@@ -1,5 +1,5 @@
 # OFDGo [![PkgGoDev](https://pkg.go.dev/badge/github.com/xiaoqidun/ofdgo)](https://pkg.go.dev/github.com/xiaoqidun/ofdgo)
-首款原生、全平台兼容的纯 Go 语言 OFD 渲染库
+首个原生、全平台兼容的纯 Go 语言 OFD 渲染库
 
 # 安装指南
 ```shell
