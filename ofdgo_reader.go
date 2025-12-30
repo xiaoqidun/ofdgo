@@ -66,6 +66,7 @@ func (r *Reader) initRoot() error {
 // 返回: []byte 文件内容, error 错误信息
 func (r *Reader) readFile(name string) ([]byte, error) {
 	name = strings.ReplaceAll(name, "\\", "/")
+	name = strings.TrimPrefix(name, "/")
 	for _, f := range r.Zip.File {
 		if f.Name == name {
 			return readZipFile(f)
@@ -79,6 +80,7 @@ func (r *Reader) readFile(name string) ([]byte, error) {
 // 返回: io.ReadCloser 文件流, error 错误信息
 func (r *Reader) openFile(name string) (io.ReadCloser, error) {
 	name = strings.ReplaceAll(name, "\\", "/")
+	name = strings.TrimPrefix(name, "/")
 	for _, f := range r.Zip.File {
 		if f.Name == name {
 			return f.Open()
