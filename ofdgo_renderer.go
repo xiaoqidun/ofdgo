@@ -81,6 +81,11 @@ func (r *Renderer) RenderPage(page *PageContent) (*canvas.Canvas, error) {
 			r.renderLayer(ctx, layer, pageH, nil, nil, 0)
 		}
 	}
+	if stamps, ok := r.Reader.Stamps[page.ID]; ok {
+		for _, s := range stamps {
+			r.renderStamp(ctx, s, pageH)
+		}
+	}
 	return c, nil
 }
 
@@ -570,6 +575,56 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 				return ff
 			}
 		}
+		winFontDir := `C:\Windows\Fonts`
+		matches, _ := filepath.Glob(filepath.Join(winFontDir, "*"+targetName+"*"))
+		if len(matches) == 0 {
+			if targetName == "SimSun" {
+				matches, _ = filepath.Glob(filepath.Join(winFontDir, "simsun.ttc"))
+			} else if targetName == "KaiTi" {
+				matches, _ = filepath.Glob(filepath.Join(winFontDir, "simkai.ttf"))
+			} else if targetName == "SimHei" {
+				matches, _ = filepath.Glob(filepath.Join(winFontDir, "simhei.ttf"))
+			} else if targetName == "FangSong" {
+				matches, _ = filepath.Glob(filepath.Join(winFontDir, "simfang.ttf"))
+			}
+		}
+		for _, m := range matches {
+			if err := ff.LoadFontFile(m, canvas.FontRegular); err == nil {
+				r.FontMap[fontID] = ff
+				return ff
+			}
+		}
 	}
 	return defaultFont
+}
+
+// renderStamp 渲染印章
+// 入参: ctx 画布上下文, s 印章对象, pageH 页面高度
+func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
+	x, y, w, h := s.Box.X, s.Box.Y, s.Box.W, s.Box.H
+	if len(s.Data) > 0 {
+		img, _, err := image.Decode(bytes.NewReader(s.Data))
+		if err == nil {
+			ctx.Push()
+			screenY := pageH - (y + h)
+			ctx.Translate(x, screenY)
+			ctx.Scale(w/float64(img.Bounds().Dx()), h/float64(img.Bounds().Dy()))
+			ctx.DrawImage(0, 0, img, canvas.DPMM(1.0))
+			ctx.Pop()
+			return
+		}
+	}
+	ctx.Push()
+	screenY := pageH - (y + h)
+	ctx.SetStrokeColor(canvas.Red)
+	ctx.SetStrokeWidth(0.5)
+	ctx.SetFillColor(canvas.Transparent)
+	ctx.DrawPath(x, screenY, canvas.Rectangle(w, h))
+	ctx.SetFillColor(canvas.Red)
+	fontSize := 3.0
+	if r.fontFamily != nil {
+		font := r.fontFamily.Face(fontSize*2.83465, canvas.Red, canvas.FontRegular, canvas.FontNormal)
+		ctx.DrawText(x+w/2-font.TextWidth("Signature")/2, screenY+h/2-fontSize/2, canvas.NewTextLine(font, "Signature", canvas.Left))
+	}
+	ctx.Pop()
 }

@@ -24,6 +24,7 @@ type Document struct {
 	Outlines    Outlines    `xml:"Outlines"`
 	Permissions Permissions `xml:"Permissions"`
 	Annotations string      `xml:"Annotations"`
+	Signatures  string      `xml:"Signatures"`
 	Attachments Attachments `xml:"Attachments"`
 	Extensions  Extensions  `xml:"Extensions"`
 }

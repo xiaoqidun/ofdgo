@@ -34,6 +34,7 @@ type Reader struct {
 	fontCache      map[string]*Font
 	drawParamCache map[string]*DrawParam
 	doc            *Document
+	Stamps         map[string][]Stamp
 }
 
 // Close 关闭阅读器
@@ -68,6 +69,19 @@ func (r *Reader) readFile(name string) ([]byte, error) {
 	for _, f := range r.Zip.File {
 		if f.Name == name {
 			return readZipFile(f)
+		}
+	}
+	return nil, fmt.Errorf("file not found: %s", name)
+}
+
+// openFile 打开压缩包内的文件流
+// 入参: name 文件名
+// 返回: io.ReadCloser 文件流, error 错误信息
+func (r *Reader) openFile(name string) (io.ReadCloser, error) {
+	name = strings.ReplaceAll(name, "\\", "/")
+	for _, f := range r.Zip.File {
+		if f.Name == name {
+			return f.Open()
 		}
 	}
 	return nil, fmt.Errorf("file not found: %s", name)
@@ -116,7 +130,8 @@ func (r *Reader) Doc() (*Document, error) {
 		r.loadRes(doc.CommonData.PublicRes)
 	}
 	r.doc = &doc
-	return &doc, nil
+	_ = r.parseSignatures(&doc)
+	return r.doc, nil
 }
 
 // loadRes 加载资源文件
@@ -183,6 +198,7 @@ func (r *Reader) PageContent(page Page) (*PageContent, error) {
 	if err := xml.Unmarshal(data, &content); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal page content: %w", err)
 	}
+	content.ID = page.ID
 	return &content, nil
 }
 

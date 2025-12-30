@@ -19,6 +19,7 @@ import "encoding/xml"
 // PageContent 页面内容
 type PageContent struct {
 	XMLName  xml.Name   `xml:"Page"`
+	ID       string     `xml:"-"`
 	Area     PageArea   `xml:"Area"`
 	Template []Template `xml:"Template"`
 	Content  Content    `xml:"Content"`
