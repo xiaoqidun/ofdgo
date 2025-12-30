@@ -58,6 +58,9 @@ func (r *Reader) initRoot() error {
 		return fmt.Errorf("failed to unmarshal ofd.xml: %w", err)
 	}
 	r.OFD = &ofd
+	r.ResMap = make(map[string]string)
+	r.fontCache = make(map[string]*Font)
+	r.drawParamCache = make(map[string]*DrawParam)
 	return nil
 }
 
@@ -122,9 +125,6 @@ func (r *Reader) Doc() (*Document, error) {
 		return nil, fmt.Errorf("failed to unmarshal document.xml: %w", err)
 	}
 	r.OFD.DocBody[0].DocInfo.DocID = "loaded"
-	r.ResMap = make(map[string]string)
-	r.fontCache = make(map[string]*Font)
-	r.drawParamCache = make(map[string]*DrawParam)
 	if doc.CommonData.DocumentRes != "" {
 		r.loadRes(doc.CommonData.DocumentRes)
 	}

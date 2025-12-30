@@ -406,7 +406,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	}
 	ctx.SetStrokeColor(strokeColor)
 	ctx.SetStrokeWidth(lineWidth)
-	ctx.DrawPath(0, 0, p.Stroke(lineWidth, canvas.RoundCap, canvas.RoundJoin, canvas.Tolerance))
+	ctx.DrawPath(0, 0, p)
 	ctx.Pop()
 }
 
