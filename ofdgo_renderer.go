@@ -47,8 +47,25 @@ type RendererOption func(*Renderer)
 
 // RenderPage 渲染特定页面内容
 // 入参: page 页面内容
-// 返回: *canvas.Canvas 画布实例, err 错误信息
+// 返回: *canvas.Canvas 画布实例, error 错误信息
 func (r *Renderer) RenderPage(page *PageContent) (*canvas.Canvas, error) {
+	box, err := r.GetPageBox(page)
+	if err != nil {
+		return nil, err
+	}
+	width, height := box.W, box.H
+	c := canvas.New(width, height)
+	ctx := canvas.NewContext(c)
+	if err := r.RenderPageToContext(ctx, page); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// GetPageBox 获取页面物理区域
+// 入参: page 页面内容
+// 返回: Box 区域, error 错误信息
+func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
 	boxStr := page.Area.PhysicalBox
 	if boxStr == "" {
 		boxStr = page.Area.ApplicationBox
@@ -62,18 +79,25 @@ func (r *Renderer) RenderPage(page *PageContent) (*canvas.Canvas, error) {
 	if boxStr == "" {
 		boxStr = "0 0 210 297"
 	}
-	box, err := ParseBox(boxStr)
+	return ParseBox(boxStr)
+}
+
+// RenderPageToContext 渲染页面到指定上下文
+// 入参: ctx 画布上下文, page 页面内容
+// 返回: error 错误信息
+func (r *Renderer) RenderPageToContext(ctx *canvas.Context, page *PageContent) error {
+	box, err := r.GetPageBox(page)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	c := canvas.New(box.W, box.H)
-	ctx := canvas.NewContext(c)
 	pageH := box.H
 	ctx.SetFillColor(canvas.White)
 	ctx.DrawPath(0, 0, canvas.Rectangle(box.W, box.H))
 	if len(page.Template) > 0 && r.Reader.doc != nil {
 		for _, tplRef := range page.Template {
-			r.renderTemplate(ctx, tplRef.TemplateID, pageH)
+			if tplRef.ZOrder != "Foreground" {
+				r.renderTemplate(ctx, tplRef.TemplateID, pageH)
+			}
 		}
 	}
 	if page.Content.Layer != nil {
@@ -81,17 +105,24 @@ func (r *Renderer) RenderPage(page *PageContent) (*canvas.Canvas, error) {
 			r.renderLayer(ctx, layer, pageH, nil, nil, 0)
 		}
 	}
-	if stamps, ok := r.Reader.Stamps[page.ID]; ok {
-		for _, s := range stamps {
-			r.renderStamp(ctx, s, pageH)
+	if len(page.Template) > 0 && r.Reader.doc != nil {
+		for _, tplRef := range page.Template {
+			if tplRef.ZOrder == "Foreground" {
+				r.renderTemplate(ctx, tplRef.TemplateID, pageH)
+			}
 		}
 	}
-	return c, nil
+	if stamps, ok := r.Reader.Stamps[page.ID]; ok {
+		for _, stamp := range stamps {
+			r.renderStamp(ctx, stamp, pageH)
+		}
+	}
+	return nil
 }
 
 // RenderPageByIndex 按索引渲染页面
 // 入参: index 页面索引
-// 返回: *canvas.Canvas 画布实例, err 错误信息
+// 返回: *canvas.Canvas 画布实例, error 错误信息
 func (r *Renderer) RenderPageByIndex(index int) (*canvas.Canvas, error) {
 	doc, err := r.Reader.Doc()
 	if err != nil {
@@ -109,7 +140,7 @@ func (r *Renderer) RenderPageByIndex(index int) (*canvas.Canvas, error) {
 
 // RenderToImage 渲染为光栅图
 // 入参: page 页面内容
-// 返回: image.Image 图像对象, err 错误信息
+// 返回: image.Image 图像对象, error 错误信息
 func (r *Renderer) RenderToImage(page *PageContent) (image.Image, error) {
 	c, err := r.RenderPage(page)
 	if err != nil {
@@ -121,7 +152,7 @@ func (r *Renderer) RenderToImage(page *PageContent) (image.Image, error) {
 
 // RenderToSVG 渲染为SVG
 // 入参: page 页面内容, writer 输出流
-// 返回: err 错误信息
+// 返回: error 错误信息
 func (r *Renderer) RenderToSVG(page *PageContent, writer io.Writer) error {
 	c, err := r.RenderPage(page)
 	if err != nil {
@@ -132,7 +163,7 @@ func (r *Renderer) RenderToSVG(page *PageContent, writer io.Writer) error {
 
 // RenderToPDF 渲染为PDF
 // 入参: page 页面内容, writer 输出流
-// 返回: err 错误信息
+// 返回: error 错误信息
 func (r *Renderer) RenderToPDF(page *PageContent, writer io.Writer) error {
 	c, err := r.RenderPage(page)
 	if err != nil {
@@ -143,7 +174,7 @@ func (r *Renderer) RenderToPDF(page *PageContent, writer io.Writer) error {
 
 // RenderToEPS 渲染为EPS
 // 入参: page 页面内容, writer 输出流
-// 返回: err 错误信息
+// 返回: error 错误信息
 func (r *Renderer) RenderToEPS(page *PageContent, writer io.Writer) error {
 	c, err := r.RenderPage(page)
 	if err != nil {
@@ -602,11 +633,37 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 // 入参: ctx 画布上下文, s 印章对象, pageH 页面高度
 func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 	x, y, w, h := s.Box.X, s.Box.Y, s.Box.W, s.Box.H
+	screenY := pageH - (y + h)
+	if s.Type == "ofd" && len(s.Data) > 0 {
+		reader, err := NewReader(bytes.NewReader(s.Data), int64(len(s.Data)))
+		if err == nil {
+			defer reader.Close()
+			doc, err := reader.Doc()
+			if err == nil {
+				renderer := NewRenderer(reader)
+				for _, pageRef := range doc.Pages.Page {
+					content, err := reader.PageContent(pageRef)
+					if err != nil {
+						continue
+					}
+					sealBox, err := renderer.GetPageBox(content)
+					if err != nil {
+						continue
+					}
+					ctx.Push()
+					ctx.Translate(x, screenY)
+					ctx.Scale(w/sealBox.W, h/sealBox.H)
+					renderer.RenderPageToContext(ctx, content)
+					ctx.Pop()
+				}
+				return
+			}
+		}
+	}
 	if len(s.Data) > 0 {
 		img, _, err := image.Decode(bytes.NewReader(s.Data))
 		if err == nil {
 			ctx.Push()
-			screenY := pageH - (y + h)
 			ctx.Translate(x, screenY)
 			ctx.Scale(w/float64(img.Bounds().Dx()), h/float64(img.Bounds().Dy()))
 			ctx.DrawImage(0, 0, img, canvas.DPMM(1.0))
@@ -615,7 +672,6 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 		}
 	}
 	ctx.Push()
-	screenY := pageH - (y + h)
 	ctx.SetStrokeColor(canvas.Red)
 	ctx.SetStrokeWidth(0.5)
 	ctx.SetFillColor(canvas.Transparent)
