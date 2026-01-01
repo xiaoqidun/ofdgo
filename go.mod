@@ -2,7 +2,10 @@ module github.com/xiaoqidun/ofdgo
 
 go 1.25.5
 
-require github.com/tdewolff/canvas v0.0.0-20251224152029-436d73bc8f67
+require (
+	github.com/tdewolff/canvas v0.0.0-20251224152029-436d73bc8f67
+	github.com/xiaoqidun/jbig2 v0.0.0-20260101144916-f162ac74fd1f
+)
 
 require (
 	codeberg.org/go-latex/latex v0.2.0 // indirect
@@ -27,9 +30,9 @@ require (
 	github.com/tdewolff/parse/v2 v2.8.4 // indirect
 	github.com/wcharczuk/go-chart/v2 v2.1.2 // indirect
 	github.com/yuin/goldmark v1.7.13 // indirect
-	golang.org/x/image v0.32.0 // indirect
+	golang.org/x/image v0.34.0 // indirect
 	golang.org/x/net v0.46.0 // indirect
-	golang.org/x/text v0.30.0 // indirect
+	golang.org/x/text v0.32.0 // indirect
 	gonum.org/v1/plot v0.16.0 // indirect
 	modernc.org/knuth v0.5.5 // indirect
 	modernc.org/token v1.1.0 // indirect
