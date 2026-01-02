@@ -542,7 +542,10 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	ff := canvas.NewFontFamily(of.FontName)
 	if of.FontFile != "" {
 		if fontData, err := r.Reader.ResData(of.FontFile); err == nil {
-			fontStyle := canvas.FontRegular
+			if _, fixedData, err := FixFontData(fontData); err == nil {
+				fontData = fixedData
+			}
+			var fontStyle canvas.FontStyle
 			if of.Bold {
 				fontStyle |= canvas.FontBold
 			}
@@ -590,15 +593,15 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	names := []string{of.FamilyName, of.FontName}
 	aliases := map[string]string{
 		"simhei":          "SimHei",
-		"黑体":              "SimHei",
+		"黑体":            "SimHei",
 		"microsoft yahei": "Microsoft YaHei",
-		"微软雅黑":            "Microsoft YaHei",
+		"微软雅黑":        "Microsoft YaHei",
 		"simsun":          "SimSun",
-		"宋体":              "SimSun",
+		"宋体":            "SimSun",
 		"kaiti":           "KaiTi",
-		"楷体":              "KaiTi",
+		"楷体":            "KaiTi",
 		"fangsong":        "FangSong",
-		"仿宋":              "FangSong",
+		"仿宋":            "FangSong",
 		"arial":           "Arial",
 		"segoe ui":        "Segoe UI",
 		"times new roman": "Times New Roman",
