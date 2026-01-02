@@ -480,6 +480,14 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if obj.Italic {
 		fontStyle |= canvas.FontItalic
 	}
+	if of, ok := r.Reader.fontCache[obj.Font]; ok {
+		if of.Bold {
+			fontStyle |= canvas.FontBold
+		}
+		if of.Italic {
+			fontStyle |= canvas.FontItalic
+		}
+	}
 	ff := r.loadFont(obj.Font)
 	face := ff.Face(sizePt, textColor, fontStyle, canvas.FontNormal)
 	for _, tc := range obj.TextCode {
@@ -534,7 +542,14 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	ff := canvas.NewFontFamily(of.FontName)
 	if of.FontFile != "" {
 		if fontData, err := r.Reader.ResData(of.FontFile); err == nil {
-			if err := ff.LoadFont(fontData, 0, canvas.FontRegular); err == nil {
+			fontStyle := canvas.FontRegular
+			if of.Bold {
+				fontStyle |= canvas.FontBold
+			}
+			if of.Italic {
+				fontStyle |= canvas.FontItalic
+			}
+			if err := ff.LoadFont(fontData, 0, fontStyle); err == nil {
 				r.FontMap[fontID] = ff
 				return ff
 			}
