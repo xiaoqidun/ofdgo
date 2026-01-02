@@ -36,6 +36,11 @@ type Font struct {
 	ID         string `xml:"ID,attr"`
 	FontName   string `xml:"FontName,attr"`
 	FamilyName string `xml:"FamilyName,attr"`
+	Charset    string `xml:"Charset,attr"`
+	Italic     bool   `xml:"Italic,attr"`
+	Bold       bool   `xml:"Bold,attr"`
+	Serif      bool   `xml:"Serif,attr"`
+	FixedWidth bool   `xml:"FixedWidth,attr"`
 	FontFile   string `xml:"FontFile"`
 }
 
