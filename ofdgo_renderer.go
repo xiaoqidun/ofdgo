@@ -474,7 +474,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		textColor = parseColor(obj.FillColor.Value)
 	}
 	fontStyle := canvas.FontRegular
-	if obj.Weight >= 700 || (obj.Weight == 0 && (strings.Contains(strings.ToLower(obj.Font), "bold"))) {
+	if obj.Weight >= 700 {
 		fontStyle |= canvas.FontBold
 	}
 	if obj.Italic {
@@ -555,12 +555,19 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 			}
 		}
 	}
+	var fontStyle canvas.FontStyle
+	if of.Bold {
+		fontStyle |= canvas.FontBold
+	}
+	if of.Italic {
+		fontStyle |= canvas.FontItalic
+	}
 	for _, dir := range r.fontDirs {
 		matches, _ := filepath.Glob(filepath.Join(dir, of.FontName+"*"))
 		for _, m := range matches {
 			ext := strings.ToLower(filepath.Ext(m))
 			if ext == ".ttf" || ext == ".otf" || ext == ".ttc" {
-				if err := ff.LoadFontFile(m, canvas.FontRegular); err == nil {
+				if err := ff.LoadFontFile(m, fontStyle); err == nil {
 					r.FontMap[fontID] = ff
 					return ff
 				}
@@ -572,7 +579,7 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 			for _, m := range matches {
 				resData, err := fs.ReadFile(fsys, m)
 				if err == nil {
-					if err := ff.LoadFont(resData, 0, canvas.FontRegular); err == nil {
+					if err := ff.LoadFont(resData, 0, fontStyle); err == nil {
 						r.FontMap[fontID] = ff
 						return ff
 					}
@@ -612,12 +619,12 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 				}
 			}
 		}
-		if err := ff.LoadSystemFont(targetName, canvas.FontRegular); err == nil {
+		if err := ff.LoadSystemFont(targetName, fontStyle); err == nil {
 			r.FontMap[fontID] = ff
 			return ff
 		}
 		if targetName != name {
-			if err := ff.LoadSystemFont(name, canvas.FontRegular); err == nil {
+			if err := ff.LoadSystemFont(name, fontStyle); err == nil {
 				r.FontMap[fontID] = ff
 				return ff
 			}
@@ -636,7 +643,7 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 			}
 		}
 		for _, m := range matches {
-			if err := ff.LoadFontFile(m, canvas.FontRegular); err == nil {
+			if err := ff.LoadFontFile(m, fontStyle); err == nil {
 				r.FontMap[fontID] = ff
 				return ff
 			}
