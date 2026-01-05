@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	github.com/tdewolff/canvas v0.0.0-20251224152029-436d73bc8f67
-	github.com/xiaoqidun/jbig2 v0.0.0-20260104071919-1e1f154f2c15
+	github.com/xiaoqidun/jbig2 v0.0.0-20260105091040-9b571ff5b839
 )
 
 require (
