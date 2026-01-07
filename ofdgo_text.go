@@ -28,6 +28,8 @@ func parseColor(val string) color.Color {
 }
 
 // parseColorWithAlpha 解析带透明度的颜色
+// 入参: val 颜色值, alpha 透明度
+// 返回: color.Color 颜色对象
 func parseColorWithAlpha(val string, alpha *int) color.Color {
 	parts := strings.Fields(val)
 	if len(parts) >= 3 {
