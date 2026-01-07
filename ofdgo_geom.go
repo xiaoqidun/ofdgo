@@ -63,6 +63,20 @@ func NewMatrix(s string) Matrix {
 	}
 }
 
+// Multiply 矩阵乘法 (m * o)
+// 入参: o 右侧矩阵
+// 返回: Matrix 结果矩阵
+func (m Matrix) Multiply(o Matrix) Matrix {
+	return Matrix{
+		a: m.a*o.a + m.c*o.b,
+		b: m.b*o.a + m.d*o.b,
+		c: m.a*o.c + m.c*o.d,
+		d: m.b*o.c + m.d*o.d,
+		e: m.a*o.e + m.c*o.f + m.e,
+		f: m.b*o.e + m.d*o.f + m.f,
+	}
+}
+
 // Transform 应用变换矩阵
 // 入参: x X坐标, y Y坐标
 // 返回: float64 变换后X, float64 变换后Y

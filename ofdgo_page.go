@@ -38,41 +38,66 @@ type Content struct {
 
 // Layer 图层
 type Layer struct {
-	ID          string        `xml:"ID,attr"`
-	DrawParam   string        `xml:"DrawParam,attr"`
-	TextObject  []TextObject  `xml:"TextObject"`
-	PathObject  []PathObject  `xml:"PathObject"`
-	ImageObject []ImageObject `xml:"ImageObject"`
+	ID                   string                 `xml:"ID,attr"`
+	DrawParam            string                 `xml:"DrawParam,attr"`
+	TextObject           []TextObject           `xml:"TextObject"`
+	PathObject           []PathObject           `xml:"PathObject"`
+	ImageObject          []ImageObject          `xml:"ImageObject"`
+	CompositeGraphicUnit []CompositeGraphicUnit `xml:"CompositeGraphicUnit"`
+}
+
+// Clips 裁剪区域集合
+type Clips struct {
+	Clip []Clip `xml:"Clip"`
+}
+
+// Clip 裁剪
+type Clip struct {
+	Area []ClipArea `xml:"Area"`
+}
+
+// ClipArea 裁剪区域
+type ClipArea struct {
+	Path []PathObject `xml:"Path"`
+	Text []TextObject `xml:"Text"`
 }
 
 // TextObject 文本对象
 type TextObject struct {
-	ID         string     `xml:"ID,attr"`
-	Boundary   string     `xml:"Boundary,attr"`
-	DrawParam  string     `xml:"DrawParam,attr"`
-	Font       string     `xml:"Font,attr"`
-	Size       float64    `xml:"Size,attr"`
-	Weight     int        `xml:"Weight,attr"`
-	Italic     bool       `xml:"Italic,attr"`
-	Decoration string     `xml:"Decoration,attr"`
-	HScale     float64    `xml:"HScale,attr"`
-	CTM        string     `xml:"CTM,attr"`
-	FillColor  *FillColor `xml:"FillColor"`
-	TextCode   []TextCode `xml:"TextCode"`
+	ID          string       `xml:"ID,attr"`
+	Boundary    string       `xml:"Boundary,attr"`
+	DrawParam   string       `xml:"DrawParam,attr"`
+	LineWidth   float64      `xml:"LineWidth,attr"`
+	Font        string       `xml:"Font,attr"`
+	Size        float64      `xml:"Size,attr"`
+	Weight      int          `xml:"Weight,attr"`
+	Italic      bool         `xml:"Italic,attr"`
+	Decoration  string       `xml:"Decoration,attr"`
+	HScale      float64      `xml:"HScale,attr"`
+	VScale      float64      `xml:"VScale,attr"`
+	CTM         string       `xml:"CTM,attr"`
+	Fill        *bool        `xml:"Fill,attr"`
+	Stroke      *bool        `xml:"Stroke,attr"`
+	StrokeColor *StrokeColor `xml:"StrokeColor"`
+	FillColor   *FillColor   `xml:"FillColor"`
+	TextCode    []TextCode   `xml:"TextCode"`
+	Clips       *Clips       `xml:"Clips"`
 }
 
 // FillColor 填充颜色
 type FillColor struct {
 	Value string `xml:"Value,attr"`
+	Alpha *int   `xml:"Alpha,attr"`
 }
 
 // TextCode 文本内容节点
 type TextCode struct {
-	X      float64 `xml:"X,attr"`
-	Y      float64 `xml:"Y,attr"`
-	DeltaX string  `xml:"DeltaX,attr"`
-	DeltaY string  `xml:"DeltaY,attr"`
-	Value  string  `xml:",chardata"`
+	X      string `xml:"X,attr"`
+	Y      string `xml:"Y,attr"`
+	DeltaX string `xml:"DeltaX,attr"`
+	DeltaY string `xml:"DeltaY,attr"`
+	Index  string `xml:"Index,attr"`
+	Value  string `xml:",chardata"`
 }
 
 // PathObject 路径对象
@@ -81,15 +106,24 @@ type PathObject struct {
 	Boundary        string       `xml:"Boundary,attr"`
 	DrawParam       string       `xml:"DrawParam,attr"`
 	LineWidth       float64      `xml:"LineWidth,attr"`
+	Join            string       `xml:"Join,attr"`
+	Cap             string       `xml:"Cap,attr"`
+	DashOffset      float64      `xml:"DashOffset,attr"`
+	DashPattern     string       `xml:"DashPattern,attr"`
+	MiterLimit      float64      `xml:"MiterLimit,attr"`
 	CTM             string       `xml:"CTM,attr"`
+	Stroke          *bool        `xml:"Stroke,attr"`
+	Fill            *bool        `xml:"Fill,attr"`
 	StrokeColor     *StrokeColor `xml:"StrokeColor"`
 	FillColor       *FillColor   `xml:"FillColor"`
 	AbbreviatedData string       `xml:"AbbreviatedData"`
+	Clips           *Clips       `xml:"Clips"`
 }
 
 // StrokeColor 勾边颜色
 type StrokeColor struct {
 	Value string `xml:"Value,attr"`
+	Alpha *int   `xml:"Alpha,attr"`
 }
 
 // ImageObject 图片对象
@@ -98,4 +132,5 @@ type ImageObject struct {
 	Boundary   string `xml:"Boundary,attr"`
 	ResourceID string `xml:"ResourceID,attr"`
 	CTM        string `xml:"CTM,attr"`
+	Clips      *Clips `xml:"Clips"`
 }

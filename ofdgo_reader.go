@@ -25,16 +25,17 @@ import (
 
 // Reader OFD文件阅读器
 type Reader struct {
-	Path           string
-	Zip            *zip.Reader
-	Closer         io.Closer
-	OFD            *OFD
-	RootDir        string
-	ResMap         map[string]string
-	fontCache      map[string]*Font
-	drawParamCache map[string]*DrawParam
-	doc            *Document
-	Stamps         map[string][]Stamp
+	Path                      string
+	Zip                       *zip.Reader
+	Closer                    io.Closer
+	OFD                       *OFD
+	RootDir                   string
+	ResMap                    map[string]string
+	fontCache                 map[string]*Font
+	drawParamCache            map[string]*DrawParam
+	compositeGraphicUnitCache map[string]*CompositeGraphicUnit
+	doc                       *Document
+	Stamps                    map[string][]Stamp
 }
 
 // Close 关闭阅读器
@@ -61,6 +62,7 @@ func (r *Reader) initRoot() error {
 	r.ResMap = make(map[string]string)
 	r.fontCache = make(map[string]*Font)
 	r.drawParamCache = make(map[string]*DrawParam)
+	r.compositeGraphicUnitCache = make(map[string]*CompositeGraphicUnit)
 	return nil
 }
 
@@ -184,6 +186,10 @@ func (r *Reader) loadRes(resPath string) {
 	for i := range res.DrawParams.DrawParam {
 		dp := &res.DrawParams.DrawParam[i]
 		r.drawParamCache[dp.ID] = dp
+	}
+	for i := range res.CompositeGraphicUnits.CompositeGraphicUnit {
+		cgu := &res.CompositeGraphicUnits.CompositeGraphicUnit[i]
+		r.compositeGraphicUnitCache[cgu.ID] = cgu
 	}
 }
 

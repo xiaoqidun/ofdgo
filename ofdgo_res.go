@@ -68,7 +68,17 @@ type DrawParam struct {
 	Relative    string       `xml:"Relative,attr"`
 	ResourceID  string       `xml:"ResourceID,attr"`
 	BaseLoc     string       `xml:"BaseLoc,attr"`
+	Link        string       `xml:"Link,attr"`
 	LineWidth   float64      `xml:"LineWidth,attr"`
+	Join        string       `xml:"Join,attr"`
+	Cap         string       `xml:"Cap,attr"`
+	DashOffset  float64      `xml:"DashOffset,attr"`
+	DashPattern string       `xml:"DashPattern,attr"`
+	MiterLimit  float64      `xml:"MiterLimit,attr"`
+	Font        string       `xml:"Font,attr"`
+	Size        float64      `xml:"Size,attr"`
+	Weight      int          `xml:"Weight,attr"`
+	Italic      bool         `xml:"Italic,attr"`
 	FillColor   *FillColor   `xml:"FillColor"`
 	StrokeColor *StrokeColor `xml:"StrokeColor"`
 }
@@ -80,7 +90,16 @@ type CompositeGraphicUnits struct {
 
 // CompositeGraphicUnit 复合图元
 type CompositeGraphicUnit struct {
-	ID         string `xml:"ID,attr"`
-	BaseLoc    string `xml:"BaseLoc,attr"`
-	ResourceID string `xml:"ResourceID,attr"`
+	ID                   string                 `xml:"ID,attr"`
+	BaseLoc              string                 `xml:"BaseLoc,attr"`
+	ResourceID           string                 `xml:"ResourceID,attr"`
+	Boundary             string                 `xml:"Boundary,attr"`
+	CTM                  string                 `xml:"CTM,attr"`
+	DrawParam            string                 `xml:"DrawParam,attr"`
+	Alpha                *int                   `xml:"Alpha,attr"`
+	TextObject           []TextObject           `xml:"TextObject"`
+	PathObject           []PathObject           `xml:"PathObject"`
+	ImageObject          []ImageObject          `xml:"ImageObject"`
+	CompositeGraphicUnit []CompositeGraphicUnit `xml:"CompositeGraphicUnit"`
+	Clips                *Clips                 `xml:"Clips"`
 }

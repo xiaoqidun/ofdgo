@@ -24,12 +24,21 @@ import (
 // 入参: val 颜色值(R G B)
 // 返回: color.Color 颜色对象
 func parseColor(val string) color.Color {
+	return parseColorWithAlpha(val, nil)
+}
+
+// parseColorWithAlpha 解析带透明度的颜色
+func parseColorWithAlpha(val string, alpha *int) color.Color {
 	parts := strings.Fields(val)
 	if len(parts) >= 3 {
 		r, _ := strconv.Atoi(parts[0])
 		g, _ := strconv.Atoi(parts[1])
 		b, _ := strconv.Atoi(parts[2])
-		return color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: 255}
+		a := 255
+		if alpha != nil {
+			a = *alpha
+		}
+		return color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: uint8(a)}
 	}
 	return color.Black
 }

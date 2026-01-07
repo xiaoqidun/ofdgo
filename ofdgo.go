@@ -65,10 +65,11 @@ func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 // 返回: *Renderer 渲染器实例
 func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 	r := &Renderer{
-		Reader:     reader,
-		DPI:        300.0,
-		DrawParams: reader.drawParamCache,
-		FontMap:    make(map[string]*canvas.FontFamily),
+		Reader:                reader,
+		DPI:                   300.0,
+		DrawParams:            reader.drawParamCache,
+		CompositeGraphicUnits: reader.compositeGraphicUnitCache,
+		FontMap:               make(map[string]*canvas.FontFamily),
 	}
 	for _, opt := range opts {
 		opt(r)
