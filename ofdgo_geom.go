@@ -127,7 +127,11 @@ func parseFloatsWithG(s string) []float64 {
 			continue
 		}
 		if gFlag {
-			gCount, _ = strconv.Atoi(p)
+			var err error
+			gCount, err = strconv.Atoi(p)
+			if err != nil {
+				gCount = 0
+			}
 			gFlag = false
 			continue
 		}

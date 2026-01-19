@@ -714,14 +714,11 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 		fontStyle |= canvas.FontItalic
 	}
 	for _, dir := range r.fontDirs {
-		matches, _ := filepath.Glob(filepath.Join(dir, of.FontName+"*"))
+		matches := r.globFontFiles(dir, of.FontName+"*")
 		for _, m := range matches {
-			ext := strings.ToLower(filepath.Ext(m))
-			if ext == ".ttf" || ext == ".otf" || ext == ".ttc" {
-				if err := ff.LoadFontFile(m, fontStyle); err == nil {
-					r.FontMap[fontID] = ff
-					return ff
-				}
+			if err := ff.LoadFontFile(m, fontStyle); err == nil {
+				r.FontMap[fontID] = ff
+				return ff
 			}
 		}
 	}
@@ -781,16 +778,17 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 			}
 		}
 		winFontDir := `C:\Windows\Fonts`
-		matches, _ := filepath.Glob(filepath.Join(winFontDir, "*"+targetName+"*"))
+		matches := r.globFontFiles(winFontDir, "*"+targetName+"*")
 		if len(matches) == 0 {
-			if targetName == "SimSun" {
-				matches, _ = filepath.Glob(filepath.Join(winFontDir, "simsun.ttc"))
-			} else if targetName == "KaiTi" {
-				matches, _ = filepath.Glob(filepath.Join(winFontDir, "simkai.ttf"))
-			} else if targetName == "SimHei" {
-				matches, _ = filepath.Glob(filepath.Join(winFontDir, "simhei.ttf"))
-			} else if targetName == "FangSong" {
-				matches, _ = filepath.Glob(filepath.Join(winFontDir, "simfang.ttf"))
+			switch targetName {
+			case "SimSun":
+				matches = r.globFontFiles(winFontDir, "simsun.ttc")
+			case "KaiTi":
+				matches = r.globFontFiles(winFontDir, "simkai.ttf")
+			case "SimHei":
+				matches = r.globFontFiles(winFontDir, "simhei.ttf")
+			case "FangSong":
+				matches = r.globFontFiles(winFontDir, "simfang.ttf")
 			}
 		}
 		for _, m := range matches {
@@ -800,7 +798,23 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 			}
 		}
 	}
+	r.FontMap[fontID] = defaultFont
 	return defaultFont
+}
+
+// globFontFiles 查找字体文件
+// 入参: dir 目录, pattern 模式
+// 返回: []string 文件列表
+func (r *Renderer) globFontFiles(dir, pattern string) []string {
+	matches, _ := filepath.Glob(filepath.Join(dir, pattern))
+	var result []string
+	for _, m := range matches {
+		ext := strings.ToLower(filepath.Ext(m))
+		if ext == ".ttf" || ext == ".otf" || ext == ".ttc" {
+			result = append(result, m)
+		}
+	}
+	return result
 }
 
 // renderStamp 渲染印章
