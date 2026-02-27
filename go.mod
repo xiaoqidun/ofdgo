@@ -3,8 +3,8 @@ module github.com/xiaoqidun/ofdgo
 go 1.25.0
 
 require (
-	github.com/tdewolff/canvas v0.0.0-20260109131636-69e1540379c6
-	github.com/xiaoqidun/jbig2 v0.0.0-20260118155717-9968b0f88191
+	github.com/tdewolff/canvas v0.0.0-20260213104355-3d7d3c955351
+	github.com/xiaoqidun/jbig2 v0.0.0-20260227073950-da27bd365019
 )
 
 require (
@@ -25,14 +25,14 @@ require (
 	github.com/kolesa-team/go-webp v1.0.5 // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/srwiley/scanx v0.0.0-20190309010443-e94503791388 // indirect
-	github.com/tdewolff/font v0.0.0-20250902141222-fb72ecc1bc0a // indirect
+	github.com/tdewolff/font v0.0.0-20260129132752-ab952538a56d // indirect
 	github.com/tdewolff/minify/v2 v2.24.4 // indirect
-	github.com/tdewolff/parse/v2 v2.8.4 // indirect
+	github.com/tdewolff/parse/v2 v2.8.5 // indirect
 	github.com/wcharczuk/go-chart/v2 v2.1.2 // indirect
 	github.com/yuin/goldmark v1.7.13 // indirect
-	golang.org/x/image v0.35.0 // indirect
+	golang.org/x/image v0.36.0 // indirect
 	golang.org/x/net v0.46.0 // indirect
-	golang.org/x/text v0.33.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
 	gonum.org/v1/plot v0.16.0 // indirect
 	modernc.org/knuth v0.5.5 // indirect
 	modernc.org/token v1.1.0 // indirect
