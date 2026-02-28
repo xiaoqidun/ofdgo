@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"math"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -777,18 +778,26 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 				return ff
 			}
 		}
-		winFontDir := `C:\Windows\Fonts`
-		matches := r.globFontFiles(winFontDir, "*"+targetName+"*")
+		var sysFontDir string
+		switch runtime.GOOS {
+		case "linux":
+			sysFontDir = `/usr/share/fonts`
+		case "darwin":
+			sysFontDir = `/Library/Fonts`
+		default:
+			sysFontDir = `C:\Windows\Fonts`
+		}
+		matches := r.globFontFiles(sysFontDir, "*"+targetName+"*")
 		if len(matches) == 0 {
 			switch targetName {
 			case "SimSun":
-				matches = r.globFontFiles(winFontDir, "simsun.ttc")
+				matches = r.globFontFiles(sysFontDir, "simsun.ttc")
 			case "KaiTi":
-				matches = r.globFontFiles(winFontDir, "simkai.ttf")
+				matches = r.globFontFiles(sysFontDir, "simkai.ttf")
 			case "SimHei":
-				matches = r.globFontFiles(winFontDir, "simhei.ttf")
+				matches = r.globFontFiles(sysFontDir, "simhei.ttf")
 			case "FangSong":
-				matches = r.globFontFiles(winFontDir, "simfang.ttf")
+				matches = r.globFontFiles(sysFontDir, "simfang.ttf")
 			}
 		}
 		for _, m := range matches {

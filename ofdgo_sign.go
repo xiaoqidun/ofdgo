@@ -71,28 +71,29 @@ func (r *Reader) parseSignatures(doc *Document) error {
 		return err
 	}
 	for _, sigRef := range signatures.List {
-		sigPath := path.Join(path.Dir(doc.Signatures), sigRef.BaseLoc)
-		sf, err := r.openFile(sigPath)
-		if err != nil {
-			continue
-		}
-		var sigFile SignatureFile
-		if err := xml.NewDecoder(sf).Decode(&sigFile); err != nil {
-			sf.Close()
-			continue
-		}
-		sf.Close()
-		signedValuePath := path.Join(path.Dir(sigPath), sigFile.SignedValue)
-		svData, err := r.ResData(signedValuePath)
-		if err != nil {
-			continue
-		}
-		sealType, sealData := extractSeal(svData)
-		for _, annot := range sigFile.SignedInfo.StampAnnot {
-			pageID := annot.PageRef
-			bbox, _ := ParseBox(annot.Boundary)
-			r.addStamp(pageID, bbox, sealType, sealData)
-		}
+		func(sigRef OFDSignature) {
+			sigPath := path.Join(path.Dir(doc.Signatures), sigRef.BaseLoc)
+			sf, err := r.openFile(sigPath)
+			if err != nil {
+				return
+			}
+			defer sf.Close()
+			var sigFile SignatureFile
+			if err := xml.NewDecoder(sf).Decode(&sigFile); err != nil {
+				return
+			}
+			signedValuePath := path.Join(path.Dir(sigPath), sigFile.SignedValue)
+			svData, err := r.ResData(signedValuePath)
+			if err != nil {
+				return
+			}
+			sealType, sealData := extractSeal(svData)
+			for _, annot := range sigFile.SignedInfo.StampAnnot {
+				pageID := annot.PageRef
+				bbox, _ := ParseBox(annot.Boundary)
+				r.addStamp(pageID, bbox, sealType, sealData)
+			}
+		}(sigRef)
 	}
 	return nil
 }

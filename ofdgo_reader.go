@@ -36,6 +36,7 @@ type Reader struct {
 	compositeGraphicUnitCache map[string]*CompositeGraphicUnit
 	doc                       *Document
 	Stamps                    map[string][]Stamp
+	fileIndex                 map[string]*zip.File
 }
 
 // Close 关闭阅读器
@@ -50,6 +51,10 @@ func (r *Reader) Close() error {
 // initRoot 读取根节点信息
 // 返回: error 错误信息
 func (r *Reader) initRoot() error {
+	r.fileIndex = make(map[string]*zip.File)
+	for _, f := range r.Zip.File {
+		r.fileIndex[f.Name] = f
+	}
 	data, err := r.readFile("OFD.xml")
 	if err != nil {
 		return fmt.Errorf("failed to read ofd.xml: %w", err)
@@ -72,10 +77,8 @@ func (r *Reader) initRoot() error {
 func (r *Reader) readFile(name string) ([]byte, error) {
 	name = strings.ReplaceAll(name, "\\", "/")
 	name = strings.TrimPrefix(name, "/")
-	for _, f := range r.Zip.File {
-		if f.Name == name {
-			return readZipFile(f)
-		}
+	if f, ok := r.fileIndex[name]; ok {
+		return readZipFile(f)
 	}
 	return nil, fmt.Errorf("file not found: %s", name)
 }
@@ -86,10 +89,8 @@ func (r *Reader) readFile(name string) ([]byte, error) {
 func (r *Reader) openFile(name string) (io.ReadCloser, error) {
 	name = strings.ReplaceAll(name, "\\", "/")
 	name = strings.TrimPrefix(name, "/")
-	for _, f := range r.Zip.File {
-		if f.Name == name {
-			return f.Open()
-		}
+	if f, ok := r.fileIndex[name]; ok {
+		return f.Open()
 	}
 	return nil, fmt.Errorf("file not found: %s", name)
 }
