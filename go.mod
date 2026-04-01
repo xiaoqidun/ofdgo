@@ -3,8 +3,8 @@ module github.com/xiaoqidun/ofdgo
 go 1.25.0
 
 require (
-	github.com/tdewolff/canvas v0.0.0-20260307092048-5da4636eb131
-	github.com/xiaoqidun/jbig2 v0.0.0-20260320005408-3a475a90de1b
+	github.com/tdewolff/canvas v0.0.0-20260320214313-adbce01b5307
+	github.com/xiaoqidun/jbig2 v0.0.0-20260401005051-ce1052e7134e
 )
 
 require (
@@ -30,7 +30,7 @@ require (
 	github.com/tdewolff/parse/v2 v2.8.5 // indirect
 	github.com/wcharczuk/go-chart/v2 v2.1.2 // indirect
 	github.com/yuin/goldmark v1.7.13 // indirect
-	golang.org/x/image v0.37.0 // indirect
+	golang.org/x/image v0.38.0 // indirect
 	golang.org/x/net v0.46.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	gonum.org/v1/plot v0.16.0 // indirect
