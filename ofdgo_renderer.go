@@ -650,7 +650,8 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if obj.VScale != 0 {
 		sizeMM *= obj.VScale
 	}
-	if scale := ctm.YScale(); scale > 0 {
+	useTextMatrix := hasTextMatrix(ctm)
+	if scale := ctm.YScale(); scale > 0 && !useTextMatrix {
 		sizeMM *= scale
 	}
 	sizePt := sizeMM * 2.83465
@@ -754,18 +755,38 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			}
 			if glyphFillPaint != nil {
 				ctx.SetFill(glyphFillPaint)
-				if embeddedFont {
-					path, width := face.ToPath(str)
-					textWidth = width
-					ctx.DrawPath(canvasX, canvasY, path)
-				} else {
-					textFace := face
-					if fillColorNode != nil && fillColorNode.AxialShd != nil {
-						textFace = ff.Face(sizePt, glyphFillPaint, fontStyle, canvas.FontNormal)
+				drawGlyph := func(x, y float64) {
+					if embeddedFont {
+						path, width := face.ToPath(str)
+						textWidth = width
+						ctx.DrawPath(x, y, path)
+					} else {
+						textFace := face
+						if fillColorNode != nil && fillColorNode.AxialShd != nil {
+							textFace = ff.Face(sizePt, glyphFillPaint, fontStyle, canvas.FontNormal)
+						}
+						text := canvas.NewTextLine(textFace, str, canvas.Left)
+						ctx.DrawText(x, y, text)
 					}
-					text := canvas.NewTextLine(textFace, str, canvas.Left)
-					ctx.DrawText(canvasX, canvasY, text)
 				}
+				if useTextMatrix {
+					ctx.Push()
+					ctx.Translate(canvasX, canvasY)
+					ctx.ComposeView(textMatrix(ctm))
+					drawGlyph(0, 0)
+					if strings.Contains(obj.Decoration, "Underline") {
+						uw := sizeMM * 0.05
+						ctx.SetStrokeWidth(uw)
+						ctx.SetStrokeColor(fillColor)
+						off := sizeMM * 0.1
+						ctx.MoveTo(0, -off)
+						ctx.LineTo(textWidth, -off)
+						ctx.Stroke()
+					}
+					ctx.Pop()
+					continue
+				}
+				drawGlyph(canvasX, canvasY)
 			}
 			if strings.Contains(obj.Decoration, "Underline") {
 				uw := sizeMM * 0.05
@@ -780,6 +801,24 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		codePos += len(runes)
 	}
 	ctx.Pop()
+}
+
+// hasTextMatrix 判断文本是否需要应用字形变换
+// 入参: ctm 变换矩阵
+// 返回: bool 是否需要变换
+func hasTextMatrix(ctm Matrix) bool {
+	const eps = 1e-9
+	return math.Abs(ctm.a-1) > eps || math.Abs(ctm.b) > eps || math.Abs(ctm.c) > eps || math.Abs(ctm.d-1) > eps
+}
+
+// textMatrix 获取文本字形变换矩阵
+// 入参: ctm OFD变换矩阵
+// 返回: canvas.Matrix 画布变换矩阵
+func textMatrix(ctm Matrix) canvas.Matrix {
+	return canvas.Matrix{
+		{ctm.a, -ctm.c, 0},
+		{-ctm.b, ctm.d, 0},
+	}
 }
 
 // loadFont 加载字体

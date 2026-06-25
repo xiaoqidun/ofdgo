@@ -138,9 +138,10 @@ func extractSeal(data []byte) (string, []byte) {
 		if node.IsCompound {
 			if elements, ok := asn1Children(node.Bytes); ok {
 				if len(elements) >= 2 && elements[1].Tag == 4 {
-					sealType := sealString(elements[0])
-					if sealType == "es" {
-						sealType = "png"
+					sealType := normalizeSealType(sealString(elements[0]))
+					if isSealMediaType(sealType) {
+						foundType, foundData = sealType, elements[1].Bytes
+						return true
 					}
 					if imgType, sealData := extractImageData(elements[1].Bytes); len(sealData) > 0 {
 						if sealType == "" {
@@ -195,6 +196,32 @@ func sealString(raw asn1.RawValue) string {
 		s = "jpeg"
 	}
 	return s
+}
+
+// normalizeSealType 标准化印章媒体类型
+// 入参: s 原始媒体类型
+// 返回: string 标准媒体类型
+func normalizeSealType(s string) string {
+	switch s {
+	case "jpg":
+		return "jpeg"
+	case "jb2", "gbig2":
+		return "jbig2"
+	default:
+		return s
+	}
+}
+
+// isSealMediaType 判断是否为可渲染印章媒体类型
+// 入参: s 媒体类型
+// 返回: bool 是否可渲染
+func isSealMediaType(s string) bool {
+	switch s {
+	case "png", "jpeg", "jbig2", "ofd":
+		return true
+	default:
+		return false
+	}
 }
 
 // extractImageData 提取图片数据
