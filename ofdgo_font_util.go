@@ -27,6 +27,13 @@ func align4(n uint32) uint32 {
 	return (n + 3) & ^uint32(3)
 }
 
+// packedGlyphRune 获取包装字体字符
+// 入参: gid 字形ID
+// 返回: rune 包装字体字符
+func packedGlyphRune(gid uint16) rune {
+	return 0xF0000 + rune(gid)
+}
+
 // calcTableChecksum 计算字体表校验和
 // 入参: data 表数据
 // 返回: uint32 校验和

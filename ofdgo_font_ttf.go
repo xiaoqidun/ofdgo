@@ -143,7 +143,7 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 		if len(mapping) == 0 {
 			mapping = make(map[rune]uint16)
 			for i := uint16(0); i < numGlyphs; i++ {
-				mapping[rune(i)] = i
+				mapping[packedGlyphRune(i)] = i
 			}
 		}
 		newTables["cmap"] = buildCmapTable(numGlyphs, mapping)

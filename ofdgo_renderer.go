@@ -602,11 +602,20 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if fillColor == nil {
 		fillColor = canvas.Black
 	}
+	var fillPaint any = fillColor
+	var fillColorNode *FillColor
 	if dp != nil && dp.FillColor != nil {
 		fillColor = parseFillColor(dp.FillColor)
+		fillColorNode = dp.FillColor
+		fillPaint = parseFillPaint(dp.FillColor, bx, by, pageH, 0, 0)
 	}
 	if obj.FillColor != nil {
 		fillColor = parseFillColor(obj.FillColor)
+		fillColorNode = obj.FillColor
+		fillPaint = parseFillPaint(obj.FillColor, bx, by, pageH, 0, 0)
+	}
+	if fillPaint == nil {
+		fillPaint = fillColor
 	}
 	fontStyle := canvas.FontRegular
 	weight := obj.Weight
@@ -638,7 +647,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if ff == nil {
 		return
 	}
-	face := ff.Face(sizePt, fillColor, fontStyle, canvas.FontNormal)
+	face := ff.Face(sizePt, fillPaint, fontStyle, canvas.FontNormal)
 	glyphRunes := r.textObjectGlyphRunes(fontID, obj)
 	codePos := 0
 	for _, tc := range obj.TextCode {
@@ -683,14 +692,22 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			tx, ty := ctm.Transform(cx, cy)
 			canvasX, canvasY := tx+bx, pageH-(ty+by)
 			textWidth := face.TextWidth(str)
-			if fillColor != nil {
-				ctx.SetFillColor(fillColor)
+			glyphFillPaint := fillPaint
+			if fillColorNode != nil && fillColorNode.AxialShd != nil {
+				glyphFillPaint = parseFillPaint(fillColorNode, bx, by, pageH, canvasX, canvasY)
+			}
+			if glyphFillPaint != nil {
+				ctx.SetFill(glyphFillPaint)
 				if embeddedFont {
 					path, width := face.ToPath(str)
 					textWidth = width
 					ctx.DrawPath(canvasX, canvasY, path)
 				} else {
-					text := canvas.NewTextLine(face, str, canvas.Left)
+					textFace := face
+					if fillColorNode != nil && fillColorNode.AxialShd != nil {
+						textFace = ff.Face(sizePt, glyphFillPaint, fontStyle, canvas.FontNormal)
+					}
+					text := canvas.NewTextLine(textFace, str, canvas.Left)
 					ctx.DrawText(canvasX, canvasY, text)
 				}
 			}
@@ -738,7 +755,14 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 					}
 					inv := make(map[uint16]rune)
 					for k, v := range mapping {
-						inv[v] = k
+						if k == packedGlyphRune(v) {
+							inv[v] = k
+						}
+					}
+					for k, v := range mapping {
+						if _, ok := inv[v]; !ok {
+							inv[v] = k
+						}
 					}
 					r.FontGIDMap[fontID] = inv
 				}

@@ -18,6 +18,7 @@ import (
 	"image/color"
 	"strconv"
 	"strings"
+	"github.com/tdewolff/canvas"
 )
 
 // parseColor 解析颜色字符串
@@ -58,6 +59,22 @@ func parseFillColor(fillColor *FillColor) color.Color {
 	return parseAxialShdColor(fillColor.AxialShd, fillColor.Alpha)
 }
 
+// parseFillPaint 解析填充画刷
+// 入参: fillColor 填充颜色节点, x X坐标, y Y坐标, pageH 页面高度, originX 原点X坐标, originY 原点Y坐标
+// 返回: any 填充画刷
+func parseFillPaint(fillColor *FillColor, x, y, pageH, originX, originY float64) any {
+	if fillColor == nil {
+		return nil
+	}
+	if strings.TrimSpace(fillColor.Value) != "" {
+		return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
+	}
+	if gradient := parseAxialShdGradient(fillColor.AxialShd, fillColor.Alpha, x, y, pageH, originX, originY); gradient != nil {
+		return gradient
+	}
+	return parseAxialShdColor(fillColor.AxialShd, fillColor.Alpha)
+}
+
 // parseStrokeColor 解析勾边颜色
 // 入参: strokeColor 勾边颜色节点
 // 返回: color.Color 颜色对象
@@ -87,6 +104,48 @@ func parseAxialShdColor(axialShd *AxialShd, alpha *int) color.Color {
 		}
 	}
 	return color.Black
+}
+
+// parseAxialShdGradient 解析轴向渐变
+// 入参: axialShd 轴向渐变节点, alpha 透明度, x X坐标, y Y坐标, pageH 页面高度, originX 原点X坐标, originY 原点Y坐标
+// 返回: canvas.Gradient 渐变对象
+func parseAxialShdGradient(axialShd *AxialShd, alpha *int, x, y, pageH, originX, originY float64) canvas.Gradient {
+	if axialShd == nil {
+		return nil
+	}
+	start := parseFloats(axialShd.StartPoint)
+	end := parseFloats(axialShd.EndPoint)
+	if len(start) < 2 || len(end) < 2 {
+		return nil
+	}
+	grad := canvas.NewGradient()
+	for _, segment := range axialShd.Segment {
+		if strings.TrimSpace(segment.Color.Value) == "" {
+			continue
+		}
+		segmentAlpha := alpha
+		if segmentAlpha == nil {
+			segmentAlpha = segment.Color.Alpha
+		}
+		grad.Add(segment.Position, colorToRGBA(parseColorWithAlpha(segment.Color.Value, segmentAlpha)))
+	}
+	if len(grad) == 0 {
+		return nil
+	}
+	startPoint := canvas.Point{X: x + start[0] - originX, Y: pageH - (y + start[1]) - originY}
+	endPoint := canvas.Point{X: x + end[0] - originX, Y: pageH - (y + end[1]) - originY}
+	if startPoint.Equals(endPoint) {
+		return nil
+	}
+	return grad.ToLinear(startPoint, endPoint)
+}
+
+// colorToRGBA 转换颜色对象
+// 入参: c 颜色对象
+// 返回: color.RGBA RGBA颜色
+func colorToRGBA(c color.Color) color.RGBA {
+	r, g, b, a := c.RGBA()
+	return color.RGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)}
 }
 
 // GetDeltaX 获取X轴偏移量数组

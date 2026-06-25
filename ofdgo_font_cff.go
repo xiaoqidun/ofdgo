@@ -803,10 +803,9 @@ func getCmapFromCFF(data []byte, numGlyphs int) map[rune]uint16 {
 			if gid == 0 {
 				continue
 			}
+			mapping[packedGlyphRune(uint16(gid))] = uint16(gid)
 			if r, ok := adobeGB1CIDToUnicode(cid); ok {
 				mapping[r] = uint16(gid)
-			} else {
-				mapping[0xE000+rune(gid)] = uint16(gid)
 			}
 		}
 		return mapping
@@ -816,7 +815,7 @@ func getCmapFromCFF(data []byte, numGlyphs int) map[rune]uint16 {
 			if gid == 0 {
 				continue
 			}
-			mapping[0xE000+rune(gid)] = uint16(gid)
+			mapping[packedGlyphRune(uint16(gid))] = uint16(gid)
 		}
 		return mapping
 	}
@@ -838,8 +837,9 @@ func getCmapFromCFF(data []byte, numGlyphs int) map[rune]uint16 {
 			r = getUnicodeFromName(name)
 		}
 		if r == 0 {
-			r = 0xE000 + rune(gid)
+			r = packedGlyphRune(uint16(gid))
 		}
+		mapping[packedGlyphRune(uint16(gid))] = uint16(gid)
 		mapping[r] = uint16(gid)
 	}
 	return mapping
@@ -867,7 +867,14 @@ func getCFFCIDRuneMap(data []byte) map[uint16]rune {
 	}
 	gidRunes := make(map[uint16]rune)
 	for run, gid := range mapping {
-		gidRunes[gid] = run
+		if run != packedGlyphRune(gid) {
+			gidRunes[gid] = run
+		}
+	}
+	for run, gid := range mapping {
+		if _, ok := gidRunes[gid]; !ok {
+			gidRunes[gid] = run
+		}
 	}
 	result := make(map[uint16]rune)
 	for gid, cid := range sids {
