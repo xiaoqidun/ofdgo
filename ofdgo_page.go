@@ -40,10 +40,20 @@ type Content struct {
 type Layer struct {
 	ID                   string                 `xml:"ID,attr"`
 	DrawParam            string                 `xml:"DrawParam,attr"`
+	Objects              []GraphicObject        `xml:"-"`
 	TextObject           []TextObject           `xml:"TextObject"`
 	PathObject           []PathObject           `xml:"PathObject"`
 	ImageObject          []ImageObject          `xml:"ImageObject"`
 	CompositeGraphicUnit []CompositeGraphicUnit `xml:"CompositeGraphicUnit"`
+}
+
+// GraphicObject 图形对象
+type GraphicObject struct {
+	Type                 string
+	TextObject           TextObject
+	PathObject           PathObject
+	ImageObject          ImageObject
+	CompositeGraphicUnit CompositeGraphicUnit
 }
 
 // Clips 裁剪区域集合
@@ -64,24 +74,25 @@ type ClipArea struct {
 
 // TextObject 文本对象
 type TextObject struct {
-	ID          string       `xml:"ID,attr"`
-	Boundary    string       `xml:"Boundary,attr"`
-	DrawParam   string       `xml:"DrawParam,attr"`
-	LineWidth   float64      `xml:"LineWidth,attr"`
-	Font        string       `xml:"Font,attr"`
-	Size        float64      `xml:"Size,attr"`
-	Weight      int          `xml:"Weight,attr"`
-	Italic      bool         `xml:"Italic,attr"`
-	Decoration  string       `xml:"Decoration,attr"`
-	HScale      float64      `xml:"HScale,attr"`
-	VScale      float64      `xml:"VScale,attr"`
-	CTM         string       `xml:"CTM,attr"`
-	Fill        *bool        `xml:"Fill,attr"`
-	Stroke      *bool        `xml:"Stroke,attr"`
-	StrokeColor *StrokeColor `xml:"StrokeColor"`
-	FillColor   *FillColor   `xml:"FillColor"`
-	TextCode    []TextCode   `xml:"TextCode"`
-	Clips       *Clips       `xml:"Clips"`
+	ID          string        `xml:"ID,attr"`
+	Boundary    string        `xml:"Boundary,attr"`
+	DrawParam   string        `xml:"DrawParam,attr"`
+	LineWidth   float64       `xml:"LineWidth,attr"`
+	Font        string        `xml:"Font,attr"`
+	Size        float64       `xml:"Size,attr"`
+	Weight      int           `xml:"Weight,attr"`
+	Italic      bool          `xml:"Italic,attr"`
+	Decoration  string        `xml:"Decoration,attr"`
+	HScale      float64       `xml:"HScale,attr"`
+	VScale      float64       `xml:"VScale,attr"`
+	CTM         string        `xml:"CTM,attr"`
+	Fill        *bool         `xml:"Fill,attr"`
+	Stroke      *bool         `xml:"Stroke,attr"`
+	StrokeColor *StrokeColor  `xml:"StrokeColor"`
+	FillColor   *FillColor    `xml:"FillColor"`
+	CGTransform []CGTransform `xml:"CGTransform"`
+	TextCode    []TextCode    `xml:"TextCode"`
+	Clips       *Clips        `xml:"Clips"`
 }
 
 // FillColor 填充颜色
@@ -98,6 +109,14 @@ type TextCode struct {
 	DeltaY string `xml:"DeltaY,attr"`
 	Index  string `xml:"Index,attr"`
 	Value  string `xml:",chardata"`
+}
+
+// CGTransform 字符到字形的映射
+type CGTransform struct {
+	CodePosition int    `xml:"CodePosition,attr"`
+	CodeCount    int    `xml:"CodeCount,attr"`
+	GlyphCount   int    `xml:"GlyphCount,attr"`
+	Glyphs       string `xml:"Glyphs"`
 }
 
 // PathObject 路径对象

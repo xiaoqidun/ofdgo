@@ -97,6 +97,7 @@ type CompositeGraphicUnit struct {
 	CTM                  string                 `xml:"CTM,attr"`
 	DrawParam            string                 `xml:"DrawParam,attr"`
 	Alpha                *int                   `xml:"Alpha,attr"`
+	Objects              []GraphicObject        `xml:"-"`
 	TextObject           []TextObject           `xml:"TextObject"`
 	PathObject           []PathObject           `xml:"PathObject"`
 	ImageObject          []ImageObject          `xml:"ImageObject"`

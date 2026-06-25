@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"golang.org/x/text/encoding/simplifiedchinese"
 	"math"
 	"sort"
 	"strconv"
@@ -28,15 +29,14 @@ import (
 // 入参: cffData CFF字体数据
 // 返回: []byte OTF字体数据, map[rune]uint16 字符映射, error 错误信息
 func wrapCFFToOTF(cffData []byte) ([]byte, map[rune]uint16, error) {
-	sanitized, err := sanitizeCFF(cffData)
-	if err == nil {
-		cffData = sanitized
-	} else {
-		return nil, nil, err
-	}
 	numGlyphs, err := parseCFFAndCountGlyphs(cffData)
 	if err != nil {
 		return nil, nil, err
+	}
+	mapping := getCmapFromCFF(cffData, int(numGlyphs))
+	sanitized, err := sanitizeCFF(cffData)
+	if err == nil {
+		cffData = sanitized
 	}
 	widths, err := parseCFFWidths(cffData, numGlyphs)
 	if err != nil {
@@ -64,12 +64,11 @@ func wrapCFFToOTF(cffData []byte) ([]byte, map[rune]uint16, error) {
 			}
 		}
 	}
-	mapping := getCmapFromCFF(cffData, int(numGlyphs))
 	tables := make(map[string][]byte)
 	tables["CFF "] = cffData
 	tables["head"] = buildHeadTable(unitsPerEm)
 	tables["hhea"] = buildHheaTable(uint16(numGlyphs))
-	tables["maxp"] = buildMaxpTable(uint16(numGlyphs))
+	tables["maxp"] = buildCFFMaxpTable(uint16(numGlyphs))
 	tables["OS/2"] = buildOS2Table()
 	tables["name"] = buildNameTable()
 	tables["post"] = buildPostTable()
@@ -747,12 +746,12 @@ func readCFFOffset(data []byte, pos, size int) int {
 	return val
 }
 
-// getCmapFromCFF 从 CFF 数据中恢复 Unicode 映射
+// getCFFCharsetInfo 读取 CFF 字符集和 ROS 信息
 // 入参: data CFF数据, numGlyphs 字形数量
-// 返回: map[rune]uint16 恢复的映射表
-func getCmapFromCFF(data []byte, numGlyphs int) map[rune]uint16 {
+// 返回: []int SID或CID列表, string Registry, string Ordering, int 字符串索引偏移, bool 是否成功
+func getCFFCharsetInfo(data []byte, numGlyphs int) ([]int, string, string, int, bool) {
 	if len(data) < 4 {
-		return nil
+		return nil, "", "", 0, false
 	}
 	hdrSize := int(data[2])
 	offset := hdrSize
@@ -763,9 +762,10 @@ func getCmapFromCFF(data []byte, numGlyphs int) map[rune]uint16 {
 	offset += szTD
 	stringIndexOff := offset
 	if topDictData == nil {
-		return nil
+		return nil, "", "", 0, false
 	}
 	td := parseCFFDict(topDictData)
+	registry, ordering := getCFFROS(data, stringIndexOff, td)
 	charsetOff := 0
 	if vals, ok := td[15]; ok && len(vals) > 0 {
 		charsetOff = int(vals[0])
@@ -784,9 +784,42 @@ func getCmapFromCFF(data []byte, numGlyphs int) map[rune]uint16 {
 			sids[i] = i
 		}
 	} else {
+		return nil, "", "", 0, false
+	}
+	return sids, registry, ordering, stringIndexOff, true
+}
+
+// getCmapFromCFF 从 CFF 数据中恢复 Unicode 映射
+// 入参: data CFF数据, numGlyphs 字形数量
+// 返回: map[rune]uint16 恢复的映射表
+func getCmapFromCFF(data []byte, numGlyphs int) map[rune]uint16 {
+	sids, registry, ordering, stringIndexOff, ok := getCFFCharsetInfo(data, numGlyphs)
+	if !ok {
 		return nil
 	}
 	mapping := make(map[rune]uint16)
+	if registry == "Adobe" && ordering == "GB1" {
+		for gid, cid := range sids {
+			if gid == 0 {
+				continue
+			}
+			if r, ok := adobeGB1CIDToUnicode(cid); ok {
+				mapping[r] = uint16(gid)
+			} else {
+				mapping[0xE000+rune(gid)] = uint16(gid)
+			}
+		}
+		return mapping
+	}
+	if registry != "" {
+		for gid := range sids {
+			if gid == 0 {
+				continue
+			}
+			mapping[0xE000+rune(gid)] = uint16(gid)
+		}
+		return mapping
+	}
 	for gid, sid := range sids {
 		if gid == 0 {
 			continue
@@ -810,6 +843,79 @@ func getCmapFromCFF(data []byte, numGlyphs int) map[rune]uint16 {
 		mapping[r] = uint16(gid)
 	}
 	return mapping
+}
+
+// getCFFCIDRuneMap 获取 CID 到包装字体字符的映射
+// 入参: data CFF或OpenType字体数据
+// 返回: map[uint16]rune CID映射
+func getCFFCIDRuneMap(data []byte) map[uint16]rune {
+	cffData := getCFFData(data)
+	if cffData == nil {
+		return nil
+	}
+	numGlyphs, err := parseCFFAndCountGlyphs(cffData)
+	if err != nil {
+		return nil
+	}
+	sids, registry, _, _, ok := getCFFCharsetInfo(cffData, numGlyphs)
+	if !ok || registry == "" {
+		return nil
+	}
+	mapping := getCmapFromCFF(cffData, numGlyphs)
+	if len(mapping) == 0 {
+		return nil
+	}
+	gidRunes := make(map[uint16]rune)
+	for run, gid := range mapping {
+		gidRunes[gid] = run
+	}
+	result := make(map[uint16]rune)
+	for gid, cid := range sids {
+		if gid == 0 || cid < 0 || cid > 0xFFFF {
+			continue
+		}
+		if run, ok := gidRunes[uint16(gid)]; ok {
+			result[uint16(cid)] = run
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// getCFFData 获取字体中的 CFF 数据
+// 入参: data 字体数据
+// 返回: []byte CFF数据
+func getCFFData(data []byte) []byte {
+	if isBareCFFData(data) {
+		return data
+	}
+	if len(data) < 12 {
+		return nil
+	}
+	tag := string(data[0:4])
+	u32Tag := binary.BigEndian.Uint32(data[0:4])
+	if tag != "OTTO" && tag != "true" && u32Tag != 0x00010000 {
+		return nil
+	}
+	numTables := int(binary.BigEndian.Uint16(data[4:6]))
+	for i := 0; i < numTables; i++ {
+		pos := 12 + i*16
+		if pos+16 > len(data) {
+			return nil
+		}
+		if string(data[pos:pos+4]) != "CFF " {
+			continue
+		}
+		offset := int(binary.BigEndian.Uint32(data[pos+8 : pos+12]))
+		length := int(binary.BigEndian.Uint32(data[pos+12 : pos+16]))
+		if offset < 0 || length < 0 || offset+length > len(data) {
+			return nil
+		}
+		return data[offset : offset+length]
+	}
+	return nil
 }
 
 // parseCFFCharset 解析 CFF 字符集并返回 SID 列表
@@ -882,6 +988,71 @@ func readStringIndexItem(data []byte, offset int, idx int) string {
 		return ""
 	}
 	return string(data[start : start+length])
+}
+
+// getCFFROS 读取 CID 字体 ROS 信息
+// 入参: data CFF数据, stringIndexOff 字符串索引偏移, td 顶层字典
+// 返回: string Registry, string Ordering
+func getCFFROS(data []byte, stringIndexOff int, td cffDict) (string, string) {
+	vals, ok := td[1230]
+	if !ok || len(vals) < 2 {
+		return "", ""
+	}
+	registry := getCFFSIDString(data, stringIndexOff, int(vals[0]))
+	ordering := getCFFSIDString(data, stringIndexOff, int(vals[1]))
+	return registry, ordering
+}
+
+// getCFFSIDString 读取 CFF SID 字符串
+// 入参: data CFF数据, stringIndexOff 字符串索引偏移, sid 字符串ID
+// 返回: string 字符串内容
+func getCFFSIDString(data []byte, stringIndexOff int, sid int) string {
+	if sid >= 0 && sid < len(cffStandardStrings) {
+		return cffStandardStrings[sid]
+	}
+	if sid > 390 {
+		return readStringIndexItem(data, stringIndexOff, sid-391)
+	}
+	return ""
+}
+
+// adobeGB1CIDToUnicode 将 Adobe-GB1 CID 转为 Unicode
+// 入参: cid 字符CID
+// 返回: rune Unicode字符, bool 是否成功
+func adobeGB1CIDToUnicode(cid int) (rune, bool) {
+	switch cid {
+	case 329:
+		return '“', true
+	case 330:
+		return '”', true
+	case 821:
+		return '、', true
+	case 822:
+		return '。', true
+	case 829:
+		return '《', true
+	case 830:
+		return '》', true
+	}
+	n := cid + 471
+	if n <= 0 {
+		return 0, false
+	}
+	row := (n-1)/94 + 1
+	cell := (n-1)%94 + 1
+	if row < 16 || row > 87 || cell < 1 || cell > 94 {
+		return 0, false
+	}
+	gbk := []byte{byte(row + 0xA0), byte(cell + 0xA0)}
+	decoded, err := simplifiedchinese.GBK.NewDecoder().Bytes(gbk)
+	if err != nil || len(decoded) == 0 {
+		return 0, false
+	}
+	rs := []rune(string(decoded))
+	if len(rs) != 1 {
+		return 0, false
+	}
+	return rs[0], true
 }
 
 // getUnicodeFromName 根据字形名称获取对应的Unicode字符

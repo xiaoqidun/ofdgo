@@ -34,14 +34,31 @@ func FixFontDataAggressive(data []byte, fixCmap, fixName bool) (bool, []byte, ma
 	if isTTC {
 		return false, data, nil, false, nil
 	}
-	if !isTrueType && !isOpenType {
-		if data[0] == 1 && data[1] == 0 && data[2] == 4 {
-			otf, mapping, err := wrapCFFToOTF(data)
-			if err == nil {
-				return true, otf, mapping, false, nil
-			}
+	if isBareCFFData(data) {
+		otf, mapping, err := wrapCFFToOTF(data)
+		if err != nil {
+			return false, data, nil, false, err
 		}
+		return true, otf, mapping, false, nil
+	}
+	if !isTrueType && !isOpenType {
+		return false, data, nil, false, nil
 	}
 	fixed, newData, mapping, mc, err := fixTrueType(data, fixCmap, fixName)
 	return fixed, newData, mapping, mc, err
+}
+
+// isBareCFFData 检查是否为 CFF 裸字体数据
+// 入参: data 字体数据
+// 返回: bool 是否为 CFF 裸数据
+func isBareCFFData(data []byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	if data[0] != 1 || data[1] != 0 {
+		return false
+	}
+	hdrSize := int(data[2])
+	offSize := int(data[3])
+	return 4 <= hdrSize && hdrSize <= len(data) && 1 <= offSize && offSize <= 4
 }

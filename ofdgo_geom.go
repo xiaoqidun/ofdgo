@@ -149,3 +149,21 @@ func parseFloatsWithG(s string) []float64 {
 	}
 	return result
 }
+
+// parseInts 解析整数数组
+// 入参: s 字符串
+// 返回: []int 整数数组
+func parseInts(s string) []int {
+	if s == "" {
+		return nil
+	}
+	s = strings.ReplaceAll(s, ",", " ")
+	parts := strings.Fields(s)
+	result := make([]int, 0, len(parts))
+	for _, p := range parts {
+		if v, err := strconv.Atoi(p); err == nil {
+			result = append(result, v)
+		}
+	}
+	return result
+}

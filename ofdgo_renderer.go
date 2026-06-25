@@ -43,6 +43,7 @@ type Renderer struct {
 	CompositeGraphicUnits map[string]*CompositeGraphicUnit
 	FontMap               map[string]*canvas.FontFamily
 	FontGIDMap            map[string]map[uint16]rune
+	FontCIDMap            map[string]map[uint16]rune
 	fontDirs              []string
 	fontFS                []fs.FS
 }
@@ -262,6 +263,12 @@ func (r *Renderer) renderLayer(ctx *canvas.Context, layer Layer, pageH float64, 
 			}
 		}
 	}
+	if len(layer.Objects) > 0 {
+		for _, obj := range layer.Objects {
+			r.renderObject(ctx, obj, pageH, defaultFill, defaultStroke, defaultLW, parentCTM)
+		}
+		return
+	}
 	for _, textObj := range layer.TextObject {
 		r.renderText(ctx, textObj, pageH, defaultFill, defaultStroke, parentCTM)
 	}
@@ -303,6 +310,13 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 			}
 		}
 	}
+	if len(cgu.Objects) > 0 {
+		for _, obj := range cgu.Objects {
+			r.renderObject(ctx, obj, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM)
+		}
+		ctx.Pop()
+		return
+	}
 	for _, imgObj := range cgu.ImageObject {
 		r.renderImage(ctx, imgObj, pageH, &currentCTM)
 	}
@@ -316,6 +330,21 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 		r.renderCompositeGraphicUnit(ctx, subCgu, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM)
 	}
 	ctx.Pop()
+}
+
+// renderObject 渲染图形对象
+// 入参: ctx 画布上下文, obj 图形对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM
+func (r *Renderer) renderObject(ctx *canvas.Context, obj GraphicObject, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix) {
+	switch obj.Type {
+	case "TextObject":
+		r.renderText(ctx, obj.TextObject, pageH, defaultFill, defaultStroke, parentCTM)
+	case "PathObject":
+		r.renderPath(ctx, obj.PathObject, pageH, defaultFill, defaultStroke, defaultLW, parentCTM)
+	case "ImageObject":
+		r.renderImage(ctx, obj.ImageObject, pageH, parentCTM)
+	case "CompositeGraphicUnit", "CompositeObject":
+		r.renderCompositeGraphicUnit(ctx, obj.CompositeGraphicUnit, pageH, defaultFill, defaultStroke, defaultLW, parentCTM)
+	}
 }
 
 // getDrawParam 获取绘制参数逻辑
@@ -592,11 +621,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if italic {
 		fontStyle |= canvas.FontItalic
 	}
-	fontID := obj.Font
-	if fontID == "" && dp != nil && dp.Font != "" {
-		fontID = dp.Font
-	}
+	fontID := r.textObjectFontID(obj)
+	embeddedFont := false
 	if of, ok := r.Reader.fontCache[fontID]; ok {
+		embeddedFont = of.FontFile != ""
 		if of.Bold {
 			fontStyle |= canvas.FontBold
 		}
@@ -609,6 +637,8 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		return
 	}
 	face := ff.Face(sizePt, fillColor, fontStyle, canvas.FontNormal)
+	glyphRunes := r.textObjectGlyphRunes(fontID, obj)
+	codePos := 0
 	for _, tc := range obj.TextCode {
 		var runes []rune
 		if tc.Index != "" {
@@ -627,6 +657,11 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		}
 		for i, run := range runes {
 			str := string(run)
+			if embeddedFont && tc.Index == "" && glyphRunes != nil {
+				if mapped, ok := glyphRunes[codePos+i]; ok {
+					str = string(mapped)
+				}
+			}
 			if i < len(xs) {
 				cx = xs[i]
 			} else if i > 0 {
@@ -645,10 +680,17 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			}
 			tx, ty := ctm.Transform(cx, cy)
 			canvasX, canvasY := tx+bx, pageH-(ty+by)
-			text := canvas.NewTextLine(face, str, canvas.Left)
+			textWidth := face.TextWidth(str)
 			if fillColor != nil {
 				ctx.SetFillColor(fillColor)
-				ctx.DrawText(canvasX, canvasY, text)
+				if embeddedFont {
+					path, width := face.ToPath(str)
+					textWidth = width
+					ctx.DrawPath(canvasX, canvasY, path)
+				} else {
+					text := canvas.NewTextLine(face, str, canvas.Left)
+					ctx.DrawText(canvasX, canvasY, text)
+				}
 			}
 			if strings.Contains(obj.Decoration, "Underline") {
 				uw := sizeMM * 0.05
@@ -656,10 +698,11 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				ctx.SetStrokeColor(fillColor)
 				off := sizeMM * 0.1
 				ctx.MoveTo(canvasX, canvasY-off)
-				ctx.LineTo(canvasX+face.TextWidth(str), canvasY-off)
+				ctx.LineTo(canvasX+textWidth, canvasY-off)
 				ctx.Stroke()
 			}
 		}
+		codePos += len(runes)
 	}
 	ctx.Pop()
 }
@@ -679,6 +722,12 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	ff := canvas.NewFontFamily(of.FontName)
 	if of.FontFile != "" {
 		if fontData, err := r.Reader.ResData(of.FontFile); err == nil {
+			if cidMap := getCFFCIDRuneMap(fontData); len(cidMap) > 0 {
+				if r.FontCIDMap == nil {
+					r.FontCIDMap = make(map[string]map[uint16]rune)
+				}
+				r.FontCIDMap[fontID] = cidMap
+			}
 			if _, fixedData, mapping, _, err := FixFontDataAggressive(fontData, true, true); err == nil {
 				fontData = fixedData
 				if mapping != nil {
@@ -824,6 +873,79 @@ func (r *Renderer) globFontFiles(dir, pattern string) []string {
 		}
 	}
 	return result
+}
+
+// textObjectFontID 获取文本对象字体ID
+// 入参: text 文本对象
+// 返回: string 字体ID
+func (r *Renderer) textObjectFontID(text TextObject) string {
+	fontID := text.Font
+	if fontID == "" && text.DrawParam != "" {
+		if dp := r.getDrawParam(text.DrawParam, nil); dp != nil && dp.Font != "" {
+			fontID = dp.Font
+		}
+	}
+	return fontID
+}
+
+// textObjectGlyphRunes 获取文本对象的字形映射
+// 入参: fontID 字体ID, text 文本对象
+// 返回: map[int]rune 文本位置到包装字体字符的映射
+func (r *Renderer) textObjectGlyphRunes(fontID string, text TextObject) map[int]rune {
+	if fontID == "" || len(text.CGTransform) == 0 {
+		return nil
+	}
+	result := make(map[int]rune)
+	for _, transform := range text.CGTransform {
+		glyphs := parseInts(transform.Glyphs)
+		count := len(glyphs)
+		if transform.GlyphCount > 0 && transform.GlyphCount < count {
+			count = transform.GlyphCount
+		}
+		if transform.CodeCount > 0 && transform.CodeCount < count {
+			count = transform.CodeCount
+		}
+		if count == 0 {
+			continue
+		}
+		if transform.CodeCount > 0 && transform.GlyphCount > 0 && transform.CodeCount != transform.GlyphCount {
+			continue
+		}
+		for i := 0; i < count; i++ {
+			if mapped, ok := r.fontGlyphRune(fontID, glyphs[i]); ok {
+				result[transform.CodePosition+i] = mapped
+			}
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// fontGlyphRune 获取字形ID对应的包装字体字符
+// 入参: fontID 字体ID, glyphID 字形ID或CID
+// 返回: rune 包装字体字符, bool 是否存在
+func (r *Renderer) fontGlyphRune(fontID string, glyphID int) (rune, bool) {
+	if glyphID < 0 || glyphID > 0xFFFF {
+		return 0, false
+	}
+	id := uint16(glyphID)
+	if r.FontCIDMap != nil {
+		if mapping := r.FontCIDMap[fontID]; mapping != nil {
+			if mapped, ok := mapping[id]; ok {
+				return mapped, true
+			}
+		}
+	}
+	if r.FontGIDMap != nil {
+		if mapping := r.FontGIDMap[fontID]; mapping != nil {
+			if mapped, ok := mapping[id]; ok {
+				return mapped, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // renderStamp 渲染印章
@@ -1003,14 +1125,11 @@ func (r *Renderer) parseIndexRunes(indexStr string, fontID string) []rune {
 			gids = append(gids, val)
 		}
 	}
-	mapping := r.FontGIDMap[fontID]
 	var res []rune
 	for _, gid := range gids {
-		if mapping != nil {
-			if rVal, ok := mapping[uint16(gid)]; ok {
-				res = append(res, rVal)
-				continue
-			}
+		if rVal, ok := r.fontGlyphRune(fontID, gid); ok {
+			res = append(res, rVal)
+			continue
 		}
 		res = append(res, rune(gid))
 	}

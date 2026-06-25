@@ -125,9 +125,29 @@ func buildHheaTable(numGlyphs uint16) []byte {
 // 入参: numGlyphs 字形数量
 // 返回: []byte maxp表数据
 func buildMaxpTable(numGlyphs uint16) []byte {
+	return buildCFFMaxpTable(numGlyphs)
+}
+
+// buildCFFMaxpTable 构建 CFF 轮廓使用的 maxp 0.5 表
+// 入参: numGlyphs 字形数量
+// 返回: []byte maxp表数据
+func buildCFFMaxpTable(numGlyphs uint16) []byte {
 	buf := new(bytes.Buffer)
 	binary.Write(buf, binary.BigEndian, uint32(0x00005000))
 	binary.Write(buf, binary.BigEndian, uint16(numGlyphs))
+	return buf.Bytes()
+}
+
+// buildTrueTypeMaxpTable 构建 TrueType 轮廓使用的 maxp 1.0 表
+// 入参: numGlyphs 字形数量
+// 返回: []byte maxp表数据
+func buildTrueTypeMaxpTable(numGlyphs uint16) []byte {
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, uint32(0x00010000))
+	binary.Write(buf, binary.BigEndian, uint16(numGlyphs))
+	for i := 0; i < 13; i++ {
+		binary.Write(buf, binary.BigEndian, uint16(0))
+	}
 	return buf.Bytes()
 }
 
@@ -236,6 +256,9 @@ type cmapSegment struct {
 // 入参: numGlyphs 字形数量, mapping 字符映射
 // 返回: []byte cmap表数据
 func buildCmapTable(numGlyphs uint16, mapping map[rune]uint16) []byte {
+	if shouldBuildCmapFormat12(mapping) {
+		return buildCmapTableFormat12(numGlyphs, mapping)
+	}
 	var segs []cmapSegment
 	if mapping == nil {
 		end := uint16(0xFFFF)
@@ -332,6 +355,116 @@ func buildCmapTable(numGlyphs uint16, mapping map[rune]uint16) []byte {
 	binary.Write(mainBuf, binary.BigEndian, uint16(1))
 	binary.Write(mainBuf, binary.BigEndian, uint32(12))
 	mainBuf.Write(data)
+	return mainBuf.Bytes()
+}
+
+// shouldBuildCmapFormat12 判断 format 4 是否会溢出 16 位 length
+func shouldBuildCmapFormat12(mapping map[rune]uint16) bool {
+	if mapping == nil {
+		return false
+	}
+	var codes []int
+	for r := range mapping {
+		if r > 0xFFFF {
+			return true
+		}
+		if r != 0xFFFF {
+			codes = append(codes, int(r))
+		}
+	}
+	if len(codes) == 0 {
+		return false
+	}
+	sort.Ints(codes)
+	segCount := 1
+	glyphIDCount := 1
+	prev := codes[0]
+	for i := 1; i < len(codes); i++ {
+		curr := codes[i]
+		if curr == prev {
+			continue
+		}
+		if curr != prev+1 {
+			segCount++
+		}
+		glyphIDCount++
+		prev = curr
+	}
+	segCount++ // sentinel segment
+	length := 16 + segCount*8 + glyphIDCount*2
+	return length > 0xFFFF
+}
+
+// buildCmapTableFormat12 构建 cmap 表 (Format 12)
+// 入参: numGlyphs 字形数量, mapping 字符映射
+// 返回: []byte cmap表数据
+func buildCmapTableFormat12(numGlyphs uint16, mapping map[rune]uint16) []byte {
+	var codes []int
+	if mapping == nil {
+		for i := 0; i < int(numGlyphs); i++ {
+			codes = append(codes, i)
+		}
+	} else {
+		for r := range mapping {
+			if r >= 0 {
+				codes = append(codes, int(r))
+			}
+		}
+	}
+	sort.Ints(codes)
+	type cmapGroup struct {
+		startChar uint32
+		endChar   uint32
+		startGID  uint32
+	}
+	var groups []cmapGroup
+	for i := 0; i < len(codes); {
+		r := rune(codes[i])
+		gid := uint16(codes[i])
+		if mapping != nil {
+			gid = mapping[r]
+		}
+		group := cmapGroup{startChar: uint32(r), endChar: uint32(r), startGID: uint32(gid)}
+		prevRune := r
+		prevGID := gid
+		i++
+		for i < len(codes) {
+			nextRune := rune(codes[i])
+			nextGID := uint16(codes[i])
+			if mapping != nil {
+				nextGID = mapping[nextRune]
+			}
+			if nextRune != prevRune+1 || nextGID != prevGID+1 {
+				break
+			}
+			group.endChar = uint32(nextRune)
+			prevRune = nextRune
+			prevGID = nextGID
+			i++
+		}
+		groups = append(groups, group)
+	}
+	sub := new(bytes.Buffer)
+	binary.Write(sub, binary.BigEndian, uint16(12))
+	binary.Write(sub, binary.BigEndian, uint16(0))
+	binary.Write(sub, binary.BigEndian, uint32(16+12*len(groups)))
+	binary.Write(sub, binary.BigEndian, uint32(0))
+	binary.Write(sub, binary.BigEndian, uint32(len(groups)))
+	for _, group := range groups {
+		binary.Write(sub, binary.BigEndian, group.startChar)
+		binary.Write(sub, binary.BigEndian, group.endChar)
+		binary.Write(sub, binary.BigEndian, group.startGID)
+	}
+	mainBuf := new(bytes.Buffer)
+	binary.Write(mainBuf, binary.BigEndian, uint16(0))
+	binary.Write(mainBuf, binary.BigEndian, uint16(2))
+	binary.Write(mainBuf, binary.BigEndian, uint16(0))
+	binary.Write(mainBuf, binary.BigEndian, uint16(4))
+	binary.Write(mainBuf, binary.BigEndian, uint32(20))
+	binary.Write(mainBuf, binary.BigEndian, uint16(3))
+	binary.Write(mainBuf, binary.BigEndian, uint16(10))
+	binary.Write(mainBuf, binary.BigEndian, uint32(20))
+	mainBuf.Write(sub.Bytes())
 	return mainBuf.Bytes()
 }
 

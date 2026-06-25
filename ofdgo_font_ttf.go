@@ -25,11 +25,15 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 	if len(data) < 12 {
 		return false, data, nil, false, nil
 	}
+	sfntTag := string(data[0:4])
+	isCFFSfnt := sfntTag == "OTTO"
 	numTables := binary.BigEndian.Uint16(data[4:6])
 	existingTables := make(map[string][]byte)
+	malformedDirectory := false
 	pos := 12
 	for i := 0; i < int(numTables); i++ {
 		if len(data) < pos+16 {
+			malformedDirectory = true
 			break
 		}
 		tag := string(data[pos : pos+4])
@@ -37,8 +41,17 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 		length := binary.BigEndian.Uint32(data[pos+12 : pos+16])
 		if uint32(len(data)) >= offset+length {
 			existingTables[tag] = data[offset : offset+length]
+			padding := (4 - (length & 3)) & 3
+			if offset%4 != 0 || uint32(len(data))-offset-length < padding {
+				malformedDirectory = true
+			}
+		} else {
+			malformedDirectory = true
 		}
 		pos += 16
+	}
+	if existingTables["CFF "] != nil {
+		isCFFSfnt = true
 	}
 	missingHead := existingTables["head"] == nil
 	missingMaxp := existingTables["maxp"] == nil
@@ -53,14 +66,6 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 	}
 	missingName := existingTables["name"] == nil
 	missingPost := existingTables["post"] == nil
-	if !missingHead && !missingMaxp && !missingHhea && !missingHmtx &&
-		!missingOS2 && !missingCmap && !missingName && !missingPost {
-		return false, data, nil, false, nil
-	}
-	newTables := make(map[string][]byte)
-	for k, v := range existingTables {
-		newTables[k] = v
-	}
 	var numGlyphs uint16 = 0
 	if !missingMaxp {
 		maxp := existingTables["maxp"]
@@ -68,22 +73,56 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 			numGlyphs = binary.BigEndian.Uint16(maxp[4:6])
 		}
 	}
+	if numGlyphs == 0 && isCFFSfnt {
+		if cff := existingTables["CFF "]; cff != nil {
+			if n, err := parseCFFAndCountGlyphs(cff); err == nil && n > 0 {
+				if n > 0xFFFF {
+					numGlyphs = 0xFFFF
+				} else {
+					numGlyphs = uint16(n)
+				}
+			}
+		}
+	}
 	if numGlyphs == 0 {
 		numGlyphs = 255
+	}
+	if !missingPost && hasBadPostTable(existingTables["post"], numGlyphs, !isCFFSfnt) {
+		missingPost = true
+	}
+	if !missingHead && !missingMaxp && !missingHhea && !missingHmtx &&
+		!missingOS2 && !missingCmap && !missingName && !missingPost && !malformedDirectory {
+		return false, data, nil, false, nil
+	}
+	newTables := make(map[string][]byte)
+	for k, v := range existingTables {
+		newTables[k] = v
 	}
 	if missingHead {
 		newTables["head"] = buildHeadTable(1000)
 	}
 	if missingMaxp {
-		newTables["maxp"] = buildMaxpTable(numGlyphs)
+		if isCFFSfnt {
+			newTables["maxp"] = buildCFFMaxpTable(numGlyphs)
+		} else {
+			newTables["maxp"] = buildTrueTypeMaxpTable(numGlyphs)
+		}
 	}
 	if missingHhea {
 		newTables["hhea"] = buildHheaTable(numGlyphs)
 	}
 	if missingHmtx {
-		defWidths := make([]uint16, numGlyphs)
-		for i := range defWidths {
-			defWidths[i] = 500
+		var defWidths []uint16
+		if isCFFSfnt {
+			if widths, err := parseCFFWidths(newTables["CFF "], int(numGlyphs)); err == nil {
+				defWidths = widths
+			}
+		}
+		if len(defWidths) == 0 {
+			defWidths = make([]uint16, numGlyphs)
+			for i := range defWidths {
+				defWidths[i] = 500
+			}
 		}
 		newTables["hmtx"] = buildHmtxTable(defWidths)
 	}
@@ -98,9 +137,14 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 	}
 	var mapping map[rune]uint16
 	if missingCmap && fixCmap {
-		mapping = make(map[rune]uint16)
-		for i := uint16(0); i < numGlyphs; i++ {
-			mapping[rune(i)] = i
+		if isCFFSfnt {
+			mapping = getCmapFromCFF(newTables["CFF "], int(numGlyphs))
+		}
+		if len(mapping) == 0 {
+			mapping = make(map[rune]uint16)
+			for i := uint16(0); i < numGlyphs; i++ {
+				mapping[rune(i)] = i
+			}
 		}
 		newTables["cmap"] = buildCmapTable(numGlyphs, mapping)
 	}
@@ -115,6 +159,31 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 		return false, data, nil, missingCmap, err
 	}
 	return true, finalData, mapping, missingCmap, nil
+}
+
+// hasBadPostTable 检查 post 表是否会被 canvas/font 拒绝
+func hasBadPostTable(data []byte, numGlyphs uint16, isTrueType bool) bool {
+	if len(data) < 32 {
+		return true
+	}
+	version := binary.BigEndian.Uint32(data[0:4])
+	switch version {
+	case 0x00010000:
+		return !isTrueType || len(data) != 32
+	case 0x00020000:
+		if len(data) < 34 {
+			return true
+		}
+		postGlyphs := binary.BigEndian.Uint16(data[32:34])
+		if postGlyphs != numGlyphs {
+			return true
+		}
+		return len(data) < 34+int(postGlyphs)*2
+	case 0x00030000:
+		return len(data) != 32
+	default:
+		return true
+	}
 }
 
 // hasUsableCmap 检查是否存在可用的 cmap 子表
