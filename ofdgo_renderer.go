@@ -541,6 +541,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	}
 	if shouldFill && fillColor != nil {
 		ctx.SetFillColor(fillColor)
+		ctx.SetStrokeColor(canvas.Transparent)
 		ctx.DrawPath(0, 0, p)
 	}
 	shouldStroke := true
@@ -551,6 +552,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		if strokeColor == nil {
 			strokeColor = color.Transparent
 		}
+		ctx.SetFillColor(canvas.Transparent)
 		ctx.SetStrokeColor(strokeColor)
 		ctx.SetStrokeWidth(lineWidth)
 		ctx.SetStrokeCapper(lineCap)
