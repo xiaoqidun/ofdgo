@@ -97,8 +97,9 @@ type TextObject struct {
 
 // FillColor 填充颜色
 type FillColor struct {
-	Value string `xml:"Value,attr"`
-	Alpha *int   `xml:"Alpha,attr"`
+	Value    string    `xml:"Value,attr"`
+	Alpha    *int      `xml:"Alpha,attr"`
+	AxialShd *AxialShd `xml:"AxialShd"`
 }
 
 // TextCode 文本内容节点
@@ -141,6 +142,27 @@ type PathObject struct {
 
 // StrokeColor 勾边颜色
 type StrokeColor struct {
+	Value    string    `xml:"Value,attr"`
+	Alpha    *int      `xml:"Alpha,attr"`
+	AxialShd *AxialShd `xml:"AxialShd"`
+}
+
+// AxialShd 轴向渐变
+type AxialShd struct {
+	Extend     string       `xml:"Extend,attr"`
+	StartPoint string       `xml:"StartPoint,attr"`
+	EndPoint   string       `xml:"EndPoint,attr"`
+	Segment    []ShdSegment `xml:"Segment"`
+}
+
+// ShdSegment 渐变分段
+type ShdSegment struct {
+	Position float64  `xml:"Position,attr"`
+	Color    ShdColor `xml:"Color"`
+}
+
+// ShdColor 渐变颜色
+type ShdColor struct {
 	Value string `xml:"Value,attr"`
 	Alpha *int   `xml:"Alpha,attr"`
 }

@@ -45,6 +45,50 @@ func parseColorWithAlpha(val string, alpha *int) color.Color {
 	return color.Black
 }
 
+// parseFillColor 解析填充颜色
+// 入参: fillColor 填充颜色节点
+// 返回: color.Color 颜色对象
+func parseFillColor(fillColor *FillColor) color.Color {
+	if fillColor == nil {
+		return nil
+	}
+	if strings.TrimSpace(fillColor.Value) != "" {
+		return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
+	}
+	return parseAxialShdColor(fillColor.AxialShd, fillColor.Alpha)
+}
+
+// parseStrokeColor 解析勾边颜色
+// 入参: strokeColor 勾边颜色节点
+// 返回: color.Color 颜色对象
+func parseStrokeColor(strokeColor *StrokeColor) color.Color {
+	if strokeColor == nil {
+		return nil
+	}
+	if strings.TrimSpace(strokeColor.Value) != "" {
+		return parseColorWithAlpha(strokeColor.Value, strokeColor.Alpha)
+	}
+	return parseAxialShdColor(strokeColor.AxialShd, strokeColor.Alpha)
+}
+
+// parseAxialShdColor 解析轴向渐变颜色
+// 入参: axialShd 轴向渐变节点, alpha 透明度
+// 返回: color.Color 颜色对象
+func parseAxialShdColor(axialShd *AxialShd, alpha *int) color.Color {
+	if axialShd != nil {
+		for _, segment := range axialShd.Segment {
+			if strings.TrimSpace(segment.Color.Value) == "" {
+				continue
+			}
+			if alpha == nil {
+				alpha = segment.Color.Alpha
+			}
+			return parseColorWithAlpha(segment.Color.Value, alpha)
+		}
+	}
+	return color.Black
+}
+
 // GetDeltaX 获取X轴偏移量数组
 // 返回: []float64 偏移量数组
 func (tc *TextCode) GetDeltaX() []float64 {

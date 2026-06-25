@@ -256,10 +256,10 @@ func (r *Renderer) renderLayer(ctx *canvas.Context, layer Layer, pageH float64, 
 				defaultLW = dp.LineWidth
 			}
 			if dp.FillColor != nil {
-				defaultFill = parseColorWithAlpha(dp.FillColor.Value, dp.FillColor.Alpha)
+				defaultFill = parseFillColor(dp.FillColor)
 			}
 			if dp.StrokeColor != nil {
-				defaultStroke = parseColorWithAlpha(dp.StrokeColor.Value, dp.StrokeColor.Alpha)
+				defaultStroke = parseStrokeColor(dp.StrokeColor)
 			}
 		}
 	}
@@ -303,10 +303,10 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 				defaultLW = dp.LineWidth
 			}
 			if dp.FillColor != nil {
-				defaultFill = parseColorWithAlpha(dp.FillColor.Value, dp.FillColor.Alpha)
+				defaultFill = parseFillColor(dp.FillColor)
 			}
 			if dp.StrokeColor != nil {
-				defaultStroke = parseColorWithAlpha(dp.StrokeColor.Value, dp.StrokeColor.Alpha)
+				defaultStroke = parseStrokeColor(dp.StrokeColor)
 			}
 		}
 	}
@@ -482,10 +482,10 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 				lineWidth = dp.LineWidth
 			}
 			if dp.FillColor != nil {
-				fillColor = parseColorWithAlpha(dp.FillColor.Value, dp.FillColor.Alpha)
+				fillColor = parseFillColor(dp.FillColor)
 			}
 			if dp.StrokeColor != nil {
-				strokeColor = parseColorWithAlpha(dp.StrokeColor.Value, dp.StrokeColor.Alpha)
+				strokeColor = parseStrokeColor(dp.StrokeColor)
 			}
 			if dp.Cap == "Round" {
 				lineCap = canvas.RoundCap
@@ -507,10 +507,10 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		lineWidth = obj.LineWidth
 	}
 	if obj.FillColor != nil {
-		fillColor = parseColorWithAlpha(obj.FillColor.Value, obj.FillColor.Alpha)
+		fillColor = parseFillColor(obj.FillColor)
 	}
 	if obj.StrokeColor != nil {
-		strokeColor = parseColorWithAlpha(obj.StrokeColor.Value, obj.StrokeColor.Alpha)
+		strokeColor = parseStrokeColor(obj.StrokeColor)
 	}
 	if obj.Cap != "" {
 		if obj.Cap == "Round" {
@@ -603,10 +603,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		fillColor = canvas.Black
 	}
 	if dp != nil && dp.FillColor != nil {
-		fillColor = parseColorWithAlpha(dp.FillColor.Value, dp.FillColor.Alpha)
+		fillColor = parseFillColor(dp.FillColor)
 	}
 	if obj.FillColor != nil {
-		fillColor = parseColorWithAlpha(obj.FillColor.Value, obj.FillColor.Alpha)
+		fillColor = parseFillColor(obj.FillColor)
 	}
 	fontStyle := canvas.FontRegular
 	weight := obj.Weight
