@@ -462,12 +462,20 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 // 入参: ctx 画布上下文, obj 路径对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM
 func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix) {
 	ctx.Push()
+	bx, by := 0.0, 0.0
+	if obj.Boundary != "" {
+		if box, err := ParseBox(obj.Boundary); err == nil {
+			bx, by = box.X, box.Y
+		}
+	}
 	ctm := NewMatrix(obj.CTM)
 	if parentCTM != nil {
 		ctm = parentCTM.Multiply(ctm)
 	}
 	r.applyClips(ctx, obj.Clips, pageH, &ctm)
 	fillColor, strokeColor := defaultFill, defaultStroke
+	var fillPaint any = fillColor
+	var strokePaint any = strokeColor
 	lineWidth := defaultLW
 	if lineWidth == 0 {
 		lineWidth = 0.353
@@ -483,9 +491,11 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			}
 			if dp.FillColor != nil {
 				fillColor = parseFillColor(dp.FillColor)
+				fillPaint = parseFillPaint(dp.FillColor, bx, by, pageH, 0, 0)
 			}
 			if dp.StrokeColor != nil {
 				strokeColor = parseStrokeColor(dp.StrokeColor)
+				strokePaint = parseStrokePaint(dp.StrokeColor, bx, by, pageH, 0, 0)
 			}
 			if dp.Cap == "Round" {
 				lineCap = canvas.RoundCap
@@ -508,9 +518,11 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	}
 	if obj.FillColor != nil {
 		fillColor = parseFillColor(obj.FillColor)
+		fillPaint = parseFillPaint(obj.FillColor, bx, by, pageH, 0, 0)
 	}
 	if obj.StrokeColor != nil {
 		strokeColor = parseStrokeColor(obj.StrokeColor)
+		strokePaint = parseStrokePaint(obj.StrokeColor, bx, by, pageH, 0, 0)
 	}
 	if obj.Cap != "" {
 		if obj.Cap == "Round" {
@@ -534,13 +546,23 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		dashPattern = parseFloats(obj.DashPattern)
 		dashOffset = obj.DashOffset
 	}
+	if scale := math.Sqrt(math.Abs(ctm.a*ctm.d - ctm.b*ctm.c)); scale > 0 {
+		lineWidth *= scale
+		dashOffset *= scale
+		for i := range dashPattern {
+			dashPattern[i] *= scale
+		}
+	}
 	p := r.buildPath(obj, pageH, ctm)
 	shouldFill := true
 	if obj.Fill != nil {
 		shouldFill = *obj.Fill
 	}
-	if shouldFill && fillColor != nil {
-		ctx.SetFillColor(fillColor)
+	if fillPaint == nil {
+		fillPaint = fillColor
+	}
+	if shouldFill && fillPaint != nil {
+		ctx.SetFill(fillPaint)
 		ctx.SetStrokeColor(canvas.Transparent)
 		ctx.DrawPath(0, 0, p)
 	}
@@ -549,11 +571,14 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		shouldStroke = *obj.Stroke
 	}
 	if shouldStroke {
-		if strokeColor == nil {
-			strokeColor = color.Transparent
+		if strokePaint == nil {
+			strokePaint = strokeColor
+		}
+		if strokePaint == nil {
+			strokePaint = color.Transparent
 		}
 		ctx.SetFillColor(canvas.Transparent)
-		ctx.SetStrokeColor(strokeColor)
+		ctx.SetStroke(strokePaint)
 		ctx.SetStrokeWidth(lineWidth)
 		ctx.SetStrokeCapper(lineCap)
 		ctx.SetStrokeJoiner(lineJoin)

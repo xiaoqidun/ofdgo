@@ -15,10 +15,10 @@
 package ofdgo
 
 import (
+	"github.com/tdewolff/canvas"
 	"image/color"
 	"strconv"
 	"strings"
-	"github.com/tdewolff/canvas"
 )
 
 // parseColor 解析颜色字符串
@@ -84,6 +84,22 @@ func parseStrokeColor(strokeColor *StrokeColor) color.Color {
 	}
 	if strings.TrimSpace(strokeColor.Value) != "" {
 		return parseColorWithAlpha(strokeColor.Value, strokeColor.Alpha)
+	}
+	return parseAxialShdColor(strokeColor.AxialShd, strokeColor.Alpha)
+}
+
+// parseStrokePaint 解析勾边画刷
+// 入参: strokeColor 勾边颜色节点, x X坐标, y Y坐标, pageH 页面高度, originX 原点X坐标, originY 原点Y坐标
+// 返回: any 勾边画刷
+func parseStrokePaint(strokeColor *StrokeColor, x, y, pageH, originX, originY float64) any {
+	if strokeColor == nil {
+		return nil
+	}
+	if strings.TrimSpace(strokeColor.Value) != "" {
+		return parseColorWithAlpha(strokeColor.Value, strokeColor.Alpha)
+	}
+	if gradient := parseAxialShdGradient(strokeColor.AxialShd, strokeColor.Alpha, x, y, pageH, originX, originY); gradient != nil {
+		return gradient
 	}
 	return parseAxialShdColor(strokeColor.AxialShd, strokeColor.Alpha)
 }
