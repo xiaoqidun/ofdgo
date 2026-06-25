@@ -77,10 +77,34 @@ func (l *Layer) decodeObject(d *xml.Decoder, start xml.StartElement) error {
 		}
 		l.CompositeGraphicUnit = append(l.CompositeGraphicUnit, obj)
 		l.Objects = append(l.Objects, GraphicObject{Type: start.Name.Local, CompositeGraphicUnit: obj})
+	case "PageBlock":
+		return l.decodePageBlock(d, start)
 	default:
 		return d.Skip()
 	}
 	return nil
+}
+
+// decodePageBlock 解析页块子对象
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (l *Layer) decodePageBlock(d *xml.Decoder, start xml.StartElement) error {
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch node := tok.(type) {
+		case xml.StartElement:
+			if err := l.decodeObject(d, node); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			if node.Name.Local == start.Name.Local {
+				return nil
+			}
+		}
+	}
 }
 
 // UnmarshalXML 解析复合图元并保留对象顺序
@@ -156,10 +180,34 @@ func (c *CompositeGraphicUnit) decodeObject(d *xml.Decoder, start xml.StartEleme
 			return err
 		}
 		c.Clips = &clips
+	case "PageBlock":
+		return c.decodePageBlock(d, start)
 	default:
 		return d.Skip()
 	}
 	return nil
+}
+
+// decodePageBlock 解析页块子对象
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (c *CompositeGraphicUnit) decodePageBlock(d *xml.Decoder, start xml.StartElement) error {
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch node := tok.(type) {
+		case xml.StartElement:
+			if err := c.decodeObject(d, node); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			if node.Name.Local == start.Name.Local {
+				return nil
+			}
+		}
+	}
 }
 
 // attrValue 获取XML属性值

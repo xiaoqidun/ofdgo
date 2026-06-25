@@ -157,30 +157,15 @@ func (r *Reader) loadRes(resPath string) {
 	baseLoc := res.BaseLoc
 	for _, mm := range res.MultiMedias.MultiMedia {
 		if mm.MediaFile != "" {
-			p := strings.TrimSpace(mm.MediaFile)
-			if p == "" {
-				continue
+			if finalPath := resolveResourcePath(resPath, baseLoc, mm.MediaFile); finalPath != "" {
+				r.ResMap[mm.ID] = finalPath
 			}
-			dir := path.Dir(resPath)
-			if baseLoc != "" {
-				if dir != baseLoc {
-					dir = path.Join(dir, baseLoc)
-				}
-			}
-			finalPath := path.Join(dir, p)
-			r.ResMap[mm.ID] = finalPath
 		}
 	}
 	for i := range res.Fonts.Font {
 		f := &res.Fonts.Font[i]
 		if f.FontFile != "" {
-			dir := path.Dir(resPath)
-			if baseLoc != "" {
-				if dir != baseLoc {
-					dir = path.Join(dir, baseLoc)
-				}
-			}
-			f.FontFile = path.Join(dir, f.FontFile)
+			f.FontFile = resolveResourcePath(resPath, baseLoc, f.FontFile)
 		}
 		r.fontCache[f.ID] = f
 	}
@@ -192,6 +177,27 @@ func (r *Reader) loadRes(resPath string) {
 		cgu := &res.CompositeGraphicUnits.CompositeGraphicUnit[i]
 		r.compositeGraphicUnitCache[cgu.ID] = cgu
 	}
+}
+
+// resolveResourcePath 解析资源文件路径
+// 入参: resPath 资源文件路径, baseLoc 资源基准路径, filePath 文件路径
+// 返回: string 资源文件路径
+func resolveResourcePath(resPath, baseLoc, filePath string) string {
+	p := strings.TrimSpace(filePath)
+	if p == "" {
+		return ""
+	}
+	p = strings.ReplaceAll(p, "\\", "/")
+	if strings.HasPrefix(p, "/") {
+		return strings.TrimPrefix(path.Clean(p), "/")
+	}
+	dir := path.Dir(resPath)
+	if baseLoc != "" {
+		if dir != baseLoc {
+			dir = path.Join(dir, baseLoc)
+		}
+	}
+	return path.Join(dir, p)
 }
 
 // PageContent 获取页面内容
@@ -217,6 +223,17 @@ func (r *Reader) PageContent(page Page) (*PageContent, error) {
 func (r *Reader) ResPath(resLink string) string {
 	if resLink == "" {
 		return ""
+	}
+	resLink = strings.ReplaceAll(resLink, "\\", "/")
+	resLink = strings.TrimSpace(resLink)
+	if resLink == "" {
+		return ""
+	}
+	resLink = strings.TrimPrefix(resLink, "/")
+	resLink = path.Clean(resLink)
+	rootDir := strings.TrimPrefix(strings.ReplaceAll(r.RootDir, "\\", "/"), "/")
+	if rootDir != "" && (resLink == rootDir || strings.HasPrefix(resLink, rootDir+"/")) {
+		return resLink
 	}
 	return path.Join(r.RootDir, resLink)
 }
