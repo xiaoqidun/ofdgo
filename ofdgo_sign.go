@@ -19,6 +19,7 @@ import (
 	"encoding/asn1"
 	"encoding/binary"
 	"encoding/xml"
+	"image"
 	"strings"
 )
 
@@ -117,7 +118,7 @@ func (r *Reader) parseSignatures(doc *Document) error {
 // 入参: data 签名值数据
 // 返回: string 印章类型, []byte 印章数据
 func extractSeal(data []byte) (string, []byte) {
-	if sealType, sealData := extractImageData(data); len(sealData) > 0 {
+	if sealType, sealData := probeSealMedia(data); len(sealData) > 0 {
 		return sealType, sealData
 	}
 	var raw asn1.RawValue
@@ -129,27 +130,17 @@ func extractSeal(data []byte) (string, []byte) {
 	var foundData []byte
 	var search func(node asn1.RawValue) bool
 	search = func(node asn1.RawValue) bool {
-		if node.Tag == 4 {
-			if sealType, sealData := extractImageData(node.Bytes); len(sealData) > 0 {
-				foundType, foundData = sealType, sealData
+		if node.Tag == asn1.TagOctetString {
+			if mediaType, mediaData := probeSealMedia(node.Bytes); len(mediaData) > 0 {
+				foundType, foundData = mediaType, mediaData
 				return true
 			}
 		}
 		if node.IsCompound {
 			if elements, ok := asn1Children(node.Bytes); ok {
-				if len(elements) >= 2 && elements[1].Tag == 4 {
-					sealType := normalizeSealType(sealString(elements[0]))
-					if isSealMediaType(sealType) {
-						foundType, foundData = sealType, elements[1].Bytes
-						return true
-					}
-					if imgType, sealData := extractImageData(elements[1].Bytes); len(sealData) > 0 {
-						if sealType == "" {
-							sealType = imgType
-						}
-						foundType, foundData = sealType, sealData
-						return true
-					}
+				if mediaType, mediaData, ok := sealMediaFromElements(elements); ok {
+					foundType, foundData = mediaType, mediaData
+					return true
 				}
 				for _, child := range elements {
 					if search(child) {
@@ -181,6 +172,28 @@ func asn1Children(data []byte) ([]asn1.RawValue, bool) {
 		data = rest
 	}
 	return elements, true
+}
+
+// sealMediaFromElements 从印章ASN.1结构提取媒体数据
+// 入参: elements ASN.1子元素
+// 返回: string 媒体类型, []byte 媒体数据, bool 是否成功
+func sealMediaFromElements(elements []asn1.RawValue) (string, []byte, bool) {
+	if len(elements) < 2 || elements[1].Tag != asn1.TagOctetString {
+		return "", nil, false
+	}
+	mediaType := normalizeSealType(sealString(elements[0]))
+	if isSealMediaType(mediaType) {
+		if mediaType == "ofd" {
+			if data := trimOFDPackage(elements[1].Bytes); len(data) > 0 {
+				return mediaType, data, true
+			}
+		}
+		return mediaType, elements[1].Bytes, true
+	}
+	if probeType, probeData := probeSealMedia(elements[1].Bytes); len(probeData) > 0 {
+		return probeType, probeData, true
+	}
+	return "", nil, false
 }
 
 // sealString 解析印章图片类型
@@ -224,48 +237,26 @@ func isSealMediaType(s string) bool {
 	}
 }
 
-// extractImageData 提取图片数据
+// probeSealMedia 探测印章媒体数据
 // 入参: data 原始数据
-// 返回: string 图片类型, []byte 图片数据
-func extractImageData(data []byte) (string, []byte) {
-	if idx := bytes.Index(data, []byte("\x89PNG\r\n\x1a\n")); idx >= 0 {
-		if end := pngDataEnd(data[idx:]); end > 0 {
-			return "png", data[idx : idx+end]
-		}
+// 返回: string 媒体类型, []byte 媒体数据
+func probeSealMedia(data []byte) (string, []byte) {
+	if sealData := trimOFDPackage(data); len(sealData) > 0 {
+		return "ofd", sealData
 	}
-	if idx := bytes.Index(data, []byte{0xff, 0xd8, 0xff}); idx >= 0 {
-		if end := bytes.Index(data[idx+2:], []byte{0xff, 0xd9}); end >= 0 {
-			return "jpeg", data[idx : idx+2+end+2]
-		}
-	}
-	if idx := bytes.Index(data, []byte("PK\x03\x04")); idx >= 0 {
-		if end := zipDataEnd(data[idx:]); end > 0 {
-			return "ofd", data[idx : idx+end]
-		}
-	}
-	return "", nil
+	return probeImageMedia(data)
 }
 
-// pngDataEnd 获取PNG数据结束位置
-// 入参: data PNG数据
-// 返回: int 结束位置
-func pngDataEnd(data []byte) int {
-	if len(data) < 8 || !bytes.Equal(data[:8], []byte("\x89PNG\r\n\x1a\n")) {
-		return 0
-	}
-	pos := 8
-	for pos+12 <= len(data) {
-		size := int(binary.BigEndian.Uint32(data[pos : pos+4]))
-		next := pos + 8 + size + 4
-		if size < 0 || next > len(data) {
-			return 0
+// trimOFDPackage 裁剪OFD包数据
+// 入参: data 原始数据
+// 返回: []byte OFD包数据
+func trimOFDPackage(data []byte) []byte {
+	if idx := bytes.Index(data, []byte("PK\x03\x04")); idx >= 0 {
+		if end := zipDataEnd(data[idx:]); end > 0 {
+			return data[idx : idx+end]
 		}
-		if string(data[pos+4:pos+8]) == "IEND" {
-			return next
-		}
-		pos = next
 	}
-	return 0
+	return nil
 }
 
 // zipDataEnd 获取ZIP数据结束位置
@@ -287,6 +278,17 @@ func zipDataEnd(data []byte) int {
 		}
 	}
 	return 0
+}
+
+// probeImageMedia 探测图片媒体数据
+// 入参: data 原始数据
+// 返回: string 媒体类型, []byte 图片数据
+func probeImageMedia(data []byte) (string, []byte) {
+	_, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return "", nil
+	}
+	return normalizeSealType(format), data
 }
 
 // Stamp 印章信息结构
