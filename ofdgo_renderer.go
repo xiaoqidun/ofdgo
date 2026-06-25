@@ -557,6 +557,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	if rectPath := r.buildTinyFillRectPath(obj, pageH, ctm, bx, by); rectPath != nil {
 		p = rectPath
 	}
+	clipPath := r.buildClipPath(obj.Clips, pageH, bx, by, ctm)
 	shouldFill := true
 	if obj.Fill != nil {
 		shouldFill = *obj.Fill
@@ -567,7 +568,13 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	if shouldFill && fillPaint != nil {
 		ctx.SetFill(fillPaint)
 		ctx.SetStrokeColor(canvas.Transparent)
-		ctx.DrawPath(0, 0, p)
+		fp := p
+		if clipPath != nil {
+			fp = p.Copy()
+			fp.Close()
+			fp = fp.And(clipPath)
+		}
+		ctx.DrawPath(0, 0, fp)
 	}
 	shouldStroke := true
 	if obj.Stroke != nil {
@@ -588,7 +595,19 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		if len(dashPattern) > 0 {
 			ctx.SetDashes(dashOffset, dashPattern...)
 		}
-		ctx.DrawPath(0, 0, p)
+		if clipPath != nil {
+			sp := p.Copy()
+			if len(dashPattern) > 0 {
+				sp = sp.Dash(dashOffset, dashPattern...)
+			}
+			sp = sp.Stroke(lineWidth, lineCap, lineJoin, canvas.Tolerance)
+			sp = sp.And(clipPath)
+			ctx.SetFill(strokePaint)
+			ctx.SetStrokeColor(canvas.Transparent)
+			ctx.DrawPath(0, 0, sp)
+		} else {
+			ctx.DrawPath(0, 0, p)
+		}
 	}
 	ctx.Pop()
 }
@@ -1153,6 +1172,44 @@ func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix) *canvas.
 			}
 		case "C":
 			p.Close()
+		}
+	}
+	return p
+}
+
+// buildClipPath 构建裁剪路径
+// 入参: clips 裁剪对象, pageH 页面高度, bx 边界X坐标, by 边界Y坐标, objectCTM 对象CTM
+// 返回: *canvas.Path 路径对象
+func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, objectCTM Matrix) *canvas.Path {
+	if clips == nil {
+		return nil
+	}
+	var p *canvas.Path
+	for _, clip := range clips.Clip {
+		var clipPath *canvas.Path
+		for _, area := range clip.Area {
+			areaCTM := NewMatrix(area.CTM)
+			if clips.TransFlag {
+				areaCTM = objectCTM.Multiply(areaCTM)
+			}
+			for _, pathObj := range area.Path {
+				ctm := areaCTM.Multiply(NewMatrix(pathObj.CTM))
+				cp := r.buildPath(pathObj, pageH, ctm)
+				cp.Translate(bx, -by)
+				cp.Close()
+				if clipPath == nil {
+					clipPath = cp
+				} else {
+					clipPath = clipPath.Or(cp)
+				}
+			}
+		}
+		if clipPath != nil {
+			if p == nil {
+				p = clipPath
+			} else {
+				p = p.And(clipPath)
+			}
 		}
 	}
 	return p

@@ -57,7 +57,10 @@ func parseFillColor(fillColor *FillColor) color.Color {
 	if strings.TrimSpace(fillColor.Value) != "" {
 		return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
 	}
-	return parseAxialShdColor(fillColor.AxialShd, fillColor.Alpha)
+	if fillColor.AxialShd != nil {
+		return parseAxialShdColor(fillColor.AxialShd, fillColor.Alpha)
+	}
+	return parseRadialShdColor(fillColor.RadialShd, fillColor.Alpha)
 }
 
 // parseFillPaint 解析填充画刷
@@ -73,7 +76,13 @@ func parseFillPaint(fillColor *FillColor, x, y, pageH, originX, originY float64)
 	if gradient := parseAxialShdGradient(fillColor.AxialShd, fillColor.Alpha, x, y, pageH, originX, originY); gradient != nil {
 		return gradient
 	}
-	return parseAxialShdColor(fillColor.AxialShd, fillColor.Alpha)
+	if gradient := parseRadialShdGradient(fillColor.RadialShd, fillColor.Alpha, x, y, pageH, originX, originY); gradient != nil {
+		return gradient
+	}
+	if fillColor.AxialShd != nil {
+		return parseAxialShdColor(fillColor.AxialShd, fillColor.Alpha)
+	}
+	return parseRadialShdColor(fillColor.RadialShd, fillColor.Alpha)
 }
 
 // parseStrokeColor 解析勾边颜色
@@ -86,7 +95,10 @@ func parseStrokeColor(strokeColor *StrokeColor) color.Color {
 	if strings.TrimSpace(strokeColor.Value) != "" {
 		return parseColorWithAlpha(strokeColor.Value, strokeColor.Alpha)
 	}
-	return parseAxialShdColor(strokeColor.AxialShd, strokeColor.Alpha)
+	if strokeColor.AxialShd != nil {
+		return parseAxialShdColor(strokeColor.AxialShd, strokeColor.Alpha)
+	}
+	return parseRadialShdColor(strokeColor.RadialShd, strokeColor.Alpha)
 }
 
 // parseStrokePaint 解析勾边画刷
@@ -102,7 +114,13 @@ func parseStrokePaint(strokeColor *StrokeColor, x, y, pageH, originX, originY fl
 	if gradient := parseAxialShdGradient(strokeColor.AxialShd, strokeColor.Alpha, x, y, pageH, originX, originY); gradient != nil {
 		return gradient
 	}
-	return parseAxialShdColor(strokeColor.AxialShd, strokeColor.Alpha)
+	if gradient := parseRadialShdGradient(strokeColor.RadialShd, strokeColor.Alpha, x, y, pageH, originX, originY); gradient != nil {
+		return gradient
+	}
+	if strokeColor.AxialShd != nil {
+		return parseAxialShdColor(strokeColor.AxialShd, strokeColor.Alpha)
+	}
+	return parseRadialShdColor(strokeColor.RadialShd, strokeColor.Alpha)
 }
 
 // parseAxialShdColor 解析轴向渐变颜色
@@ -155,6 +173,55 @@ func parseAxialShdGradient(axialShd *AxialShd, alpha *int, x, y, pageH, originX,
 		return nil
 	}
 	return grad.ToLinear(startPoint, endPoint)
+}
+
+// parseRadialShdColor 解析径向渐变颜色
+// 入参: radialShd 径向渐变节点, alpha 透明度
+// 返回: color.Color 颜色对象
+func parseRadialShdColor(radialShd *RadialShd, alpha *int) color.Color {
+	if radialShd != nil {
+		for _, segment := range radialShd.Segment {
+			if strings.TrimSpace(segment.Color.Value) == "" {
+				continue
+			}
+			if alpha == nil {
+				alpha = segment.Color.Alpha
+			}
+			return parseColorWithAlpha(segment.Color.Value, alpha)
+		}
+	}
+	return color.Black
+}
+
+// parseRadialShdGradient 解析径向渐变
+// 入参: radialShd 径向渐变节点, alpha 透明度, x X坐标, y Y坐标, pageH 页面高度, originX 原点X坐标, originY 原点Y坐标
+// 返回: canvas.Gradient 渐变对象
+func parseRadialShdGradient(radialShd *RadialShd, alpha *int, x, y, pageH, originX, originY float64) canvas.Gradient {
+	if radialShd == nil || radialShd.EndRadius <= 0 {
+		return nil
+	}
+	start := parseFloats(radialShd.StartPoint)
+	end := parseFloats(radialShd.EndPoint)
+	if len(start) < 2 || len(end) < 2 {
+		return nil
+	}
+	grad := canvas.NewGradient()
+	for _, segment := range radialShd.Segment {
+		if strings.TrimSpace(segment.Color.Value) == "" {
+			continue
+		}
+		segmentAlpha := alpha
+		if segmentAlpha == nil {
+			segmentAlpha = segment.Color.Alpha
+		}
+		grad.Add(segment.Position, colorToRGBA(parseColorWithAlpha(segment.Color.Value, segmentAlpha)))
+	}
+	if len(grad) == 0 {
+		return nil
+	}
+	startPoint := canvas.Point{X: x + start[0] - originX, Y: pageH - (y + start[1]) - originY}
+	endPoint := canvas.Point{X: x + end[0] - originX, Y: pageH - (y + end[1]) - originY}
+	return grad.ToRadial(startPoint, radialShd.StartRadius, endPoint, radialShd.EndRadius)
 }
 
 // colorToRGBA 转换颜色对象

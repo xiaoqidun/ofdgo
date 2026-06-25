@@ -58,7 +58,8 @@ type GraphicObject struct {
 
 // Clips 裁剪区域集合
 type Clips struct {
-	Clip []Clip `xml:"Clip"`
+	TransFlag bool   `xml:"TransFlag,attr"`
+	Clip      []Clip `xml:"Clip"`
 }
 
 // Clip 裁剪
@@ -68,6 +69,7 @@ type Clip struct {
 
 // ClipArea 裁剪区域
 type ClipArea struct {
+	CTM  string       `xml:"CTM,attr"`
 	Path []PathObject `xml:"Path"`
 	Text []TextObject `xml:"Text"`
 }
@@ -97,9 +99,10 @@ type TextObject struct {
 
 // FillColor 填充颜色
 type FillColor struct {
-	Value    string    `xml:"Value,attr"`
-	Alpha    *int      `xml:"Alpha,attr"`
-	AxialShd *AxialShd `xml:"AxialShd"`
+	Value     string     `xml:"Value,attr"`
+	Alpha     *int       `xml:"Alpha,attr"`
+	AxialShd  *AxialShd  `xml:"AxialShd"`
+	RadialShd *RadialShd `xml:"RadialShd"`
 }
 
 // TextCode 文本内容节点
@@ -142,9 +145,10 @@ type PathObject struct {
 
 // StrokeColor 勾边颜色
 type StrokeColor struct {
-	Value    string    `xml:"Value,attr"`
-	Alpha    *int      `xml:"Alpha,attr"`
-	AxialShd *AxialShd `xml:"AxialShd"`
+	Value     string     `xml:"Value,attr"`
+	Alpha     *int       `xml:"Alpha,attr"`
+	AxialShd  *AxialShd  `xml:"AxialShd"`
+	RadialShd *RadialShd `xml:"RadialShd"`
 }
 
 // AxialShd 轴向渐变
@@ -153,6 +157,16 @@ type AxialShd struct {
 	StartPoint string       `xml:"StartPoint,attr"`
 	EndPoint   string       `xml:"EndPoint,attr"`
 	Segment    []ShdSegment `xml:"Segment"`
+}
+
+// RadialShd 径向渐变
+type RadialShd struct {
+	Extend      string       `xml:"Extend,attr"`
+	StartPoint  string       `xml:"StartPoint,attr"`
+	StartRadius float64      `xml:"StartRadius,attr"`
+	EndPoint    string       `xml:"EndPoint,attr"`
+	EndRadius   float64      `xml:"EndRadius,attr"`
+	Segment     []ShdSegment `xml:"Segment"`
 }
 
 // ShdSegment 渐变分段
