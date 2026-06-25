@@ -127,6 +127,9 @@ func (r *Reader) Doc() (*Document, error) {
 	if err := xml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal document.xml: %w", err)
 	}
+	if doc.Signatures == "" {
+		doc.Signatures = docAttr.Signatures
+	}
 	r.OFD.DocBody[0].DocInfo.DocID = "loaded"
 	if doc.CommonData.DocumentRes != "" {
 		r.loadRes(doc.CommonData.DocumentRes)

@@ -859,37 +859,11 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 		}
 	}
 	names := []string{of.FamilyName, of.FontName}
-	aliases := map[string]string{
-		"simhei":          "SimHei",
-		"黑体":              "SimHei",
-		"microsoft yahei": "Microsoft YaHei",
-		"微软雅黑":            "Microsoft YaHei",
-		"simsun":          "SimSun",
-		"宋体":              "SimSun",
-		"kaiti":           "KaiTi",
-		"楷体":              "KaiTi",
-		"fangsong":        "FangSong",
-		"仿宋":              "FangSong",
-		"arial":           "Arial",
-		"segoe ui":        "Segoe UI",
-		"times new roman": "Times New Roman",
-	}
 	for _, name := range names {
 		if name == "" {
 			continue
 		}
-		targetName := name
-		lower := strings.ToLower(name)
-		if mapped, ok := aliases[lower]; ok {
-			targetName = mapped
-		} else {
-			for k, v := range aliases {
-				if strings.Contains(lower, k) {
-					targetName = v
-					break
-				}
-			}
-		}
+		targetName := fontAliasName(name)
 		if err := ff.LoadSystemFont(targetName, fontStyle); err == nil {
 			r.FontMap[fontID] = ff
 			return ff
@@ -931,6 +905,45 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	}
 	r.FontMap[fontID] = defaultFont
 	return defaultFont
+}
+
+// fontAliasName 获取系统字体替代名称
+// 入参: name OFD字体名称
+// 返回: string 系统字体名称
+func fontAliasName(name string) string {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	aliases := map[string]string{
+		"simhei":          "SimHei",
+		"microsoft yahei": "Microsoft YaHei",
+		"simsun":          "SimSun",
+		"kaiti":           "KaiTi",
+		"fangsong":        "FangSong",
+		"arial":           "Arial",
+		"segoe ui":        "Segoe UI",
+		"times new roman": "Times New Roman",
+	}
+	if mapped, ok := aliases[lower]; ok {
+		return mapped
+	}
+	contains := []struct {
+		Key   string
+		Value string
+	}{
+		{"黑体", "SimHei"},
+		{"微软雅黑", "Microsoft YaHei"},
+		{"仿宋", "FangSong"},
+		{"楷体", "KaiTi"},
+		{"方正书宋", "SimSun"},
+		{"书宋", "SimSun"},
+		{"宋体", "SimSun"},
+		{"宋", "SimSun"},
+	}
+	for _, item := range contains {
+		if strings.Contains(lower, item.Key) {
+			return item.Value
+		}
+	}
+	return name
 }
 
 // globFontFiles 查找字体文件

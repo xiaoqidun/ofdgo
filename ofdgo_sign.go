@@ -15,7 +15,9 @@
 package ofdgo
 
 import (
+	"bytes"
 	"encoding/asn1"
+	"encoding/binary"
 	"encoding/xml"
 	"path"
 	"strings"
@@ -46,6 +48,9 @@ type SignatureFile struct {
 	XMLName     xml.Name `xml:"Signature"`
 	SignedValue string   `xml:"SignedValue"`
 	SignedInfo  struct {
+		Seal struct {
+			BaseLoc string `xml:"BaseLoc"`
+		} `xml:"Seal"`
 		StampAnnot []struct {
 			ID       string `xml:"ID,attr"`
 			PageRef  string `xml:"PageRef,attr"`
@@ -82,12 +87,20 @@ func (r *Reader) parseSignatures(doc *Document) error {
 			if err := xml.NewDecoder(sf).Decode(&sigFile); err != nil {
 				return
 			}
-			signedValuePath := path.Join(path.Dir(sigPath), sigFile.SignedValue)
-			svData, err := r.ResData(signedValuePath)
-			if err != nil {
-				return
+			var sealType string
+			var sealData []byte
+			if sigFile.SignedInfo.Seal.BaseLoc != "" {
+				sealPath := path.Join(path.Dir(sigPath), sigFile.SignedInfo.Seal.BaseLoc)
+				if data, err := r.ResData(sealPath); err == nil {
+					sealType, sealData = extractSeal(data)
+				}
 			}
-			sealType, sealData := extractSeal(svData)
+			if len(sealData) == 0 && sigFile.SignedValue != "" {
+				signedValuePath := path.Join(path.Dir(sigPath), sigFile.SignedValue)
+				if data, err := r.ResData(signedValuePath); err == nil {
+					sealType, sealData = extractSeal(data)
+				}
+			}
 			for _, annot := range sigFile.SignedInfo.StampAnnot {
 				pageID := annot.PageRef
 				bbox, _ := ParseBox(annot.Boundary)
@@ -102,6 +115,9 @@ func (r *Reader) parseSignatures(doc *Document) error {
 // 入参: data 签名值数据
 // 返回: string 印章类型, []byte 印章数据
 func extractSeal(data []byte) (string, []byte) {
+	if sealType, sealData := extractImageData(data); len(sealData) > 0 {
+		return sealType, sealData
+	}
 	var raw asn1.RawValue
 	_, err := asn1.Unmarshal(data, &raw)
 	if err != nil {
@@ -111,24 +127,24 @@ func extractSeal(data []byte) (string, []byte) {
 	var foundData []byte
 	var search func(node asn1.RawValue) bool
 	search = func(node asn1.RawValue) bool {
+		if node.Tag == 4 {
+			if sealType, sealData := extractImageData(node.Bytes); len(sealData) > 0 {
+				foundType, foundData = sealType, sealData
+				return true
+			}
+		}
 		if node.IsCompound {
-			var elements []asn1.RawValue
-			rest, err := asn1.Unmarshal(node.Bytes, &elements)
-			if err == nil && len(rest) == 0 {
-				if len(elements) == 4 {
-					e0, e1, e2, e3 := elements[0], elements[1], elements[2], elements[3]
-					if e1.Tag == 4 && e2.Tag == 2 && e3.Tag == 2 {
-						foundData = e1.Bytes
-						var s string
-						if _, err := asn1.Unmarshal(e0.FullBytes, &s); err == nil {
-							foundType = s
-						} else {
-							foundType = string(e0.Bytes)
+			if elements, ok := asn1Children(node.Bytes); ok {
+				if len(elements) >= 2 && elements[1].Tag == 4 {
+					sealType := sealString(elements[0])
+					if sealType == "es" {
+						sealType = "png"
+					}
+					if imgType, sealData := extractImageData(elements[1].Bytes); len(sealData) > 0 {
+						if sealType == "" {
+							sealType = imgType
 						}
-						foundType = strings.ToLower(strings.TrimSpace(strings.ReplaceAll(foundType, "\x00", "")))
-						if foundType == "es" {
-							foundType = "png"
-						}
+						foundType, foundData = sealType, sealData
 						return true
 					}
 				}
@@ -145,6 +161,80 @@ func extractSeal(data []byte) (string, []byte) {
 		return foundType, foundData
 	}
 	return "", nil
+}
+
+// asn1Children 解析ASN.1复合节点子元素
+// 入参: data 复合节点内容
+// 返回: []asn1.RawValue 子元素列表, bool 是否成功
+func asn1Children(data []byte) ([]asn1.RawValue, bool) {
+	var elements []asn1.RawValue
+	for len(data) > 0 {
+		var child asn1.RawValue
+		rest, err := asn1.Unmarshal(data, &child)
+		if err != nil || len(rest) == len(data) {
+			return nil, false
+		}
+		elements = append(elements, child)
+		data = rest
+	}
+	return elements, true
+}
+
+// sealString 解析印章图片类型
+// 入参: raw ASN.1原始值
+// 返回: string 图片类型
+func sealString(raw asn1.RawValue) string {
+	var s string
+	if _, err := asn1.Unmarshal(raw.FullBytes, &s); err != nil {
+		s = string(raw.Bytes)
+	}
+	s = strings.ToLower(strings.TrimSpace(strings.ReplaceAll(s, "\x00", "")))
+	if s == "jpg" {
+		s = "jpeg"
+	}
+	return s
+}
+
+// extractImageData 提取图片数据
+// 入参: data 原始数据
+// 返回: string 图片类型, []byte 图片数据
+func extractImageData(data []byte) (string, []byte) {
+	if idx := bytes.Index(data, []byte("\x89PNG\r\n\x1a\n")); idx >= 0 {
+		if end := pngDataEnd(data[idx:]); end > 0 {
+			return "png", data[idx : idx+end]
+		}
+	}
+	if idx := bytes.Index(data, []byte{0xff, 0xd8, 0xff}); idx >= 0 {
+		if end := bytes.Index(data[idx+2:], []byte{0xff, 0xd9}); end >= 0 {
+			return "jpeg", data[idx : idx+2+end+2]
+		}
+	}
+	if idx := bytes.Index(data, []byte("PK\x03\x04")); idx >= 0 {
+		return "ofd", data[idx:]
+	}
+	return "", nil
+}
+
+// pngDataEnd 获取PNG数据结束位置
+// 入参: data PNG数据
+// 返回: int 结束位置
+func pngDataEnd(data []byte) int {
+	if len(data) < 8 || !bytes.Equal(data[:8], []byte("\x89PNG\r\n\x1a\n")) {
+		return 0
+	}
+	pos := 8
+	for pos+12 <= len(data) {
+		size := int(binary.BigEndian.Uint32(data[pos : pos+4]))
+		next := pos + 8 + size + 4
+		if size < 0 || next > len(data) {
+			return 0
+		}
+		if string(data[pos+4:pos+8]) == "IEND" {
+			return next
+		}
+		pos = next
+	}
+	return 0
 }
 
 // Stamp 印章信息结构
