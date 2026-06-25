@@ -18,11 +18,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"golang.org/x/text/encoding/simplifiedchinese"
 	"math"
 	"sort"
 	"strconv"
 	"strings"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 // wrapCFFToOTF 将 CFF 裸数据包装为 OpenType 字体格式

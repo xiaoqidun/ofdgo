@@ -15,10 +15,11 @@
 package ofdgo
 
 import (
-	"github.com/tdewolff/canvas"
 	"image/color"
 	"strconv"
 	"strings"
+
+	"github.com/tdewolff/canvas"
 )
 
 // parseColor 解析颜色字符串
