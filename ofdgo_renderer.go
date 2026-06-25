@@ -92,13 +92,22 @@ func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
 // 入参: ctx 画布上下文, page 页面内容
 // 返回: error 错误信息
 func (r *Renderer) RenderPageToContext(ctx *canvas.Context, page *PageContent) error {
+	return r.renderPageToContext(ctx, page, true)
+}
+
+// renderPageToContext 渲染页面到指定上下文
+// 入参: ctx 画布上下文, page 页面内容, drawBackground 是否绘制页面背景
+// 返回: error 错误信息
+func (r *Renderer) renderPageToContext(ctx *canvas.Context, page *PageContent, drawBackground bool) error {
 	box, err := r.GetPageBox(page)
 	if err != nil {
 		return err
 	}
 	pageH := box.H
-	ctx.SetFillColor(canvas.White)
-	ctx.DrawPath(0, 0, canvas.Rectangle(box.W, box.H))
+	if drawBackground {
+		ctx.SetFillColor(canvas.White)
+		ctx.DrawPath(0, 0, canvas.Rectangle(box.W, box.H))
+	}
 	if len(page.Template) > 0 && r.Reader.doc != nil {
 		for _, tplRef := range page.Template {
 			if tplRef.ZOrder != "Foreground" {
@@ -1058,7 +1067,7 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 					ctx.Push()
 					ctx.Translate(x, screenY)
 					ctx.Scale(w/sealBox.W, h/sealBox.H)
-					renderer.RenderPageToContext(ctx, content)
+					renderer.renderPageToContext(ctx, content, false)
 					ctx.Pop()
 				}
 				return

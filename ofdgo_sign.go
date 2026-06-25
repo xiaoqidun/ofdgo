@@ -19,7 +19,6 @@ import (
 	"encoding/asn1"
 	"encoding/binary"
 	"encoding/xml"
-	"path"
 	"strings"
 )
 
@@ -77,7 +76,7 @@ func (r *Reader) parseSignatures(doc *Document) error {
 	}
 	for _, sigRef := range signatures.List {
 		func(sigRef OFDSignature) {
-			sigPath := path.Join(path.Dir(doc.Signatures), sigRef.BaseLoc)
+			sigPath := resolveResourcePath(doc.Signatures, "", sigRef.BaseLoc)
 			sf, err := r.openFile(sigPath)
 			if err != nil {
 				return
@@ -90,16 +89,19 @@ func (r *Reader) parseSignatures(doc *Document) error {
 			var sealType string
 			var sealData []byte
 			if sigFile.SignedInfo.Seal.BaseLoc != "" {
-				sealPath := path.Join(path.Dir(sigPath), sigFile.SignedInfo.Seal.BaseLoc)
+				sealPath := resolveResourcePath(sigPath, "", sigFile.SignedInfo.Seal.BaseLoc)
 				if data, err := r.ResData(sealPath); err == nil {
 					sealType, sealData = extractSeal(data)
 				}
 			}
 			if len(sealData) == 0 && sigFile.SignedValue != "" {
-				signedValuePath := path.Join(path.Dir(sigPath), sigFile.SignedValue)
+				signedValuePath := resolveResourcePath(sigPath, "", sigFile.SignedValue)
 				if data, err := r.ResData(signedValuePath); err == nil {
 					sealType, sealData = extractSeal(data)
 				}
+			}
+			if len(sealData) == 0 {
+				return
 			}
 			for _, annot := range sigFile.SignedInfo.StampAnnot {
 				pageID := annot.PageRef
@@ -210,7 +212,9 @@ func extractImageData(data []byte) (string, []byte) {
 		}
 	}
 	if idx := bytes.Index(data, []byte("PK\x03\x04")); idx >= 0 {
-		return "ofd", data[idx:]
+		if end := zipDataEnd(data[idx:]); end > 0 {
+			return "ofd", data[idx : idx+end]
+		}
 	}
 	return "", nil
 }
@@ -233,6 +237,27 @@ func pngDataEnd(data []byte) int {
 			return next
 		}
 		pos = next
+	}
+	return 0
+}
+
+// zipDataEnd 获取ZIP数据结束位置
+// 入参: data ZIP数据
+// 返回: int 结束位置
+func zipDataEnd(data []byte) int {
+	if len(data) < 4 || !bytes.Equal(data[:4], []byte("PK\x03\x04")) {
+		return 0
+	}
+	sig := []byte("PK\x05\x06")
+	for i := len(data) - 22; i >= 0; i-- {
+		if i+22 > len(data) || !bytes.Equal(data[i:i+4], sig) {
+			continue
+		}
+		commentLen := int(binary.LittleEndian.Uint16(data[i+20 : i+22]))
+		end := i + 22 + commentLen
+		if end <= len(data) {
+			return end
+		}
 	}
 	return 0
 }
