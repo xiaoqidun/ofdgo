@@ -38,6 +38,7 @@ import (
 type Renderer struct {
 	Reader                *Reader
 	DPI                   float64
+	RenderAnnotations     bool
 	fontFamily            *canvas.FontFamily
 	DrawParams            map[string]*DrawParam
 	CompositeGraphicUnits map[string]*CompositeGraphicUnit
@@ -126,6 +127,9 @@ func (r *Renderer) renderPageToContext(ctx *canvas.Context, page *PageContent, d
 				r.renderTemplate(ctx, tplRef.TemplateID, pageH)
 			}
 		}
+	}
+	if r.RenderAnnotations {
+		r.renderAnnotations(ctx, page.ID, pageH)
 	}
 	if stamps, ok := r.Reader.Stamps[page.ID]; ok {
 		for _, stamp := range stamps {
@@ -232,6 +236,21 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer) error {
 	return p.Close()
 }
 
+// renderAnnotations 渲染页面注释外观
+// 入参: ctx 画布上下文, pageID 页面ID, pageH 页面高度
+func (r *Renderer) renderAnnotations(ctx *canvas.Context, pageID string, pageH float64) {
+	for _, annot := range r.Reader.Annots[pageID] {
+		if strings.EqualFold(annot.Type, "Link") || len(annot.Appearance.Objects) == 0 {
+			continue
+		}
+		box, _ := ParseBox(annot.Appearance.Boundary)
+		ctm := Matrix{a: 1, d: 1, e: box.X, f: box.Y}
+		for _, obj := range annot.Appearance.Objects {
+			r.renderObject(ctx, obj, pageH, nil, nil, 0, &ctm)
+		}
+	}
+}
+
 // renderTemplate 渲染模板
 // 入参: ctx 画布上下文, templateID 模板ID, pageH 页面高度
 func (r *Renderer) renderTemplate(ctx *canvas.Context, templateID string, pageH float64) {
@@ -295,6 +314,9 @@ func (r *Renderer) renderLayer(ctx *canvas.Context, layer Layer, pageH float64, 
 // renderCompositeGraphicUnit 渲染复合图元
 // 入参: ctx 画布上下文, cgu 复合图元对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM
 func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu CompositeGraphicUnit, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix) {
+	if cgu.Visible != nil && !*cgu.Visible {
+		return
+	}
 	ctx.Push()
 	currentCTM := NewMatrix(cgu.CTM)
 	if parentCTM != nil {
@@ -432,6 +454,9 @@ func (r *Renderer) initCommon() {
 // renderImage 渲染图片
 // 入参: ctx 画布上下文, obj 图片对象, pageH 页面高度, parentCTM 父级CTM
 func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float64, parentCTM *Matrix) {
+	if obj.Visible != nil && !*obj.Visible {
+		return
+	}
 	resPath, ok := r.Reader.ResMap[obj.ResourceID]
 	if !ok {
 		return
@@ -470,6 +495,9 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 // renderPath 渲染路径
 // 入参: ctx 画布上下文, obj 路径对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM
 func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix) {
+	if obj.Visible != nil && !*obj.Visible {
+		return
+	}
 	ctx.Push()
 	bx, by := 0.0, 0.0
 	if obj.Boundary != "" {
@@ -499,12 +527,14 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 				lineWidth = dp.LineWidth
 			}
 			if dp.FillColor != nil {
-				fillColor = parseFillColor(dp.FillColor)
-				fillPaint = parseFillPaint(dp.FillColor, bx, by, pageH, 0, 0)
+				fillColorNode := withFillAlpha(dp.FillColor, obj.Alpha)
+				fillColor = parseFillColor(fillColorNode)
+				fillPaint = parseFillPaint(fillColorNode, bx, by, pageH, 0, 0)
 			}
 			if dp.StrokeColor != nil {
-				strokeColor = parseStrokeColor(dp.StrokeColor)
-				strokePaint = parseStrokePaint(dp.StrokeColor, bx, by, pageH, 0, 0)
+				strokeColorNode := withStrokeAlpha(dp.StrokeColor, obj.Alpha)
+				strokeColor = parseStrokeColor(strokeColorNode)
+				strokePaint = parseStrokePaint(strokeColorNode, bx, by, pageH, 0, 0)
 			}
 			if dp.Cap == "Round" {
 				lineCap = canvas.RoundCap
@@ -526,12 +556,14 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		lineWidth = obj.LineWidth
 	}
 	if obj.FillColor != nil {
-		fillColor = parseFillColor(obj.FillColor)
-		fillPaint = parseFillPaint(obj.FillColor, bx, by, pageH, 0, 0)
+		fillColorNode := withFillAlpha(obj.FillColor, obj.Alpha)
+		fillColor = parseFillColor(fillColorNode)
+		fillPaint = parseFillPaint(fillColorNode, bx, by, pageH, 0, 0)
 	}
 	if obj.StrokeColor != nil {
-		strokeColor = parseStrokeColor(obj.StrokeColor)
-		strokePaint = parseStrokePaint(obj.StrokeColor, bx, by, pageH, 0, 0)
+		strokeColorNode := withStrokeAlpha(obj.StrokeColor, obj.Alpha)
+		strokeColor = parseStrokeColor(strokeColorNode)
+		strokePaint = parseStrokePaint(strokeColorNode, bx, by, pageH, 0, 0)
 	}
 	if obj.Cap != "" {
 		if obj.Cap == "Round" {
@@ -624,6 +656,9 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 // renderText 渲染文本
 // 入参: ctx 画布上下文, obj 文本对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, parentCTM 父级CTM
 func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64, defaultFill, defaultStroke color.Color, parentCTM *Matrix) {
+	if obj.Visible != nil && !*obj.Visible {
+		return
+	}
 	ctx.Push()
 	bx, by := 0.0, 0.0
 	if obj.Boundary != "" {
@@ -662,14 +697,14 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	var fillPaint any = fillColor
 	var fillColorNode *FillColor
 	if dp != nil && dp.FillColor != nil {
-		fillColor = parseFillColor(dp.FillColor)
-		fillColorNode = dp.FillColor
-		fillPaint = parseFillPaint(dp.FillColor, bx, by, pageH, 0, 0)
+		fillColorNode = withFillAlpha(dp.FillColor, obj.Alpha)
+		fillColor = parseFillColor(fillColorNode)
+		fillPaint = parseFillPaint(fillColorNode, bx, by, pageH, 0, 0)
 	}
 	if obj.FillColor != nil {
-		fillColor = parseFillColor(obj.FillColor)
-		fillColorNode = obj.FillColor
-		fillPaint = parseFillPaint(obj.FillColor, bx, by, pageH, 0, 0)
+		fillColorNode = withFillAlpha(obj.FillColor, obj.Alpha)
+		fillColor = parseFillColor(fillColorNode)
+		fillPaint = parseFillPaint(fillColorNode, bx, by, pageH, 0, 0)
 	}
 	if fillPaint == nil {
 		fillPaint = fillColor

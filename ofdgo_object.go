@@ -123,6 +123,11 @@ func (c *CompositeGraphicUnit) UnmarshalXML(d *xml.Decoder, start xml.StartEleme
 			c.Alpha = &alpha
 		}
 	}
+	if value := attrValue(start, "Visible"); value != "" {
+		if visible, err := strconv.ParseBool(value); err == nil {
+			c.Visible = &visible
+		}
+	}
 	for {
 		tok, err := d.Token()
 		if err != nil {
@@ -200,6 +205,93 @@ func (c *CompositeGraphicUnit) decodePageBlock(d *xml.Decoder, start xml.StartEl
 		switch node := tok.(type) {
 		case xml.StartElement:
 			if err := c.decodeObject(d, node); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			if node.Name.Local == start.Name.Local {
+				return nil
+			}
+		}
+	}
+}
+
+// UnmarshalXML 解析注释外观并保留对象顺序
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (a *Appearance) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*a = Appearance{}
+	a.Boundary = attrValue(start, "Boundary")
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch node := tok.(type) {
+		case xml.StartElement:
+			if err := a.decodeObject(d, node); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			if node.Name.Local == start.Name.Local {
+				return nil
+			}
+		}
+	}
+}
+
+// decodeObject 解析注释外观子对象
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (a *Appearance) decodeObject(d *xml.Decoder, start xml.StartElement) error {
+	switch start.Name.Local {
+	case "TextObject":
+		var obj TextObject
+		if err := d.DecodeElement(&obj, &start); err != nil {
+			return err
+		}
+		a.TextObject = append(a.TextObject, obj)
+		a.Objects = append(a.Objects, GraphicObject{Type: start.Name.Local, TextObject: obj})
+	case "PathObject":
+		var obj PathObject
+		if err := d.DecodeElement(&obj, &start); err != nil {
+			return err
+		}
+		a.PathObject = append(a.PathObject, obj)
+		a.Objects = append(a.Objects, GraphicObject{Type: start.Name.Local, PathObject: obj})
+	case "ImageObject":
+		var obj ImageObject
+		if err := d.DecodeElement(&obj, &start); err != nil {
+			return err
+		}
+		a.ImageObject = append(a.ImageObject, obj)
+		a.Objects = append(a.Objects, GraphicObject{Type: start.Name.Local, ImageObject: obj})
+	case "CompositeGraphicUnit", "CompositeObject":
+		var obj CompositeGraphicUnit
+		if err := d.DecodeElement(&obj, &start); err != nil {
+			return err
+		}
+		a.CompositeGraphicUnit = append(a.CompositeGraphicUnit, obj)
+		a.Objects = append(a.Objects, GraphicObject{Type: start.Name.Local, CompositeGraphicUnit: obj})
+	case "PageBlock":
+		return a.decodePageBlock(d, start)
+	default:
+		return d.Skip()
+	}
+	return nil
+}
+
+// decodePageBlock 解析注释外观页块子对象
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (a *Appearance) decodePageBlock(d *xml.Decoder, start xml.StartElement) error {
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch node := tok.(type) {
+		case xml.StartElement:
+			if err := a.decodeObject(d, node); err != nil {
 				return err
 			}
 		case xml.EndElement:

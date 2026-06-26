@@ -67,6 +67,7 @@ func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 	r := &Renderer{
 		Reader:                reader,
 		DPI:                   300.0,
+		RenderAnnotations:     true,
 		DrawParams:            reader.drawParamCache,
 		CompositeGraphicUnits: reader.compositeGraphicUnitCache,
 		FontMap:               make(map[string]*canvas.FontFamily),
@@ -84,6 +85,15 @@ func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 func WithDPI(dpi float64) RendererOption {
 	return func(r *Renderer) {
 		r.DPI = dpi
+	}
+}
+
+// WithAnnotations 设置是否渲染注释外观
+// 入参: enable 是否渲染
+// 返回: RendererOption 渲染选项
+func WithAnnotations(enable bool) RendererOption {
+	return func(r *Renderer) {
+		r.RenderAnnotations = enable
 	}
 }
 

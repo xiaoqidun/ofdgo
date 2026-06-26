@@ -88,6 +88,8 @@ type TextObject struct {
 	HScale      float64       `xml:"HScale,attr"`
 	VScale      float64       `xml:"VScale,attr"`
 	CTM         string        `xml:"CTM,attr"`
+	Alpha       *int          `xml:"Alpha,attr"`
+	Visible     *bool         `xml:"Visible,attr"`
 	Fill        *bool         `xml:"Fill,attr"`
 	Stroke      *bool         `xml:"Stroke,attr"`
 	StrokeColor *StrokeColor  `xml:"StrokeColor"`
@@ -135,6 +137,8 @@ type PathObject struct {
 	DashPattern     string       `xml:"DashPattern,attr"`
 	MiterLimit      float64      `xml:"MiterLimit,attr"`
 	CTM             string       `xml:"CTM,attr"`
+	Alpha           *int         `xml:"Alpha,attr"`
+	Visible         *bool        `xml:"Visible,attr"`
 	Stroke          *bool        `xml:"Stroke,attr"`
 	Fill            *bool        `xml:"Fill,attr"`
 	StrokeColor     *StrokeColor `xml:"StrokeColor"`
@@ -187,5 +191,7 @@ type ImageObject struct {
 	Boundary   string `xml:"Boundary,attr"`
 	ResourceID string `xml:"ResourceID,attr"`
 	CTM        string `xml:"CTM,attr"`
+	Alpha      *int   `xml:"Alpha,attr"`
+	Visible    *bool  `xml:"Visible,attr"`
 	Clips      *Clips `xml:"Clips"`
 }

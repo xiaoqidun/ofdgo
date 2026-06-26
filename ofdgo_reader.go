@@ -36,6 +36,7 @@ type Reader struct {
 	compositeGraphicUnitCache map[string]*CompositeGraphicUnit
 	doc                       *Document
 	Stamps                    map[string][]Stamp
+	Annots                    map[string][]Annotation
 	fileIndex                 map[string]*zip.File
 }
 
@@ -138,6 +139,7 @@ func (r *Reader) Doc() (*Document, error) {
 		r.loadRes(doc.CommonData.PublicRes)
 	}
 	r.doc = &doc
+	_ = r.parseAnnotations(&doc)
 	_ = r.parseSignatures(&doc)
 	return r.doc, nil
 }

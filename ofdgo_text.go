@@ -42,9 +42,70 @@ func parseColorWithAlpha(val string, alpha *int) color.Color {
 		if alpha != nil {
 			a = *alpha
 		}
-		return color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: uint8(a)}
+		a = clampColor(a)
+		return color.RGBA{
+			R: uint8(clampColor(r) * a / 255),
+			G: uint8(clampColor(g) * a / 255),
+			B: uint8(clampColor(b) * a / 255),
+			A: uint8(a),
+		}
 	}
 	return color.Black
+}
+
+// clampColor 限制颜色分量范围
+// 入参: v 颜色分量
+// 返回: int 颜色分量
+func clampColor(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return v
+}
+
+// mergeAlpha 合并透明度
+// 入参: colorAlpha 颜色透明度, objectAlpha 对象透明度
+// 返回: *int 合并后的透明度
+func mergeAlpha(colorAlpha, objectAlpha *int) *int {
+	if colorAlpha == nil && objectAlpha == nil {
+		return nil
+	}
+	alpha := 255
+	if colorAlpha != nil {
+		alpha = *colorAlpha
+	}
+	if objectAlpha != nil {
+		alpha = alpha * *objectAlpha / 255
+	}
+	alpha = clampColor(alpha)
+	return &alpha
+}
+
+// withFillAlpha 合并填充色透明度
+// 入参: fillColor 填充颜色节点, alpha 对象透明度
+// 返回: *FillColor 合并后的填充颜色节点
+func withFillAlpha(fillColor *FillColor, alpha *int) *FillColor {
+	if fillColor == nil || alpha == nil {
+		return fillColor
+	}
+	merged := *fillColor
+	merged.Alpha = mergeAlpha(fillColor.Alpha, alpha)
+	return &merged
+}
+
+// withStrokeAlpha 合并勾边色透明度
+// 入参: strokeColor 勾边颜色节点, alpha 对象透明度
+// 返回: *StrokeColor 合并后的勾边颜色节点
+func withStrokeAlpha(strokeColor *StrokeColor, alpha *int) *StrokeColor {
+	if strokeColor == nil || alpha == nil {
+		return strokeColor
+	}
+	merged := *strokeColor
+	merged.Alpha = mergeAlpha(strokeColor.Alpha, alpha)
+	return &merged
 }
 
 // parseFillColor 解析填充颜色
@@ -228,6 +289,9 @@ func parseRadialShdGradient(radialShd *RadialShd, alpha *int, x, y, pageH, origi
 // 入参: c 颜色对象
 // 返回: color.RGBA RGBA颜色
 func colorToRGBA(c color.Color) color.RGBA {
+	if rgba, ok := c.(color.RGBA); ok {
+		return rgba
+	}
 	r, g, b, a := c.RGBA()
 	return color.RGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)}
 }
