@@ -16,20 +16,6 @@ package ofdgo
 
 import "encoding/xml"
 
-// Signatures 签名集合
-type Signatures struct {
-	XMLName   xml.Name    `xml:"Signatures"`
-	MaxSignID string      `xml:"MaxSignId,attr"`
-	Signature []Signature `xml:"Signature"`
-}
-
-// Signature 签名信息
-type Signature struct {
-	ID      string `xml:"ID,attr"`
-	Type    string `xml:"Type,attr"`
-	BaseLoc string `xml:"BaseLoc,attr"`
-}
-
 // Annotations 注释集合
 type Annotations struct {
 	XMLName xml.Name  `xml:"Annotations"`

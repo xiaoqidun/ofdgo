@@ -240,7 +240,7 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer) error {
 // 入参: ctx 画布上下文, pageID 页面ID, pageH 页面高度
 func (r *Renderer) renderAnnotations(ctx *canvas.Context, pageID string, pageH float64) {
 	for _, annot := range r.Reader.Annots[pageID] {
-		if strings.EqualFold(annot.Type, "Link") || len(annot.Appearance.Objects) == 0 {
+		if len(annot.Appearance.Objects) == 0 {
 			continue
 		}
 		box, _ := ParseBox(annot.Appearance.Boundary)
@@ -322,10 +322,11 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 	if parentCTM != nil {
 		currentCTM = parentCTM.Multiply(currentCTM)
 	}
-	r.applyClips(ctx, cgu.Clips, pageH, &currentCTM)
 	if cgu.ResourceID != "" {
 		if ref, ok := r.CompositeGraphicUnits[cgu.ResourceID]; ok {
-			r.renderCompositeGraphicUnit(ctx, *ref, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM)
+			refCopy := *ref
+			refCopy.Alpha = mergeAlpha(refCopy.Alpha, cgu.Alpha)
+			r.renderCompositeGraphicUnit(ctx, refCopy, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM)
 		}
 	}
 	if cgu.DrawParam != "" {
@@ -343,21 +344,26 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 	}
 	if len(cgu.Objects) > 0 {
 		for _, obj := range cgu.Objects {
+			obj = mergeGraphicObjectAlpha(obj, cgu.Alpha)
 			r.renderObject(ctx, obj, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM)
 		}
 		ctx.Pop()
 		return
 	}
 	for _, imgObj := range cgu.ImageObject {
+		imgObj.Alpha = mergeAlpha(imgObj.Alpha, cgu.Alpha)
 		r.renderImage(ctx, imgObj, pageH, &currentCTM)
 	}
 	for _, pathObj := range cgu.PathObject {
+		pathObj.Alpha = mergeAlpha(pathObj.Alpha, cgu.Alpha)
 		r.renderPath(ctx, pathObj, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM)
 	}
 	for _, textObj := range cgu.TextObject {
+		textObj.Alpha = mergeAlpha(textObj.Alpha, cgu.Alpha)
 		r.renderText(ctx, textObj, pageH, defaultFill, defaultStroke, &currentCTM)
 	}
 	for _, subCgu := range cgu.CompositeGraphicUnit {
+		subCgu.Alpha = mergeAlpha(subCgu.Alpha, cgu.Alpha)
 		r.renderCompositeGraphicUnit(ctx, subCgu, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM)
 	}
 	ctx.Pop()
@@ -376,6 +382,26 @@ func (r *Renderer) renderObject(ctx *canvas.Context, obj GraphicObject, pageH fl
 	case "CompositeGraphicUnit", "CompositeObject":
 		r.renderCompositeGraphicUnit(ctx, obj.CompositeGraphicUnit, pageH, defaultFill, defaultStroke, defaultLW, parentCTM)
 	}
+}
+
+// mergeGraphicObjectAlpha 合并图形对象透明度
+// 入参: obj 图形对象, alpha 父级透明度
+// 返回: GraphicObject 合并后的图形对象
+func mergeGraphicObjectAlpha(obj GraphicObject, alpha *int) GraphicObject {
+	if alpha == nil {
+		return obj
+	}
+	switch obj.Type {
+	case "TextObject":
+		obj.TextObject.Alpha = mergeAlpha(obj.TextObject.Alpha, alpha)
+	case "PathObject":
+		obj.PathObject.Alpha = mergeAlpha(obj.PathObject.Alpha, alpha)
+	case "ImageObject":
+		obj.ImageObject.Alpha = mergeAlpha(obj.ImageObject.Alpha, alpha)
+	case "CompositeGraphicUnit", "CompositeObject":
+		obj.CompositeGraphicUnit.Alpha = mergeAlpha(obj.CompositeGraphicUnit.Alpha, alpha)
+	}
+	return obj
 }
 
 // getDrawParam 获取绘制参数逻辑
@@ -475,6 +501,7 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	if imgW <= 0 || imgH <= 0 {
 		return
 	}
+	img = imageWithAlpha(img, obj.Alpha)
 	ctm := NewMatrix(obj.CTM)
 	if obj.CTM == "" {
 		ctm = Matrix{a: box.W, d: box.H}
@@ -485,11 +512,30 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	tx, ty := ctm.Transform(0, 1)
 	canvasX, canvasY := tx+box.X, pageH-(ty+box.Y)
 	ctx.Push()
-	r.applyClips(ctx, obj.Clips, pageH, &ctm)
 	ctx.Translate(canvasX, canvasY)
 	ctx.Scale(ctm.a/imgW, ctm.d/imgH)
 	ctx.DrawImage(0, 0, img, canvas.DPMM(1.0))
 	ctx.Pop()
+}
+
+// imageWithAlpha 合并图片透明度
+// 入参: img 图片对象, alpha 对象透明度
+// 返回: image.Image 合并后的图片对象
+func imageWithAlpha(img image.Image, alpha *int) image.Image {
+	if img == nil || alpha == nil {
+		return img
+	}
+	a := clampColor(*alpha)
+	bounds := img.Bounds()
+	out := image.NewNRGBA(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			c := color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+			c.A = uint8(int(c.A) * a / 255)
+			out.SetNRGBA(x, y, c)
+		}
+	}
+	return out
 }
 
 // renderPath 渲染路径
@@ -509,8 +555,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	if parentCTM != nil {
 		ctm = parentCTM.Multiply(ctm)
 	}
-	r.applyClips(ctx, obj.Clips, pageH, &ctm)
-	fillColor, strokeColor := defaultFill, defaultStroke
+	fillColor, strokeColor := colorWithAlpha(defaultFill, obj.Alpha), colorWithAlpha(defaultStroke, obj.Alpha)
 	var fillPaint any = fillColor
 	var strokePaint any = strokeColor
 	lineWidth := defaultLW
@@ -670,7 +715,6 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if parentCTM != nil {
 		ctm = parentCTM.Multiply(ctm)
 	}
-	r.applyClips(ctx, obj.Clips, pageH, &ctm)
 	var dp *DrawParam
 	if obj.DrawParam != "" {
 		dp = r.getDrawParam(obj.DrawParam, nil)
@@ -690,9 +734,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		sizeMM *= scale
 	}
 	sizePt := sizeMM * 2.83465
-	fillColor := defaultFill
+	fillColor := colorWithAlpha(defaultFill, obj.Alpha)
 	if fillColor == nil {
-		fillColor = canvas.Black
+		fillColor = colorWithAlpha(canvas.Black, obj.Alpha)
 	}
 	var fillPaint any = fillColor
 	var fillColorNode *FillColor
@@ -1157,37 +1201,6 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 			ctx.DrawImage(0, 0, img, canvas.DPMM(1.0))
 			ctx.Pop()
 			return
-		}
-	}
-	ctx.Push()
-	ctx.SetStrokeColor(canvas.Red)
-	ctx.SetStrokeWidth(0.5)
-	ctx.SetFillColor(canvas.Transparent)
-	ctx.DrawPath(x, screenY, canvas.Rectangle(w, h))
-	ctx.SetFillColor(canvas.Red)
-	fontSize := 3.0
-	if r.fontFamily != nil {
-		font := r.fontFamily.Face(fontSize*2.83465, canvas.Red, canvas.FontRegular, canvas.FontNormal)
-		ctx.DrawText(x+w/2-font.TextWidth("Signature")/2, screenY+h/2-fontSize/2, canvas.NewTextLine(font, "Signature", canvas.Left))
-	}
-	ctx.Pop()
-}
-
-// applyClips 应用裁剪
-// 入参: ctx 画布上下文, clips 裁剪对象, pageH 页面高度, parentCTM 父级CTM
-func (r *Renderer) applyClips(ctx *canvas.Context, clips *Clips, pageH float64, parentCTM *Matrix) {
-	if clips == nil {
-		return
-	}
-	for _, clip := range clips.Clip {
-		for _, area := range clip.Area {
-			for _, pathObj := range area.Path {
-				clipCTM := NewMatrix(pathObj.CTM)
-				if parentCTM != nil {
-					clipCTM = parentCTM.Multiply(clipCTM)
-				}
-				r.buildPath(pathObj, pageH, clipCTM)
-			}
 		}
 	}
 }

@@ -108,6 +108,23 @@ func withStrokeAlpha(strokeColor *StrokeColor, alpha *int) *StrokeColor {
 	return &merged
 }
 
+// colorWithAlpha 合并颜色透明度
+// 入参: c 颜色对象, alpha 对象透明度
+// 返回: color.Color 合并后的颜色对象
+func colorWithAlpha(c color.Color, alpha *int) color.Color {
+	if c == nil || alpha == nil {
+		return c
+	}
+	a := clampColor(*alpha)
+	rgba := colorToRGBA(c)
+	return color.RGBA{
+		R: uint8(int(rgba.R) * a / 255),
+		G: uint8(int(rgba.G) * a / 255),
+		B: uint8(int(rgba.B) * a / 255),
+		A: uint8(int(rgba.A) * a / 255),
+	}
+}
+
 // parseFillColor 解析填充颜色
 // 入参: fillColor 填充颜色节点
 // 返回: color.Color 颜色对象

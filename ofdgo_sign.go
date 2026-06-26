@@ -23,24 +23,25 @@ import (
 	"strings"
 )
 
+type SignType string
+
 const (
-	// SignTypeSeal 签章类型: seal
-	SignTypeSeal = "seal"
-	// SignTypeSign 签章类型: sign
-	SignTypeSign = "sign"
+	SignTypeSeal = "Seal"
+	SignTypeSign = "Sign"
 )
 
-// OFDSignatures 签名列表列表
-type OFDSignatures struct {
-	XMLName   xml.Name       `xml:"Signatures"`
-	MaxSignId string         `xml:"MaxSignId"`
-	List      []OFDSignature `xml:"Signature"`
+// Signatures 签名列表
+type Signatures struct {
+	XMLName   xml.Name    `xml:"Signatures"`
+	MaxSignId string      `xml:"MaxSignId"`
+	List      []Signature `xml:"Signature"`
 }
 
-// OFDSignature 签名列表引用
-type OFDSignature struct {
-	ID      string `xml:"ID,attr"`
-	BaseLoc string `xml:"BaseLoc,attr"`
+// Signature 签名列表引用
+type Signature struct {
+	ID      string   `xml:"ID,attr"`
+	BaseLoc string   `xml:"BaseLoc,attr"`
+	Type    SignType `xml:"Type,attr"`
 }
 
 // SignatureFile 签名文件内容描述
@@ -66,18 +67,19 @@ func (r *Reader) parseSignatures(doc *Document) error {
 	if doc.Signatures == "" {
 		return nil
 	}
-	f, err := r.openFile(doc.Signatures)
+	sigListPath := r.ResPath(doc.Signatures)
+	f, err := r.openFile(sigListPath)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	var signatures OFDSignatures
+	var signatures Signatures
 	if err := xml.NewDecoder(f).Decode(&signatures); err != nil {
 		return err
 	}
 	for _, sigRef := range signatures.List {
-		func(sigRef OFDSignature) {
-			sigPath := resolveResourcePath(doc.Signatures, "", sigRef.BaseLoc)
+		func(sigRef Signature) {
+			sigPath := resolveResourcePath(sigListPath, "", sigRef.BaseLoc)
 			sf, err := r.openFile(sigPath)
 			if err != nil {
 				return
