@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/tdewolff/canvas v0.0.0-20260617131110-529326a1955e
 	github.com/xiaoqidun/jbig2 v0.0.0-20260624075118-47743b68effa
+	golang.org/x/text v0.38.0
 )
 
 require (
@@ -32,7 +33,6 @@ require (
 	github.com/yuin/goldmark v1.8.2 // indirect
 	golang.org/x/image v0.43.0 // indirect
 	golang.org/x/net v0.53.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
 	gonum.org/v1/plot v0.17.0 // indirect
 	modernc.org/knuth v0.5.5 // indirect
 	modernc.org/token v1.1.0 // indirect
