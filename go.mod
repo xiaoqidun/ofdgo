@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/tdewolff/canvas v0.0.0-20260617131110-529326a1955e
-	github.com/xiaoqidun/jbig2 v0.0.0-20260624075118-47743b68effa
+	github.com/xiaoqidun/jbig2 v0.0.0-20260629062926-bdd4ee3a892d
 	golang.org/x/text v0.38.0
 )
 
