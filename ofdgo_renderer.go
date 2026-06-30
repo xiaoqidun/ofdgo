@@ -40,6 +40,7 @@ type Renderer struct {
 	DPI                   float64
 	RenderAnnotations     bool
 	fontFamily            *canvas.FontFamily
+	defaultFontLoaded     bool
 	DrawParams            map[string]*DrawParam
 	CompositeGraphicUnits map[string]*CompositeGraphicUnit
 	FontMap               map[string]*canvas.FontFamily
@@ -466,15 +467,7 @@ func (r *Renderer) getDrawParam(id string, visited map[string]bool) *DrawParam {
 // initCommon 初始化公共资源
 func (r *Renderer) initCommon() {
 	r.fontFamily = canvas.NewFontFamily("default")
-	sysFonts := []string{
-		"SimHei", "Microsoft YaHei", "SimSun", "KaiTi", "FangSong",
-		"Arial", "Segoe UI", "Times New Roman",
-	}
-	for _, name := range sysFonts {
-		if err := r.fontFamily.LoadSystemFont(name, canvas.FontRegular); err == nil {
-			break
-		}
-	}
+	r.defaultFontLoaded = r.loadDefaultFonts()
 }
 
 // renderImage 渲染图片
@@ -907,7 +900,10 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	if ff, ok := r.FontMap[fontID]; ok {
 		return ff
 	}
-	defaultFont := r.fontFamily
+	var defaultFont *canvas.FontFamily
+	if r.defaultFontLoaded {
+		defaultFont = r.fontFamily
+	}
 	of, ok := r.Reader.fontCache[fontID]
 	if !ok {
 		return defaultFont
@@ -984,6 +980,23 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 				}
 			}
 		}
+	}
+	if !canLoadSystemFonts() {
+		for _, fsys := range r.fontFS {
+			if matches, err := fs.Glob(fsys, "*"); err == nil {
+				for _, m := range matches {
+					resData, err := fs.ReadFile(fsys, m)
+					if err == nil {
+						if err := ff.LoadFont(resData, 0, fontStyle); err == nil {
+							r.FontMap[fontID] = ff
+							return ff
+						}
+					}
+				}
+			}
+		}
+		r.FontMap[fontID] = defaultFont
+		return defaultFont
 	}
 	names := []string{of.FamilyName, of.FontName}
 	for _, name := range names {

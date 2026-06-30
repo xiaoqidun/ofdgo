@@ -1,0 +1,329 @@
+// Copyright 2025-2026 肖其顿 (XIAO QI DUN)
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ofdgo
+
+import (
+	"fmt"
+	"io/fs"
+	"path"
+	"sort"
+	"strings"
+)
+
+const (
+	// FontStatusEmbedded 字体使用OFD内嵌字体
+	FontStatusEmbedded = "embedded"
+	// FontStatusMatched 字体命中外部字体
+	FontStatusMatched = "matched"
+	// FontStatusFallback 字体使用外部字体回退
+	FontStatusFallback = "fallback"
+	// FontStatusMissing 字体缺失
+	FontStatusMissing = "missing"
+)
+
+// FontInfo OFD字体诊断信息
+type FontInfo struct {
+	ID         string `json:"id"`
+	FontName   string `json:"fontName"`
+	FamilyName string `json:"familyName"`
+	Charset    string `json:"charset"`
+	FontFile   string `json:"fontFile"`
+	Embedded   bool   `json:"embedded"`
+	Status     string `json:"status"`
+	Matched    string `json:"matched"`
+	Detail     string `json:"detail"`
+	Used       int    `json:"used"`
+}
+
+// Fonts 获取OFD声明的字体列表
+// 返回: []Font 字体列表, error 错误信息
+func (r *Reader) Fonts() ([]Font, error) {
+	if _, err := r.Doc(); err != nil {
+		return nil, err
+	}
+	fonts := make([]Font, 0, len(r.fontCache))
+	for _, font := range r.fontCache {
+		if font != nil {
+			fonts = append(fonts, *font)
+		}
+	}
+	sort.SliceStable(fonts, func(i, j int) bool {
+		return fonts[i].ID < fonts[j].ID
+	})
+	return fonts, nil
+}
+
+// FontInfos 获取OFD字体诊断信息
+// 返回: []FontInfo 字体诊断列表, error 错误信息
+func (r *Renderer) FontInfos() ([]FontInfo, error) {
+	if r == nil || r.Reader == nil {
+		return nil, fmt.Errorf("ofd renderer is not initialized")
+	}
+	doc, err := r.Reader.Doc()
+	if err != nil {
+		return nil, err
+	}
+	if doc == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	fonts, err := r.Reader.Fonts()
+	if err != nil {
+		return nil, err
+	}
+	usage := r.fontUsage(doc)
+	infos := make([]FontInfo, 0, len(fonts)+len(usage))
+	seen := make(map[string]bool)
+	for _, font := range fonts {
+		info := r.fontInfo(font)
+		info.Used = usage[font.ID]
+		infos = append(infos, info)
+		seen[font.ID] = true
+	}
+	for id, used := range usage {
+		if seen[id] {
+			continue
+		}
+		infos = append(infos, FontInfo{
+			ID:       id,
+			FontName: id,
+			Status:   FontStatusMissing,
+			Detail:   "未在OFD资源中声明",
+			Used:     used,
+		})
+	}
+	sort.SliceStable(infos, func(i, j int) bool {
+		if infos[i].Used == 0 && infos[j].Used > 0 {
+			return false
+		}
+		if infos[i].Used > 0 && infos[j].Used == 0 {
+			return true
+		}
+		return infos[i].ID < infos[j].ID
+	})
+	return infos, nil
+}
+
+// fontInfo 获取单个字体诊断信息
+// 入参: font 字体定义
+// 返回: FontInfo 字体诊断信息
+func (r *Renderer) fontInfo(font Font) FontInfo {
+	info := FontInfo{
+		ID:         font.ID,
+		FontName:   font.FontName,
+		FamilyName: font.FamilyName,
+		Charset:    font.Charset,
+		FontFile:   font.FontFile,
+		Embedded:   font.FontFile != "",
+	}
+	if info.Embedded {
+		if _, err := r.Reader.ResData(font.FontFile); err == nil {
+			info.Status = FontStatusEmbedded
+			info.Matched = path.Base(font.FontFile)
+			info.Detail = "使用OFD内嵌字体"
+		} else {
+			info.Status = FontStatusMissing
+			info.Detail = "内嵌字体文件缺失"
+		}
+		return info
+	}
+	if matched, exact := r.matchFont(font.FontName, font.FamilyName); matched != "" {
+		info.Matched = matched
+		if exact {
+			info.Status = FontStatusMatched
+			info.Detail = "使用外部字体文件"
+		} else {
+			info.Status = FontStatusFallback
+			info.Detail = "使用外部字体回退"
+		}
+		return info
+	}
+	info.Status = FontStatusMissing
+	info.Detail = "未找到可用字体"
+	return info
+}
+
+// matchFont 匹配外部字体
+// 入参: names 字体名称列表
+// 返回: string 匹配字体文件, bool 是否为名称匹配
+func (r *Renderer) matchFont(names ...string) (string, bool) {
+	for _, fsys := range r.fontFS {
+		if matcher, ok := fsys.(interface {
+			Match(...string) (string, bool)
+		}); ok {
+			if matched, exact := matcher.Match(names...); matched != "" {
+				return matched, exact
+			}
+			continue
+		}
+		if matched := matchFontFS(fsys, names...); matched != "" {
+			return matched, true
+		}
+	}
+	for _, fsys := range r.fontFS {
+		if matched := fallbackFontFS(fsys); matched != "" {
+			return matched, false
+		}
+	}
+	return "", false
+}
+
+// matchFontFS 从字体文件系统匹配字体
+// 入参: fsys 字体文件系统, names 字体名称列表
+// 返回: string 匹配字体文件
+func matchFontFS(fsys fs.FS, names ...string) string {
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		matches, err := fs.Glob(fsys, name+"*")
+		if err == nil && len(matches) > 0 {
+			return matches[0]
+		}
+	}
+	return ""
+}
+
+// fallbackFontFS 从字体文件系统获取回退字体
+// 入参: fsys 字体文件系统
+// 返回: string 回退字体文件
+func fallbackFontFS(fsys fs.FS) string {
+	matches, err := fs.Glob(fsys, "*")
+	if err == nil && len(matches) > 0 {
+		return matches[0]
+	}
+	return ""
+}
+
+// fontUsage 统计文档字体使用次数
+// 入参: doc 文档结构
+// 返回: map[string]int 字体使用次数
+func (r *Renderer) fontUsage(doc *Document) map[string]int {
+	usage := make(map[string]int)
+	for _, pageRef := range doc.Pages.Page {
+		page, err := r.Reader.PageContent(pageRef)
+		if err == nil {
+			r.countPageFonts(page, usage)
+		}
+	}
+	for _, tpl := range doc.CommonData.TemplatePage {
+		page, err := r.Reader.PageContent(Page{BaseLoc: tpl.BaseLoc})
+		if err == nil {
+			r.countPageFonts(page, usage)
+		}
+	}
+	return usage
+}
+
+// countPageFonts 统计页面字体使用次数
+// 入参: page 页面内容, usage 字体使用次数
+func (r *Renderer) countPageFonts(page *PageContent, usage map[string]int) {
+	for _, layer := range page.Content.Layer {
+		r.countLayerFonts(layer, usage)
+	}
+}
+
+// countLayerFonts 统计图层字体使用次数
+// 入参: layer 图层, usage 字体使用次数
+func (r *Renderer) countLayerFonts(layer Layer, usage map[string]int) {
+	if len(layer.Objects) > 0 {
+		for _, obj := range layer.Objects {
+			r.countObjectFonts(obj, usage)
+		}
+		return
+	}
+	for _, text := range layer.TextObject {
+		r.countTextFont(text, usage)
+	}
+	for _, cgu := range layer.CompositeGraphicUnit {
+		r.countCompositeFonts(cgu, usage, nil)
+	}
+}
+
+// countObjectFonts 统计图元字体使用次数
+// 入参: obj 图元对象, usage 字体使用次数
+func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int) {
+	switch obj.Type {
+	case "TextObject":
+		r.countTextFont(obj.TextObject, usage)
+	case "CompositeGraphicUnit", "CompositeObject":
+		r.countCompositeFonts(obj.CompositeGraphicUnit, usage, nil)
+	}
+}
+
+// countCompositeFonts 统计复合图元字体使用次数
+// 入参: cgu 复合图元, usage 字体使用次数, visited 已访问资源
+func (r *Renderer) countCompositeFonts(cgu CompositeGraphicUnit, usage map[string]int, visited map[string]bool) {
+	if cgu.ResourceID != "" {
+		if visited == nil {
+			visited = make(map[string]bool)
+		}
+		if visited[cgu.ResourceID] {
+			return
+		}
+		visited[cgu.ResourceID] = true
+		if ref := r.CompositeGraphicUnits[cgu.ResourceID]; ref != nil {
+			r.countCompositeFonts(*ref, usage, visited)
+		}
+	}
+	if len(cgu.Objects) > 0 {
+		for _, obj := range cgu.Objects {
+			r.countObjectFonts(obj, usage)
+		}
+		return
+	}
+	for _, text := range cgu.TextObject {
+		r.countTextFont(text, usage)
+	}
+	for _, sub := range cgu.CompositeGraphicUnit {
+		r.countCompositeFonts(sub, usage, visited)
+	}
+}
+
+// countTextFont 统计文本字体使用次数
+// 入参: text 文本对象, usage 字体使用次数
+func (r *Renderer) countTextFont(text TextObject, usage map[string]int) {
+	fontID := text.Font
+	if fontID == "" && text.DrawParam != "" {
+		fontID = r.drawParamFont(text.DrawParam, nil)
+	}
+	if fontID != "" {
+		usage[fontID]++
+	}
+}
+
+// drawParamFont 获取绘制参数字体
+// 入参: id 绘制参数ID, visited 已访问绘制参数
+// 返回: string 字体ID
+func (r *Renderer) drawParamFont(id string, visited map[string]bool) string {
+	if id == "" {
+		return ""
+	}
+	if visited == nil {
+		visited = make(map[string]bool)
+	}
+	if visited[id] {
+		return ""
+	}
+	visited[id] = true
+	dp := r.DrawParams[id]
+	if dp == nil {
+		return ""
+	}
+	if dp.Font != "" {
+		return dp.Font
+	}
+	return r.drawParamFont(dp.Relative, visited)
+}
