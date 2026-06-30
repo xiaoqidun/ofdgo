@@ -637,7 +637,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		p = rectPath
 	}
 	clipPath := r.buildClipPath(obj.Clips, pageH, bx, by, ctm)
-	shouldFill := true
+	shouldFill := false
 	if obj.Fill != nil {
 		shouldFill = *obj.Fill
 	}
