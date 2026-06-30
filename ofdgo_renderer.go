@@ -973,22 +973,26 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 		fontStyle |= canvas.FontItalic
 	}
 	for _, dir := range r.fontDirs {
-		matches := r.globFontFiles(dir, of.FontName+"*")
-		for _, m := range matches {
-			if err := ff.LoadFontFile(m, fontStyle); err == nil {
-				r.FontMap[fontID] = ff
-				return ff
+		for _, pattern := range fontFilePatterns(of.FontName, of.FamilyName) {
+			matches := r.globFontFiles(dir, pattern)
+			for _, m := range matches {
+				if err := ff.LoadFontFile(m, fontStyle); err == nil {
+					r.FontMap[fontID] = ff
+					return ff
+				}
 			}
 		}
 	}
 	for _, fsys := range r.fontFS {
-		if matches, err := fs.Glob(fsys, of.FontName+"*"); err == nil {
-			for _, m := range matches {
-				resData, err := fs.ReadFile(fsys, m)
-				if err == nil {
-					if err := ff.LoadFont(resData, 0, fontStyle); err == nil {
-						r.FontMap[fontID] = ff
-						return ff
+		for _, pattern := range fontFilePatterns(of.FontName, of.FamilyName) {
+			if matches, err := fs.Glob(fsys, pattern); err == nil {
+				for _, m := range matches {
+					resData, err := fs.ReadFile(fsys, m)
+					if err == nil {
+						if err := ff.LoadFont(resData, 0, fontStyle); err == nil {
+							r.FontMap[fontID] = ff
+							return ff
+						}
 					}
 				}
 			}
@@ -1016,13 +1020,8 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 		if name == "" {
 			continue
 		}
-		targetName := fontAliasName(name)
-		if err := ff.LoadSystemFont(targetName, fontStyle); err == nil {
-			r.FontMap[fontID] = ff
-			return ff
-		}
-		if targetName != name {
-			if err := ff.LoadSystemFont(name, fontStyle); err == nil {
+		for _, targetName := range fontSystemNames(name) {
+			if err := ff.LoadSystemFont(targetName, fontStyle); err == nil {
 				r.FontMap[fontID] = ff
 				return ff
 			}
@@ -1036,67 +1035,18 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 		default:
 			sysFontDir = `C:\Windows\Fonts`
 		}
-		matches := r.globFontFiles(sysFontDir, "*"+targetName+"*")
-		if len(matches) == 0 {
-			switch targetName {
-			case "SimSun":
-				matches = r.globFontFiles(sysFontDir, "simsun.ttc")
-			case "KaiTi":
-				matches = r.globFontFiles(sysFontDir, "simkai.ttf")
-			case "SimHei":
-				matches = r.globFontFiles(sysFontDir, "simhei.ttf")
-			case "FangSong":
-				matches = r.globFontFiles(sysFontDir, "simfang.ttf")
-			}
-		}
-		for _, m := range matches {
-			if err := ff.LoadFontFile(m, fontStyle); err == nil {
-				r.FontMap[fontID] = ff
-				return ff
+		for _, pattern := range fontFilePatterns(name) {
+			matches := r.globFontFiles(sysFontDir, pattern)
+			for _, m := range matches {
+				if err := ff.LoadFontFile(m, fontStyle); err == nil {
+					r.FontMap[fontID] = ff
+					return ff
+				}
 			}
 		}
 	}
 	r.FontMap[fontID] = defaultFont
 	return defaultFont
-}
-
-// fontAliasName 获取系统字体替代名称
-// 入参: name OFD字体名称
-// 返回: string 系统字体名称
-func fontAliasName(name string) string {
-	lower := strings.ToLower(strings.TrimSpace(name))
-	aliases := map[string]string{
-		"simhei":          "SimHei",
-		"microsoft yahei": "Microsoft YaHei",
-		"simsun":          "SimSun",
-		"kaiti":           "KaiTi",
-		"fangsong":        "FangSong",
-		"arial":           "Arial",
-		"segoe ui":        "Segoe UI",
-		"times new roman": "Times New Roman",
-	}
-	if mapped, ok := aliases[lower]; ok {
-		return mapped
-	}
-	contains := []struct {
-		Key   string
-		Value string
-	}{
-		{"黑体", "SimHei"},
-		{"微软雅黑", "Microsoft YaHei"},
-		{"仿宋", "FangSong"},
-		{"楷体", "KaiTi"},
-		{"方正书宋", "SimSun"},
-		{"书宋", "SimSun"},
-		{"宋体", "SimSun"},
-		{"宋", "SimSun"},
-	}
-	for _, item := range contains {
-		if strings.Contains(lower, item.Key) {
-			return item.Value
-		}
-	}
-	return name
 }
 
 // globFontFiles 查找字体文件

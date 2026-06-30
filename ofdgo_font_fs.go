@@ -112,10 +112,7 @@ func (fsys *FontFS) Glob(pattern string) ([]string, error) {
 // 入参: names 字体名称列表
 // 返回: string 匹配字体文件, bool 是否为名称匹配
 func (fsys *FontFS) Match(names ...string) (string, bool) {
-	for _, name := range names {
-		if strings.TrimSpace(name) == "" {
-			continue
-		}
+	for _, name := range fontCandidateNames(names...) {
 		if matches := fsys.match(name + "*"); len(matches) > 0 {
 			return matches[0], true
 		}
@@ -142,8 +139,7 @@ func (fsys *FontFS) match(pattern string) []string {
 // fallbackFonts 获取回退字体文件
 // 返回: []string 字体文件列表
 func (fsys *FontFS) fallbackFonts() []string {
-	preferred := []string{"simsun.ttc", "msyh.ttc", "simhei.ttf"}
-	for _, item := range preferred {
+	for _, item := range fontFallbackFiles {
 		if _, ok := fsys.files[item]; ok {
 			return []string{item}
 		}
@@ -195,72 +191,21 @@ func matchFontPattern(pattern, name string) bool {
 	}
 	stem := strings.TrimSuffix(pattern, "*")
 	stem = strings.TrimSuffix(stem, path.Ext(stem))
-	stem = normalizeFontFileName(stem)
+	stem = fontNormalizeName(stem)
 	if stem == "" {
 		return false
 	}
-	name = normalizeFontFileName(name)
+	name = fontNormalizeName(name)
 	if strings.HasPrefix(name, stem) {
 		return true
 	}
-	for _, alias := range fontNameAliases(stem) {
-		if strings.HasPrefix(name, alias) {
+	for _, alias := range fontCandidateNames(stem) {
+		alias = fontNormalizeName(alias)
+		if alias != "" && strings.HasPrefix(name, alias) {
 			return true
 		}
 	}
 	return false
-}
-
-// normalizeFontFileName 规范化字体文件名
-// 入参: name 字体文件名
-// 返回: string 规范化后的字体文件名
-func normalizeFontFileName(name string) string {
-	name = strings.TrimSuffix(path.Base(name), path.Ext(name))
-	name = strings.ToLower(name)
-	replacer := strings.NewReplacer(" ", "", "-", "", "_", "")
-	return replacer.Replace(name)
-}
-
-// fontNameAliases 获取字体名称别名
-// 入参: name 字体名称
-// 返回: []string 字体名称别名
-func fontNameAliases(name string) []string {
-	aliases := []struct {
-		Keys   []string
-		Values []string
-	}{
-		{[]string{"宋体", "新宋体", "simsun"}, []string{"simsun"}},
-		{[]string{"黑体", "simhei"}, []string{"simhei"}},
-		{[]string{"楷体", "kaiti", "simkai"}, []string{"simkai"}},
-		{[]string{"仿宋", "fangsong", "simfang"}, []string{"simfang"}},
-		{[]string{"微软雅黑", "microsoftyahei", "yahei", "msyh"}, []string{"msyh"}},
-	}
-	var result []string
-	for _, alias := range aliases {
-		for _, key := range alias.Keys {
-			key = normalizeFontFileName(key)
-			if key != "" && (name == key || strings.Contains(name, key)) {
-				result = append(result, alias.Values...)
-				break
-			}
-		}
-	}
-	if strings.Contains(name, "宋") {
-		result = append(result, "simsun")
-	}
-	if strings.Contains(name, "黑") {
-		result = append(result, "simhei")
-	}
-	if strings.Contains(name, "楷") {
-		result = append(result, "simkai")
-	}
-	if strings.Contains(name, "仿") {
-		result = append(result, "simfang")
-	}
-	if strings.Contains(name, "雅") {
-		result = append(result, "msyh")
-	}
-	return result
 }
 
 // fontMemFile 内存字体文件

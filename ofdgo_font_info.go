@@ -19,7 +19,6 @@ import (
 	"io/fs"
 	"path"
 	"sort"
-	"strings"
 )
 
 const (
@@ -183,12 +182,8 @@ func (r *Renderer) matchFont(names ...string) (string, bool) {
 // 入参: fsys 字体文件系统, names 字体名称列表
 // 返回: string 匹配字体文件
 func matchFontFS(fsys fs.FS, names ...string) string {
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		matches, err := fs.Glob(fsys, name+"*")
+	for _, pattern := range fontFilePatterns(names...) {
+		matches, err := fs.Glob(fsys, pattern)
 		if err == nil && len(matches) > 0 {
 			return matches[0]
 		}
