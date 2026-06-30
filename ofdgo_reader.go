@@ -38,6 +38,7 @@ type Reader struct {
 	Stamps                    map[string][]Stamp
 	Annots                    map[string][]Annotation
 	fileIndex                 map[string]*zip.File
+	fileIndexFold             map[string]*zip.File
 }
 
 // Close 关闭阅读器
@@ -53,8 +54,14 @@ func (r *Reader) Close() error {
 // 返回: error 错误信息
 func (r *Reader) initRoot() error {
 	r.fileIndex = make(map[string]*zip.File)
+	r.fileIndexFold = make(map[string]*zip.File)
 	for _, f := range r.Zip.File {
-		r.fileIndex[f.Name] = f
+		name := cleanPackagePath(f.Name)
+		r.fileIndex[name] = f
+		fold := strings.ToLower(name)
+		if _, ok := r.fileIndexFold[fold]; !ok {
+			r.fileIndexFold[fold] = f
+		}
 	}
 	data, err := r.readFile("OFD.xml")
 	if err != nil {
@@ -76,9 +83,8 @@ func (r *Reader) initRoot() error {
 // 入参: name 文件名
 // 返回: []byte 文件内容, error 错误信息
 func (r *Reader) readFile(name string) ([]byte, error) {
-	name = strings.ReplaceAll(name, "\\", "/")
-	name = strings.TrimPrefix(name, "/")
-	if f, ok := r.fileIndex[name]; ok {
+	name = cleanPackagePath(name)
+	if f, ok := r.packageFile(name); ok {
 		return readZipFile(f)
 	}
 	return nil, fmt.Errorf("file not found: %s", name)
@@ -88,12 +94,33 @@ func (r *Reader) readFile(name string) ([]byte, error) {
 // 入参: name 文件名
 // 返回: io.ReadCloser 文件流, error 错误信息
 func (r *Reader) openFile(name string) (io.ReadCloser, error) {
-	name = strings.ReplaceAll(name, "\\", "/")
-	name = strings.TrimPrefix(name, "/")
-	if f, ok := r.fileIndex[name]; ok {
+	name = cleanPackagePath(name)
+	if f, ok := r.packageFile(name); ok {
 		return f.Open()
 	}
 	return nil, fmt.Errorf("file not found: %s", name)
+}
+
+// cleanPackagePath 清理包内文件路径
+// 入参: name 文件路径
+// 返回: string 清理后的文件路径
+func cleanPackagePath(name string) string {
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = strings.TrimPrefix(name, "/")
+	return path.Clean(name)
+}
+
+// packageFile 获取包内文件
+// 入参: name 文件路径
+// 返回: *zip.File 压缩包文件, bool 是否存在
+func (r *Reader) packageFile(name string) (*zip.File, bool) {
+	if f, ok := r.fileIndex[name]; ok {
+		return f, true
+	}
+	if f, ok := r.fileIndexFold[strings.ToLower(name)]; ok {
+		return f, true
+	}
+	return nil, false
 }
 
 // readZipFile 读取zip文件内容

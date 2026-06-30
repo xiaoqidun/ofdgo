@@ -805,8 +805,8 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			if i < len(xs) {
 				cx = xs[i]
 			} else if i > 0 {
-				if i-1 < len(dxs) {
-					cx += dxs[i-1]
+				if dx, ok := textDelta(dxs, i-1); ok {
+					cx += dx
 				} else if len(dys) == 0 {
 					cx += face.TextWidth(str)
 				}
@@ -814,8 +814,8 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			if i < len(ys) {
 				cy = ys[i]
 			} else if i > 0 {
-				if i-1 < len(dys) {
-					cy += dys[i-1]
+				if dy, ok := textDelta(dys, i-1); ok {
+					cy += dy
 				}
 			}
 			tx, ty := ctm.Transform(cx, cy)
@@ -873,6 +873,19 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		codePos += len(runes)
 	}
 	ctx.Pop()
+}
+
+// textDelta 获取文本偏移量
+// 入参: deltas 偏移量数组, index 偏移量索引
+// 返回: float64 偏移量, bool 是否存在
+func textDelta(deltas []float64, index int) (float64, bool) {
+	if len(deltas) == 0 {
+		return 0, false
+	}
+	if index < len(deltas) {
+		return deltas[index], true
+	}
+	return deltas[len(deltas)-1], true
 }
 
 // hasTextMatrix 判断文本是否需要应用字形变换
