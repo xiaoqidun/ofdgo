@@ -664,7 +664,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			strokePaint = strokeColor
 		}
 		if strokePaint == nil {
-			strokePaint = color.Transparent
+			strokePaint = colorWithAlpha(canvas.Black, obj.Alpha)
 		}
 		ctx.SetFillColor(canvas.Transparent)
 		ctx.SetStroke(strokePaint)
