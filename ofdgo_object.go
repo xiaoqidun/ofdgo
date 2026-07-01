@@ -185,7 +185,7 @@ func (c *CompositeGraphicUnit) decodeObject(d *xml.Decoder, start xml.StartEleme
 			return err
 		}
 		c.Clips = &clips
-	case "PageBlock":
+	case "Content", "PageBlock":
 		return c.decodePageBlock(d, start)
 	default:
 		return d.Skip()

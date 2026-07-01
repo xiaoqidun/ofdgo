@@ -247,7 +247,7 @@ func (r *Renderer) renderAnnotations(ctx *canvas.Context, pageID string, pageH f
 		box, _ := ParseBox(annot.Appearance.Boundary)
 		ctm := Matrix{a: 1, d: 1, e: box.X, f: box.Y}
 		for _, obj := range annot.Appearance.Objects {
-			r.renderObject(ctx, obj, pageH, nil, nil, 0, &ctm)
+			r.renderObject(ctx, obj, pageH, nil, nil, 0, &ctm, false)
 		}
 	}
 }
@@ -294,7 +294,7 @@ func (r *Renderer) renderLayer(ctx *canvas.Context, layer Layer, pageH float64, 
 	}
 	if len(layer.Objects) > 0 {
 		for _, obj := range layer.Objects {
-			r.renderObject(ctx, obj, pageH, defaultFill, defaultStroke, defaultLW, parentCTM)
+			r.renderObject(ctx, obj, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false)
 		}
 		return
 	}
@@ -302,19 +302,19 @@ func (r *Renderer) renderLayer(ctx *canvas.Context, layer Layer, pageH float64, 
 		r.renderText(ctx, textObj, pageH, defaultFill, defaultStroke, parentCTM)
 	}
 	for _, pathObj := range layer.PathObject {
-		r.renderPath(ctx, pathObj, pageH, defaultFill, defaultStroke, defaultLW, parentCTM)
+		r.renderPath(ctx, pathObj, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false)
 	}
 	for _, imgObj := range layer.ImageObject {
 		r.renderImage(ctx, imgObj, pageH, parentCTM)
 	}
 	for _, cgu := range layer.CompositeGraphicUnit {
-		r.renderCompositeGraphicUnit(ctx, cgu, pageH, defaultFill, defaultStroke, defaultLW, parentCTM)
+		r.renderCompositeGraphicUnit(ctx, cgu, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false)
 	}
 }
 
 // renderCompositeGraphicUnit 渲染复合图元
-// 入参: ctx 画布上下文, cgu 复合图元对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM
-func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu CompositeGraphicUnit, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix) {
+// 入参: ctx 画布上下文, cgu 复合图元对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换
+func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu CompositeGraphicUnit, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix, boundaryInCTM bool) {
 	if cgu.Visible != nil && !*cgu.Visible {
 		return
 	}
@@ -327,7 +327,7 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 		if ref, ok := r.CompositeGraphicUnits[cgu.ResourceID]; ok {
 			refCopy := *ref
 			refCopy.Alpha = mergeAlpha(refCopy.Alpha, cgu.Alpha)
-			r.renderCompositeGraphicUnit(ctx, refCopy, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM)
+			r.renderCompositeGraphicUnit(ctx, refCopy, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, true)
 		}
 	}
 	if cgu.DrawParam != "" {
@@ -346,7 +346,7 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 	if len(cgu.Objects) > 0 {
 		for _, obj := range cgu.Objects {
 			obj = mergeGraphicObjectAlpha(obj, cgu.Alpha)
-			r.renderObject(ctx, obj, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM)
+			r.renderObject(ctx, obj, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, boundaryInCTM)
 		}
 		ctx.Pop()
 		return
@@ -357,7 +357,7 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 	}
 	for _, pathObj := range cgu.PathObject {
 		pathObj.Alpha = mergeAlpha(pathObj.Alpha, cgu.Alpha)
-		r.renderPath(ctx, pathObj, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM)
+		r.renderPath(ctx, pathObj, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, boundaryInCTM)
 	}
 	for _, textObj := range cgu.TextObject {
 		textObj.Alpha = mergeAlpha(textObj.Alpha, cgu.Alpha)
@@ -365,23 +365,23 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 	}
 	for _, subCgu := range cgu.CompositeGraphicUnit {
 		subCgu.Alpha = mergeAlpha(subCgu.Alpha, cgu.Alpha)
-		r.renderCompositeGraphicUnit(ctx, subCgu, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM)
+		r.renderCompositeGraphicUnit(ctx, subCgu, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, boundaryInCTM)
 	}
 	ctx.Pop()
 }
 
 // renderObject 渲染图形对象
-// 入参: ctx 画布上下文, obj 图形对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM
-func (r *Renderer) renderObject(ctx *canvas.Context, obj GraphicObject, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix) {
+// 入参: ctx 画布上下文, obj 图形对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换
+func (r *Renderer) renderObject(ctx *canvas.Context, obj GraphicObject, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix, boundaryInCTM bool) {
 	switch obj.Type {
 	case "TextObject":
 		r.renderText(ctx, obj.TextObject, pageH, defaultFill, defaultStroke, parentCTM)
 	case "PathObject":
-		r.renderPath(ctx, obj.PathObject, pageH, defaultFill, defaultStroke, defaultLW, parentCTM)
+		r.renderPath(ctx, obj.PathObject, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, boundaryInCTM)
 	case "ImageObject":
 		r.renderImage(ctx, obj.ImageObject, pageH, parentCTM)
 	case "CompositeGraphicUnit", "CompositeObject":
-		r.renderCompositeGraphicUnit(ctx, obj.CompositeGraphicUnit, pageH, defaultFill, defaultStroke, defaultLW, parentCTM)
+		r.renderCompositeGraphicUnit(ctx, obj.CompositeGraphicUnit, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, boundaryInCTM)
 	}
 }
 
@@ -532,8 +532,8 @@ func imageWithAlpha(img image.Image, alpha *int) image.Image {
 }
 
 // renderPath 渲染路径
-// 入参: ctx 画布上下文, obj 路径对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM
-func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix) {
+// 入参: ctx 画布上下文, obj 路径对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换
+func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix, boundaryInCTM bool) {
 	if obj.Visible != nil && !*obj.Visible {
 		return
 	}
@@ -638,7 +638,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			dashPattern[i] *= scale
 		}
 	}
-	p := r.buildPath(obj, pageH, ctm)
+	p := r.buildPath(obj, pageH, ctm, boundaryInCTM)
 	if rectPath := r.buildTinyFillRectPath(obj, pageH, ctm, bx, by); rectPath != nil {
 		p = rectPath
 	}
@@ -755,7 +755,7 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *Pattern, defaultC
 		for iy := startY; iy <= endY; iy++ {
 			tileCTM := patternCTM.Multiply(TranslationMatrix(float64(ix)*xStep, float64(iy)*yStep))
 			for _, obj := range pattern.CellContent.Objects {
-				r.renderObject(ctx, obj, pageH, defaultColor, defaultColor, 0, &tileCTM)
+				r.renderObject(ctx, obj, pageH, defaultColor, defaultColor, 0, &tileCTM, false)
 			}
 		}
 	}
@@ -1273,14 +1273,22 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 }
 
 // buildPath 解析路径并返回Canvas Path
-// 入参: obj 路径对象, pageH 页面高度, ctm 变换矩阵
+// 入参: obj 路径对象, pageH 页面高度, ctm 变换矩阵, boundaryInCTM 边界是否参与CTM变换
 // 返回: *canvas.Path 路径对象
-func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix) *canvas.Path {
+func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix, boundaryInCTM bool) *canvas.Path {
 	bx, by := 0.0, 0.0
 	if obj.Boundary != "" {
 		if box, err := ParseBox(obj.Boundary); err == nil {
 			bx, by = box.X, box.Y
 		}
+	}
+	point := func(x, y float64) (float64, float64) {
+		if boundaryInCTM {
+			tx, ty := ctm.Transform(x+bx, y+by)
+			return tx, pageH - ty
+		}
+		tx, ty := ctm.Transform(x, y)
+		return tx + bx, pageH - (ty + by)
 	}
 	p := &canvas.Path{}
 	tokens := strings.Fields(obj.AbbreviatedData)
@@ -1292,16 +1300,16 @@ func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix) *canvas.
 			if i+1 < len(tokens) {
 				x, _ := strconv.ParseFloat(tokens[i], 64)
 				y, _ := strconv.ParseFloat(tokens[i+1], 64)
-				tx, ty := ctm.Transform(x, y)
-				p.MoveTo(tx+bx, pageH-(ty+by))
+				tx, ty := point(x, y)
+				p.MoveTo(tx, ty)
 				i += 2
 			}
 		case "L":
 			if i+1 < len(tokens) {
 				x, _ := strconv.ParseFloat(tokens[i], 64)
 				y, _ := strconv.ParseFloat(tokens[i+1], 64)
-				tx, ty := ctm.Transform(x, y)
-				p.LineTo(tx+bx, pageH-(ty+by))
+				tx, ty := point(x, y)
+				p.LineTo(tx, ty)
 				i += 2
 			}
 		case "B":
@@ -1312,10 +1320,10 @@ func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix) *canvas.
 				y2, _ := strconv.ParseFloat(tokens[i+3], 64)
 				x3, _ := strconv.ParseFloat(tokens[i+4], 64)
 				y3, _ := strconv.ParseFloat(tokens[i+5], 64)
-				tx1, ty1 := ctm.Transform(x1, y1)
-				tx2, ty2 := ctm.Transform(x2, y2)
-				tx3, ty3 := ctm.Transform(x3, y3)
-				p.CubeTo(tx1+bx, pageH-(ty1+by), tx2+bx, pageH-(ty2+by), tx3+bx, pageH-(ty3+by))
+				tx1, ty1 := point(x1, y1)
+				tx2, ty2 := point(x2, y2)
+				tx3, ty3 := point(x3, y3)
+				p.CubeTo(tx1, ty1, tx2, ty2, tx3, ty3)
 				i += 6
 			}
 		case "Q":
@@ -1324,9 +1332,9 @@ func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix) *canvas.
 				y1, _ := strconv.ParseFloat(tokens[i+1], 64)
 				x2, _ := strconv.ParseFloat(tokens[i+2], 64)
 				y2, _ := strconv.ParseFloat(tokens[i+3], 64)
-				tx1, ty1 := ctm.Transform(x1, y1)
-				tx2, ty2 := ctm.Transform(x2, y2)
-				p.QuadTo(tx1+bx, pageH-(ty1+by), tx2+bx, pageH-(ty2+by))
+				tx1, ty1 := point(x1, y1)
+				tx2, ty2 := point(x2, y2)
+				p.QuadTo(tx1, ty1, tx2, ty2)
 				i += 4
 			}
 		case "A":
@@ -1341,9 +1349,9 @@ func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix) *canvas.
 				sx := math.Hypot(ctm.a, ctm.c)
 				sy := math.Hypot(ctm.b, ctm.d)
 				ctmRot := math.Atan2(ctm.b, ctm.a) * 180 / math.Pi
-				tx, ty := ctm.Transform(x, y)
+				tx, ty := point(x, y)
 				sweep = !sweep
-				p.ArcTo(rx*sx, ry*sy, -(rot + ctmRot), large, sweep, tx+bx, pageH-(ty+by))
+				p.ArcTo(rx*sx, ry*sy, -(rot + ctmRot), large, sweep, tx, ty)
 				i += 7
 			}
 		case "C":
@@ -1370,7 +1378,7 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ob
 			}
 			for _, pathObj := range area.Path {
 				ctm := areaCTM.Multiply(NewMatrix(pathObj.CTM))
-				cp := r.buildPath(pathObj, pageH, ctm)
+				cp := r.buildPath(pathObj, pageH, ctm, true)
 				cp.Translate(bx, -by)
 				cp.Close()
 				if clipPath == nil {

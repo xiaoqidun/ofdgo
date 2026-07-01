@@ -54,6 +54,16 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 		isCFFSfnt = true
 	}
 	missingHead := existingTables["head"] == nil
+	if !missingHead {
+		head := existingTables["head"]
+		if len(head) > 54 {
+			existingTables["head"] = head[:54]
+			malformedDirectory = true
+		}
+		if len(existingTables["head"]) != 54 || binary.BigEndian.Uint16(existingTables["head"][18:20]) == 0 {
+			missingHead = true
+		}
+	}
 	missingMaxp := existingTables["maxp"] == nil
 	missingHhea := existingTables["hhea"] == nil
 	missingHmtx := existingTables["hmtx"] == nil
