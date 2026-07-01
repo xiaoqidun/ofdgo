@@ -495,6 +495,8 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		return
 	}
 	img = imageWithAlpha(img, obj.Alpha)
+	pad := 0
+	img, pad = imageWithTransparentEdge(img)
 	ctm := NewMatrix(obj.CTM)
 	if obj.CTM == "" {
 		ctm = Matrix{a: box.W, d: box.H}
@@ -505,6 +507,11 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	m := canvas.Matrix{
 		{ctm.a / imgW, -ctm.c / imgH, box.X + ctm.c + ctm.e},
 		{-ctm.b / imgW, ctm.d / imgH, pageH - box.Y - ctm.d - ctm.f},
+	}
+	if pad > 0 {
+		p := float64(pad)
+		m[0][2] -= m[0][0]*p + m[0][1]*p
+		m[1][2] -= m[1][0]*p + m[1][1]*p
 	}
 	ctx.RenderImage(img, ctx.CoordSystemView().Mul(ctx.View()).Mul(m))
 }
@@ -527,6 +534,97 @@ func imageWithAlpha(img image.Image, alpha *int) image.Image {
 		}
 	}
 	return out
+}
+
+// imageWithTransparentEdge 补齐透明图片边缘颜色
+// 入参: img 图片对象
+// 返回: image.Image 补齐后的图片对象, int 补齐像素数
+func imageWithTransparentEdge(img image.Image) (image.Image, int) {
+	if img == nil {
+		return img, 0
+	}
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w == 0 || h == 0 {
+		return img, 0
+	}
+	src := image.NewNRGBA(image.Rect(0, 0, w, h))
+	hasZero, hasVisible := false, false
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			c := color.NRGBAModel.Convert(img.At(bounds.Min.X+x, bounds.Min.Y+y)).(color.NRGBA)
+			src.SetNRGBA(x, y, c)
+			if c.A == 0 {
+				hasZero = true
+			} else {
+				hasVisible = true
+			}
+		}
+	}
+	if !hasZero || !hasVisible {
+		return img, 0
+	}
+	out := image.NewNRGBA(image.Rect(0, 0, w+2, h+2))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			c := src.NRGBAAt(x, y)
+			if c.A == 0 {
+				if edge, ok := transparentEdgeColor(src, x, y); ok {
+					c = edge
+				}
+			}
+			out.SetNRGBA(x+1, y+1, c)
+		}
+	}
+	for x := 0; x < w; x++ {
+		out.SetNRGBA(x+1, 0, transparentPaddingColor(out.NRGBAAt(x+1, 1)))
+		out.SetNRGBA(x+1, h+1, transparentPaddingColor(out.NRGBAAt(x+1, h)))
+	}
+	for y := 0; y < h; y++ {
+		out.SetNRGBA(0, y+1, transparentPaddingColor(out.NRGBAAt(1, y+1)))
+		out.SetNRGBA(w+1, y+1, transparentPaddingColor(out.NRGBAAt(w, y+1)))
+	}
+	out.SetNRGBA(0, 0, transparentPaddingColor(out.NRGBAAt(1, 1)))
+	out.SetNRGBA(w+1, 0, transparentPaddingColor(out.NRGBAAt(w, 1)))
+	out.SetNRGBA(0, h+1, transparentPaddingColor(out.NRGBAAt(1, h)))
+	out.SetNRGBA(w+1, h+1, transparentPaddingColor(out.NRGBAAt(w, h)))
+	return out, 1
+}
+
+// transparentEdgeColor 获取透明像素相邻的可见颜色
+// 入参: img 图片对象, x X坐标, y Y坐标
+// 返回: color.NRGBA 颜色, bool 是否存在
+func transparentEdgeColor(img *image.NRGBA, x, y int) (color.NRGBA, bool) {
+	bounds := img.Bounds()
+	var best color.NRGBA
+	for dy := -1; dy <= 1; dy++ {
+		for dx := -1; dx <= 1; dx++ {
+			if dx == 0 && dy == 0 {
+				continue
+			}
+			nx, ny := x+dx, y+dy
+			if nx < bounds.Min.X || nx >= bounds.Max.X || ny < bounds.Min.Y || ny >= bounds.Max.Y {
+				continue
+			}
+			c := img.NRGBAAt(nx, ny)
+			if c.A > best.A {
+				best = c
+			}
+		}
+	}
+	if best.A == 0 {
+		return color.NRGBA{}, false
+	}
+	best.A = 1
+	return best, true
+}
+
+// transparentPaddingColor 获取透明补齐颜色
+// 入参: c 边缘颜色
+// 返回: color.NRGBA 补齐颜色
+func transparentPaddingColor(c color.NRGBA) color.NRGBA {
+	c.A = 1
+	return c
 }
 
 // renderPath 渲染路径
