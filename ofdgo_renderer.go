@@ -502,13 +502,11 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	if parentCTM != nil {
 		ctm = parentCTM.Multiply(ctm)
 	}
-	tx, ty := ctm.Transform(0, 1)
-	canvasX, canvasY := tx+box.X, pageH-(ty+box.Y)
-	ctx.Push()
-	ctx.Translate(canvasX, canvasY)
-	ctx.Scale(ctm.a/imgW, ctm.d/imgH)
-	ctx.DrawImage(0, 0, img, canvas.DPMM(1.0))
-	ctx.Pop()
+	m := canvas.Matrix{
+		{ctm.a / imgW, -ctm.c / imgH, box.X + ctm.c + ctm.e},
+		{-ctm.b / imgW, ctm.d / imgH, pageH - box.Y - ctm.d - ctm.f},
+	}
+	ctx.RenderImage(img, ctx.CoordSystemView().Mul(ctx.View()).Mul(m))
 }
 
 // imageWithAlpha 合并图片透明度
