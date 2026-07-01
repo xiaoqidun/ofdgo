@@ -97,6 +97,26 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 	if numGlyphs == 0 {
 		numGlyphs = 255
 	}
+	if !missingHhea && !missingHmtx {
+		hhea := existingTables["hhea"]
+		hmtx := existingTables["hmtx"]
+		if len(hhea) < 36 {
+			missingHhea = true
+		} else {
+			numMetrics := binary.BigEndian.Uint16(hhea[34:36])
+			if numMetrics == 0 || numMetrics > numGlyphs {
+				missingHhea = true
+			} else {
+				expectHmtx := int(numMetrics)*4 + int(numGlyphs-numMetrics)*2
+				if len(hmtx) < expectHmtx {
+					missingHmtx = true
+				} else if len(hmtx) > expectHmtx {
+					existingTables["hmtx"] = hmtx[:expectHmtx]
+					malformedDirectory = true
+				}
+			}
+		}
+	}
 	if !missingPost && hasBadPostTable(existingTables["post"], numGlyphs, !isCFFSfnt) {
 		missingPost = true
 	}
