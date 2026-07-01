@@ -835,9 +835,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if weight == 0 && dp != nil && dp.Weight > 0 {
 		weight = dp.Weight
 	}
-	if weight >= 700 {
-		fontStyle |= canvas.FontBold
-	}
+	syntheticBold := weight >= 700
 	italic := obj.Italic
 	if !italic && dp != nil && dp.Italic {
 		italic = true
@@ -849,12 +847,18 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	embeddedFont := false
 	if of, ok := r.Reader.fontCache[fontID]; ok {
 		embeddedFont = of.FontFile != ""
+		if !embeddedFont && fontNoSyntheticBold(of.FontName, of.FamilyName) {
+			syntheticBold = false
+		}
 		if of.Bold {
 			fontStyle |= canvas.FontBold
 		}
 		if of.Italic {
 			fontStyle |= canvas.FontItalic
 		}
+	}
+	if syntheticBold {
+		fontStyle |= canvas.FontBold
 	}
 	ff := r.loadFont(fontID)
 	if ff == nil {

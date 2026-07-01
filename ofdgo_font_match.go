@@ -20,13 +20,21 @@ import (
 )
 
 type fontMatchRule struct {
-	Keys   []string
-	Names  []string
-	Files  []string
-	System string
+	Keys            []string
+	Names           []string
+	Files           []string
+	System          string
+	NoSyntheticBold bool
 }
 
 var fontMatchRules = []fontMatchRule{
+	{
+		Keys:            []string{"小标宋", "方正小标宋", "xiaobiaosong", "fzxiaobiaosong", "fzxbs"},
+		Names:           []string{"小标宋体", "方正小标宋简体", "FZXiaoBiaoSong-B05", "FZXiaoBiaoSong-B05S"},
+		Files:           []string{"FZXBSJW.TTF", "fzxbs*.ttf", "xiaobiaosong*.ttf"},
+		System:          "FZXiaoBiaoSong-B05S",
+		NoSyntheticBold: true,
+	},
 	{
 		Keys:   []string{"宋体", "新宋体", "simsun", "nsimsun", "songti", "书宋", "方正书宋"},
 		Names:  []string{"宋体", "新宋体", "SimSun", "NSimSun", "SongTi"},
@@ -167,6 +175,20 @@ func fontDefaultSystemNames() []string {
 		"SimHei", "Microsoft YaHei", "SimSun", "KaiTi", "FangSong",
 		"Arial", "Segoe UI", "Times New Roman",
 	}
+}
+
+// fontNoSyntheticBold 判断字体是否禁用合成粗体
+// 入参: names 字体名称列表
+// 返回: bool 是否禁用合成粗体
+func fontNoSyntheticBold(names ...string) bool {
+	for _, name := range names {
+		for _, rule := range fontMatchRules {
+			if rule.NoSyntheticBold && fontRuleMatch(rule, name) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // fontRuleMatch 判断字体规则是否匹配
