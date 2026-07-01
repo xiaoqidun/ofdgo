@@ -134,7 +134,7 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 	}
 	fdCount, _ := getCFFIndexCount(data, fdArrOff)
 	if fdCount != 1 {
-		return nil, fmt.Errorf("complex cid (fdarray count=%d) not supported", fdCount)
+		return sanitizeMultiFDCFF(data, hdrSize, nameIndexData, topDict, stringIndexData, globalSubrIndexData, fdArrOff, fdCount)
 	}
 	fontDictData, _ := getCFFIndexData(data, fdArrOff)
 	fontDict := parseCFFDict(fontDictData)
@@ -243,6 +243,92 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 	if len(localSubrData) > 0 {
 		newCFF.Write(localSubrData)
 	}
+	return newCFF.Bytes(), nil
+}
+
+// sanitizeMultiFDCFF 清洗多 FD 的 CID CFF 数据
+// 入参: data 原始CFF数据, hdrSize 头部大小, nameIndexData 名称索引, topDict 顶层字典
+// 入参: stringIndexData 字符串索引, globalSubrIndexData 全局子程序索引, fdArrOff FDArray偏移, fdCount FD数量
+// 返回: []byte 清洗后的CFF数据, error 错误信息
+func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict cffDict, stringIndexData []byte, globalSubrIndexData []byte, fdArrOff int, fdCount int) ([]byte, error) {
+	charStringsOffs, ok := topDict[17]
+	if !ok || len(charStringsOffs) == 0 {
+		return nil, fmt.Errorf("missing charstrings")
+	}
+	charStringsOff := int(charStringsOffs[0])
+	charStrings := readCFFIndexItems(data, charStringsOff)
+	if len(charStrings) == 0 {
+		return nil, fmt.Errorf("missing charstrings")
+	}
+	fdSelect := make([]int, len(charStrings))
+	if fdSelectVals, ok := topDict[1237]; ok && len(fdSelectVals) > 0 {
+		fdSelect = parseCFFFDSelect(data, int(fdSelectVals[0]), len(charStrings))
+	}
+	globalSubrs := readCFFIndexItems(globalSubrIndexData, 0)
+	localSubrs, privateDicts := readCFFLocalSubrs(data, fdArrOff, fdCount)
+	inlined := make([][]byte, len(charStrings))
+	for gid, cs := range charStrings {
+		fd := 0
+		if gid < len(fdSelect) && fdSelect[gid] >= 0 && fdSelect[gid] < len(localSubrs) {
+			fd = fdSelect[gid]
+		}
+		inlined[gid] = removeType2Hints(inlineType2CharString(cs, localSubrs[fd], globalSubrs, 0))
+	}
+	delete(topDict, 1230)
+	delete(topDict, 1236)
+	delete(topDict, 1237)
+	delete(topDict, 1234)
+	delete(topDict, 15)
+	delete(topDict, 16)
+	privateDict := make(cffDict)
+	if len(privateDicts) > 0 {
+		for k, v := range privateDicts[0] {
+			privateDict[k] = v
+		}
+	}
+	delete(privateDict, 19)
+	finalPrivData := encodeCFFDict(privateDict)
+	privateLen := len(finalPrivData)
+	charStringsData := encodeCFFIndex(inlined)
+	topDict[18] = []float64{float64(privateLen), 0}
+	var newCFF bytes.Buffer
+	dummyDict := make(cffDict)
+	for k, v := range topDict {
+		dummyDict[k] = v
+	}
+	dummyDict[17] = []float64{0}
+	dummyDict[18] = []float64{float64(privateLen), 0}
+	dummyTopData := encodeCFFDict(dummyDict)
+	topIdxSize := 2 + 1 + 8 + len(dummyTopData)
+	dataStart := hdrSize + len(nameIndexData) + topIdxSize + len(stringIndexData) + len(globalSubrIndexData)
+	charStringsPos := dataStart
+	privatePos := charStringsPos + len(charStringsData)
+	topDict[17] = []float64{float64(charStringsPos)}
+	topDict[18] = []float64{float64(privateLen), float64(privatePos)}
+	finalTopData := encodeCFFDict(topDict)
+	topIndex := encodeCFFIndex([][]byte{finalTopData})
+	newCFF.Write(data[:hdrSize])
+	newCFF.Write(nameIndexData)
+	newCFF.Write(topIndex)
+	newCFF.Write(stringIndexData)
+	newCFF.Write(globalSubrIndexData)
+	if newCFF.Len() != dataStart {
+		diff := newCFF.Len() - dataStart
+		charStringsPos += diff
+		privatePos += diff
+		topDict[17] = []float64{float64(charStringsPos)}
+		topDict[18] = []float64{float64(privateLen), float64(privatePos)}
+		finalTopData = encodeCFFDict(topDict)
+		topIndex = encodeCFFIndex([][]byte{finalTopData})
+		newCFF.Reset()
+		newCFF.Write(data[:hdrSize])
+		newCFF.Write(nameIndexData)
+		newCFF.Write(topIndex)
+		newCFF.Write(stringIndexData)
+		newCFF.Write(globalSubrIndexData)
+	}
+	newCFF.Write(charStringsData)
+	newCFF.Write(finalPrivData)
 	return newCFF.Bytes(), nil
 }
 
@@ -577,6 +663,308 @@ func getCFFIndexData(data []byte, offset int) ([]byte, int) {
 		return nil, size
 	}
 	return data[start : start+length], size
+}
+
+// readCFFIndexItems 读取 CFF 索引中的所有数据项
+// 入参: data CFF数据, offset 索引偏移
+// 返回: [][]byte 数据项列表
+func readCFFIndexItems(data []byte, offset int) [][]byte {
+	count, _ := getCFFIndexCount(data, offset)
+	if count == 0 || offset+3 > len(data) {
+		return nil
+	}
+	offSize := int(data[offset+2])
+	if offSize < 1 || offSize > 4 {
+		return nil
+	}
+	dataStart := offset + 3 + (count+1)*offSize
+	items := make([][]byte, 0, count)
+	for i := 0; i < count; i++ {
+		p1 := offset + 3 + i*offSize
+		p2 := p1 + offSize
+		if p2+offSize > len(data) {
+			return items
+		}
+		off1 := readCFFOffset(data, p1, offSize)
+		off2 := readCFFOffset(data, p2, offSize)
+		start := dataStart + off1 - 1
+		length := off2 - off1
+		if start < 0 || length < 0 || start+length > len(data) {
+			items = append(items, nil)
+			continue
+		}
+		items = append(items, data[start:start+length])
+	}
+	return items
+}
+
+// parseCFFFDSelect 解析 CID CFF 的 FDSelect
+// 入参: data CFF数据, offset FDSelect偏移, numGlyphs 字形数量
+// 返回: []int 字形对应的FD索引
+func parseCFFFDSelect(data []byte, offset int, numGlyphs int) []int {
+	result := make([]int, numGlyphs)
+	if offset <= 0 || offset >= len(data) {
+		return result
+	}
+	format := data[offset]
+	pos := offset + 1
+	switch format {
+	case 0:
+		for i := 0; i < numGlyphs && pos+i < len(data); i++ {
+			result[i] = int(data[pos+i])
+		}
+	case 3:
+		if pos+2 > len(data) {
+			return result
+		}
+		nRanges := int(binary.BigEndian.Uint16(data[pos:]))
+		pos += 2
+		ranges := make([]struct {
+			first int
+			fd    int
+		}, 0, nRanges)
+		for i := 0; i < nRanges && pos+3 <= len(data); i++ {
+			first := int(binary.BigEndian.Uint16(data[pos:]))
+			fd := int(data[pos+2])
+			ranges = append(ranges, struct {
+				first int
+				fd    int
+			}{first: first, fd: fd})
+			pos += 3
+		}
+		if pos+2 > len(data) {
+			return result
+		}
+		sentinel := int(binary.BigEndian.Uint16(data[pos:]))
+		for i, item := range ranges {
+			end := sentinel
+			if i+1 < len(ranges) {
+				end = ranges[i+1].first
+			}
+			if end > numGlyphs {
+				end = numGlyphs
+			}
+			for gid := item.first; gid < end; gid++ {
+				if gid >= 0 && gid < numGlyphs {
+					result[gid] = item.fd
+				}
+			}
+		}
+	}
+	return result
+}
+
+// readCFFLocalSubrs 读取 CID CFF 的本地子程序
+// 入参: data CFF数据, fdArrOff FDArray偏移, fdCount FD数量
+// 返回: [][][]byte 本地子程序列表, []cffDict Private字典列表
+func readCFFLocalSubrs(data []byte, fdArrOff int, fdCount int) ([][][]byte, []cffDict) {
+	fdItems := readCFFIndexItems(data, fdArrOff)
+	localSubrs := make([][][]byte, fdCount)
+	privateDicts := make([]cffDict, fdCount)
+	for i := 0; i < fdCount && i < len(fdItems); i++ {
+		fdDict := parseCFFDict(fdItems[i])
+		privVals, ok := fdDict[18]
+		if !ok || len(privVals) != 2 {
+			privateDicts[i] = make(cffDict)
+			continue
+		}
+		privSize := int(privVals[0])
+		privOff := int(privVals[1])
+		if privSize <= 0 || privOff < 0 || privOff+privSize > len(data) {
+			privateDicts[i] = make(cffDict)
+			continue
+		}
+		privData := data[privOff : privOff+privSize]
+		privDict := parseCFFDict(privData)
+		privateDicts[i] = privDict
+		if subrVals, ok := privDict[19]; ok && len(subrVals) > 0 {
+			subrOff := privOff + int(subrVals[0])
+			if subrOff >= 0 && subrOff < len(data) {
+				localSubrs[i] = readCFFIndexItems(data, subrOff)
+			}
+		}
+	}
+	return localSubrs, privateDicts
+}
+
+type type2Operand struct {
+	value    int
+	outStart int
+}
+
+// inlineType2CharString 内联 Type2 CharString 子程序调用
+// 入参: data CharString数据, localSubrs 本地子程序, globalSubrs 全局子程序, depth 递归深度
+// 返回: []byte 内联后的CharString数据
+func inlineType2CharString(data []byte, localSubrs, globalSubrs [][]byte, depth int) []byte {
+	if depth > 8 {
+		return data
+	}
+	out := make([]byte, 0, len(data))
+	var stack []type2Operand
+	hintCount := 0
+	for i := 0; i < len(data); {
+		b := data[i]
+		if b == 28 && i+2 < len(data) {
+			start := len(out)
+			out = append(out, data[i:i+3]...)
+			stack = append(stack, type2Operand{value: int(parseShortInt(data, i)), outStart: start})
+			i += 3
+			continue
+		}
+		if b >= 32 && b <= 246 {
+			start := len(out)
+			out = append(out, b)
+			stack = append(stack, type2Operand{value: int(parseNumberType2(data, i)), outStart: start})
+			i++
+			continue
+		}
+		if b >= 247 && b <= 254 && i+1 < len(data) {
+			start := len(out)
+			out = append(out, data[i:i+2]...)
+			stack = append(stack, type2Operand{value: int(parseNumberType2(data, i)), outStart: start})
+			i += 2
+			continue
+		}
+		if b == 255 && i+4 < len(data) {
+			start := len(out)
+			out = append(out, data[i:i+5]...)
+			stack = append(stack, type2Operand{value: int(parseNumberType2(data, i)), outStart: start})
+			i += 5
+			continue
+		}
+		if b == 10 || b == 29 {
+			if len(stack) > 0 {
+				operand := stack[len(stack)-1]
+				out = out[:operand.outStart]
+				subrs := localSubrs
+				if b == 29 {
+					subrs = globalSubrs
+				}
+				idx := operand.value + cffSubrBias(len(subrs))
+				if idx >= 0 && idx < len(subrs) {
+					subr := inlineType2CharString(subrs[idx], localSubrs, globalSubrs, depth+1)
+					if len(subr) > 0 && subr[len(subr)-1] == 11 {
+						subr = subr[:len(subr)-1]
+					}
+					out = append(out, subr...)
+				}
+				stack = nil
+			}
+			i++
+			continue
+		}
+		if b == 11 && depth > 0 {
+			return out
+		}
+		out = append(out, b)
+		i++
+		op := int(b)
+		if b == 12 && i < len(data) {
+			out = append(out, data[i])
+			op = 1200 + int(data[i])
+			i++
+		}
+		switch op {
+		case 1, 3, 18, 23:
+			hintCount += len(stack) / 2
+		case 19, 20:
+			hintCount += len(stack) / 2
+			maskBytes := (hintCount + 7) / 8
+			if i+maskBytes > len(data) {
+				maskBytes = len(data) - i
+			}
+			out = append(out, data[i:i+maskBytes]...)
+			i += maskBytes
+		}
+		stack = nil
+	}
+	return out
+}
+
+// removeType2Hints 移除 Type2 CharString 的 hint 指令
+// 入参: data CharString数据
+// 返回: []byte 移除hint后的CharString数据
+func removeType2Hints(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	var stack []type2Operand
+	hintCount := 0
+	for i := 0; i < len(data); {
+		b := data[i]
+		if b == 28 && i+2 < len(data) {
+			start := len(out)
+			out = append(out, data[i:i+3]...)
+			stack = append(stack, type2Operand{value: int(parseShortInt(data, i)), outStart: start})
+			i += 3
+			continue
+		}
+		if b >= 32 && b <= 246 {
+			start := len(out)
+			out = append(out, b)
+			stack = append(stack, type2Operand{value: int(parseNumberType2(data, i)), outStart: start})
+			i++
+			continue
+		}
+		if b >= 247 && b <= 254 && i+1 < len(data) {
+			start := len(out)
+			out = append(out, data[i:i+2]...)
+			stack = append(stack, type2Operand{value: int(parseNumberType2(data, i)), outStart: start})
+			i += 2
+			continue
+		}
+		if b == 255 && i+4 < len(data) {
+			start := len(out)
+			out = append(out, data[i:i+5]...)
+			stack = append(stack, type2Operand{value: int(parseNumberType2(data, i)), outStart: start})
+			i += 5
+			continue
+		}
+		op := int(b)
+		opLen := 1
+		if b == 12 && i+1 < len(data) {
+			op = 1200 + int(data[i+1])
+			opLen = 2
+		}
+		switch op {
+		case 1, 3, 18, 23:
+			if len(stack) > 0 {
+				out = out[:stack[0].outStart]
+			}
+			hintCount += len(stack) / 2
+			stack = nil
+			i += opLen
+			continue
+		case 19, 20:
+			if len(stack) > 0 {
+				out = out[:stack[0].outStart]
+			}
+			hintCount += len(stack) / 2
+			i += opLen
+			maskBytes := (hintCount + 7) / 8
+			if i+maskBytes > len(data) {
+				maskBytes = len(data) - i
+			}
+			i += maskBytes
+			stack = nil
+			continue
+		}
+		out = append(out, data[i:i+opLen]...)
+		i += opLen
+		stack = nil
+	}
+	return out
+}
+
+// cffSubrBias 获取 Type2 子程序偏移
+// 入参: count 子程序数量
+// 返回: int 偏移量
+func cffSubrBias(count int) int {
+	if count < 1240 {
+		return 107
+	}
+	if count < 33900 {
+		return 1131
+	}
+	return 32768
 }
 
 // parseCFFWidths 从 CFF 数据中解析 Glyph 宽度
