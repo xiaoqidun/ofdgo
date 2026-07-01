@@ -148,13 +148,16 @@ func parseFillColor(fillColor *FillColor) color.Color {
 	if fillColor.Pattern != nil {
 		return nil
 	}
-	if strings.TrimSpace(fillColor.Value) != "" {
-		return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
-	}
 	if fillColor.AxialShd != nil {
 		return parseAxialShdColor(fillColor.AxialShd, fillColor.Alpha)
 	}
-	return parseRadialShdColor(fillColor.RadialShd, fillColor.Alpha)
+	if fillColor.RadialShd != nil {
+		return parseRadialShdColor(fillColor.RadialShd, fillColor.Alpha)
+	}
+	if strings.TrimSpace(fillColor.Value) != "" {
+		return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
+	}
+	return nil
 }
 
 // parseFillPaint 解析填充画刷
@@ -167,9 +170,6 @@ func parseFillPaint(fillColor *FillColor, x, y, pageH, originX, originY float64)
 	if fillColor.Pattern != nil {
 		return nil
 	}
-	if strings.TrimSpace(fillColor.Value) != "" {
-		return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
-	}
 	if gradient := parseAxialShdGradient(fillColor.AxialShd, fillColor.Alpha, x, y, pageH, originX, originY); gradient != nil {
 		return gradient
 	}
@@ -179,7 +179,13 @@ func parseFillPaint(fillColor *FillColor, x, y, pageH, originX, originY float64)
 	if fillColor.AxialShd != nil {
 		return parseAxialShdColor(fillColor.AxialShd, fillColor.Alpha)
 	}
-	return parseRadialShdColor(fillColor.RadialShd, fillColor.Alpha)
+	if fillColor.RadialShd != nil {
+		return parseRadialShdColor(fillColor.RadialShd, fillColor.Alpha)
+	}
+	if strings.TrimSpace(fillColor.Value) != "" {
+		return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
+	}
+	return nil
 }
 
 // parseStrokeColor 解析勾边颜色
@@ -189,13 +195,16 @@ func parseStrokeColor(strokeColor *StrokeColor) color.Color {
 	if strokeColor == nil {
 		return nil
 	}
-	if strings.TrimSpace(strokeColor.Value) != "" {
-		return parseColorWithAlpha(strokeColor.Value, strokeColor.Alpha)
-	}
 	if strokeColor.AxialShd != nil {
 		return parseAxialShdColor(strokeColor.AxialShd, strokeColor.Alpha)
 	}
-	return parseRadialShdColor(strokeColor.RadialShd, strokeColor.Alpha)
+	if strokeColor.RadialShd != nil {
+		return parseRadialShdColor(strokeColor.RadialShd, strokeColor.Alpha)
+	}
+	if strings.TrimSpace(strokeColor.Value) != "" {
+		return parseColorWithAlpha(strokeColor.Value, strokeColor.Alpha)
+	}
+	return nil
 }
 
 // parseStrokePaint 解析勾边画刷
@@ -204,9 +213,6 @@ func parseStrokeColor(strokeColor *StrokeColor) color.Color {
 func parseStrokePaint(strokeColor *StrokeColor, x, y, pageH, originX, originY float64) any {
 	if strokeColor == nil {
 		return nil
-	}
-	if strings.TrimSpace(strokeColor.Value) != "" {
-		return parseColorWithAlpha(strokeColor.Value, strokeColor.Alpha)
 	}
 	if gradient := parseAxialShdGradient(strokeColor.AxialShd, strokeColor.Alpha, x, y, pageH, originX, originY); gradient != nil {
 		return gradient
@@ -217,7 +223,13 @@ func parseStrokePaint(strokeColor *StrokeColor, x, y, pageH, originX, originY fl
 	if strokeColor.AxialShd != nil {
 		return parseAxialShdColor(strokeColor.AxialShd, strokeColor.Alpha)
 	}
-	return parseRadialShdColor(strokeColor.RadialShd, strokeColor.Alpha)
+	if strokeColor.RadialShd != nil {
+		return parseRadialShdColor(strokeColor.RadialShd, strokeColor.Alpha)
+	}
+	if strings.TrimSpace(strokeColor.Value) != "" {
+		return parseColorWithAlpha(strokeColor.Value, strokeColor.Alpha)
+	}
+	return nil
 }
 
 // parseAxialShdColor 解析轴向渐变颜色
