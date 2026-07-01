@@ -35,9 +35,9 @@ func parseColor(val string) color.Color {
 func parseColorWithAlpha(val string, alpha *int) color.Color {
 	parts := strings.Fields(val)
 	if len(parts) >= 3 {
-		r, _ := strconv.Atoi(parts[0])
-		g, _ := strconv.Atoi(parts[1])
-		b, _ := strconv.Atoi(parts[2])
+		r := parseColorComponent(parts[0])
+		g := parseColorComponent(parts[1])
+		b := parseColorComponent(parts[2])
 		a := 255
 		if alpha != nil {
 			a = *alpha
@@ -51,6 +51,19 @@ func parseColorWithAlpha(val string, alpha *int) color.Color {
 		}
 	}
 	return color.Black
+}
+
+// parseColorComponent 解析颜色分量
+// 入参: s 颜色分量
+// 返回: int 颜色分量值
+func parseColorComponent(s string) int {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "#") {
+		v, _ := strconv.ParseInt(strings.TrimPrefix(s, "#"), 16, 0)
+		return int(v)
+	}
+	v, _ := strconv.Atoi(s)
+	return v
 }
 
 // clampColor 限制颜色分量范围

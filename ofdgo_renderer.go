@@ -802,6 +802,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if obj.VScale != 0 {
 		sizeMM *= obj.VScale
 	}
+	hScale := obj.HScale
+	if hScale == 0 {
+		hScale = 1
+	}
 	useTextMatrix := hasTextMatrix(ctm)
 	if scale := ctm.YScale(); scale > 0 && !useTextMatrix {
 		sizeMM *= scale
@@ -888,7 +892,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				if dx, ok := textDelta(dxs, i-1); ok {
 					cx += dx
 				} else if len(dys) == 0 {
-					cx += face.TextWidth(str)
+					cx += face.TextWidth(str) * hScale
 				}
 			}
 			if i < len(ys) {
@@ -900,7 +904,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			}
 			tx, ty := ctm.Transform(cx, cy)
 			canvasX, canvasY := tx+bx, pageH-(ty+by)
-			textWidth := face.TextWidth(str)
+			textWidth := face.TextWidth(str) * hScale
 			glyphFillPaint := fillPaint
 			if fillColorNode != nil && fillColorNode.AxialShd != nil {
 				glyphFillPaint = parseFillPaint(fillColorNode, bx, by, pageH, canvasX, canvasY)
@@ -908,9 +912,16 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			if glyphFillPaint != nil {
 				ctx.SetFill(glyphFillPaint)
 				drawGlyph := func(x, y float64) {
+					if hScale != 1 {
+						ctx.Push()
+						ctx.Translate(x, y)
+						ctx.Scale(hScale, 1)
+						x, y = 0, 0
+						defer ctx.Pop()
+					}
 					if embeddedFont {
 						path, width := face.ToPath(str)
-						textWidth = width
+						textWidth = width * hScale
 						ctx.DrawPath(x, y, path)
 					} else {
 						textFace := face
