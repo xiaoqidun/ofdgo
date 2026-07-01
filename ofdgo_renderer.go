@@ -657,7 +657,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			fp.Close()
 			fp = fp.And(clipPath)
 		}
-		r.renderPattern(ctx, fillPattern, fillPatternColor, pageH, fp, ctm)
+		r.renderPattern(ctx, fillPattern, fillPatternColor, pageH, fp, ctm, bx, by)
 	} else if shouldFill && fillPaint != nil {
 		ctx.SetFill(fillPaint)
 		ctx.SetStrokeColor(canvas.Transparent)
@@ -706,8 +706,8 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 }
 
 // renderPattern 渲染图案填充
-// 入参: ctx 画布上下文, pattern 图案对象, defaultColor 默认颜色, pageH 页面高度, clip 填充区域, parentCTM 父级CTM
-func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *Pattern, defaultColor color.Color, pageH float64, clip *canvas.Path, parentCTM Matrix) {
+// 入参: ctx 画布上下文, pattern 图案对象, defaultColor 默认颜色, pageH 页面高度, clip 填充区域, parentCTM 父级CTM, bx 边界X坐标, by 边界Y坐标
+func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *Pattern, defaultColor color.Color, pageH float64, clip *canvas.Path, parentCTM Matrix, bx, by float64) {
 	if pattern == nil || clip == nil || len(pattern.CellContent.Objects) == 0 {
 		return
 	}
@@ -721,7 +721,7 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *Pattern, defaultC
 	if xStep <= 0 || yStep <= 0 {
 		return
 	}
-	patternCTM := parentCTM.Multiply(NewMatrix(pattern.CTM))
+	patternCTM := TranslationMatrix(bx, by).Multiply(parentCTM).Multiply(NewMatrix(pattern.CTM))
 	invCTM, ok := patternCTM.Invert()
 	if !ok {
 		return
