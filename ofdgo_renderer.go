@@ -551,6 +551,8 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	fillColor, strokeColor := colorWithAlpha(defaultFill, obj.Alpha), colorWithAlpha(defaultStroke, obj.Alpha)
 	var fillPaint any = fillColor
 	var strokePaint any = strokeColor
+	var fillPattern *Pattern
+	var fillPatternColor color.Color
 	lineWidth := defaultLW
 	if lineWidth == 0 {
 		lineWidth = 0.353
@@ -566,6 +568,8 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			}
 			if dp.FillColor != nil {
 				fillColorNode := withFillAlpha(dp.FillColor, obj.Alpha)
+				fillPattern = fillColorNode.Pattern
+				fillPatternColor = patternColor(fillColorNode)
 				fillColor = parseFillColor(fillColorNode)
 				fillPaint = parseFillPaint(fillColorNode, bx, by, pageH, 0, 0)
 			}
@@ -595,6 +599,8 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	}
 	if obj.FillColor != nil {
 		fillColorNode := withFillAlpha(obj.FillColor, obj.Alpha)
+		fillPattern = fillColorNode.Pattern
+		fillPatternColor = patternColor(fillColorNode)
 		fillColor = parseFillColor(fillColorNode)
 		fillPaint = parseFillPaint(fillColorNode, bx, by, pageH, 0, 0)
 	}
@@ -644,7 +650,15 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	if fillPaint == nil {
 		fillPaint = fillColor
 	}
-	if shouldFill && fillPaint != nil {
+	if shouldFill && fillPattern != nil {
+		fp := p
+		if clipPath != nil {
+			fp = p.Copy()
+			fp.Close()
+			fp = fp.And(clipPath)
+		}
+		r.renderPattern(ctx, fillPattern, fillPatternColor, pageH, fp, ctm)
+	} else if shouldFill && fillPaint != nil {
 		ctx.SetFill(fillPaint)
 		ctx.SetStrokeColor(canvas.Transparent)
 		fp := p
@@ -689,6 +703,72 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		}
 	}
 	ctx.Pop()
+}
+
+// renderPattern 渲染图案填充
+// 入参: ctx 画布上下文, pattern 图案对象, defaultColor 默认颜色, pageH 页面高度, clip 填充区域, parentCTM 父级CTM
+func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *Pattern, defaultColor color.Color, pageH float64, clip *canvas.Path, parentCTM Matrix) {
+	if pattern == nil || clip == nil || len(pattern.CellContent.Objects) == 0 {
+		return
+	}
+	xStep, yStep := pattern.XStep, pattern.YStep
+	if xStep == 0 {
+		xStep = pattern.Width
+	}
+	if yStep == 0 {
+		yStep = pattern.Height
+	}
+	if xStep <= 0 || yStep <= 0 {
+		return
+	}
+	patternCTM := parentCTM.Multiply(NewMatrix(pattern.CTM))
+	invCTM, ok := patternCTM.Invert()
+	if !ok {
+		return
+	}
+	bounds := clip.FastBounds()
+	points := [][2]float64{
+		{bounds.X0, pageH - bounds.Y0},
+		{bounds.X1, pageH - bounds.Y0},
+		{bounds.X1, pageH - bounds.Y1},
+		{bounds.X0, pageH - bounds.Y1},
+	}
+	minX, maxX := 0.0, 0.0
+	minY, maxY := 0.0, 0.0
+	for i, point := range points {
+		x, y := invCTM.Transform(point[0], point[1])
+		if i == 0 {
+			minX, maxX = x, x
+			minY, maxY = y, y
+			continue
+		}
+		minX = math.Min(minX, x)
+		maxX = math.Max(maxX, x)
+		minY = math.Min(minY, y)
+		maxY = math.Max(maxY, y)
+	}
+	startX := int(math.Floor(minX/xStep)) - 1
+	endX := int(math.Ceil(maxX/xStep)) + 1
+	startY := int(math.Floor(minY/yStep)) - 1
+	endY := int(math.Ceil(maxY/yStep)) + 1
+	for ix := startX; ix <= endX; ix++ {
+		for iy := startY; iy <= endY; iy++ {
+			tileCTM := patternCTM.Multiply(TranslationMatrix(float64(ix)*xStep, float64(iy)*yStep))
+			for _, obj := range pattern.CellContent.Objects {
+				r.renderObject(ctx, obj, pageH, defaultColor, defaultColor, 0, &tileCTM)
+			}
+		}
+	}
+}
+
+// patternColor 获取图案单元默认颜色
+// 入参: fillColor 填充颜色节点
+// 返回: color.Color 默认颜色
+func patternColor(fillColor *FillColor) color.Color {
+	if fillColor == nil || strings.TrimSpace(fillColor.Value) == "" {
+		return nil
+	}
+	return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
 }
 
 // renderText 渲染文本

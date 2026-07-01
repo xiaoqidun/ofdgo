@@ -86,6 +86,30 @@ func (m Matrix) Transform(x, y float64) (float64, float64) {
 	return nx, ny
 }
 
+// Invert 求逆矩阵
+// 返回: Matrix 逆矩阵, bool 是否可逆
+func (m Matrix) Invert() (Matrix, bool) {
+	det := m.a*m.d - m.b*m.c
+	if math.Abs(det) < 1e-9 {
+		return IdentityMatrix, false
+	}
+	return Matrix{
+		a: m.d / det,
+		b: -m.b / det,
+		c: -m.c / det,
+		d: m.a / det,
+		e: (m.c*m.f - m.d*m.e) / det,
+		f: (m.b*m.e - m.a*m.f) / det,
+	}, true
+}
+
+// TranslationMatrix 构造平移矩阵
+// 入参: x X轴偏移, y Y轴偏移
+// 返回: Matrix 平移矩阵
+func TranslationMatrix(x, y float64) Matrix {
+	return Matrix{a: 1, d: 1, e: x, f: y}
+}
+
 // YScale 获取Y轴缩放比例
 // 返回: float64 缩放比例
 func (m Matrix) YScale() float64 {

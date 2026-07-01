@@ -132,6 +132,9 @@ func parseFillColor(fillColor *FillColor) color.Color {
 	if fillColor == nil {
 		return nil
 	}
+	if fillColor.Pattern != nil {
+		return nil
+	}
 	if strings.TrimSpace(fillColor.Value) != "" {
 		return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
 	}
@@ -146,6 +149,9 @@ func parseFillColor(fillColor *FillColor) color.Color {
 // 返回: any 填充画刷
 func parseFillPaint(fillColor *FillColor, x, y, pageH, originX, originY float64) any {
 	if fillColor == nil {
+		return nil
+	}
+	if fillColor.Pattern != nil {
 		return nil
 	}
 	if strings.TrimSpace(fillColor.Value) != "" {

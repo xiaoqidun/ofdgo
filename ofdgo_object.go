@@ -302,6 +302,92 @@ func (a *Appearance) decodePageBlock(d *xml.Decoder, start xml.StartElement) err
 	}
 }
 
+// UnmarshalXML 解析图案单元内容并保留对象顺序
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (p *PatternContent) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*p = PatternContent{}
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch node := tok.(type) {
+		case xml.StartElement:
+			if err := p.decodeObject(d, node); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			if node.Name.Local == start.Name.Local {
+				return nil
+			}
+		}
+	}
+}
+
+// decodeObject 解析图案单元内容子对象
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (p *PatternContent) decodeObject(d *xml.Decoder, start xml.StartElement) error {
+	switch start.Name.Local {
+	case "TextObject":
+		var obj TextObject
+		if err := d.DecodeElement(&obj, &start); err != nil {
+			return err
+		}
+		p.TextObject = append(p.TextObject, obj)
+		p.Objects = append(p.Objects, GraphicObject{Type: start.Name.Local, TextObject: obj})
+	case "PathObject":
+		var obj PathObject
+		if err := d.DecodeElement(&obj, &start); err != nil {
+			return err
+		}
+		p.PathObject = append(p.PathObject, obj)
+		p.Objects = append(p.Objects, GraphicObject{Type: start.Name.Local, PathObject: obj})
+	case "ImageObject":
+		var obj ImageObject
+		if err := d.DecodeElement(&obj, &start); err != nil {
+			return err
+		}
+		p.ImageObject = append(p.ImageObject, obj)
+		p.Objects = append(p.Objects, GraphicObject{Type: start.Name.Local, ImageObject: obj})
+	case "CompositeGraphicUnit", "CompositeObject":
+		var obj CompositeGraphicUnit
+		if err := d.DecodeElement(&obj, &start); err != nil {
+			return err
+		}
+		p.CompositeGraphicUnit = append(p.CompositeGraphicUnit, obj)
+		p.Objects = append(p.Objects, GraphicObject{Type: start.Name.Local, CompositeGraphicUnit: obj})
+	case "PageBlock":
+		return p.decodePageBlock(d, start)
+	default:
+		return d.Skip()
+	}
+	return nil
+}
+
+// decodePageBlock 解析图案单元内容页块子对象
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (p *PatternContent) decodePageBlock(d *xml.Decoder, start xml.StartElement) error {
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch node := tok.(type) {
+		case xml.StartElement:
+			if err := p.decodeObject(d, node); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			if node.Name.Local == start.Name.Local {
+				return nil
+			}
+		}
+	}
+}
+
 // attrValue 获取XML属性值
 // 入参: start 起始节点, name 属性名
 // 返回: string 属性值

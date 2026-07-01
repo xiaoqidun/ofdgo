@@ -103,8 +103,28 @@ type TextObject struct {
 type FillColor struct {
 	Value     string     `xml:"Value,attr"`
 	Alpha     *int       `xml:"Alpha,attr"`
+	Pattern   *Pattern   `xml:"Pattern"`
 	AxialShd  *AxialShd  `xml:"AxialShd"`
 	RadialShd *RadialShd `xml:"RadialShd"`
+}
+
+// Pattern 图案填充
+type Pattern struct {
+	Width       float64        `xml:"Width,attr"`
+	Height      float64        `xml:"Height,attr"`
+	XStep       float64        `xml:"XStep,attr"`
+	YStep       float64        `xml:"YStep,attr"`
+	CTM         string         `xml:"CTM,attr"`
+	CellContent PatternContent `xml:"CellContent"`
+}
+
+// PatternContent 图案单元内容
+type PatternContent struct {
+	Objects              []GraphicObject        `xml:"-"`
+	TextObject           []TextObject           `xml:"TextObject"`
+	PathObject           []PathObject           `xml:"PathObject"`
+	ImageObject          []ImageObject          `xml:"ImageObject"`
+	CompositeGraphicUnit []CompositeGraphicUnit `xml:"CompositeGraphicUnit"`
 }
 
 // TextCode 文本内容节点
