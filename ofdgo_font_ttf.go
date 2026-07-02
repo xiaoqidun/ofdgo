@@ -225,15 +225,39 @@ func hasUsableCmap(data []byte) bool {
 	}
 	numTables := binary.BigEndian.Uint16(data[2:4])
 	pos := 4
+	usable := false
 	for i := 0; i < int(numTables); i++ {
 		if len(data) < pos+8 {
 			break
 		}
 		platformID := binary.BigEndian.Uint16(data[pos : pos+2])
+		encodingID := binary.BigEndian.Uint16(data[pos+2 : pos+4])
+		offset := binary.BigEndian.Uint32(data[pos+4 : pos+8])
+		if uint32(len(data)) < offset+2 {
+			return false
+		}
+		format := binary.BigEndian.Uint16(data[offset : offset+2])
+		if !supportedCmapFormat(format, platformID, encodingID) {
+			return false
+		}
 		if platformID == 0 || platformID == 3 {
-			return true
+			usable = true
 		}
 		pos += 8
 	}
-	return false
+	return usable
+}
+
+// supportedCmapFormat 判断 cmap 子表格式是否可用
+// 入参: format cmap 子表格式, platformID 平台ID, encodingID 编码ID
+// 返回: bool 是否可用
+func supportedCmapFormat(format, platformID, encodingID uint16) bool {
+	switch format {
+	case 0, 4, 6, 12:
+		return true
+	case 14:
+		return platformID == 0 && encodingID == 5
+	default:
+		return false
+	}
 }

@@ -299,13 +299,13 @@ func (r *Renderer) renderLayer(ctx *canvas.Context, layer Layer, pageH float64, 
 		return
 	}
 	for _, textObj := range layer.TextObject {
-		r.renderText(ctx, textObj, pageH, defaultFill, defaultStroke, parentCTM)
+		r.renderText(ctx, textObj, pageH, defaultFill, defaultStroke, parentCTM, false)
 	}
 	for _, pathObj := range layer.PathObject {
 		r.renderPath(ctx, pathObj, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false)
 	}
 	for _, imgObj := range layer.ImageObject {
-		r.renderImage(ctx, imgObj, pageH, parentCTM)
+		r.renderImage(ctx, imgObj, pageH, parentCTM, false)
 	}
 	for _, cgu := range layer.CompositeGraphicUnit {
 		r.renderCompositeGraphicUnit(ctx, cgu, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false)
@@ -353,7 +353,7 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 	}
 	for _, imgObj := range cgu.ImageObject {
 		imgObj.Alpha = mergeAlpha(imgObj.Alpha, cgu.Alpha)
-		r.renderImage(ctx, imgObj, pageH, &currentCTM)
+		r.renderImage(ctx, imgObj, pageH, &currentCTM, boundaryInCTM)
 	}
 	for _, pathObj := range cgu.PathObject {
 		pathObj.Alpha = mergeAlpha(pathObj.Alpha, cgu.Alpha)
@@ -361,7 +361,7 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 	}
 	for _, textObj := range cgu.TextObject {
 		textObj.Alpha = mergeAlpha(textObj.Alpha, cgu.Alpha)
-		r.renderText(ctx, textObj, pageH, defaultFill, defaultStroke, &currentCTM)
+		r.renderText(ctx, textObj, pageH, defaultFill, defaultStroke, &currentCTM, boundaryInCTM)
 	}
 	for _, subCgu := range cgu.CompositeGraphicUnit {
 		subCgu.Alpha = mergeAlpha(subCgu.Alpha, cgu.Alpha)
@@ -375,11 +375,11 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 func (r *Renderer) renderObject(ctx *canvas.Context, obj GraphicObject, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix, boundaryInCTM bool) {
 	switch obj.Type {
 	case "TextObject":
-		r.renderText(ctx, obj.TextObject, pageH, defaultFill, defaultStroke, parentCTM)
+		r.renderText(ctx, obj.TextObject, pageH, defaultFill, defaultStroke, parentCTM, boundaryInCTM)
 	case "PathObject":
 		r.renderPath(ctx, obj.PathObject, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, boundaryInCTM)
 	case "ImageObject":
-		r.renderImage(ctx, obj.ImageObject, pageH, parentCTM)
+		r.renderImage(ctx, obj.ImageObject, pageH, parentCTM, boundaryInCTM)
 	case "CompositeGraphicUnit", "CompositeObject":
 		r.renderCompositeGraphicUnit(ctx, obj.CompositeGraphicUnit, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, boundaryInCTM)
 	}
@@ -471,8 +471,8 @@ func (r *Renderer) initCommon() {
 }
 
 // renderImage 渲染图片
-// 入参: ctx 画布上下文, obj 图片对象, pageH 页面高度, parentCTM 父级CTM
-func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float64, parentCTM *Matrix) {
+// 入参: ctx 画布上下文, obj 图片对象, pageH 页面高度, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM
+func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float64, parentCTM *Matrix, boundaryInCTM bool) {
 	if obj.Visible != nil && !*obj.Visible {
 		return
 	}
@@ -501,12 +501,22 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	if obj.CTM == "" {
 		ctm = Matrix{a: box.W, d: box.H}
 	}
-	if parentCTM != nil {
-		ctm = parentCTM.Multiply(ctm)
-	}
-	m := canvas.Matrix{
-		{ctm.a / imgW, -ctm.c / imgH, box.X + ctm.c + ctm.e},
-		{-ctm.b / imgW, ctm.d / imgH, pageH - box.Y - ctm.d - ctm.f},
+	var m canvas.Matrix
+	if boundaryInCTM && parentCTM != nil {
+		x0 := box.X + ctm.c + ctm.e
+		y0 := box.Y + ctm.d + ctm.f
+		m = canvas.Matrix{
+			{(parentCTM.a*ctm.a + parentCTM.c*ctm.b) / imgW, -(parentCTM.a*ctm.c + parentCTM.c*ctm.d) / imgH, parentCTM.a*x0 + parentCTM.c*y0 + parentCTM.e},
+			{-(parentCTM.b*ctm.a + parentCTM.d*ctm.b) / imgW, (parentCTM.b*ctm.c + parentCTM.d*ctm.d) / imgH, pageH - (parentCTM.b*x0 + parentCTM.d*y0 + parentCTM.f)},
+		}
+	} else {
+		if parentCTM != nil {
+			ctm = parentCTM.Multiply(ctm)
+		}
+		m = canvas.Matrix{
+			{ctm.a / imgW, -ctm.c / imgH, box.X + ctm.c + ctm.e},
+			{-ctm.b / imgW, ctm.d / imgH, pageH - box.Y - ctm.d - ctm.f},
+		}
 	}
 	if pad > 0 {
 		p := float64(pad)
@@ -868,8 +878,8 @@ func patternColor(fillColor *FillColor) color.Color {
 }
 
 // renderText 渲染文本
-// 入参: ctx 画布上下文, obj 文本对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, parentCTM 父级CTM
-func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64, defaultFill, defaultStroke color.Color, parentCTM *Matrix) {
+// 入参: ctx 画布上下文, obj 文本对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM
+func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64, defaultFill, defaultStroke color.Color, parentCTM *Matrix, boundaryInCTM bool) {
 	if obj.Visible != nil && !*obj.Visible {
 		return
 	}
@@ -880,7 +890,8 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			bx, by = box.X, box.Y
 		}
 	}
-	ctm := NewMatrix(obj.CTM)
+	localCTM := NewMatrix(obj.CTM)
+	ctm := localCTM
 	if parentCTM != nil {
 		ctm = parentCTM.Multiply(ctm)
 	}
@@ -1002,8 +1013,15 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					cy += dy
 				}
 			}
-			tx, ty := ctm.Transform(cx, cy)
-			canvasX, canvasY := tx+bx, pageH-(ty+by)
+			var canvasX, canvasY float64
+			if boundaryInCTM && parentCTM != nil {
+				tx, ty := localCTM.Transform(cx, cy)
+				tx, ty = parentCTM.Transform(tx+bx, ty+by)
+				canvasX, canvasY = tx, pageH-ty
+			} else {
+				tx, ty := ctm.Transform(cx, cy)
+				canvasX, canvasY = tx+bx, pageH-(ty+by)
+			}
 			textWidth := face.TextWidth(str) * hScale
 			glyphFillPaint := fillPaint
 			if fillColorNode != nil && fillColorNode.AxialShd != nil {
