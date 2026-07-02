@@ -1380,6 +1380,7 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 	if len(s.Data) > 0 {
 		img, _, err := image.Decode(bytes.NewReader(s.Data))
 		if err == nil {
+			img = stampImageWithTransparentWhite(img)
 			ctx.Push()
 			ctx.Translate(x, screenY)
 			ctx.Scale(w/float64(img.Bounds().Dx()), h/float64(img.Bounds().Dy()))
@@ -1388,6 +1389,37 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 			return
 		}
 	}
+}
+
+// stampImageWithTransparentWhite 处理印章图片白色底色
+// 入参: img 印章图片对象
+// 返回: image.Image 处理后的印章图片对象
+func stampImageWithTransparentWhite(img image.Image) image.Image {
+	bounds := img.Bounds()
+	out := image.NewNRGBA(bounds)
+	hasAlpha := false
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			c := color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+			if c.A < 255 {
+				hasAlpha = true
+			}
+			out.SetNRGBA(x, y, c)
+		}
+	}
+	if hasAlpha {
+		return img
+	}
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			c := out.NRGBAAt(x, y)
+			if c.R >= 250 && c.G >= 250 && c.B >= 250 {
+				c.A = 0
+				out.SetNRGBA(x, y, c)
+			}
+		}
+	}
+	return out
 }
 
 // buildPath 解析路径并返回Canvas Path
