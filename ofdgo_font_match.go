@@ -78,6 +78,12 @@ var fontMatchRules = []fontMatchRule{
 		System: "Arial",
 	},
 	{
+		Keys:   []string{"helvetica"},
+		Names:  []string{"Helvetica", "Arial"},
+		Files:  []string{"arial.ttf", "arial*.ttf"},
+		System: "Arial",
+	},
+	{
 		Keys:   []string{"couriernew", "courier"},
 		Names:  []string{"Courier New", "CourierNew", "Courier"},
 		Files:  []string{"cour.ttf", "courier new*.ttf", "courier*.ttf"},
