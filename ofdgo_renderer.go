@@ -1357,7 +1357,17 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 			defer reader.Close()
 			doc, err := reader.Doc()
 			if err == nil {
-				renderer := NewRenderer(reader)
+				opts := []RendererOption{
+					WithDPI(r.DPI),
+					WithAnnotations(r.RenderAnnotations),
+				}
+				if len(r.fontDirs) > 0 {
+					opts = append(opts, WithFontDirs(r.fontDirs...))
+				}
+				if len(r.fontFS) > 0 {
+					opts = append(opts, WithFontFS(r.fontFS...))
+				}
+				renderer := NewRenderer(reader, opts...)
 				for _, pageRef := range doc.Pages.Page {
 					content, err := reader.PageContent(pageRef)
 					if err != nil {
