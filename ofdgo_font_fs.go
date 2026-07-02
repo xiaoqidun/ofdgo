@@ -112,8 +112,8 @@ func (fsys *FontFS) Glob(pattern string) ([]string, error) {
 // 入参: names 字体名称列表
 // 返回: string 匹配字体文件, bool 是否为名称匹配
 func (fsys *FontFS) Match(names ...string) (string, bool) {
-	for _, name := range fontCandidateNames(names...) {
-		if matches := fsys.match(name + "*"); len(matches) > 0 {
+	for _, pattern := range fontFilePatterns(names...) {
+		if matches := fsys.match(pattern); len(matches) > 0 {
 			return matches[0], true
 		}
 	}
@@ -127,11 +127,15 @@ func (fsys *FontFS) Match(names ...string) (string, bool) {
 // 入参: pattern 匹配模式
 // 返回: []string 字体文件列表
 func (fsys *FontFS) match(pattern string) []string {
-	var matches []string
+	buckets := make([][]string, fontMatchFuzzy+1)
 	for _, name := range fsys.names {
-		if matchFontPattern(pattern, name) {
-			matches = append(matches, name)
+		if rank := matchFontPatternRank(pattern, name); rank != fontMatchNone {
+			buckets[rank] = append(buckets[rank], name)
 		}
+	}
+	var matches []string
+	for rank := fontMatchExact; rank <= fontMatchFuzzy; rank++ {
+		matches = append(matches, buckets[rank]...)
 	}
 	return matches
 }
@@ -140,8 +144,8 @@ func (fsys *FontFS) match(pattern string) []string {
 // 返回: []string 字体文件列表
 func (fsys *FontFS) fallbackFonts() []string {
 	for _, item := range fontFallbackFiles {
-		if _, ok := fsys.files[item]; ok {
-			return []string{item}
+		if matches := fsys.match(item); len(matches) > 0 {
+			return []string{matches[0]}
 		}
 	}
 	if len(fsys.names) > 0 {
@@ -179,33 +183,49 @@ func cleanFontName(name string) string {
 	return strings.ToLower(name)
 }
 
-// matchFontPattern 匹配字体文件模式
+// matchFontPatternRank 获取字体文件匹配等级
 // 入参: pattern 匹配模式, name 字体文件名
-// 返回: bool 是否匹配
-func matchFontPattern(pattern, name string) bool {
-	if ok, _ := path.Match(pattern, name); ok {
-		return true
-	}
-	if ok, _ := path.Match(strings.ToLower(pattern), strings.ToLower(name)); ok {
-		return true
-	}
-	stem := strings.TrimSuffix(pattern, "*")
-	stem = strings.TrimSuffix(stem, path.Ext(stem))
-	stem = fontNormalizeName(stem)
+// 返回: int 匹配等级
+func matchFontPatternRank(pattern, name string) int {
+	exactPath, _ := path.Match(pattern, name)
+	lowerPath, _ := path.Match(strings.ToLower(pattern), strings.ToLower(name))
+	stem := fontPatternStem(pattern)
 	if stem == "" {
-		return false
+		if exactPath || lowerPath {
+			return fontMatchFuzzy
+		}
+		return fontMatchNone
 	}
 	name = fontNormalizeName(name)
-	if strings.HasPrefix(name, stem) {
-		return true
+	if name == stem {
+		return fontMatchExact
 	}
-	for _, alias := range fontCandidateNames(stem) {
+	aliases := fontExactCandidateNames(stem)
+	for _, alias := range aliases {
 		alias = fontNormalizeName(alias)
-		if alias != "" && strings.HasPrefix(name, alias) {
-			return true
+		if alias != "" && name == alias {
+			return fontMatchExact
 		}
 	}
-	return false
+	if strings.HasPrefix(name, stem) {
+		return fontMatchPartial
+	}
+	for _, alias := range aliases {
+		alias = fontNormalizeName(alias)
+		if alias != "" && strings.HasPrefix(name, alias) {
+			return fontMatchPartial
+		}
+	}
+	if exactPath || lowerPath || strings.Contains(name, stem) {
+		return fontMatchFuzzy
+	}
+	for _, alias := range aliases {
+		alias = fontNormalizeName(alias)
+		if alias != "" && strings.Contains(name, alias) {
+			return fontMatchFuzzy
+		}
+	}
+	return fontMatchNone
 }
 
 // fontMemFile 内存字体文件

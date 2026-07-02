@@ -470,6 +470,23 @@ func (r *Renderer) initCommon() {
 	r.defaultFontLoaded = r.loadDefaultFonts()
 }
 
+// childRenderer 创建继承当前配置的子渲染器
+// 入参: reader 子阅读器
+// 返回: *Renderer 子渲染器
+func (r *Renderer) childRenderer(reader *Reader) *Renderer {
+	opts := []RendererOption{
+		WithDPI(r.DPI),
+		WithAnnotations(r.RenderAnnotations),
+	}
+	if len(r.fontDirs) > 0 {
+		opts = append(opts, WithFontDirs(r.fontDirs...))
+	}
+	if len(r.fontFS) > 0 {
+		opts = append(opts, WithFontFS(r.fontFS...))
+	}
+	return NewRenderer(reader, opts...)
+}
+
 // renderImage 渲染图片
 // 入参: ctx 画布上下文, obj 图片对象, pageH 页面高度, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM
 func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float64, parentCTM *Matrix, boundaryInCTM bool) {
@@ -1194,14 +1211,12 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	}
 	for _, fsys := range r.fontFS {
 		for _, pattern := range fontFilePatterns(of.FontName, of.FamilyName) {
-			if matches, err := fs.Glob(fsys, pattern); err == nil {
-				for _, m := range matches {
-					resData, err := fs.ReadFile(fsys, m)
-					if err == nil {
-						if err := ff.LoadFont(resData, 0, fontStyle); err == nil {
-							r.FontMap[fontID] = ff
-							return ff
-						}
+			for _, m := range fontFSMatches(fsys, pattern) {
+				resData, err := fs.ReadFile(fsys, m)
+				if err == nil {
+					if err := ff.LoadFont(resData, 0, fontStyle); err == nil {
+						r.FontMap[fontID] = ff
+						return ff
 					}
 				}
 			}
@@ -1262,13 +1277,29 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 // 入参: dir 目录, pattern 模式
 // 返回: []string 文件列表
 func (r *Renderer) globFontFiles(dir, pattern string) []string {
-	matches, _ := filepath.Glob(filepath.Join(dir, pattern))
-	var result []string
-	for _, m := range matches {
-		ext := strings.ToLower(filepath.Ext(m))
-		if ext == ".ttf" || ext == ".otf" || ext == ".ttc" {
-			result = append(result, m)
+	seen := make(map[string]bool)
+	buckets := make([][]string, fontMatchFuzzy+1)
+	add := func(name string, rank int) {
+		if !isFontFileName(name) {
+			return
 		}
+		if rank == fontMatchNone || seen[name] {
+			return
+		}
+		seen[name] = true
+		buckets[rank] = append(buckets[rank], name)
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, pattern))
+	for _, m := range matches {
+		add(m, matchFontPatternRank(pattern, filepath.Base(m)))
+	}
+	matches, _ = filepath.Glob(filepath.Join(dir, "*"))
+	for _, m := range matches {
+		add(m, matchFontPatternRank(pattern, filepath.Base(m)))
+	}
+	var result []string
+	for rank := fontMatchExact; rank <= fontMatchFuzzy; rank++ {
+		result = append(result, buckets[rank]...)
 	}
 	return result
 }
@@ -1357,17 +1388,7 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 			defer reader.Close()
 			doc, err := reader.Doc()
 			if err == nil {
-				opts := []RendererOption{
-					WithDPI(r.DPI),
-					WithAnnotations(r.RenderAnnotations),
-				}
-				if len(r.fontDirs) > 0 {
-					opts = append(opts, WithFontDirs(r.fontDirs...))
-				}
-				if len(r.fontFS) > 0 {
-					opts = append(opts, WithFontFS(r.fontFS...))
-				}
-				renderer := NewRenderer(reader, opts...)
+				renderer := r.childRenderer(reader)
 				for _, pageRef := range doc.Pages.Page {
 					content, err := reader.PageContent(pageRef)
 					if err != nil {

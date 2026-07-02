@@ -157,6 +157,13 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 // 入参: names 字体名称列表
 // 返回: string 匹配字体文件, bool 是否为名称匹配
 func (r *Renderer) matchFont(names ...string) (string, bool) {
+	for _, dir := range r.fontDirs {
+		for _, pattern := range fontFilePatterns(names...) {
+			if matches := r.globFontFiles(dir, pattern); len(matches) > 0 {
+				return matches[0], true
+			}
+		}
+	}
 	for _, fsys := range r.fontFS {
 		if matcher, ok := fsys.(interface {
 			Match(...string) (string, bool)
@@ -170,9 +177,11 @@ func (r *Renderer) matchFont(names ...string) (string, bool) {
 			return matched, true
 		}
 	}
-	for _, fsys := range r.fontFS {
-		if matched := fallbackFontFS(fsys); matched != "" {
-			return matched, false
+	if !canLoadSystemFonts() {
+		for _, fsys := range r.fontFS {
+			if matched := fallbackFontFS(fsys); matched != "" {
+				return matched, false
+			}
 		}
 	}
 	return "", false
@@ -183,8 +192,7 @@ func (r *Renderer) matchFont(names ...string) (string, bool) {
 // 返回: string 匹配字体文件
 func matchFontFS(fsys fs.FS, names ...string) string {
 	for _, pattern := range fontFilePatterns(names...) {
-		matches, err := fs.Glob(fsys, pattern)
-		if err == nil && len(matches) > 0 {
+		if matches := fontFSMatches(fsys, pattern); len(matches) > 0 {
 			return matches[0]
 		}
 	}
@@ -195,11 +203,49 @@ func matchFontFS(fsys fs.FS, names ...string) string {
 // 入参: fsys 字体文件系统
 // 返回: string 回退字体文件
 func fallbackFontFS(fsys fs.FS) string {
-	matches, err := fs.Glob(fsys, "*")
-	if err == nil && len(matches) > 0 {
-		return matches[0]
+	for _, pattern := range fontFallbackFiles {
+		if matches := fontFSMatches(fsys, pattern); len(matches) > 0 {
+			return matches[0]
+		}
+	}
+	all, _ := fs.Glob(fsys, "*")
+	for _, name := range all {
+		if isFontFileName(name) {
+			return name
+		}
 	}
 	return ""
+}
+
+// fontFSMatches 匹配字体文件系统中的字体文件
+// 入参: fsys 字体文件系统, pattern 匹配模式
+// 返回: []string 字体文件列表
+func fontFSMatches(fsys fs.FS, pattern string) []string {
+	seen := make(map[string]bool)
+	buckets := make([][]string, fontMatchFuzzy+1)
+	add := func(name string, rank int) {
+		if !isFontFileName(name) {
+			return
+		}
+		if rank == fontMatchNone || seen[name] {
+			return
+		}
+		seen[name] = true
+		buckets[rank] = append(buckets[rank], name)
+	}
+	matches, _ := fs.Glob(fsys, pattern)
+	for _, name := range matches {
+		add(name, matchFontPatternRank(pattern, path.Base(name)))
+	}
+	all, _ := fs.Glob(fsys, "*")
+	for _, name := range all {
+		add(name, matchFontPatternRank(pattern, path.Base(name)))
+	}
+	var result []string
+	for rank := fontMatchExact; rank <= fontMatchFuzzy; rank++ {
+		result = append(result, buckets[rank]...)
+	}
+	return result
 }
 
 // fontUsage 统计文档字体使用次数
