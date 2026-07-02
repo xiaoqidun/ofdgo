@@ -1000,6 +1000,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		}
 		dxs, dys := parseFloats(tc.DeltaX), parseFloats(tc.DeltaY)
 		xs, ys := parseFloats(tc.X), parseFloats(tc.Y)
+		drawAsPath := embeddedFont || textCodePositioned(tc)
 		cx, cy := 0.0, 0.0
 		if len(xs) > 0 {
 			cx = xs[0]
@@ -1054,7 +1055,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 						x, y = 0, 0
 						defer ctx.Pop()
 					}
-					if embeddedFont {
+					if drawAsPath {
 						path, width := face.ToPath(str)
 						textWidth = width * hScale
 						ctx.DrawPath(x, y, path)
@@ -1099,6 +1100,16 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		codePos += len(runes)
 	}
 	ctx.Pop()
+}
+
+// textCodePositioned 判断文本编码是否带显式定位
+// 入参: textCode 文本编码
+// 返回: bool 是否带显式定位
+func textCodePositioned(textCode TextCode) bool {
+	return strings.TrimSpace(textCode.DeltaX) != "" ||
+		strings.TrimSpace(textCode.DeltaY) != "" ||
+		len(parseFloats(textCode.X)) > 1 ||
+		len(parseFloats(textCode.Y)) > 1
 }
 
 // textDelta 获取文本偏移量
