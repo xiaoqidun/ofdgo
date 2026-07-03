@@ -1,4 +1,4 @@
 .idea/
 .vscode/
 .devcontainer/
-assets\webui\ofdgo.wasm
+assets/webui/ofdgo.wasm
