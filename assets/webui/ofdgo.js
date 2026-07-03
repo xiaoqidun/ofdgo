@@ -376,6 +376,27 @@ async function queryLocalFonts() {
 	return available;
 }
 
+async function autoLoadDocumentLocalFonts(openSeq) {
+	if (!externalDocumentFontNames().length || !canReadLocalFonts()) {
+		return false;
+	}
+	setProgress("正在匹配字体", 62, STATUS.fonts);
+	try {
+		const available = state.systemFontCatalog.length ? state.systemFontCatalog : await queryLocalFonts();
+		if (openSeq !== state.openSeq) {
+			return false;
+		}
+		return await loadDocumentLocalFonts(available, openSeq);
+	} catch (err) {
+		if (err && err.name === "NotAllowedError") {
+			setStatus("未授权读取系统字体");
+			return false;
+		}
+		setStatus(String(err.message || err));
+		return false;
+	}
+}
+
 async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	const docFonts = state.doc?.fonts || [];
 	const docNames = externalDocumentFontNames();
@@ -729,8 +750,8 @@ async function openDocument(options = {}) {
 		await ensureWASM();
 	}
 	const openSeq = options.openSeq || (state.openSeq += 1);
-	const autoFonts = !options.skipAutoFonts && state.systemFontCatalog.length > 0;
-	if (autoFonts) {
+	const resetLocalFonts = !options.skipAutoFonts;
+	if (resetLocalFonts) {
 		state.localFonts = [];
 		updateFontSummary();
 		renderFontList();
@@ -742,7 +763,7 @@ async function openDocument(options = {}) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const doc = callWASM("ofdgoOpen", state.ofdBytes, autoFonts ? uploadedFonts() : allFonts());
+		const doc = callWASM("ofdgoOpen", state.ofdBytes, resetLocalFonts ? uploadedFonts() : allFonts());
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -752,20 +773,17 @@ async function openDocument(options = {}) {
 		state.pageIndex = pageIndex;
 		state.scale = 1;
 		state.fitMode = options.fitMode || "width";
-		if (!options.skipAutoFonts && state.systemFontCatalog.length > 0) {
-			setProgress("正在匹配字体", 62, STATUS.fonts);
-			if (await loadDocumentLocalFonts(state.systemFontCatalog, openSeq)) {
-				if (openSeq !== state.openSeq) {
-					return;
-				}
-				await openDocument({
-					pageIndex,
-					fitMode: state.fitMode,
-					skipAutoFonts: true,
-					openSeq,
-				});
+		if (!options.skipAutoFonts && await autoLoadDocumentLocalFonts(openSeq)) {
+			if (openSeq !== state.openSeq) {
 				return;
 			}
+			await openDocument({
+				pageIndex,
+				fitMode: state.fitMode,
+				skipAutoFonts: true,
+				openSeq,
+			});
+			return;
 		}
 		if (openSeq !== state.openSeq) {
 			return;
