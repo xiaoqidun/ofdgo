@@ -1,6 +1,6 @@
 .idea/
 .vscode/
 .devcontainer/
+assets/webui/ofdgo.wasm
 *.exe
 *.exe~
-assets/webui/ofdgo.wasm
