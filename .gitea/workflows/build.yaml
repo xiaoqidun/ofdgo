@@ -1,0 +1,32 @@
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: cn
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+      - name: docker goenv
+        uses: docker://ccr.ccs.tencentyun.com/xiaoqidun/goenv:latest
+        with:
+          args: bash .gitea/workflows/build.sh
+      - name: docker setup
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            "env.http_proxy=${{ env.HTTP_PROXY }}"
+            "env.https_proxy=${{ env.HTTPS_PROXY }}"
+            "env.no_proxy=${{ env.NO_PROXY }}"
+      - name: docker login
+        uses: docker/login-action@v3
+        with:
+          registry: ccr.ccs.tencentyun.com
+          username: ${{ secrets.docker_username }}
+          password: ${{ secrets.docker_password }}
+      - name: docker build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          provenance: false
+          tags: |
+            ccr.ccs.tencentyun.com/xiaoqidun/ofdgo:latest
