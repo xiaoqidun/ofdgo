@@ -373,7 +373,7 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	const docNames = externalDocumentFontNames();
 	if (!docFonts.length) {
 		state.localFonts = [];
-		setStatus("当前 OFD 未声明字体");
+		setStatus("暂无字体");
 		updateFontSummary();
 		renderFontList();
 		return false;
@@ -1356,7 +1356,7 @@ function renderDocumentFonts() {
 	if (!fonts.length) {
 		const empty = document.createElement("div");
 		empty.className = "font-empty";
-		empty.textContent = "未声明字体";
+		empty.textContent = "暂无字体";
 		el.docFontList.append(empty);
 		return;
 	}
