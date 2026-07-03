@@ -21,10 +21,10 @@ const FIT_WIDTH_MARGIN = 72;
 const FIT_HEIGHT_MARGIN = 86;
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const STATUS = {
-	ready: "选择 OFD 文件开始阅读",
+	ready: "选择 OFD 文件",
 	opening: "正在打开 OFD",
-	engine: "正在准备渲染引擎",
-	recovering: "正在恢复渲染引擎",
+	engine: "正在准备引擎",
+	recovering: "正在恢复引擎",
 	fonts: "正在匹配字体",
 	exporting: "正在导出 PDF",
 };
@@ -135,9 +135,17 @@ COMPACT_LAYOUT.addEventListener("change", syncLayoutMode);
 el.viewerPanel.addEventListener("scroll", () => {
 	schedulePageSync();
 });
+el.viewerPanel.addEventListener("dblclick", openOFDFromViewer);
 
 updateSidebarState();
 boot();
+
+function openOFDFromViewer() {
+	if (state.doc || document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	el.ofdInput.click();
+}
 
 function toggleSidebar(side) {
 	if (side === "pages") {
@@ -168,10 +176,10 @@ function syncLayoutMode(event) {
 }
 
 async function boot() {
-	setBusy(true, "准备渲染引擎", 8, STATUS.engine);
+	setBusy(true, "正在准备引擎", 8, STATUS.engine);
 	try {
 		await ensureWASM();
-		setProgress("准备就绪", 70);
+		setProgress("引擎准备完成", 70);
 		setEmpty("选择 OFD 文件");
 		updateFontSummary();
 		renderFontList();
@@ -210,18 +218,18 @@ async function loadWASM() {
 	clearWASMCallbacks();
 	const go = new Go();
 	if (!wasmModule) {
-		setProgress("下载渲染引擎", 16);
+		setProgress("正在下载引擎", 16);
 		const response = await fetch("./ofdgo.wasm");
 		try {
-			setProgress("编译渲染引擎", 35);
+			setProgress("正在编译引擎", 35);
 			wasmModule = await WebAssembly.compileStreaming(response.clone());
 		} catch {
 			const bytes = await response.arrayBuffer();
-			setProgress("编译渲染引擎", 45);
+			setProgress("正在编译引擎", 45);
 			wasmModule = await WebAssembly.compile(bytes);
 		}
 	}
-	setProgress("启动渲染引擎", 58);
+	setProgress("正在启动引擎", 58);
 	const instance = await WebAssembly.instantiate(wasmModule, go.importObject);
 	go.run(instance).then(() => {
 		markWASMExited(wasmSeq);
@@ -270,7 +278,7 @@ async function recoverWASM() {
 	state.wasmRecoveries += 1;
 	const pageIndex = state.pageIndex;
 	const fitMode = state.fitMode || "width";
-	setBusy(true, "恢复渲染引擎", 18, STATUS.recovering);
+	setBusy(true, "正在恢复引擎", 18, STATUS.recovering);
 	try {
 		await ensureWASM();
 		await openDocument({
@@ -311,7 +319,7 @@ async function openSelectedOFD() {
 		return;
 	}
 	state.wasmRecoveries = 0;
-	setBusy(true, "读取 OFD 文件", 10, STATUS.opening);
+	setBusy(true, "正在读取 OFD", 10, STATUS.opening);
 	try {
 		state.fileName = file.name || "ofdgo.ofd";
 		state.ofdBytes = new Uint8Array(await file.arrayBuffer());
@@ -340,7 +348,7 @@ async function loadLocalFonts() {
 		setStatus("当前浏览器不支持读取系统字体");
 		return;
 	}
-	setBusy(true, state.doc ? "匹配系统字体" : "请求系统字体授权", 12, state.doc ? STATUS.fonts : "正在请求系统字体授权");
+	setBusy(true, state.doc ? "正在匹配字体" : "正在请求授权", 12, state.doc ? STATUS.fonts : "正在请求授权");
 	try {
 		await nextFrame();
 		const available = await queryLocalFonts();
@@ -395,7 +403,7 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	const emptyStatus = available.length === 0 ? "未读取到系统字体" : "未匹配到文档所需字体";
 	const fonts = [];
 	for (let i = 0; i < selected.length; i += 1) {
-		setProgress(`读取系统字体 ${i + 1}/${selected.length}`, 20 + Math.round(i / Math.max(1, selected.length) * 60));
+		setProgress(`正在读取字体 ${i + 1}/${selected.length}`, 20 + Math.round(i / Math.max(1, selected.length) * 60));
 		const item = selected[i];
 		const blob = await item.blob();
 		if (openSeq !== state.openSeq) {
@@ -727,9 +735,9 @@ async function openDocument(options = {}) {
 		updateFontSummary();
 		renderFontList();
 	}
-	setBusy(true, "打开 OFD", 20, STATUS.opening);
+	setBusy(true, "正在打开 OFD", 20, STATUS.opening);
 	try {
-		setProgress("解析 OFD", 52);
+		setProgress("正在解析 OFD", 52);
 		await nextFrame();
 		if (openSeq !== state.openSeq) {
 			return;
@@ -745,7 +753,7 @@ async function openDocument(options = {}) {
 		state.scale = 1;
 		state.fitMode = options.fitMode || "width";
 		if (!options.skipAutoFonts && state.systemFontCatalog.length > 0) {
-			setProgress("匹配系统字体", 62, STATUS.fonts);
+			setProgress("正在匹配字体", 62, STATUS.fonts);
 			if (await loadDocumentLocalFonts(state.systemFontCatalog, openSeq)) {
 				if (openSeq !== state.openSeq) {
 					return;
@@ -795,9 +803,9 @@ async function renderPage(index, options = {}) {
 		return;
 	}
 	if (options.keepBusy) {
-		setProgress("渲染页面", 76);
+		setProgress("正在渲染页面", 76);
 	} else {
-		setBusy(true, "渲染页面", 35, `正在渲染第 ${index + 1} 页`);
+		setBusy(true, "正在渲染页面", 35, "正在渲染页面");
 	}
 	try {
 		setCurrentPage(index);
@@ -832,17 +840,23 @@ async function exportPDF() {
 		return;
 	}
 	const openSeq = state.openSeq;
-	setBusy(true, "生成 PDF", 18, STATUS.exporting);
+	el.exportButton.disabled = true;
+	setBusy(true, "正在准备 PDF", 18, STATUS.exporting);
 	try {
-		await nextFrame();
+		await waitForPaint();
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		setProgress("导出 PDF", 45);
+		setProgress("正在生成 PDF", 45);
+		await waitForPaint();
+		if (openSeq !== state.openSeq) {
+			return;
+		}
 		const result = callWASM("ofdgoExportPDF");
 		if (openSeq !== state.openSeq) {
 			return;
 		}
+		setProgress("正在保存 PDF", 86);
 		const bytes = base64ToBytes(result.base64);
 		const blob = new Blob([bytes], { type: "application/pdf" });
 		const link = document.createElement("a");
@@ -861,6 +875,7 @@ async function exportPDF() {
 	} finally {
 		if (openSeq === state.openSeq) {
 			setBusy(false);
+			updateControls();
 		}
 	}
 }
@@ -1609,4 +1624,8 @@ function formatBytes(size) {
 
 function nextFrame() {
 	return new Promise((resolve) => requestAnimationFrame(resolve));
+}
+
+function waitForPaint() {
+	return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 }
