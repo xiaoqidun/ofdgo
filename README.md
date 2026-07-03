@@ -5,6 +5,11 @@
 # 在线体验
 [OFDGo WebUI](https://ofdgo.aite.me/)，将OFDGo编译为WASM提供服务
 
+# 一键部署
+```shell
+docker run -d -p 80:80 ccr.ccs.tencentyun.com/xiaoqidun/ofdgo:latest
+```
+
 # 构建指南
 ```batch
 :: 1. 编译WASM资源
