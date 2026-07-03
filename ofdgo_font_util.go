@@ -76,6 +76,165 @@ func checkMissingCmap(data []byte) bool {
 	return true
 }
 
+// parseCmapMappings 解析 cmap 字符映射
+// 入参: data cmap表数据
+// 返回: map[rune]uint16 字符到字形映射
+func parseCmapMappings(data []byte) map[rune]uint16 {
+	if len(data) < 4 {
+		return nil
+	}
+	numTables := int(binary.BigEndian.Uint16(data[2:4]))
+	result := make(map[rune]uint16)
+	for i := 0; i < numTables; i++ {
+		pos := 4 + i*8
+		if pos+8 > len(data) {
+			break
+		}
+		platformID := binary.BigEndian.Uint16(data[pos : pos+2])
+		if platformID != 0 && platformID != 3 {
+			continue
+		}
+		offset := int(binary.BigEndian.Uint32(data[pos+4 : pos+8]))
+		if offset+2 > len(data) {
+			continue
+		}
+		switch binary.BigEndian.Uint16(data[offset : offset+2]) {
+		case 0:
+			parseCmapFormat0(data[offset:], result)
+		case 4:
+			parseCmapFormat4(data[offset:], result)
+		case 6:
+			parseCmapFormat6(data[offset:], result)
+		case 12:
+			parseCmapFormat12(data[offset:], result)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// parseCmapFormat0 解析 cmap format 0
+// 入参: data 子表数据, result 字符映射
+func parseCmapFormat0(data []byte, result map[rune]uint16) {
+	if len(data) < 262 {
+		return
+	}
+	for i := 0; i < 256; i++ {
+		gid := uint16(data[6+i])
+		if gid != 0 {
+			result[rune(i)] = gid
+		}
+	}
+}
+
+// parseCmapFormat4 解析 cmap format 4
+// 入参: data 子表数据, result 字符映射
+func parseCmapFormat4(data []byte, result map[rune]uint16) {
+	if len(data) < 16 {
+		return
+	}
+	length := int(binary.BigEndian.Uint16(data[2:4]))
+	if length > len(data) {
+		length = len(data)
+	}
+	segCount := int(binary.BigEndian.Uint16(data[6:8]) / 2)
+	endPos := 14
+	startPos := endPos + segCount*2 + 2
+	deltaPos := startPos + segCount*2
+	rangePos := deltaPos + segCount*2
+	if rangePos+segCount*2 > length {
+		return
+	}
+	for i := 0; i < segCount; i++ {
+		end := binary.BigEndian.Uint16(data[endPos+i*2:])
+		start := binary.BigEndian.Uint16(data[startPos+i*2:])
+		delta := int16(binary.BigEndian.Uint16(data[deltaPos+i*2:]))
+		rangeOffsetPos := rangePos + i*2
+		rangeOffset := binary.BigEndian.Uint16(data[rangeOffsetPos:])
+		if start == 0xFFFF && end == 0xFFFF {
+			continue
+		}
+		for c := start; c <= end; c++ {
+			var gid uint16
+			if rangeOffset == 0 {
+				gid = uint16(int(c) + int(delta))
+			} else {
+				gidPos := rangeOffsetPos + int(rangeOffset) + int(c-start)*2
+				if gidPos+2 > length {
+					continue
+				}
+				gid = binary.BigEndian.Uint16(data[gidPos:])
+				if gid != 0 {
+					gid = uint16(int(gid) + int(delta))
+				}
+			}
+			if gid != 0 {
+				result[rune(c)] = gid
+			}
+			if c == 0xFFFF {
+				break
+			}
+		}
+	}
+}
+
+// parseCmapFormat6 解析 cmap format 6
+// 入参: data 子表数据, result 字符映射
+func parseCmapFormat6(data []byte, result map[rune]uint16) {
+	if len(data) < 10 {
+		return
+	}
+	firstCode := int(binary.BigEndian.Uint16(data[6:8]))
+	entryCount := int(binary.BigEndian.Uint16(data[8:10]))
+	for i := 0; i < entryCount && 10+i*2+2 <= len(data); i++ {
+		gid := binary.BigEndian.Uint16(data[10+i*2:])
+		if gid != 0 {
+			result[rune(firstCode+i)] = gid
+		}
+	}
+}
+
+// parseCmapFormat12 解析 cmap format 12
+// 入参: data 子表数据, result 字符映射
+func parseCmapFormat12(data []byte, result map[rune]uint16) {
+	if len(data) < 16 {
+		return
+	}
+	length := int(binary.BigEndian.Uint32(data[4:8]))
+	if length > len(data) {
+		length = len(data)
+	}
+	nGroups := int(binary.BigEndian.Uint32(data[12:16]))
+	for i := 0; i < nGroups; i++ {
+		pos := 16 + i*12
+		if pos+12 > length {
+			break
+		}
+		startChar := binary.BigEndian.Uint32(data[pos:])
+		endChar := binary.BigEndian.Uint32(data[pos+4:])
+		startGID := binary.BigEndian.Uint32(data[pos+8:])
+		for c := startChar; c <= endChar; c++ {
+			gid := startGID + c - startChar
+			if gid != 0 && gid <= 0xFFFF {
+				result[rune(c)] = uint16(gid)
+			}
+			if c == endChar {
+				break
+			}
+		}
+	}
+}
+
+// addPackedGlyphMapping 添加字形ID私有映射
+// 入参: mapping 字符映射, numGlyphs 字形数量
+func addPackedGlyphMapping(mapping map[rune]uint16, numGlyphs uint16) {
+	for i := uint16(0); i < numGlyphs; i++ {
+		mapping[packedGlyphRune(i)] = i
+	}
+}
+
 // buildHeadTable 构建 head 表
 // 入参: unitsPerEm 每em单位数
 // 返回: []byte head表数据

@@ -32,6 +32,7 @@ import (
 	"github.com/tdewolff/canvas/renderers/pdf"
 	"github.com/tdewolff/canvas/renderers/rasterizer"
 	_ "github.com/xiaoqidun/jbig2"
+	_ "golang.org/x/image/bmp"
 )
 
 // Renderer 渲染器实现
@@ -501,7 +502,7 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	if err != nil {
 		return
 	}
-	img, _, err := image.Decode(bytes.NewReader(imgData))
+	img, _, err := decodeImageData(imgData)
 	if err != nil {
 		return
 	}
@@ -1420,7 +1421,7 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 		}
 	}
 	if len(s.Data) > 0 {
-		img, _, err := image.Decode(bytes.NewReader(s.Data))
+		img, _, err := decodeImageData(s.Data)
 		if err == nil {
 			img = stampImageWithTransparentWhite(img)
 			ctx.Push()

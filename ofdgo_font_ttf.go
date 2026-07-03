@@ -120,7 +120,7 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 	if !missingPost && hasBadPostTable(existingTables["post"], numGlyphs, !isCFFSfnt) {
 		missingPost = true
 	}
-	if !missingHead && !missingMaxp && !missingHhea && !missingHmtx &&
+	if !fixCmap && !missingHead && !missingMaxp && !missingHhea && !missingHmtx &&
 		!missingOS2 && !missingCmap && !missingName && !missingPost && !malformedDirectory {
 		return false, data, nil, false, nil
 	}
@@ -166,16 +166,17 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 		newTables["OS/2"] = buildOS2TableWithMetrics(ascender, descender)
 	}
 	var mapping map[rune]uint16
-	if missingCmap && fixCmap {
-		if isCFFSfnt {
+	if fixCmap {
+		if !missingCmap {
+			mapping = parseCmapMappings(newTables["cmap"])
+		}
+		if len(mapping) == 0 && isCFFSfnt {
 			mapping = getCmapFromCFF(newTables["CFF "], int(numGlyphs))
 		}
 		if len(mapping) == 0 {
 			mapping = make(map[rune]uint16)
-			for i := uint16(0); i < numGlyphs; i++ {
-				mapping[packedGlyphRune(i)] = i
-			}
 		}
+		addPackedGlyphMapping(mapping, numGlyphs)
 		newTables["cmap"] = buildCmapTable(numGlyphs, mapping)
 	}
 	if missingName && fixName {

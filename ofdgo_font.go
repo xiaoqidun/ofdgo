@@ -20,6 +20,7 @@ import (
 
 // FixFontDataAggressive 激进修复字体数据
 // 尝试修复缺失表(OS/2, cmap等)的TrueType字体或包装CFF裸数据
+// 对显式字形映射补充私有字符cmap，便于按glyph id渲染
 // 入参: data 原始字体数据, fixCmap 是否修复cmap, fixName 是否修复name
 // 返回: bool 是否修复, []byte 修复后数据, map[rune]uint16 字符映射, bool 是否缺失cmap, error 错误信息
 func FixFontDataAggressive(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uint16, bool, error) {

@@ -19,7 +19,6 @@ import (
 	"encoding/asn1"
 	"encoding/binary"
 	"encoding/xml"
-	"image"
 	"strings"
 )
 
@@ -220,6 +219,8 @@ func normalizeSealType(s string) string {
 	switch s {
 	case "jpg":
 		return "jpeg"
+	case "bmp":
+		return "bmp"
 	case "jb2", "gbig2":
 		return "jbig2"
 	default:
@@ -232,7 +233,7 @@ func normalizeSealType(s string) string {
 // 返回: bool 是否可渲染
 func isSealMediaType(s string) bool {
 	switch s {
-	case "png", "jpeg", "jbig2", "ofd":
+	case "png", "jpeg", "bmp", "jbig2", "ofd":
 		return true
 	default:
 		return false
@@ -286,7 +287,7 @@ func zipDataEnd(data []byte) int {
 // 入参: data 原始数据
 // 返回: string 媒体类型, []byte 图片数据
 func probeImageMedia(data []byte) (string, []byte) {
-	_, format, err := image.DecodeConfig(bytes.NewReader(data))
+	_, format, err := decodeImageConfigData(data)
 	if err != nil {
 		return "", nil
 	}
