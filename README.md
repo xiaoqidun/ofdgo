@@ -5,6 +5,18 @@
 # 在线体验
 [OFDGo WebUI](https://ofdgo.aite.me/)，将OFDGo编译为WASM提供服务
 
+# 构建指南
+```batch
+:: 1. 编译WASM资源
+set GOOS=js
+set GOARCH=wasm
+go build -o assets/webui/ofdgo.wasm -trimpath -ldflags "-s -w -buildid=" ./cmd/webui/wasm.go
+:: 2. 构建OFDGo WebUI
+set GOOS=windows
+set GOARCH=amd64
+go build -o ofdgo_webui.exe -trimpath -ldflags "-s -w -buildid=" ./cmd/webui/webui.go
+```
+
 # 安装指南
 ```shell
 go get -u github.com/xiaoqidun/ofdgo
