@@ -182,6 +182,20 @@ func (r *Renderer) RenderToSVG(page *PageContent, writer io.Writer) error {
 	return c.Write(writer, renderers.SVG())
 }
 
+// replacePDFProducer 替换PDF的Producer属性
+// 入参: data PDF字节数据
+// 返回: []byte 替换后的PDF字节数据
+func replacePDFProducer(data []byte) []byte {
+	old := []byte("/Producer(tdewolff/canvas)")
+	idx := bytes.LastIndex(data, old)
+	if idx < 0 {
+		return data
+	}
+	dst := []byte("/Producer(xiaoqidun/ofdgo)")
+	result := make([]byte, 0, len(data)-len(old)+len(dst))
+	return append(append(append(result, data[:idx]...), dst...), data[idx+len(old):]...)
+}
+
 // RenderToPDF 渲染为PDF
 // 入参: page 页面内容, writer 输出流
 // 返回: error 错误信息
@@ -190,7 +204,15 @@ func (r *Renderer) RenderToPDF(page *PageContent, writer io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return c.Write(writer, renderers.PDF())
+	var buf bytes.Buffer
+	p := pdf.New(&buf, c.W, c.H, nil)
+	p.SetInfo("", "", "", "", "xiaoqidun/ofdgo")
+	c.RenderTo(p)
+	if err := p.Close(); err != nil {
+		return err
+	}
+	_, err = writer.Write(replacePDFProducer(buf.Bytes()))
+	return err
 }
 
 // RenderToEPS 渲染为EPS
@@ -215,8 +237,9 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer) error {
 	if len(doc.Pages.Page) == 0 {
 		return fmt.Errorf("no pages found")
 	}
+	var buf bytes.Buffer
 	var p *pdf.PDF
-	for i, pgRef := range doc.Pages.Page {
+	for _, pgRef := range doc.Pages.Page {
 		page, err := r.Reader.PageContent(pgRef)
 		if err != nil {
 			continue
@@ -225,8 +248,9 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer) error {
 		if err != nil {
 			continue
 		}
-		if i == 0 {
-			p = pdf.New(writer, c.W, c.H, nil)
+		if p == nil {
+			p = pdf.New(&buf, c.W, c.H, nil)
+			p.SetInfo("", "", "", "", "xiaoqidun/ofdgo")
 		} else {
 			p.NewPage(c.W, c.H)
 		}
@@ -235,7 +259,11 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer) error {
 	if p == nil {
 		return fmt.Errorf("failed to render any page")
 	}
-	return p.Close()
+	if err := p.Close(); err != nil {
+		return err
+	}
+	_, err = writer.Write(replacePDFProducer(buf.Bytes()))
+	return err
 }
 
 // renderAnnotations 渲染页面注释外观
