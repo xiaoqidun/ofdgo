@@ -645,25 +645,10 @@ body[data-hide-meta] .meta-panel {
 }
 
 .doc-font-detail {
-	overflow: hidden;
 	color: var(--text-muted);
 	font-size: 11px;
 	line-height: 1.35;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-.doc-font-result {
-	display: grid;
-	grid-template-columns: minmax(72px, 42%) minmax(0, 1fr);
-	gap: 8px;
-}
-
-.doc-font-result span {
-	min-width: 0;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+	overflow-wrap: anywhere;
 }
 
 .font-list {

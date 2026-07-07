@@ -1535,31 +1535,16 @@ function renderDocumentFonts() {
 		if (font.embedded && font.status !== "embedded") {
 			badges.append(fontBadge("内嵌", "embedded"));
 		}
-		const result = fontResult(font);
+		const resultText = fontResult(font);
 		const metaText = fontMeta(font);
 
 		head.append(name, badges);
 		row.append(head);
-		appendFontResult(row, result);
 		appendFontDetail(row, metaText);
+		appendFontDetail(row, resultText);
 		fragment.append(row);
 	}
 	el.docFontList.append(fragment);
-}
-
-function appendFontResult(row, result) {
-	if (!result.source && !result.detail) {
-		return;
-	}
-	const detail = document.createElement("div");
-	const source = document.createElement("span");
-	const text = document.createElement("span");
-	detail.className = "doc-font-detail doc-font-result";
-	source.textContent = result.source;
-	text.textContent = result.detail;
-	detail.title = [result.source, result.detail].filter((item) => item).join(" · ");
-	detail.append(source, text);
-	row.append(detail);
 }
 
 function appendFontDetail(row, text) {
@@ -1610,23 +1595,23 @@ function statusText(status) {
 }
 
 function fontResult(font) {
-	const result = { source: "", detail: "" };
+	const parts = [];
 	if (font.matched) {
-		result.source = font.embedded || font.status === "embedded" ? `内嵌 ${font.matched}` : `匹配 ${font.matched}`;
+		parts.push(font.embedded || font.status === "embedded" ? `内嵌 ${font.matched}` : `匹配 ${font.matched}`);
 	}
 	if (font.detail) {
-		result.detail = font.detail;
+		parts.push(font.detail);
 	}
-	return result;
+	return parts.join(" · ");
 }
 
 function fontMeta(font) {
 	const parts = [];
 	if (font.familyName && font.familyName !== font.fontName) {
-		parts.push(`字体族 ${font.familyName}`);
+		parts.push(`字族 ${font.familyName}`);
 	}
 	if (font.charset) {
-		parts.push(`字符集 ${font.charset}`);
+		parts.push(`字集 ${font.charset}`);
 	}
 	return parts.join(" · ");
 }
