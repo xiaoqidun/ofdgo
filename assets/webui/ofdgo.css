@@ -84,10 +84,12 @@ a:focus-visible {
 }
 
 .toolbar {
+	--tool-gap: 8px;
 	position: relative;
 	z-index: 12;
 	border-bottom: 1px solid var(--line);
 	font-size: 14px;
+	gap: var(--tool-gap);
 	overflow-x: auto;
 	overflow-y: hidden;
 	scrollbar-width: none;
@@ -153,28 +155,25 @@ button:not(:disabled):hover {
 }
 
 .tool-group {
-	position: relative;
 	display: inline-flex;
 	align-items: center;
-	gap: 8px;
+	gap: var(--tool-gap);
 	flex: 0 0 auto;
 	min-width: 0;
 }
 
 .tool-group + .tool-group {
-	margin-left: 2px;
-	padding-left: 18px;
+	margin-left: 0;
+	padding-left: 0;
 }
 
 .tool-group + .tool-group::before {
-	position: absolute;
-	top: 50%;
-	left: 5px;
+	flex: 0 0 1px;
 	width: 1px;
 	height: 22px;
+	margin: 0 calc(12px - var(--tool-gap));
 	background: var(--line);
 	content: "";
-	transform: translateY(-50%);
 }
 
 .page-control {
@@ -794,9 +793,9 @@ body[aria-busy="true"] .viewer-panel {
 	}
 
 	.toolbar {
+		--tool-gap: 6px;
 		flex-wrap: nowrap;
 		overflow-x: auto;
-		gap: 6px;
 	}
 
 	.toolbar > * {
@@ -889,15 +888,6 @@ body[aria-busy="true"] .viewer-panel {
 
 	.toolbar-space {
 		display: none;
-	}
-
-	.tool-group {
-		gap: 6px;
-	}
-
-	.tool-group + .tool-group {
-		margin-left: 0;
-		padding-left: 0;
 	}
 
 	.tool-group + .tool-group::before {
