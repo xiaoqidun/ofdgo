@@ -17,6 +17,12 @@ package webui
 import (
 	"bytes"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/jpeg"
+	"image/png"
+	"strings"
 
 	"github.com/xiaoqidun/ofdgo"
 )
@@ -70,6 +76,47 @@ type PageSVG struct {
 	Width  float64 `json:"width"`
 	Height float64 `json:"height"`
 	SVG    string  `json:"svg"`
+}
+
+// ExportFormat 导出格式
+type ExportFormat struct {
+	Value     string `json:"value"`
+	Label     string `json:"label"`
+	Extension string `json:"extension"`
+	MIME      string `json:"mime"`
+}
+
+// supportedExportFormats 导出格式列表
+var supportedExportFormats = []ExportFormat{
+	{Value: "svg", Label: "SVG", Extension: "svg", MIME: "image/svg+xml"},
+	{Value: "pdf", Label: "PDF", Extension: "pdf", MIME: "application/pdf"},
+	{Value: "eps", Label: "EPS", Extension: "eps", MIME: "application/postscript"},
+	{Value: "png", Label: "PNG", Extension: "png", MIME: "image/png"},
+	{Value: "jpg", Label: "JPEG", Extension: "jpg", MIME: "image/jpeg"},
+}
+
+// ExportFormats 获取导出格式
+// 返回: []ExportFormat 导出格式列表
+func ExportFormats() []ExportFormat {
+	formats := make([]ExportFormat, len(supportedExportFormats))
+	copy(formats, supportedExportFormats)
+	return formats
+}
+
+// exportFormat 获取导出格式
+// 入参: value 格式值
+// 返回: ExportFormat 导出格式, bool 是否支持
+func exportFormat(value string) (ExportFormat, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "jpeg" {
+		value = "jpg"
+	}
+	for _, format := range supportedExportFormats {
+		if format.Value == value {
+			return format, true
+		}
+	}
+	return ExportFormat{}, false
 }
 
 // Open 打开浏览器内存中的OFD文档
@@ -146,14 +193,7 @@ func (s *Session) Info() DocumentInfo {
 // 入参: index 页面索引
 // 返回: PageSVG 页面SVG结果, error 错误信息
 func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
-	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
-		return PageSVG{}, fmt.Errorf("ofd document is not opened")
-	}
-	if index < 0 || index >= len(s.doc.Pages.Page) {
-		return PageSVG{}, fmt.Errorf("page index %d out of range", index)
-	}
-	pageRef := s.doc.Pages.Page[index]
-	page, err := s.Reader.PageContent(pageRef)
+	pageRef, page, err := s.pageContent(index)
 	if err != nil {
 		return PageSVG{}, err
 	}
@@ -168,7 +208,46 @@ func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
 	return PageSVG{Index: index, Number: index + 1, ID: pageRef.ID, Width: box.W, Height: box.H, SVG: buf.String()}, nil
 }
 
-// ExportPDF 导出整个文档为PDF
+// ExportPage 导出单页
+// 入参: index 页面索引, value 导出格式
+// 返回: []byte 文件数据, ExportFormat 导出格式, error 错误信息
+func (s *Session) ExportPage(index int, value string) ([]byte, ExportFormat, error) {
+	format, ok := exportFormat(value)
+	if !ok {
+		return nil, ExportFormat{}, fmt.Errorf("unsupported export format %s", value)
+	}
+	_, page, err := s.pageContent(index)
+	if err != nil {
+		return nil, ExportFormat{}, err
+	}
+	var buf bytes.Buffer
+	switch format.Value {
+	case "svg":
+		err = s.Renderer.RenderToSVG(page, &buf)
+	case "pdf":
+		err = s.Renderer.RenderToPDF(page, &buf)
+	case "eps":
+		err = s.Renderer.RenderToEPS(page, &buf)
+	case "png":
+		img, renderErr := s.Renderer.RenderToImage(page)
+		if renderErr != nil {
+			return nil, ExportFormat{}, renderErr
+		}
+		err = png.Encode(&buf, img)
+	case "jpg":
+		img, renderErr := s.Renderer.RenderToImage(page)
+		if renderErr != nil {
+			return nil, ExportFormat{}, renderErr
+		}
+		err = jpeg.Encode(&buf, imageWithWhiteBackground(img), &jpeg.Options{Quality: 95})
+	}
+	if err != nil {
+		return nil, ExportFormat{}, err
+	}
+	return buf.Bytes(), format, nil
+}
+
+// ExportPDF 导出文档为PDF
 // 返回: []byte PDF文件数据, error 错误信息
 func (s *Session) ExportPDF() ([]byte, error) {
 	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
@@ -179,4 +258,33 @@ func (s *Session) ExportPDF() ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// imageWithWhiteBackground 填充图片白色背景
+// 入参: img 图片对象
+// 返回: image.Image 图片对象
+func imageWithWhiteBackground(img image.Image) image.Image {
+	bounds := img.Bounds()
+	dst := image.NewRGBA(bounds)
+	draw.Draw(dst, bounds, &image.Uniform{C: color.White}, image.Point{}, draw.Src)
+	draw.Draw(dst, bounds, img, bounds.Min, draw.Over)
+	return dst
+}
+
+// pageContent 获取页面内容
+// 入参: index 页面索引
+// 返回: ofdgo.Page 页面引用, *ofdgo.PageContent 页面内容, error 错误信息
+func (s *Session) pageContent(index int) (ofdgo.Page, *ofdgo.PageContent, error) {
+	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
+		return ofdgo.Page{}, nil, fmt.Errorf("ofd document is not opened")
+	}
+	if index < 0 || index >= len(s.doc.Pages.Page) {
+		return ofdgo.Page{}, nil, fmt.Errorf("page index %d out of range", index)
+	}
+	pageRef := s.doc.Pages.Page[index]
+	page, err := s.Reader.PageContent(pageRef)
+	if err != nil {
+		return ofdgo.Page{}, nil, err
+	}
+	return pageRef, page, nil
 }

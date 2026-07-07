@@ -32,7 +32,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
 	font: inherit;
 }
 
@@ -45,13 +46,15 @@ button {
 }
 
 button:disabled,
-input:disabled {
+input:disabled,
+select:disabled {
 	cursor: not-allowed;
 	opacity: 0.48;
 }
 
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 a:focus-visible {
 	outline: 2px solid var(--focus);
 	outline-offset: 2px;
@@ -149,10 +152,29 @@ button:not(:disabled):hover {
 	flex: 1 1 auto;
 }
 
-.divider {
+.tool-group {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	flex: 0 0 auto;
+	min-width: 0;
+}
+
+.tool-group + .tool-group {
+	margin-left: 2px;
+	padding-left: 18px;
+}
+
+.tool-group + .tool-group::before {
+	position: absolute;
+	top: 50%;
+	left: 5px;
 	width: 1px;
 	height: 22px;
 	background: var(--line);
+	content: "";
+	transform: translateY(-50%);
 }
 
 .page-control {
@@ -174,6 +196,16 @@ button:not(:disabled):hover {
 	text-align: right;
 	color: #1f2428;
 	background: transparent;
+}
+
+.format-select {
+	height: var(--control-height);
+	min-width: 64px;
+	padding: 0 7px;
+	border: 1px solid var(--line);
+	border-radius: 0;
+	background: #ffffff;
+	color: #1f2428;
 }
 
 .zoom-label {
@@ -842,11 +874,20 @@ body[aria-busy="true"] .viewer-panel {
 		row-gap: 0;
 	}
 
-	.divider {
+	.toolbar-space {
 		display: none;
 	}
 
-	.toolbar-space {
+	.tool-group {
+		gap: 6px;
+	}
+
+	.tool-group + .tool-group {
+		margin-left: 0;
+		padding-left: 0;
+	}
+
+	.tool-group + .tool-group::before {
 		display: none;
 	}
 
@@ -892,6 +933,11 @@ body[aria-busy="true"] .viewer-panel {
 
 	#exportButton {
 		padding-inline: 8px;
+	}
+
+	.format-select {
+		min-width: 56px;
+		padding: 0 5px;
 	}
 
 	.footer-links {

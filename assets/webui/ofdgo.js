@@ -26,11 +26,14 @@ const STATUS = {
 	engine: "正在准备引擎",
 	recovering: "正在恢复引擎",
 	fonts: "正在匹配字体",
-	exporting: "正在导出 PDF",
+	exporting: "正在导出文档 PDF",
+	pageExporting: "正在导出单页",
 };
 const WASM_CALLBACKS = [
 	"ofdgoOpen",
 	"ofdgoRenderPage",
+	"ofdgoExportFormats",
+	"ofdgoExportPage",
 	"ofdgoExportPDF",
 	"ofdgoFontCandidates",
 ];
@@ -63,6 +66,7 @@ const state = {
 	thumbnailCache: new Map(),
 	thumbnailInFlight: new Set(),
 	thumbnailObserver: null,
+	exportFormats: [],
 	showPages: !COMPACT_LAYOUT.matches,
 	showMeta: !COMPACT_LAYOUT.matches,
 };
@@ -84,6 +88,8 @@ const el = {
 	zoomLabel: document.querySelector("#zoomLabel"),
 	fitButton: document.querySelector("#fitButton"),
 	fitHeightButton: document.querySelector("#fitHeightButton"),
+	pageExportFormat: document.querySelector("#pageExportFormat"),
+	exportPageButton: document.querySelector("#exportPageButton"),
 	exportButton: document.querySelector("#exportButton"),
 	emptyState: document.querySelector("#emptyState"),
 	progressPanel: document.querySelector("#progressPanel"),
@@ -119,6 +125,7 @@ el.zoomOutButton.addEventListener("click", () => setScale(state.scale - 0.1));
 el.zoomInButton.addEventListener("click", () => setScale(state.scale + 0.1));
 el.fitButton.addEventListener("click", fitWidth);
 el.fitHeightButton.addEventListener("click", fitHeight);
+el.exportPageButton.addEventListener("click", exportCurrentPage);
 el.exportButton.addEventListener("click", exportPDF);
 el.pageInput.addEventListener("change", () => {
 	const page = Number.parseInt(el.pageInput.value, 10);
@@ -180,6 +187,7 @@ async function boot() {
 	try {
 		await ensureWASM();
 		setProgress("引擎准备完成", 70);
+		loadExportFormats();
 		setEmpty("选择 OFD 文件");
 		updateFontSummary();
 		renderFontList();
@@ -192,6 +200,21 @@ async function boot() {
 		setEmpty(String(err.message || err));
 		setBusy(false);
 		return;
+	}
+}
+
+function loadExportFormats() {
+	const formats = callWASM("ofdgoExportFormats") || [];
+	state.exportFormats = formats;
+	el.pageExportFormat.replaceChildren();
+	for (const format of formats) {
+		const option = document.createElement("option");
+		option.value = format.value;
+		option.textContent = format.label;
+		el.pageExportFormat.append(option);
+	}
+	if (formats.length) {
+		el.pageExportFormat.value = formats[0].value;
 	}
 }
 
@@ -858,14 +881,14 @@ async function exportPDF() {
 		return;
 	}
 	const openSeq = state.openSeq;
-	el.exportButton.disabled = true;
-	setBusy(true, "正在准备 PDF", 18, STATUS.exporting);
+	setExportControlsDisabled(true);
+	setBusy(true, "正在准备文档 PDF", 18, STATUS.exporting);
 	try {
 		await waitForPaint();
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		setProgress("正在生成 PDF", 45);
+		setProgress("正在生成文档 PDF", 45);
 		await waitForPaint();
 		if (openSeq !== state.openSeq) {
 			return;
@@ -874,18 +897,53 @@ async function exportPDF() {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		setProgress("正在保存 PDF", 86);
+		setProgress("正在保存文档 PDF", 86);
 		const bytes = base64ToBytes(result.base64);
-		const blob = new Blob([bytes], { type: "application/pdf" });
-		const link = document.createElement("a");
-		const url = URL.createObjectURL(blob);
-		link.href = url;
-		link.download = pdfFileName();
-		document.body.append(link);
-		link.click();
-		link.remove();
-		window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-		setStatus(`PDF 已导出 ${formatBytes(result.size || bytes.length)}`);
+		downloadBytes(bytes, "application/pdf", pdfFileName());
+		setStatus(`文档 PDF 已导出 ${formatBytes(result.size || bytes.length)}`);
+	} catch (err) {
+		if (openSeq === state.openSeq) {
+			showError(err, false);
+		}
+	} finally {
+		if (openSeq === state.openSeq) {
+			setBusy(false);
+			updateControls();
+		}
+	}
+}
+
+async function exportCurrentPage() {
+	if (!state.doc) {
+		return;
+	}
+	const format = el.pageExportFormat.value;
+	if (!format) {
+		return;
+	}
+	const info = exportFormatInfo(format);
+	const label = info?.label || String(format || "").toUpperCase();
+	const openSeq = state.openSeq;
+	setExportControlsDisabled(true);
+	setBusy(true, `正在准备 ${label}`, 18, STATUS.pageExporting);
+	try {
+		await waitForPaint();
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		setProgress(`正在生成 ${label}`, 45);
+		await waitForPaint();
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		const result = callWASM("ofdgoExportPage", state.pageIndex, format);
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		setProgress(`正在保存 ${result.label || label}`, 86);
+		const bytes = base64ToBytes(result.base64);
+		downloadBytes(bytes, result.mime || info?.mime || "application/octet-stream", pageFileName(result.extension || info?.extension || format));
+		setStatus(`${result.label || label} 已导出 ${formatBytes(result.size || bytes.length, result.label || label)}`);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			showError(err, false);
@@ -1536,7 +1594,15 @@ function updateControls() {
 	el.fitHeightButton.disabled = !hasDoc;
 	el.fitButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "width");
 	el.fitHeightButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "height");
+	el.pageExportFormat.disabled = !hasDoc || !state.exportFormats.length;
+	el.exportPageButton.disabled = !hasDoc || !state.exportFormats.length;
 	el.exportButton.disabled = !hasDoc;
+}
+
+function setExportControlsDisabled(disabled) {
+	el.exportButton.disabled = disabled;
+	el.exportPageButton.disabled = disabled;
+	el.pageExportFormat.disabled = disabled;
 }
 
 function callWASM(name, ...args) {
@@ -1624,15 +1690,39 @@ function base64ToBytes(base64) {
 	return bytes;
 }
 
-function pdfFileName() {
-	const base = (state.fileName || state.doc?.title || "ofdgo").replace(/\.[^.]+$/, "");
-	const safe = base.replace(/[\\/:*?"<>|]+/g, "_").trim() || "ofdgo";
-	return `${safe}.pdf`;
+function downloadBytes(bytes, mime, name) {
+	const blob = new Blob([bytes], { type: mime });
+	const link = document.createElement("a");
+	const url = URL.createObjectURL(blob);
+	link.href = url;
+	link.download = name;
+	document.body.append(link);
+	link.click();
+	link.remove();
+	window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function formatBytes(size) {
+function baseFileName() {
+	const base = (state.fileName || state.doc?.title || "ofdgo").replace(/\.[^.]+$/, "");
+	return base.replace(/[\\/:*?"<>|]+/g, "_").trim() || "ofdgo";
+}
+
+function pdfFileName() {
+	return `${baseFileName()}.pdf`;
+}
+
+function pageFileName(extension) {
+	const page = String(state.pageIndex + 1).padStart(String(state.doc?.pageCount || 1).length, "0");
+	return `${baseFileName()}_p${page}.${extension || "bin"}`;
+}
+
+function exportFormatInfo(value) {
+	return state.exportFormats.find((format) => format.value === value) || null;
+}
+
+function formatBytes(size, fallback = "PDF") {
 	if (!Number.isFinite(size) || size <= 0) {
-		return "PDF";
+		return fallback;
 	}
 	if (size < 1024 * 1024) {
 		return `${Math.round(size / 1024)} KB`;

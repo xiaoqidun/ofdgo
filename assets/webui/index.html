@@ -10,25 +10,34 @@
 	<div class="app">
 		<header class="toolbar app-bar">
 			<input id="ofdInput" class="file-input" type="file" accept=".ofd,application/ofd,application/zip">
-			<button id="ofdButton" class="button primary" type="button" data-short="打开">打开</button>
 			<input id="fontInput" class="file-input" type="file" accept=".ttf,.otf,.ttc,font/*" multiple>
-			<button id="togglePagesButton" class="icon-button" type="button" title="页面栏" aria-label="页面栏" aria-pressed="true">&#9776;</button>
-			<button id="toggleMetaButton" class="icon-button" type="button" title="信息栏" aria-label="信息栏" aria-pressed="true">&#9432;</button>
+			<div class="tool-group">
+				<button id="ofdButton" class="button primary" type="button" data-short="打开">打开</button>
+				<button id="togglePagesButton" class="icon-button" type="button" title="页面栏" aria-label="页面栏" aria-pressed="true">&#9776;</button>
+				<button id="toggleMetaButton" class="icon-button" type="button" title="信息栏" aria-label="信息栏" aria-pressed="true">&#9432;</button>
+			</div>
 			<div class="toolbar-space"></div>
-			<button id="prevButton" class="icon-button" type="button" title="上一页" disabled>&lsaquo;</button>
-			<label class="page-control">
-				<input id="pageInput" type="number" min="1" value="1" disabled>
-				<span>/</span>
-				<span id="pageTotal">0</span>
-			</label>
-			<button id="nextButton" class="icon-button" type="button" title="下一页" disabled>&rsaquo;</button>
-			<div class="divider"></div>
-			<button id="zoomOutButton" class="icon-button" type="button" title="缩小" disabled>-</button>
-			<span id="zoomLabel" class="zoom-label">100%</span>
-			<button id="zoomInButton" class="icon-button" type="button" title="放大" disabled>+</button>
-			<button id="fitButton" class="button" type="button" data-short="宽" disabled>适宽</button>
-			<button id="fitHeightButton" class="button" type="button" data-short="高" disabled>适高</button>
-			<button id="exportButton" class="button" type="button" data-short="PDF" title="导出 PDF" aria-label="导出 PDF" disabled>PDF</button>
+			<div class="tool-group">
+				<button id="prevButton" class="icon-button" type="button" title="上一页" disabled>&lsaquo;</button>
+				<label class="page-control">
+					<input id="pageInput" type="number" min="1" value="1" disabled>
+					<span>/</span>
+					<span id="pageTotal">0</span>
+				</label>
+				<button id="nextButton" class="icon-button" type="button" title="下一页" disabled>&rsaquo;</button>
+			</div>
+			<div class="tool-group">
+				<button id="zoomOutButton" class="icon-button" type="button" title="缩小" disabled>-</button>
+				<span id="zoomLabel" class="zoom-label">100%</span>
+				<button id="zoomInButton" class="icon-button" type="button" title="放大" disabled>+</button>
+				<button id="fitButton" class="button" type="button" data-short="宽" disabled>适宽</button>
+				<button id="fitHeightButton" class="button" type="button" data-short="高" disabled>适高</button>
+			</div>
+			<div class="tool-group">
+				<select id="pageExportFormat" class="format-select" title="单页格式" aria-label="单页格式" disabled></select>
+				<button id="exportPageButton" class="button" type="button" data-short="页" title="导出单页" aria-label="导出单页" disabled>单页</button>
+				<button id="exportButton" class="button" type="button" data-short="文档" title="导出文档 PDF" aria-label="导出文档 PDF" disabled>文档</button>
+			</div>
 		</header>
 
 		<main class="workspace">
