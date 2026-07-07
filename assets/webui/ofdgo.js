@@ -792,8 +792,8 @@ async function openDocument(options = {}) {
 		renderPageList();
 		renderMeta();
 		renderPageFlow();
-		await nextFrame();
 		applyFit(false);
+		await nextFrame();
 		await renderPage(pageIndex, { keepBusy: true, scroll: false, openSeq });
 		queueNearbyPages(pageIndex, openSeq);
 	} catch (err) {
