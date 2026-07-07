@@ -41,9 +41,11 @@ type FontInfo = ofdgo.FontInfo
 
 // Session WebUI文档会话
 type Session struct {
-	Reader   *ofdgo.Reader
-	Renderer *ofdgo.Renderer
-	doc      *ofdgo.Document
+	Reader    *ofdgo.Reader
+	Renderer  *ofdgo.Renderer
+	doc       *ofdgo.Document
+	pageCache map[int]*ofdgo.PageContent
+	boxCache  map[int]ofdgo.Box
 }
 
 // DocumentInfo 文档信息
@@ -146,7 +148,13 @@ func Open(data []byte, opts OpenOptions) (*Session, error) {
 		rendererOptions = append(rendererOptions, ofdgo.WithFontFS(fontFS))
 	}
 	rendererOptions = append(rendererOptions, ofdgo.WithAnnotations(opts.RenderAnnotations))
-	return &Session{Reader: reader, Renderer: ofdgo.NewRenderer(reader, rendererOptions...), doc: doc}, nil
+	return &Session{
+		Reader:    reader,
+		Renderer:  ofdgo.NewRenderer(reader, rendererOptions...),
+		doc:       doc,
+		pageCache: make(map[int]*ofdgo.PageContent),
+		boxCache:  make(map[int]ofdgo.Box),
+	}, nil
 }
 
 // Close 关闭文档会话
@@ -180,8 +188,8 @@ func (s *Session) Info() DocumentInfo {
 	}
 	for index, pageRef := range s.doc.Pages.Page {
 		pageInfo := PageInfo{Index: index, ID: pageRef.ID}
-		if page, err := s.Reader.PageContent(pageRef); err == nil {
-			if box, err := s.Renderer.GetPageBox(page); err == nil {
+		if _, page, err := s.pageContent(index); err == nil {
+			if box, err := s.pageBox(index, page); err == nil {
 				pageInfo.Width = box.W
 				pageInfo.Height = box.H
 			}
@@ -199,7 +207,7 @@ func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
 	if err != nil {
 		return PageSVG{}, err
 	}
-	box, err := s.Renderer.GetPageBox(page)
+	box, err := s.pageBox(index, page)
 	if err != nil {
 		return PageSVG{}, err
 	}
@@ -284,9 +292,28 @@ func (s *Session) pageContent(index int) (ofdgo.Page, *ofdgo.PageContent, error)
 		return ofdgo.Page{}, nil, fmt.Errorf("page index %d out of range", index)
 	}
 	pageRef := s.doc.Pages.Page[index]
+	if page, ok := s.pageCache[index]; ok {
+		return pageRef, page, nil
+	}
 	page, err := s.Reader.PageContent(pageRef)
 	if err != nil {
 		return ofdgo.Page{}, nil, err
 	}
+	s.pageCache[index] = page
 	return pageRef, page, nil
+}
+
+// pageBox 获取页面物理区域
+// 入参: index 页面索引, page 页面内容
+// 返回: ofdgo.Box 页面物理区域, error 错误信息
+func (s *Session) pageBox(index int, page *ofdgo.PageContent) (ofdgo.Box, error) {
+	if box, ok := s.boxCache[index]; ok {
+		return box, nil
+	}
+	box, err := s.Renderer.GetPageBox(page)
+	if err != nil {
+		return ofdgo.Box{}, err
+	}
+	s.boxCache[index] = box
+	return box, nil
 }
