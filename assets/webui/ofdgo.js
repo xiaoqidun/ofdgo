@@ -53,6 +53,7 @@ const state = {
 	localFonts: [],
 	userFonts: [],
 	systemFontCatalog: [],
+	systemFontCatalogLoaded: false,
 	systemFontPermission: "prompt",
 	doc: null,
 	pageIndex: 0,
@@ -114,7 +115,7 @@ const el = {
 	statusText: document.querySelector("#statusText"),
 };
 
-el.ofdButton.addEventListener("click", () => el.ofdInput.click());
+el.ofdButton.addEventListener("click", openOFDFile);
 el.togglePagesButton.addEventListener("click", () => toggleSidebar("pages"));
 el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
 el.fontAddButton.addEventListener("click", () => el.fontInput.click());
@@ -150,11 +151,19 @@ el.viewerPanel.addEventListener("dblclick", openOFDFromViewer);
 updateSidebarState();
 boot();
 
-function openOFDFromViewer() {
+async function openOFDFile() {
+	if (document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	await requestLocalFontsBeforeOpen();
+	el.ofdInput.click();
+}
+
+async function openOFDFromViewer() {
 	if (state.doc || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
-	el.ofdInput.click();
+	await openOFDFile();
 }
 
 function toggleSidebar(side) {
@@ -397,10 +406,30 @@ async function loadLocalFonts() {
 	}
 }
 
+async function requestLocalFontsBeforeOpen() {
+	if (!canReadLocalFonts() || state.systemFontCatalogLoaded || state.systemFontPermission === "denied") {
+		return;
+	}
+	setBusy(true, "正在请求授权", 12, "正在请求授权");
+	try {
+		const available = await queryLocalFonts();
+		setStatus(available.length ? `已授权 ${available.length} 个系统字体` : "未读取到系统字体");
+	} catch (err) {
+		if (err && err.name === "NotAllowedError") {
+			setStatus("未授权读取系统字体");
+			return;
+		}
+		setStatus(String(err.message || err));
+	} finally {
+		setBusy(false);
+	}
+}
+
 async function queryLocalFonts() {
 	try {
 		const available = await window.queryLocalFonts();
 		state.systemFontCatalog = available;
+		state.systemFontCatalogLoaded = true;
 		state.systemFontPermission = "granted";
 		updateFontPermissionHint();
 		return available;
@@ -414,12 +443,12 @@ async function queryLocalFonts() {
 }
 
 async function autoLoadDocumentLocalFonts(openSeq) {
-	if (!externalDocumentFontNames().length || !canReadLocalFonts()) {
+	if (!externalDocumentFontNames().length || !canReadLocalFonts() || state.systemFontPermission === "denied") {
 		return false;
 	}
 	setProgress("正在匹配字体", 62, STATUS.fonts);
 	try {
-		const available = state.systemFontCatalog.length ? state.systemFontCatalog : await queryLocalFonts();
+		const available = state.systemFontCatalogLoaded ? state.systemFontCatalog : await queryLocalFonts();
 		if (openSeq !== state.openSeq) {
 			return false;
 		}
