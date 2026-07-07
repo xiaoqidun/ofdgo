@@ -25,10 +25,18 @@
 	box-sizing: border-box;
 }
 
+html {
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+}
+
 body {
 	margin: 0;
+	width: 100%;
 	min-width: 320px;
 	min-height: 100vh;
+	overflow: hidden;
 	background: #eef1f4;
 }
 
@@ -64,7 +72,7 @@ a:focus-visible {
 .app {
 	display: grid;
 	grid-template-rows: auto minmax(0, 1fr) auto;
-	width: 100vw;
+	width: 100%;
 	height: 100vh;
 	overflow: hidden;
 }
@@ -756,6 +764,7 @@ body[data-hide-meta] .meta-panel {
 
 .app-footer {
 	justify-content: space-between;
+	overflow: hidden;
 	border-top: 1px solid var(--line);
 	color: var(--text-muted);
 	font-size: 12px;
@@ -763,9 +772,13 @@ body[data-hide-meta] .meta-panel {
 
 .footer-brand {
 	flex: 0 0 var(--sidebar-width);
+	min-width: 0;
+	overflow: hidden;
 	font-weight: 400;
 	color: var(--accent-strong);
 	text-decoration: none;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .status-text {
@@ -786,6 +799,7 @@ body[data-hide-meta] .meta-panel {
 	flex: 0 0 var(--sidebar-width);
 	justify-content: flex-end;
 	min-width: 0;
+	overflow: hidden;
 }
 
 .app-footer a {
