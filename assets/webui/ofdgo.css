@@ -652,6 +652,16 @@ body[data-hide-meta] .meta-panel {
 	gap: 8px;
 }
 
+.font-permission-hint {
+	margin: 0 0 8px;
+	padding: 7px 8px;
+	border: 1px solid var(--line);
+	background: #ffffff;
+	color: var(--text-muted);
+	font-size: 12px;
+	line-height: 1.35;
+}
+
 .font-row {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) auto;

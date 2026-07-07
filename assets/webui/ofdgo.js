@@ -53,6 +53,7 @@ const state = {
 	localFonts: [],
 	userFonts: [],
 	systemFontCatalog: [],
+	systemFontPermission: "prompt",
 	doc: null,
 	pageIndex: 0,
 	scale: 1,
@@ -108,6 +109,7 @@ const el = {
 	docFontList: document.querySelector("#docFontList"),
 	docFontSummary: document.querySelector("#docFontSummary"),
 	availableFontSummary: document.querySelector("#availableFontSummary"),
+	fontPermissionHint: document.querySelector("#fontPermissionHint"),
 	fontList: document.querySelector("#fontList"),
 	statusText: document.querySelector("#statusText"),
 };
@@ -194,6 +196,7 @@ async function boot() {
 		renderFontList();
 		updateControls();
 		updateLocalFontButton();
+		await refreshLocalFontPermission();
 		setStatus(STATUS.ready);
 		setBusy(false);
 	} catch (err) {
@@ -395,9 +398,19 @@ async function loadLocalFonts() {
 }
 
 async function queryLocalFonts() {
-	const available = await window.queryLocalFonts();
-	state.systemFontCatalog = available;
-	return available;
+	try {
+		const available = await window.queryLocalFonts();
+		state.systemFontCatalog = available;
+		state.systemFontPermission = "granted";
+		updateFontPermissionHint();
+		return available;
+	} catch (err) {
+		if (err && err.name === "NotAllowedError") {
+			state.systemFontPermission = "denied";
+			updateFontPermissionHint();
+		}
+		throw err;
+	}
 }
 
 async function autoLoadDocumentLocalFonts(openSeq) {
@@ -765,10 +778,33 @@ function updateLocalFontButton() {
 	const supported = canReadLocalFonts();
 	el.localFontButton.disabled = !supported;
 	el.localFontButton.title = supported ? "授权读取浏览器可访问的系统字体" : "当前浏览器不支持读取系统字体";
+	updateFontPermissionHint();
+}
+
+function updateFontPermissionHint() {
+	el.fontPermissionHint.hidden = !canReadLocalFonts() || state.systemFontPermission === "granted";
 }
 
 function canReadLocalFonts() {
 	return typeof window.queryLocalFonts === "function";
+}
+
+async function refreshLocalFontPermission() {
+	if (!canReadLocalFonts() || !navigator.permissions?.query) {
+		updateFontPermissionHint();
+		return;
+	}
+	try {
+		const permission = await navigator.permissions.query({ name: "local-fonts" });
+		state.systemFontPermission = permission.state;
+		permission.onchange = () => {
+			state.systemFontPermission = permission.state;
+			updateFontPermissionHint();
+		};
+	} catch {
+		state.systemFontPermission = "prompt";
+	}
+	updateFontPermissionHint();
 }
 
 async function openDocument(options = {}) {
