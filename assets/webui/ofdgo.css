@@ -616,6 +616,10 @@ body[data-hide-meta] .meta-panel {
 }
 
 .font-badge {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 30px;
 	padding: 3px 6px;
 	background: #eef1f4;
 	color: var(--text-muted);

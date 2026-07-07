@@ -1574,7 +1574,7 @@ function statusText(status) {
 	case "embedded":
 		return "内嵌";
 	case "matched":
-		return "已匹配";
+		return "匹配";
 	case "fallback":
 		return "回退";
 	default:
