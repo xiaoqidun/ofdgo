@@ -17,8 +17,6 @@ const COMMON_FONT_NAMES = [
 	"Times New Roman",
 ];
 const LOCAL_FONT_LOAD_LIMIT = 16;
-const FIT_WIDTH_MARGIN = 72;
-const FIT_HEIGHT_MARGIN = 86;
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const STATUS = {
 	ready: "选择 OFD 文件",
@@ -1127,7 +1125,7 @@ function pageShell(index) {
 function scrollToPage(index) {
 	const shell = pageShell(index);
 	if (shell) {
-		shell.scrollIntoView({ block: "start", inline: "nearest" });
+		shell.scrollIntoView({ block: state.fitMode === "height" ? "center" : "start", inline: "nearest" });
 	}
 }
 
@@ -1542,7 +1540,7 @@ function fitWidth(updateStatus = true) {
 		return;
 	}
 	state.fitMode = "width";
-	const available = Math.max(280, el.pageFrame.clientWidth - FIT_WIDTH_MARGIN);
+	const available = Math.max(280, el.pageFrame.clientWidth - pageSpace() * 2);
 	const width = Math.max(1, page.width * MM_TO_PX);
 	setScale(available / width, updateStatus, "width");
 }
@@ -1553,9 +1551,12 @@ function fitHeight(updateStatus = true) {
 		return;
 	}
 	state.fitMode = "height";
-	const available = Math.max(220, el.viewerPanel.clientHeight - FIT_HEIGHT_MARGIN);
+	const available = Math.max(220, el.viewerPanel.clientHeight - pageSpace() * 2);
 	const height = Math.max(1, page.height * MM_TO_PX);
 	setScale(available / height, updateStatus, "height");
+	if (updateStatus) {
+		scrollToPage(state.pageIndex);
+	}
 }
 
 function applyFit(updateStatus = true) {
@@ -1581,6 +1582,10 @@ function setScale(nextScale, updateStatus = true, fitMode = "free") {
 
 function currentPageInfo() {
 	return state.doc?.pages?.[state.pageIndex] || null;
+}
+
+function pageSpace() {
+	return Number.parseFloat(getComputedStyle(el.pageFrame).paddingTop) || 0;
 }
 
 function updateControls() {

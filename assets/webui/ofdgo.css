@@ -16,6 +16,7 @@
 	--bar-height: 40px;
 	--bar-pad: 5px 10px;
 	--control-height: 28px;
+	--page-space: clamp(14px, 2.5vw, 28px);
 	--shadow-soft: 0 10px 28px rgba(31, 36, 40, 0.12);
 	--shadow-page: 0 14px 30px rgba(31, 36, 40, 0.16);
 }
@@ -465,13 +466,13 @@ body[data-hide-meta] .meta-panel {
 .page-frame {
 	min-width: 100%;
 	min-height: 100%;
-	padding: 34px 28px;
+	padding: var(--page-space);
 }
 
 .svg-host {
 	display: grid;
 	justify-items: center;
-	gap: 28px;
+	gap: var(--page-space);
 	width: max-content;
 	margin: 0 auto;
 }
@@ -920,10 +921,6 @@ body[data-hide-meta] .meta-panel {
 
 	.page-control input {
 		width: 38px;
-	}
-
-	.page-frame {
-		padding: 22px 14px;
 	}
 
 	.zoom-label {
