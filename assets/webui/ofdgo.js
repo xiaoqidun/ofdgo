@@ -59,6 +59,7 @@ const state = {
 	pageIndex: 0,
 	scale: 1,
 	fitMode: "width",
+	renderAnnotations: true,
 	pageCache: new Map(),
 	pageInFlight: new Set(),
 	pageObserver: null,
@@ -88,6 +89,7 @@ const el = {
 	zoomLabel: document.querySelector("#zoomLabel"),
 	fitButton: document.querySelector("#fitButton"),
 	fitHeightButton: document.querySelector("#fitHeightButton"),
+	annotationButton: document.querySelector("#annotationButton"),
 	pageExportFormat: document.querySelector("#pageExportFormat"),
 	exportPageButton: document.querySelector("#exportPageButton"),
 	exportButton: document.querySelector("#exportButton"),
@@ -125,6 +127,7 @@ el.zoomOutButton.addEventListener("click", () => setScale(state.scale - 0.1));
 el.zoomInButton.addEventListener("click", () => setScale(state.scale + 0.1));
 el.fitButton.addEventListener("click", fitWidth);
 el.fitHeightButton.addEventListener("click", fitHeight);
+el.annotationButton.addEventListener("click", toggleAnnotations);
 el.exportPageButton.addEventListener("click", exportCurrentPage);
 el.exportButton.addEventListener("click", exportPDF);
 el.pageInput.addEventListener("change", () => {
@@ -524,9 +527,7 @@ function fontData(fonts) {
 function updateFontSummary() {
 	const total = fontRecords().length;
 	const enabled = fontRecords().filter((font) => font.enabled).length;
-	if (el.availableFontSummary) {
-		el.availableFontSummary.textContent = total ? `${enabled}/${total}` : "0";
-	}
+	el.availableFontSummary.textContent = total ? `${enabled}/${total}` : "0";
 }
 
 function createFontRecord(name, data, source) {
@@ -660,15 +661,25 @@ async function applyFontChange(options = {}) {
 	});
 }
 
+async function toggleAnnotations() {
+	state.renderAnnotations = !state.renderAnnotations;
+	updateAnnotationButton();
+	if (!state.ofdBytes || !state.doc) {
+		return;
+	}
+	await openDocument({
+		pageIndex: state.pageIndex,
+		fitMode: state.fitMode,
+		skipAutoFonts: true,
+	});
+}
+
 function removeFont(id) {
 	state.localFonts = state.localFonts.filter((font) => font.id !== id);
 	state.userFonts = state.userFonts.filter((font) => font.id !== id);
 }
 
 function renderFontList() {
-	if (!el.fontList) {
-		return;
-	}
 	el.fontList.replaceChildren();
 	const fonts = fontRecords();
 	if (!fonts.length) {
@@ -753,9 +764,6 @@ function fontSourceText(source) {
 }
 
 function updateLocalFontButton() {
-	if (!el.localFontButton) {
-		return;
-	}
 	const supported = canReadLocalFonts();
 	el.localFontButton.disabled = !supported;
 	el.localFontButton.title = supported ? "授权读取浏览器可访问的系统字体" : "当前浏览器不支持读取系统字体";
@@ -786,7 +794,7 @@ async function openDocument(options = {}) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const doc = callWASM("ofdgoOpen", state.ofdBytes, resetLocalFonts ? uploadedFonts() : allFonts());
+		const doc = callWASM("ofdgoOpen", state.ofdBytes, resetLocalFonts ? uploadedFonts() : allFonts(), state.renderAnnotations);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -1436,14 +1444,9 @@ function renderMeta() {
 }
 
 function renderDocumentFonts() {
-	if (!el.docFontList) {
-		return;
-	}
 	const fonts = state.doc?.fonts || [];
 	el.docFontList.replaceChildren();
-	if (el.docFontSummary) {
-		el.docFontSummary.textContent = fontSummary(fonts);
-	}
+	el.docFontSummary.textContent = fontSummary(fonts);
 	if (!fonts.length) {
 		const empty = document.createElement("div");
 		empty.className = "font-empty";
@@ -1594,9 +1597,16 @@ function updateControls() {
 	el.fitHeightButton.disabled = !hasDoc;
 	el.fitButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "width");
 	el.fitHeightButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "height");
+	updateAnnotationButton();
 	el.pageExportFormat.disabled = !hasDoc || !state.exportFormats.length;
 	el.exportPageButton.disabled = !hasDoc || !state.exportFormats.length;
 	el.exportButton.disabled = !hasDoc;
+}
+
+function updateAnnotationButton() {
+	el.annotationButton.setAttribute("aria-pressed", String(state.renderAnnotations));
+	el.annotationButton.title = state.renderAnnotations ? "关闭注解渲染" : "开启注解渲染";
+	el.annotationButton.setAttribute("aria-label", el.annotationButton.title);
 }
 
 function setExportControlsDisabled(disabled) {

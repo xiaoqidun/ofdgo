@@ -739,10 +739,6 @@ body[data-hide-meta] .meta-panel {
 	text-align: center;
 }
 
-body[aria-busy="true"] .viewer-panel {
-	cursor: progress;
-}
-
 .app-footer {
 	justify-content: space-between;
 	border-top: 1px solid var(--line);

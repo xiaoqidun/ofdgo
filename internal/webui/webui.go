@@ -29,7 +29,8 @@ import (
 
 // OpenOptions 打开OFD文档选项
 type OpenOptions struct {
-	Fonts []FontFile
+	Fonts             []FontFile
+	RenderAnnotations bool
 }
 
 // FontFile 字体文件
@@ -144,6 +145,7 @@ func Open(data []byte, opts OpenOptions) (*Session, error) {
 		}
 		rendererOptions = append(rendererOptions, ofdgo.WithFontFS(fontFS))
 	}
+	rendererOptions = append(rendererOptions, ofdgo.WithAnnotations(opts.RenderAnnotations))
 	return &Session{Reader: reader, Renderer: ofdgo.NewRenderer(reader, rendererOptions...), doc: doc}, nil
 }
 
