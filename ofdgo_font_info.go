@@ -22,13 +22,13 @@ import (
 )
 
 const (
-	// FontStatusEmbedded 字体使用OFD内嵌字体
+	// FontStatusEmbedded 内嵌字体可用
 	FontStatusEmbedded = "embedded"
-	// FontStatusMatched 字体命中外部字体
+	// FontStatusMatched 外部字体匹配
 	FontStatusMatched = "matched"
-	// FontStatusFallback 字体使用外部字体回退
+	// FontStatusFallback 外部字体回退
 	FontStatusFallback = "fallback"
-	// FontStatusMissing 字体缺失
+	// FontStatusMissing 字体资源缺失
 	FontStatusMissing = "missing"
 )
 
@@ -98,7 +98,7 @@ func (r *Renderer) FontInfos() ([]FontInfo, error) {
 			ID:       id,
 			FontName: id,
 			Status:   FontStatusMissing,
-			Detail:   "未在OFD资源中声明",
+			Detail:   "字体资源未被声明",
 			Used:     used,
 		})
 	}
@@ -130,7 +130,7 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 		if _, err := r.Reader.ResData(font.FontFile); err == nil {
 			info.Status = FontStatusEmbedded
 			info.Matched = path.Base(font.FontFile)
-			info.Detail = "使用OFD内嵌字体"
+			info.Detail = "使用内嵌字体文件"
 		} else {
 			info.Status = FontStatusMissing
 			info.Detail = "内嵌字体文件缺失"
@@ -149,7 +149,7 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 		return info
 	}
 	info.Status = FontStatusMissing
-	info.Detail = "未找到可用字体"
+	info.Detail = "可用字体文件缺失"
 	return info
 }
 

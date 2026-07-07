@@ -1535,15 +1535,42 @@ function renderDocumentFonts() {
 		if (font.embedded && font.status !== "embedded") {
 			badges.append(fontBadge("内嵌", "embedded"));
 		}
-		const detail = document.createElement("div");
-		detail.className = "doc-font-detail";
-		detail.textContent = fontDetail(font);
+		const result = fontResult(font);
+		const metaText = fontMeta(font);
 
 		head.append(name, badges);
-		row.append(head, detail);
+		row.append(head);
+		appendFontResult(row, result);
+		appendFontDetail(row, metaText);
 		fragment.append(row);
 	}
 	el.docFontList.append(fragment);
+}
+
+function appendFontResult(row, result) {
+	if (!result.source && !result.detail) {
+		return;
+	}
+	const detail = document.createElement("div");
+	const source = document.createElement("span");
+	const text = document.createElement("span");
+	detail.className = "doc-font-detail doc-font-result";
+	source.textContent = result.source;
+	text.textContent = result.detail;
+	detail.title = [result.source, result.detail].filter((item) => item).join(" · ");
+	detail.append(source, text);
+	row.append(detail);
+}
+
+function appendFontDetail(row, text) {
+	if (!text) {
+		return;
+	}
+	const detail = document.createElement("div");
+	detail.className = "doc-font-detail";
+	detail.textContent = text;
+	detail.title = text;
+	row.append(detail);
 }
 
 function fontBadge(text, status) {
@@ -1582,7 +1609,18 @@ function statusText(status) {
 	}
 }
 
-function fontDetail(font) {
+function fontResult(font) {
+	const result = { source: "", detail: "" };
+	if (font.matched) {
+		result.source = font.embedded || font.status === "embedded" ? `内嵌 ${font.matched}` : `匹配 ${font.matched}`;
+	}
+	if (font.detail) {
+		result.detail = font.detail;
+	}
+	return result;
+}
+
+function fontMeta(font) {
 	const parts = [];
 	if (font.familyName && font.familyName !== font.fontName) {
 		parts.push(`字体族 ${font.familyName}`);
@@ -1590,13 +1628,7 @@ function fontDetail(font) {
 	if (font.charset) {
 		parts.push(`字符集 ${font.charset}`);
 	}
-	if (font.matched) {
-		parts.push(font.embedded || font.status === "embedded" ? `内嵌 ${font.matched}` : `匹配 ${font.matched}`);
-	}
-	if (font.detail) {
-		parts.push(font.detail);
-	}
-	return parts.join(" · ") || "-";
+	return parts.join(" · ");
 }
 
 function fitWidth(updateStatus = true) {
