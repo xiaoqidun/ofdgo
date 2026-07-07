@@ -1585,7 +1585,7 @@ function statusText(status) {
 function fontDetail(font) {
 	const parts = [];
 	if (font.familyName && font.familyName !== font.fontName) {
-		parts.push(`族 ${font.familyName}`);
+		parts.push(`字体族 ${font.familyName}`);
 	}
 	if (font.charset) {
 		parts.push(`字符集 ${font.charset}`);
