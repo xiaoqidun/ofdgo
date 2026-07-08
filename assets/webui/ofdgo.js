@@ -1692,7 +1692,7 @@ async function focusSignatureStamp(stamp) {
 	if (!state.doc || pageIndex < 0) {
 		return;
 	}
-	await renderPage(pageIndex, { fit: false });
+	await renderPage(pageIndex, { fit: false, scroll: false });
 	await nextFrame();
 	highlightSignatureStamp(stamp);
 	setStatus(stamp.page ? `已定位签名外观 第 ${stamp.page} 页` : "已定位签名外观");
@@ -1712,7 +1712,7 @@ function highlightSignatureStamp(stamp) {
 	mark.style.width = `${stamp.width * MM_TO_PX * state.scale}px`;
 	mark.style.height = `${stamp.height * MM_TO_PX * state.scale}px`;
 	shell.append(mark);
-	mark.scrollIntoView({ block: "center", inline: "center" });
+	mark.scrollIntoView({ block: "nearest", inline: "nearest" });
 	window.setTimeout(() => mark.remove(), 1800);
 }
 
