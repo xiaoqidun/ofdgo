@@ -925,7 +925,9 @@ async function renderPage(index, options = {}) {
 	}
 	try {
 		setCurrentPage(index);
-		applyFit(false);
+		if (options.fit !== false) {
+			applyFit(false);
+		}
 		if (options.scroll !== false) {
 			scrollToPage(index);
 		}
@@ -1690,7 +1692,7 @@ async function focusSignatureStamp(stamp) {
 	if (!state.doc || pageIndex < 0) {
 		return;
 	}
-	await renderPage(pageIndex);
+	await renderPage(pageIndex, { fit: false });
 	await nextFrame();
 	highlightSignatureStamp(stamp);
 	setStatus(stamp.page ? `已定位签名外观 第 ${stamp.page} 页` : "已定位签名外观");
