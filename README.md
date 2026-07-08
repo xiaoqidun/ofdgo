@@ -59,5 +59,51 @@ func main() {
 }
 ```
 
+# 签名验证
+```go
+package main
+
+import (
+	"log"
+	"os"
+
+	"github.com/xiaoqidun/ofdgo"
+)
+
+func main() {
+	// 1. 打开OFD文件
+	data, err := os.ReadFile("test.ofd")
+	if err != nil {
+		log.Fatal(err)
+	}
+	// 2. 验证OFD签名
+	reports, err := ofdgo.VerifySignaturesBytes(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// 3. 判断验证结果
+	if len(reports) == 0 {
+		log.Println("文件未发现签名")
+		return
+	}
+	valid := true
+	for _, report := range reports {
+		if report.Valid {
+			log.Printf("签名%s验证通过", report.ID)
+			continue
+		}
+		valid = false
+		if report.Error == "" {
+			log.Printf("签名%s验证失败", report.ID)
+		} else {
+			log.Printf("签名%s验证失败: %s", report.ID, report.Error)
+		}
+	}
+	if !valid {
+		os.Exit(1)
+	}
+}
+```
+
 # 授权协议
 本项目使用 [Apache License 2.0](https://github.com/xiaoqidun/ofdgo/blob/main/LICENSE) 授权协议
