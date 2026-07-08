@@ -27,7 +27,7 @@ go build -o ofdgo_webui.exe -trimpath -ldflags "-s -w -buildid=" ./cmd/webui/web
 go get -u github.com/xiaoqidun/ofdgo
 ```
 
-# 快速调用
+# 渲染输出
 ```go
 package main
 
