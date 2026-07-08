@@ -59,14 +59,14 @@ type SignatureInfo struct {
 	CertTimeOK        bool                 `json:"certTimeOK,omitempty"`
 	CertTrustChecked  bool                 `json:"certTrustChecked,omitempty"`
 	CertTrustOK       bool                 `json:"certTrustOK,omitempty"`
-	ReferenceCount    int                  `json:"referenceCount"`
-	ReferencePassed   int                  `json:"referencePassed"`
 	SignSerial        string               `json:"signSerial,omitempty"`
 	SignatureMethod   string               `json:"signatureMethod,omitempty"`
 	DigestMethod      string               `json:"digestMethod,omitempty"`
 	SignSubject       string               `json:"signSubject,omitempty"`
 	SignIssuer        string               `json:"signIssuer,omitempty"`
 	SealSubject       string               `json:"sealSubject,omitempty"`
+	ReferenceCount    int                  `json:"referenceCount"`
+	ReferencePassed   int                  `json:"referencePassed"`
 	Stamps            []SignatureStampInfo `json:"stamps,omitempty"`
 	Error             string               `json:"error,omitempty"`
 }
@@ -347,14 +347,14 @@ func signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
 		CertTimeOK:        report.CertTimeOK,
 		CertTrustChecked:  report.CertTrustChecked,
 		CertTrustOK:       report.CertTrustOK,
-		ReferenceCount:    len(report.References),
-		ReferencePassed:   signatureReferencePassed(report.References),
 		SignSerial:        report.SignCert.SerialNumber,
 		SignatureMethod:   report.SignatureMethod,
 		DigestMethod:      report.DigestMethod,
 		SignSubject:       report.SignCert.Subject,
 		SignIssuer:        report.SignCert.Issuer,
 		SealSubject:       report.SealCert.Subject,
+		ReferenceCount:    len(report.References),
+		ReferencePassed:   signatureReferencePassed(report.References),
 		Stamps:            signatureStampInfos(report.StampPositions),
 		Error:             signatureReportError(report),
 	}

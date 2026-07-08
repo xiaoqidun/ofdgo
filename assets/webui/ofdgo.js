@@ -1555,19 +1555,19 @@ function renderSignatures() {
 		appendSignatureCheck(row, "原文", signature.dataHashOK);
 		appendSignatureCheck(row, "签名", signature.signedValueOK);
 		if (signature.type !== "Sign") {
-			appendSignatureCheck(row, "印章", signature.sealOK && signature.sealMatchOK);
-			appendSignatureCheck(row, "匹配", signature.sealMatchOK);
+			appendSignatureCheck(row, "章验", signature.sealOK);
+			appendSignatureCheck(row, "一致", signature.sealMatchOK);
 		}
 		appendSignatureCheck(row, "证书", signature.certOK);
 		appendSignaturePolicy(row, "时效", signature.certTimeChecked, signature.certTimeOK);
 		appendSignaturePolicy(row, "信任", signature.certTrustChecked, signature.certTrustOK);
-		appendSignatureLine(row, "保护", signatureReferenceText(signature), signatureReferenceStatus(signature));
 		appendSignatureLine(row, "序号", signature.signSerial);
 		appendSignatureLine(row, "算法", signature.signatureMethod);
 		appendSignatureLine(row, "散列", signature.digestMethod);
 		appendSignatureLine(row, "主体", signature.signSubject && signature.signSubject !== signature.signer ? signature.signSubject : "");
 		appendSignatureLine(row, "颁发", signature.signIssuer);
 		appendSignatureLine(row, "章证", signature.sealSubject);
+		appendSignatureLine(row, "保护", signatureReferenceText(signature), signatureReferenceStatus(signature));
 		appendSignatureLine(row, "错误", signature.error, "fail");
 		fragment.append(row);
 	}
