@@ -81,6 +81,15 @@ type SignatureStamp struct {
 	Boundary string `xml:"Boundary,attr"`
 }
 
+// SignatureStampPosition 签名外观位置信息
+type SignatureStampPosition struct {
+	ID       string
+	Page     int
+	PageID   string
+	Boundary string
+	Box      Box
+}
+
 // SignatureReferences 签名保护文件列表
 type SignatureReferences struct {
 	CheckMethod string               `xml:"CheckMethod,attr"`
@@ -91,6 +100,29 @@ type SignatureReferences struct {
 type SignatureReference struct {
 	FileRef    string `xml:"FileRef,attr"`
 	CheckValue string `xml:"CheckValue"`
+}
+
+// SignatureStampPositions 获取签名外观位置信息
+// 入参: stamps 签名外观列表
+// 返回: []SignatureStampPosition 签名外观位置信息, error 错误信息
+func (r *Reader) SignatureStampPositions(stamps []SignatureStamp) ([]SignatureStampPosition, error) {
+	doc, err := r.Doc()
+	if err != nil {
+		return nil, err
+	}
+	pages := signaturePageNumbers(doc)
+	positions := make([]SignatureStampPosition, 0, len(stamps))
+	for _, stamp := range stamps {
+		box, _ := ParseBox(stamp.Boundary)
+		positions = append(positions, SignatureStampPosition{
+			ID:       stamp.ID,
+			Page:     pages[stamp.PageRef],
+			PageID:   stamp.PageRef,
+			Boundary: stamp.Boundary,
+			Box:      box,
+		})
+	}
+	return positions, nil
 }
 
 // parseSignatures 解析签名文件
@@ -151,6 +183,19 @@ func (r *Reader) parseSignatures(doc *Document) error {
 		}(sigRef)
 	}
 	return nil
+}
+
+// signaturePageNumbers 获取签名页面编号索引
+// 入参: doc 文档结构
+// 返回: map[string]int 页面编号索引
+func signaturePageNumbers(doc *Document) map[string]int {
+	pages := make(map[string]int, len(doc.Pages.Page))
+	for index, page := range doc.Pages.Page {
+		if page.ID != "" {
+			pages[page.ID] = index + 1
+		}
+	}
+	return pages
 }
 
 // extractSeal 尝试提取印章数据

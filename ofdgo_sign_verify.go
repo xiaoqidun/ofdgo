@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bytes"
 	"crypto/subtle"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/pem"
 	"encoding/xml"
@@ -32,10 +33,15 @@ type SignatureVerifyReport struct {
 	BaseLoc           string
 	Type              SignType
 	Provider          SignatureProvider
+	Signer            string
+	SignCert          SignatureCertInfo
+	SealCert          SignatureCertInfo
+	SealType          string
 	SignatureMethod   string
 	SignatureDateTime string
 	DigestMethod      string
 	References        []SignatureReferenceVerify
+	Stamps            []SignatureStamp
 	DigestOK          bool
 	DataHashOK        bool
 	SignedValueOK     bool
@@ -44,6 +50,15 @@ type SignatureVerifyReport struct {
 	CertOK            bool
 	Valid             bool
 	Error             string
+}
+
+// SignatureCertInfo 签名证书信息
+type SignatureCertInfo struct {
+	Subject      string
+	CommonName   string
+	Organization string
+	Issuer       string
+	SerialNumber string
 }
 
 // SignatureReferenceVerify 签名保护文件验证结果
@@ -170,6 +185,7 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 	report.SignatureDateTime = sigFile.SignedInfo.SignatureDateTime
 	report.DigestMethod = sigFile.SignedInfo.References.CheckMethod
 	report.References = r.verifySignatureReferences(sigPath, sigFile.SignedInfo.References)
+	report.Stamps = append(report.Stamps, sigFile.SignedInfo.StampAnnot...)
 	report.DigestOK = referencesOK(report.References)
 	signedValuePath := signatureRefPath(sigPath, sigFile.SignedValue)
 	signedValue, err := r.readFileExact(signedValuePath)
@@ -188,6 +204,8 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 		report.SignedValueOK = result.SignedOK
 		report.SealOK = true
 		report.CertOK = result.CertOK
+		report.SignCert = result.CertInfo
+		report.Signer = result.CertInfo.CommonName
 		report.Valid = report.DigestOK && report.DataHashOK && report.SignedValueOK && report.CertOK
 		return report
 	case "", SignTypeSeal:
@@ -196,6 +214,12 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 		return report
 	}
 	sesResult, err := verifySESSignature(signedValue, sigData)
+	if sesResult != nil {
+		report.SignCert = sesResult.SignCert
+		report.SealCert = sesResult.SealCert
+		report.SealType = sesResult.SealType
+		report.Signer = sesResult.SignCert.CommonName
+	}
 	if err != nil {
 		report.Error = err.Error()
 		return report
@@ -365,6 +389,111 @@ func xmlElementRaw(data []byte, localName string) ([]byte, error) {
 		return append([]byte(nil), data[begin:int(dec.InputOffset())]...), nil
 	}
 	return nil, fmt.Errorf("xml element not found: %s", localName)
+}
+
+// signatureCertInfo 解析签名证书信息
+// 入参: data DER编码证书
+// 返回: SignatureCertInfo 签名证书信息
+func signatureCertInfo(data []byte) SignatureCertInfo {
+	var cert struct {
+		TBSCertificate     asn1.RawValue
+		SignatureAlgorithm asn1.RawValue
+		SignatureValue     asn1.BitString
+	}
+	rest, err := asn1.Unmarshal(data, &cert)
+	if err != nil || len(rest) != 0 {
+		return SignatureCertInfo{}
+	}
+	items, ok := asn1Children(cert.TBSCertificate.Bytes)
+	if !ok {
+		return SignatureCertInfo{}
+	}
+	idx := 0
+	if len(items) > 0 && items[0].Class == asn1.ClassContextSpecific && items[0].Tag == 0 {
+		idx++
+	}
+	if len(items) <= idx+4 {
+		return SignatureCertInfo{}
+	}
+	serial, _ := asn1IntegerBig(items[idx])
+	subject := certificateNameValues(items[idx+4])
+	issuer := certificateNameValues(items[idx+2])
+	info := SignatureCertInfo{
+		Subject:      certificateNameString(subject),
+		CommonName:   certificateNameFirst(subject, "2.5.4.3"),
+		Organization: certificateNameFirst(subject, "2.5.4.10"),
+		Issuer:       certificateNameString(issuer),
+	}
+	if serial != nil {
+		info.SerialNumber = serial.String()
+	}
+	return info
+}
+
+// certificateNameValues 解析证书名称字段
+// 入参: raw 名称原始值
+// 返回: map[string][]string OID字段列表
+func certificateNameValues(raw asn1.RawValue) map[string][]string {
+	out := make(map[string][]string)
+	sets, ok := asn1Children(raw.Bytes)
+	if !ok {
+		return out
+	}
+	for _, set := range sets {
+		attrs, ok := asn1Children(set.Bytes)
+		if !ok {
+			continue
+		}
+		for _, attr := range attrs {
+			items, ok := asn1Children(attr.Bytes)
+			if !ok || len(items) < 2 {
+				continue
+			}
+			oid, err := asn1OIDString(items[0])
+			if err != nil {
+				continue
+			}
+			if value := strings.TrimSpace(asn1String(items[1])); value != "" {
+				out[oid] = append(out[oid], value)
+			}
+		}
+	}
+	return out
+}
+
+// certificateNameFirst 获取证书名称字段首值
+// 入参: values OID字段列表, oid 字段OID
+// 返回: string 字段值
+func certificateNameFirst(values map[string][]string, oid string) string {
+	if items := values[oid]; len(items) > 0 {
+		return items[0]
+	}
+	return ""
+}
+
+// certificateNameString 格式化证书名称
+// 入参: values OID字段列表
+// 返回: string 证书名称
+func certificateNameString(values map[string][]string) string {
+	var parts []string
+	for _, item := range []struct {
+		OID   string
+		Label string
+	}{
+		{"2.5.4.3", "CN"},
+		{"2.5.4.10", "O"},
+		{"2.5.4.11", "OU"},
+		{"2.5.4.6", "C"},
+		{"2.5.4.8", "ST"},
+		{"2.5.4.7", "L"},
+		{"2.5.4.5", "SN"},
+		{"1.2.840.113549.1.9.1", "E"},
+	} {
+		for _, value := range values[item.OID] {
+			parts = append(parts, item.Label+"="+value)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // parseSignatureCerts 解析签名验证证书

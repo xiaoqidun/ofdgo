@@ -39,6 +39,49 @@ type FontFile = ofdgo.FontFile
 // FontInfo OFD字体信息
 type FontInfo = ofdgo.FontInfo
 
+// SignatureInfo 签名验证信息
+type SignatureInfo struct {
+	ID                string               `json:"id"`
+	Type              string               `json:"type"`
+	Valid             bool                 `json:"valid"`
+	Error             string               `json:"error,omitempty"`
+	Provider          string               `json:"provider,omitempty"`
+	Company           string               `json:"company,omitempty"`
+	Version           string               `json:"version,omitempty"`
+	Signer            string               `json:"signer,omitempty"`
+	SignSubject       string               `json:"signSubject,omitempty"`
+	SignIssuer        string               `json:"signIssuer,omitempty"`
+	SignSerial        string               `json:"signSerial,omitempty"`
+	SealSubject       string               `json:"sealSubject,omitempty"`
+	SealIssuer        string               `json:"sealIssuer,omitempty"`
+	SealSerial        string               `json:"sealSerial,omitempty"`
+	SealType          string               `json:"sealType,omitempty"`
+	SignatureMethod   string               `json:"signatureMethod,omitempty"`
+	SignatureDateTime string               `json:"signatureDateTime,omitempty"`
+	DigestMethod      string               `json:"digestMethod,omitempty"`
+	ReferenceCount    int                  `json:"referenceCount"`
+	ReferencePassed   int                  `json:"referencePassed"`
+	DigestOK          bool                 `json:"digestOK"`
+	DataHashOK        bool                 `json:"dataHashOK"`
+	SignedValueOK     bool                 `json:"signedValueOK"`
+	SealOK            bool                 `json:"sealOK"`
+	SealMatchOK       bool                 `json:"sealMatchOK"`
+	CertOK            bool                 `json:"certOK"`
+	Stamps            []SignatureStampInfo `json:"stamps,omitempty"`
+}
+
+// SignatureStampInfo 签名外观信息
+type SignatureStampInfo struct {
+	ID       string  `json:"id,omitempty"`
+	Page     int     `json:"page,omitempty"`
+	PageID   string  `json:"pageId,omitempty"`
+	Boundary string  `json:"boundary,omitempty"`
+	X        float64 `json:"x,omitempty"`
+	Y        float64 `json:"y,omitempty"`
+	Width    float64 `json:"width,omitempty"`
+	Height   float64 `json:"height,omitempty"`
+}
+
 // Session WebUI文档会话
 type Session struct {
 	Reader    *ofdgo.Reader
@@ -50,17 +93,20 @@ type Session struct {
 
 // DocumentInfo 文档信息
 type DocumentInfo struct {
-	Version      string     `json:"version"`
-	DocType      string     `json:"docType"`
-	Title        string     `json:"title"`
-	Author       string     `json:"author"`
-	Subject      string     `json:"subject"`
-	CreationDate string     `json:"creationDate"`
-	ModDate      string     `json:"modDate"`
-	PageCount    int        `json:"pageCount"`
-	FontCount    int        `json:"fontCount"`
-	Fonts        []FontInfo `json:"fonts"`
-	Pages        []PageInfo `json:"pages"`
+	Version        string          `json:"version"`
+	DocType        string          `json:"docType"`
+	Title          string          `json:"title"`
+	Author         string          `json:"author"`
+	Subject        string          `json:"subject"`
+	CreationDate   string          `json:"creationDate"`
+	ModDate        string          `json:"modDate"`
+	PageCount      int             `json:"pageCount"`
+	FontCount      int             `json:"fontCount"`
+	SignatureCount int             `json:"signatureCount"`
+	SignatureError string          `json:"signatureError,omitempty"`
+	Fonts          []FontInfo      `json:"fonts"`
+	Signatures     []SignatureInfo `json:"signatures"`
+	Pages          []PageInfo      `json:"pages"`
 }
 
 // PageInfo 页面信息
@@ -179,6 +225,12 @@ func (s *Session) Info() DocumentInfo {
 		info.Fonts = fonts
 	}
 	info.FontCount = len(info.Fonts)
+	if signatures, err := s.signatureInfos(); err == nil {
+		info.Signatures = signatures
+	} else {
+		info.SignatureError = err.Error()
+	}
+	info.SignatureCount = len(info.Signatures)
 	if docInfo, err := s.Reader.DocInfo(); err == nil && docInfo != nil {
 		info.Title = docInfo.Title
 		info.Author = docInfo.Author
@@ -255,6 +307,108 @@ func (s *Session) ExportPage(index int, value string) ([]byte, ExportFormat, err
 		return nil, ExportFormat{}, err
 	}
 	return buf.Bytes(), format, nil
+}
+
+// signatureInfos 获取签名验证信息
+// 返回: []SignatureInfo 签名验证信息, error 错误信息
+func (s *Session) signatureInfos() ([]SignatureInfo, error) {
+	reports, err := s.Reader.VerifySignatures()
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]SignatureInfo, 0, len(reports))
+	for _, report := range reports {
+		positions, err := s.Reader.SignatureStampPositions(report.Stamps)
+		if err != nil {
+			return nil, err
+		}
+		infos = append(infos, signatureInfo(report, positions))
+	}
+	return infos, nil
+}
+
+// signatureInfo 转换签名验证信息
+// 入参: report 签名验证报告, positions 签名外观位置
+// 返回: SignatureInfo 签名验证信息
+func signatureInfo(report ofdgo.SignatureVerifyReport, positions []ofdgo.SignatureStampPosition) SignatureInfo {
+	return SignatureInfo{
+		ID:                report.ID,
+		Type:              string(report.Type),
+		Valid:             report.Valid,
+		Error:             report.Error,
+		Provider:          report.Provider.ProviderName,
+		Company:           report.Provider.Company,
+		Version:           report.Provider.Version,
+		Signer:            signatureSigner(report),
+		SignSubject:       report.SignCert.Subject,
+		SignIssuer:        report.SignCert.Issuer,
+		SignSerial:        report.SignCert.SerialNumber,
+		SealSubject:       report.SealCert.Subject,
+		SealIssuer:        report.SealCert.Issuer,
+		SealSerial:        report.SealCert.SerialNumber,
+		SealType:          report.SealType,
+		SignatureMethod:   report.SignatureMethod,
+		SignatureDateTime: report.SignatureDateTime,
+		DigestMethod:      report.DigestMethod,
+		ReferenceCount:    len(report.References),
+		ReferencePassed:   signatureReferencePassed(report.References),
+		DigestOK:          report.DigestOK,
+		DataHashOK:        report.DataHashOK,
+		SignedValueOK:     report.SignedValueOK,
+		SealOK:            report.SealOK,
+		SealMatchOK:       report.SealMatchOK,
+		CertOK:            report.CertOK,
+		Stamps:            signatureStampInfos(positions),
+	}
+}
+
+// signatureSigner 获取签名人名称
+// 入参: report 签名验证报告
+// 返回: string 签名人名称
+func signatureSigner(report ofdgo.SignatureVerifyReport) string {
+	if report.Signer != "" {
+		return report.Signer
+	}
+	if report.SignCert.CommonName != "" {
+		return report.SignCert.CommonName
+	}
+	if report.SignCert.Organization != "" {
+		return report.SignCert.Organization
+	}
+	return report.SignCert.Subject
+}
+
+// signatureReferencePassed 获取已通过保护文件数量
+// 入参: refs 保护文件验证结果
+// 返回: int 已通过保护文件数量
+func signatureReferencePassed(refs []ofdgo.SignatureReferenceVerify) int {
+	count := 0
+	for _, ref := range refs {
+		if ref.OK {
+			count++
+		}
+	}
+	return count
+}
+
+// signatureStampInfos 转换签名外观位置
+// 入参: positions 签名外观位置
+// 返回: []SignatureStampInfo 签名外观信息
+func signatureStampInfos(positions []ofdgo.SignatureStampPosition) []SignatureStampInfo {
+	infos := make([]SignatureStampInfo, 0, len(positions))
+	for _, position := range positions {
+		infos = append(infos, SignatureStampInfo{
+			ID:       position.ID,
+			Page:     position.Page,
+			PageID:   position.PageID,
+			Boundary: position.Boundary,
+			X:        position.Box.X,
+			Y:        position.Box.Y,
+			Width:    position.Box.W,
+			Height:   position.Box.H,
+		})
+	}
+	return infos
 }
 
 // ExportPDF 导出文档为PDF

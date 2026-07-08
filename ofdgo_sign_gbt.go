@@ -32,6 +32,7 @@ type digitalVerifyResult struct {
 	DataHashOK bool
 	SignedOK   bool
 	CertOK     bool
+	CertInfo   SignatureCertInfo
 }
 
 // gbtSignedData GB/T 35275 SignedData结构
@@ -86,6 +87,7 @@ func verifyRawDigitalSignature(signedValue, signedData []byte, options *signatur
 			continue
 		}
 		result.CertOK = true
+		result.CertInfo = signatureCertInfo(cert)
 		if sm2VerifySignature(pub, nil, signedData, signedValue) {
 			result.SignedOK = true
 			return result, nil
@@ -136,6 +138,7 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 		if cert == nil {
 			return result, nil
 		}
+		result.CertInfo = signatureCertInfo(cert.Raw)
 		if !isSM2SignatureMethod(signer.SignatureAlg) {
 			return nil, fmt.Errorf("unsupported signature method")
 		}

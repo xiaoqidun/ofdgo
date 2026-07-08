@@ -107,6 +107,10 @@ const el = {
 	metaVersion: document.querySelector("#metaVersion"),
 	metaType: document.querySelector("#metaType"),
 	metaFonts: document.querySelector("#metaFonts"),
+	metaSignatures: document.querySelector("#metaSignatures"),
+	signaturePanel: document.querySelector("#signaturePanel"),
+	signatureSummary: document.querySelector("#signatureSummary"),
+	signatureList: document.querySelector("#signatureList"),
 	docFontList: document.querySelector("#docFontList"),
 	docFontSummary: document.querySelector("#docFontSummary"),
 	availableFontSummary: document.querySelector("#availableFontSummary"),
@@ -1500,10 +1504,199 @@ function renderMeta() {
 	el.metaVersion.textContent = doc.version || "-";
 	el.metaType.textContent = doc.docType || "-";
 	el.metaFonts.textContent = String(doc.fontCount || 0);
+	el.metaSignatures.textContent = String(doc.signatureCount || 0);
 	el.pageTotal.textContent = String(doc.pageCount || 0);
+	renderSignatures();
 	renderDocumentFonts();
 	renderFontList();
 	updateLocalFontButton();
+}
+
+function renderSignatures() {
+	const signatures = state.doc?.signatures || [];
+	const showPanel = Boolean(state.doc?.signatureError || signatures.length);
+	el.signaturePanel.hidden = !showPanel;
+	el.signatureList.replaceChildren();
+	el.signatureSummary.textContent = signatureSummary(signatures);
+	if (!showPanel) {
+		return;
+	}
+	if (state.doc?.signatureError) {
+		const empty = document.createElement("div");
+		empty.className = "font-empty";
+		empty.textContent = state.doc.signatureError;
+		el.signatureList.append(empty);
+		return;
+	}
+	const fragment = document.createDocumentFragment();
+	for (const signature of signatures) {
+		const row = document.createElement("div");
+		row.className = `signature-row ${signature.valid ? "valid" : "invalid"}`;
+
+		const head = document.createElement("div");
+		head.className = "signature-head";
+
+		const name = signatureNameNode(signature);
+
+		const badges = document.createElement("div");
+		badges.className = "signature-badges";
+		badges.append(fontBadge(signature.valid ? "有效" : "无效", signature.valid ? "valid" : "invalid"));
+
+		head.append(name, badges);
+		row.append(head);
+		appendSignatureLine(row, "签者", signature.signer);
+		appendSignatureLine(row, "时间", formatSignatureTime(signature.signatureDateTime));
+		appendSignatureLine(row, "机构", signatureAgency(signature));
+		appendSignatureLine(row, "版本", signature.version);
+		appendSignatureLine(row, "保护", `${signature.referencePassed || 0}/${signature.referenceCount || 0}`);
+		appendSignatureCheck(row, "原文", signature.dataHashOK);
+		appendSignatureCheck(row, "摘要", signature.digestOK);
+		appendSignatureCheck(row, "签名", signature.signedValueOK);
+		appendSignatureCheck(row, "证书", signature.certOK);
+		if (signature.type !== "Sign") {
+			appendSignatureCheck(row, "印章", signature.sealOK && signature.sealMatchOK);
+			appendSignatureCheck(row, "匹配", signature.sealMatchOK);
+		}
+		appendSignatureLine(row, "算法", signature.signatureMethod);
+		appendSignatureLine(row, "散列", signature.digestMethod);
+		appendSignatureLine(row, "主体", signature.signSubject && signature.signSubject !== signature.signer ? signature.signSubject : "");
+		appendSignatureLine(row, "颁发", signature.signIssuer);
+		appendSignatureLine(row, "序列", signature.signSerial);
+		appendSignatureLine(row, "章图", signature.sealType);
+		appendSignatureLine(row, "章证", signature.sealSubject);
+		appendSignatureLine(row, "编号", signature.id);
+		appendSignatureLine(row, "错误", signature.error, "fail");
+		fragment.append(row);
+	}
+	el.signatureList.append(fragment);
+}
+
+function signatureSummary(signatures) {
+	if (!signatures.length) {
+		return "0";
+	}
+	const invalid = signatures.filter((signature) => !signature.valid).length;
+	if (invalid) {
+		return `${signatures.length} · 异常 ${invalid}`;
+	}
+	return `通过 ${signatures.length}`;
+}
+
+function signatureName() {
+	return "签名";
+}
+
+function signatureNameNode(signature) {
+	const stamps = signature.stamps || [];
+	if (!stamps.length) {
+		const name = document.createElement("div");
+		name.className = "signature-name";
+		name.textContent = signatureName();
+		return name;
+	}
+	const name = document.createElement("div");
+	name.className = "signature-name signature-name-with-stamps";
+
+	const button = document.createElement("button");
+	button.type = "button";
+	button.className = "signature-name-button";
+	button.textContent = signatureName();
+	button.addEventListener("click", () => focusSignatureStamp(stamps[0]));
+	name.append(button, signatureStampGroup(stamps));
+	return name;
+}
+
+function signatureStampGroup(stamps) {
+	const group = document.createElement("span");
+	group.className = "signature-stamp-group";
+	group.append("（");
+	for (const [index, stamp] of stamps.entries()) {
+		if (index > 0) {
+			group.append("、");
+		}
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = "signature-stamp-link";
+		button.textContent = `第${index + 1}处`;
+		button.addEventListener("click", () => focusSignatureStamp(stamp));
+		group.append(button);
+	}
+	group.append("）");
+	return group;
+}
+
+function signatureAgency(signature) {
+	if (signature.company && signature.provider) {
+		return `${signature.company} · ${signature.provider}`;
+	}
+	return signature.company || signature.provider || "";
+}
+
+function formatSignatureTime(value) {
+	const text = String(value || "").trim();
+	const digits = text.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/);
+	if (digits) {
+		return `${digits[1]}-${digits[2]}-${digits[3]} ${digits[4]}:${digits[5]}:${digits[6]}`;
+	}
+	return text.replace("T", " ").replace(/(?:Z|[+-]\d{2}:?\d{2})$/, "");
+}
+
+function appendSignatureLine(row, label, value, status = "") {
+	if (!value && value !== 0) {
+		return;
+	}
+	const line = document.createElement("div");
+	line.className = status ? `signature-line ${status}` : "signature-line";
+
+	const key = document.createElement("span");
+	key.className = "signature-label";
+	key.textContent = label;
+
+	const text = document.createElement("span");
+	text.className = "signature-value";
+	text.textContent = String(value);
+
+	line.append(key, text);
+	row.append(line);
+}
+
+function appendSignatureCheck(row, label, ok) {
+	appendSignatureLine(row, label, ok ? "通过" : "失败", ok ? "ok" : "fail");
+}
+
+async function focusSignatureStamp(stamp) {
+	const pageIndex = (stamp.page || 0) - 1;
+	if (!state.doc || pageIndex < 0) {
+		return;
+	}
+	await renderPage(pageIndex);
+	await nextFrame();
+	highlightSignatureStamp(stamp);
+	setStatus(stamp.page ? `已定位签名外观 第 ${stamp.page} 页` : "已定位签名外观");
+}
+
+function highlightSignatureStamp(stamp) {
+	clearStampHighlights();
+	const pageIndex = (stamp.page || 0) - 1;
+	const shell = pageShell(pageIndex);
+	if (!shell || !stamp.width || !stamp.height) {
+		return;
+	}
+	const mark = document.createElement("div");
+	mark.className = "stamp-highlight";
+	mark.style.left = `${stamp.x * MM_TO_PX * state.scale}px`;
+	mark.style.top = `${stamp.y * MM_TO_PX * state.scale}px`;
+	mark.style.width = `${stamp.width * MM_TO_PX * state.scale}px`;
+	mark.style.height = `${stamp.height * MM_TO_PX * state.scale}px`;
+	shell.append(mark);
+	mark.scrollIntoView({ block: "center", inline: "center" });
+	window.setTimeout(() => mark.remove(), 1800);
+}
+
+function clearStampHighlights() {
+	for (const mark of el.svgHost.querySelectorAll(".stamp-highlight")) {
+		mark.remove();
+	}
 }
 
 function renderDocumentFonts() {
@@ -1654,6 +1847,7 @@ function applyFit(updateStatus = true) {
 function setScale(nextScale, updateStatus = true, fitMode = "free") {
 	state.fitMode = fitMode;
 	state.scale = Math.min(4, Math.max(0.2, nextScale));
+	clearStampHighlights();
 	layoutPages();
 	el.zoomLabel.textContent = `${Math.round(state.scale * 100)}%`;
 	if (updateStatus && state.doc) {

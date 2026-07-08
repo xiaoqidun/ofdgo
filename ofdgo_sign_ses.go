@@ -69,6 +69,9 @@ type sesVerifyResult struct {
 	SignedOK   bool
 	SealOK     bool
 	CertOK     bool
+	SignCert   SignatureCertInfo
+	SealCert   SignatureCertInfo
+	SealType   string
 }
 
 // parseSESSignature 解析SES签章值
@@ -177,6 +180,9 @@ func verifySESSignature(data, signedData []byte) (*sesVerifyResult, error) {
 		return nil, fmt.Errorf("unsupported signature method")
 	}
 	result := &sesVerifyResult{}
+	result.SignCert = signatureCertInfo(sig.Cert)
+	result.SealCert = signatureCertInfo(sig.Seal.Cert)
+	result.SealType = sig.Seal.PicType
 	result.DataHashOK = bytes.Equal(sig.DataHash, signSM3(signedData))
 	signPub, err := parseSM2PublicKeyFromCert(sig.Cert)
 	if err != nil {
