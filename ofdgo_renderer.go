@@ -1018,14 +1018,17 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		return
 	}
 	face := ff.Face(sizePt, fillPaint, fontStyle, canvas.FontNormal)
-	glyphRunes := r.textObjectGlyphRunes(fontID, obj)
+	glyphTransforms := r.textObjectGlyphTransforms(fontID, obj)
 	codePos := 0
 	for _, tc := range obj.TextCode {
 		var runes []rune
+		var glyphs []textGlyph
 		if tc.Index != "" {
 			runes = r.parseIndexRunes(tc.Index, fontID)
+			glyphs = textRuneGlyphs(runes)
 		} else {
-			runes = []rune(tc.Value)
+			runes = textCodeRunes(tc.Value)
+			glyphs = textCodeGlyphs(runes, glyphTransforms, codePos)
 		}
 		dxs, dys := parseFloats(tc.DeltaX), parseFloats(tc.DeltaY)
 		xs, ys := parseFloats(tc.X), parseFloats(tc.Y)
@@ -1037,20 +1040,15 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		if len(ys) > 0 {
 			cy = ys[0]
 		}
-		for i, run := range runes {
-			str := string(run)
-			if embeddedFont && tc.Index == "" && glyphRunes != nil {
-				if mapped, ok := glyphRunes[codePos+i]; ok {
-					str = string(mapped)
-				}
-			}
+		for i, glyph := range glyphs {
+			str := glyph.Text
 			if i < len(xs) {
 				cx = xs[i]
 			} else if i > 0 {
 				if dx, ok := textDelta(dxs, i-1); ok {
 					cx += dx
 				} else if len(dys) == 0 {
-					cx += face.TextWidth(str) * hScale
+					cx += textGlyphWidth(face, glyph) * hScale
 				}
 			}
 			if i < len(ys) {
@@ -1069,17 +1067,17 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				tx, ty := ctm.Transform(cx, cy)
 				canvasX, canvasY = tx+bx, pageH-(ty+by)
 			}
-			textWidth := face.TextWidth(str) * hScale
+			textWidth := textGlyphWidth(face, glyph) * hScale
 			glyphFillPaint := fillPaint
 			if fillColorNode != nil && fillColorNode.AxialShd != nil {
 				glyphFillPaint = parseFillPaint(fillColorNode, bx, by, pageH, canvasX, canvasY)
 			}
-			advanceLimit := textGlyphAdvanceLimit(dxs, dys, xs, i, len(runes), cx)
+			advanceLimit := textGlyphAdvanceLimit(dxs, dys, xs, i, len(glyphs), cx)
 			if glyphFillPaint != nil {
 				ctx.SetFill(glyphFillPaint)
 				drawGlyph := func(x, y float64) {
-					if drawAsPath {
-						path, width := face.ToPath(str)
+					if drawAsPath || glyph.GlyphID >= 0 {
+						path, width := textGlyphPath(face, glyph)
 						scaleX := hScale
 						if advanceLimit > 0 && width*scaleX > advanceLimit {
 							scaleX = advanceLimit / width
@@ -1095,12 +1093,12 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 							ctx.DrawPath(x, y, path)
 						}
 					} else {
-						if hScale != 1 {
+						scaled := hScale != 1
+						if scaled {
 							ctx.Push()
 							ctx.Translate(x, y)
 							ctx.Scale(hScale, 1)
 							x, y = 0, 0
-							defer ctx.Pop()
 						}
 						textFace := face
 						if fillColorNode != nil && fillColorNode.AxialShd != nil {
@@ -1108,6 +1106,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 						}
 						text := canvas.NewTextLine(textFace, str, canvas.Left)
 						ctx.DrawText(x, y, text)
+						if scaled {
+							ctx.Pop()
+						}
 					}
 				}
 				if useTextMatrix {
@@ -1142,47 +1143,6 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		codePos += len(runes)
 	}
 	ctx.Pop()
-}
-
-// textGlyphAdvanceLimit 获取显式字形推进宽度
-// 入参: dxs X方向偏移, dys Y方向偏移, xs X坐标列表, index 字形索引, count 字形数量, currentX 当前X坐标
-// 返回: float64 推进宽度
-func textGlyphAdvanceLimit(dxs, dys, xs []float64, index int, count int, currentX float64) float64 {
-	if index+1 >= count || len(dys) > 0 {
-		return 0
-	}
-	if index+1 < len(xs) {
-		if advance := xs[index+1] - currentX; advance > 0 {
-			return advance
-		}
-	}
-	if advance, ok := textDelta(dxs, index); ok && advance > 0 {
-		return advance
-	}
-	return 0
-}
-
-// textCodePositioned 判断文本编码是否带显式定位
-// 入参: textCode 文本编码
-// 返回: bool 是否带显式定位
-func textCodePositioned(textCode TextCode) bool {
-	return strings.TrimSpace(textCode.DeltaX) != "" ||
-		strings.TrimSpace(textCode.DeltaY) != "" ||
-		len(parseFloats(textCode.X)) > 1 ||
-		len(parseFloats(textCode.Y)) > 1
-}
-
-// textDelta 获取文本偏移量
-// 入参: deltas 偏移量数组, index 偏移量索引
-// 返回: float64 偏移量, bool 是否存在
-func textDelta(deltas []float64, index int) (float64, bool) {
-	if len(deltas) == 0 {
-		return 0, false
-	}
-	if index < len(deltas) {
-		return deltas[index], true
-	}
-	return deltas[len(deltas)-1], true
 }
 
 // hasTextMatrix 判断文本是否需要应用字形变换
@@ -1382,66 +1342,6 @@ func (r *Renderer) textObjectFontID(text TextObject) string {
 		}
 	}
 	return fontID
-}
-
-// textObjectGlyphRunes 获取文本对象的字形映射
-// 入参: fontID 字体ID, text 文本对象
-// 返回: map[int]rune 文本位置到包装字体字符的映射
-func (r *Renderer) textObjectGlyphRunes(fontID string, text TextObject) map[int]rune {
-	if fontID == "" || len(text.CGTransform) == 0 {
-		return nil
-	}
-	result := make(map[int]rune)
-	for _, transform := range text.CGTransform {
-		glyphs := parseInts(transform.Glyphs)
-		count := len(glyphs)
-		if transform.GlyphCount > 0 && transform.GlyphCount < count {
-			count = transform.GlyphCount
-		}
-		if transform.CodeCount > 0 && transform.CodeCount < count {
-			count = transform.CodeCount
-		}
-		if count == 0 {
-			continue
-		}
-		if transform.CodeCount > 0 && transform.GlyphCount > 0 && transform.CodeCount != transform.GlyphCount {
-			continue
-		}
-		for i := 0; i < count; i++ {
-			if mapped, ok := r.fontGlyphRune(fontID, glyphs[i]); ok {
-				result[transform.CodePosition+i] = mapped
-			}
-		}
-	}
-	if len(result) == 0 {
-		return nil
-	}
-	return result
-}
-
-// fontGlyphRune 获取字形ID对应的包装字体字符
-// 入参: fontID 字体ID, glyphID 字形ID或CID
-// 返回: rune 包装字体字符, bool 是否存在
-func (r *Renderer) fontGlyphRune(fontID string, glyphID int) (rune, bool) {
-	if glyphID < 0 || glyphID > 0xFFFF {
-		return 0, false
-	}
-	id := uint16(glyphID)
-	if r.FontCIDMap != nil {
-		if mapping := r.FontCIDMap[fontID]; mapping != nil {
-			if mapped, ok := mapping[id]; ok {
-				return mapped, true
-			}
-		}
-	}
-	if r.FontGIDMap != nil {
-		if mapping := r.FontGIDMap[fontID]; mapping != nil {
-			if mapped, ok := mapping[id]; ok {
-				return mapped, true
-			}
-		}
-	}
-	return 0, false
 }
 
 // renderStamp 渲染印章
