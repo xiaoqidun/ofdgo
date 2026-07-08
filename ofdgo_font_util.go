@@ -20,13 +20,6 @@ import (
 	"sort"
 )
 
-// align4 计算 4 字节对齐后的长度
-// 入参: n 原始长度
-// 返回: uint32 对齐后的长度
-func align4(n uint32) uint32 {
-	return (n + 3) & ^uint32(3)
-}
-
 // packedGlyphRune 获取包装字体字符
 // 入参: gid 字形ID
 // 返回: rune 包装字体字符
@@ -53,27 +46,6 @@ func calcTableChecksum(data []byte) uint32 {
 		}
 	}
 	return sum
-}
-
-// checkMissingCmap 检查是否缺失 cmap 表
-// 入参: data 字体数据
-// 返回: bool 是否缺失
-func checkMissingCmap(data []byte) bool {
-	if len(data) < 12 {
-		return true
-	}
-	numTables := binary.BigEndian.Uint16(data[4:6])
-	for i := 0; i < int(numTables); i++ {
-		pos := 12 + i*16
-		if len(data) < pos+4 {
-			break
-		}
-		tag := string(data[pos : pos+4])
-		if tag == "cmap" {
-			return false
-		}
-	}
-	return true
 }
 
 // parseCmapMappings 解析 cmap 字符映射
@@ -285,13 +257,6 @@ func buildHheaTable(numGlyphs uint16) []byte {
 	binary.Write(buf, binary.BigEndian, int16(0))
 	binary.Write(buf, binary.BigEndian, uint16(numGlyphs))
 	return buf.Bytes()
-}
-
-// buildMaxpTable 构建 maxp 表
-// 入参: numGlyphs 字形数量
-// 返回: []byte maxp表数据
-func buildMaxpTable(numGlyphs uint16) []byte {
-	return buildCFFMaxpTable(numGlyphs)
 }
 
 // buildCFFMaxpTable 构建 CFF 轮廓使用的 maxp 0.5 表

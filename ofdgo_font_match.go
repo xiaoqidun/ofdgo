@@ -310,13 +310,6 @@ func isFontFileName(name string) bool {
 	}
 }
 
-// fontRuleMatch 判断字体规则是否匹配
-// 入参: rule 字体匹配规则, name 字体名称
-// 返回: bool 是否匹配
-func fontRuleMatch(rule fontMatchRule, name string) bool {
-	return fontRuleMatchLevel(rule, name) != fontMatchNone
-}
-
 // fontRuleMatchLevel 获取字体规则匹配等级
 // 入参: rule 字体匹配规则, name 字体名称
 // 返回: int 匹配等级

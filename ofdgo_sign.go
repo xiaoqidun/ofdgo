@@ -61,7 +61,6 @@ type SignedInfo struct {
 	Seal              SignatureSeal       `xml:"Seal"`
 	StampAnnot        []SignatureStamp    `xml:"StampAnnot"`
 	References        SignatureReferences `xml:"References"`
-	Raw               []byte              `xml:"-"`
 }
 
 // SignatureProvider 签名提供者信息

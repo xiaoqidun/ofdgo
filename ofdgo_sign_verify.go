@@ -355,11 +355,6 @@ func parseSignatureFile(data []byte) (*SignatureFile, error) {
 	if err := xml.Unmarshal(data, &sigFile); err != nil {
 		return nil, err
 	}
-	raw, err := xmlElementRaw(data, "SignedInfo")
-	if err != nil {
-		return nil, err
-	}
-	sigFile.SignedInfo.Raw = raw
 	return &sigFile, nil
 }
 
@@ -718,46 +713,6 @@ func compactSignatureCerts(certs [][]byte) [][]byte {
 		out = append(out, cert)
 	}
 	return out
-}
-
-// xmlElementRaw 提取XML元素原始字节
-// 入参: data XML数据, localName 元素名称
-// 返回: []byte 元素原始字节, error 错误信息
-func xmlElementRaw(data []byte, localName string) ([]byte, error) {
-	dec := xml.NewDecoder(bytes.NewReader(data))
-	for {
-		tok, err := dec.Token()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		start, ok := tok.(xml.StartElement)
-		if !ok || start.Name.Local != localName {
-			continue
-		}
-		end := int(dec.InputOffset())
-		begin := bytes.LastIndex(data[:end], []byte("<"))
-		if begin < 0 {
-			return nil, fmt.Errorf("xml element not found: %s", localName)
-		}
-		depth := 1
-		for depth > 0 {
-			tok, err = dec.Token()
-			if err != nil {
-				return nil, err
-			}
-			switch tok.(type) {
-			case xml.StartElement:
-				depth++
-			case xml.EndElement:
-				depth--
-			}
-		}
-		return append([]byte(nil), data[begin:int(dec.InputOffset())]...), nil
-	}
-	return nil, fmt.Errorf("xml element not found: %s", localName)
 }
 
 // signatureCertInfo 解析签名证书信息

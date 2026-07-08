@@ -22,13 +22,6 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
-// parseColor 解析颜色字符串
-// 入参: val 颜色值(R G B)
-// 返回: color.Color 颜色对象
-func parseColor(val string) color.Color {
-	return parseColorWithAlpha(val, nil)
-}
-
 // parseColorWithAlpha 解析带透明度的颜色
 // 入参: val 颜色值, alpha 透明度
 // 返回: color.Color 颜色对象
