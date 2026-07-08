@@ -29,10 +29,13 @@ const (
 
 // digitalVerifyResult 数字签名验证结果
 type digitalVerifyResult struct {
-	DataHashOK bool
-	SignedOK   bool
-	CertOK     bool
-	CertInfo   SignatureCertInfo
+	DataHashOK  bool
+	SignedOK    bool
+	CertOK      bool
+	Cert        []byte
+	SignerCerts [][]byte
+	Certs       [][]byte
+	CertInfo    SignatureCertInfo
 }
 
 // gbtSignedData GB/T 35275 SignedData结构
@@ -61,16 +64,19 @@ type gbtSignerInfo struct {
 }
 
 // verifyDigitalSignature 验证OFD数字签名
-// 入参: method 签名算法, signedValue 签名值, signedData 被签名原文, options 验证选项
+// 入参: method 签名算法, digestMethod 摘要算法, signedValue 签名值, signedData 被签名原文, options 验证选项
 // 返回: *digitalVerifyResult 验证结果, error 错误信息
-func verifyDigitalSignature(method string, signedValue, signedData []byte, options *signatureVerifyOptions) (*digitalVerifyResult, error) {
-	if !isSM2SignatureMethod(method) {
-		return nil, fmt.Errorf("unsupported signature method")
-	}
+func verifyDigitalSignature(method, digestMethod string, signedValue, signedData []byte, options *signatureVerifyOptions) (*digitalVerifyResult, error) {
 	if isGBT35275SignedValue(signedValue) {
 		return verifyGBT35275SignedData(signedValue, signedData, options)
 	}
-	return verifyRawDigitalSignature(signedValue, signedData, options)
+	if isSM2SignatureMethod(method) {
+		return verifyRawDigitalSignature(signedValue, signedData, options)
+	}
+	if isRSASignatureMethod(method) || isECDSASignatureMethod(method) {
+		return verifyRawPublicKeySignature(method, digestMethod, signedValue, signedData, options)
+	}
+	return nil, fmt.Errorf("unsupported signature method: %s", method)
 }
 
 // verifyRawDigitalSignature 验证裸SM2数字签名
@@ -87,8 +93,35 @@ func verifyRawDigitalSignature(signedValue, signedData []byte, options *signatur
 			continue
 		}
 		result.CertOK = true
+		result.Cert = cert
+		result.SignerCerts = [][]byte{cert}
 		result.CertInfo = signatureCertInfo(cert)
 		if sm2VerifySignature(pub, nil, signedData, signedValue) {
+			result.SignedOK = true
+			return result, nil
+		}
+	}
+	return result, nil
+}
+
+// verifyRawPublicKeySignature 验证裸RSA或ECDSA数字签名
+// 入参: method 签名算法, digestMethod 摘要算法, signedValue 签名值, signedData 被签名原文, options 验证选项
+// 返回: *digitalVerifyResult 验证结果, error 错误信息
+func verifyRawPublicKeySignature(method, digestMethod string, signedValue, signedData []byte, options *signatureVerifyOptions) (*digitalVerifyResult, error) {
+	if len(options.SignCerts) == 0 {
+		return nil, fmt.Errorf("signature certificate not found")
+	}
+	result := &digitalVerifyResult{DataHashOK: true}
+	for _, cert := range options.SignCerts {
+		ok, err := verifyPublicKeySignature(method, digestMethod, cert, signedData, signedValue)
+		if err != nil {
+			continue
+		}
+		result.CertOK = true
+		result.Cert = cert
+		result.SignerCerts = [][]byte{cert}
+		result.CertInfo = signatureCertInfo(cert)
+		if ok {
 			result.SignedOK = true
 			return result, nil
 		}
@@ -113,16 +146,16 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 	if len(sd.Signers) == 0 {
 		return nil, fmt.Errorf("invalid signed data signer info")
 	}
-	result := &digitalVerifyResult{}
-	digest := signSM3(signedData)
-	if len(sd.ContentDigest) != 0 && !bytes.Equal(sd.ContentDigest, digest) {
-		return result, nil
-	}
-	result.DataHashOK = true
+	result := &digitalVerifyResult{Certs: sd.rawCerts()}
 	for _, signer := range sd.Signers {
-		if !isSM3DigestMethod(signer.DigestAlg) {
-			return nil, fmt.Errorf("unsupported digest method")
+		digest, err := signatureDigest(signer.DigestAlg, signedData)
+		if err != nil {
+			return nil, err
 		}
+		if len(sd.ContentDigest) != 0 && !bytes.Equal(sd.ContentDigest, digest) {
+			return result, nil
+		}
+		result.DataHashOK = true
 		plain := sd.ContentDigest
 		if len(signer.AuthAttrs) != 0 {
 			if !bytes.Equal(signer.AttrDigest, digest) {
@@ -138,16 +171,29 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 		if cert == nil {
 			return result, nil
 		}
+		result.Cert = cert.Raw
+		result.SignerCerts = append(result.SignerCerts, cert.Raw)
 		result.CertInfo = signatureCertInfo(cert.Raw)
-		if !isSM2SignatureMethod(signer.SignatureAlg) {
-			return nil, fmt.Errorf("unsupported signature method")
+		if isSM2SignatureMethod(signer.SignatureAlg) {
+			pub, err := parseSM2PublicKeyFromCert(cert.Raw)
+			if err != nil {
+				return result, err
+			}
+			result.CertOK = true
+			if !sm2VerifySignature(pub, nil, plain, signer.Signature) {
+				return result, nil
+			}
+			continue
 		}
-		pub, err := parseSM2PublicKeyFromCert(cert.Raw)
+		if !isRSASignatureMethod(signer.SignatureAlg) && !isECDSASignatureMethod(signer.SignatureAlg) {
+			return nil, fmt.Errorf("unsupported signature method: %s", signer.SignatureAlg)
+		}
+		ok, err := verifyPublicKeySignature(signer.SignatureAlg, signer.DigestAlg, cert.Raw, plain, signer.Signature)
 		if err != nil {
 			return result, err
 		}
 		result.CertOK = true
-		if !sm2VerifySignature(pub, nil, plain, signer.Signature) {
+		if !ok {
 			return result, nil
 		}
 	}
@@ -447,6 +493,16 @@ func (sd *gbtSignedData) findCert(issuer []byte, serial *big.Int) *gbtCertificat
 		}
 	}
 	return nil
+}
+
+// rawCerts 获取SignedData证书原文
+// 返回: [][]byte 证书列表
+func (sd *gbtSignedData) rawCerts() [][]byte {
+	certs := make([][]byte, 0, len(sd.Certs))
+	for _, cert := range sd.Certs {
+		certs = append(certs, cert.Raw)
+	}
+	return certs
 }
 
 // asn1Explicit 解析显式标签内容

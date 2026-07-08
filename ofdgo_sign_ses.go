@@ -65,13 +65,16 @@ type sesCertList struct {
 
 // sesVerifyResult SES签章验证结果
 type sesVerifyResult struct {
-	DataHashOK bool
-	SignedOK   bool
-	SealOK     bool
-	CertOK     bool
-	SignCert   SignatureCertInfo
-	SealCert   SignatureCertInfo
-	SealType   string
+	DataHashOK  bool
+	SignedOK    bool
+	SealOK      bool
+	CertOK      bool
+	SignCert    SignatureCertInfo
+	SealCert    SignatureCertInfo
+	SignCertRaw []byte
+	SealCertRaw []byte
+	Certs       [][]byte
+	SealType    string
 }
 
 // parseSESSignature 解析SES签章值
@@ -169,9 +172,9 @@ func parseSESSignatureV1(items []asn1.RawValue) (*sesSignature, error) {
 }
 
 // verifySESSignature 验证SES签章值
-// 入参: data 签章值数据, signedData 被签名数据原文
+// 入参: data 签章值数据, signedData 被签名数据原文, options 验证选项
 // 返回: *sesVerifyResult 验证结果, error 错误信息
-func verifySESSignature(data, signedData []byte) (*sesVerifyResult, error) {
+func verifySESSignature(data, signedData []byte, options *signatureVerifyOptions) (*sesVerifyResult, error) {
 	sig, err := parseSESSignature(data)
 	if err != nil {
 		return nil, err
@@ -182,6 +185,10 @@ func verifySESSignature(data, signedData []byte) (*sesVerifyResult, error) {
 	result := &sesVerifyResult{}
 	result.SignCert = signatureCertInfo(sig.Cert)
 	result.SealCert = signatureCertInfo(sig.Seal.Cert)
+	result.SignCertRaw = sig.Cert
+	result.SealCertRaw = sig.Seal.Cert
+	result.Certs = append(result.Certs, sig.Seal.CertList.Certs...)
+	result.Certs = append(result.Certs, options.SignCerts...)
 	result.SealType = sig.Seal.PicType
 	result.DataHashOK = bytes.Equal(sig.DataHash, signSM3(signedData))
 	signPub, err := parseSM2PublicKeyFromCert(sig.Cert)
@@ -309,7 +316,7 @@ func parseSESHeaderVersion(raw asn1.RawValue) (int, error) {
 }
 
 // parseSESCertList 解析印章证书列表
-// 入参: raw 印章属性信息
+// 入参: raw 印章属性信息, version 印章版本
 // 返回: sesCertList 证书列表, error 错误信息
 func parseSESCertList(raw asn1.RawValue, version int) (sesCertList, error) {
 	items, ok := asn1Children(raw.Bytes)
@@ -497,16 +504,24 @@ func signSM3(data []byte) []byte {
 // 入参: method 算法标识
 // 返回: bool 是否为SM2签名算法
 func isSM2SignatureMethod(method string) bool {
-	method = strings.TrimSpace(method)
-	return method == signMethodSM2SM3 || method == signMethodSM2SM3B || method == signMethodSM2Sign
+	switch signatureMethodText(method) {
+	case signMethodSM2SM3, signMethodSM2SM3B, signMethodSM2Sign, "SM2", "SM2SM3", "SM3SM2", "SM2WITHSM3", "SM3WITHSM2":
+		return true
+	default:
+		return false
+	}
 }
 
 // isSM3DigestMethod 判断是否为SM3摘要算法
 // 入参: method 算法标识
 // 返回: bool 是否为SM3摘要算法
 func isSM3DigestMethod(method string) bool {
-	method = strings.TrimSpace(method)
-	return method == signDigestSM3 || method == signDigestSM3NoKey || method == signDigestSM3Key || method == "SM3"
+	switch signatureMethodText(method) {
+	case signDigestSM3, signDigestSM3NoKey, signDigestSM3Key, "SM3":
+		return true
+	default:
+		return false
+	}
 }
 
 // sesCertInList 判断证书是否在印章证书列表中

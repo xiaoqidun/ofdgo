@@ -19,6 +19,8 @@ import (
 	"encoding/asn1"
 	"encoding/binary"
 	"encoding/xml"
+	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -113,16 +115,50 @@ func (r *Reader) SignatureStampPositions(stamps []SignatureStamp) ([]SignatureSt
 	pages := signaturePageNumbers(doc)
 	positions := make([]SignatureStampPosition, 0, len(stamps))
 	for _, stamp := range stamps {
-		box, _ := ParseBox(stamp.Boundary)
+		page, ok := pages[stamp.PageRef]
+		if !ok {
+			return nil, fmt.Errorf("signature stamp page not found: %s", stamp.PageRef)
+		}
+		box, err := parseSignatureStampBox(stamp.Boundary)
+		if err != nil {
+			return nil, err
+		}
 		positions = append(positions, SignatureStampPosition{
 			ID:       stamp.ID,
-			Page:     pages[stamp.PageRef],
+			Page:     page,
 			PageID:   stamp.PageRef,
 			Boundary: stamp.Boundary,
 			Box:      box,
 		})
 	}
 	return positions, nil
+}
+
+// parseSignatureStampBox 解析签名外观区域
+// 入参: s 区域字符串
+// 返回: Box 矩形对象, error 错误信息
+func parseSignatureStampBox(s string) (Box, error) {
+	parts := strings.Fields(s)
+	if len(parts) != 4 {
+		return Box{}, fmt.Errorf("invalid signature stamp boundary: %s", s)
+	}
+	x, err := strconv.ParseFloat(parts[0], 64)
+	if err != nil {
+		return Box{}, fmt.Errorf("invalid signature stamp boundary: %s", s)
+	}
+	y, err := strconv.ParseFloat(parts[1], 64)
+	if err != nil {
+		return Box{}, fmt.Errorf("invalid signature stamp boundary: %s", s)
+	}
+	w, err := strconv.ParseFloat(parts[2], 64)
+	if err != nil {
+		return Box{}, fmt.Errorf("invalid signature stamp boundary: %s", s)
+	}
+	h, err := strconv.ParseFloat(parts[3], 64)
+	if err != nil {
+		return Box{}, fmt.Errorf("invalid signature stamp boundary: %s", s)
+	}
+	return Box{X: x, Y: y, W: w, H: h}, nil
 }
 
 // parseSignatures 解析签名文件
