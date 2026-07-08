@@ -55,6 +55,10 @@ type SignatureInfo struct {
 	SealOK            bool                 `json:"sealOK"`
 	SealMatchOK       bool                 `json:"sealMatchOK"`
 	CertOK            bool                 `json:"certOK"`
+	CertTimeChecked   bool                 `json:"certTimeChecked,omitempty"`
+	CertTimeOK        bool                 `json:"certTimeOK,omitempty"`
+	CertTrustChecked  bool                 `json:"certTrustChecked,omitempty"`
+	CertTrustOK       bool                 `json:"certTrustOK,omitempty"`
 	ReferenceCount    int                  `json:"referenceCount"`
 	ReferencePassed   int                  `json:"referencePassed"`
 	SignSerial        string               `json:"signSerial,omitempty"`
@@ -315,19 +319,15 @@ func (s *Session) signatureInfos() ([]SignatureInfo, error) {
 	}
 	infos := make([]SignatureInfo, 0, len(reports))
 	for _, report := range reports {
-		positions, err := s.Reader.SignatureStampPositions(report.Stamps)
-		if err != nil {
-			return nil, err
-		}
-		infos = append(infos, signatureInfo(report, positions))
+		infos = append(infos, signatureInfo(report))
 	}
 	return infos, nil
 }
 
 // signatureInfo 转换签名验证信息
-// 入参: report 签名验证报告, positions 签名外观位置
+// 入参: report 签名验证报告
 // 返回: SignatureInfo 签名验证信息
-func signatureInfo(report ofdgo.SignatureVerifyReport, positions []ofdgo.SignatureStampPosition) SignatureInfo {
+func signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
 	return SignatureInfo{
 		ID:                report.ID,
 		Type:              string(report.Type),
@@ -343,6 +343,10 @@ func signatureInfo(report ofdgo.SignatureVerifyReport, positions []ofdgo.Signatu
 		SealOK:            report.SealOK,
 		SealMatchOK:       report.SealMatchOK,
 		CertOK:            report.CertOK,
+		CertTimeChecked:   report.CertTimeChecked,
+		CertTimeOK:        report.CertTimeOK,
+		CertTrustChecked:  report.CertTrustChecked,
+		CertTrustOK:       report.CertTrustOK,
 		ReferenceCount:    len(report.References),
 		ReferencePassed:   signatureReferencePassed(report.References),
 		SignSerial:        report.SignCert.SerialNumber,
@@ -351,8 +355,8 @@ func signatureInfo(report ofdgo.SignatureVerifyReport, positions []ofdgo.Signatu
 		SignSubject:       report.SignCert.Subject,
 		SignIssuer:        report.SignCert.Issuer,
 		SealSubject:       report.SealCert.Subject,
-		Stamps:            signatureStampInfos(positions),
-		Error:             report.Error,
+		Stamps:            signatureStampInfos(report.StampPositions),
+		Error:             signatureReportError(report),
 	}
 }
 
@@ -383,6 +387,19 @@ func signatureReferencePassed(refs []ofdgo.SignatureReferenceVerify) int {
 		}
 	}
 	return count
+}
+
+// signatureReportError 获取签名错误信息
+// 入参: report 签名验证报告
+// 返回: string 错误信息
+func signatureReportError(report ofdgo.SignatureVerifyReport) string {
+	if report.Error != "" && report.StampPositionError != "" {
+		return report.Error + "; " + report.StampPositionError
+	}
+	if report.Error != "" {
+		return report.Error
+	}
+	return report.StampPositionError
 }
 
 // signatureStampInfos 转换签名外观位置

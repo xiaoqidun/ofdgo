@@ -1557,6 +1557,8 @@ function renderSignatures() {
 			appendSignatureCheck(row, "匹配", signature.sealMatchOK);
 		}
 		appendSignatureCheck(row, "证书", signature.certOK);
+		appendSignaturePolicy(row, "时效", signature.certTimeChecked, signature.certTimeOK);
+		appendSignaturePolicy(row, "信任", signature.certTrustChecked, signature.certTrustOK);
 		appendSignatureLine(row, "保护", signatureReferenceText(signature), signatureReferenceStatus(signature));
 		appendSignatureLine(row, "序号", signature.signSerial);
 		appendSignatureLine(row, "算法", signature.signatureMethod);
@@ -1674,6 +1676,13 @@ function appendSignatureLine(row, label, value, status = "") {
 
 function appendSignatureCheck(row, label, ok) {
 	appendSignatureLine(row, label, ok ? "通过" : "失败", ok ? "ok" : "fail");
+}
+
+function appendSignaturePolicy(row, label, checked, ok) {
+	if (!checked) {
+		return;
+	}
+	appendSignatureCheck(row, label, ok);
 }
 
 async function focusSignatureStamp(stamp) {
