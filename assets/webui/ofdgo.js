@@ -951,9 +951,6 @@ async function renderPage(index, options = {}) {
 			scrollToPage(index);
 		}
 		queueNearbyPages(index, openSeq);
-		updatePageListCurrent();
-		updateControls();
-		setStatus(pageStatus(index, pageCount));
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			showError(err, false);
@@ -1199,6 +1196,7 @@ async function processPageRenderQueue() {
 		while (state.pageRenderQueue.length) {
 			state.pageRenderQueue.sort(comparePageRenderTask);
 			const task = state.pageRenderQueue.shift();
+			let delayed = false;
 			try {
 				if (task.openSeq !== state.openSeq) {
 					task.resolve(null);
@@ -1213,6 +1211,11 @@ async function processPageRenderQueue() {
 					task.resolve(null);
 					continue;
 				}
+				if (shouldDelayPageTask(task)) {
+					state.pageRenderQueue.push(task);
+					delayed = true;
+					continue;
+				}
 				const page = callWASM("ofdgoRenderPage", task.index);
 				if (task.openSeq === state.openSeq) {
 					state.pageCache.set(task.index, page);
@@ -1222,7 +1225,9 @@ async function processPageRenderQueue() {
 			} catch (err) {
 				task.reject(err);
 			} finally {
-				state.pageInFlight.delete(task.key);
+				if (!delayed) {
+					state.pageInFlight.delete(task.key);
+				}
 			}
 		}
 	} finally {
@@ -1231,6 +1236,10 @@ async function processPageRenderQueue() {
 			schedulePageRender();
 		}
 	}
+}
+
+function shouldDelayPageTask(task) {
+	return state.pageRenderQueue.some((next) => next.openSeq === state.openSeq && comparePageRenderTask(next, task) < 0);
 }
 
 function comparePageRenderTask(a, b) {
@@ -1298,26 +1307,27 @@ function schedulePageSync() {
 }
 
 function syncCurrentPageFromScroll() {
-	const shells = Array.from(el.svgHost.querySelectorAll(".page-shell"));
-	if (!shells.length) {
+	const shell = pageShellFromView();
+	if (!shell) {
 		return;
 	}
-	const viewerRect = el.viewerPanel.getBoundingClientRect();
-	const targetY = viewerRect.top + Math.min(viewerRect.height * 0.45, 280);
-	let nextIndex = state.pageIndex;
-	let best = Number.POSITIVE_INFINITY;
-	for (const shell of shells) {
-		const rect = shell.getBoundingClientRect();
-		const distance = Math.abs(rect.top - targetY);
-		if (distance < best) {
-			best = distance;
-			nextIndex = Number.parseInt(shell.dataset.pageIndex, 10);
-		}
-	}
+	const nextIndex = Number.parseInt(shell.dataset.pageIndex, 10);
 	if (Number.isFinite(nextIndex) && nextIndex !== state.pageIndex) {
 		setCurrentPage(nextIndex);
 		queueNearbyPages(nextIndex);
 	}
+}
+
+function pageShellFromView() {
+	const rect = el.viewerPanel.getBoundingClientRect();
+	const x = rect.left + rect.width / 2;
+	return pageShellAtPoint(x, rect.top + rect.height * 0.45)
+		|| pageShellAtPoint(x, rect.top + rect.height * 0.25)
+		|| pageShellAtPoint(x, rect.top + rect.height * 0.65);
+}
+
+function pageShellAtPoint(x, y) {
+	return document.elementFromPoint(x, y)?.closest?.(".page-shell") || null;
 }
 
 function setCurrentPage(index) {
@@ -1330,8 +1340,16 @@ function setCurrentPage(index) {
 }
 
 function updatePageListCurrent() {
-	for (const item of el.pageList.querySelectorAll(".page-list-item")) {
-		setPageItemCurrent(item, Number.parseInt(item.dataset.pageIndex, 10) === state.pageIndex);
+	const current = el.pageList.querySelector(".page-list-item[aria-current]");
+	if (current) {
+		if (Number.parseInt(current.dataset.pageIndex, 10) === state.pageIndex) {
+			return;
+		}
+		current.removeAttribute("aria-current");
+	}
+	const next = el.pageList.querySelector(`.page-list-item[data-page-index="${state.pageIndex}"]`);
+	if (next) {
+		setPageItemCurrent(next, true);
 	}
 }
 
