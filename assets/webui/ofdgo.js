@@ -363,7 +363,7 @@ async function openSelectedOFD() {
 	try {
 		state.fileName = file.name || "ofdgo.ofd";
 		state.ofdBytes = new Uint8Array(await file.arrayBuffer());
-		await openDocument();
+		await openDocument({ pageIndex: 0, resetScroll: true });
 	} catch (err) {
 		showError(err, true);
 		setBusy(false);
@@ -878,6 +878,7 @@ async function openDocument(options = {}) {
 			await openDocument({
 				pageIndex,
 				fitMode: state.fitMode,
+				resetScroll: options.resetScroll,
 				skipAutoFonts: true,
 				openSeq,
 			});
@@ -890,6 +891,10 @@ async function openDocument(options = {}) {
 		renderPageList();
 		renderMeta();
 		renderPageFlow();
+		if (options.resetScroll) {
+			el.viewerPanel.scrollLeft = 0;
+			el.viewerPanel.scrollTop = 0;
+		}
 		applyFit(false);
 		await nextFrame();
 		await renderPage(pageIndex, { keepBusy: true, scroll: false, openSeq });
