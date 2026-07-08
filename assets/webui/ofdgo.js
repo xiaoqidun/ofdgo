@@ -1198,7 +1198,7 @@ function scrollToPage(index) {
 	if (shell) {
 		shell.scrollIntoView({ block: state.fitMode === "height" ? "center" : "start", inline: "nearest" });
 		if (state.fitMode !== "height") {
-			el.viewerPanel.scrollTop = Math.max(0, el.viewerPanel.scrollTop - pageSpace());
+			el.viewerPanel.scrollTop = Math.max(0, el.viewerPanel.scrollTop - pageBlockSpace());
 		}
 	}
 }
@@ -1840,7 +1840,6 @@ function fitWidth(updateStatus = true) {
 	if (!page) {
 		return;
 	}
-	state.fitMode = "width";
 	const space = pageSpace();
 	const available = Math.max(1, el.viewerPanel.clientWidth - space * 2);
 	const width = Math.max(1, page.width * MM_TO_PX);
@@ -1855,7 +1854,6 @@ function fitHeight(updateStatus = true) {
 	if (!page) {
 		return;
 	}
-	state.fitMode = "height";
 	const space = pageSpace();
 	const availableWidth = Math.max(1, el.viewerPanel.clientWidth - space * 2);
 	const availableHeight = Math.max(1, el.viewerPanel.clientHeight - space * 2);
@@ -1878,10 +1876,15 @@ function applyFit(updateStatus = true) {
 }
 
 function setScale(nextScale, updateStatus = true, fitMode = "free") {
+	const scale = Math.min(4, Math.max(0.2, nextScale));
+	const scaleChanged = Math.abs(scale - state.scale) > 0.001;
 	state.fitMode = fitMode;
-	state.scale = Math.min(4, Math.max(0.2, nextScale));
-	clearStampHighlights();
-	layoutPages();
+	state.scale = scale;
+	if (scaleChanged) {
+		clearStampHighlights();
+		layoutPages();
+	}
+	updateFitSpace();
 	el.zoomLabel.textContent = `${Math.round(state.scale * 100)}%`;
 	if (updateStatus && state.doc) {
 		setStatus(`第 ${state.pageIndex + 1} / ${state.doc.pageCount} 页`);
@@ -1894,7 +1897,27 @@ function currentPageInfo() {
 }
 
 function pageSpace() {
-	return Number.parseFloat(getComputedStyle(el.pageFrame).paddingTop) || 0;
+	return Number.parseFloat(getComputedStyle(el.pageFrame).paddingLeft) || 0;
+}
+
+function pageBlockSpace() {
+	return Number.parseFloat(getComputedStyle(el.pageFrame).paddingTop) || pageSpace();
+}
+
+function updateFitSpace() {
+	const page = currentPageInfo();
+	if (!page || state.fitMode === "free") {
+		el.pageFrame.style.removeProperty("--fit-space");
+		el.pageFrame.style.removeProperty("--fit-gap");
+		return;
+	}
+	const shell = pageShell(state.pageIndex);
+	const height = shell ? shell.getBoundingClientRect().height : Math.max(1, page.height * MM_TO_PX * state.scale);
+	const base = pageSpace();
+	const space = Math.max(base, (el.viewerPanel.clientHeight - height) / 2);
+	const gap = space > base ? space + 1 : space;
+	el.pageFrame.style.setProperty("--fit-space", `${space}px`);
+	el.pageFrame.style.setProperty("--fit-gap", `${gap}px`);
 }
 
 function updateControls() {

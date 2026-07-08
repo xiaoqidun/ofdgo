@@ -477,12 +477,13 @@ body[data-hide-meta] .meta-panel {
 	min-width: 100%;
 	min-height: 100%;
 	padding: var(--page-space);
+	padding-block: var(--fit-space, var(--page-space));
 }
 
 .svg-host {
 	display: grid;
 	justify-items: center;
-	gap: var(--page-space);
+	gap: var(--fit-gap, var(--fit-space, var(--page-space)));
 	width: max-content;
 	margin: 0 auto;
 }
