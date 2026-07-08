@@ -32,7 +32,6 @@ type digitalVerifyResult struct {
 	DataHashOK  bool
 	SignedOK    bool
 	CertOK      bool
-	Cert        []byte
 	SignerCerts [][]byte
 	Certs       [][]byte
 	CertInfo    SignatureCertInfo
@@ -93,7 +92,6 @@ func verifyRawDigitalSignature(signedValue, signedData []byte, options *signatur
 			continue
 		}
 		result.CertOK = true
-		result.Cert = cert
 		result.SignerCerts = [][]byte{cert}
 		result.CertInfo = signatureCertInfo(cert)
 		if sm2VerifySignature(pub, nil, signedData, signedValue) {
@@ -121,7 +119,6 @@ func verifyRawPublicKeySignature(method, digestMethod string, signedValue, signe
 			continue
 		}
 		result.CertOK = true
-		result.Cert = cert
 		result.SignerCerts = [][]byte{cert}
 		result.CertInfo = signatureCertInfo(cert)
 		if ok {
@@ -175,7 +172,6 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 			result.CertOK = false
 			return result, nil
 		}
-		result.Cert = cert.Raw
 		result.SignerCerts = append(result.SignerCerts, cert.Raw)
 		result.CertInfo = signatureCertInfo(cert.Raw)
 		if isSM2SignatureMethod(signer.SignatureAlg) {
