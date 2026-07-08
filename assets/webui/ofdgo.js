@@ -61,7 +61,9 @@ const state = {
 	fitMode: "width",
 	renderAnnotations: true,
 	pageCache: new Map(),
-	pageInFlight: new Set(),
+	pageInFlight: new Map(),
+	pageRenderQueue: [],
+	pageRenderRunning: false,
 	pageObserver: null,
 	scrollFrame: 0,
 	thumbnailCache: new Map(),
@@ -102,6 +104,7 @@ const el = {
 	svgHost: document.querySelector("#svgHost"),
 	pageListPanel: document.querySelector(".page-list-panel"),
 	pageList: document.querySelector("#pageList"),
+	metaPanel: document.querySelector(".meta-panel"),
 	metaTitle: document.querySelector("#metaTitle"),
 	metaAuthor: document.querySelector("#metaAuthor"),
 	metaVersion: document.querySelector("#metaVersion"),
@@ -894,6 +897,10 @@ async function openDocument(options = {}) {
 		if (options.resetScroll) {
 			el.viewerPanel.scrollLeft = 0;
 			el.viewerPanel.scrollTop = 0;
+			el.pageListPanel.scrollLeft = 0;
+			el.pageListPanel.scrollTop = 0;
+			el.metaPanel.scrollLeft = 0;
+			el.metaPanel.scrollTop = 0;
 		}
 		applyFit(false);
 		await nextFrame();
@@ -936,7 +943,7 @@ async function renderPage(index, options = {}) {
 		if (options.scroll !== false) {
 			scrollToPage(index);
 		}
-		await renderFlowPage(index, { throwError: true, openSeq });
+		await renderFlowPage(index, { throwError: true, openSeq, priority: 0 });
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -1075,6 +1082,10 @@ function renderPageFlow() {
 
 function resetPageFlow() {
 	state.pageCache.clear();
+	for (const task of state.pageInFlight.values()) {
+		task.resolve(null);
+	}
+	state.pageRenderQueue = [];
 	state.pageInFlight.clear();
 	resetThumbnails();
 	if (state.pageObserver) {
@@ -1086,7 +1097,7 @@ function resetPageFlow() {
 function observeFlowPage(shell, index) {
 	const openSeq = state.openSeq;
 	if (index < 4 && index !== state.pageIndex) {
-		renderFlowPage(index, { openSeq });
+		renderFlowPage(index, { openSeq, priority: 3 });
 		return;
 	}
 	const observer = flowPageObserver();
@@ -1108,7 +1119,7 @@ function flowPageObserver() {
 				}
 				const index = Number.parseInt(entry.target.dataset.pageIndex, 10);
 				state.pageObserver.unobserve(entry.target);
-				renderFlowPage(index, { openSeq });
+				renderFlowPage(index, { openSeq, priority: 4 });
 			}
 		}, {
 			root: el.viewerPanel,
@@ -1123,27 +1134,18 @@ async function renderFlowPage(index, options = {}) {
 	if (openSeq !== state.openSeq) {
 		return null;
 	}
-	if (state.pageCache.has(index)) {
-		return state.pageCache.get(index);
-	}
-	const key = `${openSeq}:${index}`;
-	if (state.pageInFlight.has(key)) {
-		return null;
-	}
-	state.pageInFlight.add(key);
 	try {
-		await nextFrame();
+		const page = await loadPageData(index, { openSeq, priority: options.priority || 2 });
 		if (openSeq !== state.openSeq) {
 			return null;
 		}
-		const page = callWASM("ofdgoRenderPage", index);
-		if (openSeq !== state.openSeq) {
-			return null;
+		if (page) {
+			const shell = pageShell(index);
+			if (!shell?.classList.contains("rendered")) {
+				mountPageSVG(index, page, openSeq);
+			}
+			updateThumbnail(index, openSeq);
 		}
-		state.pageCache.set(index, page);
-		cacheThumbnail(index, page.svg);
-		mountPageSVG(index, page, openSeq);
-		updateThumbnail(index, openSeq);
 		return page;
 	} catch (err) {
 		if (openSeq === state.openSeq) {
@@ -1153,9 +1155,86 @@ async function renderFlowPage(index, options = {}) {
 			throw err;
 		}
 		return null;
-	} finally {
-		state.pageInFlight.delete(key);
 	}
+}
+
+function loadPageData(index, options = {}) {
+	const openSeq = options.openSeq || state.openSeq;
+	if (openSeq !== state.openSeq) {
+		return Promise.resolve(null);
+	}
+	if (state.pageCache.has(index)) {
+		return Promise.resolve(state.pageCache.get(index));
+	}
+	const key = `${openSeq}:${index}`;
+	const priority = options.priority || 3;
+	const current = state.pageInFlight.get(key);
+	if (current) {
+		current.priority = Math.min(current.priority, priority);
+		return current.promise;
+	}
+	let resolve;
+	let reject;
+	const promise = new Promise((done, fail) => {
+		resolve = done;
+		reject = fail;
+	});
+	const task = { key, index, openSeq, priority, resolve, reject, promise };
+	state.pageInFlight.set(key, task);
+	state.pageRenderQueue.push(task);
+	schedulePageRender();
+	return promise;
+}
+
+function schedulePageRender() {
+	if (state.pageRenderRunning) {
+		return;
+	}
+	state.pageRenderRunning = true;
+	requestAnimationFrame(processPageRenderQueue);
+}
+
+async function processPageRenderQueue() {
+	try {
+		while (state.pageRenderQueue.length) {
+			state.pageRenderQueue.sort(comparePageRenderTask);
+			const task = state.pageRenderQueue.shift();
+			try {
+				if (task.openSeq !== state.openSeq) {
+					task.resolve(null);
+					continue;
+				}
+				if (state.pageCache.has(task.index)) {
+					task.resolve(state.pageCache.get(task.index));
+					continue;
+				}
+				await nextFrame();
+				if (task.openSeq !== state.openSeq) {
+					task.resolve(null);
+					continue;
+				}
+				const page = callWASM("ofdgoRenderPage", task.index);
+				if (task.openSeq === state.openSeq) {
+					state.pageCache.set(task.index, page);
+					cacheThumbnail(task.index, page.svg);
+				}
+				task.resolve(page);
+			} catch (err) {
+				task.reject(err);
+			} finally {
+				state.pageInFlight.delete(task.key);
+			}
+		}
+	} finally {
+		state.pageRenderRunning = false;
+		if (state.pageRenderQueue.length) {
+			schedulePageRender();
+		}
+	}
+}
+
+function comparePageRenderTask(a, b) {
+	return a.priority - b.priority || Math.abs(a.index - state.pageIndex) - Math.abs(b.index - state.pageIndex);
 }
 
 function mountPageSVG(index, page, openSeq = state.openSeq) {
@@ -1190,7 +1269,7 @@ function markFlowPageError(index, err) {
 
 function queueNearbyPages(index, openSeq = state.openSeq) {
 	for (let i = Math.max(0, index - 1); i <= Math.min((state.doc?.pageCount || 1) - 1, index + 2); i += 1) {
-		renderFlowPage(i, { openSeq });
+		renderFlowPage(i, { openSeq, priority: 2 });
 	}
 }
 
@@ -1473,15 +1552,13 @@ async function renderThumbnail(index, openSeq = state.openSeq) {
 	}
 	state.thumbnailInFlight.add(key);
 	try {
-		await nextFrame();
+		const page = await loadPageData(index, { openSeq, priority: 5 });
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const page = callWASM("ofdgoRenderPage", index);
-		if (openSeq !== state.openSeq) {
+		if (!page) {
 			return;
 		}
-		cacheThumbnail(index, page.svg);
 		updateThumbnail(index, openSeq);
 	} catch {
 		if (openSeq === state.openSeq) {
