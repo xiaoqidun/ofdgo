@@ -1074,21 +1074,34 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			if fillColorNode != nil && fillColorNode.AxialShd != nil {
 				glyphFillPaint = parseFillPaint(fillColorNode, bx, by, pageH, canvasX, canvasY)
 			}
+			advanceLimit := textGlyphAdvanceLimit(dxs, dys, xs, i, len(runes), cx)
 			if glyphFillPaint != nil {
 				ctx.SetFill(glyphFillPaint)
 				drawGlyph := func(x, y float64) {
-					if hScale != 1 {
-						ctx.Push()
-						ctx.Translate(x, y)
-						ctx.Scale(hScale, 1)
-						x, y = 0, 0
-						defer ctx.Pop()
-					}
 					if drawAsPath {
 						path, width := face.ToPath(str)
-						textWidth = width * hScale
-						ctx.DrawPath(x, y, path)
+						scaleX := hScale
+						if advanceLimit > 0 && width*scaleX > advanceLimit {
+							scaleX = advanceLimit / width
+						}
+						textWidth = width * scaleX
+						if scaleX != 1 {
+							ctx.Push()
+							ctx.Translate(x, y)
+							ctx.Scale(scaleX, 1)
+							ctx.DrawPath(0, 0, path)
+							ctx.Pop()
+						} else {
+							ctx.DrawPath(x, y, path)
+						}
 					} else {
+						if hScale != 1 {
+							ctx.Push()
+							ctx.Translate(x, y)
+							ctx.Scale(hScale, 1)
+							x, y = 0, 0
+							defer ctx.Pop()
+						}
 						textFace := face
 						if fillColorNode != nil && fillColorNode.AxialShd != nil {
 							textFace = ff.Face(sizePt, glyphFillPaint, fontStyle, canvas.FontNormal)
@@ -1129,6 +1142,24 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		codePos += len(runes)
 	}
 	ctx.Pop()
+}
+
+// textGlyphAdvanceLimit 获取显式字形推进宽度
+// 入参: dxs X方向偏移, dys Y方向偏移, xs X坐标列表, index 字形索引, count 字形数量, currentX 当前X坐标
+// 返回: float64 推进宽度
+func textGlyphAdvanceLimit(dxs, dys, xs []float64, index int, count int, currentX float64) float64 {
+	if index+1 >= count || len(dys) > 0 {
+		return 0
+	}
+	if index+1 < len(xs) {
+		if advance := xs[index+1] - currentX; advance > 0 {
+			return advance
+		}
+	}
+	if advance, ok := textDelta(dxs, index); ok && advance > 0 {
+		return advance
+	}
+	return 0
 }
 
 // textCodePositioned 判断文本编码是否带显式定位
