@@ -117,6 +117,8 @@ var fontFallbackFiles = []string{
 	"arial.ttf",
 }
 
+var fontNameReplacer = strings.NewReplacer(" ", "", "-", "", "_", "", "(", "", ")", "", "（", "", "）", "")
+
 // FontNormalizeName 规范化字体名称
 // 入参: name 字体名称
 // 返回: string 规范化后的字体名称
@@ -151,8 +153,7 @@ func FontSystemNames(names ...string) []string {
 func fontNormalizeName(name string) string {
 	name = strings.TrimSuffix(path.Base(name), path.Ext(name))
 	name = strings.ToLower(strings.TrimSpace(name))
-	replacer := strings.NewReplacer(" ", "", "-", "", "_", "", "(", "", ")", "", "（", "", "）", "")
-	return replacer.Replace(name)
+	return fontNameReplacer.Replace(name)
 }
 
 // fontCandidateNames 获取字体候选名称
@@ -318,39 +319,35 @@ func fontRuleMatchLevel(rule fontMatchRule, name string) int {
 	if name == "" {
 		return fontMatchNone
 	}
-	items := fontRuleNames(rule)
-	for _, item := range items {
+	level := fontMatchNone
+	match := func(item string) bool {
 		item = fontNormalizeName(item)
 		if item != "" && name == item {
-			return fontMatchExact
+			level = fontMatchExact
+			return true
+		}
+		if item != "" && (level == fontMatchNone || level > fontMatchPartial) && (strings.HasPrefix(name, item) || strings.HasPrefix(item, name)) {
+			level = fontMatchPartial
+		}
+		if item != "" && level == fontMatchNone && (strings.Contains(name, item) || strings.Contains(item, name)) {
+			level = fontMatchFuzzy
+		}
+		return false
+	}
+	for _, item := range rule.Keys {
+		if match(item) {
+			return level
 		}
 	}
-	for _, item := range items {
-		item = fontNormalizeName(item)
-		if item != "" && (strings.HasPrefix(name, item) || strings.HasPrefix(item, name)) {
-			return fontMatchPartial
+	for _, item := range rule.Names {
+		if match(item) {
+			return level
 		}
 	}
-	for _, item := range items {
-		item = fontNormalizeName(item)
-		if item != "" && (strings.Contains(name, item) || strings.Contains(item, name)) {
-			return fontMatchFuzzy
-		}
-	}
-	return fontMatchNone
-}
-
-// fontRuleNames 获取字体规则名称列表
-// 入参: rule 字体匹配规则
-// 返回: []string 字体规则名称列表
-func fontRuleNames(rule fontMatchRule) []string {
-	var result []string
-	result = append(result, rule.Keys...)
-	result = append(result, rule.Names...)
 	if rule.System != "" {
-		result = append(result, rule.System)
+		match(rule.System)
 	}
-	return result
+	return level
 }
 
 // appendFontName 追加字体名称
