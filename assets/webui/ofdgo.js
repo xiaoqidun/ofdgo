@@ -1197,6 +1197,9 @@ function scrollToPage(index) {
 	const shell = pageShell(index);
 	if (shell) {
 		shell.scrollIntoView({ block: state.fitMode === "height" ? "center" : "start", inline: "nearest" });
+		if (state.fitMode !== "height") {
+			el.viewerPanel.scrollTop = Math.max(0, el.viewerPanel.scrollTop - pageSpace());
+		}
 	}
 }
 
@@ -1838,9 +1841,13 @@ function fitWidth(updateStatus = true) {
 		return;
 	}
 	state.fitMode = "width";
-	const available = Math.max(280, el.pageFrame.clientWidth - pageSpace() * 2);
+	const space = pageSpace();
+	const available = Math.max(1, el.viewerPanel.clientWidth - space * 2);
 	const width = Math.max(1, page.width * MM_TO_PX);
 	setScale(available / width, updateStatus, "width");
+	if (updateStatus) {
+		scrollToPage(state.pageIndex);
+	}
 }
 
 function fitHeight(updateStatus = true) {
@@ -1849,9 +1856,12 @@ function fitHeight(updateStatus = true) {
 		return;
 	}
 	state.fitMode = "height";
-	const available = Math.max(220, el.viewerPanel.clientHeight - pageSpace() * 2);
+	const space = pageSpace();
+	const availableWidth = Math.max(1, el.viewerPanel.clientWidth - space * 2);
+	const availableHeight = Math.max(1, el.viewerPanel.clientHeight - space * 2);
+	const width = Math.max(1, page.width * MM_TO_PX);
 	const height = Math.max(1, page.height * MM_TO_PX);
-	setScale(available / height, updateStatus, "height");
+	setScale(Math.min(availableWidth / width, availableHeight / height), updateStatus, "height");
 	if (updateStatus) {
 		scrollToPage(state.pageIndex);
 	}
