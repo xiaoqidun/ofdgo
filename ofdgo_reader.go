@@ -158,7 +158,6 @@ func (r *Reader) Doc() (*Document, error) {
 	if doc.Signatures == "" {
 		doc.Signatures = docAttr.Signatures
 	}
-	r.OFD.DocBody[0].DocInfo.DocID = "loaded"
 	if doc.CommonData.DocumentRes != "" {
 		r.loadRes(doc.CommonData.DocumentRes)
 	}
@@ -276,19 +275,6 @@ func (r *Reader) ResPath(resLink string) string {
 func (r *Reader) ResData(resLink string) ([]byte, error) {
 	fullPath := r.ResPath(resLink)
 	return r.readFile(fullPath)
-}
-
-// DocRoots 获取所有文档根路径
-// 返回: []string 路径列表
-func (r *Reader) DocRoots() []string {
-	var roots []string
-	if r.OFD == nil {
-		return roots
-	}
-	for _, body := range r.OFD.DocBody {
-		roots = append(roots, body.DocRoot)
-	}
-	return roots
 }
 
 // Version 获取OFD版本号

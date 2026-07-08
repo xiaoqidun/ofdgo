@@ -60,7 +60,13 @@ type sesSeal struct {
 // sesCertList SES印章证书列表
 type sesCertList struct {
 	Certs   [][]byte
-	Digests [][]byte
+	Digests []sesCertDigest
+}
+
+// sesCertDigest SES印章证书摘要
+type sesCertDigest struct {
+	Method string
+	Value  []byte
 }
 
 // sesVerifyResult SES签章验证结果
@@ -385,17 +391,21 @@ func parseSESCertDigestList(raw asn1.RawValue) (sesCertList, error) {
 	if !ok || len(items) == 0 {
 		return sesCertList{}, fmt.Errorf("invalid ses cert digest list")
 	}
-	list := sesCertList{Digests: make([][]byte, 0, len(items))}
+	list := sesCertList{Digests: make([]sesCertDigest, 0, len(items))}
 	for _, item := range items {
 		fields, ok := asn1Children(item.Bytes)
 		if !ok || len(fields) < 2 {
 			return sesCertList{}, fmt.Errorf("invalid ses cert digest")
 		}
+		method, err := parseGBTAlgorithm(fields[0])
+		if err != nil {
+			return sesCertList{}, err
+		}
 		digest, err := asn1OctetString(fields[1])
 		if err != nil {
 			return sesCertList{}, err
 		}
-		list.Digests = append(list.Digests, digest)
+		list.Digests = append(list.Digests, sesCertDigest{Method: method, Value: digest})
 	}
 	return list, nil
 }
@@ -514,9 +524,12 @@ func sesCertInList(cert []byte, list sesCertList) bool {
 			return true
 		}
 	}
-	digest := signSM3(cert)
 	for _, item := range list.Digests {
-		if bytes.Equal(digest, item) {
+		digest, err := signatureDigest(item.Method, cert)
+		if err != nil {
+			continue
+		}
+		if bytes.Equal(digest, item.Value) {
 			return true
 		}
 	}

@@ -33,7 +33,7 @@ const WASM_CALLBACKS = [
 	"ofdgoExportFormats",
 	"ofdgoExportPage",
 	"ofdgoExportPDF",
-	"ofdgoFontCandidates",
+	"ofdgoFontSystemNames",
 ];
 
 let wasmPromise = null;
@@ -616,7 +616,7 @@ function externalDocumentFontNames() {
 
 function fontNameKeys(names) {
 	const keys = new Set();
-	for (const name of fontCandidateNames(names)) {
+	for (const name of fontSystemNames(names)) {
 		const key = normalizeFontName(name);
 		if (key) {
 			keys.add(key);
@@ -625,18 +625,18 @@ function fontNameKeys(names) {
 	return keys;
 }
 
-function fontCandidateNames(names) {
+function fontSystemNames(names) {
 	const source = (Array.isArray(names) ? names : [])
 		.map((name) => String(name || "").trim())
 		.filter((name) => name !== "");
 	if (!source.length) {
 		return [];
 	}
-	if (state.ready && !state.wasmExited && typeof globalThis.ofdgoFontCandidates === "function") {
+	if (state.ready && !state.wasmExited && typeof globalThis.ofdgoFontSystemNames === "function") {
 		try {
-			const candidates = callWASM("ofdgoFontCandidates", source);
-			if (Array.isArray(candidates)) {
-				return candidates;
+			const names = callWASM("ofdgoFontSystemNames", source);
+			if (Array.isArray(names)) {
+				return names;
 			}
 		} catch {
 			return source;
