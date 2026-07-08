@@ -79,6 +79,7 @@ type sesVerifyResult struct {
 	SealCert    SignatureCertInfo
 	SignCertRaw []byte
 	SealCertRaw []byte
+	SealRaw     []byte
 	Certs       [][]byte
 	SealType    string
 }
@@ -193,6 +194,7 @@ func verifySESSignature(data, signedData []byte, options *signatureVerifyOptions
 	result.SealCert = signatureCertInfo(sig.Seal.Cert)
 	result.SignCertRaw = sig.Cert
 	result.SealCertRaw = sig.Seal.Cert
+	result.SealRaw = sig.Seal.Raw
 	result.Certs = append(result.Certs, sig.Seal.CertList.Certs...)
 	result.Certs = append(result.Certs, options.SignCerts...)
 	result.SealType = sig.Seal.PicType

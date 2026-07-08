@@ -95,6 +95,8 @@ type signatureVerifyOptions struct {
 	VerifyTime *time.Time
 }
 
+var signatureMethodReplacer = strings.NewReplacer("-", "", "_", "", " ", "")
+
 // SignatureVerifyOption 签名验证选项函数
 type SignatureVerifyOption func(*signatureVerifyOptions)
 
@@ -295,12 +297,7 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 			report.Error = err.Error()
 			return report
 		}
-		sig, err := parseSESSignature(signedValue)
-		if err != nil {
-			report.Error = err.Error()
-			return report
-		}
-		report.SealMatchOK = bytes.Equal(sealData, sig.Seal.Raw)
+		report.SealMatchOK = bytes.Equal(sealData, sesResult.SealRaw)
 	}
 	report.Valid = report.DigestOK && report.DataHashOK && report.SignedValueOK && report.SealOK && report.SealMatchOK && report.CertOK && report.certificatePolicyOK()
 	return report
@@ -498,15 +495,14 @@ func isECDSASignatureMethod(method string) bool {
 // 返回: string 规范化算法标识
 func signatureMethodText(method string) string {
 	method = strings.TrimSpace(method)
-	if strings.HasPrefix(strings.ToLower(method), "urn:oid:") {
+	if len(method) >= len("urn:oid:") && strings.EqualFold(method[:len("urn:oid:")], "urn:oid:") {
 		method = method[len("urn:oid:"):]
 	}
 	if idx := strings.LastIndexAny(method, "#/"); idx >= 0 && idx+1 < len(method) {
 		method = method[idx+1:]
 	}
 	method = strings.ToUpper(method)
-	method = strings.NewReplacer("-", "", "_", "", " ", "").Replace(method)
-	return method
+	return signatureMethodReplacer.Replace(method)
 }
 
 // verifyPublicKeySignature 验证公钥签名
