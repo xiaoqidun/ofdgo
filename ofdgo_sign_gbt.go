@@ -111,6 +111,9 @@ func verifyRawPublicKeySignature(method, digestMethod string, signedValue, signe
 	if len(options.SignCerts) == 0 {
 		return nil, fmt.Errorf("signature certificate not found")
 	}
+	if _, err := signatureMethodHash(method, digestMethod); err != nil {
+		return nil, err
+	}
 	result := &digitalVerifyResult{DataHashOK: true}
 	for _, cert := range options.SignCerts {
 		ok, err := verifyPublicKeySignature(method, digestMethod, cert, signedData, signedValue)
@@ -169,6 +172,7 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 		}
 		cert := sd.findCert(signer.Issuer, signer.Serial)
 		if cert == nil {
+			result.CertOK = false
 			return result, nil
 		}
 		result.Cert = cert.Raw
@@ -177,10 +181,11 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 		if isSM2SignatureMethod(signer.SignatureAlg) {
 			pub, err := parseSM2PublicKeyFromCert(cert.Raw)
 			if err != nil {
+				result.CertOK = false
 				return result, err
 			}
-			result.CertOK = true
 			if !sm2VerifySignature(pub, nil, plain, signer.Signature) {
+				result.CertOK = true
 				return result, nil
 			}
 			continue
@@ -190,13 +195,15 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 		}
 		ok, err := verifyPublicKeySignature(signer.SignatureAlg, signer.DigestAlg, cert.Raw, plain, signer.Signature)
 		if err != nil {
+			result.CertOK = false
 			return result, err
 		}
-		result.CertOK = true
 		if !ok {
+			result.CertOK = true
 			return result, nil
 		}
 	}
+	result.CertOK = true
 	result.SignedOK = true
 	return result, nil
 }
@@ -328,34 +335,14 @@ func parseGBTCertificates(raw asn1.RawValue) ([]gbtCertificate, error) {
 // 入参: data DER编码证书
 // 返回: gbtCertificate 证书索引信息, error 错误信息
 func parseGBTCertificate(data []byte) (gbtCertificate, error) {
-	var cert struct {
-		TBSCertificate     asn1.RawValue
-		SignatureAlgorithm asn1.RawValue
-		SignatureValue     asn1.BitString
-	}
-	rest, err := asn1.Unmarshal(data, &cert)
-	if err != nil || len(rest) != 0 {
-		return gbtCertificate{}, fmt.Errorf("invalid certificate")
-	}
-	items, ok := asn1Children(cert.TBSCertificate.Bytes)
-	if !ok {
-		return gbtCertificate{}, fmt.Errorf("invalid tbs certificate")
-	}
-	idx := 0
-	if len(items) > 0 && items[0].Class == asn1.ClassContextSpecific && items[0].Tag == 0 {
-		idx++
-	}
-	if len(items) <= idx+2 {
-		return gbtCertificate{}, fmt.Errorf("invalid certificate issuer")
-	}
-	serial, err := asn1IntegerBig(items[idx])
+	cert, err := parseSignatureCertificate(data)
 	if err != nil {
 		return gbtCertificate{}, err
 	}
 	return gbtCertificate{
-		Raw:    append([]byte(nil), data...),
-		Issuer: append([]byte(nil), items[idx+2].FullBytes...),
-		Serial: serial,
+		Raw:    cert.Raw,
+		Issuer: cert.Issuer,
+		Serial: cert.Serial,
 	}, nil
 }
 

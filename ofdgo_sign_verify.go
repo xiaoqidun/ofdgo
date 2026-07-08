@@ -103,7 +103,7 @@ type SignatureVerifyOption func(*signatureVerifyOptions)
 // 返回: SignatureVerifyOption 签名验证选项
 func WithSignatureCert(cert []byte) SignatureVerifyOption {
 	return func(o *signatureVerifyOptions) {
-		o.SignCerts = append(o.SignCerts, parseSignatureCerts(cert)...)
+		o.SignCerts = appendSignatureCerts(o.SignCerts, cert)
 	}
 }
 
@@ -112,9 +112,7 @@ func WithSignatureCert(cert []byte) SignatureVerifyOption {
 // 返回: SignatureVerifyOption 签名验证选项
 func WithSignatureCerts(certs ...[]byte) SignatureVerifyOption {
 	return func(o *signatureVerifyOptions) {
-		for _, cert := range certs {
-			o.SignCerts = append(o.SignCerts, parseSignatureCerts(cert)...)
-		}
+		o.SignCerts = appendSignatureCerts(o.SignCerts, certs...)
 	}
 }
 
@@ -123,7 +121,7 @@ func WithSignatureCerts(certs ...[]byte) SignatureVerifyOption {
 // 返回: SignatureVerifyOption 签名验证选项
 func WithSignatureTrustCert(cert []byte) SignatureVerifyOption {
 	return func(o *signatureVerifyOptions) {
-		o.TrustCerts = append(o.TrustCerts, parseSignatureCerts(cert)...)
+		o.TrustCerts = appendSignatureCerts(o.TrustCerts, cert)
 	}
 }
 
@@ -132,9 +130,7 @@ func WithSignatureTrustCert(cert []byte) SignatureVerifyOption {
 // 返回: SignatureVerifyOption 签名验证选项
 func WithSignatureTrustCerts(certs ...[]byte) SignatureVerifyOption {
 	return func(o *signatureVerifyOptions) {
-		for _, cert := range certs {
-			o.TrustCerts = append(o.TrustCerts, parseSignatureCerts(cert)...)
-		}
+		o.TrustCerts = appendSignatureCerts(o.TrustCerts, certs...)
 	}
 }
 
@@ -145,6 +141,16 @@ func WithSignatureVerifyTime(t time.Time) SignatureVerifyOption {
 	return func(o *signatureVerifyOptions) {
 		o.VerifyTime = &t
 	}
+}
+
+// appendSignatureCerts 追加签名证书
+// 入参: dst 目标证书列表, certs DER或PEM编码证书列表
+// 返回: [][]byte 证书列表
+func appendSignatureCerts(dst [][]byte, certs ...[]byte) [][]byte {
+	for _, cert := range certs {
+		dst = append(dst, parseSignatureCerts(cert)...)
+	}
+	return dst
 }
 
 // VerifySignaturesBytes 验证OFD字节数据签名
@@ -597,8 +603,12 @@ func (report *SignatureVerifyReport) applySignatureCertificatePolicy(options *si
 	if len(options.TrustCerts) != 0 {
 		report.CertTrustChecked = true
 		report.CertTrustOK = true
+		pool := append([][]byte{}, options.SignCerts...)
+		pool = append(pool, extraCerts...)
+		pool = append(pool, options.TrustCerts...)
+		pool = compactSignatureCerts(pool)
 		for _, cert := range certs {
-			if !signatureCertTrusted(cert, options, extraCerts) {
+			if !signatureCertTrustedBy(cert, pool, options.TrustCerts, make(map[string]bool)) {
 				report.CertTrustOK = false
 				break
 			}
@@ -635,14 +645,6 @@ func signatureCertsValidAt(certs [][]byte, t time.Time) bool {
 		}
 	}
 	return true
-}
-
-// signatureCertTrusted 判断证书是否受信任
-// 入参: cert 证书, options 验证选项, extraCerts 额外证书池
-// 返回: bool 是否受信任
-func signatureCertTrusted(cert []byte, options *signatureVerifyOptions, extraCerts [][]byte) bool {
-	pool := compactSignatureCerts(append(append(append([][]byte{}, options.SignCerts...), extraCerts...), options.TrustCerts...))
-	return signatureCertTrustedBy(cert, pool, options.TrustCerts, make(map[string]bool))
 }
 
 // signatureCertTrustedBy 判断证书是否可链到信任证书
@@ -790,6 +792,7 @@ type signatureCertificate struct {
 	IssuerValue  asn1.RawValue
 	Subject      []byte
 	SubjectValue asn1.RawValue
+	PublicKey    asn1.RawValue
 	Serial       *big.Int
 	NotBefore    time.Time
 	NotAfter     time.Time
@@ -843,6 +846,7 @@ func parseSignatureCertificate(data []byte) (signatureCertificate, error) {
 		IssuerValue:  items[idx+2],
 		Subject:      append([]byte(nil), items[idx+4].FullBytes...),
 		SubjectValue: items[idx+4],
+		PublicKey:    items[idx+5],
 		Serial:       serial,
 		NotBefore:    validity[0],
 		NotAfter:     validity[1],

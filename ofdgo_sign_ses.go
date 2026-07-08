@@ -425,30 +425,11 @@ func parseSESPicture(raw asn1.RawValue) (string, []byte, error) {
 // 入参: data DER编码证书
 // 返回: sm2PublicKey SM2公钥, error 错误信息
 func parseSM2PublicKeyFromCert(data []byte) (sm2PublicKey, error) {
-	var cert struct {
-		TBSCertificate     asn1.RawValue
-		SignatureAlgorithm asn1.RawValue
-		SignatureValue     asn1.BitString
-	}
-	rest, err := asn1.Unmarshal(data, &cert)
+	cert, err := parseSignatureCertificate(data)
 	if err != nil {
 		return sm2PublicKey{}, err
 	}
-	if len(rest) != 0 {
-		return sm2PublicKey{}, fmt.Errorf("invalid certificate")
-	}
-	items, ok := asn1Children(cert.TBSCertificate.Bytes)
-	if !ok {
-		return sm2PublicKey{}, fmt.Errorf("invalid tbs certificate")
-	}
-	idx := 0
-	if len(items) > 0 && items[0].Class == asn1.ClassContextSpecific && items[0].Tag == 0 {
-		idx++
-	}
-	if len(items) <= idx+5 {
-		return sm2PublicKey{}, fmt.Errorf("invalid public key info")
-	}
-	return parseSM2PublicKeyInfo(items[idx+5])
+	return parseSM2PublicKeyInfo(cert.PublicKey)
 }
 
 // parseSM2PublicKeyInfo 解析SM2公钥信息
