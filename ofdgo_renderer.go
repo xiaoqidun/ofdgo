@@ -1269,26 +1269,24 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	if of.Italic {
 		fontStyle |= canvas.FontItalic
 	}
+	boldStyle := fontStyle&canvas.FontBold != 0
+	italicStyle := fontStyle&canvas.FontItalic != 0
+	patterns := fontFilePatterns(of.FontName, of.FamilyName)
 	for _, dir := range r.fontDirs {
-		for _, pattern := range fontFilePatterns(of.FontName, of.FamilyName) {
-			matches := r.globFontFiles(dir, pattern)
-			for _, m := range matches {
-				if err := ff.LoadFontFile(m, fontStyle); err == nil {
-					r.FontMap[fontID] = ff
-					return ff
-				}
+		for _, m := range r.matchFontFiles(dir, patterns, boldStyle, italicStyle) {
+			if err := ff.LoadFontFile(m, fontStyle); err == nil {
+				r.FontMap[fontID] = ff
+				return ff
 			}
 		}
 	}
 	for _, fsys := range r.fontFS {
-		for _, pattern := range fontFilePatterns(of.FontName, of.FamilyName) {
-			for _, m := range fontFSMatches(fsys, pattern) {
-				resData, err := fs.ReadFile(fsys, m)
-				if err == nil {
-					if err := ff.LoadFont(resData, 0, fontStyle); err == nil {
-						r.FontMap[fontID] = ff
-						return ff
-					}
+		for _, m := range fontFSMatchesStyle(fsys, patterns, boldStyle, italicStyle) {
+			resData, err := fs.ReadFile(fsys, m)
+			if err == nil {
+				if err := ff.LoadFont(resData, 0, fontStyle); err == nil {
+					r.FontMap[fontID] = ff
+					return ff
 				}
 			}
 		}
@@ -1316,27 +1314,21 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 			continue
 		}
 		for _, targetName := range fontSystemNames(name) {
+			for _, m := range r.matchFontFiles(systemFontDir(), fontFilePatterns(targetName), boldStyle, italicStyle) {
+				if err := ff.LoadFontFile(m, fontStyle); err == nil {
+					r.FontMap[fontID] = ff
+					return ff
+				}
+			}
 			if err := ff.LoadSystemFont(targetName, fontStyle); err == nil {
 				r.FontMap[fontID] = ff
 				return ff
 			}
 		}
-		var sysFontDir string
-		switch runtime.GOOS {
-		case "linux":
-			sysFontDir = `/usr/share/fonts`
-		case "darwin":
-			sysFontDir = `/Library/Fonts`
-		default:
-			sysFontDir = `C:\Windows\Fonts`
-		}
-		for _, pattern := range fontFilePatterns(name) {
-			matches := r.globFontFiles(sysFontDir, pattern)
-			for _, m := range matches {
-				if err := ff.LoadFontFile(m, fontStyle); err == nil {
-					r.FontMap[fontID] = ff
-					return ff
-				}
+		for _, m := range r.matchFontFiles(systemFontDir(), fontFilePatterns(name), boldStyle, italicStyle) {
+			if err := ff.LoadFontFile(m, fontStyle); err == nil {
+				r.FontMap[fontID] = ff
+				return ff
 			}
 		}
 	}
@@ -1344,35 +1336,39 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	return defaultFont
 }
 
-// globFontFiles 查找字体文件
-// 入参: dir 目录, pattern 模式
+// matchFontFiles 查找字体文件
+// 入参: dir 目录, patterns 模式列表, bold 是否粗体, italic 是否斜体
 // 返回: []string 文件列表
-func (r *Renderer) globFontFiles(dir, pattern string) []string {
-	seen := make(map[string]bool)
-	buckets := make([][]string, fontMatchFuzzy+1)
-	add := func(name string, rank int) {
+func (r *Renderer) matchFontFiles(dir string, patterns []string, bold, italic bool) []string {
+	var matches []fontFileMatch
+	index := make(map[string]int)
+	add := func(pattern, name string, rank int) {
 		if !isFontFileName(name) {
 			return
 		}
-		if rank == fontMatchNone || seen[name] {
-			return
+		appendFontFileMatch(&matches, index, pattern, name, rank, bold, italic)
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "*"))
+	for _, pattern := range patterns {
+		for _, name := range files {
+			add(pattern, name, matchFontPatternRank(pattern, filepath.Base(name)))
 		}
-		seen[name] = true
-		buckets[rank] = append(buckets[rank], name)
 	}
-	matches, _ := filepath.Glob(filepath.Join(dir, pattern))
-	for _, m := range matches {
-		add(m, matchFontPatternRank(pattern, filepath.Base(m)))
+	sortFontFileMatches(matches, bold, italic)
+	return fontFileMatchNames(matches)
+}
+
+// systemFontDir 获取系统字体目录
+// 返回: string 字体目录
+func systemFontDir() string {
+	switch runtime.GOOS {
+	case "linux":
+		return `/usr/share/fonts`
+	case "darwin":
+		return `/Library/Fonts`
+	default:
+		return `C:\Windows\Fonts`
 	}
-	matches, _ = filepath.Glob(filepath.Join(dir, "*"))
-	for _, m := range matches {
-		add(m, matchFontPatternRank(pattern, filepath.Base(m)))
-	}
-	var result []string
-	for rank := fontMatchExact; rank <= fontMatchFuzzy; rank++ {
-		result = append(result, buckets[rank]...)
-	}
-	return result
 }
 
 // textObjectFontID 获取文本对象字体ID

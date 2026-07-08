@@ -151,6 +151,7 @@ func FontSystemNames(names ...string) []string {
 // 入参: name 字体名称
 // 返回: string 规范化后的字体名称
 func fontNormalizeName(name string) string {
+	name = strings.ReplaceAll(name, "\\", "/")
 	name = strings.TrimSuffix(path.Base(name), path.Ext(name))
 	name = strings.ToLower(strings.TrimSpace(name))
 	return fontNameReplacer.Replace(name)
@@ -326,10 +327,10 @@ func fontRuleMatchLevel(rule fontMatchRule, name string) int {
 			level = fontMatchExact
 			return true
 		}
-		if item != "" && (level == fontMatchNone || level > fontMatchPartial) && (strings.HasPrefix(name, item) || strings.HasPrefix(item, name)) {
+		if item != "" && (level == fontMatchNone || level > fontMatchPartial) && strings.HasPrefix(name, item) {
 			level = fontMatchPartial
 		}
-		if item != "" && level == fontMatchNone && (strings.Contains(name, item) || strings.Contains(item, name)) {
+		if item != "" && level == fontMatchNone && strings.Contains(name, item) {
 			level = fontMatchFuzzy
 		}
 		return false
