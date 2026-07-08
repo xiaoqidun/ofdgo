@@ -22,11 +22,12 @@ import (
 	"strings"
 )
 
+// SignType 签名类型
 type SignType string
 
 const (
-	SignTypeSeal = "Seal"
-	SignTypeSign = "Sign"
+	SignTypeSeal SignType = "Seal"
+	SignTypeSign SignType = "Sign"
 )
 
 // Signatures 签名列表
@@ -47,16 +48,49 @@ type Signature struct {
 type SignatureFile struct {
 	XMLName     xml.Name `xml:"Signature"`
 	SignedValue string   `xml:"SignedValue"`
-	SignedInfo  struct {
-		Seal struct {
-			BaseLoc string `xml:"BaseLoc"`
-		} `xml:"Seal"`
-		StampAnnot []struct {
-			ID       string `xml:"ID,attr"`
-			PageRef  string `xml:"PageRef,attr"`
-			Boundary string `xml:"Boundary,attr"`
-		} `xml:"StampAnnot"`
-	} `xml:"SignedInfo"`
+	SignedInfo  SignedInfo
+}
+
+// SignedInfo 签名信息
+type SignedInfo struct {
+	Provider          SignatureProvider   `xml:"Provider"`
+	SignatureMethod   string              `xml:"SignatureMethod"`
+	SignatureDateTime string              `xml:"SignatureDateTime"`
+	Seal              SignatureSeal       `xml:"Seal"`
+	StampAnnot        []SignatureStamp    `xml:"StampAnnot"`
+	References        SignatureReferences `xml:"References"`
+	Raw               []byte              `xml:"-"`
+}
+
+// SignatureProvider 签名提供者信息
+type SignatureProvider struct {
+	ProviderName string `xml:"ProviderName,attr"`
+	Company      string `xml:"Company,attr"`
+	Version      string `xml:"Version,attr"`
+}
+
+// SignatureSeal 签名印章引用
+type SignatureSeal struct {
+	BaseLoc string `xml:"BaseLoc"`
+}
+
+// SignatureStamp 签名印章注释
+type SignatureStamp struct {
+	ID       string `xml:"ID,attr"`
+	PageRef  string `xml:"PageRef,attr"`
+	Boundary string `xml:"Boundary,attr"`
+}
+
+// SignatureReferences 签名保护文件列表
+type SignatureReferences struct {
+	CheckMethod string               `xml:"CheckMethod,attr"`
+	Reference   []SignatureReference `xml:"Reference"`
+}
+
+// SignatureReference 签名保护文件引用
+type SignatureReference struct {
+	FileRef    string `xml:"FileRef,attr"`
+	CheckValue string `xml:"CheckValue"`
 }
 
 // parseSignatures 解析签名文件
@@ -99,7 +133,11 @@ func (r *Reader) parseSignatures(doc *Document) error {
 			if len(sealData) == 0 && sigFile.SignedValue != "" {
 				signedValuePath := resolveResourcePath(sigPath, "", sigFile.SignedValue)
 				if data, err := r.ResData(signedValuePath); err == nil {
-					sealType, sealData = extractSeal(data)
+					if sig, err := parseSESSignature(data); err == nil {
+						sealType, sealData = sig.Seal.PicType, sig.Seal.PicData
+					} else {
+						sealType, sealData = extractSeal(data)
+					}
 				}
 			}
 			if len(sealData) == 0 {

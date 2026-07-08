@@ -43,7 +43,7 @@ func Open(path string) (*Reader, error) {
 	return reader, nil
 }
 
-// NewReader 从流创建一个 OFD 阅读器
+// NewReader 从IO读取器创建OFD阅读器
 // 入参: r IO读取器, size 数据大小
 // 返回: *Reader 阅读器实例, error 错误信息
 func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
