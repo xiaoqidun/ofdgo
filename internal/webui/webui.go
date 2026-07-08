@@ -44,30 +44,27 @@ type SignatureInfo struct {
 	ID                string               `json:"id"`
 	Type              string               `json:"type"`
 	Valid             bool                 `json:"valid"`
-	Error             string               `json:"error,omitempty"`
+	Version           string               `json:"version,omitempty"`
+	SealType          string               `json:"sealType,omitempty"`
+	Signer            string               `json:"signer,omitempty"`
+	SignatureDateTime string               `json:"signatureDateTime,omitempty"`
 	Provider          string               `json:"provider,omitempty"`
 	Company           string               `json:"company,omitempty"`
-	Version           string               `json:"version,omitempty"`
-	Signer            string               `json:"signer,omitempty"`
-	SignSubject       string               `json:"signSubject,omitempty"`
-	SignIssuer        string               `json:"signIssuer,omitempty"`
-	SignSerial        string               `json:"signSerial,omitempty"`
-	SealSubject       string               `json:"sealSubject,omitempty"`
-	SealIssuer        string               `json:"sealIssuer,omitempty"`
-	SealSerial        string               `json:"sealSerial,omitempty"`
-	SealType          string               `json:"sealType,omitempty"`
-	SignatureMethod   string               `json:"signatureMethod,omitempty"`
-	SignatureDateTime string               `json:"signatureDateTime,omitempty"`
-	DigestMethod      string               `json:"digestMethod,omitempty"`
-	ReferenceCount    int                  `json:"referenceCount"`
-	ReferencePassed   int                  `json:"referencePassed"`
-	DigestOK          bool                 `json:"digestOK"`
 	DataHashOK        bool                 `json:"dataHashOK"`
 	SignedValueOK     bool                 `json:"signedValueOK"`
 	SealOK            bool                 `json:"sealOK"`
 	SealMatchOK       bool                 `json:"sealMatchOK"`
 	CertOK            bool                 `json:"certOK"`
+	ReferenceCount    int                  `json:"referenceCount"`
+	ReferencePassed   int                  `json:"referencePassed"`
+	SignSerial        string               `json:"signSerial,omitempty"`
+	SignatureMethod   string               `json:"signatureMethod,omitempty"`
+	DigestMethod      string               `json:"digestMethod,omitempty"`
+	SignSubject       string               `json:"signSubject,omitempty"`
+	SignIssuer        string               `json:"signIssuer,omitempty"`
+	SealSubject       string               `json:"sealSubject,omitempty"`
 	Stamps            []SignatureStampInfo `json:"stamps,omitempty"`
+	Error             string               `json:"error,omitempty"`
 }
 
 // SignatureStampInfo 签名外观信息
@@ -335,30 +332,27 @@ func signatureInfo(report ofdgo.SignatureVerifyReport, positions []ofdgo.Signatu
 		ID:                report.ID,
 		Type:              string(report.Type),
 		Valid:             report.Valid,
-		Error:             report.Error,
+		Version:           report.Provider.Version,
+		SealType:          report.SealType,
+		Signer:            signatureSigner(report),
+		SignatureDateTime: report.SignatureDateTime,
 		Provider:          report.Provider.ProviderName,
 		Company:           report.Provider.Company,
-		Version:           report.Provider.Version,
-		Signer:            signatureSigner(report),
-		SignSubject:       report.SignCert.Subject,
-		SignIssuer:        report.SignCert.Issuer,
-		SignSerial:        report.SignCert.SerialNumber,
-		SealSubject:       report.SealCert.Subject,
-		SealIssuer:        report.SealCert.Issuer,
-		SealSerial:        report.SealCert.SerialNumber,
-		SealType:          report.SealType,
-		SignatureMethod:   report.SignatureMethod,
-		SignatureDateTime: report.SignatureDateTime,
-		DigestMethod:      report.DigestMethod,
-		ReferenceCount:    len(report.References),
-		ReferencePassed:   signatureReferencePassed(report.References),
-		DigestOK:          report.DigestOK,
 		DataHashOK:        report.DataHashOK,
 		SignedValueOK:     report.SignedValueOK,
 		SealOK:            report.SealOK,
 		SealMatchOK:       report.SealMatchOK,
 		CertOK:            report.CertOK,
+		ReferenceCount:    len(report.References),
+		ReferencePassed:   signatureReferencePassed(report.References),
+		SignSerial:        report.SignCert.SerialNumber,
+		SignatureMethod:   report.SignatureMethod,
+		DigestMethod:      report.DigestMethod,
+		SignSubject:       report.SignCert.Subject,
+		SignIssuer:        report.SignCert.Issuer,
+		SealSubject:       report.SealCert.Subject,
 		Stamps:            signatureStampInfos(positions),
+		Error:             report.Error,
 	}
 }
 

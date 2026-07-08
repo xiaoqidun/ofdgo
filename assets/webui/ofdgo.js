@@ -1544,27 +1544,26 @@ function renderSignatures() {
 
 		head.append(name, badges);
 		row.append(head);
+		appendSignatureLine(row, "编号", signature.id);
+		appendSignatureLine(row, "版本", signature.version);
+		appendSignatureLine(row, "章图", signature.sealType);
 		appendSignatureLine(row, "签者", signature.signer);
 		appendSignatureLine(row, "时间", formatSignatureTime(signature.signatureDateTime));
 		appendSignatureLine(row, "机构", signatureAgency(signature));
-		appendSignatureLine(row, "版本", signature.version);
-		appendSignatureLine(row, "保护", `${signature.referencePassed || 0}/${signature.referenceCount || 0}`);
 		appendSignatureCheck(row, "原文", signature.dataHashOK);
-		appendSignatureCheck(row, "摘要", signature.digestOK);
 		appendSignatureCheck(row, "签名", signature.signedValueOK);
-		appendSignatureCheck(row, "证书", signature.certOK);
 		if (signature.type !== "Sign") {
 			appendSignatureCheck(row, "印章", signature.sealOK && signature.sealMatchOK);
 			appendSignatureCheck(row, "匹配", signature.sealMatchOK);
 		}
+		appendSignatureCheck(row, "证书", signature.certOK);
+		appendSignatureLine(row, "保护", signatureReferenceText(signature), signatureReferenceStatus(signature));
+		appendSignatureLine(row, "序号", signature.signSerial);
 		appendSignatureLine(row, "算法", signature.signatureMethod);
 		appendSignatureLine(row, "散列", signature.digestMethod);
 		appendSignatureLine(row, "主体", signature.signSubject && signature.signSubject !== signature.signer ? signature.signSubject : "");
 		appendSignatureLine(row, "颁发", signature.signIssuer);
-		appendSignatureLine(row, "序列", signature.signSerial);
-		appendSignatureLine(row, "章图", signature.sealType);
 		appendSignatureLine(row, "章证", signature.sealSubject);
-		appendSignatureLine(row, "编号", signature.id);
 		appendSignatureLine(row, "错误", signature.error, "fail");
 		fragment.append(row);
 	}
@@ -1582,16 +1581,12 @@ function signatureSummary(signatures) {
 	return `通过 ${signatures.length}`;
 }
 
-function signatureName() {
-	return "签名";
-}
-
 function signatureNameNode(signature) {
 	const stamps = signature.stamps || [];
 	if (!stamps.length) {
 		const name = document.createElement("div");
 		name.className = "signature-name";
-		name.textContent = signatureName();
+		name.textContent = "签名";
 		return name;
 	}
 	const name = document.createElement("div");
@@ -1600,7 +1595,7 @@ function signatureNameNode(signature) {
 	const button = document.createElement("button");
 	button.type = "button";
 	button.className = "signature-name-button";
-	button.textContent = signatureName();
+	button.textContent = "签名";
 	button.addEventListener("click", () => focusSignatureStamp(stamps[0]));
 	name.append(button, signatureStampGroup(stamps));
 	return name;
@@ -1630,6 +1625,23 @@ function signatureAgency(signature) {
 		return `${signature.company} · ${signature.provider}`;
 	}
 	return signature.company || signature.provider || "";
+}
+
+function signatureReferenceText(signature) {
+	const passed = signature.referencePassed || 0;
+	const count = signature.referenceCount || 0;
+	if (!count) {
+		return "";
+	}
+	return `${passed === count ? "通过" : "失败"} ${passed}/${count}`;
+}
+
+function signatureReferenceStatus(signature) {
+	const count = signature.referenceCount || 0;
+	if (!count) {
+		return "";
+	}
+	return signature.referencePassed === count ? "ok" : "fail";
 }
 
 function formatSignatureTime(value) {
