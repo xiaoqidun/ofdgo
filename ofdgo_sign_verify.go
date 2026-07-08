@@ -38,32 +38,33 @@ import (
 
 // SignatureVerifyReport 签名验证报告
 type SignatureVerifyReport struct {
-	ID                string
-	BaseLoc           string
-	Type              SignType
-	Provider          SignatureProvider
-	Signer            string
-	SignCert          SignatureCertInfo
-	SealCert          SignatureCertInfo
-	SealType          string
-	SignatureMethod   string
-	SignatureDateTime string
-	DigestMethod      string
-	References        []SignatureReferenceVerify
-	Stamps            []SignatureStamp
-	StampPositions    []SignatureStampPosition
-	DigestOK          bool
-	DataHashOK        bool
-	SignedValueOK     bool
-	SealOK            bool
-	SealMatchOK       bool
-	CertOK            bool
-	CertTimeChecked   bool
-	CertTimeOK        bool
-	CertTrustChecked  bool
-	CertTrustOK       bool
-	Valid             bool
-	Error             string
+	ID                 string
+	BaseLoc            string
+	Type               SignType
+	Provider           SignatureProvider
+	Signer             string
+	SignCert           SignatureCertInfo
+	SealCert           SignatureCertInfo
+	SealType           string
+	SignatureMethod    string
+	SignatureDateTime  string
+	DigestMethod       string
+	References         []SignatureReferenceVerify
+	Stamps             []SignatureStamp
+	StampPositions     []SignatureStampPosition
+	StampPositionError string
+	DigestOK           bool
+	DataHashOK         bool
+	SignedValueOK      bool
+	SealOK             bool
+	SealMatchOK        bool
+	CertOK             bool
+	CertTimeChecked    bool
+	CertTimeOK         bool
+	CertTrustChecked   bool
+	CertTrustOK        bool
+	Valid              bool
+	Error              string
 }
 
 // SignatureCertInfo 签名证书信息
@@ -235,8 +236,7 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 	report.Stamps = append(report.Stamps, sigFile.SignedInfo.StampAnnot...)
 	report.StampPositions, err = r.SignatureStampPositions(report.Stamps)
 	if err != nil {
-		report.Error = err.Error()
-		return report
+		report.StampPositionError = err.Error()
 	}
 	report.DigestOK = referencesOK(report.References)
 	signedValuePath := signatureRefPath(sigPath, sigFile.SignedValue)
