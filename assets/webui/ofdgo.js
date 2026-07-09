@@ -2009,6 +2009,7 @@ function applyFit(updateStatus = true) {
 }
 
 function setScale(nextScale, updateStatus = true, fitMode = "free") {
+	const anchor = updateStatus && fitMode === "free" ? scaleAnchor() : null;
 	const scale = Math.min(4, Math.max(0.2, nextScale));
 	const scaleChanged = Math.abs(scale - state.scale) > 0.001;
 	state.fitMode = fitMode;
@@ -2018,11 +2019,42 @@ function setScale(nextScale, updateStatus = true, fitMode = "free") {
 		layoutPages();
 	}
 	updateFitSpace();
+	if (scaleChanged) {
+		restoreScaleAnchor(anchor);
+	}
 	el.zoomLabel.textContent = `${Math.round(state.scale * 100)}%`;
 	if (updateStatus && state.doc) {
 		setStatus(`第 ${state.pageIndex + 1} / ${state.doc.pageCount} 页`);
 	}
 	updateControls();
+}
+
+function scaleAnchor() {
+	const shell = pageShellFromView() || pageShell(state.pageIndex);
+	if (!shell) {
+		return null;
+	}
+	const viewerRect = el.viewerPanel.getBoundingClientRect();
+	const shellRect = shell.getBoundingClientRect();
+	return {
+		index: Number.parseInt(shell.dataset.pageIndex, 10),
+		x: (viewerRect.left + viewerRect.width / 2 - shellRect.left) / Math.max(1, shellRect.width),
+		y: (viewerRect.top + viewerRect.height * 0.45 - shellRect.top) / Math.max(1, shellRect.height),
+	};
+}
+
+function restoreScaleAnchor(anchor) {
+	if (!anchor) {
+		return;
+	}
+	const shell = pageShell(anchor.index);
+	if (!shell) {
+		return;
+	}
+	const viewerRect = el.viewerPanel.getBoundingClientRect();
+	const shellRect = shell.getBoundingClientRect();
+	el.viewerPanel.scrollLeft += shellRect.left + shellRect.width * anchor.x - viewerRect.left - viewerRect.width / 2;
+	el.viewerPanel.scrollTop += shellRect.top + shellRect.height * anchor.y - viewerRect.top - viewerRect.height * 0.45;
 }
 
 function currentPageInfo() {
