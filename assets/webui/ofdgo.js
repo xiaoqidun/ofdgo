@@ -27,6 +27,7 @@ const STATUS = {
 	fonts: "正在匹配字体",
 	exporting: "正在导出文档 PDF",
 	pageExporting: "正在导出单页",
+	printing: "正在准备打印",
 };
 const WASM_CALLBACKS = [
 	"ofdgoOpen",
@@ -98,6 +99,7 @@ const el = {
 	pageExportFormat: document.querySelector("#pageExportFormat"),
 	exportPageButton: document.querySelector("#exportPageButton"),
 	exportButton: document.querySelector("#exportButton"),
+	printButton: document.querySelector("#printButton"),
 	emptyState: document.querySelector("#emptyState"),
 	progressPanel: document.querySelector("#progressPanel"),
 	progressLabel: document.querySelector("#progressLabel"),
@@ -142,6 +144,7 @@ el.annotationButton.addEventListener("click", toggleAnnotations);
 el.renderDPI.addEventListener("change", changeDPI);
 el.exportPageButton.addEventListener("click", exportCurrentPage);
 el.exportButton.addEventListener("click", exportPDF);
+el.printButton.addEventListener("click", printDocument);
 el.pageInput.addEventListener("change", () => {
 	const page = Number.parseInt(el.pageInput.value, 10);
 	if (Number.isFinite(page)) {
@@ -1068,6 +1071,50 @@ async function exportCurrentPage() {
 	}
 }
 
+async function printDocument() {
+	if (!state.doc) {
+		return;
+	}
+	const openSeq = state.openSeq;
+	setExportControlsDisabled(true);
+	setBusy(true, "正在准备打印", 18, STATUS.printing);
+	try {
+		await renderPagesForPrint(openSeq);
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		setProgress("正在打开打印", 86);
+		await waitForPaint();
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		setBusy(false);
+		updateControls();
+		window.print();
+		setStatus("已打开打印");
+	} catch (err) {
+		if (openSeq === state.openSeq) {
+			showError(err, false);
+		}
+	} finally {
+		if (openSeq === state.openSeq) {
+			setBusy(false);
+			updateControls();
+		}
+	}
+}
+
+async function renderPagesForPrint(openSeq) {
+	const pages = state.doc?.pages || [];
+	for (let i = 0; i < pages.length; i += 1) {
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		setProgress(`正在渲染打印 ${i + 1}/${pages.length}`, 20 + Math.round(i / Math.max(1, pages.length) * 62), STATUS.printing);
+		await renderFlowPage(pages[i].index, { throwError: true, openSeq, priority: 0 });
+	}
+}
+
 function renderPageFlow() {
 	el.svgHost.replaceChildren();
 	if (!state.doc) {
@@ -1409,6 +1456,8 @@ function layoutPages() {
 function layoutPageShell(shell, page) {
 	const width = Math.max(1, page.width * MM_TO_PX);
 	const height = Math.max(1, page.height * MM_TO_PX);
+	shell.style.setProperty("--page-width", `${width}px`);
+	shell.style.setProperty("--page-height", `${height}px`);
 	shell.style.width = `${width * state.scale}px`;
 	shell.style.height = `${height * state.scale}px`;
 	const surface = shell.querySelector(".page-surface");
@@ -2103,6 +2152,7 @@ function updateControls() {
 	el.pageExportFormat.disabled = !hasDoc || !state.exportFormats.length;
 	el.exportPageButton.disabled = !hasDoc || !state.exportFormats.length;
 	el.exportButton.disabled = !hasDoc;
+	el.printButton.disabled = !hasDoc;
 }
 
 function updateAnnotationButton() {
@@ -2115,6 +2165,7 @@ function setExportControlsDisabled(disabled) {
 	el.exportButton.disabled = disabled;
 	el.exportPageButton.disabled = disabled;
 	el.pageExportFormat.disabled = disabled;
+	el.printButton.disabled = disabled;
 }
 
 function callWASM(name, ...args) {
