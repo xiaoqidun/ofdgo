@@ -363,7 +363,7 @@ async function openSelectedOFD() {
 	}
 	if (!isOFDFile(file)) {
 		el.ofdInput.value = "";
-		showError(new Error("请选择 .ofd 文件"), !state.doc);
+		showError(new Error("选择 OFD 文件"), !state.doc);
 		return;
 	}
 	state.wasmRecoveries = 0;
