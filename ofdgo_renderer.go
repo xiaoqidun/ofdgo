@@ -29,8 +29,6 @@ import (
 	"github.com/tdewolff/canvas/renderers"
 	"github.com/tdewolff/canvas/renderers/pdf"
 	"github.com/tdewolff/canvas/renderers/rasterizer"
-	_ "github.com/xiaoqidun/jbig2"
-	_ "golang.org/x/image/bmp"
 )
 
 // Renderer 渲染器实现
@@ -306,19 +304,7 @@ func (r *Renderer) renderTemplate(ctx *canvas.Context, templateID string, pageH 
 // renderLayer 渲染图层
 // 入参: ctx 画布上下文, layer 图层对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM
 func (r *Renderer) renderLayer(ctx *canvas.Context, layer Layer, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix) {
-	if layer.DrawParam != "" {
-		if dp := r.getDrawParam(layer.DrawParam, nil); dp != nil {
-			if dp.LineWidth > 0 {
-				defaultLW = dp.LineWidth
-			}
-			if dp.FillColor != nil {
-				defaultFill = parseFillColor(dp.FillColor)
-			}
-			if dp.StrokeColor != nil {
-				defaultStroke = parseStrokeColor(dp.StrokeColor)
-			}
-		}
-	}
+	defaultFill, defaultStroke, defaultLW = r.drawParamDefaults(layer.DrawParam, defaultFill, defaultStroke, defaultLW)
 	if len(layer.Objects) > 0 {
 		for _, obj := range layer.Objects {
 			r.renderObject(ctx, obj, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false)
@@ -357,19 +343,7 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 			r.renderCompositeGraphicUnit(ctx, refCopy, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, true)
 		}
 	}
-	if cgu.DrawParam != "" {
-		if dp := r.getDrawParam(cgu.DrawParam, nil); dp != nil {
-			if dp.LineWidth > 0 {
-				defaultLW = dp.LineWidth
-			}
-			if dp.FillColor != nil {
-				defaultFill = parseFillColor(dp.FillColor)
-			}
-			if dp.StrokeColor != nil {
-				defaultStroke = parseStrokeColor(dp.StrokeColor)
-			}
-		}
-	}
+	defaultFill, defaultStroke, defaultLW = r.drawParamDefaults(cgu.DrawParam, defaultFill, defaultStroke, defaultLW)
 	if len(cgu.Objects) > 0 {
 		for _, obj := range cgu.Objects {
 			obj = mergeGraphicObjectAlpha(obj, cgu.Alpha)
@@ -430,6 +404,29 @@ func mergeGraphicObjectAlpha(obj GraphicObject, alpha *int) GraphicObject {
 		obj.CompositeGraphicUnit.Alpha = mergeAlpha(obj.CompositeGraphicUnit.Alpha, alpha)
 	}
 	return obj
+}
+
+// drawParamDefaults 合并绘制参数默认样式
+// 入参: id 绘制参数ID, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽
+// 返回: color.Color 默认填充色, color.Color 默认描边色, float64 默认线宽
+func (r *Renderer) drawParamDefaults(id string, defaultFill, defaultStroke color.Color, defaultLW float64) (color.Color, color.Color, float64) {
+	if id == "" {
+		return defaultFill, defaultStroke, defaultLW
+	}
+	dp := r.getDrawParam(id, nil)
+	if dp == nil {
+		return defaultFill, defaultStroke, defaultLW
+	}
+	if dp.LineWidth > 0 {
+		defaultLW = dp.LineWidth
+	}
+	if dp.FillColor != nil {
+		defaultFill = parseFillColor(dp.FillColor)
+	}
+	if dp.StrokeColor != nil {
+		defaultStroke = parseStrokeColor(dp.StrokeColor)
+	}
+	return defaultFill, defaultStroke, defaultLW
 }
 
 // getDrawParam 获取绘制参数逻辑
@@ -744,16 +741,6 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *Pattern, defaultC
 	}
 }
 
-// patternColor 获取图案单元默认颜色
-// 入参: fillColor 填充颜色节点
-// 返回: color.Color 默认颜色
-func patternColor(fillColor *FillColor) color.Color {
-	if fillColor == nil || strings.TrimSpace(fillColor.Value) == "" {
-		return nil
-	}
-	return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
-}
-
 // renderText 渲染文本
 // 入参: ctx 画布上下文, obj 文本对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM
 func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64, defaultFill, defaultStroke color.Color, parentCTM *Matrix, boundaryInCTM bool) {
@@ -850,6 +837,8 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	}
 	face := ff.Face(sizePt, fillPaint, fontStyle, canvas.FontNormal)
 	glyphTransforms := r.textObjectGlyphTransforms(fontID, obj)
+	hasUnderline := strings.Contains(obj.Decoration, "Underline")
+	useGlyphFillPaint := fillColorNode != nil && fillColorNode.AxialShd != nil
 	codePos := 0
 	for _, tc := range obj.TextCode {
 		var runes []rune
@@ -863,7 +852,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		}
 		dxs, dys := parseFloats(tc.DeltaX), parseFloats(tc.DeltaY)
 		xs, ys := parseFloats(tc.X), parseFloats(tc.Y)
-		drawAsPath := embeddedFont || textCodePositioned(tc)
+		drawAsPath := embeddedFont || textCodePositioned(tc, xs, ys)
 		cx, cy := 0.0, 0.0
 		if len(xs) > 0 {
 			cx = xs[0]
@@ -900,7 +889,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			}
 			textWidth := textGlyphWidth(face, glyph) * hScale
 			glyphFillPaint := fillPaint
-			if fillColorNode != nil && fillColorNode.AxialShd != nil {
+			if useGlyphFillPaint {
 				glyphFillPaint = parseFillPaint(fillColorNode, bx, by, pageH, canvasX, canvasY)
 			}
 			advanceLimit := textGlyphAdvanceLimit(dxs, dys, xs, i, len(glyphs), cx)
@@ -932,7 +921,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 							x, y = 0, 0
 						}
 						textFace := face
-						if fillColorNode != nil && fillColorNode.AxialShd != nil {
+						if useGlyphFillPaint {
 							textFace = ff.Face(sizePt, glyphFillPaint, fontStyle, canvas.FontNormal)
 						}
 						text := canvas.NewTextLine(textFace, str, canvas.Left)
@@ -947,7 +936,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					ctx.Translate(canvasX, canvasY)
 					ctx.ComposeView(textMatrix(ctm))
 					drawGlyph(0, 0)
-					if strings.Contains(obj.Decoration, "Underline") {
+					if hasUnderline {
 						uw := sizeMM * 0.05
 						ctx.SetStrokeWidth(uw)
 						ctx.SetStrokeColor(fillColor)
@@ -961,7 +950,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				}
 				drawGlyph(canvasX, canvasY)
 			}
-			if strings.Contains(obj.Decoration, "Underline") {
+			if hasUnderline {
 				uw := sizeMM * 0.05
 				ctx.SetStrokeWidth(uw)
 				ctx.SetStrokeColor(fillColor)
@@ -974,24 +963,6 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		codePos += len(runes)
 	}
 	ctx.Pop()
-}
-
-// hasTextMatrix 判断文本是否需要应用字形变换
-// 入参: ctm 变换矩阵
-// 返回: bool 是否需要变换
-func hasTextMatrix(ctm Matrix) bool {
-	const eps = 1e-9
-	return math.Abs(ctm.a-1) > eps || math.Abs(ctm.b) > eps || math.Abs(ctm.c) > eps || math.Abs(ctm.d-1) > eps
-}
-
-// textMatrix 获取文本字形变换矩阵
-// 入参: ctm OFD变换矩阵
-// 返回: canvas.Matrix 画布变换矩阵
-func textMatrix(ctm Matrix) canvas.Matrix {
-	return canvas.Matrix{
-		{ctm.a, -ctm.c, 0},
-		{-ctm.b, ctm.d, 0},
-	}
 }
 
 // renderStamp 渲染印章
@@ -1238,36 +1209,4 @@ func (r *Renderer) buildTinyFillRectPath(obj PathObject, pageH float64, ctm Matr
 	p.LineTo(minX-expand, maxY+expand)
 	p.Close()
 	return p
-}
-
-// parseIndexRunes 解析索引字形
-// 入参: indexStr 索引字符串, fontID 字体ID
-// 返回: []rune 字形列表
-func (r *Renderer) parseIndexRunes(indexStr string, fontID string) []rune {
-	var gids []int
-	parts := strings.Fields(indexStr)
-	for _, p := range parts {
-		if strings.Contains(p, "-") {
-			sub := strings.Split(p, "-")
-			if len(sub) == 2 {
-				start, _ := strconv.Atoi(sub[0])
-				end, _ := strconv.Atoi(sub[1])
-				for k := start; k <= end; k++ {
-					gids = append(gids, k)
-				}
-			}
-		} else {
-			val, _ := strconv.Atoi(p)
-			gids = append(gids, val)
-		}
-	}
-	var res []rune
-	for _, gid := range gids {
-		if rVal, ok := r.fontGlyphRune(fontID, gid); ok {
-			res = append(res, rVal)
-			continue
-		}
-		res = append(res, rune(gid))
-	}
-	return res
 }

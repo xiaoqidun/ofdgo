@@ -15,6 +15,8 @@
 package ofdgo
 
 import (
+	"math"
+	"strconv"
 	"strings"
 
 	"github.com/tdewolff/canvas"
@@ -159,6 +161,24 @@ func textGlyphPath(face *canvas.FontFace, glyph textGlyph) (*canvas.Path, float6
 	return p, face.MmPerEm * float64(face.Font.GlyphAdvance(glyphID))
 }
 
+// hasTextMatrix 判断文本是否需要应用字形变换
+// 入参: ctm 变换矩阵
+// 返回: bool 是否需要变换
+func hasTextMatrix(ctm Matrix) bool {
+	const eps = 1e-9
+	return math.Abs(ctm.a-1) > eps || math.Abs(ctm.b) > eps || math.Abs(ctm.c) > eps || math.Abs(ctm.d-1) > eps
+}
+
+// textMatrix 获取文本字形变换矩阵
+// 入参: ctm OFD变换矩阵
+// 返回: canvas.Matrix 画布变换矩阵
+func textMatrix(ctm Matrix) canvas.Matrix {
+	return canvas.Matrix{
+		{ctm.a, -ctm.c, 0},
+		{-ctm.b, ctm.d, 0},
+	}
+}
+
 // fontGlyphRune 获取字形ID对应的包装字体字符
 // 入参: fontID 字体ID, glyphID 字形ID或CID
 // 返回: rune 包装字体字符, bool 是否存在
@@ -184,6 +204,38 @@ func (r *Renderer) fontGlyphRune(fontID string, glyphID int) (rune, bool) {
 	return 0, false
 }
 
+// parseIndexRunes 解析索引字形
+// 入参: indexStr 索引字符串, fontID 字体ID
+// 返回: []rune 字形列表
+func (r *Renderer) parseIndexRunes(indexStr string, fontID string) []rune {
+	var gids []int
+	parts := strings.Fields(indexStr)
+	for _, p := range parts {
+		if strings.Contains(p, "-") {
+			sub := strings.Split(p, "-")
+			if len(sub) == 2 {
+				start, _ := strconv.Atoi(sub[0])
+				end, _ := strconv.Atoi(sub[1])
+				for k := start; k <= end; k++ {
+					gids = append(gids, k)
+				}
+			}
+		} else {
+			val, _ := strconv.Atoi(p)
+			gids = append(gids, val)
+		}
+	}
+	var res []rune
+	for _, gid := range gids {
+		if rVal, ok := r.fontGlyphRune(fontID, gid); ok {
+			res = append(res, rVal)
+			continue
+		}
+		res = append(res, rune(gid))
+	}
+	return res
+}
+
 // textGlyphAdvanceLimit 获取显式字形推进宽度
 // 入参: dxs X方向偏移, dys Y方向偏移, xs X坐标列表, index 字形索引, count 字形数量, currentX 当前X坐标
 // 返回: float64 推进宽度
@@ -203,13 +255,13 @@ func textGlyphAdvanceLimit(dxs, dys, xs []float64, index int, count int, current
 }
 
 // textCodePositioned 判断文本编码是否带显式定位
-// 入参: textCode 文本编码
+// 入参: textCode 文本编码, xs X坐标列表, ys Y坐标列表
 // 返回: bool 是否带显式定位
-func textCodePositioned(textCode TextCode) bool {
+func textCodePositioned(textCode TextCode, xs, ys []float64) bool {
 	return strings.TrimSpace(textCode.DeltaX) != "" ||
 		strings.TrimSpace(textCode.DeltaY) != "" ||
-		len(parseFloats(textCode.X)) > 1 ||
-		len(parseFloats(textCode.Y)) > 1
+		len(xs) > 1 ||
+		len(ys) > 1
 }
 
 // textDelta 获取文本偏移量

@@ -225,6 +225,16 @@ func parseStrokePaint(strokeColor *StrokeColor, x, y, pageH, originX, originY fl
 	return nil
 }
 
+// patternColor 获取图案单元默认颜色
+// 入参: fillColor 填充颜色节点
+// 返回: color.Color 默认颜色
+func patternColor(fillColor *FillColor) color.Color {
+	if fillColor == nil || strings.TrimSpace(fillColor.Value) == "" {
+		return nil
+	}
+	return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
+}
+
 // parseAxialShdColor 解析轴向渐变颜色
 // 入参: axialShd 轴向渐变节点, alpha 透明度
 // 返回: color.Color 颜色对象

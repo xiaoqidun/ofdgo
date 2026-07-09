@@ -20,6 +20,9 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+
+	_ "github.com/xiaoqidun/jbig2"
+	_ "golang.org/x/image/bmp"
 )
 
 // decodeImageData 解码图片数据

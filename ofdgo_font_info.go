@@ -331,35 +331,7 @@ func (r *Renderer) countCompositeFonts(cgu CompositeGraphicUnit, usage map[strin
 // countTextFont 统计文本字体使用次数
 // 入参: text 文本对象, usage 字体使用次数
 func (r *Renderer) countTextFont(text TextObject, usage map[string]int) {
-	fontID := text.Font
-	if fontID == "" && text.DrawParam != "" {
-		fontID = r.drawParamFont(text.DrawParam, nil)
-	}
-	if fontID != "" {
+	if fontID := r.textObjectFontID(text); fontID != "" {
 		usage[fontID]++
 	}
-}
-
-// drawParamFont 获取绘制参数字体
-// 入参: id 绘制参数ID, visited 已访问绘制参数
-// 返回: string 字体ID
-func (r *Renderer) drawParamFont(id string, visited map[string]bool) string {
-	if id == "" {
-		return ""
-	}
-	if visited == nil {
-		visited = make(map[string]bool)
-	}
-	if visited[id] {
-		return ""
-	}
-	visited[id] = true
-	dp := r.DrawParams[id]
-	if dp == nil {
-		return ""
-	}
-	if dp.Font != "" {
-		return dp.Font
-	}
-	return r.drawParamFont(dp.Relative, visited)
 }
