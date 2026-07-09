@@ -1309,9 +1309,14 @@ function pageShell(index) {
 function scrollToPage(index) {
 	const shell = pageShell(index);
 	if (shell) {
-		shell.scrollIntoView({ block: state.fitMode === "height" ? "center" : "start", inline: "nearest" });
-		if (state.fitMode !== "height") {
-			el.viewerPanel.scrollTop = Math.max(0, el.viewerPanel.scrollTop - pageBlockSpace());
+		if (state.fitMode === "height") {
+			shell.scrollIntoView({ block: "center", inline: "nearest" });
+		} else {
+			const viewerRect = el.viewerPanel.getBoundingClientRect();
+			const shellRect = shell.getBoundingClientRect();
+			const top = el.viewerPanel.scrollTop + shellRect.top - viewerRect.top - pageBlockSpace();
+			const maxTop = Math.max(0, el.viewerPanel.scrollHeight - el.viewerPanel.clientHeight);
+			el.viewerPanel.scrollTop = Math.min(maxTop, Math.max(0, top));
 		}
 		centerPageInline(shell);
 	}
