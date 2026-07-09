@@ -1415,8 +1415,6 @@ function layoutPages() {
 function layoutPageShell(shell, page) {
 	const width = Math.max(1, page.width * MM_TO_PX);
 	const height = Math.max(1, page.height * MM_TO_PX);
-	shell.style.setProperty("--page-width", `${width}px`);
-	shell.style.setProperty("--page-height", `${height}px`);
 	shell.style.width = `${width * state.scale}px`;
 	shell.style.height = `${height * state.scale}px`;
 	const surface = shell.querySelector(".page-surface");
@@ -1982,8 +1980,12 @@ function fitWidth(updateStatus = true) {
 		return;
 	}
 	const space = pageSpace();
-	const available = Math.max(1, el.viewerPanel.clientWidth - space * 2);
 	const width = Math.max(1, page.width * MM_TO_PX);
+	const height = Math.max(1, page.height * MM_TO_PX);
+	let available = Math.max(1, el.viewerPanel.clientWidth - space * 2);
+	if (!viewerHasVerticalScrollbar() && height * (available / width) > Math.max(1, el.viewerPanel.clientHeight - space * 2)) {
+		available = Math.max(1, available - scrollbarWidth());
+	}
 	setScale(available / width, updateStatus, "width");
 	if (updateStatus) {
 		scrollToPage(state.pageIndex);
@@ -2075,6 +2077,23 @@ function pageSpace() {
 
 function pageBlockSpace() {
 	return Number.parseFloat(getComputedStyle(el.pageFrame).paddingTop) || pageSpace();
+}
+
+function viewerHasVerticalScrollbar() {
+	return el.viewerPanel.scrollHeight > el.viewerPanel.clientHeight;
+}
+
+function scrollbarWidth() {
+	const probe = document.createElement("div");
+	probe.style.position = "absolute";
+	probe.style.width = "100px";
+	probe.style.height = "100px";
+	probe.style.overflow = "scroll";
+	probe.style.left = "-9999px";
+	document.body.append(probe);
+	const width = probe.offsetWidth - probe.clientWidth;
+	probe.remove();
+	return width;
 }
 
 function updateFitSpace() {
