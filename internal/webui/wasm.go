@@ -79,7 +79,7 @@ func safeCall(fn func([]js.Value) (any, error), args []js.Value) (data any, err 
 // 入参: args 浏览器参数
 // 返回: any 文档信息, error 错误信息
 func openDocument(args []js.Value) (any, error) {
-	if len(args) < 4 {
+	if len(args) < 3 {
 		return nil, fmt.Errorf("missing open arguments")
 	}
 	data, err := bytesFromJS(args[0])
@@ -91,12 +91,11 @@ func openDocument(args []js.Value) (any, error) {
 		return nil, err
 	}
 	renderAnnotations := args[2].Bool()
-	dpi := args[3].Float()
 	if currentSession != nil {
 		_ = currentSession.Close()
 		currentSession = nil
 	}
-	session, err := Open(data, OpenOptions{Fonts: fonts, DPI: dpi, RenderAnnotations: renderAnnotations})
+	session, err := Open(data, OpenOptions{Fonts: fonts, RenderAnnotations: renderAnnotations})
 	if err != nil {
 		return nil, err
 	}
@@ -131,10 +130,10 @@ func exportPage(args []js.Value) (any, error) {
 	if currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	if len(args) < 2 {
+	if len(args) < 3 {
 		return nil, fmt.Errorf("missing export page arguments")
 	}
-	data, format, err := currentSession.ExportPage(args[0].Int(), args[1].String())
+	data, format, err := currentSession.ExportPage(args[0].Int(), args[1].String(), args[2].Float())
 	if err != nil {
 		return nil, err
 	}

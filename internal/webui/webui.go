@@ -30,7 +30,6 @@ import (
 // OpenOptions 打开OFD文档选项
 type OpenOptions struct {
 	Fonts             []FontFile
-	DPI               float64
 	RenderAnnotations bool
 }
 
@@ -187,9 +186,6 @@ func Open(data []byte, opts OpenOptions) (*Session, error) {
 		return nil, err
 	}
 	var rendererOptions []ofdgo.RendererOption
-	if opts.DPI > 0 {
-		rendererOptions = append(rendererOptions, ofdgo.WithDPI(opts.DPI))
-	}
 	if len(opts.Fonts) > 0 {
 		fontFS := ofdgo.NewFontFS(opts.Fonts)
 		if fontFS.Len() == 0 {
@@ -276,9 +272,9 @@ func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
 }
 
 // ExportPage 导出单页
-// 入参: index 页面索引, value 导出格式
+// 入参: index 页面索引, value 导出格式, dpi 图片DPI
 // 返回: []byte 文件数据, ExportFormat 导出格式, error 错误信息
-func (s *Session) ExportPage(index int, value string) ([]byte, ExportFormat, error) {
+func (s *Session) ExportPage(index int, value string, dpi float64) ([]byte, ExportFormat, error) {
 	format, ok := exportFormat(value)
 	if !ok {
 		return nil, ExportFormat{}, fmt.Errorf("unsupported export format %s", value)
@@ -296,13 +292,13 @@ func (s *Session) ExportPage(index int, value string) ([]byte, ExportFormat, err
 	case "eps":
 		err = s.Renderer.RenderToEPS(page, &buf)
 	case "png":
-		img, renderErr := s.Renderer.RenderToImage(page)
+		img, renderErr := s.renderPageImage(page, dpi)
 		if renderErr != nil {
 			return nil, ExportFormat{}, renderErr
 		}
 		err = png.Encode(&buf, img)
 	case "jpg":
-		img, renderErr := s.Renderer.RenderToImage(page)
+		img, renderErr := s.renderPageImage(page, dpi)
 		if renderErr != nil {
 			return nil, ExportFormat{}, renderErr
 		}
@@ -312,6 +308,21 @@ func (s *Session) ExportPage(index int, value string) ([]byte, ExportFormat, err
 		return nil, ExportFormat{}, err
 	}
 	return buf.Bytes(), format, nil
+}
+
+// renderPageImage 渲染页面图片
+// 入参: page 页面内容, dpi 图片DPI
+// 返回: image.Image 图像对象, error 错误信息
+func (s *Session) renderPageImage(page *ofdgo.PageContent, dpi float64) (image.Image, error) {
+	if dpi <= 0 {
+		return s.Renderer.RenderToImage(page)
+	}
+	oldDPI := s.Renderer.DPI
+	s.Renderer.DPI = dpi
+	defer func() {
+		s.Renderer.DPI = oldDPI
+	}()
+	return s.Renderer.RenderToImage(page)
 }
 
 // signatureInfos 获取签名验证信息
