@@ -361,6 +361,11 @@ async function openSelectedOFD() {
 	if (!file) {
 		return;
 	}
+	if (!isOFDFile(file)) {
+		el.ofdInput.value = "";
+		showError(new Error("请选择 .ofd 文件"), !state.doc);
+		return;
+	}
 	state.wasmRecoveries = 0;
 	setBusy(true, "正在读取 OFD", 10, STATUS.opening);
 	try {
@@ -371,6 +376,10 @@ async function openSelectedOFD() {
 		showError(err, true);
 		setBusy(false);
 	}
+}
+
+function isOFDFile(file) {
+	return /\.ofd$/i.test(file.name || "");
 }
 
 async function openSelectedFonts() {
