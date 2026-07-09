@@ -128,7 +128,7 @@ const el = {
 el.ofdButton.addEventListener("click", openOFDFile);
 el.togglePagesButton.addEventListener("click", () => toggleSidebar("pages"));
 el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
-el.fontAddButton.addEventListener("click", () => el.fontInput.click());
+el.fontAddButton.addEventListener("click", openFontFile);
 el.localFontButton.addEventListener("click", loadLocalFonts);
 el.ofdInput.addEventListener("change", openSelectedOFD);
 el.fontInput.addEventListener("change", openSelectedFonts);
@@ -167,6 +167,7 @@ async function openOFDFile() {
 		return;
 	}
 	await requestLocalFontsBeforeOpen();
+	el.ofdInput.value = "";
 	el.ofdInput.click();
 }
 
@@ -175,6 +176,11 @@ async function openOFDFromViewer() {
 		return;
 	}
 	await openOFDFile();
+}
+
+function openFontFile() {
+	el.fontInput.value = "";
+	el.fontInput.click();
 }
 
 function toggleSidebar(side) {
