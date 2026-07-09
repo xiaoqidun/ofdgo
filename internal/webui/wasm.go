@@ -79,7 +79,7 @@ func safeCall(fn func([]js.Value) (any, error), args []js.Value) (data any, err 
 // 入参: args 浏览器参数
 // 返回: any 文档信息, error 错误信息
 func openDocument(args []js.Value) (any, error) {
-	if len(args) < 3 {
+	if len(args) < 4 {
 		return nil, fmt.Errorf("missing open arguments")
 	}
 	data, err := bytesFromJS(args[0])
@@ -91,11 +91,12 @@ func openDocument(args []js.Value) (any, error) {
 		return nil, err
 	}
 	renderAnnotations := args[2].Bool()
+	dpi := args[3].Float()
 	if currentSession != nil {
 		_ = currentSession.Close()
 		currentSession = nil
 	}
-	session, err := Open(data, OpenOptions{Fonts: fonts, RenderAnnotations: renderAnnotations})
+	session, err := Open(data, OpenOptions{Fonts: fonts, DPI: dpi, RenderAnnotations: renderAnnotations})
 	if err != nil {
 		return nil, err
 	}

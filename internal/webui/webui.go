@@ -30,6 +30,7 @@ import (
 // OpenOptions 打开OFD文档选项
 type OpenOptions struct {
 	Fonts             []FontFile
+	DPI               float64
 	RenderAnnotations bool
 }
 
@@ -186,6 +187,9 @@ func Open(data []byte, opts OpenOptions) (*Session, error) {
 		return nil, err
 	}
 	var rendererOptions []ofdgo.RendererOption
+	if opts.DPI > 0 {
+		rendererOptions = append(rendererOptions, ofdgo.WithDPI(opts.DPI))
+	}
 	if len(opts.Fonts) > 0 {
 		fontFS := ofdgo.NewFontFS(opts.Fonts)
 		if fontFS.Len() == 0 {

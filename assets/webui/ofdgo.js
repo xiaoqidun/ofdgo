@@ -18,6 +18,7 @@ const COMMON_FONT_NAMES = [
 ];
 const LOCAL_FONT_LOAD_LIMIT = 16;
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
+const DEFAULT_RENDER_DPI = 300;
 const STATUS = {
 	ready: "选择 OFD 文件",
 	opening: "正在打开 OFD",
@@ -59,6 +60,7 @@ const state = {
 	pageIndex: 0,
 	scale: 1,
 	fitMode: "width",
+	renderDPI: DEFAULT_RENDER_DPI,
 	renderAnnotations: true,
 	pageCache: new Map(),
 	pageInFlight: new Map(),
@@ -92,6 +94,7 @@ const el = {
 	fitButton: document.querySelector("#fitButton"),
 	fitHeightButton: document.querySelector("#fitHeightButton"),
 	annotationButton: document.querySelector("#annotationButton"),
+	renderDPI: document.querySelector("#renderDPI"),
 	pageExportFormat: document.querySelector("#pageExportFormat"),
 	exportPageButton: document.querySelector("#exportPageButton"),
 	exportButton: document.querySelector("#exportButton"),
@@ -136,6 +139,7 @@ el.zoomInButton.addEventListener("click", () => setScale(state.scale + 0.1));
 el.fitButton.addEventListener("click", fitWidth);
 el.fitHeightButton.addEventListener("click", fitHeight);
 el.annotationButton.addEventListener("click", toggleAnnotations);
+el.renderDPI.addEventListener("change", changeDPI);
 el.exportPageButton.addEventListener("click", exportCurrentPage);
 el.exportButton.addEventListener("click", exportPDF);
 el.pageInput.addEventListener("change", () => {
@@ -730,6 +734,19 @@ async function toggleAnnotations() {
 	});
 }
 
+async function changeDPI() {
+	state.renderDPI = currentRenderDPI();
+	if (!state.ofdBytes || !state.doc) {
+		return;
+	}
+	await openDocument({
+		pageIndex: state.pageIndex,
+		fitMode: state.fitMode,
+		scale: state.scale,
+		skipAutoFonts: true,
+	});
+}
+
 function removeFont(id) {
 	state.localFonts = state.localFonts.filter((font) => font.id !== id);
 	state.userFonts = state.userFonts.filter((font) => font.id !== id);
@@ -873,7 +890,7 @@ async function openDocument(options = {}) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const doc = callWASM("ofdgoOpen", state.ofdBytes, resetLocalFonts ? uploadedFonts() : allFonts(), state.renderAnnotations);
+		const doc = callWASM("ofdgoOpen", state.ofdBytes, resetLocalFonts ? uploadedFonts() : allFonts(), state.renderAnnotations, state.renderDPI);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -881,7 +898,7 @@ async function openDocument(options = {}) {
 		const pageIndex = Math.min(Math.max(options.pageIndex || 0, 0), Math.max(pageCount - 1, 0));
 		state.doc = doc;
 		state.pageIndex = pageIndex;
-		state.scale = 1;
+		state.scale = options.scale || 1;
 		state.fitMode = options.fitMode || "width";
 		if (!options.skipAutoFonts && await autoLoadDocumentLocalFonts(openSeq)) {
 			if (openSeq !== state.openSeq) {
@@ -2181,6 +2198,10 @@ function pageFileName(extension) {
 
 function exportFormatInfo(value) {
 	return state.exportFormats.find((format) => format.value === value) || null;
+}
+
+function currentRenderDPI() {
+	return Number.parseFloat(el.renderDPI.value) || DEFAULT_RENDER_DPI;
 }
 
 function formatBytes(size, fallback = "PDF") {

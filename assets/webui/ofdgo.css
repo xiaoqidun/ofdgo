@@ -217,6 +217,10 @@ button:not(:disabled):hover {
 	color: #1f2428;
 }
 
+.dpi-select {
+	width: 54px;
+}
+
 .format-select:focus,
 .format-select:focus-visible {
 	border-color: var(--accent);
@@ -1076,6 +1080,10 @@ body[data-hide-meta] .meta-panel {
 	.format-select {
 		width: 52px;
 		padding: 0 3px;
+	}
+
+	.dpi-select {
+		width: 48px;
 	}
 
 	.footer-links {
