@@ -1293,7 +1293,14 @@ function scrollToPage(index) {
 		if (state.fitMode !== "height") {
 			el.viewerPanel.scrollTop = Math.max(0, el.viewerPanel.scrollTop - pageBlockSpace());
 		}
+		centerPageInline(shell);
 	}
+}
+
+function centerPageInline(shell) {
+	const viewerRect = el.viewerPanel.getBoundingClientRect();
+	const shellRect = shell.getBoundingClientRect();
+	el.viewerPanel.scrollLeft += shellRect.left + shellRect.width / 2 - viewerRect.left - el.viewerPanel.clientWidth / 2;
 }
 
 function schedulePageSync() {
@@ -1314,7 +1321,6 @@ function syncCurrentPageFromScroll() {
 	const nextIndex = Number.parseInt(shell.dataset.pageIndex, 10);
 	if (Number.isFinite(nextIndex) && nextIndex !== state.pageIndex) {
 		setCurrentPage(nextIndex);
-		applyFit(false);
 		queueNearbyPages(nextIndex);
 	}
 }
