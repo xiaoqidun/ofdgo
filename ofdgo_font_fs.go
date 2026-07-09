@@ -148,10 +148,11 @@ func (fsys *FontFS) matchStyle(pattern string, bold, italic bool) []string {
 func (fsys *FontFS) matchPatternsStyle(patterns []string, bold, italic bool) []string {
 	var matches []fontFileMatch
 	seen := make(map[string]int)
-	for _, pattern := range patterns {
-		for _, name := range fsys.names {
-			rank := matchFontPatternRank(pattern, name)
-			appendFontFileMatch(&matches, seen, pattern, name, rank, bold, italic)
+	files := fontFileCandidates(fsys.names, path.Base)
+	for _, matcher := range newFontPatternMatchers(patterns) {
+		for _, file := range files {
+			rank := matcher.rank(file.base)
+			appendFontFileMatch(&matches, seen, matcher.pattern, file.name, rank, bold, italic)
 		}
 	}
 	sortFontFileMatches(matches, bold, italic)
@@ -205,49 +206,126 @@ func cleanFontName(name string) string {
 // 入参: pattern 匹配模式, name 字体文件名
 // 返回: int 匹配等级
 func matchFontPatternRank(pattern, name string) int {
+	return newFontPatternMatcher(pattern).rank(name)
+}
+
+type fontFileCandidate struct {
+	name string
+	base string
+}
+
+// fontFileCandidates 筛选字体文件候选
+// 入参: names 文件名列表, base 文件名提取函数
+// 返回: []fontFileCandidate 字体文件候选列表
+func fontFileCandidates(names []string, base func(string) string) []fontFileCandidate {
+	files := make([]fontFileCandidate, 0, len(names))
+	for _, name := range names {
+		if isFontFileName(name) {
+			files = append(files, fontFileCandidate{name: name, base: base(name)})
+		}
+	}
+	return files
+}
+
+type fontPatternMatcher struct {
+	pattern      string
+	lowerPattern string
+	stem         string
+	aliases      []string
+}
+
+// newFontPatternMatcher 创建字体文件匹配器
+// 入参: pattern 匹配模式
+// 返回: fontPatternMatcher 字体文件匹配器
+func newFontPatternMatcher(pattern string) fontPatternMatcher {
+	matcher := fontPatternMatcher{
+		pattern:      pattern,
+		lowerPattern: strings.ToLower(pattern),
+		stem:         fontPatternStem(pattern),
+	}
+	if matcher.stem != "" {
+		for _, alias := range fontExactCandidateNames(matcher.stem) {
+			alias = fontNormalizeName(alias)
+			if alias != "" {
+				matcher.aliases = append(matcher.aliases, alias)
+			}
+		}
+	}
+	return matcher
+}
+
+// newFontPatternMatchers 创建字体文件匹配器列表
+// 入参: patterns 匹配模式列表
+// 返回: []fontPatternMatcher 字体文件匹配器列表
+func newFontPatternMatchers(patterns []string) []fontPatternMatcher {
+	matchers := make([]fontPatternMatcher, 0, len(patterns))
+	for _, pattern := range patterns {
+		matchers = append(matchers, newFontPatternMatcher(pattern))
+	}
+	return matchers
+}
+
+// rank 获取字体文件匹配等级
+// 入参: name 字体文件名
+// 返回: int 匹配等级
+func (m fontPatternMatcher) rank(name string) int {
 	rawName := name
-	exactPath, _ := path.Match(pattern, name)
-	lowerPath, _ := path.Match(strings.ToLower(pattern), strings.ToLower(name))
-	stem := fontPatternStem(pattern)
-	if stem == "" {
+	exactPath, _ := path.Match(m.pattern, name)
+	lowerPath, _ := path.Match(m.lowerPattern, strings.ToLower(name))
+	if m.stem == "" {
 		if exactPath || lowerPath {
 			return fontMatchFuzzy
 		}
 		return fontMatchNone
 	}
 	name = fontNormalizeName(name)
-	if name == stem {
+	if name == m.stem {
 		return fontMatchExact
 	}
-	aliases := fontExactCandidateNames(stem)
-	for _, alias := range aliases {
-		alias = fontNormalizeName(alias)
-		if alias != "" && name == alias {
+	for _, alias := range m.aliases {
+		if name == alias {
 			return fontMatchExact
 		}
 	}
-	if fontFileKnownStyleSuffix(fontFileStyleSuffix(pattern, rawName)) {
+	if fontFileKnownStyleSuffix(m.styleSuffix(rawName)) {
 		return fontMatchExact
 	}
-	if strings.HasPrefix(name, stem) {
+	if strings.HasPrefix(name, m.stem) {
 		return fontMatchPartial
 	}
-	for _, alias := range aliases {
-		alias = fontNormalizeName(alias)
-		if alias != "" && strings.HasPrefix(name, alias) {
+	for _, alias := range m.aliases {
+		if strings.HasPrefix(name, alias) {
 			return fontMatchPartial
 		}
 	}
-	if exactPath || lowerPath || strings.Contains(name, stem) {
+	if exactPath || lowerPath || strings.Contains(name, m.stem) {
 		return fontMatchFuzzy
 	}
-	for _, alias := range aliases {
-		alias = fontNormalizeName(alias)
-		if alias != "" && strings.Contains(name, alias) {
+	for _, alias := range m.aliases {
+		if strings.Contains(name, alias) {
 			return fontMatchFuzzy
 		}
 	}
 	return fontMatchNone
+}
+
+// styleSuffix 获取字体文件样式后缀
+// 入参: name 字体文件名
+// 返回: string 样式后缀
+func (m fontPatternMatcher) styleSuffix(name string) string {
+	key := fontNormalizeName(name)
+	if m.stem == "" || key == "" {
+		return ""
+	}
+	if strings.HasPrefix(key, m.stem) {
+		return strings.TrimPrefix(key, m.stem)
+	}
+	for _, alias := range m.aliases {
+		if strings.HasPrefix(key, alias) {
+			return strings.TrimPrefix(key, alias)
+		}
+	}
+	return ""
 }
 
 type fontFileMatch struct {

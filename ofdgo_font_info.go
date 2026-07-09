@@ -227,16 +227,12 @@ func fontFSMatches(fsys fs.FS, patterns []string) []string {
 func fontFSMatchesStyle(fsys fs.FS, patterns []string, bold, italic bool) []string {
 	var matches []fontFileMatch
 	seen := make(map[string]int)
-	add := func(pattern, name string, rank int) {
-		if !isFontFileName(name) {
-			return
-		}
-		appendFontFileMatch(&matches, seen, pattern, name, rank, bold, italic)
-	}
 	names, _ := fs.Glob(fsys, "*")
-	for _, pattern := range patterns {
-		for _, name := range names {
-			add(pattern, name, matchFontPatternRank(pattern, path.Base(name)))
+	candidates := fontFileCandidates(names, path.Base)
+	for _, matcher := range newFontPatternMatchers(patterns) {
+		for _, file := range candidates {
+			rank := matcher.rank(file.base)
+			appendFontFileMatch(&matches, seen, matcher.pattern, file.name, rank, bold, italic)
 		}
 	}
 	sortFontFileMatches(matches, bold, italic)

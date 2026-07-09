@@ -161,16 +161,12 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 func (r *Renderer) matchFontFiles(dir string, patterns []string, bold, italic bool) []string {
 	var matches []fontFileMatch
 	index := make(map[string]int)
-	add := func(pattern, name string, rank int) {
-		if !isFontFileName(name) {
-			return
-		}
-		appendFontFileMatch(&matches, index, pattern, name, rank, bold, italic)
-	}
 	files, _ := filepath.Glob(filepath.Join(dir, "*"))
-	for _, pattern := range patterns {
-		for _, name := range files {
-			add(pattern, name, matchFontPatternRank(pattern, filepath.Base(name)))
+	candidates := fontFileCandidates(files, filepath.Base)
+	for _, matcher := range newFontPatternMatchers(patterns) {
+		for _, file := range candidates {
+			rank := matcher.rank(file.base)
+			appendFontFileMatch(&matches, index, matcher.pattern, file.name, rank, bold, italic)
 		}
 	}
 	sortFontFileMatches(matches, bold, italic)

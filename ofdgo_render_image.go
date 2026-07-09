@@ -85,6 +85,9 @@ func imageWithAlpha(img image.Image, alpha *int) image.Image {
 		return img
 	}
 	a := clampColor(*alpha)
+	if a == 255 {
+		return img
+	}
 	bounds := img.Bounds()
 	out := image.NewNRGBA(bounds)
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
@@ -107,6 +110,9 @@ func imageWithTransparentEdge(img image.Image) (image.Image, int) {
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
 	if w == 0 || h == 0 {
+		return img, 0
+	}
+	if opaque, ok := img.(interface{ Opaque() bool }); ok && opaque.Opaque() {
 		return img, 0
 	}
 	src := image.NewNRGBA(image.Rect(0, 0, w, h))

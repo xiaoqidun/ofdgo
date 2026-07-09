@@ -1014,6 +1014,9 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 // 入参: img 印章图片对象
 // 返回: image.Image 处理后的印章图片对象
 func stampImageWithTransparentWhite(img image.Image) image.Image {
+	if opaque, ok := img.(interface{ Opaque() bool }); ok && !opaque.Opaque() {
+		return img
+	}
 	bounds := img.Bounds()
 	out := image.NewNRGBA(bounds)
 	hasAlpha := false
