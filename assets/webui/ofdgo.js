@@ -1314,6 +1314,7 @@ function syncCurrentPageFromScroll() {
 	const nextIndex = Number.parseInt(shell.dataset.pageIndex, 10);
 	if (Number.isFinite(nextIndex) && nextIndex !== state.pageIndex) {
 		setCurrentPage(nextIndex);
+		applyFit(false);
 		queueNearbyPages(nextIndex);
 	}
 }
