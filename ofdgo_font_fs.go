@@ -155,7 +155,7 @@ func (fsys *FontFS) matchPatternsStyle(patterns []string, bold, italic bool) []s
 			appendFontFileMatch(&matches, seen, matcher.pattern, file.name, rank, bold, italic)
 		}
 	}
-	sortFontFileMatches(matches, bold, italic)
+	sortFontFileMatches(matches)
 	return fontFileMatchNames(matches)
 }
 
@@ -329,9 +329,10 @@ func (m fontPatternMatcher) styleSuffix(name string) string {
 }
 
 type fontFileMatch struct {
-	name    string
-	pattern string
-	rank    int
+	name      string
+	rank      int
+	styleRank int
+	sortName  string
 }
 
 // appendFontFileMatch 追加字体文件匹配结果
@@ -341,9 +342,14 @@ func appendFontFileMatch(matches *[]fontFileMatch, seen map[string]int, pattern,
 		return
 	}
 	key := strings.ToLower(name)
-	next := fontFileMatch{name: name, pattern: pattern, rank: rank}
+	next := fontFileMatch{
+		name:      name,
+		rank:      rank,
+		styleRank: fontFileStyleRank(pattern, name, bold, italic),
+		sortName:  strings.ToLower(path.Base(name)),
+	}
 	if index, ok := seen[key]; ok {
-		if fontFileMatchLess(next, (*matches)[index], bold, italic) {
+		if fontFileMatchLess(next, (*matches)[index]) {
 			(*matches)[index] = next
 		}
 		return
@@ -353,26 +359,24 @@ func appendFontFileMatch(matches *[]fontFileMatch, seen map[string]int, pattern,
 }
 
 // sortFontFileMatches 排序字体文件匹配结果
-// 入参: matches 匹配结果, bold 是否粗体, italic 是否斜体
-func sortFontFileMatches(matches []fontFileMatch, bold, italic bool) {
+// 入参: matches 匹配结果
+func sortFontFileMatches(matches []fontFileMatch) {
 	sort.SliceStable(matches, func(i, j int) bool {
-		return fontFileMatchLess(matches[i], matches[j], bold, italic)
+		return fontFileMatchLess(matches[i], matches[j])
 	})
 }
 
 // fontFileMatchLess 判断字体文件匹配结果优先级
-// 入参: left 左侧匹配结果, right 右侧匹配结果, bold 是否粗体, italic 是否斜体
+// 入参: left 左侧匹配结果, right 右侧匹配结果
 // 返回: bool 左侧是否优先
-func fontFileMatchLess(left, right fontFileMatch, bold, italic bool) bool {
+func fontFileMatchLess(left, right fontFileMatch) bool {
 	if left.rank != right.rank {
 		return left.rank < right.rank
 	}
-	leftStyle := fontFileStyleRank(left.pattern, left.name, bold, italic)
-	rightStyle := fontFileStyleRank(right.pattern, right.name, bold, italic)
-	if leftStyle != rightStyle {
-		return leftStyle < rightStyle
+	if left.styleRank != right.styleRank {
+		return left.styleRank < right.styleRank
 	}
-	return strings.ToLower(path.Base(left.name)) < strings.ToLower(path.Base(right.name))
+	return left.sortName < right.sortName
 }
 
 // fontFileMatchNames 获取字体文件匹配名称

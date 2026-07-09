@@ -235,7 +235,7 @@ func fontFSMatchesStyle(fsys fs.FS, patterns []string, bold, italic bool) []stri
 			appendFontFileMatch(&matches, seen, matcher.pattern, file.name, rank, bold, italic)
 		}
 	}
-	sortFontFileMatches(matches, bold, italic)
+	sortFontFileMatches(matches)
 	return fontFileMatchNames(matches)
 }
 

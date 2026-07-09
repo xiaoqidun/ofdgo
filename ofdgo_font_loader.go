@@ -169,7 +169,7 @@ func (r *Renderer) matchFontFiles(dir string, patterns []string, bold, italic bo
 			appendFontFileMatch(&matches, index, matcher.pattern, file.name, rank, bold, italic)
 		}
 	}
-	sortFontFileMatches(matches, bold, italic)
+	sortFontFileMatches(matches)
 	return fontFileMatchNames(matches)
 }
 
