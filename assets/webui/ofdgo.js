@@ -1668,7 +1668,7 @@ function renderSignatures() {
 	const fragment = document.createDocumentFragment();
 	for (const signature of signatures) {
 		const row = document.createElement("div");
-		row.className = `signature-row ${signature.valid ? "valid" : "invalid"}`;
+		row.className = `signature-row ${signature.integrityValid ? "valid" : "invalid"}`;
 
 		const head = document.createElement("div");
 		head.className = "signature-head";
@@ -1677,7 +1677,7 @@ function renderSignatures() {
 
 		const badges = document.createElement("div");
 		badges.className = "signature-badges";
-		badges.append(fontBadge(signature.valid ? "有效" : "无效", signature.valid ? "valid" : "invalid"));
+		badges.append(fontBadge(signature.integrityValid ? "完整" : "异常", signature.integrityValid ? "valid" : "invalid"));
 
 		head.append(name, badges);
 		row.append(head);
@@ -1713,7 +1713,7 @@ function signatureSummary(signatures) {
 	if (!signatures.length) {
 		return "0";
 	}
-	const invalid = signatures.filter((signature) => !signature.valid).length;
+	const invalid = signatures.filter((signature) => !signature.integrityValid).length;
 	if (invalid) {
 		return `${signatures.length} · 异常 ${invalid}`;
 	}

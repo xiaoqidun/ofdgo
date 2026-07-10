@@ -43,7 +43,7 @@ type FontInfo = ofdgo.FontInfo
 type SignatureInfo struct {
 	ID                string               `json:"id"`
 	Type              string               `json:"type"`
-	Valid             bool                 `json:"valid"`
+	IntegrityValid    bool                 `json:"integrityValid"`
 	Version           string               `json:"version,omitempty"`
 	SealType          string               `json:"sealType,omitempty"`
 	Signer            string               `json:"signer,omitempty"`
@@ -346,7 +346,7 @@ func signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
 	return SignatureInfo{
 		ID:                report.ID,
 		Type:              string(report.Type),
-		Valid:             report.Valid,
+		IntegrityValid:    report.IntegrityValid(),
 		Version:           report.Provider.Version,
 		SealType:          report.SealType,
 		Signer:            signatureSigner(report),
