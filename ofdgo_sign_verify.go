@@ -37,6 +37,7 @@ import (
 )
 
 // SignatureVerifyReport 签名验证报告
+// Valid表示签名完整性及调用方指定的证书策略均通过
 type SignatureVerifyReport struct {
 	ID                 string
 	BaseLoc            string
@@ -65,6 +66,18 @@ type SignatureVerifyReport struct {
 	CertTrustOK        bool
 	Valid              bool
 	Error              string
+}
+
+// IntegrityValid 判断签名完整性是否有效
+// 返回: bool 是否有效
+func (report SignatureVerifyReport) IntegrityValid() bool {
+	return report.Error == "" && report.DigestOK && report.DataHashOK && report.SignedValueOK && report.SealOK && report.SealMatchOK && report.CertOK
+}
+
+// TrustedValid 判断签名是否可信有效
+// 返回: bool 签名完整性、证书信任及证书有效期是否均验证通过
+func (report SignatureVerifyReport) TrustedValid() bool {
+	return report.IntegrityValid() && report.CertTrustChecked && report.CertTrustOK && report.CertTimeChecked && report.CertTimeOK
 }
 
 // SignatureCertInfo 签名证书信息
@@ -267,7 +280,7 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 		report.SignCert = result.CertInfo
 		report.Signer = result.CertInfo.CommonName
 		report.applySignatureCertificatePolicy(options, result.SignerCerts, result.Certs)
-		report.Valid = report.DigestOK && report.DataHashOK && report.SignedValueOK && report.CertOK && report.certificatePolicyOK()
+		report.Valid = report.IntegrityValid() && report.certificatePolicyOK()
 		return report
 	case "", SignTypeSeal:
 	default:
@@ -299,7 +312,7 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 		}
 		report.SealMatchOK = bytes.Equal(sealData, sesResult.SealRaw)
 	}
-	report.Valid = report.DigestOK && report.DataHashOK && report.SignedValueOK && report.SealOK && report.SealMatchOK && report.CertOK && report.certificatePolicyOK()
+	report.Valid = report.IntegrityValid() && report.certificatePolicyOK()
 	return report
 }
 

@@ -202,13 +202,6 @@ func cleanFontName(name string) string {
 	return strings.ToLower(name)
 }
 
-// matchFontPatternRank 获取字体文件匹配等级
-// 入参: pattern 匹配模式, name 字体文件名
-// 返回: int 匹配等级
-func matchFontPatternRank(pattern, name string) int {
-	return newFontPatternMatcher(pattern).rank(name)
-}
-
 type fontFileCandidate struct {
 	name       string
 	base       string
@@ -426,13 +419,6 @@ func fontFileStyleRank(suffix string, bold, italic bool) int {
 	return rank
 }
 
-// fontFileStyle 获取字体文件样式
-// 入参: pattern 匹配模式, name 字体文件名
-// 返回: bool 是否粗体, bool 是否斜体
-func fontFileStyle(pattern, name string) (bool, bool) {
-	return fontFileStyleFromSuffix(fontFileStyleSuffix(pattern, name))
-}
-
 // fontFileStyleFromSuffix 获取样式后缀对应的字体样式
 // 入参: suffix 样式后缀
 // 返回: bool 是否粗体, bool 是否斜体
@@ -478,27 +464,6 @@ func fontFileKnownStyleSuffix(suffix string) bool {
 	default:
 		return false
 	}
-}
-
-// fontFileStyleSuffix 获取字体文件样式后缀
-// 入参: pattern 匹配模式, name 字体文件名
-// 返回: string 样式后缀
-func fontFileStyleSuffix(pattern, name string) string {
-	key := fontNormalizeName(name)
-	stem := fontPatternStem(pattern)
-	if stem == "" || key == "" {
-		return ""
-	}
-	if strings.HasPrefix(key, stem) {
-		return strings.TrimPrefix(key, stem)
-	}
-	for _, alias := range fontExactCandidateNames(stem) {
-		alias = fontNormalizeName(alias)
-		if alias != "" && strings.HasPrefix(key, alias) {
-			return strings.TrimPrefix(key, alias)
-		}
-	}
-	return ""
 }
 
 // fontMemFile 内存字体文件
