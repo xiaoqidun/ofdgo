@@ -594,9 +594,9 @@ func (report *SignatureVerifyReport) applySignatureCertificatePolicy(options *si
 	if len(options.TrustCerts) != 0 {
 		report.CertTrustChecked = true
 		report.CertTrustOK = true
-		pool := append([][]byte{}, options.SignCerts...)
+		pool := append([][]byte{}, options.TrustCerts...)
+		pool = append(pool, options.SignCerts...)
 		pool = append(pool, extraCerts...)
-		pool = append(pool, options.TrustCerts...)
 		pool = compactSignatureCerts(pool)
 		for _, cert := range certs {
 			if !signatureCertTrustedBy(cert, pool, options.TrustCerts, options.VerifyTime) {
@@ -638,17 +638,27 @@ func signatureCertsValidAt(certs [][]byte, t time.Time) bool {
 	return true
 }
 
+// signatureCertMaxChecks 最大证书签名验证次数
+const signatureCertMaxChecks = 100
+
+// signatureCertPathState 证书路径状态
+type signatureCertPathState struct {
+	Visited         map[string]bool
+	SignatureChecks int
+}
+
 // signatureCertTrustedBy 判断证书是否可链到信任证书
 // 入参: cert 证书, pool 证书池, trusts 信任证书, verifyTime 中间证书验证时间
 // 返回: bool 是否受信任
 func signatureCertTrustedBy(cert []byte, pool, trusts [][]byte, verifyTime *time.Time) bool {
-	return signatureCertPathTrustedBy(cert, pool, trusts, verifyTime, make(map[string]bool), 0, true)
+	state := signatureCertPathState{Visited: make(map[string]bool)}
+	return signatureCertPathTrustedBy(cert, pool, trusts, verifyTime, &state, 0, true)
 }
 
 // signatureCertPathTrustedBy 验证证书路径
-// 入参: cert 证书, pool 证书池, trusts 信任证书, verifyTime 中间证书验证时间, visited 当前路径证书, caBelow 下级非自颁发中间CA数量, target 是否目标证书
+// 入参: cert 证书, pool 证书池, trusts 信任证书, verifyTime 中间证书验证时间, state 路径状态, caBelow 下级非自颁发中间CA数量, target 是否目标证书
 // 返回: bool 是否受信任
-func signatureCertPathTrustedBy(cert []byte, pool, trusts [][]byte, verifyTime *time.Time, visited map[string]bool, caBelow int, target bool) bool {
+func signatureCertPathTrustedBy(cert []byte, pool, trusts [][]byte, verifyTime *time.Time, state *signatureCertPathState, caBelow int, target bool) bool {
 	if len(cert) == 0 {
 		return false
 	}
@@ -663,11 +673,11 @@ func signatureCertPathTrustedBy(cert []byte, pool, trusts [][]byte, verifyTime *
 		return true
 	}
 	key := string(cert)
-	if visited[key] {
+	if state.Visited[key] {
 		return false
 	}
-	visited[key] = true
-	defer delete(visited, key)
+	state.Visited[key] = true
+	defer delete(state.Visited, key)
 	c, err := parseSignatureCertificate(cert)
 	if err != nil {
 		return false
@@ -701,6 +711,9 @@ func signatureCertPathTrustedBy(cert []byte, pool, trusts [][]byte, verifyTime *
 		nextCABelow++
 	}
 	for _, issuerCert := range pool {
+		if state.SignatureChecks >= signatureCertMaxChecks {
+			return false
+		}
 		if bytes.Equal(cert, issuerCert) {
 			continue
 		}
@@ -708,10 +721,11 @@ func signatureCertPathTrustedBy(cert []byte, pool, trusts [][]byte, verifyTime *
 		if err != nil || !bytes.Equal(c.Issuer, issuer.Subject) {
 			continue
 		}
+		state.SignatureChecks++
 		if ok, err := verifyCertificateSignature(c, issuerCert); err != nil || !ok {
 			continue
 		}
-		if signatureCertPathTrustedBy(issuerCert, pool, trusts, verifyTime, visited, nextCABelow, false) {
+		if signatureCertPathTrustedBy(issuerCert, pool, trusts, verifyTime, state, nextCABelow, false) {
 			return true
 		}
 	}
@@ -829,6 +843,9 @@ func parseSignatureCertificate(data []byte) (signatureCertificate, error) {
 	}
 	if len(items) <= idx+5 {
 		return signatureCertificate{}, fmt.Errorf("invalid certificate")
+	}
+	if !bytes.Equal(items[idx+1].FullBytes, cert.SignatureAlgorithm.FullBytes) {
+		return signatureCertificate{}, fmt.Errorf("certificate signature algorithm mismatch")
 	}
 	serial, err := asn1IntegerBig(items[idx])
 	if err != nil {
