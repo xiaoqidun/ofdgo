@@ -88,7 +88,7 @@ func main() {
 	}
 	valid := true
 	for _, report := range reports {
-		if report.Valid {
+		if report.IntegrityValid() {
 			log.Printf("签名%s验证通过", report.ID)
 			continue
 		}
