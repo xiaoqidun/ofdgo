@@ -55,7 +55,7 @@ func (r *Renderer) textObjectGlyphTransforms(fontID string, text TextObject) map
 	if fontID == "" || len(text.CGTransform) == 0 {
 		return nil
 	}
-	result := make(map[int]textGlyphTransform)
+	result := make(map[int]textGlyphTransform, len(text.CGTransform))
 	for _, transform := range text.CGTransform {
 		ids := parseInts(transform.Glyphs)
 		glyphCount := len(ids)
@@ -69,9 +69,9 @@ func (r *Renderer) textObjectGlyphTransforms(fontID string, text TextObject) map
 		if codeCount <= 0 {
 			codeCount = 1
 		}
-		glyphs := make([]textGlyph, 0, glyphCount)
-		for i := 0; i < glyphCount; i++ {
-			glyphs = append(glyphs, r.textGlyphFromID(fontID, ids[i]))
+		glyphs := make([]textGlyph, glyphCount)
+		for i := range glyphs {
+			glyphs[i] = r.textGlyphFromID(fontID, ids[i])
 		}
 		result[transform.CodePosition] = textGlyphTransform{
 			CodeCount: codeCount,
@@ -108,9 +108,9 @@ func textCodeGlyphs(runes []rune, transforms map[int]textGlyphTransform, codeOff
 // 入参: runes 文本字符
 // 返回: []textGlyph 绘制字形列表
 func textRuneGlyphs(runes []rune) []textGlyph {
-	glyphs := make([]textGlyph, 0, len(runes))
-	for _, r := range runes {
-		glyphs = append(glyphs, textGlyph{Text: string(r), GlyphID: -1})
+	glyphs := make([]textGlyph, len(runes))
+	for i, r := range runes {
+		glyphs[i] = textGlyph{Text: string(r), GlyphID: -1}
 	}
 	return glyphs
 }
@@ -208,32 +208,33 @@ func (r *Renderer) fontGlyphRune(fontID string, glyphID int) (rune, bool) {
 // 入参: indexStr 索引字符串, fontID 字体ID
 // 返回: []rune 字形列表
 func (r *Renderer) parseIndexRunes(indexStr string, fontID string) []rune {
-	var gids []int
 	parts := strings.Fields(indexStr)
+	result := make([]rune, 0, len(parts))
 	for _, p := range parts {
-		if strings.Contains(p, "-") {
-			sub := strings.Split(p, "-")
-			if len(sub) == 2 {
-				start, _ := strconv.Atoi(sub[0])
-				end, _ := strconv.Atoi(sub[1])
+		if startText, endText, ok := strings.Cut(p, "-"); ok {
+			if !strings.Contains(endText, "-") {
+				start, _ := strconv.Atoi(startText)
+				end, _ := strconv.Atoi(endText)
 				for k := start; k <= end; k++ {
-					gids = append(gids, k)
+					result = append(result, r.textIndexRune(fontID, k))
 				}
 			}
 		} else {
 			val, _ := strconv.Atoi(p)
-			gids = append(gids, val)
+			result = append(result, r.textIndexRune(fontID, val))
 		}
 	}
-	var res []rune
-	for _, gid := range gids {
-		if rVal, ok := r.fontGlyphRune(fontID, gid); ok {
-			res = append(res, rVal)
-			continue
-		}
-		res = append(res, rune(gid))
+	return result
+}
+
+// textIndexRune 获取索引字形对应的字符
+// 入参: fontID 字体ID, glyphID 字形ID或CID
+// 返回: rune 字符
+func (r *Renderer) textIndexRune(fontID string, glyphID int) rune {
+	if mapped, ok := r.fontGlyphRune(fontID, glyphID); ok {
+		return mapped
 	}
-	return res
+	return rune(glyphID)
 }
 
 // textGlyphAdvanceLimit 获取显式字形推进宽度

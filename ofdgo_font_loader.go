@@ -159,14 +159,14 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 // 入参: dir 目录, patterns 模式列表, bold 是否粗体, italic 是否斜体
 // 返回: []string 文件列表
 func (r *Renderer) matchFontFiles(dir string, patterns []string, bold, italic bool) []string {
-	var matches []fontFileMatch
-	index := make(map[string]int)
 	files, _ := filepath.Glob(filepath.Join(dir, "*"))
 	candidates := fontFileCandidates(files, filepath.Base)
+	matches := make([]fontFileMatch, 0, len(candidates))
+	index := make(map[string]int, len(candidates))
 	for _, matcher := range newFontPatternMatchers(patterns) {
 		for _, file := range candidates {
-			rank := matcher.rank(file.base)
-			appendFontFileMatch(&matches, index, matcher.pattern, file.name, rank, bold, italic)
+			rank := matcher.rankCandidate(file)
+			appendFontFileMatch(&matches, index, matcher, file, rank, bold, italic)
 		}
 	}
 	sortFontFileMatches(matches)

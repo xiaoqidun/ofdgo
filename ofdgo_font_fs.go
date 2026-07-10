@@ -146,13 +146,13 @@ func (fsys *FontFS) matchStyle(pattern string, bold, italic bool) []string {
 // 入参: patterns 匹配模式列表, bold 是否粗体, italic 是否斜体
 // 返回: []string 字体文件列表
 func (fsys *FontFS) matchPatternsStyle(patterns []string, bold, italic bool) []string {
-	var matches []fontFileMatch
-	seen := make(map[string]int)
 	files := fontFileCandidates(fsys.names, path.Base)
+	matches := make([]fontFileMatch, 0, len(files))
+	seen := make(map[string]int, len(files))
 	for _, matcher := range newFontPatternMatchers(patterns) {
 		for _, file := range files {
-			rank := matcher.rank(file.base)
-			appendFontFileMatch(&matches, seen, matcher.pattern, file.name, rank, bold, italic)
+			rank := matcher.rankCandidate(file)
+			appendFontFileMatch(&matches, seen, matcher, file, rank, bold, italic)
 		}
 	}
 	sortFontFileMatches(matches)
@@ -210,8 +210,11 @@ func matchFontPatternRank(pattern, name string) int {
 }
 
 type fontFileCandidate struct {
-	name string
-	base string
+	name       string
+	base       string
+	lowerBase  string
+	normalized string
+	fold       string
 }
 
 // fontFileCandidates 筛选字体文件候选
@@ -221,7 +224,14 @@ func fontFileCandidates(names []string, base func(string) string) []fontFileCand
 	files := make([]fontFileCandidate, 0, len(names))
 	for _, name := range names {
 		if isFontFileName(name) {
-			files = append(files, fontFileCandidate{name: name, base: base(name)})
+			baseName := base(name)
+			files = append(files, fontFileCandidate{
+				name:       name,
+				base:       baseName,
+				lowerBase:  strings.ToLower(baseName),
+				normalized: fontNormalizeName(baseName),
+				fold:       strings.ToLower(name),
+			})
 		}
 	}
 	return files
@@ -269,16 +279,26 @@ func newFontPatternMatchers(patterns []string) []fontPatternMatcher {
 // 入参: name 字体文件名
 // 返回: int 匹配等级
 func (m fontPatternMatcher) rank(name string) int {
-	rawName := name
-	exactPath, _ := path.Match(m.pattern, name)
-	lowerPath, _ := path.Match(m.lowerPattern, strings.ToLower(name))
+	return m.rankCandidate(fontFileCandidate{
+		base:       name,
+		lowerBase:  strings.ToLower(name),
+		normalized: fontNormalizeName(name),
+	})
+}
+
+// rankCandidate 获取字体文件候选匹配等级
+// 入参: file 字体文件候选
+// 返回: int 匹配等级
+func (m fontPatternMatcher) rankCandidate(file fontFileCandidate) int {
+	exactPath, _ := path.Match(m.pattern, file.base)
+	lowerPath, _ := path.Match(m.lowerPattern, file.lowerBase)
 	if m.stem == "" {
 		if exactPath || lowerPath {
 			return fontMatchFuzzy
 		}
 		return fontMatchNone
 	}
-	name = fontNormalizeName(name)
+	name := file.normalized
 	if name == m.stem {
 		return fontMatchExact
 	}
@@ -287,7 +307,7 @@ func (m fontPatternMatcher) rank(name string) int {
 			return fontMatchExact
 		}
 	}
-	if fontFileKnownStyleSuffix(m.styleSuffix(rawName)) {
+	if fontFileKnownStyleSuffix(m.styleSuffixNormalized(name)) {
 		return fontMatchExact
 	}
 	if strings.HasPrefix(name, m.stem) {
@@ -309,20 +329,19 @@ func (m fontPatternMatcher) rank(name string) int {
 	return fontMatchNone
 }
 
-// styleSuffix 获取字体文件样式后缀
-// 入参: name 字体文件名
+// styleSuffixNormalized 获取规范字体名称的样式后缀
+// 入参: name 规范字体名称
 // 返回: string 样式后缀
-func (m fontPatternMatcher) styleSuffix(name string) string {
-	key := fontNormalizeName(name)
-	if m.stem == "" || key == "" {
+func (m fontPatternMatcher) styleSuffixNormalized(name string) string {
+	if m.stem == "" || name == "" {
 		return ""
 	}
-	if strings.HasPrefix(key, m.stem) {
-		return strings.TrimPrefix(key, m.stem)
+	if strings.HasPrefix(name, m.stem) {
+		return strings.TrimPrefix(name, m.stem)
 	}
 	for _, alias := range m.aliases {
-		if strings.HasPrefix(key, alias) {
-			return strings.TrimPrefix(key, alias)
+		if strings.HasPrefix(name, alias) {
+			return strings.TrimPrefix(name, alias)
 		}
 	}
 	return ""
@@ -336,25 +355,24 @@ type fontFileMatch struct {
 }
 
 // appendFontFileMatch 追加字体文件匹配结果
-// 入参: matches 匹配结果, seen 已匹配文件, pattern 匹配模式, name 字体文件名, rank 匹配等级, bold 是否粗体, italic 是否斜体
-func appendFontFileMatch(matches *[]fontFileMatch, seen map[string]int, pattern, name string, rank int, bold, italic bool) {
-	if rank == fontMatchNone || !isFontFileName(name) {
+// 入参: matches 匹配结果, seen 已匹配文件, matcher 匹配器, file 字体文件候选, rank 匹配等级, bold 是否粗体, italic 是否斜体
+func appendFontFileMatch(matches *[]fontFileMatch, seen map[string]int, matcher fontPatternMatcher, file fontFileCandidate, rank int, bold, italic bool) {
+	if rank == fontMatchNone {
 		return
 	}
-	key := strings.ToLower(name)
 	next := fontFileMatch{
-		name:      name,
+		name:      file.name,
 		rank:      rank,
-		styleRank: fontFileStyleRank(pattern, name, bold, italic),
-		sortName:  strings.ToLower(path.Base(name)),
+		styleRank: fontFileStyleRank(matcher.styleSuffixNormalized(file.normalized), bold, italic),
+		sortName:  file.lowerBase,
 	}
-	if index, ok := seen[key]; ok {
+	if index, ok := seen[file.fold]; ok {
 		if fontFileMatchLess(next, (*matches)[index]) {
 			(*matches)[index] = next
 		}
 		return
 	}
-	seen[key] = len(*matches)
+	seen[file.fold] = len(*matches)
 	*matches = append(*matches, next)
 }
 
@@ -391,10 +409,10 @@ func fontFileMatchNames(matches []fontFileMatch) []string {
 }
 
 // fontFileStyleRank 获取字体文件样式匹配等级
-// 入参: pattern 匹配模式, name 字体文件名, bold 是否粗体, italic 是否斜体
+// 入参: suffix 样式后缀, bold 是否粗体, italic 是否斜体
 // 返回: int 样式匹配等级
-func fontFileStyleRank(pattern, name string, bold, italic bool) int {
-	fileBold, fileItalic := fontFileStyle(pattern, name)
+func fontFileStyleRank(suffix string, bold, italic bool) int {
+	fileBold, fileItalic := fontFileStyleFromSuffix(suffix)
 	rank := 0
 	if fileBold != bold {
 		rank += 2
@@ -402,7 +420,6 @@ func fontFileStyleRank(pattern, name string, bold, italic bool) int {
 	if fileItalic != italic {
 		rank += 2
 	}
-	suffix := fontFileStyleSuffix(pattern, name)
 	if !bold && !italic && !fileBold && !fileItalic && suffix != "" && !fontFileRegularSuffix(suffix) {
 		rank++
 	}
@@ -413,7 +430,13 @@ func fontFileStyleRank(pattern, name string, bold, italic bool) int {
 // 入参: pattern 匹配模式, name 字体文件名
 // 返回: bool 是否粗体, bool 是否斜体
 func fontFileStyle(pattern, name string) (bool, bool) {
-	suffix := fontFileStyleSuffix(pattern, name)
+	return fontFileStyleFromSuffix(fontFileStyleSuffix(pattern, name))
+}
+
+// fontFileStyleFromSuffix 获取样式后缀对应的字体样式
+// 入参: suffix 样式后缀
+// 返回: bool 是否粗体, bool 是否斜体
+func fontFileStyleFromSuffix(suffix string) (bool, bool) {
 	bold := suffix == "b" ||
 		suffix == "bd" ||
 		suffix == "bold" ||

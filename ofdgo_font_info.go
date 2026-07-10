@@ -225,14 +225,14 @@ func fontFSMatches(fsys fs.FS, patterns []string) []string {
 // 入参: fsys 字体文件系统, patterns 匹配模式列表, bold 是否粗体, italic 是否斜体
 // 返回: []string 字体文件列表
 func fontFSMatchesStyle(fsys fs.FS, patterns []string, bold, italic bool) []string {
-	var matches []fontFileMatch
-	seen := make(map[string]int)
 	names, _ := fs.Glob(fsys, "*")
 	candidates := fontFileCandidates(names, path.Base)
+	matches := make([]fontFileMatch, 0, len(candidates))
+	seen := make(map[string]int, len(candidates))
 	for _, matcher := range newFontPatternMatchers(patterns) {
 		for _, file := range candidates {
-			rank := matcher.rank(file.base)
-			appendFontFileMatch(&matches, seen, matcher.pattern, file.name, rank, bold, italic)
+			rank := matcher.rankCandidate(file)
+			appendFontFileMatch(&matches, seen, matcher, file, rank, bold, italic)
 		}
 	}
 	sortFontFileMatches(matches)
