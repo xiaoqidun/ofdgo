@@ -599,7 +599,7 @@ func (report *SignatureVerifyReport) applySignatureCertificatePolicy(options *si
 		pool = append(pool, options.TrustCerts...)
 		pool = compactSignatureCerts(pool)
 		for _, cert := range certs {
-			if !signatureCertTrustedBy(cert, pool, options.TrustCerts, make(map[string]bool)) {
+			if !signatureCertTrustedBy(cert, pool, options.TrustCerts, options.VerifyTime) {
 				report.CertTrustOK = false
 				break
 			}
@@ -639,25 +639,66 @@ func signatureCertsValidAt(certs [][]byte, t time.Time) bool {
 }
 
 // signatureCertTrustedBy 判断证书是否可链到信任证书
-// 入参: cert 证书, pool 证书池, trusts 信任证书, visited 已访问证书
+// 入参: cert 证书, pool 证书池, trusts 信任证书, verifyTime 中间证书验证时间
 // 返回: bool 是否受信任
-func signatureCertTrustedBy(cert []byte, pool, trusts [][]byte, visited map[string]bool) bool {
+func signatureCertTrustedBy(cert []byte, pool, trusts [][]byte, verifyTime *time.Time) bool {
+	return signatureCertPathTrustedBy(cert, pool, trusts, verifyTime, make(map[string]bool), 0, true)
+}
+
+// signatureCertPathTrustedBy 验证证书路径
+// 入参: cert 证书, pool 证书池, trusts 信任证书, verifyTime 中间证书验证时间, visited 当前路径证书, caBelow 下级非自颁发中间CA数量, target 是否目标证书
+// 返回: bool 是否受信任
+func signatureCertPathTrustedBy(cert []byte, pool, trusts [][]byte, verifyTime *time.Time, visited map[string]bool, caBelow int, target bool) bool {
 	if len(cert) == 0 {
 		return false
 	}
+	trusted := false
 	for _, trust := range trusts {
 		if bytes.Equal(cert, trust) {
-			return true
+			trusted = true
+			break
 		}
+	}
+	if trusted && !target {
+		return true
 	}
 	key := string(cert)
 	if visited[key] {
 		return false
 	}
 	visited[key] = true
+	defer delete(visited, key)
 	c, err := parseSignatureCertificate(cert)
 	if err != nil {
 		return false
+	}
+	if c.UnhandledCritical {
+		return false
+	}
+	if !target && verifyTime != nil && (verifyTime.Before(c.NotBefore) || verifyTime.After(c.NotAfter)) {
+		return false
+	}
+	if target {
+		if c.KeyUsage != 0 && c.KeyUsage&(x509.KeyUsageDigitalSignature|x509.KeyUsageContentCommitment) == 0 {
+			return false
+		}
+	} else {
+		if !c.IsCA {
+			return false
+		}
+		if c.KeyUsage != 0 && c.KeyUsage&x509.KeyUsageCertSign == 0 {
+			return false
+		}
+		if c.MaxPathLen != nil && c.MaxPathLen.Cmp(big.NewInt(int64(caBelow))) < 0 {
+			return false
+		}
+	}
+	if trusted {
+		return true
+	}
+	nextCABelow := caBelow
+	if !target && !bytes.Equal(c.Issuer, c.Subject) {
+		nextCABelow++
 	}
 	for _, issuerCert := range pool {
 		if bytes.Equal(cert, issuerCert) {
@@ -670,7 +711,7 @@ func signatureCertTrustedBy(cert []byte, pool, trusts [][]byte, visited map[stri
 		if ok, err := verifyCertificateSignature(c, issuerCert); err != nil || !ok {
 			continue
 		}
-		if signatureCertTrustedBy(issuerCert, pool, trusts, visited) {
+		if signatureCertPathTrustedBy(issuerCert, pool, trusts, verifyTime, visited, nextCABelow, false) {
 			return true
 		}
 	}
@@ -735,6 +776,19 @@ func signatureCertInfo(data []byte) SignatureCertInfo {
 	return info
 }
 
+const (
+	signatureExtensionKeyUsage         = "2.5.29.15"
+	signatureExtensionBasicConstraints = "2.5.29.19"
+)
+
+// signatureCertificateExtensions 签名证书扩展
+type signatureCertificateExtensions struct {
+	IsCA              bool
+	MaxPathLen        *big.Int
+	KeyUsage          x509.KeyUsage
+	UnhandledCritical bool
+}
+
 // signatureCertificate 签名证书结构
 type signatureCertificate struct {
 	Raw          []byte
@@ -749,6 +803,7 @@ type signatureCertificate struct {
 	NotAfter     time.Time
 	SignatureAlg string
 	Signature    []byte
+	signatureCertificateExtensions
 }
 
 // parseSignatureCertificate 解析签名证书
@@ -783,6 +838,10 @@ func parseSignatureCertificate(data []byte) (signatureCertificate, error) {
 	if err != nil {
 		return signatureCertificate{}, err
 	}
+	extensions, err := parseSignatureCertificateExtensions(items[idx+6:])
+	if err != nil {
+		return signatureCertificate{}, err
+	}
 	alg, err := parseGBTAlgorithm(cert.SignatureAlgorithm)
 	if err != nil {
 		return signatureCertificate{}, err
@@ -791,19 +850,131 @@ func parseSignatureCertificate(data []byte) (signatureCertificate, error) {
 		return signatureCertificate{}, fmt.Errorf("invalid certificate signature")
 	}
 	return signatureCertificate{
-		Raw:          append([]byte(nil), data...),
-		TBS:          append([]byte(nil), cert.TBSCertificate.FullBytes...),
-		Issuer:       append([]byte(nil), items[idx+2].FullBytes...),
-		IssuerValue:  items[idx+2],
-		Subject:      append([]byte(nil), items[idx+4].FullBytes...),
-		SubjectValue: items[idx+4],
-		PublicKey:    items[idx+5],
-		Serial:       serial,
-		NotBefore:    validity[0],
-		NotAfter:     validity[1],
-		SignatureAlg: alg,
-		Signature:    append([]byte(nil), cert.SignatureValue.Bytes...),
+		Raw:                            append([]byte(nil), data...),
+		TBS:                            append([]byte(nil), cert.TBSCertificate.FullBytes...),
+		Issuer:                         append([]byte(nil), items[idx+2].FullBytes...),
+		IssuerValue:                    items[idx+2],
+		Subject:                        append([]byte(nil), items[idx+4].FullBytes...),
+		SubjectValue:                   items[idx+4],
+		PublicKey:                      items[idx+5],
+		Serial:                         serial,
+		NotBefore:                      validity[0],
+		NotAfter:                       validity[1],
+		SignatureAlg:                   alg,
+		Signature:                      append([]byte(nil), cert.SignatureValue.Bytes...),
+		signatureCertificateExtensions: extensions,
 	}, nil
+}
+
+// parseSignatureCertificateExtensions 解析签名证书扩展
+// 入参: items TBS证书剩余字段
+// 返回: signatureCertificateExtensions 签名证书扩展, error 错误信息
+func parseSignatureCertificateExtensions(items []asn1.RawValue) (signatureCertificateExtensions, error) {
+	var out signatureCertificateExtensions
+	var extensions []struct {
+		ID       asn1.ObjectIdentifier
+		Critical bool `asn1:"optional"`
+		Value    []byte
+	}
+	found := false
+	for _, item := range items {
+		if item.Class != asn1.ClassContextSpecific || item.Tag != 3 {
+			continue
+		}
+		if found || !item.IsCompound {
+			return out, fmt.Errorf("invalid certificate extensions")
+		}
+		found = true
+		rest, err := asn1.Unmarshal(item.Bytes, &extensions)
+		if err != nil || len(rest) != 0 {
+			return out, fmt.Errorf("invalid certificate extensions")
+		}
+	}
+	seen := make(map[string]bool)
+	for _, extension := range extensions {
+		oid := extension.ID.String()
+		if seen[oid] {
+			return out, fmt.Errorf("duplicate certificate extension: %s", oid)
+		}
+		seen[oid] = true
+		switch oid {
+		case signatureExtensionBasicConstraints:
+			isCA, maxPathLen, err := parseSignatureBasicConstraints(extension.Value)
+			if err != nil {
+				return out, err
+			}
+			out.IsCA = isCA
+			out.MaxPathLen = maxPathLen
+		case signatureExtensionKeyUsage:
+			keyUsage, err := parseSignatureKeyUsage(extension.Value)
+			if err != nil {
+				return out, err
+			}
+			out.KeyUsage = keyUsage
+		default:
+			if extension.Critical {
+				out.UnhandledCritical = true
+			}
+		}
+	}
+	return out, nil
+}
+
+// parseSignatureBasicConstraints 解析证书基本约束
+// 入参: data 扩展DER数据
+// 返回: bool 是否为CA, *big.Int 路径长度限制, error 错误信息
+func parseSignatureBasicConstraints(data []byte) (bool, *big.Int, error) {
+	var raw asn1.RawValue
+	rest, err := asn1.Unmarshal(data, &raw)
+	if err != nil || len(rest) != 0 || raw.Tag != asn1.TagSequence || !raw.IsCompound {
+		return false, nil, fmt.Errorf("invalid basic constraints")
+	}
+	items, ok := asn1Children(raw.Bytes)
+	if !ok || len(items) > 2 {
+		return false, nil, fmt.Errorf("invalid basic constraints")
+	}
+	idx := 0
+	isCA := false
+	if len(items) > 0 && items[0].Tag == asn1.TagBoolean {
+		rest, err := asn1.Unmarshal(items[0].FullBytes, &isCA)
+		if err != nil || len(rest) != 0 {
+			return false, nil, fmt.Errorf("invalid basic constraints")
+		}
+		idx++
+	}
+	var maxPathLen *big.Int
+	if idx < len(items) {
+		maxPathLen, err = asn1IntegerBig(items[idx])
+		if err != nil || maxPathLen.Sign() < 0 {
+			return false, nil, fmt.Errorf("invalid basic constraints")
+		}
+		idx++
+	}
+	if idx != len(items) || (maxPathLen != nil && !isCA) {
+		return false, nil, fmt.Errorf("invalid basic constraints")
+	}
+	return isCA, maxPathLen, nil
+}
+
+// parseSignatureKeyUsage 解析证书密钥用途
+// 入参: data 扩展DER数据
+// 返回: x509.KeyUsage 密钥用途, error 错误信息
+func parseSignatureKeyUsage(data []byte) (x509.KeyUsage, error) {
+	var bits asn1.BitString
+	rest, err := asn1.Unmarshal(data, &bits)
+	if err != nil || len(rest) != 0 || bits.BitLength == 0 || bits.BitLength > 9 {
+		return 0, fmt.Errorf("invalid key usage")
+	}
+	var out x509.KeyUsage
+	for i := 0; i < bits.BitLength; i++ {
+		if bits.At(i) != 0 {
+			out |= 1 << uint(i)
+		}
+	}
+	if out == 0 {
+		return 0, fmt.Errorf("invalid key usage")
+	}
+	return out, nil
 }
 
 // parseCertificateValidity 解析证书有效期
