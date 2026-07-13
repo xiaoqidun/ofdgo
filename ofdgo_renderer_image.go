@@ -15,8 +15,10 @@
 package ofdgo
 
 import (
+	"bufio"
 	"image"
 	"image/color"
+	"io"
 
 	"github.com/tdewolff/canvas"
 	canvasimage "github.com/tdewolff/canvas/image"
@@ -32,11 +34,7 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	if !ok {
 		return
 	}
-	imgData, err := r.Reader.ResData(resPath)
-	if err != nil {
-		return
-	}
-	img, _, err := decodeImageData(imgData)
+	img, err := r.decodeImageResource(resPath)
 	if err != nil {
 		return
 	}
@@ -78,6 +76,31 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	ctx.RenderImage(img, ctx.CoordSystemView().Mul(ctx.View()).Mul(m))
 }
 
+// decodeImageResource 解码图片资源
+// 入参: resPath 图片资源路径
+// 返回: image.Image 图片对象, error 错误信息
+func (r *Renderer) decodeImageResource(resPath string) (image.Image, error) {
+	rc, err := r.Reader.openFile(r.Reader.ResPath(resPath))
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	reader := bufio.NewReaderSize(rc, 8)
+	header, _ := reader.Peek(8)
+	if isJPEGData(header) {
+		return canvasimage.NewJPEGImage(reader)
+	}
+	if isPNGData(header) {
+		return canvasimage.NewPNGImage(reader)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	img, _, err := decodeImageData(data)
+	return img, err
+}
+
 // imageWithAlpha 合并图片透明度
 // 入参: img 图片对象, alpha 对象透明度
 // 返回: image.Image 合并后的图片对象
@@ -91,9 +114,10 @@ func imageWithAlpha(img image.Image, alpha *int) image.Image {
 	}
 	bounds := img.Bounds()
 	out := image.NewNRGBA(bounds)
+	source := imagePixelSource(img)
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			c := color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+			c := imageNRGBAAt(source, x, y)
 			c.A = uint8(int(c.A) * a / 255)
 			out.SetNRGBA(x, y, c)
 		}
@@ -116,14 +140,15 @@ func imageWithTransparentEdge(img image.Image) (image.Image, int) {
 	if src, ok := img.(*canvasimage.Image); ok && src.Mimetype == "image/jpeg" && src.Mask == nil {
 		return img, 0
 	}
-	if opaque, ok := img.(interface{ Opaque() bool }); ok && opaque.Opaque() {
+	source := imagePixelSource(img)
+	if opaque, ok := source.(interface{ Opaque() bool }); ok && opaque.Opaque() {
 		return img, 0
 	}
 	src := image.NewNRGBA(image.Rect(0, 0, w, h))
 	hasZero, hasVisible := false, false
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			c := color.NRGBAModel.Convert(img.At(bounds.Min.X+x, bounds.Min.Y+y)).(color.NRGBA)
+			c := imageNRGBAAt(source, bounds.Min.X+x, bounds.Min.Y+y)
 			src.SetNRGBA(x, y, c)
 			if c.A == 0 {
 				hasZero = true
@@ -160,6 +185,28 @@ func imageWithTransparentEdge(img image.Image) (image.Image, int) {
 	out.SetNRGBA(0, h+1, transparentPaddingColor(out.NRGBAAt(1, h)))
 	out.SetNRGBA(w+1, h+1, transparentPaddingColor(out.NRGBAAt(w, h)))
 	return out, 1
+}
+
+// imagePixelSource 获取图片像素源
+// 入参: img 图片对象
+// 返回: image.Image 图片像素源
+func imagePixelSource(img image.Image) image.Image {
+	if src, ok := img.(*canvasimage.Image); ok {
+		if decoded, err := src.Image(); err == nil {
+			return decoded
+		}
+	}
+	return img
+}
+
+// imageNRGBAAt 获取图片NRGBA像素
+// 入参: img 图片对象, x X坐标, y Y坐标
+// 返回: color.NRGBA NRGBA像素
+func imageNRGBAAt(img image.Image, x, y int) color.NRGBA {
+	if src, ok := img.(*image.NRGBA); ok {
+		return src.NRGBAAt(x, y)
+	}
+	return color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
 }
 
 // transparentEdgeColor 获取透明像素相邻的可见颜色

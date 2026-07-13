@@ -30,16 +30,14 @@ import (
 // 入参: data 图片数据
 // 返回: image.Image 图片对象, string 图片格式, error 错误信息
 func decodeImageData(data []byte) (image.Image, string, error) {
-	if _, format, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
-		switch format {
-		case "jpeg":
-			if img, err := canvasimage.NewJPEGImage(bytes.NewReader(data)); err == nil {
-				return img, format, nil
-			}
-		case "png":
-			if img, err := canvasimage.NewPNGImage(bytes.NewReader(data)); err == nil {
-				return img, format, nil
-			}
+	if isJPEGData(data) {
+		if img, err := canvasimage.NewJPEGImage(bytes.NewReader(data)); err == nil {
+			return img, "jpeg", nil
+		}
+	}
+	if isPNGData(data) {
+		if img, err := canvasimage.NewPNGImage(bytes.NewReader(data)); err == nil {
+			return img, "png", nil
 		}
 	}
 	img, format, err := image.Decode(bytes.NewReader(data))
@@ -50,6 +48,20 @@ func decodeImageData(data []byte) (image.Image, string, error) {
 		return img, "bmp", nil
 	}
 	return nil, "", err
+}
+
+// isJPEGData 判断是否为JPEG图片数据
+// 入参: data 图片数据
+// 返回: bool 是否为JPEG图片数据
+func isJPEGData(data []byte) bool {
+	return len(data) >= 2 && data[0] == 0xFF && data[1] == 0xD8
+}
+
+// isPNGData 判断是否为PNG图片数据
+// 入参: data 图片数据
+// 返回: bool 是否为PNG图片数据
+func isPNGData(data []byte) bool {
+	return bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n"))
 }
 
 // decodeImageConfigData 解码图片尺寸
