@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/tdewolff/canvas"
+	canvastext "github.com/tdewolff/canvas/text"
 	"github.com/tdewolff/font"
 )
 
@@ -27,6 +28,26 @@ import (
 type textGlyph struct {
 	Text    string
 	GlyphID int
+}
+
+// textGlyphPathCacheKey 字形路径缓存键
+type textGlyphPathCacheKey struct {
+	font       *canvas.Font
+	size       float64
+	fauxBold   float64
+	fauxItalic float64
+	xOffset    int32
+	yOffset    int32
+	language   string
+	script     canvastext.Script
+	direction  canvastext.Direction
+	glyph      textGlyph
+}
+
+// textGlyphPathCacheValue 字形路径缓存值
+type textGlyphPathCacheValue struct {
+	path  *canvas.Path
+	width float64
 }
 
 // textGlyphTransform 字符到字形变换
@@ -159,6 +180,30 @@ func textGlyphPath(face *canvas.FontFace, glyph textGlyph) (*canvas.Path, float6
 		p = p.Transform(canvas.Identity.Shear(face.FauxItalic, 0))
 	}
 	return p, face.MmPerEm * float64(face.Font.GlyphAdvance(glyphID))
+}
+
+// cachedTextGlyphPath 获取缓存的字形路径
+// 入参: face 字体, glyph 绘制字形
+// 返回: *canvas.Path 字形路径, float64 字形宽度
+func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (*canvas.Path, float64) {
+	key := textGlyphPathCacheKey{
+		font:       face.Font,
+		size:       face.Size,
+		fauxBold:   face.FauxBold,
+		fauxItalic: face.FauxItalic,
+		xOffset:    face.XOffset,
+		yOffset:    face.YOffset,
+		language:   face.Language,
+		script:     face.Script,
+		direction:  face.Direction,
+		glyph:      glyph,
+	}
+	if cached, ok := r.textGlyphPathCache[key]; ok {
+		return cached.path, cached.width
+	}
+	path, width := textGlyphPath(face, glyph)
+	r.textGlyphPathCache[key] = textGlyphPathCacheValue{path: path, width: width}
+	return path, width
 }
 
 // hasTextMatrix 判断文本是否需要应用字形变换

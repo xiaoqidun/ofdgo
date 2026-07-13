@@ -72,6 +72,7 @@ func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 		CompositeGraphicUnits: reader.compositeGraphicUnitCache,
 		FontMap:               make(map[string]*canvas.FontFamily),
 		fontFSCache:           make(map[fontFSKey]*canvas.FontFamily),
+		textGlyphPathCache:    make(map[textGlyphPathCacheKey]textGlyphPathCacheValue),
 	}
 	for _, opt := range opts {
 		opt(r)

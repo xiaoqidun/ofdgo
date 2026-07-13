@@ -148,7 +148,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			var glyphPath *canvas.Path
 			var glyphWidth float64
 			if drawAsGlyphPath {
-				glyphPath, glyphWidth = textGlyphPath(face, glyph)
+				glyphPath, glyphWidth = r.cachedTextGlyphPath(face, glyph)
 			} else {
 				glyphWidth = textGlyphWidth(face, glyph)
 			}
