@@ -956,6 +956,9 @@ async function renderPage(index, options = {}) {
 	}
 	try {
 		setCurrentPage(index);
+		if (options.fit !== false) {
+			applyFit(false);
+		}
 		if (options.scroll !== false) {
 			scrollToPage(index);
 		}
@@ -1361,6 +1364,10 @@ function pageShellAtPoint(x, y) {
 
 function setCurrentPage(index) {
 	state.pageIndex = index;
+	if (state.fitMode === "width") {
+		state.scale = fitWidthScale(currentPageInfo());
+		el.zoomLabel.textContent = `${Math.round(state.scale * 100)}%`;
+	}
 	updatePageListCurrent();
 	updateControls();
 	if (state.doc) {
@@ -1405,13 +1412,14 @@ function layoutPages() {
 function layoutPageShell(shell, page) {
 	const width = Math.max(1, page.width * MM_TO_PX);
 	const height = Math.max(1, page.height * MM_TO_PX);
-	shell.style.width = `${width * state.scale}px`;
-	shell.style.height = `${height * state.scale}px`;
+	const scale = state.fitMode === "width" ? state.scale * currentPageInfo().width / page.width : state.scale;
+	shell.style.width = `${width * scale}px`;
+	shell.style.height = `${height * scale}px`;
 	const surface = shell.querySelector(".page-surface");
 	if (surface) {
 		surface.style.width = `${width}px`;
 		surface.style.height = `${height}px`;
-		surface.style.transform = `scale(${state.scale})`;
+		surface.style.transform = `scale(${scale})`;
 	}
 }
 
@@ -1824,7 +1832,7 @@ async function focusSignatureStamp(stamp) {
 	if (!state.doc || pageIndex < 0) {
 		return;
 	}
-	await renderPage(pageIndex, { scroll: false });
+	await renderPage(pageIndex, { fit: false, scroll: false });
 	await nextFrame();
 	highlightSignatureStamp(stamp);
 	setStatus(stamp.page ? `已定位签名外观 第 ${stamp.page} 页` : "已定位签名外观");
@@ -1969,6 +1977,13 @@ function fitWidth(updateStatus = true) {
 	if (!page) {
 		return;
 	}
+	setScale(fitWidthScale(page), updateStatus, "width");
+	if (updateStatus) {
+		scrollToPage(state.pageIndex);
+	}
+}
+
+function fitWidthScale(page) {
 	const space = pageSpace();
 	const width = Math.max(1, page.width * MM_TO_PX);
 	const height = Math.max(1, page.height * MM_TO_PX);
@@ -1976,10 +1991,7 @@ function fitWidth(updateStatus = true) {
 	if (!viewerHasVerticalScrollbar() && height * (available / width) > Math.max(1, el.viewerPanel.clientHeight - space * 2)) {
 		available = Math.max(1, available - scrollbarWidth());
 	}
-	setScale(available / width, updateStatus, "width");
-	if (updateStatus) {
-		scrollToPage(state.pageIndex);
-	}
+	return Math.min(4, Math.max(0.2, available / width));
 }
 
 function fitHeight(updateStatus = true) {
@@ -2012,14 +2024,15 @@ function setScale(nextScale, updateStatus = true, fitMode = "free") {
 	const anchor = updateStatus && fitMode === "free" ? scaleAnchor() : null;
 	const scale = Math.min(4, Math.max(0.2, nextScale));
 	const scaleChanged = Math.abs(scale - state.scale) > 0.001;
+	const layoutChanged = scaleChanged || fitMode !== state.fitMode;
 	state.fitMode = fitMode;
 	state.scale = scale;
-	if (scaleChanged) {
+	if (layoutChanged) {
 		clearStampHighlights();
 		layoutPages();
 	}
 	updateFitSpace();
-	if (scaleChanged) {
+	if (layoutChanged) {
 		restoreScaleAnchor(anchor);
 	}
 	el.zoomLabel.textContent = `${Math.round(state.scale * 100)}%`;
