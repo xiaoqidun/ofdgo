@@ -21,7 +21,7 @@ import (
 	"image"
 	"image/color"
 
-	canvas_image "github.com/tdewolff/canvas/image"
+	canvasimage "github.com/tdewolff/canvas/image"
 	_ "github.com/xiaoqidun/jbig2"
 	_ "golang.org/x/image/bmp"
 )
@@ -33,11 +33,11 @@ func decodeImageData(data []byte) (image.Image, string, error) {
 	if _, format, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
 		switch format {
 		case "jpeg":
-			if img, err := canvas_image.NewJPEGImage(bytes.NewReader(data)); err == nil {
+			if img, err := canvasimage.NewJPEGImage(bytes.NewReader(data)); err == nil {
 				return img, format, nil
 			}
 		case "png":
-			if img, err := canvas_image.NewPNGImage(bytes.NewReader(data)); err == nil {
+			if img, err := canvasimage.NewPNGImage(bytes.NewReader(data)); err == nil {
 				return img, format, nil
 			}
 		}
