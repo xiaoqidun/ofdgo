@@ -19,6 +19,7 @@ import (
 	"image/color"
 
 	"github.com/tdewolff/canvas"
+	canvas_image "github.com/tdewolff/canvas/image"
 )
 
 // renderImage 渲染图片
@@ -110,6 +111,9 @@ func imageWithTransparentEdge(img image.Image) (image.Image, int) {
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
 	if w == 0 || h == 0 {
+		return img, 0
+	}
+	if src, ok := img.(*canvas_image.Image); ok && src.Mimetype == "image/jpeg" && src.Mask == nil {
 		return img, 0
 	}
 	if opaque, ok := img.(interface{ Opaque() bool }); ok && opaque.Opaque() {

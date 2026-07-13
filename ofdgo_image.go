@@ -21,6 +21,7 @@ import (
 	"image"
 	"image/color"
 
+	canvas_image "github.com/tdewolff/canvas/image"
 	_ "github.com/xiaoqidun/jbig2"
 	_ "golang.org/x/image/bmp"
 )
@@ -29,6 +30,18 @@ import (
 // 入参: data 图片数据
 // 返回: image.Image 图片对象, string 图片格式, error 错误信息
 func decodeImageData(data []byte) (image.Image, string, error) {
+	if _, format, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
+		switch format {
+		case "jpeg":
+			if img, err := canvas_image.NewJPEGImage(bytes.NewReader(data)); err == nil {
+				return img, format, nil
+			}
+		case "png":
+			if img, err := canvas_image.NewPNGImage(bytes.NewReader(data)); err == nil {
+				return img, format, nil
+			}
+		}
+	}
 	img, format, err := image.Decode(bytes.NewReader(data))
 	if err == nil {
 		return img, normalizeSealType(format), nil
