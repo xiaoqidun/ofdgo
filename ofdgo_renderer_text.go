@@ -144,13 +144,21 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		}
 		for i, glyph := range glyphs {
 			str := glyph.Text
+			drawAsGlyphPath := drawAsPath || glyph.GlyphID >= 0
+			var glyphPath *canvas.Path
+			var glyphWidth float64
+			if drawAsGlyphPath {
+				glyphPath, glyphWidth = textGlyphPath(face, glyph)
+			} else {
+				glyphWidth = textGlyphWidth(face, glyph)
+			}
 			if i < len(xs) {
 				cx = xs[i]
 			} else if i > 0 {
 				if dx, ok := textDelta(dxs, i-1); ok {
 					cx += dx
 				} else if len(dys) == 0 {
-					cx += textGlyphWidth(face, glyph) * hScale
+					cx += glyphWidth * hScale
 				}
 			}
 			if i < len(ys) {
@@ -169,7 +177,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				tx, ty := ctm.Transform(cx, cy)
 				canvasX, canvasY = tx+bx, pageH-(ty+by)
 			}
-			textWidth := textGlyphWidth(face, glyph) * hScale
+			textWidth := glyphWidth * hScale
 			glyphFillPaint := fillPaint
 			if useGlyphFillPaint {
 				glyphFillPaint = parseFillPaint(fillColorNode, bx, by, pageH, canvasX, canvasY)
@@ -178,21 +186,20 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			if glyphFillPaint != nil {
 				ctx.SetFill(glyphFillPaint)
 				drawGlyph := func(x, y float64) {
-					if drawAsPath || glyph.GlyphID >= 0 {
-						path, width := textGlyphPath(face, glyph)
+					if drawAsGlyphPath {
 						scaleX := hScale
-						if advanceLimit > 0 && width*scaleX > advanceLimit {
-							scaleX = advanceLimit / width
+						if advanceLimit > 0 && glyphWidth*scaleX > advanceLimit {
+							scaleX = advanceLimit / glyphWidth
 						}
-						textWidth = width * scaleX
+						textWidth = glyphWidth * scaleX
 						if scaleX != 1 {
 							ctx.Push()
 							ctx.Translate(x, y)
 							ctx.Scale(scaleX, 1)
-							ctx.DrawPath(0, 0, path)
+							ctx.DrawPath(0, 0, glyphPath)
 							ctx.Pop()
 						} else {
-							ctx.DrawPath(x, y, path)
+							ctx.DrawPath(x, y, glyphPath)
 						}
 					} else {
 						scaled := hScale != 1

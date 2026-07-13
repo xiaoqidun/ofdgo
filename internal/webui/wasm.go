@@ -17,7 +17,6 @@
 package webui
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"syscall/js"
@@ -56,6 +55,9 @@ func registerCallback(name string, fn func([]js.Value) (any, error)) {
 		data, err := safeCall(fn, args)
 		if err != nil {
 			return encodeResult(apiResult{OK: false, Error: err.Error()})
+		}
+		if result, ok := data.(js.Value); ok {
+			return result
 		}
 		return encodeResult(apiResult{OK: true, Data: data})
 	})
@@ -113,7 +115,18 @@ func renderPage(args []js.Value) (any, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("missing page index")
 	}
-	return currentSession.RenderPageSVG(args[0].Int())
+	page, err := currentSession.RenderPageSVG(args[0].Int())
+	if err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{
+		"index":  page.Index,
+		"number": page.Number,
+		"id":     page.ID,
+		"width":  page.Width,
+		"height": page.Height,
+		"svg":    page.SVG,
+	}), nil
 }
 
 // exportFormats 获取导出格式
@@ -137,14 +150,14 @@ func exportPage(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
-		"base64":    base64.StdEncoding.EncodeToString(data),
+	return successResult(map[string]any{
+		"bytes":     bytesToJS(data),
 		"size":      len(data),
 		"format":    format.Value,
 		"label":     format.Label,
 		"extension": format.Extension,
 		"mime":      format.MIME,
-	}, nil
+	}), nil
 }
 
 // exportPDF 导出OFD文档为PDF
@@ -158,10 +171,29 @@ func exportPDF(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
-		"base64": base64.StdEncoding.EncodeToString(data),
-		"size":   len(data),
-	}, nil
+	return successResult(map[string]any{
+		"bytes": bytesToJS(data),
+		"size":  len(data),
+	}), nil
+}
+
+// successResult 创建成功接口结果
+// 入参: data 返回数据
+// 返回: js.Value 接口结果
+func successResult(data any) js.Value {
+	result := js.Global().Get("Object").New()
+	result.Set("ok", true)
+	result.Set("data", data)
+	return result
+}
+
+// bytesToJS 将字节数据转换为Uint8Array
+// 入参: data 字节数据
+// 返回: js.Value Uint8Array对象
+func bytesToJS(data []byte) js.Value {
+	value := js.Global().Get("Uint8Array").New(len(data))
+	js.CopyBytesToJS(value, data)
+	return value
 }
 
 // fontSystemNames 获取系统字体名称

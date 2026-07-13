@@ -1003,7 +1003,7 @@ async function exportPDF() {
 			return;
 		}
 		setProgress("正在保存文档 PDF", 86);
-		const bytes = base64ToBytes(result.base64);
+		const bytes = result.bytes;
 		downloadBytes(bytes, "application/pdf", pdfFileName());
 		setStatus(`文档 PDF 已导出 ${formatBytes(result.size || bytes.length)}`);
 	} catch (err) {
@@ -1047,7 +1047,7 @@ async function exportCurrentPage() {
 			return;
 		}
 		setProgress(`正在保存 ${result.label || label}`, 86);
-		const bytes = base64ToBytes(result.base64);
+		const bytes = result.bytes;
 		downloadBytes(bytes, result.mime || info?.mime || "application/octet-stream", pageFileName(result.extension || info?.extension || format));
 		setStatus(`${result.label || label} 已导出 ${formatBytes(result.size || bytes.length, result.label || label)}`);
 	} catch (err) {
@@ -2159,7 +2159,7 @@ function callWASM(name, ...args) {
 		}
 		throw err;
 	}
-	const result = JSON.parse(payload);
+	const result = typeof payload === "string" ? JSON.parse(payload) : payload;
 	if (!result.ok) {
 		throw new Error(result.error || "WASM 调用失败");
 	}
@@ -2213,15 +2213,6 @@ function formatSize(value) {
 		return "-";
 	}
 	return value.toFixed(1);
-}
-
-function base64ToBytes(base64) {
-	const binary = atob(base64 || "");
-	const bytes = new Uint8Array(binary.length);
-	for (let i = 0; i < binary.length; i += 1) {
-		bytes[i] = binary.charCodeAt(i);
-	}
-	return bytes;
 }
 
 function downloadBytes(bytes, mime, name) {

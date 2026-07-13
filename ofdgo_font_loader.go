@@ -22,6 +22,13 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
+// fontFSKey 字体文件系统缓存键
+type fontFSKey struct {
+	index int
+	name  string
+	style canvas.FontStyle
+}
+
 // loadFont 加载字体
 // 入参: fontID 字体ID
 // 返回: *canvas.FontFamily 字体族
@@ -99,27 +106,19 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 			}
 		}
 	}
-	for _, fsys := range r.fontFS {
+	for index, fsys := range r.fontFS {
 		for _, m := range fontFSMatchesStyle(fsys, patterns, boldStyle, italicStyle) {
-			resData, err := fs.ReadFile(fsys, m)
-			if err == nil {
-				if err := ff.LoadFont(resData, 0, fontStyle); err == nil {
-					r.FontMap[fontID] = ff
-					return ff
-				}
+			if loaded := r.loadFontFromFS(fontID, ff, index, fsys, m, fontStyle); loaded != nil {
+				return loaded
 			}
 		}
 	}
 	if !canLoadSystemFonts() {
-		for _, fsys := range r.fontFS {
+		for index, fsys := range r.fontFS {
 			if matches, err := fs.Glob(fsys, "*"); err == nil {
 				for _, m := range matches {
-					resData, err := fs.ReadFile(fsys, m)
-					if err == nil {
-						if err := ff.LoadFont(resData, 0, fontStyle); err == nil {
-							r.FontMap[fontID] = ff
-							return ff
-						}
+					if loaded := r.loadFontFromFS(fontID, ff, index, fsys, m, fontStyle); loaded != nil {
+						return loaded
 					}
 				}
 			}
@@ -153,6 +152,38 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	}
 	r.FontMap[fontID] = defaultFont
 	return defaultFont
+}
+
+// loadFontFromFS 从字体文件系统加载字体
+// 入参: fontID 字体ID, family 字体族, index 文件系统索引, fsys 字体文件系统, name 字体文件名, style 字体样式
+// 返回: *canvas.FontFamily 字体族
+func (r *Renderer) loadFontFromFS(fontID string, family *canvas.FontFamily, index int, fsys fs.FS, name string, style canvas.FontStyle) *canvas.FontFamily {
+	key := fontFSKey{index: index, name: name, style: style}
+	if cached := r.fontFSCache[key]; cached != nil {
+		r.FontMap[fontID] = cached
+		return cached
+	}
+	data, err := readFontData(fsys, name)
+	if err != nil || family.LoadFont(data, 0, style) != nil {
+		return nil
+	}
+	r.fontFSCache[key] = family
+	r.FontMap[fontID] = family
+	return family
+}
+
+// readFontData 读取字体文件数据
+// 入参: fsys 字体文件系统, name 字体文件名
+// 返回: []byte 字体文件数据, error 错误信息
+func readFontData(fsys fs.FS, name string) ([]byte, error) {
+	if fontFS, ok := fsys.(*FontFS); ok {
+		data, ok := fontFS.files[cleanFontName(name)]
+		if !ok {
+			return nil, fs.ErrNotExist
+		}
+		return data, nil
+	}
+	return fs.ReadFile(fsys, name)
 }
 
 // matchFontFiles 查找字体文件

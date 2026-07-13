@@ -32,8 +32,9 @@ type FontFile struct {
 
 // FontFS 内存字体文件系统
 type FontFS struct {
-	files map[string][]byte
-	names []string
+	files      map[string][]byte
+	names      []string
+	candidates []fontFileCandidate
 }
 
 // NewFontFS 创建内存字体文件系统
@@ -54,6 +55,7 @@ func NewFontFS(fonts []FontFile) *FontFS {
 		fsys.files[name] = append([]byte(nil), font.Data...)
 	}
 	sort.Strings(fsys.names)
+	fsys.candidates = fontFileCandidates(fsys.names, path.Base)
 	return fsys
 }
 
@@ -146,11 +148,10 @@ func (fsys *FontFS) matchStyle(pattern string, bold, italic bool) []string {
 // 入参: patterns 匹配模式列表, bold 是否粗体, italic 是否斜体
 // 返回: []string 字体文件列表
 func (fsys *FontFS) matchPatternsStyle(patterns []string, bold, italic bool) []string {
-	files := fontFileCandidates(fsys.names, path.Base)
-	matches := make([]fontFileMatch, 0, len(files))
-	seen := make(map[string]int, len(files))
+	matches := make([]fontFileMatch, 0, len(fsys.candidates))
+	seen := make(map[string]int, len(fsys.candidates))
 	for _, matcher := range newFontPatternMatchers(patterns) {
-		for _, file := range files {
+		for _, file := range fsys.candidates {
 			rank := matcher.rankCandidate(file)
 			appendFontFileMatch(&matches, seen, matcher, file, rank, bold, italic)
 		}

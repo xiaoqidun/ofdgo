@@ -59,8 +59,8 @@ func replacePDFProducer(data []byte) []byte {
 		return data
 	}
 	dst := []byte("/Producer(xiaoqidun/ofdgo)")
-	result := make([]byte, 0, len(data)-len(old)+len(dst))
-	return append(append(append(result, data[:idx]...), dst...), data[idx+len(old):]...)
+	copy(data[idx:idx+len(old)], dst)
+	return data
 }
 
 // RenderToPDF 渲染为PDF
