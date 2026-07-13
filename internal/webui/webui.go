@@ -61,9 +61,9 @@ type SignatureInfo struct {
 	CertTrustOK       bool                 `json:"certTrustOK,omitempty"`
 	ReferenceCount    int                  `json:"referenceCount"`
 	ReferencePassed   int                  `json:"referencePassed"`
-	SignSerial        string               `json:"signSerial,omitempty"`
 	SignatureMethod   string               `json:"signatureMethod,omitempty"`
 	DigestMethod      string               `json:"digestMethod,omitempty"`
+	SignSerial        string               `json:"signSerial,omitempty"`
 	SignSubject       string               `json:"signSubject,omitempty"`
 	SignIssuer        string               `json:"signIssuer,omitempty"`
 	SealSubject       string               `json:"sealSubject,omitempty"`
@@ -364,9 +364,9 @@ func signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
 		CertTrustOK:       report.CertTrustOK,
 		ReferenceCount:    len(report.References),
 		ReferencePassed:   signatureReferencePassed(report.References),
-		SignSerial:        report.SignCert.SerialNumber,
 		SignatureMethod:   report.SignatureMethod,
 		DigestMethod:      report.DigestMethod,
+		SignSerial:        report.SignCert.SerialNumber,
 		SignSubject:       report.SignCert.Subject,
 		SignIssuer:        report.SignCert.Issuer,
 		SealSubject:       report.SealCert.Subject,

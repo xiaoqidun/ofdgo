@@ -1702,9 +1702,9 @@ function renderSignatures() {
 		appendSignaturePolicy(row, "时效", signature.certTimeChecked, signature.certTimeOK);
 		appendSignaturePolicy(row, "信任", signature.certTrustChecked, signature.certTrustOK);
 		appendSignatureLine(row, "保护", signatureReferenceText(signature), signatureReferenceStatus(signature));
-		appendSignatureLine(row, "序号", signature.signSerial);
 		appendSignatureLine(row, "算法", signature.signatureMethod);
 		appendSignatureLine(row, "散列", signature.digestMethod);
+		appendSignatureLine(row, "序号", signature.signSerial);
 		appendSignatureLine(row, "主体", signature.signSubject && signature.signSubject !== signature.signer ? signature.signSubject : "");
 		appendSignatureLine(row, "颁发", signature.signIssuer);
 		appendSignatureLine(row, "章证", signature.sealSubject);
