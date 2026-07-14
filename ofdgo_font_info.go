@@ -291,6 +291,7 @@ func (r *Renderer) fontUsage(doc *Document, pages []*PageContent) map[string]int
 	for _, tpl := range doc.CommonData.TemplatePage {
 		page, err := r.Reader.PageContent(Page{BaseLoc: tpl.BaseLoc})
 		if err == nil {
+			r.templatePageCache[tpl.ID] = page
 			r.countPageFonts(page, usage)
 		}
 	}

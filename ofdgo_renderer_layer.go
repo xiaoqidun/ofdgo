@@ -38,19 +38,24 @@ func (r *Renderer) renderAnnotations(ctx *canvas.Context, pageID string, pageH f
 // renderTemplate 渲染模板
 // 入参: ctx 画布上下文, templateID 模板ID, pageH 页面高度
 func (r *Renderer) renderTemplate(ctx *canvas.Context, templateID string, pageH float64) {
-	var tplPage *TemplatePage
-	for _, tp := range r.Reader.doc.CommonData.TemplatePage {
-		if tp.ID == templateID {
-			tplPage = &tp
-			break
+	tplContent := r.templatePageCache[templateID]
+	if tplContent == nil {
+		var tplPage *TemplatePage
+		for i := range r.Reader.doc.CommonData.TemplatePage {
+			if r.Reader.doc.CommonData.TemplatePage[i].ID == templateID {
+				tplPage = &r.Reader.doc.CommonData.TemplatePage[i]
+				break
+			}
 		}
-	}
-	if tplPage == nil {
-		return
-	}
-	tplContent, err := r.Reader.PageContent(Page{BaseLoc: tplPage.BaseLoc})
-	if err != nil {
-		return
+		if tplPage == nil {
+			return
+		}
+		var err error
+		tplContent, err = r.Reader.PageContent(Page{BaseLoc: tplPage.BaseLoc})
+		if err != nil {
+			return
+		}
+		r.templatePageCache[templateID] = tplContent
 	}
 	if tplContent.Content.Layer != nil {
 		for _, layer := range tplContent.Content.Layer {
