@@ -236,6 +236,7 @@ type fontPatternMatcher struct {
 	lowerPattern string
 	stem         string
 	aliases      []string
+	priority     int
 }
 
 // newFontPatternMatcher 创建字体文件匹配器
@@ -263,8 +264,10 @@ func newFontPatternMatcher(pattern string) fontPatternMatcher {
 // 返回: []fontPatternMatcher 字体文件匹配器列表
 func newFontPatternMatchers(patterns []string) []fontPatternMatcher {
 	matchers := make([]fontPatternMatcher, 0, len(patterns))
-	for _, pattern := range patterns {
-		matchers = append(matchers, newFontPatternMatcher(pattern))
+	for priority, pattern := range patterns {
+		matcher := newFontPatternMatcher(pattern)
+		matcher.priority = priority
+		matchers = append(matchers, matcher)
 	}
 	return matchers
 }
@@ -343,6 +346,7 @@ func (m fontPatternMatcher) styleSuffixNormalized(name string) string {
 
 type fontFileMatch struct {
 	name      string
+	priority  int
 	rank      int
 	styleRank int
 	sortName  string
@@ -356,6 +360,7 @@ func appendFontFileMatch(matches *[]fontFileMatch, seen map[string]int, matcher 
 	}
 	next := fontFileMatch{
 		name:      file.name,
+		priority:  matcher.priority,
 		rank:      rank,
 		styleRank: fontFileStyleRank(matcher.styleSuffixNormalized(file.normalized), bold, italic),
 		sortName:  file.lowerBase,
@@ -382,6 +387,9 @@ func sortFontFileMatches(matches []fontFileMatch) {
 // 入参: left 左侧匹配结果, right 右侧匹配结果
 // 返回: bool 左侧是否优先
 func fontFileMatchLess(left, right fontFileMatch) bool {
+	if left.priority != right.priority {
+		return left.priority < right.priority
+	}
 	if left.rank != right.rank {
 		return left.rank < right.rank
 	}
