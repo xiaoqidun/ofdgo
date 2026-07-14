@@ -222,10 +222,6 @@ func (s *Session) Info() DocumentInfo {
 		PageCount: len(s.doc.Pages.Page),
 		Pages:     make([]PageInfo, 0, len(s.doc.Pages.Page)),
 	}
-	if fonts, err := s.Renderer.FontInfos(); err == nil {
-		info.Fonts = fonts
-	}
-	info.FontCount = len(info.Fonts)
 	if signatures, err := s.signatureInfos(); err == nil {
 		info.Signatures = signatures
 	} else {
@@ -239,9 +235,11 @@ func (s *Session) Info() DocumentInfo {
 		info.CreationDate = docInfo.CreationDate
 		info.ModDate = docInfo.ModDate
 	}
+	pages := make([]*ofdgo.PageContent, 0, len(s.doc.Pages.Page))
 	for index, pageRef := range s.doc.Pages.Page {
 		pageInfo := PageInfo{Index: index, ID: pageRef.ID}
 		if _, page, err := s.pageContent(index); err == nil {
+			pages = append(pages, page)
 			if box, err := s.pageBox(index, page); err == nil {
 				pageInfo.Width = box.W
 				pageInfo.Height = box.H
@@ -249,6 +247,10 @@ func (s *Session) Info() DocumentInfo {
 		}
 		info.Pages = append(info.Pages, pageInfo)
 	}
+	if fonts, err := s.Renderer.FontInfosFromPages(pages); err == nil {
+		info.Fonts = fonts
+	}
+	info.FontCount = len(info.Fonts)
 	return info
 }
 

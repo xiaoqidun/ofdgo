@@ -67,6 +67,30 @@ func (r *Reader) Fonts() ([]Font, error) {
 // FontInfos 获取OFD字体诊断信息
 // 返回: []FontInfo 字体诊断列表, error 错误信息
 func (r *Renderer) FontInfos() ([]FontInfo, error) {
+	doc, err := r.fontInfoDocument()
+	if err != nil {
+		return nil, err
+	}
+	return r.fontInfos(doc, nil)
+}
+
+// FontInfosFromPages 从页面内容获取OFD字体诊断信息
+// 入参: pages 页面内容列表
+// 返回: []FontInfo 字体诊断列表, error 错误信息
+func (r *Renderer) FontInfosFromPages(pages []*PageContent) ([]FontInfo, error) {
+	doc, err := r.fontInfoDocument()
+	if err != nil {
+		return nil, err
+	}
+	if pages == nil {
+		pages = []*PageContent{}
+	}
+	return r.fontInfos(doc, pages)
+}
+
+// fontInfoDocument 获取字体诊断文档结构
+// 返回: *Document 文档结构, error 错误信息
+func (r *Renderer) fontInfoDocument() (*Document, error) {
 	if r == nil || r.Reader == nil {
 		return nil, fmt.Errorf("ofd renderer is not initialized")
 	}
@@ -77,11 +101,18 @@ func (r *Renderer) FontInfos() ([]FontInfo, error) {
 	if doc == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
+	return doc, nil
+}
+
+// fontInfos 获取OFD字体诊断信息
+// 入参: doc 文档结构, pages 页面内容列表
+// 返回: []FontInfo 字体诊断列表, error 错误信息
+func (r *Renderer) fontInfos(doc *Document, pages []*PageContent) ([]FontInfo, error) {
 	fonts, err := r.Reader.Fonts()
 	if err != nil {
 		return nil, err
 	}
-	usage := r.fontUsage(doc)
+	usage := r.fontUsage(doc, pages)
 	infos := make([]FontInfo, 0, len(fonts)+len(usage))
 	seen := make(map[string]bool)
 	for _, font := range fonts {
@@ -240,14 +271,21 @@ func fontFSMatchesStyle(fsys fs.FS, patterns []string, bold, italic bool) []stri
 }
 
 // fontUsage 统计文档字体使用次数
-// 入参: doc 文档结构
+// 入参: doc 文档结构, pages 页面内容列表, nil表示读取文档页面
 // 返回: map[string]int 字体使用次数
-func (r *Renderer) fontUsage(doc *Document) map[string]int {
+func (r *Renderer) fontUsage(doc *Document, pages []*PageContent) map[string]int {
 	usage := make(map[string]int)
-	for _, pageRef := range doc.Pages.Page {
-		page, err := r.Reader.PageContent(pageRef)
-		if err == nil {
-			r.countPageFonts(page, usage)
+	if pages == nil {
+		for _, pageRef := range doc.Pages.Page {
+			if page, err := r.Reader.PageContent(pageRef); err == nil {
+				r.countPageFonts(page, usage)
+			}
+		}
+	} else {
+		for _, page := range pages {
+			if page != nil {
+				r.countPageFonts(page, usage)
+			}
 		}
 	}
 	for _, tpl := range doc.CommonData.TemplatePage {
