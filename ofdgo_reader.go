@@ -38,7 +38,6 @@ type Reader struct {
 	Stamps                    map[string][]Stamp
 	Annots                    map[string][]Annotation
 	fileIndex                 map[string]*zip.File
-	fileIndexFold             map[string]*zip.File
 }
 
 // Close 关闭阅读器
@@ -54,14 +53,9 @@ func (r *Reader) Close() error {
 // 返回: error 错误信息
 func (r *Reader) initRoot() error {
 	r.fileIndex = make(map[string]*zip.File)
-	r.fileIndexFold = make(map[string]*zip.File)
 	for _, f := range r.Zip.File {
 		name := cleanPackagePath(f.Name)
 		r.fileIndex[name] = f
-		fold := strings.ToLower(name)
-		if _, ok := r.fileIndexFold[fold]; !ok {
-			r.fileIndexFold[fold] = f
-		}
 	}
 	data, err := r.readFile("OFD.xml")
 	if err != nil {
@@ -115,9 +109,6 @@ func cleanPackagePath(name string) string {
 // 返回: *zip.File 压缩包文件, bool 是否存在
 func (r *Reader) packageFile(name string) (*zip.File, bool) {
 	if f, ok := r.fileIndex[name]; ok {
-		return f, true
-	}
-	if f, ok := r.fileIndexFold[strings.ToLower(name)]; ok {
 		return f, true
 	}
 	return nil, false
@@ -176,7 +167,7 @@ func (r *Reader) loadRes(resPath string) {
 	if resPath == "" {
 		return
 	}
-	fullPath := path.Join(r.RootDir, resPath)
+	fullPath := r.ResPath(resPath)
 	data, err := r.readFile(fullPath)
 	if err != nil {
 		return
@@ -235,7 +226,7 @@ func resolveResourcePath(resPath, baseLoc, filePath string) string {
 // 入参: page 页面对象
 // 返回: *PageContent 页面内容, error 错误信息
 func (r *Reader) PageContent(page Page) (*PageContent, error) {
-	fullPath := path.Join(r.RootDir, page.BaseLoc)
+	fullPath := r.ResPath(page.BaseLoc)
 	data, err := r.readFile(fullPath)
 	if err != nil {
 		return nil, err
@@ -260,7 +251,9 @@ func (r *Reader) ResPath(resLink string) string {
 	if resLink == "" {
 		return ""
 	}
-	resLink = strings.TrimPrefix(resLink, "/")
+	if strings.HasPrefix(resLink, "/") {
+		return cleanPackagePath(resLink)
+	}
 	resLink = path.Clean(resLink)
 	rootDir := strings.TrimPrefix(strings.ReplaceAll(r.RootDir, "\\", "/"), "/")
 	if rootDir != "" && (resLink == rootDir || strings.HasPrefix(resLink, rootDir+"/")) {

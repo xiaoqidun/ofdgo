@@ -80,6 +80,7 @@ type SignatureStamp struct {
 	ID       string `xml:"ID,attr"`
 	PageRef  string `xml:"PageRef,attr"`
 	Boundary string `xml:"Boundary,attr"`
+	Clip     string `xml:"Clip,attr"`
 }
 
 // SignatureStampPosition 签名外观位置信息
@@ -89,6 +90,8 @@ type SignatureStampPosition struct {
 	PageID   string
 	Boundary string
 	Box      Box
+	Clip     string
+	ClipBox  *Box
 }
 
 // SignatureReferences 签名保护文件列表
@@ -122,12 +125,22 @@ func (r *Reader) SignatureStampPositions(stamps []SignatureStamp) ([]SignatureSt
 		if err != nil {
 			return nil, err
 		}
+		var clipBox *Box
+		if stamp.Clip != "" {
+			clip, err := parseSignatureStampBox(stamp.Clip)
+			if err != nil {
+				return nil, err
+			}
+			clipBox = &clip
+		}
 		positions = append(positions, SignatureStampPosition{
 			ID:       stamp.ID,
 			Page:     page,
 			PageID:   stamp.PageRef,
 			Boundary: stamp.Boundary,
 			Box:      box,
+			Clip:     stamp.Clip,
+			ClipBox:  clipBox,
 		})
 	}
 	return positions, nil
@@ -139,23 +152,23 @@ func (r *Reader) SignatureStampPositions(stamps []SignatureStamp) ([]SignatureSt
 func parseSignatureStampBox(s string) (Box, error) {
 	parts := strings.Fields(s)
 	if len(parts) != 4 {
-		return Box{}, fmt.Errorf("invalid signature stamp boundary: %s", s)
+		return Box{}, fmt.Errorf("invalid signature stamp box: %s", s)
 	}
 	x, err := strconv.ParseFloat(parts[0], 64)
 	if err != nil {
-		return Box{}, fmt.Errorf("invalid signature stamp boundary: %s", s)
+		return Box{}, fmt.Errorf("invalid signature stamp box: %s", s)
 	}
 	y, err := strconv.ParseFloat(parts[1], 64)
 	if err != nil {
-		return Box{}, fmt.Errorf("invalid signature stamp boundary: %s", s)
+		return Box{}, fmt.Errorf("invalid signature stamp box: %s", s)
 	}
 	w, err := strconv.ParseFloat(parts[2], 64)
 	if err != nil {
-		return Box{}, fmt.Errorf("invalid signature stamp boundary: %s", s)
+		return Box{}, fmt.Errorf("invalid signature stamp box: %s", s)
 	}
 	h, err := strconv.ParseFloat(parts[3], 64)
 	if err != nil {
-		return Box{}, fmt.Errorf("invalid signature stamp boundary: %s", s)
+		return Box{}, fmt.Errorf("invalid signature stamp box: %s", s)
 	}
 	return Box{X: x, Y: y, W: w, H: h}, nil
 }
@@ -212,8 +225,19 @@ func (r *Reader) parseSignatures(doc *Document) error {
 			}
 			for _, annot := range sigFile.SignedInfo.StampAnnot {
 				pageID := annot.PageRef
-				bbox, _ := ParseBox(annot.Boundary)
-				r.addStamp(pageID, bbox, sealType, sealData)
+				bbox, err := parseSignatureStampBox(annot.Boundary)
+				if err != nil {
+					continue
+				}
+				var clipBox *Box
+				if annot.Clip != "" {
+					clip, err := parseSignatureStampBox(annot.Clip)
+					if err != nil {
+						continue
+					}
+					clipBox = &clip
+				}
+				r.addStamp(pageID, bbox, clipBox, sealType, sealData)
 			}
 		}(sigRef)
 	}
@@ -415,18 +439,20 @@ func probeImageMedia(data []byte) (string, []byte) {
 // Stamp 印章信息结构
 type Stamp struct {
 	Box  Box
+	Clip *Box
 	Type string
 	Data []byte
 }
 
 // addStamp 添加印章到页面
-// 入参: pageID 页面ID, box 印章区域, sType 印章类型, data 印章数据
-func (r *Reader) addStamp(pageID string, box Box, sType string, data []byte) {
+// 入参: pageID 页面ID, box 印章区域, clip 裁剪区域, sType 印章类型, data 印章数据
+func (r *Reader) addStamp(pageID string, box Box, clip *Box, sType string, data []byte) {
 	if r.Stamps == nil {
 		r.Stamps = make(map[string][]Stamp)
 	}
 	r.Stamps[pageID] = append(r.Stamps[pageID], Stamp{
 		Box:  box,
+		Clip: clip,
 		Type: sType,
 		Data: data,
 	})

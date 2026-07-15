@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 )
 
 const (
@@ -42,6 +43,7 @@ type sesSignature struct {
 	SignAlg   string
 	Signature []byte
 	DataHash  []byte
+	Time      time.Time
 	Seal      *sesSeal
 }
 
@@ -55,6 +57,7 @@ type sesSeal struct {
 	PicType   string
 	PicData   []byte
 	CertList  sesCertList
+	Info      SignatureSealInfo
 }
 
 // sesCertList SES印章证书列表
@@ -71,17 +74,19 @@ type sesCertDigest struct {
 
 // sesVerifyResult SES签章验证结果
 type sesVerifyResult struct {
-	DataHashOK  bool
-	SignedOK    bool
-	SealOK      bool
-	CertOK      bool
-	SignCert    SignatureCertInfo
-	SealCert    SignatureCertInfo
-	SignCertRaw []byte
-	SealCertRaw []byte
-	SealRaw     []byte
-	Certs       [][]byte
-	SealType    string
+	DataHashOK    bool
+	SignedOK      bool
+	SealOK        bool
+	CertOK        bool
+	SignCert      SignatureCertInfo
+	SealCert      SignatureCertInfo
+	SignCertRaw   []byte
+	SealCertRaw   []byte
+	SealRaw       []byte
+	Certs         [][]byte
+	SealType      string
+	SealInfo      SignatureSealInfo
+	SignatureTime time.Time
 }
 
 // parseSESSignature 解析SES签章值
@@ -119,10 +124,18 @@ func parseSESSignature(data []byte) (*sesSignature, error) {
 		return nil, err
 	}
 	tbsItems, ok := asn1Children(items[0].Bytes)
-	if !ok || len(tbsItems) < 5 {
+	if !ok || len(tbsItems) < 5 || len(tbsItems) > 6 {
 		return nil, fmt.Errorf("invalid ses toSign")
 	}
 	seal, err := parseSESSeal(tbsItems[1])
+	if err != nil {
+		return nil, err
+	}
+	version, err := asn1Integer(tbsItems[0])
+	if err != nil || version != seal.Info.Version {
+		return nil, fmt.Errorf("invalid ses version")
+	}
+	signatureTime, err := asn1Time(tbsItems[2])
 	if err != nil {
 		return nil, err
 	}
@@ -136,6 +149,7 @@ func parseSESSignature(data []byte) (*sesSignature, error) {
 		SignAlg:   alg,
 		Signature: signature,
 		DataHash:  dataHash,
+		Time:      signatureTime,
 		Seal:      seal,
 	}, nil
 }
@@ -156,6 +170,11 @@ func parseSESSignatureV1(items []asn1.RawValue) (*sesSignature, error) {
 	if err != nil {
 		return nil, err
 	}
+	version, err := asn1Integer(tbsItems[0])
+	if err != nil || version != seal.Info.Version {
+		return nil, fmt.Errorf("invalid ses version")
+	}
+	signatureTime := parseSESSignatureTimeV1(tbsItems[2])
 	dataHash, err := asn1BitOrOctetBytes(tbsItems[3])
 	if err != nil {
 		return nil, err
@@ -174,8 +193,29 @@ func parseSESSignatureV1(items []asn1.RawValue) (*sesSignature, error) {
 		SignAlg:   alg,
 		Signature: signature,
 		DataHash:  dataHash,
+		Time:      signatureTime,
 		Seal:      seal,
 	}, nil
+}
+
+// parseSESSignatureTimeV1 解析SES V1签名时间
+// 入参: raw 签名时间或时间戳数据
+// 返回: time.Time 签名时间
+func parseSESSignatureTimeV1(raw asn1.RawValue) time.Time {
+	data, err := asn1BitOrOctetBytes(raw)
+	if err != nil {
+		return time.Time{}
+	}
+	if t := parseSignatureDateTime(string(data)); !t.IsZero() {
+		return t
+	}
+	var value asn1.RawValue
+	rest, err := asn1.Unmarshal(data, &value)
+	if err != nil || len(rest) != 0 {
+		return time.Time{}
+	}
+	t, _ := asn1Time(value)
+	return t
 }
 
 // verifySESSignature 验证SES签章值
@@ -198,6 +238,8 @@ func verifySESSignature(data, signedData []byte, options *signatureVerifyOptions
 	result.Certs = append(result.Certs, sig.Seal.CertList.Certs...)
 	result.Certs = append(result.Certs, options.SignCerts...)
 	result.SealType = sig.Seal.PicType
+	result.SealInfo = sig.Seal.Info
+	result.SignatureTime = sig.Time
 	result.DataHashOK = bytes.Equal(sig.DataHash, signSM3(signedData))
 	signPub, err := parseSM2PublicKeyFromCert(sig.Cert)
 	if err != nil {
@@ -243,11 +285,7 @@ func parseSESSeal(raw asn1.RawValue) (*sesSeal, error) {
 	if !ok || len(infoItems) < 4 || len(infoItems) > 5 {
 		return nil, fmt.Errorf("invalid ses seal info")
 	}
-	version, err := parseSESHeaderVersion(infoItems[0])
-	if err != nil {
-		return nil, err
-	}
-	certList, err := parseSESCertList(infoItems[2], version)
+	info, certList, err := parseSESSealInfo(infoItems)
 	if err != nil {
 		return nil, err
 	}
@@ -264,6 +302,7 @@ func parseSESSeal(raw asn1.RawValue) (*sesSeal, error) {
 		PicType:   picType,
 		PicData:   picData,
 		CertList:  certList,
+		Info:      info,
 	}, nil
 }
 
@@ -291,7 +330,7 @@ func parseSESSealV1(raw asn1.RawValue, items []asn1.RawValue) (*sesSeal, error) 
 	if err != nil {
 		return nil, err
 	}
-	certList, err := parseSESCertListV1(infoItems[2])
+	info, certList, err := parseSESSealInfo(infoItems)
 	if err != nil {
 		return nil, err
 	}
@@ -309,43 +348,92 @@ func parseSESSealV1(raw asn1.RawValue, items []asn1.RawValue) (*sesSeal, error) 
 		PicType:   picType,
 		PicData:   picData,
 		CertList:  certList,
+		Info:      info,
 	}, nil
 }
 
-// parseSESHeaderVersion 解析印章头版本
-// 入参: raw 印章头信息
-// 返回: int 版本号, error 错误信息
-func parseSESHeaderVersion(raw asn1.RawValue) (int, error) {
-	items, ok := asn1Children(raw.Bytes)
-	if !ok || len(items) < 2 {
-		return 0, fmt.Errorf("invalid ses header")
+// parseSESSealInfo 解析电子印章信息
+// 入参: items 印章信息ASN.1子元素
+// 返回: SignatureSealInfo 印章信息, sesCertList 证书列表, error 错误信息
+func parseSESSealInfo(items []asn1.RawValue) (SignatureSealInfo, sesCertList, error) {
+	if len(items) < 4 {
+		return SignatureSealInfo{}, sesCertList{}, fmt.Errorf("invalid ses seal info")
 	}
-	return asn1Integer(items[1])
+	header, ok := asn1Children(items[0].Bytes)
+	if !ok || len(header) != 3 {
+		return SignatureSealInfo{}, sesCertList{}, fmt.Errorf("invalid ses header")
+	}
+	if asn1String(header[0]) != "ES" {
+		return SignatureSealInfo{}, sesCertList{}, fmt.Errorf("invalid ses header")
+	}
+	version, err := asn1Integer(header[1])
+	if err != nil {
+		return SignatureSealInfo{}, sesCertList{}, err
+	}
+	property, ok := asn1Children(items[2].Bytes)
+	if !ok {
+		return SignatureSealInfo{}, sesCertList{}, fmt.Errorf("invalid ses property")
+	}
+	certIndex := 2
+	timeIndex := 3
+	if version >= 4 {
+		certIndex = 3
+		timeIndex = 4
+	}
+	if len(property) != timeIndex+3 {
+		return SignatureSealInfo{}, sesCertList{}, fmt.Errorf("invalid ses property")
+	}
+	typeValue, err := asn1Integer(property[0])
+	if err != nil {
+		return SignatureSealInfo{}, sesCertList{}, err
+	}
+	certList, err := parseSESCertList(property, version, certIndex)
+	if err != nil {
+		return SignatureSealInfo{}, sesCertList{}, err
+	}
+	createTime, err := asn1Time(property[timeIndex])
+	if err != nil {
+		return SignatureSealInfo{}, sesCertList{}, err
+	}
+	validStart, err := asn1Time(property[timeIndex+1])
+	if err != nil {
+		return SignatureSealInfo{}, sesCertList{}, err
+	}
+	validEnd, err := asn1Time(property[timeIndex+2])
+	if err != nil {
+		return SignatureSealInfo{}, sesCertList{}, err
+	}
+	return SignatureSealInfo{
+		Version:    version,
+		ID:         strings.TrimSpace(asn1String(items[1])),
+		VendorID:   strings.TrimSpace(asn1String(header[2])),
+		Type:       typeValue,
+		Name:       strings.TrimSpace(asn1String(property[1])),
+		CreateTime: createTime,
+		ValidStart: validStart,
+		ValidEnd:   validEnd,
+	}, certList, nil
 }
 
 // parseSESCertList 解析印章证书列表
-// 入参: raw 印章属性信息, version 印章版本
+// 入参: property 印章属性, version 印章版本, certIndex 证书列表位置
 // 返回: sesCertList 证书列表, error 错误信息
-func parseSESCertList(raw asn1.RawValue, version int) (sesCertList, error) {
-	items, ok := asn1Children(raw.Bytes)
-	if !ok || len(items) < 3 {
-		return sesCertList{}, fmt.Errorf("invalid ses property")
+func parseSESCertList(property []asn1.RawValue, version, certIndex int) (sesCertList, error) {
+	if version == 1 {
+		return parseSESCertListV1(property[certIndex])
 	}
 	if version < 4 {
-		return parseSESCertInfoList(items[2])
+		return parseSESCertInfoList(property[certIndex])
 	}
-	if len(items) < 4 {
-		return sesCertList{}, fmt.Errorf("invalid ses cert list")
-	}
-	listType, err := asn1Integer(items[2])
+	listType, err := asn1Integer(property[certIndex-1])
 	if err != nil {
 		return sesCertList{}, err
 	}
 	switch listType {
 	case 1:
-		return parseSESCertInfoList(items[3])
+		return parseSESCertInfoList(property[certIndex])
 	case 2:
-		return parseSESCertDigestList(items[3])
+		return parseSESCertDigestList(property[certIndex])
 	default:
 		return sesCertList{}, fmt.Errorf("unsupported ses cert list type")
 	}
@@ -396,12 +484,12 @@ func parseSESCertDigestList(raw asn1.RawValue) (sesCertList, error) {
 	list := sesCertList{Digests: make([]sesCertDigest, 0, len(items))}
 	for _, item := range items {
 		fields, ok := asn1Children(item.Bytes)
-		if !ok || len(fields) < 2 {
+		if !ok || len(fields) != 2 {
 			return sesCertList{}, fmt.Errorf("invalid ses cert digest")
 		}
-		method, err := parseGBTAlgorithm(fields[0])
-		if err != nil {
-			return sesCertList{}, err
+		method := strings.TrimSpace(asn1String(fields[0]))
+		if method == "" {
+			return sesCertList{}, fmt.Errorf("invalid ses cert digest")
 		}
 		digest, err := asn1OctetString(fields[1])
 		if err != nil {

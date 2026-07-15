@@ -66,8 +66,8 @@ type gbtSignerInfo struct {
 // 入参: method 签名算法, digestMethod 摘要算法, signedValue 签名值, signedData 被签名原文, options 验证选项
 // 返回: *digitalVerifyResult 验证结果, error 错误信息
 func verifyDigitalSignature(method, digestMethod string, signedValue, signedData []byte, options *signatureVerifyOptions) (*digitalVerifyResult, error) {
-	if isGBT35275SignedValue(signedValue) {
-		return verifyGBT35275SignedData(signedValue, signedData, options)
+	if value, ok := normalizeGBT35275SignedValue(signedValue); ok {
+		return verifyGBT35275SignedData(value, signedData, options)
 	}
 	if isSM2SignatureMethod(method) {
 		return verifyRawDigitalSignature(signedValue, signedData, options)
@@ -204,27 +204,150 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 	return result, nil
 }
 
-// isGBT35275SignedValue 判断签名值是否为GB/T 35275 SignedData
+// normalizeGBT35275SignedValue 规范化GB/T 35275 SignedData编码
 // 入参: data 签名值数据
-// 返回: bool 是否为SignedData
-func isGBT35275SignedValue(data []byte) bool {
+// 返回: []byte 定长编码数据, bool 是否为SignedData
+func normalizeGBT35275SignedValue(data []byte) ([]byte, bool) {
+	if contentType, ok := gbtContentType(data); ok {
+		return data, contentType == signContentSignedData
+	}
+	der, err := berToDefinite(data)
+	if err != nil {
+		return nil, false
+	}
+	contentType, ok := gbtContentType(der)
+	if !ok || contentType != signContentSignedData {
+		return nil, false
+	}
+	return der, true
+}
+
+// gbtContentType 读取GB/T 35275内容类型
+// 入参: data DER编码数据
+// 返回: string 内容类型, bool 是否完成解析
+func gbtContentType(data []byte) (string, bool) {
 	var root asn1.RawValue
 	rest, err := asn1.Unmarshal(data, &root)
 	if err != nil || len(rest) != 0 || root.Tag != signASN1Sequence {
-		return false
+		return "", false
 	}
 	items, ok := asn1Children(root.Bytes)
-	if !ok || len(items) < 2 {
-		return false
+	if !ok || len(items) == 0 {
+		return "", false
+	}
+	if items[0].Tag != asn1.TagOID {
+		return "", true
 	}
 	oid, err := asn1OIDString(items[0])
-	return err == nil && oid == signContentSignedData
+	return oid, err == nil
+}
+
+// berToDefinite 将BER不定长编码转换为定长编码
+// 入参: data BER编码数据
+// 返回: []byte 定长编码数据, error 错误信息
+func berToDefinite(data []byte) ([]byte, error) {
+	out, n, err := berValueToDefinite(data)
+	if err != nil {
+		return nil, err
+	}
+	if n != len(data) {
+		return nil, fmt.Errorf("invalid BER trailing data")
+	}
+	return out, nil
+}
+
+// berValueToDefinite 转换单个BER编码值
+// 入参: data BER编码数据
+// 返回: []byte 定长编码数据, int 已读取长度, error 错误信息
+func berValueToDefinite(data []byte) ([]byte, int, error) {
+	if len(data) < 2 {
+		return nil, 0, fmt.Errorf("invalid BER value")
+	}
+	pos := 1
+	if data[0]&0x1f == 0x1f {
+		for pos < len(data) && data[pos]&0x80 != 0 {
+			pos++
+		}
+		pos++
+	}
+	if pos >= len(data) {
+		return nil, 0, fmt.Errorf("invalid BER tag")
+	}
+	tag := data[:pos]
+	firstLength := data[pos]
+	pos++
+	if firstLength == 0x80 {
+		if tag[0]&0x20 == 0 {
+			return nil, 0, fmt.Errorf("invalid BER indefinite primitive")
+		}
+		var content []byte
+		for {
+			if len(data)-pos < 2 {
+				return nil, 0, fmt.Errorf("invalid BER unterminated value")
+			}
+			if data[pos] == 0 && data[pos+1] == 0 {
+				pos += 2
+				break
+			}
+			child, n, err := berValueToDefinite(data[pos:])
+			if err != nil {
+				return nil, 0, err
+			}
+			content = append(content, child...)
+			pos += n
+		}
+		return wrapBERValue(tag, content), pos, nil
+	}
+	length := uint64(firstLength)
+	if firstLength&0x80 != 0 {
+		n := int(firstLength & 0x7f)
+		if n == 0 || n > 8 || len(data)-pos < n {
+			return nil, 0, fmt.Errorf("invalid BER length")
+		}
+		length = 0
+		for _, b := range data[pos : pos+n] {
+			length = length<<8 | uint64(b)
+		}
+		pos += n
+	}
+	if length > uint64(len(data)-pos) {
+		return nil, 0, fmt.Errorf("invalid BER truncated value")
+	}
+	end := pos + int(length)
+	content := append([]byte(nil), data[pos:end]...)
+	if tag[0]&0x20 != 0 {
+		content = content[:0]
+		for pos < end {
+			child, n, err := berValueToDefinite(data[pos:end])
+			if err != nil {
+				return nil, 0, err
+			}
+			content = append(content, child...)
+			pos += n
+		}
+	}
+	return wrapBERValue(tag, content), end, nil
+}
+
+// wrapBERValue 包装定长BER编码值
+// 入参: tag 标签, content 内容
+// 返回: []byte 定长编码数据
+func wrapBERValue(tag, content []byte) []byte {
+	out := make([]byte, 0, len(tag)+len(content)+9)
+	out = append(out, tag...)
+	out = append(out, asn1LengthBytes(len(content))...)
+	return append(out, content...)
 }
 
 // parseGBT35275SignedData 解析GB/T 35275 SignedData
 // 入参: data 签名值数据
 // 返回: *gbtSignedData SignedData结构, error 错误信息
 func parseGBT35275SignedData(data []byte) (*gbtSignedData, error) {
+	var ok bool
+	data, ok = normalizeGBT35275SignedValue(data)
+	if !ok {
+		return nil, fmt.Errorf("invalid signed data content type")
+	}
 	contentType, content, ok, err := parseGBTContentInfoBytes(data)
 	if err != nil {
 		return nil, err
