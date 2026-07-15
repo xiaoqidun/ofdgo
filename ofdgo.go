@@ -71,6 +71,8 @@ func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 		DrawParams:            reader.drawParamCache,
 		CompositeGraphicUnits: reader.compositeGraphicUnitCache,
 		FontMap:               make(map[string]*canvas.FontFamily),
+		FontGIDMap:            make(map[string]map[uint16]rune),
+		FontCIDMap:            make(map[string]map[uint16]rune),
 		fontFSCache:           make(map[fontFSKey]*canvas.FontFamily),
 		textGlyphPathCache:    make(map[textGlyphPathCacheKey]textGlyphPathCacheValue),
 		templatePageCache:     make(map[string]*PageContent),

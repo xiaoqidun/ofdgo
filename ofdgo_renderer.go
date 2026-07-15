@@ -48,6 +48,15 @@ type RendererOption func(*Renderer)
 // 入参: page 页面内容
 // 返回: *canvas.Canvas 画布实例, error 错误信息
 func (r *Renderer) RenderPage(page *PageContent) (*canvas.Canvas, error) {
+	renderer := *r
+	renderer.decodeImages = true
+	return renderer.renderPage(page)
+}
+
+// renderPage 渲染特定页面内容
+// 入参: page 页面内容
+// 返回: *canvas.Canvas 画布实例, error 错误信息
+func (r *Renderer) renderPage(page *PageContent) (*canvas.Canvas, error) {
 	box, err := r.GetPageBox(page)
 	if err != nil {
 		return nil, err
@@ -55,7 +64,7 @@ func (r *Renderer) RenderPage(page *PageContent) (*canvas.Canvas, error) {
 	width, height := box.W, box.H
 	c := canvas.New(width, height)
 	ctx := canvas.NewContext(c)
-	if err := r.RenderPageToContext(ctx, page); err != nil {
+	if err := r.renderPageToContext(ctx, page, true); err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -85,7 +94,9 @@ func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
 // 入参: ctx 画布上下文, page 页面内容
 // 返回: error 错误信息
 func (r *Renderer) RenderPageToContext(ctx *canvas.Context, page *PageContent) error {
-	return r.renderPageToContext(ctx, page, true)
+	renderer := *r
+	renderer.decodeImages = true
+	return renderer.renderPageToContext(ctx, page, true)
 }
 
 // renderPageToContext 渲染页面到指定上下文

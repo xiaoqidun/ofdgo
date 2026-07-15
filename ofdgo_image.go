@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	_ "image/gif"
 
 	canvasimage "github.com/tdewolff/canvas/image"
 	_ "github.com/xiaoqidun/jbig2"
 	_ "golang.org/x/image/bmp"
+	_ "golang.org/x/image/tiff"
 )
 
 // decodeImageData 解码图片数据

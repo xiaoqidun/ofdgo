@@ -30,9 +30,7 @@ import (
 // 入参: page 页面内容
 // 返回: image.Image 图像对象, error 错误信息
 func (r *Renderer) RenderToImage(page *PageContent) (image.Image, error) {
-	renderer := *r
-	renderer.decodeImages = true
-	c, err := renderer.RenderPage(page)
+	c, err := r.RenderPage(page)
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +42,7 @@ func (r *Renderer) RenderToImage(page *PageContent) (image.Image, error) {
 // 入参: page 页面内容, writer 输出流
 // 返回: error 错误信息
 func (r *Renderer) RenderToSVG(page *PageContent, writer io.Writer) error {
-	c, err := r.RenderPage(page)
+	c, err := r.renderPage(page)
 	if err != nil {
 		return err
 	}
@@ -69,7 +67,7 @@ func replacePDFProducer(data []byte) []byte {
 // 入参: page 页面内容, writer 输出流
 // 返回: error 错误信息
 func (r *Renderer) RenderToPDF(page *PageContent, writer io.Writer) error {
-	c, err := r.RenderPage(page)
+	c, err := r.renderPage(page)
 	if err != nil {
 		return err
 	}
@@ -88,7 +86,7 @@ func (r *Renderer) RenderToPDF(page *PageContent, writer io.Writer) error {
 // 入参: page 页面内容, writer 输出流
 // 返回: error 错误信息
 func (r *Renderer) RenderToEPS(page *PageContent, writer io.Writer) error {
-	c, err := r.RenderPage(page)
+	c, err := r.renderPage(page)
 	if err != nil {
 		return err
 	}
@@ -113,7 +111,7 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer) error {
 		if err != nil {
 			continue
 		}
-		c, err := r.RenderPage(page)
+		c, err := r.renderPage(page)
 		if err != nil {
 			continue
 		}
