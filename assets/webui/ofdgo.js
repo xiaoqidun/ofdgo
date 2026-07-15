@@ -1673,7 +1673,7 @@ function renderSignatures() {
 	const fragment = document.createDocumentFragment();
 	for (const signature of signatures) {
 		const row = document.createElement("div");
-		row.className = `signature-row ${signature.integrityValid ? "valid" : "invalid"}`;
+		row.className = `signature-row ${signature.valid ? "valid" : "invalid"}`;
 
 		const head = document.createElement("div");
 		head.className = "signature-head";
@@ -1682,13 +1682,16 @@ function renderSignatures() {
 
 		const badges = document.createElement("div");
 		badges.className = "signature-badges";
-		badges.append(fontBadge(signature.integrityValid ? "完整" : "异常", signature.integrityValid ? "valid" : "invalid"));
+		badges.append(fontBadge(signature.valid ? "通过" : "异常", signature.valid ? "valid" : "invalid"));
 
 		head.append(name, badges);
 		row.append(head);
 		appendSignatureLine(row, "编号", signature.id);
 		appendSignatureLine(row, "版本", signature.version);
 		appendSignatureLine(row, "章图", signature.sealType);
+		appendSignatureLine(row, "章号", signature.sealId);
+		appendSignatureLine(row, "章名", signature.sealName);
+		appendSignatureLine(row, "厂商", signature.sealVendor);
 		appendSignatureLine(row, "签者", signature.signer);
 		appendSignatureLine(row, "时间", formatSignatureTime(signature.signatureDateTime));
 		appendSignatureLine(row, "机构", signatureAgency(signature));
@@ -1699,6 +1702,11 @@ function renderSignatures() {
 			appendSignatureCheck(row, "一致", signature.sealMatchOK);
 		}
 		appendSignatureCheck(row, "证书", signature.certOK);
+		appendSignaturePolicy(row, "签期", signature.signatureTimeChecked, signature.signatureTimeOK);
+		appendSignaturePolicy(row, "章期", signature.sealTimeChecked, signature.sealTimeOK);
+		if (signature.sealCertTimeChecked) {
+			appendSignatureLine(row, "制期", signature.sealCertTimeOK ? "有效" : "失效", signature.sealCertTimeOK ? "ok" : "");
+		}
 		appendSignaturePolicy(row, "时效", signature.certTimeChecked, signature.certTimeOK);
 		appendSignaturePolicy(row, "信任", signature.certTrustChecked, signature.certTrustOK);
 		appendSignatureLine(row, "保护", signatureReferenceText(signature), signatureReferenceStatus(signature));
@@ -1718,7 +1726,7 @@ function signatureSummary(signatures) {
 	if (!signatures.length) {
 		return "0";
 	}
-	const invalid = signatures.filter((signature) => !signature.integrityValid).length;
+	const invalid = signatures.filter((signature) => !signature.valid).length;
 	if (invalid) {
 		return `${signatures.length} · 异常 ${invalid}`;
 	}

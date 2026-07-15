@@ -41,34 +41,43 @@ type FontInfo = ofdgo.FontInfo
 
 // SignatureInfo 签名验证信息
 type SignatureInfo struct {
-	ID                string               `json:"id"`
-	Type              string               `json:"type"`
-	IntegrityValid    bool                 `json:"integrityValid"`
-	Version           string               `json:"version,omitempty"`
-	SealType          string               `json:"sealType,omitempty"`
-	Signer            string               `json:"signer,omitempty"`
-	SignatureDateTime string               `json:"signatureDateTime,omitempty"`
-	Provider          string               `json:"provider,omitempty"`
-	Company           string               `json:"company,omitempty"`
-	DataHashOK        bool                 `json:"dataHashOK"`
-	SignedValueOK     bool                 `json:"signedValueOK"`
-	SealOK            bool                 `json:"sealOK"`
-	SealMatchOK       bool                 `json:"sealMatchOK"`
-	CertOK            bool                 `json:"certOK"`
-	CertTimeChecked   bool                 `json:"certTimeChecked,omitempty"`
-	CertTimeOK        bool                 `json:"certTimeOK,omitempty"`
-	CertTrustChecked  bool                 `json:"certTrustChecked,omitempty"`
-	CertTrustOK       bool                 `json:"certTrustOK,omitempty"`
-	ReferenceCount    int                  `json:"referenceCount"`
-	ReferencePassed   int                  `json:"referencePassed"`
-	SignatureMethod   string               `json:"signatureMethod,omitempty"`
-	DigestMethod      string               `json:"digestMethod,omitempty"`
-	SignSerial        string               `json:"signSerial,omitempty"`
-	SignSubject       string               `json:"signSubject,omitempty"`
-	SignIssuer        string               `json:"signIssuer,omitempty"`
-	SealSubject       string               `json:"sealSubject,omitempty"`
-	Stamps            []SignatureStampInfo `json:"stamps,omitempty"`
-	Error             string               `json:"error,omitempty"`
+	ID                   string               `json:"id"`
+	Type                 string               `json:"type"`
+	Valid                bool                 `json:"valid"`
+	Version              string               `json:"version,omitempty"`
+	SealType             string               `json:"sealType,omitempty"`
+	SealID               string               `json:"sealId,omitempty"`
+	SealName             string               `json:"sealName,omitempty"`
+	SealVendor           string               `json:"sealVendor,omitempty"`
+	Signer               string               `json:"signer,omitempty"`
+	SignatureDateTime    string               `json:"signatureDateTime,omitempty"`
+	Provider             string               `json:"provider,omitempty"`
+	Company              string               `json:"company,omitempty"`
+	DataHashOK           bool                 `json:"dataHashOK"`
+	SignedValueOK        bool                 `json:"signedValueOK"`
+	SealOK               bool                 `json:"sealOK"`
+	SealMatchOK          bool                 `json:"sealMatchOK"`
+	CertOK               bool                 `json:"certOK"`
+	SignatureTimeChecked bool                 `json:"signatureTimeChecked,omitempty"`
+	SignatureTimeOK      bool                 `json:"signatureTimeOK,omitempty"`
+	SealTimeChecked      bool                 `json:"sealTimeChecked,omitempty"`
+	SealTimeOK           bool                 `json:"sealTimeOK,omitempty"`
+	SealCertTimeChecked  bool                 `json:"sealCertTimeChecked,omitempty"`
+	SealCertTimeOK       bool                 `json:"sealCertTimeOK,omitempty"`
+	CertTimeChecked      bool                 `json:"certTimeChecked,omitempty"`
+	CertTimeOK           bool                 `json:"certTimeOK,omitempty"`
+	CertTrustChecked     bool                 `json:"certTrustChecked,omitempty"`
+	CertTrustOK          bool                 `json:"certTrustOK,omitempty"`
+	ReferenceCount       int                  `json:"referenceCount"`
+	ReferencePassed      int                  `json:"referencePassed"`
+	SignatureMethod      string               `json:"signatureMethod,omitempty"`
+	DigestMethod         string               `json:"digestMethod,omitempty"`
+	SignSerial           string               `json:"signSerial,omitempty"`
+	SignSubject          string               `json:"signSubject,omitempty"`
+	SignIssuer           string               `json:"signIssuer,omitempty"`
+	SealSubject          string               `json:"sealSubject,omitempty"`
+	Stamps               []SignatureStampInfo `json:"stamps,omitempty"`
+	Error                string               `json:"error,omitempty"`
 }
 
 // SignatureStampInfo 签名外观信息
@@ -346,34 +355,43 @@ func (s *Session) signatureInfos() ([]SignatureInfo, error) {
 // 返回: SignatureInfo 签名验证信息
 func signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
 	return SignatureInfo{
-		ID:                report.ID,
-		Type:              string(report.Type),
-		IntegrityValid:    report.IntegrityValid(),
-		Version:           report.Provider.Version,
-		SealType:          report.SealType,
-		Signer:            signatureSigner(report),
-		SignatureDateTime: report.SignatureDateTime,
-		Provider:          report.Provider.ProviderName,
-		Company:           report.Provider.Company,
-		DataHashOK:        report.DataHashOK,
-		SignedValueOK:     report.SignedValueOK,
-		SealOK:            report.SealOK,
-		SealMatchOK:       report.SealMatchOK,
-		CertOK:            report.CertOK,
-		CertTimeChecked:   report.CertTimeChecked,
-		CertTimeOK:        report.CertTimeOK,
-		CertTrustChecked:  report.CertTrustChecked,
-		CertTrustOK:       report.CertTrustOK,
-		ReferenceCount:    len(report.References),
-		ReferencePassed:   signatureReferencePassed(report.References),
-		SignatureMethod:   report.SignatureMethod,
-		DigestMethod:      report.DigestMethod,
-		SignSerial:        report.SignCert.SerialNumber,
-		SignSubject:       report.SignCert.Subject,
-		SignIssuer:        report.SignCert.Issuer,
-		SealSubject:       report.SealCert.Subject,
-		Stamps:            signatureStampInfos(report.StampPositions),
-		Error:             signatureReportError(report),
+		ID:                   report.ID,
+		Type:                 string(report.Type),
+		Valid:                report.Valid,
+		Version:              report.Provider.Version,
+		SealType:             report.SealType,
+		SealID:               report.SealInfo.ID,
+		SealName:             report.SealInfo.Name,
+		SealVendor:           report.SealInfo.VendorID,
+		Signer:               signatureSigner(report),
+		SignatureDateTime:    report.SignatureDateTime,
+		Provider:             report.Provider.ProviderName,
+		Company:              report.Provider.Company,
+		DataHashOK:           report.DataHashOK,
+		SignedValueOK:        report.SignedValueOK,
+		SealOK:               report.SealOK,
+		SealMatchOK:          report.SealMatchOK,
+		CertOK:               report.CertOK,
+		SignatureTimeChecked: report.SignatureTimeChecked,
+		SignatureTimeOK:      report.SignatureTimeOK,
+		SealTimeChecked:      report.SealTimeChecked,
+		SealTimeOK:           report.SealTimeOK,
+		SealCertTimeChecked:  report.SealCertTimeChecked,
+		SealCertTimeOK:       report.SealCertTimeOK,
+		CertTimeChecked:      report.CertTimeChecked,
+		CertTimeOK:           report.CertTimeOK,
+		CertTrustChecked:     report.CertTrustChecked,
+		CertTrustOK:          report.CertTrustOK,
+		ReferenceCount:       len(report.References),
+		ReferencePassed:      signatureReferencePassed(report.References),
+		SignatureMethod:      report.SignatureMethod,
+		DigestMethod:         report.DigestMethod,
+		SignSerial:           report.SignCert.SerialNumber,
+		SignSubject:          report.SignCert.Subject,
+		SignIssuer:           report.SignCert.Issuer,
+		SealSubject:          report.SealCert.Subject,
+		Stamps:               signatureStampInfos(report.StampPositions),
+		Error:                signatureReportError(report),
 	}
 }
 
