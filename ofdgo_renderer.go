@@ -38,6 +38,7 @@ type Renderer struct {
 	templatePageCache     map[string]*PageContent
 	fontDirs              []string
 	fontFS                []fs.FS
+	decodeImages          bool
 }
 
 // RendererOption 渲染器配置选项
@@ -168,5 +169,7 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 	if len(r.fontFS) > 0 {
 		opts = append(opts, WithFontFS(r.fontFS...))
 	}
-	return NewRenderer(reader, opts...)
+	renderer := NewRenderer(reader, opts...)
+	renderer.decodeImages = r.decodeImages
+	return renderer
 }

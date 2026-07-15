@@ -63,6 +63,9 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 	if len(s.Data) > 0 {
 		img, _, err := decodeImageData(s.Data)
 		if err == nil {
+			if r.decodeImages {
+				img = imagePixelSource(img)
+			}
 			r.renderStampImage(ctx, stampImageWithTransparentWhite(img), s, pageH)
 			return
 		}
@@ -83,6 +86,7 @@ func (r *Renderer) renderOFDStampImage(data []byte) image.Image {
 		return nil
 	}
 	renderer := r.childRenderer(reader)
+	renderer.decodeImages = true
 	for _, pageRef := range doc.Pages.Page {
 		content, err := reader.PageContent(pageRef)
 		if err != nil {

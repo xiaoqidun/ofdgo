@@ -30,7 +30,9 @@ import (
 // 入参: page 页面内容
 // 返回: image.Image 图像对象, error 错误信息
 func (r *Renderer) RenderToImage(page *PageContent) (image.Image, error) {
-	c, err := r.RenderPage(page)
+	renderer := *r
+	renderer.decodeImages = true
+	c, err := renderer.RenderPage(page)
 	if err != nil {
 		return nil, err
 	}

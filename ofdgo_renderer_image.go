@@ -88,10 +88,24 @@ func (r *Renderer) decodeImageResource(resPath string) (image.Image, error) {
 	reader := bufio.NewReaderSize(rc, 8)
 	header, _ := reader.Peek(8)
 	if isJPEGData(header) {
-		return canvasimage.NewJPEGImage(reader)
+		img, err := canvasimage.NewJPEGImage(reader)
+		if err != nil {
+			return nil, err
+		}
+		if r.decodeImages {
+			return img.Image()
+		}
+		return img, nil
 	}
 	if isPNGData(header) {
-		return canvasimage.NewPNGImage(reader)
+		img, err := canvasimage.NewPNGImage(reader)
+		if err != nil {
+			return nil, err
+		}
+		if r.decodeImages {
+			return img.Image()
+		}
+		return img, nil
 	}
 	data, err := io.ReadAll(reader)
 	if err != nil {
