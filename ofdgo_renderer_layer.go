@@ -30,7 +30,7 @@ func (r *Renderer) renderAnnotations(ctx *canvas.Context, pageID string, pageH f
 		box, _ := ParseBox(annot.Appearance.Boundary)
 		ctm := Matrix{a: 1, d: 1, e: box.X, f: box.Y}
 		for _, obj := range annot.Appearance.Objects {
-			r.renderObject(ctx, obj, pageH, nil, nil, 0, &ctm, false)
+			r.renderObject(ctx, obj, pageH, nil, nil, 0, &ctm, false, nil)
 		}
 	}
 }
@@ -70,27 +70,27 @@ func (r *Renderer) renderLayer(ctx *canvas.Context, layer Layer, pageH float64, 
 	defaultFill, defaultStroke, defaultLW = r.drawParamDefaults(layer.DrawParam, defaultFill, defaultStroke, defaultLW)
 	if len(layer.Objects) > 0 {
 		for _, obj := range layer.Objects {
-			r.renderObject(ctx, obj, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false)
+			r.renderObject(ctx, obj, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false, nil)
 		}
 		return
 	}
 	for _, textObj := range layer.TextObject {
-		r.renderText(ctx, textObj, pageH, defaultFill, defaultStroke, parentCTM, false)
+		r.renderText(ctx, textObj, pageH, defaultFill, defaultStroke, parentCTM, false, nil)
 	}
 	for _, pathObj := range layer.PathObject {
-		r.renderPath(ctx, pathObj, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false)
+		r.renderPath(ctx, pathObj, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false, nil)
 	}
 	for _, imgObj := range layer.ImageObject {
-		r.renderImage(ctx, imgObj, pageH, parentCTM, false)
+		r.renderImage(ctx, imgObj, pageH, parentCTM, false, nil)
 	}
 	for _, cgu := range layer.CompositeGraphicUnit {
-		r.renderCompositeGraphicUnit(ctx, cgu, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false)
+		r.renderCompositeGraphicUnit(ctx, cgu, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false, nil)
 	}
 }
 
 // renderCompositeGraphicUnit 渲染复合图元
-// 入参: ctx 画布上下文, cgu 复合图元对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换
-func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu CompositeGraphicUnit, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix, boundaryInCTM bool) {
+// 入参: ctx 画布上下文, cgu 复合图元对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
+func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu CompositeGraphicUnit, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
 	if cgu.Visible != nil && !*cgu.Visible {
 		return
 	}
@@ -99,53 +99,55 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 	if parentCTM != nil {
 		currentCTM = parentCTM.Multiply(currentCTM)
 	}
+	box, _ := ParseBox(cgu.Boundary)
+	clipPath := intersectClipPath(parentClip, r.buildClipPath(cgu.Clips, pageH, box.X, box.Y, currentCTM))
 	if cgu.ResourceID != "" {
 		if ref, ok := r.CompositeGraphicUnits[cgu.ResourceID]; ok {
 			refCopy := *ref
 			refCopy.Alpha = mergeAlpha(refCopy.Alpha, cgu.Alpha)
-			r.renderCompositeGraphicUnit(ctx, refCopy, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, true)
+			r.renderCompositeGraphicUnit(ctx, refCopy, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, true, clipPath)
 		}
 	}
 	defaultFill, defaultStroke, defaultLW = r.drawParamDefaults(cgu.DrawParam, defaultFill, defaultStroke, defaultLW)
 	if len(cgu.Objects) > 0 {
 		for _, obj := range cgu.Objects {
 			obj = mergeGraphicObjectAlpha(obj, cgu.Alpha)
-			r.renderObject(ctx, obj, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, boundaryInCTM)
+			r.renderObject(ctx, obj, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, boundaryInCTM, clipPath)
 		}
 		ctx.Pop()
 		return
 	}
 	for _, imgObj := range cgu.ImageObject {
 		imgObj.Alpha = mergeAlpha(imgObj.Alpha, cgu.Alpha)
-		r.renderImage(ctx, imgObj, pageH, &currentCTM, boundaryInCTM)
+		r.renderImage(ctx, imgObj, pageH, &currentCTM, boundaryInCTM, clipPath)
 	}
 	for _, pathObj := range cgu.PathObject {
 		pathObj.Alpha = mergeAlpha(pathObj.Alpha, cgu.Alpha)
-		r.renderPath(ctx, pathObj, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, boundaryInCTM)
+		r.renderPath(ctx, pathObj, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, boundaryInCTM, clipPath)
 	}
 	for _, textObj := range cgu.TextObject {
 		textObj.Alpha = mergeAlpha(textObj.Alpha, cgu.Alpha)
-		r.renderText(ctx, textObj, pageH, defaultFill, defaultStroke, &currentCTM, boundaryInCTM)
+		r.renderText(ctx, textObj, pageH, defaultFill, defaultStroke, &currentCTM, boundaryInCTM, clipPath)
 	}
 	for _, subCgu := range cgu.CompositeGraphicUnit {
 		subCgu.Alpha = mergeAlpha(subCgu.Alpha, cgu.Alpha)
-		r.renderCompositeGraphicUnit(ctx, subCgu, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, boundaryInCTM)
+		r.renderCompositeGraphicUnit(ctx, subCgu, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, boundaryInCTM, clipPath)
 	}
 	ctx.Pop()
 }
 
 // renderObject 渲染图形对象
-// 入参: ctx 画布上下文, obj 图形对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换
-func (r *Renderer) renderObject(ctx *canvas.Context, obj GraphicObject, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix, boundaryInCTM bool) {
+// 入参: ctx 画布上下文, obj 图形对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
+func (r *Renderer) renderObject(ctx *canvas.Context, obj GraphicObject, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
 	switch obj.Type {
 	case "TextObject":
-		r.renderText(ctx, obj.TextObject, pageH, defaultFill, defaultStroke, parentCTM, boundaryInCTM)
+		r.renderText(ctx, obj.TextObject, pageH, defaultFill, defaultStroke, parentCTM, boundaryInCTM, parentClip)
 	case "PathObject":
-		r.renderPath(ctx, obj.PathObject, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, boundaryInCTM)
+		r.renderPath(ctx, obj.PathObject, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, boundaryInCTM, parentClip)
 	case "ImageObject":
-		r.renderImage(ctx, obj.ImageObject, pageH, parentCTM, boundaryInCTM)
+		r.renderImage(ctx, obj.ImageObject, pageH, parentCTM, boundaryInCTM, parentClip)
 	case "CompositeGraphicUnit", "CompositeObject":
-		r.renderCompositeGraphicUnit(ctx, obj.CompositeGraphicUnit, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, boundaryInCTM)
+		r.renderCompositeGraphicUnit(ctx, obj.CompositeGraphicUnit, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, boundaryInCTM, parentClip)
 	}
 }
 

@@ -24,8 +24,8 @@ import (
 const ptPerMM = 72.0 / 25.4
 
 // renderText 渲染文本
-// 入参: ctx 画布上下文, obj 文本对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM
-func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64, defaultFill, defaultStroke color.Color, parentCTM *Matrix, boundaryInCTM bool) {
+// 入参: ctx 画布上下文, obj 文本对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM, parentClip 父级裁剪路径
+func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64, defaultFill, defaultStroke color.Color, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
 	if obj.Visible != nil && !*obj.Visible {
 		return
 	}
@@ -41,6 +41,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if parentCTM != nil {
 		ctm = parentCTM.Multiply(ctm)
 	}
+	clipPath := intersectClipPath(parentClip, r.buildClipPath(obj.Clips, pageH, bx, by, ctm))
 	var dp *DrawParam
 	if obj.DrawParam != "" {
 		dp = r.getDrawParam(obj.DrawParam, nil)
@@ -115,6 +116,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	}
 	ff := r.loadFont(fontID)
 	if ff == nil {
+		ctx.Pop()
 		return
 	}
 	face := ff.Face(sizePt, fillPaint, fontStyle, canvas.FontNormal)
@@ -134,7 +136,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		}
 		dxs, dys := parseFloats(tc.DeltaX), parseFloats(tc.DeltaY)
 		xs, ys := parseFloats(tc.X), parseFloats(tc.Y)
-		drawAsPath := embeddedFont || textCodePositioned(tc, xs, ys)
+		drawAsPath := embeddedFont || textCodePositioned(tc, xs, ys) || clipPath != nil
 		cx, cy := 0.0, 0.0
 		if len(xs) > 0 {
 			cx = xs[0]
@@ -185,6 +187,32 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			advanceLimit := textGlyphAdvanceLimit(dxs, dys, xs, i, len(glyphs), cx)
 			if glyphFillPaint != nil {
 				ctx.SetFill(glyphFillPaint)
+				if clipPath != nil {
+					scaleX := hScale
+					if advanceLimit > 0 && glyphWidth*scaleX > advanceLimit {
+						scaleX = advanceLimit / glyphWidth
+					}
+					textWidth = glyphWidth * scaleX
+					textTransform := canvas.Identity.Translate(canvasX, canvasY)
+					if useTextMatrix {
+						textTransform = textTransform.Mul(textMatrix(ctm))
+					}
+					glyphPath = applyClipPath(glyphPath.Copy().Transform(textTransform.Scale(scaleX, 1)), clipPath)
+					ctx.DrawPath(0, 0, glyphPath)
+					if hasUnderline {
+						uw := sizeMM * 0.05
+						off := sizeMM * 0.1
+						underline := &canvas.Path{}
+						underline.MoveTo(0, -off)
+						underline.LineTo(textWidth, -off)
+						underline = underline.Stroke(uw, canvas.ButtCap, canvas.MiterJoin, canvas.Tolerance)
+						underline = applyClipPath(underline.Transform(textTransform), clipPath)
+						ctx.SetFillColor(fillColor)
+						ctx.SetStrokeColor(canvas.Transparent)
+						ctx.DrawPath(0, 0, underline)
+					}
+					continue
+				}
 				drawGlyph := func(x, y float64) {
 					if drawAsGlyphPath {
 						scaleX := hScale

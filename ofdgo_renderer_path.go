@@ -163,8 +163,8 @@ func (s *pathStyle) scale(ctm Matrix) {
 }
 
 // renderPath 渲染路径
-// 入参: ctx 画布上下文, obj 路径对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换
-func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix, boundaryInCTM bool) {
+// 入参: ctx 画布上下文, obj 路径对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
+func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
 	if obj.Visible != nil && !*obj.Visible {
 		return
 	}
@@ -191,7 +191,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	if rectPath := r.buildTinyFillRectPath(obj, pageH, ctm, bx, by); rectPath != nil {
 		p = rectPath
 	}
-	clipPath := r.buildClipPath(obj.Clips, pageH, bx, by, ctm)
+	clipPath := intersectClipPath(parentClip, r.buildClipPath(obj.Clips, pageH, bx, by, ctm))
 	shouldFill := false
 	if obj.Fill != nil {
 		shouldFill = *obj.Fill
@@ -204,7 +204,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		if clipPath != nil {
 			fp = p.Copy()
 			fp.Close()
-			fp = fp.And(clipPath)
+			fp = applyClipPath(fp, clipPath)
 		}
 		r.renderPattern(ctx, style.fillPattern, style.fillPatternColor, pageH, fp, ctm, bx, by)
 	} else if shouldFill && style.fillPaint != nil {
@@ -214,7 +214,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		if clipPath != nil {
 			fp = p.Copy()
 			fp.Close()
-			fp = fp.And(clipPath)
+			fp = applyClipPath(fp, clipPath)
 		}
 		ctx.DrawPath(0, 0, fp)
 	}
@@ -243,7 +243,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 				sp = sp.Dash(style.dashOffset, style.dashPattern...)
 			}
 			sp = sp.Stroke(style.lineWidth, style.lineCap, style.lineJoin, canvas.Tolerance)
-			sp = sp.And(clipPath)
+			sp = applyClipPath(sp, clipPath)
 			ctx.SetFill(style.strokePaint)
 			ctx.SetStrokeColor(canvas.Transparent)
 			ctx.DrawPath(0, 0, sp)
@@ -304,7 +304,7 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *Pattern, defaultC
 		for iy := startY; iy <= endY; iy++ {
 			tileCTM := patternCTM.Multiply(TranslationMatrix(float64(ix)*xStep, float64(iy)*yStep))
 			for _, obj := range pattern.CellContent.Objects {
-				r.renderObject(ctx, obj, pageH, defaultColor, defaultColor, 0, &tileCTM, false)
+				r.renderObject(ctx, obj, pageH, defaultColor, defaultColor, 0, &tileCTM, false, clip)
 			}
 		}
 	}
@@ -411,7 +411,7 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ob
 		var clipPath *canvas.Path
 		for _, area := range clip.Area {
 			areaCTM := NewMatrix(area.CTM)
-			if clips.TransFlag {
+			if clips.TransFlag == nil || *clips.TransFlag {
 				areaCTM = objectCTM.Multiply(areaCTM)
 			}
 			for _, pathObj := range area.Path {
@@ -422,7 +422,7 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ob
 				if clipPath == nil {
 					clipPath = cp
 				} else {
-					clipPath = clipPath.Or(cp)
+					clipPath = unionClipPath(clipPath, cp)
 				}
 			}
 		}
@@ -430,11 +430,121 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ob
 			if p == nil {
 				p = clipPath
 			} else {
-				p = p.And(clipPath)
+				p = intersectClipPath(p, clipPath)
 			}
 		}
 	}
 	return p
+}
+
+// intersectClipPath 求裁剪路径交集
+// 入参: parent 父级裁剪路径, current 当前裁剪路径
+// 返回: *canvas.Path 相交后的裁剪路径
+func intersectClipPath(parent, current *canvas.Path) *canvas.Path {
+	if parent == nil {
+		return current
+	}
+	if current == nil {
+		return parent
+	}
+	parentRect, parentOK := rectangularPath(parent)
+	currentRect, currentOK := rectangularPath(current)
+	if parentOK && currentOK {
+		return parentRect.And(currentRect).ToPath()
+	}
+	if parent.Empty() || current.Empty() {
+		return &canvas.Path{}
+	}
+	if parentOK && parentRect.Contains(current.FastBounds()) {
+		return current
+	}
+	if currentOK && currentRect.Contains(parent.FastBounds()) {
+		return parent
+	}
+	return parent.And(current)
+}
+
+// unionClipPath 合并裁剪区域
+// 入参: left 左侧裁剪路径, right 右侧裁剪路径
+// 返回: *canvas.Path 合并后的裁剪路径
+func unionClipPath(left, right *canvas.Path) *canvas.Path {
+	leftRect, leftOK := rectangularPath(left)
+	rightRect, rightOK := rectangularPath(right)
+	if leftOK && rightOK {
+		bounds := leftRect.Add(rightRect)
+		area := leftRect.Area() + rightRect.Area() - leftRect.And(rightRect).Area()
+		if canvas.Equal(area, bounds.Area()) {
+			return bounds.ToPath()
+		}
+	}
+	return left.Or(right)
+}
+
+// applyClipPath 应用裁剪路径
+// 入参: path 绘制路径, clip 裁剪路径
+// 返回: *canvas.Path 裁剪后的绘制路径
+func applyClipPath(path, clip *canvas.Path) *canvas.Path {
+	if path == nil || clip == nil {
+		return path
+	}
+	if path.Empty() || clip.Empty() {
+		return &canvas.Path{}
+	}
+	if rect, ok := rectangularPath(clip); ok {
+		bounds := path.FastBounds()
+		if rect.Contains(bounds) {
+			return path
+		}
+		if !rect.Overlaps(bounds) {
+			return &canvas.Path{}
+		}
+		if pathRect, ok := rectangularPath(path); ok {
+			return pathRect.And(rect).ToPath()
+		}
+		return path.Flatten(canvas.Tolerance).Clip(rect.X0, rect.Y0, rect.X1, rect.Y1)
+	}
+	return path.And(clip)
+}
+
+// rectangularPath 获取矩形路径区域
+// 入参: path 路径对象
+// 返回: canvas.Rect 矩形区域, bool 是否为矩形
+func rectangularPath(path *canvas.Path) (canvas.Rect, bool) {
+	if path == nil || path.HasSubpaths() || !path.Closed() {
+		return canvas.Rect{}, false
+	}
+	data := path.Data()
+	for i := 0; i < len(data); i += 4 {
+		if i+4 > len(data) || (data[i] != canvas.MoveToCmd && data[i] != canvas.LineToCmd && data[i] != canvas.CloseCmd) {
+			return canvas.Rect{}, false
+		}
+	}
+	points := path.Coords()
+	if len(points) != 5 || !points[0].Equals(points[4]) {
+		return canvas.Rect{}, false
+	}
+	rect := path.FastBounds()
+	corners := 0
+	for _, point := range points[:4] {
+		corner := 0
+		switch {
+		case canvas.Equal(point.X, rect.X0) && canvas.Equal(point.Y, rect.Y0):
+			corner = 1
+		case canvas.Equal(point.X, rect.X1) && canvas.Equal(point.Y, rect.Y0):
+			corner = 2
+		case canvas.Equal(point.X, rect.X1) && canvas.Equal(point.Y, rect.Y1):
+			corner = 4
+		case canvas.Equal(point.X, rect.X0) && canvas.Equal(point.Y, rect.Y1):
+			corner = 8
+		default:
+			return canvas.Rect{}, false
+		}
+		if corners&corner != 0 {
+			return canvas.Rect{}, false
+		}
+		corners |= corner
+	}
+	return rect, corners == 15
 }
 
 // buildTinyFillRectPath 构建微小填充矩形路径

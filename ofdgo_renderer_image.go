@@ -22,11 +22,13 @@ import (
 
 	"github.com/tdewolff/canvas"
 	canvasimage "github.com/tdewolff/canvas/image"
+	"github.com/tdewolff/canvas/renderers/rasterizer"
+	"golang.org/x/image/draw"
 )
 
 // renderImage 渲染图片
-// 入参: ctx 画布上下文, obj 图片对象, pageH 页面高度, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM
-func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float64, parentCTM *Matrix, boundaryInCTM bool) {
+// 入参: ctx 画布上下文, obj 图片对象, pageH 页面高度, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM, parentClip 父级裁剪路径
+func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float64, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
 	if obj.Visible != nil && !*obj.Visible {
 		return
 	}
@@ -39,17 +41,24 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		return
 	}
 	box, _ := ParseBox(obj.Boundary)
+	if maskPath, ok := r.Reader.ResMap[obj.ImageMask]; ok {
+		if mask, err := r.decodeImageResource(maskPath); err == nil {
+			img = imageWithMask(img, mask)
+		}
+	}
+	img = imageWithAlpha(img, obj.Alpha)
 	imgBounds := img.Bounds()
 	imgW, imgH := float64(imgBounds.Dx()), float64(imgBounds.Dy())
 	if imgW <= 0 || imgH <= 0 {
 		return
 	}
-	img = imageWithAlpha(img, obj.Alpha)
-	pad := 0
-	img, pad = imageWithTransparentEdge(img)
 	ctm := NewMatrix(obj.CTM)
 	if obj.CTM == "" {
 		ctm = Matrix{a: box.W, d: box.H}
+	}
+	objectCTM := ctm
+	if parentCTM != nil {
+		objectCTM = parentCTM.Multiply(ctm)
 	}
 	var m canvas.Matrix
 	if boundaryInCTM && parentCTM != nil {
@@ -68,12 +77,111 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 			{-ctm.b / imgW, ctm.d / imgH, pageH - box.Y - ctm.d - ctm.f},
 		}
 	}
+	clipPath := intersectClipPath(parentClip, r.buildClipPath(obj.Clips, pageH, box.X, box.Y, objectCTM))
+	img = imageWithClip(img, clipPath, m)
+	img, pad := imageWithTransparentEdge(img)
 	if pad > 0 {
 		p := float64(pad)
 		m[0][2] -= m[0][0]*p + m[0][1]*p
 		m[1][2] -= m[1][0]*p + m[1][1]*p
 	}
 	ctx.RenderImage(img, ctx.CoordSystemView().Mul(ctx.View()).Mul(m))
+}
+
+// imageWithMask 应用图片蒙版
+// 入参: img 图片对象, mask 蒙版图片
+// 返回: image.Image 蒙版处理后的图片对象
+func imageWithMask(img, mask image.Image) image.Image {
+	if img == nil || mask == nil {
+		return img
+	}
+	bounds := img.Bounds()
+	if bounds.Empty() || mask.Bounds().Empty() {
+		return img
+	}
+	source := imagePixelSource(img)
+	maskSource := imagePixelSource(mask)
+	maskBounds := maskSource.Bounds()
+	var opacity image.Image = maskSource
+	if bounds.Size() != maskBounds.Size() {
+		resized := image.NewGray(bounds)
+		draw.CatmullRom.Scale(resized, bounds, maskSource, maskBounds, draw.Src, nil)
+		opacity = resized
+		maskBounds = bounds
+	}
+	out := image.NewNRGBA(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			mx := maskBounds.Min.X + x - bounds.Min.X
+			my := maskBounds.Min.Y + y - bounds.Min.Y
+			a := color.GrayModel.Convert(opacity.At(mx, my)).(color.Gray).Y
+			c := imageNRGBAAt(source, x, y)
+			c.A = uint8(int(c.A) * int(a) / 255)
+			out.SetNRGBA(x, y, c)
+		}
+	}
+	return out
+}
+
+// imageWithClip 应用图片裁剪区域
+// 入参: img 图片对象, clipPath 裁剪路径, m 图片变换矩阵
+// 返回: image.Image 裁剪后的图片对象
+func imageWithClip(img image.Image, clipPath *canvas.Path, m canvas.Matrix) image.Image {
+	if img == nil || clipPath == nil || m.Det() == 0 {
+		return img
+	}
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w == 0 || h == 0 {
+		return img
+	}
+	p0 := m.Dot(canvas.Point{})
+	p1 := m.Dot(canvas.Point{X: float64(w)})
+	p2 := m.Dot(canvas.Point{X: float64(w), Y: float64(h)})
+	p3 := m.Dot(canvas.Point{Y: float64(h)})
+	imagePath := &canvas.Path{}
+	imagePath.MoveTo(p0.X, p0.Y)
+	imagePath.LineTo(p1.X, p1.Y)
+	imagePath.LineTo(p2.X, p2.Y)
+	imagePath.LineTo(p3.X, p3.Y)
+	imagePath.Close()
+	if rect, ok := rectangularPath(clipPath); ok {
+		if rect.Contains(imagePath.FastBounds()) {
+			return img
+		}
+	} else if clipPath.Contains(imagePath) {
+		return img
+	}
+	clip := clipPath.Copy().Transform(m.Inv())
+	clipCanvas := canvas.New(float64(w), float64(h))
+	ctx := canvas.NewContext(clipCanvas)
+	ctx.SetFillColor(canvas.White)
+	ctx.SetStrokeColor(canvas.Transparent)
+	ctx.DrawPath(0, 0, clip)
+	mask := rasterizer.Draw(clipCanvas, canvas.DPMM(1), canvas.DefaultColorSpace)
+	opaque := true
+	for y := 0; y < h && opaque; y++ {
+		for x := 0; x < w; x++ {
+			if mask.RGBAAt(x, y).A != 255 {
+				opaque = false
+				break
+			}
+		}
+	}
+	if opaque {
+		return img
+	}
+	source := imagePixelSource(img)
+	out := image.NewNRGBA(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			c := imageNRGBAAt(source, x, y)
+			a := mask.RGBAAt(x-bounds.Min.X, y-bounds.Min.Y).A
+			c.A = uint8(int(c.A) * int(a) / 255)
+			out.SetNRGBA(x, y, c)
+		}
+	}
+	return out
 }
 
 // decodeImageResource 解码图片资源

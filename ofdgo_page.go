@@ -58,7 +58,7 @@ type GraphicObject struct {
 
 // Clips 裁剪区域集合
 type Clips struct {
-	TransFlag bool   `xml:"TransFlag,attr"`
+	TransFlag *bool  `xml:"TransFlag,attr"`
 	Clip      []Clip `xml:"Clip"`
 }
 
@@ -210,6 +210,7 @@ type ImageObject struct {
 	ID         string `xml:"ID,attr"`
 	Boundary   string `xml:"Boundary,attr"`
 	ResourceID string `xml:"ResourceID,attr"`
+	ImageMask  string `xml:"ImageMask,attr"`
 	CTM        string `xml:"CTM,attr"`
 	Alpha      *int   `xml:"Alpha,attr"`
 	Visible    *bool  `xml:"Visible,attr"`
