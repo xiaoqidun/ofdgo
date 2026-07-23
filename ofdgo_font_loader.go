@@ -205,9 +205,6 @@ func (r *Renderer) fontSourceMatch(fontID string, font *Font) (fontSource, bool)
 			}
 			continue
 		}
-		if source.kind != fontSourceSystem {
-			return source, true
-		}
 		family := canvas.NewFontFamily(font.FontName)
 		if r.loadFontSource(family, source, style) != nil {
 			return source, true
@@ -230,7 +227,7 @@ func (r *Renderer) loadFontSource(family *canvas.FontFamily, source fontSource, 
 		err = family.LoadFontFile(source.name, style)
 	case fontSourceFS:
 		var data []byte
-		data, err = readFontData(r.fontFS[source.index], source.name)
+		data, err = fs.ReadFile(r.fontFS[source.index], source.name)
 		if err == nil {
 			err = family.LoadFont(data, 0, style)
 		}
@@ -243,20 +240,6 @@ func (r *Renderer) loadFontSource(family *canvas.FontFamily, source fontSource, 
 	}
 	r.fontCache[key] = family
 	return family
-}
-
-// readFontData 读取字体文件数据
-// 入参: fsys 字体文件系统, name 字体文件名
-// 返回: []byte 字体文件数据, error 错误信息
-func readFontData(fsys fs.FS, name string) ([]byte, error) {
-	if fontFS, ok := fsys.(*FontFS); ok {
-		data, ok := fontFS.files[cleanFontName(name)]
-		if !ok {
-			return nil, fs.ErrNotExist
-		}
-		return data, nil
-	}
-	return fs.ReadFile(fsys, name)
 }
 
 // matchFontFiles 查找字体文件
