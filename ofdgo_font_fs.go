@@ -72,18 +72,20 @@ func (fsys *FontFS) Len() int {
 // 入参: name 字体文件名
 // 返回: fs.File 字体文件, error 错误信息
 func (fsys *FontFS) Open(name string) (fs.File, error) {
-	name = cleanFontName(name)
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
 	if name == "." {
 		return &fontDir{entries: fsys.entries()}, nil
 	}
-	data, ok := fsys.files[name]
+	data, ok := fsys.files[strings.ToLower(name)]
 	if !ok {
-		return nil, fs.ErrNotExist
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 	}
 	return &fontMemFile{
 		Reader: bytes.NewReader(data),
 		info: fontFileInfo{
-			name: name,
+			name: strings.ToLower(name),
 			size: int64(len(data)),
 		},
 	}, nil
@@ -93,9 +95,15 @@ func (fsys *FontFS) Open(name string) (fs.File, error) {
 // 入参: name 目录名
 // 返回: []fs.DirEntry 目录条目, error 错误信息
 func (fsys *FontFS) ReadDir(name string) ([]fs.DirEntry, error) {
-	name = cleanFontName(name)
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrInvalid}
+	}
 	if name != "." {
-		return nil, fs.ErrNotExist
+		err := fs.ErrNotExist
+		if _, ok := fsys.files[strings.ToLower(name)]; ok {
+			err = fs.ErrInvalid
+		}
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: err}
 	}
 	return fsys.entries(), nil
 }
@@ -104,10 +112,7 @@ func (fsys *FontFS) ReadDir(name string) ([]fs.DirEntry, error) {
 // 入参: pattern 匹配模式
 // 返回: []string 字体文件列表, error 错误信息
 func (fsys *FontFS) Glob(pattern string) ([]string, error) {
-	if _, err := path.Match(pattern, ""); err != nil {
-		return nil, err
-	}
-	return fsys.match(pattern), nil
+	return fs.Glob(struct{ fs.FS }{fsys}, pattern)
 }
 
 // Match 匹配指定字体名称
@@ -522,6 +527,9 @@ func (d *fontDir) Close() error {
 // 返回: []fs.DirEntry 目录条目, error 错误信息
 func (d *fontDir) ReadDir(count int) ([]fs.DirEntry, error) {
 	if d.offset >= len(d.entries) {
+		if count <= 0 {
+			return nil, nil
+		}
 		return nil, io.EOF
 	}
 	if count <= 0 || d.offset+count > len(d.entries) {
