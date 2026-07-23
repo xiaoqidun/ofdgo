@@ -71,9 +71,16 @@ func (r *Renderer) RenderToPDF(page *PageContent, writer io.Writer) error {
 	if err != nil {
 		return err
 	}
+	box, err := r.GetPageBox(page)
+	if err != nil {
+		return err
+	}
+	pages := []pdfPage{{Content: page, Box: box}}
+	navigation := newPDFNavigation(r, r.Reader.doc, pages)
 	var buf bytes.Buffer
 	p := pdf.New(&buf, c.W, c.H, nil)
 	p.SetInfo("", "", "", "", "xiaoqidun/ofdgo")
+	navigation.apply(p, 0)
 	c.RenderTo(p)
 	if err := p.Close(); err != nil {
 		return err
@@ -104,27 +111,32 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer) error {
 	if len(doc.Pages.Page) == 0 {
 		return fmt.Errorf("no pages found")
 	}
+	pages := make([]pdfPage, len(doc.Pages.Page))
+	for i, pageRef := range doc.Pages.Page {
+		page, err := r.Reader.PageContent(pageRef)
+		if err != nil {
+			return fmt.Errorf("failed to read page %d: %w", i+1, err)
+		}
+		box, err := r.GetPageBox(page)
+		if err != nil {
+			return fmt.Errorf("failed to read page %d area: %w", i+1, err)
+		}
+		pages[i] = pdfPage{Content: page, Box: box}
+	}
+	navigation := newPDFNavigation(r, doc, pages)
 	var buf bytes.Buffer
-	var p *pdf.PDF
-	for _, pgRef := range doc.Pages.Page {
-		page, err := r.Reader.PageContent(pgRef)
+	p := pdf.New(&buf, pages[0].Box.W, pages[0].Box.H, nil)
+	p.SetInfo("", "", "", "", "xiaoqidun/ofdgo")
+	for i, page := range pages {
+		c, err := r.renderPage(page.Content)
 		if err != nil {
-			continue
+			return fmt.Errorf("failed to render page %d: %w", i+1, err)
 		}
-		c, err := r.renderPage(page)
-		if err != nil {
-			continue
-		}
-		if p == nil {
-			p = pdf.New(&buf, c.W, c.H, nil)
-			p.SetInfo("", "", "", "", "xiaoqidun/ofdgo")
-		} else {
+		if i > 0 {
 			p.NewPage(c.W, c.H)
 		}
+		navigation.apply(p, i)
 		c.RenderTo(p)
-	}
-	if p == nil {
-		return fmt.Errorf("failed to render any page")
 	}
 	if err := p.Close(); err != nil {
 		return err

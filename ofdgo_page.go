@@ -23,6 +23,7 @@ type PageContent struct {
 	Area     PageArea   `xml:"Area"`
 	Template []Template `xml:"Template"`
 	Content  Content    `xml:"Content"`
+	Actions  []Action   `xml:"Actions>Action"`
 }
 
 // Template 页面模板引用
@@ -97,6 +98,7 @@ type TextObject struct {
 	CGTransform []CGTransform `xml:"CGTransform"`
 	TextCode    []TextCode    `xml:"TextCode"`
 	Clips       *Clips        `xml:"Clips"`
+	Actions     []Action      `xml:"Actions>Action"`
 }
 
 // FillColor 填充颜色
@@ -165,6 +167,7 @@ type PathObject struct {
 	FillColor       *FillColor   `xml:"FillColor"`
 	AbbreviatedData string       `xml:"AbbreviatedData"`
 	Clips           *Clips       `xml:"Clips"`
+	Actions         []Action     `xml:"Actions>Action"`
 }
 
 // StrokeColor 勾边颜色
@@ -207,12 +210,13 @@ type ShdColor struct {
 
 // ImageObject 图片对象
 type ImageObject struct {
-	ID         string `xml:"ID,attr"`
-	Boundary   string `xml:"Boundary,attr"`
-	ResourceID string `xml:"ResourceID,attr"`
-	ImageMask  string `xml:"ImageMask,attr"`
-	CTM        string `xml:"CTM,attr"`
-	Alpha      *int   `xml:"Alpha,attr"`
-	Visible    *bool  `xml:"Visible,attr"`
-	Clips      *Clips `xml:"Clips"`
+	ID         string   `xml:"ID,attr"`
+	Boundary   string   `xml:"Boundary,attr"`
+	ResourceID string   `xml:"ResourceID,attr"`
+	ImageMask  string   `xml:"ImageMask,attr"`
+	CTM        string   `xml:"CTM,attr"`
+	Alpha      *int     `xml:"Alpha,attr"`
+	Visible    *bool    `xml:"Visible,attr"`
+	Clips      *Clips   `xml:"Clips"`
+	Actions    []Action `xml:"Actions>Action"`
 }

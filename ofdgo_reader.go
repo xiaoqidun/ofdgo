@@ -279,6 +279,21 @@ func (r *Reader) ResData(resLink string) ([]byte, error) {
 	return r.readFile(fullPath)
 }
 
+// readDocumentPart 读取文档关联文件
+// 入参: loc 文件位置, value 文档结构
+// 返回: string 文件路径, error 错误信息
+func (r *Reader) readDocumentPart(loc string, value any) (string, error) {
+	fullPath := r.ResPath(strings.TrimSpace(loc))
+	data, err := r.readFile(fullPath)
+	if err != nil {
+		return "", err
+	}
+	if err := xml.Unmarshal(data, value); err != nil {
+		return "", fmt.Errorf("failed to unmarshal %s: %w", path.Base(fullPath), err)
+	}
+	return fullPath, nil
+}
+
 // Version 获取OFD版本号
 // 返回: string 版本号
 func (r *Reader) Version() string {
@@ -326,6 +341,26 @@ func (r *Reader) Outlines() ([]OutlineElem, error) {
 	return doc.Outlines.OutlineElem, nil
 }
 
+// Actions 获取文档动作
+// 返回: []Action 动作列表, error 错误信息
+func (r *Reader) Actions() ([]Action, error) {
+	doc, err := r.Doc()
+	if err != nil {
+		return nil, err
+	}
+	return doc.Actions, nil
+}
+
+// Bookmarks 获取文档书签
+// 返回: []Bookmark 书签列表, error 错误信息
+func (r *Reader) Bookmarks() ([]Bookmark, error) {
+	doc, err := r.Doc()
+	if err != nil {
+		return nil, err
+	}
+	return doc.Bookmarks.Bookmark, nil
+}
+
 // Attachments 获取附件列表
 // 返回: []Attachment 附件列表, error 错误信息
 func (r *Reader) Attachments() ([]Attachment, error) {
@@ -333,7 +368,48 @@ func (r *Reader) Attachments() ([]Attachment, error) {
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(doc.Attachments.Path) != "" && doc.Attachments.Attachment == nil {
+		var attachments Attachments
+		partPath, err := r.readDocumentPart(doc.Attachments.Path, &attachments)
+		if err != nil {
+			return nil, err
+		}
+		for i := range attachments.Attachment {
+			attachment := &attachments.Attachment[i]
+			attachment.FileLoc = resolveResourcePath(partPath, "", attachment.FileLoc)
+		}
+		if attachments.Attachment == nil {
+			attachments.Attachment = []Attachment{}
+		}
+		doc.Attachments.Attachment = attachments.Attachment
+	}
 	return doc.Attachments.Attachment, nil
+}
+
+// CustomTags 获取自定义标引
+// 返回: []CustomTag 自定义标引列表, error 错误信息
+func (r *Reader) CustomTags() ([]CustomTag, error) {
+	doc, err := r.Doc()
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(doc.CustomTags.Path) != "" && doc.CustomTags.CustomTag == nil {
+		var customTags CustomTags
+		partPath, err := r.readDocumentPart(doc.CustomTags.Path, &customTags)
+		if err != nil {
+			return nil, err
+		}
+		for i := range customTags.CustomTag {
+			tag := &customTags.CustomTag[i]
+			tag.SchemaLoc = resolveResourcePath(partPath, "", tag.SchemaLoc)
+			tag.FileLoc = resolveResourcePath(partPath, "", tag.FileLoc)
+		}
+		if customTags.CustomTag == nil {
+			customTags.CustomTag = []CustomTag{}
+		}
+		doc.CustomTags.CustomTag = customTags.CustomTag
+	}
+	return doc.CustomTags.CustomTag, nil
 }
 
 // CustomDatas 获取自定义数据
@@ -349,12 +425,29 @@ func (r *Reader) CustomDatas() ([]CustomData, error) {
 	return info.CustomDatas.CustomData, nil
 }
 
-// Extensions 获取分列扩展项
+// Extensions 获取扩展项
 // 返回: []Extension 扩展项列表, error 错误信息
 func (r *Reader) Extensions() ([]Extension, error) {
 	doc, err := r.Doc()
 	if err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(doc.Extensions.Path) != "" && doc.Extensions.Extension == nil {
+		var extensions Extensions
+		partPath, err := r.readDocumentPart(doc.Extensions.Path, &extensions)
+		if err != nil {
+			return nil, err
+		}
+		for i := range extensions.Extension {
+			extension := &extensions.Extension[i]
+			for j := range extension.ExtendData {
+				extension.ExtendData[j] = resolveResourcePath(partPath, "", extension.ExtendData[j])
+			}
+		}
+		if extensions.Extension == nil {
+			extensions.Extension = []Extension{}
+		}
+		doc.Extensions.Extension = extensions.Extension
 	}
 	return doc.Extensions.Extension, nil
 }

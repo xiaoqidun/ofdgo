@@ -142,10 +142,10 @@ func parseFillColor(fillColor *FillColor) color.Color {
 		return nil
 	}
 	if fillColor.AxialShd != nil {
-		return parseAxialShdColor(fillColor.AxialShd, fillColor.Alpha)
+		return parseShdColor(fillColor.AxialShd.Segment, fillColor.Alpha)
 	}
 	if fillColor.RadialShd != nil {
-		return parseRadialShdColor(fillColor.RadialShd, fillColor.Alpha)
+		return parseShdColor(fillColor.RadialShd.Segment, fillColor.Alpha)
 	}
 	if strings.TrimSpace(fillColor.Value) != "" {
 		return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
@@ -170,10 +170,10 @@ func parseFillPaint(fillColor *FillColor, x, y, pageH, originX, originY float64)
 		return gradient
 	}
 	if fillColor.AxialShd != nil {
-		return parseAxialShdColor(fillColor.AxialShd, fillColor.Alpha)
+		return parseShdColor(fillColor.AxialShd.Segment, fillColor.Alpha)
 	}
 	if fillColor.RadialShd != nil {
-		return parseRadialShdColor(fillColor.RadialShd, fillColor.Alpha)
+		return parseShdColor(fillColor.RadialShd.Segment, fillColor.Alpha)
 	}
 	if strings.TrimSpace(fillColor.Value) != "" {
 		return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
@@ -189,10 +189,10 @@ func parseStrokeColor(strokeColor *StrokeColor) color.Color {
 		return nil
 	}
 	if strokeColor.AxialShd != nil {
-		return parseAxialShdColor(strokeColor.AxialShd, strokeColor.Alpha)
+		return parseShdColor(strokeColor.AxialShd.Segment, strokeColor.Alpha)
 	}
 	if strokeColor.RadialShd != nil {
-		return parseRadialShdColor(strokeColor.RadialShd, strokeColor.Alpha)
+		return parseShdColor(strokeColor.RadialShd.Segment, strokeColor.Alpha)
 	}
 	if strings.TrimSpace(strokeColor.Value) != "" {
 		return parseColorWithAlpha(strokeColor.Value, strokeColor.Alpha)
@@ -214,10 +214,10 @@ func parseStrokePaint(strokeColor *StrokeColor, x, y, pageH, originX, originY fl
 		return gradient
 	}
 	if strokeColor.AxialShd != nil {
-		return parseAxialShdColor(strokeColor.AxialShd, strokeColor.Alpha)
+		return parseShdColor(strokeColor.AxialShd.Segment, strokeColor.Alpha)
 	}
 	if strokeColor.RadialShd != nil {
-		return parseRadialShdColor(strokeColor.RadialShd, strokeColor.Alpha)
+		return parseShdColor(strokeColor.RadialShd.Segment, strokeColor.Alpha)
 	}
 	if strings.TrimSpace(strokeColor.Value) != "" {
 		return parseColorWithAlpha(strokeColor.Value, strokeColor.Alpha)
@@ -235,22 +235,42 @@ func patternColor(fillColor *FillColor) color.Color {
 	return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
 }
 
-// parseAxialShdColor 解析轴向渐变颜色
-// 入参: axialShd 轴向渐变节点, alpha 透明度
+// parseShdColor 解析渐变颜色
+// 入参: segments 渐变分段, alpha 透明度
 // 返回: color.Color 颜色对象
-func parseAxialShdColor(axialShd *AxialShd, alpha *int) color.Color {
-	if axialShd != nil {
-		for _, segment := range axialShd.Segment {
-			if strings.TrimSpace(segment.Color.Value) == "" {
-				continue
-			}
-			if alpha == nil {
-				alpha = segment.Color.Alpha
-			}
-			return parseColorWithAlpha(segment.Color.Value, alpha)
+func parseShdColor(segments []ShdSegment, alpha *int) color.Color {
+	for _, segment := range segments {
+		if strings.TrimSpace(segment.Color.Value) == "" {
+			continue
 		}
+		segmentAlpha := alpha
+		if segmentAlpha == nil {
+			segmentAlpha = segment.Color.Alpha
+		}
+		return parseColorWithAlpha(segment.Color.Value, segmentAlpha)
 	}
 	return color.Black
+}
+
+// parseShdSegments 解析渐变分段
+// 入参: segments 渐变分段, alpha 透明度
+// 返回: canvas.Grad 渐变分段
+func parseShdSegments(segments []ShdSegment, alpha *int) canvas.Grad {
+	gradient := canvas.NewGradient()
+	for _, segment := range segments {
+		if strings.TrimSpace(segment.Color.Value) == "" {
+			continue
+		}
+		segmentAlpha := alpha
+		if segmentAlpha == nil {
+			segmentAlpha = segment.Color.Alpha
+		}
+		gradient.Add(segment.Position, colorToRGBA(parseColorWithAlpha(segment.Color.Value, segmentAlpha)))
+	}
+	if len(gradient) == 0 {
+		return nil
+	}
+	return gradient
 }
 
 // parseAxialShdGradient 解析轴向渐变
@@ -265,18 +285,8 @@ func parseAxialShdGradient(axialShd *AxialShd, alpha *int, x, y, pageH, originX,
 	if len(start) < 2 || len(end) < 2 {
 		return nil
 	}
-	grad := canvas.NewGradient()
-	for _, segment := range axialShd.Segment {
-		if strings.TrimSpace(segment.Color.Value) == "" {
-			continue
-		}
-		segmentAlpha := alpha
-		if segmentAlpha == nil {
-			segmentAlpha = segment.Color.Alpha
-		}
-		grad.Add(segment.Position, colorToRGBA(parseColorWithAlpha(segment.Color.Value, segmentAlpha)))
-	}
-	if len(grad) == 0 {
+	gradient := parseShdSegments(axialShd.Segment, alpha)
+	if gradient == nil {
 		return nil
 	}
 	startPoint := canvas.Point{X: x + start[0] - originX, Y: pageH - (y + start[1]) - originY}
@@ -284,25 +294,7 @@ func parseAxialShdGradient(axialShd *AxialShd, alpha *int, x, y, pageH, originX,
 	if startPoint.Equals(endPoint) {
 		return nil
 	}
-	return grad.ToLinear(startPoint, endPoint)
-}
-
-// parseRadialShdColor 解析径向渐变颜色
-// 入参: radialShd 径向渐变节点, alpha 透明度
-// 返回: color.Color 颜色对象
-func parseRadialShdColor(radialShd *RadialShd, alpha *int) color.Color {
-	if radialShd != nil {
-		for _, segment := range radialShd.Segment {
-			if strings.TrimSpace(segment.Color.Value) == "" {
-				continue
-			}
-			if alpha == nil {
-				alpha = segment.Color.Alpha
-			}
-			return parseColorWithAlpha(segment.Color.Value, alpha)
-		}
-	}
-	return color.Black
+	return gradient.ToLinear(startPoint, endPoint)
 }
 
 // parseRadialShdGradient 解析径向渐变
@@ -317,23 +309,13 @@ func parseRadialShdGradient(radialShd *RadialShd, alpha *int, x, y, pageH, origi
 	if len(start) < 2 || len(end) < 2 {
 		return nil
 	}
-	grad := canvas.NewGradient()
-	for _, segment := range radialShd.Segment {
-		if strings.TrimSpace(segment.Color.Value) == "" {
-			continue
-		}
-		segmentAlpha := alpha
-		if segmentAlpha == nil {
-			segmentAlpha = segment.Color.Alpha
-		}
-		grad.Add(segment.Position, colorToRGBA(parseColorWithAlpha(segment.Color.Value, segmentAlpha)))
-	}
-	if len(grad) == 0 {
+	gradient := parseShdSegments(radialShd.Segment, alpha)
+	if gradient == nil {
 		return nil
 	}
 	startPoint := canvas.Point{X: x + start[0] - originX, Y: pageH - (y + start[1]) - originY}
 	endPoint := canvas.Point{X: x + end[0] - originX, Y: pageH - (y + end[1]) - originY}
-	return grad.ToRadial(startPoint, radialShd.StartRadius, endPoint, radialShd.EndRadius)
+	return gradient.ToRadial(startPoint, radialShd.StartRadius, endPoint, radialShd.EndRadius)
 }
 
 // colorToRGBA 转换颜色对象

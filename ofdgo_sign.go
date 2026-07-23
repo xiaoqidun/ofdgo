@@ -36,7 +36,7 @@ const (
 // Signatures 签名列表
 type Signatures struct {
 	XMLName   xml.Name    `xml:"Signatures"`
-	MaxSignId string      `xml:"MaxSignId"`
+	MaxSignID string      `xml:"MaxSignId"`
 	List      []Signature `xml:"Signature"`
 }
 
