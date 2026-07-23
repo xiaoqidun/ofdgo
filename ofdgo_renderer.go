@@ -33,7 +33,9 @@ type Renderer struct {
 	FontMap               map[string]*canvas.FontFamily
 	FontGIDMap            map[string]map[uint16]rune
 	FontCIDMap            map[string]map[uint16]rune
-	fontFSCache           map[fontFSKey]*canvas.FontFamily
+	fontCache             map[fontCacheKey]*canvas.FontFamily
+	fontSourceCache       map[string][]fontSource
+	fontSourceUsed        map[string]fontSource
 	textGlyphPathCache    map[textGlyphPathCacheKey]textGlyphPathCacheValue
 	templatePageCache     map[string]*PageContent
 	fontDirs              []string

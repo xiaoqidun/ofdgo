@@ -73,7 +73,9 @@ func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 		FontMap:               make(map[string]*canvas.FontFamily),
 		FontGIDMap:            make(map[string]map[uint16]rune),
 		FontCIDMap:            make(map[string]map[uint16]rune),
-		fontFSCache:           make(map[fontFSKey]*canvas.FontFamily),
+		fontCache:             make(map[fontCacheKey]*canvas.FontFamily),
+		fontSourceCache:       make(map[string][]fontSource),
+		fontSourceUsed:        make(map[string]fontSource),
 		textGlyphPathCache:    make(map[textGlyphPathCacheKey]textGlyphPathCacheValue),
 		templatePageCache:     make(map[string]*PageContent),
 	}

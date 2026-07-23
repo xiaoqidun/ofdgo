@@ -20,7 +20,6 @@ import (
 	"encoding/binary"
 	"encoding/xml"
 	"fmt"
-	"strconv"
 	"strings"
 )
 
@@ -28,7 +27,9 @@ import (
 type SignType string
 
 const (
+	// SignTypeSeal 印章签名
 	SignTypeSeal SignType = "Seal"
+	// SignTypeSign 数字签名
 	SignTypeSign SignType = "Sign"
 )
 
@@ -150,27 +151,11 @@ func (r *Reader) SignatureStampPositions(stamps []SignatureStamp) ([]SignatureSt
 // 入参: s 区域字符串
 // 返回: Box 矩形对象, error 错误信息
 func parseSignatureStampBox(s string) (Box, error) {
-	parts := strings.Fields(s)
-	if len(parts) != 4 {
-		return Box{}, fmt.Errorf("invalid signature stamp box: %s", s)
-	}
-	x, err := strconv.ParseFloat(parts[0], 64)
+	box, err := ParseBox(s)
 	if err != nil {
 		return Box{}, fmt.Errorf("invalid signature stamp box: %s", s)
 	}
-	y, err := strconv.ParseFloat(parts[1], 64)
-	if err != nil {
-		return Box{}, fmt.Errorf("invalid signature stamp box: %s", s)
-	}
-	w, err := strconv.ParseFloat(parts[2], 64)
-	if err != nil {
-		return Box{}, fmt.Errorf("invalid signature stamp box: %s", s)
-	}
-	h, err := strconv.ParseFloat(parts[3], 64)
-	if err != nil {
-		return Box{}, fmt.Errorf("invalid signature stamp box: %s", s)
-	}
-	return Box{X: x, Y: y, W: w, H: h}, nil
+	return box, nil
 }
 
 // parseSignatures 解析签名文件

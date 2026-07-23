@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -30,14 +31,18 @@ type Box struct {
 // 返回: Box 矩形对象, error 错误信息
 func ParseBox(s string) (Box, error) {
 	parts := strings.Fields(s)
-	if len(parts) < 4 {
-		return Box{}, nil
+	if len(parts) != 4 {
+		return Box{}, fmt.Errorf("invalid box: %s", s)
 	}
-	x, _ := strconv.ParseFloat(parts[0], 64)
-	y, _ := strconv.ParseFloat(parts[1], 64)
-	w, _ := strconv.ParseFloat(parts[2], 64)
-	h, _ := strconv.ParseFloat(parts[3], 64)
-	return Box{X: x, Y: y, W: w, H: h}, nil
+	var values [4]float64
+	for i, part := range parts {
+		value, err := strconv.ParseFloat(part, 64)
+		if err != nil {
+			return Box{}, fmt.Errorf("invalid box: %s", s)
+		}
+		values[i] = value
+	}
+	return Box{X: values[0], Y: values[1], W: values[2], H: values[3]}, nil
 }
 
 // Matrix 2D仿射变换矩阵

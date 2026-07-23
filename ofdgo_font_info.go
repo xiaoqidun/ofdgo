@@ -168,9 +168,9 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 		}
 		return info
 	}
-	if matched, exact := r.matchFont(font.FontName, font.FamilyName); matched != "" {
-		info.Matched = matched
-		if exact {
+	if source, ok := r.fontSourceMatch(font.ID, &font); ok {
+		info.Matched = source.name
+		if source.exact {
 			info.Status = FontStatusMatched
 			info.Detail = "使用外部字体文件"
 		} else {
@@ -182,74 +182,6 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 	info.Status = FontStatusMissing
 	info.Detail = "可用字体文件缺失"
 	return info
-}
-
-// matchFont 匹配外部字体
-// 入参: names 字体名称列表
-// 返回: string 匹配字体文件, bool 是否为名称匹配
-func (r *Renderer) matchFont(names ...string) (string, bool) {
-	patterns := fontFilePatterns(names...)
-	for _, dir := range r.fontDirs {
-		if matches := r.matchFontFiles(dir, patterns, false, false); len(matches) > 0 {
-			return matches[0], true
-		}
-	}
-	for _, fsys := range r.fontFS {
-		if matcher, ok := fsys.(interface {
-			Match(...string) (string, bool)
-		}); ok {
-			if matched, exact := matcher.Match(names...); matched != "" {
-				return matched, exact
-			}
-			continue
-		}
-		if matched := matchFontFS(fsys, names...); matched != "" {
-			return matched, true
-		}
-	}
-	if !canLoadSystemFonts() {
-		for _, fsys := range r.fontFS {
-			if matched := fallbackFontFS(fsys); matched != "" {
-				return matched, false
-			}
-		}
-	}
-	return "", false
-}
-
-// matchFontFS 从字体文件系统匹配字体
-// 入参: fsys 字体文件系统, names 字体名称列表
-// 返回: string 匹配字体文件
-func matchFontFS(fsys fs.FS, names ...string) string {
-	if matches := fontFSMatches(fsys, fontFilePatterns(names...)); len(matches) > 0 {
-		return matches[0]
-	}
-	return ""
-}
-
-// fallbackFontFS 从字体文件系统获取回退字体
-// 入参: fsys 字体文件系统
-// 返回: string 回退字体文件
-func fallbackFontFS(fsys fs.FS) string {
-	for _, pattern := range fontFallbackFiles {
-		if matches := fontFSMatches(fsys, []string{pattern}); len(matches) > 0 {
-			return matches[0]
-		}
-	}
-	all, _ := fs.Glob(fsys, "*")
-	for _, name := range all {
-		if isFontFileName(name) {
-			return name
-		}
-	}
-	return ""
-}
-
-// fontFSMatches 匹配字体文件系统中的字体文件
-// 入参: fsys 字体文件系统, patterns 匹配模式列表
-// 返回: []string 字体文件列表
-func fontFSMatches(fsys fs.FS, patterns []string) []string {
-	return fontFSMatchesStyle(fsys, patterns, false, false)
 }
 
 // fontFSMatchesStyle 匹配字体文件系统中的指定样式字体文件

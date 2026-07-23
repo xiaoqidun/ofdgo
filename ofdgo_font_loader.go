@@ -22,10 +22,33 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
-// fontFSKey 字体文件系统缓存键
-type fontFSKey struct {
+// fontSourceKind 字体来源类型
+type fontSourceKind uint8
+
+const (
+	fontSourceFile fontSourceKind = iota
+	fontSourceFS
+	fontSourceSystem
+)
+
+// fontSource 字体来源
+type fontSource struct {
+	kind  fontSourceKind
 	index int
 	name  string
+	exact bool
+}
+
+// fontSourceKey 字体来源去重键
+type fontSourceKey struct {
+	kind  fontSourceKind
+	index int
+	name  string
+}
+
+// fontCacheKey 字体加载缓存键
+type fontCacheKey struct {
+	fontSourceKey
 	style canvas.FontStyle
 }
 
@@ -44,6 +67,7 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	if !ok {
 		return defaultFont
 	}
+	fontStyle := canvasFontStyle(of)
 	ff := canvas.NewFontFamily(of.FontName)
 	if of.FontFile != "" {
 		if fontData, err := r.Reader.ResData(of.FontFile); err == nil {
@@ -73,13 +97,6 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 					r.FontGIDMap[fontID] = inv
 				}
 			}
-			var fontStyle canvas.FontStyle
-			if of.Bold {
-				fontStyle |= canvas.FontBold
-			}
-			if of.Italic {
-				fontStyle |= canvas.FontItalic
-			}
 			if err := ff.LoadFont(fontData, 0, fontStyle); err == nil {
 				r.FontMap[fontID] = ff
 				return ff
@@ -88,87 +105,143 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 		}
 		return nil
 	}
-	var fontStyle canvas.FontStyle
-	if of.Bold {
-		fontStyle |= canvas.FontBold
-	}
-	if of.Italic {
-		fontStyle |= canvas.FontItalic
-	}
-	boldStyle := fontStyle&canvas.FontBold != 0
-	italicStyle := fontStyle&canvas.FontItalic != 0
-	patterns := fontFilePatterns(of.FontName, of.FamilyName)
-	for _, dir := range r.fontDirs {
-		for _, m := range r.matchFontFiles(dir, patterns, boldStyle, italicStyle) {
-			if err := ff.LoadFontFile(m, fontStyle); err == nil {
-				r.FontMap[fontID] = ff
-				return ff
-			}
-		}
-	}
-	for index, fsys := range r.fontFS {
-		for _, m := range fontFSMatchesStyle(fsys, patterns, boldStyle, italicStyle) {
-			if loaded := r.loadFontFromFS(fontID, ff, index, fsys, m, fontStyle); loaded != nil {
-				return loaded
-			}
-		}
-	}
-	if !canLoadSystemFonts() {
-		for index, fsys := range r.fontFS {
-			if matches, err := fs.Glob(fsys, "*"); err == nil {
-				for _, m := range matches {
-					if loaded := r.loadFontFromFS(fontID, ff, index, fsys, m, fontStyle); loaded != nil {
-						return loaded
-					}
-				}
-			}
-		}
-		r.FontMap[fontID] = defaultFont
-		return defaultFont
-	}
-	names := []string{of.FamilyName, of.FontName}
-	for _, name := range names {
-		if name == "" {
-			continue
-		}
-		for _, targetName := range fontSystemNames(name) {
-			for _, m := range r.matchFontFiles(systemFontDir(), fontFilePatterns(targetName), boldStyle, italicStyle) {
-				if err := ff.LoadFontFile(m, fontStyle); err == nil {
-					r.FontMap[fontID] = ff
-					return ff
-				}
-			}
-			if err := ff.LoadSystemFont(targetName, fontStyle); err == nil {
-				r.FontMap[fontID] = ff
-				return ff
-			}
-		}
-		for _, m := range r.matchFontFiles(systemFontDir(), fontFilePatterns(name), boldStyle, italicStyle) {
-			if err := ff.LoadFontFile(m, fontStyle); err == nil {
-				r.FontMap[fontID] = ff
-				return ff
-			}
+	for _, source := range r.fontSources(fontID, of, fontStyle) {
+		if loaded := r.loadFontSource(ff, source, fontStyle); loaded != nil {
+			r.FontMap[fontID] = loaded
+			r.fontSourceUsed[fontID] = source
+			return loaded
 		}
 	}
 	r.FontMap[fontID] = defaultFont
 	return defaultFont
 }
 
-// loadFontFromFS 从字体文件系统加载字体
-// 入参: fontID 字体ID, family 字体族, index 文件系统索引, fsys 字体文件系统, name 字体文件名, style 字体样式
+// canvasFontStyle 获取Canvas字体样式
+// 入参: font OFD字体定义
+// 返回: canvas.FontStyle Canvas字体样式
+func canvasFontStyle(font *Font) canvas.FontStyle {
+	var style canvas.FontStyle
+	if font.Bold {
+		style |= canvas.FontBold
+	}
+	if font.Italic {
+		style |= canvas.FontItalic
+	}
+	return style
+}
+
+// fontSources 获取字体来源列表
+// 入参: fontID 字体ID, font OFD字体定义, style Canvas字体样式
+// 返回: []fontSource 字体来源列表
+func (r *Renderer) fontSources(fontID string, font *Font, style canvas.FontStyle) []fontSource {
+	if sources, ok := r.fontSourceCache[fontID]; ok {
+		return sources
+	}
+	bold := style&canvas.FontBold != 0
+	italic := style&canvas.FontItalic != 0
+	patterns := fontFilePatterns(font.FontName, font.FamilyName)
+	sources := make([]fontSource, 0)
+	seen := make(map[fontSourceKey]bool)
+	for _, dir := range r.fontDirs {
+		for _, name := range r.matchFontFiles(dir, patterns, bold, italic) {
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: name, exact: true})
+		}
+	}
+	for index, fsys := range r.fontFS {
+		for _, name := range fontFSMatchesStyle(fsys, patterns, bold, italic) {
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: name, exact: true})
+		}
+	}
+	if !canLoadSystemFonts() {
+		for index, fsys := range r.fontFS {
+			names, _ := fs.Glob(fsys, "*")
+			for _, name := range names {
+				sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: name})
+			}
+		}
+		r.fontSourceCache[fontID] = sources
+		return sources
+	}
+	for _, name := range []string{font.FamilyName, font.FontName} {
+		for _, systemName := range fontSystemNames(name) {
+			for _, match := range r.matchFontFiles(systemFontDir(), fontFilePatterns(systemName), bold, italic) {
+				sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match, exact: true})
+			}
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceSystem, name: systemName, exact: true})
+		}
+	}
+	r.fontSourceCache[fontID] = sources
+	return sources
+}
+
+// appendFontSource 追加字体来源
+// 入参: sources 字体来源列表, seen 去重映射, source 字体来源
+// 返回: []fontSource 字体来源列表
+func appendFontSource(sources []fontSource, seen map[fontSourceKey]bool, source fontSource) []fontSource {
+	if source.name == "" {
+		return sources
+	}
+	key := fontSourceKey{kind: source.kind, index: source.index, name: source.name}
+	if seen[key] {
+		return sources
+	}
+	seen[key] = true
+	return append(sources, source)
+}
+
+// fontSourceMatch 获取匹配的字体来源
+// 入参: fontID 字体ID, font OFD字体定义
+// 返回: fontSource 字体来源, bool 是否匹配
+func (r *Renderer) fontSourceMatch(fontID string, font *Font) (fontSource, bool) {
+	if source, ok := r.fontSourceUsed[fontID]; ok {
+		return source, true
+	}
+	style := canvasFontStyle(font)
+	for _, source := range r.fontSources(fontID, font, style) {
+		key := fontCacheKey{fontSourceKey: fontSourceKey{kind: source.kind, index: source.index, name: source.name}, style: style}
+		if cached, ok := r.fontCache[key]; ok {
+			if cached != nil {
+				return source, true
+			}
+			continue
+		}
+		if source.kind != fontSourceSystem {
+			return source, true
+		}
+		family := canvas.NewFontFamily(font.FontName)
+		if r.loadFontSource(family, source, style) != nil {
+			return source, true
+		}
+	}
+	return fontSource{}, false
+}
+
+// loadFontSource 加载字体来源
+// 入参: family 字体族, source 字体来源, style Canvas字体样式
 // 返回: *canvas.FontFamily 字体族
-func (r *Renderer) loadFontFromFS(fontID string, family *canvas.FontFamily, index int, fsys fs.FS, name string, style canvas.FontStyle) *canvas.FontFamily {
-	key := fontFSKey{index: index, name: name, style: style}
-	if cached := r.fontFSCache[key]; cached != nil {
-		r.FontMap[fontID] = cached
+func (r *Renderer) loadFontSource(family *canvas.FontFamily, source fontSource, style canvas.FontStyle) *canvas.FontFamily {
+	key := fontCacheKey{fontSourceKey: fontSourceKey{kind: source.kind, index: source.index, name: source.name}, style: style}
+	if cached, ok := r.fontCache[key]; ok {
 		return cached
 	}
-	data, err := readFontData(fsys, name)
-	if err != nil || family.LoadFont(data, 0, style) != nil {
+	var err error
+	switch source.kind {
+	case fontSourceFile:
+		err = family.LoadFontFile(source.name, style)
+	case fontSourceFS:
+		var data []byte
+		data, err = readFontData(r.fontFS[source.index], source.name)
+		if err == nil {
+			err = family.LoadFont(data, 0, style)
+		}
+	case fontSourceSystem:
+		err = family.LoadSystemFont(source.name, style)
+	}
+	if err != nil {
+		r.fontCache[key] = nil
 		return nil
 	}
-	r.fontFSCache[key] = family
-	r.FontMap[fontID] = family
+	r.fontCache[key] = family
 	return family
 }
 
