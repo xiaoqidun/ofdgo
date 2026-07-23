@@ -20,13 +20,9 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-
-	// 注册GIF图片解码器
 	_ "image/gif"
 
 	canvasimage "github.com/tdewolff/canvas/image"
-
-	// 注册扩展图片解码器
 	_ "github.com/xiaoqidun/jbig2"
 	_ "golang.org/x/image/bmp"
 	_ "golang.org/x/image/tiff"
