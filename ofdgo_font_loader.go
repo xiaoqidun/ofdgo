@@ -162,10 +162,14 @@ func (r *Renderer) fontSources(fontID string, font *Font, style canvas.FontStyle
 		r.fontSourceCache[fontID] = sources
 		return sources
 	}
+	systemDirs := systemFontDirs()
 	for _, name := range []string{font.FamilyName, font.FontName} {
 		for _, systemName := range fontSystemNames(name) {
-			for _, match := range r.matchFontFiles(systemFontDir(), fontFilePatterns(systemName), bold, italic) {
-				sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match, exact: true})
+			systemPatterns := fontFilePatterns(systemName)
+			for _, dir := range systemDirs {
+				for _, match := range r.matchFontFiles(dir, systemPatterns, bold, italic) {
+					sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match, exact: true})
+				}
 			}
 			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceSystem, name: systemName, exact: true})
 		}
@@ -260,15 +264,18 @@ func (r *Renderer) matchFontFiles(dir string, patterns []string, bold, italic bo
 	return fontFileMatchNames(matches)
 }
 
-// systemFontDir 获取系统字体目录
-// 返回: string 字体目录
-func systemFontDir() string {
+// systemFontDirs 获取系统字体目录
+// 返回: []string 字体目录列表
+func systemFontDirs() []string {
 	switch runtime.GOOS {
-	case "linux":
-		return `/usr/share/fonts`
+	case "android":
+		return []string{"/product/fonts", "/system/fonts"}
 	case "darwin":
-		return `/Library/Fonts`
-	default:
-		return `C:\Windows\Fonts`
+		return []string{`/Library/Fonts`}
+	case "linux":
+		return []string{`/usr/share/fonts`}
+	case "windows":
+		return []string{`C:\Windows\Fonts`}
 	}
+	return nil
 }
