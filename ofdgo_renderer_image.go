@@ -266,28 +266,46 @@ func imageWithTransparentEdge(img image.Image) (image.Image, int) {
 	if opaque, ok := source.(interface{ Opaque() bool }); ok && opaque.Opaque() {
 		return img, 0
 	}
-	src := image.NewNRGBA(image.Rect(0, 0, w, h))
 	hasZero, hasVisible := false, false
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			c := imageNRGBAAt(source, bounds.Min.X+x, bounds.Min.Y+y)
-			src.SetNRGBA(x, y, c)
-			if c.A == 0 {
-				hasZero = true
-			} else {
-				hasVisible = true
+	src, ok := source.(*image.NRGBA)
+	if ok {
+		srcBounds := src.Bounds()
+		for y := srcBounds.Min.Y; y < srcBounds.Max.Y; y++ {
+			offset := src.PixOffset(srcBounds.Min.X, y) + 3
+			for x := 0; x < w; x++ {
+				if src.Pix[offset] == 0 {
+					hasZero = true
+				} else {
+					hasVisible = true
+				}
+				offset += 4
+			}
+		}
+	} else {
+		src = image.NewNRGBA(image.Rect(0, 0, w, h))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				c := imageNRGBAAt(source, bounds.Min.X+x, bounds.Min.Y+y)
+				src.SetNRGBA(x, y, c)
+				if c.A == 0 {
+					hasZero = true
+				} else {
+					hasVisible = true
+				}
 			}
 		}
 	}
 	if !hasZero || !hasVisible {
 		return img, 0
 	}
+	srcBounds := src.Bounds()
 	out := image.NewNRGBA(image.Rect(0, 0, w+2, h+2))
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			c := src.NRGBAAt(x, y)
+			sx, sy := srcBounds.Min.X+x, srcBounds.Min.Y+y
+			c := src.NRGBAAt(sx, sy)
 			if c.A == 0 {
-				if edge, ok := transparentEdgeColor(src, x, y); ok {
+				if edge, ok := transparentEdgeColor(src, sx, sy); ok {
 					c = edge
 				}
 			}

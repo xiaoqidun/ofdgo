@@ -250,8 +250,12 @@ func (r *Renderer) loadFontSource(family *canvas.FontFamily, source fontSource, 
 // 入参: dir 目录, patterns 模式列表, bold 是否粗体, italic 是否斜体
 // 返回: []string 文件列表
 func (r *Renderer) matchFontFiles(dir string, patterns []string, bold, italic bool) []string {
-	files, _ := filepath.Glob(filepath.Join(dir, "*"))
-	candidates := fontFileCandidates(files, filepath.Base)
+	candidates, ok := r.fontDirCandidates[dir]
+	if !ok {
+		files, _ := filepath.Glob(filepath.Join(dir, "*"))
+		candidates = fontFileCandidates(files, filepath.Base)
+		r.fontDirCandidates[dir] = candidates
+	}
 	matches := make([]fontFileMatch, 0, len(candidates))
 	index := make(map[string]int, len(candidates))
 	for _, matcher := range newFontPatternMatchers(patterns) {
