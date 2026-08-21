@@ -1,13 +1,13 @@
 module github.com/xiaoqidun/ofdgo
 
-go 1.25.0
+go 1.26.4
 
 require (
-	github.com/tdewolff/canvas v0.0.0-20260714230319-248e24504c3b
-	github.com/tdewolff/font v0.0.0-20260527091451-1663e68cb8a4
-	github.com/xiaoqidun/jbig2 v0.0.0-20260728034722-cddd57533c97
-	golang.org/x/image v0.44.0
-	golang.org/x/text v0.40.0
+	github.com/tdewolff/canvas v0.0.0-20260820161200-72985dc66d4e
+	github.com/tdewolff/font v0.0.0-20260809175822-e00d3ed980cd
+	github.com/xiaoqidun/jbig2 v0.0.0-20260821144351-8336470f41a9
+	golang.org/x/image v0.45.0
+	golang.org/x/text v0.41.0
 )
 
 require (
@@ -19,7 +19,7 @@ require (
 	github.com/BurntSushi/xgbutil v0.0.0-20190907113008-ad855c713046 // indirect
 	github.com/ByteArena/poly2tri-go v0.0.0-20170716161910-d102ad91854f // indirect
 	github.com/Kagami/go-avif v0.1.0 // indirect
-	github.com/andybalholm/brotli v1.2.1 // indirect
+	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/benoitkugler/textlayout v0.3.2 // indirect
 	github.com/benoitkugler/textprocessing v0.0.6 // indirect
 	github.com/go-fonts/latin-modern v0.3.3 // indirect
@@ -28,11 +28,12 @@ require (
 	github.com/kolesa-team/go-webp v1.0.5 // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/srwiley/scanx v0.0.0-20190309010443-e94503791388 // indirect
-	github.com/tdewolff/minify/v2 v2.24.13 // indirect
-	github.com/tdewolff/parse/v2 v2.8.13 // indirect
+	github.com/tdewolff/minify/v2 v2.24.16 // indirect
+	github.com/tdewolff/parse/v2 v2.8.15 // indirect
 	github.com/wcharczuk/go-chart/v2 v2.1.2 // indirect
-	github.com/yuin/goldmark v1.8.2 // indirect
-	golang.org/x/net v0.55.0 // indirect
+	github.com/yuin/goldmark v1.8.5 // indirect
+	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	gonum.org/v1/plot v0.17.0 // indirect
 	modernc.org/knuth v0.5.5 // indirect
 	modernc.org/token v1.1.0 // indirect
