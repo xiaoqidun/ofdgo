@@ -401,6 +401,10 @@ body[data-hide-meta] .meta-panel {
 	background-size: 24px 24px;
 }
 
+.viewer-panel.single-page-fits-height {
+	overflow-y: hidden;
+}
+
 .empty-state {
 	position: absolute;
 	inset: 0;

@@ -2110,6 +2110,7 @@ function scrollbarWidth() {
 function updateFitSpace() {
 	const page = currentPageInfo();
 	if (!page || state.fitMode === "free") {
+		el.viewerPanel.classList.remove("single-page-fits-height");
 		el.pageFrame.style.removeProperty("--fit-space");
 		el.pageFrame.style.removeProperty("--fit-gap");
 		return;
@@ -2117,6 +2118,7 @@ function updateFitSpace() {
 	const shell = pageShell(state.pageIndex);
 	const height = shell ? shell.getBoundingClientRect().height : Math.max(1, page.height * MM_TO_PX * state.scale);
 	const base = pageSpace();
+	el.viewerPanel.classList.toggle("single-page-fits-height", state.doc.pageCount === 1 && height <= el.viewerPanel.clientHeight - base * 2);
 	const space = Math.max(base, (el.viewerPanel.clientHeight - height) / 2);
 	const gap = space > base ? space + 1 : space;
 	el.pageFrame.style.setProperty("--fit-space", `${space}px`);
