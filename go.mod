@@ -3,7 +3,7 @@ module github.com/xiaoqidun/ofdgo
 go 1.26.0
 
 require (
-	github.com/tdewolff/canvas v0.0.0-20260822211237-56e622de465a
+	github.com/tdewolff/canvas v0.0.0-20260901160717-dae8cd8e19a7
 	github.com/tdewolff/font v0.0.0-20260822205238-d0d2f004b117
 	github.com/xiaoqidun/jbig2 v0.0.0-20260823111534-2e67bcec7059
 	golang.org/x/image v0.45.0
