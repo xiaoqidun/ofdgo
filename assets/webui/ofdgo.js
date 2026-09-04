@@ -275,9 +275,10 @@ async function loadWASM() {
 		const response = await fetch("./ofdgo.wasm");
 		try {
 			setProgress("正在编译引擎", 35);
-			wasmModule = await WebAssembly.compileStreaming(response.clone());
+			wasmModule = await WebAssembly.compileStreaming(response);
 		} catch {
-			const bytes = await response.arrayBuffer();
+			const fallback = await fetch("./ofdgo.wasm");
+			const bytes = await fallback.arrayBuffer();
 			setProgress("正在编译引擎", 45);
 			wasmModule = await WebAssembly.compile(bytes);
 		}
@@ -2216,6 +2217,7 @@ function setProgress(text = "", percent = 0, status = "") {
 	}
 	const value = Math.max(0, Math.min(100, percent));
 	el.progressBar.style.width = `${value}%`;
+	el.progressBar.setAttribute("aria-valuenow", String(value));
 }
 
 function setStatus(text) {

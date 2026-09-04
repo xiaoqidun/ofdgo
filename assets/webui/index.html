@@ -12,7 +12,7 @@
 			<input id="ofdInput" class="file-input" type="file" accept=".ofd">
 			<input id="fontInput" class="file-input" type="file" accept=".ttf,.otf,.ttc,font/*" multiple>
 			<div class="tool-group">
-				<button id="ofdButton" class="button primary" type="button" data-short="打开">打开</button>
+				<button id="ofdButton" class="button primary" type="button" data-short="打开" aria-label="打开">打开</button>
 				<button id="togglePagesButton" class="icon-button" type="button" title="页面栏" aria-label="页面栏" aria-pressed="true">&#9776;</button>
 				<button id="toggleMetaButton" class="icon-button" type="button" title="信息栏" aria-label="信息栏" aria-pressed="true">&#9432;</button>
 			</div>
@@ -30,8 +30,8 @@
 				<button id="zoomOutButton" class="icon-button" type="button" title="缩小" disabled>-</button>
 				<span id="zoomLabel" class="zoom-label">100%</span>
 				<button id="zoomInButton" class="icon-button" type="button" title="放大" disabled>+</button>
-				<button id="fitButton" class="button" type="button" data-short="宽" disabled>适宽</button>
-				<button id="fitHeightButton" class="button" type="button" data-short="高" disabled>适高</button>
+				<button id="fitButton" class="button" type="button" data-short="宽" aria-label="适宽" disabled>适宽</button>
+				<button id="fitHeightButton" class="button" type="button" data-short="高" aria-label="适高" disabled>适高</button>
 				<button id="annotationButton" class="button" type="button" data-short="注" title="渲染注解" aria-label="渲染注解" aria-pressed="true">注解</button>
 			</div>
 			<div class="tool-group">
@@ -55,11 +55,11 @@
 
 			<section class="viewer-panel" tabindex="0">
 				<div id="emptyState" class="empty-state">选择 OFD 文件</div>
-				<div id="progressPanel" class="progress-panel" hidden>
+				<div id="progressPanel" class="progress-panel" role="status" aria-live="polite" hidden>
 					<div class="progress-spinner"></div>
 					<div id="progressLabel" class="progress-label">加载中</div>
 					<div class="progress-track">
-						<div id="progressBar" class="progress-bar"></div>
+						<div id="progressBar" class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
 					</div>
 				</div>
 				<div id="pageFrame" class="page-frame" hidden>
