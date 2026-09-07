@@ -98,6 +98,7 @@ a:focus-visible {
 	z-index: 12;
 	border-bottom: 1px solid var(--line);
 	font-size: 14px;
+	line-height: 1;
 	gap: var(--tool-gap);
 	overflow-x: auto;
 	overflow-y: hidden;
@@ -119,6 +120,9 @@ a:focus-visible {
 
 .button,
 .icon-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
 	height: var(--control-height);
 	border-radius: 0;
 }
@@ -151,12 +155,9 @@ button:not(:disabled):hover {
 }
 
 .icon-button {
-	display: inline-grid;
-	place-items: center;
 	width: var(--control-height);
 	padding: 0;
 	font-size: 14px;
-	line-height: 1;
 }
 
 .toolbar-space {
@@ -186,7 +187,8 @@ button:not(:disabled):hover {
 }
 
 .page-control {
-	display: inline-flex;
+	display: inline-grid;
+	grid-template-columns: 4ch auto 4ch;
 	align-items: center;
 	gap: 6px;
 	height: var(--control-height);
@@ -195,15 +197,27 @@ button:not(:disabled):hover {
 	border-radius: 0;
 	background: #ffffff;
 	color: var(--text-muted);
+	text-align: center;
+	font-variant-numeric: tabular-nums;
 }
 
 .page-control input {
-	width: 48px;
+	width: 100%;
+	min-width: 0;
+	height: 100%;
+	padding: 0;
 	border: 0;
 	outline: 0;
-	text-align: right;
+	appearance: textfield;
+	text-align: center;
 	color: #1f2428;
 	background: transparent;
+}
+
+.page-control input::-webkit-inner-spin-button,
+.page-control input::-webkit-outer-spin-button {
+	-webkit-appearance: none;
+	margin: 0;
 }
 
 .format-select {
@@ -1076,12 +1090,9 @@ body[data-hide-meta] .meta-panel {
 	}
 
 	.page-control {
+		grid-template-columns: 3ch auto 3ch;
 		gap: 4px;
 		padding: 0 6px;
-	}
-
-	.page-control input {
-		width: 38px;
 	}
 
 	.zoom-label {
