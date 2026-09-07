@@ -151,11 +151,7 @@ el.pageInput.addEventListener("change", () => {
 		renderPage(page - 1);
 	}
 });
-window.addEventListener("resize", () => {
-	if (state.doc) {
-		applyFit(false);
-	}
-});
+window.addEventListener("resize", resizeViewer);
 COMPACT_LAYOUT.addEventListener("change", syncLayoutMode);
 el.viewerPanel.addEventListener("scroll", () => {
 	schedulePageSync();
@@ -193,14 +189,14 @@ function toggleSidebar(side) {
 		state.showMeta = !state.showMeta;
 	}
 	updateSidebarState();
-	if (state.doc) {
-		applyFit(false);
-	}
+	resizeViewer();
 }
 
 function updateSidebarState() {
 	document.body.toggleAttribute("data-hide-pages", !state.showPages);
 	document.body.toggleAttribute("data-hide-meta", !state.showMeta);
+	el.pageListPanel.inert = !state.showPages;
+	el.metaPanel.inert = !state.showMeta;
 	el.togglePagesButton.setAttribute("aria-pressed", String(state.showPages));
 	el.toggleMetaButton.setAttribute("aria-pressed", String(state.showMeta));
 }
@@ -209,8 +205,15 @@ function syncLayoutMode(event) {
 	state.showPages = !event.matches;
 	state.showMeta = !event.matches;
 	updateSidebarState();
+	resizeViewer();
+}
+
+function resizeViewer() {
 	if (state.doc) {
 		applyFit(false);
+		if (state.fitMode === "height") {
+			scrollToPage(state.pageIndex);
+		}
 	}
 }
 
