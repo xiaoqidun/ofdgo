@@ -46,7 +46,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if parentCTM != nil {
 		ctm = parentCTM.Multiply(ctm)
 	}
-	clipPath := intersectClipPath(parentClip, r.buildClipPath(obj.Clips, pageH, bx, by, ctm))
+	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, bx, by, localCTM, parentCTM, boundaryInCTM))
 	var dp *DrawParam
 	if obj.DrawParam != "" {
 		dp = r.getDrawParam(obj.DrawParam, nil)

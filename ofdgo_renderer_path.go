@@ -175,7 +175,8 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			bx, by = box.X, box.Y
 		}
 	}
-	ctm := NewMatrix(obj.CTM)
+	localCTM := NewMatrix(obj.CTM)
+	ctm := localCTM
 	if parentCTM != nil {
 		ctm = parentCTM.Multiply(ctm)
 	}
@@ -191,7 +192,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	if rectPath := r.buildTinyFillRectPath(obj, pageH, ctm, bx, by); rectPath != nil {
 		p = rectPath
 	}
-	clipPath := intersectClipPath(parentClip, r.buildClipPath(obj.Clips, pageH, bx, by, ctm))
+	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, bx, by, localCTM, parentCTM, boundaryInCTM))
 	shouldFill := false
 	if obj.Fill != nil {
 		shouldFill = *obj.Fill
@@ -395,6 +396,24 @@ func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix, boundary
 		case "C":
 			p.Close()
 		}
+	}
+	return p
+}
+
+// buildObjectClipPath 构建对象裁剪路径并应用父级变换
+// 入参: clips 裁剪对象, pageH 页面高度, bx 边界X坐标, by 边界Y坐标, objectCTM 对象CTM, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM
+// 返回: *canvas.Path 路径对象
+func (r *Renderer) buildObjectClipPath(clips *Clips, pageH float64, bx, by float64, objectCTM Matrix, parentCTM *Matrix, boundaryInCTM bool) *canvas.Path {
+	if !boundaryInCTM && parentCTM != nil {
+		objectCTM = parentCTM.Multiply(objectCTM)
+	}
+	p := r.buildClipPath(clips, pageH, bx, by, objectCTM)
+	if p != nil && boundaryInCTM && parentCTM != nil {
+		// TransFlag只控制对象CTM，父级变换仍作用于裁剪区域及边界
+		p = p.Transform(canvas.Matrix{
+			{parentCTM.a, -parentCTM.c, parentCTM.c*pageH + parentCTM.e},
+			{-parentCTM.b, parentCTM.d, pageH*(1-parentCTM.d) - parentCTM.f},
+		})
 	}
 	return p
 }

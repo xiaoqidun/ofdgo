@@ -56,10 +56,7 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	if obj.CTM == "" {
 		ctm = Matrix{a: box.W, d: box.H}
 	}
-	objectCTM := ctm
-	if parentCTM != nil {
-		objectCTM = parentCTM.Multiply(ctm)
-	}
+	localCTM := ctm
 	var m canvas.Matrix
 	if boundaryInCTM && parentCTM != nil {
 		x0 := box.X + ctm.c + ctm.e
@@ -77,7 +74,7 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 			{-ctm.b / imgW, ctm.d / imgH, pageH - box.Y - ctm.d - ctm.f},
 		}
 	}
-	clipPath := intersectClipPath(parentClip, r.buildClipPath(obj.Clips, pageH, box.X, box.Y, objectCTM))
+	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, box.X, box.Y, localCTM, parentCTM, boundaryInCTM))
 	img = imageWithClip(img, clipPath, m)
 	img, pad := imageWithTransparentEdge(img)
 	if pad > 0 {
