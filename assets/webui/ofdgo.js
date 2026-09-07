@@ -30,6 +30,8 @@ const STATUS = {
 };
 const WASM_CALLBACKS = [
 	"ofdgoOpen",
+	"ofdgoConfigure",
+	"ofdgoDocumentInfo",
 	"ofdgoRenderPage",
 	"ofdgoExportFormats",
 	"ofdgoExportPage",
@@ -66,10 +68,12 @@ const state = {
 	pageRenderQueue: [],
 	pageRenderRunning: false,
 	pageObserver: null,
+	visiblePages: new Set(),
 	scrollFrame: 0,
 	thumbnailCache: new Map(),
 	thumbnailInFlight: new Set(),
 	thumbnailObserver: null,
+	visibleThumbnails: new Set(),
 	exportFormats: [],
 	showPages: !COMPACT_LAYOUT.matches,
 	showMeta: !COMPACT_LAYOUT.matches,
@@ -725,6 +729,8 @@ async function applyFontChange(options = {}) {
 		pageIndex: state.pageIndex,
 		fitMode: state.fitMode,
 		skipAutoFonts: options.skipAutoFonts !== false,
+		reuseSession: true,
+		fontsChanged: true,
 	});
 }
 
@@ -738,6 +744,7 @@ async function toggleAnnotations() {
 		pageIndex: state.pageIndex,
 		fitMode: state.fitMode,
 		skipAutoFonts: true,
+		reuseSession: true,
 	});
 }
 
@@ -884,7 +891,10 @@ async function openDocument(options = {}) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const doc = callWASM("ofdgoOpen", state.ofdBytes, resetLocalFonts ? uploadedFonts() : allFonts(), state.renderAnnotations);
+		const fonts = resetLocalFonts ? uploadedFonts() : allFonts();
+		const doc = options.reuseSession
+			? callWASM("ofdgoConfigure", options.fontsChanged ? fonts : null, state.renderAnnotations)
+			: callWASM("ofdgoOpen", state.ofdBytes, fonts, state.renderAnnotations);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -904,6 +914,8 @@ async function openDocument(options = {}) {
 				resetScroll: options.resetScroll,
 				skipAutoFonts: true,
 				openSeq,
+				reuseSession: true,
+				fontsChanged: true,
 			});
 			return;
 		}
@@ -926,6 +938,7 @@ async function openDocument(options = {}) {
 		await nextFrame();
 		await renderPage(pageIndex, { keepBusy: true, scroll: false, openSeq });
 		queueNearbyPages(pageIndex, openSeq);
+		loadDocumentDetails(openSeq);
 	} catch (err) {
 		if (openSeq !== state.openSeq) {
 			return;
@@ -934,6 +947,24 @@ async function openDocument(options = {}) {
 	} finally {
 		if (openSeq === state.openSeq) {
 			setBusy(false);
+		}
+	}
+}
+
+async function loadDocumentDetails(openSeq) {
+	await waitForPaint();
+	if (openSeq !== state.openSeq) {
+		return;
+	}
+	try {
+		const info = callWASM("ofdgoDocumentInfo");
+		if (openSeq === state.openSeq) {
+			Object.assign(state.doc, info, { detailsPending: false });
+			renderMeta();
+		}
+	} catch (err) {
+		if (openSeq === state.openSeq) {
+			showError(err, false);
 		}
 	}
 }
@@ -1100,6 +1131,7 @@ function renderPageFlow() {
 
 function resetPageFlow() {
 	state.pageCache.clear();
+	state.visiblePages.clear();
 	for (const task of state.pageInFlight.values()) {
 		task.resolve(null);
 	}
@@ -1116,7 +1148,6 @@ function observeFlowPage(shell, index) {
 	const openSeq = state.openSeq;
 	if (index < 4 && index !== state.pageIndex) {
 		renderFlowPage(index, { openSeq, priority: 3 });
-		return;
 	}
 	const observer = flowPageObserver();
 	if (observer) {
@@ -1131,12 +1162,20 @@ function flowPageObserver() {
 	if (!state.pageObserver) {
 		const openSeq = state.openSeq;
 		state.pageObserver = new IntersectionObserver((entries) => {
+			if (openSeq !== state.openSeq) {
+				return;
+			}
 			for (const entry of entries) {
+				const index = Number.parseInt(entry.target.dataset.pageIndex, 10);
 				if (!entry.isIntersecting) {
+					state.visiblePages.delete(index);
+					if (entry.target.classList.contains("rendered")) {
+						entry.target.querySelector(".page-surface").replaceChildren();
+						entry.target.classList.remove("rendered");
+					}
 					continue;
 				}
-				const index = Number.parseInt(entry.target.dataset.pageIndex, 10);
-				state.pageObserver.unobserve(entry.target);
+				state.visiblePages.add(index);
 				renderFlowPage(index, { openSeq, priority: 4 });
 			}
 		}, {
@@ -1153,13 +1192,13 @@ async function renderFlowPage(index, options = {}) {
 		return null;
 	}
 	try {
-		const page = await loadPageData(index, { openSeq, priority: options.priority || 2 });
+		const page = await loadPageData(index, { openSeq, priority: options.priority ?? 2 });
 		if (openSeq !== state.openSeq) {
 			return null;
 		}
 		if (page) {
 			const shell = pageShell(index);
-			if (!shell?.classList.contains("rendered")) {
+			if (!shell?.classList.contains("rendered") && (!state.pageObserver || state.visiblePages.has(index) || index === state.pageIndex)) {
 				mountPageSVG(index, page, openSeq);
 			}
 			updateThumbnail(index, openSeq);
@@ -1185,7 +1224,7 @@ function loadPageData(index, options = {}) {
 		return Promise.resolve(state.pageCache.get(index));
 	}
 	const key = `${openSeq}:${index}`;
-	const priority = options.priority || 3;
+	const priority = options.priority ?? 3;
 	const current = state.pageInFlight.get(key);
 	if (current) {
 		current.priority = Math.min(current.priority, priority);
@@ -1526,6 +1565,7 @@ function renderPageList() {
 
 function resetThumbnails() {
 	state.thumbnailCache.clear();
+	state.visibleThumbnails.clear();
 	state.thumbnailInFlight.clear();
 	if (state.thumbnailObserver) {
 		state.thumbnailObserver.disconnect();
@@ -1540,6 +1580,11 @@ function cacheThumbnail(index, svgText) {
 }
 
 function setThumbnailContent(container, svgText, index, openSeq = state.openSeq) {
+	const renderKey = `${openSeq}:${index}`;
+	if (svgText && container.dataset.renderKey === renderKey) {
+		return;
+	}
+	delete container.dataset.renderKey;
 	container.replaceChildren();
 	if (!svgText) {
 		container.classList.add("pending");
@@ -1552,6 +1597,7 @@ function setThumbnailContent(container, svgText, index, openSeq = state.openSeq)
 		svg.setAttribute("aria-hidden", "true");
 		container.classList.remove("pending", "error");
 		container.append(svg);
+		container.dataset.renderKey = renderKey;
 	} catch {
 		container.classList.add("error");
 		container.textContent = String(index + 1);
@@ -1559,16 +1605,15 @@ function setThumbnailContent(container, svgText, index, openSeq = state.openSeq)
 }
 
 function observeThumbnail(button, index, openSeq = state.openSeq) {
-	if (state.thumbnailCache.has(index)) {
-		return;
+	const observer = thumbnailObserver();
+	if (observer) {
+		observer.observe(button);
 	}
 	if (index === state.pageIndex || index < 6) {
 		renderThumbnail(index, openSeq);
 		return;
 	}
-	const observer = thumbnailObserver();
 	if (observer) {
-		observer.observe(button);
 		return;
 	}
 	if (index < 8) {
@@ -1583,12 +1628,21 @@ function thumbnailObserver() {
 	if (!state.thumbnailObserver) {
 		const openSeq = state.openSeq;
 		state.thumbnailObserver = new IntersectionObserver((entries) => {
+			if (openSeq !== state.openSeq) {
+				return;
+			}
 			for (const entry of entries) {
+				const index = Number.parseInt(entry.target.dataset.pageIndex, 10);
 				if (!entry.isIntersecting) {
+					state.visibleThumbnails.delete(index);
+					const thumb = entry.target.querySelector(".thumb-paper");
+					if (thumb.dataset.renderKey) {
+						setThumbnailContent(thumb, "", index, openSeq);
+					}
 					continue;
 				}
-				state.thumbnailObserver.unobserve(entry.target);
-				renderThumbnail(Number.parseInt(entry.target.dataset.pageIndex, 10), openSeq);
+				state.visibleThumbnails.add(index);
+				renderThumbnail(index, openSeq);
 			}
 		}, {
 			root: el.pageListPanel,
@@ -1599,7 +1653,11 @@ function thumbnailObserver() {
 }
 
 async function renderThumbnail(index, openSeq = state.openSeq) {
-	if (openSeq !== state.openSeq || !state.doc || state.thumbnailCache.has(index)) {
+	if (openSeq !== state.openSeq || !state.doc) {
+		return;
+	}
+	if (state.thumbnailCache.has(index)) {
+		updateThumbnail(index, openSeq);
 		return;
 	}
 	const key = `${openSeq}:${index}`;
@@ -1626,6 +1684,9 @@ async function renderThumbnail(index, openSeq = state.openSeq) {
 }
 
 function updateThumbnail(index, openSeq = state.openSeq) {
+	if (openSeq !== state.openSeq || (state.thumbnailObserver && !state.visibleThumbnails.has(index) && index !== state.pageIndex)) {
+		return;
+	}
 	const thumb = el.pageList.querySelector(`[data-page-index="${index}"] .thumb-paper`);
 	if (thumb) {
 		setThumbnailContent(thumb, state.thumbnailCache.get(index), index, openSeq);
@@ -1647,7 +1708,7 @@ function renderMeta() {
 	el.metaVersion.textContent = doc.version || "-";
 	el.metaType.textContent = doc.docType || "-";
 	el.metaFonts.textContent = String(doc.fontCount || 0);
-	el.metaSignatures.textContent = String(doc.signatureCount || 0);
+	el.metaSignatures.textContent = doc.detailsPending ? "正在检查" : String(doc.signatureCount || 0);
 	el.pageTotal.textContent = String(doc.pageCount || 0);
 	renderSignatures();
 	renderDocumentFonts();
@@ -1948,6 +2009,8 @@ function pageStatus(index, pageCount) {
 
 function statusText(status) {
 	switch (status) {
+	case "pending":
+		return "待检查";
 	case "embedded":
 		return "内嵌";
 	case "matched":

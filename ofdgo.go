@@ -17,6 +17,7 @@ package ofdgo
 
 import (
 	"archive/zip"
+	"image"
 	"io"
 	"io/fs"
 
@@ -79,6 +80,7 @@ func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 		fontDirCandidates:     make(map[string][]fontFileCandidate),
 		textGlyphPathCache:    make(map[textGlyphPathCacheKey]textGlyphPathCacheValue),
 		templatePageCache:     make(map[string]*PageContent),
+		imageCache:            make(map[string]image.Image),
 	}
 	for _, opt := range opts {
 		opt(r)

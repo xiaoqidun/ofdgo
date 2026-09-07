@@ -248,6 +248,37 @@ func (r *Reader) PageContent(page Page) (*PageContent, error) {
 	return &content, nil
 }
 
+// PageArea 读取页面区域，不解析页面图元
+// 入参: page 页面对象
+// 返回: PageArea 页面区域, error 错误信息
+func (r *Reader) PageArea(page Page) (PageArea, error) {
+	f, err := r.openFile(r.ResPath(page.BaseLoc))
+	if err != nil {
+		return PageArea{}, err
+	}
+	defer f.Close()
+	d := xml.NewDecoder(f)
+	for {
+		token, err := d.Token()
+		if err == io.EOF {
+			return PageArea{}, nil
+		}
+		if err != nil {
+			return PageArea{}, err
+		}
+		if start, ok := token.(xml.StartElement); ok {
+			switch start.Name.Local {
+			case "Area":
+				var area PageArea
+				err := d.DecodeElement(&area, &start)
+				return area, err
+			case "Content":
+				return PageArea{}, nil
+			}
+		}
+	}
+}
+
 // ResPath 获取资源的完整路径
 // 入参: resLink 资源链接
 // 返回: string 完整路径

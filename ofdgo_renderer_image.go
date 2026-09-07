@@ -188,7 +188,32 @@ func imageWithClip(img image.Image, clipPath *canvas.Path, m canvas.Matrix) imag
 // 入参: resPath 图片资源路径
 // 返回: image.Image 图片对象, error 错误信息
 func (r *Renderer) decodeImageResource(resPath string) (image.Image, error) {
-	rc, err := r.Reader.openFile(r.Reader.ResPath(resPath))
+	resPath = cleanPackagePath(r.Reader.ResPath(resPath))
+	img, ok := r.imageCache[resPath]
+	if !ok {
+		var err error
+		img, err = r.readImageResource(resPath)
+		if err != nil {
+			return nil, err
+		}
+		if r.imageCache == nil {
+			r.imageCache = make(map[string]image.Image)
+		}
+		r.imageCache[resPath] = img
+	}
+	if r.decodeImages {
+		if source, ok := img.(*canvasimage.Image); ok {
+			return source.Image()
+		}
+	}
+	return img, nil
+}
+
+// readImageResource 读取图片资源并保留可直接嵌入的原始编码
+// 入参: resPath 图片资源路径
+// 返回: image.Image 图片对象, error 错误信息
+func (r *Renderer) readImageResource(resPath string) (image.Image, error) {
+	rc, err := r.Reader.openFile(resPath)
 	if err != nil {
 		return nil, err
 	}
@@ -200,18 +225,12 @@ func (r *Renderer) decodeImageResource(resPath string) (image.Image, error) {
 		if err != nil {
 			return nil, err
 		}
-		if r.decodeImages {
-			return img.Image()
-		}
 		return img, nil
 	}
 	if isPNGData(header) {
 		img, err := canvasimage.NewPNGImage(reader)
 		if err != nil {
 			return nil, err
-		}
-		if r.decodeImages {
-			return img.Image()
 		}
 		return img, nil
 	}

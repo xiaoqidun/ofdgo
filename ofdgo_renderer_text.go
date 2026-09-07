@@ -29,6 +29,11 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if obj.Visible != nil && !*obj.Visible {
 		return
 	}
+	shouldFill := obj.Fill == nil || *obj.Fill
+	shouldStroke := obj.Stroke != nil && *obj.Stroke
+	if !shouldFill && !shouldStroke {
+		return
+	}
 	ctx.Push()
 	bx, by := 0.0, 0.0
 	if obj.Boundary != "" {
@@ -84,6 +89,22 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if fillPaint == nil {
 		fillPaint = fillColor
 	}
+	strokeStyle := newPathStyle(nil, defaultStroke, 0, obj.Alpha)
+	if shouldStroke {
+		if dp != nil {
+			strokeStyle.applyDrawParam(dp, bx, by, pageH, obj.Alpha)
+		}
+		if obj.StrokeColor != nil {
+			strokeStyle.applyStrokeColor(obj.StrokeColor, bx, by, pageH, obj.Alpha)
+		}
+		if obj.LineWidth > 0 {
+			strokeStyle.lineWidth = obj.LineWidth
+		}
+		if strokeStyle.strokePaint == nil {
+			strokeStyle.strokePaint = colorWithAlpha(canvas.Black, obj.Alpha)
+		}
+		strokeStyle.scale(ctm)
+	}
 	fontStyle := canvas.FontRegular
 	weight := obj.Weight
 	if weight == 0 && dp != nil && dp.Weight > 0 {
@@ -136,8 +157,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		}
 		dxs, dys := parseFloats(tc.DeltaX), parseFloats(tc.DeltaY)
 		xs, ys := parseFloats(tc.X), parseFloats(tc.Y)
-		drawAsPath := embeddedFont || textCodePositioned(tc, xs, ys) || clipPath != nil
+		drawAsPath := embeddedFont || textCodePositioned(tc, xs, ys) || clipPath != nil || shouldStroke
 		cx, cy := 0.0, 0.0
+		previousWidth := 0.0
 		if len(xs) > 0 {
 			cx = xs[0]
 		}
@@ -160,9 +182,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				if dx, ok := textDelta(dxs, i-1); ok {
 					cx += dx
 				} else if len(dys) == 0 {
-					cx += glyphWidth * hScale
+					cx += previousWidth * hScale
 				}
 			}
+			previousWidth = glyphWidth
 			if i < len(ys) {
 				cy = ys[i]
 			} else if i > 0 {
@@ -185,6 +208,40 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				glyphFillPaint = parseFillPaint(fillColorNode, bx, by, pageH, canvasX, canvasY)
 			}
 			advanceLimit := textGlyphAdvanceLimit(dxs, dys, xs, i, len(glyphs), cx)
+			if shouldStroke {
+				scaleX := hScale
+				if advanceLimit > 0 && glyphWidth*scaleX > advanceLimit {
+					scaleX = advanceLimit / glyphWidth
+				}
+				transform := canvas.Identity.Translate(canvasX, canvasY)
+				if useTextMatrix {
+					transform = transform.Mul(textMatrix(ctm))
+				}
+				path := glyphPath.Copy().Transform(transform.Scale(scaleX, 1))
+				if shouldFill && glyphFillPaint != nil {
+					ctx.SetFill(glyphFillPaint)
+					ctx.SetStrokeColor(canvas.Transparent)
+					ctx.DrawPath(0, 0, applyClipPath(path.Copy(), clipPath))
+				}
+				if len(strokeStyle.dashPattern) > 0 {
+					path = path.Dash(strokeStyle.dashOffset, strokeStyle.dashPattern...)
+				}
+				path = path.Stroke(strokeStyle.lineWidth, strokeStyle.lineCap, strokeStyle.lineJoin, canvas.Tolerance)
+				ctx.SetFill(strokeStyle.strokePaint)
+				ctx.SetStrokeColor(canvas.Transparent)
+				ctx.DrawPath(0, 0, applyClipPath(path, clipPath))
+				if hasUnderline {
+					underline := &canvas.Path{}
+					underline.MoveTo(0, -sizeMM*0.1)
+					underline.LineTo(glyphWidth*scaleX, -sizeMM*0.1)
+					underline = underline.Stroke(sizeMM*0.05, canvas.ButtCap, canvas.MiterJoin, canvas.Tolerance)
+					if shouldFill {
+						ctx.SetFillColor(fillColor)
+					}
+					ctx.DrawPath(0, 0, applyClipPath(underline.Transform(transform), clipPath))
+				}
+				continue
+			}
 			if glyphFillPaint != nil {
 				ctx.SetFill(glyphFillPaint)
 				if clipPath != nil {

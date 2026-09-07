@@ -94,11 +94,14 @@ type SignatureStampInfo struct {
 
 // Session WebUI文档会话
 type Session struct {
-	Reader    *ofdgo.Reader
-	Renderer  *ofdgo.Renderer
-	doc       *ofdgo.Document
-	pageCache map[int]*ofdgo.PageContent
-	boxCache  map[int]ofdgo.Box
+	Reader         *ofdgo.Reader
+	Renderer       *ofdgo.Renderer
+	doc            *ofdgo.Document
+	pageCache      map[int]*ofdgo.PageContent
+	boxCache       map[int]ofdgo.Box
+	signatures     []SignatureInfo
+	signatureError error
+	signaturesRead bool
 }
 
 // DocumentInfo 文档信息
@@ -117,6 +120,7 @@ type DocumentInfo struct {
 	Fonts          []FontInfo      `json:"fonts"`
 	Signatures     []SignatureInfo `json:"signatures"`
 	Pages          []PageInfo      `json:"pages"`
+	DetailsPending bool            `json:"detailsPending,omitempty"`
 }
 
 // PageInfo 页面信息
@@ -222,7 +226,69 @@ func (s *Session) Close() error {
 	return s.Reader.Close()
 }
 
-// Info 获取文档信息
+// SetFonts 更新字体配置并保留文档、页面和验签结果
+// 入参: fonts 字体文件列表
+// 返回: error 错误信息
+func (s *Session) SetFonts(fonts []FontFile) error {
+	opts := []ofdgo.RendererOption{
+		ofdgo.WithDPI(s.Renderer.DPI),
+		ofdgo.WithAnnotations(s.Renderer.RenderAnnotations),
+	}
+	if len(fonts) > 0 {
+		fontFS := ofdgo.NewFontFS(fonts)
+		if fontFS.Len() == 0 {
+			return fmt.Errorf("invalid font file")
+		}
+		opts = append(opts, ofdgo.WithFontFS(fontFS))
+	}
+	s.Renderer = ofdgo.NewRenderer(s.Reader, opts...)
+	return nil
+}
+
+// Summary 获取首屏所需信息，不解析页面图元或执行验签
+// 返回: DocumentInfo 文档信息
+func (s *Session) Summary() DocumentInfo {
+	info := DocumentInfo{
+		Version:        s.Reader.Version(),
+		DocType:        s.Reader.DocType(),
+		PageCount:      len(s.doc.Pages.Page),
+		Pages:          make([]PageInfo, 0, len(s.doc.Pages.Page)),
+		DetailsPending: true,
+	}
+	if docInfo, err := s.Reader.DocInfo(); err == nil && docInfo != nil {
+		info.Title = docInfo.Title
+		info.Author = docInfo.Author
+		info.Subject = docInfo.Subject
+		info.CreationDate = docInfo.CreationDate
+		info.ModDate = docInfo.ModDate
+	}
+	for index, page := range s.doc.Pages.Page {
+		box, ok := s.boxCache[index]
+		if !ok {
+			if area, err := s.Reader.PageArea(page); err == nil {
+				box, _ = s.pageBox(index, &ofdgo.PageContent{Area: area})
+			}
+		}
+		info.Pages = append(info.Pages, PageInfo{Index: index, ID: page.ID, Width: box.W, Height: box.H})
+	}
+	if fonts, err := s.Reader.Fonts(); err == nil {
+		for _, font := range fonts {
+			info.Fonts = append(info.Fonts, FontInfo{
+				ID:         font.ID,
+				FontName:   font.FontName,
+				FamilyName: font.FamilyName,
+				Charset:    font.Charset,
+				FontFile:   font.FontFile,
+				Embedded:   font.FontFile != "",
+				Status:     "pending",
+			})
+		}
+	}
+	info.FontCount = len(info.Fonts)
+	return info
+}
+
+// Info 获取完整文档信息
 // 返回: DocumentInfo 文档信息
 func (s *Session) Info() DocumentInfo {
 	info := DocumentInfo{
@@ -339,14 +405,20 @@ func (s *Session) renderPageImage(page *ofdgo.PageContent, dpi float64) (image.I
 // signatureInfos 获取签名验证信息
 // 返回: []SignatureInfo 签名验证信息, error 错误信息
 func (s *Session) signatureInfos() ([]SignatureInfo, error) {
+	if s.signaturesRead {
+		return s.signatures, s.signatureError
+	}
+	s.signaturesRead = true
 	reports, err := s.Reader.VerifySignatures()
 	if err != nil {
+		s.signatureError = err
 		return nil, err
 	}
 	infos := make([]SignatureInfo, 0, len(reports))
 	for _, report := range reports {
 		infos = append(infos, signatureInfo(report))
 	}
+	s.signatures = infos
 	return infos, nil
 }
 
@@ -464,7 +536,15 @@ func (s *Session) ExportPDF() ([]byte, error) {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
 	var buf bytes.Buffer
-	if err := s.Renderer.RenderToMultiPagePDF(&buf); err != nil {
+	pages := make([]*ofdgo.PageContent, len(s.doc.Pages.Page))
+	for i := range pages {
+		_, page, err := s.pageContent(i)
+		if err != nil {
+			return nil, err
+		}
+		pages[i] = page
+	}
+	if err := s.Renderer.RenderPagesToPDF(pages, &buf); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil

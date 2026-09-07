@@ -67,26 +67,12 @@ func replacePDFProducer(data []byte) []byte {
 // 入参: page 页面内容, writer 输出流
 // 返回: error 错误信息
 func (r *Renderer) RenderToPDF(page *PageContent, writer io.Writer) error {
-	c, err := r.renderPage(page)
-	if err != nil {
-		return err
-	}
 	box, err := r.GetPageBox(page)
 	if err != nil {
 		return err
 	}
 	pages := []pdfPage{{Content: page, Box: box}}
-	navigation := newPDFNavigation(r, r.Reader.doc, pages)
-	var buf bytes.Buffer
-	p := pdf.New(&buf, c.W, c.H, nil)
-	p.SetInfo("", "", "", "", "xiaoqidun/ofdgo")
-	navigation.apply(p, 0)
-	c.RenderTo(p)
-	if err := p.Close(); err != nil {
-		return err
-	}
-	_, err = writer.Write(replacePDFProducer(buf.Bytes()))
-	return err
+	return r.renderPDFPages(pages, writer)
 }
 
 // RenderToEPS 渲染为EPS
@@ -123,24 +109,57 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer) error {
 		}
 		pages[i] = pdfPage{Content: page, Box: box}
 	}
-	navigation := newPDFNavigation(r, doc, pages)
-	var buf bytes.Buffer
-	p := pdf.New(&buf, pages[0].Box.W, pages[0].Box.H, nil)
+	return r.renderPDFPages(pages, writer)
+}
+
+// RenderPagesToPDF 按指定顺序导出已解析的页面，复用调用方的页面缓存
+// 入参: contents 页面内容列表, writer 输出流
+// 返回: error 错误信息
+func (r *Renderer) RenderPagesToPDF(contents []*PageContent, writer io.Writer) error {
+	if len(contents) == 0 {
+		return fmt.Errorf("no pages found")
+	}
+	pages := make([]pdfPage, len(contents))
+	for i, page := range contents {
+		box, err := r.GetPageBox(page)
+		if err != nil {
+			return fmt.Errorf("failed to read page %d area: %w", i+1, err)
+		}
+		pages[i] = pdfPage{Content: page, Box: box}
+	}
+	return r.renderPDFPages(pages, writer)
+}
+
+// renderPDFPages 渲染页面并复用调用方的字节缓冲
+// 入参: pages 页面列表, writer 输出流
+// 返回: error 错误信息
+func (r *Renderer) renderPDFPages(pages []pdfPage, writer io.Writer) error {
+	navigation := newPDFNavigation(r, r.Reader.doc, pages)
+	buf, direct := writer.(*bytes.Buffer)
+	if !direct {
+		buf = &bytes.Buffer{}
+	}
+	start := buf.Len()
+	p := pdf.New(buf, pages[0].Box.W, pages[0].Box.H, nil)
 	p.SetInfo("", "", "", "", "xiaoqidun/ofdgo")
 	for i, page := range pages {
-		c, err := r.renderPage(page.Content)
-		if err != nil {
-			return fmt.Errorf("failed to render page %d: %w", i+1, err)
-		}
 		if i > 0 {
-			p.NewPage(c.W, c.H)
+			p.NewPage(page.Box.W, page.Box.H)
 		}
 		navigation.apply(p, i)
-		c.RenderTo(p)
+		if err := r.renderPageToContext(canvas.NewContext(p), page.Content, true); err != nil {
+			buf.Truncate(start)
+			return fmt.Errorf("failed to render page %d: %w", i+1, err)
+		}
 	}
 	if err := p.Close(); err != nil {
+		buf.Truncate(start)
 		return err
 	}
-	_, err = writer.Write(replacePDFProducer(buf.Bytes()))
+	data := replacePDFProducer(buf.Bytes()[start:])
+	if direct {
+		return nil
+	}
+	_, err := writer.Write(data)
 	return err
 }

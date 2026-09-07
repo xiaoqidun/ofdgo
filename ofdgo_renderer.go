@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	"image"
 	"io/fs"
 
 	"github.com/tdewolff/canvas"
@@ -39,6 +40,7 @@ type Renderer struct {
 	fontDirCandidates     map[string][]fontFileCandidate
 	textGlyphPathCache    map[textGlyphPathCacheKey]textGlyphPathCacheValue
 	templatePageCache     map[string]*PageContent
+	imageCache            map[string]image.Image
 	fontDirs              []string
 	fontFS                []fs.FS
 	decodeImages          bool

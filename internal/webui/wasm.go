@@ -40,6 +40,8 @@ type apiResult struct {
 // RunWASM 注册浏览器WASM接口并阻塞运行
 func RunWASM() {
 	registerCallback("ofdgoOpen", openDocument)
+	registerCallback("ofdgoConfigure", configureDocument)
+	registerCallback("ofdgoDocumentInfo", documentInfo)
 	registerCallback("ofdgoRenderPage", renderPage)
 	registerCallback("ofdgoExportFormats", exportFormats)
 	registerCallback("ofdgoExportPage", exportPage)
@@ -102,6 +104,36 @@ func openDocument(args []js.Value) (any, error) {
 		return nil, err
 	}
 	currentSession = session
+	return currentSession.Summary(), nil
+}
+
+// configureDocument 更新当前会话的字体和注解设置
+// 入参: args 浏览器参数
+// 返回: any 文档信息, error 错误信息
+func configureDocument(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	if !args[0].IsNull() && !args[0].IsUndefined() {
+		fonts, err := fontsFromJS(args[0])
+		if err != nil {
+			return nil, err
+		}
+		if err := currentSession.SetFonts(fonts); err != nil {
+			return nil, err
+		}
+	}
+	currentSession.Renderer.RenderAnnotations = args[1].Bool()
+	return currentSession.Summary(), nil
+}
+
+// documentInfo 获取首屏之后加载的字体统计和验签结果
+// 入参: args 浏览器参数
+// 返回: any 文档信息, error 错误信息
+func documentInfo(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
 	return currentSession.Info(), nil
 }
 
