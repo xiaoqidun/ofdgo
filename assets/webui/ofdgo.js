@@ -146,7 +146,7 @@ el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
 el.fontAddButton.addEventListener("click", () => openFontFile(el.fontInput));
 el.fontDirectoryButton.addEventListener("click", () => openFontFile(el.fontDirectoryInput));
 el.localFontButton.addEventListener("click", loadLocalFonts);
-el.ofdInput.addEventListener("change", openSelectedOFD);
+el.ofdInput.addEventListener("change", () => openOFD(el.ofdInput.files[0]));
 el.fontInput.addEventListener("change", openSelectedFonts);
 el.fontDirectoryInput.addEventListener("change", openSelectedFonts);
 el.prevButton.addEventListener("click", () => renderPage(state.pageIndex - 1));
@@ -274,6 +274,17 @@ async function boot() {
 		await refreshLocalFontPermission();
 		setStatus(fontsRestored ? STATUS.ready : "字体读取失败");
 		setBusy(false);
+		if ("launchQueue" in window) {
+			let opening = Promise.resolve();
+			window.launchQueue.setConsumer(({ files }) => {
+				if (!files.length) {
+					return;
+				}
+				opening = opening.then(async () => {
+					await openOFD(await files[0].getFile());
+				}).catch((err) => showError(err, !state.doc));
+			});
+		}
 	} catch (err) {
 		setStatus("渲染引擎加载失败");
 		setEmpty(String(err.message || err));
@@ -533,8 +544,7 @@ function waitFor(predicate) {
 	});
 }
 
-async function openSelectedOFD() {
-	const file = el.ofdInput.files[0];
+async function openOFD(file) {
 	if (!file) {
 		return;
 	}

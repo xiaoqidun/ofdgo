@@ -7,6 +7,15 @@
 	"display": "standalone",
 	"background_color": "#eef1f4",
 	"theme_color": "#fbfcfd",
+	"file_handlers": [
+		{
+			"action": "./",
+			"accept": {
+				"application/ofd": [".ofd"]
+			},
+			"launch_type": "multiple-clients"
+		}
+	],
 	"icons": [
 		{
 			"src": "./ofdgo.svg",
