@@ -77,28 +77,30 @@ type ClipArea struct {
 
 // TextObject 文本对象
 type TextObject struct {
-	ID          string        `xml:"ID,attr"`
-	Boundary    string        `xml:"Boundary,attr"`
-	DrawParam   string        `xml:"DrawParam,attr"`
-	LineWidth   float64       `xml:"LineWidth,attr"`
-	Font        string        `xml:"Font,attr"`
-	Size        float64       `xml:"Size,attr"`
-	Weight      int           `xml:"Weight,attr"`
-	Italic      bool          `xml:"Italic,attr"`
-	Decoration  string        `xml:"Decoration,attr"`
-	HScale      float64       `xml:"HScale,attr"`
-	VScale      float64       `xml:"VScale,attr"`
-	CTM         string        `xml:"CTM,attr"`
-	Alpha       *int          `xml:"Alpha,attr"`
-	Visible     *bool         `xml:"Visible,attr"`
-	Fill        *bool         `xml:"Fill,attr"`
-	Stroke      *bool         `xml:"Stroke,attr"`
-	StrokeColor *StrokeColor  `xml:"StrokeColor"`
-	FillColor   *FillColor    `xml:"FillColor"`
-	CGTransform []CGTransform `xml:"CGTransform"`
-	TextCode    []TextCode    `xml:"TextCode"`
-	Clips       *Clips        `xml:"Clips"`
-	Actions     []Action      `xml:"Actions>Action"`
+	ID            string        `xml:"ID,attr"`
+	Boundary      string        `xml:"Boundary,attr"`
+	DrawParam     string        `xml:"DrawParam,attr"`
+	LineWidth     float64       `xml:"LineWidth,attr"`
+	Font          string        `xml:"Font,attr"`
+	Size          float64       `xml:"Size,attr"`
+	Weight        int           `xml:"Weight,attr"`
+	Italic        bool          `xml:"Italic,attr"`
+	Decoration    string        `xml:"Decoration,attr"`
+	HScale        float64       `xml:"HScale,attr"`
+	VScale        float64       `xml:"VScale,attr"`
+	ReadDirection int           `xml:"ReadDirection,attr"`
+	CharDirection int           `xml:"CharDirection,attr"`
+	CTM           string        `xml:"CTM,attr"`
+	Alpha         *int          `xml:"Alpha,attr"`
+	Visible       *bool         `xml:"Visible,attr"`
+	Fill          *bool         `xml:"Fill,attr"`
+	Stroke        *bool         `xml:"Stroke,attr"`
+	StrokeColor   *StrokeColor  `xml:"StrokeColor"`
+	FillColor     *FillColor    `xml:"FillColor"`
+	CGTransform   []CGTransform `xml:"CGTransform"`
+	TextCode      []TextCode    `xml:"TextCode"`
+	Clips         *Clips        `xml:"Clips"`
+	Actions       []Action      `xml:"Actions>Action"`
 }
 
 // FillColor 填充颜色
