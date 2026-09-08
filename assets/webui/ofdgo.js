@@ -1250,7 +1250,10 @@ async function openDocument(options = {}) {
 		state.doc = doc;
 		state.pageIndex = pageIndex;
 		state.scale = options.scale || 1;
-		state.fitMode = options.fitMode || "width";
+		if (!options.fitMode) {
+			setContinuous(window.matchMedia("(max-width: 640px)").matches);
+		}
+		state.fitMode = options.fitMode || (!state.continuous && pageCount === 1 ? "height" : "width");
 		if (!options.skipAutoFonts && await autoLoadDocumentLocalFonts(openSeq)) {
 			if (openSeq !== state.openSeq) {
 				return;
@@ -2406,11 +2409,15 @@ function fontMeta(font) {
 	return parts.join(" · ");
 }
 
-function toggleContinuous() {
-	const anchor = state.fitMode === "free" ? scaleAnchor() : null;
-	state.continuous = !state.continuous;
+function setContinuous(continuous) {
+	state.continuous = continuous;
 	el.pageFrame.classList.toggle("continuous", state.continuous);
 	el.continuousButton.setAttribute("aria-pressed", String(state.continuous));
+}
+
+function toggleContinuous() {
+	const anchor = state.fitMode === "free" ? scaleAnchor() : null;
+	setContinuous(!state.continuous);
 	clearStampHighlights();
 	if (state.fitMode === "free") {
 		restoreScaleAnchor(anchor);
