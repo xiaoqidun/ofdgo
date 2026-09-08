@@ -17,7 +17,7 @@ const COMMON_FONT_NAMES = [
 	"Times New Roman",
 ];
 const LOCAL_FONT_LOAD_LIMIT = 16;
-const FONT_DATABASE = "ofdgo-fonts";
+const FONT_DATABASE = "ofdgo";
 const fontChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel(FONT_DATABASE) : null;
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const DEFAULT_IMAGE_DPI = 300;
@@ -615,7 +615,12 @@ async function addStoredFonts(fonts) {
 		const digest = await crypto.subtle.digest("SHA-256", font.data);
 		const checksum = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 		if (!records.has(checksum)) {
-			records.set(checksum, { checksum, name: font.name, enabled: font.enabled, data: new Blob([font.data]) });
+			records.set(checksum, {
+				name: font.name,
+				data: new Blob([font.data]),
+				enabled: font.enabled,
+				checksum,
+			});
 		}
 	}
 	await fontTransaction("readwrite", (store) => {
@@ -884,7 +889,7 @@ async function restoreUserFonts() {
 	fonts.push(...state.userFonts.filter((font) => font.source === "upload"));
 	if (fonts.length === state.userFonts.length && fonts.every((font, index) => {
 		const old = state.userFonts[index];
-		return font.id === old.id && font.checksum === old.checksum && font.name === old.name && font.enabled === old.enabled;
+		return font.id === old.id && font.name === old.name && font.enabled === old.enabled && font.checksum === old.checksum;
 	})) {
 		return false;
 	}
@@ -932,8 +937,8 @@ function createFontRecord(name, data, source) {
 		id: `${source}-${state.fontSeq}`,
 		name: name || "font.ttf",
 		data,
-		source,
 		enabled: true,
+		source,
 	};
 }
 
