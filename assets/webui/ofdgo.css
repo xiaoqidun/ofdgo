@@ -513,6 +513,11 @@ body[data-hide-meta] .meta-panel {
 	padding-block: var(--fit-space, var(--page-space));
 }
 
+.page-frame.continuous {
+	--page-space: 0px;
+	align-items: start;
+}
+
 .svg-host {
 	display: grid;
 	justify-items: center;
@@ -527,6 +532,11 @@ body[data-hide-meta] .meta-panel {
 	border: 1px solid rgba(170, 183, 193, 0.55);
 	box-shadow: var(--shadow-page);
 	background: var(--page);
+}
+
+.page-frame.continuous .page-shell {
+	border: 0;
+	box-shadow: none;
 }
 
 .page-shell.error {
@@ -910,6 +920,7 @@ body[data-hide-meta] .meta-panel {
 }
 
 .app-footer {
+	z-index: 12;
 	justify-content: space-between;
 	overflow: hidden;
 	border-top: 1px solid var(--line);

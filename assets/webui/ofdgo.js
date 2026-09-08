@@ -62,6 +62,7 @@ const state = {
 	pageIndex: 0,
 	scale: 1,
 	fitMode: "width",
+	continuous: false,
 	renderAnnotations: true,
 	pageCache: new Map(),
 	pageInFlight: new Map(),
@@ -98,6 +99,7 @@ const el = {
 	zoomLabel: document.querySelector("#zoomLabel"),
 	fitButton: document.querySelector("#fitButton"),
 	fitHeightButton: document.querySelector("#fitHeightButton"),
+	continuousButton: document.querySelector("#continuousButton"),
 	annotationButton: document.querySelector("#annotationButton"),
 	imageDPI: document.querySelector("#imageDPI"),
 	pageExportFormat: document.querySelector("#pageExportFormat"),
@@ -145,6 +147,7 @@ el.zoomOutButton.addEventListener("click", () => setScale(state.scale - 0.1));
 el.zoomInButton.addEventListener("click", () => setScale(state.scale + 0.1));
 el.fitButton.addEventListener("click", fitWidth);
 el.fitHeightButton.addEventListener("click", fitHeight);
+el.continuousButton.addEventListener("click", toggleContinuous);
 el.annotationButton.addEventListener("click", toggleAnnotations);
 el.pageExportFormat.addEventListener("change", () => updateDPIControl());
 el.exportPageButton.addEventListener("click", exportCurrentPage);
@@ -1121,6 +1124,7 @@ async function exportCurrentPage() {
 
 function renderPageFlow() {
 	el.svgHost.replaceChildren();
+	el.viewerPanel.classList.remove("single-page-fits-height");
 	if (!state.doc) {
 		return;
 	}
@@ -1374,7 +1378,7 @@ function pageShell(index) {
 function scrollToPage(index) {
 	const shell = pageShell(index);
 	if (shell) {
-		if (state.fitMode === "height") {
+		if (state.fitMode === "height" && !state.continuous) {
 			shell.scrollIntoView({ block: "center", inline: "nearest" });
 		} else {
 			const viewerRect = el.viewerPanel.getBoundingClientRect();
@@ -1418,6 +1422,16 @@ function syncCurrentPageFromScroll() {
 function pageShellFromView() {
 	const rect = el.viewerPanel.getBoundingClientRect();
 	const x = rect.left + rect.width / 2;
+	if (state.continuous) {
+		if (el.viewerPanel.scrollTop + el.viewerPanel.clientHeight >= el.viewerPanel.scrollHeight - 1) {
+			// 末尾无法顶对齐时保留完整可见的当前页
+			const shell = pageShell(state.pageIndex);
+			const bounds = shell?.getBoundingClientRect();
+			return bounds && bounds.top >= rect.top - 1 && bounds.bottom <= rect.bottom + 1
+				? shell : el.svgHost.lastElementChild;
+		}
+		return pageShellAtPoint(x, rect.top + 1);
+	}
 	return pageShellAtPoint(x, rect.top + rect.height * 0.45)
 		|| pageShellAtPoint(x, rect.top + rect.height * 0.25)
 		|| pageShellAtPoint(x, rect.top + rect.height * 0.65);
@@ -2069,6 +2083,20 @@ function fontMeta(font) {
 	return parts.join(" · ");
 }
 
+function toggleContinuous() {
+	const anchor = state.fitMode === "free" ? scaleAnchor() : null;
+	state.continuous = !state.continuous;
+	el.pageFrame.classList.toggle("continuous", state.continuous);
+	el.continuousButton.setAttribute("aria-pressed", String(state.continuous));
+	clearStampHighlights();
+	if (state.fitMode === "free") {
+		restoreScaleAnchor(anchor);
+	} else {
+		applyFit(false);
+		scrollToPage(state.pageIndex);
+	}
+}
+
 function fitWidth(updateStatus = true) {
 	const page = currentPageInfo();
 	if (!page) {
@@ -2083,10 +2111,14 @@ function fitWidth(updateStatus = true) {
 function fitWidthScale(page) {
 	const space = pageSpace();
 	const width = Math.max(1, page.width * MM_TO_PX);
-	const height = Math.max(1, page.height * MM_TO_PX);
 	let available = Math.max(1, el.viewerPanel.clientWidth - space * 2);
-	if (!viewerHasVerticalScrollbar() && height * (available / width) > Math.max(1, el.viewerPanel.clientHeight - space * 2)) {
-		available = Math.max(1, available - scrollbarWidth());
+	if (!viewerHasVerticalScrollbar()) {
+		const height = state.continuous
+			? state.doc.pages.reduce((total, item) => total + available * item.height / item.width, 0)
+			: Math.max(1, page.height * MM_TO_PX) * (available / width);
+		if (height > Math.max(1, el.viewerPanel.clientHeight - space * 2)) {
+			available = Math.max(1, available - scrollbarWidth());
+		}
 	}
 	return Math.min(4, Math.max(0.2, available / width));
 }
@@ -2097,10 +2129,32 @@ function fitHeight(updateStatus = true) {
 		return;
 	}
 	const space = pageSpace();
-	const availableWidth = Math.max(1, el.viewerPanel.clientWidth - space * 2);
-	const availableHeight = Math.max(1, el.viewerPanel.clientHeight - space * 2);
+	let availableWidth = Math.max(1, el.viewerPanel.clientWidth - space * 2);
+	let availableHeight = Math.max(1, el.viewerPanel.clientHeight - space * 2);
 	const width = Math.max(1, page.width * MM_TO_PX);
 	const height = Math.max(1, page.height * MM_TO_PX);
+	if (state.continuous) {
+		availableWidth = Math.max(1, el.viewerPanel.offsetWidth);
+		availableHeight = Math.max(1, el.viewerPanel.offsetHeight);
+		const contentWidth = state.doc.pages.reduce((max, item) => Math.max(max, item.width), 0) * MM_TO_PX;
+		const contentHeight = state.doc.pages.reduce((total, item) => total + item.height, 0) * MM_TO_PX;
+		const scale = Math.min(availableWidth / width, availableHeight / height);
+		const vertical = scale > availableHeight / contentHeight;
+		const horizontal = scale > availableWidth / contentWidth;
+		if (vertical || horizontal) {
+			const scrollbar = scrollbarWidth();
+			availableWidth = Math.max(1, availableWidth - (vertical ? scrollbar : 0));
+			availableHeight = Math.max(1, availableHeight - (horizontal ? scrollbar : 0));
+			// 一侧滚动条占用空间后，另一侧也可能需要滚动条
+			const nextScale = Math.min(availableWidth / width, availableHeight / height);
+			if (!vertical && nextScale > availableHeight / contentHeight) {
+				availableWidth = Math.max(1, availableWidth - scrollbar);
+			}
+			if (!horizontal && nextScale > availableWidth / contentWidth) {
+				availableHeight = Math.max(1, availableHeight - scrollbar);
+			}
+		}
+	}
 	setScale(Math.min(availableWidth / width, availableHeight / height), updateStatus, "height");
 	if (updateStatus) {
 		scrollToPage(state.pageIndex);
@@ -2120,8 +2174,7 @@ function applyFit(updateStatus = true) {
 function setScale(nextScale, updateStatus = true, fitMode = "free") {
 	const anchor = updateStatus && fitMode === "free" ? scaleAnchor() : null;
 	const scale = Math.min(4, Math.max(0.2, nextScale));
-	const scaleChanged = Math.abs(scale - state.scale) > 0.001;
-	const layoutChanged = scaleChanged || fitMode !== state.fitMode;
+	const layoutChanged = scale !== state.scale || fitMode !== state.fitMode;
 	state.fitMode = fitMode;
 	state.scale = scale;
 	if (layoutChanged) {
@@ -2208,7 +2261,7 @@ function updateFitSpace() {
 	const height = shell ? shell.getBoundingClientRect().height : Math.max(1, page.height * MM_TO_PX * state.scale);
 	const base = pageSpace();
 	el.viewerPanel.classList.toggle("single-page-fits-height", state.doc.pageCount === 1 && height <= el.viewerPanel.clientHeight - base * 2);
-	const space = Math.max(base, (el.viewerPanel.clientHeight - height) / 2);
+	const space = state.continuous ? 0 : Math.max(base, (el.viewerPanel.clientHeight - height) / 2);
 	const gap = space > base ? space + 1 : space;
 	el.pageFrame.style.setProperty("--fit-space", `${space}px`);
 	el.pageFrame.style.setProperty("--fit-gap", `${gap}px`);
@@ -2226,6 +2279,7 @@ function updateControls() {
 	el.zoomInButton.disabled = !hasDoc || state.scale >= 4;
 	el.fitButton.disabled = !hasDoc;
 	el.fitHeightButton.disabled = !hasDoc;
+	el.continuousButton.disabled = !hasDoc;
 	el.fitButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "width");
 	el.fitHeightButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "height");
 	updateAnnotationButton();
