@@ -1424,7 +1424,6 @@ function pageShellFromView() {
 	const x = rect.left + rect.width / 2;
 	if (state.continuous) {
 		if (el.viewerPanel.scrollTop + el.viewerPanel.clientHeight >= el.viewerPanel.scrollHeight - 1) {
-			// 末尾无法顶对齐时保留完整可见的当前页
 			const shell = pageShell(state.pageIndex);
 			const bounds = shell?.getBoundingClientRect();
 			return bounds && bounds.top >= rect.top - 1 && bounds.bottom <= rect.bottom + 1
@@ -2139,18 +2138,17 @@ function fitHeight(updateStatus = true) {
 		const contentWidth = state.doc.pages.reduce((max, item) => Math.max(max, item.width), 0) * MM_TO_PX;
 		const contentHeight = state.doc.pages.reduce((total, item) => total + item.height, 0) * MM_TO_PX;
 		const scale = Math.min(availableWidth / width, availableHeight / height);
-		const vertical = scale > availableHeight / contentHeight;
-		const horizontal = scale > availableWidth / contentWidth;
-		if (vertical || horizontal) {
+		const needsVerticalScrollbar = scale > availableHeight / contentHeight;
+		const needsHorizontalScrollbar = scale > availableWidth / contentWidth;
+		if (needsVerticalScrollbar || needsHorizontalScrollbar) {
 			const scrollbar = scrollbarWidth();
-			availableWidth = Math.max(1, availableWidth - (vertical ? scrollbar : 0));
-			availableHeight = Math.max(1, availableHeight - (horizontal ? scrollbar : 0));
-			// 一侧滚动条占用空间后，另一侧也可能需要滚动条
+			availableWidth = Math.max(1, availableWidth - (needsVerticalScrollbar ? scrollbar : 0));
+			availableHeight = Math.max(1, availableHeight - (needsHorizontalScrollbar ? scrollbar : 0));
 			const nextScale = Math.min(availableWidth / width, availableHeight / height);
-			if (!vertical && nextScale > availableHeight / contentHeight) {
+			if (!needsVerticalScrollbar && nextScale > availableHeight / contentHeight) {
 				availableWidth = Math.max(1, availableWidth - scrollbar);
 			}
-			if (!horizontal && nextScale > availableWidth / contentWidth) {
+			if (!needsHorizontalScrollbar && nextScale > availableWidth / contentWidth) {
 				availableHeight = Math.max(1, availableHeight - scrollbar);
 			}
 		}
