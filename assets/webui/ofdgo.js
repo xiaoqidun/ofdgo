@@ -83,9 +83,11 @@ const el = {
 	ofdInput: document.querySelector("#ofdInput"),
 	ofdButton: document.querySelector("#ofdButton"),
 	fontInput: document.querySelector("#fontInput"),
+	fontDirectoryInput: document.querySelector("#fontDirectoryInput"),
 	togglePagesButton: document.querySelector("#togglePagesButton"),
 	toggleMetaButton: document.querySelector("#toggleMetaButton"),
 	fontAddButton: document.querySelector("#fontAddButton"),
+	fontDirectoryButton: document.querySelector("#fontDirectoryButton"),
 	localFontButton: document.querySelector("#localFontButton"),
 	prevButton: document.querySelector("#prevButton"),
 	nextButton: document.querySelector("#nextButton"),
@@ -131,10 +133,12 @@ const el = {
 el.ofdButton.addEventListener("click", openOFDFile);
 el.togglePagesButton.addEventListener("click", () => toggleSidebar("pages"));
 el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
-el.fontAddButton.addEventListener("click", openFontFile);
+el.fontAddButton.addEventListener("click", () => openFontFile(el.fontInput));
+el.fontDirectoryButton.addEventListener("click", () => openFontFile(el.fontDirectoryInput));
 el.localFontButton.addEventListener("click", loadLocalFonts);
 el.ofdInput.addEventListener("change", openSelectedOFD);
 el.fontInput.addEventListener("change", openSelectedFonts);
+el.fontDirectoryInput.addEventListener("change", openSelectedFonts);
 el.prevButton.addEventListener("click", () => renderPage(state.pageIndex - 1));
 el.nextButton.addEventListener("click", () => renderPage(state.pageIndex + 1));
 el.zoomOutButton.addEventListener("click", () => setScale(state.scale - 0.1));
@@ -158,6 +162,7 @@ el.viewerPanel.addEventListener("scroll", () => {
 });
 el.viewerPanel.addEventListener("dblclick", openOFDFromViewer);
 
+el.fontDirectoryButton.disabled = !("webkitdirectory" in el.fontDirectoryInput);
 updateSidebarState();
 boot();
 
@@ -177,9 +182,9 @@ async function openOFDFromViewer() {
 	await openOFDFile();
 }
 
-function openFontFile() {
-	el.fontInput.value = "";
-	el.fontInput.click();
+function openFontFile(input) {
+	input.value = "";
+	input.click();
 }
 
 function toggleSidebar(side) {
@@ -400,17 +405,34 @@ function isOFDFile(file) {
 	return /\.ofd$/i.test(file.name || "");
 }
 
-async function openSelectedFonts() {
-	const files = Array.from(el.fontInput.files || []);
+async function openSelectedFonts(event) {
+	const input = event.currentTarget;
+	const files = Array.from(input.files || []).filter((file) => (
+		!input.webkitdirectory || /\.(ttf|otf|ttc)$/i.test(file.name)
+	));
+	input.value = "";
 	if (!files.length) {
+		setStatus("未发现字体文件");
 		return;
 	}
-	const fonts = await Promise.all(files.map(async (file) => (
-		createFontRecord(file.name, new Uint8Array(await file.arrayBuffer()), "upload")
-	)));
-	state.userFonts.push(...fonts);
-	el.fontInput.value = "";
-	await applyFontChange();
+	setBusy(true, "正在读取字体", 10, STATUS.fonts);
+	try {
+		const fonts = [];
+		for (let i = 0; i < files.length; i += 1) {
+			setProgress(`正在读取字体 ${i + 1}/${files.length}`, 10 + Math.round(i / files.length * 60));
+			const file = files[i];
+			fonts.push(createFontRecord(file.name, new Uint8Array(await file.arrayBuffer()), "upload"));
+		}
+		state.userFonts.push(...fonts);
+		await applyFontChange();
+		if (!state.doc) {
+			setStatus(`已添加 ${fonts.length} 个字体`);
+		}
+	} catch (err) {
+		showError(err, false);
+	} finally {
+		setBusy(false);
+	}
 }
 
 async function loadLocalFonts() {

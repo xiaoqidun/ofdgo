@@ -11,6 +11,7 @@
 		<header class="toolbar app-bar">
 			<input id="ofdInput" class="file-input" type="file" accept=".ofd">
 			<input id="fontInput" class="file-input" type="file" accept=".ttf,.otf,.ttc,font/*" multiple>
+			<input id="fontDirectoryInput" class="file-input" type="file" webkitdirectory multiple>
 			<div class="tool-group">
 				<button id="ofdButton" class="button primary" type="button" data-short="打开" aria-label="打开">打开</button>
 				<button id="togglePagesButton" class="icon-button" type="button" title="页面栏" aria-label="页面栏" aria-pressed="true">&#9776;</button>
@@ -116,6 +117,7 @@
 							<span id="availableFontSummary" class="count-pill">0</span>
 							<button id="localFontButton" class="small-button" type="button">系统字体</button>
 							<button id="fontAddButton" class="small-button" type="button">添加</button>
+							<button id="fontDirectoryButton" class="small-button" type="button" title="添加字体目录" aria-label="添加字体目录">目录</button>
 						</div>
 					</div>
 					<div id="fontPermissionHint" class="font-permission-hint" hidden>需授权读取系统字体</div>
