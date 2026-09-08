@@ -27,9 +27,6 @@ import (
 // currentSession 当前WebUI文档会话
 var currentSession *Session
 
-// callbacks 浏览器回调函数引用
-var callbacks []js.Func
-
 // apiResult 浏览器接口返回结果
 type apiResult struct {
 	OK    bool   `json:"ok"`
@@ -64,7 +61,6 @@ func registerCallback(name string, fn func([]js.Value) (any, error)) {
 		return encodeResult(apiResult{OK: true, Data: data})
 	})
 	js.Global().Set(name, cb)
-	callbacks = append(callbacks, cb)
 }
 
 // safeCall 调用浏览器回调并转换异常

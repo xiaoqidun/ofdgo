@@ -14,9 +14,25 @@
 
 package webuiassets
 
-import "embed"
+import (
+	"crypto/sha256"
+	"embed"
+	"encoding/hex"
+)
 
 // FS WebUI嵌入静态文件
 //
-//go:embed index.html ofdgo.js ofdgo.css wasm_exec.js ofdgo.wasm
+//go:embed index.html ofdgo.css ofdgo.js ofdgo.sw.js ofdgo.wasm wasm_exec.js
 var FS embed.FS
+
+// Checksum 计算WebUI嵌入资源校验值
+// 返回: string SHA-256十六进制校验值
+func Checksum() string {
+	hash := sha256.New()
+	entries, _ := FS.ReadDir(".")
+	for _, entry := range entries {
+		data, _ := FS.ReadFile(entry.Name())
+		hash.Write(data)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}

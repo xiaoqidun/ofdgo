@@ -13,7 +13,7 @@
 			<input id="fontInput" class="file-input" type="file" accept=".ttf,.otf,.ttc,font/*" multiple>
 			<input id="fontDirectoryInput" class="file-input" type="file" webkitdirectory multiple>
 			<div class="tool-group">
-				<button id="ofdButton" class="button primary" type="button" data-short="打开" aria-label="打开">打开</button>
+				<button id="ofdButton" class="icon-button" type="button" title="打开" aria-label="打开">&#128449;</button>
 				<button id="togglePagesButton" class="icon-button" type="button" title="页面栏" aria-label="页面栏" aria-pressed="true">&#9776;</button>
 				<button id="toggleMetaButton" class="icon-button" type="button" title="信息栏" aria-label="信息栏" aria-pressed="true">&#9432;</button>
 			</div>
@@ -70,6 +70,15 @@
 			</section>
 
 			<aside class="meta-panel">
+				<section id="appPanel" class="app-panel" aria-labelledby="appPanelTitle" hidden>
+					<div class="panel-row">
+						<div id="appPanelTitle" class="panel-title compact">应用</div>
+						<div class="panel-actions">
+							<span id="offlineStatus" class="app-status" role="status">准备中</span>
+							<button id="refreshAppButton" class="small-button app-refresh" type="button" title="刷新应用" aria-label="刷新应用" disabled>&#8635;</button>
+						</div>
+					</div>
+				</section>
 				<div class="panel-title">文档</div>
 				<dl class="meta-list">
 					<div>

@@ -17,12 +17,14 @@
 package main
 
 import (
+	"bytes"
 	"flag"
+	"fmt"
 	"net/http"
 	"os"
-	"strings"
+	"time"
 
-	webuiassets "github.com/xiaoqidun/ofdgo/assets/webui"
+	"github.com/xiaoqidun/ofdgo/assets/webui"
 )
 
 func main() {
@@ -36,10 +38,16 @@ func main() {
 // serveWebUI 创建WebUI静态文件处理器
 // 返回: http.Handler HTTP处理器
 func serveWebUI() http.Handler {
-	files := http.FileServer(http.FS(webuiassets.FS))
+	files := http.FileServerFS(webuiassets.FS)
+	checksum := webuiassets.Checksum()
+	serviceWorker, _ := webuiassets.FS.ReadFile("ofdgo.sw.js")
+	serviceWorker = append([]byte(fmt.Sprintf("const BUNDLE_CHECKSUM = %q;\n", checksum)), serviceWorker...)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, ".wasm") {
-			w.Header().Set("Content-Type", "application/wasm")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-OFDGo-Checksum", checksum)
+		if r.URL.Path == "/ofdgo.sw.js" {
+			http.ServeContent(w, r, "ofdgo.sw.js", time.Time{}, bytes.NewReader(serviceWorker))
+			return
 		}
 		files.ServeHTTP(w, r)
 	})

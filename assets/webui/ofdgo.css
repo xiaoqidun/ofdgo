@@ -103,7 +103,6 @@ a:focus-visible {
 	overflow-x: auto;
 	overflow-y: hidden;
 	scrollbar-width: none;
-	-ms-overflow-style: none;
 }
 
 .toolbar::-webkit-scrollbar {
@@ -130,16 +129,6 @@ a:focus-visible {
 .button {
 	padding: 0 10px;
 	white-space: nowrap;
-}
-
-.button.primary {
-	border-color: var(--accent);
-	background: var(--accent);
-	color: #ffffff;
-}
-
-.button.primary:hover {
-	background: var(--accent-strong);
 }
 
 button:not(:disabled):hover {
@@ -170,11 +159,6 @@ button:not(:disabled):hover {
 	gap: var(--tool-gap);
 	flex: 0 0 auto;
 	min-width: 0;
-}
-
-.tool-group + .tool-group {
-	margin-left: 0;
-	padding-left: 0;
 }
 
 .tool-group + .tool-group::before {
@@ -330,6 +314,30 @@ body[data-hide-meta] .meta-panel {
 	border-radius: 0;
 	font-size: 12px;
 	white-space: nowrap;
+}
+
+.app-panel {
+	margin-bottom: 12px;
+	padding-bottom: 12px;
+	border-bottom: 1px solid var(--line);
+}
+
+.app-panel .panel-row {
+	margin-bottom: 0;
+	flex-wrap: nowrap;
+}
+
+.app-status {
+	color: var(--text-muted);
+	font-size: 12px;
+}
+
+.app-refresh {
+	width: 26px;
+	padding: 0;
+	color: var(--accent-strong);
+	font-size: 18px;
+	line-height: 1;
 }
 
 .page-list {
@@ -760,7 +768,8 @@ body[data-hide-meta] .meta-panel {
 }
 
 .font-badge.embedded,
-.font-badge.matched {
+.font-badge.matched,
+.font-badge.valid {
 	background: #e4f3ef;
 	color: var(--accent-strong);
 }
@@ -774,11 +783,6 @@ body[data-hide-meta] .meta-panel {
 .font-badge.invalid {
 	background: #f9e8e5;
 	color: #803f38;
-}
-
-.font-badge.valid {
-	background: #e4f3ef;
-	color: var(--accent-strong);
 }
 
 .signature-line {
@@ -932,9 +936,6 @@ body[data-hide-meta] .meta-panel {
 	flex: 0 0 var(--sidebar-width);
 	min-width: 0;
 	overflow: hidden;
-	font-weight: 400;
-	color: var(--accent-strong);
-	text-decoration: none;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
@@ -977,8 +978,6 @@ body[data-hide-meta] .meta-panel {
 
 	.toolbar {
 		--tool-gap: 6px;
-		flex-wrap: nowrap;
-		overflow-x: auto;
 	}
 
 	.toolbar > * {
@@ -989,17 +988,9 @@ body[data-hide-meta] .meta-panel {
 		display: none;
 	}
 
-	.app-footer {
-		flex-wrap: nowrap;
-	}
-
 	.footer-brand,
 	.footer-links {
 		flex: 0 1 auto;
-	}
-
-	.status-text {
-		text-align: center;
 	}
 
 	.workspace {
@@ -1059,20 +1050,6 @@ body[data-hide-meta] .meta-panel {
 		grid-template-columns: 1fr;
 	}
 
-	.toolbar {
-		height: var(--bar-height);
-		min-height: var(--bar-height);
-		flex-wrap: nowrap;
-		align-content: center;
-		overflow-x: auto;
-		overflow-y: hidden;
-		row-gap: 0;
-	}
-
-	.toolbar-space {
-		display: none;
-	}
-
 	.tool-group + .tool-group::before {
 		display: none;
 	}
@@ -1090,10 +1067,6 @@ body[data-hide-meta] .meta-panel {
 		content: attr(data-short);
 		font-size: 12px;
 		font-weight: 500;
-	}
-
-	.button.primary[data-short] {
-		min-width: 42px;
 	}
 
 	.icon-button {
@@ -1117,9 +1090,5 @@ body[data-hide-meta] .meta-panel {
 
 	.dpi-select {
 		width: 48px;
-	}
-
-	.footer-links {
-		justify-content: flex-end;
 	}
 }

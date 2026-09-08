@@ -115,6 +115,9 @@ const el = {
 	pageListPanel: document.querySelector(".page-list-panel"),
 	pageList: document.querySelector("#pageList"),
 	metaPanel: document.querySelector(".meta-panel"),
+	appPanel: document.querySelector("#appPanel"),
+	offlineStatus: document.querySelector("#offlineStatus"),
+	refreshAppButton: document.querySelector("#refreshAppButton"),
 	metaTitle: document.querySelector("#metaTitle"),
 	metaAuthor: document.querySelector("#metaAuthor"),
 	metaVersion: document.querySelector("#metaVersion"),
@@ -152,6 +155,7 @@ el.annotationButton.addEventListener("click", toggleAnnotations);
 el.pageExportFormat.addEventListener("change", () => updateDPIControl());
 el.exportPageButton.addEventListener("click", exportCurrentPage);
 el.exportButton.addEventListener("click", exportPDF);
+el.refreshAppButton.addEventListener("click", refreshApplication);
 el.pageInput.addEventListener("change", () => {
 	const page = Number.parseInt(el.pageInput.value, 10);
 	if (Number.isFinite(page)) {
@@ -228,6 +232,10 @@ function resizeViewer() {
 async function boot() {
 	setBusy(true, "正在准备引擎", 8, STATUS.engine);
 	try {
+		if (!await prepareOffline()) {
+			return;
+		}
+		setProgress("正在准备引擎", 8, STATUS.engine);
 		await ensureWASM();
 		setProgress("引擎准备完成", 70);
 		loadExportFormats();
@@ -244,6 +252,120 @@ async function boot() {
 		setEmpty(String(err.message || err));
 		setBusy(false);
 		return;
+	}
+}
+
+async function registerOffline() {
+	const scope = new URL("./", location.href).href;
+	let registration = await navigator.serviceWorker.getRegistration(scope);
+	if (!registration || registration.scope !== scope) {
+		registration = await navigator.serviceWorker.register("./ofdgo.sw.js", { updateViaCache: "none" });
+	}
+	const worker = registration.active || registration.installing || registration.waiting;
+	await waitForWorker(worker, "activated");
+	return registration;
+}
+
+async function prepareOffline() {
+	if (!window.isSecureContext || !("serviceWorker" in navigator) || !("caches" in window) || !("locks" in navigator)) {
+		return true;
+	}
+	el.appPanel.hidden = false;
+	setProgress("正在准备离线", null, "正在准备离线");
+	try {
+		const registration = await registerOffline();
+		const result = await requestOffline(registration.active, "prepare");
+		if (result.reload) {
+			location.reload();
+			return false;
+		}
+		el.offlineStatus.textContent = "可离线";
+	} catch {
+		el.offlineStatus.textContent = "未就绪";
+	}
+	el.refreshAppButton.disabled = false;
+	return true;
+}
+
+function waitForWorker(worker, target) {
+	return new Promise((resolve, reject) => {
+		function changed() {
+			if (worker.state === target || worker.state === "activated") {
+				worker.removeEventListener("statechange", changed);
+				resolve();
+			} else if (worker.state === "redundant") {
+				worker.removeEventListener("statechange", changed);
+				reject(new Error("离线服务启动失败"));
+			}
+		}
+		worker.addEventListener("statechange", changed);
+		changed();
+	});
+}
+
+function requestOffline(worker, type) {
+	return new Promise((resolve, reject) => {
+		const channel = new MessageChannel();
+		function close() {
+			channel.port1.close();
+			worker.removeEventListener("statechange", changed);
+		}
+		function changed() {
+			if (worker.state === "redundant") {
+				close();
+				reject(new Error("离线服务已更新"));
+			}
+		}
+		channel.port1.onmessage = ({ data }) => {
+			close();
+			if (data.ok) {
+				resolve(data);
+			} else {
+				reject(new Error(data.error));
+			}
+		};
+		worker.addEventListener("statechange", changed);
+		worker.postMessage({ type }, [channel.port2]);
+		changed();
+	});
+}
+
+async function refreshApplication() {
+	if (document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	if ((state.ofdBytes || state.userFonts.length) && !window.confirm("刷新后需重新打开文件和添加字体，是否继续？")) {
+		return;
+	}
+	setBusy(true, "正在刷新应用", null, "正在刷新应用");
+	el.refreshAppButton.disabled = true;
+	const panels = document.querySelectorAll(".toolbar, .workspace");
+	panels.forEach((panel) => { panel.inert = true; });
+	try {
+		if (navigator.storage?.persist) {
+			await navigator.storage.persist().catch(() => false);
+		}
+		const scope = new URL("./", location.href).href;
+		await navigator.locks.request(`ofdgo:${scope}:refresh`, { ifAvailable: true }, async (lock) => {
+			if (!lock) {
+				throw new Error("应用正在刷新");
+			}
+			const registration = await registerOffline();
+			await registration.update();
+			if (registration.installing) {
+				await waitForWorker(registration.installing, "installed");
+			}
+			const worker = registration.waiting || registration.active;
+			await requestOffline(worker, "refresh");
+			await waitForWorker(worker, "activated");
+			location.reload();
+		});
+	} catch (err) {
+		setStatus(err.message === "应用正在刷新" ? err.message : "应用刷新失败");
+	} finally {
+		panels.forEach((panel) => { panel.inert = false; });
+		el.refreshAppButton.disabled = false;
+		setBusy(false);
 	}
 }
 
@@ -532,7 +654,7 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 		renderFontList();
 		return false;
 	}
-	if (docFonts.length && !docNames.length) {
+	if (!docNames.length) {
 		state.localFonts = [];
 		setStatus("OFD 字体均为内嵌");
 		updateFontSummary();
@@ -540,7 +662,7 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 		return false;
 	}
 	const docWanted = fontNameKeys(docNames);
-	const docLoadLimit = docNames.length ? Math.min(LOCAL_FONT_LOAD_LIMIT, Math.max(4, docNames.length * 3)) : 6;
+	const docLoadLimit = Math.min(LOCAL_FONT_LOAD_LIMIT, Math.max(4, docNames.length * 3));
 	let selected = selectLocalFonts(available, docWanted, docLoadLimit);
 	if (!selected.length) {
 		const fallbackWanted = fontNameKeys(COMMON_FONT_NAMES);
@@ -549,7 +671,7 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	const emptyStatus = available.length === 0 ? "未读取到系统字体" : "未匹配到文档所需字体";
 	const fonts = [];
 	for (let i = 0; i < selected.length; i += 1) {
-		setProgress(`正在读取字体 ${i + 1}/${selected.length}`, 20 + Math.round(i / Math.max(1, selected.length) * 60));
+		setProgress(`正在读取字体 ${i + 1}/${selected.length}`, 20 + Math.round(i / selected.length * 60));
 		const item = selected[i];
 		const blob = await item.blob();
 		if (openSeq !== state.openSeq) {
@@ -563,7 +685,7 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	if (openSeq !== state.openSeq) {
 		return false;
 	}
-	state.localFonts = mergeFontRecords([], fonts);
+	state.localFonts = fonts;
 	setStatus(fonts.length ? `已加载 ${fonts.length} 个系统字体` : emptyStatus);
 	updateFontSummary();
 	renderFontList();
@@ -624,8 +746,9 @@ function fontData(fonts) {
 }
 
 function updateFontSummary() {
-	const total = fontRecords().length;
-	const enabled = fontRecords().filter((font) => font.enabled).length;
+	const fonts = fontRecords();
+	const total = fonts.length;
+	const enabled = fonts.filter((font) => font.enabled).length;
 	el.availableFontSummary.textContent = total ? `${enabled}/${total}` : "0";
 }
 
@@ -638,20 +761,6 @@ function createFontRecord(name, data, source) {
 		source,
 		enabled: true,
 	};
-}
-
-function mergeFontRecords(oldFonts, newFonts) {
-	const seen = new Set(oldFonts.map((font) => normalizeFontName(font.name)));
-	const merged = [...oldFonts];
-	for (const font of newFonts) {
-		const key = normalizeFontName(font.name);
-		if (!key || seen.has(key)) {
-			continue;
-		}
-		seen.add(key);
-		merged.push(font);
-	}
-	return merged;
 }
 
 function fontRecords() {
@@ -2347,10 +2456,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 		return;
 	}
 	el.progressPanel.hidden = false;
-	if (status) {
-		setStatus(status);
-	}
-	setProgress(text, percent);
+	setProgress(text, percent, status);
 }
 
 function setProgress(text = "", percent = 0, status = "") {
@@ -2359,6 +2465,10 @@ function setProgress(text = "", percent = 0, status = "") {
 	}
 	if (status) {
 		setStatus(status);
+	}
+	el.progressBar.parentElement.hidden = percent === null;
+	if (percent === null) {
+		return;
 	}
 	const value = Math.max(0, Math.min(100, percent));
 	el.progressBar.style.width = `${value}%`;
