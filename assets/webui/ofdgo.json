@@ -1,0 +1,17 @@
+{
+	"id": "./",
+	"name": "OFDGo WebUI",
+	"short_name": "OFDGo",
+	"start_url": "./",
+	"scope": "./",
+	"display": "standalone",
+	"background_color": "#eef1f4",
+	"theme_color": "#fbfcfd",
+	"icons": [
+		{
+			"src": "./ofdgo.svg",
+			"sizes": "any",
+			"type": "image/svg+xml"
+		}
+	]
+}
