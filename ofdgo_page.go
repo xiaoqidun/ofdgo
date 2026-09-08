@@ -163,6 +163,7 @@ type PathObject struct {
 	Visible         *bool        `xml:"Visible,attr"`
 	Stroke          *bool        `xml:"Stroke,attr"`
 	Fill            *bool        `xml:"Fill,attr"`
+	Rule            string       `xml:"Rule,attr"`
 	StrokeColor     *StrokeColor `xml:"StrokeColor"`
 	FillColor       *FillColor   `xml:"FillColor"`
 	AbbreviatedData string       `xml:"AbbreviatedData"`

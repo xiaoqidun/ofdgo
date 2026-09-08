@@ -200,30 +200,35 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	if style.fillPaint == nil {
 		style.fillPaint = style.fillColor
 	}
-	if shouldFill && style.fillPattern != nil {
+	if shouldFill {
 		fp := p
+		fillRule := canvas.NonZero
+		if obj.Rule == "Even-Odd" {
+			fillRule = canvas.EvenOdd
+			if clipPath != nil || style.fillPattern != nil {
+				fp = fp.Settle(fillRule)
+			}
+		}
 		if clipPath != nil {
-			fp = p.Copy()
+			fp = fp.Copy()
 			fp.Close()
 			fp = applyClipPath(fp, clipPath)
 		}
-		r.renderPattern(ctx, style.fillPattern, style.fillPatternColor, pageH, fp, ctm, bx, by)
-	} else if shouldFill && style.fillPaint != nil {
-		ctx.SetFill(style.fillPaint)
-		ctx.SetStrokeColor(canvas.Transparent)
-		fp := p
-		if clipPath != nil {
-			fp = p.Copy()
-			fp.Close()
-			fp = applyClipPath(fp, clipPath)
+		if style.fillPattern != nil {
+			r.renderPattern(ctx, style.fillPattern, style.fillPatternColor, pageH, fp, ctm, bx, by)
+		} else if style.fillPaint != nil {
+			ctx.SetFillRule(fillRule)
+			ctx.SetFill(style.fillPaint)
+			ctx.SetStrokeColor(canvas.Transparent)
+			ctx.DrawPath(0, 0, fp)
 		}
-		ctx.DrawPath(0, 0, fp)
 	}
 	shouldStroke := true
 	if obj.Stroke != nil {
 		shouldStroke = *obj.Stroke
 	}
 	if shouldStroke {
+		ctx.SetFillRule(canvas.NonZero)
 		if style.strokePaint == nil {
 			style.strokePaint = style.strokeColor
 		}
@@ -409,7 +414,6 @@ func (r *Renderer) buildObjectClipPath(clips *Clips, pageH float64, bx, by float
 	}
 	p := r.buildClipPath(clips, pageH, bx, by, objectCTM)
 	if p != nil && boundaryInCTM && parentCTM != nil {
-		// TransFlag只控制对象CTM，父级变换仍作用于裁剪区域及边界
 		p = p.Transform(canvas.Matrix{
 			{parentCTM.a, -parentCTM.c, parentCTM.c*pageH + parentCTM.e},
 			{-parentCTM.b, parentCTM.d, pageH*(1-parentCTM.d) - parentCTM.f},
@@ -438,6 +442,9 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ob
 				cp := r.buildPath(pathObj, pageH, ctm, true)
 				cp.Translate(bx, -by)
 				cp.Close()
+				if pathObj.Rule == "Even-Odd" {
+					cp = cp.Settle(canvas.EvenOdd)
+				}
 				if clipPath == nil {
 					clipPath = cp
 				} else {
