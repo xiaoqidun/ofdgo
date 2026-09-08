@@ -1898,11 +1898,7 @@ function signatureReferenceStatus(signature) {
 
 function formatSignatureTime(value) {
 	const text = String(value || "").trim();
-	const digits = text.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/);
-	if (digits) {
-		return `${digits[1]}-${digits[2]}-${digits[3]} ${digits[4]}:${digits[5]}:${digits[6]}`;
-	}
-	return text.replace("T", " ").replace(/(?:Z|[+-]\d{2}:?\d{2})$/, "");
+	return text.replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/, "$1-$2-$3 $4:$5:$6$7$8").replace("T", " ");
 }
 
 function appendSignatureLine(row, label, value, status = "") {
