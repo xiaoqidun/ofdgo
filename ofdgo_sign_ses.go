@@ -74,19 +74,23 @@ type sesCertDigest struct {
 
 // sesVerifyResult SES签章验证结果
 type sesVerifyResult struct {
-	DataHashOK    bool
-	SignedOK      bool
-	SealOK        bool
-	CertOK        bool
-	SignCert      SignatureCertInfo
-	SealCert      SignatureCertInfo
-	SignCertRaw   []byte
-	SealCertRaw   []byte
-	SealRaw       []byte
-	Certs         [][]byte
-	SealType      string
-	SealInfo      SignatureSealInfo
-	SignatureTime time.Time
+	DataHashChecked bool
+	DataHashOK      bool
+	SignedChecked   bool
+	SignedOK        bool
+	SealChecked     bool
+	SealOK          bool
+	CertChecked     bool
+	CertOK          bool
+	SignCert        SignatureCertInfo
+	SealCert        SignatureCertInfo
+	SignCertRaw     []byte
+	SealCertRaw     []byte
+	SealRaw         []byte
+	Certs           [][]byte
+	SealType        string
+	SealInfo        SignatureSealInfo
+	SignatureTime   time.Time
 }
 
 // parseSESSignature 解析SES签章值
@@ -240,6 +244,7 @@ func verifySESSignature(data, signedData []byte, options *signatureVerifyOptions
 	result.SealType = sig.Seal.PicType
 	result.SealInfo = sig.Seal.Info
 	result.SignatureTime = sig.Time
+	result.DataHashChecked = true
 	result.DataHashOK = bytes.Equal(sig.DataHash, signSM3(signedData))
 	signPub, err := parseSM2PublicKeyFromCert(sig.Cert)
 	if err != nil {
@@ -249,8 +254,11 @@ func verifySESSignature(data, signedData []byte, options *signatureVerifyOptions
 	if err != nil {
 		return result, err
 	}
+	result.SignedChecked = true
 	result.SignedOK = sm2VerifySignature(signPub, nil, sig.ToSign, sig.Signature)
+	result.SealChecked = true
 	result.SealOK = sm2VerifySignature(sealPub, nil, sig.Seal.SignData, sig.Seal.Signature)
+	result.CertChecked = true
 	result.CertOK = sesCertInList(sig.Cert, sig.Seal.CertList)
 	return result, nil
 }

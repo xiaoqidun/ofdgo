@@ -1773,7 +1773,7 @@ function renderSignatures() {
 	const fragment = document.createDocumentFragment();
 	for (const signature of signatures) {
 		const row = document.createElement("div");
-		row.className = `signature-row ${signature.valid ? "valid" : "invalid"}`;
+		row.className = `signature-row ${signature.status}`;
 
 		const head = document.createElement("div");
 		head.className = "signature-head";
@@ -1782,7 +1782,7 @@ function renderSignatures() {
 
 		const badges = document.createElement("div");
 		badges.className = "signature-badges";
-		badges.append(fontBadge(signature.valid ? "通过" : "异常", signature.valid ? "valid" : "invalid"));
+		badges.append(fontBadge(signature.status === "valid" ? "通过" : signature.status === "invalid" ? "异常" : "未验", signature.status));
 
 		head.append(name, badges);
 		row.append(head);
@@ -1795,20 +1795,20 @@ function renderSignatures() {
 		appendSignatureLine(row, "签者", signature.signer);
 		appendSignatureLine(row, "时间", formatSignatureTime(signature.signatureDateTime));
 		appendSignatureLine(row, "机构", signatureAgency(signature));
-		appendSignatureCheck(row, "原文", signature.dataHashOK);
-		appendSignatureCheck(row, "签名", signature.signedValueOK);
+		appendSignatureCheck(row, "原文", signature.dataHashChecked, signature.dataHashOK);
+		appendSignatureCheck(row, "签名", signature.signedValueChecked, signature.signedValueOK);
 		if (signature.type !== "Sign") {
-			appendSignatureCheck(row, "章验", signature.sealOK);
-			appendSignatureCheck(row, "一致", signature.sealMatchOK);
+			appendSignatureCheck(row, "章验", signature.sealChecked, signature.sealOK);
+			appendSignaturePolicy(row, "一致", signature.sealMatchChecked, signature.sealMatchOK);
 		}
-		appendSignatureCheck(row, "证书", signature.certOK);
+		appendSignatureCheck(row, "证书", signature.certChecked, signature.certOK);
 		appendSignaturePolicy(row, "签期", signature.signatureTimeChecked, signature.signatureTimeOK);
 		appendSignaturePolicy(row, "章期", signature.sealTimeChecked, signature.sealTimeOK);
 		if (signature.sealCertTimeChecked) {
 			appendSignatureLine(row, "制期", signature.sealCertTimeOK ? "有效" : "失效", signature.sealCertTimeOK ? "ok" : "");
 		}
 		appendSignaturePolicy(row, "时效", signature.certTimeChecked, signature.certTimeOK);
-		appendSignaturePolicy(row, "信任", signature.certTrustChecked, signature.certTrustOK);
+		appendSignatureCheck(row, "信任", signature.certTrustChecked, signature.certTrustOK);
 		appendSignatureLine(row, "保护", signatureReferenceText(signature), signatureReferenceStatus(signature));
 		appendSignatureLine(row, "算法", signature.signatureMethod);
 		appendSignatureLine(row, "散列", signature.digestMethod);
@@ -1826,11 +1826,16 @@ function signatureSummary(signatures) {
 	if (!signatures.length) {
 		return "0";
 	}
-	const invalid = signatures.filter((signature) => !signature.valid).length;
+	const invalid = signatures.filter((signature) => signature.status === "invalid").length;
+	const unchecked = signatures.filter((signature) => signature.status === "unchecked").length;
+	const parts = [String(signatures.length)];
 	if (invalid) {
-		return `${signatures.length} · 异常 ${invalid}`;
+		parts.push(`异常 ${invalid}`);
 	}
-	return `通过 ${signatures.length}`;
+	if (unchecked) {
+		parts.push(`未验 ${unchecked}`);
+	}
+	return parts.length > 1 ? parts.join(" · ") : `通过 ${signatures.length}`;
 }
 
 function signatureNameNode(signature) {
@@ -1885,7 +1890,8 @@ function signatureReferenceText(signature) {
 	if (!count) {
 		return "";
 	}
-	return `${passed === count ? "通过" : "失败"} ${passed}/${count}`;
+	const status = signatureReferenceStatus(signature);
+	return `${status === "ok" ? "通过" : status === "fail" ? "失败" : "未验"} ${passed}/${count}`;
 }
 
 function signatureReferenceStatus(signature) {
@@ -1893,7 +1899,10 @@ function signatureReferenceStatus(signature) {
 	if (!count) {
 		return "";
 	}
-	return signature.referencePassed === count ? "ok" : "fail";
+	if (signature.referencePassed < signature.referenceChecked) {
+		return "fail";
+	}
+	return signature.referenceChecked === count ? "ok" : "";
 }
 
 function formatSignatureTime(value) {
@@ -1920,15 +1929,15 @@ function appendSignatureLine(row, label, value, status = "") {
 	row.append(line);
 }
 
-function appendSignatureCheck(row, label, ok) {
-	appendSignatureLine(row, label, ok ? "通过" : "失败", ok ? "ok" : "fail");
+function appendSignatureCheck(row, label, checked, ok) {
+	appendSignatureLine(row, label, checked ? ok ? "通过" : "失败" : "未验", checked ? ok ? "ok" : "fail" : "");
 }
 
 function appendSignaturePolicy(row, label, checked, ok) {
 	if (!checked) {
 		return;
 	}
-	appendSignatureCheck(row, label, ok);
+	appendSignatureCheck(row, label, checked, ok);
 }
 
 async function focusSignatureStamp(stamp) {

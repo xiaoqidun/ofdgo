@@ -29,12 +29,15 @@ const (
 
 // digitalVerifyResult 数字签名验证结果
 type digitalVerifyResult struct {
-	DataHashOK  bool
-	SignedOK    bool
-	CertOK      bool
-	SignerCerts [][]byte
-	Certs       [][]byte
-	CertInfo    SignatureCertInfo
+	DataHashChecked bool
+	DataHashOK      bool
+	SignedChecked   bool
+	SignedOK        bool
+	CertChecked     bool
+	CertOK          bool
+	SignerCerts     [][]byte
+	Certs           [][]byte
+	CertInfo        SignatureCertInfo
 }
 
 // gbtSignedData GB/T 35275 SignedData结构
@@ -85,15 +88,17 @@ func verifyRawDigitalSignature(signedValue, signedData []byte, options *signatur
 	if len(options.SignCerts) == 0 {
 		return nil, fmt.Errorf("signature certificate not found")
 	}
-	result := &digitalVerifyResult{DataHashOK: true}
+	result := &digitalVerifyResult{DataHashChecked: true, DataHashOK: true}
 	for _, cert := range options.SignCerts {
 		pub, err := parseSM2PublicKeyFromCert(cert)
 		if err != nil {
 			continue
 		}
+		result.CertChecked = true
 		result.CertOK = true
 		result.SignerCerts = [][]byte{cert}
 		result.CertInfo = signatureCertInfo(cert)
+		result.SignedChecked = true
 		if sm2VerifySignature(pub, nil, signedData, signedValue) {
 			result.SignedOK = true
 			return result, nil
@@ -112,15 +117,17 @@ func verifyRawPublicKeySignature(method, digestMethod string, signedValue, signe
 	if _, err := signatureMethodHash(method, digestMethod); err != nil {
 		return nil, err
 	}
-	result := &digitalVerifyResult{DataHashOK: true}
+	result := &digitalVerifyResult{DataHashChecked: true, DataHashOK: true}
 	for _, cert := range options.SignCerts {
 		ok, err := verifyPublicKeySignature(method, digestMethod, cert, signedData, signedValue)
 		if err != nil {
 			continue
 		}
+		result.CertChecked = true
 		result.CertOK = true
 		result.SignerCerts = [][]byte{cert}
 		result.CertInfo = signatureCertInfo(cert)
+		result.SignedChecked = true
 		if ok {
 			result.SignedOK = true
 			return result, nil
@@ -147,18 +154,21 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 		return nil, fmt.Errorf("invalid signed data signer info")
 	}
 	result := &digitalVerifyResult{Certs: sd.rawCerts()}
-	for _, signer := range sd.Signers {
+	for index, signer := range sd.Signers {
 		digest, err := signatureDigest(signer.DigestAlg, signedData)
 		if err != nil {
 			return nil, err
 		}
 		if len(sd.ContentDigest) != 0 && !bytes.Equal(sd.ContentDigest, digest) {
+			result.DataHashChecked = true
+			result.DataHashOK = false
 			return result, nil
 		}
 		result.DataHashOK = true
 		plain := sd.ContentDigest
 		if len(signer.AuthAttrs) != 0 {
 			if !bytes.Equal(signer.AttrDigest, digest) {
+				result.DataHashChecked = true
 				result.DataHashOK = false
 				return result, nil
 			}
@@ -167,6 +177,7 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 		if len(plain) == 0 {
 			return nil, fmt.Errorf("invalid signed data content")
 		}
+		result.DataHashChecked = index == len(sd.Signers)-1
 		cert := sd.findCert(signer.Issuer, signer.Serial)
 		if cert == nil {
 			result.CertOK = false
@@ -181,6 +192,8 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 				return result, err
 			}
 			if !sm2VerifySignature(pub, nil, plain, signer.Signature) {
+				result.SignedChecked = true
+				result.CertChecked = index == len(sd.Signers)-1
 				result.CertOK = true
 				return result, nil
 			}
@@ -195,11 +208,15 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 			return result, err
 		}
 		if !ok {
+			result.SignedChecked = true
+			result.CertChecked = index == len(sd.Signers)-1
 			result.CertOK = true
 			return result, nil
 		}
 	}
+	result.CertChecked = true
 	result.CertOK = true
+	result.SignedChecked = true
 	result.SignedOK = true
 	return result, nil
 }

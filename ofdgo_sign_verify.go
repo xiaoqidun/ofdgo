@@ -39,6 +39,7 @@ import (
 
 // SignatureVerifyReport 签名验证报告
 // Valid表示签名完整性、签名时间语义及调用方指定的证书策略均通过
+// Checked表示对应检查已得出结论, 未检查时不能将OK的零值视为失败
 // SealCertTimeOK仅提供制章证书在签名时间的状态信息, 不参与Valid判断
 type SignatureVerifyReport struct {
 	ID                   string
@@ -59,10 +60,15 @@ type SignatureVerifyReport struct {
 	StampPositions       []SignatureStampPosition
 	StampPositionError   string
 	DigestOK             bool
+	DataHashChecked      bool
 	DataHashOK           bool
+	SignedValueChecked   bool
 	SignedValueOK        bool
+	SealChecked          bool
 	SealOK               bool
+	SealMatchChecked     bool
 	SealMatchOK          bool
+	CertChecked          bool
 	CertOK               bool
 	SignatureTimeChecked bool
 	SignatureTimeOK      bool
@@ -88,6 +94,21 @@ func (report SignatureVerifyReport) IntegrityValid() bool {
 // 返回: bool 签名完整性、时间语义、证书信任及证书有效期是否均验证通过
 func (report SignatureVerifyReport) TrustedValid() bool {
 	return report.IntegrityValid() && report.certificatePolicyOK() && report.CertTrustChecked && report.CertTimeChecked
+}
+
+// HasFailure 判断已完成的签名检查是否存在失败
+// 返回: bool 是否存在失败, 未完成检查时仍需判断Valid和Error
+func (report SignatureVerifyReport) HasFailure() bool {
+	for _, ref := range report.References {
+		if ref.Checked && !ref.OK {
+			return true
+		}
+	}
+	return report.DataHashChecked && !report.DataHashOK ||
+		report.SignedValueChecked && !report.SignedValueOK ||
+		report.SealChecked && !report.SealOK ||
+		report.SealMatchChecked && !report.SealMatchOK ||
+		report.CertChecked && !report.CertOK || !report.certificatePolicyOK()
 }
 
 // SignatureCertInfo 签名证书信息
@@ -120,6 +141,7 @@ type SignatureReferenceVerify struct {
 	Path       string
 	CheckValue []byte
 	Actual     []byte
+	Checked    bool
 	OK         bool
 	Error      string
 }
@@ -298,16 +320,21 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 	switch report.Type {
 	case SignTypeSign:
 		result, err := verifyDigitalSignature(report.SignatureMethod, report.DigestMethod, signedValue, sigData, options)
+		if result != nil {
+			report.DataHashChecked = result.DataHashChecked
+			report.DataHashOK = result.DataHashOK
+			report.SignedValueChecked = result.SignedChecked
+			report.SignedValueOK = result.SignedOK
+			report.CertChecked = result.CertChecked
+			report.CertOK = result.CertOK
+			report.SignCert = result.CertInfo
+			report.Signer = result.CertInfo.CommonName
+		}
 		if err != nil {
 			report.Error = err.Error()
 			return report
 		}
-		report.DataHashOK = result.DataHashOK
-		report.SignedValueOK = result.SignedOK
 		report.SealOK = true
-		report.CertOK = result.CertOK
-		report.SignCert = result.CertInfo
-		report.Signer = result.CertInfo.CommonName
 		report.SignatureTime = parseSignatureDateTime(report.SignatureDateTime)
 		report.applySignatureTimePolicy()
 		report.applySignatureCertificatePolicy(options, result.SignerCerts, result.Certs)
@@ -320,6 +347,14 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 	}
 	sesResult, err := verifySESSignature(signedValue, sigData, options)
 	if sesResult != nil {
+		report.DataHashChecked = sesResult.DataHashChecked
+		report.DataHashOK = sesResult.DataHashOK
+		report.SignedValueChecked = sesResult.SignedChecked
+		report.SignedValueOK = sesResult.SignedOK
+		report.SealChecked = sesResult.SealChecked
+		report.SealOK = sesResult.SealOK
+		report.CertChecked = sesResult.CertChecked
+		report.CertOK = sesResult.CertOK
 		report.SignCert = sesResult.SignCert
 		report.SealCert = sesResult.SealCert
 		report.SealInfo = sesResult.SealInfo
@@ -331,10 +366,6 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 		report.Error = err.Error()
 		return report
 	}
-	report.DataHashOK = sesResult.DataHashOK
-	report.SignedValueOK = sesResult.SignedOK
-	report.SealOK = sesResult.SealOK
-	report.CertOK = sesResult.CertOK
 	report.applySignatureTimePolicy()
 	report.applySignatureCertificatePolicy(options, [][]byte{sesResult.SignCertRaw, sesResult.SealCertRaw}, sesResult.Certs)
 	if sigFile.SignedInfo.Seal.BaseLoc != "" {
@@ -344,6 +375,7 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 			report.Error = err.Error()
 			return report
 		}
+		report.SealMatchChecked = true
 		report.SealMatchOK = bytes.Equal(sealData, sesResult.SealRaw)
 	}
 	report.Valid = report.IntegrityValid() && report.certificatePolicyOK()
@@ -387,6 +419,7 @@ func (r *Reader) verifySignatureReference(sigPath, method string, ref SignatureR
 	}
 	result.CheckValue = checkValue
 	result.Actual = actual
+	result.Checked = true
 	result.OK = subtle.ConstantTimeCompare(checkValue, actual) == 1
 	return result
 }

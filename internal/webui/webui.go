@@ -23,6 +23,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"strings"
+	"time"
 
 	"github.com/xiaoqidun/ofdgo"
 )
@@ -43,7 +44,7 @@ type FontInfo = ofdgo.FontInfo
 type SignatureInfo struct {
 	ID                   string               `json:"id"`
 	Type                 string               `json:"type"`
-	Valid                bool                 `json:"valid"`
+	Status               string               `json:"status"`
 	Version              string               `json:"version,omitempty"`
 	SealType             string               `json:"sealType,omitempty"`
 	SealID               string               `json:"sealId,omitempty"`
@@ -53,10 +54,15 @@ type SignatureInfo struct {
 	SignatureDateTime    string               `json:"signatureDateTime,omitempty"`
 	Provider             string               `json:"provider,omitempty"`
 	Company              string               `json:"company,omitempty"`
+	DataHashChecked      bool                 `json:"dataHashChecked"`
 	DataHashOK           bool                 `json:"dataHashOK"`
+	SignedValueChecked   bool                 `json:"signedValueChecked"`
 	SignedValueOK        bool                 `json:"signedValueOK"`
+	SealChecked          bool                 `json:"sealChecked"`
 	SealOK               bool                 `json:"sealOK"`
+	SealMatchChecked     bool                 `json:"sealMatchChecked"`
 	SealMatchOK          bool                 `json:"sealMatchOK"`
+	CertChecked          bool                 `json:"certChecked"`
 	CertOK               bool                 `json:"certOK"`
 	SignatureTimeChecked bool                 `json:"signatureTimeChecked,omitempty"`
 	SignatureTimeOK      bool                 `json:"signatureTimeOK,omitempty"`
@@ -69,6 +75,7 @@ type SignatureInfo struct {
 	CertTrustChecked     bool                 `json:"certTrustChecked,omitempty"`
 	CertTrustOK          bool                 `json:"certTrustOK,omitempty"`
 	ReferenceCount       int                  `json:"referenceCount"`
+	ReferenceChecked     int                  `json:"referenceChecked"`
 	ReferencePassed      int                  `json:"referencePassed"`
 	SignatureMethod      string               `json:"signatureMethod,omitempty"`
 	DigestMethod         string               `json:"digestMethod,omitempty"`
@@ -426,23 +433,39 @@ func (s *Session) signatureInfos() ([]SignatureInfo, error) {
 // 入参: report 签名验证报告
 // 返回: SignatureInfo 签名验证信息
 func signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
+	status := "unchecked"
+	if report.Valid {
+		status = "valid"
+	} else if report.HasFailure() {
+		status = "invalid"
+	}
+	dateTime := report.SignatureDateTime
+	if !report.SignatureTime.IsZero() {
+		dateTime = report.SignatureTime.Format(time.RFC3339Nano)
+	}
+	checked, passed := signatureReferenceCounts(report.References)
 	return SignatureInfo{
 		ID:                   report.ID,
 		Type:                 string(report.Type),
-		Valid:                report.Valid,
+		Status:               status,
 		Version:              report.Provider.Version,
 		SealType:             report.SealType,
 		SealID:               report.SealInfo.ID,
 		SealName:             report.SealInfo.Name,
 		SealVendor:           report.SealInfo.VendorID,
 		Signer:               signatureSigner(report),
-		SignatureDateTime:    report.SignatureDateTime,
+		SignatureDateTime:    dateTime,
 		Provider:             report.Provider.ProviderName,
 		Company:              report.Provider.Company,
+		DataHashChecked:      report.DataHashChecked,
 		DataHashOK:           report.DataHashOK,
+		SignedValueChecked:   report.SignedValueChecked,
 		SignedValueOK:        report.SignedValueOK,
+		SealChecked:          report.SealChecked,
 		SealOK:               report.SealOK,
+		SealMatchChecked:     report.SealMatchChecked,
 		SealMatchOK:          report.SealMatchOK,
+		CertChecked:          report.CertChecked,
 		CertOK:               report.CertOK,
 		SignatureTimeChecked: report.SignatureTimeChecked,
 		SignatureTimeOK:      report.SignatureTimeOK,
@@ -455,7 +478,8 @@ func signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
 		CertTrustChecked:     report.CertTrustChecked,
 		CertTrustOK:          report.CertTrustOK,
 		ReferenceCount:       len(report.References),
-		ReferencePassed:      signatureReferencePassed(report.References),
+		ReferenceChecked:     checked,
+		ReferencePassed:      passed,
 		SignatureMethod:      report.SignatureMethod,
 		DigestMethod:         report.DigestMethod,
 		SignSerial:           report.SignCert.SerialNumber,
@@ -483,17 +507,20 @@ func signatureSigner(report ofdgo.SignatureVerifyReport) string {
 	return report.SignCert.Subject
 }
 
-// signatureReferencePassed 获取已通过保护文件数量
+// signatureReferenceCounts 获取保护文件检查数量
 // 入参: refs 保护文件验证结果
-// 返回: int 已通过保护文件数量
-func signatureReferencePassed(refs []ofdgo.SignatureReferenceVerify) int {
-	count := 0
+// 返回: int 已检查数量, int 已通过数量
+func signatureReferenceCounts(refs []ofdgo.SignatureReferenceVerify) (int, int) {
+	checked, passed := 0, 0
 	for _, ref := range refs {
+		if ref.Checked {
+			checked++
+		}
 		if ref.OK {
-			count++
+			passed++
 		}
 	}
-	return count
+	return checked, passed
 }
 
 // signatureReportError 获取签名错误信息
