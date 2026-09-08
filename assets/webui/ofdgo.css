@@ -149,6 +149,30 @@ button:not(:disabled):hover {
 	font-size: 14px;
 }
 
+.open-icon {
+	position: relative;
+	width: 14px;
+	height: 12px;
+}
+
+.open-icon::before {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 6px;
+	height: 4px;
+	border: 1px solid currentColor;
+	border-bottom: 0;
+	content: "";
+}
+
+.open-icon::after {
+	position: absolute;
+	inset: 3px 0 0;
+	border: 1px solid currentColor;
+	content: "";
+}
+
 .toolbar-space {
 	flex: 1 1 auto;
 }

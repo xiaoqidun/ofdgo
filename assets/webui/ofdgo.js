@@ -17,6 +17,8 @@ const COMMON_FONT_NAMES = [
 	"Times New Roman",
 ];
 const LOCAL_FONT_LOAD_LIMIT = 16;
+const FONT_DATABASE = "ofdgo-fonts";
+const fontChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel(FONT_DATABASE) : null;
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const DEFAULT_IMAGE_DPI = 300;
 const STATUS = {
@@ -42,6 +44,7 @@ const WASM_CALLBACKS = [
 let wasmPromise = null;
 let wasmModule = null;
 let wasmRecoveryTimer = 0;
+let fontDatabase = null;
 
 const state = {
 	ready: false,
@@ -55,6 +58,8 @@ const state = {
 	fontSeq: 0,
 	localFonts: [],
 	userFonts: [],
+	fontSyncPending: false,
+	fontSyncing: false,
 	systemFontCatalog: [],
 	systemFontCatalogLoaded: false,
 	systemFontPermission: "prompt",
@@ -168,6 +173,19 @@ el.viewerPanel.addEventListener("scroll", () => {
 	schedulePageSync();
 });
 el.viewerPanel.addEventListener("dblclick", openOFDFromViewer);
+if (fontChannel) {
+	fontChannel.onmessage = scheduleFontSync;
+}
+el.fontList.addEventListener("focusout", () => {
+	if (state.fontSyncPending) {
+		window.setTimeout(syncUserFonts, 0);
+	}
+});
+document.addEventListener("visibilitychange", () => {
+	if (!document.hidden) {
+		scheduleFontSync();
+	}
+});
 
 el.fontDirectoryButton.disabled = !("webkitdirectory" in el.fontDirectoryInput);
 updateSidebarState();
@@ -190,6 +208,9 @@ async function openOFDFromViewer() {
 }
 
 function openFontFile(input) {
+	if (document.body.hasAttribute("aria-busy")) {
+		return;
+	}
 	input.value = "";
 	input.click();
 }
@@ -237,6 +258,12 @@ async function boot() {
 		}
 		setProgress("正在准备引擎", 8, STATUS.engine);
 		await ensureWASM();
+		let fontsRestored = true;
+		try {
+			await restoreUserFonts();
+		} catch {
+			fontsRestored = false;
+		}
 		setProgress("引擎准备完成", 70);
 		loadExportFormats();
 		setEmpty("选择 OFD 文件");
@@ -245,7 +272,7 @@ async function boot() {
 		updateControls();
 		updateLocalFontButton();
 		await refreshLocalFontPermission();
-		setStatus(STATUS.ready);
+		setStatus(fontsRestored ? STATUS.ready : "字体读取失败");
 		setBusy(false);
 	} catch (err) {
 		setStatus("渲染引擎加载失败");
@@ -334,7 +361,9 @@ async function refreshApplication() {
 	if (document.body.hasAttribute("aria-busy")) {
 		return;
 	}
-	if ((state.ofdBytes || state.userFonts.length) && !window.confirm("刷新后需重新打开文件和添加字体，是否继续？")) {
+	const temporaryFonts = state.userFonts.some((font) => font.source === "upload");
+	const message = temporaryFonts ? "刷新后需重新打开文件和添加未保存字体，是否继续？" : "刷新后需重新打开文件，是否继续？";
+	if ((state.ofdBytes || temporaryFonts) && !window.confirm(message)) {
 		return;
 	}
 	setBusy(true, "正在刷新应用", null, "正在刷新应用");
@@ -530,14 +559,103 @@ function isOFDFile(file) {
 	return /\.ofd$/i.test(file.name || "");
 }
 
+function openFontDatabase() {
+	if (!fontDatabase) {
+		fontDatabase = new Promise((resolve, reject) => {
+			const request = indexedDB.open(FONT_DATABASE, 1);
+			request.onupgradeneeded = () => {
+				const store = request.result.createObjectStore("fonts", { keyPath: "id", autoIncrement: true });
+				store.createIndex("checksum", "checksum", { unique: true });
+			};
+			request.onsuccess = () => {
+				const db = request.result;
+				db.onversionchange = () => {
+					db.close();
+					fontDatabase = null;
+				};
+				resolve(db);
+			};
+			request.onerror = () => reject(request.error);
+		}).catch((err) => {
+			fontDatabase = null;
+			throw err;
+		});
+	}
+	return fontDatabase;
+}
+
+async function fontTransaction(mode, action) {
+	const db = await openFontDatabase();
+	return new Promise((resolve, reject) => {
+		const tx = db.transaction("fonts", mode);
+		let request;
+		tx.oncomplete = () => {
+			if (mode === "readwrite") {
+				fontChannel?.postMessage(null);
+			}
+			resolve(request?.result);
+		};
+		tx.onabort = () => reject(tx.error || new Error("字体保存失败"));
+		try {
+			request = action(tx.objectStore("fonts"));
+		} catch (err) {
+			tx.abort();
+			reject(err);
+		}
+	});
+}
+
+function listStoredFonts() {
+	return fontTransaction("readonly", (store) => store.getAll());
+}
+
+async function addStoredFonts(fonts) {
+	const records = new Map();
+	for (const font of fonts) {
+		const digest = await crypto.subtle.digest("SHA-256", font.data);
+		const checksum = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+		if (!records.has(checksum)) {
+			records.set(checksum, { checksum, name: font.name, enabled: font.enabled, data: new Blob([font.data]) });
+		}
+	}
+	await fontTransaction("readwrite", (store) => {
+		for (const font of records.values()) {
+			const request = store.index("checksum").getKey(font.checksum);
+			request.onsuccess = () => {
+				if (request.result === undefined) {
+					store.add(font);
+				}
+			};
+		}
+	});
+}
+
+function updateStoredFont(id, changes) {
+	return fontTransaction("readwrite", (store) => {
+		const request = store.get(id);
+		request.onsuccess = () => {
+			if (request.result) {
+				store.put({ ...request.result, ...changes });
+			}
+		};
+	});
+}
+
+function deleteStoredFont(id) {
+	return fontTransaction("readwrite", (store) => store.delete(id));
+}
+
 async function openSelectedFonts(event) {
+	if (document.body.hasAttribute("aria-busy")) {
+		return;
+	}
 	const input = event.currentTarget;
 	const files = Array.from(input.files || []).filter((file) => (
 		!input.webkitdirectory || /\.(ttf|otf|ttc)$/i.test(file.name)
 	));
 	input.value = "";
 	if (!files.length) {
-		setStatus("未发现字体文件");
+		setStatus("暂无字体文件");
 		return;
 	}
 	setBusy(true, "正在读取字体", 10, STATUS.fonts);
@@ -548,11 +666,21 @@ async function openSelectedFonts(event) {
 			const file = files[i];
 			fonts.push(createFontRecord(file.name, new Uint8Array(await file.arrayBuffer()), "upload"));
 		}
-		state.userFonts.push(...fonts);
-		await applyFontChange();
-		if (!state.doc) {
-			setStatus(`已添加 ${fonts.length} 个字体`);
+		let saved = true;
+		try {
+			await addStoredFonts(fonts);
+		} catch {
+			saved = false;
+			state.userFonts.push(...fonts);
 		}
+		const changed = saved ? await restoreUserFonts() : true;
+		if (saved && navigator.storage?.persist) {
+			navigator.storage.persist().catch(() => false);
+		}
+		if (changed) {
+			await applyFontChange();
+		}
+		setStatus(saved ? "字体保存完成" : "字体仅限本次");
 	} catch (err) {
 		showError(err, false);
 	} finally {
@@ -561,6 +689,9 @@ async function openSelectedFonts(event) {
 }
 
 async function loadLocalFonts() {
+	if (document.body.hasAttribute("aria-busy")) {
+		return;
+	}
 	if (!canReadLocalFonts()) {
 		setStatus("当前浏览器不支持读取系统字体");
 		return;
@@ -728,21 +859,64 @@ function selectLocalFonts(fonts, wanted, limit) {
 	return uniqueLocalFonts(ranked.map((item) => item.font)).slice(0, limit);
 }
 
-function allFonts() {
-	return fontData(fontRecords());
+async function fontData(fonts) {
+	const result = [];
+	for (const font of fonts) {
+		if (!font.enabled) {
+			continue;
+		}
+		if (font.data instanceof Blob) {
+			font.data = new Uint8Array(await font.data.arrayBuffer());
+		}
+		result.push({ name: font.name, data: font.data });
+	}
+	return result;
 }
 
-function uploadedFonts() {
-	return fontData(state.userFonts);
+async function restoreUserFonts() {
+	const stored = await listStoredFonts();
+	const previous = new Map(state.userFonts.map((font) => [font.id, font]));
+	const fonts = stored.map((font) => ({
+		...font,
+		data: previous.get(font.id)?.checksum === font.checksum ? previous.get(font.id).data : font.data,
+		source: "stored",
+	}));
+	fonts.push(...state.userFonts.filter((font) => font.source === "upload"));
+	if (fonts.length === state.userFonts.length && fonts.every((font, index) => {
+		const old = state.userFonts[index];
+		return font.id === old.id && font.checksum === old.checksum && font.name === old.name && font.enabled === old.enabled;
+	})) {
+		return false;
+	}
+	state.userFonts = fonts;
+	return true;
 }
 
-function fontData(fonts) {
-	return fonts
-		.filter((font) => font.enabled)
-		.map((font) => ({
-			name: font.name,
-			data: font.data,
-		}));
+function scheduleFontSync() {
+	state.fontSyncPending = true;
+	syncUserFonts();
+}
+
+async function syncUserFonts() {
+	if (!state.ready || !state.fontSyncPending || state.fontSyncing || document.hidden || document.body.hasAttribute("aria-busy") || document.activeElement?.classList.contains("font-name-input")) {
+		return;
+	}
+	state.fontSyncPending = false;
+	state.fontSyncing = true;
+	setBusy(true, "正在同步字体", null);
+	try {
+		if (await restoreUserFonts()) {
+			await applyFontChange();
+		}
+		if (!state.doc) {
+			setStatus(STATUS.ready);
+		}
+	} catch {
+		setStatus("字体读取失败");
+	} finally {
+		state.fontSyncing = false;
+		setBusy(false);
+	}
 }
 
 function updateFontSummary() {
@@ -865,6 +1039,7 @@ async function applyFontChange(options = {}) {
 	await openDocument({
 		pageIndex: state.pageIndex,
 		fitMode: state.fitMode,
+		scale: state.scale,
 		skipAutoFonts: options.skipAutoFonts !== false,
 		reuseSession: true,
 		fontsChanged: true,
@@ -888,6 +1063,36 @@ async function toggleAnnotations() {
 function removeFont(id) {
 	state.localFonts = state.localFonts.filter((font) => font.id !== id);
 	state.userFonts = state.userFonts.filter((font) => font.id !== id);
+}
+
+async function changeFont(font, changes) {
+	if (document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	setBusy(true, "正在更新字体", null, STATUS.fonts);
+	try {
+		if (font.source === "stored") {
+			if (changes) {
+				await updateStoredFont(font.id, changes);
+			} else {
+				await deleteStoredFont(font.id);
+			}
+			await restoreUserFonts();
+		} else if (changes) {
+			Object.assign(font, changes);
+		} else {
+			removeFont(font.id);
+		}
+		await applyFontChange();
+		if (!state.doc) {
+			setStatus(STATUS.ready);
+		}
+	} catch {
+		renderFontList();
+		setStatus("字体更新失败");
+	} finally {
+		setBusy(false);
+	}
 }
 
 function renderFontList() {
@@ -918,9 +1123,7 @@ function renderFontList() {
 		const enabledText = document.createElement("span");
 		enabledText.textContent = font.enabled ? "启用" : "停用";
 		enabled.addEventListener("change", async () => {
-			font.enabled = enabled.checked;
-			enabledText.textContent = font.enabled ? "启用" : "停用";
-			await applyFontChange();
+			await changeFont(font, { enabled: enabled.checked });
 		});
 
 		const name = document.createElement("input");
@@ -933,8 +1136,7 @@ function renderFontList() {
 				name.value = font.name;
 				return;
 			}
-			font.name = next;
-			await applyFontChange();
+			await changeFont(font, { name: next });
 		});
 
 		const main = document.createElement("div");
@@ -951,8 +1153,7 @@ function renderFontList() {
 		remove.title = "删除字体";
 		remove.textContent = "×";
 		remove.addEventListener("click", async () => {
-			removeFont(font.id);
-			await applyFontChange();
+			await changeFont(font);
 		});
 
 		const actions = document.createElement("div");
@@ -1028,9 +1229,13 @@ async function openDocument(options = {}) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const fonts = resetLocalFonts ? uploadedFonts() : allFonts();
+		const fonts = !options.reuseSession || options.fontsChanged
+			? await fontData(resetLocalFonts ? state.userFonts : fontRecords()) : null;
+		if (openSeq !== state.openSeq) {
+			return;
+		}
 		const doc = options.reuseSession
-			? callWASM("ofdgoConfigure", options.fontsChanged ? fonts : null, state.renderAnnotations)
+			? callWASM("ofdgoConfigure", fonts, state.renderAnnotations)
 			: callWASM("ofdgoOpen", state.ofdBytes, fonts, state.renderAnnotations);
 		if (openSeq !== state.openSeq) {
 			return;
@@ -2451,8 +2656,12 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("aria-busy", busy);
+	el.fontList.inert = busy;
 	if (!busy) {
 		el.progressPanel.hidden = true;
+		if (state.fontSyncPending) {
+			window.setTimeout(syncUserFonts, 0);
+		}
 		return;
 	}
 	el.progressPanel.hidden = false;
