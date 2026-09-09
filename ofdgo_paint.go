@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"image/color"
+	"math"
 	"strconv"
 	"strings"
 
@@ -154,19 +155,19 @@ func parseFillColor(fillColor *FillColor) color.Color {
 }
 
 // parseFillPaint 解析填充画刷
-// 入参: fillColor 填充颜色节点, x X坐标, y Y坐标, pageH 页面高度, originX 原点X坐标, originY 原点Y坐标
+// 入参: fillColor 填充颜色节点, x X坐标, y Y坐标, pageH 页面高度
 // 返回: any 填充画刷
-func parseFillPaint(fillColor *FillColor, x, y, pageH, originX, originY float64) any {
+func parseFillPaint(fillColor *FillColor, x, y, pageH float64) any {
 	if fillColor == nil {
 		return nil
 	}
 	if fillColor.Pattern != nil {
 		return nil
 	}
-	if gradient := parseAxialShdGradient(fillColor.AxialShd, fillColor.Alpha, x, y, pageH, originX, originY); gradient != nil {
+	if gradient := parseAxialShdGradient(fillColor.AxialShd, fillColor.Alpha, x, y, pageH); gradient != nil {
 		return gradient
 	}
-	if gradient := parseRadialShdGradient(fillColor.RadialShd, fillColor.Alpha, x, y, pageH, originX, originY); gradient != nil {
+	if gradient := parseRadialShdGradient(fillColor.RadialShd, fillColor.Alpha, x, y, pageH); gradient != nil {
 		return gradient
 	}
 	if fillColor.AxialShd != nil {
@@ -201,16 +202,16 @@ func parseStrokeColor(strokeColor *StrokeColor) color.Color {
 }
 
 // parseStrokePaint 解析勾边画刷
-// 入参: strokeColor 勾边颜色节点, x X坐标, y Y坐标, pageH 页面高度, originX 原点X坐标, originY 原点Y坐标
+// 入参: strokeColor 勾边颜色节点, x X坐标, y Y坐标, pageH 页面高度
 // 返回: any 勾边画刷
-func parseStrokePaint(strokeColor *StrokeColor, x, y, pageH, originX, originY float64) any {
+func parseStrokePaint(strokeColor *StrokeColor, x, y, pageH float64) any {
 	if strokeColor == nil {
 		return nil
 	}
-	if gradient := parseAxialShdGradient(strokeColor.AxialShd, strokeColor.Alpha, x, y, pageH, originX, originY); gradient != nil {
+	if gradient := parseAxialShdGradient(strokeColor.AxialShd, strokeColor.Alpha, x, y, pageH); gradient != nil {
 		return gradient
 	}
-	if gradient := parseRadialShdGradient(strokeColor.RadialShd, strokeColor.Alpha, x, y, pageH, originX, originY); gradient != nil {
+	if gradient := parseRadialShdGradient(strokeColor.RadialShd, strokeColor.Alpha, x, y, pageH); gradient != nil {
 		return gradient
 	}
 	if strokeColor.AxialShd != nil {
@@ -287,9 +288,9 @@ func parseShdSegments(segments []ShdSegment, alpha *int) canvas.Grad {
 }
 
 // parseAxialShdGradient 解析轴向渐变
-// 入参: axialShd 轴向渐变节点, alpha 透明度, x X坐标, y Y坐标, pageH 页面高度, originX 原点X坐标, originY 原点Y坐标
+// 入参: axialShd 轴向渐变节点, alpha 透明度, x X坐标, y Y坐标, pageH 页面高度
 // 返回: canvas.Gradient 渐变对象
-func parseAxialShdGradient(axialShd *AxialShd, alpha *int, x, y, pageH, originX, originY float64) canvas.Gradient {
+func parseAxialShdGradient(axialShd *AxialShd, alpha *int, x, y, pageH float64) canvas.Gradient {
 	if axialShd == nil {
 		return nil
 	}
@@ -302,18 +303,51 @@ func parseAxialShdGradient(axialShd *AxialShd, alpha *int, x, y, pageH, originX,
 	if gradient == nil {
 		return nil
 	}
-	startPoint := canvas.Point{X: x + start[0] - originX, Y: pageH - (y + start[1]) - originY}
-	endPoint := canvas.Point{X: x + end[0] - originX, Y: pageH - (y + end[1]) - originY}
+	startPoint := canvas.Point{X: x + start[0], Y: pageH - (y + start[1])}
+	endPoint := canvas.Point{X: x + end[0], Y: pageH - (y + end[1])}
 	if startPoint.Equals(endPoint) {
 		return nil
 	}
 	return gradient.ToLinear(startPoint, endPoint)
 }
 
+// axialShdClip 获取轴向渐变的延伸裁剪区域
+// 入参: ctx 画布上下文, paint 画刷, shading 轴向渐变节点
+// 返回: *canvas.Path 裁剪区域
+func axialShdClip(ctx *canvas.Context, paint any, shading *AxialShd) *canvas.Path {
+	gradient, ok := paint.(*canvas.LinearGradient)
+	if !ok || shading == nil {
+		return nil
+	}
+	extend, _ := strconv.Atoi(shading.Extend)
+	if extend == 3 {
+		return nil
+	}
+	d := gradient.End.Sub(gradient.Start)
+	axis := canvas.Matrix{{d.X, -d.Y, gradient.Start.X}, {d.Y, d.X, gradient.Start.Y}}
+	origin := ctx.CoordView().Dot(canvas.Point{})
+	view := ctx.CoordSystemView().Mul(ctx.View()).Translate(origin.X, origin.Y).Mul(axis)
+	if view.Det() == 0 {
+		return &canvas.Path{}
+	}
+	width, height := ctx.Size()
+	area := (canvas.Rect{X1: width, Y1: height}).Transform(view.Inv())
+	if extend&1 == 0 {
+		area.X0 = math.Max(area.X0, 0)
+	}
+	if extend&2 == 0 {
+		area.X1 = math.Min(area.X1, 1)
+	}
+	if area.X1 <= area.X0 {
+		return &canvas.Path{}
+	}
+	return area.ToPath().Transform(axis)
+}
+
 // parseRadialShdGradient 解析径向渐变
-// 入参: radialShd 径向渐变节点, alpha 透明度, x X坐标, y Y坐标, pageH 页面高度, originX 原点X坐标, originY 原点Y坐标
+// 入参: radialShd 径向渐变节点, alpha 透明度, x X坐标, y Y坐标, pageH 页面高度
 // 返回: canvas.Gradient 渐变对象
-func parseRadialShdGradient(radialShd *RadialShd, alpha *int, x, y, pageH, originX, originY float64) canvas.Gradient {
+func parseRadialShdGradient(radialShd *RadialShd, alpha *int, x, y, pageH float64) canvas.Gradient {
 	if radialShd == nil || radialShd.EndRadius <= 0 {
 		return nil
 	}
@@ -326,8 +360,8 @@ func parseRadialShdGradient(radialShd *RadialShd, alpha *int, x, y, pageH, origi
 	if gradient == nil {
 		return nil
 	}
-	startPoint := canvas.Point{X: x + start[0] - originX, Y: pageH - (y + start[1]) - originY}
-	endPoint := canvas.Point{X: x + end[0] - originX, Y: pageH - (y + end[1]) - originY}
+	startPoint := canvas.Point{X: x + start[0], Y: pageH - (y + start[1])}
+	endPoint := canvas.Point{X: x + end[0], Y: pageH - (y + end[1])}
 	return gradient.ToRadial(startPoint, radialShd.StartRadius, endPoint, radialShd.EndRadius)
 }
 

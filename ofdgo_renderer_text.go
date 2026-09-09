@@ -80,17 +80,22 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if dp != nil && dp.FillColor != nil {
 		fillColorNode = withFillAlpha(dp.FillColor, obj.Alpha)
 		fillColor = parseFillColor(fillColorNode)
-		fillPaint = parseFillPaint(fillColorNode, bx, by, pageH, 0, 0)
+		fillPaint = parseFillPaint(fillColorNode, bx, by, pageH)
 	}
 	if obj.FillColor != nil {
 		fillColorNode = withFillAlpha(obj.FillColor, obj.Alpha)
 		fillColor = parseFillColor(fillColorNode)
-		fillPaint = parseFillPaint(fillColorNode, bx, by, pageH, 0, 0)
+		fillPaint = parseFillPaint(fillColorNode, bx, by, pageH)
 	}
 	if fillPaint == nil {
 		fillPaint = fillColor
 	}
+	fillClip := clipPath
+	if fillColorNode != nil {
+		fillClip = intersectClipPath(fillClip, axialShdClip(ctx, fillPaint, fillColorNode.AxialShd))
+	}
 	strokeStyle := newPathStyle(nil, defaultStroke, 0, obj.Alpha)
+	strokeClip := clipPath
 	if shouldStroke {
 		if dp != nil {
 			strokeStyle.applyDrawParam(dp, bx, by, pageH, obj.Alpha)
@@ -105,6 +110,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			strokeStyle.strokePaint = colorWithAlpha(canvas.Black, obj.Alpha)
 		}
 		strokeStyle.scale(ctm)
+		strokeClip = intersectClipPath(strokeClip, axialShdClip(ctx, strokeStyle.strokePaint, strokeStyle.strokeAxialShd))
 	}
 	fontStyle := canvas.FontRegular
 	weight := obj.Weight
@@ -144,7 +150,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	face := ff.Face(sizePt, fillPaint, fontStyle, canvas.FontNormal)
 	glyphTransforms := r.textObjectGlyphTransforms(fontID, obj)
 	hasUnderline := strings.Contains(obj.Decoration, "Underline")
-	useGlyphFillPaint := fillColorNode != nil && fillColorNode.AxialShd != nil
+	_, axialFill := fillPaint.(*canvas.LinearGradient)
 	verticalAdvance := (obj.ReadDirection-obj.CharDirection)%180 != 0
 	advanceX, advanceY := 1.0, 0.0
 	switch obj.ReadDirection {
@@ -168,7 +174,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		}
 		dxs, dys := parseFloats(tc.DeltaX), parseFloats(tc.DeltaY)
 		xs, ys := parseFloats(tc.X), parseFloats(tc.Y)
-		drawAsPath := embeddedFont || textCodePositioned(tc, xs, ys) || clipPath != nil || shouldStroke
+		drawAsPath := embeddedFont || textCodePositioned(tc, xs, ys) || fillClip != nil || axialFill || shouldStroke
 		cx, cy := 0.0, 0.0
 		previousAdvance := 0.0
 		if len(xs) > 0 {
@@ -219,10 +225,6 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				canvasX, canvasY = tx+bx, pageH-(ty+by)
 			}
 			textWidth := glyphWidth * hScale
-			glyphFillPaint := fillPaint
-			if useGlyphFillPaint {
-				glyphFillPaint = parseFillPaint(fillColorNode, bx, by, pageH, canvasX, canvasY)
-			}
 			advanceLimit := 0.0
 			if obj.CharDirection == 0 {
 				advanceLimit = textGlyphAdvanceLimit(dxs, dys, xs, i, len(glyphs), cx)
@@ -237,10 +239,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					transform = transform.Mul(glyphMatrix)
 				}
 				path := glyphPath.Copy().Transform(transform.Scale(scaleX, 1))
-				if shouldFill && glyphFillPaint != nil {
-					ctx.SetFill(glyphFillPaint)
+				if shouldFill && fillPaint != nil {
+					ctx.SetFill(fillPaint)
 					ctx.SetStrokeColor(canvas.Transparent)
-					ctx.DrawPath(0, 0, applyClipPath(path.Copy(), clipPath))
+					ctx.DrawPath(0, 0, applyClipPath(path.Copy(), fillClip))
 				}
 				if len(strokeStyle.dashPattern) > 0 {
 					path = path.Dash(strokeStyle.dashOffset, strokeStyle.dashPattern...)
@@ -248,7 +250,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				path = path.Stroke(strokeStyle.lineWidth, strokeStyle.lineCap, strokeStyle.lineJoin, canvas.Tolerance)
 				ctx.SetFill(strokeStyle.strokePaint)
 				ctx.SetStrokeColor(canvas.Transparent)
-				ctx.DrawPath(0, 0, applyClipPath(path, clipPath))
+				ctx.DrawPath(0, 0, applyClipPath(path, strokeClip))
 				if hasUnderline {
 					underline := &canvas.Path{}
 					underline.MoveTo(0, -sizeMM*0.1)
@@ -261,9 +263,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				}
 				continue
 			}
-			if glyphFillPaint != nil {
-				ctx.SetFill(glyphFillPaint)
-				if clipPath != nil {
+			if fillPaint != nil {
+				ctx.SetFill(fillPaint)
+				if fillClip != nil || axialFill {
 					scaleX := hScale
 					if advanceLimit > 0 && glyphWidth*scaleX > advanceLimit {
 						scaleX = advanceLimit / glyphWidth
@@ -273,7 +275,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					if useTextMatrix {
 						textTransform = textTransform.Mul(glyphMatrix)
 					}
-					glyphPath = applyClipPath(glyphPath.Copy().Transform(textTransform.Scale(scaleX, 1)), clipPath)
+					glyphPath = applyClipPath(glyphPath.Copy().Transform(textTransform.Scale(scaleX, 1)), fillClip)
 					ctx.DrawPath(0, 0, glyphPath)
 					if hasUnderline {
 						uw := sizeMM * 0.05
@@ -313,11 +315,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 							ctx.Scale(hScale, 1)
 							x, y = 0, 0
 						}
-						textFace := face
-						if useGlyphFillPaint {
-							textFace = ff.Face(sizePt, glyphFillPaint, fontStyle, canvas.FontNormal)
-						}
-						text := canvas.NewTextLine(textFace, str, canvas.Left)
+						text := canvas.NewTextLine(face, str, canvas.Left)
 						ctx.DrawText(x, y, text)
 						if scaled {
 							ctx.Pop()

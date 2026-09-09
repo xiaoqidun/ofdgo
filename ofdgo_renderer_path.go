@@ -30,6 +30,8 @@ type pathStyle struct {
 	strokeColor      color.Color
 	fillPaint        any
 	strokePaint      any
+	fillAxialShd     *AxialShd
+	strokeAxialShd   *AxialShd
 	fillPattern      *Pattern
 	fillPatternColor color.Color
 	lineWidth        float64
@@ -65,7 +67,8 @@ func (s *pathStyle) applyFillColor(fill *FillColor, bx, by, pageH float64, alpha
 	s.fillPattern = fillColorNode.Pattern
 	s.fillPatternColor = patternColor(fillColorNode)
 	s.fillColor = parseFillColor(fillColorNode)
-	s.fillPaint = parseFillPaint(fillColorNode, bx, by, pageH, 0, 0)
+	s.fillPaint = parseFillPaint(fillColorNode, bx, by, pageH)
+	s.fillAxialShd = fillColorNode.AxialShd
 }
 
 // applyStrokeColor 应用描边颜色
@@ -73,7 +76,8 @@ func (s *pathStyle) applyFillColor(fill *FillColor, bx, by, pageH float64, alpha
 func (s *pathStyle) applyStrokeColor(stroke *StrokeColor, bx, by, pageH float64, alpha *int) {
 	strokeColorNode := withStrokeAlpha(stroke, alpha)
 	s.strokeColor = parseStrokeColor(strokeColorNode)
-	s.strokePaint = parseStrokePaint(strokeColorNode, bx, by, pageH, 0, 0)
+	s.strokePaint = parseStrokePaint(strokeColorNode, bx, by, pageH)
+	s.strokeAxialShd = strokeColorNode.AxialShd
 }
 
 // pathLineCap 转换线帽样式
@@ -211,18 +215,19 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		style.fillPaint = style.fillColor
 	}
 	if shouldFill {
+		fillClip := intersectClipPath(clipPath, axialShdClip(ctx, style.fillPaint, style.fillAxialShd))
 		fp := p
 		fillRule := canvas.NonZero
 		if obj.Rule == "Even-Odd" {
 			fillRule = canvas.EvenOdd
-			if clipPath != nil || style.fillPattern != nil {
+			if fillClip != nil || style.fillPattern != nil {
 				fp = fp.Settle(fillRule)
 			}
 		}
-		if clipPath != nil {
+		if fillClip != nil {
 			fp = fp.Copy()
 			fp.Close()
-			fp = applyClipPath(fp, clipPath)
+			fp = applyClipPath(fp, fillClip)
 		}
 		if style.fillPattern != nil {
 			r.renderPattern(ctx, style.fillPattern, style.fillPatternColor, pageH, fp, ctm, bx, by)
@@ -253,13 +258,14 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		if len(style.dashPattern) > 0 {
 			ctx.SetDashes(style.dashOffset, style.dashPattern...)
 		}
-		if clipPath != nil {
+		strokeClip := intersectClipPath(clipPath, axialShdClip(ctx, style.strokePaint, style.strokeAxialShd))
+		if strokeClip != nil {
 			sp := p.Copy()
 			if len(style.dashPattern) > 0 {
 				sp = sp.Dash(style.dashOffset, style.dashPattern...)
 			}
 			sp = sp.Stroke(style.lineWidth, style.lineCap, style.lineJoin, canvas.Tolerance)
-			sp = applyClipPath(sp, clipPath)
+			sp = applyClipPath(sp, strokeClip)
 			ctx.SetFill(style.strokePaint)
 			ctx.SetStrokeColor(canvas.Transparent)
 			ctx.DrawPath(0, 0, sp)
@@ -543,7 +549,6 @@ func applyClipPath(path, clip *canvas.Path) *canvas.Path {
 		if pathRect, ok := rectangularPath(path); ok {
 			return pathRect.And(rect).ToPath()
 		}
-		return path.Flatten(canvas.Tolerance).Clip(rect.X0, rect.Y0, rect.X1, rect.Y1)
 	}
 	return path.And(clip)
 }
