@@ -243,10 +243,7 @@ func parseShdColor(segments []ShdSegment, alpha *int) color.Color {
 		if strings.TrimSpace(segment.Color.Value) == "" {
 			continue
 		}
-		segmentAlpha := alpha
-		if segmentAlpha == nil {
-			segmentAlpha = segment.Color.Alpha
-		}
+		segmentAlpha := mergeAlpha(segment.Color.Alpha, alpha)
 		return parseColorWithAlpha(segment.Color.Value, segmentAlpha)
 	}
 	return color.Black
@@ -280,10 +277,7 @@ func parseShdSegments(segments []ShdSegment, alpha *int) canvas.Grad {
 		if strings.TrimSpace(segment.Color.Value) == "" {
 			continue
 		}
-		segmentAlpha := alpha
-		if segmentAlpha == nil {
-			segmentAlpha = segment.Color.Alpha
-		}
+		segmentAlpha := mergeAlpha(segment.Color.Alpha, alpha)
 		gradient.Add(offset, colorToRGBA(parseColorWithAlpha(segment.Color.Value, segmentAlpha)))
 	}
 	if len(gradient) == 0 {
