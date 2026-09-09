@@ -244,7 +244,7 @@ function syncLayoutMode(event) {
 function resizeViewer() {
 	if (state.doc) {
 		applyFit(false);
-		if (state.fitMode === "height") {
+		if (state.fitMode !== "free") {
 			scrollToPage(state.pageIndex);
 		}
 	}
