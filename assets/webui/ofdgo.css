@@ -995,6 +995,16 @@ body[data-hide-meta] .meta-panel {
 	text-decoration: underline;
 }
 
+@media (display-mode: standalone) {
+	body {
+		min-height: 100svh;
+	}
+
+	.app {
+		height: 100svh;
+	}
+}
+
 @media (max-width: 900px) {
 	:root {
 		--sidebar-width: min(78vw, 292px);
