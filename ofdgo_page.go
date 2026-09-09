@@ -184,6 +184,8 @@ type StrokeColor struct {
 
 // AxialShd 轴向渐变
 type AxialShd struct {
+	MapType    string       `xml:"MapType,attr"`
+	MapUnit    float64      `xml:"MapUnit,attr"`
 	Extend     string       `xml:"Extend,attr"`
 	StartPoint string       `xml:"StartPoint,attr"`
 	EndPoint   string       `xml:"EndPoint,attr"`
@@ -192,6 +194,8 @@ type AxialShd struct {
 
 // RadialShd 径向渐变
 type RadialShd struct {
+	MapType     string       `xml:"MapType,attr"`
+	MapUnit     float64      `xml:"MapUnit,attr"`
 	Extend      string       `xml:"Extend,attr"`
 	StartPoint  string       `xml:"StartPoint,attr"`
 	StartRadius float64      `xml:"StartRadius,attr"`

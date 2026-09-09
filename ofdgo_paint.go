@@ -165,10 +165,10 @@ func parseFillPaint(fillColor *FillColor, x, y, pageH float64) any {
 		return nil
 	}
 	if gradient := parseAxialShdGradient(fillColor.AxialShd, fillColor.Alpha, x, y, pageH); gradient != nil {
-		return gradient
+		return newShdPaint(gradient, fillColor.AxialShd.Extend, fillColor.AxialShd.MapType, fillColor.AxialShd.MapUnit)
 	}
 	if gradient := parseRadialShdGradient(fillColor.RadialShd, fillColor.Alpha, x, y, pageH); gradient != nil {
-		return gradient
+		return newShdPaint(gradient, fillColor.RadialShd.Extend, fillColor.RadialShd.MapType, fillColor.RadialShd.MapUnit)
 	}
 	if fillColor.AxialShd != nil {
 		return parseShdColor(fillColor.AxialShd.Segment, fillColor.Alpha)
@@ -209,10 +209,10 @@ func parseStrokePaint(strokeColor *StrokeColor, x, y, pageH float64) any {
 		return nil
 	}
 	if gradient := parseAxialShdGradient(strokeColor.AxialShd, strokeColor.Alpha, x, y, pageH); gradient != nil {
-		return gradient
+		return newShdPaint(gradient, strokeColor.AxialShd.Extend, strokeColor.AxialShd.MapType, strokeColor.AxialShd.MapUnit)
 	}
 	if gradient := parseRadialShdGradient(strokeColor.RadialShd, strokeColor.Alpha, x, y, pageH); gradient != nil {
-		return gradient
+		return newShdPaint(gradient, strokeColor.RadialShd.Extend, strokeColor.RadialShd.MapType, strokeColor.RadialShd.MapUnit)
 	}
 	if strokeColor.AxialShd != nil {
 		return parseShdColor(strokeColor.AxialShd.Segment, strokeColor.Alpha)
@@ -312,14 +312,9 @@ func parseAxialShdGradient(axialShd *AxialShd, alpha *int, x, y, pageH float64) 
 }
 
 // axialShdClip 获取轴向渐变的延伸裁剪区域
-// 入参: ctx 画布上下文, paint 画刷, shading 轴向渐变节点
+// 入参: ctx 画布上下文, gradient 轴向渐变, extend 延伸方向
 // 返回: *canvas.Path 裁剪区域
-func axialShdClip(ctx *canvas.Context, paint any, shading *AxialShd) *canvas.Path {
-	gradient, ok := paint.(*canvas.LinearGradient)
-	if !ok || shading == nil {
-		return nil
-	}
-	extend, _ := strconv.Atoi(shading.Extend)
+func axialShdClip(ctx *canvas.Context, gradient *canvas.LinearGradient, extend int) *canvas.Path {
 	if extend == 3 {
 		return nil
 	}
