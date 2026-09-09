@@ -20,10 +20,24 @@ import "encoding/xml"
 type Res struct {
 	XMLName               xml.Name              `xml:"Res"`
 	BaseLoc               string                `xml:"BaseLoc,attr"`
+	ColorSpaces           ColorSpaces           `xml:"ColorSpaces"`
 	Fonts                 Fonts                 `xml:"Fonts"`
 	MultiMedias           MultiMedias           `xml:"MultiMedias"`
 	DrawParams            DrawParams            `xml:"DrawParams"`
 	CompositeGraphicUnits CompositeGraphicUnits `xml:"CompositeGraphicUnits"`
+}
+
+// ColorSpaces 颜色空间集合
+type ColorSpaces struct {
+	ColorSpace []ColorSpace `xml:"ColorSpace"`
+}
+
+// ColorSpace 颜色空间定义
+type ColorSpace struct {
+	ID               string   `xml:"ID,attr"`
+	Type             string   `xml:"Type,attr"`
+	BitsPerComponent int      `xml:"BitsPerComponent,attr"`
+	Palette          []string `xml:"Palette>CV"`
 }
 
 // Fonts 字体集合

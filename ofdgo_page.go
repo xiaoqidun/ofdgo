@@ -22,6 +22,7 @@ type PageContent struct {
 	ID       string     `xml:"-"`
 	Area     PageArea   `xml:"Area"`
 	Template []Template `xml:"Template"`
+	PageRes  string     `xml:"PageRes"`
 	Content  Content    `xml:"Content"`
 	Actions  []Action   `xml:"Actions>Action"`
 }
@@ -105,11 +106,14 @@ type TextObject struct {
 
 // FillColor 填充颜色
 type FillColor struct {
-	Value     string     `xml:"Value,attr"`
-	Alpha     *int       `xml:"Alpha,attr"`
-	Pattern   *Pattern   `xml:"Pattern"`
-	AxialShd  *AxialShd  `xml:"AxialShd"`
-	RadialShd *RadialShd `xml:"RadialShd"`
+	Value       string     `xml:"Value,attr"`
+	Index       *int       `xml:"Index,attr"`
+	ColorSpace  string     `xml:"ColorSpace,attr"`
+	Alpha       *int       `xml:"Alpha,attr"`
+	Pattern     *Pattern   `xml:"Pattern"`
+	AxialShd    *AxialShd  `xml:"AxialShd"`
+	RadialShd   *RadialShd `xml:"RadialShd"`
+	unsupported bool
 }
 
 // Pattern 图案填充
@@ -119,6 +123,7 @@ type Pattern struct {
 	XStep         float64        `xml:"XStep,attr"`
 	YStep         float64        `xml:"YStep,attr"`
 	ReflectMethod string         `xml:"ReflectMethod,attr"`
+	RelativeTo    string         `xml:"RelativeTo,attr"`
 	CTM           string         `xml:"CTM,attr"`
 	CellContent   PatternContent `xml:"CellContent"`
 }
@@ -175,12 +180,7 @@ type PathObject struct {
 }
 
 // StrokeColor 勾边颜色
-type StrokeColor struct {
-	Value     string     `xml:"Value,attr"`
-	Alpha     *int       `xml:"Alpha,attr"`
-	AxialShd  *AxialShd  `xml:"AxialShd"`
-	RadialShd *RadialShd `xml:"RadialShd"`
-}
+type StrokeColor FillColor
 
 // AxialShd 轴向渐变
 type AxialShd struct {
@@ -215,8 +215,10 @@ type ShdSegment struct {
 
 // ShdColor 渐变颜色
 type ShdColor struct {
-	Value string `xml:"Value,attr"`
-	Alpha *int   `xml:"Alpha,attr"`
+	Value      string `xml:"Value,attr"`
+	Index      *int   `xml:"Index,attr"`
+	ColorSpace string `xml:"ColorSpace,attr"`
+	Alpha      *int   `xml:"Alpha,attr"`
 }
 
 // ImageObject 图片对象

@@ -76,15 +76,19 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		fillColor = colorWithAlpha(canvas.Black, obj.Alpha)
 	}
 	var fillPaint any = fillColor
+	var fillPattern *patternPaint
+	var fillColorNode *FillColor
 	if dp != nil && dp.FillColor != nil {
-		fillColorNode := withFillAlpha(dp.FillColor, obj.Alpha)
-		fillColor = parseFillColor(fillColorNode)
-		fillPaint = parseFillPaint(fillColorNode, bx, by, pageH)
+		fillColorNode = dp.FillColor
 	}
 	if obj.FillColor != nil {
-		fillColorNode := withFillAlpha(obj.FillColor, obj.Alpha)
-		fillColor = parseFillColor(fillColorNode)
-		fillPaint = parseFillPaint(fillColorNode, bx, by, pageH)
+		fillColorNode = obj.FillColor
+	}
+	if fillColorNode != nil {
+		fillColorNode = withFillAlpha(fillColorNode, obj.Alpha)
+		fillColor = r.parseFillColor(fillColorNode)
+		fillPaint = r.parseFillPaint(fillColorNode, bx, by, pageH)
+		fillPattern = r.parsePatternPaint(fillColorNode.Pattern, fillColorNode.Value, fillColorNode.Index, fillColorNode.ColorSpace, fillColorNode.Alpha)
 	}
 	if fillPaint == nil {
 		fillPaint = fillColor
@@ -96,10 +100,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	strokeView := canvas.Identity
 	if shouldStroke {
 		if dp != nil {
-			strokeStyle.applyDrawParam(dp, bx, by, pageH, obj.Alpha)
+			strokeStyle.applyDrawParam(r, dp, bx, by, pageH, obj.Alpha)
 		}
 		if obj.StrokeColor != nil {
-			strokeStyle.applyStrokeColor(obj.StrokeColor, bx, by, pageH, obj.Alpha)
+			strokeStyle.applyStrokeColor(r, obj.StrokeColor, bx, by, pageH, obj.Alpha)
 		}
 		if obj.LineWidth > 0 {
 			strokeStyle.lineWidth = obj.LineWidth
@@ -110,6 +114,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		strokeStyle.scale(ctm)
 		strokeStyle.strokePaint, shadingClip, strokeView = resolveShdPaint(ctx, strokeStyle.strokePaint)
 		strokeClip = intersectClipPath(strokeClip, shadingClip)
+	}
+	patternCTM := TranslationMatrix(bx, by).Multiply(ctm)
+	if boundaryInCTM && parentCTM != nil {
+		patternCTM = parentCTM.Multiply(TranslationMatrix(bx, by)).Multiply(localCTM)
 	}
 	fontStyle := canvas.FontRegular
 	weight := obj.Weight
@@ -173,7 +181,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		}
 		dxs, dys := parseFloats(tc.DeltaX), parseFloats(tc.DeltaY)
 		xs, ys := parseFloats(tc.X), parseFloats(tc.Y)
-		drawAsPath := embeddedFont || textCodePositioned(tc, xs, ys) || fillClip != nil || shadedFill || shouldStroke
+		drawAsPath := embeddedFont || textCodePositioned(tc, xs, ys) || fillClip != nil || shadedFill || fillPattern != nil || shouldStroke
 		cx, cy := 0.0, 0.0
 		previousAdvance := 0.0
 		if len(xs) > 0 {
@@ -238,7 +246,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					transform = transform.Mul(glyphMatrix)
 				}
 				path := glyphPath.Copy().Transform(transform.Scale(scaleX, 1))
-				if shouldFill && fillPaint != nil {
+				if shouldFill && fillPattern != nil {
+					r.renderPattern(ctx, fillPattern, pageH, applyClipPath(path.Copy(), fillClip), patternCTM)
+				} else if shouldFill && fillPaint != nil {
 					ctx.SetFill(fillPaint)
 					ctx.SetStrokeColor(canvas.Transparent)
 					drawShdPath(ctx, applyClipPath(path.Copy(), fillClip), fillView)
@@ -247,26 +257,35 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					path = path.Dash(strokeStyle.dashOffset, strokeStyle.dashPattern...)
 				}
 				path = path.Stroke(strokeStyle.lineWidth, strokeStyle.lineCap, strokeStyle.lineJoin, canvas.Tolerance)
-				ctx.SetFill(strokeStyle.strokePaint)
-				ctx.SetStrokeColor(canvas.Transparent)
-				drawShdPath(ctx, applyClipPath(path, strokeClip), strokeView)
+				path = applyClipPath(path, strokeClip)
+				if strokeStyle.strokePattern != nil {
+					r.renderPattern(ctx, strokeStyle.strokePattern, pageH, path, patternCTM)
+				} else {
+					ctx.SetFill(strokeStyle.strokePaint)
+					ctx.SetStrokeColor(canvas.Transparent)
+					drawShdPath(ctx, path, strokeView)
+				}
 				if hasUnderline {
 					underline := &canvas.Path{}
 					underline.MoveTo(0, -sizeMM*0.1)
 					underline.LineTo(glyphWidth*scaleX, -sizeMM*0.1)
 					underline = underline.Stroke(sizeMM*0.05, canvas.ButtCap, canvas.MiterJoin, canvas.Tolerance)
-					if shouldFill {
+					if shouldFill && fillPattern != nil {
+						r.renderPattern(ctx, fillPattern, pageH, applyClipPath(underline.Transform(transform), clipPath), patternCTM)
+					} else if shouldFill {
 						ctx.SetFillColor(fillColor)
 						ctx.DrawPath(0, 0, applyClipPath(underline.Transform(transform), clipPath))
+					} else if strokeStyle.strokePattern != nil {
+						r.renderPattern(ctx, strokeStyle.strokePattern, pageH, applyClipPath(underline.Transform(transform), strokeClip), patternCTM)
 					} else {
 						drawShdPath(ctx, applyClipPath(underline.Transform(transform), strokeClip), strokeView)
 					}
 				}
 				continue
 			}
-			if fillPaint != nil {
+			if fillPaint != nil || fillPattern != nil {
 				ctx.SetFill(fillPaint)
-				if fillClip != nil || shadedFill {
+				if fillClip != nil || shadedFill || fillPattern != nil {
 					scaleX := hScale
 					if advanceLimit > 0 && glyphWidth*scaleX > advanceLimit {
 						scaleX = advanceLimit / glyphWidth
@@ -277,7 +296,11 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 						textTransform = textTransform.Mul(glyphMatrix)
 					}
 					glyphPath = applyClipPath(glyphPath.Copy().Transform(textTransform.Scale(scaleX, 1)), fillClip)
-					drawShdPath(ctx, glyphPath, fillView)
+					if fillPattern != nil {
+						r.renderPattern(ctx, fillPattern, pageH, glyphPath, patternCTM)
+					} else {
+						drawShdPath(ctx, glyphPath, fillView)
+					}
 					if hasUnderline {
 						uw := sizeMM * 0.05
 						off := sizeMM * 0.1
@@ -286,9 +309,13 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 						underline.LineTo(textWidth, -off)
 						underline = underline.Stroke(uw, canvas.ButtCap, canvas.MiterJoin, canvas.Tolerance)
 						underline = applyClipPath(underline.Transform(textTransform), clipPath)
-						ctx.SetFillColor(fillColor)
-						ctx.SetStrokeColor(canvas.Transparent)
-						ctx.DrawPath(0, 0, underline)
+						if fillPattern != nil {
+							r.renderPattern(ctx, fillPattern, pageH, underline, patternCTM)
+						} else {
+							ctx.SetFillColor(fillColor)
+							ctx.SetStrokeColor(canvas.Transparent)
+							ctx.DrawPath(0, 0, underline)
+						}
 					}
 					continue
 				}

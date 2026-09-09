@@ -19,6 +19,30 @@ import (
 	"strconv"
 )
 
+// UnmarshalXML 解析填充颜色并区分未支持的复杂颜色
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (c *FillColor) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type plain FillColor
+	var value struct {
+		plain
+		Other *struct{} `xml:",any"`
+	}
+	if err := d.DecodeElement(&value, &start); err != nil {
+		return err
+	}
+	*c = FillColor(value.plain)
+	c.unsupported = value.Other != nil
+	return nil
+}
+
+// UnmarshalXML 解析勾边颜色并区分未支持的复杂颜色
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (c *StrokeColor) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	return (*FillColor)(c).UnmarshalXML(d, start)
+}
+
 // graphicObjectTarget 图形对象集合
 type graphicObjectTarget struct {
 	objects   *[]GraphicObject

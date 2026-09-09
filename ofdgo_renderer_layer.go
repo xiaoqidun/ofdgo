@@ -194,10 +194,10 @@ func (r *Renderer) drawParamDefaults(id string, defaultFill, defaultStroke color
 		defaultLW = dp.LineWidth
 	}
 	if dp.FillColor != nil {
-		defaultFill = parseFillColor(dp.FillColor)
+		defaultFill = r.parseFillColor(dp.FillColor)
 	}
 	if dp.StrokeColor != nil {
-		defaultStroke = parseStrokeColor(dp.StrokeColor)
+		defaultStroke = r.parseStrokeColor(dp.StrokeColor)
 	}
 	return defaultFill, defaultStroke, defaultLW
 }

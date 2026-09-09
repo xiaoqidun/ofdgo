@@ -32,6 +32,7 @@ type Reader struct {
 	RootDir                   string
 	ResMap                    map[string]string
 	fontCache                 map[string]*Font
+	colorSpaceCache           map[string]*ColorSpace
 	drawParamCache            map[string]*DrawParam
 	compositeGraphicUnitCache map[string]*CompositeGraphicUnit
 	doc                       *Document
@@ -74,6 +75,7 @@ func (r *Reader) initRoot() error {
 	r.OFD = &ofd
 	r.ResMap = make(map[string]string)
 	r.fontCache = make(map[string]*Font)
+	r.colorSpaceCache = make(map[string]*ColorSpace)
 	r.drawParamCache = make(map[string]*DrawParam)
 	r.compositeGraphicUnitCache = make(map[string]*CompositeGraphicUnit)
 	return nil
@@ -186,6 +188,10 @@ func (r *Reader) loadRes(resPath string) {
 		return
 	}
 	baseLoc := res.BaseLoc
+	for i := range res.ColorSpaces.ColorSpace {
+		cs := &res.ColorSpaces.ColorSpace[i]
+		r.colorSpaceCache[cs.ID] = cs
+	}
 	for _, mm := range res.MultiMedias.MultiMedia {
 		if mm.MediaFile != "" {
 			if finalPath := resolveResourcePath(resPath, baseLoc, mm.MediaFile); finalPath != "" {
@@ -245,6 +251,9 @@ func (r *Reader) PageContent(page Page) (*PageContent, error) {
 		return nil, fmt.Errorf("failed to unmarshal page content: %w", err)
 	}
 	content.ID = page.ID
+	if content.PageRes != "" {
+		r.loadRes(resolveResourcePath(page.BaseLoc, "", content.PageRes))
+	}
 	return &content, nil
 }
 

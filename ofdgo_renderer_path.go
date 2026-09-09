@@ -26,17 +26,17 @@ import (
 const defaultPathLineWidth = 0.353
 
 type pathStyle struct {
-	fillColor        color.Color
-	strokeColor      color.Color
-	fillPaint        any
-	strokePaint      any
-	fillPattern      *Pattern
-	fillPatternColor color.Color
-	lineWidth        float64
-	lineCap          canvas.Capper
-	lineJoin         canvas.Joiner
-	dashOffset       float64
-	dashPattern      []float64
+	fillColor     color.Color
+	strokeColor   color.Color
+	fillPaint     any
+	strokePaint   any
+	fillPattern   *patternPaint
+	strokePattern *patternPaint
+	lineWidth     float64
+	lineCap       canvas.Capper
+	lineJoin      canvas.Joiner
+	dashOffset    float64
+	dashPattern   []float64
 }
 
 // newPathStyle 创建路径样式
@@ -59,21 +59,21 @@ func newPathStyle(defaultFill, defaultStroke color.Color, defaultLW float64, alp
 }
 
 // applyFillColor 应用填充颜色
-// 入参: fill 填充颜色, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, alpha 对象透明度
-func (s *pathStyle) applyFillColor(fill *FillColor, bx, by, pageH float64, alpha *int) {
+// 入参: r 渲染器, fill 填充颜色, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, alpha 对象透明度
+func (s *pathStyle) applyFillColor(r *Renderer, fill *FillColor, bx, by, pageH float64, alpha *int) {
 	fillColorNode := withFillAlpha(fill, alpha)
-	s.fillPattern = fillColorNode.Pattern
-	s.fillPatternColor = patternColor(fillColorNode)
-	s.fillColor = parseFillColor(fillColorNode)
-	s.fillPaint = parseFillPaint(fillColorNode, bx, by, pageH)
+	s.fillPattern = r.parsePatternPaint(fillColorNode.Pattern, fillColorNode.Value, fillColorNode.Index, fillColorNode.ColorSpace, fillColorNode.Alpha)
+	s.fillColor = r.parseFillColor(fillColorNode)
+	s.fillPaint = r.parseFillPaint(fillColorNode, bx, by, pageH)
 }
 
 // applyStrokeColor 应用描边颜色
-// 入参: stroke 描边颜色, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, alpha 对象透明度
-func (s *pathStyle) applyStrokeColor(stroke *StrokeColor, bx, by, pageH float64, alpha *int) {
+// 入参: r 渲染器, stroke 描边颜色, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, alpha 对象透明度
+func (s *pathStyle) applyStrokeColor(r *Renderer, stroke *StrokeColor, bx, by, pageH float64, alpha *int) {
 	strokeColorNode := withStrokeAlpha(stroke, alpha)
-	s.strokeColor = parseStrokeColor(strokeColorNode)
-	s.strokePaint = parseStrokePaint(strokeColorNode, bx, by, pageH)
+	s.strokePattern = r.parsePatternPaint(strokeColorNode.Pattern, strokeColorNode.Value, strokeColorNode.Index, strokeColorNode.ColorSpace, strokeColorNode.Alpha)
+	s.strokeColor = r.parseStrokeColor(strokeColorNode)
+	s.strokePaint = r.parseStrokePaint(strokeColorNode, bx, by, pageH)
 }
 
 // pathLineCap 转换线帽样式
@@ -103,16 +103,16 @@ func pathLineJoin(join string, fallback canvas.Joiner) canvas.Joiner {
 }
 
 // applyDrawParam 应用绘制参数样式
-// 入参: dp 绘制参数, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, alpha 对象透明度
-func (s *pathStyle) applyDrawParam(dp *DrawParam, bx, by, pageH float64, alpha *int) {
+// 入参: r 渲染器, dp 绘制参数, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, alpha 对象透明度
+func (s *pathStyle) applyDrawParam(r *Renderer, dp *DrawParam, bx, by, pageH float64, alpha *int) {
 	if dp.LineWidth > 0 {
 		s.lineWidth = dp.LineWidth
 	}
 	if dp.FillColor != nil {
-		s.applyFillColor(dp.FillColor, bx, by, pageH, alpha)
+		s.applyFillColor(r, dp.FillColor, bx, by, pageH, alpha)
 	}
 	if dp.StrokeColor != nil {
-		s.applyStrokeColor(dp.StrokeColor, bx, by, pageH, alpha)
+		s.applyStrokeColor(r, dp.StrokeColor, bx, by, pageH, alpha)
 	}
 	if dp.Cap != "" {
 		s.lineCap = pathLineCap(dp.Cap, s.lineCap)
@@ -127,16 +127,16 @@ func (s *pathStyle) applyDrawParam(dp *DrawParam, bx, by, pageH float64, alpha *
 }
 
 // applyPathObject 应用路径对象样式
-// 入参: obj 路径对象, bx 边界X坐标, by 边界Y坐标, pageH 页面高度
-func (s *pathStyle) applyPathObject(obj PathObject, bx, by, pageH float64) {
+// 入参: r 渲染器, obj 路径对象, bx 边界X坐标, by 边界Y坐标, pageH 页面高度
+func (s *pathStyle) applyPathObject(r *Renderer, obj PathObject, bx, by, pageH float64) {
 	if obj.LineWidth > 0 {
 		s.lineWidth = obj.LineWidth
 	}
 	if obj.FillColor != nil {
-		s.applyFillColor(obj.FillColor, bx, by, pageH, obj.Alpha)
+		s.applyFillColor(r, obj.FillColor, bx, by, pageH, obj.Alpha)
 	}
 	if obj.StrokeColor != nil {
-		s.applyStrokeColor(obj.StrokeColor, bx, by, pageH, obj.Alpha)
+		s.applyStrokeColor(r, obj.StrokeColor, bx, by, pageH, obj.Alpha)
 	}
 	if obj.Cap != "" {
 		s.lineCap = pathLineCap(obj.Cap, canvas.ButtCap)
@@ -183,11 +183,15 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	style := newPathStyle(defaultFill, defaultStroke, defaultLW, obj.Alpha)
 	if obj.DrawParam != "" {
 		if dp := r.getDrawParam(obj.DrawParam, nil); dp != nil {
-			style.applyDrawParam(dp, bx, by, pageH, obj.Alpha)
+			style.applyDrawParam(r, dp, bx, by, pageH, obj.Alpha)
 		}
 	}
-	style.applyPathObject(obj, bx, by, pageH)
+	style.applyPathObject(r, obj, bx, by, pageH)
 	style.scale(ctm)
+	patternCTM := TranslationMatrix(bx, by).Multiply(ctm)
+	if boundaryInCTM && parentCTM != nil {
+		patternCTM = parentCTM.Multiply(TranslationMatrix(bx, by)).Multiply(localCTM)
+	}
 	pathCTM := ctm
 	if boundaryInCTM {
 		pathCTM = localCTM
@@ -227,7 +231,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			fp = applyClipPath(fp, fillClip)
 		}
 		if style.fillPattern != nil {
-			r.renderPattern(ctx, style.fillPattern, style.fillPatternColor, pageH, fp, ctm, bx, by)
+			r.renderPattern(ctx, style.fillPattern, pageH, fp, patternCTM)
 		} else if style.fillPaint != nil {
 			ctx.SetFillRule(fillRule)
 			ctx.SetFill(fillPaint)
@@ -259,13 +263,17 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			ctx.SetDashes(0)
 		}
 		strokeClip := intersectClipPath(clipPath, shadingClip)
-		if strokeClip != nil || strokeView != canvas.Identity {
+		if strokeClip != nil || strokeView != canvas.Identity || style.strokePattern != nil {
 			sp = sp.Copy()
 			sp = sp.Stroke(style.lineWidth, style.lineCap, style.lineJoin, canvas.Tolerance)
 			sp = applyClipPath(sp, strokeClip)
-			ctx.SetFill(strokePaint)
-			ctx.SetStrokeColor(canvas.Transparent)
-			drawShdPath(ctx, sp, strokeView)
+			if style.strokePattern != nil {
+				r.renderPattern(ctx, style.strokePattern, pageH, sp, patternCTM)
+			} else {
+				ctx.SetFill(strokePaint)
+				ctx.SetStrokeColor(canvas.Transparent)
+				drawShdPath(ctx, sp, strokeView)
+			}
 		} else {
 			ctx.DrawPath(0, 0, sp)
 		}
@@ -274,22 +282,25 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 }
 
 // renderPattern 渲染图案填充
-// 入参: ctx 画布上下文, pattern 图案对象, defaultColor 默认颜色, pageH 页面高度, clip 填充区域, parentCTM 父级CTM, bx 边界X坐标, by 边界Y坐标
-func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *Pattern, defaultColor color.Color, pageH float64, clip *canvas.Path, parentCTM Matrix, bx, by float64) {
-	if pattern == nil || clip == nil || len(pattern.CellContent.Objects) == 0 {
+// 入参: ctx 画布上下文, pattern 底纹画刷, pageH 页面高度, clip 绘制区域, objectCTM 对象变换矩阵
+func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *patternPaint, pageH float64, clip *canvas.Path, objectCTM Matrix) {
+	if clip == nil || clip.Empty() || len(pattern.CellContent.Objects) == 0 {
 		return
 	}
 	xStep, yStep := pattern.XStep, pattern.YStep
-	if xStep == 0 {
+	if xStep < pattern.Width {
 		xStep = pattern.Width
 	}
-	if yStep == 0 {
+	if yStep < pattern.Height {
 		yStep = pattern.Height
 	}
 	if xStep <= 0 || yStep <= 0 {
 		return
 	}
-	patternCTM := TranslationMatrix(bx, by).Multiply(parentCTM).Multiply(NewMatrix(pattern.CTM))
+	patternCTM := NewMatrix(pattern.CTM)
+	if pattern.RelativeTo != "Page" {
+		patternCTM = objectCTM.Multiply(patternCTM)
+	}
 	invCTM, ok := patternCTM.Invert()
 	if !ok {
 		return
@@ -329,7 +340,8 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *Pattern, defaultC
 				tileCTM = tileCTM.Multiply(Matrix{a: 1, d: -1, f: pattern.Height})
 			}
 			for _, obj := range pattern.CellContent.Objects {
-				r.renderObject(ctx, obj, pageH, defaultColor, defaultColor, 0, &tileCTM, true, clip)
+				obj = mergeGraphicObjectAlpha(obj, pattern.alpha)
+				r.renderObject(ctx, obj, pageH, pattern.color, pattern.color, 0, &tileCTM, true, clip)
 			}
 		}
 	}

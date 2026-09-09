@@ -24,40 +24,66 @@ import (
 )
 
 // parseColorWithAlpha 解析带透明度的颜色
-// 入参: val 颜色值, alpha 透明度
+// 入参: value 颜色值, index 调色板索引, space 颜色空间标识, alpha 透明度
 // 返回: color.Color 颜色对象
-func parseColorWithAlpha(val string, alpha *int) color.Color {
-	parts := strings.Fields(val)
-	if len(parts) >= 3 {
-		r := parseColorComponent(parts[0])
-		g := parseColorComponent(parts[1])
-		b := parseColorComponent(parts[2])
-		a := 255
-		if alpha != nil {
-			a = *alpha
+func (r *Renderer) parseColorWithAlpha(value string, index *int, space string, alpha *int) color.Color {
+	if space == "" && r.Reader.doc != nil {
+		space = strconv.Itoa(r.Reader.doc.CommonData.DefaultCS)
+	}
+	cs := r.Reader.colorSpaceCache[space]
+	kind, bits, count := "RGB", 8, 3
+	if cs != nil {
+		kind = cs.Type
+		switch cs.BitsPerComponent {
+		case 1, 2, 4, 8, 16:
+			bits = cs.BitsPerComponent
 		}
-		a = clampColor(a)
-		return color.RGBA{
-			R: uint8(clampColor(r) * a / 255),
-			G: uint8(clampColor(g) * a / 255),
-			B: uint8(clampColor(b) * a / 255),
-			A: uint8(a),
+		if strings.TrimSpace(value) == "" && index != nil && 0 <= *index && *index < len(cs.Palette) {
+			value = cs.Palette[*index]
 		}
 	}
-	return color.Black
+	switch kind {
+	case "GRAY":
+		count = 1
+	case "CMYK":
+		count = 4
+	}
+	parts := strings.Fields(value)
+	var components [4]uint8
+	limit := 1<<bits - 1
+	if len(parts) >= count {
+		for i, part := range parts[:count] {
+			v, err := parseColorComponent(part)
+			if err != nil || v < 0 || limit < v {
+				components = [4]uint8{}
+				break
+			}
+			components[i] = uint8((v*255 + limit/2) / limit)
+		}
+	}
+	red, green, blue := components[0], components[1], components[2]
+	switch kind {
+	case "GRAY":
+		green, blue = red, red
+	case "CMYK":
+		red, green, blue = color.CMYKToRGB(components[0], components[1], components[2], components[3])
+	}
+	a := 255
+	if alpha != nil {
+		a = clampColor(*alpha)
+	}
+	return color.RGBA{R: uint8(int(red) * a / 255), G: uint8(int(green) * a / 255), B: uint8(int(blue) * a / 255), A: uint8(a)}
 }
 
 // parseColorComponent 解析颜色分量
 // 入参: s 颜色分量
-// 返回: int 颜色分量值
-func parseColorComponent(s string) int {
-	s = strings.TrimSpace(s)
+// 返回: int 颜色分量值, error 错误信息
+func parseColorComponent(s string) (int, error) {
 	if strings.HasPrefix(s, "#") {
-		v, _ := strconv.ParseInt(strings.TrimPrefix(s, "#"), 16, 0)
-		return int(v)
+		v, err := strconv.ParseInt(s[1:], 16, 0)
+		return int(v), err
 	}
-	v, _ := strconv.Atoi(s)
-	return v
+	return strconv.Atoi(s)
 }
 
 // clampColor 限制颜色分量范围
@@ -135,7 +161,7 @@ func colorWithAlpha(c color.Color, alpha *int) color.Color {
 // parseFillColor 解析填充颜色
 // 入参: fillColor 填充颜色节点
 // 返回: color.Color 颜色对象
-func parseFillColor(fillColor *FillColor) color.Color {
+func (r *Renderer) parseFillColor(fillColor *FillColor) color.Color {
 	if fillColor == nil {
 		return nil
 	}
@@ -143,117 +169,81 @@ func parseFillColor(fillColor *FillColor) color.Color {
 		return nil
 	}
 	if fillColor.AxialShd != nil {
-		return parseShdColor(fillColor.AxialShd.Segment, fillColor.Alpha)
+		return r.parseShdColor(fillColor.AxialShd.Segment, fillColor.Alpha)
 	}
 	if fillColor.RadialShd != nil {
-		return parseShdColor(fillColor.RadialShd.Segment, fillColor.Alpha)
+		return r.parseShdColor(fillColor.RadialShd.Segment, fillColor.Alpha)
 	}
-	if strings.TrimSpace(fillColor.Value) != "" {
-		return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
+	if fillColor.unsupported && strings.TrimSpace(fillColor.Value) == "" && fillColor.Index == nil {
+		return nil
 	}
-	return nil
+	return r.parseColorWithAlpha(fillColor.Value, fillColor.Index, fillColor.ColorSpace, fillColor.Alpha)
 }
 
 // parseFillPaint 解析填充画刷
 // 入参: fillColor 填充颜色节点, x X坐标, y Y坐标, pageH 页面高度
 // 返回: any 填充画刷
-func parseFillPaint(fillColor *FillColor, x, y, pageH float64) any {
+func (r *Renderer) parseFillPaint(fillColor *FillColor, x, y, pageH float64) any {
 	if fillColor == nil {
 		return nil
 	}
 	if fillColor.Pattern != nil {
 		return nil
 	}
-	if gradient := parseAxialShdGradient(fillColor.AxialShd, fillColor.Alpha, x, y, pageH); gradient != nil {
+	if gradient := r.parseAxialShdGradient(fillColor.AxialShd, fillColor.Alpha, x, y, pageH); gradient != nil {
 		return newShdPaint(gradient, fillColor.AxialShd.Extend, fillColor.AxialShd.MapType, fillColor.AxialShd.MapUnit)
 	}
-	if paint := parseRadialShdPaint(fillColor.RadialShd, fillColor.Alpha, x, y, pageH); paint != nil {
+	if paint := r.parseRadialShdPaint(fillColor.RadialShd, fillColor.Alpha, x, y, pageH); paint != nil {
 		return paint
 	}
-	if fillColor.AxialShd != nil {
-		return parseShdColor(fillColor.AxialShd.Segment, fillColor.Alpha)
-	}
-	if fillColor.RadialShd != nil {
-		return parseShdColor(fillColor.RadialShd.Segment, fillColor.Alpha)
-	}
-	if strings.TrimSpace(fillColor.Value) != "" {
-		return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
-	}
-	return nil
+	return r.parseFillColor(fillColor)
 }
 
 // parseStrokeColor 解析勾边颜色
 // 入参: strokeColor 勾边颜色节点
 // 返回: color.Color 颜色对象
-func parseStrokeColor(strokeColor *StrokeColor) color.Color {
-	if strokeColor == nil {
-		return nil
-	}
-	if strokeColor.AxialShd != nil {
-		return parseShdColor(strokeColor.AxialShd.Segment, strokeColor.Alpha)
-	}
-	if strokeColor.RadialShd != nil {
-		return parseShdColor(strokeColor.RadialShd.Segment, strokeColor.Alpha)
-	}
-	if strings.TrimSpace(strokeColor.Value) != "" {
-		return parseColorWithAlpha(strokeColor.Value, strokeColor.Alpha)
-	}
-	return nil
+func (r *Renderer) parseStrokeColor(strokeColor *StrokeColor) color.Color {
+	return r.parseFillColor((*FillColor)(strokeColor))
 }
 
 // parseStrokePaint 解析勾边画刷
 // 入参: strokeColor 勾边颜色节点, x X坐标, y Y坐标, pageH 页面高度
 // 返回: any 勾边画刷
-func parseStrokePaint(strokeColor *StrokeColor, x, y, pageH float64) any {
-	if strokeColor == nil {
-		return nil
-	}
-	if gradient := parseAxialShdGradient(strokeColor.AxialShd, strokeColor.Alpha, x, y, pageH); gradient != nil {
-		return newShdPaint(gradient, strokeColor.AxialShd.Extend, strokeColor.AxialShd.MapType, strokeColor.AxialShd.MapUnit)
-	}
-	if paint := parseRadialShdPaint(strokeColor.RadialShd, strokeColor.Alpha, x, y, pageH); paint != nil {
-		return paint
-	}
-	if strokeColor.AxialShd != nil {
-		return parseShdColor(strokeColor.AxialShd.Segment, strokeColor.Alpha)
-	}
-	if strokeColor.RadialShd != nil {
-		return parseShdColor(strokeColor.RadialShd.Segment, strokeColor.Alpha)
-	}
-	if strings.TrimSpace(strokeColor.Value) != "" {
-		return parseColorWithAlpha(strokeColor.Value, strokeColor.Alpha)
-	}
-	return nil
+func (r *Renderer) parseStrokePaint(strokeColor *StrokeColor, x, y, pageH float64) any {
+	return r.parseFillPaint((*FillColor)(strokeColor), x, y, pageH)
 }
 
-// patternColor 获取图案单元默认颜色
-// 入参: fillColor 填充颜色节点
-// 返回: color.Color 默认颜色
-func patternColor(fillColor *FillColor) color.Color {
-	if fillColor == nil || strings.TrimSpace(fillColor.Value) == "" {
+type patternPaint struct {
+	*Pattern
+	color color.Color
+	alpha *int
+}
+
+// parsePatternPaint 解析底纹画刷
+// 入参: pattern 底纹对象, value 颜色值, index 调色板索引, space 颜色空间标识, alpha 透明度
+// 返回: *patternPaint 底纹画刷
+func (r *Renderer) parsePatternPaint(pattern *Pattern, value string, index *int, space string, alpha *int) *patternPaint {
+	if pattern == nil {
 		return nil
 	}
-	return parseColorWithAlpha(fillColor.Value, fillColor.Alpha)
+	return &patternPaint{Pattern: pattern, color: r.parseColorWithAlpha(value, index, space, nil), alpha: alpha}
 }
 
 // parseShdColor 解析渐变颜色
 // 入参: segments 渐变分段, alpha 透明度
 // 返回: color.Color 颜色对象
-func parseShdColor(segments []ShdSegment, alpha *int) color.Color {
-	for _, segment := range segments {
-		if strings.TrimSpace(segment.Color.Value) == "" {
-			continue
-		}
-		segmentAlpha := mergeAlpha(segment.Color.Alpha, alpha)
-		return parseColorWithAlpha(segment.Color.Value, segmentAlpha)
+func (r *Renderer) parseShdColor(segments []ShdSegment, alpha *int) color.Color {
+	if len(segments) == 0 {
+		return color.Black
 	}
-	return color.Black
+	c := segments[0].Color
+	return r.parseColorWithAlpha(c.Value, c.Index, c.ColorSpace, mergeAlpha(c.Alpha, alpha))
 }
 
 // parseShdSegments 解析渐变分段
 // 入参: segments 渐变分段, alpha 透明度
 // 返回: canvas.Grad 渐变分段
-func parseShdSegments(segments []ShdSegment, alpha *int) canvas.Grad {
+func (r *Renderer) parseShdSegments(segments []ShdSegment, alpha *int) canvas.Grad {
 	gradient := canvas.NewGradient()
 	position, step := 0.0, 0.0
 	for i, segment := range segments {
@@ -275,11 +265,8 @@ func parseShdSegments(segments []ShdSegment, alpha *int) canvas.Grad {
 		}
 		offset := position
 		position += step
-		if strings.TrimSpace(segment.Color.Value) == "" {
-			continue
-		}
 		segmentAlpha := mergeAlpha(segment.Color.Alpha, alpha)
-		gradient.Add(offset, colorToRGBA(parseColorWithAlpha(segment.Color.Value, segmentAlpha)))
+		gradient.Add(offset, colorToRGBA(r.parseColorWithAlpha(segment.Color.Value, segment.Color.Index, segment.Color.ColorSpace, segmentAlpha)))
 	}
 	if len(gradient) == 0 {
 		return nil
@@ -290,7 +277,7 @@ func parseShdSegments(segments []ShdSegment, alpha *int) canvas.Grad {
 // parseAxialShdGradient 解析轴向渐变
 // 入参: axialShd 轴向渐变节点, alpha 透明度, x X坐标, y Y坐标, pageH 页面高度
 // 返回: canvas.Gradient 渐变对象
-func parseAxialShdGradient(axialShd *AxialShd, alpha *int, x, y, pageH float64) canvas.Gradient {
+func (r *Renderer) parseAxialShdGradient(axialShd *AxialShd, alpha *int, x, y, pageH float64) canvas.Gradient {
 	if axialShd == nil {
 		return nil
 	}
@@ -299,7 +286,7 @@ func parseAxialShdGradient(axialShd *AxialShd, alpha *int, x, y, pageH float64) 
 	if len(start) < 2 || len(end) < 2 {
 		return nil
 	}
-	gradient := parseShdSegments(axialShd.Segment, alpha)
+	gradient := r.parseShdSegments(axialShd.Segment, alpha)
 	if gradient == nil {
 		return nil
 	}
@@ -342,7 +329,7 @@ func axialShdClip(ctx *canvas.Context, gradient *canvas.LinearGradient, extend i
 // parseRadialShdPaint 解析径向渐变画刷
 // 入参: radialShd 径向渐变节点, alpha 透明度, x X坐标, y Y坐标, pageH 页面高度
 // 返回: *shdPaint 渐变画刷
-func parseRadialShdPaint(radialShd *RadialShd, alpha *int, x, y, pageH float64) *shdPaint {
+func (r *Renderer) parseRadialShdPaint(radialShd *RadialShd, alpha *int, x, y, pageH float64) *shdPaint {
 	if radialShd == nil || radialShd.EndRadius <= 0 {
 		return nil
 	}
@@ -351,7 +338,7 @@ func parseRadialShdPaint(radialShd *RadialShd, alpha *int, x, y, pageH float64) 
 	if len(start) < 2 || len(end) < 2 {
 		return nil
 	}
-	gradient := parseShdSegments(radialShd.Segment, alpha)
+	gradient := r.parseShdSegments(radialShd.Segment, alpha)
 	if gradient == nil {
 		return nil
 	}
