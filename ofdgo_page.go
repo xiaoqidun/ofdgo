@@ -41,6 +41,7 @@ type Content struct {
 // Layer 图层
 type Layer struct {
 	ID                   string                 `xml:"ID,attr"`
+	Type                 string                 `xml:"Type,attr"`
 	DrawParam            string                 `xml:"DrawParam,attr"`
 	Objects              []GraphicObject        `xml:"-"`
 	TextObject           []TextObject           `xml:"TextObject"`

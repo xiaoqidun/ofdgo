@@ -118,24 +118,19 @@ func (r *Renderer) renderPageToContext(ctx *canvas.Context, page *PageContent, d
 		ctx.SetFillColor(canvas.White)
 		ctx.DrawPath(0, 0, canvas.Rectangle(box.W, box.H))
 	}
-	if len(page.Template) > 0 && r.Reader.doc != nil {
-		for _, tplRef := range page.Template {
-			if tplRef.ZOrder != "Foreground" {
-				r.renderTemplate(ctx, tplRef.TemplateID, pageH)
+	for order := range 3 {
+		if r.Reader.doc != nil {
+			for _, tplRef := range page.Template {
+				kind := tplRef.ZOrder
+				if kind == "" {
+					kind = "Background"
+				}
+				if layerOrder(kind) == order {
+					r.renderTemplate(ctx, tplRef.TemplateID, pageH)
+				}
 			}
 		}
-	}
-	if page.Content.Layer != nil {
-		for _, layer := range page.Content.Layer {
-			r.renderLayer(ctx, layer, pageH, nil, nil)
-		}
-	}
-	if len(page.Template) > 0 && r.Reader.doc != nil {
-		for _, tplRef := range page.Template {
-			if tplRef.ZOrder == "Foreground" {
-				r.renderTemplate(ctx, tplRef.TemplateID, pageH)
-			}
-		}
+		r.renderLayers(ctx, page.Content.Layer, pageH, order)
 	}
 	if r.RenderAnnotations {
 		r.renderAnnotations(ctx, page.ID, pageH)

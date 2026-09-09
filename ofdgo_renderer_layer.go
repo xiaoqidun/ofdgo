@@ -53,8 +53,29 @@ func (r *Renderer) renderTemplate(ctx *canvas.Context, templateID string, pageH 
 		}
 		r.templatePageCache[templateID] = tplContent
 	}
-	if tplContent.Content.Layer != nil {
-		for _, layer := range tplContent.Content.Layer {
+	for order := range 3 {
+		r.renderLayers(ctx, tplContent.Content.Layer, pageH, order)
+	}
+}
+
+// layerOrder 获取图层类型的绘制顺序
+// 入参: kind 图层类型
+// 返回: int 绘制顺序
+func layerOrder(kind string) int {
+	switch kind {
+	case "Background":
+		return 0
+	case "Foreground":
+		return 2
+	}
+	return 1
+}
+
+// renderLayers 按原顺序渲染指定类型的图层
+// 入参: ctx 画布上下文, layers 图层列表, pageH 页面高度, order 图层类型顺序
+func (r *Renderer) renderLayers(ctx *canvas.Context, layers []Layer, pageH float64, order int) {
+	for _, layer := range layers {
+		if layerOrder(layer.Type) == order {
 			r.renderLayer(ctx, layer, pageH, nil, nil)
 		}
 	}

@@ -119,6 +119,7 @@ func decodeObjectContainer(d *xml.Decoder, start xml.StartElement, decode func(*
 func (l *Layer) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	*l = Layer{}
 	l.ID = attrValue(start, "ID")
+	l.Type = attrValue(start, "Type")
 	l.DrawParam = attrValue(start, "DrawParam")
 	return decodeObjectContainer(d, start, l.decodeObject)
 }
