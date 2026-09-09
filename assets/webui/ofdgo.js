@@ -106,6 +106,7 @@ const el = {
 	appPanel: document.querySelector("#appPanel"),
 	offlineStatus: document.querySelector("#offlineStatus"),
 	refreshAppButton: document.querySelector("#refreshAppButton"),
+	metaFile: document.querySelector("#metaFile"),
 	metaTitle: document.querySelector("#metaTitle"),
 	metaAuthor: document.querySelector("#metaAuthor"),
 	metaVersion: document.querySelector("#metaVersion"),
@@ -539,8 +540,8 @@ async function openOFD(file) {
 	state.wasmRecoveries = 0;
 	setBusy(true, "正在读取 OFD", 10, STATUS.opening);
 	try {
-		state.fileName = file.name || "ofdgo.ofd";
 		state.ofdBytes = new Uint8Array(await file.arrayBuffer());
+		state.fileName = file.name || "ofdgo.ofd";
 		await openDocument({ pageIndex: 0, resetScroll: true });
 	} catch (err) {
 		showError(err, true);
@@ -1972,6 +1973,8 @@ function markThumbnailError(index) {
 
 function renderMeta() {
 	const doc = state.doc || {};
+	document.title = `OFDGo WebUI - ${state.fileName}`;
+	el.metaFile.textContent = state.fileName;
 	el.metaTitle.textContent = doc.title || "-";
 	el.metaAuthor.textContent = doc.author || "-";
 	el.metaVersion.textContent = doc.version || "-";
