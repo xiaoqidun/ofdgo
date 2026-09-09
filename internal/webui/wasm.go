@@ -43,7 +43,7 @@ func RunWASM() {
 	registerCallback("ofdgoExportFormats", exportFormats)
 	registerCallback("ofdgoExportPage", exportPage)
 	registerCallback("ofdgoExportPDF", exportPDF)
-	registerCallback("ofdgoFontSystemNames", fontSystemNames)
+	registerCallback("ofdgoFontFileMatches", fontFileMatches)
 	select {}
 }
 
@@ -224,12 +224,13 @@ func bytesToJS(data []byte) js.Value {
 	return value
 }
 
-// fontSystemNames 获取系统字体名称
+// fontFileMatches 匹配浏览器字体文件名称
 // 入参: args 浏览器参数
-// 返回: any 系统字体名称, error 错误信息
-func fontSystemNames(args []js.Value) (any, error) {
-	names := stringsFromJS(jsArg(args, 0))
-	return ofdgo.FontSystemNames(names...), nil
+// 返回: any 匹配的字体文件名称, error 错误信息
+func fontFileMatches(args []js.Value) (any, error) {
+	files := stringsFromJS(jsArg(args, 0))
+	names := stringsFromJS(jsArg(args, 1))
+	return ofdgo.FontFileMatches(files, false, false, names...), nil
 }
 
 // bytesFromJS 从浏览器值读取二进制数据

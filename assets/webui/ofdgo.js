@@ -1,21 +1,4 @@
 const MM_TO_PX = 96 / 25.4;
-const COMMON_FONT_NAMES = [
-	"SimSun",
-	"NSimSun",
-	"SimHei",
-	"KaiTi",
-	"FangSong",
-	"Microsoft YaHei",
-	"PingFang SC",
-	"Noto Sans CJK SC",
-	"Source Han Sans SC",
-	"FZXiaoBiaoSong-B05",
-	"Arial",
-	"Arial Black",
-	"Helvetica",
-	"Courier New",
-	"Times New Roman",
-];
 const LOCAL_FONT_LOAD_LIMIT = 16;
 const FONT_DATABASE = "ofdgo";
 const fontChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel(FONT_DATABASE) : null;
@@ -38,7 +21,7 @@ const WASM_CALLBACKS = [
 	"ofdgoExportFormats",
 	"ofdgoExportPage",
 	"ofdgoExportPDF",
-	"ofdgoFontSystemNames",
+	"ofdgoFontFileMatches",
 ];
 
 let wasmPromise = null;
@@ -807,12 +790,10 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 		renderFontList();
 		return false;
 	}
-	const docWanted = fontNameKeys(docNames);
 	const docLoadLimit = Math.min(LOCAL_FONT_LOAD_LIMIT, Math.max(4, docNames.length * 3));
-	let selected = selectLocalFonts(available, docWanted, docLoadLimit);
+	let selected = selectLocalFonts(available, docNames, docLoadLimit);
 	if (!selected.length) {
-		const fallbackWanted = fontNameKeys(COMMON_FONT_NAMES);
-		selected = selectLocalFonts(available, fallbackWanted, 6);
+		selected = selectLocalFonts(available, [], 6);
 	}
 	const emptyStatus = available.length === 0 ? "未读取到系统字体" : "未匹配到文档所需字体";
 	const fonts = [];
@@ -852,26 +833,10 @@ function uniqueLocalFonts(fonts) {
 	return selected;
 }
 
-function selectLocalFonts(fonts, wanted, limit) {
-	const ranked = [];
-	for (const font of fonts) {
-		const rank = localFontMatchRank(font, wanted);
-		if (!rank) {
-			continue;
-		}
-		ranked.push({
-			font,
-			rank,
-			styleRank: localFontStyleRank(font),
-			name: normalizeFontName(localFontName(font)),
-		});
-	}
-	ranked.sort((a, b) => (
-		a.rank - b.rank ||
-		a.styleRank - b.styleRank ||
-		a.name.localeCompare(b.name)
-	));
-	return uniqueLocalFonts(ranked.map((item) => item.font)).slice(0, limit);
+function selectLocalFonts(fonts, names, limit) {
+	const available = new Map(uniqueLocalFonts(fonts).map((font) => [localFontName(font), font]));
+	const matched = callWASM("ofdgoFontFileMatches", [...available.keys()], names);
+	return matched.slice(0, limit).map((name) => available.get(name));
 }
 
 async function fontData(fonts) {
@@ -965,72 +930,6 @@ function externalDocumentFontNames() {
 		names.push(font.fontName, font.familyName);
 	}
 	return names;
-}
-
-function fontNameKeys(names) {
-	const keys = new Set();
-	for (const name of fontSystemNames(names)) {
-		const key = normalizeFontName(name);
-		if (key) {
-			keys.add(key);
-		}
-	}
-	return keys;
-}
-
-function fontSystemNames(names) {
-	const source = (Array.isArray(names) ? names : [])
-		.map((name) => String(name || "").trim())
-		.filter((name) => name !== "");
-	if (!source.length) {
-		return [];
-	}
-	if (state.ready && !state.wasmExited && typeof globalThis.ofdgoFontSystemNames === "function") {
-		try {
-			const names = callWASM("ofdgoFontSystemNames", source);
-			if (Array.isArray(names)) {
-				return names;
-			}
-		} catch {
-			return source;
-		}
-	}
-	return source;
-}
-
-function localFontMatchRank(font, wanted) {
-	let best = 0;
-	for (const name of [font.family, font.fullName, font.postscriptName, font.style]) {
-		const key = normalizeFontName(name);
-		if (!key) {
-			continue;
-		}
-		for (const wantedKey of wanted) {
-			let rank = 0;
-			if (key === wantedKey) {
-				rank = 1;
-			} else if (key.startsWith(wantedKey) || wantedKey.startsWith(key)) {
-				rank = 2;
-			} else if (key.includes(wantedKey) || wantedKey.includes(key)) {
-				rank = 3;
-			}
-			if (rank && (!best || rank < best)) {
-				best = rank;
-			}
-		}
-	}
-	return best;
-}
-
-function localFontStyleRank(font) {
-	const key = normalizeFontName(font.style);
-	if (!key || key === "regular" || key === "normal") {
-		return 0;
-	}
-	if (key.includes("bold") || key.includes("italic")) {
-		return 2;
-	}
-	return 1;
 }
 
 function localFontName(font) {

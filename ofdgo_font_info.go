@@ -189,17 +189,7 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 // 返回: []string 字体文件列表
 func fontFSMatchesStyle(fsys fs.FS, patterns []string, bold, italic bool) []string {
 	names, _ := fs.Glob(fsys, "*")
-	candidates := fontFileCandidates(names, path.Base)
-	matches := make([]fontFileMatch, 0, len(candidates))
-	seen := make(map[string]int, len(candidates))
-	for _, matcher := range newFontPatternMatchers(patterns) {
-		for _, file := range candidates {
-			rank := matcher.rankCandidate(file)
-			appendFontFileMatch(&matches, seen, matcher, file, rank, bold, italic)
-		}
-	}
-	sortFontFileMatches(matches)
-	return fontFileMatchNames(matches)
+	return fontFileMatches(fontFileCandidates(names, path.Base), patterns, bold, italic)
 }
 
 // fontUsage 统计文档字体使用次数

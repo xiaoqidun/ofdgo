@@ -152,26 +152,29 @@ func (r *Renderer) fontSources(fontID string, font *Font, style canvas.FontStyle
 			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: name, exact: true})
 		}
 	}
-	if !canLoadSystemFonts() {
-		for index, fsys := range r.fontFS {
-			names, _ := fs.Glob(fsys, "*")
-			for _, name := range names {
-				sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: name})
+	if canLoadSystemFonts() {
+		systemDirs := systemFontDirs()
+		for _, name := range []string{font.FamilyName, font.FontName} {
+			for _, systemName := range fontSystemNames(name) {
+				systemPatterns := fontFilePatterns(systemName)
+				for _, dir := range systemDirs {
+					for _, match := range r.matchFontFiles(dir, systemPatterns, bold, italic) {
+						sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match, exact: true})
+					}
+				}
+				sources = appendFontSource(sources, seen, fontSource{kind: fontSourceSystem, name: systemName, exact: true})
 			}
 		}
-		r.fontSourceCache[fontID] = sources
-		return sources
 	}
-	systemDirs := systemFontDirs()
-	for _, name := range []string{font.FamilyName, font.FontName} {
-		for _, systemName := range fontSystemNames(name) {
-			systemPatterns := fontFilePatterns(systemName)
-			for _, dir := range systemDirs {
-				for _, match := range r.matchFontFiles(dir, systemPatterns, bold, italic) {
-					sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match, exact: true})
-				}
-			}
-			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceSystem, name: systemName, exact: true})
+	for index, fsys := range r.fontFS {
+		for _, name := range fontFSMatchesStyle(fsys, fontFilePatterns(fontDefaultSystemNames()...), bold, italic) {
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: name})
+		}
+	}
+	for index, fsys := range r.fontFS {
+		names, _ := fs.Glob(fsys, "*")
+		for _, name := range names {
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: name})
 		}
 	}
 	r.fontSourceCache[fontID] = sources
@@ -256,16 +259,7 @@ func (r *Renderer) matchFontFiles(dir string, patterns []string, bold, italic bo
 		candidates = fontFileCandidates(files, filepath.Base)
 		r.fontDirCandidates[dir] = candidates
 	}
-	matches := make([]fontFileMatch, 0, len(candidates))
-	index := make(map[string]int, len(candidates))
-	for _, matcher := range newFontPatternMatchers(patterns) {
-		for _, file := range candidates {
-			rank := matcher.rankCandidate(file)
-			appendFontFileMatch(&matches, index, matcher, file, rank, bold, italic)
-		}
-	}
-	sortFontFileMatches(matches)
-	return fontFileMatchNames(matches)
+	return fontFileMatches(candidates, patterns, bold, italic)
 }
 
 // systemFontDirs 获取系统字体目录

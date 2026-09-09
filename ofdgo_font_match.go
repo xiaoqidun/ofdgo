@@ -110,13 +110,6 @@ var fontMatchRules = []fontMatchRule{
 	},
 }
 
-var fontFallbackFiles = []string{
-	"simsun.ttc", "simsun.ttf", "nsimsun.ttf",
-	"msyh.ttc", "msyh.ttf", "simhei.ttf",
-	"NotoSansCJK*.ttc", "NotoSansSC*.otf", "SourceHanSansSC*.otf",
-	"arial.ttf",
-}
-
 var fontNameReplacer = strings.NewReplacer(" ", "", "-", "", "_", "", "(", "", ")", "", "（", "", "）", "")
 
 // FontNormalizeName 规范化字体名称

@@ -196,6 +196,14 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		for i, glyph := range glyphs {
 			str := glyph.Text
 			drawAsGlyphPath := drawAsPath || glyph.GlyphID >= 0
+			if !drawAsGlyphPath {
+				for _, char := range str {
+					if face.Font.GlyphIndex(char) == 0 {
+						drawAsGlyphPath = true
+						break
+					}
+				}
+			}
 			var glyphPath *canvas.Path
 			var glyphWidth float64
 			if drawAsGlyphPath {

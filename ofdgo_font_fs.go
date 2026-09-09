@@ -129,34 +129,37 @@ func (fsys *FontFS) MatchStyle(bold, italic bool, names ...string) (string, bool
 	if matches := fsys.matchPatternsStyle(fontFilePatterns(names...), bold, italic); len(matches) > 0 {
 		return matches[0], true
 	}
-	if matches := fsys.fallbackFonts(); len(matches) > 0 {
+	if matches := fsys.fallbackFonts(bold, italic); len(matches) > 0 {
 		return matches[0], false
 	}
 	return "", false
 }
 
-// match 匹配字体文件模式
-// 入参: pattern 匹配模式
-// 返回: []string 字体文件列表
-func (fsys *FontFS) match(pattern string) []string {
-	return fsys.matchStyle(pattern, false, false)
-}
-
-// matchStyle 匹配指定样式的字体文件模式
-// 入参: pattern 匹配模式, bold 是否粗体, italic 是否斜体
-// 返回: []string 字体文件列表
-func (fsys *FontFS) matchStyle(pattern string, bold, italic bool) []string {
-	return fsys.matchPatternsStyle([]string{pattern}, bold, italic)
+// FontFileMatches 匹配指定样式的字体文件名称
+// 入参: files 可用字体文件名, bold 是否粗体, italic 是否斜体, names 字体名称，留空匹配默认回退字体
+// 返回: []string 按优先级排列的匹配文件名
+func FontFileMatches(files []string, bold, italic bool, names ...string) []string {
+	if len(names) == 0 {
+		names = fontDefaultSystemNames()
+	}
+	return fontFileMatches(fontFileCandidates(files, path.Base), fontFilePatterns(names...), bold, italic)
 }
 
 // matchPatternsStyle 匹配指定样式的字体文件模式
 // 入参: patterns 匹配模式列表, bold 是否粗体, italic 是否斜体
 // 返回: []string 字体文件列表
 func (fsys *FontFS) matchPatternsStyle(patterns []string, bold, italic bool) []string {
-	matches := make([]fontFileMatch, 0, len(fsys.candidates))
-	seen := make(map[string]int, len(fsys.candidates))
+	return fontFileMatches(fsys.candidates, patterns, bold, italic)
+}
+
+// fontFileMatches 匹配字体文件候选
+// 入参: candidates 字体候选, patterns 匹配模式, bold 是否粗体, italic 是否斜体
+// 返回: []string 按优先级排列的匹配文件名
+func fontFileMatches(candidates []fontFileCandidate, patterns []string, bold, italic bool) []string {
+	matches := make([]fontFileMatch, 0, len(candidates))
+	seen := make(map[string]int, len(candidates))
 	for _, matcher := range newFontPatternMatchers(patterns) {
-		for _, file := range fsys.candidates {
+		for _, file := range candidates {
 			rank := matcher.rankCandidate(file)
 			appendFontFileMatch(&matches, seen, matcher, file, rank, bold, italic)
 		}
@@ -166,12 +169,11 @@ func (fsys *FontFS) matchPatternsStyle(patterns []string, bold, italic bool) []s
 }
 
 // fallbackFonts 获取回退字体文件
+// 入参: bold 是否粗体, italic 是否斜体
 // 返回: []string 字体文件列表
-func (fsys *FontFS) fallbackFonts() []string {
-	for _, item := range fontFallbackFiles {
-		if matches := fsys.match(item); len(matches) > 0 {
-			return []string{matches[0]}
-		}
+func (fsys *FontFS) fallbackFonts(bold, italic bool) []string {
+	if matches := fsys.matchPatternsStyle(fontFilePatterns(fontDefaultSystemNames()...), bold, italic); len(matches) > 0 {
+		return matches
 	}
 	if len(fsys.names) > 0 {
 		return []string{fsys.names[0]}
