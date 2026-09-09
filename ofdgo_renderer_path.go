@@ -223,6 +223,14 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		fillPaint, shadingClip, fillView := resolveShdPaint(ctx, style.fillPaint)
 		fillClip := intersectClipPath(clipPath, shadingClip)
 		fp := p
+		_, repeat := fillPaint.(*repeatAxialGradient)
+		if fillClip != nil || repeat {
+			paths := canvas.Paths(p.Copy().Split())
+			for _, path := range paths {
+				path.Close()
+			}
+			fp = paths.Merge()
+		}
 		fillRule := canvas.NonZero
 		if obj.Rule == "Even-Odd" {
 			fillRule = canvas.EvenOdd
@@ -231,8 +239,6 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			}
 		}
 		if fillClip != nil {
-			fp = fp.Copy()
-			fp.Close()
 			fp = applyClipPath(fp, fillClip)
 		}
 		if style.fillPattern != nil {
@@ -268,7 +274,8 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			ctx.SetDashes(0)
 		}
 		strokeClip := intersectClipPath(clipPath, shadingClip)
-		if strokeClip != nil || strokeView != canvas.Identity || style.strokePattern != nil {
+		_, repeat := strokePaint.(*repeatAxialGradient)
+		if strokeClip != nil || strokeView != canvas.Identity || repeat || style.strokePattern != nil {
 			sp = sp.Copy()
 			sp = sp.Stroke(style.lineWidth, style.lineCap, style.lineJoin, canvas.Tolerance)
 			sp = applyClipPath(sp, strokeClip)

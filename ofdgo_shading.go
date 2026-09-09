@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"image/color"
 	"math"
 	"strconv"
 
@@ -27,6 +28,28 @@ type shdPaint struct {
 	extend   int
 	mapType  string
 	period   float64
+}
+
+// repeatAxialGradient 轴向重复渐变
+type repeatAxialGradient struct {
+	*canvas.LinearGradient
+	period float64
+}
+
+// At 获取重复区间内的渐变颜色
+// 入参: x X坐标, y Y坐标
+// 返回: color.RGBA 渐变颜色
+func (g *repeatAxialGradient) At(x, y float64) color.RGBA {
+	d := g.End.Sub(g.Start)
+	t := (canvas.Point{X: x, Y: y}).Sub(g.Start).Dot(d) / d.Dot(d) / g.period
+	return g.Grad.At(t - math.Floor(t))
+}
+
+// SetColorSpace 转换重复渐变颜色空间
+// 入参: space 颜色空间
+// 返回: canvas.Gradient 渐变对象
+func (g *repeatAxialGradient) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
+	return &repeatAxialGradient{LinearGradient: g.LinearGradient.SetColorSpace(space).(*canvas.LinearGradient), period: g.period}
 }
 
 // newShdPaint 创建渐变画刷
@@ -65,6 +88,9 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 		clip := axialShdClip(g, s.extend, bounds)
 		if clip != nil && s.view != canvas.Identity {
 			clip = clip.Transform(s.view)
+		}
+		if s.mapType == "Repeat" {
+			return &repeatAxialGradient{LinearGradient: g, period: s.period}, clip, s.view
 		}
 		if s.mapType != "Reflect" {
 			return g, clip, s.view
@@ -135,6 +161,10 @@ func transformShdPaint(paint any, parentCTM *Matrix, bx, by, pageH float64, boun
 // drawShdPath 绘制渐变路径并保持图形轮廓不变
 // 入参: ctx 画布上下文, path 填充路径, view 渐变变换
 func drawShdPath(ctx *canvas.Context, path *canvas.Path, view canvas.Matrix) {
+	if gradient, ok := ctx.Style.Fill.Gradient.(*repeatAxialGradient); ok {
+		drawRepeatAxialPath(ctx, path, gradient, view)
+		return
+	}
 	if view == canvas.Identity {
 		ctx.DrawPath(0, 0, path)
 		return
@@ -142,6 +172,41 @@ func drawShdPath(ctx *canvas.Context, path *canvas.Path, view canvas.Matrix) {
 	origin := ctx.CoordView().Dot(canvas.Point{})
 	m := ctx.CoordSystemView().Mul(ctx.View()).Translate(origin.X, origin.Y).Mul(view)
 	ctx.RenderPath(path.Copy().Transform(view.Inv()), ctx.Style, m)
+}
+
+// drawRepeatAxialPath 按周期裁剪并绘制轴向重复渐变
+// 入参: ctx 画布上下文, path 填充路径, gradient 重复渐变, view 渐变变换
+func drawRepeatAxialPath(ctx *canvas.Context, path *canvas.Path, gradient *repeatAxialGradient, view canvas.Matrix) {
+	p := path.Copy()
+	if ctx.FillRule == canvas.EvenOdd {
+		p = p.Settle(canvas.EvenOdd)
+	}
+	p = p.Transform(view.Inv())
+	d := gradient.End.Sub(gradient.Start).Mul(gradient.period)
+	axis := canvas.Matrix{{d.X, -d.Y, gradient.Start.X}, {d.Y, d.X, gradient.Start.Y}}
+	bounds := p.FastBounds().And(shdCanvasBounds(ctx).Transform(view.Inv()))
+	area := bounds.Transform(axis.Inv())
+	origin := ctx.CoordView().Dot(canvas.Point{})
+	m := ctx.CoordSystemView().Mul(ctx.View()).Translate(origin.X, origin.Y).Mul(view)
+	style := ctx.Style
+	style.FillRule = canvas.NonZero
+	stops := gradient.Grad
+	if stops[0].Offset > 0 {
+		stops = append(canvas.Grad{{Offset: 0, Color: stops[0].Color}}, stops...)
+	}
+	if last := stops[len(stops)-1]; last.Offset < 1 {
+		stops = append(append(canvas.Grad(nil), stops...), canvas.Stop{Offset: 1, Color: last.Color})
+	}
+	for i, end := math.Floor(area.X0), math.Ceil(area.X1); i < end; i++ {
+		clip := (canvas.Rect{X0: i, Y0: area.Y0, X1: i + 1, Y1: area.Y1}).ToPath().Transform(axis)
+		part := applyClipPath(p, clip)
+		if part.Empty() {
+			continue
+		}
+		start := gradient.Start.Add(d.Mul(i))
+		style.Fill = canvas.Paint{Gradient: stops.ToLinear(start, start.Add(d))}
+		ctx.RenderPath(part, style, m)
+	}
 }
 
 // rangeLimits 限制渐变延伸区间
