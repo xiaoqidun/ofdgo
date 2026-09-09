@@ -14,11 +14,7 @@
 
 package ofdgo
 
-import (
-	"image/color"
-
-	"github.com/tdewolff/canvas"
-)
+import "github.com/tdewolff/canvas"
 
 // renderAnnotations 渲染页面注释外观
 // 入参: ctx 画布上下文, pageID 页面ID, pageH 页面高度
@@ -30,7 +26,7 @@ func (r *Renderer) renderAnnotations(ctx *canvas.Context, pageID string, pageH f
 		box, _ := ParseBox(annot.Appearance.Boundary)
 		ctm := Matrix{a: 1, d: 1, e: box.X, f: box.Y}
 		for _, obj := range annot.Appearance.Objects {
-			r.renderObject(ctx, obj, pageH, nil, nil, 0, &ctm, false, nil)
+			r.renderObject(ctx, obj, pageH, nil, &ctm, false, nil)
 		}
 	}
 }
@@ -59,38 +55,38 @@ func (r *Renderer) renderTemplate(ctx *canvas.Context, templateID string, pageH 
 	}
 	if tplContent.Content.Layer != nil {
 		for _, layer := range tplContent.Content.Layer {
-			r.renderLayer(ctx, layer, pageH, nil, nil, 0, nil)
+			r.renderLayer(ctx, layer, pageH, nil, nil)
 		}
 	}
 }
 
 // renderLayer 渲染图层
-// 入参: ctx 画布上下文, layer 图层对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM
-func (r *Renderer) renderLayer(ctx *canvas.Context, layer Layer, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix) {
-	defaultFill, defaultStroke, defaultLW = r.drawParamDefaults(layer.DrawParam, defaultFill, defaultStroke, defaultLW)
+// 入参: ctx 画布上下文, layer 图层对象, pageH 页面高度, defaults 默认绘制参数, parentCTM 父级CTM
+func (r *Renderer) renderLayer(ctx *canvas.Context, layer Layer, pageH float64, defaults *DrawParam, parentCTM *Matrix) {
+	defaults = r.drawParamDefaults(layer.DrawParam, defaults)
 	if len(layer.Objects) > 0 {
 		for _, obj := range layer.Objects {
-			r.renderObject(ctx, obj, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false, nil)
+			r.renderObject(ctx, obj, pageH, defaults, parentCTM, false, nil)
 		}
 		return
 	}
 	for _, textObj := range layer.TextObject {
-		r.renderText(ctx, textObj, pageH, defaultFill, defaultStroke, parentCTM, false, nil)
+		r.renderText(ctx, textObj, pageH, defaults, parentCTM, false, nil)
 	}
 	for _, pathObj := range layer.PathObject {
-		r.renderPath(ctx, pathObj, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false, nil)
+		r.renderPath(ctx, pathObj, pageH, defaults, parentCTM, false, nil)
 	}
 	for _, imgObj := range layer.ImageObject {
 		r.renderImage(ctx, imgObj, pageH, parentCTM, false, nil)
 	}
 	for _, cgu := range layer.CompositeGraphicUnit {
-		r.renderCompositeGraphicUnit(ctx, cgu, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, false, nil)
+		r.renderCompositeGraphicUnit(ctx, cgu, pageH, defaults, parentCTM, false, nil)
 	}
 }
 
 // renderCompositeGraphicUnit 渲染复合图元
-// 入参: ctx 画布上下文, cgu 复合图元对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
-func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu CompositeGraphicUnit, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
+// 入参: ctx 画布上下文, cgu 复合图元对象, pageH 页面高度, defaults 默认绘制参数, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
+func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu CompositeGraphicUnit, pageH float64, defaults *DrawParam, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
 	if cgu.Visible != nil && !*cgu.Visible {
 		return
 	}
@@ -109,18 +105,18 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 		clips, clipCTM = &clipCopy, boundaryCTM
 	}
 	clipPath := intersectClipPath(parentClip, r.buildClipPath(clips, pageH, 0, 0, clipCTM))
+	defaults = r.drawParamDefaults(cgu.DrawParam, defaults)
 	if cgu.ResourceID != "" {
 		if ref, ok := r.CompositeGraphicUnits[cgu.ResourceID]; ok {
 			refCopy := *ref
 			refCopy.Alpha = mergeAlpha(refCopy.Alpha, cgu.Alpha)
-			r.renderCompositeGraphicUnit(ctx, refCopy, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, true, clipPath)
+			r.renderCompositeGraphicUnit(ctx, refCopy, pageH, defaults, &currentCTM, true, clipPath)
 		}
 	}
-	defaultFill, defaultStroke, defaultLW = r.drawParamDefaults(cgu.DrawParam, defaultFill, defaultStroke, defaultLW)
 	if len(cgu.Objects) > 0 {
 		for _, obj := range cgu.Objects {
 			obj = mergeGraphicObjectAlpha(obj, cgu.Alpha)
-			r.renderObject(ctx, obj, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, boundaryInCTM, clipPath)
+			r.renderObject(ctx, obj, pageH, defaults, &currentCTM, boundaryInCTM, clipPath)
 		}
 		ctx.Pop()
 		return
@@ -131,31 +127,31 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 	}
 	for _, pathObj := range cgu.PathObject {
 		pathObj.Alpha = mergeAlpha(pathObj.Alpha, cgu.Alpha)
-		r.renderPath(ctx, pathObj, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, boundaryInCTM, clipPath)
+		r.renderPath(ctx, pathObj, pageH, defaults, &currentCTM, boundaryInCTM, clipPath)
 	}
 	for _, textObj := range cgu.TextObject {
 		textObj.Alpha = mergeAlpha(textObj.Alpha, cgu.Alpha)
-		r.renderText(ctx, textObj, pageH, defaultFill, defaultStroke, &currentCTM, boundaryInCTM, clipPath)
+		r.renderText(ctx, textObj, pageH, defaults, &currentCTM, boundaryInCTM, clipPath)
 	}
 	for _, subCgu := range cgu.CompositeGraphicUnit {
 		subCgu.Alpha = mergeAlpha(subCgu.Alpha, cgu.Alpha)
-		r.renderCompositeGraphicUnit(ctx, subCgu, pageH, defaultFill, defaultStroke, defaultLW, &currentCTM, boundaryInCTM, clipPath)
+		r.renderCompositeGraphicUnit(ctx, subCgu, pageH, defaults, &currentCTM, boundaryInCTM, clipPath)
 	}
 	ctx.Pop()
 }
 
 // renderObject 渲染图形对象
-// 入参: ctx 画布上下文, obj 图形对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
-func (r *Renderer) renderObject(ctx *canvas.Context, obj GraphicObject, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
+// 入参: ctx 画布上下文, obj 图形对象, pageH 页面高度, defaults 默认绘制参数, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
+func (r *Renderer) renderObject(ctx *canvas.Context, obj GraphicObject, pageH float64, defaults *DrawParam, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
 	switch obj.Type {
 	case "TextObject":
-		r.renderText(ctx, obj.TextObject, pageH, defaultFill, defaultStroke, parentCTM, boundaryInCTM, parentClip)
+		r.renderText(ctx, obj.TextObject, pageH, defaults, parentCTM, boundaryInCTM, parentClip)
 	case "PathObject":
-		r.renderPath(ctx, obj.PathObject, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, boundaryInCTM, parentClip)
+		r.renderPath(ctx, obj.PathObject, pageH, defaults, parentCTM, boundaryInCTM, parentClip)
 	case "ImageObject":
 		r.renderImage(ctx, obj.ImageObject, pageH, parentCTM, boundaryInCTM, parentClip)
 	case "CompositeGraphicUnit", "CompositeObject":
-		r.renderCompositeGraphicUnit(ctx, obj.CompositeGraphicUnit, pageH, defaultFill, defaultStroke, defaultLW, parentCTM, boundaryInCTM, parentClip)
+		r.renderCompositeGraphicUnit(ctx, obj.CompositeGraphicUnit, pageH, defaults, parentCTM, boundaryInCTM, parentClip)
 	}
 }
 
@@ -180,26 +176,61 @@ func mergeGraphicObjectAlpha(obj GraphicObject, alpha *int) GraphicObject {
 }
 
 // drawParamDefaults 合并绘制参数默认样式
-// 入参: id 绘制参数ID, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽
-// 返回: color.Color 默认填充色, color.Color 默认描边色, float64 默认线宽
-func (r *Renderer) drawParamDefaults(id string, defaultFill, defaultStroke color.Color, defaultLW float64) (color.Color, color.Color, float64) {
+// 入参: id 绘制参数ID, defaults 默认绘制参数
+// 返回: *DrawParam 合并后的绘制参数
+func (r *Renderer) drawParamDefaults(id string, defaults *DrawParam) *DrawParam {
 	if id == "" {
-		return defaultFill, defaultStroke, defaultLW
+		return defaults
 	}
 	dp := r.getDrawParam(id, nil)
 	if dp == nil {
-		return defaultFill, defaultStroke, defaultLW
+		return defaults
 	}
+	if defaults == nil {
+		return dp
+	}
+	return mergeDrawParam(*defaults, dp)
+}
+
+// mergeDrawParam 合并绘制参数属性
+// 入参: base 基础绘制参数, dp 覆盖绘制参数
+// 返回: *DrawParam 合并后的绘制参数
+func mergeDrawParam(base DrawParam, dp *DrawParam) *DrawParam {
 	if dp.LineWidth > 0 {
-		defaultLW = dp.LineWidth
+		base.LineWidth = dp.LineWidth
+	}
+	if dp.Join != "" {
+		base.Join = dp.Join
+	}
+	if dp.Cap != "" {
+		base.Cap = dp.Cap
+	}
+	if dp.DashPattern != "" {
+		base.DashPattern = dp.DashPattern
+		base.DashOffset = dp.DashOffset
+	}
+	if dp.MiterLimit > 0 {
+		base.MiterLimit = dp.MiterLimit
 	}
 	if dp.FillColor != nil {
-		defaultFill = r.parseFillColor(dp.FillColor)
+		base.FillColor = dp.FillColor
 	}
 	if dp.StrokeColor != nil {
-		defaultStroke = r.parseStrokeColor(dp.StrokeColor)
+		base.StrokeColor = dp.StrokeColor
 	}
-	return defaultFill, defaultStroke, defaultLW
+	if dp.Font != "" {
+		base.Font = dp.Font
+	}
+	if dp.Size > 0 {
+		base.Size = dp.Size
+	}
+	if dp.Weight > 0 {
+		base.Weight = dp.Weight
+	}
+	if dp.Italic {
+		base.Italic = dp.Italic
+	}
+	return &base
 }
 
 // getDrawParam 获取绘制参数逻辑
@@ -219,42 +250,7 @@ func (r *Renderer) getDrawParam(id string, visited map[string]bool) *DrawParam {
 			if base == nil {
 				return dp
 			}
-			merged := *base
-			if dp.LineWidth > 0 {
-				merged.LineWidth = dp.LineWidth
-			}
-			if dp.Join != "" {
-				merged.Join = dp.Join
-			}
-			if dp.Cap != "" {
-				merged.Cap = dp.Cap
-			}
-			if dp.DashPattern != "" {
-				merged.DashPattern = dp.DashPattern
-				merged.DashOffset = dp.DashOffset
-			}
-			if dp.MiterLimit > 0 {
-				merged.MiterLimit = dp.MiterLimit
-			}
-			if dp.FillColor != nil {
-				merged.FillColor = dp.FillColor
-			}
-			if dp.StrokeColor != nil {
-				merged.StrokeColor = dp.StrokeColor
-			}
-			if dp.Font != "" {
-				merged.Font = dp.Font
-			}
-			if dp.Size > 0 {
-				merged.Size = dp.Size
-			}
-			if dp.Weight > 0 {
-				merged.Weight = dp.Weight
-			}
-			if dp.Italic {
-				merged.Italic = dp.Italic
-			}
-			return &merged
+			return mergeDrawParam(*base, dp)
 		}
 		return dp
 	}

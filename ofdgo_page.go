@@ -82,6 +82,8 @@ type TextObject struct {
 	Boundary      string        `xml:"Boundary,attr"`
 	DrawParam     string        `xml:"DrawParam,attr"`
 	LineWidth     float64       `xml:"LineWidth,attr"`
+	Join          string        `xml:"Join,attr"`
+	MiterLimit    float64       `xml:"MiterLimit,attr"`
 	Font          string        `xml:"Font,attr"`
 	Size          float64       `xml:"Size,attr"`
 	Weight        int           `xml:"Weight,attr"`

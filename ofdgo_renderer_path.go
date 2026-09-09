@@ -24,6 +24,7 @@ import (
 )
 
 const defaultPathLineWidth = 0.353
+const defaultMiterLimit = 3.528
 
 type pathStyle struct {
 	fillColor     color.Color
@@ -35,26 +36,24 @@ type pathStyle struct {
 	lineWidth     float64
 	lineCap       canvas.Capper
 	lineJoin      canvas.Joiner
+	miterLimit    float64
 	dashOffset    float64
 	dashPattern   []float64
 }
 
 // newPathStyle 创建路径样式
-// 入参: defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, alpha 对象透明度
+// 入参: dp 默认绘制参数, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, alpha 对象透明度
 // 返回: pathStyle 路径样式
-func newPathStyle(defaultFill, defaultStroke color.Color, defaultLW float64, alpha *int) pathStyle {
+func (r *Renderer) newPathStyle(dp *DrawParam, bx, by, pageH float64, alpha *int) pathStyle {
 	style := pathStyle{
-		fillColor:   colorWithAlpha(defaultFill, alpha),
-		strokeColor: colorWithAlpha(defaultStroke, alpha),
-		lineWidth:   defaultLW,
-		lineCap:     canvas.ButtCap,
-		lineJoin:    canvas.MiterJoin,
+		lineWidth:  defaultPathLineWidth,
+		lineCap:    canvas.ButtCap,
+		lineJoin:   canvas.MiterJoiner{GapJoiner: canvas.BevelJoin, Limit: defaultMiterLimit},
+		miterLimit: defaultMiterLimit,
 	}
-	if style.lineWidth == 0 {
-		style.lineWidth = defaultPathLineWidth
+	if dp != nil {
+		style.applyDrawParam(r, dp, bx, by, pageH, alpha)
 	}
-	style.fillPaint = style.fillColor
-	style.strokePaint = style.strokeColor
 	return style
 }
 
@@ -62,7 +61,7 @@ func newPathStyle(defaultFill, defaultStroke color.Color, defaultLW float64, alp
 // 入参: r 渲染器, fill 填充颜色, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, alpha 对象透明度
 func (s *pathStyle) applyFillColor(r *Renderer, fill *FillColor, bx, by, pageH float64, alpha *int) {
 	fillColorNode := withFillAlpha(fill, alpha)
-	s.fillPattern = r.parsePatternPaint(fillColorNode.Pattern, fillColorNode.Value, fillColorNode.Index, fillColorNode.ColorSpace, fillColorNode.Alpha)
+	s.fillPattern = parsePatternPaint(fillColorNode)
 	s.fillColor = r.parseFillColor(fillColorNode)
 	s.fillPaint = r.parseFillPaint(fillColorNode, bx, by, pageH)
 }
@@ -71,7 +70,7 @@ func (s *pathStyle) applyFillColor(r *Renderer, fill *FillColor, bx, by, pageH f
 // 入参: r 渲染器, stroke 描边颜色, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, alpha 对象透明度
 func (s *pathStyle) applyStrokeColor(r *Renderer, stroke *StrokeColor, bx, by, pageH float64, alpha *int) {
 	strokeColorNode := withStrokeAlpha(stroke, alpha)
-	s.strokePattern = r.parsePatternPaint(strokeColorNode.Pattern, strokeColorNode.Value, strokeColorNode.Index, strokeColorNode.ColorSpace, strokeColorNode.Alpha)
+	s.strokePattern = parsePatternPaint((*FillColor)(strokeColorNode))
 	s.strokeColor = r.parseStrokeColor(strokeColorNode)
 	s.strokePaint = r.parseStrokePaint(strokeColorNode, bx, by, pageH)
 }
@@ -81,6 +80,8 @@ func (s *pathStyle) applyStrokeColor(r *Renderer, stroke *StrokeColor, bx, by, p
 // 返回: canvas.Capper 线帽样式
 func pathLineCap(cap string, fallback canvas.Capper) canvas.Capper {
 	switch cap {
+	case "Butt":
+		return canvas.ButtCap
 	case "Round":
 		return canvas.RoundCap
 	case "Square":
@@ -89,17 +90,23 @@ func pathLineCap(cap string, fallback canvas.Capper) canvas.Capper {
 	return fallback
 }
 
-// pathLineJoin 转换线连接样式
-// 入参: join 线连接名称, fallback 默认线连接
-// 返回: canvas.Joiner 线连接样式
-func pathLineJoin(join string, fallback canvas.Joiner) canvas.Joiner {
-	switch join {
-	case "Round":
-		return canvas.RoundJoin
-	case "Bevel":
-		return canvas.BevelJoin
+// applyLineJoin 应用线连接样式及尖角限制
+// 入参: join 线连接名称, limit 尖角限制
+func (s *pathStyle) applyLineJoin(join string, limit float64) {
+	if limit > 0 {
+		s.miterLimit = limit
 	}
-	return fallback
+	switch join {
+	case "Miter":
+		s.lineJoin = canvas.MiterJoin
+	case "Round":
+		s.lineJoin = canvas.RoundJoin
+	case "Bevel":
+		s.lineJoin = canvas.BevelJoin
+	}
+	if _, ok := s.lineJoin.(canvas.MiterJoiner); ok {
+		s.lineJoin = canvas.MiterJoiner{GapJoiner: canvas.BevelJoin, Limit: s.miterLimit}
+	}
 }
 
 // applyDrawParam 应用绘制参数样式
@@ -117,9 +124,7 @@ func (s *pathStyle) applyDrawParam(r *Renderer, dp *DrawParam, bx, by, pageH flo
 	if dp.Cap != "" {
 		s.lineCap = pathLineCap(dp.Cap, s.lineCap)
 	}
-	if dp.Join != "" {
-		s.lineJoin = pathLineJoin(dp.Join, s.lineJoin)
-	}
+	s.applyLineJoin(dp.Join, dp.MiterLimit)
 	if dp.DashPattern != "" {
 		s.dashPattern = parseFloats(dp.DashPattern)
 		s.dashOffset = dp.DashOffset
@@ -141,9 +146,7 @@ func (s *pathStyle) applyPathObject(r *Renderer, obj PathObject, bx, by, pageH f
 	if obj.Cap != "" {
 		s.lineCap = pathLineCap(obj.Cap, canvas.ButtCap)
 	}
-	if obj.Join != "" {
-		s.lineJoin = pathLineJoin(obj.Join, canvas.MiterJoin)
-	}
+	s.applyLineJoin(obj.Join, obj.MiterLimit)
 	if obj.DashPattern != "" {
 		s.dashPattern = parseFloats(obj.DashPattern)
 		s.dashOffset = obj.DashOffset
@@ -163,8 +166,8 @@ func (s *pathStyle) scale(ctm Matrix) {
 }
 
 // renderPath 渲染路径
-// 入参: ctx 画布上下文, obj 路径对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, defaultLW 默认线宽, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
-func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64, defaultFill, defaultStroke color.Color, defaultLW float64, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
+// 入参: ctx 画布上下文, obj 路径对象, pageH 页面高度, defaults 默认绘制参数, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
+func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64, defaults *DrawParam, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
 	if obj.Visible != nil && !*obj.Visible {
 		return
 	}
@@ -180,7 +183,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	if parentCTM != nil {
 		ctm = parentCTM.Multiply(ctm)
 	}
-	style := newPathStyle(defaultFill, defaultStroke, defaultLW, obj.Alpha)
+	style := r.newPathStyle(defaults, bx, by, pageH, obj.Alpha)
 	if obj.DrawParam != "" {
 		if dp := r.getDrawParam(obj.DrawParam, nil); dp != nil {
 			style.applyDrawParam(r, dp, bx, by, pageH, obj.Alpha)
@@ -188,10 +191,12 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	}
 	style.applyPathObject(r, obj, bx, by, pageH)
 	style.scale(ctm)
-	patternCTM := TranslationMatrix(bx, by).Multiply(ctm)
+	objectCTM := TranslationMatrix(bx, by).Multiply(ctm)
 	if boundaryInCTM && parentCTM != nil {
-		patternCTM = parentCTM.Multiply(TranslationMatrix(bx, by)).Multiply(localCTM)
+		objectCTM = parentCTM.Multiply(TranslationMatrix(bx, by)).Multiply(localCTM)
 	}
+	transformShdPaint(style.fillPaint, parentCTM, bx, by, pageH, boundaryInCTM)
+	transformShdPaint(style.strokePaint, parentCTM, bx, by, pageH, boundaryInCTM)
 	pathCTM := ctm
 	if boundaryInCTM {
 		pathCTM = localCTM
@@ -231,7 +236,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			fp = applyClipPath(fp, fillClip)
 		}
 		if style.fillPattern != nil {
-			r.renderPattern(ctx, style.fillPattern, pageH, fp, patternCTM)
+			r.renderPattern(ctx, style.fillPattern, pageH, fp, objectCTM)
 		} else if style.fillPaint != nil {
 			ctx.SetFillRule(fillRule)
 			ctx.SetFill(fillPaint)
@@ -268,7 +273,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			sp = sp.Stroke(style.lineWidth, style.lineCap, style.lineJoin, canvas.Tolerance)
 			sp = applyClipPath(sp, strokeClip)
 			if style.strokePattern != nil {
-				r.renderPattern(ctx, style.strokePattern, pageH, sp, patternCTM)
+				r.renderPattern(ctx, style.strokePattern, pageH, sp, objectCTM)
 			} else {
 				ctx.SetFill(strokePaint)
 				ctx.SetStrokeColor(canvas.Transparent)
@@ -330,6 +335,7 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *patternPaint, pag
 	endX := int(math.Ceil(maxX/xStep)) + 1
 	startY := int(math.Floor(minY/yStep)) - 1
 	endY := int(math.Ceil(maxY/yStep)) + 1
+	defaults := &DrawParam{FillColor: &pattern.color, StrokeColor: (*StrokeColor)(&pattern.color)}
 	for ix := startX; ix <= endX; ix++ {
 		for iy := startY; iy <= endY; iy++ {
 			tileCTM := patternCTM.Multiply(TranslationMatrix(float64(ix)*xStep, float64(iy)*yStep))
@@ -341,7 +347,7 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *patternPaint, pag
 			}
 			for _, obj := range pattern.CellContent.Objects {
 				obj = mergeGraphicObjectAlpha(obj, pattern.alpha)
-				r.renderObject(ctx, obj, pageH, pattern.color, pattern.color, 0, &tileCTM, true, clip)
+				r.renderObject(ctx, obj, pageH, defaults, &tileCTM, true, clip)
 			}
 		}
 	}

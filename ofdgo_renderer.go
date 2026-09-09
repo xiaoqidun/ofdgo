@@ -126,7 +126,7 @@ func (r *Renderer) renderPageToContext(ctx *canvas.Context, page *PageContent, d
 	}
 	if page.Content.Layer != nil {
 		for _, layer := range page.Content.Layer {
-			r.renderLayer(ctx, layer, pageH, nil, nil, 0, nil)
+			r.renderLayer(ctx, layer, pageH, nil, nil)
 		}
 	}
 	if len(page.Template) > 0 && r.Reader.doc != nil {

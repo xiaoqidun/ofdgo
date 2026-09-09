@@ -56,15 +56,22 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 	if !ok {
 		return paint, nil, canvas.Identity
 	}
+	if canvas.Equal(s.view.Det(), 0) {
+		return nil, &canvas.Path{}, canvas.Identity
+	}
 	switch g := s.gradient.(type) {
 	case *canvas.LinearGradient:
-		clip := axialShdClip(ctx, g, s.extend)
+		bounds := shdCanvasBounds(ctx).Transform(s.view.Inv())
+		clip := axialShdClip(g, s.extend, bounds)
+		if clip != nil && s.view != canvas.Identity {
+			clip = clip.Transform(s.view)
+		}
 		if s.mapType != "Reflect" {
 			return g, clip, s.view
 		}
 		d := g.End.Sub(g.Start)
 		axis := canvas.Matrix{{d.X, -d.Y, g.Start.X}, {d.Y, d.X, g.Start.Y}}
-		area := shdCanvasBounds(ctx).Transform(axis.Inv())
+		area := bounds.Transform(axis.Inv())
 		lo, hi := s.rangeLimits(area.X0, area.X1)
 		if hi <= lo {
 			return g, &canvas.Path{}, s.view
@@ -106,6 +113,23 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 		return gradient.ToRadial(g.C0.Add(d.Mul(lo)), math.Max(0, g.R0+dr*lo), g.C0.Add(d.Mul(hi)), math.Max(0, g.R0+dr*hi)), clip, s.view
 	}
 	return s.gradient, nil, s.view
+}
+
+// transformShdPaint 应用渐变的父级坐标变换
+// 入参: paint 画刷, parentCTM 父级变换矩阵, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, boundaryInCTM 边界是否参与父级变换
+func transformShdPaint(paint any, parentCTM *Matrix, bx, by, pageH float64, boundaryInCTM bool) {
+	s, ok := paint.(*shdPaint)
+	if !ok || parentCTM == nil {
+		return
+	}
+	ctm := *parentCTM
+	if !boundaryInCTM {
+		ctm = TranslationMatrix(bx, by).Multiply(ctm).Multiply(TranslationMatrix(-bx, -by))
+	}
+	s.view = canvas.Matrix{
+		{ctm.a, -ctm.c, ctm.c*pageH + ctm.e},
+		{-ctm.b, ctm.d, pageH*(1-ctm.d) - ctm.f},
+	}.Mul(s.view)
 }
 
 // drawShdPath 绘制渐变路径并保持图形轮廓不变

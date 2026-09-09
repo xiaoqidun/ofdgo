@@ -215,18 +215,18 @@ func (r *Renderer) parseStrokePaint(strokeColor *StrokeColor, x, y, pageH float6
 
 type patternPaint struct {
 	*Pattern
-	color color.Color
+	color FillColor
 	alpha *int
 }
 
 // parsePatternPaint 解析底纹画刷
-// 入参: pattern 底纹对象, value 颜色值, index 调色板索引, space 颜色空间标识, alpha 透明度
+// 入参: fill 填充颜色节点
 // 返回: *patternPaint 底纹画刷
-func (r *Renderer) parsePatternPaint(pattern *Pattern, value string, index *int, space string, alpha *int) *patternPaint {
-	if pattern == nil {
+func parsePatternPaint(fill *FillColor) *patternPaint {
+	if fill.Pattern == nil {
 		return nil
 	}
-	return &patternPaint{Pattern: pattern, color: r.parseColorWithAlpha(value, index, space, nil), alpha: alpha}
+	return &patternPaint{Pattern: fill.Pattern, color: FillColor{Value: fill.Value, Index: fill.Index, ColorSpace: fill.ColorSpace}, alpha: fill.Alpha}
 }
 
 // parseShdColor 解析渐变颜色
@@ -299,21 +299,15 @@ func (r *Renderer) parseAxialShdGradient(axialShd *AxialShd, alpha *int, x, y, p
 }
 
 // axialShdClip 获取轴向渐变的延伸裁剪区域
-// 入参: ctx 画布上下文, gradient 轴向渐变, extend 延伸方向
+// 入参: gradient 轴向渐变, extend 延伸方向, bounds 可见区域
 // 返回: *canvas.Path 裁剪区域
-func axialShdClip(ctx *canvas.Context, gradient *canvas.LinearGradient, extend int) *canvas.Path {
+func axialShdClip(gradient *canvas.LinearGradient, extend int, bounds canvas.Rect) *canvas.Path {
 	if extend == 3 {
 		return nil
 	}
 	d := gradient.End.Sub(gradient.Start)
 	axis := canvas.Matrix{{d.X, -d.Y, gradient.Start.X}, {d.Y, d.X, gradient.Start.Y}}
-	origin := ctx.CoordView().Dot(canvas.Point{})
-	view := ctx.CoordSystemView().Mul(ctx.View()).Translate(origin.X, origin.Y).Mul(axis)
-	if view.Det() == 0 {
-		return &canvas.Path{}
-	}
-	width, height := ctx.Size()
-	area := (canvas.Rect{X1: width, Y1: height}).Transform(view.Inv())
+	area := bounds.Transform(axis.Inv())
 	if extend&1 == 0 {
 		area.X0 = math.Max(area.X0, 0)
 	}

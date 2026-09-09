@@ -15,7 +15,6 @@
 package ofdgo
 
 import (
-	"image/color"
 	"strings"
 
 	"github.com/tdewolff/canvas"
@@ -24,8 +23,8 @@ import (
 const ptPerMM = 72.0 / 25.4
 
 // renderText 渲染文本
-// 入参: ctx 画布上下文, obj 文本对象, pageH 页面高度, defaultFill 默认填充色, defaultStroke 默认描边色, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM, parentClip 父级裁剪路径
-func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64, defaultFill, defaultStroke color.Color, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
+// 入参: ctx 画布上下文, obj 文本对象, pageH 页面高度, defaults 默认绘制参数, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM, parentClip 父级裁剪路径
+func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64, defaults *DrawParam, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
 	if obj.Visible != nil && !*obj.Visible {
 		return
 	}
@@ -45,6 +44,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	ctm := localCTM
 	if parentCTM != nil {
 		ctm = parentCTM.Multiply(ctm)
+	}
+	objectCTM := TranslationMatrix(bx, by).Multiply(ctm)
+	if boundaryInCTM && parentCTM != nil {
+		objectCTM = parentCTM.Multiply(TranslationMatrix(bx, by)).Multiply(localCTM)
 	}
 	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, bx, by, localCTM, parentCTM, boundaryInCTM))
 	var dp *DrawParam
@@ -71,13 +74,13 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		sizeMM *= scale
 	}
 	sizePt := sizeMM * ptPerMM
-	fillColor := colorWithAlpha(defaultFill, obj.Alpha)
-	if fillColor == nil {
-		fillColor = colorWithAlpha(canvas.Black, obj.Alpha)
-	}
+	fillColor := colorWithAlpha(canvas.Black, obj.Alpha)
 	var fillPaint any = fillColor
 	var fillPattern *patternPaint
 	var fillColorNode *FillColor
+	if defaults != nil {
+		fillColorNode = defaults.FillColor
+	}
 	if dp != nil && dp.FillColor != nil {
 		fillColorNode = dp.FillColor
 	}
@@ -88,17 +91,19 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		fillColorNode = withFillAlpha(fillColorNode, obj.Alpha)
 		fillColor = r.parseFillColor(fillColorNode)
 		fillPaint = r.parseFillPaint(fillColorNode, bx, by, pageH)
-		fillPattern = r.parsePatternPaint(fillColorNode.Pattern, fillColorNode.Value, fillColorNode.Index, fillColorNode.ColorSpace, fillColorNode.Alpha)
+		fillPattern = parsePatternPaint(fillColorNode)
 	}
 	if fillPaint == nil {
 		fillPaint = fillColor
 	}
+	transformShdPaint(fillPaint, parentCTM, bx, by, pageH, boundaryInCTM)
 	fillPaint, shadingClip, fillView := resolveShdPaint(ctx, fillPaint)
 	fillClip := intersectClipPath(clipPath, shadingClip)
-	strokeStyle := newPathStyle(nil, defaultStroke, 0, obj.Alpha)
+	var strokeStyle pathStyle
 	strokeClip := clipPath
 	strokeView := canvas.Identity
 	if shouldStroke {
+		strokeStyle = r.newPathStyle(defaults, bx, by, pageH, obj.Alpha)
 		if dp != nil {
 			strokeStyle.applyDrawParam(r, dp, bx, by, pageH, obj.Alpha)
 		}
@@ -108,16 +113,14 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		if obj.LineWidth > 0 {
 			strokeStyle.lineWidth = obj.LineWidth
 		}
+		strokeStyle.applyLineJoin(obj.Join, obj.MiterLimit)
 		if strokeStyle.strokePaint == nil {
 			strokeStyle.strokePaint = colorWithAlpha(canvas.Black, obj.Alpha)
 		}
 		strokeStyle.scale(ctm)
+		transformShdPaint(strokeStyle.strokePaint, parentCTM, bx, by, pageH, boundaryInCTM)
 		strokeStyle.strokePaint, shadingClip, strokeView = resolveShdPaint(ctx, strokeStyle.strokePaint)
 		strokeClip = intersectClipPath(strokeClip, shadingClip)
-	}
-	patternCTM := TranslationMatrix(bx, by).Multiply(ctm)
-	if boundaryInCTM && parentCTM != nil {
-		patternCTM = parentCTM.Multiply(TranslationMatrix(bx, by)).Multiply(localCTM)
 	}
 	fontStyle := canvas.FontRegular
 	weight := obj.Weight
@@ -247,7 +250,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				}
 				path := glyphPath.Copy().Transform(transform.Scale(scaleX, 1))
 				if shouldFill && fillPattern != nil {
-					r.renderPattern(ctx, fillPattern, pageH, applyClipPath(path.Copy(), fillClip), patternCTM)
+					r.renderPattern(ctx, fillPattern, pageH, applyClipPath(path.Copy(), fillClip), objectCTM)
 				} else if shouldFill && fillPaint != nil {
 					ctx.SetFill(fillPaint)
 					ctx.SetStrokeColor(canvas.Transparent)
@@ -259,7 +262,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				path = path.Stroke(strokeStyle.lineWidth, strokeStyle.lineCap, strokeStyle.lineJoin, canvas.Tolerance)
 				path = applyClipPath(path, strokeClip)
 				if strokeStyle.strokePattern != nil {
-					r.renderPattern(ctx, strokeStyle.strokePattern, pageH, path, patternCTM)
+					r.renderPattern(ctx, strokeStyle.strokePattern, pageH, path, objectCTM)
 				} else {
 					ctx.SetFill(strokeStyle.strokePaint)
 					ctx.SetStrokeColor(canvas.Transparent)
@@ -271,12 +274,12 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					underline.LineTo(glyphWidth*scaleX, -sizeMM*0.1)
 					underline = underline.Stroke(sizeMM*0.05, canvas.ButtCap, canvas.MiterJoin, canvas.Tolerance)
 					if shouldFill && fillPattern != nil {
-						r.renderPattern(ctx, fillPattern, pageH, applyClipPath(underline.Transform(transform), clipPath), patternCTM)
+						r.renderPattern(ctx, fillPattern, pageH, applyClipPath(underline.Transform(transform), clipPath), objectCTM)
 					} else if shouldFill {
 						ctx.SetFillColor(fillColor)
 						ctx.DrawPath(0, 0, applyClipPath(underline.Transform(transform), clipPath))
 					} else if strokeStyle.strokePattern != nil {
-						r.renderPattern(ctx, strokeStyle.strokePattern, pageH, applyClipPath(underline.Transform(transform), strokeClip), patternCTM)
+						r.renderPattern(ctx, strokeStyle.strokePattern, pageH, applyClipPath(underline.Transform(transform), strokeClip), objectCTM)
 					} else {
 						drawShdPath(ctx, applyClipPath(underline.Transform(transform), strokeClip), strokeView)
 					}
@@ -297,7 +300,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					}
 					glyphPath = applyClipPath(glyphPath.Copy().Transform(textTransform.Scale(scaleX, 1)), fillClip)
 					if fillPattern != nil {
-						r.renderPattern(ctx, fillPattern, pageH, glyphPath, patternCTM)
+						r.renderPattern(ctx, fillPattern, pageH, glyphPath, objectCTM)
 					} else {
 						drawShdPath(ctx, glyphPath, fillView)
 					}
@@ -310,7 +313,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 						underline = underline.Stroke(uw, canvas.ButtCap, canvas.MiterJoin, canvas.Tolerance)
 						underline = applyClipPath(underline.Transform(textTransform), clipPath)
 						if fillPattern != nil {
-							r.renderPattern(ctx, fillPattern, pageH, underline, patternCTM)
+							r.renderPattern(ctx, fillPattern, pageH, underline, objectCTM)
 						} else {
 							ctx.SetFillColor(fillColor)
 							ctx.SetStrokeColor(canvas.Transparent)
