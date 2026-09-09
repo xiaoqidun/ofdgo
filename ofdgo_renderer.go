@@ -79,15 +79,16 @@ func (r *Renderer) renderPage(page *PageContent) (*canvas.Canvas, error) {
 // 入参: page 页面内容
 // 返回: Box 区域, error 错误信息
 func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
-	boxStr := page.Area.PhysicalBox
+	area, err := r.Reader.resolvePageArea(page.Area, page.Template)
+	if err != nil {
+		return Box{}, err
+	}
+	boxStr := area.PhysicalBox
 	if boxStr == "" {
-		boxStr = page.Area.ApplicationBox
+		boxStr = area.ApplicationBox
 	}
 	if boxStr == "" {
-		boxStr = page.Area.ContentBox
-	}
-	if boxStr == "" && r.Reader.doc != nil {
-		boxStr = r.Reader.doc.CommonData.PageArea.PhysicalBox
+		boxStr = area.ContentBox
 	}
 	if boxStr == "" {
 		boxStr = "0 0 210 297"

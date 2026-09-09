@@ -160,11 +160,11 @@ func (r *Reader) Doc() (*Document, error) {
 	if doc.Signatures == "" {
 		doc.Signatures = docAttr.Signatures
 	}
-	if doc.CommonData.DocumentRes != "" {
-		r.loadRes(doc.CommonData.DocumentRes)
+	for _, res := range doc.CommonData.DocumentRes {
+		r.loadRes(res)
 	}
-	if doc.CommonData.PublicRes != "" {
-		r.loadRes(doc.CommonData.PublicRes)
+	for _, res := range doc.CommonData.PublicRes {
+		r.loadRes(res)
 	}
 	r.doc = &doc
 	_ = r.parseAnnotations(&doc)
@@ -251,8 +251,12 @@ func (r *Reader) PageContent(page Page) (*PageContent, error) {
 		return nil, fmt.Errorf("failed to unmarshal page content: %w", err)
 	}
 	content.ID = page.ID
-	if content.PageRes != "" {
-		r.loadRes(resolveResourcePath(page.BaseLoc, "", content.PageRes))
+	for _, res := range content.PageRes {
+		r.loadRes(resolveResourcePath(page.BaseLoc, "", res))
+	}
+	content.Area, err = r.resolvePageArea(content.Area, content.Template)
+	if err != nil {
+		return nil, err
 	}
 	return &content, nil
 }
@@ -261,31 +265,79 @@ func (r *Reader) PageContent(page Page) (*PageContent, error) {
 // 入参: page 页面对象
 // 返回: PageArea 页面区域, error 错误信息
 func (r *Reader) PageArea(page Page) (PageArea, error) {
-	f, err := r.openFile(r.ResPath(page.BaseLoc))
+	content, err := r.readPageHeader(page)
 	if err != nil {
 		return PageArea{}, err
 	}
+	return r.resolvePageArea(content.Area, content.Template)
+}
+
+// readPageHeader 读取页面区域和模板引用
+// 入参: page 页面对象
+// 返回: PageContent 页面头部, error 错误信息
+func (r *Reader) readPageHeader(page Page) (PageContent, error) {
+	f, err := r.openFile(r.ResPath(page.BaseLoc))
+	if err != nil {
+		return PageContent{}, err
+	}
 	defer f.Close()
+	var content PageContent
 	d := xml.NewDecoder(f)
 	for {
 		token, err := d.Token()
 		if err == io.EOF {
-			return PageArea{}, nil
+			return content, nil
 		}
 		if err != nil {
-			return PageArea{}, err
+			return PageContent{}, err
 		}
 		if start, ok := token.(xml.StartElement); ok {
 			switch start.Name.Local {
+			case "Page":
+				continue
+			case "Template":
+				var template Template
+				if err := d.DecodeElement(&template, &start); err != nil {
+					return PageContent{}, err
+				}
+				content.Template = append(content.Template, template)
 			case "Area":
-				var area PageArea
-				err := d.DecodeElement(&area, &start)
-				return area, err
+				err := d.DecodeElement(&content.Area, &start)
+				return content, err
 			case "Content":
-				return PageArea{}, nil
+				return content, nil
+			default:
+				if err := d.Skip(); err != nil {
+					return PageContent{}, err
+				}
 			}
 		}
 	}
+}
+
+// resolvePageArea 解析页面区域的继承关系
+// 入参: area 页面区域, templates 模板引用
+// 返回: PageArea 页面区域, error 错误信息
+func (r *Reader) resolvePageArea(area PageArea, templates []Template) (PageArea, error) {
+	if area != (PageArea{}) || r.doc == nil {
+		return area, nil
+	}
+	for _, ref := range templates {
+		for _, template := range r.doc.CommonData.TemplatePage {
+			if template.ID != ref.TemplateID {
+				continue
+			}
+			content, err := r.readPageHeader(Page{BaseLoc: template.BaseLoc})
+			if err != nil {
+				return PageArea{}, err
+			}
+			if content.Area != (PageArea{}) {
+				return content.Area, nil
+			}
+			break
+		}
+	}
+	return r.doc.CommonData.PageArea, nil
 }
 
 // ResPath 获取资源的完整路径

@@ -103,8 +103,8 @@ type CustomTag struct {
 type CommonData struct {
 	MaxUnitID    int            `xml:"MaxUnitID"`
 	PageArea     PageArea       `xml:"PageArea"`
-	PublicRes    string         `xml:"PublicRes"`
-	DocumentRes  string         `xml:"DocumentRes"`
+	PublicRes    []string       `xml:"PublicRes"`
+	DocumentRes  []string       `xml:"DocumentRes"`
 	TemplatePage []TemplatePage `xml:"TemplatePage"`
 	DefaultCS    int            `xml:"DefaultCS"`
 }

@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bufio"
+	"fmt"
 	"image"
 	"image/color"
 	"io"
@@ -83,6 +84,38 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		m[1][2] -= m[1][0]*p + m[1][1]*p
 	}
 	ctx.RenderImage(img, ctx.CoordSystemView().Mul(ctx.View()).Mul(m))
+	if obj.Border != nil {
+		r.renderImageBorder(ctx, obj, box, pageH, parentCTM, boundaryInCTM, clipPath)
+	}
+}
+
+// renderImageBorder 渲染图像边框
+// 入参: ctx 画布上下文, obj 图片对象, box 图像边界, pageH 页面高度, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM, clipPath 裁剪路径
+func (r *Renderer) renderImageBorder(ctx *canvas.Context, obj ImageObject, box Box, pageH float64, parentCTM *Matrix, boundaryInCTM bool, clipPath *canvas.Path) {
+	border := obj.Border
+	width := defaultPathLineWidth
+	if border.LineWidth != nil {
+		width = *border.LineWidth
+	}
+	if width == 0 {
+		return
+	}
+	w, h := box.W, box.H
+	data := fmt.Sprintf("M 0 0 L %g 0 L %g %g L 0 %g C", w, w, h, h)
+	rx, ry := min(border.HorizonalCornerRadius, w/2), min(border.VerticalCornerRadius, h/2)
+	if rx > 0 && ry > 0 {
+		data = fmt.Sprintf("M 0 %g A %g %g 0 0 1 %g 0 L %g 0 A %g %g 0 0 1 %g %g L %g %g A %g %g 0 0 1 %g %g L %g %g A %g %g 0 0 1 0 %g C",
+			ry, rx, ry, rx, w-rx, rx, ry, w, ry, w, h-ry, rx, ry, w-rx, h, rx, h, rx, ry, h-ry)
+	}
+	r.renderPath(ctx, PathObject{
+		Boundary:        obj.Boundary,
+		LineWidth:       width,
+		DashOffset:      border.DashOffset,
+		DashPattern:     border.DashPattern,
+		Alpha:           obj.Alpha,
+		StrokeColor:     border.BorderColor,
+		AbbreviatedData: data,
+	}, pageH, nil, parentCTM, boundaryInCTM, clipPath)
 }
 
 // imageWithMask 应用图片蒙版

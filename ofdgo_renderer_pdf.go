@@ -184,6 +184,9 @@ func pageActionSources(page pdfPage) []pdfActionSource {
 func annotationActionSources(annotations []Annotation) []pdfActionSource {
 	sources := make([]pdfActionSource, 0)
 	for _, annotation := range annotations {
+		if annotation.Visible != nil && !*annotation.Visible {
+			continue
+		}
 		box, err := ParseBox(annotation.Appearance.Boundary)
 		if err != nil {
 			continue

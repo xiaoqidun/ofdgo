@@ -20,7 +20,7 @@ import "github.com/tdewolff/canvas"
 // 入参: ctx 画布上下文, pageID 页面ID, pageH 页面高度
 func (r *Renderer) renderAnnotations(ctx *canvas.Context, pageID string, pageH float64) {
 	for _, annot := range r.Reader.Annots[pageID] {
-		if len(annot.Appearance.Objects) == 0 {
+		if annot.Visible != nil && !*annot.Visible {
 			continue
 		}
 		box, _ := ParseBox(annot.Appearance.Boundary)

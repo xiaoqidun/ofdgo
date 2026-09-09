@@ -41,6 +41,7 @@ type Annotation struct {
 	Subtype     string `xml:"Subtype,attr"`
 	Creator     string `xml:"Creator,attr"`
 	LastModDate string `xml:"LastModDate,attr"`
+	Visible     *bool  `xml:"Visible,attr"`
 	Appearance  Appearance
 }
 
