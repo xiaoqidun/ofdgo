@@ -114,12 +114,13 @@ type FillColor struct {
 
 // Pattern 图案填充
 type Pattern struct {
-	Width       float64        `xml:"Width,attr"`
-	Height      float64        `xml:"Height,attr"`
-	XStep       float64        `xml:"XStep,attr"`
-	YStep       float64        `xml:"YStep,attr"`
-	CTM         string         `xml:"CTM,attr"`
-	CellContent PatternContent `xml:"CellContent"`
+	Width         float64        `xml:"Width,attr"`
+	Height        float64        `xml:"Height,attr"`
+	XStep         float64        `xml:"XStep,attr"`
+	YStep         float64        `xml:"YStep,attr"`
+	ReflectMethod string         `xml:"ReflectMethod,attr"`
+	CTM           string         `xml:"CTM,attr"`
+	CellContent   PatternContent `xml:"CellContent"`
 }
 
 // PatternContent 图案单元内容
@@ -201,8 +202,9 @@ type RadialShd struct {
 
 // ShdSegment 渐变分段
 type ShdSegment struct {
-	Position float64  `xml:"Position,attr"`
-	Color    ShdColor `xml:"Color"`
+	Position        float64  `xml:"Position,attr"`
+	Color           ShdColor `xml:"Color"`
+	positionMissing bool
 }
 
 // ShdColor 渐变颜色

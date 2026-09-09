@@ -188,9 +188,19 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	}
 	style.applyPathObject(obj, bx, by, pageH)
 	style.scale(ctm)
-	p := r.buildPath(obj, pageH, ctm, boundaryInCTM)
-	if rectPath := r.buildTinyFillRectPath(obj, pageH, ctm, bx, by); rectPath != nil {
+	pathCTM := ctm
+	if boundaryInCTM {
+		pathCTM = localCTM
+	}
+	p := r.buildPath(obj, pageH, pathCTM, false)
+	if rectPath := r.buildTinyFillRectPath(obj, pageH, pathCTM, bx, by); rectPath != nil {
 		p = rectPath
+	}
+	if boundaryInCTM && parentCTM != nil {
+		p = p.Transform(canvas.Matrix{
+			{parentCTM.a, -parentCTM.c, parentCTM.c*pageH + parentCTM.e},
+			{-parentCTM.b, parentCTM.d, pageH*(1-parentCTM.d) - parentCTM.f},
+		})
 	}
 	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, bx, by, localCTM, parentCTM, boundaryInCTM))
 	shouldFill := false
@@ -309,8 +319,14 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *Pattern, defaultC
 	for ix := startX; ix <= endX; ix++ {
 		for iy := startY; iy <= endY; iy++ {
 			tileCTM := patternCTM.Multiply(TranslationMatrix(float64(ix)*xStep, float64(iy)*yStep))
+			if ix%2 != 0 && (pattern.ReflectMethod == "Column" || pattern.ReflectMethod == "RowAndColumn") {
+				tileCTM = tileCTM.Multiply(Matrix{a: -1, d: 1, e: pattern.Width})
+			}
+			if iy%2 != 0 && (pattern.ReflectMethod == "Row" || pattern.ReflectMethod == "RowAndColumn") {
+				tileCTM = tileCTM.Multiply(Matrix{a: 1, d: -1, f: pattern.Height})
+			}
 			for _, obj := range pattern.CellContent.Objects {
-				r.renderObject(ctx, obj, pageH, defaultColor, defaultColor, 0, &tileCTM, false, clip)
+				r.renderObject(ctx, obj, pageH, defaultColor, defaultColor, 0, &tileCTM, true, clip)
 			}
 		}
 	}

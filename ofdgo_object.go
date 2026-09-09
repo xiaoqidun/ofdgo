@@ -237,6 +237,15 @@ func (p *PatternContent) decodeObject(d *xml.Decoder, start xml.StartElement) er
 	return d.Skip()
 }
 
+// UnmarshalXML 解析渐变分段并保留位置的缺省状态
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (s *ShdSegment) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type segment ShdSegment
+	*s = ShdSegment{positionMissing: attrValue(start, "Position") == ""}
+	return d.DecodeElement((*segment)(s), &start)
+}
+
 // attrValue 获取XML属性值
 // 入参: start 起始节点, name 属性名
 // 返回: string 属性值

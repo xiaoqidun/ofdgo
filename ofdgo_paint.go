@@ -257,7 +257,26 @@ func parseShdColor(segments []ShdSegment, alpha *int) color.Color {
 // 返回: canvas.Grad 渐变分段
 func parseShdSegments(segments []ShdSegment, alpha *int) canvas.Grad {
 	gradient := canvas.NewGradient()
-	for _, segment := range segments {
+	position, step := 0.0, 0.0
+	for i, segment := range segments {
+		if !segment.positionMissing {
+			position = segment.Position
+		} else if i == len(segments)-1 {
+			position = 1
+		}
+		if i == 0 || !segment.positionMissing {
+			next := i + 1
+			for next < len(segments)-1 && segments[next].positionMissing {
+				next++
+			}
+			end := 1.0
+			if next < len(segments) && !segments[next].positionMissing {
+				end = segments[next].Position
+			}
+			step = (end - position) / float64(next-i)
+		}
+		offset := position
+		position += step
 		if strings.TrimSpace(segment.Color.Value) == "" {
 			continue
 		}
@@ -265,7 +284,7 @@ func parseShdSegments(segments []ShdSegment, alpha *int) canvas.Grad {
 		if segmentAlpha == nil {
 			segmentAlpha = segment.Color.Alpha
 		}
-		gradient.Add(segment.Position, colorToRGBA(parseColorWithAlpha(segment.Color.Value, segmentAlpha)))
+		gradient.Add(offset, colorToRGBA(parseColorWithAlpha(segment.Color.Value, segmentAlpha)))
 	}
 	if len(gradient) == 0 {
 		return nil
