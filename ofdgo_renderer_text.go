@@ -184,7 +184,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		}
 		dxs, dys := parseFloats(tc.DeltaX), parseFloats(tc.DeltaY)
 		xs, ys := parseFloats(tc.X), parseFloats(tc.Y)
-		drawAsPath := embeddedFont || textCodePositioned(tc, xs, ys) || fillClip != nil || shadedFill || fillPattern != nil || shouldStroke
+		drawAsPath := embeddedFont || face.FauxBold > 0 || textCodePositioned(tc, xs, ys) || fillClip != nil || shadedFill || fillPattern != nil || shouldStroke
 		cx, cy := 0.0, 0.0
 		previousAdvance := 0.0
 		if len(xs) > 0 {
@@ -296,6 +296,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			}
 			if fillPaint != nil || fillPattern != nil {
 				ctx.SetFill(fillPaint)
+				ctx.SetStrokeColor(canvas.Transparent)
 				if fillClip != nil || shadedFill || fillPattern != nil {
 					scaleX := hScale
 					if advanceLimit > 0 && glyphWidth*scaleX > advanceLimit {
