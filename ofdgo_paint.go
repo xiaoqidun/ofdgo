@@ -167,8 +167,8 @@ func parseFillPaint(fillColor *FillColor, x, y, pageH float64) any {
 	if gradient := parseAxialShdGradient(fillColor.AxialShd, fillColor.Alpha, x, y, pageH); gradient != nil {
 		return newShdPaint(gradient, fillColor.AxialShd.Extend, fillColor.AxialShd.MapType, fillColor.AxialShd.MapUnit)
 	}
-	if gradient := parseRadialShdGradient(fillColor.RadialShd, fillColor.Alpha, x, y, pageH); gradient != nil {
-		return newShdPaint(gradient, fillColor.RadialShd.Extend, fillColor.RadialShd.MapType, fillColor.RadialShd.MapUnit)
+	if paint := parseRadialShdPaint(fillColor.RadialShd, fillColor.Alpha, x, y, pageH); paint != nil {
+		return paint
 	}
 	if fillColor.AxialShd != nil {
 		return parseShdColor(fillColor.AxialShd.Segment, fillColor.Alpha)
@@ -211,8 +211,8 @@ func parseStrokePaint(strokeColor *StrokeColor, x, y, pageH float64) any {
 	if gradient := parseAxialShdGradient(strokeColor.AxialShd, strokeColor.Alpha, x, y, pageH); gradient != nil {
 		return newShdPaint(gradient, strokeColor.AxialShd.Extend, strokeColor.AxialShd.MapType, strokeColor.AxialShd.MapUnit)
 	}
-	if gradient := parseRadialShdGradient(strokeColor.RadialShd, strokeColor.Alpha, x, y, pageH); gradient != nil {
-		return newShdPaint(gradient, strokeColor.RadialShd.Extend, strokeColor.RadialShd.MapType, strokeColor.RadialShd.MapUnit)
+	if paint := parseRadialShdPaint(strokeColor.RadialShd, strokeColor.Alpha, x, y, pageH); paint != nil {
+		return paint
 	}
 	if strokeColor.AxialShd != nil {
 		return parseShdColor(strokeColor.AxialShd.Segment, strokeColor.Alpha)
@@ -339,10 +339,10 @@ func axialShdClip(ctx *canvas.Context, gradient *canvas.LinearGradient, extend i
 	return area.ToPath().Transform(axis)
 }
 
-// parseRadialShdGradient 解析径向渐变
+// parseRadialShdPaint 解析径向渐变画刷
 // 入参: radialShd 径向渐变节点, alpha 透明度, x X坐标, y Y坐标, pageH 页面高度
-// 返回: canvas.Gradient 渐变对象
-func parseRadialShdGradient(radialShd *RadialShd, alpha *int, x, y, pageH float64) canvas.Gradient {
+// 返回: *shdPaint 渐变画刷
+func parseRadialShdPaint(radialShd *RadialShd, alpha *int, x, y, pageH float64) *shdPaint {
 	if radialShd == nil || radialShd.EndRadius <= 0 {
 		return nil
 	}
@@ -357,7 +357,12 @@ func parseRadialShdGradient(radialShd *RadialShd, alpha *int, x, y, pageH float6
 	}
 	startPoint := canvas.Point{X: x + start[0], Y: pageH - (y + start[1])}
 	endPoint := canvas.Point{X: x + end[0], Y: pageH - (y + end[1])}
-	return gradient.ToRadial(startPoint, radialShd.StartRadius, endPoint, radialShd.EndRadius)
+	paint := newShdPaint(gradient.ToRadial(startPoint, radialShd.StartRadius, endPoint, radialShd.EndRadius), radialShd.Extend, radialShd.MapType, radialShd.MapUnit)
+	if e := radialShd.Eccentricity; 0 < e && e < 1 {
+		paint.view = canvas.Identity.Translate(startPoint.X, startPoint.Y).Rotate(-radialShd.Angle).Scale(1, math.Sqrt(1-e*e)).Translate(-startPoint.X, -startPoint.Y)
+		paint.gradient = gradient.ToRadial(startPoint, radialShd.StartRadius, paint.view.Inv().Dot(endPoint), radialShd.EndRadius)
+	}
+	return paint
 }
 
 // colorToRGBA 转换颜色对象

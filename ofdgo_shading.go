@@ -23,6 +23,7 @@ import (
 
 type shdPaint struct {
 	gradient canvas.Gradient
+	view     canvas.Matrix
 	extend   int
 	mapType  string
 	period   float64
@@ -44,46 +45,49 @@ func newShdPaint(gradient canvas.Gradient, extend, mapType string, mapUnit float
 	if mapUnit > 0 && length > 0 {
 		period = mapUnit / length
 	}
-	return &shdPaint{gradient: gradient, extend: flags, mapType: mapType, period: period}
+	return &shdPaint{gradient: gradient, view: canvas.Identity, extend: flags, mapType: mapType, period: period}
 }
 
 // resolveShdPaint 解析渐变画刷和裁剪区域
 // 入参: ctx 画布上下文, paint 画刷
-// 返回: any 画刷, *canvas.Path 裁剪区域
-func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path) {
+// 返回: any 画刷, *canvas.Path 裁剪区域, canvas.Matrix 渐变变换
+func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.Matrix) {
 	s, ok := paint.(*shdPaint)
 	if !ok {
-		return paint, nil
+		return paint, nil, canvas.Identity
 	}
 	switch g := s.gradient.(type) {
 	case *canvas.LinearGradient:
 		clip := axialShdClip(ctx, g, s.extend)
 		if s.mapType != "Reflect" {
-			return g, clip
+			return g, clip, s.view
 		}
 		d := g.End.Sub(g.Start)
 		axis := canvas.Matrix{{d.X, -d.Y, g.Start.X}, {d.Y, d.X, g.Start.Y}}
 		area := shdCanvasBounds(ctx).Transform(axis.Inv())
 		lo, hi := s.rangeLimits(area.X0, area.X1)
 		if hi <= lo {
-			return g, &canvas.Path{}
+			return g, &canvas.Path{}, s.view
 		}
 		gradient := reflectShdGrad(g.Grad, s.period, lo, hi)
-		return gradient.ToLinear(g.Start.Add(d.Mul(lo)), g.Start.Add(d.Mul(hi))), clip
+		return gradient.ToLinear(g.Start.Add(d.Mul(lo)), g.Start.Add(d.Mul(hi))), clip, s.view
 	case *canvas.RadialGradient:
 		d, dr := g.C1.Sub(g.C0), g.R1-g.R0
 		length := d.Length()
 		if length >= math.Abs(dr) {
-			return g, nil
+			return g, nil, s.view
 		}
-		clip := radialShdClip(ctx, g, s.extend)
+		bounds := shdCanvasBounds(ctx).Transform(s.view.Inv())
+		clip := radialShdClip(g, s.extend, bounds)
+		if clip != nil && s.view != canvas.Identity {
+			clip = clip.Transform(s.view)
+		}
 		if s.mapType != "Reflect" {
-			return g, clip
+			return g, clip, s.view
 		}
 		lo, hi := 0.0, 1.0
 		if s.extend != 0 {
 			distance := 0.0
-			bounds := shdCanvasBounds(ctx)
 			for _, point := range []canvas.Point{{X: bounds.X0, Y: bounds.Y0}, {X: bounds.X1, Y: bounds.Y0}, {X: bounds.X1, Y: bounds.Y1}, {X: bounds.X0, Y: bounds.Y1}} {
 				distance = math.Max(distance, point.Sub(g.C0).Length())
 			}
@@ -96,12 +100,24 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path) {
 			hi = math.Min(hi, -g.R0/dr)
 		}
 		if hi <= lo {
-			return g, &canvas.Path{}
+			return g, &canvas.Path{}, s.view
 		}
 		gradient := reflectShdGrad(g.Grad, s.period, lo, hi)
-		return gradient.ToRadial(g.C0.Add(d.Mul(lo)), math.Max(0, g.R0+dr*lo), g.C0.Add(d.Mul(hi)), math.Max(0, g.R0+dr*hi)), clip
+		return gradient.ToRadial(g.C0.Add(d.Mul(lo)), math.Max(0, g.R0+dr*lo), g.C0.Add(d.Mul(hi)), math.Max(0, g.R0+dr*hi)), clip, s.view
 	}
-	return s.gradient, nil
+	return s.gradient, nil, s.view
+}
+
+// drawShdPath 绘制渐变路径并保持图形轮廓不变
+// 入参: ctx 画布上下文, path 填充路径, view 渐变变换
+func drawShdPath(ctx *canvas.Context, path *canvas.Path, view canvas.Matrix) {
+	if view == canvas.Identity {
+		ctx.DrawPath(0, 0, path)
+		return
+	}
+	origin := ctx.CoordView().Dot(canvas.Point{})
+	m := ctx.CoordSystemView().Mul(ctx.View()).Translate(origin.X, origin.Y).Mul(view)
+	ctx.RenderPath(path.Copy().Transform(view.Inv()), ctx.Style, m)
 }
 
 // rangeLimits 限制渐变延伸区间
@@ -131,9 +147,9 @@ func shdCanvasBounds(ctx *canvas.Context) canvas.Rect {
 }
 
 // radialShdClip 获取包含双圆的径向渐变裁剪区域
-// 入参: ctx 画布上下文, g 径向渐变, extend 延伸方向
+// 入参: g 径向渐变, extend 延伸方向, bounds 渐变坐标系下的画布边界
 // 返回: *canvas.Path 裁剪区域
-func radialShdClip(ctx *canvas.Context, g *canvas.RadialGradient, extend int) *canvas.Path {
+func radialShdClip(g *canvas.RadialGradient, extend int, bounds canvas.Rect) *canvas.Path {
 	inner, outer := g.C0, g.C1
 	r0, r1 := g.R0, g.R1
 	if r1 < r0 {
@@ -147,7 +163,7 @@ func radialShdClip(ctx *canvas.Context, g *canvas.RadialGradient, extend int) *c
 	if extend&2 == 0 {
 		clip = canvas.Circle(r1).Translate(outer.X, outer.Y)
 	} else {
-		clip = shdCanvasBounds(ctx).ToPath()
+		clip = bounds.ToPath()
 	}
 	if extend&1 == 0 && r0 > 0 {
 		clip = clip.Not(canvas.Circle(r0).Translate(inner.X, inner.Y))

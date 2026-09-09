@@ -49,9 +49,9 @@ func FixFontDataAggressive(data []byte, fixCmap, fixName bool) (bool, []byte, ma
 	return fixed, newData, mapping, mc, err
 }
 
-// isBareCFFData 检查是否为 CFF 裸字体数据
+// isBareCFFData 检查是否为CFF裸字体数据
 // 入参: data 字体数据
-// 返回: bool 是否为 CFF 裸数据
+// 返回: bool 是否为CFF裸数据
 func isBareCFFData(data []byte) bool {
 	if len(data) < 4 {
 		return false

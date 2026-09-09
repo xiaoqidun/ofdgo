@@ -18,7 +18,7 @@ import (
 	"encoding/binary"
 )
 
-// fixTrueType 尝试修复 TrueType/OpenType 字体数据
+// fixTrueType 尝试修复TrueType/OpenType字体数据
 // 入参: data 原始字体数据, fixCmap 是否修复cmap, fixName 是否修复name
 // 返回: bool 是否修复, []byte 修复后数据, map[rune]uint16 字符映射, bool 是否缺失cmap, error 错误信息
 func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uint16, bool, error) {
@@ -192,7 +192,7 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 	return true, finalData, mapping, missingCmap, nil
 }
 
-// hasBadPostTable 检查 post 表是否会被 canvas/font 拒绝
+// hasBadPostTable 检查post表是否会被canvas/font拒绝
 func hasBadPostTable(data []byte, numGlyphs uint16, isTrueType bool) bool {
 	if len(data) < 32 {
 		return true
@@ -217,7 +217,7 @@ func hasBadPostTable(data []byte, numGlyphs uint16, isTrueType bool) bool {
 	}
 }
 
-// hasUsableCmap 检查是否存在可用的 cmap 子表
+// hasUsableCmap 检查是否存在可用的cmap子表
 // 入参: data cmap表数据
 // 返回: bool 是否可用
 func hasUsableCmap(data []byte) bool {
@@ -249,8 +249,8 @@ func hasUsableCmap(data []byte) bool {
 	return usable
 }
 
-// supportedCmapFormat 判断 cmap 子表格式是否可用
-// 入参: format cmap 子表格式, platformID 平台ID, encodingID 编码ID
+// supportedCmapFormat 判断cmap子表格式是否可用
+// 入参: format cmap子表格式, platformID 平台ID, encodingID 编码ID
 // 返回: bool 是否可用
 func supportedCmapFormat(format, platformID, encodingID uint16) bool {
 	switch format {

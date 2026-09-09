@@ -48,7 +48,7 @@ func calcTableChecksum(data []byte) uint32 {
 	return sum
 }
 
-// parseCmapMappings 解析 cmap 字符映射
+// parseCmapMappings 解析cmap字符映射
 // 入参: data cmap表数据
 // 返回: map[rune]uint16 字符到字形映射
 func parseCmapMappings(data []byte) map[rune]uint16 {
@@ -87,7 +87,7 @@ func parseCmapMappings(data []byte) map[rune]uint16 {
 	return result
 }
 
-// parseCmapFormat0 解析 cmap format 0
+// parseCmapFormat0 解析cmap format 0
 // 入参: data 子表数据, result 字符映射
 func parseCmapFormat0(data []byte, result map[rune]uint16) {
 	if len(data) < 262 {
@@ -101,7 +101,7 @@ func parseCmapFormat0(data []byte, result map[rune]uint16) {
 	}
 }
 
-// parseCmapFormat4 解析 cmap format 4
+// parseCmapFormat4 解析cmap format 4
 // 入参: data 子表数据, result 字符映射
 func parseCmapFormat4(data []byte, result map[rune]uint16) {
 	if len(data) < 16 {
@@ -152,7 +152,7 @@ func parseCmapFormat4(data []byte, result map[rune]uint16) {
 	}
 }
 
-// parseCmapFormat6 解析 cmap format 6
+// parseCmapFormat6 解析cmap format 6
 // 入参: data 子表数据, result 字符映射
 func parseCmapFormat6(data []byte, result map[rune]uint16) {
 	if len(data) < 10 {
@@ -168,7 +168,7 @@ func parseCmapFormat6(data []byte, result map[rune]uint16) {
 	}
 }
 
-// parseCmapFormat12 解析 cmap format 12
+// parseCmapFormat12 解析cmap format 12
 // 入参: data 子表数据, result 字符映射
 func parseCmapFormat12(data []byte, result map[rune]uint16) {
 	if len(data) < 16 {
@@ -207,7 +207,7 @@ func addPackedGlyphMapping(mapping map[rune]uint16, numGlyphs uint16) {
 	}
 }
 
-// buildHeadTable 构建 head 表
+// buildHeadTable 构建head表
 // 入参: unitsPerEm 每em单位数
 // 返回: []byte head表数据
 func buildHeadTable(unitsPerEm uint16) []byte {
@@ -233,7 +233,7 @@ func buildHeadTable(unitsPerEm uint16) []byte {
 	return buf.Bytes()
 }
 
-// buildHheaTable 构建 hhea 表
+// buildHheaTable 构建hhea表
 // 入参: numGlyphs 字形数量
 // 返回: []byte hhea表数据
 func buildHheaTable(numGlyphs uint16) []byte {
@@ -259,7 +259,7 @@ func buildHheaTable(numGlyphs uint16) []byte {
 	return buf.Bytes()
 }
 
-// buildCFFMaxpTable 构建 CFF 轮廓使用的 maxp 0.5 表
+// buildCFFMaxpTable 构建CFF轮廓使用的maxp 0.5表
 // 入参: numGlyphs 字形数量
 // 返回: []byte maxp表数据
 func buildCFFMaxpTable(numGlyphs uint16) []byte {
@@ -269,7 +269,7 @@ func buildCFFMaxpTable(numGlyphs uint16) []byte {
 	return buf.Bytes()
 }
 
-// buildTrueTypeMaxpTable 构建 TrueType 轮廓使用的 maxp 1.0 表
+// buildTrueTypeMaxpTable 构建TrueType轮廓使用的maxp 1.0表
 // 入参: numGlyphs 字形数量
 // 返回: []byte maxp表数据
 func buildTrueTypeMaxpTable(numGlyphs uint16) []byte {
@@ -282,13 +282,13 @@ func buildTrueTypeMaxpTable(numGlyphs uint16) []byte {
 	return buf.Bytes()
 }
 
-// buildOS2Table 构建 OS/2 表 (使用默认 Metrics)
+// buildOS2Table 构建OS/2表 (使用默认Metrics)
 // 返回: []byte OS/2表数据
 func buildOS2Table() []byte {
 	return buildOS2TableWithMetrics(800, -200)
 }
 
-// buildOS2TableWithMetrics 构建 OS/2 表
+// buildOS2TableWithMetrics 构建OS/2表
 // 入参: ascender 上升部, descender 下降部
 // 返回: []byte OS/2表数据
 func buildOS2TableWithMetrics(ascender, descender int16) []byte {
@@ -337,7 +337,7 @@ func buildOS2TableWithMetrics(ascender, descender int16) []byte {
 	return os2.Bytes()
 }
 
-// buildNameTable 构建 name 表 (最小化)
+// buildNameTable 构建name表 (最小化)
 // 返回: []byte name表数据
 func buildNameTable() []byte {
 	buf := new(bytes.Buffer)
@@ -347,7 +347,7 @@ func buildNameTable() []byte {
 	return buf.Bytes()
 }
 
-// buildPostTable 构建 post 表 (版本 3.0, 无字形名称)
+// buildPostTable 构建post表 (版本3.0, 无字形名称)
 // 返回: []byte post表数据
 func buildPostTable() []byte {
 	buf := new(bytes.Buffer)
@@ -363,7 +363,7 @@ func buildPostTable() []byte {
 	return buf.Bytes()
 }
 
-// buildHmtxTable 构建 hmtx 表
+// buildHmtxTable 构建hmtx表
 // 入参: widths 宽度列表
 // 返回: []byte hmtx表数据
 func buildHmtxTable(widths []uint16) []byte {
@@ -375,7 +375,7 @@ func buildHmtxTable(widths []uint16) []byte {
 	return buf.Bytes()
 }
 
-// cmapSegment cmap 表段结构
+// cmapSegment cmap表段结构
 // 字段: start 开始字符, end 结束字符, delta 增量, offset 偏移
 type cmapSegment struct {
 	start, end uint16
@@ -383,7 +383,7 @@ type cmapSegment struct {
 	offset     uint16
 }
 
-// buildCmapTable 构建 cmap 表 (Format 4)
+// buildCmapTable 构建cmap表 (Format 4)
 // 入参: numGlyphs 字形数量, mapping 字符映射
 // 返回: []byte cmap表数据
 func buildCmapTable(numGlyphs uint16, mapping map[rune]uint16) []byte {
@@ -489,7 +489,7 @@ func buildCmapTable(numGlyphs uint16, mapping map[rune]uint16) []byte {
 	return mainBuf.Bytes()
 }
 
-// shouldBuildCmapFormat12 判断 format 4 是否会溢出 16 位 length
+// shouldBuildCmapFormat12 判断format 4是否会溢出16位length
 func shouldBuildCmapFormat12(mapping map[rune]uint16) bool {
 	if mapping == nil {
 		return false
@@ -526,7 +526,7 @@ func shouldBuildCmapFormat12(mapping map[rune]uint16) bool {
 	return length > 0xFFFF
 }
 
-// buildCmapTableFormat12 构建 cmap 表 (Format 12)
+// buildCmapTableFormat12 构建cmap表 (Format 12)
 // 入参: numGlyphs 字形数量, mapping 字符映射
 // 返回: []byte cmap表数据
 func buildCmapTableFormat12(numGlyphs uint16, mapping map[rune]uint16) []byte {
@@ -599,7 +599,7 @@ func buildCmapTableFormat12(numGlyphs uint16, mapping map[rune]uint16) []byte {
 	return mainBuf.Bytes()
 }
 
-// otfTableRecord OTF 表记录结构
+// otfTableRecord OTF表记录结构
 // 字段: tag 标签, checksum 校验和, offset 偏移, length 长度, data 数据
 type otfTableRecord struct {
 	tag      string
@@ -609,7 +609,7 @@ type otfTableRecord struct {
 	data     []byte
 }
 
-// serializeOTF 序列化 OpenType 字体结构
+// serializeOTF 序列化OpenType字体结构
 // 入参: tables 表数据映射
 // 返回: []byte 完整字体数据, error 错误信息
 func serializeOTF(tables map[string][]byte) ([]byte, error) {

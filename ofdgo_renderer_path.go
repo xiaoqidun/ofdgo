@@ -211,7 +211,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		style.fillPaint = style.fillColor
 	}
 	if shouldFill {
-		fillPaint, shadingClip := resolveShdPaint(ctx, style.fillPaint)
+		fillPaint, shadingClip, fillView := resolveShdPaint(ctx, style.fillPaint)
 		fillClip := intersectClipPath(clipPath, shadingClip)
 		fp := p
 		fillRule := canvas.NonZero
@@ -232,7 +232,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			ctx.SetFillRule(fillRule)
 			ctx.SetFill(fillPaint)
 			ctx.SetStrokeColor(canvas.Transparent)
-			ctx.DrawPath(0, 0, fp)
+			drawShdPath(ctx, fp, fillView)
 		}
 	}
 	shouldStroke := true
@@ -247,28 +247,27 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		if style.strokePaint == nil {
 			style.strokePaint = colorWithAlpha(canvas.Black, obj.Alpha)
 		}
-		strokePaint, shadingClip := resolveShdPaint(ctx, style.strokePaint)
+		strokePaint, shadingClip, strokeView := resolveShdPaint(ctx, style.strokePaint)
 		ctx.SetFillColor(canvas.Transparent)
 		ctx.SetStroke(strokePaint)
 		ctx.SetStrokeWidth(style.lineWidth)
 		ctx.SetStrokeCapper(style.lineCap)
 		ctx.SetStrokeJoiner(style.lineJoin)
+		sp := p
 		if len(style.dashPattern) > 0 {
-			ctx.SetDashes(style.dashOffset, style.dashPattern...)
+			sp = sp.Dash(style.dashOffset, style.dashPattern...)
+			ctx.SetDashes(0)
 		}
 		strokeClip := intersectClipPath(clipPath, shadingClip)
-		if strokeClip != nil {
-			sp := p.Copy()
-			if len(style.dashPattern) > 0 {
-				sp = sp.Dash(style.dashOffset, style.dashPattern...)
-			}
+		if strokeClip != nil || strokeView != canvas.Identity {
+			sp = sp.Copy()
 			sp = sp.Stroke(style.lineWidth, style.lineCap, style.lineJoin, canvas.Tolerance)
 			sp = applyClipPath(sp, strokeClip)
 			ctx.SetFill(strokePaint)
 			ctx.SetStrokeColor(canvas.Transparent)
-			ctx.DrawPath(0, 0, sp)
+			drawShdPath(ctx, sp, strokeView)
 		} else {
-			ctx.DrawPath(0, 0, p)
+			ctx.DrawPath(0, 0, sp)
 		}
 	}
 	ctx.Pop()

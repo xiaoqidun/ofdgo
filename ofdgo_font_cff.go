@@ -26,7 +26,7 @@ import (
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
-// wrapCFFToOTF 将 CFF 裸数据包装为 OpenType 字体格式
+// wrapCFFToOTF 将CFF裸数据包装为OpenType字体格式
 // 入参: cffData CFF字体数据
 // 返回: []byte OTF字体数据, map[rune]uint16 字符映射, error 错误信息
 func wrapCFFToOTF(cffData []byte) ([]byte, map[rune]uint16, error) {
@@ -79,7 +79,7 @@ func wrapCFFToOTF(cffData []byte) ([]byte, map[rune]uint16, error) {
 	return data, mapping, err
 }
 
-// cffDict 使用 float64 存储所有数值，以统一处理整数和实数
+// cffDict 使用float64存储所有数值，以统一处理整数和实数
 type cffDict map[int][]float64
 
 // sanitizeCFF 尝试清洗CFF数据，转换CID字体并合并FontMatrix
@@ -246,7 +246,7 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 	return newCFF.Bytes(), nil
 }
 
-// sanitizeMultiFDCFF 清洗多 FD 的 CID CFF 数据
+// sanitizeMultiFDCFF 清洗多FD的CID CFF数据
 // 入参: data 原始CFF数据, hdrSize 头部大小, nameIndexData 名称索引, topDict 顶层字典
 // 入参: stringIndexData 字符串索引, globalSubrIndexData 全局子程序索引, fdArrOff FDArray偏移, fdCount FD数量
 // 返回: []byte 清洗后的CFF数据, error 错误信息
@@ -332,7 +332,7 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 	return newCFF.Bytes(), nil
 }
 
-// parseCFFAndCountGlyphs 解析 CFF 头部并统计字形数量
+// parseCFFAndCountGlyphs 解析CFF头部并统计字形数量
 // 入参: data CFF数据
 // 返回: int 字形数量, error 错误信息
 func parseCFFAndCountGlyphs(data []byte) (int, error) {
@@ -370,7 +370,7 @@ func parseCFFAndCountGlyphs(data []byte) (int, error) {
 	return 0, fmt.Errorf("failed to parse top dict")
 }
 
-// multiplyAffine 2x3 仿射矩阵乘法
+// multiplyAffine 2x3仿射矩阵乘法
 // 入参: a 矩阵A, b 矩阵B
 // 返回: []float64 结果矩阵
 func multiplyAffine(a, b []float64) []float64 {
@@ -384,7 +384,7 @@ func multiplyAffine(a, b []float64) []float64 {
 	}
 }
 
-// parseCFFDict 解析 CFF 字典数据
+// parseCFFDict 解析CFF字典数据
 // 入参: data 字典数据
 // 返回: cffDict 解析后的字典映射
 func parseCFFDict(data []byte) cffDict {
@@ -442,7 +442,7 @@ func parseCFFDict(data []byte) cffDict {
 	return dict
 }
 
-// parseCFFReal 解析 CFF 实数编码
+// parseCFFReal 解析CFF实数编码
 // 入参: data 数据切片
 // 返回: string 实数字符串, int 消耗字节数
 func parseCFFReal(data []byte) (string, int) {
@@ -478,7 +478,7 @@ func parseCFFReal(data []byte) (string, int) {
 	return sb.String(), i
 }
 
-// encodeCFFDict 编码 CFF 字典 (仅使用 float64 操作数)
+// encodeCFFDict 编码CFF字典 (仅使用float64操作数)
 // 入参: dict CFF字典映射
 // 返回: []byte 编码后的字典数据
 func encodeCFFDict(dict cffDict) []byte {
@@ -503,7 +503,7 @@ func encodeCFFDict(dict cffDict) []byte {
 	return buf.Bytes()
 }
 
-// encodeNumberCFF 编码单个数值到 CFF 格式
+// encodeNumberCFF 编码单个数值到CFF格式
 // 入参: buf 缓冲区, val 数值
 func encodeNumberCFF(buf *bytes.Buffer, val float64) {
 	if val == math.Trunc(val) {
@@ -557,7 +557,7 @@ func encodeNumberCFF(buf *bytes.Buffer, val float64) {
 	}
 }
 
-// encodeCFFIndex 编码 CFF 索引结构
+// encodeCFFIndex 编码CFF索引结构
 // 入参: items 数据项列表
 // 返回: []byte 编码后的索引数据
 func encodeCFFIndex(items []([]byte)) []byte {
@@ -602,7 +602,7 @@ func putOffset(buf *bytes.Buffer, val int, size int) {
 	buf.Write(tmp[4-size:])
 }
 
-// getCFFIndexCount 读取 CFF 索引的计数和大小
+// getCFFIndexCount 读取CFF索引的计数和大小
 // 入参: data CFF数据, offset 偏移量
 // 返回: int 数量, int 索引结构总大小
 func getCFFIndexCount(data []byte, offset int) (int, int) {
@@ -635,7 +635,7 @@ func getCFFIndexCount(data []byte, offset int) (int, int) {
 	return count, 3 + (count+1)*offSize + (dataEnd - 1)
 }
 
-// getCFFIndexData 读取 CFF 索引的数据块
+// getCFFIndexData 读取CFF索引的数据块
 // 入参: data CFF数据, offset 偏移量
 // 返回: []byte 索引数据(已去除offsets), int 索引结构总大小
 func getCFFIndexData(data []byte, offset int) ([]byte, int) {
@@ -665,7 +665,7 @@ func getCFFIndexData(data []byte, offset int) ([]byte, int) {
 	return data[start : start+length], size
 }
 
-// readCFFIndexItems 读取 CFF 索引中的所有数据项
+// readCFFIndexItems 读取CFF索引中的所有数据项
 // 入参: data CFF数据, offset 索引偏移
 // 返回: [][]byte 数据项列表
 func readCFFIndexItems(data []byte, offset int) [][]byte {
@@ -698,7 +698,7 @@ func readCFFIndexItems(data []byte, offset int) [][]byte {
 	return items
 }
 
-// parseCFFFDSelect 解析 CID CFF 的 FDSelect
+// parseCFFFDSelect 解析CID CFF的FDSelect
 // 入参: data CFF数据, offset FDSelect偏移, numGlyphs 字形数量
 // 返回: []int 字形对应的FD索引
 func parseCFFFDSelect(data []byte, offset int, numGlyphs int) []int {
@@ -754,7 +754,7 @@ func parseCFFFDSelect(data []byte, offset int, numGlyphs int) []int {
 	return result
 }
 
-// readCFFLocalSubrs 读取 CID CFF 的本地子程序
+// readCFFLocalSubrs 读取CID CFF的本地子程序
 // 入参: data CFF数据, fdArrOff FDArray偏移, fdCount FD数量
 // 返回: [][][]byte 本地子程序列表, []cffDict Private字典列表
 func readCFFLocalSubrs(data []byte, fdArrOff int, fdCount int) ([][][]byte, []cffDict) {
@@ -792,7 +792,7 @@ type type2Operand struct {
 	outStart int
 }
 
-// inlineType2CharString 内联 Type2 CharString 子程序调用
+// inlineType2CharString 内联Type2 CharString子程序调用
 // 入参: data CharString数据, localSubrs 本地子程序, globalSubrs 全局子程序, depth 递归深度
 // 返回: []byte 内联后的CharString数据
 func inlineType2CharString(data []byte, localSubrs, globalSubrs [][]byte, depth int) []byte {
@@ -881,7 +881,7 @@ func inlineType2CharString(data []byte, localSubrs, globalSubrs [][]byte, depth 
 	return out
 }
 
-// removeType2Hints 移除 Type2 CharString 的 hint 指令
+// removeType2Hints 移除Type2 CharString的hint指令
 // 入参: data CharString数据
 // 返回: []byte 移除hint后的CharString数据
 func removeType2Hints(data []byte) []byte {
@@ -954,7 +954,7 @@ func removeType2Hints(data []byte) []byte {
 	return out
 }
 
-// cffSubrBias 获取 Type2 子程序偏移
+// cffSubrBias 获取Type2子程序偏移
 // 入参: count 子程序数量
 // 返回: int 偏移量
 func cffSubrBias(count int) int {
@@ -967,7 +967,7 @@ func cffSubrBias(count int) int {
 	return 32768
 }
 
-// parseCFFWidths 从 CFF 数据中解析 Glyph 宽度
+// parseCFFWidths 从CFF数据中解析Glyph宽度
 // 入参: data CFF数据, numGlyphs 字形数量
 // 返回: []uint16 宽度列表, error 错误信息
 func parseCFFWidths(data []byte, numGlyphs int) ([]uint16, error) {
@@ -1037,7 +1037,7 @@ func parseCFFWidths(data []byte, numGlyphs int) ([]uint16, error) {
 	return nil, fmt.Errorf("no charstrings")
 }
 
-// scanCharStringWidth 扫描 CharString 获取宽度
+// scanCharStringWidth 扫描CharString获取宽度
 // 入参: data CharString数据, nominal, def 默认宽度值
 // 返回: float64 宽度值
 func scanCharStringWidth(data []byte, nominal, def float64) float64 {
@@ -1099,7 +1099,7 @@ func parseShortInt(data []byte, idx int) float64 {
 	return float64(int16(binary.BigEndian.Uint16(data[idx+1:])))
 }
 
-// parseNumberType2 解析 Number (Type 2)
+// parseNumberType2 解析Number (Type 2)
 // 入参: data 数据, idx 索引
 // 返回: float64 浮点值
 func parseNumberType2(data []byte, idx int) float64 {
@@ -1135,7 +1135,7 @@ func readCFFOffset(data []byte, pos, size int) int {
 	return val
 }
 
-// getCFFCharsetInfo 读取 CFF 字符集和 ROS 信息
+// getCFFCharsetInfo 读取CFF字符集和ROS信息
 // 入参: data CFF数据, numGlyphs 字形数量
 // 返回: []int SID或CID列表, string Registry, string Ordering, int 字符串索引偏移, bool 是否成功
 func getCFFCharsetInfo(data []byte, numGlyphs int) ([]int, string, string, int, bool) {
@@ -1178,7 +1178,7 @@ func getCFFCharsetInfo(data []byte, numGlyphs int) ([]int, string, string, int, 
 	return sids, registry, ordering, stringIndexOff, true
 }
 
-// getCmapFromCFF 从 CFF 数据中恢复 Unicode 映射
+// getCmapFromCFF 从CFF数据中恢复Unicode映射
 // 入参: data CFF数据, numGlyphs 字形数量
 // 返回: map[rune]uint16 恢复的映射表
 func getCmapFromCFF(data []byte, numGlyphs int) map[rune]uint16 {
@@ -1234,7 +1234,7 @@ func getCmapFromCFF(data []byte, numGlyphs int) map[rune]uint16 {
 	return mapping
 }
 
-// getCFFCIDRuneMap 获取 CID 到包装字体字符的映射
+// getCFFCIDRuneMap 获取CID到包装字体字符的映射
 // 入参: data CFF或OpenType字体数据
 // 返回: map[uint16]rune CID映射
 func getCFFCIDRuneMap(data []byte) map[uint16]rune {
@@ -1280,7 +1280,7 @@ func getCFFCIDRuneMap(data []byte) map[uint16]rune {
 	return result
 }
 
-// getCFFData 获取字体中的 CFF 数据
+// getCFFData 获取字体中的CFF数据
 // 入参: data 字体数据
 // 返回: []byte CFF数据
 func getCFFData(data []byte) []byte {
@@ -1314,7 +1314,7 @@ func getCFFData(data []byte) []byte {
 	return nil
 }
 
-// parseCFFCharset 解析 CFF 字符集并返回 SID 列表
+// parseCFFCharset 解析CFF字符集并返回SID列表
 // 入参: data CFF数据, offset 偏移量, numGlyphs 字形数量
 // 返回: []int SID列表
 func parseCFFCharset(data []byte, offset int, numGlyphs int) []int {
@@ -1357,7 +1357,7 @@ func parseCFFCharset(data []byte, offset int, numGlyphs int) []int {
 	return sids
 }
 
-// readStringIndexItem 读取 CFF 字符串索引项
+// readStringIndexItem 读取CFF字符串索引项
 // 入参: data CFF数据, offset 索引偏移, idx 索引号
 // 返回: string 读取的字符串
 func readStringIndexItem(data []byte, offset int, idx int) string {
@@ -1386,7 +1386,7 @@ func readStringIndexItem(data []byte, offset int, idx int) string {
 	return string(data[start : start+length])
 }
 
-// getCFFROS 读取 CID 字体 ROS 信息
+// getCFFROS 读取CID字体ROS信息
 // 入参: data CFF数据, stringIndexOff 字符串索引偏移, td 顶层字典
 // 返回: string Registry, string Ordering
 func getCFFROS(data []byte, stringIndexOff int, td cffDict) (string, string) {
@@ -1399,7 +1399,7 @@ func getCFFROS(data []byte, stringIndexOff int, td cffDict) (string, string) {
 	return registry, ordering
 }
 
-// getCFFSIDString 读取 CFF SID 字符串
+// getCFFSIDString 读取CFF SID字符串
 // 入参: data CFF数据, stringIndexOff 字符串索引偏移, sid 字符串ID
 // 返回: string 字符串内容
 func getCFFSIDString(data []byte, stringIndexOff int, sid int) string {
@@ -1412,7 +1412,7 @@ func getCFFSIDString(data []byte, stringIndexOff int, sid int) string {
 	return ""
 }
 
-// adobeGB1CIDToUnicode 将 Adobe-GB1 CID 转为 Unicode
+// adobeGB1CIDToUnicode 将Adobe-GB1 CID转为Unicode
 // 入参: cid 字符CID
 // 返回: rune Unicode字符, bool 是否成功
 func adobeGB1CIDToUnicode(cid int) (rune, bool) {
@@ -1541,7 +1541,7 @@ func getUnicodeFromName(name string) rune {
 	return 0
 }
 
-// cffStandardStrings CFF 标准字符串表
+// cffStandardStrings CFF标准字符串表
 var cffStandardStrings = []string{
 	".notdef", "space", "exclam", "quotedbl", "numbersign", "dollar", "percent", "ampersand", "quoteright", "parenleft", "parenright", "asterisk", "plus", "comma", "hyphen", "period", "slash", "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "colon", "semicolon", "less", "equal", "greater", "question", "at", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "bracketleft", "backslash", "bracketright", "asciicircum", "underscore", "quoteleft", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "braceleft", "bar", "braceright", "asciitilde", "exclamdown", "cent", "sterling", "fraction", "yen", "florin", "section", "currency", "quotesingle", "quotedblleft", "quotedblright", "guillemotleft", "guillemotright", "dagger", "daggerdbl", "fi", "fl", "endash", "emdash", "paragraph", "bullet", "quotesinglbase", "quotedblbase", "second", "circumflex", "breve", "dotaccent", "dieresis", "grave", "ring", "cedilla", "hungarumlaut", "ogonek", "caron", "emspace",
 	"AE", "ordfeminine", "Lslash", "Oslash", "OE", "ordmasculine", "ae", "dotlessi", "lslash", "oslash", "oe", "germandbls", "onesuperior", "logicalnot", "mu", "trademark", "Eth", "onehalf", "plusminus", "Thorn", "onequarter", "divide", "brokenbar", "degree", "thorn", "threequarters", "twosuperior", "registered", "minus", "eth", "multiply", "threesuperior", "copyright", "Aacute", "Acircumflex", "Adieresis", "Agrave", "Aring", "Atilde", "Ccedilla", "Eacute", "Ecircumflex", "Edieresis", "Egrave", "Iacute", "Icircumflex", "Idieresis", "Igrave", "Ntilde", "Oacute", "Ocircumflex", "Odieresis", "Ograve", "Otilde", "Scaron", "Uacute", "Ucircumflex", "Udieresis", "Ugrave", "Yacute", "Ydieresis", "Zcaron", "aacute", "acircumflex", "adieresis", "agrave", "aring", "atilde", "ccedilla", "eacute", "ecircumflex", "edieresis", "egrave", "iacute", "icircumflex", "idieresis", "igrave", "ntilde", "oacute", "ocircumflex", "odieresis", "ograve", "otilde", "scaron", "uacute", "ucircumflex", "udieresis", "ugrave", "yacute", "ydieresis", "zcaron", "exclamsmall", "Hungarumlautsmall", "dollaroldstyle", "dollarsuperior", "ampersandsmall", "Acutesmall", "parenleftsuperior", "parenrightsuperior", "2dotlead", "nbspace", "1dotlead", "zerooldstyle", "oneoldstyle", "twooldstyle", "threeoldstyle", "fouroldstyle", "fiveoldstyle", "sixoldstyle", "sevenoldstyle", "eightoldstyle", "nineoldstyle", "commasuperior", "threequartersemdash", "periodsuperior", "questionsmall", "asuperior", "bsuperior", "centsuperior", "dsuperior", "esuperior", "isuperior", "lsuperior", "msuperior", "nsuperior", "osuperior", "rsuperior", "ssuperior", "tsuperior", "ff", "ffi", "ffl", "parenleftinferior", "parenrightinferior", "Circumflexsmall", "hyphensuperior", "Gravesmall", "Asmall", "Bsmall", "Csmall", "Dsmall", "Esmall", "Fsmall", "Gsmall", "Hsmall", "Ismall", "Jsmall", "Ksmall", "Lsmall", "Msmall", "Nsmall", "Osmall", "Psmall", "Qsmall", "Rsmall", "Ssmall", "Tsmall", "Usmall", "Vsmall", "Wsmall", "Xsmall", "Ysmall", "Zsmall", "colonmonetary", "onefitted", "rupiah", "Tildesmall", "exclamdownsmall", "centoldstyle", "Lslashsmall", "Scaronsmall", "Zcaronsmall", "Dieresissmall", "Brevesmall", "Caronsmall", "Dotaccentsmall", "Macronsmall", "figuredash", "hypheninferior", "Ogoneksmall", "Ringsmall", "Cedillasmall", "questiondownsmall", "oneeighth", "threeeighths", "fiveeighths", "seveneighths", "onethird", "twothirds", "zerosuperior", "foursuperior", "fivesuperior", "sixsuperior", "sevensuperior", "eightsuperior", "ninesuperior", "zeroinferior", "oneinferior", "twoinferior", "threeinferior", "fourinferior", "fiveinferior", "sixinferior", "seveninferior", "eightinferior", "nineinferior", "centinferior", "dollarinferior", "periodinferior", "commainferior", "Agravesmall", "Aacutesmall", "Acircumflexsmall", "Atildesmall", "Adieresissmall", "Aringsmall", "AEsmall", "Ccedillasmall", "Egravesmall", "Eacutesmall", "Ecircumflexsmall", "Edieresissmall", "Igravesmall", "Iacutesmall", "Icircumflexsmall", "Idieresissmall", "Ethsmall", "Ntildesmall", "Ogravesmall", "Oacutesmall", "Ocircumflexsmall", "Otildesmall", "Odieresissmall", "OEsmall", "Oslashsmall", "Ugravesmall", "Uacutesmall", "Ucircumflexsmall", "Udieresissmall", "Yacutesmall", "Thornsmall", "Ydieresissmall", "001.000", "001.001", "001.002", "001.003", "Black", "Bold", "Book", "Light", "Medium", "Regular", "Roman", "Semibold",

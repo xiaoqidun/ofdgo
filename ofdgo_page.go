@@ -194,14 +194,16 @@ type AxialShd struct {
 
 // RadialShd 径向渐变
 type RadialShd struct {
-	MapType     string       `xml:"MapType,attr"`
-	MapUnit     float64      `xml:"MapUnit,attr"`
-	Extend      string       `xml:"Extend,attr"`
-	StartPoint  string       `xml:"StartPoint,attr"`
-	StartRadius float64      `xml:"StartRadius,attr"`
-	EndPoint    string       `xml:"EndPoint,attr"`
-	EndRadius   float64      `xml:"EndRadius,attr"`
-	Segment     []ShdSegment `xml:"Segment"`
+	MapType      string       `xml:"MapType,attr"`
+	MapUnit      float64      `xml:"MapUnit,attr"`
+	Eccentricity float64      `xml:"Eccentricity,attr"`
+	Angle        float64      `xml:"Angle,attr"`
+	Extend       string       `xml:"Extend,attr"`
+	StartPoint   string       `xml:"StartPoint,attr"`
+	StartRadius  float64      `xml:"StartRadius,attr"`
+	EndPoint     string       `xml:"EndPoint,attr"`
+	EndRadius    float64      `xml:"EndRadius,attr"`
+	Segment      []ShdSegment `xml:"Segment"`
 }
 
 // ShdSegment 渐变分段

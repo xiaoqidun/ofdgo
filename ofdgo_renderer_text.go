@@ -89,10 +89,11 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if fillPaint == nil {
 		fillPaint = fillColor
 	}
-	fillPaint, shadingClip := resolveShdPaint(ctx, fillPaint)
+	fillPaint, shadingClip, fillView := resolveShdPaint(ctx, fillPaint)
 	fillClip := intersectClipPath(clipPath, shadingClip)
 	strokeStyle := newPathStyle(nil, defaultStroke, 0, obj.Alpha)
 	strokeClip := clipPath
+	strokeView := canvas.Identity
 	if shouldStroke {
 		if dp != nil {
 			strokeStyle.applyDrawParam(dp, bx, by, pageH, obj.Alpha)
@@ -107,7 +108,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			strokeStyle.strokePaint = colorWithAlpha(canvas.Black, obj.Alpha)
 		}
 		strokeStyle.scale(ctm)
-		strokeStyle.strokePaint, shadingClip = resolveShdPaint(ctx, strokeStyle.strokePaint)
+		strokeStyle.strokePaint, shadingClip, strokeView = resolveShdPaint(ctx, strokeStyle.strokePaint)
 		strokeClip = intersectClipPath(strokeClip, shadingClip)
 	}
 	fontStyle := canvas.FontRegular
@@ -240,7 +241,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				if shouldFill && fillPaint != nil {
 					ctx.SetFill(fillPaint)
 					ctx.SetStrokeColor(canvas.Transparent)
-					ctx.DrawPath(0, 0, applyClipPath(path.Copy(), fillClip))
+					drawShdPath(ctx, applyClipPath(path.Copy(), fillClip), fillView)
 				}
 				if len(strokeStyle.dashPattern) > 0 {
 					path = path.Dash(strokeStyle.dashOffset, strokeStyle.dashPattern...)
@@ -248,7 +249,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				path = path.Stroke(strokeStyle.lineWidth, strokeStyle.lineCap, strokeStyle.lineJoin, canvas.Tolerance)
 				ctx.SetFill(strokeStyle.strokePaint)
 				ctx.SetStrokeColor(canvas.Transparent)
-				ctx.DrawPath(0, 0, applyClipPath(path, strokeClip))
+				drawShdPath(ctx, applyClipPath(path, strokeClip), strokeView)
 				if hasUnderline {
 					underline := &canvas.Path{}
 					underline.MoveTo(0, -sizeMM*0.1)
@@ -256,8 +257,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					underline = underline.Stroke(sizeMM*0.05, canvas.ButtCap, canvas.MiterJoin, canvas.Tolerance)
 					if shouldFill {
 						ctx.SetFillColor(fillColor)
+						ctx.DrawPath(0, 0, applyClipPath(underline.Transform(transform), clipPath))
+					} else {
+						drawShdPath(ctx, applyClipPath(underline.Transform(transform), strokeClip), strokeView)
 					}
-					ctx.DrawPath(0, 0, applyClipPath(underline.Transform(transform), clipPath))
 				}
 				continue
 			}
@@ -274,7 +277,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 						textTransform = textTransform.Mul(glyphMatrix)
 					}
 					glyphPath = applyClipPath(glyphPath.Copy().Transform(textTransform.Scale(scaleX, 1)), fillClip)
-					ctx.DrawPath(0, 0, glyphPath)
+					drawShdPath(ctx, glyphPath, fillView)
 					if hasUnderline {
 						uw := sizeMM * 0.05
 						off := sizeMM * 0.1

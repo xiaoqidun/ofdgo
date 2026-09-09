@@ -80,7 +80,7 @@ func decodeImageConfigData(data []byte) (image.Config, string, error) {
 	return image.Config{}, "", err
 }
 
-// decodeBMPConfig 解码 BMP 尺寸
+// decodeBMPConfig 解码BMP尺寸
 // 入参: data 图片数据
 // 返回: image.Config 图片尺寸, error 错误信息
 func decodeBMPConfig(data []byte) (image.Config, error) {
@@ -100,7 +100,7 @@ func decodeBMPConfig(data []byte) (image.Config, error) {
 	return image.Config{ColorModel: color.NRGBAModel, Width: width, Height: height}, nil
 }
 
-// decodeBMPImage 解码 BMP 图片
+// decodeBMPImage 解码BMP图片
 // 入参: data 图片数据
 // 返回: image.Image 图片对象, error 错误信息
 func decodeBMPImage(data []byte) (image.Image, error) {
@@ -153,7 +153,7 @@ func decodeBMPImage(data []byte) (image.Image, error) {
 	return img, nil
 }
 
-// parseBMPHeader 解析 BMP 文件头
+// parseBMPHeader 解析BMP文件头
 // 入参: data 图片数据
 // 返回: int 像素偏移, int 宽度, int 高度, uint16 位数, uint32 压缩方式, error 错误信息
 func parseBMPHeader(data []byte) (int, int, int, uint16, uint32, error) {
