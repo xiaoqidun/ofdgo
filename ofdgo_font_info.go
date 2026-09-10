@@ -108,11 +108,11 @@ func (r *Renderer) fontInfoDocument() (*Document, error) {
 // 入参: doc 文档结构, pages 页面内容列表
 // 返回: []FontInfo 字体诊断列表, error 错误信息
 func (r *Renderer) fontInfos(doc *Document, pages []*PageContent) ([]FontInfo, error) {
+	usage := r.fontUsage(doc, pages)
 	fonts, err := r.Reader.Fonts()
 	if err != nil {
 		return nil, err
 	}
-	usage := r.fontUsage(doc, pages)
 	infos := make([]FontInfo, 0, len(fonts)+len(usage))
 	seen := make(map[string]bool)
 	for _, font := range fonts {
@@ -226,50 +226,94 @@ func (r *Renderer) countPageFonts(page *PageContent, usage map[string]int) {
 	for _, layer := range page.Content.Layer {
 		r.countLayerFonts(layer, usage)
 	}
+	if r.RenderAnnotations {
+		for _, annot := range r.Reader.Annots[page.ID] {
+			if annot.Visible != nil && !*annot.Visible {
+				continue
+			}
+			for _, obj := range annot.Appearance.Objects {
+				r.countObjectFonts(obj, usage, nil, nil)
+			}
+		}
+	}
 }
 
 // countLayerFonts 统计图层字体使用次数
 // 入参: layer 图层, usage 字体使用次数
 func (r *Renderer) countLayerFonts(layer Layer, usage map[string]int) {
+	defaults := r.drawParamDefaults(layer.DrawParam, nil)
 	if len(layer.Objects) > 0 {
 		for _, obj := range layer.Objects {
-			r.countObjectFonts(obj, usage)
+			r.countObjectFonts(obj, usage, defaults, nil)
 		}
 		return
 	}
 	for _, text := range layer.TextObject {
-		r.countTextFont(text, usage)
+		r.countObjectFonts(GraphicObject{Type: "TextObject", TextObject: text}, usage, defaults, nil)
 	}
 	for _, path := range layer.PathObject {
-		r.countClipFonts(path.Clips, usage)
+		r.countObjectFonts(GraphicObject{Type: "PathObject", PathObject: path}, usage, defaults, nil)
 	}
 	for _, image := range layer.ImageObject {
-		r.countClipFonts(image.Clips, usage)
+		r.countObjectFonts(GraphicObject{Type: "ImageObject", ImageObject: image}, usage, defaults, nil)
 	}
 	for _, cgu := range layer.CompositeGraphicUnit {
-		r.countCompositeFonts(cgu, usage, nil)
+		r.countCompositeFonts(cgu, usage, defaults, nil)
 	}
 }
 
 // countObjectFonts 统计图元字体使用次数
-// 入参: obj 图元对象, usage 字体使用次数
-func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int) {
+// 入参: obj 图元对象, usage 字体使用次数, defaults 默认绘制参数, visited 已访问资源
+func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int, defaults *DrawParam, visited map[string]bool) {
+	var fill *FillColor
+	var stroke *StrokeColor
+	var shouldFill, shouldStroke bool
 	switch obj.Type {
 	case "TextObject":
-		r.countTextFont(obj.TextObject, usage)
+		text := obj.TextObject
+		r.countTextFont(text, usage)
+		defaults = r.drawParamDefaults(text.DrawParam, defaults)
+		fill, stroke = text.FillColor, text.StrokeColor
+		shouldFill = text.Fill == nil || *text.Fill
+		shouldStroke = text.Stroke != nil && *text.Stroke
 	case "PathObject":
-		r.countClipFonts(obj.PathObject.Clips, usage)
+		path := obj.PathObject
+		r.countClipFonts(path.Clips, usage)
+		defaults = r.drawParamDefaults(path.DrawParam, defaults)
+		fill, stroke = path.FillColor, path.StrokeColor
+		shouldFill = path.Fill != nil && *path.Fill
+		shouldStroke = path.Stroke == nil || *path.Stroke
 	case "ImageObject":
 		r.countClipFonts(obj.ImageObject.Clips, usage)
+		if border := obj.ImageObject.Border; border != nil && (border.LineWidth == nil || *border.LineWidth != 0) {
+			r.countPatternFonts((*FillColor)(border.BorderColor), usage, visited)
+		}
+		return
 	case "CompositeGraphicUnit", "CompositeObject":
-		r.countCompositeFonts(obj.CompositeGraphicUnit, usage, nil)
+		r.countCompositeFonts(obj.CompositeGraphicUnit, usage, defaults, visited)
+		return
+	}
+	if defaults != nil {
+		if fill == nil {
+			fill = defaults.FillColor
+		}
+		if stroke == nil {
+			stroke = defaults.StrokeColor
+		}
+	}
+	if shouldFill {
+		r.countPatternFonts(fill, usage, visited)
+	}
+	if shouldStroke {
+		r.countPatternFonts((*FillColor)(stroke), usage, visited)
 	}
 }
 
 // countCompositeFonts 统计复合图元字体使用次数
-// 入参: cgu 复合图元, usage 字体使用次数, visited 已访问资源
-func (r *Renderer) countCompositeFonts(cgu CompositeGraphicUnit, usage map[string]int, visited map[string]bool) {
+// 入参: cgu 复合图元, usage 字体使用次数, defaults 默认绘制参数, visited 已访问资源
+func (r *Renderer) countCompositeFonts(cgu CompositeGraphicUnit, usage map[string]int, defaults *DrawParam, visited map[string]bool) {
 	r.countClipFonts(cgu.Clips, usage)
+	defaults = r.drawParamDefaults(cgu.DrawParam, defaults)
 	if cgu.ResourceID != "" {
 		if visited == nil {
 			visited = make(map[string]bool)
@@ -279,26 +323,38 @@ func (r *Renderer) countCompositeFonts(cgu CompositeGraphicUnit, usage map[strin
 		}
 		visited[cgu.ResourceID] = true
 		if ref := r.CompositeGraphicUnits[cgu.ResourceID]; ref != nil {
-			r.countCompositeFonts(*ref, usage, visited)
+			r.countCompositeFonts(*ref, usage, defaults, visited)
 		}
+		defer delete(visited, cgu.ResourceID)
 	}
 	if len(cgu.Objects) > 0 {
 		for _, obj := range cgu.Objects {
-			r.countObjectFonts(obj, usage)
+			r.countObjectFonts(obj, usage, defaults, visited)
 		}
 		return
 	}
 	for _, text := range cgu.TextObject {
-		r.countTextFont(text, usage)
+		r.countObjectFonts(GraphicObject{Type: "TextObject", TextObject: text}, usage, defaults, visited)
 	}
 	for _, path := range cgu.PathObject {
-		r.countClipFonts(path.Clips, usage)
+		r.countObjectFonts(GraphicObject{Type: "PathObject", PathObject: path}, usage, defaults, visited)
 	}
 	for _, image := range cgu.ImageObject {
-		r.countClipFonts(image.Clips, usage)
+		r.countObjectFonts(GraphicObject{Type: "ImageObject", ImageObject: image}, usage, defaults, visited)
 	}
 	for _, sub := range cgu.CompositeGraphicUnit {
-		r.countCompositeFonts(sub, usage, visited)
+		r.countCompositeFonts(sub, usage, defaults, visited)
+	}
+}
+
+// countPatternFonts 统计底纹单元字体使用次数
+// 入参: fill 填充或描边颜色, usage 字体使用次数, visited 已访问资源
+func (r *Renderer) countPatternFonts(fill *FillColor, usage map[string]int, visited map[string]bool) {
+	if fill == nil || fill.Pattern == nil {
+		return
+	}
+	for _, obj := range fill.Pattern.CellContent.Objects {
+		r.countObjectFonts(obj, usage, nil, visited)
 	}
 }
 
