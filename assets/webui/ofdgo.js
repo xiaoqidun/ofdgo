@@ -2515,7 +2515,7 @@ function updateControls() {
 	el.nextButton.disabled = !hasDoc || state.pageIndex >= pageCount - 1;
 	el.pageInput.disabled = !hasDoc;
 	el.pageInput.max = String(pageCount || 1);
-	el.pageInput.value = String(hasDoc ? state.pageIndex + 1 : 1);
+	el.pageInput.value = String(hasDoc ? state.pageIndex + 1 : 0);
 	el.zoomOutButton.disabled = !hasDoc || state.scale <= 0.2;
 	el.zoomInButton.disabled = !hasDoc || state.scale >= 4;
 	el.fitButton.disabled = !hasDoc;
