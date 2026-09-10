@@ -166,7 +166,7 @@ type PathObject struct {
 	LineWidth       float64      `xml:"LineWidth,attr"`
 	Join            string       `xml:"Join,attr"`
 	Cap             string       `xml:"Cap,attr"`
-	DashOffset      float64      `xml:"DashOffset,attr"`
+	DashOffset      *float64     `xml:"DashOffset,attr"`
 	DashPattern     string       `xml:"DashPattern,attr"`
 	MiterLimit      float64      `xml:"MiterLimit,attr"`
 	CTM             string       `xml:"CTM,attr"`

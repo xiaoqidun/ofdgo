@@ -228,6 +228,8 @@ func mergeDrawParam(base DrawParam, dp *DrawParam) *DrawParam {
 	}
 	if dp.DashPattern != "" {
 		base.DashPattern = dp.DashPattern
+	}
+	if dp.DashOffset != nil {
 		base.DashOffset = dp.DashOffset
 	}
 	if dp.MiterLimit > 0 {

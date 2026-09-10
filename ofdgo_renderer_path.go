@@ -127,7 +127,9 @@ func (s *pathStyle) applyDrawParam(r *Renderer, dp *DrawParam, bx, by, pageH flo
 	s.applyLineJoin(dp.Join, dp.MiterLimit)
 	if dp.DashPattern != "" {
 		s.dashPattern = parseFloats(dp.DashPattern)
-		s.dashOffset = dp.DashOffset
+	}
+	if dp.DashOffset != nil {
+		s.dashOffset = *dp.DashOffset
 	}
 }
 
@@ -149,7 +151,9 @@ func (s *pathStyle) applyPathObject(r *Renderer, obj PathObject, bx, by, pageH f
 	s.applyLineJoin(obj.Join, obj.MiterLimit)
 	if obj.DashPattern != "" {
 		s.dashPattern = parseFloats(obj.DashPattern)
-		s.dashOffset = obj.DashOffset
+	}
+	if obj.DashOffset != nil {
+		s.dashOffset = *obj.DashOffset
 	}
 }
 
@@ -370,13 +374,10 @@ func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix, boundary
 			bx, by = box.X, box.Y
 		}
 	}
-	point := func(x, y float64) (float64, float64) {
-		if boundaryInCTM {
-			tx, ty := ctm.Transform(x+bx, y+by)
-			return tx, pageH - ty
-		}
-		tx, ty := ctm.Transform(x, y)
-		return tx + bx, pageH - (ty + by)
+	if boundaryInCTM {
+		ctm = ctm.Multiply(TranslationMatrix(bx, by))
+	} else {
+		ctm = TranslationMatrix(bx, by).Multiply(ctm)
 	}
 	p := &canvas.Path{}
 	tokens := strings.Fields(obj.AbbreviatedData)
@@ -388,16 +389,14 @@ func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix, boundary
 			if i+1 < len(tokens) {
 				x, _ := strconv.ParseFloat(tokens[i], 64)
 				y, _ := strconv.ParseFloat(tokens[i+1], 64)
-				tx, ty := point(x, y)
-				p.MoveTo(tx, ty)
+				p.MoveTo(x, y)
 				i += 2
 			}
 		case "L":
 			if i+1 < len(tokens) {
 				x, _ := strconv.ParseFloat(tokens[i], 64)
 				y, _ := strconv.ParseFloat(tokens[i+1], 64)
-				tx, ty := point(x, y)
-				p.LineTo(tx, ty)
+				p.LineTo(x, y)
 				i += 2
 			}
 		case "B":
@@ -408,10 +407,7 @@ func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix, boundary
 				y2, _ := strconv.ParseFloat(tokens[i+3], 64)
 				x3, _ := strconv.ParseFloat(tokens[i+4], 64)
 				y3, _ := strconv.ParseFloat(tokens[i+5], 64)
-				tx1, ty1 := point(x1, y1)
-				tx2, ty2 := point(x2, y2)
-				tx3, ty3 := point(x3, y3)
-				p.CubeTo(tx1, ty1, tx2, ty2, tx3, ty3)
+				p.CubeTo(x1, y1, x2, y2, x3, y3)
 				i += 6
 			}
 		case "Q":
@@ -420,9 +416,7 @@ func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix, boundary
 				y1, _ := strconv.ParseFloat(tokens[i+1], 64)
 				x2, _ := strconv.ParseFloat(tokens[i+2], 64)
 				y2, _ := strconv.ParseFloat(tokens[i+3], 64)
-				tx1, ty1 := point(x1, y1)
-				tx2, ty2 := point(x2, y2)
-				p.QuadTo(tx1, ty1, tx2, ty2)
+				p.QuadTo(x1, y1, x2, y2)
 				i += 4
 			}
 		case "A":
@@ -434,19 +428,17 @@ func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix, boundary
 				sweep, _ := strconv.ParseBool(tokens[i+4])
 				x, _ := strconv.ParseFloat(tokens[i+5], 64)
 				y, _ := strconv.ParseFloat(tokens[i+6], 64)
-				sx := math.Hypot(ctm.a, ctm.c)
-				sy := math.Hypot(ctm.b, ctm.d)
-				ctmRot := math.Atan2(ctm.b, ctm.a) * 180 / math.Pi
-				tx, ty := point(x, y)
-				sweep = !sweep
-				p.ArcTo(rx*sx, ry*sy, -(rot + ctmRot), large, sweep, tx, ty)
+				p.ArcTo(rx, ry, rot, large, sweep, x, y)
 				i += 7
 			}
 		case "C":
 			p.Close()
 		}
 	}
-	return p
+	if canvas.Equal(ctm.a*ctm.d-ctm.b*ctm.c, 0) {
+		p = p.ReplaceArcs()
+	}
+	return p.Transform(canvas.Matrix{{ctm.a, ctm.c, ctm.e}, {-ctm.b, -ctm.d, pageH - ctm.f}})
 }
 
 // buildObjectClipPath 构建对象裁剪路径并应用父级变换

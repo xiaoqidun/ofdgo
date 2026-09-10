@@ -110,7 +110,7 @@ func (r *Renderer) renderImageBorder(ctx *canvas.Context, obj ImageObject, box B
 	r.renderPath(ctx, PathObject{
 		Boundary:        obj.Boundary,
 		LineWidth:       width,
-		DashOffset:      border.DashOffset,
+		DashOffset:      &border.DashOffset,
 		DashPattern:     border.DashPattern,
 		Alpha:           obj.Alpha,
 		StrokeColor:     border.BorderColor,
