@@ -10,7 +10,7 @@ const STATUS = {
 	engine: "正在准备引擎",
 	recovering: "正在恢复引擎",
 	fonts: "正在匹配字体",
-	exporting: "正在导出文档 PDF",
+	exporting: "正在导出文档",
 	pageExporting: "正在导出单页",
 };
 const WASM_CALLBACKS = [
@@ -692,7 +692,7 @@ async function loadLocalFonts() {
 		return;
 	}
 	if (!canReadLocalFonts()) {
-		setStatus("当前浏览器不支持读取系统字体");
+		setStatus("不支持读取系统字体");
 		return;
 	}
 	setBusy(true, state.doc ? "正在匹配字体" : "正在请求授权", 12, state.doc ? STATUS.fonts : "正在请求授权");
@@ -708,7 +708,7 @@ async function loadLocalFonts() {
 		}
 	} catch (err) {
 		if (err && err.name === "NotAllowedError") {
-			setStatus("未授权读取系统字体");
+			setStatus("系统字体未授权");
 		} else {
 			setStatus(String(err.message || err));
 		}
@@ -727,7 +727,7 @@ async function requestLocalFontsBeforeOpen() {
 		setStatus(available.length ? `已授权 ${available.length} 个系统字体` : "未读取到系统字体");
 	} catch (err) {
 		if (err && err.name === "NotAllowedError") {
-			setStatus("未授权读取系统字体");
+			setStatus("系统字体未授权");
 			return;
 		}
 		setStatus(String(err.message || err));
@@ -766,7 +766,7 @@ async function autoLoadDocumentLocalFonts(openSeq) {
 		return await loadDocumentLocalFonts(available, openSeq);
 	} catch (err) {
 		if (err && err.name === "NotAllowedError") {
-			setStatus("未授权读取系统字体");
+			setStatus("系统字体未授权");
 			return false;
 		}
 		setStatus(String(err.message || err));
@@ -786,7 +786,7 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	}
 	if (!docNames.length) {
 		state.localFonts = [];
-		setStatus("OFD 字体均为内嵌");
+		setStatus("文档字体均为内嵌");
 		updateFontSummary();
 		renderFontList();
 		return false;
@@ -796,7 +796,7 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	if (!selected.length) {
 		selected = selectLocalFonts(available, [], 6);
 	}
-	const emptyStatus = available.length === 0 ? "未读取到系统字体" : "未匹配到文档所需字体";
+	const emptyStatus = available.length === 0 ? "未读取到系统字体" : "未匹配到所需字体";
 	const fonts = [];
 	for (let i = 0; i < selected.length; i += 1) {
 		setProgress(`正在读取字体 ${i + 1}/${selected.length}`, 20 + Math.round(i / selected.length * 60));
@@ -1093,7 +1093,7 @@ function fontSourceText(source) {
 function updateLocalFontButton() {
 	const supported = canReadLocalFonts();
 	el.localFontButton.disabled = !supported;
-	el.localFontButton.title = supported ? "授权读取浏览器可访问的系统字体" : "当前浏览器不支持读取系统字体";
+	el.localFontButton.title = supported ? "读取系统字体" : "不支持读取系统字体";
 	updateFontPermissionHint();
 }
 
@@ -1279,13 +1279,13 @@ async function exportPDF() {
 	}
 	const openSeq = state.openSeq;
 	setExportControlsDisabled(true);
-	setBusy(true, "正在准备文档 PDF", 18, STATUS.exporting);
+	setBusy(true, "正在准备 PDF", 18, STATUS.exporting);
 	try {
 		await waitForPaint();
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		setProgress("正在生成文档 PDF", 45);
+		setProgress("正在生成 PDF", 45);
 		await waitForPaint();
 		if (openSeq !== state.openSeq) {
 			return;
@@ -1294,10 +1294,10 @@ async function exportPDF() {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		setProgress("正在保存文档 PDF", 86);
+		setProgress("正在保存 PDF", 86);
 		const bytes = result.bytes;
 		downloadBytes(bytes, "application/pdf", pdfFileName());
-		setStatus(`文档 PDF 已导出 ${formatBytes(result.size || bytes.length)}`);
+		setStatus(`PDF 已导出 ${formatBytes(result.size || bytes.length)}`);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			showError(err, false);
@@ -2182,7 +2182,7 @@ async function focusSignatureStamp(stamp) {
 	await renderPage(pageIndex, { fit: false, scroll: false });
 	await nextFrame();
 	highlightSignatureStamp(stamp);
-	setStatus(stamp.page ? `已定位签名外观 第 ${stamp.page} 页` : "已定位签名外观");
+	setStatus(`已定位签名 第 ${stamp.page} 页`);
 }
 
 function highlightSignatureStamp(stamp) {
@@ -2287,7 +2287,7 @@ function pageStatus(index, pageCount) {
 function statusText(status) {
 	switch (status) {
 	case "pending":
-		return "待检查";
+		return "待查";
 	case "embedded":
 		return "内嵌";
 	case "matched":
@@ -2532,7 +2532,7 @@ function updateControls() {
 
 function updateAnnotationButton() {
 	el.annotationButton.setAttribute("aria-pressed", String(state.renderAnnotations));
-	el.annotationButton.title = state.renderAnnotations ? "关闭注解渲染" : "开启注解渲染";
+	el.annotationButton.title = state.renderAnnotations ? "关闭注解" : "开启注解";
 	el.annotationButton.setAttribute("aria-label", el.annotationButton.title);
 }
 
