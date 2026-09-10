@@ -189,16 +189,7 @@ func imageWithClip(img image.Image, clipPath *canvas.Path, m canvas.Matrix) imag
 	ctx.SetStrokeColor(canvas.Transparent)
 	ctx.DrawPath(0, 0, clip)
 	mask := rasterizer.Draw(clipCanvas, canvas.DPMM(1), canvas.DefaultColorSpace)
-	opaque := true
-	for y := 0; y < h && opaque; y++ {
-		for x := 0; x < w; x++ {
-			if mask.RGBAAt(x, y).A != 255 {
-				opaque = false
-				break
-			}
-		}
-	}
-	if opaque {
+	if mask.Opaque() {
 		return img
 	}
 	source := imagePixelSource(img)
@@ -349,16 +340,17 @@ func imageWithTransparentEdge(img image.Image) (image.Image, int) {
 	}
 	srcBounds := src.Bounds()
 	out := image.NewNRGBA(image.Rect(0, 0, w+2, h+2))
+	draw.Draw(out, out.Bounds().Inset(1), src, srcBounds.Min, draw.Src)
 	for y := 0; y < h; y++ {
+		sy := srcBounds.Min.Y + y
+		offset := src.PixOffset(srcBounds.Min.X, sy) + 3
 		for x := 0; x < w; x++ {
-			sx, sy := srcBounds.Min.X+x, srcBounds.Min.Y+y
-			c := src.NRGBAAt(sx, sy)
-			if c.A == 0 {
-				if edge, ok := transparentEdgeColor(src, sx, sy); ok {
-					c = edge
+			if src.Pix[offset] == 0 {
+				if edge, ok := transparentEdgeColor(src, srcBounds.Min.X+x, sy); ok {
+					out.SetNRGBA(x+1, y+1, edge)
 				}
 			}
-			out.SetNRGBA(x+1, y+1, c)
+			offset += 4
 		}
 	}
 	for x := 0; x < w; x++ {
