@@ -38,6 +38,7 @@ type Renderer struct {
 	fontSourceCache       map[string][]fontSource
 	fontSourceUsed        map[string]fontSource
 	fontDirCandidates     map[string][]fontFileCandidate
+	fontFSCandidates      map[int][]fontFileCandidate
 	textGlyphPathCache    map[textGlyphPathCacheKey]textGlyphPathCacheValue
 	templatePageCache     map[string]*PageContent
 	imageCache            map[string]image.Image

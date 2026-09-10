@@ -16,7 +16,6 @@ package ofdgo
 
 import (
 	"fmt"
-	"io/fs"
 	"path"
 	"sort"
 )
@@ -182,14 +181,6 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 	info.Status = FontStatusMissing
 	info.Detail = "可用字体文件缺失"
 	return info
-}
-
-// fontFSMatchesStyle 匹配字体文件系统中的指定样式字体文件
-// 入参: fsys 字体文件系统, patterns 匹配模式列表, bold 是否粗体, italic 是否斜体
-// 返回: []string 字体文件列表
-func fontFSMatchesStyle(fsys fs.FS, patterns []string, bold, italic bool) []string {
-	names, _ := fs.Glob(fsys, "*")
-	return fontFileMatches(fontFileCandidates(names, path.Base), patterns, bold, italic)
 }
 
 // fontUsage 统计文档字体使用次数

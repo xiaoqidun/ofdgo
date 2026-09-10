@@ -22,6 +22,7 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
+// shdPaint 渐变画刷
 type shdPaint struct {
 	gradient canvas.Gradient
 	view     canvas.Matrix

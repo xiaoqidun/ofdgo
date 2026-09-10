@@ -78,6 +78,7 @@ func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 		fontSourceCache:       make(map[string][]fontSource),
 		fontSourceUsed:        make(map[string]fontSource),
 		fontDirCandidates:     make(map[string][]fontFileCandidate),
+		fontFSCandidates:      make(map[int][]fontFileCandidate),
 		textGlyphPathCache:    make(map[textGlyphPathCacheKey]textGlyphPathCacheValue),
 		templatePageCache:     make(map[string]*PageContent),
 		imageCache:            make(map[string]image.Image),

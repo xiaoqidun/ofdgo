@@ -861,9 +861,17 @@ function uniqueLocalFonts(fonts) {
 }
 
 function selectLocalFonts(fonts, names, limit) {
-	const available = new Map(uniqueLocalFonts(fonts).map((font) => [localFontName(font), font]));
+	const available = new Map();
+	for (const font of uniqueLocalFonts(fonts)) {
+		available.set(localFontName(font), font);
+		for (const name of [font.postscriptName, [font.family, font.style].filter(Boolean).join(" ")]) {
+			if (name) {
+				available.set(`${name}.ttf`, font);
+			}
+		}
+	}
 	const matched = callWASM("ofdgoFontFileMatches", [...available.keys()], names);
-	return matched.slice(0, limit).map((name) => available.get(name));
+	return uniqueLocalFonts(matched.map((name) => available.get(name))).slice(0, limit);
 }
 
 async function fontData(fonts) {

@@ -787,6 +787,7 @@ func readCFFLocalSubrs(data []byte, fdArrOff int, fdCount int) ([][][]byte, []cf
 	return localSubrs, privateDicts
 }
 
+// type2Operand Type2操作数
 type type2Operand struct {
 	value    int
 	outStart int

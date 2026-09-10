@@ -26,6 +26,7 @@ import (
 const defaultPathLineWidth = 0.353
 const defaultMiterLimit = 3.528
 
+// pathStyle 路径绘制样式
 type pathStyle struct {
 	fillColor     color.Color
 	strokeColor   color.Color

@@ -213,6 +213,7 @@ func (r *Renderer) parseStrokePaint(strokeColor *StrokeColor, x, y, pageH float6
 	return r.parseFillPaint((*FillColor)(strokeColor), x, y, pageH)
 }
 
+// patternPaint 底纹画刷
 type patternPaint struct {
 	*Pattern
 	color FillColor

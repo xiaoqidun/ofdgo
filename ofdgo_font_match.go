@@ -19,6 +19,7 @@ import (
 	"strings"
 )
 
+// fontMatchRule 字体匹配规则
 type fontMatchRule struct {
 	Keys            []string
 	Names           []string
@@ -145,7 +146,10 @@ func FontSystemNames(names ...string) []string {
 // 返回: string 规范化后的字体名称
 func fontNormalizeName(name string) string {
 	name = strings.ReplaceAll(name, "\\", "/")
-	name = strings.TrimSuffix(path.Base(name), path.Ext(name))
+	name = path.Base(strings.TrimSpace(name))
+	if isFontFileName(name) {
+		name = strings.TrimSuffix(name, path.Ext(name))
+	}
 	name = strings.ToLower(strings.TrimSpace(name))
 	return fontNameReplacer.Replace(name)
 }
@@ -162,6 +166,34 @@ func fontCandidateNames(names ...string) []string {
 // 返回: []string 精确字体候选名称
 func fontExactCandidateNames(names ...string) []string {
 	return fontCandidateNamesByLevel(fontMatchExact, names...)
+}
+
+// fontQualifiedNames 获取保留名称后缀的字体候选
+// 入参: name 字体名称
+// 返回: []string 保留后缀的候选名称
+func fontQualifiedNames(name string) []string {
+	name = fontNormalizeName(name)
+	var names []string
+	seen := make(map[string]bool)
+	for _, rule := range fontMatchRules {
+		if fontRuleMatchLevel(rule, name) != fontMatchPartial {
+			continue
+		}
+		prefix := ""
+		for _, group := range [][]string{rule.Keys, rule.Names, {rule.System}} {
+			for _, alias := range group {
+				alias = fontNormalizeName(alias)
+				if len(alias) > len(prefix) && strings.HasPrefix(name, alias) {
+					prefix = alias
+				}
+			}
+		}
+		suffix := strings.TrimPrefix(name, prefix)
+		for _, alias := range append([]string{rule.System}, rule.Names...) {
+			names = appendFontName(names, seen, fontNormalizeName(alias)+suffix)
+		}
+	}
+	return names
 }
 
 // fontCandidateNamesByLevel 获取指定等级内的字体候选名称
@@ -199,7 +231,9 @@ func fontCandidateNamesByLevel(maxLevel int, names ...string) []string {
 // 返回: string 字体匹配模式主干
 func fontPatternStem(pattern string) string {
 	stem := strings.TrimSuffix(pattern, "*")
-	stem = strings.TrimSuffix(stem, path.Ext(stem))
+	if isFontFileName(stem) {
+		stem = strings.TrimSuffix(stem, path.Ext(stem))
+	}
 	if index := strings.IndexAny(stem, "*?["); index >= 0 {
 		stem = stem[:index]
 	}
