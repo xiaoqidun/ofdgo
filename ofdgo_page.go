@@ -72,9 +72,10 @@ type Clip struct {
 
 // ClipArea 裁剪区域
 type ClipArea struct {
-	CTM  string       `xml:"CTM,attr"`
-	Path []PathObject `xml:"Path"`
-	Text []TextObject `xml:"Text"`
+	DrawParam string       `xml:"DrawParam,attr"`
+	CTM       string       `xml:"CTM,attr"`
+	Path      []PathObject `xml:"Path"`
+	Text      []TextObject `xml:"Text"`
 }
 
 // TextObject 文本对象

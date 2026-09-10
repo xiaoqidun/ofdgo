@@ -467,7 +467,7 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ob
 	}
 	var p *canvas.Path
 	for _, clip := range clips.Clip {
-		var clipPath *canvas.Path
+		renderer := &clipRenderer{}
 		for _, area := range clip.Area {
 			areaCTM := NewMatrix(area.CTM)
 			if clips.TransFlag == nil || *clips.TransFlag {
@@ -481,20 +481,30 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ob
 				if pathObj.Rule == "Even-Odd" {
 					cp = cp.Settle(canvas.EvenOdd)
 				}
-				if clipPath == nil {
-					clipPath = cp
-				} else {
-					clipPath = unionClipPath(clipPath, cp)
+				renderer.add(cp)
+			}
+			for _, textObj := range area.Text {
+				box, _ := ParseBox(textObj.Boundary)
+				ctm := NewMatrix(textObj.CTM)
+				m := areaCTM.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(ctm)
+				ctx := canvas.NewContext(renderer)
+				ctx.SetView(canvas.Matrix{{m.a, -m.c, bx + m.e}, {-m.b, m.d, pageH - by - m.f}})
+				renderer.clip = r.buildObjectClipPath(textObj.Clips, pageH, box.X, box.Y, ctm, &areaCTM, true)
+				if renderer.clip != nil {
+					renderer.clip = renderer.clip.Translate(bx, -by)
 				}
+				textObj.Boundary, textObj.CTM = "", ""
+				textObj.Clips = nil
+				textObj.Alpha = nil
+				textObj.FillColor = &FillColor{Value: "0 0 0"}
+				textObj.StrokeColor = &StrokeColor{Value: "0 0 0"}
+				r.renderText(ctx, textObj, 0, r.drawParamDefaults(area.DrawParam, nil), nil, false, nil)
 			}
 		}
-		if clipPath != nil {
-			if p == nil {
-				p = clipPath
-			} else {
-				p = intersectClipPath(p, clipPath)
-			}
+		if renderer.path == nil {
+			renderer.path = &canvas.Path{}
 		}
+		p = intersectClipPath(p, renderer.path)
 	}
 	return p
 }

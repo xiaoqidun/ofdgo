@@ -240,6 +240,12 @@ func (r *Renderer) countLayerFonts(layer Layer, usage map[string]int) {
 	for _, text := range layer.TextObject {
 		r.countTextFont(text, usage)
 	}
+	for _, path := range layer.PathObject {
+		r.countClipFonts(path.Clips, usage)
+	}
+	for _, image := range layer.ImageObject {
+		r.countClipFonts(image.Clips, usage)
+	}
 	for _, cgu := range layer.CompositeGraphicUnit {
 		r.countCompositeFonts(cgu, usage, nil)
 	}
@@ -251,6 +257,10 @@ func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int) {
 	switch obj.Type {
 	case "TextObject":
 		r.countTextFont(obj.TextObject, usage)
+	case "PathObject":
+		r.countClipFonts(obj.PathObject.Clips, usage)
+	case "ImageObject":
+		r.countClipFonts(obj.ImageObject.Clips, usage)
 	case "CompositeGraphicUnit", "CompositeObject":
 		r.countCompositeFonts(obj.CompositeGraphicUnit, usage, nil)
 	}
@@ -259,6 +269,7 @@ func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int) {
 // countCompositeFonts 统计复合图元字体使用次数
 // 入参: cgu 复合图元, usage 字体使用次数, visited 已访问资源
 func (r *Renderer) countCompositeFonts(cgu CompositeGraphicUnit, usage map[string]int, visited map[string]bool) {
+	r.countClipFonts(cgu.Clips, usage)
 	if cgu.ResourceID != "" {
 		if visited == nil {
 			visited = make(map[string]bool)
@@ -280,6 +291,12 @@ func (r *Renderer) countCompositeFonts(cgu CompositeGraphicUnit, usage map[strin
 	for _, text := range cgu.TextObject {
 		r.countTextFont(text, usage)
 	}
+	for _, path := range cgu.PathObject {
+		r.countClipFonts(path.Clips, usage)
+	}
+	for _, image := range cgu.ImageObject {
+		r.countClipFonts(image.Clips, usage)
+	}
 	for _, sub := range cgu.CompositeGraphicUnit {
 		r.countCompositeFonts(sub, usage, visited)
 	}
@@ -290,5 +307,21 @@ func (r *Renderer) countCompositeFonts(cgu CompositeGraphicUnit, usage map[strin
 func (r *Renderer) countTextFont(text TextObject, usage map[string]int) {
 	if fontID := r.textObjectFontID(text); fontID != "" {
 		usage[fontID]++
+	}
+	r.countClipFonts(text.Clips, usage)
+}
+
+// countClipFonts 统计裁剪文字字体使用次数
+// 入参: clips 裁剪区域集合, usage 字体使用次数
+func (r *Renderer) countClipFonts(clips *Clips, usage map[string]int) {
+	if clips == nil {
+		return
+	}
+	for _, clip := range clips.Clip {
+		for _, area := range clip.Area {
+			for _, text := range area.Text {
+				r.countTextFont(text, usage)
+			}
+		}
 	}
 }
