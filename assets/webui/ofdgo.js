@@ -157,6 +157,13 @@ el.viewerPanel.addEventListener("scroll", () => {
 	schedulePageSync();
 });
 el.viewerPanel.addEventListener("dblclick", openOFDFromViewer);
+document.addEventListener("dragover", (event) => {
+	if (event.dataTransfer.types.includes("Files")) {
+		event.preventDefault();
+		event.dataTransfer.dropEffect = document.body.hasAttribute("aria-busy") ? "none" : "copy";
+	}
+});
+document.addEventListener("drop", openOFDFromDrop);
 if (fontChannel) {
 	fontChannel.onmessage = scheduleFontSync;
 }
@@ -189,6 +196,25 @@ async function openOFDFromViewer() {
 		return;
 	}
 	await openOFDFile();
+}
+
+async function openOFDFromDrop(event) {
+	if (!event.dataTransfer.types.includes("Files")) {
+		return;
+	}
+	event.preventDefault();
+	if (document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	if (event.dataTransfer.files.length > 1) {
+		setStatus("仅支持单文件拖入");
+		return;
+	}
+	const file = event.dataTransfer.files[0];
+	if (file && isOFDFile(file)) {
+		await requestLocalFontsBeforeOpen();
+	}
+	await openOFD(file);
 }
 
 function openFontFile(input) {
@@ -357,7 +383,7 @@ async function refreshApplication() {
 		return;
 	}
 	const temporaryFonts = state.userFonts.some((font) => font.source === "upload");
-	const message = temporaryFonts ? "刷新后需重新打开文件和添加未保存字体，是否继续？" : "刷新后需重新打开文件，是否继续？";
+	const message = temporaryFonts ? "刷新后文件需重新打开，未保存字体需重新添加" : "刷新后文件需重新打开";
 	if ((state.ofdBytes || temporaryFonts) && !window.confirm(message)) {
 		return;
 	}
@@ -700,7 +726,7 @@ async function loadLocalFonts() {
 		await nextFrame();
 		const available = await queryLocalFonts();
 		if (!state.doc) {
-			setStatus(available.length ? `已授权 ${available.length} 个系统字体` : "未读取到系统字体");
+			setStatus(available.length ? `系统字体已授权 ${available.length} 个` : "未读取到系统字体");
 			return;
 		}
 		if (await loadDocumentLocalFonts(available)) {
@@ -724,7 +750,7 @@ async function requestLocalFontsBeforeOpen() {
 	setBusy(true, "正在请求授权", 12, "正在请求授权");
 	try {
 		const available = await queryLocalFonts();
-		setStatus(available.length ? `已授权 ${available.length} 个系统字体` : "未读取到系统字体");
+		setStatus(available.length ? `系统字体已授权 ${available.length} 个` : "未读取到系统字体");
 	} catch (err) {
 		if (err && err.name === "NotAllowedError") {
 			setStatus("系统字体未授权");
@@ -814,7 +840,7 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 		return false;
 	}
 	state.localFonts = fonts;
-	setStatus(fonts.length ? `已加载 ${fonts.length} 个系统字体` : emptyStatus);
+	setStatus(fonts.length ? `系统字体已加载 ${fonts.length} 个` : emptyStatus);
 	updateFontSummary();
 	renderFontList();
 	return fonts.length > 0;
@@ -2182,7 +2208,7 @@ async function focusSignatureStamp(stamp) {
 	await renderPage(pageIndex, { fit: false, scroll: false });
 	await nextFrame();
 	highlightSignatureStamp(stamp);
-	setStatus(`已定位签名 第 ${stamp.page} 页`);
+	setStatus(`签名已定位 第 ${stamp.page} 页`);
 }
 
 function highlightSignatureStamp(stamp) {
