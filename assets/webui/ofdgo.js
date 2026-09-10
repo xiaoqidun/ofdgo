@@ -2517,6 +2517,7 @@ function scrollbarWidth() {
 	probe.style.width = "100px";
 	probe.style.height = "100px";
 	probe.style.overflow = "scroll";
+	probe.style.scrollbarWidth = getComputedStyle(el.viewerPanel).scrollbarWidth;
 	probe.style.left = "-9999px";
 	document.body.append(probe);
 	const width = probe.offsetWidth - probe.clientWidth;

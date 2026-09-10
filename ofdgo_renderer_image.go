@@ -310,13 +310,15 @@ func imageWithTransparentEdge(img image.Image) (image.Image, int) {
 	src, ok := source.(*image.NRGBA)
 	if ok {
 		srcBounds := src.Bounds()
+		hasZero = src.Pix[3] == 0
+		hasVisible = !hasZero
+	scan:
 		for y := srcBounds.Min.Y; y < srcBounds.Max.Y; y++ {
 			offset := src.PixOffset(srcBounds.Min.X, y) + 3
 			for x := 0; x < w; x++ {
-				if src.Pix[offset] == 0 {
-					hasZero = true
-				} else {
-					hasVisible = true
+				if (src.Pix[offset] == 0) != hasZero {
+					hasZero, hasVisible = true, true
+					break scan
 				}
 				offset += 4
 			}

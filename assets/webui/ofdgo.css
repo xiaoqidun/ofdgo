@@ -286,6 +286,13 @@ body[data-hide-meta] .meta-panel {
 }
 
 .page-list-panel,
+.viewer-panel,
+.meta-panel {
+	scrollbar-width: thin;
+	scrollbar-color: var(--line-strong) transparent;
+}
+
+.page-list-panel,
 .meta-panel {
 	min-height: 0;
 	padding: 12px;
