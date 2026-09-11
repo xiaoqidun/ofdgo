@@ -1734,12 +1734,9 @@ function layoutPageShell(shell, page) {
 }
 
 function parseSVG(svgText, prefix = "") {
-	const parsed = new DOMParser().parseFromString(svgText, "image/svg+xml");
-	const error = parsed.querySelector("parsererror");
-	if (error) {
-		throw new Error(error.textContent.trim());
-	}
-	const svg = document.importNode(parsed.documentElement, true);
+	const template = document.createElement("template");
+	template.innerHTML = svgText;
+	const svg = document.adoptNode(template.content.firstElementChild);
 	prefixSVGIds(svg, prefix);
 	return svg;
 }
