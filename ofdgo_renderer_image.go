@@ -405,6 +405,19 @@ func imageNRGBAAt(img image.Image, x, y int) color.NRGBA {
 		r, g, b, _ := src.YCbCrAt(x, y).RGBA()
 		return color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: 255}
 	}
+	if src, ok := img.(*image.RGBA); ok {
+		c := src.RGBA64At(x, y)
+		if c.A == 0 {
+			return color.NRGBA{}
+		}
+		r, g, b, a := uint32(c.R), uint32(c.G), uint32(c.B), uint32(c.A)
+		if a != 0xffff {
+			r = r * 0xffff / a
+			g = g * 0xffff / a
+			b = b * 0xffff / a
+		}
+		return color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)}
+	}
 	return color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
 }
 
