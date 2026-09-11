@@ -1623,7 +1623,7 @@ function queueNearbyPages(index, openSeq = state.openSeq) {
 }
 
 function pageShell(index) {
-	return el.svgHost.querySelector(`.page-shell[data-page-index="${index}"]`);
+	return el.svgHost.children.item(index);
 }
 
 function scrollToPage(index) {
