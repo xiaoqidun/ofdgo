@@ -34,28 +34,34 @@ func (r *Renderer) renderAnnotations(ctx *canvas.Context, pageID string, pageH f
 // renderTemplate 渲染模板
 // 入参: ctx 画布上下文, templateID 模板ID, pageH 页面高度
 func (r *Renderer) renderTemplate(ctx *canvas.Context, templateID string, pageH float64) {
-	tplContent := r.templatePageCache[templateID]
+	tplContent := r.loadTemplate(templateID)
 	if tplContent == nil {
-		var tplPage *TemplatePage
-		for i := range r.Reader.doc.CommonData.TemplatePage {
-			if r.Reader.doc.CommonData.TemplatePage[i].ID == templateID {
-				tplPage = &r.Reader.doc.CommonData.TemplatePage[i]
-				break
-			}
-		}
-		if tplPage == nil {
-			return
-		}
-		var err error
-		tplContent, err = r.Reader.PageContent(Page{BaseLoc: tplPage.BaseLoc})
-		if err != nil {
-			return
-		}
-		r.templatePageCache[templateID] = tplContent
+		return
 	}
 	for order := range 3 {
 		r.renderLayers(ctx, tplContent.Content.Layer, pageH, order)
 	}
+}
+
+// loadTemplate 加载模板页面并复用解析结果
+// 入参: templateID 模板ID
+// 返回: *PageContent 模板页面
+func (r *Renderer) loadTemplate(templateID string) *PageContent {
+	if page := r.templatePageCache[templateID]; page != nil {
+		return page
+	}
+	for _, tpl := range r.Reader.doc.CommonData.TemplatePage {
+		if tpl.ID != templateID {
+			continue
+		}
+		page, err := r.Reader.PageContent(Page{BaseLoc: tpl.BaseLoc})
+		if err != nil {
+			return nil
+		}
+		r.templatePageCache[templateID] = page
+		return page
+	}
+	return nil
 }
 
 // layerOrder 获取图层类型的绘制顺序

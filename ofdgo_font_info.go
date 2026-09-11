@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	"io"
 	"path"
 	"sort"
 )
@@ -157,7 +158,12 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 		Embedded:   font.FontFile != "",
 	}
 	if info.Embedded {
-		if _, err := r.Reader.ResData(font.FontFile); err == nil {
+		file, err := r.Reader.openFile(r.Reader.ResPath(font.FontFile))
+		if err == nil {
+			_, err = io.Copy(io.Discard, file)
+			file.Close()
+		}
+		if err == nil {
 			info.Status = FontStatusEmbedded
 			info.Matched = path.Base(font.FontFile)
 			info.Detail = "使用内嵌字体文件"
@@ -202,9 +208,7 @@ func (r *Renderer) fontUsage(doc *Document, pages []*PageContent) map[string]int
 		}
 	}
 	for _, tpl := range doc.CommonData.TemplatePage {
-		page, err := r.Reader.PageContent(Page{BaseLoc: tpl.BaseLoc})
-		if err == nil {
-			r.templatePageCache[tpl.ID] = page
+		if page := r.loadTemplate(tpl.ID); page != nil {
 			r.countPageFonts(page, usage)
 		}
 	}
