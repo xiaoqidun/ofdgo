@@ -144,7 +144,7 @@ func imageWithMask(img, mask image.Image) image.Image {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			mx := maskBounds.Min.X + x - bounds.Min.X
 			my := maskBounds.Min.Y + y - bounds.Min.Y
-			a := color.GrayModel.Convert(opacity.At(mx, my)).(color.Gray).Y
+			a := imageGrayAt(opacity, mx, my).Y
 			c := imageNRGBAAt(source, x, y)
 			c.A = uint8(int(c.A) * int(a) / 255)
 			out.SetNRGBA(x, y, c)
@@ -392,6 +392,23 @@ func imagePixelSource(img image.Image) image.Image {
 		}
 	}
 	return img
+}
+
+// imageGrayAt 获取图片灰度像素
+// 入参: img 图片对象, x X坐标, y Y坐标
+// 返回: color.Gray 灰度像素
+func imageGrayAt(img image.Image, x, y int) color.Gray {
+	if src, ok := img.(*image.Gray); ok {
+		return src.GrayAt(x, y)
+	}
+	if src, ok := img.(*image.Paletted); ok {
+		return color.GrayModel.Convert(src.At(x, y)).(color.Gray)
+	}
+	if src, ok := img.(image.RGBA64Image); ok {
+		r, g, b, _ := src.RGBA64At(x, y).RGBA()
+		return color.Gray{Y: uint8((19595*r + 38470*g + 7471*b + 1<<15) >> 24)}
+	}
+	return color.GrayModel.Convert(img.At(x, y)).(color.Gray)
 }
 
 // imageNRGBAAt 获取图片NRGBA像素
