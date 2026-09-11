@@ -1533,10 +1533,10 @@ function schedulePageRender() {
 
 async function processPageRenderQueue() {
 	try {
+		await nextFrame();
 		while (state.pageRenderQueue.length) {
 			state.pageRenderQueue.sort(comparePageRenderTask);
 			const task = state.pageRenderQueue.shift();
-			let delayed = false;
 			try {
 				if (task.openSeq !== state.openSeq) {
 					task.resolve(null);
@@ -1544,16 +1544,6 @@ async function processPageRenderQueue() {
 				}
 				if (state.pageCache.has(task.index)) {
 					task.resolve(state.pageCache.get(task.index));
-					continue;
-				}
-				await nextFrame();
-				if (task.openSeq !== state.openSeq) {
-					task.resolve(null);
-					continue;
-				}
-				if (shouldDelayPageTask(task)) {
-					state.pageRenderQueue.push(task);
-					delayed = true;
 					continue;
 				}
 				const page = await callWASM("ofdgoRenderPage", task.index);
@@ -1565,21 +1555,12 @@ async function processPageRenderQueue() {
 			} catch (err) {
 				task.reject(err);
 			} finally {
-				if (!delayed) {
-					state.pageInFlight.delete(task.key);
-				}
+				state.pageInFlight.delete(task.key);
 			}
 		}
 	} finally {
 		state.pageRenderRunning = false;
-		if (state.pageRenderQueue.length) {
-			schedulePageRender();
-		}
 	}
-}
-
-function shouldDelayPageTask(task) {
-	return state.pageRenderQueue.some((next) => next.openSeq === state.openSeq && comparePageRenderTask(next, task) < 0);
 }
 
 function comparePageRenderTask(a, b) {
