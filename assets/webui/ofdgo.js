@@ -13,19 +13,11 @@ const STATUS = {
 	exporting: "正在导出文档",
 	pageExporting: "正在导出单页",
 };
-const WASM_CALLBACKS = [
-	"ofdgoOpen",
-	"ofdgoConfigure",
-	"ofdgoDocumentInfo",
-	"ofdgoRenderPage",
-	"ofdgoExportFormats",
-	"ofdgoExportPage",
-	"ofdgoExportPDF",
-	"ofdgoFontFileMatches",
-];
+const wasmRequests = new Map();
 
 let wasmPromise = null;
-let wasmModule = null;
+let wasmWorker = null;
+let wasmRequestID = 0;
 let wasmRecoveryTimer = 0;
 let fontDatabase = null;
 
@@ -35,9 +27,11 @@ const state = {
 	wasmSeq: 0,
 	wasmRecovering: false,
 	wasmRecoveries: 0,
+	exporting: false,
 	ofdBytes: null,
 	fileName: "ofdgo.ofd",
 	openSeq: 0,
+	pageSeq: 0,
 	fontSeq: 0,
 	localFonts: [],
 	userFonts: [],
@@ -275,7 +269,7 @@ async function boot() {
 			fontsRestored = false;
 		}
 		setProgress("引擎准备完成", 70);
-		loadExportFormats();
+		await loadExportFormats();
 		setEmpty("选择 OFD 文件");
 		updateFontSummary();
 		renderFontList();
@@ -419,8 +413,8 @@ async function refreshApplication() {
 	}
 }
 
-function loadExportFormats() {
-	const formats = callWASM("ofdgoExportFormats") || [];
+async function loadExportFormats() {
+	const formats = await callWASM("ofdgoExportFormats") || [];
 	state.exportFormats = formats;
 	el.pageExportFormat.replaceChildren();
 	for (const format of formats) {
@@ -448,47 +442,41 @@ async function ensureWASM() {
 }
 
 async function loadWASM() {
-	if (!globalThis.Go) {
-		throw new Error("渲染引擎脚本缺失");
-	}
 	const wasmSeq = state.wasmSeq + 1;
 	state.wasmSeq = wasmSeq;
 	state.ready = false;
 	state.wasmExited = false;
-	clearWASMCallbacks();
-	const go = new Go();
-	if (!wasmModule) {
-		setProgress("正在下载引擎", 16);
-		const response = await fetch("./ofdgo.wasm");
-		try {
-			setProgress("正在编译引擎", 35);
-			wasmModule = await WebAssembly.compileStreaming(response);
-		} catch {
-			const fallback = await fetch("./ofdgo.wasm");
-			const bytes = await fallback.arrayBuffer();
-			setProgress("正在编译引擎", 45);
-			wasmModule = await WebAssembly.compile(bytes);
-		}
-	}
-	setProgress("正在启动引擎", 58);
-	const instance = await WebAssembly.instantiate(wasmModule, go.importObject);
-	go.run(instance).then(() => {
-		markWASMExited(wasmSeq);
-	}).catch((err) => {
-		markWASMExited(wasmSeq, err);
+	await new Promise((resolve, reject) => {
+		const worker = new Worker("./ofdgo.wasm.js");
+		wasmWorker = worker;
+		const fail = (err) => {
+			markWASMExited(wasmSeq, err);
+			reject(err);
+		};
+		worker.onerror = (event) => fail(new Error(event.message || "渲染引擎加载失败"));
+		worker.onmessageerror = () => fail(new Error("渲染引擎通信失败"));
+		worker.onmessage = ({ data }) => {
+			if (worker !== wasmWorker) {
+				return;
+			}
+			if (data.type === "progress") {
+				setProgress(data.text, data.percent);
+			} else if (data.type === "ready") {
+				state.ready = true;
+				resolve();
+			} else if (data.type === "exit") {
+				fail(new Error(data.error));
+			} else {
+				const request = wasmRequests.get(data.id);
+				wasmRequests.delete(data.id);
+				if (data.ok) {
+					request.resolve(data.data);
+				} else {
+					request.reject(new Error(data.error));
+				}
+			}
+		};
 	});
-	await waitFor(() => WASM_CALLBACKS.every((name) => typeof globalThis[name] === "function"));
-	if (wasmSeq !== state.wasmSeq) {
-		return;
-	}
-	state.ready = true;
-	state.wasmExited = false;
-}
-
-function clearWASMCallbacks() {
-	for (const name of WASM_CALLBACKS) {
-		globalThis[name] = undefined;
-	}
 }
 
 function markWASMExited(wasmSeq = state.wasmSeq, err) {
@@ -497,6 +485,12 @@ function markWASMExited(wasmSeq = state.wasmSeq, err) {
 	}
 	state.ready = false;
 	state.wasmExited = true;
+	wasmWorker?.terminate();
+	wasmWorker = null;
+	for (const request of wasmRequests.values()) {
+		request.reject(err || new Error("渲染引擎已退出"));
+	}
+	wasmRequests.clear();
 	if (err) {
 		setStatus("渲染引擎异常，正在恢复");
 	}
@@ -517,41 +511,26 @@ async function recoverWASM() {
 	}
 	state.wasmRecovering = true;
 	state.wasmRecoveries += 1;
-	const pageIndex = state.pageIndex;
-	const fitMode = state.fitMode || "width";
+	const openSeq = ++state.openSeq;
 	setBusy(true, "正在恢复引擎", 18, STATUS.recovering);
 	try {
-		await ensureWASM();
 		await openDocument({
-			pageIndex,
-			fitMode,
+			pageIndex: state.pageIndex,
+			fitMode: state.fitMode || "width",
+			scale: state.scale,
 			skipAutoFonts: true,
+			openSeq,
 		});
 	} catch (err) {
-		showError(err, !state.doc);
+		if (openSeq === state.openSeq) {
+			showError(err, !state.doc);
+		}
 	} finally {
 		state.wasmRecovering = false;
-		if (!state.doc) {
+		if (openSeq === state.openSeq) {
 			setBusy(false);
 		}
 	}
-}
-
-function waitFor(predicate) {
-	return new Promise((resolve, reject) => {
-		const started = performance.now();
-		const timer = window.setInterval(() => {
-			if (predicate()) {
-				window.clearInterval(timer);
-				resolve();
-				return;
-			}
-			if (performance.now() - started > 5000) {
-				window.clearInterval(timer);
-				reject(new Error("渲染引擎初始化超时"));
-			}
-		}, 20);
-	});
 }
 
 async function openOFD(file) {
@@ -564,14 +543,21 @@ async function openOFD(file) {
 		return;
 	}
 	state.wasmRecoveries = 0;
+	const openSeq = ++state.openSeq;
 	setBusy(true, "正在读取 OFD", 10, STATUS.opening);
 	try {
-		state.ofdBytes = new Uint8Array(await file.arrayBuffer());
+		const bytes = new Uint8Array(await file.arrayBuffer());
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		state.ofdBytes = bytes;
 		state.fileName = file.name || "ofdgo.ofd";
-		await openDocument({ pageIndex: 0, resetScroll: true });
+		await openDocument({ pageIndex: 0, resetScroll: true, openSeq });
 	} catch (err) {
-		showError(err, true);
-		setBusy(false);
+		if (openSeq === state.openSeq) {
+			showError(err, true);
+			setBusy(false);
+		}
 	}
 }
 
@@ -818,9 +804,12 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 		return false;
 	}
 	const docLoadLimit = Math.min(LOCAL_FONT_LOAD_LIMIT, Math.max(4, docNames.length * 3));
-	let selected = selectLocalFonts(available, docNames, docLoadLimit);
+	let selected = await selectLocalFonts(available, docNames, docLoadLimit);
 	if (!selected.length) {
-		selected = selectLocalFonts(available, [], 6);
+		selected = await selectLocalFonts(available, [], 6);
+	}
+	if (openSeq !== state.openSeq) {
+		return false;
 	}
 	const emptyStatus = available.length === 0 ? "未读取到系统字体" : "未匹配到所需字体";
 	const fonts = [];
@@ -860,7 +849,7 @@ function uniqueLocalFonts(fonts) {
 	return selected;
 }
 
-function selectLocalFonts(fonts, names, limit) {
+async function selectLocalFonts(fonts, names, limit) {
 	const available = new Map();
 	for (const font of uniqueLocalFonts(fonts)) {
 		available.set(localFontName(font), font);
@@ -870,7 +859,7 @@ function selectLocalFonts(fonts, names, limit) {
 			}
 		}
 	}
-	const matched = callWASM("ofdgoFontFileMatches", [...available.keys()], names);
+	const matched = await callWASM("ofdgoFontFileMatches", [...available.keys()], names);
 	return uniqueLocalFonts(matched.map((name) => available.get(name))).slice(0, limit);
 }
 
@@ -996,6 +985,9 @@ async function applyFontChange(options = {}) {
 }
 
 async function toggleAnnotations() {
+	if (document.body.hasAttribute("aria-busy")) {
+		return;
+	}
 	state.renderAnnotations = !state.renderAnnotations;
 	updateAnnotationButton();
 	if (!state.ofdBytes || !state.doc) {
@@ -1161,10 +1153,13 @@ async function openDocument(options = {}) {
 	if (!state.ofdBytes) {
 		return;
 	}
+	const openSeq = options.openSeq || (state.openSeq += 1);
 	if (!state.ready || state.wasmExited) {
 		await ensureWASM();
 	}
-	const openSeq = options.openSeq || (state.openSeq += 1);
+	if (openSeq !== state.openSeq) {
+		return;
+	}
 	const resetLocalFonts = !options.skipAutoFonts;
 	if (resetLocalFonts) {
 		state.localFonts = [];
@@ -1184,8 +1179,8 @@ async function openDocument(options = {}) {
 			return;
 		}
 		const doc = options.reuseSession
-			? callWASM("ofdgoConfigure", fonts, state.renderAnnotations)
-			: callWASM("ofdgoOpen", state.ofdBytes, fonts, state.renderAnnotations);
+			? await callWASM("ofdgoConfigure", fonts, state.renderAnnotations)
+			: await callWASM("ofdgoOpen", state.ofdBytes, fonts, state.renderAnnotations);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -1251,7 +1246,7 @@ async function loadDocumentDetails(openSeq) {
 		return;
 	}
 	try {
-		const info = callWASM("ofdgoDocumentInfo");
+		const info = await callWASM("ofdgoDocumentInfo");
 		if (openSeq === state.openSeq) {
 			Object.assign(state.doc, info, { detailsPending: false });
 			renderMeta();
@@ -1275,10 +1270,13 @@ async function renderPage(index, options = {}) {
 	if (index < 0 || index >= pageCount) {
 		return;
 	}
-	if (options.keepBusy) {
-		setProgress("正在渲染页面", 76);
-	} else {
-		setBusy(true, "正在渲染页面", 35, "正在渲染页面");
+	const pageSeq = ++state.pageSeq;
+	if (!state.exporting) {
+		if (options.keepBusy) {
+			setProgress("正在渲染页面", 76);
+		} else {
+			setBusy(true, "正在渲染页面", 35, "正在渲染页面");
+		}
 	}
 	try {
 		setCurrentPage(index);
@@ -1289,7 +1287,7 @@ async function renderPage(index, options = {}) {
 			scrollToPage(index);
 		}
 		await renderFlowPage(index, { throwError: true, openSeq, priority: 0 });
-		if (openSeq !== state.openSeq) {
+		if (openSeq !== state.openSeq || index !== state.pageIndex) {
 			return;
 		}
 		if (options.scroll !== false) {
@@ -1301,30 +1299,22 @@ async function renderPage(index, options = {}) {
 			showError(err, false);
 		}
 	} finally {
-		if (!options.keepBusy && openSeq === state.openSeq) {
+		if (!options.keepBusy && !state.exporting && openSeq === state.openSeq && pageSeq === state.pageSeq) {
 			setBusy(false);
 		}
 	}
 }
 
 async function exportPDF() {
-	if (!state.doc) {
+	if (!state.doc || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
 	const openSeq = state.openSeq;
-	setExportControlsDisabled(true);
-	setBusy(true, "正在准备 PDF", 18, STATUS.exporting);
+	state.exporting = true;
+	updateControls();
+	setBusy(true, "正在生成 PDF", 45, STATUS.exporting);
 	try {
-		await waitForPaint();
-		if (openSeq !== state.openSeq) {
-			return;
-		}
-		setProgress("正在生成 PDF", 45);
-		await waitForPaint();
-		if (openSeq !== state.openSeq) {
-			return;
-		}
-		const result = callWASM("ofdgoExportPDF");
+		const result = await callWASM("ofdgoExportPDF");
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -1337,6 +1327,7 @@ async function exportPDF() {
 			showError(err, false);
 		}
 	} finally {
+		state.exporting = false;
 		if (openSeq === state.openSeq) {
 			setBusy(false);
 			updateControls();
@@ -1345,7 +1336,7 @@ async function exportPDF() {
 }
 
 async function exportCurrentPage() {
-	if (!state.doc) {
+	if (!state.doc || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
 	const format = el.pageExportFormat.value;
@@ -1355,32 +1346,26 @@ async function exportCurrentPage() {
 	const info = exportFormatInfo(format);
 	const label = info?.label || String(format || "").toUpperCase();
 	const openSeq = state.openSeq;
-	setExportControlsDisabled(true);
-	setBusy(true, `正在准备 ${label}`, 18, STATUS.pageExporting);
+	const fileName = pageFileName(info?.extension || format);
+	state.exporting = true;
+	updateControls();
+	setBusy(true, `正在生成 ${label}`, 45, STATUS.pageExporting);
 	try {
-		await waitForPaint();
-		if (openSeq !== state.openSeq) {
-			return;
-		}
-		setProgress(`正在生成 ${label}`, 45);
-		await waitForPaint();
-		if (openSeq !== state.openSeq) {
-			return;
-		}
 		const dpi = exportFormatUsesDPI(format) ? currentImageDPI() : 0;
-		const result = callWASM("ofdgoExportPage", state.pageIndex, format, dpi);
+		const result = await callWASM("ofdgoExportPage", state.pageIndex, format, dpi);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
 		setProgress(`正在保存 ${result.label || label}`, 86);
 		const bytes = result.bytes;
-		downloadBytes(bytes, result.mime || info?.mime || "application/octet-stream", pageFileName(result.extension || info?.extension || format));
+		downloadBytes(bytes, result.mime || info?.mime || "application/octet-stream", fileName);
 		setStatus(`${result.label || label} 已导出 ${formatBytes(result.size || bytes.length, result.label || label)}`);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			showError(err, false);
 		}
 	} finally {
+		state.exporting = false;
 		if (openSeq === state.openSeq) {
 			setBusy(false);
 			updateControls();
@@ -1571,7 +1556,7 @@ async function processPageRenderQueue() {
 					delayed = true;
 					continue;
 				}
-				const page = callWASM("ofdgoRenderPage", task.index);
+				const page = await callWASM("ofdgoRenderPage", task.index);
 				if (task.openSeq === state.openSeq) {
 					state.pageCache.set(task.index, page);
 					cacheThumbnail(task.index, page.svg);
@@ -1714,7 +1699,7 @@ function setCurrentPage(index) {
 	}
 	updatePageListCurrent();
 	updateControls();
-	if (state.doc) {
+	if (state.doc && !state.exporting) {
 		setStatus(pageStatus(index, state.doc.pageCount));
 	}
 }
@@ -2461,7 +2446,7 @@ function setScale(nextScale, updateStatus = true, fitMode = "free") {
 		restoreScaleAnchor(anchor);
 	}
 	el.zoomLabel.textContent = `${Math.round(state.scale * 100)}%`;
-	if (updateStatus && state.doc) {
+	if (updateStatus && state.doc && !state.exporting) {
 		setStatus(`第 ${state.pageIndex + 1} / ${state.doc.pageCount} 页`);
 	}
 	updateControls();
@@ -2559,9 +2544,9 @@ function updateControls() {
 	el.fitButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "width");
 	el.fitHeightButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "height");
 	updateAnnotationButton();
-	el.pageExportFormat.disabled = !hasDoc || !state.exportFormats.length;
-	el.exportPageButton.disabled = !hasDoc || !state.exportFormats.length;
-	el.exportButton.disabled = !hasDoc;
+	el.pageExportFormat.disabled = !hasDoc || state.exporting || !state.exportFormats.length;
+	el.exportPageButton.disabled = !hasDoc || state.exporting || !state.exportFormats.length;
+	el.exportButton.disabled = !hasDoc || state.exporting;
 	updateDPIControl();
 }
 
@@ -2571,38 +2556,24 @@ function updateAnnotationButton() {
 	el.annotationButton.setAttribute("aria-label", el.annotationButton.title);
 }
 
-function setExportControlsDisabled(disabled) {
-	el.exportButton.disabled = disabled;
-	el.exportPageButton.disabled = disabled;
-	el.pageExportFormat.disabled = disabled;
-	updateDPIControl(disabled);
-}
-
-function callWASM(name, ...args) {
-	const fn = globalThis[name];
-	if (typeof fn !== "function") {
-		throw new Error("渲染引擎未初始化");
-	}
+async function callWASM(name, ...args) {
 	if (state.wasmExited) {
 		scheduleWASMRecovery();
 		throw new Error(state.wasmRecovering ? "渲染引擎正在恢复" : "渲染引擎已退出，正在恢复");
 	}
-	let payload;
-	try {
-		payload = fn(...args);
-	} catch (err) {
-		const message = String(err.message || err);
-		if (message.includes("Go program has already exited")) {
-			markWASMExited(state.wasmSeq);
-			throw new Error("渲染引擎已退出，正在恢复");
+	if (!state.ready) {
+		throw new Error("渲染引擎未初始化");
+	}
+	return new Promise((resolve, reject) => {
+		const id = ++wasmRequestID;
+		wasmRequests.set(id, { resolve, reject });
+		try {
+			wasmWorker.postMessage({ id, name, args });
+		} catch (err) {
+			wasmRequests.delete(id);
+			reject(err);
 		}
-		throw err;
-	}
-	const result = typeof payload === "string" ? JSON.parse(payload) : payload;
-	if (!result.ok) {
-		throw new Error(result.error || "WASM 调用失败");
-	}
-	return result.data;
+	});
 }
 
 function showError(err, empty = !state.doc) {
@@ -2694,8 +2665,8 @@ function exportFormatUsesDPI(value) {
 	return value === "png" || value === "jpg";
 }
 
-function updateDPIControl(disabled = false) {
-	el.imageDPI.disabled = disabled || !state.doc || !exportFormatUsesDPI(el.pageExportFormat.value);
+function updateDPIControl() {
+	el.imageDPI.disabled = state.exporting || !state.doc || !exportFormatUsesDPI(el.pageExportFormat.value);
 }
 
 function currentImageDPI() {

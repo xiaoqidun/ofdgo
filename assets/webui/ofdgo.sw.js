@@ -1,6 +1,6 @@
 const CACHE_PREFIX = `ofdgo:${self.registration.scope}:app:`;
 const META_CACHE = `${CACHE_PREFIX}meta`;
-const ASSETS = ["./", "ofdgo.css", "ofdgo.js", "ofdgo.json", "ofdgo.svg", "ofdgo.sw.js", "ofdgo.wasm", "wasm_exec.js"]
+const ASSETS = ["./", "ofdgo.css", "ofdgo.js", "ofdgo.json", "ofdgo.svg", "ofdgo.sw.js", "ofdgo.wasm", "ofdgo.wasm.js", "wasm_exec.js"]
 	.map((path) => new URL(path, self.registration.scope).href);
 const CLIENT_PREFIX = new URL("__client/", self.registration.scope).href;
 
@@ -14,7 +14,7 @@ self.addEventListener("fetch", (event) => {
 	if (event.request.method !== "GET" || !url.startsWith(self.registration.scope) || (navigation && url !== self.registration.scope)) {
 		return;
 	}
-	event.respondWith(navigator.locks.request(CACHE_PREFIX, { mode: navigation ? "exclusive" : "shared" }, () => readResource(event, navigation)));
+	event.respondWith(navigator.locks.request(CACHE_PREFIX, { mode: event.resultingClientId ? "exclusive" : "shared" }, () => readResource(event, navigation)));
 });
 
 self.addEventListener("message", (event) => {
@@ -85,12 +85,14 @@ async function readResource(event, navigation) {
 	let bundle;
 	if (navigation) {
 		bundle = await currentBundle(meta);
-		await meta.put(CLIENT_PREFIX + event.resultingClientId, Response.json(bundle));
 	} else {
 		bundle = await readBundle(meta, CLIENT_PREFIX + event.clientId);
 	}
 	if (!bundle || !await caches.has(bundle.name)) {
 		return Response.error();
+	}
+	if (event.resultingClientId) {
+		await meta.put(CLIENT_PREFIX + event.resultingClientId, Response.json(bundle));
 	}
 	const url = resourceURL(event.request.url);
 	if (!bundle.assets.includes(url)) {
