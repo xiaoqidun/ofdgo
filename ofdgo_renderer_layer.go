@@ -25,8 +25,8 @@ func (r *Renderer) renderAnnotations(ctx *canvas.Context, pageID string, pageH f
 		}
 		box, _ := ParseBox(annot.Appearance.Boundary)
 		ctm := Matrix{a: 1, d: 1, e: box.X, f: box.Y}
-		for _, obj := range annot.Appearance.Objects {
-			r.renderObject(ctx, obj, pageH, nil, &ctm, false, nil)
+		for i := range annot.Appearance.Objects {
+			r.renderObject(ctx, &annot.Appearance.Objects[i], pageH, nil, &ctm, false, nil)
 		}
 	}
 }
@@ -92,8 +92,8 @@ func (r *Renderer) renderLayers(ctx *canvas.Context, layers []Layer, pageH float
 func (r *Renderer) renderLayer(ctx *canvas.Context, layer Layer, pageH float64, defaults *DrawParam, parentCTM *Matrix) {
 	defaults = r.drawParamDefaults(layer.DrawParam, defaults)
 	if len(layer.Objects) > 0 {
-		for _, obj := range layer.Objects {
-			r.renderObject(ctx, obj, pageH, defaults, parentCTM, false, nil)
+		for i := range layer.Objects {
+			r.renderObject(ctx, &layer.Objects[i], pageH, defaults, parentCTM, false, nil)
 		}
 		return
 	}
@@ -143,7 +143,7 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 	if len(cgu.Objects) > 0 {
 		for _, obj := range cgu.Objects {
 			obj = mergeGraphicObjectAlpha(obj, cgu.Alpha)
-			r.renderObject(ctx, obj, pageH, defaults, &currentCTM, boundaryInCTM, clipPath)
+			r.renderObject(ctx, &obj, pageH, defaults, &currentCTM, boundaryInCTM, clipPath)
 		}
 		ctx.Pop()
 		return
@@ -169,7 +169,7 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 
 // renderObject 渲染图形对象
 // 入参: ctx 画布上下文, obj 图形对象, pageH 页面高度, defaults 默认绘制参数, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
-func (r *Renderer) renderObject(ctx *canvas.Context, obj GraphicObject, pageH float64, defaults *DrawParam, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
+func (r *Renderer) renderObject(ctx *canvas.Context, obj *GraphicObject, pageH float64, defaults *DrawParam, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
 	switch obj.Type {
 	case "TextObject":
 		r.renderText(ctx, obj.TextObject, pageH, defaults, parentCTM, boundaryInCTM, parentClip)

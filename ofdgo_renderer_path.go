@@ -359,7 +359,7 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *patternPaint, pag
 			}
 			for _, obj := range pattern.CellContent.Objects {
 				obj = mergeGraphicObjectAlpha(obj, pattern.alpha)
-				r.renderObject(ctx, obj, pageH, defaults, &tileCTM, true, clip)
+				r.renderObject(ctx, &obj, pageH, defaults, &tileCTM, true, clip)
 			}
 		}
 	}
