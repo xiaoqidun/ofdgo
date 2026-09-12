@@ -216,6 +216,13 @@ COMPACT_LAYOUT.addEventListener("change", syncLayoutMode);
 el.viewerPanel.addEventListener("scroll", () => {
 	schedulePageSync();
 });
+el.viewerPanel.addEventListener("click", () => {
+	if (COMPACT_LAYOUT.matches && (state.showPages || state.showMeta)) {
+		state.showPages = false;
+		state.showMeta = false;
+		updateSidebarState();
+	}
+});
 el.viewerPanel.addEventListener("dblclick", openOFDFromViewer);
 document.addEventListener("dragover", (event) => {
 	if (event.dataTransfer.types.includes("Files")) {
@@ -288,11 +295,19 @@ function openFontFile(input) {
 function toggleSidebar(side) {
 	if (side === "pages") {
 		state.showPages = !state.showPages;
+		if (COMPACT_LAYOUT.matches) {
+			state.showMeta = false;
+		}
 	} else if (side === "meta") {
 		state.showMeta = !state.showMeta;
+		if (COMPACT_LAYOUT.matches) {
+			state.showPages = false;
+		}
 	}
 	updateSidebarState();
-	resizeViewer();
+	if (!COMPACT_LAYOUT.matches) {
+		resizeViewer();
+	}
 }
 
 function updateSidebarState() {
