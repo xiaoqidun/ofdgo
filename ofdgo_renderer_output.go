@@ -26,16 +26,37 @@ import (
 	"github.com/tdewolff/canvas/renderers/rasterizer"
 )
 
+// rasterRenderer 保留页面物理尺寸的光栅渲染器
+type rasterRenderer struct {
+	*rasterizer.Rasterizer
+	width, height float64
+}
+
+// Size 返回页面物理尺寸
+// 返回: float64 宽度, float64 高度
+func (r *rasterRenderer) Size() (float64, float64) {
+	return r.width, r.height
+}
+
 // RenderToImage 渲染为光栅图
 // 入参: page 页面内容
 // 返回: image.Image 图像对象, error 错误信息
 func (r *Renderer) RenderToImage(page *PageContent) (image.Image, error) {
-	c, err := r.RenderPage(page)
+	box, err := r.GetPageBox(page)
 	if err != nil {
 		return nil, err
 	}
 	dpmm := r.DPI / 25.4
-	return rasterizer.Draw(c, canvas.DPMM(dpmm), canvas.DefaultColorSpace), nil
+	raster := &rasterRenderer{
+		Rasterizer: rasterizer.New(box.W, box.H, canvas.DPMM(dpmm), canvas.DefaultColorSpace),
+		width:      box.W,
+		height:     box.H,
+	}
+	if err := r.RenderPageToContext(canvas.NewContext(raster), page); err != nil {
+		return nil, err
+	}
+	raster.Close()
+	return raster.Image, nil
 }
 
 // RenderToSVG 渲染为SVG

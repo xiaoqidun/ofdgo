@@ -168,10 +168,18 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 		Embedded:   font.FontFile != "",
 	}
 	if info.Embedded {
-		file, err := r.Reader.openFile(r.Reader.ResPath(font.FontFile))
-		if err == nil {
-			_, err = io.Copy(io.Discard, file)
-			file.Close()
+		name := r.Reader.ResPath(font.FontFile)
+		var err error
+		if !r.Reader.fontFilesChecked[name] {
+			var file io.ReadCloser
+			file, err = r.Reader.openFile(name)
+			if err == nil {
+				_, err = io.Copy(io.Discard, file)
+				file.Close()
+				if err == nil {
+					r.Reader.fontFilesChecked[name] = true
+				}
+			}
 		}
 		if err == nil {
 			info.Status = FontStatusEmbedded

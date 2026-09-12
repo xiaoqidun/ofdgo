@@ -31,8 +31,10 @@ type Reader struct {
 	OFD                       *OFD
 	RootDir                   string
 	ResMap                    map[string]string
+	resourcesRead             map[string]bool
 	fontCache                 map[string]*Font
 	fontResourcesRead         bool
+	fontFilesChecked          map[string]bool
 	colorSpaceCache           map[string]*ColorSpace
 	drawParamCache            map[string]*DrawParam
 	compositeGraphicUnitCache map[string]*CompositeGraphicUnit
@@ -76,7 +78,9 @@ func (r *Reader) initRoot() error {
 	}
 	r.OFD = &ofd
 	r.ResMap = make(map[string]string)
+	r.resourcesRead = make(map[string]bool)
 	r.fontCache = make(map[string]*Font)
+	r.fontFilesChecked = make(map[string]bool)
 	r.colorSpaceCache = make(map[string]*ColorSpace)
 	r.drawParamCache = make(map[string]*DrawParam)
 	r.compositeGraphicUnitCache = make(map[string]*CompositeGraphicUnit)
@@ -182,6 +186,9 @@ func (r *Reader) loadRes(resPath string) {
 		return
 	}
 	fullPath := r.ResPath(resPath)
+	if r.resourcesRead[fullPath] {
+		return
+	}
 	data, err := r.readFile(fullPath)
 	if err != nil {
 		return
@@ -217,6 +224,7 @@ func (r *Reader) loadRes(resPath string) {
 		cgu := &res.CompositeGraphicUnits.CompositeGraphicUnit[i]
 		r.compositeGraphicUnitCache[cgu.ID] = cgu
 	}
+	r.resourcesRead[fullPath] = true
 }
 
 // resolveResourcePath 解析资源文件路径
