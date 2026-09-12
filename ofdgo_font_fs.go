@@ -147,6 +147,36 @@ func FontFileMatches(files []string, bold, italic bool, names ...string) []strin
 	return fontFileMatchNames(fontFileMatches(fontFileCandidates(files, path.Base), names, bold, italic))
 }
 
+// MatchFontFiles 按文档字体名称和样式选择首选文件，跳过内嵌字体
+// 入参: files 可用字体文件名
+// 返回: []string 所需字体文件名, error 错误信息
+func (r *Reader) MatchFontFiles(files []string) ([]string, error) {
+	fonts, err := r.Fonts()
+	if err != nil {
+		return nil, err
+	}
+	candidates := fontFileCandidates(files, path.Base)
+	names := make([]string, 0, len(fonts))
+	seen := make(map[string]bool)
+	for _, font := range fonts {
+		if font.FontFile != "" {
+			continue
+		}
+		matches := fontFileMatches(candidates, []string{font.FontName, font.FamilyName}, font.Bold, font.Italic)
+		if len(matches) == 0 {
+			matches = fontFileMatches(candidates, nil, font.Bold, font.Italic)
+		}
+		if len(matches) > 0 {
+			name := matches[0].name
+			if !seen[name] {
+				names = append(names, name)
+				seen[name] = true
+			}
+		}
+	}
+	return names, nil
+}
+
 // matchStyle 匹配指定样式的字体名称
 // 入参: names 字体名称列表, bold 是否粗体, italic 是否斜体
 // 返回: []fontFileMatch 字体匹配列表

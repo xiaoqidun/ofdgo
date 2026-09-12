@@ -20,8 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"syscall/js"
-
-	"github.com/xiaoqidun/ofdgo"
 )
 
 // currentSession 当前WebUI文档会话
@@ -43,7 +41,7 @@ func RunWASM() {
 	registerCallback("ofdgoExportFormats", exportFormats)
 	registerCallback("ofdgoExportPage", exportPage)
 	registerCallback("ofdgoExportPDF", exportPDF)
-	registerCallback("ofdgoFontFileMatches", fontFileMatches)
+	registerCallback("ofdgoMatchFontFiles", matchFontFiles)
 	select {}
 }
 
@@ -224,13 +222,14 @@ func bytesToJS(data []byte) js.Value {
 	return value
 }
 
-// fontFileMatches 匹配浏览器字体文件名称
+// matchFontFiles 匹配文档所需的字体文件
 // 入参: args 浏览器参数
 // 返回: any 匹配的字体文件名称, error 错误信息
-func fontFileMatches(args []js.Value) (any, error) {
-	files := stringsFromJS(jsArg(args, 0))
-	names := stringsFromJS(jsArg(args, 1))
-	return ofdgo.FontFileMatches(files, false, false, names...), nil
+func matchFontFiles(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	return currentSession.Reader.MatchFontFiles(stringsFromJS(args[0]))
 }
 
 // bytesFromJS 从浏览器值读取二进制数据
@@ -279,31 +278,11 @@ func fontsFromJS(value js.Value) ([]FontFile, error) {
 // 入参: value 浏览器值
 // 返回: []string 字符串列表
 func stringsFromJS(value js.Value) []string {
-	if value.IsUndefined() || value.IsNull() {
-		return nil
+	items := make([]string, value.Length())
+	for i := range items {
+		items[i] = value.Index(i).String()
 	}
-	if js.Global().Get("Array").Call("isArray", value).Bool() {
-		length := value.Get("length").Int()
-		items := make([]string, 0, length)
-		for i := 0; i < length; i++ {
-			item := value.Index(i)
-			if !item.IsUndefined() && !item.IsNull() {
-				items = append(items, item.String())
-			}
-		}
-		return items
-	}
-	return []string{value.String()}
-}
-
-// jsArg 获取浏览器参数
-// 入参: args 浏览器参数列表, index 参数索引
-// 返回: js.Value 浏览器值
-func jsArg(args []js.Value, index int) js.Value {
-	if index < 0 || index >= len(args) {
-		return js.Undefined()
-	}
-	return args[index]
+	return items
 }
 
 // encodeResult 编码浏览器接口返回结果

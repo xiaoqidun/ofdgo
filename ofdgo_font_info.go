@@ -49,8 +49,18 @@ type FontInfo struct {
 // Fonts 获取OFD声明的字体列表
 // 返回: []Font 字体列表, error 错误信息
 func (r *Reader) Fonts() ([]Font, error) {
-	if _, err := r.Doc(); err != nil {
+	doc, err := r.Doc()
+	if err != nil {
 		return nil, err
+	}
+	if !r.fontResourcesRead {
+		for _, page := range doc.Pages.Page {
+			r.loadPageResources(page)
+		}
+		for _, template := range doc.CommonData.TemplatePage {
+			r.loadPageResources(Page{BaseLoc: template.BaseLoc})
+		}
+		r.fontResourcesRead = true
 	}
 	fonts := make([]Font, 0, len(r.fontCache))
 	for _, font := range r.fontCache {

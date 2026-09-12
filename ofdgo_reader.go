@@ -32,9 +32,11 @@ type Reader struct {
 	RootDir                   string
 	ResMap                    map[string]string
 	fontCache                 map[string]*Font
+	fontResourcesRead         bool
 	colorSpaceCache           map[string]*ColorSpace
 	drawParamCache            map[string]*DrawParam
 	compositeGraphicUnitCache map[string]*CompositeGraphicUnit
+	pageHeaderCache           map[string]PageContent
 	doc                       *Document
 	Stamps                    map[string][]Stamp
 	Annots                    map[string][]Annotation
@@ -78,6 +80,7 @@ func (r *Reader) initRoot() error {
 	r.colorSpaceCache = make(map[string]*ColorSpace)
 	r.drawParamCache = make(map[string]*DrawParam)
 	r.compositeGraphicUnitCache = make(map[string]*CompositeGraphicUnit)
+	r.pageHeaderCache = make(map[string]PageContent)
 	return nil
 }
 
@@ -272,21 +275,38 @@ func (r *Reader) PageArea(page Page) (PageArea, error) {
 	return r.resolvePageArea(content.Area, content.Template)
 }
 
-// readPageHeader 读取页面区域和模板引用
+// loadPageResources 加载页面资源，不解析图元
+// 入参: page 页面引用
+func (r *Reader) loadPageResources(page Page) {
+	header, err := r.readPageHeader(page)
+	if err != nil {
+		return
+	}
+	for _, res := range header.PageRes {
+		r.loadRes(resolveResourcePath(page.BaseLoc, "", res))
+	}
+}
+
+// readPageHeader 读取页面区域、模板引用和资源声明
 // 入参: page 页面对象
 // 返回: PageContent 页面头部, error 错误信息
 func (r *Reader) readPageHeader(page Page) (PageContent, error) {
-	f, err := r.openFile(r.ResPath(page.BaseLoc))
+	name := r.ResPath(page.BaseLoc)
+	if content, ok := r.pageHeaderCache[name]; ok {
+		return content, nil
+	}
+	f, err := r.openFile(name)
 	if err != nil {
 		return PageContent{}, err
 	}
 	defer f.Close()
 	var content PageContent
 	d := xml.NewDecoder(f)
+scan:
 	for {
 		token, err := d.Token()
 		if err == io.EOF {
-			return content, nil
+			break
 		}
 		if err != nil {
 			return PageContent{}, err
@@ -302,10 +322,17 @@ func (r *Reader) readPageHeader(page Page) (PageContent, error) {
 				}
 				content.Template = append(content.Template, template)
 			case "Area":
-				err := d.DecodeElement(&content.Area, &start)
-				return content, err
+				if err := d.DecodeElement(&content.Area, &start); err != nil {
+					return PageContent{}, err
+				}
+			case "PageRes":
+				var res string
+				if err := d.DecodeElement(&res, &start); err != nil {
+					return PageContent{}, err
+				}
+				content.PageRes = append(content.PageRes, res)
 			case "Content":
-				return content, nil
+				break scan
 			default:
 				if err := d.Skip(); err != nil {
 					return PageContent{}, err
@@ -313,6 +340,8 @@ func (r *Reader) readPageHeader(page Page) (PageContent, error) {
 			}
 		}
 	}
+	r.pageHeaderCache[name] = content
+	return content, nil
 }
 
 // resolvePageArea 解析页面区域的继承关系

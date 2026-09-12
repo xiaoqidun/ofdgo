@@ -1,5 +1,4 @@
 const MM_TO_PX = 96 / 25.4;
-const LOCAL_FONT_LOAD_LIMIT = 16;
 const FONT_DATABASE = "ofdgo";
 const fontChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel(FONT_DATABASE) : null;
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
@@ -765,7 +764,7 @@ async function queryLocalFonts() {
 }
 
 async function autoLoadDocumentLocalFonts(openSeq) {
-	if (!externalDocumentFontNames().length || !canReadLocalFonts() || state.systemFontPermission === "denied") {
+	if (!state.doc?.fonts?.some((font) => !font.embedded) || !canReadLocalFonts() || state.systemFontPermission === "denied") {
 		return false;
 	}
 	setProgress("正在匹配字体", 62, STATUS.fonts);
@@ -787,7 +786,6 @@ async function autoLoadDocumentLocalFonts(openSeq) {
 
 async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	const docFonts = state.doc?.fonts || [];
-	const docNames = externalDocumentFontNames();
 	if (!docFonts.length) {
 		state.localFonts = [];
 		setStatus("暂无字体");
@@ -795,18 +793,14 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 		renderFontList();
 		return false;
 	}
-	if (!docNames.length) {
+	if (docFonts.every((font) => font.embedded)) {
 		state.localFonts = [];
 		setStatus("文档字体均为内嵌");
 		updateFontSummary();
 		renderFontList();
 		return false;
 	}
-	const docLoadLimit = Math.min(LOCAL_FONT_LOAD_LIMIT, Math.max(4, docNames.length * 3));
-	let selected = await selectLocalFonts(available, docNames, docLoadLimit);
-	if (!selected.length) {
-		selected = await selectLocalFonts(available, [], 6);
-	}
+	const selected = await selectLocalFonts(available);
 	if (openSeq !== state.openSeq) {
 		return false;
 	}
@@ -834,32 +828,22 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	return fonts.length > 0;
 }
 
-function uniqueLocalFonts(fonts) {
-	const seen = new Set();
-	const selected = [];
-	for (const font of fonts) {
-		const key = normalizeFontName(localFontName(font));
-		if (!key || seen.has(key)) {
-			continue;
-		}
-		seen.add(key);
-		selected.push(font);
-	}
-	return selected;
-}
-
-async function selectLocalFonts(fonts, names, limit) {
+async function selectLocalFonts(fonts) {
 	const available = new Map();
-	for (const font of uniqueLocalFonts(fonts)) {
-		available.set(localFontName(font), font);
-		for (const name of [font.postscriptName, [font.family, font.style].filter(Boolean).join(" ")]) {
-			if (name) {
-				available.set(`${name}.ttf`, font);
+	for (const font of fonts) {
+		const names = [
+			localFontName(font),
+			font.postscriptName && `${font.postscriptName}.ttf`,
+			font.family && `${[font.family, font.style].filter(Boolean).join(" ")}.ttf`,
+		];
+		for (const name of names) {
+			if (name && !available.has(name)) {
+				available.set(name, font);
 			}
 		}
 	}
-	const matched = await callWASM("ofdgoFontFileMatches", [...available.keys()], names);
-	return uniqueLocalFonts(matched.map((name) => available.get(name))).slice(0, limit);
+	const matched = await callWASM("ofdgoMatchFontFiles", [...available.keys()]);
+	return [...new Set(matched.map((name) => available.get(name)))];
 }
 
 async function fontData(fonts) {
@@ -944,27 +928,9 @@ function fontRecords() {
 	return [...state.localFonts, ...state.userFonts];
 }
 
-function externalDocumentFontNames() {
-	const names = [];
-	for (const font of state.doc?.fonts || []) {
-		if (font.embedded || font.status === "embedded") {
-			continue;
-		}
-		names.push(font.fontName, font.familyName);
-	}
-	return names;
-}
-
 function localFontName(font) {
 	const name = font.fullName || font.family || font.postscriptName || "local-font";
 	return `${name}.ttf`;
-}
-
-function normalizeFontName(name = "") {
-	return String(name)
-		.toLowerCase()
-		.replace(/\.[^.]+$/, "")
-		.replace(/[\s_\-()（）]/g, "");
 }
 
 async function applyFontChange(options = {}) {
