@@ -115,6 +115,8 @@ const el = {
 	signaturePanel: document.querySelector("#signaturePanel"),
 	signatureSummary: document.querySelector("#signatureSummary"),
 	signatureList: document.querySelector("#signatureList"),
+	annotationPanel: document.querySelector("#annotationPanel"),
+	annotationList: document.querySelector("#annotationList"),
 	docFontList: document.querySelector("#docFontList"),
 	docFontSummary: document.querySelector("#docFontSummary"),
 	availableFontSummary: document.querySelector("#availableFontSummary"),
@@ -1245,15 +1247,15 @@ async function loadDocumentDetails(openSeq) {
 
 async function renderPage(index, options = {}) {
 	if (!state.doc) {
-		return;
+		return null;
 	}
 	const openSeq = options.openSeq || state.openSeq;
 	if (openSeq !== state.openSeq) {
-		return;
+		return null;
 	}
 	const pageCount = state.doc.pageCount || 0;
 	if (index < 0 || index >= pageCount) {
-		return;
+		return null;
 	}
 	const pageSeq = ++state.pageSeq;
 	if (!state.exporting) {
@@ -1271,18 +1273,20 @@ async function renderPage(index, options = {}) {
 		if (options.scroll !== false) {
 			scrollToPage(index);
 		}
-		await renderFlowPage(index, { throwError: true, openSeq, priority: 0 });
+		const page = await renderFlowPage(index, { throwError: true, openSeq, priority: 0 });
 		if (openSeq !== state.openSeq || index !== state.pageIndex) {
-			return;
+			return null;
 		}
 		if (options.scroll !== false) {
 			scrollToPage(index);
 		}
 		queueNearbyPages(index, openSeq);
+		return page;
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			showError(err, false);
 		}
+		return null;
 	} finally {
 		if (!options.keepBusy && !state.exporting && openSeq === state.openSeq && pageSeq === state.pageSeq) {
 			setBusy(false);
@@ -2071,6 +2075,7 @@ function renderMeta() {
 	el.pageTotal.textContent = String(doc.pageCount || 0);
 	renderAttachments();
 	renderSignatures();
+	renderAnnotations();
 	renderDocumentFonts();
 	renderFontList();
 	updateLocalFontButton();
@@ -2140,17 +2145,17 @@ function renderSignatures() {
 		badges.className = "signature-badges";
 		badges.append(fontBadge(signature.status === "valid" ? "通过" : signature.status === "invalid" ? "异常" : "未验", signature.status));
 
-		head.append(name, badges);
+		head.append(badges, name);
 		row.append(head);
-		appendSignatureLine(row, "编号", signature.id);
-		appendSignatureLine(row, "版本", signature.version);
-		appendSignatureLine(row, "章图", signature.sealType);
-		appendSignatureLine(row, "章号", signature.sealId);
-		appendSignatureLine(row, "章名", signature.sealName);
-		appendSignatureLine(row, "厂商", signature.sealVendor);
-		appendSignatureLine(row, "签者", signature.signer);
-		appendSignatureLine(row, "时间", formatSignatureTime(signature.signatureDateTime));
-		appendSignatureLine(row, "机构", signatureAgency(signature));
+		appendInfoLine(row, "编号", signature.id);
+		appendInfoLine(row, "版本", signature.version);
+		appendInfoLine(row, "章图", signature.sealType);
+		appendInfoLine(row, "章号", signature.sealId);
+		appendInfoLine(row, "章名", signature.sealName);
+		appendInfoLine(row, "厂商", signature.sealVendor);
+		appendInfoLine(row, "签者", signature.signer);
+		appendInfoLine(row, "时间", formatDocumentTime(signature.signatureDateTime));
+		appendInfoLine(row, "机构", signatureAgency(signature));
 		appendSignatureCheck(row, "原文", signature.dataHashChecked, signature.dataHashOK);
 		appendSignatureCheck(row, "签名", signature.signedValueChecked, signature.signedValueOK);
 		if (signature.type !== "Sign") {
@@ -2161,18 +2166,18 @@ function renderSignatures() {
 		appendSignaturePolicy(row, "签期", signature.signatureTimeChecked, signature.signatureTimeOK);
 		appendSignaturePolicy(row, "章期", signature.sealTimeChecked, signature.sealTimeOK);
 		if (signature.sealCertTimeChecked) {
-			appendSignatureLine(row, "制期", signature.sealCertTimeOK ? "有效" : "失效", signature.sealCertTimeOK ? "ok" : "");
+			appendInfoLine(row, "制期", signature.sealCertTimeOK ? "有效" : "失效", signature.sealCertTimeOK ? "ok" : "");
 		}
 		appendSignaturePolicy(row, "时效", signature.certTimeChecked, signature.certTimeOK);
 		appendSignatureCheck(row, "信任", signature.certTrustChecked, signature.certTrustOK);
-		appendSignatureLine(row, "保护", signatureReferenceText(signature), signatureReferenceStatus(signature));
-		appendSignatureLine(row, "算法", signature.signatureMethod);
-		appendSignatureLine(row, "散列", signature.digestMethod);
-		appendSignatureLine(row, "序号", signature.signSerial);
-		appendSignatureLine(row, "主体", signature.signSubject && signature.signSubject !== signature.signer ? signature.signSubject : "");
-		appendSignatureLine(row, "颁发", signature.signIssuer);
-		appendSignatureLine(row, "章证", signature.sealSubject);
-		appendSignatureLine(row, "错误", signature.error, "fail");
+		appendInfoLine(row, "保护", signatureReferenceText(signature), signatureReferenceStatus(signature));
+		appendInfoLine(row, "算法", signature.signatureMethod);
+		appendInfoLine(row, "散列", signature.digestMethod);
+		appendInfoLine(row, "序号", signature.signSerial);
+		appendInfoLine(row, "主体", signature.signSubject && signature.signSubject !== signature.signer ? signature.signSubject : "");
+		appendInfoLine(row, "颁发", signature.signIssuer);
+		appendInfoLine(row, "章证", signature.sealSubject);
+		appendInfoLine(row, "错误", signature.error, "fail");
 		fragment.append(row);
 	}
 	el.signatureList.append(fragment);
@@ -2196,20 +2201,17 @@ function signatureSummary(signatures) {
 
 function signatureNameNode(signature) {
 	const stamps = signature.stamps || [];
+	const name = document.createElement("div");
+	name.className = "signature-name";
 	if (!stamps.length) {
-		const name = document.createElement("div");
-		name.className = "signature-name";
 		name.textContent = "签名";
 		return name;
 	}
-	const name = document.createElement("div");
-	name.className = "signature-name signature-name-with-stamps";
-
 	const button = document.createElement("button");
 	button.type = "button";
-	button.className = "signature-name-button";
+	button.className = "info-name-button";
 	button.textContent = "签名";
-	button.addEventListener("click", () => focusSignatureStamp(stamps[0]));
+	button.addEventListener("click", () => focusPageRegion(stamps[0], "签名"));
 	name.append(button, signatureStampGroup(stamps));
 	return name;
 }
@@ -2217,19 +2219,17 @@ function signatureNameNode(signature) {
 function signatureStampGroup(stamps) {
 	const group = document.createElement("span");
 	group.className = "signature-stamp-group";
-	group.append("（");
 	for (const [index, stamp] of stamps.entries()) {
-		if (index > 0) {
-			group.append("、");
-		}
+		const item = document.createElement("span");
+		item.className = "signature-stamp-item";
 		const button = document.createElement("button");
 		button.type = "button";
 		button.className = "signature-stamp-link";
 		button.textContent = `第${index + 1}处`;
-		button.addEventListener("click", () => focusSignatureStamp(stamp));
-		group.append(button);
+		button.addEventListener("click", () => focusPageRegion(stamp, "签名"));
+		item.append(index === 0 ? "（" : "", button, index === stamps.length - 1 ? "）" : "、");
+		group.append(item);
 	}
-	group.append("）");
 	return group;
 }
 
@@ -2261,24 +2261,24 @@ function signatureReferenceStatus(signature) {
 	return signature.referenceChecked === count ? "ok" : "";
 }
 
-function formatSignatureTime(value) {
+function formatDocumentTime(value) {
 	const text = String(value || "").trim();
 	return text.replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/, "$1-$2-$3 $4:$5:$6$7$8").replace("T", " ");
 }
 
-function appendSignatureLine(row, label, value, status = "") {
+function appendInfoLine(row, label, value, status = "") {
 	if (!value && value !== 0) {
 		return;
 	}
 	const line = document.createElement("div");
-	line.className = status ? `signature-line ${status}` : "signature-line";
+	line.className = status ? `info-line ${status}` : "info-line";
 
 	const key = document.createElement("span");
-	key.className = "signature-label";
+	key.className = "info-label";
 	key.textContent = label;
 
 	const text = document.createElement("span");
-	text.className = "signature-value";
+	text.className = "info-value";
 	text.textContent = String(value);
 
 	line.append(key, text);
@@ -2286,7 +2286,7 @@ function appendSignatureLine(row, label, value, status = "") {
 }
 
 function appendSignatureCheck(row, label, checked, ok) {
-	appendSignatureLine(row, label, checked ? ok ? "通过" : "失败" : "未验", checked ? ok ? "ok" : "fail" : "");
+	appendInfoLine(row, label, checked ? ok ? "通过" : "失败" : "未验", checked ? ok ? "ok" : "fail" : "");
 }
 
 function appendSignaturePolicy(row, label, checked, ok) {
@@ -2296,39 +2296,74 @@ function appendSignaturePolicy(row, label, checked, ok) {
 	appendSignatureCheck(row, label, checked, ok);
 }
 
-async function focusSignatureStamp(stamp) {
-	const pageIndex = (stamp.page || 0) - 1;
-	if (!state.doc || pageIndex < 0) {
+async function focusPageRegion(region, label) {
+	const pageIndex = region.page - 1;
+	if (!state.doc || pageIndex < 0 || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
-	await renderPage(pageIndex, { fit: false, scroll: false });
+	const openSeq = state.openSeq;
+	if (!await renderPage(pageIndex, { fit: false, scroll: false })) {
+		return;
+	}
 	await nextFrame();
-	highlightSignatureStamp(stamp);
-	setStatus(`签名已定位 第 ${stamp.page} 页`);
+	if (openSeq !== state.openSeq || pageIndex !== state.pageIndex) {
+		return;
+	}
+	highlightPageRegion(region);
+	setStatus(`${label}已定位 第 ${region.page} 页`);
 }
 
-function highlightSignatureStamp(stamp) {
-	clearStampHighlights();
-	const pageIndex = (stamp.page || 0) - 1;
+function highlightPageRegion(region) {
+	clearRegionHighlights();
+	const pageIndex = region.page - 1;
 	const shell = pageShell(pageIndex);
-	if (!shell || !stamp.width || !stamp.height) {
+	if (!shell || !(region.width > 0 && region.height > 0)) {
 		return;
 	}
 	const mark = document.createElement("div");
-	mark.className = "stamp-highlight";
-	mark.style.left = `${stamp.x * MM_TO_PX * state.scale}px`;
-	mark.style.top = `${stamp.y * MM_TO_PX * state.scale}px`;
-	mark.style.width = `${stamp.width * MM_TO_PX * state.scale}px`;
-	mark.style.height = `${stamp.height * MM_TO_PX * state.scale}px`;
+	mark.className = "region-highlight";
+	mark.style.left = `${region.x * MM_TO_PX * state.scale}px`;
+	mark.style.top = `${region.y * MM_TO_PX * state.scale}px`;
+	mark.style.width = `${region.width * MM_TO_PX * state.scale}px`;
+	mark.style.height = `${region.height * MM_TO_PX * state.scale}px`;
 	shell.append(mark);
 	mark.scrollIntoView({ block: "nearest", inline: "nearest" });
 	window.setTimeout(() => mark.remove(), 1800);
 }
 
-function clearStampHighlights() {
-	for (const mark of el.svgHost.querySelectorAll(".stamp-highlight")) {
+function clearRegionHighlights() {
+	for (const mark of el.svgHost.querySelectorAll(".region-highlight")) {
 		mark.remove();
 	}
+}
+
+function renderAnnotations() {
+	const annotations = (state.doc?.annotations || []).filter((annotation) => annotation.visible);
+	el.annotationPanel.hidden = !annotations.length;
+	el.annotationList.replaceChildren();
+	const types = { Link: "链接", Path: "路径", Highlight: "高亮", Stamp: "印章", Watermark: "水印" };
+	const fragment = document.createDocumentFragment();
+	for (const annotation of annotations) {
+		const row = document.createElement("div");
+		row.className = "annotation-row";
+		const head = document.createElement("div");
+		head.className = "annotation-head";
+		const name = document.createElement("button");
+		name.type = "button";
+		name.className = "info-name-button";
+		name.textContent = `第 ${annotation.page} 页`;
+		name.disabled = !state.renderAnnotations || annotation.width <= 0 || annotation.height <= 0;
+		name.title = state.renderAnnotations ? "定位注解" : "注解已隐藏";
+		name.addEventListener("click", () => focusPageRegion(annotation, "注解"));
+		const badge = fontBadge(types[annotation.type] || "注解", "");
+		head.append(badge, name);
+		row.append(head);
+		appendInfoLine(row, "内容", annotation.remark);
+		appendInfoLine(row, "作者", annotation.creator);
+		appendInfoLine(row, "时间", formatDocumentTime(annotation.lastModDate));
+		fragment.append(row);
+	}
+	el.annotationList.append(fragment);
 }
 
 function renderDocumentFonts() {
@@ -2363,7 +2398,7 @@ function renderDocumentFonts() {
 		const resultText = fontResult(font);
 		const metaText = fontMeta(font);
 
-		head.append(name, badges);
+		head.append(badges, name);
 		row.append(head);
 		appendFontDetail(row, metaText);
 		appendFontDetail(row, resultText);
@@ -2452,7 +2487,7 @@ function setContinuous(continuous) {
 function toggleContinuous() {
 	const anchor = state.fitMode === "free" ? scaleAnchor() : null;
 	setContinuous(!state.continuous);
-	clearStampHighlights();
+	clearRegionHighlights();
 	if (state.fitMode === "free") {
 		restoreScaleAnchor(anchor);
 	} else {
@@ -2541,7 +2576,7 @@ function setScale(nextScale, updateStatus = true, fitMode = "free") {
 	state.fitMode = fitMode;
 	state.scale = scale;
 	if (layoutChanged) {
-		clearStampHighlights();
+		clearRegionHighlights();
 		layoutPages();
 	}
 	updateFitSpace();

@@ -42,7 +42,25 @@ type Annotation struct {
 	Creator     string `xml:"Creator,attr"`
 	LastModDate string `xml:"LastModDate,attr"`
 	Visible     *bool  `xml:"Visible,attr"`
+	Remark      string `xml:"Remark"`
 	Appearance  Appearance
+}
+
+// AnnotationInfo 注释信息，Page从1开始，位置和尺寸使用页面毫米坐标
+type AnnotationInfo struct {
+	ID          string  `json:"id"`
+	Page        int     `json:"page"`
+	PageID      string  `json:"pageId"`
+	Type        string  `json:"type"`
+	Subtype     string  `json:"subtype,omitempty"`
+	Creator     string  `json:"creator,omitempty"`
+	LastModDate string  `json:"lastModDate,omitempty"`
+	Remark      string  `json:"remark,omitempty"`
+	Visible     bool    `json:"visible"`
+	X           float64 `json:"x"`
+	Y           float64 `json:"y"`
+	Width       float64 `json:"width"`
+	Height      float64 `json:"height"`
 }
 
 // Appearance 注释外观
@@ -53,6 +71,37 @@ type Appearance struct {
 	PathObject           []PathObject           `xml:"PathObject"`
 	ImageObject          []ImageObject          `xml:"ImageObject"`
 	CompositeGraphicUnit []CompositeGraphicUnit `xml:"CompositeGraphicUnit"`
+}
+
+// AnnotationInfos 按页面顺序获取注释信息，包含不可见注释
+// 返回: []AnnotationInfo 注释信息, error 错误信息
+func (r *Reader) AnnotationInfos() ([]AnnotationInfo, error) {
+	doc, err := r.Doc()
+	if err != nil {
+		return nil, err
+	}
+	var infos []AnnotationInfo
+	for index, page := range doc.Pages.Page {
+		for _, annotation := range r.Annots[page.ID] {
+			box, _ := ParseBox(annotation.Appearance.Boundary)
+			infos = append(infos, AnnotationInfo{
+				ID:          annotation.ID,
+				Page:        index + 1,
+				PageID:      page.ID,
+				Type:        annotation.Type,
+				Subtype:     annotation.Subtype,
+				Creator:     annotation.Creator,
+				LastModDate: annotation.LastModDate,
+				Remark:      annotation.Remark,
+				Visible:     annotation.Visible == nil || *annotation.Visible,
+				X:           box.X,
+				Y:           box.Y,
+				Width:       box.W,
+				Height:      box.H,
+			})
+		}
+	}
+	return infos, nil
 }
 
 // parseAnnotations 解析注释文件

@@ -614,7 +614,7 @@ button.outline-link:hover {
 
 @media (prefers-reduced-motion: reduce) {
 	.progress-spinner,
-	.stamp-highlight {
+	.region-highlight {
 		animation: none;
 	}
 
@@ -694,17 +694,17 @@ button.outline-link:hover {
 	display: none;
 }
 
-.stamp-highlight {
+.region-highlight {
 	position: absolute;
 	z-index: 4;
 	border: 2px solid var(--accent);
 	background: rgba(15, 123, 104, 0.08);
 	box-shadow: 0 0 0 3px rgba(15, 123, 104, 0.16);
 	pointer-events: none;
-	animation: stampPulse 0.9s ease-in-out 2;
+	animation: regionPulse 0.9s ease-in-out 2;
 }
 
-@keyframes stampPulse {
+@keyframes regionPulse {
 	50% {
 		border-color: var(--accent-strong);
 		box-shadow: 0 0 0 5px rgba(15, 123, 104, 0.18);
@@ -742,6 +742,7 @@ button.outline-link:hover {
 .font-panel,
 .doc-font-panel,
 .attachment-panel,
+.annotation-panel,
 .signature-panel {
 	margin-top: 18px;
 	padding-top: 12px;
@@ -794,12 +795,14 @@ button.outline-link:hover {
 }
 
 .doc-font-list,
+.annotation-list,
 .signature-list {
 	display: grid;
 	gap: 8px;
 }
 
 .doc-font-row,
+.annotation-row,
 .signature-row {
 	display: grid;
 	gap: 6px;
@@ -812,6 +815,7 @@ button.outline-link:hover {
 .page-list-item:not(:disabled):hover,
 .doc-font-row:hover,
 .signature-row:hover,
+.annotation-row:hover,
 .font-row:hover {
 	border-color: var(--line-strong);
 	background: #ffffff;
@@ -838,24 +842,20 @@ button.outline-link:hover {
 }
 
 .doc-font-head,
+.annotation-head,
 .signature-head {
-	display: grid;
-	grid-template-columns: minmax(0, 1fr) auto;
-	align-items: start;
-	gap: 8px;
+	display: flow-root;
 }
 
 .doc-font-name,
 .signature-name {
-	overflow: hidden;
 	color: #1f2428;
 	font-size: 13px;
 	font-weight: 600;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+	overflow-wrap: anywhere;
 }
 
-.signature-name-button {
+.info-name-button {
 	display: inline;
 	padding: 0;
 	border: 0;
@@ -867,19 +867,24 @@ button.outline-link:hover {
 	text-align: left;
 }
 
-.signature-name-button:not(:disabled):hover {
+.info-name-button:not(:disabled):hover {
 	background: transparent;
 	color: var(--accent-strong);
 	text-decoration: underline;
 }
 
-.signature-name-with-stamps {
-	white-space: normal;
+.annotation-head .info-name-button {
+	color: var(--accent-strong);
+	font-size: 13px;
 }
 
 .signature-stamp-group {
 	color: var(--text-muted);
 	font-weight: 400;
+}
+
+.signature-stamp-item {
+	white-space: nowrap;
 }
 
 .signature-stamp-link {
@@ -904,6 +909,17 @@ button.outline-link:hover {
 	flex-wrap: wrap;
 	justify-content: flex-end;
 	gap: 4px;
+}
+
+.doc-font-badges,
+.signature-badges,
+.annotation-head > .font-badge {
+	float: right;
+	margin-left: 8px;
+}
+
+.annotation-row .info-value {
+	white-space: pre-wrap;
 }
 
 .font-badge {
@@ -937,7 +953,7 @@ button.outline-link:hover {
 	color: #803f38;
 }
 
-.signature-line {
+.info-line {
 	display: grid;
 	grid-template-columns: 30px minmax(0, 1fr);
 	align-items: start;
@@ -947,21 +963,21 @@ button.outline-link:hover {
 	line-height: 1.35;
 }
 
-.signature-label {
+.info-label {
 	color: #7b8791;
 	white-space: nowrap;
 }
 
-.signature-value {
+.info-value {
 	min-width: 0;
 	overflow-wrap: anywhere;
 }
 
-.signature-line.ok .signature-value {
+.info-line.ok .info-value {
 	color: var(--accent-strong);
 }
 
-.signature-line.fail .signature-value {
+.info-line.fail .info-value {
 	color: #803f38;
 }
 

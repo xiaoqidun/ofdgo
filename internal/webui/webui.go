@@ -114,24 +114,25 @@ type Session struct {
 
 // DocumentInfo 文档信息
 type DocumentInfo struct {
-	Version         string           `json:"version"`
-	DocType         string           `json:"docType"`
-	Title           string           `json:"title"`
-	Author          string           `json:"author"`
-	Subject         string           `json:"subject"`
-	CreationDate    string           `json:"creationDate"`
-	ModDate         string           `json:"modDate"`
-	PageCount       int              `json:"pageCount"`
-	FontCount       int              `json:"fontCount"`
-	SignatureCount  int              `json:"signatureCount"`
-	SignatureError  string           `json:"signatureError,omitempty"`
-	AttachmentError string           `json:"attachmentError,omitempty"`
-	Attachments     []AttachmentInfo `json:"attachments,omitempty"`
-	Fonts           []FontInfo       `json:"fonts"`
-	Signatures      []SignatureInfo  `json:"signatures"`
-	Pages           []PageInfo       `json:"pages"`
-	Outlines        []OutlineInfo    `json:"outlines,omitempty"`
-	DetailsPending  bool             `json:"detailsPending,omitempty"`
+	Version         string                 `json:"version"`
+	DocType         string                 `json:"docType"`
+	Title           string                 `json:"title"`
+	Author          string                 `json:"author"`
+	Subject         string                 `json:"subject"`
+	CreationDate    string                 `json:"creationDate"`
+	ModDate         string                 `json:"modDate"`
+	PageCount       int                    `json:"pageCount"`
+	FontCount       int                    `json:"fontCount"`
+	SignatureCount  int                    `json:"signatureCount"`
+	SignatureError  string                 `json:"signatureError,omitempty"`
+	AttachmentError string                 `json:"attachmentError,omitempty"`
+	Attachments     []AttachmentInfo       `json:"attachments,omitempty"`
+	Fonts           []FontInfo             `json:"fonts"`
+	Signatures      []SignatureInfo        `json:"signatures"`
+	Annotations     []ofdgo.AnnotationInfo `json:"annotations,omitempty"`
+	Pages           []PageInfo             `json:"pages"`
+	Outlines        []OutlineInfo          `json:"outlines,omitempty"`
+	DetailsPending  bool                   `json:"detailsPending,omitempty"`
 }
 
 // OutlineInfo 目录节点信息
@@ -320,6 +321,7 @@ func (s *Session) Info() DocumentInfo {
 		Pages:     make([]PageInfo, 0, len(s.doc.Pages.Page)),
 		Outlines:  s.doc.OutlineInfos(),
 	}
+	info.Annotations, _ = s.Reader.AnnotationInfos()
 	if attachments, err := s.Reader.Attachments(); err == nil {
 		for _, attachment := range attachments {
 			if attachment.Visible {
