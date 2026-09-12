@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -30,17 +31,21 @@ type Box struct {
 // 入参: s 字符串
 // 返回: Box 矩形对象, error 错误信息
 func ParseBox(s string) (Box, error) {
-	parts := strings.Fields(s)
-	if len(parts) != 4 {
-		return Box{}, fmt.Errorf("invalid box: %s", s)
-	}
 	var values [4]float64
-	for i, part := range parts {
+	i := 0
+	for part := range strings.FieldsSeq(s) {
+		if i == len(values) {
+			return Box{}, fmt.Errorf("invalid box: %s", s)
+		}
 		value, err := strconv.ParseFloat(part, 64)
 		if err != nil {
 			return Box{}, fmt.Errorf("invalid box: %s", s)
 		}
 		values[i] = value
+		i++
+	}
+	if i != len(values) {
+		return Box{}, fmt.Errorf("invalid box: %s", s)
 	}
 	return Box{X: values[0], Y: values[1], W: values[2], H: values[3]}, nil
 }
@@ -146,11 +151,10 @@ func parseFloats(s string) []float64 {
 // 入参: s 字符串
 // 返回: []float64 浮点数数组
 func parseFloatsWithG(s string) []float64 {
-	parts := strings.Fields(s)
 	var result []float64
 	gFlag := false
 	gCount := 0
-	for _, p := range parts {
+	for p := range strings.FieldsSeq(s) {
 		if p == "g" {
 			gFlag = true
 			continue
@@ -166,6 +170,7 @@ func parseFloatsWithG(s string) []float64 {
 		}
 		if gCount > 0 {
 			v, _ := strconv.ParseFloat(p, 64)
+			result = slices.Grow(result, gCount)
 			for j := 0; j < gCount; j++ {
 				result = append(result, v)
 			}

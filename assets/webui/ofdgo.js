@@ -53,7 +53,6 @@ const state = {
 	pageObserver: null,
 	visiblePages: new Set(),
 	scrollFrame: 0,
-	thumbnailCache: new Map(),
 	thumbnailInFlight: new Set(),
 	thumbnailObserver: null,
 	visibleThumbnails: new Set(),
@@ -1549,7 +1548,6 @@ async function processPageRenderQueue() {
 				const page = await callWASM("ofdgoRenderPage", task.index);
 				if (task.openSeq === state.openSeq) {
 					state.pageCache.set(task.index, page);
-					cacheThumbnail(task.index, page.svg);
 				}
 				task.resolve(page);
 			} catch (err) {
@@ -1809,7 +1807,7 @@ function renderPageList() {
 		const thumb = document.createElement("span");
 		thumb.className = "thumb-paper";
 		thumb.setAttribute("aria-hidden", "true");
-		setThumbnailContent(thumb, state.thumbnailCache.get(page.index), page.index, openSeq);
+		setThumbnailContent(thumb, state.pageCache.get(page.index)?.svg, page.index, openSeq);
 
 		const label = document.createElement("span");
 		label.className = "thumb-label";
@@ -1831,18 +1829,11 @@ function renderPageList() {
 }
 
 function resetThumbnails() {
-	state.thumbnailCache.clear();
 	state.visibleThumbnails.clear();
 	state.thumbnailInFlight.clear();
 	if (state.thumbnailObserver) {
 		state.thumbnailObserver.disconnect();
 		state.thumbnailObserver = null;
-	}
-}
-
-function cacheThumbnail(index, svgText) {
-	if (typeof svgText === "string" && svgText) {
-		state.thumbnailCache.set(index, svgText);
 	}
 }
 
@@ -1923,7 +1914,7 @@ async function renderThumbnail(index, openSeq = state.openSeq) {
 	if (openSeq !== state.openSeq || !state.doc) {
 		return;
 	}
-	if (state.thumbnailCache.has(index)) {
+	if (state.pageCache.has(index)) {
 		updateThumbnail(index, openSeq);
 		return;
 	}
@@ -1956,7 +1947,7 @@ function updateThumbnail(index, openSeq = state.openSeq) {
 	}
 	const thumb = el.pageList.querySelector(`[data-page-index="${index}"] .thumb-paper`);
 	if (thumb) {
-		setThumbnailContent(thumb, state.thumbnailCache.get(index), index, openSeq);
+		setThumbnailContent(thumb, state.pageCache.get(index)?.svg, index, openSeq);
 	}
 }
 
