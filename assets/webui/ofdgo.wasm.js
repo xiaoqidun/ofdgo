@@ -11,7 +11,7 @@ self.onmessage = ({ data: { id, name, args } }) => {
 };
 
 function exitWASM(err) {
-	self.postMessage({ type: "exit", error: err?.message || "渲染引擎已退出" });
+	self.postMessage({ type: "exit", error: err?.message || "引擎运行中断" });
 	self.close();
 }
 

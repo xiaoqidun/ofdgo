@@ -5,7 +5,7 @@ const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const DEFAULT_IMAGE_DPI = 300;
 const STATUS = {
 	ready: "选择 OFD 文件",
-	opening: "正在打开 OFD",
+	opening: "正在打开文档",
 	engine: "正在准备引擎",
 	recovering: "正在恢复引擎",
 	fonts: "正在匹配字体",
@@ -46,6 +46,7 @@ const state = {
 	doc: null,
 	pageIndex: 0,
 	scale: 1,
+	rotation: 0,
 	fitMode: "width",
 	continuous: false,
 	renderAnnotations: true,
@@ -84,6 +85,7 @@ const el = {
 	zoomLabel: document.querySelector("#zoomLabel"),
 	fitButton: document.querySelector("#fitButton"),
 	fitHeightButton: document.querySelector("#fitHeightButton"),
+	rotateButton: document.querySelector("#rotateButton"),
 	continuousButton: document.querySelector("#continuousButton"),
 	annotationButton: document.querySelector("#annotationButton"),
 	imageDPI: document.querySelector("#imageDPI"),
@@ -193,6 +195,7 @@ el.zoomOutButton.addEventListener("click", () => setScale(state.scale - 0.1));
 el.zoomInButton.addEventListener("click", () => setScale(state.scale + 0.1));
 el.fitButton.addEventListener("click", fitWidth);
 el.fitHeightButton.addEventListener("click", fitHeight);
+el.rotateButton.addEventListener("click", rotatePages);
 el.continuousButton.addEventListener("click", toggleContinuous);
 el.annotationButton.addEventListener("click", toggleAnnotations);
 document.addEventListener("copy", copySelection);
@@ -371,7 +374,7 @@ async function boot() {
 			});
 		}
 	} catch (err) {
-		setStatus("渲染引擎加载失败");
+		setStatus("引擎加载失败");
 		setEmpty(String(err.message || err));
 		setBusy(false);
 		return;
@@ -418,7 +421,7 @@ function waitForWorker(worker, target) {
 				resolve();
 			} else if (worker.state === "redundant") {
 				worker.removeEventListener("statechange", changed);
-				reject(new Error("离线服务启动失败"));
+				reject(new Error("离线启动失败"));
 			}
 		}
 		worker.addEventListener("statechange", changed);
@@ -436,7 +439,7 @@ function requestOffline(worker, type) {
 		function changed() {
 			if (worker.state === "redundant") {
 				close();
-				reject(new Error("离线服务已更新"));
+				reject(new Error("离线服务中断"));
 			}
 		}
 		channel.port1.onmessage = ({ data }) => {
@@ -458,7 +461,7 @@ async function refreshApplication() {
 		return;
 	}
 	const temporaryFonts = state.userFonts.some((font) => font.source === "upload");
-	const message = temporaryFonts ? "刷新后文件需重新打开，未保存字体需重新添加" : "刷新后文件需重新打开";
+	const message = temporaryFonts ? "刷新后需重新打开文件\n未保存字体需重新添加" : "刷新后需重新打开文件";
 	if ((state.ofdBytes || temporaryFonts) && !window.confirm(message)) {
 		return;
 	}
@@ -534,8 +537,8 @@ async function loadWASM() {
 			markWASMExited(wasmSeq, err);
 			reject(err);
 		};
-		worker.onerror = (event) => fail(new Error(event.message || "渲染引擎加载失败"));
-		worker.onmessageerror = () => fail(new Error("渲染引擎通信失败"));
+		worker.onerror = (event) => fail(new Error(event.message || "引擎加载失败"));
+		worker.onmessageerror = () => fail(new Error("引擎通信失败"));
 		worker.onmessage = ({ data }) => {
 			if (worker !== wasmWorker) {
 				return;
@@ -569,11 +572,11 @@ function markWASMExited(wasmSeq = state.wasmSeq, err) {
 	wasmWorker?.terminate();
 	wasmWorker = null;
 	for (const request of wasmRequests.values()) {
-		request.reject(err || new Error("渲染引擎已退出"));
+		request.reject(err || new Error("引擎运行中断"));
 	}
 	wasmRequests.clear();
 	if (err) {
-		setStatus("渲染引擎异常，正在恢复");
+		setStatus("引擎运行中断");
 	}
 	scheduleWASMRecovery();
 }
@@ -625,7 +628,7 @@ async function openOFD(file) {
 	}
 	state.wasmRecoveries = 0;
 	const openSeq = ++state.openSeq;
-	setBusy(true, "正在读取 OFD", 10, STATUS.opening);
+	setBusy(true, "正在读取文档", 10, STATUS.opening);
 	try {
 		const bytes = new Uint8Array(await file.arrayBuffer());
 		if (openSeq !== state.openSeq) {
@@ -754,7 +757,7 @@ async function openSelectedFonts(event) {
 	try {
 		const fonts = [];
 		for (let i = 0; i < files.length; i += 1) {
-			setProgress(`正在读取字体 ${i + 1}/${files.length}`, 10 + Math.round(i / files.length * 60));
+			setProgress(`正在读取字体 ${i + 1} / ${files.length}`, 10 + Math.round(i / files.length * 60));
 			const file = files[i];
 			fonts.push(createFontRecord(file.name, new Uint8Array(await file.arrayBuffer()), "upload"));
 		}
@@ -785,7 +788,7 @@ async function loadLocalFonts() {
 		return;
 	}
 	if (!canReadLocalFonts()) {
-		setStatus("不支持读取系统字体");
+		setStatus("无法读取系统字体");
 		return;
 	}
 	setBusy(true, state.doc ? "正在匹配字体" : "正在请求授权", 12, state.doc ? STATUS.fonts : "正在请求授权");
@@ -793,7 +796,7 @@ async function loadLocalFonts() {
 		await nextFrame();
 		const available = await queryLocalFonts();
 		if (!state.doc) {
-			setStatus(available.length ? `系统字体已授权 ${available.length} 个` : "未读取到系统字体");
+			setStatus(available.length ? `字体授权完成 ${available.length} 个` : "暂无系统字体");
 			return;
 		}
 		if (await loadDocumentLocalFonts(available)) {
@@ -801,7 +804,7 @@ async function loadLocalFonts() {
 		}
 	} catch (err) {
 		if (err && err.name === "NotAllowedError") {
-			setStatus("系统字体未授权");
+			setStatus("字体尚未授权");
 		} else {
 			setStatus(String(err.message || err));
 		}
@@ -817,10 +820,10 @@ async function requestLocalFontsBeforeOpen() {
 	setBusy(true, "正在请求授权", 12, "正在请求授权");
 	try {
 		const available = await queryLocalFonts();
-		setStatus(available.length ? `系统字体已授权 ${available.length} 个` : "未读取到系统字体");
+		setStatus(available.length ? `字体授权完成 ${available.length} 个` : "暂无系统字体");
 	} catch (err) {
 		if (err && err.name === "NotAllowedError") {
-			setStatus("系统字体未授权");
+			setStatus("字体尚未授权");
 			return;
 		}
 		setStatus(String(err.message || err));
@@ -859,7 +862,7 @@ async function autoLoadDocumentLocalFonts(openSeq) {
 		return await loadDocumentLocalFonts(available, openSeq);
 	} catch (err) {
 		if (err && err.name === "NotAllowedError") {
-			setStatus("系统字体未授权");
+			setStatus("字体尚未授权");
 			return false;
 		}
 		setStatus(String(err.message || err));
@@ -871,14 +874,14 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	const docFonts = state.doc?.fonts || [];
 	if (!docFonts.length) {
 		state.localFonts = [];
-		setStatus("暂无字体");
+		setStatus("暂无文档字体");
 		updateFontSummary();
 		renderFontList();
 		return false;
 	}
 	if (docFonts.every((font) => font.embedded)) {
 		state.localFonts = [];
-		setStatus("文档字体均为内嵌");
+		setStatus("字体均为内嵌");
 		updateFontSummary();
 		renderFontList();
 		return false;
@@ -887,10 +890,10 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	if (openSeq !== state.openSeq) {
 		return false;
 	}
-	const emptyStatus = available.length === 0 ? "未读取到系统字体" : "未匹配到所需字体";
+	const emptyStatus = available.length === 0 ? "暂无系统字体" : "暂无匹配字体";
 	const fonts = [];
 	for (let i = 0; i < selected.length; i += 1) {
-		setProgress(`正在读取字体 ${i + 1}/${selected.length}`, 20 + Math.round(i / selected.length * 60));
+		setProgress(`正在读取字体 ${i + 1} / ${selected.length}`, 20 + Math.round(i / selected.length * 60));
 		const item = selected[i];
 		const blob = await item.blob();
 		if (openSeq !== state.openSeq) {
@@ -905,7 +908,7 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 		return false;
 	}
 	state.localFonts = fonts;
-	setStatus(fonts.length ? `系统字体已加载 ${fonts.length} 个` : emptyStatus);
+	setStatus(fonts.length ? `字体加载完成 ${fonts.length} 个` : emptyStatus);
 	updateFontSummary();
 	renderFontList();
 	return fonts.length > 0;
@@ -1167,7 +1170,7 @@ function fontSourceText(source) {
 function updateLocalFontButton() {
 	const supported = canReadLocalFonts();
 	el.localFontButton.disabled = !supported;
-	el.localFontButton.title = supported ? "读取系统字体" : "不支持读取系统字体";
+	el.localFontButton.title = supported ? "读取系统字体" : "无法读取系统字体";
 	updateFontPermissionHint();
 }
 
@@ -1215,9 +1218,9 @@ async function openDocument(options = {}) {
 		updateFontSummary();
 		renderFontList();
 	}
-	setBusy(true, "正在打开 OFD", 20, STATUS.opening);
+	setBusy(true, "正在打开文档", 20, STATUS.opening);
 	try {
-		setProgress("正在解析 OFD", 52);
+		setProgress("正在解析文档", 52);
 		await nextFrame();
 		if (openSeq !== state.openSeq) {
 			return;
@@ -1239,6 +1242,7 @@ async function openDocument(options = {}) {
 		state.pageIndex = pageIndex;
 		state.scale = options.scale || 1;
 		if (!options.fitMode) {
+			state.rotation = 0;
 			setContinuous(window.matchMedia("(max-width: 640px)").matches);
 		}
 		state.fitMode = options.fitMode || (!state.continuous && pageCount === 1 ? "height" : "width");
@@ -1373,7 +1377,7 @@ async function downloadAttachment(attachment) {
 			return;
 		}
 		downloadBytes(result.bytes, "application/octet-stream", attachment.fileName);
-		setStatus(`附件已下载 ${formatBytes(result.bytes.length, "0 KB")}`);
+		setStatus(`附件下载完成 ${formatBytes(result.bytes.length, "0 KB")}`);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			showError(err, false);
@@ -1403,7 +1407,7 @@ async function exportPDF() {
 		setProgress("正在保存 PDF", 86);
 		const bytes = result.bytes;
 		downloadBytes(bytes, "application/pdf", pdfFileName());
-		setStatus(`PDF 已导出 ${formatBytes(result.size || bytes.length)}`);
+		setStatus(`PDF 导出完成 ${formatBytes(result.size || bytes.length)}`);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			showError(err, false);
@@ -1441,7 +1445,7 @@ async function exportCurrentPage() {
 		setProgress(`正在保存 ${result.label || label}`, 86);
 		const bytes = result.bytes;
 		downloadBytes(bytes, result.mime || info?.mime || "application/octet-stream", fileName);
-		setStatus(`${result.label || label} 已导出 ${formatBytes(result.size || bytes.length, result.label || label)}`);
+		setStatus(`${result.label || label} 导出完成 ${formatBytes(result.size || bytes.length, result.label || label)}`);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			showError(err, false);
@@ -1829,13 +1833,13 @@ function syncCurrentPageFromScroll() {
 function pageShellFromView() {
 	const rect = el.viewerPanel.getBoundingClientRect();
 	const x = rect.left + rect.width / 2;
+	if (el.viewerPanel.scrollTop + el.viewerPanel.clientHeight >= el.viewerPanel.scrollHeight - 1) {
+		const shell = pageShell(state.pageIndex);
+		const bounds = shell?.getBoundingClientRect();
+		return bounds && bounds.top >= rect.top - 1 && bounds.bottom <= rect.bottom + 1
+			? shell : el.svgHost.lastElementChild;
+	}
 	if (state.continuous) {
-		if (el.viewerPanel.scrollTop + el.viewerPanel.clientHeight >= el.viewerPanel.scrollHeight - 1) {
-			const shell = pageShell(state.pageIndex);
-			const bounds = shell?.getBoundingClientRect();
-			return bounds && bounds.top >= rect.top - 1 && bounds.bottom <= rect.bottom + 1
-				? shell : el.svgHost.lastElementChild;
-		}
 		return pageShellAtPoint(x, rect.top + 1);
 	}
 	return pageShellAtPoint(x, rect.top + rect.height * 0.45)
@@ -1897,14 +1901,19 @@ function layoutPages() {
 function layoutPageShell(shell, page) {
 	const width = Math.max(1, page.width * MM_TO_PX);
 	const height = Math.max(1, page.height * MM_TO_PX);
-	const scale = state.fitMode === "width" ? state.scale * currentPageInfo().width / page.width : state.scale;
-	shell.style.width = `${width * scale}px`;
-	shell.style.height = `${height * scale}px`;
+	const size = pageViewSize(page);
+	const viewWidth = Math.max(1, size.width * MM_TO_PX);
+	const viewHeight = Math.max(1, size.height * MM_TO_PX);
+	const scale = state.fitMode === "width" ? state.scale * pageViewSize(currentPageInfo()).width / size.width : state.scale;
+	shell.style.width = `${viewWidth * scale}px`;
+	shell.style.height = `${viewHeight * scale}px`;
 	const surface = shell.querySelector(".page-surface");
 	if (surface) {
 		surface.style.width = `${width}px`;
 		surface.style.height = `${height}px`;
-		surface.style.transform = `scale(${scale})`;
+		const x = state.rotation === 90 || state.rotation === 180 ? viewWidth : 0;
+		const y = state.rotation >= 180 ? viewHeight : 0;
+		surface.style.transform = `scale(${scale}) translate(${x}px, ${y}px) rotate(${state.rotation}deg)`;
 	}
 }
 
@@ -2025,10 +2034,10 @@ async function searchDocument() {
 			for (const match of matches || []) {
 				state.searchMatches.push({ ...match, page });
 			}
-			el.searchStatus.textContent = `搜索 ${page + 1}/${pageCount} 页`;
+			el.searchStatus.textContent = `正在搜索 ${page + 1} / ${pageCount} 页`;
 			renderSearchResults();
 		}
-		el.searchStatus.textContent = state.searchMatches.length ? "搜索完成" : "未找到文字";
+		el.searchStatus.textContent = state.searchMatches.length ? "搜索完成" : "暂无结果";
 		if (state.searchIndex < 0 && state.searchMatches.length && !el.searchPanel.hidden && state.showPages) {
 			await selectSearchMatch(0);
 		}
@@ -2204,9 +2213,7 @@ function renderPageList() {
 		button.dataset.pageIndex = String(page.index);
 		button.title = `${formatSize(page.width)} x ${formatSize(page.height)} mm`;
 		setPageItemCurrent(button, page.index === state.pageIndex);
-		if (page.width > 0 && page.height > 0) {
-			button.style.setProperty("--thumb-ratio", `${page.width} / ${page.height}`);
-		}
+		layoutThumbnail(button, page);
 
 		const thumb = document.createElement("span");
 		thumb.className = "thumb-paper";
@@ -2239,6 +2246,17 @@ function resetThumbnails() {
 		state.thumbnailObserver.disconnect();
 		state.thumbnailObserver = null;
 	}
+}
+
+function layoutThumbnail(button, page) {
+	if (page.width <= 0 || page.height <= 0) {
+		return;
+	}
+	const size = pageViewSize(page);
+	button.style.setProperty("--thumb-ratio", `${size.width} / ${size.height}`);
+	button.style.setProperty("--thumb-width", `${page.width / size.width * 100}%`);
+	button.style.setProperty("--thumb-height", `${page.height / size.height * 100}%`);
+	button.style.setProperty("--thumb-rotation", `${state.rotation}deg`);
 }
 
 function setThumbnailContent(container, svgText, index, openSeq = state.openSeq) {
@@ -2548,7 +2566,7 @@ function signatureReferenceText(signature) {
 		return "";
 	}
 	const status = signatureReferenceStatus(signature);
-	return `${status === "ok" ? "通过" : status === "fail" ? "失败" : "未验"} ${passed}/${count}`;
+	return `${status === "ok" ? "通过" : status === "fail" ? "失败" : "未验"} ${passed} / ${count}`;
 }
 
 function signatureReferenceStatus(signature) {
@@ -2611,7 +2629,7 @@ async function focusPageRegion(region, label) {
 		return;
 	}
 	highlightPageRegion(region);
-	setStatus(`${label}已定位 第 ${region.page} 页`);
+	setStatus(`${label}定位完成 第 ${region.page} 页`);
 }
 
 function highlightPageRegion(region) {
@@ -2623,11 +2641,11 @@ function highlightPageRegion(region) {
 	}
 	const mark = document.createElement("div");
 	mark.className = "region-highlight";
-	mark.style.left = `${region.x * MM_TO_PX * state.scale}px`;
-	mark.style.top = `${region.y * MM_TO_PX * state.scale}px`;
-	mark.style.width = `${region.width * MM_TO_PX * state.scale}px`;
-	mark.style.height = `${region.height * MM_TO_PX * state.scale}px`;
-	shell.append(mark);
+	mark.style.left = `${region.x * MM_TO_PX}px`;
+	mark.style.top = `${region.y * MM_TO_PX}px`;
+	mark.style.width = `${region.width * MM_TO_PX}px`;
+	mark.style.height = `${region.height * MM_TO_PX}px`;
+	shell.querySelector(".page-surface").append(mark);
 	mark.scrollIntoView({ block: "nearest", inline: "nearest" });
 	window.setTimeout(() => mark.remove(), 1800);
 }
@@ -2797,6 +2815,29 @@ function toggleContinuous() {
 	}
 }
 
+function rotatePages() {
+	if (document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	state.rotation = (state.rotation + 90) % 360;
+	clearRegionHighlights();
+	el.viewerPanel.classList.remove("single-page-fits-height");
+	layoutPages();
+	for (const page of state.doc.pages) {
+		layoutThumbnail(el.pageList.children.item(page.index), page);
+	}
+	if (state.fitMode === "free") {
+		updateFitSpace();
+	} else {
+		applyFit(false);
+	}
+	scrollToPage(state.pageIndex);
+}
+
+function pageViewSize(page) {
+	return state.rotation % 180 ? { width: page.height, height: page.width } : page;
+}
+
 function fitWidth(updateStatus = true) {
 	const page = currentPageInfo();
 	if (!page) {
@@ -2809,12 +2850,16 @@ function fitWidth(updateStatus = true) {
 }
 
 function fitWidthScale(page) {
+	page = pageViewSize(page);
 	const space = pageSpace();
 	const width = Math.max(1, page.width * MM_TO_PX);
 	let available = Math.max(1, el.viewerPanel.clientWidth - space * 2);
 	if (!viewerHasVerticalScrollbar()) {
 		const height = state.continuous
-			? state.doc.pages.reduce((total, item) => total + available * item.height / item.width, 0)
+			? state.doc.pages.reduce((total, item) => {
+				const size = pageViewSize(item);
+				return total + available * size.height / size.width;
+			}, 0)
 			: Math.max(1, page.height * MM_TO_PX) * (available / width);
 		if (height > Math.max(1, el.viewerPanel.clientHeight - space * 2)) {
 			available = Math.max(1, available - scrollbarWidth());
@@ -2831,13 +2876,14 @@ function fitHeight(updateStatus = true) {
 	const space = pageSpace();
 	let availableWidth = Math.max(1, el.viewerPanel.clientWidth - space * 2);
 	let availableHeight = Math.max(1, el.viewerPanel.clientHeight - space * 2);
-	const width = Math.max(1, page.width * MM_TO_PX);
-	const height = Math.max(1, page.height * MM_TO_PX);
+	const size = pageViewSize(page);
+	const width = Math.max(1, size.width * MM_TO_PX);
+	const height = Math.max(1, size.height * MM_TO_PX);
 	if (state.continuous) {
 		availableWidth = Math.max(1, el.viewerPanel.offsetWidth);
 		availableHeight = Math.max(1, el.viewerPanel.offsetHeight);
-		const contentWidth = state.doc.pages.reduce((max, item) => Math.max(max, item.width), 0) * MM_TO_PX;
-		const contentHeight = state.doc.pages.reduce((total, item) => total + item.height, 0) * MM_TO_PX;
+		const contentWidth = state.doc.pages.reduce((max, item) => Math.max(max, pageViewSize(item).width), 0) * MM_TO_PX;
+		const contentHeight = state.doc.pages.reduce((total, item) => total + pageViewSize(item).height, 0) * MM_TO_PX;
 		const scale = Math.min(availableWidth / width, availableHeight / height);
 		const needsVerticalScrollbar = scale > availableHeight / contentHeight;
 		const needsHorizontalScrollbar = scale > availableWidth / contentWidth;
@@ -2958,7 +3004,7 @@ function updateFitSpace() {
 		return;
 	}
 	const shell = pageShell(state.pageIndex);
-	const height = shell ? shell.getBoundingClientRect().height : Math.max(1, page.height * MM_TO_PX * state.scale);
+	const height = shell ? shell.getBoundingClientRect().height : Math.max(1, pageViewSize(page).height * MM_TO_PX * state.scale);
 	const base = pageSpace();
 	el.viewerPanel.classList.toggle("single-page-fits-height", state.doc.pageCount === 1 && height <= el.viewerPanel.clientHeight - base * 2);
 	const space = state.continuous ? 0 : Math.max(base, (el.viewerPanel.clientHeight - height) / 2);
@@ -2979,6 +3025,7 @@ function updateControls() {
 	el.zoomInButton.disabled = !hasDoc || state.scale >= 4;
 	el.fitButton.disabled = !hasDoc;
 	el.fitHeightButton.disabled = !hasDoc;
+	el.rotateButton.disabled = !hasDoc;
 	el.continuousButton.disabled = !hasDoc;
 	el.fitButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "width");
 	el.fitHeightButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "height");
@@ -2998,10 +3045,10 @@ function updateAnnotationButton() {
 async function callWASM(name, ...args) {
 	if (state.wasmExited) {
 		scheduleWASMRecovery();
-		throw new Error(state.wasmRecovering ? "渲染引擎正在恢复" : "渲染引擎已退出，正在恢复");
+		throw new Error(state.wasmRecovering ? STATUS.recovering : "引擎运行中断");
 	}
 	if (!state.ready) {
-		throw new Error("渲染引擎未初始化");
+		throw new Error("引擎尚未就绪");
 	}
 	return new Promise((resolve, reject) => {
 		const id = ++wasmRequestID;

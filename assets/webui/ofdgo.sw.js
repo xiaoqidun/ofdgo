@@ -106,12 +106,12 @@ async function updateBundle(meta) {
 	const resources = await Promise.all(ASSETS.map(async (url) => {
 		const response = await fetch(new Request(url, { cache: "no-store" }));
 		if (!response.ok || response.redirected) {
-			throw new Error("应用资源下载失败");
+			throw new Error("资源下载失败");
 		}
 		return { url, response };
 	}));
 	if (resources.some(({ response }) => response.headers.get("X-OFDGo-Checksum") !== BUNDLE_CHECKSUM)) {
-		throw new Error("应用资源版本不一致");
+		throw new Error("资源校验失败");
 	}
 	const bundle = { name: CACHE_PREFIX + crypto.randomUUID(), assets: ASSETS };
 	try {
