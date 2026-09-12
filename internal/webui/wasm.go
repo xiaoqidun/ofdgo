@@ -39,6 +39,7 @@ func RunWASM() {
 	registerCallback("ofdgoDocumentInfo", documentInfo)
 	registerCallback("ofdgoAttachmentData", attachmentData)
 	registerCallback("ofdgoRenderPage", renderPage)
+	registerCallback("ofdgoSearchPage", searchPage)
 	registerCallback("ofdgoExportFormats", exportFormats)
 	registerCallback("ofdgoExportPage", exportPage)
 	registerCallback("ofdgoExportPDF", exportPDF)
@@ -118,7 +119,10 @@ func configureDocument(args []js.Value) (any, error) {
 			return nil, err
 		}
 	}
-	currentSession.Renderer.RenderAnnotations = args[1].Bool()
+	if currentSession.Renderer.RenderAnnotations != args[1].Bool() {
+		currentSession.Renderer.RenderAnnotations = args[1].Bool()
+		clear(currentSession.textCache)
+	}
 	return currentSession.Summary(), nil
 }
 
@@ -179,6 +183,16 @@ func renderPage(args []js.Value) (any, error) {
 		"svg":    page.SVG,
 		"links":  links,
 	}), nil
+}
+
+// searchPage 搜索OFD页面文字
+// 入参: args 浏览器参数
+// 返回: any 搜索结果, error 错误信息
+func searchPage(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	return currentSession.SearchPage(args[0].Int(), args[1].String())
 }
 
 // exportFormats 获取导出格式

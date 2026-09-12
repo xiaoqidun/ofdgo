@@ -32,6 +32,10 @@ const state = {
 	openSeq: 0,
 	pageSeq: 0,
 	fontSeq: 0,
+	searchSeq: 0,
+	searchQuery: "",
+	searchMatches: [],
+	searchIndex: -1,
 	localFonts: [],
 	userFonts: [],
 	fontSyncPending: false,
@@ -99,6 +103,15 @@ const el = {
 	outlinesTab: document.querySelector("#outlinesTab"),
 	pageList: document.querySelector("#pageList"),
 	outlineList: document.querySelector("#outlineList"),
+	searchTab: document.querySelector("#searchTab"),
+	searchPanel: document.querySelector("#searchPanel"),
+	searchForm: document.querySelector("#searchForm"),
+	searchInput: document.querySelector("#searchInput"),
+	searchStatus: document.querySelector("#searchStatus"),
+	searchCount: document.querySelector("#searchCount"),
+	searchPrev: document.querySelector("#searchPrev"),
+	searchNext: document.querySelector("#searchNext"),
+	searchResults: document.querySelector("#searchResults"),
 	metaPanel: document.querySelector(".meta-panel"),
 	appPanel: document.querySelector("#appPanel"),
 	offlineStatus: document.querySelector("#offlineStatus"),
@@ -128,14 +141,43 @@ const el = {
 el.ofdButton.addEventListener("click", openOFDFile);
 el.togglePagesButton.addEventListener("click", () => toggleSidebar("pages"));
 el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
-el.pagesTab.addEventListener("click", () => showOutlines(false));
-el.outlinesTab.addEventListener("click", () => showOutlines(true));
+el.pagesTab.addEventListener("click", () => showNavigation(el.pagesTab));
+el.outlinesTab.addEventListener("click", () => showNavigation(el.outlinesTab));
+el.searchTab.addEventListener("click", () => {
+	showNavigation(el.searchTab);
+	el.searchInput.focus({ preventScroll: true });
+});
 el.navigationTabs.addEventListener("keydown", (event) => {
 	if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
 		event.preventDefault();
-		const outlines = event.key === "End" || (event.key !== "Home" && el.outlineList.hidden);
-		showOutlines(outlines);
-		(outlines ? el.outlinesTab : el.pagesTab).focus();
+		const tabs = [el.pagesTab, el.outlinesTab, el.searchTab].filter((tab) => !tab.hidden);
+		const current = tabs.indexOf(event.target);
+		const index = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
+			: (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+		showNavigation(tabs[index]);
+		tabs[index].focus();
+	}
+});
+el.searchForm.addEventListener("submit", (event) => {
+	event.preventDefault();
+	searchDocument();
+});
+el.searchInput.addEventListener("input", () => resetSearch(false));
+el.searchPrev.addEventListener("click", () => selectSearchMatch(Math.max(0, state.searchIndex) - 1));
+el.searchNext.addEventListener("click", () => selectSearchMatch(state.searchIndex + 1));
+document.addEventListener("keydown", (event) => {
+	if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f" && state.doc) {
+		event.preventDefault();
+		if (!state.showPages) {
+			toggleSidebar("pages");
+		}
+		showNavigation(el.searchTab);
+		el.searchInput.focus({ preventScroll: true });
+		el.searchInput.select();
+	} else if (event.key === "Escape" && !el.searchPanel.hidden) {
+		resetSearch();
+		showNavigation(el.pagesTab);
+		el.pagesTab.focus();
 	}
 });
 el.fontAddButton.addEventListener("click", () => openFontFile(el.fontInput));
@@ -1145,6 +1187,7 @@ async function openDocument(options = {}) {
 		return;
 	}
 	const resetLocalFonts = !options.skipAutoFonts;
+	resetSearch();
 	if (resetLocalFonts) {
 		state.localFonts = [];
 		updateFontSummary();
@@ -1619,6 +1662,7 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 		surface.append(anchor);
 	}
 	shell.classList.add("rendered");
+	renderSearchHighlights(index);
 	if (state.doc?.pages?.[index]) {
 		layoutPageShell(shell, state.doc.pages[index]);
 	}
@@ -1823,25 +1867,190 @@ function prefixSVGIds(svg, prefix) {
 	}
 }
 
-function showOutlines(show) {
-	el.pageList.hidden = show;
-	el.outlineList.hidden = !show;
-	el.pagesTab.setAttribute("aria-selected", String(!show));
-	el.outlinesTab.setAttribute("aria-selected", String(show));
-	el.pagesTab.tabIndex = show ? -1 : 0;
-	el.outlinesTab.tabIndex = show ? 0 : -1;
+function showNavigation(selected) {
+	for (const [tab, panel] of [[el.pagesTab, el.pageList], [el.outlinesTab, el.outlineList], [el.searchTab, el.searchPanel]]) {
+		const active = tab === selected;
+		panel.hidden = !active;
+		tab.setAttribute("aria-selected", String(active));
+		tab.tabIndex = active ? 0 : -1;
+	}
 	el.pageListPanel.scrollTop = 0;
 }
 
 function renderOutlines() {
 	const outlines = state.doc.outlines || [];
-	el.pageListTitle.hidden = outlines.length > 0;
-	el.navigationTabs.hidden = outlines.length === 0;
+	el.pageListTitle.hidden = true;
+	el.navigationTabs.hidden = false;
+	el.outlinesTab.hidden = outlines.length === 0;
 	el.outlineList.replaceChildren();
 	if (outlines.length > 0) {
 		el.outlineList.append(createOutlineList(outlines));
 	}
-	showOutlines(false);
+	showNavigation(el.pagesTab);
+}
+
+function resetSearch(clearInput = true) {
+	state.searchSeq += 1;
+	state.searchQuery = "";
+	state.searchMatches = [];
+	state.searchIndex = -1;
+	if (clearInput) {
+		el.searchInput.value = "";
+	}
+	el.searchStatus.textContent = "输入文字";
+	el.searchResults.replaceChildren();
+	updateSearchCount();
+	clearSearchHighlights();
+}
+
+async function searchDocument() {
+	if (!state.doc || document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	const query = el.searchInput.value.trim();
+	if (query && query === state.searchQuery) {
+		await selectSearchMatch(state.searchIndex + 1);
+		return;
+	}
+	resetSearch(false);
+	if (!query) {
+		return;
+	}
+	state.searchQuery = query;
+	const seq = state.searchSeq;
+	const openSeq = state.openSeq;
+	const pageCount = state.doc.pageCount;
+	try {
+		for (let page = 0; page < pageCount; page += 1) {
+			await waitForPaint();
+			if (seq !== state.searchSeq || openSeq !== state.openSeq) {
+				return;
+			}
+			const matches = await callWASM("ofdgoSearchPage", page, query);
+			if (seq !== state.searchSeq || openSeq !== state.openSeq) {
+				return;
+			}
+			for (const match of matches || []) {
+				state.searchMatches.push({ ...match, page });
+			}
+			el.searchStatus.textContent = `搜索 ${page + 1}/${pageCount} 页`;
+			renderSearchResults();
+		}
+		el.searchStatus.textContent = state.searchMatches.length ? "搜索完成" : "未找到文字";
+		if (state.searchIndex < 0 && state.searchMatches.length && !el.searchPanel.hidden && state.showPages) {
+			await selectSearchMatch(0);
+		}
+	} catch (err) {
+		if (seq === state.searchSeq && openSeq === state.openSeq) {
+			state.searchQuery = "";
+			el.searchStatus.textContent = "搜索失败";
+			showError(err, false);
+		}
+	}
+}
+
+function updateSearchCount() {
+	const count = state.searchMatches.length;
+	el.searchCount.textContent = `${state.searchIndex + 1} / ${count}`;
+	el.searchPrev.disabled = count === 0;
+	el.searchNext.disabled = count === 0;
+}
+
+function renderSearchResults() {
+	const start = Math.floor(Math.max(0, state.searchIndex) / 50) * 50;
+	if (el.searchResults.firstElementChild && Number(el.searchResults.firstElementChild.dataset.matchIndex) !== start) {
+		el.searchResults.replaceChildren();
+	}
+	for (let i = start + el.searchResults.childElementCount; i < Math.min(start + 50, state.searchMatches.length); i += 1) {
+		const match = state.searchMatches[i];
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = "search-result";
+		button.dataset.matchIndex = String(i);
+		const page = document.createElement("span");
+		page.className = "search-page";
+		page.textContent = `第 ${match.page + 1} 页`;
+		const text = document.createElement("span");
+		const mark = document.createElement("mark");
+		mark.textContent = match.text;
+		text.append(match.before, mark, match.after);
+		button.append(page, text);
+		button.addEventListener("click", () => selectSearchMatch(i));
+		el.searchResults.append(button);
+	}
+	for (const button of el.searchResults.children) {
+		button.setAttribute("aria-current", String(Number(button.dataset.matchIndex) === state.searchIndex));
+	}
+	updateSearchCount();
+}
+
+async function selectSearchMatch(index) {
+	const count = state.searchMatches.length;
+	if (!count || document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	index = (index + count) % count;
+	state.searchIndex = index;
+	const match = state.searchMatches[index];
+	const seq = state.searchSeq;
+	const openSeq = state.openSeq;
+	clearSearchHighlights();
+	renderSearchResults();
+	if (!await renderPage(match.page, { fit: false, scroll: false })) {
+		return;
+	}
+	await nextFrame();
+	if (seq !== state.searchSeq || openSeq !== state.openSeq || state.searchIndex !== index || state.pageIndex !== match.page) {
+		return;
+	}
+	renderSearchHighlights(match.page);
+	const mark = pageShell(match.page).querySelector(".search-highlight");
+	if (mark) {
+		const box = mark.getBoundingClientRect();
+		const viewer = el.viewerPanel.getBoundingClientRect();
+		el.viewerPanel.scrollTop += box.top + box.height / 2 - viewer.top - el.viewerPanel.clientHeight / 2;
+		if (box.left < viewer.left) {
+			el.viewerPanel.scrollLeft += box.left - viewer.left;
+		} else if (box.right > viewer.left + el.viewerPanel.clientWidth) {
+			el.viewerPanel.scrollLeft += box.right - viewer.left - el.viewerPanel.clientWidth;
+		}
+	} else {
+		scrollToPage(match.page);
+	}
+	const button = el.searchResults.querySelector("[aria-current=true]");
+	const row = button.getBoundingClientRect();
+	const panel = el.searchResults.getBoundingClientRect();
+	if (row.top < panel.top) {
+		el.searchResults.scrollTop += row.top - panel.top;
+	} else if (row.bottom > panel.bottom) {
+		el.searchResults.scrollTop += row.bottom - panel.bottom;
+	}
+}
+
+function clearSearchHighlights() {
+	for (const mark of el.svgHost.querySelectorAll(".search-highlight")) {
+		mark.remove();
+	}
+}
+
+function renderSearchHighlights(index) {
+	const match = state.searchMatches[state.searchIndex];
+	if (!match || match.page !== index) {
+		return;
+	}
+	const surface = pageShell(index).querySelector(".page-surface");
+	for (const mark of surface.querySelectorAll(".search-highlight")) {
+		mark.remove();
+	}
+	for (const box of match.boxes || []) {
+		const mark = document.createElement("span");
+		mark.className = "search-highlight";
+		mark.style.left = `${box.X * MM_TO_PX}px`;
+		mark.style.top = `${box.Y * MM_TO_PX}px`;
+		mark.style.width = `${box.W * MM_TO_PX}px`;
+		mark.style.height = `${box.H * MM_TO_PX}px`;
+		surface.append(mark);
+	}
 }
 
 function createOutlineList(outlines) {

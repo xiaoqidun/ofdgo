@@ -173,6 +173,9 @@ func (s *pathStyle) scale(ctm Matrix) {
 // renderPath 渲染路径
 // 入参: ctx 画布上下文, obj 路径对象, pageH 页面高度, defaults 默认绘制参数, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
 func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64, defaults *DrawParam, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
+	if r.pageText != nil {
+		return
+	}
 	if obj.Visible != nil && !*obj.Visible {
 		return
 	}
@@ -499,7 +502,9 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ob
 				textObj.Alpha = nil
 				textObj.FillColor = &FillColor{Value: "0 0 0"}
 				textObj.StrokeColor = &StrokeColor{Value: "0 0 0"}
-				r.renderText(ctx, textObj, 0, r.drawParamDefaults(area.DrawParam, nil), nil, false, nil)
+				textRenderer := *r
+				textRenderer.pageText = nil
+				textRenderer.renderText(ctx, textObj, 0, r.drawParamDefaults(area.DrawParam, nil), nil, false, nil)
 			}
 		}
 		if renderer.path == nil {

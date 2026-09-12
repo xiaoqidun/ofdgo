@@ -45,6 +45,7 @@ type Renderer struct {
 	fontDirs              []string
 	fontFS                []fs.FS
 	decodeImages          bool
+	pageText              *PageText
 }
 
 // RendererOption 渲染器配置选项

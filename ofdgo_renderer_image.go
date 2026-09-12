@@ -30,6 +30,9 @@ import (
 // renderImage 渲染图片
 // 入参: ctx 画布上下文, obj 图片对象, pageH 页面高度, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM, parentClip 父级裁剪路径
 func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float64, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
+	if r.pageText != nil {
+		return
+	}
 	if obj.Visible != nil && !*obj.Visible {
 		return
 	}

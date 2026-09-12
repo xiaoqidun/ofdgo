@@ -153,7 +153,28 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		fontStyle |= canvas.FontBold
 	}
 	ff := r.loadFont(fontID)
+	var textRun *TextRun
+	if r.pageText != nil {
+		textRun = r.pageText.addRun(obj)
+	}
 	if ff == nil {
+		if textRun != nil {
+			box, _ := ParseBox(obj.Boundary)
+			boundaryCTM := TranslationMatrix(box.X, box.Y)
+			if parentCTM != nil {
+				if boundaryInCTM {
+					boundaryCTM = parentCTM.Multiply(boundaryCTM)
+				} else {
+					boundaryCTM = boundaryCTM.Multiply(*parentCTM)
+				}
+			}
+			m := canvas.Matrix{{boundaryCTM.a, -boundaryCTM.c, boundaryCTM.e}, {-boundaryCTM.b, boundaryCTM.d, pageH - boundaryCTM.f}}
+			path := canvas.Rectangle(box.W, box.H).Translate(0, -box.H).Transform(m)
+			box = textPathBox(applyClipPath(path, clipPath), pageH)
+			for i := range textRun.Boxes {
+				textRun.Boxes[i] = box
+			}
+		}
 		ctx.Pop()
 		return
 	}
@@ -172,6 +193,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		advanceX, advanceY = 0, -1
 	}
 	codePos := 0
+	textPos := 0
 	for _, tc := range obj.TextCode {
 		var runes []rune
 		var glyphs []textGlyph
@@ -181,6 +203,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		} else {
 			runes = textCodeRunes(tc.Value)
 			glyphs = textCodeGlyphs(runes, glyphTransforms, codePos)
+		}
+		var spans [][2]int
+		if textRun != nil && tc.Index == "" {
+			spans = textGlyphSpans(runes, glyphTransforms, codePos)
 		}
 		dxs, dys := parseFloats(tc.DeltaX), parseFloats(tc.DeltaY)
 		xs, ys := parseFloats(tc.X), parseFloats(tc.Y)
@@ -246,6 +272,27 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			advanceLimit := 0.0
 			if obj.CharDirection == 0 {
 				advanceLimit = textGlyphAdvanceLimit(dxs, dys, xs, i, len(glyphs), cx)
+			}
+			if textRun != nil {
+				if i < len(spans) {
+					if glyphPath == nil {
+						glyphPath, _ = r.cachedTextGlyphPath(face, glyph)
+					}
+					scaleX := hScale
+					if drawAsGlyphPath && advanceLimit > 0 && glyphWidth*scaleX > advanceLimit {
+						scaleX = advanceLimit / glyphWidth
+					}
+					m := canvas.Identity.Translate(canvasX, canvasY)
+					if useTextMatrix {
+						m = m.Mul(glyphMatrix)
+					}
+					path := glyphPath.Copy().Transform(m.Scale(scaleX, 1))
+					box := textPathBox(applyClipPath(path, clipPath), pageH)
+					for j := spans[i][0]; j < spans[i][1]; j++ {
+						textRun.Boxes[textPos+j] = unionTextBox(textRun.Boxes[textPos+j], box)
+					}
+				}
+				continue
 			}
 			if shouldStroke {
 				scaleX := hScale
@@ -392,6 +439,13 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			}
 		}
 		codePos += len(runes)
+		if textRun != nil {
+			if tc.Index == "" {
+				textPos += len(runes)
+			} else {
+				textPos++
+			}
+		}
 	}
 	ctx.Pop()
 }

@@ -22,13 +22,13 @@
 			</div>
 			<div class="toolbar-space"></div>
 			<div class="tool-group">
-				<button id="prevButton" class="icon-button" type="button" title="上一页" disabled>&lsaquo;</button>
+				<button id="prevButton" class="icon-button arrow-prev" type="button" title="上一页" aria-label="上一页" disabled></button>
 				<label class="page-control">
 					<input id="pageInput" type="number" min="1" value="0" disabled>
 					<span>/</span>
 					<span id="pageTotal">0</span>
 				</label>
-				<button id="nextButton" class="icon-button" type="button" title="下一页" disabled>&rsaquo;</button>
+				<button id="nextButton" class="icon-button arrow-next" type="button" title="下一页" aria-label="下一页" disabled></button>
 			</div>
 			<div class="tool-group">
 				<button id="zoomOutButton" class="icon-button" type="button" title="缩小" disabled>-</button>
@@ -58,9 +58,23 @@
 				<div id="navigationTabs" class="navigation-tabs" role="tablist" aria-label="文档导航" hidden>
 					<button id="pagesTab" type="button" role="tab" aria-selected="true" aria-controls="pageList">页面</button>
 					<button id="outlinesTab" type="button" role="tab" aria-selected="false" aria-controls="outlineList" tabindex="-1">目录</button>
+					<button id="searchTab" type="button" role="tab" aria-selected="false" aria-controls="searchPanel" tabindex="-1">搜索</button>
 				</div>
 				<div id="pageList" class="page-list" role="tabpanel" aria-label="页面"></div>
 				<div id="outlineList" role="tabpanel" aria-label="目录" hidden></div>
+				<div id="searchPanel" role="tabpanel" aria-label="搜索" hidden>
+					<form id="searchForm" class="search-form" role="search">
+						<input id="searchInput" type="search" aria-label="搜索文字" placeholder="搜索文字" autocomplete="off">
+						<button type="submit" class="button">搜索</button>
+					</form>
+					<div class="search-tools">
+						<span id="searchStatus" role="status" aria-live="polite">输入文字</span>
+						<span id="searchCount">0 / 0</span>
+						<button id="searchPrev" type="button" class="icon-button arrow-prev" title="上一处" aria-label="上一处" disabled></button>
+						<button id="searchNext" type="button" class="icon-button arrow-next" title="下一处" aria-label="下一处" disabled></button>
+					</div>
+					<div id="searchResults" class="search-results"></div>
+				</div>
 			</aside>
 
 			<section class="viewer-panel" tabindex="0">

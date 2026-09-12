@@ -107,6 +107,7 @@ type Session struct {
 	doc            *ofdgo.Document
 	pageCache      map[int]*ofdgo.PageContent
 	boxCache       map[int]ofdgo.Box
+	textCache      map[int]*ofdgo.PageText
 	signatures     []SignatureInfo
 	signatureError error
 	signaturesRead bool
@@ -239,6 +240,7 @@ func Open(data []byte, opts OpenOptions) (*Session, error) {
 		doc:       doc,
 		pageCache: make(map[int]*ofdgo.PageContent),
 		boxCache:  make(map[int]ofdgo.Box),
+		textCache: make(map[int]*ofdgo.PageText),
 	}, nil
 }
 
@@ -264,7 +266,27 @@ func (s *Session) SetFonts(fonts []FontFile) error {
 	} else {
 		s.Renderer.SetFontFS()
 	}
+	clear(s.textCache)
 	return nil
+}
+
+// SearchPage 搜索指定页面，复用当前会话的文字索引
+// 入参: index 页面索引, query 搜索文字
+// 返回: []ofdgo.TextMatch 匹配结果, error 错误信息
+func (s *Session) SearchPage(index int, query string) ([]ofdgo.TextMatch, error) {
+	text := s.textCache[index]
+	if text == nil {
+		_, page, err := s.pageContent(index)
+		if err != nil {
+			return nil, err
+		}
+		text, err = s.Renderer.PageText(page)
+		if err != nil {
+			return nil, err
+		}
+		s.textCache[index] = text
+	}
+	return text.Search(query), nil
 }
 
 // Summary 获取首屏所需信息，不解析页面图元或执行验签

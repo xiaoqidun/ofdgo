@@ -149,6 +149,19 @@ button:not(:disabled):hover {
 	font-size: 14px;
 }
 
+.arrow-prev::before,
+.arrow-next::before {
+	width: 5px;
+	height: 8px;
+	background: currentColor;
+	clip-path: polygon(100% 0, 100% 20%, 30% 50%, 100% 80%, 100% 100%, 0 50%);
+	content: "";
+}
+
+.arrow-next::before {
+	transform: rotate(180deg);
+}
+
 .open-icon {
 	position: relative;
 	width: 14px;
@@ -287,6 +300,7 @@ body[data-hide-meta] .meta-panel {
 
 .page-list-panel,
 .viewer-panel,
+.search-results,
 .meta-panel {
 	scrollbar-width: thin;
 	scrollbar-color: var(--line-strong) transparent;
@@ -398,6 +412,110 @@ body[data-hide-meta] .meta-panel {
 	margin: 0;
 	padding: 0;
 	list-style: none;
+}
+
+body:not([data-hide-pages]) .page-list-panel:has(#searchPanel:not([hidden])),
+#searchPanel:not([hidden]) {
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	overflow: hidden;
+}
+
+#searchPanel {
+	flex: 1;
+}
+
+#searchPanel :focus-visible {
+	outline-offset: -2px;
+}
+
+.search-results {
+	min-height: 0;
+	overflow: auto;
+}
+
+.search-form {
+	display: flex;
+	gap: 6px;
+	flex-shrink: 0;
+}
+
+.search-form input {
+	width: 0;
+	min-width: 0;
+	flex: 1;
+	height: var(--control-height);
+	padding: 0 6px;
+	border: 1px solid var(--line);
+	border-radius: 0;
+	background: #ffffff;
+	color: #1f2428;
+	font-size: 13px;
+	appearance: none;
+}
+
+.search-form button {
+	flex-shrink: 0;
+	font-size: 12px;
+}
+
+.search-tools {
+	display: flex;
+	flex-shrink: 0;
+	align-items: center;
+	gap: 6px;
+	margin: 8px 0;
+	color: var(--text-muted);
+	font-size: 11px;
+	font-variant-numeric: tabular-nums;
+}
+
+#searchStatus {
+	flex: 1;
+	min-width: 0;
+}
+
+.search-tools button {
+	width: 24px;
+	height: 24px;
+	padding: 0;
+}
+
+.search-result {
+	display: block;
+	width: 100%;
+	height: auto;
+	padding: 8px 4px;
+	border: 0;
+	border-bottom: 1px solid var(--line);
+	background: transparent;
+	font-size: 13px;
+	line-height: 1.5;
+	text-align: left;
+	overflow-wrap: anywhere;
+}
+
+.search-result[aria-current="true"] {
+	background: #e4f3ef;
+}
+
+.search-page {
+	display: block;
+	margin-bottom: 3px;
+	color: var(--text-muted);
+	font-size: 11px;
+}
+
+.search-result mark {
+	background: #c9e6de;
+	color: var(--accent-strong);
+}
+
+.search-highlight {
+	position: absolute;
+	background: rgba(15, 123, 104, 0.24);
+	pointer-events: none;
 }
 
 .outline-list .outline-list {
@@ -1174,6 +1292,7 @@ button.outline-link:hover {
 	.workspace {
 		position: relative;
 		grid-template-columns: minmax(0, 1fr);
+		overflow: clip;
 	}
 
 	body[data-hide-pages] .workspace,
