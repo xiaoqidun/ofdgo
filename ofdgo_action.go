@@ -102,6 +102,21 @@ type RegionCommand struct {
 	EndPoint       string
 }
 
+// gotoDest 获取文档内跳转目标
+// 入参: action 跳转动作, bookmarks 书签
+// 返回: *Dest 跳转目标
+func gotoDest(action *Goto, bookmarks map[string]Dest) *Dest {
+	if action.Dest != nil {
+		return action.Dest
+	}
+	if action.Bookmark != nil {
+		if dest, ok := bookmarks[action.Bookmark.Name]; ok {
+			return &dest
+		}
+	}
+	return nil
+}
+
 // UnmarshalXML 解析跳转目标
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息

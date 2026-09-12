@@ -127,8 +127,12 @@ type DocumentInfo struct {
 	Fonts          []FontInfo      `json:"fonts"`
 	Signatures     []SignatureInfo `json:"signatures"`
 	Pages          []PageInfo      `json:"pages"`
+	Outlines       []OutlineInfo   `json:"outlines,omitempty"`
 	DetailsPending bool            `json:"detailsPending,omitempty"`
 }
+
+// OutlineInfo 目录节点信息
+type OutlineInfo = ofdgo.OutlineInfo
 
 // PageInfo 页面信息
 type PageInfo struct {
@@ -257,6 +261,7 @@ func (s *Session) Summary() DocumentInfo {
 		DocType:        s.Reader.DocType(),
 		PageCount:      len(s.doc.Pages.Page),
 		Pages:          make([]PageInfo, 0, len(s.doc.Pages.Page)),
+		Outlines:       s.doc.OutlineInfos(),
 		DetailsPending: true,
 	}
 	if docInfo, err := s.Reader.DocInfo(); err == nil && docInfo != nil {
@@ -300,6 +305,7 @@ func (s *Session) Info() DocumentInfo {
 		DocType:   s.Reader.DocType(),
 		PageCount: len(s.doc.Pages.Page),
 		Pages:     make([]PageInfo, 0, len(s.doc.Pages.Page)),
+		Outlines:  s.doc.OutlineInfos(),
 	}
 	if signatures, err := s.signatureInfos(); err == nil {
 		info.Signatures = signatures

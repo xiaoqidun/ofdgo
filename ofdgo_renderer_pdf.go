@@ -235,21 +235,6 @@ func appendGraphicActionSources(sources []pdfActionSource, object GraphicObject,
 	return sources
 }
 
-// gotoDest 获取文档内跳转目标
-// 入参: action 跳转动作, bookmarks 书签
-// 返回: *Dest 跳转目标
-func gotoDest(action *Goto, bookmarks map[string]Dest) *Dest {
-	if action.Dest != nil {
-		return action.Dest
-	}
-	if action.Bookmark != nil {
-		if dest, ok := bookmarks[action.Bookmark.Name]; ok {
-			return &dest
-		}
-	}
-	return nil
-}
-
 // outlineDest 获取大纲跳转目标
 // 入参: outline 大纲节点, bookmarks 书签
 // 返回: *Dest 跳转目标

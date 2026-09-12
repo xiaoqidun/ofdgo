@@ -371,6 +371,84 @@ body[data-hide-meta] .meta-panel {
 	line-height: 1;
 }
 
+.navigation-tabs {
+	display: flex;
+	gap: 16px;
+	margin-bottom: 10px;
+	border-bottom: 1px solid var(--line);
+}
+
+.navigation-tabs button {
+	height: 28px;
+	padding: 0 0 6px;
+	border: 0;
+	border-bottom: 2px solid transparent;
+	background: transparent;
+	color: var(--text-muted);
+	font-size: 12px;
+	font-weight: 700;
+}
+
+.navigation-tabs button[aria-selected="true"] {
+	border-bottom-color: var(--accent);
+	color: var(--accent-strong);
+}
+
+.outline-list {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.outline-list .outline-list {
+	padding-left: 14px;
+}
+
+.outline-list summary {
+	margin-left: 14px;
+	color: var(--text-muted);
+	cursor: pointer;
+	list-style-position: outside;
+}
+
+.outline-leaf {
+	padding-left: 14px;
+}
+
+.outline-link {
+	display: inline-flex;
+	align-items: baseline;
+	gap: 8px;
+	width: 100%;
+	min-height: 30px;
+	height: auto;
+	padding: 5px 4px;
+	border: 0;
+	background: transparent;
+	font-size: 13px;
+	line-height: 1.5;
+	text-align: left;
+	vertical-align: top;
+}
+
+.outline-link > :first-child {
+	flex: 1;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.outline-page {
+	flex-shrink: 0;
+	color: var(--text-muted);
+	font-size: 12px;
+	font-variant-numeric: tabular-nums;
+}
+
+button.outline-link:hover {
+	background: #e4f3ef;
+	color: var(--accent-strong);
+}
+
 .page-list {
 	display: grid;
 	gap: 8px;
@@ -470,6 +548,8 @@ body[data-hide-meta] .meta-panel {
 }
 
 .empty-state[hidden],
+.navigation-tabs[hidden],
+.page-list[hidden],
 .page-frame[hidden],
 .progress-panel[hidden] {
 	display: none;

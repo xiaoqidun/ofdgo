@@ -93,7 +93,12 @@ const el = {
 	viewerPanel: document.querySelector(".viewer-panel"),
 	svgHost: document.querySelector("#svgHost"),
 	pageListPanel: document.querySelector(".page-list-panel"),
+	pageListTitle: document.querySelector("#pageListTitle"),
+	navigationTabs: document.querySelector("#navigationTabs"),
+	pagesTab: document.querySelector("#pagesTab"),
+	outlinesTab: document.querySelector("#outlinesTab"),
 	pageList: document.querySelector("#pageList"),
+	outlineList: document.querySelector("#outlineList"),
 	metaPanel: document.querySelector(".meta-panel"),
 	appPanel: document.querySelector("#appPanel"),
 	offlineStatus: document.querySelector("#offlineStatus"),
@@ -119,6 +124,16 @@ const el = {
 el.ofdButton.addEventListener("click", openOFDFile);
 el.togglePagesButton.addEventListener("click", () => toggleSidebar("pages"));
 el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
+el.pagesTab.addEventListener("click", () => showOutlines(false));
+el.outlinesTab.addEventListener("click", () => showOutlines(true));
+el.navigationTabs.addEventListener("keydown", (event) => {
+	if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+		event.preventDefault();
+		const outlines = event.key === "End" || (event.key !== "Home" && el.outlineList.hidden);
+		showOutlines(outlines);
+		(outlines ? el.outlinesTab : el.pagesTab).focus();
+	}
+});
 el.fontAddButton.addEventListener("click", () => openFontFile(el.fontInput));
 el.fontDirectoryButton.addEventListener("click", () => openFontFile(el.fontDirectoryInput));
 el.localFontButton.addEventListener("click", loadLocalFonts);
@@ -1178,6 +1193,9 @@ async function openDocument(options = {}) {
 		}
 		resetPageFlow();
 		renderPageList();
+		if (options.resetScroll || el.outlineList.childElementCount === 0) {
+			renderOutlines();
+		}
 		renderMeta();
 		renderPageFlow();
 		if (options.resetScroll) {
@@ -1746,6 +1764,68 @@ function prefixSVGIds(svg, prefix) {
 			}
 		}
 	}
+}
+
+function showOutlines(show) {
+	el.pageList.hidden = show;
+	el.outlineList.hidden = !show;
+	el.pagesTab.setAttribute("aria-selected", String(!show));
+	el.outlinesTab.setAttribute("aria-selected", String(show));
+	el.pagesTab.tabIndex = show ? -1 : 0;
+	el.outlinesTab.tabIndex = show ? 0 : -1;
+	el.pageListPanel.scrollTop = 0;
+}
+
+function renderOutlines() {
+	const outlines = state.doc.outlines || [];
+	el.pageListTitle.hidden = outlines.length > 0;
+	el.navigationTabs.hidden = outlines.length === 0;
+	el.outlineList.replaceChildren();
+	if (outlines.length > 0) {
+		el.outlineList.append(createOutlineList(outlines));
+	}
+	showOutlines(false);
+}
+
+function createOutlineList(outlines) {
+	const list = document.createElement("ul");
+	list.className = "outline-list";
+	for (const outline of outlines) {
+		const item = document.createElement("li");
+		const hasChildren = outline.children?.length > 0;
+		const row = document.createElement(hasChildren ? "summary" : "div");
+		if (!hasChildren) {
+			row.className = "outline-leaf";
+		}
+		const link = document.createElement(outline.page ? "button" : "span");
+		link.className = "outline-link";
+		const title = document.createElement("span");
+		title.textContent = outline.title;
+		link.append(title);
+		if (outline.page) {
+			link.type = "button";
+			const page = document.createElement("span");
+			page.className = "outline-page";
+			page.textContent = String(outline.page);
+			page.setAttribute("aria-label", `第 ${outline.page} 页`);
+			link.append(page);
+			link.addEventListener("click", (event) => {
+				event.preventDefault();
+				renderPage(outline.page - 1);
+			});
+		}
+		row.append(link);
+		if (hasChildren) {
+			const details = document.createElement("details");
+			details.open = outline.expanded;
+			details.append(row, createOutlineList(outline.children));
+			item.append(details);
+		} else {
+			item.append(row);
+		}
+		list.append(item);
+	}
+	return list;
 }
 
 function renderPageList() {

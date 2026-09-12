@@ -161,6 +161,14 @@ type OutlineElem struct {
 	OutlineElem []OutlineElem `xml:"OutlineElem"`
 }
 
+// OutlineInfo 目录节点信息，Page从1开始，0表示没有有效的文档内目标页
+type OutlineInfo struct {
+	Title    string        `json:"title"`
+	Expanded bool          `json:"expanded"`
+	Page     int           `json:"page,omitempty"`
+	Children []OutlineInfo `json:"children,omitempty"`
+}
+
 // Permissions 权限声明
 type Permissions struct {
 	Edit          bool         `xml:"Edit"`
@@ -180,6 +188,48 @@ type Permissions struct {
 type ValidPeriod struct {
 	StartDate string `xml:"StartDate,attr"`
 	EndDate   string `xml:"EndDate,attr"`
+}
+
+// OutlineInfos 获取目录层级和目标页码
+// 返回: []OutlineInfo 目录节点信息
+func (doc *Document) OutlineInfos() []OutlineInfo {
+	if len(doc.Outlines.OutlineElem) == 0 {
+		return nil
+	}
+	bookmarks := make(map[string]Dest, len(doc.Bookmarks.Bookmark))
+	for _, bookmark := range doc.Bookmarks.Bookmark {
+		bookmarks[bookmark.Name] = bookmark.Dest
+	}
+	pages := make(map[string]int, len(doc.Pages.Page))
+	for index, page := range doc.Pages.Page {
+		pages[page.ID] = index + 1
+	}
+	return outlineInfos(doc.Outlines.OutlineElem, bookmarks, pages)
+}
+
+// outlineInfos 转换目录节点信息
+// 入参: outlines 大纲节点, bookmarks 书签, pages 页码索引
+// 返回: []OutlineInfo 目录节点信息
+func outlineInfos(outlines []OutlineElem, bookmarks map[string]Dest, pages map[string]int) []OutlineInfo {
+	infos := make([]OutlineInfo, 0, len(outlines))
+	for _, outline := range outlines {
+		info := OutlineInfo{Title: outline.Title, Expanded: outline.Expanded}
+		for _, action := range outline.Actions {
+			if action.Goto != nil {
+				if dest := gotoDest(action.Goto, bookmarks); dest != nil {
+					info.Page = pages[dest.PageID]
+					if info.Page != 0 {
+						break
+					}
+				}
+			}
+		}
+		if len(outline.OutlineElem) > 0 {
+			info.Children = outlineInfos(outline.OutlineElem, bookmarks, pages)
+		}
+		infos = append(infos, info)
+	}
+	return infos
 }
 
 // UnmarshalXML 解析文档并应用权限默认值

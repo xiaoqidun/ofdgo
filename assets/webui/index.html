@@ -54,8 +54,13 @@
 
 		<main class="workspace">
 			<aside class="page-list-panel">
-				<div class="panel-title">页面</div>
-				<div id="pageList" class="page-list"></div>
+				<div id="pageListTitle" class="panel-title">页面</div>
+				<div id="navigationTabs" class="navigation-tabs" role="tablist" aria-label="文档导航" hidden>
+					<button id="pagesTab" type="button" role="tab" aria-selected="true" aria-controls="pageList">页面</button>
+					<button id="outlinesTab" type="button" role="tab" aria-selected="false" aria-controls="outlineList" tabindex="-1">目录</button>
+				</div>
+				<div id="pageList" class="page-list" role="tabpanel" aria-label="页面"></div>
+				<div id="outlineList" role="tabpanel" aria-label="目录" hidden></div>
 			</aside>
 
 			<section class="viewer-panel" tabindex="0">
