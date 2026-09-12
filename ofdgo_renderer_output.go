@@ -24,18 +24,35 @@ import (
 	"github.com/tdewolff/canvas/renderers"
 	"github.com/tdewolff/canvas/renderers/pdf"
 	"github.com/tdewolff/canvas/renderers/rasterizer"
+	"golang.org/x/image/draw"
+	"golang.org/x/image/math/f64"
 )
 
 // rasterRenderer 保留页面物理尺寸的光栅渲染器
 type rasterRenderer struct {
 	*rasterizer.Rasterizer
 	width, height float64
+	dpmm          float64
+	linear        bool
 }
 
 // Size 返回页面物理尺寸
 // 返回: float64 宽度, float64 高度
 func (r *rasterRenderer) Size() (float64, float64) {
 	return r.width, r.height
+}
+
+// RenderImage 使用底层图片完成平移和缩放
+// 入参: img 图片对象, m 图片变换矩阵
+func (r *rasterRenderer) RenderImage(img image.Image, m canvas.Matrix) {
+	if !r.linear || m[0][1] != 0 || m[1][0] != 0 {
+		r.Rasterizer.RenderImage(img, m)
+		return
+	}
+	origin := m.Dot(canvas.Point{Y: float64(img.Bounds().Dy())}).Mul(r.dpmm)
+	m = m.Scale(r.dpmm, r.dpmm)
+	transform := f64.Aff3{m[0][0], -m[0][1], origin.X, -m[1][0], m[1][1], float64(r.Bounds().Dy()) - origin.Y}
+	draw.CatmullRom.Transform(r.Image, transform, img, img.Bounds(), draw.Over, nil)
 }
 
 // RenderToImage 渲染为光栅图
@@ -47,10 +64,14 @@ func (r *Renderer) RenderToImage(page *PageContent) (image.Image, error) {
 		return nil, err
 	}
 	dpmm := r.DPI / 25.4
+	colorSpace := canvas.DefaultColorSpace
+	_, linear := colorSpace.(canvas.LinearColorSpace)
 	raster := &rasterRenderer{
-		Rasterizer: rasterizer.New(box.W, box.H, canvas.DPMM(dpmm), canvas.DefaultColorSpace),
+		Rasterizer: rasterizer.New(box.W, box.H, canvas.DPMM(dpmm), colorSpace),
 		width:      box.W,
 		height:     box.H,
+		dpmm:       dpmm,
+		linear:     linear,
 	}
 	if err := r.RenderPageToContext(canvas.NewContext(raster), page); err != nil {
 		return nil, err
