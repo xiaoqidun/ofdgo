@@ -140,6 +140,18 @@ func imageWithMask(img, mask image.Image) image.Image {
 		maskBounds = bounds
 	}
 	out := image.NewNRGBA(bounds)
+	if src, ok := source.(*image.NRGBA); ok {
+		for y := 0; y < bounds.Dy(); y++ {
+			offset := src.PixOffset(bounds.Min.X, bounds.Min.Y+y)
+			row := out.Pix[y*out.Stride : (y+1)*out.Stride]
+			copy(row, src.Pix[offset:offset+len(row)])
+			for x := 3; x < len(row); x += 4 {
+				a := imageGrayAt(opacity, maskBounds.Min.X+x/4, maskBounds.Min.Y+y).Y
+				row[x] = uint8(int(row[x]) * int(a) / 255)
+			}
+		}
+		return out
+	}
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			mx := maskBounds.Min.X + x - bounds.Min.X

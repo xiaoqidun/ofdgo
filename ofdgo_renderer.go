@@ -50,6 +50,26 @@ type Renderer struct {
 // RendererOption 渲染器配置选项
 type RendererOption func(*Renderer)
 
+// SetFontFS 替换外部字体文件系统并重置字体缓存
+// 入参: fsys 字体文件系统
+func (r *Renderer) SetFontFS(fsys ...fs.FS) {
+	r.fontFS = append([]fs.FS(nil), fsys...)
+	r.resetFontCache()
+}
+
+// resetFontCache 重置字体匹配、加载和字形缓存
+func (r *Renderer) resetFontCache() {
+	r.FontMap = make(map[string]*canvas.FontFamily)
+	r.FontGIDMap = make(map[string]map[uint16]rune)
+	r.FontCIDMap = make(map[string]map[uint16]rune)
+	r.fontCache = make(map[fontCacheKey]*canvas.FontFamily)
+	r.fontSourceCache = make(map[string][]fontSource)
+	r.fontSourceUsed = make(map[string]fontSource)
+	r.fontDirCandidates = make(map[string][]fontFileCandidate)
+	r.fontFSCandidates = make(map[int][]fontFileCandidate)
+	r.textGlyphPathCache = make(map[textGlyphPathCacheKey]textGlyphPathCacheValue)
+}
+
 // RenderPage 渲染特定页面内容
 // 入参: page 页面内容
 // 返回: *canvas.Canvas 画布实例, error 错误信息

@@ -237,18 +237,15 @@ func (s *Session) Close() error {
 // 入参: fonts 字体文件列表
 // 返回: error 错误信息
 func (s *Session) SetFonts(fonts []FontFile) error {
-	opts := []ofdgo.RendererOption{
-		ofdgo.WithDPI(s.Renderer.DPI),
-		ofdgo.WithAnnotations(s.Renderer.RenderAnnotations),
-	}
 	if len(fonts) > 0 {
 		fontFS := ofdgo.NewFontFS(fonts)
 		if fontFS.Len() == 0 {
 			return fmt.Errorf("invalid font file")
 		}
-		opts = append(opts, ofdgo.WithFontFS(fontFS))
+		s.Renderer.SetFontFS(fontFS)
+	} else {
+		s.Renderer.SetFontFS()
 	}
-	s.Renderer = ofdgo.NewRenderer(s.Reader, opts...)
 	return nil
 }
 

@@ -20,8 +20,6 @@ import (
 	"image"
 	"io"
 	"io/fs"
-
-	"github.com/tdewolff/canvas"
 )
 
 // Open 打开OFD文件
@@ -71,18 +69,10 @@ func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 		RenderAnnotations:     true,
 		DrawParams:            reader.drawParamCache,
 		CompositeGraphicUnits: reader.compositeGraphicUnitCache,
-		FontMap:               make(map[string]*canvas.FontFamily),
-		FontGIDMap:            make(map[string]map[uint16]rune),
-		FontCIDMap:            make(map[string]map[uint16]rune),
-		fontCache:             make(map[fontCacheKey]*canvas.FontFamily),
-		fontSourceCache:       make(map[string][]fontSource),
-		fontSourceUsed:        make(map[string]fontSource),
-		fontDirCandidates:     make(map[string][]fontFileCandidate),
-		fontFSCandidates:      make(map[int][]fontFileCandidate),
-		textGlyphPathCache:    make(map[textGlyphPathCacheKey]textGlyphPathCacheValue),
 		templatePageCache:     make(map[string]*PageContent),
 		imageCache:            make(map[string]image.Image),
 	}
+	r.resetFontCache()
 	for _, opt := range opts {
 		opt(r)
 	}
