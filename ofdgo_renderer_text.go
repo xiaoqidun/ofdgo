@@ -139,7 +139,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	embeddedFont := false
 	if of, ok := r.Reader.fontCache[fontID]; ok {
 		embeddedFont = of.FontFile != ""
-		if !embeddedFont && fontNoSyntheticBold(of.FontName, of.FamilyName) {
+		if syntheticBold && !embeddedFont && fontNoSyntheticBold(of.FontName, of.FamilyName) {
 			syntheticBold = false
 		}
 		if of.Bold {

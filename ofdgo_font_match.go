@@ -318,8 +318,11 @@ func fontDefaultSystemNames() []string {
 func fontNoSyntheticBold(names ...string) bool {
 	for _, name := range names {
 		for _, rule := range fontMatchRules {
+			if !rule.NoSyntheticBold {
+				continue
+			}
 			level := fontRuleMatchLevel(rule, name)
-			if rule.NoSyntheticBold && level >= fontMatchExact && level <= fontMatchPartial {
+			if level >= fontMatchExact && level <= fontMatchPartial {
 				return true
 			}
 		}
