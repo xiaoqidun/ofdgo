@@ -785,6 +785,34 @@ button.outline-link:hover {
 	transform-origin: 0 0;
 }
 
+.text-layer {
+	position: absolute;
+	inset: 0;
+	overflow: hidden;
+	color: transparent;
+	opacity: 0.24;
+	pointer-events: none;
+	-webkit-user-select: text;
+	user-select: text;
+	text-size-adjust: none;
+}
+
+.text-run > span {
+	position: absolute;
+	left: 0;
+	top: 0;
+	font: 100px/1 sans-serif;
+	white-space: pre;
+	transform-origin: 0 0;
+	cursor: text;
+	pointer-events: auto;
+}
+
+.text-run > span::selection {
+	color: transparent;
+	background: var(--accent);
+}
+
 .page-link {
 	position: absolute;
 }
@@ -833,6 +861,8 @@ button.outline-link:hover {
 	display: block;
 	max-width: none;
 	transform-origin: 0 0;
+	-webkit-user-select: none;
+	user-select: none;
 }
 
 .meta-list {

@@ -164,6 +164,14 @@ func renderPage(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	text, err := currentSession.PageText(args[0].Int())
+	if err != nil {
+		return nil, err
+	}
+	textData, err := json.Marshal(text)
+	if err != nil {
+		return nil, err
+	}
 	links := make([]any, len(page.Links))
 	for i, link := range page.Links {
 		links[i] = map[string]any{
@@ -182,6 +190,7 @@ func renderPage(args []js.Value) (any, error) {
 		"height": page.Height,
 		"svg":    page.SVG,
 		"links":  links,
+		"text":   js.Global().Get("JSON").Call("parse", string(textData)),
 	}), nil
 }
 

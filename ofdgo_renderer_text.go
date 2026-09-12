@@ -179,6 +179,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		return
 	}
 	face := ff.Face(sizePt, fillPaint, fontStyle, canvas.FontNormal)
+	var metrics canvas.FontMetrics
+	if textRun != nil {
+		metrics = face.Metrics()
+	}
 	glyphTransforms := r.textObjectGlyphTransforms(fontID, obj)
 	hasUnderline := strings.Contains(obj.Decoration, "Underline")
 	_, shadedFill := fillPaint.(canvas.Gradient)
@@ -291,6 +295,11 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					for j := spans[i][0]; j < spans[i][1]; j++ {
 						textRun.Boxes[textPos+j] = unionTextBox(textRun.Boxes[textPos+j], box)
 					}
+					bounds := canvas.Rect{Y0: -metrics.Descent, X1: glyphWidth, Y1: metrics.Ascent}
+					if !glyphPath.Empty() {
+						bounds = bounds.Add(glyphPath.Bounds())
+					}
+					textRun.addSpan(textPos+spans[i][0], textPos+spans[i][1], bounds, m.Scale(scaleX, 1), clipPath, pageH)
 				}
 				continue
 			}

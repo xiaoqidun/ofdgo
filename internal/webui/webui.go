@@ -270,10 +270,10 @@ func (s *Session) SetFonts(fonts []FontFile) error {
 	return nil
 }
 
-// SearchPage 搜索指定页面，复用当前会话的文字索引
-// 入参: index 页面索引, query 搜索文字
-// 返回: []ofdgo.TextMatch 匹配结果, error 错误信息
-func (s *Session) SearchPage(index int, query string) ([]ofdgo.TextMatch, error) {
+// PageText 获取指定页面文字，复用当前会话的文字索引
+// 入参: index 页面索引
+// 返回: *ofdgo.PageText 页面文字, error 错误信息
+func (s *Session) PageText(index int) (*ofdgo.PageText, error) {
 	text := s.textCache[index]
 	if text == nil {
 		_, page, err := s.pageContent(index)
@@ -285,6 +285,17 @@ func (s *Session) SearchPage(index int, query string) ([]ofdgo.TextMatch, error)
 			return nil, err
 		}
 		s.textCache[index] = text
+	}
+	return text, nil
+}
+
+// SearchPage 搜索指定页面，复用当前会话的文字索引
+// 入参: index 页面索引, query 搜索文字
+// 返回: []ofdgo.TextMatch 匹配结果, error 错误信息
+func (s *Session) SearchPage(index int, query string) ([]ofdgo.TextMatch, error) {
+	text, err := s.PageText(index)
+	if err != nil {
+		return nil, err
 	}
 	return text.Search(query), nil
 }

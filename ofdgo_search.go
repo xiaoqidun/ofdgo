@@ -31,9 +31,18 @@ type PageText struct {
 // TextRun 文本对象原文及逐字符区域，坐标以页面左上角为原点，单位为毫米
 // Boxes与Text的Unicode字符一一对应，缺少字体时使用文本对象区域
 type TextRun struct {
-	ID    string `json:"id"`
-	Text  string `json:"text"`
-	Boxes []Box  `json:"boxes"`
+	ID    string     `json:"id"`
+	Text  string     `json:"text"`
+	Boxes []Box      `json:"boxes"`
+	Spans []TextSpan `json:"spans"`
+}
+
+// TextSpan 可选文字区间，Start和End为Unicode字符偏移
+// Matrix依次为a、b、c、d、e、f，将单位矩形映射到页面左上角为原点的毫米坐标
+type TextSpan struct {
+	Start  int        `json:"start"`
+	End    int        `json:"end"`
+	Matrix [6]float64 `json:"matrix"`
 }
 
 // TextMatch 文字匹配结果，Run为文本对象索引，Start和End为原文Unicode字符区间
@@ -175,4 +184,37 @@ func unionTextBox(a, b Box) Box {
 	}
 	x, y := math.Min(a.X, b.X), math.Min(a.Y, b.Y)
 	return Box{X: x, Y: y, W: math.Max(a.X+a.W, b.X+b.W) - x, H: math.Max(a.Y+a.H, b.Y+b.H) - y}
+}
+
+// addSpan 收集字形选择区域，同一原文区间的多个字形合并为一项
+// 入参: start 起始字符, end 结束字符, bounds 字形布局区域, m 字形变换, clip 裁剪路径, pageH 页面高度
+func (run *TextRun) addSpan(start, end int, bounds canvas.Rect, m canvas.Matrix, clip *canvas.Path, pageH float64) {
+	if m.Det() == 0 {
+		return
+	}
+	if clip != nil {
+		path := canvas.Rectangle(bounds.W(), bounds.H()).Translate(bounds.X0, bounds.Y0).Transform(m)
+		path = applyClipPath(path, clip)
+		if path.Empty() {
+			return
+		}
+		bounds = path.Transform(m.Inv()).Bounds()
+	}
+	if bounds.W() < 0 || bounds.H() <= 0 {
+		return
+	}
+	m = canvas.Matrix{{1, 0, 0}, {0, -1, pageH}}.Mul(m).Translate(bounds.X0, bounds.Y1).Scale(bounds.W(), -bounds.H())
+	span := TextSpan{Start: start, End: end}
+	if n := len(run.Spans); n > 0 && run.Spans[n-1].Start == start && run.Spans[n-1].End == end {
+		span = run.Spans[n-1]
+		v := span.Matrix
+		previous := canvas.Matrix{{v[0], v[2], v[4]}, {v[1], v[3], v[5]}}
+		if previous.Det() != 0 {
+			bounds = canvas.Rect{X1: 1, Y1: 1}.Add(canvas.Rect{X1: 1, Y1: 1}.Transform(previous.Inv().Mul(m)))
+			m = previous.Translate(bounds.X0, bounds.Y0).Scale(bounds.W(), bounds.H())
+		}
+		run.Spans = run.Spans[:n-1]
+	}
+	span.Matrix = [6]float64{m[0][0], m[1][0], m[0][1], m[1][1], m[0][2], m[1][2]}
+	run.Spans = append(run.Spans, span)
 }

@@ -50,6 +50,7 @@ const state = {
 	continuous: false,
 	renderAnnotations: true,
 	pageCache: new Map(),
+	selectedPages: new Set(),
 	pageInFlight: new Map(),
 	pageRenderQueue: [],
 	pageRenderRunning: false,
@@ -194,6 +195,12 @@ el.fitButton.addEventListener("click", fitWidth);
 el.fitHeightButton.addEventListener("click", fitHeight);
 el.continuousButton.addEventListener("click", toggleContinuous);
 el.annotationButton.addEventListener("click", toggleAnnotations);
+document.addEventListener("copy", copySelection);
+document.addEventListener("selectionchange", () => {
+	for (const index of state.selectedPages) {
+		unmountPage(index);
+	}
+});
 el.pageExportFormat.addEventListener("change", () => updateDPIControl());
 el.exportPageButton.addEventListener("click", exportCurrentPage);
 el.exportButton.addEventListener("click", exportPDF);
@@ -1471,6 +1478,7 @@ function renderPageFlow() {
 
 function resetPageFlow() {
 	state.pageCache.clear();
+	state.selectedPages.clear();
 	state.visiblePages.clear();
 	for (const task of state.pageInFlight.values()) {
 		task.resolve(null);
@@ -1509,13 +1517,11 @@ function flowPageObserver() {
 				const index = Number.parseInt(entry.target.dataset.pageIndex, 10);
 				if (!entry.isIntersecting) {
 					state.visiblePages.delete(index);
-					if (entry.target.classList.contains("rendered")) {
-						entry.target.querySelector(".page-surface").replaceChildren();
-						entry.target.classList.remove("rendered");
-					}
+					unmountPage(index);
 					continue;
 				}
 				state.visiblePages.add(index);
+				state.selectedPages.delete(index);
 				renderFlowPage(index, { openSeq, priority: 4 });
 			}
 		}, {
@@ -1524,6 +1530,18 @@ function flowPageObserver() {
 		});
 	}
 	return state.pageObserver;
+}
+
+function unmountPage(index) {
+	const shell = pageShell(index);
+	const selection = document.getSelection();
+	if (selection.rangeCount && selection.getRangeAt(0).intersectsNode(shell)) {
+		state.selectedPages.add(index);
+		return;
+	}
+	shell.querySelector(".page-surface").replaceChildren();
+	shell.classList.remove("rendered");
+	state.selectedPages.delete(index);
 }
 
 async function renderFlowPage(index, options = {}) {
@@ -1638,6 +1656,7 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 	const svg = parseSVG(page.svg, `p${openSeq}-${index}`);
 	svg.classList.add("ofd-svg");
 	surface.replaceChildren(svg);
+	surface.append(createTextLayer(page.text));
 	for (const link of page.links) {
 		let url;
 		try {
@@ -1666,6 +1685,64 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 	if (state.doc?.pages?.[index]) {
 		layoutPageShell(shell, state.doc.pages[index]);
 	}
+}
+
+function createTextLayer(text) {
+	const layer = document.createElement("div");
+	layer.className = "text-layer";
+	const measure = document.createElement("canvas").getContext("2d");
+	measure.font = "100px sans-serif";
+	for (const run of text.runs || []) {
+		const line = document.createElement("span");
+		line.className = "text-run";
+		const chars = Array.from(run.text);
+		for (const item of run.spans || []) {
+			const span = document.createElement("span");
+			span.textContent = chars.slice(item.start, item.end).join("");
+			const width = measure.measureText(span.textContent).width || 1;
+			const [a, b, c, d, e, f] = item.matrix.map((value) => value * MM_TO_PX);
+			span.style.transform = `matrix(${a / width}, ${b / width}, ${c / 100}, ${d / 100}, ${e}, ${f})`;
+			line.append(span);
+		}
+		layer.append(line);
+	}
+	return layer;
+}
+
+function copySelection(event) {
+	if (event.target.closest?.("input, textarea, [contenteditable]")) {
+		return;
+	}
+	const selection = document.getSelection();
+	if (selection.isCollapsed || !selection.rangeCount) {
+		return;
+	}
+	const range = selection.getRangeAt(0);
+	if (!el.svgHost.contains(range.startContainer) || !el.svgHost.contains(range.endContainer)) {
+		return;
+	}
+	const lines = [];
+	for (const run of el.svgHost.querySelectorAll(".text-run")) {
+		if (!range.intersectsNode(run)) {
+			continue;
+		}
+		const part = range.cloneRange();
+		if (!run.contains(part.startContainer)) {
+			part.setStart(run, 0);
+		}
+		if (!run.contains(part.endContainer)) {
+			part.setEnd(run, run.childNodes.length);
+		}
+		const text = part.cloneContents().textContent;
+		if (text) {
+			lines.push(text);
+		}
+	}
+	if (!lines.length) {
+		return;
+	}
+	event.clipboardData.setData("text/plain", lines.join("\n"));
+	event.preventDefault();
 }
 
 function markFlowPageError(index, err) {
