@@ -22,6 +22,7 @@ import (
 	"image/draw"
 	"image/jpeg"
 	"image/png"
+	"path"
 	"strings"
 	"time"
 
@@ -113,26 +114,37 @@ type Session struct {
 
 // DocumentInfo 文档信息
 type DocumentInfo struct {
-	Version        string          `json:"version"`
-	DocType        string          `json:"docType"`
-	Title          string          `json:"title"`
-	Author         string          `json:"author"`
-	Subject        string          `json:"subject"`
-	CreationDate   string          `json:"creationDate"`
-	ModDate        string          `json:"modDate"`
-	PageCount      int             `json:"pageCount"`
-	FontCount      int             `json:"fontCount"`
-	SignatureCount int             `json:"signatureCount"`
-	SignatureError string          `json:"signatureError,omitempty"`
-	Fonts          []FontInfo      `json:"fonts"`
-	Signatures     []SignatureInfo `json:"signatures"`
-	Pages          []PageInfo      `json:"pages"`
-	Outlines       []OutlineInfo   `json:"outlines,omitempty"`
-	DetailsPending bool            `json:"detailsPending,omitempty"`
+	Version         string           `json:"version"`
+	DocType         string           `json:"docType"`
+	Title           string           `json:"title"`
+	Author          string           `json:"author"`
+	Subject         string           `json:"subject"`
+	CreationDate    string           `json:"creationDate"`
+	ModDate         string           `json:"modDate"`
+	PageCount       int              `json:"pageCount"`
+	FontCount       int              `json:"fontCount"`
+	SignatureCount  int              `json:"signatureCount"`
+	SignatureError  string           `json:"signatureError,omitempty"`
+	AttachmentError string           `json:"attachmentError,omitempty"`
+	Attachments     []AttachmentInfo `json:"attachments,omitempty"`
+	Fonts           []FontInfo       `json:"fonts"`
+	Signatures      []SignatureInfo  `json:"signatures"`
+	Pages           []PageInfo       `json:"pages"`
+	Outlines        []OutlineInfo    `json:"outlines,omitempty"`
+	DetailsPending  bool             `json:"detailsPending,omitempty"`
 }
 
 // OutlineInfo 目录节点信息
 type OutlineInfo = ofdgo.OutlineInfo
+
+// AttachmentInfo 可见附件信息，Size单位为KB
+type AttachmentInfo struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Format   string   `json:"format,omitempty"`
+	Size     *float64 `json:"size,omitempty"`
+	FileName string   `json:"fileName"`
+}
 
 // PageInfo 页面信息
 type PageInfo struct {
@@ -306,6 +318,21 @@ func (s *Session) Info() DocumentInfo {
 		PageCount: len(s.doc.Pages.Page),
 		Pages:     make([]PageInfo, 0, len(s.doc.Pages.Page)),
 		Outlines:  s.doc.OutlineInfos(),
+	}
+	if attachments, err := s.Reader.Attachments(); err == nil {
+		for _, attachment := range attachments {
+			if attachment.Visible {
+				info.Attachments = append(info.Attachments, AttachmentInfo{
+					ID:       attachment.ID,
+					Name:     attachment.Name,
+					Format:   attachment.Format,
+					Size:     attachment.Size,
+					FileName: path.Base(s.Reader.ResPath(attachment.FileLoc)),
+				})
+			}
+		}
+	} else {
+		info.AttachmentError = err.Error()
 	}
 	if signatures, err := s.signatureInfos(); err == nil {
 		info.Signatures = signatures

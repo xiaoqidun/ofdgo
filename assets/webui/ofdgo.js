@@ -110,6 +110,8 @@ const el = {
 	metaType: document.querySelector("#metaType"),
 	metaFonts: document.querySelector("#metaFonts"),
 	metaSignatures: document.querySelector("#metaSignatures"),
+	attachmentPanel: document.querySelector("#attachmentPanel"),
+	attachmentList: document.querySelector("#attachmentList"),
 	signaturePanel: document.querySelector("#signaturePanel"),
 	signatureSummary: document.querySelector("#signatureSummary"),
 	signatureList: document.querySelector("#signatureList"),
@@ -1288,6 +1290,34 @@ async function renderPage(index, options = {}) {
 	}
 }
 
+async function downloadAttachment(attachment) {
+	if (!state.doc || document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	const openSeq = state.openSeq;
+	state.exporting = true;
+	updateControls();
+	setBusy(true, "正在读取附件", null, "正在读取附件");
+	try {
+		const result = await callWASM("ofdgoAttachmentData", attachment.id);
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		downloadBytes(result.bytes, "application/octet-stream", attachment.fileName);
+		setStatus(`附件已下载 ${formatBytes(result.bytes.length, "0 KB")}`);
+	} catch (err) {
+		if (openSeq === state.openSeq) {
+			showError(err, false);
+		}
+	} finally {
+		state.exporting = false;
+		if (openSeq === state.openSeq) {
+			setBusy(false);
+			updateControls();
+		}
+	}
+}
+
 async function exportPDF() {
 	if (!state.doc || document.body.hasAttribute("aria-busy")) {
 		return;
@@ -2016,10 +2046,45 @@ function renderMeta() {
 	el.metaFonts.textContent = String(doc.fontCount || 0);
 	el.metaSignatures.textContent = doc.detailsPending ? "正在检查" : String(doc.signatureCount || 0);
 	el.pageTotal.textContent = String(doc.pageCount || 0);
+	renderAttachments();
 	renderSignatures();
 	renderDocumentFonts();
 	renderFontList();
 	updateLocalFontButton();
+}
+
+function renderAttachments() {
+	const attachments = state.doc?.attachments || [];
+	el.attachmentPanel.hidden = !attachments.length && !state.doc?.attachmentError;
+	el.attachmentList.replaceChildren();
+	if (state.doc?.attachmentError) {
+		const error = document.createElement("div");
+		error.className = "attachment-detail";
+		error.textContent = "附件读取失败";
+		error.title = state.doc.attachmentError;
+		el.attachmentList.append(error);
+		return;
+	}
+	for (const attachment of attachments) {
+		const item = document.createElement("button");
+		item.type = "button";
+		item.className = "attachment-item";
+		item.title = `下载 ${attachment.fileName}`;
+		item.setAttribute("aria-label", `下载 ${attachment.name}`);
+		const name = document.createElement("span");
+		name.className = "attachment-name";
+		name.textContent = attachment.name;
+		item.append(name);
+		const detail = [attachment.format, attachment.size == null ? "" : formatBytes(attachment.size * 1024, "0 KB")].filter(Boolean).join(" · ");
+		if (detail) {
+			const meta = document.createElement("span");
+			meta.className = "attachment-detail";
+			meta.textContent = ` · ${detail}`;
+			item.append(meta);
+		}
+		item.addEventListener("click", () => downloadAttachment(attachment));
+		el.attachmentList.append(item);
+	}
 }
 
 function renderSignatures() {

@@ -37,6 +37,7 @@ func RunWASM() {
 	registerCallback("ofdgoOpen", openDocument)
 	registerCallback("ofdgoConfigure", configureDocument)
 	registerCallback("ofdgoDocumentInfo", documentInfo)
+	registerCallback("ofdgoAttachmentData", attachmentData)
 	registerCallback("ofdgoRenderPage", renderPage)
 	registerCallback("ofdgoExportFormats", exportFormats)
 	registerCallback("ofdgoExportPage", exportPage)
@@ -129,6 +130,20 @@ func documentInfo(args []js.Value) (any, error) {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
 	return currentSession.Info(), nil
+}
+
+// attachmentData 读取附件数据
+// 入参: args 浏览器参数
+// 返回: any 附件数据, error 错误信息
+func attachmentData(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	data, err := currentSession.Reader.AttachmentData(args[0].String())
+	if err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"bytes": bytesToJS(data)}), nil
 }
 
 // renderPage 渲染OFD页面

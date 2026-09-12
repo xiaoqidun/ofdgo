@@ -411,7 +411,7 @@ body[data-hide-meta] .meta-panel {
 	list-style-position: outside;
 }
 
-.outline-leaf {
+.outline-list:has(> li > details) .outline-leaf {
 	padding-left: 14px;
 }
 
@@ -731,10 +731,41 @@ button.outline-link:hover {
 
 .font-panel,
 .doc-font-panel,
+.attachment-panel,
 .signature-panel {
 	margin-top: 18px;
 	padding-top: 12px;
 	border-top: 1px solid var(--line);
+}
+
+.attachment-list {
+	display: grid;
+	gap: 8px;
+}
+
+.attachment-item {
+	width: 100%;
+	padding: 4px 0;
+	border: 0;
+	background: transparent;
+	color: var(--accent-strong);
+	font-size: 13px;
+	line-height: 1.4;
+	text-align: left;
+	overflow-wrap: anywhere;
+}
+
+.attachment-item:not(:disabled):hover {
+	background: transparent;
+}
+
+.attachment-item:hover .attachment-name {
+	text-decoration: underline;
+}
+
+.attachment-detail {
+	color: var(--text-muted);
+	font-size: 11px;
 }
 
 .count-pill {

@@ -505,7 +505,9 @@ func (r *Reader) Attachments() ([]Attachment, error) {
 		}
 		for i := range attachments.Attachment {
 			attachment := &attachments.Attachment[i]
-			attachment.FileLoc = resolveResourcePath(partPath, "", attachment.FileLoc)
+			if fileLoc := resolveResourcePath(partPath, "", attachment.FileLoc); fileLoc != "" {
+				attachment.FileLoc = "/" + fileLoc
+			}
 		}
 		if attachments.Attachment == nil {
 			attachments.Attachment = []Attachment{}
@@ -513,6 +515,22 @@ func (r *Reader) Attachments() ([]Attachment, error) {
 		doc.Attachments.Attachment = attachments.Attachment
 	}
 	return doc.Attachments.Attachment, nil
+}
+
+// AttachmentData 获取附件文件数据
+// 入参: id 附件标识
+// 返回: []byte 附件数据, error 错误信息
+func (r *Reader) AttachmentData(id string) ([]byte, error) {
+	attachments, err := r.Attachments()
+	if err != nil {
+		return nil, err
+	}
+	for _, attachment := range attachments {
+		if attachment.ID == id {
+			return r.ResData(attachment.FileLoc)
+		}
+	}
+	return nil, fmt.Errorf("attachment not found: %s", id)
 }
 
 // CustomTags 获取自定义标引
