@@ -164,6 +164,32 @@ func (r *Renderer) renderPageToContext(ctx *canvas.Context, page *PageContent, d
 	return nil
 }
 
+// PageLinks 获取页面及可见注释的矩形外链，不包含自定义Region
+// 入参: page 页面内容
+// 返回: []PageLink 页面外链, error 错误信息
+func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
+	box, err := r.GetPageBox(page)
+	if err != nil {
+		return nil, err
+	}
+	sources := pageActionSources(page, box)
+	if r.RenderAnnotations {
+		sources = append(sources, annotationActionSources(r.Reader.Annots[page.ID])...)
+	}
+	var links []PageLink
+	for _, source := range sources {
+		if source.Box.W <= 0 || source.Box.H <= 0 {
+			continue
+		}
+		for _, action := range source.Actions {
+			if action.Event == "CLICK" && action.URI != nil && action.URI.URI != "" && action.Region == nil {
+				links = append(links, PageLink{URI: resolveActionURI(*action.URI), Box: source.Box})
+			}
+		}
+	}
+	return links, nil
+}
+
 // RenderPageByIndex 按索引渲染页面
 // 入参: index 页面索引
 // 返回: *canvas.Canvas 画布实例, error 错误信息

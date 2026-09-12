@@ -156,12 +156,13 @@ type PageInfo struct {
 
 // PageSVG 页面SVG结果
 type PageSVG struct {
-	Index  int     `json:"index"`
-	Number int     `json:"number"`
-	ID     string  `json:"id"`
-	Width  float64 `json:"width"`
-	Height float64 `json:"height"`
-	SVG    string  `json:"svg"`
+	Index  int              `json:"index"`
+	Number int              `json:"number"`
+	ID     string           `json:"id"`
+	Width  float64          `json:"width"`
+	Height float64          `json:"height"`
+	SVG    string           `json:"svg"`
+	Links  []ofdgo.PageLink `json:"-"`
 }
 
 // ExportFormat 导出格式
@@ -382,7 +383,11 @@ func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
 	if err := s.Renderer.RenderToSVG(page, &buf); err != nil {
 		return PageSVG{}, err
 	}
-	return PageSVG{Index: index, Number: index + 1, ID: pageRef.ID, Width: box.W, Height: box.H, SVG: buf.String()}, nil
+	links, err := s.Renderer.PageLinks(page)
+	if err != nil {
+		return PageSVG{}, err
+	}
+	return PageSVG{Index: index, Number: index + 1, ID: pageRef.ID, Width: box.W, Height: box.H, SVG: buf.String(), Links: links}, nil
 }
 
 // ExportPage 导出单页

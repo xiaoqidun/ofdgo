@@ -1591,6 +1591,29 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 	const svg = parseSVG(page.svg, `p${openSeq}-${index}`);
 	svg.classList.add("ofd-svg");
 	surface.replaceChildren(svg);
+	for (const link of page.links) {
+		let url;
+		try {
+			url = new URL(link.uri);
+		} catch {
+			continue;
+		}
+		if (url.protocol !== "http:" && url.protocol !== "https:") {
+			continue;
+		}
+		const anchor = document.createElement("a");
+		anchor.className = "page-link";
+		anchor.href = url.href;
+		anchor.target = "_blank";
+		anchor.rel = "noopener noreferrer";
+		anchor.title = url.href;
+		anchor.setAttribute("aria-label", url.href);
+		anchor.style.left = `${link.x / page.width * 100}%`;
+		anchor.style.top = `${link.y / page.height * 100}%`;
+		anchor.style.width = `${link.width / page.width * 100}%`;
+		anchor.style.height = `${link.height / page.height * 100}%`;
+		surface.append(anchor);
+	}
 	shell.classList.add("rendered");
 	if (state.doc?.pages?.[index]) {
 		layoutPageShell(shell, state.doc.pages[index]);

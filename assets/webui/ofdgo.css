@@ -663,7 +663,17 @@ button.outline-link:hover {
 }
 
 .page-surface {
+	position: relative;
 	transform-origin: 0 0;
+}
+
+.page-link {
+	position: absolute;
+}
+
+.page-link:hover,
+.page-link:focus-visible {
+	background: rgba(15, 123, 104, 0.08);
 }
 
 .page-placeholder {

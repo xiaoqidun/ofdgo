@@ -16,7 +16,6 @@ package ofdgo
 
 import (
 	"fmt"
-	"net/url"
 
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers/pdf"
@@ -55,12 +54,6 @@ type pdfOutline struct {
 	Y     float64
 }
 
-// pdfActionSource PDF动作来源
-type pdfActionSource struct {
-	Box     Box
-	Actions []Action
-}
-
 // newPDFNavigation 创建PDF导航信息
 // 入参: renderer 渲染器, doc 文档结构, pages 页面数据
 // 返回: *pdfNavigation PDF导航信息
@@ -81,7 +74,7 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []pdfPage) *pdfNa
 		}
 	}
 	for i, page := range pages {
-		sources := pageActionSources(page)
+		sources := pageActionSources(page.Content, page.Box)
 		if renderer.RenderAnnotations {
 			sources = append(sources, annotationActionSources(renderer.Reader.Annots[page.Content.ID])...)
 		}
@@ -159,82 +152,6 @@ func (n *pdfNavigation) apply(renderer *pdf.PDF, page int) {
 	}
 }
 
-// pageActionSources 获取页面动作来源
-// 入参: page 页面数据
-// 返回: []pdfActionSource 动作来源
-func pageActionSources(page pdfPage) []pdfActionSource {
-	sources := make([]pdfActionSource, 0)
-	if len(page.Content.Actions) > 0 {
-		sources = append(sources, pdfActionSource{
-			Box:     Box{W: page.Box.W, H: page.Box.H},
-			Actions: page.Content.Actions,
-		})
-	}
-	for _, layer := range page.Content.Content.Layer {
-		for _, object := range layer.Objects {
-			sources = appendGraphicActionSources(sources, object, nil)
-		}
-	}
-	return sources
-}
-
-// annotationActionSources 获取注释动作来源
-// 入参: annotations 页面注释
-// 返回: []pdfActionSource 动作来源
-func annotationActionSources(annotations []Annotation) []pdfActionSource {
-	sources := make([]pdfActionSource, 0)
-	for _, annotation := range annotations {
-		if annotation.Visible != nil && !*annotation.Visible {
-			continue
-		}
-		box, err := ParseBox(annotation.Appearance.Boundary)
-		if err != nil {
-			continue
-		}
-		for _, object := range annotation.Appearance.Objects {
-			sources = appendGraphicActionSources(sources, object, &box)
-		}
-	}
-	return sources
-}
-
-// appendGraphicActionSources 添加图形对象动作来源
-// 入参: sources 动作来源, object 图形对象, box 指定动作区域
-// 返回: []pdfActionSource 动作来源
-func appendGraphicActionSources(sources []pdfActionSource, object GraphicObject, box *Box) []pdfActionSource {
-	var boundary string
-	var actions []Action
-	var children []GraphicObject
-	switch object.Type {
-	case "TextObject":
-		boundary = object.TextObject.Boundary
-		actions = object.TextObject.Actions
-	case "PathObject":
-		boundary = object.PathObject.Boundary
-		actions = object.PathObject.Actions
-	case "ImageObject":
-		boundary = object.ImageObject.Boundary
-		actions = object.ImageObject.Actions
-	case "CompositeGraphicUnit", "CompositeObject":
-		boundary = object.CompositeGraphicUnit.Boundary
-		actions = object.CompositeGraphicUnit.Actions
-		children = object.CompositeGraphicUnit.Objects
-	}
-	sourceBox := box
-	if sourceBox == nil && boundary != "" {
-		if value, err := ParseBox(boundary); err == nil {
-			sourceBox = &value
-		}
-	}
-	if sourceBox != nil && len(actions) > 0 {
-		sources = append(sources, pdfActionSource{Box: *sourceBox, Actions: actions})
-	}
-	for _, child := range children {
-		sources = appendGraphicActionSources(sources, child, box)
-	}
-	return sources
-}
-
 // outlineDest 获取大纲跳转目标
 // 入参: outline 大纲节点, bookmarks 书签
 // 返回: *Dest 跳转目标
@@ -252,24 +169,6 @@ func outlineDest(outline OutlineElem, bookmarks map[string]Dest) *Dest {
 		}
 	}
 	return nil
-}
-
-// resolveActionURI 解析URI动作地址
-// 入参: action URI动作
-// 返回: string URI地址
-func resolveActionURI(action URI) string {
-	if action.Base == "" {
-		return action.URI
-	}
-	base, err := url.Parse(action.Base)
-	if err != nil {
-		return action.URI
-	}
-	target, err := url.Parse(action.URI)
-	if err != nil {
-		return action.URI
-	}
-	return base.ResolveReference(target).String()
 }
 
 // pdfSourceRect 转换PDF动作区域

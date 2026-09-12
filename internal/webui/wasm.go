@@ -160,6 +160,16 @@ func renderPage(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	links := make([]any, len(page.Links))
+	for i, link := range page.Links {
+		links[i] = map[string]any{
+			"uri":    link.URI,
+			"x":      link.Box.X,
+			"y":      link.Box.Y,
+			"width":  link.Box.W,
+			"height": link.Box.H,
+		}
+	}
 	return successResult(map[string]any{
 		"index":  page.Index,
 		"number": page.Number,
@@ -167,6 +177,7 @@ func renderPage(args []js.Value) (any, error) {
 		"width":  page.Width,
 		"height": page.Height,
 		"svg":    page.SVG,
+		"links":  links,
 	}), nil
 }
 

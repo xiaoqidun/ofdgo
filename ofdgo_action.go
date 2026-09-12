@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"encoding/xml"
+	"net/url"
 	"strconv"
 )
 
@@ -56,6 +57,12 @@ type GotoBookmark struct {
 type URI struct {
 	URI  string `xml:"URI,attr"`
 	Base string `xml:"Base,attr"`
+}
+
+// PageLink 页面矩形外链，Box使用页面毫米坐标
+type PageLink struct {
+	URI string
+	Box Box
 }
 
 // GotoA 附件动作
@@ -100,6 +107,12 @@ type RegionCommand struct {
 	LargeArc       string
 	SweepDirection string
 	EndPoint       string
+}
+
+// actionSource 动作来源
+type actionSource struct {
+	Box     Box
+	Actions []Action
 }
 
 // gotoDest 获取文档内跳转目标
@@ -210,4 +223,100 @@ func (a *RegionArea) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 func actionFloatAttr(start xml.StartElement, name string) float64 {
 	value, _ := strconv.ParseFloat(attrValue(start, name), 64)
 	return value
+}
+
+// pageActionSources 获取页面动作来源
+// 入参: page 页面内容, box 页面区域
+// 返回: []actionSource 动作来源
+func pageActionSources(page *PageContent, box Box) []actionSource {
+	sources := make([]actionSource, 0)
+	if len(page.Actions) > 0 {
+		sources = append(sources, actionSource{
+			Box:     Box{W: box.W, H: box.H},
+			Actions: page.Actions,
+		})
+	}
+	for _, layer := range page.Content.Layer {
+		for _, object := range layer.Objects {
+			sources = appendGraphicActionSources(sources, object, nil)
+		}
+	}
+	return sources
+}
+
+// annotationActionSources 获取注释动作来源
+// 入参: annotations 页面注释
+// 返回: []actionSource 动作来源
+func annotationActionSources(annotations []Annotation) []actionSource {
+	sources := make([]actionSource, 0)
+	for _, annotation := range annotations {
+		if annotation.Visible != nil && !*annotation.Visible {
+			continue
+		}
+		box, err := ParseBox(annotation.Appearance.Boundary)
+		if err != nil {
+			continue
+		}
+		for _, object := range annotation.Appearance.Objects {
+			sources = appendGraphicActionSources(sources, object, &box)
+		}
+	}
+	return sources
+}
+
+// appendGraphicActionSources 添加图形对象动作来源
+// 入参: sources 动作来源, object 图形对象, box 指定动作区域
+// 返回: []actionSource 动作来源
+func appendGraphicActionSources(sources []actionSource, object GraphicObject, box *Box) []actionSource {
+	var boundary string
+	var actions []Action
+	var children []GraphicObject
+	switch object.Type {
+	case "TextObject":
+		boundary = object.TextObject.Boundary
+		actions = object.TextObject.Actions
+	case "PathObject":
+		boundary = object.PathObject.Boundary
+		actions = object.PathObject.Actions
+	case "ImageObject":
+		boundary = object.ImageObject.Boundary
+		actions = object.ImageObject.Actions
+	case "CompositeGraphicUnit", "CompositeObject":
+		boundary = object.CompositeGraphicUnit.Boundary
+		actions = object.CompositeGraphicUnit.Actions
+		children = object.CompositeGraphicUnit.Objects
+	}
+	if len(actions) > 0 {
+		sourceBox := box
+		if sourceBox == nil && boundary != "" {
+			if value, err := ParseBox(boundary); err == nil {
+				sourceBox = &value
+			}
+		}
+		if sourceBox != nil {
+			sources = append(sources, actionSource{Box: *sourceBox, Actions: actions})
+		}
+	}
+	for _, child := range children {
+		sources = appendGraphicActionSources(sources, child, box)
+	}
+	return sources
+}
+
+// resolveActionURI 解析URI动作地址
+// 入参: action URI动作
+// 返回: string URI地址
+func resolveActionURI(action URI) string {
+	if action.Base == "" {
+		return action.URI
+	}
+	base, err := url.Parse(action.Base)
+	if err != nil {
+		return action.URI
+	}
+	target, err := url.Parse(action.URI)
+	if err != nil {
+		return action.URI
+	}
+	return base.ResolveReference(target).String()
 }
