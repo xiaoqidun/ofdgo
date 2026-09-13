@@ -124,11 +124,14 @@ const el = {
 	refreshAppButton: document.querySelector("#refreshAppButton"),
 	metaFile: document.querySelector("#metaFile"),
 	metaTitle: document.querySelector("#metaTitle"),
+	metaSubject: document.querySelector("#metaSubject"),
 	metaAuthor: document.querySelector("#metaAuthor"),
-	metaVersion: document.querySelector("#metaVersion"),
+	metaCreationDate: document.querySelector("#metaCreationDate"),
+	metaModDate: document.querySelector("#metaModDate"),
 	metaType: document.querySelector("#metaType"),
-	metaFonts: document.querySelector("#metaFonts"),
+	metaVersion: document.querySelector("#metaVersion"),
 	metaSignatures: document.querySelector("#metaSignatures"),
+	metaFonts: document.querySelector("#metaFonts"),
 	attachmentPanel: document.querySelector("#attachmentPanel"),
 	attachmentList: document.querySelector("#attachmentList"),
 	signaturePanel: document.querySelector("#signaturePanel"),
@@ -2397,10 +2400,18 @@ function renderMeta() {
 	el.metaFile.textContent = state.fileName;
 	el.metaTitle.textContent = doc.title || "-";
 	el.metaAuthor.textContent = doc.author || "-";
-	el.metaVersion.textContent = doc.version || "-";
+	for (const [field, value] of [
+		[el.metaSubject, (doc.subject || "").trim()],
+		[el.metaCreationDate, formatDocumentTime(doc.creationDate)],
+		[el.metaModDate, formatDocumentTime(doc.modDate)],
+	]) {
+		field.textContent = value;
+		field.parentElement.hidden = !value;
+	}
 	el.metaType.textContent = doc.docType || "-";
-	el.metaFonts.textContent = String(doc.fontCount || 0);
+	el.metaVersion.textContent = doc.version || "-";
 	el.metaSignatures.textContent = doc.detailsPending ? "正在检查" : String(doc.signatureCount || 0);
+	el.metaFonts.textContent = String(doc.fontCount || 0);
 	el.pageTotal.textContent = String(doc.pageCount || 0);
 	renderAttachments();
 	renderSignatures();

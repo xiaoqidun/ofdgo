@@ -684,6 +684,7 @@ button.outline-link:hover {
 }
 
 .empty-state[hidden],
+.meta-list > [hidden],
 .navigation-tabs[hidden],
 .page-list[hidden],
 .page-frame[hidden],
