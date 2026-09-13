@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -35,7 +36,7 @@ const (
 	fontMatchFuzzy
 )
 
-var fontMatchRules = []fontMatchRule{
+var fontMatchRules = normalizeFontMatchRules([]fontMatchRule{
 	{
 		Keys:            []string{"小标宋", "方正小标宋", "xiaobiaosong", "fzxiaobiaosong", "fzxbs"},
 		Names:           []string{"小标宋体", "方正小标宋简体", "FZXiaoBiaoSong-B05", "FZXiaoBiaoSong-B05S"},
@@ -109,9 +110,27 @@ var fontMatchRules = []fontMatchRule{
 		Files:  []string{"times.ttf", "times new roman*.ttf", "times*.ttf"},
 		System: "Times New Roman",
 	},
-}
+})
 
 var fontNameReplacer = strings.NewReplacer(" ", "", "-", "", "_", "", "(", "", ")", "", "（", "", "）", "")
+
+// normalizeFontMatchRules 预处理固定字体规则的匹配名称，保留候选名称及顺序
+// 入参: rules 字体匹配规则
+// 返回: []fontMatchRule 预处理后的规则
+func normalizeFontMatchRules(rules []fontMatchRule) []fontMatchRule {
+	for i := range rules {
+		rule := &rules[i]
+		keys := append(append(rule.Keys, rule.Names...), rule.System)
+		rule.Keys = nil
+		for _, key := range keys {
+			key = fontNormalizeName(key)
+			if key != "" && !slices.Contains(rule.Keys, key) {
+				rule.Keys = append(rule.Keys, key)
+			}
+		}
+	}
+	return rules
+}
 
 // FontNormalizeName 规范化字体名称
 // 入参: name 字体名称
@@ -180,12 +199,9 @@ func fontQualifiedNames(name string) []string {
 			continue
 		}
 		prefix := ""
-		for _, group := range [][]string{rule.Keys, rule.Names, {rule.System}} {
-			for _, alias := range group {
-				alias = fontNormalizeName(alias)
-				if len(alias) > len(prefix) && strings.HasPrefix(name, alias) {
-					prefix = alias
-				}
+		for _, alias := range rule.Keys {
+			if len(alias) > len(prefix) && strings.HasPrefix(name, alias) {
+				prefix = alias
 			}
 		}
 		suffix := strings.TrimPrefix(name, prefix)
@@ -351,32 +367,15 @@ func fontRuleMatchLevel(rule fontMatchRule, name string) int {
 		return fontMatchNone
 	}
 	level := fontMatchNone
-	match := func(item string) bool {
-		item = fontNormalizeName(item)
-		if item != "" && name == item {
-			level = fontMatchExact
-			return true
+	for _, item := range rule.Keys {
+		if name == item {
+			return fontMatchExact
 		}
-		if item != "" && (level == fontMatchNone || level > fontMatchPartial) && strings.HasPrefix(name, item) {
+		if strings.HasPrefix(name, item) {
 			level = fontMatchPartial
-		}
-		if item != "" && level == fontMatchNone && strings.Contains(name, item) {
+		} else if level == fontMatchNone && strings.Contains(name, item) {
 			level = fontMatchFuzzy
 		}
-		return false
-	}
-	for _, item := range rule.Keys {
-		if match(item) {
-			return level
-		}
-	}
-	for _, item := range rule.Names {
-		if match(item) {
-			return level
-		}
-	}
-	if rule.System != "" {
-		match(rule.System)
 	}
 	return level
 }

@@ -84,12 +84,15 @@ func (p *PageText) Search(query string) []TextMatch {
 	length := utf8.RuneCountInString(query)
 	for index, run := range p.Runs {
 		text := foldText(run.Text)
-		runes := []rune(run.Text)
+		var runes []rune
 		codeOffset := 0
 		for offset := 0; offset < len(text); {
 			found := strings.Index(text[offset:], query)
 			if found < 0 {
 				break
+			}
+			if runes == nil {
+				runes = []rune(run.Text)
 			}
 			start := codeOffset + utf8.RuneCountInString(text[offset:offset+found])
 			offset += found

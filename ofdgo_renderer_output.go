@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"image"
@@ -130,9 +131,13 @@ func (r *Renderer) RenderToEPS(page *PageContent, writer io.Writer) error {
 	}
 	options := ps.DefaultOptions
 	options.Format = ps.EncapsulatedPostScript
-	renderer := ps.New(writer, c.W, c.H, &options)
+	buffer := bufio.NewWriter(writer)
+	renderer := ps.New(buffer, c.W, c.H, &options)
 	c.RenderTo(renderer)
-	return renderer.Close()
+	if err := renderer.Close(); err != nil {
+		return err
+	}
+	return buffer.Flush()
 }
 
 // RenderToMultiPagePDF 将整个文档导出为多页PDF
