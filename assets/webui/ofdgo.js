@@ -2036,10 +2036,6 @@ async function searchDocument() {
 	const pageCount = state.doc.pageCount;
 	try {
 		for (let page = 0; page < pageCount; page += 1) {
-			await waitForPaint();
-			if (seq !== state.searchSeq || openSeq !== state.openSeq) {
-				return;
-			}
 			const matches = await callWASM("ofdgoSearchPage", page, query);
 			if (seq !== state.searchSeq || openSeq !== state.openSeq) {
 				return;
