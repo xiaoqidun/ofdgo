@@ -21,6 +21,27 @@ import (
 	"github.com/tdewolff/canvas/renderers/pdf"
 )
 
+// pdfRenderer PDF渲染器
+type pdfRenderer struct {
+	*pdf.PDF
+	glyphPaths map[*canvas.Path]*canvas.Path
+}
+
+// glyphPath 复用相似变换下的PDF字形圆弧转换
+// 入参: path 缓存字形路径, matrix 字形变换
+// 返回: *canvas.Path PDF字形路径
+func (r *pdfRenderer) glyphPath(path *canvas.Path, matrix canvas.Matrix) *canvas.Path {
+	if !matrix.IsSimilarity() {
+		return path
+	}
+	if cached, ok := r.glyphPaths[path]; ok {
+		return cached
+	}
+	converted := path.ReplaceArcs()
+	r.glyphPaths[path] = converted
+	return converted
+}
+
 // pdfPage PDF页面数据
 type pdfPage struct {
 	Content *PageContent

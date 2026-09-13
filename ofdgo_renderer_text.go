@@ -396,6 +396,11 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 							scaleX = advanceLimit / glyphWidth
 						}
 						textWidth = glyphWidth * scaleX
+						if face.FauxBold != 0 {
+							if renderer, ok := ctx.Renderer.(*pdfRenderer); ok {
+								glyphPath = renderer.glyphPath(glyphPath, ctx.View().Scale(scaleX, 1))
+							}
+						}
 						if scaleX != 1 {
 							ctx.Push()
 							ctx.Translate(x, y)

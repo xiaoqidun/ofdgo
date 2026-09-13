@@ -244,13 +244,14 @@ func (r *Renderer) renderPDFPages(pages []pdfPage, writer io.Writer) error {
 	}
 	start := buf.Len()
 	p := pdf.New(buf, pages[0].Box.W, pages[0].Box.H, nil)
+	renderer := &pdfRenderer{PDF: p, glyphPaths: make(map[*canvas.Path]*canvas.Path)}
 	p.SetInfo("", "", "", "", "xiaoqidun/ofdgo")
 	for i, page := range pages {
 		if i > 0 {
 			p.NewPage(page.Box.W, page.Box.H)
 		}
 		navigation.apply(p, i)
-		if err := r.renderPageToContext(canvas.NewContext(p), page.Content, true); err != nil {
+		if err := r.renderPageToContext(canvas.NewContext(renderer), page.Content, true); err != nil {
 			buf.Truncate(start)
 			return fmt.Errorf("failed to render page %d: %w", i+1, err)
 		}
