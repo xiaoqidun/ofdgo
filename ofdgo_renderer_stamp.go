@@ -28,7 +28,7 @@ import (
 // renderStamp 渲染印章
 // 入参: ctx 画布上下文, s 印章对象, pageH 页面高度
 func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
-	if r.pageText != nil {
+	if r.textOnly {
 		return
 	}
 	if s.Type == "ofd" && len(s.Data) > 0 {

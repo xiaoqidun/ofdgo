@@ -23,10 +23,12 @@ import (
 )
 
 // Renderer 渲染器实现
+// OnPageText可选，接收页面绘制时同步提取的文字，不包含图案和签名外观
 type Renderer struct {
 	Reader                *Reader
 	DPI                   float64
 	RenderAnnotations     bool
+	OnPageText            func(*PageContent, *PageText)
 	fontFamily            *canvas.FontFamily
 	defaultFontLoaded     bool
 	DrawParams            map[string]*DrawParam
@@ -47,6 +49,7 @@ type Renderer struct {
 	fontFS                []fs.FS
 	decodeImages          bool
 	pageText              *PageText
+	textOnly              bool
 }
 
 // RendererOption 渲染器配置选项
@@ -137,6 +140,11 @@ func (r *Renderer) renderPageToContext(ctx *canvas.Context, page *PageContent, d
 	if err != nil {
 		return err
 	}
+	if r.OnPageText != nil {
+		renderer := *r
+		renderer.pageText = &PageText{}
+		r = &renderer
+	}
 	pageH := box.H
 	if drawBackground {
 		ctx.SetFillColor(canvas.White)
@@ -163,6 +171,9 @@ func (r *Renderer) renderPageToContext(ctx *canvas.Context, page *PageContent, d
 		for _, stamp := range stamps {
 			r.renderStamp(ctx, stamp, pageH)
 		}
+	}
+	if r.OnPageText != nil {
+		r.OnPageText(page, r.pageText)
 	}
 	return nil
 }

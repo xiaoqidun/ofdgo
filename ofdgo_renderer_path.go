@@ -173,7 +173,7 @@ func (s *pathStyle) scale(ctm Matrix) {
 // renderPath 渲染路径
 // 入参: ctx 画布上下文, obj 路径对象, pageH 页面高度, defaults 默认绘制参数, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
 func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64, defaults *DrawParam, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
-	if r.pageText != nil {
+	if r.textOnly {
 		return
 	}
 	if obj.Visible != nil && !*obj.Visible {
@@ -304,6 +304,11 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 // renderPattern 渲染图案填充
 // 入参: ctx 画布上下文, pattern 底纹画刷, pageH 页面高度, clip 绘制区域, objectCTM 对象变换矩阵
 func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *patternPaint, pageH float64, clip *canvas.Path, objectCTM Matrix) {
+	if r.pageText != nil {
+		renderer := *r
+		renderer.pageText = nil
+		r = &renderer
+	}
 	if clip == nil || clip.Empty() || len(pattern.CellContent.Objects) == 0 {
 		return
 	}
@@ -504,6 +509,7 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ob
 				textObj.StrokeColor = &StrokeColor{Value: "0 0 0"}
 				textRenderer := *r
 				textRenderer.pageText = nil
+				textRenderer.textOnly = false
 				textRenderer.renderText(ctx, textObj, 0, r.drawParamDefaults(area.DrawParam, nil), nil, false, nil)
 			}
 		}

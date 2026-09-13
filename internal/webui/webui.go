@@ -418,7 +418,13 @@ func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
 		return PageSVG{}, err
 	}
 	var buf bytes.Buffer
-	fonts, err := s.Renderer.RenderToSVGWithFonts(page, &buf)
+	renderer := *s.Renderer
+	if s.textCache[index] == nil {
+		renderer.OnPageText = func(_ *ofdgo.PageContent, text *ofdgo.PageText) {
+			s.textCache[index] = text
+		}
+	}
+	fonts, err := renderer.RenderToSVGWithFonts(page, &buf)
 	if err != nil {
 		return PageSVG{}, err
 	}

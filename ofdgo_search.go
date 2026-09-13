@@ -65,7 +65,9 @@ func (r *Renderer) PageText(page *PageContent) (*PageText, error) {
 		return nil, err
 	}
 	renderer := *r
+	renderer.OnPageText = nil
 	renderer.pageText = &PageText{}
+	renderer.textOnly = true
 	if err := renderer.renderPageToContext(canvas.NewContext(canvas.New(box.W, box.H)), page, false); err != nil {
 		return nil, err
 	}

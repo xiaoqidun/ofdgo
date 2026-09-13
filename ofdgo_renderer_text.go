@@ -301,7 +301,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					}
 					textRun.addSpan(textPos+spans[i][0], textPos+spans[i][1], bounds, m.Scale(scaleX, 1), clipPath, pageH)
 				}
-				continue
+				if r.textOnly {
+					continue
+				}
 			}
 			if shouldStroke {
 				scaleX := hScale

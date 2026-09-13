@@ -210,7 +210,7 @@ func renderPage(args []js.Value) (any, error) {
 		"svg":    page.SVG,
 		"links":  links,
 		"fonts":  fonts,
-		"text":   js.Global().Get("JSON").Call("parse", string(textData)),
+		"text":   string(textData),
 	}), nil
 }
 

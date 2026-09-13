@@ -1665,6 +1665,7 @@ async function processPageRenderQueue() {
 				const page = await callWASM("ofdgoRenderPage", task.index);
 				await loadSVGFonts(page.fonts, task.openSeq);
 				if (task.openSeq === state.openSeq) {
+					page.text = JSON.parse(page.text);
 					state.pageCache.set(task.index, page);
 				}
 				task.resolve(page);
