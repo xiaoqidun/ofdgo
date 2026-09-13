@@ -19,6 +19,7 @@ let wasmWorker = null;
 let wasmRequestID = 0;
 let wasmRecoveryTimer = 0;
 let fontDatabase = null;
+let textMeasure = null;
 
 const state = {
 	ready: false,
@@ -1750,8 +1751,9 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 function createTextLayer(text) {
 	const layer = document.createElement("div");
 	layer.className = "text-layer";
-	const measure = document.createElement("canvas").getContext("2d");
+	const measure = textMeasure ||= document.createElement("canvas").getContext("2d");
 	measure.font = "100px sans-serif";
+	const widths = new Map();
 	for (const run of text.runs || []) {
 		const line = document.createElement("span");
 		line.className = "text-run";
@@ -1759,7 +1761,11 @@ function createTextLayer(text) {
 		for (const item of run.spans || []) {
 			const span = document.createElement("span");
 			span.textContent = chars.slice(item.start, item.end).join("");
-			const width = measure.measureText(span.textContent).width || 1;
+			let width = widths.get(span.textContent);
+			if (width === undefined) {
+				width = measure.measureText(span.textContent).width || 1;
+				widths.set(span.textContent, width);
+			}
 			const [a, b, c, d, e, f] = item.matrix.map((value) => value * MM_TO_PX);
 			span.style.transform = `matrix(${a / width}, ${b / width}, ${c / 100}, ${d / 100}, ${e}, ${f})`;
 			line.append(span);
