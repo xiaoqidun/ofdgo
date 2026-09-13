@@ -21,9 +21,10 @@ import (
 	"io"
 
 	"github.com/tdewolff/canvas"
-	"github.com/tdewolff/canvas/renderers"
 	"github.com/tdewolff/canvas/renderers/pdf"
+	"github.com/tdewolff/canvas/renderers/ps"
 	"github.com/tdewolff/canvas/renderers/rasterizer"
+	"github.com/tdewolff/canvas/renderers/svg"
 	"golang.org/x/image/draw"
 	"golang.org/x/image/math/f64"
 )
@@ -88,7 +89,9 @@ func (r *Renderer) RenderToSVG(page *PageContent, writer io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return c.Write(writer, renderers.SVG())
+	renderer := svg.New(writer, c.W, c.H, nil)
+	c.RenderTo(renderer)
+	return renderer.Close()
 }
 
 // replacePDFProducer 替换PDF的Producer属性
@@ -125,7 +128,11 @@ func (r *Renderer) RenderToEPS(page *PageContent, writer io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return c.Write(writer, renderers.EPS())
+	options := ps.DefaultOptions
+	options.Format = ps.EncapsulatedPostScript
+	renderer := ps.New(writer, c.W, c.H, &options)
+	c.RenderTo(renderer)
+	return renderer.Close()
 }
 
 // RenderToMultiPagePDF 将整个文档导出为多页PDF

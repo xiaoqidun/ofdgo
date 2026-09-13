@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"fmt"
 	"image"
-	"image/color"
 	"image/draw"
 	"image/jpeg"
 	"image/png"
@@ -476,7 +475,7 @@ func (s *Session) ExportPage(index int, value string, dpi float64) ([]byte, Expo
 		if renderErr != nil {
 			return nil, ExportFormat{}, renderErr
 		}
-		err = jpeg.Encode(&buf, imageWithWhiteBackground(img), &jpeg.Options{Quality: 95})
+		err = jpeg.Encode(&buf, fillWhiteBackground(img), &jpeg.Options{Quality: 95})
 	}
 	if err != nil {
 		return nil, ExportFormat{}, err
@@ -667,13 +666,27 @@ func (s *Session) ExportPDF() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// imageWithWhiteBackground 填充图片白色背景
+// fillWhiteBackground 填充白色背景，复用当前导出图片的RGBA像素
 // 入参: img 图片对象
 // 返回: image.Image 图片对象
-func imageWithWhiteBackground(img image.Image) image.Image {
+func fillWhiteBackground(img image.Image) image.Image {
 	bounds := img.Bounds()
+	if rgba, ok := img.(*image.RGBA); ok {
+		for y := 0; y < bounds.Dy(); y++ {
+			row := rgba.Pix[y*rgba.Stride : y*rgba.Stride+bounds.Dx()*4]
+			for i := 0; i < len(row); i += 4 {
+				if alpha := 255 - row[i+3]; alpha != 0 {
+					row[i] += alpha
+					row[i+1] += alpha
+					row[i+2] += alpha
+					row[i+3] = 255
+				}
+			}
+		}
+		return rgba
+	}
 	dst := image.NewRGBA(bounds)
-	draw.Draw(dst, bounds, &image.Uniform{C: color.White}, image.Point{}, draw.Src)
+	draw.Draw(dst, bounds, image.White, image.Point{}, draw.Src)
 	draw.Draw(dst, bounds, img, bounds.Min, draw.Over)
 	return dst
 }
