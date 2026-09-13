@@ -23,6 +23,7 @@ import (
 )
 
 // Open 打开OFD文件
+// 返回的阅读器持有文件，使用完毕后需调用Close
 // 入参: path 文件路径
 // 返回: *Reader 阅读器实例, error 错误信息
 func Open(path string) (*Reader, error) {
@@ -43,6 +44,7 @@ func Open(path string) (*Reader, error) {
 }
 
 // NewReader 从IO读取器创建OFD阅读器
+// 读取器的生命周期由调用方管理，Reader.Close不会关闭它
 // 入参: r IO读取器, size 数据大小
 // 返回: *Reader 阅读器实例, error 错误信息
 func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
@@ -114,15 +116,4 @@ func WithFontFS(fs ...fs.FS) RendererOption {
 	return func(r *Renderer) {
 		r.fontFS = append(r.fontFS, fs...)
 	}
-}
-
-// PageCount 获取文档总页数
-// 入参: reader 阅读器
-// 返回: int 页数
-func PageCount(reader *Reader) int {
-	doc, _ := reader.Doc()
-	if doc == nil {
-		return 0
-	}
-	return len(doc.Pages.Page)
 }

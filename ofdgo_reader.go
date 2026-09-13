@@ -24,6 +24,7 @@ import (
 )
 
 // Reader OFD文件阅读器
+// Reader及共享它的Renderer需串行调用
 type Reader struct {
 	Path                      string
 	Zip                       *zip.Reader
@@ -249,6 +250,7 @@ func resolveResourcePath(resPath, baseLoc, filePath string) string {
 }
 
 // PageContent 获取页面内容
+// 每次返回独立的页面内容，修改后可传入Renderer重绘，不会写回原文件
 // 入参: page 页面对象
 // 返回: *PageContent 页面内容, error 错误信息
 func (r *Reader) PageContent(page Page) (*PageContent, error) {
@@ -270,6 +272,30 @@ func (r *Reader) PageContent(page Page) (*PageContent, error) {
 		return nil, err
 	}
 	return &content, nil
+}
+
+// PageCount 获取当前文档总页数
+// 返回: int 页数, error 错误信息
+func (r *Reader) PageCount() (int, error) {
+	doc, err := r.Doc()
+	if err != nil {
+		return 0, err
+	}
+	return len(doc.Pages.Page), nil
+}
+
+// PageContentByIndex 按当前文档页面顺序读取页面内容
+// 入参: index 页面索引，从0开始
+// 返回: *PageContent 页面内容, error 错误信息
+func (r *Reader) PageContentByIndex(index int) (*PageContent, error) {
+	doc, err := r.Doc()
+	if err != nil {
+		return nil, err
+	}
+	if index < 0 || index >= len(doc.Pages.Page) {
+		return nil, fmt.Errorf("page index %d out of range", index)
+	}
+	return r.PageContent(doc.Pages.Page[index])
 }
 
 // PageArea 读取页面区域，不解析页面图元

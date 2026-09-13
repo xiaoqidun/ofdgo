@@ -17,10 +17,7 @@ package webui
 import (
 	"bytes"
 	"fmt"
-	"image"
-	"image/draw"
 	"image/jpeg"
-	"image/png"
 	"path"
 	"strings"
 	"time"
@@ -279,7 +276,7 @@ func (s *Session) SetFonts(fonts []FontFile) error {
 func (s *Session) PageText(index int) (*ofdgo.PageText, error) {
 	text := s.textCache[index]
 	if text == nil {
-		_, page, err := s.pageContent(index)
+		page, err := s.pageContent(index)
 		if err != nil {
 			return nil, err
 		}
@@ -389,7 +386,7 @@ func (s *Session) Info() DocumentInfo {
 	pages := make([]*ofdgo.PageContent, 0, len(s.doc.Pages.Page))
 	for index, pageRef := range s.doc.Pages.Page {
 		pageInfo := PageInfo{Index: index, ID: pageRef.ID}
-		if _, page, err := s.pageContent(index); err == nil {
+		if page, err := s.pageContent(index); err == nil {
 			pages = append(pages, page)
 			if box, err := s.pageBox(index, page); err == nil {
 				pageInfo.Width = box.W
@@ -409,7 +406,7 @@ func (s *Session) Info() DocumentInfo {
 // 入参: index 页面索引
 // 返回: PageSVG 页面SVG结果, error 错误信息
 func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
-	pageRef, page, err := s.pageContent(index)
+	page, err := s.pageContent(index)
 	if err != nil {
 		return PageSVG{}, err
 	}
@@ -436,7 +433,7 @@ func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
 		s.svgFonts[font.Name] = font.Data
 		fonts[i].Data = nil
 	}
-	return PageSVG{Index: index, Number: index + 1, ID: pageRef.ID, Width: box.W, Height: box.H, SVG: buf.String(), Links: links, Fonts: fonts}, nil
+	return PageSVG{Index: index, Number: index + 1, ID: page.ID, Width: box.W, Height: box.H, SVG: buf.String(), Links: links, Fonts: fonts}, nil
 }
 
 // SVGFontData 获取已渲染页面引用的字体数据
@@ -458,50 +455,31 @@ func (s *Session) ExportPage(index int, value string, dpi float64) ([]byte, Expo
 	if !ok {
 		return nil, ExportFormat{}, fmt.Errorf("unsupported export format %s", value)
 	}
-	_, page, err := s.pageContent(index)
+	page, err := s.pageContent(index)
 	if err != nil {
 		return nil, ExportFormat{}, err
 	}
 	var buf bytes.Buffer
+	renderer := *s.Renderer
+	if dpi > 0 && (format.Value == "png" || format.Value == "jpg") {
+		renderer.DPI = dpi
+	}
 	switch format.Value {
 	case "svg":
-		err = s.Renderer.RenderToSVG(page, &buf)
+		err = renderer.RenderToSVG(page, &buf)
 	case "pdf":
-		err = s.Renderer.RenderToPDF(page, &buf)
+		err = renderer.RenderToPDF(page, &buf)
 	case "eps":
-		err = s.Renderer.RenderToEPS(page, &buf)
+		err = renderer.RenderToEPS(page, &buf)
 	case "png":
-		img, renderErr := s.renderPageImage(page, dpi)
-		if renderErr != nil {
-			return nil, ExportFormat{}, renderErr
-		}
-		err = png.Encode(&buf, img)
+		err = renderer.RenderToPNG(page, &buf)
 	case "jpg":
-		img, renderErr := s.renderPageImage(page, dpi)
-		if renderErr != nil {
-			return nil, ExportFormat{}, renderErr
-		}
-		err = jpeg.Encode(&buf, fillWhiteBackground(img), &jpeg.Options{Quality: 95})
+		err = renderer.RenderToJPEG(page, &buf, &jpeg.Options{Quality: 95})
 	}
 	if err != nil {
 		return nil, ExportFormat{}, err
 	}
 	return buf.Bytes(), format, nil
-}
-
-// renderPageImage 渲染页面图片
-// 入参: page 页面内容, dpi 图片DPI
-// 返回: image.Image 图像对象, error 错误信息
-func (s *Session) renderPageImage(page *ofdgo.PageContent, dpi float64) (image.Image, error) {
-	if dpi <= 0 {
-		return s.Renderer.RenderToImage(page)
-	}
-	oldDPI := s.Renderer.DPI
-	s.Renderer.DPI = dpi
-	defer func() {
-		s.Renderer.DPI = oldDPI
-	}()
-	return s.Renderer.RenderToImage(page)
 }
 
 // signatureInfos 获取签名验证信息
@@ -660,7 +638,7 @@ func (s *Session) ExportPDF() ([]byte, error) {
 	var buf bytes.Buffer
 	pages := make([]*ofdgo.PageContent, len(s.doc.Pages.Page))
 	for i := range pages {
-		_, page, err := s.pageContent(i)
+		page, err := s.pageContent(i)
 		if err != nil {
 			return nil, err
 		}
@@ -672,51 +650,22 @@ func (s *Session) ExportPDF() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// fillWhiteBackground 填充白色背景，复用当前导出图片的RGBA像素
-// 入参: img 图片对象
-// 返回: image.Image 图片对象
-func fillWhiteBackground(img image.Image) image.Image {
-	bounds := img.Bounds()
-	if rgba, ok := img.(*image.RGBA); ok {
-		for y := 0; y < bounds.Dy(); y++ {
-			row := rgba.Pix[y*rgba.Stride : y*rgba.Stride+bounds.Dx()*4]
-			for i := 0; i < len(row); i += 4 {
-				if alpha := 255 - row[i+3]; alpha != 0 {
-					row[i] += alpha
-					row[i+1] += alpha
-					row[i+2] += alpha
-					row[i+3] = 255
-				}
-			}
-		}
-		return rgba
-	}
-	dst := image.NewRGBA(bounds)
-	draw.Draw(dst, bounds, image.White, image.Point{}, draw.Src)
-	draw.Draw(dst, bounds, img, bounds.Min, draw.Over)
-	return dst
-}
-
 // pageContent 获取页面内容
 // 入参: index 页面索引
-// 返回: ofdgo.Page 页面引用, *ofdgo.PageContent 页面内容, error 错误信息
-func (s *Session) pageContent(index int) (ofdgo.Page, *ofdgo.PageContent, error) {
+// 返回: *ofdgo.PageContent 页面内容, error 错误信息
+func (s *Session) pageContent(index int) (*ofdgo.PageContent, error) {
 	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
-		return ofdgo.Page{}, nil, fmt.Errorf("ofd document is not opened")
+		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	if index < 0 || index >= len(s.doc.Pages.Page) {
-		return ofdgo.Page{}, nil, fmt.Errorf("page index %d out of range", index)
-	}
-	pageRef := s.doc.Pages.Page[index]
 	if page, ok := s.pageCache[index]; ok {
-		return pageRef, page, nil
+		return page, nil
 	}
-	page, err := s.Reader.PageContent(pageRef)
+	page, err := s.Reader.PageContentByIndex(index)
 	if err != nil {
-		return ofdgo.Page{}, nil, err
+		return nil, err
 	}
 	s.pageCache[index] = page
-	return pageRef, page, nil
+	return page, nil
 }
 
 // pageBox 获取页面物理区域

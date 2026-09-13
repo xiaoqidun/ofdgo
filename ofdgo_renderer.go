@@ -15,7 +15,6 @@
 package ofdgo
 
 import (
-	"fmt"
 	"image"
 	"io/fs"
 
@@ -23,19 +22,20 @@ import (
 )
 
 // Renderer 渲染器实现
+// 通过NewRenderer创建，实例及共享的Reader需串行使用
 // OnPageText可选，接收页面绘制时同步提取的文字，不包含图案和签名外观
 type Renderer struct {
 	Reader                *Reader
 	DPI                   float64
 	RenderAnnotations     bool
 	OnPageText            func(*PageContent, *PageText)
-	fontFamily            *canvas.FontFamily
-	defaultFontLoaded     bool
 	DrawParams            map[string]*DrawParam
 	CompositeGraphicUnits map[string]*CompositeGraphicUnit
-	FontMap               map[string]*canvas.FontFamily
-	FontGIDMap            map[string]map[uint16]rune
-	FontCIDMap            map[string]map[uint16]rune
+	fontFamily            *canvas.FontFamily
+	defaultFontLoaded     bool
+	fontMap               map[string]*canvas.FontFamily
+	fontGIDMap            map[string]map[uint16]rune
+	fontCIDMap            map[string]map[uint16]rune
 	fontCache             map[fontCacheKey]*canvas.FontFamily
 	svgFontCache          map[*canvas.Font]SVGFont
 	fontSourceCache       map[string][]fontSource
@@ -64,9 +64,9 @@ func (r *Renderer) SetFontFS(fsys ...fs.FS) {
 
 // resetFontCache 重置字体匹配、加载和字形缓存
 func (r *Renderer) resetFontCache() {
-	r.FontMap = make(map[string]*canvas.FontFamily)
-	r.FontGIDMap = make(map[string]map[uint16]rune)
-	r.FontCIDMap = make(map[string]map[uint16]rune)
+	r.fontMap = make(map[string]*canvas.FontFamily)
+	r.fontGIDMap = make(map[string]map[uint16]rune)
+	r.fontCIDMap = make(map[string]map[uint16]rune)
 	r.fontCache = make(map[fontCacheKey]*canvas.FontFamily)
 	r.svgFontCache = make(map[*canvas.Font]SVGFont)
 	r.fontSourceCache = make(map[string][]fontSource)
@@ -205,17 +205,10 @@ func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
 }
 
 // RenderPageByIndex 按索引渲染页面
-// 入参: index 页面索引
+// 入参: index 页面索引，从0开始
 // 返回: *canvas.Canvas 画布实例, error 错误信息
 func (r *Renderer) RenderPageByIndex(index int) (*canvas.Canvas, error) {
-	doc, err := r.Reader.Doc()
-	if err != nil {
-		return nil, err
-	}
-	if index < 0 || index >= len(doc.Pages.Page) {
-		return nil, fmt.Errorf("page index %d out of range", index)
-	}
-	page, err := r.Reader.PageContent(doc.Pages.Page[index])
+	page, err := r.Reader.PageContentByIndex(index)
 	if err != nil {
 		return nil, err
 	}

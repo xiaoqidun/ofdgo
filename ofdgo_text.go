@@ -232,19 +232,11 @@ func (r *Renderer) fontGlyphRune(fontID string, glyphID int) (rune, bool) {
 		return 0, false
 	}
 	id := uint16(glyphID)
-	if r.FontCIDMap != nil {
-		if mapping := r.FontCIDMap[fontID]; mapping != nil {
-			if mapped, ok := mapping[id]; ok {
-				return mapped, true
-			}
-		}
+	if mapped, ok := r.fontCIDMap[fontID][id]; ok {
+		return mapped, true
 	}
-	if r.FontGIDMap != nil {
-		if mapping := r.FontGIDMap[fontID]; mapping != nil {
-			if mapped, ok := mapping[id]; ok {
-				return mapped, true
-			}
-		}
+	if mapped, ok := r.fontGIDMap[fontID][id]; ok {
+		return mapped, true
 	}
 	return 0, false
 }

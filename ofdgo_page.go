@@ -39,6 +39,7 @@ type Content struct {
 }
 
 // Layer 图层
+// Objects非空时按其顺序渲染，图元修改应作用于Objects中的对象
 type Layer struct {
 	ID                   string                 `xml:"ID,attr"`
 	Type                 string                 `xml:"Type,attr"`

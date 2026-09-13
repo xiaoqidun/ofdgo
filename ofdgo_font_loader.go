@@ -62,7 +62,7 @@ type fontCacheKey struct {
 // 入参: fontID 字体ID
 // 返回: *canvas.FontFamily 字体族
 func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
-	if ff, ok := r.FontMap[fontID]; ok {
+	if ff, ok := r.fontMap[fontID]; ok {
 		return ff
 	}
 	var defaultFont *canvas.FontFamily
@@ -78,17 +78,11 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	if of.FontFile != "" {
 		if fontData, err := r.Reader.ResData(of.FontFile); err == nil {
 			if cidMap := getCFFCIDRuneMap(fontData); len(cidMap) > 0 {
-				if r.FontCIDMap == nil {
-					r.FontCIDMap = make(map[string]map[uint16]rune)
-				}
-				r.FontCIDMap[fontID] = cidMap
+				r.fontCIDMap[fontID] = cidMap
 			}
 			if _, fixedData, mapping, _, err := FixFontDataAggressive(fontData, true, true); err == nil {
 				fontData = fixedData
 				if mapping != nil {
-					if r.FontGIDMap == nil {
-						r.FontGIDMap = make(map[string]map[uint16]rune)
-					}
 					inv := make(map[uint16]rune)
 					for k, v := range mapping {
 						if k == packedGlyphRune(v) {
@@ -100,11 +94,11 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 							inv[v] = k
 						}
 					}
-					r.FontGIDMap[fontID] = inv
+					r.fontGIDMap[fontID] = inv
 				}
 			}
 			if err := ff.LoadFont(fontData, 0, fontStyle); err == nil {
-				r.FontMap[fontID] = ff
+				r.fontMap[fontID] = ff
 				return ff
 			}
 			return nil
@@ -113,12 +107,12 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	}
 	for _, source := range r.fontSources(fontID, of, fontStyle) {
 		if loaded := r.loadFontSource(ff, source, fontStyle); loaded != nil {
-			r.FontMap[fontID] = loaded
+			r.fontMap[fontID] = loaded
 			r.fontSourceUsed[fontID] = source
 			return loaded
 		}
 	}
-	r.FontMap[fontID] = defaultFont
+	r.fontMap[fontID] = defaultFont
 	return defaultFont
 }
 
