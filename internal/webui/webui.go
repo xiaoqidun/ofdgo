@@ -108,6 +108,7 @@ type Session struct {
 	pageCache      map[int]*ofdgo.PageContent
 	boxCache       map[int]ofdgo.Box
 	textCache      map[int]*ofdgo.PageText
+	svgFonts       map[string][]byte
 	signatures     []SignatureInfo
 	signatureError error
 	signaturesRead bool
@@ -165,6 +166,7 @@ type PageSVG struct {
 	Height float64          `json:"height"`
 	SVG    string           `json:"svg"`
 	Links  []ofdgo.PageLink `json:"-"`
+	Fonts  []ofdgo.SVGFont  `json:"-"`
 }
 
 // ExportFormat 导出格式
@@ -241,6 +243,7 @@ func Open(data []byte, opts OpenOptions) (*Session, error) {
 		pageCache: make(map[int]*ofdgo.PageContent),
 		boxCache:  make(map[int]ofdgo.Box),
 		textCache: make(map[int]*ofdgo.PageText),
+		svgFonts:  make(map[string][]byte),
 	}, nil
 }
 
@@ -267,6 +270,7 @@ func (s *Session) SetFonts(fonts []FontFile) error {
 		s.Renderer.SetFontFS()
 	}
 	clear(s.textCache)
+	clear(s.svgFonts)
 	return nil
 }
 
@@ -415,14 +419,30 @@ func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
 		return PageSVG{}, err
 	}
 	var buf bytes.Buffer
-	if err := s.Renderer.RenderToSVG(page, &buf); err != nil {
+	fonts, err := s.Renderer.RenderToSVGWithFonts(page, &buf)
+	if err != nil {
 		return PageSVG{}, err
 	}
 	links, err := s.Renderer.PageLinks(page)
 	if err != nil {
 		return PageSVG{}, err
 	}
-	return PageSVG{Index: index, Number: index + 1, ID: pageRef.ID, Width: box.W, Height: box.H, SVG: buf.String(), Links: links}, nil
+	for i, font := range fonts {
+		s.svgFonts[font.Name] = font.Data
+		fonts[i].Data = nil
+	}
+	return PageSVG{Index: index, Number: index + 1, ID: pageRef.ID, Width: box.W, Height: box.H, SVG: buf.String(), Links: links, Fonts: fonts}, nil
+}
+
+// SVGFontData 获取已渲染页面引用的字体数据
+// 入参: name 字体资源标识
+// 返回: []byte 字体数据, error 错误信息
+func (s *Session) SVGFontData(name string) ([]byte, error) {
+	data, ok := s.svgFonts[name]
+	if !ok {
+		return nil, fmt.Errorf("svg font not found: %s", name)
+	}
+	return data, nil
 }
 
 // ExportPage 导出单页

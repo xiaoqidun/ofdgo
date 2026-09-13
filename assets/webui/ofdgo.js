@@ -53,6 +53,7 @@ const state = {
 	continuous: false,
 	renderAnnotations: true,
 	pageCache: new Map(),
+	svgFonts: new Map(),
 	selectedPages: new Set(),
 	pageInFlight: new Map(),
 	pageRenderQueue: [],
@@ -1509,6 +1510,10 @@ function renderPageFlow() {
 }
 
 function resetPageFlow() {
+	for (const font of state.svgFonts.values()) {
+		document.fonts.delete(font);
+	}
+	state.svgFonts.clear();
 	state.pageCache.clear();
 	state.selectedPages.clear();
 	state.visiblePages.clear();
@@ -1657,6 +1662,7 @@ async function processPageRenderQueue() {
 					continue;
 				}
 				const page = await callWASM("ofdgoRenderPage", task.index);
+				await loadSVGFonts(page.fonts, task.openSeq);
 				if (task.openSeq === state.openSeq) {
 					state.pageCache.set(task.index, page);
 				}
@@ -1669,6 +1675,28 @@ async function processPageRenderQueue() {
 		}
 	} finally {
 		state.pageRenderRunning = false;
+	}
+}
+
+async function loadSVGFonts(fonts, openSeq) {
+	for (const font of fonts) {
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		if (state.svgFonts.has(font.name)) {
+			continue;
+		}
+		const data = await callWASM("ofdgoSVGFontData", font.name);
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		const face = new FontFace(font.name, data.bytes, { weight: String(font.weight), style: font.style });
+		await face.load();
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		document.fonts.add(face);
+		state.svgFonts.set(font.name, face);
 	}
 }
 

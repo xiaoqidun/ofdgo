@@ -39,6 +39,7 @@ func RunWASM() {
 	registerCallback("ofdgoDocumentInfo", documentInfo)
 	registerCallback("ofdgoAttachmentData", attachmentData)
 	registerCallback("ofdgoRenderPage", renderPage)
+	registerCallback("ofdgoSVGFontData", svgFontData)
 	registerCallback("ofdgoSearchPage", searchPage)
 	registerCallback("ofdgoExportFormats", exportFormats)
 	registerCallback("ofdgoExportPage", exportPage)
@@ -150,6 +151,20 @@ func attachmentData(args []js.Value) (any, error) {
 	return successResult(map[string]any{"bytes": bytesToJS(data)}), nil
 }
 
+// svgFontData 读取SVG字体资源
+// 入参: args 浏览器参数
+// 返回: any 字体数据, error 错误信息
+func svgFontData(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	data, err := currentSession.SVGFontData(args[0].String())
+	if err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"bytes": bytesToJS(data)}), nil
+}
+
 // renderPage 渲染OFD页面
 // 入参: args 浏览器参数
 // 返回: any 页面SVG结果, error 错误信息
@@ -182,6 +197,10 @@ func renderPage(args []js.Value) (any, error) {
 			"height": link.Box.H,
 		}
 	}
+	fonts := make([]any, len(page.Fonts))
+	for i, font := range page.Fonts {
+		fonts[i] = map[string]any{"name": font.Name, "weight": font.Weight, "style": font.Style}
+	}
 	return successResult(map[string]any{
 		"index":  page.Index,
 		"number": page.Number,
@@ -190,6 +209,7 @@ func renderPage(args []js.Value) (any, error) {
 		"height": page.Height,
 		"svg":    page.SVG,
 		"links":  links,
+		"fonts":  fonts,
 		"text":   js.Global().Get("JSON").Call("parse", string(textData)),
 	}), nil
 }

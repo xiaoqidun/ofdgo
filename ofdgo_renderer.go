@@ -35,6 +35,7 @@ type Renderer struct {
 	FontGIDMap            map[string]map[uint16]rune
 	FontCIDMap            map[string]map[uint16]rune
 	fontCache             map[fontCacheKey]*canvas.FontFamily
+	svgFontCache          map[*canvas.Font]SVGFont
 	fontSourceCache       map[string][]fontSource
 	fontSourceUsed        map[string]fontSource
 	fontDirCandidates     map[string][]fontFileCandidate
@@ -64,6 +65,7 @@ func (r *Renderer) resetFontCache() {
 	r.FontGIDMap = make(map[string]map[uint16]rune)
 	r.FontCIDMap = make(map[string]map[uint16]rune)
 	r.fontCache = make(map[fontCacheKey]*canvas.FontFamily)
+	r.svgFontCache = make(map[*canvas.Font]SVGFont)
 	r.fontSourceCache = make(map[string][]fontSource)
 	r.fontSourceUsed = make(map[string]fontSource)
 	r.fontDirCandidates = make(map[string][]fontFileCandidate)
