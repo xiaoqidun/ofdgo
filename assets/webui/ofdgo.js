@@ -2074,10 +2074,13 @@ async function searchDocument() {
 			if (seq !== state.searchSeq || openSeq !== state.openSeq) {
 				return;
 			}
-			for (const match of matches || []) {
+			el.searchStatus.textContent = `正在搜索 ${page + 1} / ${pageCount} 页`;
+			if (!matches?.length) {
+				continue;
+			}
+			for (const match of matches) {
 				state.searchMatches.push({ ...match, page });
 			}
-			el.searchStatus.textContent = `正在搜索 ${page + 1} / ${pageCount} 页`;
 			renderSearchResults();
 		}
 		el.searchStatus.textContent = state.searchMatches.length ? "搜索完成" : "暂无结果";

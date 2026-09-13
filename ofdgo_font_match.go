@@ -192,10 +192,11 @@ func fontExactCandidateNames(names ...string) []string {
 // 返回: []string 保留后缀的候选名称
 func fontQualifiedNames(name string) []string {
 	name = fontNormalizeName(name)
+	key := fontNormalizeName(name)
 	var names []string
 	seen := make(map[string]bool)
 	for _, rule := range fontMatchRules {
-		if fontRuleMatchLevel(rule, name) != fontMatchPartial {
+		if fontRuleMatchLevel(rule, key) != fontMatchPartial {
 			continue
 		}
 		prefix := ""
@@ -227,10 +228,11 @@ func fontCandidateNamesByLevel(maxLevel int, names ...string) []string {
 		result = appendFontName(result, seen, name)
 		bases = append(bases, name)
 	}
+	levels := fontMatchLevels(bases)
 	for level := fontMatchExact; level <= maxLevel; level++ {
-		for _, name := range bases {
-			for _, rule := range fontMatchRules {
-				if fontRuleMatchLevel(rule, name) == level {
+		for i := range bases {
+			for j, rule := range fontMatchRules {
+				if levels[i*len(fontMatchRules)+j] == level {
 					result = appendFontName(result, seen, rule.System)
 					for _, item := range rule.Names {
 						result = appendFontName(result, seen, item)
@@ -262,13 +264,14 @@ func fontPatternStem(pattern string) string {
 func fontFilePatterns(names ...string) []string {
 	var result []string
 	seen := make(map[string]bool)
+	levels := fontMatchLevels(names)
 	for level := fontMatchExact; level <= fontMatchFuzzy; level++ {
-		for _, name := range fontCandidateNamesAtLevel(level, names...) {
+		for _, name := range fontCandidateNamesAtLevel(level, names, levels) {
 			result = appendFontPattern(result, seen, name+"*")
 		}
-		for _, name := range names {
-			for _, rule := range fontMatchRules {
-				if fontRuleMatchLevel(rule, name) == level {
+		for i := range names {
+			for j, rule := range fontMatchRules {
+				if levels[i*len(fontMatchRules)+j] == level {
 					for _, item := range rule.Files {
 						result = appendFontPattern(result, seen, item)
 					}
@@ -294,12 +297,12 @@ func fontSystemNames(names ...string) []string {
 }
 
 // fontCandidateNamesAtLevel 获取指定等级的字体候选名称
-// 入参: level 匹配等级, names 字体名称列表
+// 入参: level 匹配等级, names 字体名称列表, levels 名称与规则的匹配等级
 // 返回: []string 字体候选名称
-func fontCandidateNamesAtLevel(level int, names ...string) []string {
+func fontCandidateNamesAtLevel(level int, names []string, levels []int) []string {
 	var result []string
 	seen := make(map[string]bool)
-	for _, name := range names {
+	for i, name := range names {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
@@ -307,8 +310,8 @@ func fontCandidateNamesAtLevel(level int, names ...string) []string {
 		if level == fontMatchExact {
 			result = appendFontName(result, seen, name)
 		}
-		for _, rule := range fontMatchRules {
-			if fontRuleMatchLevel(rule, name) == level {
+		for j, rule := range fontMatchRules {
+			if levels[i*len(fontMatchRules)+j] == level {
 				result = appendFontName(result, seen, rule.System)
 				for _, item := range rule.Names {
 					result = appendFontName(result, seen, item)
@@ -333,6 +336,7 @@ func fontDefaultSystemNames() []string {
 // 返回: bool 是否禁用合成粗体
 func fontNoSyntheticBold(names ...string) bool {
 	for _, name := range names {
+		name = fontNormalizeName(name)
 		for _, rule := range fontMatchRules {
 			if !rule.NoSyntheticBold {
 				continue
@@ -358,11 +362,24 @@ func isFontFileName(name string) bool {
 	}
 }
 
+// fontMatchLevels 按名称和规则顺序计算匹配等级
+// 入参: names 字体名称列表
+// 返回: []int 名称与规则的匹配等级
+func fontMatchLevels(names []string) []int {
+	levels := make([]int, len(names)*len(fontMatchRules))
+	for i, name := range names {
+		name = fontNormalizeName(name)
+		for j, rule := range fontMatchRules {
+			levels[i*len(fontMatchRules)+j] = fontRuleMatchLevel(rule, name)
+		}
+	}
+	return levels
+}
+
 // fontRuleMatchLevel 获取字体规则匹配等级
-// 入参: rule 字体匹配规则, name 字体名称
+// 入参: rule 字体匹配规则, name 规范化后的字体名称
 // 返回: int 匹配等级
 func fontRuleMatchLevel(rule fontMatchRule, name string) int {
-	name = fontNormalizeName(name)
 	if name == "" {
 		return fontMatchNone
 	}
