@@ -1991,9 +1991,6 @@ function prefixSVGIds(svg, prefix) {
 		return;
 	}
 	const replaceRef = (value) => {
-		if (!value) {
-			return value;
-		}
 		let next = value.replace(/url\(#([^)]+)\)/g, (match, id) => {
 			const mapped = idMap.get(id);
 			return mapped ? `url(#${mapped})` : match;
@@ -2007,10 +2004,15 @@ function prefixSVGIds(svg, prefix) {
 		return next;
 	};
 	const attrs = ["clip-path", "fill", "filter", "href", "marker-end", "marker-mid", "marker-start", "mask", "stroke", "style", "xlink:href"];
-	for (const node of svg.querySelectorAll("*")) {
-		for (const attr of attrs) {
-			if (node.hasAttribute(attr)) {
-				node.setAttribute(attr, replaceRef(node.getAttribute(attr)));
+	for (const attr of attrs) {
+		for (const node of svg.querySelectorAll(`[${attr === "xlink:href" ? "*|href" : attr}*="#"]`)) {
+			const value = node.getAttribute(attr);
+			if (!value) {
+				continue;
+			}
+			const next = replaceRef(value);
+			if (next !== value) {
+				node.setAttribute(attr, next);
 			}
 		}
 	}
