@@ -659,6 +659,19 @@ button.outline-link:hover {
 	overflow-y: hidden;
 }
 
+.viewer-panel.pan-mode,
+.pan-mode .text-run > span {
+	cursor: grab;
+}
+
+.viewer-panel.panning,
+.panning .text-layer,
+.panning .text-run > span {
+	cursor: grabbing;
+	-webkit-user-select: none;
+	user-select: none;
+}
+
 .empty-state {
 	position: absolute;
 	inset: 0;

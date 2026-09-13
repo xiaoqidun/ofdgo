@@ -47,6 +47,8 @@ const state = {
 	pageIndex: 0,
 	scale: 1,
 	rotation: 0,
+	panMode: false,
+	pan: null,
 	fitMode: "width",
 	continuous: false,
 	renderAnnotations: true,
@@ -86,6 +88,7 @@ const el = {
 	fitButton: document.querySelector("#fitButton"),
 	fitHeightButton: document.querySelector("#fitHeightButton"),
 	rotateButton: document.querySelector("#rotateButton"),
+	panButton: document.querySelector("#panButton"),
 	continuousButton: document.querySelector("#continuousButton"),
 	annotationButton: document.querySelector("#annotationButton"),
 	imageDPI: document.querySelector("#imageDPI"),
@@ -196,6 +199,7 @@ el.zoomInButton.addEventListener("click", () => setScale(state.scale + 0.1));
 el.fitButton.addEventListener("click", fitWidth);
 el.fitHeightButton.addEventListener("click", fitHeight);
 el.rotateButton.addEventListener("click", rotatePages);
+el.panButton.addEventListener("click", togglePan);
 el.continuousButton.addEventListener("click", toggleContinuous);
 el.annotationButton.addEventListener("click", toggleAnnotations);
 document.addEventListener("copy", copySelection);
@@ -215,10 +219,16 @@ el.pageInput.addEventListener("change", () => {
 	}
 });
 window.addEventListener("resize", resizeViewer);
+window.addEventListener("blur", () => endPan());
 COMPACT_LAYOUT.addEventListener("change", syncLayoutMode);
 el.viewerPanel.addEventListener("scroll", () => {
 	schedulePageSync();
 });
+el.viewerPanel.addEventListener("pointerdown", startPan);
+el.viewerPanel.addEventListener("pointermove", movePan);
+el.viewerPanel.addEventListener("pointerup", endPan);
+el.viewerPanel.addEventListener("pointercancel", endPan);
+el.viewerPanel.addEventListener("lostpointercapture", endPan);
 el.viewerPanel.addEventListener("click", () => {
 	if (COMPACT_LAYOUT.matches && (state.showPages || state.showMeta)) {
 		state.showPages = false;
@@ -2838,6 +2848,52 @@ function pageViewSize(page) {
 	return state.rotation % 180 ? { width: page.height, height: page.width } : page;
 }
 
+function togglePan() {
+	if (document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	endPan();
+	state.panMode = !state.panMode;
+	el.viewerPanel.classList.toggle("pan-mode", state.panMode);
+	el.panButton.setAttribute("aria-pressed", String(state.panMode));
+}
+
+function startPan(event) {
+	if (!state.panMode || !state.doc || event.pointerType !== "mouse" || event.button !== 0 || document.body.hasAttribute("aria-busy") || event.target.closest("a")) {
+		return;
+	}
+	const rect = el.viewerPanel.getBoundingClientRect();
+	if (event.clientX >= rect.left + el.viewerPanel.clientWidth || event.clientY >= rect.top + el.viewerPanel.clientHeight) {
+		return;
+	}
+	event.preventDefault();
+	state.pan = { id: event.pointerId, x: event.clientX + el.viewerPanel.scrollLeft, y: event.clientY + el.viewerPanel.scrollTop };
+	el.viewerPanel.setPointerCapture(event.pointerId);
+	el.viewerPanel.classList.add("panning");
+	el.viewerPanel.focus({ preventScroll: true });
+}
+
+function movePan(event) {
+	const pan = state.pan;
+	if (!pan || event.pointerId !== pan.id) {
+		return;
+	}
+	el.viewerPanel.scrollLeft = pan.x - event.clientX;
+	el.viewerPanel.scrollTop = pan.y - event.clientY;
+}
+
+function endPan(event) {
+	const pan = state.pan;
+	if (!pan || (event && event.pointerId !== pan.id)) {
+		return;
+	}
+	state.pan = null;
+	el.viewerPanel.classList.remove("panning");
+	if (el.viewerPanel.hasPointerCapture(pan.id)) {
+		el.viewerPanel.releasePointerCapture(pan.id);
+	}
+}
+
 function fitWidth(updateStatus = true) {
 	const page = currentPageInfo();
 	if (!page) {
@@ -3026,6 +3082,7 @@ function updateControls() {
 	el.fitButton.disabled = !hasDoc;
 	el.fitHeightButton.disabled = !hasDoc;
 	el.rotateButton.disabled = !hasDoc;
+	el.panButton.disabled = !hasDoc;
 	el.continuousButton.disabled = !hasDoc;
 	el.fitButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "width");
 	el.fitHeightButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "height");
@@ -3080,6 +3137,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 		}
 		return;
 	}
+	endPan();
 	el.progressPanel.hidden = false;
 	setProgress(text, percent, status);
 }
