@@ -208,20 +208,19 @@ func imageWithClip(img image.Image, clipPath *canvas.Path, m canvas.Matrix) imag
 		return img
 	}
 	source := imagePixelSource(img)
+	out := &image.NRGBA{Pix: mask.Pix, Stride: mask.Stride, Rect: bounds}
 	if src, ok := source.(*image.NRGBA); ok {
-		out := image.NewNRGBA(bounds)
 		for y := 0; y < h; y++ {
 			offset := src.PixOffset(bounds.Min.X, bounds.Min.Y+y)
 			row := out.Pix[y*out.Stride : y*out.Stride+w*4]
-			alpha := mask.Pix[y*mask.Stride : y*mask.Stride+w*4]
-			copy(row, src.Pix[offset:offset+w*4])
-			for x := 3; x < len(row); x += 4 {
-				row[x] = uint8(int(row[x]) * int(alpha[x]) / 255)
+			pixels := src.Pix[offset : offset+w*4]
+			for x := 0; x < len(row); x += 4 {
+				copy(row[x:x+3], pixels[x:x+3])
+				row[x+3] = uint8(int(pixels[x+3]) * int(row[x+3]) / 255)
 			}
 		}
 		return out
 	}
-	out := &image.NRGBA{Pix: mask.Pix, Stride: mask.Stride, Rect: bounds}
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			c := imageNRGBAAt(source, x, y)
