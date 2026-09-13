@@ -421,11 +421,35 @@ async function prepareOffline() {
 			return false;
 		}
 		el.offlineStatus.textContent = "可离线";
+		watchApplicationUpdates(result.checksum);
 	} catch {
 		el.offlineStatus.textContent = "未就绪";
 	}
 	el.refreshAppButton.disabled = false;
 	return true;
+}
+
+function watchApplicationUpdates(checksum) {
+	let checking = false;
+	async function check() {
+		if (checking || document.hidden || !navigator.onLine) {
+			return;
+		}
+		checking = true;
+		try {
+			const response = await fetch("./", { method: "HEAD", cache: "no-store", signal: AbortSignal.timeout(10000) });
+			const latest = response.headers.get("X-OFDGo-Checksum");
+			if (response.ok && !response.redirected && latest) {
+				el.offlineStatus.textContent = latest === checksum ? "可离线" : "可更新";
+			}
+		} catch {
+		} finally {
+			checking = false;
+		}
+	}
+	window.addEventListener("online", check);
+	document.addEventListener("visibilitychange", check);
+	check();
 }
 
 function waitForWorker(worker, target) {

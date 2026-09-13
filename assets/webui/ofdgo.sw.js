@@ -25,24 +25,26 @@ self.addEventListener("message", (event) => {
 	}
 	event.waitUntil((async () => {
 		try {
-			const reload = await navigator.locks.request(CACHE_PREFIX, async () => {
+			const result = await navigator.locks.request(CACHE_PREFIX, async () => {
 				const meta = await caches.open(META_CACHE);
 				await cleanBundles(meta);
 				if (type === "refresh") {
 					await updateBundle(meta);
-					return true;
+					return { reload: true };
 				}
 				const bundle = await readBundle(meta, CLIENT_PREFIX + event.source.id);
 				if (await isBundleComplete(bundle)) {
-					return false;
+					const cache = await caches.open(bundle.name);
+					const response = await cache.match(self.registration.scope);
+					return { reload: false, checksum: response.headers.get("X-OFDGo-Checksum") };
 				}
 				await currentBundle(meta);
-				return true;
+				return { reload: true };
 			});
 			if (type === "refresh") {
 				await self.skipWaiting();
 			}
-			port.postMessage({ ok: true, reload });
+			port.postMessage({ ok: true, ...result });
 		} catch (err) {
 			port.postMessage({ error: err.message });
 		} finally {
