@@ -15,6 +15,8 @@
 package ofdgo
 
 import (
+	"encoding/xml"
+	"fmt"
 	"math"
 	"strings"
 	"unicode"
@@ -22,6 +24,39 @@ import (
 
 	"github.com/tdewolff/canvas"
 )
+
+// textPageTokens 保留文字及其复合图元和裁剪，跳过独立路径与图片
+type textPageTokens struct {
+	*xml.Decoder
+	parents []string
+}
+
+// Token 读取文字页面所需的XML节点
+// 返回: xml.Token XML节点, error 错误信息
+func (d *textPageTokens) Token() (xml.Token, error) {
+	for {
+		token, err := d.Decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		switch node := token.(type) {
+		case xml.StartElement:
+			if len(d.parents) > 0 && (node.Name.Local == "PathObject" || node.Name.Local == "ImageObject") {
+				switch d.parents[len(d.parents)-1] {
+				case "Layer", "PageBlock", "CompositeGraphicUnit", "CompositeObject":
+					if err := d.Decoder.Skip(); err != nil {
+						return nil, err
+					}
+					continue
+				}
+			}
+			d.parents = append(d.parents, node.Name.Local)
+		case xml.EndElement:
+			d.parents = d.parents[:len(d.parents)-1]
+		}
+		return token, nil
+	}
+}
 
 // PageText 页面文字，按绘制顺序保留文本对象，不包含图像和签名外观
 type PageText struct {
@@ -72,6 +107,24 @@ func (r *Renderer) PageText(page *PageContent) (*PageText, error) {
 		return nil, err
 	}
 	return renderer.pageText, nil
+}
+
+// PageTextByIndex 按页面索引提取文字，避免解析独立路径和图片图元
+// 入参: index 页面索引，从0开始
+// 返回: *PageText 页面文字, error 错误信息
+func (r *Renderer) PageTextByIndex(index int) (*PageText, error) {
+	doc, err := r.Reader.Doc()
+	if err != nil {
+		return nil, err
+	}
+	if index < 0 || index >= len(doc.Pages.Page) {
+		return nil, fmt.Errorf("page index %d out of range", index)
+	}
+	page, err := r.Reader.readPageContent(doc.Pages.Page[index], true)
+	if err != nil {
+		return nil, err
+	}
+	return r.PageText(page)
 }
 
 // String 按文本对象顺序合并原文，以换行分隔非空对象

@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -254,13 +255,26 @@ func resolveResourcePath(resPath, baseLoc, filePath string) string {
 // 入参: page 页面对象
 // 返回: *PageContent 页面内容, error 错误信息
 func (r *Reader) PageContent(page Page) (*PageContent, error) {
+	return r.readPageContent(page, false)
+}
+
+// readPageContent 读取页面，可跳过文字提取不使用的独立路径和图片
+// 入参: page 页面对象, textOnly 是否仅用于文字提取
+// 返回: *PageContent 页面内容, error 错误信息
+func (r *Reader) readPageContent(page Page, textOnly bool) (*PageContent, error) {
 	fullPath := r.ResPath(page.BaseLoc)
 	data, err := r.readFile(fullPath)
 	if err != nil {
 		return nil, err
 	}
 	var content PageContent
-	if err := xml.Unmarshal(data, &content); err != nil {
+	if textOnly {
+		decoder := &textPageTokens{Decoder: xml.NewDecoder(bytes.NewReader(data))}
+		err = xml.NewTokenDecoder(decoder).Decode(&content)
+	} else {
+		err = xml.Unmarshal(data, &content)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal page content: %w", err)
 	}
 	content.ID = page.ID

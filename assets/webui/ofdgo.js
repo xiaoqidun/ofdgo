@@ -3,6 +3,8 @@ const FONT_DATABASE = "ofdgo";
 const fontChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel(FONT_DATABASE) : null;
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const DEFAULT_IMAGE_DPI = 300;
+const PAGE_CACHE_LIMIT = 16;
+const PAGE_CACHE_BYTES = 32 * 1024 * 1024;
 const STATUS = {
 	ready: "选择 OFD 文件",
 	opening: "正在打开文档",
@@ -1760,6 +1762,7 @@ function flowPageObserver() {
 				state.selectedPages.delete(index);
 				renderFlowPage(index, { openSeq, priority: 4 });
 			}
+			trimPageCache();
 		}, {
 			root: el.viewerPanel,
 			rootMargin: "600px 0px",
@@ -1798,6 +1801,7 @@ async function renderFlowPage(index, options = {}) {
 			}
 			updateThumbnail(index, openSeq);
 		}
+		trimPageCache();
 		return page;
 	} catch (err) {
 		if (openSeq === state.openSeq) {
@@ -1816,7 +1820,10 @@ function loadPageData(index, options = {}) {
 		return Promise.resolve(null);
 	}
 	if (state.pageCache.has(index)) {
-		return Promise.resolve(state.pageCache.get(index));
+		const page = state.pageCache.get(index);
+		state.pageCache.delete(index);
+		state.pageCache.set(index, page);
+		return Promise.resolve(page);
 	}
 	const key = `${openSeq}:${index}`;
 	const priority = options.priority ?? 3;
@@ -1869,7 +1876,9 @@ async function processPageRenderQueue() {
 							state.svgImages.set(image.name, image.url);
 						}
 					}
+					page.imageNames = page.images.map((image) => image.name);
 					delete page.images;
+					page.cacheBytes = (page.svg.length + page.text.length) * 2;
 					page.text = JSON.parse(page.text);
 					state.pageCache.set(task.index, page);
 				}
@@ -1882,6 +1891,42 @@ async function processPageRenderQueue() {
 		}
 	} finally {
 		state.pageRenderRunning = false;
+	}
+}
+
+function trimPageCache() {
+	const protectedPages = new Set([state.pageIndex, ...state.visiblePages, ...state.visibleThumbnails, ...state.selectedPages]);
+	for (const task of state.pageInFlight.values()) {
+		protectedPages.add(task.index);
+	}
+	const references = new Map();
+	let bytes = 0;
+	for (const page of state.pageCache.values()) {
+		bytes += page.cacheBytes;
+		for (const name of page.imageNames) {
+			references.set(name, (references.get(name) || 0) + 1);
+		}
+	}
+	for (const url of state.svgImages.values()) {
+		bytes += url.length * 2;
+	}
+	for (const [index, page] of state.pageCache) {
+		if (state.pageCache.size <= PAGE_CACHE_LIMIT && bytes <= PAGE_CACHE_BYTES) {
+			break;
+		}
+		if (protectedPages.has(index)) {
+			continue;
+		}
+		state.pageCache.delete(index);
+		bytes -= page.cacheBytes;
+		for (const name of page.imageNames) {
+			const count = references.get(name) - 1;
+			references.set(name, count);
+			if (count === 0) {
+				bytes -= state.svgImages.get(name).length * 2;
+				state.svgImages.delete(name);
+			}
+		}
 	}
 }
 
@@ -1992,6 +2037,7 @@ function syncSelection() {
 	for (const index of state.selectedPages) {
 		unmountPage(index);
 	}
+	trimPageCache();
 }
 
 function isDocumentSelection(range) {
@@ -2652,6 +2698,7 @@ function thumbnailObserver() {
 				state.visibleThumbnails.add(index);
 				renderThumbnail(index, openSeq);
 			}
+			trimPageCache();
 		}, {
 			root: el.pageListPanel,
 			rootMargin: "180px 0px",
@@ -2682,6 +2729,7 @@ async function renderThumbnail(index, openSeq = state.openSeq) {
 			return;
 		}
 		updateThumbnail(index, openSeq);
+		trimPageCache();
 	} catch {
 		if (openSeq === state.openSeq) {
 			markThumbnailError(index);

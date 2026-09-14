@@ -146,11 +146,7 @@ func (r *Renderer) RenderToMultiPageText(writer io.Writer, indices ...int) error
 	}
 	written := false
 	for i, index := range indices {
-		page, err := r.Reader.PageContentByIndex(index)
-		if err != nil {
-			return fmt.Errorf("failed to read page %d: %w", index+1, err)
-		}
-		text, err := r.PageText(page)
+		text, err := r.PageTextByIndex(index)
 		if err != nil {
 			return fmt.Errorf("failed to extract page %d text: %w", index+1, err)
 		}
@@ -420,6 +416,7 @@ func (r *Renderer) renderPDFPages(pages []pdfPage, writer io.Writer, progress fu
 			buf.Truncate(start)
 			return fmt.Errorf("failed to render page %d: %w", i+1, err)
 		}
+		pages[i].Content = nil
 		if progress != nil {
 			if err := progress(i+1, len(pages)); err != nil {
 				buf.Truncate(start)

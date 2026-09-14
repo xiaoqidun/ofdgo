@@ -278,15 +278,8 @@ func (s *Session) SetFonts(fonts []FontFile) error {
 func (s *Session) PageText(index int) (*ofdgo.PageText, error) {
 	text := s.textCache[index]
 	if text == nil {
-		page := s.pageCache[index]
 		var err error
-		if page == nil {
-			page, err = s.Reader.PageContentByIndex(index)
-			if err != nil {
-				return nil, err
-			}
-		}
-		text, err = s.Renderer.PageText(page)
+		text, err = s.readPageText(index)
 		if err != nil {
 			return nil, err
 		}
@@ -301,16 +294,23 @@ func (s *Session) PageText(index int) (*ofdgo.PageText, error) {
 func (s *Session) PageTextString(index int) (string, error) {
 	text := s.textCache[index]
 	if text == nil {
-		page, err := s.Reader.PageContentByIndex(index)
-		if err != nil {
-			return "", err
-		}
-		text, err = s.Renderer.PageText(page)
+		var err error
+		text, err = s.readPageText(index)
 		if err != nil {
 			return "", err
 		}
 	}
 	return text.String(), nil
+}
+
+// readPageText 复用已加载页面，否则只解析文字所需图元
+// 入参: index 页面索引
+// 返回: *ofdgo.PageText 页面文字, error 错误信息
+func (s *Session) readPageText(index int) (*ofdgo.PageText, error) {
+	if page := s.pageCache[index]; page != nil {
+		return s.Renderer.PageText(page)
+	}
+	return s.Renderer.PageTextByIndex(index)
 }
 
 // SearchPage 搜索指定页面，复用当前会话的文字索引
@@ -667,21 +667,10 @@ func (s *Session) ExportPDF(writer io.Writer, indices ...int) error {
 	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
 		return fmt.Errorf("ofd document is not opened")
 	}
-	if len(indices) > 0 {
-		return s.Renderer.RenderToMultiPagePDF(writer, indices...)
-	}
-	pages := make([]*ofdgo.PageContent, len(s.doc.Pages.Page))
-	for i := range pages {
-		page, err := s.pageContent(i)
-		if err != nil {
-			return err
-		}
-		pages[i] = page
-	}
-	return s.Renderer.RenderPagesToPDF(pages, writer)
+	return s.Renderer.RenderToMultiPagePDF(writer, indices...)
 }
 
-// pageContent 获取页面内容
+// pageContent 读取页面，复用最近一次解析结果
 // 入参: index 页面索引
 // 返回: *ofdgo.PageContent 页面内容, error 错误信息
 func (s *Session) pageContent(index int) (*ofdgo.PageContent, error) {
@@ -691,6 +680,7 @@ func (s *Session) pageContent(index int) (*ofdgo.PageContent, error) {
 	if page, ok := s.pageCache[index]; ok {
 		return page, nil
 	}
+	clear(s.pageCache)
 	page, err := s.Reader.PageContentByIndex(index)
 	if err != nil {
 		return nil, err
