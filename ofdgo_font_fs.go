@@ -190,6 +190,18 @@ func (fsys *FontFS) matchStyle(names []string, bold, italic bool) []fontFileMatc
 func fontFileMatches(candidates []fontFileCandidate, names []string, bold, italic bool) []fontFileMatch {
 	matches := make([]fontFileMatch, 0, len(candidates))
 	seen := make(map[string]int, len(candidates))
+	if len(names) == 0 {
+		for _, name := range fontDefaultSystemNames() {
+			for _, match := range fontFileMatches(candidates, []string{name}, bold, italic) {
+				key := strings.ToLower(match.name)
+				if _, ok := seen[key]; !ok {
+					seen[key] = len(matches)
+					matches = append(matches, match)
+				}
+			}
+		}
+		return matches
+	}
 	for i, name := range names {
 		if name == "" {
 			continue
@@ -205,9 +217,6 @@ func fontFileMatches(candidates []fontFileCandidate, names []string, bold, itali
 				}
 			}
 		}
-	}
-	if len(names) == 0 {
-		names = fontDefaultSystemNames()
 	}
 	for _, matcher := range newFontPatternMatchers(fontFilePatterns(names...)) {
 		for _, file := range candidates {
