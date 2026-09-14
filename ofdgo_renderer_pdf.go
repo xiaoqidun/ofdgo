@@ -146,6 +146,7 @@ func (n *pdfNavigation) addAction(page int, rect canvas.Rect, action Action, boo
 // 入参: outlines 大纲节点, level 节点层级, bookmarks 书签, pageIndex 页面索引表, pages 页面数据
 func (n *pdfNavigation) addOutlines(outlines []OutlineElem, level int, bookmarks map[string]Dest, pageIndex map[string]int, pages []pdfPage) {
 	for _, outline := range outlines {
+		nextLevel := level
 		if dest := outlineDest(outline, bookmarks); dest != nil {
 			if page, ok := pageIndex[dest.PageID]; ok {
 				n.Outline[page] = append(n.Outline[page], pdfOutline{
@@ -153,9 +154,10 @@ func (n *pdfNavigation) addOutlines(outlines []OutlineElem, level int, bookmarks
 					Level: level,
 					Y:     pdfDestY(*dest, pages[page].Box.H),
 				})
+				nextLevel++
 			}
 		}
-		n.addOutlines(outline.OutlineElem, level+1, bookmarks, pageIndex, pages)
+		n.addOutlines(outline.OutlineElem, nextLevel, bookmarks, pageIndex, pages)
 	}
 }
 

@@ -614,15 +614,15 @@ func signatureStampInfos(positions []ofdgo.SignatureStampPosition) []SignatureSt
 }
 
 // ExportDocument 导出文档为PDF或逐页打包ZIP
-// 入参: value 导出格式, dpi 图片DPI, writer 输出流
+// 入参: value 导出格式, dpi 图片DPI, writer 输出流, indices 零基页面索引，省略则全部
 // 返回: ExportFormat 导出格式, error 错误信息
-func (s *Session) ExportDocument(value string, dpi float64, writer io.Writer) (ExportFormat, error) {
+func (s *Session) ExportDocument(value string, dpi float64, writer io.Writer, indices ...int) (ExportFormat, error) {
 	format, ok := exportFormat(value)
 	if !ok {
 		return ExportFormat{}, fmt.Errorf("unsupported export format %s", value)
 	}
 	if format.Value == "pdf" {
-		return format, s.ExportPDF(writer)
+		return format, s.ExportPDF(writer, indices...)
 	}
 	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
 		return ExportFormat{}, fmt.Errorf("ofd document is not opened")
@@ -631,16 +631,19 @@ func (s *Session) ExportDocument(value string, dpi float64, writer io.Writer) (E
 	if dpi > 0 && (format.Value == "png" || format.Value == "jpg") {
 		renderer.DPI = dpi
 	}
-	err := renderer.RenderToZIP(writer, format.Value)
+	err := renderer.RenderToZIP(writer, format.Value, indices...)
 	return ExportFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}, err
 }
 
 // ExportPDF 导出文档为PDF
-// 入参: writer 输出流
+// 入参: writer 输出流, indices 零基页面索引，省略则全部
 // 返回: error 错误信息
-func (s *Session) ExportPDF(writer io.Writer) error {
+func (s *Session) ExportPDF(writer io.Writer, indices ...int) error {
 	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
 		return fmt.Errorf("ofd document is not opened")
+	}
+	if len(indices) > 0 {
+		return s.Renderer.RenderToMultiPagePDF(writer, indices...)
 	}
 	pages := make([]*ofdgo.PageContent, len(s.doc.Pages.Page))
 	for i := range pages {

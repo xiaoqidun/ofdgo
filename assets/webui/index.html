@@ -50,9 +50,29 @@
 					<option value="600">600</option>
 				</select>
 				<button id="exportPageButton" class="button" type="button" data-short="单" title="导出单页" aria-label="导出单页" disabled>单页</button>
-				<button id="exportButton" class="button" type="button" data-short="全" title="导出文档" aria-label="导出文档" disabled>文档</button>
+				<button id="exportButton" class="button" type="button" data-short="档" title="导出文档" aria-label="导出文档" aria-haspopup="dialog" popovertarget="exportPanel" disabled>文档</button>
 			</div>
 		</header>
+		<div id="exportPanel" class="export-panel" popover role="dialog" aria-label="导出文档">
+			<form id="exportForm">
+				<div class="export-row">
+					<span id="exportScopeLabel">范围</span>
+					<div class="export-options" role="radiogroup" aria-labelledby="exportScopeLabel">
+						<label><input id="exportAll" type="radio" name="scope" value="all" checked autofocus><span>全部</span></label>
+						<label><input id="exportSpecified" type="radio" name="scope" value="specified"><span>指定</span></label>
+					</div>
+				</div>
+				<div id="exportRangeRow" class="export-row" hidden>
+					<label for="exportRange">页码</label>
+					<input id="exportRange" type="text" aria-describedby="exportRangeStatus" autocomplete="off" spellcheck="false">
+				</div>
+				<div class="export-actions">
+					<div id="exportRangeStatus" class="export-range-status" role="status" aria-live="polite"></div>
+					<button class="button" type="button" popovertarget="exportPanel" popovertargetaction="hide">取消</button>
+					<button id="exportSubmit" class="button" type="submit">导出</button>
+				</div>
+			</form>
+		</div>
 
 		<main class="workspace">
 			<aside class="page-list-panel">
@@ -70,7 +90,7 @@
 						<button type="submit" class="button">搜索</button>
 					</form>
 					<div class="search-tools">
-						<span id="searchStatus" role="status" aria-live="polite">输入文字</span>
+						<span id="searchStatus" role="status" aria-live="polite"></span>
 						<span id="searchCount">0 / 0</span>
 						<button id="searchPrev" type="button" class="icon-button arrow-prev" title="上一处" aria-label="上一处" aria-keyshortcuts="Shift+F3" disabled></button>
 						<button id="searchNext" type="button" class="icon-button arrow-next" title="下一处" aria-label="下一处" aria-keyshortcuts="F3" disabled></button>

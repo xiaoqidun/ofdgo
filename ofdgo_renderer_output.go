@@ -69,9 +69,9 @@ func (r *Renderer) outputRenderer(format string) (string, func(*PageContent, io.
 }
 
 // RenderToZIP 逐页渲染并写入ZIP，文件编号按总页数补零，出错时调用方应丢弃输出
-// 入参: writer 输出流, format svg、pdf、eps、png、jpg或jpeg
+// 入参: writer 输出流, format svg、pdf、eps、png、jpg或jpeg, indices 零基页面索引，省略则全部，按原页序去重
 // 返回: error 错误信息
-func (r *Renderer) RenderToZIP(writer io.Writer, format string) error {
+func (r *Renderer) RenderToZIP(writer io.Writer, format string, indices ...int) error {
 	extension, render, err := r.outputRenderer(format)
 	if err != nil {
 		return err
@@ -80,8 +80,9 @@ func (r *Renderer) RenderToZIP(writer io.Writer, format string) error {
 	if err != nil {
 		return err
 	}
-	if count == 0 {
-		return fmt.Errorf("no pages found")
+	indices, err = exportPageIndices(count, indices)
+	if err != nil {
+		return err
 	}
 	archive := zip.NewWriter(writer)
 	method := zip.Deflate
@@ -89,7 +90,7 @@ func (r *Renderer) RenderToZIP(writer io.Writer, format string) error {
 		method = zip.Store
 	}
 	width := len(strconv.Itoa(count))
-	for index := range count {
+	for _, index := range indices {
 		page, err := r.Reader.PageContentByIndex(index)
 		if err != nil {
 			return fmt.Errorf("failed to read page %d: %w", index+1, err)
@@ -269,26 +270,27 @@ func (r *Renderer) RenderToEPS(page *PageContent, writer io.Writer) error {
 	return buffer.Flush()
 }
 
-// RenderToMultiPagePDF 将整个文档导出为多页PDF
-// 入参: writer 输出流
+// RenderToMultiPagePDF 将文档页面导出为多页PDF
+// 入参: writer 输出流, indices 零基页面索引，省略则全部，按原页序去重
 // 返回: error 错误信息
-func (r *Renderer) RenderToMultiPagePDF(writer io.Writer) error {
+func (r *Renderer) RenderToMultiPagePDF(writer io.Writer, indices ...int) error {
 	doc, err := r.Reader.Doc()
 	if err != nil {
 		return err
 	}
-	if len(doc.Pages.Page) == 0 {
-		return fmt.Errorf("no pages found")
+	indices, err = exportPageIndices(len(doc.Pages.Page), indices)
+	if err != nil {
+		return err
 	}
-	pages := make([]pdfPage, len(doc.Pages.Page))
-	for i, pageRef := range doc.Pages.Page {
-		page, err := r.Reader.PageContent(pageRef)
+	pages := make([]pdfPage, len(indices))
+	for i, index := range indices {
+		page, err := r.Reader.PageContent(doc.Pages.Page[index])
 		if err != nil {
-			return fmt.Errorf("failed to read page %d: %w", i+1, err)
+			return fmt.Errorf("failed to read page %d: %w", index+1, err)
 		}
 		box, err := r.GetPageBox(page)
 		if err != nil {
-			return fmt.Errorf("failed to read page %d area: %w", i+1, err)
+			return fmt.Errorf("failed to read page %d area: %w", index+1, err)
 		}
 		pages[i] = pdfPage{Content: page, Box: box}
 	}

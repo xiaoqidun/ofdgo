@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"syscall/js"
+
+	"github.com/xiaoqidun/ofdgo"
 )
 
 // exportWriter 分块传递导出数据
@@ -74,6 +76,7 @@ func RunWASM() {
 	registerCallback("ofdgoSVGFontData", svgFontData)
 	registerCallback("ofdgoSearchPage", searchPage)
 	registerCallback("ofdgoExportFormats", exportFormats)
+	registerCallback("ofdgoParsePageRange", parsePageRange)
 	registerExportCallback("ofdgoExportPage", exportPage)
 	registerExportCallback("ofdgoExportDocument", exportDocument)
 	registerCallback("ofdgoMatchFontFiles", matchFontFiles)
@@ -287,6 +290,20 @@ func exportFormats(args []js.Value) (any, error) {
 	return ExportFormats(), nil
 }
 
+// parsePageRange 解析当前文档的导出页码
+// 入参: args 浏览器参数
+// 返回: any 页面索引, error 错误信息
+func parsePageRange(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	count, err := currentSession.Reader.PageCount()
+	if err != nil {
+		return nil, err
+	}
+	return ofdgo.ParsePageRange(args[0].String(), count)
+}
+
 // exportPage 导出OFD单页
 // 入参: args 浏览器参数
 // 返回: any 导出结果, error 错误信息
@@ -318,8 +335,15 @@ func exportDocument(args []js.Value) (any, error) {
 	if currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	writer := bufio.NewWriterSize(exportWriter{write: args[2]}, 1<<20)
-	format, err := currentSession.ExportDocument(args[0].String(), args[1].Float(), writer)
+	var indices []int
+	if !args[2].IsNull() {
+		indices = make([]int, args[2].Length())
+		for i := range indices {
+			indices[i] = args[2].Index(i).Int()
+		}
+	}
+	writer := bufio.NewWriterSize(exportWriter{write: args[3]}, 1<<20)
+	format, err := currentSession.ExportDocument(args[0].String(), args[1].Float(), writer, indices...)
 	if err != nil {
 		return nil, err
 	}

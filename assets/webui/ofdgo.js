@@ -66,6 +66,7 @@ const state = {
 	thumbnailObserver: null,
 	visibleThumbnails: new Set(),
 	exportFormats: [],
+	exportPages: null,
 	showPages: !COMPACT_LAYOUT.matches,
 	showMeta: !COMPACT_LAYOUT.matches,
 };
@@ -97,6 +98,14 @@ const el = {
 	exportFormat: document.querySelector("#exportFormat"),
 	exportPageButton: document.querySelector("#exportPageButton"),
 	exportButton: document.querySelector("#exportButton"),
+	exportPanel: document.querySelector("#exportPanel"),
+	exportForm: document.querySelector("#exportForm"),
+	exportAll: document.querySelector("#exportAll"),
+	exportSpecified: document.querySelector("#exportSpecified"),
+	exportRangeRow: document.querySelector("#exportRangeRow"),
+	exportRange: document.querySelector("#exportRange"),
+	exportRangeStatus: document.querySelector("#exportRangeStatus"),
+	exportSubmit: document.querySelector("#exportSubmit"),
 	emptyState: document.querySelector("#emptyState"),
 	progressPanel: document.querySelector("#progressPanel"),
 	progressLabel: document.querySelector("#progressLabel"),
@@ -201,7 +210,19 @@ document.addEventListener("selectionchange", () => {
 });
 el.exportFormat.addEventListener("change", () => updateDPIControl());
 el.exportPageButton.addEventListener("click", () => exportFile(false));
-el.exportButton.addEventListener("click", () => exportFile(true));
+el.exportPanel.addEventListener("beforetoggle", prepareExportPanel);
+el.exportAll.addEventListener("change", updateExportRange);
+el.exportSpecified.addEventListener("change", () => {
+	updateExportRange();
+	el.exportRange.focus();
+});
+el.exportRange.addEventListener("input", updateExportRange);
+el.exportForm.addEventListener("submit", (event) => {
+	event.preventDefault();
+	if (!el.exportSubmit.disabled) {
+		return exportFile(true, state.exportPages);
+	}
+});
 el.refreshAppButton.addEventListener("click", refreshApplication);
 el.pageInput.addEventListener("change", () => {
 	const page = Number.parseInt(el.pageInput.value, 10);
@@ -254,7 +275,7 @@ updateSidebarState();
 boot();
 
 function handleKeyDown(event) {
-	if (event.defaultPrevented || event.isComposing || event.altKey || document.body.hasAttribute("aria-busy")) {
+	if (event.defaultPrevented || event.isComposing || event.altKey || document.body.hasAttribute("aria-busy") || el.exportPanel.matches(":popover-open")) {
 		return;
 	}
 	const key = event.key;
@@ -1487,7 +1508,48 @@ async function downloadAttachment(attachment) {
 	}
 }
 
-async function exportFile(whole) {
+function prepareExportPanel(event) {
+	if (event.newState !== "open") {
+		return;
+	}
+	if (!state.doc || document.body.hasAttribute("aria-busy")) {
+		event.preventDefault();
+		return;
+	}
+	el.exportForm.reset();
+	updateExportRange();
+}
+
+async function updateExportRange() {
+	const specified = el.exportSpecified.checked;
+	const value = el.exportRange.value.trim();
+	const openSeq = state.openSeq;
+	state.exportPages = null;
+	el.exportRangeRow.hidden = !specified;
+	el.exportRange.removeAttribute("aria-invalid");
+	el.exportSubmit.disabled = specified;
+	el.exportRangeStatus.textContent = specified && value ? "正在校验" : "";
+	if (!specified || !value) {
+		return;
+	}
+	const current = () => openSeq === state.openSeq && el.exportPanel.matches(":popover-open")
+		&& el.exportSpecified.checked && value === el.exportRange.value.trim();
+	try {
+		const indices = await callWASM("ofdgoParsePageRange", value);
+		if (current()) {
+			state.exportPages = indices;
+			el.exportSubmit.disabled = false;
+			el.exportRangeStatus.textContent = `共 ${indices.length} 页`;
+		}
+	} catch {
+		if (current()) {
+			el.exportRange.setAttribute("aria-invalid", "true");
+			el.exportRangeStatus.textContent = "页码无效";
+		}
+	}
+}
+
+async function exportFile(whole, indices = null) {
 	if (!state.doc || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
@@ -1514,7 +1576,7 @@ async function exportFile(whole) {
 			return;
 		}
 		const result = whole
-			? await callWASM("ofdgoExportDocument", format.value, dpi, file)
+			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, file)
 			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, file);
 		if (openSeq !== state.openSeq) {
 			return;
@@ -2124,7 +2186,7 @@ function resetSearch(clearInput = true) {
 	if (clearInput) {
 		el.searchInput.value = "";
 	}
-	el.searchStatus.textContent = "输入文字";
+	el.searchStatus.textContent = "";
 	el.searchResults.replaceChildren();
 	updateSearchCount();
 	clearSearchHighlights();
@@ -3260,6 +3322,9 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 		}
 		return;
 	}
+	if (el.exportPanel.matches(":popover-open")) {
+		el.exportPanel.hidePopover();
+	}
 	endPan();
 	el.progressPanel.hidden = false;
 	setProgress(text, percent, status);
@@ -3317,7 +3382,7 @@ function baseFileName() {
 
 function pageFileName(extension) {
 	const page = String(state.pageIndex + 1).padStart(String(state.doc?.pageCount || 1).length, "0");
-	return `${baseFileName()}_p${page}.${extension}`;
+	return `${baseFileName()}_${page}.${extension}`;
 }
 
 function exportFormatInfo(value) {
