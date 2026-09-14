@@ -36,7 +36,7 @@ import (
 )
 
 // RenderTo 按格式渲染单页，JPEG使用95画质
-// 入参: page 页面内容, writer 输出流, format svg、pdf、eps、png、jpg或jpeg
+// 入参: page 页面内容, writer 输出流, format svg、pdf、eps、png、jpg、jpeg或txt
 // 返回: error 错误信息
 func (r *Renderer) RenderTo(page *PageContent, writer io.Writer, format string) error {
 	_, render, err := r.outputRenderer(format)
@@ -55,6 +55,8 @@ func (r *Renderer) outputRenderer(format string) (string, func(*PageContent, io.
 		return "svg", r.RenderToSVG, nil
 	case "pdf":
 		return "pdf", r.RenderToPDF, nil
+	case "txt":
+		return "txt", r.RenderToText, nil
 	case "eps":
 		return "eps", r.RenderToEPS, nil
 	case "png":
@@ -69,7 +71,7 @@ func (r *Renderer) outputRenderer(format string) (string, func(*PageContent, io.
 }
 
 // RenderToZIP 逐页渲染并写入ZIP，文件编号按总页数补零，出错时调用方应丢弃输出
-// 入参: writer 输出流, format svg、pdf、eps、png、jpg或jpeg, indices 零基页面索引，省略则全部，按原页序去重
+// 入参: writer 输出流, format svg、pdf、eps、png、jpg、jpeg或txt, indices 零基页面索引，省略则全部，按原页序去重
 // 返回: error 错误信息
 func (r *Renderer) RenderToZIP(writer io.Writer, format string, indices ...int) error {
 	extension, render, err := r.outputRenderer(format)
@@ -113,6 +115,61 @@ func (r *Renderer) RenderToZIP(writer io.Writer, format string, indices ...int) 
 		}
 	}
 	return archive.Close()
+}
+
+// RenderToText 导出页面原文为UTF-8文本，以换行分隔非空文本对象
+// 入参: page 页面内容, writer 输出流
+// 返回: error 错误信息
+func (r *Renderer) RenderToText(page *PageContent, writer io.Writer) error {
+	text, err := r.PageText(page)
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(writer, text.String())
+	return err
+}
+
+// RenderToMultiPageText 逐页导出UTF-8原文，以换行分隔非空页面，出错时调用方应丢弃输出
+// 入参: writer 输出流, indices 零基页面索引，省略则全部，按原页序去重
+// 返回: error 错误信息
+func (r *Renderer) RenderToMultiPageText(writer io.Writer, indices ...int) error {
+	count, err := r.Reader.PageCount()
+	if err != nil {
+		return err
+	}
+	indices, err = exportPageIndices(count, indices)
+	if err != nil {
+		return err
+	}
+	if err := r.exportProgress(0, len(indices)); err != nil {
+		return err
+	}
+	written := false
+	for i, index := range indices {
+		page, err := r.Reader.PageContentByIndex(index)
+		if err != nil {
+			return fmt.Errorf("failed to read page %d: %w", index+1, err)
+		}
+		text, err := r.PageText(page)
+		if err != nil {
+			return fmt.Errorf("failed to extract page %d text: %w", index+1, err)
+		}
+		if value := text.String(); value != "" {
+			if written {
+				if _, err := io.WriteString(writer, "\n"); err != nil {
+					return err
+				}
+			}
+			if _, err := io.WriteString(writer, value); err != nil {
+				return err
+			}
+			written = true
+		}
+		if err := r.exportProgress(i+1, len(indices)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // exportProgress 回报导出进度并传递调用方的停止原因

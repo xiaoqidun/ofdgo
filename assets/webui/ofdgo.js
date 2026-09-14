@@ -695,7 +695,7 @@ async function loadWASM() {
 						setProgress("正在保存", null);
 					} else if (!el.cancelExportButton.disabled) {
 						if (data.completed === data.total) {
-							setProgress("正在封装", null);
+							setProgress("正在收尾", null);
 						} else {
 							setProgress(`正在导出 ${data.completed} / ${data.total} 页`, data.completed / data.total * 100);
 						}
@@ -1540,7 +1540,7 @@ async function downloadAttachment(attachment) {
 			return;
 		}
 		downloadBytes(result.bytes, "application/octet-stream", attachment.fileName);
-		setStatus(`附件下载完成 ${formatBytes(result.bytes.length, "0 KB")}`);
+		setStatus(`附件下载完成 ${formatBytes(result.bytes.length)}`);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			showError(err, false);
@@ -1600,9 +1600,10 @@ async function exportFile(whole, indices = null) {
 	if (!format) {
 		return;
 	}
-	const label = whole ? (format.value === "pdf" ? "PDF" : "ZIP") : format.label;
-	const extension = whole ? label.toLowerCase() : format.extension;
-	const mime = whole && format.value !== "pdf" ? "application/zip" : format.mime;
+	const archive = whole && format.value !== "pdf" && format.value !== "txt";
+	const label = archive ? "ZIP" : format.label;
+	const extension = archive ? "zip" : format.extension;
+	const mime = archive ? "application/zip" : format.mime;
 	const openSeq = state.openSeq;
 	const fileName = whole ? `${baseFileName()}.${extension}` : pageFileName(extension);
 	const pageIndex = state.pageIndex;
@@ -1627,7 +1628,7 @@ async function exportFile(whole, indices = null) {
 		if (result.blob) {
 			downloadBytes(result.blob, result.mime, fileName);
 		}
-		setStatus(`${result.label} 导出完成 ${formatBytes(result.size, result.label)}`);
+		setStatus(`${result.label} 导出完成 ${formatBytes(result.size)}`);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			if (err.name === "AbortError") {
@@ -2737,7 +2738,7 @@ function renderAttachments() {
 		name.className = "attachment-name";
 		name.textContent = attachment.name;
 		item.append(name);
-		const detail = [attachment.format, attachment.size == null ? "" : formatBytes(attachment.size * 1024, "0 KB")].filter(Boolean).join(" · ");
+		const detail = [attachment.format, attachment.size == null ? "" : formatBytes(attachment.size * 1024)].filter(Boolean).join(" · ");
 		if (detail) {
 			const meta = document.createElement("span");
 			meta.className = "attachment-detail";
@@ -3524,9 +3525,9 @@ function currentImageDPI() {
 	return Number.parseFloat(el.imageDPI.value) || DEFAULT_IMAGE_DPI;
 }
 
-function formatBytes(size, fallback = "PDF") {
+function formatBytes(size) {
 	if (!Number.isFinite(size) || size <= 0) {
-		return fallback;
+		return "0 KB";
 	}
 	if (size < 1024 * 1024) {
 		return `${Math.round(size / 1024)} KB`;

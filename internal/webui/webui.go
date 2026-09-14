@@ -179,7 +179,8 @@ var supportedExportFormats = []ExportFormat{
 	{Value: "pdf", Label: "PDF", Extension: "pdf", MIME: "application/pdf"},
 	{Value: "eps", Label: "EPS", Extension: "eps", MIME: "application/postscript"},
 	{Value: "png", Label: "PNG", Extension: "png", MIME: "image/png"},
-	{Value: "jpg", Label: "JPEG", Extension: "jpg", MIME: "image/jpeg"},
+	{Value: "jpg", Label: "JPG", Extension: "jpg", MIME: "image/jpeg"},
+	{Value: "txt", Label: "TXT", Extension: "txt", MIME: "text/plain"},
 }
 
 // ExportFormats 获取导出格式
@@ -631,7 +632,7 @@ func signatureStampInfos(positions []ofdgo.SignatureStampPosition) []SignatureSt
 	return infos
 }
 
-// ExportDocument 导出文档为PDF或逐页打包ZIP
+// ExportDocument 导出文档为PDF、TXT或逐页打包ZIP
 // 入参: value 导出格式, dpi 图片DPI, writer 输出流, indices 零基页面索引，省略则全部
 // 返回: ExportFormat 导出格式, error 错误信息
 func (s *Session) ExportDocument(value string, dpi float64, writer io.Writer, indices ...int) (ExportFormat, error) {
@@ -644,6 +645,9 @@ func (s *Session) ExportDocument(value string, dpi float64, writer io.Writer, in
 	}
 	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
 		return ExportFormat{}, fmt.Errorf("ofd document is not opened")
+	}
+	if format.Value == "txt" {
+		return format, s.Renderer.RenderToMultiPageText(writer, indices...)
 	}
 	renderer := *s.Renderer
 	if dpi > 0 && (format.Value == "png" || format.Value == "jpg") {
