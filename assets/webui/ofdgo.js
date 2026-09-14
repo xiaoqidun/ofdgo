@@ -67,6 +67,7 @@ const state = {
 	visibleThumbnails: new Set(),
 	exportFormats: [],
 	exportPages: null,
+	exportBackdrop: false,
 	showPages: !COMPACT_LAYOUT.matches,
 	showMeta: !COMPACT_LAYOUT.matches,
 };
@@ -105,6 +106,7 @@ const el = {
 	exportRangeRow: document.querySelector("#exportRangeRow"),
 	exportRange: document.querySelector("#exportRange"),
 	exportRangeStatus: document.querySelector("#exportRangeStatus"),
+	exportCancel: document.querySelector("#exportCancel"),
 	exportSubmit: document.querySelector("#exportSubmit"),
 	emptyState: document.querySelector("#emptyState"),
 	progressPanel: document.querySelector("#progressPanel"),
@@ -210,7 +212,16 @@ document.addEventListener("selectionchange", () => {
 });
 el.exportFormat.addEventListener("change", () => updateDPIControl());
 el.exportPageButton.addEventListener("click", () => exportFile(false));
-el.exportPanel.addEventListener("beforetoggle", prepareExportPanel);
+el.exportButton.addEventListener("click", openExportPanel);
+el.exportCancel.addEventListener("click", () => el.exportPanel.close());
+el.exportPanel.addEventListener("pointerdown", (event) => {
+	state.exportBackdrop = event.target === el.exportPanel;
+});
+el.exportPanel.addEventListener("click", (event) => {
+	if (state.exportBackdrop && event.target === el.exportPanel) {
+		el.exportPanel.close();
+	}
+});
 el.exportAll.addEventListener("change", updateExportRange);
 el.exportSpecified.addEventListener("change", () => {
 	updateExportRange();
@@ -275,7 +286,7 @@ updateSidebarState();
 boot();
 
 function handleKeyDown(event) {
-	if (event.defaultPrevented || event.isComposing || event.altKey || document.body.hasAttribute("aria-busy") || el.exportPanel.matches(":popover-open")) {
+	if (event.defaultPrevented || event.isComposing || event.altKey || document.body.hasAttribute("aria-busy") || el.exportPanel.open) {
 		return;
 	}
 	const key = event.key;
@@ -1508,16 +1519,13 @@ async function downloadAttachment(attachment) {
 	}
 }
 
-function prepareExportPanel(event) {
-	if (event.newState !== "open") {
-		return;
-	}
+function openExportPanel() {
 	if (!state.doc || document.body.hasAttribute("aria-busy")) {
-		event.preventDefault();
 		return;
 	}
 	el.exportForm.reset();
 	updateExportRange();
+	el.exportPanel.showModal();
 }
 
 async function updateExportRange() {
@@ -1532,7 +1540,7 @@ async function updateExportRange() {
 	if (!specified || !value) {
 		return;
 	}
-	const current = () => openSeq === state.openSeq && el.exportPanel.matches(":popover-open")
+	const current = () => openSeq === state.openSeq && el.exportPanel.open
 		&& el.exportSpecified.checked && value === el.exportRange.value.trim();
 	try {
 		const indices = await callWASM("ofdgoParsePageRange", value);
@@ -3322,9 +3330,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 		}
 		return;
 	}
-	if (el.exportPanel.matches(":popover-open")) {
-		el.exportPanel.hidePopover();
-	}
+	el.exportPanel.close();
 	endPan();
 	el.progressPanel.hidden = false;
 	setProgress(text, percent, status);

@@ -50,29 +50,29 @@
 					<option value="600">600</option>
 				</select>
 				<button id="exportPageButton" class="button" type="button" data-short="单" title="导出单页" aria-label="导出单页" disabled>单页</button>
-				<button id="exportButton" class="button" type="button" data-short="多" title="导出文档" aria-label="导出文档" aria-haspopup="dialog" popovertarget="exportPanel" disabled>文档</button>
+				<button id="exportButton" class="button" type="button" data-short="多" title="导出文档" aria-label="导出文档" aria-haspopup="dialog" aria-controls="exportPanel" disabled>文档</button>
 			</div>
 		</header>
-		<div id="exportPanel" class="export-panel" popover role="dialog" aria-label="导出文档">
+		<dialog id="exportPanel" class="form-dialog" aria-label="导出文档">
 			<form id="exportForm">
-				<div class="export-row">
+				<div class="form-row">
 					<span id="exportScopeLabel">范围</span>
-					<div class="export-options" role="radiogroup" aria-labelledby="exportScopeLabel">
+					<div class="form-options" role="radiogroup" aria-labelledby="exportScopeLabel">
 						<label><input id="exportAll" type="radio" name="scope" value="all" checked autofocus><span>全部</span></label>
 						<label><input id="exportSpecified" type="radio" name="scope" value="specified"><span>指定</span></label>
 					</div>
 				</div>
-				<div id="exportRangeRow" class="export-row" hidden>
+				<div id="exportRangeRow" class="form-row" hidden>
 					<label for="exportRange">页码</label>
 					<input id="exportRange" type="text" aria-describedby="exportRangeStatus" autocomplete="off" spellcheck="false">
 				</div>
-				<div class="export-actions">
-					<div id="exportRangeStatus" class="export-range-status" role="status" aria-live="polite"></div>
-					<button class="button" type="button" popovertarget="exportPanel" popovertargetaction="hide">取消</button>
+				<div class="form-actions">
+					<div id="exportRangeStatus" class="form-status" role="status" aria-live="polite"></div>
+					<button id="exportCancel" class="button" type="button">取消</button>
 					<button id="exportSubmit" class="button" type="submit">导出</button>
 				</div>
 			</form>
-		</div>
+		</dialog>
 
 		<main class="workspace">
 			<aside class="page-list-panel">

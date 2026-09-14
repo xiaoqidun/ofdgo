@@ -256,15 +256,13 @@ button:not(:disabled):hover {
 	width: 54px;
 }
 
-.export-panel {
-	top: calc(var(--bar-height) + 8px);
-	right: 0;
-	bottom: auto;
-	left: auto;
-	width: var(--sidebar-width);
-	max-height: calc(100dvh - var(--bar-height) - 18px);
-	margin: 0;
-	padding: 12px;
+.form-dialog {
+	inset: 0;
+	width: 320px;
+	max-width: calc(100% - 24px);
+	max-height: calc(100dvh - 24px);
+	margin: auto;
+	padding: 0;
 	border: 1px solid var(--line);
 	background: var(--panel);
 	color: #1f2428;
@@ -272,7 +270,15 @@ button:not(:disabled):hover {
 	font-size: 14px;
 }
 
-.export-row {
+.form-dialog::backdrop {
+	background: rgb(31 36 40 / 18%);
+}
+
+.form-dialog > form {
+	padding: 12px;
+}
+
+.form-row {
 	display: grid;
 	grid-template-columns: 2em minmax(0, 1fr);
 	align-items: center;
@@ -280,22 +286,22 @@ button:not(:disabled):hover {
 	margin-bottom: 12px;
 }
 
-.export-options {
+.form-options {
 	display: flex;
 }
 
-.export-options label {
+.form-options label {
 	position: relative;
 	flex: 1;
 	cursor: pointer;
 }
 
-.export-options input {
+.form-options input {
 	position: absolute;
 	opacity: 0;
 }
 
-.export-options span {
+.form-options span {
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -304,22 +310,22 @@ button:not(:disabled):hover {
 	background: #ffffff;
 }
 
-.export-options label + label span {
+.form-options label + label span {
 	border-left: 0;
 }
 
-.export-options input:checked + span {
+.form-options input:checked + span {
 	background: #e4f3ef;
 	color: var(--accent-strong);
 	box-shadow: 0 0 0 1px var(--accent) inset;
 }
 
-.export-options input:focus-visible + span {
+.form-options input:focus-visible + span {
 	outline: 2px solid var(--focus);
 	outline-offset: 2px;
 }
 
-.export-row input[type="text"] {
+.form-row input[type="text"] {
 	width: 100%;
 	min-width: 0;
 	height: var(--control-height);
@@ -330,11 +336,11 @@ button:not(:disabled):hover {
 	color: #1f2428;
 }
 
-.export-row input[aria-invalid="true"] {
+.form-row input[aria-invalid="true"] {
 	border-color: #b14343;
 }
 
-.export-range-status {
+.form-status {
 	min-width: 0;
 	color: var(--text-muted);
 	font-size: 12px;
@@ -342,20 +348,20 @@ button:not(:disabled):hover {
 	overflow-wrap: anywhere;
 }
 
-.export-actions {
+.form-actions {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) auto auto;
 	align-items: center;
 	gap: 8px;
 }
 
-#exportSubmit {
+.form-actions button[type="submit"] {
 	border-color: var(--accent);
 	background: var(--accent);
 	color: #ffffff;
 }
 
-#exportSubmit:not(:disabled):hover {
+.form-actions button[type="submit"]:not(:disabled):hover {
 	background: var(--accent-strong);
 }
 
@@ -794,7 +800,7 @@ button.outline-link:hover {
 .empty-state[hidden],
 .meta-list > [hidden],
 .navigation-tabs[hidden],
-.export-row[hidden],
+.form-row[hidden],
 .page-list[hidden],
 .page-frame[hidden],
 .progress-panel[hidden] {
@@ -1428,11 +1434,6 @@ button.outline-link:hover {
 @media (max-width: 900px) {
 	:root {
 		--sidebar-width: min(78vw, 292px);
-	}
-
-	.export-panel {
-		right: 10px;
-		width: min(300px, calc(100% - 20px));
 	}
 
 	.toolbar {
