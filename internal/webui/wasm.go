@@ -19,6 +19,7 @@ package webui
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -282,6 +283,10 @@ func renderPage(args []js.Value) (any, error) {
 	for i, font := range page.Fonts {
 		fonts[i] = map[string]any{"name": font.Name, "weight": font.Weight, "style": font.Style}
 	}
+	images := make([]any, len(page.Images))
+	for i, image := range page.Images {
+		images[i] = map[string]any{"name": image.Name, "url": "data:" + image.MIME + ";base64," + base64.StdEncoding.EncodeToString(image.Data)}
+	}
 	return successResult(map[string]any{
 		"index":  page.Index,
 		"number": page.Number,
@@ -291,6 +296,7 @@ func renderPage(args []js.Value) (any, error) {
 		"svg":    page.SVG,
 		"links":  links,
 		"fonts":  fonts,
+		"images": images,
 		"text":   string(textData),
 	}), nil
 }

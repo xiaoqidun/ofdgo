@@ -163,6 +163,7 @@ type PageSVG struct {
 	SVG    string           `json:"svg"`
 	Links  []ofdgo.PageLink `json:"-"`
 	Fonts  []ofdgo.SVGFont  `json:"-"`
+	Images []ofdgo.SVGImage `json:"-"`
 }
 
 // ExportFormat 导出格式
@@ -402,19 +403,17 @@ func (s *Session) Info() DocumentInfo {
 		info.CreationDate = docInfo.CreationDate
 		info.ModDate = docInfo.ModDate
 	}
-	pages := make([]*ofdgo.PageContent, 0, len(s.doc.Pages.Page))
 	for index, pageRef := range s.doc.Pages.Page {
 		pageInfo := PageInfo{Index: index, ID: pageRef.ID}
-		if page, err := s.pageContent(index); err == nil {
-			pages = append(pages, page)
-			if box, err := s.pageBox(index, page); err == nil {
+		if area, err := s.Reader.PageArea(pageRef); err == nil {
+			if box, err := s.pageBox(index, &ofdgo.PageContent{Area: area}); err == nil {
 				pageInfo.Width = box.W
 				pageInfo.Height = box.H
 			}
 		}
 		info.Pages = append(info.Pages, pageInfo)
 	}
-	if fonts, err := s.Renderer.FontInfosFromPages(pages); err == nil {
+	if fonts, err := s.Renderer.FontInfos(); err == nil {
 		info.Fonts = fonts
 	}
 	info.FontCount = len(info.Fonts)
@@ -440,7 +439,7 @@ func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
 			s.textCache[index] = text
 		}
 	}
-	fonts, err := renderer.RenderToSVGWithFonts(page, &buf)
+	resources, err := renderer.RenderToSVGWithResources(page, &buf)
 	if err != nil {
 		return PageSVG{}, err
 	}
@@ -448,11 +447,11 @@ func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
 	if err != nil {
 		return PageSVG{}, err
 	}
-	for i, font := range fonts {
+	for i, font := range resources.Fonts {
 		s.svgFonts[font.Name] = font.Data
-		fonts[i].Data = nil
+		resources.Fonts[i].Data = nil
 	}
-	return PageSVG{Index: index, Number: index + 1, ID: page.ID, Width: box.W, Height: box.H, SVG: buf.String(), Links: links, Fonts: fonts}, nil
+	return PageSVG{Index: index, Number: index + 1, ID: page.ID, Width: box.W, Height: box.H, SVG: buf.String(), Links: links, Fonts: resources.Fonts, Images: resources.Images}, nil
 }
 
 // SVGFontData 获取已渲染页面引用的字体数据

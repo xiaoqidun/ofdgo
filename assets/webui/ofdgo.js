@@ -56,6 +56,7 @@ const state = {
 	renderAnnotations: true,
 	pageCache: new Map(),
 	svgFonts: new Map(),
+	svgImages: new Map(),
 	selectedPages: new Set(),
 	documentSelection: null,
 	pageInFlight: new Map(),
@@ -1710,6 +1711,7 @@ function resetPageFlow() {
 		document.fonts.delete(font);
 	}
 	state.svgFonts.clear();
+	state.svgImages.clear();
 	state.pageCache.clear();
 	state.selectedPages.clear();
 	state.documentSelection = null;
@@ -1862,6 +1864,12 @@ async function processPageRenderQueue() {
 				const page = await callWASM("ofdgoRenderPage", task.index);
 				await loadSVGFonts(page.fonts, task.openSeq);
 				if (task.openSeq === state.openSeq) {
+					for (const image of page.images) {
+						if (!state.svgImages.has(image.name)) {
+							state.svgImages.set(image.name, image.url);
+						}
+					}
+					delete page.images;
 					page.text = JSON.parse(page.text);
 					state.pageCache.set(task.index, page);
 				}
@@ -2229,7 +2237,7 @@ function layoutPageShell(shell, page) {
 
 function parseSVG(svgText, prefix = "") {
 	const template = document.createElement("template");
-	template.innerHTML = svgText;
+	template.innerHTML = svgText.replace(/xlink:href="(ofdgo-image-[a-f0-9]{64})"/g, (_, name) => `xlink:href="${state.svgImages.get(name)}"`);
 	const svg = document.adoptNode(template.content.firstElementChild);
 	prefixSVGIds(svg, prefix);
 	return svg;

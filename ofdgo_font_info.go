@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"encoding/xml"
 	"fmt"
 	"io"
 	"path"
@@ -214,8 +215,10 @@ func (r *Renderer) fontUsage(doc *Document, pages []*PageContent) map[string]int
 	usage := make(map[string]int)
 	if pages == nil {
 		for _, pageRef := range doc.Pages.Page {
-			if page, err := r.Reader.PageContent(pageRef); err == nil {
-				r.countPageFonts(page, usage)
+			if counts, err := r.readPageFontUsage(pageRef); err == nil {
+				for id, count := range counts {
+					usage[id] += count
+				}
 			}
 		}
 	} else {
@@ -233,14 +236,104 @@ func (r *Renderer) fontUsage(doc *Document, pages []*PageContent) map[string]int
 	return usage
 }
 
+// fontUsagePage 逐图元统计字体的页面解码器
+type fontUsagePage struct {
+	renderer *Renderer
+	usage    map[string]int
+}
+
+// readPageFontUsage 读取页面字体用量，不保留页面图元
+// 入参: page 页面引用
+// 返回: map[string]int 字体使用次数, error 错误信息
+func (r *Renderer) readPageFontUsage(page Page) (map[string]int, error) {
+	r.Reader.loadPageResources(page)
+	f, err := r.Reader.openFile(r.Reader.ResPath(page.BaseLoc))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	content := fontUsagePage{renderer: r, usage: make(map[string]int)}
+	if err := xml.NewDecoder(f).Decode(&content); err != nil {
+		return nil, err
+	}
+	if _, err := io.Copy(io.Discard, f); err != nil {
+		return nil, err
+	}
+	r.countAnnotationFonts(page.ID, content.usage)
+	return content.usage, nil
+}
+
+// UnmarshalXML 解析页面内容中的图层字体
+// 入参: d XML解码器, start 页面起始节点
+// 返回: error 错误信息
+func (p *fontUsagePage) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Local != "Page" {
+		return fmt.Errorf("expected element type <Page> but have <%s>", start.Name.Local)
+	}
+	return decodeObjectContainer(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "Content" {
+			return d.Skip()
+		}
+		return decodeObjectContainer(d, node, func(d *xml.Decoder, layer xml.StartElement) error {
+			if layer.Name.Local != "Layer" {
+				return d.Skip()
+			}
+			return p.decodeObjects(d, layer, p.renderer.drawParamDefaults(attrValue(layer, "DrawParam"), nil))
+		})
+	})
+}
+
+// decodeObjects 逐个读取图元并复用字体统计规则
+// 入参: d XML解码器, start 容器起始节点, defaults 默认绘制参数
+// 返回: error 错误信息
+func (p *fontUsagePage) decodeObjects(d *xml.Decoder, start xml.StartElement, defaults *DrawParam) error {
+	return decodeObjectContainer(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "PageBlock":
+			return p.decodeObjects(d, node, defaults)
+		case "PathObject":
+			var obj struct {
+				PathObject
+				AbbreviatedData struct{} `xml:"AbbreviatedData"`
+			}
+			if err := d.DecodeElement(&obj, &node); err != nil {
+				return err
+			}
+			p.renderer.countObjectFonts(GraphicObject{Type: "PathObject", PathObject: obj.PathObject}, p.usage, defaults, nil)
+			return nil
+		case "ImageObject":
+			var obj ImageObject
+			if err := d.DecodeElement(&obj, &node); err != nil {
+				return err
+			}
+			p.renderer.countObjectFonts(GraphicObject{Type: "ImageObject", ImageObject: obj}, p.usage, defaults, nil)
+			return nil
+		}
+		var layer Layer
+		if err := layer.decodeObject(d, node); err != nil {
+			return err
+		}
+		for _, obj := range layer.Objects {
+			p.renderer.countObjectFonts(obj, p.usage, defaults, nil)
+		}
+		return nil
+	})
+}
+
 // countPageFonts 统计页面字体使用次数
 // 入参: page 页面内容, usage 字体使用次数
 func (r *Renderer) countPageFonts(page *PageContent, usage map[string]int) {
 	for _, layer := range page.Content.Layer {
 		r.countLayerFonts(layer, usage)
 	}
+	r.countAnnotationFonts(page.ID, usage)
+}
+
+// countAnnotationFonts 统计页面注释中的字体使用次数
+// 入参: pageID 页面标识, usage 字体使用次数
+func (r *Renderer) countAnnotationFonts(pageID string, usage map[string]int) {
 	if r.RenderAnnotations {
-		for _, annot := range r.Reader.Annots[page.ID] {
+		for _, annot := range r.Reader.Annots[pageID] {
 			if annot.Visible != nil && !*annot.Visible {
 				continue
 			}
