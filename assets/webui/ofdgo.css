@@ -424,6 +424,10 @@ body[data-hide-meta] .meta-panel {
 	overflow: auto;
 }
 
+.page-list-panel {
+	scroll-padding-top: 51px;
+}
+
 .meta-panel {
 	border-right: 0;
 	border-left: 1px solid var(--line);
@@ -495,10 +499,16 @@ body[data-hide-meta] .meta-panel {
 }
 
 .navigation-tabs {
+	position: sticky;
+	top: -12px;
+	z-index: 1;
 	display: flex;
 	gap: 16px;
+	margin-top: -12px;
 	margin-bottom: 10px;
+	padding-top: 12px;
 	border-bottom: 1px solid var(--line);
+	background: var(--panel);
 }
 
 .navigation-tabs button {
