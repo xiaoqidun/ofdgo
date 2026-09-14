@@ -17,10 +17,42 @@
 package webui
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"syscall/js"
 )
+
+// exportWriter 分块传递导出数据
+type exportWriter struct {
+	write js.Value
+}
+
+// Write 将数据块交给浏览器保存
+// 入参: data 导出数据
+// 返回: int 写入长度, error 错误信息
+func (w exportWriter) Write(data []byte) (int, error) {
+	done := make(chan error)
+	callback := js.FuncOf(func(this js.Value, args []js.Value) any {
+		var err error
+		if len(args) > 0 {
+			err = fmt.Errorf("%s", args[0].String())
+		}
+		done <- err
+		return nil
+	})
+	defer callback.Release()
+	size := len(data)
+	for len(data) > 0 {
+		n := min(len(data), 1<<20)
+		w.write.Invoke(bytesToJS(data[:n]), callback)
+		if err := <-done; err != nil {
+			return size - len(data), err
+		}
+		data = data[n:]
+	}
+	return size, nil
+}
 
 // currentSession 当前WebUI文档会话
 var currentSession *Session
@@ -42,8 +74,8 @@ func RunWASM() {
 	registerCallback("ofdgoSVGFontData", svgFontData)
 	registerCallback("ofdgoSearchPage", searchPage)
 	registerCallback("ofdgoExportFormats", exportFormats)
-	registerCallback("ofdgoExportPage", exportPage)
-	registerCallback("ofdgoExportDocument", exportDocument)
+	registerExportCallback("ofdgoExportPage", exportPage)
+	registerExportCallback("ofdgoExportDocument", exportDocument)
 	registerCallback("ofdgoMatchFontFiles", matchFontFiles)
 	select {}
 }
@@ -52,16 +84,40 @@ func RunWASM() {
 // 入参: name 回调名称, fn 回调函数
 func registerCallback(name string, fn func([]js.Value) (any, error)) {
 	cb := js.FuncOf(func(this js.Value, args []js.Value) any {
-		data, err := safeCall(fn, args)
-		if err != nil {
-			return encodeResult(apiResult{OK: false, Error: err.Error()})
-		}
-		if result, ok := data.(js.Value); ok {
-			return result
-		}
-		return encodeResult(apiResult{OK: true, Data: data})
+		return callbackResult(fn, args)
 	})
 	js.Global().Set(name, cb)
+}
+
+// registerExportCallback 异步导出，为浏览器处理数据块让出事件循环
+// 入参: name 回调名称, fn 回调函数
+func registerExportCallback(name string, fn func([]js.Value) (any, error)) {
+	cb := js.FuncOf(func(this js.Value, args []js.Value) any {
+		executor := js.FuncOf(func(this js.Value, callbacks []js.Value) any {
+			resolve := callbacks[0]
+			go func() {
+				resolve.Invoke(callbackResult(fn, args))
+			}()
+			return nil
+		})
+		defer executor.Release()
+		return js.Global().Get("Promise").New(executor)
+	})
+	js.Global().Set(name, cb)
+}
+
+// callbackResult 转换浏览器接口结果
+// 入参: fn 回调函数, args 回调参数
+// 返回: any 浏览器结果
+func callbackResult(fn func([]js.Value) (any, error), args []js.Value) any {
+	data, err := safeCall(fn, args)
+	if err != nil {
+		return encodeResult(apiResult{OK: false, Error: err.Error()})
+	}
+	if result, ok := data.(js.Value); ok {
+		return result
+	}
+	return encodeResult(apiResult{OK: true, Data: data})
 }
 
 // safeCall 调用浏览器回调并转换异常
@@ -238,15 +294,18 @@ func exportPage(args []js.Value) (any, error) {
 	if currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	if len(args) < 3 {
+	if len(args) < 4 {
 		return nil, fmt.Errorf("missing export page arguments")
 	}
-	data, format, err := currentSession.ExportPage(args[0].Int(), args[1].String(), args[2].Float())
+	writer := bufio.NewWriterSize(exportWriter{write: args[3]}, 1<<20)
+	format, err := currentSession.ExportPage(args[0].Int(), args[1].String(), args[2].Float(), writer)
 	if err != nil {
 		return nil, err
 	}
+	if err := writer.Flush(); err != nil {
+		return nil, err
+	}
 	return successResult(map[string]any{
-		"bytes": bytesToJS(data),
 		"label": format.Label,
 		"mime":  format.MIME,
 	}), nil
@@ -259,12 +318,15 @@ func exportDocument(args []js.Value) (any, error) {
 	if currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	data, format, err := currentSession.ExportDocument(args[0].String(), args[1].Float())
+	writer := bufio.NewWriterSize(exportWriter{write: args[2]}, 1<<20)
+	format, err := currentSession.ExportDocument(args[0].String(), args[1].Float(), writer)
 	if err != nil {
 		return nil, err
 	}
+	if err := writer.Flush(); err != nil {
+		return nil, err
+	}
 	return successResult(map[string]any{
-		"bytes": bytesToJS(data),
 		"label": format.Label,
 		"mime":  format.MIME,
 	}), nil

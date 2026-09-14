@@ -15,12 +15,10 @@
 package webui
 
 import (
-	"archive/zip"
 	"bytes"
 	"fmt"
-	"image/jpeg"
+	"io"
 	"path"
-	"strconv"
 	"strings"
 	"time"
 
@@ -450,38 +448,22 @@ func (s *Session) SVGFontData(name string) ([]byte, error) {
 }
 
 // ExportPage 导出单页
-// 入参: index 页面索引, value 导出格式, dpi 图片DPI
-// 返回: []byte 文件数据, ExportFormat 导出格式, error 错误信息
-func (s *Session) ExportPage(index int, value string, dpi float64) ([]byte, ExportFormat, error) {
+// 入参: index 页面索引, value 导出格式, dpi 图片DPI, writer 输出流
+// 返回: ExportFormat 导出格式, error 错误信息
+func (s *Session) ExportPage(index int, value string, dpi float64, writer io.Writer) (ExportFormat, error) {
 	format, ok := exportFormat(value)
 	if !ok {
-		return nil, ExportFormat{}, fmt.Errorf("unsupported export format %s", value)
+		return ExportFormat{}, fmt.Errorf("unsupported export format %s", value)
 	}
 	page, err := s.pageContent(index)
 	if err != nil {
-		return nil, ExportFormat{}, err
+		return ExportFormat{}, err
 	}
-	var buf bytes.Buffer
 	renderer := *s.Renderer
 	if dpi > 0 && (format.Value == "png" || format.Value == "jpg") {
 		renderer.DPI = dpi
 	}
-	switch format.Value {
-	case "svg":
-		err = renderer.RenderToSVG(page, &buf)
-	case "pdf":
-		err = renderer.RenderToPDF(page, &buf)
-	case "eps":
-		err = renderer.RenderToEPS(page, &buf)
-	case "png":
-		err = renderer.RenderToPNG(page, &buf)
-	case "jpg":
-		err = renderer.RenderToJPEG(page, &buf, &jpeg.Options{Quality: 95})
-	}
-	if err != nil {
-		return nil, ExportFormat{}, err
-	}
-	return buf.Bytes(), format, nil
+	return format, renderer.RenderTo(page, writer, format.Value)
 }
 
 // signatureInfos 获取签名验证信息
@@ -632,72 +614,43 @@ func signatureStampInfos(positions []ofdgo.SignatureStampPosition) []SignatureSt
 }
 
 // ExportDocument 导出文档为PDF或逐页打包ZIP
-// 入参: value 导出格式, dpi 图片DPI
-// 返回: []byte 文件数据, ExportFormat 导出格式, error 错误信息
-func (s *Session) ExportDocument(value string, dpi float64) ([]byte, ExportFormat, error) {
+// 入参: value 导出格式, dpi 图片DPI, writer 输出流
+// 返回: ExportFormat 导出格式, error 错误信息
+func (s *Session) ExportDocument(value string, dpi float64, writer io.Writer) (ExportFormat, error) {
 	format, ok := exportFormat(value)
 	if !ok {
-		return nil, ExportFormat{}, fmt.Errorf("unsupported export format %s", value)
+		return ExportFormat{}, fmt.Errorf("unsupported export format %s", value)
 	}
 	if format.Value == "pdf" {
-		data, err := s.ExportPDF()
-		return data, format, err
+		return format, s.ExportPDF(writer)
 	}
 	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
-		return nil, ExportFormat{}, fmt.Errorf("ofd document is not opened")
+		return ExportFormat{}, fmt.Errorf("ofd document is not opened")
 	}
-	count := len(s.doc.Pages.Page)
-	if count == 0 {
-		return nil, ExportFormat{}, fmt.Errorf("no pages found")
+	renderer := *s.Renderer
+	if dpi > 0 && (format.Value == "png" || format.Value == "jpg") {
+		renderer.DPI = dpi
 	}
-	var buf bytes.Buffer
-	archive := zip.NewWriter(&buf)
-	method := zip.Deflate
-	if format.Value == "png" || format.Value == "jpg" {
-		method = zip.Store
-	}
-	width := len(strconv.Itoa(count))
-	for index := range count {
-		data, _, err := s.ExportPage(index, format.Value, dpi)
-		if err != nil {
-			return nil, ExportFormat{}, fmt.Errorf("failed to export page %d: %w", index+1, err)
-		}
-		entry, err := archive.CreateHeader(&zip.FileHeader{
-			Name:   fmt.Sprintf("%0*d.%s", width, index+1, format.Extension),
-			Method: method,
-		})
-		if err != nil {
-			return nil, ExportFormat{}, err
-		}
-		if _, err := entry.Write(data); err != nil {
-			return nil, ExportFormat{}, err
-		}
-	}
-	if err := archive.Close(); err != nil {
-		return nil, ExportFormat{}, err
-	}
-	return buf.Bytes(), ExportFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}, nil
+	err := renderer.RenderToZIP(writer, format.Value)
+	return ExportFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}, err
 }
 
 // ExportPDF 导出文档为PDF
-// 返回: []byte PDF文件数据, error 错误信息
-func (s *Session) ExportPDF() ([]byte, error) {
+// 入参: writer 输出流
+// 返回: error 错误信息
+func (s *Session) ExportPDF(writer io.Writer) error {
 	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
-		return nil, fmt.Errorf("ofd document is not opened")
+		return fmt.Errorf("ofd document is not opened")
 	}
-	var buf bytes.Buffer
 	pages := make([]*ofdgo.PageContent, len(s.doc.Pages.Page))
 	for i := range pages {
 		page, err := s.pageContent(i)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		pages[i] = page
 	}
-	if err := s.Renderer.RenderPagesToPDF(pages, &buf); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return s.Renderer.RenderPagesToPDF(pages, writer)
 }
 
 // pageContent 获取页面内容

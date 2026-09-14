@@ -1,14 +1,49 @@
 importScripts("./wasm_exec.js");
 
-self.onmessage = ({ data: { id, name, args } }) => {
+let pending = Promise.resolve();
+self.onmessage = ({ data }) => {
+	pending = pending.then(() => handleMessage(data));
+};
+async function handleMessage({ id, name, args }) {
+	let output;
 	try {
-		const payload = globalThis[name](...args);
+		const chunks = [];
+		let size = 0;
+		const exporting = name === "ofdgoExportPage" || name === "ofdgoExportDocument";
+		if (exporting) {
+			const file = args.pop();
+			if (file) {
+				output = await file.createWritable();
+			}
+			args.push((bytes, done) => {
+				size += bytes.length;
+				if (output) {
+					output.write(bytes).then(() => done(), (err) => done(err.message));
+				} else {
+					chunks.push(new Blob([bytes]));
+					setTimeout(done, 0);
+				}
+			});
+		}
+		const payload = await globalThis[name](...args);
 		const result = typeof payload === "string" ? JSON.parse(payload) : payload;
+		if (exporting && result.ok) {
+			result.data.size = size;
+			if (output) {
+				await output.close();
+			} else {
+				result.data.blob = new Blob(chunks, { type: result.data.mime });
+			}
+		} else if (output) {
+			await output.abort();
+		}
+		output = null;
 		self.postMessage({ id, ...result }, result.data?.bytes ? [result.data.bytes.buffer] : []);
 	} catch (err) {
+		await output?.abort().catch(() => {});
 		self.postMessage({ id, ok: false, error: err.message });
 	}
-};
+}
 
 function exitWASM(err) {
 	self.postMessage({ type: "exit", error: err?.message || "引擎运行中断" });

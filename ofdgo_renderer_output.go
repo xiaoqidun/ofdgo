@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"fmt"
@@ -22,6 +23,8 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"strconv"
+	"strings"
 
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers/pdf"
@@ -31,6 +34,79 @@ import (
 	"golang.org/x/image/draw"
 	"golang.org/x/image/math/f64"
 )
+
+// RenderTo 按格式渲染单页，JPEG使用95画质
+// 入参: page 页面内容, writer 输出流, format svg、pdf、eps、png、jpg或jpeg
+// 返回: error 错误信息
+func (r *Renderer) RenderTo(page *PageContent, writer io.Writer, format string) error {
+	_, render, err := r.outputRenderer(format)
+	if err != nil {
+		return err
+	}
+	return render(page, writer)
+}
+
+// outputRenderer 获取格式扩展名和渲染方法
+// 入参: format 输出格式
+// 返回: string 扩展名, func 渲染方法, error 错误信息
+func (r *Renderer) outputRenderer(format string) (string, func(*PageContent, io.Writer) error, error) {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "svg":
+		return "svg", r.RenderToSVG, nil
+	case "pdf":
+		return "pdf", r.RenderToPDF, nil
+	case "eps":
+		return "eps", r.RenderToEPS, nil
+	case "png":
+		return "png", r.RenderToPNG, nil
+	case "jpg", "jpeg":
+		return "jpg", func(page *PageContent, writer io.Writer) error {
+			return r.RenderToJPEG(page, writer, &jpeg.Options{Quality: 95})
+		}, nil
+	default:
+		return "", nil, fmt.Errorf("unsupported output format %s", format)
+	}
+}
+
+// RenderToZIP 逐页渲染并写入ZIP，文件编号按总页数补零，出错时调用方应丢弃输出
+// 入参: writer 输出流, format svg、pdf、eps、png、jpg或jpeg
+// 返回: error 错误信息
+func (r *Renderer) RenderToZIP(writer io.Writer, format string) error {
+	extension, render, err := r.outputRenderer(format)
+	if err != nil {
+		return err
+	}
+	count, err := r.Reader.PageCount()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return fmt.Errorf("no pages found")
+	}
+	archive := zip.NewWriter(writer)
+	method := zip.Deflate
+	if extension == "png" || extension == "jpg" {
+		method = zip.Store
+	}
+	width := len(strconv.Itoa(count))
+	for index := range count {
+		page, err := r.Reader.PageContentByIndex(index)
+		if err != nil {
+			return fmt.Errorf("failed to read page %d: %w", index+1, err)
+		}
+		entry, err := archive.CreateHeader(&zip.FileHeader{
+			Name:   fmt.Sprintf("%0*d.%s", width, index+1, extension),
+			Method: method,
+		})
+		if err != nil {
+			return err
+		}
+		if err := render(page, entry); err != nil {
+			return fmt.Errorf("failed to export page %d: %w", index+1, err)
+		}
+	}
+	return archive.Close()
+}
 
 // rasterRenderer 保留页面物理尺寸的光栅渲染器
 type rasterRenderer struct {
@@ -139,9 +215,13 @@ func (r *Renderer) RenderToSVG(page *PageContent, writer io.Writer) error {
 	if err != nil {
 		return err
 	}
-	renderer := svg.New(writer, c.W, c.H, nil)
+	buffer := bufio.NewWriter(writer)
+	renderer := svg.New(buffer, c.W, c.H, nil)
 	c.RenderTo(renderer)
-	return renderer.Close()
+	if err := renderer.Close(); err != nil {
+		return err
+	}
+	return buffer.Flush()
 }
 
 // replacePDFProducer 替换PDF的Producer属性

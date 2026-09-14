@@ -1496,26 +1496,41 @@ async function exportFile(whole) {
 		return;
 	}
 	const label = whole ? (format.value === "pdf" ? "PDF" : "ZIP") : format.label;
+	const extension = whole ? label.toLowerCase() : format.extension;
+	const mime = whole && format.value !== "pdf" ? "application/zip" : format.mime;
 	const openSeq = state.openSeq;
-	const fileName = whole ? `${baseFileName()}.${label.toLowerCase()}` : pageFileName(format.extension);
+	const fileName = whole ? `${baseFileName()}.${extension}` : pageFileName(extension);
+	const pageIndex = state.pageIndex;
+	const dpi = exportFormatUsesDPI(format.value) ? currentImageDPI() : 0;
 	state.exporting = true;
 	updateControls();
 	setBusy(true, `正在生成 ${label}`, null, whole ? STATUS.exporting : STATUS.pageExporting);
 	try {
-		const dpi = exportFormatUsesDPI(format.value) ? currentImageDPI() : 0;
+		const file = window.showSaveFilePicker ? await window.showSaveFilePicker({
+			suggestedName: fileName,
+			types: [{ description: label, accept: { [mime]: [`.${extension}`] } }],
+		}) : null;
+		if (openSeq !== state.openSeq) {
+			return;
+		}
 		const result = whole
-			? await callWASM("ofdgoExportDocument", format.value, dpi)
-			: await callWASM("ofdgoExportPage", state.pageIndex, format.value, dpi);
+			? await callWASM("ofdgoExportDocument", format.value, dpi, file)
+			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, file);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
 		setProgress(`正在保存 ${result.label}`, 100);
-		const bytes = result.bytes;
-		downloadBytes(bytes, result.mime, fileName);
-		setStatus(`${result.label} 导出完成 ${formatBytes(bytes.length, result.label)}`);
+		if (result.blob) {
+			downloadBytes(result.blob, result.mime, fileName);
+		}
+		setStatus(`${result.label} 导出完成 ${formatBytes(result.size, result.label)}`);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
-			showError(err, false);
+			if (err.name === "AbortError") {
+				setStatus("导出已取消");
+			} else {
+				showError(err, false);
+			}
 		}
 	} finally {
 		state.exporting = false;
