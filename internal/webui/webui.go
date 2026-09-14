@@ -175,8 +175,8 @@ type ExportFormat struct {
 
 // supportedExportFormats 导出格式列表
 var supportedExportFormats = []ExportFormat{
-	{Value: "svg", Label: "SVG", Extension: "svg", MIME: "image/svg+xml"},
 	{Value: "pdf", Label: "PDF", Extension: "pdf", MIME: "application/pdf"},
+	{Value: "svg", Label: "SVG", Extension: "svg", MIME: "image/svg+xml"},
 	{Value: "eps", Label: "EPS", Extension: "eps", MIME: "application/postscript"},
 	{Value: "png", Label: "PNG", Extension: "png", MIME: "image/png"},
 	{Value: "jpg", Label: "JPG", Extension: "jpg", MIME: "image/jpeg"},
