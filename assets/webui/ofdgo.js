@@ -94,7 +94,7 @@ const el = {
 	continuousButton: document.querySelector("#continuousButton"),
 	annotationButton: document.querySelector("#annotationButton"),
 	imageDPI: document.querySelector("#imageDPI"),
-	pageExportFormat: document.querySelector("#pageExportFormat"),
+	exportFormat: document.querySelector("#exportFormat"),
 	exportPageButton: document.querySelector("#exportPageButton"),
 	exportButton: document.querySelector("#exportButton"),
 	emptyState: document.querySelector("#emptyState"),
@@ -199,9 +199,9 @@ document.addEventListener("selectionchange", () => {
 		unmountPage(index);
 	}
 });
-el.pageExportFormat.addEventListener("change", () => updateDPIControl());
-el.exportPageButton.addEventListener("click", exportCurrentPage);
-el.exportButton.addEventListener("click", exportPDF);
+el.exportFormat.addEventListener("change", () => updateDPIControl());
+el.exportPageButton.addEventListener("click", () => exportFile(false));
+el.exportButton.addEventListener("click", () => exportFile(true));
 el.refreshAppButton.addEventListener("click", refreshApplication);
 el.pageInput.addEventListener("change", () => {
 	const page = Number.parseInt(el.pageInput.value, 10);
@@ -593,15 +593,15 @@ async function refreshApplication() {
 async function loadExportFormats() {
 	const formats = await callWASM("ofdgoExportFormats") || [];
 	state.exportFormats = formats;
-	el.pageExportFormat.replaceChildren();
+	el.exportFormat.replaceChildren();
 	for (const format of formats) {
 		const option = document.createElement("option");
 		option.value = format.value;
 		option.textContent = format.label;
-		el.pageExportFormat.append(option);
+		el.exportFormat.append(option);
 	}
 	if (formats.length) {
-		el.pageExportFormat.value = formats[0].value;
+		el.exportFormat.value = formats[0].value;
 	}
 	updateDPIControl();
 }
@@ -1487,61 +1487,32 @@ async function downloadAttachment(attachment) {
 	}
 }
 
-async function exportPDF() {
+async function exportFile(whole) {
 	if (!state.doc || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
-	const openSeq = state.openSeq;
-	state.exporting = true;
-	updateControls();
-	setBusy(true, "正在生成 PDF", 45, STATUS.exporting);
-	try {
-		const result = await callWASM("ofdgoExportPDF");
-		if (openSeq !== state.openSeq) {
-			return;
-		}
-		setProgress("正在保存 PDF", 86);
-		const bytes = result.bytes;
-		downloadBytes(bytes, "application/pdf", pdfFileName());
-		setStatus(`PDF 导出完成 ${formatBytes(result.size || bytes.length)}`);
-	} catch (err) {
-		if (openSeq === state.openSeq) {
-			showError(err, false);
-		}
-	} finally {
-		state.exporting = false;
-		if (openSeq === state.openSeq) {
-			setBusy(false);
-			updateControls();
-		}
-	}
-}
-
-async function exportCurrentPage() {
-	if (!state.doc || document.body.hasAttribute("aria-busy")) {
-		return;
-	}
-	const format = el.pageExportFormat.value;
+	const format = exportFormatInfo(el.exportFormat.value);
 	if (!format) {
 		return;
 	}
-	const info = exportFormatInfo(format);
-	const label = info?.label || String(format || "").toUpperCase();
+	const label = whole ? (format.value === "pdf" ? "PDF" : "ZIP") : format.label;
 	const openSeq = state.openSeq;
-	const fileName = pageFileName(info?.extension || format);
+	const fileName = whole ? `${baseFileName()}.${label.toLowerCase()}` : pageFileName(format.extension);
 	state.exporting = true;
 	updateControls();
-	setBusy(true, `正在生成 ${label}`, 45, STATUS.pageExporting);
+	setBusy(true, `正在生成 ${label}`, null, whole ? STATUS.exporting : STATUS.pageExporting);
 	try {
-		const dpi = exportFormatUsesDPI(format) ? currentImageDPI() : 0;
-		const result = await callWASM("ofdgoExportPage", state.pageIndex, format, dpi);
+		const dpi = exportFormatUsesDPI(format.value) ? currentImageDPI() : 0;
+		const result = whole
+			? await callWASM("ofdgoExportDocument", format.value, dpi)
+			: await callWASM("ofdgoExportPage", state.pageIndex, format.value, dpi);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		setProgress(`正在保存 ${result.label || label}`, 86);
+		setProgress(`正在保存 ${result.label}`, 100);
 		const bytes = result.bytes;
-		downloadBytes(bytes, result.mime || info?.mime || "application/octet-stream", fileName);
-		setStatus(`${result.label || label} 导出完成 ${formatBytes(result.size || bytes.length, result.label || label)}`);
+		downloadBytes(bytes, result.mime, fileName);
+		setStatus(`${result.label} 导出完成 ${formatBytes(bytes.length, result.label)}`);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			showError(err, false);
@@ -3224,9 +3195,9 @@ function updateControls() {
 	el.fitButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "width");
 	el.fitHeightButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "height");
 	updateAnnotationButton();
-	el.pageExportFormat.disabled = !hasDoc || state.exporting || !state.exportFormats.length;
+	el.exportFormat.disabled = !hasDoc || state.exporting || !state.exportFormats.length;
 	el.exportPageButton.disabled = !hasDoc || state.exporting || !state.exportFormats.length;
-	el.exportButton.disabled = !hasDoc || state.exporting;
+	el.exportButton.disabled = !hasDoc || state.exporting || !state.exportFormats.length;
 	updateDPIControl();
 }
 
@@ -3329,13 +3300,9 @@ function baseFileName() {
 	return base.replace(/[\\/:*?"<>|]+/g, "_").trim() || "ofdgo";
 }
 
-function pdfFileName() {
-	return `${baseFileName()}.pdf`;
-}
-
 function pageFileName(extension) {
 	const page = String(state.pageIndex + 1).padStart(String(state.doc?.pageCount || 1).length, "0");
-	return `${baseFileName()}_p${page}.${extension || "bin"}`;
+	return `${baseFileName()}_p${page}.${extension}`;
 }
 
 function exportFormatInfo(value) {
@@ -3347,7 +3314,7 @@ function exportFormatUsesDPI(value) {
 }
 
 function updateDPIControl() {
-	el.imageDPI.disabled = state.exporting || !state.doc || !exportFormatUsesDPI(el.pageExportFormat.value);
+	el.imageDPI.disabled = state.exporting || !state.doc || !exportFormatUsesDPI(el.exportFormat.value);
 }
 
 function currentImageDPI() {

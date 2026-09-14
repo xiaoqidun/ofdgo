@@ -15,10 +15,12 @@
 package webui
 
 import (
+	"archive/zip"
 	"bytes"
 	"fmt"
 	"image/jpeg"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -627,6 +629,54 @@ func signatureStampInfos(positions []ofdgo.SignatureStampPosition) []SignatureSt
 		})
 	}
 	return infos
+}
+
+// ExportDocument 导出文档为PDF或逐页打包ZIP
+// 入参: value 导出格式, dpi 图片DPI
+// 返回: []byte 文件数据, ExportFormat 导出格式, error 错误信息
+func (s *Session) ExportDocument(value string, dpi float64) ([]byte, ExportFormat, error) {
+	format, ok := exportFormat(value)
+	if !ok {
+		return nil, ExportFormat{}, fmt.Errorf("unsupported export format %s", value)
+	}
+	if format.Value == "pdf" {
+		data, err := s.ExportPDF()
+		return data, format, err
+	}
+	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
+		return nil, ExportFormat{}, fmt.Errorf("ofd document is not opened")
+	}
+	count := len(s.doc.Pages.Page)
+	if count == 0 {
+		return nil, ExportFormat{}, fmt.Errorf("no pages found")
+	}
+	var buf bytes.Buffer
+	archive := zip.NewWriter(&buf)
+	method := zip.Deflate
+	if format.Value == "png" || format.Value == "jpg" {
+		method = zip.Store
+	}
+	width := len(strconv.Itoa(count))
+	for index := range count {
+		data, _, err := s.ExportPage(index, format.Value, dpi)
+		if err != nil {
+			return nil, ExportFormat{}, fmt.Errorf("failed to export page %d: %w", index+1, err)
+		}
+		entry, err := archive.CreateHeader(&zip.FileHeader{
+			Name:   fmt.Sprintf("%0*d.%s", width, index+1, format.Extension),
+			Method: method,
+		})
+		if err != nil {
+			return nil, ExportFormat{}, err
+		}
+		if _, err := entry.Write(data); err != nil {
+			return nil, ExportFormat{}, err
+		}
+	}
+	if err := archive.Close(); err != nil {
+		return nil, ExportFormat{}, err
+	}
+	return buf.Bytes(), ExportFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}, nil
 }
 
 // ExportPDF 导出文档为PDF

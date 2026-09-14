@@ -43,7 +43,7 @@ func RunWASM() {
 	registerCallback("ofdgoSearchPage", searchPage)
 	registerCallback("ofdgoExportFormats", exportFormats)
 	registerCallback("ofdgoExportPage", exportPage)
-	registerCallback("ofdgoExportPDF", exportPDF)
+	registerCallback("ofdgoExportDocument", exportDocument)
 	registerCallback("ofdgoMatchFontFiles", matchFontFiles)
 	select {}
 }
@@ -246,29 +246,27 @@ func exportPage(args []js.Value) (any, error) {
 		return nil, err
 	}
 	return successResult(map[string]any{
-		"bytes":     bytesToJS(data),
-		"size":      len(data),
-		"format":    format.Value,
-		"label":     format.Label,
-		"extension": format.Extension,
-		"mime":      format.MIME,
+		"bytes": bytesToJS(data),
+		"label": format.Label,
+		"mime":  format.MIME,
 	}), nil
 }
 
-// exportPDF 导出OFD文档为PDF
+// exportDocument 导出OFD文档
 // 入参: args 浏览器参数
-// 返回: any PDF结果, error 错误信息
-func exportPDF(args []js.Value) (any, error) {
+// 返回: any 导出结果, error 错误信息
+func exportDocument(args []js.Value) (any, error) {
 	if currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	data, err := currentSession.ExportPDF()
+	data, format, err := currentSession.ExportDocument(args[0].String(), args[1].Float())
 	if err != nil {
 		return nil, err
 	}
 	return successResult(map[string]any{
 		"bytes": bytesToJS(data),
-		"size":  len(data),
+		"label": format.Label,
+		"mime":  format.MIME,
 	}), nil
 }
 
