@@ -3513,7 +3513,12 @@ async function callWASM(name, ...args) {
 			el.cancelExportButton.disabled = false;
 		}
 		try {
-			wasmWorker.postMessage({ id, name, args });
+			const transfer = [];
+			if (name === "ofdgoOpen") {
+				args[0] = args[0].slice();
+				transfer.push(args[0].buffer);
+			}
+			wasmWorker.postMessage({ id, name, args }, transfer);
 		} catch (err) {
 			wasmRequests.delete(id);
 			reject(err);
