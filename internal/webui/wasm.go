@@ -85,6 +85,7 @@ func RunWASM() {
 	registerCallback("ofdgoRenderPage", renderPage)
 	registerCallback("ofdgoSVGFontData", svgFontData)
 	registerCallback("ofdgoSearchPage", searchPage)
+	registerCallback("ofdgoPageTextString", pageTextString)
 	registerCallback("ofdgoExportFormats", exportFormats)
 	registerCallback("ofdgoParsePageRange", parsePageRange)
 	registerExportCallback("ofdgoExportPage", exportPage)
@@ -281,6 +282,16 @@ func renderPage(args []js.Value) (any, error) {
 		"fonts":  fonts,
 		"text":   string(textData),
 	}), nil
+}
+
+// pageTextString 提取OFD页面原文
+// 入参: args 浏览器参数
+// 返回: any 页面原文, error 错误信息
+func pageTextString(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	return currentSession.PageTextString(args[0].Int())
 }
 
 // searchPage 搜索OFD页面文字

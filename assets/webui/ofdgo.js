@@ -57,6 +57,7 @@ const state = {
 	pageCache: new Map(),
 	svgFonts: new Map(),
 	selectedPages: new Set(),
+	documentSelection: null,
 	pageInFlight: new Map(),
 	pageRenderQueue: [],
 	pageRenderRunning: false,
@@ -207,11 +208,7 @@ el.panButton.addEventListener("click", togglePan);
 el.continuousButton.addEventListener("click", toggleContinuous);
 el.annotationButton.addEventListener("click", toggleAnnotations);
 document.addEventListener("copy", copySelection);
-document.addEventListener("selectionchange", () => {
-	for (const index of state.selectedPages) {
-		unmountPage(index);
-	}
-});
+document.addEventListener("selectionchange", syncSelection);
 el.exportFormat.addEventListener("change", () => updateDPIControl());
 el.exportPageButton.addEventListener("click", () => exportFile(false));
 el.exportButton.addEventListener("click", openExportPanel);
@@ -289,10 +286,22 @@ updateSidebarState();
 boot();
 
 function handleKeyDown(event) {
-	if (event.defaultPrevented || event.isComposing || event.altKey || document.body.hasAttribute("aria-busy") || el.exportPanel.open) {
+	if (event.defaultPrevented || event.isComposing || event.altKey) {
 		return;
 	}
 	const key = event.key;
+	const target = event.target;
+	if ((event.ctrlKey || event.metaKey) && !event.shiftKey && key.toLowerCase() === "a" && state.doc
+		&& el.viewerPanel.contains(target) && !target.closest("input, textarea, select, [contenteditable]")) {
+		event.preventDefault();
+		if (!document.body.hasAttribute("aria-busy") && !el.exportPanel.open) {
+			selectDocumentText();
+		}
+		return;
+	}
+	if (document.body.hasAttribute("aria-busy") || el.exportPanel.open) {
+		return;
+	}
 	if (event.ctrlKey || event.metaKey) {
 		if (!event.shiftKey && key.toLowerCase() === "o") {
 			event.preventDefault();
@@ -306,7 +315,13 @@ function handleKeyDown(event) {
 	if (!state.doc) {
 		return;
 	}
-	const target = event.target;
+	if (key === "Escape" && !event.shiftKey && state.documentSelection && el.viewerPanel.contains(target)
+		&& !target.closest("input, textarea, select, [contenteditable]")) {
+		event.preventDefault();
+		document.getSelection().removeAllRanges();
+		syncSelection();
+		return;
+	}
 	if (key === "F3") {
 		event.preventDefault();
 		if (state.searchMatches.length) {
@@ -1684,6 +1699,7 @@ function resetPageFlow() {
 	state.svgFonts.clear();
 	state.pageCache.clear();
 	state.selectedPages.clear();
+	state.documentSelection = null;
 	state.visiblePages.clear();
 	for (const task of state.pageInFlight.values()) {
 		task.resolve(null);
@@ -1740,7 +1756,8 @@ function flowPageObserver() {
 function unmountPage(index) {
 	const shell = pageShell(index);
 	const selection = document.getSelection();
-	if (selection.rangeCount && selection.getRangeAt(0).intersectsNode(shell)) {
+	const range = selection.rangeCount ? selection.getRangeAt(0) : null;
+	if (range && (!state.documentSelection || !isDocumentSelection(range)) && range.intersectsNode(shell)) {
 		state.selectedPages.add(index);
 		return;
 	}
@@ -1943,6 +1960,62 @@ function createTextLayer(text) {
 	return layer;
 }
 
+function syncSelection() {
+	const selection = document.getSelection();
+	if (state.documentSelection && (!selection.rangeCount || !isDocumentSelection(selection.getRangeAt(0)))) {
+		state.documentSelection = null;
+		if (state.doc && !document.body.hasAttribute("aria-busy")) {
+			setStatus(pageStatus(state.pageIndex, state.doc.pageCount));
+		}
+	}
+	for (const index of state.selectedPages) {
+		unmountPage(index);
+	}
+}
+
+function isDocumentSelection(range) {
+	return range.startContainer === el.svgHost && range.startOffset === 0
+		&& range.endContainer === el.svgHost && range.endOffset === el.svgHost.childNodes.length;
+}
+
+async function selectDocumentText() {
+	const selection = document.getSelection();
+	if (state.documentSelection && selection.rangeCount && isDocumentSelection(selection.getRangeAt(0))) {
+		return;
+	}
+	const openSeq = state.openSeq;
+	const current = { text: null };
+	const active = () => state.documentSelection === current && openSeq === state.openSeq
+		&& selection.rangeCount > 0 && isDocumentSelection(selection.getRangeAt(0));
+	state.documentSelection = current;
+	const range = document.createRange();
+	range.selectNodeContents(el.svgHost);
+	selection.removeAllRanges();
+	selection.addRange(range);
+	const pages = [];
+	const count = state.doc.pageCount;
+	try {
+		for (let index = 0; index < count; index += 1) {
+			setStatus(`正在全选 ${index + 1} / ${count} 页`);
+			const text = await callWASM("ofdgoPageTextString", index);
+			if (!active()) {
+				return;
+			}
+			if (text) {
+				pages.push(text);
+			}
+		}
+		current.text = pages.join("\n");
+		setStatus(current.text ? "文字已全选" : "暂无文字");
+	} catch (err) {
+		if (active()) {
+			state.documentSelection = null;
+			selection.removeAllRanges();
+			showError(err, false);
+		}
+	}
+}
+
 function copySelection(event) {
 	if (event.target.closest?.("input, textarea, [contenteditable]")) {
 		return;
@@ -1952,6 +2025,15 @@ function copySelection(event) {
 		return;
 	}
 	const range = selection.getRangeAt(0);
+	if (state.documentSelection && isDocumentSelection(range)) {
+		event.preventDefault();
+		if (state.documentSelection.text === null) {
+			setStatus("正在全选文字");
+		} else {
+			event.clipboardData.setData("text/plain", state.documentSelection.text);
+		}
+		return;
+	}
 	if (!el.svgHost.contains(range.startContainer) || !el.svgHost.contains(range.endContainer)) {
 		return;
 	}

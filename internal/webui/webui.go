@@ -289,6 +289,24 @@ func (s *Session) PageText(index int) (*ofdgo.PageText, error) {
 	return text, nil
 }
 
+// PageTextString 获取页面原文，不为全文复制保留额外的页面和文字索引
+// 入参: index 页面索引
+// 返回: string 页面原文, error 错误信息
+func (s *Session) PageTextString(index int) (string, error) {
+	text := s.textCache[index]
+	if text == nil {
+		page, err := s.Reader.PageContentByIndex(index)
+		if err != nil {
+			return "", err
+		}
+		text, err = s.Renderer.PageText(page)
+		if err != nil {
+			return "", err
+		}
+	}
+	return text.String(), nil
+}
+
 // SearchPage 搜索指定页面，复用当前会话的文字索引
 // 入参: index 页面索引, query 搜索文字
 // 返回: []ofdgo.TextMatch 匹配结果, error 错误信息

@@ -74,6 +74,22 @@ func (r *Renderer) PageText(page *PageContent) (*PageText, error) {
 	return renderer.pageText, nil
 }
 
+// String 按文本对象顺序合并原文，以换行分隔非空对象
+// 返回: string 页面原文
+func (p *PageText) String() string {
+	var text strings.Builder
+	for _, run := range p.Runs {
+		if run.Text == "" {
+			continue
+		}
+		if text.Len() > 0 {
+			text.WriteByte('\n')
+		}
+		text.WriteString(run.Text)
+	}
+	return text.String()
+}
+
 // Search 按原文进行忽略大小写的字面匹配，不跨文本对象拼接或识别图像
 // 入参: query 搜索文字
 // 返回: []TextMatch 匹配结果及上下文
