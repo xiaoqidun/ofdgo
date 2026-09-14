@@ -56,8 +56,8 @@ func NewFontFS(fonts []FontFile) *FontFS {
 	}
 	sort.Strings(fsys.names)
 	fsys.candidates = fontFileCandidates(fsys.names, path.Base)
-	for _, file := range fsys.candidates {
-		fsys.candidates = appendFontFileNames(fsys.candidates, file, fontFileNames(bytes.NewReader(fsys.files[file.name])))
+	for i, file := range fsys.candidates {
+		fsys.candidates = appendFontFileNames(fsys.candidates, i, fontFileNames(bytes.NewReader(fsys.files[file.name])))
 	}
 	return fsys
 }
@@ -192,15 +192,20 @@ func fontFileMatches(candidates []fontFileCandidate, names []string, bold, itali
 	seen := make(map[string]int, len(candidates))
 	if len(names) == 0 {
 		for _, name := range fontDefaultSystemNames() {
-			for _, match := range fontFileMatches(candidates, []string{name}, bold, italic) {
-				key := strings.ToLower(match.name)
-				if _, ok := seen[key]; !ok {
-					seen[key] = len(matches)
-					matches = append(matches, match)
-				}
+			matches = append(matches, fontFileMatches(candidates, []string{name}, bold, italic)...)
+		}
+		sort.SliceStable(matches, func(i, j int) bool {
+			return matches[i].rank < matches[j].rank
+		})
+		unique := matches[:0]
+		for _, match := range matches {
+			key := strings.ToLower(match.name)
+			if _, ok := seen[key]; !ok {
+				seen[key] = len(unique)
+				unique = append(unique, match)
 			}
 		}
-		return matches
+		return unique
 	}
 	for i, name := range names {
 		if name == "" {
@@ -428,11 +433,15 @@ func appendFontFileMatch(matches *[]fontFileMatch, seen map[string]int, matcher 
 	if rank == fontMatchNone {
 		return
 	}
+	suffix := matcher.styleSuffixNormalized(file.normalized)
+	if rank == fontMatchFuzzy {
+		suffix = matcher.styleSuffixNormalized(fontNormalizeName(file.base))
+	}
 	next := fontFileMatch{
 		name:      file.name,
 		priority:  matcher.priority,
 		rank:      rank,
-		styleRank: fontFileStyleRank(matcher.styleSuffixNormalized(file.normalized), bold, italic),
+		styleRank: fontFileStyleRank(suffix, bold, italic),
 		sortName:  file.lowerBase,
 	}
 	if index, ok := seen[file.fold]; ok {

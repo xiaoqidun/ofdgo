@@ -271,12 +271,12 @@ func (r *Renderer) matchFontFiles(dir string, names []string, bold, italic bool)
 	if !ok {
 		files, _ := filepath.Glob(filepath.Join(dir, "*"))
 		candidates = fontFileCandidates(files, filepath.Base)
-		for _, candidate := range candidates {
+		for i, candidate := range candidates {
 			file, err := os.Open(candidate.name)
 			if err != nil {
 				continue
 			}
-			candidates = appendFontFileNames(candidates, candidate, fontFileNames(file))
+			candidates = appendFontFileNames(candidates, i, fontFileNames(file))
 			file.Close()
 		}
 		r.fontDirCandidates[dir] = candidates
@@ -296,7 +296,7 @@ func (r *Renderer) matchFontFS(index int, names []string, bold, italic bool) []f
 	if !ok {
 		files, _ := fs.Glob(fsys, "*")
 		candidates = fontFileCandidates(files, path.Base)
-		for _, candidate := range candidates {
+		for i, candidate := range candidates {
 			file, err := fsys.Open(candidate.name)
 			if err != nil {
 				continue
@@ -306,7 +306,7 @@ func (r *Renderer) matchFontFS(index int, names []string, bold, italic bool) []f
 				data, _ := io.ReadAll(file)
 				reader = bytes.NewReader(data)
 			}
-			candidates = appendFontFileNames(candidates, candidate, fontFileNames(reader))
+			candidates = appendFontFileNames(candidates, i, fontFileNames(reader))
 			file.Close()
 		}
 		r.fontFSCandidates[index] = candidates

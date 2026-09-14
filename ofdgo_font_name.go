@@ -33,14 +33,16 @@ type fontNameRecord struct {
 	Offset   uint16
 }
 
-// appendFontFileNames 追加字体内部名称对应的候选
-// 入参: candidates 字体候选, file 字体文件, names 字体内部名称
+// appendFontFileNames 使用字体内部名称匹配，缺失时保留文件名
+// 入参: candidates 字体候选, index 文件候选索引, names 字体内部名称
 // 返回: []fontFileCandidate 字体候选列表
-func appendFontFileNames(candidates []fontFileCandidate, file fontFileCandidate, names []string) []fontFileCandidate {
-	base := file.normalized
-	for _, name := range names {
+func appendFontFileNames(candidates []fontFileCandidate, index int, names []string) []fontFileCandidate {
+	file := candidates[index]
+	for i, name := range names {
 		file.normalized = fontNormalizeName(name)
-		if file.normalized != base {
+		if i == 0 {
+			candidates[index] = file
+		} else {
 			candidates = append(candidates, file)
 		}
 	}
