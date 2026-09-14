@@ -278,9 +278,13 @@ func (s *Session) SetFonts(fonts []FontFile) error {
 func (s *Session) PageText(index int) (*ofdgo.PageText, error) {
 	text := s.textCache[index]
 	if text == nil {
-		page, err := s.pageContent(index)
-		if err != nil {
-			return nil, err
+		page := s.pageCache[index]
+		var err error
+		if page == nil {
+			page, err = s.Reader.PageContentByIndex(index)
+			if err != nil {
+				return nil, err
+			}
 		}
 		text, err = s.Renderer.PageText(page)
 		if err != nil {
