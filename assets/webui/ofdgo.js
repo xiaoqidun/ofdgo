@@ -40,6 +40,7 @@ const state = {
 	searchQuery: "",
 	searchMatches: [],
 	searchIndex: -1,
+	navigationScroll: new Map(),
 	localFonts: [],
 	userFonts: [],
 	fontSyncPending: false,
@@ -183,7 +184,7 @@ el.navigationTabs.addEventListener("keydown", (event) => {
 		const index = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
 			: (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
 		showNavigation(tabs[index]);
-		tabs[index].focus();
+		tabs[index].focus({ preventScroll: true });
 	}
 });
 el.searchForm.addEventListener("submit", (event) => {
@@ -1713,6 +1714,9 @@ function resetPageFlow() {
 		document.fonts.delete(font);
 	}
 	state.svgFonts.clear();
+	for (const image of state.svgImages.values()) {
+		URL.revokeObjectURL(image.url);
+	}
 	state.svgImages.clear();
 	state.pageCache.clear();
 	state.selectedPages.clear();
@@ -1873,7 +1877,8 @@ async function processPageRenderQueue() {
 				if (task.openSeq === state.openSeq) {
 					for (const image of page.images) {
 						if (!state.svgImages.has(image.name)) {
-							state.svgImages.set(image.name, image.url);
+							const blob = new Blob([image.bytes], { type: image.mime });
+							state.svgImages.set(image.name, { url: URL.createObjectURL(blob), size: blob.size });
 						}
 					}
 					page.imageNames = page.images.map((image) => image.name);
@@ -1907,8 +1912,8 @@ function trimPageCache() {
 			references.set(name, (references.get(name) || 0) + 1);
 		}
 	}
-	for (const url of state.svgImages.values()) {
-		bytes += url.length * 2;
+	for (const image of state.svgImages.values()) {
+		bytes += image.size;
 	}
 	for (const [index, page] of state.pageCache) {
 		if (state.pageCache.size <= PAGE_CACHE_LIMIT && bytes <= PAGE_CACHE_BYTES) {
@@ -1923,7 +1928,9 @@ function trimPageCache() {
 			const count = references.get(name) - 1;
 			references.set(name, count);
 			if (count === 0) {
-				bytes -= state.svgImages.get(name).length * 2;
+				const image = state.svgImages.get(name);
+				bytes -= image.size;
+				URL.revokeObjectURL(image.url);
 				state.svgImages.delete(name);
 			}
 		}
@@ -2239,6 +2246,16 @@ function updatePageListCurrent() {
 	const next = el.pageList.querySelector(`.page-list-item[data-page-index="${state.pageIndex}"]`);
 	if (next) {
 		setPageItemCurrent(next, true);
+		if (state.showPages && !el.pageList.hidden) {
+			const panel = el.pageListPanel.getBoundingClientRect();
+			const item = next.getBoundingClientRect();
+			const top = panel.top + Number.parseFloat(getComputedStyle(next).scrollMarginTop);
+			if (item.top < top) {
+				el.pageListPanel.scrollTop += item.top - top;
+			} else if (item.bottom > panel.bottom) {
+				el.pageListPanel.scrollTop += Math.min(item.top - top, item.bottom - panel.bottom);
+			}
+		}
 	}
 }
 
@@ -2283,7 +2300,7 @@ function layoutPageShell(shell, page) {
 
 function parseSVG(svgText, prefix = "") {
 	const template = document.createElement("template");
-	template.innerHTML = svgText.replace(/xlink:href="(ofdgo-image-[a-f0-9]{64})"/g, (_, name) => `xlink:href="${state.svgImages.get(name)}"`);
+	template.innerHTML = svgText.replace(/xlink:href="(ofdgo-image-[a-f0-9]{64})"/g, (_, name) => `xlink:href="${state.svgImages.get(name).url}"`);
 	const svg = document.adoptNode(template.content.firstElementChild);
 	prefixSVGIds(svg, prefix);
 	return svg;
@@ -2344,16 +2361,22 @@ function focusSearch() {
 }
 
 function showNavigation(selected) {
+	const scrollTop = el.pageListPanel.scrollTop;
 	for (const [tab, panel] of [[el.pagesTab, el.pageList], [el.outlinesTab, el.outlineList], [el.searchTab, el.searchPanel]]) {
+		if (tab.getAttribute("aria-selected") === "true") {
+			state.navigationScroll.set(tab, scrollTop);
+		}
 		const active = tab === selected;
 		panel.hidden = !active;
 		tab.setAttribute("aria-selected", String(active));
 		tab.tabIndex = active ? 0 : -1;
 	}
-	el.pageListPanel.scrollTop = 0;
+	el.pageListPanel.scrollTop = state.navigationScroll.get(selected) || 0;
 }
 
 function renderOutlines() {
+	state.navigationScroll.clear();
+	el.pageListPanel.scrollTop = 0;
 	const outlines = state.doc.outlines || [];
 	el.pageListTitle.hidden = true;
 	el.navigationTabs.hidden = false;

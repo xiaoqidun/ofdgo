@@ -19,7 +19,6 @@ package webui
 import (
 	"bufio"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -285,7 +284,7 @@ func renderPage(args []js.Value) (any, error) {
 	}
 	images := make([]any, len(page.Images))
 	for i, image := range page.Images {
-		images[i] = map[string]any{"name": image.Name, "url": "data:" + image.MIME + ";base64," + base64.StdEncoding.EncodeToString(image.Data)}
+		images[i] = map[string]any{"name": image.Name, "mime": image.MIME, "bytes": bytesToJS(image.Data)}
 	}
 	return successResult(map[string]any{
 		"index":  page.Index,

@@ -67,7 +67,8 @@ async function handleMessage({ id, name, args }) {
 			await output.abort();
 		}
 		output = null;
-		self.postMessage({ id, ...result }, result.data?.bytes ? [result.data.bytes.buffer] : []);
+		const transfer = result.data?.bytes ? [result.data.bytes.buffer] : (result.data?.images || []).map((image) => image.bytes.buffer);
+		self.postMessage({ id, ...result }, transfer);
 	} catch (err) {
 		await output?.abort().catch(() => {});
 		const result = { id, ok: false, error: err.message };
