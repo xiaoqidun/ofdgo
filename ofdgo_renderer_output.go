@@ -339,7 +339,11 @@ func (r *Renderer) renderPDFPages(pages []pdfPage, writer io.Writer, progress fu
 	start := buf.Len()
 	p := pdf.New(buf, pages[0].Box.W, pages[0].Box.H, nil)
 	renderer := &pdfRenderer{PDF: p, glyphPaths: make(map[*canvas.Path]*canvas.Path)}
-	p.SetInfo("", "", "", "", "xiaoqidun/ofdgo")
+	var info DocInfo
+	if docInfo, err := r.Reader.DocInfo(); err == nil {
+		info = *docInfo
+	}
+	p.SetInfo(info.Title, info.Subject, "", info.Author, "xiaoqidun/ofdgo")
 	for i, page := range pages {
 		if i > 0 {
 			p.NewPage(page.Box.W, page.Box.H)
