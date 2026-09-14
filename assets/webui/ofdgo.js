@@ -670,6 +670,16 @@ async function loadWASM() {
 			}
 			if (data.type === "progress") {
 				setProgress(data.text, data.percent);
+			} else if (data.type === "export") {
+				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.exporting) {
+					if (data.stage === "save") {
+						setProgress("正在保存", null);
+					} else if (data.completed === data.total) {
+						setProgress("正在封装", null);
+					} else {
+						setProgress(`正在导出 ${data.completed} / ${data.total} 页`, data.completed / data.total * 100);
+					}
+				}
 			} else if (data.type === "ready") {
 				state.ready = true;
 				resolve();
@@ -1589,7 +1599,6 @@ async function exportFile(whole, indices = null) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		setProgress(`正在保存 ${result.label}`, 100);
 		if (result.blob) {
 			downloadBytes(result.blob, result.mime, fileName);
 		}
@@ -3302,7 +3311,7 @@ async function callWASM(name, ...args) {
 	}
 	return new Promise((resolve, reject) => {
 		const id = ++wasmRequestID;
-		wasmRequests.set(id, { resolve, reject });
+		wasmRequests.set(id, { resolve, reject, openSeq: state.openSeq });
 		try {
 			wasmWorker.postMessage({ id, name, args });
 		} catch (err) {

@@ -839,6 +839,7 @@ button.outline-link:hover {
 	overflow: hidden;
 	color: #1f2428;
 	font-size: 13px;
+	font-variant-numeric: tabular-nums;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }

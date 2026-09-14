@@ -335,6 +335,11 @@ func exportDocument(args []js.Value) (any, error) {
 	if currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
+	renderer := currentSession.Renderer
+	renderer.OnExportProgress = func(completed, total int) {
+		args[4].Invoke(completed, total)
+	}
+	defer func() { renderer.OnExportProgress = nil }()
 	var indices []int
 	if !args[2].IsNull() {
 		indices = make([]int, args[2].Length())

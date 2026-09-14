@@ -24,11 +24,17 @@ async function handleMessage({ id, name, args }) {
 					setTimeout(done, 0);
 				}
 			});
+			if (name === "ofdgoExportDocument") {
+				args.push((completed, total) => {
+					self.postMessage({ id, type: "export", stage: "pages", completed, total });
+				});
+			}
 		}
 		const payload = await globalThis[name](...args);
 		const result = typeof payload === "string" ? JSON.parse(payload) : payload;
 		if (exporting && result.ok) {
 			result.data.size = size;
+			self.postMessage({ id, type: "export", stage: "save" });
 			if (output) {
 				await output.close();
 			} else {

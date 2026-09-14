@@ -90,7 +90,10 @@ func (r *Renderer) RenderToZIP(writer io.Writer, format string, indices ...int) 
 		method = zip.Store
 	}
 	width := len(strconv.Itoa(count))
-	for _, index := range indices {
+	if r.OnExportProgress != nil {
+		r.OnExportProgress(0, len(indices))
+	}
+	for i, index := range indices {
 		page, err := r.Reader.PageContentByIndex(index)
 		if err != nil {
 			return fmt.Errorf("failed to read page %d: %w", index+1, err)
@@ -104,6 +107,9 @@ func (r *Renderer) RenderToZIP(writer io.Writer, format string, indices ...int) 
 		}
 		if err := render(page, entry); err != nil {
 			return fmt.Errorf("failed to export page %d: %w", index+1, err)
+		}
+		if r.OnExportProgress != nil {
+			r.OnExportProgress(i+1, len(indices))
 		}
 	}
 	return archive.Close()
@@ -248,7 +254,7 @@ func (r *Renderer) RenderToPDF(page *PageContent, writer io.Writer) error {
 		return err
 	}
 	pages := []pdfPage{{Content: page, Box: box}}
-	return r.renderPDFPages(pages, writer)
+	return r.renderPDFPages(pages, writer, nil)
 }
 
 // RenderToEPS 渲染为EPS
@@ -282,6 +288,9 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer, indices ...int) error 
 	if err != nil {
 		return err
 	}
+	if r.OnExportProgress != nil {
+		r.OnExportProgress(0, len(indices))
+	}
 	pages := make([]pdfPage, len(indices))
 	for i, index := range indices {
 		page, err := r.Reader.PageContent(doc.Pages.Page[index])
@@ -294,7 +303,7 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer, indices ...int) error 
 		}
 		pages[i] = pdfPage{Content: page, Box: box}
 	}
-	return r.renderPDFPages(pages, writer)
+	return r.renderPDFPages(pages, writer, r.OnExportProgress)
 }
 
 // RenderPagesToPDF 按指定顺序导出已解析的页面，复用调用方的页面缓存
@@ -304,6 +313,9 @@ func (r *Renderer) RenderPagesToPDF(contents []*PageContent, writer io.Writer) e
 	if len(contents) == 0 {
 		return fmt.Errorf("no pages found")
 	}
+	if r.OnExportProgress != nil {
+		r.OnExportProgress(0, len(contents))
+	}
 	pages := make([]pdfPage, len(contents))
 	for i, page := range contents {
 		box, err := r.GetPageBox(page)
@@ -312,13 +324,13 @@ func (r *Renderer) RenderPagesToPDF(contents []*PageContent, writer io.Writer) e
 		}
 		pages[i] = pdfPage{Content: page, Box: box}
 	}
-	return r.renderPDFPages(pages, writer)
+	return r.renderPDFPages(pages, writer, r.OnExportProgress)
 }
 
 // renderPDFPages 渲染页面并复用调用方的字节缓冲
-// 入参: pages 页面列表, writer 输出流
+// 入参: pages 页面列表, writer 输出流, progress 页面处理进度
 // 返回: error 错误信息
-func (r *Renderer) renderPDFPages(pages []pdfPage, writer io.Writer) error {
+func (r *Renderer) renderPDFPages(pages []pdfPage, writer io.Writer, progress func(int, int)) error {
 	navigation := newPDFNavigation(r, r.Reader.doc, pages)
 	buf, direct := writer.(*bytes.Buffer)
 	if !direct {
@@ -336,6 +348,9 @@ func (r *Renderer) renderPDFPages(pages []pdfPage, writer io.Writer) error {
 		if err := r.renderPageToContext(canvas.NewContext(renderer), page.Content, true); err != nil {
 			buf.Truncate(start)
 			return fmt.Errorf("failed to render page %d: %w", i+1, err)
+		}
+		if progress != nil {
+			progress(i+1, len(pages))
 		}
 	}
 	if err := p.Close(); err != nil {
