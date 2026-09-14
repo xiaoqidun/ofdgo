@@ -154,11 +154,11 @@ el.togglePagesButton.addEventListener("click", () => toggleSidebar("pages"));
 el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
 el.pagesTab.addEventListener("click", () => showNavigation(el.pagesTab));
 el.outlinesTab.addEventListener("click", () => showNavigation(el.outlinesTab));
-el.searchTab.addEventListener("click", () => {
-	showNavigation(el.searchTab);
-	el.searchInput.focus({ preventScroll: true });
-});
+el.searchTab.addEventListener("click", focusSearch);
 el.navigationTabs.addEventListener("keydown", (event) => {
+	if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+		return;
+	}
 	if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
 		event.preventDefault();
 		const tabs = [el.pagesTab, el.outlinesTab, el.searchTab].filter((tab) => !tab.hidden);
@@ -176,21 +176,7 @@ el.searchForm.addEventListener("submit", (event) => {
 el.searchInput.addEventListener("input", () => resetSearch(false));
 el.searchPrev.addEventListener("click", () => selectSearchMatch(Math.max(0, state.searchIndex) - 1));
 el.searchNext.addEventListener("click", () => selectSearchMatch(state.searchIndex + 1));
-document.addEventListener("keydown", (event) => {
-	if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f" && state.doc) {
-		event.preventDefault();
-		if (!state.showPages) {
-			toggleSidebar("pages");
-		}
-		showNavigation(el.searchTab);
-		el.searchInput.focus({ preventScroll: true });
-		el.searchInput.select();
-	} else if (event.key === "Escape" && !el.searchPanel.hidden) {
-		resetSearch();
-		showNavigation(el.pagesTab);
-		el.pagesTab.focus();
-	}
-});
+document.addEventListener("keydown", handleKeyDown);
 el.fontAddButton.addEventListener("click", () => openFontFile(el.fontInput));
 el.fontDirectoryButton.addEventListener("click", () => openFontFile(el.fontDirectoryInput));
 el.localFontButton.addEventListener("click", loadLocalFonts);
@@ -266,6 +252,74 @@ document.addEventListener("visibilitychange", () => {
 el.fontDirectoryButton.disabled = !("webkitdirectory" in el.fontDirectoryInput);
 updateSidebarState();
 boot();
+
+function handleKeyDown(event) {
+	if (event.defaultPrevented || event.isComposing || event.altKey || document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	const key = event.key;
+	if (event.ctrlKey || event.metaKey) {
+		if (!event.shiftKey && key.toLowerCase() === "o") {
+			event.preventDefault();
+			openOFDFile();
+		} else if (!event.shiftKey && key.toLowerCase() === "f" && state.doc) {
+			event.preventDefault();
+			focusSearch();
+		}
+		return;
+	}
+	if (!state.doc) {
+		return;
+	}
+	const target = event.target;
+	if (key === "F3") {
+		event.preventDefault();
+		if (state.searchMatches.length) {
+			selectSearchMatch(event.shiftKey ? Math.max(0, state.searchIndex) - 1 : state.searchIndex + 1);
+		} else {
+			focusSearch();
+		}
+		return;
+	}
+	if (key === "Escape" && !event.shiftKey && !el.searchPanel.hidden && (el.pageListPanel.contains(target) || el.viewerPanel.contains(target))) {
+		event.preventDefault();
+		resetSearch();
+		showNavigation(el.pagesTab);
+		if (COMPACT_LAYOUT.matches && state.showPages) {
+			state.showPages = false;
+			updateSidebarState();
+		}
+		el.viewerPanel.focus({ preventScroll: true });
+		return;
+	}
+	if (key === "Enter" && target === el.pageInput && !event.shiftKey) {
+		event.preventDefault();
+		el.viewerPanel.focus({ preventScroll: true });
+		return;
+	}
+	if (key === "Enter" && target === el.searchInput && event.shiftKey && state.searchMatches.length) {
+		event.preventDefault();
+		selectSearchMatch(Math.max(0, state.searchIndex) - 1);
+		return;
+	}
+	if (!el.viewerPanel.contains(target) || target.closest("input, textarea, select, button, a, [contenteditable]")) {
+		return;
+	}
+	let button;
+	if (key === "+" || (key === "=" && !event.shiftKey)) {
+		button = el.zoomInButton;
+	} else if (key === "-" && !event.shiftKey) {
+		button = el.zoomOutButton;
+	} else if (!event.shiftKey && (key === "ArrowLeft" || key === "ArrowRight")) {
+		if (document.getSelection().isCollapsed && el.viewerPanel.scrollWidth <= el.viewerPanel.clientWidth) {
+			button = key === "ArrowLeft" ? el.prevButton : el.nextButton;
+		}
+	}
+	if (button) {
+		event.preventDefault();
+		button.click();
+	}
+}
 
 async function openOFDFile() {
 	if (document.body.hasAttribute("aria-busy")) {
@@ -1320,7 +1374,10 @@ async function openDocument(options = {}) {
 		}
 		applyFit(false);
 		await nextFrame();
-		await renderPage(pageIndex, { keepBusy: true, scroll: false, openSeq });
+		const page = await renderPage(pageIndex, { keepBusy: true, scroll: false, openSeq });
+		if (page && options.resetScroll) {
+			el.viewerPanel.focus({ preventScroll: true });
+		}
 		queueNearbyPages(pageIndex, openSeq);
 		loadDocumentDetails(openSeq);
 	} catch (err) {
@@ -2040,6 +2097,15 @@ function prefixSVGIds(svg, prefix) {
 			}
 		}
 	}
+}
+
+function focusSearch() {
+	if (!state.showPages) {
+		toggleSidebar("pages");
+	}
+	showNavigation(el.searchTab);
+	el.searchInput.focus({ preventScroll: true });
+	el.searchInput.select();
 }
 
 function showNavigation(selected) {
