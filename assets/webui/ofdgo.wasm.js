@@ -1,38 +1,61 @@
 importScripts("./wasm_exec.js");
 
 let pending = Promise.resolve();
+const exports = new Map();
 self.onmessage = ({ data }) => {
+	if (data.type === "cancel") {
+		exports.get(data.id)?.abort();
+		return;
+	}
+	if (data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument") {
+		exports.set(data.id, new AbortController());
+	}
 	pending = pending.then(() => handleMessage(data));
 };
 async function handleMessage({ id, name, args }) {
 	let output;
+	let channel;
+	const signal = exports.get(id)?.signal;
 	try {
+		signal?.throwIfAborted();
 		const chunks = [];
 		let size = 0;
-		const exporting = name === "ofdgoExportPage" || name === "ofdgoExportDocument";
-		if (exporting) {
+		if (signal) {
 			const file = args.pop();
 			if (file) {
 				output = await file.createWritable();
 			}
+			signal.throwIfAborted();
+			channel = new MessageChannel();
+			const finish = (done, err) => {
+				channel.port1.onmessage = () => done(err?.message || "", signal.aborted);
+				channel.port2.postMessage(null);
+			};
 			args.push((bytes, done) => {
+				if (signal.aborted) {
+					finish(done);
+					return;
+				}
 				size += bytes.length;
 				if (output) {
-					output.write(bytes).then(() => done(), (err) => done(err.message));
+					output.write(bytes).then(() => finish(done), (err) => finish(done, err));
 				} else {
 					chunks.push(new Blob([bytes]));
-					setTimeout(done, 0);
+					finish(done);
 				}
 			});
 			if (name === "ofdgoExportDocument") {
-				args.push((completed, total) => {
+				args.push((completed, total, done) => {
 					self.postMessage({ id, type: "export", stage: "pages", completed, total });
+					finish(done);
 				});
 			}
 		}
 		const payload = await globalThis[name](...args);
+		signal?.throwIfAborted();
 		const result = typeof payload === "string" ? JSON.parse(payload) : payload;
-		if (exporting && result.ok) {
+		if (signal && result.ok) {
+			exports.delete(id);
 			result.data.size = size;
 			self.postMessage({ id, type: "export", stage: "save" });
 			if (output) {
@@ -47,7 +70,16 @@ async function handleMessage({ id, name, args }) {
 		self.postMessage({ id, ...result }, result.data?.bytes ? [result.data.bytes.buffer] : []);
 	} catch (err) {
 		await output?.abort().catch(() => {});
-		self.postMessage({ id, ok: false, error: err.message });
+		const result = { id, ok: false, error: err.message };
+		if (signal?.aborted) {
+			result.error = "导出已取消";
+			result.canceled = true;
+		}
+		self.postMessage(result);
+	} finally {
+		channel?.port1.close();
+		channel?.port2.close();
+		exports.delete(id);
 	}
 }
 

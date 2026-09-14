@@ -803,6 +803,7 @@ button.outline-link:hover {
 .form-row[hidden],
 .page-list[hidden],
 .page-frame[hidden],
+.progress-panel > [hidden],
 .progress-panel[hidden] {
 	display: none;
 }
@@ -823,6 +824,10 @@ button.outline-link:hover {
 	box-shadow: var(--shadow-soft);
 	transform: translateX(-50%);
 	backdrop-filter: blur(8px);
+}
+
+.progress-panel:has(> button:not([hidden])) {
+	grid-template-columns: auto minmax(0, 1fr) auto;
 }
 
 .progress-spinner {

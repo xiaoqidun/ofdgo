@@ -24,13 +24,13 @@ import (
 // Renderer 渲染器实现
 // 通过NewRenderer创建，实例及共享的Reader需串行使用
 // OnPageText可选，接收页面绘制时同步提取的文字，不包含图案和签名外观
-// OnExportProgress可选，同步回报文档导出的已处理页数及总页数，不代表封装或写入成功
+// OnExportProgress可选，同步回报文档导出的已处理页数及总页数，返回错误则停止，页数完成不代表写入成功
 type Renderer struct {
 	Reader                *Reader
 	DPI                   float64
 	RenderAnnotations     bool
 	OnPageText            func(*PageContent, *PageText)
-	OnExportProgress      func(completed, total int)
+	OnExportProgress      func(completed, total int) error
 	DrawParams            map[string]*DrawParam
 	CompositeGraphicUnits map[string]*CompositeGraphicUnit
 	fontFamily            *canvas.FontFamily

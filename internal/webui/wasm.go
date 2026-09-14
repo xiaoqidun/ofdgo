@@ -18,6 +18,7 @@ package webui
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"syscall/js"
@@ -34,26 +35,35 @@ type exportWriter struct {
 // 入参: data 导出数据
 // 返回: int 写入长度, error 错误信息
 func (w exportWriter) Write(data []byte) (int, error) {
-	done := make(chan error)
-	callback := js.FuncOf(func(this js.Value, args []js.Value) any {
-		var err error
-		if len(args) > 0 {
-			err = fmt.Errorf("%s", args[0].String())
-		}
-		done <- err
-		return nil
-	})
-	defer callback.Release()
 	size := len(data)
 	for len(data) > 0 {
 		n := min(len(data), 1<<20)
-		w.write.Invoke(bytesToJS(data[:n]), callback)
-		if err := <-done; err != nil {
+		if err := awaitExport(w.write, bytesToJS(data[:n])); err != nil {
 			return size - len(data), err
 		}
 		data = data[n:]
 	}
 	return size, nil
+}
+
+// awaitExport 等待浏览器处理导出检查点
+// 入参: fn 浏览器回调, args 回调参数
+// 返回: error 写入错误或取消原因
+func awaitExport(fn js.Value, args ...any) error {
+	done := make(chan error)
+	callback := js.FuncOf(func(this js.Value, args []js.Value) any {
+		var err error
+		if args[1].Bool() {
+			err = context.Canceled
+		} else if message := args[0].String(); message != "" {
+			err = fmt.Errorf("%s", message)
+		}
+		done <- err
+		return nil
+	})
+	defer callback.Release()
+	fn.Invoke(append(args, callback)...)
+	return <-done
 }
 
 // currentSession 当前WebUI文档会话
@@ -336,8 +346,8 @@ func exportDocument(args []js.Value) (any, error) {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
 	renderer := currentSession.Renderer
-	renderer.OnExportProgress = func(completed, total int) {
-		args[4].Invoke(completed, total)
+	renderer.OnExportProgress = func(completed, total int) error {
+		return awaitExport(args[4], completed, total)
 	}
 	defer func() { renderer.OnExportProgress = nil }()
 	var indices []int

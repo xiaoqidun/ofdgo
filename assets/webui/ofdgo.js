@@ -28,6 +28,7 @@ const state = {
 	wasmRecovering: false,
 	wasmRecoveries: 0,
 	exporting: false,
+	exportRequestID: 0,
 	ofdBytes: null,
 	fileName: "ofdgo.ofd",
 	openSeq: 0,
@@ -111,6 +112,7 @@ const el = {
 	emptyState: document.querySelector("#emptyState"),
 	progressPanel: document.querySelector("#progressPanel"),
 	progressLabel: document.querySelector("#progressLabel"),
+	cancelExportButton: document.querySelector("#cancelExportButton"),
 	progressBar: document.querySelector("#progressBar"),
 	pageFrame: document.querySelector("#pageFrame"),
 	viewerPanel: document.querySelector(".viewer-panel"),
@@ -214,6 +216,7 @@ el.exportFormat.addEventListener("change", () => updateDPIControl());
 el.exportPageButton.addEventListener("click", () => exportFile(false));
 el.exportButton.addEventListener("click", openExportPanel);
 el.exportCancel.addEventListener("click", () => el.exportPanel.close());
+el.cancelExportButton.addEventListener("click", cancelExport);
 el.exportPanel.addEventListener("pointerdown", (event) => {
 	state.exportBackdrop = event.target === el.exportPanel;
 });
@@ -673,11 +676,14 @@ async function loadWASM() {
 			} else if (data.type === "export") {
 				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.exporting) {
 					if (data.stage === "save") {
+						el.cancelExportButton.disabled = true;
 						setProgress("正在保存", null);
-					} else if (data.completed === data.total) {
-						setProgress("正在封装", null);
-					} else {
-						setProgress(`正在导出 ${data.completed} / ${data.total} 页`, data.completed / data.total * 100);
+					} else if (!el.cancelExportButton.disabled) {
+						if (data.completed === data.total) {
+							setProgress("正在封装", null);
+						} else {
+							setProgress(`正在导出 ${data.completed} / ${data.total} 页`, data.completed / data.total * 100);
+						}
 					}
 				}
 			} else if (data.type === "ready") {
@@ -691,7 +697,11 @@ async function loadWASM() {
 				if (data.ok) {
 					request.resolve(data.data);
 				} else {
-					request.reject(new Error(data.error));
+					const err = new Error(data.error);
+					if (data.canceled) {
+						err.name = "AbortError";
+					}
+					request.reject(err);
 				}
 			}
 		};
@@ -1613,11 +1623,22 @@ async function exportFile(whole, indices = null) {
 		}
 	} finally {
 		state.exporting = false;
+		state.exportRequestID = 0;
+		el.cancelExportButton.hidden = true;
 		if (openSeq === state.openSeq) {
 			setBusy(false);
 			updateControls();
 		}
 	}
+}
+
+function cancelExport() {
+	if (!state.exportRequestID || el.cancelExportButton.disabled) {
+		return;
+	}
+	el.cancelExportButton.disabled = true;
+	setProgress("正在取消", null);
+	wasmWorker.postMessage({ type: "cancel", id: state.exportRequestID });
 }
 
 function renderPageFlow() {
@@ -3312,6 +3333,11 @@ async function callWASM(name, ...args) {
 	return new Promise((resolve, reject) => {
 		const id = ++wasmRequestID;
 		wasmRequests.set(id, { resolve, reject, openSeq: state.openSeq });
+		if (name === "ofdgoExportPage" || name === "ofdgoExportDocument") {
+			state.exportRequestID = id;
+			el.cancelExportButton.hidden = false;
+			el.cancelExportButton.disabled = false;
+		}
 		try {
 			wasmWorker.postMessage({ id, name, args });
 		} catch (err) {
