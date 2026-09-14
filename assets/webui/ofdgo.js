@@ -1535,18 +1535,30 @@ async function downloadAttachment(attachment) {
 	updateControls();
 	setBusy(true, "正在读取附件", null, "正在读取附件");
 	try {
-		const result = await callWASM("ofdgoAttachmentData", attachment.id);
+		const file = window.showSaveFilePicker ? await window.showSaveFilePicker({ suggestedName: attachment.fileName }) : null;
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		downloadBytes(result.bytes, "application/octet-stream", attachment.fileName);
-		setStatus(`附件下载完成 ${formatBytes(result.bytes.length)}`);
+		const result = await callWASM("ofdgoExportAttachment", attachment.id, file);
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		if (result.blob) {
+			downloadBytes(result.blob, result.mime, attachment.fileName);
+		}
+		setStatus(`附件下载完成 ${formatBytes(result.size)}`);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
-			showError(err, false);
+			if (err.name === "AbortError") {
+				setStatus("下载已取消");
+			} else {
+				showError(err, false);
+			}
 		}
 	} finally {
 		state.exporting = false;
+		state.exportRequestID = 0;
+		el.cancelExportButton.hidden = true;
 		if (openSeq === state.openSeq) {
 			setBusy(false);
 			updateControls();
@@ -3416,7 +3428,7 @@ async function callWASM(name, ...args) {
 	return new Promise((resolve, reject) => {
 		const id = ++wasmRequestID;
 		wasmRequests.set(id, { resolve, reject, openSeq: state.openSeq });
-		if (name === "ofdgoExportPage" || name === "ofdgoExportDocument") {
+		if (name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment") {
 			state.exportRequestID = id;
 			el.cancelExportButton.hidden = false;
 			el.cancelExportButton.disabled = false;

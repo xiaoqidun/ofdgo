@@ -543,20 +543,32 @@ func (r *Reader) Attachments() ([]Attachment, error) {
 	return doc.Attachments.Attachment, nil
 }
 
-// AttachmentData 获取附件文件数据
+// OpenAttachment 打开附件文件流，调用方负责关闭，完整读取后校验ZIP数据
 // 入参: id 附件标识
-// 返回: []byte 附件数据, error 错误信息
-func (r *Reader) AttachmentData(id string) ([]byte, error) {
+// 返回: io.ReadCloser 附件文件流, error 错误信息
+func (r *Reader) OpenAttachment(id string) (io.ReadCloser, error) {
 	attachments, err := r.Attachments()
 	if err != nil {
 		return nil, err
 	}
 	for _, attachment := range attachments {
 		if attachment.ID == id {
-			return r.ResData(attachment.FileLoc)
+			return r.openFile(r.ResPath(attachment.FileLoc))
 		}
 	}
 	return nil, fmt.Errorf("attachment not found: %s", id)
+}
+
+// AttachmentData 获取附件文件数据
+// 入参: id 附件标识
+// 返回: []byte 附件数据, error 错误信息
+func (r *Reader) AttachmentData(id string) ([]byte, error) {
+	stream, err := r.OpenAttachment(id)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	return io.ReadAll(stream)
 }
 
 // CustomTags 获取自定义标引

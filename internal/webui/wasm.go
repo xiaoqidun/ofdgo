@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"syscall/js"
 
 	"github.com/xiaoqidun/ofdgo"
@@ -81,7 +82,6 @@ func RunWASM() {
 	registerCallback("ofdgoOpen", openDocument)
 	registerCallback("ofdgoConfigure", configureDocument)
 	registerCallback("ofdgoDocumentInfo", documentInfo)
-	registerCallback("ofdgoAttachmentData", attachmentData)
 	registerCallback("ofdgoRenderPage", renderPage)
 	registerCallback("ofdgoSVGFontData", svgFontData)
 	registerCallback("ofdgoSearchPage", searchPage)
@@ -90,6 +90,7 @@ func RunWASM() {
 	registerCallback("ofdgoParsePageRange", parsePageRange)
 	registerExportCallback("ofdgoExportPage", exportPage)
 	registerExportCallback("ofdgoExportDocument", exportDocument)
+	registerExportCallback("ofdgoExportAttachment", exportAttachment)
 	registerCallback("ofdgoMatchFontFiles", matchFontFiles)
 	select {}
 }
@@ -207,18 +208,28 @@ func documentInfo(args []js.Value) (any, error) {
 	return currentSession.Info(), nil
 }
 
-// attachmentData 读取附件数据
+// exportAttachment 分块导出附件
 // 入参: args 浏览器参数
 // 返回: any 附件数据, error 错误信息
-func attachmentData(args []js.Value) (any, error) {
+func exportAttachment(args []js.Value) (any, error) {
 	if currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	data, err := currentSession.Reader.AttachmentData(args[0].String())
+	stream, err := currentSession.Reader.OpenAttachment(args[0].String())
 	if err != nil {
 		return nil, err
 	}
-	return successResult(map[string]any{"bytes": bytesToJS(data)}), nil
+	defer stream.Close()
+	writer := bufio.NewWriterSize(exportWriter{write: args[1]}, 1<<20)
+	if _, err := io.Copy(writer, stream); err != nil {
+		return nil, err
+	}
+	if err := writer.Flush(); err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{
+		"mime": "application/octet-stream",
+	}), nil
 }
 
 // svgFontData 读取SVG字体资源
