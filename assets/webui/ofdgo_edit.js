@@ -8,25 +8,16 @@ export function pagePoint(x, y, rect, page, rotation) {
 	return { x: point[0] * page.width, y: point[1] * page.height };
 }
 
-export function objectTransform(box, page, dx, dy, corner = "") {
+export function objectTransform(box, dx, dy, corner = "") {
 	if (!corner) {
-		return {
-			x: Math.max(-box.x, Math.min(dx, Math.max(-box.x, page.width - box.x - box.width))),
-			y: Math.max(-box.y, Math.min(dy, Math.max(-box.y, page.height - box.y - box.height))),
-			scale: 1,
-		};
+		return { x: dx, y: dy, scale: 1 };
 	}
 	const left = corner.includes("w");
 	const top = corner.includes("n");
 	const x = left ? -dx : dx;
 	const y = top ? -dy : dy;
-	const limit = Math.min(
-		(left ? box.x + box.width : page.width - box.x) / box.width,
-		(top ? box.y + box.height : page.height - box.y) / box.height,
-	);
 	const minimum = Math.min(1, 1 / Math.min(box.width, box.height));
-	const scale = Math.max(Math.min(minimum, limit), Math.min(limit,
-		1 + (x * box.width + y * box.height) / (box.width ** 2 + box.height ** 2)));
+	const scale = Math.max(minimum, 1 + (x * box.width + y * box.height) / (box.width ** 2 + box.height ** 2));
 	return { x: left ? box.width * (1 - scale) : 0, y: top ? box.height * (1 - scale) : 0, scale };
 }
 
@@ -37,8 +28,8 @@ export function selectionBounds(items) {
 		height: Math.max(...items.map(item => item.y + item.height)) - y };
 }
 
-// constrainedPoint applies drawing constraints before clipping the endpoint to the page.
-export function constrainedPoint(from, to, page, shape, shift) {
+// constrainedPoint preserves shape constraints without changing off-page geometry.
+export function constrainedPoint(from, to, shape, shift) {
 	let dx = to.x - from.x, dy = to.y - from.y;
 	if (shift && shape === "line") {
 		const directions = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
@@ -51,37 +42,31 @@ export function constrainedPoint(from, to, page, shape, shift) {
 		dx = (dx < 0 ? -1 : 1) * size;
 		dy = (dy < 0 ? -1 : 1) * size;
 	}
-	if (!shift) {
-		return { x: Math.max(0, Math.min(to.x, page.width)), y: Math.max(0, Math.min(to.y, page.height)) };
-	}
-	const limit = Math.min(1,
-		dx ? (dx > 0 ? page.width - from.x : -from.x) / dx : 1,
-		dy ? (dy > 0 ? page.height - from.y : -from.y) / dy : 1);
-	return { x: from.x + dx * limit, y: from.y + dy * limit };
+	return { x: from.x + dx, y: from.y + dy };
 }
 
 // reshapeBox moves line endpoints or resizes basic shapes without scaling their stroke.
 export function reshapeBox(item, dx, dy, handle, shift) {
-	const box = item.geometry, page = item.page;
+	const box = item.geometry;
 	if (!dx && !dy && !shift) return { ...box };
 	if (item.shape === "line") {
 		const start = { x: box.x, y: box.y }, end = { x: box.x + box.width, y: box.y + box.height };
 		const fixed = handle === "start" ? end : start, moving = handle === "start" ? start : end;
-		const point = constrainedPoint(fixed, { x: moving.x + dx, y: moving.y + dy }, page, "line", shift);
+		const point = constrainedPoint(fixed, { x: moving.x + dx, y: moving.y + dy }, "line", shift);
 		const from = handle === "start" ? point : fixed, to = handle === "start" ? fixed : point;
 		return from.x === to.x && from.y === to.y ? null
 			: { x: from.x, y: from.y, width: to.x - from.x, height: to.y - from.y };
 	}
 	if (shift && handle.length === 2) {
-		const change = objectTransform(box, page, dx, dy, handle);
+		const change = objectTransform(box, dx, dy, handle);
 		return { x: box.x + change.x, y: box.y + change.y, width: box.width * change.scale, height: box.height * change.scale };
 	}
 	let x = box.x, y = box.y, right = x + box.width, bottom = y + box.height;
 	const minWidth = Math.min(1, box.width), minHeight = Math.min(1, box.height);
-	if (handle.includes("w")) x = Math.max(0, Math.min(x + dx, right - minWidth));
-	if (handle.includes("e")) right = Math.min(page.width, Math.max(right + dx, x + minWidth));
-	if (handle.includes("n")) y = Math.max(0, Math.min(y + dy, bottom - minHeight));
-	if (handle.includes("s")) bottom = Math.min(page.height, Math.max(bottom + dy, y + minHeight));
+	if (handle.includes("w")) x = Math.min(x + dx, right - minWidth);
+	if (handle.includes("e")) right = Math.max(right + dx, x + minWidth);
+	if (handle.includes("n")) y = Math.min(y + dy, bottom - minHeight);
+	if (handle.includes("s")) bottom = Math.max(bottom + dy, y + minHeight);
 	return { x, y, width: right - x, height: bottom - y };
 }
 
@@ -144,7 +129,9 @@ export class CanvasEditor {
 	}
 
 	mount(index, page, surface) {
-		const selected = this.items().filter(item => item.index === index).map(item => item.id);
+		const pending = this.pendingSelection?.index === index;
+		const selected = pending ? this.pendingSelection.ids || page.objects.slice(-1).map(item => item.id)
+			: this.items().filter(item => item.index === index).map(item => item.id);
 		const selection = [];
 		this.pages.set(surface, { index, width: page.width, height: page.height });
 		const layer = document.createElement("div");
@@ -178,10 +165,7 @@ export class CanvasEditor {
 		}
 		surface.append(layer);
 		if (selected.length) this.setSelection(selection);
-		if (this.selectLast && layer.lastElementChild) {
-			this.selectLast = false;
-			this.select(this.nodes.get(layer.lastElementChild));
-		}
+		if (pending) this.pendingSelection = null;
 	}
 
 	place(item, change = { x: 0, y: 0, scale: 1 }) {
@@ -249,7 +233,7 @@ export class CanvasEditor {
 	clear() {
 		this.closeText();
 		this.cancel();
-		this.selectLast = false;
+		this.pendingSelection = null;
 		this.select(null);
 	}
 
@@ -319,7 +303,7 @@ export class CanvasEditor {
 		const from = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.item.page, drag.rotation);
 		const to = pagePoint(event.clientX, event.clientY, drag.rect, drag.item.page, drag.rotation);
 		if (drag.item.type === "TextObject" && (drag.corner === "w" || drag.corner === "e")) {
-			drag.box = reshapeBox({ geometry: drag.item, page: drag.item.page }, to.x - from.x, 0, drag.corner, false);
+			drag.box = reshapeBox({ geometry: drag.item }, to.x - from.x, 0, drag.corner, false);
 			Object.assign(drag.item.node.style, { left: `${drag.box.x * PX_PER_MM}px`, width: `${drag.box.width * PX_PER_MM}px` });
 			return;
 		}
@@ -329,7 +313,7 @@ export class CanvasEditor {
 			if (drag.node) paintShape(drag.node, drag.item.shape, drag.box || drag.item.geometry);
 			return;
 		}
-		drag.change = objectTransform(drag.item, drag.item.page, to.x - from.x, to.y - from.y, drag.corner);
+		drag.change = objectTransform(drag.item, to.x - from.x, to.y - from.y, drag.corner);
 		this.place(drag.item, drag.change);
 	}
 
@@ -421,7 +405,7 @@ export class CanvasEditor {
 	// moveMarquee includes intersecting objects while preserving an additive selection.
 	moveMarquee(event, drag) {
 		const from = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.page, drag.rotation);
-		const to = constrainedPoint(from, pagePoint(event.clientX, event.clientY, drag.rect, drag.page, drag.rotation), drag.page, "rectangle", false);
+		const to = pagePoint(event.clientX, event.clientY, drag.rect, drag.page, drag.rotation);
 		const box = { x: Math.min(from.x, to.x), y: Math.min(from.y, to.y), width: Math.abs(to.x-from.x), height: Math.abs(to.y-from.y) };
 		paintShape(drag.node, "rectangle", box);
 		if (Math.hypot(event.clientX-drag.clientX, event.clientY-drag.clientY) < 3) return;
@@ -436,7 +420,7 @@ export class CanvasEditor {
 	}
 
 	startShape(event) {
-		const surface = event.target.closest(".page-surface");
+		const surface = event.target.closest(".page-surface") || (this.tool !== "text" && this.nearestSurface(event));
 		const page = this.pages.get(surface);
 		if (!page) {
 			return;
@@ -453,6 +437,22 @@ export class CanvasEditor {
 			rect: surface.getBoundingClientRect(), rotation: this.options.rotation(),
 			clientX: event.clientX, clientY: event.clientY };
 		this.viewer.setPointerCapture(event.pointerId);
+	}
+
+	// nearestSurface assigns a pasteboard gesture to one mounted page for its entire duration.
+	nearestSurface(event) {
+		let nearest = null, distance = Infinity;
+		for (const surface of this.viewer.querySelectorAll(".page-surface")) {
+			if (!this.pages.has(surface)) continue;
+			const rect = surface.getBoundingClientRect();
+			const next = Math.hypot(Math.max(rect.left - event.clientX, 0, event.clientX - rect.right),
+				Math.max(rect.top - event.clientY, 0, event.clientY - rect.bottom));
+			if (next < distance) {
+				nearest = surface;
+				distance = next;
+			}
+		}
+		return nearest;
 	}
 
 	// createPreview provides a temporary SVG overlay without rerendering the page during a drag.
@@ -472,10 +472,10 @@ export class CanvasEditor {
 	moveShape(event, drag) {
 		const point = (x, y) => {
 			const p = pagePoint(x, y, drag.rect, drag.page, drag.rotation);
-			return { x: Math.max(0, Math.min(p.x, drag.page.width)), y: Math.max(0, Math.min(p.y, drag.page.height)) };
+			return drag.shape === "text" ? { x: Math.max(0, Math.min(p.x, drag.page.width)), y: Math.max(0, Math.min(p.y, drag.page.height)) } : p;
 		};
 		const from = point(drag.clientX, drag.clientY);
-		const to = constrainedPoint(from, pagePoint(event.clientX, event.clientY, drag.rect, drag.page, drag.rotation), drag.page, drag.shape, event.shiftKey && drag.shape !== "text");
+		const to = constrainedPoint(from, point(event.clientX, event.clientY), drag.shape, event.shiftKey && drag.shape !== "text");
 		const x = Math.min(from.x, to.x), y = Math.min(from.y, to.y);
 		const width = Math.abs(to.x - from.x), height = drag.shape === "text" ? Math.max(5, Math.abs(to.y - from.y)) : Math.abs(to.y - from.y);
 		const valid = Math.hypot(event.clientX - drag.clientX, event.clientY - drag.clientY) >= 3
@@ -531,11 +531,7 @@ export class CanvasEditor {
 			const [x, y] = directions[event.key];
 			const [dx, dy] = [[x, y], [y, -x], [-x, -y], [-y, x]][this.options.rotation() / 90];
 			const step = event.shiftKey ? 10 : 1;
-			const change = objectTransform(this.selected, this.selected.page,
-				dx * step, dy * step);
-			if (change.x || change.y) {
-				this.options.onTransform(this.selected, change);
-			}
+			this.options.onTransform(this.selected, { x: dx * step, y: dy * step, scale: 1 });
 		}
 	}
 

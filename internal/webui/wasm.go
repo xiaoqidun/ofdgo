@@ -113,8 +113,9 @@ func RunWASM() {
 	registerCallback("ofdgoTransformObjects", transformObjects)
 	registerCallback("ofdgoAlignObjects", alignObjects)
 	registerCallback("ofdgoDeleteObjects", deleteObjects)
-	registerCallback("ofdgoCopyObject", copyObject)
-	registerCallback("ofdgoMoveObject", moveObject)
+	registerCallback("ofdgoCopyObjects", copyObjects)
+	registerCallback("ofdgoOrderObjects", orderObjects)
+	registerCallback("ofdgoDistributeObjects", distributeObjects)
 	registerCallback("ofdgoDeleteObject", deleteObject)
 	registerCallback("ofdgoUndo", func([]js.Value) (any, error) { return restoreEditor(false) })
 	registerCallback("ofdgoRedo", func([]js.Value) (any, error) { return restoreEditor(true) })
@@ -542,6 +543,12 @@ type editorPageInfo struct {
 	PageIndex int `json:"pageIndex"`
 }
 
+// editorSelectionInfo 对象复制结果及新选区。
+type editorSelectionInfo struct {
+	editorInfo
+	SelectedIDs []string `json:"selectedIDs"`
+}
+
 // editorSummary 获取当前创作文档状态
 // 返回: editorInfo 文档信息
 func editorSummary() editorInfo {
@@ -780,55 +787,38 @@ func reshapeObject(args []js.Value) (any, error) {
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
 
-// copyObject 复制选中对象并平移，复用字体和图片资源
-// 入参: args 页码、对象标识和位移
+// copyObjects 复制选区并返回新对象标识，复用字体和图片资源
+// 入参: args 页码、对象标识列表和位移
 // 返回: any 文档信息, error 错误信息
-func copyObject(args []js.Value) (any, error) {
+func copyObjects(args []js.Value) (any, error) {
 	if currentEditor == nil {
 		return nil, fmt.Errorf("no document is being created")
 	}
-	page := args[0].Int()
-	object, err := currentEditor.Object(page, args[1].String())
+	ids, err := currentEditor.CopyObjects(args[0].Int(), stringsFromJS(args[1]), args[2].Float(), args[3].Float())
 	if err != nil {
 		return nil, err
 	}
-	var boundary *string
-	switch object.Type {
-	case "TextObject":
-		boundary = &object.TextObject.Boundary
-	case "ImageObject":
-		boundary = &object.ImageObject.Boundary
-	case "PathObject":
-		boundary = &object.PathObject.Boundary
-	default:
-		return nil, fmt.Errorf("unsupported object type %q", object.Type)
-	}
-	box, err := ofdgo.ParseBox(*boundary)
-	if err != nil {
-		return nil, err
-	}
-	*boundary = fmt.Sprintf("%g %g %g %g", box.X+args[2].Float(), box.Y+args[3].Float(), box.W, box.H)
-	if _, err := currentEditor.AddObject(page, object); err != nil {
-		return nil, err
-	}
-	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
-}
-
-// moveObject 调整选中对象的绘制顺序
-// 入参: args 页码、对象标识和目标索引
-// 返回: any 文档信息, error 错误信息
-func moveObject(args []js.Value) (any, error) {
-	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
-	}
-	revision := currentEditor.Revision()
-	if err := currentEditor.MoveObject(args[0].Int(), args[1].String(), args[2].Int()); err != nil {
-		return nil, err
-	}
-	if currentEditor.Revision() == revision {
+	if len(ids) == 0 {
 		return editorSummary(), nil
 	}
-	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+	info, err := previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+	return editorSelectionInfo{info, ids}, err
+}
+
+// orderObjects 调整选区的绘制顺序
+// 入参: args 页码、对象标识列表和层级动作
+// 返回: any 文档信息, error 错误信息
+func orderObjects(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		return currentEditor.OrderObjects(args[0].Int(), stringsFromJS(args[1]), args[2].String())
+	})
+}
+
+// distributeObjects 按指定轴等距分布选区。
+func distributeObjects(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		return currentEditor.DistributeObjects(args[0].Int(), stringsFromJS(args[1]), args[2].String())
+	})
 }
 
 // deleteObject 删除创作画布中选中的对象
@@ -1175,33 +1165,24 @@ func layoutText(args []js.Value) (any, error) {
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
 
-// selectedIDs 读取多选对象标识，交由库统一校验。
-func selectedIDs(value js.Value) []string {
-	ids := make([]string, value.Length())
-	for i := range ids {
-		ids[i] = value.Index(i).String()
-	}
-	return ids
-}
-
 // transformObjects 统一移动或缩放选区，生成一次撤销记录。
 func transformObjects(args []js.Value) (any, error) {
 	return changeObjects(func() error {
-		return currentEditor.TransformObjects(args[0].Int(), selectedIDs(args[1]), args[2].Float(), args[3].Float(), args[4].Float())
+		return currentEditor.TransformObjects(args[0].Int(), stringsFromJS(args[1]), args[2].Float(), args[3].Float(), args[4].Float())
 	})
 }
 
 // alignObjects 对齐选区中的对象。
 func alignObjects(args []js.Value) (any, error) {
 	return changeObjects(func() error {
-		return currentEditor.AlignObjects(args[0].Int(), selectedIDs(args[1]), args[2].String())
+		return currentEditor.AlignObjects(args[0].Int(), stringsFromJS(args[1]), args[2].String())
 	})
 }
 
 // deleteObjects 一次删除选区中的对象。
 func deleteObjects(args []js.Value) (any, error) {
 	return changeObjects(func() error {
-		return currentEditor.DeleteObjects(args[0].Int(), selectedIDs(args[1]))
+		return currentEditor.DeleteObjects(args[0].Int(), stringsFromJS(args[1]))
 	})
 }
 

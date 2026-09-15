@@ -121,15 +121,68 @@ a:focus-visible {
 	grid-template-columns: repeat(4, max-content);
 }
 
-.form-unit.paragraph-height {
+.editor-field {
+	display: grid;
+	align-items: center;
 	grid-column: 1 / -1;
-	grid-template-columns: auto 58px auto;
-	gap: 4px;
+	grid-template-columns: 2em minmax(0, 1fr);
+	gap: 6px;
+	white-space: nowrap;
 }
 
-.paragraph-height input {
-	width: 58px;
+.editor-number {
+	display: flex;
+	align-items: center;
 	min-width: 0;
+	height: var(--control-height);
+	border: 1px solid var(--line);
+	background: #fff;
+}
+
+.editor-number:focus-within {
+	outline: 2px solid var(--focus);
+	outline-offset: 2px;
+}
+
+.editor-number input {
+	width: 100%;
+	min-width: 0;
+	height: 100%;
+	padding: 0 6px;
+	border: 0;
+	outline: 0;
+	background: transparent;
+	color: #1f2428;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+}
+
+.editor-number > span {
+	padding-right: 6px;
+	color: var(--text-muted);
+	font-size: 12px;
+}
+
+.editor-number:has(input:disabled) {
+	opacity: 0.5;
+}
+
+.editor-number input:disabled {
+	opacity: 1;
+}
+
+.editor-group:has(#shapeFill) .editor-field {
+	grid-template-columns: 2em 100px;
+	justify-content: end;
+}
+
+.editor-group:has(#textFont) {
+	grid-template-columns: 100px 54px;
+}
+
+.editor-paragraph {
+	width: 172px;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .editor-file #saveButton {
@@ -353,17 +406,14 @@ button:not(:disabled):hover {
 }
 
 .page-control input,
-.paragraph-height input,
-.text-size input {
+.editor-number input {
 	appearance: textfield;
 }
 
 .page-control input::-webkit-inner-spin-button,
 .page-control input::-webkit-outer-spin-button,
-.paragraph-height input::-webkit-inner-spin-button,
-.paragraph-height input::-webkit-outer-spin-button,
-.text-size input::-webkit-inner-spin-button,
-.text-size input::-webkit-outer-spin-button {
+.editor-number input::-webkit-inner-spin-button,
+.editor-number input::-webkit-outer-spin-button {
 	-webkit-appearance: none;
 	margin: 0;
 }
@@ -468,9 +518,7 @@ button:not(:disabled):hover {
 .form-row input[type="number"],
 .form-row input[type="file"],
 .form-row select,
-.form-row textarea,
-.paragraph-height input,
-.text-size input {
+.form-row textarea {
 	width: 100%;
 	min-width: 0;
 	height: var(--control-height);
@@ -487,11 +535,6 @@ button:not(:disabled):hover {
 	padding: 6px;
 	line-height: 1.5;
 	resize: vertical;
-}
-
-.form-unit.text-size {
-	grid-template-columns: calc(2em + 22px) auto;
-	gap: 6px;
 }
 
 .color-input {
@@ -1201,7 +1244,7 @@ button.outline-link:hover {
 	pointer-events: none;
 }
 
-.editing-draw .page-surface {
+.editing-draw {
 	cursor: crosshair;
 	touch-action: none;
 	user-select: none;

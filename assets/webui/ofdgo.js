@@ -1,4 +1,4 @@
-import { CanvasEditor, objectTransform } from "./ofdgo_edit.js";
+import { CanvasEditor } from "./ofdgo_edit.js";
 import { FontManager } from "./ofdgo_font.js";
 
 const MM_TO_PX = 96 / 25.4;
@@ -92,6 +92,7 @@ const el = {
 	copyObjectButton: document.querySelector("#copyObjectButton"),
 	objectOrder: document.querySelector("#objectOrder"),
 	objectAlign: document.querySelector("#objectAlign"),
+	objectDistribute: document.querySelector("#objectDistribute"),
 	multiSelectButton: document.querySelector("#multiSelectButton"),
 	textAlign: document.querySelector("#textAlign"),
 	textWrap: document.querySelector("#textWrap"),
@@ -341,11 +342,7 @@ editorClick(el.copyObjectButton, () => {
 	if (!item) {
 		return;
 	}
-	let change = objectTransform(item, item.page, 3, 3);
-	if (!change.x && !change.y) {
-		change = objectTransform(item, item.page, -3, -3);
-	}
-	return changeDocument("ofdgoCopyObject", item, change.x, change.y);
+	return changeDocument("ofdgoCopyObjects", { ...item, id: canvasEditor.items().map(member => member.id) }, 3, 3);
 });
 el.objectOrder.addEventListener("change", () => {
 	const action = el.objectOrder.value;
@@ -354,14 +351,20 @@ el.objectOrder.addEventListener("change", () => {
 	if (!item || !action) {
 		return;
 	}
-	const targets = { up: item.order + 1, down: item.order - 1, top: item.count - 1, bottom: 0 };
-	return changeDocument("ofdgoMoveObject", item, targets[action]);
+	return changeDocument("ofdgoOrderObjects", { ...item, id: canvasEditor.items().map(member => member.id) }, action);
 });
 el.objectAlign.addEventListener("change", () => {
 	const alignment = el.objectAlign.value;
 	el.objectAlign.value = "";
 	if (canvasEditor.selected && alignment) {
 		return changeDocument(canvasEditor.selected.items ? "ofdgoAlignObjects" : "ofdgoAlignObject", canvasEditor.selected, alignment);
+	}
+});
+el.objectDistribute.addEventListener("change", () => {
+	const axis = el.objectDistribute.value;
+	el.objectDistribute.value = "";
+	if (axis && canvasEditor.items().length >= 3) {
+		return changeDocument("ofdgoDistributeObjects", canvasEditor.selected, axis);
 	}
 });
 editorClick(el.undoButton, () => changeDocument("ofdgoUndo"));
@@ -885,7 +888,7 @@ async function insertObject(event) {
 			return;
 		}
 		setEditorInfo(doc);
-		canvasEditor.selectLast = !item;
+		canvasEditor.pendingSelection = item ? null : { index };
 		state.selectObjects = true;
 		setPan(false);
 		openSeq = ++state.openSeq;
@@ -1031,8 +1034,8 @@ async function changeDocument(name, item, ...args) {
 		if (!item || name === "ofdgoDeleteObject" || name === "ofdgoDeleteObjects") {
 			canvasEditor.clear();
 		}
-		if (name === "ofdgoCopyObject" || name === "ofdgoInsertShape" || name === "ofdgoInsertText") {
-			canvasEditor.selectLast = true;
+		if (name === "ofdgoCopyObjects" || name === "ofdgoInsertShape" || name === "ofdgoInsertText") {
+			canvasEditor.pendingSelection = { index: item?.index ?? args[0], ids: doc.selectedIDs };
 		}
 		openSeq = ++state.openSeq;
 		if (item || name === "ofdgoInsertShape" || name === "ofdgoInsertText") {
@@ -4127,7 +4130,8 @@ function updateEditorTools() {
 function updateObjectControls(item, reset = false) {
 	const disabled = !item || Boolean(item.draft) || !state.ready || state.exporting;
 	el.deleteObjectButton.disabled = el.objectAlign.disabled = disabled;
-	el.copyObjectButton.disabled = disabled || Boolean(item?.items);
+	el.copyObjectButton.disabled = disabled;
+	el.objectDistribute.disabled = disabled || !item.items || item.items.length < 3;
 	el.editObjectButton.disabled = disabled || Boolean(item.items) || item.type === "PathObject";
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const text = item?.type === "TextObject" ? item : state.textDefaults;
@@ -4158,9 +4162,14 @@ function updateObjectControls(item, reset = false) {
 		}
 	}
 	updateDrawingControls();
-	el.objectOrder.disabled = disabled || Boolean(item.items) || item.count <= 1;
+	const members = item?.items || (item ? [item] : []);
+	const orders = members.map(member => member.order).sort((a, b) => a - b);
+	const count = members[0]?.count || 0;
+	const canRaise = orders.some((order, i) => order !== count - orders.length + i);
+	const canLower = orders.some((order, i) => order !== i);
+	el.objectOrder.disabled = disabled || count <= orders.length;
 	for (const option of el.objectOrder.options) {
-		option.disabled = disabled || (["up", "top"].includes(option.value) ? item.order === item.count - 1 : item.order === 0);
+		option.disabled = disabled || (["up", "top"].includes(option.value) ? !canRaise : !canLower);
 	}
 }
 

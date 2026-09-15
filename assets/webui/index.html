@@ -83,11 +83,16 @@
 					<option value="middle">垂直</option>
 					<option value="bottom">底部</option>
 				</select>
+				<select id="objectDistribute" class="order-select" aria-label="对象分布" disabled>
+					<option value="" hidden>分布</option>
+					<option value="horizontal">水平</option>
+					<option value="vertical">垂直</option>
+				</select>
 				<span>对象</span>
 			</div>
 			<div class="editor-group">
 				<div class="text-font"><select id="textFont" aria-label="字体" title="字体" disabled></select><button id="textFontAdd" class="icon-button" type="button" title="添加字体" aria-label="添加字体">+</button></div>
-				<div class="form-unit text-size"><input id="textSize" type="number" min="1" step="any" required aria-label="字号" disabled><span>pt</span></div>
+				<div class="editor-number"><input id="textSize" type="number" min="1" step="any" required aria-label="字号" disabled><span>pt</span></div>
 				<input id="textColor" class="color-input" type="color" value="#000000" aria-label="文字颜色" title="文字颜色" disabled>
 				<span>文字</span>
 			</div>
@@ -99,7 +104,7 @@
 					<option value="justify">两端</option>
 				</select>
 				<button id="textWrap" class="button" type="button" aria-label="自动折行" aria-pressed="false" disabled>折行</button>
-				<label class="form-unit paragraph-height"><span>行距</span><input id="textLineHeight" type="number" min="0" step="any" placeholder="自动" aria-label="行距" title="行距，0为自动" disabled><span>pt</span></label>
+				<label class="editor-field"><span>行距</span><span class="editor-number"><input id="textLineHeight" type="number" min="0" step="any" placeholder="自动" aria-label="行距" title="行距，0为自动" disabled><span>pt</span></span></label>
 				<span>段落</span>
 			</div>
 			<div class="editor-group">
@@ -113,7 +118,7 @@
 			<div class="editor-group">
 				<div class="shape-paint"><label><input id="shapeFill" type="checkbox">填充</label><input id="shapeFillColor" class="color-input" type="color" value="#dcefeb" aria-label="填充颜色" title="填充颜色"></div>
 				<div class="shape-paint"><label><input id="shapeStroke" type="checkbox" checked>描边</label><input id="shapeStrokeColor" class="color-input" type="color" value="#000000" aria-label="描边颜色" title="描边颜色"></div>
-				<div class="form-unit text-size"><input id="shapeWidth" type="number" value="1" min="0" step="any" required aria-label="线宽" title="线宽"><span>pt</span></div>
+				<label class="editor-field"><span>线宽</span><span class="editor-number"><input id="shapeWidth" type="number" value="1" min="0" step="any" required aria-label="线宽" title="线宽"><span>pt</span></span></label>
 				<span>图形</span>
 			</div>
 			<div class="editor-group">
