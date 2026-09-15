@@ -74,13 +74,11 @@ export class CanvasEditor {
 			this.nodes.set(node, item);
 			node.addEventListener("focus", () => this.select(item));
 			this.place(item);
-			if (object.image) {
-				for (const corner of ["nw", "ne", "sw", "se"]) {
-					const handle = document.createElement("span");
-					handle.className = `edit-handle edit-${corner}`;
-					handle.dataset.corner = corner;
-					node.append(handle);
-				}
+			for (const corner of ["nw", "ne", "sw", "se"]) {
+				const handle = document.createElement("span");
+				handle.className = `edit-handle edit-${corner}`;
+				handle.dataset.corner = corner;
+				node.append(handle);
 			}
 			layer.append(node);
 			if (this.selected?.index === index && this.selected.id === object.id) {

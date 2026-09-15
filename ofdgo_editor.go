@@ -652,6 +652,73 @@ func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) er
 	return nil
 }
 
+// TransformObject 以页面原点等比缩放后平移对象，文字同步缩放字号和字距，保留原有排版
+// 入参: page 页面索引, id 对象标识, dx 横向位移, dy 纵向位移, scale 正缩放比例
+// 返回: error 错误信息
+func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) error {
+	if !finite(dx) || !finite(dy) || !finite(scale) || scale <= 0 {
+		return fmt.Errorf("transform requires finite offsets and a positive finite scale")
+	}
+	object, err := e.Object(page, id)
+	if err != nil {
+		return err
+	}
+	if dx == 0 && dy == 0 && scale == 1 {
+		return nil
+	}
+	var boundary, ctm *string
+	switch object.Type {
+	case "TextObject":
+		obj := &object.TextObject
+		boundary, ctm = &obj.Boundary, &obj.CTM
+		if scale != 1 {
+			obj.Size *= scale
+			if obj.LineWidth == 0 && obj.Stroke != nil && *obj.Stroke {
+				obj.LineWidth = defaultPathLineWidth
+			}
+			obj.LineWidth *= scale
+			for i := range obj.TextCode {
+				code := &obj.TextCode[i]
+				for _, value := range []*string{&code.X, &code.Y, &code.DeltaX, &code.DeltaY} {
+					*value = scaleTextNumbers(*value, scale)
+				}
+			}
+		}
+	case "PathObject":
+		boundary, ctm = &object.PathObject.Boundary, &object.PathObject.CTM
+	case "ImageObject":
+		boundary, ctm = &object.ImageObject.Boundary, &object.ImageObject.CTM
+	}
+	box, err := ParseBox(*boundary)
+	if err != nil {
+		return err
+	}
+	*boundary = fmt.Sprintf("%s %s %s %s", ofdNumber(box.X*scale+dx), ofdNumber(box.Y*scale+dy), ofdNumber(box.W*scale), ofdNumber(box.H*scale))
+	if scale != 1 && (*ctm != "" || object.Type != "TextObject") {
+		m := NewMatrix(*ctm)
+		if object.Type != "TextObject" {
+			m.a, m.b, m.c, m.d = m.a*scale, m.b*scale, m.c*scale, m.d*scale
+		}
+		*ctm = fmt.Sprintf("%s %s %s %s %s %s", ofdNumber(m.a), ofdNumber(m.b), ofdNumber(m.c), ofdNumber(m.d), ofdNumber(m.e*scale), ofdNumber(m.f*scale))
+	}
+	return e.UpdateObject(page, id, object)
+}
+
+// scaleTextNumbers 缩放已校验的文字定位数值，保留g重复编码
+// 入参: value 定位数值, scale 缩放比例
+// 返回: string 缩放后的数值
+func scaleTextNumbers(value string, scale float64) string {
+	fields := strings.Fields(value)
+	for i := 0; i < len(fields); i++ {
+		if fields[i] == "g" {
+			i += 2
+		}
+		number, _ := strconv.ParseFloat(fields[i], 64)
+		fields[i] = ofdNumber(number * scale)
+	}
+	return strings.Join(fields, " ")
+}
+
 // LayoutText 按嵌入字体度量重排横向单行文字，设置基线和字距，保留绘制属性
 // 不进行段落排版和复杂文字塑形，不修改文档，通过AddObject或UpdateObject提交
 // 入参: obj 文字对象, value 原文

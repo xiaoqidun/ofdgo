@@ -38,6 +38,7 @@ const state = {
 	savedRevision: null,
 	textObject: null,
 	insertFonts: [],
+	textFonts: [],
 	ofdBytes: null,
 	fileName: "ofdgo.ofd",
 	openSeq: 0,
@@ -89,6 +90,7 @@ const el = {
 	editTextButton: document.querySelector("#editTextButton"),
 	copyObjectButton: document.querySelector("#copyObjectButton"),
 	objectOrder: document.querySelector("#objectOrder"),
+	textFont: document.querySelector("#textFont"),
 	textSize: document.querySelector("#textSize"),
 	textColor: document.querySelector("#textColor"),
 	undoButton: document.querySelector("#undoButton"),
@@ -121,14 +123,10 @@ const el = {
 	insertForm: document.querySelector("#insertForm"),
 	insertTextRow: document.querySelector("#insertTextRow"),
 	insertFontRow: document.querySelector("#insertFontRow"),
-	insertSizeRow: document.querySelector("#insertSizeRow"),
-	insertColorRow: document.querySelector("#insertColorRow"),
 	insertImageRow: document.querySelector("#insertImageRow"),
 	insertText: document.querySelector("#insertText"),
 	insertFont: document.querySelector("#insertFont"),
 	insertFontAdd: document.querySelector("#insertFontAdd"),
-	insertSize: document.querySelector("#insertSize"),
-	insertColor: document.querySelector("#insertColor"),
 	insertImage: document.querySelector("#insertImage"),
 	insertStatus: document.querySelector("#insertStatus"),
 	insertCancel: document.querySelector("#insertCancel"),
@@ -228,7 +226,8 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	busy: () => document.body.hasAttribute("aria-busy"),
 	rotation: () => state.rotation,
 	onSelect: updateObjectControls,
-	onTransform: (item, change) => changeDocument("ofdgoTransformObject", item, change.x, change.y, change.scale),
+	onTransform: (item, change) => changeDocument("ofdgoTransformObject", item,
+		change.x + item.x * (1 - change.scale), change.y + item.y * (1 - change.scale), change.scale),
 	onDelete: (item) => changeDocument("ofdgoDeleteObject", item),
 	onEdit: (item) => openInsertPanel(true, item),
 });
@@ -255,6 +254,13 @@ el.editTextButton.addEventListener("click", () => {
 });
 el.textSize.addEventListener("change", () => changeTextStyle(false));
 el.textColor.addEventListener("change", () => changeTextStyle(true));
+el.textFont.addEventListener("change", () => {
+	const item = canvasEditor.selected;
+	const font = state.textFonts[Number(el.textFont.value)];
+	if (item && !item.image && state.ready && !document.body.hasAttribute("aria-busy") && font && !font.embedded) {
+		return changeDocument("ofdgoUpdateText", item, item.text, fontManager.read(font), item.size, null);
+	}
+});
 el.textSize.addEventListener("keydown", (event) => {
 	if (event.key === "Enter" || event.key === "Escape") {
 		event.preventDefault();
@@ -643,12 +649,10 @@ async function openInsertPanel(text, item = null) {
 	if (item) {
 		state.insertFonts = [];
 		el.insertText.value = item.text;
-		el.insertSize.value = textPoints(item.size);
-		el.insertColor.value = item.color;
 	}
 	el.insertPanel.setAttribute("aria-label", item ? "修改文字" : text ? "添加文字" : "添加图片");
 	el.insertSubmit.textContent = item ? "修改" : "添加";
-	for (const [row, input] of [[el.insertTextRow, el.insertText], [el.insertFontRow, el.insertFont], [el.insertSizeRow, el.insertSize], [el.insertColorRow, el.insertColor]]) {
+	for (const [row, input] of [[el.insertTextRow, el.insertText], [el.insertFontRow, el.insertFont]]) {
 		row.hidden = !text;
 		input.disabled = !text;
 	}
@@ -661,21 +665,39 @@ async function openInsertPanel(text, item = null) {
 
 function updateInsertFonts() {
 	const selected = state.insertFonts[Number(el.insertFont.value)];
-	const key = (font) => font?.id || font?.postscriptName;
-	state.insertFonts = [...fontManager.userFonts.filter((font) => font.enabled), ...fontManager.catalog];
-	if (state.textObject) {
-		state.insertFonts.unshift({ id: `embedded:${state.textObject.font}`, name: state.textObject.fontName, embedded: true });
+	state.insertFonts = editorFonts(state.textObject);
+	setFontOptions(el.insertFont, state.insertFonts, selected);
+	el.insertSubmit.disabled = !el.insertTextRow.hidden && !state.insertFonts.length;
+	el.insertStatus.textContent = el.insertSubmit.disabled ? "尚未添加字体" : "";
+}
+
+function editorFonts(item) {
+	const fonts = [...fontManager.userFonts.filter((font) => font.enabled), ...fontManager.catalog];
+	if (item) {
+		fonts.unshift({ id: `embedded:${item.font}`, name: item.fontName, embedded: true });
 	}
-	el.insertFont.replaceChildren();
-	state.insertFonts.forEach((font, index) => {
+	return fonts;
+}
+
+function setFontOptions(select, fonts, selected) {
+	const key = (font) => font?.id || font?.postscriptName;
+	select.replaceChildren();
+	fonts.forEach((font, index) => {
 		const option = document.createElement("option");
 		option.value = String(index);
 		option.textContent = font.fullName || font.name;
 		option.selected = key(font) === key(selected);
-		el.insertFont.append(option);
+		select.append(option);
 	});
-	el.insertSubmit.disabled = !el.insertTextRow.hidden && !state.insertFonts.length;
-	el.insertStatus.textContent = el.insertSubmit.disabled ? "尚未添加字体" : "";
+}
+
+function updateTextFonts(item, refresh = false) {
+	const text = item && !item.image;
+	if (refresh || state.textFonts[0]?.id !== (text ? `embedded:${item.font}` : undefined)) {
+		state.textFonts = text ? editorFonts(item) : [];
+		setFontOptions(el.textFont, state.textFonts, state.textFonts[0]);
+	}
+	el.textFont.value = text ? "0" : "";
 }
 
 async function insertObject(event) {
@@ -705,11 +727,10 @@ async function insertObject(event) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const points = Number(el.insertSize.value);
-		const size = item && points === textPoints(item.size) ? item.size : points * 25.4 / 72;
+		const value = item && data === null && el.insertText.value === item.text ? null : el.insertText.value;
 		const doc = item
-			? await callWASM("ofdgoUpdateText", item.index, item.id, el.insertText.value, data, size, el.insertColor.value === item.color ? null : el.insertColor.value)
-			: text ? await callWASM("ofdgoInsertText", index, el.insertText.value, data, x, y, size, el.insertColor.value)
+			? await callWASM("ofdgoUpdateText", item.index, item.id, value, data, item.size, null)
+			: text ? await callWASM("ofdgoInsertText", index, el.insertText.value, data, x, y, 12 * 25.4 / 72, "#000000")
 			: await callWASM("ofdgoInsertImage", index, data, x, y, page.width - x * 2);
 		if (openSeq !== state.openSeq) {
 			return;
@@ -744,7 +765,7 @@ async function insertObject(event) {
 }
 
 function textPoints(size) {
-	return Number((size * 72 / 25.4).toPrecision(12));
+	return Number((size * 72 / 25.4).toFixed(2));
 }
 
 async function changeTextStyle(color) {
@@ -774,6 +795,10 @@ async function changeDocument(name, item, ...args) {
 	const { scrollLeft, scrollTop } = el.viewerPanel;
 	setBusy(true);
 	try {
+		args = await Promise.all(args);
+		if (openSeq !== state.openSeq) {
+			return;
+		}
 		const doc = await callWASM(name, ...(item ? [item.index, item.id] : []), ...args);
 		if (openSeq !== state.openSeq) {
 			return;
@@ -1579,6 +1604,7 @@ async function changeFont(font, changes) {
 }
 
 function renderFontList() {
+	updateTextFonts(canvasEditor.selected, true);
 	if (el.insertPanel.open) {
 		updateInsertFonts();
 	}
@@ -3842,7 +3868,8 @@ function updateObjectControls(item, reset = false) {
 	const disabled = !item || !state.ready || state.exporting;
 	el.deleteObjectButton.disabled = el.copyObjectButton.disabled = disabled;
 	el.editTextButton.disabled = !item || item.image || !state.ready || state.exporting;
-	el.textSize.disabled = el.textColor.disabled = el.editTextButton.disabled;
+	el.textFont.disabled = el.textSize.disabled = el.textColor.disabled = el.editTextButton.disabled;
+	updateTextFonts(item);
 	if (reset || el.textSize.disabled || document.activeElement !== el.textSize) {
 		el.textSize.value = item && !item.image ? textPoints(item.size) : "";
 	}

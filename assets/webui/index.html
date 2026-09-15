@@ -70,6 +70,7 @@
 				<span>对象</span>
 			</div>
 			<div class="editor-group">
+				<select id="textFont" aria-label="字体" title="字体" disabled></select>
 				<div class="form-unit text-size"><input id="textSize" type="number" min="1" step="any" required aria-label="字号" disabled><span>pt</span></div>
 				<input id="textColor" class="color-input" type="color" value="#000000" aria-label="文字颜色" title="文字颜色" disabled>
 				<span>文字</span>
@@ -155,16 +156,6 @@
 					<div class="form-font">
 						<select id="insertFont" required></select>
 						<button id="insertFontAdd" class="icon-button" type="button" title="添加字体" aria-label="添加字体">+</button>
-					</div>
-				</div>
-				<div class="form-pair">
-					<div id="insertSizeRow" class="form-row">
-						<label for="insertSize">字号</label>
-						<div class="form-unit text-size"><input id="insertSize" type="number" value="12" min="1" step="any" required><span>pt</span></div>
-					</div>
-					<div id="insertColorRow" class="form-row">
-						<label for="insertColor">颜色</label>
-						<input id="insertColor" class="color-input" type="color" value="#000000">
 					</div>
 				</div>
 				<div id="insertImageRow" class="form-row" hidden>

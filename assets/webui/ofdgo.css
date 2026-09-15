@@ -108,9 +108,13 @@ a:focus-visible {
 	grid-template-columns: repeat(5, max-content);
 }
 
-.editor-group:has(#insertTextButton),
-.editor-group:has(#textSize) {
+.editor-group:has(#insertTextButton) {
 	grid-template-columns: repeat(2, max-content);
+}
+
+#textFont {
+	width: 128px;
+	min-width: 0;
 }
 
 .editor-group:has(#addPageButton) {
@@ -308,14 +312,20 @@ button:not(:disabled):hover {
 	padding: 0;
 	border: 0;
 	outline: 0;
-	appearance: textfield;
 	text-align: center;
 	color: #1f2428;
 	background: transparent;
 }
 
+.page-control input,
+.text-size input {
+	appearance: textfield;
+}
+
 .page-control input::-webkit-inner-spin-button,
-.page-control input::-webkit-outer-spin-button {
+.page-control input::-webkit-outer-spin-button,
+.text-size input::-webkit-inner-spin-button,
+.text-size input::-webkit-outer-spin-button {
 	-webkit-appearance: none;
 	margin: 0;
 }

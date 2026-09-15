@@ -627,7 +627,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 	return objects, nil
 }
 
-// transformObject 移动文字或等比缩放图片
+// transformObject 等比缩放后平移对象
 // 入参: args 页码、对象标识、位移和缩放比例
 // 返回: any 文档信息, error 错误信息
 func transformObject(args []js.Value) (any, error) {
@@ -635,31 +635,12 @@ func transformObject(args []js.Value) (any, error) {
 		return nil, fmt.Errorf("no document is being created")
 	}
 	page, id := args[0].Int(), args[1].String()
-	object, err := currentEditor.Object(page, id)
-	if err != nil {
+	revision := currentEditor.Revision()
+	if err := currentEditor.TransformObject(page, id, args[2].Float(), args[3].Float(), args[4].Float()); err != nil {
 		return nil, err
 	}
-	scale := args[4].Float()
-	var boundary *string
-	switch object.Type {
-	case "TextObject":
-		if scale != 1 {
-			return nil, fmt.Errorf("text resizing is not supported")
-		}
-		boundary = &object.TextObject.Boundary
-	case "ImageObject":
-		boundary = &object.ImageObject.Boundary
-		object.ImageObject.CTM = ""
-	default:
-		return nil, fmt.Errorf("unsupported object type %q", object.Type)
-	}
-	box, err := ofdgo.ParseBox(*boundary)
-	if err != nil {
-		return nil, err
-	}
-	*boundary = fmt.Sprintf("%g %g %g %g", box.X+args[2].Float(), box.Y+args[3].Float(), box.W*scale, box.H*scale)
-	if err := currentEditor.UpdateObject(page, id, object); err != nil {
-		return nil, err
+	if currentEditor.Revision() == revision {
+		return editorSummary(), nil
 	}
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
