@@ -96,6 +96,7 @@ func RunWASM() {
 	registerExportCallback("ofdgoExportAttachment", exportAttachment)
 	registerCallback("ofdgoMatchFontFiles", matchFontFiles)
 	registerCallback("ofdgoCreateDocument", createDocument)
+	registerCallback("ofdgoChangePage", changePage)
 	registerCallback("ofdgoInsertText", insertText)
 	registerCallback("ofdgoUpdateText", updateText)
 	registerCallback("ofdgoInsertImage", insertImage)
@@ -521,6 +522,12 @@ type editorInfo struct {
 	CanRedo  bool   `json:"canRedo"`
 }
 
+// editorPageInfo 页面操作结果与目标页面
+type editorPageInfo struct {
+	editorInfo
+	PageIndex int `json:"pageIndex"`
+}
+
 // editorSummary 获取当前创作文档状态
 // 返回: editorInfo 文档信息
 func editorSummary() editorInfo {
@@ -660,6 +667,49 @@ func deleteObject(args []js.Value) (any, error) {
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
 
+// changePage 管理创作文档的页面
+// 入参: args 操作、页面索引及尺寸或目标索引
+// 返回: any 文档信息和目标页面, error 错误信息
+func changePage(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	index := args[1].Int()
+	revision := currentEditor.Revision()
+	var err error
+	switch action := args[0].String(); action {
+	case "add":
+		index, err = currentEditor.AddPage(args[2].Float(), args[3].Float())
+	case "copy":
+		index, err = currentEditor.CopyPage(index)
+	case "delete":
+		if currentEditor.PageCount() == 1 {
+			return nil, fmt.Errorf("the document must contain at least one page")
+		}
+		err = currentEditor.DeletePage(index)
+		index = min(index, currentEditor.PageCount()-1)
+	case "move":
+		target := args[2].Int()
+		err = currentEditor.MovePage(index, target)
+		index = target
+	case "resize":
+		err = currentEditor.ResizePage(index, args[2].Float(), args[3].Float())
+	default:
+		return nil, fmt.Errorf("unsupported page action %q", action)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if currentEditor.Revision() == revision {
+		return editorPageInfo{editorSummary(), index}, nil
+	}
+	info, err := previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+	if err != nil {
+		return nil, err
+	}
+	return editorPageInfo{info, index}, nil
+}
+
 // createDocument 新建单页文档
 // 入参: args 标题、纸张宽高和注解设置
 // 返回: any 文档信息, error 错误信息
@@ -675,15 +725,15 @@ func createDocument(args []js.Value) (any, error) {
 
 // previewEditor 通过内存快照更新预览，不生成中间压缩包
 // 入参: editor 新建文档, annotations 是否显示注解
-// 返回: any 文档信息, error 错误信息
-func previewEditor(editor *ofdgo.Editor, annotations bool) (any, error) {
+// 返回: editorInfo 文档信息, error 错误信息
+func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 	reader, err := editor.Reader()
 	if err != nil {
-		return nil, err
+		return editorInfo{}, err
 	}
 	session, err := newSession(reader, OpenOptions{RenderAnnotations: annotations})
 	if err != nil {
-		return nil, err
+		return editorInfo{}, err
 	}
 	if currentSession != nil {
 		_ = currentSession.Close()

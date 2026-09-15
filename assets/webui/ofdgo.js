@@ -91,6 +91,20 @@ const el = {
 	redoButton: document.querySelector("#redoButton"),
 	insertTextButton: document.querySelector("#insertTextButton"),
 	insertImageButton: document.querySelector("#insertImageButton"),
+	addPageButton: document.querySelector("#addPageButton"),
+	copyPageButton: document.querySelector("#copyPageButton"),
+	deletePageButton: document.querySelector("#deletePageButton"),
+	movePagePrevButton: document.querySelector("#movePagePrevButton"),
+	movePageNextButton: document.querySelector("#movePageNextButton"),
+	pageSettingsButton: document.querySelector("#pageSettingsButton"),
+	pagePanel: document.querySelector("#pagePanel"),
+	pageForm: document.querySelector("#pageForm"),
+	pagePortrait: document.querySelector("#pagePortrait"),
+	pageLandscape: document.querySelector("#pageLandscape"),
+	pageWidth: document.querySelector("#pageWidth"),
+	pageHeight: document.querySelector("#pageHeight"),
+	pageStatus: document.querySelector("#pageStatus"),
+	pageCancel: document.querySelector("#pageCancel"),
 	saveButton: document.querySelector("#saveButton"),
 	createPanel: document.querySelector("#createPanel"),
 	createForm: document.querySelector("#createForm"),
@@ -235,6 +249,31 @@ el.editTextButton.addEventListener("click", () => {
 });
 el.undoButton.addEventListener("click", () => changeDocument("ofdgoUndo"));
 el.redoButton.addEventListener("click", () => changeDocument("ofdgoRedo"));
+el.addPageButton.addEventListener("click", () => {
+	const page = currentPageInfo();
+	return changeDocument("ofdgoChangePage", null, "add", state.pageIndex, page.width, page.height);
+});
+el.copyPageButton.addEventListener("click", () => changeDocument("ofdgoChangePage", null, "copy", state.pageIndex));
+el.deletePageButton.addEventListener("click", () => changeDocument("ofdgoChangePage", null, "delete", state.pageIndex));
+el.movePagePrevButton.addEventListener("click", () => changeDocument("ofdgoChangePage", null, "move", state.pageIndex, state.pageIndex - 1));
+el.movePageNextButton.addEventListener("click", () => changeDocument("ofdgoChangePage", null, "move", state.pageIndex, state.pageIndex + 1));
+el.pageSettingsButton.addEventListener("click", openPagePanel);
+el.pageCancel.addEventListener("click", () => el.pagePanel.close());
+el.pageWidth.addEventListener("input", updatePageDirection);
+el.pageHeight.addEventListener("input", updatePageDirection);
+for (const radio of [el.pagePortrait, el.pageLandscape]) {
+	radio.addEventListener("change", () => {
+		[el.pageWidth.value, el.pageHeight.value] = [el.pageHeight.value, el.pageWidth.value];
+		updatePageDirection();
+	});
+}
+el.pageForm.addEventListener("submit", async (event) => {
+	event.preventDefault();
+	el.pageStatus.textContent = "";
+	if (await changeDocument("ofdgoChangePage", null, "resize", state.pageIndex, Number(el.pageWidth.value), Number(el.pageHeight.value))) {
+		el.pagePanel.close();
+	}
+});
 el.ofdButton.addEventListener("click", openOFDFile);
 el.newButton.addEventListener("click", openCreatePanel);
 el.createCancel.addEventListener("click", () => el.createPanel.close());
@@ -455,7 +494,25 @@ function handleKeyDown(event) {
 }
 
 function formDialogOpen() {
-	return el.exportPanel.open || el.createPanel.open || el.insertPanel.open;
+	return el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open;
+}
+
+function openPagePanel() {
+	if (!state.editing || document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	const page = currentPageInfo();
+	el.pageWidth.value = String(page.width);
+	el.pageHeight.value = String(page.height);
+	el.pageStatus.textContent = "";
+	updatePageDirection();
+	el.pagePanel.showModal();
+}
+
+function updatePageDirection() {
+	const landscape = Number(el.pageWidth.value) > Number(el.pageHeight.value);
+	el.pageLandscape.checked = landscape;
+	el.pagePortrait.checked = !landscape;
 }
 
 function warnUnsaved(event) {
@@ -590,12 +647,12 @@ async function insertObject(event) {
 	let openSeq = state.openSeq;
 	const text = !el.insertTextRow.hidden;
 	const item = state.textObject;
-	const { scrollLeft, scrollTop } = el.viewerPanel;
-	const page = state.doc.pages[state.pageIndex];
+	const index = item?.index ?? state.pageIndex;
+	const page = state.doc.pages[index];
 	const x = Math.min(20, page.width / 10);
 	const y = Math.min(20, page.height / 10);
 	el.insertStatus.textContent = "";
-	setBusy(true, item ? "正在修改文字" : text ? "正在添加文字" : "正在添加图片", null);
+	setBusy(true);
 	try {
 		let data = null;
 		if (text) {
@@ -613,8 +670,8 @@ async function insertObject(event) {
 		const size = item && points === Number((item.size * 72 / 25.4).toPrecision(12)) ? item.size : points * 25.4 / 72;
 		const doc = item
 			? await callWASM("ofdgoUpdateText", item.index, item.id, el.insertText.value, data, size)
-			: text ? await callWASM("ofdgoInsertText", state.pageIndex, el.insertText.value, data, x, y, size)
-			: await callWASM("ofdgoInsertImage", state.pageIndex, data, x, y, page.width - x * 2);
+			: text ? await callWASM("ofdgoInsertText", index, el.insertText.value, data, x, y, size)
+			: await callWASM("ofdgoInsertImage", index, data, x, y, page.width - x * 2);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -624,15 +681,17 @@ async function insertObject(event) {
 		state.selectObjects = true;
 		setPan(false);
 		openSeq = ++state.openSeq;
-		await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex: item?.index ?? state.pageIndex, fitMode: state.fitMode, scale: state.scale });
-		if (item && openSeq === state.openSeq) {
-			el.viewerPanel.scrollLeft = scrollLeft;
-			el.viewerPanel.scrollTop = scrollTop;
+		await refreshEditorPage(doc, index, openSeq);
+		if (openSeq === state.openSeq) {
 			el.viewerPanel.focus({ preventScroll: true });
 		}
 	} catch (err) {
 		if (openSeq === state.openSeq) {
-			el.insertStatus.textContent = err.message;
+			if (el.insertPanel.open) {
+				el.insertStatus.textContent = err.message;
+			} else {
+				showError(err, false);
+			}
 		}
 	} finally {
 		if (openSeq === state.openSeq) {
@@ -646,31 +705,106 @@ async function changeDocument(name, item, ...args) {
 		return;
 	}
 	let openSeq = state.openSeq;
+	const previous = currentPageInfo();
 	const { scrollLeft, scrollTop } = el.viewerPanel;
-	setBusy(true, "正在更新文档", null);
+	setBusy(true);
 	try {
-		const doc = await callWASM(name, ...(item ? [item.index, item.id, ...args] : []));
+		const doc = await callWASM(name, ...(item ? [item.index, item.id] : []), ...args);
 		if (openSeq !== state.openSeq) {
 			return;
+		}
+		if (doc.revision === state.editorInfo?.revision) {
+			return true;
 		}
 		setEditorInfo(doc);
 		if (!item || name === "ofdgoDeleteObject") {
 			canvasEditor.clear();
 		}
 		openSeq = ++state.openSeq;
-		await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex: item?.index ?? state.pageIndex, fitMode: state.fitMode, scale: state.scale });
+		if (item) {
+			await refreshEditorPage(doc, item.index, openSeq);
+		} else {
+			const samePage = doc.pages.findIndex((page) => page.id === previous.id);
+			const pageIndex = doc.pageIndex ?? (samePage < 0 ? Math.min(state.pageIndex, doc.pageCount - 1) : samePage);
+			const page = doc.pages[pageIndex];
+			const keepScroll = doc.pageIndex === undefined && page.id === previous.id && pageIndex === state.pageIndex
+				&& page.width === previous.width && page.height === previous.height;
+			await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex, fitMode: state.fitMode, scale: state.scale });
+			if (openSeq === state.openSeq) {
+				if (keepScroll) {
+					el.viewerPanel.scrollLeft = scrollLeft;
+					el.viewerPanel.scrollTop = scrollTop;
+				} else {
+					scrollToPage(pageIndex);
+				}
+			}
+		}
 		if (openSeq === state.openSeq) {
-			el.viewerPanel.scrollLeft = scrollLeft;
-			el.viewerPanel.scrollTop = scrollTop;
 			el.viewerPanel.focus({ preventScroll: true });
+			return true;
 		}
 	} catch (err) {
 		if (openSeq === state.openSeq) {
-			showError(err, false);
+			if (el.pagePanel.open) {
+				el.pageStatus.textContent = err.message;
+			} else {
+				showError(err, false);
+			}
 		}
 	} finally {
 		if (openSeq === state.openSeq) {
 			setBusy(false);
+		}
+	}
+}
+
+async function refreshEditorPage(doc, index, openSeq) {
+	state.doc = doc;
+	resetSearch();
+	state.documentSelection = null;
+	resetPageLoading();
+	try {
+		const page = await loadPageData(index, { openSeq, priority: 0, refresh: true });
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		mountPageSVG(index, page, openSeq);
+		updateThumbnail(index, openSeq);
+		setStatus(pageStatus(state.pageIndex, doc.pageCount));
+	} catch (err) {
+		if (openSeq === state.openSeq) {
+			state.pageCache.delete(index);
+			canvasEditor.clear();
+			const shell = pageShell(index);
+			shell.querySelector(".page-surface").replaceChildren();
+			shell.classList.remove("rendered");
+			markFlowPageError(index, err);
+			markThumbnailError(index);
+		}
+		throw err;
+	} finally {
+		if (openSeq === state.openSeq) {
+			const pages = [...state.pageCache.values()];
+			for (const [name, image] of state.svgImages) {
+				if (!pages.some((page) => page.imageNames.includes(name))) {
+					URL.revokeObjectURL(image.url);
+					state.svgImages.delete(name);
+				}
+			}
+			for (const [name, font] of state.svgFonts) {
+				if (!pages.some((page) => page.fonts.some((item) => item.name === name))) {
+					document.fonts.delete(font);
+					state.svgFonts.delete(name);
+				}
+			}
+			renderMeta();
+			updateControls();
+			loadDocumentDetails(openSeq);
+			for (const page of doc.pages) {
+				observeFlowPage(pageShell(page.index), page.index);
+				const button = el.pageList.querySelector(`[data-page-index="${page.index}"]`);
+				observeThumbnail(button, page.index, openSeq);
+			}
 		}
 	}
 }
@@ -1116,6 +1250,7 @@ async function openOFD(file) {
 		setDirty(false);
 		el.createPanel.close();
 		el.insertPanel.close();
+		el.pagePanel.close();
 		updateControls();
 		await openDocument({ pageIndex: 0, resetScroll: true, openSeq });
 	} catch (err) {
@@ -1587,7 +1722,7 @@ async function loadDocumentDetails(openSeq) {
 }
 
 async function renderPage(index, options = {}) {
-	if (!state.doc) {
+	if (!state.doc || (state.editing && document.body.hasAttribute("aria-busy") && !options.keepBusy)) {
 		return null;
 	}
 	const openSeq = options.openSeq || state.openSeq;
@@ -1835,6 +1970,10 @@ function resetPageFlow() {
 	state.selectedPages.clear();
 	state.documentSelection = null;
 	state.visiblePages.clear();
+	resetPageLoading();
+}
+
+function resetPageLoading() {
 	for (const task of state.pageInFlight.values()) {
 		task.resolve(null);
 	}
@@ -1936,12 +2075,6 @@ function loadPageData(index, options = {}) {
 	if (openSeq !== state.openSeq) {
 		return Promise.resolve(null);
 	}
-	if (state.pageCache.has(index)) {
-		const page = state.pageCache.get(index);
-		state.pageCache.delete(index);
-		state.pageCache.set(index, page);
-		return Promise.resolve(page);
-	}
 	const key = `${openSeq}:${index}`;
 	const priority = options.priority ?? 3;
 	const current = state.pageInFlight.get(key);
@@ -1949,13 +2082,19 @@ function loadPageData(index, options = {}) {
 		current.priority = Math.min(current.priority, priority);
 		return current.promise;
 	}
+	if (!options.refresh && state.pageCache.has(index)) {
+		const page = state.pageCache.get(index);
+		state.pageCache.delete(index);
+		state.pageCache.set(index, page);
+		return Promise.resolve(page);
+	}
 	let resolve;
 	let reject;
 	const promise = new Promise((done, fail) => {
 		resolve = done;
 		reject = fail;
 	});
-	const task = { key, index, openSeq, priority, resolve, reject, promise };
+	const task = { key, index, openSeq, priority, refresh: options.refresh, resolve, reject, promise };
 	state.pageInFlight.set(key, task);
 	state.pageRenderQueue.push(task);
 	schedulePageRender();
@@ -1981,7 +2120,7 @@ async function processPageRenderQueue() {
 					task.resolve(null);
 					continue;
 				}
-				if (state.pageCache.has(task.index)) {
+				if (!task.refresh && state.pageCache.has(task.index)) {
 					task.resolve(state.pageCache.get(task.index));
 					continue;
 				}
@@ -2892,6 +3031,7 @@ function updateThumbnail(index, openSeq = state.openSeq) {
 function markThumbnailError(index) {
 	const thumb = el.pageList.querySelector(`[data-page-index="${index}"] .thumb-paper`);
 	if (thumb) {
+		delete thumb.dataset.renderKey;
 		thumb.classList.add("error");
 		thumb.textContent = String(index + 1);
 	}
@@ -3617,6 +3757,11 @@ function updateControls() {
 function updateEditorTools() {
 	el.editorTools.hidden = !state.editing;
 	el.insertTextButton.disabled = el.insertImageButton.disabled = el.saveButton.disabled = !state.ready || state.exporting;
+	const pagesDisabled = !state.editing || !state.ready || state.exporting;
+	el.addPageButton.disabled = el.copyPageButton.disabled = el.pageSettingsButton.disabled = pagesDisabled;
+	el.deletePageButton.disabled = pagesDisabled || state.doc?.pageCount <= 1;
+	el.movePagePrevButton.disabled = pagesDisabled || state.pageIndex === 0;
+	el.movePageNextButton.disabled = pagesDisabled || state.pageIndex === state.doc?.pageCount - 1;
 	const enabled = state.editing && state.selectObjects && !state.panMode;
 	canvasEditor.setEnabled(enabled);
 	el.selectObjectButton.setAttribute("aria-pressed", String(enabled));
@@ -3678,6 +3823,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("aria-busy", busy);
 	el.createForm.inert = busy;
 	el.insertForm.inert = busy;
+	el.pageForm.inert = busy;
 	el.editorTools.inert = busy;
 	el.fontList.inert = busy;
 	if (!busy) {
@@ -3689,7 +3835,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	}
 	el.exportPanel.close();
 	endPan();
-	el.progressPanel.hidden = false;
+	el.progressPanel.hidden = !text;
 	setProgress(text, percent, status);
 }
 

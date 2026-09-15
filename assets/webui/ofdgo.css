@@ -97,11 +97,19 @@ a:focus-visible {
 
 .editor-group {
 	display: grid;
-	grid-auto-columns: max-content;
+	grid-template-columns: repeat(3, max-content);
 	column-gap: 6px;
 	row-gap: 4px;
 	padding-right: 12px;
 	border-right: 1px solid var(--line);
+}
+
+.editor-group:has(#insertTextButton) {
+	grid-template-columns: repeat(2, max-content);
+}
+
+.editor-group:has(#addPageButton) {
+	grid-template-columns: repeat(6, max-content);
 }
 
 .editor-group:last-child {
@@ -349,6 +357,17 @@ button:not(:disabled):hover {
 	align-items: center;
 	gap: 12px;
 	margin-bottom: 12px;
+}
+
+.form-pair {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 12px;
+}
+
+.form-pair .form-unit {
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 4px;
 }
 
 .form-options {
@@ -1742,5 +1761,15 @@ button.outline-link:hover {
 
 	.dpi-select {
 		width: 48px;
+	}
+}
+
+@media (max-width: 360px) {
+	.editor-group:has(#addPageButton) {
+		grid-template-columns: repeat(3, max-content);
+	}
+
+	.editor-group:has(#addPageButton) > button {
+		grid-row: auto;
 	}
 }

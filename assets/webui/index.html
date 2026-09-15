@@ -67,6 +67,15 @@
 				<span>插入</span>
 			</div>
 			<div class="editor-group">
+				<button id="addPageButton" class="button" type="button" aria-label="新增页面">新增</button>
+				<button id="copyPageButton" class="button" type="button" aria-label="复制页面">复制</button>
+				<button id="deletePageButton" class="button" type="button" aria-label="删除页面">删除</button>
+				<button id="movePagePrevButton" class="button" type="button" aria-label="页面前移">前移</button>
+				<button id="movePageNextButton" class="button" type="button" aria-label="页面后移">后移</button>
+				<button id="pageSettingsButton" class="button" type="button" aria-label="页面设置" aria-haspopup="dialog" aria-controls="pagePanel">设置</button>
+				<span>页面</span>
+			</div>
+			<div class="editor-group">
 				<button id="saveButton" class="button" type="button" aria-label="保存OFD">保存</button>
 				<button id="undoButton" class="button" type="button" disabled>撤销</button>
 				<button id="redoButton" class="button" type="button" disabled>重做</button>
@@ -79,18 +88,46 @@
 					<label for="createName">名称</label>
 					<input id="createName" type="text" value="未命名" required autofocus>
 				</div>
-				<div class="form-row">
-					<label for="createWidth">宽度</label>
-					<div class="form-unit"><input id="createWidth" type="number" value="210" min="1" step="any" required><span>mm</span></div>
-				</div>
-				<div class="form-row">
-					<label for="createHeight">高度</label>
-					<div class="form-unit"><input id="createHeight" type="number" value="297" min="1" step="any" required><span>mm</span></div>
+				<div class="form-pair">
+					<div class="form-row">
+						<label for="createWidth">宽度</label>
+						<div class="form-unit"><input id="createWidth" type="number" value="210" min="1" step="any" required><span>mm</span></div>
+					</div>
+					<div class="form-row">
+						<label for="createHeight">高度</label>
+						<div class="form-unit"><input id="createHeight" type="number" value="297" min="1" step="any" required><span>mm</span></div>
+					</div>
 				</div>
 				<div class="form-actions">
 					<div id="createStatus" class="form-status" role="status"></div>
 					<button id="createCancel" class="button" type="button">取消</button>
 					<button class="button" type="submit">新建</button>
+				</div>
+			</form>
+		</dialog>
+		<dialog id="pagePanel" class="form-dialog" aria-label="页面设置">
+			<form id="pageForm">
+				<div class="form-row">
+					<span id="pageDirectionLabel">方向</span>
+					<div class="form-options" role="radiogroup" aria-labelledby="pageDirectionLabel">
+						<label><input id="pagePortrait" type="radio" name="direction" value="portrait" autofocus><span>竖向</span></label>
+						<label><input id="pageLandscape" type="radio" name="direction" value="landscape"><span>横向</span></label>
+					</div>
+				</div>
+				<div class="form-pair">
+					<div class="form-row">
+						<label for="pageWidth">宽度</label>
+						<div class="form-unit"><input id="pageWidth" type="number" min="1" step="any" required><span>mm</span></div>
+					</div>
+					<div class="form-row">
+						<label for="pageHeight">高度</label>
+						<div class="form-unit"><input id="pageHeight" type="number" min="1" step="any" required><span>mm</span></div>
+					</div>
+				</div>
+				<div class="form-actions">
+					<div id="pageStatus" class="form-status" role="status"></div>
+					<button id="pageCancel" class="button" type="button">取消</button>
+					<button class="button" type="submit">确定</button>
 				</div>
 			</form>
 		</dialog>
