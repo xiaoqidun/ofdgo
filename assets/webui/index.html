@@ -58,7 +58,15 @@
 			<div class="editor-group">
 				<button id="selectObjectButton" class="button" type="button" aria-pressed="true">选择</button>
 				<button id="editTextButton" class="button" type="button" aria-label="修改文字" disabled>修改</button>
+				<button id="copyObjectButton" class="button" type="button" aria-label="复制对象" disabled>复制</button>
 				<button id="deleteObjectButton" class="button" type="button" disabled>删除</button>
+				<select id="objectOrder" class="order-select" aria-label="对象层级" disabled>
+					<option value="" hidden>层级</option>
+					<option value="up">上移</option>
+					<option value="down">下移</option>
+					<option value="top">置顶</option>
+					<option value="bottom">置底</option>
+				</select>
 				<span>对象</span>
 			</div>
 			<div class="editor-group">

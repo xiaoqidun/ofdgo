@@ -104,6 +104,10 @@ a:focus-visible {
 	border-right: 1px solid var(--line);
 }
 
+.editor-group:has(#selectObjectButton) {
+	grid-template-columns: repeat(5, max-content);
+}
+
 .editor-group:has(#insertTextButton) {
 	grid-template-columns: repeat(2, max-content);
 }
@@ -116,12 +120,14 @@ a:focus-visible {
 	border-right: 0;
 }
 
-.editor-group > button {
+.editor-group > button,
+.editor-group > select {
 	grid-row: 1;
 }
 
 .editor-group > span {
 	grid-column: 1 / -1;
+	align-self: end;
 	text-align: center;
 	font-size: 12px;
 	color: var(--text-muted);
@@ -314,7 +320,8 @@ button:not(:disabled):hover {
 	margin: 0;
 }
 
-.format-select {
+.format-select,
+.order-select {
 	width: 58px;
 	height: var(--control-height);
 	min-width: 0;
@@ -424,8 +431,26 @@ button:not(:disabled):hover {
 }
 
 .form-row input[type="file"] {
-	height: auto;
-	padding: 4px;
+	padding: 0;
+	color: var(--text-muted);
+}
+
+.form-row input[type="file"]::file-selector-button {
+	height: 100%;
+	margin: 0 8px 0 0;
+	padding: 0 8px;
+	border: 0;
+	border-right: 1px solid var(--line);
+	border-radius: 0;
+	background: var(--panel);
+	color: #1f2428;
+	font: inherit;
+	cursor: pointer;
+}
+
+.form-row input[type="file"]::file-selector-button:hover {
+	background: #e4f3ef;
+	color: var(--accent-strong);
 }
 
 .form-unit {
@@ -475,13 +500,16 @@ button:not(:disabled):hover {
 }
 
 .format-select:focus,
-.format-select:focus-visible {
+.format-select:focus-visible,
+.order-select:focus,
+.order-select:focus-visible {
 	border-color: var(--accent);
 	outline: 2px solid var(--accent);
 	outline-offset: 2px;
 }
 
-.format-select option:checked {
+.format-select option:checked,
+.order-select option:checked {
 	background-color: #e4f3ef;
 	color: var(--accent-strong);
 }

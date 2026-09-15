@@ -1,4 +1,4 @@
-import { CanvasEditor } from "./ofdgo_edit.js";
+import { CanvasEditor, objectTransform } from "./ofdgo_edit.js";
 import { FontManager } from "./ofdgo_font.js";
 
 const MM_TO_PX = 96 / 25.4;
@@ -87,6 +87,8 @@ const el = {
 	selectObjectButton: document.querySelector("#selectObjectButton"),
 	deleteObjectButton: document.querySelector("#deleteObjectButton"),
 	editTextButton: document.querySelector("#editTextButton"),
+	copyObjectButton: document.querySelector("#copyObjectButton"),
+	objectOrder: document.querySelector("#objectOrder"),
 	undoButton: document.querySelector("#undoButton"),
 	redoButton: document.querySelector("#redoButton"),
 	insertTextButton: document.querySelector("#insertTextButton"),
@@ -246,6 +248,27 @@ el.editTextButton.addEventListener("click", () => {
 	if (canvasEditor.selected && !canvasEditor.selected.image) {
 		openInsertPanel(true, canvasEditor.selected);
 	}
+});
+el.copyObjectButton.addEventListener("click", () => {
+	const item = canvasEditor.selected;
+	if (!item) {
+		return;
+	}
+	let change = objectTransform(item, item.page, 3, 3);
+	if (!change.x && !change.y) {
+		change = objectTransform(item, item.page, -3, -3);
+	}
+	return changeDocument("ofdgoCopyObject", item, change.x, change.y);
+});
+el.objectOrder.addEventListener("change", () => {
+	const action = el.objectOrder.value;
+	el.objectOrder.value = "";
+	const item = canvasEditor.selected;
+	if (!item || !action) {
+		return;
+	}
+	const targets = { up: item.order + 1, down: item.order - 1, top: item.count - 1, bottom: 0 };
+	return changeDocument("ofdgoMoveObject", item, targets[action]);
 });
 el.undoButton.addEventListener("click", () => changeDocument("ofdgoUndo"));
 el.redoButton.addEventListener("click", () => changeDocument("ofdgoRedo"));
@@ -719,6 +742,9 @@ async function changeDocument(name, item, ...args) {
 		setEditorInfo(doc);
 		if (!item || name === "ofdgoDeleteObject") {
 			canvasEditor.clear();
+		}
+		if (name === "ofdgoCopyObject") {
+			canvasEditor.selectLast = true;
 		}
 		openSeq = ++state.openSeq;
 		if (item) {
@@ -3771,8 +3797,13 @@ function updateEditorTools() {
 }
 
 function updateObjectControls(item) {
-	el.deleteObjectButton.disabled = !item || !state.ready || state.exporting;
+	const disabled = !item || !state.ready || state.exporting;
+	el.deleteObjectButton.disabled = el.copyObjectButton.disabled = disabled;
 	el.editTextButton.disabled = !item || item.image || !state.ready || state.exporting;
+	el.objectOrder.disabled = disabled || item.count <= 1;
+	for (const option of el.objectOrder.options) {
+		option.disabled = disabled || (["up", "top"].includes(option.value) ? item.order === item.count - 1 : item.order === 0);
+	}
 }
 
 function updateAnnotationButton() {

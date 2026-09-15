@@ -101,6 +101,8 @@ func RunWASM() {
 	registerCallback("ofdgoUpdateText", updateText)
 	registerCallback("ofdgoInsertImage", insertImage)
 	registerCallback("ofdgoTransformObject", transformObject)
+	registerCallback("ofdgoCopyObject", copyObject)
+	registerCallback("ofdgoMoveObject", moveObject)
 	registerCallback("ofdgoDeleteObject", deleteObject)
 	registerCallback("ofdgoUndo", func([]js.Value) (any, error) { return restoreEditor(false) })
 	registerCallback("ofdgoRedo", func([]js.Value) (any, error) { return restoreEditor(true) })
@@ -589,7 +591,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 		fontNames[font.ID] = font.FontName
 	}
 	for _, layer := range page.Content.Layer {
-		for _, object := range layer.Objects {
+		for order, object := range layer.Objects {
 			var id string
 			var box ofdgo.Box
 			switch object.Type {
@@ -606,7 +608,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 				continue
 			}
 			if box.W > 0 && box.H > 0 {
-				item := map[string]any{"id": id, "image": object.Type == "ImageObject", "x": box.X, "y": box.Y, "width": box.W, "height": box.H}
+				item := map[string]any{"id": id, "image": object.Type == "ImageObject", "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "count": len(layer.Objects)}
 				if object.Type == "TextObject" {
 					item["text"], item["font"], item["fontName"], item["size"] = textValues[id], object.TextObject.Font, fontNames[object.TextObject.Font], object.TextObject.Size
 				}
@@ -650,6 +652,55 @@ func transformObject(args []js.Value) (any, error) {
 	*boundary = fmt.Sprintf("%g %g %g %g", box.X+args[2].Float(), box.Y+args[3].Float(), box.W*scale, box.H*scale)
 	if err := currentEditor.UpdateObject(page, id, object); err != nil {
 		return nil, err
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// copyObject 复制选中对象并平移，复用字体和图片资源
+// 入参: args 页码、对象标识和位移
+// 返回: any 文档信息, error 错误信息
+func copyObject(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	page := args[0].Int()
+	object, err := currentEditor.Object(page, args[1].String())
+	if err != nil {
+		return nil, err
+	}
+	var boundary *string
+	switch object.Type {
+	case "TextObject":
+		boundary = &object.TextObject.Boundary
+	case "ImageObject":
+		boundary = &object.ImageObject.Boundary
+	default:
+		return nil, fmt.Errorf("unsupported object type %q", object.Type)
+	}
+	box, err := ofdgo.ParseBox(*boundary)
+	if err != nil {
+		return nil, err
+	}
+	*boundary = fmt.Sprintf("%g %g %g %g", box.X+args[2].Float(), box.Y+args[3].Float(), box.W, box.H)
+	if _, err := currentEditor.AddObject(page, object); err != nil {
+		return nil, err
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// moveObject 调整选中对象的绘制顺序
+// 入参: args 页码、对象标识和目标索引
+// 返回: any 文档信息, error 错误信息
+func moveObject(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	revision := currentEditor.Revision()
+	if err := currentEditor.MoveObject(args[0].Int(), args[1].String(), args[2].Int()); err != nil {
+		return nil, err
+	}
+	if currentEditor.Revision() == revision {
+		return editorSummary(), nil
 	}
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
