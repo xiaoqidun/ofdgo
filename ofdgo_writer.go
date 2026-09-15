@@ -101,13 +101,11 @@ func (e *Editor) validate() error {
 // 返回: error 错误信息
 func (e *Editor) writeParts(write func(string, []byte, bool) error) error {
 	writeXML := func(name string, encode func(*ofdXML)) error {
-		var data bytes.Buffer
-		x := newOFDXML(&data)
-		encode(x)
-		if err := x.finish(); err != nil {
+		data, err := encodeOFDXML(encode)
+		if err != nil {
 			return err
 		}
-		return write(name, data.Bytes(), false)
+		return write(name, data, false)
 	}
 	if err := writeXML("OFD.xml", func(x *ofdXML) {
 		x.root("OFD", ofdAttrs{{Name: xml.Name{Local: "Version"}, Value: "1.0"}, {Name: xml.Name{Local: "DocType"}, Value: "OFD"}})
@@ -171,23 +169,7 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error) error {
 	}
 	for i, page := range e.pages {
 		if err := writeXML(fmt.Sprintf("Doc_0/Pages/%d/Content.xml", i+1), func(x *ofdXML) {
-			x.root("Page", nil)
-			x.start("Area", nil)
-			x.text("PhysicalBox", page.Area.PhysicalBox)
-			x.end("Area")
-			x.start("Content", nil)
-			for _, layer := range page.Content.Layer {
-				var attrs ofdAttrs
-				attrs.add("ID", layer.ID)
-				attrs.add("Type", layer.Type)
-				x.start("Layer", attrs)
-				for _, object := range layer.Objects {
-					x.object(object, false)
-				}
-				x.end("Layer")
-			}
-			x.end("Content")
-			x.end("Page")
+			x.page(page)
 		}); err != nil {
 			return err
 		}
@@ -198,6 +180,28 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error) error {
 		}
 	}
 	return nil
+}
+
+// page 写出页面尺寸、图层和对象
+// 入参: page 页面内容
+func (x *ofdXML) page(page PageContent) {
+	x.root("Page", nil)
+	x.start("Area", nil)
+	x.text("PhysicalBox", page.Area.PhysicalBox)
+	x.end("Area")
+	x.start("Content", nil)
+	for _, layer := range page.Content.Layer {
+		var attrs ofdAttrs
+		attrs.add("ID", layer.ID)
+		attrs.add("Type", layer.Type)
+		x.start("Layer", attrs)
+		for _, object := range layer.Objects {
+			x.object(object, false)
+		}
+		x.end("Layer")
+	}
+	x.end("Content")
+	x.end("Page")
 }
 
 // writeResources 写出文档资源索引
@@ -362,13 +366,13 @@ func (a *ofdAttrs) alpha(value *int) {
 	}
 }
 
-// objectXML 编码单个对象，用于隔离调用方数据并统一读写语义
-// 入参: object 图形对象
+// encodeOFDXML 编码文档节点，用于保存和独立副本
+// 入参: encode 节点写入方法
 // 返回: []byte XML数据, error 错误信息
-func objectXML(object GraphicObject) ([]byte, error) {
+func encodeOFDXML(encode func(*ofdXML)) ([]byte, error) {
 	var data bytes.Buffer
 	x := newOFDXML(&data)
-	x.object(object, true)
+	encode(x)
 	if err := x.finish(); err != nil {
 		return nil, err
 	}

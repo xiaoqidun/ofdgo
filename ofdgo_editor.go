@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"image"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -32,7 +33,7 @@ import (
 )
 
 // Editor 新建OFD文档，长度单位为毫米，页面索引从0开始，实例需串行使用
-// Info可修改文档元数据，页面和资源通过方法添加，不修改已有OFD文件
+// Info可修改文档元数据，通过方法管理页面、对象和资源，不修改已有OFD文件
 type Editor struct {
 	Info       DocInfo
 	pages      []PageContent
@@ -75,6 +76,42 @@ func NewEditor() *Editor {
 	}
 }
 
+// PageCount 获取当前页数
+// 返回: int 页数
+func (e *Editor) PageCount() int {
+	return len(e.pages)
+}
+
+// Page 获取页面的独立副本，修改副本不影响文档
+// 入参: index 页面索引
+// 返回: *PageContent 页面内容, error 错误信息
+func (e *Editor) Page(index int) (*PageContent, error) {
+	page, err := e.page(index)
+	if err != nil {
+		return nil, err
+	}
+	data, err := encodeOFDXML(func(x *ofdXML) { x.page(*page) })
+	if err != nil {
+		return nil, err
+	}
+	var result PageContent
+	if err := xml.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	result.ID = page.ID
+	return &result, nil
+}
+
+// page 按索引获取内部页面
+// 入参: index 页面索引
+// 返回: *PageContent 页面内容, error 错误信息
+func (e *Editor) page(index int) (*PageContent, error) {
+	if index < 0 || index >= len(e.pages) {
+		return nil, fmt.Errorf("page index %d out of range", index)
+	}
+	return &e.pages[index], nil
+}
+
 // AddPage 添加页面及默认正文图层
 // 入参: width 页面宽度, height 页面高度
 // 返回: int 页面索引, error 错误信息
@@ -88,6 +125,52 @@ func (e *Editor) AddPage(width, height float64) (int, error) {
 		Content: Content{Layer: []Layer{{ID: e.nextID(), Type: "Body"}}},
 	})
 	return len(e.pages) - 1, nil
+}
+
+// DeletePage 删除页面，不回收资源或复用标识，删除后页面索引随之变化
+// 入参: index 页面索引
+// 返回: error 错误信息
+func (e *Editor) DeletePage(index int) error {
+	if _, err := e.page(index); err != nil {
+		return err
+	}
+	e.pages = slices.Delete(e.pages, index, index+1)
+	return nil
+}
+
+// MovePage 移动页面，保留页面及对象标识
+// 入参: from 原页面索引, to 移动后的页面索引
+// 返回: error 错误信息
+func (e *Editor) MovePage(from, to int) error {
+	if _, err := e.page(from); err != nil {
+		return err
+	}
+	if _, err := e.page(to); err != nil {
+		return err
+	}
+	page := e.pages[from]
+	if from < to {
+		copy(e.pages[from:to], e.pages[from+1:to+1])
+	} else {
+		copy(e.pages[to+1:from+1], e.pages[to:from])
+	}
+	e.pages[to] = page
+	return nil
+}
+
+// ResizePage 调整页面尺寸，不缩放或移动页面内的对象
+// 入参: index 页面索引, width 页面宽度, height 页面高度
+// 返回: error 错误信息
+func (e *Editor) ResizePage(index int, width, height float64) error {
+	page, err := e.page(index)
+	if err != nil {
+		return err
+	}
+	if !finite(width) || !finite(height) || width <= 0 || height <= 0 {
+		return fmt.Errorf("page dimensions must be finite and positive")
+	}
+	page.Area.PhysicalBox = fmt.Sprintf("0 0 %s %s", ofdNumber(width), ofdNumber(height))
+	return nil
 }
 
 // nextID 分配文档内唯一标识
@@ -203,10 +286,89 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 // 入参: page 页面索引, object 对象内容，添加后不再引用调用方的可变数据
 // 返回: string 对象标识, error 错误信息
 func (e *Editor) AddObject(page int, object GraphicObject) (string, error) {
-	if page < 0 || page >= len(e.pages) {
-		return "", fmt.Errorf("page index %d out of range", page)
+	content, err := e.page(page)
+	if err != nil {
+		return "", err
 	}
 	id := strconv.Itoa(e.maxID + 1)
+	object, err = e.prepareObject(id, object)
+	if err != nil {
+		return "", err
+	}
+	e.maxID++
+	content.Content.Layer[0].Objects = append(content.Content.Layer[0].Objects, object)
+	return id, nil
+}
+
+// Object 获取对象的独立副本，修改副本不影响文档
+// 入参: page 页面索引, id 对象标识
+// 返回: GraphicObject 对象内容, error 错误信息
+func (e *Editor) Object(page int, id string) (GraphicObject, error) {
+	layer, index, err := e.findObject(page, id)
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	return cloneEditorObject(layer.Objects[index])
+}
+
+// UpdateObject 替换对象内容，保留原对象标识和绘制顺序，校验规则与AddObject相同
+// 入参: page 页面索引, id 对象标识, object 新内容，忽略其ID且不引用调用方的可变数据
+// 返回: error 错误信息
+func (e *Editor) UpdateObject(page int, id string, object GraphicObject) error {
+	layer, index, err := e.findObject(page, id)
+	if err != nil {
+		return err
+	}
+	object, err = e.prepareObject(id, object)
+	if err != nil {
+		return err
+	}
+	layer.Objects[index] = object
+	return nil
+}
+
+// DeleteObject 删除对象，不回收资源或复用标识
+// 入参: page 页面索引, id 对象标识
+// 返回: error 错误信息
+func (e *Editor) DeleteObject(page int, id string) error {
+	layer, index, err := e.findObject(page, id)
+	if err != nil {
+		return err
+	}
+	layer.Objects = slices.Delete(layer.Objects, index, index+1)
+	return nil
+}
+
+// findObject 查找正文图层中的对象
+// 入参: page 页面索引, id 对象标识
+// 返回: *Layer 所属图层, int 对象索引, error 错误信息
+func (e *Editor) findObject(page int, id string) (*Layer, int, error) {
+	content, err := e.page(page)
+	if err != nil {
+		return nil, 0, err
+	}
+	layer := &content.Content.Layer[0]
+	for index, object := range layer.Objects {
+		var objectID string
+		switch object.Type {
+		case "TextObject":
+			objectID = object.TextObject.ID
+		case "PathObject":
+			objectID = object.PathObject.ID
+		case "ImageObject":
+			objectID = object.ImageObject.ID
+		}
+		if objectID == id {
+			return layer, index, nil
+		}
+	}
+	return nil, 0, fmt.Errorf("object %q not found on page %d", id, page)
+}
+
+// prepareObject 校验基本对象并生成独立副本
+// 入参: id 对象标识, object 对象内容
+// 返回: GraphicObject 对象内容, error 错误信息
+func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, error) {
 	var boundary, ctm, drawParam, join string
 	var alpha *int
 	var clips *Clips
@@ -216,7 +378,7 @@ func (e *Editor) AddObject(page int, object GraphicObject) (string, error) {
 	case "TextObject":
 		obj := &object.TextObject
 		if err := e.prepareText(obj); err != nil {
-			return "", err
+			return GraphicObject{}, err
 		}
 		obj.ID = id
 		boundary, ctm, drawParam = obj.Boundary, obj.CTM, obj.DrawParam
@@ -226,34 +388,34 @@ func (e *Editor) AddObject(page int, object GraphicObject) (string, error) {
 	case "PathObject":
 		obj := &object.PathObject
 		if err := creationPath(obj.AbbreviatedData); err != nil {
-			return "", err
+			return GraphicObject{}, err
 		}
 		if obj.Rule != "" && obj.Rule != "NonZero" && obj.Rule != "Even-Odd" {
-			return "", fmt.Errorf("invalid fill rule %q", obj.Rule)
+			return GraphicObject{}, fmt.Errorf("invalid fill rule %q", obj.Rule)
 		}
 		if !finite(obj.LineWidth) || obj.LineWidth < 0 || !finite(obj.MiterLimit) || obj.MiterLimit < 0 {
-			return "", fmt.Errorf("invalid path stroke dimensions")
+			return GraphicObject{}, fmt.Errorf("invalid path stroke dimensions")
 		}
 		if obj.Cap != "" && obj.Cap != "Butt" && obj.Cap != "Round" && obj.Cap != "Square" {
-			return "", fmt.Errorf("invalid line cap %q", obj.Cap)
+			return GraphicObject{}, fmt.Errorf("invalid line cap %q", obj.Cap)
 		}
 		if obj.DashOffset != nil && !finite(*obj.DashOffset) {
-			return "", fmt.Errorf("invalid dash offset")
+			return GraphicObject{}, fmt.Errorf("invalid dash offset")
 		}
 		if obj.DashPattern != "" {
 			values, err := creationNumbers(obj.DashPattern, len(strings.Fields(obj.DashPattern)))
 			if err != nil {
-				return "", err
+				return GraphicObject{}, err
 			}
 			total := 0.0
 			for _, value := range values {
 				if value < 0 {
-					return "", fmt.Errorf("dash lengths must not be negative")
+					return GraphicObject{}, fmt.Errorf("dash lengths must not be negative")
 				}
 				total += value
 			}
 			if total == 0 {
-				return "", fmt.Errorf("dash pattern must have a positive length")
+				return GraphicObject{}, fmt.Errorf("dash pattern must have a positive length")
 			}
 		}
 		obj.ID = id
@@ -264,45 +426,52 @@ func (e *Editor) AddObject(page int, object GraphicObject) (string, error) {
 	case "ImageObject":
 		obj := &object.ImageObject
 		if !e.images[obj.ResourceID] || (obj.ImageMask != "" && !e.images[obj.ImageMask]) {
-			return "", fmt.Errorf("image resource not found")
+			return GraphicObject{}, fmt.Errorf("image resource not found")
 		}
 		if obj.Border != nil {
-			return "", fmt.Errorf("image borders are not supported for creation")
+			return GraphicObject{}, fmt.Errorf("image borders are not supported for creation")
 		}
 		obj.ID = id
 		boundary, ctm = obj.Boundary, obj.CTM
 		alpha, clips, actions = obj.Alpha, obj.Clips, obj.Actions
 	default:
-		return "", fmt.Errorf("unsupported object type %q", object.Type)
+		return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
 	}
 	box, err := creationBox(boundary)
 	if err != nil {
-		return "", err
+		return GraphicObject{}, err
 	}
 	if ctm != "" {
 		if _, err := creationNumbers(ctm, 6); err != nil {
-			return "", fmt.Errorf("invalid CTM: %w", err)
+			return GraphicObject{}, fmt.Errorf("invalid CTM: %w", err)
 		}
 	} else if object.Type == "ImageObject" {
 		object.ImageObject.CTM = fmt.Sprintf("%s 0 0 %s 0 0", ofdNumber(box.W), ofdNumber(box.H))
 	}
 	if drawParam != "" || clips != nil || len(actions) != 0 {
-		return "", fmt.Errorf("draw parameter references, clips and actions are not supported for creation")
+		return GraphicObject{}, fmt.Errorf("draw parameter references, clips and actions are not supported for creation")
 	}
 	if alpha != nil && (*alpha < 0 || *alpha > 255) {
-		return "", fmt.Errorf("alpha must be between 0 and 255")
+		return GraphicObject{}, fmt.Errorf("alpha must be between 0 and 255")
 	}
 	for _, color := range []*FillColor{fill, stroke} {
 		if err := creationColor(color); err != nil {
-			return "", err
+			return GraphicObject{}, err
 		}
 	}
 	if join != "" && join != "Miter" && join != "Round" && join != "Bevel" {
-		return "", fmt.Errorf("invalid line join %q", join)
+		return GraphicObject{}, fmt.Errorf("invalid line join %q", join)
 	}
-	data, err := objectXML(object)
+	return cloneEditorObject(object)
+}
+
+// cloneEditorObject 通过统一序列化规则复制对象
+// 入参: object 对象内容
+// 返回: GraphicObject 独立副本, error 错误信息
+func cloneEditorObject(object GraphicObject) (GraphicObject, error) {
+	data, err := encodeOFDXML(func(x *ofdXML) { x.object(object, true) })
 	if err != nil {
-		return "", err
+		return GraphicObject{}, err
 	}
 	object = GraphicObject{Type: object.Type}
 	var target any
@@ -315,11 +484,9 @@ func (e *Editor) AddObject(page int, object GraphicObject) (string, error) {
 		target = &object.ImageObject
 	}
 	if err := xml.Unmarshal(data, target); err != nil {
-		return "", err
+		return GraphicObject{}, err
 	}
-	e.maxID++
-	e.pages[page].Content.Layer[0].Objects = append(e.pages[page].Content.Layer[0].Objects, object)
-	return id, nil
+	return object, nil
 }
 
 // AddText 添加单行文字，使用嵌入字体的字宽定位，不进行段落排版和复杂文字塑形
