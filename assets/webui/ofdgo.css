@@ -108,7 +108,8 @@ a:focus-visible {
 	grid-template-columns: repeat(5, max-content);
 }
 
-.editor-group:has(#insertTextButton) {
+.editor-group:has(#insertTextButton),
+.editor-group:has(#textSize) {
 	grid-template-columns: repeat(2, max-content);
 }
 
@@ -120,8 +121,7 @@ a:focus-visible {
 	border-right: 0;
 }
 
-.editor-group > button,
-.editor-group > select {
+.editor-group > :not(span) {
 	grid-row: 1;
 }
 
@@ -419,7 +419,8 @@ button:not(:disabled):hover {
 .form-row input[type="text"],
 .form-row input[type="number"],
 .form-row input[type="file"],
-.form-row select {
+.form-row select,
+.text-size input {
 	width: 100%;
 	min-width: 0;
 	height: var(--control-height);
@@ -428,6 +429,33 @@ button:not(:disabled):hover {
 	border-radius: 0;
 	background: #ffffff;
 	color: #1f2428;
+}
+
+.form-unit.text-size {
+	grid-template-columns: calc(2em + 22px) auto;
+	gap: 6px;
+}
+
+.color-input {
+	width: calc(2em + 22px);
+	height: var(--control-height);
+	padding: 3px;
+	border: 1px solid var(--line);
+	border-radius: 0;
+	background: #ffffff;
+	cursor: pointer;
+}
+
+.color-input::-webkit-color-swatch-wrapper {
+	padding: 0;
+}
+
+.color-input::-webkit-color-swatch {
+	border: 0;
+}
+
+.color-input::-moz-color-swatch {
+	border: 0;
 }
 
 .form-row input[type="file"] {

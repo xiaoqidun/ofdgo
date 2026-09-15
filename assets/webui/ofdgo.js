@@ -89,6 +89,8 @@ const el = {
 	editTextButton: document.querySelector("#editTextButton"),
 	copyObjectButton: document.querySelector("#copyObjectButton"),
 	objectOrder: document.querySelector("#objectOrder"),
+	textSize: document.querySelector("#textSize"),
+	textColor: document.querySelector("#textColor"),
 	undoButton: document.querySelector("#undoButton"),
 	redoButton: document.querySelector("#redoButton"),
 	insertTextButton: document.querySelector("#insertTextButton"),
@@ -120,11 +122,13 @@ const el = {
 	insertTextRow: document.querySelector("#insertTextRow"),
 	insertFontRow: document.querySelector("#insertFontRow"),
 	insertSizeRow: document.querySelector("#insertSizeRow"),
+	insertColorRow: document.querySelector("#insertColorRow"),
 	insertImageRow: document.querySelector("#insertImageRow"),
 	insertText: document.querySelector("#insertText"),
 	insertFont: document.querySelector("#insertFont"),
 	insertFontAdd: document.querySelector("#insertFontAdd"),
 	insertSize: document.querySelector("#insertSize"),
+	insertColor: document.querySelector("#insertColor"),
 	insertImage: document.querySelector("#insertImage"),
 	insertStatus: document.querySelector("#insertStatus"),
 	insertCancel: document.querySelector("#insertCancel"),
@@ -247,6 +251,17 @@ el.deleteObjectButton.addEventListener("click", () => {
 el.editTextButton.addEventListener("click", () => {
 	if (canvasEditor.selected && !canvasEditor.selected.image) {
 		openInsertPanel(true, canvasEditor.selected);
+	}
+});
+el.textSize.addEventListener("change", () => changeTextStyle(false));
+el.textColor.addEventListener("change", () => changeTextStyle(true));
+el.textSize.addEventListener("keydown", (event) => {
+	if (event.key === "Enter" || event.key === "Escape") {
+		event.preventDefault();
+		if (event.key === "Escape") {
+			updateObjectControls(canvasEditor.selected, true);
+		}
+		el.textSize.blur();
 	}
 });
 el.copyObjectButton.addEventListener("click", () => {
@@ -628,11 +643,12 @@ async function openInsertPanel(text, item = null) {
 	if (item) {
 		state.insertFonts = [];
 		el.insertText.value = item.text;
-		el.insertSize.value = Number((item.size * 72 / 25.4).toPrecision(12));
+		el.insertSize.value = textPoints(item.size);
+		el.insertColor.value = item.color;
 	}
 	el.insertPanel.setAttribute("aria-label", item ? "修改文字" : text ? "添加文字" : "添加图片");
 	el.insertSubmit.textContent = item ? "修改" : "添加";
-	for (const [row, input] of [[el.insertTextRow, el.insertText], [el.insertFontRow, el.insertFont], [el.insertSizeRow, el.insertSize]]) {
+	for (const [row, input] of [[el.insertTextRow, el.insertText], [el.insertFontRow, el.insertFont], [el.insertSizeRow, el.insertSize], [el.insertColorRow, el.insertColor]]) {
 		row.hidden = !text;
 		input.disabled = !text;
 	}
@@ -690,16 +706,20 @@ async function insertObject(event) {
 			return;
 		}
 		const points = Number(el.insertSize.value);
-		const size = item && points === Number((item.size * 72 / 25.4).toPrecision(12)) ? item.size : points * 25.4 / 72;
+		const size = item && points === textPoints(item.size) ? item.size : points * 25.4 / 72;
 		const doc = item
-			? await callWASM("ofdgoUpdateText", item.index, item.id, el.insertText.value, data, size)
-			: text ? await callWASM("ofdgoInsertText", index, el.insertText.value, data, x, y, size)
+			? await callWASM("ofdgoUpdateText", item.index, item.id, el.insertText.value, data, size, el.insertColor.value === item.color ? null : el.insertColor.value)
+			: text ? await callWASM("ofdgoInsertText", index, el.insertText.value, data, x, y, size, el.insertColor.value)
 			: await callWASM("ofdgoInsertImage", index, data, x, y, page.width - x * 2);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		setEditorInfo(doc);
 		el.insertPanel.close();
+		if (item && doc.revision === state.editorInfo?.revision) {
+			el.viewerPanel.focus({ preventScroll: true });
+			return;
+		}
+		setEditorInfo(doc);
 		canvasEditor.selectLast = !item;
 		state.selectObjects = true;
 		setPan(false);
@@ -721,6 +741,28 @@ async function insertObject(event) {
 			setBusy(false);
 		}
 	}
+}
+
+function textPoints(size) {
+	return Number((size * 72 / 25.4).toPrecision(12));
+}
+
+async function changeTextStyle(color) {
+	const item = canvasEditor.selected;
+	if (!item || item.image || !state.ready || state.exporting) {
+		return;
+	}
+	if (!color && !el.textSize.checkValidity()) {
+		showError(new Error("字号无效"), false);
+		updateObjectControls(item, true);
+		return;
+	}
+	const size = color || Number(el.textSize.value) === textPoints(item.size) ? item.size : Number(el.textSize.value) * 25.4 / 72;
+	const fill = color && el.textColor.value !== item.color ? el.textColor.value : null;
+	if (size !== item.size || fill !== null) {
+		await changeDocument("ofdgoUpdateText", item, color ? null : item.text, null, size, fill);
+	}
+	updateObjectControls(canvasEditor.selected, true);
 }
 
 async function changeDocument(name, item, ...args) {
@@ -3796,10 +3838,17 @@ function updateEditorTools() {
 	el.redoButton.disabled = !state.editorInfo?.canRedo || !state.ready || state.exporting;
 }
 
-function updateObjectControls(item) {
+function updateObjectControls(item, reset = false) {
 	const disabled = !item || !state.ready || state.exporting;
 	el.deleteObjectButton.disabled = el.copyObjectButton.disabled = disabled;
 	el.editTextButton.disabled = !item || item.image || !state.ready || state.exporting;
+	el.textSize.disabled = el.textColor.disabled = el.editTextButton.disabled;
+	if (reset || el.textSize.disabled || document.activeElement !== el.textSize) {
+		el.textSize.value = item && !item.image ? textPoints(item.size) : "";
+	}
+	if (reset || el.textColor.disabled || document.activeElement !== el.textColor) {
+		el.textColor.value = item && !item.image ? item.color : "#000000";
+	}
 	el.objectOrder.disabled = disabled || item.count <= 1;
 	for (const option of el.objectOrder.options) {
 		option.disabled = disabled || (["up", "top"].includes(option.value) ? item.order === item.count - 1 : item.order === 0);

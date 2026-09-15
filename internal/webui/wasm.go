@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -611,6 +612,13 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 				item := map[string]any{"id": id, "image": object.Type == "ImageObject", "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "count": len(layer.Objects)}
 				if object.Type == "TextObject" {
 					item["text"], item["font"], item["fontName"], item["size"] = textValues[id], object.TextObject.Font, fontNames[object.TextObject.Font], object.TextObject.Size
+					var r, g, b float64
+					if fill := object.TextObject.FillColor; fill != nil {
+						if _, err := fmt.Sscan(fill.Value, &r, &g, &b); err != nil {
+							return nil, err
+						}
+					}
+					item["color"] = fmt.Sprintf("#%02x%02x%02x", byte(r), byte(g), byte(b))
 				}
 				objects = append(objects, item)
 			}
@@ -794,8 +802,8 @@ func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 	return editorSummary(), nil
 }
 
-// updateText 修改文字内容、字体和字号，空字体数据沿用对象字体
-// 入参: args 页码、对象标识、内容、字体数据和字号
+// updateText 修改文字，null内容保留排版，null字体数据和颜色沿用对象属性
+// 入参: args 页码、对象标识、内容、字体数据、字号和颜色
 // 返回: any 文档信息, error 错误信息
 func updateText(args []js.Value) (any, error) {
 	if currentEditor == nil {
@@ -806,25 +814,60 @@ func updateText(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	fontID := object.TextObject.Font
-	if !args[3].IsNull() {
-		data, err := bytesFromJS(args[3])
-		if err != nil {
-			return nil, err
+	if object.Type != "TextObject" {
+		return nil, fmt.Errorf("object %q is not text", id)
+	}
+	if !args[2].IsNull() {
+		if !args[3].IsNull() {
+			data, err := bytesFromJS(args[3])
+			if err != nil {
+				return nil, err
+			}
+			object.TextObject.Font, err = currentEditor.AddFont(FontFile{Data: data}, 0)
+			if err != nil {
+				return nil, err
+			}
 		}
-		fontID, err = currentEditor.AddFont(FontFile{Data: data}, 0)
-		if err != nil {
+		object.TextObject.Size = args[4].Float()
+		if err := currentEditor.LayoutText(&object.TextObject, args[2].String()); err != nil {
 			return nil, err
 		}
 	}
-	if err := currentEditor.UpdateText(page, id, args[2].String(), fontID, args[4].Float()); err != nil {
+	if !args[5].IsNull() {
+		if err := setTextColor(&object.TextObject, args[5].String()); err != nil {
+			return nil, err
+		}
+	}
+	revision := currentEditor.Revision()
+	if err := currentEditor.UpdateObject(page, id, object); err != nil {
 		return nil, err
+	}
+	if currentEditor.Revision() == revision {
+		return editorSummary(), nil
 	}
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
 
+// setTextColor 将浏览器RGB色值写入文字对象，保留颜色透明度
+// 入参: object 文字对象, value 十六进制色值
+// 返回: error 错误信息
+func setTextColor(object *ofdgo.TextObject, value string) error {
+	if len(value) != 7 || value[0] != '#' {
+		return fmt.Errorf("invalid RGB color %q", value)
+	}
+	rgb, err := hex.DecodeString(value[1:])
+	if err != nil {
+		return err
+	}
+	if object.FillColor == nil {
+		object.FillColor = &ofdgo.FillColor{}
+	}
+	object.FillColor.Value = fmt.Sprintf("%d %d %d", rgb[0], rgb[1], rgb[2])
+	return nil
+}
+
 // insertText 使用选定字体创建文字对象
-// 入参: args 页码、内容、字体数据、横纵坐标和字号
+// 入参: args 页码、内容、字体数据、横纵坐标、字号和颜色
 // 返回: any 文档信息, error 错误信息
 func insertText(args []js.Value) (any, error) {
 	if currentEditor == nil {
@@ -849,7 +892,17 @@ func insertText(args []js.Value) (any, error) {
 	}
 	x, y := args[3].Float(), args[4].Float()
 	box = ofdgo.Box{X: x, Y: y, W: box.W - x, H: box.H - y}
-	if _, err := currentEditor.AddText(page, box, args[1].String(), fontID, args[5].Float()); err != nil {
+	object := ofdgo.GraphicObject{Type: "TextObject", TextObject: ofdgo.TextObject{
+		Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
+		Font:     fontID, Size: args[5].Float(),
+	}}
+	if err := currentEditor.LayoutText(&object.TextObject, args[1].String()); err != nil {
+		return nil, err
+	}
+	if err := setTextColor(&object.TextObject, args[6].String()); err != nil {
+		return nil, err
+	}
+	if _, err := currentEditor.AddObject(page, object); err != nil {
 		return nil, err
 	}
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)

@@ -119,13 +119,14 @@ export class CanvasEditor {
 			return;
 		}
 		const node = event.target.closest(".edit-object");
-		if (!node) {
-			this.select(null);
+		if (node) {
+			event.preventDefault();
+		}
+		this.viewer.focus({ preventScroll: true });
+		this.select(node ? this.nodes.get(node) : null);
+		if (!node || this.options.busy()) {
 			return;
 		}
-		event.preventDefault();
-		this.select(this.nodes.get(node));
-		this.viewer.focus({ preventScroll: true });
 		const item = this.selected;
 		this.drag = {
 			item, pointerID: event.pointerId, corner: event.target.dataset.corner || "",

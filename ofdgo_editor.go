@@ -621,7 +621,7 @@ func (e *Editor) AddText(page int, box Box, value, fontID string, size float64) 
 		Boundary: fmt.Sprintf("%s %s %s %s", ofdNumber(box.X), ofdNumber(box.Y), ofdNumber(box.W), ofdNumber(box.H)),
 		Font:     fontID, Size: size,
 	}}
-	if err := e.layoutText(&object.TextObject, value); err != nil {
+	if err := e.LayoutText(&object.TextObject, value); err != nil {
 		return "", err
 	}
 	return e.AddObject(page, object)
@@ -641,7 +641,7 @@ func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) er
 		return fmt.Errorf("object %q is not text", id)
 	}
 	object.TextObject.Font, object.TextObject.Size = fontID, size
-	if err := e.layoutText(&object.TextObject, value); err != nil {
+	if err := e.LayoutText(&object.TextObject, value); err != nil {
 		return err
 	}
 	object, err = e.prepareObject(id, object)
@@ -652,16 +652,20 @@ func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) er
 	return nil
 }
 
-// layoutText 按嵌入字体度量设置横向单行文字的基线和字距
+// LayoutText 按嵌入字体度量重排横向单行文字，设置基线和字距，保留绘制属性
+// 不进行段落排版和复杂文字塑形，不修改文档，通过AddObject或UpdateObject提交
 // 入参: obj 文字对象, value 原文
 // 返回: error 错误信息
-func (e *Editor) layoutText(obj *TextObject, value string) error {
+func (e *Editor) LayoutText(obj *TextObject, value string) error {
 	if obj.ReadDirection != 0 || obj.CharDirection != 0 {
 		return fmt.Errorf("automatic text layout requires horizontal text")
 	}
 	sfnt, ok := e.fonts[obj.Font]
 	if !ok {
 		return fmt.Errorf("font resource %q not found", obj.Font)
+	}
+	if !finite(obj.Size) || obj.Size <= 0 || !finite(obj.HScale) || obj.HScale < 0 {
+		return fmt.Errorf("invalid text dimensions")
 	}
 	if !utf8.ValidString(value) || strings.ContainsAny(value, "\r\n\t") || value == "" {
 		return fmt.Errorf("text must be a nonempty UTF-8 line")
