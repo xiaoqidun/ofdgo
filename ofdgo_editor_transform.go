@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	"math"
 	"slices"
 )
 
@@ -152,6 +153,16 @@ func (e *Editor) CropImage(page int, id string, box Box) error {
 		return fmt.Errorf("object %q is not an image", id)
 	}
 	image := &object.ImageObject
+	if err := cropImageObject(image, box); err != nil {
+		return err
+	}
+	return e.UpdateObject(page, id, object)
+}
+
+// cropImageObject 更新图片副本的裁剪和局部坐标，不修改资源。
+// 入参: image 图片对象副本, box 页面毫米坐标中的保留范围
+// 返回: error 错误信息
+func cropImageObject(image *ImageObject, box Box) error {
 	full, err := image.ImageBounds()
 	if err != nil {
 		return err
@@ -181,7 +192,64 @@ func (e *Editor) CropImage(page int, id string, box Box) error {
 		path.Fill, path.Stroke = &fill, &stroke
 		image.Clips = &Clips{Clip: []Clip{{Area: []ClipArea{{CTM: inverse.String(), Path: []PathObject{path}}}}}}
 	}
+	return nil
+}
+
+// FitImage 按原始像素比例居中适应或填充当前Boundary，保留直角旋转及镜像方向。
+// 保留原始图片，不重采样；重设裁剪，一次撤销恢复原布局。
+// 入参: page 页面索引, id 图片对象标识, mode 为contain（完整显示）或cover（填满裁剪）
+// 返回: error 错误信息
+func (e *Editor) FitImage(page int, id, mode string) error {
+	object, err := e.Object(page, id)
+	if err != nil {
+		return err
+	}
+	if object.Type != "ImageObject" {
+		return fmt.Errorf("object %q is not an image", id)
+	}
+	if err := e.fitImage(&object.ImageObject, mode); err != nil {
+		return err
+	}
 	return e.UpdateObject(page, id, object)
+}
+
+// fitImage 将原始像素比例应用到当前图片框，适应时保留空白，填充时裁掉超出部分。
+// 入参: obj 图片对象副本, mode 为contain或cover
+// 返回: error 错误信息
+func (e *Editor) fitImage(obj *ImageObject, mode string) error {
+	if mode != "contain" && mode != "cover" {
+		return fmt.Errorf("invalid image fit %q", mode)
+	}
+	box, err := creationBox(obj.Boundary)
+	if err != nil {
+		return err
+	}
+	m := NewMatrix(obj.CTM)
+	if !axisAlignedMatrix(m) {
+		return fmt.Errorf("image fitting requires an axis-aligned transform")
+	}
+	size := e.images[obj.ResourceID]
+	w, h := float64(size.X), float64(size.Y)
+	if m.a == 0 {
+		w, h = h, w
+	}
+	scale := math.Min(box.W/w, box.H/h)
+	if mode == "cover" {
+		scale = math.Max(box.W/w, box.H/h)
+	}
+	if m.a == 0 {
+		m.b, m.c = math.Copysign(float64(size.X)*scale, m.b), math.Copysign(float64(size.Y)*scale, m.c)
+	} else {
+		m.a, m.d = math.Copysign(w*scale, m.a), math.Copysign(h*scale, m.d)
+	}
+	m.e, m.f = 0, 0
+	full := m.TransformBox(Box{W: 1, H: 1})
+	m.e, m.f = (box.W-full.W)/2-full.X, (box.H-full.H)/2-full.Y
+	obj.CTM, obj.Clips = m.String(), nil
+	if mode == "cover" {
+		return cropImageObject(obj, box)
+	}
+	return nil
 }
 
 // TextFrame 将对象Boundary逆变换到本地坐标并返回轴对齐边界。

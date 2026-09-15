@@ -39,7 +39,7 @@ const state = {
 	insertObject: null,
 	textFonts: [],
 	textFontID: null,
-	textDefaults: { type: "TextObject", size: 12 * 25.4 / 72, color: "#000000", wrap: true, align: "left", paragraphHeight: 0 },
+	textDefaults: { type: "TextObject", size: 12 * 25.4 / 72, color: "#000000", wrap: true, align: "left", paragraphHeight: 0, letterSpacing: 0 },
 	ofdBytes: null,
 	fileName: "ofdgo.ofd",
 	openSeq: 0,
@@ -95,12 +95,14 @@ const el = {
 	objectDistribute: document.querySelector("#objectDistribute"),
 	objectRotate: document.querySelector("#objectRotate"),
 	objectFlip: document.querySelector("#objectFlip"),
+	imageFit: document.querySelector("#imageFit"),
 	cropImageButton: document.querySelector("#cropImageButton"),
 	resetCropButton: document.querySelector("#resetCropButton"),
 	multiSelectButton: document.querySelector("#multiSelectButton"),
 	textAlign: document.querySelector("#textAlign"),
 	textWrap: document.querySelector("#textWrap"),
 	textLineHeight: document.querySelector("#textLineHeight"),
+	textSpacing: document.querySelector("#textSpacing"),
 	textFont: document.querySelector("#textFont"),
 	textFontAdd: document.querySelector("#textFontAdd"),
 	textSize: document.querySelector("#textSize"),
@@ -142,6 +144,8 @@ const el = {
 	insertPanel: document.querySelector("#insertPanel"),
 	insertForm: document.querySelector("#insertForm"),
 	insertImage: document.querySelector("#insertImage"),
+	insertFitRow: document.querySelector("#insertFitRow"),
+	insertFit: document.querySelector("#insertFit"),
 	insertStatus: document.querySelector("#insertStatus"),
 	insertCancel: document.querySelector("#insertCancel"),
 	insertSubmit: document.querySelector("#insertSubmit"),
@@ -244,7 +248,7 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onTransform: (item, change) => changeDocument(item.items ? "ofdgoTransformObjects" : "ofdgoTransformObject", item,
 		change.x + item.x * (1 - change.scale), change.y + item.y * (1 - change.scale), change.scale),
 	onReshape: (item, box) => changeDocument("ofdgoReshapeObject", item, box.x, box.y, box.width, box.height),
-	onTextWidth: (item, box) => changeDocument("ofdgoLayoutText", item, box.x - item.x, box.width, true, item.align || "", item.paragraphHeight || 0),
+	onTextWidth: (item, box) => changeDocument("ofdgoLayoutText", item, box.x - item.x, box.width, true, item.align || "", item.paragraphHeight || 0, item.letterSpacing || 0),
 	onCrop: (item, box) => changeDocument("ofdgoCropImage", item, box.x, box.y, box.width, box.height),
 	onCropChange: () => {
 		updatePendingChanges();
@@ -259,7 +263,7 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 		box.x, box.y, box.width, box.height, style.fill, style.fillColor, style.stroke, style.strokeColor, style.lineWidth),
 	onDrawText: beginCanvasText,
 	onCommitText: (item, value, fontData) => item.draft
-		? changeDocument("ofdgoInsertText", null, item.index, value, fontData || item.fontData, item.x, item.y, item.size, item.color, item.width, item.wrap, item.align, item.paragraphHeight)
+		? changeDocument("ofdgoInsertText", null, item.index, value, fontData || item.fontData, item.x, item.y, item.size, item.color, item.width, item.wrap, item.align, item.paragraphHeight, item.letterSpacing)
 		: changeDocument("ofdgoUpdateText", item, value, fontData || null, item.size, null),
 	onTextChange: () => {
 		const editing = canvasEditor.input;
@@ -271,7 +275,6 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	},
 });
 
-// updatePendingChanges 将未提交的文字和裁剪计入修改状态，不生成历史记录。
 function updatePendingChanges() {
 	const editing = canvasEditor.input;
 	setDirty(state.editing && (state.editorInfo?.revision !== state.savedRevision
@@ -282,7 +285,6 @@ el.editorTools.addEventListener("pointerdown", (event) => {
 	if (canvasEditor.input && event.target.closest("button")) event.preventDefault();
 });
 
-// editorClick 提交画布中的文字和裁剪后，再执行工具栏操作。
 function editorClick(button, action) {
 	button.addEventListener("click", async () => {
 		if (canvasEditor.input && !await canvasEditor.commitText()) return;
@@ -323,9 +325,10 @@ el.textColor.addEventListener("change", () => changeTextStyle(true));
 editorClick(el.textWrap, () => changeParagraph(!currentTextStyle().wrap));
 el.textAlign.addEventListener("change", () => changeParagraph());
 el.textLineHeight.addEventListener("change", () => changeParagraph());
+el.textSpacing.addEventListener("change", () => changeParagraph());
 el.textFont.addEventListener("change", changeTextFont);
 el.shapeWidth.addEventListener("focus", () => { el.shapeWidth.defaultValue = el.shapeWidth.value; });
-for (const input of [el.textSize, el.shapeWidth, el.textLineHeight]) {
+for (const input of [el.textSize, el.shapeWidth, el.textLineHeight, el.textSpacing]) {
 	input.addEventListener("keydown", (event) => {
 		if (event.isComposing) return;
 		if (event.key === "Enter" || event.key === "Escape") {
@@ -387,7 +390,12 @@ el.cropImageButton.addEventListener("click", () => {
 	if (document.body.hasAttribute("aria-busy")) return;
 	if (canvasEditor.crop) return canvasEditor.commitCrop();
 	const item = canvasEditor.selected;
-	if (item?.type === "ImageObject") canvasEditor.startCrop(item);
+	if (item?.type === "ImageObject") return startImageCrop(item);
+});
+el.imageFit.addEventListener("change", () => {
+	const mode = el.imageFit.value, item = canvasEditor.selected;
+	el.imageFit.value = "";
+	if (mode && item?.type === "ImageObject" && !canvasEditor.crop) return changeDocument("ofdgoFitImage", item, mode);
 });
 el.resetCropButton.addEventListener("click", () => {
 	if (document.body.hasAttribute("aria-busy")) return;
@@ -788,12 +796,46 @@ async function editCanvasObject(item) {
 	}
 }
 
+async function startImageCrop(item) {
+	const openSeq = state.openSeq;
+	const urls = [];
+	let mounted = false;
+	setBusy(true);
+	try {
+		const page = await callWASM("ofdgoPreviewImage", item.index, item.id);
+		if (openSeq !== state.openSeq || !item.surface.isConnected) return;
+		const images = new Map(state.svgImages);
+		for (const image of page.images) {
+			if (images.has(image.name)) continue;
+			const url = URL.createObjectURL(new Blob([image.bytes], { type: image.mime }));
+			urls.push(url);
+			images.set(image.name, { url });
+		}
+		await Promise.all(urls.map(url => {
+			const image = new Image();
+			image.src = url;
+			return image.decode();
+		}));
+		if (openSeq !== state.openSeq || canvasEditor.selected !== item) return;
+		const svg = parseSVG(page.svg, `crop${openSeq}-${item.id}`, images);
+		svg.classList.add("ofd-svg");
+		canvasEditor.startCrop(item, { svg, urls });
+		mounted = true;
+	} catch (err) {
+		if (openSeq === state.openSeq) showError(err, false);
+	} finally {
+		if (!mounted) urls.forEach(url => URL.revokeObjectURL(url));
+		if (openSeq === state.openSeq) setBusy(false);
+	}
+}
+
 function openInsertPanel(item = null) {
 	if (!state.editing || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
 	el.insertForm.reset();
 	state.insertObject = item;
+	el.insertFitRow.hidden = !item;
 	el.insertPanel.setAttribute("aria-label", item ? "替换图片" : "添加图片");
 	el.insertSubmit.textContent = item ? "替换" : "添加";
 	el.insertStatus.textContent = "";
@@ -801,12 +843,10 @@ function openInsertPanel(item = null) {
 	el.insertImage.focus();
 }
 
-// currentTextStyle 获取所选文字样式，未选中文字时使用新文字的默认样式。
 function currentTextStyle() {
 	return canvasEditor.selected?.type === "TextObject" ? canvasEditor.selected : state.textDefaults;
 }
 
-// toggleTextTool 切换画布文字工具，不提前创建空文字对象。
 async function toggleTextTool() {
 	if (!state.editing || document.body.hasAttribute("aria-busy")) return;
 	if (canvasEditor.tool === "text") {
@@ -821,7 +861,7 @@ async function toggleTextTool() {
 	if (openSeq !== state.openSeq) return;
 	const style = currentTextStyle();
 	state.textDefaults = { type: "TextObject", size: style.size, color: style.color, wrap: style.wrap,
-		align: style.align || "left", paragraphHeight: style.paragraphHeight || 0,
+		align: style.align || "left", paragraphHeight: style.paragraphHeight || 0, letterSpacing: style.letterSpacing || 0,
 		fontChoice: state.textFonts[Number(el.textFont.value)] || state.textDefaults.fontChoice };
 	state.selectObjects = true;
 	setPan(false);
@@ -829,7 +869,6 @@ async function toggleTextTool() {
 	el.viewerPanel.focus({ preventScroll: true });
 }
 
-// beginCanvasText 加载所选本地字体，并在画布上创建待提交的文字输入框。
 async function beginCanvasText(index, box, surface, page) {
 	const font = state.textDefaults.fontChoice || state.textFonts[Number(el.textFont.value)];
 	if (!font) {
@@ -889,7 +928,6 @@ function updateTextFonts(item, refresh = false) {
 	}
 }
 
-// changeTextFont 更换字体时保留尚未提交的文字。
 async function changeTextFont() {
 	const item = canvasEditor.selected;
 	const font = state.textFonts[Number(el.textFont.value)];
@@ -943,7 +981,7 @@ async function insertObject(event) {
 			return;
 		}
 		const doc = item
-			? await callWASM("ofdgoReplaceImage", item.index, item.id, data)
+			? await callWASM("ofdgoReplaceImage", item.index, item.id, data, el.insertFit.value)
 			: await callWASM("ofdgoInsertImage", index, data, x, y, page.width - x * 2);
 		if (openSeq !== state.openSeq) {
 			return;
@@ -981,7 +1019,6 @@ function textPoints(size) {
 	return Number((size * 72 / 25.4).toFixed(2));
 }
 
-// changeParagraph 仅提交变更的段落选项，具体排版由库完成。
 async function changeParagraph(wrap = currentTextStyle().wrap) {
 	const item = currentTextStyle();
 	if (document.body.hasAttribute("aria-busy") || item.draft) return;
@@ -991,12 +1028,18 @@ async function changeParagraph(wrap = currentTextStyle().wrap) {
 	}
 	const points = Number(el.textLineHeight.value);
 	const height = points === textPoints(item.paragraphHeight || 0) ? item.paragraphHeight || 0 : points * 25.4 / 72;
-	if (item === state.textDefaults) {
-		Object.assign(item, { wrap: Boolean(wrap), align: el.textAlign.value, paragraphHeight: height });
+	if (!el.textSpacing.checkValidity()) {
 		updateObjectControls(canvasEditor.selected, true);
 		return;
 	}
-	await changeDocument("ofdgoLayoutText", item, null, null, Boolean(wrap), el.textAlign.value, height);
+	const spacingPoints = Number(el.textSpacing.value);
+	const spacing = spacingPoints === textPoints(item.letterSpacing || 0) ? item.letterSpacing || 0 : spacingPoints * 25.4 / 72;
+	if (item === state.textDefaults) {
+		Object.assign(item, { wrap: Boolean(wrap), align: el.textAlign.value, paragraphHeight: height, letterSpacing: spacing });
+		updateObjectControls(canvasEditor.selected, true);
+		return;
+	}
+	await changeDocument("ofdgoLayoutText", item, null, null, Boolean(wrap), el.textAlign.value, height, spacing);
 	updateObjectControls(canvasEditor.selected, true);
 }
 
@@ -2984,9 +3027,9 @@ function layoutPageShell(shell, page) {
 	}
 }
 
-function parseSVG(svgText, prefix = "") {
+function parseSVG(svgText, prefix = "", images = state.svgImages) {
 	const template = document.createElement("template");
-	template.innerHTML = svgText.replace(/xlink:href="(ofdgo-image-[a-f0-9]{64})"/g, (_, name) => `xlink:href="${state.svgImages.get(name).url}"`);
+	template.innerHTML = svgText.replace(/xlink:href="(ofdgo-image-[a-f0-9]{64})"/g, (_, name) => `xlink:href="${images.get(name).url}"`);
 	const svg = document.adoptNode(template.content.firstElementChild);
 	prefixSVGIds(svg, prefix);
 	return svg;
@@ -4206,6 +4249,7 @@ function updateObjectControls(item, reset = false) {
 	el.objectAlign.disabled = disabled || cropping;
 	el.objectRotate.disabled = el.objectFlip.disabled = disabled || cropping;
 	el.cropImageButton.disabled = disabled || item.type !== "ImageObject";
+	el.imageFit.disabled = el.cropImageButton.disabled || cropping;
 	el.cropImageButton.textContent = cropping ? "完成" : "裁剪";
 	el.cropImageButton.setAttribute("aria-label", cropping ? "完成裁剪" : "裁剪图片");
 	el.cropImageButton.setAttribute("aria-pressed", String(cropping));
@@ -4219,11 +4263,14 @@ function updateObjectControls(item, reset = false) {
 	el.textFont.disabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items);
 	el.textSize.disabled = el.textColor.disabled = el.textFont.disabled || Boolean(item?.draft);
 	el.textFontAdd.disabled = !state.editing || !state.ready || state.exporting;
-	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSize.disabled;
+	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled;
 	el.textAlign.value = text.align || "left";
 	el.textWrap.setAttribute("aria-pressed", String(Boolean(text.wrap)));
 	if (reset || document.activeElement !== el.textLineHeight) {
 		el.textLineHeight.value = text.paragraphHeight ? String(textPoints(text.paragraphHeight)) : "";
+	}
+	if (reset || document.activeElement !== el.textSpacing) {
+		el.textSpacing.value = text.letterSpacing ? String(textPoints(text.letterSpacing)) : "";
 	}
 	updateTextFonts(item);
 	if (reset || el.textSize.disabled || document.activeElement !== el.textSize) {

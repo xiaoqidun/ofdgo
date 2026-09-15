@@ -21,11 +21,13 @@ import (
 )
 
 // TextLayout 本地横向段落选项，Wrap按CTM变换前的边界宽度折行，Align为left、center、right或justify。
-// LineHeight为毫米单位的基线间距，0使用字体度量；零值保持显式换行和左对齐。
+// LineHeight为毫米单位的基线间距，0使用字体度量；LetterSpacing为字素间的附加毫米间距，可为负。
+// 零值保持显式换行和左对齐。
 type TextLayout struct {
-	Wrap       bool
-	Align      string
-	LineHeight float64
+	Wrap          bool
+	Align         string
+	LineHeight    float64
+	LetterSpacing float64
 }
 
 // textLayout 保存编辑中的原文与选项，不写入OFD，也不参与渲染。
@@ -45,9 +47,9 @@ func (obj TextObject) TextLayout() (string, TextLayout) {
 }
 
 // breakTextLines 优先使用Unicode断行机会，过长词仅在字素边界折行，不丢弃空白。
-// 入参: runes 段落字符, advances 各字符步进, width 本地排版宽度, wrap 是否自动折行
+// 入参: runes 段落字符, advances 含字距的字符步进, width 本地排版宽度, wrap 是否自动折行, spacing 附加字距
 // 返回: [][2]int 各行的字符起止索引，左闭右开
-func breakTextLines(runes []rune, advances []float64, width float64, wrap bool) [][2]int {
+func breakTextLines(runes []rune, advances []float64, width float64, wrap bool, spacing float64) [][2]int {
 	if !wrap || len(runes) == 0 {
 		return [][2]int{{0, len(runes)}}
 	}
@@ -76,7 +78,11 @@ func breakTextLines(runes []rune, advances []float64, width float64, wrap bool) 
 			for visible > start && runes[visible-1] == ' ' {
 				visible--
 			}
-			if sums[visible]-sums[start] > width && end > start {
+			length := sums[visible] - sums[start]
+			if visible > start {
+				length -= spacing
+			}
+			if length > width && end > start {
 				break
 			}
 			end = candidate
@@ -84,7 +90,7 @@ func breakTextLines(runes []rune, advances []float64, width float64, wrap bool) 
 			if breaks[end] {
 				legal = end
 			}
-			if sums[visible]-sums[start] > width {
+			if length > width {
 				break
 			}
 		}
@@ -101,9 +107,9 @@ func breakTextLines(runes []rune, advances []float64, width float64, wrap bool) 
 }
 
 // alignTextLine 将段落对齐转换为标准X和DeltaX，两端对齐保留段落末行左对齐。
-// 入参: runes 行内字符, advances 各字符步进, width 本地排版宽度, alignment 对齐方式, justify 是否允许本行两端对齐
+// 入参: runes 行内字符, advances 含字距的字符步进, width 本地排版宽度, alignment 对齐方式, justify 是否允许本行两端对齐, spacing 附加字距
 // 返回: float64 行首X坐标, string 字符间的DeltaX序列
-func alignTextLine(runes []rune, advances []float64, width float64, alignment string, justify bool) (float64, string) {
+func alignTextLine(runes []rune, advances []float64, width float64, alignment string, justify bool, spacing float64) (float64, string) {
 	end := len(runes)
 	for end > 0 && runes[end-1] == ' ' {
 		end--
@@ -111,6 +117,9 @@ func alignTextLine(runes []rune, advances []float64, width float64, alignment st
 	length := 0.0
 	for _, advance := range advances[:end] {
 		length += advance
+	}
+	if end > 0 {
+		length -= spacing
 	}
 	x, extra := 0.0, max(0, width-length)
 	if alignment == "center" {
@@ -139,4 +148,18 @@ func alignTextLine(runes []rune, advances []float64, width float64, alignment st
 		deltas[i] = ofdNumber(advance)
 	}
 	return x, strings.Join(deltas, " ")
+}
+
+// spaceTextAdvances 将字距加入各字素末尾，不拆散组合字符。
+// 入参: runes 段落字符, advances 待更新的字符步进, spacing 附加毫米字距
+func spaceTextAdvances(runes []rune, advances []float64, spacing float64) {
+	if spacing == 0 {
+		return
+	}
+	var seg segmenter.Segmenter
+	seg.Init(runes)
+	for it := seg.GraphemeIterator(); it.Next(); {
+		cluster := it.Grapheme()
+		advances[cluster.Offset+len(cluster.Text)-1] += spacing
+	}
 }

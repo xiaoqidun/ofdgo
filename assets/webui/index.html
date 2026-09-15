@@ -101,9 +101,17 @@
 					<option value="horizontal">水平</option>
 					<option value="vertical">垂直</option>
 				</select>
+				<span>变换</span>
+			</div>
+			<div class="editor-group editor-image">
+				<select id="imageFit" aria-label="图片适应方式" disabled>
+					<option value="" hidden>缩放</option>
+					<option value="contain">适应</option>
+					<option value="cover">填充</option>
+				</select>
 				<button id="cropImageButton" class="button" type="button" aria-label="裁剪图片" aria-pressed="false" disabled>裁剪</button>
 				<button id="resetCropButton" class="button" type="button" aria-label="还原图片" disabled>还原</button>
-				<span>变换</span>
+				<span>图片</span>
 			</div>
 			<div class="editor-group">
 				<div class="text-font"><select id="textFont" aria-label="字体" title="字体" disabled></select><button id="textFontAdd" class="icon-button" type="button" title="添加字体" aria-label="添加字体">+</button></div>
@@ -118,8 +126,9 @@
 					<option value="right">右齐</option>
 					<option value="justify">两端</option>
 				</select>
-				<button id="textWrap" class="button" type="button" aria-label="自动折行" aria-pressed="false" disabled>折行</button>
 				<label class="editor-field"><span>行距</span><span class="editor-number"><input id="textLineHeight" type="number" min="0" step="any" placeholder="自动" aria-label="行距" title="行距，0为自动" disabled><span>pt</span></span></label>
+				<button id="textWrap" class="button" type="button" aria-label="自动折行" aria-pressed="false" disabled>折行</button>
+				<label class="editor-field"><span>字距</span><span class="editor-number"><input id="textSpacing" type="number" step="any" placeholder="0" aria-label="字距" title="字距" disabled><span>pt</span></span></label>
 				<span>段落</span>
 			</div>
 			<div class="editor-group">
@@ -200,6 +209,10 @@
 				<div class="form-row">
 					<label for="insertImage">图片</label>
 					<input id="insertImage" type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" required autofocus>
+				</div>
+				<div id="insertFitRow" class="form-row" hidden>
+					<label for="insertFit">缩放</label>
+					<select id="insertFit"><option value="contain">适应</option><option value="cover">填充</option></select>
 				</div>
 				<div class="form-actions">
 					<div id="insertStatus" class="form-status" role="status"></div>

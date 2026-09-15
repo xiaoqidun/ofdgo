@@ -40,7 +40,7 @@ type Editor struct {
 	pages        []PageContent
 	resources    []editorResource
 	fonts        map[string]*font.SFNT
-	images       map[string]bool
+	images       map[string]image.Point
 	resourceID   map[editorResourceKey]string
 	maxID        int
 	history      []editorChange
@@ -77,7 +77,7 @@ func NewEditor() *Editor {
 			CreationDate: time.Now().Format("2006-01-02"),
 		},
 		fonts:      make(map[string]*font.SFNT),
-		images:     make(map[string]bool),
+		images:     make(map[string]image.Point),
 		resourceID: make(map[editorResourceKey]string),
 	}
 }
@@ -346,7 +346,7 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 		data:  bytes.Clone(data),
 		image: &MultiMedia{ID: id, Type: "Image", Format: strings.ToUpper(format), MediaFile: name},
 	})
-	e.images[id] = true
+	e.images[id] = image.Pt(config.Width, config.Height)
 	e.resourceID[key] = id
 	return id, nil
 }
@@ -554,7 +554,7 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 		fill, stroke = obj.FillColor, (*FillColor)(obj.StrokeColor)
 	case "ImageObject":
 		obj := &object.ImageObject
-		if !e.images[obj.ResourceID] || (obj.ImageMask != "" && !e.images[obj.ImageMask]) {
+		if e.images[obj.ResourceID].X == 0 || (obj.ImageMask != "" && e.images[obj.ImageMask].X == 0) {
 			return GraphicObject{}, fmt.Errorf("image resource not found")
 		}
 		if obj.Border != nil {
@@ -720,6 +720,7 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 			if obj.layout != nil {
 				layout := *obj.layout
 				layout.options.LineHeight *= scale
+				layout.options.LetterSpacing *= scale
 				obj.layout = &layout
 			}
 			if obj.LineWidth == 0 && obj.Stroke != nil && *obj.Stroke {
@@ -756,10 +757,10 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 	return object, nil
 }
 
-// ReplaceImage 替换图片资源，保留对象位置、尺寸、变换和绘制顺序
-// 入参: page 页面索引, id 图片对象标识, data PNG或JPEG数据
+// ReplaceImage 替换图片资源，保留对象标识和绘制顺序，一次撤销恢复资源及布局。
+// 入参: page 页面索引, id 图片对象标识, data PNG或JPEG数据, fit 为contain、cover或空，空值保留原变换和裁剪
 // 返回: error 错误信息
-func (e *Editor) ReplaceImage(page int, id string, data []byte) error {
+func (e *Editor) ReplaceImage(page int, id string, data []byte, fit string) error {
 	object, err := e.Object(page, id)
 	if err != nil {
 		return err
@@ -770,6 +771,11 @@ func (e *Editor) ReplaceImage(page int, id string, data []byte) error {
 	object.ImageObject.ResourceID, err = e.AddImage(data)
 	if err != nil {
 		return err
+	}
+	if fit != "" {
+		if err := e.fitImage(&object.ImageObject, fit); err != nil {
+			return err
+		}
 	}
 	return e.UpdateObject(page, id, object)
 }
@@ -819,6 +825,9 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 	if !finite(lineHeight) || lineHeight < 0 {
 		return fmt.Errorf("line height must be finite and nonnegative")
 	}
+	if !finite(options.LetterSpacing) {
+		return fmt.Errorf("letter spacing must be finite")
+	}
 	if !slices.Contains([]string{"", "left", "center", "right", "justify"}, options.Align) {
 		return fmt.Errorf("invalid text alignment %q", options.Align)
 	}
@@ -849,13 +858,16 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 				return fmt.Errorf("font does not contain U+%04X", char)
 			}
 			advances[i] = float64(sfnt.GlyphAdvance(glyph)) * unit * hScale
-			if !finite(advances[i]) {
+		}
+		spaceTextAdvances(runes, advances, options.LetterSpacing)
+		for _, advance := range advances {
+			if !finite(advance) {
 				return fmt.Errorf("text advance exceeds finite range")
 			}
 		}
-		lines := breakTextLines(runes, advances, width, options.Wrap)
+		lines := breakTextLines(runes, advances, width, options.Wrap, options.LetterSpacing)
 		for i, line := range lines {
-			x, deltas := alignTextLine(runes[line[0]:line[1]], advances[line[0]:line[1]], width, options.Align, i+1 < len(lines))
+			x, deltas := alignTextLine(runes[line[0]:line[1]], advances[line[0]:line[1]], width, options.Align, i+1 < len(lines), options.LetterSpacing)
 			y := float64(ascender)*unit + float64(len(codes))*lineHeight
 			if !finite(x) || !finite(y) {
 				return fmt.Errorf("text position exceeds finite range")

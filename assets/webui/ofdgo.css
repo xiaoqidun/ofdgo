@@ -113,10 +113,22 @@ a:focus-visible {
 
 .editor-file,
 .editor-paragraph,
-.editor-transform,
+.editor-image,
 .editor-group:has(#textFont),
 .editor-group:has(#shapeFill) {
 	grid-template-columns: repeat(2, max-content);
+}
+
+.editor-transform {
+	grid-template-columns: max-content;
+}
+
+.editor-image > select {
+	grid-column: 1 / -1;
+}
+
+.editor-paragraph > .editor-field {
+	grid-column: auto;
 }
 
 .editor-objects {
@@ -178,8 +190,8 @@ a:focus-visible {
 }
 
 .editor-paragraph {
-	width: 172px;
-	grid-template-columns: repeat(2, minmax(0, 1fr));
+	width: 218px;
+	grid-template-columns: 54px minmax(0, 1fr);
 }
 
 .editor-file #saveButton {
@@ -194,6 +206,14 @@ a:focus-visible {
 #textFont {
 	width: 100%;
 	min-width: 0;
+}
+
+#textColor {
+	width: 100%;
+}
+
+.shape-paint {
+	justify-content: space-between;
 }
 
 .shape-paint,

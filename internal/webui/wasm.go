@@ -119,6 +119,8 @@ func RunWASM() {
 	registerCallback("ofdgoRotateObjects", rotateObjects)
 	registerCallback("ofdgoFlipObjects", flipObjects)
 	registerCallback("ofdgoCropImage", cropImage)
+	registerCallback("ofdgoFitImage", fitImage)
+	registerCallback("ofdgoPreviewImage", previewImage)
 	registerCallback("ofdgoDeleteObject", deleteObject)
 	registerCallback("ofdgoUndo", func([]js.Value) (any, error) { return restoreEditor(false) })
 	registerCallback("ofdgoRedo", func([]js.Value) (any, error) { return restoreEditor(true) })
@@ -318,10 +320,6 @@ func renderPage(args []js.Value) (any, error) {
 	for i, font := range page.Fonts {
 		fonts[i] = map[string]any{"name": font.Name, "weight": font.Weight, "style": font.Style}
 	}
-	images := make([]any, len(page.Images))
-	for i, image := range page.Images {
-		images[i] = map[string]any{"name": image.Name, "mime": image.MIME, "bytes": bytesToJS(image.Data)}
-	}
 	return successResult(map[string]any{
 		"index":   page.Index,
 		"number":  page.Number,
@@ -331,7 +329,7 @@ func renderPage(args []js.Value) (any, error) {
 		"svg":     page.SVG,
 		"links":   links,
 		"fonts":   fonts,
-		"images":  images,
+		"images":  svgImagesToJS(page.Images),
 		"text":    string(textData),
 		"objects": objects,
 	}), nil
@@ -662,6 +660,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					value, layout := source.TextObject.TextLayout()
 					item["text"], item["font"], item["fontName"], item["size"] = value, object.TextObject.Font, fontNames[object.TextObject.Font], object.TextObject.Size
 					item["wrap"], item["align"], item["paragraphHeight"] = layout.Wrap, layout.Align, layout.LineHeight
+					item["letterSpacing"] = layout.LetterSpacing
 					frame, err := object.TextObject.TextFrame()
 					if err != nil {
 						return nil, err
@@ -724,7 +723,7 @@ func editorFont(args []js.Value) (any, error) {
 }
 
 // replaceImage 替换图片资源并更新预览
-// 入参: args 页码、对象标识和图片数据
+// 入参: args 页码、对象标识、图片数据和适应方式
 // 返回: any 文档信息, error 错误信息
 func replaceImage(args []js.Value) (any, error) {
 	if currentEditor == nil {
@@ -735,7 +734,7 @@ func replaceImage(args []js.Value) (any, error) {
 		return nil, err
 	}
 	revision := currentEditor.Revision()
-	if err := currentEditor.ReplaceImage(args[0].Int(), args[1].String(), data); err != nil {
+	if err := currentEditor.ReplaceImage(args[0].Int(), args[1].String(), data, args[3].String()); err != nil {
 		return nil, err
 	}
 	if currentEditor.Revision() == revision {
@@ -1106,7 +1105,7 @@ func updatePathStyle(args []js.Value) (any, error) {
 }
 
 // insertText 使用选定字体创建文字对象
-// 入参: args 页码、内容、字体数据、横纵坐标、字号、颜色、框宽、折行、对齐和行距
+// 入参: args 页码、内容、字体数据、横纵坐标、字号、颜色、框宽、折行、对齐、行距和字距
 // 返回: any 文档信息, error 错误信息
 func insertText(args []js.Value) (any, error) {
 	if currentEditor == nil {
@@ -1139,7 +1138,7 @@ func insertText(args []js.Value) (any, error) {
 		Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
 		Font:     fontID, Size: args[5].Float(),
 	}}
-	if err := currentEditor.LayoutText(&object.TextObject, args[1].String(), ofdgo.TextLayout{Wrap: args[8].Bool(), Align: args[9].String(), LineHeight: args[10].Float()}); err != nil {
+	if err := currentEditor.LayoutText(&object.TextObject, args[1].String(), ofdgo.TextLayout{Wrap: args[8].Bool(), Align: args[9].String(), LineHeight: args[10].Float(), LetterSpacing: args[11].Float()}); err != nil {
 		return nil, err
 	}
 	if err := setTextColor(&object.TextObject, args[6].String()); err != nil {
@@ -1152,7 +1151,7 @@ func insertText(args []js.Value) (any, error) {
 }
 
 // layoutText 调整文字框和段落排版，保留软换行前的原文。
-// 入参: args 页码、对象标识、本地左侧偏移、宽度、折行、对齐和行距
+// 入参: args 页码、对象标识、本地左侧偏移、宽度、折行、对齐、行距和字距
 // 返回: any 文档信息, error 错误信息
 func layoutText(args []js.Value) (any, error) {
 	if currentEditor == nil {
@@ -1173,7 +1172,7 @@ func layoutText(args []js.Value) (any, error) {
 		}
 	}
 	value, _ := object.TextObject.TextLayout()
-	if err := currentEditor.LayoutText(&object.TextObject, value, ofdgo.TextLayout{Wrap: args[4].Bool(), Align: args[5].String(), LineHeight: args[6].Float()}); err != nil {
+	if err := currentEditor.LayoutText(&object.TextObject, value, ofdgo.TextLayout{Wrap: args[4].Bool(), Align: args[5].String(), LineHeight: args[6].Float(), LetterSpacing: args[7].Float()}); err != nil {
 		return nil, err
 	}
 	revision := currentEditor.Revision()
@@ -1228,6 +1227,59 @@ func cropImage(args []js.Value) (any, error) {
 	return changeObjects(func() error {
 		return currentEditor.CropImage(args[0].Int(), args[1].String(), ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
 	})
+}
+
+// fitImage 按原始比例适应或填充图片框。
+// 入参: args 页面索引、对象标识和适应方式
+// 返回: any 文档信息, error 错误信息
+func fitImage(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		return currentEditor.FitImage(args[0].Int(), args[1].String(), args[2].String())
+	})
+}
+
+// previewImage 在页面副本中显示指定图片的完整内容，不改变正文、历史或缓存。
+// 入参: args 页面索引和图片对象标识
+// 返回: any 页面SVG和分离的图片资源, error 错误信息
+func previewImage(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	page, err := currentEditor.Page(args[0].Int())
+	if err != nil {
+		return nil, err
+	}
+	id := args[1].String()
+	found := false
+	for i := range page.Content.Layer {
+		for j := range page.Content.Layer[i].Objects {
+			object := &page.Content.Layer[i].Objects[j]
+			if object.Type == "ImageObject" && object.ImageObject.ID == id {
+				object.ImageObject.Clips = nil
+				found = true
+			}
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("image object %q not found", id)
+	}
+	var out bytes.Buffer
+	resources, err := currentSession.Renderer.RenderToSVGWithResources(page, &out)
+	if err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"svg": out.String(), "images": svgImagesToJS(resources.Images)}), nil
+}
+
+// svgImagesToJS 将图片资源以二进制数组传给前端，不使用base64。
+// 入参: images SVG引用的图片资源
+// 返回: []any 图片标识、类型和数据
+func svgImagesToJS(images []ofdgo.SVGImage) []any {
+	items := make([]any, len(images))
+	for i, image := range images {
+		items[i] = map[string]any{"name": image.Name, "mime": image.MIME, "bytes": bytesToJS(image.Data)}
+	}
+	return items
 }
 
 // transformObjects 统一移动或缩放选区，生成一次撤销记录。
