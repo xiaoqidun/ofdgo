@@ -87,6 +87,8 @@ a:focus-visible {
 .editor-toolbar {
 	display: flex;
 	flex-wrap: wrap;
+	max-height: 40dvh;
+	overflow: auto;
 	gap: 12px;
 	padding: 8px 12px 6px;
 	border-bottom: 1px solid var(--line);
@@ -118,6 +120,19 @@ a:focus-visible {
 #textFont {
 	width: 128px;
 	min-width: 0;
+}
+
+.shape-paint,
+.shape-paint label {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	white-space: nowrap;
+}
+
+.shape-paint input[type="checkbox"] {
+	margin: 0;
+	accent-color: var(--accent);
 }
 
 .editor-group:has(#addPageButton) {
@@ -1162,6 +1177,30 @@ button.outline-link:hover {
 	pointer-events: none;
 }
 
+.editing-draw .page-surface {
+	cursor: crosshair;
+	touch-action: none;
+	user-select: none;
+}
+
+.editing-draw .edit-layer,
+.editing-draw .page-surface > :not(.edit-preview) {
+	pointer-events: none;
+}
+
+.editing-draw .edit-object {
+	pointer-events: none;
+}
+
+.edit-preview {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+	overflow: visible;
+}
+
 .edit-object {
 	position: absolute;
 	pointer-events: auto;
@@ -1173,6 +1212,12 @@ button.outline-link:hover {
 .edit-object:hover,
 .edit-object.selected {
 	outline: calc(1px / var(--surface-scale)) solid var(--accent);
+}
+
+.edit-line::before {
+	position: absolute;
+	inset: calc(-4px / var(--surface-scale));
+	content: "";
 }
 
 .edit-object.selected {

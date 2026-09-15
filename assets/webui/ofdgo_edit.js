@@ -24,7 +24,8 @@ export function objectTransform(box, page, dx, dy, corner = "") {
 		(left ? box.x + box.width : page.width - box.x) / box.width,
 		(top ? box.y + box.height : page.height - box.y) / box.height,
 	);
-	const scale = Math.max(Math.min(1 / Math.min(box.width, box.height), limit), Math.min(limit,
+	const minimum = Math.min(1, 1 / (box.line ? Math.max(box.width, box.height) : Math.min(box.width, box.height)));
+	const scale = Math.max(Math.min(minimum, limit), Math.min(limit,
 		1 + (x * box.width + y * box.height) / (box.width ** 2 + box.height ** 2)));
 	return { x: left ? box.width * (1 - scale) : 0, y: top ? box.height * (1 - scale) : 0, scale };
 }
@@ -36,6 +37,8 @@ export class CanvasEditor {
 		this.enabled = false;
 		this.selected = null;
 		this.nodes = new WeakMap();
+		this.pages = new WeakMap();
+		this.tool = "";
 		viewer.addEventListener("pointerdown", (event) => this.start(event));
 		viewer.addEventListener("pointermove", (event) => this.move(event));
 		viewer.addEventListener("pointerup", (event) => this.end(event));
@@ -57,19 +60,34 @@ export class CanvasEditor {
 		this.enabled = enabled;
 		this.viewer.classList.toggle("editing-select", enabled);
 		if (!enabled) {
+			this.setTool("");
 			this.clear();
 		}
 	}
 
+	setTool(tool) {
+		this.cancel();
+		this.tool = tool;
+		this.viewer.classList.toggle("editing-draw", Boolean(tool));
+		if (tool) {
+			this.select(null);
+		}
+		this.options.onTool?.(tool);
+	}
+
 	mount(index, page, surface) {
+		this.pages.set(surface, { index, width: page.width, height: page.height });
 		const layer = document.createElement("div");
 		layer.className = "edit-layer";
 		for (const object of page.objects) {
 			const node = document.createElement("div");
 			node.className = "edit-object";
+			if (object.line) {
+				node.classList.add("edit-line");
+			}
 			node.tabIndex = 0;
 			node.setAttribute("role", "button");
-			node.setAttribute("aria-label", object.image ? "图片对象" : "文字对象");
+			node.setAttribute("aria-label", { ImageObject: "图片对象", TextObject: "文字对象", PathObject: "图形对象" }[object.type]);
 			const item = { ...object, index, page: { width: page.width, height: page.height }, node, surface };
 			this.nodes.set(node, item);
 			node.addEventListener("focus", () => this.select(item));
@@ -120,6 +138,10 @@ export class CanvasEditor {
 		if (!this.enabled || this.options.busy() || event.button !== 0 || this.drag) {
 			return;
 		}
+		if (this.tool) {
+			this.startShape(event);
+			return;
+		}
 		const node = event.target.closest(".edit-object");
 		if (node) {
 			event.preventDefault();
@@ -144,6 +166,10 @@ export class CanvasEditor {
 			return;
 		}
 		event.preventDefault();
+		if (drag.shape) {
+			this.moveShape(event, drag);
+			return;
+		}
 		if (!drag.change && Math.hypot(event.clientX - drag.clientX, event.clientY - drag.clientY) < 3) {
 			return;
 		}
@@ -159,6 +185,18 @@ export class CanvasEditor {
 			return;
 		}
 		this.move(event);
+		if (drag.shape) {
+			this.drag = null;
+			this.viewer.releasePointerCapture(drag.pointerID);
+			if (!drag.box) {
+				drag.preview.remove();
+				return;
+			}
+			this.setTool("");
+			Promise.resolve(this.options.onDraw(drag.page.index, drag.shape, drag.box, drag.style))
+				.finally(() => drag.preview.remove());
+			return;
+		}
 		this.cancel();
 		if (drag.change && (drag.change.x || drag.change.y || drag.change.scale !== 1)) {
 			this.options.onTransform(drag.item, drag.change);
@@ -169,14 +207,75 @@ export class CanvasEditor {
 		const drag = this.drag;
 		this.drag = null;
 		if (drag) {
-			this.place(drag.item);
+			if (drag.shape) {
+				drag.preview.remove();
+			} else {
+				this.place(drag.item);
+			}
 			if (this.viewer.hasPointerCapture(drag.pointerID)) {
 				this.viewer.releasePointerCapture(drag.pointerID);
 			}
 		}
 	}
 
+	startShape(event) {
+		const surface = event.target.closest(".page-surface");
+		const page = this.pages.get(surface);
+		if (!page) {
+			return;
+		}
+		event.preventDefault();
+		this.viewer.focus({ preventScroll: true });
+		const preview = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+		preview.classList.add("edit-preview");
+		preview.setAttribute("viewBox", `0 0 ${page.width} ${page.height}`);
+		const shape = this.tool;
+		const node = document.createElementNS("http://www.w3.org/2000/svg", shape === "rectangle" ? "rect" : shape);
+		const style = this.options.drawStyle();
+		if (shape === "line") {
+			style.fill = false;
+			style.stroke = true;
+		}
+		node.setAttribute("fill", style.fill ? style.fillColor : "none");
+		node.setAttribute("stroke", style.stroke ? style.strokeColor : "none");
+		node.setAttribute("stroke-width", style.lineWidth);
+		preview.append(node);
+		surface.append(preview);
+		this.drag = { shape, page, preview, node, style, pointerID: event.pointerId,
+			rect: surface.getBoundingClientRect(), rotation: this.options.rotation(),
+			clientX: event.clientX, clientY: event.clientY };
+		this.viewer.setPointerCapture(event.pointerId);
+	}
+
+	moveShape(event, drag) {
+		const point = (x, y) => {
+			const p = pagePoint(x, y, drag.rect, drag.page, drag.rotation);
+			return { x: Math.max(0, Math.min(p.x, drag.page.width)), y: Math.max(0, Math.min(p.y, drag.page.height)) };
+		};
+		const from = point(drag.clientX, drag.clientY);
+		const to = point(event.clientX, event.clientY);
+		const x = Math.min(from.x, to.x), y = Math.min(from.y, to.y);
+		const width = Math.abs(to.x - from.x), height = Math.abs(to.y - from.y);
+		const valid = Math.hypot(event.clientX - drag.clientX, event.clientY - drag.clientY) >= 3
+			&& (drag.shape === "line" ? width > 0 || height > 0 : width > 0 && height > 0);
+		drag.box = valid ? drag.shape === "line"
+			? { x: from.x, y: from.y, width: to.x - from.x, height: to.y - from.y }
+			: { x, y, width, height } : null;
+		const attributes = drag.shape === "line" ? { x1: from.x, y1: from.y, x2: to.x, y2: to.y }
+			: drag.shape === "ellipse" ? { cx: x + width / 2, cy: y + height / 2, rx: width / 2, ry: height / 2 }
+			: { x, y, width, height };
+		for (const [key, value] of Object.entries(attributes)) {
+			drag.node.setAttribute(key, value);
+		}
+	}
+
 	keyDown(event) {
+		if (event.key === "Escape" && this.tool && !this.options.busy()) {
+			event.preventDefault();
+			event.stopPropagation();
+			this.setTool("");
+			return;
+		}
 		if (this.input || !this.enabled || !this.selected || this.options.busy() || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) {
 			return;
 		}

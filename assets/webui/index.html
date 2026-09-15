@@ -90,6 +90,18 @@
 				<span>插入</span>
 			</div>
 			<div class="editor-group">
+				<button id="drawLineButton" class="button" type="button" aria-label="绘制直线" aria-pressed="false">直线</button>
+				<button id="drawRectangleButton" class="button" type="button" aria-label="绘制矩形" aria-pressed="false">矩形</button>
+				<button id="drawEllipseButton" class="button" type="button" aria-label="绘制椭圆" aria-pressed="false">椭圆</button>
+				<span>绘制</span>
+			</div>
+			<div class="editor-group">
+				<div class="shape-paint"><label><input id="shapeFill" type="checkbox">填充</label><input id="shapeFillColor" class="color-input" type="color" value="#dcefeb" aria-label="填充颜色" title="填充颜色"></div>
+				<div class="shape-paint"><label><input id="shapeStroke" type="checkbox" checked>描边</label><input id="shapeStrokeColor" class="color-input" type="color" value="#000000" aria-label="描边颜色" title="描边颜色"></div>
+				<div class="form-unit text-size"><input id="shapeWidth" type="number" value="1" min="0" step="any" required aria-label="线宽" title="线宽"><span>pt</span></div>
+				<span>图形</span>
+			</div>
+			<div class="editor-group">
 				<button id="addPageButton" class="button" type="button" aria-label="新增页面">新增</button>
 				<button id="copyPageButton" class="button" type="button" aria-label="复制页面">复制</button>
 				<button id="deletePageButton" class="button" type="button" aria-label="删除页面">删除</button>
