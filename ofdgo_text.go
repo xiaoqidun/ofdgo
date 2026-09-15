@@ -25,7 +25,7 @@ import (
 	"github.com/tdewolff/font"
 )
 
-// Text 获取文字原文，同一行起点处的基线变化以换行分隔，字形索引以占位字符表示
+// Text 获取定位后的文字，横向换行以换行符分隔，字形索引以占位字符表示
 // 返回: string 原文
 func (obj TextObject) Text() string {
 	var text strings.Builder
@@ -42,7 +42,7 @@ func (obj TextObject) Text() string {
 	return text.String()
 }
 
-// textCodeLineBreak 判断横向文本是否回到行首并更换基线
+// textCodeLineBreak 判断横向文字的行首回退，或有足够行距且水平范围重叠的对齐段落
 // 入参: index 文本编码索引
 // 返回: bool 是否换行
 func (obj TextObject) textCodeLineBreak(index int) bool {
@@ -54,7 +54,21 @@ func (obj TextObject) textCodeLineBreak(index int) bool {
 	start, es := strconv.ParseFloat(obj.TextCode[0].X, 64)
 	y, ey := strconv.ParseFloat(code.Y, 64)
 	prev, ep := strconv.ParseFloat(previous.Y, 64)
-	return ex == nil && es == nil && ey == nil && ep == nil && x == start && y != prev
+	if ex != nil || es != nil || ey != nil || ep != nil {
+		return false
+	}
+	if x == start && y != prev {
+		return true
+	}
+	left, err := strconv.ParseFloat(previous.X, 64)
+	if err != nil || obj.Size <= 0 || y-prev < obj.Size/2 || previous.DeltaY != "" || code.DeltaY != "" {
+		return false
+	}
+	right := left + obj.Size
+	for _, dx := range previous.GetDeltaX() {
+		right += dx
+	}
+	return x <= right
 }
 
 // textGlyph 绘制字形

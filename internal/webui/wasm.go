@@ -109,6 +109,10 @@ func RunWASM() {
 	registerCallback("ofdgoAlignObject", alignObject)
 	registerCallback("ofdgoTransformObject", transformObject)
 	registerCallback("ofdgoReshapeObject", reshapeObject)
+	registerCallback("ofdgoLayoutText", layoutText)
+	registerCallback("ofdgoTransformObjects", transformObjects)
+	registerCallback("ofdgoAlignObjects", alignObjects)
+	registerCallback("ofdgoDeleteObjects", deleteObjects)
 	registerCallback("ofdgoCopyObject", copyObject)
 	registerCallback("ofdgoMoveObject", moveObject)
 	registerCallback("ofdgoDeleteObject", deleteObject)
@@ -574,9 +578,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 		return nil, err
 	}
 	textBoxes := make(map[string]ofdgo.Box)
-	textValues := make(map[string]string)
 	for _, run := range text.Runs {
-		textValues[run.ID] += run.Text
 		for _, box := range run.Boxes {
 			if box.W <= 0 || box.H <= 0 {
 				continue
@@ -636,7 +638,20 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					item["lineWidth"] = path.LineWidth * editorPathScale(path)
 				}
 				if object.Type == "TextObject" {
-					item["text"], item["font"], item["fontName"], item["size"] = textValues[id], object.TextObject.Font, fontNames[object.TextObject.Font], object.TextObject.Size
+					source, err := currentEditor.Object(index, id)
+					if err != nil {
+						return nil, err
+					}
+					value, layout := source.TextObject.TextLayout()
+					item["text"], item["font"], item["fontName"], item["size"] = value, object.TextObject.Font, fontNames[object.TextObject.Font], object.TextObject.Size
+					item["wrap"], item["align"], item["paragraphHeight"] = layout.Wrap, layout.Align, layout.LineHeight
+					if layout.Wrap {
+						frame, err := ofdgo.ParseBox(object.TextObject.Boundary)
+						if err != nil {
+							return nil, err
+						}
+						item["x"], item["y"], item["width"], item["height"] = frame.X, frame.Y, frame.W, math.Max(object.TextObject.Size, box.Y+box.H-frame.Y)
+					}
 					if codes := object.TextObject.TextCode; len(codes) > 1 {
 						first, _ := strconv.ParseFloat(codes[0].Y, 64)
 						second, _ := strconv.ParseFloat(codes[1].Y, 64)
@@ -932,7 +947,8 @@ func updateText(args []js.Value) (any, error) {
 			}
 		}
 		object.TextObject.Size = args[4].Float()
-		if err := currentEditor.LayoutText(&object.TextObject, args[2].String(), 0); err != nil {
+		_, layout := object.TextObject.TextLayout()
+		if err := currentEditor.LayoutText(&object.TextObject, args[2].String(), layout); err != nil {
 			return nil, err
 		}
 	}
@@ -1077,7 +1093,7 @@ func updatePathStyle(args []js.Value) (any, error) {
 }
 
 // insertText 使用选定字体创建文字对象
-// 入参: args 页码、内容、字体数据、横纵坐标、字号和颜色
+// 入参: args 页码、内容、字体数据、横纵坐标、字号、颜色、框宽、折行、对齐和行距
 // 返回: any 文档信息, error 错误信息
 func insertText(args []js.Value) (any, error) {
 	if currentEditor == nil {
@@ -1101,12 +1117,16 @@ func insertText(args []js.Value) (any, error) {
 		return nil, err
 	}
 	x, y := args[3].Float(), args[4].Float()
-	box = ofdgo.Box{X: x, Y: y, W: box.W - x, H: box.H - y}
+	width := args[7].Float()
+	if width == 0 {
+		width = 80
+	}
+	box = ofdgo.Box{X: x, Y: y, W: math.Min(width, box.W-x), H: box.H - y}
 	object := ofdgo.GraphicObject{Type: "TextObject", TextObject: ofdgo.TextObject{
 		Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
 		Font:     fontID, Size: args[5].Float(),
 	}}
-	if err := currentEditor.LayoutText(&object.TextObject, args[1].String(), 0); err != nil {
+	if err := currentEditor.LayoutText(&object.TextObject, args[1].String(), ofdgo.TextLayout{Wrap: args[8].Bool(), Align: args[9].String(), LineHeight: args[10].Float()}); err != nil {
 		return nil, err
 	}
 	if err := setTextColor(&object.TextObject, args[6].String()); err != nil {
@@ -1114,6 +1134,88 @@ func insertText(args []js.Value) (any, error) {
 	}
 	if _, err := currentEditor.AddObject(page, object); err != nil {
 		return nil, err
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// layoutText 调整文字框和段落排版，保留软换行前的原文。
+// 入参: args 页码、对象标识、左侧坐标、宽度、折行、对齐和行距
+// 返回: any 文档信息, error 错误信息
+func layoutText(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	page, id := args[0].Int(), args[1].String()
+	object, err := currentEditor.Object(page, id)
+	if err != nil {
+		return nil, err
+	}
+	if object.Type != "TextObject" {
+		return nil, fmt.Errorf("object is not text")
+	}
+	box, err := ofdgo.ParseBox(object.TextObject.Boundary)
+	if err != nil {
+		return nil, err
+	}
+	if !args[2].IsNull() {
+		box.X, box.W = args[2].Float(), args[3].Float()
+	}
+	object.TextObject.Boundary = fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H)
+	value, _ := object.TextObject.TextLayout()
+	if err := currentEditor.LayoutText(&object.TextObject, value, ofdgo.TextLayout{Wrap: args[4].Bool(), Align: args[5].String(), LineHeight: args[6].Float()}); err != nil {
+		return nil, err
+	}
+	revision := currentEditor.Revision()
+	if err := currentEditor.UpdateObject(page, id, object); err != nil {
+		return nil, err
+	}
+	if currentEditor.Revision() == revision {
+		return editorSummary(), nil
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// selectedIDs 读取多选对象标识，交由库统一校验。
+func selectedIDs(value js.Value) []string {
+	ids := make([]string, value.Length())
+	for i := range ids {
+		ids[i] = value.Index(i).String()
+	}
+	return ids
+}
+
+// transformObjects 统一移动或缩放选区，生成一次撤销记录。
+func transformObjects(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		return currentEditor.TransformObjects(args[0].Int(), selectedIDs(args[1]), args[2].Float(), args[3].Float(), args[4].Float())
+	})
+}
+
+// alignObjects 对齐选区中的对象。
+func alignObjects(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		return currentEditor.AlignObjects(args[0].Int(), selectedIDs(args[1]), args[2].String())
+	})
+}
+
+// deleteObjects 一次删除选区中的对象。
+func deleteObjects(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		return currentEditor.DeleteObjects(args[0].Int(), selectedIDs(args[1]))
+	})
+}
+
+// changeObjects 提交库层批量操作，无修改时复用当前预览。
+func changeObjects(apply func() error) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	revision := currentEditor.Revision()
+	if err := apply(); err != nil {
+		return nil, err
+	}
+	if currentEditor.Revision() == revision {
+		return editorSummary(), nil
 	}
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }

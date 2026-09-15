@@ -105,6 +105,11 @@ func (e *Editor) Page(index int) (*PageContent, error) {
 		return nil, err
 	}
 	result.ID = page.ID
+	for i, layer := range page.Content.Layer {
+		for j, object := range layer.Objects {
+			result.Content.Layer[i].Objects[j].TextObject.layout = object.TextObject.layout
+		}
+	}
 	return &result, nil
 }
 
@@ -593,6 +598,7 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 // 入参: object 对象内容
 // 返回: GraphicObject 独立副本, error 错误信息
 func cloneEditorObject(object GraphicObject) (GraphicObject, error) {
+	layout := object.TextObject.layout
 	data, err := encodeOFDXML(func(x *ofdXML) { x.object(object, true) })
 	if err != nil {
 		return GraphicObject{}, err
@@ -610,6 +616,7 @@ func cloneEditorObject(object GraphicObject) (GraphicObject, error) {
 	if err := xml.Unmarshal(data, target); err != nil {
 		return GraphicObject{}, err
 	}
+	object.TextObject.layout = layout
 	return object, nil
 }
 
@@ -621,14 +628,14 @@ func (e *Editor) AddText(page int, box Box, value, fontID string, size float64) 
 		Boundary: fmt.Sprintf("%s %s %s %s", ofdNumber(box.X), ofdNumber(box.Y), ofdNumber(box.W), ofdNumber(box.H)),
 		Font:     fontID, Size: size,
 	}}
-	if err := e.LayoutText(&object.TextObject, value, 0); err != nil {
+	if err := e.LayoutText(&object.TextObject, value, TextLayout{}); err != nil {
 		return "", err
 	}
 	return e.AddObject(page, object)
 }
 
-// UpdateText 按AddText规则重排横向文字，保留对象标识、顺序、边界及绘制属性
-// 自定义文字定位使用UpdateObject，不进行段落排版和复杂文字塑形
+// UpdateText 按现有段落选项重排横向文字，保留对象标识、顺序、边界及绘制属性
+// 自定义文字定位使用UpdateObject，不进行复杂文字塑形
 // 入参: page 页面索引, id 文字对象标识, value 原文, fontID 字体资源标识, size 字号
 // 返回: error 错误信息
 func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) error {
@@ -641,7 +648,8 @@ func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) er
 		return fmt.Errorf("object %q is not text", id)
 	}
 	object.TextObject.Font, object.TextObject.Size = fontID, size
-	if err := e.LayoutText(&object.TextObject, value, 0); err != nil {
+	_, layout := object.TextObject.TextLayout()
+	if err := e.LayoutText(&object.TextObject, value, layout); err != nil {
 		return err
 	}
 	object, err = e.prepareObject(id, object)
@@ -656,16 +664,11 @@ func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) er
 // 入参: page 页面索引, id 对象标识, dx 横向位移, dy 纵向位移, scale 正缩放比例
 // 返回: error 错误信息
 func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) error {
-	if !finite(dx) || !finite(dy) || !finite(scale) || scale <= 0 {
-		return fmt.Errorf("transform requires finite offsets and a positive finite scale")
-	}
-	object, err := e.Object(page, id)
-	if err != nil {
-		return err
-	}
-	if dx == 0 && dy == 0 && scale == 1 {
-		return nil
-	}
+	return e.TransformObjects(page, []string{id}, dx, dy, scale)
+}
+
+// transformEditorObject 变换独立对象副本，保留绘制属性和编辑中的段落信息。
+func transformEditorObject(object GraphicObject, dx, dy, scale float64) (GraphicObject, error) {
 	var boundary, ctm *string
 	switch object.Type {
 	case "TextObject":
@@ -673,6 +676,11 @@ func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) err
 		boundary, ctm = &obj.Boundary, &obj.CTM
 		if scale != 1 {
 			obj.Size *= scale
+			if obj.layout != nil {
+				layout := *obj.layout
+				layout.options.LineHeight *= scale
+				obj.layout = &layout
+			}
 			if obj.LineWidth == 0 && obj.Stroke != nil && *obj.Stroke {
 				obj.LineWidth = defaultPathLineWidth
 			}
@@ -691,7 +699,7 @@ func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) err
 	}
 	box, err := ParseBox(*boundary)
 	if err != nil {
-		return err
+		return GraphicObject{}, err
 	}
 	*boundary = fmt.Sprintf("%s %s %s %s", ofdNumber(box.X*scale+dx), ofdNumber(box.Y*scale+dy), ofdNumber(box.W*scale), ofdNumber(box.H*scale))
 	if scale != 1 && (*ctm != "" || object.Type != "TextObject") {
@@ -701,7 +709,7 @@ func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) err
 		}
 		*ctm = fmt.Sprintf("%s %s %s %s %s %s", ofdNumber(m.a), ofdNumber(m.b), ofdNumber(m.c), ofdNumber(m.d), ofdNumber(m.e*scale), ofdNumber(m.f*scale))
 	}
-	return e.UpdateObject(page, id, object)
+	return object, nil
 }
 
 // ReplaceImage 替换图片资源，保留对象位置、尺寸、变换和绘制顺序
@@ -726,59 +734,7 @@ func (e *Editor) ReplaceImage(page int, id string, data []byte) error {
 // 入参: page 页面索引, id 对象标识, alignment 为left、center、right、top、middle或bottom
 // 返回: error 错误信息
 func (e *Editor) AlignObject(page int, id, alignment string) error {
-	if !slices.Contains([]string{"left", "center", "right", "top", "middle", "bottom"}, alignment) {
-		return fmt.Errorf("invalid alignment %q", alignment)
-	}
-	object, err := e.Object(page, id)
-	if err != nil {
-		return err
-	}
-	content := &e.pages[page]
-	pageBox, _ := ParseBox(content.Area.PhysicalBox)
-	var box Box
-	switch object.Type {
-	case "TextObject":
-		reader, err := e.Reader()
-		if err != nil {
-			return err
-		}
-		defer reader.Close()
-		renderer := NewRenderer(reader)
-		text, err := renderer.PageText(content)
-		if err != nil {
-			return err
-		}
-		for _, run := range text.Runs {
-			if run.ID == id {
-				for _, bounds := range run.Boxes {
-					box = unionTextBox(box, bounds)
-				}
-			}
-		}
-	case "PathObject":
-		box, _ = ParseBox(object.PathObject.Boundary)
-	case "ImageObject":
-		box, _ = ParseBox(object.ImageObject.Boundary)
-	}
-	if box.W <= 0 || box.H <= 0 {
-		return fmt.Errorf("object %q has no visible bounds", id)
-	}
-	dx, dy := 0.0, 0.0
-	switch alignment {
-	case "left":
-		dx = -box.X
-	case "center":
-		dx = (pageBox.W-box.W)/2 - box.X
-	case "right":
-		dx = pageBox.W - box.W - box.X
-	case "top":
-		dy = -box.Y
-	case "middle":
-		dy = (pageBox.H-box.H)/2 - box.Y
-	case "bottom":
-		dy = pageBox.H - box.H - box.Y
-	}
-	return e.TransformObject(page, id, dx, dy, 1)
+	return e.AlignObjects(page, []string{id}, alignment)
 }
 
 // scaleTextNumbers 缩放已校验的文字定位数值，保留g重复编码
@@ -796,11 +752,11 @@ func scaleTextNumbers(value string, scale float64) string {
 	return strings.Join(fields, " ")
 }
 
-// LayoutText 按显式换行和嵌入字体度量重排横向文字，保留绘制属性
-// 不自动折行或进行复杂文字塑形，不修改文档，通过AddObject或UpdateObject提交
-// 入参: obj 文字对象, value 原文, lineHeight 基线间距，0使用字体度量，单位为毫米
+// LayoutText 按嵌入字体度量和段落选项重排横向文字，保留绘制属性，不进行复杂文字塑形
+// 不修改文档，通过AddObject或UpdateObject提交；选项仅供当前编辑过程使用，保存为标准文字定位
+// 入参: obj 文字对象, value 原文, options 段落排版选项
 // 返回: error 错误信息
-func (e *Editor) LayoutText(obj *TextObject, value string, lineHeight float64) error {
+func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) error {
 	if obj.ReadDirection != 0 || obj.CharDirection != 0 {
 		return fmt.Errorf("automatic text layout requires horizontal text")
 	}
@@ -815,8 +771,20 @@ func (e *Editor) LayoutText(obj *TextObject, value string, lineHeight float64) e
 	if !utf8.ValidString(value) || strings.Contains(value, "\t") || strings.Trim(value, "\n") == "" {
 		return fmt.Errorf("text must contain UTF-8 characters without tabs")
 	}
+	lineHeight := options.LineHeight
 	if !finite(lineHeight) || lineHeight < 0 {
 		return fmt.Errorf("line height must be finite and nonnegative")
+	}
+	if !slices.Contains([]string{"", "left", "center", "right", "justify"}, options.Align) {
+		return fmt.Errorf("invalid text alignment %q", options.Align)
+	}
+	var width float64
+	if options.Wrap || options.Align != "" && options.Align != "left" {
+		box, err := creationBox(obj.Boundary)
+		if err != nil {
+			return err
+		}
+		width = box.W
 	}
 	hScale := obj.HScale
 	if hScale == 0 {
@@ -827,31 +795,35 @@ func (e *Editor) LayoutText(obj *TextObject, value string, lineHeight float64) e
 	if lineHeight == 0 {
 		lineHeight = math.Max(obj.Size, float64(int(ascender)-int(descender)+int(gap))*unit)
 	}
-	lines := strings.Split(value, "\n")
-	codes := make([]TextCode, len(lines))
-	for line, value := range lines {
-		runes := []rune(value)
-		deltas := make([]string, 0, max(0, len(runes)-1))
+	var codes []TextCode
+	for _, paragraph := range strings.Split(value, "\n") {
+		runes := []rune(paragraph)
+		advances := make([]float64, len(runes))
 		for i, char := range runes {
 			glyph := sfnt.GlyphIndex(char)
 			if glyph == 0 {
 				return fmt.Errorf("font does not contain U+%04X", char)
 			}
-			if i+1 < len(runes) {
-				advance := float64(sfnt.GlyphAdvance(glyph)) * unit * hScale
-				if !finite(advance) {
-					return fmt.Errorf("text advance exceeds finite range")
-				}
-				deltas = append(deltas, ofdNumber(advance))
+			advances[i] = float64(sfnt.GlyphAdvance(glyph)) * unit * hScale
+			if !finite(advances[i]) {
+				return fmt.Errorf("text advance exceeds finite range")
 			}
 		}
-		y := float64(ascender)*unit + float64(line)*lineHeight
-		if !finite(y) {
-			return fmt.Errorf("text baseline exceeds finite range")
+		lines := breakTextLines(runes, advances, width, options.Wrap)
+		for i, line := range lines {
+			x, deltas := alignTextLine(runes[line[0]:line[1]], advances[line[0]:line[1]], width, options.Align, i+1 < len(lines))
+			y := float64(ascender)*unit + float64(len(codes))*lineHeight
+			if !finite(x) || !finite(y) {
+				return fmt.Errorf("text position exceeds finite range")
+			}
+			codes = append(codes, TextCode{X: ofdNumber(x), Y: ofdNumber(y), DeltaX: deltas, Value: escapeOFDText(string(runes[line[0]:line[1]]))})
 		}
-		codes[line] = TextCode{X: "0", Y: ofdNumber(y), DeltaX: strings.Join(deltas, " "), Value: escapeOFDText(value)}
 	}
 	obj.TextCode = codes
+	obj.layout = nil
+	if options != (TextLayout{}) {
+		obj.layout = &textLayout{value: value, options: options}
+	}
 	return nil
 }
 

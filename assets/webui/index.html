@@ -61,8 +61,9 @@
 				<button id="redoButton" class="button" type="button" disabled>重做</button>
 				<span>文件</span>
 			</div>
-			<div class="editor-group">
+			<div class="editor-group editor-objects">
 				<button id="selectObjectButton" class="button" type="button" aria-pressed="true">选择</button>
+				<button id="multiSelectButton" class="button" type="button" aria-pressed="false" title="多选对象">多选</button>
 				<button id="editObjectButton" class="button" type="button" aria-label="修改对象" disabled>修改</button>
 				<button id="copyObjectButton" class="button" type="button" aria-label="复制对象" disabled>复制</button>
 				<button id="deleteObjectButton" class="button" type="button" disabled>删除</button>
@@ -73,25 +74,36 @@
 					<option value="top">置顶</option>
 					<option value="bottom">置底</option>
 				</select>
-				<select id="objectAlign" class="order-select" aria-label="页面对齐" disabled>
+				<select id="objectAlign" class="order-select" aria-label="对象对齐" disabled>
 					<option value="" hidden>对齐</option>
 					<option value="left">左侧</option>
-					<option value="center">水平居中</option>
+					<option value="center">水平</option>
 					<option value="right">右侧</option>
 					<option value="top">顶部</option>
-					<option value="middle">垂直居中</option>
+					<option value="middle">垂直</option>
 					<option value="bottom">底部</option>
 				</select>
 				<span>对象</span>
 			</div>
 			<div class="editor-group">
-				<select id="textFont" aria-label="字体" title="字体" disabled></select>
+				<div class="text-font"><select id="textFont" aria-label="字体" title="字体" disabled></select><button id="textFontAdd" class="icon-button" type="button" title="添加字体" aria-label="添加字体">+</button></div>
 				<div class="form-unit text-size"><input id="textSize" type="number" min="1" step="any" required aria-label="字号" disabled><span>pt</span></div>
 				<input id="textColor" class="color-input" type="color" value="#000000" aria-label="文字颜色" title="文字颜色" disabled>
 				<span>文字</span>
 			</div>
+			<div class="editor-group editor-paragraph">
+				<select id="textAlign" aria-label="段落对齐" title="段落对齐" disabled>
+					<option value="left">左齐</option>
+					<option value="center">居中</option>
+					<option value="right">右齐</option>
+					<option value="justify">两端</option>
+				</select>
+				<button id="textWrap" class="button" type="button" aria-label="自动折行" aria-pressed="false" disabled>折行</button>
+				<label class="form-unit paragraph-height"><span>行距</span><input id="textLineHeight" type="number" min="0" step="any" placeholder="自动" aria-label="行距" title="行距，0为自动" disabled><span>pt</span></label>
+				<span>段落</span>
+			</div>
 			<div class="editor-group">
-				<button id="insertTextButton" class="button" type="button" aria-label="添加文字">文字</button>
+				<button id="insertTextButton" class="button" type="button" aria-label="添加文字" aria-pressed="false">文字</button>
 				<button id="insertImageButton" class="button" type="button" aria-label="添加图片">图片</button>
 				<button id="drawLineButton" class="button" type="button" aria-label="绘制直线" aria-pressed="false">直线</button>
 				<button id="drawRectangleButton" class="button" type="button" aria-label="绘制矩形" aria-pressed="false">矩形</button>
@@ -163,22 +175,11 @@
 				</div>
 			</form>
 		</dialog>
-		<dialog id="insertPanel" class="form-dialog" aria-label="添加文字">
+		<dialog id="insertPanel" class="form-dialog" aria-label="添加图片">
 			<form id="insertForm">
-				<div id="insertTextRow" class="form-row">
-					<label for="insertText">内容</label>
-					<textarea id="insertText" rows="3" required autofocus></textarea>
-				</div>
-				<div id="insertFontRow" class="form-row">
-					<label for="insertFont">字体</label>
-					<div class="form-font">
-						<select id="insertFont" required></select>
-						<button id="insertFontAdd" class="icon-button" type="button" title="添加字体" aria-label="添加字体">+</button>
-					</div>
-				</div>
-				<div id="insertImageRow" class="form-row" hidden>
+				<div class="form-row">
 					<label for="insertImage">图片</label>
-					<input id="insertImage" type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" required>
+					<input id="insertImage" type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" required autofocus>
 				</div>
 				<div class="form-actions">
 					<div id="insertStatus" class="form-status" role="status"></div>

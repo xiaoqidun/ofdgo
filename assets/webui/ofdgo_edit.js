@@ -30,6 +30,13 @@ export function objectTransform(box, page, dx, dy, corner = "") {
 	return { x: left ? box.width * (1 - scale) : 0, y: top ? box.height * (1 - scale) : 0, scale };
 }
 
+// selectionBounds keeps same-page objects together without changing their relative positions.
+export function selectionBounds(items) {
+	const x = Math.min(...items.map(item => item.x)), y = Math.min(...items.map(item => item.y));
+	return { x, y, width: Math.max(...items.map(item => item.x + item.width)) - x,
+		height: Math.max(...items.map(item => item.y + item.height)) - y };
+}
+
 // constrainedPoint applies drawing constraints before clipping the endpoint to the page.
 export function constrainedPoint(from, to, page, shape, shift) {
 	let dx = to.x - from.x, dy = to.y - from.y;
@@ -95,6 +102,7 @@ export class CanvasEditor {
 		this.options = options;
 		this.enabled = false;
 		this.selected = null;
+		this.multiple = false;
 		this.nodes = new WeakMap();
 		this.pages = new WeakMap();
 		this.tool = "";
@@ -107,7 +115,7 @@ export class CanvasEditor {
 		viewer.addEventListener("keyup", (event) => this.modifierChange(event));
 		viewer.addEventListener("dblclick", () => {
 			const item = this.selected;
-			if (this.enabled && item && !this.input && !this.options.busy()) {
+			if (this.enabled && item && !item.items && !this.input && !this.options.busy()) {
 				this.options.onEdit(item);
 			}
 		});
@@ -136,6 +144,8 @@ export class CanvasEditor {
 	}
 
 	mount(index, page, surface) {
+		const selected = this.items().filter(item => item.index === index).map(item => item.id);
+		const selection = [];
 		this.pages.set(surface, { index, width: page.width, height: page.height });
 		const layer = document.createElement("div");
 		layer.className = "edit-layer";
@@ -152,7 +162,8 @@ export class CanvasEditor {
 			this.nodes.set(node, item);
 			node.addEventListener("focus", () => this.select(item));
 			const handles = object.shape === "line" ? ["start", "end"]
-				: object.shape ? ["nw", "n", "ne", "e", "se", "s", "sw", "w"] : ["nw", "ne", "sw", "se"];
+				: object.shape ? ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
+					: object.type === "TextObject" ? ["nw", "ne", "e", "se", "sw", "w"] : ["nw", "ne", "sw", "se"];
 			for (const corner of handles) {
 				const handle = document.createElement("span");
 				handle.className = `edit-handle edit-${corner}`;
@@ -161,11 +172,12 @@ export class CanvasEditor {
 			}
 			this.place(item);
 			layer.append(node);
-			if (this.selected?.index === index && this.selected.id === object.id) {
-				this.select(item);
+			if (selected.includes(object.id)) {
+				selection.push(item);
 			}
 		}
 		surface.append(layer);
+		if (selected.length) this.setSelection(selection);
 		if (this.selectLast && layer.lastElementChild) {
 			this.selectLast = false;
 			this.select(this.nodes.get(layer.lastElementChild));
@@ -173,6 +185,10 @@ export class CanvasEditor {
 	}
 
 	place(item, change = { x: 0, y: 0, scale: 1 }) {
+		if (item.items) {
+			for (const member of item.items) this.place(member, change);
+			return;
+		}
 		if (item.shape) {
 			this.placeShape(item, { x: item.geometry.x + change.x, y: item.geometry.y + change.y,
 				width: item.geometry.width * change.scale, height: item.geometry.height * change.scale });
@@ -200,11 +216,34 @@ export class CanvasEditor {
 		}
 	}
 
-	select(item) {
-		this.selected?.node.classList.remove("selected");
-		this.selected = item;
-		item?.node.classList.add("selected");
-		this.options.onSelect(item);
+	// items returns the current selection without treating a group as a document object.
+	items() {
+		return this.selected?.items || (this.selected ? [this.selected] : []);
+	}
+
+	// setSelection updates object highlights and exposes one same-page selection to the toolbar.
+	setSelection(items) {
+		for (const item of this.items()) {
+			item.node.classList.remove("selected", "multi-selected");
+			item.node.setAttribute("aria-pressed", "false");
+		}
+		this.selected = items.length < 2 ? items[0] || null : { ...selectionBounds(items), items,
+			id: items.map(item => item.id), index: items[0].index, page: items[0].page, surface: items[0].surface };
+		for (const item of items) {
+			item.node.classList.add("selected");
+			item.node.classList.toggle("multi-selected", items.length > 1);
+			item.node.setAttribute("aria-pressed", "true");
+		}
+		this.options.onSelect(this.selected);
+	}
+
+	select(item, add = false) {
+		if (!add || !item || this.selected && item.index !== this.selected.index) {
+			this.setSelection(item ? [item] : []);
+			return;
+		}
+		const items = this.items();
+		this.setSelection(items.includes(item) ? items.filter(member => member !== item) : [...items, item]);
 	}
 
 	clear() {
@@ -216,6 +255,7 @@ export class CanvasEditor {
 
 	start(event) {
 		if (this.input) {
+			if (event.target !== this.input.input) this.commitText();
 			return;
 		}
 		if (!this.enabled || this.options.busy() || event.button !== 0 || this.drag) {
@@ -230,13 +270,23 @@ export class CanvasEditor {
 			event.preventDefault();
 		}
 		this.viewer.focus({ preventScroll: true });
-		this.select(node ? this.nodes.get(node) : null);
+		const target = node ? this.nodes.get(node) : null;
+		const additive = event.shiftKey || event.ctrlKey || event.metaKey || this.multiple;
+		if (!target) {
+			this.startMarquee(event, additive);
+			return;
+		}
+		if (additive && !event.target.dataset.corner) {
+			this.select(target, true);
+			return;
+		}
+		if (!this.items().includes(target)) this.select(target);
 		if (!node || this.options.busy()) {
 			return;
 		}
 		const item = this.selected;
 		this.drag = {
-			item, pointerID: event.pointerId, corner: event.target.dataset.corner || "",
+			item, pointerID: event.pointerId, corner: item.items ? "" : event.target.dataset.corner || "",
 			rect: item.surface.getBoundingClientRect(), rotation: this.options.rotation(),
 			clientX: event.clientX, clientY: event.clientY,
 		};
@@ -259,11 +309,20 @@ export class CanvasEditor {
 			this.moveShape(event, drag);
 			return;
 		}
+		if (drag.marquee) {
+			this.moveMarquee(event, drag);
+			return;
+		}
 		if (!drag.change && !drag.box && Math.hypot(event.clientX - drag.clientX, event.clientY - drag.clientY) < 3) {
 			return;
 		}
 		const from = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.item.page, drag.rotation);
 		const to = pagePoint(event.clientX, event.clientY, drag.rect, drag.item.page, drag.rotation);
+		if (drag.item.type === "TextObject" && (drag.corner === "w" || drag.corner === "e")) {
+			drag.box = reshapeBox({ geometry: drag.item, page: drag.item.page }, to.x - from.x, 0, drag.corner, false);
+			Object.assign(drag.item.node.style, { left: `${drag.box.x * PX_PER_MM}px`, width: `${drag.box.width * PX_PER_MM}px` });
+			return;
+		}
 		if (drag.item.shape && drag.corner) {
 			drag.box = reshapeBox(drag.item, to.x - from.x, to.y - from.y, drag.corner, event.shiftKey);
 			this.placeShape(drag.item, drag.box || drag.item.geometry);
@@ -280,9 +339,25 @@ export class CanvasEditor {
 			return;
 		}
 		this.move(event);
+		if (drag.marquee) {
+			this.drag = null;
+			drag.preview.remove();
+			this.viewer.releasePointerCapture(drag.pointerID);
+			return;
+		}
 		if (drag.shape) {
 			this.drag = null;
 			this.viewer.releasePointerCapture(drag.pointerID);
+			if (drag.shape === "text") {
+				const from = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.page, drag.rotation);
+				const x = Math.max(0, Math.min(from.x, drag.page.width - 1));
+				const y = Math.max(0, Math.min(from.y, drag.page.height - 1));
+				const box = drag.box || { x, y, width: Math.min(80, drag.page.width - x), height: 5 };
+				drag.preview.remove();
+				this.setTool("");
+				this.options.onDrawText(drag.page.index, box, drag.surface, drag.page);
+				return;
+			}
 			if (!drag.box) {
 				drag.preview.remove();
 				return;
@@ -292,13 +367,15 @@ export class CanvasEditor {
 				.finally(() => drag.preview.remove());
 			return;
 		}
-		if (drag.item.shape && drag.corner) {
+		if ((drag.item.shape || drag.item.type === "TextObject") && drag.corner && drag.box) {
 			this.drag = null;
 			this.viewer.releasePointerCapture(drag.pointerID);
-			const changed = drag.box && Object.keys(drag.box).some((key) => drag.box[key] !== drag.item.geometry[key]);
-			Promise.resolve(changed && this.options.onReshape(drag.item, drag.box)).finally(() => {
+			const geometry = drag.item.geometry || drag.item;
+			const changed = Object.keys(drag.box).some((key) => drag.box[key] !== geometry[key]);
+			const apply = drag.item.shape ? this.options.onReshape : this.options.onTextWidth;
+			Promise.resolve(changed && apply(drag.item, drag.box)).finally(() => {
 				drag.preview?.remove();
-				this.placeShape(drag.item, drag.item.geometry);
+				this.place(drag.item);
 			});
 			return;
 		}
@@ -313,6 +390,7 @@ export class CanvasEditor {
 		this.drag = null;
 		if (drag) {
 			drag.preview?.remove();
+			if (drag.marquee) this.setSelection(drag.before);
 			if (drag.item) {
 				this.place(drag.item);
 			}
@@ -320,6 +398,41 @@ export class CanvasEditor {
 				this.viewer.releasePointerCapture(drag.pointerID);
 			}
 		}
+	}
+
+	// startMarquee selects by page-space geometry, so rotation and zoom use the same hit tests.
+	startMarquee(event, additive) {
+		const surface = event.target.closest(".page-surface"), page = this.pages.get(surface);
+		if (!page) {
+			this.select(null);
+			return;
+		}
+		event.preventDefault();
+		const before = this.items();
+		const base = additive ? before.filter(item => item.index === page.index) : [];
+		this.setSelection(base);
+		this.drag = { marquee: true, page, surface, before, base,
+			...this.createPreview(surface, page, "rectangle", { fill: true, fillColor: "var(--accent-soft)", stroke: true, strokeColor: "var(--accent)", lineWidth: 0.2 }),
+			pointerID: event.pointerId, clientX: event.clientX, clientY: event.clientY,
+			rect: surface.getBoundingClientRect(), rotation: this.options.rotation() };
+		this.viewer.setPointerCapture(event.pointerId);
+	}
+
+	// moveMarquee includes intersecting objects while preserving an additive selection.
+	moveMarquee(event, drag) {
+		const from = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.page, drag.rotation);
+		const to = constrainedPoint(from, pagePoint(event.clientX, event.clientY, drag.rect, drag.page, drag.rotation), drag.page, "rectangle", false);
+		const box = { x: Math.min(from.x, to.x), y: Math.min(from.y, to.y), width: Math.abs(to.x-from.x), height: Math.abs(to.y-from.y) };
+		paintShape(drag.node, "rectangle", box);
+		if (Math.hypot(event.clientX-drag.clientX, event.clientY-drag.clientY) < 3) return;
+		const items = [...drag.base];
+		for (const node of drag.surface.querySelectorAll(".edit-object")) {
+			const item = this.nodes.get(node);
+			if (!items.includes(item) && item.x <= box.x+box.width && item.x+item.width >= box.x && item.y <= box.y+box.height && item.y+item.height >= box.y) {
+				items.push(item);
+			}
+		}
+		this.setSelection(items);
 	}
 
 	startShape(event) {
@@ -336,7 +449,7 @@ export class CanvasEditor {
 			style.fill = false;
 			style.stroke = true;
 		}
-		this.drag = { shape, page, ...this.createPreview(surface, page, shape, style), style, pointerID: event.pointerId,
+		this.drag = { shape, page, surface, ...this.createPreview(surface, page, shape === "text" ? "rectangle" : shape, style), style, pointerID: event.pointerId,
 			rect: surface.getBoundingClientRect(), rotation: this.options.rotation(),
 			clientX: event.clientX, clientY: event.clientY };
 		this.viewer.setPointerCapture(event.pointerId);
@@ -362,15 +475,15 @@ export class CanvasEditor {
 			return { x: Math.max(0, Math.min(p.x, drag.page.width)), y: Math.max(0, Math.min(p.y, drag.page.height)) };
 		};
 		const from = point(drag.clientX, drag.clientY);
-		const to = constrainedPoint(from, pagePoint(event.clientX, event.clientY, drag.rect, drag.page, drag.rotation), drag.page, drag.shape, event.shiftKey);
+		const to = constrainedPoint(from, pagePoint(event.clientX, event.clientY, drag.rect, drag.page, drag.rotation), drag.page, drag.shape, event.shiftKey && drag.shape !== "text");
 		const x = Math.min(from.x, to.x), y = Math.min(from.y, to.y);
-		const width = Math.abs(to.x - from.x), height = Math.abs(to.y - from.y);
+		const width = Math.abs(to.x - from.x), height = drag.shape === "text" ? Math.max(5, Math.abs(to.y - from.y)) : Math.abs(to.y - from.y);
 		const valid = Math.hypot(event.clientX - drag.clientX, event.clientY - drag.clientY) >= 3
 			&& (drag.shape === "line" ? width > 0 || height > 0 : width > 0 && height > 0);
 		drag.box = valid ? drag.shape === "line"
 			? { x: from.x, y: from.y, width: to.x - from.x, height: to.y - from.y }
 			: { x, y, width, height } : null;
-		paintShape(drag.node, drag.shape, drag.shape === "line"
+		paintShape(drag.node, drag.shape === "text" ? "rectangle" : drag.shape, drag.shape === "line"
 			? { x: from.x, y: from.y, width: to.x - from.x, height: to.y - from.y } : { x, y, width, height });
 	}
 
@@ -384,7 +497,14 @@ export class CanvasEditor {
 	}
 
 	keyDown(event) {
+		if (event.defaultPrevented || event.target?.closest("input, textarea, select, [contenteditable]")) return;
 		this.modifierChange(event);
+		if (event.key === "Escape" && this.drag && !this.tool && !this.options.busy()) {
+			event.preventDefault();
+			event.stopPropagation();
+			this.cancel();
+			return;
+		}
 		if (event.key === "Escape" && this.tool && !this.options.busy()) {
 			event.preventDefault();
 			event.stopPropagation();
@@ -405,9 +525,9 @@ export class CanvasEditor {
 			this.drag ? this.cancel() : this.clear();
 		} else if (event.key === "Delete") {
 			this.options.onDelete(this.selected);
-		} else if (edit && !this.drag) {
+		} else if (edit && !this.drag && !this.selected.items) {
 			this.options.onEdit(this.selected);
-		} else if (!this.drag) {
+		} else if (!this.drag && directions[event.key]) {
 			const [x, y] = directions[event.key];
 			const [dx, dy] = [[x, y], [y, -x], [-x, -y], [-y, x]][this.options.rotation() / 90];
 			const step = event.shiftKey ? 10 : 1;
@@ -427,15 +547,16 @@ export class CanvasEditor {
 		const input = document.createElement("textarea");
 		input.className = "edit-text";
 		input.setAttribute("aria-label", "编辑文字");
-		input.wrap = "off";
+		input.wrap = item.wrap ? "soft" : "off";
 		input.spellcheck = false;
 		input.value = item.text;
 		Object.assign(input.style, {
 			left: `${item.x * PX_PER_MM}px`, top: `${item.y * PX_PER_MM}px`,
-			width: `${Math.max(item.width, Math.min(50, item.page.width - item.x)) * PX_PER_MM + 4}px`,
+			width: `${(item.wrap ? item.width : Math.max(item.width, Math.min(50, item.page.width - item.x))) * PX_PER_MM + 4}px`,
 			minHeight: `${item.height * PX_PER_MM + 4}px`,
 			fontFamily: `"${face.family}"`, fontSize: `${item.size * PX_PER_MM}px`,
-			lineHeight: item.lineHeight ? `${item.lineHeight * PX_PER_MM}px` : "normal", color: item.color,
+			lineHeight: item.paragraphHeight || item.lineHeight ? `${(item.paragraphHeight || item.lineHeight) * PX_PER_MM}px` : "normal", color: item.color,
+			textAlign: item.align || "left",
 		});
 		this.input = { input, item, face };
 		item.surface.append(input);
@@ -464,22 +585,21 @@ export class CanvasEditor {
 		});
 		resize();
 		input.focus({ preventScroll: true });
-		input.select();
+		if (!item.draft) input.select();
 	}
 
 	async commitText() {
 		const editing = this.input;
-		if (!editing || editing.input.readOnly) {
-			return;
-		}
-		if (editing.input.value === editing.item.text) {
+		if (!editing) return true;
+		if (editing.input.readOnly) return false;
+		if (editing.input.value === editing.item.text || editing.item.draft && !editing.input.value.trim()) {
 			this.closeText();
-			return;
+			return true;
 		}
 		editing.input.readOnly = true;
 		const saved = await this.options.onCommitText(editing.item, editing.input.value);
 		if (this.input !== editing) {
-			return;
+			return Boolean(saved);
 		}
 		if (saved) {
 			this.closeText();
@@ -487,6 +607,7 @@ export class CanvasEditor {
 			editing.input.readOnly = false;
 			editing.input.focus({ preventScroll: true });
 		}
+		return Boolean(saved);
 	}
 
 	closeText() {
@@ -495,6 +616,7 @@ export class CanvasEditor {
 		if (editing) {
 			editing.input.remove();
 			document.fonts.delete(editing.face);
+			if (editing.item.draft && this.selected === editing.item) this.select(null);
 			this.options.onTextChange();
 		}
 	}

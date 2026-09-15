@@ -1,0 +1,138 @@
+// Copyright 2025-2026 肖其顿 (XIAO QI DUN)
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ofdgo
+
+import (
+	"strings"
+
+	"github.com/go-text/typesetting/segmenter"
+)
+
+// TextLayout 横向段落选项，Wrap按Boundary宽度折行，Align为left、center、right或justify。
+// LineHeight为毫米单位的基线间距，0使用字体度量；零值保持显式换行和左对齐。
+type TextLayout struct {
+	Wrap       bool
+	Align      string
+	LineHeight float64
+}
+
+// textLayout 保存编辑中的原文与选项，不写入OFD，也不参与渲染。
+type textLayout struct {
+	value   string
+	options TextLayout
+}
+
+// TextLayout 获取最近一次排版的原文与选项，区分软换行和显式换行。
+// 信息仅在当前编辑过程保留，读取OFD时返回定位后的文字和默认选项。
+// 返回: string 原文, TextLayout 排版选项
+func (obj TextObject) TextLayout() (string, TextLayout) {
+	if obj.layout != nil {
+		return obj.layout.value, obj.layout.options
+	}
+	return obj.Text(), TextLayout{}
+}
+
+// breakTextLines 优先使用Unicode断行机会，过长词仅在字素边界折行，不丢弃空白。
+func breakTextLines(runes []rune, advances []float64, width float64, wrap bool) [][2]int {
+	if !wrap || len(runes) == 0 {
+		return [][2]int{{0, len(runes)}}
+	}
+	var seg segmenter.Segmenter
+	seg.Init(runes)
+	breaks := make([]bool, len(runes)+1)
+	for it := seg.LineIterator(); it.Next(); {
+		line := it.Line()
+		breaks[line.Offset+len(line.Text)] = true
+	}
+	var ends []int
+	for it := seg.GraphemeIterator(); it.Next(); {
+		cluster := it.Grapheme()
+		ends = append(ends, cluster.Offset+len(cluster.Text))
+	}
+	sums := make([]float64, len(runes)+1)
+	for i, advance := range advances {
+		sums[i+1] = sums[i] + advance
+	}
+	var lines [][2]int
+	for start, cursor := 0, 0; start < len(runes); {
+		end, legal, next := start, start, cursor
+		for next < len(ends) {
+			candidate := ends[next]
+			visible := candidate
+			for visible > start && runes[visible-1] == ' ' {
+				visible--
+			}
+			if sums[visible]-sums[start] > width && end > start {
+				break
+			}
+			end = candidate
+			next++
+			if breaks[end] {
+				legal = end
+			}
+			if sums[visible]-sums[start] > width {
+				break
+			}
+		}
+		if end < len(runes) && legal > start {
+			end = legal
+		}
+		lines = append(lines, [2]int{start, end})
+		start = end
+		for cursor < len(ends) && ends[cursor] <= start {
+			cursor++
+		}
+	}
+	return lines
+}
+
+// alignTextLine 将段落对齐转换为标准X和DeltaX，两端对齐保留段落末行左对齐。
+func alignTextLine(runes []rune, advances []float64, width float64, alignment string, justify bool) (float64, string) {
+	end := len(runes)
+	for end > 0 && runes[end-1] == ' ' {
+		end--
+	}
+	length := 0.0
+	for _, advance := range advances[:end] {
+		length += advance
+	}
+	x, extra := 0.0, max(0, width-length)
+	if alignment == "center" {
+		x = extra / 2
+	} else if alignment == "right" {
+		x = extra
+	}
+	gaps := make(map[int]bool)
+	if alignment == "justify" && justify && extra > 0 {
+		var seg segmenter.Segmenter
+		seg.Init(runes[:end])
+		for it := seg.LineIterator(); it.Next(); {
+			line := it.Line()
+			at := line.Offset + len(line.Text)
+			if at < end {
+				gaps[at-1] = true
+			}
+		}
+	}
+	deltas := make([]string, max(0, len(runes)-1))
+	for i := range deltas {
+		advance := advances[i]
+		if gaps[i] {
+			advance += extra / float64(len(gaps))
+		}
+		deltas[i] = ofdNumber(advance)
+	}
+	return x, strings.Join(deltas, " ")
+}

@@ -107,6 +107,7 @@ type TextObject struct {
 	TextCode      []TextCode    `xml:"TextCode"`
 	Clips         *Clips        `xml:"Clips"`
 	Actions       []Action      `xml:"Actions>Action"`
+	layout        *textLayout
 }
 
 // FillColor 填充颜色

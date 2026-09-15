@@ -111,9 +111,25 @@ a:focus-visible {
 }
 
 .editor-file,
+.editor-paragraph,
 .editor-group:has(#textFont),
 .editor-group:has(#shapeFill) {
 	grid-template-columns: repeat(2, max-content);
+}
+
+.editor-objects {
+	grid-template-columns: repeat(4, max-content);
+}
+
+.form-unit.paragraph-height {
+	grid-column: 1 / -1;
+	grid-template-columns: auto 58px auto;
+	gap: 4px;
+}
+
+.paragraph-height input {
+	width: 58px;
+	min-width: 0;
 }
 
 .editor-file #saveButton {
@@ -126,9 +142,8 @@ a:focus-visible {
 }
 
 #textFont {
-	grid-column: 1 / -1;
-	width: 128px;
-	min-width: 100%;
+	width: 100%;
+	min-width: 0;
 }
 
 .shape-paint,
@@ -268,7 +283,7 @@ button:not(:disabled):hover {
 
 .new-icon {
 	position: relative;
-	width: 12px;
+	width: 15px;
 	height: 15px;
 	border: 1px solid currentColor;
 }
@@ -338,12 +353,15 @@ button:not(:disabled):hover {
 }
 
 .page-control input,
+.paragraph-height input,
 .text-size input {
 	appearance: textfield;
 }
 
 .page-control input::-webkit-inner-spin-button,
 .page-control input::-webkit-outer-spin-button,
+.paragraph-height input::-webkit-inner-spin-button,
+.paragraph-height input::-webkit-outer-spin-button,
 .text-size input::-webkit-inner-spin-button,
 .text-size input::-webkit-outer-spin-button {
 	-webkit-appearance: none;
@@ -451,6 +469,7 @@ button:not(:disabled):hover {
 .form-row input[type="file"],
 .form-row select,
 .form-row textarea,
+.paragraph-height input,
 .text-size input {
 	width: 100%;
 	min-width: 0;
@@ -531,10 +550,12 @@ button:not(:disabled):hover {
 	color: var(--text-muted);
 }
 
-.form-font {
+.text-font {
 	display: grid;
+	width: 160px;
 	grid-template-columns: minmax(0, 1fr) auto;
-	gap: 8px;
+	grid-column: 1 / -1;
+	gap: 4px;
 }
 
 .form-row input[aria-invalid="true"] {
@@ -1239,6 +1260,10 @@ button.outline-link:hover {
 
 .selected .edit-handle {
 	display: block;
+}
+
+.multi-selected .edit-handle {
+	display: none;
 }
 
 .edit-handle::before {

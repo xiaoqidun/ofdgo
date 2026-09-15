@@ -3,6 +3,7 @@ module github.com/xiaoqidun/ofdgo
 go 1.26.0
 
 require (
+	github.com/go-text/typesetting v0.3.4
 	github.com/tdewolff/canvas v0.0.0-20260913163248-dd4999d1c76a
 	github.com/tdewolff/font v0.0.0-20260913163313-54f98bb59ee6
 	github.com/xiaoqidun/jbig2 v1.0.0
@@ -23,7 +24,6 @@ require (
 	github.com/benoitkugler/textlayout v0.3.2 // indirect
 	github.com/benoitkugler/textprocessing v0.0.6 // indirect
 	github.com/go-fonts/latin-modern v0.3.3 // indirect
-	github.com/go-text/typesetting v0.3.4 // indirect
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
 	github.com/kolesa-team/go-webp v1.0.5 // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
