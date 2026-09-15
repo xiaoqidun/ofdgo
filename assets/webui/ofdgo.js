@@ -437,12 +437,16 @@ function toggleSidebar(side) {
 }
 
 function updateSidebarState() {
+	const openingPages = state.showPages && el.pageListPanel.inert;
 	document.body.toggleAttribute("data-hide-pages", !state.showPages);
 	document.body.toggleAttribute("data-hide-meta", !state.showMeta);
 	el.pageListPanel.inert = !state.showPages;
 	el.metaPanel.inert = !state.showMeta;
 	el.togglePagesButton.setAttribute("aria-pressed", String(state.showPages));
 	el.toggleMetaButton.setAttribute("aria-pressed", String(state.showMeta));
+	if (openingPages) {
+		updatePageListCurrent(true);
+	}
 }
 
 function syncLayoutMode(event) {
@@ -2235,10 +2239,10 @@ function setCurrentPage(index) {
 	}
 }
 
-function updatePageListCurrent() {
+function updatePageListCurrent(force = false) {
 	const current = el.pageList.querySelector(".page-list-item[aria-current]");
 	if (current) {
-		if (Number.parseInt(current.dataset.pageIndex, 10) === state.pageIndex) {
+		if (!force && Number.parseInt(current.dataset.pageIndex, 10) === state.pageIndex) {
 			return;
 		}
 		current.removeAttribute("aria-current");

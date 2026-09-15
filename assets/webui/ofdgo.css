@@ -1499,6 +1499,12 @@ button.outline-link:hover {
 		display: block;
 	}
 
+	body[data-hide-pages] .page-list-panel:has(#searchPanel:not([hidden])) {
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+	}
+
 	.page-list-panel {
 		left: 0;
 	}
