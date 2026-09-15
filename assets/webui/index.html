@@ -17,6 +17,7 @@
 			<input id="fontDirectoryInput" class="file-input" type="file" webkitdirectory multiple>
 			<div class="tool-group">
 				<button id="ofdButton" class="icon-button" type="button" title="打开" aria-label="打开" aria-keyshortcuts="Control+O Meta+O"><span class="open-icon" aria-hidden="true"></span></button>
+				<button id="newButton" class="icon-button" type="button" title="新建" aria-label="新建文档"><span class="new-icon" aria-hidden="true"></span></button>
 				<button id="togglePagesButton" class="icon-button" type="button" title="页面栏" aria-label="页面栏" aria-pressed="true">&#9776;</button>
 				<button id="toggleMetaButton" class="icon-button" type="button" title="信息栏" aria-label="信息栏" aria-pressed="true">&#9432;</button>
 			</div>
@@ -53,6 +54,74 @@
 				<button id="exportButton" class="button" type="button" data-short="多" title="导出文档" aria-label="导出文档" aria-haspopup="dialog" aria-controls="exportPanel" disabled>文档</button>
 			</div>
 		</header>
+		<div id="editorTools" class="editor-toolbar" role="toolbar" aria-label="创作工具" hidden>
+			<div class="editor-group">
+				<button id="selectObjectButton" class="button" type="button" aria-pressed="true">选择</button>
+				<button id="editTextButton" class="button" type="button" aria-label="修改文字" disabled>修改</button>
+				<button id="deleteObjectButton" class="button" type="button" disabled>删除</button>
+				<span>对象</span>
+			</div>
+			<div class="editor-group">
+				<button id="insertTextButton" class="button" type="button" aria-label="添加文字">文字</button>
+				<button id="insertImageButton" class="button" type="button" aria-label="添加图片">图片</button>
+				<span>插入</span>
+			</div>
+			<div class="editor-group">
+				<button id="saveButton" class="button" type="button" aria-label="保存OFD">保存</button>
+				<button id="undoButton" class="button" type="button" disabled>撤销</button>
+				<button id="redoButton" class="button" type="button" disabled>重做</button>
+				<span>文件</span>
+			</div>
+		</div>
+		<dialog id="createPanel" class="form-dialog" aria-label="新建文档">
+			<form id="createForm">
+				<div class="form-row">
+					<label for="createName">名称</label>
+					<input id="createName" type="text" value="未命名" required autofocus>
+				</div>
+				<div class="form-row">
+					<label for="createWidth">宽度</label>
+					<div class="form-unit"><input id="createWidth" type="number" value="210" min="1" step="any" required><span>mm</span></div>
+				</div>
+				<div class="form-row">
+					<label for="createHeight">高度</label>
+					<div class="form-unit"><input id="createHeight" type="number" value="297" min="1" step="any" required><span>mm</span></div>
+				</div>
+				<div class="form-actions">
+					<div id="createStatus" class="form-status" role="status"></div>
+					<button id="createCancel" class="button" type="button">取消</button>
+					<button class="button" type="submit">新建</button>
+				</div>
+			</form>
+		</dialog>
+		<dialog id="insertPanel" class="form-dialog" aria-label="添加文字">
+			<form id="insertForm">
+				<div id="insertTextRow" class="form-row">
+					<label for="insertText">内容</label>
+					<input id="insertText" type="text" required autofocus>
+				</div>
+				<div id="insertFontRow" class="form-row">
+					<label for="insertFont">字体</label>
+					<div class="form-font">
+						<select id="insertFont" required></select>
+						<button id="insertFontAdd" class="icon-button" type="button" title="添加字体" aria-label="添加字体">+</button>
+					</div>
+				</div>
+				<div id="insertSizeRow" class="form-row">
+					<label for="insertSize">字号</label>
+					<div class="form-unit"><input id="insertSize" type="number" value="12" min="1" step="any" required><span>pt</span></div>
+				</div>
+				<div id="insertImageRow" class="form-row" hidden>
+					<label for="insertImage">图片</label>
+					<input id="insertImage" type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" required>
+				</div>
+				<div class="form-actions">
+					<div id="insertStatus" class="form-status" role="status"></div>
+					<button id="insertCancel" class="button" type="button">取消</button>
+					<button id="insertSubmit" class="button" type="submit">添加</button>
+				</div>
+			</form>
+		</dialog>
 		<dialog id="exportPanel" class="form-dialog" aria-label="导出文档">
 			<form id="exportForm">
 				<div class="form-row">

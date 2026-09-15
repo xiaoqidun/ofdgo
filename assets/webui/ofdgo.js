@@ -1,6 +1,7 @@
+import { CanvasEditor } from "./ofdgo_edit.js";
+import { FontManager } from "./ofdgo_font.js";
+
 const MM_TO_PX = 96 / 25.4;
-const FONT_DATABASE = "ofdgo";
-const fontChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel(FONT_DATABASE) : null;
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const DEFAULT_IMAGE_DPI = 300;
 const PAGE_CACHE_LIMIT = 16;
@@ -20,7 +21,6 @@ let wasmPromise = null;
 let wasmWorker = null;
 let wasmRequestID = 0;
 let wasmRecoveryTimer = 0;
-let fontDatabase = null;
 let textMeasure = null;
 
 const state = {
@@ -31,23 +31,24 @@ const state = {
 	wasmRecoveries: 0,
 	exporting: false,
 	exportRequestID: 0,
+	editing: false,
+	selectObjects: true,
+	dirty: false,
+	editorInfo: null,
+	savedRevision: null,
+	textObject: null,
+	insertFonts: [],
 	ofdBytes: null,
 	fileName: "ofdgo.ofd",
 	openSeq: 0,
 	pageSeq: 0,
-	fontSeq: 0,
 	searchSeq: 0,
 	searchQuery: "",
 	searchMatches: [],
 	searchIndex: -1,
 	navigationScroll: new Map(),
-	localFonts: [],
-	userFonts: [],
 	fontSyncPending: false,
 	fontSyncing: false,
-	systemFontCatalog: [],
-	systemFontCatalogLoaded: false,
-	systemFontPermission: "prompt",
 	doc: null,
 	pageIndex: 0,
 	scale: 1,
@@ -81,6 +82,37 @@ const state = {
 const el = {
 	ofdInput: document.querySelector("#ofdInput"),
 	ofdButton: document.querySelector("#ofdButton"),
+	newButton: document.querySelector("#newButton"),
+	editorTools: document.querySelector("#editorTools"),
+	selectObjectButton: document.querySelector("#selectObjectButton"),
+	deleteObjectButton: document.querySelector("#deleteObjectButton"),
+	editTextButton: document.querySelector("#editTextButton"),
+	undoButton: document.querySelector("#undoButton"),
+	redoButton: document.querySelector("#redoButton"),
+	insertTextButton: document.querySelector("#insertTextButton"),
+	insertImageButton: document.querySelector("#insertImageButton"),
+	saveButton: document.querySelector("#saveButton"),
+	createPanel: document.querySelector("#createPanel"),
+	createForm: document.querySelector("#createForm"),
+	createName: document.querySelector("#createName"),
+	createWidth: document.querySelector("#createWidth"),
+	createHeight: document.querySelector("#createHeight"),
+	createStatus: document.querySelector("#createStatus"),
+	createCancel: document.querySelector("#createCancel"),
+	insertPanel: document.querySelector("#insertPanel"),
+	insertForm: document.querySelector("#insertForm"),
+	insertTextRow: document.querySelector("#insertTextRow"),
+	insertFontRow: document.querySelector("#insertFontRow"),
+	insertSizeRow: document.querySelector("#insertSizeRow"),
+	insertImageRow: document.querySelector("#insertImageRow"),
+	insertText: document.querySelector("#insertText"),
+	insertFont: document.querySelector("#insertFont"),
+	insertFontAdd: document.querySelector("#insertFontAdd"),
+	insertSize: document.querySelector("#insertSize"),
+	insertImage: document.querySelector("#insertImage"),
+	insertStatus: document.querySelector("#insertStatus"),
+	insertCancel: document.querySelector("#insertCancel"),
+	insertSubmit: document.querySelector("#insertSubmit"),
 	fontInput: document.querySelector("#fontInput"),
 	fontDirectoryInput: document.querySelector("#fontDirectoryInput"),
 	togglePagesButton: document.querySelector("#togglePagesButton"),
@@ -167,7 +199,53 @@ const el = {
 	statusText: document.querySelector("#statusText"),
 };
 
+const fontManager = new FontManager({
+	onChange: scheduleFontSync,
+	onPermissionChange: updateFontPermissionHint,
+});
+
+const canvasEditor = new CanvasEditor(el.viewerPanel, {
+	busy: () => document.body.hasAttribute("aria-busy"),
+	rotation: () => state.rotation,
+	onSelect: updateObjectControls,
+	onTransform: (item, change) => changeDocument("ofdgoTransformObject", item, change.x, change.y, change.scale),
+	onDelete: (item) => changeDocument("ofdgoDeleteObject", item),
+	onEdit: (item) => openInsertPanel(true, item),
+});
+
+el.selectObjectButton.addEventListener("click", () => {
+	if (document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	state.selectObjects = !state.selectObjects || state.panMode;
+	if (state.selectObjects && state.panMode) {
+		togglePan();
+	}
+	updateEditorTools();
+});
+el.deleteObjectButton.addEventListener("click", () => {
+	if (canvasEditor.selected) {
+		changeDocument("ofdgoDeleteObject", canvasEditor.selected);
+	}
+});
+el.editTextButton.addEventListener("click", () => {
+	if (canvasEditor.selected && !canvasEditor.selected.image) {
+		openInsertPanel(true, canvasEditor.selected);
+	}
+});
+el.undoButton.addEventListener("click", () => changeDocument("ofdgoUndo"));
+el.redoButton.addEventListener("click", () => changeDocument("ofdgoRedo"));
 el.ofdButton.addEventListener("click", openOFDFile);
+el.newButton.addEventListener("click", openCreatePanel);
+el.createCancel.addEventListener("click", () => el.createPanel.close());
+el.createForm.addEventListener("submit", createDocument);
+el.insertTextButton.addEventListener("click", () => openInsertPanel(true));
+el.insertImageButton.addEventListener("click", () => openInsertPanel(false));
+el.insertCancel.addEventListener("click", () => el.insertPanel.close());
+el.insertPanel.addEventListener("close", () => { state.textObject = null; });
+el.insertForm.addEventListener("submit", insertObject);
+el.insertFontAdd.addEventListener("click", () => openFontFile(el.fontInput));
+el.saveButton.addEventListener("click", () => exportFile(true, null, "ofd"));
 el.togglePagesButton.addEventListener("click", () => toggleSidebar("pages"));
 el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
 el.pagesTab.addEventListener("click", () => showNavigation(el.pagesTab));
@@ -271,9 +349,6 @@ document.addEventListener("dragover", (event) => {
 	}
 });
 document.addEventListener("drop", openOFDFromDrop);
-if (fontChannel) {
-	fontChannel.onmessage = scheduleFontSync;
-}
 el.fontList.addEventListener("focusout", () => {
 	if (state.fontSyncPending) {
 		window.setTimeout(syncUserFonts, 0);
@@ -298,16 +373,20 @@ function handleKeyDown(event) {
 	if ((event.ctrlKey || event.metaKey) && !event.shiftKey && key.toLowerCase() === "a" && state.doc
 		&& el.viewerPanel.contains(target) && !target.closest("input, textarea, select, [contenteditable]")) {
 		event.preventDefault();
-		if (!document.body.hasAttribute("aria-busy") && !el.exportPanel.open) {
+		if (!document.body.hasAttribute("aria-busy") && !formDialogOpen()) {
 			selectDocumentText();
 		}
 		return;
 	}
-	if (document.body.hasAttribute("aria-busy") || el.exportPanel.open) {
+	if (document.body.hasAttribute("aria-busy") || formDialogOpen()) {
 		return;
 	}
 	if (event.ctrlKey || event.metaKey) {
-		if (!event.shiftKey && key.toLowerCase() === "o") {
+		if (state.editing && !target.closest("input, textarea, select, [contenteditable]")
+			&& (key.toLowerCase() === "z" || (!event.shiftKey && key.toLowerCase() === "y"))) {
+			event.preventDefault();
+			(key.toLowerCase() === "y" || event.shiftKey ? el.redoButton : el.undoButton).click();
+		} else if (!event.shiftKey && key.toLowerCase() === "o") {
 			event.preventDefault();
 			openOFDFile();
 		} else if (!event.shiftKey && key.toLowerCase() === "f" && state.doc) {
@@ -372,6 +451,227 @@ function handleKeyDown(event) {
 	if (button) {
 		event.preventDefault();
 		button.click();
+	}
+}
+
+function formDialogOpen() {
+	return el.exportPanel.open || el.createPanel.open || el.insertPanel.open;
+}
+
+function warnUnsaved(event) {
+	event.preventDefault();
+	event.returnValue = "";
+}
+
+function setDirty(dirty) {
+	if (state.dirty === dirty) {
+		return;
+	}
+	state.dirty = dirty;
+	if (dirty) {
+		window.addEventListener("beforeunload", warnUnsaved);
+	} else {
+		window.removeEventListener("beforeunload", warnUnsaved);
+	}
+}
+
+function discardChanges() {
+	return !state.dirty || window.confirm("文档尚未保存，放弃更改？");
+}
+
+function setEditorInfo(doc) {
+	state.editorInfo = { revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo };
+	setDirty(doc.revision !== state.savedRevision);
+}
+
+function openCreatePanel() {
+	if (document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	el.createForm.reset();
+	el.createStatus.textContent = "";
+	el.createPanel.showModal();
+}
+
+async function createDocument(event) {
+	event.preventDefault();
+	if (document.body.hasAttribute("aria-busy") || !discardChanges()) {
+		return;
+	}
+	const title = el.createName.value.trim() || "未命名";
+	const openSeq = ++state.openSeq;
+	setBusy(true, "正在新建文档", null, "正在新建文档");
+	try {
+		await ensureWASM();
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		const doc = await callWASM("ofdgoCreateDocument", title, Number(el.createWidth.value), Number(el.createHeight.value), state.renderAnnotations);
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		state.editing = true;
+		canvasEditor.clear();
+		state.selectObjects = true;
+		setPan(false);
+		state.ofdBytes = null;
+		state.fileName = `${title.replace(/[\\/:*?"<>|]+/g, "_").replace(/\.ofd$/i, "")}.ofd`;
+		state.savedRevision = null;
+		setEditorInfo(doc);
+		el.createPanel.close();
+		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true });
+	} catch (err) {
+		if (openSeq === state.openSeq) {
+			el.createStatus.textContent = err.message;
+		}
+	} finally {
+		if (openSeq === state.openSeq) {
+			setBusy(false);
+			updateControls();
+		}
+	}
+}
+
+async function openInsertPanel(text, item = null) {
+	if (!state.editing || document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	const openSeq = state.openSeq;
+	if (text && !item) {
+		await requestLocalFontsBeforeOpen();
+	}
+	if (openSeq !== state.openSeq) {
+		return;
+	}
+	el.insertForm.reset();
+	state.textObject = item;
+	if (item) {
+		state.insertFonts = [];
+		el.insertText.value = item.text;
+		el.insertSize.value = Number((item.size * 72 / 25.4).toPrecision(12));
+	}
+	el.insertPanel.setAttribute("aria-label", item ? "修改文字" : text ? "添加文字" : "添加图片");
+	el.insertSubmit.textContent = item ? "修改" : "添加";
+	for (const [row, input] of [[el.insertTextRow, el.insertText], [el.insertFontRow, el.insertFont], [el.insertSizeRow, el.insertSize]]) {
+		row.hidden = !text;
+		input.disabled = !text;
+	}
+	el.insertImageRow.hidden = text;
+	el.insertImage.disabled = text;
+	updateInsertFonts();
+	el.insertPanel.showModal();
+	(text ? el.insertText : el.insertImage).focus();
+}
+
+function updateInsertFonts() {
+	const selected = state.insertFonts[Number(el.insertFont.value)];
+	const key = (font) => font?.id || font?.postscriptName;
+	state.insertFonts = [...fontManager.userFonts.filter((font) => font.enabled), ...fontManager.catalog];
+	if (state.textObject) {
+		state.insertFonts.unshift({ id: `embedded:${state.textObject.font}`, name: state.textObject.fontName, embedded: true });
+	}
+	el.insertFont.replaceChildren();
+	state.insertFonts.forEach((font, index) => {
+		const option = document.createElement("option");
+		option.value = String(index);
+		option.textContent = font.fullName || font.name;
+		option.selected = key(font) === key(selected);
+		el.insertFont.append(option);
+	});
+	el.insertSubmit.disabled = !el.insertTextRow.hidden && !state.insertFonts.length;
+	el.insertStatus.textContent = el.insertSubmit.disabled ? "尚未添加字体" : "";
+}
+
+async function insertObject(event) {
+	event.preventDefault();
+	if (!state.editing || document.body.hasAttribute("aria-busy") || el.insertSubmit.disabled) {
+		return;
+	}
+	let openSeq = state.openSeq;
+	const text = !el.insertTextRow.hidden;
+	const item = state.textObject;
+	const { scrollLeft, scrollTop } = el.viewerPanel;
+	const page = state.doc.pages[state.pageIndex];
+	const x = Math.min(20, page.width / 10);
+	const y = Math.min(20, page.height / 10);
+	el.insertStatus.textContent = "";
+	setBusy(true, item ? "正在修改文字" : text ? "正在添加文字" : "正在添加图片", null);
+	try {
+		let data = null;
+		if (text) {
+			const font = state.insertFonts[Number(el.insertFont.value)];
+			if (!font.embedded) {
+				data = await fontManager.read(font);
+			}
+		} else {
+			data = new Uint8Array(await el.insertImage.files[0].arrayBuffer());
+		}
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		const points = Number(el.insertSize.value);
+		const size = item && points === Number((item.size * 72 / 25.4).toPrecision(12)) ? item.size : points * 25.4 / 72;
+		const doc = item
+			? await callWASM("ofdgoUpdateText", item.index, item.id, el.insertText.value, data, size)
+			: text ? await callWASM("ofdgoInsertText", state.pageIndex, el.insertText.value, data, x, y, size)
+			: await callWASM("ofdgoInsertImage", state.pageIndex, data, x, y, page.width - x * 2);
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		setEditorInfo(doc);
+		el.insertPanel.close();
+		canvasEditor.selectLast = !item;
+		state.selectObjects = true;
+		setPan(false);
+		openSeq = ++state.openSeq;
+		await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex: item?.index ?? state.pageIndex, fitMode: state.fitMode, scale: state.scale });
+		if (item && openSeq === state.openSeq) {
+			el.viewerPanel.scrollLeft = scrollLeft;
+			el.viewerPanel.scrollTop = scrollTop;
+			el.viewerPanel.focus({ preventScroll: true });
+		}
+	} catch (err) {
+		if (openSeq === state.openSeq) {
+			el.insertStatus.textContent = err.message;
+		}
+	} finally {
+		if (openSeq === state.openSeq) {
+			setBusy(false);
+		}
+	}
+}
+
+async function changeDocument(name, item, ...args) {
+	if (!state.editing || document.body.hasAttribute("aria-busy")) {
+		return;
+	}
+	let openSeq = state.openSeq;
+	const { scrollLeft, scrollTop } = el.viewerPanel;
+	setBusy(true, "正在更新文档", null);
+	try {
+		const doc = await callWASM(name, ...(item ? [item.index, item.id, ...args] : []));
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		setEditorInfo(doc);
+		if (!item || name === "ofdgoDeleteObject") {
+			canvasEditor.clear();
+		}
+		openSeq = ++state.openSeq;
+		await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex: item?.index ?? state.pageIndex, fitMode: state.fitMode, scale: state.scale });
+		if (openSeq === state.openSeq) {
+			el.viewerPanel.scrollLeft = scrollLeft;
+			el.viewerPanel.scrollTop = scrollTop;
+			el.viewerPanel.focus({ preventScroll: true });
+		}
+	} catch (err) {
+		if (openSeq === state.openSeq) {
+			showError(err, false);
+		}
+	} finally {
+		if (openSeq === state.openSeq) {
+			setBusy(false);
+		}
 	}
 }
 
@@ -475,7 +775,7 @@ async function boot() {
 		await ensureWASM();
 		let fontsRestored = true;
 		try {
-			await restoreUserFonts();
+			await fontManager.restore();
 		} catch {
 			fontsRestored = false;
 		}
@@ -486,7 +786,7 @@ async function boot() {
 		renderFontList();
 		updateControls();
 		updateLocalFontButton();
-		await refreshLocalFontPermission();
+		await fontManager.refreshPermission();
 		setStatus(fontsRestored ? STATUS.ready : "字体读取失败");
 		setBusy(false);
 		if ("launchQueue" in window) {
@@ -512,7 +812,7 @@ async function registerOffline() {
 	const scope = new URL("./", location.href).href;
 	let registration = await navigator.serviceWorker.getRegistration(scope);
 	if (!registration || registration.scope !== scope) {
-		registration = await navigator.serviceWorker.register("./ofdgo.sw.js", { updateViaCache: "none" });
+		registration = await navigator.serviceWorker.register("./ofdgo_work.js", { updateViaCache: "none" });
 	}
 	const worker = registration.active || registration.installing || registration.waiting;
 	await waitForWorker(worker, "activated");
@@ -611,9 +911,9 @@ async function refreshApplication() {
 	if (document.body.hasAttribute("aria-busy")) {
 		return;
 	}
-	const temporaryFonts = state.userFonts.some((font) => font.source === "upload");
-	const message = temporaryFonts ? "刷新后需重新打开文件\n未保存字体需重新添加" : "刷新后需重新打开文件";
-	if ((state.ofdBytes || temporaryFonts) && !window.confirm(message)) {
+	const temporaryFonts = fontManager.userFonts.some((font) => font.source === "upload");
+	const message = [state.dirty ? "文档尚未保存，刷新将丢失更改" : "刷新后需重新打开文件", temporaryFonts ? "未保存字体需重新添加" : ""].filter(Boolean).join("\n");
+	if ((state.ofdBytes || state.doc || temporaryFonts) && !window.confirm(message)) {
 		return;
 	}
 	setBusy(true, "正在刷新应用", null, "正在刷新应用");
@@ -637,6 +937,7 @@ async function refreshApplication() {
 			const worker = registration.waiting || registration.active;
 			await requestOffline(worker, "refresh");
 			await waitForWorker(worker, "activated");
+			window.removeEventListener("beforeunload", warnUnsaved);
 			location.reload();
 		});
 	} catch (err) {
@@ -682,7 +983,7 @@ async function loadWASM() {
 	state.ready = false;
 	state.wasmExited = false;
 	await new Promise((resolve, reject) => {
-		const worker = new Worker("./ofdgo.wasm.js");
+		const worker = new Worker("./ofdgo_wasm.js");
 		wasmWorker = worker;
 		const fail = (err) => {
 			markWASMExited(wasmSeq, err);
@@ -744,8 +1045,9 @@ function markWASMExited(wasmSeq = state.wasmSeq, err) {
 	}
 	wasmRequests.clear();
 	if (err) {
-		setStatus("引擎运行中断");
+		setStatus(state.editing ? "引擎中断，未保存内容无法恢复" : "引擎运行中断");
 	}
+	updateControls();
 	scheduleWASMRecovery();
 }
 
@@ -794,6 +1096,9 @@ async function openOFD(file) {
 		showError(new Error("选择 OFD 文件"), !state.doc);
 		return;
 	}
+	if (!discardChanges()) {
+		return;
+	}
 	state.wasmRecoveries = 0;
 	const openSeq = ++state.openSeq;
 	setBusy(true, "正在读取文档", 10, STATUS.opening);
@@ -804,6 +1109,14 @@ async function openOFD(file) {
 		}
 		state.ofdBytes = bytes;
 		state.fileName = file.name || "ofdgo.ofd";
+		state.editing = false;
+		state.editorInfo = null;
+		state.savedRevision = null;
+		canvasEditor.clear();
+		setDirty(false);
+		el.createPanel.close();
+		el.insertPanel.close();
+		updateControls();
 		await openDocument({ pageIndex: 0, resetScroll: true, openSeq });
 	} catch (err) {
 		if (openSeq === state.openSeq) {
@@ -815,97 +1128,6 @@ async function openOFD(file) {
 
 function isOFDFile(file) {
 	return /\.ofd$/i.test(file.name || "");
-}
-
-function openFontDatabase() {
-	if (!fontDatabase) {
-		fontDatabase = new Promise((resolve, reject) => {
-			const request = indexedDB.open(FONT_DATABASE, 1);
-			request.onupgradeneeded = () => {
-				const store = request.result.createObjectStore("fonts", { keyPath: "id", autoIncrement: true });
-				store.createIndex("checksum", "checksum", { unique: true });
-			};
-			request.onsuccess = () => {
-				const db = request.result;
-				db.onversionchange = () => {
-					db.close();
-					fontDatabase = null;
-				};
-				resolve(db);
-			};
-			request.onerror = () => reject(request.error);
-		}).catch((err) => {
-			fontDatabase = null;
-			throw err;
-		});
-	}
-	return fontDatabase;
-}
-
-async function fontTransaction(mode, action) {
-	const db = await openFontDatabase();
-	return new Promise((resolve, reject) => {
-		const tx = db.transaction("fonts", mode);
-		let request;
-		tx.oncomplete = () => {
-			if (mode === "readwrite") {
-				fontChannel?.postMessage(null);
-			}
-			resolve(request?.result);
-		};
-		tx.onabort = () => reject(tx.error || new Error("字体保存失败"));
-		try {
-			request = action(tx.objectStore("fonts"));
-		} catch (err) {
-			tx.abort();
-			reject(err);
-		}
-	});
-}
-
-function listStoredFonts() {
-	return fontTransaction("readonly", (store) => store.getAll());
-}
-
-async function addStoredFonts(fonts) {
-	const records = new Map();
-	for (const font of fonts) {
-		const digest = await crypto.subtle.digest("SHA-256", font.data);
-		const checksum = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-		if (!records.has(checksum)) {
-			records.set(checksum, {
-				name: font.name,
-				data: new Blob([font.data]),
-				enabled: font.enabled,
-				checksum,
-			});
-		}
-	}
-	await fontTransaction("readwrite", (store) => {
-		for (const font of records.values()) {
-			const request = store.index("checksum").getKey(font.checksum);
-			request.onsuccess = () => {
-				if (request.result === undefined) {
-					store.add(font);
-				}
-			};
-		}
-	});
-}
-
-function updateStoredFont(id, changes) {
-	return fontTransaction("readwrite", (store) => {
-		const request = store.get(id);
-		request.onsuccess = () => {
-			if (request.result) {
-				store.put({ ...request.result, ...changes });
-			}
-		};
-	});
-}
-
-function deleteStoredFont(id) {
-	return fontTransaction("readwrite", (store) => store.delete(id));
 }
 
 async function openSelectedFonts(event) {
@@ -927,19 +1149,9 @@ async function openSelectedFonts(event) {
 		for (let i = 0; i < files.length; i += 1) {
 			setProgress(`正在读取字体 ${i + 1} / ${files.length}`, 10 + Math.round(i / files.length * 60));
 			const file = files[i];
-			fonts.push(createFontRecord(file.name, new Uint8Array(await file.arrayBuffer()), "upload"));
+			fonts.push(fontManager.record(file.name, new Uint8Array(await file.arrayBuffer()), "upload"));
 		}
-		let saved = true;
-		try {
-			await addStoredFonts(fonts);
-		} catch {
-			saved = false;
-			state.userFonts.push(...fonts);
-		}
-		const changed = saved ? await restoreUserFonts() : true;
-		if (saved && navigator.storage?.persist) {
-			navigator.storage.persist().catch(() => false);
-		}
+		const { saved, changed } = await fontManager.add(fonts);
 		if (changed) {
 			await applyFontChange();
 		}
@@ -955,14 +1167,14 @@ async function loadLocalFonts() {
 	if (document.body.hasAttribute("aria-busy")) {
 		return;
 	}
-	if (!canReadLocalFonts()) {
+	if (!fontManager.canReadLocal()) {
 		setStatus("无法读取系统字体");
 		return;
 	}
 	setBusy(true, state.doc ? "正在匹配字体" : "正在请求授权", 12, state.doc ? STATUS.fonts : "正在请求授权");
 	try {
 		await nextFrame();
-		const available = await queryLocalFonts();
+		const available = await fontManager.queryLocal();
 		if (!state.doc) {
 			setStatus(available.length ? `字体授权完成 ${available.length} 个` : "暂无系统字体");
 			return;
@@ -982,12 +1194,12 @@ async function loadLocalFonts() {
 }
 
 async function requestLocalFontsBeforeOpen() {
-	if (!canReadLocalFonts() || state.systemFontCatalogLoaded || state.systemFontPermission === "denied") {
+	if (!fontManager.canReadLocal() || fontManager.catalogLoaded || fontManager.permission === "denied") {
 		return;
 	}
 	setBusy(true, "正在请求授权", 12, "正在请求授权");
 	try {
-		const available = await queryLocalFonts();
+		const available = await fontManager.queryLocal();
 		setStatus(available.length ? `字体授权完成 ${available.length} 个` : "暂无系统字体");
 	} catch (err) {
 		if (err && err.name === "NotAllowedError") {
@@ -1000,30 +1212,13 @@ async function requestLocalFontsBeforeOpen() {
 	}
 }
 
-async function queryLocalFonts() {
-	try {
-		const available = await window.queryLocalFonts();
-		state.systemFontCatalog = available;
-		state.systemFontCatalogLoaded = true;
-		state.systemFontPermission = "granted";
-		updateFontPermissionHint();
-		return available;
-	} catch (err) {
-		if (err && err.name === "NotAllowedError") {
-			state.systemFontPermission = "denied";
-			updateFontPermissionHint();
-		}
-		throw err;
-	}
-}
-
 async function autoLoadDocumentLocalFonts(openSeq) {
-	if (!state.doc?.fonts?.some((font) => !font.embedded) || !canReadLocalFonts() || state.systemFontPermission === "denied") {
+	if (!state.doc?.fonts?.some((font) => !font.embedded) || !fontManager.canReadLocal() || fontManager.permission === "denied") {
 		return false;
 	}
 	setProgress("正在匹配字体", 62, STATUS.fonts);
 	try {
-		const available = state.systemFontCatalogLoaded ? state.systemFontCatalog : await queryLocalFonts();
+		const available = fontManager.catalogLoaded ? fontManager.catalog : await fontManager.queryLocal();
 		if (openSeq !== state.openSeq) {
 			return false;
 		}
@@ -1041,14 +1236,14 @@ async function autoLoadDocumentLocalFonts(openSeq) {
 async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	const docFonts = state.doc?.fonts || [];
 	if (!docFonts.length) {
-		state.localFonts = [];
+		fontManager.localFonts = [];
 		setStatus("暂无文档字体");
 		updateFontSummary();
 		renderFontList();
 		return false;
 	}
 	if (docFonts.every((font) => font.embedded)) {
-		state.localFonts = [];
+		fontManager.localFonts = [];
 		setStatus("字体均为内嵌");
 		updateFontSummary();
 		renderFontList();
@@ -1063,19 +1258,13 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	for (let i = 0; i < selected.length; i += 1) {
 		setProgress(`正在读取字体 ${i + 1} / ${selected.length}`, 20 + Math.round(i / selected.length * 60));
 		const item = selected[i];
-		const blob = await item.blob();
+		const data = await fontManager.read(item);
 		if (openSeq !== state.openSeq) {
 			return false;
 		}
-		fonts.push(createFontRecord(localFontName(item), new Uint8Array(await blob.arrayBuffer()), "browser"));
-		if (openSeq !== state.openSeq) {
-			return false;
-		}
+		fonts.push(fontManager.record(fontManager.localName(item), data, "browser"));
 	}
-	if (openSeq !== state.openSeq) {
-		return false;
-	}
-	state.localFonts = fonts;
+	fontManager.localFonts = fonts;
 	setStatus(fonts.length ? `字体加载完成 ${fonts.length} 个` : emptyStatus);
 	updateFontSummary();
 	renderFontList();
@@ -1086,7 +1275,7 @@ async function selectLocalFonts(fonts) {
 	const available = new Map();
 	for (const font of fonts) {
 		const names = [
-			localFontName(font),
+			fontManager.localName(font),
 			font.postscriptName && `${font.postscriptName}.ttf`,
 			font.family && `${[font.family, font.style].filter(Boolean).join(" ")}.ttf`,
 		];
@@ -1098,39 +1287,6 @@ async function selectLocalFonts(fonts) {
 	}
 	const matched = await callWASM("ofdgoMatchFontFiles", [...available.keys()]);
 	return [...new Set(matched.map((name) => available.get(name)))];
-}
-
-async function fontData(fonts) {
-	const result = [];
-	for (const font of fonts) {
-		if (!font.enabled) {
-			continue;
-		}
-		if (font.data instanceof Blob) {
-			font.data = new Uint8Array(await font.data.arrayBuffer());
-		}
-		result.push({ name: font.name, data: font.data });
-	}
-	return result;
-}
-
-async function restoreUserFonts() {
-	const stored = await listStoredFonts();
-	const previous = new Map(state.userFonts.map((font) => [font.id, font]));
-	const fonts = stored.map((font) => ({
-		...font,
-		data: previous.get(font.id)?.checksum === font.checksum ? previous.get(font.id).data : font.data,
-		source: "stored",
-	}));
-	fonts.push(...state.userFonts.filter((font) => font.source === "upload"));
-	if (fonts.length === state.userFonts.length && fonts.every((font, index) => {
-		const old = state.userFonts[index];
-		return font.id === old.id && font.name === old.name && font.enabled === old.enabled && font.checksum === old.checksum;
-	})) {
-		return false;
-	}
-	state.userFonts = fonts;
-	return true;
 }
 
 function scheduleFontSync() {
@@ -1146,7 +1302,7 @@ async function syncUserFonts() {
 	state.fontSyncing = true;
 	setBusy(true, "正在同步字体", null);
 	try {
-		if (await restoreUserFonts()) {
+		if (await fontManager.restore()) {
 			await applyFontChange();
 		}
 		if (!state.doc) {
@@ -1161,36 +1317,16 @@ async function syncUserFonts() {
 }
 
 function updateFontSummary() {
-	const fonts = fontRecords();
+	const fonts = fontManager.records();
 	const total = fonts.length;
 	const enabled = fonts.filter((font) => font.enabled).length;
 	el.availableFontSummary.textContent = total ? `${enabled}/${total}` : "0";
 }
 
-function createFontRecord(name, data, source) {
-	state.fontSeq += 1;
-	return {
-		id: `${source}-${state.fontSeq}`,
-		name: name || "font.ttf",
-		data,
-		enabled: true,
-		source,
-	};
-}
-
-function fontRecords() {
-	return [...state.localFonts, ...state.userFonts];
-}
-
-function localFontName(font) {
-	const name = font.fullName || font.family || font.postscriptName || "local-font";
-	return `${name}.ttf`;
-}
-
 async function applyFontChange(options = {}) {
 	updateFontSummary();
 	renderFontList();
-	if (!state.ofdBytes || !state.doc) {
+	if (!state.doc) {
 		return;
 	}
 	await openDocument({
@@ -1209,7 +1345,7 @@ async function toggleAnnotations() {
 	}
 	state.renderAnnotations = !state.renderAnnotations;
 	updateAnnotationButton();
-	if (!state.ofdBytes || !state.doc) {
+	if (!state.doc) {
 		return;
 	}
 	await openDocument({
@@ -1220,29 +1356,13 @@ async function toggleAnnotations() {
 	});
 }
 
-function removeFont(id) {
-	state.localFonts = state.localFonts.filter((font) => font.id !== id);
-	state.userFonts = state.userFonts.filter((font) => font.id !== id);
-}
-
 async function changeFont(font, changes) {
 	if (document.body.hasAttribute("aria-busy")) {
 		return;
 	}
 	setBusy(true, "正在更新字体", null, STATUS.fonts);
 	try {
-		if (font.source === "stored") {
-			if (changes) {
-				await updateStoredFont(font.id, changes);
-			} else {
-				await deleteStoredFont(font.id);
-			}
-			await restoreUserFonts();
-		} else if (changes) {
-			Object.assign(font, changes);
-		} else {
-			removeFont(font.id);
-		}
+		await fontManager.change(font, changes);
 		await applyFontChange();
 		if (!state.doc) {
 			setStatus(STATUS.ready);
@@ -1256,8 +1376,11 @@ async function changeFont(font, changes) {
 }
 
 function renderFontList() {
+	if (el.insertPanel.open) {
+		updateInsertFonts();
+	}
 	el.fontList.replaceChildren();
-	const fonts = fontRecords();
+	const fonts = fontManager.records();
 	if (!fonts.length) {
 		const empty = document.createElement("div");
 		empty.className = "font-empty";
@@ -1336,40 +1459,18 @@ function fontSourceText(source) {
 }
 
 function updateLocalFontButton() {
-	const supported = canReadLocalFonts();
+	const supported = fontManager.canReadLocal();
 	el.localFontButton.disabled = !supported;
 	el.localFontButton.title = supported ? "读取系统字体" : "无法读取系统字体";
 	updateFontPermissionHint();
 }
 
 function updateFontPermissionHint() {
-	el.fontPermissionHint.hidden = !canReadLocalFonts() || state.systemFontPermission === "granted";
-}
-
-function canReadLocalFonts() {
-	return typeof window.queryLocalFonts === "function";
-}
-
-async function refreshLocalFontPermission() {
-	if (!canReadLocalFonts() || !navigator.permissions?.query) {
-		updateFontPermissionHint();
-		return;
-	}
-	try {
-		const permission = await navigator.permissions.query({ name: "local-fonts" });
-		state.systemFontPermission = permission.state;
-		permission.onchange = () => {
-			state.systemFontPermission = permission.state;
-			updateFontPermissionHint();
-		};
-	} catch {
-		state.systemFontPermission = "prompt";
-	}
-	updateFontPermissionHint();
+	el.fontPermissionHint.hidden = !fontManager.canReadLocal() || fontManager.permission === "granted";
 }
 
 async function openDocument(options = {}) {
-	if (!state.ofdBytes) {
+	if (!state.ofdBytes && !state.editing) {
 		return;
 	}
 	const openSeq = options.openSeq || (state.openSeq += 1);
@@ -1382,7 +1483,7 @@ async function openDocument(options = {}) {
 	const resetLocalFonts = !options.skipAutoFonts;
 	resetSearch();
 	if (resetLocalFonts) {
-		state.localFonts = [];
+		fontManager.localFonts = [];
 		updateFontSummary();
 		renderFontList();
 	}
@@ -1393,14 +1494,14 @@ async function openDocument(options = {}) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const fonts = !options.reuseSession || options.fontsChanged
-			? await fontData(resetLocalFonts ? state.userFonts : fontRecords()) : null;
+		const fonts = !options.doc && (!options.reuseSession || options.fontsChanged)
+			? await fontManager.files(resetLocalFonts ? fontManager.userFonts : fontManager.records()) : null;
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const doc = options.reuseSession
+		const doc = options.doc || (options.reuseSession
 			? await callWASM("ofdgoConfigure", fonts, state.renderAnnotations)
-			: await callWASM("ofdgoOpen", state.ofdBytes, fonts, state.renderAnnotations);
+			: await callWASM("ofdgoOpen", state.ofdBytes, fonts, state.renderAnnotations));
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -1612,15 +1713,19 @@ async function updateExportRange() {
 	}
 }
 
-async function exportFile(whole, indices = null) {
+async function exportFile(whole, indices = null, value = el.exportFormat.value) {
 	if (!state.doc || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
-	const format = exportFormatInfo(el.exportFormat.value);
+	const saving = value === "ofd";
+	if (saving && !state.editing) {
+		return;
+	}
+	const format = saving ? { value: "ofd", label: "OFD", extension: "ofd", mime: "application/ofd" } : exportFormatInfo(value);
 	if (!format) {
 		return;
 	}
-	const archive = whole && format.value !== "pdf" && format.value !== "txt";
+	const archive = whole && !saving && format.value !== "pdf" && format.value !== "txt";
 	const label = archive ? "ZIP" : format.label;
 	const extension = archive ? "zip" : format.extension;
 	const mime = archive ? "application/zip" : format.mime;
@@ -1639,7 +1744,7 @@ async function exportFile(whole, indices = null) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const result = whole
+		const result = saving ? await callWASM("ofdgoSaveDocument", file) : whole
 			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, file)
 			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, file);
 		if (openSeq !== state.openSeq) {
@@ -1648,7 +1753,11 @@ async function exportFile(whole, indices = null) {
 		if (result.blob) {
 			downloadBytes(result.blob, result.mime, fileName);
 		}
-		setStatus(`${result.label} 导出完成 ${formatBytes(result.size)}`);
+		if (saving) {
+			state.savedRevision = state.editorInfo.revision;
+			setDirty(false);
+		}
+		setStatus(`${result.label} ${saving ? "保存" : "导出"}完成 ${formatBytes(result.size)}`);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			if (err.name === "AbortError") {
@@ -1980,6 +2089,9 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 	svg.classList.add("ofd-svg");
 	surface.replaceChildren(svg);
 	surface.append(createTextLayer(page.text));
+	if (state.editing) {
+		canvasEditor.mount(index, page, surface);
+	}
 	for (const link of page.links) {
 		let url;
 		try {
@@ -2298,7 +2410,8 @@ function layoutPageShell(shell, page) {
 		surface.style.height = `${height}px`;
 		const x = state.rotation === 90 || state.rotation === 180 ? viewWidth : 0;
 		const y = state.rotation >= 180 ? viewHeight : 0;
-		surface.style.transform = `scale(${scale}) translate(${x}px, ${y}px) rotate(${state.rotation}deg)`;
+	surface.style.transform = `scale(${scale}) translate(${x}px, ${y}px) rotate(${state.rotation}deg)`;
+	surface.style.setProperty("--surface-scale", String(scale));
 	}
 }
 
@@ -3230,6 +3343,7 @@ function rotatePages() {
 	if (document.body.hasAttribute("aria-busy")) {
 		return;
 	}
+	canvasEditor.cancel();
 	state.rotation = (state.rotation + 90) % 360;
 	clearRegionHighlights();
 	el.viewerPanel.classList.remove("single-page-fits-height");
@@ -3253,10 +3367,15 @@ function togglePan() {
 	if (document.body.hasAttribute("aria-busy")) {
 		return;
 	}
+	setPan(!state.panMode);
+}
+
+function setPan(enabled) {
 	endPan();
-	state.panMode = !state.panMode;
+	state.panMode = enabled;
 	el.viewerPanel.classList.toggle("pan-mode", state.panMode);
 	el.panButton.setAttribute("aria-pressed", String(state.panMode));
+	updateEditorTools();
 }
 
 function startPan(event) {
@@ -3472,6 +3591,7 @@ function updateFitSpace() {
 
 function updateControls() {
 	const hasDoc = Boolean(state.doc);
+	updateEditorTools();
 	const pageCount = state.doc ? state.doc.pageCount : 0;
 	el.prevButton.disabled = !hasDoc || state.pageIndex <= 0;
 	el.nextButton.disabled = !hasDoc || state.pageIndex >= pageCount - 1;
@@ -3494,6 +3614,22 @@ function updateControls() {
 	updateDPIControl();
 }
 
+function updateEditorTools() {
+	el.editorTools.hidden = !state.editing;
+	el.insertTextButton.disabled = el.insertImageButton.disabled = el.saveButton.disabled = !state.ready || state.exporting;
+	const enabled = state.editing && state.selectObjects && !state.panMode;
+	canvasEditor.setEnabled(enabled);
+	el.selectObjectButton.setAttribute("aria-pressed", String(enabled));
+	updateObjectControls(canvasEditor.selected);
+	el.undoButton.disabled = !state.editorInfo?.canUndo || !state.ready || state.exporting;
+	el.redoButton.disabled = !state.editorInfo?.canRedo || !state.ready || state.exporting;
+}
+
+function updateObjectControls(item) {
+	el.deleteObjectButton.disabled = !item || !state.ready || state.exporting;
+	el.editTextButton.disabled = !item || item.image || !state.ready || state.exporting;
+}
+
 function updateAnnotationButton() {
 	el.annotationButton.setAttribute("aria-pressed", String(state.renderAnnotations));
 	el.annotationButton.title = state.renderAnnotations ? "关闭注解" : "开启注解";
@@ -3511,7 +3647,7 @@ async function callWASM(name, ...args) {
 	return new Promise((resolve, reject) => {
 		const id = ++wasmRequestID;
 		wasmRequests.set(id, { resolve, reject, openSeq: state.openSeq });
-		if (name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment") {
+		if (name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument") {
 			state.exportRequestID = id;
 			el.cancelExportButton.hidden = false;
 			el.cancelExportButton.disabled = false;
@@ -3540,6 +3676,9 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("aria-busy", busy);
+	el.createForm.inert = busy;
+	el.insertForm.inert = busy;
+	el.editorTools.inert = busy;
 	el.fontList.inert = busy;
 	if (!busy) {
 		el.progressPanel.hidden = true;

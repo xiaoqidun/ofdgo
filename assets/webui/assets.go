@@ -22,7 +22,7 @@ import (
 
 // FS WebUI嵌入静态文件
 //
-//go:embed index.html ofdgo.css ofdgo.js ofdgo.json ofdgo.svg ofdgo.sw.js ofdgo.wasm ofdgo.wasm.js wasm_exec.js
+//go:embed index.html ofdgo.css ofdgo.js ofdgo.json ofdgo.svg ofdgo.wasm ofdgo_edit.js ofdgo_font.js ofdgo_wasm.js ofdgo_work.js wasm_exec.js
 var FS embed.FS
 
 // Checksum 计算WebUI嵌入资源校验值

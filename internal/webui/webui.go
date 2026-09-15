@@ -219,6 +219,13 @@ func Open(data []byte, opts OpenOptions) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newSession(reader, opts)
+}
+
+// newSession 从文档快照创建阅读会话
+// 入参: reader 文档读取器, opts 打开选项
+// 返回: *Session 文档会话, error 错误信息
+func newSession(reader *ofdgo.Reader, opts OpenOptions) (*Session, error) {
 	doc, err := reader.Doc()
 	if err != nil {
 		reader.Close()

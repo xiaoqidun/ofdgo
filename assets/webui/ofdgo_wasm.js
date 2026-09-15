@@ -7,7 +7,7 @@ self.onmessage = ({ data }) => {
 		exports.get(data.id)?.abort();
 		return;
 	}
-	if (data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment") {
+	if (data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoSaveDocument") {
 		exports.set(data.id, new AbortController());
 	}
 	pending = pending.then(() => handleMessage(data));

@@ -77,6 +77,48 @@ a:focus-visible {
 	overflow: hidden;
 }
 
+.app:has(.editor-toolbar:not([hidden])) {
+	grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+
+.editor-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 12px;
+	padding: 8px 12px 6px;
+	border-bottom: 1px solid var(--line);
+	background: var(--panel);
+	font-size: 14px;
+}
+
+.editor-toolbar[hidden] {
+	display: none;
+}
+
+.editor-group {
+	display: grid;
+	grid-auto-columns: max-content;
+	column-gap: 6px;
+	row-gap: 4px;
+	padding-right: 12px;
+	border-right: 1px solid var(--line);
+}
+
+.editor-group:last-child {
+	border-right: 0;
+}
+
+.editor-group > button {
+	grid-row: 1;
+}
+
+.editor-group > span {
+	grid-column: 1 / -1;
+	text-align: center;
+	font-size: 12px;
+	color: var(--text-muted);
+}
+
 .app-bar {
 	display: flex;
 	align-items: center;
@@ -184,6 +226,29 @@ button:not(:disabled):hover {
 	inset: 3px 0 0;
 	border: 1px solid currentColor;
 	content: "";
+}
+
+.new-icon {
+	position: relative;
+	width: 12px;
+	height: 15px;
+	border: 1px solid currentColor;
+}
+
+.new-icon::before,
+.new-icon::after {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	width: 6px;
+	height: 1px;
+	background: currentColor;
+	content: "";
+	transform: translate(-50%, -50%);
+}
+
+.new-icon::after {
+	transform: translate(-50%, -50%) rotate(90deg);
 }
 
 .toolbar-space {
@@ -325,7 +390,10 @@ button:not(:disabled):hover {
 	outline-offset: 2px;
 }
 
-.form-row input[type="text"] {
+.form-row input[type="text"],
+.form-row input[type="number"],
+.form-row input[type="file"],
+.form-row select {
 	width: 100%;
 	min-width: 0;
 	height: var(--control-height);
@@ -334,6 +402,28 @@ button:not(:disabled):hover {
 	border-radius: 0;
 	background: #ffffff;
 	color: #1f2428;
+}
+
+.form-row input[type="file"] {
+	height: auto;
+	padding: 4px;
+}
+
+.form-unit {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) 2em;
+	align-items: center;
+	gap: 8px;
+}
+
+.form-unit > span {
+	color: var(--text-muted);
+}
+
+.form-font {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 8px;
 }
 
 .form-row input[aria-invalid="true"] {
@@ -813,6 +903,7 @@ button.outline-link:hover {
 .meta-list > [hidden],
 .navigation-tabs[hidden],
 .form-row[hidden],
+.tool-group[hidden],
 .page-list[hidden],
 .page-frame[hidden],
 .progress-panel > [hidden],
@@ -935,6 +1026,82 @@ button.outline-link:hover {
 .page-surface {
 	position: relative;
 	transform-origin: 0 0;
+}
+
+.edit-layer {
+	display: none;
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+}
+
+.editing-select .edit-layer {
+	display: block;
+}
+
+.editing-select .text-run > span {
+	pointer-events: none;
+}
+
+.edit-object {
+	position: absolute;
+	pointer-events: auto;
+	touch-action: none;
+	user-select: none;
+	cursor: move;
+}
+
+.edit-object:hover,
+.edit-object.selected {
+	outline: calc(1px / var(--surface-scale)) solid var(--accent);
+}
+
+.edit-object.selected {
+	background: rgba(15, 123, 104, 0.04);
+}
+
+.edit-handle {
+	display: none;
+	position: absolute;
+	width: calc(9px / var(--surface-scale));
+	height: calc(9px / var(--surface-scale));
+	border: calc(1px / var(--surface-scale)) solid var(--accent);
+	background: #fff;
+	transform: translate(-50%, -50%);
+}
+
+.selected .edit-handle {
+	display: block;
+}
+
+.edit-handle::before {
+	position: absolute;
+	inset: calc(-8px / var(--surface-scale));
+	content: "";
+}
+
+.edit-nw {
+	left: 0;
+	top: 0;
+	cursor: nwse-resize;
+}
+
+.edit-ne {
+	left: 100%;
+	top: 0;
+	cursor: nesw-resize;
+}
+
+.edit-sw {
+	left: 0;
+	top: 100%;
+	cursor: nesw-resize;
+}
+
+.edit-se {
+	left: 100%;
+	top: 100%;
+	cursor: nwse-resize;
 }
 
 .text-layer {

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"image"
 	"math"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,13 +36,18 @@ import (
 // Editor 新建OFD文档，长度单位为毫米，页面索引从0开始，实例需串行使用
 // Info可修改文档元数据，通过方法管理页面、对象和资源，不修改已有OFD文件
 type Editor struct {
-	Info       DocInfo
-	pages      []PageContent
-	resources  []editorResource
-	fonts      map[string]*font.SFNT
-	images     map[string]bool
-	resourceID map[editorResourceKey]string
-	maxID      int
+	Info         DocInfo
+	pages        []PageContent
+	resources    []editorResource
+	fonts        map[string]*font.SFNT
+	images       map[string]bool
+	resourceID   map[editorResourceKey]string
+	maxID        int
+	history      []editorChange
+	historyIndex int
+	historyLimit int
+	revision     uint64
+	serial       uint64
 }
 
 // editorResource 文档内嵌资源
@@ -124,7 +130,9 @@ func (e *Editor) AddPage(width, height float64) (int, error) {
 		Area:    PageArea{PhysicalBox: fmt.Sprintf("0 0 %s %s", ofdNumber(width), ofdNumber(height))},
 		Content: Content{Layer: []Layer{{ID: e.nextID(), Type: "Body"}}},
 	})
-	return len(e.pages) - 1, nil
+	index := len(e.pages) - 1
+	e.recordPageAddition(index)
+	return index, nil
 }
 
 // CopyPage 复制页面并追加到文档末尾，分配新标识，复用字体和图片资源
@@ -164,15 +172,23 @@ func (e *Editor) CopyPage(index int) (int, error) {
 		}
 	}
 	e.pages = append(e.pages, page)
-	return len(e.pages) - 1, nil
+	index = len(e.pages) - 1
+	e.recordPageAddition(index)
+	return index, nil
 }
 
 // DeletePage 删除页面，不回收资源或复用标识，删除后页面索引随之变化
 // 入参: index 页面索引
 // 返回: error 错误信息
 func (e *Editor) DeletePage(index int) error {
-	if _, err := e.page(index); err != nil {
+	page, err := e.page(index)
+	if err != nil {
 		return err
+	}
+	if change := e.recordChange(); change != nil {
+		saved := copyEditorPage(*page)
+		change.undo = func(e *Editor) { e.pages = slices.Insert(e.pages, index, copyEditorPage(saved)) }
+		change.redo = func(e *Editor) { e.pages = slices.Delete(e.pages, index, index+1) }
 	}
 	e.pages = slices.Delete(e.pages, index, index+1)
 	return nil
@@ -188,13 +204,14 @@ func (e *Editor) MovePage(from, to int) error {
 	if _, err := e.page(to); err != nil {
 		return err
 	}
-	page := e.pages[from]
-	if from < to {
-		copy(e.pages[from:to], e.pages[from+1:to+1])
-	} else {
-		copy(e.pages[to+1:from+1], e.pages[to:from])
+	if from == to {
+		return nil
 	}
-	e.pages[to] = page
+	moveEditorItem(e.pages, from, to)
+	if change := e.recordChange(); change != nil {
+		change.undo = func(e *Editor) { moveEditorItem(e.pages, to, from) }
+		change.redo = func(e *Editor) { moveEditorItem(e.pages, from, to) }
+	}
 	return nil
 }
 
@@ -209,7 +226,15 @@ func (e *Editor) ResizePage(index int, width, height float64) error {
 	if !finite(width) || !finite(height) || width <= 0 || height <= 0 {
 		return fmt.Errorf("page dimensions must be finite and positive")
 	}
-	page.Area.PhysicalBox = fmt.Sprintf("0 0 %s %s", ofdNumber(width), ofdNumber(height))
+	before, after := page.Area.PhysicalBox, fmt.Sprintf("0 0 %s %s", ofdNumber(width), ofdNumber(height))
+	if before == after {
+		return nil
+	}
+	page.Area.PhysicalBox = after
+	if change := e.recordChange(); change != nil {
+		change.undo = func(e *Editor) { e.pages[index].Area.PhysicalBox = before }
+		change.redo = func(e *Editor) { e.pages[index].Area.PhysicalBox = after }
+	}
 	return nil
 }
 
@@ -337,6 +362,17 @@ func (e *Editor) AddObject(page int, object GraphicObject) (string, error) {
 	}
 	e.maxID++
 	content.Content.Layer[0].Objects = append(content.Content.Layer[0].Objects, object)
+	if change := e.recordChange(); change != nil {
+		index := len(content.Content.Layer[0].Objects) - 1
+		change.undo = func(e *Editor) {
+			layer := &e.pages[page].Content.Layer[0]
+			layer.Objects = slices.Delete(layer.Objects, index, index+1)
+		}
+		change.redo = func(e *Editor) {
+			layer := &e.pages[page].Content.Layer[0]
+			layer.Objects = slices.Insert(layer.Objects, index, object)
+		}
+	}
 	return id, nil
 }
 
@@ -355,7 +391,7 @@ func (e *Editor) Object(page int, id string) (GraphicObject, error) {
 // 入参: page 页面索引, id 对象标识, object 新内容，忽略其ID且不引用调用方的可变数据
 // 返回: error 错误信息
 func (e *Editor) UpdateObject(page int, id string, object GraphicObject) error {
-	layer, index, err := e.findObject(page, id)
+	_, index, err := e.findObject(page, id)
 	if err != nil {
 		return err
 	}
@@ -363,7 +399,7 @@ func (e *Editor) UpdateObject(page int, id string, object GraphicObject) error {
 	if err != nil {
 		return err
 	}
-	layer.Objects[index] = object
+	e.replaceObject(page, index, object)
 	return nil
 }
 
@@ -374,6 +410,17 @@ func (e *Editor) DeleteObject(page int, id string) error {
 	layer, index, err := e.findObject(page, id)
 	if err != nil {
 		return err
+	}
+	if change := e.recordChange(); change != nil {
+		object := layer.Objects[index]
+		change.undo = func(e *Editor) {
+			layer := &e.pages[page].Content.Layer[0]
+			layer.Objects = slices.Insert(layer.Objects, index, object)
+		}
+		change.redo = func(e *Editor) {
+			layer := &e.pages[page].Content.Layer[0]
+			layer.Objects = slices.Delete(layer.Objects, index, index+1)
+		}
 	}
 	layer.Objects = slices.Delete(layer.Objects, index, index+1)
 	return nil
@@ -390,14 +437,30 @@ func (e *Editor) MoveObject(page int, id string, to int) error {
 	if to < 0 || to >= len(layer.Objects) {
 		return fmt.Errorf("object index %d out of range", to)
 	}
-	object := layer.Objects[from]
-	if from < to {
-		copy(layer.Objects[from:to], layer.Objects[from+1:to+1])
-	} else {
-		copy(layer.Objects[to+1:from+1], layer.Objects[to:from])
+	if from == to {
+		return nil
 	}
-	layer.Objects[to] = object
+	moveEditorItem(layer.Objects, from, to)
+	if change := e.recordChange(); change != nil {
+		change.undo = func(e *Editor) { moveEditorItem(e.pages[page].Content.Layer[0].Objects, to, from) }
+		change.redo = func(e *Editor) { moveEditorItem(e.pages[page].Content.Layer[0].Objects, from, to) }
+	}
 	return nil
+}
+
+// replaceObject 提交已校验的对象并记录前后内容
+// 入参: page 页面索引, index 对象索引, object 新内容
+func (e *Editor) replaceObject(page, index int, object GraphicObject) {
+	layer := &e.pages[page].Content.Layer[0]
+	before := layer.Objects[index]
+	if reflect.DeepEqual(before, object) {
+		return
+	}
+	layer.Objects[index] = object
+	if change := e.recordChange(); change != nil {
+		change.undo = func(e *Editor) { e.pages[page].Content.Layer[0].Objects[index] = before }
+		change.redo = func(e *Editor) { e.pages[page].Content.Layer[0].Objects[index] = object }
+	}
 }
 
 // findObject 查找正文图层中的对象
@@ -585,7 +648,7 @@ func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) er
 	if err != nil {
 		return err
 	}
-	layer.Objects[index] = object
+	e.replaceObject(page, index, object)
 	return nil
 }
 

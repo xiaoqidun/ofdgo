@@ -18,10 +18,13 @@ package webui
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
 	"io"
+	"math"
 	"syscall/js"
 
 	"github.com/xiaoqidun/ofdgo"
@@ -92,6 +95,15 @@ func RunWASM() {
 	registerExportCallback("ofdgoExportDocument", exportDocument)
 	registerExportCallback("ofdgoExportAttachment", exportAttachment)
 	registerCallback("ofdgoMatchFontFiles", matchFontFiles)
+	registerCallback("ofdgoCreateDocument", createDocument)
+	registerCallback("ofdgoInsertText", insertText)
+	registerCallback("ofdgoUpdateText", updateText)
+	registerCallback("ofdgoInsertImage", insertImage)
+	registerCallback("ofdgoTransformObject", transformObject)
+	registerCallback("ofdgoDeleteObject", deleteObject)
+	registerCallback("ofdgoUndo", func([]js.Value) (any, error) { return restoreEditor(false) })
+	registerCallback("ofdgoRedo", func([]js.Value) (any, error) { return restoreEditor(true) })
+	registerExportCallback("ofdgoSaveDocument", saveDocument)
 	select {}
 }
 
@@ -163,6 +175,7 @@ func openDocument(args []js.Value) (any, error) {
 		return nil, err
 	}
 	renderAnnotations := args[2].Bool()
+	currentEditor = nil
 	if currentSession != nil {
 		_ = currentSession.Close()
 		currentSession = nil
@@ -268,6 +281,10 @@ func renderPage(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	objects, err := editorObjects(args[0].Int(), text)
+	if err != nil {
+		return nil, err
+	}
 	links := make([]any, len(page.Links))
 	for i, link := range page.Links {
 		links[i] = map[string]any{
@@ -287,16 +304,17 @@ func renderPage(args []js.Value) (any, error) {
 		images[i] = map[string]any{"name": image.Name, "mime": image.MIME, "bytes": bytesToJS(image.Data)}
 	}
 	return successResult(map[string]any{
-		"index":  page.Index,
-		"number": page.Number,
-		"id":     page.ID,
-		"width":  page.Width,
-		"height": page.Height,
-		"svg":    page.SVG,
-		"links":  links,
-		"fonts":  fonts,
-		"images": images,
-		"text":   string(textData),
+		"index":   page.Index,
+		"number":  page.Number,
+		"id":      page.ID,
+		"width":   page.Width,
+		"height":  page.Height,
+		"svg":     page.SVG,
+		"links":   links,
+		"fonts":   fonts,
+		"images":  images,
+		"text":    string(textData),
+		"objects": objects,
 	}), nil
 }
 
@@ -490,4 +508,307 @@ func encodeResult(result apiResult) string {
 		return string(fallback)
 	}
 	return string(data)
+}
+
+// currentEditor 当前新建文档
+var currentEditor *ofdgo.Editor
+
+// editorInfo 创作文档信息与操作状态
+type editorInfo struct {
+	DocumentInfo
+	Revision uint64 `json:"revision"`
+	CanUndo  bool   `json:"canUndo"`
+	CanRedo  bool   `json:"canRedo"`
+}
+
+// editorSummary 获取当前创作文档状态
+// 返回: editorInfo 文档信息
+func editorSummary() editorInfo {
+	return editorInfo{currentSession.Summary(), currentEditor.Revision(), currentEditor.CanUndo(), currentEditor.CanRedo()}
+}
+
+// restoreEditor 撤销或重做并更新预览
+// 入参: redo 是否重做
+// 返回: any 文档信息, error 错误信息
+func restoreEditor(redo bool) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	apply := currentEditor.Undo
+	if redo {
+		apply = currentEditor.Redo
+	}
+	if !apply() {
+		return editorSummary(), nil
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// editorObjects 提供创作画布的对象命中区域
+// 入参: index 页面索引, text 页面文字
+// 返回: []any 对象区域, error 错误信息
+func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
+	objects := []any{}
+	if currentEditor == nil {
+		return objects, nil
+	}
+	page, err := currentSession.pageContent(index)
+	if err != nil {
+		return nil, err
+	}
+	textBoxes := make(map[string]ofdgo.Box)
+	textValues := make(map[string]string)
+	for _, run := range text.Runs {
+		textValues[run.ID] += run.Text
+		for _, box := range run.Boxes {
+			if box.W <= 0 || box.H <= 0 {
+				continue
+			}
+			prev, exists := textBoxes[run.ID]
+			if !exists {
+				textBoxes[run.ID] = box
+				continue
+			}
+			x, y := math.Min(prev.X, box.X), math.Min(prev.Y, box.Y)
+			textBoxes[run.ID] = ofdgo.Box{X: x, Y: y, W: math.Max(prev.X+prev.W, box.X+box.W) - x, H: math.Max(prev.Y+prev.H, box.Y+box.H) - y}
+		}
+	}
+	fonts, err := currentSession.Reader.Fonts()
+	if err != nil {
+		return nil, err
+	}
+	fontNames := make(map[string]string, len(fonts))
+	for _, font := range fonts {
+		fontNames[font.ID] = font.FontName
+	}
+	for _, layer := range page.Content.Layer {
+		for _, object := range layer.Objects {
+			var id string
+			var box ofdgo.Box
+			switch object.Type {
+			case "TextObject":
+				id = object.TextObject.ID
+				box = textBoxes[id]
+			case "ImageObject":
+				id = object.ImageObject.ID
+				box, err = ofdgo.ParseBox(object.ImageObject.Boundary)
+				if err != nil {
+					return nil, err
+				}
+			default:
+				continue
+			}
+			if box.W > 0 && box.H > 0 {
+				item := map[string]any{"id": id, "image": object.Type == "ImageObject", "x": box.X, "y": box.Y, "width": box.W, "height": box.H}
+				if object.Type == "TextObject" {
+					item["text"], item["font"], item["fontName"], item["size"] = textValues[id], object.TextObject.Font, fontNames[object.TextObject.Font], object.TextObject.Size
+				}
+				objects = append(objects, item)
+			}
+		}
+	}
+	return objects, nil
+}
+
+// transformObject 移动文字或等比缩放图片
+// 入参: args 页码、对象标识、位移和缩放比例
+// 返回: any 文档信息, error 错误信息
+func transformObject(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	page, id := args[0].Int(), args[1].String()
+	object, err := currentEditor.Object(page, id)
+	if err != nil {
+		return nil, err
+	}
+	scale := args[4].Float()
+	var boundary *string
+	switch object.Type {
+	case "TextObject":
+		if scale != 1 {
+			return nil, fmt.Errorf("text resizing is not supported")
+		}
+		boundary = &object.TextObject.Boundary
+	case "ImageObject":
+		boundary = &object.ImageObject.Boundary
+		object.ImageObject.CTM = ""
+	default:
+		return nil, fmt.Errorf("unsupported object type %q", object.Type)
+	}
+	box, err := ofdgo.ParseBox(*boundary)
+	if err != nil {
+		return nil, err
+	}
+	*boundary = fmt.Sprintf("%g %g %g %g", box.X+args[2].Float(), box.Y+args[3].Float(), box.W*scale, box.H*scale)
+	if err := currentEditor.UpdateObject(page, id, object); err != nil {
+		return nil, err
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// deleteObject 删除创作画布中选中的对象
+// 入参: args 页码和对象标识
+// 返回: any 文档信息, error 错误信息
+func deleteObject(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	if err := currentEditor.DeleteObject(args[0].Int(), args[1].String()); err != nil {
+		return nil, err
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// createDocument 新建单页文档
+// 入参: args 标题、纸张宽高和注解设置
+// 返回: any 文档信息, error 错误信息
+func createDocument(args []js.Value) (any, error) {
+	editor := ofdgo.NewEditor()
+	editor.Info.Title = args[0].String()
+	if _, err := editor.AddPage(args[1].Float(), args[2].Float()); err != nil {
+		return nil, err
+	}
+	editor.SetHistoryLimit(100)
+	return previewEditor(editor, args[3].Bool())
+}
+
+// previewEditor 通过内存快照更新预览，不生成中间压缩包
+// 入参: editor 新建文档, annotations 是否显示注解
+// 返回: any 文档信息, error 错误信息
+func previewEditor(editor *ofdgo.Editor, annotations bool) (any, error) {
+	reader, err := editor.Reader()
+	if err != nil {
+		return nil, err
+	}
+	session, err := newSession(reader, OpenOptions{RenderAnnotations: annotations})
+	if err != nil {
+		return nil, err
+	}
+	if currentSession != nil {
+		_ = currentSession.Close()
+	}
+	currentSession = session
+	currentEditor = editor
+	return editorSummary(), nil
+}
+
+// updateText 修改文字内容、字体和字号，空字体数据沿用对象字体
+// 入参: args 页码、对象标识、内容、字体数据和字号
+// 返回: any 文档信息, error 错误信息
+func updateText(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	page, id := args[0].Int(), args[1].String()
+	object, err := currentEditor.Object(page, id)
+	if err != nil {
+		return nil, err
+	}
+	fontID := object.TextObject.Font
+	if !args[3].IsNull() {
+		data, err := bytesFromJS(args[3])
+		if err != nil {
+			return nil, err
+		}
+		fontID, err = currentEditor.AddFont(FontFile{Data: data}, 0)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := currentEditor.UpdateText(page, id, args[2].String(), fontID, args[4].Float()); err != nil {
+		return nil, err
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// insertText 使用选定字体创建文字对象
+// 入参: args 页码、内容、字体数据、横纵坐标和字号
+// 返回: any 文档信息, error 错误信息
+func insertText(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	data, err := bytesFromJS(args[2])
+	if err != nil {
+		return nil, err
+	}
+	fontID, err := currentEditor.AddFont(FontFile{Data: data}, 0)
+	if err != nil {
+		return nil, err
+	}
+	page := args[0].Int()
+	content, err := currentSession.pageContent(page)
+	if err != nil {
+		return nil, err
+	}
+	box, err := currentSession.pageBox(page, content)
+	if err != nil {
+		return nil, err
+	}
+	x, y := args[3].Float(), args[4].Float()
+	box = ofdgo.Box{X: x, Y: y, W: box.W - x, H: box.H - y}
+	if _, err := currentEditor.AddText(page, box, args[1].String(), fontID, args[5].Float()); err != nil {
+		return nil, err
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// insertImage 按原始比例创建图片对象
+// 入参: args 页码、图片数据、横纵坐标和宽度
+// 返回: any 文档信息, error 错误信息
+func insertImage(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	data, err := bytesFromJS(args[1])
+	if err != nil {
+		return nil, err
+	}
+	resourceID, err := currentEditor.AddImage(data)
+	if err != nil {
+		return nil, err
+	}
+	config, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	width := args[4].Float()
+	box := ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: width, H: width * float64(config.Height) / float64(config.Width)}
+	content, err := currentSession.pageContent(args[0].Int())
+	if err != nil {
+		return nil, err
+	}
+	pageBox, err := currentSession.pageBox(args[0].Int(), content)
+	if err != nil {
+		return nil, err
+	}
+	if height := pageBox.H - box.Y*2; box.H > height {
+		box.W *= height / box.H
+		box.H = height
+	}
+	object := ofdgo.GraphicObject{Type: "ImageObject", ImageObject: ofdgo.ImageObject{
+		ResourceID: resourceID, Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
+	}}
+	if _, err := currentEditor.AddObject(args[0].Int(), object); err != nil {
+		return nil, err
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// saveDocument 分块写出新建文档
+// 入参: args 数据写出回调
+// 返回: any 保存结果, error 错误信息
+func saveDocument(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	writer := bufio.NewWriterSize(exportWriter{write: args[0]}, 1<<20)
+	if _, err := currentEditor.WriteTo(writer); err != nil {
+		return nil, err
+	}
+	if err := writer.Flush(); err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"mime": "application/ofd", "label": "OFD"}), nil
 }

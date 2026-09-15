@@ -40,13 +40,13 @@ func main() {
 func serveWebUI() http.Handler {
 	files := http.FileServerFS(webuiassets.FS)
 	checksum := webuiassets.Checksum()
-	serviceWorker, _ := webuiassets.FS.ReadFile("ofdgo.sw.js")
+	serviceWorker, _ := webuiassets.FS.ReadFile("ofdgo_work.js")
 	serviceWorker = append([]byte(fmt.Sprintf("const BUNDLE_CHECKSUM = %q;\n", checksum)), serviceWorker...)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-OFDGo-Checksum", checksum)
-		if r.URL.Path == "/ofdgo.sw.js" {
-			http.ServeContent(w, r, "ofdgo.sw.js", time.Time{}, bytes.NewReader(serviceWorker))
+		if r.URL.Path == "/ofdgo_work.js" {
+			http.ServeContent(w, r, "ofdgo_work.js", time.Time{}, bytes.NewReader(serviceWorker))
 			return
 		}
 		files.ServeHTTP(w, r)
