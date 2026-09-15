@@ -96,6 +96,39 @@ func (m Matrix) Transform(x, y float64) (float64, float64) {
 	return nx, ny
 }
 
+// TransformBox 获取矩形经仿射变换后的轴对齐边界。
+// 入参: box 原始矩形范围
+// 返回: Box 变换后的轴对齐边界
+func (m Matrix) TransformBox(box Box) Box {
+	x, y := m.Transform(box.X, box.Y)
+	left, top, right, bottom := x, y, x, y
+	for _, point := range [][2]float64{{box.X + box.W, box.Y}, {box.X, box.Y + box.H}, {box.X + box.W, box.Y + box.H}} {
+		x, y := m.Transform(point[0], point[1])
+		left, top, right, bottom = math.Min(left, x), math.Min(top, y), math.Max(right, x), math.Max(bottom, y)
+	}
+	return Box{X: left, Y: top, W: right - left, H: bottom - top}
+}
+
+// String 返回标准CTM属性值。
+// 返回: string 六个空格分隔的矩阵分量
+func (m Matrix) String() string {
+	return fmt.Sprintf("%s %s %s %s %s %s", ofdNumber(m.a), ofdNumber(m.b), ofdNumber(m.c), ofdNumber(m.d), ofdNumber(m.e), ofdNumber(m.f))
+}
+
+// axisAlignedMatrix 判断变换是否保持坐标轴平行，含直角旋转与镜像。
+// 入参: m 仿射变换矩阵
+// 返回: bool 是否为非退化的轴对齐变换
+func axisAlignedMatrix(m Matrix) bool {
+	return m.b == 0 && m.c == 0 && m.a != 0 && m.d != 0 || m.a == 0 && m.d == 0 && m.b != 0 && m.c != 0
+}
+
+// matrixVector 变换位移，不包含平移分量。
+// 入参: m 仿射变换矩阵, x、y 原始位移
+// 返回: float64 变换后的X位移, float64 变换后的Y位移
+func matrixVector(m Matrix, x, y float64) (float64, float64) {
+	return m.a*x + m.c*y, m.b*x + m.d*y
+}
+
 // Invert 求逆矩阵
 // 返回: Matrix 逆矩阵, bool 是否可逆
 func (m Matrix) Invert() (Matrix, bool) {

@@ -352,7 +352,7 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 }
 
 // AddObject 按添加顺序放入正文图层，支持文字、路径和图片，自动分配对象ID
-// 首版支持基本颜色和直接资源引用，不支持动作、裁剪、渐变及复合图元
+// 支持基本颜色、直接资源引用及图片的路径裁剪，不支持动作、渐变及复合图元
 // 入参: page 页面索引, object 对象内容，添加后不再引用调用方的可变数据
 // 返回: string 对象标识, error 错误信息
 func (e *Editor) AddObject(page int, object GraphicObject) (string, error) {
@@ -577,8 +577,11 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 	} else if object.Type == "ImageObject" {
 		object.ImageObject.CTM = fmt.Sprintf("%s 0 0 %s 0 0", ofdNumber(box.W), ofdNumber(box.H))
 	}
-	if drawParam != "" || clips != nil || len(actions) != 0 {
-		return GraphicObject{}, fmt.Errorf("draw parameter references, clips and actions are not supported for creation")
+	if drawParam != "" || len(actions) != 0 || clips != nil && object.Type != "ImageObject" {
+		return GraphicObject{}, fmt.Errorf("draw parameter references, non-image clips and actions are not supported for creation")
+	}
+	if err := e.validateImageClips(clips); err != nil {
+		return GraphicObject{}, err
 	}
 	if alpha != nil && (*alpha < 0 || *alpha > 255) {
 		return GraphicObject{}, fmt.Errorf("alpha must be between 0 and 255")
@@ -592,6 +595,42 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 		return GraphicObject{}, fmt.Errorf("invalid line join %q", join)
 	}
 	return cloneEditorObject(object)
+}
+
+// validateImageClips 校验图片的路径裁剪，仅接受无资源引用及嵌套裁剪的路径
+// 入参: clips 图片裁剪集合，nil表示无裁剪
+// 返回: error 错误信息
+func (e *Editor) validateImageClips(clips *Clips) error {
+	if clips == nil {
+		return nil
+	}
+	if len(clips.Clip) == 0 {
+		return fmt.Errorf("image clips must contain a clip")
+	}
+	for _, clip := range clips.Clip {
+		if len(clip.Area) == 0 {
+			return fmt.Errorf("image clip must contain an area")
+		}
+		for _, area := range clip.Area {
+			if len(area.Path) == 0 || area.DrawParam != "" || len(area.Text) != 0 {
+				return fmt.Errorf("image clips only support paths without draw parameter references")
+			}
+			if area.CTM != "" {
+				if _, err := creationNumbers(area.CTM, 6); err != nil {
+					return err
+				}
+			}
+			for _, path := range area.Path {
+				if path.ID != "" {
+					return fmt.Errorf("clip paths must not have object IDs")
+				}
+				if _, err := e.prepareObject("", GraphicObject{Type: "PathObject", PathObject: path}); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // cloneEditorObject 通过统一序列化规则复制对象
@@ -668,6 +707,8 @@ func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) err
 }
 
 // transformEditorObject 变换独立对象副本，保留绘制属性和编辑中的段落信息。
+// 入参: object 对象副本, dx 横向位移, dy 纵向位移, scale 正缩放比例
+// 返回: GraphicObject 变换后的对象, error 错误信息
 func transformEditorObject(object GraphicObject, dx, dy, scale float64) (GraphicObject, error) {
 	var boundary, ctm *string
 	switch object.Type {
@@ -696,6 +737,9 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 		boundary, ctm = &object.PathObject.Boundary, &object.PathObject.CTM
 	case "ImageObject":
 		boundary, ctm = &object.ImageObject.Boundary, &object.ImageObject.CTM
+		if scale != 1 {
+			object.ImageObject.Clips = transformImageClips(object.ImageObject.Clips, Matrix{a: scale, d: scale})
+		}
 	}
 	box, err := ParseBox(*boundary)
 	if err != nil {
@@ -780,7 +824,7 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 	}
 	var width float64
 	if options.Wrap || options.Align != "" && options.Align != "left" {
-		box, err := creationBox(obj.Boundary)
+		box, err := obj.TextFrame()
 		if err != nil {
 			return err
 		}

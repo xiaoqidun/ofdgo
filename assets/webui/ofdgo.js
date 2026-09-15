@@ -93,6 +93,10 @@ const el = {
 	objectOrder: document.querySelector("#objectOrder"),
 	objectAlign: document.querySelector("#objectAlign"),
 	objectDistribute: document.querySelector("#objectDistribute"),
+	objectRotate: document.querySelector("#objectRotate"),
+	objectFlip: document.querySelector("#objectFlip"),
+	cropImageButton: document.querySelector("#cropImageButton"),
+	resetCropButton: document.querySelector("#resetCropButton"),
 	multiSelectButton: document.querySelector("#multiSelectButton"),
 	textAlign: document.querySelector("#textAlign"),
 	textWrap: document.querySelector("#textWrap"),
@@ -240,7 +244,13 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onTransform: (item, change) => changeDocument(item.items ? "ofdgoTransformObjects" : "ofdgoTransformObject", item,
 		change.x + item.x * (1 - change.scale), change.y + item.y * (1 - change.scale), change.scale),
 	onReshape: (item, box) => changeDocument("ofdgoReshapeObject", item, box.x, box.y, box.width, box.height),
-	onTextWidth: (item, box) => changeDocument("ofdgoLayoutText", item, box.x, box.width, true, item.align || "", item.paragraphHeight || 0),
+	onTextWidth: (item, box) => changeDocument("ofdgoLayoutText", item, box.x - item.x, box.width, true, item.align || "", item.paragraphHeight || 0),
+	onCrop: (item, box) => changeDocument("ofdgoCropImage", item, box.x, box.y, box.width, box.height),
+	onCropChange: () => {
+		updatePendingChanges();
+		updateObjectControls(canvasEditor.selected);
+		syncSelection();
+	},
 	onDelete: (item) => changeDocument(item.items ? "ofdgoDeleteObjects" : "ofdgoDeleteObject", item),
 	onEdit: editCanvasObject,
 	drawStyle: shapeStyle,
@@ -253,8 +263,7 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 		: changeDocument("ofdgoUpdateText", item, value, fontData || null, item.size, null),
 	onTextChange: () => {
 		const editing = canvasEditor.input;
-		setDirty(state.editing && (state.editorInfo?.revision !== state.savedRevision
-			|| Boolean(editing && (editing.input.value !== editing.item.text || editing.fontData))));
+		updatePendingChanges();
 		if (!editing) {
 			updateTextFonts(canvasEditor.selected, true);
 			syncSelection();
@@ -262,14 +271,22 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	},
 });
 
+// updatePendingChanges 将未提交的文字和裁剪计入修改状态，不生成历史记录。
+function updatePendingChanges() {
+	const editing = canvasEditor.input;
+	setDirty(state.editing && (state.editorInfo?.revision !== state.savedRevision
+		|| Boolean(editing && (editing.input.value !== editing.item.text || editing.fontData)) || canvasEditor.cropChanged()));
+}
+
 el.editorTools.addEventListener("pointerdown", (event) => {
 	if (canvasEditor.input && event.target.closest("button")) event.preventDefault();
 });
 
-// editorClick commits inline text before resolving the selection for a toolbar command.
+// editorClick 提交画布中的文字和裁剪后，再执行工具栏操作。
 function editorClick(button, action) {
 	button.addEventListener("click", async () => {
 		if (canvasEditor.input && !await canvasEditor.commitText()) return;
+		if (canvasEditor.crop && !await canvasEditor.commitCrop()) return;
 		return action();
 	});
 }
@@ -356,6 +373,30 @@ el.objectDistribute.addEventListener("change", () => {
 	if (axis && canvasEditor.items().length >= 3) {
 		return changeDocument("ofdgoDistributeObjects", canvasEditor.selected, axis);
 	}
+});
+for (const [select, method] of [[el.objectRotate, "ofdgoRotateObjects"], [el.objectFlip, "ofdgoFlipObjects"]]) {
+	select.addEventListener("change", () => {
+		const value = select.value, item = canvasEditor.selected;
+		select.value = "";
+		if (!item || !value || canvasEditor.crop) return;
+		return changeDocument(method, { ...item, id: canvasEditor.items().map(member => member.id) },
+			select === el.objectRotate ? Number(value) : value);
+	});
+}
+el.cropImageButton.addEventListener("click", () => {
+	if (document.body.hasAttribute("aria-busy")) return;
+	if (canvasEditor.crop) return canvasEditor.commitCrop();
+	const item = canvasEditor.selected;
+	if (item?.type === "ImageObject") canvasEditor.startCrop(item);
+});
+el.resetCropButton.addEventListener("click", () => {
+	if (document.body.hasAttribute("aria-busy")) return;
+	if (canvasEditor.crop) {
+		canvasEditor.closeCrop();
+		return;
+	}
+	const item = canvasEditor.selected;
+	if (item?.imageBounds) return canvasEditor.options.onCrop(item, item.imageBounds);
 });
 editorClick(el.undoButton, () => changeDocument("ofdgoUndo"));
 editorClick(el.redoButton, () => changeDocument("ofdgoRedo"));
@@ -760,12 +801,12 @@ function openInsertPanel(item = null) {
 	el.insertImage.focus();
 }
 
-// currentTextStyle returns the selected text style or the next text box's defaults.
+// currentTextStyle 获取所选文字样式，未选中文字时使用新文字的默认样式。
 function currentTextStyle() {
 	return canvasEditor.selected?.type === "TextObject" ? canvasEditor.selected : state.textDefaults;
 }
 
-// toggleTextTool places text directly on the page without creating empty document objects.
+// toggleTextTool 切换画布文字工具，不提前创建空文字对象。
 async function toggleTextTool() {
 	if (!state.editing || document.body.hasAttribute("aria-busy")) return;
 	if (canvasEditor.tool === "text") {
@@ -788,7 +829,7 @@ async function toggleTextTool() {
 	el.viewerPanel.focus({ preventScroll: true });
 }
 
-// beginCanvasText loads the chosen local font and starts an unsaved inline text box.
+// beginCanvasText 加载所选本地字体，并在画布上创建待提交的文字输入框。
 async function beginCanvasText(index, box, surface, page) {
 	const font = state.textDefaults.fontChoice || state.textFonts[Number(el.textFont.value)];
 	if (!font) {
@@ -848,7 +889,7 @@ function updateTextFonts(item, refresh = false) {
 	}
 }
 
-// changeTextFont preserves uncommitted text while loading a replacement font.
+// changeTextFont 更换字体时保留尚未提交的文字。
 async function changeTextFont() {
 	const item = canvasEditor.selected;
 	const font = state.textFonts[Number(el.textFont.value)];
@@ -940,7 +981,7 @@ function textPoints(size) {
 	return Number((size * 72 / 25.4).toFixed(2));
 }
 
-// changeParagraph keeps layout in the library and only submits changed form values.
+// changeParagraph 仅提交变更的段落选项，具体排版由库完成。
 async function changeParagraph(wrap = currentTextStyle().wrap) {
 	const item = currentTextStyle();
 	if (document.body.hasAttribute("aria-busy") || item.draft) return;
@@ -2253,9 +2294,10 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		if (canvasEditor.input) {
+		if (canvasEditor.input || canvasEditor.crop) {
 			setBusy(false);
 			if (!await canvasEditor.commitText()) return;
+			if (!await canvasEditor.commitCrop()) return;
 			openSeq = state.openSeq;
 			setBusy(true, `正在生成 ${label}`, null, whole ? STATUS.exporting : STATUS.pageExporting);
 		}
@@ -2406,7 +2448,7 @@ function unmountPage(index) {
 	const shell = pageShell(index);
 	const selection = document.getSelection();
 	const range = !selection.isCollapsed && selection.rangeCount ? selection.getRangeAt(0) : null;
-	if (canvasEditor.input?.item.index === index
+	if (canvasEditor.input?.item.index === index || canvasEditor.crop?.item.index === index
 		|| range && (!state.documentSelection || !isDocumentSelection(range)) && range.intersectsNode(shell)) {
 		state.selectedPages.add(index);
 		return;
@@ -4160,7 +4202,17 @@ function updateObjectControls(item, reset = false) {
 	const disabled = !item || Boolean(item.draft) || !state.ready || state.exporting;
 	el.deleteObjectButton.disabled = el.objectAlign.disabled = disabled;
 	el.copyObjectButton.disabled = disabled;
-	el.objectDistribute.disabled = disabled || !item.items || item.items.length < 3;
+	const cropping = Boolean(canvasEditor.crop);
+	el.objectAlign.disabled = disabled || cropping;
+	el.objectRotate.disabled = el.objectFlip.disabled = disabled || cropping;
+	el.cropImageButton.disabled = disabled || item.type !== "ImageObject";
+	el.cropImageButton.textContent = cropping ? "完成" : "裁剪";
+	el.cropImageButton.setAttribute("aria-label", cropping ? "完成裁剪" : "裁剪图片");
+	el.cropImageButton.setAttribute("aria-pressed", String(cropping));
+	el.resetCropButton.textContent = cropping ? "取消" : "还原";
+	el.resetCropButton.setAttribute("aria-label", cropping ? "取消裁剪" : "还原图片");
+	el.resetCropButton.disabled = disabled || !cropping && (!item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
+	el.objectDistribute.disabled = disabled || cropping || !item.items || item.items.length < 3;
 	el.editObjectButton.disabled = disabled || Boolean(item.items) || item.type === "PathObject";
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const text = item?.type === "TextObject" ? item : state.textDefaults;
@@ -4197,7 +4249,7 @@ function updateObjectControls(item, reset = false) {
 	const count = members[0]?.count || 0;
 	const canRaise = orders.some((order, i) => order !== count - orders.length + i);
 	const canLower = orders.some((order, i) => order !== i);
-	el.objectOrder.disabled = disabled || count <= orders.length;
+	el.objectOrder.disabled = disabled || cropping || count <= orders.length;
 	for (const option of el.objectOrder.options) {
 		option.disabled = disabled || (["up", "top"].includes(option.value) ? !canRaise : !canLower);
 	}

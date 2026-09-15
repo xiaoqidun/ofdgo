@@ -537,7 +537,9 @@ func buildCmapTable(numGlyphs uint16, mapping map[rune]uint16) []byte {
 	return mainBuf.Bytes()
 }
 
-// shouldBuildCmapFormat12 判断format 4是否会溢出16位length
+// shouldBuildCmapFormat12 判断字符超出BMP或format 4长度溢出时是否需要format 12
+// 入参: mapping 字符到字形的映射
+// 返回: bool 是否需要构建format 12子表
 func shouldBuildCmapFormat12(mapping map[rune]uint16) bool {
 	if mapping == nil {
 		return false

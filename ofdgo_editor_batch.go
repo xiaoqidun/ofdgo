@@ -175,6 +175,7 @@ func (e *Editor) DistributeObjects(page int, ids []string, axis string) error {
 }
 
 // replaceObjects 替换正文对象列表，隔离历史快照与后续的增删、排序操作。
+// 入参: page 页面索引, objects 新的正文对象列表
 func (e *Editor) replaceObjects(page int, objects []GraphicObject) {
 	before := e.pages[page].Content.Layer[0].Objects
 	if reflect.DeepEqual(before, objects) {
@@ -319,6 +320,8 @@ func (e *Editor) DeleteObjects(page int, ids []string) error {
 }
 
 // selectedObjects 校验同页选择，返回内部只读对象与对应索引。
+// 入参: page 页面索引, ids 对象标识，不得重复
+// 返回: []GraphicObject 所选对象, []int 正文对象索引, error 错误信息
 func (e *Editor) selectedObjects(page int, ids []string) ([]GraphicObject, []int, error) {
 	if _, err := e.page(page); err != nil {
 		return nil, nil, err
@@ -341,6 +344,8 @@ func (e *Editor) selectedObjects(page int, ids []string) ([]GraphicObject, []int
 }
 
 // editorObjectID 获取可创作对象的标准标识。
+// 入参: object 图形对象
+// 返回: string 对象标识，不支持的类型返回空字符串
 func editorObjectID(object GraphicObject) string {
 	switch object.Type {
 	case "TextObject":
@@ -354,6 +359,8 @@ func editorObjectID(object GraphicObject) string {
 }
 
 // objectBounds 批量获取对齐范围，每页只度量一次文字。
+// 入参: page 页面索引, objects 待度量的对象
+// 返回: []Box 对象范围，文字采用字形范围，其余采用Boundary, error 错误信息
 func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) {
 	textBoxes := make(map[string]Box)
 	if slices.ContainsFunc(objects, func(o GraphicObject) bool { return o.Type == "TextObject" }) {

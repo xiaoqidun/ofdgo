@@ -90,6 +90,21 @@
 				</select>
 				<span>对象</span>
 			</div>
+			<div class="editor-group editor-transform">
+				<select id="objectRotate" class="order-select" aria-label="对象旋转" disabled>
+					<option value="" hidden>旋转</option>
+					<option value="90">右转90°</option>
+					<option value="-90">左转90°</option>
+				</select>
+				<select id="objectFlip" class="order-select" aria-label="对象翻转" disabled>
+					<option value="" hidden>翻转</option>
+					<option value="horizontal">水平</option>
+					<option value="vertical">垂直</option>
+				</select>
+				<button id="cropImageButton" class="button" type="button" aria-label="裁剪图片" aria-pressed="false" disabled>裁剪</button>
+				<button id="resetCropButton" class="button" type="button" aria-label="还原图片" disabled>还原</button>
+				<span>变换</span>
+			</div>
 			<div class="editor-group">
 				<div class="text-font"><select id="textFont" aria-label="字体" title="字体" disabled></select><button id="textFontAdd" class="icon-button" type="button" title="添加字体" aria-label="添加字体">+</button></div>
 				<div class="editor-number"><input id="textSize" type="number" min="1" step="any" required aria-label="字号" disabled><span>pt</span></div>

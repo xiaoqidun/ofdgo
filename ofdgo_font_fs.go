@@ -584,8 +584,9 @@ func (d *fontDir) Stat() (fs.FileInfo, error) {
 	return fontFileInfo{name: ".", mode: fs.ModeDir}, nil
 }
 
-// Read 读取字体目录数据
-// 返回: int 读取字节数, error 错误信息
+// Read 字体目录不提供字节内容，始终返回EOF
+// 入参: []byte 读取缓冲区，不使用
+// 返回: int 始终为0, error 始终为io.EOF
 func (d *fontDir) Read([]byte) (int, error) {
 	return 0, io.EOF
 }

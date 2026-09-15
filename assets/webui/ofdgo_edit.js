@@ -21,14 +21,14 @@ export function objectTransform(box, dx, dy, corner = "") {
 	return { x: left ? box.width * (1 - scale) : 0, y: top ? box.height * (1 - scale) : 0, scale };
 }
 
-// selectionBounds keeps same-page objects together without changing their relative positions.
+// selectionBounds 计算同页对象的联合边界，不改变对象位置。
 export function selectionBounds(items) {
 	const x = Math.min(...items.map(item => item.x)), y = Math.min(...items.map(item => item.y));
 	return { x, y, width: Math.max(...items.map(item => item.x + item.width)) - x,
 		height: Math.max(...items.map(item => item.y + item.height)) - y };
 }
 
-// alignmentGuides marks the nearest edges or centers without changing object coordinates.
+// alignmentGuides 查找最近的边缘或中心辅助线，不改变对象坐标。
 function alignmentGuides(box, targets, tolerance) {
 	const lines = [];
 	for (const [axis, size, cross, span] of [["x", "width", "y", "height"], ["y", "height", "x", "width"]]) {
@@ -51,7 +51,26 @@ function alignmentGuides(box, targets, tolerance) {
 	return lines.join("");
 }
 
-// constrainedPoint preserves shape constraints without changing off-page geometry.
+// transformedBox 将本地矩形映射到页面，用于变换后的文字框预览。
+function transformedBox(box, matrix) {
+	const [a, b, c, d, e, f] = matrix;
+	const points = [[box.x, box.y], [box.x + box.width, box.y], [box.x, box.y + box.height], [box.x + box.width, box.y + box.height]]
+		.map(([x, y]) => [a * x + c * y + e, b * x + d * y + f]);
+	const x = Math.min(...points.map(p => p[0])), y = Math.min(...points.map(p => p[1]));
+	return { x, y, width: Math.max(...points.map(p => p[0])) - x, height: Math.max(...points.map(p => p[1])) - y };
+}
+
+// cropBox 将保留区域限制在当前图片范围内，不改变图片比例。
+function cropBox(box, bounds, dx, dy, corner) {
+	if (!corner) return { ...box, x: Math.max(bounds.x, Math.min(box.x + dx, bounds.x + bounds.width - box.width)),
+		y: Math.max(bounds.y, Math.min(box.y + dy, bounds.y + bounds.height - box.height)) };
+	const next = reshapeBox({ geometry: box }, dx, dy, corner, false);
+	const x = Math.max(bounds.x, next.x), y = Math.max(bounds.y, next.y);
+	return { x, y, width: Math.min(bounds.x + bounds.width, next.x + next.width) - x,
+		height: Math.min(bounds.y + bounds.height, next.y + next.height) - y };
+}
+
+// constrainedPoint 按修饰键约束图形端点，允许超出页面边界。
 export function constrainedPoint(from, to, shape, shift) {
 	let dx = to.x - from.x, dy = to.y - from.y;
 	if (shift && shape === "line") {
@@ -68,7 +87,7 @@ export function constrainedPoint(from, to, shape, shift) {
 	return { x: from.x + dx, y: from.y + dy };
 }
 
-// reshapeBox moves line endpoints or resizes basic shapes without scaling their stroke.
+// reshapeBox 移动线段端点或调整基本图形范围，不缩放描边。
 export function reshapeBox(item, dx, dy, handle, shift) {
 	const box = item.geometry;
 	if (!dx && !dy && !shift) return { ...box };
@@ -93,7 +112,7 @@ export function reshapeBox(item, dx, dy, handle, shift) {
 	return { x, y, width: right - x, height: bottom - y };
 }
 
-// paintShape uses the same page-space geometry for creation and endpoint previews.
+// paintShape 使用统一的页面坐标绘制图形及端点调整预览。
 function paintShape(node, shape, box) {
 	const { x, y, width, height } = box;
 	const attributes = shape === "line" ? { x1: x, y1: y, x2: x + width, y2: y + height }
@@ -152,6 +171,8 @@ export class CanvasEditor {
 	}
 
 	mount(index, page, surface) {
+		const crop = this.crop?.item.index === index ? this.crop : null;
+		if (crop) this.closeCrop();
 		const pending = this.pendingSelection?.index === index;
 		const selected = pending ? this.pendingSelection.ids || page.objects.slice(-1).map(item => item.id)
 			: this.items().filter(item => item.index === index).map(item => item.id);
@@ -189,6 +210,12 @@ export class CanvasEditor {
 		surface.append(layer);
 		if (selected.length) this.setSelection(selection);
 		if (pending) this.pendingSelection = null;
+		if (crop && selection.length === 1 && selection[0].id === crop.item.id
+			&& ["x", "y", "width", "height"].every(key => selection[0][key] === crop.item[key])) {
+			this.startCrop(selection[0]);
+			this.crop.box = { ...crop.box };
+			this.paintCrop();
+		}
 	}
 
 	place(item, change = { x: 0, y: 0, scale: 1 }) {
@@ -208,9 +235,19 @@ export class CanvasEditor {
 			left: `${(item.x + change.x) * PX_PER_MM}px`, top: `${(item.y + change.y) * PX_PER_MM}px`,
 			width: `${item.width * change.scale * PX_PER_MM}px`, height: `${item.height * change.scale * PX_PER_MM}px`,
 		});
+		if (item.textFrame) {
+			const { matrix: [a, b, c, d, e, f], width, height } = item.textFrame;
+			for (const handle of item.node.children) {
+				if (handle.dataset.corner !== "w" && handle.dataset.corner !== "e") continue;
+				const x = handle.dataset.corner === "e" ? width : 0;
+				handle.style.left = `${(a * x + c * height / 2 + e - item.x) * change.scale * PX_PER_MM}px`;
+				handle.style.top = `${(b * x + d * height / 2 + f - item.y) * change.scale * PX_PER_MM}px`;
+				handle.style.cursor = a === 0 ? "var(--resize-vertical, ns-resize)" : "var(--resize-horizontal, ew-resize)";
+			}
+		}
 	}
 
-	// placeShape positions basic-shape handles at their geometry rather than the padded boundary.
+	// placeShape 按图形几何范围放置手柄，不包含边界留量。
 	placeShape(item, box) {
 		const x = Math.min(box.x, box.x + box.width), y = Math.min(box.y, box.y + box.height);
 		Object.assign(item.node.style, {
@@ -226,13 +263,14 @@ export class CanvasEditor {
 		}
 	}
 
-	// items returns the current selection without treating a group as a document object.
+	// items 获取选中的真实对象，临时多选框不作为文档对象。
 	items() {
 		return this.selected?.items || (this.selected ? [this.selected] : []);
 	}
 
-	// setSelection updates object highlights and exposes one same-page selection to the toolbar.
+	// setSelection 更新同页对象选区，并同步工具栏。
 	setSelection(items) {
+		if (this.crop && (items.length !== 1 || items[0] !== this.crop.item)) this.closeCrop();
 		if (this.selected?.items) this.selected.node.remove();
 		for (const item of this.items()) {
 			item.node.classList.remove("selected", "multi-selected");
@@ -273,6 +311,7 @@ export class CanvasEditor {
 
 	clear() {
 		this.closeText();
+		this.closeCrop();
 		this.cancel();
 		this.pendingSelection = null;
 		this.select(null);
@@ -284,6 +323,19 @@ export class CanvasEditor {
 			return;
 		}
 		if (!this.enabled || this.options.busy() || event.button !== 0 || this.drag) {
+			return;
+		}
+		if (this.crop) {
+			if (!event.target.closest(".edit-crop")) {
+				this.commitCrop();
+				return;
+			}
+			event.preventDefault();
+			this.viewer.focus({ preventScroll: true });
+			const { item, box } = this.crop;
+			this.drag = { crop: true, box: { ...box }, pointerID: event.pointerId, corner: event.target.dataset.corner || "",
+				page: item.page, rect: item.surface.getBoundingClientRect(), rotation: this.options.rotation(), clientX: event.clientX, clientY: event.clientY };
+			this.viewer.setPointerCapture(event.pointerId);
 			return;
 		}
 		if (this.tool) {
@@ -336,6 +388,13 @@ export class CanvasEditor {
 		}
 		event.preventDefault();
 		drag.pointer = event;
+		if (drag.crop) {
+			const from = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.page, drag.rotation);
+			const to = pagePoint(event.clientX, event.clientY, drag.rect, drag.page, drag.rotation);
+			this.crop.box = cropBox(drag.box, this.crop.item, to.x - from.x, to.y - from.y, drag.corner);
+			this.paintCrop();
+			return;
+		}
 		if (drag.shape) {
 			this.moveShape(event, drag);
 			return;
@@ -350,6 +409,16 @@ export class CanvasEditor {
 		const from = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.item.page, drag.rotation);
 		const to = pagePoint(event.clientX, event.clientY, drag.rect, drag.item.page, drag.rotation);
 		if (drag.item.type === "TextObject" && (drag.corner === "w" || drag.corner === "e")) {
+			if (drag.item.textFrame) {
+				const frame = drag.item.textFrame, [a, b, c, d] = frame.matrix;
+				const dx = (d * (to.x - from.x) - c * (to.y - from.y)) / (a * d - b * c);
+				const box = reshapeBox({ geometry: { x: 0, y: 0, width: frame.width, height: frame.height } }, dx, 0, drag.corner, false);
+				drag.box = { x: drag.item.x + box.x, width: box.width };
+				const bounds = transformedBox(box, frame.matrix);
+				Object.assign(drag.item.node.style, { left: `${bounds.x * PX_PER_MM}px`, top: `${bounds.y * PX_PER_MM}px`,
+					width: `${bounds.width * PX_PER_MM}px`, height: `${bounds.height * PX_PER_MM}px` });
+				return;
+			}
 			drag.box = reshapeBox({ geometry: drag.item }, to.x - from.x, 0, drag.corner, false);
 			Object.assign(drag.item.node.style, { left: `${drag.box.x * PX_PER_MM}px`, width: `${drag.box.width * PX_PER_MM}px` });
 			return;
@@ -365,7 +434,7 @@ export class CanvasEditor {
 		if (!drag.corner) this.showGuides(drag);
 	}
 
-	// showGuides keeps the visual threshold constant through page zoom and rotation.
+	// showGuides 在页面缩放和旋转时保持辅助线的屏幕判定距离一致。
 	showGuides(drag) {
 		const { item, rect, rotation, change } = drag;
 		const path = alignmentGuides({ ...item, x: item.x + change.x, y: item.y + change.y }, drag.targets, {
@@ -388,6 +457,11 @@ export class CanvasEditor {
 			return;
 		}
 		this.move(event);
+		if (drag.crop) {
+			this.drag = null;
+			this.viewer.releasePointerCapture(drag.pointerID);
+			return;
+		}
 		if (drag.marquee) {
 			this.drag = null;
 			drag.preview.remove();
@@ -419,7 +493,7 @@ export class CanvasEditor {
 		if ((drag.item.shape || drag.item.type === "TextObject") && drag.corner && drag.box) {
 			this.drag = null;
 			this.viewer.releasePointerCapture(drag.pointerID);
-			const geometry = drag.item.geometry || drag.item;
+			const geometry = drag.item.geometry || (drag.item.textFrame ? { x: drag.item.x, width: drag.item.textFrame.width } : drag.item);
 			const changed = Object.keys(drag.box).some((key) => drag.box[key] !== geometry[key]);
 			const apply = drag.item.shape ? this.options.onReshape : this.options.onTextWidth;
 			Promise.resolve(changed && apply(drag.item, drag.box)).finally(() => {
@@ -438,6 +512,10 @@ export class CanvasEditor {
 		const drag = this.drag;
 		this.drag = null;
 		if (drag) {
+			if (drag.crop) {
+				this.crop.box = drag.box;
+				this.paintCrop();
+			}
 			drag.preview?.remove();
 			drag.guides?.preview.remove();
 			if (drag.marquee) this.setSelection(drag.before);
@@ -450,7 +528,7 @@ export class CanvasEditor {
 		}
 	}
 
-	// startMarquee selects by page-space geometry, so rotation and zoom use the same hit tests.
+	// startMarquee 在页面坐标中开始框选，统一处理缩放和旋转。
 	startMarquee(event, additive) {
 		const surface = event.target.closest(".page-surface"), page = this.pages.get(surface);
 		if (!page) {
@@ -468,7 +546,7 @@ export class CanvasEditor {
 		this.viewer.setPointerCapture(event.pointerId);
 	}
 
-	// moveMarquee includes intersecting objects while preserving an additive selection.
+	// moveMarquee 选中与框选区域相交的对象，支持追加到已有选区。
 	moveMarquee(event, drag) {
 		const from = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.page, drag.rotation);
 		const to = pagePoint(event.clientX, event.clientY, drag.rect, drag.page, drag.rotation);
@@ -505,7 +583,7 @@ export class CanvasEditor {
 		this.viewer.setPointerCapture(event.pointerId);
 	}
 
-	// nearestSurface assigns a pasteboard gesture to one mounted page for its entire duration.
+	// nearestSurface 为页面外开始的手势确定一个已加载页面，拖动期间不切换页面。
 	nearestSurface(event) {
 		let nearest = null, distance = Infinity;
 		for (const surface of this.viewer.querySelectorAll(".page-surface")) {
@@ -521,7 +599,7 @@ export class CanvasEditor {
 		return nearest;
 	}
 
-	// createPreview provides a temporary SVG overlay without rerendering the page during a drag.
+	// createPreview 创建临时SVG预览层，拖动期间不重新渲染页面。
 	createPreview(surface, page, shape, style) {
 		const preview = document.createElementNS("http://www.w3.org/2000/svg", "svg");
 		preview.classList.add("edit-preview");
@@ -553,7 +631,7 @@ export class CanvasEditor {
 			? { x: from.x, y: from.y, width: to.x - from.x, height: to.y - from.y } : { x, y, width, height });
 	}
 
-	// modifierChange refreshes the preview even when Shift changes without pointer movement.
+	// modifierChange 在指针静止时响应Shift变化并刷新预览。
 	modifierChange(event) {
 		const pointer = this.drag?.pointer;
 		if (event.key === "Shift" && pointer) {
@@ -564,6 +642,16 @@ export class CanvasEditor {
 
 	keyDown(event) {
 		if (event.defaultPrevented || event.target?.closest("input, textarea, select, [contenteditable]")) return;
+		if (this.crop && !this.options.busy()) {
+			if (event.key === "Escape" || event.key === "Enter") {
+				event.preventDefault();
+				event.stopPropagation();
+				if (event.key === "Enter") this.commitCrop();
+				else if (this.drag) this.cancel();
+				else this.closeCrop();
+			}
+			return;
+		}
 		this.modifierChange(event);
 		if (event.key === "Escape" && this.drag && !this.tool && !this.options.busy()) {
 			event.preventDefault();
@@ -620,6 +708,11 @@ export class CanvasEditor {
 			lineHeight: item.paragraphHeight || item.lineHeight ? `${(item.paragraphHeight || item.lineHeight) * PX_PER_MM}px` : "normal", color: item.color,
 			textAlign: item.align || "left",
 		});
+		if (item.textFrame) {
+			const { width, height, matrix: [a, b, c, d, e, f] } = item.textFrame;
+			Object.assign(input.style, { left: "0px", top: "0px", width: `${Math.max(width, item.wrap ? width : 50) * PX_PER_MM + 4}px`,
+				minHeight: `${height * PX_PER_MM + 4}px`, transform: `matrix(${a},${b},${c},${d},${e * PX_PER_MM},${f * PX_PER_MM})` });
+		}
 		this.input = { input, item, face, fontChoice: item.fontChoice };
 		item.surface.append(input);
 		input.addEventListener("input", () => {
@@ -648,14 +741,14 @@ export class CanvasEditor {
 		if (!item.draft) input.select();
 	}
 
-	// resizeText follows the draft's current font and content without changing document geometry.
+	// resizeText 按当前字体和内容调整输入框，不修改文档中的几何范围。
 	resizeText() {
 		const { input } = this.input;
 		input.style.height = "0px";
 		input.style.height = `${input.scrollHeight + 2}px`;
 	}
 
-	// setTextFont changes only the inline buffer until text and font are committed together.
+	// setTextFont 暂存输入框字体，后续与文字内容一起提交。
 	setTextFont(face, data) {
 		const editing = this.input;
 		document.fonts.add(face);
@@ -699,5 +792,68 @@ export class CanvasEditor {
 			if (editing.item.draft && this.selected === editing.item) this.select(null);
 			this.options.onTextChange();
 		}
+	}
+
+	// startCrop 开始调整图片保留区域，确认前不修改文档。
+	startCrop(item) {
+		this.cancel();
+		this.closeCrop();
+		this.setTool("");
+		const box = { x: item.x, y: item.y, width: item.width, height: item.height };
+		const { preview, node: mask } = this.createPreview(item.surface, item.page, "path", { fill: true, fillColor: "rgba(255,255,255,0.72)" });
+		mask.setAttribute("fill-rule", "evenodd");
+		const node = document.createElement("div");
+		node.className = "edit-layer edit-crop";
+		for (const corner of ["nw", "n", "ne", "e", "se", "s", "sw", "w"]) {
+			const handle = document.createElement("span");
+			handle.className = `edit-handle edit-${corner}`;
+			handle.dataset.corner = corner;
+			node.append(handle);
+		}
+		item.surface.append(node);
+		item.surface.classList.add("cropping");
+		this.crop = { item, box, node, mask, preview };
+		this.paintCrop();
+		this.viewer.focus({ preventScroll: true });
+	}
+
+	// paintCrop 更新遮罩及手柄，不重新渲染或复制图片数据。
+	paintCrop() {
+		const { item, box, node, mask } = this.crop;
+		const rectangle = b => `M${b.x} ${b.y}h${b.width}v${b.height}h${-b.width}Z`;
+		mask.setAttribute("d", rectangle(item) + rectangle(box));
+		Object.assign(node.style, { left: `${box.x * PX_PER_MM}px`, top: `${box.y * PX_PER_MM}px`, width: `${box.width * PX_PER_MM}px`, height: `${box.height * PX_PER_MM}px` });
+		this.options.onCropChange();
+	}
+
+	// cropChanged 判断裁剪范围是否有待提交的变更。
+	cropChanged() {
+		return Boolean(this.crop && ["x", "y", "width", "height"].some(key => this.crop.box[key] !== this.crop.item[key]));
+	}
+
+	// commitCrop 将裁剪作为一次可撤销操作提交，失败时保留预览。
+	async commitCrop() {
+		if (!this.crop) return true;
+		if (this.options.busy()) return false;
+		if (!this.cropChanged()) {
+			this.closeCrop();
+			return true;
+		}
+		const crop = this.crop;
+		const saved = await this.options.onCrop(crop.item, crop.box);
+		if (saved && this.crop === crop) this.closeCrop();
+		return Boolean(saved);
+	}
+
+	// closeCrop 移除临时裁剪区域，不修改文档内容。
+	closeCrop() {
+		if (!this.crop) return;
+		if (this.drag?.crop) this.cancel();
+		const crop = this.crop;
+		this.crop = null;
+		crop.node.remove();
+		crop.preview.remove();
+		crop.item.surface.classList.remove("cropping");
+		this.options.onCropChange();
 	}
 }

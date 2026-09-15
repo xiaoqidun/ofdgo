@@ -20,7 +20,7 @@ import (
 	"github.com/go-text/typesetting/segmenter"
 )
 
-// TextLayout 横向段落选项，Wrap按Boundary宽度折行，Align为left、center、right或justify。
+// TextLayout 本地横向段落选项，Wrap按CTM变换前的边界宽度折行，Align为left、center、right或justify。
 // LineHeight为毫米单位的基线间距，0使用字体度量；零值保持显式换行和左对齐。
 type TextLayout struct {
 	Wrap       bool
@@ -45,6 +45,8 @@ func (obj TextObject) TextLayout() (string, TextLayout) {
 }
 
 // breakTextLines 优先使用Unicode断行机会，过长词仅在字素边界折行，不丢弃空白。
+// 入参: runes 段落字符, advances 各字符步进, width 本地排版宽度, wrap 是否自动折行
+// 返回: [][2]int 各行的字符起止索引，左闭右开
 func breakTextLines(runes []rune, advances []float64, width float64, wrap bool) [][2]int {
 	if !wrap || len(runes) == 0 {
 		return [][2]int{{0, len(runes)}}
@@ -99,6 +101,8 @@ func breakTextLines(runes []rune, advances []float64, width float64, wrap bool) 
 }
 
 // alignTextLine 将段落对齐转换为标准X和DeltaX，两端对齐保留段落末行左对齐。
+// 入参: runes 行内字符, advances 各字符步进, width 本地排版宽度, alignment 对齐方式, justify 是否允许本行两端对齐
+// 返回: float64 行首X坐标, string 字符间的DeltaX序列
 func alignTextLine(runes []rune, advances []float64, width float64, alignment string, justify bool) (float64, string) {
 	end := len(runes)
 	for end > 0 && runes[end-1] == ' ' {

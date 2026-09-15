@@ -116,6 +116,9 @@ func RunWASM() {
 	registerCallback("ofdgoCopyObjects", copyObjects)
 	registerCallback("ofdgoOrderObjects", orderObjects)
 	registerCallback("ofdgoDistributeObjects", distributeObjects)
+	registerCallback("ofdgoRotateObjects", rotateObjects)
+	registerCallback("ofdgoFlipObjects", flipObjects)
+	registerCallback("ofdgoCropImage", cropImage)
 	registerCallback("ofdgoDeleteObject", deleteObject)
 	registerCallback("ofdgoUndo", func([]js.Value) (any, error) { return restoreEditor(false) })
 	registerCallback("ofdgoRedo", func([]js.Value) (any, error) { return restoreEditor(true) })
@@ -572,7 +575,7 @@ func restoreEditor(redo bool) (any, error) {
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
 
-// editorObjects 提供创作画布的对象命中区域
+// editorObjects 提供创作画布的对象范围、文字排版及原始图片边界
 // 入参: index 页面索引, text 页面文字
 // 返回: []any 对象区域, error 错误信息
 func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
@@ -632,6 +635,13 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 			}
 			if box.W > 0 && box.H > 0 {
 				item := map[string]any{"id": id, "type": object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "count": len(layer.Objects)}
+				if object.Type == "ImageObject" {
+					full, err := object.ImageObject.ImageBounds()
+					if err != nil {
+						return nil, err
+					}
+					item["imageBounds"] = editorBox(full)
+				}
 				if object.Type == "PathObject" {
 					path := object.PathObject
 					kind, geometry := path.Shape()
@@ -652,12 +662,23 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					value, layout := source.TextObject.TextLayout()
 					item["text"], item["font"], item["fontName"], item["size"] = value, object.TextObject.Font, fontNames[object.TextObject.Font], object.TextObject.Size
 					item["wrap"], item["align"], item["paragraphHeight"] = layout.Wrap, layout.Align, layout.LineHeight
+					frame, err := object.TextObject.TextFrame()
+					if err != nil {
+						return nil, err
+					}
+					boundary, _ := ofdgo.ParseBox(object.TextObject.Boundary)
+					matrix := ofdgo.TranslationMatrix(boundary.X, boundary.Y).Multiply(ofdgo.NewMatrix(object.TextObject.CTM))
+					inverse, _ := matrix.Invert()
+					local := inverse.TransformBox(box)
+					width := math.Max(object.TextObject.Size, local.X+local.W)
 					if layout.Wrap {
-						frame, err := ofdgo.ParseBox(object.TextObject.Boundary)
-						if err != nil {
-							return nil, err
-						}
-						item["x"], item["y"], item["width"], item["height"] = frame.X, frame.Y, frame.W, math.Max(object.TextObject.Size, box.Y+box.H-frame.Y)
+						width = frame.W
+					}
+					frame = ofdgo.Box{W: width, H: math.Max(object.TextObject.Size, local.Y+local.H)}
+					item["textFrame"] = map[string]any{"width": frame.W, "height": frame.H, "matrix": editorMatrix(matrix)}
+					if layout.Wrap {
+						bounds := matrix.TransformBox(frame)
+						item["x"], item["y"], item["width"], item["height"] = bounds.X, bounds.Y, bounds.W, bounds.H
 					}
 					if codes := object.TextObject.TextCode; len(codes) > 1 {
 						first, _ := strconv.ParseFloat(codes[0].Y, 64)
@@ -815,6 +836,8 @@ func orderObjects(args []js.Value) (any, error) {
 }
 
 // distributeObjects 按指定轴等距分布选区。
+// 入参: args 页面索引、对象标识数组和分布轴
+// 返回: any 文档信息, error 错误信息
 func distributeObjects(args []js.Value) (any, error) {
 	return changeObjects(func() error {
 		return currentEditor.DistributeObjects(args[0].Int(), stringsFromJS(args[1]), args[2].String())
@@ -1129,7 +1152,7 @@ func insertText(args []js.Value) (any, error) {
 }
 
 // layoutText 调整文字框和段落排版，保留软换行前的原文。
-// 入参: args 页码、对象标识、左侧坐标、宽度、折行、对齐和行距
+// 入参: args 页码、对象标识、本地左侧偏移、宽度、折行、对齐和行距
 // 返回: any 文档信息, error 错误信息
 func layoutText(args []js.Value) (any, error) {
 	if currentEditor == nil {
@@ -1143,14 +1166,12 @@ func layoutText(args []js.Value) (any, error) {
 	if object.Type != "TextObject" {
 		return nil, fmt.Errorf("object is not text")
 	}
-	box, err := ofdgo.ParseBox(object.TextObject.Boundary)
-	if err != nil {
-		return nil, err
-	}
 	if !args[2].IsNull() {
-		box.X, box.W = args[2].Float(), args[3].Float()
+		object.TextObject, err = object.TextObject.ResizeTextFrame(args[2].Float(), args[3].Float())
+		if err != nil {
+			return nil, err
+		}
 	}
-	object.TextObject.Boundary = fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H)
 	value, _ := object.TextObject.TextLayout()
 	if err := currentEditor.LayoutText(&object.TextObject, value, ofdgo.TextLayout{Wrap: args[4].Bool(), Align: args[5].String(), LineHeight: args[6].Float()}); err != nil {
 		return nil, err
@@ -1165,7 +1186,53 @@ func layoutText(args []js.Value) (any, error) {
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
 
+// editorBox 将库层毫米边界传递给画布交互层。
+// 入参: box 毫米坐标中的矩形范围
+// 返回: map[string]any 可直接传递给JavaScript的横纵坐标和宽高
+func editorBox(box ofdgo.Box) map[string]any {
+	return map[string]any{"x": box.X, "y": box.Y, "width": box.W, "height": box.H}
+}
+
+// editorMatrix 将标准CTM转换为浏览器仿射矩阵分量。
+// 入参: matrix 库层仿射矩阵
+// 返回: []any 可直接传递给JavaScript的a、b、c、d、e、f分量，位移单位为毫米
+func editorMatrix(matrix ofdgo.Matrix) []any {
+	x, y := matrix.Transform(0, 0)
+	ax, ay := matrix.Transform(1, 0)
+	bx, by := matrix.Transform(0, 1)
+	return []any{ax - x, ay - y, bx - x, by - y, x, y}
+}
+
+// rotateObjects 旋转同页选区，通用几何与历史记录由库负责。
+// 入参: args 页面索引、对象标识数组和顺时针角度
+// 返回: any 文档信息, error 错误信息
+func rotateObjects(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		return currentEditor.RotateObjects(args[0].Int(), stringsFromJS(args[1]), args[2].Int())
+	})
+}
+
+// flipObjects 镜像同页选区。
+// 入参: args 页面索引、对象标识数组和镜像轴
+// 返回: any 文档信息, error 错误信息
+func flipObjects(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		return currentEditor.FlipObjects(args[0].Int(), stringsFromJS(args[1]), args[2].String())
+	})
+}
+
+// cropImage 设置图片裁剪范围，保留原始图片数据。
+// 入参: args 页面索引、对象标识及页面毫米坐标中的横纵坐标和宽高
+// 返回: any 文档信息, error 错误信息
+func cropImage(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		return currentEditor.CropImage(args[0].Int(), args[1].String(), ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
+	})
+}
+
 // transformObjects 统一移动或缩放选区，生成一次撤销记录。
+// 入参: args 页面索引、对象标识数组、横纵位移和正缩放比例
+// 返回: any 文档信息, error 错误信息
 func transformObjects(args []js.Value) (any, error) {
 	return changeObjects(func() error {
 		return currentEditor.TransformObjects(args[0].Int(), stringsFromJS(args[1]), args[2].Float(), args[3].Float(), args[4].Float())
@@ -1173,6 +1240,8 @@ func transformObjects(args []js.Value) (any, error) {
 }
 
 // alignObjects 对齐选区中的对象。
+// 入参: args 页面索引、对象标识数组和对齐方式
+// 返回: any 文档信息, error 错误信息
 func alignObjects(args []js.Value) (any, error) {
 	return changeObjects(func() error {
 		return currentEditor.AlignObjects(args[0].Int(), stringsFromJS(args[1]), args[2].String())
@@ -1180,6 +1249,8 @@ func alignObjects(args []js.Value) (any, error) {
 }
 
 // deleteObjects 一次删除选区中的对象。
+// 入参: args 页面索引和对象标识数组
+// 返回: any 文档信息, error 错误信息
 func deleteObjects(args []js.Value) (any, error) {
 	return changeObjects(func() error {
 		return currentEditor.DeleteObjects(args[0].Int(), stringsFromJS(args[1]))
@@ -1187,6 +1258,8 @@ func deleteObjects(args []js.Value) (any, error) {
 }
 
 // changeObjects 提交库层批量操作，无修改时复用当前预览。
+// 入参: apply 待执行的编辑操作
+// 返回: any 文档信息, error 错误信息
 func changeObjects(apply func() error) (any, error) {
 	if currentEditor == nil {
 		return nil, fmt.Errorf("no document is being created")

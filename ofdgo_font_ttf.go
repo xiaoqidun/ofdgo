@@ -192,7 +192,9 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 	return true, finalData, mapping, missingCmap, nil
 }
 
-// hasBadPostTable 检查post表是否会被canvas/font拒绝
+// hasBadPostTable 检查post表的版本、长度及字形数量是否存在已知不兼容
+// 入参: data post表数据, numGlyphs 字形总数, isTrueType 是否使用TrueType轮廓
+// 返回: bool 是否需要替换post表
 func hasBadPostTable(data []byte, numGlyphs uint16, isTrueType bool) bool {
 	if len(data) < 32 {
 		return true

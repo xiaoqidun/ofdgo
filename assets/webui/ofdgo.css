@@ -9,6 +9,7 @@
 	--page: #ffffff;
 	--text-muted: #66737f;
 	--accent: #0f7b68;
+	--accent-soft: rgba(15, 123, 104, 0.12);
 	--accent-strong: #095c4e;
 	--focus: #0f7b68;
 	--sidebar-width: clamp(220px, 20vw, 292px);
@@ -112,6 +113,7 @@ a:focus-visible {
 
 .editor-file,
 .editor-paragraph,
+.editor-transform,
 .editor-group:has(#textFont),
 .editor-group:has(#shapeFill) {
 	grid-template-columns: repeat(2, max-content);
@@ -1220,6 +1222,7 @@ button.outline-link:hover {
 	background: #fff;
 	outline: none;
 	resize: none;
+	transform-origin: 0 0;
 	font-kerning: none;
 	font-variant-ligatures: none;
 	letter-spacing: 0;
@@ -1273,7 +1276,8 @@ button.outline-link:hover {
 
 .edit-object:hover,
 .edit-object.selected,
-.edit-selection {
+.edit-selection,
+.edit-crop {
 	outline: calc(1px / var(--surface-scale)) solid var(--accent);
 }
 
@@ -1298,7 +1302,8 @@ button.outline-link:hover {
 }
 
 .selected .edit-handle,
-.edit-selection .edit-handle {
+.edit-selection .edit-handle,
+.edit-crop .edit-handle {
 	display: block;
 }
 
@@ -1306,9 +1311,26 @@ button.outline-link:hover {
 	display: none;
 }
 
-.edit-selection .edit-handle {
+.edit-selection .edit-handle,
+.edit-crop .edit-handle {
 	pointer-events: auto;
 	touch-action: none;
+}
+
+.edit-crop {
+	pointer-events: auto;
+	touch-action: none;
+	cursor: move;
+}
+
+.cropping .edit-object {
+	pointer-events: none;
+	outline: none;
+	background: none;
+}
+
+.cropping .edit-object .edit-handle {
+	display: none;
 }
 
 .edit-handle::before {

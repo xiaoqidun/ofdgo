@@ -437,7 +437,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.flag("Fill", obj.Fill)
 		attrs.alpha(obj.Alpha)
 		fill, stroke = obj.FillColor, (*FillColor)(obj.StrokeColor)
-	case "PathObject":
+	case "PathObject", "Path":
 		obj := object.PathObject
 		attrs.add("ID", obj.ID)
 		attrs.add("Boundary", obj.Boundary)
@@ -467,7 +467,9 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.alpha(obj.Alpha)
 	}
 	x.start(object.Type, attrs)
-	if object.Type == "PathObject" {
+	if object.Type == "ImageObject" {
+		x.clips(object.ImageObject.Clips)
+	} else if object.Type == "PathObject" || object.Type == "Path" {
 		x.color("StrokeColor", stroke)
 		x.color("FillColor", fill)
 		x.text("AbbreviatedData", object.PathObject.AbbreviatedData)
@@ -484,6 +486,31 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		}
 	}
 	x.end(object.Type)
+}
+
+// clips 写出图片路径裁剪，保留裁剪集合、区域及路径的变换
+// 入参: clips 裁剪集合，nil不输出节点
+func (x *ofdXML) clips(clips *Clips) {
+	if clips == nil {
+		return
+	}
+	var attrs ofdAttrs
+	attrs.flag("TransFlag", clips.TransFlag)
+	x.start("Clips", attrs)
+	for _, clip := range clips.Clip {
+		x.start("Clip", nil)
+		for _, area := range clip.Area {
+			var attrs ofdAttrs
+			attrs.add("CTM", area.CTM)
+			x.start("Area", attrs)
+			for _, path := range area.Path {
+				x.object(GraphicObject{Type: "Path", PathObject: path}, false)
+			}
+			x.end("Area")
+		}
+		x.end("Clip")
+	}
+	x.end("Clips")
 }
 
 // textCode 使用XML字符引用转义空格，避免依赖阅读器保留原始空白
