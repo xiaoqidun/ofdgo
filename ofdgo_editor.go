@@ -127,6 +127,46 @@ func (e *Editor) AddPage(width, height float64) (int, error) {
 	return len(e.pages) - 1, nil
 }
 
+// CopyPage 复制页面并追加到文档末尾，分配新标识，复用字体和图片资源
+// 副本可独立修改，位置通过MovePage调整
+// 入参: index 原页面索引
+// 返回: int 副本页面索引, error 错误信息
+func (e *Editor) CopyPage(index int) (int, error) {
+	source, err := e.page(index)
+	if err != nil {
+		return 0, err
+	}
+	page := PageContent{Area: source.Area, Content: Content{Layer: make([]Layer, len(source.Content.Layer))}}
+	for i, layer := range source.Content.Layer {
+		page.Content.Layer[i] = Layer{Type: layer.Type, Objects: make([]GraphicObject, len(layer.Objects))}
+		for j, object := range layer.Objects {
+			page.Content.Layer[i].Objects[j], err = cloneEditorObject(object)
+			if err != nil {
+				return 0, err
+			}
+		}
+	}
+	page.ID = e.nextID()
+	for i := range page.Content.Layer {
+		layer := &page.Content.Layer[i]
+		layer.ID = e.nextID()
+		for j := range layer.Objects {
+			object := &layer.Objects[j]
+			id := e.nextID()
+			switch object.Type {
+			case "TextObject":
+				object.TextObject.ID = id
+			case "PathObject":
+				object.PathObject.ID = id
+			case "ImageObject":
+				object.ImageObject.ID = id
+			}
+		}
+	}
+	e.pages = append(e.pages, page)
+	return len(e.pages) - 1, nil
+}
+
 // DeletePage 删除页面，不回收资源或复用标识，删除后页面索引随之变化
 // 入参: index 页面索引
 // 返回: error 错误信息
@@ -180,7 +220,7 @@ func (e *Editor) nextID() string {
 	return strconv.Itoa(e.maxID)
 }
 
-// AddFont 嵌入OpenType字体，集合字体按索引提取，重复资源复用标识
+// AddFont 注册OpenType字体，集合字体按索引提取，重复资源复用标识，引用后写入文档
 // 入参: file 字体文件, index 集合内字体索引，单字体为0
 // 返回: string 字体资源标识, error 错误信息
 func (e *Editor) AddFont(file FontFile, index int) (string, error) {
@@ -250,7 +290,7 @@ func editorFontName(sfnt *font.SFNT, names ...font.NameID) string {
 	return ""
 }
 
-// AddImage 嵌入PNG或JPEG图片，保留原始编码，重复资源复用标识
+// AddImage 注册PNG或JPEG图片，保留原始编码，重复资源复用标识，引用后写入文档
 // 入参: data 图片数据
 // 返回: string 图片资源标识, error 错误信息
 func (e *Editor) AddImage(data []byte) (string, error) {

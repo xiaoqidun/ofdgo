@@ -27,7 +27,7 @@ import (
 
 const ofdNamespace = "http://www.ofdspec.org/2016"
 
-// WriteTo 逐个条目写出OFD，不关闭调用方输出流，出错时应丢弃本次输出
+// WriteTo 逐个条目写出OFD，仅包含实际引用的资源，不关闭调用方输出流，出错时应丢弃本次输出
 // 入参: writer 输出流
 // 返回: int64 已写入字节数, error 错误信息
 func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
@@ -55,7 +55,7 @@ func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
 }
 
 // Reader 获取当前文档的独立内存快照，不进行ZIP压缩，后续修改不影响已有快照
-// 返回的Reader可用于现有渲染、搜索和导出接口，二进制资源内部共享只读数据
+// 返回的Reader可用于现有渲染、搜索和导出接口，仅包含实际引用的资源，二进制数据内部共享只读
 // 返回: *Reader 阅读器, error 错误信息
 func (e *Editor) Reader() (*Reader, error) {
 	if err := e.validate(); err != nil {
@@ -100,6 +100,7 @@ func (e *Editor) validate() error {
 // 入参: write 条目写入方法
 // 返回: error 错误信息
 func (e *Editor) writeParts(write func(string, []byte, bool) error) error {
+	fonts, images := e.usedResources()
 	writeXML := func(name string, encode func(*ofdXML)) error {
 		data, err := encodeOFDXML(encode)
 		if err != nil {
@@ -145,7 +146,7 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error) error {
 		x.start("PageArea", nil)
 		x.text("PhysicalBox", e.pages[0].Area.PhysicalBox)
 		x.end("PageArea")
-		if len(e.resources) != 0 {
+		if len(fonts)+len(images) != 0 {
 			x.text("DocumentRes", "DocumentRes.xml")
 		}
 		x.end("CommonData")
@@ -162,8 +163,8 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error) error {
 	}); err != nil {
 		return err
 	}
-	if len(e.resources) != 0 {
-		if err := writeXML("Doc_0/DocumentRes.xml", e.writeResources); err != nil {
+	if len(fonts)+len(images) != 0 {
+		if err := writeXML("Doc_0/DocumentRes.xml", func(x *ofdXML) { x.resources(fonts, images) }); err != nil {
 			return err
 		}
 	}
@@ -174,12 +175,44 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error) error {
 			return err
 		}
 	}
-	for _, resource := range e.resources {
-		if err := write(resource.name, resource.data, resource.image != nil); err != nil {
-			return err
+	for _, resources := range [][]editorResource{fonts, images} {
+		for _, resource := range resources {
+			if err := write(resource.name, resource.data, resource.image != nil); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// usedResources 按注册顺序筛选当前页面引用的字体和图片，不修改资源池
+// 返回: []editorResource 字体资源, []editorResource 图片资源
+func (e *Editor) usedResources() (fonts, images []editorResource) {
+	used := make(map[string]bool)
+	for _, page := range e.pages {
+		for _, layer := range page.Content.Layer {
+			for _, object := range layer.Objects {
+				switch object.Type {
+				case "TextObject":
+					used[object.TextObject.Font] = true
+				case "ImageObject":
+					used[object.ImageObject.ResourceID] = true
+					if object.ImageObject.ImageMask != "" {
+						used[object.ImageObject.ImageMask] = true
+					}
+				}
+			}
+		}
+	}
+	for _, resource := range e.resources {
+		if resource.font != nil && used[resource.font.ID] {
+			fonts = append(fonts, resource)
+		}
+		if resource.image != nil && used[resource.image.ID] {
+			images = append(images, resource)
+		}
+	}
+	return fonts, images
 }
 
 // page 写出页面尺寸、图层和对象
@@ -204,16 +237,13 @@ func (x *ofdXML) page(page PageContent) {
 	x.end("Page")
 }
 
-// writeResources 写出文档资源索引
-// 入参: x XML编码器
-func (e *Editor) writeResources(x *ofdXML) {
+// resources 写出文档资源索引
+// 入参: fonts 字体资源, images 图片资源
+func (x *ofdXML) resources(fonts, images []editorResource) {
 	x.root("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "Res"}})
-	if len(e.fonts) != 0 {
+	if len(fonts) != 0 {
 		x.start("Fonts", nil)
-		for _, resource := range e.resources {
-			if resource.font == nil {
-				continue
-			}
+		for _, resource := range fonts {
 			font := resource.font
 			var attrs ofdAttrs
 			attrs.add("ID", font.ID)
@@ -235,12 +265,9 @@ func (e *Editor) writeResources(x *ofdXML) {
 		}
 		x.end("Fonts")
 	}
-	if len(e.images) != 0 {
+	if len(images) != 0 {
 		x.start("MultiMedias", nil)
-		for _, resource := range e.resources {
-			if resource.image == nil {
-				continue
-			}
+		for _, resource := range images {
 			image := resource.image
 			var attrs ofdAttrs
 			attrs.add("ID", image.ID)
