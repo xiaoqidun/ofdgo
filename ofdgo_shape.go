@@ -17,6 +17,8 @@ package ofdgo
 import (
 	"fmt"
 	"math"
+	"strconv"
+	"strings"
 )
 
 // ShapeKind 基本图形类型
@@ -30,6 +32,7 @@ const (
 
 // NewShape 创建使用标准紧缩路径的图形，默认黑色描边、不填充。
 // 可调整返回对象的颜色、线宽等属性后通过 Editor.AddObject 写入。
+// 水平、垂直直线使用正尺寸边界，路径端点不变。
 // 入参: kind 图形类型, box 图形范围；直线从 (X,Y) 到 (X+W,Y+H)，W、H 可为负或零
 // 返回: PathObject 路径对象, error 错误信息
 func NewShape(kind ShapeKind, box Box) (PathObject, error) {
@@ -42,7 +45,6 @@ func NewShape(kind ShapeKind, box Box) (PathObject, error) {
 		if box.W == 0 && box.H == 0 {
 			return PathObject{}, fmt.Errorf("line endpoints must differ")
 		}
-		// 为水平、垂直直线保留有效的正尺寸边界，路径端点不变。
 		x, y := math.Min(0, box.W)-defaultPathLineWidth/2, math.Min(0, box.H)-defaultPathLineWidth/2
 		object.AbbreviatedData = fmt.Sprintf("M %g %g L %g %g", -x, -y, box.W-x, box.H-y)
 		box = Box{X: box.X + x, Y: box.Y + y, W: math.Abs(box.W) + defaultPathLineWidth, H: math.Abs(box.H) + defaultPathLineWidth}
@@ -61,4 +63,106 @@ func NewShape(kind ShapeKind, box Box) (PathObject, error) {
 	}
 	object.Boundary = fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H)
 	return object, nil
+}
+
+// Shape 识别 NewShape 生成的基本路径及其正向轴对齐缩放、平移，返回应用 Boundary 和 CTM 后的几何范围。
+// 直线范围以起点和有符号的端点位移表示；非基本路径或不支持的变换返回空类型。
+// 返回: ShapeKind 图形类型, Box 几何范围（不含描边）
+func (p PathObject) Shape() (ShapeKind, Box) {
+	tokens := strings.Fields(p.AbbreviatedData)
+	var commands string
+	var values []float64
+	for _, token := range tokens {
+		if token == "M" || token == "L" || token == "A" || token == "C" {
+			commands += token
+			continue
+		}
+		value, err := strconv.ParseFloat(token, 64)
+		if err != nil || !finite(value) {
+			return "", Box{}
+		}
+		values = append(values, value)
+	}
+	var kind ShapeKind
+	var box Box
+	switch {
+	case commands == "ML" && len(values) == 4 && len(tokens) == 6 && tokens[0] == "M" && tokens[3] == "L":
+		kind, box = ShapeLine, Box{X: values[0], Y: values[1], W: values[2] - values[0], H: values[3] - values[1]}
+	case commands == "MLLLC" && len(values) == 8:
+		kind, box = ShapeRectangle, Box{W: values[2], H: values[5]}
+	case commands == "MAAC" && len(values) == 16:
+		kind, box = ShapeEllipse, Box{W: values[7], H: values[1] * 2}
+	default:
+		return "", Box{}
+	}
+	if kind != ShapeLine {
+		shape, err := NewShape(kind, box)
+		if err != nil || !sameShapePath(tokens, strings.Fields(shape.AbbreviatedData)) {
+			return "", Box{}
+		}
+	} else if box.W == 0 && box.H == 0 {
+		return "", Box{}
+	}
+	if p.CTM != "" {
+		if _, err := creationNumbers(p.CTM, 6); err != nil {
+			return "", Box{}
+		}
+	}
+	boundary, err := ParseBox(p.Boundary)
+	m := NewMatrix(p.CTM)
+	if err != nil || m.a <= 0 || m.d <= 0 || m.b != 0 || m.c != 0 {
+		return "", Box{}
+	}
+	x, y := m.Transform(box.X, box.Y)
+	box = Box{X: boundary.X + x, Y: boundary.Y + y, W: box.W * m.a, H: box.H * m.d}
+	if !finite(box.X) || !finite(box.Y) || !finite(box.W) || !finite(box.H) || !finite(box.X+box.W) || !finite(box.Y+box.H) {
+		return "", Box{}
+	}
+	return kind, box
+}
+
+// sameShapePath 比较基本路径的命令与数值，忽略数值格式差异。
+// 入参: a、b 路径词元
+// 返回: bool 是否相同
+func sameShapePath(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, token := range a {
+		if token == b[i] {
+			continue
+		}
+		x, errX := strconv.ParseFloat(token, 64)
+		y, errY := strconv.ParseFloat(b[i], 64)
+		if errX != nil || errY != nil || x != y {
+			return false
+		}
+	}
+	return true
+}
+
+// Reshape 调整基本路径在所在坐标系中的几何范围，保留对象标识、变换和绘制属性，不缩放线宽。
+// 返回对象可通过 Editor.UpdateObject 写入；仅支持 Shape 可识别的路径。
+// 入参: box 新几何范围，直线使用起点和有符号的端点位移
+// 返回: PathObject 调整后的对象, error 错误信息
+func (p PathObject) Reshape(box Box) (PathObject, error) {
+	kind, previous := p.Shape()
+	if kind == "" {
+		return PathObject{}, fmt.Errorf("path is not a supported basic shape")
+	}
+	if box == previous {
+		return p, nil
+	}
+	if !finite(box.X) || !finite(box.Y) || !finite(box.X+box.W) || !finite(box.Y+box.H) {
+		return PathObject{}, fmt.Errorf("shape coordinates must be finite")
+	}
+	m := NewMatrix(p.CTM)
+	shape, err := NewShape(kind, Box{W: box.W / m.a, H: box.H / m.d})
+	if err != nil {
+		return PathObject{}, err
+	}
+	boundary, _ := ParseBox(shape.Boundary)
+	p.Boundary = fmt.Sprintf("%g %g %g %g", box.X+boundary.X*m.a-m.e, box.Y+boundary.Y*m.d-m.f, boundary.W*m.a, boundary.H*m.d)
+	p.AbbreviatedData = shape.AbbreviatedData
+	return p, nil
 }

@@ -237,6 +237,7 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onSelect: updateObjectControls,
 	onTransform: (item, change) => changeDocument("ofdgoTransformObject", item,
 		change.x + item.x * (1 - change.scale), change.y + item.y * (1 - change.scale), change.scale),
+	onReshape: (item, box) => changeDocument("ofdgoReshapeObject", item, box.x, box.y, box.width, box.height),
 	onDelete: (item) => changeDocument("ofdgoDeleteObject", item),
 	onEdit: editCanvasObject,
 	drawStyle: shapeStyle,
@@ -902,7 +903,7 @@ async function changeShapeStyle() {
 
 function updateDrawingControls() {
 	const tool = canvasEditor.tool;
-	const line = tool === "line" || !tool && canvasEditor.selected?.line;
+	const line = tool === "line" || !tool && canvasEditor.selected?.shape === "line";
 	if (line) {
 		el.shapeFill.checked = false;
 		el.shapeStroke.checked = true;
@@ -2811,8 +2812,9 @@ function layoutPageShell(shell, page) {
 		surface.style.height = `${height}px`;
 		const x = state.rotation === 90 || state.rotation === 180 ? viewWidth : 0;
 		const y = state.rotation >= 180 ? viewHeight : 0;
-	surface.style.transform = `scale(${scale}) translate(${x}px, ${y}px) rotate(${state.rotation}deg)`;
-	surface.style.setProperty("--surface-scale", String(scale));
+		surface.style.transform = `scale(${scale}) translate(${x}px, ${y}px) rotate(${state.rotation}deg)`;
+		surface.style.setProperty("--surface-scale", String(scale));
+		surface.classList.toggle("sideways", state.rotation % 180 !== 0);
 	}
 }
 

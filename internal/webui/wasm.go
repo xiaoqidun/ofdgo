@@ -27,7 +27,6 @@ import (
 	"io"
 	"math"
 	"strconv"
-	"strings"
 	"syscall/js"
 
 	"github.com/xiaoqidun/ofdgo"
@@ -109,6 +108,7 @@ func RunWASM() {
 	registerCallback("ofdgoEditorFont", editorFont)
 	registerCallback("ofdgoAlignObject", alignObject)
 	registerCallback("ofdgoTransformObject", transformObject)
+	registerCallback("ofdgoReshapeObject", reshapeObject)
 	registerCallback("ofdgoCopyObject", copyObject)
 	registerCallback("ofdgoMoveObject", moveObject)
 	registerCallback("ofdgoDeleteObject", deleteObject)
@@ -625,7 +625,11 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 				item := map[string]any{"id": id, "type": object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "count": len(layer.Objects)}
 				if object.Type == "PathObject" {
 					path := object.PathObject
-					item["line"] = editorLine(path)
+					kind, geometry := path.Shape()
+					if kind != "" {
+						item["shape"] = string(kind)
+						item["geometry"] = map[string]any{"x": geometry.X, "y": geometry.Y, "width": geometry.W, "height": geometry.H}
+					}
 					item["fill"], item["stroke"] = path.Fill != nil && *path.Fill, path.Stroke == nil || *path.Stroke
 					item["fillColor"] = editorColorHex(path.FillColor)
 					item["strokeColor"] = editorColorHex((*ofdgo.FillColor)(path.StrokeColor))
@@ -724,6 +728,35 @@ func transformObject(args []js.Value) (any, error) {
 	page, id := args[0].Int(), args[1].String()
 	revision := currentEditor.Revision()
 	if err := currentEditor.TransformObject(page, id, args[2].Float(), args[3].Float(), args[4].Float()); err != nil {
+		return nil, err
+	}
+	if currentEditor.Revision() == revision {
+		return editorSummary(), nil
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// reshapeObject 调整基本图形的尺寸或直线端点，保留绘制样式
+// 入参: args 页码、对象标识和页面几何范围
+// 返回: any 文档信息, error 错误信息
+func reshapeObject(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	page, id := args[0].Int(), args[1].String()
+	object, err := currentEditor.Object(page, id)
+	if err != nil {
+		return nil, err
+	}
+	if object.Type != "PathObject" {
+		return nil, fmt.Errorf("object is not a path")
+	}
+	object.PathObject, err = object.PathObject.Reshape(ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
+	if err != nil {
+		return nil, err
+	}
+	revision := currentEditor.Revision()
+	if err := currentEditor.UpdateObject(page, id, object); err != nil {
 		return nil, err
 	}
 	if currentEditor.Revision() == revision {
@@ -965,20 +998,12 @@ func editorPathScale(object ofdgo.PathObject) float64 {
 	return math.Sqrt(math.Abs((ax-x)*(by-y) - (ay-y)*(bx-x)))
 }
 
-// editorLine 判断路径是否为单一直线
-// 入参: object 路径对象
-// 返回: bool 是否为单一直线
-func editorLine(object ofdgo.PathObject) bool {
-	tokens := strings.Fields(object.AbbreviatedData)
-	return len(tokens) == 6 && tokens[0] == "M" && tokens[3] == "L"
-}
-
 // setPathStyle 应用图形填充、描边和线宽
 // 入参: object 路径对象, args 填充开关及色值、描边开关及色值、线宽
 // 返回: error 错误信息
 func setPathStyle(object *ofdgo.PathObject, args []js.Value) error {
 	fill, stroke, width := args[0].Bool(), args[2].Bool(), args[4].Float()
-	if editorLine(*object) {
+	if kind, _ := object.Shape(); kind == ofdgo.ShapeLine {
 		fill, stroke = false, true
 	}
 	if !fill && !stroke {

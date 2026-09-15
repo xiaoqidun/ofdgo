@@ -55,6 +55,12 @@
 			</div>
 		</header>
 		<div id="editorTools" class="editor-toolbar" role="toolbar" aria-label="创作工具" hidden>
+			<div class="editor-group editor-file">
+				<button id="saveButton" class="button" type="button" aria-label="保存OFD">保存</button>
+				<button id="undoButton" class="button" type="button" disabled>撤销</button>
+				<button id="redoButton" class="button" type="button" disabled>重做</button>
+				<span>文件</span>
+			</div>
 			<div class="editor-group">
 				<button id="selectObjectButton" class="button" type="button" aria-pressed="true">选择</button>
 				<button id="editObjectButton" class="button" type="button" aria-label="修改对象" disabled>修改</button>
@@ -87,13 +93,10 @@
 			<div class="editor-group">
 				<button id="insertTextButton" class="button" type="button" aria-label="添加文字">文字</button>
 				<button id="insertImageButton" class="button" type="button" aria-label="添加图片">图片</button>
-				<span>插入</span>
-			</div>
-			<div class="editor-group">
 				<button id="drawLineButton" class="button" type="button" aria-label="绘制直线" aria-pressed="false">直线</button>
 				<button id="drawRectangleButton" class="button" type="button" aria-label="绘制矩形" aria-pressed="false">矩形</button>
 				<button id="drawEllipseButton" class="button" type="button" aria-label="绘制椭圆" aria-pressed="false">椭圆</button>
-				<span>绘制</span>
+				<span>插入</span>
 			</div>
 			<div class="editor-group">
 				<div class="shape-paint"><label><input id="shapeFill" type="checkbox">填充</label><input id="shapeFillColor" class="color-input" type="color" value="#dcefeb" aria-label="填充颜色" title="填充颜色"></div>
@@ -109,12 +112,6 @@
 				<button id="movePageNextButton" class="button" type="button" aria-label="页面后移">后移</button>
 				<button id="pageSettingsButton" class="button" type="button" aria-label="页面设置" aria-haspopup="dialog" aria-controls="pagePanel">设置</button>
 				<span>页面</span>
-			</div>
-			<div class="editor-group">
-				<button id="saveButton" class="button" type="button" aria-label="保存OFD">保存</button>
-				<button id="undoButton" class="button" type="button" disabled>撤销</button>
-				<button id="redoButton" class="button" type="button" disabled>重做</button>
-				<span>文件</span>
 			</div>
 		</div>
 		<dialog id="createPanel" class="form-dialog" aria-label="新建文档">

@@ -86,7 +86,6 @@ a:focus-visible {
 
 .editor-toolbar {
 	display: flex;
-	flex-wrap: wrap;
 	max-height: 40dvh;
 	overflow: auto;
 	gap: 12px;
@@ -102,24 +101,34 @@ a:focus-visible {
 
 .editor-group {
 	display: grid;
+	flex: 0 0 auto;
 	grid-template-columns: repeat(3, max-content);
+	grid-template-rows: repeat(2, 28px) 16px;
 	column-gap: 6px;
 	row-gap: 4px;
 	padding-right: 12px;
 	border-right: 1px solid var(--line);
 }
 
-.editor-group:has(#selectObjectButton) {
-	grid-template-columns: repeat(6, max-content);
-}
-
-.editor-group:has(#insertTextButton) {
+.editor-file,
+.editor-group:has(#textFont),
+.editor-group:has(#shapeFill) {
 	grid-template-columns: repeat(2, max-content);
 }
 
+.editor-file #saveButton {
+	grid-row: 1 / 3;
+	height: 100%;
+}
+
+.editor-file #redoButton {
+	grid-column: 2;
+}
+
 #textFont {
+	grid-column: 1 / -1;
 	width: 128px;
-	min-width: 0;
+	min-width: 100%;
 }
 
 .shape-paint,
@@ -135,20 +144,13 @@ a:focus-visible {
 	accent-color: var(--accent);
 }
 
-.editor-group:has(#addPageButton) {
-	grid-template-columns: repeat(6, max-content);
-}
-
 .editor-group:last-child {
 	border-right: 0;
 }
 
-.editor-group > :not(span) {
-	grid-row: 1;
-}
-
 .editor-group > span {
 	grid-column: 1 / -1;
+	grid-row: 3;
 	align-self: end;
 	text-align: center;
 	font-size: 12px;
@@ -612,6 +614,7 @@ body[data-hide-meta] .meta-panel {
 .page-list-panel,
 .viewer-panel,
 .search-results,
+.editor-toolbar,
 .meta-panel {
 	scrollbar-width: thin;
 	scrollbar-color: var(--line-strong) transparent;
@@ -1247,25 +1250,65 @@ button.outline-link:hover {
 .edit-nw {
 	left: 0;
 	top: 0;
-	cursor: nwse-resize;
+	cursor: var(--resize-diagonal, nwse-resize);
 }
 
 .edit-ne {
 	left: 100%;
 	top: 0;
-	cursor: nesw-resize;
+	cursor: var(--resize-antidiagonal, nesw-resize);
 }
 
 .edit-sw {
 	left: 0;
 	top: 100%;
-	cursor: nesw-resize;
+	cursor: var(--resize-antidiagonal, nesw-resize);
 }
 
 .edit-se {
 	left: 100%;
 	top: 100%;
-	cursor: nwse-resize;
+	cursor: var(--resize-diagonal, nwse-resize);
+}
+
+.edit-n,
+.edit-s {
+	left: 50%;
+	cursor: var(--resize-vertical, ns-resize);
+}
+
+.edit-n {
+	top: 0;
+}
+
+.edit-s {
+	top: 100%;
+}
+
+.edit-w,
+.edit-e {
+	top: 50%;
+	cursor: var(--resize-horizontal, ew-resize);
+}
+
+.edit-w {
+	left: 0;
+}
+
+.edit-e {
+	left: 100%;
+}
+
+.edit-start,
+.edit-end {
+	cursor: crosshair;
+}
+
+.page-surface.sideways {
+	--resize-diagonal: nesw-resize;
+	--resize-antidiagonal: nwse-resize;
+	--resize-vertical: ew-resize;
+	--resize-horizontal: ns-resize;
 }
 
 .text-layer {
@@ -1906,17 +1949,5 @@ button.outline-link:hover {
 
 	.dpi-select {
 		width: 48px;
-	}
-}
-
-@media (max-width: 360px) {
-	.editor-group:has(#selectObjectButton),
-	.editor-group:has(#addPageButton) {
-		grid-template-columns: repeat(3, max-content);
-	}
-
-	.editor-group:has(#addPageButton) > button,
-	.editor-group:has(#selectObjectButton) > :not(span) {
-		grid-row: auto;
 	}
 }
