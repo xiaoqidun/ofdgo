@@ -44,7 +44,7 @@ export class CanvasEditor {
 		viewer.addEventListener("keydown", (event) => this.keyDown(event));
 		viewer.addEventListener("dblclick", () => {
 			const item = this.selected;
-			if (this.enabled && item && !item.image && !this.options.busy()) {
+			if (this.enabled && item && !this.input && !this.options.busy()) {
 				this.options.onEdit(item);
 			}
 		});
@@ -107,12 +107,16 @@ export class CanvasEditor {
 	}
 
 	clear() {
+		this.closeText();
 		this.cancel();
 		this.selectLast = false;
 		this.select(null);
 	}
 
 	start(event) {
+		if (this.input) {
+			return;
+		}
 		if (!this.enabled || this.options.busy() || event.button !== 0 || this.drag) {
 			return;
 		}
@@ -173,11 +177,11 @@ export class CanvasEditor {
 	}
 
 	keyDown(event) {
-		if (!this.enabled || !this.selected || this.options.busy() || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) {
+		if (this.input || !this.enabled || !this.selected || this.options.busy() || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) {
 			return;
 		}
 		const directions = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
-		const edit = (event.key === "Enter" || event.key === "F2") && !this.selected.image;
+		const edit = event.key === "Enter" || event.key === "F2";
 		if (event.key !== "Escape" && event.key !== "Delete" && !edit && !directions[event.key]) {
 			return;
 		}
@@ -198,6 +202,86 @@ export class CanvasEditor {
 			if (change.x || change.y) {
 				this.options.onTransform(this.selected, change);
 			}
+		}
+	}
+
+	editText(item, face) {
+		this.cancel();
+		this.closeText();
+		this.select(item);
+		document.fonts.add(face);
+		const input = document.createElement("textarea");
+		input.className = "edit-text";
+		input.setAttribute("aria-label", "编辑文字");
+		input.wrap = "off";
+		input.spellcheck = false;
+		input.value = item.text;
+		Object.assign(input.style, {
+			left: `${item.x * PX_PER_MM}px`, top: `${item.y * PX_PER_MM}px`,
+			width: `${Math.max(item.width, Math.min(50, item.page.width - item.x)) * PX_PER_MM + 4}px`,
+			minHeight: `${item.height * PX_PER_MM + 4}px`,
+			fontFamily: `"${face.family}"`, fontSize: `${item.size * PX_PER_MM}px`,
+			lineHeight: item.lineHeight ? `${item.lineHeight * PX_PER_MM}px` : "normal", color: item.color,
+		});
+		this.input = { input, item, face };
+		item.surface.append(input);
+		const resize = () => {
+			input.style.height = "0px";
+			input.style.height = `${input.scrollHeight + 2}px`;
+		};
+		input.addEventListener("input", () => {
+			resize();
+			this.options.onTextChange();
+		});
+		input.addEventListener("blur", () => this.commitText());
+		input.addEventListener("keydown", (event) => {
+			event.stopPropagation();
+			if (event.isComposing || input.readOnly) {
+				return;
+			}
+			if (event.key === "Escape") {
+				event.preventDefault();
+				this.closeText();
+				this.viewer.focus({ preventScroll: true });
+			} else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+				event.preventDefault();
+				this.commitText();
+			}
+		});
+		resize();
+		input.focus({ preventScroll: true });
+		input.select();
+	}
+
+	async commitText() {
+		const editing = this.input;
+		if (!editing || editing.input.readOnly) {
+			return;
+		}
+		if (editing.input.value === editing.item.text) {
+			this.closeText();
+			return;
+		}
+		editing.input.readOnly = true;
+		const saved = await this.options.onCommitText(editing.item, editing.input.value);
+		if (this.input !== editing) {
+			return;
+		}
+		if (saved) {
+			this.closeText();
+		} else {
+			editing.input.readOnly = false;
+			editing.input.focus({ preventScroll: true });
+		}
+	}
+
+	closeText() {
+		const editing = this.input;
+		this.input = null;
+		if (editing) {
+			editing.input.remove();
+			document.fonts.delete(editing.face);
+			this.options.onTextChange();
 		}
 	}
 }

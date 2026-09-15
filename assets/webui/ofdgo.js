@@ -36,7 +36,7 @@ const state = {
 	dirty: false,
 	editorInfo: null,
 	savedRevision: null,
-	textObject: null,
+	insertObject: null,
 	insertFonts: [],
 	textFonts: [],
 	ofdBytes: null,
@@ -87,9 +87,10 @@ const el = {
 	editorTools: document.querySelector("#editorTools"),
 	selectObjectButton: document.querySelector("#selectObjectButton"),
 	deleteObjectButton: document.querySelector("#deleteObjectButton"),
-	editTextButton: document.querySelector("#editTextButton"),
+	editObjectButton: document.querySelector("#editObjectButton"),
 	copyObjectButton: document.querySelector("#copyObjectButton"),
 	objectOrder: document.querySelector("#objectOrder"),
+	objectAlign: document.querySelector("#objectAlign"),
 	textFont: document.querySelector("#textFont"),
 	textSize: document.querySelector("#textSize"),
 	textColor: document.querySelector("#textColor"),
@@ -229,7 +230,16 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onTransform: (item, change) => changeDocument("ofdgoTransformObject", item,
 		change.x + item.x * (1 - change.scale), change.y + item.y * (1 - change.scale), change.scale),
 	onDelete: (item) => changeDocument("ofdgoDeleteObject", item),
-	onEdit: (item) => openInsertPanel(true, item),
+	onEdit: editCanvasObject,
+	onCommitText: (item, value) => changeDocument("ofdgoUpdateText", item, value, null, item.size, null),
+	onTextChange: () => {
+		const editing = canvasEditor.input;
+		setDirty(state.editing && (state.editorInfo?.revision !== state.savedRevision
+			|| Boolean(editing && editing.input.value !== editing.item.text)));
+		if (!editing) {
+			syncSelection();
+		}
+	},
 });
 
 el.selectObjectButton.addEventListener("click", () => {
@@ -247,9 +257,9 @@ el.deleteObjectButton.addEventListener("click", () => {
 		changeDocument("ofdgoDeleteObject", canvasEditor.selected);
 	}
 });
-el.editTextButton.addEventListener("click", () => {
-	if (canvasEditor.selected && !canvasEditor.selected.image) {
-		openInsertPanel(true, canvasEditor.selected);
+el.editObjectButton.addEventListener("click", () => {
+	if (canvasEditor.selected) {
+		openInsertPanel(!canvasEditor.selected.image, canvasEditor.selected);
 	}
 });
 el.textSize.addEventListener("change", () => changeTextStyle(false));
@@ -291,6 +301,13 @@ el.objectOrder.addEventListener("change", () => {
 	const targets = { up: item.order + 1, down: item.order - 1, top: item.count - 1, bottom: 0 };
 	return changeDocument("ofdgoMoveObject", item, targets[action]);
 });
+el.objectAlign.addEventListener("change", () => {
+	const alignment = el.objectAlign.value;
+	el.objectAlign.value = "";
+	if (canvasEditor.selected && alignment) {
+		return changeDocument("ofdgoAlignObject", canvasEditor.selected, alignment);
+	}
+});
 el.undoButton.addEventListener("click", () => changeDocument("ofdgoUndo"));
 el.redoButton.addEventListener("click", () => changeDocument("ofdgoRedo"));
 el.addPageButton.addEventListener("click", () => {
@@ -325,7 +342,7 @@ el.createForm.addEventListener("submit", createDocument);
 el.insertTextButton.addEventListener("click", () => openInsertPanel(true));
 el.insertImageButton.addEventListener("click", () => openInsertPanel(false));
 el.insertCancel.addEventListener("click", () => el.insertPanel.close());
-el.insertPanel.addEventListener("close", () => { state.textObject = null; });
+el.insertPanel.addEventListener("close", () => { state.insertObject = null; });
 el.insertForm.addEventListener("submit", insertObject);
 el.insertFontAdd.addEventListener("click", () => openFontFile(el.fontInput));
 el.saveButton.addEventListener("click", () => exportFile(true, null, "ofd"));
@@ -633,6 +650,33 @@ async function createDocument(event) {
 	}
 }
 
+async function editCanvasObject(item) {
+	if (item.image) {
+		return openInsertPanel(false, item);
+	}
+	if (!state.editing || document.body.hasAttribute("aria-busy") || canvasEditor.input) {
+		return;
+	}
+	const openSeq = state.openSeq;
+	setBusy(true);
+	try {
+		const data = await callWASM("ofdgoEditorFont", item.font);
+		const face = new FontFace(`ofdgo-edit-${item.font}`, data.bytes);
+		await face.load();
+		if (openSeq === state.openSeq && item.node.isConnected) {
+			canvasEditor.editText(item, face);
+		}
+	} catch (err) {
+		if (openSeq === state.openSeq) {
+			showError(err, false);
+		}
+	} finally {
+		if (openSeq === state.openSeq) {
+			setBusy(false);
+		}
+	}
+}
+
 async function openInsertPanel(text, item = null) {
 	if (!state.editing || document.body.hasAttribute("aria-busy")) {
 		return;
@@ -645,13 +689,13 @@ async function openInsertPanel(text, item = null) {
 		return;
 	}
 	el.insertForm.reset();
-	state.textObject = item;
-	if (item) {
+	state.insertObject = item;
+	if (item && text) {
 		state.insertFonts = [];
 		el.insertText.value = item.text;
 	}
-	el.insertPanel.setAttribute("aria-label", item ? "修改文字" : text ? "添加文字" : "添加图片");
-	el.insertSubmit.textContent = item ? "修改" : "添加";
+	el.insertPanel.setAttribute("aria-label", item ? text ? "修改文字" : "替换图片" : text ? "添加文字" : "添加图片");
+	el.insertSubmit.textContent = item ? text ? "修改" : "替换" : "添加";
 	for (const [row, input] of [[el.insertTextRow, el.insertText], [el.insertFontRow, el.insertFont]]) {
 		row.hidden = !text;
 		input.disabled = !text;
@@ -665,7 +709,7 @@ async function openInsertPanel(text, item = null) {
 
 function updateInsertFonts() {
 	const selected = state.insertFonts[Number(el.insertFont.value)];
-	state.insertFonts = editorFonts(state.textObject);
+	state.insertFonts = editorFonts(state.insertObject?.image ? null : state.insertObject);
 	setFontOptions(el.insertFont, state.insertFonts, selected);
 	el.insertSubmit.disabled = !el.insertTextRow.hidden && !state.insertFonts.length;
 	el.insertStatus.textContent = el.insertSubmit.disabled ? "尚未添加字体" : "";
@@ -707,7 +751,7 @@ async function insertObject(event) {
 	}
 	let openSeq = state.openSeq;
 	const text = !el.insertTextRow.hidden;
-	const item = state.textObject;
+	const item = state.insertObject;
 	const index = item?.index ?? state.pageIndex;
 	const page = state.doc.pages[index];
 	const x = Math.min(20, page.width / 10);
@@ -729,7 +773,8 @@ async function insertObject(event) {
 		}
 		const value = item && data === null && el.insertText.value === item.text ? null : el.insertText.value;
 		const doc = item
-			? await callWASM("ofdgoUpdateText", item.index, item.id, value, data, item.size, null)
+			? text ? await callWASM("ofdgoUpdateText", item.index, item.id, value, data, item.size, null)
+			: await callWASM("ofdgoReplaceImage", item.index, item.id, data)
 			: text ? await callWASM("ofdgoInsertText", index, el.insertText.value, data, x, y, 12 * 25.4 / 72, "#000000")
 			: await callWASM("ofdgoInsertImage", index, data, x, y, page.width - x * 2);
 		if (openSeq !== state.openSeq) {
@@ -822,15 +867,8 @@ async function changeDocument(name, item, ...args) {
 			const page = doc.pages[pageIndex];
 			const keepScroll = doc.pageIndex === undefined && page.id === previous.id && pageIndex === state.pageIndex
 				&& page.width === previous.width && page.height === previous.height;
-			await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex, fitMode: state.fitMode, scale: state.scale });
-			if (openSeq === state.openSeq) {
-				if (keepScroll) {
-					el.viewerPanel.scrollLeft = scrollLeft;
-					el.viewerPanel.scrollTop = scrollTop;
-				} else {
-					scrollToPage(pageIndex);
-				}
-			}
+			await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex, fitMode: state.fitMode, scale: state.scale,
+				keepPreview: true, previewScroll: keepScroll ? { scrollLeft, scrollTop } : null });
 		}
 		if (openSeq === state.openSeq) {
 			el.viewerPanel.focus({ preventScroll: true });
@@ -877,19 +915,7 @@ async function refreshEditorPage(doc, index, openSeq) {
 		throw err;
 	} finally {
 		if (openSeq === state.openSeq) {
-			const pages = [...state.pageCache.values()];
-			for (const [name, image] of state.svgImages) {
-				if (!pages.some((page) => page.imageNames.includes(name))) {
-					URL.revokeObjectURL(image.url);
-					state.svgImages.delete(name);
-				}
-			}
-			for (const [name, font] of state.svgFonts) {
-				if (!pages.some((page) => page.fonts.some((item) => item.name === name))) {
-					document.fonts.delete(font);
-					state.svgFonts.delete(name);
-				}
-			}
+			releasePageResources();
 			renderMeta();
 			updateControls();
 			loadDocumentDetails(openSeq);
@@ -898,6 +924,22 @@ async function refreshEditorPage(doc, index, openSeq) {
 				const button = el.pageList.querySelector(`[data-page-index="${page.index}"]`);
 				observeThumbnail(button, page.index, openSeq);
 			}
+		}
+	}
+}
+
+function releasePageResources() {
+	const pages = [...state.pageCache.values()];
+	for (const [name, image] of state.svgImages) {
+		if (!pages.some((page) => page.imageNames.includes(name))) {
+			URL.revokeObjectURL(image.url);
+			state.svgImages.delete(name);
+		}
+	}
+	for (const [name, font] of state.svgFonts) {
+		if (!pages.some((page) => page.fonts.some((item) => item.name === name))) {
+			document.fonts.delete(font);
+			state.svgFonts.delete(name);
 		}
 	}
 }
@@ -1703,6 +1745,7 @@ async function openDocument(options = {}) {
 		return;
 	}
 	const openSeq = options.openSeq || (state.openSeq += 1);
+	const previewIDs = options.keepPreview ? [...state.visiblePages].map((index) => state.doc.pages[index].id) : [];
 	if (!state.ready || state.wasmExited) {
 		await ensureWASM();
 	}
@@ -1716,10 +1759,12 @@ async function openDocument(options = {}) {
 		updateFontSummary();
 		renderFontList();
 	}
-	setBusy(true, "正在打开文档", 20, STATUS.opening);
+	options.keepPreview ? setBusy(true) : setBusy(true, "正在打开文档", 20, STATUS.opening);
 	try {
-		setProgress("正在解析文档", 52);
-		await nextFrame();
+		if (!options.keepPreview) {
+			setProgress("正在解析文档", 52);
+			await nextFrame();
+		}
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -1762,13 +1807,30 @@ async function openDocument(options = {}) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		resetPageFlow();
+		if (options.keepPreview) {
+			resetPageLoading();
+			state.pageCache.clear();
+			const indices = new Set([pageIndex, ...doc.pages.filter((page) => previewIDs.includes(page.id)).map((page) => page.index)]);
+			for (const index of indices) {
+				await loadPageData(index, { openSeq, priority: 0, refresh: true });
+				if (openSeq !== state.openSeq) {
+					return;
+				}
+			}
+		}
+		resetPageFlow(options.keepPreview);
 		renderPageList();
 		if (options.resetScroll || el.outlineList.childElementCount === 0) {
 			renderOutlines();
 		}
 		renderMeta();
 		renderPageFlow();
+		if (options.keepPreview) {
+			for (const [index, page] of state.pageCache) {
+				mountPageSVG(index, page, openSeq);
+			}
+			releasePageResources();
+		}
 		if (options.resetScroll) {
 			el.viewerPanel.scrollLeft = 0;
 			el.viewerPanel.scrollTop = 0;
@@ -1778,8 +1840,20 @@ async function openDocument(options = {}) {
 			el.metaPanel.scrollTop = 0;
 		}
 		applyFit(false);
+		if (options.keepPreview) {
+			if (options.previewScroll) {
+				Object.assign(el.viewerPanel, options.previewScroll);
+			} else {
+				scrollToPage(pageIndex);
+			}
+			setStatus(pageStatus(pageIndex, pageCount));
+		}
 		await nextFrame();
-		const page = await renderPage(pageIndex, { keepBusy: true, scroll: false, openSeq });
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		const page = options.keepPreview ? state.pageCache.get(pageIndex)
+			: await renderPage(pageIndex, { keepBusy: true, scroll: false, openSeq });
 		if (page && options.resetScroll) {
 			el.viewerPanel.focus({ preventScroll: true });
 		}
@@ -2051,16 +2125,11 @@ function renderPageFlow() {
 	el.pageFrame.hidden = false;
 }
 
-function resetPageFlow() {
-	for (const font of state.svgFonts.values()) {
-		document.fonts.delete(font);
+function resetPageFlow(keepCache = false) {
+	if (!keepCache) {
+		state.pageCache.clear();
+		releasePageResources();
 	}
-	state.svgFonts.clear();
-	for (const image of state.svgImages.values()) {
-		URL.revokeObjectURL(image.url);
-	}
-	state.svgImages.clear();
-	state.pageCache.clear();
 	state.selectedPages.clear();
 	state.documentSelection = null;
 	state.visiblePages.clear();
@@ -2124,8 +2193,9 @@ function flowPageObserver() {
 function unmountPage(index) {
 	const shell = pageShell(index);
 	const selection = document.getSelection();
-	const range = selection.rangeCount ? selection.getRangeAt(0) : null;
-	if (range && (!state.documentSelection || !isDocumentSelection(range)) && range.intersectsNode(shell)) {
+	const range = !selection.isCollapsed && selection.rangeCount ? selection.getRangeAt(0) : null;
+	if (canvasEditor.input?.item.index === index
+		|| range && (!state.documentSelection || !isDocumentSelection(range)) && range.intersectsNode(shell)) {
 		state.selectedPages.add(index);
 		return;
 	}
@@ -2365,7 +2435,12 @@ function createTextLayer(text) {
 		const line = document.createElement("span");
 		line.className = "text-run";
 		const chars = Array.from(run.text);
+		let end = 0;
 		for (const item of run.spans || []) {
+			const breaks = chars.slice(end, item.start).filter((char) => char === "\n").join("");
+			if (breaks) {
+				line.append(document.createTextNode(breaks));
+			}
 			const span = document.createElement("span");
 			span.textContent = chars.slice(item.start, item.end).join("");
 			let width = widths.get(span.textContent);
@@ -2376,6 +2451,11 @@ function createTextLayer(text) {
 			const [a, b, c, d, e, f] = item.matrix.map((value) => value * MM_TO_PX);
 			span.style.transform = `matrix(${a / width}, ${b / width}, ${c / 100}, ${d / 100}, ${e}, ${f})`;
 			line.append(span);
+			end = item.end;
+		}
+		const breaks = chars.slice(end).filter((char) => char === "\n").join("");
+		if (breaks) {
+			line.append(document.createTextNode(breaks));
 		}
 		layer.append(line);
 	}
@@ -3866,9 +3946,8 @@ function updateEditorTools() {
 
 function updateObjectControls(item, reset = false) {
 	const disabled = !item || !state.ready || state.exporting;
-	el.deleteObjectButton.disabled = el.copyObjectButton.disabled = disabled;
-	el.editTextButton.disabled = !item || item.image || !state.ready || state.exporting;
-	el.textFont.disabled = el.textSize.disabled = el.textColor.disabled = el.editTextButton.disabled;
+	el.deleteObjectButton.disabled = el.copyObjectButton.disabled = el.editObjectButton.disabled = el.objectAlign.disabled = disabled;
+	el.textFont.disabled = el.textSize.disabled = el.textColor.disabled = disabled || item.image;
 	updateTextFonts(item);
 	if (reset || el.textSize.disabled || document.activeElement !== el.textSize) {
 		el.textSize.value = item && !item.image ? textPoints(item.size) : "";

@@ -198,7 +198,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	}
 	codePos := 0
 	textPos := 0
-	for _, tc := range obj.TextCode {
+	for index, tc := range obj.TextCode {
+		if textRun != nil && obj.textCodeLineBreak(index) {
+			textPos++
+		}
 		var runes []rune
 		var glyphs []textGlyph
 		if tc.Index != "" {

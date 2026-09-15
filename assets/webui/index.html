@@ -57,7 +57,7 @@
 		<div id="editorTools" class="editor-toolbar" role="toolbar" aria-label="创作工具" hidden>
 			<div class="editor-group">
 				<button id="selectObjectButton" class="button" type="button" aria-pressed="true">选择</button>
-				<button id="editTextButton" class="button" type="button" aria-label="修改文字" disabled>修改</button>
+				<button id="editObjectButton" class="button" type="button" aria-label="修改对象" disabled>修改</button>
 				<button id="copyObjectButton" class="button" type="button" aria-label="复制对象" disabled>复制</button>
 				<button id="deleteObjectButton" class="button" type="button" disabled>删除</button>
 				<select id="objectOrder" class="order-select" aria-label="对象层级" disabled>
@@ -66,6 +66,15 @@
 					<option value="down">下移</option>
 					<option value="top">置顶</option>
 					<option value="bottom">置底</option>
+				</select>
+				<select id="objectAlign" class="order-select" aria-label="页面对齐" disabled>
+					<option value="" hidden>对齐</option>
+					<option value="left">左侧</option>
+					<option value="center">水平居中</option>
+					<option value="right">右侧</option>
+					<option value="top">顶部</option>
+					<option value="middle">垂直居中</option>
+					<option value="bottom">底部</option>
 				</select>
 				<span>对象</span>
 			</div>
@@ -149,7 +158,7 @@
 			<form id="insertForm">
 				<div id="insertTextRow" class="form-row">
 					<label for="insertText">内容</label>
-					<input id="insertText" type="text" required autofocus>
+					<textarea id="insertText" rows="3" required autofocus></textarea>
 				</div>
 				<div id="insertFontRow" class="form-row">
 					<label for="insertFont">字体</label>

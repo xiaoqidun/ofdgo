@@ -26,6 +26,7 @@ import (
 	"image"
 	"io"
 	"math"
+	"strconv"
 	"syscall/js"
 
 	"github.com/xiaoqidun/ofdgo"
@@ -101,6 +102,9 @@ func RunWASM() {
 	registerCallback("ofdgoInsertText", insertText)
 	registerCallback("ofdgoUpdateText", updateText)
 	registerCallback("ofdgoInsertImage", insertImage)
+	registerCallback("ofdgoReplaceImage", replaceImage)
+	registerCallback("ofdgoEditorFont", editorFont)
+	registerCallback("ofdgoAlignObject", alignObject)
 	registerCallback("ofdgoTransformObject", transformObject)
 	registerCallback("ofdgoCopyObject", copyObject)
 	registerCallback("ofdgoMoveObject", moveObject)
@@ -612,6 +616,11 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 				item := map[string]any{"id": id, "image": object.Type == "ImageObject", "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "count": len(layer.Objects)}
 				if object.Type == "TextObject" {
 					item["text"], item["font"], item["fontName"], item["size"] = textValues[id], object.TextObject.Font, fontNames[object.TextObject.Font], object.TextObject.Size
+					if codes := object.TextObject.TextCode; len(codes) > 1 {
+						first, _ := strconv.ParseFloat(codes[0].Y, 64)
+						second, _ := strconv.ParseFloat(codes[1].Y, 64)
+						item["lineHeight"] = second - first
+					}
 					var r, g, b float64
 					if fill := object.TextObject.FillColor; fill != nil {
 						if _, err := fmt.Sscan(fill.Value, &r, &g, &b); err != nil {
@@ -625,6 +634,67 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 		}
 	}
 	return objects, nil
+}
+
+// editorFont 读取创作对象的完整内嵌字体，供画布输入使用
+// 入参: args 字体资源标识
+// 返回: any 字体数据, error 错误信息
+func editorFont(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	fonts, err := currentSession.Reader.Fonts()
+	if err != nil {
+		return nil, err
+	}
+	for _, font := range fonts {
+		if font.ID == args[0].String() {
+			data, err := currentSession.Reader.ResData(font.FontFile)
+			if err != nil {
+				return nil, err
+			}
+			return successResult(map[string]any{"bytes": bytesToJS(data)}), nil
+		}
+	}
+	return nil, fmt.Errorf("font resource %q not found", args[0].String())
+}
+
+// replaceImage 替换图片资源并更新预览
+// 入参: args 页码、对象标识和图片数据
+// 返回: any 文档信息, error 错误信息
+func replaceImage(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	data, err := bytesFromJS(args[2])
+	if err != nil {
+		return nil, err
+	}
+	revision := currentEditor.Revision()
+	if err := currentEditor.ReplaceImage(args[0].Int(), args[1].String(), data); err != nil {
+		return nil, err
+	}
+	if currentEditor.Revision() == revision {
+		return editorSummary(), nil
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// alignObject 将对象对齐页面并更新预览
+// 入参: args 页码、对象标识和对齐方式
+// 返回: any 文档信息, error 错误信息
+func alignObject(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	revision := currentEditor.Revision()
+	if err := currentEditor.AlignObject(args[0].Int(), args[1].String(), args[2].String()); err != nil {
+		return nil, err
+	}
+	if currentEditor.Revision() == revision {
+		return editorSummary(), nil
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
 
 // transformObject 等比缩放后平移对象
@@ -810,7 +880,7 @@ func updateText(args []js.Value) (any, error) {
 			}
 		}
 		object.TextObject.Size = args[4].Float()
-		if err := currentEditor.LayoutText(&object.TextObject, args[2].String()); err != nil {
+		if err := currentEditor.LayoutText(&object.TextObject, args[2].String(), 0); err != nil {
 			return nil, err
 		}
 	}
@@ -877,7 +947,7 @@ func insertText(args []js.Value) (any, error) {
 		Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
 		Font:     fontID, Size: args[5].Float(),
 	}}
-	if err := currentEditor.LayoutText(&object.TextObject, args[1].String()); err != nil {
+	if err := currentEditor.LayoutText(&object.TextObject, args[1].String(), 0); err != nil {
 		return nil, err
 	}
 	if err := setTextColor(&object.TextObject, args[6].String()); err != nil {

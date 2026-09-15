@@ -25,6 +25,38 @@ import (
 	"github.com/tdewolff/font"
 )
 
+// Text 获取文字原文，同一行起点处的基线变化以换行分隔，字形索引以占位字符表示
+// 返回: string 原文
+func (obj TextObject) Text() string {
+	var text strings.Builder
+	for i, code := range obj.TextCode {
+		if obj.textCodeLineBreak(i) {
+			text.WriteByte('\n')
+		}
+		if code.Index == "" {
+			text.WriteString(string(textCodeRunes(code.Value)))
+		} else {
+			text.WriteRune('\uFFFC')
+		}
+	}
+	return text.String()
+}
+
+// textCodeLineBreak 判断横向文本是否回到行首并更换基线
+// 入参: index 文本编码索引
+// 返回: bool 是否换行
+func (obj TextObject) textCodeLineBreak(index int) bool {
+	if index == 0 || obj.ReadDirection != 0 || obj.CharDirection != 0 {
+		return false
+	}
+	code, previous := obj.TextCode[index], obj.TextCode[index-1]
+	x, ex := strconv.ParseFloat(code.X, 64)
+	start, es := strconv.ParseFloat(obj.TextCode[0].X, 64)
+	y, ey := strconv.ParseFloat(code.Y, 64)
+	prev, ep := strconv.ParseFloat(previous.Y, 64)
+	return ex == nil && es == nil && ey == nil && ep == nil && x == start && y != prev
+}
+
 // textGlyph 绘制字形
 type textGlyph struct {
 	Text    string

@@ -42,6 +42,7 @@ body {
 
 button,
 input,
+textarea,
 select {
 	font: inherit;
 }
@@ -56,6 +57,7 @@ button {
 
 button:disabled,
 input:disabled,
+textarea:disabled,
 select:disabled {
 	cursor: not-allowed;
 	opacity: 0.48;
@@ -63,6 +65,7 @@ select:disabled {
 
 button:focus-visible,
 input:focus-visible,
+textarea:focus-visible,
 select:focus-visible,
 a:focus-visible {
 	outline: 2px solid var(--focus);
@@ -105,7 +108,7 @@ a:focus-visible {
 }
 
 .editor-group:has(#selectObjectButton) {
-	grid-template-columns: repeat(5, max-content);
+	grid-template-columns: repeat(6, max-content);
 }
 
 .editor-group:has(#insertTextButton) {
@@ -430,6 +433,7 @@ button:not(:disabled):hover {
 .form-row input[type="number"],
 .form-row input[type="file"],
 .form-row select,
+.form-row textarea,
 .text-size input {
 	width: 100%;
 	min-width: 0;
@@ -439,6 +443,14 @@ button:not(:disabled):hover {
 	border-radius: 0;
 	background: #ffffff;
 	color: #1f2428;
+}
+
+.form-row textarea {
+	height: auto;
+	min-height: var(--control-height);
+	padding: 6px;
+	line-height: 1.5;
+	resize: vertical;
 }
 
 .form-unit.text-size {
@@ -1118,6 +1130,28 @@ button.outline-link:hover {
 	position: absolute;
 	inset: 0;
 	pointer-events: none;
+}
+
+.edit-text {
+	position: absolute;
+	overflow: hidden;
+	z-index: 1;
+	margin: -2px;
+	padding: 1px;
+	border: 1px solid var(--accent);
+	border-radius: 0;
+	background: #fff;
+	outline: none;
+	resize: none;
+	font-kerning: none;
+	font-variant-ligatures: none;
+	letter-spacing: 0;
+	cursor: text;
+	touch-action: auto;
+}
+
+.edit-text:focus-visible {
+	outline: none;
 }
 
 .editing-select .edit-layer {
@@ -1831,11 +1865,13 @@ button.outline-link:hover {
 }
 
 @media (max-width: 360px) {
+	.editor-group:has(#selectObjectButton),
 	.editor-group:has(#addPageButton) {
 		grid-template-columns: repeat(3, max-content);
 	}
 
-	.editor-group:has(#addPageButton) > button {
+	.editor-group:has(#addPageButton) > button,
+	.editor-group:has(#selectObjectButton) > :not(span) {
 		grid-row: auto;
 	}
 }

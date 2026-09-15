@@ -204,15 +204,8 @@ func foldText(text string) string {
 // 入参: obj 文本对象
 // 返回: *TextRun 文本及待填充的字符区域
 func (p *PageText) addRun(obj TextObject) *TextRun {
-	var text strings.Builder
-	for _, code := range obj.TextCode {
-		if code.Index == "" {
-			text.WriteString(string(textCodeRunes(code.Value)))
-		} else {
-			text.WriteRune('\uFFFC')
-		}
-	}
-	p.Runs = append(p.Runs, TextRun{ID: obj.ID, Text: text.String(), Boxes: make([]Box, utf8.RuneCountInString(text.String()))})
+	text := obj.Text()
+	p.Runs = append(p.Runs, TextRun{ID: obj.ID, Text: text, Boxes: make([]Box, utf8.RuneCountInString(text))})
 	return &p.Runs[len(p.Runs)-1]
 }
 
