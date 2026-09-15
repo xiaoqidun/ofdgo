@@ -46,6 +46,7 @@ type Reader struct {
 	Annots                    map[string][]Annotation
 	fileIndex                 map[string]*zip.File
 	fileIndexFold             map[string]*zip.File
+	files                     map[string][]byte
 }
 
 // Close 关闭阅读器
@@ -62,12 +63,14 @@ func (r *Reader) Close() error {
 func (r *Reader) initRoot() error {
 	r.fileIndex = make(map[string]*zip.File)
 	r.fileIndexFold = make(map[string]*zip.File)
-	for _, f := range r.Zip.File {
-		name := cleanPackagePath(f.Name)
-		r.fileIndex[name] = f
-		fold := strings.ToLower(name)
-		if _, ok := r.fileIndexFold[fold]; !ok {
-			r.fileIndexFold[fold] = f
+	if r.Zip != nil {
+		for _, f := range r.Zip.File {
+			name := cleanPackagePath(f.Name)
+			r.fileIndex[name] = f
+			fold := strings.ToLower(name)
+			if _, ok := r.fileIndexFold[fold]; !ok {
+				r.fileIndexFold[fold] = f
+			}
 		}
 	}
 	data, err := r.readFile("OFD.xml")
@@ -90,22 +93,28 @@ func (r *Reader) initRoot() error {
 	return nil
 }
 
-// readFile 读取压缩包内的文件
+// readFile 读取文档内的文件
 // 入参: name 文件名
 // 返回: []byte 文件内容, error 错误信息
 func (r *Reader) readFile(name string) ([]byte, error) {
 	name = cleanPackagePath(name)
+	if data, ok := r.files[name]; ok {
+		return bytes.Clone(data), nil
+	}
 	if f, ok := r.packageFile(name); ok {
 		return readZipFile(f)
 	}
 	return nil, fmt.Errorf("file not found: %s", name)
 }
 
-// openFile 打开压缩包内的文件流
+// openFile 打开文档内的文件流
 // 入参: name 文件名
 // 返回: io.ReadCloser 文件流, error 错误信息
 func (r *Reader) openFile(name string) (io.ReadCloser, error) {
 	name = cleanPackagePath(name)
+	if data, ok := r.files[name]; ok {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
 	if f, ok := r.packageFile(name); ok {
 		return f.Open()
 	}

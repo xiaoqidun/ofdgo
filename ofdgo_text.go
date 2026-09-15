@@ -18,6 +18,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/tdewolff/canvas"
 	canvastext "github.com/tdewolff/canvas/text"
@@ -322,7 +323,31 @@ func textCodeRunes(value string) []rune {
 	if strings.ContainsAny(value, "\r\n") {
 		value = strings.TrimSpace(value)
 	}
-	return []rune(value)
+	runes := []rune(value)
+	if !strings.Contains(value, "\\") {
+		return runes
+	}
+	written := 0
+	for i := 0; i < len(runes); i++ {
+		char := runes[i]
+		if char == '\\' && i+4 < len(runes) {
+			if code, err := strconv.ParseUint(string(runes[i+1:i+5]), 16, 16); err == nil {
+				decoded := rune(code)
+				if !utf16.IsSurrogate(decoded) {
+					char = decoded
+					i += 4
+				} else if decoded >= 0xd800 && decoded <= 0xdbff && i+9 < len(runes) && runes[i+5] == '\\' {
+					if low, err := strconv.ParseUint(string(runes[i+6:i+10]), 16, 16); err == nil && low >= 0xdc00 && low <= 0xdfff {
+						char = utf16.DecodeRune(decoded, rune(low))
+						i += 9
+					}
+				}
+			}
+		}
+		runes[written] = char
+		written++
+	}
+	return runes[:written]
 }
 
 // GetDeltaX 获取X轴偏移量数组

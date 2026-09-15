@@ -17,8 +17,56 @@ package ofdgo
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"sort"
 )
+
+// extractCollectionFont 提取集合中的单个OpenType字体，保留表内容并重新计算校验和
+// 入参: data 集合数据, index 字体索引
+// 返回: []byte 单字体数据, error 错误信息
+func extractCollectionFont(data []byte, index int) ([]byte, error) {
+	if len(data) < 12 || string(data[:4]) != "ttcf" {
+		return nil, fmt.Errorf("invalid font collection header")
+	}
+	version := binary.BigEndian.Uint32(data[4:])
+	count := uint64(binary.BigEndian.Uint32(data[8:]))
+	if (version != 0x00010000 && version != 0x00020000) || count > uint64(len(data)-12)/4 || index < 0 || uint64(index) >= count {
+		return nil, fmt.Errorf("invalid font collection index or version")
+	}
+	offset := uint64(binary.BigEndian.Uint32(data[12+index*4:]))
+	if offset > uint64(len(data)-12) {
+		return nil, fmt.Errorf("invalid font offset")
+	}
+	header := data[offset : offset+12]
+	if string(header[:4]) != "\x00\x01\x00\x00" && string(header[:4]) != "OTTO" && string(header[:4]) != "true" {
+		return nil, fmt.Errorf("invalid OpenType header")
+	}
+	tableCount := uint64(binary.BigEndian.Uint16(header[4:]))
+	offset += 12
+	if tableCount == 0 || tableCount > (uint64(len(data))-offset)/16 {
+		return nil, fmt.Errorf("invalid font table directory")
+	}
+	tables := make(map[string][]byte, tableCount)
+	for i := uint64(0); i < tableCount; i++ {
+		entry := data[offset+i*16 : offset+(i+1)*16]
+		tag := string(entry[:4])
+		start := uint64(binary.BigEndian.Uint32(entry[8:]))
+		length := uint64(binary.BigEndian.Uint32(entry[12:]))
+		if start > uint64(len(data)) || length > uint64(len(data))-start {
+			return nil, fmt.Errorf("invalid %s font table range", tag)
+		}
+		if _, exists := tables[tag]; exists {
+			return nil, fmt.Errorf("duplicate %s font table", tag)
+		}
+		tables[tag] = data[start : start+length]
+	}
+	if len(tables["head"]) < 12 {
+		return nil, fmt.Errorf("invalid head font table")
+	}
+	tables["head"] = bytes.Clone(tables["head"])
+	clear(tables["head"][8:12])
+	return serializeOTF(tables)
+}
 
 // packedGlyphRune 获取包装字体字符
 // 入参: gid 字形ID

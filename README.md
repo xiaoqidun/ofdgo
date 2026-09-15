@@ -1,5 +1,5 @@
 # OFDGo [![PkgGoDev](https://pkg.go.dev/badge/github.com/xiaoqidun/ofdgo)](https://pkg.go.dev/github.com/xiaoqidun/ofdgo)
-首个原生、全平台兼容的纯 Go 语言 OFD 渲染库
+首个原生、全平台兼容的纯 Go 语言 OFD 读写库
 
 
 # 在线体验
@@ -101,6 +101,50 @@ func main() {
 	}
 	if !valid {
 		os.Exit(1)
+	}
+}
+```
+
+# 创建文档
+```go
+package main
+
+import (
+	"log"
+	"os"
+
+	"github.com/xiaoqidun/ofdgo"
+)
+
+func main() {
+	// 1. 创建文档
+	editor := ofdgo.NewEditor()
+	editor.Info.Title = "示例文档"
+	page, err := editor.AddPage(210, 297)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// 2. 添加文字
+	fontData, err := os.ReadFile("font.ttf")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fontID, err := editor.AddFont(ofdgo.FontFile{Data: fontData}, 0)
+	if err != nil {
+		log.Fatal(err)
+	}
+	_, err = editor.AddText(page, ofdgo.Box{X: 20, Y: 20, W: 170, H: 15}, "你好，OFDGo！", fontID, 6)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// 3. 保存文档
+	ofdFile, err := os.Create("test.ofd")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer ofdFile.Close()
+	if _, err := editor.WriteTo(ofdFile); err != nil {
+		log.Fatal(err)
 	}
 }
 ```
