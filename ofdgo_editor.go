@@ -339,6 +339,27 @@ func (e *Editor) DeleteObject(page int, id string) error {
 	return nil
 }
 
+// MoveObject 调整同页正文图层内的绘制顺序，保留对象标识和内容
+// 入参: page 页面索引, id 对象标识, to 移动后的对象索引，0为最底层，末尾为最顶层
+// 返回: error 错误信息
+func (e *Editor) MoveObject(page int, id string, to int) error {
+	layer, from, err := e.findObject(page, id)
+	if err != nil {
+		return err
+	}
+	if to < 0 || to >= len(layer.Objects) {
+		return fmt.Errorf("object index %d out of range", to)
+	}
+	object := layer.Objects[from]
+	if from < to {
+		copy(layer.Objects[from:to], layer.Objects[from+1:to+1])
+	} else {
+		copy(layer.Objects[to+1:from+1], layer.Objects[to:from])
+	}
+	layer.Objects[to] = object
+	return nil
+}
+
 // findObject 查找正文图层中的对象
 // 入参: page 页面索引, id 对象标识
 // 返回: *Layer 所属图层, int 对象索引, error 错误信息
@@ -493,30 +514,73 @@ func cloneEditorObject(object GraphicObject) (GraphicObject, error) {
 // 入参: page 页面索引, box 文字边界, value 原文, fontID 字体资源标识, size 字号
 // 返回: string 对象标识, error 错误信息
 func (e *Editor) AddText(page int, box Box, value, fontID string, size float64) (string, error) {
-	sfnt, ok := e.fonts[fontID]
+	object := GraphicObject{Type: "TextObject", TextObject: TextObject{
+		Boundary: fmt.Sprintf("%s %s %s %s", ofdNumber(box.X), ofdNumber(box.Y), ofdNumber(box.W), ofdNumber(box.H)),
+		Font:     fontID, Size: size,
+	}}
+	if err := e.layoutText(&object.TextObject, value); err != nil {
+		return "", err
+	}
+	return e.AddObject(page, object)
+}
+
+// UpdateText 按AddText规则重排横向单行文字，保留对象标识、顺序、边界及绘制属性
+// 自定义文字定位使用UpdateObject，不进行段落排版和复杂文字塑形
+// 入参: page 页面索引, id 文字对象标识, value 原文, fontID 字体资源标识, size 字号
+// 返回: error 错误信息
+func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) error {
+	layer, index, err := e.findObject(page, id)
+	if err != nil {
+		return err
+	}
+	object := layer.Objects[index]
+	if object.Type != "TextObject" {
+		return fmt.Errorf("object %q is not text", id)
+	}
+	object.TextObject.Font, object.TextObject.Size = fontID, size
+	if err := e.layoutText(&object.TextObject, value); err != nil {
+		return err
+	}
+	object, err = e.prepareObject(id, object)
+	if err != nil {
+		return err
+	}
+	layer.Objects[index] = object
+	return nil
+}
+
+// layoutText 按嵌入字体度量设置横向单行文字的基线和字距
+// 入参: obj 文字对象, value 原文
+// 返回: error 错误信息
+func (e *Editor) layoutText(obj *TextObject, value string) error {
+	if obj.ReadDirection != 0 || obj.CharDirection != 0 {
+		return fmt.Errorf("automatic text layout requires horizontal text")
+	}
+	sfnt, ok := e.fonts[obj.Font]
 	if !ok {
-		return "", fmt.Errorf("font resource %q not found", fontID)
+		return fmt.Errorf("font resource %q not found", obj.Font)
 	}
 	if !utf8.ValidString(value) || strings.ContainsAny(value, "\r\n\t") || value == "" {
-		return "", fmt.Errorf("text must be a nonempty UTF-8 line")
+		return fmt.Errorf("text must be a nonempty UTF-8 line")
+	}
+	hScale := obj.HScale
+	if hScale == 0 {
+		hScale = 1
 	}
 	runes := []rune(value)
 	deltas := make([]string, 0, len(runes)-1)
 	for i, char := range runes {
 		glyph := sfnt.GlyphIndex(char)
 		if glyph == 0 {
-			return "", fmt.Errorf("font does not contain U+%04X", char)
+			return fmt.Errorf("font does not contain U+%04X", char)
 		}
 		if i+1 < len(runes) {
-			deltas = append(deltas, ofdNumber(float64(sfnt.GlyphAdvance(glyph))*size/float64(sfnt.UnitsPerEm())))
+			deltas = append(deltas, ofdNumber(float64(sfnt.GlyphAdvance(glyph))*obj.Size/float64(sfnt.UnitsPerEm())*hScale))
 		}
 	}
 	ascender, _, _ := sfnt.VerticalMetrics()
-	return e.AddObject(page, GraphicObject{Type: "TextObject", TextObject: TextObject{
-		Boundary: fmt.Sprintf("%s %s %s %s", ofdNumber(box.X), ofdNumber(box.Y), ofdNumber(box.W), ofdNumber(box.H)),
-		Font:     fontID, Size: size,
-		TextCode: []TextCode{{X: "0", Y: ofdNumber(float64(ascender) * size / float64(sfnt.UnitsPerEm())), DeltaX: strings.Join(deltas, " "), Value: escapeOFDText(value)}},
-	}})
+	obj.TextCode = []TextCode{{X: "0", Y: ofdNumber(float64(ascender) * obj.Size / float64(sfnt.UnitsPerEm())), DeltaX: strings.Join(deltas, " "), Value: escapeOFDText(value)}}
+	return nil
 }
 
 // prepareText 校验并补全标准文字定位，避免依赖阅读器的缺省字距补偿
