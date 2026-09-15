@@ -28,6 +28,29 @@ export function selectionBounds(items) {
 		height: Math.max(...items.map(item => item.y + item.height)) - y };
 }
 
+// alignmentGuides marks the nearest edges or centers without changing object coordinates.
+function alignmentGuides(box, targets, tolerance) {
+	const lines = [];
+	for (const [axis, size, cross, span] of [["x", "width", "y", "height"], ["y", "height", "x", "width"]]) {
+		let distance = Infinity, line;
+		for (const target of targets) {
+			for (const anchor of [0, 0.5, 1]) {
+				const position = target[axis] + target[size] * anchor;
+				for (const edge of [0, 0.5, 1]) {
+					const delta = Math.abs(box[axis] + box[size] * edge - position);
+					if (delta > tolerance[axis] || delta >= distance) continue;
+					distance = delta;
+					const from = Math.min(box[cross], target[cross]);
+					const to = Math.max(box[cross] + box[span], target[cross] + target[span]);
+					line = axis === "x" ? `M${position} ${from}V${to}` : `M${from} ${position}H${to}`;
+				}
+			}
+		}
+		if (line) lines.push(line);
+	}
+	return lines.join("");
+}
+
 // constrainedPoint preserves shape constraints without changing off-page geometry.
 export function constrainedPoint(from, to, shape, shift) {
 	let dx = to.x - from.x, dy = to.y - from.y;
@@ -170,11 +193,14 @@ export class CanvasEditor {
 
 	place(item, change = { x: 0, y: 0, scale: 1 }) {
 		if (item.items) {
-			for (const member of item.items) this.place(member, change);
-			return;
+			for (const member of item.items) this.place(member, {
+				x: change.x + (member.x - item.x) * (change.scale - 1),
+				y: change.y + (member.y - item.y) * (change.scale - 1), scale: change.scale,
+			});
 		}
 		if (item.shape) {
-			this.placeShape(item, { x: item.geometry.x + change.x, y: item.geometry.y + change.y,
+			this.placeShape(item, { x: item.geometry.x + change.x + (item.geometry.x - item.x) * (change.scale - 1),
+				y: item.geometry.y + change.y + (item.geometry.y - item.y) * (change.scale - 1),
 				width: item.geometry.width * change.scale, height: item.geometry.height * change.scale });
 			return;
 		}
@@ -207,12 +233,27 @@ export class CanvasEditor {
 
 	// setSelection updates object highlights and exposes one same-page selection to the toolbar.
 	setSelection(items) {
+		if (this.selected?.items) this.selected.node.remove();
 		for (const item of this.items()) {
 			item.node.classList.remove("selected", "multi-selected");
 			item.node.setAttribute("aria-pressed", "false");
 		}
 		this.selected = items.length < 2 ? items[0] || null : { ...selectionBounds(items), items,
 			id: items.map(item => item.id), index: items[0].index, page: items[0].page, surface: items[0].surface };
+		if (items.length > 1) {
+			const node = document.createElement("div");
+			node.className = "edit-layer edit-selection";
+			for (const corner of ["nw", "ne", "sw", "se"]) {
+				const handle = document.createElement("span");
+				handle.className = `edit-handle edit-${corner}`;
+				handle.dataset.corner = corner;
+				node.append(handle);
+			}
+			this.selected.node = node;
+			this.nodes.set(node, this.selected);
+			this.place(this.selected);
+			this.selected.surface.append(node);
+		}
 		for (const item of items) {
 			item.node.classList.add("selected");
 			item.node.classList.toggle("multi-selected", items.length > 1);
@@ -249,7 +290,7 @@ export class CanvasEditor {
 			this.startShape(event);
 			return;
 		}
-		const node = event.target.closest(".edit-object");
+		const node = event.target.closest(".edit-object, .edit-selection");
 		if (node) {
 			event.preventDefault();
 		}
@@ -264,16 +305,22 @@ export class CanvasEditor {
 			this.select(target, true);
 			return;
 		}
-		if (!this.items().includes(target)) this.select(target);
+		if (target !== this.selected && !this.items().includes(target)) this.select(target);
 		if (!node || this.options.busy()) {
 			return;
 		}
 		const item = this.selected;
 		this.drag = {
-			item, pointerID: event.pointerId, corner: item.items ? "" : event.target.dataset.corner || "",
+			item, pointerID: event.pointerId, corner: !item.items || target === item ? event.target.dataset.corner || "" : "",
 			rect: item.surface.getBoundingClientRect(), rotation: this.options.rotation(),
 			clientX: event.clientX, clientY: event.clientY,
 		};
+		if (!this.drag.corner) {
+			const selected = this.items();
+			this.drag.targets = [...item.surface.querySelectorAll(".edit-object")]
+				.map(node => this.nodes.get(node)).filter(member => !selected.includes(member));
+			this.drag.targets.push({ x: 0, y: 0, ...item.page });
+		}
 		if (item.shape === "line" && this.drag.corner) {
 			Object.assign(this.drag, this.createPreview(item.surface, item.page, item.shape, {
 				fill: false, stroke: true, strokeColor: "var(--accent)", lineWidth: item.lineWidth,
@@ -315,6 +362,24 @@ export class CanvasEditor {
 		}
 		drag.change = objectTransform(drag.item, to.x - from.x, to.y - from.y, drag.corner);
 		this.place(drag.item, drag.change);
+		if (!drag.corner) this.showGuides(drag);
+	}
+
+	// showGuides keeps the visual threshold constant through page zoom and rotation.
+	showGuides(drag) {
+		const { item, rect, rotation, change } = drag;
+		const path = alignmentGuides({ ...item, x: item.x + change.x, y: item.y + change.y }, drag.targets, {
+			x: 4 * item.page.width / (rotation % 180 ? rect.height : rect.width),
+			y: 4 * item.page.height / (rotation % 180 ? rect.width : rect.height),
+		});
+		if (!drag.guides && path) {
+			drag.guides = this.createPreview(item.surface, item.page, "path", {
+				fill: false, stroke: true, strokeColor: "var(--accent)", lineWidth: 1,
+			});
+			drag.guides.node.setAttribute("vector-effect", "non-scaling-stroke");
+			drag.guides.node.setAttribute("stroke-dasharray", "4 3");
+		}
+		drag.guides?.node.setAttribute("d", path);
 	}
 
 	end(event) {
@@ -374,6 +439,7 @@ export class CanvasEditor {
 		this.drag = null;
 		if (drag) {
 			drag.preview?.remove();
+			drag.guides?.preview.remove();
 			if (drag.marquee) this.setSelection(drag.before);
 			if (drag.item) {
 				this.place(drag.item);
@@ -554,17 +620,15 @@ export class CanvasEditor {
 			lineHeight: item.paragraphHeight || item.lineHeight ? `${(item.paragraphHeight || item.lineHeight) * PX_PER_MM}px` : "normal", color: item.color,
 			textAlign: item.align || "left",
 		});
-		this.input = { input, item, face };
+		this.input = { input, item, face, fontChoice: item.fontChoice };
 		item.surface.append(input);
-		const resize = () => {
-			input.style.height = "0px";
-			input.style.height = `${input.scrollHeight + 2}px`;
-		};
 		input.addEventListener("input", () => {
-			resize();
+			this.resizeText();
 			this.options.onTextChange();
 		});
-		input.addEventListener("blur", () => this.commitText());
+		input.addEventListener("blur", (event) => {
+			if (!this.options.fontControls?.includes(event.relatedTarget)) this.commitText();
+		});
 		input.addEventListener("keydown", (event) => {
 			event.stopPropagation();
 			if (event.isComposing || input.readOnly) {
@@ -579,21 +643,41 @@ export class CanvasEditor {
 				this.commitText();
 			}
 		});
-		resize();
+		this.resizeText();
 		input.focus({ preventScroll: true });
 		if (!item.draft) input.select();
+	}
+
+	// resizeText follows the draft's current font and content without changing document geometry.
+	resizeText() {
+		const { input } = this.input;
+		input.style.height = "0px";
+		input.style.height = `${input.scrollHeight + 2}px`;
+	}
+
+	// setTextFont changes only the inline buffer until text and font are committed together.
+	setTextFont(face, data) {
+		const editing = this.input;
+		document.fonts.add(face);
+		document.fonts.delete(editing.face);
+		editing.face = face;
+		editing.fontData = data;
+		editing.input.style.fontFamily = `"${face.family}"`;
+		this.resizeText();
+		this.options.onTextChange();
+		editing.input.focus({ preventScroll: true });
 	}
 
 	async commitText() {
 		const editing = this.input;
 		if (!editing) return true;
 		if (editing.input.readOnly) return false;
-		if (editing.input.value === editing.item.text || editing.item.draft && !editing.input.value.trim()) {
+		if (editing.input.value === editing.item.text && !editing.fontData || editing.item.draft && !editing.input.value.trim()) {
 			this.closeText();
 			return true;
 		}
 		editing.input.readOnly = true;
-		const saved = await this.options.onCommitText(editing.item, editing.input.value);
+		const saved = await this.options.onCommitText(editing.item, editing.input.value, editing.fontData);
 		if (this.input !== editing) {
 			return Boolean(saved);
 		}

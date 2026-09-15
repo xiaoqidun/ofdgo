@@ -233,6 +233,7 @@ const fontManager = new FontManager({
 });
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
+	fontControls: [el.textFont, el.textFontAdd],
 	busy: () => document.body.hasAttribute("aria-busy"),
 	rotation: () => state.rotation,
 	onSelect: updateObjectControls,
@@ -247,14 +248,15 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onDraw: (index, shape, box, style) => changeDocument("ofdgoInsertShape", null, index, shape,
 		box.x, box.y, box.width, box.height, style.fill, style.fillColor, style.stroke, style.strokeColor, style.lineWidth),
 	onDrawText: beginCanvasText,
-	onCommitText: (item, value) => item.draft
-		? changeDocument("ofdgoInsertText", null, item.index, value, item.fontData, item.x, item.y, item.size, item.color, item.width, item.wrap, item.align, item.paragraphHeight)
-		: changeDocument("ofdgoUpdateText", item, value, null, item.size, null),
+	onCommitText: (item, value, fontData) => item.draft
+		? changeDocument("ofdgoInsertText", null, item.index, value, fontData || item.fontData, item.x, item.y, item.size, item.color, item.width, item.wrap, item.align, item.paragraphHeight)
+		: changeDocument("ofdgoUpdateText", item, value, fontData || null, item.size, null),
 	onTextChange: () => {
 		const editing = canvasEditor.input;
 		setDirty(state.editing && (state.editorInfo?.revision !== state.savedRevision
-			|| Boolean(editing && editing.input.value !== editing.item.text)));
+			|| Boolean(editing && (editing.input.value !== editing.item.text || editing.fontData))));
 		if (!editing) {
+			updateTextFonts(canvasEditor.selected, true);
 			syncSelection();
 		}
 	},
@@ -304,19 +306,7 @@ el.textColor.addEventListener("change", () => changeTextStyle(true));
 editorClick(el.textWrap, () => changeParagraph(!currentTextStyle().wrap));
 el.textAlign.addEventListener("change", () => changeParagraph());
 el.textLineHeight.addEventListener("change", () => changeParagraph());
-el.textFont.addEventListener("change", async () => {
-	const item = canvasEditor.selected;
-	const font = state.textFonts[Number(el.textFont.value)];
-	if (!state.ready || document.body.hasAttribute("aria-busy") || !font || item?.draft) return;
-	if (item?.type === "TextObject") {
-		if (!font.embedded) {
-			await changeDocument("ofdgoUpdateText", item, item.text, fontManager.read(font), item.size, null);
-			updateTextFonts(canvasEditor.selected, true);
-		}
-	} else {
-		state.textDefaults.fontChoice = font;
-	}
-});
+el.textFont.addEventListener("change", changeTextFont);
 el.shapeWidth.addEventListener("focus", () => { el.shapeWidth.defaultValue = el.shapeWidth.value; });
 for (const input of [el.textSize, el.shapeWidth, el.textLineHeight]) {
 	input.addEventListener("keydown", (event) => {
@@ -418,10 +408,7 @@ editorClick(el.insertImageButton, () => openInsertPanel());
 el.insertCancel.addEventListener("click", () => el.insertPanel.close());
 el.insertPanel.addEventListener("close", () => { state.insertObject = null; });
 el.insertForm.addEventListener("submit", insertObject);
-el.textFontAdd.addEventListener("click", () => {
-	openFontFile(el.fontInput);
-	canvasEditor.commitText();
-});
+el.textFontAdd.addEventListener("click", () => openFontFile(el.fontInput));
 el.saveButton.addEventListener("click", () => exportFile(true, null, "ofd"));
 el.togglePagesButton.addEventListener("click", () => toggleSidebar("pages"));
 el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
@@ -851,10 +838,48 @@ function updateTextFonts(item, refresh = false) {
 	if (refresh || state.textFontID !== id) {
 		state.textFontID = id;
 		state.textFonts = editorFonts(id ? item : null);
-		const selected = id ? state.textFonts[0] : state.textDefaults.fontChoice;
-		if (!id && selected?.embedded) state.textFonts.unshift(selected);
+		const selected = canvasEditor.input?.fontChoice || (id ? state.textFonts[0] : state.textDefaults.fontChoice);
+		if (selected && (canvasEditor.input || selected.embedded)
+			&& !state.textFonts.some(font => (font.id || font.postscriptName) === (selected.id || selected.postscriptName))) {
+			state.textFonts.unshift(selected);
+		}
 		setFontOptions(el.textFont, state.textFonts, selected || state.textFonts[0]);
 		if (!id) state.textDefaults.fontChoice = state.textFonts[Number(el.textFont.value)];
+	}
+}
+
+// changeTextFont preserves uncommitted text while loading a replacement font.
+async function changeTextFont() {
+	const item = canvasEditor.selected;
+	const font = state.textFonts[Number(el.textFont.value)];
+	if (!state.ready || document.body.hasAttribute("aria-busy") || !font) return;
+	const editing = canvasEditor.input;
+	if (editing) {
+		const openSeq = state.openSeq;
+		setBusy(true);
+		try {
+			const data = font.embedded ? (await callWASM("ofdgoEditorFont", font.id.slice(9))).bytes : await fontManager.read(font);
+			const face = new FontFace("ofdgo-edit-font", data);
+			await face.load();
+			if (openSeq !== state.openSeq || canvasEditor.input !== editing) return;
+			editing.fontChoice = font;
+			if (item.draft) state.textDefaults.fontChoice = font;
+			canvasEditor.setTextFont(face, data);
+		} catch (err) {
+			if (openSeq === state.openSeq) {
+				updateTextFonts(canvasEditor.selected, true);
+				showError(err, false);
+			}
+		} finally {
+			if (openSeq === state.openSeq) setBusy(false);
+		}
+	} else if (item?.type === "TextObject") {
+		if (!font.embedded) {
+			await changeDocument("ofdgoUpdateText", item, item.text, fontManager.read(font), item.size, null);
+			updateTextFonts(canvasEditor.selected, true);
+		}
+	} else {
+		state.textDefaults.fontChoice = font;
 	}
 }
 
@@ -1777,6 +1802,10 @@ async function applyFontChange(options = {}) {
 	updateFontSummary();
 	renderFontList();
 	if (!state.doc) {
+		return;
+	}
+	if (state.editing) {
+		setStatus(pageStatus(state.pageIndex, state.doc.pageCount));
 		return;
 	}
 	await openDocument({
@@ -4135,8 +4164,9 @@ function updateObjectControls(item, reset = false) {
 	el.editObjectButton.disabled = disabled || Boolean(item.items) || item.type === "PathObject";
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const text = item?.type === "TextObject" ? item : state.textDefaults;
-	el.textFont.disabled = el.textSize.disabled = el.textColor.disabled = !state.editing || !state.ready || state.exporting || Boolean(item?.draft || item?.items);
-	el.textFontAdd.disabled = !state.editing || !state.ready || state.exporting || Boolean(item?.draft);
+	el.textFont.disabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items);
+	el.textSize.disabled = el.textColor.disabled = el.textFont.disabled || Boolean(item?.draft);
+	el.textFontAdd.disabled = !state.editing || !state.ready || state.exporting;
 	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSize.disabled;
 	el.textAlign.value = text.align || "left";
 	el.textWrap.setAttribute("aria-pressed", String(Boolean(text.wrap)));

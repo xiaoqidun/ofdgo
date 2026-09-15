@@ -171,11 +171,6 @@ a:focus-visible {
 	opacity: 1;
 }
 
-.editor-group:has(#shapeFill) .editor-field {
-	grid-template-columns: 2em 100px;
-	justify-content: end;
-}
-
 .editor-group:has(#textFont) {
 	grid-template-columns: 100px 54px;
 }
@@ -1277,7 +1272,8 @@ button.outline-link:hover {
 }
 
 .edit-object:hover,
-.edit-object.selected {
+.edit-object.selected,
+.edit-selection {
 	outline: calc(1px / var(--surface-scale)) solid var(--accent);
 }
 
@@ -1301,12 +1297,18 @@ button.outline-link:hover {
 	transform: translate(-50%, -50%);
 }
 
-.selected .edit-handle {
+.selected .edit-handle,
+.edit-selection .edit-handle {
 	display: block;
 }
 
 .multi-selected .edit-handle {
 	display: none;
+}
+
+.edit-selection .edit-handle {
+	pointer-events: auto;
+	touch-action: none;
 }
 
 .edit-handle::before {
