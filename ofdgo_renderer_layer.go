@@ -126,7 +126,6 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 	currentCTM := boundaryCTM.Multiply(NewMatrix(cgu.CTM))
 	clips, clipCTM := cgu.Clips, currentCTM
 	if clips != nil && clips.TransFlag != nil && !*clips.TransFlag {
-		// 不参与对象CTM的裁剪仍位于对象边界及父级坐标系中
 		clipCopy := *clips
 		clipCopy.TransFlag = nil
 		clips, clipCTM = &clipCopy, boundaryCTM

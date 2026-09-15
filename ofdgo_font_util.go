@@ -569,7 +569,7 @@ func shouldBuildCmapFormat12(mapping map[rune]uint16) bool {
 		glyphIDCount++
 		prev = curr
 	}
-	segCount++ // sentinel segment
+	segCount++
 	length := 16 + segCount*8 + glyphIDCount*2
 	return length > 0xFFFF
 }
