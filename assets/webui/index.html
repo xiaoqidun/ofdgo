@@ -332,20 +332,22 @@
 					<button id="outlinesTab" type="button" role="tab" aria-selected="false" aria-controls="outlineList" tabindex="-1">目录</button>
 					<button id="searchTab" type="button" role="tab" aria-keyshortcuts="Control+F Meta+F" aria-selected="false" aria-controls="searchPanel" tabindex="-1">搜索</button>
 				</div>
-				<div id="pageList" class="page-list" role="tabpanel" aria-label="页面"></div>
-				<div id="outlineList" role="tabpanel" aria-label="目录" hidden></div>
-				<div id="searchPanel" role="tabpanel" aria-label="搜索" hidden>
-					<form id="searchForm" class="search-form" role="search">
-						<input id="searchInput" type="search" aria-label="搜索文字" placeholder="搜索文字" autocomplete="off">
-						<button type="submit" class="button">搜索</button>
-					</form>
-					<div class="search-tools">
-						<span id="searchStatus" role="status" aria-live="polite"></span>
-						<span id="searchCount">0 / 0</span>
-						<button id="searchPrev" type="button" class="icon-button arrow-prev" title="上一处" aria-label="上一处" aria-keyshortcuts="Shift+F3" disabled></button>
-						<button id="searchNext" type="button" class="icon-button arrow-next" title="下一处" aria-label="下一处" aria-keyshortcuts="F3" disabled></button>
+				<div id="navigationContent" class="navigation-content">
+					<div id="pageList" class="page-list" role="tabpanel" aria-label="页面"></div>
+					<div id="outlineList" role="tabpanel" aria-label="目录" hidden></div>
+					<div id="searchPanel" role="tabpanel" aria-label="搜索" hidden>
+						<form id="searchForm" class="search-form" role="search">
+							<input id="searchInput" type="search" aria-label="搜索文字" placeholder="搜索文字" autocomplete="off">
+							<button type="submit" class="button">搜索</button>
+						</form>
+						<div class="search-tools">
+							<span id="searchStatus" role="status" aria-live="polite"></span>
+							<span id="searchCount">0 / 0</span>
+							<button id="searchPrev" type="button" class="icon-button arrow-prev" title="上一处" aria-label="上一处" aria-keyshortcuts="Shift+F3" disabled></button>
+							<button id="searchNext" type="button" class="icon-button arrow-next" title="下一处" aria-label="下一处" aria-keyshortcuts="F3" disabled></button>
+						</div>
+						<div id="searchResults" class="search-results"></div>
 					</div>
-					<div id="searchResults" class="search-results"></div>
 				</div>
 			</aside>
 

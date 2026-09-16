@@ -280,6 +280,7 @@ const el = {
 	pageListPanel: document.querySelector(".page-list-panel"),
 	pageListTitle: document.querySelector("#pageListTitle"),
 	navigationTabs: document.querySelector("#navigationTabs"),
+	navigationContent: document.querySelector("#navigationContent"),
 	pagesTab: document.querySelector("#pagesTab"),
 	outlinesTab: document.querySelector("#outlinesTab"),
 	pageList: document.querySelector("#pageList"),
@@ -2747,8 +2748,8 @@ async function openDocument(options = {}) {
 		if (options.resetScroll) {
 			el.viewerPanel.scrollLeft = 0;
 			el.viewerPanel.scrollTop = 0;
-			el.pageListPanel.scrollLeft = 0;
-			el.pageListPanel.scrollTop = 0;
+			el.navigationContent.scrollLeft = 0;
+			el.navigationContent.scrollTop = 0;
 			el.metaPanel.scrollLeft = 0;
 			el.metaPanel.scrollTop = 0;
 		}
@@ -3679,16 +3680,12 @@ function updatePageListCurrent(force = false) {
 	if (next) {
 		setPageItemCurrent(next, true);
 		if (state.showPages && !el.pageList.hidden) {
-			const panel = el.pageListPanel.getBoundingClientRect();
+			const panel = el.navigationContent.getBoundingClientRect();
 			const item = next.getBoundingClientRect();
-			const style = getComputedStyle(el.pageListPanel);
-			const top = Math.max(panel.top + Number.parseFloat(style.paddingTop),
-				el.navigationTabs.getBoundingClientRect().bottom + Number.parseFloat(getComputedStyle(el.navigationTabs).marginBottom));
-			const bottom = panel.bottom - Number.parseFloat(style.paddingBottom);
-			if (item.top < top) {
-				el.pageListPanel.scrollTop += item.top - top;
-			} else if (item.bottom > bottom) {
-				el.pageListPanel.scrollTop += Math.min(item.top - top, item.bottom - bottom);
+			if (item.top < panel.top) {
+				el.navigationContent.scrollTop += item.top - panel.top;
+			} else if (item.bottom > panel.bottom) {
+				el.navigationContent.scrollTop += Math.min(item.top - panel.top, item.bottom - panel.bottom);
 			}
 		}
 	}
@@ -3799,7 +3796,7 @@ function focusSearch() {
 }
 
 function showNavigation(selected) {
-	const scrollTop = el.pageListPanel.scrollTop;
+	const scrollTop = el.navigationContent.scrollTop;
 	for (const [tab, panel] of [[el.pagesTab, el.pageList], [el.outlinesTab, el.outlineList], [el.searchTab, el.searchPanel]]) {
 		if (tab.getAttribute("aria-selected") === "true") {
 			state.navigationScroll.set(tab, scrollTop);
@@ -3809,12 +3806,12 @@ function showNavigation(selected) {
 		tab.setAttribute("aria-selected", String(active));
 		tab.tabIndex = active ? 0 : -1;
 	}
-	el.pageListPanel.scrollTop = state.navigationScroll.get(selected) || 0;
+	el.navigationContent.scrollTop = state.navigationScroll.get(selected) || 0;
 }
 
 function renderOutlines(reset = true) {
 	const selected = !reset && [el.pagesTab, el.outlinesTab, el.searchTab].find(tab => tab.getAttribute("aria-selected") === "true");
-	const scrollTop = reset ? 0 : el.pageListPanel.scrollTop;
+	const scrollTop = reset ? 0 : el.navigationContent.scrollTop;
 	if (reset) {
 		state.navigationScroll.clear();
 		state.outlineExpanded.clear();
@@ -3843,7 +3840,7 @@ function renderOutlines(reset = true) {
 	if (outlines.length > 0) {
 		el.outlineList.append(createOutlineList(outlines));
 	}
-	el.pageListPanel.scrollTop = scrollTop;
+	el.navigationContent.scrollTop = scrollTop;
 	showNavigation(selected && !selected.hidden ? selected : el.pagesTab);
 }
 
@@ -4162,9 +4159,9 @@ function enablePageDrag(button, index) {
 		const tick = () => {
 			if (seq !== state.openSeq || !state.editing) { finish(false); return; }
 			if (dragging) {
-				const rect = el.pageListPanel.getBoundingClientRect();
+				const rect = el.navigationContent.getBoundingClientRect();
 				const delta = y < rect.top + 48 ? -10 : y > rect.bottom - 48 ? 10 : 0;
-				if (delta) el.pageListPanel.scrollTop += delta;
+				if (delta) el.navigationContent.scrollTop += delta;
 				locate();
 			}
 			frame = requestAnimationFrame(tick);
@@ -4286,7 +4283,7 @@ function thumbnailObserver() {
 			}
 			trimPageCache();
 		}, {
-			root: el.pageListPanel,
+			root: el.navigationContent,
 			rootMargin: "180px 0px",
 		});
 	}

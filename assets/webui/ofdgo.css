@@ -848,7 +848,7 @@ body[data-hide-meta] .meta-panel {
 	display: none;
 }
 
-.page-list-panel,
+.navigation-content,
 .viewer-panel,
 .search-results,
 .editor-toolbar,
@@ -866,11 +866,16 @@ body[data-hide-meta] .meta-panel {
 	overflow: auto;
 }
 
-.page-list-item,
-.outline-list summary,
-.outline-link {
-	scroll-margin-top: 51px;
-	scroll-margin-bottom: 12px;
+.page-list-panel {
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+
+.navigation-content {
+	flex: 1;
+	min-height: 0;
+	overflow: auto;
 }
 
 .meta-panel {
@@ -944,17 +949,11 @@ body[data-hide-meta] .meta-panel {
 }
 
 .navigation-tabs {
-	position: sticky;
-	top: -12px;
-	z-index: 1;
 	display: flex;
+	flex-shrink: 0;
 	gap: 16px;
-	margin-top: -12px;
-	margin-bottom: 10px;
-	padding-top: 12px;
+	margin-bottom: 12px;
 	border-bottom: 1px solid var(--line);
-	background: var(--panel);
-	box-shadow: 0 10px var(--panel);
 }
 
 .navigation-tabs button {
@@ -979,7 +978,7 @@ body[data-hide-meta] .meta-panel {
 	list-style: none;
 }
 
-body:not([data-hide-pages]) .page-list-panel:has(#searchPanel:not([hidden])),
+.navigation-content:has(#searchPanel:not([hidden])),
 #searchPanel:not([hidden]) {
 	display: flex;
 	flex-direction: column;
@@ -2262,15 +2261,12 @@ button.outline-link:hover {
 		transition: transform 0.18s ease;
 	}
 
-	body[data-hide-pages] .page-list-panel,
 	body[data-hide-meta] .meta-panel {
 		display: block;
 	}
 
-	body[data-hide-pages] .page-list-panel:has(#searchPanel:not([hidden])) {
+	body[data-hide-pages] .page-list-panel {
 		display: flex;
-		flex-direction: column;
-		overflow: hidden;
 	}
 
 	.page-list-panel {
