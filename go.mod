@@ -6,7 +6,7 @@ require (
 	github.com/go-text/typesetting v0.3.5
 	github.com/tdewolff/canvas v0.0.0-20260913163248-dd4999d1c76a
 	github.com/tdewolff/font v0.0.0-20260913163313-54f98bb59ee6
-	github.com/xiaoqidun/jbig2 v1.1.0
+	github.com/xiaoqidun/jbig2 v1.1.1
 	golang.org/x/image v0.46.0
 	golang.org/x/text v0.42.0
 )
