@@ -426,8 +426,6 @@ editorClick(el.editObjectButton, () => {
 	}
 });
 el.textSize.addEventListener("change", () => changeTextStyle(false));
-el.textSize.addEventListener("focus", () => updateObjectControls(canvasEditor.selected, true));
-el.textSize.addEventListener("blur", () => updateObjectControls(canvasEditor.selected, true));
 el.textColor.addEventListener("change", () => changeTextStyle(true));
 editorClick(el.textWrap, () => changeParagraph(!currentTextStyle().wrap));
 el.textAlign.addEventListener("change", () => changeParagraph());
@@ -1540,8 +1538,13 @@ async function insertObject(event) {
 	}
 }
 
-function textPoints(size) {
-	return Number((size * 72 / 25.4).toFixed(2));
+function displayPoints(length) {
+	return Number((length * 72 / 25.4).toPrecision(6));
+}
+
+function inputMillimeters(input, original) {
+	const points = Number(input.value);
+	return points === displayPoints(original) ? original : points * 25.4 / 72;
 }
 
 async function changeParagraph(wrap = currentTextStyle().wrap) {
@@ -1551,14 +1554,12 @@ async function changeParagraph(wrap = currentTextStyle().wrap) {
 		updateObjectControls(item, true);
 		return;
 	}
-	const points = Number(el.textLineHeight.value);
-	const height = points === textPoints(item.paragraphHeight || 0) ? item.paragraphHeight || 0 : points * 25.4 / 72;
+	const height = inputMillimeters(el.textLineHeight, item.paragraphHeight || 0);
 	if (!el.textSpacing.checkValidity()) {
 		updateObjectControls(canvasEditor.selected, true);
 		return;
 	}
-	const spacingPoints = Number(el.textSpacing.value);
-	const spacing = spacingPoints === textPoints(item.letterSpacing || 0) ? item.letterSpacing || 0 : spacingPoints * 25.4 / 72;
+	const spacing = inputMillimeters(el.textSpacing, item.letterSpacing || 0);
 	if (item === state.textDefaults) {
 		Object.assign(item, { wrap: Boolean(wrap), align: el.textAlign.value, paragraphHeight: height, letterSpacing: spacing });
 		updateObjectControls(canvasEditor.selected, true);
@@ -1582,7 +1583,7 @@ async function changeTextStyle(color) {
 		updateObjectControls(item, true);
 		return;
 	}
-	const size = color || Number(el.textSize.value) === Number(el.textSize.defaultValue) ? item.size : Number(el.textSize.value) * 25.4 / 72;
+	const size = color ? item.size : inputMillimeters(el.textSize, item.size);
 	const fill = color && el.textColor.value !== item.color ? el.textColor.value : null;
 	if (item.items) {
 		if (color ? !canEditObject(item, "update") : !canEditObject(item, "layoutKnown") || !canEditObject(item, "reflow")) return;
@@ -1615,17 +1616,13 @@ function shapeStyle() {
 		lineWidth: Number(el.shapeWidth.value) * 25.4 / 72 };
 }
 
-function strokePoints(width) {
-	return Number((width * 72 / 25.4).toPrecision(6));
-}
-
 async function changeShapeStyle() {
 	const item = canvasEditor.selected;
 	if (!state.editing || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
 	if (!el.shapeWidth.checkValidity() || Number(el.shapeWidth.value) <= 0) {
-		el.shapeWidth.value = String(item?.type === "PathObject" ? strokePoints(item.lineWidth) : 1);
+		el.shapeWidth.value = String(item?.type === "PathObject" ? displayPoints(item.lineWidth) : 1);
 		return;
 	}
 	if (!el.shapeFill.checked && !el.shapeStroke.checked) {
@@ -1634,8 +1631,10 @@ async function changeShapeStyle() {
 	const style = shapeStyle();
 	if (item?.type === "PathObject") {
 		await changeDocument("ofdgoUpdatePathStyle", item, style.fill, style.fillColor, style.stroke, style.strokeColor,
-			Number(el.shapeWidth.value) === strokePoints(item.lineWidth) ? item.lineWidth : style.lineWidth);
+			inputMillimeters(el.shapeWidth, item.lineWidth));
 		updateObjectControls(canvasEditor.selected, true);
+	} else {
+		el.shapeWidth.value = String(Number(el.shapeWidth.value));
 	}
 	updateDrawingControls();
 }
@@ -3682,11 +3681,14 @@ function updatePageListCurrent(force = false) {
 		if (state.showPages && !el.pageList.hidden) {
 			const panel = el.pageListPanel.getBoundingClientRect();
 			const item = next.getBoundingClientRect();
-			const top = panel.top + Number.parseFloat(getComputedStyle(next).scrollMarginTop);
+			const style = getComputedStyle(el.pageListPanel);
+			const top = Math.max(panel.top + Number.parseFloat(style.paddingTop),
+				el.navigationTabs.getBoundingClientRect().bottom + Number.parseFloat(getComputedStyle(el.navigationTabs).marginBottom));
+			const bottom = panel.bottom - Number.parseFloat(style.paddingBottom);
 			if (item.top < top) {
 				el.pageListPanel.scrollTop += item.top - top;
-			} else if (item.bottom > panel.bottom) {
-				el.pageListPanel.scrollTop += Math.min(item.top - top, item.bottom - panel.bottom);
+			} else if (item.bottom > bottom) {
+				el.pageListPanel.scrollTop += Math.min(item.top - top, item.bottom - bottom);
 			}
 		}
 	}
@@ -5123,18 +5125,17 @@ function updateObjectControls(item, reset = false) {
 	el.textSpacing.placeholder = layoutKnown ? "0" : "原文";
 	el.textWrap.setAttribute("aria-pressed", String(Boolean(text.wrap)));
 	if (reset || document.activeElement !== el.textLineHeight) {
-		el.textLineHeight.value = text.paragraphHeight ? String(textPoints(text.paragraphHeight)) : "";
+		el.textLineHeight.value = text.paragraphHeight ? String(displayPoints(text.paragraphHeight)) : "";
 	}
 	if (reset || document.activeElement !== el.textSpacing) {
-		el.textSpacing.value = text.letterSpacing ? String(textPoints(text.letterSpacing)) : "";
+		el.textSpacing.value = text.letterSpacing ? String(displayPoints(text.letterSpacing)) : "";
 	}
 	updateTextFonts(item);
 	if (reset || el.textSize.disabled || document.activeElement !== el.textSize) {
-		el.textSize.value = text.size === undefined ? "" : document.activeElement === el.textSize ? textPoints(text.size) : Math.round(textPoints(text.size));
-		el.textSize.defaultValue = el.textSize.value;
+		el.textSize.value = text.size === undefined ? "" : displayPoints(text.size);
 	}
 	el.textSize.placeholder = text.size === undefined ? "混合" : "";
-	el.textSize.title = text.size === undefined ? "字号：混合" : `字号 ${textPoints(text.size)} pt`;
+	el.textSize.title = text.size === undefined ? "字号：混合" : `字号 ${displayPoints(text.size)} pt`;
 	el.textColor.classList.toggle("mixed-color", Boolean(selection?.items && !text.color));
 	el.textColor.title = selection?.items && !text.color ? "文字颜色：混合" : "文字颜色";
 	if (reset || el.textColor.disabled || document.activeElement !== el.textColor) {
@@ -5146,7 +5147,7 @@ function updateObjectControls(item, reset = false) {
 		el.shapeFillColor.value = item.fillColor;
 		el.shapeStrokeColor.value = item.strokeColor;
 		if (reset || document.activeElement !== el.shapeWidth) {
-			el.shapeWidth.value = strokePoints(item.lineWidth);
+			el.shapeWidth.value = displayPoints(item.lineWidth);
 		}
 	}
 	updateDrawingControls();

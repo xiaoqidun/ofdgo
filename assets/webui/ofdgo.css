@@ -138,8 +138,7 @@ a:focus-visible {
 	display: grid;
 	align-items: center;
 	grid-column: 1 / -1;
-	grid-template-columns: 2em 86px;
-	justify-content: space-between;
+	grid-template-columns: 2em minmax(0, 1fr);
 	gap: 6px;
 	white-space: nowrap;
 }
@@ -190,7 +189,7 @@ a:focus-visible {
 }
 
 .editor-paragraph {
-	grid-template-columns: 54px max-content;
+	grid-template-columns: 54px 120px;
 }
 
 .editor-group:has(#shapeFill) {
@@ -871,6 +870,7 @@ body[data-hide-meta] .meta-panel {
 .outline-list summary,
 .outline-link {
 	scroll-margin-top: 51px;
+	scroll-margin-bottom: 12px;
 }
 
 .meta-panel {
@@ -954,6 +954,7 @@ body[data-hide-meta] .meta-panel {
 	padding-top: 12px;
 	border-bottom: 1px solid var(--line);
 	background: var(--panel);
+	box-shadow: 0 10px var(--panel);
 }
 
 .navigation-tabs button {
@@ -1133,7 +1134,7 @@ button.outline-link:hover {
 
 .page-list {
 	display: grid;
-	gap: 8px;
+	gap: 12px;
 }
 
 .page-list-item {
