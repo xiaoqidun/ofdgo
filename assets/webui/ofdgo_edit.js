@@ -33,13 +33,10 @@ export function objectTransform(box, dx, dy, corner = "") {
 }
 
 export function textTransform(box, dx, dy, corner) {
-	if (!corner) return objectTransform(box, dx, dy);
-	const left = corner.includes("w"), top = corner.includes("n");
-	const horizontal = (left ? -dx : dx) / box.width;
-	const vertical = (top ? -dy : dy) / box.height;
-	const delta = corner.length === 1 || Math.abs(vertical) > Math.abs(horizontal) ? vertical : horizontal;
-	const scale = Math.max(Math.min(1, 1 / box.height), 1 + delta);
-	return { x: corner.length === 1 ? box.width * (1 - scale) / 2 : left ? box.width * (1 - scale) : 0,
+	if (corner !== "n" && corner !== "s") return objectTransform(box, dx, dy, corner);
+	const top = corner === "n";
+	const scale = Math.max(Math.min(1, 1 / box.height), 1 + (top ? -dy : dy) / box.height);
+	return { x: box.width * (1 - scale) / 2,
 		y: top ? box.height * (1 - scale) : 0, scale };
 }
 
@@ -567,15 +564,6 @@ export class CanvasEditor {
 		}
 		const from = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.item.page, drag.rotation);
 		const to = pagePoint(event.clientX, event.clientY, drag.rect, drag.item.page, drag.rotation);
-		if (!drag.box && !drag.change && drag.item.type === "TextObject" && (drag.corner === "w" || drag.corner === "e")) {
-			const scale = (drag.rotation % 180 ? drag.rect.width : drag.rect.height) / drag.item.page.height;
-			const dx = to.x - from.x, dy = to.y - from.y;
-			const frame = drag.item.textFrame;
-			if ((!frame || frame.matrix[0] > 0 && frame.matrix[3] > 0)
-				&& drag.item.height * scale < 28 && Math.abs(dy) * scale >= 3 && Math.abs(dy) > Math.abs(dx) / 2) {
-				drag.corner = (dy < 0 ? "n" : "s") + drag.corner;
-			}
-		}
 		if (drag.item.type === "TextObject" && (drag.corner === "w" || drag.corner === "e")) {
 			if (drag.item.textFrame) {
 				const frame = drag.item.textFrame, [a, b, c, d] = frame.matrix;
@@ -653,7 +641,7 @@ export class CanvasEditor {
 				const from = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.page, drag.rotation);
 				const x = Math.max(0, Math.min(from.x, drag.page.width - 1));
 				const y = Math.max(0, Math.min(from.y, drag.page.height - 1));
-				const box = drag.box || { x, y, width: Math.min(80, drag.page.width - x), height: 5 };
+				const box = drag.box ? { ...drag.box, wrap: true } : { x, y, width: Math.min(80, drag.page.width - x), height: 5, wrap: false };
 				drag.preview.remove();
 				this.setTool("");
 				this.options.onDrawText(drag.page.index, box, drag.surface, drag.page);
