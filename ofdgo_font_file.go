@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/tdewolff/font"
 )
@@ -94,6 +95,35 @@ func (f FontFile) Face(index int) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.Clone(data), nil
+}
+
+// MissingGlyphs 检查指定字体的字符覆盖，不注册资源或修改文档，忽略段落换行
+// 入参: index 零起始字体索引, text 待检查文字
+// 返回: string 按首次出现顺序去重的缺失字符, error 字体或文字格式错误
+func (f FontFile) MissingGlyphs(index int, text string) (string, error) {
+	if !utf8.ValidString(text) {
+		return "", fmt.Errorf("text must be UTF-8")
+	}
+	data, err := f.Face(index)
+	if err != nil {
+		return "", err
+	}
+	sfnt, err := font.ParseSFNT(data, 0)
+	if err != nil {
+		return "", err
+	}
+	seen := make(map[rune]bool)
+	var missing strings.Builder
+	for _, char := range text {
+		if char == '\r' || char == '\n' || seen[char] {
+			continue
+		}
+		seen[char] = true
+		if sfnt.GlyphIndex(char) == 0 {
+			missing.WriteRune(char)
+		}
+	}
+	return missing.String(), nil
 }
 
 // fontFileCount 校验字体或集合头并读取字体数量

@@ -58,12 +58,69 @@ func missingGlyphError(id string, characters []rune) error {
 
 // TextLayout 本地横向段落选项，Wrap按CTM变换前的边界宽度折行，Align为left、center、right或justify
 // LineHeight为毫米单位的基线间距，0使用字体度量；LetterSpacing为字素间的附加毫米间距，可为负
+// LeftIndent和RightIndent为左右缩进，FirstLineIndent为每段首行相对左缩进的偏移，单位为毫米
 // 零值保持显式换行和左对齐
 type TextLayout struct {
-	Wrap          bool
-	Align         string
-	LineHeight    float64
-	LetterSpacing float64
+	Wrap            bool
+	Align           string
+	LineHeight      float64
+	LetterSpacing   float64
+	LeftIndent      float64
+	RightIndent     float64
+	FirstLineIndent float64
+}
+
+// TextStyle 文字样式增量，Font和Color为空、Size为0时保留原值
+// Size单位为毫米，Color为OFD的RGB分量字符串，保留原颜色透明度
+type TextStyle struct {
+	Font  string
+	Size  float64
+	Color string
+}
+
+// StyleText 原子更新同页文字样式，全部校验通过后提交一次撤销记录
+// 已知段落重新排版；原布局未知时替换字体和颜色保留坐标，不允许自动调整字号
+// 入参: page 页面索引, ids 文字对象标识, style 样式增量
+// 返回: error 错误信息
+func (e *Editor) StyleText(page int, ids []string, style TextStyle) error {
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil {
+		return err
+	}
+	updates := make([]GraphicObject, len(objects))
+	for i, object := range objects {
+		id := editorObjectID(object)
+		if object.Type != "TextObject" {
+			return fmt.Errorf("object %q is not text", id)
+		}
+		updates[i] = cloneEditorData(object)
+		text := &updates[i].TextObject
+		value, layout := text.TextLayout()
+		known := e.objectOrigin(id) == nil || text.layout != nil
+		fontChanged := style.Font != "" && style.Font != text.Font
+		sizeChanged := style.Size != 0 && style.Size != text.Size
+		if sizeChanged && !known {
+			return &EditError{Code: EditUnsupportedObject, Err: fmt.Errorf("object %q requires explicit paragraph layout before changing size", id)}
+		}
+		if fontChanged {
+			text.Font = style.Font
+		}
+		if sizeChanged {
+			text.Size = style.Size
+		}
+		if known && (fontChanged || sizeChanged) {
+			if err := e.LayoutText(text, value, layout); err != nil {
+				return err
+			}
+		}
+		if style.Color != "" {
+			if text.FillColor == nil {
+				text.FillColor = &FillColor{}
+			}
+			text.FillColor.Value = style.Color
+		}
+	}
+	return e.UpdateObjects(page, updates)
 }
 
 // textLayout 保存编辑中的原文与选项，不写入OFD，也不参与渲染
@@ -83,9 +140,9 @@ func (obj TextObject) TextLayout() (string, TextLayout) {
 }
 
 // breakTextLines 优先使用Unicode断行机会，过长词仅在字素边界折行，不丢弃空白
-// 入参: runes 段落字符, advances 含字距的字符步进, width 本地排版宽度, wrap 是否自动折行, spacing 附加字距
+// 入参: runes 段落字符, advances 含字距的字符步进, width 本地排版宽度, wrap 是否自动折行, spacing 附加字距, indent 首行缩进
 // 返回: [][2]int 各行的字符起止索引，左闭右开
-func breakTextLines(runes []rune, advances []float64, width float64, wrap bool, spacing float64) [][2]int {
+func breakTextLines(runes []rune, advances []float64, width float64, wrap bool, spacing, indent float64) [][2]int {
 	if !wrap || len(runes) == 0 {
 		return [][2]int{{0, len(runes)}}
 	}
@@ -107,6 +164,10 @@ func breakTextLines(runes []rune, advances []float64, width float64, wrap bool, 
 	}
 	var lines [][2]int
 	for start, cursor := 0, 0; start < len(runes); {
+		available := width
+		if start == 0 {
+			available -= indent
+		}
 		end, legal, next := start, start, cursor
 		for next < len(ends) {
 			candidate := ends[next]
@@ -118,7 +179,7 @@ func breakTextLines(runes []rune, advances []float64, width float64, wrap bool, 
 			if visible > start {
 				length -= spacing
 			}
-			if length > width && end > start {
+			if length > available && end > start {
 				break
 			}
 			end = candidate
@@ -126,7 +187,7 @@ func breakTextLines(runes []rune, advances []float64, width float64, wrap bool, 
 			if breaks[end] {
 				legal = end
 			}
-			if length > width {
+			if length > available {
 				break
 			}
 		}

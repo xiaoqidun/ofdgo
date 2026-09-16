@@ -123,7 +123,7 @@
 				<label class="editor-field"><span>行距</span><span class="editor-number"><input id="textLineHeight" type="number" min="0" step="any" placeholder="自动" aria-label="行距" title="行距，0为自动" disabled><span>pt</span></span></label>
 				<button id="textWrap" class="button" type="button" aria-label="自动折行" aria-pressed="false" disabled>折行</button>
 				<label class="editor-field"><span>字距</span><span class="editor-number"><input id="textSpacing" type="number" step="any" placeholder="0" aria-label="字距" title="字距" disabled><span>pt</span></span></label>
-				<span>段落</span>
+				<button id="paragraphButton" class="editor-group-action" type="button" title="段落缩进" aria-label="段落缩进" aria-haspopup="dialog" aria-controls="paragraphPanel" disabled>段落</button>
 			</div>
 			<div class="editor-group">
 				<div class="shape-paint"><label><input id="shapeFill" type="checkbox">填充</label><input id="shapeFillColor" class="color-input" type="color" value="#dcefeb" aria-label="填充颜色" title="填充颜色"></div>
@@ -155,7 +155,7 @@
 				<span>变换</span>
 			</div>
 			<div class="editor-group">
-				<button id="addPageButton" class="button" type="button" aria-label="新增页面">新增</button>
+				<select id="addPageButton" aria-label="新增页面" title="新增页面"><option value="" hidden>新增</option><option value="blank">空白</option><option value="import">插页</option></select>
 				<button id="copyPageButton" class="button" type="button" aria-label="复制页面">复制</button>
 				<button id="deletePageButton" class="button" type="button" aria-label="删除页面">删除</button>
 				<button id="movePagePrevButton" class="button" type="button" aria-label="页面前移">前移</button>
@@ -185,6 +185,25 @@
 					<button id="createCancel" class="button" type="button">取消</button>
 					<button class="button" type="submit">新建</button>
 				</div>
+			</form>
+		</dialog>
+		<dialog id="importPanel" class="form-dialog" aria-label="插入页面">
+			<form id="importForm">
+				<div class="form-row"><label for="importFile">文档</label><input id="importFile" type="file" accept=".ofd" required autofocus></div>
+				<div class="form-row"><label for="importRange">范围</label><select id="importRange"><option value="all">全部</option><option value="custom">指定</option></select></div>
+				<div id="importPagesRow" class="form-row" hidden><label for="importPages">页码</label><input id="importPages" type="text" autocomplete="off" spellcheck="false" disabled></div>
+				<div class="form-row"><label for="importPosition">位置</label><select id="importPosition"><option value="before">页前</option><option value="after" selected>页后</option><option value="first">首部</option><option value="last">末尾</option></select></div>
+				<div class="form-actions"><div id="importStatus" class="form-status" role="status"></div><button id="importCancel" class="button" type="button">取消</button><button id="importSubmit" class="button" type="submit" disabled>插入</button></div>
+			</form>
+		</dialog>
+		<dialog id="paragraphPanel" class="form-dialog" aria-label="段落缩进">
+			<form id="paragraphForm">
+				<div class="form-row"><label for="firstLineIndent">首行</label><div class="form-unit"><input id="firstLineIndent" type="number" step="any" required autofocus><span>mm</span></div></div>
+				<div class="form-pair">
+					<div class="form-row"><label for="leftIndent">左侧</label><div class="form-unit"><input id="leftIndent" type="number" step="any" required><span>mm</span></div></div>
+					<div class="form-row"><label for="rightIndent">右侧</label><div class="form-unit"><input id="rightIndent" type="number" step="any" required><span>mm</span></div></div>
+				</div>
+				<div class="form-actions"><div id="paragraphStatus" class="form-status" role="status"></div><button id="paragraphCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
 		<dialog id="pagePanel" class="form-dialog" aria-label="页面设置">

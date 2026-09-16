@@ -1,4 +1,4 @@
-import { CanvasEditor, canEditObject, missingGlyphMessage, objectEditReason } from "./ofdgo_edit.js";
+import { CanvasEditor, canEditObject, missingGlyphMessage, objectEditReason, selectedText } from "./ofdgo_edit.js";
 import { FontManager, FontPicker } from "./ofdgo_font.js";
 
 const MM_TO_PX = 96 / 25.4;
@@ -38,6 +38,7 @@ const state = {
 	editorInfo: null,
 	savedRevision: null,
 	insertObject: null,
+	importPageCount: 0,
 	objectClipboard: null,
 	textFonts: [],
 	textFontID: null,
@@ -114,6 +115,24 @@ const el = {
 	textFontToggle: document.querySelector("#textFontToggle"),
 	textFontList: document.querySelector("#textFontList"),
 	textFontAdd: document.querySelector("#textFontAdd"),
+	paragraphButton: document.querySelector("#paragraphButton"),
+	paragraphPanel: document.querySelector("#paragraphPanel"),
+	paragraphForm: document.querySelector("#paragraphForm"),
+	paragraphCancel: document.querySelector("#paragraphCancel"),
+	paragraphStatus: document.querySelector("#paragraphStatus"),
+	leftIndent: document.querySelector("#leftIndent"),
+	rightIndent: document.querySelector("#rightIndent"),
+	firstLineIndent: document.querySelector("#firstLineIndent"),
+	importPanel: document.querySelector("#importPanel"),
+	importForm: document.querySelector("#importForm"),
+	importFile: document.querySelector("#importFile"),
+	importRange: document.querySelector("#importRange"),
+	importPagesRow: document.querySelector("#importPagesRow"),
+	importPages: document.querySelector("#importPages"),
+	importPosition: document.querySelector("#importPosition"),
+	importStatus: document.querySelector("#importStatus"),
+	importCancel: document.querySelector("#importCancel"),
+	importSubmit: document.querySelector("#importSubmit"),
 	textSize: document.querySelector("#textSize"),
 	textColor: document.querySelector("#textColor"),
 	drawLineButton: document.querySelector("#drawLineButton"),
@@ -270,7 +289,7 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onTransform: (item, change) => changeDocument(item.items ? "ofdgoTransformObjects" : "ofdgoTransformObject", item,
 		change.x + item.x * (1 - change.scale), change.y + item.y * (1 - change.scale), change.scale),
 	onReshape: (item, box) => changeDocument("ofdgoReshapeObject", item, box.x, box.y, box.width, box.height),
-	onTextWidth: (item, box) => changeDocument("ofdgoLayoutText", item, box.x - item.x, box.width, true, item.align || "", item.paragraphHeight || 0, item.letterSpacing || 0),
+	onTextWidth: (item, box) => changeDocument("ofdgoLayoutText", item, box.x - item.x, box.width, true, item.align || "", item.paragraphHeight || 0, item.letterSpacing || 0, ...textIndents(item)),
 	onCrop: (item, box) => changeDocument("ofdgoCropImage", item, box.x, box.y, box.width, box.height),
 	onCropChange: () => {
 		updatePendingChanges();
@@ -294,7 +313,7 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 		box.x, box.y, box.width, box.height, style.fill, style.fillColor, style.stroke, style.strokeColor, style.lineWidth),
 	onDrawText: beginCanvasText,
 	onCommitText: (item, value, fontData) => item.draft
-		? changeDocument("ofdgoInsertText", null, item.index, value, fontData || item.fontData, item.x, item.y, item.size, item.color, item.width, item.wrap, item.align, item.paragraphHeight, item.letterSpacing)
+		? changeDocument("ofdgoInsertText", null, item.index, value, fontData || item.fontData, item.x, item.y, item.size, item.color, item.width, item.wrap, item.align, item.paragraphHeight, item.letterSpacing, ...textIndents(item))
 		: changeDocument("ofdgoUpdateText", item, value, fontData || null, item.size, null),
 	onTextChange: () => {
 		const editing = canvasEditor.input;
@@ -357,6 +376,28 @@ el.textColor.addEventListener("change", () => changeTextStyle(true));
 editorClick(el.textWrap, () => changeParagraph(!currentTextStyle().wrap));
 el.textAlign.addEventListener("change", () => changeParagraph());
 el.textLineHeight.addEventListener("change", () => changeParagraph());
+editorClick(el.paragraphButton, () => {
+	const item = currentTextStyle();
+	for (const key of ["leftIndent", "rightIndent", "firstLineIndent"]) el[key].value = item[key] || 0;
+	el.paragraphStatus.textContent = "";
+	el.paragraphPanel.showModal();
+});
+el.paragraphCancel.addEventListener("click", () => el.paragraphPanel.close());
+el.paragraphForm.addEventListener("submit", async event => {
+	event.preventDefault();
+	if (document.body.hasAttribute("aria-busy") || !el.paragraphForm.reportValidity()) return;
+	const item = currentTextStyle();
+	const indents = Object.fromEntries(["leftIndent", "rightIndent", "firstLineIndent"].map(key => [key, Number(el[key].value)]));
+	if (item === state.textDefaults) {
+		Object.assign(item, indents);
+	} else {
+		if (!confirmTextReflow(item)) return;
+		const saved = await changeDocument("ofdgoLayoutText", item, null, null, Boolean(item.wrap), item.align || "left",
+			item.paragraphHeight || 0, item.letterSpacing || 0, ...textIndents(indents));
+		if (!saved) return;
+	}
+	el.paragraphPanel.close();
+});
 el.textSpacing.addEventListener("change", () => changeParagraph());
 el.shapeWidth.addEventListener("focus", () => { el.shapeWidth.defaultValue = el.shapeWidth.value; });
 for (const input of [el.textSize, el.shapeWidth, el.textLineHeight, el.textSpacing]) {
@@ -455,9 +496,35 @@ for (const [button, tool] of [[el.drawLineButton, "line"], [el.drawRectangleButt
 for (const input of [el.shapeFill, el.shapeFillColor, el.shapeStroke, el.shapeStrokeColor, el.shapeWidth]) {
 	input.addEventListener("change", changeShapeStyle);
 }
-editorClick(el.addPageButton, () => {
+el.addPageButton.addEventListener("change", async () => {
+	const action = el.addPageButton.value;
+	el.addPageButton.value = "";
+	if (canvasEditor.input && !await canvasEditor.commitText()) return;
+	if (canvasEditor.crop && !await canvasEditor.commitCrop()) return;
+	if (action === "import") { openImportPanel(); return; }
 	const page = currentPageInfo();
 	return changeDocument("ofdgoChangePage", null, "add", state.pageIndex, page.width, page.height);
+});
+el.importCancel.addEventListener("click", () => el.importPanel.close());
+el.importPanel.addEventListener("close", () => {
+	state.importPageCount = 0;
+	el.importForm.reset();
+	if (state.ready) callWASM("ofdgoLoadImport", null).catch(err => showError(err, false));
+});
+el.importFile.addEventListener("change", loadImportFile);
+el.importRange.addEventListener("change", () => {
+	const custom = el.importRange.value === "custom";
+	el.importPagesRow.hidden = !custom;
+	el.importPages.disabled = !custom;
+	el.importPages.required = custom;
+	if (custom) el.importPages.focus();
+});
+el.importForm.addEventListener("submit", async event => {
+	event.preventDefault();
+	if (document.body.hasAttribute("aria-busy") || !state.importPageCount || !el.importForm.reportValidity()) return;
+	const position = { before:state.pageIndex, after:state.pageIndex+1, first:0, last:state.doc.pageCount }[el.importPosition.value];
+	const saved = await changeDocument("ofdgoImportPages", null, el.importRange.value === "custom" ? el.importPages.value : "", position);
+	if (saved) el.importPanel.close();
 });
 editorClick(el.copyPageButton, () => changeDocument("ofdgoChangePage", null, "copy", state.pageIndex));
 editorClick(el.deletePageButton, () => changeDocument("ofdgoChangePage", null, "delete", state.pageIndex));
@@ -712,7 +779,45 @@ function handleKeyDown(event) {
 }
 
 function formDialogOpen() {
-	return el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open;
+	return el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open;
+}
+
+function openImportPanel() {
+	if (!state.editing || document.body.hasAttribute("aria-busy")) return;
+	state.importPageCount = 0;
+	el.importForm.reset();
+	el.importStatus.textContent = "";
+	el.importSubmit.disabled = true;
+	el.importPagesRow.hidden = true;
+	el.importPages.disabled = true;
+	el.importPages.required = false;
+	el.importPanel.showModal();
+}
+
+async function loadImportFile() {
+	const file = el.importFile.files[0];
+	const openSeq = state.openSeq;
+	state.importPageCount = 0;
+	el.importSubmit.disabled = true;
+	el.importStatus.textContent = "";
+	setBusy(true);
+	try {
+		const data = file ? new Uint8Array(await file.arrayBuffer()) : null;
+		if (openSeq !== state.openSeq) return;
+		const info = await callWASM("ofdgoLoadImport", data);
+		if (openSeq !== state.openSeq || !el.importPanel.open) {
+			await callWASM("ofdgoLoadImport", null);
+			return;
+		}
+		state.importPageCount = info?.pageCount || 0;
+		el.importPages.title = state.importPageCount ? `页码 1-${state.importPageCount}` : "页码";
+		el.importStatus.textContent = info?.signed ? "保留签章外观，原签名不再有效" : "";
+		el.importSubmit.disabled = !state.importPageCount;
+	} catch (err) {
+		if (openSeq === state.openSeq && el.importPanel.open) el.importStatus.textContent = err.message;
+	} finally {
+		if (openSeq === state.openSeq) setBusy(false);
+	}
 }
 
 function openPagePanel() {
@@ -943,7 +1048,11 @@ function openInsertPanel(item = null) {
 }
 
 function currentTextStyle() {
-	return canvasEditor.selected?.type === "TextObject" ? canvasEditor.selected : state.textDefaults;
+	return selectedText(canvasEditor.selected) || state.textDefaults;
+}
+
+function textIndents(item) {
+	return [item.leftIndent || 0, item.rightIndent || 0, item.firstLineIndent || 0];
 }
 
 async function toggleTextTool() {
@@ -958,10 +1067,11 @@ async function toggleTextTool() {
 		updateTextFonts(canvasEditor.selected, true);
 	}
 	if (openSeq !== state.openSeq) return;
-	const style = canEditObject(canvasEditor.selected, "layoutKnown") ? currentTextStyle() : state.textDefaults;
+	const style = !canvasEditor.selected?.items && canEditObject(canvasEditor.selected, "layoutKnown") ? currentTextStyle() : state.textDefaults;
 	const font = state.textFonts[Number(fontPicker.value)];
 	state.textDefaults = { type: "TextObject", size: style.size, color: style.color, wrap: style.wrap,
 		align: style.align || "left", paragraphHeight: style.paragraphHeight || 0, letterSpacing: style.letterSpacing || 0,
+		leftIndent: style.leftIndent || 0, rightIndent: style.rightIndent || 0, firstLineIndent: style.firstLineIndent || 0,
 		fontChoice: font && !font.disabled ? font : state.textDefaults.fontChoice };
 	state.selectObjects = true;
 	setPan(false);
@@ -1045,22 +1155,25 @@ async function readTextFont(font) {
 }
 
 function updateTextFonts(item, refresh = false) {
+	item = selectedText(item);
 	const id = item?.type === "TextObject" && !item.draft ? item.font : null;
-	if (refresh || state.textFontID !== id) {
-		state.textFontID = id;
+	const key = item?.items ? `selection:${item.items.map(member => member.id).join(",")}:${id || ""}` : id;
+	if (refresh || state.textFontID !== key) {
+		state.textFontID = key;
 		state.textFonts = editorFonts(id ? item : null);
 		const selected = canvasEditor.input?.fontChoice || (id ? state.textFonts[0] : state.textDefaults.fontChoice);
 		if (selected && (canvasEditor.input || selected.embedded)
 			&& !state.textFonts.some(font => (font.id || font.postscriptName) === (selected.id || selected.postscriptName))) {
 			state.textFonts.unshift(selected);
 		}
-		fontPicker.setFonts(state.textFonts, selected || state.textFonts[0]);
-		if (!id) state.textDefaults.fontChoice = state.textFonts[Number(fontPicker.value)];
+		fontPicker.setFonts(state.textFonts, item?.items && !id ? null : selected || state.textFonts[0]);
+		el.textFont.placeholder = item?.items && !id ? "混合" : "";
+		if (!id && !item?.items) state.textDefaults.fontChoice = state.textFonts[Number(fontPicker.value)];
 	}
 }
 
 async function changeTextFont() {
-	const item = canvasEditor.selected;
+	const item = selectedText(canvasEditor.selected);
 	const font = state.textFonts[Number(fontPicker.value)];
 	if (!state.ready || document.body.hasAttribute("aria-busy") || !font || font.disabled) return;
 	const editing = canvasEditor.input;
@@ -1069,6 +1182,7 @@ async function changeTextFont() {
 		setBusy(true);
 		try {
 			const data = await readTextFont(font);
+			await callWASM("ofdgoCheckTextFont", data, editing.input.value);
 			const face = new FontFace("ofdgo-edit-font", data);
 			await face.load();
 			if (openSeq !== state.openSeq || canvasEditor.input !== editing) return;
@@ -1084,8 +1198,8 @@ async function changeTextFont() {
 			if (openSeq === state.openSeq) setBusy(false);
 		}
 	} else if (item?.type === "TextObject") {
-		if (!font.embedded && canEditObject(item, "replaceFont")) {
-			await changeDocument("ofdgoUpdateText", item, canEditObject(item, "layoutKnown") ? item.text : null, readTextFont(font), item.size, null);
+		if (canEditObject(item, "replaceFont") && (!font.embedded || item.font !== font.id.slice(9))) {
+			await changeDocument("ofdgoStyleText", { ...item, id: (item.items || [item]).map(member => member.id) }, readTextFont(font), 0, null);
 			updateTextFonts(canvasEditor.selected, true);
 		}
 	} else {
@@ -1174,7 +1288,7 @@ async function changeParagraph(wrap = currentTextStyle().wrap) {
 		updateObjectControls(item, true);
 		return;
 	}
-	await changeDocument("ofdgoLayoutText", item, null, null, Boolean(wrap), el.textAlign.value, height, spacing);
+	await changeDocument("ofdgoLayoutText", item, null, null, Boolean(wrap), el.textAlign.value, height, spacing, ...textIndents(item));
 	updateObjectControls(canvasEditor.selected, true);
 }
 
@@ -1190,6 +1304,15 @@ async function changeTextStyle(color) {
 	}
 	const size = color || Number(el.textSize.value) === Number(el.textSize.defaultValue) ? item.size : Number(el.textSize.value) * 25.4 / 72;
 	const fill = color && el.textColor.value !== item.color ? el.textColor.value : null;
+	if (item.items) {
+		if (color ? !canEditObject(item, "update") : !canEditObject(item, "layoutKnown") || !canEditObject(item, "reflow")) return;
+		if (!color && !el.textSize.value) return;
+		if (size !== item.size || fill !== null) {
+			await changeDocument("ofdgoStyleText", { ...item, id: item.items.map(member => member.id) }, null, color ? 0 : size, fill);
+		}
+		updateObjectControls(canvasEditor.selected, true);
+		return;
+	}
 	if (item === state.textDefaults) {
 		item.size = size;
 		if (fill !== null) item.color = fill;
@@ -1314,6 +1437,10 @@ async function changeDocument(name, item, ...args) {
 		if (openSeq === state.openSeq) {
 			if (el.pagePanel.open) {
 				el.pageStatus.textContent = err.message;
+			} else if (el.paragraphPanel.open) {
+				el.paragraphStatus.textContent = err.message;
+			} else if (el.importPanel.open) {
+				el.importStatus.textContent = err.message;
 			} else {
 				showError(err, false);
 			}
@@ -1825,6 +1952,8 @@ async function openOFD(file) {
 		el.createPanel.close();
 		el.insertPanel.close();
 		el.pagePanel.close();
+		el.paragraphPanel.close();
+		el.importPanel.close();
 		updateControls();
 		await openDocument({ pageIndex: 0, resetScroll: true, openSeq });
 	} catch (err) {
@@ -3049,10 +3178,10 @@ async function pasteEditorContent(event) {
 		el.textFontAdd.focus();
 		return;
 	}
-	const style = currentTextStyle();
+	const style = canvasEditor.selected?.items ? state.textDefaults : currentTextStyle();
 	const data = readTextFont(font);
 	await changeDocument("ofdgoInsertText", null, index, value, data, x, y, style.size, style.color,
-		page.width - x * 2, style.wrap, style.align || "left", style.paragraphHeight || 0, style.letterSpacing || 0);
+		page.width - x * 2, style.wrap, style.align || "left", style.paragraphHeight || 0, style.letterSpacing || 0, ...textIndents(style));
 }
 
 function copySelection(event) {
@@ -4512,13 +4641,15 @@ function updateObjectControls(item, reset = false) {
 	el.editObjectButton.disabled = disabled || Boolean(item.items) || item.type === "PathObject"
 		|| !canEditObject(item, item.type === "TextObject" ? "reflow" : "update");
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
-	const text = item?.type === "TextObject" ? item : state.textDefaults;
-	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items);
+	const selection = selectedText(item);
+	const text = selection || state.textDefaults;
+	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items && !selection);
 	fontPicker.setDisabled(textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "replaceFont"));
-	el.textSize.disabled = textDisabled || Boolean(item?.draft) || text !== state.textDefaults && !canEditObject(item, "reflow");
+	el.textSize.disabled = textDisabled || Boolean(item?.draft) || text !== state.textDefaults && (!canEditObject(item, "reflow") || Boolean(item?.items) && !canEditObject(item, "layoutKnown"));
 	el.textColor.disabled = textDisabled || Boolean(item?.draft) || text !== state.textDefaults && !canEditObject(item, "update");
 	el.textFontAdd.disabled = !state.editing || !state.ready || state.exporting;
-	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled;
+	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled || Boolean(item?.items);
+	el.paragraphButton.disabled = el.textAlign.disabled;
 	const layoutKnown = text === state.textDefaults || Boolean(item?.draft) || canEditObject(item, "layoutKnown");
 	el.textAlign.value = layoutKnown ? text.align || "left" : "";
 	el.textLineHeight.placeholder = layoutKnown ? "自动" : "原文";
@@ -4532,10 +4663,13 @@ function updateObjectControls(item, reset = false) {
 	}
 	updateTextFonts(item);
 	if (reset || el.textSize.disabled || document.activeElement !== el.textSize) {
-		el.textSize.value = document.activeElement === el.textSize ? textPoints(text.size) : Math.round(textPoints(text.size));
+		el.textSize.value = text.size === undefined ? "" : document.activeElement === el.textSize ? textPoints(text.size) : Math.round(textPoints(text.size));
 		el.textSize.defaultValue = el.textSize.value;
 	}
-	el.textSize.title = `字号 ${textPoints(text.size)} pt`;
+	el.textSize.placeholder = text.size === undefined ? "混合" : "";
+	el.textSize.title = text.size === undefined ? "字号：混合" : `字号 ${textPoints(text.size)} pt`;
+	el.textColor.classList.toggle("mixed-color", Boolean(selection?.items && !text.color));
+	el.textColor.title = selection?.items && !text.color ? "文字颜色：混合" : "文字颜色";
 	if (reset || el.textColor.disabled || document.activeElement !== el.textColor) {
 		el.textColor.value = text.color || "#000000";
 	}
@@ -4589,6 +4723,7 @@ async function callWASM(name, ...args) {
 				args[0] = args[0].slice();
 				transfer.push(args[0].buffer);
 			}
+			if (name === "ofdgoLoadImport" && args[0]) transfer.push(args[0].buffer);
 			wasmWorker.postMessage({ id, name, args }, transfer);
 		} catch (err) {
 			wasmRequests.delete(id);
@@ -4610,6 +4745,8 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	el.createForm.inert = busy;
 	el.insertForm.inert = busy;
 	el.pageForm.inert = busy;
+	el.paragraphForm.inert = busy;
+	el.importForm.inert = busy;
 	el.editorTools.inert = busy;
 	el.fontList.inert = busy;
 	if (!busy) {

@@ -28,6 +28,7 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"strings"
 	"syscall/js"
 
 	"github.com/xiaoqidun/ofdgo"
@@ -76,12 +77,16 @@ func awaitExport(fn js.Value, args ...any) error {
 // currentSession 当前WebUI文档会话
 var currentSession *Session
 
+// pendingImport 待插页文档，仅保留文件数据与索引，不创建渲染会话
+var pendingImport *ofdgo.Reader
+
 // apiResult 浏览器接口返回结果
 type apiResult struct {
 	OK            bool                     `json:"ok"`
 	Error         string                   `json:"error,omitempty"`
 	Data          any                      `json:"data,omitempty"`
 	MissingGlyphs *ofdgo.MissingGlyphError `json:"missingGlyphs,omitempty"`
+	ReasonCode    ofdgo.EditReason         `json:"reasonCode,omitempty"`
 }
 
 // RunWASM 注册浏览器WASM接口并阻塞运行
@@ -104,8 +109,12 @@ func RunWASM() {
 	registerCallback("ofdgoCreateDocument", createDocument)
 	registerCallback("ofdgoEditDocument", editDocument)
 	registerCallback("ofdgoChangePage", changePage)
+	registerCallback("ofdgoLoadImport", loadImport)
+	registerCallback("ofdgoImportPages", importPages)
 	registerCallback("ofdgoInsertText", insertText)
 	registerCallback("ofdgoUpdateText", updateText)
+	registerCallback("ofdgoStyleText", styleText)
+	registerCallback("ofdgoCheckTextFont", checkTextFont)
 	registerCallback("ofdgoInsertImage", insertImage)
 	registerCallback("ofdgoInsertShape", insertShape)
 	registerCallback("ofdgoUpdatePathStyle", updatePathStyle)
@@ -170,7 +179,13 @@ func callbackResult(fn func([]js.Value) (any, error), args []js.Value) any {
 	data, err := safeCall(fn, args)
 	if err != nil {
 		result := apiResult{Error: err.Error()}
-		errors.As(err, &result.MissingGlyphs)
+		var failure *ofdgo.EditError
+		if errors.As(err, &failure) {
+			result.ReasonCode = failure.Code
+		}
+		if errors.As(err, &result.MissingGlyphs) {
+			result.ReasonCode = ofdgo.EditMissingGlyphs
+		}
 		return encodeResult(result)
 	}
 	if result, ok := data.(js.Value); ok {
@@ -207,6 +222,7 @@ func openDocument(args []js.Value) (any, error) {
 		return nil, err
 	}
 	renderAnnotations := args[2].Bool()
+	clearImport()
 	currentEditor = nil
 	copiedObjects = nil
 	if currentSession != nil {
@@ -701,7 +717,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					return nil, err
 				}
 				item := map[string]any{"id": id, "type": object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "position": position.Index, "count": position.Count, "container": position.Container,
-					"capabilities": map[string]any{"update": capability.Update, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason}}
+					"capabilities": map[string]any{"update": capability.Update, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode)}}
 				if missing := capability.MissingGlyphs; missing != nil {
 					item["capabilities"].(map[string]any)["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
 				}
@@ -729,6 +745,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					item["text"], item["font"], item["fontName"], item["size"] = value, object.TextObject.Font, fontNames[object.TextObject.Font], object.TextObject.Size
 					item["wrap"], item["align"], item["paragraphHeight"] = layout.Wrap, layout.Align, layout.LineHeight
 					item["letterSpacing"] = layout.LetterSpacing
+					item["leftIndent"], item["rightIndent"], item["firstLineIndent"] = layout.LeftIndent, layout.RightIndent, layout.FirstLineIndent
 					if capability.Reflow {
 						frame, err := object.TextObject.TextFrame()
 						if err != nil {
@@ -992,10 +1009,79 @@ func changePage(args []js.Value) (any, error) {
 	return editorPageInfo{info, index}, nil
 }
 
+// clearImport 释放待插页文档
+func clearImport() {
+	if pendingImport != nil {
+		_ = pendingImport.Close()
+		pendingImport = nil
+	}
+}
+
+// loadImport 加载待插页文件的索引，null参数清除待处理文件
+// 入参: args OFD字节数组或null
+// 返回: any 页数及签名提示, error 错误信息
+func loadImport(args []js.Value) (any, error) {
+	clearImport()
+	if args[0].IsNull() {
+		return nil, nil
+	}
+	data, err := bytesFromJS(args[0])
+	if err != nil {
+		return nil, err
+	}
+	reader, err := ofdgo.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+	doc, err := reader.Doc()
+	if err != nil {
+		reader.Close()
+		return nil, err
+	}
+	if len(doc.Pages.Page) == 0 {
+		reader.Close()
+		return nil, fmt.Errorf("document has no pages")
+	}
+	pendingImport = reader
+	return map[string]any{"pageCount": len(doc.Pages.Page), "signed": doc.Signatures != ""}, nil
+}
+
+// importPages 插入指定来源页面并保持目标文档元数据
+// 入参: args 页码表达式，空值为全部，以及目标零基插入位置
+// 返回: any 文档信息及首个插入页, error 错误信息
+func importPages(args []js.Value) (any, error) {
+	if currentEditor == nil || pendingImport == nil {
+		return nil, fmt.Errorf("no document is ready for page import")
+	}
+	doc, err := pendingImport.Doc()
+	if err != nil {
+		return nil, err
+	}
+	var indexes []int
+	if value := strings.TrimSpace(args[0].String()); value != "" {
+		indexes, err = ofdgo.ParsePageRange(value, len(doc.Pages.Page))
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		for i := range doc.Pages.Page {
+			indexes = append(indexes, i)
+		}
+	}
+	at := args[1].Int()
+	if _, err := currentEditor.ImportPages(pendingImport, indexes, at); err != nil {
+		return nil, err
+	}
+	clearImport()
+	info, err := previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+	return editorPageInfo{info, at}, err
+}
+
 // createDocument 新建单页文档
 // 入参: args 标题、纸张宽高和注解设置
 // 返回: any 文档信息, error 错误信息
 func createDocument(args []js.Value) (any, error) {
+	clearImport()
 	editor := ofdgo.NewEditor()
 	editor.Info.Title = args[0].String()
 	if _, err := editor.AddPage(args[1].Float(), args[2].Float()); err != nil {
@@ -1070,6 +1156,13 @@ func updateText(args []js.Value) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		value := object.TextObject.Text()
+		if !args[2].IsNull() {
+			value = args[2].String()
+		}
+		if err := checkFontGlyphs(data, value); err != nil {
+			return nil, err
+		}
 		object.TextObject.Font, err = currentEditor.AddFont(FontFile{Data: data}, 0)
 		if err != nil {
 			return nil, err
@@ -1095,6 +1188,73 @@ func updateText(args []js.Value) (any, error) {
 		return editorSummary(), nil
 	}
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// checkFontGlyphs 只检查候选字体，不注册资源或改变文档
+// 入参: data 字体数据, value 待替换文字
+// 返回: error 缺字或字体格式错误
+func checkFontGlyphs(data []byte, value string) error {
+	missing, err := (FontFile{Data: data}).MissingGlyphs(0, value)
+	if err != nil {
+		return err
+	}
+	if missing != "" {
+		return &ofdgo.MissingGlyphError{Characters: missing}
+	}
+	return nil
+}
+
+// checkTextFont 为画布输入预检候选字体
+// 入参: args 字体数据和输入文字
+// 返回: any 空结果, error 缺字或字体格式错误
+func checkTextFont(args []js.Value) (any, error) {
+	data, err := bytesFromJS(args[0])
+	if err != nil {
+		return nil, err
+	}
+	return nil, checkFontGlyphs(data, args[1].String())
+}
+
+// styleText 批量修改文字样式，字体预检通过后交由库原子提交
+// 入参: args 页码、对象标识、字体数据、字号和颜色，null字体与颜色保持原值
+// 返回: any 文档信息, error 错误信息
+func styleText(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		page, ids := args[0].Int(), stringsFromJS(args[1])
+		style := ofdgo.TextStyle{Size: args[3].Float()}
+		if !args[2].IsNull() {
+			data, err := bytesFromJS(args[2])
+			if err != nil {
+				return err
+			}
+			var value strings.Builder
+			for _, id := range ids {
+				object, err := currentEditor.Object(page, id)
+				if err != nil {
+					return err
+				}
+				if object.Type != "TextObject" {
+					return fmt.Errorf("object %q is not text", id)
+				}
+				value.WriteString(object.TextObject.Text())
+			}
+			if err := checkFontGlyphs(data, value.String()); err != nil {
+				return err
+			}
+			style.Font, err = currentEditor.AddFont(FontFile{Data: data}, 0)
+			if err != nil {
+				return err
+			}
+		}
+		if !args[4].IsNull() {
+			var color ofdgo.FillColor
+			if err := setEditorColor(&color, args[4].String()); err != nil {
+				return err
+			}
+			style.Color = color.Value
+		}
+		return currentEditor.StyleText(page, ids, style)
+	})
 }
 
 // setTextColor 将浏览器RGB色值写入文字对象，保留颜色透明度
@@ -1223,7 +1383,7 @@ func updatePathStyle(args []js.Value) (any, error) {
 }
 
 // insertText 使用选定字体创建文字对象
-// 入参: args 页码、内容、字体数据、横纵坐标、字号、颜色、框宽、折行、对齐、行距和字距
+// 入参: args 页码、内容、字体数据、横纵坐标、字号、颜色、框宽、折行、对齐、行距、字距及左右和首行缩进
 // 返回: any 文档信息, error 错误信息
 func insertText(args []js.Value) (any, error) {
 	if currentEditor == nil {
@@ -1256,7 +1416,7 @@ func insertText(args []js.Value) (any, error) {
 		Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
 		Font:     fontID, Size: args[5].Float(),
 	}}
-	if err := currentEditor.LayoutText(&object.TextObject, args[1].String(), ofdgo.TextLayout{Wrap: args[8].Bool(), Align: args[9].String(), LineHeight: args[10].Float(), LetterSpacing: args[11].Float()}); err != nil {
+	if err := currentEditor.LayoutText(&object.TextObject, args[1].String(), ofdgo.TextLayout{Wrap: args[8].Bool(), Align: args[9].String(), LineHeight: args[10].Float(), LetterSpacing: args[11].Float(), LeftIndent: args[12].Float(), RightIndent: args[13].Float(), FirstLineIndent: args[14].Float()}); err != nil {
 		return nil, err
 	}
 	if err := setTextColor(&object.TextObject, args[6].String()); err != nil {
@@ -1269,7 +1429,7 @@ func insertText(args []js.Value) (any, error) {
 }
 
 // layoutText 调整文字框和段落排版，保留软换行前的原文
-// 入参: args 页码、对象标识、本地左侧偏移、宽度、折行、对齐、行距和字距
+// 入参: args 页码、对象标识、本地左侧偏移、宽度、折行、对齐、行距、字距及左右和首行缩进
 // 返回: any 文档信息, error 错误信息
 func layoutText(args []js.Value) (any, error) {
 	if currentEditor == nil {
@@ -1290,7 +1450,7 @@ func layoutText(args []js.Value) (any, error) {
 		}
 	}
 	value, _ := object.TextObject.TextLayout()
-	if err := currentEditor.LayoutText(&object.TextObject, value, ofdgo.TextLayout{Wrap: args[4].Bool(), Align: args[5].String(), LineHeight: args[6].Float(), LetterSpacing: args[7].Float()}); err != nil {
+	if err := currentEditor.LayoutText(&object.TextObject, value, ofdgo.TextLayout{Wrap: args[4].Bool(), Align: args[5].String(), LineHeight: args[6].Float(), LetterSpacing: args[7].Float(), LeftIndent: args[8].Float(), RightIndent: args[9].Float(), FirstLineIndent: args[10].Float()}); err != nil {
 		return nil, err
 	}
 	revision := currentEditor.Revision()

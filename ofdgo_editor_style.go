@@ -25,7 +25,7 @@ func (e *Editor) editorDrawParam(id string, visited map[string]bool) (*DrawParam
 	}
 	dp := e.source.reader.drawParamCache[id]
 	if dp == nil || visited[id] {
-		return nil, fmt.Errorf("invalid draw parameter reference %q", id)
+		return nil, &EditError{Code: EditUnsupportedStyle, Err: fmt.Errorf("invalid draw parameter reference %q", id)}
 	}
 	visited[id] = true
 	base, err := e.editorDrawParam(dp.Relative, visited)
@@ -72,7 +72,7 @@ func (e *Editor) resolveEditorStyle(object GraphicObject, layer string) (Graphic
 	} else {
 		obj := &object.TextObject
 		if style.Cap != "" && style.Cap != "Butt" || style.DashPattern != "" || style.DashOffset != nil && *style.DashOffset != 0 {
-			return GraphicObject{}, fmt.Errorf("text draw parameters require unsupported stroke styles")
+			return GraphicObject{}, &EditError{Code: EditUnsupportedStyle, Err: fmt.Errorf("text draw parameters require unsupported stroke styles")}
 		}
 		style = mergeDrawParam(*style, &DrawParam{LineWidth: obj.LineWidth, Join: obj.Join,
 			MiterLimit: obj.MiterLimit, FillColor: obj.FillColor, StrokeColor: obj.StrokeColor})
@@ -84,7 +84,7 @@ func (e *Editor) resolveEditorStyle(object GraphicObject, layer string) (Graphic
 	}
 	for _, color := range []*FillColor{style.FillColor, (*FillColor)(style.StrokeColor)} {
 		if err := creationColor(color); err != nil {
-			return GraphicObject{}, fmt.Errorf("unsupported draw parameter color: %w", err)
+			return GraphicObject{}, &EditError{Code: EditUnsupportedColor, Err: fmt.Errorf("unsupported draw parameter color: %w", err)}
 		}
 	}
 	return cloneEditorObject(object)

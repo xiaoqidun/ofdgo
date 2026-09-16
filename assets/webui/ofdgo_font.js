@@ -32,7 +32,7 @@ export class FontPicker {
 			this.names.set(name, (this.names.get(name) || 0) + 1);
 		}
 		const key = font => font?.id || font?.postscriptName;
-		this.value = fonts.length ? String(Math.max(0, fonts.findIndex(font => key(font) === key(selected)))) : "";
+		this.value = !fonts.length ? "" : selected === null ? "-1" : String(Math.max(0, fonts.findIndex(font => key(font) === key(selected))));
 		this.restore();
 	}
 

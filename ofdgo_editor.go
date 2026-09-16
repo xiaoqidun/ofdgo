@@ -606,7 +606,7 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 	}
 	for _, color := range []*FillColor{fill, stroke} {
 		if err := creationColor(color); err != nil {
-			return GraphicObject{}, err
+			return GraphicObject{}, &EditError{Code: EditUnsupportedColor, Err: err}
 		}
 	}
 	if join != "" && join != "Miter" && join != "Round" && join != "Bevel" {
@@ -725,6 +725,9 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 				layout := *obj.layout
 				layout.options.LineHeight *= scale
 				layout.options.LetterSpacing *= scale
+				layout.options.LeftIndent *= scale
+				layout.options.RightIndent *= scale
+				layout.options.FirstLineIndent *= scale
 				obj.layout = &layout
 			}
 			if obj.LineWidth == 0 && obj.Stroke != nil && *obj.Stroke {
@@ -821,7 +824,7 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 	}
 	sfnt, err := e.editorFont(obj.Font)
 	if err != nil {
-		return fmt.Errorf("font resource %q not found", obj.Font)
+		return err
 	}
 	if !finite(obj.Size) || obj.Size <= 0 || !finite(obj.HScale) || obj.HScale < 0 {
 		return fmt.Errorf("invalid text dimensions")
@@ -837,16 +840,22 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 	if !finite(options.LetterSpacing) {
 		return fmt.Errorf("letter spacing must be finite")
 	}
+	if !finite(options.LeftIndent) || !finite(options.RightIndent) || !finite(options.FirstLineIndent) {
+		return fmt.Errorf("paragraph indents must be finite")
+	}
 	if !slices.Contains([]string{"", "left", "center", "right", "justify"}, options.Align) {
 		return fmt.Errorf("invalid text alignment %q", options.Align)
 	}
 	var width float64
-	if options.Wrap || options.Align != "" && options.Align != "left" {
+	if options.Wrap || options.Align != "" && options.Align != "left" || options.LeftIndent != 0 || options.RightIndent != 0 || options.FirstLineIndent != 0 {
 		box, err := obj.TextFrame()
 		if err != nil {
 			return err
 		}
-		width = box.W
+		width = box.W - options.LeftIndent - options.RightIndent
+		if !finite(width) || width <= 0 || !finite(width-options.FirstLineIndent) || width-options.FirstLineIndent <= 0 {
+			return fmt.Errorf("paragraph indents leave no text width")
+		}
 	}
 	hScale := obj.HScale
 	if hScale == 0 {
@@ -879,9 +888,14 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 				return fmt.Errorf("text advance exceeds finite range")
 			}
 		}
-		lines := breakTextLines(runes, advances, width, options.Wrap, options.LetterSpacing)
+		lines := breakTextLines(runes, advances, width, options.Wrap, options.LetterSpacing, options.FirstLineIndent)
 		for i, line := range lines {
-			x, deltas := alignTextLine(runes[line[0]:line[1]], advances[line[0]:line[1]], width, options.Align, i+1 < len(lines), options.LetterSpacing)
+			indent := 0.0
+			if i == 0 {
+				indent = options.FirstLineIndent
+			}
+			x, deltas := alignTextLine(runes[line[0]:line[1]], advances[line[0]:line[1]], width-indent, options.Align, i+1 < len(lines), options.LetterSpacing)
+			x += options.LeftIndent + indent
 			y := float64(ascender)*unit + float64(len(codes))*lineHeight
 			if !finite(x) || !finite(y) {
 				return fmt.Errorf("text position exceeds finite range")
@@ -905,14 +919,17 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 // 返回: error 错误信息
 func (e *Editor) prepareText(obj *TextObject) error {
 	sfnt, err := e.editorFont(obj.Font)
-	if err != nil || !finite(obj.Size) || obj.Size <= 0 {
+	if err != nil {
+		return err
+	}
+	if !finite(obj.Size) || obj.Size <= 0 {
 		return fmt.Errorf("text requires an embedded font and a positive finite size")
 	}
 	if len(obj.TextCode) == 0 {
 		return fmt.Errorf("text codes are empty")
 	}
 	if obj.VScale != 0 || obj.Decoration != "" || len(obj.CGTransform) != 0 {
-		return fmt.Errorf("text extensions and glyph transforms are not supported for creation")
+		return &EditError{Code: EditUnsupportedObject, Err: fmt.Errorf("text extensions and glyph transforms are not supported for creation")}
 	}
 	if !finite(obj.HScale) || obj.HScale < 0 || !finite(obj.LineWidth) || obj.LineWidth < 0 || !finite(obj.MiterLimit) || obj.MiterLimit < 0 {
 		return fmt.Errorf("invalid text dimensions")

@@ -131,20 +131,27 @@ export function missingGlyphMessage(diagnostic) {
 }
 
 export function objectEditReason(item) {
+	const labels = { fontUnavailable: "字体不可用", unsupportedColor: "颜色样式暂不支持", unsupportedStyle: "绘制参数暂不支持",
+		unsupportedContainer: "容器特性暂不支持", invalidObject: "对象数据异常" };
 	const reasons = (item?.items || (item ? [item] : [])).map(object => {
 		const reason = object.capabilities?.reason || "";
 		if (!reason) return "";
-		let message = "对象特性暂不支持";
+		let message = labels[object.capabilities.reasonCode] || "对象特性暂不支持";
 		if (object.capabilities.missingGlyphs) message = missingGlyphMessage(object.capabilities.missingGlyphs);
-		else if (reason.includes("embedded font")) message = "缺少内嵌字体";
-		else if (reason.includes("color") || reason.includes("RGB")) message = "颜色样式暂不支持";
-		else if (reason.includes("draw parameter")) message = "绘制参数暂不支持";
-		else if (reason.includes("layer")) message = "图层特性暂不支持";
-		else if (reason.includes("container")) message = "容器特性暂不支持";
-		else if (reason.includes("invalid")) message = "对象数据异常";
 		return `${object.capabilities.transform ? "部分操作受限" : "暂不可编辑"}：${message}`;
 	});
 	return [...new Set(reasons.filter(Boolean))].join("；");
+}
+
+export function selectedText(item) {
+	if (!item?.items) return item?.type === "TextObject" ? item : null;
+	if (!item.items.every(member => member.type === "TextObject")) return null;
+	const text = { ...item, type: "TextObject" };
+	for (const key of ["font", "fontName", "size", "color"]) {
+		const value = item.items[0][key];
+		text[key] = item.items.every(member => member[key] === value) ? value : undefined;
+	}
+	return text;
 }
 
 export class CanvasEditor {
@@ -803,6 +810,9 @@ export class CanvasEditor {
 			lineHeight: item.paragraphHeight || item.lineHeight ? `${(item.paragraphHeight || item.lineHeight) * PX_PER_MM}px` : "normal", color: item.color,
 			textAlign: item.align || "left",
 			letterSpacing: `${(item.letterSpacing || 0) * PX_PER_MM}px`,
+			paddingLeft: `${2 + Math.max(0, item.leftIndent || 0) * PX_PER_MM}px`,
+			paddingRight: `${2 + Math.max(0, item.rightIndent || 0) * PX_PER_MM}px`,
+			textIndent: `${(item.firstLineIndent || 0) * PX_PER_MM}px`,
 		});
 		if (item.textFrame) {
 			const { width, height, matrix: [a, b, c, d, e, f] } = item.textFrame;

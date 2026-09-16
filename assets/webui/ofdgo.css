@@ -334,13 +334,34 @@ a:focus-visible {
 	border-right: 0;
 }
 
-.editor-group > span {
+.editor-group > span,
+.editor-group-action {
 	grid-column: 1 / -1;
 	grid-row: 3;
 	align-self: end;
 	text-align: center;
 	font-size: 12px;
 	color: var(--text-muted);
+}
+
+.editor-group-action {
+	justify-self: center;
+	padding: 0 8px;
+	height: 16px;
+	min-height: 0;
+	border: 0;
+	background: transparent;
+	line-height: 16px;
+	text-decoration: underline dotted;
+	text-underline-offset: 3px;
+}
+
+.mixed-color::-webkit-color-swatch {
+	background: repeating-linear-gradient(135deg, #fff 0 4px, #aeb7bc 4px 8px);
+}
+
+.mixed-color::-moz-color-swatch {
+	background: repeating-linear-gradient(135deg, #fff 0 4px, #aeb7bc 4px 8px);
 }
 
 .app-bar {

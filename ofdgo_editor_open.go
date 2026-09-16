@@ -45,7 +45,7 @@ type editorObjectOrigin struct {
 	page   *editorSourcePage
 	node   *editorXML
 	object GraphicObject
-	reason string
+	reason error
 }
 
 // editorSourcePage 保存页面原文、解析快照及图层和页块内的对象位置
@@ -72,16 +72,18 @@ type ObjectCapabilities struct {
 	Delete        bool
 	Order         bool
 	Reason        string
+	ReasonCode    EditReason
 	MissingGlyphs *MissingGlyphError
 }
 
 // editError 将操作受限原因转为错误，保留可供调用方识别的缺字诊断
 // 返回: error 受限原因
 func (c ObjectCapabilities) editError() error {
+	var err error = errors.New(c.Reason)
 	if c.MissingGlyphs != nil {
-		return c.MissingGlyphs
+		err = c.MissingGlyphs
 	}
-	return errors.New(c.Reason)
+	return &EditError{Code: c.ReasonCode, Err: err}
 }
 
 // PageCapabilities 页面可执行的操作，Insert表示可以添加RGB对象；新增空白页面始终可用
@@ -309,7 +311,7 @@ func (e *Editor) loadSourcePage(index int) error {
 				if editorXMLSupported(node) {
 					resolved, err := e.resolveEditorStyle(object, layer.DrawParam)
 					if err != nil {
-						origin.reason = err.Error()
+						origin.reason = err
 					} else {
 						layer.Objects[j] = resolved
 					}
@@ -343,10 +345,10 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 		return all, nil
 	}
 	if !editorXMLSupported(node) {
-		return ObjectCapabilities{Reason: "object uses unsupported editing features"}, nil
+		return ObjectCapabilities{Reason: "object uses unsupported editing features", ReasonCode: EditUnsupportedObject}, nil
 	}
-	if origin := e.objectOrigin(id); origin.reason != "" {
-		return ObjectCapabilities{Reason: origin.reason}, nil
+	if origin := e.objectOrigin(id); origin.reason != nil {
+		return ObjectCapabilities{Reason: origin.reason.Error(), ReasonCode: editReason(origin.reason)}, nil
 	}
 	for parent := node.parent; parent.name.Local != "Content"; parent = parent.parent {
 		allowed := "ID"
@@ -354,21 +356,23 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 			allowed += " Type DrawParam"
 		}
 		if !editorXMLAttributes(parent, allowed) {
-			return ObjectCapabilities{Reason: "object container uses unsupported editing features"}, nil
+			return ObjectCapabilities{Reason: "object container uses unsupported editing features", ReasonCode: EditUnsupportedContainer}, nil
 		}
 	}
 	if err := validateEditorGeometry(object); err != nil {
-		return ObjectCapabilities{Reason: err.Error()}, nil
+		return ObjectCapabilities{Reason: err.Error(), ReasonCode: EditInvalidObject}, nil
 	}
 	all.Order = editorContainerOrderable(node.parent)
 	if _, err := e.prepareObject(id, object); err != nil {
 		all.Update, all.Reflow, all.Copy, all.Reason = false, false, false, err.Error()
+		all.ReasonCode = editReason(err)
 		errors.As(err, &all.MissingGlyphs)
 	}
 	if !e.sourceRGB() {
 		all.ReplaceFont = false
 		all.Update, all.Reflow, all.Copy, all.Reason = false, false, false, "document uses a non-RGB default color space"
 		all.MissingGlyphs = nil
+		all.ReasonCode = EditUnsupportedColor
 	}
 	if object.Type == "TextObject" {
 		all.Arrange = all.Update
@@ -426,16 +430,16 @@ func (e *Editor) editorFont(id string) (*font.SFNT, error) {
 	if e.source != nil {
 		data, err := e.source.reader.FontData(id)
 		if err != nil {
-			return nil, err
+			return nil, &EditError{Code: EditFontUnavailable, Err: err}
 		}
 		sfnt, err := font.ParseSFNT(data, 0)
 		if err != nil {
-			return nil, err
+			return nil, &EditError{Code: EditFontUnavailable, Err: err}
 		}
 		e.fonts[id] = sfnt
 		return sfnt, nil
 	}
-	return nil, fmt.Errorf("embedded font %q not found", id)
+	return nil, &EditError{Code: EditFontUnavailable, Err: fmt.Errorf("embedded font %q not found", id)}
 }
 
 // editorImage 按需读取原图片尺寸，不解码完整像素
