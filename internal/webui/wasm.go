@@ -114,6 +114,8 @@ func RunWASM() {
 	registerCallback("ofdgoAlignObjects", alignObjects)
 	registerCallback("ofdgoDeleteObjects", deleteObjects)
 	registerCallback("ofdgoCopyObjects", copyObjects)
+	registerCallback("ofdgoCaptureObjects", captureObjects)
+	registerCallback("ofdgoPasteObjects", pasteObjects)
 	registerCallback("ofdgoOrderObjects", orderObjects)
 	registerCallback("ofdgoDistributeObjects", distributeObjects)
 	registerCallback("ofdgoRotateObjects", rotateObjects)
@@ -197,6 +199,7 @@ func openDocument(args []js.Value) (any, error) {
 	}
 	renderAnnotations := args[2].Bool()
 	currentEditor = nil
+	copiedObjects = nil
 	if currentSession != nil {
 		_ = currentSession.Close()
 		currentSession = nil
@@ -530,6 +533,15 @@ func encodeResult(result apiResult) string {
 // currentEditor 当前新建文档
 var currentEditor *ofdgo.Editor
 
+// editorClipboard 当前创作文档中的对象快照与剪贴板标识。
+type editorClipboard struct {
+	token   string
+	objects []ofdgo.GraphicObject
+}
+
+// copiedObjects 当前对象剪贴板，不保存字体或图片的重复数据。
+var copiedObjects *editorClipboard
+
 // editorInfo 创作文档信息与操作状态
 type editorInfo struct {
 	DocumentInfo
@@ -814,7 +826,43 @@ func copyObjects(args []js.Value) (any, error) {
 	if currentEditor == nil {
 		return nil, fmt.Errorf("no document is being created")
 	}
-	ids, err := currentEditor.CopyObjects(args[0].Int(), stringsFromJS(args[1]), args[2].Float(), args[3].Float())
+	objects, err := currentEditor.Objects(args[0].Int(), stringsFromJS(args[1]))
+	if err != nil {
+		return nil, err
+	}
+	return copyEditorObjects(args[0].Int(), objects, args[2].Float(), args[3].Float())
+}
+
+// captureObjects 保存独立选区快照，不修改文档或历史。
+// 入参: args 页面索引、对象标识数组和剪贴板标识
+// 返回: any 空结果, error 错误信息
+func captureObjects(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being created")
+	}
+	objects, err := currentEditor.Objects(args[0].Int(), stringsFromJS(args[1]))
+	if err != nil {
+		return nil, err
+	}
+	copiedObjects = &editorClipboard{args[2].String(), objects}
+	return nil, nil
+}
+
+// pasteObjects 将当前文档的对象快照粘贴到目标页。
+// 入参: args 目标页、剪贴板标识和横纵位移
+// 返回: any 文档信息及新选区, error 错误信息
+func pasteObjects(args []js.Value) (any, error) {
+	if currentEditor == nil || copiedObjects == nil || copiedObjects.token != args[1].String() {
+		return nil, fmt.Errorf("object clipboard is no longer available")
+	}
+	return copyEditorObjects(args[0].Int(), copiedObjects.objects, args[2].Float(), args[3].Float())
+}
+
+// copyEditorObjects 复制快照并更新预览，返回新对象标识。
+// 入参: page 目标页, objects 对象快照, dx、dy 毫米位移
+// 返回: any 文档信息及新选区, error 错误信息
+func copyEditorObjects(page int, objects []ofdgo.GraphicObject, dx, dy float64) (any, error) {
+	ids, err := currentEditor.CopyObjects(page, objects, dx, dy)
 	if err != nil {
 		return nil, err
 	}
@@ -928,6 +976,9 @@ func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 		_ = currentSession.Close()
 	}
 	currentSession = session
+	if currentEditor != editor {
+		copiedObjects = nil
+	}
 	currentEditor = editor
 	return editorSummary(), nil
 }

@@ -6,6 +6,7 @@ const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const DEFAULT_IMAGE_DPI = 300;
 const PAGE_CACHE_LIMIT = 16;
 const PAGE_CACHE_BYTES = 32 * 1024 * 1024;
+const OBJECT_CLIPBOARD_TYPE = "application/x-ofdgo-objects";
 const STATUS = {
 	ready: "选择 OFD 文件",
 	opening: "正在打开文档",
@@ -37,6 +38,7 @@ const state = {
 	editorInfo: null,
 	savedRevision: null,
 	insertObject: null,
+	objectClipboard: null,
 	textFonts: [],
 	textFontID: null,
 	textDefaults: { type: "TextObject", size: 12 * 25.4 / 72, color: "#000000", wrap: true, align: "left", paragraphHeight: 0, letterSpacing: 0 },
@@ -503,6 +505,7 @@ el.panButton.addEventListener("click", togglePan);
 el.continuousButton.addEventListener("click", toggleContinuous);
 el.annotationButton.addEventListener("click", toggleAnnotations);
 document.addEventListener("copy", copySelection);
+el.viewerPanel.addEventListener("paste", pasteEditorContent);
 document.addEventListener("selectionchange", syncSelection);
 el.exportFormat.addEventListener("change", () => updateDPIControl());
 el.exportPageButton.addEventListener("click", () => exportFile(false));
@@ -640,7 +643,7 @@ function handleKeyDown(event) {
 	}
 	if (key === "Enter" && target === el.pageInput && !event.shiftKey) {
 		event.preventDefault();
-		el.viewerPanel.focus({ preventScroll: true });
+		if (!event.repeat) el.pageInput.dispatchEvent(new Event("change"));
 		return;
 	}
 	if (key === "Enter" && target === el.searchInput && event.shiftKey && state.searchMatches.length) {
@@ -742,6 +745,7 @@ async function createDocument(event) {
 			return;
 		}
 		state.editing = true;
+		state.objectClipboard = null;
 		canvasEditor.clear();
 		delete state.textDefaults.fontChoice;
 		updateTextFonts(null, true);
@@ -1143,11 +1147,14 @@ async function changeDocument(name, item, ...args) {
 		if (!item || name === "ofdgoDeleteObject" || name === "ofdgoDeleteObjects") {
 			canvasEditor.clear();
 		}
-		if (name === "ofdgoCopyObjects" || name === "ofdgoInsertShape" || name === "ofdgoInsertText") {
+		if (name === "ofdgoCopyObjects" || name === "ofdgoPasteObjects" || name === "ofdgoInsertShape" || name === "ofdgoInsertText" || name === "ofdgoInsertImage") {
+			state.selectObjects = true;
+			canvasEditor.setTool("");
+			setPan(false);
 			canvasEditor.pendingSelection = { index: item?.index ?? args[0], ids: doc.selectedIDs };
 		}
 		openSeq = ++state.openSeq;
-		if (item || name === "ofdgoInsertShape" || name === "ofdgoInsertText") {
+		if (item || name === "ofdgoPasteObjects" || name === "ofdgoInsertShape" || name === "ofdgoInsertText" || name === "ofdgoInsertImage") {
 			await refreshEditorPage(doc, item ? item.index : args[0], openSeq);
 		} else {
 			const samePage = doc.pages.findIndex((page) => page.id === previous.id);
@@ -1668,6 +1675,7 @@ async function openOFD(file) {
 		state.ofdBytes = bytes;
 		state.fileName = file.name || "ofdgo.ofd";
 		state.editing = false;
+		state.objectClipboard = null;
 		state.editorInfo = null;
 		state.savedRevision = null;
 		canvasEditor.clear();
@@ -2816,11 +2824,78 @@ async function selectDocumentText() {
 	}
 }
 
+function copyEditorSelection(event) {
+	if (!state.editing || !canvasEditor.enabled || !canvasEditor.selected || !el.viewerPanel.contains(event.target)
+		|| canvasEditor.input || canvasEditor.crop || canvasEditor.drag || document.body.hasAttribute("aria-busy")) return false;
+	const items = canvasEditor.items().slice().sort((a, b) => a.order - b.order);
+	const clipboard = { token: crypto.randomUUID(), page: state.doc.pages[items[0].index].id, offset: 0 };
+	event.clipboardData.setData(OBJECT_CLIPBOARD_TYPE, clipboard.token);
+	event.clipboardData.setData("text/plain", items.map(item => item.text || "").filter(Boolean).join("\n"));
+	event.preventDefault();
+	state.objectClipboard = clipboard;
+	clipboard.ready = callWASM("ofdgoCaptureObjects", items[0].index, items.map(item => item.id), clipboard.token)
+		.then(() => true, err => {
+			if (state.objectClipboard === clipboard) showError(err, false);
+			return false;
+		});
+	return true;
+}
+
+async function pasteEditorContent(event) {
+	if (!state.editing || event.target.closest?.("input, textarea, select, [contenteditable]") || formDialogOpen()) return;
+	event.preventDefault();
+	if (document.body.hasAttribute("aria-busy") || canvasEditor.input || canvasEditor.crop || canvasEditor.drag) return;
+	const token = event.clipboardData.getData(OBJECT_CLIPBOARD_TYPE);
+	const index = state.pageIndex, page = state.doc.pages[index];
+	if (token) {
+		const clipboard = state.objectClipboard;
+		if (!clipboard || token !== clipboard.token) {
+			setStatus("对象剪贴板已失效");
+			return;
+		}
+		const openSeq = state.openSeq;
+		if (!await clipboard.ready || openSeq !== state.openSeq || index !== state.pageIndex || state.objectClipboard !== clipboard) return;
+		const offset = clipboard.page === page.id ? clipboard.offset + 3 : 0;
+		if (await changeDocument("ofdgoPasteObjects", null, index, token, offset, offset)) {
+			clipboard.page = page.id;
+			clipboard.offset = offset;
+		}
+		return;
+	}
+	const files = Array.from(event.clipboardData.files);
+	const x = Math.min(20, page.width / 10), y = Math.min(20, page.height / 10);
+	if (files.length) {
+		if (files.length !== 1) {
+			setStatus("一次粘贴一张图片");
+			return;
+		}
+		if (!/^image\/(png|jpeg)$/.test(files[0].type)) {
+			setStatus("图片仅支持 PNG、JPG");
+			return;
+		}
+		await changeDocument("ofdgoInsertImage", null, index, files[0].arrayBuffer().then(bytes => new Uint8Array(bytes)), x, y, page.width - x * 2);
+		return;
+	}
+	const value = event.clipboardData.getData("text/plain").replace(/\t/g, "    ");
+	if (!value.trim()) return;
+	const font = state.textFonts[Number(el.textFont.value)];
+	if (!font) {
+		setStatus("尚未添加字体");
+		el.textFontAdd.focus();
+		return;
+	}
+	const style = currentTextStyle();
+	const data = font.embedded ? callWASM("ofdgoEditorFont", font.id.slice(9)).then(result => result.bytes) : fontManager.read(font);
+	await changeDocument("ofdgoInsertText", null, index, value, data, x, y, style.size, style.color,
+		page.width - x * 2, style.wrap, style.align || "left", style.paragraphHeight || 0, style.letterSpacing || 0);
+}
+
 function copySelection(event) {
 	if (event.target.closest?.("input, textarea, [contenteditable]")) {
 		return;
 	}
 	const selection = document.getSelection();
+	if (selection.isCollapsed && copyEditorSelection(event)) return;
 	if (selection.isCollapsed || !selection.rangeCount) {
 		return;
 	}

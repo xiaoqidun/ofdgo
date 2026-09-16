@@ -24,23 +24,46 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
-// CopyObjects 按原绘制顺序复制同页对象并平移，复用资源，提交一次撤销记录。
-// 入参: page 页面索引, ids 对象标识, dx、dy 毫米位移
-// 返回: []string 按绘制顺序排列的新对象标识, error 错误信息
-func (e *Editor) CopyObjects(page int, ids []string, dx, dy float64) ([]string, error) {
-	if !finite(dx) || !finite(dy) {
-		return nil, fmt.Errorf("copy requires finite offsets")
-	}
+// Objects 按绘制顺序获取选区的独立快照，保留编辑中的段落信息。
+// 入参: page 页面索引, ids 对象标识，不得重复
+// 返回: []GraphicObject 独立对象副本, error 错误信息
+func (e *Editor) Objects(page int, ids []string) ([]GraphicObject, error) {
 	_, indexes, err := e.selectedObjects(page, ids)
 	if err != nil {
 		return nil, err
 	}
 	slices.Sort(indexes)
-	before := e.pages[page].Content.Layer[0].Objects
 	objects := make([]GraphicObject, len(indexes))
-	result := make([]string, len(indexes))
 	for i, index := range indexes {
-		object, err := cloneEditorObject(before[index])
+		objects[i], err = cloneEditorObject(e.pages[page].Content.Layer[0].Objects[index])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return objects, nil
+}
+
+// CopyObjects 将对象快照按输入顺序复制到目标页并平移，分配新ID，提交一次撤销记录。
+// 对象引用当前Editor已注册的资源，保留段落信息，不修改输入快照。
+// 入参: page 目标页面索引, objects 对象快照, dx、dy 毫米位移
+// 返回: []string 按绘制顺序排列的新对象标识, error 错误信息
+func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) ([]string, error) {
+	if !finite(dx) || !finite(dy) {
+		return nil, fmt.Errorf("copy requires finite offsets")
+	}
+	content, err := e.page(page)
+	if err != nil {
+		return nil, err
+	}
+	if len(objects) == 0 {
+		return nil, nil
+	}
+	before := content.Content.Layer[0].Objects
+	prepared := make([]GraphicObject, len(objects))
+	result := make([]string, len(objects))
+	for i, object := range objects {
+		result[i] = strconv.Itoa(e.maxID + i + 1)
+		object, err := e.prepareObject(result[i], object)
 		if err != nil {
 			return nil, err
 		}
@@ -48,14 +71,13 @@ func (e *Editor) CopyObjects(page int, ids []string, dx, dy float64) ([]string, 
 		if err != nil {
 			return nil, err
 		}
-		result[i] = strconv.Itoa(e.maxID + i + 1)
-		objects[i], err = e.prepareObject(result[i], object)
+		prepared[i], err = e.prepareObject(result[i], object)
 		if err != nil {
 			return nil, err
 		}
 	}
 	e.maxID += len(objects)
-	e.replaceObjects(page, append(slices.Clone(before), objects...))
+	e.replaceObjects(page, append(slices.Clone(before), prepared...))
 	return result, nil
 }
 

@@ -27,17 +27,19 @@ export function selectionBounds(items) {
 		height: Math.max(...items.map(item => item.y + item.height)) - y };
 }
 
-function alignmentGuides(box, targets, tolerance) {
+function alignmentSnap(box, targets, tolerance) {
 	const lines = [];
+	const offset = { x: 0, y: 0 };
 	for (const [axis, size, cross, span] of [["x", "width", "y", "height"], ["y", "height", "x", "width"]]) {
 		let distance = Infinity, line;
 		for (const target of targets) {
 			for (const anchor of [0, 0.5, 1]) {
 				const position = target[axis] + target[size] * anchor;
 				for (const edge of [0, 0.5, 1]) {
-					const delta = Math.abs(box[axis] + box[size] * edge - position);
-					if (delta > tolerance[axis] || delta >= distance) continue;
-					distance = delta;
+					const delta = position - box[axis] - box[size] * edge;
+					if (Math.abs(delta) > tolerance[axis] || Math.abs(delta) >= distance) continue;
+					distance = Math.abs(delta);
+					offset[axis] = delta;
 					const from = Math.min(box[cross], target[cross]);
 					const to = Math.max(box[cross] + box[span], target[cross] + target[span]);
 					line = axis === "x" ? `M${position} ${from}V${to}` : `M${from} ${position}H${to}`;
@@ -46,7 +48,7 @@ function alignmentGuides(box, targets, tolerance) {
 		}
 		if (line) lines.push(line);
 	}
-	return lines.join("");
+	return { ...offset, path: lines.join("") };
 }
 
 function transformedBox(box, matrix) {
@@ -422,16 +424,18 @@ export class CanvasEditor {
 			return;
 		}
 		drag.change = objectTransform(drag.item, to.x - from.x, to.y - from.y, drag.corner);
+		if (!drag.corner) this.snap(drag, event.altKey);
 		this.place(drag.item, drag.change);
-		if (!drag.corner) this.showGuides(drag);
 	}
 
-	showGuides(drag) {
+	snap(drag, bypass = false) {
 		const { item, rect, rotation, change } = drag;
-		const path = alignmentGuides({ ...item, x: item.x + change.x, y: item.y + change.y }, drag.targets, {
+		const { x, y, path } = bypass ? { x: 0, y: 0, path: "" } : alignmentSnap({ ...item, x: item.x + change.x, y: item.y + change.y }, drag.targets, {
 			x: 4 * item.page.width / (rotation % 180 ? rect.height : rect.width),
 			y: 4 * item.page.height / (rotation % 180 ? rect.width : rect.height),
 		});
+		change.x += x;
+		change.y += y;
 		if (!drag.guides && path) {
 			drag.guides = this.createPreview(item.surface, item.page, "path", {
 				fill: false, stroke: true, strokeColor: "var(--accent)", lineWidth: 1,
@@ -620,9 +624,9 @@ export class CanvasEditor {
 
 	modifierChange(event) {
 		const pointer = this.drag?.pointer;
-		if (event.key === "Shift" && pointer) {
+		if ((event.key === "Shift" || event.key === "Alt") && pointer) {
 			this.move({ pointerId: pointer.pointerId, clientX: pointer.clientX, clientY: pointer.clientY,
-				shiftKey: event.shiftKey, preventDefault() {} });
+				shiftKey: event.shiftKey, altKey: event.altKey, preventDefault() {} });
 		}
 	}
 
