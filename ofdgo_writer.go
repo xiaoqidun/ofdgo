@@ -29,19 +29,28 @@ import (
 
 const ofdNamespace = "http://www.ofdspec.org/2016"
 
-// WriteTo 逐个条目写出OFD，仅包含实际引用的资源，不关闭调用方输出流，出错时应丢弃本次输出
+// WriteTo 逐个条目写出OFD，不关闭调用方输出流，出错时应丢弃本次输出
+// 新增资源仅写入实际引用的部分，静态TrueType轮廓字体按实际文字生成子集；编辑资源、原文档字体、可变及彩色字体等保持原样。
+// 重开子集文档后输入未包含的文字，需要通过AddFont注册完整字体并替换原字体引用。
 // 入参: writer 输出流
 // 返回: int64 已写入字节数, error 错误信息
 func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
 	if err := e.validate(); err != nil {
 		return 0, err
 	}
+	fonts, err := e.subsetFonts()
+	if err != nil {
+		return 0, err
+	}
 	if e.source != nil {
-		return e.writeSource(writer)
+		return e.writeSource(writer, fonts)
 	}
 	output := &ofdCountingWriter{writer: writer}
 	archive := zip.NewWriter(output)
-	err := e.writeParts(func(name string, data []byte, compressed bool) error {
+	err = e.writeParts(func(name string, data []byte, compressed bool) error {
+		if subset, ok := fonts[name]; ok {
+			data = subset
+		}
 		method := uint16(zip.Deflate)
 		if compressed {
 			method = zip.Store
@@ -60,7 +69,7 @@ func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
 }
 
 // Reader 获取当前文档的独立内存快照，不进行ZIP压缩，后续修改不影响已有快照
-// 返回的Reader可用于现有渲染、搜索和导出接口，仅包含实际引用的资源，二进制数据内部共享只读
+// 返回的Reader可用于现有渲染、搜索和导出接口，新增资源仅包含实际引用的部分，二进制数据内部共享只读
 // 返回: *Reader 阅读器, error 错误信息
 func (e *Editor) Reader() (*Reader, error) {
 	if err := e.validate(); err != nil {

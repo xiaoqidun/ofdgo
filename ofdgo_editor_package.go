@@ -214,17 +214,20 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 		for _, object := range original.Objects {
 			before[editorObjectID(object)] = object
 		}
+		ordered := make(map[*editorXML][]GraphicObject)
 		after := make(map[string]GraphicObject)
-		var ordered []GraphicObject
 		for _, object := range current.Objects {
 			id := editorObjectID(object)
 			after[id] = object
-			if source.nodes[id] != nil {
-				ordered = append(ordered, object)
+			if node := source.nodes[id]; node != nil {
+				ordered[node.parent] = append(ordered[node.parent], object)
 			}
 		}
-		orderable := e.sourceLayerOrderable(index, original.ID)
-		position := 0
+		positions := make(map[*editorXML]int)
+		orderable := make(map[*editorXML]bool)
+		for parent := range ordered {
+			orderable[parent] = editorContainerOrderable(parent)
+		}
 		for _, object := range original.Objects {
 			id := editorObjectID(object)
 			node := source.nodes[id]
@@ -232,12 +235,14 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 				continue
 			}
 			next, exists := after[id]
-			if orderable {
-				exists = position < len(ordered)
+			if orderable[node.parent] {
+				position := positions[node.parent]
+				members := ordered[node.parent]
+				exists = position < len(members)
 				if exists {
-					next = ordered[position]
+					next = members[position]
 				}
-				position++
+				positions[node.parent]++
 			}
 			var encoded []byte
 			if exists {
@@ -369,13 +374,14 @@ func (e *Editor) sourceInfoXML() ([]byte, error) {
 }
 
 // writeSource 将未修改ZIP条目直接复制到新包，逐项写入改动，不持有原资源解压副本。
-// 入参: writer 输出流
+// 入参: writer 输出流, fonts 新增字体子集
 // 返回: int64 写入字节数, error 错误信息
-func (e *Editor) writeSource(writer io.Writer) (int64, error) {
+func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte) (int64, error) {
 	parts, err := e.sourceParts()
 	if err != nil {
 		return 0, err
 	}
+	maps.Copy(parts, fonts)
 	reader := e.source.reader
 	remaining := maps.Clone(reader.files)
 	if remaining == nil {

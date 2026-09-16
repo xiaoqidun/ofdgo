@@ -132,7 +132,59 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 	return result, nil
 }
 
-// OrderObjects 调整同页选区的绘制顺序，保留选中及未选中对象各自的相对顺序。
+// ObjectPosition 对象在图层或页块直接成员中的位置，Index从0开始，Count不含嵌套页块的对象。
+type ObjectPosition struct {
+	Layer     string
+	Container string
+	Index     int
+	Count     int
+}
+
+// ObjectPosition 获取对象的直接容器及排序位置。
+// 入参: page 页面索引, id 对象标识
+// 返回: ObjectPosition 对象位置, error 错误信息
+func (e *Editor) ObjectPosition(page int, id string) (ObjectPosition, error) {
+	layer, _, err := e.findObject(page, id)
+	if err != nil {
+		return ObjectPosition{}, err
+	}
+	parent, indexes := e.objectOrderIndexes(page, layer, id)
+	position := ObjectPosition{Layer: layer.ID, Container: layer.ID, Count: len(indexes)}
+	if parent != nil {
+		position.Container = parent.attr("ID")
+	}
+	for i, index := range indexes {
+		if editorObjectID(layer.Objects[index]) == id {
+			position.Index = i
+			break
+		}
+	}
+	return position, nil
+}
+
+// objectOrderIndexes 获取同一直接容器的对象索引，不跨越图层或页块。
+// 入参: page 页面索引, layer 图层, id 对象标识
+// 返回: *editorXML 原始容器, []int 对象索引
+func (e *Editor) objectOrderIndexes(page int, layer *Layer, id string) (*editorXML, []int) {
+	var nodes map[string]*editorXML
+	var parent *editorXML
+	if e.originalPage(page) {
+		nodes = e.source.pages[e.pages[page].ID].nodes
+		if node := nodes[id]; node != nil {
+			parent = node.parent
+		}
+	}
+	var indexes []int
+	for i, object := range layer.Objects {
+		node := nodes[editorObjectID(object)]
+		if node == nil && parent == nil || node != nil && node.parent == parent {
+			indexes = append(indexes, i)
+		}
+	}
+	return parent, indexes
+}
+
+// OrderObjects 调整同一图层或页块内选区的绘制顺序，保留各组选中及未选中对象的相对顺序。
 // 入参: page 页面索引, ids 对象标识, order 为up、down、top或bottom
 // 返回: error 错误信息
 func (e *Editor) OrderObjects(page int, ids []string, order string) error {
@@ -143,20 +195,25 @@ func (e *Editor) OrderObjects(page int, ids []string, order string) error {
 	if err != nil || len(indexes) == 0 {
 		return err
 	}
+	layer := &e.pages[page].Content.Layer[indexes[0].layer]
+	_, siblings := e.objectOrderIndexes(page, layer, ids[0])
 	for i, id := range ids {
 		capability, err := e.ObjectCapabilities(page, id)
 		if err != nil {
 			return err
 		}
-		if !capability.Order || indexes[i].layer != indexes[0].layer {
-			return fmt.Errorf("ordering requires editable objects in the same layer")
+		if !capability.Order || indexes[i].layer != indexes[0].layer || !slices.Contains(siblings, indexes[i].index) {
+			return fmt.Errorf("ordering requires editable objects in the same container")
 		}
 	}
 	layers := copyEditorPage(e.pages[page]).Content.Layer
-	objects := layers[indexes[0].layer].Objects
+	objects := make([]GraphicObject, len(siblings))
+	for i, index := range siblings {
+		objects[i] = layer.Objects[index]
+	}
 	selected := make([]bool, len(objects))
 	for _, index := range indexes {
-		selected[index.index] = true
+		selected[slices.Index(siblings, index.index)] = true
 	}
 	switch order {
 	case "up":
@@ -184,7 +241,9 @@ func (e *Editor) OrderObjects(page int, ids []string, order string) error {
 		}
 		objects = ordered
 	}
-	layers[indexes[0].layer].Objects = objects
+	for i, index := range siblings {
+		layers[indexes[0].layer].Objects[index] = objects[i]
+	}
 	e.replaceLayers(page, layers)
 	return nil
 }

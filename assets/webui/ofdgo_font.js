@@ -1,5 +1,141 @@
 const DATABASE = "ofdgo";
 
+export class FontPicker {
+	constructor(input, toggle, list, onChange) {
+		Object.assign(this, { input, toggle, list, onChange, fonts: [], value: "", active: -1, open: false });
+		input.addEventListener("input", () => this.show(input.value));
+		input.addEventListener("focus", () => input.select());
+		input.addEventListener("click", () => { if (!this.open) this.show(); });
+		input.addEventListener("keydown", event => this.keyDown(event));
+		input.addEventListener("blur", () => { this.commitExact(); this.close(); });
+		toggle.addEventListener("pointerdown", event => event.preventDefault());
+		toggle.addEventListener("click", () => {
+			if (this.open) this.close();
+			else { input.focus(); this.show(); }
+		});
+		list.addEventListener("pointerdown", event => {
+			if (event.target.closest("[role=option]")) event.preventDefault();
+		});
+		list.addEventListener("click", event => {
+			const option = event.target.closest("[role=option]");
+			if (option) this.choose(Number(option.dataset.index));
+		});
+		window.addEventListener("resize", () => this.close());
+	}
+
+	setFonts(fonts, selected) {
+		this.close();
+		this.fonts = fonts;
+		const key = font => font?.id || font?.postscriptName;
+		this.value = fonts.length ? String(Math.max(0, fonts.findIndex(font => key(font) === key(selected)))) : "";
+		this.restore();
+	}
+
+	setDisabled(disabled) {
+		this.input.disabled = this.toggle.disabled = disabled;
+		if (disabled) this.close();
+	}
+
+	restore() {
+		const font = this.fonts[Number(this.value)];
+		this.input.value = font?.fullName || font?.name || "";
+		this.input.setAttribute("aria-expanded", String(this.open));
+		this.input.removeAttribute("aria-activedescendant");
+	}
+
+	show(query = "") {
+		if (this.input.disabled) return;
+		const normalize = value => value.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ").trim();
+		const terms = normalize(query).split(" ").filter(Boolean);
+		this.matches = this.fonts.map((font, index) => ({ font, index })).filter(({ font }) => {
+			const name = normalize([font.fullName, font.name, font.family, font.postscriptName].filter(Boolean).join(" "));
+			return terms.every(term => name.includes(term));
+		});
+		this.list.replaceChildren();
+		for (const { font, index } of this.matches) {
+			const option = document.createElement("div");
+			option.id = `${this.list.id}-${index}`;
+			option.dataset.index = String(index);
+			option.setAttribute("role", "option");
+			option.setAttribute("aria-disabled", String(Boolean(font.disabled)));
+			option.textContent = font.fullName || font.name;
+			this.list.append(option);
+		}
+		if (!this.matches.length) {
+			const empty = document.createElement("div");
+			empty.className = "font-search-empty";
+			empty.textContent = "无匹配字体";
+			this.list.append(empty);
+		}
+		if (!this.open) this.list.showPopover();
+		this.open = true;
+		this.input.setAttribute("aria-expanded", "true");
+		this.position();
+		const selected = this.matches.findIndex(({ font, index }) => !font.disabled && String(index) === this.value);
+		this.activate(selected < 0 ? this.matches.findIndex(({ font }) => !font.disabled) : selected);
+	}
+
+	position() {
+		if (!this.open) return;
+		const rect = this.input.getBoundingClientRect();
+		if (rect.right <= 0 || rect.left >= window.innerWidth) { this.close(); return; }
+		const width = Math.min(Math.max(rect.width, 260), window.innerWidth - 16);
+		Object.assign(this.list.style, { left: `${Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))}px`,
+			top: `${rect.bottom + 4}px`, width: `${width}px`, maxHeight: `${Math.max(40, Math.min(280, window.innerHeight - rect.bottom - 12))}px` });
+	}
+
+	activate(index) {
+		this.active = index;
+		[...this.list.children].forEach((option, i) => option.setAttribute("aria-selected", String(i === index)));
+		const option = this.list.children[index];
+		if (option) {
+			this.input.setAttribute("aria-activedescendant", option.id);
+			option.scrollIntoView({ block: "nearest" });
+		} else this.input.removeAttribute("aria-activedescendant");
+	}
+
+	choose(index) {
+		if (!this.fonts[index] || this.fonts[index].disabled) return;
+		const changed = this.value !== String(index);
+		this.value = String(index);
+		this.close();
+		if (changed) return this.onChange();
+	}
+
+	commitExact() {
+		const value = this.input.value.trim().toLocaleLowerCase();
+		const index = this.fonts.findIndex(font => !font.disabled
+			&& [font.fullName, font.name, font.postscriptName].some(name => name?.toLocaleLowerCase() === value));
+		if (index >= 0) this.choose(index);
+	}
+
+	close() {
+		if (this.open) { this.open = false; this.list.hidePopover(); }
+		this.restore();
+	}
+
+	keyDown(event) {
+		if (event.isComposing) return;
+		if (!["Escape", "Enter", "ArrowDown", "ArrowUp", "Tab"].includes(event.key)) return;
+		event.stopPropagation();
+		if (event.key === "Escape") {
+			event.preventDefault();
+			this.close();
+		} else if (event.key === "Enter") {
+			event.preventDefault();
+			if (this.open && this.active >= 0) this.choose(this.matches[this.active].index);
+			else { this.commitExact(); this.close(); }
+		} else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+			event.preventDefault();
+			if (!this.open) { this.show(); return; }
+			const direction = event.key === "ArrowDown" ? 1 : -1;
+			for (let i = this.active + direction; i >= 0 && i < this.matches.length; i += direction) {
+				if (!this.matches[i].font.disabled) { this.activate(i); break; }
+			}
+		} else if (event.key === "Tab") { this.commitExact(); this.close(); }
+	}
+}
+
 export class FontManager {
 	constructor({ onChange, onPermissionChange }) {
 		this.userFonts = [];

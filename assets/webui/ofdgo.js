@@ -1,5 +1,5 @@
 import { CanvasEditor, canEditObject, objectEditReason } from "./ofdgo_edit.js";
-import { FontManager } from "./ofdgo_font.js";
+import { FontManager, FontPicker } from "./ofdgo_font.js";
 
 const MM_TO_PX = 96 / 25.4;
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
@@ -109,6 +109,8 @@ const el = {
 	textLineHeight: document.querySelector("#textLineHeight"),
 	textSpacing: document.querySelector("#textSpacing"),
 	textFont: document.querySelector("#textFont"),
+	textFontToggle: document.querySelector("#textFontToggle"),
+	textFontList: document.querySelector("#textFontList"),
 	textFontAdd: document.querySelector("#textFontAdd"),
 	textSize: document.querySelector("#textSize"),
 	textColor: document.querySelector("#textColor"),
@@ -244,9 +246,11 @@ const fontManager = new FontManager({
 	onChange: scheduleFontSync,
 	onPermissionChange: updateFontPermissionHint,
 });
+const fontPicker = new FontPicker(el.textFont, el.textFontToggle, el.textFontList, changeTextFont);
+el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
-	fontControls: [el.textFont, el.textFontAdd],
+	fontControls: [el.textFont, el.textFontToggle, el.textFontAdd],
 	busy: () => document.body.hasAttribute("aria-busy"),
 	rotation: () => state.rotation,
 	canInsert: (index) => pageCan("insert", index),
@@ -341,7 +345,6 @@ editorClick(el.textWrap, () => changeParagraph(!currentTextStyle().wrap));
 el.textAlign.addEventListener("change", () => changeParagraph());
 el.textLineHeight.addEventListener("change", () => changeParagraph());
 el.textSpacing.addEventListener("change", () => changeParagraph());
-el.textFont.addEventListener("change", changeTextFont);
 el.shapeWidth.addEventListener("focus", () => { el.shapeWidth.defaultValue = el.shapeWidth.value; });
 for (const input of [el.textSize, el.shapeWidth, el.textLineHeight, el.textSpacing]) {
 	input.addEventListener("keydown", (event) => {
@@ -942,7 +945,7 @@ async function toggleTextTool() {
 	}
 	if (openSeq !== state.openSeq) return;
 	const style = canEditObject(canvasEditor.selected, "layoutKnown") ? currentTextStyle() : state.textDefaults;
-	const font = state.textFonts[Number(el.textFont.value)];
+	const font = state.textFonts[Number(fontPicker.value)];
 	state.textDefaults = { type: "TextObject", size: style.size, color: style.color, wrap: style.wrap,
 		align: style.align || "left", paragraphHeight: style.paragraphHeight || 0, letterSpacing: style.letterSpacing || 0,
 		fontChoice: font && !font.disabled ? font : state.textDefaults.fontChoice };
@@ -953,7 +956,7 @@ async function toggleTextTool() {
 }
 
 async function beginCanvasText(index, box, surface, page) {
-	const font = state.textDefaults.fontChoice || state.textFonts[Number(el.textFont.value)];
+	const font = state.textDefaults.fontChoice || state.textFonts[Number(fontPicker.value)];
 	if (!font || font.disabled) {
 		setStatus("尚未添加字体");
 		el.textFontAdd.focus();
@@ -984,19 +987,6 @@ function editorFonts(item) {
 	return fonts;
 }
 
-function setFontOptions(select, fonts, selected) {
-	const key = (font) => font?.id || font?.postscriptName;
-	select.replaceChildren();
-	fonts.forEach((font, index) => {
-		const option = document.createElement("option");
-		option.value = String(index);
-		option.textContent = font.fullName || font.name;
-		option.disabled = Boolean(font.disabled);
-		select.append(option);
-	});
-	select.value = fonts.length ? String(Math.max(0, fonts.findIndex(font => key(font) === key(selected)))) : "";
-}
-
 function updateTextFonts(item, refresh = false) {
 	const id = item?.type === "TextObject" && !item.draft ? item.font : null;
 	if (refresh || state.textFontID !== id) {
@@ -1007,14 +997,14 @@ function updateTextFonts(item, refresh = false) {
 			&& !state.textFonts.some(font => (font.id || font.postscriptName) === (selected.id || selected.postscriptName))) {
 			state.textFonts.unshift(selected);
 		}
-		setFontOptions(el.textFont, state.textFonts, selected || state.textFonts[0]);
-		if (!id) state.textDefaults.fontChoice = state.textFonts[Number(el.textFont.value)];
+		fontPicker.setFonts(state.textFonts, selected || state.textFonts[0]);
+		if (!id) state.textDefaults.fontChoice = state.textFonts[Number(fontPicker.value)];
 	}
 }
 
 async function changeTextFont() {
 	const item = canvasEditor.selected;
-	const font = state.textFonts[Number(el.textFont.value)];
+	const font = state.textFonts[Number(fontPicker.value)];
 	if (!state.ready || document.body.hasAttribute("aria-busy") || !font || font.disabled) return;
 	const editing = canvasEditor.input;
 	if (editing) {
@@ -2992,7 +2982,7 @@ async function pasteEditorContent(event) {
 	}
 	const value = event.clipboardData.getData("text/plain").replace(/\t/g, "    ");
 	if (!value.trim()) return;
-	const font = state.textFonts[Number(el.textFont.value)];
+	const font = state.textFonts[Number(fontPicker.value)];
 	if (!font || font.disabled) {
 		setStatus("尚未添加字体");
 		el.textFontAdd.focus();
@@ -4459,7 +4449,7 @@ function updateObjectControls(item, reset = false) {
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const text = item?.type === "TextObject" ? item : state.textDefaults;
 	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items);
-	el.textFont.disabled = textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "replaceFont");
+	fontPicker.setDisabled(textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "replaceFont"));
 	el.textSize.disabled = textDisabled || Boolean(item?.draft) || text !== state.textDefaults && !canEditObject(item, "reflow");
 	el.textColor.disabled = textDisabled || Boolean(item?.draft) || text !== state.textDefaults && !canEditObject(item, "update");
 	el.textFontAdd.disabled = !state.editing || !state.ready || state.exporting;
@@ -4495,12 +4485,12 @@ function updateObjectControls(item, reset = false) {
 	}
 	updateDrawingControls();
 	const members = item?.items || (item ? [item] : []);
-	const orders = members.map(member => member.order).sort((a, b) => a - b);
+	const orders = members.map(member => member.position).sort((a, b) => a - b);
 	const count = members[0]?.count || 0;
 	const canRaise = orders.some((order, i) => order !== count - orders.length + i);
 	const canLower = orders.some((order, i) => order !== i);
 	el.objectOrder.disabled = disabled || cropping || count <= orders.length || !canEditObject(item, "order")
-		|| members.some(member => member.layer !== members[0].layer);
+		|| members.some(member => member.container !== members[0].container);
 	for (const option of el.objectOrder.options) {
 		option.disabled = el.objectOrder.disabled || (["up", "top"].includes(option.value) ? !canRaise : !canLower);
 	}

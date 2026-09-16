@@ -208,6 +208,78 @@ a:focus-visible {
 	min-width: 0;
 }
 
+.font-picker {
+	display: flex;
+	min-width: 0;
+	height: var(--control-height);
+	border: 1px solid var(--line);
+	background: #fff;
+}
+
+.font-picker #textFont {
+	padding: 0 6px;
+	border: 0;
+	outline: 0;
+	background: transparent;
+	color: #1f2428;
+}
+
+.font-picker:focus-within {
+	outline: 2px solid var(--focus);
+	outline-offset: 2px;
+}
+
+#textFontToggle {
+	width: 24px;
+	min-width: 24px;
+	padding: 0;
+	border: 0;
+}
+
+#textFontToggle::after {
+	content: "";
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	border-right: 1px solid currentColor;
+	border-bottom: 1px solid currentColor;
+	transform: translateY(-2px) rotate(45deg);
+}
+
+.font-listbox {
+	position: fixed;
+	margin: 0;
+	padding: 4px;
+	border: 1px solid var(--line);
+	background: var(--panel);
+	color: #1f2428;
+	box-shadow: 0 5px 18px rgba(20, 40, 50, 0.14);
+	overflow-y: auto;
+	font-size: 14px;
+}
+
+.font-listbox [role="option"] {
+	padding: 6px 8px;
+	line-height: 1.4;
+	overflow-wrap: anywhere;
+	cursor: pointer;
+}
+
+.font-listbox [role="option"]:hover,
+.font-listbox [aria-selected="true"] {
+	background: var(--accent-soft);
+	color: var(--accent);
+}
+
+.font-listbox [aria-disabled="true"],
+.font-search-empty {
+	color: var(--text-muted);
+}
+
+.font-search-empty {
+	padding: 6px 8px;
+}
+
 #textColor {
 	width: 100%;
 }

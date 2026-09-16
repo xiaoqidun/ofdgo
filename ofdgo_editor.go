@@ -428,15 +428,17 @@ func (e *Editor) DeleteObject(page int, id string) error {
 	return e.DeleteObjects(page, []string{id})
 }
 
-// MoveObject 调整同页正文图层内的绘制顺序，保留对象标识和内容
-// 入参: page 页面索引, id 对象标识, to 移动后的对象索引，0为最底层，末尾为最顶层
+// MoveObject 调整同一图层或末级页块内的绘制顺序，保留对象标识和内容
+// 入参: page 页面索引, id 对象标识, to 直接容器内的对象索引，0为最底层，末尾为最顶层
 // 返回: error 错误信息
 func (e *Editor) MoveObject(page int, id string, to int) error {
 	layer, from, err := e.findObject(page, id)
 	if err != nil {
 		return err
 	}
-	if to < 0 || to >= len(layer.Objects) {
+	_, siblings := e.objectOrderIndexes(page, layer, id)
+	from = slices.Index(siblings, from)
+	if to < 0 || to >= len(siblings) {
 		return fmt.Errorf("object index %d out of range", to)
 	}
 	if from == to {
@@ -452,7 +454,14 @@ func (e *Editor) MoveObject(page int, id string, to int) error {
 	layers := copyEditorPage(e.pages[page]).Content.Layer
 	for i := range layers {
 		if layers[i].ID == layer.ID {
-			moveEditorItem(layers[i].Objects, from, to)
+			objects := make([]GraphicObject, len(siblings))
+			for j, index := range siblings {
+				objects[j] = layer.Objects[index]
+			}
+			moveEditorItem(objects, from, to)
+			for j, index := range siblings {
+				layers[i].Objects[index] = objects[j]
+			}
 		}
 	}
 	e.replaceLayers(page, layers)

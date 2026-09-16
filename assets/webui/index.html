@@ -100,7 +100,8 @@
 				<span>插入</span>
 			</div>
 			<div class="editor-group">
-				<div class="text-font"><select id="textFont" aria-label="字体" title="字体" disabled></select><button id="textFontAdd" class="icon-button" type="button" title="添加字体" aria-label="添加字体">+</button></div>
+				<div class="text-font"><div class="font-picker"><input id="textFont" type="text" role="combobox" aria-label="字体" title="字体" aria-autocomplete="list" aria-controls="textFontList" aria-expanded="false" autocomplete="off" spellcheck="false" disabled><button id="textFontToggle" type="button" title="选择字体" aria-label="选择字体" tabindex="-1" disabled></button></div><button id="textFontAdd" class="icon-button" type="button" title="添加字体" aria-label="添加字体">+</button></div>
+				<div id="textFontList" class="font-listbox" role="listbox" aria-label="字体列表" popover="manual"></div>
 				<div class="editor-number"><input id="textSize" type="number" min="1" step="any" required aria-label="字号" disabled><span>pt</span></div>
 				<input id="textColor" class="color-input" type="color" value="#000000" aria-label="文字颜色" title="文字颜色" disabled>
 				<span>文字</span>

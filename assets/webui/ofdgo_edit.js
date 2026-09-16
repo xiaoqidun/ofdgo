@@ -156,9 +156,9 @@ export class CanvasEditor {
 		viewer.addEventListener("lostpointercapture", () => this.cancel());
 		viewer.addEventListener("keydown", (event) => this.keyDown(event));
 		viewer.addEventListener("keyup", (event) => this.modifierChange(event));
-		viewer.addEventListener("dblclick", () => {
+		viewer.addEventListener("dblclick", (event) => {
 			const item = this.selected;
-			if (this.enabled && item && !item.items && !this.input && !this.options.busy()) {
+			if (!event.altKey && this.enabled && item && !item.items && !this.input && !this.options.busy()) {
 				this.options.onEdit(item);
 			}
 		});
@@ -361,6 +361,10 @@ export class CanvasEditor {
 			this.startShape(event);
 			return;
 		}
+		if (event.altKey && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.target.dataset.corner) {
+			this.cycleSelection(event);
+			return;
+		}
 		const node = event.target.closest(".edit-object, .edit-selection");
 		if (node) {
 			event.preventDefault();
@@ -399,6 +403,19 @@ export class CanvasEditor {
 			}));
 		}
 		this.viewer.setPointerCapture(event.pointerId);
+	}
+
+	cycleSelection(event) {
+		const surface = event.target.closest(".page-surface");
+		const page = this.pages.get(surface);
+		if (!page) return;
+		const point = pagePoint(event.clientX, event.clientY, surface.getBoundingClientRect(), page, this.options.rotation());
+		const items = [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)).reverse()
+			.filter(item => point.x >= item.x && point.x <= item.x + item.width && point.y >= item.y && point.y <= item.y + item.height);
+		if (!items.length) return;
+		event.preventDefault();
+		this.viewer.focus({ preventScroll: true });
+		this.select(items[(items.indexOf(this.selected) + 1) % items.length]);
 	}
 
 	move(event) {

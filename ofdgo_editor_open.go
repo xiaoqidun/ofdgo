@@ -57,7 +57,7 @@ type editorSourcePage struct {
 }
 
 // ObjectCapabilities 已有对象可执行的操作，Reason说明受限原因。
-// Update表示完整替换内容，ReplaceFont表示可显式替换文字字体，Transform表示保留文字定位的几何变换，Order仅限当前图层。
+// Update表示完整替换内容，ReplaceFont表示可显式替换文字字体，Transform表示保留文字定位的几何变换，Order仅限同一图层或末级页块。
 // Arrange表示可准确度量对齐与旋转范围；Reflow表示可重排文字，LayoutKnown表示段落选项可恢复。
 type ObjectCapabilities struct {
 	Update      bool
@@ -348,7 +348,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 	if err := validateEditorGeometry(object); err != nil {
 		return ObjectCapabilities{Reason: err.Error()}, nil
 	}
-	all.Order = e.sourceLayerOrderable(page, layer.ID)
+	all.Order = editorContainerOrderable(node.parent)
 	if _, err := e.prepareObject(id, object); err != nil {
 		all.Update, all.Reflow, all.Copy, all.Reason = false, false, false, err.Error()
 	}
@@ -375,23 +375,13 @@ func (e *Editor) objectOrigin(id string) *editorObjectOrigin {
 	return e.source.origins[id]
 }
 
-// sourceLayerOrderable 判断图层是否仅含可独立排序的直接对象。
-// 入参: page 页面索引, id 图层标识
+// editorContainerOrderable 判断容器的直接对象能否在保留页块的前提下排序。
+// 入参: container 图层或页块
 // 返回: bool 是否可排序
-func (e *Editor) sourceLayerOrderable(page int, id string) bool {
-	if !e.originalPage(page) {
-		return true
-	}
-	content := e.source.pages[e.pages[page].ID].root.child("Content")
-	if content != nil {
-		for _, layer := range content.children {
-			if layer.attr("ID") == id {
-				for _, child := range layer.children {
-					if !editorXMLSupported(child) {
-						return false
-					}
-				}
-			}
+func editorContainerOrderable(container *editorXML) bool {
+	for _, child := range container.children {
+		if !editorXMLSupported(child) {
+			return false
 		}
 	}
 	return true

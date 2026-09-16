@@ -662,7 +662,11 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 				continue
 			}
 			if box.W > 0 && box.H > 0 {
-				item := map[string]any{"id": id, "type": object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "count": len(layer.Objects), "layer": layer.ID,
+				position, err := currentEditor.ObjectPosition(index, id)
+				if err != nil {
+					return nil, err
+				}
+				item := map[string]any{"id": id, "type": object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "position": position.Index, "count": position.Count, "container": position.Container,
 					"capabilities": map[string]any{"update": capability.Update, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason}}
 				if object.Type == "ImageObject" && capability.Update {
 					full, err := object.ImageObject.ImageBounds()
