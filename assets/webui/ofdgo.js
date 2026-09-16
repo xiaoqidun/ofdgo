@@ -1,4 +1,4 @@
-import { CanvasEditor, canEditObject, objectEditReason } from "./ofdgo_edit.js";
+import { CanvasEditor, canEditObject, missingGlyphMessage, objectEditReason } from "./ofdgo_edit.js";
 import { FontManager, FontPicker } from "./ofdgo_font.js";
 
 const MM_TO_PX = 96 / 25.4;
@@ -1727,7 +1727,7 @@ async function loadWASM() {
 				if (data.ok) {
 					request.resolve(data.data);
 				} else {
-					const err = new Error(data.error);
+					const err = new Error(missingGlyphMessage(data.missingGlyphs) || data.error);
 					if (data.canceled) {
 						err.name = "AbortError";
 					}

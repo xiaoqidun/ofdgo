@@ -273,12 +273,14 @@ a:focus-visible {
 	gap: 12px;
 	padding: 6px 8px;
 	line-height: 1.4;
-	overflow-wrap: anywhere;
 	cursor: pointer;
 }
 
 .font-listbox [role="option"] > span:first-child {
 	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .font-option-source {

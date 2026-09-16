@@ -15,10 +15,46 @@
 package ofdgo
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/go-text/typesetting/segmenter"
 )
+
+// MissingGlyphError 字体缺字错误，FontID为OFD字体资源标识，Characters按首次出现顺序保留不重复的缺失字符
+// 可通过errors.As从编辑错误中取得，不表示字体缺失或文件损坏
+type MissingGlyphError struct {
+	FontID     string `json:"fontID"`
+	Characters string `json:"characters"`
+}
+
+// Error 返回缺失字符的Unicode码点
+// 返回: string 错误描述
+func (e *MissingGlyphError) Error() string {
+	var codes []string
+	for _, char := range e.Characters {
+		codes = append(codes, fmt.Sprintf("U+%04X", char))
+	}
+	return fmt.Sprintf("font %q does not contain %s", e.FontID, strings.Join(codes, ", "))
+}
+
+// missingGlyphError 汇总缺失字符，无缺字时返回nil
+// 入参: id 字体资源标识, characters 缺失字符
+// 返回: error 缺字诊断
+func missingGlyphError(id string, characters []rune) error {
+	if len(characters) == 0 {
+		return nil
+	}
+	seen := make(map[rune]bool)
+	var value strings.Builder
+	for _, char := range characters {
+		if !seen[char] {
+			seen[char] = true
+			value.WriteRune(char)
+		}
+	}
+	return &MissingGlyphError{FontID: id, Characters: value.String()}
+}
 
 // TextLayout 本地横向段落选项，Wrap按CTM变换前的边界宽度折行，Align为left、center、right或justify
 // LineHeight为毫米单位的基线间距，0使用字体度量；LetterSpacing为字素间的附加毫米间距，可为负

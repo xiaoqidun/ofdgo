@@ -122,13 +122,21 @@ export function canEditObject(item, capability) {
 	return Boolean(item) && (item.items || [item]).every(object => Boolean(object.capabilities?.[capability]));
 }
 
+export function missingGlyphMessage(diagnostic) {
+	if (!diagnostic) return "";
+	const characters = Array.from(diagnostic.characters);
+	const sample = characters.slice(0, 8).map(char => /[\p{C}\p{Z}\p{M}]/u.test(char)
+		? `U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}` : char).join(" ");
+	return `字体缺字：${sample}${characters.length > 8 ? ` 等 ${characters.length} 字` : ""}，改选字体`;
+}
+
 export function objectEditReason(item) {
 	const reasons = (item?.items || (item ? [item] : [])).map(object => {
 		const reason = object.capabilities?.reason || "";
 		if (!reason) return "";
 		let message = "对象特性暂不支持";
-		if (reason.includes("embedded font")) message = "缺少内嵌字体";
-		else if (reason.includes("does not contain")) message = "字体缺字";
+		if (object.capabilities.missingGlyphs) message = missingGlyphMessage(object.capabilities.missingGlyphs);
+		else if (reason.includes("embedded font")) message = "缺少内嵌字体";
 		else if (reason.includes("color") || reason.includes("RGB")) message = "颜色样式暂不支持";
 		else if (reason.includes("draw parameter")) message = "绘制参数暂不支持";
 		else if (reason.includes("layer")) message = "图层特性暂不支持";

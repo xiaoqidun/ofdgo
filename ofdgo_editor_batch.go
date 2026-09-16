@@ -57,7 +57,7 @@ func (e *Editor) Objects(page int, ids []string) ([]GraphicObject, error) {
 			return nil, err
 		}
 		if !capability.Copy {
-			return nil, fmt.Errorf("object %q cannot be copied: %s", editorObjectID(object), capability.Reason)
+			return nil, fmt.Errorf("object %q cannot be copied: %w", editorObjectID(object), capability.editError())
 		}
 		objects[i], err = cloneEditorObject(object)
 		if err != nil {
@@ -362,7 +362,7 @@ func (e *Editor) updateObjects(page int, objects []GraphicObject, geometry bool)
 				return err
 			}
 			if !capability.Transform || !geometry && !e.sourceRGB() {
-				return fmt.Errorf("object %q is read-only for this operation: %s", ids[i], capability.Reason)
+				return fmt.Errorf("object %q is read-only for this operation: %w", ids[i], capability.editError())
 			}
 		}
 		if geometry && e.originalPage(page) {
@@ -498,7 +498,7 @@ func (e *Editor) DeleteObjects(page int, ids []string) error {
 			return err
 		}
 		if !capability.Delete {
-			return fmt.Errorf("object %q cannot be deleted: %s", id, capability.Reason)
+			return fmt.Errorf("object %q cannot be deleted: %w", id, capability.editError())
 		}
 	}
 	layers := copyEditorPage(e.pages[page]).Content.Layer
@@ -568,7 +568,7 @@ func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) 
 			return nil, err
 		}
 		if !capability.Arrange {
-			return nil, fmt.Errorf("object %q cannot be arranged: %s", editorObjectID(object), capability.Reason)
+			return nil, fmt.Errorf("object %q cannot be arranged: %w", editorObjectID(object), capability.editError())
 		}
 	}
 	reader, err := e.Reader()

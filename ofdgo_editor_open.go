@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"image"
 	"io"
@@ -59,17 +60,28 @@ type editorSourcePage struct {
 // ObjectCapabilities 已有对象可执行的操作，Reason说明受限原因
 // Update表示完整替换内容，ReplaceFont表示可显式替换文字字体，Transform表示保留文字定位的几何变换，Order仅限同一图层或末级页块
 // Arrange表示可准确度量对齐与旋转范围；Reflow表示可重排文字，LayoutKnown表示段落选项可恢复
+// MissingGlyphs提供缺字导致操作受限时的结构化诊断
 type ObjectCapabilities struct {
-	Update      bool
-	ReplaceFont bool
-	Reflow      bool
-	LayoutKnown bool
-	Transform   bool
-	Arrange     bool
-	Copy        bool
-	Delete      bool
-	Order       bool
-	Reason      string
+	Update        bool
+	ReplaceFont   bool
+	Reflow        bool
+	LayoutKnown   bool
+	Transform     bool
+	Arrange       bool
+	Copy          bool
+	Delete        bool
+	Order         bool
+	Reason        string
+	MissingGlyphs *MissingGlyphError
+}
+
+// editError 将操作受限原因转为错误，保留可供调用方识别的缺字诊断
+// 返回: error 受限原因
+func (c ObjectCapabilities) editError() error {
+	if c.MissingGlyphs != nil {
+		return c.MissingGlyphs
+	}
+	return errors.New(c.Reason)
 }
 
 // PageCapabilities 页面可执行的操作，Insert表示可以添加RGB对象；新增空白页面始终可用
@@ -351,10 +363,12 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 	all.Order = editorContainerOrderable(node.parent)
 	if _, err := e.prepareObject(id, object); err != nil {
 		all.Update, all.Reflow, all.Copy, all.Reason = false, false, false, err.Error()
+		errors.As(err, &all.MissingGlyphs)
 	}
 	if !e.sourceRGB() {
 		all.ReplaceFont = false
 		all.Update, all.Reflow, all.Copy, all.Reason = false, false, false, "document uses a non-RGB default color space"
+		all.MissingGlyphs = nil
 	}
 	if object.Type == "TextObject" {
 		all.Arrange = all.Update

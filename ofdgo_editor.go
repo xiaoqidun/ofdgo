@@ -858,15 +858,20 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 		lineHeight = math.Max(obj.Size, float64(int(ascender)-int(descender)+int(gap))*unit)
 	}
 	var codes []TextCode
+	var missing []rune
 	for _, paragraph := range strings.Split(value, "\n") {
 		runes := []rune(paragraph)
 		advances := make([]float64, len(runes))
 		for i, char := range runes {
 			glyph := sfnt.GlyphIndex(char)
 			if glyph == 0 {
-				return fmt.Errorf("font does not contain U+%04X", char)
+				missing = append(missing, char)
+				continue
 			}
 			advances[i] = float64(sfnt.GlyphAdvance(glyph)) * unit * hScale
+		}
+		if len(missing) != 0 {
+			continue
 		}
 		spaceTextAdvances(runes, advances, options.LetterSpacing)
 		for _, advance := range advances {
@@ -883,6 +888,9 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 			}
 			codes = append(codes, TextCode{X: ofdNumber(x), Y: ofdNumber(y), DeltaX: deltas, Value: escapeOFDText(string(runes[line[0]:line[1]]))})
 		}
+	}
+	if err := missingGlyphError(obj.Font, missing); err != nil {
+		return err
 	}
 	obj.TextCode = codes
 	obj.layout = nil
@@ -918,6 +926,7 @@ func (e *Editor) prepareText(obj *TextObject) error {
 		}
 	}
 	obj.TextCode = append([]TextCode(nil), obj.TextCode...)
+	var missing []rune
 	x, y := "", ""
 	for i := range obj.TextCode {
 		code := &obj.TextCode[i]
@@ -939,7 +948,7 @@ func (e *Editor) prepareText(obj *TextObject) error {
 		runes := textCodeRunes(code.Value)
 		for _, char := range runes {
 			if sfnt.GlyphIndex(char) == 0 {
-				return fmt.Errorf("font does not contain U+%04X", char)
+				missing = append(missing, char)
 			}
 		}
 		for _, delta := range []string{code.DeltaX, code.DeltaY} {
@@ -957,7 +966,7 @@ func (e *Editor) prepareText(obj *TextObject) error {
 	if strings.Trim(obj.Text(), "\n") == "" {
 		return fmt.Errorf("text codes are empty")
 	}
-	return nil
+	return missingGlyphError(obj.Font, missing)
 }
 
 // creationDeltas 校验文字位移数组及g重复编码

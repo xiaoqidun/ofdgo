@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"io"
@@ -77,9 +78,10 @@ var currentSession *Session
 
 // apiResult 浏览器接口返回结果
 type apiResult struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
-	Data  any    `json:"data,omitempty"`
+	OK            bool                     `json:"ok"`
+	Error         string                   `json:"error,omitempty"`
+	Data          any                      `json:"data,omitempty"`
+	MissingGlyphs *ofdgo.MissingGlyphError `json:"missingGlyphs,omitempty"`
 }
 
 // RunWASM 注册浏览器WASM接口并阻塞运行
@@ -167,7 +169,9 @@ func registerExportCallback(name string, fn func([]js.Value) (any, error)) {
 func callbackResult(fn func([]js.Value) (any, error), args []js.Value) any {
 	data, err := safeCall(fn, args)
 	if err != nil {
-		return encodeResult(apiResult{OK: false, Error: err.Error()})
+		result := apiResult{Error: err.Error()}
+		errors.As(err, &result.MissingGlyphs)
+		return encodeResult(result)
 	}
 	if result, ok := data.(js.Value); ok {
 		return result
@@ -698,6 +702,9 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 				}
 				item := map[string]any{"id": id, "type": object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "position": position.Index, "count": position.Count, "container": position.Container,
 					"capabilities": map[string]any{"update": capability.Update, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason}}
+				if missing := capability.MissingGlyphs; missing != nil {
+					item["capabilities"].(map[string]any)["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
+				}
 				if object.Type == "ImageObject" && capability.Update {
 					full, err := object.ImageObject.ImageBounds()
 					if err != nil {
