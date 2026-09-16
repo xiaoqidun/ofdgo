@@ -171,7 +171,7 @@ func (e *Editor) sourceParts() (map[string][]byte, error) {
 	return parts, nil
 }
 
-// sourcePageXML 仅改写已修改的直接对象、页面尺寸和新增图层。
+// sourcePageXML 仅改写已修改的对象、页面尺寸和新增图层，保留原页块层级。
 // 入参: index 页面索引, source 原页面
 // 返回: []byte 页面XML, error 错误信息
 func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, error) {

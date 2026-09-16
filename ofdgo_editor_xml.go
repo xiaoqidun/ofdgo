@@ -187,13 +187,48 @@ func editorXMLSetText(data []byte, node *editorXML, values [][2]string) []byte {
 	return editorPatchXML(data, patches)
 }
 
+// editorXMLObjects 递归登记图层和页块内的对象位置，保留原容器层级。
+// 入参: container 图层或页块, nodes 标识与节点映射
+// 返回: error 错误信息
+func editorXMLObjects(container *editorXML, nodes map[string]*editorXML) error {
+	for _, node := range container.children {
+		if id := node.attr("ID"); id != "" {
+			if nodes[id] != nil {
+				return fmt.Errorf("duplicate object ID %q", id)
+			}
+			nodes[id] = node
+		}
+		if node.name.Local == "PageBlock" {
+			if err := editorXMLObjects(node, nodes); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// editorXMLAttributes 判断节点的命名空间与属性是否在编辑器支持范围内。
+// 入参: node 节点, allowed 允许的属性名称
+// 返回: bool 是否支持
+func editorXMLAttributes(node *editorXML, allowed string) bool {
+	if node.name.Space != "" && node.name.Space != ofdNamespace && node.name.Space != "http://www.ofdspec.org" {
+		return false
+	}
+	for _, attr := range node.attrs {
+		if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" && attr.Name.Space == "" {
+			continue
+		}
+		if attr.Name.Space != "" || !slices.Contains(strings.Fields(allowed), attr.Name.Local) {
+			return false
+		}
+	}
+	return true
+}
+
 // editorXMLSupported 判断原文是否仅包含创建器能够保留的对象字段。
 // 入参: node 对象或子节点
 // 返回: bool 是否支持完整编辑
 func editorXMLSupported(node *editorXML) bool {
-	if node.name.Space != "" && node.name.Space != ofdNamespace && node.name.Space != "http://www.ofdspec.org" {
-		return false
-	}
 	var allowed, children string
 	switch node.name.Local {
 	case "TextObject":
@@ -219,13 +254,8 @@ func editorXMLSupported(node *editorXML) bool {
 	default:
 		return false
 	}
-	for _, attr := range node.attrs {
-		if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" && attr.Name.Space == "" {
-			continue
-		}
-		if attr.Name.Space != "" || !slices.Contains(strings.Fields(allowed), attr.Name.Local) {
-			return false
-		}
+	if !editorXMLAttributes(node, allowed) {
+		return false
 	}
 	for _, child := range node.children {
 		if !slices.Contains(strings.Fields(children), child.name.Local) || !editorXMLSupported(child) {

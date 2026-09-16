@@ -47,7 +47,7 @@ type editorObjectOrigin struct {
 	reason string
 }
 
-// editorSourcePage 保存页面原文、解析快照及可定位的直接对象。
+// editorSourcePage 保存页面原文、解析快照及图层和页块内的对象位置。
 type editorSourcePage struct {
 	ref      Page
 	data     []byte
@@ -281,14 +281,8 @@ func (e *Editor) loadSourcePage(index int) error {
 			if layer.name.Local != "Layer" {
 				continue
 			}
-			for _, node := range layer.children {
-				id := node.attr("ID")
-				if id != "" {
-					if nodes[id] != nil {
-						return fmt.Errorf("duplicate object ID %q", id)
-					}
-					nodes[id] = node
-				}
+			if err := editorXMLObjects(layer, nodes); err != nil {
+				return err
 			}
 		}
 	}
@@ -334,13 +328,6 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 	source := e.source.pages[e.pages[page].ID]
 	node := source.nodes[id]
 	if node == nil {
-		for _, original := range source.original.Content.Layer {
-			for _, object := range original.Objects {
-				if editorObjectID(object) == id {
-					return ObjectCapabilities{Reason: "nested objects are read-only"}, nil
-				}
-			}
-		}
 		return all, nil
 	}
 	if !editorXMLSupported(node) {
@@ -349,12 +336,13 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 	if origin := e.objectOrigin(id); origin.reason != "" {
 		return ObjectCapabilities{Reason: origin.reason}, nil
 	}
-	for _, attr := range node.parent.attrs {
-		if attr.Name.Space == "xmlns" || attr.Name.Space == "" && attr.Name.Local == "xmlns" {
-			continue
+	for parent := node.parent; parent.name.Local != "Content"; parent = parent.parent {
+		allowed := "ID"
+		if parent.name.Local == "Layer" {
+			allowed += " Type DrawParam"
 		}
-		if attr.Name.Space != "" || attr.Name.Local != "ID" && attr.Name.Local != "Type" && attr.Name.Local != "DrawParam" {
-			return ObjectCapabilities{Reason: "layer uses unsupported editing features"}, nil
+		if !editorXMLAttributes(parent, allowed) {
+			return ObjectCapabilities{Reason: "object container uses unsupported editing features"}, nil
 		}
 	}
 	if err := validateEditorGeometry(object); err != nil {

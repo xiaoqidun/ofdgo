@@ -35,7 +35,7 @@ func (e *Editor) editorDrawParam(id string, visited map[string]bool) (*DrawParam
 	return mergeDrawParam(*base, dp), nil
 }
 
-// resolveEditorStyle 为直接对象生成独立的有效样式，不改写共享资源或原XML。
+// resolveEditorStyle 为对象生成独立的有效样式，不改写共享资源或原XML。
 // 入参: object 原对象, layer 图层绘制参数标识
 // 返回: GraphicObject 编辑快照, error 错误信息
 func (e *Editor) resolveEditorStyle(object GraphicObject, layer string) (GraphicObject, error) {

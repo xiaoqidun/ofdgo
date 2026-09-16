@@ -132,6 +132,7 @@ export function objectEditReason(item) {
 		else if (reason.includes("color") || reason.includes("RGB")) message = "颜色样式暂不支持";
 		else if (reason.includes("draw parameter")) message = "绘制参数暂不支持";
 		else if (reason.includes("layer")) message = "图层特性暂不支持";
+		else if (reason.includes("container")) message = "容器特性暂不支持";
 		else if (reason.includes("invalid")) message = "对象数据异常";
 		return `${object.capabilities.transform ? "部分操作受限" : "暂不可编辑"}：${message}`;
 	});

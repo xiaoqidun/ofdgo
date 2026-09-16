@@ -651,9 +651,6 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 			if err != nil {
 				return nil, err
 			}
-			if capability.Reason == "nested objects are read-only" {
-				continue
-			}
 			var box ofdgo.Box
 			switch object.Type {
 			case "TextObject":
