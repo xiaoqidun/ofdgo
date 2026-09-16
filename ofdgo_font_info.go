@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -73,6 +74,30 @@ func (r *Reader) Fonts() ([]Font, error) {
 		return fonts[i].ID < fonts[j].ID
 	})
 	return fonts, nil
+}
+
+// FontData 读取内嵌字体，集合按声明名称和样式提取为独立字体，其他格式保留原始字节
+// 入参: id 字体资源标识
+// 返回: []byte 字体数据, error 资源缺失或集合解析错误
+func (r *Reader) FontData(id string) ([]byte, error) {
+	if r.fontCache[id] == nil {
+		if _, err := r.Fonts(); err != nil {
+			return nil, err
+		}
+	}
+	f := r.fontCache[id]
+	if f == nil || f.FontFile == "" {
+		return nil, fmt.Errorf("embedded font %q not found", id)
+	}
+	data, err := r.ResData(f.FontFile)
+	if err != nil {
+		return nil, err
+	}
+	if bytes.HasPrefix(data, []byte("ttcf")) {
+		index := fontCollectionIndex(data, []string{f.FontName, f.FamilyName}, f.Bold, f.Italic)
+		return extractCollectionFont(data, index)
+	}
+	return data, nil
 }
 
 // FontInfos 获取OFD字体诊断信息

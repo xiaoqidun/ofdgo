@@ -34,42 +34,70 @@ type fontNameRecord struct {
 }
 
 // appendFontFileNames 使用字体内部名称匹配，缺失时保留文件名
-// 入参: candidates 字体候选, index 文件候选索引, names 字体内部名称
+// 入参: candidates 字体候选, index 文件候选索引, faces 各字体内部名称
 // 返回: []fontFileCandidate 字体候选列表
-func appendFontFileNames(candidates []fontFileCandidate, index int, names []string) []fontFileCandidate {
+func appendFontFileNames(candidates []fontFileCandidate, index int, faces [][]string) []fontFileCandidate {
 	file := candidates[index]
-	for i, name := range names {
-		file.normalized = fontNormalizeName(name)
-		if i == 0 {
-			candidates[index] = file
-		} else {
-			candidates = append(candidates, file)
+	replaced := false
+	for face, names := range faces {
+		file.face = face
+		for _, name := range names {
+			file.normalized = fontNormalizeName(name)
+			if !replaced {
+				candidates[index] = file
+				replaced = true
+			} else {
+				candidates = append(candidates, file)
+			}
 		}
 	}
 	return candidates
 }
 
-// fontFileNames 读取字体或集合首项的名称
+// fontFileNames 按字体索引读取字体或集合中各项的名称
 // 入参: file 字体数据
-// 返回: []string 字体名称及带样式的字体族名称
-func fontFileNames(file io.ReaderAt) []string {
+// 返回: [][]string 各字体名称及带样式的字体族名称
+func fontFileNames(file io.ReaderAt) [][]string {
 	var header [12]byte
 	if _, err := file.ReadAt(header[:], 0); err != nil {
 		return nil
 	}
-	var offset int64
-	if string(header[:4]) == "ttcf" {
-		if binary.BigEndian.Uint32(header[8:]) == 0 {
-			return nil
-		}
+	if string(header[:4]) != "ttcf" {
+		return [][]string{fontFaceNames(file, 0)}
+	}
+	version := binary.BigEndian.Uint32(header[4:])
+	if version != 0x00010000 && version != 0x00020000 {
+		return nil
+	}
+	var faces [][]string
+	for i, count := uint32(0), binary.BigEndian.Uint32(header[8:]); i < count; i++ {
 		var entry [4]byte
-		if _, err := file.ReadAt(entry[:], 12); err != nil {
+		if _, err := file.ReadAt(entry[:], 12+int64(i)*4); err != nil {
 			return nil
 		}
-		offset = int64(binary.BigEndian.Uint32(entry[:]))
-		if _, err := file.ReadAt(header[:], offset); err != nil {
-			return nil
-		}
+		faces = append(faces, fontFaceNames(file, int64(binary.BigEndian.Uint32(entry[:]))))
+	}
+	return faces
+}
+
+// fontCollectionIndex 按内部名称与样式选择集合项，未匹配时保留首项
+// 入参: data 集合数据, names 字体名称, bold 是否粗体, italic 是否斜体
+// 返回: int 零起始字体索引
+func fontCollectionIndex(data []byte, names []string, bold, italic bool) int {
+	candidates := appendFontFileNames([]fontFileCandidate{{}}, 0, fontFileNames(bytes.NewReader(data)))
+	if matches := fontFileMatches(candidates, names, bold, italic); len(matches) > 0 {
+		return matches[0].face
+	}
+	return 0
+}
+
+// fontFaceNames 读取指定字体表目录中的名称
+// 入参: file 字体数据, offset 字体表目录偏移
+// 返回: []string 字体名称及带样式的字体族名称
+func fontFaceNames(file io.ReaderAt, offset int64) []string {
+	var header [12]byte
+	if _, err := file.ReadAt(header[:], offset); err != nil {
+		return nil
 	}
 	switch string(header[:4]) {
 	case "\x00\x01\x00\x00", "OTTO", "true":

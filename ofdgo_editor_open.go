@@ -410,23 +410,16 @@ func (e *Editor) editorFont(id string) (*font.SFNT, error) {
 		return sfnt, nil
 	}
 	if e.source != nil {
-		reader := e.source.reader
-		if f := reader.fontCache[id]; f != nil && f.FontFile != "" {
-			data, err := reader.ResData(f.FontFile)
-			if err != nil {
-				return nil, err
-			}
-			data, err = font.ToSFNT(data)
-			if err != nil {
-				return nil, err
-			}
-			sfnt, err := font.ParseSFNT(data, 0)
-			if err != nil {
-				return nil, err
-			}
-			e.fonts[id] = sfnt
-			return sfnt, nil
+		data, err := e.source.reader.FontData(id)
+		if err != nil {
+			return nil, err
 		}
+		sfnt, err := font.ParseSFNT(data, 0)
+		if err != nil {
+			return nil, err
+		}
+		e.fonts[id] = sfnt
+		return sfnt, nil
 	}
 	return nil, fmt.Errorf("embedded font %q not found", id)
 }

@@ -40,6 +40,7 @@ const (
 type fontSource struct {
 	kind     fontSourceKind
 	index    int
+	face     int
 	name     string
 	exact    bool
 	priority int
@@ -49,6 +50,7 @@ type fontSource struct {
 type fontSourceKey struct {
 	kind  fontSourceKind
 	index int
+	face  int
 	name  string
 }
 
@@ -76,7 +78,7 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	fontStyle := canvasFontStyle(of)
 	ff := canvas.NewFontFamily(of.FontName)
 	if of.FontFile != "" {
-		if fontData, err := r.Reader.ResData(of.FontFile); err == nil {
+		if fontData, err := r.Reader.FontData(fontID); err == nil {
 			if cidMap := getCFFCIDRuneMap(fontData); len(cidMap) > 0 {
 				r.fontCIDMap[fontID] = cidMap
 			}
@@ -144,12 +146,12 @@ func (r *Renderer) fontSources(fontID string, font *Font, style canvas.FontStyle
 	seen := make(map[fontSourceKey]bool)
 	for _, dir := range r.fontDirs {
 		for _, match := range r.matchFontFiles(dir, names, bold, italic) {
-			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.name, exact: true, priority: min(match.priority, 0)})
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.name, face: match.face, exact: true, priority: min(match.priority, 0)})
 		}
 	}
 	for index := range r.fontFS {
 		for _, match := range r.matchFontFS(index, names, bold, italic) {
-			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: match.name, exact: true, priority: min(match.priority, 0)})
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: match.name, face: match.face, exact: true, priority: min(match.priority, 0)})
 		}
 	}
 	sortFontSources(sources)
@@ -157,7 +159,7 @@ func (r *Renderer) fontSources(fontID string, font *Font, style canvas.FontStyle
 	if canLoadSystemFonts() {
 		for _, dir := range systemFontDirs() {
 			for _, match := range r.matchFontFiles(dir, names, bold, italic) {
-				sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.name, exact: true, priority: min(match.priority, 0)})
+				sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.name, face: match.face, exact: true, priority: min(match.priority, 0)})
 			}
 		}
 		for _, name := range fontSystemNames(names...) {
@@ -174,7 +176,7 @@ func (r *Renderer) fontSources(fontID string, font *Font, style canvas.FontStyle
 	sortFontSources(sources[systemStart:])
 	for index := range r.fontFS {
 		for _, match := range r.matchFontFS(index, nil, bold, italic) {
-			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: match.name})
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: match.name, face: match.face})
 		}
 	}
 	for index, fsys := range r.fontFS {
@@ -202,7 +204,7 @@ func appendFontSource(sources []fontSource, seen map[fontSourceKey]bool, source 
 	if source.name == "" {
 		return sources
 	}
-	key := fontSourceKey{kind: source.kind, index: source.index, name: source.name}
+	key := fontSourceKey{kind: source.kind, index: source.index, name: source.name, face: source.face}
 	if seen[key] {
 		return sources
 	}
@@ -219,7 +221,7 @@ func (r *Renderer) fontSourceMatch(fontID string, font *Font) (fontSource, bool)
 	}
 	style := canvasFontStyle(font)
 	for _, source := range r.fontSources(fontID, font, style) {
-		key := fontCacheKey{fontSourceKey: fontSourceKey{kind: source.kind, index: source.index, name: source.name}, style: style}
+		key := fontCacheKey{fontSourceKey: fontSourceKey{kind: source.kind, index: source.index, name: source.name, face: source.face}, style: style}
 		if cached, ok := r.fontCache[key]; ok {
 			if cached != nil {
 				return source, true
@@ -238,22 +240,27 @@ func (r *Renderer) fontSourceMatch(fontID string, font *Font) (fontSource, bool)
 // 入参: family 字体族, source 字体来源, style Canvas字体样式
 // 返回: *canvas.FontFamily 字体族
 func (r *Renderer) loadFontSource(family *canvas.FontFamily, source fontSource, style canvas.FontStyle) *canvas.FontFamily {
-	key := fontCacheKey{fontSourceKey: fontSourceKey{kind: source.kind, index: source.index, name: source.name}, style: style}
+	key := fontCacheKey{fontSourceKey: fontSourceKey{kind: source.kind, index: source.index, name: source.name, face: source.face}, style: style}
 	if cached, ok := r.fontCache[key]; ok {
 		return cached
 	}
 	var err error
+	var data []byte
 	switch source.kind {
 	case fontSourceFile:
-		err = family.LoadFontFile(source.name, style)
+		data, err = os.ReadFile(source.name)
 	case fontSourceFS:
-		var data []byte
 		data, err = fs.ReadFile(r.fontFS[source.index], source.name)
+	case fontSourceSystem:
+		err = family.LoadSystemFont(source.name, style)
+	}
+	if err == nil && source.kind != fontSourceSystem {
+		if bytes.HasPrefix(data, []byte("ttcf")) {
+			data, err = extractCollectionFont(data, source.face)
+		}
 		if err == nil {
 			err = family.LoadFont(data, 0, style)
 		}
-	case fontSourceSystem:
-		err = family.LoadSystemFont(source.name, style)
 	}
 	if err != nil {
 		r.fontCache[key] = nil

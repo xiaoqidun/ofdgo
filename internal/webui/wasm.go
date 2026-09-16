@@ -758,27 +758,18 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 	return objects, nil
 }
 
-// editorFont 读取创作对象的完整内嵌字体，供画布输入使用
+// editorFont 读取对象实际使用的内嵌字体，供画布输入使用
 // 入参: args 字体资源标识
 // 返回: any 字体数据, error 错误信息
 func editorFont(args []js.Value) (any, error) {
 	if currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
 	}
-	fonts, err := currentSession.Reader.Fonts()
+	data, err := currentSession.Reader.FontData(args[0].String())
 	if err != nil {
 		return nil, err
 	}
-	for _, font := range fonts {
-		if font.ID == args[0].String() {
-			data, err := currentSession.Reader.ResData(font.FontFile)
-			if err != nil {
-				return nil, err
-			}
-			return successResult(map[string]any{"bytes": bytesToJS(data)}), nil
-		}
-	}
-	return nil, fmt.Errorf("font resource %q not found", args[0].String())
+	return successResult(map[string]any{"bytes": bytesToJS(data)}), nil
 }
 
 // replaceImage 替换图片资源并更新预览

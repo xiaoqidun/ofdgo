@@ -189,7 +189,7 @@ func (fsys *FontFS) matchStyle(names []string, bold, italic bool) []fontFileMatc
 // 返回: []fontFileMatch 按优先级排列的字体匹配
 func fontFileMatches(candidates []fontFileCandidate, names []string, bold, italic bool) []fontFileMatch {
 	matches := make([]fontFileMatch, 0, len(candidates))
-	seen := make(map[string]int, len(candidates))
+	seen := make(map[fontFileKey]int, len(candidates))
 	if len(names) == 0 {
 		for _, name := range fontDefaultSystemNames() {
 			matches = append(matches, fontFileMatches(candidates, []string{name}, bold, italic)...)
@@ -199,7 +199,7 @@ func fontFileMatches(candidates []fontFileCandidate, names []string, bold, itali
 		})
 		unique := matches[:0]
 		for _, match := range matches {
-			key := strings.ToLower(match.name)
+			key := fontFileKey{strings.ToLower(match.name), match.face}
 			if _, ok := seen[key]; !ok {
 				seen[key] = len(unique)
 				unique = append(unique, match)
@@ -278,6 +278,7 @@ func cleanFontName(name string) string {
 // fontFileCandidate 字体文件候选
 type fontFileCandidate struct {
 	name       string
+	face       int
 	base       string
 	lowerBase  string
 	normalized string
@@ -421,15 +422,22 @@ func (m fontPatternMatcher) styleSuffixNormalized(name string) string {
 // fontFileMatch 字体文件匹配结果
 type fontFileMatch struct {
 	name      string
+	face      int
 	priority  int
 	rank      int
 	styleRank int
 	sortName  string
 }
 
+// fontFileKey 字体文件与集合索引的去重键
+type fontFileKey struct {
+	name string
+	face int
+}
+
 // appendFontFileMatch 追加字体文件匹配结果
 // 入参: matches 匹配结果, seen 已匹配文件, matcher 匹配器, file 字体文件候选, rank 匹配等级, bold 是否粗体, italic 是否斜体
-func appendFontFileMatch(matches *[]fontFileMatch, seen map[string]int, matcher fontPatternMatcher, file fontFileCandidate, rank int, bold, italic bool) {
+func appendFontFileMatch(matches *[]fontFileMatch, seen map[fontFileKey]int, matcher fontPatternMatcher, file fontFileCandidate, rank int, bold, italic bool) {
 	if rank == fontMatchNone {
 		return
 	}
@@ -439,18 +447,20 @@ func appendFontFileMatch(matches *[]fontFileMatch, seen map[string]int, matcher 
 	}
 	next := fontFileMatch{
 		name:      file.name,
+		face:      file.face,
 		priority:  matcher.priority,
 		rank:      rank,
 		styleRank: fontFileStyleRank(suffix, bold, italic),
 		sortName:  file.lowerBase,
 	}
-	if index, ok := seen[file.fold]; ok {
+	key := fontFileKey{file.fold, file.face}
+	if index, ok := seen[key]; ok {
 		if fontFileMatchLess(next, (*matches)[index]) {
 			(*matches)[index] = next
 		}
 		return
 	}
-	seen[file.fold] = len(*matches)
+	seen[key] = len(*matches)
 	*matches = append(*matches, next)
 }
 
@@ -483,8 +493,13 @@ func fontFileMatchLess(left, right fontFileMatch) bool {
 // 返回: []string 字体文件列表
 func fontFileMatchNames(matches []fontFileMatch) []string {
 	names := make([]string, 0, len(matches))
+	seen := make(map[string]bool, len(matches))
 	for _, match := range matches {
-		names = append(names, match.name)
+		key := strings.ToLower(match.name)
+		if !seen[key] {
+			seen[key] = true
+			names = append(names, match.name)
+		}
 	}
 	return names
 }

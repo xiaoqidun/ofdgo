@@ -26,6 +26,11 @@ export class FontPicker {
 	setFonts(fonts, selected) {
 		this.close();
 		this.fonts = fonts;
+		this.names = new Map();
+		for (const font of fonts) {
+			const name = (font.fullName || font.name).normalize("NFKC").toLocaleLowerCase();
+			this.names.set(name, (this.names.get(name) || 0) + 1);
+		}
 		const key = font => font?.id || font?.postscriptName;
 		this.value = fonts.length ? String(Math.max(0, fonts.findIndex(font => key(font) === key(selected)))) : "";
 		this.restore();
@@ -39,8 +44,15 @@ export class FontPicker {
 	restore() {
 		const font = this.fonts[Number(this.value)];
 		this.input.value = font?.fullName || font?.name || "";
+		this.input.title = font ? [this.input.value, this.sourceLabel(font)].filter(Boolean).join(" · ") : "";
 		this.input.setAttribute("aria-expanded", String(this.open));
 		this.input.removeAttribute("aria-activedescendant");
+	}
+
+	sourceLabel(font) {
+		const name = (font.fullName || font.name).normalize("NFKC").toLocaleLowerCase();
+		if (this.names.get(name) < 2) return "";
+		return font.embedded ? "内嵌" : font.file || ["stored", "upload"].includes(font.source) ? "上传" : "系统";
 	}
 
 	show(query = "") {
@@ -58,7 +70,17 @@ export class FontPicker {
 			option.dataset.index = String(index);
 			option.setAttribute("role", "option");
 			option.setAttribute("aria-disabled", String(Boolean(font.disabled)));
-			option.textContent = font.fullName || font.name;
+			const name = document.createElement("span");
+			name.textContent = font.fullName || font.name;
+			option.append(name);
+			const source = this.sourceLabel(font);
+			if (source) {
+				const label = document.createElement("span");
+				label.className = "font-option-source";
+				label.textContent = source;
+				option.append(label);
+			}
+			option.title = font.name || font.fullName;
 			this.list.append(option);
 		}
 		if (!this.matches.length) {
