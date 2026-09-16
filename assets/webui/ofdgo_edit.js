@@ -128,7 +128,7 @@ export function objectEditReason(item) {
 		if (!reason) return "";
 		let message = "对象特性暂不支持";
 		if (reason.includes("embedded font")) message = "缺少内嵌字体";
-		else if (reason.includes("does not contain")) message = "字体缺少所需文字";
+		else if (reason.includes("does not contain")) message = "字体缺字";
 		else if (reason.includes("color") || reason.includes("RGB")) message = "颜色样式暂不支持";
 		else if (reason.includes("draw parameter")) message = "绘制参数暂不支持";
 		else if (reason.includes("layer")) message = "图层特性暂不支持";

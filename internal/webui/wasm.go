@@ -655,10 +655,8 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 			switch object.Type {
 			case "TextObject":
 				box = textBoxes[id]
-			case "ImageObject":
-				box, err = ofdgo.ParseBox(object.ImageObject.Boundary)
-			case "PathObject":
-				box, err = ofdgo.ParseBox(object.PathObject.Boundary)
+			default:
+				box, err = currentSession.Renderer.ObjectBounds(object, layer.DrawParam)
 			}
 			if err != nil {
 				continue

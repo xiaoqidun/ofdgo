@@ -2939,7 +2939,7 @@ function copyEditorSelection(event) {
 	const items = canvasEditor.items().slice().sort((a, b) => a.order - b.order);
 	if (!canEditObject(canvasEditor.selected, "copy")) {
 		event.preventDefault();
-		setStatus("当前对象不可复制");
+		setStatus("对象不可复制");
 		return true;
 	}
 	const clipboard = { token: crypto.randomUUID(), page: state.doc.pages[items[0].index].id, offset: 0 };
@@ -2964,7 +2964,7 @@ async function pasteEditorContent(event) {
 	if (token) {
 		const clipboard = state.objectClipboard;
 		if (!clipboard || token !== clipboard.token) {
-			setStatus("对象剪贴板已失效");
+			setStatus("对象剪贴板失效");
 			return;
 		}
 		const openSeq = state.openSeq;
@@ -4418,7 +4418,7 @@ function updateControls() {
 function updateEditorTools() {
 	el.editButton.disabled = !state.doc || !state.ready || state.exporting;
 	el.editButton.setAttribute("aria-pressed", String(state.editing));
-	el.editButton.title = state.editing ? "返回阅读" : "编辑文档";
+	el.editButton.title = state.editing ? "阅读" : "编辑";
 	el.editButton.setAttribute("aria-label", el.editButton.title);
 	el.editNotice.textContent = state.editorInfo?.editWarnings?.join("；") || "";
 	el.editNotice.hidden = !state.editing || !el.editNotice.textContent;

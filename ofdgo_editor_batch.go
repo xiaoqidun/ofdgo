@@ -499,9 +499,9 @@ func editorObjectID(object GraphicObject) string {
 	return ""
 }
 
-// objectBounds 批量获取对齐范围，每页只度量一次文字。
+// objectBounds 批量获取对齐范围，复用同一渲染器的资源和字形缓存。
 // 入参: page 页面索引, objects 待度量的对象
-// 返回: []Box 对象范围，文字采用字形范围，其余采用Boundary, error 错误信息
+// 返回: []Box 对象范围, error 错误信息
 func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) {
 	for _, object := range objects {
 		capability, err := e.ObjectCapabilities(page, editorObjectID(object))
@@ -512,32 +512,17 @@ func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) 
 			return nil, fmt.Errorf("object %q cannot be arranged: %s", editorObjectID(object), capability.Reason)
 		}
 	}
-	textBoxes := make(map[string]Box)
-	if slices.ContainsFunc(objects, func(o GraphicObject) bool { return o.Type == "TextObject" }) {
-		reader, err := e.Reader()
-		if err != nil {
-			return nil, err
-		}
-		defer reader.Close()
-		text, err := NewRenderer(reader).PageText(&e.pages[page])
-		if err != nil {
-			return nil, err
-		}
-		for _, run := range text.Runs {
-			for _, box := range run.Boxes {
-				textBoxes[run.ID] = unionTextBox(textBoxes[run.ID], box)
-			}
-		}
+	reader, err := e.Reader()
+	if err != nil {
+		return nil, err
 	}
+	defer reader.Close()
+	renderer := NewRenderer(reader)
 	boxes := make([]Box, len(objects))
 	for i, object := range objects {
-		switch object.Type {
-		case "TextObject":
-			boxes[i] = textBoxes[object.TextObject.ID]
-		case "PathObject":
-			boxes[i], _ = ParseBox(object.PathObject.Boundary)
-		case "ImageObject":
-			boxes[i], _ = ParseBox(object.ImageObject.Boundary)
+		boxes[i], err = renderer.ObjectBounds(object, "")
+		if err != nil {
+			return nil, err
 		}
 		if boxes[i].W <= 0 || boxes[i].H <= 0 {
 			return nil, fmt.Errorf("object %q has no visible bounds", editorObjectID(object))

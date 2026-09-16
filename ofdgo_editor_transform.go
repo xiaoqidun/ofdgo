@@ -20,14 +20,14 @@ import (
 	"slices"
 )
 
-// RotateObject 绕对象中心旋转，文字采用字形范围，其余对象采用Boundary。
+// RotateObject 绕对象可见范围中心旋转。
 // 入参: page 页面索引, id 对象标识, degrees 顺时针角度
 // 返回: error 错误信息
 func (e *Editor) RotateObject(page int, id string, degrees int) error {
 	return e.RotateObjects(page, []string{id}, degrees)
 }
 
-// RotateObjects 绕同页选区中心旋转，文字采用字形范围，其余对象采用Boundary。
+// RotateObjects 绕同页选区的可见范围中心旋转。
 // 保留相对位置及资源，一次撤销恢复全部。
 // 入参: page 页面索引, ids 对象标识, degrees 顺时针角度，仅支持90度的整数倍
 // 返回: error 错误信息
@@ -40,7 +40,7 @@ func (e *Editor) RotateObjects(page int, ids []string, degrees int) error {
 	return e.orientObjects(page, ids, m)
 }
 
-// FlipObject 绕对象中心镜像，文字采用字形范围，其余对象采用Boundary。
+// FlipObject 绕对象可见范围中心镜像。
 // 入参: page 页面索引, id 对象标识, axis 为horizontal或vertical
 // 返回: error 错误信息
 func (e *Editor) FlipObject(page int, id, axis string) error {
@@ -48,7 +48,7 @@ func (e *Editor) FlipObject(page int, id, axis string) error {
 }
 
 // FlipObjects 以同页选区中心镜像，保留资源及绘制顺序，一次撤销恢复全部。
-// 文字采用字形范围，其余对象采用Boundary。
+// 以对象可见范围计算选区。
 // 入参: page 页面索引, ids 对象标识, axis 为horizontal或vertical
 // 返回: error 错误信息
 func (e *Editor) FlipObjects(page int, ids []string, axis string) error {
