@@ -56,10 +56,11 @@ type editorSourcePage struct {
 }
 
 // ObjectCapabilities 已有对象可执行的操作，Reason说明受限原因。
-// Update表示完整替换内容，Transform表示保留文字定位的几何变换，Order仅限当前图层。
+// Update表示完整替换内容，ReplaceFont表示可显式替换文字字体，Transform表示保留文字定位的几何变换，Order仅限当前图层。
 // Arrange表示可准确度量对齐与旋转范围；Reflow表示可重排文字，LayoutKnown表示段落选项可恢复。
 type ObjectCapabilities struct {
 	Update      bool
+	ReplaceFont bool
 	Reflow      bool
 	LayoutKnown bool
 	Transform   bool
@@ -315,7 +316,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 		return ObjectCapabilities{}, err
 	}
 	object := layer.Objects[index]
-	all := ObjectCapabilities{Update: true, Reflow: object.Type == "TextObject" && object.TextObject.ReadDirection == 0 && object.TextObject.CharDirection == 0, LayoutKnown: object.Type == "TextObject" && (e.objectOrigin(id) == nil || object.TextObject.layout != nil), Transform: true, Arrange: true, Copy: true, Delete: true, Order: true}
+	all := ObjectCapabilities{Update: true, ReplaceFont: object.Type == "TextObject", Reflow: object.Type == "TextObject" && object.TextObject.ReadDirection == 0 && object.TextObject.CharDirection == 0, LayoutKnown: object.Type == "TextObject" && (e.objectOrigin(id) == nil || object.TextObject.layout != nil), Transform: true, Arrange: true, Copy: true, Delete: true, Order: true}
 	if !e.originalPage(page) {
 		return all, nil
 	}
@@ -350,6 +351,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 		all.Update, all.Reflow, all.Copy, all.Reason = false, false, false, err.Error()
 	}
 	if !e.sourceRGB() {
+		all.ReplaceFont = false
 		all.Update, all.Reflow, all.Copy, all.Reason = false, false, false, "document uses a non-RGB default color space"
 	}
 	if object.Type == "TextObject" {

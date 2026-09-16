@@ -118,6 +118,10 @@ function paintShape(node, shape, box) {
 	}
 }
 
+export function canEditObject(item, capability) {
+	return Boolean(item) && (item.items || [item]).every(object => Boolean(object.capabilities?.[capability]));
+}
+
 export class CanvasEditor {
 	constructor(viewer, options) {
 		this.viewer = viewer;
@@ -187,9 +191,10 @@ export class CanvasEditor {
 			const item = { ...object, index, page: { width: page.width, height: page.height }, node, surface };
 			this.nodes.set(node, item);
 			node.addEventListener("focus", () => this.select(item));
-			const handles = object.shape === "line" ? ["start", "end"]
+			const handles = !canEditObject(object, "transform") ? [] : object.shape === "line" ? ["start", "end"]
 				: object.shape ? ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
-					: object.type === "TextObject" ? ["nw", "ne", "e", "se", "sw", "w"] : ["nw", "ne", "sw", "se"];
+					: object.type === "TextObject" && canEditObject(object, "reflow") && canEditObject(object, "layoutKnown")
+						? ["nw", "ne", "e", "se", "sw", "w"] : ["nw", "ne", "sw", "se"];
 			for (const corner of handles) {
 				const handle = document.createElement("span");
 				handle.className = `edit-handle edit-${corner}`;
@@ -275,7 +280,7 @@ export class CanvasEditor {
 		if (items.length > 1) {
 			const node = document.createElement("div");
 			node.className = "edit-layer edit-selection";
-			for (const corner of ["nw", "ne", "sw", "se"]) {
+			for (const corner of canEditObject(this.selected, "transform") ? ["nw", "ne", "sw", "se"] : []) {
 				const handle = document.createElement("span");
 				handle.className = `edit-handle edit-${corner}`;
 				handle.dataset.corner = corner;
@@ -356,6 +361,7 @@ export class CanvasEditor {
 			return;
 		}
 		const item = this.selected;
+		if (!canEditObject(item, "transform")) return;
 		this.drag = {
 			item, pointerID: event.pointerId, corner: !item.items || target === item ? event.target.dataset.corner || "" : "",
 			rect: item.surface.getBoundingClientRect(), rotation: this.options.rotation(),
@@ -559,7 +565,7 @@ export class CanvasEditor {
 	startShape(event) {
 		const surface = event.target.closest(".page-surface") || (this.tool !== "text" && this.nearestSurface(event));
 		const page = this.pages.get(surface);
-		if (!page) {
+		if (!page || !this.options.canInsert(page.index)) {
 			return;
 		}
 		event.preventDefault();
@@ -667,11 +673,11 @@ export class CanvasEditor {
 		event.stopPropagation();
 		if (event.key === "Escape") {
 			this.drag ? this.cancel() : this.clear();
-		} else if (event.key === "Delete") {
+		} else if (event.key === "Delete" && canEditObject(this.selected, "delete")) {
 			this.options.onDelete(this.selected);
 		} else if (edit && !this.drag && !this.selected.items) {
 			this.options.onEdit(this.selected);
-		} else if (!this.drag && directions[event.key]) {
+		} else if (!this.drag && directions[event.key] && canEditObject(this.selected, "transform")) {
 			const [x, y] = directions[event.key];
 			const [dx, dy] = [[x, y], [y, -x], [-x, -y], [-y, x]][this.options.rotation() / 90];
 			const step = event.shiftKey ? 10 : 1;
@@ -714,6 +720,7 @@ export class CanvasEditor {
 			if (!this.options.fontControls?.includes(event.relatedTarget)) this.commitText();
 		});
 		input.addEventListener("keydown", (event) => {
+			if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "s") return;
 			event.stopPropagation();
 			if (event.isComposing || input.readOnly) {
 				return;

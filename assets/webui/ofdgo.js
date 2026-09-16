@@ -1,4 +1,4 @@
-import { CanvasEditor } from "./ofdgo_edit.js";
+import { CanvasEditor, canEditObject } from "./ofdgo_edit.js";
 import { FontManager } from "./ofdgo_font.js";
 
 const MM_TO_PX = 96 / 25.4;
@@ -52,6 +52,7 @@ const state = {
 	searchIndex: -1,
 	navigationScroll: new Map(),
 	fontSyncPending: false,
+	fontRenderPending: false,
 	fontSyncing: false,
 	doc: null,
 	pageIndex: 0,
@@ -87,6 +88,8 @@ const el = {
 	ofdInput: document.querySelector("#ofdInput"),
 	ofdButton: document.querySelector("#ofdButton"),
 	newButton: document.querySelector("#newButton"),
+	editButton: document.querySelector("#editButton"),
+	editNotice: document.querySelector("#editNotice"),
 	editorTools: document.querySelector("#editorTools"),
 	selectObjectButton: document.querySelector("#selectObjectButton"),
 	deleteObjectButton: document.querySelector("#deleteObjectButton"),
@@ -246,6 +249,7 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	fontControls: [el.textFont, el.textFontAdd],
 	busy: () => document.body.hasAttribute("aria-busy"),
 	rotation: () => state.rotation,
+	canInsert: (index) => pageCan("insert", index),
 	onSelect: updateObjectControls,
 	onTransform: (item, change) => changeDocument(item.items ? "ofdgoTransformObjects" : "ofdgoTransformObject", item,
 		change.x + item.x * (1 - change.scale), change.y + item.y * (1 - change.scale), change.scale),
@@ -256,6 +260,7 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 		updatePendingChanges();
 		updateObjectControls(canvasEditor.selected);
 		syncSelection();
+		if (state.fontRenderPending) window.setTimeout(refreshPendingFonts, 0);
 	},
 	onDelete: (item) => changeDocument(item.items ? "ofdgoDeleteObjects" : "ofdgoDeleteObject", item),
 	onEdit: editCanvasObject,
@@ -273,13 +278,14 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 		if (!editing) {
 			updateTextFonts(canvasEditor.selected, true);
 			syncSelection();
+			if (state.fontRenderPending) window.setTimeout(refreshPendingFonts, 0);
 		}
 	},
 });
 
 function updatePendingChanges() {
 	const editing = canvasEditor.input;
-	setDirty(state.editing && (state.editorInfo?.revision !== state.savedRevision
+	setDirty(Boolean(state.editorInfo) && (state.editorInfo.revision !== state.savedRevision
 		|| Boolean(editing && (editing.input.value !== editing.item.text || editing.fontData)) || canvasEditor.cropChanged()));
 }
 
@@ -452,6 +458,10 @@ el.pageForm.addEventListener("submit", async (event) => {
 });
 el.ofdButton.addEventListener("click", openOFDFile);
 el.newButton.addEventListener("click", openCreatePanel);
+el.editButton.addEventListener("click", toggleEditor);
+el.editButton.addEventListener("pointerdown", (event) => {
+	if (canvasEditor.input) event.preventDefault();
+});
 el.createCancel.addEventListener("click", () => el.createPanel.close());
 el.createForm.addEventListener("submit", createDocument);
 editorClick(el.insertTextButton, toggleTextTool);
@@ -588,6 +598,11 @@ function handleKeyDown(event) {
 	}
 	const key = event.key;
 	const target = event.target;
+	if ((event.ctrlKey || event.metaKey) && !event.shiftKey && key.toLowerCase() === "s" && state.editorInfo) {
+		event.preventDefault();
+		if (!document.body.hasAttribute("aria-busy") && !formDialogOpen()) exportFile(true, null, "ofd");
+		return;
+	}
 	if ((event.ctrlKey || event.metaKey) && !event.shiftKey && key.toLowerCase() === "a" && state.doc
 		&& el.viewerPanel.contains(target) && !target.closest("input, textarea, select, [contenteditable]")) {
 		event.preventDefault();
@@ -716,8 +731,60 @@ function discardChanges() {
 }
 
 function setEditorInfo(doc) {
-	state.editorInfo = { revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo };
+	state.editorInfo = { revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
+		pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || [] };
 	setDirty(doc.revision !== state.savedRevision);
+}
+
+function pageCan(capability, index = state.pageIndex) {
+	return Boolean(state.editorInfo?.pageCapabilities?.[index]?.[capability]);
+}
+
+async function toggleEditor() {
+	if (!state.doc || !state.ready || document.body.hasAttribute("aria-busy") || formDialogOpen()) return;
+	if (state.editorInfo) {
+		if (!await canvasEditor.commitText() || !await canvasEditor.commitCrop()) return;
+		state.editing = !state.editing;
+		canvasEditor.clear();
+		canvasEditor.setTool("");
+		if (state.editing) {
+			state.selectObjects = true;
+			setPan(false);
+		}
+		updateControls();
+		applyFit(false);
+		return;
+	}
+	const { pageIndex, fitMode, scale } = state;
+	const { scrollLeft, scrollTop } = el.viewerPanel;
+	const openSeq = ++state.openSeq;
+	setBusy(true, "正在准备编辑", null, "正在准备编辑");
+	try {
+		const doc = await callWASM("ofdgoEditDocument");
+		if (openSeq !== state.openSeq) return;
+		state.savedRevision = doc.revision;
+		setEditorInfo(doc);
+		state.editing = true;
+		state.selectObjects = true;
+		state.ofdBytes = null;
+		state.objectClipboard = null;
+		canvasEditor.clear();
+		setPan(false);
+		await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex, fitMode, scale,
+			keepPreview: true, previewScroll: { scrollLeft, scrollTop } });
+	} catch (err) {
+		if (openSeq === state.openSeq) showError(err, false);
+	} finally {
+		if (openSeq === state.openSeq) {
+			setBusy(false);
+			updateControls();
+		}
+	}
+}
+
+function confirmTextReflow(item) {
+	return canEditObject(item, "reflow") && (canEditObject(item, "layoutKnown")
+		|| window.confirm("原文排版未知，此操作将重新排版。继续？"));
 }
 
 function openCreatePanel() {
@@ -748,6 +815,7 @@ async function createDocument(event) {
 		}
 		state.editing = true;
 		state.objectClipboard = null;
+		state.fontRenderPending = false;
 		canvasEditor.clear();
 		delete state.textDefaults.fontChoice;
 		updateTextFonts(null, true);
@@ -772,15 +840,16 @@ async function createDocument(event) {
 }
 
 async function editCanvasObject(item) {
+	if (!state.editing || document.body.hasAttribute("aria-busy") || canvasEditor.input || item.items) return;
+	if (item.type === "TextObject") {
+		if (!confirmTextReflow(item)) return;
+	} else if (!canEditObject(item, "update")) return;
 	if (item.type === "PathObject") {
 		el.shapeWidth.focus();
 		return;
 	}
 	if (item.type === "ImageObject") {
 		return openInsertPanel(item);
-	}
-	if (!state.editing || document.body.hasAttribute("aria-busy") || canvasEditor.input) {
-		return;
 	}
 	const openSeq = state.openSeq;
 	setBusy(true);
@@ -854,7 +923,7 @@ function currentTextStyle() {
 }
 
 async function toggleTextTool() {
-	if (!state.editing || document.body.hasAttribute("aria-busy")) return;
+	if (!state.editing || !pageCan("insert") || document.body.hasAttribute("aria-busy")) return;
 	if (canvasEditor.tool === "text") {
 		canvasEditor.setTool("");
 		return;
@@ -865,10 +934,11 @@ async function toggleTextTool() {
 		updateTextFonts(canvasEditor.selected, true);
 	}
 	if (openSeq !== state.openSeq) return;
-	const style = currentTextStyle();
+	const style = canEditObject(canvasEditor.selected, "layoutKnown") ? currentTextStyle() : state.textDefaults;
+	const font = state.textFonts[Number(el.textFont.value)];
 	state.textDefaults = { type: "TextObject", size: style.size, color: style.color, wrap: style.wrap,
 		align: style.align || "left", paragraphHeight: style.paragraphHeight || 0, letterSpacing: style.letterSpacing || 0,
-		fontChoice: state.textFonts[Number(el.textFont.value)] || state.textDefaults.fontChoice };
+		fontChoice: font && !font.disabled ? font : state.textDefaults.fontChoice };
 	state.selectObjects = true;
 	setPan(false);
 	canvasEditor.setTool("text");
@@ -877,7 +947,7 @@ async function toggleTextTool() {
 
 async function beginCanvasText(index, box, surface, page) {
 	const font = state.textDefaults.fontChoice || state.textFonts[Number(el.textFont.value)];
-	if (!font) {
+	if (!font || font.disabled) {
 		setStatus("尚未添加字体");
 		el.textFontAdd.focus();
 		return;
@@ -902,7 +972,7 @@ async function beginCanvasText(index, box, surface, page) {
 function editorFonts(item) {
 	const fonts = [...fontManager.userFonts.filter((font) => font.enabled), ...fontManager.catalog];
 	if (item) {
-		fonts.unshift({ id: `embedded:${item.font}`, name: item.fontName, embedded: true });
+		fonts.unshift({ id: `embedded:${item.font}`, name: item.fontName || item.font, embedded: true, disabled: !canEditObject(item, "update") });
 	}
 	return fonts;
 }
@@ -914,6 +984,7 @@ function setFontOptions(select, fonts, selected) {
 		const option = document.createElement("option");
 		option.value = String(index);
 		option.textContent = font.fullName || font.name;
+		option.disabled = Boolean(font.disabled);
 		select.append(option);
 	});
 	select.value = fonts.length ? String(Math.max(0, fonts.findIndex(font => key(font) === key(selected)))) : "";
@@ -937,7 +1008,7 @@ function updateTextFonts(item, refresh = false) {
 async function changeTextFont() {
 	const item = canvasEditor.selected;
 	const font = state.textFonts[Number(el.textFont.value)];
-	if (!state.ready || document.body.hasAttribute("aria-busy") || !font) return;
+	if (!state.ready || document.body.hasAttribute("aria-busy") || !font || font.disabled) return;
 	const editing = canvasEditor.input;
 	if (editing) {
 		const openSeq = state.openSeq;
@@ -959,8 +1030,8 @@ async function changeTextFont() {
 			if (openSeq === state.openSeq) setBusy(false);
 		}
 	} else if (item?.type === "TextObject") {
-		if (!font.embedded) {
-			await changeDocument("ofdgoUpdateText", item, item.text, fontManager.read(font), item.size, null);
+		if (!font.embedded && canEditObject(item, "replaceFont")) {
+			await changeDocument("ofdgoUpdateText", item, canEditObject(item, "layoutKnown") ? item.text : null, fontManager.read(font), item.size, null);
 			updateTextFonts(canvasEditor.selected, true);
 		}
 	} else {
@@ -1045,6 +1116,10 @@ async function changeParagraph(wrap = currentTextStyle().wrap) {
 		updateObjectControls(canvasEditor.selected, true);
 		return;
 	}
+	if (!confirmTextReflow(item)) {
+		updateObjectControls(item, true);
+		return;
+	}
 	await changeDocument("ofdgoLayoutText", item, null, null, Boolean(wrap), el.textAlign.value, height, spacing);
 	updateObjectControls(canvasEditor.selected, true);
 }
@@ -1068,6 +1143,10 @@ async function changeTextStyle(color) {
 		return;
 	}
 	if (size !== item.size || fill !== null) {
+		if (color ? !canEditObject(item, "update") : !confirmTextReflow(item)) {
+			updateObjectControls(item, true);
+			return;
+		}
 		await changeDocument("ofdgoUpdateText", item, color ? null : item.text, null, size, fill);
 	}
 	updateObjectControls(canvasEditor.selected, true);
@@ -1114,13 +1193,15 @@ function updateDrawingControls() {
 	}
 	const disabled = !state.editing || !state.ready || state.exporting;
 	for (const [button, name] of [[el.drawLineButton, "line"], [el.drawRectangleButton, "rectangle"], [el.drawEllipseButton, "ellipse"]]) {
-		button.disabled = disabled;
+		button.disabled = disabled || !pageCan("insert");
 		button.setAttribute("aria-pressed", String(tool === name));
 	}
 	el.selectObjectButton.setAttribute("aria-pressed", String(canvasEditor.enabled && !tool));
-	el.shapeFill.disabled = el.shapeStroke.disabled = disabled || line;
-	el.shapeFillColor.disabled = disabled || line || !el.shapeFill.checked;
-	el.shapeStrokeColor.disabled = el.shapeWidth.disabled = disabled || !line && !el.shapeStroke.checked;
+	const styleDisabled = disabled || (canvasEditor.selected?.type === "PathObject"
+		? !canEditObject(canvasEditor.selected, "update") : !pageCan("insert"));
+	el.shapeFill.disabled = el.shapeStroke.disabled = styleDisabled || line;
+	el.shapeFillColor.disabled = styleDisabled || line || !el.shapeFill.checked;
+	el.shapeStrokeColor.disabled = el.shapeWidth.disabled = styleDisabled || !line && !el.shapeStroke.checked;
 }
 
 async function changeDocument(name, item, ...args) {
@@ -1612,7 +1693,7 @@ function markWASMExited(wasmSeq = state.wasmSeq, err) {
 	}
 	wasmRequests.clear();
 	if (err) {
-		setStatus(state.editing ? "引擎中断，未保存内容无法恢复" : "引擎运行中断");
+		setStatus(state.editorInfo ? "引擎中断，未保存内容无法恢复" : "引擎运行中断");
 	}
 	updateControls();
 	scheduleWASMRecovery();
@@ -1679,6 +1760,7 @@ async function openOFD(file) {
 		state.editing = false;
 		state.objectClipboard = null;
 		state.editorInfo = null;
+		state.fontRenderPending = false;
 		state.savedRevision = null;
 		canvasEditor.clear();
 		setDirty(false);
@@ -1749,7 +1831,7 @@ async function loadLocalFonts() {
 			return;
 		}
 		if (await loadDocumentLocalFonts(available)) {
-			await applyFontChange({ skipAutoFonts: true });
+			await applyFontChange();
 		}
 	} catch (err) {
 		if (err && err.name === "NotAllowedError") {
@@ -1892,24 +1974,42 @@ function updateFontSummary() {
 	el.availableFontSummary.textContent = total ? `${enabled}/${total}` : "0";
 }
 
-async function applyFontChange(options = {}) {
+async function applyFontChange() {
 	updateFontSummary();
 	renderFontList();
 	if (!state.doc) {
 		return;
 	}
-	if (state.editing) {
+	if (canvasEditor.input || canvasEditor.crop) {
+		const openSeq = state.openSeq;
+		const fonts = await fontManager.files(fontManager.records());
+		if (openSeq !== state.openSeq) return;
+		await callWASM("ofdgoConfigure", fonts, state.renderAnnotations);
+		if (openSeq !== state.openSeq) return;
+		state.fontRenderPending = true;
 		setStatus(pageStatus(state.pageIndex, state.doc.pageCount));
 		return;
 	}
+	await refreshFontPreview(true);
+}
+
+async function refreshFontPreview(fontsChanged) {
+	state.fontRenderPending = false;
 	await openDocument({
 		pageIndex: state.pageIndex,
 		fitMode: state.fitMode,
 		scale: state.scale,
-		skipAutoFonts: options.skipAutoFonts !== false,
+		skipAutoFonts: true,
 		reuseSession: true,
-		fontsChanged: true,
+		fontsChanged,
+		keepPreview: Boolean(state.editorInfo),
+		previewScroll: { scrollLeft: el.viewerPanel.scrollLeft, scrollTop: el.viewerPanel.scrollTop },
 	});
+}
+
+async function refreshPendingFonts() {
+	if (!state.fontRenderPending || !state.ready || document.body.hasAttribute("aria-busy") || canvasEditor.input || canvasEditor.crop) return;
+	await refreshFontPreview(false);
 }
 
 async function toggleAnnotations() {
@@ -2041,7 +2141,7 @@ function updateFontPermissionHint() {
 }
 
 async function openDocument(options = {}) {
-	if (!state.ofdBytes && !state.editing) {
+	if (!state.ofdBytes && !state.editorInfo) {
 		return;
 	}
 	const openSeq = options.openSeq || (state.openSeq += 1);
@@ -2190,7 +2290,7 @@ async function loadDocumentDetails(openSeq) {
 }
 
 async function renderPage(index, options = {}) {
-	if (!state.doc || (state.editing && document.body.hasAttribute("aria-busy") && !options.keepBusy)) {
+	if (!state.doc || (state.editorInfo && document.body.hasAttribute("aria-busy") && !options.keepBusy)) {
 		return null;
 	}
 	const openSeq = options.openSeq || state.openSeq;
@@ -2321,7 +2421,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 		return;
 	}
 	const saving = value === "ofd";
-	if (saving && !state.editing) {
+	if (saving && !state.editorInfo) {
 		return;
 	}
 	const format = saving ? { value: "ofd", label: "OFD", extension: "ofd", mime: "application/ofd" } : exportFormatInfo(value);
@@ -2699,7 +2799,7 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 	svg.classList.add("ofd-svg");
 	surface.replaceChildren(svg);
 	surface.append(createTextLayer(page.text));
-	if (state.editing) {
+	if (state.editorInfo) {
 		canvasEditor.mount(index, page, surface);
 	}
 	for (const link of page.links) {
@@ -2830,6 +2930,11 @@ function copyEditorSelection(event) {
 	if (!state.editing || !canvasEditor.enabled || !canvasEditor.selected || !el.viewerPanel.contains(event.target)
 		|| canvasEditor.input || canvasEditor.crop || canvasEditor.drag || document.body.hasAttribute("aria-busy")) return false;
 	const items = canvasEditor.items().slice().sort((a, b) => a.order - b.order);
+	if (!canEditObject(canvasEditor.selected, "copy")) {
+		event.preventDefault();
+		setStatus("当前对象不可复制");
+		return true;
+	}
 	const clipboard = { token: crypto.randomUUID(), page: state.doc.pages[items[0].index].id, offset: 0 };
 	event.clipboardData.setData(OBJECT_CLIPBOARD_TYPE, clipboard.token);
 	event.clipboardData.setData("text/plain", items.map(item => item.text || "").filter(Boolean).join("\n"));
@@ -2846,7 +2951,7 @@ function copyEditorSelection(event) {
 async function pasteEditorContent(event) {
 	if (!state.editing || event.target.closest?.("input, textarea, select, [contenteditable]") || formDialogOpen()) return;
 	event.preventDefault();
-	if (document.body.hasAttribute("aria-busy") || canvasEditor.input || canvasEditor.crop || canvasEditor.drag) return;
+	if (document.body.hasAttribute("aria-busy") || canvasEditor.input || canvasEditor.crop || canvasEditor.drag || !pageCan("insert")) return;
 	const token = event.clipboardData.getData(OBJECT_CLIPBOARD_TYPE);
 	const index = state.pageIndex, page = state.doc.pages[index];
 	if (token) {
@@ -2881,7 +2986,7 @@ async function pasteEditorContent(event) {
 	const value = event.clipboardData.getData("text/plain").replace(/\t/g, "    ");
 	if (!value.trim()) return;
 	const font = state.textFonts[Number(el.textFont.value)];
-	if (!font) {
+	if (!font || font.disabled) {
 		setStatus("尚未添加字体");
 		el.textFontAdd.focus();
 		return;
@@ -4304,13 +4409,21 @@ function updateControls() {
 }
 
 function updateEditorTools() {
+	el.editButton.disabled = !state.doc || !state.ready || state.exporting;
+	el.editButton.setAttribute("aria-pressed", String(state.editing));
+	el.editButton.title = state.editing ? "返回阅读" : "编辑文档";
+	el.editButton.setAttribute("aria-label", el.editButton.title);
+	el.editNotice.textContent = state.editorInfo?.editWarnings?.join("；") || "";
+	el.editNotice.hidden = !state.editing || !el.editNotice.textContent;
 	el.editorTools.hidden = !state.editing;
-	el.insertTextButton.disabled = el.insertImageButton.disabled = el.saveButton.disabled = !state.ready || state.exporting;
 	const pagesDisabled = !state.editing || !state.ready || state.exporting;
-	el.addPageButton.disabled = el.copyPageButton.disabled = el.pageSettingsButton.disabled = pagesDisabled;
-	el.deletePageButton.disabled = pagesDisabled || state.doc?.pageCount <= 1;
-	el.movePagePrevButton.disabled = pagesDisabled || state.pageIndex === 0;
-	el.movePageNextButton.disabled = pagesDisabled || state.pageIndex === state.doc?.pageCount - 1;
+	el.insertTextButton.disabled = el.insertImageButton.disabled = pagesDisabled || !pageCan("insert");
+	el.saveButton.disabled = el.addPageButton.disabled = pagesDisabled;
+	el.copyPageButton.disabled = pagesDisabled || !pageCan("copy");
+	el.pageSettingsButton.disabled = pagesDisabled || !pageCan("resize");
+	el.deletePageButton.disabled = pagesDisabled || !pageCan("delete") || state.doc?.pageCount <= 1;
+	el.movePagePrevButton.disabled = pagesDisabled || !pageCan("move") || state.pageIndex === 0;
+	el.movePageNextButton.disabled = pagesDisabled || !pageCan("move") || state.pageIndex === state.doc?.pageCount - 1;
 	const enabled = state.editing && state.selectObjects && !state.panMode;
 	canvasEditor.setEnabled(enabled);
 	updateObjectControls(canvasEditor.selected);
@@ -4320,28 +4433,34 @@ function updateEditorTools() {
 
 function updateObjectControls(item, reset = false) {
 	const disabled = !item || Boolean(item.draft) || !state.ready || state.exporting;
-	el.deleteObjectButton.disabled = el.objectAlign.disabled = disabled;
-	el.copyObjectButton.disabled = disabled;
+	el.deleteObjectButton.disabled = disabled || !canEditObject(item, "delete");
+	el.copyObjectButton.disabled = disabled || !canEditObject(item, "copy");
 	const cropping = Boolean(canvasEditor.crop);
-	el.objectAlign.disabled = disabled || cropping;
-	el.objectRotate.disabled = el.objectFlip.disabled = disabled || cropping;
-	el.cropImageButton.disabled = disabled || item.type !== "ImageObject";
+	el.objectAlign.disabled = disabled || cropping || !canEditObject(item, "arrange");
+	el.objectRotate.disabled = el.objectFlip.disabled = el.objectAlign.disabled;
+	el.cropImageButton.disabled = disabled || item.type !== "ImageObject" || !canEditObject(item, "update");
 	el.imageFit.disabled = el.cropImageButton.disabled || cropping;
 	el.cropImageButton.textContent = cropping ? "完成" : "裁剪";
 	el.cropImageButton.setAttribute("aria-label", cropping ? "完成裁剪" : "裁剪图片");
 	el.cropImageButton.setAttribute("aria-pressed", String(cropping));
 	el.resetCropButton.textContent = cropping ? "取消" : "还原";
 	el.resetCropButton.setAttribute("aria-label", cropping ? "取消裁剪" : "还原图片");
-	el.resetCropButton.disabled = disabled || !cropping && (!item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
-	el.objectDistribute.disabled = disabled || cropping || !item.items || item.items.length < 3;
-	el.editObjectButton.disabled = disabled || Boolean(item.items) || item.type === "PathObject";
+	el.resetCropButton.disabled = el.cropImageButton.disabled || !cropping && (!item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
+	el.objectDistribute.disabled = el.objectAlign.disabled || !item.items || item.items.length < 3;
+	el.editObjectButton.disabled = disabled || Boolean(item.items) || item.type === "PathObject"
+		|| !canEditObject(item, item.type === "TextObject" ? "reflow" : "update");
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const text = item?.type === "TextObject" ? item : state.textDefaults;
-	el.textFont.disabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items);
-	el.textSize.disabled = el.textColor.disabled = el.textFont.disabled || Boolean(item?.draft);
+	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items);
+	el.textFont.disabled = textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "replaceFont");
+	el.textSize.disabled = textDisabled || Boolean(item?.draft) || text !== state.textDefaults && !canEditObject(item, "reflow");
+	el.textColor.disabled = textDisabled || Boolean(item?.draft) || text !== state.textDefaults && !canEditObject(item, "update");
 	el.textFontAdd.disabled = !state.editing || !state.ready || state.exporting;
 	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled;
-	el.textAlign.value = text.align || "left";
+	const layoutKnown = text === state.textDefaults || Boolean(item?.draft) || canEditObject(item, "layoutKnown");
+	el.textAlign.value = layoutKnown ? text.align || "left" : "";
+	el.textLineHeight.placeholder = layoutKnown ? "自动" : "原文";
+	el.textSpacing.placeholder = layoutKnown ? "0" : "原文";
 	el.textWrap.setAttribute("aria-pressed", String(Boolean(text.wrap)));
 	if (reset || document.activeElement !== el.textLineHeight) {
 		el.textLineHeight.value = text.paragraphHeight ? String(textPoints(text.paragraphHeight)) : "";
@@ -4356,9 +4475,9 @@ function updateObjectControls(item, reset = false) {
 	}
 	el.textSize.title = `字号 ${textPoints(text.size)} pt`;
 	if (reset || el.textColor.disabled || document.activeElement !== el.textColor) {
-		el.textColor.value = text.color;
+		el.textColor.value = text.color || "#000000";
 	}
-	if (item?.type === "PathObject") {
+	if (item?.type === "PathObject" && canEditObject(item, "update")) {
 		el.shapeFill.checked = item.fill;
 		el.shapeStroke.checked = item.stroke;
 		el.shapeFillColor.value = item.fillColor;
@@ -4373,9 +4492,10 @@ function updateObjectControls(item, reset = false) {
 	const count = members[0]?.count || 0;
 	const canRaise = orders.some((order, i) => order !== count - orders.length + i);
 	const canLower = orders.some((order, i) => order !== i);
-	el.objectOrder.disabled = disabled || cropping || count <= orders.length;
+	el.objectOrder.disabled = disabled || cropping || count <= orders.length || !canEditObject(item, "order")
+		|| members.some(member => member.layer !== members[0].layer);
 	for (const option of el.objectOrder.options) {
-		option.disabled = disabled || (["up", "top"].includes(option.value) ? !canRaise : !canLower);
+		option.disabled = el.objectOrder.disabled || (["up", "top"].includes(option.value) ? !canRaise : !canLower);
 	}
 }
 
@@ -4435,6 +4555,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 		if (state.fontSyncPending) {
 			window.setTimeout(syncUserFonts, 0);
 		}
+		if (state.fontRenderPending) window.setTimeout(refreshPendingFonts, 0);
 		return;
 	}
 	el.exportPanel.close();

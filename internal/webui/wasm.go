@@ -668,7 +668,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 			}
 			if box.W > 0 && box.H > 0 {
 				item := map[string]any{"id": id, "type": object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "count": len(layer.Objects), "layer": layer.ID,
-					"capabilities": map[string]any{"update": capability.Update, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason}}
+					"capabilities": map[string]any{"update": capability.Update, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason}}
 				if object.Type == "ImageObject" {
 					full, err := object.ImageObject.ImageBounds()
 					if err != nil {
@@ -1027,7 +1027,7 @@ func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 	return editorSummary(), nil
 }
 
-// updateText 修改文字，null内容保留排版，null字体数据和颜色沿用对象属性
+// updateText 修改文字，null内容保留定位且允许替换字体，null字体数据和颜色沿用对象属性
 // 入参: args 页码、对象标识、内容、字体数据、字号和颜色
 // 返回: any 文档信息, error 错误信息
 func updateText(args []js.Value) (any, error) {
@@ -1042,17 +1042,17 @@ func updateText(args []js.Value) (any, error) {
 	if object.Type != "TextObject" {
 		return nil, fmt.Errorf("object %q is not text", id)
 	}
-	if !args[2].IsNull() {
-		if !args[3].IsNull() {
-			data, err := bytesFromJS(args[3])
-			if err != nil {
-				return nil, err
-			}
-			object.TextObject.Font, err = currentEditor.AddFont(FontFile{Data: data}, 0)
-			if err != nil {
-				return nil, err
-			}
+	if !args[3].IsNull() {
+		data, err := bytesFromJS(args[3])
+		if err != nil {
+			return nil, err
 		}
+		object.TextObject.Font, err = currentEditor.AddFont(FontFile{Data: data}, 0)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !args[2].IsNull() {
 		object.TextObject.Size = args[4].Float()
 		_, layout := object.TextObject.TextLayout()
 		if err := currentEditor.LayoutText(&object.TextObject, args[2].String(), layout); err != nil {
@@ -1463,7 +1463,7 @@ func insertImage(args []js.Value) (any, error) {
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
 
-// saveDocument 分块写出新建文档
+// saveDocument 分块写出当前编辑文档
 // 入参: args 数据写出回调
 // 返回: any 保存结果, error 错误信息
 func saveDocument(args []js.Value) (any, error) {

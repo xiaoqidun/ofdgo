@@ -43,6 +43,7 @@
 				<button id="annotationButton" class="button" type="button" data-short="注" title="关闭注解" aria-label="关闭注解" aria-pressed="true">注解</button>
 			</div>
 			<div class="tool-group">
+				<button id="editButton" class="button" type="button" data-short="编" title="编辑文档" aria-label="编辑文档" aria-pressed="false" disabled>编辑</button>
 				<select id="exportFormat" class="format-select" title="导出格式" aria-label="导出格式" disabled></select>
 				<select id="imageDPI" class="format-select dpi-select" title="图片 DPI" aria-label="图片 DPI" disabled>
 					<option value="96">96</option>
@@ -54,9 +55,9 @@
 				<button id="exportButton" class="button" type="button" data-short="多" title="导出文档" aria-label="导出文档" aria-haspopup="dialog" aria-controls="exportPanel" disabled>文档</button>
 			</div>
 		</header>
-		<div id="editorTools" class="editor-toolbar" role="toolbar" aria-label="创作工具" hidden>
+		<div id="editorTools" class="editor-toolbar" role="toolbar" aria-label="编辑工具" hidden>
 			<div class="editor-group editor-file">
-				<button id="saveButton" class="button" type="button" aria-label="保存OFD">保存</button>
+				<button id="saveButton" class="button" type="button" title="另存为OFD" aria-label="保存OFD" aria-keyshortcuts="Control+S Meta+S">保存</button>
 				<button id="undoButton" class="button" type="button" disabled>撤销</button>
 				<button id="redoButton" class="button" type="button" disabled>重做</button>
 				<span>文件</span>
@@ -121,6 +122,7 @@
 			</div>
 			<div class="editor-group editor-paragraph">
 				<select id="textAlign" aria-label="段落对齐" title="段落对齐" disabled>
+					<option value="" hidden>原文</option>
 					<option value="left">左齐</option>
 					<option value="center">居中</option>
 					<option value="right">右齐</option>
@@ -293,6 +295,7 @@
 					</div>
 				</section>
 				<div class="panel-title">文档</div>
+				<div id="editNotice" class="font-permission-hint" role="status" hidden></div>
 				<dl class="meta-list">
 					<div>
 						<dt>文件</dt>
