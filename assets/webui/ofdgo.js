@@ -152,9 +152,8 @@ const el = {
 	arrowTool: document.querySelector("#arrowTool"),
 	drawRectangleButton: document.querySelector("#drawRectangleButton"),
 	drawEllipseButton: document.querySelector("#drawEllipseButton"),
-	eraseObjectButton: document.querySelector("#eraseObjectButton"),
-	eraseRegionButton: document.querySelector("#eraseRegionButton"),
-	erasePathButton: document.querySelector("#erasePathButton"),
+	eraseButton: document.querySelector("#eraseButton"),
+	eraseMode: document.querySelector("#eraseMode"),
 	shapeFill: document.querySelector("#shapeFill"),
 	shapeFillColor: document.querySelector("#shapeFillColor"),
 	shapeStroke: document.querySelector("#shapeStroke"),
@@ -547,19 +546,13 @@ el.resetCropButton.addEventListener("click", () => {
 });
 editorClick(el.undoButton, () => changeDocument("ofdgoUndo"));
 editorClick(el.redoButton, () => changeDocument("ofdgoRedo"));
-for (const [button, tool] of [[el.drawLineButton, "line"], [el.drawRectangleButton, "rectangle"], [el.drawEllipseButton, "ellipse"],
-	[el.eraseObjectButton, "erase-object"], [el.eraseRegionButton, "erase-region"], [el.erasePathButton, "erase-path"]]) {
-	editorClick(button, () => {
-		if (!state.editing || document.body.hasAttribute("aria-busy")) {
-			return;
-		}
-		const next = canvasEditor.tool === tool ? "" : tool;
-		state.selectObjects = true;
-		setPan(false);
-		canvasEditor.setTool(next);
-		el.viewerPanel.focus({ preventScroll: true });
-	});
+for (const [button, tool] of [[el.drawLineButton, "line"], [el.drawRectangleButton, "rectangle"], [el.drawEllipseButton, "ellipse"]]) {
+	editorClick(button, () => toggleDrawingTool(tool));
 }
+editorClick(el.eraseButton, () => toggleDrawingTool(el.eraseMode.value));
+el.eraseMode.addEventListener("change", () => {
+	if (canvasEditor.tool.startsWith("erase-")) canvasEditor.setTool(el.eraseMode.value);
+});
 for (const input of [el.shapeFill, el.shapeFillColor, el.shapeStroke, el.shapeStrokeColor, el.shapeWidth]) {
 	input.addEventListener("change", changeShapeStyle);
 }
@@ -1647,6 +1640,15 @@ async function changeShapeStyle() {
 	updateDrawingControls();
 }
 
+function toggleDrawingTool(tool) {
+	if (!state.editing || document.body.hasAttribute("aria-busy")) return;
+	const next = canvasEditor.tool === tool ? "" : tool;
+	state.selectObjects = true;
+	setPan(false);
+	canvasEditor.setTool(next);
+	el.viewerPanel.focus({ preventScroll: true });
+}
+
 function updateDrawingControls() {
 	const tool = canvasEditor.tool;
 	el.insertTextButton.setAttribute("aria-pressed", String(tool === "text"));
@@ -1661,10 +1663,8 @@ function updateDrawingControls() {
 		button.disabled = disabled || !pageCan("insert");
 		button.setAttribute("aria-pressed", String(tool === name));
 	}
-	for (const [button, name] of [[el.eraseObjectButton, "erase-object"], [el.eraseRegionButton, "erase-region"], [el.erasePathButton, "erase-path"]]) {
-		button.disabled = disabled;
-		button.setAttribute("aria-pressed", String(tool === name));
-	}
+	el.eraseButton.disabled = el.eraseMode.disabled = disabled;
+	el.eraseButton.setAttribute("aria-pressed", String(tool.startsWith("erase-")));
 	el.selectObjectButton.setAttribute("aria-pressed", String(canvasEditor.enabled && !tool));
 	const styleDisabled = disabled || (canvasEditor.selected?.type === "PathObject"
 		? !canEditObject(canvasEditor.selected, "update") : !pageCan("insert"));

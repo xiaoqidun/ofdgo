@@ -89,7 +89,6 @@ a:focus-visible {
 	display: flex;
 	max-height: 40dvh;
 	overflow: auto;
-	gap: 8px;
 	padding: 8px 10px 6px;
 	border-bottom: 1px solid var(--line);
 	background: var(--panel);
@@ -102,35 +101,32 @@ a:focus-visible {
 
 .editor-group {
 	display: grid;
-	flex: 0 0 auto;
+	flex: 1 0 auto;
+	justify-content: center;
 	grid-template-columns: repeat(3, max-content);
 	grid-template-rows: repeat(2, 28px) 16px;
 	column-gap: 4px;
 	row-gap: 4px;
-	padding-right: 8px;
+	padding: 0 8px;
 	border-right: 1px solid var(--line);
 }
 
 .editor-file,
-.editor-erase,
 .editor-image {
 	grid-template-columns: repeat(2, max-content);
 }
 
-.editor-transform {
+.editor-transform,
+.editor-erase {
 	grid-template-columns: max-content;
-}
-
-#eraseObjectButton {
-	grid-row: span 2;
-	height: 100%;
 }
 
 .editor-image > select {
 	grid-column: 1 / -1;
 }
 
-.editor-paragraph > .editor-field {
+.editor-paragraph > .editor-field,
+.editor-group:has(#textFont) > .editor-field {
 	grid-column: auto;
 }
 
@@ -142,7 +138,8 @@ a:focus-visible {
 	display: grid;
 	align-items: center;
 	grid-column: 1 / -1;
-	grid-template-columns: 2em minmax(0, 1fr);
+	grid-template-columns: 2em 86px;
+	justify-content: space-between;
 	gap: 6px;
 	white-space: nowrap;
 }
@@ -189,17 +186,15 @@ a:focus-visible {
 }
 
 .editor-group:has(#textFont) {
-	grid-template-columns: 102px 54px;
+	grid-template-columns: 160px 32px;
 }
 
 .editor-paragraph {
-	width: 194px;
-	grid-template-columns: 54px minmax(0, 1fr);
+	grid-template-columns: 54px max-content;
 }
 
 .editor-group:has(#shapeFill) {
-	width: 180px;
-	grid-template-columns: repeat(2, minmax(0, 1fr));
+	grid-template-columns: repeat(2, 84px);
 }
 
 .editor-file #saveButton {
@@ -209,11 +204,6 @@ a:focus-visible {
 
 .editor-file #redoButton {
 	grid-column: 2;
-}
-
-#textFont {
-	width: 100%;
-	min-width: 0;
 }
 
 .font-picker {
@@ -227,6 +217,7 @@ a:focus-visible {
 .font-picker #textFont {
 	flex: 1 1 0;
 	width: 0;
+	min-width: 0;
 	text-overflow: ellipsis;
 	padding: 0 6px;
 	border: 0;
@@ -333,7 +324,15 @@ a:focus-visible {
 	accent-color: var(--accent);
 }
 
+.editor-group:first-child {
+	flex-grow: 0.5;
+	justify-content: start;
+	padding-left: 0;
+}
+
 .editor-group:last-child {
+	flex-grow: 0.5;
+	justify-content: end;
 	padding-right: 0;
 	border-right: 0;
 }
@@ -766,10 +765,14 @@ button:not(:disabled):hover {
 
 .text-font {
 	display: grid;
-	width: 160px;
+	width: 196px;
 	grid-template-columns: minmax(0, 1fr) auto;
 	grid-column: 1 / -1;
 	gap: 4px;
+}
+
+.text-font .icon-button {
+	width: 32px;
 }
 
 .form-row input[aria-invalid="true"] {
