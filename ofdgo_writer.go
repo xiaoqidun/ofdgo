@@ -530,10 +530,12 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 	if object.Type == "ImageObject" {
 		x.clips(object.ImageObject.Clips)
 	} else if object.Type == "PathObject" || object.Type == "Path" {
+		x.clips(object.PathObject.Clips)
 		x.color("StrokeColor", stroke)
 		x.color("FillColor", fill)
 		x.text("AbbreviatedData", object.PathObject.AbbreviatedData)
 	} else if object.Type == "TextObject" {
+		x.clips(object.TextObject.Clips)
 		x.color("FillColor", fill)
 		x.color("StrokeColor", stroke)
 		for _, code := range object.TextObject.TextCode {
@@ -548,7 +550,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 	x.end(object.Type)
 }
 
-// clips 写出图片路径裁剪，保留裁剪集合、区域及路径的变换
+// clips 写出对象路径裁剪，保留裁剪集合、区域及路径的变换
 // 入参: clips 裁剪集合，nil不输出节点
 func (x *ofdXML) clips(clips *Clips) {
 	if clips == nil {

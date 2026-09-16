@@ -102,21 +102,18 @@ func (e *Editor) orientObjects(page int, ids []string, matrix Matrix) error {
 		local := TranslationMatrix(-after.X, -after.Y).Multiply(matrix).Multiply(TranslationMatrix(before.X, before.Y))
 		*ctm = local.Multiply(NewMatrix(*ctm)).String()
 		*boundary = editorBoxString(after)
-		if object.Type == "ImageObject" {
-			object.ImageObject.Clips = transformImageClips(object.ImageObject.Clips, local)
+		if clips := editorObjectClips(&object); *clips != nil && (*clips).TransFlag != nil && !*(*clips).TransFlag {
+			*clips = transformObjectClips(*clips, local)
 		}
 		objects[i] = object
 	}
 	return e.updateObjects(page, objects, true)
 }
 
-// transformImageClips 同步变换不随对象CTM变化的裁剪区域，不修改原始裁剪数据。
-// 入参: clips 图片裁剪集合, matrix 对象边界坐标中的变换
+// transformObjectClips 变换裁剪区域，不修改原始裁剪数据。
+// 入参: clips 裁剪集合, matrix 对象边界坐标中的变换
 // 返回: *Clips 变换后的裁剪集合
-func transformImageClips(clips *Clips, matrix Matrix) *Clips {
-	if clips == nil || clips.TransFlag == nil || *clips.TransFlag {
-		return clips
-	}
+func transformObjectClips(clips *Clips, matrix Matrix) *Clips {
 	result := *clips
 	result.Clip = slices.Clone(clips.Clip)
 	for i := range result.Clip {

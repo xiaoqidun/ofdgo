@@ -52,6 +52,7 @@ const state = {
 	searchIndex: -1,
 	navigationScroll: new Map(),
 	fontSyncPending: false,
+	fontCatalogLoading: false,
 	fontRenderPending: false,
 	fontSyncing: false,
 	doc: null,
@@ -117,6 +118,8 @@ const el = {
 	drawLineButton: document.querySelector("#drawLineButton"),
 	drawRectangleButton: document.querySelector("#drawRectangleButton"),
 	drawEllipseButton: document.querySelector("#drawEllipseButton"),
+	eraseObjectButton: document.querySelector("#eraseObjectButton"),
+	eraseRegionButton: document.querySelector("#eraseRegionButton"),
 	shapeFill: document.querySelector("#shapeFill"),
 	shapeFillColor: document.querySelector("#shapeFillColor"),
 	shapeStroke: document.querySelector("#shapeStroke"),
@@ -246,7 +249,7 @@ const fontManager = new FontManager({
 	onChange: scheduleFontSync,
 	onPermissionChange: updateFontPermissionHint,
 });
-const fontPicker = new FontPicker(el.textFont, el.textFontToggle, el.textFontList, changeTextFont);
+const fontPicker = new FontPicker(el.textFont, el.textFontToggle, el.textFontList, changeTextFont, loadEditorFonts);
 el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
@@ -274,6 +277,13 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 		if (state.fontRenderPending) window.setTimeout(refreshPendingFonts, 0);
 	},
 	onDelete: (item) => changeDocument(item.items ? "ofdgoDeleteObjects" : "ofdgoDeleteObject", item),
+	onErase: (items, box) => {
+		const blocked = items.find(item => !canEditObject(item, box ? "arrange" : "delete"));
+		if (blocked) { setStatus(objectEditReason(blocked) || "对象暂不可擦除"); return false; }
+		const item = { index: items[0].index, id: items.map(item => item.id) };
+		return box ? changeDocument("ofdgoEraseObjects", item, box.x, box.y, box.width, box.height)
+			: changeDocument("ofdgoDeleteObjects", item);
+	},
 	onEdit: editCanvasObject,
 	drawStyle: shapeStyle,
 	onTool: updateDrawingControls,
@@ -426,7 +436,8 @@ el.resetCropButton.addEventListener("click", () => {
 });
 editorClick(el.undoButton, () => changeDocument("ofdgoUndo"));
 editorClick(el.redoButton, () => changeDocument("ofdgoRedo"));
-for (const [button, tool] of [[el.drawLineButton, "line"], [el.drawRectangleButton, "rectangle"], [el.drawEllipseButton, "ellipse"]]) {
+for (const [button, tool] of [[el.drawLineButton, "line"], [el.drawRectangleButton, "rectangle"], [el.drawEllipseButton, "ellipse"],
+	[el.eraseObjectButton, "erase-object"], [el.eraseRegionButton, "erase-region"]]) {
 	editorClick(button, () => {
 		if (!state.editing || document.body.hasAttribute("aria-busy")) {
 			return;
@@ -987,6 +998,23 @@ function editorFonts(item) {
 	return fonts;
 }
 
+async function loadEditorFonts() {
+	if (!fontManager.canReadLocal() || fontManager.catalogLoaded || fontManager.permission === "denied" || state.fontCatalogLoading) return;
+	state.fontCatalogLoading = true;
+	try {
+		await fontManager.queryLocal();
+		const open = fontPicker.open;
+		const selected = state.textFonts[Number(fontPicker.value)];
+		const query = el.textFont.value === (selected?.fullName || selected?.name || "") ? "" : el.textFont.value;
+		updateTextFonts(canvasEditor.selected, true);
+		if (open && !el.textFont.disabled) { if (query) el.textFont.value = query; fontPicker.show(query); }
+	} catch (err) {
+		setStatus(err?.name === "NotAllowedError" ? "字体尚未授权" : String(err.message || err));
+	} finally {
+		state.fontCatalogLoading = false;
+	}
+}
+
 function updateTextFonts(item, refresh = false) {
 	const id = item?.type === "TextObject" && !item.draft ? item.font : null;
 	if (refresh || state.textFontID !== id) {
@@ -1193,6 +1221,10 @@ function updateDrawingControls() {
 		button.disabled = disabled || !pageCan("insert");
 		button.setAttribute("aria-pressed", String(tool === name));
 	}
+	for (const [button, name] of [[el.eraseObjectButton, "erase-object"], [el.eraseRegionButton, "erase-region"]]) {
+		button.disabled = disabled;
+		button.setAttribute("aria-pressed", String(tool === name));
+	}
 	el.selectObjectButton.setAttribute("aria-pressed", String(canvasEditor.enabled && !tool));
 	const styleDisabled = disabled || (canvasEditor.selected?.type === "PathObject"
 		? !canEditObject(canvasEditor.selected, "update") : !pageCan("insert"));
@@ -1224,7 +1256,7 @@ async function changeDocument(name, item, ...args) {
 			return true;
 		}
 		setEditorInfo(doc);
-		if (!item || name === "ofdgoDeleteObject" || name === "ofdgoDeleteObjects") {
+		if (!item || name === "ofdgoDeleteObject" || name === "ofdgoDeleteObjects" || name === "ofdgoEraseObjects") {
 			canvasEditor.clear();
 		}
 		if (name === "ofdgoCopyObjects" || name === "ofdgoPasteObjects" || name === "ofdgoInsertShape" || name === "ofdgoInsertText" || name === "ofdgoInsertImage") {

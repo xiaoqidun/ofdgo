@@ -382,12 +382,21 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte) (int64, 
 		return 0, err
 	}
 	maps.Copy(parts, fonts)
+	removed, err := e.pruneSourceResources(parts)
+	if err != nil {
+		return 0, err
+	}
 	reader := e.source.reader
 	remaining := maps.Clone(reader.files)
 	if remaining == nil {
 		remaining = make(map[string][]byte)
 	}
 	maps.Copy(remaining, parts)
+	for name := range remaining {
+		if removed[strings.ToLower(cleanPackagePath(name))] {
+			delete(remaining, name)
+		}
+	}
 	output := &ofdCountingWriter{writer: writer}
 	archive := zip.NewWriter(output)
 	if reader.Zip != nil {
@@ -401,6 +410,9 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte) (int64, 
 				continue
 			}
 			name := cleanPackagePath(file.Name)
+			if removed[strings.ToLower(name)] {
+				continue
+			}
 			if data, ok := remaining[name]; ok {
 				header := file.FileHeader
 				entry, err := archive.CreateHeader(&header)

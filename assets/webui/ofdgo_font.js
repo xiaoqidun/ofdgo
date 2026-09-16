@@ -1,8 +1,8 @@
 const DATABASE = "ofdgo";
 
 export class FontPicker {
-	constructor(input, toggle, list, onChange) {
-		Object.assign(this, { input, toggle, list, onChange, fonts: [], value: "", active: -1, open: false });
+	constructor(input, toggle, list, onChange, onOpen) {
+		Object.assign(this, { input, toggle, list, onChange, onOpen, fonts: [], value: "", active: -1, open: false });
 		input.addEventListener("input", () => this.show(input.value));
 		input.addEventListener("focus", () => input.select());
 		input.addEventListener("click", () => { if (!this.open) this.show(); });
@@ -73,6 +73,7 @@ export class FontPicker {
 		this.position();
 		const selected = this.matches.findIndex(({ font, index }) => !font.disabled && String(index) === this.value);
 		this.activate(selected < 0 ? this.matches.findIndex(({ font }) => !font.disabled) : selected);
+		this.onOpen?.();
 	}
 
 	position() {

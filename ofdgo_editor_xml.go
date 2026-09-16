@@ -232,11 +232,12 @@ func editorXMLSupported(node *editorXML) bool {
 	var allowed, children string
 	switch node.name.Local {
 	case "TextObject":
-		allowed, children = "ID Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Italic Visible Stroke Fill Alpha", "FillColor StrokeColor TextCode"
+		allowed, children = "ID Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Italic Visible Stroke Fill Alpha", "Clips FillColor StrokeColor TextCode"
 	case "PathObject", "Path":
 		allowed, children = "Boundary CTM LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha", "StrokeColor FillColor AbbreviatedData"
 		if node.name.Local == "PathObject" {
 			allowed += " ID DrawParam"
+			children += " Clips"
 		}
 	case "ImageObject":
 		allowed, children = "ID Boundary CTM ResourceID ImageMask Visible Alpha", "Clips"

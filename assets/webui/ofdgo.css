@@ -119,7 +119,8 @@ a:focus-visible {
 	grid-template-columns: repeat(2, max-content);
 }
 
-.editor-transform {
+.editor-transform,
+.editor-erase {
 	grid-template-columns: max-content;
 }
 
@@ -1400,6 +1401,7 @@ button.outline-link:hover {
 
 .edit-object:hover,
 .edit-object.selected,
+.edit-object.erasing,
 .edit-selection,
 .edit-crop {
 	outline: calc(1px / var(--surface-scale)) solid var(--accent);
@@ -1417,6 +1419,11 @@ button.outline-link:hover {
 
 .edit-object.selected {
 	background: rgba(15, 123, 104, 0.04);
+}
+
+.edit-object.erasing {
+	background: var(--accent-soft);
+	outline-style: dashed;
 }
 
 .edit-handle {

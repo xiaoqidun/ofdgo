@@ -114,6 +114,7 @@ func RunWASM() {
 	registerCallback("ofdgoTransformObjects", transformObjects)
 	registerCallback("ofdgoAlignObjects", alignObjects)
 	registerCallback("ofdgoDeleteObjects", deleteObjects)
+	registerCallback("ofdgoEraseObjects", eraseObjects)
 	registerCallback("ofdgoCopyObjects", copyObjects)
 	registerCallback("ofdgoCaptureObjects", captureObjects)
 	registerCallback("ofdgoPasteObjects", pasteObjects)
@@ -1396,6 +1397,17 @@ func alignObjects(args []js.Value) (any, error) {
 func deleteObjects(args []js.Value) (any, error) {
 	return changeObjects(func() error {
 		return currentEditor.DeleteObjects(args[0].Int(), stringsFromJS(args[1]))
+	})
+}
+
+// eraseObjects 按页面矩形范围擦除对象，保留局部裁剪之外的内容。
+// 入参: args 页面索引、对象标识数组和毫米坐标范围
+// 返回: any 文档信息, error 错误信息
+func eraseObjects(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		return currentEditor.EraseObjects(args[0].Int(), stringsFromJS(args[1]), ofdgo.Box{
+			X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float(),
+		})
 	})
 }
 

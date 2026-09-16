@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tdewolff/font"
+	"github.com/xiaoqidun/jbig2"
 )
 
 // Editor 编辑OFD文档，长度单位为毫米，页面索引从0开始，实例需串行使用
@@ -346,7 +347,8 @@ func editorFontName(sfnt *font.SFNT, names ...font.NameID) string {
 	return ""
 }
 
-// AddImage 注册PNG或JPEG图片，保留原始编码，重复资源复用标识，引用后写入文档
+// AddImage 注册PNG或JPEG图片，重复资源复用标识，引用后写入文档
+// 不透明纯黑白PNG仅在无损JBIG2编码更小时转换，其他图片保留原始编码。
 // 入参: data 图片数据
 // 返回: string 图片资源标识, error 错误信息
 func (e *Editor) AddImage(data []byte) (string, error) {
@@ -364,10 +366,17 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 	if err := e.prepareSourceIDs(); err != nil {
 		return "", err
 	}
+	if format == "png" && uint64(config.Width)*uint64(config.Height) <= 64<<20 {
+		if compact := editorBinaryImage(data); compact != nil {
+			data, format = compact, "jbig2"
+		}
+	}
 	id := e.nextID()
 	extension := format
 	if extension == "jpeg" {
 		extension = "jpg"
+	} else if extension == "jbig2" {
+		extension = "jb2"
 	}
 	name := "Image_" + id + "." + extension
 	e.resources = append(e.resources, editorResource{
@@ -380,8 +389,23 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 	return id, nil
 }
 
+// editorBinaryImage 尝试纯黑白无损编码，不二值化，不改变透明度，无体积收益时保留原图。
+// 入参: data PNG图片数据
+// 返回: []byte 更小的JBIG2数据，不适用时为nil
+func editorBinaryImage(data []byte) []byte {
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil
+	}
+	var output bytes.Buffer
+	if err := jbig2.Encode(&output, img, &jbig2.Options{MaxPageBytes: uint64(len(data))}); err != nil || output.Len() >= len(data) {
+		return nil
+	}
+	return output.Bytes()
+}
+
 // AddObject 按添加顺序放入正文图层，支持文字、路径和图片，自动分配对象ID
-// 支持基本颜色、直接资源引用及图片的路径裁剪，不支持动作、渐变及复合图元
+// 支持基本颜色、直接资源引用及路径裁剪，不支持动作、渐变及复合图元
 // 入参: page 页面索引, object 对象内容，添加后不再引用调用方的可变数据
 // 返回: string 对象标识, error 错误信息
 func (e *Editor) AddObject(page int, object GraphicObject) (string, error) {
@@ -579,10 +603,10 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 	} else if object.Type == "ImageObject" {
 		object.ImageObject.CTM = fmt.Sprintf("%s 0 0 %s 0 0", ofdNumber(box.W), ofdNumber(box.H))
 	}
-	if drawParam != "" || len(actions) != 0 || clips != nil && object.Type != "ImageObject" {
-		return GraphicObject{}, fmt.Errorf("draw parameter references, non-image clips and actions are not supported for creation")
+	if drawParam != "" || len(actions) != 0 {
+		return GraphicObject{}, fmt.Errorf("draw parameter references and actions are not supported for creation")
 	}
-	if err := e.validateImageClips(clips); err != nil {
+	if err := e.validateObjectClips(clips); err != nil {
 		return GraphicObject{}, err
 	}
 	if alpha != nil && (*alpha < 0 || *alpha > 255) {
@@ -599,23 +623,23 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 	return cloneEditorObject(object)
 }
 
-// validateImageClips 校验图片的路径裁剪，仅接受无资源引用及嵌套裁剪的路径
-// 入参: clips 图片裁剪集合，nil表示无裁剪
+// validateObjectClips 校验对象的路径裁剪，仅接受无资源引用及嵌套裁剪的路径
+// 入参: clips 裁剪集合，nil表示无裁剪
 // 返回: error 错误信息
-func (e *Editor) validateImageClips(clips *Clips) error {
+func (e *Editor) validateObjectClips(clips *Clips) error {
 	if clips == nil {
 		return nil
 	}
 	if len(clips.Clip) == 0 {
-		return fmt.Errorf("image clips must contain a clip")
+		return fmt.Errorf("clips must contain a clip")
 	}
 	for _, clip := range clips.Clip {
 		if len(clip.Area) == 0 {
-			return fmt.Errorf("image clip must contain an area")
+			return fmt.Errorf("clip must contain an area")
 		}
 		for _, area := range clip.Area {
 			if len(area.Path) == 0 || area.DrawParam != "" || len(area.Text) != 0 {
-				return fmt.Errorf("image clips only support paths without draw parameter references")
+				return fmt.Errorf("clips only support paths without draw parameter references")
 			}
 			if area.CTM != "" {
 				if _, err := creationNumbers(area.CTM, 6); err != nil {
@@ -623,8 +647,8 @@ func (e *Editor) validateImageClips(clips *Clips) error {
 				}
 			}
 			for _, path := range area.Path {
-				if path.ID != "" {
-					return fmt.Errorf("clip paths must not have object IDs")
+				if path.ID != "" || path.Clips != nil {
+					return fmt.Errorf("clip paths must not have object IDs or nested clips")
 				}
 				if _, err := e.prepareObject("", GraphicObject{Type: "PathObject", PathObject: path}); err != nil {
 					return err
@@ -726,11 +750,11 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 		boundary, ctm = &object.PathObject.Boundary, &object.PathObject.CTM
 	case "ImageObject":
 		boundary, ctm = &object.ImageObject.Boundary, &object.ImageObject.CTM
-		if scale != 1 {
-			object.ImageObject.Clips = transformImageClips(object.ImageObject.Clips, Matrix{a: scale, d: scale})
-		}
 	default:
 		return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
+	}
+	if clips := editorObjectClips(&object); scale != 1 && *clips != nil && (object.Type == "TextObject" || (*clips).TransFlag != nil && !*(*clips).TransFlag) {
+		*clips = transformObjectClips(*clips, Matrix{a: scale, d: scale})
 	}
 	box, err := ParseBox(*boundary)
 	if err != nil {

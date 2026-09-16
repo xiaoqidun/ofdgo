@@ -20,6 +20,7 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"math"
 
 	"github.com/tdewolff/canvas"
 	canvasimage "github.com/tdewolff/canvas/image"
@@ -79,7 +80,8 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		}
 	}
 	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, box.X, box.Y, localCTM, parentCTM, boundaryInCTM))
-	img = imageWithClip(img, clipPath, m)
+	img = imageWithClip(img, clipPath, m, 96)
+	m = m.Scale(imgW/float64(img.Bounds().Dx()), imgH/float64(img.Bounds().Dy()))
 	img, pad := imageWithTransparentEdge(img)
 	if pad > 0 {
 		p := float64(pad)
@@ -169,9 +171,10 @@ func imageWithMask(img, mask image.Image) image.Image {
 }
 
 // imageWithClip 应用图片裁剪区域
-// 入参: img 图片对象, clipPath 裁剪路径, m 图片变换矩阵
+// 低分辨率图片按最低精度细化蒙版，细化后的像素上限16Mi，不降低原图分辨率。
+// 入参: img 图片对象, clipPath 裁剪路径, m 图片变换矩阵, dpi 最低蒙版分辨率，0保留原图精度
 // 返回: image.Image 裁剪后的图片对象
-func imageWithClip(img image.Image, clipPath *canvas.Path, m canvas.Matrix) image.Image {
+func imageWithClip(img image.Image, clipPath *canvas.Path, m canvas.Matrix, dpi float64) image.Image {
 	if img == nil || clipPath == nil || m.Det() == 0 {
 		return img
 	}
@@ -196,6 +199,16 @@ func imageWithClip(img image.Image, clipPath *canvas.Path, m canvas.Matrix) imag
 		}
 	} else if clipPath.Contains(imagePath) {
 		return img
+	}
+	scale := math.Max(math.Hypot(m[0][0], m[1][0]), math.Hypot(m[0][1], m[1][1])) * dpi / 25.4
+	scale = math.Min(scale, math.Sqrt((16<<20)/(float64(w)*float64(h))))
+	if scale > 1 {
+		nw, nh := int(float64(w)*scale), int(float64(h)*scale)
+		resized := image.NewNRGBA(image.Rect(0, 0, nw, nh))
+		draw.CatmullRom.Scale(resized, resized.Bounds(), imagePixelSource(img), bounds, draw.Src, nil)
+		img = resized
+		m = m.Scale(float64(w)/float64(nw), float64(h)/float64(nh))
+		bounds, w, h = resized.Bounds(), nw, nh
 	}
 	clip := clipPath.Copy().Transform(m.Inv())
 	clipCanvas := canvas.New(float64(w), float64(h))

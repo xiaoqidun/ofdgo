@@ -358,7 +358,8 @@ export class CanvasEditor {
 			return;
 		}
 		if (this.tool) {
-			this.startShape(event);
+			if (this.tool.startsWith("erase-")) this.startErase(event);
+			else this.startShape(event);
 			return;
 		}
 		if (event.altKey && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.target.dataset.corner) {
@@ -425,6 +426,10 @@ export class CanvasEditor {
 		}
 		event.preventDefault();
 		drag.pointer = event;
+		if (drag.erase) {
+			this.moveErase(event, drag);
+			return;
+		}
 		if (drag.crop) {
 			const from = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.page, drag.rotation);
 			const to = pagePoint(event.clientX, event.clientY, drag.rect, drag.page, drag.rotation);
@@ -495,6 +500,14 @@ export class CanvasEditor {
 			return;
 		}
 		this.move(event);
+		if (drag.erase) {
+			const items = drag.erase === "erase-object" ? [...drag.erased] : drag.box
+				? drag.items.filter(item => item.x < drag.box.x + drag.box.width && item.x + item.width > drag.box.x
+					&& item.y < drag.box.y + drag.box.height && item.y + item.height > drag.box.y) : [];
+			this.cancel();
+			if (items.length) this.options.onErase(items, drag.erase === "erase-region" ? drag.box : null);
+			return;
+		}
 		if (drag.crop) {
 			this.drag = null;
 			this.viewer.releasePointerCapture(drag.pointerID);
@@ -550,6 +563,7 @@ export class CanvasEditor {
 		const drag = this.drag;
 		this.drag = null;
 		if (drag) {
+			for (const item of drag.erased || []) item.node.classList.remove("erasing");
 			if (drag.crop) {
 				this.crop.box = drag.box;
 				this.paintCrop();
@@ -564,6 +578,29 @@ export class CanvasEditor {
 				this.viewer.releasePointerCapture(drag.pointerID);
 			}
 		}
+	}
+
+	startErase(event) {
+		const surface = event.target.closest(".page-surface") || this.nearestSurface(event);
+		const page = this.pages.get(surface);
+		if (!page) return;
+		event.preventDefault();
+		this.viewer.focus({ preventScroll: true });
+		this.drag = { erase: this.tool, page, surface, items: [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)),
+			erased: new Set(), shape: "rectangle", pointerID: event.pointerId, clientX: event.clientX, clientY: event.clientY,
+			rect: surface.getBoundingClientRect(), rotation: this.options.rotation() };
+		if (this.tool === "erase-region") Object.assign(this.drag, this.createPreview(surface, page, "rectangle",
+			{ fill: true, fillColor: "var(--accent-soft)", stroke: true, strokeColor: "var(--accent)", lineWidth: 0.2 }));
+		this.viewer.setPointerCapture(event.pointerId);
+		this.moveErase(event, this.drag);
+	}
+
+	moveErase(event, drag) {
+		if (drag.erase === "erase-region") { this.moveShape(event, drag); return; }
+		const point = pagePoint(event.clientX, event.clientY, drag.rect, drag.page, drag.rotation);
+		const item = [...drag.items].reverse().find(item => point.x >= item.x && point.x <= item.x + item.width
+			&& point.y >= item.y && point.y <= item.y + item.height);
+		if (item) { drag.erased.add(item); item.node.classList.add("erasing"); }
 	}
 
 	startMarquee(event, additive) {
