@@ -225,6 +225,9 @@ a:focus-visible {
 }
 
 .font-picker #textFont {
+	flex: 1 1 0;
+	width: 0;
+	text-overflow: ellipsis;
 	padding: 0 6px;
 	border: 0;
 	outline: 0;
@@ -263,6 +266,7 @@ a:focus-visible {
 	color: #1f2428;
 	box-shadow: 0 5px 18px rgba(20, 40, 50, 0.14);
 	overflow-y: auto;
+	overflow-x: hidden;
 	font-size: 14px;
 }
 
@@ -1250,6 +1254,7 @@ button.outline-link:hover {
 }
 
 .empty-state[hidden],
+.panel-row > [hidden],
 .meta-list > [hidden],
 .navigation-tabs[hidden],
 .form-row[hidden],
@@ -1387,7 +1392,7 @@ button.outline-link:hover {
 
 .edit-text {
 	position: absolute;
-	overflow: hidden;
+	overflow: visible;
 	z-index: 1;
 	margin: -2px;
 	padding: 1px;
@@ -1395,13 +1400,18 @@ button.outline-link:hover {
 	border-radius: 0;
 	background: #fff;
 	outline: none;
-	resize: none;
 	transform-origin: 0 0;
 	font-kerning: none;
 	font-variant-ligatures: none;
 	letter-spacing: 0;
 	cursor: text;
 	touch-action: auto;
+}
+
+.edit-text div,
+.edit-text p {
+	margin: 0;
+	text-indent: inherit;
 }
 
 .edit-text:focus-visible {

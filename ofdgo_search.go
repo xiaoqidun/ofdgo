@@ -80,8 +80,9 @@ type TextSpan struct {
 	Matrix [6]float64 `json:"matrix"`
 }
 
-// TextMatch 文字匹配结果，Run为文本对象索引，Start和End为原文Unicode字符区间
+// TextMatch 文字匹配结果，ID为对象标识，Run为文本对象索引，Start和End为原文Unicode字符区间
 type TextMatch struct {
+	ID     string `json:"id"`
 	Run    int    `json:"run"`
 	Start  int    `json:"start"`
 	End    int    `json:"end"`
@@ -169,6 +170,7 @@ func (p *PageText) Search(query string) []TextMatch {
 			offset += found
 			end := start + length
 			match := TextMatch{
+				ID:  run.ID,
 				Run: index, Start: start, End: end,
 				Before: string(runes[max(0, start-16):start]),
 				Text:   string(runes[start:end]),

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"image"
 	"math"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -87,6 +88,20 @@ func NewEditor() *Editor {
 // 返回: int 页数
 func (e *Editor) PageCount() int {
 	return len(e.pages)
+}
+
+// SetInfo 更新文档元数据，独立保存输入并计入修订和撤销记录
+// 入参: info 完整元数据，未修改字段由调用方保留
+func (e *Editor) SetInfo(info DocInfo) {
+	if reflect.DeepEqual(e.Info, info) {
+		return
+	}
+	before, after := cloneEditorData(e.Info), cloneEditorData(info)
+	e.Info = cloneEditorData(after)
+	if change := e.recordChange(); change != nil {
+		change.undo = func(e *Editor) { e.Info = cloneEditorData(before) }
+		change.redo = func(e *Editor) { e.Info = cloneEditorData(after) }
+	}
 }
 
 // Page 获取页面的独立副本，修改副本不影响文档
@@ -160,7 +175,13 @@ func (e *Editor) AddPage(width, height float64) (int, error) {
 // 返回: int 副本页面索引, error 错误信息
 func (e *Editor) CopyPage(index int) (int, error) {
 	if e.originalPage(index) {
-		return 0, fmt.Errorf("copying imported pages is not supported")
+		source, err := e.Reader()
+		if err != nil {
+			return 0, err
+		}
+		at := len(e.pages)
+		_, err = e.importPages(source, []int{index}, at, true)
+		return at, err
 	}
 	source, err := e.page(index)
 	if err != nil {
@@ -203,13 +224,10 @@ func (e *Editor) CopyPage(index int) (int, error) {
 	return index, nil
 }
 
-// DeletePage 删除页面，不回收资源或复用标识，删除后页面索引随之变化
+// DeletePage 删除页面，输出时清理相关目录、跳转、注释和签章位置，保留其他页面及原始签名凭据
 // 入参: index 页面索引
 // 返回: error 错误信息
 func (e *Editor) DeletePage(index int) error {
-	if e.originalPage(index) {
-		return fmt.Errorf("deleting imported pages is not supported")
-	}
 	page, err := e.page(index)
 	if err != nil {
 		return err

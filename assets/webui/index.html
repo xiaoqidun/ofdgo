@@ -206,6 +206,14 @@
 				<div class="form-actions"><div id="paragraphStatus" class="form-status" role="status"></div><button id="paragraphCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
+		<dialog id="infoPanel" class="form-dialog" aria-label="文档信息">
+			<form id="infoForm">
+				<label class="form-row"><span>标题</span><input id="infoTitle" type="text" autofocus></label>
+				<label class="form-row"><span>作者</span><input id="infoAuthor" type="text"></label>
+				<label class="form-row"><span>主题</span><input id="infoSubject" type="text"></label>
+				<div class="form-actions"><div id="infoStatus" class="form-status" role="status"></div><button id="infoCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
+			</form>
+		</dialog>
 		<dialog id="pagePanel" class="form-dialog" aria-label="页面设置">
 			<form id="pageForm">
 				<div class="form-row">
@@ -320,7 +328,10 @@
 						</div>
 					</div>
 				</section>
-				<div class="panel-title">文档</div>
+				<div class="panel-row">
+					<div class="panel-title compact">文档</div>
+					<button id="infoButton" class="small-button" type="button" aria-label="编辑文档信息" aria-haspopup="dialog" aria-controls="infoPanel" hidden>修改</button>
+				</div>
 				<div id="editNotice" class="font-permission-hint" role="status" hidden></div>
 				<dl class="meta-list">
 					<div>

@@ -247,15 +247,14 @@ func (e *Editor) originalPage(index int) bool {
 	return e.source != nil && index >= 0 && index < len(e.pages) && e.source.pages[e.pages[index].ID] != nil
 }
 
-// PageCapabilities 获取页面操作范围；原始页面暂不复制、删除，避免破坏模板与外部引用
+// PageCapabilities 获取页面操作范围，复制和删除由库统一维护标准引用
 // 入参: index 页面索引
 // 返回: PageCapabilities 操作能力, error 错误信息
 func (e *Editor) PageCapabilities(index int) (PageCapabilities, error) {
 	if index < 0 || index >= len(e.pages) {
 		return PageCapabilities{}, fmt.Errorf("page index %d out of range", index)
 	}
-	original := e.originalPage(index)
-	return PageCapabilities{Insert: e.sourceRGB(), Copy: !original, Delete: !original, Move: true, Resize: true}, nil
+	return PageCapabilities{Insert: e.sourceRGB(), Copy: true, Delete: true, Move: true, Resize: true}, nil
 }
 
 // sourceRGB 判断新建RGB对象能否直接使用文档默认颜色空间

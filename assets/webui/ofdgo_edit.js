@@ -1,5 +1,16 @@
 const PX_PER_MM = 96 / 25.4;
 
+export function editTextValue(input) {
+	let text = "", previous;
+	for (const node of input.childNodes) {
+		const block = node.nodeName === "DIV" || node.nodeName === "P";
+		if (previous && (block || previous.nodeName === "DIV" || previous.nodeName === "P") && previous.nodeName !== "BR") text += "\n";
+		text += node.nodeType === 3 ? node.textContent : node.nodeName === "BR" ? (node.nextSibling ? "\n" : "") : editTextValue(node);
+		previous = node;
+	}
+	return text;
+}
+
 export function pagePoint(x, y, rect, page, rotation) {
 	const u = (x - rect.left) / rect.width;
 	const v = (y - rect.top) / rect.height;
@@ -25,6 +36,21 @@ export function selectionBounds(items) {
 	const x = Math.min(...items.map(item => item.x)), y = Math.min(...items.map(item => item.y));
 	return { x, y, width: Math.max(...items.map(item => item.x + item.width)) - x,
 		height: Math.max(...items.map(item => item.y + item.height)) - y };
+}
+
+function resizeCorner(node, event) {
+	let corner = event.target.dataset.corner || "", distance = Infinity;
+	if (!corner) return corner;
+	for (const handle of node.children) {
+		if (!handle.dataset.corner) continue;
+		const rect = handle.getBoundingClientRect();
+		const next = (event.clientX - rect.left - rect.width / 2) ** 2 + (event.clientY - rect.top - rect.height / 2) ** 2;
+		if (next < distance || next === distance && handle.dataset.corner === event.target.dataset.corner) {
+			corner = handle.dataset.corner;
+			distance = next;
+		}
+	}
+	return corner;
 }
 
 function alignmentSnap(box, targets, tolerance) {
@@ -353,7 +379,7 @@ export class CanvasEditor {
 
 	start(event) {
 		if (this.input) {
-			if (event.target !== this.input.input) this.commitText();
+			if (!this.input.input.contains(event.target)) this.commitText();
 			return;
 		}
 		if (!this.enabled || this.options.busy() || event.button !== 0 || this.drag) {
@@ -367,7 +393,7 @@ export class CanvasEditor {
 			event.preventDefault();
 			this.viewer.focus({ preventScroll: true });
 			const { item, box } = this.crop;
-			this.drag = { crop: true, box: { ...box }, pointerID: event.pointerId, corner: event.target.dataset.corner || "",
+			this.drag = { crop: true, box: { ...box }, pointerID: event.pointerId, corner: resizeCorner(this.crop.node, event),
 				page: item.page, rect: item.surface.getBoundingClientRect(), rotation: this.options.rotation(), clientX: event.clientX, clientY: event.clientY };
 			this.viewer.setPointerCapture(event.pointerId);
 			return;
@@ -403,7 +429,7 @@ export class CanvasEditor {
 		const item = this.selected;
 		if (!canEditObject(item, "transform")) return;
 		this.drag = {
-			item, pointerID: event.pointerId, corner: !item.items || target === item ? event.target.dataset.corner || "" : "",
+			item, pointerID: event.pointerId, corner: !item.items || target === item ? resizeCorner(node, event) : "",
 			rect: item.surface.getBoundingClientRect(), rotation: this.options.rotation(),
 			clientX: event.clientX, clientY: event.clientY,
 		};
@@ -568,10 +594,12 @@ export class CanvasEditor {
 			});
 			return;
 		}
-		this.cancel();
 		if (drag.change && (drag.change.x || drag.change.y || drag.change.scale !== 1)) {
-			this.options.onTransform(drag.item, drag.change);
-		}
+			this.drag = null;
+			drag.guides?.preview.remove();
+			this.viewer.releasePointerCapture(drag.pointerID);
+			Promise.resolve(this.options.onTransform(drag.item, drag.change)).finally(() => this.place(drag.item));
+		} else this.cancel();
 	}
 
 	cancel() {
@@ -796,34 +824,47 @@ export class CanvasEditor {
 		this.closeText();
 		this.select(item);
 		document.fonts.add(face);
-		const input = document.createElement("textarea");
+		const input = document.createElement("div");
 		input.className = "edit-text";
 		input.setAttribute("aria-label", "编辑文字");
-		input.wrap = item.wrap ? "soft" : "off";
+		input.setAttribute("role", "textbox");
+		input.setAttribute("aria-multiline", "true");
+		input.contentEditable = "true";
 		input.spellcheck = false;
-		input.value = item.text;
+		for (const text of item.text.split("\n")) {
+			const paragraph = document.createElement("div");
+			if (text) paragraph.textContent = text;
+			else paragraph.append(document.createElement("br"));
+			input.append(paragraph);
+		}
+		const left = item.leftIndent || 0, right = item.rightIndent || 0;
+		const frame = item.textFrame || { width: item.width, height: item.height, matrix: [1, 0, 0, 1, item.x, item.y] };
+		const [a, b, c, d, e, f] = frame.matrix;
 		Object.assign(input.style, {
-			left: `${item.x * PX_PER_MM}px`, top: `${item.y * PX_PER_MM}px`,
-			width: `${(item.wrap ? item.width : Math.max(item.width, Math.min(50, item.page.width - item.x))) * PX_PER_MM + 4}px`,
-			minHeight: `${item.height * PX_PER_MM + 4}px`,
+			left: "0px", top: "0px",
+			width: `${(Math.max(frame.width, item.wrap ? frame.width : 50) - left - right) * PX_PER_MM + 4}px`,
+			minHeight: `${frame.height * PX_PER_MM + 4}px`,
+			transform: `matrix(${a},${b},${c},${d},${(e + a * left) * PX_PER_MM},${(f + b * left) * PX_PER_MM})`,
+			whiteSpace: item.wrap ? "pre-wrap" : "pre",
 			fontFamily: `"${face.family}"`, fontSize: `${item.size * PX_PER_MM}px`,
 			lineHeight: item.paragraphHeight || item.lineHeight ? `${(item.paragraphHeight || item.lineHeight) * PX_PER_MM}px` : "normal", color: item.color,
 			textAlign: item.align || "left",
 			letterSpacing: `${(item.letterSpacing || 0) * PX_PER_MM}px`,
-			paddingLeft: `${2 + Math.max(0, item.leftIndent || 0) * PX_PER_MM}px`,
-			paddingRight: `${2 + Math.max(0, item.rightIndent || 0) * PX_PER_MM}px`,
 			textIndent: `${(item.firstLineIndent || 0) * PX_PER_MM}px`,
 		});
-		if (item.textFrame) {
-			const { width, height, matrix: [a, b, c, d, e, f] } = item.textFrame;
-			Object.assign(input.style, { left: "0px", top: "0px", width: `${Math.max(width, item.wrap ? width : 50) * PX_PER_MM + 4}px`,
-				minHeight: `${height * PX_PER_MM + 4}px`, transform: `matrix(${a},${b},${c},${d},${e * PX_PER_MM},${f * PX_PER_MM})` });
-		}
 		this.input = { input, item, face, fontChoice: item.fontChoice };
 		item.surface.append(input);
-		input.addEventListener("input", () => {
-			this.resizeText();
-			this.options.onTextChange();
+		input.addEventListener("input", () => this.options.onTextChange());
+		input.addEventListener("paste", event => {
+			event.preventDefault();
+			document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
+		});
+		input.addEventListener("beforeinput", event => {
+			if (event.inputType.startsWith("format")) event.preventDefault();
+			if (event.inputType === "insertLineBreak") {
+				event.preventDefault();
+				document.execCommand("insertParagraph");
+			}
 		});
 		input.addEventListener("blur", (event) => {
 			if (!this.options.fontControls?.includes(event.relatedTarget)) this.commitText();
@@ -831,7 +872,7 @@ export class CanvasEditor {
 		input.addEventListener("keydown", (event) => {
 			if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "s") return;
 			event.stopPropagation();
-			if (event.isComposing || input.readOnly) {
+			if (event.isComposing || this.input?.saving) {
 				return;
 			}
 			if (event.key === "Escape") {
@@ -843,15 +884,8 @@ export class CanvasEditor {
 				this.commitText();
 			}
 		});
-		this.resizeText();
 		input.focus({ preventScroll: true });
-		if (!item.draft) input.select();
-	}
-
-	resizeText() {
-		const { input } = this.input;
-		input.style.height = "0px";
-		input.style.height = `${input.scrollHeight + 2}px`;
+		if (!item.draft) document.getSelection().selectAllChildren(input);
 	}
 
 	setTextFont(face, data) {
@@ -861,7 +895,6 @@ export class CanvasEditor {
 		editing.face = face;
 		editing.fontData = data;
 		editing.input.style.fontFamily = `"${face.family}"`;
-		this.resizeText();
 		this.options.onTextChange();
 		editing.input.focus({ preventScroll: true });
 	}
@@ -869,20 +902,23 @@ export class CanvasEditor {
 	async commitText() {
 		const editing = this.input;
 		if (!editing) return true;
-		if (editing.input.readOnly) return false;
-		if (editing.input.value === editing.item.text && !editing.fontData || editing.item.draft && !editing.input.value.trim()) {
+		if (editing.saving) return false;
+		const value = editTextValue(editing.input);
+		if (value === editing.item.text && !editing.fontData || editing.item.draft && !value.trim()) {
 			this.closeText();
 			return true;
 		}
-		editing.input.readOnly = true;
-		const saved = await this.options.onCommitText(editing.item, editing.input.value, editing.fontData);
+		editing.saving = true;
+		editing.input.contentEditable = "false";
+		const saved = await this.options.onCommitText(editing.item, value, editing.fontData);
 		if (this.input !== editing) {
 			return Boolean(saved);
 		}
 		if (saved) {
 			this.closeText();
 		} else {
-			editing.input.readOnly = false;
+			editing.saving = false;
+			editing.input.contentEditable = "true";
 			editing.input.focus({ preventScroll: true });
 		}
 		return Boolean(saved);

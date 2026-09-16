@@ -44,6 +44,7 @@ export class FontPicker {
 	restore() {
 		const font = this.fonts[Number(this.value)];
 		this.input.value = font?.fullName || font?.name || "";
+		this.input.scrollLeft = 0;
 		this.input.title = font ? [this.input.value, this.sourceLabel(font)].filter(Boolean).join(" · ") : "";
 		this.input.setAttribute("aria-expanded", String(this.open));
 		this.input.removeAttribute("aria-activedescendant");

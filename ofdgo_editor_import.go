@@ -47,6 +47,7 @@ type editorPageImport struct {
 	templateParts map[string][]byte
 	defaultCS     string
 	attachments   map[string][]byte
+	copyPage      bool
 }
 
 // ImportPages 将来源主文档中的指定页面插入目标位置，保持输入顺序并作为一次撤销操作
@@ -56,6 +57,13 @@ type editorPageImport struct {
 // 入参: source 来源阅读器, indexes 来源页面索引，不可重复, at 目标插入位置
 // 返回: []string 新页面标识, error 错误信息
 func (e *Editor) ImportPages(source *Reader, indexes []int, at int) ([]string, error) {
+	return e.importPages(source, indexes, at, false)
+}
+
+// importPages 迁移页面，同文档复制时复用原资源并保留其他页面的跳转
+// 入参: source 来源阅读器, indexes 来源页索引, at 插入位置, copyPage 是否同文档复制
+// 返回: []string 新页标识, error 错误信息
+func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage bool) ([]string, error) {
 	if at < 0 || at > len(e.pages) {
 		return nil, fmt.Errorf("page index %d out of range", at)
 	}
@@ -91,8 +99,15 @@ func (e *Editor) ImportPages(source *Reader, indexes []int, at int) ([]string, e
 	for editorDirectoryExists(base.reader, prefix) {
 		prefix += "_"
 	}
-	m := &editorPageImport{reader: source, doc: doc, prefix: prefix, maximum: e.maxID,
+	m := &editorPageImport{reader: source, doc: doc, prefix: prefix, maximum: e.maxID, copyPage: copyPage,
 		ids: make(map[string]string), pages: selected, files: make(map[string][]byte), resources: make(map[string]editorImportEntry), used: make(map[string][]byte), templates: make(map[string]TemplatePage), templateParts: make(map[string][]byte), attachments: make(map[string][]byte)}
+	if copyPage {
+		for _, page := range doc.Pages.Page {
+			if !selected[page.ID] {
+				m.ids[page.ID] = page.ID
+			}
+		}
+	}
 	for _, name := range append(slices.Clone(doc.CommonData.PublicRes), doc.CommonData.DocumentRes...) {
 		if err := m.resourceIndex(source.ResPath(name)); err != nil {
 			return nil, err
@@ -130,28 +145,30 @@ func (e *Editor) ImportPages(source *Reader, indexes []int, at int) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	var resourceContent []byte
-	for _, group := range []string{"ColorSpaces", "DrawParams", "Fonts", "MultiMedias", "CompositeGraphicUnits"} {
-		var entries []byte
-		for _, id := range slices.Sorted(maps.Keys(m.used)) {
-			if m.resources[id].group == group {
-				entries = append(entries, m.used[id]...)
+	if !copyPage {
+		var resourceContent []byte
+		for _, group := range []string{"ColorSpaces", "DrawParams", "Fonts", "MultiMedias", "CompositeGraphicUnits"} {
+			var entries []byte
+			for _, id := range slices.Sorted(maps.Keys(m.used)) {
+				if m.resources[id].group == group {
+					entries = append(entries, m.used[id]...)
+				}
 			}
+			if len(entries) == 0 {
+				continue
+			}
+			encoded, err := editorXMLContainer(group, nil, entries)
+			if err != nil {
+				return nil, err
+			}
+			resourceContent = append(resourceContent, encoded...)
 		}
-		if len(entries) == 0 {
-			continue
-		}
-		encoded, err := editorXMLContainer(group, nil, entries)
+		resources, err := editorXMLContainer("Res", nil, resourceContent)
 		if err != nil {
 			return nil, err
 		}
-		resourceContent = append(resourceContent, encoded...)
+		m.files[path.Join(prefix, "Resources.xml")] = resources
 	}
-	resources, err := editorXMLContainer("Res", nil, resourceContent)
-	if err != nil {
-		return nil, err
-	}
-	m.files[path.Join(prefix, "Resources.xml")] = resources
 	next, err := m.merge(base, refs, annotations, signatures)
 	if err != nil {
 		return nil, err
@@ -159,6 +176,32 @@ func (e *Editor) ImportPages(source *Reader, indexes []int, at int) ([]string, e
 	added := make([]PageContent, len(refs))
 	for i, ref := range refs {
 		added[i] = PageContent{ID: ref.ID}
+	}
+	if copyPage {
+		preview := *e
+		preview.source, preview.pages = next, added
+		for i, index := range indexes {
+			layouts := make(map[string]*textLayout)
+			for _, layer := range e.pages[index].Content.Layer {
+				for _, object := range layer.Objects {
+					if layout := object.TextObject.layout; object.Type == "TextObject" && layout != nil {
+						value := *layout
+						layouts[m.ids[object.TextObject.ID]] = &value
+					}
+				}
+			}
+			if err := preview.loadSourcePage(i); err != nil {
+				return nil, err
+			}
+			for j := range added[i].Content.Layer {
+				for k := range added[i].Content.Layer[j].Objects {
+					object := &added[i].Content.Layer[j].Objects[k]
+					if object.Type == "TextObject" {
+						object.TextObject.layout = layouts[object.TextObject.ID]
+					}
+				}
+			}
+		}
 	}
 	if e.source == nil {
 		for i := range e.resources {
@@ -268,6 +311,14 @@ func (m *editorPageImport) resourceIndex(name string) error {
 // 入参: value 来源资源标识
 // 返回: string 新标识, error 错误信息
 func (m *editorPageImport) reference(value string) (string, error) {
+	if m.copyPage {
+		if _, ok := m.resources[value]; ok {
+			return value, nil
+		}
+		if _, ok := m.templates[value]; ok {
+			return value, nil
+		}
+	}
 	if entry, ok := m.resources[value]; ok {
 		if _, seen := m.used[value]; !seen {
 			m.used[value] = nil
@@ -387,6 +438,13 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 	}
 	name := node.name.Local
 	if name == "PageRes" {
+		if m.copyPage {
+			loc, err := m.resolve(entry.name, "", strings.TrimSpace(editorImportText(entry.data, node)))
+			if err != nil {
+				return nil, err
+			}
+			return editorXMLText("PageRes", "/"+loc), nil
+		}
 		return nil, nil
 	}
 	if name == "StampAnnot" && !m.pages[node.attr("PageRef")] {
@@ -402,7 +460,7 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			for _, bookmark := range m.doc.Bookmarks.Bookmark {
 				bookmarks[bookmark.Name] = bookmark.Dest
 			}
-			if dest := gotoDest(&action, bookmarks); dest == nil || !m.pages[dest.PageID] {
+			if dest := gotoDest(&action, bookmarks); dest == nil || !m.pages[dest.PageID] && !m.copyPage {
 				return nil, nil
 			}
 		}
@@ -586,6 +644,9 @@ func (m *editorPageImport) annotations() ([]byte, error) {
 // 入参: id 来源附件标识
 // 返回: string 新标识, error 错误信息
 func (m *editorPageImport) attachment(id string) (string, error) {
+	if m.copyPage {
+		return id, nil
+	}
 	if _, exists := m.attachments[id]; exists {
 		return m.id(id), nil
 	}
@@ -692,7 +753,10 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 			break
 		}
 	}
-	content := editorXMLText("DocumentRes", "/"+path.Join(m.prefix, "Resources.xml"))
+	var content []byte
+	if m.files[path.Join(m.prefix, "Resources.xml")] != nil {
+		content = editorXMLText("DocumentRes", "/"+path.Join(m.prefix, "Resources.xml"))
+	}
 	for _, id := range slices.Sorted(maps.Keys(m.templateParts)) {
 		content = append(content, m.templateParts[id]...)
 	}

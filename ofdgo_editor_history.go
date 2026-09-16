@@ -26,7 +26,7 @@ type editorChange struct {
 
 // SetHistoryLimit 设置撤销和重做记录的总上限，默认关闭，非正数关闭并释放记录
 // 缩减上限时优先保留最近的撤销记录，不影响当前文档及修订标识
-// 记录页面和对象操作，不包含Info的直接修改及字体、图片注册，资源继续共享
+// 记录页面、对象及SetInfo操作，不包含Info的直接修改及字体、图片注册，资源继续共享
 // 入参: limit 最大记录数
 func (e *Editor) SetHistoryLimit(limit int) {
 	e.historyLimit = max(0, limit)
@@ -55,7 +55,7 @@ func (e *Editor) CanRedo() bool {
 	return e.historyIndex < len(e.history)
 }
 
-// Undo 撤销最近一次页面或对象操作，保留资源和已分配的标识
+// Undo 撤销最近一次操作，保留资源和已分配的标识
 // 返回: bool 是否执行了撤销
 func (e *Editor) Undo() bool {
 	if !e.CanUndo() {
@@ -81,7 +81,7 @@ func (e *Editor) Redo() bool {
 	return true
 }
 
-// Revision 获取页面和对象的当前修订标识，撤销或重做时恢复对应标识
+// Revision 获取当前修订标识，撤销或重做时恢复对应标识
 // Info的直接修改和资源注册不计入修订，标识仅在当前Editor实例内有效
 // 返回: uint64 修订标识
 func (e *Editor) Revision() uint64 {

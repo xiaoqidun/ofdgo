@@ -28,7 +28,7 @@ import (
 	"strings"
 )
 
-// sourceParts 生成编辑过的XML和新增资源，不读取未修改页面或原始二进制资源
+// sourceParts 生成编辑快照的XML和新增资源，删页时同步清理标准引用
 // 返回: map[string][]byte 替换及新增条目, error 错误信息
 func (e *Editor) sourceParts() (map[string][]byte, error) {
 	parts := make(map[string][]byte)
@@ -158,6 +158,9 @@ func (e *Editor) sourceParts() (map[string][]byte, error) {
 			return nil, err
 		}
 		parts["OFD.xml"] = data
+	}
+	if err := e.prunePageReferences(parts); err != nil {
+		return nil, err
 	}
 	for name, data := range maps.Clone(parts) {
 		if file, ok := reader.packageFile(name); ok {

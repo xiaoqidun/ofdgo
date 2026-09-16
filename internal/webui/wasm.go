@@ -108,6 +108,7 @@ func RunWASM() {
 	registerCallback("ofdgoFontFace", fontFace)
 	registerCallback("ofdgoCreateDocument", createDocument)
 	registerCallback("ofdgoEditDocument", editDocument)
+	registerCallback("ofdgoUpdateInfo", updateInfo)
 	registerCallback("ofdgoChangePage", changePage)
 	registerCallback("ofdgoLoadImport", loadImport)
 	registerCallback("ofdgoImportPages", importPages)
@@ -1089,6 +1090,18 @@ func createDocument(args []js.Value) (any, error) {
 	}
 	editor.SetHistoryLimit(100)
 	return previewEditor(editor, args[3].Bool())
+}
+
+// updateInfo 修改标题、作者和主题，保留其他元数据及创建程序标识
+// 入参: args 标题、作者、主题
+// 返回: any 编辑状态, error 错误信息
+func updateInfo(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		info := currentEditor.Info
+		info.Title, info.Author, info.Subject = args[0].String(), args[1].String(), args[2].String()
+		currentEditor.SetInfo(info)
+		return nil
+	})
 }
 
 // editDocument 将已打开文档接入编辑器，沿用页面、资源及字体配置
