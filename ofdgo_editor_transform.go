@@ -64,6 +64,49 @@ func (e *Editor) FlipObjects(page int, ids []string, axis string) error {
 	return e.orientObjects(page, ids, m)
 }
 
+// ResizeObjects 将选区可见范围移动并缩放到指定矩形，文字与路径保持比例，图片支持独立宽高
+// 不重排文字或重采样图片，一次撤销恢复全部；基本图形独立调整宽高可使用PathObject.Reshape
+// 入参: page 页面索引, ids 对象标识, box 页面毫米坐标中的目标范围
+// 返回: error 错误信息
+func (e *Editor) ResizeObjects(page int, ids []string, box Box) error {
+	if _, err := creationBox(editorBoxString(box)); err != nil {
+		return err
+	}
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil || len(objects) == 0 {
+		return err
+	}
+	boxes, err := e.objectBounds(page, objects)
+	if err != nil {
+		return err
+	}
+	var before Box
+	for _, bounds := range boxes {
+		before = unionTextBox(before, bounds)
+	}
+	if before.W <= 0 || before.H <= 0 {
+		return fmt.Errorf("selection has no visible bounds")
+	}
+	sx, sy := box.W/before.W, box.H/before.H
+	uniform := math.Abs(sx-sy) <= 1e-9*math.Max(sx, sy)
+	matrix := Matrix{a: sx, d: sy, e: box.X - before.X*sx, f: box.Y - before.Y*sy}
+	for i, object := range objects {
+		object = cloneEditorData(object)
+		if uniform {
+			object, err = transformEditorObject(object, matrix.e, matrix.f, sx)
+		} else if object.Type == "ImageObject" {
+			object = transformEditorMatrix(object, matrix)
+		} else {
+			return fmt.Errorf("nonuniform resizing requires image objects")
+		}
+		if err != nil {
+			return err
+		}
+		objects[i] = object
+	}
+	return e.updateObjects(page, objects, true)
+}
+
 // orientObjects 更新Boundary与CTM，不重排文字或重采样图片
 // 入参: page 页面索引, ids 对象标识, matrix 直角旋转或镜像矩阵
 // 返回: error 错误信息
@@ -83,31 +126,36 @@ func (e *Editor) orientObjects(page int, ids []string, matrix Matrix) error {
 	x, y := box.X+box.W/2, box.Y+box.H/2
 	matrix = TranslationMatrix(x, y).Multiply(matrix).Multiply(TranslationMatrix(-x, -y))
 	for i, object := range objects {
-		var boundary, ctm *string
-		switch object.Type {
-		case "TextObject":
-			boundary, ctm = &object.TextObject.Boundary, &object.TextObject.CTM
-		case "PathObject":
-			boundary, ctm = &object.PathObject.Boundary, &object.PathObject.CTM
-		case "ImageObject":
-			boundary, ctm = &object.ImageObject.Boundary, &object.ImageObject.CTM
-		default:
-			return fmt.Errorf("unsupported object type %q", object.Type)
-		}
-		before, _ := ParseBox(*boundary)
-		if object.Type == "ImageObject" && *ctm == "" {
-			*ctm = Matrix{a: before.W, d: before.H}.String()
-		}
-		after := matrix.TransformBox(before)
-		local := TranslationMatrix(-after.X, -after.Y).Multiply(matrix).Multiply(TranslationMatrix(before.X, before.Y))
-		*ctm = local.Multiply(NewMatrix(*ctm)).String()
-		*boundary = editorBoxString(after)
-		if clips := editorObjectClips(&object); *clips != nil && (*clips).TransFlag != nil && !*(*clips).TransFlag {
-			*clips = transformObjectClips(*clips, local)
-		}
-		objects[i] = object
+		objects[i] = transformEditorMatrix(object, matrix)
 	}
 	return e.updateObjects(page, objects, true)
+}
+
+// transformEditorMatrix 在页面坐标中变换基本对象，保留局部绘制数据和裁剪
+// 入参: object 对象, matrix 页面变换
+// 返回: GraphicObject 变换后的独立对象
+func transformEditorMatrix(object GraphicObject, matrix Matrix) GraphicObject {
+	var boundary, ctm *string
+	switch object.Type {
+	case "TextObject":
+		boundary, ctm = &object.TextObject.Boundary, &object.TextObject.CTM
+	case "PathObject":
+		boundary, ctm = &object.PathObject.Boundary, &object.PathObject.CTM
+	case "ImageObject":
+		boundary, ctm = &object.ImageObject.Boundary, &object.ImageObject.CTM
+	}
+	before, _ := ParseBox(*boundary)
+	if object.Type == "ImageObject" && *ctm == "" {
+		*ctm = Matrix{a: before.W, d: before.H}.String()
+	}
+	after := matrix.TransformBox(before)
+	local := TranslationMatrix(-after.X, -after.Y).Multiply(matrix).Multiply(TranslationMatrix(before.X, before.Y))
+	*ctm = local.Multiply(NewMatrix(*ctm)).String()
+	*boundary = editorBoxString(after)
+	if clips := editorObjectClips(&object); *clips != nil && (*clips).TransFlag != nil && !*(*clips).TransFlag {
+		*clips = transformObjectClips(*clips, local)
+	}
+	return object
 }
 
 // transformObjectClips 变换裁剪区域，不修改原始裁剪数据

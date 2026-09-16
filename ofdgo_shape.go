@@ -47,9 +47,11 @@ func (p PathObject) Outline() (string, error) {
 type ShapeKind string
 
 const (
-	ShapeLine      ShapeKind = "line"
-	ShapeRectangle ShapeKind = "rectangle"
-	ShapeEllipse   ShapeKind = "ellipse"
+	ShapeLine        ShapeKind = "line"
+	ShapeArrow       ShapeKind = "arrow"
+	ShapeDoubleArrow ShapeKind = "double-arrow"
+	ShapeRectangle   ShapeKind = "rectangle"
+	ShapeEllipse     ShapeKind = "ellipse"
 )
 
 // NewShape 创建使用标准紧缩路径的图形，默认黑色描边、不填充
@@ -63,13 +65,38 @@ func NewShape(kind ShapeKind, box Box) (PathObject, error) {
 	}
 	object := PathObject{LineWidth: defaultPathLineWidth}
 	switch kind {
-	case ShapeLine:
+	case ShapeLine, ShapeArrow, ShapeDoubleArrow:
 		if box.W == 0 && box.H == 0 {
 			return PathObject{}, fmt.Errorf("line endpoints must differ")
 		}
-		x, y := math.Min(0, box.W)-defaultPathLineWidth/2, math.Min(0, box.H)-defaultPathLineWidth/2
-		object.AbbreviatedData = fmt.Sprintf("M %g %g L %g %g", -x, -y, box.W-x, box.H-y)
-		box = Box{X: box.X + x, Y: box.Y + y, W: math.Abs(box.W) + defaultPathLineWidth, H: math.Abs(box.H) + defaultPathLineWidth}
+		points := []Point{{}, {X: box.W, Y: box.H}}
+		if kind != ShapeLine {
+			length := math.Hypot(box.W, box.H)
+			head := math.Min(4, length/3)
+			x, y := box.W/length*head, box.H/length*head
+			points = append(points, Point{X: box.W - x - y*0.45, Y: box.H - y + x*0.45}, Point{X: box.W, Y: box.H}, Point{X: box.W - x + y*0.45, Y: box.H - y - x*0.45})
+			if kind == ShapeDoubleArrow {
+				points = append(points, Point{X: x - y*0.45, Y: y + x*0.45}, Point{}, Point{X: x + y*0.45, Y: y - x*0.45})
+			}
+		}
+		left, top, right, bottom := 0.0, 0.0, 0.0, 0.0
+		for _, point := range points {
+			left, top, right, bottom = math.Min(left, point.X), math.Min(top, point.Y), math.Max(right, point.X), math.Max(bottom, point.Y)
+		}
+		left, top, right, bottom = left-defaultPathLineWidth/2, top-defaultPathLineWidth/2, right+defaultPathLineWidth/2, bottom+defaultPathLineWidth/2
+		var data strings.Builder
+		for i, point := range points {
+			command := "L"
+			if i == 0 || i == 2 || i == 5 {
+				command = "M"
+			}
+			if i > 0 {
+				data.WriteByte(' ')
+			}
+			fmt.Fprintf(&data, "%s %g %g", command, point.X-left, point.Y-top)
+		}
+		object.AbbreviatedData = data.String()
+		box = Box{X: box.X + left, Y: box.Y + top, W: right - left, H: bottom - top}
 	case ShapeRectangle, ShapeEllipse:
 		if box.W <= 0 || box.H <= 0 {
 			return PathObject{}, fmt.Errorf("shape dimensions must be positive")
@@ -108,6 +135,16 @@ func (p PathObject) Shape() (ShapeKind, Box) {
 	var kind ShapeKind
 	var box Box
 	switch {
+	case (commands == "MLMLL" && len(values) == 10) || (commands == "MLMLLMLL" && len(values) == 16):
+		kind = ShapeArrow
+		if commands == "MLMLLMLL" {
+			kind = ShapeDoubleArrow
+		}
+		box = Box{X: values[0], Y: values[1], W: values[2] - values[0], H: values[3] - values[1]}
+		shape, err := NewShape(kind, Box{W: box.W, H: box.H})
+		if err != nil || !sameShapePath(tokens, strings.Fields(shape.AbbreviatedData)) {
+			return "", Box{}
+		}
 	case commands == "ML" && len(values) == 4 && len(tokens) == 6 && tokens[0] == "M" && tokens[3] == "L":
 		kind, box = ShapeLine, Box{X: values[0], Y: values[1], W: values[2] - values[0], H: values[3] - values[1]}
 	case commands == "MLLLC" && len(values) == 8:
@@ -117,7 +154,8 @@ func (p PathObject) Shape() (ShapeKind, Box) {
 	default:
 		return "", Box{}
 	}
-	if kind != ShapeLine {
+	line := kind == ShapeLine || kind == ShapeArrow || kind == ShapeDoubleArrow
+	if !line {
 		shape, err := NewShape(kind, box)
 		if err != nil || !sameShapePath(tokens, strings.Fields(shape.AbbreviatedData)) {
 			return "", Box{}
@@ -135,7 +173,7 @@ func (p PathObject) Shape() (ShapeKind, Box) {
 	if err != nil || !axisAlignedMatrix(m) {
 		return "", Box{}
 	}
-	if kind == ShapeLine {
+	if line {
 		x, y := m.Transform(box.X, box.Y)
 		w, h := matrixVector(m, box.W, box.H)
 		box = Box{X: boundary.X + x, Y: boundary.Y + y, W: w, H: h}
@@ -161,7 +199,7 @@ func sameShapePath(a, b []string) bool {
 		}
 		x, errX := strconv.ParseFloat(token, 64)
 		y, errY := strconv.ParseFloat(b[i], 64)
-		if errX != nil || errY != nil || x != y {
+		if errX != nil || errY != nil || !finite(x) || !finite(y) || math.Abs(x-y) > 1e-10*math.Max(1, math.Max(math.Abs(x), math.Abs(y))) {
 			return false
 		}
 	}
@@ -190,7 +228,8 @@ func (p PathObject) Reshape(box Box) (PathObject, error) {
 	} else {
 		w, h = box.H/m.b, box.W/m.c
 	}
-	if kind != ShapeLine {
+	line := kind == ShapeLine || kind == ShapeArrow || kind == ShapeDoubleArrow
+	if !line {
 		w, h = math.Abs(w), math.Abs(h)
 	}
 	shape, err := NewShape(kind, Box{W: w, H: h})
@@ -203,7 +242,7 @@ func (p PathObject) Reshape(box Box) (PathObject, error) {
 	} else {
 		m.e, m.f = 0, 0
 		var x, y float64
-		if kind == ShapeLine {
+		if line {
 			x, y = m.Transform(-boundary.X, -boundary.Y)
 		} else {
 			bounds := m.TransformBox(boundary)

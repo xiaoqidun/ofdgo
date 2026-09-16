@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"html"
 	"image"
 	"image/png"
 	"io"
@@ -61,13 +62,14 @@ type svgResourceRenderer struct {
 	seen       map[string]bool
 	styles     strings.Builder
 	err        error
+	objects    map[*GraphicObject]string
 }
 
 // RenderToSVGWithFonts 渲染为SVG并返回页面引用的字体资源，不在SVG中嵌入字体
 // 入参: page 页面内容, writer 输出流
 // 返回: []SVGFont 字体资源，可按Name复用并按Weight、Style注册，error 错误信息
 func (r *Renderer) RenderToSVGWithFonts(page *PageContent, writer io.Writer) ([]SVGFont, error) {
-	resources, err := r.renderSVGResources(page, writer, false)
+	resources, err := r.renderSVGResources(page, writer, false, false)
 	return resources.Fonts, err
 }
 
@@ -75,14 +77,21 @@ func (r *Renderer) RenderToSVGWithFonts(page *PageContent, writer io.Writer) ([]
 // 入参: page 页面内容, writer 输出流
 // 返回: SVGResources 可跨页面复用的资源, error 错误信息
 func (r *Renderer) RenderToSVGWithResources(page *PageContent, writer io.Writer) (SVGResources, error) {
-	return r.renderSVGResources(page, writer, true)
+	return r.renderSVGResources(page, writer, true, false)
+}
+
+// RenderToSVGWithObjects 渲染SVG并为页面直接对象添加data-ofd-object分组，保持原绘制顺序和分离资源
+// 入参: page 页面内容, writer 输出流
+// 返回: SVGResources 字体和图片资源, error 错误信息
+func (r *Renderer) RenderToSVGWithObjects(page *PageContent, writer io.Writer) (SVGResources, error) {
+	return r.renderSVGResources(page, writer, true, true)
 }
 
 // renderSVGResources 渲染SVG并收集外部资源
-// 入参: page 页面内容, writer 输出流, images 是否分离图片
+// 入参: page 页面内容, writer 输出流, images 是否分离图片, objects 是否标识页面直接对象
 // 返回: SVGResources 外部资源, error 错误信息
-func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, images bool) (SVGResources, error) {
-	c, err := r.renderPage(page)
+func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, images, objects bool) (SVGResources, error) {
+	box, err := r.GetPageBox(page)
 	if err != nil {
 		return SVGResources{}, err
 	}
@@ -90,7 +99,7 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 	options.EmbedFonts = false
 	buffer := bufio.NewWriter(writer)
 	s := &svgResourceRenderer{
-		SVG:      svg.New(buffer, c.W, c.H, &options),
+		SVG:      svg.New(buffer, box.W, box.H, &options),
 		renderer: r,
 		writer:   buffer,
 		seen:     make(map[string]bool),
@@ -98,7 +107,24 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 	if images {
 		s.imageNames = make(map[image.Image]string)
 	}
-	c.RenderTo(s)
+	if objects {
+		s.objects = make(map[*GraphicObject]string)
+		for i := range page.Content.Layer {
+			for j := range page.Content.Layer[i].Objects {
+				object := &page.Content.Layer[i].Objects[j]
+				s.objects[object] = editorObjectID(*object)
+			}
+		}
+		if err := r.renderPageToContext(canvas.NewContext(s), page, true); err != nil {
+			return SVGResources{}, err
+		}
+	} else {
+		c, err := r.renderPage(page)
+		if err != nil {
+			return SVGResources{}, err
+		}
+		c.RenderTo(s)
+	}
 	if s.err != nil {
 		return SVGResources{}, s.err
 	}
@@ -107,6 +133,23 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 		return SVGResources{}, err
 	}
 	return SVGResources{Fonts: s.fonts, Images: s.images}, buffer.Flush()
+}
+
+// beginObject 开始标记当前页面直接对象，模板、注释和内部复合对象不单独标记
+// 入参: object 图形对象
+// 返回: bool 是否写入分组
+func (s *svgResourceRenderer) beginObject(object *GraphicObject) bool {
+	id := s.objects[object]
+	if id == "" {
+		return false
+	}
+	fmt.Fprintf(s.writer, `<g data-ofd-object="%s">`, html.EscapeString(id))
+	return true
+}
+
+// endObject 结束对象分组
+func (s *svgResourceRenderer) endObject() {
+	fmt.Fprint(s.writer, `</g>`)
 }
 
 // RenderImage 绘制图片，分离资源时保持原始编码、尺寸和变换

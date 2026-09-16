@@ -32,6 +32,34 @@ export function objectTransform(box, dx, dy, corner = "") {
 	return { x: left ? box.width * (1 - scale) : 0, y: top ? box.height * (1 - scale) : 0, scale };
 }
 
+export function textTransform(box, dx, dy, corner) {
+	if (!corner) return objectTransform(box, dx, dy);
+	const left = corner.includes("w"), top = corner.includes("n");
+	const horizontal = (left ? -dx : dx) / box.width;
+	const vertical = (top ? -dy : dy) / box.height;
+	const delta = corner.length === 1 || Math.abs(vertical) > Math.abs(horizontal) ? vertical : horizontal;
+	const scale = Math.max(Math.min(1, 1 / box.height), 1 + delta);
+	return { x: corner.length === 1 ? box.width * (1 - scale) / 2 : left ? box.width * (1 - scale) : 0,
+		y: top ? box.height * (1 - scale) : 0, scale };
+}
+
+export function lineShape(shape) {
+	return shape === "line" || shape === "arrow" || shape === "double-arrow";
+}
+
+function arrowPath(shape, box) {
+	const { x, y, width: w, height: h } = box, length = Math.hypot(w, h);
+	let path = `M${x} ${y}L${x + w} ${y + h}`;
+	if (!length) return path;
+	const head = Math.min(4, length / 3), ux = w / length, uy = h / length;
+	for (const reverse of shape === "double-arrow" ? [false, true] : [false]) {
+		const px = reverse ? x : x + w, py = reverse ? y : y + h, direction = reverse ? -1 : 1;
+		const bx = px - ux * head * direction, by = py - uy * head * direction;
+		path += `M${bx - uy * head * .45} ${by + ux * head * .45}L${px} ${py}L${bx + uy * head * .45} ${by - ux * head * .45}`;
+	}
+	return path;
+}
+
 export function selectionBounds(items) {
 	const x = Math.min(...items.map(item => item.x)), y = Math.min(...items.map(item => item.y));
 	return { x, y, width: Math.max(...items.map(item => item.x + item.width)) - x,
@@ -96,7 +124,7 @@ function cropBox(box, bounds, dx, dy, corner) {
 
 export function constrainedPoint(from, to, shape, shift) {
 	let dx = to.x - from.x, dy = to.y - from.y;
-	if (shift && shape === "line") {
+	if (shift && lineShape(shape)) {
 		const directions = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
 		const [x, y] = directions[(Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) + 8) % 8];
 		const length = (dx * x + dy * y) / (x * x + y * y);
@@ -113,7 +141,7 @@ export function constrainedPoint(from, to, shape, shift) {
 export function reshapeBox(item, dx, dy, handle, shift) {
 	const box = item.geometry;
 	if (!dx && !dy && !shift) return { ...box };
-	if (item.shape === "line") {
+	if (lineShape(item.shape)) {
 		const start = { x: box.x, y: box.y }, end = { x: box.x + box.width, y: box.y + box.height };
 		const fixed = handle === "start" ? end : start, moving = handle === "start" ? start : end;
 		const point = constrainedPoint(fixed, { x: moving.x + dx, y: moving.y + dy }, "line", shift);
@@ -136,7 +164,8 @@ export function reshapeBox(item, dx, dy, handle, shift) {
 
 function paintShape(node, shape, box) {
 	const { x, y, width, height } = box;
-	const attributes = shape === "line" ? { x1: x, y1: y, x2: x + width, y2: y + height }
+	const attributes = lineShape(shape) && shape !== "line" ? { d: arrowPath(shape, box) }
+		: shape === "line" ? { x1: x, y1: y, x2: x + width, y2: y + height }
 		: shape === "ellipse" ? { cx: x + width / 2, cy: y + height / 2, rx: width / 2, ry: height / 2 }
 		: { x, y, width, height };
 	for (const [key, value] of Object.entries(attributes)) {
@@ -237,18 +266,21 @@ export class CanvasEditor {
 		this.pages.set(surface, { index, width: page.width, height: page.height });
 		const layer = document.createElement("div");
 		layer.className = "edit-layer";
-		for (const object of page.objects) {
+		const artwork = new Map([...surface.querySelectorAll("[data-ofd-object]")].map((node, order) => [node.getAttribute("data-ofd-object"), { node, order }]));
+		const objects = [...page.objects].sort((a, b) => (artwork.get(a.id)?.order ?? 0) - (artwork.get(b.id)?.order ?? 0));
+		for (const object of objects) {
 			const node = document.createElement("div");
 			node.className = "edit-object";
 			node.classList.toggle("read-only", !canEditObject(object, "transform"));
 			node.title = objectEditReason(object);
-			if (object.shape === "line") {
+			if (lineShape(object.shape)) {
 				node.classList.add("edit-line");
 			}
 			node.tabIndex = 0;
 			node.setAttribute("role", "button");
 			node.setAttribute("aria-label", { ImageObject: "图片对象", TextObject: "文字对象", PathObject: "图形对象" }[object.type]);
 			const item = { ...object, index, page: { width: page.width, height: page.height }, node, surface };
+			item.artwork = artwork.get(object.id)?.node;
 			if (object.type === "PathObject" && (object.shape || object.outline)) {
 				node.classList.add("edit-contour");
 				const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -263,10 +295,10 @@ export class CanvasEditor {
 			}
 			this.nodes.set(node, item);
 			node.addEventListener("focus", () => this.select(item));
-			const handles = !canEditObject(object, "transform") ? [] : object.shape === "line" ? ["start", "end"]
+			const handles = !canEditObject(object, "transform") ? [] : lineShape(object.shape) ? ["start", "end"]
 				: object.shape ? ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
 					: object.type === "TextObject" && canEditObject(object, "reflow") && canEditObject(object, "layoutKnown")
-						? ["nw", "ne", "e", "se", "sw", "w"] : ["nw", "ne", "sw", "se"];
+						? ["nw", "n", "ne", "e", "se", "s", "sw", "w"] : ["nw", "ne", "sw", "se"];
 			for (const corner of handles) {
 				const handle = document.createElement("span");
 				handle.className = `edit-handle edit-${corner}`;
@@ -299,6 +331,11 @@ export class CanvasEditor {
 				y: change.y + (member.y - item.y) * (change.scale - 1), scale: change.scale,
 			});
 		}
+		if (item.artwork) {
+			const scale = change.scale, x = item.x * (1 - scale) + change.x, y = item.y * (1 - scale) + change.y;
+			if (x || y || scale !== 1) item.artwork.setAttribute("transform", `translate(${x} ${y}) scale(${scale})`);
+			else item.artwork.removeAttribute("transform");
+		}
 		if (item.shape) {
 			this.placeShape(item, { x: item.geometry.x + change.x + (item.geometry.x - item.x) * (change.scale - 1),
 				y: item.geometry.y + change.y + (item.geometry.y - item.y) * (change.scale - 1),
@@ -328,7 +365,7 @@ export class CanvasEditor {
 			left: `${x * PX_PER_MM}px`, top: `${y * PX_PER_MM}px`,
 			width: `${Math.abs(box.width) * PX_PER_MM}px`, height: `${Math.abs(box.height) * PX_PER_MM}px`,
 		});
-		if (item.shape === "line") {
+		if (lineShape(item.shape)) {
 			for (const handle of item.node.children) {
 				if (!handle.dataset.corner) continue;
 				const end = handle.dataset.corner === "end";
@@ -340,7 +377,8 @@ export class CanvasEditor {
 			const { svg, path } = item.contour;
 			const width = Math.abs(box.width), height = Math.abs(box.height);
 			svg.setAttribute("viewBox", `0 0 ${width || 1} ${height || 1}`);
-			const values = item.shape === "line" ? { x1: box.x - x, y1: box.y - y, x2: box.x + box.width - x, y2: box.y + box.height - y }
+			const values = lineShape(item.shape) && item.shape !== "line" ? { d: arrowPath(item.shape, { x: box.x - x, y: box.y - y, width: box.width, height: box.height }) }
+				: item.shape === "line" ? { x1: box.x - x, y1: box.y - y, x2: box.x + box.width - x, y2: box.y + box.height - y }
 				: item.shape === "ellipse" ? { cx: width / 2, cy: height / 2, rx: width / 2, ry: height / 2 }
 					: { x: 0, y: 0, width, height };
 			for (const [key, value] of Object.entries(values)) path.setAttribute(key, String(value));
@@ -430,12 +468,12 @@ export class CanvasEditor {
 			this.cycleSelection(event);
 			return;
 		}
-		const node = event.target.closest(".edit-object, .edit-selection");
-		if (node) {
-			event.preventDefault();
-		}
+		let node = event.target.closest(".edit-object, .edit-selection");
+		const direct = this.nodes.get(node);
+		const target = event.target.dataset.corner || direct && !direct.contours ? direct : this.itemsAt(event)[0];
+		if (node || target) event.preventDefault();
+		node = target?.node;
 		this.viewer.focus({ preventScroll: true });
-		const target = node ? this.nodes.get(node) : null;
 		const additive = event.shiftKey || event.ctrlKey || event.metaKey || this.multiple;
 		if (!target) {
 			this.startMarquee(event, additive);
@@ -462,7 +500,7 @@ export class CanvasEditor {
 				.map(node => this.nodes.get(node)).filter(member => !selected.includes(member));
 			this.drag.targets.push({ x: 0, y: 0, ...item.page });
 		}
-		if (item.shape === "line" && this.drag.corner) {
+		if (lineShape(item.shape) && this.drag.corner) {
 			Object.assign(this.drag, this.createPreview(item.surface, item.page, item.shape, {
 				fill: false, stroke: true, strokeColor: "var(--accent)", lineWidth: item.lineWidth,
 			}));
@@ -470,13 +508,28 @@ export class CanvasEditor {
 		this.viewer.setPointerCapture(event.pointerId);
 	}
 
-	cycleSelection(event) {
+	contains(item, point, tolerance = 0) {
+		if (point.x < item.x - tolerance || point.x > item.x + item.width + tolerance || point.y < item.y - tolerance || point.y > item.y + item.height + tolerance) return false;
+		if (!item.contours) return point.x >= item.x && point.x <= item.x + item.width && point.y >= item.y && point.y <= item.y + item.height;
+		this.hitContext ||= document.createElement("canvas").getContext("2d");
+		item.hitPaths ||= item.contours.map(contour => ({ path: new Path2D(contour.path), rule: contour.evenOdd ? "evenodd" : "nonzero" }));
+		this.hitContext.lineWidth = tolerance * 2;
+		return item.hitPaths.some(({ path, rule }) => this.hitContext.isPointInPath(path, point.x, point.y, rule)
+			|| tolerance > 0 && this.hitContext.isPointInStroke(path, point.x, point.y));
+	}
+
+	itemsAt(event) {
 		const surface = event.target.closest(".page-surface");
 		const page = this.pages.get(surface);
-		if (!page) return;
-		const point = pagePoint(event.clientX, event.clientY, surface.getBoundingClientRect(), page, this.options.rotation());
-		const items = [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)).reverse()
-			.filter(item => point.x >= item.x && point.x <= item.x + item.width && point.y >= item.y && point.y <= item.y + item.height);
+		if (!page) return [];
+		const rect = surface.getBoundingClientRect(), rotation = this.options.rotation();
+		const point = pagePoint(event.clientX, event.clientY, rect, page, rotation);
+		const tolerance = 3 * page.width / (rotation % 180 ? rect.height : rect.width);
+		return [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)).reverse().filter(item => this.contains(item, point, tolerance));
+	}
+
+	cycleSelection(event) {
+		const items = this.itemsAt(event);
 		if (!items.length) return;
 		event.preventDefault();
 		this.viewer.focus({ preventScroll: true });
@@ -514,6 +567,15 @@ export class CanvasEditor {
 		}
 		const from = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.item.page, drag.rotation);
 		const to = pagePoint(event.clientX, event.clientY, drag.rect, drag.item.page, drag.rotation);
+		if (!drag.box && !drag.change && drag.item.type === "TextObject" && (drag.corner === "w" || drag.corner === "e")) {
+			const scale = (drag.rotation % 180 ? drag.rect.width : drag.rect.height) / drag.item.page.height;
+			const dx = to.x - from.x, dy = to.y - from.y;
+			const frame = drag.item.textFrame;
+			if ((!frame || frame.matrix[0] > 0 && frame.matrix[3] > 0)
+				&& drag.item.height * scale < 28 && Math.abs(dy) * scale >= 3 && Math.abs(dy) > Math.abs(dx) / 2) {
+				drag.corner = (dy < 0 ? "n" : "s") + drag.corner;
+			}
+		}
 		if (drag.item.type === "TextObject" && (drag.corner === "w" || drag.corner === "e")) {
 			if (drag.item.textFrame) {
 				const frame = drag.item.textFrame, [a, b, c, d] = frame.matrix;
@@ -535,7 +597,8 @@ export class CanvasEditor {
 			if (drag.node) paintShape(drag.node, drag.item.shape, drag.box || drag.item.geometry);
 			return;
 		}
-		drag.change = objectTransform(drag.item, to.x - from.x, to.y - from.y, drag.corner);
+		const transform = drag.item.type === "TextObject" ? textTransform : objectTransform;
+		drag.change = transform(drag.item, to.x - from.x, to.y - from.y, drag.corner);
 		if (!drag.corner) this.snap(drag, event.altKey);
 		this.place(drag.item, drag.change);
 	}
@@ -681,8 +744,7 @@ export class CanvasEditor {
 			drag.node.setAttribute("d", drag.points.map((point, index) => `${index ? "L" : "M"}${point.x} ${point.y}`).join(" ") + " Z");
 			return;
 		}
-		const item = [...drag.items].reverse().find(item => point.x >= item.x && point.x <= item.x + item.width
-			&& point.y >= item.y && point.y <= item.y + item.height);
+		const item = [...drag.items].reverse().find(item => this.contains(item, point, 3 * drag.page.width / (drag.rotation % 180 ? drag.rect.height : drag.rect.width)));
 		if (item) { drag.erased.add(item); item.node.classList.add("erasing"); }
 	}
 
@@ -729,7 +791,7 @@ export class CanvasEditor {
 		this.viewer.focus({ preventScroll: true });
 		const shape = this.tool;
 		const style = this.options.drawStyle();
-		if (shape === "line") {
+		if (lineShape(shape)) {
 			style.fill = false;
 			style.stroke = true;
 		}
@@ -758,7 +820,7 @@ export class CanvasEditor {
 		const preview = document.createElementNS("http://www.w3.org/2000/svg", "svg");
 		preview.classList.add("edit-preview");
 		preview.setAttribute("viewBox", `0 0 ${page.width} ${page.height}`);
-		const node = document.createElementNS("http://www.w3.org/2000/svg", shape === "rectangle" ? "rect" : shape);
+		const node = document.createElementNS("http://www.w3.org/2000/svg", lineShape(shape) && shape !== "line" ? "path" : shape === "rectangle" ? "rect" : shape);
 		node.setAttribute("fill", style.fill ? style.fillColor : "none");
 		node.setAttribute("stroke", style.stroke ? style.strokeColor : "none");
 		node.setAttribute("stroke-width", style.lineWidth);
@@ -777,11 +839,11 @@ export class CanvasEditor {
 		const x = Math.min(from.x, to.x), y = Math.min(from.y, to.y);
 		const width = Math.abs(to.x - from.x), height = drag.shape === "text" ? Math.max(5, Math.abs(to.y - from.y)) : Math.abs(to.y - from.y);
 		const valid = Math.hypot(event.clientX - drag.clientX, event.clientY - drag.clientY) >= 3
-			&& (drag.shape === "line" ? width > 0 || height > 0 : width > 0 && height > 0);
-		drag.box = valid ? drag.shape === "line"
+			&& (lineShape(drag.shape) ? width > 0 || height > 0 : width > 0 && height > 0);
+		drag.box = valid ? lineShape(drag.shape)
 			? { x: from.x, y: from.y, width: to.x - from.x, height: to.y - from.y }
 			: { x, y, width, height } : null;
-		paintShape(drag.node, drag.shape === "text" ? "rectangle" : drag.shape, drag.shape === "line"
+		paintShape(drag.node, drag.shape === "text" ? "rectangle" : drag.shape, lineShape(drag.shape)
 			? { x: from.x, y: from.y, width: to.x - from.x, height: to.y - from.y } : { x, y, width, height });
 	}
 

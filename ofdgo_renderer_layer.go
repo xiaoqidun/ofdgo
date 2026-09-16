@@ -169,6 +169,12 @@ func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu Composite
 // renderObject 渲染图形对象
 // 入参: ctx 画布上下文, obj 图形对象, pageH 页面高度, defaults 默认绘制参数, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
 func (r *Renderer) renderObject(ctx *canvas.Context, obj *GraphicObject, pageH float64, defaults *DrawParam, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
+	if groups, ok := ctx.Renderer.(interface {
+		beginObject(*GraphicObject) bool
+		endObject()
+	}); ok && groups.beginObject(obj) {
+		defer groups.endObject()
+	}
 	switch obj.Type {
 	case "TextObject":
 		r.renderText(ctx, obj.TextObject, pageH, defaults, parentCTM, boundaryInCTM, parentClip)

@@ -28,6 +28,32 @@ import (
 // 入参: object 图形对象, drawParam 图层绘制参数标识，无继承时为空
 // 返回: Box 毫米坐标范围, error 错误信息
 func (r *Renderer) ObjectBounds(object GraphicObject, drawParam string) (Box, error) {
+	return r.measureObject(object, drawParam, &boundsRenderer{})
+}
+
+// ObjectContour 页面坐标中的填充轮廓，Path为SVG路径，EvenOdd表示奇偶填充
+type ObjectContour struct {
+	Path    string `json:"path"`
+	EvenOdd bool   `json:"evenOdd,omitempty"`
+}
+
+// ObjectContours 获取路径或图片的实际绘制区域，包含描边、虚线、变换及对象裁剪
+// 图片不解码像素，底纹不展开图案单元；不包含页面边界或父级变换
+// 入参: object 路径或图片对象, drawParam 图层绘制参数标识
+// 返回: []ObjectContour 可用于点选的轮廓, error 错误信息
+func (r *Renderer) ObjectContours(object GraphicObject, drawParam string) ([]ObjectContour, error) {
+	if object.Type != "PathObject" && object.Type != "ImageObject" {
+		return nil, fmt.Errorf("contours require a path or image object")
+	}
+	bounds := &boundsRenderer{collect: true}
+	_, err := r.measureObject(object, drawParam, bounds)
+	return bounds.contours, err
+}
+
+// measureObject 复用渲染逻辑收集对象范围与可选轮廓
+// 入参: object 对象, drawParam 图层绘制参数标识, bounds 度量目标
+// 返回: Box 毫米范围, error 错误信息
+func (r *Renderer) measureObject(object GraphicObject, drawParam string, bounds *boundsRenderer) (Box, error) {
 	if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "ImageObject" {
 		return Box{}, fmt.Errorf("unsupported object type %q", object.Type)
 	}
@@ -44,7 +70,6 @@ func (r *Renderer) ObjectBounds(object GraphicObject, drawParam string) (Box, er
 	renderer.pageText = nil
 	renderer.textOnly = false
 	defaults := renderer.drawParamDefaults(drawParam, nil)
-	bounds := &boundsRenderer{}
 	ctx := canvas.NewContext(bounds)
 	switch object.Type {
 	case "TextObject":
@@ -106,7 +131,9 @@ func boundsColor(color *FillColor) *FillColor {
 
 // boundsRenderer 收集绘制范围，不分配页面像素或合并独立图形轮廓
 type boundsRenderer struct {
-	box Box
+	box      Box
+	collect  bool
+	contours []ObjectContour
 }
 
 // Size 返回不限定边界的度量画布尺寸
@@ -118,18 +145,27 @@ func (r *boundsRenderer) Size() (float64, float64) {
 // add 合并路径的精确曲线范围并转换为向下的纵轴
 // 入参: path 绘制路径
 func (r *boundsRenderer) add(path *canvas.Path) {
+	r.addContour(path, false)
+}
+
+// addContour 合并范围并按需保留独立填充区域
+// 入参: path 绘制路径, evenOdd 是否使用奇偶规则
+func (r *boundsRenderer) addContour(path *canvas.Path, evenOdd bool) {
 	if path.Empty() {
 		return
 	}
 	rect := path.Bounds()
 	r.box = unionTextBox(r.box, Box{X: rect.X0, Y: -rect.Y1, W: rect.W(), H: rect.H()})
+	if r.collect {
+		r.contours = append(r.contours, ObjectContour{Path: path.Copy().Transform(canvas.Matrix{{1, 0, 0}, {0, -1, 0}}).ToSVG(), EvenOdd: evenOdd})
+	}
 }
 
 // RenderPath 收集填充与描边范围，保持线帽、连接和虚线语义
 // 入参: path 路径, style 绘制样式, m 变换矩阵
 func (r *boundsRenderer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix) {
 	if style.HasFill() {
-		r.add(path.Copy().Transform(m))
+		r.addContour(path.Copy().Transform(m), style.FillRule == canvas.EvenOdd)
 	}
 	if style.HasStroke() {
 		p := path.Dash(style.DashOffset, style.Dashes...).Stroke(style.StrokeWidth, style.StrokeCapper, style.StrokeJoiner, canvas.Tolerance)

@@ -80,6 +80,9 @@ var currentSession *Session
 // pendingImport 待插页文档，仅保留文件数据与索引，不创建渲染会话
 var pendingImport *ofdgo.Reader
 
+// copiedStyle 当前文档中的独立样式快照
+var copiedStyle *ofdgo.GraphicObject
+
 // apiResult 浏览器接口返回结果
 type apiResult struct {
 	OK            bool                     `json:"ok"`
@@ -113,6 +116,10 @@ func RunWASM() {
 	registerCallback("ofdgoBatchPages", batchPages)
 	registerCallback("ofdgoChangeOutline", changeOutline)
 	registerCallback("ofdgoStyleObjects", styleObjects)
+	registerCallback("ofdgoMoveOutline", moveOutline)
+	registerCallback("ofdgoCaptureStyle", captureStyle)
+	registerCallback("ofdgoPasteStyle", pasteStyle)
+	registerCallback("ofdgoResizeObjects", resizeObjects)
 	registerCallback("ofdgoLoadImport", loadImport)
 	registerCallback("ofdgoImportPages", importPages)
 	registerCallback("ofdgoInsertText", insertText)
@@ -229,6 +236,7 @@ func openDocument(args []js.Value) (any, error) {
 	clearImport()
 	currentEditor = nil
 	copiedObjects = nil
+	copiedStyle = nil
 	if currentSession != nil {
 		_ = currentSession.Close()
 		currentSession = nil
@@ -759,6 +767,17 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 						item["lineWidth"] = path.LineWidth * editorPathScale(path)
 					}
 				}
+				if object.Type == "PathObject" || object.Type == "ImageObject" {
+					contours, err := currentSession.Renderer.ObjectContours(object, layer.DrawParam)
+					if err != nil {
+						return nil, err
+					}
+					paths := make([]any, len(contours))
+					for i, contour := range contours {
+						paths[i] = map[string]any{"path": contour.Path, "evenOdd": contour.EvenOdd}
+					}
+					item["contours"] = paths
+				}
 				if object.Type == "ImageObject" && capability.Update {
 					full, err := object.ImageObject.ImageBounds()
 					if err != nil {
@@ -767,6 +786,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					item["imageBounds"] = editorBox(full)
 				}
 				if object.Type == "TextObject" {
+					item["bounds"] = editorBox(box)
 					value, layout := object.TextObject.TextLayout()
 					item["text"], item["font"], item["fontName"], item["size"] = value, object.TextObject.Font, fontNames[object.TextObject.Font], object.TextObject.Size
 					item["wrap"], item["align"], item["paragraphHeight"] = layout.Wrap, layout.Align, layout.LineHeight
@@ -1071,27 +1091,100 @@ func batchPages(args []js.Value) (any, error) {
 	return editorPageInfo{info.(editorInfo), index}, nil
 }
 
+// editorOutlineInfo 目录操作后的位置
+type editorOutlineInfo struct {
+	editorInfo
+	OutlinePath []int `json:"outlinePath"`
+}
+
+// indexesFromJS 读取整数索引列表
+// 入参: value JavaScript数组
+// 返回: []int 索引列表
+func indexesFromJS(value js.Value) []int {
+	indexes := make([]int, value.Length())
+	for i := range indexes {
+		indexes[i] = value.Index(i).Int()
+	}
+	return indexes
+}
+
+// moveOutline 调整目录顺序或层级
+// 入参: args 源路径、目标父路径及插入索引
+// 返回: any 文档及新路径, error 错误信息
+func moveOutline(args []js.Value) (any, error) {
+	var path []int
+	info, err := changeObjects(func() error {
+		var err error
+		path, err = currentEditor.MoveOutline(indexesFromJS(args[0]), indexesFromJS(args[1]), args[2].Int())
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return editorOutlineInfo{info.(editorInfo), path}, nil
+}
+
+// captureStyle 保存单个对象样式来源，不改写文档
+// 入参: args 页面索引和对象标识
+// 返回: any 空结果, error 错误信息
+func captureStyle(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	object, err := currentEditor.Object(args[0].Int(), args[1].String())
+	if err != nil {
+		return nil, err
+	}
+	copiedStyle = &object
+	return nil, nil
+}
+
+// pasteStyle 将保存的样式应用到同类型选区
+// 入参: args 页面索引和对象标识列表
+// 返回: any 文档信息, error 错误信息
+func pasteStyle(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		if copiedStyle == nil {
+			return fmt.Errorf("style clipboard is empty")
+		}
+		return currentEditor.CopyStyle(args[0].Int(), stringsFromJS(args[1]), *copiedStyle)
+	})
+}
+
+// resizeObjects 设置选区位置及尺寸
+// 入参: args 页面索引、对象标识、横纵坐标及宽高
+// 返回: any 文档信息, error 错误信息
+func resizeObjects(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		return currentEditor.ResizeObjects(args[0].Int(), stringsFromJS(args[1]), ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
+	})
+}
+
 // changeOutline 新增、修改或删除层级目录
 // 入参: args 操作、层级索引、标题及目标页面索引
 // 返回: any 文档信息, error 错误信息
 func changeOutline(args []js.Value) (any, error) {
-	return changeObjects(func() error {
-		path := make([]int, args[1].Length())
-		for i := range path {
-			path[i] = args[1].Index(i).Int()
-		}
+	path := indexesFromJS(args[1])
+	info, err := changeObjects(func() error {
 		switch args[0].String() {
 		case "add":
-			_, err := currentEditor.AddOutline(path, args[2].String(), args[3].Int())
+			var err error
+			path, err = currentEditor.AddOutline(path, args[2].String(), args[3].Int())
 			return err
 		case "update":
 			return currentEditor.UpdateOutline(path, args[2].String(), args[3].Int())
 		case "delete":
-			return currentEditor.DeleteOutline(path)
+			err := currentEditor.DeleteOutline(path)
+			path = nil
+			return err
 		default:
 			return fmt.Errorf("unsupported outline action %q", args[0].String())
 		}
 	})
+	if err != nil {
+		return nil, err
+	}
+	return editorOutlineInfo{info.(editorInfo), path}, nil
 }
 
 // styleObjects 原子更新对象透明度和路径描边属性
@@ -1257,8 +1350,10 @@ func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 		_ = currentSession.Close()
 	}
 	currentSession = session
+	session.editing = true
 	if currentEditor != editor {
 		copiedObjects = nil
+		copiedStyle = nil
 	}
 	currentEditor = editor
 	return editorSummary(), nil

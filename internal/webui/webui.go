@@ -109,6 +109,7 @@ type Session struct {
 	signatures     []SignatureInfo
 	signatureError error
 	signaturesRead bool
+	editing        bool
 }
 
 // DocumentInfo 文档信息
@@ -455,7 +456,11 @@ func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
 			s.textCache[index] = text
 		}
 	}
-	resources, err := renderer.RenderToSVGWithResources(page, &buf)
+	renderSVG := renderer.RenderToSVGWithResources
+	if s.editing {
+		renderSVG = renderer.RenderToSVGWithObjects
+	}
+	resources, err := renderSVG(page, &buf)
 	if err != nil {
 		return PageSVG{}, err
 	}

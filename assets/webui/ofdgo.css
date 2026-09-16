@@ -1511,6 +1511,21 @@ button.outline-link:hover {
 	margin-bottom: 10px;
 }
 
+.form-format {
+	display: flex;
+	gap: 8px;
+}
+
+.form-format > button {
+	flex: 1;
+}
+
+.form-check {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
 .outline-link.selected {
 	background: var(--accent-soft);
 	color: var(--accent);

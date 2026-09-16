@@ -1,4 +1,4 @@
-import { CanvasEditor, canEditObject, editTextValue, missingGlyphMessage, objectEditReason, selectedText } from "./ofdgo_edit.js";
+import { CanvasEditor, canEditObject, editTextValue, missingGlyphMessage, objectEditReason, selectedText, lineShape, selectionBounds } from "./ofdgo_edit.js";
 import { FontManager, FontPicker } from "./ofdgo_font.js";
 
 const MM_TO_PX = 96 / 25.4;
@@ -43,6 +43,8 @@ const state = {
 	outlineAction: "add",
 	styleOriginal: null,
 	objectClipboard: null,
+	styleClipboard: null,
+	outlineExpanded: new Map(),
 	textFonts: [],
 	textFontID: null,
 	textDefaults: { type: "TextObject", size: 12 * 25.4 / 72, color: "#000000", wrap: true, align: "left", paragraphHeight: 0, letterSpacing: 0 },
@@ -147,6 +149,7 @@ const el = {
 	textSize: document.querySelector("#textSize"),
 	textColor: document.querySelector("#textColor"),
 	drawLineButton: document.querySelector("#drawLineButton"),
+	arrowTool: document.querySelector("#arrowTool"),
 	drawRectangleButton: document.querySelector("#drawRectangleButton"),
 	drawEllipseButton: document.querySelector("#drawEllipseButton"),
 	eraseObjectButton: document.querySelector("#eraseObjectButton"),
@@ -176,6 +179,18 @@ const el = {
 	batchPagesCancel: document.querySelector("#batchPagesCancel"),
 	batchPagesSubmit: document.querySelector("#batchPagesSubmit"),
 	objectStyleButton: document.querySelector("#objectStyleButton"),
+	copyStyleButton: document.querySelector("#copyStyleButton"),
+	pasteStyleButton: document.querySelector("#pasteStyleButton"),
+	objectBoundsButton: document.querySelector("#objectBoundsButton"),
+	objectBoundsPanel: document.querySelector("#objectBoundsPanel"),
+	objectBoundsForm: document.querySelector("#objectBoundsForm"),
+	objectBoundsCancel: document.querySelector("#objectBoundsCancel"),
+	objectBoundsStatus: document.querySelector("#objectBoundsStatus"),
+	objectX: document.querySelector("#objectX"),
+	objectY: document.querySelector("#objectY"),
+	objectWidth: document.querySelector("#objectWidth"),
+	objectHeight: document.querySelector("#objectHeight"),
+	objectAspect: document.querySelector("#objectAspect"),
 	objectStylePanel: document.querySelector("#objectStylePanel"),
 	objectStyleForm: document.querySelector("#objectStyleForm"),
 	objectOpacity: document.querySelector("#objectOpacity"),
@@ -192,6 +207,8 @@ const el = {
 	outlineForm: document.querySelector("#outlineForm"),
 	outlineTitle: document.querySelector("#outlineTitle"),
 	outlineParent: document.querySelector("#outlineParent"),
+	outlinePosition: document.querySelector("#outlinePosition"),
+	outlinePositionRow: document.querySelector("#outlinePositionRow"),
 	outlinePage: document.querySelector("#outlinePage"),
 	outlineStatus: document.querySelector("#outlineStatus"),
 	outlineCancel: document.querySelector("#outlineCancel"),
@@ -598,6 +615,51 @@ el.batchPagesForm.addEventListener("submit", async event => {
 	if (await changeDocument("ofdgoBatchPages", null, el.batchPageAction.value, el.batchPageRange.value)) el.batchPagesPanel.close();
 });
 editorClick(el.objectStyleButton, openObjectStyle);
+editorClick(el.objectBoundsButton, openObjectBounds);
+el.arrowTool.addEventListener("change", async () => {
+	const tool = el.arrowTool.value;
+	el.arrowTool.value = "";
+	if (await canvasEditor.commitText() && await canvasEditor.commitCrop()) {
+		setPan(false);
+		state.selectObjects = true;
+		canvasEditor.setTool(tool);
+		updateControls();
+	}
+});
+el.copyStyleButton.addEventListener("click", async () => {
+	const item = canvasEditor.selected, seq = state.openSeq;
+	setBusy(true);
+	try {
+		await callWASM("ofdgoCaptureStyle", item.index, item.id);
+		if (seq === state.openSeq) { state.styleClipboard = item.type; el.objectStylePanel.close(); }
+	} catch (err) { if (seq === state.openSeq) el.objectStyleStatus.textContent = err.message; }
+	finally { if (seq === state.openSeq) setBusy(false); }
+});
+el.pasteStyleButton.addEventListener("click", async () => {
+	const item = canvasEditor.selected;
+	if (await changeDocument("ofdgoPasteStyle", { ...item, id: canvasEditor.items().map(member => member.id) })) el.objectStylePanel.close();
+});
+el.objectBoundsCancel.addEventListener("click", () => el.objectBoundsPanel.close());
+for (const input of [el.objectWidth, el.objectHeight]) input.addEventListener("input", () => {
+	if (!el.objectAspect.checked || !input.value || el.objectWidth.disabled || el.objectHeight.disabled) return;
+	const box = state.boundsOriginal;
+	if (input === el.objectWidth) setObjectDimension(el.objectHeight, Number(input.value) * box.height / box.width);
+	else setObjectDimension(el.objectWidth, Number(input.value) * box.width / box.height);
+});
+el.objectAspect.addEventListener("change", () => {
+	if (el.objectAspect.checked) setObjectDimension(el.objectHeight, objectDimension(el.objectWidth) * state.boundsOriginal.height / state.boundsOriginal.width);
+});
+el.objectBoundsForm.addEventListener("submit", async event => {
+	event.preventDefault();
+	const item = canvasEditor.selected;
+	const values = [el.objectX, el.objectY, el.objectWidth, el.objectHeight].map(objectDimension);
+	let saved;
+	if (item.shape) {
+		if (lineShape(item.shape)) { values[2] *= Math.sign(item.geometry.width); values[3] *= Math.sign(item.geometry.height); }
+		saved = await changeDocument("ofdgoReshapeObject", item, ...values);
+	} else saved = await changeDocument("ofdgoResizeObjects", { ...item, id: canvasEditor.items().map(member => member.id) }, ...values);
+	if (saved) el.objectBoundsPanel.close();
+});
 el.objectStyleCancel.addEventListener("click", () => el.objectStylePanel.close());
 el.objectDash.addEventListener("change", () => {
 	el.objectDashRow.hidden = el.objectDash.value !== "custom";
@@ -614,8 +676,12 @@ el.outlineForm.addEventListener("submit", async event => {
 	event.preventDefault();
 	const path = state.outlineAction === "add" ? JSON.parse(el.outlineParent.value) : state.outlineSelection;
 	const page = el.outlinePage.value === "" ? -1 : Number(el.outlinePage.value) - 1;
-	if (await changeDocument("ofdgoChangeOutline", null, state.outlineAction, path, el.outlineTitle.value, page)) el.outlinePanel.close();
+	const saved = state.outlineAction === "move"
+		? await changeDocument("ofdgoMoveOutline", null, state.outlineSelection, JSON.parse(el.outlineParent.value), Number(el.outlinePosition.value) - 1)
+		: await changeDocument("ofdgoChangeOutline", null, state.outlineAction, path, el.outlineTitle.value, page);
+	if (saved) el.outlinePanel.close();
 });
+el.outlineParent.addEventListener("change", updateOutlinePosition);
 el.pageCancel.addEventListener("click", () => el.pagePanel.close());
 el.pageWidth.addEventListener("input", updatePageDirection);
 el.pageHeight.addEventListener("input", updatePageDirection);
@@ -865,12 +931,37 @@ function handleKeyDown(event) {
 
 function formDialogOpen() {
 	return el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open
-		|| el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open;
+		|| el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open || el.objectBoundsPanel.open;
+}
+
+function setObjectDimension(input, value) {
+	input.value = String(Number(value.toFixed(2)));
+	input.defaultValue = input.value;
+	input.dataset.precise = String(value);
+}
+
+function objectDimension(input) {
+	return Number(input.value === input.defaultValue ? input.dataset.precise : input.value);
+}
+
+function openObjectBounds() {
+	const item = canvasEditor.selected;
+	const box = item.geometry || selectionBounds((item.items || [item]).map(member => member.bounds || member));
+	state.boundsOriginal = { x: box.x, y: box.y, width: Math.abs(box.width), height: Math.abs(box.height) };
+	for (const [input, key] of [[el.objectX,"x"], [el.objectY,"y"], [el.objectWidth,"width"], [el.objectHeight,"height"]]) setObjectDimension(input, state.boundsOriginal[key]);
+	el.objectAspect.checked = true;
+	el.objectAspect.disabled = !item.shape && (item.items || [item]).some(member => member.type !== "ImageObject") || lineShape(item.shape) && (!box.width || !box.height);
+	el.objectWidth.disabled = lineShape(item.shape) && !box.width;
+	el.objectHeight.disabled = lineShape(item.shape) && !box.height;
+	el.objectBoundsStatus.textContent = "";
+	el.objectBoundsPanel.showModal();
 }
 
 function openObjectStyle() {
 	const items = canvasEditor.items();
 	if (!items.length) return;
+	el.copyStyleButton.disabled = items.length !== 1 || !canEditObject(items[0], "update");
+	el.pasteStyleButton.disabled = !state.styleClipboard || !items.every(item => item.type === state.styleClipboard && canEditObject(item, "update"));
 	const shared = (key, fallback) => items.every(item => (item[key] ?? fallback) === (items[0][key] ?? fallback)) ? items[0][key] ?? fallback : null;
 	const alpha = shared("alpha", 255), dash = shared("dashPattern", "");
 	el.objectOpacity.value = alpha === null ? "" : String(Math.round((1 - alpha / 255) * 10000) / 100);
@@ -921,16 +1012,57 @@ function openOutlinePanel(action) {
 	addOption([], "无");
 	const walk = (items, path = []) => items.forEach((item, index) => {
 		const next = [...path, index];
+		if (action === "move" && state.outlineSelection.every((part, i) => next[i] === part)) return;
 		addOption(next, `${"　".repeat(path.length)}${item.title}`);
 		walk(item.children || [], next);
 	});
 	walk(state.doc.outlines || []);
 	el.outlineParent.value = JSON.stringify(action === "add" ? state.outlineSelection || [] : state.outlineSelection.slice(0, -1));
-	el.outlineParent.disabled = action !== "add";
-	el.outlineTitle.disabled = el.outlinePage.disabled = action === "delete";
-	el.outlineSubmit.textContent = { add: "新增", update: "确定", delete: "删除" }[action];
+	el.outlineParent.disabled = action !== "add" && action !== "move";
+	el.outlineTitle.disabled = el.outlinePage.disabled = action === "delete" || action === "move";
+	el.outlinePositionRow.hidden = action !== "move";
+	el.outlinePosition.disabled = action !== "move";
+	updateOutlinePosition();
+	el.outlineSubmit.textContent = { add: "新增", update: "确定", delete: "删除", move: "确定" }[action];
 	el.outlineStatus.textContent = action === "delete" && outline.children?.length ? "同时删除子目录" : "";
 	el.outlinePanel.showModal();
+}
+
+function outlineChildren(outlines, path) {
+	for (const index of path) outlines = outlines[index].children || [];
+	return outlines;
+}
+
+function updateOutlinePosition() {
+	if (state.outlineAction !== "move") return;
+	const parent = JSON.parse(el.outlineParent.value);
+	const same = JSON.stringify(parent) === JSON.stringify(state.outlineSelection.slice(0, -1));
+	const count = outlineChildren(state.doc.outlines, parent).length + (same ? 0 : 1);
+	el.outlinePosition.max = String(count);
+	el.outlinePosition.value = String(same ? state.outlineSelection.at(-1) + 1 : count);
+}
+
+function remapOutlineExpansion(name, args, next) {
+	const roots = state.doc.outlines || [], expanded = new Map();
+	const walk = (items, visit, path = []) => items.forEach((item, index) => {
+		const current = [...path, index];
+		visit(item, JSON.stringify(current));
+		walk(item.children || [], visit, current);
+	});
+	walk(roots, (item, key) => expanded.set(item, state.outlineExpanded.get(key) ?? item.expanded));
+	const moving = name === "ofdgoMoveOutline", action = moving ? "move" : args[0], source = moving ? args[0] : args[1];
+	let item;
+	if (action === "move" || action === "delete") item = outlineChildren(roots, source.slice(0, -1)).splice(source.at(-1), 1)[0];
+	if (action === "move" || action === "add") {
+		let children = roots;
+		for (const index of next.slice(0, -1)) {
+			expanded.set(children[index], true);
+			children = children[index].children ||= [];
+		}
+		children.splice(next.at(-1), 0, item || {});
+	}
+	state.outlineExpanded.clear();
+	walk(roots, (item, key) => state.outlineExpanded.set(key, Boolean(expanded.get(item))));
 }
 
 function openImportPanel() {
@@ -1050,6 +1182,7 @@ async function toggleEditor() {
 		state.selectObjects = true;
 		state.ofdBytes = null;
 		state.objectClipboard = null;
+		state.styleClipboard = null;
 		canvasEditor.clear();
 		setPan(false);
 		await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex, fitMode, scale,
@@ -1097,6 +1230,7 @@ async function createDocument(event) {
 		}
 		state.editing = true;
 		state.objectClipboard = null;
+		state.styleClipboard = null;
 		state.fontRenderPending = false;
 		canvasEditor.clear();
 		delete state.textDefaults.fontChoice;
@@ -1516,12 +1650,13 @@ async function changeShapeStyle() {
 function updateDrawingControls() {
 	const tool = canvasEditor.tool;
 	el.insertTextButton.setAttribute("aria-pressed", String(tool === "text"));
-	const line = tool === "line" || !tool && canvasEditor.selected?.shape === "line";
+	const line = lineShape(tool) || !tool && lineShape(canvasEditor.selected?.shape);
 	if (line) {
 		el.shapeFill.checked = false;
 		el.shapeStroke.checked = true;
 	}
 	const disabled = !state.editing || !state.ready || state.exporting;
+	el.arrowTool.disabled = disabled || !pageCan("insert");
 	for (const [button, name] of [[el.drawLineButton, "line"], [el.drawRectangleButton, "rectangle"], [el.drawEllipseButton, "ellipse"]]) {
 		button.disabled = disabled || !pageCan("insert");
 		button.setAttribute("aria-pressed", String(tool === name));
@@ -1560,6 +1695,10 @@ async function changeDocument(name, item, ...args) {
 		if (doc.revision === state.editorInfo?.revision) {
 			return true;
 		}
+		if ((name === "ofdgoUndo" || name === "ofdgoRedo") && JSON.stringify(doc.outlines) !== JSON.stringify(state.doc.outlines)) {
+			state.outlineSelection = null;
+			state.outlineExpanded.clear();
+		}
 		setEditorInfo(doc);
 		if (name === "ofdgoUpdateInfo") {
 			Object.assign(state.doc, { title: doc.title, author: doc.author, subject: doc.subject });
@@ -1567,8 +1706,10 @@ async function changeDocument(name, item, ...args) {
 			updateControls();
 			return true;
 		}
-		if (name === "ofdgoChangeOutline") {
+		if (name === "ofdgoChangeOutline" || name === "ofdgoMoveOutline") {
+			remapOutlineExpansion(name, args, doc.outlinePath);
 			state.doc.outlines = doc.outlines;
+			state.outlineSelection = doc.outlinePath;
 			renderOutlines(false);
 			showNavigation(el.outlinesTab);
 			updateControls();
@@ -1603,6 +1744,8 @@ async function changeDocument(name, item, ...args) {
 				el.batchPagesStatus.textContent = err.message;
 			} else if (el.objectStylePanel.open) {
 				el.objectStyleStatus.textContent = err.message;
+			} else if (el.objectBoundsPanel.open) {
+				el.objectBoundsStatus.textContent = err.message;
 			} else if (el.outlinePanel.open) {
 				el.outlineStatus.textContent = err.message;
 			} else if (el.infoPanel.open) {
@@ -2121,6 +2264,7 @@ async function openOFD(file) {
 		state.fileName = file.name || "ofdgo.ofd";
 		state.editing = false;
 		state.objectClipboard = null;
+		state.styleClipboard = null;
 		state.editorInfo = null;
 		state.fontRenderPending = false;
 		state.savedRevision = null;
@@ -2134,6 +2278,7 @@ async function openOFD(file) {
 		el.importPanel.close();
 		el.batchPagesPanel.close();
 		el.objectStylePanel.close();
+		el.objectBoundsPanel.close();
 		el.outlinePanel.close();
 		updateControls();
 		await openDocument({ pageIndex: 0, resetScroll: true, openSeq });
@@ -3668,23 +3813,26 @@ function showNavigation(selected) {
 function renderOutlines(reset = true) {
 	const selected = !reset && [el.pagesTab, el.outlinesTab, el.searchTab].find(tab => tab.getAttribute("aria-selected") === "true");
 	const scrollTop = reset ? 0 : el.pageListPanel.scrollTop;
-	if (reset) state.navigationScroll.clear();
+	if (reset) {
+		state.navigationScroll.clear();
+		state.outlineExpanded.clear();
+		state.outlineSelection = null;
+	}
 	const outlines = state.doc.outlines || [];
 	el.pageListTitle.hidden = true;
 	el.navigationTabs.hidden = false;
 	el.outlinesTab.hidden = outlines.length === 0 && !state.editing;
 	el.outlineList.replaceChildren();
-	state.outlineSelection = null;
 	if (state.editing) {
 		const tools = document.createElement("div");
 		tools.className = "outline-tools";
-		for (const [action, label] of [["add", "新增"], ["update", "修改"], ["delete", "删除"]]) {
+		for (const [action, label] of [["add", "新增"], ["update", "修改"], ["move", "移动"], ["delete", "删除"]]) {
 			const button = document.createElement("button");
 			button.className = "button";
 			button.type = "button";
 			button.textContent = label;
 			button.dataset.outlineAction = action;
-			button.disabled = action !== "add";
+			button.disabled = action !== "add" && !state.outlineSelection?.length;
 			editorClick(button, () => openOutlinePanel(action));
 			tools.append(button);
 		}
@@ -3885,6 +4033,7 @@ function createOutlineList(outlines, path = []) {
 		}
 		const link = document.createElement(outline.page || state.editing ? "button" : "span");
 		link.className = "outline-link";
+		link.classList.toggle("selected", state.editing && JSON.stringify(current) === JSON.stringify(state.outlineSelection));
 		const title = document.createElement("span");
 		title.textContent = outline.title;
 		link.append(title);
@@ -3911,7 +4060,11 @@ function createOutlineList(outlines, path = []) {
 		row.append(link);
 		if (hasChildren) {
 			const details = document.createElement("details");
-			details.open = outline.expanded;
+			const key = JSON.stringify(current);
+			details.open = state.outlineExpanded.get(key) ?? outline.expanded;
+			details.addEventListener("toggle", () => {
+				if (details.isConnected) state.outlineExpanded.set(key, details.open);
+			});
 			details.append(row, createOutlineList(outline.children, current));
 			item.append(details);
 		} else {
@@ -4940,6 +5093,7 @@ function updateObjectControls(item, reset = false) {
 	el.copyObjectButton.disabled = disabled || !canEditObject(item, "copy");
 	el.objectStyleButton.disabled = disabled || !canEditObject(item, "transform");
 	const cropping = Boolean(canvasEditor.crop);
+	el.objectBoundsButton.disabled = disabled || cropping || !canEditObject(item, "transform");
 	el.objectAlign.disabled = disabled || cropping || !canEditObject(item, "arrange");
 	el.objectRotate.disabled = el.objectFlip.disabled = el.objectAlign.disabled;
 	el.cropImageButton.disabled = disabled || item.type !== "ImageObject" || !canEditObject(item, "update");
@@ -5063,6 +5217,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	el.importForm.inert = busy;
 	el.batchPagesForm.inert = busy;
 	el.objectStyleForm.inert = busy;
+	el.objectBoundsForm.inert = busy;
 	el.outlineForm.inert = busy;
 	el.outlineList.inert = busy;
 	el.navigationTabs.inert = busy;

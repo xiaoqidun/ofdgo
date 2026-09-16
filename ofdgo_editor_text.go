@@ -87,11 +87,22 @@ func (e *Editor) StyleText(page int, ids []string, style TextStyle) error {
 	if err != nil {
 		return err
 	}
+	updates, err := e.styleTextObjects(objects, style)
+	if err != nil {
+		return err
+	}
+	return e.UpdateObjects(page, updates)
+}
+
+// styleTextObjects 生成文字样式副本，不提交文档或历史
+// 入参: objects 原文字对象, style 样式增量
+// 返回: []GraphicObject 更新对象, error 错误信息
+func (e *Editor) styleTextObjects(objects []GraphicObject, style TextStyle) ([]GraphicObject, error) {
 	updates := make([]GraphicObject, len(objects))
 	for i, object := range objects {
 		id := editorObjectID(object)
 		if object.Type != "TextObject" {
-			return fmt.Errorf("object %q is not text", id)
+			return nil, fmt.Errorf("object %q is not text", id)
 		}
 		updates[i] = cloneEditorData(object)
 		text := &updates[i].TextObject
@@ -100,7 +111,7 @@ func (e *Editor) StyleText(page int, ids []string, style TextStyle) error {
 		fontChanged := style.Font != "" && style.Font != text.Font
 		sizeChanged := style.Size != 0 && style.Size != text.Size
 		if sizeChanged && !known {
-			return &EditError{Code: EditUnsupportedObject, Err: fmt.Errorf("object %q requires explicit paragraph layout before changing size", id)}
+			return nil, &EditError{Code: EditUnsupportedObject, Err: fmt.Errorf("object %q requires explicit paragraph layout before changing size", id)}
 		}
 		if fontChanged {
 			text.Font = style.Font
@@ -110,7 +121,7 @@ func (e *Editor) StyleText(page int, ids []string, style TextStyle) error {
 		}
 		if known && (fontChanged || sizeChanged) {
 			if err := e.LayoutText(text, value, layout); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		if style.Color != "" {
@@ -120,7 +131,7 @@ func (e *Editor) StyleText(page int, ids []string, style TextStyle) error {
 			text.FillColor.Value = style.Color
 		}
 	}
-	return e.UpdateObjects(page, updates)
+	return updates, nil
 }
 
 // textLayout 保存编辑中的原文与选项，不写入OFD，也不参与渲染

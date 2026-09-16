@@ -103,6 +103,7 @@
 				<button id="drawLineButton" class="button" type="button" aria-label="绘制直线" aria-pressed="false">直线</button>
 				<button id="drawRectangleButton" class="button" type="button" aria-label="绘制矩形" aria-pressed="false">矩形</button>
 				<button id="drawEllipseButton" class="button" type="button" aria-label="绘制椭圆" aria-pressed="false">椭圆</button>
+				<select id="arrowTool" aria-label="绘制箭头" title="绘制箭头"><option value="" hidden>箭头</option><option value="arrow">单向</option><option value="double-arrow">双向</option></select>
 				<span>插入</span>
 			</div>
 			<div class="editor-group">
@@ -152,7 +153,7 @@
 					<option value="horizontal">水平</option>
 					<option value="vertical">垂直</option>
 				</select>
-				<span>变换</span>
+				<button id="objectBoundsButton" class="editor-group-action" type="button" title="位置尺寸" aria-label="位置尺寸" aria-haspopup="dialog" aria-controls="objectBoundsPanel" disabled>变换</button>
 			</div>
 			<div class="editor-group">
 				<select id="addPageButton" aria-label="新增页面" title="新增页面"><option value="" hidden>新增</option><option value="blank">空白</option><option value="import">插页</option></select>
@@ -173,6 +174,7 @@
 		</dialog>
 		<dialog id="objectStylePanel" class="form-dialog" aria-label="对象样式">
 			<form id="objectStyleForm">
+				<div class="form-row"><span>格式</span><div class="form-format"><button id="copyStyleButton" class="button" type="button" aria-label="复制格式">复制</button><button id="pasteStyleButton" class="button" type="button" aria-label="粘贴格式">粘贴</button></div></div>
 				<div class="form-row"><label for="objectOpacity">透明</label><div class="form-unit"><input id="objectOpacity" type="number" min="0" max="100" step="any" aria-label="透明度" autofocus><span>%</span></div></div>
 				<div id="objectStrokeFields">
 					<div class="form-row"><label for="objectDash">线型</label><select id="objectDash"><option value="mixed" hidden>混合</option><option value="solid">实线</option><option value="dash">虚线</option><option value="dot">点线</option><option value="dashdot">点划</option><option value="custom">自定</option></select></div>
@@ -191,7 +193,22 @@
 				<div class="form-row"><label for="outlineTitle">标题</label><input id="outlineTitle" type="text" required autofocus></div>
 				<div class="form-row"><label for="outlineParent">上级</label><select id="outlineParent"></select></div>
 				<div class="form-row"><label for="outlinePage">页码</label><input id="outlinePage" type="number" min="1" step="1" placeholder="无" aria-label="目标页码，留空表示无目标"></div>
+				<div id="outlinePositionRow" class="form-row" hidden><label for="outlinePosition">顺序</label><input id="outlinePosition" type="number" min="1" step="1" required value="1"></div>
 				<div class="form-actions"><div id="outlineStatus" class="form-status" role="status"></div><button id="outlineCancel" class="button" type="button">取消</button><button id="outlineSubmit" class="button" type="submit">新增</button></div>
+			</form>
+		</dialog>
+		<dialog id="objectBoundsPanel" class="form-dialog" aria-label="位置尺寸">
+			<form id="objectBoundsForm">
+				<div class="form-pair">
+					<div class="form-row"><label for="objectX">横向</label><div class="form-unit"><input id="objectX" type="number" step="any" required autofocus><span>mm</span></div></div>
+					<div class="form-row"><label for="objectY">纵向</label><div class="form-unit"><input id="objectY" type="number" step="any" required><span>mm</span></div></div>
+				</div>
+				<div class="form-pair">
+					<div class="form-row"><label for="objectWidth">宽度</label><div class="form-unit"><input id="objectWidth" type="number" min="0" step="any" required><span>mm</span></div></div>
+					<div class="form-row"><label for="objectHeight">高度</label><div class="form-unit"><input id="objectHeight" type="number" min="0" step="any" required><span>mm</span></div></div>
+				</div>
+				<div class="form-row"><span>比例</span><label class="form-check"><input id="objectAspect" type="checkbox" checked>锁定</label></div>
+				<div class="form-actions"><div id="objectBoundsStatus" class="form-status" role="status"></div><button id="objectBoundsCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
 		<dialog id="createPanel" class="form-dialog" aria-label="新建文档">

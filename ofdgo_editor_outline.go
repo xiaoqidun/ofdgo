@@ -187,6 +187,62 @@ func (e *Editor) DeleteOutline(path []int) error {
 	return e.setOutlineXML(editorPatchXML(data, []editorXMLPatch{{node.start, node.end, nil}}))
 }
 
+// MoveOutline 移动目录及其子树，保留原始动作和扩展字段，一次撤销恢复
+// 入参: path 节点路径, parent 移动前的目标父路径，空路径表示根, index 移除源节点后在目标父节点中的插入索引
+// 返回: []int 移动后的路径, error 错误信息
+func (e *Editor) MoveOutline(path, parent []int, index int) ([]int, error) {
+	if len(path) == 0 || len(parent) >= len(path) && slices.Equal(path, parent[:len(path)]) {
+		return nil, fmt.Errorf("cannot move an outline into itself")
+	}
+	data, err := e.outlineXML()
+	if err != nil {
+		return nil, err
+	}
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	node, err := editorOutlineNode(root, path)
+	if err != nil {
+		return nil, err
+	}
+	target, err := editorOutlineNode(root, parent)
+	if err != nil {
+		return nil, err
+	}
+	children := editorOutlineChildren(target)
+	same := slices.Equal(path[:len(path)-1], parent)
+	if same {
+		children = slices.Delete(children, path[len(path)-1], path[len(path)-1]+1)
+	}
+	if index < 0 || index > len(children) {
+		return nil, fmt.Errorf("outline insertion index %d out of range", index)
+	}
+	result := slices.Clone(parent)
+	if len(result) >= len(path) && slices.Equal(path[:len(path)-1], result[:len(path)-1]) && result[len(path)-1] > path[len(path)-1] {
+		result[len(path)-1]--
+	}
+	result = append(result, index)
+	if same && path[len(path)-1] == index {
+		return result, nil
+	}
+	value, err := editorXMLStandalone(data[node.start:node.end], node)
+	if err != nil {
+		return nil, err
+	}
+	patches := []editorXMLPatch{{node.start, node.end, nil}}
+	if target.open == target.end {
+		patches = append(patches, editorXMLContent(data, target, value))
+	} else {
+		at := target.close
+		if index < len(children) {
+			at = children[index].start
+		}
+		patches = append(patches, editorXMLPatch{at, at, value})
+	}
+	return result, e.setOutlineXML(editorPatchXML(data, patches))
+}
+
 // validateOutline 校验目录标题和目标页面
 // 入参: title 标题, page 页面索引
 // 返回: error 错误信息

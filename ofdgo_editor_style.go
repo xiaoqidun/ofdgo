@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -149,9 +150,6 @@ func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
 				if err := validateEditorStroke(*path); err != nil {
 					return err
 				}
-				if path.Join != "" && path.Join != "Miter" && path.Join != "Round" && path.Join != "Bevel" {
-					return fmt.Errorf("invalid line join %q", path.Join)
-				}
 			}
 		default:
 			return fmt.Errorf("unsupported object type %q", object.Type)
@@ -161,10 +159,107 @@ func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
 	return e.updateObjects(page, objects, true)
 }
 
+// CopyStyle 将同类型对象的外观复制到选区，不复制内容、位置、资源数据或动作
+// 文字复制字体、字号、颜色及透明度，沿用目标段落设置；字体标识须属于当前文档
+// 路径按页面中的实际线宽和虚线长度复制，保持目标变换
+// 入参: page 目标页面索引, ids 目标对象标识, source 样式来源快照
+// 返回: error 错误信息
+func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) error {
+	var alpha *int
+	switch source.Type {
+	case "TextObject":
+		alpha = source.TextObject.Alpha
+	case "PathObject":
+		alpha = source.PathObject.Alpha
+	case "ImageObject":
+		alpha = source.ImageObject.Alpha
+	default:
+		return fmt.Errorf("unsupported style source %q", source.Type)
+	}
+	if alpha != nil && (*alpha < 0 || *alpha > 255) {
+		return fmt.Errorf("alpha must be between 0 and 255")
+	}
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil {
+		return err
+	}
+	for _, object := range objects {
+		if object.Type != source.Type {
+			return fmt.Errorf("style requires objects of the same type")
+		}
+	}
+	if source.Type == "TextObject" {
+		objects, err = e.styleTextObjects(objects, TextStyle{Font: source.TextObject.Font, Size: source.TextObject.Size})
+		if err != nil {
+			return err
+		}
+		for i := range objects {
+			objects[i].TextObject.FillColor = cloneEditorData(source.TextObject.FillColor)
+			objects[i].TextObject.Alpha = cloneEditorData(source.TextObject.Alpha)
+		}
+		return e.UpdateObjects(page, objects)
+	}
+	if source.Type == "PathObject" {
+		from := source.PathObject
+		if from.DrawParam != "" {
+			return fmt.Errorf("style source must have resolved draw parameters")
+		}
+		if err := validateEditorStroke(from); err != nil {
+			return err
+		}
+		for _, color := range []*FillColor{from.FillColor, (*FillColor)(from.StrokeColor)} {
+			if err := creationColor(color); err != nil {
+				return err
+			}
+		}
+	}
+	for i, object := range objects {
+		object = cloneEditorData(object)
+		switch source.Type {
+		case "PathObject":
+			from, to := source.PathObject, &object.PathObject
+			to.Fill, to.Stroke, to.Alpha = from.Fill, from.Stroke, from.Alpha
+			to.FillColor, to.StrokeColor = from.FillColor, from.StrokeColor
+			to.LineWidth, to.Cap, to.Join, to.MiterLimit = from.LineWidth, from.Cap, from.Join, from.MiterLimit
+			to.DashPattern, to.DashOffset = from.DashPattern, from.DashOffset
+			scale := editorStrokeScale(from.CTM) / editorStrokeScale(to.CTM)
+			if scale != 1 {
+				if to.LineWidth == 0 {
+					to.LineWidth = defaultPathLineWidth
+				}
+				to.LineWidth *= scale
+				to.DashPattern = scaleTextNumbers(to.DashPattern, scale)
+				if to.DashOffset != nil {
+					value := *to.DashOffset * scale
+					to.DashOffset = &value
+				}
+			}
+		case "ImageObject":
+			object.ImageObject.Alpha = source.ImageObject.Alpha
+		}
+		objects[i] = object
+	}
+	return e.updateObjects(page, objects, true)
+}
+
+// editorStrokeScale 获取路径在页面坐标中的描边倍率，与渲染器保持一致
+// 入参: ctm 对象变换
+// 返回: float64 描边倍率
+func editorStrokeScale(ctm string) float64 {
+	m := NewMatrix(ctm)
+	if scale := math.Sqrt(math.Abs(m.a*m.d - m.b*m.c)); scale > 0 {
+		return scale
+	}
+	return 1
+}
+
 // validateEditorStroke 校验路径描边尺寸、端点和虚线
 // 入参: path 路径对象
 // 返回: error 错误信息
 func validateEditorStroke(path PathObject) error {
+	if path.Join != "" && path.Join != "Miter" && path.Join != "Round" && path.Join != "Bevel" {
+		return fmt.Errorf("invalid line join %q", path.Join)
+	}
 	if !finite(path.LineWidth) || path.LineWidth < 0 || !finite(path.MiterLimit) || path.MiterLimit < 0 {
 		return fmt.Errorf("invalid path stroke dimensions")
 	}
