@@ -53,6 +53,7 @@ const state = {
 	navigationScroll: new Map(),
 	fontSyncPending: false,
 	fontCatalogLoading: false,
+	fontFacesLoading: false,
 	fontRenderPending: false,
 	fontSyncing: false,
 	doc: null,
@@ -1001,23 +1002,40 @@ function editorFonts(item) {
 }
 
 async function loadEditorFonts() {
-	const local = fontManager.canReadLocal() && !fontManager.catalogLoaded && fontManager.permission !== "denied";
-	if (state.fontCatalogLoading || !local && !fontManager.userFonts.some(font => font.enabled && !font.faces)) return;
-	state.fontCatalogLoading = true;
-	try {
-		if (local) {
-			try { await fontManager.queryLocal(); }
-			catch (err) { setStatus(err?.name === "NotAllowedError" ? "字体尚未授权" : String(err.message || err)); }
-		}
-		await fontManager.loadFaces(data => callWASM("ofdgoFontFaces", data));
-		const open = fontPicker.open;
-		const selected = state.textFonts[Number(fontPicker.value)];
-		const query = el.textFont.value === (selected?.fullName || selected?.name || "") ? "" : el.textFont.value;
-		updateTextFonts(canvasEditor.selected, true);
-		if (open && !el.textFont.disabled) { if (query) el.textFont.value = query; fontPicker.show(query); }
-	} finally {
-		state.fontCatalogLoading = false;
+	const tasks = [];
+	if (!state.fontCatalogLoading && fontManager.canReadLocal() && !fontManager.catalogLoaded && fontManager.permission !== "denied") {
+		state.fontCatalogLoading = true;
+		tasks.push((async () => {
+			try {
+				await fontManager.queryLocal();
+				refreshEditorFonts();
+			} catch (err) {
+				setStatus(err?.name === "NotAllowedError" ? "字体尚未授权" : String(err.message || err));
+			} finally {
+				state.fontCatalogLoading = false;
+			}
+		})());
 	}
+	if (!state.fontFacesLoading && fontManager.userFonts.some(font => font.enabled && !font.faces)) {
+		state.fontFacesLoading = true;
+		tasks.push((async () => {
+			try {
+				await fontManager.loadFaces(data => callWASM("ofdgoFontFaces", data));
+				refreshEditorFonts();
+			} finally {
+				state.fontFacesLoading = false;
+			}
+		})());
+	}
+	await Promise.all(tasks);
+}
+
+function refreshEditorFonts() {
+	const open = fontPicker.open;
+	const selected = state.textFonts[Number(fontPicker.value)];
+	const query = el.textFont.value === (selected?.fullName || selected?.name || "") ? "" : el.textFont.value;
+	updateTextFonts(canvasEditor.selected, true);
+	if (open && !el.textFont.disabled) { if (query) el.textFont.value = query; fontPicker.show(query, false); }
 }
 
 async function readTextFont(font) {
@@ -4138,6 +4156,10 @@ function fontResult(font) {
 	const parts = [];
 	if (font.matched) {
 		parts.push(font.embedded || font.status === "embedded" ? `内嵌 ${font.matched}` : `匹配 ${font.matched}`);
+	}
+	if (font.matchedFace?.fullName) {
+		parts.push(font.matchedFace.fullName);
+		if (font.matchedFace.index > 0) parts.push(`索引 ${font.matchedFace.index}`);
 	}
 	if (font.detail) {
 		parts.push(font.detail);

@@ -55,7 +55,7 @@ export class FontPicker {
 		return font.embedded ? "内嵌" : font.file || ["stored", "upload"].includes(font.source) ? "上传" : "系统";
 	}
 
-	show(query = "") {
+	show(query = "", load = true) {
 		if (this.input.disabled) return;
 		const normalize = value => value.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ").trim();
 		const terms = normalize(query).split(" ").filter(Boolean);
@@ -95,7 +95,7 @@ export class FontPicker {
 		this.position();
 		const selected = this.matches.findIndex(({ font, index }) => !font.disabled && String(index) === this.value);
 		this.activate(selected < 0 ? this.matches.findIndex(({ font }) => !font.disabled) : selected);
-		this.onOpen?.();
+		if (load) this.onOpen?.();
 	}
 
 	position() {
@@ -316,8 +316,9 @@ export class FontManager {
 	}
 
 	async loadFaces(inspect) {
-		for (const file of this.userFonts) {
-			if (!file.enabled || file.faces) continue;
+		while (true) {
+			const file = this.userFonts.find(font => font.enabled && !font.faces);
+			if (!file) return;
 			try { file.faces = await inspect(await this.read(file)); }
 			catch { file.faces = []; }
 		}

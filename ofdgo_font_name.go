@@ -84,7 +84,14 @@ func fontFileNames(file io.ReaderAt) [][]string {
 // 入参: data 集合数据, names 字体名称, bold 是否粗体, italic 是否斜体
 // 返回: int 零起始字体索引
 func fontCollectionIndex(data []byte, names []string, bold, italic bool) int {
-	candidates := appendFontFileNames([]fontFileCandidate{{}}, 0, fontFileNames(bytes.NewReader(data)))
+	return fontNameIndex(fontFileNames(bytes.NewReader(data)), names, bold, italic)
+}
+
+// fontNameIndex 按名称与样式选择字体索引，未匹配时保留首项
+// 入参: faces 各字体名称, names 目标名称, bold 是否粗体, italic 是否斜体
+// 返回: int 零起始字体索引
+func fontNameIndex(faces [][]string, names []string, bold, italic bool) int {
+	candidates := appendFontFileNames([]fontFileCandidate{{}}, 0, faces)
 	if matches := fontFileMatches(candidates, names, bold, italic); len(matches) > 0 {
 		return matches[0].face
 	}

@@ -89,8 +89,8 @@ a:focus-visible {
 	display: flex;
 	max-height: 40dvh;
 	overflow: auto;
-	gap: 12px;
-	padding: 8px 12px 6px;
+	gap: 8px;
+	padding: 8px 10px 6px;
 	border-bottom: 1px solid var(--line);
 	background: var(--panel);
 	font-size: 14px;
@@ -105,18 +105,15 @@ a:focus-visible {
 	flex: 0 0 auto;
 	grid-template-columns: repeat(3, max-content);
 	grid-template-rows: repeat(2, 28px) 16px;
-	column-gap: 6px;
+	column-gap: 4px;
 	row-gap: 4px;
-	padding-right: 12px;
+	padding-right: 8px;
 	border-right: 1px solid var(--line);
 }
 
 .editor-file,
 .editor-erase,
-.editor-paragraph,
-.editor-image,
-.editor-group:has(#textFont),
-.editor-group:has(#shapeFill) {
+.editor-image {
 	grid-template-columns: repeat(2, max-content);
 }
 
@@ -192,12 +189,17 @@ a:focus-visible {
 }
 
 .editor-group:has(#textFont) {
-	grid-template-columns: 100px 54px;
+	grid-template-columns: 102px 54px;
 }
 
 .editor-paragraph {
-	width: 218px;
+	width: 194px;
 	grid-template-columns: 54px minmax(0, 1fr);
+}
+
+.editor-group:has(#shapeFill) {
+	width: 180px;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .editor-file #saveButton {
@@ -308,6 +310,10 @@ a:focus-visible {
 	justify-content: space-between;
 }
 
+.shape-paint .color-input {
+	width: 32px;
+}
+
 .shape-paint,
 .shape-paint label {
 	display: flex;
@@ -322,6 +328,7 @@ a:focus-visible {
 }
 
 .editor-group:last-child {
+	padding-right: 0;
 	border-right: 0;
 }
 

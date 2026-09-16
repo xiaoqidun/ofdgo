@@ -37,7 +37,7 @@ type Reader struct {
 	resourceFiles             map[string]string
 	fontCache                 map[string]*Font
 	fontResourcesRead         bool
-	fontFilesChecked          map[string]bool
+	fontFaces                 map[string][]*FontFace
 	colorSpaceCache           map[string]*ColorSpace
 	drawParamCache            map[string]*DrawParam
 	compositeGraphicUnitCache map[string]*CompositeGraphicUnit
@@ -87,7 +87,7 @@ func (r *Reader) initRoot() error {
 	r.resourcesRead = make(map[string]bool)
 	r.resourceFiles = make(map[string]string)
 	r.fontCache = make(map[string]*Font)
-	r.fontFilesChecked = make(map[string]bool)
+	r.fontFaces = make(map[string][]*FontFace)
 	r.colorSpaceCache = make(map[string]*ColorSpace)
 	r.drawParamCache = make(map[string]*DrawParam)
 	r.compositeGraphicUnitCache = make(map[string]*CompositeGraphicUnit)

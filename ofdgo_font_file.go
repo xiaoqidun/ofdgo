@@ -50,26 +50,33 @@ func (f FontFile) Faces() ([]FontFace, error) {
 		if err != nil {
 			return nil, err
 		}
-		records, values := fontNameValues(tables["name"])
-		name := func(ids ...uint16) string {
-			for _, id := range ids {
-				for _, record := range records {
-					if record.Name == id {
-						if value := strings.TrimSpace(values[[4]uint16{record.Platform, record.Encoding, record.Language, id}]); value != "" {
-							return value
-						}
-					}
-				}
-			}
-			return ""
-		}
-		face := FontFace{Index: index, FullName: name(4, 6, 16, 1), Family: name(16, 1), Style: name(17, 2), PostScriptName: name(6), Names: fontNamesFromTable(tables["name"])}
+		face := fontFaceInfo(tables["name"], index)
 		if face.FullName == "" {
 			return nil, fmt.Errorf("font %d has no usable name", index)
 		}
 		faces = append(faces, face)
 	}
 	return faces, nil
+}
+
+// fontFaceInfo 从名称表读取字体信息
+// 入参: data 名称表数据, index 零起始字体索引
+// 返回: FontFace 字体信息
+func fontFaceInfo(data []byte, index int) FontFace {
+	records, values := fontNameValues(data)
+	name := func(ids ...uint16) string {
+		for _, id := range ids {
+			for _, record := range records {
+				if record.Name == id {
+					if value := strings.TrimSpace(values[[4]uint16{record.Platform, record.Encoding, record.Language, id}]); value != "" {
+						return value
+					}
+				}
+			}
+		}
+		return ""
+	}
+	return FontFace{Index: index, FullName: name(4, 6, 16, 1), Family: name(16, 1), Style: name(17, 2), PostScriptName: name(6), Names: fontNamesFromTable(data)}
 }
 
 // Face 提取指定字体，返回独立的OpenType数据，可用于预览或AddFont，且不修改原文件

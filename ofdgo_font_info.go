@@ -20,7 +20,10 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"slices"
 	"sort"
+
+	"github.com/tdewolff/font"
 )
 
 const (
@@ -34,18 +37,19 @@ const (
 	FontStatusMissing = "missing"
 )
 
-// FontInfo OFD字体诊断信息
+// FontInfo OFD字体诊断信息，MatchedFace为实际匹配字体及原文件中的零起始索引，无法读取时为空
 type FontInfo struct {
-	ID         string `json:"id"`
-	FontName   string `json:"fontName"`
-	FamilyName string `json:"familyName"`
-	Charset    string `json:"charset"`
-	FontFile   string `json:"fontFile"`
-	Embedded   bool   `json:"embedded"`
-	Status     string `json:"status"`
-	Matched    string `json:"matched"`
-	Detail     string `json:"detail"`
-	Used       int    `json:"used"`
+	ID          string    `json:"id"`
+	FontName    string    `json:"fontName"`
+	FamilyName  string    `json:"familyName"`
+	Charset     string    `json:"charset"`
+	FontFile    string    `json:"fontFile"`
+	Embedded    bool      `json:"embedded"`
+	Status      string    `json:"status"`
+	Matched     string    `json:"matched"`
+	MatchedFace *FontFace `json:"matchedFace,omitempty"`
+	Detail      string    `json:"detail"`
+	Used        int       `json:"used"`
 }
 
 // Fonts 获取OFD声明的字体列表
@@ -98,6 +102,48 @@ func (r *Reader) FontData(id string) ([]byte, error) {
 		return extractCollectionFont(data, index)
 	}
 	return data, nil
+}
+
+// embeddedFontFace 按资源缓存内嵌字体名称并返回独立副本，不解析字形轮廓
+// 入参: of OFD字体定义
+// 返回: *FontFace 字体信息, error 资源读取错误
+func (r *Reader) embeddedFontFace(of Font) (*FontFace, error) {
+	name := r.ResPath(of.FontFile)
+	faces, ok := r.fontFaces[name]
+	if !ok {
+		data, err := r.readFile(name)
+		if err != nil {
+			return nil, err
+		}
+		if data, err = font.ToSFNT(data); err == nil {
+			if count, err := fontFileCount(data); err == nil {
+				faces = make([]*FontFace, count)
+				for index := range faces {
+					if tables, err := fontFileTables(data, index); err == nil {
+						info := fontFaceInfo(tables["name"], index)
+						faces[index] = &info
+					}
+				}
+			}
+		}
+		r.fontFaces[name] = faces
+	}
+	if len(faces) == 0 {
+		return nil, nil
+	}
+	names := make([][]string, len(faces))
+	for index, face := range faces {
+		if face != nil {
+			names[index] = face.Names
+		}
+	}
+	index := fontNameIndex(names, []string{of.FontName, of.FamilyName}, of.Bold, of.Italic)
+	if faces[index] == nil {
+		return nil, nil
+	}
+	face := *faces[index]
+	face.Names = slices.Clone(face.Names)
+	return &face, nil
 }
 
 // FontInfos 获取OFD字体诊断信息
@@ -194,22 +240,11 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 		Embedded:   font.FontFile != "",
 	}
 	if info.Embedded {
-		name := r.Reader.ResPath(font.FontFile)
-		var err error
-		if !r.Reader.fontFilesChecked[name] {
-			var file io.ReadCloser
-			file, err = r.Reader.openFile(name)
-			if err == nil {
-				_, err = io.Copy(io.Discard, file)
-				file.Close()
-				if err == nil {
-					r.Reader.fontFilesChecked[name] = true
-				}
-			}
-		}
+		face, err := r.Reader.embeddedFontFace(font)
 		if err == nil {
 			info.Status = FontStatusEmbedded
 			info.Matched = path.Base(font.FontFile)
+			info.MatchedFace = face
 			info.Detail = "使用内嵌字体文件"
 		} else {
 			info.Status = FontStatusMissing
@@ -217,8 +252,10 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 		}
 		return info
 	}
-	if source, ok := r.fontSourceMatch(font.ID, &font); ok {
+	if source, family := r.fontSourceMatch(font.ID, &font); family != nil {
 		info.Matched = source.name
+		face := fontFaceInfo(family.Face(12, canvasFontStyle(&font)).Font.SFNT.Tables["name"], source.face)
+		info.MatchedFace = &face
 		if source.exact {
 			info.Status = FontStatusMatched
 			info.Detail = "使用外部字体文件"

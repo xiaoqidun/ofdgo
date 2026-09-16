@@ -214,26 +214,26 @@ func appendFontSource(sources []fontSource, seen map[fontSourceKey]bool, source 
 
 // fontSourceMatch 获取匹配的字体来源
 // 入参: fontID 字体ID, font OFD字体定义
-// 返回: fontSource 字体来源, bool 是否匹配
-func (r *Renderer) fontSourceMatch(fontID string, font *Font) (fontSource, bool) {
+// 返回: fontSource 字体来源, *canvas.FontFamily 已加载的字体族，未匹配时为空
+func (r *Renderer) fontSourceMatch(fontID string, font *Font) (fontSource, *canvas.FontFamily) {
 	if source, ok := r.fontSourceUsed[fontID]; ok {
-		return source, true
+		return source, r.fontMap[fontID]
 	}
 	style := canvasFontStyle(font)
 	for _, source := range r.fontSources(fontID, font, style) {
 		key := fontCacheKey{fontSourceKey: fontSourceKey{kind: source.kind, index: source.index, name: source.name, face: source.face}, style: style}
 		if cached, ok := r.fontCache[key]; ok {
 			if cached != nil {
-				return source, true
+				return source, cached
 			}
 			continue
 		}
 		family := canvas.NewFontFamily(font.FontName)
-		if r.loadFontSource(family, source, style) != nil {
-			return source, true
+		if loaded := r.loadFontSource(family, source, style); loaded != nil {
+			return source, loaded
 		}
 	}
-	return fontSource{}, false
+	return fontSource{}, nil
 }
 
 // loadFontSource 加载字体来源
