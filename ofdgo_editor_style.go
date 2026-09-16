@@ -14,7 +14,10 @@
 
 package ofdgo
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // editorDrawParam 解析原文档的绘制参数继承链，缺失或循环引用不进入编辑快照
 // 入参: id 绘制参数标识, visited 已访问标识
@@ -88,4 +91,105 @@ func (e *Editor) resolveEditorStyle(object GraphicObject, layer string) (Graphic
 		}
 	}
 	return cloneEditorObject(object)
+}
+
+// ObjectStyle 对象外观，nil字段保持原值，长度单位为对象坐标系中的毫米
+type ObjectStyle struct {
+	Alpha       *int
+	DashPattern *string
+	DashOffset  *float64
+	Cap         *string
+	Join        *string
+}
+
+// StyleObjects 原子更新文字、图片和路径透明度，路径另支持描边样式
+// 入参: page 页面索引, ids 对象标识, style 待修改属性
+// 返回: error 错误信息
+func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
+	if style.Alpha != nil && (*style.Alpha < 0 || *style.Alpha > 255) {
+		return fmt.Errorf("alpha must be between 0 and 255")
+	}
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil {
+		return err
+	}
+	stroke := style.DashPattern != nil || style.DashOffset != nil || style.Cap != nil || style.Join != nil
+	for i := range objects {
+		object := cloneEditorData(objects[i])
+		if stroke && object.Type != "PathObject" {
+			return fmt.Errorf("stroke style requires path objects")
+		}
+		switch object.Type {
+		case "TextObject":
+			if style.Alpha != nil {
+				object.TextObject.Alpha = style.Alpha
+			}
+		case "ImageObject":
+			if style.Alpha != nil {
+				object.ImageObject.Alpha = style.Alpha
+			}
+		case "PathObject":
+			path := &object.PathObject
+			if style.Alpha != nil {
+				path.Alpha = style.Alpha
+			}
+			if style.DashPattern != nil {
+				path.DashPattern = *style.DashPattern
+			}
+			if style.DashOffset != nil {
+				path.DashOffset = style.DashOffset
+			}
+			if style.Cap != nil {
+				path.Cap = *style.Cap
+			}
+			if style.Join != nil {
+				path.Join = *style.Join
+			}
+			if stroke {
+				if err := validateEditorStroke(*path); err != nil {
+					return err
+				}
+				if path.Join != "" && path.Join != "Miter" && path.Join != "Round" && path.Join != "Bevel" {
+					return fmt.Errorf("invalid line join %q", path.Join)
+				}
+			}
+		default:
+			return fmt.Errorf("unsupported object type %q", object.Type)
+		}
+		objects[i] = object
+	}
+	return e.updateObjects(page, objects, true)
+}
+
+// validateEditorStroke 校验路径描边尺寸、端点和虚线
+// 入参: path 路径对象
+// 返回: error 错误信息
+func validateEditorStroke(path PathObject) error {
+	if !finite(path.LineWidth) || path.LineWidth < 0 || !finite(path.MiterLimit) || path.MiterLimit < 0 {
+		return fmt.Errorf("invalid path stroke dimensions")
+	}
+	if path.Cap != "" && path.Cap != "Butt" && path.Cap != "Round" && path.Cap != "Square" {
+		return fmt.Errorf("invalid line cap %q", path.Cap)
+	}
+	if path.DashOffset != nil && !finite(*path.DashOffset) {
+		return fmt.Errorf("invalid dash offset")
+	}
+	if path.DashPattern == "" {
+		return nil
+	}
+	values, err := creationNumbers(path.DashPattern, len(strings.Fields(path.DashPattern)))
+	if err != nil {
+		return err
+	}
+	total := 0.0
+	for _, value := range values {
+		if value < 0 {
+			return fmt.Errorf("dash lengths must not be negative")
+		}
+		total += value
+	}
+	if total == 0 {
+		return fmt.Errorf("dash pattern must have a positive length")
+	}
+	return nil
 }

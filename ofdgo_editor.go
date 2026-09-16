@@ -50,6 +50,7 @@ type Editor struct {
 	revision     uint64
 	serial       uint64
 	source       *editorSource
+	outlines     []byte
 }
 
 // editorResource 文档内嵌资源
@@ -174,70 +175,165 @@ func (e *Editor) AddPage(width, height float64) (int, error) {
 // 入参: index 原页面索引
 // 返回: int 副本页面索引, error 错误信息
 func (e *Editor) CopyPage(index int) (int, error) {
-	if e.originalPage(index) {
-		source, err := e.Reader()
-		if err != nil {
-			return 0, err
-		}
-		at := len(e.pages)
-		_, err = e.importPages(source, []int{index}, at, true)
-		return at, err
-	}
-	source, err := e.page(index)
+	indexes, err := e.CopyPages([]int{index})
 	if err != nil {
 		return 0, err
 	}
-	page := PageContent{Area: source.Area, Content: Content{Layer: make([]Layer, len(source.Content.Layer))}}
-	for i, layer := range source.Content.Layer {
-		page.Content.Layer[i] = Layer{Type: layer.Type, Objects: make([]GraphicObject, len(layer.Objects))}
-		for j, object := range layer.Objects {
-			page.Content.Layer[i].Objects[j], err = cloneEditorObject(object)
-			if err != nil {
-				return 0, err
+	return indexes[0], nil
+}
+
+// CopyPages 按指定顺序复制页面并追加到文档末尾，一次操作计入一条撤销记录
+// 入参: indexes 不重复的原页面索引
+// 返回: []int 副本页面索引, error 错误信息
+func (e *Editor) CopyPages(indexes []int) ([]int, error) {
+	if err := e.validatePageIndexes(indexes); err != nil {
+		return nil, err
+	}
+	if len(indexes) == 0 {
+		return nil, nil
+	}
+	at := len(e.pages)
+	if e.source != nil {
+		source, err := e.Reader()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := e.importPages(source, indexes, at, true); err != nil {
+			return nil, err
+		}
+		result := make([]int, len(indexes))
+		for i := range result {
+			result[i] = at + i
+		}
+		return result, nil
+	}
+	pages := make([]PageContent, len(indexes))
+	for n, index := range indexes {
+		source := &e.pages[index]
+		page := &pages[n]
+		*page = PageContent{Area: source.Area, Content: Content{Layer: make([]Layer, len(source.Content.Layer))}}
+		for i, layer := range source.Content.Layer {
+			page.Content.Layer[i] = Layer{Type: layer.Type, Objects: make([]GraphicObject, len(layer.Objects))}
+			for j, object := range layer.Objects {
+				copy, err := cloneEditorObject(object)
+				if err != nil {
+					return nil, err
+				}
+				page.Content.Layer[i].Objects[j] = copy
 			}
 		}
 	}
-	page.ID = e.nextID()
-	for i := range page.Content.Layer {
-		layer := &page.Content.Layer[i]
-		layer.ID = e.nextID()
-		for j := range layer.Objects {
-			object := &layer.Objects[j]
-			origin := e.objectOrigin(editorObjectID(*object))
-			id := e.nextID()
-			if origin != nil {
-				e.source.origins[id] = origin
+	result := make([]int, len(pages))
+	for n := range pages {
+		page := &pages[n]
+		page.ID = e.nextID()
+		for i := range page.Content.Layer {
+			layer := &page.Content.Layer[i]
+			layer.ID = e.nextID()
+			for j := range layer.Objects {
+				object := &layer.Objects[j]
+				id := e.nextID()
+				switch object.Type {
+				case "TextObject":
+					object.TextObject.ID = id
+				case "PathObject":
+					object.PathObject.ID = id
+				case "ImageObject":
+					object.ImageObject.ID = id
+				}
 			}
-			switch object.Type {
-			case "TextObject":
-				object.TextObject.ID = id
-			case "PathObject":
-				object.PathObject.ID = id
-			case "ImageObject":
-				object.ImageObject.ID = id
+		}
+		result[n] = at + n
+	}
+	e.pages = append(e.pages, pages...)
+	if change := e.recordChange(); change != nil {
+		for i := range pages {
+			pages[i] = copyEditorPage(pages[i])
+		}
+		change.undo = func(e *Editor) { e.pages = e.pages[:at] }
+		change.redo = func(e *Editor) {
+			for _, page := range pages {
+				e.pages = append(e.pages, copyEditorPage(page))
 			}
 		}
 	}
-	e.pages = append(e.pages, page)
-	index = len(e.pages) - 1
-	e.recordPageAddition(index)
-	return index, nil
+	return result, nil
 }
 
 // DeletePage 删除页面，输出时清理相关目录、跳转、注释和签章位置，保留其他页面及原始签名凭据
 // 入参: index 页面索引
 // 返回: error 错误信息
 func (e *Editor) DeletePage(index int) error {
-	page, err := e.page(index)
-	if err != nil {
+	return e.DeletePages([]int{index})
+}
+
+// DeletePages 删除指定页面，输出时清理页面引用，一次操作计入一条撤销记录
+// 入参: indexes 不重复的页面索引
+// 返回: error 错误信息
+func (e *Editor) DeletePages(indexes []int) error {
+	if err := e.validatePageIndexes(indexes); err != nil {
 		return err
 	}
-	if change := e.recordChange(); change != nil {
-		saved := copyEditorPage(*page)
-		change.undo = func(e *Editor) { e.pages = slices.Insert(e.pages, index, copyEditorPage(saved)) }
-		change.redo = func(e *Editor) { e.pages = slices.Delete(e.pages, index, index+1) }
+	if len(indexes) == 0 {
+		return nil
 	}
-	e.pages = slices.Delete(e.pages, index, index+1)
+	indexes = slices.Clone(indexes)
+	slices.Sort(indexes)
+	saved := make([]PageContent, len(indexes))
+	for i, index := range indexes {
+		page, err := e.page(index)
+		if err != nil {
+			return err
+		}
+		saved[i] = copyEditorPage(*page)
+	}
+	remove := func(e *Editor) {
+		kept, next := e.pages[:0], 0
+		for index, page := range e.pages {
+			if next < len(indexes) && index == indexes[next] {
+				next++
+			} else {
+				kept = append(kept, page)
+			}
+		}
+		clear(e.pages[len(kept):])
+		e.pages = kept
+	}
+	if change := e.recordChange(); change != nil {
+		change.undo = func(e *Editor) {
+			pages := make([]PageContent, len(e.pages)+len(saved))
+			kept, removed := 0, 0
+			for index := range pages {
+				if removed < len(indexes) && index == indexes[removed] {
+					pages[index] = copyEditorPage(saved[removed])
+					removed++
+				} else {
+					pages[index] = e.pages[kept]
+					kept++
+				}
+			}
+			e.pages = pages
+		}
+		change.redo = remove
+	}
+	remove(e)
+	return nil
+}
+
+// validatePageIndexes 校验页面索引范围和重复值
+// 入参: indexes 页面索引
+// 返回: error 错误信息
+func (e *Editor) validatePageIndexes(indexes []int) error {
+	seen := make(map[int]bool, len(indexes))
+	for _, index := range indexes {
+		if index < 0 || index >= len(e.pages) {
+			return fmt.Errorf("page index %d out of range", index)
+		}
+		if seen[index] {
+			return fmt.Errorf("duplicate page index %d", index)
+		}
+		seen[index] = true
+	}
 	return nil
 }
 
@@ -553,30 +649,8 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 		if obj.Rule != "" && obj.Rule != "NonZero" && obj.Rule != "Even-Odd" {
 			return GraphicObject{}, fmt.Errorf("invalid fill rule %q", obj.Rule)
 		}
-		if !finite(obj.LineWidth) || obj.LineWidth < 0 || !finite(obj.MiterLimit) || obj.MiterLimit < 0 {
-			return GraphicObject{}, fmt.Errorf("invalid path stroke dimensions")
-		}
-		if obj.Cap != "" && obj.Cap != "Butt" && obj.Cap != "Round" && obj.Cap != "Square" {
-			return GraphicObject{}, fmt.Errorf("invalid line cap %q", obj.Cap)
-		}
-		if obj.DashOffset != nil && !finite(*obj.DashOffset) {
-			return GraphicObject{}, fmt.Errorf("invalid dash offset")
-		}
-		if obj.DashPattern != "" {
-			values, err := creationNumbers(obj.DashPattern, len(strings.Fields(obj.DashPattern)))
-			if err != nil {
-				return GraphicObject{}, err
-			}
-			total := 0.0
-			for _, value := range values {
-				if value < 0 {
-					return GraphicObject{}, fmt.Errorf("dash lengths must not be negative")
-				}
-				total += value
-			}
-			if total == 0 {
-				return GraphicObject{}, fmt.Errorf("dash pattern must have a positive length")
-			}
+		if err := validateEditorStroke(*obj); err != nil {
+			return GraphicObject{}, err
 		}
 		obj.ID = id
 		boundary, ctm, drawParam = obj.Boundary, obj.CTM, obj.DrawParam

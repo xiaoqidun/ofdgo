@@ -1470,6 +1470,95 @@ button.outline-link:hover {
 	cursor: default;
 }
 
+.edit-object.edit-contour,
+.edit-object.edit-contour.selected,
+.edit-object.edit-contour.erasing {
+	outline: none;
+	background: transparent;
+}
+
+.edit-outline {
+	display: none;
+	position: absolute;
+	width: 100%;
+	height: 100%;
+	min-width: 1px;
+	min-height: 1px;
+	overflow: visible;
+	pointer-events: none;
+	fill: none;
+	stroke: var(--accent);
+	stroke-width: calc(1px / var(--surface-scale));
+}
+
+.edit-outline > * {
+	vector-effect: non-scaling-stroke;
+}
+
+.edit-object:hover > .edit-outline,
+.edit-object.selected > .edit-outline,
+.edit-object.erasing > .edit-outline {
+	display: block;
+}
+
+.edit-object.erasing > .edit-outline {
+	stroke-dasharray: 3 2;
+}
+
+.outline-tools {
+	display: flex;
+	gap: 6px;
+	margin-bottom: 10px;
+}
+
+.outline-link.selected {
+	background: var(--accent-soft);
+	color: var(--accent);
+}
+
+.page-list-item {
+	position: relative;
+}
+
+.thumb-grip {
+	position: absolute;
+	right: 8px;
+	bottom: 8px;
+	width: 24px;
+	height: 28px;
+	cursor: grab;
+	touch-action: none;
+	color: var(--text-muted);
+}
+
+.thumb-grip::before {
+	content: "";
+	position: absolute;
+	left: 7px;
+	top: 7px;
+	width: 3px;
+	height: 3px;
+	background: currentColor;
+	box-shadow: 6px 0 currentColor, 0 6px currentColor, 6px 6px currentColor, 0 12px currentColor, 6px 12px currentColor;
+}
+
+.page-list-item.reordering {
+	opacity: 0.5;
+}
+
+.page-list-item.drop-before::before,
+.page-list-item.drop-after::after {
+	content: "";
+	position: absolute;
+	left: 0;
+	right: 0;
+	height: 2px;
+	background: var(--accent);
+}
+
+.page-list-item.drop-before::before { top: -6px; }
+.page-list-item.drop-after::after { bottom: -6px; }
+
 .edit-line::before {
 	position: absolute;
 	inset: calc(-4px / var(--surface-scale));

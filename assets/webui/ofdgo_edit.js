@@ -249,6 +249,18 @@ export class CanvasEditor {
 			node.setAttribute("role", "button");
 			node.setAttribute("aria-label", { ImageObject: "图片对象", TextObject: "文字对象", PathObject: "图形对象" }[object.type]);
 			const item = { ...object, index, page: { width: page.width, height: page.height }, node, surface };
+			if (object.type === "PathObject" && (object.shape || object.outline)) {
+				node.classList.add("edit-contour");
+				const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+				svg.classList.add("edit-outline");
+				svg.setAttribute("aria-hidden", "true");
+				svg.setAttribute("preserveAspectRatio", "none");
+				const contour = document.createElementNS("http://www.w3.org/2000/svg", object.shape === "line" ? "line" : object.shape === "ellipse" ? "ellipse" : object.shape === "rectangle" ? "rect" : "path");
+				if (!object.shape) contour.setAttribute("d", object.outline);
+				svg.append(contour);
+				node.append(svg);
+				item.contour = { svg, path: contour };
+			}
 			this.nodes.set(node, item);
 			node.addEventListener("focus", () => this.select(item));
 			const handles = !canEditObject(object, "transform") ? [] : object.shape === "line" ? ["start", "end"]
@@ -297,6 +309,7 @@ export class CanvasEditor {
 			left: `${(item.x + change.x) * PX_PER_MM}px`, top: `${(item.y + change.y) * PX_PER_MM}px`,
 			width: `${item.width * change.scale * PX_PER_MM}px`, height: `${item.height * change.scale * PX_PER_MM}px`,
 		});
+		if (item.contour) item.contour.svg.setAttribute("viewBox", `${item.x} ${item.y} ${item.width} ${item.height}`);
 		if (item.textFrame) {
 			const { matrix: [a, b, c, d, e, f], width, height } = item.textFrame;
 			for (const handle of item.node.children) {
@@ -317,10 +330,20 @@ export class CanvasEditor {
 		});
 		if (item.shape === "line") {
 			for (const handle of item.node.children) {
+				if (!handle.dataset.corner) continue;
 				const end = handle.dataset.corner === "end";
 				handle.style.left = `${(box.x + (end ? box.width : 0) - x) * PX_PER_MM}px`;
 				handle.style.top = `${(box.y + (end ? box.height : 0) - y) * PX_PER_MM}px`;
 			}
+		}
+		if (item.contour) {
+			const { svg, path } = item.contour;
+			const width = Math.abs(box.width), height = Math.abs(box.height);
+			svg.setAttribute("viewBox", `0 0 ${width || 1} ${height || 1}`);
+			const values = item.shape === "line" ? { x1: box.x - x, y1: box.y - y, x2: box.x + box.width - x, y2: box.y + box.height - y }
+				: item.shape === "ellipse" ? { cx: width / 2, cy: height / 2, rx: width / 2, ry: height / 2 }
+					: { x: 0, y: 0, width, height };
+			for (const [key, value] of Object.entries(values)) path.setAttribute(key, String(value));
 		}
 	}
 

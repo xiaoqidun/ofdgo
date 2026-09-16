@@ -342,10 +342,10 @@ func (e *Editor) UpdateObjects(page int, objects []GraphicObject) error {
 	return e.updateObjects(page, objects, false)
 }
 
-// updateObjects 校验内容更新或纯几何变换，原子提交跨图层选区
-// 入参: page 页面索引, objects 新对象, geometry 是否保留原内容的几何操作
+// updateObjects 校验内容更新或几何与外观变换，原子提交跨图层选区
+// 入参: page 页面索引, objects 新对象, preserveContent 是否保留原内容
 // 返回: error 错误信息
-func (e *Editor) updateObjects(page int, objects []GraphicObject, geometry bool) error {
+func (e *Editor) updateObjects(page int, objects []GraphicObject, preserveContent bool) error {
 	ids := make([]string, len(objects))
 	for i, object := range objects {
 		ids[i] = editorObjectID(object)
@@ -361,11 +361,11 @@ func (e *Editor) updateObjects(page int, objects []GraphicObject, geometry bool)
 			if err != nil {
 				return err
 			}
-			if !capability.Transform || !geometry && !e.sourceRGB() {
+			if !capability.Transform || !preserveContent && !e.sourceRGB() {
 				return fmt.Errorf("object %q is read-only for this operation: %w", ids[i], capability.editError())
 			}
 		}
-		if geometry && e.originalPage(page) {
+		if preserveContent && e.originalPage(page) {
 			if err := validateEditorGeometry(object); err != nil {
 				return err
 			}

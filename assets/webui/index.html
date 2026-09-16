@@ -89,7 +89,7 @@
 					<option value="horizontal">水平</option>
 					<option value="vertical">垂直</option>
 				</select>
-				<span>对象</span>
+				<button id="objectStyleButton" class="editor-group-action" type="button" title="对象样式" aria-label="对象样式" aria-haspopup="dialog" aria-controls="objectStylePanel" disabled>对象</button>
 			</div>
 			<div class="editor-group editor-erase">
 				<button id="eraseObjectButton" class="button" type="button" title="整对象擦除" aria-label="整对象擦除" aria-pressed="false">对象</button>
@@ -161,9 +161,39 @@
 				<button id="movePagePrevButton" class="button" type="button" aria-label="页面前移">前移</button>
 				<button id="movePageNextButton" class="button" type="button" aria-label="页面后移">后移</button>
 				<button id="pageSettingsButton" class="button" type="button" aria-label="页面设置" aria-haspopup="dialog" aria-controls="pagePanel">设置</button>
-				<span>页面</span>
+				<button id="batchPagesButton" class="editor-group-action" type="button" title="批量页面" aria-label="批量页面" aria-haspopup="dialog" aria-controls="batchPagesPanel">页面</button>
 			</div>
 		</div>
+		<dialog id="batchPagesPanel" class="form-dialog" aria-label="批量页面">
+			<form id="batchPagesForm">
+				<div class="form-row"><label for="batchPageAction">操作</label><select id="batchPageAction"><option value="copy">复制</option><option value="delete">删除</option></select></div>
+				<div class="form-row"><label for="batchPageRange">页码</label><input id="batchPageRange" type="text" required autocomplete="off" spellcheck="false" autofocus></div>
+				<div class="form-actions"><div id="batchPagesStatus" class="form-status" role="status"></div><button id="batchPagesCancel" class="button" type="button">取消</button><button id="batchPagesSubmit" class="button" type="submit">复制</button></div>
+			</form>
+		</dialog>
+		<dialog id="objectStylePanel" class="form-dialog" aria-label="对象样式">
+			<form id="objectStyleForm">
+				<div class="form-row"><label for="objectOpacity">透明</label><div class="form-unit"><input id="objectOpacity" type="number" min="0" max="100" step="any" aria-label="透明度" autofocus><span>%</span></div></div>
+				<div id="objectStrokeFields">
+					<div class="form-row"><label for="objectDash">线型</label><select id="objectDash"><option value="mixed" hidden>混合</option><option value="solid">实线</option><option value="dash">虚线</option><option value="dot">点线</option><option value="dashdot">点划</option><option value="custom">自定</option></select></div>
+					<div id="objectDashRow" class="form-row" hidden><label for="objectDashPattern">间隔</label><div class="form-unit"><input id="objectDashPattern" type="text" autocomplete="off" spellcheck="false"><span>mm</span></div></div>
+					<div class="form-row"><label for="objectDashOffset">偏移</label><div class="form-unit"><input id="objectDashOffset" type="number" step="any"><span>mm</span></div></div>
+					<div class="form-pair">
+						<div class="form-row"><label for="objectCap">端点</label><select id="objectCap"><option value="mixed" hidden>混合</option><option value="Butt">平头</option><option value="Round">圆头</option><option value="Square">方头</option></select></div>
+						<div class="form-row"><label for="objectJoin">转角</label><select id="objectJoin"><option value="mixed" hidden>混合</option><option value="Miter">尖角</option><option value="Round">圆角</option><option value="Bevel">斜角</option></select></div>
+					</div>
+				</div>
+				<div class="form-actions"><div id="objectStyleStatus" class="form-status" role="status"></div><button id="objectStyleCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
+			</form>
+		</dialog>
+		<dialog id="outlinePanel" class="form-dialog" aria-label="编辑目录">
+			<form id="outlineForm">
+				<div class="form-row"><label for="outlineTitle">标题</label><input id="outlineTitle" type="text" required autofocus></div>
+				<div class="form-row"><label for="outlineParent">上级</label><select id="outlineParent"></select></div>
+				<div class="form-row"><label for="outlinePage">页码</label><input id="outlinePage" type="number" min="1" step="1" placeholder="无" aria-label="目标页码，留空表示无目标"></div>
+				<div class="form-actions"><div id="outlineStatus" class="form-status" role="status"></div><button id="outlineCancel" class="button" type="button">取消</button><button id="outlineSubmit" class="button" type="submit">新增</button></div>
+			</form>
+		</dialog>
 		<dialog id="createPanel" class="form-dialog" aria-label="新建文档">
 			<form id="createForm">
 				<div class="form-row">

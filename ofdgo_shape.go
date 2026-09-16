@@ -19,7 +19,29 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
+	"github.com/tdewolff/canvas"
 )
+
+// Outline 获取页面坐标系中的SVG路径轮廓，不包含描边宽度和填充
+// 入参: p 路径对象
+// 返回: string SVG路径数据, error 错误信息
+func (p PathObject) Outline() (string, error) {
+	if err := creationPath(p.AbbreviatedData); err != nil {
+		return "", err
+	}
+	if _, err := creationBox(p.Boundary); err != nil {
+		return "", err
+	}
+	if p.CTM != "" {
+		if _, err := creationNumbers(p.CTM, 6); err != nil {
+			return "", err
+		}
+	}
+	r := &Renderer{}
+	path := r.buildPath(p, 0, NewMatrix(p.CTM), false)
+	return path.Transform(canvas.Matrix{{1, 0, 0}, {0, -1, 0}}).ToSVG(), nil
+}
 
 // ShapeKind 基本图形类型
 type ShapeKind string

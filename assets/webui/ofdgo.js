@@ -39,6 +39,9 @@ const state = {
 	savedRevision: null,
 	insertObject: null,
 	importPageCount: 0,
+	outlineSelection: null,
+	outlineAction: "add",
+	styleOriginal: null,
 	objectClipboard: null,
 	textFonts: [],
 	textFontID: null,
@@ -164,6 +167,35 @@ const el = {
 	movePagePrevButton: document.querySelector("#movePagePrevButton"),
 	movePageNextButton: document.querySelector("#movePageNextButton"),
 	pageSettingsButton: document.querySelector("#pageSettingsButton"),
+	batchPagesButton: document.querySelector("#batchPagesButton"),
+	batchPagesPanel: document.querySelector("#batchPagesPanel"),
+	batchPagesForm: document.querySelector("#batchPagesForm"),
+	batchPageAction: document.querySelector("#batchPageAction"),
+	batchPageRange: document.querySelector("#batchPageRange"),
+	batchPagesStatus: document.querySelector("#batchPagesStatus"),
+	batchPagesCancel: document.querySelector("#batchPagesCancel"),
+	batchPagesSubmit: document.querySelector("#batchPagesSubmit"),
+	objectStyleButton: document.querySelector("#objectStyleButton"),
+	objectStylePanel: document.querySelector("#objectStylePanel"),
+	objectStyleForm: document.querySelector("#objectStyleForm"),
+	objectOpacity: document.querySelector("#objectOpacity"),
+	objectStrokeFields: document.querySelector("#objectStrokeFields"),
+	objectDash: document.querySelector("#objectDash"),
+	objectDashRow: document.querySelector("#objectDashRow"),
+	objectDashPattern: document.querySelector("#objectDashPattern"),
+	objectDashOffset: document.querySelector("#objectDashOffset"),
+	objectCap: document.querySelector("#objectCap"),
+	objectJoin: document.querySelector("#objectJoin"),
+	objectStyleStatus: document.querySelector("#objectStyleStatus"),
+	objectStyleCancel: document.querySelector("#objectStyleCancel"),
+	outlinePanel: document.querySelector("#outlinePanel"),
+	outlineForm: document.querySelector("#outlineForm"),
+	outlineTitle: document.querySelector("#outlineTitle"),
+	outlineParent: document.querySelector("#outlineParent"),
+	outlinePage: document.querySelector("#outlinePage"),
+	outlineStatus: document.querySelector("#outlineStatus"),
+	outlineCancel: document.querySelector("#outlineCancel"),
+	outlineSubmit: document.querySelector("#outlineSubmit"),
 	pagePanel: document.querySelector("#pagePanel"),
 	pageForm: document.querySelector("#pageForm"),
 	pagePortrait: document.querySelector("#pagePortrait"),
@@ -549,6 +581,41 @@ editorClick(el.deletePageButton, () => changeDocument("ofdgoChangePage", null, "
 editorClick(el.movePagePrevButton, () => changeDocument("ofdgoChangePage", null, "move", state.pageIndex, state.pageIndex - 1));
 editorClick(el.movePageNextButton, () => changeDocument("ofdgoChangePage", null, "move", state.pageIndex, state.pageIndex + 1));
 editorClick(el.pageSettingsButton, openPagePanel);
+editorClick(el.batchPagesButton, () => {
+	el.batchPageAction.value = "copy";
+	el.batchPagesSubmit.textContent = "复制";
+	el.batchPageRange.value = String(state.pageIndex + 1);
+	el.batchPagesStatus.textContent = "";
+	el.batchPagesPanel.showModal();
+	el.batchPageRange.select();
+});
+el.batchPagesCancel.addEventListener("click", () => el.batchPagesPanel.close());
+el.batchPageAction.addEventListener("change", () => {
+	el.batchPagesSubmit.textContent = el.batchPageAction.value === "copy" ? "复制" : "删除";
+});
+el.batchPagesForm.addEventListener("submit", async event => {
+	event.preventDefault();
+	if (await changeDocument("ofdgoBatchPages", null, el.batchPageAction.value, el.batchPageRange.value)) el.batchPagesPanel.close();
+});
+editorClick(el.objectStyleButton, openObjectStyle);
+el.objectStyleCancel.addEventListener("click", () => el.objectStylePanel.close());
+el.objectDash.addEventListener("change", () => {
+	el.objectDashRow.hidden = el.objectDash.value !== "custom";
+	el.objectDashPattern.required = !el.objectDashRow.hidden;
+});
+el.objectStyleForm.addEventListener("submit", async event => {
+	event.preventDefault();
+	const style = readObjectStyle();
+	const item = canvasEditor.selected;
+	if (await changeDocument("ofdgoStyleObjects", { ...item, id: canvasEditor.items().map(member => member.id) }, style)) el.objectStylePanel.close();
+});
+el.outlineCancel.addEventListener("click", () => el.outlinePanel.close());
+el.outlineForm.addEventListener("submit", async event => {
+	event.preventDefault();
+	const path = state.outlineAction === "add" ? JSON.parse(el.outlineParent.value) : state.outlineSelection;
+	const page = el.outlinePage.value === "" ? -1 : Number(el.outlinePage.value) - 1;
+	if (await changeDocument("ofdgoChangeOutline", null, state.outlineAction, path, el.outlineTitle.value, page)) el.outlinePanel.close();
+});
 el.pageCancel.addEventListener("click", () => el.pagePanel.close());
 el.pageWidth.addEventListener("input", updatePageDirection);
 el.pageHeight.addEventListener("input", updatePageDirection);
@@ -797,7 +864,73 @@ function handleKeyDown(event) {
 }
 
 function formDialogOpen() {
-	return el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open;
+	return el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open
+		|| el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open;
+}
+
+function openObjectStyle() {
+	const items = canvasEditor.items();
+	if (!items.length) return;
+	const shared = (key, fallback) => items.every(item => (item[key] ?? fallback) === (items[0][key] ?? fallback)) ? items[0][key] ?? fallback : null;
+	const alpha = shared("alpha", 255), dash = shared("dashPattern", "");
+	el.objectOpacity.value = alpha === null ? "" : String(Math.round((1 - alpha / 255) * 10000) / 100);
+	el.objectOpacity.placeholder = alpha === null ? "混合" : "";
+	el.objectStrokeFields.hidden = !items.every(item => item.type === "PathObject");
+	el.objectDash.value = dash === null ? "mixed" : dash === "" ? "solid" : "custom";
+	el.objectDashPattern.value = dash || "";
+	el.objectDashRow.hidden = el.objectDash.value !== "custom";
+	el.objectDashPattern.required = !el.objectStrokeFields.hidden && !el.objectDashRow.hidden;
+	el.objectDashOffset.value = shared("dashOffset", 0) ?? "";
+	el.objectCap.value = shared("cap", "") || (shared("cap", "") === null ? "mixed" : "Butt");
+	el.objectJoin.value = shared("join", "") || (shared("join", "") === null ? "mixed" : "Miter");
+	state.styleOriginal = Object.fromEntries(["objectOpacity", "objectDash", "objectDashPattern", "objectDashOffset", "objectCap", "objectJoin"].map(key => [key, el[key].value]));
+	el.objectStyleStatus.textContent = "";
+	el.objectStylePanel.showModal();
+}
+
+function readObjectStyle() {
+	const style = {}, changed = key => el[key].value !== state.styleOriginal[key];
+	if (changed("objectOpacity") && el.objectOpacity.value !== "") style.alpha = Math.round((1 - Number(el.objectOpacity.value) / 100) * 255);
+	if (!el.objectStrokeFields.hidden) {
+		if (changed("objectDash") || changed("objectDashPattern")) {
+			const patterns = { solid: "", dash: "3 2", dot: "0.3 1.5", dashdot: "3 1.5 0.3 1.5", custom: el.objectDashPattern.value.trim() };
+			if (el.objectDash.value in patterns) style.dashPattern = patterns[el.objectDash.value];
+		}
+		if (changed("objectDashOffset") && el.objectDashOffset.value !== "") style.dashOffset = Number(el.objectDashOffset.value);
+		if (changed("objectCap") && el.objectCap.value !== "mixed") style.cap = el.objectCap.value;
+		if (changed("objectJoin") && el.objectJoin.value !== "mixed") style.join = el.objectJoin.value;
+	}
+	return style;
+}
+
+function openOutlinePanel(action) {
+	state.outlineAction = action;
+	let outline = null, items = state.doc.outlines || [];
+	for (const index of state.outlineSelection || []) { outline = items[index]; items = outline.children || []; }
+	el.outlineTitle.value = action === "add" ? "" : outline.title;
+	el.outlinePage.value = action === "add" ? String(state.pageIndex + 1) : outline.page || "";
+	el.outlinePage.max = String(state.doc.pageCount);
+	el.outlineParent.replaceChildren();
+	const addOption = (path, title) => {
+		const option = document.createElement("option");
+		option.value = JSON.stringify(path);
+		option.textContent = title;
+		option.title = title;
+		el.outlineParent.append(option);
+	};
+	addOption([], "无");
+	const walk = (items, path = []) => items.forEach((item, index) => {
+		const next = [...path, index];
+		addOption(next, `${"　".repeat(path.length)}${item.title}`);
+		walk(item.children || [], next);
+	});
+	walk(state.doc.outlines || []);
+	el.outlineParent.value = JSON.stringify(action === "add" ? state.outlineSelection || [] : state.outlineSelection.slice(0, -1));
+	el.outlineParent.disabled = action !== "add";
+	el.outlineTitle.disabled = el.outlinePage.disabled = action === "delete";
+	el.outlineSubmit.textContent = { add: "新增", update: "确定", delete: "删除" }[action];
+	el.outlineStatus.textContent = action === "delete" && outline.children?.length ? "同时删除子目录" : "";
+	el.outlinePanel.showModal();
 }
 
 function openImportPanel() {
@@ -899,6 +1032,8 @@ async function toggleEditor() {
 			setPan(false);
 		}
 		updateControls();
+		renderOutlines(false);
+		renderPageList();
 		applyFit(false);
 		return;
 	}
@@ -1432,6 +1567,13 @@ async function changeDocument(name, item, ...args) {
 			updateControls();
 			return true;
 		}
+		if (name === "ofdgoChangeOutline") {
+			state.doc.outlines = doc.outlines;
+			renderOutlines(false);
+			showNavigation(el.outlinesTab);
+			updateControls();
+			return true;
+		}
 		const clearSelection = !item || ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoEraseObjects", "ofdgoEraseObjectsPath"].includes(name);
 		if (name === "ofdgoCopyObjects" || name === "ofdgoPasteObjects" || name === "ofdgoInsertShape" || name === "ofdgoInsertText" || name === "ofdgoInsertImage") {
 			state.selectObjects = true;
@@ -1457,7 +1599,13 @@ async function changeDocument(name, item, ...args) {
 		}
 	} catch (err) {
 		if (openSeq === state.openSeq) {
-			if (el.infoPanel.open) {
+			if (el.batchPagesPanel.open) {
+				el.batchPagesStatus.textContent = err.message;
+			} else if (el.objectStylePanel.open) {
+				el.objectStyleStatus.textContent = err.message;
+			} else if (el.outlinePanel.open) {
+				el.outlineStatus.textContent = err.message;
+			} else if (el.infoPanel.open) {
 				el.infoStatus.textContent = err.message;
 			} else if (el.pagePanel.open) {
 				el.pageStatus.textContent = err.message;
@@ -1984,6 +2132,9 @@ async function openOFD(file) {
 		el.paragraphPanel.close();
 		el.infoPanel.close();
 		el.importPanel.close();
+		el.batchPagesPanel.close();
+		el.objectStylePanel.close();
+		el.outlinePanel.close();
 		updateControls();
 		await openDocument({ pageIndex: 0, resetScroll: true, openSeq });
 	} catch (err) {
@@ -2439,7 +2590,7 @@ async function openDocument(options = {}) {
 		resetPageFlow(options.keepPreview);
 		renderPageList();
 		if (options.keepPreview || options.resetScroll || el.outlineList.childElementCount === 0) {
-			renderOutlines();
+			renderOutlines(!options.keepPreview);
 		}
 		renderMeta();
 		renderPageFlow();
@@ -3514,18 +3665,36 @@ function showNavigation(selected) {
 	el.pageListPanel.scrollTop = state.navigationScroll.get(selected) || 0;
 }
 
-function renderOutlines() {
-	state.navigationScroll.clear();
-	el.pageListPanel.scrollTop = 0;
+function renderOutlines(reset = true) {
+	const selected = !reset && [el.pagesTab, el.outlinesTab, el.searchTab].find(tab => tab.getAttribute("aria-selected") === "true");
+	const scrollTop = reset ? 0 : el.pageListPanel.scrollTop;
+	if (reset) state.navigationScroll.clear();
 	const outlines = state.doc.outlines || [];
 	el.pageListTitle.hidden = true;
 	el.navigationTabs.hidden = false;
-	el.outlinesTab.hidden = outlines.length === 0;
+	el.outlinesTab.hidden = outlines.length === 0 && !state.editing;
 	el.outlineList.replaceChildren();
+	state.outlineSelection = null;
+	if (state.editing) {
+		const tools = document.createElement("div");
+		tools.className = "outline-tools";
+		for (const [action, label] of [["add", "新增"], ["update", "修改"], ["delete", "删除"]]) {
+			const button = document.createElement("button");
+			button.className = "button";
+			button.type = "button";
+			button.textContent = label;
+			button.dataset.outlineAction = action;
+			button.disabled = action !== "add";
+			editorClick(button, () => openOutlinePanel(action));
+			tools.append(button);
+		}
+		el.outlineList.append(tools);
+	}
 	if (outlines.length > 0) {
 		el.outlineList.append(createOutlineList(outlines));
 	}
-	showNavigation(el.pagesTab);
+	el.pageListPanel.scrollTop = scrollTop;
+	showNavigation(selected && !selected.hidden ? selected : el.pagesTab);
 }
 
 function resetSearch(clearInput = true) {
@@ -3703,17 +3872,18 @@ function renderSearchHighlights(index) {
 	}
 }
 
-function createOutlineList(outlines) {
+function createOutlineList(outlines, path = []) {
 	const list = document.createElement("ul");
 	list.className = "outline-list";
-	for (const outline of outlines) {
+	for (const [index, outline] of outlines.entries()) {
+		const current = [...path, index];
 		const item = document.createElement("li");
 		const hasChildren = outline.children?.length > 0;
 		const row = document.createElement(hasChildren ? "summary" : "div");
 		if (!hasChildren) {
 			row.className = "outline-leaf";
 		}
-		const link = document.createElement(outline.page ? "button" : "span");
+		const link = document.createElement(outline.page || state.editing ? "button" : "span");
 		link.className = "outline-link";
 		const title = document.createElement("span");
 		title.textContent = outline.title;
@@ -3725,16 +3895,24 @@ function createOutlineList(outlines) {
 			page.textContent = String(outline.page);
 			page.setAttribute("aria-label", `第 ${outline.page} 页`);
 			link.append(page);
+		}
+		if (outline.page || state.editing) {
+			link.type = "button";
 			link.addEventListener("click", (event) => {
 				event.preventDefault();
-				renderPage(outline.page - 1);
+				if (state.editing) {
+					state.outlineSelection = current;
+					for (const node of el.outlineList.querySelectorAll(".outline-link")) node.classList.toggle("selected", node === link);
+					for (const button of el.outlineList.querySelectorAll("[data-outline-action]")) button.disabled = false;
+				}
+				if (outline.page) renderPage(outline.page - 1);
 			});
 		}
 		row.append(link);
 		if (hasChildren) {
 			const details = document.createElement("details");
 			details.open = outline.expanded;
-			details.append(row, createOutlineList(outline.children));
+			details.append(row, createOutlineList(outline.children, current));
 			item.append(details);
 		} else {
 			item.append(row);
@@ -3778,6 +3956,7 @@ function renderPageList() {
 		size.textContent = `${formatSize(page.width)} x ${formatSize(page.height)} mm`;
 
 		button.append(thumb, label, size);
+		if (state.editing && pageCan("move", page.index)) enablePageDrag(button, page.index);
 		button.addEventListener("click", () => renderPage(page.index));
 		fragment.append(button);
 		thumbnailTargets.push([button, page.index]);
@@ -3795,6 +3974,83 @@ function resetThumbnails() {
 		state.thumbnailObserver.disconnect();
 		state.thumbnailObserver = null;
 	}
+}
+
+function pageDropIndex(from, target, after) {
+	const position = target + Number(after);
+	return position > from ? position - 1 : position;
+}
+
+function enablePageDrag(button, index) {
+	const grip = document.createElement("span");
+	grip.className = "thumb-grip";
+	grip.title = "拖动排序";
+	grip.setAttribute("aria-hidden", "true");
+	button.append(grip);
+	grip.addEventListener("click", event => event.stopPropagation());
+	grip.addEventListener("pointerdown", event => {
+		if (event.button !== 0 || document.body.hasAttribute("aria-busy")) return;
+		event.preventDefault();
+		event.stopPropagation();
+		const seq = state.openSeq, pointer = event.pointerId;
+		let x = event.clientX, y = event.clientY, target = index, marker = null, frame = 0, dragging = false;
+		const clearMarker = () => { marker?.classList.remove("drop-before", "drop-after"); marker = null; };
+		const locate = () => {
+			clearMarker();
+			target = index;
+			const node = document.elementFromPoint(x, y)?.closest(".page-list-item");
+			if (!node || !el.pageList.contains(node)) return;
+			const rect = node.getBoundingClientRect(), after = y > rect.top + rect.height / 2;
+			target = pageDropIndex(index, Number(node.dataset.pageIndex), after);
+			if (target !== index) { marker = node; marker.classList.add(after ? "drop-after" : "drop-before"); }
+		};
+		const tick = () => {
+			if (seq !== state.openSeq || !state.editing) { finish(false); return; }
+			if (dragging) {
+				const rect = el.pageListPanel.getBoundingClientRect();
+				const delta = y < rect.top + 48 ? -10 : y > rect.bottom - 48 ? 10 : 0;
+				if (delta) el.pageListPanel.scrollTop += delta;
+				locate();
+			}
+			frame = requestAnimationFrame(tick);
+		};
+		const move = next => {
+			if (next.pointerId !== pointer) return;
+			x = next.clientX; y = next.clientY;
+			dragging ||= Math.hypot(x - event.clientX, y - event.clientY) > 4;
+			button.classList.toggle("reordering", dragging);
+			if (dragging) locate();
+		};
+		const finish = async commit => {
+			cancelAnimationFrame(frame);
+			grip.removeEventListener("pointermove", move);
+			grip.removeEventListener("pointerup", up);
+			grip.removeEventListener("pointercancel", cancel);
+			grip.removeEventListener("lostpointercapture", cancel);
+			clearMarker();
+			button.classList.remove("reordering");
+			if (grip.hasPointerCapture(pointer)) grip.releasePointerCapture(pointer);
+			if (commit && dragging && target !== index && seq === state.openSeq && await canvasEditor.commitText() && await canvasEditor.commitCrop()) {
+				await changeDocument("ofdgoChangePage", null, "move", index, target);
+			}
+		};
+		const up = next => { if (next.pointerId === pointer) finish(true); };
+		const cancel = () => finish(false);
+		grip.setPointerCapture(pointer);
+		grip.addEventListener("pointermove", move);
+		grip.addEventListener("pointerup", up);
+		grip.addEventListener("pointercancel", cancel);
+		grip.addEventListener("lostpointercapture", cancel);
+		frame = requestAnimationFrame(tick);
+	});
+	button.addEventListener("keydown", async event => {
+		if (!event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key) || document.body.hasAttribute("aria-busy")) return;
+		event.preventDefault();
+		const target = index + (event.key === "ArrowUp" ? -1 : 1);
+		if (target >= 0 && target < state.doc.pageCount && await canvasEditor.commitText() && await canvasEditor.commitCrop()) {
+			if (await changeDocument("ofdgoChangePage", null, "move", index, target)) el.pageList.querySelector(`[data-page-index="${target}"]`)?.focus();
+		}
+	});
 }
 
 function layoutThumbnail(button, page) {
@@ -4665,6 +4921,7 @@ function updateEditorTools() {
 	const pagesDisabled = !state.editing || !state.ready || state.exporting;
 	el.insertTextButton.disabled = el.insertImageButton.disabled = pagesDisabled || !pageCan("insert");
 	el.saveButton.disabled = el.addPageButton.disabled = pagesDisabled;
+	el.batchPagesButton.disabled = pagesDisabled;
 	el.copyPageButton.disabled = pagesDisabled || !pageCan("copy");
 	el.pageSettingsButton.disabled = pagesDisabled || !pageCan("resize");
 	el.deletePageButton.disabled = pagesDisabled || !pageCan("delete") || state.doc?.pageCount <= 1;
@@ -4681,6 +4938,7 @@ function updateObjectControls(item, reset = false) {
 	const disabled = !item || Boolean(item.draft) || !state.ready || state.exporting;
 	el.deleteObjectButton.disabled = disabled || !canEditObject(item, "delete");
 	el.copyObjectButton.disabled = disabled || !canEditObject(item, "copy");
+	el.objectStyleButton.disabled = disabled || !canEditObject(item, "transform");
 	const cropping = Boolean(canvasEditor.crop);
 	el.objectAlign.disabled = disabled || cropping || !canEditObject(item, "arrange");
 	el.objectRotate.disabled = el.objectFlip.disabled = el.objectAlign.disabled;
@@ -4803,6 +5061,12 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	el.paragraphForm.inert = busy;
 	el.infoForm.inert = busy;
 	el.importForm.inert = busy;
+	el.batchPagesForm.inert = busy;
+	el.objectStyleForm.inert = busy;
+	el.outlineForm.inert = busy;
+	el.outlineList.inert = busy;
+	el.navigationTabs.inert = busy;
+	el.pageList.inert = busy;
 	el.editorTools.inert = busy;
 	el.fontList.inert = busy;
 	if (!busy) {

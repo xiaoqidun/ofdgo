@@ -129,6 +129,12 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error) error {
 		if err != nil {
 			return err
 		}
+		if name == "Doc_0/Document.xml" {
+			data, err = e.withOutlines(data)
+			if err != nil {
+				return err
+			}
+		}
 		return write(name, data, false)
 	}
 	if err := writeXML("OFD.xml", func(x *ofdXML) {

@@ -110,6 +110,9 @@ func RunWASM() {
 	registerCallback("ofdgoEditDocument", editDocument)
 	registerCallback("ofdgoUpdateInfo", updateInfo)
 	registerCallback("ofdgoChangePage", changePage)
+	registerCallback("ofdgoBatchPages", batchPages)
+	registerCallback("ofdgoChangeOutline", changeOutline)
+	registerCallback("ofdgoStyleObjects", styleObjects)
 	registerCallback("ofdgoLoadImport", loadImport)
 	registerCallback("ofdgoImportPages", importPages)
 	registerCallback("ofdgoInsertText", insertText)
@@ -722,24 +725,46 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 				if missing := capability.MissingGlyphs; missing != nil {
 					item["capabilities"].(map[string]any)["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
 				}
+				var alpha *int
+				switch object.Type {
+				case "TextObject":
+					alpha = object.TextObject.Alpha
+				case "ImageObject":
+					alpha = object.ImageObject.Alpha
+				case "PathObject":
+					alpha = object.PathObject.Alpha
+				}
+				item["alpha"] = 255
+				if alpha != nil {
+					item["alpha"] = *alpha
+				}
+				if object.Type == "PathObject" {
+					path := object.PathObject
+					item["dashPattern"], item["cap"], item["join"] = path.DashPattern, path.Cap, path.Join
+					item["dashOffset"] = 0.0
+					if path.DashOffset != nil {
+						item["dashOffset"] = *path.DashOffset
+					}
+					kind, geometry := path.Shape()
+					if kind != "" && capability.Update {
+						item["shape"] = string(kind)
+						item["geometry"] = map[string]any{"x": geometry.X, "y": geometry.Y, "width": geometry.W, "height": geometry.H}
+					} else if outline, err := path.Outline(); err == nil {
+						item["outline"] = outline
+					}
+					if capability.Update {
+						item["fill"], item["stroke"] = path.Fill != nil && *path.Fill, path.Stroke == nil || *path.Stroke
+						item["fillColor"] = editorColorHex(path.FillColor)
+						item["strokeColor"] = editorColorHex((*ofdgo.FillColor)(path.StrokeColor))
+						item["lineWidth"] = path.LineWidth * editorPathScale(path)
+					}
+				}
 				if object.Type == "ImageObject" && capability.Update {
 					full, err := object.ImageObject.ImageBounds()
 					if err != nil {
 						return nil, err
 					}
 					item["imageBounds"] = editorBox(full)
-				}
-				if object.Type == "PathObject" && capability.Update {
-					path := object.PathObject
-					kind, geometry := path.Shape()
-					if kind != "" {
-						item["shape"] = string(kind)
-						item["geometry"] = map[string]any{"x": geometry.X, "y": geometry.Y, "width": geometry.W, "height": geometry.H}
-					}
-					item["fill"], item["stroke"] = path.Fill != nil && *path.Fill, path.Stroke == nil || *path.Stroke
-					item["fillColor"] = editorColorHex(path.FillColor)
-					item["strokeColor"] = editorColorHex((*ofdgo.FillColor)(path.StrokeColor))
-					item["lineWidth"] = path.LineWidth * editorPathScale(path)
 				}
 				if object.Type == "TextObject" {
 					value, layout := object.TextObject.TextLayout()
@@ -1008,6 +1033,96 @@ func changePage(args []js.Value) (any, error) {
 		return nil, err
 	}
 	return editorPageInfo{info, index}, nil
+}
+
+// batchPages 按页码范围批量复制或删除页面
+// 入参: args 操作及页码表达式
+// 返回: any 文档信息及目标页, error 错误信息
+func batchPages(args []js.Value) (any, error) {
+	index := 0
+	info, err := changeObjects(func() error {
+		indexes, err := ofdgo.ParsePageRange(args[1].String(), currentEditor.PageCount())
+		if err != nil {
+			return err
+		}
+		switch args[0].String() {
+		case "copy":
+			copies, err := currentEditor.CopyPages(indexes)
+			if err == nil && len(copies) > 0 {
+				index = copies[0]
+			}
+			return err
+		case "delete":
+			if len(indexes) == currentEditor.PageCount() {
+				return fmt.Errorf("the document must contain at least one page")
+			}
+			if err := currentEditor.DeletePages(indexes); err != nil {
+				return err
+			}
+			index = min(indexes[0], currentEditor.PageCount()-1)
+			return nil
+		default:
+			return fmt.Errorf("unsupported page action %q", args[0].String())
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return editorPageInfo{info.(editorInfo), index}, nil
+}
+
+// changeOutline 新增、修改或删除层级目录
+// 入参: args 操作、层级索引、标题及目标页面索引
+// 返回: any 文档信息, error 错误信息
+func changeOutline(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		path := make([]int, args[1].Length())
+		for i := range path {
+			path[i] = args[1].Index(i).Int()
+		}
+		switch args[0].String() {
+		case "add":
+			_, err := currentEditor.AddOutline(path, args[2].String(), args[3].Int())
+			return err
+		case "update":
+			return currentEditor.UpdateOutline(path, args[2].String(), args[3].Int())
+		case "delete":
+			return currentEditor.DeleteOutline(path)
+		default:
+			return fmt.Errorf("unsupported outline action %q", args[0].String())
+		}
+	})
+}
+
+// styleObjects 原子更新对象透明度和路径描边属性
+// 入参: args 页面索引、对象标识数组及样式，省略字段保持原值
+// 返回: any 文档信息, error 错误信息
+func styleObjects(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		style := ofdgo.ObjectStyle{}
+		value := args[2]
+		if field := value.Get("alpha"); !field.IsUndefined() {
+			v := field.Int()
+			style.Alpha = &v
+		}
+		if field := value.Get("dashPattern"); !field.IsUndefined() {
+			v := field.String()
+			style.DashPattern = &v
+		}
+		if field := value.Get("dashOffset"); !field.IsUndefined() {
+			v := field.Float()
+			style.DashOffset = &v
+		}
+		if field := value.Get("cap"); !field.IsUndefined() {
+			v := field.String()
+			style.Cap = &v
+		}
+		if field := value.Get("join"); !field.IsUndefined() {
+			v := field.String()
+			style.Join = &v
+		}
+		return currentEditor.StyleObjects(args[0].Int(), stringsFromJS(args[1]), style)
+	})
 }
 
 // clearImport 释放待插页文档

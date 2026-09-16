@@ -159,6 +159,22 @@ func (e *Editor) sourceParts() (map[string][]byte, error) {
 		}
 		parts["OFD.xml"] = data
 	}
+	if e.outlines != nil {
+		name := reader.ResPath(reader.OFD.DocBody[0].DocRoot)
+		data, ok := parts[name]
+		if !ok {
+			var err error
+			data, err = reader.readFile(name)
+			if err != nil {
+				return nil, err
+			}
+		}
+		updated, err := e.withOutlines(data)
+		if err != nil {
+			return nil, err
+		}
+		parts[name] = updated
+	}
 	if err := e.prunePageReferences(parts); err != nil {
 		return nil, err
 	}
