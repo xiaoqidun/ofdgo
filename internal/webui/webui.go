@@ -100,6 +100,7 @@ type SignatureStampInfo struct {
 type Session struct {
 	Reader         *ofdgo.Reader
 	Renderer       *ofdgo.Renderer
+	fontFS         *ofdgo.FontFS
 	doc            *ofdgo.Document
 	pageCache      map[int]*ofdgo.PageContent
 	boxCache       map[int]ofdgo.Box
@@ -232,8 +233,9 @@ func newSession(reader *ofdgo.Reader, opts OpenOptions) (*Session, error) {
 		return nil, err
 	}
 	var rendererOptions []ofdgo.RendererOption
+	var fontFS *ofdgo.FontFS
 	if len(opts.Fonts) > 0 {
-		fontFS := ofdgo.NewFontFS(opts.Fonts)
+		fontFS = ofdgo.NewFontFS(opts.Fonts)
 		if fontFS.Len() == 0 {
 			reader.Close()
 			return nil, fmt.Errorf("invalid font file")
@@ -244,6 +246,7 @@ func newSession(reader *ofdgo.Reader, opts OpenOptions) (*Session, error) {
 	return &Session{
 		Reader:    reader,
 		Renderer:  ofdgo.NewRenderer(reader, rendererOptions...),
+		fontFS:    fontFS,
 		doc:       doc,
 		pageCache: make(map[int]*ofdgo.PageContent),
 		boxCache:  make(map[int]ofdgo.Box),
@@ -271,8 +274,10 @@ func (s *Session) SetFonts(fonts []FontFile) error {
 			return fmt.Errorf("invalid font file")
 		}
 		s.Renderer.SetFontFS(fontFS)
+		s.fontFS = fontFS
 	} else {
 		s.Renderer.SetFontFS()
+		s.fontFS = nil
 	}
 	clear(s.textCache)
 	clear(s.svgFonts)

@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"image"
 	"math"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,8 +32,8 @@ import (
 	"github.com/tdewolff/font"
 )
 
-// Editor 新建OFD文档，长度单位为毫米，页面索引从0开始，实例需串行使用
-// Info可修改文档元数据，通过方法管理页面、对象和资源，不修改已有OFD文件
+// Editor 编辑OFD文档，长度单位为毫米，页面索引从0开始，实例需串行使用
+// Info可修改文档元数据，通过方法管理页面、对象和资源，WriteTo另存结果，不覆盖输入
 type Editor struct {
 	Info         DocInfo
 	pages        []PageContent
@@ -48,6 +47,7 @@ type Editor struct {
 	historyLimit int
 	revision     uint64
 	serial       uint64
+	source       *editorSource
 }
 
 // editorResource 文档内嵌资源
@@ -96,18 +96,23 @@ func (e *Editor) Page(index int) (*PageContent, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := encodeOFDXML(func(x *ofdXML) { x.page(*page) })
-	if err != nil {
-		return nil, err
-	}
-	var result PageContent
-	if err := xml.Unmarshal(data, &result); err != nil {
-		return nil, err
-	}
-	result.ID = page.ID
-	for i, layer := range page.Content.Layer {
-		for j, object := range layer.Objects {
-			result.Content.Layer[i].Objects[j].TextObject.layout = object.TextObject.layout
+	result := cloneEditorData(*page)
+	result.XMLName = xml.Name{Space: ofdNamespace, Local: "Page"}
+	for i := range result.Content.Layer {
+		layer := &result.Content.Layer[i]
+		layer.TextObject, layer.PathObject, layer.ImageObject, layer.CompositeGraphicUnit = nil, nil, nil, nil
+		for _, object := range layer.Objects {
+			switch object.Type {
+			case "TextObject":
+				object.TextObject.layout = nil
+				layer.TextObject = append(layer.TextObject, object.TextObject)
+			case "PathObject":
+				layer.PathObject = append(layer.PathObject, object.PathObject)
+			case "ImageObject":
+				layer.ImageObject = append(layer.ImageObject, object.ImageObject)
+			case "CompositeObject", "CompositeGraphicUnit":
+				layer.CompositeGraphicUnit = append(layer.CompositeGraphicUnit, object.CompositeGraphicUnit)
+			}
 		}
 	}
 	return &result, nil
@@ -120,6 +125,11 @@ func (e *Editor) page(index int) (*PageContent, error) {
 	if index < 0 || index >= len(e.pages) {
 		return nil, fmt.Errorf("page index %d out of range", index)
 	}
+	if e.source != nil {
+		if err := e.loadSourcePage(index); err != nil {
+			return nil, err
+		}
+	}
 	return &e.pages[index], nil
 }
 
@@ -129,6 +139,9 @@ func (e *Editor) page(index int) (*PageContent, error) {
 func (e *Editor) AddPage(width, height float64) (int, error) {
 	if !finite(width) || !finite(height) || width <= 0 || height <= 0 {
 		return 0, fmt.Errorf("page dimensions must be finite and positive")
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return 0, err
 	}
 	e.pages = append(e.pages, PageContent{
 		ID:      e.nextID(),
@@ -145,6 +158,9 @@ func (e *Editor) AddPage(width, height float64) (int, error) {
 // 入参: index 原页面索引
 // 返回: int 副本页面索引, error 错误信息
 func (e *Editor) CopyPage(index int) (int, error) {
+	if e.originalPage(index) {
+		return 0, fmt.Errorf("copying imported pages is not supported")
+	}
 	source, err := e.page(index)
 	if err != nil {
 		return 0, err
@@ -165,7 +181,11 @@ func (e *Editor) CopyPage(index int) (int, error) {
 		layer.ID = e.nextID()
 		for j := range layer.Objects {
 			object := &layer.Objects[j]
+			origin := e.objectOrigin(editorObjectID(*object))
 			id := e.nextID()
+			if origin != nil {
+				e.source.origins[id] = origin
+			}
 			switch object.Type {
 			case "TextObject":
 				object.TextObject.ID = id
@@ -186,6 +206,9 @@ func (e *Editor) CopyPage(index int) (int, error) {
 // 入参: index 页面索引
 // 返回: error 错误信息
 func (e *Editor) DeletePage(index int) error {
+	if e.originalPage(index) {
+		return fmt.Errorf("deleting imported pages is not supported")
+	}
 	page, err := e.page(index)
 	if err != nil {
 		return err
@@ -282,13 +305,16 @@ func (e *Editor) AddFont(file FontFile, index int) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("font has no name")
 	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return "", err
+	}
 	id := e.nextID()
 	extension := ".ttf"
 	if sfnt.IsCFF {
 		extension = ".otf"
 	}
 	resource := editorResource{
-		name: "Doc_0/Res/Font_" + id + extension,
+		name: e.resourceDirectory() + "/Font_" + id + extension,
 		data: data,
 		font: &Font{
 			ID: id, FontName: name,
@@ -299,7 +325,7 @@ func (e *Editor) AddFont(file FontFile, index int) (string, error) {
 			FixedWidth: sfnt.Post.IsFixedPitch != 0,
 		},
 	}
-	resource.font.FontFile = strings.TrimPrefix(resource.name, "Doc_0/Res/")
+	resource.font.FontFile = "Font_" + id + extension
 	e.resources = append(e.resources, resource)
 	e.fonts[id] = sfnt
 	e.resourceID[key] = id
@@ -335,6 +361,9 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 	if id, ok := e.resourceID[key]; ok {
 		return id, nil
 	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return "", err
+	}
 	id := e.nextID()
 	extension := format
 	if extension == "jpeg" {
@@ -342,7 +371,7 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 	}
 	name := "Image_" + id + "." + extension
 	e.resources = append(e.resources, editorResource{
-		name:  "Doc_0/Res/" + name,
+		name:  e.resourceDirectory() + "/" + name,
 		data:  bytes.Clone(data),
 		image: &MultiMedia{ID: id, Type: "Image", Format: strings.ToUpper(format), MediaFile: name},
 	})
@@ -356,29 +385,11 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 // 入参: page 页面索引, object 对象内容，添加后不再引用调用方的可变数据
 // 返回: string 对象标识, error 错误信息
 func (e *Editor) AddObject(page int, object GraphicObject) (string, error) {
-	content, err := e.page(page)
+	ids, err := e.CopyObjects(page, []GraphicObject{object}, 0, 0)
 	if err != nil {
 		return "", err
 	}
-	id := strconv.Itoa(e.maxID + 1)
-	object, err = e.prepareObject(id, object)
-	if err != nil {
-		return "", err
-	}
-	e.maxID++
-	content.Content.Layer[0].Objects = append(content.Content.Layer[0].Objects, object)
-	if change := e.recordChange(); change != nil {
-		index := len(content.Content.Layer[0].Objects) - 1
-		change.undo = func(e *Editor) {
-			layer := &e.pages[page].Content.Layer[0]
-			layer.Objects = slices.Delete(layer.Objects, index, index+1)
-		}
-		change.redo = func(e *Editor) {
-			layer := &e.pages[page].Content.Layer[0]
-			layer.Objects = slices.Insert(layer.Objects, index, object)
-		}
-	}
-	return id, nil
+	return ids[0], nil
 }
 
 // Object 获取对象的独立副本，修改副本不影响文档
@@ -396,39 +407,24 @@ func (e *Editor) Object(page int, id string) (GraphicObject, error) {
 // 入参: page 页面索引, id 对象标识, object 新内容，忽略其ID且不引用调用方的可变数据
 // 返回: error 错误信息
 func (e *Editor) UpdateObject(page int, id string, object GraphicObject) error {
-	_, index, err := e.findObject(page, id)
-	if err != nil {
-		return err
+	switch object.Type {
+	case "TextObject":
+		object.TextObject.ID = id
+	case "PathObject":
+		object.PathObject.ID = id
+	case "ImageObject":
+		object.ImageObject.ID = id
+	default:
+		return fmt.Errorf("unsupported object type %q", object.Type)
 	}
-	object, err = e.prepareObject(id, object)
-	if err != nil {
-		return err
-	}
-	e.replaceObject(page, index, object)
-	return nil
+	return e.UpdateObjects(page, []GraphicObject{object})
 }
 
 // DeleteObject 删除对象，不回收资源或复用标识
 // 入参: page 页面索引, id 对象标识
 // 返回: error 错误信息
 func (e *Editor) DeleteObject(page int, id string) error {
-	layer, index, err := e.findObject(page, id)
-	if err != nil {
-		return err
-	}
-	if change := e.recordChange(); change != nil {
-		object := layer.Objects[index]
-		change.undo = func(e *Editor) {
-			layer := &e.pages[page].Content.Layer[0]
-			layer.Objects = slices.Insert(layer.Objects, index, object)
-		}
-		change.redo = func(e *Editor) {
-			layer := &e.pages[page].Content.Layer[0]
-			layer.Objects = slices.Delete(layer.Objects, index, index+1)
-		}
-	}
-	layer.Objects = slices.Delete(layer.Objects, index, index+1)
-	return nil
+	return e.DeleteObjects(page, []string{id})
 }
 
 // MoveObject 调整同页正文图层内的绘制顺序，保留对象标识和内容
@@ -445,30 +441,24 @@ func (e *Editor) MoveObject(page int, id string, to int) error {
 	if from == to {
 		return nil
 	}
-	moveEditorItem(layer.Objects, from, to)
-	if change := e.recordChange(); change != nil {
-		change.undo = func(e *Editor) { moveEditorItem(e.pages[page].Content.Layer[0].Objects, to, from) }
-		change.redo = func(e *Editor) { moveEditorItem(e.pages[page].Content.Layer[0].Objects, from, to) }
+	capability, err := e.ObjectCapabilities(page, id)
+	if err != nil {
+		return err
 	}
+	if !capability.Order {
+		return fmt.Errorf("object %q cannot be reordered", id)
+	}
+	layers := copyEditorPage(e.pages[page]).Content.Layer
+	for i := range layers {
+		if layers[i].ID == layer.ID {
+			moveEditorItem(layers[i].Objects, from, to)
+		}
+	}
+	e.replaceLayers(page, layers)
 	return nil
 }
 
-// replaceObject 提交已校验的对象并记录前后内容
-// 入参: page 页面索引, index 对象索引, object 新内容
-func (e *Editor) replaceObject(page, index int, object GraphicObject) {
-	layer := &e.pages[page].Content.Layer[0]
-	before := layer.Objects[index]
-	if reflect.DeepEqual(before, object) {
-		return
-	}
-	layer.Objects[index] = object
-	if change := e.recordChange(); change != nil {
-		change.undo = func(e *Editor) { e.pages[page].Content.Layer[0].Objects[index] = before }
-		change.redo = func(e *Editor) { e.pages[page].Content.Layer[0].Objects[index] = object }
-	}
-}
-
-// findObject 查找正文图层中的对象
+// findObject 查找页面各图层中的对象
 // 入参: page 页面索引, id 对象标识
 // 返回: *Layer 所属图层, int 对象索引, error 错误信息
 func (e *Editor) findObject(page int, id string) (*Layer, int, error) {
@@ -476,19 +466,12 @@ func (e *Editor) findObject(page int, id string) (*Layer, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	layer := &content.Content.Layer[0]
-	for index, object := range layer.Objects {
-		var objectID string
-		switch object.Type {
-		case "TextObject":
-			objectID = object.TextObject.ID
-		case "PathObject":
-			objectID = object.PathObject.ID
-		case "ImageObject":
-			objectID = object.ImageObject.ID
-		}
-		if objectID == id {
-			return layer, index, nil
+	for i := range content.Content.Layer {
+		layer := &content.Content.Layer[i]
+		for index, object := range layer.Objects {
+			if editorObjectID(object) == id && id != "" {
+				return layer, index, nil
+			}
 		}
 	}
 	return nil, 0, fmt.Errorf("object %q not found on page %d", id, page)
@@ -506,8 +489,12 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 	switch object.Type {
 	case "TextObject":
 		obj := &object.TextObject
+		codes := obj.TextCode
 		if err := e.prepareText(obj); err != nil {
 			return GraphicObject{}, err
+		}
+		if e.objectOrigin(obj.ID) != nil {
+			obj.TextCode = codes
 		}
 		obj.ID = id
 		boundary, ctm, drawParam = obj.Boundary, obj.CTM, obj.DrawParam
@@ -554,8 +541,13 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 		fill, stroke = obj.FillColor, (*FillColor)(obj.StrokeColor)
 	case "ImageObject":
 		obj := &object.ImageObject
-		if e.images[obj.ResourceID].X == 0 || (obj.ImageMask != "" && e.images[obj.ImageMask].X == 0) {
-			return GraphicObject{}, fmt.Errorf("image resource not found")
+		if _, err := e.editorImage(obj.ResourceID); err != nil {
+			return GraphicObject{}, err
+		}
+		if obj.ImageMask != "" {
+			if _, err := e.editorImage(obj.ImageMask); err != nil {
+				return GraphicObject{}, err
+			}
 		}
 		if obj.Border != nil {
 			return GraphicObject{}, fmt.Errorf("image borders are not supported for creation")
@@ -633,30 +625,21 @@ func (e *Editor) validateImageClips(clips *Clips) error {
 	return nil
 }
 
-// cloneEditorObject 通过统一序列化规则复制对象
+// cloneEditorObject 复制对象全部已解析字段，保留不可变的段落信息
 // 入参: object 对象内容
 // 返回: GraphicObject 独立副本, error 错误信息
 func cloneEditorObject(object GraphicObject) (GraphicObject, error) {
-	layout := object.TextObject.layout
-	data, err := encodeOFDXML(func(x *ofdXML) { x.object(object, true) })
-	if err != nil {
-		return GraphicObject{}, err
-	}
-	object = GraphicObject{Type: object.Type}
-	var target any
 	switch object.Type {
 	case "TextObject":
-		target = &object.TextObject
+		return GraphicObject{Type: object.Type, TextObject: cloneEditorData(object.TextObject)}, nil
 	case "PathObject":
-		target = &object.PathObject
+		return GraphicObject{Type: object.Type, PathObject: cloneEditorData(object.PathObject)}, nil
 	case "ImageObject":
-		target = &object.ImageObject
+		return GraphicObject{Type: object.Type, ImageObject: cloneEditorData(object.ImageObject)}, nil
+	case "CompositeObject", "CompositeGraphicUnit":
+		return GraphicObject{Type: object.Type, CompositeGraphicUnit: cloneEditorData(object.CompositeGraphicUnit)}, nil
 	}
-	if err := xml.Unmarshal(data, target); err != nil {
-		return GraphicObject{}, err
-	}
-	object.TextObject.layout = layout
-	return object, nil
+	return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
 }
 
 // AddText 添加文字，按显式换行和嵌入字体度量定位，不自动折行或进行复杂文字塑形
@@ -691,12 +674,7 @@ func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) er
 	if err := e.LayoutText(&object.TextObject, value, layout); err != nil {
 		return err
 	}
-	object, err = e.prepareObject(id, object)
-	if err != nil {
-		return err
-	}
-	e.replaceObject(page, index, object)
-	return nil
+	return e.UpdateObject(page, id, object)
 }
 
 // TransformObject 以页面原点等比缩放后平移对象，文字同步缩放字号和字距，保留原有排版
@@ -741,10 +719,15 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 		if scale != 1 {
 			object.ImageObject.Clips = transformImageClips(object.ImageObject.Clips, Matrix{a: scale, d: scale})
 		}
+	default:
+		return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
 	}
 	box, err := ParseBox(*boundary)
 	if err != nil {
 		return GraphicObject{}, err
+	}
+	if object.Type == "ImageObject" && *ctm == "" && scale != 1 {
+		*ctm = Matrix{a: box.W, d: box.H}.String()
 	}
 	*boundary = fmt.Sprintf("%s %s %s %s", ofdNumber(box.X*scale+dx), ofdNumber(box.Y*scale+dy), ofdNumber(box.W*scale), ofdNumber(box.H*scale))
 	if scale != 1 && (*ctm != "" || object.Type != "TextObject") {
@@ -810,8 +793,8 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 	if obj.ReadDirection != 0 || obj.CharDirection != 0 {
 		return fmt.Errorf("automatic text layout requires horizontal text")
 	}
-	sfnt, ok := e.fonts[obj.Font]
-	if !ok {
+	sfnt, err := e.editorFont(obj.Font)
+	if err != nil {
 		return fmt.Errorf("font resource %q not found", obj.Font)
 	}
 	if !finite(obj.Size) || obj.Size <= 0 || !finite(obj.HScale) || obj.HScale < 0 {
@@ -877,7 +860,7 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 	}
 	obj.TextCode = codes
 	obj.layout = nil
-	if options != (TextLayout{}) {
+	if options != (TextLayout{}) || e.objectOrigin(obj.ID) != nil {
 		obj.layout = &textLayout{value: value, options: options}
 	}
 	return nil
@@ -887,7 +870,8 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 // 入参: obj 文字对象
 // 返回: error 错误信息
 func (e *Editor) prepareText(obj *TextObject) error {
-	if e.fonts[obj.Font] == nil || !finite(obj.Size) || obj.Size <= 0 {
+	sfnt, err := e.editorFont(obj.Font)
+	if err != nil || !finite(obj.Size) || obj.Size <= 0 {
 		return fmt.Errorf("text requires an embedded font and a positive finite size")
 	}
 	if len(obj.TextCode) == 0 {
@@ -928,7 +912,7 @@ func (e *Editor) prepareText(obj *TextObject) error {
 		code.X, code.Y = x, y
 		runes := textCodeRunes(code.Value)
 		for _, char := range runes {
-			if e.fonts[obj.Font].GlyphIndex(char) == 0 {
+			if sfnt.GlyphIndex(char) == 0 {
 				return fmt.Errorf("font does not contain U+%04X", char)
 			}
 		}

@@ -91,8 +91,13 @@ func (e *Editor) orientObjects(page int, ids []string, matrix Matrix) error {
 			boundary, ctm = &object.PathObject.Boundary, &object.PathObject.CTM
 		case "ImageObject":
 			boundary, ctm = &object.ImageObject.Boundary, &object.ImageObject.CTM
+		default:
+			return fmt.Errorf("unsupported object type %q", object.Type)
 		}
 		before, _ := ParseBox(*boundary)
+		if object.Type == "ImageObject" && *ctm == "" {
+			*ctm = Matrix{a: before.W, d: before.H}.String()
+		}
 		after := matrix.TransformBox(before)
 		local := TranslationMatrix(-after.X, -after.Y).Multiply(matrix).Multiply(TranslationMatrix(before.X, before.Y))
 		*ctm = local.Multiply(NewMatrix(*ctm)).String()
@@ -102,7 +107,7 @@ func (e *Editor) orientObjects(page int, ids []string, matrix Matrix) error {
 		}
 		objects[i] = object
 	}
-	return e.UpdateObjects(page, objects)
+	return e.updateObjects(page, objects, true)
 }
 
 // transformImageClips 同步变换不随对象CTM变化的裁剪区域，不修改原始裁剪数据。
@@ -174,6 +179,9 @@ func cropImageObject(image *ImageObject, box Box) error {
 		return fmt.Errorf("crop must stay within the image bounds")
 	}
 	before, _ := ParseBox(image.Boundary)
+	if image.CTM == "" {
+		image.CTM = Matrix{a: before.W, d: before.H}.String()
+	}
 	if box.X != before.X || box.Y != before.Y {
 		image.CTM = TranslationMatrix(before.X-box.X, before.Y-box.Y).Multiply(NewMatrix(image.CTM)).String()
 	}
@@ -225,10 +233,16 @@ func (e *Editor) fitImage(obj *ImageObject, mode string) error {
 		return err
 	}
 	m := NewMatrix(obj.CTM)
+	if obj.CTM == "" {
+		m = Matrix{a: box.W, d: box.H}
+	}
 	if !axisAlignedMatrix(m) {
 		return fmt.Errorf("image fitting requires an axis-aligned transform")
 	}
-	size := e.images[obj.ResourceID]
+	size, err := e.editorImage(obj.ResourceID)
+	if err != nil {
+		return err
+	}
 	w, h := float64(size.X), float64(size.Y)
 	if m.a == 0 {
 		w, h = h, w

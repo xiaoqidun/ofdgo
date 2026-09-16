@@ -1071,6 +1071,10 @@ button.outline-link:hover {
 	outline-offset: -2px;
 }
 
+.viewer-panel.pointer-focus:focus {
+	outline: none;
+}
+
 .viewer-panel.pan-mode,
 .pan-mode .text-run > span {
 	cursor: grab;

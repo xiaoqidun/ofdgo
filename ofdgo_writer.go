@@ -21,6 +21,8 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -33,6 +35,9 @@ const ofdNamespace = "http://www.ofdspec.org/2016"
 func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
 	if err := e.validate(); err != nil {
 		return 0, err
+	}
+	if e.source != nil {
+		return e.writeSource(writer)
 	}
 	output := &ofdCountingWriter{writer: writer}
 	archive := zip.NewWriter(output)
@@ -61,6 +66,9 @@ func (e *Editor) Reader() (*Reader, error) {
 	if err := e.validate(); err != nil {
 		return nil, err
 	}
+	if e.source != nil {
+		return e.sourceReader()
+	}
 	r := &Reader{files: make(map[string][]byte)}
 	if err := e.writeParts(func(name string, data []byte, _ bool) error {
 		r.files[name] = data
@@ -83,10 +91,15 @@ func (e *Editor) validate() error {
 	if len(e.pages) == 0 {
 		return fmt.Errorf("document must contain at least one page")
 	}
-	if data, err := hex.DecodeString(e.Info.DocID); err != nil || len(data) != 16 {
-		return fmt.Errorf("DocID must contain 32 hexadecimal characters")
+	if e.source == nil || e.Info.DocID != e.source.info.DocID {
+		if data, err := hex.DecodeString(e.Info.DocID); err != nil || len(data) != 16 {
+			return fmt.Errorf("DocID must contain 32 hexadecimal characters")
+		}
 	}
-	for _, date := range []string{e.Info.CreationDate, e.Info.ModDate} {
+	for i, date := range []string{e.Info.CreationDate, e.Info.ModDate} {
+		if e.source != nil && date == []string{e.source.info.CreationDate, e.source.info.ModDate}[i] {
+			continue
+		}
 		if date != "" {
 			if _, err := time.Parse("2006-01-02", date); err != nil {
 				return fmt.Errorf("invalid document date: %w", err)
@@ -100,7 +113,7 @@ func (e *Editor) validate() error {
 // 入参: write 条目写入方法
 // 返回: error 错误信息
 func (e *Editor) writeParts(write func(string, []byte, bool) error) error {
-	fonts, images := e.usedResources()
+	fonts, images, _ := e.usedResources()
 	writeXML := func(name string, encode func(*ofdXML)) error {
 		data, err := encodeOFDXML(encode)
 		if err != nil {
@@ -185,20 +198,42 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error) error {
 	return nil
 }
 
-// usedResources 按注册顺序筛选当前页面引用的字体和图片，不修改资源池
-// 返回: []editorResource 字体资源, []editorResource 图片资源
-func (e *Editor) usedResources() (fonts, images []editorResource) {
+// usedResources 筛选当前引用的新增资源及需要跨页复用的原资源文件，不修改资源池。
+// 返回: []editorResource 新增字体, []editorResource 新增图片, []string 原资源文件
+func (e *Editor) usedResources() (fonts, images []editorResource, sourceFiles []string) {
 	used := make(map[string]bool)
+	promoted := make(map[string]bool)
 	for _, page := range e.pages {
+		var original map[string]GraphicObject
+		if e.source != nil {
+			original = make(map[string]GraphicObject)
+			if source := e.source.pages[page.ID]; source != nil && source.original != nil {
+				for _, layer := range source.original.Content.Layer {
+					for _, object := range layer.Objects {
+						original[editorObjectID(object)] = object
+					}
+				}
+			}
+		}
 		for _, layer := range page.Content.Layer {
 			for _, object := range layer.Objects {
+				before, exists := original[editorObjectID(object)]
 				switch object.Type {
 				case "TextObject":
 					used[object.TextObject.Font] = true
+					if e.source != nil && (!exists || before.Type != object.Type || before.TextObject.Font != object.TextObject.Font) {
+						promoted[object.TextObject.Font] = true
+					}
 				case "ImageObject":
 					used[object.ImageObject.ResourceID] = true
+					if e.source != nil && (!exists || before.Type != object.Type || before.ImageObject.ResourceID != object.ImageObject.ResourceID) {
+						promoted[object.ImageObject.ResourceID] = true
+					}
 					if object.ImageObject.ImageMask != "" {
 						used[object.ImageObject.ImageMask] = true
+						if e.source != nil && (!exists || before.Type != object.Type || before.ImageObject.ImageMask != object.ImageObject.ImageMask) {
+							promoted[object.ImageObject.ImageMask] = true
+						}
 					}
 				}
 			}
@@ -207,12 +242,20 @@ func (e *Editor) usedResources() (fonts, images []editorResource) {
 	for _, resource := range e.resources {
 		if resource.font != nil && used[resource.font.ID] {
 			fonts = append(fonts, resource)
+			delete(promoted, resource.font.ID)
 		}
 		if resource.image != nil && used[resource.image.ID] {
 			images = append(images, resource)
+			delete(promoted, resource.image.ID)
 		}
 	}
-	return fonts, images
+	files := make(map[string]bool)
+	for id := range promoted {
+		if name := e.source.reader.resourceFiles[id]; name != "" {
+			files[name] = true
+		}
+	}
+	return fonts, images, slices.Sorted(maps.Keys(files))
 }
 
 // page 写出页面尺寸、图层和对象
@@ -224,17 +267,23 @@ func (x *ofdXML) page(page PageContent) {
 	x.end("Area")
 	x.start("Content", nil)
 	for _, layer := range page.Content.Layer {
-		var attrs ofdAttrs
-		attrs.add("ID", layer.ID)
-		attrs.add("Type", layer.Type)
-		x.start("Layer", attrs)
-		for _, object := range layer.Objects {
-			x.object(object, false)
-		}
-		x.end("Layer")
+		x.layer(layer)
 	}
 	x.end("Content")
 	x.end("Page")
+}
+
+// layer 写出新建图层及其对象。
+// 入参: layer 图层
+func (x *ofdXML) layer(layer Layer) {
+	var attrs ofdAttrs
+	attrs.add("ID", layer.ID)
+	attrs.add("Type", layer.Type)
+	x.start("Layer", attrs)
+	for _, object := range layer.Objects {
+		x.object(object, false)
+	}
+	x.end("Layer")
 }
 
 // resources 写出文档资源索引

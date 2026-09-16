@@ -24,6 +24,22 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
+// editorObjectPosition 对象所属图层及层内索引。
+type editorObjectPosition struct {
+	layer int
+	index int
+}
+
+// compareEditorPosition 比较对象在页面结构中的先后顺序。
+// 入参: a、b 对象位置
+// 返回: int 比较结果
+func compareEditorPosition(a, b editorObjectPosition) int {
+	if value := cmp.Compare(a.layer, b.layer); value != 0 {
+		return value
+	}
+	return cmp.Compare(a.index, b.index)
+}
+
 // Objects 按绘制顺序获取选区的独立快照，保留编辑中的段落信息。
 // 入参: page 页面索引, ids 对象标识，不得重复
 // 返回: []GraphicObject 独立对象副本, error 错误信息
@@ -32,10 +48,18 @@ func (e *Editor) Objects(page int, ids []string) ([]GraphicObject, error) {
 	if err != nil {
 		return nil, err
 	}
-	slices.Sort(indexes)
+	slices.SortFunc(indexes, compareEditorPosition)
 	objects := make([]GraphicObject, len(indexes))
 	for i, index := range indexes {
-		objects[i], err = cloneEditorObject(e.pages[page].Content.Layer[0].Objects[index])
+		object := e.pages[page].Content.Layer[index.layer].Objects[index.index]
+		capability, err := e.ObjectCapabilities(page, editorObjectID(object))
+		if err != nil {
+			return nil, err
+		}
+		if !capability.Copy {
+			return nil, fmt.Errorf("object %q cannot be copied: %s", editorObjectID(object), capability.Reason)
+		}
+		objects[i], err = cloneEditorObject(object)
 		if err != nil {
 			return nil, err
 		}
@@ -51,33 +75,60 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 	if !finite(dx) || !finite(dy) {
 		return nil, fmt.Errorf("copy requires finite offsets")
 	}
-	content, err := e.page(page)
+	_, err := e.page(page)
 	if err != nil {
 		return nil, err
 	}
 	if len(objects) == 0 {
 		return nil, nil
 	}
-	before := content.Content.Layer[0].Objects
+	if !e.sourceRGB() {
+		return nil, fmt.Errorf("inserting objects requires an RGB default color space")
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return nil, err
+	}
 	prepared := make([]GraphicObject, len(objects))
 	result := make([]string, len(objects))
 	for i, object := range objects {
+		origin := e.objectOrigin(editorObjectID(object))
 		result[i] = strconv.Itoa(e.maxID + i + 1)
 		object, err := e.prepareObject(result[i], object)
 		if err != nil {
 			return nil, err
 		}
-		object, err = transformEditorObject(object, dx, dy, 1)
-		if err != nil {
-			return nil, err
+		if dx != 0 || dy != 0 {
+			object, err = transformEditorObject(object, dx, dy, 1)
+			if err != nil {
+				return nil, err
+			}
+			codes := object.TextObject.TextCode
+			object, err = e.prepareObject(result[i], object)
+			if err != nil {
+				return nil, err
+			}
+			if origin != nil {
+				object.TextObject.TextCode = codes
+			}
 		}
-		prepared[i], err = e.prepareObject(result[i], object)
-		if err != nil {
-			return nil, err
-		}
+		prepared[i] = object
 	}
 	e.maxID += len(objects)
-	e.replaceObjects(page, append(slices.Clone(before), prepared...))
+	for i, object := range objects {
+		if origin := e.objectOrigin(editorObjectID(object)); origin != nil {
+			e.source.origins[result[i]] = origin
+		}
+	}
+	layers := copyEditorPage(e.pages[page]).Content.Layer
+	target := 0
+	if e.originalPage(page) {
+		target = len(e.source.pages[e.pages[page].ID].original.Content.Layer)
+	}
+	if target == len(layers) {
+		layers = append(layers, Layer{ID: e.nextID(), Type: "Body"})
+	}
+	layers[target].Objects = append(layers[target].Objects, prepared...)
+	e.replaceLayers(page, layers)
 	return result, nil
 }
 
@@ -92,10 +143,20 @@ func (e *Editor) OrderObjects(page int, ids []string, order string) error {
 	if err != nil || len(indexes) == 0 {
 		return err
 	}
-	objects := slices.Clone(e.pages[page].Content.Layer[0].Objects)
+	for i, id := range ids {
+		capability, err := e.ObjectCapabilities(page, id)
+		if err != nil {
+			return err
+		}
+		if !capability.Order || indexes[i].layer != indexes[0].layer {
+			return fmt.Errorf("ordering requires editable objects in the same layer")
+		}
+	}
+	layers := copyEditorPage(e.pages[page]).Content.Layer
+	objects := layers[indexes[0].layer].Objects
 	selected := make([]bool, len(objects))
 	for _, index := range indexes {
-		selected[index] = true
+		selected[index.index] = true
 	}
 	switch order {
 	case "up":
@@ -123,7 +184,8 @@ func (e *Editor) OrderObjects(page int, ids []string, order string) error {
 		}
 		objects = ordered
 	}
-	e.replaceObjects(page, objects)
+	layers[indexes[0].layer].Objects = objects
+	e.replaceLayers(page, layers)
 	return nil
 }
 
@@ -158,7 +220,7 @@ func (e *Editor) DistributeObjects(page int, ids []string, axis string) error {
 		if c := cmp.Compare(positions[i], positions[j]); c != 0 {
 			return c
 		}
-		return cmp.Compare(indexes[i], indexes[j])
+		return compareEditorPosition(indexes[i], indexes[j])
 	})
 	first, last := order[0], order[len(order)-1]
 	gap := (positions[last] + sizes[last] - positions[first] - total) / float64(len(order)-1)
@@ -167,7 +229,7 @@ func (e *Editor) DistributeObjects(page int, ids []string, axis string) error {
 		if canvas.Equal(step, 0) {
 			step = 0
 		}
-		if step < 0 || step == 0 && indexes[index] > indexes[order[i+1]] {
+		if step < 0 || step == 0 && compareEditorPosition(indexes[index], indexes[order[i+1]]) > 0 {
 			return fmt.Errorf("overlap prevents ordered equal-gap distribution")
 		}
 	}
@@ -193,21 +255,24 @@ func (e *Editor) DistributeObjects(page int, ids []string, axis string) error {
 		}
 		updates = append(updates, object)
 	}
-	return e.UpdateObjects(page, updates)
+	return e.updateObjects(page, updates, true)
 }
 
-// replaceObjects 替换正文对象列表，隔离历史快照与后续的增删、排序操作。
-// 入参: page 页面索引, objects 新的正文对象列表
-func (e *Editor) replaceObjects(page int, objects []GraphicObject) {
-	before := e.pages[page].Content.Layer[0].Objects
-	if reflect.DeepEqual(before, objects) {
+// replaceLayers 替换图层容器，隔离历史快照与后续的增删、排序操作。
+// 入参: page 页面索引, layers 新图层列表
+func (e *Editor) replaceLayers(page int, layers []Layer) {
+	before := copyEditorPage(e.pages[page]).Content.Layer
+	if reflect.DeepEqual(before, layers) {
 		return
 	}
-	before, after := slices.Clone(before), slices.Clone(objects)
-	e.pages[page].Content.Layer[0].Objects = slices.Clone(after)
+	after := copyEditorPage(PageContent{Content: Content{Layer: layers}}).Content.Layer
+	apply := func(e *Editor, layers []Layer) {
+		e.pages[page].Content.Layer = copyEditorPage(PageContent{Content: Content{Layer: layers}}).Content.Layer
+	}
+	apply(e, after)
 	if change := e.recordChange(); change != nil {
-		change.undo = func(e *Editor) { e.pages[page].Content.Layer[0].Objects = slices.Clone(before) }
-		change.redo = func(e *Editor) { e.pages[page].Content.Layer[0].Objects = slices.Clone(after) }
+		change.undo = func(e *Editor) { apply(e, before) }
+		change.redo = func(e *Editor) { apply(e, after) }
 	}
 }
 
@@ -215,6 +280,13 @@ func (e *Editor) replaceObjects(page int, objects []GraphicObject) {
 // 入参: page 页面索引, objects 新对象内容，ID不得重复
 // 返回: error 错误信息
 func (e *Editor) UpdateObjects(page int, objects []GraphicObject) error {
+	return e.updateObjects(page, objects, false)
+}
+
+// updateObjects 校验内容更新或纯几何变换，原子提交跨图层选区。
+// 入参: page 页面索引, objects 新对象, geometry 是否保留原内容的几何操作
+// 返回: error 错误信息
+func (e *Editor) updateObjects(page int, objects []GraphicObject, geometry bool) error {
 	ids := make([]string, len(objects))
 	for i, object := range objects {
 		ids[i] = editorObjectID(object)
@@ -225,9 +297,25 @@ func (e *Editor) UpdateObjects(page int, objects []GraphicObject) error {
 	}
 	after := make([]GraphicObject, len(objects))
 	for i, object := range objects {
-		after[i], err = e.prepareObject(ids[i], object)
-		if err != nil {
-			return err
+		if e.originalPage(page) {
+			capability, err := e.ObjectCapabilities(page, ids[i])
+			if err != nil {
+				return err
+			}
+			if !capability.Transform || !geometry && !e.sourceRGB() {
+				return fmt.Errorf("object %q is read-only for this operation: %s", ids[i], capability.Reason)
+			}
+		}
+		if geometry && e.originalPage(page) {
+			if err := validateEditorGeometry(object); err != nil {
+				return err
+			}
+			after[i] = cloneEditorData(object)
+		} else {
+			after[i], err = e.prepareObject(ids[i], object)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	if reflect.DeepEqual(before, after) {
@@ -235,7 +323,7 @@ func (e *Editor) UpdateObjects(page int, objects []GraphicObject) error {
 	}
 	apply := func(e *Editor, objects []GraphicObject) {
 		for i, index := range indexes {
-			e.pages[page].Content.Layer[0].Objects[index] = objects[i]
+			e.pages[page].Content.Layer[index.layer].Objects[index.index] = objects[i]
 		}
 	}
 	apply(e, after)
@@ -261,6 +349,11 @@ func (e *Editor) TransformObjects(page int, ids []string, dx, dy, scale float64)
 		return nil
 	}
 	for i, object := range objects {
+		if e.originalPage(page) {
+			if err := validateEditorGeometry(object); err != nil {
+				return err
+			}
+		}
 		object, err = cloneEditorObject(object)
 		if err != nil {
 			return err
@@ -269,8 +362,11 @@ func (e *Editor) TransformObjects(page int, ids []string, dx, dy, scale float64)
 		if err != nil {
 			return err
 		}
+		if origin := e.objectOrigin(editorObjectID(object)); origin != nil && origin.node.attr("LineWidth") == "0" && object.Type == "TextObject" && object.TextObject.LineWidth == 0 {
+			objects[i].TextObject.LineWidth = 0
+		}
 	}
-	return e.UpdateObjects(page, objects)
+	return e.updateObjects(page, objects, true)
 }
 
 // AlignObjects 单对象对齐页面，多对象相互对齐至选区边界，文字采用实际字形范围。
@@ -320,7 +416,7 @@ func (e *Editor) AlignObjects(page int, ids []string, alignment string) error {
 			return err
 		}
 	}
-	return e.UpdateObjects(page, objects)
+	return e.updateObjects(page, objects, true)
 }
 
 // DeleteObjects 原子删除同页对象，保留其余对象顺序，一次撤销恢复全部。
@@ -331,25 +427,34 @@ func (e *Editor) DeleteObjects(page int, ids []string) error {
 	if err != nil || len(indexes) == 0 {
 		return err
 	}
-	before := e.pages[page].Content.Layer[0].Objects
-	after := slices.Clone(before)
-	slices.Sort(indexes)
-	for _, index := range slices.Backward(indexes) {
-		after = slices.Delete(after, index, index+1)
+	for _, id := range ids {
+		capability, err := e.ObjectCapabilities(page, id)
+		if err != nil {
+			return err
+		}
+		if !capability.Delete {
+			return fmt.Errorf("object %q cannot be deleted: %s", id, capability.Reason)
+		}
 	}
-	e.replaceObjects(page, after)
+	layers := copyEditorPage(e.pages[page]).Content.Layer
+	slices.SortFunc(indexes, compareEditorPosition)
+	for _, index := range slices.Backward(indexes) {
+		layer := &layers[index.layer]
+		layer.Objects = slices.Delete(layer.Objects, index.index, index.index+1)
+	}
+	e.replaceLayers(page, layers)
 	return nil
 }
 
 // selectedObjects 校验同页选择，返回内部只读对象与对应索引。
 // 入参: page 页面索引, ids 对象标识，不得重复
-// 返回: []GraphicObject 所选对象, []int 正文对象索引, error 错误信息
-func (e *Editor) selectedObjects(page int, ids []string) ([]GraphicObject, []int, error) {
+// 返回: []GraphicObject 所选对象, []editorObjectPosition 图层和对象索引, error 错误信息
+func (e *Editor) selectedObjects(page int, ids []string) ([]GraphicObject, []editorObjectPosition, error) {
 	if _, err := e.page(page); err != nil {
 		return nil, nil, err
 	}
 	objects := make([]GraphicObject, len(ids))
-	indexes := make([]int, len(ids))
+	indexes := make([]editorObjectPosition, len(ids))
 	seen := make(map[string]bool, len(ids))
 	for i, id := range ids {
 		if seen[id] {
@@ -360,7 +465,13 @@ func (e *Editor) selectedObjects(page int, ids []string) ([]GraphicObject, []int
 		if err != nil {
 			return nil, nil, err
 		}
-		objects[i], indexes[i] = layer.Objects[index], index
+		for j := range e.pages[page].Content.Layer {
+			if &e.pages[page].Content.Layer[j] == layer {
+				indexes[i] = editorObjectPosition{j, index}
+				break
+			}
+		}
+		objects[i] = layer.Objects[index]
 	}
 	return objects, indexes, nil
 }
@@ -376,6 +487,8 @@ func editorObjectID(object GraphicObject) string {
 		return object.PathObject.ID
 	case "ImageObject":
 		return object.ImageObject.ID
+	case "CompositeObject", "CompositeGraphicUnit":
+		return object.CompositeGraphicUnit.ID
 	}
 	return ""
 }
@@ -384,6 +497,15 @@ func editorObjectID(object GraphicObject) string {
 // 入参: page 页面索引, objects 待度量的对象
 // 返回: []Box 对象范围，文字采用字形范围，其余采用Boundary, error 错误信息
 func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) {
+	for _, object := range objects {
+		capability, err := e.ObjectCapabilities(page, editorObjectID(object))
+		if err != nil {
+			return nil, err
+		}
+		if !capability.Arrange {
+			return nil, fmt.Errorf("object %q cannot be arranged: %s", editorObjectID(object), capability.Reason)
+		}
+	}
 	textBoxes := make(map[string]Box)
 	if slices.ContainsFunc(objects, func(o GraphicObject) bool { return o.Type == "TextObject" }) {
 		reader, err := e.Reader()

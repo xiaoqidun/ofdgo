@@ -149,5 +149,41 @@ func main() {
 }
 ```
 
+# 编辑文档
+```go
+package main
+
+import (
+	"log"
+	"os"
+
+	"github.com/xiaoqidun/ofdgo"
+)
+
+func main() {
+	// 1. 打开文档
+	reader, err := ofdgo.Open("test.ofd")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer reader.Close()
+	// 2. 编辑标题
+	editor, err := reader.Editor()
+	if err != nil {
+		log.Fatal(err)
+	}
+	editor.Info.Title = "编辑后的"
+	// 3. 另存文档
+	ofdFile, err := os.Create("edited.ofd")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer ofdFile.Close()
+	if _, err := editor.WriteTo(ofdFile); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
 # 授权协议
 本项目使用 [Apache License 2.0](https://github.com/xiaoqidun/ofdgo/blob/main/LICENSE) 授权协议

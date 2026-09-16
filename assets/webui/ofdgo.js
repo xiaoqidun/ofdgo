@@ -488,6 +488,8 @@ el.searchInput.addEventListener("input", () => resetSearch(false));
 el.searchPrev.addEventListener("click", () => selectSearchMatch(Math.max(0, state.searchIndex) - 1));
 el.searchNext.addEventListener("click", () => selectSearchMatch(state.searchIndex + 1));
 document.addEventListener("keydown", handleKeyDown);
+document.addEventListener("keydown", () => el.viewerPanel.classList.remove("pointer-focus"), true);
+document.addEventListener("pointerdown", () => el.viewerPanel.classList.add("pointer-focus"), true);
 el.fontAddButton.addEventListener("click", () => openFontFile(el.fontInput));
 el.fontDirectoryButton.addEventListener("click", () => openFontFile(el.fontDirectoryInput));
 el.localFontButton.addEventListener("click", loadLocalFonts);

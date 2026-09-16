@@ -34,6 +34,7 @@ type Reader struct {
 	RootDir                   string
 	ResMap                    map[string]string
 	resourcesRead             map[string]bool
+	resourceFiles             map[string]string
 	fontCache                 map[string]*Font
 	fontResourcesRead         bool
 	fontFilesChecked          map[string]bool
@@ -84,6 +85,7 @@ func (r *Reader) initRoot() error {
 	r.OFD = &ofd
 	r.ResMap = make(map[string]string)
 	r.resourcesRead = make(map[string]bool)
+	r.resourceFiles = make(map[string]string)
 	r.fontCache = make(map[string]*Font)
 	r.fontFilesChecked = make(map[string]bool)
 	r.colorSpaceCache = make(map[string]*ColorSpace)
@@ -102,6 +104,9 @@ func (r *Reader) readFile(name string) ([]byte, error) {
 		return bytes.Clone(data), nil
 	}
 	if f, ok := r.packageFile(name); ok {
+		if data, ok := r.files[cleanPackagePath(f.Name)]; ok {
+			return bytes.Clone(data), nil
+		}
 		return readZipFile(f)
 	}
 	return nil, fmt.Errorf("file not found: %s", name)
@@ -116,6 +121,9 @@ func (r *Reader) openFile(name string) (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(data)), nil
 	}
 	if f, ok := r.packageFile(name); ok {
+		if data, ok := r.files[cleanPackagePath(f.Name)]; ok {
+			return io.NopCloser(bytes.NewReader(data)), nil
+		}
 		return f.Open()
 	}
 	return nil, fmt.Errorf("file not found: %s", name)
@@ -217,6 +225,7 @@ func (r *Reader) loadRes(resPath string) {
 		if mm.MediaFile != "" {
 			if finalPath := resolveResourcePath(resPath, baseLoc, mm.MediaFile); finalPath != "" {
 				r.ResMap[mm.ID] = finalPath
+				r.resourceFiles[mm.ID] = fullPath
 			}
 		}
 	}
@@ -226,6 +235,7 @@ func (r *Reader) loadRes(resPath string) {
 			f.FontFile = resolveResourcePath(resPath, baseLoc, f.FontFile)
 		}
 		r.fontCache[f.ID] = f
+		r.resourceFiles[f.ID] = fullPath
 	}
 	for i := range res.DrawParams.DrawParam {
 		dp := &res.DrawParams.DrawParam[i]

@@ -98,6 +98,7 @@ func RunWASM() {
 	registerExportCallback("ofdgoExportAttachment", exportAttachment)
 	registerCallback("ofdgoMatchFontFiles", matchFontFiles)
 	registerCallback("ofdgoCreateDocument", createDocument)
+	registerCallback("ofdgoEditDocument", editDocument)
 	registerCallback("ofdgoChangePage", changePage)
 	registerCallback("ofdgoInsertText", insertText)
 	registerCallback("ofdgoUpdateText", updateText)
@@ -530,10 +531,10 @@ func encodeResult(result apiResult) string {
 	return string(data)
 }
 
-// currentEditor 当前新建文档
+// currentEditor 当前编辑文档
 var currentEditor *ofdgo.Editor
 
-// editorClipboard 当前创作文档中的对象快照与剪贴板标识。
+// editorClipboard 当前编辑文档中的对象快照与剪贴板标识。
 type editorClipboard struct {
 	token   string
 	objects []ofdgo.GraphicObject
@@ -542,12 +543,14 @@ type editorClipboard struct {
 // copiedObjects 当前对象剪贴板，不保存字体或图片的重复数据。
 var copiedObjects *editorClipboard
 
-// editorInfo 创作文档信息与操作状态
+// editorInfo 编辑文档信息与操作状态
 type editorInfo struct {
 	DocumentInfo
-	Revision uint64 `json:"revision"`
-	CanUndo  bool   `json:"canUndo"`
-	CanRedo  bool   `json:"canRedo"`
+	Revision         uint64            `json:"revision"`
+	CanUndo          bool              `json:"canUndo"`
+	CanRedo          bool              `json:"canRedo"`
+	PageCapabilities []map[string]bool `json:"pageCapabilities"`
+	EditWarnings     []string          `json:"editWarnings,omitempty"`
 }
 
 // editorPageInfo 页面操作结果与目标页面
@@ -562,10 +565,21 @@ type editorSelectionInfo struct {
 	SelectedIDs []string `json:"selectedIDs"`
 }
 
-// editorSummary 获取当前创作文档状态
+// editorSummary 获取当前编辑文档状态
 // 返回: editorInfo 文档信息
 func editorSummary() editorInfo {
-	return editorInfo{currentSession.Summary(), currentEditor.Revision(), currentEditor.CanUndo(), currentEditor.CanRedo()}
+	info := editorInfo{DocumentInfo: currentSession.Summary(), Revision: currentEditor.Revision(), CanUndo: currentEditor.CanUndo(), CanRedo: currentEditor.CanRedo()}
+	if !currentSession.doc.Permissions.Edit {
+		info.EditWarnings = append(info.EditWarnings, "原文件声明不允许编辑")
+	}
+	if currentSession.doc.Signatures != "" {
+		info.EditWarnings = append(info.EditWarnings, "修改文档可能使原签名失效")
+	}
+	for i := 0; i < currentEditor.PageCount(); i++ {
+		capability, _ := currentEditor.PageCapabilities(i)
+		info.PageCapabilities = append(info.PageCapabilities, map[string]bool{"insert": capability.Insert, "copy": capability.Copy, "delete": capability.Delete, "move": capability.Move, "resize": capability.Resize})
+	}
+	return info
 }
 
 // restoreEditor 撤销或重做并更新预览
@@ -573,7 +587,7 @@ func editorSummary() editorInfo {
 // 返回: any 文档信息, error 错误信息
 func restoreEditor(redo bool) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	apply := currentEditor.Undo
 	if redo {
@@ -585,7 +599,7 @@ func restoreEditor(redo bool) (any, error) {
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
 
-// editorObjects 提供创作画布的对象范围、文字排版及原始图片边界
+// editorObjects 提供编辑画布的对象范围、文字排版及原始图片边界
 // 入参: index 页面索引, text 页面文字
 // 返回: []any 对象区域, error 错误信息
 func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
@@ -623,28 +637,38 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 	for _, layer := range page.Content.Layer {
 		for order, object := range layer.Objects {
 			var id string
-			var box ofdgo.Box
 			switch object.Type {
 			case "TextObject":
 				id = object.TextObject.ID
-				box = textBoxes[id]
 			case "ImageObject":
 				id = object.ImageObject.ID
-				box, err = ofdgo.ParseBox(object.ImageObject.Boundary)
-				if err != nil {
-					return nil, err
-				}
 			case "PathObject":
 				id = object.PathObject.ID
-				box, err = ofdgo.ParseBox(object.PathObject.Boundary)
-				if err != nil {
-					return nil, err
-				}
 			default:
 				continue
 			}
+			capability, err := currentEditor.ObjectCapabilities(index, id)
+			if err != nil {
+				return nil, err
+			}
+			if !capability.Transform && !capability.Update {
+				continue
+			}
+			var box ofdgo.Box
+			switch object.Type {
+			case "TextObject":
+				box = textBoxes[id]
+			case "ImageObject":
+				box, err = ofdgo.ParseBox(object.ImageObject.Boundary)
+			case "PathObject":
+				box, err = ofdgo.ParseBox(object.PathObject.Boundary)
+			}
+			if err != nil {
+				return nil, err
+			}
 			if box.W > 0 && box.H > 0 {
-				item := map[string]any{"id": id, "type": object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "count": len(layer.Objects)}
+				item := map[string]any{"id": id, "type": object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "count": len(layer.Objects), "layer": layer.ID,
+					"capabilities": map[string]any{"update": capability.Update, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason}}
 				if object.Type == "ImageObject" {
 					full, err := object.ImageObject.ImageBounds()
 					if err != nil {
@@ -652,7 +676,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					}
 					item["imageBounds"] = editorBox(full)
 				}
-				if object.Type == "PathObject" {
+				if object.Type == "PathObject" && capability.Update {
 					path := object.PathObject
 					kind, geometry := path.Shape()
 					if kind != "" {
@@ -673,36 +697,34 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					item["text"], item["font"], item["fontName"], item["size"] = value, object.TextObject.Font, fontNames[object.TextObject.Font], object.TextObject.Size
 					item["wrap"], item["align"], item["paragraphHeight"] = layout.Wrap, layout.Align, layout.LineHeight
 					item["letterSpacing"] = layout.LetterSpacing
-					frame, err := object.TextObject.TextFrame()
-					if err != nil {
-						return nil, err
-					}
-					boundary, _ := ofdgo.ParseBox(object.TextObject.Boundary)
-					matrix := ofdgo.TranslationMatrix(boundary.X, boundary.Y).Multiply(ofdgo.NewMatrix(object.TextObject.CTM))
-					inverse, _ := matrix.Invert()
-					local := inverse.TransformBox(box)
-					width := math.Max(object.TextObject.Size, local.X+local.W)
-					if layout.Wrap {
-						width = frame.W
-					}
-					frame = ofdgo.Box{W: width, H: math.Max(object.TextObject.Size, local.Y+local.H)}
-					item["textFrame"] = map[string]any{"width": frame.W, "height": frame.H, "matrix": editorMatrix(matrix)}
-					if layout.Wrap {
-						bounds := matrix.TransformBox(frame)
-						item["x"], item["y"], item["width"], item["height"] = bounds.X, bounds.Y, bounds.W, bounds.H
+					if capability.Reflow {
+						frame, err := object.TextObject.TextFrame()
+						if err != nil {
+							return nil, err
+						}
+						boundary, _ := ofdgo.ParseBox(object.TextObject.Boundary)
+						matrix := ofdgo.TranslationMatrix(boundary.X, boundary.Y).Multiply(ofdgo.NewMatrix(object.TextObject.CTM))
+						inverse, _ := matrix.Invert()
+						local := inverse.TransformBox(box)
+						width := math.Max(object.TextObject.Size, local.X+local.W)
+						if layout.Wrap {
+							width = frame.W
+						}
+						frame = ofdgo.Box{W: width, H: math.Max(object.TextObject.Size, local.Y+local.H)}
+						item["textFrame"] = map[string]any{"width": frame.W, "height": frame.H, "matrix": editorMatrix(matrix)}
+						if layout.Wrap {
+							bounds := matrix.TransformBox(frame)
+							item["x"], item["y"], item["width"], item["height"] = bounds.X, bounds.Y, bounds.W, bounds.H
+						}
 					}
 					if codes := object.TextObject.TextCode; len(codes) > 1 {
 						first, _ := strconv.ParseFloat(codes[0].Y, 64)
 						second, _ := strconv.ParseFloat(codes[1].Y, 64)
 						item["lineHeight"] = second - first
 					}
-					var r, g, b float64
-					if fill := object.TextObject.FillColor; fill != nil {
-						if _, err := fmt.Sscan(fill.Value, &r, &g, &b); err != nil {
-							return nil, err
-						}
+					if capability.Update {
+						item["color"] = editorColorHex(object.TextObject.FillColor)
 					}
-					item["color"] = fmt.Sprintf("#%02x%02x%02x", byte(r), byte(g), byte(b))
 				}
 				objects = append(objects, item)
 			}
@@ -716,7 +738,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 // 返回: any 字体数据, error 错误信息
 func editorFont(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	fonts, err := currentSession.Reader.Fonts()
 	if err != nil {
@@ -739,7 +761,7 @@ func editorFont(args []js.Value) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func replaceImage(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	data, err := bytesFromJS(args[2])
 	if err != nil {
@@ -760,7 +782,7 @@ func replaceImage(args []js.Value) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func alignObject(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	revision := currentEditor.Revision()
 	if err := currentEditor.AlignObject(args[0].Int(), args[1].String(), args[2].String()); err != nil {
@@ -777,7 +799,7 @@ func alignObject(args []js.Value) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func transformObject(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	page, id := args[0].Int(), args[1].String()
 	revision := currentEditor.Revision()
@@ -795,7 +817,7 @@ func transformObject(args []js.Value) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func reshapeObject(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	page, id := args[0].Int(), args[1].String()
 	object, err := currentEditor.Object(page, id)
@@ -824,7 +846,7 @@ func reshapeObject(args []js.Value) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func copyObjects(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	objects, err := currentEditor.Objects(args[0].Int(), stringsFromJS(args[1]))
 	if err != nil {
@@ -838,7 +860,7 @@ func copyObjects(args []js.Value) (any, error) {
 // 返回: any 空结果, error 错误信息
 func captureObjects(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	objects, err := currentEditor.Objects(args[0].Int(), stringsFromJS(args[1]))
 	if err != nil {
@@ -896,7 +918,7 @@ func distributeObjects(args []js.Value) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func deleteObject(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	if err := currentEditor.DeleteObject(args[0].Int(), args[1].String()); err != nil {
 		return nil, err
@@ -909,7 +931,7 @@ func deleteObject(args []js.Value) (any, error) {
 // 返回: any 文档信息和目标页面, error 错误信息
 func changePage(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	index := args[1].Int()
 	revision := currentEditor.Revision()
@@ -960,8 +982,26 @@ func createDocument(args []js.Value) (any, error) {
 	return previewEditor(editor, args[3].Bool())
 }
 
+// editDocument 将已打开文档接入编辑器，沿用页面、资源及字体配置。
+// 入参: args 浏览器参数
+// 返回: any 编辑状态, error 错误信息
+func editDocument(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	if currentEditor != nil {
+		return editorSummary(), nil
+	}
+	editor, err := currentSession.Reader.Editor()
+	if err != nil {
+		return nil, err
+	}
+	editor.SetHistoryLimit(100)
+	return previewEditor(editor, currentSession.Renderer.RenderAnnotations)
+}
+
 // previewEditor 通过内存快照更新预览，不生成中间压缩包
-// 入参: editor 新建文档, annotations 是否显示注解
+// 入参: editor 编辑文档, annotations 是否显示注解
 // 返回: editorInfo 文档信息, error 错误信息
 func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 	reader, err := editor.Reader()
@@ -973,6 +1013,10 @@ func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 		return editorInfo{}, err
 	}
 	if currentSession != nil {
+		if currentSession.fontFS != nil {
+			session.fontFS = currentSession.fontFS
+			session.Renderer.SetFontFS(session.fontFS)
+		}
 		_ = currentSession.Close()
 	}
 	currentSession = session
@@ -988,7 +1032,7 @@ func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 // 返回: any 文档信息, error 错误信息
 func updateText(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	page, id := args[0].Int(), args[1].String()
 	object, err := currentEditor.Object(page, id)
@@ -1112,7 +1156,7 @@ func setPathStyle(object *ofdgo.PathObject, args []js.Value) error {
 // 返回: any 文档信息, error 错误信息
 func insertShape(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	path, err := ofdgo.NewShape(ofdgo.ShapeKind(args[1].String()), ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
 	if err != nil {
@@ -1132,7 +1176,7 @@ func insertShape(args []js.Value) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func updatePathStyle(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	page, id := args[0].Int(), args[1].String()
 	object, err := currentEditor.Object(page, id)
@@ -1160,7 +1204,7 @@ func updatePathStyle(args []js.Value) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func insertText(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	data, err := bytesFromJS(args[2])
 	if err != nil {
@@ -1206,7 +1250,7 @@ func insertText(args []js.Value) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func layoutText(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	page, id := args[0].Int(), args[1].String()
 	object, err := currentEditor.Object(page, id)
@@ -1294,7 +1338,7 @@ func fitImage(args []js.Value) (any, error) {
 // 返回: any 页面SVG和分离的图片资源, error 错误信息
 func previewImage(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	page, err := currentEditor.Page(args[0].Int())
 	if err != nil {
@@ -1365,7 +1409,7 @@ func deleteObjects(args []js.Value) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func changeObjects(apply func() error) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	revision := currentEditor.Revision()
 	if err := apply(); err != nil {
@@ -1382,7 +1426,7 @@ func changeObjects(apply func() error) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func insertImage(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	data, err := bytesFromJS(args[1])
 	if err != nil {
@@ -1424,7 +1468,7 @@ func insertImage(args []js.Value) (any, error) {
 // 返回: any 保存结果, error 错误信息
 func saveDocument(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being created")
+		return nil, fmt.Errorf("no document is being edited")
 	}
 	writer := bufio.NewWriterSize(exportWriter{write: args[0]}, 1<<20)
 	if _, err := currentEditor.WriteTo(writer); err != nil {

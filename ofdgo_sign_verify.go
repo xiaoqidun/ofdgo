@@ -440,6 +440,9 @@ func parseSignatureFile(data []byte) (*SignatureFile, error) {
 // 返回: []byte 文件数据, error 错误信息
 func (r *Reader) readFileExact(name string) ([]byte, error) {
 	name = cleanPackagePath(name)
+	if data, ok := r.files[name]; ok {
+		return bytes.Clone(data), nil
+	}
 	if f, ok := r.fileIndex[name]; ok {
 		return readZipFile(f)
 	}
