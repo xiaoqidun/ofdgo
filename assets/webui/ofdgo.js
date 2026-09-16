@@ -1,4 +1,4 @@
-import { CanvasEditor, canEditObject } from "./ofdgo_edit.js";
+import { CanvasEditor, canEditObject, objectEditReason } from "./ofdgo_edit.js";
 import { FontManager } from "./ofdgo_font.js";
 
 const MM_TO_PX = 96 / 25.4;
@@ -250,7 +250,14 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	busy: () => document.body.hasAttribute("aria-busy"),
 	rotation: () => state.rotation,
 	canInsert: (index) => pageCan("insert", index),
-	onSelect: updateObjectControls,
+	onSelect: (item, previous) => {
+		updateObjectControls(item);
+		const reason = objectEditReason(item), previousReason = objectEditReason(previous);
+		if (state.editing && state.doc && !document.body.hasAttribute("aria-busy")
+			&& (reason || previousReason && el.statusText.textContent === previousReason)) {
+			setStatus(reason || pageStatus(state.pageIndex, state.doc.pageCount));
+		}
+	},
 	onTransform: (item, change) => changeDocument(item.items ? "ofdgoTransformObjects" : "ofdgoTransformObject", item,
 		change.x + item.x * (1 - change.scale), change.y + item.y * (1 - change.scale), change.scale),
 	onReshape: (item, box) => changeDocument("ofdgoReshapeObject", item, box.x, box.y, box.width, box.height),

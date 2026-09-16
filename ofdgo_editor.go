@@ -392,7 +392,8 @@ func (e *Editor) AddObject(page int, object GraphicObject) (string, error) {
 	return ids[0], nil
 }
 
-// Object 获取对象的独立副本，修改副本不影响文档
+// Object 获取对象的独立副本，修改副本不影响文档。
+// 可编辑的继承样式解析为直接属性；仅在对象修改或复制时写入独立样式。
 // 入参: page 页面索引, id 对象标识
 // 返回: GraphicObject 对象内容, error 错误信息
 func (e *Editor) Object(page int, id string) (GraphicObject, error) {

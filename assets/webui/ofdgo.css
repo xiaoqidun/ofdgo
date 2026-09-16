@@ -374,6 +374,34 @@ button:not(:disabled):hover {
 	transform: translate(-50%, -50%) rotate(90deg);
 }
 
+.edit-icon {
+	position: relative;
+	width: 15px;
+	height: 15px;
+	transform: rotate(-45deg);
+}
+
+.edit-icon::before {
+	position: absolute;
+	top: 5px;
+	left: 4px;
+	width: 9px;
+	height: 3px;
+	border: 1px solid currentColor;
+	content: "";
+}
+
+.edit-icon::after {
+	position: absolute;
+	top: 5px;
+	left: 0;
+	width: 4px;
+	height: 5px;
+	background: currentColor;
+	clip-path: polygon(0 50%, 100% 0, 100% 100%);
+	content: "";
+}
+
 .toolbar-space {
 	flex: 1 1 auto;
 }
@@ -1303,6 +1331,10 @@ button.outline-link:hover {
 .edit-selection,
 .edit-crop {
 	outline: calc(1px / var(--surface-scale)) solid var(--accent);
+}
+
+.edit-object.read-only {
+	cursor: default;
 }
 
 .edit-line::before {

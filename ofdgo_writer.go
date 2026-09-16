@@ -467,6 +467,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 	case "TextObject":
 		obj := object.TextObject
 		attrs.add("ID", obj.ID)
+		attrs.add("DrawParam", obj.DrawParam)
 		attrs.add("Boundary", obj.Boundary)
 		attrs.add("CTM", obj.CTM)
 		attrs.add("Font", obj.Font)
@@ -489,6 +490,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 	case "PathObject", "Path":
 		obj := object.PathObject
 		attrs.add("ID", obj.ID)
+		attrs.add("DrawParam", obj.DrawParam)
 		attrs.add("Boundary", obj.Boundary)
 		attrs.add("CTM", obj.CTM)
 		attrs.number("LineWidth", obj.LineWidth)

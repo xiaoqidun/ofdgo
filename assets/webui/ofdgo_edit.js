@@ -122,6 +122,22 @@ export function canEditObject(item, capability) {
 	return Boolean(item) && (item.items || [item]).every(object => Boolean(object.capabilities?.[capability]));
 }
 
+export function objectEditReason(item) {
+	const reasons = (item?.items || (item ? [item] : [])).map(object => {
+		const reason = object.capabilities?.reason || "";
+		if (!reason) return "";
+		let message = "对象特性暂不支持";
+		if (reason.includes("embedded font")) message = "缺少内嵌字体";
+		else if (reason.includes("does not contain")) message = "字体缺少所需文字";
+		else if (reason.includes("color") || reason.includes("RGB")) message = "颜色样式暂不支持";
+		else if (reason.includes("draw parameter")) message = "绘制参数暂不支持";
+		else if (reason.includes("layer")) message = "图层特性暂不支持";
+		else if (reason.includes("invalid")) message = "对象数据异常";
+		return `${object.capabilities.transform ? "部分操作受限" : "暂不可编辑"}：${message}`;
+	});
+	return [...new Set(reasons.filter(Boolean))].join("；");
+}
+
 export class CanvasEditor {
 	constructor(viewer, options) {
 		this.viewer = viewer;
@@ -182,6 +198,8 @@ export class CanvasEditor {
 		for (const object of page.objects) {
 			const node = document.createElement("div");
 			node.className = "edit-object";
+			node.classList.toggle("read-only", !canEditObject(object, "transform"));
+			node.title = objectEditReason(object);
 			if (object.shape === "line") {
 				node.classList.add("edit-line");
 			}
@@ -269,6 +287,7 @@ export class CanvasEditor {
 	}
 
 	setSelection(items) {
+		const previous = this.selected;
 		if (this.crop && (items.length !== 1 || items[0] !== this.crop.item)) this.closeCrop();
 		if (this.selected?.items) this.selected.node.remove();
 		for (const item of this.items()) {
@@ -296,7 +315,7 @@ export class CanvasEditor {
 			item.node.classList.toggle("multi-selected", items.length > 1);
 			item.node.setAttribute("aria-pressed", "true");
 		}
-		this.options.onSelect(this.selected);
+		this.options.onSelect(this.selected, previous);
 	}
 
 	select(item, add = false) {

@@ -18,6 +18,7 @@
 			<div class="tool-group">
 				<button id="ofdButton" class="icon-button" type="button" title="打开" aria-label="打开" aria-keyshortcuts="Control+O Meta+O"><span class="open-icon" aria-hidden="true"></span></button>
 				<button id="newButton" class="icon-button" type="button" title="新建" aria-label="新建文档"><span class="new-icon" aria-hidden="true"></span></button>
+				<button id="editButton" class="icon-button" type="button" title="编辑文档" aria-label="编辑文档" aria-pressed="false" disabled><span class="edit-icon" aria-hidden="true"></span></button>
 				<button id="togglePagesButton" class="icon-button" type="button" title="页面栏" aria-label="页面栏" aria-pressed="true">&#9776;</button>
 				<button id="toggleMetaButton" class="icon-button" type="button" title="信息栏" aria-label="信息栏" aria-pressed="true">&#9432;</button>
 			</div>
@@ -43,7 +44,6 @@
 				<button id="annotationButton" class="button" type="button" data-short="注" title="关闭注解" aria-label="关闭注解" aria-pressed="true">注解</button>
 			</div>
 			<div class="tool-group">
-				<button id="editButton" class="button" type="button" data-short="编" title="编辑文档" aria-label="编辑文档" aria-pressed="false" disabled>编辑</button>
 				<select id="exportFormat" class="format-select" title="导出格式" aria-label="导出格式" disabled></select>
 				<select id="imageDPI" class="format-select dpi-select" title="图片 DPI" aria-label="图片 DPI" disabled>
 					<option value="96">96</option>
@@ -91,28 +91,13 @@
 				</select>
 				<span>对象</span>
 			</div>
-			<div class="editor-group editor-transform">
-				<select id="objectRotate" class="order-select" aria-label="对象旋转" disabled>
-					<option value="" hidden>旋转</option>
-					<option value="90">右转90°</option>
-					<option value="-90">左转90°</option>
-				</select>
-				<select id="objectFlip" class="order-select" aria-label="对象翻转" disabled>
-					<option value="" hidden>翻转</option>
-					<option value="horizontal">水平</option>
-					<option value="vertical">垂直</option>
-				</select>
-				<span>变换</span>
-			</div>
-			<div class="editor-group editor-image">
-				<select id="imageFit" aria-label="图片适应方式" disabled>
-					<option value="" hidden>缩放</option>
-					<option value="contain">适应</option>
-					<option value="cover">填充</option>
-				</select>
-				<button id="cropImageButton" class="button" type="button" aria-label="裁剪图片" aria-pressed="false" disabled>裁剪</button>
-				<button id="resetCropButton" class="button" type="button" aria-label="还原图片" disabled>还原</button>
-				<span>图片</span>
+			<div class="editor-group">
+				<button id="insertTextButton" class="button" type="button" aria-label="添加文字" aria-pressed="false">文字</button>
+				<button id="insertImageButton" class="button" type="button" aria-label="添加图片">图片</button>
+				<button id="drawLineButton" class="button" type="button" aria-label="绘制直线" aria-pressed="false">直线</button>
+				<button id="drawRectangleButton" class="button" type="button" aria-label="绘制矩形" aria-pressed="false">矩形</button>
+				<button id="drawEllipseButton" class="button" type="button" aria-label="绘制椭圆" aria-pressed="false">椭圆</button>
+				<span>插入</span>
 			</div>
 			<div class="editor-group">
 				<div class="text-font"><select id="textFont" aria-label="字体" title="字体" disabled></select><button id="textFontAdd" class="icon-button" type="button" title="添加字体" aria-label="添加字体">+</button></div>
@@ -134,18 +119,33 @@
 				<span>段落</span>
 			</div>
 			<div class="editor-group">
-				<button id="insertTextButton" class="button" type="button" aria-label="添加文字" aria-pressed="false">文字</button>
-				<button id="insertImageButton" class="button" type="button" aria-label="添加图片">图片</button>
-				<button id="drawLineButton" class="button" type="button" aria-label="绘制直线" aria-pressed="false">直线</button>
-				<button id="drawRectangleButton" class="button" type="button" aria-label="绘制矩形" aria-pressed="false">矩形</button>
-				<button id="drawEllipseButton" class="button" type="button" aria-label="绘制椭圆" aria-pressed="false">椭圆</button>
-				<span>插入</span>
-			</div>
-			<div class="editor-group">
 				<div class="shape-paint"><label><input id="shapeFill" type="checkbox">填充</label><input id="shapeFillColor" class="color-input" type="color" value="#dcefeb" aria-label="填充颜色" title="填充颜色"></div>
 				<div class="shape-paint"><label><input id="shapeStroke" type="checkbox" checked>描边</label><input id="shapeStrokeColor" class="color-input" type="color" value="#000000" aria-label="描边颜色" title="描边颜色"></div>
 				<label class="editor-field"><span>线宽</span><span class="editor-number"><input id="shapeWidth" type="number" value="1" min="0" step="any" required aria-label="线宽" title="线宽"><span>pt</span></span></label>
 				<span>图形</span>
+			</div>
+			<div class="editor-group editor-image">
+				<select id="imageFit" aria-label="图片适应方式" disabled>
+					<option value="" hidden>缩放</option>
+					<option value="contain">适应</option>
+					<option value="cover">填充</option>
+				</select>
+				<button id="cropImageButton" class="button" type="button" aria-label="裁剪图片" aria-pressed="false" disabled>裁剪</button>
+				<button id="resetCropButton" class="button" type="button" aria-label="还原图片" disabled>还原</button>
+				<span>图片</span>
+			</div>
+			<div class="editor-group editor-transform">
+				<select id="objectRotate" class="order-select" aria-label="对象旋转" disabled>
+					<option value="" hidden>旋转</option>
+					<option value="90">右转90°</option>
+					<option value="-90">左转90°</option>
+				</select>
+				<select id="objectFlip" class="order-select" aria-label="对象翻转" disabled>
+					<option value="" hidden>翻转</option>
+					<option value="horizontal">水平</option>
+					<option value="vertical">垂直</option>
+				</select>
+				<span>变换</span>
 			</div>
 			<div class="editor-group">
 				<button id="addPageButton" class="button" type="button" aria-label="新增页面">新增</button>

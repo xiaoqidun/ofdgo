@@ -316,6 +316,12 @@ func (e *Editor) updateObjects(page int, objects []GraphicObject, geometry bool)
 			if err != nil {
 				return err
 			}
+			if e.originalPage(page) {
+				after[i], err = e.resolveEditorStyle(after[i], e.pages[page].Content.Layer[indexes[i].layer].DrawParam)
+				if err != nil {
+					return err
+				}
+			}
 		}
 	}
 	if reflect.DeepEqual(before, after) {

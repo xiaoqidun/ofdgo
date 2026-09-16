@@ -44,6 +44,7 @@ type editorObjectOrigin struct {
 	page   *editorSourcePage
 	node   *editorXML
 	object GraphicObject
+	reason string
 }
 
 // editorSourcePage 保存页面原文、解析快照及可定位的直接对象。
@@ -292,15 +293,25 @@ func (e *Editor) loadSourcePage(index int) error {
 		}
 	}
 	source.data, source.root, source.nodes = data, root, nodes
-	source.original = page
-	for _, layer := range page.Content.Layer {
-		for _, object := range layer.Objects {
+	for i := range page.Content.Layer {
+		layer := &page.Content.Layer[i]
+		for j, object := range layer.Objects {
 			id := editorObjectID(object)
 			if node := nodes[id]; node != nil {
-				e.source.origins[id] = &editorObjectOrigin{page: source, node: node, object: object}
+				origin := &editorObjectOrigin{page: source, node: node, object: object}
+				e.source.origins[id] = origin
+				if editorXMLSupported(node) {
+					resolved, err := e.resolveEditorStyle(object, layer.DrawParam)
+					if err != nil {
+						origin.reason = err.Error()
+					} else {
+						layer.Objects[j] = resolved
+					}
+				}
 			}
 		}
 	}
+	source.original = page
 	e.pages[index] = copyEditorPage(*page)
 	return nil
 }
@@ -332,8 +343,11 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 		}
 		return all, nil
 	}
-	if layer.DrawParam != "" || !editorXMLSupported(node) {
+	if !editorXMLSupported(node) {
 		return ObjectCapabilities{Reason: "object uses unsupported editing features"}, nil
+	}
+	if origin := e.objectOrigin(id); origin.reason != "" {
+		return ObjectCapabilities{Reason: origin.reason}, nil
 	}
 	for _, attr := range node.parent.attrs {
 		if attr.Name.Space == "xmlns" || attr.Name.Space == "" && attr.Name.Local == "xmlns" {

@@ -191,17 +191,17 @@ func editorXMLSetText(data []byte, node *editorXML, values [][2]string) []byte {
 // 入参: node 对象或子节点
 // 返回: bool 是否支持完整编辑
 func editorXMLSupported(node *editorXML) bool {
-	if node.name.Space != "" && node.name.Space != ofdNamespace {
+	if node.name.Space != "" && node.name.Space != ofdNamespace && node.name.Space != "http://www.ofdspec.org" {
 		return false
 	}
 	var allowed, children string
 	switch node.name.Local {
 	case "TextObject":
-		allowed, children = "ID Boundary CTM Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Italic Visible Stroke Fill Alpha", "FillColor StrokeColor TextCode"
+		allowed, children = "ID Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Italic Visible Stroke Fill Alpha", "FillColor StrokeColor TextCode"
 	case "PathObject", "Path":
 		allowed, children = "Boundary CTM LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha", "StrokeColor FillColor AbbreviatedData"
 		if node.name.Local == "PathObject" {
-			allowed += " ID"
+			allowed += " ID DrawParam"
 		}
 	case "ImageObject":
 		allowed, children = "ID Boundary CTM ResourceID ImageMask Visible Alpha", "Clips"
@@ -236,11 +236,25 @@ func editorXMLSupported(node *editorXML) bool {
 }
 
 // editorXMLObject 修改对象发生变化的属性与内容，保留原文中的显式默认值。
+// 有效样式快照在修改后展开原绘制参数，避免已清除的属性重新继承。
 // 入参: data 页面原文, node 原对象节点, before 原对象, after 新对象
 // 返回: []byte 对象XML, error 错误信息
 func editorXMLObject(data []byte, node *editorXML, before, after GraphicObject) ([]byte, error) {
 	if before.Type != after.Type {
 		return editorObjectXML(after)
+	}
+	if node.attr("DrawParam") != "" && before.TextObject.DrawParam == "" && before.PathObject.DrawParam == "" {
+		before = GraphicObject{Type: before.Type}
+		var err error
+		switch before.Type {
+		case "TextObject":
+			err = xml.Unmarshal(data[node.start:node.end], &before.TextObject)
+		case "PathObject":
+			err = xml.Unmarshal(data[node.start:node.end], &before.PathObject)
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	oldXML, err := editorObjectXML(before)
 	if err != nil {
