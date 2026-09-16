@@ -278,9 +278,6 @@ func (e *Editor) nextID() string {
 // 入参: file 字体文件, index 集合内字体索引，单字体为0
 // 返回: string 字体资源标识, error 错误信息
 func (e *Editor) AddFont(file FontFile, index int) (string, error) {
-	if index < 0 {
-		return "", fmt.Errorf("font index must not be negative")
-	}
 	data, err := font.ToSFNT(file.Data)
 	if err != nil {
 		return "", err
@@ -289,16 +286,11 @@ func (e *Editor) AddFont(file FontFile, index int) (string, error) {
 	if id, ok := e.resourceID[key]; ok {
 		return id, nil
 	}
-	if bytes.HasPrefix(data, []byte("ttcf")) {
-		data, err = extractCollectionFont(data, index)
-		if err != nil {
-			return "", err
-		}
-		index = 0
-	} else {
-		data = bytes.Clone(data)
+	data, err = (FontFile{Data: data}).Face(index)
+	if err != nil {
+		return "", err
 	}
-	sfnt, err := font.ParseSFNT(data, index)
+	sfnt, err := font.ParseSFNT(data, 0)
 	if err != nil {
 		return "", err
 	}
@@ -348,7 +340,7 @@ func editorFontName(sfnt *font.SFNT, names ...font.NameID) string {
 }
 
 // AddImage 注册PNG或JPEG图片，重复资源复用标识，引用后写入文档
-// 不透明纯黑白PNG仅在无损JBIG2编码更小时转换，其他图片保留原始编码。
+// 不透明纯黑白PNG仅在无损JBIG2编码更小时转换，其他图片保留原始编码
 // 入参: data 图片数据
 // 返回: string 图片资源标识, error 错误信息
 func (e *Editor) AddImage(data []byte) (string, error) {
@@ -389,7 +381,7 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 	return id, nil
 }
 
-// editorBinaryImage 尝试纯黑白无损编码，不二值化，不改变透明度，无体积收益时保留原图。
+// editorBinaryImage 尝试纯黑白无损编码，不二值化，不改变透明度，无体积收益时保留原图
 // 入参: data PNG图片数据
 // 返回: []byte 更小的JBIG2数据，不适用时为nil
 func editorBinaryImage(data []byte) []byte {
@@ -416,8 +408,8 @@ func (e *Editor) AddObject(page int, object GraphicObject) (string, error) {
 	return ids[0], nil
 }
 
-// Object 获取对象的独立副本，修改副本不影响文档。
-// 可编辑的继承样式解析为直接属性；仅在对象修改或复制时写入独立样式。
+// Object 获取对象的独立副本，修改副本不影响文档
+// 可编辑的继承样式解析为直接属性；仅在对象修改或复制时写入独立样式
 // 入参: page 页面索引, id 对象标识
 // 返回: GraphicObject 对象内容, error 错误信息
 func (e *Editor) Object(page int, id string) (GraphicObject, error) {
@@ -718,7 +710,7 @@ func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) err
 	return e.TransformObjects(page, []string{id}, dx, dy, scale)
 }
 
-// transformEditorObject 变换独立对象副本，保留绘制属性和编辑中的段落信息。
+// transformEditorObject 变换独立对象副本，保留绘制属性和编辑中的段落信息
 // 入参: object 对象副本, dx 横向位移, dy 纵向位移, scale 正缩放比例
 // 返回: GraphicObject 变换后的对象, error 错误信息
 func transformEditorObject(object GraphicObject, dx, dy, scale float64) (GraphicObject, error) {
@@ -774,7 +766,7 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 	return object, nil
 }
 
-// ReplaceImage 替换图片资源，保留对象标识和绘制顺序，一次撤销恢复资源及布局。
+// ReplaceImage 替换图片资源，保留对象标识和绘制顺序，一次撤销恢复资源及布局
 // 入参: page 页面索引, id 图片对象标识, data PNG或JPEG数据, fit 为contain、cover或空，空值保留原变换和裁剪
 // 返回: error 错误信息
 func (e *Editor) ReplaceImage(page int, id string, data []byte, fit string) error {

@@ -21,10 +21,10 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
-// ObjectBounds 获取文字、路径或图片在页面坐标中的轴对齐范围，不修改对象。
-// 文字采用字形范围，路径包含描边与裁剪，图片采用裁剪后的几何范围，不解码像素或排除透明像素。
-// 底纹按填充或描边轮廓度量，不展开图案单元。
-// 不应用页面边界或父级变换；无可见范围时返回零值，不支持的对象类型返回错误。
+// ObjectBounds 获取文字、路径或图片在页面坐标中的轴对齐范围，不修改对象
+// 文字采用字形范围，路径包含描边与裁剪，图片采用裁剪后的几何范围，不解码像素或排除透明像素
+// 底纹按填充或描边轮廓度量，不展开图案单元
+// 不应用页面边界或父级变换；无可见范围时返回零值，不支持的对象类型返回错误
 // 入参: object 图形对象, drawParam 图层绘制参数标识，无继承时为空
 // 返回: Box 毫米坐标范围, error 错误信息
 func (r *Renderer) ObjectBounds(object GraphicObject, drawParam string) (Box, error) {
@@ -94,7 +94,7 @@ func (r *Renderer) ObjectBounds(object GraphicObject, drawParam string) (Box, er
 	return bounds.box, nil
 }
 
-// boundsColor 以底纹的基础颜色和透明度度量轮廓，不修改原画刷。
+// boundsColor 以底纹的基础颜色和透明度度量轮廓，不修改原画刷
 // 入参: color 填充或描边颜色
 // 返回: *FillColor 用于度量的颜色
 func boundsColor(color *FillColor) *FillColor {
@@ -104,18 +104,18 @@ func boundsColor(color *FillColor) *FillColor {
 	return &FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}
 }
 
-// boundsRenderer 收集绘制范围，不分配页面像素或合并独立图形轮廓。
+// boundsRenderer 收集绘制范围，不分配页面像素或合并独立图形轮廓
 type boundsRenderer struct {
 	box Box
 }
 
-// Size 返回不限定边界的度量画布尺寸。
+// Size 返回不限定边界的度量画布尺寸
 // 返回: float64 宽度, float64 高度
 func (r *boundsRenderer) Size() (float64, float64) {
 	return 0, 0
 }
 
-// add 合并路径的精确曲线范围并转换为向下的纵轴。
+// add 合并路径的精确曲线范围并转换为向下的纵轴
 // 入参: path 绘制路径
 func (r *boundsRenderer) add(path *canvas.Path) {
 	if path.Empty() {
@@ -125,7 +125,7 @@ func (r *boundsRenderer) add(path *canvas.Path) {
 	r.box = unionTextBox(r.box, Box{X: rect.X0, Y: -rect.Y1, W: rect.W(), H: rect.H()})
 }
 
-// RenderPath 收集填充与描边范围，保持线帽、连接和虚线语义。
+// RenderPath 收集填充与描边范围，保持线帽、连接和虚线语义
 // 入参: path 路径, style 绘制样式, m 变换矩阵
 func (r *boundsRenderer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix) {
 	if style.HasFill() {
@@ -137,12 +137,12 @@ func (r *boundsRenderer) RenderPath(path *canvas.Path, style canvas.Style, m can
 	}
 }
 
-// RenderText 收集绘制文字范围。
+// RenderText 收集绘制文字范围
 // 入参: text 文字, m 变换矩阵
 func (r *boundsRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
 	text.RenderTo(r, m, 0)
 }
 
-// RenderImage 度量不展开底纹图片。
+// RenderImage 度量不展开底纹图片
 // 入参: img 图片, m 变换矩阵
 func (r *boundsRenderer) RenderImage(img image.Image, m canvas.Matrix) {}

@@ -120,6 +120,7 @@ const el = {
 	drawEllipseButton: document.querySelector("#drawEllipseButton"),
 	eraseObjectButton: document.querySelector("#eraseObjectButton"),
 	eraseRegionButton: document.querySelector("#eraseRegionButton"),
+	erasePathButton: document.querySelector("#erasePathButton"),
 	shapeFill: document.querySelector("#shapeFill"),
 	shapeFillColor: document.querySelector("#shapeFillColor"),
 	shapeStroke: document.querySelector("#shapeStroke"),
@@ -277,10 +278,11 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 		if (state.fontRenderPending) window.setTimeout(refreshPendingFonts, 0);
 	},
 	onDelete: (item) => changeDocument(item.items ? "ofdgoDeleteObjects" : "ofdgoDeleteObject", item),
-	onErase: (items, box) => {
+	onErase: (items, box, points) => {
 		const blocked = items.find(item => !canEditObject(item, box ? "arrange" : "delete"));
 		if (blocked) { setStatus(objectEditReason(blocked) || "对象暂不可擦除"); return false; }
 		const item = { index: items[0].index, id: items.map(item => item.id) };
+		if (points) return changeDocument("ofdgoEraseObjectsPath", item, points);
 		return box ? changeDocument("ofdgoEraseObjects", item, box.x, box.y, box.width, box.height)
 			: changeDocument("ofdgoDeleteObjects", item);
 	},
@@ -437,7 +439,7 @@ el.resetCropButton.addEventListener("click", () => {
 editorClick(el.undoButton, () => changeDocument("ofdgoUndo"));
 editorClick(el.redoButton, () => changeDocument("ofdgoRedo"));
 for (const [button, tool] of [[el.drawLineButton, "line"], [el.drawRectangleButton, "rectangle"], [el.drawEllipseButton, "ellipse"],
-	[el.eraseObjectButton, "erase-object"], [el.eraseRegionButton, "erase-region"]]) {
+	[el.eraseObjectButton, "erase-object"], [el.eraseRegionButton, "erase-region"], [el.erasePathButton, "erase-path"]]) {
 	editorClick(button, () => {
 		if (!state.editing || document.body.hasAttribute("aria-busy")) {
 			return;
@@ -976,7 +978,7 @@ async function beginCanvasText(index, box, surface, page) {
 	const openSeq = state.openSeq;
 	setBusy(true);
 	try {
-		const data = font.embedded ? (await callWASM("ofdgoEditorFont", font.id.slice(9))).bytes : await fontManager.read(font);
+		const data = await readTextFont(font);
 		const face = new FontFace("ofdgo-draft", data);
 		await face.load();
 		if (openSeq !== state.openSeq || !surface.isConnected) return;
@@ -991,7 +993,7 @@ async function beginCanvasText(index, box, surface, page) {
 }
 
 function editorFonts(item) {
-	const fonts = [...fontManager.userFonts.filter((font) => font.enabled), ...fontManager.catalog];
+	const fonts = fontManager.editorFonts();
 	if (item) {
 		fonts.unshift({ id: `embedded:${item.font}`, name: item.fontName || item.font, embedded: true, disabled: !canEditObject(item, "update") });
 	}
@@ -999,20 +1001,29 @@ function editorFonts(item) {
 }
 
 async function loadEditorFonts() {
-	if (!fontManager.canReadLocal() || fontManager.catalogLoaded || fontManager.permission === "denied" || state.fontCatalogLoading) return;
+	const local = fontManager.canReadLocal() && !fontManager.catalogLoaded && fontManager.permission !== "denied";
+	if (state.fontCatalogLoading || !local && !fontManager.userFonts.some(font => font.enabled && !font.faces)) return;
 	state.fontCatalogLoading = true;
 	try {
-		await fontManager.queryLocal();
+		if (local) {
+			try { await fontManager.queryLocal(); }
+			catch (err) { setStatus(err?.name === "NotAllowedError" ? "字体尚未授权" : String(err.message || err)); }
+		}
+		await fontManager.loadFaces(data => callWASM("ofdgoFontFaces", data));
 		const open = fontPicker.open;
 		const selected = state.textFonts[Number(fontPicker.value)];
 		const query = el.textFont.value === (selected?.fullName || selected?.name || "") ? "" : el.textFont.value;
 		updateTextFonts(canvasEditor.selected, true);
 		if (open && !el.textFont.disabled) { if (query) el.textFont.value = query; fontPicker.show(query); }
-	} catch (err) {
-		setStatus(err?.name === "NotAllowedError" ? "字体尚未授权" : String(err.message || err));
 	} finally {
 		state.fontCatalogLoading = false;
 	}
+}
+
+async function readTextFont(font) {
+	if (font.embedded) return (await callWASM("ofdgoEditorFont", font.id.slice(9))).bytes;
+	if (font.file) return (await callWASM("ofdgoFontFace", await fontManager.read(font.file), font.index)).bytes;
+	return fontManager.read(font);
 }
 
 function updateTextFonts(item, refresh = false) {
@@ -1039,7 +1050,7 @@ async function changeTextFont() {
 		const openSeq = state.openSeq;
 		setBusy(true);
 		try {
-			const data = font.embedded ? (await callWASM("ofdgoEditorFont", font.id.slice(9))).bytes : await fontManager.read(font);
+			const data = await readTextFont(font);
 			const face = new FontFace("ofdgo-edit-font", data);
 			await face.load();
 			if (openSeq !== state.openSeq || canvasEditor.input !== editing) return;
@@ -1056,7 +1067,7 @@ async function changeTextFont() {
 		}
 	} else if (item?.type === "TextObject") {
 		if (!font.embedded && canEditObject(item, "replaceFont")) {
-			await changeDocument("ofdgoUpdateText", item, canEditObject(item, "layoutKnown") ? item.text : null, fontManager.read(font), item.size, null);
+			await changeDocument("ofdgoUpdateText", item, canEditObject(item, "layoutKnown") ? item.text : null, readTextFont(font), item.size, null);
 			updateTextFonts(canvasEditor.selected, true);
 		}
 	} else {
@@ -1221,7 +1232,7 @@ function updateDrawingControls() {
 		button.disabled = disabled || !pageCan("insert");
 		button.setAttribute("aria-pressed", String(tool === name));
 	}
-	for (const [button, name] of [[el.eraseObjectButton, "erase-object"], [el.eraseRegionButton, "erase-region"]]) {
+	for (const [button, name] of [[el.eraseObjectButton, "erase-object"], [el.eraseRegionButton, "erase-region"], [el.erasePathButton, "erase-path"]]) {
 		button.disabled = disabled;
 		button.setAttribute("aria-pressed", String(tool === name));
 	}
@@ -1256,7 +1267,7 @@ async function changeDocument(name, item, ...args) {
 			return true;
 		}
 		setEditorInfo(doc);
-		if (!item || name === "ofdgoDeleteObject" || name === "ofdgoDeleteObjects" || name === "ofdgoEraseObjects") {
+		if (!item || name === "ofdgoDeleteObject" || name === "ofdgoDeleteObjects" || name === "ofdgoEraseObjects" || name === "ofdgoEraseObjectsPath") {
 			canvasEditor.clear();
 		}
 		if (name === "ofdgoCopyObjects" || name === "ofdgoPasteObjects" || name === "ofdgoInsertShape" || name === "ofdgoInsertText" || name === "ofdgoInsertImage") {
@@ -3021,7 +3032,7 @@ async function pasteEditorContent(event) {
 		return;
 	}
 	const style = currentTextStyle();
-	const data = font.embedded ? callWASM("ofdgoEditorFont", font.id.slice(9)).then(result => result.bytes) : fontManager.read(font);
+	const data = readTextFont(font);
 	await changeDocument("ofdgoInsertText", null, index, value, data, x, y, style.size, style.color,
 		page.width - x * 2, style.wrap, style.align || "left", style.paragraphHeight || 0, style.letterSpacing || 0);
 }

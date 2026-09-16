@@ -505,7 +505,7 @@ export class CanvasEditor {
 				? drag.items.filter(item => item.x < drag.box.x + drag.box.width && item.x + item.width > drag.box.x
 					&& item.y < drag.box.y + drag.box.height && item.y + item.height > drag.box.y) : [];
 			this.cancel();
-			if (items.length) this.options.onErase(items, drag.erase === "erase-region" ? drag.box : null);
+			if (items.length && (!drag.points || drag.points.length >= 3)) this.options.onErase(items, drag.box, drag.points);
 			return;
 		}
 		if (drag.crop) {
@@ -591,6 +591,11 @@ export class CanvasEditor {
 			rect: surface.getBoundingClientRect(), rotation: this.options.rotation() };
 		if (this.tool === "erase-region") Object.assign(this.drag, this.createPreview(surface, page, "rectangle",
 			{ fill: true, fillColor: "var(--accent-soft)", stroke: true, strokeColor: "var(--accent)", lineWidth: 0.2 }));
+		if (this.tool === "erase-path") {
+			Object.assign(this.drag, this.createPreview(surface, page, "path",
+				{ fill: true, fillColor: "var(--accent-soft)", stroke: true, strokeColor: "var(--accent)", lineWidth: 0.2 }), { points: [] });
+			this.drag.node.setAttribute("fill-rule", "evenodd");
+		}
 		this.viewer.setPointerCapture(event.pointerId);
 		this.moveErase(event, this.drag);
 	}
@@ -598,6 +603,18 @@ export class CanvasEditor {
 	moveErase(event, drag) {
 		if (drag.erase === "erase-region") { this.moveShape(event, drag); return; }
 		const point = pagePoint(event.clientX, event.clientY, drag.rect, drag.page, drag.rotation);
+		if (drag.points) {
+			const last = drag.lastPointer;
+			if (last && Math.hypot(event.clientX - last.x, event.clientY - last.y) < 2) return;
+			drag.lastPointer = { x: event.clientX, y: event.clientY };
+			drag.points.push(point);
+			const box = drag.box || { x: point.x, y: point.y, width: 0, height: 0 };
+			const right = Math.max(box.x + box.width, point.x), bottom = Math.max(box.y + box.height, point.y);
+			drag.box = { x: Math.min(box.x, point.x), y: Math.min(box.y, point.y) };
+			Object.assign(drag.box, { width: right - drag.box.x, height: bottom - drag.box.y });
+			drag.node.setAttribute("d", drag.points.map((point, index) => `${index ? "L" : "M"}${point.x} ${point.y}`).join(" ") + " Z");
+			return;
+		}
 		const item = [...drag.items].reverse().find(item => point.x >= item.x && point.x <= item.x + item.width
 			&& point.y >= item.y && point.y <= item.y + item.height);
 		if (item) { drag.erased.add(item); item.node.classList.add("erasing"); }

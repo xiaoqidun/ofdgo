@@ -24,13 +24,13 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
-// editorObjectPosition 对象所属图层及层内索引。
+// editorObjectPosition 对象所属图层及层内索引
 type editorObjectPosition struct {
 	layer int
 	index int
 }
 
-// compareEditorPosition 比较对象在页面结构中的先后顺序。
+// compareEditorPosition 比较对象在页面结构中的先后顺序
 // 入参: a、b 对象位置
 // 返回: int 比较结果
 func compareEditorPosition(a, b editorObjectPosition) int {
@@ -40,7 +40,7 @@ func compareEditorPosition(a, b editorObjectPosition) int {
 	return cmp.Compare(a.index, b.index)
 }
 
-// Objects 按绘制顺序获取选区的独立快照，保留编辑中的段落信息。
+// Objects 按绘制顺序获取选区的独立快照，保留编辑中的段落信息
 // 入参: page 页面索引, ids 对象标识，不得重复
 // 返回: []GraphicObject 独立对象副本, error 错误信息
 func (e *Editor) Objects(page int, ids []string) ([]GraphicObject, error) {
@@ -67,8 +67,8 @@ func (e *Editor) Objects(page int, ids []string) ([]GraphicObject, error) {
 	return objects, nil
 }
 
-// CopyObjects 将对象快照按输入顺序复制到目标页并平移，分配新ID，提交一次撤销记录。
-// 对象引用当前Editor已注册的资源，保留段落信息，不修改输入快照。
+// CopyObjects 将对象快照按输入顺序复制到目标页并平移，分配新ID，提交一次撤销记录
+// 对象引用当前Editor已注册的资源，保留段落信息，不修改输入快照
 // 入参: page 目标页面索引, objects 对象快照, dx、dy 毫米位移
 // 返回: []string 按绘制顺序排列的新对象标识, error 错误信息
 func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) ([]string, error) {
@@ -132,7 +132,7 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 	return result, nil
 }
 
-// ObjectPosition 对象在图层或页块直接成员中的位置，Index从0开始，Count不含嵌套页块的对象。
+// ObjectPosition 对象在图层或页块直接成员中的位置，Index从0开始，Count不含嵌套页块的对象
 type ObjectPosition struct {
 	Layer     string
 	Container string
@@ -140,7 +140,7 @@ type ObjectPosition struct {
 	Count     int
 }
 
-// ObjectPosition 获取对象的直接容器及排序位置。
+// ObjectPosition 获取对象的直接容器及排序位置
 // 入参: page 页面索引, id 对象标识
 // 返回: ObjectPosition 对象位置, error 错误信息
 func (e *Editor) ObjectPosition(page int, id string) (ObjectPosition, error) {
@@ -162,7 +162,7 @@ func (e *Editor) ObjectPosition(page int, id string) (ObjectPosition, error) {
 	return position, nil
 }
 
-// objectOrderIndexes 获取同一直接容器的对象索引，不跨越图层或页块。
+// objectOrderIndexes 获取同一直接容器的对象索引，不跨越图层或页块
 // 入参: page 页面索引, layer 图层, id 对象标识
 // 返回: *editorXML 原始容器, []int 对象索引
 func (e *Editor) objectOrderIndexes(page int, layer *Layer, id string) (*editorXML, []int) {
@@ -184,7 +184,7 @@ func (e *Editor) objectOrderIndexes(page int, layer *Layer, id string) (*editorX
 	return parent, indexes
 }
 
-// OrderObjects 调整同一图层或页块内选区的绘制顺序，保留各组选中及未选中对象的相对顺序。
+// OrderObjects 调整同一图层或页块内选区的绘制顺序，保留各组选中及未选中对象的相对顺序
 // 入参: page 页面索引, ids 对象标识, order 为up、down、top或bottom
 // 返回: error 错误信息
 func (e *Editor) OrderObjects(page int, ids []string, order string) error {
@@ -248,8 +248,8 @@ func (e *Editor) OrderObjects(page int, ids []string, order string) error {
 	return nil
 }
 
-// DistributeObjects 按可见范围等距分布同页对象，固定两端对象，保留绘制顺序。
-// 不足三个对象时不修改；允许负间距，无法保持位置顺序的重叠布局返回错误。
+// DistributeObjects 按可见范围等距分布同页对象，固定两端对象，保留绘制顺序
+// 不足三个对象时不修改；允许负间距，无法保持位置顺序的重叠布局返回错误
 // 入参: page 页面索引, ids 对象标识, axis 为horizontal或vertical
 // 返回: error 错误信息
 func (e *Editor) DistributeObjects(page int, ids []string, axis string) error {
@@ -317,7 +317,7 @@ func (e *Editor) DistributeObjects(page int, ids []string, axis string) error {
 	return e.updateObjects(page, updates, true)
 }
 
-// replaceLayers 替换图层容器，隔离历史快照与后续的增删、排序操作。
+// replaceLayers 替换图层容器，隔离历史快照与后续的增删、排序操作
 // 入参: page 页面索引, layers 新图层列表
 func (e *Editor) replaceLayers(page int, layers []Layer) {
 	before := copyEditorPage(e.pages[page]).Content.Layer
@@ -335,14 +335,14 @@ func (e *Editor) replaceLayers(page int, layers []Layer) {
 	}
 }
 
-// UpdateObjects 原子替换同页对象，按各对象ID定位，全部校验通过后提交一次历史记录。
+// UpdateObjects 原子替换同页对象，按各对象ID定位，全部校验通过后提交一次历史记录
 // 入参: page 页面索引, objects 新对象内容，ID不得重复
 // 返回: error 错误信息
 func (e *Editor) UpdateObjects(page int, objects []GraphicObject) error {
 	return e.updateObjects(page, objects, false)
 }
 
-// updateObjects 校验内容更新或纯几何变换，原子提交跨图层选区。
+// updateObjects 校验内容更新或纯几何变换，原子提交跨图层选区
 // 入参: page 页面索引, objects 新对象, geometry 是否保留原内容的几何操作
 // 返回: error 错误信息
 func (e *Editor) updateObjects(page int, objects []GraphicObject, geometry bool) error {
@@ -399,7 +399,7 @@ func (e *Editor) updateObjects(page int, objects []GraphicObject, geometry bool)
 	return nil
 }
 
-// TransformObjects 同页对象以页面原点等比缩放后统一平移，保持相对位置，一次撤销恢复全部。
+// TransformObjects 同页对象以页面原点等比缩放后统一平移，保持相对位置，一次撤销恢复全部
 // 入参: page 页面索引, ids 对象标识, dx、dy 位移, scale 正缩放比例
 // 返回: error 错误信息
 func (e *Editor) TransformObjects(page int, ids []string, dx, dy, scale float64) error {
@@ -434,7 +434,7 @@ func (e *Editor) TransformObjects(page int, ids []string, dx, dy, scale float64)
 	return e.updateObjects(page, objects, true)
 }
 
-// AlignObjects 单对象对齐页面，多对象相互对齐至选区边界，文字采用实际字形范围。
+// AlignObjects 单对象对齐页面，多对象相互对齐至选区边界，文字采用实际字形范围
 // 入参: page 页面索引, ids 对象标识, alignment 为left、center、right、top、middle或bottom
 // 返回: error 错误信息
 func (e *Editor) AlignObjects(page int, ids []string, alignment string) error {
@@ -484,7 +484,7 @@ func (e *Editor) AlignObjects(page int, ids []string, alignment string) error {
 	return e.updateObjects(page, objects, true)
 }
 
-// DeleteObjects 原子删除同页对象，保留其余对象顺序，一次撤销恢复全部。
+// DeleteObjects 原子删除同页对象，保留其余对象顺序，一次撤销恢复全部
 // 入参: page 页面索引, ids 对象标识
 // 返回: error 错误信息
 func (e *Editor) DeleteObjects(page int, ids []string) error {
@@ -511,7 +511,7 @@ func (e *Editor) DeleteObjects(page int, ids []string) error {
 	return nil
 }
 
-// selectedObjects 校验同页选择，返回内部只读对象与对应索引。
+// selectedObjects 校验同页选择，返回内部只读对象与对应索引
 // 入参: page 页面索引, ids 对象标识，不得重复
 // 返回: []GraphicObject 所选对象, []editorObjectPosition 图层和对象索引, error 错误信息
 func (e *Editor) selectedObjects(page int, ids []string) ([]GraphicObject, []editorObjectPosition, error) {
@@ -541,7 +541,7 @@ func (e *Editor) selectedObjects(page int, ids []string) ([]GraphicObject, []edi
 	return objects, indexes, nil
 }
 
-// editorObjectID 获取可创作对象的标准标识。
+// editorObjectID 获取可创作对象的标准标识
 // 入参: object 图形对象
 // 返回: string 对象标识，不支持的类型返回空字符串
 func editorObjectID(object GraphicObject) string {
@@ -558,7 +558,7 @@ func editorObjectID(object GraphicObject) string {
 	return ""
 }
 
-// objectBounds 批量获取对齐范围，复用同一渲染器的资源和字形缓存。
+// objectBounds 批量获取对齐范围，复用同一渲染器的资源和字形缓存
 // 入参: page 页面索引, objects 待度量的对象
 // 返回: []Box 对象范围, error 错误信息
 func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) {

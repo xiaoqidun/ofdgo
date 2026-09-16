@@ -30,8 +30,9 @@ import (
 const ofdNamespace = "http://www.ofdspec.org/2016"
 
 // WriteTo 逐个条目写出OFD，不关闭调用方输出流，出错时应丢弃本次输出
-// 新增资源仅写入实际引用的部分，静态TrueType轮廓字体按实际文字生成子集；编辑资源、原文档字体、可变及彩色字体等保持原样。
-// 重开子集文档后输入未包含的文字，需要通过AddFont注册完整字体并替换原字体引用。
+// 新增资源仅写入实际引用的部分，静态TrueType轮廓字体按实际文字生成子集
+// 原有字体在全包引用可确定时保留字形编号裁剪；编辑资源、复杂字体及无法确定的引用保持原样
+// 重开子集文档后输入未包含的文字，需要通过AddFont注册完整字体并替换原字体引用
 // 入参: writer 输出流
 // 返回: int64 已写入字节数, error 错误信息
 func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
@@ -207,7 +208,7 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error) error {
 	return nil
 }
 
-// usedResources 筛选当前引用的新增资源及需要跨页复用的原资源文件，不修改资源池。
+// usedResources 筛选当前引用的新增资源及需要跨页复用的原资源文件，不修改资源池
 // 返回: []editorResource 新增字体, []editorResource 新增图片, []string 原资源文件
 func (e *Editor) usedResources() (fonts, images []editorResource, sourceFiles []string) {
 	used := make(map[string]bool)
@@ -282,7 +283,7 @@ func (x *ofdXML) page(page PageContent) {
 	x.end("Page")
 }
 
-// layer 写出新建图层及其对象。
+// layer 写出新建图层及其对象
 // 入参: layer 图层
 func (x *ofdXML) layer(layer Layer) {
 	var attrs ofdAttrs

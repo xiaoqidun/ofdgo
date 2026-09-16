@@ -25,15 +25,33 @@ import (
 // 入参: data 集合数据, index 字体索引
 // 返回: []byte 单字体数据, error 错误信息
 func extractCollectionFont(data []byte, index int) ([]byte, error) {
-	if len(data) < 12 || string(data[:4]) != "ttcf" {
-		return nil, fmt.Errorf("invalid font collection header")
+	tables, err := fontFileTables(data, index)
+	if err != nil {
+		return nil, err
 	}
-	version := binary.BigEndian.Uint32(data[4:])
-	count := uint64(binary.BigEndian.Uint32(data[8:]))
-	if (version != 0x00010000 && version != 0x00020000) || count > uint64(len(data)-12)/4 || index < 0 || uint64(index) >= count {
-		return nil, fmt.Errorf("invalid font collection index or version")
+	if len(tables["head"]) < 12 {
+		return nil, fmt.Errorf("invalid head font table")
 	}
-	offset := uint64(binary.BigEndian.Uint32(data[12+index*4:]))
+	tables["head"] = bytes.Clone(tables["head"])
+	clear(tables["head"][8:12])
+	return serializeOTF(tables)
+}
+
+// fontFileTables 读取单字体或集合指定项的表目录，不复制表数据
+// 入参: data 字体数据, index 字体索引
+// 返回: map[string][]byte 字体表, error 错误信息
+func fontFileTables(data []byte, index int) (map[string][]byte, error) {
+	count, err := fontFileCount(data)
+	if err != nil {
+		return nil, err
+	}
+	if index < 0 || index >= count {
+		return nil, fmt.Errorf("invalid font index %d", index)
+	}
+	var offset uint64
+	if string(data[:4]) == "ttcf" {
+		offset = uint64(binary.BigEndian.Uint32(data[12+index*4:]))
+	}
 	if offset > uint64(len(data)-12) {
 		return nil, fmt.Errorf("invalid font offset")
 	}
@@ -60,12 +78,7 @@ func extractCollectionFont(data []byte, index int) ([]byte, error) {
 		}
 		tables[tag] = data[start : start+length]
 	}
-	if len(tables["head"]) < 12 {
-		return nil, fmt.Errorf("invalid head font table")
-	}
-	tables["head"] = bytes.Clone(tables["head"])
-	clear(tables["head"][8:12])
-	return serializeOTF(tables)
+	return tables, nil
 }
 
 // packedGlyphRune 获取包装字体字符
@@ -537,7 +550,7 @@ func buildCmapTable(numGlyphs uint16, mapping map[rune]uint16) []byte {
 	return mainBuf.Bytes()
 }
 
-// shouldBuildCmapFormat12 判断字符超出BMP或format 4长度溢出时是否需要format 12
+// shouldBuildCmapFormat12 判断终止码、补充平面字符或format 4长度溢出时是否需要format 12
 // 入参: mapping 字符到字形的映射
 // 返回: bool 是否需要构建format 12子表
 func shouldBuildCmapFormat12(mapping map[rune]uint16) bool {
@@ -546,12 +559,10 @@ func shouldBuildCmapFormat12(mapping map[rune]uint16) bool {
 	}
 	var codes []int
 	for r := range mapping {
-		if r > 0xFFFF {
+		if r >= 0xFFFF {
 			return true
 		}
-		if r != 0xFFFF {
-			codes = append(codes, int(r))
-		}
+		codes = append(codes, int(r))
 	}
 	if len(codes) == 0 {
 		return false

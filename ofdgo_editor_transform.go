@@ -20,15 +20,15 @@ import (
 	"slices"
 )
 
-// RotateObject 绕对象可见范围中心旋转。
+// RotateObject 绕对象可见范围中心旋转
 // 入参: page 页面索引, id 对象标识, degrees 顺时针角度
 // 返回: error 错误信息
 func (e *Editor) RotateObject(page int, id string, degrees int) error {
 	return e.RotateObjects(page, []string{id}, degrees)
 }
 
-// RotateObjects 绕同页选区的可见范围中心旋转。
-// 保留相对位置及资源，一次撤销恢复全部。
+// RotateObjects 绕同页选区的可见范围中心旋转
+// 保留相对位置及资源，一次撤销恢复全部
 // 入参: page 页面索引, ids 对象标识, degrees 顺时针角度，仅支持90度的整数倍
 // 返回: error 错误信息
 func (e *Editor) RotateObjects(page int, ids []string, degrees int) error {
@@ -40,15 +40,15 @@ func (e *Editor) RotateObjects(page int, ids []string, degrees int) error {
 	return e.orientObjects(page, ids, m)
 }
 
-// FlipObject 绕对象可见范围中心镜像。
+// FlipObject 绕对象可见范围中心镜像
 // 入参: page 页面索引, id 对象标识, axis 为horizontal或vertical
 // 返回: error 错误信息
 func (e *Editor) FlipObject(page int, id, axis string) error {
 	return e.FlipObjects(page, []string{id}, axis)
 }
 
-// FlipObjects 以同页选区中心镜像，保留资源及绘制顺序，一次撤销恢复全部。
-// 以对象可见范围计算选区。
+// FlipObjects 以同页选区中心镜像，保留资源及绘制顺序，一次撤销恢复全部
+// 以对象可见范围计算选区
 // 入参: page 页面索引, ids 对象标识, axis 为horizontal或vertical
 // 返回: error 错误信息
 func (e *Editor) FlipObjects(page int, ids []string, axis string) error {
@@ -64,7 +64,7 @@ func (e *Editor) FlipObjects(page int, ids []string, axis string) error {
 	return e.orientObjects(page, ids, m)
 }
 
-// orientObjects 更新Boundary与CTM，不重排文字或重采样图片。
+// orientObjects 更新Boundary与CTM，不重排文字或重采样图片
 // 入参: page 页面索引, ids 对象标识, matrix 直角旋转或镜像矩阵
 // 返回: error 错误信息
 func (e *Editor) orientObjects(page int, ids []string, matrix Matrix) error {
@@ -110,7 +110,7 @@ func (e *Editor) orientObjects(page int, ids []string, matrix Matrix) error {
 	return e.updateObjects(page, objects, true)
 }
 
-// transformObjectClips 变换裁剪区域，不修改原始裁剪数据。
+// transformObjectClips 变换裁剪区域，不修改原始裁剪数据
 // 入参: clips 裁剪集合, matrix 对象边界坐标中的变换
 // 返回: *Clips 变换后的裁剪集合
 func transformObjectClips(clips *Clips, matrix Matrix) *Clips {
@@ -126,7 +126,7 @@ func transformObjectClips(clips *Clips, matrix Matrix) *Clips {
 	return &result
 }
 
-// ImageBounds 返回完整图片经Boundary位移及CTM变换后的轴对齐边界，不应用裁剪或父级变换。
+// ImageBounds 返回完整图片经Boundary位移及CTM变换后的轴对齐边界，不应用裁剪或父级变换
 // 返回: Box 所在坐标系中的完整图片边界, error 错误信息
 func (obj ImageObject) ImageBounds() (Box, error) {
 	box, err := creationBox(obj.Boundary)
@@ -142,8 +142,8 @@ func (obj ImageObject) ImageBounds() (Box, error) {
 	return TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(obj.CTM)).TransformBox(Box{W: 1, H: 1}), nil
 }
 
-// CropImage 按页面毫米坐标重设图片裁剪，保留原始资源及像素，可再次扩大裁剪区域。
-// 使用ImageObject.ImageBounds返回的范围可还原完整图片；提交一次撤销记录。
+// CropImage 按页面毫米坐标重设图片裁剪，保留原始资源及像素，可再次扩大裁剪区域
+// 使用ImageObject.ImageBounds返回的范围可还原完整图片；提交一次撤销记录
 // 入参: page 页面索引, id 图片对象标识, box 页面毫米坐标中的保留范围
 // 返回: error 错误信息
 func (e *Editor) CropImage(page int, id string, box Box) error {
@@ -161,7 +161,7 @@ func (e *Editor) CropImage(page int, id string, box Box) error {
 	return e.UpdateObject(page, id, object)
 }
 
-// cropImageObject 更新图片副本的裁剪和局部坐标，不修改资源。
+// cropImageObject 更新图片副本的裁剪和局部坐标，不修改资源
 // 入参: image 图片对象副本, box 页面毫米坐标中的保留范围
 // 返回: error 错误信息
 func cropImageObject(image *ImageObject, box Box) error {
@@ -200,8 +200,8 @@ func cropImageObject(image *ImageObject, box Box) error {
 	return nil
 }
 
-// FitImage 按原始像素比例居中适应或填充当前Boundary，保留直角旋转及镜像方向。
-// 保留原始图片，不重采样；重设裁剪，一次撤销恢复原布局。
+// FitImage 按原始像素比例居中适应或填充当前Boundary，保留直角旋转及镜像方向
+// 保留原始图片，不重采样；重设裁剪，一次撤销恢复原布局
 // 入参: page 页面索引, id 图片对象标识, mode 为contain（完整显示）或cover（填满裁剪）
 // 返回: error 错误信息
 func (e *Editor) FitImage(page int, id, mode string) error {
@@ -218,7 +218,7 @@ func (e *Editor) FitImage(page int, id, mode string) error {
 	return e.UpdateObject(page, id, object)
 }
 
-// fitImage 将原始像素比例应用到当前图片框，适应时保留空白，填充时裁掉超出部分。
+// fitImage 将原始像素比例应用到当前图片框，适应时保留空白，填充时裁掉超出部分
 // 入参: obj 图片对象副本, mode 为contain或cover
 // 返回: error 错误信息
 func (e *Editor) fitImage(obj *ImageObject, mode string) error {
@@ -263,8 +263,8 @@ func (e *Editor) fitImage(obj *ImageObject, mode string) error {
 	return nil
 }
 
-// TextFrame 将对象Boundary逆变换到本地坐标并返回轴对齐边界。
-// 直角旋转与翻转不改变本地段落宽度。
+// TextFrame 将对象Boundary逆变换到本地坐标并返回轴对齐边界
+// 直角旋转与翻转不改变本地段落宽度
 // 返回: Box 对象本地坐标中的边界, error 错误信息
 func (obj TextObject) TextFrame() (Box, error) {
 	box, err := creationBox(obj.Boundary)
@@ -283,8 +283,8 @@ func (obj TextObject) TextFrame() (Box, error) {
 	return m.TransformBox(Box{W: box.W, H: box.H}), nil
 }
 
-// ResizeTextFrame 调整文字本地坐标的左侧偏移及宽度，保留页面方向；重新排版后通过UpdateObject提交。
-// 支持轴向缩放、直角旋转与镜像，不支持斜切或其他角度旋转。
+// ResizeTextFrame 调整文字本地坐标的左侧偏移及宽度，保留页面方向；重新排版后通过UpdateObject提交
+// 支持轴向缩放、直角旋转与镜像，不支持斜切或其他角度旋转
 // 入参: offset 本地左侧位移, width 新的本地排版宽度，单位为毫米
 // 返回: TextObject 调整后的文字对象, error 错误信息
 func (obj TextObject) ResizeTextFrame(offset, width float64) (TextObject, error) {
@@ -308,7 +308,7 @@ func (obj TextObject) ResizeTextFrame(offset, width float64) (TextObject, error)
 	return obj, nil
 }
 
-// editorBoxString 使用统一精度序列化创作边界。
+// editorBoxString 使用统一精度序列化创作边界
 // 入参: box 矩形范围
 // 返回: string 标准Boundary属性值
 func editorBoxString(box Box) string {

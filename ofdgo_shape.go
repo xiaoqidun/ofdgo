@@ -30,9 +30,9 @@ const (
 	ShapeEllipse   ShapeKind = "ellipse"
 )
 
-// NewShape 创建使用标准紧缩路径的图形，默认黑色描边、不填充。
-// 可调整返回对象的颜色、线宽等属性后通过 Editor.AddObject 写入。
-// 水平、垂直直线使用正尺寸边界，路径端点不变。
+// NewShape 创建使用标准紧缩路径的图形，默认黑色描边、不填充
+// 可调整返回对象的颜色、线宽等属性后通过 Editor.AddObject 写入
+// 水平、垂直直线使用正尺寸边界，路径端点不变
 // 入参: kind 图形类型, box 图形范围；直线从 (X,Y) 到 (X+W,Y+H)，W、H 可为负或零
 // 返回: PathObject 路径对象, error 错误信息
 func NewShape(kind ShapeKind, box Box) (PathObject, error) {
@@ -65,8 +65,8 @@ func NewShape(kind ShapeKind, box Box) (PathObject, error) {
 	return object, nil
 }
 
-// Shape 识别 NewShape 生成的基本路径及其轴对齐缩放、直角旋转、镜像和平移。
-// 直线范围以起点和有符号的端点位移表示；非基本路径或不支持的变换返回空类型。
+// Shape 识别 NewShape 生成的基本路径及其轴对齐缩放、直角旋转、镜像和平移
+// 直线范围以起点和有符号的端点位移表示；非基本路径或不支持的变换返回空类型
 // 返回: ShapeKind 图形类型, Box 几何范围（不含描边）
 func (p PathObject) Shape() (ShapeKind, Box) {
 	tokens := strings.Fields(p.AbbreviatedData)
@@ -126,7 +126,7 @@ func (p PathObject) Shape() (ShapeKind, Box) {
 	return kind, box
 }
 
-// sameShapePath 比较基本路径的命令与数值，忽略数值格式差异。
+// sameShapePath 比较基本路径的命令与数值，忽略数值格式差异
 // 入参: a、b 路径词元
 // 返回: bool 是否相同
 func sameShapePath(a, b []string) bool {
@@ -146,8 +146,8 @@ func sameShapePath(a, b []string) bool {
 	return true
 }
 
-// Reshape 调整基本路径在所在坐标系中的几何范围，保留对象标识、方向、缩放和绘制属性，不缩放线宽。
-// 返回对象可通过 Editor.UpdateObject 写入；仅支持 Shape 可识别的路径。
+// Reshape 调整基本路径在所在坐标系中的几何范围，保留对象标识、方向、缩放和绘制属性，不缩放线宽
+// 返回对象可通过 Editor.UpdateObject 写入；仅支持 Shape 可识别的路径
 // 入参: box 新几何范围，直线使用起点和有符号的端点位移
 // 返回: PathObject 调整后的对象, error 错误信息
 func (p PathObject) Reshape(box Box) (PathObject, error) {

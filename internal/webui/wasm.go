@@ -97,6 +97,8 @@ func RunWASM() {
 	registerExportCallback("ofdgoExportDocument", exportDocument)
 	registerExportCallback("ofdgoExportAttachment", exportAttachment)
 	registerCallback("ofdgoMatchFontFiles", matchFontFiles)
+	registerCallback("ofdgoFontFaces", fontFaces)
+	registerCallback("ofdgoFontFace", fontFace)
 	registerCallback("ofdgoCreateDocument", createDocument)
 	registerCallback("ofdgoEditDocument", editDocument)
 	registerCallback("ofdgoChangePage", changePage)
@@ -115,6 +117,7 @@ func RunWASM() {
 	registerCallback("ofdgoAlignObjects", alignObjects)
 	registerCallback("ofdgoDeleteObjects", deleteObjects)
 	registerCallback("ofdgoEraseObjects", eraseObjects)
+	registerCallback("ofdgoEraseObjectsPath", eraseObjectsPath)
 	registerCallback("ofdgoCopyObjects", copyObjects)
 	registerCallback("ofdgoCaptureObjects", captureObjects)
 	registerCallback("ofdgoPasteObjects", pasteObjects)
@@ -467,6 +470,32 @@ func matchFontFiles(args []js.Value) (any, error) {
 	return currentSession.Reader.MatchFontFiles(stringsFromJS(args[0]))
 }
 
+// fontFaces 读取上传字体的名称和集合索引
+// 入参: args 字体数据
+// 返回: any 字体列表, error 错误信息
+func fontFaces(args []js.Value) (any, error) {
+	data, err := bytesFromJS(args[0])
+	if err != nil {
+		return nil, err
+	}
+	return (ofdgo.FontFile{Data: data}).Faces()
+}
+
+// fontFace 提取编辑时选定的字体，供输入预览和保存共用
+// 入参: args 字体数据和零起始索引
+// 返回: any 独立字体数据, error 错误信息
+func fontFace(args []js.Value) (any, error) {
+	data, err := bytesFromJS(args[0])
+	if err != nil {
+		return nil, err
+	}
+	data, err = (ofdgo.FontFile{Data: data}).Face(args[1].Int())
+	if err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"bytes": bytesToJS(data)}), nil
+}
+
 // bytesFromJS 从浏览器值读取二进制数据
 // 入参: value 浏览器值
 // 返回: []byte 二进制数据, error 错误信息
@@ -535,13 +564,13 @@ func encodeResult(result apiResult) string {
 // currentEditor 当前编辑文档
 var currentEditor *ofdgo.Editor
 
-// editorClipboard 当前编辑文档中的对象快照与剪贴板标识。
+// editorClipboard 当前编辑文档中的对象快照与剪贴板标识
 type editorClipboard struct {
 	token   string
 	objects []ofdgo.GraphicObject
 }
 
-// copiedObjects 当前对象剪贴板，不保存字体或图片的重复数据。
+// copiedObjects 当前对象剪贴板，不保存字体或图片的重复数据
 var copiedObjects *editorClipboard
 
 // editorInfo 编辑文档信息与操作状态
@@ -560,7 +589,7 @@ type editorPageInfo struct {
 	PageIndex int `json:"pageIndex"`
 }
 
-// editorSelectionInfo 对象复制结果及新选区。
+// editorSelectionInfo 对象复制结果及新选区
 type editorSelectionInfo struct {
 	editorInfo
 	SelectedIDs []string `json:"selectedIDs"`
@@ -851,7 +880,7 @@ func copyObjects(args []js.Value) (any, error) {
 	return copyEditorObjects(args[0].Int(), objects, args[2].Float(), args[3].Float())
 }
 
-// captureObjects 保存独立选区快照，不修改文档或历史。
+// captureObjects 保存独立选区快照，不修改文档或历史
 // 入参: args 页面索引、对象标识数组和剪贴板标识
 // 返回: any 空结果, error 错误信息
 func captureObjects(args []js.Value) (any, error) {
@@ -866,7 +895,7 @@ func captureObjects(args []js.Value) (any, error) {
 	return nil, nil
 }
 
-// pasteObjects 将当前文档的对象快照粘贴到目标页。
+// pasteObjects 将当前文档的对象快照粘贴到目标页
 // 入参: args 目标页、剪贴板标识和横纵位移
 // 返回: any 文档信息及新选区, error 错误信息
 func pasteObjects(args []js.Value) (any, error) {
@@ -876,7 +905,7 @@ func pasteObjects(args []js.Value) (any, error) {
 	return copyEditorObjects(args[0].Int(), copiedObjects.objects, args[2].Float(), args[3].Float())
 }
 
-// copyEditorObjects 复制快照并更新预览，返回新对象标识。
+// copyEditorObjects 复制快照并更新预览，返回新对象标识
 // 入参: page 目标页, objects 对象快照, dx、dy 毫米位移
 // 返回: any 文档信息及新选区, error 错误信息
 func copyEditorObjects(page int, objects []ofdgo.GraphicObject, dx, dy float64) (any, error) {
@@ -900,7 +929,7 @@ func orderObjects(args []js.Value) (any, error) {
 	})
 }
 
-// distributeObjects 按指定轴等距分布选区。
+// distributeObjects 按指定轴等距分布选区
 // 入参: args 页面索引、对象标识数组和分布轴
 // 返回: any 文档信息, error 错误信息
 func distributeObjects(args []js.Value) (any, error) {
@@ -978,7 +1007,7 @@ func createDocument(args []js.Value) (any, error) {
 	return previewEditor(editor, args[3].Bool())
 }
 
-// editDocument 将已打开文档接入编辑器，沿用页面、资源及字体配置。
+// editDocument 将已打开文档接入编辑器，沿用页面、资源及字体配置
 // 入参: args 浏览器参数
 // 返回: any 编辑状态, error 错误信息
 func editDocument(args []js.Value) (any, error) {
@@ -1241,7 +1270,7 @@ func insertText(args []js.Value) (any, error) {
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
 
-// layoutText 调整文字框和段落排版，保留软换行前的原文。
+// layoutText 调整文字框和段落排版，保留软换行前的原文
 // 入参: args 页码、对象标识、本地左侧偏移、宽度、折行、对齐、行距和字距
 // 返回: any 文档信息, error 错误信息
 func layoutText(args []js.Value) (any, error) {
@@ -1276,14 +1305,14 @@ func layoutText(args []js.Value) (any, error) {
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
 
-// editorBox 将库层毫米边界传递给画布交互层。
+// editorBox 将库层毫米边界传递给画布交互层
 // 入参: box 毫米坐标中的矩形范围
 // 返回: map[string]any 可直接传递给JavaScript的横纵坐标和宽高
 func editorBox(box ofdgo.Box) map[string]any {
 	return map[string]any{"x": box.X, "y": box.Y, "width": box.W, "height": box.H}
 }
 
-// editorMatrix 将标准CTM转换为浏览器仿射矩阵分量。
+// editorMatrix 将标准CTM转换为浏览器仿射矩阵分量
 // 入参: matrix 库层仿射矩阵
 // 返回: []any 可直接传递给JavaScript的a、b、c、d、e、f分量，位移单位为毫米
 func editorMatrix(matrix ofdgo.Matrix) []any {
@@ -1293,7 +1322,7 @@ func editorMatrix(matrix ofdgo.Matrix) []any {
 	return []any{ax - x, ay - y, bx - x, by - y, x, y}
 }
 
-// rotateObjects 旋转同页选区，通用几何与历史记录由库负责。
+// rotateObjects 旋转同页选区，通用几何与历史记录由库负责
 // 入参: args 页面索引、对象标识数组和顺时针角度
 // 返回: any 文档信息, error 错误信息
 func rotateObjects(args []js.Value) (any, error) {
@@ -1302,7 +1331,7 @@ func rotateObjects(args []js.Value) (any, error) {
 	})
 }
 
-// flipObjects 镜像同页选区。
+// flipObjects 镜像同页选区
 // 入参: args 页面索引、对象标识数组和镜像轴
 // 返回: any 文档信息, error 错误信息
 func flipObjects(args []js.Value) (any, error) {
@@ -1311,7 +1340,7 @@ func flipObjects(args []js.Value) (any, error) {
 	})
 }
 
-// cropImage 设置图片裁剪范围，保留原始图片数据。
+// cropImage 设置图片裁剪范围，保留原始图片数据
 // 入参: args 页面索引、对象标识及页面毫米坐标中的横纵坐标和宽高
 // 返回: any 文档信息, error 错误信息
 func cropImage(args []js.Value) (any, error) {
@@ -1320,7 +1349,7 @@ func cropImage(args []js.Value) (any, error) {
 	})
 }
 
-// fitImage 按原始比例适应或填充图片框。
+// fitImage 按原始比例适应或填充图片框
 // 入参: args 页面索引、对象标识和适应方式
 // 返回: any 文档信息, error 错误信息
 func fitImage(args []js.Value) (any, error) {
@@ -1329,7 +1358,7 @@ func fitImage(args []js.Value) (any, error) {
 	})
 }
 
-// previewImage 在页面副本中显示指定图片的完整内容，不改变正文、历史或缓存。
+// previewImage 在页面副本中显示指定图片的完整内容，不改变正文、历史或缓存
 // 入参: args 页面索引和图片对象标识
 // 返回: any 页面SVG和分离的图片资源, error 错误信息
 func previewImage(args []js.Value) (any, error) {
@@ -1362,7 +1391,7 @@ func previewImage(args []js.Value) (any, error) {
 	return successResult(map[string]any{"svg": out.String(), "images": svgImagesToJS(resources.Images)}), nil
 }
 
-// svgImagesToJS 将图片资源以二进制数组传给前端，不使用base64。
+// svgImagesToJS 将图片资源以二进制数组传给前端，不使用base64
 // 入参: images SVG引用的图片资源
 // 返回: []any 图片标识、类型和数据
 func svgImagesToJS(images []ofdgo.SVGImage) []any {
@@ -1373,7 +1402,7 @@ func svgImagesToJS(images []ofdgo.SVGImage) []any {
 	return items
 }
 
-// transformObjects 统一移动或缩放选区，生成一次撤销记录。
+// transformObjects 统一移动或缩放选区，生成一次撤销记录
 // 入参: args 页面索引、对象标识数组、横纵位移和正缩放比例
 // 返回: any 文档信息, error 错误信息
 func transformObjects(args []js.Value) (any, error) {
@@ -1382,7 +1411,7 @@ func transformObjects(args []js.Value) (any, error) {
 	})
 }
 
-// alignObjects 对齐选区中的对象。
+// alignObjects 对齐选区中的对象
 // 入参: args 页面索引、对象标识数组和对齐方式
 // 返回: any 文档信息, error 错误信息
 func alignObjects(args []js.Value) (any, error) {
@@ -1391,7 +1420,7 @@ func alignObjects(args []js.Value) (any, error) {
 	})
 }
 
-// deleteObjects 一次删除选区中的对象。
+// deleteObjects 一次删除选区中的对象
 // 入参: args 页面索引和对象标识数组
 // 返回: any 文档信息, error 错误信息
 func deleteObjects(args []js.Value) (any, error) {
@@ -1400,7 +1429,21 @@ func deleteObjects(args []js.Value) (any, error) {
 	})
 }
 
-// eraseObjects 按页面矩形范围擦除对象，保留局部裁剪之外的内容。
+// eraseObjectsPath 按页面闭合折线范围擦除对象，保留局部裁剪之外的内容
+// 入参: args 页面索引、对象标识数组和坐标点数组
+// 返回: any 文档信息, error 错误信息
+func eraseObjectsPath(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		points := make([]ofdgo.Point, args[2].Length())
+		for i := range points {
+			point := args[2].Index(i)
+			points[i] = ofdgo.Point{X: point.Get("x").Float(), Y: point.Get("y").Float()}
+		}
+		return currentEditor.EraseObjectsPath(args[0].Int(), stringsFromJS(args[1]), points)
+	})
+}
+
+// eraseObjects 按页面矩形范围擦除对象，保留局部裁剪之外的内容
 // 入参: args 页面索引、对象标识数组和毫米坐标范围
 // 返回: any 文档信息, error 错误信息
 func eraseObjects(args []js.Value) (any, error) {
@@ -1411,7 +1454,7 @@ func eraseObjects(args []js.Value) (any, error) {
 	})
 }
 
-// changeObjects 提交库层批量操作，无修改时复用当前预览。
+// changeObjects 提交库层批量操作，无修改时复用当前预览
 // 入参: apply 待执行的编辑操作
 // 返回: any 文档信息, error 错误信息
 func changeObjects(apply func() error) (any, error) {

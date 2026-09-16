@@ -28,7 +28,7 @@ import (
 	"strings"
 )
 
-// sourceParts 生成编辑过的XML和新增资源，不读取未修改页面或原始二进制资源。
+// sourceParts 生成编辑过的XML和新增资源，不读取未修改页面或原始二进制资源
 // 返回: map[string][]byte 替换及新增条目, error 错误信息
 func (e *Editor) sourceParts() (map[string][]byte, error) {
 	parts := make(map[string][]byte)
@@ -171,7 +171,7 @@ func (e *Editor) sourceParts() (map[string][]byte, error) {
 	return parts, nil
 }
 
-// sourcePageXML 仅改写已修改的对象、页面尺寸和新增图层，保留原页块层级。
+// sourcePageXML 仅改写已修改的对象、页面尺寸和新增图层，保留原页块层级
 // 入参: index 页面索引, source 原页面
 // 返回: []byte 页面XML, error 错误信息
 func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, error) {
@@ -290,7 +290,7 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 	return editorPatchXML(data, patches), nil
 }
 
-// sourceLayerXML 写出新增图层，对复制对象保留原始定位和显式默认值。
+// sourceLayerXML 写出新增图层，对复制对象保留原始定位和显式默认值
 // 入参: layer 图层
 // 返回: []byte 图层XML, error 错误信息
 func (e *Editor) sourceLayerXML(layer Layer) ([]byte, error) {
@@ -314,7 +314,7 @@ func (e *Editor) sourceLayerXML(layer Layer) ([]byte, error) {
 	return editorXMLContainer("Layer", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: layer.ID}, {Name: xml.Name{Local: "Type"}, Value: layer.Type}}, content)
 }
 
-// sourceNewPageXML 编码新增页面，同时保留复制对象的原文语义。
+// sourceNewPageXML 编码新增页面，同时保留复制对象的原文语义
 // 入参: page 页面
 // 返回: []byte 页面XML, error 错误信息
 func (e *Editor) sourceNewPageXML(page PageContent) ([]byte, error) {
@@ -337,7 +337,7 @@ func (e *Editor) sourceNewPageXML(page PageContent) ([]byte, error) {
 	return editorXMLContainer("Page", nil, append(area, content...))
 }
 
-// sourceInfoXML 更新公开元数据，保留原创建程序和未识别字段。
+// sourceInfoXML 更新公开元数据，保留原创建程序和未识别字段
 // 返回: []byte 根索引XML, error 错误信息
 func (e *Editor) sourceInfoXML() ([]byte, error) {
 	data, err := e.source.reader.readFile("OFD.xml")
@@ -373,7 +373,7 @@ func (e *Editor) sourceInfoXML() ([]byte, error) {
 	return editorXMLSetText(data, info, values), nil
 }
 
-// writeSource 将未修改ZIP条目直接复制到新包，逐项写入改动，不持有原资源解压副本。
+// writeSource 将未修改ZIP条目直接复制到新包，逐项写入改动，不持有原资源解压副本
 // 入参: writer 输出流, fonts 新增字体子集
 // 返回: int64 写入字节数, error 错误信息
 func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte) (int64, error) {
@@ -382,7 +382,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte) (int64, 
 		return 0, err
 	}
 	maps.Copy(parts, fonts)
-	removed, err := e.pruneSourceResources(parts)
+	removed, err := e.compactSourceResources(parts)
 	if err != nil {
 		return 0, err
 	}
@@ -445,7 +445,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte) (int64, 
 	return output.count, err
 }
 
-// sourceReader 生成原包与修改条目组成的独立预览快照，不进行ZIP压缩。
+// sourceReader 生成原包与修改条目组成的独立预览快照，不进行ZIP压缩
 // 返回: *Reader 阅读器, error 错误信息
 func (e *Editor) sourceReader() (*Reader, error) {
 	parts, err := e.sourceParts()

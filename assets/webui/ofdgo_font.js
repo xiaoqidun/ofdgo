@@ -48,7 +48,7 @@ export class FontPicker {
 		const normalize = value => value.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ").trim();
 		const terms = normalize(query).split(" ").filter(Boolean);
 		this.matches = this.fonts.map((font, index) => ({ font, index })).filter(({ font }) => {
-			const name = normalize([font.fullName, font.name, font.family, font.postscriptName].filter(Boolean).join(" "));
+			const name = normalize([font.fullName, font.name, font.family, font.style, font.postscriptName, ...(font.names || [])].filter(Boolean).join(" "));
 			return terms.every(term => name.includes(term));
 		});
 		this.list.replaceChildren();
@@ -105,8 +105,10 @@ export class FontPicker {
 
 	commitExact() {
 		const value = this.input.value.trim().toLocaleLowerCase();
-		const index = this.fonts.findIndex(font => !font.disabled
-			&& [font.fullName, font.name, font.postscriptName].some(name => name?.toLocaleLowerCase() === value));
+		const matches = font => font && !font.disabled
+			&& [font.fullName, font.name, font.postscriptName, ...(font.names || [])].some(name => name?.toLocaleLowerCase() === value);
+		const selected = Number(this.value);
+		const index = matches(this.fonts[selected]) ? selected : this.fonts.findIndex(matches);
 		if (index >= 0) this.choose(index);
 	}
 
@@ -283,6 +285,22 @@ export class FontManager {
 		return font.data;
 	}
 
+	editorFonts() {
+		return [...this.userFonts.filter(font => font.enabled).flatMap(file => {
+			if (!file.faces) return [file];
+			if (!file.faces.length) return [{ ...file, disabled: true }];
+			return file.faces.map(face => ({ ...face, id: face.index ? `${file.id}:${face.index}` : file.id, name: file.name, file }));
+		}), ...this.catalog];
+	}
+
+	async loadFaces(inspect) {
+		for (const file of this.userFonts) {
+			if (!file.enabled || file.faces) continue;
+			try { file.faces = await inspect(await this.read(file)); }
+			catch { file.faces = []; }
+		}
+	}
+
 	async add(fonts) {
 		let saved = true;
 		try {
@@ -320,6 +338,7 @@ export class FontManager {
 		const fonts = stored.map((font) => ({
 			...font,
 			data: previous.get(font.id)?.checksum === font.checksum ? previous.get(font.id).data : font.data,
+			faces: previous.get(font.id)?.checksum === font.checksum ? previous.get(font.id).faces : undefined,
 			source: "stored",
 		}));
 		fonts.push(...this.userFonts.filter((font) => font.source === "upload"));

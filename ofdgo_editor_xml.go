@@ -23,7 +23,7 @@ import (
 	"strings"
 )
 
-// editorXML 保存XML节点的原文位置，不重写未修改的内容。
+// editorXML 保存XML节点的原文位置，不重写未修改的内容
 type editorXML struct {
 	name                    xml.Name
 	attrs                   []xml.Attr
@@ -32,13 +32,13 @@ type editorXML struct {
 	parent                  *editorXML
 }
 
-// editorXMLPatch 替换原文中的连续区间。
+// editorXMLPatch 替换原文中的连续区间
 type editorXMLPatch struct {
 	start, end int
 	data       []byte
 }
 
-// parseEditorXML 解析节点位置，保留命名空间、注释和原始格式。
+// parseEditorXML 解析节点位置，保留命名空间、注释和原始格式
 // 入参: data XML原文
 // 返回: *editorXML 根节点, error 错误信息
 func parseEditorXML(data []byte) (*editorXML, error) {
@@ -80,7 +80,7 @@ func parseEditorXML(data []byte) (*editorXML, error) {
 	return root, nil
 }
 
-// child 查找OFD直接子节点。
+// child 查找OFD直接子节点
 // 入参: name 节点名称
 // 返回: *editorXML 节点，不存在时为nil
 func (n *editorXML) child(name string) *editorXML {
@@ -92,7 +92,7 @@ func (n *editorXML) child(name string) *editorXML {
 	return nil
 }
 
-// attr 获取无命名空间的属性值。
+// attr 获取无命名空间的属性值
 // 入参: name 属性名称
 // 返回: string 属性值
 func (n *editorXML) attr(name string) string {
@@ -104,7 +104,7 @@ func (n *editorXML) attr(name string) string {
 	return ""
 }
 
-// editorPatchXML 按位置应用互不重叠的替换。
+// editorPatchXML 按位置应用互不重叠的替换
 // 入参: data 原文, patches 修改区间
 // 返回: []byte 修改后的XML
 func editorPatchXML(data []byte, patches []editorXMLPatch) []byte {
@@ -125,7 +125,7 @@ func editorPatchXML(data []byte, patches []editorXMLPatch) []byte {
 	return result.Bytes()
 }
 
-// editorXMLContent 替换节点内部内容，兼容自闭合节点。
+// editorXMLContent 替换节点内部内容，兼容自闭合节点
 // 入参: data 原文, node 节点, content 新内容
 // 返回: editorXMLPatch 修改区间
 func editorXMLContent(data []byte, node *editorXML, content []byte) editorXMLPatch {
@@ -141,7 +141,7 @@ func editorXMLContent(data []byte, node *editorXML, content []byte) editorXMLPat
 	return editorXMLPatch{node.start, node.end, replacement}
 }
 
-// editorXMLText 编码带独立命名空间的文本节点。
+// editorXMLText 编码带独立命名空间的文本节点
 // 入参: name 节点名称, value 文本
 // 返回: []byte XML片段
 func editorXMLText(name, value string) []byte {
@@ -150,7 +150,7 @@ func editorXMLText(name, value string) []byte {
 	return []byte("<ofd:" + name + " xmlns:ofd=\"" + ofdNamespace + "\">" + escaped.String() + "</ofd:" + name + ">")
 }
 
-// editorXMLSetText 更新或追加直接子节点，保留其他节点。
+// editorXMLSetText 更新或追加直接子节点，保留其他节点
 // 入参: data 原文, node 父节点, values 需要修改的字段
 // 返回: []byte 修改后的XML
 func editorXMLSetText(data []byte, node *editorXML, values [][2]string) []byte {
@@ -187,7 +187,7 @@ func editorXMLSetText(data []byte, node *editorXML, values [][2]string) []byte {
 	return editorPatchXML(data, patches)
 }
 
-// editorXMLObjects 递归登记图层和页块内的对象位置，保留原容器层级。
+// editorXMLObjects 递归登记图层和页块内的对象位置，保留原容器层级
 // 入参: container 图层或页块, nodes 标识与节点映射
 // 返回: error 错误信息
 func editorXMLObjects(container *editorXML, nodes map[string]*editorXML) error {
@@ -207,7 +207,7 @@ func editorXMLObjects(container *editorXML, nodes map[string]*editorXML) error {
 	return nil
 }
 
-// editorXMLAttributes 判断节点的命名空间与属性是否在编辑器支持范围内。
+// editorXMLAttributes 判断节点的命名空间与属性是否在编辑器支持范围内
 // 入参: node 节点, allowed 允许的属性名称
 // 返回: bool 是否支持
 func editorXMLAttributes(node *editorXML, allowed string) bool {
@@ -225,7 +225,7 @@ func editorXMLAttributes(node *editorXML, allowed string) bool {
 	return true
 }
 
-// editorXMLSupported 判断原文是否仅包含创建器能够保留的对象字段。
+// editorXMLSupported 判断原文是否仅包含创建器能够保留的对象字段
 // 入参: node 对象或子节点
 // 返回: bool 是否支持完整编辑
 func editorXMLSupported(node *editorXML) bool {
@@ -266,8 +266,8 @@ func editorXMLSupported(node *editorXML) bool {
 	return true
 }
 
-// editorXMLObject 修改对象发生变化的属性与内容，保留原文中的显式默认值。
-// 有效样式快照在修改后展开原绘制参数，避免已清除的属性重新继承。
+// editorXMLObject 修改对象发生变化的属性与内容，保留原文中的显式默认值
+// 有效样式快照在修改后展开原绘制参数，避免已清除的属性重新继承
 // 入参: data 页面原文, node 原对象节点, before 原对象, after 新对象
 // 返回: []byte 对象XML, error 错误信息
 func editorXMLObject(data []byte, node *editorXML, before, after GraphicObject) ([]byte, error) {
@@ -298,7 +298,7 @@ func editorXMLObject(data []byte, node *editorXML, before, after GraphicObject) 
 	return editorXMLMerge(data, node, oldXML, newXML)
 }
 
-// editorXMLMerge 按标准编码的差异更新原节点，递归保留未变化的显式默认值与命名空间。
+// editorXMLMerge 按标准编码的差异更新原节点，递归保留未变化的显式默认值与命名空间
 // 入参: data 原文, node 原节点, oldXML 修改前编码, newXML 修改后编码
 // 返回: []byte 更新节点, error 错误信息
 func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte, error) {
@@ -397,7 +397,7 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 	return result.Bytes(), nil
 }
 
-// editorXMLContainer 用标准编码器封装已编码的子节点。
+// editorXMLContainer 用标准编码器封装已编码的子节点
 // 入参: name 节点名称, attrs 属性, content 子节点XML
 // 返回: []byte XML片段, error 错误信息
 func editorXMLContainer(name string, attrs ofdAttrs, content []byte) ([]byte, error) {
@@ -410,7 +410,7 @@ func editorXMLContainer(name string, attrs ofdAttrs, content []byte) ([]byte, er
 	return output.Bytes(), err
 }
 
-// editorXMLStandalone 补齐原对象继承的命名空间，使跨页复制不依赖原父节点。
+// editorXMLStandalone 补齐原对象继承的命名空间，使跨页复制不依赖原父节点
 // 入参: data 对象XML, source 原节点
 // 返回: []byte 独立XML片段, error 错误信息
 func editorXMLStandalone(data []byte, source *editorXML) ([]byte, error) {

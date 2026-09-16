@@ -171,7 +171,7 @@ func imageWithMask(img, mask image.Image) image.Image {
 }
 
 // imageWithClip 应用图片裁剪区域
-// 低分辨率图片按最低精度细化蒙版，细化后的像素上限16Mi，不降低原图分辨率。
+// 低分辨率图片按最低精度细化蒙版，细化后的像素上限16Mi，不降低原图分辨率
 // 入参: img 图片对象, clipPath 裁剪路径, m 图片变换矩阵, dpi 最低蒙版分辨率，0保留原图精度
 // 返回: image.Image 裁剪后的图片对象
 func imageWithClip(img image.Image, clipPath *canvas.Path, m canvas.Matrix, dpi float64) image.Image {

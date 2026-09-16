@@ -112,6 +112,7 @@ a:focus-visible {
 }
 
 .editor-file,
+.editor-erase,
 .editor-paragraph,
 .editor-image,
 .editor-group:has(#textFont),
@@ -119,9 +120,13 @@ a:focus-visible {
 	grid-template-columns: repeat(2, max-content);
 }
 
-.editor-transform,
-.editor-erase {
+.editor-transform {
 	grid-template-columns: max-content;
+}
+
+#eraseObjectButton {
+	grid-row: span 2;
+	height: 100%;
 }
 
 .editor-image > select {

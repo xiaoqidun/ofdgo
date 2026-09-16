@@ -20,9 +20,9 @@ import (
 	"github.com/go-text/typesetting/segmenter"
 )
 
-// TextLayout 本地横向段落选项，Wrap按CTM变换前的边界宽度折行，Align为left、center、right或justify。
-// LineHeight为毫米单位的基线间距，0使用字体度量；LetterSpacing为字素间的附加毫米间距，可为负。
-// 零值保持显式换行和左对齐。
+// TextLayout 本地横向段落选项，Wrap按CTM变换前的边界宽度折行，Align为left、center、right或justify
+// LineHeight为毫米单位的基线间距，0使用字体度量；LetterSpacing为字素间的附加毫米间距，可为负
+// 零值保持显式换行和左对齐
 type TextLayout struct {
 	Wrap          bool
 	Align         string
@@ -30,14 +30,14 @@ type TextLayout struct {
 	LetterSpacing float64
 }
 
-// textLayout 保存编辑中的原文与选项，不写入OFD，也不参与渲染。
+// textLayout 保存编辑中的原文与选项，不写入OFD，也不参与渲染
 type textLayout struct {
 	value   string
 	options TextLayout
 }
 
-// TextLayout 获取最近一次排版的原文与选项，区分软换行和显式换行。
-// 信息仅在当前编辑过程保留，读取OFD时返回定位后的文字和默认选项。
+// TextLayout 获取最近一次排版的原文与选项，区分软换行和显式换行
+// 信息仅在当前编辑过程保留，读取OFD时返回定位后的文字和默认选项
 // 返回: string 原文, TextLayout 排版选项
 func (obj TextObject) TextLayout() (string, TextLayout) {
 	if obj.layout != nil {
@@ -46,7 +46,7 @@ func (obj TextObject) TextLayout() (string, TextLayout) {
 	return obj.Text(), TextLayout{}
 }
 
-// breakTextLines 优先使用Unicode断行机会，过长词仅在字素边界折行，不丢弃空白。
+// breakTextLines 优先使用Unicode断行机会，过长词仅在字素边界折行，不丢弃空白
 // 入参: runes 段落字符, advances 含字距的字符步进, width 本地排版宽度, wrap 是否自动折行, spacing 附加字距
 // 返回: [][2]int 各行的字符起止索引，左闭右开
 func breakTextLines(runes []rune, advances []float64, width float64, wrap bool, spacing float64) [][2]int {
@@ -106,7 +106,7 @@ func breakTextLines(runes []rune, advances []float64, width float64, wrap bool, 
 	return lines
 }
 
-// alignTextLine 将段落对齐转换为标准X和DeltaX，两端对齐保留段落末行左对齐。
+// alignTextLine 将段落对齐转换为标准X和DeltaX，两端对齐保留段落末行左对齐
 // 入参: runes 行内字符, advances 含字距的字符步进, width 本地排版宽度, alignment 对齐方式, justify 是否允许本行两端对齐, spacing 附加字距
 // 返回: float64 行首X坐标, string 字符间的DeltaX序列
 func alignTextLine(runes []rune, advances []float64, width float64, alignment string, justify bool, spacing float64) (float64, string) {
@@ -150,7 +150,7 @@ func alignTextLine(runes []rune, advances []float64, width float64, alignment st
 	return x, strings.Join(deltas, " ")
 }
 
-// spaceTextAdvances 将字距加入各字素末尾，不拆散组合字符。
+// spaceTextAdvances 将字距加入各字素末尾，不拆散组合字符
 // 入参: runes 段落字符, advances 待更新的字符步进, spacing 附加毫米字距
 func spaceTextAdvances(runes []rune, advances []float64, spacing float64) {
 	if spacing == 0 {

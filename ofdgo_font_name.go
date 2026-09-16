@@ -99,17 +99,42 @@ func fontFileNames(file io.ReaderAt) []string {
 // 入参: data 名称表数据
 // 返回: []string 字体名称列表
 func fontNamesFromTable(data []byte) []string {
+	records, values := fontNameValues(data)
+	var names []string
+	seen := make(map[string]bool)
+	for _, record := range records {
+		key := [4]uint16{record.Platform, record.Encoding, record.Language, record.Name}
+		name := values[key]
+		switch record.Name {
+		case 1, 16:
+			key[3]++
+			if style := values[key]; style != "" && name != "" {
+				name += " " + style
+			}
+		case 4, 6:
+		default:
+			continue
+		}
+		names = appendFontName(names, seen, name)
+	}
+	return names
+}
+
+// fontNameValues 解码字体名称表的多语言记录
+// 入参: data 名称表数据
+// 返回: []fontNameRecord 名称记录, map[[4]uint16]string 平台、编码、语言和名称对应的文本
+func fontNameValues(data []byte) ([]fontNameRecord, map[[4]uint16]string) {
 	if len(data) < 6 || binary.BigEndian.Uint16(data) > 1 {
-		return nil
+		return nil, nil
 	}
 	count := int(binary.BigEndian.Uint16(data[2:]))
 	storage := int(binary.BigEndian.Uint16(data[4:]))
 	if 6+count*12 > storage || storage > len(data) {
-		return nil
+		return nil, nil
 	}
 	records := make([]fontNameRecord, count)
 	if err := binary.Read(bytes.NewReader(data[6:]), binary.BigEndian, records); err != nil {
-		return nil
+		return nil, nil
 	}
 	values := make(map[[4]uint16]string)
 	for _, record := range records {
@@ -141,22 +166,5 @@ func fontNamesFromTable(data []byte) []string {
 		}
 		values[[4]uint16{record.Platform, record.Encoding, record.Language, record.Name}] = name
 	}
-	var names []string
-	seen := make(map[string]bool)
-	for _, record := range records {
-		key := [4]uint16{record.Platform, record.Encoding, record.Language, record.Name}
-		name := values[key]
-		switch record.Name {
-		case 1, 16:
-			key[3]++
-			if style := values[key]; style != "" && name != "" {
-				name += " " + style
-			}
-		case 4, 6:
-		default:
-			continue
-		}
-		names = appendFontName(names, seen, name)
-	}
-	return names
+	return records, values
 }
