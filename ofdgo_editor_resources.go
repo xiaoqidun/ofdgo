@@ -39,7 +39,7 @@ type editorResourceRefs struct {
 // 入参: parts 已修改和新增的包内条目, progress 保存进度回调
 // 返回: map[string]bool 可移除的二进制条目, error 读取错误
 func (e *Editor) compactSourceResources(parts map[string][]byte, progress editorProgress) (map[string]bool, error) {
-	if len(parts) == 0 {
+	if len(parts) == 0 && e.revision == 0 {
 		return nil, nil
 	}
 	reader := e.source.reader

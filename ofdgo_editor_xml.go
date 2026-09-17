@@ -546,6 +546,21 @@ func editorXMLEncodedFragment(data []byte, node *editorXML) []byte {
 	return editorPatchXML(fragment, []editorXMLPatch{{position, position, []byte(" xmlns:ofd=\"" + ofdNamespace + "\"")}})
 }
 
+// editorXMLAttribute 修改单个标准属性，保留节点其余原文
+// 入参: data 原文, node 节点, name 属性名, value 新值
+// 返回: []byte 修改后的节点, error 错误信息
+func editorXMLAttribute(data []byte, node *editorXML, name, value string) ([]byte, error) {
+	before, err := editorXMLContainer(node.name.Local, ofdAttrs{{Name: xml.Name{Local: name}, Value: node.attr(name)}}, nil)
+	if err != nil {
+		return nil, err
+	}
+	after, err := editorXMLContainer(node.name.Local, ofdAttrs{{Name: xml.Name{Local: name}, Value: value}}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return editorXMLMerge(data, node, before, after)
+}
+
 // editorXMLContainer 用标准编码器封装已编码的子节点
 // 入参: name 节点名称, attrs 属性, content 子节点XML
 // 返回: []byte XML片段, error 错误信息

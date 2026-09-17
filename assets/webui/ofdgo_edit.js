@@ -176,7 +176,10 @@ function paintShape(node, shape, box) {
 }
 
 export function canEditObject(item, capability) {
-	return Boolean(item) && (item.items || [item]).every(object => Boolean(object.capabilities?.[capability]));
+	if (!item) return false;
+	const objects = item.items || [item];
+	if (objects.some(object => object.type === "Annotation") && objects.some(object => object.type !== "Annotation")) return false;
+	return objects.every(object => Boolean(object.capabilities?.[capability] || capability === "move" && object.capabilities?.transform));
 }
 
 export function missingGlyphMessage(diagnostic, action = "请更换字体") {
@@ -188,6 +191,7 @@ export function missingGlyphMessage(diagnostic, action = "请更换字体") {
 }
 
 export function objectEditReason(item) {
+	if (item?.items?.some(object => object.type === "Annotation") && item.items.some(object => object.type !== "Annotation")) return "注解与正文需分别操作";
 	const labels = { fontUnavailable: "字体不可用", unsupportedColor: "暂不支持此颜色", unsupportedStyle: "暂不支持此样式",
 		unsupportedContainer: "暂不支持此对象结构", invalidObject: "对象数据异常" };
 	const reasons = (item?.items || (item ? [item] : [])).map(object => {
@@ -278,18 +282,20 @@ export class CanvasEditor {
 		const layer = document.createElement("div");
 		layer.className = "edit-layer";
 		const artwork = new Map([...surface.querySelectorAll("[data-ofd-object], [data-ofd-child]")].map((node, order) => [node.getAttribute("data-ofd-object") || node.getAttribute("data-ofd-child"), { node, order }]));
-		const objects = [...page.objects].sort((a, b) => (artwork.get(a.id)?.order ?? 0) - (artwork.get(b.id)?.order ?? 0));
+		const objects = [...page.objects].sort((a, b) => Number(Boolean(b.background)) - Number(Boolean(a.background))
+			|| (artwork.get(a.id)?.order ?? 0) - (artwork.get(b.id)?.order ?? 0));
 		for (const object of objects) {
 			const node = document.createElement("div");
 			node.className = "edit-object";
-			node.classList.toggle("read-only", !canEditObject(object, "transform"));
+			node.classList.toggle("edit-background", Boolean(object.background));
+			node.classList.toggle("read-only", !canEditObject(object, "move"));
 			node.title = objectEditReason(object);
 			if (lineShape(object.shape)) {
 				node.classList.add("edit-line");
 			}
 			node.tabIndex = 0;
 			node.setAttribute("role", "button");
-			node.setAttribute("aria-label", { ImageObject: "图片对象", TextObject: "文字对象", PathObject: "图形对象", CompositeObject: "复合对象", CompositeGraphicUnit: "复合对象" }[object.type]);
+			node.setAttribute("aria-label", { ImageObject: "图片对象", TextObject: "文字对象", PathObject: "图形对象", CompositeObject: "复合对象", CompositeGraphicUnit: "复合对象", Annotation: "注解对象" }[object.type]);
 			const item = { ...object, index, page: { width: page.width, height: page.height }, node, surface };
 			item.artwork = artwork.get(object.id)?.node;
 			if (object.type === "PathObject" && (object.shape || object.outline) || (object.scoped || object.type === "CompositeObject" || object.type === "CompositeGraphicUnit") && object.contours?.length) {
@@ -527,8 +533,9 @@ export class CanvasEditor {
 		node = target?.node;
 		this.focus();
 		const additive = event.shiftKey || event.ctrlKey || event.metaKey || this.multiple;
-		if (!target) {
+		if (!target || target.background && !this.items().includes(target)) {
 			this.startMarquee(event, additive);
+			if (this.drag?.marquee) this.drag.target = target;
 			return;
 		}
 		if (additive && !event.target.dataset.corner) {
@@ -540,7 +547,7 @@ export class CanvasEditor {
 			return;
 		}
 		const item = this.selected;
-		if (!canEditObject(item, "transform")) return;
+		if (!canEditObject(item, "move")) return;
 		this.drag = {
 			item, pointerID: event.pointerId, corner: !item.items || target === item ? resizeCorner(node, event) : "",
 			rect: item.surface.getBoundingClientRect(), rotation: this.options.rotation(),
@@ -739,6 +746,7 @@ export class CanvasEditor {
 			this.drag = null;
 			drag.preview.remove();
 			this.viewer.releasePointerCapture(drag.pointerID);
+			if (drag.target && !drag.moved) this.setSelection([...drag.base, drag.target]);
 			return;
 		}
 		if (drag.shape) {
@@ -810,7 +818,8 @@ export class CanvasEditor {
 		if (!page) return;
 		event.preventDefault();
 		this.focus();
-		this.drag = { erase: this.tool, page, surface, items: [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)),
+		this.drag = { erase: this.tool, page, surface, items: [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node))
+			.filter(item => this.tool === "erase-object" || !item.background),
 			erased: new Set(), shape: "rectangle", pointerID: event.pointerId, clientX: event.clientX, clientY: event.clientY,
 			rect: surface.getBoundingClientRect(), rotation: this.options.rotation() };
 		if (this.tool === "erase-region") Object.assign(this.drag, this.createPreview(surface, page, "rectangle",
@@ -866,9 +875,11 @@ export class CanvasEditor {
 		const box = { x: Math.min(from.x, to.x), y: Math.min(from.y, to.y), width: Math.abs(to.x-from.x), height: Math.abs(to.y-from.y) };
 		paintShape(drag.node, "rectangle", box);
 		if (Math.hypot(event.clientX-drag.clientX, event.clientY-drag.clientY) < 3) return;
+		drag.moved = true;
 		const items = [...drag.base];
 		for (const node of drag.surface.querySelectorAll(".edit-object")) {
 			const item = this.nodes.get(node);
+			if (item.background && (item.x < box.x || item.y < box.y || item.x + item.width > box.x + box.width || item.y + item.height > box.y + box.height)) continue;
 			if (!items.includes(item) && item.x <= box.x+box.width && item.x+item.width >= box.x && item.y <= box.y+box.height && item.y+item.height >= box.y) {
 				items.push(item);
 			}
@@ -1030,7 +1041,7 @@ export class CanvasEditor {
 		} else if (edit && !this.drag && !this.selected.items) {
 			if (this.nudge) this.commitNudge().then(saved => { if (saved && this.selected) this.options.onEdit(this.selected); });
 			else this.options.onEdit(this.selected);
-		} else if (!this.drag && directions[event.key] && canEditObject(this.selected, "transform")) {
+		} else if (!this.drag && directions[event.key] && canEditObject(this.selected, "move")) {
 			const [x, y] = directions[event.key];
 			const [dx, dy] = [[x, y], [y, -x], [-x, -y], [-y, x]][this.options.rotation() / 90];
 			const step = event.shiftKey ? 10 : 1;

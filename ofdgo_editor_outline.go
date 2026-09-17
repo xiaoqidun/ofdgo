@@ -158,7 +158,7 @@ func (e *Editor) UpdateOutline(path []int, title string, page int) error {
 	if err != nil {
 		return err
 	}
-	value, err := editorOutlineAttribute(updated, node, "Title", title)
+	value, err := editorXMLAttribute(updated, node, "Title", title)
 	if err != nil {
 		return err
 	}
@@ -326,21 +326,6 @@ func editorOutlineNode(root *editorXML, path []int) (*editorXML, error) {
 	return root, nil
 }
 
-// editorOutlineAttribute 修改单个标准属性，保留节点其余原文
-// 入参: data 原文, node 节点, name 属性名, value 新值
-// 返回: []byte 修改后的节点, error 错误信息
-func editorOutlineAttribute(data []byte, node *editorXML, name, value string) ([]byte, error) {
-	before, err := editorXMLContainer(node.name.Local, ofdAttrs{{Name: xml.Name{Local: name}, Value: node.attr(name)}}, nil)
-	if err != nil {
-		return nil, err
-	}
-	after, err := editorXMLContainer(node.name.Local, ofdAttrs{{Name: xml.Name{Local: name}, Value: value}}, nil)
-	if err != nil {
-		return nil, err
-	}
-	return editorXMLMerge(data, node, before, after)
-}
-
 // setOutlineXML 更新目录及可选叶节点计数，保存一次撤销记录
 // 入参: data 新目录原文
 // 返回: error 错误信息
@@ -369,7 +354,7 @@ func (e *Editor) setOutlineXML(data []byte) error {
 			for _, child := range editorOutlineChildren(node) {
 				count += leaves(child)
 			}
-			value, err := editorOutlineAttribute(data, node, "Count", strconv.Itoa(count))
+			value, err := editorXMLAttribute(data, node, "Count", strconv.Itoa(count))
 			if err != nil {
 				return err
 			}

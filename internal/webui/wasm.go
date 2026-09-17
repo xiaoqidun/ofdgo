@@ -118,6 +118,7 @@ func RunWASM() {
 	registerCallback("ofdgoChangePage", changePage)
 	registerCallback("ofdgoBatchPages", batchPages)
 	registerCallback("ofdgoChangeOutline", changeOutline)
+	registerCallback("ofdgoChangeAnnotations", changeAnnotations)
 	registerCallback("ofdgoStyleObjects", styleObjects)
 	registerCallback("ofdgoMoveOutline", moveOutline)
 	registerCallback("ofdgoCaptureStyle", captureStyle)
@@ -852,6 +853,31 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 		}
 	}
 	return objects, nil
+}
+
+// changeAnnotations 修改注解说明、平移或删除同页注解，复用会话历史与预览
+// 入参: args 页面索引、注解标识数组、操作及参数
+// 返回: any 编辑状态, error 错误信息
+func changeAnnotations(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		ids := stringsFromJS(args[1])
+		for i := range ids {
+			ids[i] = strings.TrimPrefix(ids[i], "annotation:")
+		}
+		switch args[2].String() {
+		case "update":
+			if len(ids) != 1 {
+				return fmt.Errorf("select one annotation to update")
+			}
+			return currentEditor.UpdateAnnotation(args[0].Int(), ids[0], args[3].String(), args[4].String())
+		case "move":
+			return currentEditor.MoveAnnotations(args[0].Int(), ids, args[3].Float(), args[4].Float())
+		case "delete":
+			return currentEditor.DeleteAnnotations(args[0].Int(), ids)
+		default:
+			return fmt.Errorf("unsupported annotation action %q", args[2].String())
+		}
+	})
 }
 
 // editorCapabilities 统一顶层与内部对象的操作能力和受限原因

@@ -88,7 +88,7 @@ func (r *Renderer) RenderToSVGWithResources(page *PageContent, writer io.Writer)
 	return r.renderSVGResources(page, writer, true, false)
 }
 
-// RenderToSVGWithObjects 渲染SVG并为页面直接对象添加data-ofd-object分组，保持原绘制顺序和分离资源
+// RenderToSVGWithObjects 渲染SVG并为页面对象和注解添加data-ofd-object分组，注解标识使用annotation:前缀
 // 入参: page 页面内容, writer 输出流
 // 返回: SVGResources 字体和图片资源, error 错误信息
 func (r *Renderer) RenderToSVGWithObjects(page *PageContent, writer io.Writer) (SVGResources, error) {
@@ -143,7 +143,7 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 	return SVGResources{Fonts: s.fonts, Images: s.images}, buffer.Flush()
 }
 
-// beginObject 标记直接对象及复合成员，模板与注释不单独标记
+// beginObject 标记直接对象及复合成员，模板与注解内部图元不单独标记
 // 入参: object 图形对象
 // 返回: bool 是否写入分组
 func (s *svgResourceRenderer) beginObject(object *GraphicObject) bool {
@@ -167,6 +167,18 @@ func (s *svgResourceRenderer) beginObject(object *GraphicObject) bool {
 func (s *svgResourceRenderer) endObject() {
 	s.objectStack = s.objectStack[:len(s.objectStack)-1]
 	fmt.Fprint(s.writer, `</g>`)
+}
+
+// beginAnnotation 标记完整注解外观，内部图元保持原有层级和绘制顺序
+// 入参: id 注解标识
+// 返回: bool 是否写入分组
+func (s *svgResourceRenderer) beginAnnotation(id string) bool {
+	if s.objects == nil {
+		return false
+	}
+	s.objectStack = append(s.objectStack, svgObjectGroup{})
+	fmt.Fprintf(s.writer, `<g data-ofd-object="annotation:%s">`, html.EscapeString(id))
+	return true
 }
 
 // skipObjects 为不可见资源保留内部成员序号

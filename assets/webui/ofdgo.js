@@ -27,6 +27,7 @@ let textMeasure = null;
 
 const state = {
 	composite: null,
+	annotationEdit: null,
 	ready: false,
 	wasmExited: false,
 	wasmSeq: 0,
@@ -334,6 +335,13 @@ const el = {
 	signatureSummary: document.querySelector("#signatureSummary"),
 	signatureList: document.querySelector("#signatureList"),
 	annotationNote: document.querySelector("#annotationNote"),
+	annotationForm: document.querySelector("#annotationForm"),
+	annotationFields: document.querySelector("#annotationFields"),
+	annotationRemark: document.querySelector("#annotationRemark"),
+	annotationCreator: document.querySelector("#annotationCreator"),
+	annotationStatus: document.querySelector("#annotationStatus"),
+	annotationClose: document.querySelector("#annotationClose"),
+	annotationSubmit: document.querySelector("#annotationSubmit"),
 	annotationDetail: document.querySelector("#annotationDetail"),
 	docFontList: document.querySelector("#docFontList"),
 	docFontSummary: document.querySelector("#docFontSummary"),
@@ -363,7 +371,9 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 			setStatus(reason || pageStatus(state.pageIndex, state.doc.pageCount));
 		}
 	},
-	onTransform: (item, change) => changeDocument(item.items ? "ofdgoTransformObjects" : "ofdgoTransformObject", item,
+	onTransform: (item, change) => (item.items || [item]).every(object => object.type === "Annotation")
+		? changeAnnotations(item, "move", change.x, change.y)
+		: changeDocument(item.items ? "ofdgoTransformObjects" : "ofdgoTransformObject", item,
 		change.x + item.x * (1 - change.scale), change.y + item.y * (1 - change.scale), change.scale),
 	onNudgeChange: () => {
 		updatePendingChanges();
@@ -379,8 +389,13 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 		syncSelection();
 		if (state.fontRenderPending) window.setTimeout(refreshPendingFonts, 0);
 	},
-	onDelete: (item) => changeDocument(item.items ? "ofdgoDeleteObjects" : "ofdgoDeleteObject", item),
+	onDelete: (item) => (item.items || [item]).every(object => object.type === "Annotation")
+		? changeAnnotations(item, "delete") : changeDocument(item.items ? "ofdgoDeleteObjects" : "ofdgoDeleteObject", item),
 	onErase: (items, box, points) => {
+		if (items.some(item => item.type === "Annotation")) {
+			if (box || !items.every(item => item.type === "Annotation")) { setStatus(box ? "注解暂不支持局部擦除" : "注解与正文需分别操作"); return false; }
+			return changeAnnotations({ items, index: items[0].index, id: items.map(item => item.id) }, "delete");
+		}
 		const blocked = items.find(item => !canEditObject(item, box ? "arrange" : "delete"));
 		if (blocked) { setStatus(objectEditReason(blocked) || "对象暂不可擦除"); return false; }
 		const item = { index: items[0].index, id: items.map(item => item.id), scoped: items.every(item => item.scoped) };
@@ -479,6 +494,16 @@ el.infoCancel.addEventListener("click", () => el.infoPanel.close());
 el.infoForm.addEventListener("submit", async event => {
 	event.preventDefault();
 	if (await changeDocument("ofdgoUpdateInfo", null, el.infoTitle.value, el.infoAuthor.value, el.infoSubject.value)) el.infoPanel.close();
+});
+el.annotationClose.addEventListener("click", () => el.annotationNote.close());
+el.annotationNote.addEventListener("close", () => { state.annotationEdit = null; });
+el.annotationForm.addEventListener("submit", async event => {
+	if (!state.annotationEdit) return;
+	event.preventDefault();
+	if (await changeAnnotations(state.annotationEdit, "update", el.annotationRemark.value, el.annotationCreator.value)) {
+		el.annotationNote.close();
+		canvasEditor.focus();
+	}
 });
 el.paragraphForm.addEventListener("submit", async event => {
 	event.preventDefault();
@@ -1370,6 +1395,18 @@ async function createDocument(event) {
 
 async function editCanvasObject(item) {
 	if (!state.editing || document.body.hasAttribute("aria-busy") || canvasEditor.input || item.items) return;
+	if (item.type === "Annotation") {
+		state.annotationEdit = item;
+		el.annotationRemark.value = item.remark || "";
+		el.annotationCreator.value = item.creator || "";
+		el.annotationFields.hidden = el.annotationSubmit.hidden = false;
+		el.annotationDetail.hidden = true;
+		el.annotationStatus.textContent = "";
+		el.annotationClose.textContent = "取消";
+		el.annotationNote.showModal();
+		el.annotationRemark.focus();
+		return;
+	}
 	if (canEditObject(item, "enter")) return enterCompositeScope(item.index, item.id);
 	if (item.type === "TextObject") {
 		if (!confirmTextReflow(item)) return;
@@ -1403,7 +1440,17 @@ async function editCanvasObject(item) {
 
 function mountEditorObjects(index, page, surface) {
 	const scope = state.composite?.index === index ? state.composite : null;
-	canvasEditor.mount(index, scope ? { ...page, objects: scope.objects } : page, surface);
+	const annotations = state.renderAnnotations ? (page.annotations || []).filter(annotation => annotation.visible).map(annotation => ({
+		...annotation, id: `annotation:${annotation.id}`, type: "Annotation", width: annotation.width || 6, height: annotation.height || 6,
+		background: annotation.type === "Watermark" || annotation.x <= 0.1 && annotation.y <= 0.1
+			&& annotation.x + annotation.width >= page.width - 0.1 && annotation.y + annotation.height >= page.height - 0.1,
+		capabilities: { update: true, move: true, delete: true },
+	})) : [];
+	canvasEditor.mount(index, { ...page, objects: scope ? scope.objects : [...page.objects, ...annotations] }, surface);
+}
+
+function changeAnnotations(item, action, ...args) {
+	return changeDocument("ofdgoChangeAnnotations", { ...item, id: item.items ? item.id : [item.id] }, action, ...args);
 }
 
 function resetCompositeScope() {
@@ -1953,7 +2000,8 @@ async function changeDocument(name, item, ...args) {
 			rememberEditorView(before, revision);
 			return true;
 		}
-		const clearSelection = !item || ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoEraseObjects", "ofdgoEraseObjectsPath"].includes(name);
+		const clearSelection = !item || name === "ofdgoChangeAnnotations" && args[0] === "delete"
+			|| ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoEraseObjects", "ofdgoEraseObjectsPath"].includes(name);
 		if (name === "ofdgoCopyObjects" || name === "ofdgoPasteObjects" || name === "ofdgoGroupObjects" || name === "ofdgoInsertShape" || name === "ofdgoInsertText" || name === "ofdgoInsertImage") {
 			state.selectObjects = true;
 			canvasEditor.setTool("");
@@ -1981,7 +2029,9 @@ async function changeDocument(name, item, ...args) {
 		}
 	} catch (err) {
 		if (openSeq === state.openSeq) {
-			if (el.batchPagesPanel.open) {
+			if (el.annotationNote.open) {
+				el.annotationStatus.textContent = err.message;
+			} else if (el.batchPagesPanel.open) {
 				el.batchPagesStatus.textContent = err.message;
 			} else if (el.objectStylePanel.open) {
 				el.objectStyleStatus.textContent = err.message;
@@ -5270,6 +5320,10 @@ function mountAnnotationNotes(index, surface, annotations) {
 		note.addEventListener("click", () => {
 			if (state.editing || document.body.hasAttribute("aria-busy")) return;
 			el.annotationDetail.replaceChildren();
+			el.annotationFields.hidden = el.annotationSubmit.hidden = true;
+			el.annotationDetail.hidden = false;
+			el.annotationStatus.textContent = "";
+			el.annotationClose.textContent = "关闭";
 			const content = document.createElement("div");
 			content.textContent = annotation.remark;
 			el.annotationDetail.append(content);
@@ -5746,7 +5800,7 @@ function updateObjectControls(item, reset = false) {
 	el.editObjectButton.disabled = disabled || Boolean(item.items) || !canEditObject(item, "enter") && (item.type === "PathObject"
 		|| !canEditObject(item, item.type === "TextObject" ? "reflow" : item.type === "ImageObject" ? "replaceImage" : "update"));
 	el.editObjectButton.textContent = canEditObject(item, "enter") ? "进入" : item?.type === "ImageObject" ? "替换" : "修改";
-	el.editObjectButton.title = canEditObject(item, "enter") ? "进入组合" : item?.type === "ImageObject" ? "替换图片" : "修改对象";
+	el.editObjectButton.title = canEditObject(item, "enter") ? "进入组合" : item?.type === "ImageObject" ? "替换图片" : item?.type === "Annotation" ? "修改注解" : "修改对象";
 	el.editObjectButton.setAttribute("aria-label", el.editObjectButton.title);
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const selection = selectedText(item);
@@ -5866,6 +5920,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	el.pageForm.inert = busy;
 	el.paragraphForm.inert = busy;
 	el.infoForm.inert = busy;
+	el.annotationForm.inert = busy;
 	el.importForm.inert = busy && !state.importing;
 	for (const input of [el.importFile, el.importRange, el.importPosition, el.importOutlines]) input.disabled = busy;
 	el.importPages.disabled = busy || el.importRange.value !== "custom";

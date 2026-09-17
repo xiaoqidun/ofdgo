@@ -23,10 +23,18 @@ func (r *Renderer) renderAnnotations(ctx *canvas.Context, pageID string, pageH f
 		if annot.Visible != nil && !*annot.Visible {
 			continue
 		}
+		groups, grouped := ctx.Renderer.(interface {
+			beginAnnotation(string) bool
+			endObject()
+		})
+		grouped = grouped && groups.beginAnnotation(annot.ID)
 		box, _ := ParseBox(annot.Appearance.Boundary)
 		ctm := Matrix{a: 1, d: 1, e: box.X, f: box.Y}
 		for i := range annot.Appearance.Objects {
 			r.renderObject(ctx, &annot.Appearance.Objects[i], pageH, nil, &ctm, false, nil)
+		}
+		if grouped {
+			groups.endObject()
 		}
 	}
 }

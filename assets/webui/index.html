@@ -265,9 +265,13 @@
 			</form>
 		</dialog>
 		<dialog id="annotationNote" class="form-dialog" aria-label="注解">
-			<form method="dialog">
+			<form id="annotationForm" method="dialog">
 				<div id="annotationDetail" class="annotation-detail"></div>
-				<div class="form-actions"><button class="button" type="submit" autofocus>关闭</button></div>
+				<div id="annotationFields" hidden>
+					<div class="form-row"><label for="annotationRemark">说明</label><textarea id="annotationRemark" rows="4"></textarea></div>
+					<div class="form-row"><label for="annotationCreator">作者</label><input id="annotationCreator" type="text"></div>
+				</div>
+				<div class="form-actions"><div id="annotationStatus" class="form-status" role="status"></div><button id="annotationClose" class="button" type="button" autofocus>关闭</button><button id="annotationSubmit" class="button" type="submit" hidden>确定</button></div>
 			</form>
 		</dialog>
 		<dialog id="pagePanel" class="form-dialog" aria-label="页面设置">
