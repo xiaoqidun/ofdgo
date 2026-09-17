@@ -1306,7 +1306,7 @@ async function toggleEditor() {
 
 function confirmTextReflow(item) {
 	return canEditObject(item, "reflow") && (canEditObject(item, "layoutKnown")
-		|| window.confirm("原文排版未知，此操作将重新排版。继续？"));
+		|| window.confirm("原文排版未知，将重新排版。继续？"));
 }
 
 function openCreatePanel() {
@@ -5688,6 +5688,9 @@ function updateObjectControls(item, reset = false) {
 	el.objectDistribute.disabled = el.objectAlign.disabled || !item.items || item.items.length < 3;
 	el.editObjectButton.disabled = disabled || Boolean(item.items) || !canEditObject(item, "enter") && (item.type === "PathObject"
 		|| !canEditObject(item, item.type === "TextObject" ? "reflow" : item.type === "ImageObject" ? "replaceImage" : "update"));
+	el.editObjectButton.textContent = canEditObject(item, "enter") ? "进入" : item?.type === "ImageObject" ? "替换" : "修改";
+	el.editObjectButton.title = canEditObject(item, "enter") ? "进入组合" : item?.type === "ImageObject" ? "替换图片" : "修改对象";
+	el.editObjectButton.setAttribute("aria-label", el.editObjectButton.title);
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const selection = selectedText(item);
 	const text = selection ? currentTextStyle() : state.textDefaults;
@@ -5753,7 +5756,7 @@ function updateObjectControls(item, reset = false) {
 
 function updateAnnotationButton() {
 	el.annotationButton.setAttribute("aria-pressed", String(state.renderAnnotations));
-	el.annotationButton.title = state.renderAnnotations ? "关闭注解" : "开启注解";
+	el.annotationButton.title = state.renderAnnotations ? "隐藏注解" : "显示注解";
 	el.annotationButton.setAttribute("aria-label", el.annotationButton.title);
 }
 
@@ -5772,6 +5775,8 @@ async function callWASM(name, ...args) {
 			state.exportRequestID = id;
 			el.cancelExportButton.hidden = false;
 			el.cancelExportButton.disabled = false;
+			el.cancelExportButton.title = { ofdgoSaveDocument: "取消保存", ofdgoImportPages: "取消导入", ofdgoExportAttachment: "取消下载" }[name] || "取消导出";
+			el.cancelExportButton.setAttribute("aria-label", el.cancelExportButton.title);
 		}
 		try {
 			const transfer = [];

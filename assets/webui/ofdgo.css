@@ -798,6 +798,10 @@ button:not(:disabled):hover {
 	gap: 8px;
 }
 
+.form-actions > button:only-child {
+	grid-column: -2;
+}
+
 .form-actions button[type="submit"] {
 	border-color: var(--accent);
 	background: var(--accent);
@@ -1795,6 +1799,7 @@ button.outline-link:hover {
 .annotation-detail {
 	display: grid;
 	gap: 8px;
+	margin-bottom: 12px;
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
 }
