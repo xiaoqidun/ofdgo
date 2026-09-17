@@ -4,7 +4,7 @@
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<meta name="theme-color" content="#fbfcfd">
-	<title>OFDGo WebUI - 纯粹的OFD编辑器，完全本地、离线可用</title>
+	<title>OFDGo WebUI - OFD编辑器</title>
 	<link rel="manifest" href="./ofdgo.json">
 	<link rel="icon" type="image/svg+xml" href="./ofdgo.svg">
 	<link rel="stylesheet" href="./ofdgo.css">
@@ -264,6 +264,7 @@
 		</dialog>
 		<dialog id="pagePanel" class="form-dialog" aria-label="页面设置">
 			<form id="pageForm">
+				<div id="pageRangeRow" class="form-row" hidden><span>范围</span><output id="pageRange"></output></div>
 				<div class="form-row">
 					<span id="pageDirectionLabel">方向</span>
 					<div class="form-options" role="radiogroup" aria-labelledby="pageDirectionLabel">
@@ -333,6 +334,11 @@
 					<button id="pagesTab" type="button" role="tab" aria-selected="true" aria-controls="pageList">页面</button>
 					<button id="outlinesTab" type="button" role="tab" aria-selected="false" aria-controls="outlineList" tabindex="-1">目录</button>
 					<button id="searchTab" type="button" role="tab" aria-keyshortcuts="Control+F Meta+F" aria-selected="false" aria-controls="searchPanel" tabindex="-1">搜索</button>
+				</div>
+				<div id="pageSelectionTools" class="page-selection-tools" hidden>
+					<span id="pageSelectionCount" role="status"></span>
+					<button id="selectAllPages" class="small-button" type="button">全选</button>
+					<button id="finishPageSelection" class="small-button" type="button">完成</button>
 				</div>
 				<div id="navigationContent" class="navigation-content">
 					<div id="pageList" class="page-list" role="tabpanel" aria-label="页面"></div>

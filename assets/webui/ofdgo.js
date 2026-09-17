@@ -42,6 +42,8 @@ const state = {
 	importing: false,
 	pageSelection: new Set(),
 	pageSelectionAnchor: null,
+	pageMultiSelect: false,
+	pageTouchPointer: null,
 	outlineSelection: null,
 	outlineAction: "add",
 	styleOriginal: null,
@@ -223,6 +225,8 @@ const el = {
 	pagePortrait: document.querySelector("#pagePortrait"),
 	pageLandscape: document.querySelector("#pageLandscape"),
 	pageWidth: document.querySelector("#pageWidth"),
+	pageRangeRow: document.querySelector("#pageRangeRow"),
+	pageRange: document.querySelector("#pageRange"),
 	pageHeight: document.querySelector("#pageHeight"),
 	pageStatus: document.querySelector("#pageStatus"),
 	pageCancel: document.querySelector("#pageCancel"),
@@ -286,6 +290,10 @@ const el = {
 	pageListPanel: document.querySelector(".page-list-panel"),
 	pageListTitle: document.querySelector("#pageListTitle"),
 	navigationTabs: document.querySelector("#navigationTabs"),
+	pageSelectionTools: document.querySelector("#pageSelectionTools"),
+	pageSelectionCount: document.querySelector("#pageSelectionCount"),
+	selectAllPages: document.querySelector("#selectAllPages"),
+	finishPageSelection: document.querySelector("#finishPageSelection"),
 	navigationContent: document.querySelector("#navigationContent"),
 	pagesTab: document.querySelector("#pagesTab"),
 	outlinesTab: document.querySelector("#outlinesTab"),
@@ -716,7 +724,7 @@ for (const radio of [el.pagePortrait, el.pageLandscape]) {
 el.pageForm.addEventListener("submit", async (event) => {
 	event.preventDefault();
 	el.pageStatus.textContent = "";
-	if (await changeDocument("ofdgoChangePage", null, "resize", state.pageIndex, Number(el.pageWidth.value), Number(el.pageHeight.value))) {
+	if (await changeDocument("ofdgoBatchPages", null, "resize", selectedPageRange(), Number(el.pageWidth.value), Number(el.pageHeight.value))) {
 		el.pagePanel.close();
 	}
 });
@@ -1130,18 +1138,27 @@ function openPagePanel() {
 	if (!state.editing || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
-	const page = currentPageInfo();
-	el.pageWidth.value = String(page.width);
-	el.pageHeight.value = String(page.height);
+	const pages = selectedPageIndexes().map(index => state.doc.pages[index]);
+	if (!pages.length) return;
+	for (const [input, key] of [[el.pageWidth, "width"], [el.pageHeight, "height"]]) {
+		const same = pages.every(page => page[key] === pages[0][key]);
+		input.value = same ? String(pages[0][key]) : "";
+		input.placeholder = same ? "" : "不同";
+	}
+	el.pageRangeRow.hidden = pages.length === 1;
+	el.pageRange.textContent = `共${pages.length}页`;
+	el.pageRange.title = selectedPageRange();
 	el.pageStatus.textContent = "";
 	updatePageDirection();
 	el.pagePanel.showModal();
 }
 
 function updatePageDirection() {
+	const complete = el.pageWidth.value !== "" && el.pageHeight.value !== "";
+	el.pagePortrait.disabled = el.pageLandscape.disabled = !complete;
 	const landscape = Number(el.pageWidth.value) > Number(el.pageHeight.value);
-	el.pageLandscape.checked = landscape;
-	el.pagePortrait.checked = !landscape;
+	el.pageLandscape.checked = complete && landscape;
+	el.pagePortrait.checked = complete && !landscape;
 }
 
 function warnUnsaved(event) {
@@ -2340,6 +2357,7 @@ async function openOFD(file) {
 		state.editing = false;
 		state.pageSelection.clear();
 		state.pageSelectionAnchor = null;
+		state.pageMultiSelect = false;
 		state.objectClipboard = null;
 		state.styleClipboard = null;
 		state.editorInfo = null;
@@ -2775,6 +2793,7 @@ async function openDocument(options = {}) {
 		if (options.resetScroll || !options.skipAutoFonts) {
 			state.pageSelection.clear();
 			state.pageSelectionAnchor = null;
+			state.pageMultiSelect = false;
 		}
 		state.pageIndex = pageIndex;
 		state.scale = options.scale || 1;
@@ -2978,8 +2997,12 @@ function openExportPanel() {
 		return;
 	}
 	el.exportForm.reset();
-	updateExportRange();
+	if (state.editing && state.pageSelection.size) {
+		el.exportSpecified.checked = true;
+		el.exportRange.value = selectedPageRange();
+	}
 	el.exportPanel.showModal();
+	updateExportRange();
 }
 
 async function updateExportRange() {
@@ -3001,7 +3024,7 @@ async function updateExportRange() {
 		if (current()) {
 			state.exportPages = indices;
 			el.exportSubmit.disabled = false;
-			el.exportRangeStatus.textContent = `共 ${indices.length} 页`;
+			el.exportRangeStatus.textContent = `共${indices.length}页`;
 		}
 	} catch {
 		if (current()) {
@@ -3980,6 +4003,7 @@ function showNavigation(selected) {
 		tab.setAttribute("aria-selected", String(active));
 		tab.tabIndex = active ? 0 : -1;
 	}
+	el.pageSelectionTools.hidden = !state.editing || !state.pageMultiSelect || selected !== el.pagesTab;
 	el.navigationContent.scrollTop = state.navigationScroll.get(selected) || 0;
 }
 
@@ -4261,19 +4285,20 @@ function createOutlineList(outlines, path = []) {
 }
 
 function selectedPageIndexes() {
-	if (!state.pageSelection.size) return [state.pageIndex];
+	if (!state.pageSelection.size) return state.pageMultiSelect ? [] : [state.pageIndex];
 	return state.doc.pages.filter(page => state.pageSelection.has(page.id)).map(page => page.index);
 }
 
 function changeSelectedPages(action, direction = 0) {
 	const indexes = selectedPageIndexes();
+	if (!indexes.length) return;
 	if (indexes.length === 1) return changeDocument("ofdgoChangePage", null, action, indexes[0], ...(direction ? [indexes[0] + direction] : []));
 	const at = direction < 0 ? indexes[0] - 1 : indexes.at(-1) + 2;
 	return changeDocument("ofdgoBatchPages", null, action, selectedPageRange(), ...(direction ? [at] : []));
 }
 
-function selectedPageRange() {
-	const pages = selectedPageIndexes().map(index => index + 1);
+function selectedPageRange(indexes = selectedPageIndexes()) {
+	const pages = indexes.map(index => index + 1);
 	const ranges = [];
 	for (let i = 0; i < pages.length; i++) {
 		const first = pages[i];
@@ -4284,6 +4309,10 @@ function selectedPageRange() {
 }
 
 function syncPageSelection() {
+	if (!state.editing) state.pageMultiSelect = false;
+	el.pageSelectionTools.hidden = !state.editing || !state.pageMultiSelect || el.pageList.hidden;
+	el.pageSelectionCount.textContent = `已选${state.pageSelection.size}页`;
+	el.selectAllPages.textContent = state.pageSelection.size === state.doc?.pageCount ? "清空" : "全选";
 	for (const button of el.pageList.children) {
 		if (state.editing) button.setAttribute("aria-pressed", String(state.pageSelection.has(state.doc.pages[Number(button.dataset.pageIndex)].id)));
 		else button.removeAttribute("aria-pressed");
@@ -4292,8 +4321,12 @@ function syncPageSelection() {
 
 function selectThumbnailPage(event, index) {
 	if (document.body.hasAttribute("aria-busy")) return;
+	if (event.pointerId === state.pageTouchPointer) {
+		state.pageTouchPointer = null;
+		return;
+	}
 	if (state.editing) {
-		const page = state.doc.pages[index], additive = event.ctrlKey || event.metaKey;
+		const page = state.doc.pages[index], additive = event.ctrlKey || event.metaKey || state.pageMultiSelect;
 		if (!additive) state.pageSelection.clear();
 		if (event.shiftKey) {
 			let anchor = state.doc.pages.findIndex(page => page.id === state.pageSelectionAnchor);
@@ -4311,6 +4344,62 @@ function selectThumbnailPage(event, index) {
 	return renderPage(index);
 }
 
+el.selectAllPages.addEventListener("click", () => {
+	if (document.body.hasAttribute("aria-busy")) return;
+	state.pageSelection = new Set(state.pageSelection.size === state.doc.pageCount ? [] : state.doc.pages.map(page => page.id));
+	syncPageSelection();
+	updateControls();
+});
+
+el.finishPageSelection.addEventListener("click", () => {
+	state.pageMultiSelect = false;
+	syncPageSelection();
+	updateControls();
+});
+
+let cancelPageTouch = null;
+
+el.pageList.addEventListener("pointerdown", event => {
+	cancelPageTouch?.();
+	state.pageTouchPointer = null;
+	if (!state.editing || event.pointerType !== "touch" || !event.isPrimary || document.body.hasAttribute("aria-busy")) return;
+	const button = event.target.closest(".page-list-item");
+	if (!button || event.target.closest(".thumb-grip")) return;
+	const seq = state.openSeq, pointer = event.pointerId;
+	const timer = setTimeout(() => {
+		if (seq !== state.openSeq || !state.editing || document.body.hasAttribute("aria-busy")) return;
+		if (!state.pageMultiSelect) state.pageSelection.clear();
+		state.pageMultiSelect = true;
+		state.pageTouchPointer = pointer;
+		state.pageSelection.add(state.doc.pages[Number(button.dataset.pageIndex)].id);
+		syncPageSelection();
+		updateControls();
+	}, 450);
+	const finish = next => {
+		if (next.pointerId !== pointer) return;
+		cancelPageTouch?.();
+	};
+	cancelPageTouch = () => {
+		clearTimeout(timer);
+		el.pageList.removeEventListener("pointermove", move);
+		el.pageList.removeEventListener("pointerup", finish);
+		el.pageList.removeEventListener("pointercancel", finish);
+		el.pageList.removeEventListener("lostpointercapture", finish);
+		cancelPageTouch = null;
+	};
+	const move = next => {
+		if (Math.hypot(next.clientX - event.clientX, next.clientY - event.clientY) > 8) finish(next);
+	};
+	el.pageList.addEventListener("pointermove", move);
+	el.pageList.addEventListener("pointerup", finish);
+	el.pageList.addEventListener("pointercancel", finish);
+	el.pageList.addEventListener("lostpointercapture", finish);
+});
+
+el.pageList.addEventListener("contextmenu", event => {
+	if (state.pageMultiSelect) event.preventDefault();
+});
+
 el.pageList.addEventListener("keydown", event => {
 	if (!state.editing || event.isComposing || document.body.hasAttribute("aria-busy")) return;
 	if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "a") {
@@ -4318,6 +4407,7 @@ el.pageList.addEventListener("keydown", event => {
 	} else if (event.key === "Escape") {
 		state.pageSelection.clear();
 		state.pageSelectionAnchor = null;
+		state.pageMultiSelect = false;
 	} else return;
 	event.preventDefault();
 	event.stopPropagation();
@@ -4382,9 +4472,19 @@ function resetThumbnails() {
 	}
 }
 
-function pageDropIndex(from, target, after) {
+function pageDropIndex(indexes, target, after) {
 	const position = target + Number(after);
-	return position > from ? position - 1 : position;
+	return position - indexes.filter(index => index < position).length;
+}
+
+function selectDragPages(index) {
+	if (!state.pageSelection.has(state.doc.pages[index].id)) {
+		state.pageSelection = new Set([state.doc.pages[index].id]);
+		state.pageSelectionAnchor = state.doc.pages[index].id;
+		syncPageSelection();
+		updateControls();
+	}
+	return selectedPageIndexes();
 }
 
 function enablePageDrag(button, index) {
@@ -4399,16 +4499,21 @@ function enablePageDrag(button, index) {
 		event.preventDefault();
 		event.stopPropagation();
 		const seq = state.openSeq, pointer = event.pointerId;
-		let x = event.clientX, y = event.clientY, target = index, marker = null, frame = 0, dragging = false;
+		const indexes = selectDragPages(index);
+		let x = event.clientX, y = event.clientY, position = null, marker = null, frame = 0, dragging = false;
 		const clearMarker = () => { marker?.classList.remove("drop-before", "drop-after"); marker = null; };
 		const locate = () => {
 			clearMarker();
-			target = index;
+			position = null;
 			const node = document.elementFromPoint(x, y)?.closest(".page-list-item");
 			if (!node || !el.pageList.contains(node)) return;
 			const rect = node.getBoundingClientRect(), after = y > rect.top + rect.height / 2;
-			target = pageDropIndex(index, Number(node.dataset.pageIndex), after);
-			if (target !== index) { marker = node; marker.classList.add(after ? "drop-after" : "drop-before"); }
+			const target = Number(node.dataset.pageIndex), to = pageDropIndex(indexes, target, after);
+			if (indexes.some((index, offset) => index !== to + offset)) {
+				position = target + Number(after);
+				marker = node;
+				marker.classList.add(after ? "drop-after" : "drop-before");
+			}
 		};
 		const tick = () => {
 			if (seq !== state.openSeq || !state.editing) { finish(false); return; }
@@ -4436,8 +4541,8 @@ function enablePageDrag(button, index) {
 			clearMarker();
 			button.classList.remove("reordering");
 			if (grip.hasPointerCapture(pointer)) grip.releasePointerCapture(pointer);
-			if (commit && dragging && target !== index && seq === state.openSeq && await canvasEditor.commitText() && await canvasEditor.commitCrop()) {
-				await changeDocument("ofdgoChangePage", null, "move", index, target);
+			if (commit && dragging && position !== null && seq === state.openSeq && await canvasEditor.commitText() && await canvasEditor.commitCrop()) {
+				await changeDocument("ofdgoBatchPages", null, "move", selectedPageRange(indexes), position);
 			}
 		};
 		const up = next => { if (next.pointerId === pointer) finish(true); };
@@ -4452,9 +4557,11 @@ function enablePageDrag(button, index) {
 	button.addEventListener("keydown", async event => {
 		if (!event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key) || document.body.hasAttribute("aria-busy")) return;
 		event.preventDefault();
-		const target = index + (event.key === "ArrowUp" ? -1 : 1);
+		const indexes = selectDragPages(index), direction = event.key === "ArrowUp" ? -1 : 1;
+		const target = direction < 0 ? indexes[0] - 1 : indexes.at(-1) + 1;
 		if (target >= 0 && target < state.doc.pageCount && await canvasEditor.commitText() && await canvasEditor.commitCrop()) {
-			if (await changeDocument("ofdgoChangePage", null, "move", index, target)) el.pageList.querySelector(`[data-page-index="${target}"]`)?.focus();
+			const focus = (direction < 0 ? target : target - indexes.length + 1) + indexes.indexOf(index);
+			if (await changeSelectedPages("move", direction)) el.pageList.querySelector(`[data-page-index="${focus}"]`)?.focus();
 		}
 	});
 }
@@ -5329,12 +5436,13 @@ function updateEditorTools() {
 	const pagesDisabled = !state.editing || !state.ready || state.exporting;
 	el.insertTextButton.disabled = el.insertImageButton.disabled = pagesDisabled || !pageCan("insert");
 	el.saveButton.disabled = el.addPageButton.disabled = pagesDisabled;
-	el.batchPagesButton.disabled = pagesDisabled;
 	const selectedPages = state.editing ? selectedPageIndexes() : [state.pageIndex];
-	el.copyPageButton.disabled = pagesDisabled || selectedPages.some(index => !pageCan("copy", index));
-	el.pageSettingsButton.disabled = pagesDisabled || !pageCan("resize");
-	el.deletePageButton.disabled = pagesDisabled || selectedPages.some(index => !pageCan("delete", index)) || selectedPages.length >= state.doc?.pageCount;
-	const moveDisabled = pagesDisabled || selectedPages.some(index => !pageCan("move", index));
+	const selectionDisabled = pagesDisabled || !selectedPages.length;
+	el.batchPagesButton.disabled = selectionDisabled;
+	el.copyPageButton.disabled = selectionDisabled || selectedPages.some(index => !pageCan("copy", index));
+	el.pageSettingsButton.disabled = selectionDisabled || selectedPages.some(index => !pageCan("resize", index));
+	el.deletePageButton.disabled = selectionDisabled || selectedPages.some(index => !pageCan("delete", index)) || selectedPages.length >= state.doc?.pageCount;
+	const moveDisabled = selectionDisabled || selectedPages.some(index => !pageCan("move", index));
 	el.movePagePrevButton.disabled = moveDisabled || selectedPages[0] === 0;
 	el.movePageNextButton.disabled = moveDisabled || selectedPages.at(-1) === state.doc?.pageCount - 1;
 	const enabled = state.editing && state.selectObjects && !state.panMode;

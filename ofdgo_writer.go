@@ -88,6 +88,7 @@ func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
 
 // WritePagesTo 按指定顺序将页面另存为独立OFD，不修改当前文档或撤销记录
 // 保留描述信息并生成新文档标识，迁移相关资源、目录、注释和签章外观，移除指向未选页面的跳转
+// 快照只准备所选页面，关联引用由页面导入流程统一筛选
 // 签名凭据不代表另存文件验签有效；进度与取消复用OnWriteProgress，另含snapshot、ids和commit阶段
 // 入参: writer 输出流, indexes 从0开始的页面索引，不可重复或为空
 // 返回: int64 已写入字节数, error 错误信息
@@ -95,11 +96,32 @@ func (e *Editor) WritePagesTo(writer io.Writer, indexes []int) (int64, error) {
 	if len(indexes) == 0 {
 		return 0, fmt.Errorf("no pages selected")
 	}
+	if err := e.validatePageIndexes(indexes); err != nil {
+		return 0, err
+	}
 	progress := editorProgress(e.OnWriteProgress)
 	if err := progress.report("snapshot", 0, 0); err != nil {
 		return 0, err
 	}
-	reader, err := e.reader(progress)
+	snapshot := *e
+	snapshot.pages = make([]PageContent, len(indexes))
+	if e.source != nil {
+		source := *e.source
+		source.pages = make(map[string]*editorSourcePage, len(indexes))
+		for _, index := range indexes {
+			id := e.pages[index].ID
+			if page := e.source.pages[id]; page != nil {
+				source.pages[id] = page
+			}
+		}
+		snapshot.source = &source
+	}
+	positions := make([]int, len(indexes))
+	for i, index := range indexes {
+		snapshot.pages[i] = e.pages[index]
+		positions[i] = i
+	}
+	reader, err := snapshot.reader(progress)
 	if err != nil {
 		return 0, err
 	}
@@ -109,7 +131,7 @@ func (e *Editor) WritePagesTo(writer io.Writer, indexes []int) (int64, error) {
 	selected.Info = cloneEditorData(e.Info)
 	selected.Info.DocID = id
 	selected.OnWriteProgress = e.OnWriteProgress
-	if _, err := selected.ImportPagesWithOptions(reader, indexes, 0, PageImportOptions{Outlines: true, OnProgress: e.OnWriteProgress}); err != nil {
+	if _, err := selected.ImportPagesWithOptions(reader, positions, 0, PageImportOptions{Outlines: true, OnProgress: e.OnWriteProgress}); err != nil {
 		return 0, err
 	}
 	return selected.WriteTo(writer)

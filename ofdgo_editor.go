@@ -420,22 +420,48 @@ func (e *Editor) reorderPages(order []int) {
 // 入参: index 页面索引, width 页面宽度, height 页面高度
 // 返回: error 错误信息
 func (e *Editor) ResizePage(index int, width, height float64) error {
-	page, err := e.page(index)
-	if err != nil {
+	return e.ResizePages([]int{index}, width, height)
+}
+
+// ResizePages 统一调整指定页面尺寸，不缩放或移动对象，一次操作计入一条撤销记录
+// 入参: indexes 不重复的页面索引, width 页面宽度, height 页面高度
+// 返回: error 错误信息
+func (e *Editor) ResizePages(indexes []int, width, height float64) error {
+	if err := e.validatePageIndexes(indexes); err != nil {
 		return err
 	}
 	if !finite(width) || !finite(height) || width <= 0 || height <= 0 {
 		return fmt.Errorf("page dimensions must be finite and positive")
 	}
-	before, after := page.Area.PhysicalBox, fmt.Sprintf("0 0 %s %s", ofdNumber(width), ofdNumber(height))
-	if before == after {
+	after := fmt.Sprintf("0 0 %s %s", ofdNumber(width), ofdNumber(height))
+	before := make([]string, len(indexes))
+	changed := false
+	for i, index := range indexes {
+		page, err := e.page(index)
+		if err != nil {
+			return err
+		}
+		before[i] = page.Area.PhysicalBox
+		changed = changed || before[i] != after
+	}
+	if !changed {
 		return nil
 	}
-	page.Area.PhysicalBox = after
-	if change := e.recordChange(); change != nil {
-		change.undo = func(e *Editor) { e.pages[index].Area.PhysicalBox = before }
-		change.redo = func(e *Editor) { e.pages[index].Area.PhysicalBox = after }
+	indexes = slices.Clone(indexes)
+	resize := func(e *Editor) {
+		for _, index := range indexes {
+			e.pages[index].Area.PhysicalBox = after
+		}
 	}
+	if change := e.recordChange(); change != nil {
+		change.undo = func(e *Editor) {
+			for i, index := range indexes {
+				e.pages[index].Area.PhysicalBox = before[i]
+			}
+		}
+		change.redo = resize
+	}
+	resize(e)
 	return nil
 }
 

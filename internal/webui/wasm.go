@@ -1075,8 +1075,8 @@ func changePage(args []js.Value) (any, error) {
 	return editorPageInfo{info, index}, nil
 }
 
-// batchPages 按页码范围批量复制、删除或移动页面
-// 入参: args 操作、页码表达式及原页面序列中的插入位置
+// batchPages 按页码范围批量复制、删除、移动或调整页面尺寸
+// 入参: args 操作、页码表达式及插入位置或宽高
 // 返回: any 文档信息及目标页, error 错误信息
 func batchPages(args []js.Value) (any, error) {
 	index := 0
@@ -1113,6 +1113,9 @@ func batchPages(args []js.Value) (any, error) {
 				}
 			}
 			return currentEditor.MovePages(indexes, index)
+		case "resize":
+			index = indexes[0]
+			return currentEditor.ResizePages(indexes, args[2].Float(), args[3].Float())
 		default:
 			return fmt.Errorf("unsupported page action %q", args[0].String())
 		}
