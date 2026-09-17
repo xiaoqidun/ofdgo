@@ -1556,33 +1556,58 @@ func editorPathScale(object ofdgo.PathObject) float64 {
 }
 
 // setPathStyle 应用图形填充、描边和线宽
-// 入参: object 路径对象, args 填充开关及色值、描边开关及色值、线宽
+// 入参: object 路径对象, args 填充开关及色值、描边开关及色值、线宽，null保持原值
 // 返回: error 错误信息
 func setPathStyle(object *ofdgo.PathObject, args []js.Value) error {
-	fill, stroke, width := args[0].Bool(), args[2].Bool(), args[4].Float()
-	if kind, _ := object.Shape(); kind == ofdgo.ShapeLine {
+	fill, stroke := object.Fill != nil && *object.Fill, object.Stroke == nil || *object.Stroke
+	if !args[0].IsNull() {
+		fill = args[0].Bool()
+	}
+	if !args[2].IsNull() {
+		stroke = args[2].Bool()
+	}
+	if kind, _ := object.Shape(); kind == ofdgo.ShapeLine || kind == ofdgo.ShapeArrow || kind == ofdgo.ShapeDoubleArrow {
 		fill, stroke = false, true
 	}
 	if !fill && !stroke {
-		return fmt.Errorf("fill or stroke must be enabled")
+		if args[0].IsNull() || args[2].IsNull() {
+			stroke = true
+		} else {
+			return fmt.Errorf("fill or stroke must be enabled")
+		}
 	}
-	if width <= 0 || math.IsNaN(width) || math.IsInf(width, 0) {
-		return fmt.Errorf("line width must be positive and finite")
+	if !args[0].IsNull() || fill != (object.Fill != nil && *object.Fill) {
+		object.Fill = &fill
 	}
-	object.Fill, object.Stroke = &fill, &stroke
-	if scale := editorPathScale(*object); width != object.LineWidth*scale {
-		object.LineWidth = width / scale
+	if !args[2].IsNull() || stroke != (object.Stroke == nil || *object.Stroke) {
+		object.Stroke = &stroke
 	}
-	if object.FillColor == nil {
-		object.FillColor = &ofdgo.FillColor{}
+	if !args[4].IsNull() {
+		width := args[4].Float()
+		if width <= 0 || math.IsNaN(width) || math.IsInf(width, 0) {
+			return fmt.Errorf("line width must be positive and finite")
+		}
+		if scale := editorPathScale(*object); width != object.LineWidth*scale {
+			object.LineWidth = width / scale
+		}
 	}
-	if object.StrokeColor == nil {
-		object.StrokeColor = &ofdgo.StrokeColor{}
+	if !args[1].IsNull() {
+		if object.FillColor == nil {
+			object.FillColor = &ofdgo.FillColor{}
+		}
+		if err := setEditorColor(object.FillColor, args[1].String()); err != nil {
+			return err
+		}
 	}
-	if err := setEditorColor(object.FillColor, args[1].String()); err != nil {
-		return err
+	if !args[3].IsNull() {
+		if object.StrokeColor == nil {
+			object.StrokeColor = &ofdgo.StrokeColor{}
+		}
+		if err := setEditorColor((*ofdgo.FillColor)(object.StrokeColor), args[3].String()); err != nil {
+			return err
+		}
 	}
-	return setEditorColor((*ofdgo.FillColor)(object.StrokeColor), args[3].String())
+	return nil
 }
 
 // insertShape 创建标准路径图形
@@ -1605,32 +1630,28 @@ func insertShape(args []js.Value) (any, error) {
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
 
-// updatePathStyle 更新选中路径的绘制样式
-// 入参: args 页码、对象标识和绘制样式
+// updatePathStyle 原子更新选中路径的绘制样式，保留未修改属性
+// 入参: args 页码、对象标识列表和绘制样式
 // 返回: any 文档信息, error 错误信息
 func updatePathStyle(args []js.Value) (any, error) {
-	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being edited")
-	}
-	page, id := args[0].Int(), args[1].String()
-	object, err := currentEditor.Object(page, id)
-	if err != nil {
-		return nil, err
-	}
-	if object.Type != "PathObject" {
-		return nil, fmt.Errorf("object is not a path")
-	}
-	if err := setPathStyle(&object.PathObject, args[2:]); err != nil {
-		return nil, err
-	}
-	revision := currentEditor.Revision()
-	if err := currentEditor.UpdateObject(page, id, object); err != nil {
-		return nil, err
-	}
-	if currentEditor.Revision() == revision {
-		return editorSummary(), nil
-	}
-	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+	return changeObjects(func() error {
+		page, ids := args[0].Int(), stringsFromJS(args[1])
+		objects := make([]ofdgo.GraphicObject, len(ids))
+		for i, id := range ids {
+			object, err := currentEditor.Object(page, id)
+			if err != nil {
+				return err
+			}
+			if object.Type != "PathObject" {
+				return fmt.Errorf("object is not a path")
+			}
+			if err := setPathStyle(&object.PathObject, args[2:]); err != nil {
+				return err
+			}
+			objects[i] = object
+		}
+		return currentEditor.UpdateObjects(page, objects)
+	})
 }
 
 // insertText 使用选定字体创建文字对象

@@ -1642,22 +1642,34 @@ function shapeStyle() {
 		lineWidth: Number(el.shapeWidth.value) * 25.4 / 72 };
 }
 
-async function changeShapeStyle() {
-	const item = canvasEditor.selected;
+function selectedPath(item) {
+	if (!item?.items) return item?.type === "PathObject" ? item : null;
+	if (!item.items.every(member => member.type === "PathObject")) return null;
+	const path = { ...item, type: "PathObject", shape: item.items.every(member => lineShape(member.shape)) ? "line" : "" };
+	for (const key of ["fill", "stroke", "fillColor", "strokeColor", "lineWidth"]) {
+		const value = item.items[0][key];
+		path[key] = item.items.every(member => member[key] === value) ? value : undefined;
+	}
+	return path;
+}
+
+async function changeShapeStyle({ target }) {
+	const item = selectedPath(canvasEditor.selected);
 	if (!state.editing || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
-	if (!el.shapeWidth.checkValidity() || Number(el.shapeWidth.value) <= 0) {
-		el.shapeWidth.value = String(item?.type === "PathObject" ? displayPoints(item.lineWidth) : 1);
+	if (canvasEditor.selected && (!item || !canEditObject(item, "update"))) return;
+	if (target === el.shapeWidth && (!el.shapeWidth.checkValidity() || Number(el.shapeWidth.value) <= 0)) {
+		el.shapeWidth.value = item ? item.lineWidth === undefined ? "" : String(displayPoints(item.lineWidth)) : "1";
 		return;
 	}
-	if (!el.shapeFill.checked && !el.shapeStroke.checked) {
-		el.shapeStroke.checked = true;
-	}
-	const style = shapeStyle();
-	if (item?.type === "PathObject") {
-		await changeDocument("ofdgoUpdatePathStyle", item, style.fill, style.fillColor, style.stroke, style.strokeColor,
-			inputMillimeters(el.shapeWidth, item.lineWidth));
+	if (item) {
+		const values = [el.shapeFill, el.shapeFillColor, el.shapeStroke, el.shapeStrokeColor, el.shapeWidth].map(input => {
+			if (input !== target) return null;
+			if (input === el.shapeFill || input === el.shapeStroke) return input.checked;
+			return input === el.shapeWidth ? inputMillimeters(input, item.lineWidth) : input.value;
+		});
+		await changeDocument("ofdgoUpdatePathStyle", { ...item, id: (item.items || [item]).map(member => member.id) }, ...values);
 		updateObjectControls(canvasEditor.selected, true);
 	} else {
 		el.shapeWidth.value = String(Number(el.shapeWidth.value));
@@ -1676,10 +1688,13 @@ function toggleDrawingTool(tool) {
 
 function updateDrawingControls() {
 	const tool = canvasEditor.tool;
+	const path = selectedPath(canvasEditor.selected);
 	el.insertTextButton.setAttribute("aria-pressed", String(tool === "text"));
-	const line = lineShape(tool) || !tool && lineShape(canvasEditor.selected?.shape);
+	const line = lineShape(tool) || !tool && lineShape(path?.shape);
 	if (line) {
 		el.shapeFill.checked = false;
+		el.shapeStroke.checked = true;
+	} else if (!path && !el.shapeFill.checked && !el.shapeStroke.checked) {
 		el.shapeStroke.checked = true;
 	}
 	const disabled = !state.editing || !state.ready || state.exporting;
@@ -1691,11 +1706,10 @@ function updateDrawingControls() {
 	el.eraseButton.disabled = el.eraseMode.disabled = disabled;
 	el.eraseButton.setAttribute("aria-pressed", String(tool.startsWith("erase-")));
 	el.selectObjectButton.setAttribute("aria-pressed", String(canvasEditor.enabled && !tool));
-	const styleDisabled = disabled || (canvasEditor.selected?.type === "PathObject"
-		? !canEditObject(canvasEditor.selected, "update") : !pageCan("insert"));
+	const styleDisabled = disabled || (canvasEditor.selected ? !path || !canEditObject(path, "update") : !pageCan("insert"));
 	el.shapeFill.disabled = el.shapeStroke.disabled = styleDisabled || line;
-	el.shapeFillColor.disabled = styleDisabled || line || !el.shapeFill.checked;
-	el.shapeStrokeColor.disabled = el.shapeWidth.disabled = styleDisabled || !line && !el.shapeStroke.checked;
+	el.shapeFillColor.disabled = styleDisabled || line || !el.shapeFill.checked && !el.shapeFill.indeterminate;
+	el.shapeStrokeColor.disabled = el.shapeWidth.disabled = styleDisabled || !line && !el.shapeStroke.checked && !el.shapeStroke.indeterminate;
 }
 
 async function changeDocument(name, item, ...args) {
@@ -5220,14 +5234,24 @@ function updateObjectControls(item, reset = false) {
 	if (reset || el.textColor.disabled || document.activeElement !== el.textColor) {
 		el.textColor.value = text.color || "#000000";
 	}
-	if (item?.type === "PathObject" && canEditObject(item, "update")) {
-		el.shapeFill.checked = item.fill;
-		el.shapeStroke.checked = item.stroke;
-		el.shapeFillColor.value = item.fillColor;
-		el.shapeStrokeColor.value = item.strokeColor;
+	const path = selectedPath(item);
+	for (const [input, key] of [[el.shapeFill, "fill"], [el.shapeStroke, "stroke"]]) {
+		input.indeterminate = Boolean(path?.items && path[key] === undefined);
+		if (path) input.checked = Boolean(path[key]);
+	}
+	for (const [input, key, label] of [[el.shapeFillColor, "fillColor", "填充颜色"], [el.shapeStrokeColor, "strokeColor", "描边颜色"]]) {
+		const mixed = Boolean(path?.items && path[key] === undefined);
+		input.classList.toggle("mixed-color", mixed);
+		input.title = mixed ? `${label}：混合` : label;
+		if (path && (reset || document.activeElement !== input)) input.value = path[key] || "#000000";
+	}
+	el.shapeWidth.placeholder = path?.items && path.lineWidth === undefined ? "混合" : "";
+	if (path && canEditObject(path, "update")) {
 		if (reset || document.activeElement !== el.shapeWidth) {
-			el.shapeWidth.value = displayPoints(item.lineWidth);
+			el.shapeWidth.value = path.lineWidth === undefined ? "" : displayPoints(path.lineWidth);
 		}
+	} else if (!item && !el.shapeWidth.value) {
+		el.shapeWidth.value = "1";
 	}
 	updateDrawingControls();
 	const members = item?.items || (item ? [item] : []);

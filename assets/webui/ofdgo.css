@@ -2222,6 +2222,29 @@ button.outline-link:hover {
 	}
 }
 
+@media (min-width: 901px) and (max-width: 1600px) and (pointer: fine) {
+	.editor-group {
+		padding-inline: 5px;
+		column-gap: 3px;
+	}
+
+	.editor-toolbar .button {
+		padding-inline: 7px;
+	}
+
+	.editor-group:has(#textFont) {
+		grid-template-columns: 144px 32px;
+	}
+
+	.editor-paragraph {
+		grid-template-columns: 54px 108px;
+	}
+
+	.toolbar {
+		--tool-gap: 6px;
+	}
+}
+
 @media (max-width: 900px) {
 	:root {
 		--sidebar-width: min(78vw, 292px);
