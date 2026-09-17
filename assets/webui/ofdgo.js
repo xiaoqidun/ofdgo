@@ -1005,7 +1005,7 @@ function openObjectStyle() {
 	const alpha = shared("alpha", 255), dash = shared("dashPattern", "");
 	el.objectOpacity.value = alpha === null ? "" : String(Math.round((1 - alpha / 255) * 10000) / 100);
 	el.objectOpacity.placeholder = alpha === null ? "混合" : "";
-	el.objectStrokeFields.hidden = Boolean(state.composite) || !items.every(item => item.type === "PathObject");
+	el.objectStrokeFields.hidden = !items.every(item => item.type === "PathObject" && (!item.scoped || canEditObject(item, "paint")));
 	el.objectDash.value = dash === null ? "mixed" : dash === "" ? "solid" : "custom";
 	el.objectDashPattern.value = dash || "";
 	el.objectDashRow.hidden = el.objectDash.value !== "custom";
@@ -1313,7 +1313,7 @@ async function editCanvasObject(item) {
 	if (canEditObject(item, "enter")) return enterCompositeScope(item.index, item.id);
 	if (item.type === "TextObject") {
 		if (!confirmTextReflow(item)) return;
-	} else if (!canEditObject(item, "update")) return;
+	} else if (!canEditObject(item, item.type === "ImageObject" ? "replaceImage" : "update")) return;
 	if (item.type === "PathObject") {
 		el.shapeWidth.focus();
 		return;
@@ -1425,7 +1425,7 @@ function openInsertPanel(item = null) {
 	}
 	el.insertForm.reset();
 	state.insertObject = item;
-	el.insertFitRow.hidden = !item;
+	el.insertFitRow.hidden = !item || Boolean(item.scoped);
 	el.insertPanel.setAttribute("aria-label", item ? "替换图片" : "添加图片");
 	el.insertSubmit.textContent = item ? "替换" : "添加";
 	el.insertStatus.textContent = "";
@@ -1614,8 +1614,9 @@ async function insertObject(event) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const doc = item
-			? await callWASM("ofdgoReplaceImage", item.index, item.id, data, el.insertFit.value)
+		const doc = item?.scoped
+			? await callWASM("ofdgoChangeCompositeObjects", item.index, state.composite.key, [item.id], "image", data)
+			: item ? await callWASM("ofdgoReplaceImage", item.index, item.id, data, el.insertFit.value)
 			: await callWASM("ofdgoInsertImage", index, data, x, y, page.width - x * 2);
 		if (openSeq !== state.openSeq) {
 			return;
@@ -1831,7 +1832,8 @@ async function changeDocument(name, item, ...args) {
 		}
 		const scope = state.composite;
 		const operation = { ofdgoTransformObject: "transform", ofdgoTransformObjects: "transform", ofdgoRotateObjects: "rotate", ofdgoFlipObjects: "flip", ofdgoResizeObjects: "resize",
-			ofdgoAlignObject: "align", ofdgoAlignObjects: "align", ofdgoDistributeObjects: "distribute", ofdgoStyleObjects: "style", ofdgoUpdatePathStyle: "paint", ofdgoCompositeTextColor: "textColor" }[name];
+			ofdgoAlignObject: "align", ofdgoAlignObjects: "align", ofdgoDistributeObjects: "distribute", ofdgoStyleObjects: "style", ofdgoUpdatePathStyle: "paint", ofdgoCompositeTextColor: "textColor",
+			ofdgoDeleteObject: "delete", ofdgoDeleteObjects: "delete", ofdgoCopyObjects: "copy", ofdgoOrderObjects: "order" }[name];
 		const members = item?.items || (item ? [item] : []);
 		const scoped = scope && members.length && members.every(member => member.scoped);
 		if (!item) resetCompositeScope();
@@ -1872,6 +1874,7 @@ async function changeDocument(name, item, ...args) {
 			setPan(false);
 			canvasEditor.pendingSelection = { index: item?.index ?? args[0], ids: doc.selectedIDs };
 		}
+		if (scoped && name === "ofdgoOrderObjects") canvasEditor.pendingSelection = { index: item.index, ids: doc.selectedIDs };
 		openSeq = ++state.openSeq;
 		if (item || name === "ofdgoPasteObjects" || name === "ofdgoInsertShape" || name === "ofdgoInsertText" || name === "ofdgoInsertImage") {
 			await refreshEditorPage(doc, item ? item.index : args[0], openSeq, clearSelection);
@@ -3694,6 +3697,11 @@ function copyEditorSelection(event) {
 		|| canvasEditor.input || canvasEditor.crop || canvasEditor.drag || document.body.hasAttribute("aria-busy")) return false;
 	const items = canvasEditor.items().slice().sort((a, b) => a.order - b.order);
 	const cut = event.type === "cut";
+	if (state.composite) {
+		event.preventDefault();
+		setStatus("内部对象请用复制按钮");
+		return true;
+	}
 	if (!canEditObject(canvasEditor.selected, "copy") || cut && !canEditObject(canvasEditor.selected, "delete")) {
 		event.preventDefault();
 		setStatus(cut ? "对象不可剪切" : "对象不可复制");
@@ -5536,10 +5544,11 @@ function updateEditorTools() {
 function updateObjectControls(item, reset = false) {
 	el.compositeBackButton.hidden = !state.composite;
 	el.compositeBackButton.disabled = !state.ready || state.exporting;
-	el.deleteObjectButton.hidden = Boolean(state.composite);
+	el.selectObjectButton.hidden = Boolean(state.composite);
+	const members = item?.items || (item ? [item] : []);
 	const disabled = !item || Boolean(item.draft) || !state.ready || state.exporting;
 	el.deleteObjectButton.disabled = disabled || !canEditObject(item, "delete");
-	el.copyObjectButton.disabled = disabled || !canEditObject(item, "copy");
+	el.copyObjectButton.disabled = disabled || !canEditObject(item, "copy") || Boolean(state.composite && members.some(member => member.container !== members[0].container));
 	el.objectStyleButton.disabled = disabled || !canEditObject(item, "transform");
 	const cropping = Boolean(canvasEditor.crop);
 	el.objectBoundsButton.disabled = disabled || cropping || !canEditObject(item, "transform");
@@ -5555,7 +5564,7 @@ function updateObjectControls(item, reset = false) {
 	el.resetCropButton.disabled = el.cropImageButton.disabled || !cropping && (!item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
 	el.objectDistribute.disabled = el.objectAlign.disabled || !item.items || item.items.length < 3;
 	el.editObjectButton.disabled = disabled || Boolean(item.items) || !canEditObject(item, "enter") && (item.type === "PathObject"
-		|| !canEditObject(item, item.type === "TextObject" ? "reflow" : "update"));
+		|| !canEditObject(item, item.type === "TextObject" ? "reflow" : item.type === "ImageObject" ? "replaceImage" : "update"));
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const selection = selectedText(item);
 	const text = selection ? currentTextStyle() : state.textDefaults;
@@ -5608,7 +5617,6 @@ function updateObjectControls(item, reset = false) {
 		el.shapeWidth.value = "1";
 	}
 	updateDrawingControls();
-	const members = item?.items || (item ? [item] : []);
 	const orders = members.map(member => member.position).sort((a, b) => a - b);
 	const count = members[0]?.count || 0;
 	const canRaise = orders.some((order, i) => order !== count - orders.length + i);

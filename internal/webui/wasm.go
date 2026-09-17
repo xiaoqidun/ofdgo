@@ -832,7 +832,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 // 返回: map[string]any 前端能力
 func editorCapabilities(capability ofdgo.ObjectCapabilities, kind string) map[string]any {
 	result := map[string]any{"update": capability.Update, "paint": capability.Paint, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode),
-		"enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
+		"replaceImage": capability.ReplaceImage, "enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
 	if missing := capability.MissingGlyphs; missing != nil {
 		result["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
 	}
@@ -919,7 +919,7 @@ func compositeObjects(args []js.Value) (any, error) {
 		if box.W <= 0 || box.H <= 0 {
 			continue
 		}
-		item := map[string]any{"id": fmt.Sprintf("%s/%d", key, i), "type": member.Object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": i, "position": i, "count": len(members), "container": key, "scoped": true, "contours": member.Contours,
+		item := map[string]any{"id": fmt.Sprintf("%s/%d", key, i), "type": member.Object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": i, "position": member.Position.Index, "count": member.Position.Count, "container": key + ":" + member.Position.Container, "scoped": true, "contours": member.Contours,
 			"capabilities": editorCapabilities(member.Capabilities, member.Object.Type)}
 		editorAppearance(item, member.Object, member.Capabilities.Paint, member.StrokeScale)
 		if member.Object.Type == "TextObject" {
@@ -932,11 +932,12 @@ func compositeObjects(args []js.Value) (any, error) {
 	return objects, nil
 }
 
-// changeCompositeObjects 复用库层内部选区变换与单次撤销
+// changeCompositeObjects 提交内部选区操作，结构变化后返回新的选区路径
 // 入参: args 页面索引、父路径、成员路径列表、操作及参数
 // 返回: any 文档信息, error 错误信息
 func changeCompositeObjects(args []js.Value) (any, error) {
-	return changeObjects(func() error {
+	var selected []int
+	result, err := changeObjects(func() error {
 		key := args[1].String()
 		path, err := compositePath(key)
 		if err != nil {
@@ -957,6 +958,23 @@ func changeCompositeObjects(args []js.Value) (any, error) {
 		page := args[0].Int()
 		operation := args[3].String()
 		switch operation {
+		case "delete":
+			return currentEditor.DeleteCompositeObjects(page, path, indexes)
+		case "copy":
+			selected, err = currentEditor.CopyCompositeObjects(page, path, indexes, args[4].Float(), args[5].Float())
+			return err
+		case "order":
+			selected, err = currentEditor.OrderCompositeObjects(page, path, indexes, args[4].String())
+			return err
+		case "image":
+			if len(indexes) != 1 {
+				return fmt.Errorf("image replacement requires one member")
+			}
+			data, err := bytesFromJS(args[4])
+			if err != nil {
+				return err
+			}
+			return currentEditor.ReplaceCompositeImage(page, path, indexes[0], data)
 		case "transform":
 			return currentEditor.TransformCompositeObjects(page, path, indexes, args[4].Float(), args[5].Float(), args[6].Float())
 		case "rotate":
@@ -1007,6 +1025,17 @@ func changeCompositeObjects(args []js.Value) (any, error) {
 			return fmt.Errorf("unsupported composite operation")
 		}
 	})
+	if err != nil {
+		return nil, err
+	}
+	if selected == nil {
+		return result, nil
+	}
+	doc := editorSelectionInfo{editorInfo: result.(editorInfo)}
+	for _, index := range selected {
+		doc.SelectedIDs = append(doc.SelectedIDs, fmt.Sprintf("%s/%d", args[1].String(), index))
+	}
+	return doc, nil
 }
 
 // editorFont 读取对象实际使用的内嵌字体，供画布输入使用

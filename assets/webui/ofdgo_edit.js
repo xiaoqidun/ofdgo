@@ -190,7 +190,8 @@ export function objectEditReason(item) {
 		if (!reason) return "";
 		const message = labels[object.capabilities.reasonCode] || "暂不支持此对象特性";
 		const available = object.capabilities.transform ? object.capabilities.paint ? "仍可移动、改色" : "仍可移动"
-			: object.capabilities.copy && object.capabilities.delete ? "仍可复制、删除" : "暂不可编辑";
+			: object.capabilities.replaceImage ? "仍可替换图片" : object.capabilities.copy && object.capabilities.delete ? "仍可复制、删除"
+			: object.capabilities.delete ? "仍可删除" : "暂不可编辑";
 		return object.capabilities.missingGlyphs ? missingGlyphMessage(object.capabilities.missingGlyphs, available) : `${message}，${available}`;
 	});
 	return [...new Set(reasons.filter(Boolean))].join("；");

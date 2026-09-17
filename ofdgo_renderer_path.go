@@ -126,7 +126,7 @@ func (s *pathStyle) applyDrawParam(r *Renderer, dp *DrawParam, bx, by, pageH flo
 		s.lineCap = pathLineCap(dp.Cap, s.lineCap)
 	}
 	s.applyLineJoin(dp.Join, dp.MiterLimit)
-	if dp.DashPattern != "" {
+	if dp.DashPattern != "" || dp.dashPatternSet {
 		s.dashPattern = parseFloats(dp.DashPattern)
 	}
 	if dp.DashOffset != nil {
@@ -150,7 +150,7 @@ func (s *pathStyle) applyPathObject(r *Renderer, obj PathObject, bx, by, pageH f
 		s.lineCap = pathLineCap(obj.Cap, canvas.ButtCap)
 	}
 	s.applyLineJoin(obj.Join, obj.MiterLimit)
-	if obj.DashPattern != "" {
+	if obj.DashPattern != "" || obj.dashPatternSet {
 		s.dashPattern = parseFloats(obj.DashPattern)
 	}
 	if obj.DashOffset != nil {

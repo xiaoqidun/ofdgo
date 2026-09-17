@@ -90,11 +90,12 @@ func (e *Editor) resolveEditorStyleDefaults(object GraphicObject, base *DrawPara
 	if object.Type == "PathObject" {
 		obj := &object.PathObject
 		style = mergeDrawParam(*style, &DrawParam{LineWidth: obj.LineWidth, Join: obj.Join, Cap: obj.Cap,
-			MiterLimit: obj.MiterLimit, DashPattern: obj.DashPattern, DashOffset: obj.DashOffset,
+			MiterLimit: obj.MiterLimit, DashPattern: obj.DashPattern, dashPatternSet: obj.dashPatternSet, DashOffset: obj.DashOffset,
 			FillColor: obj.FillColor, StrokeColor: obj.StrokeColor})
 		obj.DrawParam = ""
 		obj.LineWidth, obj.Join, obj.Cap = style.LineWidth, style.Join, style.Cap
 		obj.MiterLimit, obj.DashPattern, obj.DashOffset = style.MiterLimit, style.DashPattern, style.DashOffset
+		obj.dashPatternSet = style.dashPatternSet
 		obj.FillColor, obj.StrokeColor = style.FillColor, style.StrokeColor
 	} else {
 		obj := &object.TextObject
@@ -221,6 +222,7 @@ func (e *Editor) styleObject(object GraphicObject, style ObjectStyle) (GraphicOb
 		}
 		if style.DashPattern != nil {
 			path.DashPattern = *style.DashPattern
+			path.dashPatternSet = path.DashPattern == ""
 		}
 		if style.DashOffset != nil {
 			path.DashOffset = style.DashOffset
@@ -316,6 +318,7 @@ func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) error {
 			to.FillColor, to.StrokeColor = from.FillColor, from.StrokeColor
 			to.LineWidth, to.Cap, to.Join, to.MiterLimit = from.LineWidth, from.Cap, from.Join, from.MiterLimit
 			to.DashPattern, to.DashOffset = from.DashPattern, from.DashOffset
+			to.dashPatternSet = from.dashPatternSet
 			scale := editorStrokeScale(from.CTM) / editorStrokeScale(to.CTM)
 			if scale != 1 {
 				if to.LineWidth == 0 {

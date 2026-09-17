@@ -34,12 +34,14 @@ type ObjectPath struct {
 
 // CompositeMember 复合对象的直接成员快照，Object包含有效样式，不用于整体替换原对象
 // Bounds与Contours使用页面毫米坐标，StrokeScale为对象描边到页面的倍率
+// Position表示当前范围内的直接容器位置，结构操作后需重新枚举
 type CompositeMember struct {
 	Object       GraphicObject
 	Bounds       Box
 	Contours     []ObjectContour
 	StrokeScale  float64
 	Capabilities ObjectCapabilities
+	Position     ObjectPosition
 	Transform    bool
 }
 
@@ -59,6 +61,9 @@ type editorCompositeNode struct {
 	expanded      bool
 	changed       bool
 	span          *editorXML
+	owner         *editorCompositeNode
+	patches       []editorXMLPatch
+	index         int
 }
 
 // CompositeObjects 枚举复合对象的直接可绘制成员，资源引用层不占用路径层级
@@ -189,6 +194,9 @@ func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, 
 			break
 		}
 		if depth == len(path.Children) {
+			for i, member := range members {
+				member.index = i
+			}
 			return reader, renderer, root, members, nil
 		}
 		i := path.Children[depth]
@@ -300,6 +308,7 @@ func (n *editorCompositeNode) members(reader *Reader, renderer *Renderer, visiti
 					}
 					item.parent, item.boundaryInCTM, item.defaults, item.clip, item.visible, item.span = matrix, n.boundaryInCTM, defaults, clip, visible, child
 					item.drawParams = drawParams
+					item.owner = n
 					n.children = append(n.children, item)
 				}
 			}
@@ -332,6 +341,18 @@ func (n *editorCompositeNode) members(reader *Reader, renderer *Renderer, visiti
 // 返回: []CompositeMember 独立快照及操作能力
 func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorCompositeNode) []CompositeMember {
 	result := make([]CompositeMember, len(nodes))
+	positions := make(map[*editorXML]ObjectPosition)
+	orderable := make(map[*editorXML]bool)
+	for _, node := range nodes {
+		parent := node.span.parent
+		position := positions[parent]
+		if position.Count == 0 {
+			position.Container = fmt.Sprint(node.index)
+			orderable[parent] = editorContainerOrderable(parent)
+		}
+		position.Count++
+		positions[parent] = position
+	}
 	for i, node := range nodes {
 		bounds := &boundsRenderer{collect: true}
 		object := node.object
@@ -346,7 +367,8 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		_, invertible := node.parent.Invert()
 		borderActions := node.object.Type == "ImageObject" && node.object.ImageObject.Border != nil && len(node.object.ImageObject.Actions) != 0
 		transform := invertible && editorXMLTransformable(node.node) && validateEditorGeometry(node.object) == nil && !borderActions
-		capability := ObjectCapabilities{Transform: transform, Arrange: transform && bounds.box.W > 0 && bounds.box.H > 0}
+		capability := ObjectCapabilities{Transform: transform, Arrange: transform && bounds.box.W > 0 && bounds.box.H > 0,
+			Delete: true, Copy: transform && editorXMLCopyable(node.node), Order: orderable[node.span.parent], ReplaceImage: node.object.Type == "ImageObject"}
 		style, err := e.compositeMemberStyle(node)
 		if !transform {
 			capability.ReasonCode, capability.Reason = EditUnsupportedContainer, "composite member cannot be transformed"
@@ -360,7 +382,10 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		}
 		_, ctm := editorGeometry(node.object)
 		matrix := node.parent.Multiply(NewMatrix(ctm))
-		result[i] = CompositeMember{Object: style, Bounds: bounds.box, Contours: bounds.contours, StrokeScale: math.Sqrt(math.Abs(matrix.a*matrix.d - matrix.b*matrix.c)), Capabilities: capability, Transform: transform}
+		position := positions[node.span.parent]
+		result[i] = CompositeMember{Object: style, Bounds: bounds.box, Contours: bounds.contours, StrokeScale: math.Sqrt(math.Abs(matrix.a*matrix.d - matrix.b*matrix.c)), Capabilities: capability, Position: position, Transform: transform}
+		position.Index++
+		positions[node.span.parent] = position
 	}
 	return result
 }
@@ -386,15 +411,12 @@ func (e *Editor) compositeMemberStyle(node *editorCompositeNode) (GraphicObject,
 }
 
 // StyleCompositeObjects 原子修改成员透明度、文字颜色及路径填充、描边和线宽
-// 不重排文字，不改写继承参数；暂不支持虚线及端点样式
+// 不重排文字，不改写继承参数；显式实线覆盖原虚线继承
 // 入参: page 页面索引, path 父路径, indexes 成员序号, style 待修改属性，线宽使用页面毫米
 // 返回: error 错误信息
 func (e *Editor) StyleCompositeObjects(page int, path ObjectPath, indexes []int, style ObjectStyle) error {
-	if style.DashPattern != nil || style.DashOffset != nil || style.Cap != nil || style.Join != nil {
-		return fmt.Errorf("composite stroke parameters are not supported")
-	}
 	return e.editCompositeObjects(page, path, indexes, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
-		paint := style.Fill != nil || style.Stroke != nil || style.FillColor != nil || style.StrokeColor != nil || style.LineWidth != nil
+		paint := style.Fill != nil || style.Stroke != nil || style.FillColor != nil || style.StrokeColor != nil || style.LineWidth != nil || style.DashPattern != nil || style.DashOffset != nil || style.Cap != nil || style.Join != nil
 		for i, node := range nodes {
 			capability := members[i].Capabilities
 			if !capability.Transform || paint && !capability.Paint {
@@ -417,18 +439,9 @@ func (e *Editor) StyleCompositeObjects(page int, path ObjectPath, indexes []int,
 			if err != nil {
 				return err
 			}
-			data, err := editorXMLObject(node.data, node.node, node.object, object)
-			if err != nil {
+			if err := node.update(object); err != nil {
 				return err
 			}
-			if bytes.Equal(data, node.data) {
-				continue
-			}
-			updated, err := newEditorCompositeNode(data)
-			if err != nil {
-				return err
-			}
-			node.data, node.node, node.object, node.changed = data, updated.node, updated.object, true
 		}
 		return nil
 	})
@@ -548,6 +561,14 @@ func (e *Editor) editCompositeObjects(page int, path ObjectPath, indexes []int, 
 	ready := e.source.idsReady
 	defer func() {
 		if err != nil {
+			removed := make(map[string]bool)
+			for _, resource := range e.resources[count:] {
+				if resource.image != nil {
+					removed[resource.image.ID] = true
+					delete(e.images, resource.image.ID)
+				}
+			}
+			maps.DeleteFunc(e.resourceID, func(_ editorResourceKey, id string) bool { return removed[id] })
 			clear(e.resources[count:])
 			e.resources, e.maxID = e.resources[:count], maximum
 			e.source.idsReady = ready
@@ -698,7 +719,7 @@ func compositeBoundary(object GraphicObject, parent Matrix, inward bool) Graphic
 // 入参: node 实例节点
 // 返回: []byte 新片段, bool 是否变化, error 错误信息
 func (e *Editor) writeCompositeNode(node *editorCompositeNode) ([]byte, bool, error) {
-	var patches []editorXMLPatch
+	patches := slices.Clone(node.patches)
 	for _, child := range node.children {
 		data, changed, err := e.writeCompositeNode(child)
 		if err != nil {
@@ -748,22 +769,7 @@ func (e *Editor) addCompositeResource(data []byte) (string, error) {
 		return "", fmt.Errorf("composite contains unsupported identifiers")
 	}
 	ids := make(map[string]string)
-	var collect func(*editorXML) error
-	collect = func(node *editorXML) error {
-		if id := editorResourceID(node.attr("ID")); id != "" {
-			if ids[id] != "" {
-				return fmt.Errorf("duplicate object ID %q", id)
-			}
-			ids[id] = e.nextID()
-		}
-		for _, child := range node.children {
-			if err := collect(child); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := collect(root); err != nil {
+	if err := e.collectCompositeIDs(root, ids); err != nil {
 		return "", err
 	}
 	id := ids[editorResourceID(root.attr("ID"))]

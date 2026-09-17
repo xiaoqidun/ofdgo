@@ -164,14 +164,15 @@ type CGTransform struct {
 
 // PathObject 路径对象
 type PathObject struct {
-	ID              string       `xml:"ID,attr"`
-	Boundary        string       `xml:"Boundary,attr"`
-	DrawParam       string       `xml:"DrawParam,attr"`
-	LineWidth       float64      `xml:"LineWidth,attr"`
-	Join            string       `xml:"Join,attr"`
-	Cap             string       `xml:"Cap,attr"`
-	DashOffset      *float64     `xml:"DashOffset,attr"`
-	DashPattern     string       `xml:"DashPattern,attr"`
+	ID              string   `xml:"ID,attr"`
+	Boundary        string   `xml:"Boundary,attr"`
+	DrawParam       string   `xml:"DrawParam,attr"`
+	LineWidth       float64  `xml:"LineWidth,attr"`
+	Join            string   `xml:"Join,attr"`
+	Cap             string   `xml:"Cap,attr"`
+	DashOffset      *float64 `xml:"DashOffset,attr"`
+	DashPattern     string   `xml:"DashPattern,attr"`
+	dashPatternSet  bool
 	MiterLimit      float64      `xml:"MiterLimit,attr"`
 	CTM             string       `xml:"CTM,attr"`
 	Alpha           *int         `xml:"Alpha,attr"`

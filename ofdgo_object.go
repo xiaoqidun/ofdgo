@@ -19,6 +19,46 @@ import (
 	"strconv"
 )
 
+// UnmarshalXML 解析路径并区分省略的虚线样式与显式实线
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (p *PathObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type plain PathObject
+	var value struct {
+		plain
+		DashPattern *string `xml:"DashPattern,attr"`
+	}
+	if err := d.DecodeElement(&value, &start); err != nil {
+		return err
+	}
+	*p = PathObject(value.plain)
+	if value.DashPattern != nil {
+		p.DashPattern = *value.DashPattern
+		p.dashPatternSet = p.DashPattern == ""
+	}
+	return nil
+}
+
+// UnmarshalXML 解析绘制参数并保留显式实线对基础参数的覆盖
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (p *DrawParam) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type plain DrawParam
+	var value struct {
+		plain
+		DashPattern *string `xml:"DashPattern,attr"`
+	}
+	if err := d.DecodeElement(&value, &start); err != nil {
+		return err
+	}
+	*p = DrawParam(value.plain)
+	if value.DashPattern != nil {
+		p.DashPattern = *value.DashPattern
+		p.dashPatternSet = p.DashPattern == ""
+	}
+	return nil
+}
+
 // UnmarshalXML 解析填充颜色并区分未支持的复杂颜色
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息

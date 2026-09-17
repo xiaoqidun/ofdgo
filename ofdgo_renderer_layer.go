@@ -249,8 +249,9 @@ func mergeDrawParam(base DrawParam, dp *DrawParam) *DrawParam {
 	if dp.Cap != "" {
 		base.Cap = dp.Cap
 	}
-	if dp.DashPattern != "" {
+	if dp.DashPattern != "" || dp.dashPatternSet {
 		base.DashPattern = dp.DashPattern
+		base.dashPatternSet = dp.dashPatternSet
 	}
 	if dp.DashOffset != nil {
 		base.DashOffset = dp.DashOffset

@@ -104,6 +104,13 @@ func (n *editorXML) attr(name string) string {
 	return ""
 }
 
+// hasAttr 判断属性是否存在，区分空值与省略
+// 入参: name 属性名称
+// 返回: bool 是否存在
+func (n *editorXML) hasAttr(name string) bool {
+	return slices.ContainsFunc(n.attrs, func(attr xml.Attr) bool { return attr.Name.Space == "" && attr.Name.Local == name })
+}
+
 // editorPatchXML 按位置应用互不重叠的替换
 // 入参: data 原文, patches 修改区间
 // 返回: []byte 修改后的XML
@@ -363,7 +370,7 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 	}
 	changes := make(map[string]string)
 	for _, attr := range append(oldNode.attrs, newNode.attrs...) {
-		if attr.Name.Space == "" && oldNode.attr(attr.Name.Local) != newNode.attr(attr.Name.Local) {
+		if attr.Name.Space == "" && (oldNode.attr(attr.Name.Local) != newNode.attr(attr.Name.Local) || oldNode.hasAttr(attr.Name.Local) != newNode.hasAttr(attr.Name.Local)) {
 			changes[attr.Name.Local] = newNode.attr(attr.Name.Local)
 		}
 	}
@@ -388,7 +395,7 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 			if value, ok := changes[attr.Name.Local]; ok {
 				attr.Value = value
 				delete(changes, attr.Name.Local)
-				if value == "" {
+				if !newNode.hasAttr(attr.Name.Local) {
 					continue
 				}
 			}
@@ -402,7 +409,7 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 		result.WriteByte('"')
 	}
 	for _, attr := range newNode.attrs {
-		if value, ok := changes[attr.Name.Local]; ok && value != "" {
+		if value, ok := changes[attr.Name.Local]; ok {
 			result.WriteString(" " + attr.Name.Local + "=\"")
 			_ = xml.EscapeText(&result, []byte(value))
 			result.WriteByte('"')

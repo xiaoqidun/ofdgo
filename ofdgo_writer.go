@@ -637,7 +637,11 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.add("Join", obj.Join)
 		attrs.add("Cap", obj.Cap)
 		attrs.add("Rule", obj.Rule)
-		attrs.add("DashPattern", obj.DashPattern)
+		if obj.dashPatternSet {
+			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
+		} else {
+			attrs.add("DashPattern", obj.DashPattern)
+		}
 		if obj.DashOffset != nil {
 			attrs.add("DashOffset", ofdNumber(*obj.DashOffset))
 		}

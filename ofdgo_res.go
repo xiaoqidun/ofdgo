@@ -78,23 +78,24 @@ type DrawParams struct {
 
 // DrawParam 绘制参数
 type DrawParam struct {
-	ID          string       `xml:"ID,attr"`
-	Relative    string       `xml:"Relative,attr"`
-	ResourceID  string       `xml:"ResourceID,attr"`
-	BaseLoc     string       `xml:"BaseLoc,attr"`
-	Link        string       `xml:"Link,attr"`
-	LineWidth   float64      `xml:"LineWidth,attr"`
-	Join        string       `xml:"Join,attr"`
-	Cap         string       `xml:"Cap,attr"`
-	DashOffset  *float64     `xml:"DashOffset,attr"`
-	DashPattern string       `xml:"DashPattern,attr"`
-	MiterLimit  float64      `xml:"MiterLimit,attr"`
-	Font        string       `xml:"Font,attr"`
-	Size        float64      `xml:"Size,attr"`
-	Weight      int          `xml:"Weight,attr"`
-	Italic      bool         `xml:"Italic,attr"`
-	FillColor   *FillColor   `xml:"FillColor"`
-	StrokeColor *StrokeColor `xml:"StrokeColor"`
+	ID             string   `xml:"ID,attr"`
+	Relative       string   `xml:"Relative,attr"`
+	ResourceID     string   `xml:"ResourceID,attr"`
+	BaseLoc        string   `xml:"BaseLoc,attr"`
+	Link           string   `xml:"Link,attr"`
+	LineWidth      float64  `xml:"LineWidth,attr"`
+	Join           string   `xml:"Join,attr"`
+	Cap            string   `xml:"Cap,attr"`
+	DashOffset     *float64 `xml:"DashOffset,attr"`
+	DashPattern    string   `xml:"DashPattern,attr"`
+	dashPatternSet bool
+	MiterLimit     float64      `xml:"MiterLimit,attr"`
+	Font           string       `xml:"Font,attr"`
+	Size           float64      `xml:"Size,attr"`
+	Weight         int          `xml:"Weight,attr"`
+	Italic         bool         `xml:"Italic,attr"`
+	FillColor      *FillColor   `xml:"FillColor"`
+	StrokeColor    *StrokeColor `xml:"StrokeColor"`
 }
 
 // CompositeGraphicUnits 复合图元集合

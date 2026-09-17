@@ -62,11 +62,13 @@ type editorSourcePage struct {
 // Update表示完整替换内容，ReplaceFont表示可显式替换文字字体，Transform表示保留文字定位的几何变换，Order仅限同一图层或末级页块
 // Arrange表示可准确度量对齐与旋转范围；Reflow表示可重排文字，LayoutKnown表示段落选项可恢复
 // Paint表示可独立修改纯色填充和描边，不要求重新排版文字
+// ReplaceImage表示可替换图片数据，内部成员保留原布局，不开放裁剪或重新适应
 // MissingGlyphs提供缺字导致操作受限时的结构化诊断
 type ObjectCapabilities struct {
 	Update        bool
 	Paint         bool
 	ReplaceFont   bool
+	ReplaceImage  bool
 	Reflow        bool
 	LayoutKnown   bool
 	Transform     bool
@@ -355,6 +357,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 	all := ObjectCapabilities{Update: true, Paint: object.Type == "TextObject" || object.Type == "PathObject", ReplaceFont: object.Type == "TextObject", Reflow: object.Type == "TextObject" && object.TextObject.ReadDirection == 0 && object.TextObject.CharDirection == 0, LayoutKnown: object.Type == "TextObject" && (e.objectOrigin(id) == nil || object.TextObject.layout != nil), Transform: true, Arrange: true, Copy: true, Delete: true, Order: true}
 	origin := e.objectOrigin(id)
 	if origin == nil {
+		all.ReplaceImage = object.Type == "ImageObject"
 		return all, nil
 	}
 	node := origin.node
@@ -384,6 +387,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 		errors.As(err, &all.MissingGlyphs)
 	}
 	all.Paint = all.Paint && e.editorPaintable(object)
+	all.ReplaceImage = all.Update && object.Type == "ImageObject"
 	if object.Type == "ImageObject" && object.ImageObject.Border != nil && len(object.ImageObject.Actions) != 0 {
 		all.Transform, all.Arrange = false, false
 		all.Reason, all.ReasonCode = "image actions cannot be transformed together with the border", EditUnsupportedObject
@@ -425,6 +429,7 @@ func editorPreservedObject(before, after GraphicObject) bool {
 		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
 		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
 		a.DashOffset, a.DashPattern, a.Cap, a.Join = b.DashOffset, b.DashPattern, b.Cap, b.Join
+		a.dashPatternSet = b.dashPatternSet
 	case "ImageObject":
 		a, b := &before.ImageObject, after.ImageObject
 		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha

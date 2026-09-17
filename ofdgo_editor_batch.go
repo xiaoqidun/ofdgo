@@ -219,6 +219,17 @@ func (e *Editor) OrderObjects(page int, ids []string, order string) error {
 	for _, index := range indexes {
 		selected[slices.Index(siblings, index.index)] = true
 	}
+	orderEditorObjects(objects, selected, order)
+	for i, index := range siblings {
+		layers[indexes[0].layer].Objects[index] = objects[i]
+	}
+	e.replaceLayers(page, layers)
+	return nil
+}
+
+// orderEditorObjects 调整选区层级，保持选中及未选中对象各自的相对顺序
+// 入参: objects 同容器对象, selected 选中状态, order 排序方向
+func orderEditorObjects[T any](objects []T, selected []bool, order string) {
 	switch order {
 	case "up":
 		for i := len(objects) - 2; i >= 0; i-- {
@@ -235,7 +246,7 @@ func (e *Editor) OrderObjects(page int, ids []string, order string) error {
 			}
 		}
 	default:
-		ordered := make([]GraphicObject, 0, len(objects))
+		ordered := make([]T, 0, len(objects))
 		for _, takeSelected := range []bool{order == "bottom", order != "bottom"} {
 			for i, object := range objects {
 				if selected[i] == takeSelected {
@@ -243,13 +254,8 @@ func (e *Editor) OrderObjects(page int, ids []string, order string) error {
 				}
 			}
 		}
-		objects = ordered
+		copy(objects, ordered)
 	}
-	for i, index := range siblings {
-		layers[indexes[0].layer].Objects[index] = objects[i]
-	}
-	e.replaceLayers(page, layers)
-	return nil
 }
 
 // DistributeObjects 按可见范围等距分布同页对象，固定两端对象，保留绘制顺序
