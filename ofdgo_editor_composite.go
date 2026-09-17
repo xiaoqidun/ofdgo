@@ -72,17 +72,17 @@ type editorCompositeNode struct {
 	states        map[string]editorCompositeState
 }
 
-// editorCompositeState 保存内部对象的会话排版及新增裁剪起点，不写入OFD
+// editorCompositeState 保存内部对象的会话排版及可还原裁剪，不写入OFD
 type editorCompositeState struct {
 	layout *textLayout
 	crop   *editorCompositeCrop
 	origin [2]float64
 }
 
-// editorCompositeCrop 记录编辑前的裁剪数量及节点存在性
+// editorCompositeCrop 记录本次编辑新增的裁剪序号及原节点存在性
 type editorCompositeCrop struct {
-	count  int
-	exists bool
+	indexes []int
+	exists  bool
 }
 
 // setStates 独立保存当前XML子树的会话信息，共享不可变记录
@@ -387,6 +387,9 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 		var collect func(*editorXML) error
 		collect = func(container *editorXML) error {
 			for _, child := range container.children {
+				if child.name.Space != "" && child.name.Space != ofdNamespace && child.name.Space != "http://www.ofdspec.org" {
+					continue
+				}
 				switch child.name.Local {
 				case "Content", "PageBlock":
 					if err := collect(child); err != nil {
@@ -492,6 +495,7 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 			clips := node.object.ImageObject.Clips
 			_, capability.CropImage = node.matrix(clips == nil || clips.TransFlag == nil || *clips.TransFlag).Invert()
 			capability.FitImage = capability.CropImage && axisAlignedMatrix(NewMatrix(node.object.ImageObject.CTM))
+			capability.ResetCrop = node.states[editorObjectID(node.object)].crop != nil
 		}
 		_, ctm := editorGeometry(node.object)
 		matrix := node.parent.Multiply(NewMatrix(ctm))
@@ -651,22 +655,19 @@ func (e *Editor) changeCompositeObjects(page int, path ObjectPath, indexes []int
 // 返回: error 错误信息
 func (e *Editor) editCompositeObjects(page int, path ObjectPath, indexes []int, edit func(*Renderer, []*editorCompositeNode, []CompositeMember) error) (err error) {
 	return e.editCompositeScope(page, path, func(renderer *Renderer, _ *editorCompositeNode, nodes []*editorCompositeNode) error {
-		members := e.measureCompositeMembers(renderer, nodes)
 		selected := make(map[int]bool)
 		var selectedNodes []*editorCompositeNode
-		var selectedMembers []CompositeMember
 		for _, i := range indexes {
 			if i < 0 || i >= len(nodes) || selected[i] {
 				return fmt.Errorf("invalid composite selection")
 			}
 			selected[i] = true
 			selectedNodes = append(selectedNodes, nodes[i])
-			selectedMembers = append(selectedMembers, members[i])
 		}
 		if len(selected) == 0 {
 			return nil
 		}
-		return edit(renderer, selectedNodes, selectedMembers)
+		return edit(renderer, selectedNodes, e.measureCompositeMembers(renderer, selectedNodes))
 	})
 }
 
@@ -929,9 +930,20 @@ func (e *Editor) addCompositeResource(data []byte, states map[string]editorCompo
 // 入参: id 资源标识, data 资源XML
 // 返回: editorResource 资源, error 错误信息
 func (e *Editor) compositeResource(id string, data []byte) (editorResource, error) {
-	root, err := parseEditorXML(data)
+	refs, err := editorResourceReferences(data)
 	if err != nil {
 		return editorResource{}, err
+	}
+	return editorResource{name: e.resourceDirectory() + "/Composite_" + id + ".xml", data: data, composite: id, references: refs}, nil
+}
+
+// editorResourceReferences 收集标准资源XML中的对象引用
+// 入参: data 资源XML
+// 返回: []string 引用标识, error 错误信息
+func editorResourceReferences(data []byte) ([]string, error) {
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return nil, err
 	}
 	refs := make(map[string]bool)
 	var collect func(*editorXML)
@@ -948,7 +960,7 @@ func (e *Editor) compositeResource(id string, data []byte) (editorResource, erro
 		}
 	}
 	collect(root)
-	return editorResource{name: e.resourceDirectory() + "/Composite_" + id + ".xml", data: data, composite: id, references: slices.Sorted(maps.Keys(refs))}, nil
+	return slices.Sorted(maps.Keys(refs)), nil
 }
 
 // collectCompositeReferences 收集内联复合对象引用的新资源

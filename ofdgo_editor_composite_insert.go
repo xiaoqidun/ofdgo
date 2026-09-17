@@ -19,11 +19,12 @@ import (
 	"encoding/xml"
 	"fmt"
 	"image/color"
+	"reflect"
 	"strconv"
 )
 
-// AddCompositeObject 按页面坐标向内部范围末尾添加基本对象，复用已注册资源
-// 入参: page 页面索引, path 父路径, object 文字、图片或路径
+// AddCompositeObject 按页面坐标向内部范围末尾添加对象，复用已注册资源
+// 入参: page 页面索引, path 父路径, object 基本对象或复合快照
 // 返回: int 新成员序号, error 错误信息
 func (e *Editor) AddCompositeObject(page int, path ObjectPath, object GraphicObject) (int, error) {
 	indexes, err := e.CopyObjectsToComposite(page, path, []GraphicObject{object}, 0, 0)
@@ -64,9 +65,6 @@ func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []Gra
 		}
 		var content []byte
 		for _, source := range objects {
-			if source.Type == "CompositeObject" || source.Type == "CompositeGraphicUnit" {
-				return fmt.Errorf("composite groups require their original editing scope")
-			}
 			id := e.nextID()
 			object, err := e.prepareCopiedObject(id, source)
 			if err != nil {
@@ -95,6 +93,16 @@ func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []Gra
 				return err
 			}
 			node.parent, node.boundaryInCTM = IdentityMatrix, true
+			node.setStates(object.CompositeGraphicUnit.states)
+			if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
+				if err := node.convertCoordinates(IdentityMatrix, true); err != nil {
+					return err
+				}
+				node.defaults, err = e.editorDrawParam(e.copiedLayerStyle(source), make(map[string]bool))
+				if err != nil {
+					return err
+				}
+			}
 			if err := e.isolateCompositeStyle(node); err != nil {
 				return err
 			}
@@ -102,14 +110,16 @@ func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []Gra
 				return err
 			}
 			if !owner.boundaryInCTM {
-				if err := node.update(compositeBoundary(node.object, parent, false)); err != nil {
+				if err := node.convertCoordinates(parent, false); err != nil {
 					return err
 				}
 			}
-			if origin == nil && object.TextObject.layout != nil {
+			state := object.state
+			if object.TextObject.layout != nil && !reflect.DeepEqual(state.layout, object.TextObject.layout) {
 				y, _ := strconv.ParseFloat(object.TextObject.TextCode[0].Y, 64)
-				node.setState(editorCompositeState{layout: object.TextObject.layout, origin: [2]float64{0, y}})
+				state.layout, state.origin = object.TextObject.layout, [2]float64{0, y}
 			}
+			node.setState(state)
 			for id, state := range node.states {
 				owner.states[id] = state
 			}
@@ -142,10 +152,39 @@ func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []Gra
 	return result, nil
 }
 
-// isolateCompositeStyle 固定基本对象的绘制参数，避免目标容器改变颜色、虚线和线帽
+// isolateCompositeStyle 固定对象的绘制参数，避免目标容器改变颜色、虚线和线帽
 // 入参: node 页面坐标中的对象节点
 // 返回: error 错误信息
 func (e *Editor) isolateCompositeStyle(node *editorCompositeNode) error {
+	if node.object.Type == "CompositeObject" || node.object.Type == "CompositeGraphicUnit" {
+		own, err := e.editorDrawParam(node.object.CompositeGraphicUnit.DrawParam, make(map[string]bool))
+		if err != nil {
+			return err
+		}
+		if node.defaults != nil {
+			own = mergeDrawParam(*node.defaults, own)
+		}
+		for _, color := range []*FillColor{own.FillColor, (*FillColor)(own.StrokeColor)} {
+			if err := e.editorColor(color); err != nil {
+				return &EditError{Code: EditUnsupportedColor, Err: fmt.Errorf("composite inherited color cannot be isolated: %w", err)}
+			}
+		}
+		id, err := e.neutralDrawParam()
+		if err != nil {
+			return err
+		}
+		base, err := e.editorDrawParam(id, make(map[string]bool))
+		if err != nil {
+			return err
+		}
+		id, err = e.addEditorDrawParam(*mergeDrawParam(*base, own))
+		if err != nil {
+			return err
+		}
+		object := node.object
+		object.CompositeGraphicUnit.DrawParam = id
+		return node.update(object)
+	}
 	object, err := e.resolveEditorStyleDefaults(node.object, &DrawParam{})
 	if err != nil {
 		return err
@@ -168,31 +207,51 @@ func (e *Editor) isolateCompositeStyle(node *editorCompositeNode) error {
 // neutralDrawParam 注册可复用的完整默认绘制参数，不改变文档默认颜色空间
 // 返回: string 绘制参数标识, error 错误信息
 func (e *Editor) neutralDrawParam() (string, error) {
-	for _, resource := range e.resources {
-		if resource.draw != nil {
-			return resource.draw.ID, nil
-		}
-	}
-	if err := e.prepareSourceIDs(); err != nil {
-		return "", err
-	}
 	fill, err := e.RGBColor(color.NRGBA{A: 255})
 	if err != nil {
 		return "", err
 	}
 	zero := 0.0
-	draw := &DrawParam{ID: e.nextID(), LineWidth: defaultPathLineWidth, Cap: "Butt", Join: "Miter", MiterLimit: defaultMiterLimit, DashOffset: &zero, dashPatternSet: true, FillColor: fill, StrokeColor: (*StrokeColor)(fill)}
+	return e.addEditorDrawParam(DrawParam{LineWidth: defaultPathLineWidth, Cap: "Butt", Join: "Miter", MiterLimit: defaultMiterLimit, DashOffset: &zero, dashPatternSet: true, FillColor: fill, StrokeColor: (*StrokeColor)(fill)})
+}
+
+// addEditorDrawParam 注册完整有效绘制参数，相同外观复用资源
+// 入参: draw 不含继承关系的有效参数
+// 返回: string 资源标识, error 错误信息
+func (e *Editor) addEditorDrawParam(draw DrawParam) (string, error) {
+	draw.ID, draw.Relative, draw.ResourceID, draw.BaseLoc, draw.Link = "", "", "", "", ""
+	for _, resource := range e.resources {
+		if resource.draw != nil {
+			previous := *resource.draw
+			previous.ID = ""
+			if reflect.DeepEqual(previous, draw) {
+				return resource.draw.ID, nil
+			}
+		}
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return "", err
+	}
+	draw.ID = e.nextID()
 	data, err := encodeOFDXML(func(x *ofdXML) {
 		x.root("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "."}})
 		x.start("DrawParams", nil)
 		attrs := ofdAttrs{}
-		for _, pair := range [][2]string{{"ID", draw.ID}, {"LineWidth", ofdNumber(draw.LineWidth)}, {"Cap", draw.Cap}, {"Join", draw.Join}, {"MiterLimit", ofdNumber(draw.MiterLimit)}, {"DashOffset", "0"}} {
+		for _, pair := range [][2]string{{"ID", draw.ID}, {"LineWidth", ofdNumber(draw.LineWidth)}, {"Cap", draw.Cap}, {"Join", draw.Join}, {"MiterLimit", ofdNumber(draw.MiterLimit)}, {"Font", draw.Font}} {
 			attrs.add(pair[0], pair[1])
 		}
-		attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: ""})
+		attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: draw.DashPattern})
+		if draw.DashOffset != nil {
+			attrs.add("DashOffset", ofdNumber(*draw.DashOffset))
+		}
+		attrs.number("Size", draw.Size)
+		attrs.number("Weight", float64(draw.Weight))
+		if draw.Italic {
+			attrs.add("Italic", "true")
+		}
 		x.start("DrawParam", attrs)
-		x.color("FillColor", fill)
-		x.color("StrokeColor", fill)
+		x.color("FillColor", draw.FillColor)
+		x.color("StrokeColor", (*FillColor)(draw.StrokeColor))
 		x.end("DrawParam")
 		x.end("DrawParams")
 		x.end("Res")
@@ -200,10 +259,11 @@ func (e *Editor) neutralDrawParam() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resource := editorResource{name: e.resourceDirectory() + "/DrawParam_" + draw.ID + ".xml", data: data, draw: draw}
-	if fill.ColorSpace != "" {
-		resource.references = []string{fill.ColorSpace}
+	refs, err := editorResourceReferences(data)
+	if err != nil {
+		return "", err
 	}
+	resource := editorResource{name: e.resourceDirectory() + "/DrawParam_" + draw.ID + ".xml", data: data, draw: &draw, references: refs}
 	e.resources = append(e.resources, resource)
 	return draw.ID, nil
 }

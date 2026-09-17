@@ -313,6 +313,7 @@ func (e *Editor) CropImage(page int, id string, box Box) error {
 	if err := cropImageObject(image, box); err != nil {
 		return err
 	}
+	object.state.crop = nil
 	return e.UpdateObject(page, id, object)
 }
 
@@ -370,6 +371,7 @@ func (e *Editor) FitImage(page int, id, mode string) error {
 	if err := e.fitImage(&object.ImageObject, mode); err != nil {
 		return err
 	}
+	object.state.crop = nil
 	return e.UpdateObject(page, id, object)
 }
 

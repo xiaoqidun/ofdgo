@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"reflect"
+	"slices"
 )
 
 // matrix 获取对象局部坐标到页面的变换，兼容旧式内联边界
@@ -33,7 +35,7 @@ func (n *editorCompositeNode) matrix(transform bool) Matrix {
 			m = Matrix{a: box.W, d: box.H}
 		}
 	}
-	if n.boundaryInCTM {
+	if n.boundaryInCTM || n.object.Type == "CompositeObject" || n.object.Type == "CompositeGraphicUnit" {
 		return n.parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(m)
 	}
 	if !transform {
@@ -74,19 +76,29 @@ func (e *Editor) CropCompositeImage(page int, path ObjectPath, index int, box Bo
 	})
 }
 
-// appendCompositeClip 追加独立交集裁剪并记录会话还原起点，保留原始裁剪XML
-// 入参: node 对象节点, shape 裁剪路径, matrix 路径到裁剪坐标的变换, track 是否记录还原起点
+// appendCompositeClip 追加独立交集裁剪并记录可还原序号，保留原始裁剪XML
+// 入参: node 对象节点, shape 裁剪路径, matrix 路径到裁剪坐标的变换, track 是否记录还原序号
 // 返回: error 错误信息
 func appendCompositeClip(node *editorCompositeNode, shape PathObject, matrix Matrix, track bool) error {
+	clip := Clip{Area: []ClipArea{{CTM: matrix.String(), Path: []PathObject{shape}}}}
+	if clips := *editorObjectClips(&node.object); clips != nil && slices.ContainsFunc(clips.Clip, func(previous Clip) bool { return reflect.DeepEqual(previous, clip) }) {
+		return nil
+	}
 	state := node.states[editorObjectID(node.object)]
-	if track && state.crop == nil {
-		state.crop = &editorCompositeCrop{exists: node.node.child("Clips") != nil}
-		if clips := node.object.ImageObject.Clips; clips != nil {
-			state.crop.count = len(clips.Clip)
+	if track {
+		crop := editorCompositeCrop{exists: node.node.child("Clips") != nil}
+		if state.crop != nil {
+			crop = *state.crop
 		}
+		count := 0
+		if clips := node.object.ImageObject.Clips; clips != nil {
+			count = len(clips.Clip)
+		}
+		crop.indexes = append(slices.Clone(crop.indexes), count)
+		state.crop = &crop
 	}
 	data, err := encodeOFDXML(func(x *ofdXML) {
-		x.clips(&Clips{Clip: []Clip{{Area: []ClipArea{{CTM: matrix.String(), Path: []PathObject{shape}}}}}})
+		x.clips(&Clips{Clip: []Clip{clip}})
 	})
 	if err != nil {
 		return err
@@ -130,6 +142,51 @@ func (e *Editor) ResetCompositeImageCrop(page int, path ObjectPath, index int) e
 	})
 }
 
+// ResetImageCrop 还原从内部范围粘贴到页面的图片裁剪，保留原始裁剪与父范围限制
+// 仅处理当前会话记录的新增裁剪，无还原记录时不修改对象
+// 入参: page 页面索引, id 图片标识
+// 返回: error 错误信息
+func (e *Editor) ResetImageCrop(page int, id string) error {
+	object, err := e.Object(page, id)
+	if err != nil {
+		return err
+	}
+	if object.Type != "ImageObject" {
+		return fmt.Errorf("object %q is not an image", id)
+	}
+	if object.state.crop == nil {
+		return nil
+	}
+	origin := e.snapshotOrigin(object)
+	var data []byte
+	if origin == nil {
+		data, err = editorObjectXML(object)
+	} else {
+		data, err = editorXMLObject(origin.data, origin.node, origin.object, object)
+		if err == nil {
+			data, err = editorXMLStandalone(data, origin.node)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	node, err := newEditorCompositeNode(data)
+	if err != nil {
+		return err
+	}
+	node.setState(object.state)
+	if err := resetCompositeImageCrop(node); err != nil {
+		return err
+	}
+	node.object.state = node.states[id]
+	if origin == nil {
+		return e.UpdateObject(page, id, node.object)
+	}
+	node.node.parent = origin.node.parent
+	next := &editorObjectOrigin{page: origin.page, data: node.data, node: node.node, object: node.object}
+	return e.updateObjectOrigins(page, []GraphicObject{node.object}, true, map[string]*editorObjectOrigin{id: next})
+}
+
 // resetCompositeImageCrop 恢复图片原始裁剪节点，不还原后续变换和资源替换
 // 入参: node 图片节点
 // 返回: error 错误信息
@@ -143,13 +200,13 @@ func resetCompositeImageCrop(node *editorCompositeNode) error {
 	}
 	clips := node.node.child("Clips")
 	var patches []editorXMLPatch
-	if !state.crop.exists {
+	if !state.crop.exists && len(node.object.ImageObject.Clips.Clip) == len(state.crop.indexes) {
 		patches = append(patches, editorXMLPatch{clips.start, clips.end, nil})
 	} else {
 		count := 0
 		for _, child := range clips.children {
 			if child.name.Local == "Clip" {
-				if count >= state.crop.count {
+				if slices.Contains(state.crop.indexes, count) {
 					patches = append(patches, editorXMLPatch{child.start, child.end, nil})
 				}
 				count++

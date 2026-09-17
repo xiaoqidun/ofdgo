@@ -62,6 +62,7 @@ type editorSourcePage struct {
 // Update表示完整替换内容，ReplaceFont表示可显式替换文字字体，Transform表示保留文字定位的几何变换，Order仅限同一图层或末级页块
 // Arrange表示可准确度量对齐与旋转范围；Reflow表示可重排文字，LayoutKnown表示段落选项可恢复
 // FitImage表示可按原始图片比例适应或填充现有边界
+// ResetCrop表示有可单独还原的会话裁剪
 // Paint表示可独立修改纯色填充和描边，不要求重新排版文字
 // ReplaceImage表示可替换图片数据，CropImage表示可裁剪图片；内部裁剪与原裁剪取交集
 // MissingGlyphs提供缺字导致操作受限时的结构化诊断
@@ -72,6 +73,7 @@ type ObjectCapabilities struct {
 	ReplaceImage  bool
 	CropImage     bool
 	FitImage      bool
+	ResetCrop     bool
 	Reflow        bool
 	LayoutKnown   bool
 	Transform     bool
@@ -358,6 +360,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 	}
 	object := layer.Objects[index]
 	all := ObjectCapabilities{Update: true, Paint: object.Type == "TextObject" || object.Type == "PathObject", ReplaceFont: object.Type == "TextObject", Reflow: object.Type == "TextObject" && object.TextObject.ReadDirection == 0 && object.TextObject.CharDirection == 0, LayoutKnown: object.Type == "TextObject" && (e.objectOrigin(id) == nil || object.TextObject.layout != nil), Transform: true, Arrange: true, Copy: true, Delete: true, Order: true}
+	all.ResetCrop = object.Type == "ImageObject" && object.state.crop != nil
 	origin := e.objectOrigin(id)
 	if origin == nil {
 		all.ReplaceImage = object.Type == "ImageObject"
@@ -426,6 +429,7 @@ func editorPreservedObject(before, after GraphicObject) bool {
 		return false
 	}
 	before = cloneEditorData(before)
+	before.state = after.state
 	switch before.Type {
 	case "TextObject":
 		a, b := &before.TextObject, after.TextObject

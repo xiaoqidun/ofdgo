@@ -111,6 +111,7 @@ func (e *Editor) copyObjectOrigin(before, after GraphicObject, maximum *int) (Gr
 		return GraphicObject{}, nil, err
 	}
 	result.TextObject.layout = after.TextObject.layout
+	result.state = after.state
 	result.CompositeGraphicUnit.states = remapCompositeStates(after.CompositeGraphicUnit.states, ids)
 	root.parent = origin.node.parent
 	return result, &editorObjectOrigin{page: origin.page, data: data, node: root, object: result}, nil

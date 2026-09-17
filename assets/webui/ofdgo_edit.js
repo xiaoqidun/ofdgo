@@ -289,7 +289,7 @@ export class CanvasEditor {
 				svg.setAttribute("aria-hidden", "true");
 				svg.setAttribute("preserveAspectRatio", "none");
 				let contour;
-				if (object.type === "PathObject" && !object.scoped) {
+				if (object.type === "PathObject" && (!object.scoped || object.shape)) {
 					contour = document.createElementNS("http://www.w3.org/2000/svg", object.shape === "line" ? "line" : object.shape === "ellipse" ? "ellipse" : object.shape === "rectangle" ? "rect" : "path");
 					if (!object.shape) contour.setAttribute("d", object.outline);
 					svg.append(contour);
@@ -1025,6 +1025,7 @@ export class CanvasEditor {
 		this.input = { input, item, face, fontChoice: item.fontChoice };
 		const editing = this.input;
 		item.artwork?.classList.add("edit-text-source");
+		item.node.classList.add("edit-text-source");
 		item.surface.append(input);
 		input.addEventListener("input", () => this.options.onTextChange());
 		input.addEventListener("compositionstart", () => { editing.composing = true; });
@@ -1143,6 +1144,7 @@ export class CanvasEditor {
 		if (editing) {
 			editing.input.remove();
 			editing.item.artwork?.classList.remove("edit-text-source");
+			editing.item.node.classList.remove("edit-text-source");
 			document.fonts.delete(editing.face);
 			if (editing.item.draft && this.selected === editing.item) this.select(null);
 			this.options.onTextChange();

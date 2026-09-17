@@ -211,11 +211,37 @@ func sameShapePath(a, b []string) bool {
 // 入参: box 新几何范围，直线使用起点和有符号的端点位移
 // 返回: PathObject 调整后的对象, error 错误信息
 func (p PathObject) Reshape(box Box) (PathObject, error) {
-	kind, previous := p.Shape()
+	kind, _ := p.Shape()
+	return p.reshape(kind, box)
+}
+
+// ReshapeLine 调整直线端点及箭头类型，保留绘制样式、变换及裁剪
+// 入参: kind 为ShapeLine、ShapeArrow或ShapeDoubleArrow, box 起点及有符号端点位移
+// 返回: PathObject 调整后的直线, error 错误信息
+func (p PathObject) ReshapeLine(kind ShapeKind, box Box) (PathObject, error) {
+	before, _ := p.Shape()
+	if !lineShapeKind(before) || !lineShapeKind(kind) {
+		return PathObject{}, fmt.Errorf("path is not a supported line")
+	}
+	return p.reshape(kind, box)
+}
+
+// lineShapeKind 判断基本图形是否使用直线端点
+// 入参: kind 图形类型
+// 返回: bool 是否为直线或箭头
+func lineShapeKind(kind ShapeKind) bool {
+	return kind == ShapeLine || kind == ShapeArrow || kind == ShapeDoubleArrow
+}
+
+// reshape 在原坐标变换下重建已识别基本图形的几何，不改写样式
+// 入参: kind 目标类型, box 新几何范围
+// 返回: PathObject 调整后的对象, error 错误信息
+func (p PathObject) reshape(kind ShapeKind, box Box) (PathObject, error) {
+	before, previous := p.Shape()
 	if kind == "" {
 		return PathObject{}, fmt.Errorf("path is not a supported basic shape")
 	}
-	if box == previous {
+	if box == previous && kind == before {
 		return p, nil
 	}
 	if !finite(box.X) || !finite(box.Y) || !finite(box.X+box.W) || !finite(box.Y+box.H) {

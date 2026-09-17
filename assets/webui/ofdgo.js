@@ -379,7 +379,7 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onErase: (items, box, points) => {
 		const blocked = items.find(item => !canEditObject(item, box ? "arrange" : "delete"));
 		if (blocked) { setStatus(objectEditReason(blocked) || "对象暂不可擦除"); return false; }
-		const item = { index: items[0].index, id: items.map(item => item.id) };
+		const item = { index: items[0].index, id: items.map(item => item.id), scoped: items.every(item => item.scoped) };
 		if (points) return changeDocument("ofdgoEraseObjectsPath", item, points);
 		return box ? changeDocument("ofdgoEraseObjects", item, box.x, box.y, box.width, box.height)
 			: changeDocument("ofdgoDeleteObjects", item);
@@ -570,6 +570,7 @@ el.resetCropButton.addEventListener("click", () => {
 	}
 	const item = canvasEditor.selected;
 	if (item?.scoped) return changeDocument("ofdgoResetCompositeCrop", item);
+	if (canEditObject(item, "resetCrop")) return changeDocument("ofdgoResetImageCrop", item);
 	if (item?.imageBounds) return canvasEditor.options.onCrop(item, item.imageBounds);
 });
 editorClick(el.undoButton, () => changeDocument("ofdgoUndo"));
@@ -661,6 +662,12 @@ el.arrowTool.addEventListener("change", async () => {
 	const tool = el.arrowTool.value;
 	el.arrowTool.value = "";
 	if (await canvasEditor.commitText() && await canvasEditor.commitCrop()) {
+		const item = canvasEditor.selected;
+		if (lineShape(item?.shape)) {
+			const box = item.geometry;
+			await changeDocument("ofdgoReshapeLine", item, box.x, box.y, box.width, box.height, tool);
+			return;
+		}
 		setPan(false);
 		state.selectObjects = true;
 		canvasEditor.setTool(tool);
@@ -1828,7 +1835,7 @@ function updateDrawingControls() {
 		button.disabled = disabled || !pageCan("insert");
 		button.setAttribute("aria-pressed", String(tool === name));
 	}
-	el.eraseButton.disabled = el.eraseMode.disabled = disabled || Boolean(state.composite);
+	el.eraseButton.disabled = el.eraseMode.disabled = disabled;
 	el.eraseButton.setAttribute("aria-pressed", String(tool.startsWith("erase-")));
 	el.selectObjectButton.setAttribute("aria-pressed", String(canvasEditor.enabled && !tool));
 	const styleDisabled = disabled || (canvasEditor.selected ? !path || !canEditObject(path, "paint") : !pageCan("insert"));
@@ -1860,6 +1867,7 @@ async function changeDocument(name, item, ...args) {
 		const operation = { ofdgoTransformObject: "transform", ofdgoTransformObjects: "transform", ofdgoRotateObjects: "rotate", ofdgoFlipObjects: "flip", ofdgoResizeObjects: "resize",
 			ofdgoAlignObject: "align", ofdgoAlignObjects: "align", ofdgoDistributeObjects: "distribute", ofdgoStyleObjects: "style", ofdgoUpdatePathStyle: "paint", ofdgoCompositeTextColor: "textColor",
 			ofdgoUpdateText: "text", ofdgoStyleText: "textStyle", ofdgoCropImage: "crop", ofdgoLayoutText: "layout", ofdgoFitImage: "fit", ofdgoResetCompositeCrop: "resetCrop",
+			ofdgoReshapeObject: "reshape", ofdgoReshapeLine: "line", ofdgoEraseObjects: "erase", ofdgoEraseObjectsPath: "erasePath",
 			ofdgoDeleteObject: "delete", ofdgoDeleteObjects: "delete", ofdgoCopyObjects: "copy", ofdgoOrderObjects: "order" }[name];
 		const members = item?.items || (item ? [item] : []);
 		const scoped = scope && members.length && members.every(member => member.scoped);
@@ -1876,7 +1884,7 @@ async function changeDocument(name, item, ...args) {
 			return true;
 		}
 		const view = name === "ofdgoUndo" ? state.editorViews.get(revision) : name === "ofdgoRedo" ? state.editorViews.get(doc.revision) : null;
-		const reindex = !!scope && (scoped && ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoCopyObjects", "ofdgoOrderObjects"].includes(name)
+		const reindex = !!scope && (scoped && ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoCopyObjects", "ofdgoOrderObjects", "ofdgoEraseObjects", "ofdgoEraseObjectsPath"].includes(name)
 			|| inserting || name === "ofdgoPasteObjects" && !!args[4]);
 		const reindexed = restoring ? view?.reindex && view.before : reindex && before;
 		const clipboard = state.objectClipboard;
@@ -5616,7 +5624,7 @@ function updateObjectControls(item, reset = false) {
 	el.cropImageButton.setAttribute("aria-pressed", String(cropping));
 	el.resetCropButton.textContent = cropping ? "取消" : "还原";
 	el.resetCropButton.setAttribute("aria-label", cropping ? "取消裁剪" : "还原图片");
-	el.resetCropButton.disabled = el.cropImageButton.disabled || !cropping && (item.scoped ? !item.cropped : !item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
+	el.resetCropButton.disabled = canEditObject(item, "resetCrop") ? disabled : el.cropImageButton.disabled || !cropping && (item.scoped ? !item.cropped : !item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
 	el.objectDistribute.disabled = el.objectAlign.disabled || !item.items || item.items.length < 3;
 	el.editObjectButton.disabled = disabled || Boolean(item.items) || !canEditObject(item, "enter") && (item.type === "PathObject"
 		|| !canEditObject(item, item.type === "TextObject" ? "reflow" : item.type === "ImageObject" ? "replaceImage" : "update"));

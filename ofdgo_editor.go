@@ -858,13 +858,13 @@ func (e *Editor) validateObjectClips(clips *Clips) error {
 func cloneEditorObject(object GraphicObject) (GraphicObject, error) {
 	switch object.Type {
 	case "TextObject":
-		return GraphicObject{Type: object.Type, TextObject: cloneEditorData(object.TextObject)}, nil
+		return GraphicObject{Type: object.Type, TextObject: cloneEditorData(object.TextObject), state: object.state}, nil
 	case "PathObject":
-		return GraphicObject{Type: object.Type, PathObject: cloneEditorData(object.PathObject)}, nil
+		return GraphicObject{Type: object.Type, PathObject: cloneEditorData(object.PathObject), state: object.state}, nil
 	case "ImageObject":
-		return GraphicObject{Type: object.Type, ImageObject: cloneEditorData(object.ImageObject)}, nil
+		return GraphicObject{Type: object.Type, ImageObject: cloneEditorData(object.ImageObject), state: object.state}, nil
 	case "CompositeObject", "CompositeGraphicUnit":
-		return GraphicObject{Type: object.Type, CompositeGraphicUnit: cloneEditorData(object.CompositeGraphicUnit)}, nil
+		return GraphicObject{Type: object.Type, CompositeGraphicUnit: cloneEditorData(object.CompositeGraphicUnit), state: object.state}, nil
 	}
 	return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
 }

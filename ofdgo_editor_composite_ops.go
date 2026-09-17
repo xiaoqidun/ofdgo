@@ -183,6 +183,71 @@ func (n *editorCompositeNode) update(object GraphicObject) error {
 	return nil
 }
 
+// Shape 获取内部直线的页面端点，其他成员返回空类型
+// 返回: ShapeKind 直线或箭头类型, Box 起点及有符号端点位移
+func (m CompositeMember) Shape() (ShapeKind, Box) {
+	if m.Object.Type != "PathObject" || !m.Capabilities.Transform {
+		return "", Box{}
+	}
+	kind, box := m.Object.PathObject.Shape()
+	if !lineShapeKind(kind) {
+		return "", Box{}
+	}
+	return kind, transformLineBox(box, m.lineParent())
+}
+
+// lineParent 获取直线所在坐标到页面的变换，兼容旧式内联边界
+// 返回: Matrix 直线父坐标变换
+func (m CompositeMember) lineParent() Matrix {
+	p := m.Object.PathObject
+	box, _ := ParseBox(p.Boundary)
+	inverse, _ := TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(p.CTM)).Invert()
+	return m.Matrix.Multiply(inverse)
+}
+
+// transformLineBox 变换起点及有符号端点位移
+// 入参: box 直线端点, matrix 坐标变换
+// 返回: Box 变换后的端点
+func transformLineBox(box Box, matrix Matrix) Box {
+	x, y := matrix.Transform(box.X, box.Y)
+	w, h := matrixVector(matrix, box.W, box.H)
+	return Box{X: x, Y: y, W: w, H: h}
+}
+
+// ReshapeCompositeLine 修改内部直线的页面端点及箭头，保留原始属性和父变换
+// 入参: page 页面索引, path 父路径, index 成员序号, kind 直线类型, box 页面端点
+// 返回: error 错误信息
+func (e *Editor) ReshapeCompositeLine(page int, path ObjectPath, index int, kind ShapeKind, box Box) error {
+	return e.editCompositeObjects(page, path, []int{index}, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
+		before, geometry := members[0].Shape()
+		if before == "" {
+			return fmt.Errorf("composite member is not a supported line")
+		}
+		if kind == "" {
+			kind = before
+		}
+		if kind == before && geometry == box {
+			return nil
+		}
+		node := nodes[0]
+		inverse, _ := node.parent.Invert()
+		object := cloneEditorData(node.object)
+		if !node.boundaryInCTM {
+			object = compositeBoundary(object, node.parent, true)
+		}
+		var err error
+		object.PathObject, err = object.PathObject.ReshapeLine(kind, transformLineBox(box, inverse))
+		if err != nil {
+			return err
+		}
+		if !node.boundaryInCTM {
+			object = compositeBoundary(object, node.parent, false)
+		}
+		object.PathObject.Clips = node.object.PathObject.Clips
+		return node.update(object)
+	})
+}
+
 // collectCompositeIDs 为已校验副本中的标准标识分配新值，拒绝重复标识
 // 入参: node 原节点, ids 原标识与新标识
 // 返回: error 错误信息

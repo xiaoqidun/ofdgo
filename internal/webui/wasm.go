@@ -136,6 +136,8 @@ func RunWASM() {
 	registerCallback("ofdgoAlignObject", alignObject)
 	registerCallback("ofdgoTransformObject", transformObject)
 	registerCallback("ofdgoReshapeObject", reshapeObject)
+	registerCallback("ofdgoReshapeLine", reshapeLine)
+	registerCallback("ofdgoResetImageCrop", resetImageCrop)
 	registerCallback("ofdgoLayoutText", layoutText)
 	registerCallback("ofdgoTransformObjects", transformObjects)
 	registerCallback("ofdgoCompositeObjects", compositeObjects)
@@ -833,7 +835,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 // 返回: map[string]any 前端能力
 func editorCapabilities(capability ofdgo.ObjectCapabilities, kind string) map[string]any {
 	result := map[string]any{"update": capability.Update, "paint": capability.Paint, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode),
-		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "fitImage": capability.FitImage, "enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
+		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "fitImage": capability.FitImage, "resetCrop": capability.ResetCrop, "enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
 	if missing := capability.MissingGlyphs; missing != nil {
 		result["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
 	}
@@ -923,6 +925,9 @@ func compositeObjects(args []js.Value) (any, error) {
 		item := map[string]any{"id": fmt.Sprintf("%s/%d", key, i), "type": member.Object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": i, "position": member.Position.Index, "count": member.Position.Count, "container": key + ":" + member.Position.Container, "scoped": true, "contours": member.Contours,
 			"capabilities": editorCapabilities(member.Capabilities, member.Object.Type)}
 		editorAppearance(item, member.Object, member.Capabilities.Paint, member.StrokeScale)
+		if kind, geometry := member.Shape(); kind != "" {
+			item["shape"], item["geometry"] = string(kind), editorBox(geometry)
+		}
 		if member.Object.Type == "TextObject" {
 			object := member.Object.TextObject
 			value, layout := object.TextLayout()
@@ -978,6 +983,19 @@ func changeCompositeObjects(args []js.Value) (any, error) {
 		page := args[0].Int()
 		operation := args[3].String()
 		switch operation {
+		case "reshape", "line":
+			if len(indexes) != 1 {
+				return fmt.Errorf("line editing requires one member")
+			}
+			kind := ofdgo.ShapeKind("")
+			if operation == "line" {
+				kind = ofdgo.ShapeKind(args[8].String())
+			}
+			return currentEditor.ReshapeCompositeLine(page, path, indexes[0], kind, ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()})
+		case "erase":
+			return currentEditor.EraseCompositeObjects(page, path, indexes, ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()})
+		case "erasePath":
+			return currentEditor.EraseCompositeObjectsPath(page, path, indexes, pointsFromJS(args[4]))
 		case "delete":
 			return currentEditor.DeleteCompositeObjects(page, path, indexes)
 		case "copy":
@@ -1263,6 +1281,27 @@ func reshapeObject(args []js.Value) (any, error) {
 		return editorSummary(), nil
 	}
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// reshapeLine 修改直线端点与箭头类型，复用库层样式保留逻辑
+// 入参: args 页码、对象标识、页面端点及箭头类型
+// 返回: any 文档信息, error 错误信息
+func reshapeLine(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		page, id := args[0].Int(), args[1].String()
+		object, err := currentEditor.Object(page, id)
+		if err != nil {
+			return err
+		}
+		if object.Type != "PathObject" {
+			return fmt.Errorf("object is not a path")
+		}
+		object.PathObject, err = object.PathObject.ReshapeLine(ofdgo.ShapeKind(args[6].String()), ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
+		if err != nil {
+			return err
+		}
+		return currentEditor.UpdateObject(page, id, object)
+	})
 }
 
 // copyObjects 复制选区并返回新对象标识，复用字体和图片资源
@@ -2164,6 +2203,13 @@ func cropImage(args []js.Value) (any, error) {
 	})
 }
 
+// resetImageCrop 还原跨范围复制图片的会话裁剪，不移除原始及父级裁剪
+// 入参: args 页面索引及对象标识
+// 返回: any 文档信息, error 错误信息
+func resetImageCrop(args []js.Value) (any, error) {
+	return changeObjects(func() error { return currentEditor.ResetImageCrop(args[0].Int(), args[1].String()) })
+}
+
 // fitImage 按原始比例适应或填充图片框
 // 入参: args 页面索引、对象标识和适应方式
 // 返回: any 文档信息, error 错误信息
@@ -2249,13 +2295,20 @@ func deleteObjects(args []js.Value) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func eraseObjectsPath(args []js.Value) (any, error) {
 	return changeObjects(func() error {
-		points := make([]ofdgo.Point, args[2].Length())
-		for i := range points {
-			point := args[2].Index(i)
-			points[i] = ofdgo.Point{X: point.Get("x").Float(), Y: point.Get("y").Float()}
-		}
-		return currentEditor.EraseObjectsPath(args[0].Int(), stringsFromJS(args[1]), points)
+		return currentEditor.EraseObjectsPath(args[0].Int(), stringsFromJS(args[1]), pointsFromJS(args[2]))
 	})
+}
+
+// pointsFromJS 读取前端页面坐标点数组
+// 入参: value 坐标点数组
+// 返回: []ofdgo.Point 页面毫米坐标
+func pointsFromJS(value js.Value) []ofdgo.Point {
+	points := make([]ofdgo.Point, value.Length())
+	for i := range points {
+		point := value.Index(i)
+		points[i] = ofdgo.Point{X: point.Get("x").Float(), Y: point.Get("y").Float()}
+	}
+	return points
 }
 
 // eraseObjects 按页面矩形范围擦除对象，保留局部裁剪之外的内容
