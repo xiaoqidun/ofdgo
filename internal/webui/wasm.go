@@ -983,15 +983,20 @@ func changeCompositeObjects(args []js.Value) (any, error) {
 		page := args[0].Int()
 		operation := args[3].String()
 		switch operation {
+		case "pasteStyle":
+			if copiedStyle == nil {
+				return fmt.Errorf("style clipboard is empty")
+			}
+			return currentEditor.CopyCompositeStyle(page, path, indexes, *copiedStyle)
 		case "reshape", "line":
 			if len(indexes) != 1 {
-				return fmt.Errorf("line editing requires one member")
+				return fmt.Errorf("shape editing requires one member")
 			}
-			kind := ofdgo.ShapeKind("")
+			box := ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()}
 			if operation == "line" {
-				kind = ofdgo.ShapeKind(args[8].String())
+				return currentEditor.ReshapeCompositeLine(page, path, indexes[0], ofdgo.ShapeKind(args[8].String()), box)
 			}
-			return currentEditor.ReshapeCompositeLine(page, path, indexes[0], kind, ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()})
+			return currentEditor.ReshapeCompositeObject(page, path, indexes[0], box)
 		case "erase":
 			return currentEditor.EraseCompositeObjects(page, path, indexes, ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()})
 		case "erasePath":
@@ -1566,11 +1571,32 @@ func moveOutline(args []js.Value) (any, error) {
 }
 
 // captureStyle 保存单个对象样式来源，不改写文档
-// 入参: args 页面索引和对象标识
+// 入参: args 页面索引、对象标识及可选内部范围
 // 返回: any 空结果, error 错误信息
 func captureStyle(args []js.Value) (any, error) {
 	if currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
+	}
+	if len(args) > 2 && args[2].String() != "" {
+		key := args[2].String()
+		path, err := compositePath(key)
+		if err != nil {
+			return nil, err
+		}
+		indexes, err := compositeIndexes(key, []string{args[1].String()})
+		if err != nil {
+			return nil, err
+		}
+		members, err := currentEditor.CompositeObjects(args[0].Int(), path)
+		if err != nil {
+			return nil, err
+		}
+		if indexes[0] >= len(members) {
+			return nil, fmt.Errorf("style source is unavailable")
+		}
+		object := members[indexes[0]].Style()
+		copiedStyle = &object
+		return nil, nil
 	}
 	object, err := currentEditor.Object(args[0].Int(), args[1].String())
 	if err != nil {

@@ -87,6 +87,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 		}
 		copy.setStates(source.states)
 		copy.defaults = source.defaults
+		copy.drawParams = source.drawParams
 		object, err := e.compositeMemberStyle(source)
 		if err != nil {
 			return err
@@ -251,7 +252,7 @@ func editorClipPath(path *canvas.Path) PathObject {
 // 入参: page 页面索引, path 父复合路径, indexes 同一容器的成员序号
 // 返回: *CompositeSelection 独立快照, error 错误信息
 func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []int) (*CompositeSelection, error) {
-	reader, renderer, root, nodes, err := e.compositeScope(page, path)
+	reader, _, root, nodes, err := e.compositeScope(page, path)
 	if err != nil {
 		return nil, err
 	}
@@ -261,15 +262,17 @@ func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []in
 	}
 	indexes = slices.Clone(indexes)
 	slices.Sort(indexes)
-	members := e.measureCompositeMembers(renderer, nodes)
 	var owner *editorCompositeNode
 	var container *editorXML
 	selection := &CompositeSelection{editor: e, page: e.pages[page].ID, path: ObjectPath{ID: path.ID, Children: slices.Clone(path.Children)}, source: e.objectOrigin(path.ID).page}
 	for j, i := range indexes {
-		if i < 0 || i >= len(nodes) || j > 0 && indexes[j-1] == i || !members[i].Capabilities.Copy {
+		if i < 0 || i >= len(nodes) || j > 0 && indexes[j-1] == i {
 			return nil, fmt.Errorf("invalid composite copy selection")
 		}
 		node := nodes[i]
+		if !node.transformable() || !editorXMLCopyable(node.node) {
+			return nil, fmt.Errorf("composite member cannot be copied")
+		}
 		if j == 0 {
 			owner, container = node.owner, node.span.parent
 		} else if node.span.parent != container {

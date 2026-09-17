@@ -183,26 +183,36 @@ func (n *editorCompositeNode) update(object GraphicObject) error {
 	return nil
 }
 
-// Shape 获取内部直线的页面端点，其他成员返回空类型
-// 返回: ShapeKind 直线或箭头类型, Box 起点及有符号端点位移
+// Shape 获取内部基本路径的页面几何，矩形和椭圆要求轴对齐，其他成员返回空类型
+// 返回: ShapeKind 图形类型, Box 几何范围，直线使用起点及有符号端点位移
 func (m CompositeMember) Shape() (ShapeKind, Box) {
 	if m.Object.Type != "PathObject" || !m.Capabilities.Transform {
 		return "", Box{}
 	}
 	kind, box := m.Object.PathObject.Shape()
-	if !lineShapeKind(kind) {
+	if kind == "" {
 		return "", Box{}
 	}
-	return kind, transformLineBox(box, m.lineParent())
+	parent, ok := m.shapeParent()
+	if !ok {
+		return "", Box{}
+	}
+	if lineShapeKind(kind) {
+		return kind, transformLineBox(box, parent)
+	}
+	if !axisAlignedMatrix(parent) {
+		return "", Box{}
+	}
+	return kind, parent.TransformBox(box)
 }
 
-// lineParent 获取直线所在坐标到页面的变换，兼容旧式内联边界
-// 返回: Matrix 直线父坐标变换
-func (m CompositeMember) lineParent() Matrix {
+// shapeParent 获取路径所在坐标到页面的变换，兼容旧式内联边界
+// 返回: Matrix 路径父坐标变换, bool 是否可逆
+func (m CompositeMember) shapeParent() (Matrix, bool) {
 	p := m.Object.PathObject
 	box, _ := ParseBox(p.Boundary)
-	inverse, _ := TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(p.CTM)).Invert()
-	return m.Matrix.Multiply(inverse)
+	inverse, ok := TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(p.CTM)).Invert()
+	return m.Matrix.Multiply(inverse), ok
 }
 
 // transformLineBox 变换起点及有符号端点位移
@@ -218,10 +228,27 @@ func transformLineBox(box Box, matrix Matrix) Box {
 // 入参: page 页面索引, path 父路径, index 成员序号, kind 直线类型, box 页面端点
 // 返回: error 错误信息
 func (e *Editor) ReshapeCompositeLine(page int, path ObjectPath, index int, kind ShapeKind, box Box) error {
+	if kind != "" && !lineShapeKind(kind) {
+		return fmt.Errorf("unsupported line kind %q", kind)
+	}
+	return e.reshapeCompositeObject(page, path, index, kind, box, true)
+}
+
+// ReshapeCompositeObject 调整内部基本路径的页面几何，保留绘制样式、变换与裁剪
+// 入参: page 页面索引, path 父路径, index 成员序号, box 页面范围，直线使用有符号端点位移
+// 返回: error 错误信息
+func (e *Editor) ReshapeCompositeObject(page int, path ObjectPath, index int, box Box) error {
+	return e.reshapeCompositeObject(page, path, index, "", box, false)
+}
+
+// reshapeCompositeObject 按页面几何修改单个内部路径，可选修改箭头类型
+// 入参: page 页面索引, path 父路径, index 成员序号, kind 目标类型，空值保持原类型, box 页面几何, lineOnly 是否仅接受直线
+// 返回: error 错误信息
+func (e *Editor) reshapeCompositeObject(page int, path ObjectPath, index int, kind ShapeKind, box Box, lineOnly bool) error {
 	return e.editCompositeObjects(page, path, []int{index}, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
 		before, geometry := members[0].Shape()
-		if before == "" {
-			return fmt.Errorf("composite member is not a supported line")
+		if before == "" || lineOnly && !lineShapeKind(before) {
+			return fmt.Errorf("composite member is not a supported shape")
 		}
 		if kind == "" {
 			kind = before
@@ -236,7 +263,14 @@ func (e *Editor) ReshapeCompositeLine(page int, path ObjectPath, index int, kind
 			object = compositeBoundary(object, node.parent, true)
 		}
 		var err error
-		object.PathObject, err = object.PathObject.ReshapeLine(kind, transformLineBox(box, inverse))
+		if lineShapeKind(kind) {
+			object.PathObject, err = object.PathObject.ReshapeLine(kind, transformLineBox(box, inverse))
+		} else {
+			if _, err := creationBox(editorBoxString(box)); err != nil {
+				return err
+			}
+			object.PathObject, err = object.PathObject.Reshape(inverse.TransformBox(box))
+		}
 		if err != nil {
 			return err
 		}

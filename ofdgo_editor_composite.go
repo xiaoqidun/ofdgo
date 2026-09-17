@@ -464,9 +464,7 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		if node.visible {
 			renderer.renderObject(canvas.NewContext(bounds), &object, 0, node.defaults, &node.parent, node.boundaryInCTM, node.clip)
 		}
-		_, invertible := node.parent.Invert()
-		borderActions := node.object.Type == "ImageObject" && node.object.ImageObject.Border != nil && len(node.object.ImageObject.Actions) != 0
-		transform := invertible && editorXMLTransformable(node.node) && validateEditorGeometry(node.object) == nil && !borderActions
+		transform := node.transformable()
 		capability := ObjectCapabilities{Transform: transform, Arrange: transform && bounds.box.W > 0 && bounds.box.H > 0,
 			Delete: true, Copy: transform && editorXMLCopyable(node.node), Order: orderable[node.span.parent], ReplaceImage: node.object.Type == "ImageObject"}
 		style, err := e.compositeMemberStyle(node)
@@ -505,6 +503,14 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		positions[node.span.parent] = position
 	}
 	return result
+}
+
+// transformable 校验内部对象能否保留原文进行几何操作，不执行绘制测量
+// 返回: bool 是否支持
+func (n *editorCompositeNode) transformable() bool {
+	_, invertible := n.parent.Invert()
+	borderActions := n.object.Type == "ImageObject" && n.object.ImageObject.Border != nil && len(n.object.ImageObject.Actions) != 0
+	return invertible && editorXMLTransformable(n.node) && validateEditorGeometry(n.object) == nil && !borderActions
 }
 
 // compositeMemberStyle 解析成员的继承样式，缺失或循环参数不开放改色

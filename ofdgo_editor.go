@@ -77,6 +77,7 @@ type editorResource struct {
 	subset     *editorFontSubset
 	states     map[string]editorCompositeState
 	draw       *DrawParam
+	drawSource string
 }
 
 // definition 获取独立定义资源的标识

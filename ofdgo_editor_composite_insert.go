@@ -98,10 +98,7 @@ func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []Gra
 				if err := node.convertCoordinates(IdentityMatrix, true); err != nil {
 					return err
 				}
-				node.defaults, err = e.editorDrawParam(e.copiedLayerStyle(source), make(map[string]bool))
-				if err != nil {
-					return err
-				}
+				node.drawParams = []string{e.copiedLayerStyle(source)}
 			}
 			if err := e.isolateCompositeStyle(node); err != nil {
 				return err
@@ -157,27 +154,17 @@ func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []Gra
 // 返回: error 错误信息
 func (e *Editor) isolateCompositeStyle(node *editorCompositeNode) error {
 	if node.object.Type == "CompositeObject" || node.object.Type == "CompositeGraphicUnit" {
-		own, err := e.editorDrawParam(node.object.CompositeGraphicUnit.DrawParam, make(map[string]bool))
-		if err != nil {
-			return err
-		}
-		if node.defaults != nil {
-			own = mergeDrawParam(*node.defaults, own)
-		}
-		for _, color := range []*FillColor{own.FillColor, (*FillColor)(own.StrokeColor)} {
-			if err := e.editorColor(color); err != nil {
-				return &EditError{Code: EditUnsupportedColor, Err: fmt.Errorf("composite inherited color cannot be isolated: %w", err)}
-			}
-		}
 		id, err := e.neutralDrawParam()
 		if err != nil {
 			return err
 		}
-		base, err := e.editorDrawParam(id, make(map[string]bool))
-		if err != nil {
-			return err
+		for _, source := range node.drawParams {
+			id, err = e.copyDrawParam(source, id, make(map[string]bool))
+			if err != nil {
+				return err
+			}
 		}
-		id, err = e.addEditorDrawParam(*mergeDrawParam(*base, own))
+		id, err = e.copyDrawParam(node.object.CompositeGraphicUnit.DrawParam, id, make(map[string]bool))
 		if err != nil {
 			return err
 		}

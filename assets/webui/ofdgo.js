@@ -678,7 +678,7 @@ el.copyStyleButton.addEventListener("click", async () => {
 	const item = canvasEditor.selected, seq = state.openSeq;
 	setBusy(true);
 	try {
-		await callWASM("ofdgoCaptureStyle", item.index, item.id);
+		await callWASM("ofdgoCaptureStyle", item.index, item.id, state.composite?.key || "");
 		if (seq === state.openSeq) { state.styleClipboard = item.type; el.objectStylePanel.close(); }
 	} catch (err) { if (seq === state.openSeq) el.objectStyleStatus.textContent = err.message; }
 	finally { if (seq === state.openSeq) setBusy(false); }
@@ -1006,11 +1006,18 @@ function openObjectBounds() {
 	el.objectBoundsPanel.showModal();
 }
 
+function canCopyStyle(item) {
+	if (!item?.scoped) return canEditObject(item, "update");
+	if (item.type === "TextObject") return canEditObject(item, "replaceFont") && canEditObject(item, "paint");
+	if (item.type === "PathObject") return canEditObject(item, "transform") && canEditObject(item, "paint");
+	return item.type === "ImageObject" && canEditObject(item, "transform");
+}
+
 function openObjectStyle() {
 	const items = canvasEditor.items();
 	if (!items.length) return;
-	el.copyStyleButton.disabled = items.length !== 1 || !canEditObject(items[0], "update");
-	el.pasteStyleButton.disabled = !state.styleClipboard || !items.every(item => item.type === state.styleClipboard && canEditObject(item, "update"));
+	el.copyStyleButton.disabled = items.length !== 1 || !canCopyStyle(items[0]);
+	el.pasteStyleButton.disabled = !state.styleClipboard || !items.every(item => item.type === state.styleClipboard && canCopyStyle(item));
 	const shared = (key, fallback) => items.every(item => (item[key] ?? fallback) === (items[0][key] ?? fallback)) ? items[0][key] ?? fallback : null;
 	const alpha = shared("alpha", 255), dash = shared("dashPattern", "");
 	el.objectOpacity.value = alpha === null ? "" : String(Math.round((1 - alpha / 255) * 10000) / 100);
@@ -1867,7 +1874,7 @@ async function changeDocument(name, item, ...args) {
 		const operation = { ofdgoTransformObject: "transform", ofdgoTransformObjects: "transform", ofdgoRotateObjects: "rotate", ofdgoFlipObjects: "flip", ofdgoResizeObjects: "resize",
 			ofdgoAlignObject: "align", ofdgoAlignObjects: "align", ofdgoDistributeObjects: "distribute", ofdgoStyleObjects: "style", ofdgoUpdatePathStyle: "paint", ofdgoCompositeTextColor: "textColor",
 			ofdgoUpdateText: "text", ofdgoStyleText: "textStyle", ofdgoCropImage: "crop", ofdgoLayoutText: "layout", ofdgoFitImage: "fit", ofdgoResetCompositeCrop: "resetCrop",
-			ofdgoReshapeObject: "reshape", ofdgoReshapeLine: "line", ofdgoEraseObjects: "erase", ofdgoEraseObjectsPath: "erasePath",
+			ofdgoReshapeObject: "reshape", ofdgoReshapeLine: "line", ofdgoEraseObjects: "erase", ofdgoEraseObjectsPath: "erasePath", ofdgoPasteStyle: "pasteStyle",
 			ofdgoDeleteObject: "delete", ofdgoDeleteObjects: "delete", ofdgoCopyObjects: "copy", ofdgoOrderObjects: "order" }[name];
 		const members = item?.items || (item ? [item] : []);
 		const scoped = scope && members.length && members.every(member => member.scoped);

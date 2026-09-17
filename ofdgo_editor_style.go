@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	"image/color"
 	"math"
 	"strings"
 )
@@ -269,28 +270,44 @@ func editorStyleColor(color, before *FillColor) *FillColor {
 // 路径按页面中的实际线宽和虚线长度复制，保持目标变换
 // 入参: page 目标页面索引, ids 目标对象标识, source 样式来源快照
 // 返回: error 错误信息
-func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) error {
-	var alpha *int
-	switch source.Type {
-	case "TextObject":
-		alpha = source.TextObject.Alpha
-	case "PathObject":
-		alpha = source.PathObject.Alpha
-	case "ImageObject":
-		alpha = source.ImageObject.Alpha
-	default:
-		return fmt.Errorf("unsupported style source %q", source.Type)
-	}
-	if alpha != nil && (*alpha < 0 || *alpha > 255) {
-		return fmt.Errorf("alpha must be between 0 and 255")
+func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err error) {
+	if err := e.validateCopyStyle(source); err != nil {
+		return err
 	}
 	objects, _, err := e.selectedObjects(page, ids)
-	if err != nil {
+	if err != nil || len(objects) == 0 {
 		return err
 	}
 	for _, object := range objects {
 		if object.Type != source.Type {
 			return fmt.Errorf("style requires objects of the same type")
+		}
+	}
+	count, maximum := len(e.resources), e.maxID
+	ready := e.source != nil && e.source.idsReady
+	defer func() {
+		if err != nil {
+			clear(e.resources[count:])
+			e.resources, e.maxID = e.resources[:count], maximum
+			if e.source != nil {
+				e.source.idsReady = ready
+			}
+		}
+	}()
+	if source.Type == "TextObject" && source.TextObject.FillColor == nil || source.Type == "PathObject" && (source.PathObject.FillColor == nil || source.PathObject.StrokeColor == nil) {
+		black, err := e.RGBColor(color.NRGBA{A: 255})
+		if err != nil {
+			return err
+		}
+		if source.Type == "TextObject" {
+			source.TextObject.FillColor = black
+		} else {
+			if source.PathObject.FillColor == nil {
+				source.PathObject.FillColor = black
+			}
+			if source.PathObject.StrokeColor == nil {
+				source.PathObject.StrokeColor = (*StrokeColor)(black)
+			}
 		}
 	}
 	if source.Type == "TextObject" {
@@ -304,48 +321,85 @@ func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) error {
 		}
 		return e.UpdateObjects(page, objects)
 	}
-	if source.Type == "PathObject" {
-		from := source.PathObject
-		if from.DrawParam != "" {
-			return fmt.Errorf("style source must have resolved draw parameters")
-		}
-		if err := validateEditorStroke(from); err != nil {
-			return err
-		}
-		for _, color := range []*FillColor{from.FillColor, (*FillColor)(from.StrokeColor)} {
-			if err := e.editorColor(color); err != nil {
-				return err
-			}
-		}
-	}
 	for i, object := range objects {
 		object = cloneEditorData(object)
 		switch source.Type {
 		case "PathObject":
-			from, to := source.PathObject, &object.PathObject
-			to.Fill, to.Stroke, to.Alpha = from.Fill, from.Stroke, from.Alpha
-			to.FillColor, to.StrokeColor = from.FillColor, from.StrokeColor
-			to.LineWidth, to.Cap, to.Join, to.MiterLimit = from.LineWidth, from.Cap, from.Join, from.MiterLimit
-			to.DashPattern, to.DashOffset = from.DashPattern, from.DashOffset
-			to.dashPatternSet = from.dashPatternSet
-			scale := editorStrokeScale(from.CTM) / editorStrokeScale(to.CTM)
-			if scale != 1 {
-				if to.LineWidth == 0 {
-					to.LineWidth = defaultPathLineWidth
-				}
-				to.LineWidth *= scale
-				to.DashPattern = scaleTextNumbers(to.DashPattern, scale)
-				if to.DashOffset != nil {
-					value := *to.DashOffset * scale
-					to.DashOffset = &value
-				}
-			}
+			object.PathObject = copyEditorPathStyle(object.PathObject, source.PathObject, editorStrokeScale(source.PathObject.CTM)/editorStrokeScale(object.PathObject.CTM))
 		case "ImageObject":
 			object.ImageObject.Alpha = source.ImageObject.Alpha
 		}
 		objects[i] = object
 	}
 	return e.updateObjects(page, objects, true)
+}
+
+// validateCopyStyle 校验样式来源，不分配资源或改写对象
+// 入参: source 有效外观快照
+// 返回: error 错误信息
+func (e *Editor) validateCopyStyle(source GraphicObject) error {
+	var alpha *int
+	var colors []*FillColor
+	switch source.Type {
+	case "TextObject":
+		alpha, colors = source.TextObject.Alpha, []*FillColor{source.TextObject.FillColor}
+	case "PathObject":
+		from := source.PathObject
+		alpha, colors = from.Alpha, []*FillColor{from.FillColor, (*FillColor)(from.StrokeColor)}
+		if from.DrawParam != "" {
+			return fmt.Errorf("style source must have resolved draw parameters")
+		}
+		if err := validateEditorStroke(from); err != nil {
+			return err
+		}
+	case "ImageObject":
+		alpha = source.ImageObject.Alpha
+	default:
+		return fmt.Errorf("unsupported style source %q", source.Type)
+	}
+	if alpha != nil && (*alpha < 0 || *alpha > 255) {
+		return fmt.Errorf("alpha must be between 0 and 255")
+	}
+	for _, color := range colors {
+		if err := e.editorColor(color); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// copyEditorPathStyle 按页面描边倍率复制路径外观，保留目标几何和行为
+// 入参: to 目标路径, from 来源路径, scale 来源与目标的描边倍率比
+// 返回: PathObject 独立路径副本
+func copyEditorPathStyle(to, from PathObject, scale float64) PathObject {
+	from = cloneEditorData(from)
+	to.Fill, to.Stroke, to.Alpha = from.Fill, from.Stroke, from.Alpha
+	to.FillColor, to.StrokeColor = from.FillColor, from.StrokeColor
+	to.LineWidth, to.Cap, to.Join, to.MiterLimit = from.LineWidth, from.Cap, from.Join, from.MiterLimit
+	to.DashPattern, to.DashOffset, to.dashPatternSet = from.DashPattern, from.DashOffset, true
+	if to.LineWidth == 0 {
+		to.LineWidth = defaultPathLineWidth
+	}
+	if to.Cap == "" {
+		to.Cap = "Butt"
+	}
+	if to.Join == "" {
+		to.Join = "Miter"
+	}
+	if to.MiterLimit == 0 {
+		to.MiterLimit = defaultMiterLimit
+	}
+	if to.DashOffset == nil {
+		zero := 0.0
+		to.DashOffset = &zero
+	}
+	if scale != 1 {
+		to.LineWidth *= scale
+		to.DashPattern = scaleTextNumbers(to.DashPattern, scale)
+		value := *to.DashOffset * scale
+		to.DashOffset = &value
+	}
+	return to
 }
 
 // editorStrokeScale 获取路径在页面坐标中的描边倍率，与渲染器保持一致

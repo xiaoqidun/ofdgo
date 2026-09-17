@@ -114,7 +114,7 @@ func NewShape(kind ShapeKind, box Box) (PathObject, error) {
 	return object, nil
 }
 
-// Shape 识别 NewShape 生成的基本路径及其轴对齐缩放、直角旋转、镜像和平移
+// Shape 识别NewShape生成的基本路径，直线支持可逆仿射变换，矩形和椭圆要求轴对齐
 // 直线范围以起点和有符号的端点位移表示；非基本路径或不支持的变换返回空类型
 // 返回: ShapeKind 图形类型, Box 几何范围（不含描边）
 func (p PathObject) Shape() (ShapeKind, Box) {
@@ -170,7 +170,8 @@ func (p PathObject) Shape() (ShapeKind, Box) {
 	}
 	boundary, err := ParseBox(p.Boundary)
 	m := NewMatrix(p.CTM)
-	if err != nil || !axisAlignedMatrix(m) {
+	_, invertible := m.Invert()
+	if err != nil || !axisAlignedMatrix(m) && (!line || !invertible) {
 		return "", Box{}
 	}
 	if line {
@@ -207,7 +208,7 @@ func sameShapePath(a, b []string) bool {
 }
 
 // Reshape 调整基本路径在所在坐标系中的几何范围，保留对象标识、方向、缩放和绘制属性，不缩放线宽
-// 返回对象可通过 Editor.UpdateObject 写入；仅支持 Shape 可识别的路径
+// 返回对象可通过Editor.UpdateObject写入；仅支持Shape可识别的路径
 // 入参: box 新几何范围，直线使用起点和有符号的端点位移
 // 返回: PathObject 调整后的对象, error 错误信息
 func (p PathObject) Reshape(box Box) (PathObject, error) {
@@ -249,12 +250,15 @@ func (p PathObject) reshape(kind ShapeKind, box Box) (PathObject, error) {
 	}
 	m := NewMatrix(p.CTM)
 	var w, h float64
-	if m.b == 0 {
+	line := lineShapeKind(kind)
+	if m.b == 0 && m.c == 0 {
 		w, h = box.W/m.a, box.H/m.d
-	} else {
+	} else if m.a == 0 && m.d == 0 {
 		w, h = box.H/m.b, box.W/m.c
+	} else {
+		inverse, _ := m.Invert()
+		w, h = matrixVector(inverse, box.W, box.H)
 	}
-	line := kind == ShapeLine || kind == ShapeArrow || kind == ShapeDoubleArrow
 	if !line {
 		w, h = math.Abs(w), math.Abs(h)
 	}

@@ -57,83 +57,92 @@ func (e *Editor) ResizeCompositeTextFrame(page int, path ObjectPath, index int, 
 func (e *Editor) changeCompositeText(page int, path ObjectPath, indexes []int, value *string, style TextStyle, options *TextLayout, frame *Box) error {
 	return e.editCompositeObjects(page, path, indexes, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
 		for i, node := range nodes {
-			member := members[i]
-			if node.object.Type != "TextObject" || !member.Capabilities.ReplaceFont {
-				return fmt.Errorf("composite text style is not supported")
-			}
-			object := cloneEditorData(node.object)
-			text := cloneEditorData(member.Object.TextObject)
-			state := node.states[editorObjectID(node.object)]
-			content, layout := text.TextLayout()
-			original := content
-			if style.Font != "" {
-				text.Font = style.Font
-			}
-			if value != nil {
-				content = *value
-			}
-			if options != nil {
-				layout = *options
-			}
-			if frame != nil {
-				var err error
-				if !node.boundaryInCTM {
-					text = compositeBoundary(GraphicObject{Type: "TextObject", TextObject: text}, node.parent, true).TextObject
-				}
-				text, err = text.ResizeTextFrame(frame.X, frame.W)
-				if err != nil {
-					return err
-				}
-				if !node.boundaryInCTM {
-					text = compositeBoundary(GraphicObject{Type: "TextObject", TextObject: text}, node.parent, false).TextObject
-				}
-				object.TextObject.Boundary, object.TextObject.CTM = text.Boundary, text.CTM
-			}
-			if options != nil || content != original || style.Size != 0 && style.Size != text.Size {
-				if style.Size != 0 {
-					text.Size = style.Size
-				}
-				if state.layout == nil {
-					if len(text.TextCode) == 0 {
-						return fmt.Errorf("text codes are empty")
-					}
-					origin, err := creationNumbers(text.TextCode[0].X+" "+text.TextCode[0].Y, 2)
-					if err != nil {
-						return err
-					}
-					copy(state.origin[:], origin)
-				}
-				if err := e.layoutCompositeText(&text, content, layout, state.origin); err != nil {
-					return err
-				}
-				object.TextObject.Size, object.TextObject.TextCode = text.Size, text.TextCode
-				state.layout = &textLayout{value: content, options: layout}
-			}
-			if style.Font != "" && style.Font != object.TextObject.Font {
-				if err := e.prepareText(&text); err != nil {
-					return err
-				}
-				object.TextObject.Font = style.Font
-			}
-			if style.Color != "" {
-				if err := creationColor(&FillColor{Value: style.Color}); err != nil {
-					return err
-				}
-				var r, g, b float64
-				fmt.Sscan(style.Color, &r, &g, &b)
-				fill, err := e.RGBColor(color.NRGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: 255})
-				if err != nil {
-					return err
-				}
-				object.TextObject.FillColor = editorStyleColor(fill, member.Object.TextObject.FillColor)
-			}
-			if err := node.update(object); err != nil {
+			if err := e.updateCompositeText(node, members[i], value, style, options, frame); err != nil {
 				return err
 			}
-			node.setState(state)
 		}
 		return nil
 	})
+}
+
+// updateCompositeText 按有效样式更新单个内部文字节点并保留段落基线
+// 入参: node 原文节点, member 有效快照, value 新内容, style 样式增量, options 段落选项, frame 文字框调整
+// 返回: error 错误信息
+func (e *Editor) updateCompositeText(node *editorCompositeNode, member CompositeMember, value *string, style TextStyle, options *TextLayout, frame *Box) error {
+	if node.object.Type != "TextObject" || !member.Capabilities.ReplaceFont {
+		return fmt.Errorf("composite text style is not supported")
+	}
+	object := cloneEditorData(node.object)
+	text := cloneEditorData(member.Object.TextObject)
+	state := node.states[editorObjectID(node.object)]
+	content, layout := text.TextLayout()
+	original := content
+	if style.Font != "" {
+		text.Font = style.Font
+	}
+	if value != nil {
+		content = *value
+	}
+	if options != nil {
+		layout = *options
+	}
+	if frame != nil {
+		var err error
+		if !node.boundaryInCTM {
+			text = compositeBoundary(GraphicObject{Type: "TextObject", TextObject: text}, node.parent, true).TextObject
+		}
+		text, err = text.ResizeTextFrame(frame.X, frame.W)
+		if err != nil {
+			return err
+		}
+		if !node.boundaryInCTM {
+			text = compositeBoundary(GraphicObject{Type: "TextObject", TextObject: text}, node.parent, false).TextObject
+		}
+		object.TextObject.Boundary, object.TextObject.CTM = text.Boundary, text.CTM
+	}
+	if options != nil || content != original || style.Size != 0 && style.Size != text.Size {
+		if style.Size != 0 {
+			text.Size = style.Size
+		}
+		if state.layout == nil {
+			if len(text.TextCode) == 0 {
+				return fmt.Errorf("text codes are empty")
+			}
+			origin, err := creationNumbers(text.TextCode[0].X+" "+text.TextCode[0].Y, 2)
+			if err != nil {
+				return err
+			}
+			copy(state.origin[:], origin)
+		}
+		if err := e.layoutCompositeText(&text, content, layout, state.origin); err != nil {
+			return err
+		}
+		object.TextObject.Size, object.TextObject.TextCode = text.Size, text.TextCode
+		state.layout = &textLayout{value: content, options: layout}
+	}
+	if style.Font != "" && style.Font != object.TextObject.Font {
+		if err := e.prepareText(&text); err != nil {
+			return err
+		}
+		object.TextObject.Font = style.Font
+	}
+	if style.Color != "" {
+		if err := creationColor(&FillColor{Value: style.Color}); err != nil {
+			return err
+		}
+		var r, g, b float64
+		fmt.Sscan(style.Color, &r, &g, &b)
+		fill, err := e.RGBColor(color.NRGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: 255})
+		if err != nil {
+			return err
+		}
+		object.TextObject.FillColor = editorStyleColor(fill, member.Object.TextObject.FillColor)
+	}
+	if err := node.update(object); err != nil {
+		return err
+	}
+	node.setState(state)
+	return nil
 }
 
 // layoutCompositeText 重排普通文字并保持原首行基线起点
