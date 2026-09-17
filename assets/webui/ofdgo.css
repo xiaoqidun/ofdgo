@@ -1777,6 +1777,32 @@ button.outline-link:hover {
 	background: rgba(15, 123, 104, 0.08);
 }
 
+.annotation-note {
+	position: absolute;
+	z-index: 2;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border: 1px solid var(--line-strong);
+	background: var(--panel);
+	color: var(--accent-strong);
+	font-size: 16px;
+	line-height: 20px;
+	text-align: center;
+	transform: translateX(-100%);
+}
+
+.annotation-detail {
+	display: grid;
+	gap: 8px;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.editing .annotation-note {
+	display: none;
+}
+
 .page-placeholder {
 	position: absolute;
 	inset: 0;
@@ -1845,7 +1871,6 @@ button.outline-link:hover {
 .font-panel,
 .doc-font-panel,
 .attachment-panel,
-.annotation-panel,
 .signature-panel {
 	margin-top: 18px;
 	padding-top: 12px;
@@ -1898,14 +1923,12 @@ button.outline-link:hover {
 }
 
 .doc-font-list,
-.annotation-list,
 .signature-list {
 	display: grid;
 	gap: 8px;
 }
 
 .doc-font-row,
-.annotation-row,
 .signature-row {
 	display: grid;
 	gap: 6px;
@@ -1918,7 +1941,6 @@ button.outline-link:hover {
 .page-list-item:not(:disabled):hover,
 .doc-font-row:hover,
 .signature-row:hover,
-.annotation-row:hover,
 .font-row:hover {
 	border-color: var(--line-strong);
 	background: #ffffff;
@@ -1945,7 +1967,6 @@ button.outline-link:hover {
 }
 
 .doc-font-head,
-.annotation-head,
 .signature-head {
 	display: flow-root;
 }
@@ -1974,11 +1995,6 @@ button.outline-link:hover {
 	background: transparent;
 	color: var(--accent-strong);
 	text-decoration: underline;
-}
-
-.annotation-head .info-name-button {
-	color: var(--accent-strong);
-	font-size: 13px;
 }
 
 .signature-stamp-group {
@@ -2015,14 +2031,9 @@ button.outline-link:hover {
 }
 
 .doc-font-badges,
-.signature-badges,
-.annotation-head > .font-badge {
+.signature-badges {
 	float: right;
 	margin-left: 8px;
-}
-
-.annotation-row .info-value {
-	white-space: pre-wrap;
 }
 
 .font-badge {

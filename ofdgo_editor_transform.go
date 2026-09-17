@@ -67,7 +67,7 @@ func (e *Editor) FlipObjects(page int, ids []string, axis string) error {
 	return e.orientObjects(page, ids, m)
 }
 
-// ResizeObjects 将选区可见范围移动并缩放到指定矩形，文字、路径和带边框图片保持比例，无边框图片支持独立宽高
+// ResizeObjects 按选区可见范围计算目标矩形的变换，图片及纯图片资源支持独立宽高，描边遵循OFD变换规则
 // 不重排文字或重采样图片，一次撤销恢复全部；基本图形独立调整宽高可使用PathObject.Reshape
 // 入参: page 页面索引, ids 对象标识, box 页面毫米坐标中的目标范围
 // 返回: error 错误信息
@@ -96,10 +96,10 @@ func (e *Editor) ResizeObjects(page int, ids []string, box Box) error {
 	return e.transformObjects(page, objects, func(object GraphicObject) (GraphicObject, error) {
 		if uniform {
 			return e.transformObject(object, matrix.e, matrix.f, sx)
-		} else if object.Type == "ImageObject" && object.ImageObject.Border == nil {
+		} else if e.objectStretchable(object, make(map[string]bool)) {
 			return e.transformMatrix(object, matrix)
 		}
-		return GraphicObject{}, fmt.Errorf("nonuniform resizing requires images without borders")
+		return GraphicObject{}, fmt.Errorf("nonuniform resizing requires images or image-only groups")
 	})
 }
 
@@ -177,9 +177,56 @@ func (e *Editor) transformMatrix(object GraphicObject, matrix Matrix) (GraphicOb
 	}
 	origin := e.objectOrigin(object.ImageObject.ID)
 	if origin == nil {
-		return GraphicObject{}, fmt.Errorf("bordered image requires an original object")
+		return GraphicObject{}, fmt.Errorf("image source is unavailable")
 	}
-	return e.transformBorderedImage(object, matrix, origin, NewRenderer(e.source.reader, WithFontFS(e.fontFS...)))
+	reader, err := e.Reader()
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	defer reader.Close()
+	return e.transformBorderedImage(object, matrix, origin, NewRenderer(reader, WithFontFS(e.fontFS...)))
+}
+
+// objectStretchable 允许图片及纯图片资源独立调整宽高，内联组合仍保持比例
+// 入参: object 对象, visiting 当前资源链
+// 返回: bool 是否支持独立宽高
+func (e *Editor) objectStretchable(object GraphicObject, visiting map[string]bool) bool {
+	if object.Type != "ImageObject" && (object.CompositeGraphicUnit.ResourceID == "" || len(object.CompositeGraphicUnit.Objects) != 0) {
+		return false
+	}
+	return e.objectImagesOnly(object, visiting)
+}
+
+// objectImagesOnly 检查资源链中是否只有图片，保留原边框与裁剪语义
+// 入参: object 对象, visiting 当前资源链
+// 返回: bool 是否只包含图片
+func (e *Editor) objectImagesOnly(object GraphicObject, visiting map[string]bool) bool {
+	if object.Type == "ImageObject" {
+		return object.ImageObject.Border == nil || len(object.ImageObject.Actions) == 0
+	}
+	if object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+		return false
+	}
+	group := object.CompositeGraphicUnit
+	found := len(group.Objects) != 0
+	if id := group.ResourceID; id != "" {
+		if visiting[id] {
+			return false
+		}
+		visiting[id] = true
+		resource, err := e.compositeDefinition(id)
+		if err != nil || !e.objectImagesOnly(resource.object, visiting) {
+			return false
+		}
+		delete(visiting, id)
+		found = true
+	}
+	for _, child := range group.Objects {
+		if !e.objectImagesOnly(child, visiting) {
+			return false
+		}
+	}
+	return found
 }
 
 // transformBorderedImage 将原文图片封装为复合资源，保留边框和裁剪
@@ -231,6 +278,7 @@ func (e *Editor) transformBorderedImage(object GraphicObject, matrix Matrix, ori
 	if err != nil {
 		return GraphicObject{}, err
 	}
+	resource.states = map[string]editorCompositeState{child.ImageObject.ID: object.state}
 	e.resources = append(e.resources, resource)
 	object = GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: CompositeGraphicUnit{ID: object.ImageObject.ID, ResourceID: id, Boundary: editorBoxString(extent)}}
 	return transformEditorMatrix(object, matrix), nil

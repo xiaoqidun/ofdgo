@@ -17,6 +17,7 @@ const STATUS = {
 	pageExporting: "正在导出单页",
 };
 const wasmRequests = new Map();
+const metaContents = new WeakMap();
 
 let wasmPromise = null;
 let wasmWorker = null;
@@ -332,8 +333,8 @@ const el = {
 	signaturePanel: document.querySelector("#signaturePanel"),
 	signatureSummary: document.querySelector("#signatureSummary"),
 	signatureList: document.querySelector("#signatureList"),
-	annotationPanel: document.querySelector("#annotationPanel"),
-	annotationList: document.querySelector("#annotationList"),
+	annotationNote: document.querySelector("#annotationNote"),
+	annotationDetail: document.querySelector("#annotationDetail"),
 	docFontList: document.querySelector("#docFontList"),
 	docFontSummary: document.querySelector("#docFontSummary"),
 	availableFontSummary: document.querySelector("#availableFontSummary"),
@@ -711,7 +712,11 @@ el.objectBoundsForm.addEventListener("submit", async event => {
 	const item = canvasEditor.selected;
 	const values = [el.objectX, el.objectY, el.objectWidth, el.objectHeight].map(objectDimension);
 	let saved;
-	if (item.shape) {
+	if (item.oriented) {
+		const [a, b, c, d, e, f] = item.oriented.matrix, determinant = a * d - b * c;
+		const x = values[0] - e, y = values[1] - f;
+		saved = await changeDocument("ofdgoReshapeObject", item, (d * x - c * y) / determinant, (a * y - b * x) / determinant, values[2] / Math.hypot(a, b), values[3] / Math.hypot(c, d), true);
+	} else if (item.shape) {
 		if (lineShape(item.shape)) { values[2] *= Math.sign(item.geometry.width); values[3] *= Math.sign(item.geometry.height); }
 		saved = await changeDocument("ofdgoReshapeObject", item, ...values);
 	} else saved = await changeDocument("ofdgoResizeObjects", { ...item, id: canvasEditor.items().map(member => member.id) }, ...values);
@@ -989,7 +994,7 @@ function handleKeyDown(event) {
 
 function formDialogOpen() {
 	return el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open
-		|| el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open || el.objectBoundsPanel.open;
+		|| el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open;
 }
 
 function setObjectDimension(input, value) {
@@ -1004,11 +1009,16 @@ function objectDimension(input) {
 
 function openObjectBounds() {
 	const item = canvasEditor.selected;
-	const box = item.geometry || selectionBounds((item.items || [item]).map(member => member.bounds || member));
+	let box = item.geometry || selectionBounds((item.items || [item]).map(member => member.bounds || member));
+	if (item.oriented) {
+		const frame = item.oriented, [a, b, c, d, e, f] = frame.matrix;
+		box = { x: a * frame.box.x + c * frame.box.y + e, y: b * frame.box.x + d * frame.box.y + f,
+			width: frame.box.width * Math.hypot(a, b), height: frame.box.height * Math.hypot(c, d) };
+	}
 	state.boundsOriginal = { x: box.x, y: box.y, width: Math.abs(box.width), height: Math.abs(box.height) };
 	for (const [input, key] of [[el.objectX,"x"], [el.objectY,"y"], [el.objectWidth,"width"], [el.objectHeight,"height"]]) setObjectDimension(input, state.boundsOriginal[key]);
 	el.objectAspect.checked = true;
-	el.objectAspect.disabled = !item.shape && (item.items || [item]).some(member => member.type !== "ImageObject" || member.imageBorder) || lineShape(item.shape) && (!box.width || !box.height);
+	el.objectAspect.disabled = !item.shape && !item.oriented && !canEditObject(item, "stretch") || lineShape(item.shape) && (!box.width || !box.height);
 	el.objectWidth.disabled = lineShape(item.shape) && !box.width;
 	el.objectHeight.disabled = lineShape(item.shape) && !box.height;
 	el.objectBoundsStatus.textContent = "";
@@ -1026,8 +1036,8 @@ function openObjectStyle() {
 	const items = canvasEditor.items();
 	if (!items.length) return;
 	const ordered = [...items].sort((a, b) => a.position - b.position);
-	el.groupObjectsButton.disabled = Boolean(state.composite) || items.length < 2 || !ordered.every((item, index) => canEditObject(item, "copy") && canEditObject(item, "order") && item.container === ordered[0].container && item.position === ordered[0].position + index);
-	el.ungroupObjectButton.disabled = Boolean(state.composite) || items.length !== 1 || !canEditObject(items[0], "ungroup");
+	el.groupObjectsButton.disabled = items.length < 2 || !ordered.every((item, index) => canEditObject(item, "copy") && canEditObject(item, "order") && item.container === ordered[0].container && item.position === ordered[0].position + index);
+	el.ungroupObjectButton.disabled = items.length !== 1 || !canEditObject(items[0], "ungroup");
 	el.copyStyleButton.disabled = items.length !== 1 || !canCopyStyle(items[0]);
 	el.pasteStyleButton.disabled = !state.styleClipboard || !items.every(item => item.type === state.styleClipboard && canCopyStyle(item));
 	const shared = (key, fallback) => items.every(item => (item[key] ?? fallback) === (items[0][key] ?? fallback)) ? items[0][key] ?? fallback : null;
@@ -1248,6 +1258,7 @@ async function toggleEditor() {
 	if (!state.doc || !state.ready || document.body.hasAttribute("aria-busy") || formDialogOpen()) return;
 	if (state.editorInfo) {
 		if (!await canvasEditor.commitText() || !await canvasEditor.commitCrop()) return;
+		const anchor = scaleAnchor(0);
 		state.editing = !state.editing;
 		resetCompositeScope();
 		canvasEditor.clear();
@@ -1260,10 +1271,11 @@ async function toggleEditor() {
 		renderOutlines(false);
 		renderPageList();
 		applyFit(false);
+		restoreScaleAnchor(anchor);
 		return;
 	}
 	const { pageIndex, fitMode, scale } = state;
-	const { scrollLeft, scrollTop } = el.viewerPanel;
+	const anchor = scaleAnchor(0);
 	const openSeq = ++state.openSeq;
 	setBusy(true, "正在准备编辑", null, "正在准备编辑");
 	try {
@@ -1281,7 +1293,7 @@ async function toggleEditor() {
 		canvasEditor.clear();
 		setPan(false);
 		await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex, fitMode, scale,
-			keepPreview: true, previewScroll: { scrollLeft, scrollTop } });
+			keepPreview: true, previewAnchor: anchor });
 	} catch (err) {
 		if (openSeq === state.openSeq) showError(err, false);
 	} finally {
@@ -1887,7 +1899,7 @@ async function changeDocument(name, item, ...args) {
 			ofdgoAlignObject: "align", ofdgoAlignObjects: "align", ofdgoDistributeObjects: "distribute", ofdgoStyleObjects: "style", ofdgoUpdatePathStyle: "paint", ofdgoCompositeTextColor: "textColor",
 			ofdgoUpdateText: "text", ofdgoStyleText: "textStyle", ofdgoCropImage: "crop", ofdgoLayoutText: "layout", ofdgoFitImage: "fit", ofdgoResetCompositeCrop: "resetCrop",
 			ofdgoReshapeObject: "reshape", ofdgoReshapeLine: "line", ofdgoEraseObjects: "erase", ofdgoEraseObjectsPath: "erasePath", ofdgoPasteStyle: "pasteStyle",
-			ofdgoDeleteObject: "delete", ofdgoDeleteObjects: "delete", ofdgoCopyObjects: "copy", ofdgoOrderObjects: "order" }[name];
+			ofdgoDeleteObject: "delete", ofdgoDeleteObjects: "delete", ofdgoCopyObjects: "copy", ofdgoOrderObjects: "order", ofdgoGroupObjects: "group" }[name];
 		const members = item?.items || (item ? [item] : []);
 		const scoped = scope && members.length && members.every(member => member.scoped);
 		const inserting = ["ofdgoInsertShape", "ofdgoInsertText", "ofdgoInsertImage"].includes(name);
@@ -1903,7 +1915,7 @@ async function changeDocument(name, item, ...args) {
 			return true;
 		}
 		const view = name === "ofdgoUndo" ? state.editorViews.get(revision) : name === "ofdgoRedo" ? state.editorViews.get(doc.revision) : null;
-		const reindex = !!scope && (scoped && ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoCopyObjects", "ofdgoOrderObjects", "ofdgoEraseObjects", "ofdgoEraseObjectsPath"].includes(name)
+		const reindex = !!scope && (scoped && ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoCopyObjects", "ofdgoOrderObjects", "ofdgoEraseObjects", "ofdgoEraseObjectsPath", "ofdgoGroupObjects"].includes(name)
 			|| inserting || name === "ofdgoPasteObjects" && !!args[4]);
 		const reindexed = restoring ? view?.reindex && view.before : reindex && before;
 		const clipboard = state.objectClipboard;
@@ -2031,7 +2043,7 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 	} finally {
 		if (openSeq === state.openSeq) {
 			releasePageResources();
-			renderMeta();
+			renderMeta(true);
 			updateControls();
 			loadDocumentDetails(openSeq);
 			for (const page of doc.pages) {
@@ -2521,6 +2533,7 @@ async function openOFD(file) {
 		el.pagePanel.close();
 		el.paragraphPanel.close();
 		el.infoPanel.close();
+		el.annotationNote.close();
 		el.importPanel.close();
 		el.batchPagesPanel.close();
 		el.objectStylePanel.close();
@@ -2989,7 +3002,7 @@ async function openDocument(options = {}) {
 		if (options.keepPreview || options.resetScroll || el.outlineList.childElementCount === 0) {
 			renderOutlines(!options.keepPreview);
 		}
-		renderMeta();
+		renderMeta(options.keepPreview);
 		renderPageFlow();
 		if (options.keepPreview) {
 			for (const [index, page] of state.pageCache) {
@@ -3007,7 +3020,9 @@ async function openDocument(options = {}) {
 		}
 		applyFit(false);
 		if (options.keepPreview) {
-			if (options.previewScroll) {
+			if (options.previewAnchor) {
+				restoreScaleAnchor(options.previewAnchor);
+			} else if (options.previewScroll) {
 				Object.assign(el.viewerPanel, options.previewScroll);
 			} else {
 				scrollToPage(pageIndex);
@@ -3045,11 +3060,13 @@ async function loadDocumentDetails(openSeq) {
 	try {
 		const info = await callWASM("ofdgoDocumentInfo");
 		if (openSeq === state.openSeq) {
-			Object.assign(state.doc, info, { detailsPending: false });
+			Object.assign(state.doc, info, { detailsPending: false, detailsError: "" });
 			renderMeta();
 		}
 	} catch (err) {
 		if (openSeq === state.openSeq) {
+			Object.assign(state.doc, { detailsPending: false, detailsError: err.message });
+			renderMeta();
 			showError(err, false);
 		}
 	}
@@ -3595,14 +3612,14 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 	if (state.editorInfo) {
 		mountEditorObjects(index, page, surface);
 	}
+	mountAnnotationNotes(index, surface);
 	for (const link of page.links) {
 		const anchor = document.createElement("a");
 		anchor.className = "page-link";
 		if (link.dest) {
 			const target = state.doc.pages.findIndex(page => page.id === link.dest.pageID);
-			if (target < 0 || !["XYZ", "Fit", "FitH", "FitV", "FitR"].includes(link.dest.type)) continue;
-			anchor.href = `#page-${target + 1}`;
-			anchor.title = `第${target + 1}页`;
+			anchor.href = target < 0 ? "#" : `#page-${target + 1}`;
+			anchor.title = target < 0 ? "文档链接" : `第${target + 1}页`;
 			anchor.addEventListener("click", event => { event.preventDefault(); navigateDestination(link.dest); });
 		} else {
 			let url;
@@ -3637,7 +3654,14 @@ function destinationPoint(page, x, y) {
 async function navigateDestination(dest) {
 	if (document.body.hasAttribute("aria-busy")) return;
 	const index = state.doc.pages.findIndex(page => page.id === dest.pageID);
-	if (index < 0) return;
+	if (index < 0) {
+		setStatus("目标页面不存在");
+		return;
+	}
+	if (!["XYZ", "Fit", "FitH", "FitV", "FitR"].includes(dest.type)) {
+		setStatus("暂不支持此跳转方式");
+		return;
+	}
 	const seq = state.openSeq, scale = state.scale;
 	await renderPage(index, { fit: false, scroll: false });
 	if (seq !== state.openSeq || state.pageIndex !== index) return;
@@ -4873,8 +4897,9 @@ function markThumbnailError(index) {
 	}
 }
 
-function renderMeta() {
+function renderMeta(keepDetails = false) {
 	const doc = state.doc || {};
+	el.metaPanel.setAttribute("aria-busy", String(!!doc.detailsPending));
 	document.title = `OFDGo WebUI - ${state.fileName}`;
 	el.metaFile.textContent = state.fileName;
 	el.metaTitle.textContent = doc.title || "-";
@@ -4889,15 +4914,23 @@ function renderMeta() {
 	}
 	el.metaType.textContent = doc.docType || "-";
 	el.metaVersion.textContent = doc.version || "-";
-	el.metaSignatures.textContent = doc.detailsPending ? "正在检查" : String(doc.signatureCount || 0);
 	el.metaFonts.textContent = String(doc.fontCount || 0);
 	el.pageTotal.textContent = String(doc.pageCount || 0);
-	renderAttachments();
-	renderSignatures();
+	if (keepDetails && doc.detailsPending) return;
+	el.metaSignatures.textContent = doc.detailsPending ? "正在检查" : doc.detailsError ? "读取失败" : String(doc.signatureCount || 0);
+	renderMetaContent(el.attachmentList, [doc.attachments, doc.attachmentError], renderAttachments);
+	renderMetaContent(el.signatureList, [doc.signatures, doc.signatureError], renderSignatures);
 	renderAnnotations();
-	renderDocumentFonts();
-	renderFontList();
+	renderMetaContent(el.docFontList, doc.fonts || [], renderDocumentFonts);
+	updateTextFonts(canvasEditor.selected, true);
 	updateLocalFontButton();
+}
+
+function renderMetaContent(node, value, render) {
+	const key = JSON.stringify(value);
+	if (metaContents.get(node) === key) return;
+	render();
+	metaContents.set(node, key);
 }
 
 function renderAttachments() {
@@ -5157,32 +5190,38 @@ function clearRegionHighlights() {
 }
 
 function renderAnnotations() {
-	const annotations = (state.doc?.annotations || []).filter((annotation) => annotation.visible);
-	el.annotationPanel.hidden = !annotations.length;
-	el.annotationList.replaceChildren();
-	const types = { Link: "链接", Path: "路径", Highlight: "高亮", Stamp: "印章", Watermark: "水印" };
-	const fragment = document.createDocumentFragment();
-	for (const annotation of annotations) {
-		const row = document.createElement("div");
-		row.className = "annotation-row";
-		const head = document.createElement("div");
-		head.className = "annotation-head";
-		const name = document.createElement("button");
-		name.type = "button";
-		name.className = "info-name-button";
-		name.textContent = `第 ${annotation.page} 页`;
-		name.disabled = !state.renderAnnotations || annotation.width <= 0 || annotation.height <= 0;
-		name.title = state.renderAnnotations ? "定位注解" : "注解已隐藏";
-		name.addEventListener("click", () => focusPageRegion(annotation, "注解"));
-		const badge = fontBadge(types[annotation.type] || "注解", "");
-		head.append(badge, name);
-		row.append(head);
-		appendInfoLine(row, "内容", annotation.remark);
-		appendInfoLine(row, "作者", annotation.creator);
-		appendInfoLine(row, "时间", formatDocumentTime(annotation.lastModDate));
-		fragment.append(row);
+	for (const shell of el.svgHost.querySelectorAll(".page-shell.rendered")) {
+		mountAnnotationNotes(Number(shell.dataset.pageIndex), shell.querySelector(".page-surface"));
 	}
-	el.annotationList.append(fragment);
+}
+
+function mountAnnotationNotes(index, surface) {
+	for (const note of surface.querySelectorAll(".annotation-note")) note.remove();
+	if (!state.renderAnnotations) return;
+	const page = state.doc.pages[index];
+	for (const annotation of state.doc.annotations || []) {
+		if (!annotation.visible || annotation.page !== index + 1 || !annotation.remark?.trim()) continue;
+		const note = document.createElement("button");
+		note.type = "button";
+		note.className = "annotation-note";
+		note.textContent = "\u24d8";
+		note.title = "查看注解";
+		note.setAttribute("aria-label", "查看注解");
+		note.setAttribute("aria-haspopup", "dialog");
+		note.style.left = `${Math.max(22 / MM_TO_PX, Math.min(page.width, annotation.x + annotation.width)) * MM_TO_PX}px`;
+		note.style.top = `${Math.max(0, Math.min(page.height - 22 / MM_TO_PX, annotation.y)) * MM_TO_PX}px`;
+		note.addEventListener("click", () => {
+			if (state.editing || document.body.hasAttribute("aria-busy")) return;
+			el.annotationDetail.replaceChildren();
+			const content = document.createElement("div");
+			content.textContent = annotation.remark;
+			el.annotationDetail.append(content);
+			appendInfoLine(el.annotationDetail, "作者", annotation.creator);
+			appendInfoLine(el.annotationDetail, "时间", formatDocumentTime(annotation.lastModDate));
+			el.annotationNote.showModal();
+		});
+		surface.append(note);
+	}
 }
 
 function renderDocumentFonts() {
@@ -5358,7 +5397,7 @@ function setPan(enabled) {
 }
 
 function startPan(event) {
-	if (!state.panMode || !state.doc || event.pointerType !== "mouse" || event.button !== 0 || document.body.hasAttribute("aria-busy") || event.target.closest("a")) {
+	if (!state.panMode || !state.doc || event.pointerType !== "mouse" || event.button !== 0 || document.body.hasAttribute("aria-busy") || event.target.closest("a, button")) {
 		return;
 	}
 	const rect = el.viewerPanel.getBoundingClientRect();
@@ -5494,7 +5533,7 @@ function setScale(nextScale, updateStatus = true, fitMode = "free") {
 	updateControls();
 }
 
-function scaleAnchor() {
+function scaleAnchor(viewY = 0.45) {
 	const shell = pageShellFromView() || pageShell(state.pageIndex);
 	if (!shell) {
 		return null;
@@ -5503,8 +5542,9 @@ function scaleAnchor() {
 	const shellRect = shell.getBoundingClientRect();
 	return {
 		index: Number.parseInt(shell.dataset.pageIndex, 10),
+		viewY,
 		x: (viewerRect.left + viewerRect.width / 2 - shellRect.left) / Math.max(1, shellRect.width),
-		y: (viewerRect.top + viewerRect.height * 0.45 - shellRect.top) / Math.max(1, shellRect.height),
+		y: (viewerRect.top + viewerRect.height * viewY - shellRect.top) / Math.max(1, shellRect.height),
 	};
 }
 
@@ -5519,7 +5559,7 @@ function restoreScaleAnchor(anchor) {
 	const viewerRect = el.viewerPanel.getBoundingClientRect();
 	const shellRect = shell.getBoundingClientRect();
 	el.viewerPanel.scrollLeft += shellRect.left + shellRect.width * anchor.x - viewerRect.left - viewerRect.width / 2;
-	el.viewerPanel.scrollTop += shellRect.top + shellRect.height * anchor.y - viewerRect.top - viewerRect.height * 0.45;
+	el.viewerPanel.scrollTop += shellRect.top + shellRect.height * anchor.y - viewerRect.top - viewerRect.height * anchor.viewY;
 }
 
 function currentPageInfo() {
@@ -5596,6 +5636,7 @@ function updateControls() {
 }
 
 function updateEditorTools() {
+	el.viewerPanel.classList.toggle("editing", state.editing);
 	el.editButton.disabled = !state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
 	el.editButton.setAttribute("aria-pressed", String(state.editing));
 	el.editButton.title = state.editing ? "阅读" : "编辑";

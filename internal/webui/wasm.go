@@ -841,7 +841,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 // 返回: map[string]any 前端能力
 func editorCapabilities(capability ofdgo.ObjectCapabilities, kind string) map[string]any {
 	result := map[string]any{"update": capability.Update, "paint": capability.Paint, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode),
-		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "fitImage": capability.FitImage, "resetCrop": capability.ResetCrop, "ungroup": capability.Ungroup, "enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
+		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "fitImage": capability.FitImage, "resetCrop": capability.ResetCrop, "ungroup": capability.Ungroup, "stretch": capability.Stretch, "enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
 	if missing := capability.MissingGlyphs; missing != nil {
 		result["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
 	}
@@ -991,6 +991,18 @@ func changeCompositeObjects(args []js.Value) (any, error) {
 		page := args[0].Int()
 		operation := args[3].String()
 		switch operation {
+		case "group":
+			if args[4].Bool() {
+				if len(indexes) != 1 {
+					return fmt.Errorf("ungrouping requires one member")
+				}
+				selected, err = currentEditor.UngroupCompositeObject(page, path, indexes[0])
+			} else {
+				var index int
+				index, err = currentEditor.GroupCompositeObjects(page, path, indexes)
+				selected = []int{index}
+			}
+			return err
 		case "pasteStyle":
 			if copiedStyle == nil {
 				return fmt.Errorf("style clipboard is empty")
@@ -1161,19 +1173,19 @@ func changeCompositeText(page int, path ofdgo.ObjectPath, indexes []int, operati
 		if err != nil {
 			return err
 		}
-		members, err := currentEditor.CompositeObjects(page, path)
+		members, err := currentEditor.CompositeObjectsAt(page, path, indexes)
 		if err != nil {
 			return err
 		}
 		var text strings.Builder
-		for _, index := range indexes {
-			if index >= len(members) || !members[index].Capabilities.ReplaceFont {
+		for _, member := range members {
+			if !member.Capabilities.ReplaceFont {
 				return fmt.Errorf("composite font replacement is not supported")
 			}
 			if value != nil {
 				text.WriteString(*value)
 			} else {
-				text.WriteString(members[index].Object.TextObject.Text())
+				text.WriteString(member.Object.TextObject.Text())
 			}
 		}
 		if err := checkFontGlyphs(data, text.String()); err != nil {

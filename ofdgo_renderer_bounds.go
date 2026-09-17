@@ -180,7 +180,13 @@ func (r *boundsRenderer) addContour(path *canvas.Path, evenOdd bool) {
 	rect := path.Bounds()
 	r.box = unionTextBox(r.box, Box{X: rect.X0, Y: -rect.Y1, W: rect.W(), H: rect.H()})
 	if r.collect {
-		r.contours = append(r.contours, ObjectContour{Path: path.Copy().Transform(canvas.Matrix{{1, 0, 0}, {0, -1, 0}}).ToSVG(), EvenOdd: evenOdd})
+		outline := &canvas.Path{}
+		for _, subpath := range path.Split() {
+			subpath = subpath.Copy()
+			subpath.Close()
+			outline = outline.Append(subpath)
+		}
+		r.contours = append(r.contours, ObjectContour{Path: outline.Transform(canvas.Matrix{{1, 0, 0}, {0, -1, 0}}).ToSVG(), EvenOdd: evenOdd})
 	}
 }
 

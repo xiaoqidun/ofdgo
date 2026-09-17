@@ -162,30 +162,48 @@ func (e *Editor) CompositeObjects(page int, path ObjectPath) ([]CompositeMember,
 // 入参: page 页面索引, path 父复合路径, index 成员序号
 // 返回: CompositeMember 独立成员快照, error 错误信息
 func (e *Editor) CompositeObject(page int, path ObjectPath, index int) (CompositeMember, error) {
-	reader, renderer, _, nodes, err := e.compositeScope(page, path)
+	members, err := e.CompositeObjectsAt(page, path, []int{index})
 	if err != nil {
 		return CompositeMember{}, err
 	}
-	defer reader.Close()
-	if index < 0 || index >= len(nodes) {
-		return CompositeMember{}, fmt.Errorf("composite member index %d out of range", index)
+	return members[0], nil
+}
+
+// CompositeObjectsAt 按输入顺序读取指定成员，一次解析范围且仅度量选区
+// 入参: page 页面索引, path 父复合路径, indexes 不重复的成员序号
+// 返回: []CompositeMember 独立成员快照, error 错误信息
+func (e *Editor) CompositeObjectsAt(page int, path ObjectPath, indexes []int) ([]CompositeMember, error) {
+	reader, renderer, _, nodes, err := e.compositeScope(page, path)
+	if err != nil {
+		return nil, err
 	}
-	member := e.measureCompositeMembers(renderer, nodes[index:index+1])[0]
-	position := ObjectPosition{}
-	for i, node := range nodes {
-		if node.span.parent != nodes[index].span.parent {
-			continue
+	defer reader.Close()
+	selected := make([]*editorCompositeNode, len(indexes))
+	seen := make(map[int]bool, len(indexes))
+	for i, index := range indexes {
+		if index < 0 || index >= len(nodes) || seen[index] {
+			return nil, fmt.Errorf("invalid composite member index %d", index)
 		}
+		seen[index] = true
+		selected[i] = nodes[index]
+	}
+	positions := make([]ObjectPosition, len(nodes))
+	containers := make(map[*editorXML]ObjectPosition)
+	for i, node := range nodes {
+		position := containers[node.span.parent]
 		if position.Count == 0 {
 			position.Container = fmt.Sprint(i)
 		}
-		if i == index {
-			position.Index = position.Count
-		}
+		positions[i] = ObjectPosition{Container: position.Container, Index: position.Count}
 		position.Count++
+		containers[node.span.parent] = position
 	}
-	member.Position = position
-	return member, nil
+	members := e.measureCompositeMembers(renderer, selected)
+	for i, index := range indexes {
+		members[i].Position = positions[index]
+		members[i].Position.Count = containers[nodes[index].span.parent].Count
+	}
+	return members, nil
 }
 
 // TransformCompositeObjects 在页面坐标中等比缩放并平移内部选区，只隔离被修改实例的资源
@@ -225,7 +243,7 @@ func (e *Editor) FlipCompositeObjects(page int, path ObjectPath, indexes []int, 
 	return e.changeCompositeObjects(page, path, indexes, func(box Box) Matrix { return compositeOrientation(box, m) })
 }
 
-// ResizeCompositeObjects 缩放内部选区到目标范围，无边框图片支持独立宽高，其他对象保持比例
+// ResizeCompositeObjects 按内部选区范围计算变换，图片及纯图片资源支持独立宽高，描边遵循OFD变换规则
 // 入参: page 页面索引, path 父复合对象路径, indexes 成员序号, box 页面毫米目标范围
 // 返回: error 错误信息
 func (e *Editor) ResizeCompositeObjects(page int, path ObjectPath, indexes []int, box Box) error {
@@ -247,8 +265,8 @@ func (e *Editor) ResizeCompositeObjects(page int, path ObjectPath, indexes []int
 		uniform := math.Abs(sx-sy) <= 1e-9*math.Max(sx, sy)
 		if !uniform {
 			for _, node := range nodes {
-				if node.object.Type != "ImageObject" || node.object.ImageObject.Border != nil {
-					return fmt.Errorf("nonuniform resizing requires images without borders")
+				if !e.objectStretchable(node.object, make(map[string]bool)) {
+					return fmt.Errorf("nonuniform resizing requires images or image-only groups")
 				}
 			}
 		} else {
@@ -504,6 +522,8 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		transform := node.transformable()
 		capability := ObjectCapabilities{Transform: transform, Arrange: transform && bounds.box.W > 0 && bounds.box.H > 0,
 			Delete: true, Copy: transform && editorXMLCopyable(node.node), Order: orderable[node.span.parent], ReplaceImage: node.object.Type == "ImageObject"}
+		capability.Ungroup = transform && capability.Order && e.compositeUngroupable(node.node) && (node.object.CompositeGraphicUnit.ResourceID != "" || len(node.object.CompositeGraphicUnit.Objects) != 0)
+		capability.Stretch = transform && e.objectStretchable(node.object, make(map[string]bool))
 		style, err := e.compositeMemberStyle(node)
 		if !transform {
 			capability.ReasonCode, capability.Reason = EditUnsupportedContainer, "composite member cannot be transformed"
@@ -779,6 +799,7 @@ func (e *Editor) transformCompositeMember(renderer *Renderer, n *editorComposite
 	}
 	local := inverse.Multiply(matrix).Multiply(n.parent)
 	if object.Type == "ImageObject" && object.ImageObject.Border != nil {
+		object.state = n.states[editorObjectID(object)]
 		origin := &editorObjectOrigin{data: n.data, node: n.node, object: n.object}
 		object, err = e.transformBorderedImage(object, local, origin, renderer)
 		if err != nil {

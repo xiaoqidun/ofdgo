@@ -67,7 +67,7 @@ type editorSourcePage struct {
 // Paint表示可独立修改纯色填充和描边，不要求重新排版文字
 // ReplaceImage表示可替换图片数据，CropImage表示可裁剪图片；内部裁剪与原裁剪取交集
 // MissingGlyphs提供缺字导致操作受限时的结构化诊断
-// Ungroup表示可移除内联组合容器并保留内部内容
+// Ungroup表示可移除组合容器并保留内部内容，Stretch表示图片及纯图片组合可独立调整宽高
 type ObjectCapabilities struct {
 	Update        bool
 	Paint         bool
@@ -84,6 +84,7 @@ type ObjectCapabilities struct {
 	Delete        bool
 	Order         bool
 	Ungroup       bool
+	Stretch       bool
 	Reason        string
 	ReasonCode    EditReason
 	MissingGlyphs *MissingGlyphError
@@ -366,6 +367,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 	all.ResetCrop = object.Type == "ImageObject" && object.state.crop != nil
 	origin := e.objectOrigin(id)
 	if origin == nil {
+		all.Stretch = object.Type == "ImageObject"
 		all.ReplaceImage = object.Type == "ImageObject"
 		all.CropImage = all.ReplaceImage
 		all.FitImage = all.ReplaceImage && axisAlignedMatrix(NewMatrix(object.ImageObject.CTM))
@@ -385,7 +387,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 		return ObjectCapabilities{Reason: err.Error(), ReasonCode: EditInvalidObject}, nil
 	}
 	all.Order = editorContainerOrderable(node.parent)
-	all.Ungroup = all.Order && editorUngroupable(node) && len(object.CompositeGraphicUnit.Objects) != 0
+	all.Ungroup = all.Order && e.compositeUngroupable(node) && (object.CompositeGraphicUnit.ResourceID != "" || len(object.CompositeGraphicUnit.Objects) != 0)
 	all.Copy = editorXMLCopyable(node) && (origin.reason == nil || object.Type == "PathObject" && editReason(origin.reason) == EditUnsupportedColor)
 	if origin.reason != nil {
 		all.Update, all.Reflow, all.ReplaceFont, all.Paint = false, false, false, false
@@ -412,6 +414,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 			all.Reflow = false
 		}
 	}
+	all.Stretch = all.Transform && e.objectStretchable(object, make(map[string]bool))
 	return all, nil
 }
 

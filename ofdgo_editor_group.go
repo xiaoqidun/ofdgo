@@ -103,36 +103,25 @@ func (e *Editor) GroupObjects(page int, ids []string) (string, error) {
 	return id, nil
 }
 
-// UngroupObject 展开内联组合，保留页面外观与裁剪，含容器行为或扩展的组合不拆解
+// UngroupObject 展开组合，保留页面外观与裁剪，资源引用分配独立标识，含容器行为或扩展的组合不拆解
 // 入参: page 页面索引, id 组合标识
 // 返回: []string 展开后的对象标识, error 错误信息
 func (e *Editor) UngroupObject(page int, id string) ([]string, error) {
-	objects, indexes, err := e.selectedObjects(page, []string{id})
+	_, indexes, err := e.selectedObjects(page, []string{id})
 	if err != nil {
 		return nil, err
 	}
 	origin := e.objectOrigin(id)
-	if origin == nil || !editorUngroupable(origin.node) || !editorContainerOrderable(origin.node.parent) || objects[0].CompositeGraphicUnit.ResourceID != "" {
+	if origin == nil || !editorContainerOrderable(origin.node.parent) {
 		return nil, fmt.Errorf("group container cannot be removed without losing attributes")
 	}
-	reader, _, _, nodes, err := e.compositeScope(page, ObjectPath{ID: id})
+	reader, renderer, root, _, err := e.compositeScope(page, ObjectPath{ID: id})
 	if err != nil {
 		return nil, err
 	}
-	reader.Close()
-	if len(nodes) == 0 {
-		return nil, fmt.Errorf("group has no objects")
-	}
-	members := make([]int, len(nodes))
-	for i := range members {
-		members[i] = i
-	}
-	selection, err := e.CaptureCompositeObjects(page, ObjectPath{ID: id}, members)
-	if err != nil {
-		return nil, err
-	}
+	defer reader.Close()
 	var result []string
-	err = e.pasteCompositeSelection(selection, func(objects []GraphicObject) error {
+	err = e.ungroupCompositeNode(renderer, root, func(objects []GraphicObject) error {
 		origins := make(map[string]*editorObjectOrigin, len(objects))
 		for i := range objects {
 			object := &objects[i]
@@ -149,14 +138,14 @@ func (e *Editor) UngroupObject(page int, id string) ([]string, error) {
 	return result, err
 }
 
-// editorUngroupable 判断移除内联容器是否会丢失对象行为或未知属性
+// editorUngroupable 判断移除容器是否会丢失对象行为或未知属性
 // 入参: node 容器节点
 // 返回: bool 是否可解组
 func editorUngroupable(node *editorXML) bool {
 	if node.name.Local != "CompositeObject" && node.name.Local != "CompositeGraphicUnit" {
 		return false
 	}
-	if !editorXMLAttributes(node, "ID Boundary CTM DrawParam Alpha Visible") {
+	if !editorXMLAttributes(node, "ID Boundary CTM DrawParam Alpha Visible ResourceID Width Height") {
 		return false
 	}
 	for _, child := range node.children {

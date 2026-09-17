@@ -264,6 +264,12 @@
 				<div class="form-actions"><div id="infoStatus" class="form-status" role="status"></div><button id="infoCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
+		<dialog id="annotationNote" class="form-dialog" aria-label="注解">
+			<form method="dialog">
+				<div id="annotationDetail" class="annotation-detail"></div>
+				<div class="form-actions"><button class="button" type="submit" autofocus>关闭</button></div>
+			</form>
+		</dialog>
 		<dialog id="pagePanel" class="form-dialog" aria-label="页面设置">
 			<form id="pageForm">
 				<div id="pageRangeRow" class="form-row" hidden><span>范围</span><output id="pageRange"></output></div>
@@ -443,10 +449,6 @@
 						<span id="signatureSummary" class="count-pill">0</span>
 					</div>
 					<div id="signatureList" class="signature-list"></div>
-				</section>
-				<section id="annotationPanel" class="annotation-panel" aria-labelledby="annotationPanelTitle" hidden>
-					<div id="annotationPanelTitle" class="panel-title">注解</div>
-					<div id="annotationList" class="annotation-list"></div>
 				</section>
 				<section class="doc-font-panel" aria-labelledby="docFontPanelTitle">
 					<div class="panel-row">

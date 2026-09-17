@@ -294,7 +294,7 @@ export class CanvasEditor {
 				svg.setAttribute("aria-hidden", "true");
 				svg.setAttribute("preserveAspectRatio", "none");
 				let contour;
-				if (object.type === "PathObject" && (!object.scoped || object.shape || object.oriented)) {
+				if (object.type === "PathObject" && (object.shape || object.oriented || !object.contours?.length)) {
 					const shape = object.shape || object.oriented?.kind;
 					contour = document.createElementNS("http://www.w3.org/2000/svg", shape === "line" ? "line" : shape === "ellipse" ? "ellipse" : shape === "rectangle" ? "rect" : "path");
 					if (!shape) contour.setAttribute("d", object.outline);
@@ -312,7 +312,7 @@ export class CanvasEditor {
 			this.nodes.set(node, item);
 			node.addEventListener("focus", () => this.select(item));
 			const handles = !canEditObject(object, "transform") ? [] : lineShape(object.shape) ? ["start", "end"]
-				: object.shape || object.oriented || object.type === "ImageObject" && !object.imageBorder ? ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
+				: object.shape || object.oriented || canEditObject(object, "stretch") ? ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
 					: object.type === "TextObject" && canEditObject(object, "reflow") && canEditObject(object, "layoutKnown")
 						? ["nw", "n", "ne", "e", "se", "s", "sw", "w"] : ["nw", "ne", "sw", "se"];
 			for (const corner of handles) {
@@ -629,7 +629,7 @@ export class CanvasEditor {
 			Object.assign(drag.item.node.style, { left: `${drag.box.x * PX_PER_MM}px`, width: `${drag.box.width * PX_PER_MM}px` });
 			return;
 		}
-		if (drag.item.type === "ImageObject" && !drag.item.imageBorder && drag.corner.length === 1) {
+		if (canEditObject(drag.item, "stretch") && drag.corner.length === 1) {
 			drag.box = reshapeBox({ geometry: drag.item }, to.x - from.x, to.y - from.y, drag.corner, false);
 			const sx = drag.box.width / drag.item.width, sy = drag.box.height / drag.item.height;
 			Object.assign(drag.item.node.style, { left: `${drag.box.x * PX_PER_MM}px`, top: `${drag.box.y * PX_PER_MM}px`,
@@ -763,7 +763,7 @@ export class CanvasEditor {
 			this.viewer.releasePointerCapture(drag.pointerID);
 			const geometry = drag.item.oriented?.box || drag.item.geometry || (drag.item.textFrame ? { x: drag.item.x, width: drag.item.textFrame.width } : drag.item);
 			const changed = Object.keys(drag.box).some((key) => drag.box[key] !== geometry[key]);
-			const apply = drag.item.shape || drag.item.oriented ? this.options.onReshape : drag.item.type === "ImageObject" ? this.options.onResize : this.options.onTextWidth;
+			const apply = drag.item.shape || drag.item.oriented ? this.options.onReshape : canEditObject(drag.item, "stretch") ? this.options.onResize : this.options.onTextWidth;
 			Promise.resolve(changed && apply(drag.item, drag.box)).finally(() => {
 				drag.preview?.remove();
 				this.place(drag.item);
