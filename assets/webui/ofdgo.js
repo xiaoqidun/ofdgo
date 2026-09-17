@@ -55,7 +55,7 @@ const state = {
 	outlineExpanded: new Map(),
 	textFonts: [],
 	textFontID: null,
-	textDefaults: { type: "TextObject", size: 12 * 25.4 / 72, color: "#000000", wrap: true, align: "left", paragraphHeight: 0, letterSpacing: 0 },
+	textDefaults: { type: "TextObject", size: 16 * 25.4 / 72, color: "#000000", wrap: true, align: "left", paragraphHeight: 0, letterSpacing: 0 },
 	ofdBytes: null,
 	fileName: "ofdgo.ofd",
 	openSeq: 0,
@@ -802,8 +802,10 @@ el.searchInput.addEventListener("input", () => resetSearch(false));
 el.searchPrev.addEventListener("click", () => selectSearchMatch(Math.max(0, state.searchIndex) - 1));
 el.searchNext.addEventListener("click", () => selectSearchMatch(state.searchIndex + 1));
 document.addEventListener("keydown", handleKeyDown);
-document.addEventListener("keydown", () => el.viewerPanel.classList.remove("pointer-focus"), true);
-document.addEventListener("pointerdown", () => el.viewerPanel.classList.add("pointer-focus"), true);
+document.addEventListener("keydown", event => {
+	if (event.key === "Tab") el.viewerPanel.classList.add("keyboard-focus");
+}, true);
+document.addEventListener("pointerdown", () => el.viewerPanel.classList.remove("keyboard-focus"), true);
 el.fontAddButton.addEventListener("click", () => openFontFile(el.fontInput));
 el.fontDirectoryButton.addEventListener("click", () => openFontFile(el.fontDirectoryInput));
 el.localFontButton.addEventListener("click", loadLocalFonts);
@@ -960,7 +962,7 @@ function handleKeyDown(event) {
 			state.showPages = false;
 			updateSidebarState();
 		}
-		el.viewerPanel.focus({ preventScroll: true });
+		canvasEditor.focus();
 		return;
 	}
 	if (key === "Enter" && target === el.pageInput && !event.shiftKey) {
@@ -1424,7 +1426,7 @@ async function enterCompositeScope(index, key) {
 		if (page && surface) mountEditorObjects(index, page, surface);
 		updateControls();
 		setStatus(pageStatus(index, state.doc.pageCount));
-		el.viewerPanel.focus({ preventScroll: true });
+		canvasEditor.focus();
 	} catch (err) {
 		if (openSeq === state.openSeq) showError(err, false);
 	} finally {
@@ -1439,7 +1441,7 @@ async function exitCompositeScope() {
 	if (split >= 0) return enterCompositeScope(scope.index, scope.key.slice(0, split));
 	resetCompositeScope();
 	updateControls();
-	el.viewerPanel.focus({ preventScroll: true });
+	canvasEditor.focus();
 }
 
 async function startImageCrop(item) {
@@ -1524,7 +1526,7 @@ async function toggleTextTool() {
 	state.selectObjects = true;
 	setPan(false);
 	canvasEditor.setTool("text");
-	el.viewerPanel.focus({ preventScroll: true });
+	canvasEditor.focus();
 }
 
 async function beginCanvasText(index, box, surface, page) {
@@ -1684,7 +1686,7 @@ async function insertObject(event) {
 		}
 		el.insertPanel.close();
 		if (item && doc.revision === state.editorInfo?.revision) {
-			el.viewerPanel.focus({ preventScroll: true });
+			canvasEditor.focus();
 			return;
 		}
 		setEditorInfo(doc);
@@ -1695,7 +1697,7 @@ async function insertObject(event) {
 		await refreshEditorPage(doc, index, openSeq);
 		if (openSeq === state.openSeq) {
 			rememberEditorView(before, revision, !item && !!state.composite);
-			el.viewerPanel.focus({ preventScroll: true });
+			canvasEditor.focus();
 		}
 	} catch (err) {
 		if (openSeq === state.openSeq) {
@@ -1846,7 +1848,7 @@ function toggleDrawingTool(tool) {
 	state.selectObjects = true;
 	setPan(false);
 	canvasEditor.setTool(next);
-	el.viewerPanel.focus({ preventScroll: true });
+	canvasEditor.focus();
 }
 
 function updateDrawingControls() {
@@ -1972,7 +1974,7 @@ async function changeDocument(name, item, ...args) {
 		}
 		if (openSeq === state.openSeq) {
 			if (!restoring) rememberEditorView(before, revision, reindex);
-			if (!toolbarFocus) el.viewerPanel.focus({ preventScroll: true });
+			if (!toolbarFocus) canvasEditor.focus();
 			return true;
 		}
 	} catch (err) {
@@ -3036,7 +3038,7 @@ async function openDocument(options = {}) {
 		const page = options.keepPreview ? state.pageCache.get(pageIndex)
 			: await renderPage(pageIndex, { keepBusy: true, scroll: false, openSeq });
 		if (page && options.resetScroll) {
-			el.viewerPanel.focus({ preventScroll: true });
+			canvasEditor.focus();
 		}
 		queueNearbyPages(pageIndex, openSeq);
 		loadDocumentDetails(openSeq);
@@ -3516,8 +3518,9 @@ async function processPageRenderQueue() {
 						task.resolve(null);
 						continue;
 					}
-					page.cacheBytes = (page.svg.length + page.text.length) * 2;
+					page.cacheBytes = (page.svg.length + page.text.length + page.annotations.length) * 2;
 					page.text = JSON.parse(page.text);
+					page.annotations = JSON.parse(page.annotations);
 					state.pageCache.set(task.index, page);
 				}
 				task.resolve(page);
@@ -3612,35 +3615,88 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 	if (state.editorInfo) {
 		mountEditorObjects(index, page, surface);
 	}
-	mountAnnotationNotes(index, surface);
-	for (const link of page.links) {
+	mountAnnotationNotes(index, surface, page.annotations);
+	mountPageLinks(page, surface);
+	shell.classList.add("rendered");
+	renderSearchHighlights(index);
+	if (state.doc?.pages?.[index]) {
+		layoutPageShell(shell, state.doc.pages[index]);
+	}
+}
+
+function pageLinkTarget(link) {
+	if (link.dest) {
+		const target = state.doc.pages.findIndex(page => page.id === link.dest.pageID);
+		return { href: target < 0 ? "#" : `#page-${target + 1}`, title: target < 0 ? "文档链接" : `第${target + 1}页`, activate: () => navigateDestination(link.dest) };
+	}
+	if (link.attachment) {
+		return { href: "#", title: link.fileName ? `下载附件：${link.fileName}` : "下载附件", activate: () => {
+			if (!link.fileName) { setStatus("附件不存在"); return; }
+			return downloadAttachment({ id: link.attachment, fileName: link.fileName });
+		} };
+	}
+	let url;
+	try { url = new URL(link.uri); } catch { return null; }
+	if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+	return { href: url.href, title: url.href, external: true, activate: () => { window.open(url.href, "_blank", "noopener,noreferrer"); } };
+}
+
+function mountPageLinks(page, surface) {
+	const groups = new Map();
+	const mounted = new Map();
+	for (const [index, link] of page.links.entries()) {
+		const target = pageLinkTarget(link);
+		if (!target) continue;
+		target.order = index;
+		const key = link.group ? JSON.stringify([link.group, link.x, link.y, link.width, link.height, link.path]) : index;
+		if (!groups.has(key)) groups.set(key, { link, targets: [] });
+		groups.get(key).targets.push(target);
+	}
+	for (const { link, targets } of groups.values()) {
 		const anchor = document.createElement("a");
 		anchor.className = "page-link";
-		if (link.dest) {
-			const target = state.doc.pages.findIndex(page => page.id === link.dest.pageID);
-			anchor.href = target < 0 ? "#" : `#page-${target + 1}`;
-			anchor.title = target < 0 ? "文档链接" : `第${target + 1}页`;
-			anchor.addEventListener("click", event => { event.preventDefault(); navigateDestination(link.dest); });
-		} else {
-			let url;
-			try { url = new URL(link.uri); } catch { continue; }
-			if (url.protocol !== "http:" && url.protocol !== "https:") continue;
-			anchor.href = url.href;
+		anchor.href = targets[0].href;
+		anchor.title = targets[0].title;
+		mounted.set(anchor, { link, targets });
+		if (!link.group && targets[0].external) {
 			anchor.target = "_blank";
 			anchor.rel = "noopener noreferrer";
-			anchor.title = url.href;
+		} else {
+			anchor.addEventListener("click", async event => {
+				event.preventDefault();
+				if (document.body.hasAttribute("aria-busy")) return;
+				const openSeq = state.openSeq;
+				let actions = targets;
+				if (event.detail && link.group) {
+					const matches = new Set();
+					for (const node of document.elementsFromPoint(event.clientX, event.clientY)) {
+						const entry = mounted.get(node.closest(".page-link"));
+						if (entry?.link.group === link.group) entry.targets.forEach(target => matches.add(target));
+					}
+					actions = [...matches].sort((a, b) => a.order - b.order);
+				}
+				for (const target of actions) {
+					if (openSeq !== state.openSeq) break;
+					await target.activate();
+				}
+			});
 		}
 		anchor.setAttribute("aria-label", anchor.title);
 		anchor.style.left = `${link.x / page.width * 100}%`;
 		anchor.style.top = `${link.y / page.height * 100}%`;
 		anchor.style.width = `${link.width / page.width * 100}%`;
 		anchor.style.height = `${link.height / page.height * 100}%`;
+		if (link.path) {
+			anchor.classList.add("page-region-link");
+			const region = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+			region.setAttribute("viewBox", `${link.x} ${link.y} ${link.width} ${link.height}`);
+			region.setAttribute("aria-hidden", "true");
+			const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+			path.setAttribute("d", link.path);
+			region.append(path);
+			anchor.append(region);
+		}
 		surface.append(anchor);
-	}
-	shell.classList.add("rendered");
-	renderSearchHighlights(index);
-	if (state.doc?.pages?.[index]) {
-		layoutPageShell(shell, state.doc.pages[index]);
 	}
 }
 
@@ -4121,6 +4177,7 @@ function layoutPageShell(shell, page) {
 		const y = state.rotation >= 180 ? viewHeight : 0;
 		surface.style.transform = `scale(${scale}) translate(${x}px, ${y}px) rotate(${state.rotation}deg)`;
 		surface.style.setProperty("--surface-scale", String(scale));
+		surface.style.setProperty("--surface-rotation", `${state.rotation}deg`);
 		surface.classList.toggle("sideways", state.rotation % 180 !== 0);
 	}
 }
@@ -4920,7 +4977,6 @@ function renderMeta(keepDetails = false) {
 	el.metaSignatures.textContent = doc.detailsPending ? "正在检查" : doc.detailsError ? "读取失败" : String(doc.signatureCount || 0);
 	renderMetaContent(el.attachmentList, [doc.attachments, doc.attachmentError], renderAttachments);
 	renderMetaContent(el.signatureList, [doc.signatures, doc.signatureError], renderSignatures);
-	renderAnnotations();
 	renderMetaContent(el.docFontList, doc.fonts || [], renderDocumentFonts);
 	updateTextFonts(canvasEditor.selected, true);
 	updateLocalFontButton();
@@ -5189,21 +5245,17 @@ function clearRegionHighlights() {
 	}
 }
 
-function renderAnnotations() {
-	for (const shell of el.svgHost.querySelectorAll(".page-shell.rendered")) {
-		mountAnnotationNotes(Number(shell.dataset.pageIndex), shell.querySelector(".page-surface"));
-	}
-}
-
-function mountAnnotationNotes(index, surface) {
+function mountAnnotationNotes(index, surface, annotations) {
 	for (const note of surface.querySelectorAll(".annotation-note")) note.remove();
 	if (!state.renderAnnotations) return;
 	const page = state.doc.pages[index];
-	for (const annotation of state.doc.annotations || []) {
+	for (const annotation of annotations || []) {
 		if (!annotation.visible || annotation.page !== index + 1 || !annotation.remark?.trim()) continue;
 		const note = document.createElement("button");
 		note.type = "button";
 		note.className = "annotation-note";
+		note.classList.toggle("no-zoom", !!annotation.noZoom);
+		note.classList.toggle("no-rotate", !!annotation.noRotate);
 		note.textContent = "\u24d8";
 		note.title = "查看注解";
 		note.setAttribute("aria-label", "查看注解");
@@ -5408,7 +5460,7 @@ function startPan(event) {
 	state.pan = { id: event.pointerId, x: event.clientX + el.viewerPanel.scrollLeft, y: event.clientY + el.viewerPanel.scrollTop };
 	el.viewerPanel.setPointerCapture(event.pointerId);
 	el.viewerPanel.classList.add("panning");
-	el.viewerPanel.focus({ preventScroll: true });
+	canvasEditor.focus();
 }
 
 function movePan(event) {

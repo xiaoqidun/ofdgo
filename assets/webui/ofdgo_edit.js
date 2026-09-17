@@ -242,6 +242,11 @@ export class CanvasEditor {
 		window.addEventListener("resize", () => this.cancel());
 	}
 
+	focus() {
+		this.viewer.classList.remove("keyboard-focus");
+		this.viewer.focus({ preventScroll: true });
+	}
+
 	setEnabled(enabled) {
 		this.enabled = enabled;
 		this.viewer.classList.toggle("editing-select", enabled);
@@ -499,7 +504,7 @@ export class CanvasEditor {
 				return;
 			}
 			event.preventDefault();
-			this.viewer.focus({ preventScroll: true });
+			this.focus();
 			const { item, box } = this.crop;
 			this.drag = { crop: true, box: { ...box }, pointerID: event.pointerId, corner: resizeCorner(this.crop.node, event),
 				page: item.page, rect: item.surface.getBoundingClientRect(), rotation: this.options.rotation(), clientX: event.clientX, clientY: event.clientY };
@@ -520,7 +525,7 @@ export class CanvasEditor {
 		const target = event.target.dataset.corner || direct && !direct.contours ? direct : this.itemsAt(event)[0];
 		if (node || target) event.preventDefault();
 		node = target?.node;
-		this.viewer.focus({ preventScroll: true });
+		this.focus();
 		const additive = event.shiftKey || event.ctrlKey || event.metaKey || this.multiple;
 		if (!target) {
 			this.startMarquee(event, additive);
@@ -579,7 +584,7 @@ export class CanvasEditor {
 		const items = this.itemsAt(event);
 		if (!items.length) return;
 		event.preventDefault();
-		this.viewer.focus({ preventScroll: true });
+		this.focus();
 		this.select(items[(items.indexOf(this.selected) + 1) % items.length]);
 	}
 
@@ -804,7 +809,7 @@ export class CanvasEditor {
 		const page = this.pages.get(surface);
 		if (!page) return;
 		event.preventDefault();
-		this.viewer.focus({ preventScroll: true });
+		this.focus();
 		this.drag = { erase: this.tool, page, surface, items: [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)),
 			erased: new Set(), shape: "rectangle", pointerID: event.pointerId, clientX: event.clientX, clientY: event.clientY,
 			rect: surface.getBoundingClientRect(), rotation: this.options.rotation() };
@@ -878,7 +883,7 @@ export class CanvasEditor {
 			return;
 		}
 		event.preventDefault();
-		this.viewer.focus({ preventScroll: true });
+		this.focus();
 		const shape = this.tool;
 		const style = this.options.drawStyle();
 		if (lineShape(shape)) {
@@ -1117,7 +1122,7 @@ export class CanvasEditor {
 			if (event.key === "Escape") {
 				event.preventDefault();
 				this.closeText();
-				this.viewer.focus({ preventScroll: true });
+				this.focus();
 			} else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
 				event.preventDefault();
 				this.commitText();
@@ -1224,7 +1229,7 @@ export class CanvasEditor {
 		item.surface.classList.add("cropping");
 		this.crop = { item, box, initialBox: { ...box }, node, mask, preview, original, pagePreview };
 		this.paintCrop();
-		this.viewer.focus({ preventScroll: true });
+		this.focus();
 	}
 
 	paintCrop() {

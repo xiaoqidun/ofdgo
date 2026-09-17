@@ -180,7 +180,7 @@ func (r *Renderer) renderPageToContext(ctx *canvas.Context, page *PageContent, d
 	return nil
 }
 
-// PageLinks 获取页面及可见注释的矩形链接，解析书签目标，不包含自定义Region
+// PageLinks 获取页面、模板和可见注释的点击链接，包含复杂区域、组合图元和附件动作
 // 入参: page 页面内容
 // 返回: []PageLink 页面链接, error 错误信息
 func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
@@ -188,20 +188,23 @@ func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
 	if err != nil {
 		return nil, err
 	}
-	sources := pageActionSources(page, box)
+	sources := r.pageActionSources(page, box)
 	if r.RenderAnnotations {
-		sources = append(sources, annotationActionSources(r.Reader.Annots[page.ID])...)
+		sources = append(sources, r.annotationActionSources(r.Reader.Annots[page.ID])...)
 	}
 	var links []PageLink
 	var bookmarks map[string]Dest
-	for _, source := range sources {
-		if source.Box.W <= 0 || source.Box.H <= 0 {
-			continue
-		}
+	for sourceIndex, source := range sources {
+		start := len(links)
 		for _, action := range source.Actions {
-			if action.Event != "CLICK" || action.Region != nil {
+			if action.Event != "CLICK" {
 				continue
 			}
+			box, path := actionLinkRegion(source, action)
+			if box.W <= 0 || box.H <= 0 {
+				continue
+			}
+			link := PageLink{Box: box, Path: path}
 			if action.Goto != nil {
 				if bookmarks == nil {
 					doc, err := r.Reader.Doc()
@@ -215,10 +218,20 @@ func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
 				}
 				if dest := gotoDest(action.Goto, bookmarks); dest != nil {
 					value := *dest
-					links = append(links, PageLink{Dest: &value, Box: source.Box})
+					link.Dest = &value
+					links = append(links, link)
 				}
 			} else if action.URI != nil && action.URI.URI != "" {
-				links = append(links, PageLink{URI: resolveActionURI(*action.URI), Box: source.Box})
+				link.URI = resolveActionURI(*action.URI)
+				links = append(links, link)
+			} else if action.GotoA != nil {
+				link.Attachment = action.GotoA.AttachID
+				links = append(links, link)
+			}
+		}
+		if len(links)-start > 1 {
+			for i := start; i < len(links); i++ {
+				links[i].Group = sourceIndex + 1
 			}
 		}
 	}

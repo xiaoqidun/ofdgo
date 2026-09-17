@@ -114,25 +114,24 @@ type Session struct {
 
 // DocumentInfo 文档信息
 type DocumentInfo struct {
-	Version         string                 `json:"version"`
-	DocType         string                 `json:"docType"`
-	Title           string                 `json:"title"`
-	Author          string                 `json:"author"`
-	Subject         string                 `json:"subject"`
-	CreationDate    string                 `json:"creationDate"`
-	ModDate         string                 `json:"modDate"`
-	PageCount       int                    `json:"pageCount"`
-	FontCount       int                    `json:"fontCount"`
-	SignatureCount  int                    `json:"signatureCount"`
-	SignatureError  string                 `json:"signatureError,omitempty"`
-	AttachmentError string                 `json:"attachmentError,omitempty"`
-	Attachments     []AttachmentInfo       `json:"attachments,omitempty"`
-	Fonts           []FontInfo             `json:"fonts"`
-	Signatures      []SignatureInfo        `json:"signatures"`
-	Annotations     []ofdgo.AnnotationInfo `json:"annotations,omitempty"`
-	Pages           []PageInfo             `json:"pages"`
-	Outlines        []OutlineInfo          `json:"outlines,omitempty"`
-	DetailsPending  bool                   `json:"detailsPending,omitempty"`
+	Version         string           `json:"version"`
+	DocType         string           `json:"docType"`
+	Title           string           `json:"title"`
+	Author          string           `json:"author"`
+	Subject         string           `json:"subject"`
+	CreationDate    string           `json:"creationDate"`
+	ModDate         string           `json:"modDate"`
+	PageCount       int              `json:"pageCount"`
+	FontCount       int              `json:"fontCount"`
+	SignatureCount  int              `json:"signatureCount"`
+	SignatureError  string           `json:"signatureError,omitempty"`
+	AttachmentError string           `json:"attachmentError,omitempty"`
+	Attachments     []AttachmentInfo `json:"attachments,omitempty"`
+	Fonts           []FontInfo       `json:"fonts"`
+	Signatures      []SignatureInfo  `json:"signatures"`
+	Pages           []PageInfo       `json:"pages"`
+	Outlines        []OutlineInfo    `json:"outlines,omitempty"`
+	DetailsPending  bool             `json:"detailsPending,omitempty"`
 }
 
 // OutlineInfo 目录节点信息
@@ -157,15 +156,16 @@ type PageInfo struct {
 
 // PageSVG 页面SVG结果
 type PageSVG struct {
-	Index  int              `json:"index"`
-	Number int              `json:"number"`
-	ID     string           `json:"id"`
-	Width  float64          `json:"width"`
-	Height float64          `json:"height"`
-	SVG    string           `json:"svg"`
-	Links  []ofdgo.PageLink `json:"-"`
-	Fonts  []ofdgo.SVGFont  `json:"-"`
-	Images []ofdgo.SVGImage `json:"-"`
+	Index       int                    `json:"index"`
+	Number      int                    `json:"number"`
+	ID          string                 `json:"id"`
+	Width       float64                `json:"width"`
+	Height      float64                `json:"height"`
+	SVG         string                 `json:"svg"`
+	Links       []ofdgo.PageLink       `json:"-"`
+	Fonts       []ofdgo.SVGFont        `json:"-"`
+	Images      []ofdgo.SVGImage       `json:"-"`
+	Annotations []ofdgo.AnnotationInfo `json:"annotations,omitempty"`
 }
 
 // ExportFormat 导出格式
@@ -391,7 +391,6 @@ func (s *Session) Info() DocumentInfo {
 		Pages:     make([]PageInfo, 0, len(s.doc.Pages.Page)),
 		Outlines:  s.doc.OutlineInfos(),
 	}
-	info.Annotations, _ = s.Reader.AnnotationInfos()
 	if attachments, err := s.Reader.Attachments(); err == nil {
 		for _, attachment := range attachments {
 			if attachment.Visible {
@@ -468,11 +467,15 @@ func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
 	if err != nil {
 		return PageSVG{}, err
 	}
+	annotations, err := s.Reader.AnnotationInfosByIndex(index)
+	if err != nil {
+		return PageSVG{}, err
+	}
 	for i, font := range resources.Fonts {
 		s.svgFonts[font.Name] = font.Data
 		resources.Fonts[i].Data = nil
 	}
-	return PageSVG{Index: index, Number: index + 1, ID: page.ID, Width: box.W, Height: box.H, SVG: buf.String(), Links: links, Fonts: resources.Fonts, Images: resources.Images}, nil
+	return PageSVG{Index: index, Number: index + 1, ID: page.ID, Width: box.W, Height: box.H, SVG: buf.String(), Links: links, Fonts: resources.Fonts, Images: resources.Images, Annotations: annotations}, nil
 }
 
 // SVGFontData 获取已渲染页面引用的字体数据

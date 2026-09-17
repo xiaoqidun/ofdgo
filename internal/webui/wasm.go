@@ -28,6 +28,7 @@ import (
 	"image/color"
 	"io"
 	"math"
+	"path"
 	"strconv"
 	"strings"
 	"syscall/js"
@@ -363,10 +364,22 @@ func renderPage(args []js.Value) (any, error) {
 	for i, link := range page.Links {
 		item := map[string]any{
 			"uri":    link.URI,
+			"path":   link.Path,
+			"group":  link.Group,
 			"x":      link.Box.X,
 			"y":      link.Box.Y,
 			"width":  link.Box.W,
 			"height": link.Box.H,
+		}
+		if link.Attachment != "" {
+			item["attachment"] = link.Attachment
+			attachments, _ := currentSession.Reader.Attachments()
+			for _, attachment := range attachments {
+				if attachment.ID == link.Attachment {
+					item["fileName"] = path.Base(currentSession.Reader.ResPath(attachment.FileLoc))
+					break
+				}
+			}
 		}
 		if dest := link.Dest; dest != nil {
 			item["dest"] = map[string]any{"type": dest.Type, "pageID": dest.PageID, "left": dest.Left, "top": dest.Top,
@@ -378,18 +391,23 @@ func renderPage(args []js.Value) (any, error) {
 	for i, font := range page.Fonts {
 		fonts[i] = map[string]any{"name": font.Name, "weight": font.Weight, "style": font.Style}
 	}
+	annotations, err := json.Marshal(page.Annotations)
+	if err != nil {
+		return nil, err
+	}
 	return successResult(map[string]any{
-		"index":   page.Index,
-		"number":  page.Number,
-		"id":      page.ID,
-		"width":   page.Width,
-		"height":  page.Height,
-		"svg":     page.SVG,
-		"links":   links,
-		"fonts":   fonts,
-		"images":  svgImagesToJS(page.Images),
-		"text":    string(textData),
-		"objects": objects,
+		"annotations": string(annotations),
+		"index":       page.Index,
+		"number":      page.Number,
+		"id":          page.ID,
+		"width":       page.Width,
+		"height":      page.Height,
+		"svg":         page.SVG,
+		"links":       links,
+		"fonts":       fonts,
+		"images":      svgImagesToJS(page.Images),
+		"text":        string(textData),
+		"objects":     objects,
 	}), nil
 }
 

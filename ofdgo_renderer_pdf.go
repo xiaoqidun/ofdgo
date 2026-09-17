@@ -95,16 +95,20 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []pdfPage) *pdfNa
 		}
 	}
 	for i, page := range pages {
-		sources := pageActionSources(page.Content, page.Box)
+		sources := renderer.pageActionSources(page.Content, page.Box)
 		if renderer.RenderAnnotations {
-			sources = append(sources, annotationActionSources(renderer.Reader.Annots[page.Content.ID])...)
+			sources = append(sources, renderer.annotationActionSources(renderer.Reader.Annots[page.Content.ID])...)
 		}
 		for _, source := range sources {
-			rect := pdfSourceRect(source.Box, page.Box.H)
 			for _, action := range source.Actions {
 				if action.Event != "CLICK" {
 					continue
 				}
+				box, _ := actionLinkRegion(source, action)
+				if box.W <= 0 || box.H <= 0 {
+					continue
+				}
+				rect := pdfSourceRect(box, page.Box.H)
 				navigation.addAction(i, rect, action, bookmarks, pageIndex, pages)
 			}
 		}

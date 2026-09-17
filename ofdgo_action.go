@@ -18,6 +18,8 @@ import (
 	"encoding/xml"
 	"net/url"
 	"strconv"
+
+	"github.com/tdewolff/canvas"
 )
 
 // Action 动作
@@ -59,11 +61,16 @@ type URI struct {
 	Base string `xml:"Base,attr"`
 }
 
-// PageLink 页面矩形链接，URI与Dest分别表示外链和文档内跳转，Box使用页面毫米坐标
+// PageLink 页面链接，URI、Dest和Attachment分别表示外链、文档内跳转和附件
+// Box使用页面毫米坐标，Path为可选的页面坐标SVG路径，存在时作为精确点击区域
+// 同一来源的多个动作共享非零Group，组内按返回顺序执行
 type PageLink struct {
-	URI  string
-	Box  Box
-	Dest *Dest
+	URI        string
+	Box        Box
+	Dest       *Dest
+	Attachment string
+	Path       string
+	Group      int
 }
 
 // GotoA 附件动作
@@ -114,6 +121,8 @@ type RegionCommand struct {
 type actionSource struct {
 	Box     Box
 	Actions []Action
+	Matrix  Matrix
+	Path    string
 }
 
 // gotoDest 获取文档内跳转目标
@@ -229,17 +238,48 @@ func actionFloatAttr(start xml.StartElement, name string) float64 {
 // pageActionSources 获取页面动作来源
 // 入参: page 页面内容, box 页面区域
 // 返回: []actionSource 动作来源
-func pageActionSources(page *PageContent, box Box) []actionSource {
+func (r *Renderer) pageActionSources(page *PageContent, box Box) []actionSource {
 	sources := make([]actionSource, 0)
 	if len(page.Actions) > 0 {
 		sources = append(sources, actionSource{
 			Box:     Box{W: box.W, H: box.H},
 			Actions: page.Actions,
+			Matrix:  IdentityMatrix,
 		})
 	}
-	for _, layer := range page.Content.Layer {
+	for order := range 3 {
+		if r.Reader.doc != nil {
+			for _, ref := range page.Template {
+				kind := ref.ZOrder
+				if kind == "" {
+					kind = "Background"
+				}
+				if layerOrder(kind) != order {
+					continue
+				}
+				if template := r.loadTemplate(ref.TemplateID); template != nil {
+					sources = append(sources, actionSource{Box: Box{W: box.W, H: box.H}, Actions: template.Actions, Matrix: IdentityMatrix})
+					for templateOrder := range 3 {
+						sources = r.appendLayerActionSources(sources, template.Content.Layer, templateOrder)
+					}
+				}
+			}
+		}
+		sources = r.appendLayerActionSources(sources, page.Content.Layer, order)
+	}
+	return sources
+}
+
+// appendLayerActionSources 按绘制顺序添加图层动作来源
+// 入参: sources 动作来源, layers 页面图层, order 图层顺序
+// 返回: []actionSource 动作来源
+func (r *Renderer) appendLayerActionSources(sources []actionSource, layers []Layer, order int) []actionSource {
+	for _, layer := range layers {
+		if layerOrder(layer.Type) != order {
+			continue
+		}
 		for _, object := range layer.Objects {
-			sources = appendGraphicActionSources(sources, object, nil)
+			sources = r.appendGraphicActionSources(sources, object, IdentityMatrix, false, nil)
 		}
 	}
 	return sources
@@ -248,7 +288,7 @@ func pageActionSources(page *PageContent, box Box) []actionSource {
 // annotationActionSources 获取注释动作来源
 // 入参: annotations 页面注释
 // 返回: []actionSource 动作来源
-func annotationActionSources(annotations []Annotation) []actionSource {
+func (r *Renderer) annotationActionSources(annotations []Annotation) []actionSource {
 	sources := make([]actionSource, 0)
 	for _, annotation := range annotations {
 		if annotation.Visible != nil && !*annotation.Visible {
@@ -259,49 +299,160 @@ func annotationActionSources(annotations []Annotation) []actionSource {
 			continue
 		}
 		for _, object := range annotation.Appearance.Objects {
-			sources = appendGraphicActionSources(sources, object, &box)
+			sources = r.appendGraphicActionSources(sources, object, TranslationMatrix(box.X, box.Y), false, nil)
 		}
 	}
 	return sources
 }
 
 // appendGraphicActionSources 添加图形对象动作来源
-// 入参: sources 动作来源, object 图形对象, box 指定动作区域
+// 入参: sources 动作来源, object 图形对象, parent 父级变换, boundaryInCTM 边界是否参与父级变换, seen 当前资源引用链
 // 返回: []actionSource 动作来源
-func appendGraphicActionSources(sources []actionSource, object GraphicObject, box *Box) []actionSource {
-	var boundary string
+func (r *Renderer) appendGraphicActionSources(sources []actionSource, object GraphicObject, parent Matrix, boundaryInCTM bool, seen map[string]bool) []actionSource {
+	var boundary, ctm, resource string
 	var actions []Action
 	var children []GraphicObject
+	composite := false
 	switch object.Type {
 	case "TextObject":
 		boundary = object.TextObject.Boundary
+		ctm = object.TextObject.CTM
 		actions = object.TextObject.Actions
 	case "PathObject":
 		boundary = object.PathObject.Boundary
+		ctm = object.PathObject.CTM
 		actions = object.PathObject.Actions
 	case "ImageObject":
 		boundary = object.ImageObject.Boundary
+		ctm = object.ImageObject.CTM
 		actions = object.ImageObject.Actions
 	case "CompositeGraphicUnit", "CompositeObject":
 		boundary = object.CompositeGraphicUnit.Boundary
+		ctm = object.CompositeGraphicUnit.CTM
+		resource = object.CompositeGraphicUnit.ResourceID
 		actions = object.CompositeGraphicUnit.Actions
 		children = object.CompositeGraphicUnit.Objects
+		composite = true
 	}
+	box, _ := ParseBox(boundary)
+	placement := TranslationMatrix(box.X, box.Y).Multiply(parent)
+	if boundaryInCTM || composite {
+		placement = parent.Multiply(TranslationMatrix(box.X, box.Y))
+	}
+	matrix := placement.Multiply(NewMatrix(ctm))
 	if len(actions) > 0 {
-		sourceBox := box
-		if sourceBox == nil && boundary != "" {
-			if value, err := ParseBox(boundary); err == nil {
-				sourceBox = &value
-			}
+		source := actionSource{Box: placement.TransformBox(Box{W: box.W, H: box.H}), Actions: actions, Matrix: matrix}
+		if placement.a == 1 && placement.b == 0 && placement.c == 0 && placement.d == 1 {
+			source.Box.W, source.Box.H = box.W, box.H
 		}
-		if sourceBox != nil {
-			sources = append(sources, actionSource{Box: *sourceBox, Actions: actions})
+		if box.W > 0 && box.H > 0 && !axisAlignedMatrix(placement) {
+			source.Path = canvas.Rectangle(box.W, box.H).Transform(actionCanvasMatrix(placement)).ToSVG()
+		}
+		sources = append(sources, source)
+	}
+	if resource != "" && !seen[resource] {
+		if unit := r.CompositeGraphicUnits[resource]; unit != nil {
+			if seen == nil {
+				seen = make(map[string]bool)
+			}
+			seen[resource] = true
+			sources = r.appendGraphicActionSources(sources, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: *unit}, matrix, true, seen)
+			delete(seen, resource)
 		}
 	}
 	for _, child := range children {
-		sources = appendGraphicActionSources(sources, child, box)
+		sources = r.appendGraphicActionSources(sources, child, matrix, boundaryInCTM, seen)
 	}
 	return sources
+}
+
+// actionCanvasMatrix 转换页面坐标矩阵，不翻转Y轴
+// 入参: matrix 页面变换
+// 返回: canvas.Matrix 路径变换
+func actionCanvasMatrix(matrix Matrix) canvas.Matrix {
+	return canvas.Matrix{{matrix.a, matrix.c, matrix.e}, {matrix.b, matrix.d, matrix.f}}
+}
+
+// actionRegionPath 解析复杂点击区域并转换为页面坐标
+// 入参: region 动作区域, matrix 坐标变换
+// 返回: *canvas.Path 点击路径
+func actionRegionPath(region *Region, matrix Matrix) *canvas.Path {
+	path := &canvas.Path{}
+	for _, area := range region.Area {
+		start := parseFloats(area.Start)
+		if len(start) != 2 {
+			continue
+		}
+		part := &canvas.Path{}
+		part.MoveTo(start[0], start[1])
+		for _, command := range area.Command {
+			p1, p2, p3 := parseFloats(command.Point1), parseFloats(command.Point2), parseFloats(command.Point3)
+			switch command.Type {
+			case "Move":
+				if len(p1) == 2 {
+					part.Close()
+					part.MoveTo(p1[0], p1[1])
+				}
+			case "Line":
+				if len(p1) == 2 {
+					part.LineTo(p1[0], p1[1])
+				}
+			case "QuadraticBezier":
+				if len(p1) == 2 && len(p2) == 2 {
+					part.QuadTo(p1[0], p1[1], p2[0], p2[1])
+				}
+			case "CubicBezier":
+				if len(p3) == 2 {
+					first, second := part.Pos(), canvas.Point{X: p3[0], Y: p3[1]}
+					if len(p1) == 2 {
+						first = canvas.Point{X: p1[0], Y: p1[1]}
+					}
+					if len(p2) == 2 {
+						second = canvas.Point{X: p2[0], Y: p2[1]}
+					}
+					part.CubeTo(first.X, first.Y, second.X, second.Y, p3[0], p3[1])
+				}
+			case "Arc":
+				size, end := parseFloats(command.EllipseSize), parseFloats(command.EndPoint)
+				angle, err := strconv.ParseFloat(command.RotationAngle, 64)
+				large, largeErr := strconv.ParseBool(command.LargeArc)
+				sweep, sweepErr := strconv.ParseBool(command.SweepDirection)
+				if len(end) == 2 && err == nil && largeErr == nil && sweepErr == nil {
+					rx, ry := 0.0, 0.0
+					if len(size) > 0 {
+						rx, ry = size[0], size[0]
+					}
+					if len(size) > 1 {
+						ry = size[1]
+					}
+					part.ArcTo(rx, ry, angle, large, sweep, end[0], end[1])
+				}
+			case "Close":
+				part.Close()
+			}
+		}
+		part.Close()
+		path = path.Append(part)
+	}
+	if canvas.Equal(matrix.a*matrix.d-matrix.b*matrix.c, 0) {
+		path = path.ReplaceArcs()
+	}
+	return path.Transform(actionCanvasMatrix(matrix))
+}
+
+// actionLinkRegion 获取动作点击区域
+// 入参: source 动作来源, action 动作
+// 返回: Box 外接矩形, string 精确路径
+func actionLinkRegion(source actionSource, action Action) (Box, string) {
+	if action.Region == nil {
+		return source.Box, source.Path
+	}
+	path := actionRegionPath(action.Region, source.Matrix)
+	if path.Empty() {
+		return Box{}, ""
+	}
+	box := path.Bounds()
+	return Box{X: box.X0, Y: box.Y0, W: box.W(), H: box.H()}, path.ToSVG()
 }
 
 // resolveActionURI 解析URI动作地址

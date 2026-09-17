@@ -14,7 +14,10 @@
 
 package ofdgo
 
-import "encoding/xml"
+import (
+	"encoding/xml"
+	"fmt"
+)
 
 // Annotations 注释集合
 type Annotations struct {
@@ -42,6 +45,8 @@ type Annotation struct {
 	Creator     string `xml:"Creator,attr"`
 	LastModDate string `xml:"LastModDate,attr"`
 	Visible     *bool  `xml:"Visible,attr"`
+	NoZoom      bool   `xml:"NoZoom,attr"`
+	NoRotate    bool   `xml:"NoRotate,attr"`
 	Remark      string `xml:"Remark"`
 	Appearance  Appearance
 }
@@ -57,6 +62,8 @@ type AnnotationInfo struct {
 	LastModDate string  `json:"lastModDate,omitempty"`
 	Remark      string  `json:"remark,omitempty"`
 	Visible     bool    `json:"visible"`
+	NoZoom      bool    `json:"noZoom,omitempty"`
+	NoRotate    bool    `json:"noRotate,omitempty"`
 	X           float64 `json:"x"`
 	Y           float64 `json:"y"`
 	Width       float64 `json:"width"`
@@ -82,26 +89,51 @@ func (r *Reader) AnnotationInfos() ([]AnnotationInfo, error) {
 	}
 	var infos []AnnotationInfo
 	for index, page := range doc.Pages.Page {
-		for _, annotation := range r.Annots[page.ID] {
-			box, _ := ParseBox(annotation.Appearance.Boundary)
-			infos = append(infos, AnnotationInfo{
-				ID:          annotation.ID,
-				Page:        index + 1,
-				PageID:      page.ID,
-				Type:        annotation.Type,
-				Subtype:     annotation.Subtype,
-				Creator:     annotation.Creator,
-				LastModDate: annotation.LastModDate,
-				Remark:      annotation.Remark,
-				Visible:     annotation.Visible == nil || *annotation.Visible,
-				X:           box.X,
-				Y:           box.Y,
-				Width:       box.W,
-				Height:      box.H,
-			})
-		}
+		infos = append(infos, r.annotationInfos(index, page.ID)...)
 	}
 	return infos, nil
+}
+
+// AnnotationInfosByIndex 获取指定页面的注释信息，包含不可见注释，不解析页面图元
+// 入参: index 页面索引，从0开始
+// 返回: []AnnotationInfo 注释信息, error 错误信息
+func (r *Reader) AnnotationInfosByIndex(index int) ([]AnnotationInfo, error) {
+	doc, err := r.Doc()
+	if err != nil {
+		return nil, err
+	}
+	if index < 0 || index >= len(doc.Pages.Page) {
+		return nil, fmt.Errorf("page index out of range: %d", index)
+	}
+	return r.annotationInfos(index, doc.Pages.Page[index].ID), nil
+}
+
+// annotationInfos 提取指定页面的注释信息
+// 入参: index 页面索引, pageID 页面标识
+// 返回: []AnnotationInfo 注释信息
+func (r *Reader) annotationInfos(index int, pageID string) []AnnotationInfo {
+	var infos []AnnotationInfo
+	for _, annotation := range r.Annots[pageID] {
+		box, _ := ParseBox(annotation.Appearance.Boundary)
+		infos = append(infos, AnnotationInfo{
+			ID:          annotation.ID,
+			Page:        index + 1,
+			PageID:      pageID,
+			Type:        annotation.Type,
+			Subtype:     annotation.Subtype,
+			Creator:     annotation.Creator,
+			LastModDate: annotation.LastModDate,
+			Remark:      annotation.Remark,
+			Visible:     annotation.Visible == nil || *annotation.Visible,
+			NoZoom:      annotation.NoZoom,
+			NoRotate:    annotation.NoRotate,
+			X:           box.X,
+			Y:           box.Y,
+			Width:       box.W,
+			Height:      box.H,
+		})
+	}
+	return infos
 }
 
 // parseAnnotations 解析注释文件

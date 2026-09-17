@@ -92,19 +92,6 @@
 				</select>
 				<button id="objectStyleButton" class="editor-group-action" type="button" title="对象样式" aria-label="对象样式" aria-haspopup="dialog" aria-controls="objectStylePanel" disabled>对象</button>
 			</div>
-			<div class="editor-group editor-transform">
-				<select id="objectRotate" class="order-select" aria-label="对象旋转" disabled>
-					<option value="" hidden>旋转</option>
-					<option value="90">右转90°</option>
-					<option value="-90">左转90°</option>
-				</select>
-				<select id="objectFlip" class="order-select" aria-label="对象翻转" disabled>
-					<option value="" hidden>翻转</option>
-					<option value="horizontal">水平</option>
-					<option value="vertical">垂直</option>
-				</select>
-				<button id="objectBoundsButton" class="editor-group-action" type="button" title="位置尺寸" aria-label="位置尺寸" aria-haspopup="dialog" aria-controls="objectBoundsPanel" disabled>变换</button>
-			</div>
 			<div class="editor-group">
 				<button id="insertTextButton" class="button" type="button" title="文字" aria-label="文字" aria-pressed="false">文字</button>
 				<button id="insertImageButton" class="button" type="button" title="图片" aria-label="图片">图片</button>
@@ -149,6 +136,19 @@
 				<button id="cropImageButton" class="button" type="button" aria-label="裁剪图片" aria-pressed="false" disabled>裁剪</button>
 				<button id="resetCropButton" class="button" type="button" aria-label="还原图片" disabled>还原</button>
 				<span>图片</span>
+			</div>
+			<div class="editor-group editor-transform">
+				<select id="objectRotate" class="order-select" aria-label="对象旋转" disabled>
+					<option value="" hidden>旋转</option>
+					<option value="90">右转90°</option>
+					<option value="-90">左转90°</option>
+				</select>
+				<select id="objectFlip" class="order-select" aria-label="对象翻转" disabled>
+					<option value="" hidden>翻转</option>
+					<option value="horizontal">水平</option>
+					<option value="vertical">垂直</option>
+				</select>
+				<button id="objectBoundsButton" class="editor-group-action" type="button" title="位置尺寸" aria-label="位置尺寸" aria-haspopup="dialog" aria-controls="objectBoundsPanel" disabled>变换</button>
 			</div>
 			<div class="editor-group editor-erase">
 				<button id="eraseButton" class="button" type="button" title="擦除" aria-label="擦除" aria-pressed="false">擦除</button>

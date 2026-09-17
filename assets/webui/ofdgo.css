@@ -1257,13 +1257,13 @@ button.outline-link:hover {
 	overflow-y: hidden;
 }
 
-.viewer-panel:focus-visible {
-	outline: 2px solid var(--focus);
-	outline-offset: -2px;
+.viewer-panel:focus {
+	outline: none;
 }
 
-.viewer-panel.pointer-focus:focus {
-	outline: none;
+.viewer-panel.keyboard-focus:focus-visible {
+	outline: 2px solid var(--focus);
+	outline-offset: -2px;
 }
 
 .viewer-panel.pan-mode,
@@ -1781,6 +1781,29 @@ button.outline-link:hover {
 	background: rgba(15, 123, 104, 0.08);
 }
 
+.page-region-link,
+.page-region-link:hover,
+.page-region-link:focus-visible {
+	pointer-events: none;
+	background: none;
+}
+
+.page-region-link > svg {
+	display: block;
+	width: 100%;
+	height: 100%;
+}
+
+.page-region-link path {
+	pointer-events: fill;
+	fill: transparent;
+}
+
+.page-region-link:hover path,
+.page-region-link:focus-visible path {
+	fill: rgba(15, 123, 104, 0.08);
+}
+
 .annotation-note {
 	position: absolute;
 	z-index: 2;
@@ -1793,7 +1816,16 @@ button.outline-link:hover {
 	font-size: 16px;
 	line-height: 20px;
 	text-align: center;
-	transform: translateX(-100%);
+	transform-origin: 0 0;
+	transform: rotate(var(--note-rotation, 0deg)) scale(var(--note-scale, 1)) translateX(-100%);
+}
+
+.annotation-note.no-zoom {
+	--note-scale: calc(1 / var(--surface-scale, 1));
+}
+
+.annotation-note.no-rotate {
+	--note-rotation: calc(-1 * var(--surface-rotation, 0deg));
 }
 
 .annotation-detail {
@@ -1804,7 +1836,8 @@ button.outline-link:hover {
 	overflow-wrap: anywhere;
 }
 
-.editing .annotation-note {
+.editing .annotation-note,
+.editing .page-link {
 	display: none;
 }
 
