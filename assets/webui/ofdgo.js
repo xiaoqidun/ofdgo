@@ -1274,6 +1274,7 @@ async function toggleEditor() {
 		renderPageList();
 		applyFit(false);
 		restoreScaleAnchor(anchor);
+		updatePageListCurrent(true);
 		return;
 	}
 	const { pageIndex, fitMode, scale } = state;
@@ -1302,6 +1303,7 @@ async function toggleEditor() {
 		if (openSeq === state.openSeq) {
 			setBusy(false);
 			updateControls();
+			if (state.editing) updatePageListCurrent(true);
 		}
 	}
 }
@@ -1571,7 +1573,7 @@ async function loadEditorFonts() {
 				await fontManager.queryLocal();
 				refreshEditorFonts();
 			} catch (err) {
-				setStatus(err?.name === "NotAllowedError" ? "字体尚未授权" : String(err.message || err));
+				setStatus(err?.name === "NotAllowedError" ? "系统字体未授权" : String(err.message || err));
 			} finally {
 				state.fontCatalogLoading = false;
 			}
@@ -2098,7 +2100,7 @@ async function openOFDFromDrop(event) {
 		return;
 	}
 	if (event.dataTransfer.files.length > 1) {
-		setStatus("仅支持单文件拖入");
+		setStatus("一次拖入一个文件");
 		return;
 	}
 	const file = event.dataTransfer.files[0];
@@ -2593,7 +2595,7 @@ async function loadLocalFonts() {
 		return;
 	}
 	if (!fontManager.canReadLocal()) {
-		setStatus("无法读取系统字体");
+		setStatus("浏览器不支持系统字体");
 		return;
 	}
 	setBusy(true, state.doc ? "正在匹配字体" : "正在请求授权", 12, state.doc ? STATUS.fonts : "正在请求授权");
@@ -2609,7 +2611,7 @@ async function loadLocalFonts() {
 		}
 	} catch (err) {
 		if (err && err.name === "NotAllowedError") {
-			setStatus("字体尚未授权");
+			setStatus("系统字体未授权");
 		} else {
 			setStatus(String(err.message || err));
 		}
@@ -2628,7 +2630,7 @@ async function requestLocalFontsBeforeOpen() {
 		setStatus(available.length ? `已授权${available.length}种字体` : "暂无系统字体");
 	} catch (err) {
 		if (err && err.name === "NotAllowedError") {
-			setStatus("字体尚未授权");
+			setStatus("系统字体未授权");
 			return;
 		}
 		setStatus(String(err.message || err));
@@ -2650,7 +2652,7 @@ async function autoLoadDocumentLocalFonts(openSeq) {
 		return await loadDocumentLocalFonts(available, openSeq);
 	} catch (err) {
 		if (err && err.name === "NotAllowedError") {
-			setStatus("字体尚未授权");
+			setStatus("系统字体未授权");
 			return false;
 		}
 		setStatus(String(err.message || err));
@@ -2906,7 +2908,7 @@ function fontSourceText(source) {
 function updateLocalFontButton() {
 	const supported = fontManager.canReadLocal();
 	el.localFontButton.disabled = !supported;
-	el.localFontButton.title = supported ? "读取系统字体" : "无法读取系统字体";
+	el.localFontButton.title = supported ? "读取系统字体" : "浏览器不支持系统字体";
 	updateFontPermissionHint();
 }
 
@@ -4564,7 +4566,10 @@ function syncPageSelection() {
 	if (!state.editing) state.pageMultiSelect = false;
 	el.pageSelectionTools.hidden = !state.editing || !state.pageMultiSelect || el.pageList.hidden;
 	el.pageSelectionCount.textContent = `已选${state.pageSelection.size}页`;
-	el.selectAllPages.textContent = state.pageSelection.size === state.doc?.pageCount ? "清空" : "全选";
+	const allSelected = state.pageSelection.size === state.doc?.pageCount;
+	el.selectAllPages.textContent = allSelected ? "取消" : "全选";
+	el.selectAllPages.title = allSelected ? "取消全选" : "全选页面";
+	el.selectAllPages.setAttribute("aria-label", el.selectAllPages.title);
 	for (const button of el.pageList.children) {
 		if (state.editing) button.setAttribute("aria-pressed", String(state.pageSelection.has(state.doc.pages[Number(button.dataset.pageIndex)].id)));
 		else button.removeAttribute("aria-pressed");

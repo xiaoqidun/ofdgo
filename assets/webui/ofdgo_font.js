@@ -87,7 +87,7 @@ export class FontPicker {
 		if (!this.matches.length) {
 			const empty = document.createElement("div");
 			empty.className = "font-search-empty";
-			empty.textContent = "无匹配字体";
+			empty.textContent = this.fonts.length ? "暂无匹配字体" : "暂无字体";
 			this.list.append(empty);
 		}
 		if (!this.open) this.list.showPopover();
