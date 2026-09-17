@@ -737,11 +737,12 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 				return nil, err
 			}
 			var box ofdgo.Box
+			var contours []ofdgo.ObjectContour
 			switch object.Type {
 			case "TextObject":
 				box = textBoxes[id]
 			default:
-				box, err = currentSession.Renderer.ObjectBounds(object, layer.DrawParam)
+				box, contours, err = currentSession.Renderer.ObjectGeometry(object, layer.DrawParam)
 			}
 			if err != nil {
 				continue
@@ -762,6 +763,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					alpha = object.TextObject.Alpha
 				case "ImageObject":
 					alpha = object.ImageObject.Alpha
+					item["imageBorder"] = object.ImageObject.Border != nil
 				case "PathObject":
 					alpha = object.PathObject.Alpha
 				case "CompositeObject", "CompositeGraphicUnit":
@@ -793,10 +795,6 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					}
 				}
 				if object.Type == "PathObject" || object.Type == "ImageObject" || object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
-					contours, err := currentSession.Renderer.ObjectContours(object, layer.DrawParam)
-					if err != nil {
-						return nil, err
-					}
 					paths := make([]any, len(contours))
 					for i, contour := range contours {
 						paths[i] = map[string]any{"path": contour.Path, "evenOdd": contour.EvenOdd}

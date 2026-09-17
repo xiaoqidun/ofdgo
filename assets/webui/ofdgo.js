@@ -981,7 +981,7 @@ function openObjectBounds() {
 	state.boundsOriginal = { x: box.x, y: box.y, width: Math.abs(box.width), height: Math.abs(box.height) };
 	for (const [input, key] of [[el.objectX,"x"], [el.objectY,"y"], [el.objectWidth,"width"], [el.objectHeight,"height"]]) setObjectDimension(input, state.boundsOriginal[key]);
 	el.objectAspect.checked = true;
-	el.objectAspect.disabled = !item.shape && (item.items || [item]).some(member => member.type !== "ImageObject") || lineShape(item.shape) && (!box.width || !box.height);
+	el.objectAspect.disabled = !item.shape && (item.items || [item]).some(member => member.type !== "ImageObject" || member.imageBorder) || lineShape(item.shape) && (!box.width || !box.height);
 	el.objectWidth.disabled = lineShape(item.shape) && !box.width;
 	el.objectHeight.disabled = lineShape(item.shape) && !box.height;
 	el.objectBoundsStatus.textContent = "";

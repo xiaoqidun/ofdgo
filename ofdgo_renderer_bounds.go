@@ -42,12 +42,20 @@ type ObjectContour struct {
 // 入参: object 路径、图片或复合对象, drawParam 图层绘制参数标识
 // 返回: []ObjectContour 可用于点选的轮廓, error 错误信息
 func (r *Renderer) ObjectContours(object GraphicObject, drawParam string) ([]ObjectContour, error) {
+	_, contours, err := r.ObjectGeometry(object, drawParam)
+	return contours, err
+}
+
+// ObjectGeometry 一次度量路径、图片或复合对象的范围与轮廓，语义与ObjectBounds和ObjectContours一致
+// 入参: object 图形对象, drawParam 图层绘制参数标识
+// 返回: Box 毫米范围, []ObjectContour 绘制轮廓, error 错误信息
+func (r *Renderer) ObjectGeometry(object GraphicObject, drawParam string) (Box, []ObjectContour, error) {
 	if object.Type != "PathObject" && object.Type != "ImageObject" && object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
-		return nil, fmt.Errorf("contours require a path, image or composite object")
+		return Box{}, nil, fmt.Errorf("contours require a path, image or composite object")
 	}
 	bounds := &boundsRenderer{collect: true}
-	_, err := r.measureObject(object, drawParam, bounds)
-	return bounds.contours, err
+	box, err := r.measureObject(object, drawParam, bounds)
+	return box, bounds.contours, err
 }
 
 // measureObject 复用渲染逻辑收集对象范围与可选轮廓

@@ -302,12 +302,15 @@ func editorXMLContainersSupported(node *editorXML) bool {
 	return true
 }
 
-// editorXMLCopyable 判断独立复制是否无需重写内部标识或动作引用
+// editorXMLCopyable 判断内部标识能否按标准重映射，扩展节点的标识不作推断
 // 入参: node 原始对象节点
 // 返回: bool 是否支持保真复制
 func editorXMLCopyable(node *editorXML) bool {
+	if node.attr("ID") != "" && (editorResourceID(node.attr("ID")) == "" || node.name.Space != "" && node.name.Space != ofdNamespace && node.name.Space != "http://www.ofdspec.org") {
+		return false
+	}
 	for _, child := range node.children {
-		if child.attr("ID") != "" || child.name.Local == "Actions" || !editorXMLCopyable(child) {
+		if !editorXMLCopyable(child) {
 			return false
 		}
 	}

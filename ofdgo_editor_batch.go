@@ -63,6 +63,7 @@ func (e *Editor) Objects(page int, ids []string) ([]GraphicObject, error) {
 		if err != nil {
 			return nil, err
 		}
+		objects[i].origin = e.objectOrigin(editorObjectID(object))
 	}
 	return objects, nil
 }
@@ -86,7 +87,9 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 		return nil, err
 	}
 	prepared := make([]GraphicObject, len(objects))
+	origins := make([]*editorObjectOrigin, len(objects))
 	result := make([]string, len(objects))
+	maximum := e.maxID + len(objects)
 	for i, object := range objects {
 		result[i] = strconv.Itoa(e.maxID + i + 1)
 		object, err := e.prepareCopiedObject(result[i], object)
@@ -102,11 +105,14 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 				return nil, err
 			}
 		}
-		prepared[i] = object
+		prepared[i], origins[i], err = e.copyObjectOrigin(objects[i], object, &maximum)
+		if err != nil {
+			return nil, err
+		}
 	}
-	e.maxID += len(objects)
-	for i, object := range objects {
-		if origin := e.objectOrigin(editorObjectID(object)); origin != nil {
+	e.maxID = maximum
+	for i, origin := range origins {
+		if origin != nil {
 			e.source.origins[result[i]] = origin
 		}
 	}
@@ -115,10 +121,17 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 	if e.originalPage(page) {
 		target = len(e.source.pages[e.pages[page].ID].original.Content.Layer)
 	}
-	if target == len(layers) {
-		layers = append(layers, Layer{ID: e.nextID(), Type: "Body"})
+	if target < len(layers) {
+		target = len(layers) - 1
 	}
-	layers[target].Objects = append(layers[target].Objects, prepared...)
+	for i, object := range prepared {
+		style := e.copiedLayerStyle(objects[i])
+		if target == len(layers) || layers[target].DrawParam != style {
+			layers = append(layers, Layer{ID: e.nextID(), Type: "Body", DrawParam: style})
+			target = len(layers) - 1
+		}
+		layers[target].Objects = append(layers[target].Objects, object)
+	}
 	e.replaceLayers(page, layers)
 	return result, nil
 }
@@ -346,7 +359,9 @@ func (e *Editor) updateObjects(page int, objects []GraphicObject, preserveConten
 		return err
 	}
 	after := make([]GraphicObject, len(objects))
+	var beforeOrigins, afterOrigins map[string]*editorObjectOrigin
 	for i, object := range objects {
+		object.origin = nil
 		preserved := preserveContent
 		origin := e.objectOrigin(ids[i])
 		if origin != nil {
@@ -372,6 +387,23 @@ func (e *Editor) updateObjects(page int, objects []GraphicObject, preserveConten
 				return err
 			}
 			after[i] = cloneEditorData(object)
+			if before[i].Type != object.Type {
+				data, err := editorObjectXML(object)
+				if err != nil {
+					return err
+				}
+				root, err := parseEditorXML(data)
+				if err != nil {
+					return err
+				}
+				root.parent = origin.node.parent
+				if beforeOrigins == nil {
+					beforeOrigins = make(map[string]*editorObjectOrigin)
+					afterOrigins = make(map[string]*editorObjectOrigin)
+				}
+				beforeOrigins[ids[i]] = origin
+				afterOrigins[ids[i]] = &editorObjectOrigin{page: origin.page, data: data, node: root, object: object}
+			}
 		} else {
 			after[i], err = e.prepareObject(ids[i], object)
 			if err != nil {
@@ -388,15 +420,18 @@ func (e *Editor) updateObjects(page int, objects []GraphicObject, preserveConten
 	if reflect.DeepEqual(before, after) {
 		return nil
 	}
-	apply := func(e *Editor, objects []GraphicObject) {
+	apply := func(e *Editor, objects []GraphicObject, origins map[string]*editorObjectOrigin) {
 		for i, index := range indexes {
 			e.pages[page].Content.Layer[index.layer].Objects[index.index] = objects[i]
 		}
+		for id, origin := range origins {
+			e.source.origins[id] = origin
+		}
 	}
-	apply(e, after)
+	apply(e, after, afterOrigins)
 	if change := e.recordChange(); change != nil {
-		change.undo = func(e *Editor) { apply(e, before) }
-		change.redo = func(e *Editor) { apply(e, after) }
+		change.undo = func(e *Editor) { apply(e, before, beforeOrigins) }
+		change.redo = func(e *Editor) { apply(e, after, afterOrigins) }
 	}
 	return nil
 }
@@ -415,25 +450,21 @@ func (e *Editor) TransformObjects(page int, ids []string, dx, dy, scale float64)
 	if dx == 0 && dy == 0 && scale == 1 {
 		return nil
 	}
-	for i, object := range objects {
+	return e.transformObjects(page, objects, func(object GraphicObject) (GraphicObject, error) {
 		if e.originalPage(page) {
 			if err := validateEditorGeometry(object); err != nil {
-				return err
+				return GraphicObject{}, err
 			}
 		}
-		object, err = cloneEditorObject(object)
+		after, err := e.transformObject(object, dx, dy, scale)
 		if err != nil {
-			return err
-		}
-		objects[i], err = e.transformObject(object, dx, dy, scale)
-		if err != nil {
-			return err
+			return GraphicObject{}, err
 		}
 		if origin := e.objectOrigin(editorObjectID(object)); origin != nil && origin.node.attr("LineWidth") == "0" && object.Type == "TextObject" && object.TextObject.LineWidth == 0 {
-			objects[i].TextObject.LineWidth = 0
+			after.TextObject.LineWidth = 0
 		}
-	}
-	return e.updateObjects(page, objects, true)
+		return after, nil
+	})
 }
 
 // AlignObjects 单对象对齐页面，多对象相互对齐至选区边界，文字采用实际字形范围

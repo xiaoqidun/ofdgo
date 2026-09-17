@@ -59,12 +59,13 @@ type Editor struct {
 
 // editorResource 文档内嵌资源
 type editorResource struct {
-	name   string
-	data   []byte
-	font   *Font
-	image  *MultiMedia
-	space  *ColorSpace
-	subset *editorFontSubset
+	name      string
+	data      []byte
+	font      *Font
+	image     *MultiMedia
+	space     *ColorSpace
+	composite string
+	subset    *editorFontSubset
 }
 
 // editorResourceKey 资源内容和字体集合索引
@@ -609,6 +610,7 @@ func (e *Editor) AddObject(page int, object GraphicObject) (string, error) {
 
 // Object 获取对象的独立副本，修改副本不影响文档
 // 可编辑的继承样式解析为直接属性；仅在对象修改或复制时写入独立样式
+// 副本保留捕获时的原文来源，后续变换与撤销不改变其复制语义
 // 入参: page 页面索引, id 对象标识
 // 返回: GraphicObject 对象内容, error 错误信息
 func (e *Editor) Object(page int, id string) (GraphicObject, error) {
@@ -616,7 +618,9 @@ func (e *Editor) Object(page int, id string) (GraphicObject, error) {
 	if err != nil {
 		return GraphicObject{}, err
 	}
-	return cloneEditorObject(layer.Objects[index])
+	object, err := cloneEditorObject(layer.Objects[index])
+	object.origin = e.objectOrigin(id)
+	return object, err
 }
 
 // UpdateObject 替换对象内容，保留原对象标识和绘制顺序，校验规则与AddObject相同
@@ -881,6 +885,7 @@ func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) er
 }
 
 // TransformObject 以页面原点等比缩放后平移对象，文字同步缩放字号和字距，保留原有排版
+// 带边框图片缩放时转为保留原图片与边框的复合对象，标识不变
 // 入参: page 页面索引, id 对象标识, dx 横向位移, dy 纵向位移, scale 正缩放比例
 // 返回: error 错误信息
 func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) error {

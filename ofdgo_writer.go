@@ -320,7 +320,7 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 		for _, layer := range page.Content.Layer {
 			for _, object := range layer.Objects {
 				before, exists := original[editorObjectID(object)]
-				if origin := e.objectOrigin(editorObjectID(object)); origin != nil && !exists {
+				if origin := e.objectOrigin(editorObjectID(object)); origin != nil && (!exists || before.Type != object.Type) {
 					for _, name := range origin.page.original.PageRes {
 						files[e.source.reader.ResPath(resolveResourcePath(origin.page.ref.BaseLoc, "", name))] = true
 					}
@@ -334,6 +334,8 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 					}
 				}
 				switch object.Type {
+				case "CompositeObject", "CompositeGraphicUnit":
+					used[object.CompositeGraphicUnit.ResourceID] = true
 				case "TextObject":
 					used[object.TextObject.Font] = true
 					if e.source != nil && (!exists || before.Type != object.Type || before.TextObject.Font != object.TextObject.Font) {
@@ -355,6 +357,9 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 		}
 	}
 	for _, resource := range e.resources {
+		if resource.composite != "" && used[resource.composite] {
+			files[resource.name] = true
+		}
 		if resource.font != nil && used[resource.font.ID] {
 			fonts = append(fonts, resource)
 			delete(promoted, resource.font.ID)

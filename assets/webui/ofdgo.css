@@ -770,10 +770,9 @@ button:not(:disabled):hover {
 
 .text-font {
 	display: grid;
-	width: 196px;
-	grid-template-columns: minmax(0, 1fr) auto;
+	min-width: 0;
+	grid-template-columns: subgrid;
 	grid-column: 1 / -1;
-	gap: 4px;
 }
 
 .text-font .icon-button {

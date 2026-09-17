@@ -49,6 +49,13 @@ func (e *Editor) resolveEditorStyle(object GraphicObject, layer string) (Graphic
 		id = object.TextObject.DrawParam
 	case "PathObject":
 		id = object.PathObject.DrawParam
+	case "CompositeObject", "CompositeGraphicUnit":
+		for _, id := range []string{layer, object.CompositeGraphicUnit.DrawParam} {
+			if _, err := e.editorDrawParam(id, make(map[string]bool)); err != nil {
+				return GraphicObject{}, err
+			}
+		}
+		return object, nil
 	default:
 		return object, nil
 	}

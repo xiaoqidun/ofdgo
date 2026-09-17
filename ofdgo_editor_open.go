@@ -43,6 +43,7 @@ type editorSource struct {
 // editorObjectOrigin 保留原对象的XML语义，供复制和局部更新复用
 type editorObjectOrigin struct {
 	page   *editorSourcePage
+	data   []byte
 	node   *editorXML
 	object GraphicObject
 	reason error
@@ -322,7 +323,7 @@ func (e *Editor) loadSourcePage(index int) error {
 		for j, object := range layer.Objects {
 			id := editorObjectID(object)
 			if node := nodes[id]; node != nil {
-				origin := &editorObjectOrigin{page: source, node: node, object: object}
+				origin := &editorObjectOrigin{page: source, data: data, node: node, object: object}
 				e.source.origins[id] = origin
 				if editorXMLTransformable(node) {
 					resolved, err := e.resolveEditorStyle(object, layer.DrawParam)
@@ -371,13 +372,6 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 	}
 	all.Order = editorContainerOrderable(node.parent)
 	all.Copy = editorXMLCopyable(node) && origin.reason == nil
-	if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
-		for parent := node.parent; parent != nil; parent = parent.parent {
-			if parent.name.Local == "Layer" && parent.attr("DrawParam") != "" {
-				all.Copy = false
-			}
-		}
-	}
 	if origin.reason != nil {
 		all.Update, all.Reflow, all.ReplaceFont, all.Paint = false, false, false, false
 		all.Reason, all.ReasonCode = origin.reason.Error(), editReason(origin.reason)
@@ -390,9 +384,9 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 		errors.As(err, &all.MissingGlyphs)
 	}
 	all.Paint = all.Paint && e.editorPaintable(object)
-	if object.Type == "ImageObject" && object.ImageObject.Border != nil {
+	if object.Type == "ImageObject" && object.ImageObject.Border != nil && len(object.ImageObject.Actions) != 0 {
 		all.Transform, all.Arrange = false, false
-		all.Reason, all.ReasonCode = "image border transformations are not supported", EditUnsupportedObject
+		all.Reason, all.ReasonCode = "image actions cannot be transformed together with the border", EditUnsupportedObject
 	}
 	if object.Type == "TextObject" {
 		all.Arrange = all.Update || e.editorTextMeasurable(object.TextObject)
@@ -460,7 +454,8 @@ func editorPreservedObject(before, after GraphicObject) bool {
 // 入参: id 新标识, object 对象快照
 // 返回: GraphicObject 独立副本, error 错误信息
 func (e *Editor) prepareCopiedObject(id string, object GraphicObject) (GraphicObject, error) {
-	origin := e.objectOrigin(editorObjectID(object))
+	origin := e.snapshotOrigin(object)
+	object.origin = nil
 	if origin == nil {
 		return e.prepareObject(id, object)
 	}
@@ -477,9 +472,6 @@ func (e *Editor) prepareCopiedObject(id string, object GraphicObject) (GraphicOb
 	before, err := e.resolveEditorStyle(origin.object, drawParam)
 	if err != nil {
 		return GraphicObject{}, err
-	}
-	if drawParam != "" && (object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit") {
-		return GraphicObject{}, fmt.Errorf("copy requires preserving the composite layer draw parameters")
 	}
 	if !editorPreservedObject(before, object) {
 		if !editorXMLSupported(origin.node) {
@@ -664,7 +656,7 @@ func (e *Editor) editorImage(id string) (image.Point, error) {
 	return size, nil
 }
 
-// cloneEditorData 深复制编辑快照，未导出的排版信息保持不可变共享
+// cloneEditorData 深复制编辑快照，未导出的排版及原文来源保持不可变共享
 // 入参: value 原值
 // 返回: T 独立副本
 func cloneEditorData[T any](value T) T {

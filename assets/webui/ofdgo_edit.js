@@ -281,15 +281,24 @@ export class CanvasEditor {
 			node.setAttribute("aria-label", { ImageObject: "图片对象", TextObject: "文字对象", PathObject: "图形对象", CompositeObject: "复合对象", CompositeGraphicUnit: "复合对象" }[object.type]);
 			const item = { ...object, index, page: { width: page.width, height: page.height }, node, surface };
 			item.artwork = artwork.get(object.id)?.node;
-			if (object.type === "PathObject" && (object.shape || object.outline)) {
+			if (object.type === "PathObject" && (object.shape || object.outline) || (object.type === "CompositeObject" || object.type === "CompositeGraphicUnit") && object.contours?.length) {
 				node.classList.add("edit-contour");
 				const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
 				svg.classList.add("edit-outline");
 				svg.setAttribute("aria-hidden", "true");
 				svg.setAttribute("preserveAspectRatio", "none");
-				const contour = document.createElementNS("http://www.w3.org/2000/svg", object.shape === "line" ? "line" : object.shape === "ellipse" ? "ellipse" : object.shape === "rectangle" ? "rect" : "path");
-				if (!object.shape) contour.setAttribute("d", object.outline);
-				svg.append(contour);
+				let contour;
+				if (object.type === "PathObject") {
+					contour = document.createElementNS("http://www.w3.org/2000/svg", object.shape === "line" ? "line" : object.shape === "ellipse" ? "ellipse" : object.shape === "rectangle" ? "rect" : "path");
+					if (!object.shape) contour.setAttribute("d", object.outline);
+					svg.append(contour);
+				} else {
+					for (const path of object.contours) {
+						const contour = document.createElementNS("http://www.w3.org/2000/svg", "path");
+						contour.setAttribute("d", path.path);
+						svg.append(contour);
+					}
+				}
 				node.append(svg);
 				item.contour = { svg, path: contour };
 			}

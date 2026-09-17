@@ -58,6 +58,7 @@ type GraphicObject struct {
 	PathObject           PathObject
 	ImageObject          ImageObject
 	CompositeGraphicUnit CompositeGraphicUnit
+	origin               *editorObjectOrigin
 }
 
 // Clips 裁剪区域集合

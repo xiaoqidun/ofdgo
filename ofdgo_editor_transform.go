@@ -15,6 +15,8 @@
 package ofdgo
 
 import (
+	"bytes"
+	"encoding/xml"
 	"fmt"
 	"math"
 	"slices"
@@ -29,6 +31,7 @@ func (e *Editor) RotateObject(page int, id string, degrees int) error {
 
 // RotateObjects 绕同页选区的可见范围中心旋转
 // 保留相对位置及资源，一次撤销恢复全部
+// 带边框图片转为保留原内容的复合对象，标识不变
 // 入参: page 页面索引, ids 对象标识, degrees 顺时针角度，仅支持90度的整数倍
 // 返回: error 错误信息
 func (e *Editor) RotateObjects(page int, ids []string, degrees int) error {
@@ -64,7 +67,7 @@ func (e *Editor) FlipObjects(page int, ids []string, axis string) error {
 	return e.orientObjects(page, ids, m)
 }
 
-// ResizeObjects 将选区可见范围移动并缩放到指定矩形，文字与路径保持比例，图片支持独立宽高
+// ResizeObjects 将选区可见范围移动并缩放到指定矩形，文字、路径和带边框图片保持比例，无边框图片支持独立宽高
 // 不重排文字或重采样图片，一次撤销恢复全部；基本图形独立调整宽高可使用PathObject.Reshape
 // 入参: page 页面索引, ids 对象标识, box 页面毫米坐标中的目标范围
 // 返回: error 错误信息
@@ -90,27 +93,23 @@ func (e *Editor) ResizeObjects(page int, ids []string, box Box) error {
 	sx, sy := box.W/before.W, box.H/before.H
 	uniform := math.Abs(sx-sy) <= 1e-9*math.Max(sx, sy)
 	matrix := Matrix{a: sx, d: sy, e: box.X - before.X*sx, f: box.Y - before.Y*sy}
-	for i, object := range objects {
-		object = cloneEditorData(object)
+	return e.transformObjects(page, objects, func(object GraphicObject) (GraphicObject, error) {
 		if uniform {
-			object, err = e.transformObject(object, matrix.e, matrix.f, sx)
-		} else if object.Type == "ImageObject" {
-			object = transformEditorMatrix(object, matrix)
-		} else {
-			return fmt.Errorf("nonuniform resizing requires image objects")
+			return e.transformObject(object, matrix.e, matrix.f, sx)
+		} else if object.Type == "ImageObject" && object.ImageObject.Border == nil {
+			return e.transformMatrix(object, matrix)
 		}
-		if err != nil {
-			return err
-		}
-		objects[i] = object
-	}
-	return e.updateObjects(page, objects, true)
+		return GraphicObject{}, fmt.Errorf("nonuniform resizing requires images without borders")
+	})
 }
 
 // transformObject 对原有复杂对象仅更新变换，不重建其文字、画刷或其他局部属性
 // 入参: object 对象, dx、dy 页面位移, scale 缩放比例
 // 返回: GraphicObject 新对象, error 错误信息
 func (e *Editor) transformObject(object GraphicObject, dx, dy, scale float64) (GraphicObject, error) {
+	if object.Type == "ImageObject" && object.ImageObject.Border != nil && scale != 1 {
+		return e.transformMatrix(object, Matrix{a: scale, d: scale, e: dx, f: dy})
+	}
 	if origin := e.objectOrigin(editorObjectID(object)); origin != nil && (!editorXMLSupported(origin.node) || origin.reason != nil) {
 		return transformEditorMatrix(object, Matrix{a: scale, d: scale, e: dx, f: dy}), nil
 	}
@@ -135,10 +134,95 @@ func (e *Editor) orientObjects(page int, ids []string, matrix Matrix) error {
 	}
 	x, y := box.X+box.W/2, box.Y+box.H/2
 	matrix = TranslationMatrix(x, y).Multiply(matrix).Multiply(TranslationMatrix(-x, -y))
+	return e.transformObjects(page, objects, func(object GraphicObject) (GraphicObject, error) {
+		return e.transformMatrix(object, matrix)
+	})
+}
+
+// transformObjects 原子变换对象副本，失败不保留新复合资源及其标识
+// 入参: page 页面索引, objects 选区快照, transform 单对象变换
+// 返回: error 错误信息
+func (e *Editor) transformObjects(page int, objects []GraphicObject, transform func(GraphicObject) (GraphicObject, error)) (err error) {
+	count, maximum := len(e.resources), e.maxID
+	idsReady := e.source != nil && e.source.idsReady
+	defer func() {
+		if err != nil {
+			clear(e.resources[count:])
+			e.resources, e.maxID = e.resources[:count], maximum
+			if e.source != nil {
+				e.source.idsReady = idsReady
+			}
+		}
+	}()
+	after := make([]GraphicObject, len(objects))
 	for i, object := range objects {
-		objects[i] = transformEditorMatrix(object, matrix)
+		object, err = cloneEditorObject(object)
+		if err != nil {
+			return err
+		}
+		after[i], err = transform(object)
+		if err != nil {
+			return err
+		}
 	}
-	return e.updateObjects(page, objects, true)
+	return e.updateObjects(page, after, true)
+}
+
+// transformMatrix 将带边框图片封装为标准复合资源后整体变换，不改变原边框及裁剪语义
+// 入参: object 对象, matrix 页面变换
+// 返回: GraphicObject 变换后的对象, error 错误信息
+func (e *Editor) transformMatrix(object GraphicObject, matrix Matrix) (GraphicObject, error) {
+	if object.Type != "ImageObject" || object.ImageObject.Border == nil {
+		return transformEditorMatrix(object, matrix), nil
+	}
+	origin := e.objectOrigin(object.ImageObject.ID)
+	if origin == nil {
+		return GraphicObject{}, fmt.Errorf("bordered image requires an original object")
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return GraphicObject{}, err
+	}
+	box, err := creationBox(object.ImageObject.Boundary)
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	visible, err := NewRenderer(e.source.reader).ObjectBounds(object, "")
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	extent := unionTextBox(box, visible)
+	child := cloneEditorData(object)
+	child.ImageObject.ID = e.nextID()
+	child.ImageObject.Boundary = editorBoxString(Box{X: box.X - extent.X, Y: box.Y - extent.Y, W: box.W, H: box.H})
+	data, err := editorXMLObject(origin.data, origin.node, origin.object, child)
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	data, err = editorXMLStandalone(data, origin.node)
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	content, err := editorXMLContainer("Content", nil, data)
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	id := e.nextID()
+	attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: id}, {Name: xml.Name{Local: "Width"}, Value: ofdNumber(extent.W)}, {Name: xml.Name{Local: "Height"}, Value: ofdNumber(extent.H)}}
+	data, err = editorXMLContainer("CompositeGraphicUnit", attrs, bytes.TrimPrefix(content, []byte(xml.Header)))
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	data, err = editorXMLContainer("CompositeGraphicUnits", nil, bytes.TrimPrefix(data, []byte(xml.Header)))
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	data, err = editorXMLContainer("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "."}}, bytes.TrimPrefix(data, []byte(xml.Header)))
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	e.resources = append(e.resources, editorResource{name: e.resourceDirectory() + "/Composite_" + id + ".xml", data: data, composite: id})
+	object = GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: CompositeGraphicUnit{ID: object.ImageObject.ID, ResourceID: id, Boundary: editorBoxString(extent)}}
+	return transformEditorMatrix(object, matrix), nil
 }
 
 // transformEditorMatrix 在页面坐标中变换基本对象，保留局部绘制数据和裁剪

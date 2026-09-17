@@ -67,6 +67,11 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 		return nil, err
 	}
 	fonts, images, spaces, resourceFiles := e.usedResources()
+	for _, resource := range e.resources {
+		if resource.composite != "" && slices.Contains(resourceFiles, resource.name) {
+			parts[resource.name] = resource.data
+		}
+	}
 	commonData := source.document.CommonData
 	for _, name := range append(slices.Clone(commonData.DocumentRes), commonData.PublicRes...) {
 		resourceFiles = slices.DeleteFunc(resourceFiles, func(file string) bool {
@@ -325,7 +330,7 @@ func (e *Editor) sourceLayerXML(layer Layer) ([]byte, error) {
 		var data []byte
 		var err error
 		if origin := e.objectOrigin(editorObjectID(object)); origin != nil {
-			data, err = editorXMLObject(origin.page.data, origin.node, origin.object, object)
+			data, err = editorXMLObject(origin.data, origin.node, origin.object, object)
 			if err == nil {
 				data, err = editorXMLStandalone(data, origin.node)
 			}
@@ -337,7 +342,9 @@ func (e *Editor) sourceLayerXML(layer Layer) ([]byte, error) {
 		}
 		content = append(content, data...)
 	}
-	return editorXMLContainer("Layer", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: layer.ID}, {Name: xml.Name{Local: "Type"}, Value: layer.Type}}, content)
+	attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: layer.ID}, {Name: xml.Name{Local: "Type"}, Value: layer.Type}}
+	attrs.add("DrawParam", layer.DrawParam)
+	return editorXMLContainer("Layer", attrs, content)
 }
 
 // sourceNewPageXML 编码新增页面，同时保留复制对象的原文语义
