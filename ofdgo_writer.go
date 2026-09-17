@@ -29,6 +29,19 @@ import (
 
 const ofdNamespace = "http://www.ofdspec.org/2016"
 
+// editorProgress 保存准备阶段的进度检查点，内存预览使用nil
+type editorProgress func(stage string, completed, total int) error
+
+// report 回报进度并原样传递调用方停止原因
+// 入参: stage 阶段, completed 已处理项, total 总项数
+// 返回: error 调用方停止原因
+func (progress editorProgress) report(stage string, completed, total int) error {
+	if progress != nil {
+		return progress(stage, completed, total)
+	}
+	return nil
+}
+
 // WriteTo 逐个条目写出OFD，不关闭调用方输出流，出错时应丢弃本次输出
 // 新增资源仅写入实际引用的部分，静态TrueType轮廓字体按实际文字生成子集
 // 原有字体在全包引用可确定时保留字形编号裁剪；编辑资源、复杂字体及无法确定的引用保持原样
@@ -39,12 +52,16 @@ func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
 	if err := e.validate(); err != nil {
 		return 0, err
 	}
-	fonts, err := e.subsetFonts()
+	progress := editorProgress(e.OnWriteProgress)
+	fonts, err := e.subsetFonts(progress)
 	if err != nil {
 		return 0, err
 	}
 	if e.source != nil {
-		return e.writeSource(writer, fonts)
+		return e.writeSource(writer, fonts, progress)
+	}
+	if err := progress.report("write", 0, 0); err != nil {
+		return 0, err
 	}
 	output := &ofdCountingWriter{writer: writer}
 	archive := zip.NewWriter(output)
@@ -62,7 +79,7 @@ func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
 		}
 		_, err = entry.Write(data)
 		return err
-	})
+	}, progress)
 	if err == nil {
 		err = archive.Close()
 	}
@@ -83,7 +100,7 @@ func (e *Editor) Reader() (*Reader, error) {
 	if err := e.writeParts(func(name string, data []byte, _ bool) error {
 		r.files[name] = data
 		return nil
-	}); err != nil {
+	}, nil); err != nil {
 		return nil, err
 	}
 	if err := r.initRoot(); err != nil {
@@ -91,6 +108,9 @@ func (e *Editor) Reader() (*Reader, error) {
 	}
 	if _, err := r.Doc(); err != nil {
 		return nil, err
+	}
+	for i, page := range r.doc.Pages.Page {
+		r.pageHeaderCache[r.ResPath(page.BaseLoc)] = PageContent{Area: PageArea{PhysicalBox: e.pages[i].Area.PhysicalBox}}
 	}
 	return r, nil
 }
@@ -120,9 +140,9 @@ func (e *Editor) validate() error {
 }
 
 // writeParts 生成根节点、文档、资源索引、页面及二进制资源
-// 入参: write 条目写入方法
+// 入参: write 条目写入方法, progress 保存进度回调，预览时为nil
 // 返回: error 错误信息
-func (e *Editor) writeParts(write func(string, []byte, bool) error) error {
+func (e *Editor) writeParts(write func(string, []byte, bool) error, progress editorProgress) error {
 	fonts, images, _ := e.usedResources()
 	writeXML := func(name string, encode func(*ofdXML)) error {
 		data, err := encodeOFDXML(encode)
@@ -198,11 +218,17 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error) error {
 		}
 	}
 	for i, page := range e.pages {
+		if err := progress.report("pages", i, len(e.pages)); err != nil {
+			return err
+		}
 		if err := writeXML(fmt.Sprintf("Doc_0/Pages/%d/Content.xml", i+1), func(x *ofdXML) {
 			x.page(page)
 		}); err != nil {
 			return err
 		}
+	}
+	if err := progress.report("pages", len(e.pages), len(e.pages)); err != nil {
+		return err
 	}
 	for _, resources := range [][]editorResource{fonts, images} {
 		for _, resource := range resources {

@@ -36,9 +36,9 @@ type editorResourceRefs struct {
 // compactSourceResources 在保存副本中清理无引用字体和图片，并裁剪可完整确认用字的原有字体
 // 按GB/T 33190-2016附录A检查标识和路径引用，包括模板、注释、底纹、裁剪、版本和其他文档
 // 全包检查保留孤立XML中的引用；未知命名空间、扩展数据或无法解析的XML使本次清理跳过
-// 入参: parts 已修改和新增的包内条目
+// 入参: parts 已修改和新增的包内条目, progress 保存进度回调
 // 返回: map[string]bool 可移除的二进制条目, error 读取错误
-func (e *Editor) compactSourceResources(parts map[string][]byte) (map[string]bool, error) {
+func (e *Editor) compactSourceResources(parts map[string][]byte, progress editorProgress) (map[string]bool, error) {
 	if len(parts) == 0 {
 		return nil, nil
 	}
@@ -55,7 +55,11 @@ func (e *Editor) compactSourceResources(parts map[string][]byte) (map[string]boo
 	}
 	refs := editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
 	var resources []string
-	for _, name := range slices.Sorted(maps.Keys(names)) {
+	ordered := slices.Sorted(maps.Keys(names))
+	for i, name := range ordered {
+		if err := progress.report("references", i, len(ordered)); err != nil {
+			return nil, err
+		}
 		if strings.HasSuffix(name, "/") {
 			continue
 		}
@@ -78,11 +82,17 @@ func (e *Editor) compactSourceResources(parts map[string][]byte) (map[string]boo
 			resources = append(resources, name)
 		}
 	}
+	if err := progress.report("references", len(ordered), len(ordered)); err != nil {
+		return nil, err
+	}
 	removed := make(map[string]bool)
 	usedFiles := maps.Clone(refs.files)
 	updates := make(map[string][]byte)
 	fontFiles := make(map[string]*editorFontUsage)
-	for _, name := range resources {
+	for i, name := range resources {
+		if err := progress.report("resources", i, len(resources)); err != nil {
+			return nil, err
+		}
 		data, ok := parts[name]
 		if !ok {
 			var err error
@@ -150,10 +160,16 @@ func (e *Editor) compactSourceResources(parts map[string][]byte) (map[string]boo
 			updates[name] = editorPatchXML(data, patches)
 		}
 	}
+	if err := progress.report("resources", len(resources), len(resources)); err != nil {
+		return nil, err
+	}
 	for name := range usedFiles {
 		delete(removed, name)
 	}
-	for name := range names {
+	for i, name := range ordered {
+		if err := progress.report("fonts", i, len(ordered)); err != nil {
+			return nil, err
+		}
 		key := strings.ToLower(cleanPackagePath(name))
 		usage := fontFiles[key]
 		if usage == nil || usage.unsafe || refs.files[key] || removed[key] || parts[name] != nil {
@@ -166,6 +182,9 @@ func (e *Editor) compactSourceResources(parts map[string][]byte) (map[string]boo
 		if subset := subsetSourceFont(data, usage); subset != nil {
 			updates[name] = subset
 		}
+	}
+	if err := progress.report("fonts", len(ordered), len(ordered)); err != nil {
+		return nil, err
 	}
 	maps.Copy(parts, updates)
 	for name := range parts {

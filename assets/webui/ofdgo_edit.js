@@ -222,15 +222,16 @@ export class CanvasEditor {
 		viewer.addEventListener("pointercancel", () => this.cancel());
 		viewer.addEventListener("lostpointercapture", () => this.cancel());
 		viewer.addEventListener("keydown", (event) => this.keyDown(event));
-		viewer.addEventListener("keyup", (event) => this.modifierChange(event));
+		viewer.addEventListener("keyup", (event) => this.keyUp(event));
+		viewer.addEventListener("blur", () => this.commitNudge());
 		viewer.addEventListener("dblclick", (event) => {
 			const item = this.selected;
 			if (!event.altKey && this.enabled && item && !item.items && !this.input && !this.options.busy()) {
 				this.options.onEdit(item);
 			}
 		});
-		viewer.addEventListener("scroll", () => this.cancel());
-		window.addEventListener("blur", () => this.cancel());
+		viewer.addEventListener("scroll", () => this.scroll());
+		window.addEventListener("blur", () => { this.cancel(); this.commitNudge(); });
 		window.addEventListener("resize", () => this.cancel());
 	}
 
@@ -387,6 +388,7 @@ export class CanvasEditor {
 	}
 
 	setSelection(items) {
+		this.cancelNudge();
 		const previous = this.selected;
 		if (this.crop && (items.length !== 1 || items[0] !== this.crop.item)) this.closeCrop();
 		if (this.selected?.items) this.selected.node.remove();
@@ -436,11 +438,15 @@ export class CanvasEditor {
 	}
 
 	start(event) {
+		if (this.nudge) {
+			this.commitNudge();
+			return;
+		}
 		if (this.input) {
 			if (!this.input.input.contains(event.target)) this.commitText();
 			return;
 		}
-		if (!this.enabled || this.options.busy() || event.button !== 0 || this.drag) {
+		if (!this.enabled || this.options.busy() || this.nudgeCommit || event.button !== 0 || this.drag) {
 			return;
 		}
 		if (this.crop) {
@@ -562,7 +568,7 @@ export class CanvasEditor {
 		if (!drag.change && !drag.box && Math.hypot(event.clientX - drag.clientX, event.clientY - drag.clientY) < 3) {
 			return;
 		}
-		const from = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.item.page, drag.rotation);
+		const from = drag.origin ||= pagePoint(drag.clientX, drag.clientY, drag.rect, drag.item.page, drag.rotation);
 		const to = pagePoint(event.clientX, event.clientY, drag.rect, drag.item.page, drag.rotation);
 		if (drag.item.type === "TextObject" && (drag.corner === "w" || drag.corner === "e")) {
 			if (drag.item.textFrame) {
@@ -587,15 +593,50 @@ export class CanvasEditor {
 		}
 		const transform = drag.item.type === "TextObject" ? textTransform : objectTransform;
 		drag.change = transform(drag.item, to.x - from.x, to.y - from.y, drag.corner);
-		if (!drag.corner) this.snap(drag, event.altKey);
+		if (!drag.corner) {
+			drag.axis = event.shiftKey ? Math.abs(drag.change.x) >= Math.abs(drag.change.y) ? "x" : "y" : "";
+			if (drag.axis) drag.change[drag.axis === "x" ? "y" : "x"] = 0;
+			this.snap(drag, event.altKey);
+			this.autoScroll(drag);
+		}
 		this.place(drag.item, drag.change);
+	}
+
+	scroll() {
+		const drag = this.drag;
+		if (!drag?.item || drag.corner || !drag.pointer) {
+			this.cancel();
+			return;
+		}
+		drag.origin ||= pagePoint(drag.clientX, drag.clientY, drag.rect, drag.item.page, drag.rotation);
+		drag.rect = drag.item.surface.getBoundingClientRect();
+		this.move(drag.pointer);
+	}
+
+	autoScroll(drag) {
+		if (drag.scrolling) return;
+		drag.scrolling = true;
+		requestAnimationFrame(time => {
+			drag.scrolling = false;
+			if (this.drag !== drag) return;
+			const viewer = this.viewer, rect = viewer.getBoundingClientRect(), pointer = drag.pointer;
+			const speed = (value, start, size) => value < start + 32 ? Math.max(-1, (value - start - 32) / 32)
+				: value > start + size - 32 ? Math.min(1, (value - start - size + 32) / 32) : 0;
+			const elapsed = Math.min(32, time - (drag.scrollTime ?? time - 16));
+			drag.scrollTime = time;
+			const left = viewer.scrollLeft, top = viewer.scrollTop;
+			viewer.scrollLeft += speed(pointer.clientX, rect.left, viewer.clientWidth) * elapsed;
+			viewer.scrollTop += speed(pointer.clientY, rect.top, viewer.clientHeight) * elapsed;
+			if (viewer.scrollLeft !== left || viewer.scrollTop !== top) this.scroll();
+			else drag.scrollTime = null;
+		});
 	}
 
 	snap(drag, bypass = false) {
 		const { item, rect, rotation, change } = drag;
 		const { x, y, path } = bypass ? { x: 0, y: 0, path: "" } : alignmentSnap({ ...item, x: item.x + change.x, y: item.y + change.y }, drag.targets, {
-			x: 4 * item.page.width / (rotation % 180 ? rect.height : rect.width),
-			y: 4 * item.page.height / (rotation % 180 ? rect.width : rect.height),
+			x: drag.axis === "y" ? 0 : 4 * item.page.width / (rotation % 180 ? rect.height : rect.width),
+			y: drag.axis === "x" ? 0 : 4 * item.page.height / (rotation % 180 ? rect.width : rect.height),
 		});
 		change.x += x;
 		change.y += y;
@@ -843,6 +884,38 @@ export class CanvasEditor {
 		}
 	}
 
+	keyUp(event) {
+		this.modifierChange(event);
+		if (this.nudge?.keys.delete(event.key) && !this.nudge.keys.size) return this.commitNudge();
+	}
+
+	nudgeChanged() {
+		return Boolean(this.nudge && (this.nudge.x || this.nudge.y));
+	}
+
+	cancelNudge() {
+		const nudge = this.nudge;
+		this.nudge = null;
+		if (nudge) {
+			this.place(nudge.item);
+			this.options.onNudgeChange?.();
+		}
+	}
+
+	commitNudge() {
+		if (this.nudgeCommit) return this.nudgeCommit;
+		const nudge = this.nudge;
+		if (!nudge) return Promise.resolve(true);
+		this.nudge = null;
+		this.nudgeCommit = Promise.resolve().then(() => nudge.x || nudge.y
+			? this.options.onTransform(nudge.item, { x: nudge.x, y: nudge.y, scale: 1 }) : true).finally(() => {
+			this.place(nudge.item);
+			this.nudgeCommit = null;
+			this.options.onNudgeChange?.();
+		});
+		return this.nudgeCommit;
+	}
+
 	keyDown(event) {
 		if (event.defaultPrevented || event.target?.closest("input, textarea, select, [contenteditable]")) return;
 		if (this.crop && !this.options.busy()) {
@@ -868,7 +941,7 @@ export class CanvasEditor {
 			this.setTool("");
 			return;
 		}
-		if (this.input || !this.enabled || !this.selected || this.options.busy() || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) {
+		if (this.input || !this.enabled || !this.selected || this.options.busy() || this.nudgeCommit || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) {
 			return;
 		}
 		const directions = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
@@ -879,16 +952,23 @@ export class CanvasEditor {
 		event.preventDefault();
 		event.stopPropagation();
 		if (event.key === "Escape") {
-			this.drag ? this.cancel() : this.clear();
+			this.nudge ? this.cancelNudge() : this.drag ? this.cancel() : this.clear();
 		} else if (event.key === "Delete" && canEditObject(this.selected, "delete")) {
-			this.options.onDelete(this.selected);
+			if (this.nudge) this.commitNudge().then(saved => { if (saved && this.selected) this.options.onDelete(this.selected); });
+			else this.options.onDelete(this.selected);
 		} else if (edit && !this.drag && !this.selected.items) {
-			this.options.onEdit(this.selected);
+			if (this.nudge) this.commitNudge().then(saved => { if (saved && this.selected) this.options.onEdit(this.selected); });
+			else this.options.onEdit(this.selected);
 		} else if (!this.drag && directions[event.key] && canEditObject(this.selected, "transform")) {
 			const [x, y] = directions[event.key];
 			const [dx, dy] = [[x, y], [y, -x], [-x, -y], [-y, x]][this.options.rotation() / 90];
 			const step = event.shiftKey ? 10 : 1;
-			this.options.onTransform(this.selected, { x: dx * step, y: dy * step, scale: 1 });
+			const nudge = this.nudge ||= { item: this.selected, x: 0, y: 0, keys: new Set() };
+			nudge.keys.add(event.key);
+			nudge.x += dx * step;
+			nudge.y += dy * step;
+			this.place(nudge.item, { x: nudge.x, y: nudge.y, scale: 1 });
+			this.options.onNudgeChange?.();
 		}
 	}
 
@@ -926,8 +1006,16 @@ export class CanvasEditor {
 			textIndent: `${(item.firstLineIndent || 0) * PX_PER_MM}px`,
 		});
 		this.input = { input, item, face, fontChoice: item.fontChoice };
+		const editing = this.input;
 		item.surface.append(input);
 		input.addEventListener("input", () => this.options.onTextChange());
+		input.addEventListener("compositionstart", () => { editing.composing = true; });
+		input.addEventListener("compositionend", () => {
+			editing.composing = false;
+			Promise.resolve().then(() => {
+				if (this.input === editing && editing.commitAfterComposition) this.commitText();
+			});
+		});
 		input.addEventListener("paste", event => {
 			event.preventDefault();
 			document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
@@ -940,12 +1028,22 @@ export class CanvasEditor {
 			}
 		});
 		input.addEventListener("blur", (event) => {
-			if (!this.options.fontControls?.includes(event.relatedTarget)) this.commitText();
+			const selection = document.getSelection();
+			if (selection?.rangeCount && input.contains(selection.anchorNode)) editing.range = selection.getRangeAt(0).cloneRange();
+			if (!this.options.textControls?.includes(event.relatedTarget)) this.commitText();
+		});
+		input.addEventListener("focus", () => {
+			if (editing.range) {
+				const selection = document.getSelection();
+				selection.removeAllRanges();
+				selection.addRange(editing.range);
+				editing.range = null;
+			}
 		});
 		input.addEventListener("keydown", (event) => {
 			if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "s") return;
 			event.stopPropagation();
-			if (event.isComposing || this.input?.saving) {
+			if (event.isComposing || editing.composing || editing.saving) {
 				return;
 			}
 			if (event.key === "Escape") {
@@ -972,18 +1070,42 @@ export class CanvasEditor {
 		editing.input.focus({ preventScroll: true });
 	}
 
+	setTextStyle(values) {
+		const editing = this.input;
+		const style = { ...editing.style, ...values };
+		for (const key of Object.keys(style)) if (style[key] === editing.item[key]) delete style[key];
+		editing.style = Object.keys(style).length ? style : null;
+		const item = { ...editing.item, ...editing.style };
+		editing.input.style.fontSize = `${item.size * PX_PER_MM}px`;
+		editing.input.style.color = item.color;
+		this.options.onTextChange();
+	}
+
+	textChanged() {
+		const editing = this.input;
+		if (!editing) return false;
+		const value = editTextValue(editing.input);
+		return (!editing.item.draft || Boolean(value.trim()))
+			&& (value !== editing.item.text || Boolean(editing.fontData || editing.style));
+	}
+
 	async commitText() {
 		const editing = this.input;
 		if (!editing) return true;
 		if (editing.saving) return false;
+		if (editing.composing) {
+			editing.commitAfterComposition = true;
+			return false;
+		}
+		editing.commitAfterComposition = false;
 		const value = editTextValue(editing.input);
-		if (value === editing.item.text && !editing.fontData || editing.item.draft && !value.trim()) {
+		if (!this.textChanged()) {
 			this.closeText();
 			return true;
 		}
 		editing.saving = true;
 		editing.input.contentEditable = "false";
-		const saved = await this.options.onCommitText(editing.item, value, editing.fontData);
+		const saved = await this.options.onCommitText(editing.style ? { ...editing.item, ...editing.style } : editing.item, value, editing.fontData, editing.style?.color ?? null);
 		if (this.input !== editing) {
 			return Boolean(saved);
 		}

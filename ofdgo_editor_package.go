@@ -29,13 +29,17 @@ import (
 )
 
 // sourceParts 生成编辑快照的XML和新增资源，删页时同步清理标准引用
+// 入参: progress 保存进度回调，预览时为nil
 // 返回: map[string][]byte 替换及新增条目, error 错误信息
-func (e *Editor) sourceParts() (map[string][]byte, error) {
+func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error) {
 	parts := make(map[string][]byte)
 	source := e.source
 	reader := source.reader
 	pageRefs := make([]Page, len(e.pages))
 	for i, page := range e.pages {
+		if err := progress.report("pages", i, len(e.pages)); err != nil {
+			return nil, err
+		}
 		original := source.pages[page.ID]
 		if original != nil {
 			pageRefs[i] = original.ref
@@ -58,6 +62,9 @@ func (e *Editor) sourceParts() (map[string][]byte, error) {
 			parts[name] = data
 			pageRefs[i] = Page{ID: page.ID, BaseLoc: "/" + name}
 		}
+	}
+	if err := progress.report("pages", len(e.pages), len(e.pages)); err != nil {
+		return nil, err
 	}
 	fonts, images, resourceFiles := e.usedResources()
 	commonData := source.document.CommonData
@@ -393,15 +400,15 @@ func (e *Editor) sourceInfoXML() ([]byte, error) {
 }
 
 // writeSource 将未修改ZIP条目直接复制到新包，逐项写入改动，不持有原资源解压副本
-// 入参: writer 输出流, fonts 新增字体子集
+// 入参: writer 输出流, fonts 新增字体子集, progress 保存进度回调
 // 返回: int64 写入字节数, error 错误信息
-func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte) (int64, error) {
-	parts, err := e.sourceParts()
+func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress editorProgress) (int64, error) {
+	parts, err := e.sourceParts(progress)
 	if err != nil {
 		return 0, err
 	}
 	maps.Copy(parts, fonts)
-	removed, err := e.compactSourceResources(parts)
+	removed, err := e.compactSourceResources(parts, progress)
 	if err != nil {
 		return 0, err
 	}
@@ -415,6 +422,9 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte) (int64, 
 		if removed[strings.ToLower(cleanPackagePath(name))] {
 			delete(remaining, name)
 		}
+	}
+	if err := progress.report("write", 0, 0); err != nil {
+		return 0, err
 	}
 	output := &ofdCountingWriter{writer: writer}
 	archive := zip.NewWriter(output)
@@ -467,7 +477,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte) (int64, 
 // sourceReader 生成原包与修改条目组成的独立预览快照，不进行ZIP压缩
 // 返回: *Reader 阅读器, error 错误信息
 func (e *Editor) sourceReader() (*Reader, error) {
-	parts, err := e.sourceParts()
+	parts, err := e.sourceParts(nil)
 	if err != nil {
 		return nil, err
 	}
@@ -482,6 +492,11 @@ func (e *Editor) sourceReader() (*Reader, error) {
 	}
 	if _, err := reader.Doc(); err != nil {
 		return nil, err
+	}
+	for name, header := range e.source.reader.pageHeaderCache {
+		if _, changed := parts[name]; !changed {
+			reader.pageHeaderCache[name] = header
+		}
 	}
 	return reader, nil
 }

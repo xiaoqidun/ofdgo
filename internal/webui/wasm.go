@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall/js"
+	"time"
 
 	"github.com/xiaoqidun/ofdgo"
 )
@@ -608,11 +609,11 @@ var copiedObjects *editorClipboard
 // editorInfo 编辑文档信息与操作状态
 type editorInfo struct {
 	DocumentInfo
-	Revision         uint64            `json:"revision"`
-	CanUndo          bool              `json:"canUndo"`
-	CanRedo          bool              `json:"canRedo"`
-	PageCapabilities []map[string]bool `json:"pageCapabilities"`
-	EditWarnings     []string          `json:"editWarnings,omitempty"`
+	Revision         uint64   `json:"revision"`
+	CanUndo          bool     `json:"canUndo"`
+	CanRedo          bool     `json:"canRedo"`
+	PageCapabilities []uint   `json:"pageCapabilities"`
+	EditWarnings     []string `json:"editWarnings,omitempty"`
 }
 
 // editorPageInfo 页面操作结果与目标页面
@@ -637,11 +638,25 @@ func editorSummary() editorInfo {
 	if currentSession.doc.Signatures != "" {
 		info.EditWarnings = append(info.EditWarnings, "修改文档可能使原签名失效")
 	}
-	for i := 0; i < currentEditor.PageCount(); i++ {
+	info.PageCapabilities = make([]uint, currentEditor.PageCount())
+	for i := range info.PageCapabilities {
 		capability, _ := currentEditor.PageCapabilities(i)
-		info.PageCapabilities = append(info.PageCapabilities, map[string]bool{"insert": capability.Insert, "copy": capability.Copy, "delete": capability.Delete, "move": capability.Move, "resize": capability.Resize})
+		info.PageCapabilities[i] = pageCapabilityMask(capability)
 	}
 	return info
+}
+
+// pageCapabilityMask 按插入、复制、删除、移动和尺寸的固定顺序编码页面能力，避免重复传输字段名
+// 入参: capability 页面能力
+// 返回: uint 能力位标记
+func pageCapabilityMask(capability ofdgo.PageCapabilities) uint {
+	var mask uint
+	for i, enabled := range [...]bool{capability.Insert, capability.Copy, capability.Delete, capability.Move, capability.Resize} {
+		if enabled {
+			mask |= 1 << i
+		}
+	}
+	return mask
 }
 
 // restoreEditor 撤销或重做并更新预览
@@ -1055,8 +1070,8 @@ func changePage(args []js.Value) (any, error) {
 	return editorPageInfo{info, index}, nil
 }
 
-// batchPages 按页码范围批量复制或删除页面
-// 入参: args 操作及页码表达式
+// batchPages 按页码范围批量复制、删除或移动页面
+// 入参: args 操作、页码表达式及原页面序列中的插入位置
 // 返回: any 文档信息及目标页, error 错误信息
 func batchPages(args []js.Value) (any, error) {
 	index := 0
@@ -1081,6 +1096,18 @@ func batchPages(args []js.Value) (any, error) {
 			}
 			index = min(indexes[0], currentEditor.PageCount()-1)
 			return nil
+		case "move":
+			at := args[2].Int()
+			if at < 0 || at > currentEditor.PageCount() {
+				return fmt.Errorf("page index %d out of range", at)
+			}
+			index = at
+			for _, selected := range indexes {
+				if selected < at {
+					index--
+				}
+			}
+			return currentEditor.MovePages(indexes, index)
 		default:
 			return fmt.Errorf("unsupported page action %q", args[0].String())
 		}
@@ -1256,7 +1283,7 @@ func loadImport(args []js.Value) (any, error) {
 }
 
 // importPages 插入指定来源页面并保持目标文档元数据
-// 入参: args 页码表达式，空值为全部，以及目标零基插入位置
+// 入参: args 页码表达式，空值为全部、目标零基插入位置和是否导入对应目录
 // 返回: any 文档信息及首个插入页, error 错误信息
 func importPages(args []js.Value) (any, error) {
 	if currentEditor == nil || pendingImport == nil {
@@ -1278,7 +1305,8 @@ func importPages(args []js.Value) (any, error) {
 		}
 	}
 	at := args[1].Int()
-	if _, err := currentEditor.ImportPages(pendingImport, indexes, at); err != nil {
+	options := ofdgo.PageImportOptions{Outlines: len(args) > 2 && args[2].Bool()}
+	if _, err := currentEditor.ImportPagesWithOptions(pendingImport, indexes, at, options); err != nil {
 		return nil, err
 	}
 	clearImport()
@@ -1881,7 +1909,7 @@ func insertImage(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if height := pageBox.H - box.Y*2; box.H > height {
+	if height := pageBox.H - box.Y; box.H > height {
 		box.W *= height / box.H
 		box.H = height
 	}
@@ -1895,11 +1923,23 @@ func insertImage(args []js.Value) (any, error) {
 }
 
 // saveDocument 分块写出当前编辑文档
-// 入参: args 数据写出回调
+// 入参: args 数据写出回调和可选的准备进度回调
 // 返回: any 保存结果, error 错误信息
 func saveDocument(args []js.Value) (any, error) {
 	if currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
+	}
+	if len(args) > 1 {
+		var lastStage string
+		var lastProgress time.Time
+		currentEditor.OnWriteProgress = func(stage string, completed, total int) error {
+			if stage == lastStage && completed != total && time.Since(lastProgress) < 32*time.Millisecond {
+				return nil
+			}
+			lastStage, lastProgress = stage, time.Now()
+			return awaitExport(args[1], stage, completed, total)
+		}
+		defer func() { currentEditor.OnWriteProgress = nil }()
 	}
 	writer := bufio.NewWriterSize(exportWriter{write: args[0]}, 1<<20)
 	if _, err := currentEditor.WriteTo(writer); err != nil {

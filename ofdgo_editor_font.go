@@ -176,9 +176,16 @@ func subsetSourceFont(data []byte, usage *editorFontUsage) []byte {
 	return result
 }
 
-// subsetFonts 收集新增字体实际使用的字形，仅裁剪保存结果，不修改编辑资源或原文档字体
+// editorFontSubset 保存单个新增字体最近一次裁剪结果，不保留历史字形集合
+type editorFontSubset struct {
+	glyphs []uint16
+	data   []byte
+}
+
+// subsetFonts 收集新增字体实际使用的字形，仅裁剪保存结果，保留完整编辑字体
+// 入参: progress 保存进度回调
 // 返回: map[string][]byte 包内字体子集, error 错误信息
-func (e *Editor) subsetFonts() (map[string][]byte, error) {
+func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error) {
 	used := make(map[string]map[uint16]bool)
 	for _, resource := range e.resources {
 		if resource.font == nil {
@@ -189,7 +196,11 @@ func (e *Editor) subsetFonts() (map[string][]byte, error) {
 			used[resource.font.ID] = make(map[uint16]bool)
 		}
 	}
-	for _, page := range e.pages {
+	total := len(e.pages) + len(e.resources)
+	for i, page := range e.pages {
+		if err := progress.report("fonts", i, total); err != nil {
+			return nil, err
+		}
 		for _, layer := range page.Content.Layer {
 			for _, object := range layer.Objects {
 				if object.Type != "TextObject" {
@@ -209,24 +220,41 @@ func (e *Editor) subsetFonts() (map[string][]byte, error) {
 		}
 	}
 	result := make(map[string][]byte)
-	for _, resource := range e.resources {
-		if resource.font == nil || len(used[resource.font.ID]) == 0 {
+	for i := range e.resources {
+		if err := progress.report("fonts", len(e.pages)+i, total); err != nil {
+			return nil, err
+		}
+		resource := &e.resources[i]
+		if resource.font == nil {
 			continue
 		}
 		glyphs := used[resource.font.ID]
+		if len(glyphs) == 0 {
+			resource.subset = nil
+			continue
+		}
 		glyphs[0] = true
 		ids := make([]uint16, 0, len(glyphs))
 		for id := range glyphs {
 			ids = append(ids, id)
 		}
 		slices.Sort(ids)
-		data, err := subsetEditorFont(resource.data, ids)
-		if err != nil {
-			return nil, fmt.Errorf("subset font %s: %w", resource.font.FontName, err)
+		if resource.subset == nil || !slices.Equal(resource.subset.glyphs, ids) {
+			data, err := subsetEditorFont(resource.data, ids)
+			if err != nil {
+				return nil, fmt.Errorf("subset font %s: %w", resource.font.FontName, err)
+			}
+			if len(data) >= len(resource.data) {
+				data = nil
+			}
+			resource.subset = &editorFontSubset{glyphs: ids, data: data}
 		}
-		if len(data) < len(resource.data) {
-			result[resource.name] = data
+		if resource.subset.data != nil {
+			result[resource.name] = resource.subset.data
 		}
+	}
+	if err := progress.report("fonts", total, total); err != nil {
+		return nil, err
 	}
 	return result, nil
 }

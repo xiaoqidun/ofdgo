@@ -36,29 +36,34 @@ import (
 
 // Editor 编辑OFD文档，长度单位为毫米，页面索引从0开始，实例需串行使用
 // Info可修改文档元数据，通过方法管理页面、对象和资源，WriteTo另存结果，不覆盖输入
+// OnWriteProgress可选，按fonts、pages、references、resources、write阶段同步回报准备进度，返回错误则停止保存
+// completed和total为当前阶段已处理及总工作项，write阶段不计数；阶段可重复，准备完成不代表保存成功
+// 回调不可重入修改编辑器，可返回context.Canceled等调用方停止原因
 type Editor struct {
-	Info         DocInfo
-	pages        []PageContent
-	resources    []editorResource
-	fonts        map[string]*font.SFNT
-	images       map[string]image.Point
-	resourceID   map[editorResourceKey]string
-	maxID        int
-	history      []editorChange
-	historyIndex int
-	historyLimit int
-	revision     uint64
-	serial       uint64
-	source       *editorSource
-	outlines     []byte
+	OnWriteProgress func(stage string, completed, total int) error
+	Info            DocInfo
+	pages           []PageContent
+	resources       []editorResource
+	fonts           map[string]*font.SFNT
+	images          map[string]image.Point
+	resourceID      map[editorResourceKey]string
+	maxID           int
+	history         []editorChange
+	historyIndex    int
+	historyLimit    int
+	revision        uint64
+	serial          uint64
+	source          *editorSource
+	outlines        []byte
 }
 
 // editorResource 文档内嵌资源
 type editorResource struct {
-	name  string
-	data  []byte
-	font  *Font
-	image *MultiMedia
+	name   string
+	data   []byte
+	font   *Font
+	image  *MultiMedia
+	subset *editorFontSubset
 }
 
 // editorResourceKey 资源内容和字体集合索引
@@ -198,7 +203,7 @@ func (e *Editor) CopyPages(indexes []int) ([]int, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, err := e.importPages(source, indexes, at, true); err != nil {
+		if _, err := e.importPages(source, indexes, at, true, PageImportOptions{}); err != nil {
 			return nil, err
 		}
 		result := make([]int, len(indexes))
@@ -356,6 +361,59 @@ func (e *Editor) MovePage(from, to int) error {
 		change.redo = func(e *Editor) { moveEditorItem(e.pages, from, to) }
 	}
 	return nil
+}
+
+// MovePages 按指定顺序将页面移动到移除这些页面后的目标位置，保留页面及对象标识
+// 一次操作计入一条撤销记录，不解析或重写页面内容
+// 入参: indexes 不重复的原页面索引, to 移动后的起始页面索引，最大值为总页数减去移动页数
+// 返回: error 错误信息
+func (e *Editor) MovePages(indexes []int, to int) error {
+	if err := e.validatePageIndexes(indexes); err != nil {
+		return err
+	}
+	if to < 0 || to > len(e.pages)-len(indexes) {
+		return fmt.Errorf("page index %d out of range", to)
+	}
+	if len(indexes) == 0 {
+		return nil
+	}
+	selected := make(map[int]bool, len(indexes))
+	for _, index := range indexes {
+		selected[index] = true
+	}
+	order := make([]int, 0, len(e.pages))
+	for index := range e.pages {
+		if !selected[index] {
+			order = append(order, index)
+		}
+	}
+	order = slices.Insert(order, to, indexes...)
+	changed := false
+	for index, previous := range order {
+		changed = changed || index != previous
+	}
+	if !changed {
+		return nil
+	}
+	e.reorderPages(order)
+	if change := e.recordChange(); change != nil {
+		inverse := make([]int, len(order))
+		for index, previous := range order {
+			inverse[previous] = index
+		}
+		change.undo = func(e *Editor) { e.reorderPages(inverse) }
+		change.redo = func(e *Editor) { e.reorderPages(order) }
+	}
+	return nil
+}
+
+// reorderPages 按原页面索引序列调整页面顺序
+// 入参: order 页面索引序列
+func (e *Editor) reorderPages(order []int) {
+	pages := slices.Clone(e.pages)
+	for index, previous := range order {
+		e.pages[index] = pages[previous]
+	}
 }
 
 // ResizePage 调整页面尺寸，不缩放或移动页面内的对象

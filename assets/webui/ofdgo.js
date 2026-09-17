@@ -1,4 +1,4 @@
-import { CanvasEditor, canEditObject, editTextValue, missingGlyphMessage, objectEditReason, selectedText, lineShape, selectionBounds } from "./ofdgo_edit.js";
+import { CanvasEditor, canEditObject, editTextValue, missingGlyphMessage, objectEditReason, selectedText, lineShape, selectionBounds, pagePoint } from "./ofdgo_edit.js";
 import { FontManager, FontPicker } from "./ofdgo_font.js";
 
 const MM_TO_PX = 96 / 25.4;
@@ -143,6 +143,7 @@ const el = {
 	importPagesRow: document.querySelector("#importPagesRow"),
 	importPages: document.querySelector("#importPages"),
 	importPosition: document.querySelector("#importPosition"),
+	importOutlines: document.querySelector("#importOutlines"),
 	importStatus: document.querySelector("#importStatus"),
 	importCancel: document.querySelector("#importCancel"),
 	importSubmit: document.querySelector("#importSubmit"),
@@ -174,6 +175,8 @@ const el = {
 	batchPagesForm: document.querySelector("#batchPagesForm"),
 	batchPageAction: document.querySelector("#batchPageAction"),
 	batchPageRange: document.querySelector("#batchPageRange"),
+	batchPagePositionRow: document.querySelector("#batchPagePositionRow"),
+	batchPagePosition: document.querySelector("#batchPagePosition"),
 	batchPagesStatus: document.querySelector("#batchPagesStatus"),
 	batchPagesCancel: document.querySelector("#batchPagesCancel"),
 	batchPagesSubmit: document.querySelector("#batchPagesSubmit"),
@@ -331,7 +334,7 @@ const fontPicker = new FontPicker(el.textFont, el.textFontToggle, el.textFontLis
 el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
-	fontControls: [el.textFont, el.textFontToggle, el.textFontAdd],
+	textControls: [el.textFont, el.textFontToggle, el.textFontAdd, el.textSize, el.textColor],
 	busy: () => document.body.hasAttribute("aria-busy"),
 	rotation: () => state.rotation,
 	canInsert: (index) => pageCan("insert", index),
@@ -345,6 +348,10 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	},
 	onTransform: (item, change) => changeDocument(item.items ? "ofdgoTransformObjects" : "ofdgoTransformObject", item,
 		change.x + item.x * (1 - change.scale), change.y + item.y * (1 - change.scale), change.scale),
+	onNudgeChange: () => {
+		updatePendingChanges();
+		el.undoButton.disabled = !state.ready || state.exporting || !state.editorInfo?.canUndo && !canvasEditor.nudgeChanged();
+	},
 	onReshape: (item, box) => changeDocument("ofdgoReshapeObject", item, box.x, box.y, box.width, box.height),
 	onTextWidth: (item, box) => changeDocument("ofdgoLayoutText", item, box.x - item.x, box.width, true, item.align || "", item.paragraphHeight || 0, item.letterSpacing || 0, ...textIndents(item)),
 	onCrop: (item, box) => changeDocument("ofdgoCropImage", item, box.x, box.y, box.width, box.height),
@@ -369,9 +376,9 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onDraw: (index, shape, box, style) => changeDocument("ofdgoInsertShape", null, index, shape,
 		box.x, box.y, box.width, box.height, style.fill, style.fillColor, style.stroke, style.strokeColor, style.lineWidth),
 	onDrawText: beginCanvasText,
-	onCommitText: (item, value, fontData) => item.draft
+	onCommitText: (item, value, fontData, color = null) => item.draft
 		? changeDocument("ofdgoInsertText", null, item.index, value, fontData || item.fontData, item.x, item.y, item.size, item.color, item.width, item.wrap, item.align, item.paragraphHeight, item.letterSpacing, ...textIndents(item))
-		: changeDocument("ofdgoUpdateText", item, value, fontData || null, item.size, null),
+		: changeDocument("ofdgoUpdateText", item, value, fontData || null, item.size, color),
 	onTextChange: () => {
 		const editing = canvasEditor.input;
 		updatePendingChanges();
@@ -384,17 +391,17 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 });
 
 function updatePendingChanges() {
-	const editing = canvasEditor.input;
 	setDirty(Boolean(state.editorInfo) && (state.editorInfo.revision !== state.savedRevision
-		|| Boolean(editing && (editTextValue(editing.input) !== editing.item.text || editing.fontData)) || canvasEditor.cropChanged()));
+		|| canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged()));
 }
 
 el.editorTools.addEventListener("pointerdown", (event) => {
-	if (canvasEditor.input && event.target.closest("button")) event.preventDefault();
+	if ((canvasEditor.input || canvasEditor.nudge) && event.target.closest("button")) event.preventDefault();
 });
 
 function editorClick(button, action) {
 	button.addEventListener("click", async () => {
+		if ((canvasEditor.nudge || canvasEditor.nudgeCommit) && !await canvasEditor.commitNudge()) return;
 		if (canvasEditor.input && !await canvasEditor.commitText()) return;
 		if (canvasEditor.crop && !await canvasEditor.commitCrop()) return;
 		return action();
@@ -582,7 +589,7 @@ el.importForm.addEventListener("submit", async event => {
 	event.preventDefault();
 	if (document.body.hasAttribute("aria-busy") || !state.importPageCount || !el.importForm.reportValidity()) return;
 	const position = { before:state.pageIndex, after:state.pageIndex+1, first:0, last:state.doc.pageCount }[el.importPosition.value];
-	const saved = await changeDocument("ofdgoImportPages", null, el.importRange.value === "custom" ? el.importPages.value : "", position);
+	const saved = await changeDocument("ofdgoImportPages", null, el.importRange.value === "custom" ? el.importPages.value : "", position, el.importOutlines.checked);
 	if (saved) el.importPanel.close();
 });
 editorClick(el.copyPageButton, () => changeDocument("ofdgoChangePage", null, "copy", state.pageIndex));
@@ -593,6 +600,8 @@ editorClick(el.pageSettingsButton, openPagePanel);
 editorClick(el.batchPagesButton, () => {
 	el.batchPageAction.value = "copy";
 	el.batchPagesSubmit.textContent = "复制";
+	el.batchPagePositionRow.hidden = true;
+	el.batchPagePosition.value = "after";
 	el.batchPageRange.value = String(state.pageIndex + 1);
 	el.batchPagesStatus.textContent = "";
 	el.batchPagesPanel.showModal();
@@ -600,11 +609,14 @@ editorClick(el.batchPagesButton, () => {
 });
 el.batchPagesCancel.addEventListener("click", () => el.batchPagesPanel.close());
 el.batchPageAction.addEventListener("change", () => {
-	el.batchPagesSubmit.textContent = el.batchPageAction.value === "copy" ? "复制" : "删除";
+	el.batchPagesSubmit.textContent = { copy: "复制", move: "移动", delete: "删除" }[el.batchPageAction.value];
+	el.batchPagePositionRow.hidden = el.batchPageAction.value !== "move";
 });
 el.batchPagesForm.addEventListener("submit", async event => {
 	event.preventDefault();
-	if (await changeDocument("ofdgoBatchPages", null, el.batchPageAction.value, el.batchPageRange.value)) el.batchPagesPanel.close();
+	const args = [el.batchPageAction.value, el.batchPageRange.value];
+	if (args[0] === "move") args.push({ before: state.pageIndex, after: state.pageIndex + 1, first: 0, last: state.doc.pageCount }[el.batchPagePosition.value]);
+	if (await changeDocument("ofdgoBatchPages", null, ...args)) el.batchPagesPanel.close();
 });
 editorClick(el.objectStyleButton, openObjectStyle);
 editorClick(el.objectBoundsButton, openObjectBounds);
@@ -751,6 +763,7 @@ el.panButton.addEventListener("click", togglePan);
 el.continuousButton.addEventListener("click", toggleContinuous);
 el.annotationButton.addEventListener("click", toggleAnnotations);
 document.addEventListener("copy", copySelection);
+document.addEventListener("cut", copySelection);
 el.viewerPanel.addEventListener("paste", pasteEditorContent);
 document.addEventListener("selectionchange", syncSelection);
 el.exportFormat.addEventListener("change", () => updateDPIControl());
@@ -1141,7 +1154,8 @@ function setEditorInfo(doc) {
 }
 
 function pageCan(capability, index = state.pageIndex) {
-	return Boolean(state.editorInfo?.pageCapabilities?.[index]?.[capability]);
+	const bit = { insert: 1, copy: 2, delete: 4, move: 8, resize: 16 }[capability];
+	return Boolean(state.editorInfo?.pageCapabilities?.[index] & bit);
 }
 
 async function toggleEditor() {
@@ -1327,7 +1341,8 @@ function openInsertPanel(item = null) {
 }
 
 function currentTextStyle() {
-	return selectedText(canvasEditor.selected) || state.textDefaults;
+	const text = selectedText(canvasEditor.selected) || state.textDefaults;
+	return canvasEditor.input?.style ? { ...text, ...canvasEditor.input.style } : text;
 }
 
 function textIndents(item) {
@@ -1349,6 +1364,7 @@ async function toggleTextTool() {
 	const style = !canvasEditor.selected?.items && canEditObject(canvasEditor.selected, "layoutKnown") ? currentTextStyle() : state.textDefaults;
 	const font = state.textFonts[Number(fontPicker.value)];
 	state.textDefaults = { type: "TextObject", size: style.size, color: style.color, wrap: style.wrap,
+		wrapOverride: style === state.textDefaults ? style.wrapOverride : style.wrap,
 		align: style.align || "left", paragraphHeight: style.paragraphHeight || 0, letterSpacing: style.letterSpacing || 0,
 		leftIndent: style.leftIndent || 0, rightIndent: style.rightIndent || 0, firstLineIndent: style.firstLineIndent || 0,
 		fontChoice: font && !font.disabled ? font : state.textDefaults.fontChoice };
@@ -1373,7 +1389,8 @@ async function beginCanvasText(index, box, surface, page) {
 		await face.load();
 		if (openSeq !== state.openSeq || !surface.isConnected) return;
 		const node = document.createElement("div");
-		const item = { ...state.textDefaults, ...box, index, page, surface, node, text: "", draft: true, fontData: data };
+		const item = { ...state.textDefaults, ...box, wrap: state.textDefaults.wrapOverride ?? box.wrap ?? state.textDefaults.wrap,
+			index, page, surface, node, text: "", draft: true, fontData: data };
 		canvasEditor.editText(item, face);
 	} catch (err) {
 		if (openSeq === state.openSeq) showError(err, false);
@@ -1548,8 +1565,10 @@ function inputMillimeters(input, original) {
 	return points === displayPoints(original) ? original : points * 25.4 / 72;
 }
 
-async function changeParagraph(wrap = currentTextStyle().wrap) {
+async function changeParagraph(wrap) {
 	const item = currentTextStyle();
+	const explicitWrap = wrap !== undefined;
+	wrap ??= item.wrap;
 	if (document.body.hasAttribute("aria-busy") || item.draft) return;
 	if (!el.textLineHeight.checkValidity()) {
 		updateObjectControls(item, true);
@@ -1563,6 +1582,7 @@ async function changeParagraph(wrap = currentTextStyle().wrap) {
 	const spacing = inputMillimeters(el.textSpacing, item.letterSpacing || 0);
 	if (item === state.textDefaults) {
 		Object.assign(item, { wrap: Boolean(wrap), align: el.textAlign.value, paragraphHeight: height, letterSpacing: spacing });
+		if (explicitWrap) item.wrapOverride = Boolean(wrap);
 		updateObjectControls(canvasEditor.selected, true);
 		return;
 	}
@@ -1576,7 +1596,7 @@ async function changeParagraph(wrap = currentTextStyle().wrap) {
 
 async function changeTextStyle(color) {
 	const item = currentTextStyle();
-	if (!state.ready || state.exporting || item.draft || document.body.hasAttribute("aria-busy")) {
+	if (!state.ready || state.exporting || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
 	if (!color && !el.textSize.checkValidity()) {
@@ -1586,6 +1606,11 @@ async function changeTextStyle(color) {
 	}
 	const size = color ? item.size : inputMillimeters(el.textSize, item.size);
 	const fill = color && el.textColor.value !== item.color ? el.textColor.value : null;
+	if (canvasEditor.input) {
+		canvasEditor.setTextStyle(color ? { color: el.textColor.value } : { size });
+		updateObjectControls(canvasEditor.selected, true);
+		return;
+	}
 	if (item.items) {
 		if (color ? !canEditObject(item, "update") : !canEditObject(item, "layoutKnown") || !canEditObject(item, "reflow")) return;
 		if (!color && !el.textSize.value) return;
@@ -2156,7 +2181,10 @@ async function loadWASM() {
 						el.cancelExportButton.disabled = true;
 						setProgress("正在保存", null);
 					} else if (!el.cancelExportButton.disabled) {
-						if (data.completed === data.total) {
+						if (data.stage === "prepare") {
+							const label = { fonts: "正在处理字体", pages: "正在处理页面", references: "正在检查引用", resources: "正在整理资源", write: "正在写入" }[data.phase];
+							setProgress(label, data.total ? data.completed / data.total * 100 : null);
+						} else if (data.completed === data.total) {
 							setProgress("正在收尾", null);
 						} else {
 							setProgress(`正在导出 ${data.completed} / ${data.total} 页`, data.completed / data.total * 100);
@@ -2961,8 +2989,9 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		if (canvasEditor.input || canvasEditor.crop) {
+		if (canvasEditor.input || canvasEditor.crop || canvasEditor.nudge || canvasEditor.nudgeCommit) {
 			setBusy(false);
+			if (!await canvasEditor.commitNudge()) return;
 			if (!await canvasEditor.commitText()) return;
 			if (!await canvasEditor.commitCrop()) return;
 			openSeq = state.openSeq;
@@ -3455,29 +3484,59 @@ function copyEditorSelection(event) {
 	if (!state.editing || !canvasEditor.enabled || !canvasEditor.selected || !el.viewerPanel.contains(event.target)
 		|| canvasEditor.input || canvasEditor.crop || canvasEditor.drag || document.body.hasAttribute("aria-busy")) return false;
 	const items = canvasEditor.items().slice().sort((a, b) => a.order - b.order);
-	if (!canEditObject(canvasEditor.selected, "copy")) {
+	const cut = event.type === "cut";
+	if (!canEditObject(canvasEditor.selected, "copy") || cut && !canEditObject(canvasEditor.selected, "delete")) {
 		event.preventDefault();
-		setStatus("对象不可复制");
+		setStatus(cut ? "对象不可剪切" : "对象不可复制");
 		return true;
 	}
-	const clipboard = { token: crypto.randomUUID(), page: state.doc.pages[items[0].index].id, offset: 0 };
+	const index = items[0].index, ids = items.map(item => item.id);
+	const clipboard = { token: crypto.randomUUID(), page: state.doc.pages[index].id, bounds: selectionBounds(items), x: 0, y: 0, cut };
+	if (canvasEditor.nudge) {
+		clipboard.bounds.x += canvasEditor.nudge.x;
+		clipboard.bounds.y += canvasEditor.nudge.y;
+	}
 	event.clipboardData.setData(OBJECT_CLIPBOARD_TYPE, clipboard.token);
 	event.clipboardData.setData("text/plain", items.map(item => item.text || "").filter(Boolean).join("\n"));
 	event.preventDefault();
 	state.objectClipboard = clipboard;
-	clipboard.ready = callWASM("ofdgoCaptureObjects", items[0].index, items.map(item => item.id), clipboard.token)
-		.then(() => true, err => {
+	const capture = () => {
+		const openSeq = state.openSeq, revision = state.editorInfo.revision;
+		return callWASM("ofdgoCaptureObjects", index, ids, clipboard.token).then(async () => {
+			clipboard.cut = false;
+			if (cut && openSeq === state.openSeq && revision === state.editorInfo?.revision && index === state.pageIndex && state.objectClipboard === clipboard) {
+				clipboard.cut = Boolean(await changeDocument("ofdgoDeleteObjects", { index, id: ids }));
+			}
+			return true;
+		}, err => {
 			if (state.objectClipboard === clipboard) showError(err, false);
 			return false;
 		});
+	};
+	clipboard.ready = canvasEditor.nudge ? canvasEditor.commitNudge().then(saved => saved ? capture() : false) : capture();
 	return true;
+}
+
+function visiblePageBounds(index) {
+	const page = state.doc.pages[index], surface = pageShell(index)?.querySelector(".page-surface");
+	const full = { x: 0, y: 0, width: page.width, height: page.height };
+	if (!surface) return full;
+	const rect = surface.getBoundingClientRect(), view = el.viewerPanel.getBoundingClientRect();
+	const left = Math.max(rect.left, view.left), top = Math.max(rect.top, view.top);
+	const right = Math.min(rect.right, view.left + el.viewerPanel.clientWidth), bottom = Math.min(rect.bottom, view.top + el.viewerPanel.clientHeight);
+	if (right <= left || bottom <= top) return full;
+	const a = pagePoint(left, top, rect, page, state.rotation), b = pagePoint(right, bottom, rect, page, state.rotation);
+	return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), width: Math.abs(a.x - b.x), height: Math.abs(a.y - b.y) };
 }
 
 async function pasteEditorContent(event) {
 	if (!state.editing || event.target.closest?.("input, textarea, select, [contenteditable]") || formDialogOpen()) return;
 	event.preventDefault();
-	if (document.body.hasAttribute("aria-busy") || canvasEditor.input || canvasEditor.crop || canvasEditor.drag || !pageCan("insert")) return;
 	const token = event.clipboardData.getData(OBJECT_CLIPBOARD_TYPE);
+	const files = Array.from(event.clipboardData.files);
+	const value = event.clipboardData.getData("text/plain").replace(/\t/g, "    ");
+	if ((canvasEditor.nudge || canvasEditor.nudgeCommit) && !await canvasEditor.commitNudge()) return;
+	if (document.body.hasAttribute("aria-busy") || canvasEditor.input || canvasEditor.crop || canvasEditor.drag || !pageCan("insert")) return;
 	const index = state.pageIndex, page = state.doc.pages[index];
 	if (token) {
 		const clipboard = state.objectClipboard;
@@ -3487,15 +3546,25 @@ async function pasteEditorContent(event) {
 		}
 		const openSeq = state.openSeq;
 		if (!await clipboard.ready || openSeq !== state.openSeq || index !== state.pageIndex || state.objectClipboard !== clipboard) return;
-		const offset = clipboard.page === page.id ? clipboard.offset + 3 : 0;
-		if (await changeDocument("ofdgoPasteObjects", null, index, token, offset, offset)) {
+		const visible = visiblePageBounds(index), bounds = clipboard.bounds;
+		const offset = clipboard.page === page.id ? { x: clipboard.x + (clipboard.cut ? 0 : 3), y: clipboard.y + (clipboard.cut ? 0 : 3) } : { x: 0, y: 0 };
+		for (const [axis, size] of [["x", "width"], ["y", "height"]]) {
+			const position = bounds[axis] + offset[axis];
+			if (position < visible[axis] || position + bounds[size] > visible[axis] + visible[size]) {
+				const margin = Math.min(20, visible[size] / 10);
+				offset[axis] = Math.max(visible[axis] + margin, Math.min(position, visible[axis] + visible[size] - margin - bounds[size])) - bounds[axis];
+			}
+		}
+		if (await changeDocument("ofdgoPasteObjects", null, index, token, offset.x, offset.y)) {
 			clipboard.page = page.id;
-			clipboard.offset = offset;
+			clipboard.x = offset.x;
+			clipboard.y = offset.y;
+			clipboard.cut = false;
 		}
 		return;
 	}
-	const files = Array.from(event.clipboardData.files);
-	const x = Math.min(20, page.width / 10), y = Math.min(20, page.height / 10);
+	const visible = visiblePageBounds(index), margin = Math.min(20, visible.width / 10);
+	const x = visible.x + margin, y = visible.y + Math.min(20, visible.height / 10), width = visible.width - margin * 2;
 	if (files.length) {
 		if (files.length !== 1) {
 			setStatus("一次粘贴一张图片");
@@ -3505,10 +3574,9 @@ async function pasteEditorContent(event) {
 			setStatus("图片仅支持 PNG、JPG");
 			return;
 		}
-		await changeDocument("ofdgoInsertImage", null, index, files[0].arrayBuffer().then(bytes => new Uint8Array(bytes)), x, y, page.width - x * 2);
+		await changeDocument("ofdgoInsertImage", null, index, files[0].arrayBuffer().then(bytes => new Uint8Array(bytes)), x, y, width);
 		return;
 	}
-	const value = event.clipboardData.getData("text/plain").replace(/\t/g, "    ");
 	if (!value.trim()) return;
 	const font = state.textFonts[Number(fontPicker.value)];
 	if (!font || font.disabled) {
@@ -3519,7 +3587,7 @@ async function pasteEditorContent(event) {
 	const style = canvasEditor.selected?.items ? state.textDefaults : currentTextStyle();
 	const data = readTextFont(font);
 	await changeDocument("ofdgoInsertText", null, index, value, data, x, y, style.size, style.color,
-		page.width - x * 2, style.wrap, style.align || "left", style.paragraphHeight || 0, style.letterSpacing || 0, ...textIndents(style));
+		width, style.wrap, style.align || "left", style.paragraphHeight || 0, style.letterSpacing || 0, ...textIndents(style));
 }
 
 function copySelection(event) {
@@ -4046,6 +4114,18 @@ function createOutlineList(outlines, path = []) {
 		}
 		if (outline.page || state.editing) {
 			link.type = "button";
+			link.addEventListener("keydown", async event => {
+				if (!state.editing || event.defaultPrevented || event.isComposing || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
+					|| !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+				event.preventDefault();
+				const target = index + (event.key === "ArrowUp" ? -1 : 1);
+				if (event.repeat || document.body.hasAttribute("aria-busy") || target < 0 || target >= outlines.length) return;
+				if (await changeDocument("ofdgoMoveOutline", null, current, path, target)) {
+					const selected = el.outlineList.querySelector(".outline-link.selected");
+					selected?.focus({ preventScroll: true });
+					selected?.scrollIntoView({ block: "nearest" });
+				}
+			});
 			link.addEventListener("click", (event) => {
 				event.preventDefault();
 				if (state.editing) {
@@ -4936,6 +5016,8 @@ function applyFit(updateStatus = true) {
 	}
 	if (state.fitMode === "width") {
 		fitWidth(updateStatus);
+	} else {
+		updateControls();
 	}
 }
 
@@ -5108,13 +5190,13 @@ function updateObjectControls(item, reset = false) {
 		|| !canEditObject(item, item.type === "TextObject" ? "reflow" : "update");
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const selection = selectedText(item);
-	const text = selection || state.textDefaults;
+	const text = selection ? currentTextStyle() : state.textDefaults;
 	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items && !selection);
 	fontPicker.setDisabled(textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "replaceFont"));
-	el.textSize.disabled = textDisabled || Boolean(item?.draft) || text !== state.textDefaults && (!canEditObject(item, "reflow") || Boolean(item?.items) && !canEditObject(item, "layoutKnown"));
-	el.textColor.disabled = textDisabled || Boolean(item?.draft) || text !== state.textDefaults && !canEditObject(item, "update");
+	el.textSize.disabled = textDisabled || text !== state.textDefaults && !item.draft && (!canEditObject(item, "reflow") || Boolean(item?.items) && !canEditObject(item, "layoutKnown"));
+	el.textColor.disabled = textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "update");
 	el.textFontAdd.disabled = !state.editing || !state.ready || state.exporting;
-	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled || Boolean(item?.items);
+	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled || Boolean(item?.items || item?.draft) || Boolean(canvasEditor.input);
 	el.paragraphButton.disabled = el.textAlign.disabled;
 	const layoutKnown = text === state.textDefaults || Boolean(item?.draft) || canEditObject(item, "layoutKnown");
 	el.textAlign.value = layoutKnown ? text.align || "left" : "";

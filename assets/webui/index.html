@@ -166,8 +166,9 @@
 		</div>
 		<dialog id="batchPagesPanel" class="form-dialog" aria-label="批量页面">
 			<form id="batchPagesForm">
-				<div class="form-row"><label for="batchPageAction">操作</label><select id="batchPageAction"><option value="copy">复制</option><option value="delete">删除</option></select></div>
+				<div class="form-row"><label for="batchPageAction">操作</label><select id="batchPageAction"><option value="copy">复制</option><option value="move">移动</option><option value="delete">删除</option></select></div>
 				<div class="form-row"><label for="batchPageRange">页码</label><input id="batchPageRange" type="text" required autocomplete="off" spellcheck="false" autofocus></div>
+				<div id="batchPagePositionRow" class="form-row" hidden><label for="batchPagePosition">位置</label><select id="batchPagePosition"><option value="before">页前</option><option value="after">页后</option><option value="first">首部</option><option value="last">末尾</option></select></div>
 				<div class="form-actions"><div id="batchPagesStatus" class="form-status" role="status"></div><button id="batchPagesCancel" class="button" type="button">取消</button><button id="batchPagesSubmit" class="button" type="submit">复制</button></div>
 			</form>
 		</dialog>
@@ -239,6 +240,7 @@
 				<div class="form-row"><label for="importRange">范围</label><select id="importRange"><option value="all">全部</option><option value="custom">指定</option></select></div>
 				<div id="importPagesRow" class="form-row" hidden><label for="importPages">页码</label><input id="importPages" type="text" autocomplete="off" spellcheck="false" disabled></div>
 				<div class="form-row"><label for="importPosition">位置</label><select id="importPosition"><option value="before">页前</option><option value="after" selected>页后</option><option value="first">首部</option><option value="last">末尾</option></select></div>
+				<div class="form-row"><label for="importOutlines">目录</label><input id="importOutlines" type="checkbox" title="导入对应目录"></div>
 				<div class="form-actions"><div id="importStatus" class="form-status" role="status"></div><button id="importCancel" class="button" type="button">取消</button><button id="importSubmit" class="button" type="submit" disabled>插入</button></div>
 			</form>
 		</dialog>

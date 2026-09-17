@@ -639,6 +639,12 @@ button:not(:disabled):hover {
 	gap: 12px;
 }
 
+.form-row input[type="checkbox"] {
+	justify-self: start;
+	margin: 0;
+	accent-color: var(--accent);
+}
+
 .form-pair .form-unit {
 	grid-template-columns: minmax(0, 1fr) auto;
 	gap: 4px;

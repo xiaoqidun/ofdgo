@@ -50,6 +50,11 @@ type editorPageImport struct {
 	copyPage      bool
 }
 
+// PageImportOptions 页面导入选项，零值仅导入页面及其关联资源
+type PageImportOptions struct {
+	Outlines bool
+}
+
 // ImportPages 将来源主文档中的指定页面插入目标位置，保持输入顺序并作为一次撤销操作
 // 页面索引从0开始，at可等于当前页数；复制关联模板、注释、签章外观和实际引用的资源
 // 不导入来源元数据和目录，指向未选页面的跳转被移除；签名数据仅保留原始凭据，不代表合并后文档有效
@@ -57,13 +62,22 @@ type editorPageImport struct {
 // 入参: source 来源阅读器, indexes 来源页面索引，不可重复, at 目标插入位置
 // 返回: []string 新页面标识, error 错误信息
 func (e *Editor) ImportPages(source *Reader, indexes []int, at int) ([]string, error) {
-	return e.importPages(source, indexes, at, false)
+	return e.ImportPagesWithOptions(source, indexes, at, PageImportOptions{})
+}
+
+// ImportPagesWithOptions 按选项导入页面，页面与目录作为一次原子操作提交
+// Outlines启用时追加指向所选页面的目录及其祖先，保留层级和跳转坐标，不导入无关目录
+// 其他行为与ImportPages相同，不迁移来源元数据
+// 入参: source 来源阅读器, indexes 来源页面索引, at 目标插入位置, options 导入选项
+// 返回: []string 新页面标识, error 错误信息
+func (e *Editor) ImportPagesWithOptions(source *Reader, indexes []int, at int, options PageImportOptions) ([]string, error) {
+	return e.importPages(source, indexes, at, false, options)
 }
 
 // importPages 迁移页面，同文档复制时复用原资源并保留其他页面的跳转
-// 入参: source 来源阅读器, indexes 来源页索引, at 插入位置, copyPage 是否同文档复制
+// 入参: source 来源阅读器, indexes 来源页索引, at 插入位置, copyPage 是否同文档复制, options 导入选项
 // 返回: []string 新页标识, error 错误信息
-func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage bool) ([]string, error) {
+func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage bool, options PageImportOptions) ([]string, error) {
 	if at < 0 || at > len(e.pages) {
 		return nil, fmt.Errorf("page index %d out of range", at)
 	}
@@ -145,6 +159,17 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 	if err != nil {
 		return nil, err
 	}
+	beforeOutlines, outlines := e.outlines, e.outlines
+	if options.Outlines {
+		imported, err := m.outlines()
+		if err != nil {
+			return nil, err
+		}
+		outlines, err = e.appendImportedOutlines(imported)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if !copyPage {
 		var resourceContent []byte
 		for _, group := range []string{"ColorSpaces", "DrawParams", "Fonts", "MultiMedias", "CompositeGraphicUnits"} {
@@ -217,6 +242,7 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 		}
 	}
 	e.source, e.maxID = next, m.maximum
+	e.outlines = outlines
 	e.pages = slices.Insert(e.pages, at, added...)
 	if change := e.recordChange(); change != nil {
 		change.undo = func(e *Editor) {
@@ -225,6 +251,7 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 			}
 			e.pages = slices.Delete(e.pages, at, at+len(added))
 			e.source = base
+			e.outlines = beforeOutlines
 		}
 		change.redo = func(e *Editor) {
 			pages := make([]PageContent, len(added))
@@ -233,9 +260,116 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 			}
 			e.pages = slices.Insert(e.pages, at, pages...)
 			e.source = next
+			e.outlines = outlines
 		}
 	}
 	return ids, nil
+}
+
+// outlines 筛选指向导入页面的目录树并复用标准动作迁移
+// 返回: []byte 目录片段, error 错误信息
+func (m *editorPageImport) outlines() ([]byte, error) {
+	name := m.reader.ResPath(m.reader.OFD.DocBody[0].DocRoot)
+	data, err := m.reader.readFile(name)
+	if err != nil {
+		return nil, err
+	}
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	root = root.child("Outlines")
+	if root == nil {
+		return nil, nil
+	}
+	bookmarks := make(map[string]Dest, len(m.doc.Bookmarks.Bookmark))
+	for _, bookmark := range m.doc.Bookmarks.Bookmark {
+		bookmarks[bookmark.Name] = bookmark.Dest
+	}
+	var patches []editorXMLPatch
+	var keep func(*editorXML) (bool, error)
+	keep = func(node *editorXML) (bool, error) {
+		start, selected := len(patches), false
+		if actions := node.child("Actions"); actions != nil {
+			var value struct {
+				Action []Action `xml:"Action"`
+			}
+			if err := xml.Unmarshal(data[actions.start:actions.end], &value); err != nil {
+				return false, err
+			}
+			for _, action := range value.Action {
+				if action.Goto != nil {
+					if dest := gotoDest(action.Goto, bookmarks); dest != nil && m.pages[dest.PageID] {
+						selected = true
+					}
+				}
+			}
+		}
+		for _, child := range editorOutlineChildren(node) {
+			retained, err := keep(child)
+			if err != nil {
+				return false, err
+			}
+			selected = selected || retained
+		}
+		if !selected {
+			patches = append(patches[:start], editorXMLPatch{node.start, node.end, nil})
+		}
+		return selected, nil
+	}
+	for _, node := range editorOutlineChildren(root) {
+		if _, err := keep(node); err != nil {
+			return nil, err
+		}
+	}
+	data = editorPatchXML(data, patches)
+	root, err = parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	root = root.child("Outlines")
+	if len(editorOutlineChildren(root)) == 0 {
+		return nil, nil
+	}
+	return m.encode(editorImportEntry{name: name, data: data}, root)
+}
+
+// appendImportedOutlines 将已迁移目录追加到目标根目录，规范计数且不修改当前编辑器
+// 入参: imported 已迁移目录片段
+// 返回: []byte 合并后的目录, error 错误信息
+func (e *Editor) appendImportedOutlines(imported []byte) ([]byte, error) {
+	if len(imported) == 0 {
+		return e.outlines, nil
+	}
+	added, err := parseEditorXML(imported)
+	if err != nil {
+		return nil, err
+	}
+	data, err := e.outlineXML()
+	if err != nil {
+		return nil, err
+	}
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	var content []byte
+	if root.open != root.end {
+		content = bytes.Clone(data[root.open:root.close])
+	}
+	for _, child := range editorOutlineChildren(added) {
+		value, err := editorXMLStandalone(imported[child.start:child.end], child)
+		if err != nil {
+			return nil, err
+		}
+		content = append(content, value...)
+	}
+	preview := *e
+	preview.historyLimit = 0
+	if err := preview.setOutlineXML(editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, root, content)})); err != nil {
+		return nil, err
+	}
+	return preview.outlines, nil
 }
 
 // importBase 为新建文档提供空的保真包基底，不重复保存已创建的页面和资源
@@ -250,7 +384,7 @@ func (e *Editor) importBase() (*editorSource, error) {
 			files[name] = data
 		}
 		return nil
-	}); err != nil {
+	}, nil); err != nil {
 		return nil, err
 	}
 	data := files["Doc_0/Document.xml"]

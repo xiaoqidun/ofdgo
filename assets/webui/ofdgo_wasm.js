@@ -49,6 +49,11 @@ async function handleMessage({ id, name, args }) {
 					self.postMessage({ id, type: "export", stage: "pages", completed, total });
 					finish(done);
 				});
+			} else if (name === "ofdgoSaveDocument") {
+				args.push((phase, completed, total, done) => {
+					self.postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
+					finish(done);
+				});
 			}
 		}
 		const payload = await globalThis[name](...args);
