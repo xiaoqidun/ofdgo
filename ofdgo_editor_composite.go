@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -33,13 +34,14 @@ type ObjectPath struct {
 }
 
 // CompositeMember 复合对象的直接成员快照，Object包含有效样式，不用于整体替换原对象
-// Bounds与Contours使用页面毫米坐标，StrokeScale为对象描边到页面的倍率
+// Bounds与Contours使用页面毫米坐标，Matrix将对象局部坐标映射至页面，StrokeScale为描边倍率
 // Position表示当前范围内的直接容器位置，结构操作后需重新枚举
 type CompositeMember struct {
 	Object       GraphicObject
 	Bounds       Box
 	Contours     []ObjectContour
 	StrokeScale  float64
+	Matrix       Matrix
 	Capabilities ObjectCapabilities
 	Position     ObjectPosition
 	Transform    bool
@@ -380,10 +382,24 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		if err != nil {
 			style = cloneEditorData(node.object)
 		}
+		if transform && err == nil && node.object.Type == "TextObject" && editorXMLSupported(node.node) {
+			capability.ReplaceFont = true
+			text := cloneEditorData(style.TextObject)
+			if err := e.prepareText(&text); err != nil {
+				capability.ReasonCode, capability.Reason = editReason(err), err.Error()
+				errors.As(err, &capability.MissingGlyphs)
+			} else if _, err := text.TextFrame(); err == nil {
+				capability.Reflow = text.ReadDirection == 0 && text.CharDirection == 0
+			}
+		}
+		if transform && node.object.Type == "ImageObject" && bounds.box.W > 0 && bounds.box.H > 0 {
+			clips := node.object.ImageObject.Clips
+			_, capability.CropImage = node.matrix(clips == nil || clips.TransFlag == nil || *clips.TransFlag).Invert()
+		}
 		_, ctm := editorGeometry(node.object)
 		matrix := node.parent.Multiply(NewMatrix(ctm))
 		position := positions[node.span.parent]
-		result[i] = CompositeMember{Object: style, Bounds: bounds.box, Contours: bounds.contours, StrokeScale: math.Sqrt(math.Abs(matrix.a*matrix.d - matrix.b*matrix.c)), Capabilities: capability, Position: position, Transform: transform}
+		result[i] = CompositeMember{Object: style, Bounds: bounds.box, Contours: bounds.contours, Matrix: node.matrix(true), StrokeScale: math.Sqrt(math.Abs(matrix.a*matrix.d - matrix.b*matrix.c)), Capabilities: capability, Position: position, Transform: transform}
 		position.Index++
 		positions[node.span.parent] = position
 	}
@@ -537,26 +553,35 @@ func (e *Editor) changeCompositeObjects(page int, path ObjectPath, indexes []int
 // 入参: page 页面索引, path 父路径, indexes 成员序号, edit 修改回调
 // 返回: error 错误信息
 func (e *Editor) editCompositeObjects(page int, path ObjectPath, indexes []int, edit func(*Renderer, []*editorCompositeNode, []CompositeMember) error) (err error) {
+	return e.editCompositeScope(page, path, func(renderer *Renderer, _ *editorCompositeNode, nodes []*editorCompositeNode) error {
+		members := e.measureCompositeMembers(renderer, nodes)
+		selected := make(map[int]bool)
+		var selectedNodes []*editorCompositeNode
+		var selectedMembers []CompositeMember
+		for _, i := range indexes {
+			if i < 0 || i >= len(nodes) || selected[i] {
+				return fmt.Errorf("invalid composite selection")
+			}
+			selected[i] = true
+			selectedNodes = append(selectedNodes, nodes[i])
+			selectedMembers = append(selectedMembers, members[i])
+		}
+		if len(selected) == 0 {
+			return nil
+		}
+		return edit(renderer, selectedNodes, selectedMembers)
+	})
+}
+
+// editCompositeScope 原子提交内部范围修改，支持向空容器粘贴并在失败时回收新增资源
+// 入参: page 页面索引, path 父路径, edit 修改回调
+// 返回: error 错误信息
+func (e *Editor) editCompositeScope(page int, path ObjectPath, edit func(*Renderer, *editorCompositeNode, []*editorCompositeNode) error) (err error) {
 	reader, renderer, root, nodes, err := e.compositeScope(page, path)
 	if err != nil {
 		return err
 	}
 	defer reader.Close()
-	members := e.measureCompositeMembers(renderer, nodes)
-	selected := make(map[int]bool)
-	var selectedNodes []*editorCompositeNode
-	var selectedMembers []CompositeMember
-	for _, i := range indexes {
-		if i < 0 || i >= len(nodes) || selected[i] {
-			return fmt.Errorf("invalid composite selection")
-		}
-		selected[i] = true
-		selectedNodes = append(selectedNodes, nodes[i])
-		selectedMembers = append(selectedMembers, members[i])
-	}
-	if len(selected) == 0 {
-		return nil
-	}
 	count, maximum := len(e.resources), e.maxID
 	ready := e.source.idsReady
 	defer func() {
@@ -577,7 +602,7 @@ func (e *Editor) editCompositeObjects(page int, path ObjectPath, indexes []int, 
 	if err = e.prepareSourceIDs(); err != nil {
 		return err
 	}
-	if err = edit(renderer, selectedNodes, selectedMembers); err != nil {
+	if err = edit(renderer, root, nodes); err != nil {
 		return err
 	}
 	data, changed, err := e.writeCompositeNode(root)

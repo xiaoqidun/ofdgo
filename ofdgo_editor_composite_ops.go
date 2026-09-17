@@ -60,23 +60,9 @@ func (e *Editor) CopyCompositeObjects(page int, path ObjectPath, indexes []int, 
 			}
 		}
 		slices.SortFunc(nodes, func(a, b *editorCompositeNode) int { return a.index - b.index })
-		ids := make(map[string]string)
-		for _, node := range nodes {
-			if err := e.collectCompositeIDs(node.node, ids); err != nil {
-				return err
-			}
-		}
-		var data []byte
-		for _, node := range nodes {
-			copy := *node
-			if err := e.transformCompositeMember(renderer, &copy, TranslationMatrix(dx, dy)); err != nil {
-				return err
-			}
-			fragment, err := editorXMLRemapIDs(copy.data, copy.node, ids)
-			if err != nil {
-				return err
-			}
-			data = append(data, fragment...)
+		data, err := e.copyCompositeNodes(renderer, nodes, dx, dy)
+		if err != nil {
+			return err
 		}
 		owner := nodes[0].owner
 		owner.patches = append(owner.patches, editorXMLPatch{container.close, container.close, data})
@@ -95,6 +81,31 @@ func (e *Editor) CopyCompositeObjects(page int, path ObjectPath, indexes []int, 
 		return nil, err
 	}
 	return result, nil
+}
+
+// copyCompositeNodes 复制成员原文并统一重映射标识，保持副本之间的引用
+// 入参: renderer 渲染器, nodes 快照, dx、dy 页面位移
+// 返回: []byte 副本XML, error 错误信息
+func (e *Editor) copyCompositeNodes(renderer *Renderer, nodes []*editorCompositeNode, dx, dy float64) ([]byte, error) {
+	ids := make(map[string]string)
+	for _, node := range nodes {
+		if err := e.collectCompositeIDs(node.node, ids); err != nil {
+			return nil, err
+		}
+	}
+	var data []byte
+	for _, node := range nodes {
+		copy := *node
+		if err := e.transformCompositeMember(renderer, &copy, TranslationMatrix(dx, dy)); err != nil {
+			return nil, err
+		}
+		fragment, err := editorXMLRemapIDs(copy.data, copy.node, ids)
+		if err != nil {
+			return nil, err
+		}
+		data = append(data, fragment...)
+	}
+	return data, nil
 }
 
 // OrderCompositeObjects 调整同一直接容器内的绘制顺序，不改变页块和其他实例

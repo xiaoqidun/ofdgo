@@ -613,8 +613,9 @@ var currentEditor *ofdgo.Editor
 
 // editorClipboard 当前编辑文档中的对象快照与剪贴板标识
 type editorClipboard struct {
-	token   string
-	objects []ofdgo.GraphicObject
+	token     string
+	objects   []ofdgo.GraphicObject
+	composite *ofdgo.CompositeSelection
 }
 
 // copiedObjects 当前对象剪贴板，不保存字体或图片的重复数据
@@ -832,7 +833,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 // 返回: map[string]any 前端能力
 func editorCapabilities(capability ofdgo.ObjectCapabilities, kind string) map[string]any {
 	result := map[string]any{"update": capability.Update, "paint": capability.Paint, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode),
-		"replaceImage": capability.ReplaceImage, "enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
+		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
 	if missing := capability.MissingGlyphs; missing != nil {
 		result["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
 	}
@@ -926,6 +927,15 @@ func compositeObjects(args []js.Value) (any, error) {
 			object := member.Object.TextObject
 			item["text"], _ = object.TextLayout()
 			item["font"], item["fontName"], item["size"] = object.Font, fontNames[object.Font], object.Size
+			item["bounds"] = editorBox(box)
+			if member.Capabilities.Reflow {
+				inverse, _ := member.Matrix.Invert()
+				local := inverse.TransformBox(box)
+				item["textFrame"] = map[string]any{"width": math.Max(object.Size, local.X+local.W), "height": math.Max(object.Size, local.Y+local.H), "matrix": editorMatrix(member.Matrix)}
+			}
+		}
+		if member.Capabilities.CropImage {
+			item["imageBounds"] = editorBox(box)
 		}
 		objects = append(objects, item)
 	}
@@ -943,17 +953,9 @@ func changeCompositeObjects(args []js.Value) (any, error) {
 		if err != nil {
 			return err
 		}
-		var indexes []int
-		for _, id := range stringsFromJS(args[2]) {
-			part, found := strings.CutPrefix(id, key+"/")
-			if !found {
-				return fmt.Errorf("selection is outside composite")
-			}
-			i, err := strconv.Atoi(part)
-			if err != nil {
-				return err
-			}
-			indexes = append(indexes, i)
+		indexes, err := compositeIndexes(key, stringsFromJS(args[2]))
+		if err != nil {
+			return err
 		}
 		page := args[0].Int()
 		operation := args[3].String()
@@ -966,6 +968,13 @@ func changeCompositeObjects(args []js.Value) (any, error) {
 		case "order":
 			selected, err = currentEditor.OrderCompositeObjects(page, path, indexes, args[4].String())
 			return err
+		case "text", "textStyle":
+			return changeCompositeText(page, path, indexes, operation, args[4:])
+		case "crop":
+			if len(indexes) != 1 {
+				return fmt.Errorf("image crop requires one member")
+			}
+			return currentEditor.CropCompositeImage(page, path, indexes[0], ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()})
 		case "image":
 			if len(indexes) != 1 {
 				return fmt.Errorf("image replacement requires one member")
@@ -1036,6 +1045,82 @@ func changeCompositeObjects(args []js.Value) (any, error) {
 		doc.SelectedIDs = append(doc.SelectedIDs, fmt.Sprintf("%s/%d", args[1].String(), index))
 	}
 	return doc, nil
+}
+
+// compositeIndexes 将画布成员路径转换为同一范围的序号
+// 入参: key 父路径, ids 成员路径
+// 返回: []int 成员序号, error 错误信息
+func compositeIndexes(key string, ids []string) ([]int, error) {
+	indexes := make([]int, 0, len(ids))
+	for _, id := range ids {
+		part, found := strings.CutPrefix(id, key+"/")
+		if !found {
+			return nil, fmt.Errorf("selection is outside composite")
+		}
+		i, err := strconv.Atoi(part)
+		if err != nil || i < 0 {
+			return nil, fmt.Errorf("invalid composite member")
+		}
+		indexes = append(indexes, i)
+	}
+	return indexes, nil
+}
+
+// changeCompositeText 修改内部文字，嵌入字体前校验选区用字
+// 入参: page 页面索引, path 父路径, indexes 成员序号, operation 操作, args 内容及样式
+// 返回: error 错误信息
+func changeCompositeText(page int, path ofdgo.ObjectPath, indexes []int, operation string, args []js.Value) error {
+	var value *string
+	if operation == "text" {
+		if len(indexes) != 1 {
+			return fmt.Errorf("text editing requires one member")
+		}
+		if !args[0].IsNull() {
+			text := args[0].String()
+			value = &text
+		}
+		args = args[1:]
+	}
+	style := ofdgo.TextStyle{Size: args[1].Float()}
+	if !args[0].IsNull() {
+		data, err := bytesFromJS(args[0])
+		if err != nil {
+			return err
+		}
+		members, err := currentEditor.CompositeObjects(page, path)
+		if err != nil {
+			return err
+		}
+		var text strings.Builder
+		for _, index := range indexes {
+			if index >= len(members) || !members[index].Capabilities.ReplaceFont {
+				return fmt.Errorf("composite font replacement is not supported")
+			}
+			if value != nil {
+				text.WriteString(*value)
+			} else {
+				text.WriteString(members[index].Object.TextObject.Text())
+			}
+		}
+		if err := checkFontGlyphs(data, text.String()); err != nil {
+			return err
+		}
+		style.Font, err = currentEditor.AddFont(FontFile{Data: data}, 0)
+		if err != nil {
+			return err
+		}
+	}
+	if !args[2].IsNull() {
+		var fill ofdgo.FillColor
+		if err := setEditorColor(&fill, args[2].String()); err != nil {
+			return err
+		}
+		style.Color = fill.Value
+	}
+	if value != nil {
+		return currentEditor.UpdateCompositeText(page, path, indexes[0], *value, style)
+	}
+	return currentEditor.StyleCompositeText(page, path, indexes, style)
 }
 
 // editorFont 读取对象实际使用的内嵌字体，供画布输入使用
@@ -1152,26 +1237,64 @@ func copyObjects(args []js.Value) (any, error) {
 }
 
 // captureObjects 保存独立选区快照，不修改文档或历史
-// 入参: args 页面索引、对象标识数组和剪贴板标识
+// 入参: args 页面索引、对象标识数组、剪贴板标识和可选父路径
 // 返回: any 空结果, error 错误信息
 func captureObjects(args []js.Value) (any, error) {
 	if currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
 	}
-	objects, err := currentEditor.Objects(args[0].Int(), stringsFromJS(args[1]))
+	clipboard := &editorClipboard{token: args[2].String()}
+	var err error
+	if len(args) > 3 && args[3].String() != "" {
+		key := args[3].String()
+		path, pathErr := compositePath(key)
+		if pathErr != nil {
+			return nil, pathErr
+		}
+		indexes, indexErr := compositeIndexes(key, stringsFromJS(args[1]))
+		if indexErr != nil {
+			return nil, indexErr
+		}
+		clipboard.composite, err = currentEditor.CaptureCompositeObjects(args[0].Int(), path, indexes)
+	} else {
+		clipboard.objects, err = currentEditor.Objects(args[0].Int(), stringsFromJS(args[1]))
+	}
 	if err != nil {
 		return nil, err
 	}
-	copiedObjects = &editorClipboard{args[2].String(), objects}
+	copiedObjects = clipboard
 	return nil, nil
 }
 
 // pasteObjects 将当前文档的对象快照粘贴到目标页
-// 入参: args 目标页、剪贴板标识和横纵位移
+// 入参: args 目标页、剪贴板标识、横纵位移和可选父路径
 // 返回: any 文档信息及新选区, error 错误信息
 func pasteObjects(args []js.Value) (any, error) {
 	if currentEditor == nil || copiedObjects == nil || copiedObjects.token != args[1].String() {
 		return nil, fmt.Errorf("object clipboard is no longer available")
+	}
+	if copiedObjects.composite != nil {
+		if len(args) < 5 || args[4].String() == "" {
+			return nil, fmt.Errorf("paste requires the original composite scope")
+		}
+		key := args[4].String()
+		path, err := compositePath(key)
+		if err != nil {
+			return nil, err
+		}
+		indexes, err := currentEditor.PasteCompositeObjects(args[0].Int(), path, copiedObjects.composite, args[2].Float(), args[3].Float())
+		if err != nil {
+			return nil, err
+		}
+		info, err := previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+		result := editorSelectionInfo{editorInfo: info}
+		for _, index := range indexes {
+			result.SelectedIDs = append(result.SelectedIDs, fmt.Sprintf("%s/%d", key, index))
+		}
+		return result, err
+	}
+	if len(args) > 4 && args[4].String() != "" {
+		return nil, fmt.Errorf("top-level objects cannot be pasted into a composite")
 	}
 	return copyEditorObjects(args[0].Int(), copiedObjects.objects, args[2].Float(), args[3].Float())
 }

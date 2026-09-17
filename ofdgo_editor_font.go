@@ -196,6 +196,11 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 			used[resource.font.ID] = make(map[uint16]bool)
 		}
 	}
+	if len(used) == 0 {
+		return nil, progress.report("fonts", 0, 0)
+	}
+	refs := editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool)}
+	composite := false
 	total := len(e.pages) + len(e.resources)
 	for i, page := range e.pages {
 		if err := progress.report("fonts", i, total); err != nil {
@@ -203,6 +208,23 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		}
 		for _, layer := range page.Content.Layer {
 			for _, object := range layer.Objects {
+				if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
+					composite = true
+					origin := e.objectOrigin(editorObjectID(object))
+					if origin == nil {
+						return nil, nil
+					}
+					data, err := editorXMLObject(origin.data, origin.node, origin.object, object)
+					if err == nil {
+						data, err = editorXMLStandalone(data, origin.node)
+					}
+					if err != nil {
+						return nil, err
+					}
+					if _, safe := refs.scan(bytes.NewReader(data), "Page.xml"); !safe {
+						return nil, nil
+					}
+				}
 				if object.Type != "TextObject" {
 					continue
 				}
@@ -215,6 +237,30 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 					for _, char := range textCodeRunes(code.Value) {
 						glyphs[e.fonts[obj.Font].GlyphIndex(char)] = true
 					}
+				}
+			}
+		}
+	}
+	if composite {
+		_, _, _, files := e.usedResources()
+		for i, resource := range e.resources {
+			if resource.composite == "" || !slices.Contains(files, resource.name) {
+				continue
+			}
+			if err := progress.report("fonts", len(e.pages)+i, total); err != nil {
+				return nil, err
+			}
+			if _, safe := refs.scan(bytes.NewReader(resource.data), resource.name); !safe {
+				return nil, nil
+			}
+		}
+		for id, usage := range refs.fonts {
+			glyphs := used[id]
+			if usage.unsafe || len(usage.glyphs) != 0 {
+				delete(used, id)
+			} else if glyphs != nil {
+				for char := range usage.chars {
+					glyphs[e.fonts[id].GlyphIndex(char)] = true
 				}
 			}
 		}
