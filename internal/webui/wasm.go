@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"io"
 	"math"
 	"strconv"
@@ -726,6 +727,8 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 				id = object.ImageObject.ID
 			case "PathObject":
 				id = object.PathObject.ID
+			case "CompositeObject", "CompositeGraphicUnit":
+				id = object.CompositeGraphicUnit.ID
 			default:
 				continue
 			}
@@ -749,7 +752,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					return nil, err
 				}
 				item := map[string]any{"id": id, "type": object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "position": position.Index, "count": position.Count, "container": position.Container,
-					"capabilities": map[string]any{"update": capability.Update, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode)}}
+					"capabilities": map[string]any{"update": capability.Update, "paint": capability.Paint, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode)}}
 				if missing := capability.MissingGlyphs; missing != nil {
 					item["capabilities"].(map[string]any)["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
 				}
@@ -761,6 +764,8 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					alpha = object.ImageObject.Alpha
 				case "PathObject":
 					alpha = object.PathObject.Alpha
+				case "CompositeObject", "CompositeGraphicUnit":
+					alpha = object.CompositeGraphicUnit.Alpha
 				}
 				item["alpha"] = 255
 				if alpha != nil {
@@ -780,14 +785,14 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					} else if outline, err := path.Outline(); err == nil {
 						item["outline"] = outline
 					}
-					if capability.Update {
+					if capability.Paint {
 						item["fill"], item["stroke"] = path.Fill != nil && *path.Fill, path.Stroke == nil || *path.Stroke
 						item["fillColor"] = editorColorHex(path.FillColor)
 						item["strokeColor"] = editorColorHex((*ofdgo.FillColor)(path.StrokeColor))
 						item["lineWidth"] = path.LineWidth * editorPathScale(path)
 					}
 				}
-				if object.Type == "PathObject" || object.Type == "ImageObject" {
+				if object.Type == "PathObject" || object.Type == "ImageObject" || object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
 					contours, err := currentSession.Renderer.ObjectContours(object, layer.DrawParam)
 					if err != nil {
 						return nil, err
@@ -837,7 +842,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 						second, _ := strconv.ParseFloat(codes[1].Y, 64)
 						item["lineHeight"] = second - first
 					}
-					if capability.Update {
+					if capability.Paint {
 						item["color"] = editorColorHex(object.TextObject.FillColor)
 					}
 				}
@@ -1529,10 +1534,10 @@ func setTextColor(object *ofdgo.TextObject, value string) error {
 	return setEditorColor(object.FillColor, value)
 }
 
-// setEditorColor 写入浏览器RGB色值，保留其他颜色属性
-// 入参: color 颜色, value 十六进制色值
+// setEditorColor 写入当前文档的RGB纯色，保留透明度并替换原颜色空间和索引
+// 入参: fill 颜色, value 十六进制色值
 // 返回: error 错误信息
-func setEditorColor(color *ofdgo.FillColor, value string) error {
+func setEditorColor(fill *ofdgo.FillColor, value string) error {
 	if len(value) != 7 || value[0] != '#' {
 		return fmt.Errorf("invalid RGB color %q", value)
 	}
@@ -1540,19 +1545,24 @@ func setEditorColor(color *ofdgo.FillColor, value string) error {
 	if err != nil {
 		return err
 	}
-	color.Value = fmt.Sprintf("%d %d %d", rgb[0], rgb[1], rgb[2])
+	converted, err := currentEditor.RGBColor(color.NRGBA{R: rgb[0], G: rgb[1], B: rgb[2], A: 255})
+	if err != nil {
+		return err
+	}
+	converted.Alpha = fill.Alpha
+	*fill = *converted
 	return nil
 }
 
-// editorColorHex 将创作对象的RGB颜色转换为浏览器色值
+// editorColorHex 将当前文档纯色转换为浏览器色值
 // 入参: color 颜色
 // 返回: string 十六进制色值
-func editorColorHex(color *ofdgo.FillColor) string {
-	var r, g, b int
-	if color != nil {
-		fmt.Sscan(color.Value, &r, &g, &b)
+func editorColorHex(value *ofdgo.FillColor) string {
+	converted, err := currentEditor.Color(value)
+	if err != nil {
+		return ""
 	}
-	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
+	return fmt.Sprintf("#%02x%02x%02x", converted.R, converted.G, converted.B)
 }
 
 // editorPathScale 获取路径线宽的页面缩放比例

@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 
 	"github.com/go-text/typesetting/segmenter"
@@ -125,10 +126,19 @@ func (e *Editor) styleTextObjects(objects []GraphicObject, style TextStyle) ([]G
 			}
 		}
 		if style.Color != "" {
-			if text.FillColor == nil {
-				text.FillColor = &FillColor{}
+			if err := creationColor(&FillColor{Value: style.Color}); err != nil {
+				return nil, err
 			}
-			text.FillColor.Value = style.Color
+			var r, g, b float64
+			fmt.Sscan(style.Color, &r, &g, &b)
+			value, err := e.RGBColor(color.NRGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: 255})
+			if err != nil {
+				return nil, err
+			}
+			if text.FillColor != nil {
+				value.Alpha = text.FillColor.Alpha
+			}
+			text.FillColor = value
 		}
 	}
 	return updates, nil

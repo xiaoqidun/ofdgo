@@ -63,6 +63,7 @@ type editorResource struct {
 	data   []byte
 	font   *Font
 	image  *MultiMedia
+	space  *ColorSpace
 	subset *editorFontSubset
 }
 
@@ -781,7 +782,7 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 		return GraphicObject{}, fmt.Errorf("alpha must be between 0 and 255")
 	}
 	for _, color := range []*FillColor{fill, stroke} {
-		if err := creationColor(color); err != nil {
+		if err := e.editorColor(color); err != nil {
 			return GraphicObject{}, &EditError{Code: EditUnsupportedColor, Err: err}
 		}
 	}
@@ -890,6 +891,9 @@ func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) err
 // 入参: object 对象副本, dx 横向位移, dy 纵向位移, scale 正缩放比例
 // 返回: GraphicObject 变换后的对象, error 错误信息
 func transformEditorObject(object GraphicObject, dx, dy, scale float64) (GraphicObject, error) {
+	if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" || object.Type == "TextObject" && (len(object.TextObject.CGTransform) != 0 || object.TextObject.VScale != 0 || object.TextObject.Decoration != "") {
+		return transformEditorMatrix(object, Matrix{a: scale, d: scale, e: dx, f: dy}), nil
+	}
 	var boundary, ctm *string
 	switch object.Type {
 	case "TextObject":

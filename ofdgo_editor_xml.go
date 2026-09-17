@@ -244,7 +244,7 @@ func editorXMLSupported(node *editorXML) bool {
 	case "TextCode":
 		allowed = "X Y DeltaX DeltaY"
 	case "FillColor", "StrokeColor":
-		allowed = "Value Alpha"
+		allowed = "Value Alpha ColorSpace Index"
 	case "Clips":
 		allowed, children = "TransFlag", "Clip"
 	case "Clip":
@@ -266,6 +266,54 @@ func editorXMLSupported(node *editorXML) bool {
 	return true
 }
 
+// editorXMLTransformable 判断对象是否支持保留原文的几何操作
+// 入参: node 原始对象节点
+// 返回: bool 是否支持
+func editorXMLTransformable(node *editorXML) bool {
+	var attrs string
+	switch node.name.Local {
+	case "TextObject":
+		attrs = "ID Boundary CTM DrawParam Font Size HScale VScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Italic Decoration Visible Stroke Fill Alpha"
+	case "PathObject":
+		attrs = "ID Boundary CTM DrawParam LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha"
+	case "ImageObject":
+		attrs = "ID Boundary CTM ResourceID ImageMask Visible Alpha"
+	case "CompositeObject", "CompositeGraphicUnit":
+		attrs = "ID Boundary CTM ResourceID DrawParam Visible Alpha"
+	default:
+		return false
+	}
+	return editorXMLAttributes(node, attrs)
+}
+
+// editorXMLContainersSupported 判断父级容器是否仅含可保留的标识和样式
+// 入参: node 对象节点
+// 返回: bool 是否支持容器内操作
+func editorXMLContainersSupported(node *editorXML) bool {
+	for parent := node.parent; parent.name.Local != "Content"; parent = parent.parent {
+		allowed := "ID"
+		if parent.name.Local == "Layer" {
+			allowed += " Type DrawParam"
+		}
+		if !editorXMLAttributes(parent, allowed) {
+			return false
+		}
+	}
+	return true
+}
+
+// editorXMLCopyable 判断独立复制是否无需重写内部标识或动作引用
+// 入参: node 原始对象节点
+// 返回: bool 是否支持保真复制
+func editorXMLCopyable(node *editorXML) bool {
+	for _, child := range node.children {
+		if child.attr("ID") != "" || child.name.Local == "Actions" || !editorXMLCopyable(child) {
+			return false
+		}
+	}
+	return true
+}
+
 // editorXMLObject 修改对象发生变化的属性与内容，保留原文中的显式默认值
 // 有效样式快照在修改后展开原绘制参数，避免已清除的属性重新继承
 // 入参: data 页面原文, node 原对象节点, before 原对象, after 新对象
@@ -274,7 +322,7 @@ func editorXMLObject(data []byte, node *editorXML, before, after GraphicObject) 
 	if before.Type != after.Type {
 		return editorObjectXML(after)
 	}
-	if node.attr("DrawParam") != "" && before.TextObject.DrawParam == "" && before.PathObject.DrawParam == "" {
+	if node.attr("DrawParam") != "" && (before.Type == "TextObject" && before.TextObject.DrawParam == "" || before.Type == "PathObject" && before.PathObject.DrawParam == "") {
 		before = GraphicObject{Type: before.Type}
 		var err error
 		switch before.Type {
@@ -342,9 +390,6 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 				}
 			}
 		}
-		if contentChanged && attr.Name.Space == "xmlns" && attr.Name.Local == "ofd" {
-			continue
-		}
 		key := attr.Name.Local
 		if attr.Name.Space != "" {
 			key = attr.Name.Space + ":" + key
@@ -360,15 +405,12 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 			result.WriteByte('"')
 		}
 	}
-	if contentChanged {
-		result.WriteString(" xmlns:ofd=\"" + ofdNamespace + "\"")
-	}
 	result.WriteByte('>')
 	if contentChanged {
 		matching := len(node.children) > 0 && len(node.children) == len(oldNode.children) && len(node.children) == len(newNode.children)
 		if matching {
 			for i, child := range node.children {
-				if child.name.Local != oldNode.children[i].name.Local || child.name.Local != newNode.children[i].name.Local {
+				if child.name.Space != "" && child.name.Space != ofdNamespace && child.name.Space != "http://www.ofdspec.org" || child.name.Local != oldNode.children[i].name.Local || child.name.Local != newNode.children[i].name.Local {
 					matching = false
 					break
 				}
@@ -388,13 +430,110 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 			}
 			result.Write(data[position:node.close])
 		} else {
-			result.Write(newXML[newNode.open:newNode.close])
+			content, err := editorXMLMergeContent(data, node, oldXML, oldNode, newXML, newNode)
+			if err != nil {
+				return nil, err
+			}
+			result.Write(content)
 		}
 	} else if node.open != node.end {
 		result.Write(data[node.open:node.close])
 	}
 	result.WriteString("</" + name + ">")
 	return result.Bytes(), nil
+}
+
+// editorXMLMergeContent 按字段合并子节点，保留未修改字段、扩展节点和注释
+// 入参: data、node 原文节点, oldXML、oldNode 修改前编码, newXML、newNode 修改后编码
+// 返回: []byte 子节点内容, error 错误信息
+func editorXMLMergeContent(data []byte, node *editorXML, oldXML []byte, oldNode *editorXML, newXML []byte, newNode *editorXML) ([]byte, error) {
+	if len(oldNode.children) == 0 && len(newNode.children) == 0 {
+		return newXML[newNode.open:newNode.close], nil
+	}
+	groups := func(root *editorXML, encoded bool) map[string][]*editorXML {
+		result := make(map[string][]*editorXML)
+		for _, child := range root.children {
+			if encoded || child.name.Space == "" || child.name.Space == ofdNamespace || child.name.Space == "http://www.ofdspec.org" {
+				result[child.name.Local] = append(result[child.name.Local], child)
+			}
+		}
+		return result
+	}
+	original, before, after := groups(node, false), groups(oldNode, true), groups(newNode, true)
+	var names []string
+	for _, child := range append(slices.Clone(newNode.children), oldNode.children...) {
+		if !slices.Contains(names, child.name.Local) {
+			names = append(names, child.name.Local)
+		}
+	}
+	var patches []editorXMLPatch
+	for _, name := range names {
+		old, next, source := before[name], after[name], original[name]
+		var oldData, newData []byte
+		for _, child := range old {
+			oldData = append(oldData, oldXML[child.start:child.end]...)
+		}
+		for _, child := range next {
+			newData = append(newData, newXML[child.start:child.end]...)
+		}
+		if bytes.Equal(oldData, newData) {
+			continue
+		}
+		if len(source) > 0 && len(source) == len(old) {
+			for i, child := range source {
+				var encoded []byte
+				if i < len(next) {
+					var err error
+					encoded, err = editorXMLMerge(data, child, oldXML[old[i].start:old[i].end], newXML[next[i].start:next[i].end])
+					if err != nil {
+						return nil, err
+					}
+				}
+				patches = append(patches, editorXMLPatch{child.start - node.open, child.end - node.open, encoded})
+			}
+			if len(next) > len(source) {
+				var added []byte
+				for _, child := range next[len(source):] {
+					added = append(added, editorXMLEncodedFragment(newXML, child)...)
+				}
+				position := source[len(source)-1].end - node.open
+				patches = append(patches, editorXMLPatch{position, position, added})
+			}
+			continue
+		}
+		newData = nil
+		for _, child := range next {
+			newData = append(newData, editorXMLEncodedFragment(newXML, child)...)
+		}
+		if len(source) > 0 {
+			for i, child := range source {
+				var encoded []byte
+				if i == 0 {
+					encoded = newData
+				}
+				patches = append(patches, editorXMLPatch{child.start - node.open, child.end - node.open, encoded})
+			}
+		} else if len(next) > 0 {
+			position := node.close
+			for _, child := range newNode.children {
+				if child.start > next[0].start && len(original[child.name.Local]) > 0 {
+					position = original[child.name.Local][0].start
+					break
+				}
+			}
+			patches = append(patches, editorXMLPatch{position - node.open, position - node.open, newData})
+		}
+	}
+	return editorPatchXML(data[node.open:node.close], patches), nil
+}
+
+// editorXMLEncodedFragment 为新增的标准编码节点局部声明前缀，不覆盖原文命名空间
+// 入参: data 标准编码内容, node 待插入的子节点
+// 返回: []byte 独立片段
+func editorXMLEncodedFragment(data []byte, node *editorXML) []byte {
+	position := node.open - node.start - 1
+	fragment := data[node.start:node.end]
+	return editorPatchXML(fragment, []editorXMLPatch{{position, position, []byte(" xmlns:ofd=\"" + ofdNamespace + "\"")}})
 }
 
 // editorXMLContainer 用标准编码器封装已编码的子节点

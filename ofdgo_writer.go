@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"time"
@@ -201,7 +202,7 @@ func (e *Editor) validate() error {
 // 入参: write 条目写入方法, progress 保存进度回调，预览时为nil
 // 返回: error 错误信息
 func (e *Editor) writeParts(write func(string, []byte, bool) error, progress editorProgress) error {
-	fonts, images, _ := e.usedResources()
+	fonts, images, spaces, _ := e.usedResources()
 	writeXML := func(name string, encode func(*ofdXML)) error {
 		data, err := encodeOFDXML(encode)
 		if err != nil {
@@ -253,7 +254,7 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error, progress edi
 		x.start("PageArea", nil)
 		x.text("PhysicalBox", e.pages[0].Area.PhysicalBox)
 		x.end("PageArea")
-		if len(fonts)+len(images) != 0 {
+		if len(fonts)+len(images)+len(spaces) != 0 {
 			x.text("DocumentRes", "DocumentRes.xml")
 		}
 		x.end("CommonData")
@@ -270,8 +271,8 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error, progress edi
 	}); err != nil {
 		return err
 	}
-	if len(fonts)+len(images) != 0 {
-		if err := writeXML("Doc_0/DocumentRes.xml", func(x *ofdXML) { x.resources(fonts, images) }); err != nil {
+	if len(fonts)+len(images)+len(spaces) != 0 {
+		if err := writeXML("Doc_0/DocumentRes.xml", func(x *ofdXML) { x.resources(fonts, images, spaces) }); err != nil {
 			return err
 		}
 	}
@@ -299,10 +300,11 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error, progress edi
 }
 
 // usedResources 筛选当前引用的新增资源及需要跨页复用的原资源文件，不修改资源池
-// 返回: []editorResource 新增字体, []editorResource 新增图片, []string 原资源文件
-func (e *Editor) usedResources() (fonts, images []editorResource, sourceFiles []string) {
+// 返回: []editorResource 新增字体, []editorResource 新增图片, []ColorSpace 新增颜色空间, []string 原资源文件
+func (e *Editor) usedResources() (fonts, images []editorResource, spaces []ColorSpace, sourceFiles []string) {
 	used := make(map[string]bool)
 	promoted := make(map[string]bool)
+	files := make(map[string]bool)
 	for _, page := range e.pages {
 		var original map[string]GraphicObject
 		if e.source != nil {
@@ -318,6 +320,19 @@ func (e *Editor) usedResources() (fonts, images []editorResource, sourceFiles []
 		for _, layer := range page.Content.Layer {
 			for _, object := range layer.Objects {
 				before, exists := original[editorObjectID(object)]
+				if origin := e.objectOrigin(editorObjectID(object)); origin != nil && !exists {
+					for _, name := range origin.page.original.PageRes {
+						files[e.source.reader.ResPath(resolveResourcePath(origin.page.ref.BaseLoc, "", name))] = true
+					}
+				}
+				for _, value := range []*FillColor{object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor), object.PathObject.FillColor, (*FillColor)(object.PathObject.StrokeColor)} {
+					if value != nil && value.ColorSpace != "" {
+						used[value.ColorSpace] = true
+						if e.source != nil && (!exists || !reflect.DeepEqual(before, object)) {
+							promoted[value.ColorSpace] = true
+						}
+					}
+				}
 				switch object.Type {
 				case "TextObject":
 					used[object.TextObject.Font] = true
@@ -348,14 +363,17 @@ func (e *Editor) usedResources() (fonts, images []editorResource, sourceFiles []
 			images = append(images, resource)
 			delete(promoted, resource.image.ID)
 		}
+		if resource.space != nil && used[resource.space.ID] {
+			spaces = append(spaces, *resource.space)
+			delete(promoted, resource.space.ID)
+		}
 	}
-	files := make(map[string]bool)
 	for id := range promoted {
 		if name := e.source.reader.resourceFiles[id]; name != "" {
 			files[name] = true
 		}
 	}
-	return fonts, images, slices.Sorted(maps.Keys(files))
+	return fonts, images, spaces, slices.Sorted(maps.Keys(files))
 }
 
 // page 写出页面尺寸、图层和对象
@@ -387,9 +405,17 @@ func (x *ofdXML) layer(layer Layer) {
 }
 
 // resources 写出文档资源索引
-// 入参: fonts 字体资源, images 图片资源
-func (x *ofdXML) resources(fonts, images []editorResource) {
+// 入参: fonts 字体资源, images 图片资源, spaces 颜色空间
+func (x *ofdXML) resources(fonts, images []editorResource, spaces []ColorSpace) {
 	x.root("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "Res"}})
+	if len(spaces) != 0 {
+		x.start("ColorSpaces", nil)
+		for _, space := range spaces {
+			x.start("ColorSpace", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: space.ID}, {Name: xml.Name{Local: "Type"}, Value: space.Type}, {Name: xml.Name{Local: "BitsPerComponent"}, Value: strconv.Itoa(space.BitsPerComponent)}})
+			x.end("ColorSpace")
+		}
+		x.end("ColorSpaces")
+	}
 	if len(fonts) != 0 {
 		x.start("Fonts", nil)
 		for _, resource := range fonts {
@@ -616,10 +642,21 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.add("ImageMask", obj.ImageMask)
 		attrs.flag("Visible", obj.Visible)
 		attrs.alpha(obj.Alpha)
+	case "CompositeObject", "CompositeGraphicUnit":
+		obj := object.CompositeGraphicUnit
+		attrs.add("ID", obj.ID)
+		attrs.add("Boundary", obj.Boundary)
+		attrs.add("CTM", obj.CTM)
+		attrs.add("ResourceID", obj.ResourceID)
+		attrs.add("DrawParam", obj.DrawParam)
+		attrs.flag("Visible", obj.Visible)
+		attrs.alpha(obj.Alpha)
 	}
 	x.start(object.Type, attrs)
 	if object.Type == "ImageObject" {
 		x.clips(object.ImageObject.Clips)
+	} else if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
+		x.clips(object.CompositeGraphicUnit.Clips)
 	} else if object.Type == "PathObject" || object.Type == "Path" {
 		x.clips(object.PathObject.Clips)
 		x.color("StrokeColor", stroke)
@@ -655,6 +692,7 @@ func (x *ofdXML) clips(clips *Clips) {
 		for _, area := range clip.Area {
 			var attrs ofdAttrs
 			attrs.add("CTM", area.CTM)
+			attrs.add("DrawParam", area.DrawParam)
 			x.start("Area", attrs)
 			for _, path := range area.Path {
 				x.object(GraphicObject{Type: "Path", PathObject: path}, false)
@@ -690,6 +728,10 @@ func (x *ofdXML) color(name string, color *FillColor) {
 	}
 	var attrs ofdAttrs
 	attrs.add("Value", color.Value)
+	attrs.add("ColorSpace", color.ColorSpace)
+	if color.Index != nil {
+		attrs.add("Index", strconv.Itoa(*color.Index))
+	}
 	attrs.alpha(color.Alpha)
 	x.start(name, attrs)
 	x.end(name)

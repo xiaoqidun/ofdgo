@@ -93,7 +93,7 @@ func (e *Editor) ResizeObjects(page int, ids []string, box Box) error {
 	for i, object := range objects {
 		object = cloneEditorData(object)
 		if uniform {
-			object, err = transformEditorObject(object, matrix.e, matrix.f, sx)
+			object, err = e.transformObject(object, matrix.e, matrix.f, sx)
 		} else if object.Type == "ImageObject" {
 			object = transformEditorMatrix(object, matrix)
 		} else {
@@ -105,6 +105,16 @@ func (e *Editor) ResizeObjects(page int, ids []string, box Box) error {
 		objects[i] = object
 	}
 	return e.updateObjects(page, objects, true)
+}
+
+// transformObject 对原有复杂对象仅更新变换，不重建其文字、画刷或其他局部属性
+// 入参: object 对象, dx、dy 页面位移, scale 缩放比例
+// 返回: GraphicObject 新对象, error 错误信息
+func (e *Editor) transformObject(object GraphicObject, dx, dy, scale float64) (GraphicObject, error) {
+	if origin := e.objectOrigin(editorObjectID(object)); origin != nil && (!editorXMLSupported(origin.node) || origin.reason != nil) {
+		return transformEditorMatrix(object, Matrix{a: scale, d: scale, e: dx, f: dy}), nil
+	}
+	return transformEditorObject(object, dx, dy, scale)
 }
 
 // orientObjects 更新Boundary与CTM，不重排文字或重采样图片
@@ -143,6 +153,8 @@ func transformEditorMatrix(object GraphicObject, matrix Matrix) GraphicObject {
 		boundary, ctm = &object.PathObject.Boundary, &object.PathObject.CTM
 	case "ImageObject":
 		boundary, ctm = &object.ImageObject.Boundary, &object.ImageObject.CTM
+	case "CompositeObject", "CompositeGraphicUnit":
+		boundary, ctm = &object.CompositeGraphicUnit.Boundary, &object.CompositeGraphicUnit.CTM
 	}
 	before, _ := ParseBox(*boundary)
 	if object.Type == "ImageObject" && *ctm == "" {

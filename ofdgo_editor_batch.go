@@ -82,18 +82,14 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 	if len(objects) == 0 {
 		return nil, nil
 	}
-	if !e.sourceRGB() {
-		return nil, fmt.Errorf("inserting objects requires an RGB default color space")
-	}
 	if err := e.prepareSourceIDs(); err != nil {
 		return nil, err
 	}
 	prepared := make([]GraphicObject, len(objects))
 	result := make([]string, len(objects))
 	for i, object := range objects {
-		origin := e.objectOrigin(editorObjectID(object))
 		result[i] = strconv.Itoa(e.maxID + i + 1)
-		object, err := e.prepareObject(result[i], object)
+		object, err := e.prepareCopiedObject(result[i], object)
 		if err != nil {
 			return nil, err
 		}
@@ -102,13 +98,8 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 			if err != nil {
 				return nil, err
 			}
-			codes := object.TextObject.TextCode
-			object, err = e.prepareObject(result[i], object)
-			if err != nil {
+			if err = validateEditorGeometry(object); err != nil {
 				return nil, err
-			}
-			if origin != nil {
-				object.TextObject.TextCode = codes
 			}
 		}
 		prepared[i] = object
@@ -308,7 +299,7 @@ func (e *Editor) DistributeObjects(page int, ids []string, axis string) error {
 		if err != nil {
 			return err
 		}
-		object, err = transformEditorObject(object, dx, dy, 1)
+		object, err = e.transformObject(object, dx, dy, 1)
 		if err != nil {
 			return err
 		}
@@ -356,16 +347,27 @@ func (e *Editor) updateObjects(page int, objects []GraphicObject, preserveConten
 	}
 	after := make([]GraphicObject, len(objects))
 	for i, object := range objects {
-		if e.originalPage(page) {
+		preserved := preserveContent
+		origin := e.objectOrigin(ids[i])
+		if origin != nil {
 			capability, err := e.ObjectCapabilities(page, ids[i])
 			if err != nil {
 				return err
 			}
-			if !capability.Transform || !preserveContent && !e.sourceRGB() {
+			if !capability.Transform {
 				return fmt.Errorf("object %q is read-only for this operation: %w", ids[i], capability.editError())
 			}
+			if !preserved && !capability.Update && editorPreservedObject(before[i], object) && capability.Paint {
+				if err := e.validatePreservedAppearance(before[i], object); err != nil {
+					return err
+				}
+				preserved = true
+			}
+			if !preserved && !editorXMLSupported(origin.node) {
+				return capability.editError()
+			}
 		}
-		if preserveContent && e.originalPage(page) {
+		if preserved && origin != nil {
 			if err := validateEditorGeometry(object); err != nil {
 				return err
 			}
@@ -423,7 +425,7 @@ func (e *Editor) TransformObjects(page int, ids []string, dx, dy, scale float64)
 		if err != nil {
 			return err
 		}
-		objects[i], err = transformEditorObject(object, dx, dy, scale)
+		objects[i], err = e.transformObject(object, dx, dy, scale)
 		if err != nil {
 			return err
 		}
@@ -476,7 +478,7 @@ func (e *Editor) AlignObjects(page int, ids []string, alignment string) error {
 		if err != nil {
 			return err
 		}
-		objects[i], err = transformEditorObject(objects[i], dx, dy, 1)
+		objects[i], err = e.transformObject(objects[i], dx, dy, 1)
 		if err != nil {
 			return err
 		}
@@ -576,10 +578,17 @@ func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) 
 		return nil, err
 	}
 	defer reader.Close()
+	if _, err := reader.PageContentByIndex(page); err != nil {
+		return nil, err
+	}
 	renderer := NewRenderer(reader)
 	boxes := make([]Box, len(objects))
 	for i, object := range objects {
-		boxes[i], err = renderer.ObjectBounds(object, "")
+		layer, _, findErr := e.findObject(page, editorObjectID(object))
+		if findErr != nil {
+			return nil, findErr
+		}
+		boxes[i], err = renderer.ObjectBounds(object, layer.DrawParam)
 		if err != nil {
 			return nil, err
 		}

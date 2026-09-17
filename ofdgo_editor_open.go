@@ -60,9 +60,11 @@ type editorSourcePage struct {
 // ObjectCapabilities 已有对象可执行的操作，Reason说明受限原因
 // Update表示完整替换内容，ReplaceFont表示可显式替换文字字体，Transform表示保留文字定位的几何变换，Order仅限同一图层或末级页块
 // Arrange表示可准确度量对齐与旋转范围；Reflow表示可重排文字，LayoutKnown表示段落选项可恢复
+// Paint表示可独立修改纯色填充和描边，不要求重新排版文字
 // MissingGlyphs提供缺字导致操作受限时的结构化诊断
 type ObjectCapabilities struct {
 	Update        bool
+	Paint         bool
 	ReplaceFont   bool
 	Reflow        bool
 	LayoutKnown   bool
@@ -128,9 +130,9 @@ func (r *Reader) Editor() (*Editor, error) {
 	}
 	e := NewEditor()
 	e.Info, e.maxID = cloneEditorData(*info), maximum
-	directory := path.Join(reader.RootDir, "Edit")
+	directory := path.Join(cleanPackagePath(reader.RootDir), "Edit")
 	for i := 1; editorDirectoryExists(reader, directory); i++ {
-		directory = path.Join(reader.RootDir, "Edit_"+strconv.Itoa(i))
+		directory = path.Join(cleanPackagePath(reader.RootDir), "Edit_"+strconv.Itoa(i))
 	}
 	e.source = &editorSource{reader: reader, document: doc, info: cloneEditorData(*info), directory: directory, pages: make(map[string]*editorSourcePage), origins: make(map[string]*editorObjectOrigin)}
 	for _, page := range doc.Pages.Page {
@@ -322,7 +324,7 @@ func (e *Editor) loadSourcePage(index int) error {
 			if node := nodes[id]; node != nil {
 				origin := &editorObjectOrigin{page: source, node: node, object: object}
 				e.source.origins[id] = origin
-				if editorXMLSupported(node) {
+				if editorXMLTransformable(node) {
 					resolved, err := e.resolveEditorStyle(object, layer.DrawParam)
 					if err != nil {
 						origin.reason = err
@@ -339,7 +341,7 @@ func (e *Editor) loadSourcePage(index int) error {
 }
 
 // ObjectCapabilities 获取对象可执行的操作，不支持的内容保持原文，不强制转换
-// 字体缺失或子集不包含原文时仍可移动、删除，不允许重新排版或复制
+// 字体缺失或子集不包含原文时仍可保真移动、复制和删除，不自动重新排版
 // 显式提供可用字体后可通过UpdateObject替换；原文布局未知时不自动推断段落选项
 // 入参: page 页面索引, id 对象标识
 // 返回: ObjectCapabilities 操作能力, error 错误信息
@@ -349,47 +351,51 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 		return ObjectCapabilities{}, err
 	}
 	object := layer.Objects[index]
-	all := ObjectCapabilities{Update: true, ReplaceFont: object.Type == "TextObject", Reflow: object.Type == "TextObject" && object.TextObject.ReadDirection == 0 && object.TextObject.CharDirection == 0, LayoutKnown: object.Type == "TextObject" && (e.objectOrigin(id) == nil || object.TextObject.layout != nil), Transform: true, Arrange: true, Copy: true, Delete: true, Order: true}
-	if !e.originalPage(page) {
+	all := ObjectCapabilities{Update: true, Paint: object.Type == "TextObject" || object.Type == "PathObject", ReplaceFont: object.Type == "TextObject", Reflow: object.Type == "TextObject" && object.TextObject.ReadDirection == 0 && object.TextObject.CharDirection == 0, LayoutKnown: object.Type == "TextObject" && (e.objectOrigin(id) == nil || object.TextObject.layout != nil), Transform: true, Arrange: true, Copy: true, Delete: true, Order: true}
+	origin := e.objectOrigin(id)
+	if origin == nil {
 		return all, nil
 	}
-	source := e.source.pages[e.pages[page].ID]
-	node := source.nodes[id]
-	if node == nil {
-		return all, nil
-	}
-	if !editorXMLSupported(node) {
+	node := origin.node
+	if !editorXMLTransformable(node) {
 		return ObjectCapabilities{Reason: "object uses unsupported editing features", ReasonCode: EditUnsupportedObject}, nil
 	}
-	if origin := e.objectOrigin(id); origin.reason != nil {
-		return ObjectCapabilities{Reason: origin.reason.Error(), ReasonCode: editReason(origin.reason)}, nil
+	if origin.reason != nil && editReason(origin.reason) == EditUnsupportedStyle {
+		return ObjectCapabilities{Reason: origin.reason.Error(), ReasonCode: EditUnsupportedStyle}, nil
 	}
-	for parent := node.parent; parent.name.Local != "Content"; parent = parent.parent {
-		allowed := "ID"
-		if parent.name.Local == "Layer" {
-			allowed += " Type DrawParam"
-		}
-		if !editorXMLAttributes(parent, allowed) {
-			return ObjectCapabilities{Reason: "object container uses unsupported editing features", ReasonCode: EditUnsupportedContainer}, nil
-		}
+	if !editorXMLContainersSupported(node) {
+		return ObjectCapabilities{Reason: "object container uses unsupported editing features", ReasonCode: EditUnsupportedContainer}, nil
 	}
 	if err := validateEditorGeometry(object); err != nil {
 		return ObjectCapabilities{Reason: err.Error(), ReasonCode: EditInvalidObject}, nil
 	}
 	all.Order = editorContainerOrderable(node.parent)
-	if _, err := e.prepareObject(id, object); err != nil {
-		all.Update, all.Reflow, all.Copy, all.Reason = false, false, false, err.Error()
+	all.Copy = editorXMLCopyable(node) && origin.reason == nil
+	if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
+		for parent := node.parent; parent != nil; parent = parent.parent {
+			if parent.name.Local == "Layer" && parent.attr("DrawParam") != "" {
+				all.Copy = false
+			}
+		}
+	}
+	if origin.reason != nil {
+		all.Update, all.Reflow, all.ReplaceFont, all.Paint = false, false, false, false
+		all.Reason, all.ReasonCode = origin.reason.Error(), editReason(origin.reason)
+	} else if !editorXMLSupported(node) {
+		all.Update, all.Reflow, all.ReplaceFont = false, false, false
+		all.Reason, all.ReasonCode = "content can only be edited with its original structure preserved", EditUnsupportedObject
+	} else if _, err := e.prepareObject(id, object); err != nil {
+		all.Update, all.Reflow, all.Reason = false, false, err.Error()
 		all.ReasonCode = editReason(err)
 		errors.As(err, &all.MissingGlyphs)
 	}
-	if !e.sourceRGB() {
-		all.ReplaceFont = false
-		all.Update, all.Reflow, all.Copy, all.Reason = false, false, false, "document uses a non-RGB default color space"
-		all.MissingGlyphs = nil
-		all.ReasonCode = EditUnsupportedColor
+	all.Paint = all.Paint && e.editorPaintable(object)
+	if object.Type == "ImageObject" && object.ImageObject.Border != nil {
+		all.Transform, all.Arrange = false, false
+		all.Reason, all.ReasonCode = "image border transformations are not supported", EditUnsupportedObject
 	}
 	if object.Type == "TextObject" {
-		all.Arrange = all.Update
+		all.Arrange = all.Update || e.editorTextMeasurable(object.TextObject)
 		if _, err := object.TextObject.TextFrame(); err != nil {
 			all.Reflow = false
 		}
@@ -407,12 +413,147 @@ func (e *Editor) objectOrigin(id string) *editorObjectOrigin {
 	return e.source.origins[id]
 }
 
+// editorPreservedObject 判断对象是否仅改变标识、几何和可独立写回的外观字段
+// 入参: before 原始快照, after 新快照
+// 返回: bool 是否保留原内容
+func editorPreservedObject(before, after GraphicObject) bool {
+	if before.Type != after.Type {
+		return false
+	}
+	before = cloneEditorData(before)
+	switch before.Type {
+	case "TextObject":
+		a, b := &before.TextObject, after.TextObject
+		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
+		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
+	case "PathObject":
+		a, b := &before.PathObject, after.PathObject
+		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
+		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
+		a.DashOffset, a.DashPattern, a.Cap, a.Join = b.DashOffset, b.DashPattern, b.Cap, b.Join
+	case "ImageObject":
+		a, b := &before.ImageObject, after.ImageObject
+		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
+	case "CompositeObject", "CompositeGraphicUnit":
+		a, b := &before.CompositeGraphicUnit, after.CompositeGraphicUnit
+		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
+	default:
+		return false
+	}
+	a, b := *editorObjectClips(&before), *editorObjectClips(&after)
+	if a == nil {
+		*editorObjectClips(&before) = b
+	} else if b != nil && len(a.Clip) <= len(b.Clip) {
+		a.Clip = append(a.Clip, b.Clip[len(a.Clip):]...)
+		for i := range a.Clip {
+			if len(a.Clip[i].Area) == len(b.Clip[i].Area) {
+				for j := range a.Clip[i].Area {
+					a.Clip[i].Area[j].CTM = b.Clip[i].Area[j].CTM
+				}
+			}
+		}
+	}
+	return reflect.DeepEqual(before, after)
+}
+
+// prepareCopiedObject 保真复制原对象，不重新生成字形或丢弃未修改字段
+// 入参: id 新标识, object 对象快照
+// 返回: GraphicObject 独立副本, error 错误信息
+func (e *Editor) prepareCopiedObject(id string, object GraphicObject) (GraphicObject, error) {
+	origin := e.objectOrigin(editorObjectID(object))
+	if origin == nil {
+		return e.prepareObject(id, object)
+	}
+	if !editorXMLTransformable(origin.node) || !editorXMLContainersSupported(origin.node) || !editorXMLCopyable(origin.node) || origin.reason != nil {
+		return GraphicObject{}, fmt.Errorf("object cannot be copied without changing its original structure")
+	}
+	var drawParam string
+	for parent := origin.node.parent; parent != nil; parent = parent.parent {
+		if parent.name.Local == "Layer" {
+			drawParam = parent.attr("DrawParam")
+			break
+		}
+	}
+	before, err := e.resolveEditorStyle(origin.object, drawParam)
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	if drawParam != "" && (object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit") {
+		return GraphicObject{}, fmt.Errorf("copy requires preserving the composite layer draw parameters")
+	}
+	if !editorPreservedObject(before, object) {
+		if !editorXMLSupported(origin.node) {
+			return GraphicObject{}, fmt.Errorf("copy would replace unsupported object content")
+		}
+		return e.prepareObject(id, object)
+	}
+	if err := validateEditorGeometry(object); err != nil {
+		return GraphicObject{}, err
+	}
+	if err := e.validatePreservedAppearance(before, object); err != nil {
+		return GraphicObject{}, err
+	}
+	result := cloneEditorData(object)
+	switch result.Type {
+	case "TextObject":
+		result.TextObject.ID = id
+	case "PathObject":
+		result.PathObject.ID = id
+	case "ImageObject":
+		result.ImageObject.ID = id
+	case "CompositeObject", "CompositeGraphicUnit":
+		result.CompositeGraphicUnit.ID = id
+	}
+	return result, nil
+}
+
+// validatePreservedAppearance 校验保真对象实际修改的颜色、描边和裁剪，不重新解释未修改字段
+// 入参: before 原对象, after 新对象
+// 返回: error 错误信息
+func (e *Editor) validatePreservedAppearance(before, after GraphicObject) error {
+	old := []*FillColor{before.TextObject.FillColor, (*FillColor)(before.TextObject.StrokeColor), before.PathObject.FillColor, (*FillColor)(before.PathObject.StrokeColor)}
+	next := []*FillColor{after.TextObject.FillColor, (*FillColor)(after.TextObject.StrokeColor), after.PathObject.FillColor, (*FillColor)(after.PathObject.StrokeColor)}
+	for i, value := range next {
+		if !reflect.DeepEqual(old[i], value) {
+			if err := e.editorColor(value); err != nil {
+				return err
+			}
+		}
+	}
+	a, b := *editorObjectClips(&before), *editorObjectClips(&after)
+	if b != nil {
+		count := 0
+		if a != nil {
+			count = len(a.Clip)
+		}
+		for i, clip := range b.Clip {
+			if i >= count {
+				if err := e.validateObjectClips(&Clips{Clip: []Clip{clip}}); err != nil {
+					return err
+				}
+				continue
+			}
+			for j, area := range clip.Area {
+				if area.CTM != a.Clip[i].Area[j].CTM && area.CTM != "" {
+					if _, err := creationNumbers(area.CTM, 6); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	if after.Type == "PathObject" {
+		return validateEditorStroke(after.PathObject)
+	}
+	return nil
+}
+
 // editorContainerOrderable 判断容器的直接对象能否在保留页块的前提下排序
 // 入参: container 图层或页块
 // 返回: bool 是否可排序
 func editorContainerOrderable(container *editorXML) bool {
 	for _, child := range container.children {
-		if !editorXMLSupported(child) {
+		if !editorXMLTransformable(child) {
 			return false
 		}
 	}
@@ -430,6 +571,8 @@ func editorGeometry(object GraphicObject) (string, string) {
 		return object.PathObject.Boundary, object.PathObject.CTM
 	case "ImageObject":
 		return object.ImageObject.Boundary, object.ImageObject.CTM
+	case "CompositeObject", "CompositeGraphicUnit":
+		return object.CompositeGraphicUnit.Boundary, object.CompositeGraphicUnit.CTM
 	}
 	return "", ""
 }
@@ -454,6 +597,46 @@ func (e *Editor) editorFont(id string) (*font.SFNT, error) {
 		return sfnt, nil
 	}
 	return nil, &EditError{Code: EditFontUnavailable, Err: fmt.Errorf("embedded font %q not found", id)}
+}
+
+// editorTextMeasurable 判断原字形能否在不使用回退字体的情况下度量
+// 入参: text 原文字对象
+// 返回: bool 是否可准确度量
+func (e *Editor) editorTextMeasurable(text TextObject) bool {
+	sfnt, err := e.editorFont(text.Font)
+	if err != nil {
+		return false
+	}
+	transforms := make(map[int]CGTransform, len(text.CGTransform))
+	for _, transform := range text.CGTransform {
+		transforms[transform.CodePosition] = transform
+	}
+	offset := 0
+	for _, code := range text.TextCode {
+		runes := textCodeRunes(code.Value)
+		for i := 0; i < len(runes); {
+			if transform, ok := transforms[offset+i]; ok {
+				ids := parseInts(transform.Glyphs)
+				count := max(1, transform.CodeCount)
+				if len(ids) == 0 || count > len(runes)-i {
+					return false
+				}
+				for _, id := range ids {
+					if id <= 0 || id >= int(sfnt.NumGlyphs()) {
+						return false
+					}
+				}
+				i += count
+			} else {
+				if sfnt.GlyphIndex(runes[i]) == 0 {
+					return false
+				}
+				i++
+			}
+		}
+		offset += len(runes)
+	}
+	return true
 }
 
 // editorImage 按需读取原图片尺寸，不解码完整像素
@@ -541,9 +724,23 @@ func validateEditorGeometry(object GraphicObject) error {
 			return err
 		}
 	}
+	var alpha *int
+	switch object.Type {
+	case "TextObject":
+		alpha = object.TextObject.Alpha
+	case "PathObject":
+		alpha = object.PathObject.Alpha
+	case "ImageObject":
+		alpha = object.ImageObject.Alpha
+	case "CompositeObject", "CompositeGraphicUnit":
+		alpha = object.CompositeGraphicUnit.Alpha
+	}
+	if alpha != nil && (*alpha < 0 || *alpha > 255) {
+		return fmt.Errorf("alpha must be between 0 and 255")
+	}
 	if object.Type == "TextObject" {
 		obj := object.TextObject
-		if !finite(obj.Size) || obj.Size <= 0 || !finite(obj.LineWidth) {
+		if !finite(obj.Size) || obj.Size <= 0 || !finite(obj.LineWidth) || obj.LineWidth < 0 {
 			return fmt.Errorf("invalid text geometry")
 		}
 		for _, code := range obj.TextCode {

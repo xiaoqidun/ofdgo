@@ -304,6 +304,12 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 // renderPattern 渲染图案填充
 // 入参: ctx 画布上下文, pattern 底纹画刷, pageH 页面高度, clip 绘制区域, objectCTM 对象变换矩阵
 func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *patternPaint, pageH float64, clip *canvas.Path, objectCTM Matrix) {
+	if bounds, ok := ctx.Renderer.(*boundsRenderer); ok {
+		if pattern.alpha == nil || *pattern.alpha > 0 {
+			bounds.add(clip)
+		}
+		return
+	}
 	if r.pageText != nil {
 		renderer := *r
 		renderer.pageText = nil

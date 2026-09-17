@@ -34,6 +34,10 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	if r.textOnly {
 		return
 	}
+	if _, ok := ctx.Renderer.(*boundsRenderer); ok {
+		r.measureImage(ctx, obj, pageH, parentCTM, boundaryInCTM, parentClip)
+		return
+	}
 	if obj.Visible != nil && !*obj.Visible {
 		return
 	}

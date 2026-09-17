@@ -184,7 +184,7 @@ func (e *Editor) eraseObjects(page int, ids []string, box Box, points []Point, r
 }
 
 // editorObjectClips 获取基本对象的裁剪字段
-// 入参: object 文字、路径或图片对象
+// 入参: object 文字、路径、图片或复合对象
 // 返回: **Clips 裁剪字段地址，不支持的对象返回nil
 func editorObjectClips(object *GraphicObject) **Clips {
 	switch object.Type {
@@ -194,6 +194,8 @@ func editorObjectClips(object *GraphicObject) **Clips {
 		return &object.PathObject.Clips
 	case "ImageObject":
 		return &object.ImageObject.Clips
+	case "CompositeObject", "CompositeGraphicUnit":
+		return &object.CompositeGraphicUnit.Clips
 	}
 	return nil
 }

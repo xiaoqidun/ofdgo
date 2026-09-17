@@ -1647,7 +1647,7 @@ async function changeTextStyle(color) {
 		return;
 	}
 	if (item.items) {
-		if (color ? !canEditObject(item, "update") : !canEditObject(item, "layoutKnown") || !canEditObject(item, "reflow")) return;
+		if (color ? !canEditObject(item, "paint") : !canEditObject(item, "layoutKnown") || !canEditObject(item, "reflow")) return;
 		if (!color && !el.textSize.value) return;
 		if (size !== item.size || fill !== null) {
 			await changeDocument("ofdgoStyleText", { ...item, id: item.items.map(member => member.id) }, null, color ? 0 : size, fill);
@@ -1662,7 +1662,7 @@ async function changeTextStyle(color) {
 		return;
 	}
 	if (size !== item.size || fill !== null) {
-		if (color ? !canEditObject(item, "update") : !confirmTextReflow(item)) {
+		if (color ? !canEditObject(item, "paint") : !confirmTextReflow(item)) {
 			updateObjectControls(item, true);
 			return;
 		}
@@ -1693,7 +1693,7 @@ async function changeShapeStyle({ target }) {
 	if (!state.editing || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
-	if (canvasEditor.selected && (!item || !canEditObject(item, "update"))) return;
+	if (canvasEditor.selected && (!item || !canEditObject(item, "paint"))) return;
 	if (target === el.shapeWidth && (!el.shapeWidth.checkValidity() || Number(el.shapeWidth.value) <= 0)) {
 		el.shapeWidth.value = item ? item.lineWidth === undefined ? "" : String(displayPoints(item.lineWidth)) : "1";
 		return;
@@ -1741,7 +1741,7 @@ function updateDrawingControls() {
 	el.eraseButton.disabled = el.eraseMode.disabled = disabled;
 	el.eraseButton.setAttribute("aria-pressed", String(tool.startsWith("erase-")));
 	el.selectObjectButton.setAttribute("aria-pressed", String(canvasEditor.enabled && !tool));
-	const styleDisabled = disabled || (canvasEditor.selected ? !path || !canEditObject(path, "update") : !pageCan("insert"));
+	const styleDisabled = disabled || (canvasEditor.selected ? !path || !canEditObject(path, "paint") : !pageCan("insert"));
 	el.shapeFill.disabled = el.shapeStroke.disabled = styleDisabled || line;
 	el.shapeFillColor.disabled = styleDisabled || line || !el.shapeFill.checked && !el.shapeFill.indeterminate;
 	el.shapeStrokeColor.disabled = el.shapeWidth.disabled = styleDisabled || !line && !el.shapeStroke.checked && !el.shapeStroke.indeterminate;
@@ -5478,7 +5478,7 @@ function updateObjectControls(item, reset = false) {
 	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items && !selection);
 	fontPicker.setDisabled(textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "replaceFont"));
 	el.textSize.disabled = textDisabled || text !== state.textDefaults && !item.draft && (!canEditObject(item, "reflow") || Boolean(item?.items) && !canEditObject(item, "layoutKnown"));
-	el.textColor.disabled = textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "update");
+	el.textColor.disabled = textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "paint");
 	el.textFontAdd.disabled = !state.editing || !state.ready || state.exporting;
 	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled || Boolean(item?.items || item?.draft) || Boolean(canvasEditor.input);
 	el.paragraphButton.disabled = el.textAlign.disabled;
@@ -5516,7 +5516,7 @@ function updateObjectControls(item, reset = false) {
 		if (path && (reset || document.activeElement !== input)) input.value = path[key] || "#000000";
 	}
 	el.shapeWidth.placeholder = path?.items && path.lineWidth === undefined ? "混合" : "";
-	if (path && canEditObject(path, "update")) {
+	if (path && canEditObject(path, "paint")) {
 		if (reset || document.activeElement !== el.shapeWidth) {
 			el.shapeWidth.value = path.lineWidth === undefined ? "" : displayPoints(path.lineWidth);
 		}

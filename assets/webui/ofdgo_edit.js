@@ -190,7 +190,9 @@ export function objectEditReason(item) {
 		if (!reason) return "";
 		let message = labels[object.capabilities.reasonCode] || "对象特性暂不支持";
 		if (object.capabilities.missingGlyphs) message = missingGlyphMessage(object.capabilities.missingGlyphs);
-		return `${object.capabilities.transform ? "部分操作受限" : "暂不可编辑"}：${message}`;
+		const available = object.capabilities.transform ? object.capabilities.paint ? "可移动、改色" : "可移动"
+			: object.capabilities.copy && object.capabilities.delete ? "可复制、删除" : "暂不可编辑";
+		return `${available}：${message}`;
 	});
 	return [...new Set(reasons.filter(Boolean))].join("；");
 }
@@ -276,7 +278,7 @@ export class CanvasEditor {
 			}
 			node.tabIndex = 0;
 			node.setAttribute("role", "button");
-			node.setAttribute("aria-label", { ImageObject: "图片对象", TextObject: "文字对象", PathObject: "图形对象" }[object.type]);
+			node.setAttribute("aria-label", { ImageObject: "图片对象", TextObject: "文字对象", PathObject: "图形对象", CompositeObject: "复合对象", CompositeGraphicUnit: "复合对象" }[object.type]);
 			const item = { ...object, index, page: { width: page.width, height: page.height }, node, surface };
 			item.artwork = artwork.get(object.id)?.node;
 			if (object.type === "PathObject" && (object.shape || object.outline)) {

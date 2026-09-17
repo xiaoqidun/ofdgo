@@ -220,6 +220,7 @@ func (r *Reader) loadRes(resPath string) {
 	for i := range res.ColorSpaces.ColorSpace {
 		cs := &res.ColorSpaces.ColorSpace[i]
 		r.colorSpaceCache[cs.ID] = cs
+		r.resourceFiles[cs.ID] = fullPath
 	}
 	for _, mm := range res.MultiMedias.MultiMedia {
 		if mm.MediaFile != "" {
@@ -456,7 +457,7 @@ func (r *Reader) ResPath(resLink string) string {
 	if rootDir != "" && (resLink == rootDir || strings.HasPrefix(resLink, rootDir+"/")) {
 		return resLink
 	}
-	return path.Join(r.RootDir, resLink)
+	return cleanPackagePath(path.Join(r.RootDir, resLink))
 }
 
 // ResData 获取资源文件数据

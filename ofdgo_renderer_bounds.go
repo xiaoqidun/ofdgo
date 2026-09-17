@@ -21,7 +21,7 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
-// ObjectBounds 获取文字、路径或图片在页面坐标中的轴对齐范围，不修改对象
+// ObjectBounds 获取文字、路径、图片或复合对象在页面坐标中的轴对齐范围，不修改对象
 // 文字采用字形范围，路径包含描边与裁剪，图片采用裁剪后的几何范围，不解码像素或排除透明像素
 // 底纹按填充或描边轮廓度量，不展开图案单元
 // 不应用页面边界或父级变换；无可见范围时返回零值，不支持的对象类型返回错误
@@ -37,13 +37,13 @@ type ObjectContour struct {
 	EvenOdd bool   `json:"evenOdd,omitempty"`
 }
 
-// ObjectContours 获取路径或图片的实际绘制区域，包含描边、虚线、变换及对象裁剪
+// ObjectContours 获取路径、图片或复合对象的实际绘制区域，包含描边、虚线、变换及对象裁剪
 // 图片不解码像素，底纹不展开图案单元；不包含页面边界或父级变换
-// 入参: object 路径或图片对象, drawParam 图层绘制参数标识
+// 入参: object 路径、图片或复合对象, drawParam 图层绘制参数标识
 // 返回: []ObjectContour 可用于点选的轮廓, error 错误信息
 func (r *Renderer) ObjectContours(object GraphicObject, drawParam string) ([]ObjectContour, error) {
-	if object.Type != "PathObject" && object.Type != "ImageObject" {
-		return nil, fmt.Errorf("contours require a path or image object")
+	if object.Type != "PathObject" && object.Type != "ImageObject" && object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+		return nil, fmt.Errorf("contours require a path, image or composite object")
 	}
 	bounds := &boundsRenderer{collect: true}
 	_, err := r.measureObject(object, drawParam, bounds)
@@ -54,7 +54,7 @@ func (r *Renderer) ObjectContours(object GraphicObject, drawParam string) ([]Obj
 // 入参: object 对象, drawParam 图层绘制参数标识, bounds 度量目标
 // 返回: Box 毫米范围, error 错误信息
 func (r *Renderer) measureObject(object GraphicObject, drawParam string, bounds *boundsRenderer) (Box, error) {
-	if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "ImageObject" {
+	if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "ImageObject" && object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
 		return Box{}, fmt.Errorf("unsupported object type %q", object.Type)
 	}
 	boundary, ctm := editorGeometry(object)
@@ -97,26 +97,41 @@ func (r *Renderer) measureObject(object GraphicObject, drawParam string, bounds 
 		obj.StrokeColor = (*StrokeColor)(boundsColor((*FillColor)(obj.StrokeColor)))
 		renderer.renderPath(ctx, obj, 0, defaults, nil, false, nil)
 	case "ImageObject":
-		obj := object.ImageObject
-		if obj.Visible != nil && !*obj.Visible || obj.Alpha != nil && *obj.Alpha == 0 {
-			return Box{}, nil
-		}
-		box, _ := ParseBox(obj.Boundary)
-		ctm := NewMatrix(obj.CTM)
-		if obj.CTM == "" {
-			ctm = Matrix{a: box.W, d: box.H}
-		}
-		p := canvas.Rectangle(1, 1).Transform(canvas.Matrix{{ctm.a, ctm.c, box.X + ctm.e}, {-ctm.b, -ctm.d, -box.Y - ctm.f}})
-		clip := renderer.buildObjectClipPath(obj.Clips, 0, box.X, box.Y, ctm, nil, false)
-		bounds.add(applyClipPath(p, clip))
-		if obj.Border != nil {
-			border := *obj.Border
-			border.BorderColor = (*StrokeColor)(boundsColor((*FillColor)(border.BorderColor)))
-			obj.Border = &border
-			renderer.renderImageBorder(ctx, obj, box, 0, nil, false, clip)
-		}
+		renderer.measureImage(ctx, object.ImageObject, 0, nil, false, nil)
+	case "CompositeObject", "CompositeGraphicUnit":
+		renderer.renderCompositeGraphicUnit(ctx, object.CompositeGraphicUnit, 0, defaults, nil, false, nil)
 	}
 	return bounds.box, nil
+}
+
+// measureImage 复用图片变换与裁剪语义度量范围，不读取像素数据
+// 入参: ctx 度量画布, obj 图片, pageH 页面高度, parentCTM 父变换, boundaryInCTM 边界是否参与变换, parentClip 父裁剪
+func (r *Renderer) measureImage(ctx *canvas.Context, obj ImageObject, pageH float64, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
+	if obj.Visible != nil && !*obj.Visible || obj.Alpha != nil && *obj.Alpha == 0 {
+		return
+	}
+	box, _ := ParseBox(obj.Boundary)
+	ctm := NewMatrix(obj.CTM)
+	if obj.CTM == "" {
+		ctm = Matrix{a: box.W, d: box.H}
+	}
+	m := TranslationMatrix(box.X, box.Y).Multiply(ctm)
+	if parentCTM != nil {
+		if boundaryInCTM {
+			m = parentCTM.Multiply(m)
+		} else {
+			m = TranslationMatrix(box.X, box.Y).Multiply(*parentCTM).Multiply(ctm)
+		}
+	}
+	p := canvas.Rectangle(1, 1).Transform(canvas.Matrix{{m.a, m.c, m.e}, {-m.b, -m.d, pageH - m.f}})
+	clip := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, box.X, box.Y, ctm, parentCTM, boundaryInCTM))
+	ctx.Renderer.(*boundsRenderer).add(applyClipPath(p, clip))
+	if obj.Border != nil {
+		border := *obj.Border
+		border.BorderColor = (*StrokeColor)(boundsColor((*FillColor)(border.BorderColor)))
+		obj.Border = &border
+		r.renderImageBorder(ctx, obj, box, pageH, parentCTM, boundaryInCTM, clip)
+	}
 }
 
 // boundsColor 以底纹的基础颜色和透明度度量轮廓，不修改原画刷

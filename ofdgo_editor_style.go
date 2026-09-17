@@ -87,7 +87,7 @@ func (e *Editor) resolveEditorStyle(object GraphicObject, layer string) (Graphic
 		obj.FillColor, obj.StrokeColor = style.FillColor, style.StrokeColor
 	}
 	for _, color := range []*FillColor{style.FillColor, (*FillColor)(style.StrokeColor)} {
-		if err := creationColor(color); err != nil {
+		if err := e.editorColor(color); err != nil {
 			return GraphicObject{}, &EditError{Code: EditUnsupportedColor, Err: fmt.Errorf("unsupported draw parameter color: %w", err)}
 		}
 	}
@@ -103,7 +103,7 @@ type ObjectStyle struct {
 	Join        *string
 }
 
-// StyleObjects 原子更新文字、图片和路径透明度，路径另支持描边样式
+// StyleObjects 原子更新文字、图片、路径与复合对象透明度，路径另支持描边样式
 // 入参: page 页面索引, ids 对象标识, style 待修改属性
 // 返回: error 错误信息
 func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
@@ -128,6 +128,10 @@ func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
 		case "ImageObject":
 			if style.Alpha != nil {
 				object.ImageObject.Alpha = style.Alpha
+			}
+		case "CompositeObject", "CompositeGraphicUnit":
+			if style.Alpha != nil {
+				object.CompositeGraphicUnit.Alpha = style.Alpha
 			}
 		case "PathObject":
 			path := &object.PathObject
@@ -208,7 +212,7 @@ func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) error {
 			return err
 		}
 		for _, color := range []*FillColor{from.FillColor, (*FillColor)(from.StrokeColor)} {
-			if err := creationColor(color); err != nil {
+			if err := e.editorColor(color); err != nil {
 				return err
 			}
 		}

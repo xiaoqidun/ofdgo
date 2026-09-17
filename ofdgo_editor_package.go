@@ -66,17 +66,17 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 	if err := progress.report("pages", len(e.pages), len(e.pages)); err != nil {
 		return nil, err
 	}
-	fonts, images, resourceFiles := e.usedResources()
+	fonts, images, spaces, resourceFiles := e.usedResources()
 	commonData := source.document.CommonData
 	for _, name := range append(slices.Clone(commonData.DocumentRes), commonData.PublicRes...) {
 		resourceFiles = slices.DeleteFunc(resourceFiles, func(file string) bool {
 			return strings.EqualFold(file, reader.ResPath(name))
 		})
 	}
-	if len(fonts)+len(images) != 0 {
+	if len(fonts)+len(images)+len(spaces) != 0 {
 		resourcePath := path.Join(source.directory, "Resources.xml")
 		resourceFiles = append(resourceFiles, resourcePath)
-		data, err := encodeOFDXML(func(x *ofdXML) { x.resources(fonts, images) })
+		data, err := encodeOFDXML(func(x *ofdXML) { x.resources(fonts, images, spaces) })
 		if err != nil {
 			return nil, err
 		}
