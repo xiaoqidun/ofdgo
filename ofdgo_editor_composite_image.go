@@ -70,38 +70,138 @@ func (e *Editor) CropCompositeImage(page int, path ObjectPath, index int, box Bo
 		}
 		fill, stroke := true, false
 		shape.Fill, shape.Stroke = &fill, &stroke
-		data, err := encodeOFDXML(func(x *ofdXML) {
-			x.clips(&Clips{Clip: []Clip{{Area: []ClipArea{{CTM: inverse.String(), Path: []PathObject{shape}}}}}})
-		})
+		return appendCompositeClip(node, shape, inverse, true)
+	})
+}
+
+// appendCompositeClip 追加独立交集裁剪并记录会话还原起点，保留原始裁剪XML
+// 入参: node 对象节点, shape 裁剪路径, matrix 路径到裁剪坐标的变换, track 是否记录还原起点
+// 返回: error 错误信息
+func appendCompositeClip(node *editorCompositeNode, shape PathObject, matrix Matrix, track bool) error {
+	state := node.states[editorObjectID(node.object)]
+	if track && state.crop == nil {
+		state.crop = &editorCompositeCrop{exists: node.node.child("Clips") != nil}
+		if clips := node.object.ImageObject.Clips; clips != nil {
+			state.crop.count = len(clips.Clip)
+		}
+	}
+	data, err := encodeOFDXML(func(x *ofdXML) {
+		x.clips(&Clips{Clip: []Clip{{Area: []ClipArea{{CTM: matrix.String(), Path: []PathObject{shape}}}}}})
+	})
+	if err != nil {
+		return err
+	}
+	data = bytes.TrimPrefix(data, []byte(xml.Header))
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return err
+	}
+	var patch editorXMLPatch
+	if original := node.node.child("Clips"); original != nil {
+		clip, err := editorXMLStandalone(data[root.children[0].start:root.children[0].end], root.children[0])
 		if err != nil {
 			return err
 		}
-		data = bytes.TrimPrefix(data, []byte(xml.Header))
-		root, err := parseEditorXML(data)
+		content := append(bytes.Clone(node.data[original.open:original.close]), clip...)
+		patch = editorXMLContent(node.data, original, content)
+	} else {
+		data, err = editorXMLStandalone(data, root)
 		if err != nil {
 			return err
 		}
-		var patch editorXMLPatch
-		if original := node.node.child("Clips"); original != nil {
-			clip, err := editorXMLStandalone(data[root.children[0].start:root.children[0].end], root.children[0])
-			if err != nil {
-				return err
-			}
-			content := append(bytes.Clone(node.data[original.open:original.close]), clip...)
-			patch = editorXMLContent(node.data, original, content)
-		} else {
-			data, err = editorXMLStandalone(data, root)
-			if err != nil {
-				return err
-			}
-			content := append(data, node.data[node.node.open:node.node.close]...)
-			patch = editorXMLContent(node.data, node.node, content)
-		}
-		updated, err := newEditorCompositeNode(editorPatchXML(node.data, []editorXMLPatch{patch}))
-		if err != nil {
-			return err
-		}
-		node.data, node.node, node.object, node.changed = updated.data, updated.node, updated.object, true
+		content := append(data, node.data[node.node.open:node.node.close]...)
+		patch = editorXMLContent(node.data, node.node, content)
+	}
+	updated, err := newEditorCompositeNode(editorPatchXML(node.data, []editorXMLPatch{patch}))
+	if err != nil {
+		return err
+	}
+	node.data, node.node, node.object, node.changed = updated.data, updated.node, updated.object, true
+	node.setState(state)
+	return nil
+}
+
+// ResetCompositeImageCrop 仅移除本次编辑追加的裁剪，保留输入文件中的裁剪、蒙版和其他属性
+// 入参: page 页面索引, path 父路径, index 图片序号
+// 返回: error 错误信息
+func (e *Editor) ResetCompositeImageCrop(page int, path ObjectPath, index int) error {
+	return e.editCompositeObjects(page, path, []int{index}, func(_ *Renderer, nodes []*editorCompositeNode, _ []CompositeMember) error {
+		return resetCompositeImageCrop(nodes[0])
+	})
+}
+
+// resetCompositeImageCrop 恢复图片原始裁剪节点，不还原后续变换和资源替换
+// 入参: node 图片节点
+// 返回: error 错误信息
+func resetCompositeImageCrop(node *editorCompositeNode) error {
+	if node.object.Type != "ImageObject" {
+		return fmt.Errorf("composite member is not an image")
+	}
+	state := node.states[editorObjectID(node.object)]
+	if state.crop == nil {
 		return nil
+	}
+	clips := node.node.child("Clips")
+	var patches []editorXMLPatch
+	if !state.crop.exists {
+		patches = append(patches, editorXMLPatch{clips.start, clips.end, nil})
+	} else {
+		count := 0
+		for _, child := range clips.children {
+			if child.name.Local == "Clip" {
+				if count >= state.crop.count {
+					patches = append(patches, editorXMLPatch{child.start, child.end, nil})
+				}
+				count++
+			}
+		}
+	}
+	updated, err := newEditorCompositeNode(editorPatchXML(node.data, patches))
+	if err != nil {
+		return err
+	}
+	node.data, node.node, node.object, node.changed = updated.data, updated.node, updated.object, true
+	state.crop = nil
+	node.setState(state)
+	return nil
+}
+
+// FitCompositeImage 按原像素比例适应或填充内部图片框，保留原始裁剪和蒙版
+// 入参: page 页面索引, path 父路径, index 图片序号, mode 为contain或cover
+// 返回: error 错误信息
+func (e *Editor) FitCompositeImage(page int, path ObjectPath, index int, mode string) error {
+	return e.editCompositeObjects(page, path, []int{index}, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
+		node := nodes[0]
+		if !members[0].Capabilities.FitImage {
+			return fmt.Errorf("composite image fitting is not supported")
+		}
+		if err := resetCompositeImageCrop(node); err != nil {
+			return err
+		}
+		object := cloneEditorData(node.object)
+		if err := e.fitImage(&object.ImageObject, mode); err != nil {
+			return err
+		}
+		object.ImageObject.Clips = node.object.ImageObject.Clips
+		if err := node.update(object); err != nil {
+			return err
+		}
+		if mode == "contain" {
+			return nil
+		}
+		box, _ := ParseBox(object.ImageObject.Boundary)
+		shape, err := NewShape(ShapeRectangle, Box{W: box.W, H: box.H})
+		if err != nil {
+			return err
+		}
+		fill, stroke := true, false
+		shape.Fill, shape.Stroke = &fill, &stroke
+		frame := node.parent.Multiply(TranslationMatrix(box.X, box.Y))
+		if !node.boundaryInCTM {
+			frame = TranslationMatrix(box.X, box.Y).Multiply(node.parent)
+		}
+		clips := object.ImageObject.Clips
+		inverse, _ := node.matrix(clips == nil || clips.TransFlag == nil || *clips.TransFlag).Invert()
+		return appendCompositeClip(node, shape, inverse.Multiply(frame), true)
 	})
 }

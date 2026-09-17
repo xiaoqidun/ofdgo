@@ -61,6 +61,7 @@ type editorSourcePage struct {
 // ObjectCapabilities 已有对象可执行的操作，Reason说明受限原因
 // Update表示完整替换内容，ReplaceFont表示可显式替换文字字体，Transform表示保留文字定位的几何变换，Order仅限同一图层或末级页块
 // Arrange表示可准确度量对齐与旋转范围；Reflow表示可重排文字，LayoutKnown表示段落选项可恢复
+// FitImage表示可按原始图片比例适应或填充现有边界
 // Paint表示可独立修改纯色填充和描边，不要求重新排版文字
 // ReplaceImage表示可替换图片数据，CropImage表示可裁剪图片；内部裁剪与原裁剪取交集
 // MissingGlyphs提供缺字导致操作受限时的结构化诊断
@@ -70,6 +71,7 @@ type ObjectCapabilities struct {
 	ReplaceFont   bool
 	ReplaceImage  bool
 	CropImage     bool
+	FitImage      bool
 	Reflow        bool
 	LayoutKnown   bool
 	Transform     bool
@@ -360,6 +362,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 	if origin == nil {
 		all.ReplaceImage = object.Type == "ImageObject"
 		all.CropImage = all.ReplaceImage
+		all.FitImage = all.ReplaceImage && axisAlignedMatrix(NewMatrix(object.ImageObject.CTM))
 		return all, nil
 	}
 	node := origin.node
@@ -391,6 +394,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 	all.Paint = all.Paint && e.editorPaintable(object)
 	all.ReplaceImage = all.Update && object.Type == "ImageObject"
 	all.CropImage = all.ReplaceImage
+	all.FitImage = all.ReplaceImage && axisAlignedMatrix(NewMatrix(object.ImageObject.CTM))
 	if object.Type == "ImageObject" && object.ImageObject.Border != nil && len(object.ImageObject.Actions) != 0 {
 		all.Transform, all.Arrange = false, false
 		all.Reason, all.ReasonCode = "image actions cannot be transformed together with the border", EditUnsupportedObject

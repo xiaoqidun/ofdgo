@@ -120,4 +120,5 @@ type CompositeGraphicUnit struct {
 	CompositeGraphicUnit []CompositeGraphicUnit `xml:"CompositeGraphicUnit"`
 	Clips                *Clips                 `xml:"Clips"`
 	Actions              []Action               `xml:"Actions>Action"`
+	states               map[string]editorCompositeState
 }

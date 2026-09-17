@@ -1425,6 +1425,10 @@ button.outline-link:hover {
 	pointer-events: none;
 }
 
+.edit-text-source {
+	visibility: hidden;
+}
+
 .edit-text {
 	position: absolute;
 	overflow: visible;

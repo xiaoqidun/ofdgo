@@ -402,6 +402,7 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 		const editing = canvasEditor.input;
 		updatePendingChanges();
 		if (!editing) {
+			updateObjectControls(canvasEditor.selected);
 			updateTextFonts(canvasEditor.selected, true);
 			syncSelection();
 			if (state.fontRenderPending) window.setTimeout(refreshPendingFonts, 0);
@@ -568,6 +569,7 @@ el.resetCropButton.addEventListener("click", () => {
 		return;
 	}
 	const item = canvasEditor.selected;
+	if (item?.scoped) return changeDocument("ofdgoResetCompositeCrop", item);
 	if (item?.imageBounds) return canvasEditor.options.onCrop(item, item.imageBounds);
 });
 editorClick(el.undoButton, () => changeDocument("ofdgoUndo"));
@@ -1212,7 +1214,6 @@ function rememberEditorView(before, revision, reindex = false) {
 }
 
 function pageCan(capability, index = state.pageIndex) {
-	if (state.composite && capability === "insert") return false;
 	const bit = { insert: 1, copy: 2, delete: 4, move: 8, resize: 16 }[capability];
 	return Boolean(state.editorInfo?.pageCapabilities?.[index] & bit);
 }
@@ -1639,7 +1640,7 @@ async function insertObject(event) {
 		const doc = item?.scoped
 			? await callWASM("ofdgoChangeCompositeObjects", item.index, state.composite.key, [item.id], "image", data)
 			: item ? await callWASM("ofdgoReplaceImage", item.index, item.id, data, el.insertFit.value)
-			: await callWASM("ofdgoInsertImage", index, data, x, y, page.width - x * 2);
+			: await callWASM("ofdgoInsertImage", index, data, x, y, page.width - x * 2, state.composite?.key || "");
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -1649,13 +1650,13 @@ async function insertObject(event) {
 			return;
 		}
 		setEditorInfo(doc);
-		canvasEditor.pendingSelection = item ? null : { index };
+		canvasEditor.pendingSelection = item ? null : { index, ids: doc.selectedIDs };
 		state.selectObjects = true;
 		setPan(false);
 		openSeq = ++state.openSeq;
 		await refreshEditorPage(doc, index, openSeq);
 		if (openSeq === state.openSeq) {
-			rememberEditorView(before, revision);
+			rememberEditorView(before, revision, !item && !!state.composite);
 			el.viewerPanel.focus({ preventScroll: true });
 		}
 	} catch (err) {
@@ -1858,10 +1859,12 @@ async function changeDocument(name, item, ...args) {
 		const scope = state.composite;
 		const operation = { ofdgoTransformObject: "transform", ofdgoTransformObjects: "transform", ofdgoRotateObjects: "rotate", ofdgoFlipObjects: "flip", ofdgoResizeObjects: "resize",
 			ofdgoAlignObject: "align", ofdgoAlignObjects: "align", ofdgoDistributeObjects: "distribute", ofdgoStyleObjects: "style", ofdgoUpdatePathStyle: "paint", ofdgoCompositeTextColor: "textColor",
-			ofdgoUpdateText: "text", ofdgoStyleText: "textStyle", ofdgoCropImage: "crop",
+			ofdgoUpdateText: "text", ofdgoStyleText: "textStyle", ofdgoCropImage: "crop", ofdgoLayoutText: "layout", ofdgoFitImage: "fit", ofdgoResetCompositeCrop: "resetCrop",
 			ofdgoDeleteObject: "delete", ofdgoDeleteObjects: "delete", ofdgoCopyObjects: "copy", ofdgoOrderObjects: "order" }[name];
 		const members = item?.items || (item ? [item] : []);
 		const scoped = scope && members.length && members.every(member => member.scoped);
+		const inserting = ["ofdgoInsertShape", "ofdgoInsertText", "ofdgoInsertImage"].includes(name);
+		if (scope && inserting) args.push(scope.key);
 		if (scoped && !operation) throw new Error("内部对象暂不支持此操作");
 		const doc = scoped
 			? await callWASM("ofdgoChangeCompositeObjects", item.index, scope.key, Array.isArray(item.id) ? item.id : members.map(member => member.id), operation, ...args)
@@ -1874,7 +1877,7 @@ async function changeDocument(name, item, ...args) {
 		}
 		const view = name === "ofdgoUndo" ? state.editorViews.get(revision) : name === "ofdgoRedo" ? state.editorViews.get(doc.revision) : null;
 		const reindex = !!scope && (scoped && ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoCopyObjects", "ofdgoOrderObjects"].includes(name)
-			|| name === "ofdgoPasteObjects" && !!args[4]);
+			|| inserting || name === "ofdgoPasteObjects" && !!args[4]);
 		const reindexed = restoring ? view?.reindex && view.before : reindex && before;
 		const clipboard = state.objectClipboard;
 		if (reindexed && clipboard?.scope?.startsWith(reindexed.scope + "/") && clipboard.page === reindexed.page) state.objectClipboard = null;
@@ -1882,7 +1885,7 @@ async function changeDocument(name, item, ...args) {
 		const restoredIndex = location ? doc.pages.findIndex(page => page.id === location.page) : -1;
 		if (restoredIndex >= 0) {
 			state.composite = location.scope ? { index: restoredIndex, key: location.scope, objects: [] } : null;
-		} else if (!item && !(name === "ofdgoPasteObjects" && args[4])) {
+		} else if (!item && !inserting && !(name === "ofdgoPasteObjects" && args[4])) {
 			resetCompositeScope();
 		}
 		if (restoring && JSON.stringify(doc.outlines) !== JSON.stringify(state.doc.outlines)) {
@@ -3752,7 +3755,8 @@ function copyEditorSelection(event) {
 		return true;
 	}
 	const index = items[0].index, ids = items.map(item => item.id);
-	const clipboard = { token: crypto.randomUUID(), page: state.doc.pages[index].id, scope: state.composite?.key || "", bounds: selectionBounds(items), x: 0, y: 0, cut };
+	const clipboard = { token: crypto.randomUUID(), page: state.doc.pages[index].id, scope: state.composite?.key || "", bounds: selectionBounds(items), x: 0, y: 0, cut,
+		compound: items.some(item => item.type === "CompositeObject" || item.type === "CompositeGraphicUnit") };
 	if (canvasEditor.nudge) {
 		clipboard.bounds.x += canvasEditor.nudge.x;
 		clipboard.bounds.y += canvasEditor.nudge.y;
@@ -3807,13 +3811,14 @@ async function pasteEditorContent(event) {
 		}
 		const openSeq = state.openSeq;
 		if (!await clipboard.ready || openSeq !== state.openSeq || index !== state.pageIndex || state.objectClipboard !== clipboard) return;
-		if ((clipboard.scope || "") !== (state.composite?.key || "") || clipboard.scope && clipboard.page !== page.id) {
-			setStatus("请回到原编辑范围粘贴");
+		const scope = state.composite?.key || "";
+		if (clipboard.compound && (scope || clipboard.scope) && (scope !== clipboard.scope || page.id !== clipboard.page)) {
+			setStatus("复合对象请在原范围粘贴");
 			return;
 		}
-		if (!clipboard.scope && !pageCan("insert")) return;
+		if (!pageCan("insert")) return;
 		const visible = visiblePageBounds(index), bounds = clipboard.bounds;
-		const offset = clipboard.page === page.id ? { x: clipboard.x + (clipboard.cut ? 0 : 3), y: clipboard.y + (clipboard.cut ? 0 : 3) } : { x: 0, y: 0 };
+		const offset = (clipboard.targetPage || clipboard.page) === page.id ? { x: clipboard.x + (clipboard.cut ? 0 : 3), y: clipboard.y + (clipboard.cut ? 0 : 3) } : { x: 0, y: 0 };
 		for (const [axis, size] of [["x", "width"], ["y", "height"]]) {
 			const position = bounds[axis] + offset[axis];
 			if (position < visible[axis] || position + bounds[size] > visible[axis] + visible[size]) {
@@ -3821,8 +3826,8 @@ async function pasteEditorContent(event) {
 				offset[axis] = Math.max(visible[axis] + margin, Math.min(position, visible[axis] + visible[size] - margin - bounds[size])) - bounds[axis];
 			}
 		}
-		if (await changeDocument("ofdgoPasteObjects", null, index, token, offset.x, offset.y, clipboard.scope || "")) {
-			clipboard.page = page.id;
+		if (await changeDocument("ofdgoPasteObjects", null, index, token, offset.x, offset.y, state.composite?.key || "")) {
+			clipboard.targetPage = page.id;
 			clipboard.x = offset.x;
 			clipboard.y = offset.y;
 			clipboard.cut = false;
@@ -5605,25 +5610,25 @@ function updateObjectControls(item, reset = false) {
 	el.objectAlign.disabled = disabled || cropping || !canEditObject(item, "arrange");
 	el.objectRotate.disabled = el.objectFlip.disabled = disabled || cropping || !canEditObject(item, state.composite ? "transform" : "arrange");
 	el.cropImageButton.disabled = disabled || item.type !== "ImageObject" || !canEditObject(item, "cropImage");
-	el.imageFit.disabled = el.cropImageButton.disabled || cropping || Boolean(item.scoped);
+	el.imageFit.disabled = el.cropImageButton.disabled || cropping || Boolean(item.scoped && !canEditObject(item, "fitImage"));
 	el.cropImageButton.textContent = cropping ? "完成" : "裁剪";
 	el.cropImageButton.setAttribute("aria-label", cropping ? "完成裁剪" : "裁剪图片");
 	el.cropImageButton.setAttribute("aria-pressed", String(cropping));
 	el.resetCropButton.textContent = cropping ? "取消" : "还原";
 	el.resetCropButton.setAttribute("aria-label", cropping ? "取消裁剪" : "还原图片");
-	el.resetCropButton.disabled = el.cropImageButton.disabled || !cropping && (item.scoped || !item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
+	el.resetCropButton.disabled = el.cropImageButton.disabled || !cropping && (item.scoped ? !item.cropped : !item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
 	el.objectDistribute.disabled = el.objectAlign.disabled || !item.items || item.items.length < 3;
 	el.editObjectButton.disabled = disabled || Boolean(item.items) || !canEditObject(item, "enter") && (item.type === "PathObject"
 		|| !canEditObject(item, item.type === "TextObject" ? "reflow" : item.type === "ImageObject" ? "replaceImage" : "update"));
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const selection = selectedText(item);
 	const text = selection ? currentTextStyle() : state.textDefaults;
-	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(state.composite && !selection) || Boolean(item?.items && !selection);
+	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items && !selection);
 	fontPicker.setDisabled(textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "replaceFont"));
 	el.textSize.disabled = textDisabled || text !== state.textDefaults && !item.draft && (!canEditObject(item, "reflow") || Boolean(item?.items) && !canEditObject(item, "layoutKnown"));
 	el.textColor.disabled = textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "paint");
 	el.textFontAdd.disabled = !state.editing || !state.ready || state.exporting;
-	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled || Boolean(item?.items || item?.draft) || Boolean(canvasEditor.input || state.composite);
+	el.textAlign.disabled = el.textWrap.disabled = el.textLineHeight.disabled = el.textSpacing.disabled = el.textSize.disabled || Boolean(item?.items || item?.draft) || Boolean(canvasEditor.input);
 	el.paragraphButton.disabled = el.textAlign.disabled;
 	const layoutKnown = text === state.textDefaults || Boolean(item?.draft) || canEditObject(item, "layoutKnown");
 	el.textAlign.value = layoutKnown ? text.align || "left" : "";

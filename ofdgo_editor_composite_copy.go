@@ -15,12 +15,17 @@
 package ofdgo
 
 import (
+	"encoding/xml"
 	"fmt"
+	"maps"
 	"slices"
+	"strings"
+
+	"github.com/tdewolff/canvas"
 )
 
 // CompositeSelection 同一内部容器的独立选区快照，共享不可变字体和图片资源
-// 仅可粘贴回当前Editor的原范围，源对象修改或删除不改变快照，不用于跨文档交换
+// 可在当前Editor内粘贴，源对象修改或删除不改变快照，不用于跨文档交换
 // 父路径的祖先成员增删或排序后需重新捕获，避免使用已失效的序号路径
 type CompositeSelection struct {
 	editor     *Editor
@@ -29,6 +34,135 @@ type CompositeSelection struct {
 	references int
 	containers []int
 	nodes      []*editorCompositeNode
+	source     *editorSourcePage
+}
+
+// PasteCompositeSelection 将内部基本对象快照粘贴到页面顶层，保持源继承外观和裁剪
+// 复合成员需留在原范围操作，不将未知嵌套结构强制扁平化
+// 入参: page 目标页, selection 当前编辑器内捕获的快照, dx、dy 页面位移
+// 返回: []string 新对象标识, error 错误信息
+func (e *Editor) PasteCompositeSelection(page int, selection *CompositeSelection, dx, dy float64) ([]string, error) {
+	if !finite(dx) || !finite(dy) {
+		return nil, fmt.Errorf("paste requires finite offsets")
+	}
+	if _, err := e.page(page); err != nil {
+		return nil, err
+	}
+	objects, err := e.compositeSelectionObjects(selection)
+	if err != nil {
+		return nil, err
+	}
+	return e.CopyObjects(page, objects, dx, dy)
+}
+
+// compositeSelectionObjects 固定内部基本对象的页面几何和父裁剪，保留原XML扩展
+// 入参: selection 独立内部快照
+// 返回: []GraphicObject 可复制到其他范围的快照, error 错误信息
+func (e *Editor) compositeSelectionObjects(selection *CompositeSelection) ([]GraphicObject, error) {
+	if selection == nil || selection.editor != e {
+		return nil, fmt.Errorf("composite selection belongs to another editor")
+	}
+	for _, node := range selection.nodes {
+		if node.object.Type == "CompositeObject" || node.object.Type == "CompositeGraphicUnit" {
+			return nil, fmt.Errorf("composite groups require their original editing scope")
+		}
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return nil, err
+	}
+	reader, err := e.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	renderer := NewRenderer(reader, WithFontFS(e.fontFS...))
+	var objects []GraphicObject
+	for _, source := range selection.nodes {
+		copy, err := newEditorCompositeNode(source.data)
+		if err != nil {
+			return nil, err
+		}
+		copy.setStates(source.states)
+		object, err := e.compositeMemberStyle(source)
+		if err != nil {
+			return nil, err
+		}
+		object = mergeGraphicObjectAlpha(object, source.alpha)
+		if !source.visible || source.clip != nil && source.clip.Empty() {
+			visible := false
+			switch object.Type {
+			case "TextObject":
+				object.TextObject.Visible = &visible
+			case "PathObject":
+				object.PathObject.Visible = &visible
+			case "ImageObject":
+				object.ImageObject.Visible = &visible
+			}
+		}
+		if !source.boundaryInCTM {
+			object = compositeBoundary(object, source.parent, true)
+		}
+		if err := copy.update(object); err != nil {
+			return nil, err
+		}
+		copy.parent, copy.boundaryInCTM = IdentityMatrix, true
+		if err := e.transformCompositeMember(renderer, copy, source.parent); err != nil {
+			return nil, err
+		}
+		if err := e.isolateCompositeStyle(copy); err != nil {
+			return nil, err
+		}
+		if source.clip != nil && !source.clip.Empty() {
+			shape := compositeClipPath(source.clip)
+			clips := *editorObjectClips(&copy.object)
+			matrix, ok := copy.matrix(clips == nil || clips.TransFlag == nil || *clips.TransFlag).Invert()
+			if !ok {
+				return nil, fmt.Errorf("composite clip transform is not invertible")
+			}
+			if err := appendCompositeClip(copy, shape, matrix, false); err != nil {
+				return nil, err
+			}
+		}
+		copy.node.parent = &editorXML{name: xml.Name{Local: "Layer"}, parent: &editorXML{name: xml.Name{Local: "Content"}}}
+		object, err = e.resolveEditorStyle(copy.object, "")
+		if err != nil {
+			return nil, err
+		}
+		object.origin = &editorObjectOrigin{page: selection.source, data: copy.data, node: copy.node, object: copy.object}
+		objects = append(objects, object)
+	}
+	return objects, nil
+}
+
+// compositeClipPath 将已解析的父裁剪转换为标准紧缩路径，使用页面毫米坐标
+// 入参: path 画布裁剪
+// 返回: PathObject 标准裁剪路径
+func compositeClipPath(path *canvas.Path) PathObject {
+	path = path.Copy().Transform(canvas.Matrix{{1, 0, 0}, {0, -1, 0}}).ReplaceArcs()
+	data := path.Data()
+	var value strings.Builder
+	for i := 0; i < len(data); {
+		switch data[i] {
+		case canvas.MoveToCmd, canvas.LineToCmd:
+			command := "L"
+			if data[i] == canvas.MoveToCmd {
+				command = "M"
+			}
+			fmt.Fprintf(&value, "%s %s %s ", command, ofdNumber(data[i+1]), ofdNumber(data[i+2]))
+			i += 4
+		case canvas.QuadToCmd:
+			fmt.Fprintf(&value, "Q %s %s %s %s ", ofdNumber(data[i+1]), ofdNumber(data[i+2]), ofdNumber(data[i+3]), ofdNumber(data[i+4]))
+			i += 6
+		case canvas.CubeToCmd:
+			fmt.Fprintf(&value, "B %s %s %s %s %s %s ", ofdNumber(data[i+1]), ofdNumber(data[i+2]), ofdNumber(data[i+3]), ofdNumber(data[i+4]), ofdNumber(data[i+5]), ofdNumber(data[i+6]))
+			i += 8
+		case canvas.CloseCmd:
+			value.WriteString("C ")
+			i += 4
+		}
+	}
+	fill, stroke := true, false
+	return PathObject{Boundary: "0 0 1 1", Fill: &fill, Stroke: &stroke, AbbreviatedData: strings.TrimSpace(value.String())}
 }
 
 // CaptureCompositeObjects 捕获内部选区，不修改文档或分配资源
@@ -48,7 +182,7 @@ func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []in
 	members := e.measureCompositeMembers(renderer, nodes)
 	var owner *editorCompositeNode
 	var container *editorXML
-	selection := &CompositeSelection{editor: e, page: e.pages[page].ID, path: ObjectPath{ID: path.ID, Children: slices.Clone(path.Children)}}
+	selection := &CompositeSelection{editor: e, page: e.pages[page].ID, path: ObjectPath{ID: path.ID, Children: slices.Clone(path.Children)}, source: e.objectOrigin(path.ID).page}
 	for j, i := range indexes {
 		if i < 0 || i >= len(nodes) || j > 0 && indexes[j-1] == i || !members[i].Capabilities.Copy {
 			return nil, fmt.Errorf("invalid composite copy selection")
@@ -76,22 +210,30 @@ func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []in
 	return selection, nil
 }
 
-// PasteCompositeObjects 将快照粘贴至原内部容器末尾，不依赖源成员当前的序号或存在性
-// 位移使用当前父变换下的页面毫米，父容器和继承样式沿用当前范围，提交一次撤销记录
+// PasteCompositeObjects 将快照粘贴至内部范围末尾，不依赖源成员当前的序号或存在性
+// 同范围沿用原容器和当前继承样式，跨范围固定基本对象的源外观，位移使用页面毫米
+// 目标范围的父透明度及裁剪仍作用于新成员，全部成员提交一次撤销记录
 // 入参: page 页面索引, path 父复合路径, selection 捕获的快照, dx、dy 页面位移
 // 返回: []int 新成员序号, error 错误信息
 func (e *Editor) PasteCompositeObjects(page int, path ObjectPath, selection *CompositeSelection, dx, dy float64) ([]int, error) {
-	if selection == nil || selection.editor != e || path.ID != selection.path.ID || !slices.Equal(path.Children, selection.path.Children) {
-		return nil, fmt.Errorf("paste requires the original composite scope")
+	if selection == nil || selection.editor != e {
+		return nil, fmt.Errorf("composite selection belongs to another editor")
 	}
 	if !finite(dx) || !finite(dy) {
 		return nil, fmt.Errorf("paste requires finite offsets")
 	}
+	if _, err := e.page(page); err != nil {
+		return nil, err
+	}
+	if e.pages[page].ID != selection.page || path.ID != selection.path.ID || !slices.Equal(path.Children, selection.path.Children) {
+		objects, err := e.compositeSelectionObjects(selection)
+		if err != nil {
+			return nil, err
+		}
+		return e.CopyObjectsToComposite(page, path, objects, dx, dy)
+	}
 	var result []int
 	err := e.editCompositeScope(page, path, func(renderer *Renderer, root *editorCompositeNode, _ []*editorCompositeNode) error {
-		if e.pages[page].ID != selection.page {
-			return fmt.Errorf("paste requires the original page")
-		}
 		scope := root.loadedScope(path.Children)
 		owner := scope
 		for i := 0; i < selection.references; i++ {
@@ -116,10 +258,11 @@ func (e *Editor) PasteCompositeObjects(page int, path ObjectPath, selection *Com
 			copy.parent, copy.boundaryInCTM = parent, owner.boundaryInCTM
 			nodes[i] = &copy
 		}
-		data, err := e.copyCompositeNodes(renderer, nodes, dx, dy)
+		data, states, err := e.copyCompositeNodes(renderer, nodes, dx, dy)
 		if err != nil {
 			return err
 		}
+		maps.Copy(owner.states, states)
 		next, reached := 0, false
 		var count func(*editorCompositeNode)
 		count = func(node *editorCompositeNode) {

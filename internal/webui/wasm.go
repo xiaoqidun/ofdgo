@@ -833,7 +833,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 // 返回: map[string]any 前端能力
 func editorCapabilities(capability ofdgo.ObjectCapabilities, kind string) map[string]any {
 	result := map[string]any{"update": capability.Update, "paint": capability.Paint, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode),
-		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
+		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "fitImage": capability.FitImage, "enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
 	if missing := capability.MissingGlyphs; missing != nil {
 		result["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
 	}
@@ -925,17 +925,35 @@ func compositeObjects(args []js.Value) (any, error) {
 		editorAppearance(item, member.Object, member.Capabilities.Paint, member.StrokeScale)
 		if member.Object.Type == "TextObject" {
 			object := member.Object.TextObject
-			item["text"], _ = object.TextLayout()
+			value, layout := object.TextLayout()
+			item["text"] = value
+			item["wrap"], item["align"], item["paragraphHeight"] = layout.Wrap, layout.Align, layout.LineHeight
+			item["letterSpacing"] = layout.LetterSpacing
+			item["leftIndent"], item["rightIndent"], item["firstLineIndent"] = layout.LeftIndent, layout.RightIndent, layout.FirstLineIndent
 			item["font"], item["fontName"], item["size"] = object.Font, fontNames[object.Font], object.Size
 			item["bounds"] = editorBox(box)
 			if member.Capabilities.Reflow {
 				inverse, _ := member.Matrix.Invert()
 				local := inverse.TransformBox(box)
-				item["textFrame"] = map[string]any{"width": math.Max(object.Size, local.X+local.W), "height": math.Max(object.Size, local.Y+local.H), "matrix": editorMatrix(member.Matrix)}
+				width := math.Max(object.Size, local.X+local.W)
+				if layout.Wrap {
+					frame, err := object.TextFrame()
+					if err != nil {
+						return nil, err
+					}
+					width = frame.W
+				}
+				frame := ofdgo.Box{W: width, H: math.Max(object.Size, local.Y+local.H)}
+				item["textFrame"] = map[string]any{"width": frame.W, "height": frame.H, "matrix": editorMatrix(member.Matrix)}
+				if layout.Wrap {
+					bounds := member.Matrix.TransformBox(frame)
+					item["x"], item["y"], item["width"], item["height"] = bounds.X, bounds.Y, bounds.W, bounds.H
+				}
 			}
 		}
 		if member.Capabilities.CropImage {
 			item["imageBounds"] = editorBox(box)
+			item["cropped"] = member.Cropped
 		}
 		objects = append(objects, item)
 	}
@@ -970,6 +988,31 @@ func changeCompositeObjects(args []js.Value) (any, error) {
 			return err
 		case "text", "textStyle":
 			return changeCompositeText(page, path, indexes, operation, args[4:])
+		case "layout":
+			if len(indexes) != 1 {
+				return fmt.Errorf("text layout requires one member")
+			}
+			layout := ofdgo.TextLayout{Wrap: args[6].Bool(), Align: args[7].String(), LineHeight: args[8].Float(), LetterSpacing: args[9].Float(), LeftIndent: args[10].Float(), RightIndent: args[11].Float(), FirstLineIndent: args[12].Float()}
+			if !args[4].IsNull() {
+				return currentEditor.ResizeCompositeTextFrame(page, path, indexes[0], args[4].Float(), args[5].Float(), layout)
+			}
+			members, err := currentEditor.CompositeObjects(page, path)
+			if err != nil {
+				return err
+			}
+			if indexes[0] >= len(members) {
+				return fmt.Errorf("text member is unavailable")
+			}
+			value, _ := members[indexes[0]].Object.TextObject.TextLayout()
+			return currentEditor.LayoutCompositeText(page, path, indexes[0], value, layout)
+		case "fit", "resetCrop":
+			if len(indexes) != 1 {
+				return fmt.Errorf("image operation requires one member")
+			}
+			if operation == "fit" {
+				return currentEditor.FitCompositeImage(page, path, indexes[0], args[4].String())
+			}
+			return currentEditor.ResetCompositeImageCrop(page, path, indexes[0])
 		case "crop":
 			if len(indexes) != 1 {
 				return fmt.Errorf("image crop requires one member")
@@ -1273,16 +1316,22 @@ func pasteObjects(args []js.Value) (any, error) {
 	if currentEditor == nil || copiedObjects == nil || copiedObjects.token != args[1].String() {
 		return nil, fmt.Errorf("object clipboard is no longer available")
 	}
-	if copiedObjects.composite != nil {
-		if len(args) < 5 || args[4].String() == "" {
-			return nil, fmt.Errorf("paste requires the original composite scope")
-		}
-		key := args[4].String()
+	key := ""
+	if len(args) > 4 {
+		key = args[4].String()
+	}
+	page, dx, dy := args[0].Int(), args[2].Float(), args[3].Float()
+	if key != "" {
 		path, err := compositePath(key)
 		if err != nil {
 			return nil, err
 		}
-		indexes, err := currentEditor.PasteCompositeObjects(args[0].Int(), path, copiedObjects.composite, args[2].Float(), args[3].Float())
+		var indexes []int
+		if copiedObjects.composite != nil {
+			indexes, err = currentEditor.PasteCompositeObjects(page, path, copiedObjects.composite, dx, dy)
+		} else {
+			indexes, err = currentEditor.CopyObjectsToComposite(page, path, copiedObjects.objects, dx, dy)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1293,10 +1342,15 @@ func pasteObjects(args []js.Value) (any, error) {
 		}
 		return result, err
 	}
-	if len(args) > 4 && args[4].String() != "" {
-		return nil, fmt.Errorf("top-level objects cannot be pasted into a composite")
+	if copiedObjects.composite != nil {
+		ids, err := currentEditor.PasteCompositeSelection(page, copiedObjects.composite, dx, dy)
+		if err != nil {
+			return nil, err
+		}
+		info, err := previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+		return editorSelectionInfo{info, ids}, err
 	}
-	return copyEditorObjects(args[0].Int(), copiedObjects.objects, args[2].Float(), args[3].Float())
+	return copyEditorObjects(page, copiedObjects.objects, dx, dy)
 }
 
 // copyEditorObjects 复制快照并更新预览，返回新对象标识
@@ -1961,10 +2015,7 @@ func insertShape(args []js.Value) (any, error) {
 	if err := setPathStyle(&path, args[6:]); err != nil {
 		return nil, err
 	}
-	if _, err := currentEditor.AddObject(args[0].Int(), ofdgo.GraphicObject{Type: "PathObject", PathObject: path}); err != nil {
-		return nil, err
-	}
-	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+	return insertEditorObject(args[0].Int(), ofdgo.GraphicObject{Type: "PathObject", PathObject: path}, args[11:])
 }
 
 // updatePathStyle 原子更新选中路径的绘制样式，保留未修改属性
@@ -2031,10 +2082,7 @@ func insertText(args []js.Value) (any, error) {
 	if err := setTextColor(&object.TextObject, args[6].String()); err != nil {
 		return nil, err
 	}
-	if _, err := currentEditor.AddObject(page, object); err != nil {
-		return nil, err
-	}
-	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+	return insertEditorObject(page, object, args[15:])
 }
 
 // layoutText 调整文字框和段落排版，保留软换行前的原文
@@ -2274,10 +2322,32 @@ func insertImage(args []js.Value) (any, error) {
 	object := ofdgo.GraphicObject{Type: "ImageObject", ImageObject: ofdgo.ImageObject{
 		ResourceID: resourceID, Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
 	}}
-	if _, err := currentEditor.AddObject(args[0].Int(), object); err != nil {
+	return insertEditorObject(args[0].Int(), object, args[5:])
+}
+
+// insertEditorObject 复用顶层和内部范围插入流程，返回稳定选区
+// 入参: page 页码, object 新对象, scope 可选父路径
+// 返回: any 文档信息及新选区, error 错误信息
+func insertEditorObject(page int, object ofdgo.GraphicObject, scope []js.Value) (any, error) {
+	var id string
+	var err error
+	if len(scope) > 0 && scope[0].String() != "" {
+		key := scope[0].String()
+		path, parseErr := compositePath(key)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		var index int
+		index, err = currentEditor.AddCompositeObject(page, path, object)
+		id = fmt.Sprintf("%s/%d", key, index)
+	} else {
+		id, err = currentEditor.AddObject(page, object)
+	}
+	if err != nil {
 		return nil, err
 	}
-	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+	info, err := previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+	return editorSelectionInfo{info, []string{id}}, err
 }
 
 // editorOperationProgress 节流长操作检查点并向浏览器让出执行，保证阶段开始和结束可取消

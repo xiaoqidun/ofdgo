@@ -337,6 +337,7 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 				case "CompositeObject", "CompositeGraphicUnit":
 					collectCompositeReferences(object.CompositeGraphicUnit, used)
 				case "TextObject":
+					used[object.TextObject.DrawParam] = true
 					used[object.TextObject.Font] = true
 					if e.source != nil && (!exists || before.Type != object.Type || before.TextObject.Font != object.TextObject.Font) {
 						promoted[object.TextObject.Font] = true
@@ -352,20 +353,22 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 							promoted[object.ImageObject.ImageMask] = true
 						}
 					}
+				case "PathObject":
+					used[object.PathObject.DrawParam] = true
 				}
 			}
 		}
 	}
 	for i := len(e.resources) - 1; i >= 0; i-- {
 		resource := e.resources[i]
-		if resource.composite != "" && used[resource.composite] {
+		if resource.definition() != "" && used[resource.definition()] {
 			for _, id := range resource.references {
 				used[id] = true
 			}
 		}
 	}
 	for _, resource := range e.resources {
-		if resource.composite != "" && used[resource.composite] {
+		if resource.definition() != "" && used[resource.definition()] {
 			files[resource.name] = true
 		}
 		if resource.font != nil && used[resource.font.ID] {

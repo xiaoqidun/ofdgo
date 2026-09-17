@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"slices"
 )
 
@@ -60,11 +61,12 @@ func (e *Editor) CopyCompositeObjects(page int, path ObjectPath, indexes []int, 
 			}
 		}
 		slices.SortFunc(nodes, func(a, b *editorCompositeNode) int { return a.index - b.index })
-		data, err := e.copyCompositeNodes(renderer, nodes, dx, dy)
+		data, states, err := e.copyCompositeNodes(renderer, nodes, dx, dy)
 		if err != nil {
 			return err
 		}
 		owner := nodes[0].owner
+		maps.Copy(owner.states, states)
 		owner.patches = append(owner.patches, editorXMLPatch{container.close, container.close, data})
 		next := 0
 		for _, member := range owner.children {
@@ -85,27 +87,29 @@ func (e *Editor) CopyCompositeObjects(page int, path ObjectPath, indexes []int, 
 
 // copyCompositeNodes 复制成员原文并统一重映射标识，保持副本之间的引用
 // 入参: renderer 渲染器, nodes 快照, dx、dy 页面位移
-// 返回: []byte 副本XML, error 错误信息
-func (e *Editor) copyCompositeNodes(renderer *Renderer, nodes []*editorCompositeNode, dx, dy float64) ([]byte, error) {
+// 返回: []byte 副本XML, map[string]editorCompositeState 会话信息, error 错误信息
+func (e *Editor) copyCompositeNodes(renderer *Renderer, nodes []*editorCompositeNode, dx, dy float64) ([]byte, map[string]editorCompositeState, error) {
 	ids := make(map[string]string)
 	for _, node := range nodes {
 		if err := e.collectCompositeIDs(node.node, ids); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	var data []byte
+	states := make(map[string]editorCompositeState)
 	for _, node := range nodes {
 		copy := *node
 		if err := e.transformCompositeMember(renderer, &copy, TranslationMatrix(dx, dy)); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		fragment, err := editorXMLRemapIDs(copy.data, copy.node, ids)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+		maps.Copy(states, remapCompositeStates(node.states, ids))
 		data = append(data, fragment...)
 	}
-	return data, nil
+	return data, states, nil
 }
 
 // OrderCompositeObjects 调整同一直接容器内的绘制顺序，不改变页块和其他实例

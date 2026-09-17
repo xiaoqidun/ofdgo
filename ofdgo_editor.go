@@ -75,6 +75,17 @@ type editorResource struct {
 	composite  string
 	references []string
 	subset     *editorFontSubset
+	states     map[string]editorCompositeState
+	draw       *DrawParam
+}
+
+// definition 获取独立定义资源的标识
+// 返回: string 复合资源或绘制参数标识
+func (r editorResource) definition() string {
+	if r.draw != nil {
+		return r.draw.ID
+	}
+	return r.composite
 }
 
 // editorResourceKey 资源内容和字体集合索引

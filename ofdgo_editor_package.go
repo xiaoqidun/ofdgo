@@ -68,7 +68,7 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 	}
 	fonts, images, spaces, resourceFiles := e.usedResources()
 	for _, resource := range e.resources {
-		if resource.composite != "" && slices.Contains(resourceFiles, resource.name) {
+		if resource.definition() != "" && slices.Contains(resourceFiles, resource.name) {
 			parts[resource.name] = resource.data
 		}
 	}

@@ -1024,6 +1024,7 @@ export class CanvasEditor {
 		});
 		this.input = { input, item, face, fontChoice: item.fontChoice };
 		const editing = this.input;
+		item.artwork?.classList.add("edit-text-source");
 		item.surface.append(input);
 		input.addEventListener("input", () => this.options.onTextChange());
 		input.addEventListener("compositionstart", () => { editing.composing = true; });
@@ -1141,6 +1142,7 @@ export class CanvasEditor {
 		this.input = null;
 		if (editing) {
 			editing.input.remove();
+			editing.item.artwork?.classList.remove("edit-text-source");
 			document.fonts.delete(editing.face);
 			if (editing.item.draft && this.selected === editing.item) this.select(null);
 			this.options.onTextChange();

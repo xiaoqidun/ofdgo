@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"reflect"
 	"slices"
 
 	"github.com/tdewolff/canvas"
@@ -45,6 +46,7 @@ type CompositeMember struct {
 	Capabilities ObjectCapabilities
 	Position     ObjectPosition
 	Transform    bool
+	Cropped      bool
 }
 
 // editorCompositeNode 保留原始XML及实例上下文，不修改共享资源
@@ -58,6 +60,7 @@ type editorCompositeNode struct {
 	drawParams    []string
 	clip          *canvas.Path
 	visible       bool
+	alpha         *int
 	ref           *editorCompositeNode
 	children      []*editorCompositeNode
 	expanded      bool
@@ -66,6 +69,81 @@ type editorCompositeNode struct {
 	owner         *editorCompositeNode
 	patches       []editorXMLPatch
 	index         int
+	states        map[string]editorCompositeState
+}
+
+// editorCompositeState 保存内部对象的会话排版及新增裁剪起点，不写入OFD
+type editorCompositeState struct {
+	layout *textLayout
+	crop   *editorCompositeCrop
+	origin [2]float64
+}
+
+// editorCompositeCrop 记录编辑前的裁剪数量及节点存在性
+type editorCompositeCrop struct {
+	count  int
+	exists bool
+}
+
+// setStates 独立保存当前XML子树的会话信息，共享不可变记录
+// 入参: states 来源记录
+func (n *editorCompositeNode) setStates(states map[string]editorCompositeState) {
+	n.states = make(map[string]editorCompositeState)
+	var visit func(*editorXML)
+	visit = func(node *editorXML) {
+		if state, ok := states[node.attr("ID")]; ok {
+			n.states[node.attr("ID")] = state
+		}
+		for _, child := range node.children {
+			visit(child)
+		}
+	}
+	visit(n.node)
+	n.object.TextObject.layout = n.states[editorObjectID(n.object)].layout
+}
+
+// setState 替换当前对象的会话记录并计入本次事务
+// 入参: state 新记录
+func (n *editorCompositeNode) setState(state editorCompositeState) {
+	id := editorObjectID(n.object)
+	if reflect.DeepEqual(n.states[id], state) {
+		return
+	}
+	if n.states == nil {
+		n.states = make(map[string]editorCompositeState)
+	}
+	if state == (editorCompositeState{}) {
+		delete(n.states, id)
+	} else {
+		n.states[id] = state
+	}
+	n.object.TextObject.layout = state.layout
+	n.changed = true
+}
+
+// remapCompositeStates 随XML标识重映射会话记录，仅保留当前子树的对象
+// 入参: states 原记录, ids 标识映射
+// 返回: map[string]editorCompositeState 新记录
+func remapCompositeStates(states map[string]editorCompositeState, ids map[string]string) map[string]editorCompositeState {
+	var result map[string]editorCompositeState
+	for id, next := range ids {
+		if state, ok := states[id]; ok {
+			if result == nil {
+				result = make(map[string]editorCompositeState)
+			}
+			result[next] = state
+		}
+	}
+	return result
+}
+
+// removeCompositeStates 清除子树旧记录，再由写入结果合并新记录
+// 入参: states 目标记录, node 子树根节点
+func removeCompositeStates(states map[string]editorCompositeState, node *editorXML) {
+	delete(states, node.attr("ID"))
+	for _, child := range node.children {
+		removeCompositeStates(states, child)
+	}
 }
 
 // CompositeObjects 枚举复合对象的直接可绘制成员，资源引用层不占用路径层级
@@ -124,25 +202,29 @@ func (e *Editor) ResizeCompositeObjects(page int, path ObjectPath, indexes []int
 	if _, err := creationBox(editorBoxString(box)); err != nil {
 		return err
 	}
-	members, err := e.CompositeObjects(page, path)
-	if err != nil {
-		return err
-	}
-	var before Box
-	for _, i := range indexes {
-		if i < 0 || i >= len(members) {
-			return fmt.Errorf("invalid composite selection")
+	return e.editCompositeObjects(page, path, indexes, func(renderer *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
+		var before Box
+		for _, member := range members {
+			if !member.Capabilities.Transform {
+				return member.Capabilities.editError()
+			}
+			before = unionTextBox(before, member.Bounds)
 		}
-		before = unionTextBox(before, members[i].Bounds)
-	}
-	if before.W <= 0 || before.H <= 0 {
-		return fmt.Errorf("selection has no visible bounds")
-	}
-	sx, sy := box.W/before.W, box.H/before.H
-	if math.Abs(sx-sy) > 1e-9*math.Max(sx, sy) {
-		return fmt.Errorf("composite members require proportional resizing")
-	}
-	return e.TransformCompositeObjects(page, path, indexes, box.X-before.X*sx, box.Y-before.Y*sx, sx)
+		if before.W <= 0 || before.H <= 0 {
+			return fmt.Errorf("selection has no visible bounds")
+		}
+		sx, sy := box.W/before.W, box.H/before.H
+		if math.Abs(sx-sy) > 1e-9*math.Max(sx, sy) {
+			return fmt.Errorf("composite members require proportional resizing")
+		}
+		matrix := Matrix{a: sx, d: sx, e: box.X - before.X*sx, f: box.Y - before.Y*sx}
+		for _, node := range nodes {
+			if err := e.transformCompositeMember(renderer, node, matrix); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // compositeOrientation 将旋转或镜像中心移至选区中心
@@ -177,6 +259,7 @@ func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, 
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	root.setStates(object.CompositeGraphicUnit.states)
 	reader, err := e.Reader()
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -191,7 +274,7 @@ func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, 
 	scope := root
 	for depth := 0; ; depth++ {
 		var members []*editorCompositeNode
-		members, err = scope.members(reader, renderer, make(map[string]bool))
+		members, err = e.compositeMembers(scope, reader, renderer, make(map[string]bool))
 		if err != nil {
 			break
 		}
@@ -237,10 +320,10 @@ func newEditorCompositeNode(data []byte) (*editorCompositeNode, error) {
 	return &editorCompositeNode{data: data, node: node, object: object}, err
 }
 
-// members 展开当前复合实例的资源引用与直接绘制成员
-// 入参: reader 资源读取器, renderer 渲染上下文, visiting 当前资源链
+// compositeMembers 展开当前复合实例的资源引用与直接绘制成员
+// 入参: n 当前节点, reader 资源读取器, renderer 渲染上下文, visiting 当前资源链
 // 返回: []*editorCompositeNode 成员, error 错误信息
-func (n *editorCompositeNode) members(reader *Reader, renderer *Renderer, visiting map[string]bool) ([]*editorCompositeNode, error) {
+func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, renderer *Renderer, visiting map[string]bool) ([]*editorCompositeNode, error) {
 	if n.object.Type != "CompositeObject" && n.object.Type != "CompositeGraphicUnit" {
 		return nil, fmt.Errorf("object is not composite")
 	}
@@ -259,6 +342,7 @@ func (n *editorCompositeNode) members(reader *Reader, renderer *Renderer, visiti
 		defaults := renderer.drawParamDefaults(c.DrawParam, n.defaults)
 		drawParams := append(slices.Clone(n.drawParams), c.DrawParam)
 		visible := n.visible && (c.Visible == nil || *c.Visible)
+		alpha := mergeAlpha(n.alpha, c.Alpha)
 		if c.ResourceID != "" {
 			data, err := reader.readFile(reader.resourceFiles[c.ResourceID])
 			if err != nil {
@@ -288,8 +372,17 @@ func (n *editorCompositeNode) members(reader *Reader, renderer *Renderer, visiti
 			if err != nil {
 				return nil, err
 			}
+			var states map[string]editorCompositeState
+			for _, resource := range e.resources {
+				if resource.composite == c.ResourceID {
+					states = resource.states
+					break
+				}
+			}
+			n.ref.setStates(states)
 			n.ref.parent, n.ref.boundaryInCTM, n.ref.defaults, n.ref.clip, n.ref.visible = matrix, true, defaults, clip, visible
 			n.ref.drawParams = drawParams
+			n.ref.alpha = alpha
 		}
 		var collect func(*editorXML) error
 		collect = func(container *editorXML) error {
@@ -308,8 +401,10 @@ func (n *editorCompositeNode) members(reader *Reader, renderer *Renderer, visiti
 					if err != nil {
 						return err
 					}
+					item.setStates(n.states)
 					item.parent, item.boundaryInCTM, item.defaults, item.clip, item.visible, item.span = matrix, n.boundaryInCTM, defaults, clip, visible, child
 					item.drawParams = drawParams
+					item.alpha = alpha
 					item.owner = n
 					n.children = append(n.children, item)
 				}
@@ -328,7 +423,7 @@ func (n *editorCompositeNode) members(reader *Reader, renderer *Renderer, visiti
 			return nil, fmt.Errorf("cyclic composite resource %q", id)
 		}
 		visiting[id] = true
-		members, err := n.ref.members(reader, renderer, visiting)
+		members, err := e.compositeMembers(n.ref, reader, renderer, visiting)
 		delete(visiting, id)
 		if err != nil {
 			return nil, err
@@ -390,16 +485,18 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 				errors.As(err, &capability.MissingGlyphs)
 			} else if _, err := text.TextFrame(); err == nil {
 				capability.Reflow = text.ReadDirection == 0 && text.CharDirection == 0
+				capability.LayoutKnown = text.layout != nil
 			}
 		}
 		if transform && node.object.Type == "ImageObject" && bounds.box.W > 0 && bounds.box.H > 0 {
 			clips := node.object.ImageObject.Clips
 			_, capability.CropImage = node.matrix(clips == nil || clips.TransFlag == nil || *clips.TransFlag).Invert()
+			capability.FitImage = capability.CropImage && axisAlignedMatrix(NewMatrix(node.object.ImageObject.CTM))
 		}
 		_, ctm := editorGeometry(node.object)
 		matrix := node.parent.Multiply(NewMatrix(ctm))
 		position := positions[node.span.parent]
-		result[i] = CompositeMember{Object: style, Bounds: bounds.box, Contours: bounds.contours, Matrix: node.matrix(true), StrokeScale: math.Sqrt(math.Abs(matrix.a*matrix.d - matrix.b*matrix.c)), Capabilities: capability, Position: position, Transform: transform}
+		result[i] = CompositeMember{Object: style, Bounds: bounds.box, Contours: bounds.contours, Matrix: node.matrix(true), StrokeScale: math.Sqrt(math.Abs(matrix.a*matrix.d - matrix.b*matrix.c)), Capabilities: capability, Position: position, Transform: transform, Cropped: node.states[editorObjectID(node.object)].crop != nil}
 		position.Index++
 		positions[node.span.parent] = position
 	}
@@ -613,6 +710,8 @@ func (e *Editor) editCompositeScope(page int, path ObjectPath, edit func(*Render
 	if err != nil {
 		return err
 	}
+	next.setStates(root.states)
+	next.object.CompositeGraphicUnit.states = next.states
 	origin := e.objectOrigin(path.ID)
 	next.node.parent = origin.node.parent
 	updated := &editorObjectOrigin{page: origin.page, data: data, node: next.node, object: next.object}
@@ -745,6 +844,10 @@ func compositeBoundary(object GraphicObject, parent Matrix, inward bool) Graphic
 // 返回: []byte 新片段, bool 是否变化, error 错误信息
 func (e *Editor) writeCompositeNode(node *editorCompositeNode) ([]byte, bool, error) {
 	patches := slices.Clone(node.patches)
+	states := maps.Clone(node.states)
+	if states == nil {
+		states = make(map[string]editorCompositeState)
+	}
 	for _, child := range node.children {
 		data, changed, err := e.writeCompositeNode(child)
 		if err != nil {
@@ -752,17 +855,20 @@ func (e *Editor) writeCompositeNode(node *editorCompositeNode) ([]byte, bool, er
 		}
 		if changed {
 			patches = append(patches, editorXMLPatch{child.span.start, child.span.end, data})
+			removeCompositeStates(states, child.node)
+			maps.Copy(states, child.states)
 		}
 	}
 	data := editorPatchXML(node.data, patches)
 	changed := node.changed || len(patches) != 0
+	node.states = states
 	if node.ref != nil {
 		fragment, dirty, err := e.writeCompositeNode(node.ref)
 		if err != nil {
 			return nil, false, err
 		}
 		if dirty {
-			id, err := e.addCompositeResource(fragment)
+			id, err := e.addCompositeResource(fragment, node.ref.states)
 			if err != nil {
 				return nil, false, err
 			}
@@ -783,9 +889,9 @@ func (e *Editor) writeCompositeNode(node *editorCompositeNode) ([]byte, bool, er
 }
 
 // addCompositeResource 注册独立复合资源并重映射内部标识，保留未知XML
-// 入参: data 复合资源片段
+// 入参: data 复合资源片段, states 内部会话记录
 // 返回: string 新资源标识, error 错误信息
-func (e *Editor) addCompositeResource(data []byte) (string, error) {
+func (e *Editor) addCompositeResource(data []byte, states map[string]editorCompositeState) (string, error) {
 	root, err := parseEditorXML(data)
 	if err != nil {
 		return "", err
@@ -814,6 +920,7 @@ func (e *Editor) addCompositeResource(data []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	resource.states = remapCompositeStates(states, ids)
 	e.resources = append(e.resources, resource)
 	return id, nil
 }
@@ -848,13 +955,16 @@ func (e *Editor) compositeResource(id string, data []byte) (editorResource, erro
 // 入参: composite 复合对象, used 引用集合
 func collectCompositeReferences(composite CompositeGraphicUnit, used map[string]bool) {
 	used[composite.ResourceID] = true
+	used[composite.DrawParam] = true
 	for _, object := range composite.Objects {
 		var fill, stroke *FillColor
 		switch object.Type {
 		case "TextObject":
 			used[object.TextObject.Font] = true
+			used[object.TextObject.DrawParam] = true
 			fill, stroke = object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor)
 		case "PathObject":
+			used[object.PathObject.DrawParam] = true
 			fill, stroke = object.PathObject.FillColor, (*FillColor)(object.PathObject.StrokeColor)
 		case "ImageObject":
 			used[object.ImageObject.ResourceID] = true

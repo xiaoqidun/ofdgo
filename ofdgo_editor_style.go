@@ -27,7 +27,16 @@ func (e *Editor) editorDrawParam(id string, visited map[string]bool) (*DrawParam
 	if id == "" {
 		return &DrawParam{}, nil
 	}
-	dp := e.source.reader.drawParamCache[id]
+	var dp *DrawParam
+	for _, resource := range e.resources {
+		if resource.draw != nil && resource.draw.ID == id {
+			dp = resource.draw
+			break
+		}
+	}
+	if dp == nil && e.source != nil {
+		dp = e.source.reader.drawParamCache[id]
+	}
 	if dp == nil || visited[id] {
 		return nil, &EditError{Code: EditUnsupportedStyle, Err: fmt.Errorf("invalid draw parameter reference %q", id)}
 	}
