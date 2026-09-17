@@ -187,6 +187,56 @@ func (p PathObject) Shape() (ShapeKind, Box) {
 	return kind, box
 }
 
+// ShapeFrame 获取矩形或椭圆的局部几何及到所在坐标系的变换
+// 返回: ShapeKind 图形类型, Box 局部范围, Matrix 坐标变换，非基本图形返回空类型
+func (p PathObject) ShapeFrame() (ShapeKind, Box, Matrix) {
+	if p.CTM != "" {
+		if _, err := creationNumbers(p.CTM, 6); err != nil {
+			return "", Box{}, Matrix{}
+		}
+	}
+	boundary, err := ParseBox(p.Boundary)
+	matrix := TranslationMatrix(boundary.X, boundary.Y).Multiply(NewMatrix(p.CTM))
+	if _, ok := matrix.Invert(); err != nil || !ok {
+		return "", Box{}, Matrix{}
+	}
+	p.Boundary, p.CTM = "0 0 1 1", ""
+	kind, box := p.Shape()
+	if kind != ShapeRectangle && kind != ShapeEllipse {
+		return "", Box{}, Matrix{}
+	}
+	return kind, box, matrix
+}
+
+// ReshapeFrame 沿矩形或椭圆自身方向调整局部范围，保留样式、变换方向和裁剪
+// 入参: box ShapeFrame坐标系中的目标范围
+// 返回: PathObject 调整后的路径, error 错误信息
+func (p PathObject) ReshapeFrame(box Box) (PathObject, error) {
+	kind, previous, matrix := p.ShapeFrame()
+	if kind == "" {
+		return PathObject{}, fmt.Errorf("path is not a supported framed shape")
+	}
+	if box == previous {
+		return p, nil
+	}
+	if _, err := creationBox(editorBoxString(box)); err != nil {
+		return PathObject{}, err
+	}
+	shape, err := NewShape(kind, Box{W: box.W, H: box.H})
+	if err != nil {
+		return PathObject{}, err
+	}
+	matrix = matrix.Multiply(TranslationMatrix(box.X, box.Y))
+	bounds := matrix.TransformBox(Box{W: box.W, H: box.H})
+	if _, err := creationBox(editorBoxString(bounds)); err != nil {
+		return PathObject{}, err
+	}
+	p.Boundary = editorBoxString(bounds)
+	p.CTM = TranslationMatrix(-bounds.X, -bounds.Y).Multiply(matrix).String()
+	p.AbbreviatedData = shape.AbbreviatedData
+	return p, nil
+}
+
 // sameShapePath 比较基本路径的命令与数值，忽略数值格式差异
 // 入参: a、b 路径词元
 // 返回: bool 是否相同

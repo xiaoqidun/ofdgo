@@ -206,6 +206,49 @@ func (m CompositeMember) Shape() (ShapeKind, Box) {
 	return kind, parent.TransformBox(box)
 }
 
+// ShapeFrame 获取内部矩形或椭圆的局部范围及页面变换
+// 返回: ShapeKind 图形类型, Box 局部范围, Matrix 页面变换
+func (m CompositeMember) ShapeFrame() (ShapeKind, Box, Matrix) {
+	if m.Object.Type != "PathObject" || !m.Capabilities.Transform {
+		return "", Box{}, Matrix{}
+	}
+	kind, box, _ := m.Object.PathObject.ShapeFrame()
+	if _, ok := m.Matrix.Invert(); !ok {
+		return "", Box{}, Matrix{}
+	}
+	return kind, box, m.Matrix
+}
+
+// ReshapeCompositeFrame 沿内部矩形或椭圆自身方向拉伸，不修改共享实例
+// 入参: page 页面索引, path 父路径, index 成员序号, box ShapeFrame局部目标范围
+// 返回: error 错误信息
+func (e *Editor) ReshapeCompositeFrame(page int, path ObjectPath, index int, box Box) error {
+	return e.editCompositeObjects(page, path, []int{index}, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
+		kind, previous, _ := members[0].ShapeFrame()
+		if kind == "" {
+			return fmt.Errorf("composite member is not a framed shape")
+		}
+		if box == previous {
+			return nil
+		}
+		node := nodes[0]
+		object := cloneEditorData(node.object)
+		if !node.boundaryInCTM {
+			object = compositeBoundary(object, node.parent, true)
+		}
+		var err error
+		object.PathObject, err = object.PathObject.ReshapeFrame(box)
+		if err != nil {
+			return err
+		}
+		if !node.boundaryInCTM {
+			object = compositeBoundary(object, node.parent, false)
+		}
+		object.PathObject.Clips = node.object.PathObject.Clips
+		return node.update(object)
+	})
+}
+
 // shapeParent 获取路径所在坐标到页面的变换，兼容旧式内联边界
 // 返回: Matrix 路径父坐标变换, bool 是否可逆
 func (m CompositeMember) shapeParent() (Matrix, bool) {

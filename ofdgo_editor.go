@@ -56,6 +56,7 @@ type Editor struct {
 	revision        uint64
 	serial          uint64
 	source          *editorSource
+	origins         map[string]*editorObjectOrigin
 	outlines        []byte
 }
 
@@ -252,15 +253,21 @@ func (e *Editor) CopyPages(indexes []int) ([]int, error) {
 		}
 	}
 	result := make([]int, len(pages))
+	maximum := e.maxID
+	origins := make(map[string]*editorObjectOrigin)
 	for n := range pages {
 		page := &pages[n]
-		page.ID = e.nextID()
+		maximum++
+		page.ID = strconv.Itoa(maximum)
 		for i := range page.Content.Layer {
 			layer := &page.Content.Layer[i]
-			layer.ID = e.nextID()
+			maximum++
+			layer.ID = strconv.Itoa(maximum)
 			for j := range layer.Objects {
 				object := &layer.Objects[j]
-				id := e.nextID()
+				before := *object
+				maximum++
+				id := strconv.Itoa(maximum)
 				switch object.Type {
 				case "TextObject":
 					object.TextObject.ID = id
@@ -268,10 +275,24 @@ func (e *Editor) CopyPages(indexes []int) ([]int, error) {
 					object.PathObject.ID = id
 				case "ImageObject":
 					object.ImageObject.ID = id
+				case "CompositeObject", "CompositeGraphicUnit":
+					object.CompositeGraphicUnit.ID = id
+				}
+				copied, origin, err := e.copyObjectOrigin(before, *object, &maximum)
+				if err != nil {
+					return nil, err
+				}
+				*object = copied
+				if origin != nil {
+					origins[id] = origin
 				}
 			}
 		}
 		result[n] = at + n
+	}
+	e.maxID = maximum
+	for id, origin := range origins {
+		e.setObjectOrigin(id, origin)
 	}
 	e.pages = append(e.pages, pages...)
 	if change := e.recordChange(); change != nil {

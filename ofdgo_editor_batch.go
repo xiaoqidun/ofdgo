@@ -113,7 +113,7 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 	e.maxID = maximum
 	for i, origin := range origins {
 		if origin != nil {
-			e.source.origins[result[i]] = origin
+			e.setObjectOrigin(result[i], origin)
 		}
 	}
 	layers := copyEditorPage(e.pages[page]).Content.Layer
@@ -173,14 +173,26 @@ func (e *Editor) objectOrderIndexes(page int, layer *Layer, id string) (*editorX
 	var nodes map[string]*editorXML
 	var parent *editorXML
 	if e.originalPage(page) {
-		nodes = e.source.pages[e.pages[page].ID].nodes
+		source := e.source.pages[e.pages[page].ID]
+		if slices.ContainsFunc(source.original.Content.Layer, func(original Layer) bool { return original.ID == layer.ID }) {
+			nodes = source.nodes
+		}
+	}
+	if nodes != nil {
 		if node := nodes[id]; node != nil {
 			parent = node.parent
+		} else if origin := e.objectOrigin(id); origin != nil {
+			parent = origin.node.parent
 		}
 	}
 	var indexes []int
 	for i, object := range layer.Objects {
 		node := nodes[editorObjectID(object)]
+		if node == nil && nodes != nil {
+			if origin := e.objectOrigin(editorObjectID(object)); origin != nil {
+				node = origin.node
+			}
+		}
 		if node == nil && parent == nil || node != nil && node.parent == parent {
 			indexes = append(indexes, i)
 		}
@@ -469,7 +481,7 @@ func (e *Editor) updateObjectOrigins(page int, objects []GraphicObject, preserve
 			e.pages[page].Content.Layer[index.layer].Objects[index.index] = objects[i]
 		}
 		for id, origin := range origins {
-			e.source.origins[id] = origin
+			e.setObjectOrigin(id, origin)
 		}
 	}
 	apply(e, after, afterOrigins)

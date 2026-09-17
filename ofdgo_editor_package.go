@@ -250,7 +250,13 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 		for _, object := range current.Objects {
 			id := editorObjectID(object)
 			after[id] = object
-			if node := source.nodes[id]; node != nil {
+			node := source.nodes[id]
+			if node == nil {
+				if origin := e.objectOrigin(id); origin != nil {
+					node = origin.node
+				}
+			}
+			if node != nil {
 				ordered[node.parent] = append(ordered[node.parent], object)
 			}
 		}
@@ -279,7 +285,7 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 			if exists {
 				nextID := editorObjectID(next)
 				origin := source.nodes[nextID]
-				if reflect.DeepEqual(before[nextID], next) {
+				if origin != nil && reflect.DeepEqual(before[nextID], next) {
 					encoded = data[origin.start:origin.end]
 				} else {
 					var err error
@@ -293,6 +299,21 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 			if !bytes.Equal(encoded, data[node.start:node.end]) {
 				patches = append(patches, editorXMLPatch{node.start, node.end, encoded})
 			}
+		}
+		for parent, members := range ordered {
+			if !orderable[parent] || positions[parent] >= len(members) {
+				continue
+			}
+			var added []byte
+			for _, object := range members[positions[parent]:] {
+				origin := e.objectOrigin(editorObjectID(object))
+				encoded, err := editorXMLObject(origin.data, origin.node, origin.object, object)
+				if err != nil {
+					return nil, err
+				}
+				added = append(added, encoded...)
+			}
+			patches = append(patches, editorXMLPatch{parent.close, parent.close, added})
 		}
 	}
 	var added []byte

@@ -202,7 +202,7 @@ func (e *Editor) validate() error {
 // 入参: write 条目写入方法, progress 保存进度回调，预览时为nil
 // 返回: error 错误信息
 func (e *Editor) writeParts(write func(string, []byte, bool) error, progress editorProgress) error {
-	fonts, images, spaces, _ := e.usedResources()
+	fonts, images, spaces, definitions := e.usedResources()
 	writeXML := func(name string, encode func(*ofdXML)) error {
 		data, err := encodeOFDXML(encode)
 		if err != nil {
@@ -257,6 +257,9 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error, progress edi
 		if len(fonts)+len(images)+len(spaces) != 0 {
 			x.text("DocumentRes", "DocumentRes.xml")
 		}
+		for _, name := range definitions {
+			x.text("DocumentRes", "/"+name)
+		}
 		x.end("CommonData")
 		x.start("Pages", nil)
 		for i, page := range e.pages {
@@ -280,10 +283,19 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error, progress edi
 		if err := progress.report("pages", i, len(e.pages)); err != nil {
 			return err
 		}
-		if err := writeXML(fmt.Sprintf("Doc_0/Pages/%d/Content.xml", i+1), func(x *ofdXML) {
-			x.page(page)
-		}); err != nil {
-			return err
+		name := fmt.Sprintf("Doc_0/Pages/%d/Content.xml", i+1)
+		if len(e.origins) == 0 {
+			if err := writeXML(name, func(x *ofdXML) { x.page(page) }); err != nil {
+				return err
+			}
+		} else {
+			data, err := e.sourceNewPageXML(page)
+			if err != nil {
+				return err
+			}
+			if err := write(name, data, false); err != nil {
+				return err
+			}
 		}
 	}
 	if err := progress.report("pages", len(e.pages), len(e.pages)); err != nil {
@@ -292,6 +304,13 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error, progress edi
 	for _, resources := range [][]editorResource{fonts, images} {
 		for _, resource := range resources {
 			if err := write(resource.name, resource.data, resource.image != nil); err != nil {
+				return err
+			}
+		}
+	}
+	for _, resource := range e.resources {
+		if resource.definition() != "" && slices.Contains(definitions, resource.name) {
+			if err := write(resource.name, resource.data, false); err != nil {
 				return err
 			}
 		}
@@ -320,7 +339,7 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 		for _, layer := range page.Content.Layer {
 			for _, object := range layer.Objects {
 				before, exists := original[editorObjectID(object)]
-				if origin := e.objectOrigin(editorObjectID(object)); origin != nil && (!exists || before.Type != object.Type || !reflect.DeepEqual(before.CompositeGraphicUnit, object.CompositeGraphicUnit)) {
+				if origin := e.objectOrigin(editorObjectID(object)); origin != nil && origin.page != nil && (!exists || before.Type != object.Type || !reflect.DeepEqual(before.CompositeGraphicUnit, object.CompositeGraphicUnit)) {
 					for _, name := range origin.page.original.PageRes {
 						files[e.source.reader.ResPath(resolveResourcePath(origin.page.ref.BaseLoc, "", name))] = true
 					}
@@ -336,6 +355,9 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 				switch object.Type {
 				case "CompositeObject", "CompositeGraphicUnit":
 					collectCompositeReferences(object.CompositeGraphicUnit, used)
+					if e.source != nil && (!exists || !reflect.DeepEqual(before.CompositeGraphicUnit, object.CompositeGraphicUnit)) {
+						collectCompositeReferences(object.CompositeGraphicUnit, promoted)
+					}
 				case "TextObject":
 					used[object.TextObject.DrawParam] = true
 					used[object.TextObject.Font] = true
@@ -364,6 +386,9 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 		if resource.definition() != "" && used[resource.definition()] {
 			for _, id := range resource.references {
 				used[id] = true
+				if e.source != nil {
+					promoted[id] = true
+				}
 			}
 		}
 	}

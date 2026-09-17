@@ -92,13 +92,22 @@ func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []Gra
 			if err != nil {
 				return err
 			}
+			if node.object.Type == "PathObject" {
+				_, styleErr := e.resolveEditorStyle(node.object, e.copiedLayerStyle(source))
+				if styleErr != nil && editReason(styleErr) == EditUnsupportedColor || !e.editorPaintable(node.object) {
+					node, err = e.wrapCompositePath(node)
+					if err != nil {
+						return err
+					}
+				}
+			}
 			node.parent, node.boundaryInCTM = IdentityMatrix, true
 			node.setStates(object.CompositeGraphicUnit.states)
+			node.drawParams = []string{e.copiedLayerStyle(source)}
 			if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
 				if err := node.convertCoordinates(IdentityMatrix, true); err != nil {
 					return err
 				}
-				node.drawParams = []string{e.copiedLayerStyle(source)}
 			}
 			if err := e.isolateCompositeStyle(node); err != nil {
 				return err
@@ -149,11 +158,26 @@ func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []Gra
 	return result, nil
 }
 
+// wrapCompositePath 通过独立容器变换复杂路径，保持渐变坐标与原始颜色节点
+// 入参: node 复杂路径
+// 返回: *editorCompositeNode 包装节点, error 错误信息
+func (e *Editor) wrapCompositePath(node *editorCompositeNode) (*editorCompositeNode, error) {
+	content, err := editorXMLContainer("Content", nil, bytes.TrimPrefix(node.data, []byte(xml.Header)))
+	if err != nil {
+		return nil, err
+	}
+	data, err := editorXMLContainer("CompositeObject", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: e.nextID()}, {Name: xml.Name{Local: "Boundary"}, Value: "0 0 1 1"}}, bytes.TrimPrefix(content, []byte(xml.Header)))
+	if err != nil {
+		return nil, err
+	}
+	return newEditorCompositeNode(data)
+}
+
 // isolateCompositeStyle 固定对象的绘制参数，避免目标容器改变颜色、虚线和线帽
 // 入参: node 页面坐标中的对象节点
 // 返回: error 错误信息
 func (e *Editor) isolateCompositeStyle(node *editorCompositeNode) error {
-	if node.object.Type == "CompositeObject" || node.object.Type == "CompositeGraphicUnit" {
+	if node.object.Type == "CompositeObject" || node.object.Type == "CompositeGraphicUnit" || node.object.Type == "PathObject" {
 		id, err := e.neutralDrawParam()
 		if err != nil {
 			return err
@@ -164,29 +188,32 @@ func (e *Editor) isolateCompositeStyle(node *editorCompositeNode) error {
 				return err
 			}
 		}
-		id, err = e.copyDrawParam(node.object.CompositeGraphicUnit.DrawParam, id, make(map[string]bool))
+		parameter := node.object.CompositeGraphicUnit.DrawParam
+		if node.object.Type == "PathObject" {
+			parameter = node.object.PathObject.DrawParam
+		}
+		id, err = e.copyDrawParam(parameter, id, make(map[string]bool))
 		if err != nil {
 			return err
 		}
 		object := node.object
-		object.CompositeGraphicUnit.DrawParam = id
+		if object.Type == "PathObject" {
+			object.PathObject.DrawParam = id
+		} else {
+			object.CompositeGraphicUnit.DrawParam = id
+		}
 		return node.update(object)
 	}
 	object, err := e.resolveEditorStyleDefaults(node.object, &DrawParam{})
 	if err != nil {
 		return err
 	}
-	if object.Type == "TextObject" || object.Type == "PathObject" {
+	if object.Type == "TextObject" {
 		id, err := e.neutralDrawParam()
 		if err != nil {
 			return err
 		}
-		if object.Type == "TextObject" {
-			object.TextObject.DrawParam = id
-		} else {
-			object.PathObject.DrawParam = id
-			object.PathObject.dashPatternSet = true
-		}
+		object.TextObject.DrawParam = id
 	}
 	return node.update(object)
 }

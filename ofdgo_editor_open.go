@@ -42,6 +42,7 @@ type editorSource struct {
 
 // editorObjectOrigin 保留原对象的XML语义，供复制和局部更新复用
 type editorObjectOrigin struct {
+	editor *Editor
 	page   *editorSourcePage
 	data   []byte
 	node   *editorXML
@@ -66,6 +67,7 @@ type editorSourcePage struct {
 // Paint表示可独立修改纯色填充和描边，不要求重新排版文字
 // ReplaceImage表示可替换图片数据，CropImage表示可裁剪图片；内部裁剪与原裁剪取交集
 // MissingGlyphs提供缺字导致操作受限时的结构化诊断
+// Ungroup表示可移除内联组合容器并保留内部内容
 type ObjectCapabilities struct {
 	Update        bool
 	Paint         bool
@@ -81,6 +83,7 @@ type ObjectCapabilities struct {
 	Copy          bool
 	Delete        bool
 	Order         bool
+	Ungroup       bool
 	Reason        string
 	ReasonCode    EditReason
 	MissingGlyphs *MissingGlyphError
@@ -382,7 +385,8 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 		return ObjectCapabilities{Reason: err.Error(), ReasonCode: EditInvalidObject}, nil
 	}
 	all.Order = editorContainerOrderable(node.parent)
-	all.Copy = editorXMLCopyable(node) && origin.reason == nil
+	all.Ungroup = all.Order && editorUngroupable(node) && len(object.CompositeGraphicUnit.Objects) != 0
+	all.Copy = editorXMLCopyable(node) && (origin.reason == nil || object.Type == "PathObject" && editReason(origin.reason) == EditUnsupportedColor)
 	if origin.reason != nil {
 		all.Update, all.Reflow, all.ReplaceFont, all.Paint = false, false, false, false
 		all.Reason, all.ReasonCode = origin.reason.Error(), editReason(origin.reason)
@@ -415,10 +419,27 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 // 入参: id 对象标识
 // 返回: *editorObjectOrigin 原始对象，无来源时为nil
 func (e *Editor) objectOrigin(id string) *editorObjectOrigin {
+	if origin := e.origins[id]; origin != nil {
+		return origin
+	}
 	if e.source == nil {
 		return nil
 	}
 	return e.source.origins[id]
+}
+
+// setObjectOrigin 保存当前编辑器的对象原文，支持新建文档中的组合对象
+// 入参: id 对象标识, origin 原文来源，nil恢复原始来源
+func (e *Editor) setObjectOrigin(id string, origin *editorObjectOrigin) {
+	if e.origins == nil {
+		e.origins = make(map[string]*editorObjectOrigin)
+	}
+	if origin != nil && origin.page == nil && origin.editor == nil {
+		copy := *origin
+		copy.editor = e
+		origin = &copy
+	}
+	e.origins[id] = origin
 }
 
 // editorPreservedObject 判断对象是否仅改变标识、几何和可独立写回的外观字段
@@ -475,7 +496,7 @@ func (e *Editor) prepareCopiedObject(id string, object GraphicObject) (GraphicOb
 	if origin == nil {
 		return e.prepareObject(id, object)
 	}
-	if !editorXMLTransformable(origin.node) || !editorXMLContainersSupported(origin.node) || !editorXMLCopyable(origin.node) || origin.reason != nil {
+	if !editorXMLTransformable(origin.node) || !editorXMLContainersSupported(origin.node) || !editorXMLCopyable(origin.node) || origin.reason != nil && (object.Type != "PathObject" || editReason(origin.reason) != EditUnsupportedColor) {
 		return GraphicObject{}, fmt.Errorf("object cannot be copied without changing its original structure")
 	}
 	var drawParam string
@@ -485,7 +506,7 @@ func (e *Editor) prepareCopiedObject(id string, object GraphicObject) (GraphicOb
 			break
 		}
 	}
-	before, err := e.resolveEditorStyle(origin.object, drawParam)
+	before, err := e.copiedObjectStyle(origin.object, drawParam)
 	if err != nil {
 		return GraphicObject{}, err
 	}

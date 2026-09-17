@@ -110,17 +110,11 @@ func appendCompositeClip(node *editorCompositeNode, shape PathObject, matrix Mat
 	}
 	var patch editorXMLPatch
 	if original := node.node.child("Clips"); original != nil {
-		clip, err := editorXMLStandalone(data[root.children[0].start:root.children[0].end], root.children[0])
-		if err != nil {
-			return err
-		}
+		clip := editorXMLEncodedFragment(data, root.children[0])
 		content := append(bytes.Clone(node.data[original.open:original.close]), clip...)
 		patch = editorXMLContent(node.data, original, content)
 	} else {
-		data, err = editorXMLStandalone(data, root)
-		if err != nil {
-			return err
-		}
+		data = editorXMLEncodedFragment(data, root)
 		content := append(data, node.data[node.node.open:node.node.close]...)
 		patch = editorXMLContent(node.data, node.node, content)
 	}

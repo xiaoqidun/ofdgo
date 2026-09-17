@@ -159,6 +159,11 @@ export function reshapeBox(item, dx, dy, handle, shift) {
 	return { x, y, width: right - x, height: bottom - y };
 }
 
+export function reshapeFrame(frame, dx, dy, handle, shift) {
+	const [a, b, c, d] = frame.matrix, determinant = a * d - b * c;
+	return reshapeBox({ geometry: frame.box }, (d * dx - c * dy) / determinant, (a * dy - b * dx) / determinant, handle, shift);
+}
+
 function paintShape(node, shape, box) {
 	const { x, y, width, height } = box;
 	const attributes = lineShape(shape) && shape !== "line" ? { d: arrowPath(shape, box) }
@@ -289,9 +294,10 @@ export class CanvasEditor {
 				svg.setAttribute("aria-hidden", "true");
 				svg.setAttribute("preserveAspectRatio", "none");
 				let contour;
-				if (object.type === "PathObject" && (!object.scoped || object.shape)) {
-					contour = document.createElementNS("http://www.w3.org/2000/svg", object.shape === "line" ? "line" : object.shape === "ellipse" ? "ellipse" : object.shape === "rectangle" ? "rect" : "path");
-					if (!object.shape) contour.setAttribute("d", object.outline);
+				if (object.type === "PathObject" && (!object.scoped || object.shape || object.oriented)) {
+					const shape = object.shape || object.oriented?.kind;
+					contour = document.createElementNS("http://www.w3.org/2000/svg", shape === "line" ? "line" : shape === "ellipse" ? "ellipse" : shape === "rectangle" ? "rect" : "path");
+					if (!shape) contour.setAttribute("d", object.outline);
 					svg.append(contour);
 				} else {
 					for (const path of object.contours) {
@@ -306,7 +312,7 @@ export class CanvasEditor {
 			this.nodes.set(node, item);
 			node.addEventListener("focus", () => this.select(item));
 			const handles = !canEditObject(object, "transform") ? [] : lineShape(object.shape) ? ["start", "end"]
-				: object.shape ? ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
+				: object.shape || object.oriented || object.type === "ImageObject" && !object.imageBorder ? ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
 					: object.type === "TextObject" && canEditObject(object, "reflow") && canEditObject(object, "layoutKnown")
 						? ["nw", "n", "ne", "e", "se", "s", "sw", "w"] : ["nw", "ne", "sw", "se"];
 			for (const corner of handles) {
@@ -346,6 +352,10 @@ export class CanvasEditor {
 			if (x || y || scale !== 1) item.artwork.setAttribute("transform", `translate(${x} ${y}) scale(${scale})`);
 			else item.artwork.removeAttribute("transform");
 		}
+		if (item.oriented) {
+			this.placeOriented(item, item.oriented.box, change);
+			return;
+		}
 		if (item.shape) {
 			this.placeShape(item, { x: item.geometry.x + change.x + (item.geometry.x - item.x) * (change.scale - 1),
 				y: item.geometry.y + change.y + (item.geometry.y - item.y) * (change.scale - 1),
@@ -367,6 +377,28 @@ export class CanvasEditor {
 				handle.style.cursor = a === 0 ? "var(--resize-vertical, ns-resize)" : "var(--resize-horizontal, ew-resize)";
 			}
 		}
+	}
+
+	placeOriented(item, box, change = { x: 0, y: 0, scale: 1 }) {
+		const frame = item.oriented, bounds = transformedBox(box, frame.matrix), scale = change.scale;
+		const [a, b, c, d, e, f] = frame.matrix;
+		Object.assign(item.node.style, {
+			left: `${(item.x + change.x + (bounds.x - item.x) * scale) * PX_PER_MM}px`,
+			top: `${(item.y + change.y + (bounds.y - item.y) * scale) * PX_PER_MM}px`,
+			width: `${bounds.width * scale * PX_PER_MM}px`, height: `${bounds.height * scale * PX_PER_MM}px`,
+		});
+		for (const handle of item.node.children) {
+			const corner = handle.dataset.corner;
+			if (!corner) continue;
+			const x = box.x + box.width * (corner.includes("w") ? 0 : corner.includes("e") ? 1 : .5);
+			const y = box.y + box.height * (corner.includes("n") ? 0 : corner.includes("s") ? 1 : .5);
+			handle.style.left = `${(a * x + c * y + e - bounds.x) * scale * PX_PER_MM}px`;
+			handle.style.top = `${(b * x + d * y + f - bounds.y) * scale * PX_PER_MM}px`;
+		}
+		const { svg, path } = item.contour;
+		svg.setAttribute("viewBox", `${bounds.x} ${bounds.y} ${bounds.width} ${bounds.height}`);
+		path.setAttribute("transform", `matrix(${frame.matrix.join(" ")})`);
+		paintShape(path, frame.kind, box);
 	}
 
 	placeShape(item, box) {
@@ -597,6 +629,23 @@ export class CanvasEditor {
 			Object.assign(drag.item.node.style, { left: `${drag.box.x * PX_PER_MM}px`, width: `${drag.box.width * PX_PER_MM}px` });
 			return;
 		}
+		if (drag.item.type === "ImageObject" && !drag.item.imageBorder && drag.corner.length === 1) {
+			drag.box = reshapeBox({ geometry: drag.item }, to.x - from.x, to.y - from.y, drag.corner, false);
+			const sx = drag.box.width / drag.item.width, sy = drag.box.height / drag.item.height;
+			Object.assign(drag.item.node.style, { left: `${drag.box.x * PX_PER_MM}px`, top: `${drag.box.y * PX_PER_MM}px`,
+				width: `${drag.box.width * PX_PER_MM}px`, height: `${drag.box.height * PX_PER_MM}px` });
+			drag.item.artwork?.setAttribute("transform", `translate(${drag.box.x - drag.item.x * sx} ${drag.box.y - drag.item.y * sy}) scale(${sx} ${sy})`);
+			return;
+		}
+		if (drag.item.oriented && drag.corner) {
+			const frame = drag.item.oriented;
+			drag.box = reshapeFrame(frame, to.x - from.x, to.y - from.y, drag.corner, event.shiftKey);
+			this.placeOriented(drag.item, drag.box);
+			const matrix = new DOMMatrix(frame.matrix), sx = drag.box.width / frame.box.width, sy = drag.box.height / frame.box.height;
+			const transform = matrix.translate(drag.box.x - frame.box.x * sx, drag.box.y - frame.box.y * sy).scale(sx, sy).multiply(matrix.inverse());
+			drag.item.artwork?.setAttribute("transform", `matrix(${[transform.a, transform.b, transform.c, transform.d, transform.e, transform.f].join(" ")})`);
+			return;
+		}
 		if (drag.item.shape && drag.corner) {
 			drag.box = reshapeBox(drag.item, to.x - from.x, to.y - from.y, drag.corner, event.shiftKey);
 			this.placeShape(drag.item, drag.box || drag.item.geometry);
@@ -709,12 +758,12 @@ export class CanvasEditor {
 				.finally(() => drag.preview.remove());
 			return;
 		}
-		if ((drag.item.shape || drag.item.type === "TextObject") && drag.corner && drag.box) {
+		if (drag.corner && drag.box) {
 			this.drag = null;
 			this.viewer.releasePointerCapture(drag.pointerID);
-			const geometry = drag.item.geometry || (drag.item.textFrame ? { x: drag.item.x, width: drag.item.textFrame.width } : drag.item);
+			const geometry = drag.item.oriented?.box || drag.item.geometry || (drag.item.textFrame ? { x: drag.item.x, width: drag.item.textFrame.width } : drag.item);
 			const changed = Object.keys(drag.box).some((key) => drag.box[key] !== geometry[key]);
-			const apply = drag.item.shape ? this.options.onReshape : this.options.onTextWidth;
+			const apply = drag.item.shape || drag.item.oriented ? this.options.onReshape : drag.item.type === "ImageObject" ? this.options.onResize : this.options.onTextWidth;
 			Promise.resolve(changed && apply(drag.item, drag.box)).finally(() => {
 				drag.preview?.remove();
 				this.place(drag.item);

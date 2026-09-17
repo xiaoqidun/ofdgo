@@ -158,6 +158,36 @@ func (e *Editor) CompositeObjects(page int, path ObjectPath) ([]CompositeMember,
 	return e.measureCompositeMembers(renderer, members), nil
 }
 
+// CompositeObject 读取指定内部成员，仅度量该成员并保留完整容器位置
+// 入参: page 页面索引, path 父复合路径, index 成员序号
+// 返回: CompositeMember 独立成员快照, error 错误信息
+func (e *Editor) CompositeObject(page int, path ObjectPath, index int) (CompositeMember, error) {
+	reader, renderer, _, nodes, err := e.compositeScope(page, path)
+	if err != nil {
+		return CompositeMember{}, err
+	}
+	defer reader.Close()
+	if index < 0 || index >= len(nodes) {
+		return CompositeMember{}, fmt.Errorf("composite member index %d out of range", index)
+	}
+	member := e.measureCompositeMembers(renderer, nodes[index:index+1])[0]
+	position := ObjectPosition{}
+	for i, node := range nodes {
+		if node.span.parent != nodes[index].span.parent {
+			continue
+		}
+		if position.Count == 0 {
+			position.Container = fmt.Sprint(i)
+		}
+		if i == index {
+			position.Index = position.Count
+		}
+		position.Count++
+	}
+	member.Position = position
+	return member, nil
+}
+
 // TransformCompositeObjects 在页面坐标中等比缩放并平移内部选区，只隔离被修改实例的资源
 // 入参: page 页面索引, path 父复合对象路径, indexes 成员序号, dx、dy 位移, scale 正缩放比例
 // 返回: error 错误信息
@@ -195,7 +225,7 @@ func (e *Editor) FlipCompositeObjects(page int, path ObjectPath, indexes []int, 
 	return e.changeCompositeObjects(page, path, indexes, func(box Box) Matrix { return compositeOrientation(box, m) })
 }
 
-// ResizeCompositeObjects 等比缩放内部选区到目标范围，不重排文字或重采样图片
+// ResizeCompositeObjects 缩放内部选区到目标范围，无边框图片支持独立宽高，其他对象保持比例
 // 入参: page 页面索引, path 父复合对象路径, indexes 成员序号, box 页面毫米目标范围
 // 返回: error 错误信息
 func (e *Editor) ResizeCompositeObjects(page int, path ObjectPath, indexes []int, box Box) error {
@@ -214,10 +244,17 @@ func (e *Editor) ResizeCompositeObjects(page int, path ObjectPath, indexes []int
 			return fmt.Errorf("selection has no visible bounds")
 		}
 		sx, sy := box.W/before.W, box.H/before.H
-		if math.Abs(sx-sy) > 1e-9*math.Max(sx, sy) {
-			return fmt.Errorf("composite members require proportional resizing")
+		uniform := math.Abs(sx-sy) <= 1e-9*math.Max(sx, sy)
+		if !uniform {
+			for _, node := range nodes {
+				if node.object.Type != "ImageObject" || node.object.ImageObject.Border != nil {
+					return fmt.Errorf("nonuniform resizing requires images without borders")
+				}
+			}
+		} else {
+			sy = sx
 		}
-		matrix := Matrix{a: sx, d: sx, e: box.X - before.X*sx, f: box.Y - before.Y*sx}
+		matrix := Matrix{a: sx, d: sy, e: box.X - before.X*sx, f: box.Y - before.Y*sy}
 		for _, node := range nodes {
 			if err := e.transformCompositeMember(renderer, node, matrix); err != nil {
 				return err
@@ -687,7 +724,7 @@ func (e *Editor) editCompositeScope(page int, path ObjectPath, edit func(*Render
 	}
 	defer reader.Close()
 	count, maximum := len(e.resources), e.maxID
-	ready := e.source.idsReady
+	ready := e.source != nil && e.source.idsReady
 	defer func() {
 		if err != nil {
 			removed := make(map[string]bool)
@@ -700,7 +737,9 @@ func (e *Editor) editCompositeScope(page int, path ObjectPath, edit func(*Render
 			maps.DeleteFunc(e.resourceID, func(_ editorResourceKey, id string) bool { return removed[id] })
 			clear(e.resources[count:])
 			e.resources, e.maxID = e.resources[:count], maximum
-			e.source.idsReady = ready
+			if e.source != nil {
+				e.source.idsReady = ready
+			}
 		}
 	}()
 	if err = e.prepareSourceIDs(); err != nil {

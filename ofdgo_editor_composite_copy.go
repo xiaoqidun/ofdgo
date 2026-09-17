@@ -63,11 +63,15 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 	if selection == nil || selection.editor != e {
 		return fmt.Errorf("composite selection belongs to another editor")
 	}
-	count, maximum, ready := len(e.resources), e.maxID, e.source.idsReady
+	count, maximum := len(e.resources), e.maxID
+	ready := e.source != nil && e.source.idsReady
 	defer func() {
 		if err != nil {
 			clear(e.resources[count:])
-			e.resources, e.maxID, e.source.idsReady = e.resources[:count], maximum, ready
+			e.resources, e.maxID = e.resources[:count], maximum
+			if e.source != nil {
+				e.source.idsReady = ready
+			}
 		}
 	}()
 	if err := e.prepareSourceIDs(); err != nil {
@@ -85,12 +89,22 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 		if err != nil {
 			return err
 		}
+		style, styleErr := e.compositeMemberStyle(source)
+		if styleErr != nil {
+			if source.object.Type != "PathObject" || editReason(styleErr) != EditUnsupportedColor {
+				return styleErr
+			}
+			copy, err = e.wrapCompositePath(copy)
+			if err != nil {
+				return err
+			}
+		}
 		copy.setStates(source.states)
 		copy.defaults = source.defaults
 		copy.drawParams = source.drawParams
-		object, err := e.compositeMemberStyle(source)
-		if err != nil {
-			return err
+		object := cloneEditorData(copy.object)
+		if styleErr == nil && object.Type != "PathObject" {
+			object = style
 		}
 		object = mergeGraphicObjectAlpha(object, source.alpha)
 		if !source.visible || source.clip != nil && source.clip.Empty() {
@@ -138,7 +152,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 			}
 		}
 		copy.node.parent = &editorXML{name: xml.Name{Local: "Layer"}, parent: &editorXML{name: xml.Name{Local: "Content"}}}
-		object, err = e.resolveEditorStyle(copy.object, "")
+		object, err = e.copiedObjectStyle(copy.object, "")
 		if err != nil {
 			return err
 		}
@@ -149,7 +163,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 			object.CompositeGraphicUnit.states = maps.Clone(copy.states)
 			copy.object.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
 		}
-		object.origin = &editorObjectOrigin{page: selection.source, data: copy.data, node: copy.node, object: copy.object}
+		object.origin = &editorObjectOrigin{editor: e, page: selection.source, data: copy.data, node: copy.node, object: copy.object}
 		objects = append(objects, object)
 	}
 	return paste(objects)

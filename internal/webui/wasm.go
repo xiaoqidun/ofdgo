@@ -120,6 +120,7 @@ func RunWASM() {
 	registerCallback("ofdgoStyleObjects", styleObjects)
 	registerCallback("ofdgoMoveOutline", moveOutline)
 	registerCallback("ofdgoCaptureStyle", captureStyle)
+	registerCallback("ofdgoGroupObjects", groupObjects)
 	registerCallback("ofdgoPasteStyle", pasteStyle)
 	registerCallback("ofdgoResizeObjects", resizeObjects)
 	registerCallback("ofdgoLoadImport", loadImport)
@@ -775,6 +776,11 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					} else if outline, err := path.Outline(); err == nil {
 						item["outline"] = outline
 					}
+					if kind == "" && capability.Update {
+						if kind, box, matrix := path.ShapeFrame(); kind != "" {
+							item["oriented"] = map[string]any{"kind": string(kind), "box": editorBox(box), "matrix": editorMatrix(matrix)}
+						}
+					}
 				}
 				if object.Type == "PathObject" || object.Type == "ImageObject" || object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
 					paths := make([]any, len(contours))
@@ -835,7 +841,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 // 返回: map[string]any 前端能力
 func editorCapabilities(capability ofdgo.ObjectCapabilities, kind string) map[string]any {
 	result := map[string]any{"update": capability.Update, "paint": capability.Paint, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode),
-		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "fitImage": capability.FitImage, "resetCrop": capability.ResetCrop, "enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
+		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "fitImage": capability.FitImage, "resetCrop": capability.ResetCrop, "ungroup": capability.Ungroup, "enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
 	if missing := capability.MissingGlyphs; missing != nil {
 		result["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
 	}
@@ -927,6 +933,8 @@ func compositeObjects(args []js.Value) (any, error) {
 		editorAppearance(item, member.Object, member.Capabilities.Paint, member.StrokeScale)
 		if kind, geometry := member.Shape(); kind != "" {
 			item["shape"], item["geometry"] = string(kind), editorBox(geometry)
+		} else if kind, box, matrix := member.ShapeFrame(); kind != "" {
+			item["oriented"] = map[string]any{"kind": string(kind), "box": editorBox(box), "matrix": editorMatrix(matrix)}
 		}
 		if member.Object.Type == "TextObject" {
 			object := member.Object.TextObject
@@ -996,6 +1004,9 @@ func changeCompositeObjects(args []js.Value) (any, error) {
 			if operation == "line" {
 				return currentEditor.ReshapeCompositeLine(page, path, indexes[0], ofdgo.ShapeKind(args[8].String()), box)
 			}
+			if len(args) > 8 && args[8].Bool() {
+				return currentEditor.ReshapeCompositeFrame(page, path, indexes[0], box)
+			}
 			return currentEditor.ReshapeCompositeObject(page, path, indexes[0], box)
 		case "erase":
 			return currentEditor.EraseCompositeObjects(page, path, indexes, ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()})
@@ -1019,14 +1030,11 @@ func changeCompositeObjects(args []js.Value) (any, error) {
 			if !args[4].IsNull() {
 				return currentEditor.ResizeCompositeTextFrame(page, path, indexes[0], args[4].Float(), args[5].Float(), layout)
 			}
-			members, err := currentEditor.CompositeObjects(page, path)
+			member, err := currentEditor.CompositeObject(page, path, indexes[0])
 			if err != nil {
 				return err
 			}
-			if indexes[0] >= len(members) {
-				return fmt.Errorf("text member is unavailable")
-			}
-			value, _ := members[indexes[0]].Object.TextObject.TextLayout()
+			value, _ := member.Object.TextObject.TextLayout()
 			return currentEditor.LayoutCompositeText(page, path, indexes[0], value, layout)
 		case "fit", "resetCrop":
 			if len(indexes) != 1 {
@@ -1274,7 +1282,12 @@ func reshapeObject(args []js.Value) (any, error) {
 	if object.Type != "PathObject" {
 		return nil, fmt.Errorf("object is not a path")
 	}
-	object.PathObject, err = object.PathObject.Reshape(ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
+	box := ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()}
+	if len(args) > 6 && args[6].Bool() {
+		object.PathObject, err = object.PathObject.ReshapeFrame(box)
+	} else {
+		object.PathObject, err = object.PathObject.Reshape(box)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1410,6 +1423,32 @@ func copyEditorObjects(page int, objects []ofdgo.GraphicObject, dx, dy float64) 
 	}
 	info, err := previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 	return editorSelectionInfo{info, ids}, err
+}
+
+// groupObjects 组合或解组并返回新的选区，复用单次历史提交
+// 入参: args 页面索引、对象标识列表和是否解组
+// 返回: any 文档及选区, error 错误信息
+func groupObjects(args []js.Value) (any, error) {
+	var ids []string
+	info, err := changeObjects(func() error {
+		page, selected := args[0].Int(), stringsFromJS(args[1])
+		var err error
+		if args[2].Bool() {
+			if len(selected) != 1 {
+				return fmt.Errorf("ungrouping requires one object")
+			}
+			ids, err = currentEditor.UngroupObject(page, selected[0])
+		} else {
+			var id string
+			id, err = currentEditor.GroupObjects(page, selected)
+			ids = []string{id}
+		}
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return editorSelectionInfo{info.(editorInfo), ids}, nil
 }
 
 // orderObjects 调整选区的绘制顺序
@@ -1587,14 +1626,11 @@ func captureStyle(args []js.Value) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		members, err := currentEditor.CompositeObjects(args[0].Int(), path)
+		member, err := currentEditor.CompositeObject(args[0].Int(), path, indexes[0])
 		if err != nil {
 			return nil, err
 		}
-		if indexes[0] >= len(members) {
-			return nil, fmt.Errorf("style source is unavailable")
-		}
-		object := members[indexes[0]].Style()
+		object := member.Style()
 		copiedStyle = &object
 		return nil, nil
 	}

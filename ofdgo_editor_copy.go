@@ -21,12 +21,23 @@ import (
 	"strconv"
 )
 
+// copiedObjectStyle 保留复杂路径的原始颜色引用，普通对象沿用有效样式快照
+// 入参: object 原对象, layer 图层绘制参数
+// 返回: GraphicObject 复制快照, error 错误信息
+func (e *Editor) copiedObjectStyle(object GraphicObject, layer string) (GraphicObject, error) {
+	result, err := e.resolveEditorStyle(object, layer)
+	if err != nil && object.Type == "PathObject" && editReason(err) == EditUnsupportedColor {
+		return cloneEditorData(object), nil
+	}
+	return result, err
+}
+
 // snapshotOrigin 获取当前文档内捕获时的原文来源，外部快照按普通对象校验
 // 入参: object 对象快照
 // 返回: *editorObjectOrigin 原文来源
 func (e *Editor) snapshotOrigin(object GraphicObject) *editorObjectOrigin {
 	if object.origin != nil {
-		if e.source != nil && e.source.pages[object.origin.page.ref.ID] == object.origin.page {
+		if object.origin.editor == e || object.origin.page != nil && e.source != nil && e.source.pages[object.origin.page.ref.ID] == object.origin.page {
 			return object.origin
 		}
 		return nil
@@ -199,15 +210,21 @@ func editorObjectReference(name string) bool {
 	return false
 }
 
-// copiedLayerStyle 获取复合对象需保留的图层绘制参数，不向基本对象重新施加继承样式
+// copiedLayerStyle 保留复合对象和复杂路径的图层参数，普通对象使用已解析样式
 // 入参: object 对象
 // 返回: string 绘制参数标识
 func (e *Editor) copiedLayerStyle(object GraphicObject) string {
-	if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
+	if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" || object.Type == "PathObject" {
 		if origin := e.snapshotOrigin(object); origin != nil {
 			for parent := origin.node.parent; parent != nil; parent = parent.parent {
 				if parent.name.Local == "Layer" {
-					return parent.attr("DrawParam")
+					id := parent.attr("DrawParam")
+					if object.Type == "PathObject" {
+						if _, err := e.resolveEditorStyle(object, id); err == nil || editReason(err) != EditUnsupportedColor {
+							return ""
+						}
+					}
+					return id
 				}
 			}
 		}

@@ -219,13 +219,17 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 		preview := *e
 		preview.source, preview.pages = next, added
 		for i, index := range indexes {
-			layouts := make(map[string]*textLayout)
+			states := make(map[string]editorCompositeState)
+			groups := make(map[string]map[string]editorCompositeState)
 			for _, layer := range e.pages[index].Content.Layer {
 				for _, object := range layer.Objects {
+					id := m.ids[editorObjectID(object)]
+					state := object.state
 					if layout := object.TextObject.layout; object.Type == "TextObject" && layout != nil {
-						value := *layout
-						layouts[m.ids[object.TextObject.ID]] = &value
+						state.layout = layout
 					}
+					states[id] = state
+					groups[id] = remapCompositeStates(object.CompositeGraphicUnit.states, m.ids)
 				}
 			}
 			if err := preview.loadSourcePage(i); err != nil {
@@ -234,9 +238,12 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 			for j := range added[i].Content.Layer {
 				for k := range added[i].Content.Layer[j].Objects {
 					object := &added[i].Content.Layer[j].Objects[k]
+					id := editorObjectID(*object)
+					object.state = states[id]
 					if object.Type == "TextObject" {
-						object.TextObject.layout = layouts[object.TextObject.ID]
+						object.TextObject.layout = object.state.layout
 					}
+					object.CompositeGraphicUnit.states = groups[id]
 				}
 			}
 		}

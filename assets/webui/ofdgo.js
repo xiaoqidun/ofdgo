@@ -203,6 +203,8 @@ const el = {
 	objectAspect: document.querySelector("#objectAspect"),
 	objectStylePanel: document.querySelector("#objectStylePanel"),
 	objectStyleForm: document.querySelector("#objectStyleForm"),
+	groupObjectsButton: document.querySelector("#groupObjectsButton"),
+	ungroupObjectButton: document.querySelector("#ungroupObjectButton"),
 	objectOpacity: document.querySelector("#objectOpacity"),
 	objectStrokeFields: document.querySelector("#objectStrokeFields"),
 	objectDash: document.querySelector("#objectDash"),
@@ -366,7 +368,8 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 		updatePendingChanges();
 		el.undoButton.disabled = !state.ready || state.exporting || !state.editorInfo?.canUndo && !canvasEditor.nudgeChanged();
 	},
-	onReshape: (item, box) => changeDocument("ofdgoReshapeObject", item, box.x, box.y, box.width, box.height),
+	onReshape: (item, box) => changeDocument("ofdgoReshapeObject", item, box.x, box.y, box.width, box.height, Boolean(item.oriented)),
+	onResize: (item, box) => changeDocument("ofdgoResizeObjects", { ...item, id: [item.id] }, box.x, box.y, box.width, box.height),
 	onTextWidth: (item, box) => changeDocument("ofdgoLayoutText", item, box.x - item.x, box.width, true, item.align || "", item.paragraphHeight || 0, item.letterSpacing || 0, ...textIndents(item)),
 	onCrop: (item, box) => changeDocument("ofdgoCropImage", item, box.x, box.y, box.width, box.height),
 	onCropChange: () => {
@@ -658,6 +661,12 @@ el.batchPagesForm.addEventListener("submit", async event => {
 });
 editorClick(el.objectStyleButton, openObjectStyle);
 editorClick(el.objectBoundsButton, openObjectBounds);
+for (const [button, ungroup] of [[el.groupObjectsButton, false], [el.ungroupObjectButton, true]]) {
+	button.addEventListener("click", async () => {
+		const item = canvasEditor.selected;
+		if (await changeDocument("ofdgoGroupObjects", { ...item, id: canvasEditor.items().map(member => member.id) }, ungroup)) el.objectStylePanel.close();
+	});
+}
 el.arrowTool.addEventListener("change", async () => {
 	const tool = el.arrowTool.value;
 	el.arrowTool.value = "";
@@ -999,7 +1008,7 @@ function openObjectBounds() {
 	state.boundsOriginal = { x: box.x, y: box.y, width: Math.abs(box.width), height: Math.abs(box.height) };
 	for (const [input, key] of [[el.objectX,"x"], [el.objectY,"y"], [el.objectWidth,"width"], [el.objectHeight,"height"]]) setObjectDimension(input, state.boundsOriginal[key]);
 	el.objectAspect.checked = true;
-	el.objectAspect.disabled = Boolean(state.composite) || !item.shape && (item.items || [item]).some(member => member.type !== "ImageObject" || member.imageBorder) || lineShape(item.shape) && (!box.width || !box.height);
+	el.objectAspect.disabled = !item.shape && (item.items || [item]).some(member => member.type !== "ImageObject" || member.imageBorder) || lineShape(item.shape) && (!box.width || !box.height);
 	el.objectWidth.disabled = lineShape(item.shape) && !box.width;
 	el.objectHeight.disabled = lineShape(item.shape) && !box.height;
 	el.objectBoundsStatus.textContent = "";
@@ -1016,6 +1025,9 @@ function canCopyStyle(item) {
 function openObjectStyle() {
 	const items = canvasEditor.items();
 	if (!items.length) return;
+	const ordered = [...items].sort((a, b) => a.position - b.position);
+	el.groupObjectsButton.disabled = Boolean(state.composite) || items.length < 2 || !ordered.every((item, index) => canEditObject(item, "copy") && canEditObject(item, "order") && item.container === ordered[0].container && item.position === ordered[0].position + index);
+	el.ungroupObjectButton.disabled = Boolean(state.composite) || items.length !== 1 || !canEditObject(items[0], "ungroup");
 	el.copyStyleButton.disabled = items.length !== 1 || !canCopyStyle(items[0]);
 	el.pasteStyleButton.disabled = !state.styleClipboard || !items.every(item => item.type === state.styleClipboard && canCopyStyle(item));
 	const shared = (key, fallback) => items.every(item => (item[key] ?? fallback) === (items[0][key] ?? fallback)) ? items[0][key] ?? fallback : null;
@@ -1926,7 +1938,7 @@ async function changeDocument(name, item, ...args) {
 			return true;
 		}
 		const clearSelection = !item || ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoEraseObjects", "ofdgoEraseObjectsPath"].includes(name);
-		if (name === "ofdgoCopyObjects" || name === "ofdgoPasteObjects" || name === "ofdgoInsertShape" || name === "ofdgoInsertText" || name === "ofdgoInsertImage") {
+		if (name === "ofdgoCopyObjects" || name === "ofdgoPasteObjects" || name === "ofdgoGroupObjects" || name === "ofdgoInsertShape" || name === "ofdgoInsertText" || name === "ofdgoInsertImage") {
 			state.selectObjects = true;
 			canvasEditor.setTool("");
 			setPan(false);
