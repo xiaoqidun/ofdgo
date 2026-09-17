@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"maps"
 	"path"
 	"slices"
@@ -48,11 +49,15 @@ type editorPageImport struct {
 	defaultCS     string
 	attachments   map[string][]byte
 	copyPage      bool
+	progress      editorProgress
 }
 
 // PageImportOptions 页面导入选项，零值仅导入页面及其关联资源
+// OnProgress按ids、pages、resources、commit阶段回报进度，total为0表示总量未知
+// 回调返回错误则取消导入，commit检查点之后统一提交；回调不可重入修改编辑器
 type PageImportOptions struct {
-	Outlines bool
+	Outlines   bool
+	OnProgress func(stage string, completed, total int) error
 }
 
 // ImportPages 将来源主文档中的指定页面插入目标位置，保持输入顺序并作为一次撤销操作
@@ -99,7 +104,9 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 	if len(indexes) == 0 {
 		return nil, nil
 	}
-	if err := e.prepareSourceIDs(); err != nil {
+	progress := editorProgress(options.OnProgress)
+	maximum, err := e.sourceMaxID(progress)
+	if err != nil {
 		return nil, err
 	}
 	base := e.source
@@ -109,11 +116,11 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 			return nil, err
 		}
 	}
-	prefix := path.Join(base.directory, "Import_"+strconv.Itoa(e.maxID+1))
+	prefix := path.Join(base.directory, "Import_"+strconv.Itoa(maximum+1))
 	for editorDirectoryExists(base.reader, prefix) {
 		prefix += "_"
 	}
-	m := &editorPageImport{reader: source, doc: doc, prefix: prefix, maximum: e.maxID, copyPage: copyPage,
+	m := &editorPageImport{reader: source, doc: doc, prefix: prefix, maximum: maximum, copyPage: copyPage, progress: progress,
 		ids: make(map[string]string), pages: selected, files: make(map[string][]byte), resources: make(map[string]editorImportEntry), used: make(map[string][]byte), templates: make(map[string]TemplatePage), templateParts: make(map[string][]byte), attachments: make(map[string][]byte)}
 	if copyPage {
 		for _, page := range doc.Pages.Page {
@@ -143,6 +150,9 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 	refs := make([]Page, len(indexes))
 	ids := make([]string, len(indexes))
 	for i, index := range indexes {
+		if err := progress.report("pages", i, len(indexes)); err != nil {
+			return nil, err
+		}
 		page := doc.Pages.Page[index]
 		ids[i] = m.id(page.ID)
 		name, err := m.copyXML(source.ResPath(page.BaseLoc))
@@ -150,6 +160,9 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 			return nil, err
 		}
 		refs[i] = Page{ID: ids[i], BaseLoc: name}
+	}
+	if err := progress.report("pages", len(indexes), len(indexes)); err != nil {
+		return nil, err
 	}
 	annotations, err := m.annotations()
 	if err != nil {
@@ -228,6 +241,9 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 			}
 		}
 	}
+	if err := progress.report("commit", 0, 0); err != nil {
+		return nil, err
+	}
 	if e.source == nil {
 		for i := range e.resources {
 			resource := &e.resources[i]
@@ -242,6 +258,7 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 		}
 	}
 	e.source, e.maxID = next, m.maximum
+	next.idsReady = true
 	e.outlines = outlines
 	e.pages = slices.Insert(e.pages, at, added...)
 	if change := e.recordChange(); change != nil {
@@ -266,11 +283,43 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 	return ids, nil
 }
 
+// readFile 分块读取导入条目，允许资源解压过程中取消，不共享来源内存
+// 入参: name 包内路径
+// 返回: []byte 条目内容, error 错误信息
+func (m *editorPageImport) readFile(name string) ([]byte, error) {
+	input, err := m.reader.openFile(name)
+	if err != nil {
+		return nil, err
+	}
+	defer input.Close()
+	return io.ReadAll(&editorProgressReader{Reader: input, progress: m.progress, stage: "resources"})
+}
+
+// editorProgressReader 为输入流提供可取消的分块读取检查点
+type editorProgressReader struct {
+	io.Reader
+	progress  editorProgress
+	stage     string
+	completed int
+}
+
+// Read 读取数据并在下一块开始前检查取消
+// 入参: data 接收缓冲区
+// 返回: int 读取字节数, error 错误信息
+func (r *editorProgressReader) Read(data []byte) (int, error) {
+	if err := r.progress.report(r.stage, r.completed, 0); err != nil {
+		return 0, err
+	}
+	n, err := r.Reader.Read(data[:min(len(data), 1<<20)])
+	r.completed += n
+	return n, err
+}
+
 // outlines 筛选指向导入页面的目录树并复用标准动作迁移
 // 返回: []byte 目录片段, error 错误信息
 func (m *editorPageImport) outlines() ([]byte, error) {
 	name := m.reader.ResPath(m.reader.OFD.DocBody[0].DocRoot)
-	data, err := m.reader.readFile(name)
+	data, err := m.readFile(name)
 	if err != nil {
 		return nil, err
 	}
@@ -422,7 +471,7 @@ func (m *editorPageImport) id(value string) string {
 // 入参: name 资源索引路径
 // 返回: error 错误信息
 func (m *editorPageImport) resourceIndex(name string) error {
-	data, err := m.reader.readFile(name)
+	data, err := m.readFile(name)
 	if err != nil {
 		return err
 	}
@@ -505,11 +554,11 @@ func (m *editorPageImport) copyData(name string, evidence bool) (string, error) 
 	}
 	target := path.Join(directory, name)
 	if _, exists := m.files[target]; !exists {
-		data, err := m.reader.readFile(name)
+		data, err := m.readFile(name)
 		if err != nil {
 			return "", err
 		}
-		m.files[target] = bytes.Clone(data)
+		m.files[target] = data
 	}
 	return "/" + target, nil
 }
@@ -522,7 +571,7 @@ func (m *editorPageImport) copyXML(name string) (string, error) {
 	if _, exists := m.files[target]; exists {
 		return "/" + target, nil
 	}
-	data, err := m.reader.readFile(name)
+	data, err := m.readFile(name)
 	if err != nil {
 		return "", err
 	}
@@ -752,7 +801,7 @@ func (m *editorPageImport) annotations() ([]byte, error) {
 		return nil, nil
 	}
 	name := m.reader.ResPath(m.doc.Annotations)
-	data, err := m.reader.readFile(name)
+	data, err := m.readFile(name)
 	if err != nil {
 		return nil, err
 	}
@@ -788,7 +837,7 @@ func (m *editorPageImport) attachment(id string) (string, error) {
 	if m.doc.Attachments.Path != "" {
 		name = m.reader.ResPath(m.doc.Attachments.Path)
 	}
-	data, err := m.reader.readFile(name)
+	data, err := m.readFile(name)
 	if err != nil {
 		return "", err
 	}
@@ -817,7 +866,7 @@ func (m *editorPageImport) signatures() ([]byte, error) {
 		return nil, nil
 	}
 	name := m.reader.ResPath(m.doc.Signatures)
-	data, err := m.reader.readFile(name)
+	data, err := m.readFile(name)
 	if err != nil {
 		return nil, err
 	}
@@ -834,7 +883,7 @@ func (m *editorPageImport) signatures() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		value, err := m.reader.readFile(loc)
+		value, err := m.readFile(loc)
 		if err != nil {
 			return nil, err
 		}

@@ -475,9 +475,10 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 }
 
 // sourceReader 生成原包与修改条目组成的独立预览快照，不进行ZIP压缩
+// 入参: progress 准备进度回调
 // 返回: *Reader 阅读器, error 错误信息
-func (e *Editor) sourceReader() (*Reader, error) {
-	parts, err := e.sourceParts(nil)
+func (e *Editor) sourceReader(progress editorProgress) (*Reader, error) {
+	parts, err := e.sourceParts(progress)
 	if err != nil {
 		return nil, err
 	}

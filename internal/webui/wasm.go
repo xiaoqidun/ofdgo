@@ -104,9 +104,9 @@ func RunWASM() {
 	registerCallback("ofdgoPageTextString", pageTextString)
 	registerCallback("ofdgoExportFormats", exportFormats)
 	registerCallback("ofdgoParsePageRange", parsePageRange)
-	registerExportCallback("ofdgoExportPage", exportPage)
-	registerExportCallback("ofdgoExportDocument", exportDocument)
-	registerExportCallback("ofdgoExportAttachment", exportAttachment)
+	registerAsyncCallback("ofdgoExportPage", exportPage)
+	registerAsyncCallback("ofdgoExportDocument", exportDocument)
+	registerAsyncCallback("ofdgoExportAttachment", exportAttachment)
 	registerCallback("ofdgoMatchFontFiles", matchFontFiles)
 	registerCallback("ofdgoFontFaces", fontFaces)
 	registerCallback("ofdgoFontFace", fontFace)
@@ -122,7 +122,7 @@ func RunWASM() {
 	registerCallback("ofdgoPasteStyle", pasteStyle)
 	registerCallback("ofdgoResizeObjects", resizeObjects)
 	registerCallback("ofdgoLoadImport", loadImport)
-	registerCallback("ofdgoImportPages", importPages)
+	registerAsyncCallback("ofdgoImportPages", importPages)
 	registerCallback("ofdgoInsertText", insertText)
 	registerCallback("ofdgoUpdateText", updateText)
 	registerCallback("ofdgoStyleText", styleText)
@@ -154,7 +154,7 @@ func RunWASM() {
 	registerCallback("ofdgoDeleteObject", deleteObject)
 	registerCallback("ofdgoUndo", func([]js.Value) (any, error) { return restoreEditor(false) })
 	registerCallback("ofdgoRedo", func([]js.Value) (any, error) { return restoreEditor(true) })
-	registerExportCallback("ofdgoSaveDocument", saveDocument)
+	registerAsyncCallback("ofdgoSaveDocument", saveDocument)
 	select {}
 }
 
@@ -167,9 +167,9 @@ func registerCallback(name string, fn func([]js.Value) (any, error)) {
 	js.Global().Set(name, cb)
 }
 
-// registerExportCallback 异步导出，为浏览器处理数据块让出事件循环
+// registerAsyncCallback 注册异步回调，为浏览器处理数据和取消请求让出事件循环
 // 入参: name 回调名称, fn 回调函数
-func registerExportCallback(name string, fn func([]js.Value) (any, error)) {
+func registerAsyncCallback(name string, fn func([]js.Value) (any, error)) {
 	cb := js.FuncOf(func(this js.Value, args []js.Value) any {
 		executor := js.FuncOf(func(this js.Value, callbacks []js.Value) any {
 			resolve := callbacks[0]
@@ -349,13 +349,18 @@ func renderPage(args []js.Value) (any, error) {
 	}
 	links := make([]any, len(page.Links))
 	for i, link := range page.Links {
-		links[i] = map[string]any{
+		item := map[string]any{
 			"uri":    link.URI,
 			"x":      link.Box.X,
 			"y":      link.Box.Y,
 			"width":  link.Box.W,
 			"height": link.Box.H,
 		}
+		if dest := link.Dest; dest != nil {
+			item["dest"] = map[string]any{"type": dest.Type, "pageID": dest.PageID, "left": dest.Left, "top": dest.Top,
+				"right": dest.Right, "bottom": dest.Bottom, "zoom": dest.Zoom}
+		}
+		links[i] = item
 	}
 	fonts := make([]any, len(page.Fonts))
 	for i, font := range page.Fonts {
@@ -1283,7 +1288,7 @@ func loadImport(args []js.Value) (any, error) {
 }
 
 // importPages 插入指定来源页面并保持目标文档元数据
-// 入参: args 页码表达式，空值为全部、目标零基插入位置和是否导入对应目录
+// 入参: args 页码表达式，空值为全部、目标零基插入位置、是否导入对应目录和可选进度回调
 // 返回: any 文档信息及首个插入页, error 错误信息
 func importPages(args []js.Value) (any, error) {
 	if currentEditor == nil || pendingImport == nil {
@@ -1306,6 +1311,9 @@ func importPages(args []js.Value) (any, error) {
 	}
 	at := args[1].Int()
 	options := ofdgo.PageImportOptions{Outlines: len(args) > 2 && args[2].Bool()}
+	if len(args) > 3 {
+		options.OnProgress = editorOperationProgress(args[3])
+	}
 	if _, err := currentEditor.ImportPagesWithOptions(pendingImport, indexes, at, options); err != nil {
 		return nil, err
 	}
@@ -1943,27 +1951,40 @@ func insertImage(args []js.Value) (any, error) {
 	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
 
-// saveDocument 分块写出当前编辑文档
-// 入参: args 数据写出回调和可选的准备进度回调
+// editorOperationProgress 节流长操作检查点并向浏览器让出执行，保证阶段开始和结束可取消
+// 入参: callback 浏览器进度回调
+// 返回: func(string, int, int) error 进度回调
+func editorOperationProgress(callback js.Value) func(string, int, int) error {
+	var lastStage string
+	var lastProgress time.Time
+	return func(stage string, completed, total int) error {
+		if stage == lastStage && (total == 0 || completed != total) && time.Since(lastProgress) < 32*time.Millisecond {
+			return nil
+		}
+		lastStage, lastProgress = stage, time.Now()
+		return awaitExport(callback, stage, completed, total)
+	}
+}
+
+// saveDocument 分块写出当前编辑文档或指定页面
+// 入参: args 数据写出回调、可选准备进度回调和可选页面索引
 // 返回: any 保存结果, error 错误信息
 func saveDocument(args []js.Value) (any, error) {
 	if currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
 	}
 	if len(args) > 1 {
-		var lastStage string
-		var lastProgress time.Time
-		currentEditor.OnWriteProgress = func(stage string, completed, total int) error {
-			if stage == lastStage && completed != total && time.Since(lastProgress) < 32*time.Millisecond {
-				return nil
-			}
-			lastStage, lastProgress = stage, time.Now()
-			return awaitExport(args[1], stage, completed, total)
-		}
+		currentEditor.OnWriteProgress = editorOperationProgress(args[1])
 		defer func() { currentEditor.OnWriteProgress = nil }()
 	}
 	writer := bufio.NewWriterSize(exportWriter{write: args[0]}, 1<<20)
-	if _, err := currentEditor.WriteTo(writer); err != nil {
+	var err error
+	if len(args) > 2 {
+		_, err = currentEditor.WritePagesTo(writer, indexesFromJS(args[2]))
+	} else {
+		_, err = currentEditor.WriteTo(writer)
+	}
+	if err != nil {
 		return nil, err
 	}
 	if err := writer.Flush(); err != nil {

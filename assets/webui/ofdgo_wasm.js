@@ -1,66 +1,77 @@
 importScripts("./wasm_exec.js");
 
 let pending = Promise.resolve();
-const exports = new Map();
+const operations = new Map();
 self.onmessage = ({ data }) => {
 	if (data.type === "cancel") {
-		exports.get(data.id)?.abort();
+		operations.get(data.id)?.abort();
 		return;
 	}
-	if (data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoSaveDocument") {
-		exports.set(data.id, new AbortController());
+	if (data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoImportPages") {
+		operations.set(data.id, new AbortController());
 	}
 	pending = pending.then(() => handleMessage(data));
 };
 async function handleMessage({ id, name, args }) {
 	let output;
 	let channel;
-	const signal = exports.get(id)?.signal;
+	const signal = operations.get(id)?.signal;
+	const importing = name === "ofdgoImportPages";
 	try {
 		signal?.throwIfAborted();
 		const chunks = [];
 		let size = 0;
 		if (signal) {
-			const file = args.pop();
-			if (file) {
-				output = await file.createWritable();
-			}
-			signal.throwIfAborted();
 			channel = new MessageChannel();
-			const finish = (done, err) => {
-				channel.port1.onmessage = () => done(err?.message || "", signal.aborted);
+			const finish = (done, err, commit = false) => {
+				channel.port1.onmessage = () => {
+					if (commit && !signal.aborted && !err) operations.delete(id);
+					done(err?.message || "", signal.aborted);
+				};
 				channel.port2.postMessage(null);
 			};
-			args.push((bytes, done) => {
-				if (signal.aborted) {
-					finish(done);
-					return;
-				}
-				size += bytes.length;
-				if (output) {
-					output.write(bytes).then(() => finish(done), (err) => finish(done, err));
-				} else {
-					chunks.push(new Blob([bytes]));
-					finish(done);
-				}
-			});
-			if (name === "ofdgoExportDocument") {
-				args.push((completed, total, done) => {
-					self.postMessage({ id, type: "export", stage: "pages", completed, total });
-					finish(done);
-				});
-			} else if (name === "ofdgoSaveDocument") {
+			if (importing) {
 				args.push((phase, completed, total, done) => {
-					self.postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
-					finish(done);
+					self.postMessage({ id, type: "import", phase, completed, total });
+					finish(done, null, phase === "commit");
 				});
+			} else {
+				const file = args.pop();
+				const indices = name === "ofdgoSaveDocument" ? args.shift() : null;
+				if (file) output = await file.createWritable();
+				signal.throwIfAborted();
+				args.push((bytes, done) => {
+					if (signal.aborted) {
+						finish(done);
+						return;
+					}
+					size += bytes.length;
+					if (output) {
+						output.write(bytes).then(() => finish(done), (err) => finish(done, err));
+					} else {
+						chunks.push(new Blob([bytes]));
+						finish(done);
+					}
+				});
+				if (name === "ofdgoExportDocument") {
+					args.push((completed, total, done) => {
+						self.postMessage({ id, type: "export", stage: "pages", completed, total });
+						finish(done);
+					});
+				} else if (name === "ofdgoSaveDocument") {
+					args.push((phase, completed, total, done) => {
+						self.postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
+						finish(done);
+					});
+					if (indices != null) args.push(indices);
+				}
 			}
 		}
 		const payload = await globalThis[name](...args);
 		signal?.throwIfAborted();
 		const result = typeof payload === "string" ? JSON.parse(payload) : payload;
-		if (signal && result.ok) {
-			exports.delete(id);
+		if (signal && !importing && result.ok) {
+			operations.delete(id);
 			result.data.size = size;
 			self.postMessage({ id, type: "export", stage: "save" });
 			if (output) {
@@ -78,14 +89,14 @@ async function handleMessage({ id, name, args }) {
 		await output?.abort().catch(() => {});
 		const result = { id, ok: false, error: err.message };
 		if (signal?.aborted) {
-			result.error = "导出已取消";
+			result.error = importing ? "导入已取消" : "导出已取消";
 			result.canceled = true;
 		}
 		self.postMessage(result);
 	} finally {
 		channel?.port1.close();
 		channel?.port2.close();
-		exports.delete(id);
+		operations.delete(id);
 	}
 }
 

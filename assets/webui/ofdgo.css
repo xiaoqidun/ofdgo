@@ -1155,9 +1155,15 @@ button.outline-link:hover {
 
 .page-list-item[aria-current] {
 	border-color: var(--accent);
-	background: #e4f3ef;
 	color: var(--accent-strong);
 	font-weight: 700;
+}
+
+.page-list-item[aria-current]:not([aria-pressed="false"]),
+.page-list-item[aria-pressed="true"] {
+	border-color: var(--accent);
+	background: #e4f3ef;
+	color: var(--accent-strong);
 }
 
 .thumb-paper {

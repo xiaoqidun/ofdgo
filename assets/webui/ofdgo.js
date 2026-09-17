@@ -39,6 +39,9 @@ const state = {
 	savedRevision: null,
 	insertObject: null,
 	importPageCount: 0,
+	importing: false,
+	pageSelection: new Set(),
+	pageSelectionAnchor: null,
 	outlineSelection: null,
 	outlineAction: "add",
 	styleOriginal: null,
@@ -571,7 +574,10 @@ el.addPageButton.addEventListener("change", async () => {
 	const page = currentPageInfo();
 	return changeDocument("ofdgoChangePage", null, "add", state.pageIndex, page.width, page.height);
 });
-el.importCancel.addEventListener("click", () => el.importPanel.close());
+el.importCancel.addEventListener("click", () => state.importing ? cancelExport() : el.importPanel.close());
+el.importPanel.addEventListener("cancel", event => {
+	if (state.importing) { event.preventDefault(); cancelExport(); }
+});
 el.importPanel.addEventListener("close", () => {
 	state.importPageCount = 0;
 	el.importForm.reset();
@@ -592,29 +598,41 @@ el.importForm.addEventListener("submit", async event => {
 	const saved = await changeDocument("ofdgoImportPages", null, el.importRange.value === "custom" ? el.importPages.value : "", position, el.importOutlines.checked);
 	if (saved) el.importPanel.close();
 });
-editorClick(el.copyPageButton, () => changeDocument("ofdgoChangePage", null, "copy", state.pageIndex));
-editorClick(el.deletePageButton, () => changeDocument("ofdgoChangePage", null, "delete", state.pageIndex));
-editorClick(el.movePagePrevButton, () => changeDocument("ofdgoChangePage", null, "move", state.pageIndex, state.pageIndex - 1));
-editorClick(el.movePageNextButton, () => changeDocument("ofdgoChangePage", null, "move", state.pageIndex, state.pageIndex + 1));
+editorClick(el.copyPageButton, () => changeSelectedPages("copy"));
+editorClick(el.deletePageButton, () => changeSelectedPages("delete"));
+editorClick(el.movePagePrevButton, () => changeSelectedPages("move", -1));
+editorClick(el.movePageNextButton, () => changeSelectedPages("move", 1));
 editorClick(el.pageSettingsButton, openPagePanel);
-editorClick(el.batchPagesButton, () => {
+editorClick(el.batchPagesButton, openBatchPages);
+function openBatchPages() {
 	el.batchPageAction.value = "copy";
 	el.batchPagesSubmit.textContent = "复制";
 	el.batchPagePositionRow.hidden = true;
 	el.batchPagePosition.value = "after";
-	el.batchPageRange.value = String(state.pageIndex + 1);
+	el.batchPageRange.value = selectedPageRange();
 	el.batchPagesStatus.textContent = "";
 	el.batchPagesPanel.showModal();
 	el.batchPageRange.select();
-});
+}
 el.batchPagesCancel.addEventListener("click", () => el.batchPagesPanel.close());
 el.batchPageAction.addEventListener("change", () => {
-	el.batchPagesSubmit.textContent = { copy: "复制", move: "移动", delete: "删除" }[el.batchPageAction.value];
+	el.batchPagesSubmit.textContent = { copy: "复制", move: "移动", delete: "删除", save: "另存" }[el.batchPageAction.value];
 	el.batchPagePositionRow.hidden = el.batchPageAction.value !== "move";
 });
 el.batchPagesForm.addEventListener("submit", async event => {
 	event.preventDefault();
+	if (document.body.hasAttribute("aria-busy") || !el.batchPagesForm.reportValidity()) return;
 	const args = [el.batchPageAction.value, el.batchPageRange.value];
+	if (args[0] === "save") {
+		const seq = state.openSeq;
+		try {
+			const indices = await callWASM("ofdgoParsePageRange", args[1]);
+			if (seq === state.openSeq && el.batchPagesPanel.open && await exportFile(true, indices, "ofd")) el.batchPagesPanel.close();
+		} catch (err) {
+			if (seq === state.openSeq) el.batchPagesStatus.textContent = err.message;
+		}
+		return;
+	}
 	if (args[0] === "move") args.push({ before: state.pageIndex, after: state.pageIndex + 1, first: 0, last: state.doc.pageCount }[el.batchPagePosition.value]);
 	if (await changeDocument("ofdgoBatchPages", null, ...args)) el.batchPagesPanel.close();
 });
@@ -1721,7 +1739,9 @@ async function changeDocument(name, item, ...args) {
 	const toolbarFocus = el.editorTools.contains(active) ? active : null;
 	const previous = currentPageInfo();
 	const { scrollLeft, scrollTop } = el.viewerPanel;
-	setBusy(true);
+	const importing = name === "ofdgoImportPages";
+	if (importing) state.importing = true;
+	setBusy(true, importing ? "正在导入" : "", null);
 	try {
 		args = await Promise.all(args);
 		if (openSeq !== state.openSeq) {
@@ -1800,6 +1820,12 @@ async function changeDocument(name, item, ...args) {
 			}
 		}
 	} finally {
+		if (importing) {
+			state.importing = false;
+			state.exportRequestID = 0;
+			el.cancelExportButton.hidden = true;
+			el.importCancel.disabled = false;
+		}
 		if (openSeq === state.openSeq) {
 			setBusy(false);
 			if (toolbarFocus?.isConnected && !toolbarFocus.disabled) toolbarFocus.focus({ preventScroll: true });
@@ -2196,7 +2222,7 @@ async function loadWASM() {
 						setProgress("正在保存", null);
 					} else if (!el.cancelExportButton.disabled) {
 						if (data.stage === "prepare") {
-							const label = { fonts: "正在处理字体", pages: "正在处理页面", references: "正在检查引用", resources: "正在整理资源", write: "正在写入" }[data.phase];
+							const label = { snapshot: "正在准备", ids: "正在检查", commit: "正在整理", fonts: "正在处理字体", pages: "正在处理页面", references: "正在检查引用", resources: "正在整理资源", write: "正在写入" }[data.phase];
 							setProgress(label, data.total ? data.completed / data.total * 100 : null);
 						} else if (data.completed === data.total) {
 							setProgress("正在收尾", null);
@@ -2204,6 +2230,13 @@ async function loadWASM() {
 							setProgress(`正在导出 ${data.completed} / ${data.total} 页`, data.completed / data.total * 100);
 						}
 					}
+				}
+			} else if (data.type === "import") {
+				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.importing && !el.importCancel.disabled) {
+					const label = { ids: "正在检查", pages: "正在导入", resources: "正在读取", commit: "正在完成" }[data.phase];
+					el.importStatus.textContent = data.total ? `${label}${data.completed}/${data.total}页` : label;
+					setProgress(label, data.total ? data.completed / data.total * 100 : null);
+					if (data.phase === "commit") el.importCancel.disabled = el.cancelExportButton.disabled = true;
 				}
 			} else if (data.type === "ready") {
 				state.ready = true;
@@ -2305,6 +2338,8 @@ async function openOFD(file) {
 		state.ofdBytes = bytes;
 		state.fileName = file.name || "ofdgo.ofd";
 		state.editing = false;
+		state.pageSelection.clear();
+		state.pageSelectionAnchor = null;
 		state.objectClipboard = null;
 		state.styleClipboard = null;
 		state.editorInfo = null;
@@ -2737,6 +2772,10 @@ async function openDocument(options = {}) {
 		const pageCount = doc.pageCount || 0;
 		const pageIndex = Math.min(Math.max(options.pageIndex || 0, 0), Math.max(pageCount - 1, 0));
 		state.doc = doc;
+		if (options.resetScroll || !options.skipAutoFonts) {
+			state.pageSelection.clear();
+			state.pageSelectionAnchor = null;
+		}
 		state.pageIndex = pageIndex;
 		state.scale = options.scale || 1;
 		if (!options.fitMode) {
@@ -2989,7 +3028,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 	const extension = archive ? "zip" : format.extension;
 	const mime = archive ? "application/zip" : format.mime;
 	let openSeq = state.openSeq;
-	const fileName = whole ? `${baseFileName()}.${extension}` : pageFileName(extension);
+	const fileName = saving && indices !== null ? `${baseFileName()}_选页.ofd` : whole ? `${baseFileName()}.${extension}` : pageFileName(extension);
 	const pageIndex = state.pageIndex;
 	const dpi = exportFormatUsesDPI(format.value) ? currentImageDPI() : 0;
 	state.exporting = true;
@@ -3011,7 +3050,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 			openSeq = state.openSeq;
 			setBusy(true, `正在生成 ${label}`, null, whole ? STATUS.exporting : STATUS.pageExporting);
 		}
-		const result = saving ? await callWASM("ofdgoSaveDocument", file) : whole
+		const result = saving ? await callWASM("ofdgoSaveDocument", indices, file) : whole
 			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, file)
 			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, file);
 		if (openSeq !== state.openSeq) {
@@ -3020,13 +3059,15 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 		if (result.blob) {
 			downloadBytes(result.blob, result.mime, fileName);
 		}
-		if (saving) {
+		if (saving && indices === null) {
 			state.savedRevision = state.editorInfo.revision;
 			setDirty(false);
 		}
 		setStatus(`${result.label} ${saving ? "保存" : "导出"}完成 ${formatBytes(result.size)}`);
+		return true;
 	} catch (err) {
 		if (openSeq === state.openSeq) {
+			if (el.batchPagesPanel.open) el.batchPagesStatus.textContent = err.name === "AbortError" ? "导出已取消" : err.message;
 			if (err.name === "AbortError") {
 				setStatus("导出已取消");
 			} else {
@@ -3049,6 +3090,10 @@ function cancelExport() {
 		return;
 	}
 	el.cancelExportButton.disabled = true;
+	if (state.importing) {
+		el.importCancel.disabled = true;
+		el.importStatus.textContent = "正在取消";
+	}
 	setProgress("正在取消", null);
 	wasmWorker.postMessage({ type: "cancel", id: state.exportRequestID });
 }
@@ -3371,22 +3416,24 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 		canvasEditor.mount(index, page, surface);
 	}
 	for (const link of page.links) {
-		let url;
-		try {
-			url = new URL(link.uri);
-		} catch {
-			continue;
-		}
-		if (url.protocol !== "http:" && url.protocol !== "https:") {
-			continue;
-		}
 		const anchor = document.createElement("a");
 		anchor.className = "page-link";
-		anchor.href = url.href;
-		anchor.target = "_blank";
-		anchor.rel = "noopener noreferrer";
-		anchor.title = url.href;
-		anchor.setAttribute("aria-label", url.href);
+		if (link.dest) {
+			const target = state.doc.pages.findIndex(page => page.id === link.dest.pageID);
+			if (target < 0 || !["XYZ", "Fit", "FitH", "FitV", "FitR"].includes(link.dest.type)) continue;
+			anchor.href = `#page-${target + 1}`;
+			anchor.title = `第${target + 1}页`;
+			anchor.addEventListener("click", event => { event.preventDefault(); navigateDestination(link.dest); });
+		} else {
+			let url;
+			try { url = new URL(link.uri); } catch { continue; }
+			if (url.protocol !== "http:" && url.protocol !== "https:") continue;
+			anchor.href = url.href;
+			anchor.target = "_blank";
+			anchor.rel = "noopener noreferrer";
+			anchor.title = url.href;
+		}
+		anchor.setAttribute("aria-label", anchor.title);
 		anchor.style.left = `${link.x / page.width * 100}%`;
 		anchor.style.top = `${link.y / page.height * 100}%`;
 		anchor.style.width = `${link.width / page.width * 100}%`;
@@ -3398,6 +3445,51 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 	if (state.doc?.pages?.[index]) {
 		layoutPageShell(shell, state.doc.pages[index]);
 	}
+}
+
+function destinationPoint(page, x, y) {
+	if (state.rotation === 90) return { x: page.height - y, y: x };
+	if (state.rotation === 180) return { x: page.width - x, y: page.height - y };
+	if (state.rotation === 270) return { x: y, y: page.width - x };
+	return { x, y };
+}
+
+async function navigateDestination(dest) {
+	if (document.body.hasAttribute("aria-busy")) return;
+	const index = state.doc.pages.findIndex(page => page.id === dest.pageID);
+	if (index < 0) return;
+	const seq = state.openSeq, scale = state.scale;
+	await renderPage(index, { fit: false, scroll: false });
+	if (seq !== state.openSeq || state.pageIndex !== index) return;
+	const page = state.doc.pages[index], size = pageViewSize(page), space = pageSpace();
+	const width = el.viewerPanel.clientWidth - space * 2, height = el.viewerPanel.clientHeight - space * 2;
+	let left = dest.left, top = dest.top;
+	if (dest.type === "Fit") {
+		fitHeight(false);
+		scrollToPage(index);
+		return;
+	} else if (dest.type === "FitH") {
+		setScale(fitWidthScale(page), false);
+		left = 0;
+	} else if (dest.type === "FitV") {
+		setScale(height / (size.height * MM_TO_PX), false);
+		top = 0;
+	} else if (dest.type === "FitR") {
+		const a = destinationPoint(page, dest.left, dest.top), b = destinationPoint(page, dest.right, dest.bottom);
+		if (dest.right <= dest.left || dest.bottom <= dest.top) return;
+		setScale(Math.min(width / Math.abs(b.x - a.x), height / Math.abs(b.y - a.y)) / MM_TO_PX, false);
+	} else {
+		setScale(dest.zoom > 0 ? dest.zoom : scale, false);
+	}
+	const point = destinationPoint(page, left, top);
+	if (dest.type === "FitR") {
+		const bottom = destinationPoint(page, dest.right, dest.bottom);
+		point.x = Math.min(point.x, bottom.x);
+		point.y = Math.min(point.y, bottom.y);
+	}
+	const shell = pageShell(index).getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
+	el.viewerPanel.scrollLeft += shell.left - viewer.left + point.x * MM_TO_PX * state.scale - space;
+	el.viewerPanel.scrollTop += shell.top - viewer.top + point.y * MM_TO_PX * state.scale - pageBlockSpace();
 }
 
 function createTextLayer(text) {
@@ -4168,6 +4260,71 @@ function createOutlineList(outlines, path = []) {
 	return list;
 }
 
+function selectedPageIndexes() {
+	if (!state.pageSelection.size) return [state.pageIndex];
+	return state.doc.pages.filter(page => state.pageSelection.has(page.id)).map(page => page.index);
+}
+
+function changeSelectedPages(action, direction = 0) {
+	const indexes = selectedPageIndexes();
+	if (indexes.length === 1) return changeDocument("ofdgoChangePage", null, action, indexes[0], ...(direction ? [indexes[0] + direction] : []));
+	const at = direction < 0 ? indexes[0] - 1 : indexes.at(-1) + 2;
+	return changeDocument("ofdgoBatchPages", null, action, selectedPageRange(), ...(direction ? [at] : []));
+}
+
+function selectedPageRange() {
+	const pages = selectedPageIndexes().map(index => index + 1);
+	const ranges = [];
+	for (let i = 0; i < pages.length; i++) {
+		const first = pages[i];
+		while (pages[i + 1] === pages[i] + 1) i++;
+		ranges.push(first === pages[i] ? String(first) : `${first}-${pages[i]}`);
+	}
+	return ranges.join(",");
+}
+
+function syncPageSelection() {
+	for (const button of el.pageList.children) {
+		if (state.editing) button.setAttribute("aria-pressed", String(state.pageSelection.has(state.doc.pages[Number(button.dataset.pageIndex)].id)));
+		else button.removeAttribute("aria-pressed");
+	}
+}
+
+function selectThumbnailPage(event, index) {
+	if (document.body.hasAttribute("aria-busy")) return;
+	if (state.editing) {
+		const page = state.doc.pages[index], additive = event.ctrlKey || event.metaKey;
+		if (!additive) state.pageSelection.clear();
+		if (event.shiftKey) {
+			let anchor = state.doc.pages.findIndex(page => page.id === state.pageSelectionAnchor);
+			if (anchor < 0) anchor = state.pageIndex;
+			for (let i = Math.min(anchor, index); i <= Math.max(anchor, index); i++) state.pageSelection.add(state.doc.pages[i].id);
+		} else {
+			if (additive && state.pageSelection.has(page.id)) state.pageSelection.delete(page.id);
+			else state.pageSelection.add(page.id);
+			state.pageSelectionAnchor = page.id;
+		}
+		syncPageSelection();
+		updateControls();
+		if (additive || event.shiftKey) return;
+	}
+	return renderPage(index);
+}
+
+el.pageList.addEventListener("keydown", event => {
+	if (!state.editing || event.isComposing || document.body.hasAttribute("aria-busy")) return;
+	if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "a") {
+		state.pageSelection = new Set(state.doc.pages.map(page => page.id));
+	} else if (event.key === "Escape") {
+		state.pageSelection.clear();
+		state.pageSelectionAnchor = null;
+	} else return;
+	event.preventDefault();
+	event.stopPropagation();
+	syncPageSelection();
+	updateControls();
+});
+
 function renderPageList() {
 	el.pageList.replaceChildren();
 	if (!state.doc) {
@@ -4176,6 +4333,8 @@ function renderPageList() {
 	if (state.thumbnailObserver) {
 		state.thumbnailObserver.disconnect();
 	}
+	const ids = new Set(state.doc.pages.map(page => page.id));
+	for (const id of state.pageSelection) if (!ids.has(id) || !state.editing) state.pageSelection.delete(id);
 	const fragment = document.createDocumentFragment();
 	const thumbnailTargets = [];
 	const openSeq = state.openSeq;
@@ -4203,11 +4362,12 @@ function renderPageList() {
 
 		button.append(thumb, label, size);
 		if (state.editing && pageCan("move", page.index)) enablePageDrag(button, page.index);
-		button.addEventListener("click", () => renderPage(page.index));
+		button.addEventListener("click", event => selectThumbnailPage(event, page.index));
 		fragment.append(button);
 		thumbnailTargets.push([button, page.index]);
 	}
 	el.pageList.append(fragment);
+	syncPageSelection();
 	for (const [button, index] of thumbnailTargets) {
 		observeThumbnail(button, index, openSeq);
 	}
@@ -5170,11 +5330,13 @@ function updateEditorTools() {
 	el.insertTextButton.disabled = el.insertImageButton.disabled = pagesDisabled || !pageCan("insert");
 	el.saveButton.disabled = el.addPageButton.disabled = pagesDisabled;
 	el.batchPagesButton.disabled = pagesDisabled;
-	el.copyPageButton.disabled = pagesDisabled || !pageCan("copy");
+	const selectedPages = state.editing ? selectedPageIndexes() : [state.pageIndex];
+	el.copyPageButton.disabled = pagesDisabled || selectedPages.some(index => !pageCan("copy", index));
 	el.pageSettingsButton.disabled = pagesDisabled || !pageCan("resize");
-	el.deletePageButton.disabled = pagesDisabled || !pageCan("delete") || state.doc?.pageCount <= 1;
-	el.movePagePrevButton.disabled = pagesDisabled || !pageCan("move") || state.pageIndex === 0;
-	el.movePageNextButton.disabled = pagesDisabled || !pageCan("move") || state.pageIndex === state.doc?.pageCount - 1;
+	el.deletePageButton.disabled = pagesDisabled || selectedPages.some(index => !pageCan("delete", index)) || selectedPages.length >= state.doc?.pageCount;
+	const moveDisabled = pagesDisabled || selectedPages.some(index => !pageCan("move", index));
+	el.movePagePrevButton.disabled = moveDisabled || selectedPages[0] === 0;
+	el.movePageNextButton.disabled = moveDisabled || selectedPages.at(-1) === state.doc?.pageCount - 1;
 	const enabled = state.editing && state.selectObjects && !state.panMode;
 	canvasEditor.setEnabled(enabled);
 	updateObjectControls(canvasEditor.selected);
@@ -5283,7 +5445,7 @@ async function callWASM(name, ...args) {
 	return new Promise((resolve, reject) => {
 		const id = ++wasmRequestID;
 		wasmRequests.set(id, { resolve, reject, openSeq: state.openSeq });
-		if (name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument") {
+		if (name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument" || name === "ofdgoImportPages") {
 			state.exportRequestID = id;
 			el.cancelExportButton.hidden = false;
 			el.cancelExportButton.disabled = false;
@@ -5318,7 +5480,10 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	el.pageForm.inert = busy;
 	el.paragraphForm.inert = busy;
 	el.infoForm.inert = busy;
-	el.importForm.inert = busy;
+	el.importForm.inert = busy && !state.importing;
+	for (const input of [el.importFile, el.importRange, el.importPosition, el.importOutlines]) input.disabled = busy;
+	el.importPages.disabled = busy || el.importRange.value !== "custom";
+	el.importSubmit.disabled = busy || !state.importPageCount;
 	el.batchPagesForm.inert = busy;
 	el.objectStyleForm.inert = busy;
 	el.objectBoundsForm.inert = busy;

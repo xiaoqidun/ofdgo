@@ -59,10 +59,11 @@ type URI struct {
 	Base string `xml:"Base,attr"`
 }
 
-// PageLink 页面矩形外链，Box使用页面毫米坐标
+// PageLink 页面矩形链接，URI与Dest分别表示外链和文档内跳转，Box使用页面毫米坐标
 type PageLink struct {
-	URI string
-	Box Box
+	URI  string
+	Box  Box
+	Dest *Dest
 }
 
 // GotoA 附件动作

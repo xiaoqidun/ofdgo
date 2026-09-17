@@ -180,9 +180,9 @@ func (r *Renderer) renderPageToContext(ctx *canvas.Context, page *PageContent, d
 	return nil
 }
 
-// PageLinks 获取页面及可见注释的矩形外链，不包含自定义Region
+// PageLinks 获取页面及可见注释的矩形链接，解析书签目标，不包含自定义Region
 // 入参: page 页面内容
-// 返回: []PageLink 页面外链, error 错误信息
+// 返回: []PageLink 页面链接, error 错误信息
 func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
 	box, err := r.GetPageBox(page)
 	if err != nil {
@@ -193,12 +193,31 @@ func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
 		sources = append(sources, annotationActionSources(r.Reader.Annots[page.ID])...)
 	}
 	var links []PageLink
+	var bookmarks map[string]Dest
 	for _, source := range sources {
 		if source.Box.W <= 0 || source.Box.H <= 0 {
 			continue
 		}
 		for _, action := range source.Actions {
-			if action.Event == "CLICK" && action.URI != nil && action.URI.URI != "" && action.Region == nil {
+			if action.Event != "CLICK" || action.Region != nil {
+				continue
+			}
+			if action.Goto != nil {
+				if bookmarks == nil {
+					doc, err := r.Reader.Doc()
+					if err != nil {
+						return nil, err
+					}
+					bookmarks = make(map[string]Dest, len(doc.Bookmarks.Bookmark))
+					for _, bookmark := range doc.Bookmarks.Bookmark {
+						bookmarks[bookmark.Name] = bookmark.Dest
+					}
+				}
+				if dest := gotoDest(action.Goto, bookmarks); dest != nil {
+					value := *dest
+					links = append(links, PageLink{Dest: &value, Box: source.Box})
+				}
+			} else if action.URI != nil && action.URI.URI != "" {
 				links = append(links, PageLink{URI: resolveActionURI(*action.URI), Box: source.Box})
 			}
 		}

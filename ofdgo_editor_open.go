@@ -163,8 +163,23 @@ func editorDirectoryExists(reader *Reader, directory string) bool {
 // prepareSourceIDs 首次新增内容前流式核对原包标识，不依赖可能缺失或过期的MaxUnitID
 // 返回: error 错误信息
 func (e *Editor) prepareSourceIDs() error {
+	maximum, err := e.sourceMaxID(nil)
+	if err != nil {
+		return err
+	}
+	e.maxID = maximum
+	if e.source != nil {
+		e.source.idsReady = true
+	}
+	return nil
+}
+
+// sourceMaxID 核对最大标识，不修改文档或缓存，允许导入准备阶段取消
+// 入参: progress 进度回调
+// 返回: int 最大标识, error 错误信息
+func (e *Editor) sourceMaxID(progress editorProgress) (int, error) {
 	if e.source == nil || e.source.idsReady {
-		return nil
+		return e.maxID, nil
 	}
 	reader := e.source.reader
 	names := make(map[string]bool)
@@ -181,17 +196,16 @@ func (e *Editor) prepareSourceIDs() error {
 		}
 		input, err := reader.openFile(name)
 		if err != nil {
-			return err
+			return 0, err
 		}
-		id, err := editorXMLMaxID(input)
+		id, err := editorXMLMaxID(&editorProgressReader{Reader: input, progress: progress, stage: "ids"})
 		input.Close()
 		if err != nil {
-			return fmt.Errorf("scan IDs in %s: %w", name, err)
+			return 0, fmt.Errorf("scan IDs in %s: %w", name, err)
 		}
 		maximum = max(maximum, id)
 	}
-	e.maxID, e.source.idsReady = maximum, true
-	return nil
+	return maximum, nil
 }
 
 // editorXMLMaxID 流式读取OFD结构中的最大标识，跳过非OFD的XML附件
@@ -202,7 +216,8 @@ func editorXMLMaxID(input io.Reader) (int, error) {
 	maximum, started := 0, false
 	for {
 		token, err := decoder.Token()
-		if err == io.EOF || err != nil && !started {
+		var syntax *xml.SyntaxError
+		if err == io.EOF || !started && errors.As(err, &syntax) {
 			return maximum, nil
 		}
 		if err != nil {
