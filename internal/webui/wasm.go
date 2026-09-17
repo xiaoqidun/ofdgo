@@ -761,46 +761,16 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					return nil, err
 				}
 				item := map[string]any{"id": id, "type": object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "position": position.Index, "count": position.Count, "container": position.Container,
-					"capabilities": map[string]any{"update": capability.Update, "paint": capability.Paint, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode)}}
-				if missing := capability.MissingGlyphs; missing != nil {
-					item["capabilities"].(map[string]any)["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
-				}
-				item["capabilities"].(map[string]any)["enter"] = capability.Transform && (object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit")
-				var alpha *int
-				switch object.Type {
-				case "TextObject":
-					alpha = object.TextObject.Alpha
-				case "ImageObject":
-					alpha = object.ImageObject.Alpha
-					item["imageBorder"] = object.ImageObject.Border != nil
-				case "PathObject":
-					alpha = object.PathObject.Alpha
-				case "CompositeObject", "CompositeGraphicUnit":
-					alpha = object.CompositeGraphicUnit.Alpha
-				}
-				item["alpha"] = 255
-				if alpha != nil {
-					item["alpha"] = *alpha
-				}
+					"capabilities": editorCapabilities(capability, object.Type)}
+				editorAppearance(item, object, capability.Paint, editorPathScale(object.PathObject))
 				if object.Type == "PathObject" {
 					path := object.PathObject
-					item["dashPattern"], item["cap"], item["join"] = path.DashPattern, path.Cap, path.Join
-					item["dashOffset"] = 0.0
-					if path.DashOffset != nil {
-						item["dashOffset"] = *path.DashOffset
-					}
 					kind, geometry := path.Shape()
 					if kind != "" && capability.Update {
 						item["shape"] = string(kind)
 						item["geometry"] = map[string]any{"x": geometry.X, "y": geometry.Y, "width": geometry.W, "height": geometry.H}
 					} else if outline, err := path.Outline(); err == nil {
 						item["outline"] = outline
-					}
-					if capability.Paint {
-						item["fill"], item["stroke"] = path.Fill != nil && *path.Fill, path.Stroke == nil || *path.Stroke
-						item["fillColor"] = editorColorHex(path.FillColor)
-						item["strokeColor"] = editorColorHex((*ofdgo.FillColor)(path.StrokeColor))
-						item["lineWidth"] = path.LineWidth * editorPathScale(path)
 					}
 				}
 				if object.Type == "PathObject" || object.Type == "ImageObject" || object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
@@ -849,15 +819,58 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 						second, _ := strconv.ParseFloat(codes[1].Y, 64)
 						item["lineHeight"] = second - first
 					}
-					if capability.Paint {
-						item["color"] = editorColorHex(object.TextObject.FillColor)
-					}
 				}
 				objects = append(objects, item)
 			}
 		}
 	}
 	return objects, nil
+}
+
+// editorCapabilities 统一顶层与内部对象的操作能力和受限原因
+// 入参: capability 库层能力, kind 对象类型
+// 返回: map[string]any 前端能力
+func editorCapabilities(capability ofdgo.ObjectCapabilities, kind string) map[string]any {
+	result := map[string]any{"update": capability.Update, "paint": capability.Paint, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode),
+		"enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
+	if missing := capability.MissingGlyphs; missing != nil {
+		result["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
+	}
+	return result
+}
+
+// editorAppearance 提供对象自身透明度及有效绘制外观，不混入父对象透明度
+// 入参: item 前端对象, object 有效样式, paint 是否可改色, scale 描边页面倍率
+func editorAppearance(item map[string]any, object ofdgo.GraphicObject, paint bool, scale float64) {
+	var alpha *int
+	switch object.Type {
+	case "TextObject":
+		alpha = object.TextObject.Alpha
+		if paint {
+			item["color"] = editorColorHex(object.TextObject.FillColor)
+		}
+	case "ImageObject":
+		alpha = object.ImageObject.Alpha
+		item["imageBorder"] = object.ImageObject.Border != nil
+	case "PathObject":
+		path := object.PathObject
+		alpha = path.Alpha
+		item["dashPattern"], item["cap"], item["join"], item["dashOffset"] = path.DashPattern, path.Cap, path.Join, 0.0
+		if path.DashOffset != nil {
+			item["dashOffset"] = *path.DashOffset
+		}
+		if paint {
+			item["fill"], item["stroke"] = path.Fill != nil && *path.Fill, path.Stroke == nil || *path.Stroke
+			item["fillColor"], item["strokeColor"] = editorColorHex(path.FillColor), editorColorHex((*ofdgo.FillColor)(path.StrokeColor))
+			item["lineWidth"] = path.LineWidth * scale
+		}
+	case "CompositeObject", "CompositeGraphicUnit":
+		alpha = object.CompositeGraphicUnit.Alpha
+	}
+	item["alpha"] = 255
+	if alpha != nil {
+		item["alpha"] = *alpha
+	}
 }
 
 // compositePath 解析画布复合对象路径
@@ -892,14 +905,29 @@ func compositeObjects(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	fonts, err := currentSession.Reader.Fonts()
+	if err != nil {
+		return nil, err
+	}
+	fontNames := make(map[string]string, len(fonts))
+	for _, font := range fonts {
+		fontNames[font.ID] = font.FontName
+	}
 	objects := make([]any, 0, len(members))
 	for i, member := range members {
 		box := member.Bounds
 		if box.W <= 0 || box.H <= 0 {
 			continue
 		}
-		objects = append(objects, map[string]any{"id": fmt.Sprintf("%s/%d", key, i), "type": member.Object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": i, "position": i, "count": len(members), "container": key, "scoped": true, "contours": member.Contours,
-			"capabilities": map[string]any{"transform": member.Transform, "enter": member.Object.Type == "CompositeObject" || member.Object.Type == "CompositeGraphicUnit"}})
+		item := map[string]any{"id": fmt.Sprintf("%s/%d", key, i), "type": member.Object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": i, "position": i, "count": len(members), "container": key, "scoped": true, "contours": member.Contours,
+			"capabilities": editorCapabilities(member.Capabilities, member.Object.Type)}
+		editorAppearance(item, member.Object, member.Capabilities.Paint, member.StrokeScale)
+		if member.Object.Type == "TextObject" {
+			object := member.Object.TextObject
+			item["text"], _ = object.TextLayout()
+			item["font"], item["fontName"], item["size"] = object.Font, fontNames[object.Font], object.Size
+		}
+		objects = append(objects, item)
 	}
 	return objects, nil
 }
@@ -927,7 +955,8 @@ func changeCompositeObjects(args []js.Value) (any, error) {
 			indexes = append(indexes, i)
 		}
 		page := args[0].Int()
-		switch args[3].String() {
+		operation := args[3].String()
+		switch operation {
 		case "transform":
 			return currentEditor.TransformCompositeObjects(page, path, indexes, args[4].Float(), args[5].Float(), args[6].Float())
 		case "rotate":
@@ -936,6 +965,44 @@ func changeCompositeObjects(args []js.Value) (any, error) {
 			return currentEditor.FlipCompositeObjects(page, path, indexes, args[4].String())
 		case "resize":
 			return currentEditor.ResizeCompositeObjects(page, path, indexes, ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()})
+		case "align":
+			return currentEditor.AlignCompositeObjects(page, path, indexes, args[4].String())
+		case "distribute":
+			return currentEditor.DistributeCompositeObjects(page, path, indexes, args[4].String())
+		case "style":
+			return currentEditor.StyleCompositeObjects(page, path, indexes, objectStyle(args[4]))
+		case "paint", "textColor":
+			style := ofdgo.ObjectStyle{}
+			if operation == "textColor" {
+				style.FillColor = &ofdgo.FillColor{}
+				if err := setEditorColor(style.FillColor, args[4].String()); err != nil {
+					return err
+				}
+			} else {
+				if !args[4].IsNull() {
+					value := args[4].Bool()
+					style.Fill = &value
+				}
+				if !args[6].IsNull() {
+					value := args[6].Bool()
+					style.Stroke = &value
+				}
+				var colors [2]*ofdgo.FillColor
+				for i := range colors {
+					if !args[5+i*2].IsNull() {
+						colors[i] = &ofdgo.FillColor{}
+						if err := setEditorColor(colors[i], args[5+i*2].String()); err != nil {
+							return err
+						}
+					}
+				}
+				style.FillColor, style.StrokeColor = colors[0], (*ofdgo.StrokeColor)(colors[1])
+				if !args[8].IsNull() {
+					value := args[8].Float()
+					style.LineWidth = &value
+				}
+			}
+			return currentEditor.StyleCompositeObjects(page, path, indexes, style)
 		default:
 			return fmt.Errorf("unsupported composite operation")
 		}
@@ -1321,30 +1388,36 @@ func changeOutline(args []js.Value) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func styleObjects(args []js.Value) (any, error) {
 	return changeObjects(func() error {
-		style := ofdgo.ObjectStyle{}
-		value := args[2]
-		if field := value.Get("alpha"); !field.IsUndefined() {
-			v := field.Int()
-			style.Alpha = &v
-		}
-		if field := value.Get("dashPattern"); !field.IsUndefined() {
-			v := field.String()
-			style.DashPattern = &v
-		}
-		if field := value.Get("dashOffset"); !field.IsUndefined() {
-			v := field.Float()
-			style.DashOffset = &v
-		}
-		if field := value.Get("cap"); !field.IsUndefined() {
-			v := field.String()
-			style.Cap = &v
-		}
-		if field := value.Get("join"); !field.IsUndefined() {
-			v := field.String()
-			style.Join = &v
-		}
-		return currentEditor.StyleObjects(args[0].Int(), stringsFromJS(args[1]), style)
+		return currentEditor.StyleObjects(args[0].Int(), stringsFromJS(args[1]), objectStyle(args[2]))
 	})
+}
+
+// objectStyle 读取高级面板提交的外观字段，省略字段保持原值
+// 入参: value 前端样式
+// 返回: ofdgo.ObjectStyle 库层样式
+func objectStyle(value js.Value) ofdgo.ObjectStyle {
+	style := ofdgo.ObjectStyle{}
+	if field := value.Get("alpha"); !field.IsUndefined() {
+		v := field.Int()
+		style.Alpha = &v
+	}
+	if field := value.Get("dashPattern"); !field.IsUndefined() {
+		v := field.String()
+		style.DashPattern = &v
+	}
+	if field := value.Get("dashOffset"); !field.IsUndefined() {
+		v := field.Float()
+		style.DashOffset = &v
+	}
+	if field := value.Get("cap"); !field.IsUndefined() {
+		v := field.String()
+		style.Cap = &v
+	}
+	if field := value.Get("join"); !field.IsUndefined() {
+		v := field.String()
+		style.Join = &v
+	}
+	return style
 }
 
 // clearImport 释放待插页文档

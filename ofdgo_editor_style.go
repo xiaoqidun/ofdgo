@@ -66,6 +66,22 @@ func (e *Editor) resolveEditorStyle(object GraphicObject, layer string) (Graphic
 	if err != nil {
 		return GraphicObject{}, err
 	}
+	return e.resolveEditorStyleDefaults(object, base)
+}
+
+// resolveEditorStyleDefaults 合并对象参数与继承外观，仅生成编辑快照
+// 入参: object 原对象, base 继承参数
+// 返回: GraphicObject 有效样式快照, error 错误信息
+func (e *Editor) resolveEditorStyleDefaults(object GraphicObject, base *DrawParam) (GraphicObject, error) {
+	var id string
+	switch object.Type {
+	case "TextObject":
+		id = object.TextObject.DrawParam
+	case "PathObject":
+		id = object.PathObject.DrawParam
+	default:
+		return cloneEditorData(object), nil
+	}
 	dp, err := e.editorDrawParam(id, make(map[string]bool))
 	if err != nil {
 		return GraphicObject{}, err
@@ -101,73 +117,140 @@ func (e *Editor) resolveEditorStyle(object GraphicObject, layer string) (Graphic
 	return cloneEditorObject(object)
 }
 
-// ObjectStyle 对象外观，nil字段保持原值，长度单位为对象坐标系中的毫米
+// ObjectStyle 对象外观，nil字段保持原值，颜色的Alpha为nil时保留原颜色透明度
+// StyleObjects使用对象坐标毫米，StyleCompositeObjects的LineWidth使用页面毫米
 type ObjectStyle struct {
 	Alpha       *int
+	Fill        *bool
+	Stroke      *bool
+	FillColor   *FillColor
+	StrokeColor *StrokeColor
+	LineWidth   *float64
 	DashPattern *string
 	DashOffset  *float64
 	Cap         *string
 	Join        *string
 }
 
-// StyleObjects 原子更新文字、图片、路径与复合对象透明度，路径另支持描边样式
+// StyleObjects 原子更新对象透明度、文字颜色及路径填充和描边样式
 // 入参: page 页面索引, ids 对象标识, style 待修改属性
 // 返回: error 错误信息
 func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
-	if style.Alpha != nil && (*style.Alpha < 0 || *style.Alpha > 255) {
-		return fmt.Errorf("alpha must be between 0 and 255")
-	}
 	objects, _, err := e.selectedObjects(page, ids)
 	if err != nil {
 		return err
 	}
-	stroke := style.DashPattern != nil || style.DashOffset != nil || style.Cap != nil || style.Join != nil
 	for i := range objects {
-		object := cloneEditorData(objects[i])
-		if stroke && object.Type != "PathObject" {
-			return fmt.Errorf("stroke style requires path objects")
+		if style.Fill != nil || style.Stroke != nil || style.FillColor != nil || style.StrokeColor != nil || style.LineWidth != nil {
+			capability, err := e.ObjectCapabilities(page, ids[i])
+			if err != nil {
+				return err
+			}
+			if !capability.Paint {
+				return fmt.Errorf("object %q cannot be painted: %w", ids[i], capability.editError())
+			}
 		}
-		switch object.Type {
-		case "TextObject":
-			if style.Alpha != nil {
-				object.TextObject.Alpha = style.Alpha
-			}
-		case "ImageObject":
-			if style.Alpha != nil {
-				object.ImageObject.Alpha = style.Alpha
-			}
-		case "CompositeObject", "CompositeGraphicUnit":
-			if style.Alpha != nil {
-				object.CompositeGraphicUnit.Alpha = style.Alpha
-			}
-		case "PathObject":
-			path := &object.PathObject
-			if style.Alpha != nil {
-				path.Alpha = style.Alpha
-			}
-			if style.DashPattern != nil {
-				path.DashPattern = *style.DashPattern
-			}
-			if style.DashOffset != nil {
-				path.DashOffset = style.DashOffset
-			}
-			if style.Cap != nil {
-				path.Cap = *style.Cap
-			}
-			if style.Join != nil {
-				path.Join = *style.Join
-			}
-			if stroke {
-				if err := validateEditorStroke(*path); err != nil {
-					return err
-				}
-			}
-		default:
-			return fmt.Errorf("unsupported object type %q", object.Type)
+		objects[i], err = e.styleObject(objects[i], style)
+		if err != nil {
+			return err
 		}
-		objects[i] = object
 	}
 	return e.updateObjects(page, objects, true)
+}
+
+// styleObject 仅替换请求的外观字段，保留内容、定位及未修改样式
+// 入参: object 原对象, style 待修改属性
+// 返回: GraphicObject 修改后的独立对象, error 错误信息
+func (e *Editor) styleObject(object GraphicObject, style ObjectStyle) (GraphicObject, error) {
+	if style.Alpha != nil && (*style.Alpha < 0 || *style.Alpha > 255) {
+		return GraphicObject{}, fmt.Errorf("alpha must be between 0 and 255")
+	}
+	stroke := style.DashPattern != nil || style.DashOffset != nil || style.Cap != nil || style.Join != nil
+	paint := style.Fill != nil || style.Stroke != nil || style.StrokeColor != nil || style.LineWidth != nil
+	if (stroke || paint) && object.Type != "PathObject" {
+		return GraphicObject{}, fmt.Errorf("stroke style requires path objects")
+	}
+	if style.FillColor != nil && object.Type != "TextObject" && object.Type != "PathObject" {
+		return GraphicObject{}, fmt.Errorf("fill color requires text or path objects")
+	}
+	for _, value := range []*FillColor{style.FillColor, (*FillColor)(style.StrokeColor)} {
+		if value != nil {
+			if err := e.editorColor(value); err != nil {
+				return GraphicObject{}, err
+			}
+		}
+	}
+	switch object.Type {
+	case "TextObject":
+		if style.Alpha != nil {
+			object.TextObject.Alpha = style.Alpha
+		}
+		if style.FillColor != nil {
+			object.TextObject.FillColor = editorStyleColor(style.FillColor, object.TextObject.FillColor)
+		}
+	case "ImageObject":
+		if style.Alpha != nil {
+			object.ImageObject.Alpha = style.Alpha
+		}
+	case "CompositeObject", "CompositeGraphicUnit":
+		if style.Alpha != nil {
+			object.CompositeGraphicUnit.Alpha = style.Alpha
+		}
+	case "PathObject":
+		path := &object.PathObject
+		if style.Alpha != nil {
+			path.Alpha = style.Alpha
+		}
+		if style.Fill != nil {
+			path.Fill = style.Fill
+		}
+		if style.Stroke != nil {
+			path.Stroke = style.Stroke
+		}
+		if style.FillColor != nil {
+			path.FillColor = editorStyleColor(style.FillColor, path.FillColor)
+		}
+		if style.StrokeColor != nil {
+			path.StrokeColor = (*StrokeColor)(editorStyleColor((*FillColor)(style.StrokeColor), (*FillColor)(path.StrokeColor)))
+		}
+		if style.LineWidth != nil {
+			if !finite(*style.LineWidth) || *style.LineWidth <= 0 {
+				return GraphicObject{}, fmt.Errorf("line width must be positive")
+			}
+			path.LineWidth = *style.LineWidth
+		}
+		if style.DashPattern != nil {
+			path.DashPattern = *style.DashPattern
+		}
+		if style.DashOffset != nil {
+			path.DashOffset = style.DashOffset
+		}
+		if style.Cap != nil {
+			path.Cap = *style.Cap
+		}
+		if style.Join != nil {
+			path.Join = *style.Join
+		}
+		if stroke {
+			if err := validateEditorStroke(*path); err != nil {
+				return GraphicObject{}, err
+			}
+		}
+	default:
+		return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
+	}
+	return cloneEditorData(object), nil
+}
+
+// editorStyleColor 替换色值时保留未指定的颜色透明度
+// 入参: color 新颜色, before 原有效颜色
+// 返回: *FillColor 独立颜色
+func editorStyleColor(color, before *FillColor) *FillColor {
+	result := cloneEditorData(color)
+	if result != nil && result.Alpha == nil && before != nil {
+		result.Alpha = cloneEditorData(before.Alpha)
+	}
+	return result
 }
 
 // CopyStyle 将同类型对象的外观复制到选区，不复制内容、位置、资源数据或动作

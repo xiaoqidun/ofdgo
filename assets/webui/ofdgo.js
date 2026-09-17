@@ -1005,7 +1005,7 @@ function openObjectStyle() {
 	const alpha = shared("alpha", 255), dash = shared("dashPattern", "");
 	el.objectOpacity.value = alpha === null ? "" : String(Math.round((1 - alpha / 255) * 10000) / 100);
 	el.objectOpacity.placeholder = alpha === null ? "混合" : "";
-	el.objectStrokeFields.hidden = !items.every(item => item.type === "PathObject");
+	el.objectStrokeFields.hidden = Boolean(state.composite) || !items.every(item => item.type === "PathObject");
 	el.objectDash.value = dash === null ? "mixed" : dash === "" ? "solid" : "custom";
 	el.objectDashPattern.value = dash || "";
 	el.objectDashRow.hidden = el.objectDash.value !== "custom";
@@ -1704,6 +1704,13 @@ async function changeTextStyle(color) {
 		updateObjectControls(canvasEditor.selected, true);
 		return;
 	}
+	if (state.composite) {
+		if (color && fill !== null && canEditObject(item, "paint")) {
+			await changeDocument("ofdgoCompositeTextColor", item, fill);
+		}
+		updateObjectControls(canvasEditor.selected, true);
+		return;
+	}
 	if (item.items) {
 		if (color ? !canEditObject(item, "paint") : !canEditObject(item, "layoutKnown") || !canEditObject(item, "reflow")) return;
 		if (!color && !el.textSize.value) return;
@@ -1823,7 +1830,8 @@ async function changeDocument(name, item, ...args) {
 			return;
 		}
 		const scope = state.composite;
-		const operation = { ofdgoTransformObject: "transform", ofdgoTransformObjects: "transform", ofdgoRotateObjects: "rotate", ofdgoFlipObjects: "flip", ofdgoResizeObjects: "resize" }[name];
+		const operation = { ofdgoTransformObject: "transform", ofdgoTransformObjects: "transform", ofdgoRotateObjects: "rotate", ofdgoFlipObjects: "flip", ofdgoResizeObjects: "resize",
+			ofdgoAlignObject: "align", ofdgoAlignObjects: "align", ofdgoDistributeObjects: "distribute", ofdgoStyleObjects: "style", ofdgoUpdatePathStyle: "paint", ofdgoCompositeTextColor: "textColor" }[name];
 		const members = item?.items || (item ? [item] : []);
 		const scoped = scope && members.length && members.every(member => member.scoped);
 		if (!item) resetCompositeScope();
@@ -5498,7 +5506,7 @@ function updateControls() {
 }
 
 function updateEditorTools() {
-	el.editButton.disabled = !state.doc || !state.ready || state.exporting;
+	el.editButton.disabled = !state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
 	el.editButton.setAttribute("aria-pressed", String(state.editing));
 	el.editButton.title = state.editing ? "阅读" : "编辑";
 	el.editButton.setAttribute("aria-label", el.editButton.title);
@@ -5532,7 +5540,7 @@ function updateObjectControls(item, reset = false) {
 	const disabled = !item || Boolean(item.draft) || !state.ready || state.exporting;
 	el.deleteObjectButton.disabled = disabled || !canEditObject(item, "delete");
 	el.copyObjectButton.disabled = disabled || !canEditObject(item, "copy");
-	el.objectStyleButton.disabled = disabled || Boolean(state.composite) || !canEditObject(item, "transform");
+	el.objectStyleButton.disabled = disabled || !canEditObject(item, "transform");
 	const cropping = Boolean(canvasEditor.crop);
 	el.objectBoundsButton.disabled = disabled || cropping || !canEditObject(item, "transform");
 	el.objectAlign.disabled = disabled || cropping || !canEditObject(item, "arrange");
@@ -5551,7 +5559,7 @@ function updateObjectControls(item, reset = false) {
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const selection = selectedText(item);
 	const text = selection ? currentTextStyle() : state.textDefaults;
-	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(state.composite) || Boolean(item?.items && !selection);
+	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(state.composite && !selection) || Boolean(item?.items && !selection);
 	fontPicker.setDisabled(textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "replaceFont"));
 	el.textSize.disabled = textDisabled || text !== state.textDefaults && !item.draft && (!canEditObject(item, "reflow") || Boolean(item?.items) && !canEditObject(item, "layoutKnown"));
 	el.textColor.disabled = textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "paint");
@@ -5659,6 +5667,7 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("aria-busy", busy);
+	el.editButton.disabled = busy || !state.doc || !state.ready || state.exporting;
 	el.createForm.inert = busy;
 	el.insertForm.inert = busy;
 	el.pageForm.inert = busy;

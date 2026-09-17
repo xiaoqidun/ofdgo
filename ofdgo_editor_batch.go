@@ -268,6 +268,39 @@ func (e *Editor) DistributeObjects(page int, ids []string, axis string) error {
 	if err != nil {
 		return err
 	}
+	matrices, err := editorDistribution(boxes, indexes, axis)
+	if err != nil {
+		return err
+	}
+	var updates []GraphicObject
+	for i, matrix := range matrices {
+		if matrix == IdentityMatrix {
+			continue
+		}
+		object, err := cloneEditorObject(objects[i])
+		if err != nil {
+			return err
+		}
+		object, err = e.transformObject(object, matrix.e, matrix.f, 1)
+		if err != nil {
+			return err
+		}
+		updates = append(updates, object)
+	}
+	return e.updateObjects(page, updates, true)
+}
+
+// editorDistribution 计算等间距平移，位置相同时按原绘制顺序排序
+// 入参: boxes 可见范围, indexes 绘制位置, axis 分布方向
+// 返回: []Matrix 页面平移, error 错误信息
+func editorDistribution(boxes []Box, indexes []editorObjectPosition, axis string) ([]Matrix, error) {
+	matrices := make([]Matrix, len(boxes))
+	for i := range matrices {
+		matrices[i] = IdentityMatrix
+	}
+	if len(boxes) < 3 {
+		return matrices, nil
+	}
 	positions, sizes := make([]float64, len(boxes)), make([]float64, len(boxes))
 	order := make([]int, len(boxes))
 	total := 0.0
@@ -293,11 +326,10 @@ func (e *Editor) DistributeObjects(page int, ids []string, axis string) error {
 			step = 0
 		}
 		if step < 0 || step == 0 && compareEditorPosition(indexes[index], indexes[order[i+1]]) > 0 {
-			return fmt.Errorf("overlap prevents ordered equal-gap distribution")
+			return nil, fmt.Errorf("overlap prevents ordered equal-gap distribution")
 		}
 	}
 	next := positions[first] + sizes[first] + gap
-	updates := make([]GraphicObject, 0, len(order)-2)
 	for _, index := range order[1 : len(order)-1] {
 		position := next
 		next += sizes[index] + gap
@@ -308,17 +340,9 @@ func (e *Editor) DistributeObjects(page int, ids []string, axis string) error {
 		if axis == "vertical" {
 			dx, dy = 0, dx
 		}
-		object, err := cloneEditorObject(objects[index])
-		if err != nil {
-			return err
-		}
-		object, err = e.transformObject(object, dx, dy, 1)
-		if err != nil {
-			return err
-		}
-		updates = append(updates, object)
+		matrices[index] = TranslationMatrix(dx, dy)
 	}
-	return e.updateObjects(page, updates, true)
+	return matrices, nil
 }
 
 // replaceLayers 替换图层容器，隔离历史快照与后续的增删、排序操作
@@ -504,31 +528,45 @@ func (e *Editor) AlignObjects(page int, ids []string, alignment string) error {
 		}
 	}
 	for i, box := range boxes {
-		dx, dy := 0.0, 0.0
-		switch alignment {
-		case "left":
-			dx = target.X - box.X
-		case "center":
-			dx = target.X + (target.W-box.W)/2 - box.X
-		case "right":
-			dx = target.X + target.W - box.W - box.X
-		case "top":
-			dy = target.Y - box.Y
-		case "middle":
-			dy = target.Y + (target.H-box.H)/2 - box.Y
-		case "bottom":
-			dy = target.Y + target.H - box.H - box.Y
-		}
+		matrix := editorAlignment(box, target, alignment)
 		objects[i], err = cloneEditorObject(objects[i])
 		if err != nil {
 			return err
 		}
-		objects[i], err = e.transformObject(objects[i], dx, dy, 1)
+		objects[i], err = e.transformObject(objects[i], matrix.e, matrix.f, 1)
 		if err != nil {
 			return err
 		}
 	}
 	return e.updateObjects(page, objects, true)
+}
+
+// editorAlignment 计算对象范围到目标边缘或中心的平移
+// 入参: box 对象范围, target 目标范围, alignment 对齐方式
+// 返回: Matrix 页面平移
+func editorAlignment(box, target Box, alignment string) Matrix {
+	matrix := IdentityMatrix
+	switch alignment {
+	case "left":
+		matrix.e = target.X - box.X
+	case "center":
+		matrix.e = target.X + (target.W-box.W)/2 - box.X
+	case "right":
+		matrix.e = target.X + target.W - box.W - box.X
+	case "top":
+		matrix.f = target.Y - box.Y
+	case "middle":
+		matrix.f = target.Y + (target.H-box.H)/2 - box.Y
+	case "bottom":
+		matrix.f = target.Y + target.H - box.H - box.Y
+	}
+	if canvas.Equal(matrix.e, 0) {
+		matrix.e = 0
+	}
+	if canvas.Equal(matrix.f, 0) {
+		matrix.f = 0
+	}
+	return matrix
 }
 
 // DeleteObjects 原子删除同页对象，保留其余对象顺序，一次撤销恢复全部
