@@ -1287,6 +1287,7 @@ button.outline-link:hover {
 }
 
 .empty-state[hidden],
+.editor-group > [hidden],
 .panel-row > [hidden],
 .meta-list > [hidden],
 .navigation-tabs[hidden],

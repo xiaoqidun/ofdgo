@@ -54,15 +54,23 @@ type SVGResources struct {
 // svgResourceRenderer 分离外部资源的SVG渲染器
 type svgResourceRenderer struct {
 	*svg.SVG
-	renderer   *Renderer
-	writer     io.Writer
-	fonts      []SVGFont
-	images     []SVGImage
-	imageNames map[image.Image]string
-	seen       map[string]bool
-	styles     strings.Builder
-	err        error
-	objects    map[*GraphicObject]string
+	renderer    *Renderer
+	writer      io.Writer
+	fonts       []SVGFont
+	images      []SVGImage
+	imageNames  map[image.Image]string
+	seen        map[string]bool
+	styles      strings.Builder
+	err         error
+	objects     map[*GraphicObject]string
+	objectStack []svgObjectGroup
+}
+
+// svgObjectGroup 记录编辑分组的稳定路径，不把底纹内部绘制当作成员
+type svgObjectGroup struct {
+	path      string
+	next      int
+	composite bool
 }
 
 // RenderToSVGWithFonts 渲染为SVG并返回页面引用的字体资源，不在SVG中嵌入字体
@@ -135,21 +143,38 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 	return SVGResources{Fonts: s.fonts, Images: s.images}, buffer.Flush()
 }
 
-// beginObject 开始标记当前页面直接对象，模板、注释和内部复合对象不单独标记
+// beginObject 标记直接对象及复合成员，模板与注释不单独标记
 // 入参: object 图形对象
 // 返回: bool 是否写入分组
 func (s *svgResourceRenderer) beginObject(object *GraphicObject) bool {
 	id := s.objects[object]
+	attribute := "data-ofd-object"
 	if id == "" {
-		return false
+		if len(s.objectStack) == 0 || !s.objectStack[len(s.objectStack)-1].composite {
+			return false
+		}
+		parent := &s.objectStack[len(s.objectStack)-1]
+		id = fmt.Sprintf("%s/%d", parent.path, parent.next)
+		parent.next++
+		attribute = "data-ofd-child"
 	}
-	fmt.Fprintf(s.writer, `<g data-ofd-object="%s">`, html.EscapeString(id))
+	s.objectStack = append(s.objectStack, svgObjectGroup{path: id, composite: object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit"})
+	fmt.Fprintf(s.writer, `<g %s="%s">`, attribute, html.EscapeString(id))
 	return true
 }
 
 // endObject 结束对象分组
 func (s *svgResourceRenderer) endObject() {
+	s.objectStack = s.objectStack[:len(s.objectStack)-1]
 	fmt.Fprint(s.writer, `</g>`)
+}
+
+// skipObjects 为不可见资源保留内部成员序号
+// 入参: count 直接成员数量
+func (s *svgResourceRenderer) skipObjects(count int) {
+	if len(s.objectStack) > 0 {
+		s.objectStack[len(s.objectStack)-1].next += count
+	}
 }
 
 // RenderImage 绘制图片，分离资源时保持原始编码、尺寸和变换

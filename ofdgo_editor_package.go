@@ -283,7 +283,8 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 					encoded = data[origin.start:origin.end]
 				} else {
 					var err error
-					encoded, err = editorXMLObject(data, origin, before[nextID], next)
+					current := e.objectOrigin(nextID)
+					encoded, err = editorXMLObject(current.data, current.node, current.object, next)
 					if err != nil {
 						return nil, err
 					}

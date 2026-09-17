@@ -179,6 +179,13 @@ func (e *Editor) transformMatrix(object GraphicObject, matrix Matrix) (GraphicOb
 	if origin == nil {
 		return GraphicObject{}, fmt.Errorf("bordered image requires an original object")
 	}
+	return e.transformBorderedImage(object, matrix, origin, NewRenderer(e.source.reader, WithFontFS(e.fontFS...)))
+}
+
+// transformBorderedImage 将原文图片封装为复合资源，保留边框和裁剪
+// 入参: object 图片对象, matrix 变换, origin 原文, renderer 资源度量器
+// 返回: GraphicObject 变换结果, error 错误信息
+func (e *Editor) transformBorderedImage(object GraphicObject, matrix Matrix, origin *editorObjectOrigin, renderer *Renderer) (GraphicObject, error) {
 	if err := e.prepareSourceIDs(); err != nil {
 		return GraphicObject{}, err
 	}
@@ -186,7 +193,7 @@ func (e *Editor) transformMatrix(object GraphicObject, matrix Matrix) (GraphicOb
 	if err != nil {
 		return GraphicObject{}, err
 	}
-	visible, err := NewRenderer(e.source.reader).ObjectBounds(object, "")
+	visible, err := renderer.ObjectBounds(object, "")
 	if err != nil {
 		return GraphicObject{}, err
 	}
@@ -220,7 +227,11 @@ func (e *Editor) transformMatrix(object GraphicObject, matrix Matrix) (GraphicOb
 	if err != nil {
 		return GraphicObject{}, err
 	}
-	e.resources = append(e.resources, editorResource{name: e.resourceDirectory() + "/Composite_" + id + ".xml", data: data, composite: id})
+	resource, err := e.compositeResource(id, data)
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	e.resources = append(e.resources, resource)
 	object = GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: CompositeGraphicUnit{ID: object.ImageObject.ID, ResourceID: id, Boundary: editorBoxString(extent)}}
 	return transformEditorMatrix(object, matrix), nil
 }

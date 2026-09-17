@@ -25,6 +25,7 @@ let wasmRecoveryTimer = 0;
 let textMeasure = null;
 
 const state = {
+	composite: null,
 	ready: false,
 	wasmExited: false,
 	wasmSeq: 0,
@@ -107,6 +108,7 @@ const el = {
 	selectObjectButton: document.querySelector("#selectObjectButton"),
 	deleteObjectButton: document.querySelector("#deleteObjectButton"),
 	editObjectButton: document.querySelector("#editObjectButton"),
+	compositeBackButton: document.querySelector("#compositeBackButton"),
 	copyObjectButton: document.querySelector("#copyObjectButton"),
 	objectOrder: document.querySelector("#objectOrder"),
 	objectAlign: document.querySelector("#objectAlign"),
@@ -382,6 +384,11 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 			: changeDocument("ofdgoDeleteObjects", item);
 	},
 	onEdit: editCanvasObject,
+	onExitScope: () => {
+		if (!state.composite) return false;
+		exitCompositeScope();
+		return true;
+	},
 	drawStyle: shapeStyle,
 	onTool: updateDrawingControls,
 	onDraw: (index, shape, box, style) => changeDocument("ofdgoInsertShape", null, index, shape,
@@ -439,6 +446,7 @@ editorClick(el.multiSelectButton, () => {
 	canvasEditor.multiple = !canvasEditor.multiple;
 	el.multiSelectButton.setAttribute("aria-pressed", String(canvasEditor.multiple));
 });
+editorClick(el.compositeBackButton, exitCompositeScope);
 editorClick(el.editObjectButton, () => {
 	if (canvasEditor.selected) {
 		editCanvasObject(canvasEditor.selected);
@@ -981,7 +989,7 @@ function openObjectBounds() {
 	state.boundsOriginal = { x: box.x, y: box.y, width: Math.abs(box.width), height: Math.abs(box.height) };
 	for (const [input, key] of [[el.objectX,"x"], [el.objectY,"y"], [el.objectWidth,"width"], [el.objectHeight,"height"]]) setObjectDimension(input, state.boundsOriginal[key]);
 	el.objectAspect.checked = true;
-	el.objectAspect.disabled = !item.shape && (item.items || [item]).some(member => member.type !== "ImageObject" || member.imageBorder) || lineShape(item.shape) && (!box.width || !box.height);
+	el.objectAspect.disabled = Boolean(state.composite) || !item.shape && (item.items || [item]).some(member => member.type !== "ImageObject" || member.imageBorder) || lineShape(item.shape) && (!box.width || !box.height);
 	el.objectWidth.disabled = lineShape(item.shape) && !box.width;
 	el.objectHeight.disabled = lineShape(item.shape) && !box.height;
 	el.objectBoundsStatus.textContent = "";
@@ -1189,6 +1197,7 @@ function setEditorInfo(doc) {
 }
 
 function pageCan(capability, index = state.pageIndex) {
+	if (state.composite && capability === "insert") return false;
 	const bit = { insert: 1, copy: 2, delete: 4, move: 8, resize: 16 }[capability];
 	return Boolean(state.editorInfo?.pageCapabilities?.[index] & bit);
 }
@@ -1198,6 +1207,7 @@ async function toggleEditor() {
 	if (state.editorInfo) {
 		if (!await canvasEditor.commitText() || !await canvasEditor.commitCrop()) return;
 		state.editing = !state.editing;
+		resetCompositeScope();
 		canvasEditor.clear();
 		canvasEditor.setTool("");
 		if (state.editing) {
@@ -1220,6 +1230,7 @@ async function toggleEditor() {
 		state.savedRevision = doc.revision;
 		setEditorInfo(doc);
 		state.editing = true;
+		state.composite = null;
 		state.selectObjects = true;
 		state.ofdBytes = null;
 		state.objectClipboard = null;
@@ -1270,6 +1281,7 @@ async function createDocument(event) {
 			return;
 		}
 		state.editing = true;
+		state.composite = null;
 		state.objectClipboard = null;
 		state.styleClipboard = null;
 		state.fontRenderPending = false;
@@ -1298,6 +1310,7 @@ async function createDocument(event) {
 
 async function editCanvasObject(item) {
 	if (!state.editing || document.body.hasAttribute("aria-busy") || canvasEditor.input || item.items) return;
+	if (canEditObject(item, "enter")) return enterCompositeScope(item.index, item.id);
 	if (item.type === "TextObject") {
 		if (!confirmTextReflow(item)) return;
 	} else if (!canEditObject(item, "update")) return;
@@ -1326,6 +1339,51 @@ async function editCanvasObject(item) {
 			setBusy(false);
 		}
 	}
+}
+
+function mountEditorObjects(index, page, surface) {
+	const scope = state.composite?.index === index ? state.composite : null;
+	canvasEditor.mount(index, scope ? { ...page, objects: scope.objects } : page, surface);
+}
+
+function resetCompositeScope() {
+	const scope = state.composite;
+	if (!scope) return;
+	state.composite = null;
+	canvasEditor.clear();
+	const page = state.pageCache.get(scope.index), surface = pageShell(scope.index)?.querySelector(".page-surface");
+	if (page && surface) mountEditorObjects(scope.index, page, surface);
+}
+
+async function enterCompositeScope(index, key) {
+	const openSeq = state.openSeq;
+	setBusy(true);
+	try {
+		const objects = await callWASM("ofdgoCompositeObjects", index, key);
+		if (openSeq !== state.openSeq) return;
+		canvasEditor.clear();
+		canvasEditor.setTool("");
+		state.composite = { index, key, objects };
+		const page = state.pageCache.get(index), surface = pageShell(index)?.querySelector(".page-surface");
+		if (page && surface) mountEditorObjects(index, page, surface);
+		updateControls();
+		setStatus(pageStatus(index, state.doc.pageCount));
+		el.viewerPanel.focus({ preventScroll: true });
+	} catch (err) {
+		if (openSeq === state.openSeq) showError(err, false);
+	} finally {
+		if (openSeq === state.openSeq) setBusy(false);
+	}
+}
+
+async function exitCompositeScope() {
+	const scope = state.composite;
+	if (!scope) return;
+	const split = scope.key.lastIndexOf("/");
+	if (split >= 0) return enterCompositeScope(scope.index, scope.key.slice(0, split));
+	resetCompositeScope();
+	updateControls();
+	el.viewerPanel.focus({ preventScroll: true });
 }
 
 async function startImageCrop(item) {
@@ -1738,7 +1796,7 @@ function updateDrawingControls() {
 		button.disabled = disabled || !pageCan("insert");
 		button.setAttribute("aria-pressed", String(tool === name));
 	}
-	el.eraseButton.disabled = el.eraseMode.disabled = disabled;
+	el.eraseButton.disabled = el.eraseMode.disabled = disabled || Boolean(state.composite);
 	el.eraseButton.setAttribute("aria-pressed", String(tool.startsWith("erase-")));
 	el.selectObjectButton.setAttribute("aria-pressed", String(canvasEditor.enabled && !tool));
 	const styleDisabled = disabled || (canvasEditor.selected ? !path || !canEditObject(path, "paint") : !pageCan("insert"));
@@ -1764,7 +1822,15 @@ async function changeDocument(name, item, ...args) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const doc = await callWASM(name, ...(item ? [item.index, item.id] : []), ...args);
+		const scope = state.composite;
+		const operation = { ofdgoTransformObject: "transform", ofdgoTransformObjects: "transform", ofdgoRotateObjects: "rotate", ofdgoFlipObjects: "flip", ofdgoResizeObjects: "resize" }[name];
+		const members = item?.items || (item ? [item] : []);
+		const scoped = scope && members.length && members.every(member => member.scoped);
+		if (!item) resetCompositeScope();
+		if (scoped && !operation) throw new Error("内部对象暂不支持此操作");
+		const doc = scoped
+			? await callWASM("ofdgoChangeCompositeObjects", item.index, scope.key, Array.isArray(item.id) ? item.id : members.map(member => member.id), operation, ...args)
+			: await callWASM(name, ...(item ? [item.index, item.id] : []), ...args);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -2355,6 +2421,7 @@ async function openOFD(file) {
 		state.ofdBytes = bytes;
 		state.fileName = file.name || "ofdgo.ofd";
 		state.editing = false;
+		state.composite = null;
 		state.pageSelection.clear();
 		state.pageSelectionAnchor = null;
 		state.pageMultiSelect = false;
@@ -2414,7 +2481,7 @@ async function openSelectedFonts(event) {
 		if (changed) {
 			await applyFontChange();
 		}
-		setStatus(saved ? "字体保存完成" : "字体仅限本次");
+		setStatus(saved ? "字体已保存" : "字体未保存，仅本次可用");
 	} catch (err) {
 		showError(err, false);
 	} finally {
@@ -2435,7 +2502,7 @@ async function loadLocalFonts() {
 		await nextFrame();
 		const available = await fontManager.queryLocal();
 		if (!state.doc) {
-			setStatus(available.length ? `字体授权完成 ${available.length} 个` : "暂无系统字体");
+			setStatus(available.length ? `已授权${available.length}种字体` : "暂无系统字体");
 			return;
 		}
 		if (await loadDocumentLocalFonts(available)) {
@@ -2459,7 +2526,7 @@ async function requestLocalFontsBeforeOpen() {
 	setBusy(true, "正在请求授权", 12, "正在请求授权");
 	try {
 		const available = await fontManager.queryLocal();
-		setStatus(available.length ? `字体授权完成 ${available.length} 个` : "暂无系统字体");
+		setStatus(available.length ? `已授权${available.length}种字体` : "暂无系统字体");
 	} catch (err) {
 		if (err && err.name === "NotAllowedError") {
 			setStatus("字体尚未授权");
@@ -2503,7 +2570,7 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	}
 	if (docFonts.every((font) => font.embedded)) {
 		fontManager.localFonts = [];
-		setStatus("字体均为内嵌");
+		setStatus("字体均已内嵌");
 		updateFontSummary();
 		renderFontList();
 		return false;
@@ -2524,7 +2591,7 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 		fonts.push(fontManager.record(fontManager.localName(item), data, "browser"));
 	}
 	fontManager.localFonts = fonts;
-	setStatus(fonts.length ? `字体加载完成 ${fonts.length} 个` : emptyStatus);
+	setStatus(fonts.length ? `已加载${fonts.length}种字体` : emptyStatus);
 	updateFontSummary();
 	renderFontList();
 	return fonts.length > 0;
@@ -2972,7 +3039,7 @@ async function downloadAttachment(attachment) {
 		if (result.blob) {
 			downloadBytes(result.blob, result.mime, attachment.fileName);
 		}
-		setStatus(`附件下载完成 ${formatBytes(result.size)}`);
+		setStatus(`附件已下载（${formatBytes(result.size)}）`);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			if (err.name === "AbortError") {
@@ -3086,7 +3153,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 			state.savedRevision = state.editorInfo.revision;
 			setDirty(false);
 		}
-		setStatus(`${result.label} ${saving ? "保存" : "导出"}完成 ${formatBytes(result.size)}`);
+		setStatus(`${result.label}已${saving ? "保存" : "导出"}（${formatBytes(result.size)}）`);
 		return true;
 	} catch (err) {
 		if (openSeq === state.openSeq) {
@@ -3321,6 +3388,11 @@ async function processPageRenderQueue() {
 					continue;
 				}
 				const page = await callWASM("ofdgoRenderPage", task.index);
+				const scope = state.composite;
+				if (scope?.index === task.index) {
+					const objects = await callWASM("ofdgoCompositeObjects", task.index, scope.key);
+					if (scope === state.composite && task.openSeq === state.openSeq) scope.objects = objects;
+				}
 				await loadSVGFonts(page.fonts, task.openSeq);
 				if (task.openSeq === state.openSeq) {
 					for (const image of page.images) {
@@ -3436,7 +3508,7 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 	surface.replaceChildren(svg);
 	surface.append(createTextLayer(page.text));
 	if (state.editorInfo) {
-		canvasEditor.mount(index, page, surface);
+		mountEditorObjects(index, page, surface);
 	}
 	for (const link of page.links) {
 		const anchor = document.createElement("a");
@@ -3670,7 +3742,7 @@ async function pasteEditorContent(event) {
 	if (token) {
 		const clipboard = state.objectClipboard;
 		if (!clipboard || token !== clipboard.token) {
-			setStatus("对象剪贴板失效");
+			setStatus("复制内容已失效，请重新复制");
 			return;
 		}
 		const openSeq = state.openSeq;
@@ -3700,7 +3772,7 @@ async function pasteEditorContent(event) {
 			return;
 		}
 		if (!/^image\/(png|jpeg)$/.test(files[0].type)) {
-			setStatus("图片仅支持 PNG、JPG");
+			setStatus("仅支持PNG、JPG图片");
 			return;
 		}
 		await changeDocument("ofdgoInsertImage", null, index, files[0].arrayBuffer().then(bytes => new Uint8Array(bytes)), x, y, width);
@@ -3853,6 +3925,7 @@ function pageShellAtPoint(x, y) {
 }
 
 function setCurrentPage(index) {
+	if (state.composite && state.composite.index !== index) resetCompositeScope();
 	state.pageIndex = index;
 	if (state.fitMode === "width") {
 		state.scale = fitWidthScale(currentPageInfo());
@@ -4958,7 +5031,7 @@ async function focusPageRegion(region, label) {
 		return;
 	}
 	highlightPageRegion(region);
-	setStatus(`${label}定位完成 第 ${region.page} 页`);
+	setStatus(`已定位${label}（第${region.page}页）`);
 }
 
 function highlightPageRegion(region) {
@@ -5453,14 +5526,17 @@ function updateEditorTools() {
 }
 
 function updateObjectControls(item, reset = false) {
+	el.compositeBackButton.hidden = !state.composite;
+	el.compositeBackButton.disabled = !state.ready || state.exporting;
+	el.deleteObjectButton.hidden = Boolean(state.composite);
 	const disabled = !item || Boolean(item.draft) || !state.ready || state.exporting;
 	el.deleteObjectButton.disabled = disabled || !canEditObject(item, "delete");
 	el.copyObjectButton.disabled = disabled || !canEditObject(item, "copy");
-	el.objectStyleButton.disabled = disabled || !canEditObject(item, "transform");
+	el.objectStyleButton.disabled = disabled || Boolean(state.composite) || !canEditObject(item, "transform");
 	const cropping = Boolean(canvasEditor.crop);
 	el.objectBoundsButton.disabled = disabled || cropping || !canEditObject(item, "transform");
 	el.objectAlign.disabled = disabled || cropping || !canEditObject(item, "arrange");
-	el.objectRotate.disabled = el.objectFlip.disabled = el.objectAlign.disabled;
+	el.objectRotate.disabled = el.objectFlip.disabled = disabled || cropping || !canEditObject(item, state.composite ? "transform" : "arrange");
 	el.cropImageButton.disabled = disabled || item.type !== "ImageObject" || !canEditObject(item, "update");
 	el.imageFit.disabled = el.cropImageButton.disabled || cropping;
 	el.cropImageButton.textContent = cropping ? "完成" : "裁剪";
@@ -5470,12 +5546,12 @@ function updateObjectControls(item, reset = false) {
 	el.resetCropButton.setAttribute("aria-label", cropping ? "取消裁剪" : "还原图片");
 	el.resetCropButton.disabled = el.cropImageButton.disabled || !cropping && (!item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
 	el.objectDistribute.disabled = el.objectAlign.disabled || !item.items || item.items.length < 3;
-	el.editObjectButton.disabled = disabled || Boolean(item.items) || item.type === "PathObject"
-		|| !canEditObject(item, item.type === "TextObject" ? "reflow" : "update");
+	el.editObjectButton.disabled = disabled || Boolean(item.items) || !canEditObject(item, "enter") && (item.type === "PathObject"
+		|| !canEditObject(item, item.type === "TextObject" ? "reflow" : "update"));
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const selection = selectedText(item);
 	const text = selection ? currentTextStyle() : state.textDefaults;
-	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(item?.items && !selection);
+	const textDisabled = !state.editing || !state.ready || state.exporting || Boolean(state.composite) || Boolean(item?.items && !selection);
 	fontPicker.setDisabled(textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "replaceFont"));
 	el.textSize.disabled = textDisabled || text !== state.textDefaults && !item.draft && (!canEditObject(item, "reflow") || Boolean(item?.items) && !canEditObject(item, "layoutKnown"));
 	el.textColor.disabled = textDisabled || text !== state.textDefaults && !item.draft && !canEditObject(item, "paint");
@@ -5498,9 +5574,9 @@ function updateObjectControls(item, reset = false) {
 		el.textSize.value = text.size === undefined ? "" : displayPoints(text.size);
 	}
 	el.textSize.placeholder = text.size === undefined ? "混合" : "";
-	el.textSize.title = text.size === undefined ? "字号：混合" : `字号 ${displayPoints(text.size)} pt`;
+	el.textSize.title = text.size === undefined ? "字号不同" : `字号${displayPoints(text.size)}pt`;
 	el.textColor.classList.toggle("mixed-color", Boolean(selection?.items && !text.color));
-	el.textColor.title = selection?.items && !text.color ? "文字颜色：混合" : "文字颜色";
+	el.textColor.title = selection?.items && !text.color ? "文字颜色不同" : "文字颜色";
 	if (reset || el.textColor.disabled || document.activeElement !== el.textColor) {
 		el.textColor.value = text.color || "#000000";
 	}
@@ -5512,7 +5588,7 @@ function updateObjectControls(item, reset = false) {
 	for (const [input, key, label] of [[el.shapeFillColor, "fillColor", "填充颜色"], [el.shapeStrokeColor, "strokeColor", "描边颜色"]]) {
 		const mixed = Boolean(path?.items && path[key] === undefined);
 		input.classList.toggle("mixed-color", mixed);
-		input.title = mixed ? `${label}：混合` : label;
+		input.title = mixed ? `${label}不同` : label;
 		if (path && (reset || document.activeElement !== input)) input.value = path[key] || "#000000";
 	}
 	el.shapeWidth.placeholder = path?.items && path.lineWidth === undefined ? "混合" : "";

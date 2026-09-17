@@ -138,6 +138,8 @@ func RunWASM() {
 	registerCallback("ofdgoReshapeObject", reshapeObject)
 	registerCallback("ofdgoLayoutText", layoutText)
 	registerCallback("ofdgoTransformObjects", transformObjects)
+	registerCallback("ofdgoCompositeObjects", compositeObjects)
+	registerCallback("ofdgoChangeCompositeObjects", changeCompositeObjects)
 	registerCallback("ofdgoAlignObjects", alignObjects)
 	registerCallback("ofdgoDeleteObjects", deleteObjects)
 	registerCallback("ofdgoEraseObjects", eraseObjects)
@@ -265,6 +267,12 @@ func configureDocument(args []js.Value) (any, error) {
 		}
 		if err := currentSession.SetFonts(fonts); err != nil {
 			return nil, err
+		}
+		if currentEditor != nil {
+			currentEditor.SetFontFS()
+			if currentSession.fontFS != nil {
+				currentEditor.SetFontFS(currentSession.fontFS)
+			}
 		}
 	}
 	if currentSession.Renderer.RenderAnnotations != args[1].Bool() {
@@ -757,6 +765,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 				if missing := capability.MissingGlyphs; missing != nil {
 					item["capabilities"].(map[string]any)["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
 				}
+				item["capabilities"].(map[string]any)["enter"] = capability.Transform && (object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit")
 				var alpha *int
 				switch object.Type {
 				case "TextObject":
@@ -849,6 +858,88 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 		}
 	}
 	return objects, nil
+}
+
+// compositePath 解析画布复合对象路径
+// 入参: value 顶层标识与逐层序号
+// 返回: ofdgo.ObjectPath 库层路径, error 错误信息
+func compositePath(value string) (ofdgo.ObjectPath, error) {
+	parts := strings.Split(value, "/")
+	path := ofdgo.ObjectPath{ID: parts[0]}
+	for _, part := range parts[1:] {
+		index, err := strconv.Atoi(part)
+		if err != nil || index < 0 {
+			return path, fmt.Errorf("invalid composite path")
+		}
+		path.Children = append(path.Children, index)
+	}
+	return path, nil
+}
+
+// compositeObjects 获取内部编辑范围，不重新渲染页面或传输图片
+// 入参: args 页面索引与复合路径
+// 返回: any 画布对象列表, error 错误信息
+func compositeObjects(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	key := args[1].String()
+	path, err := compositePath(key)
+	if err != nil {
+		return nil, err
+	}
+	members, err := currentEditor.CompositeObjects(args[0].Int(), path)
+	if err != nil {
+		return nil, err
+	}
+	objects := make([]any, 0, len(members))
+	for i, member := range members {
+		box := member.Bounds
+		if box.W <= 0 || box.H <= 0 {
+			continue
+		}
+		objects = append(objects, map[string]any{"id": fmt.Sprintf("%s/%d", key, i), "type": member.Object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": i, "position": i, "count": len(members), "container": key, "scoped": true, "contours": member.Contours,
+			"capabilities": map[string]any{"transform": member.Transform, "enter": member.Object.Type == "CompositeObject" || member.Object.Type == "CompositeGraphicUnit"}})
+	}
+	return objects, nil
+}
+
+// changeCompositeObjects 复用库层内部选区变换与单次撤销
+// 入参: args 页面索引、父路径、成员路径列表、操作及参数
+// 返回: any 文档信息, error 错误信息
+func changeCompositeObjects(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		key := args[1].String()
+		path, err := compositePath(key)
+		if err != nil {
+			return err
+		}
+		var indexes []int
+		for _, id := range stringsFromJS(args[2]) {
+			part, found := strings.CutPrefix(id, key+"/")
+			if !found {
+				return fmt.Errorf("selection is outside composite")
+			}
+			i, err := strconv.Atoi(part)
+			if err != nil {
+				return err
+			}
+			indexes = append(indexes, i)
+		}
+		page := args[0].Int()
+		switch args[3].String() {
+		case "transform":
+			return currentEditor.TransformCompositeObjects(page, path, indexes, args[4].Float(), args[5].Float(), args[6].Float())
+		case "rotate":
+			return currentEditor.RotateCompositeObjects(page, path, indexes, args[4].Int())
+		case "flip":
+			return currentEditor.FlipCompositeObjects(page, path, indexes, args[4].String())
+		case "resize":
+			return currentEditor.ResizeCompositeObjects(page, path, indexes, ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()})
+		default:
+			return fmt.Errorf("unsupported composite operation")
+		}
+	})
 }
 
 // editorFont 读取对象实际使用的内嵌字体，供画布输入使用
@@ -1384,10 +1475,12 @@ func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 	if err != nil {
 		return editorInfo{}, err
 	}
+	editor.SetFontFS()
 	if currentSession != nil {
 		if currentSession.fontFS != nil {
 			session.fontFS = currentSession.fontFS
 			session.Renderer.SetFontFS(session.fontFS)
+			editor.SetFontFS(session.fontFS)
 		}
 		_ = currentSession.Close()
 	}

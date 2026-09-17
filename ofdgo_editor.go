@@ -22,6 +22,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"image"
+	"io/fs"
 	"math"
 	"reflect"
 	"slices"
@@ -45,6 +46,7 @@ type Editor struct {
 	pages           []PageContent
 	resources       []editorResource
 	fonts           map[string]*font.SFNT
+	fontFS          []fs.FS
 	images          map[string]image.Point
 	resourceID      map[editorResourceKey]string
 	maxID           int
@@ -57,15 +59,22 @@ type Editor struct {
 	outlines        []byte
 }
 
+// SetFontFS 设置几何度量使用的外部字体来源，与预览渲染器保持一致，不嵌入或替换文档字体
+// 入参: fsys 字体文件系统，空参数恢复默认来源
+func (e *Editor) SetFontFS(fsys ...fs.FS) {
+	e.fontFS = slices.Clone(fsys)
+}
+
 // editorResource 文档内嵌资源
 type editorResource struct {
-	name      string
-	data      []byte
-	font      *Font
-	image     *MultiMedia
-	space     *ColorSpace
-	composite string
-	subset    *editorFontSubset
+	name       string
+	data       []byte
+	font       *Font
+	image      *MultiMedia
+	space      *ColorSpace
+	composite  string
+	references []string
+	subset     *editorFontSubset
 }
 
 // editorResourceKey 资源内容和字体集合索引

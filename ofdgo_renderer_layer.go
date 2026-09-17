@@ -115,6 +115,18 @@ func (r *Renderer) renderLayer(ctx *canvas.Context, layer Layer, pageH float64, 
 // 入参: ctx 画布上下文, cgu 复合图元对象, pageH 页面高度, defaults 默认绘制参数, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
 func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu CompositeGraphicUnit, pageH float64, defaults *DrawParam, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
 	if cgu.Visible != nil && !*cgu.Visible {
+		if groups, ok := ctx.Renderer.(interface{ skipObjects(int) }); ok {
+			count, ref, seen := len(cgu.Objects), cgu.ResourceID, make(map[string]bool)
+			for ref != "" && !seen[ref] {
+				seen[ref] = true
+				unit := r.CompositeGraphicUnits[ref]
+				if unit == nil {
+					break
+				}
+				count, ref = count+len(unit.Objects), unit.ResourceID
+			}
+			groups.skipObjects(count)
+		}
 		return
 	}
 	ctx.Push()

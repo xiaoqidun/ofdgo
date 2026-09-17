@@ -174,25 +174,24 @@ export function canEditObject(item, capability) {
 	return Boolean(item) && (item.items || [item]).every(object => Boolean(object.capabilities?.[capability]));
 }
 
-export function missingGlyphMessage(diagnostic) {
+export function missingGlyphMessage(diagnostic, action = "请更换字体") {
 	if (!diagnostic) return "";
 	const characters = Array.from(diagnostic.characters);
 	const sample = characters.slice(0, 8).map(char => /[\p{C}\p{Z}\p{M}]/u.test(char)
-		? `U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}` : char).join(" ");
-	return `字体缺字：${sample}${characters.length > 8 ? ` 等 ${characters.length} 字` : ""}，改选字体`;
+		? `U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}` : char).join("、");
+	return `字体缺字（${sample}${characters.length > 8 ? `等${characters.length}字` : ""}），${action}`;
 }
 
 export function objectEditReason(item) {
-	const labels = { fontUnavailable: "字体不可用", unsupportedColor: "颜色样式暂不支持", unsupportedStyle: "绘制参数暂不支持",
-		unsupportedContainer: "容器特性暂不支持", invalidObject: "对象数据异常" };
+	const labels = { fontUnavailable: "字体不可用", unsupportedColor: "暂不支持此颜色", unsupportedStyle: "暂不支持此样式",
+		unsupportedContainer: "暂不支持此对象结构", invalidObject: "对象数据异常" };
 	const reasons = (item?.items || (item ? [item] : [])).map(object => {
 		const reason = object.capabilities?.reason || "";
 		if (!reason) return "";
-		let message = labels[object.capabilities.reasonCode] || "对象特性暂不支持";
-		if (object.capabilities.missingGlyphs) message = missingGlyphMessage(object.capabilities.missingGlyphs);
-		const available = object.capabilities.transform ? object.capabilities.paint ? "可移动、改色" : "可移动"
-			: object.capabilities.copy && object.capabilities.delete ? "可复制、删除" : "暂不可编辑";
-		return `${available}：${message}`;
+		const message = labels[object.capabilities.reasonCode] || "暂不支持此对象特性";
+		const available = object.capabilities.transform ? object.capabilities.paint ? "仍可移动、改色" : "仍可移动"
+			: object.capabilities.copy && object.capabilities.delete ? "仍可复制、删除" : "暂不可编辑";
+		return object.capabilities.missingGlyphs ? missingGlyphMessage(object.capabilities.missingGlyphs, available) : `${message}，${available}`;
 	});
 	return [...new Set(reasons.filter(Boolean))].join("；");
 }
@@ -257,6 +256,7 @@ export class CanvasEditor {
 	}
 
 	mount(index, page, surface) {
+		surface.querySelector(".edit-layer")?.remove();
 		const crop = this.crop?.item.index === index ? this.crop : null;
 		if (crop) this.closeCrop(true);
 		const pending = this.pendingSelection?.index === index;
@@ -266,7 +266,7 @@ export class CanvasEditor {
 		this.pages.set(surface, { index, width: page.width, height: page.height });
 		const layer = document.createElement("div");
 		layer.className = "edit-layer";
-		const artwork = new Map([...surface.querySelectorAll("[data-ofd-object]")].map((node, order) => [node.getAttribute("data-ofd-object"), { node, order }]));
+		const artwork = new Map([...surface.querySelectorAll("[data-ofd-object], [data-ofd-child]")].map((node, order) => [node.getAttribute("data-ofd-object") || node.getAttribute("data-ofd-child"), { node, order }]));
 		const objects = [...page.objects].sort((a, b) => (artwork.get(a.id)?.order ?? 0) - (artwork.get(b.id)?.order ?? 0));
 		for (const object of objects) {
 			const node = document.createElement("div");
@@ -281,14 +281,14 @@ export class CanvasEditor {
 			node.setAttribute("aria-label", { ImageObject: "图片对象", TextObject: "文字对象", PathObject: "图形对象", CompositeObject: "复合对象", CompositeGraphicUnit: "复合对象" }[object.type]);
 			const item = { ...object, index, page: { width: page.width, height: page.height }, node, surface };
 			item.artwork = artwork.get(object.id)?.node;
-			if (object.type === "PathObject" && (object.shape || object.outline) || (object.type === "CompositeObject" || object.type === "CompositeGraphicUnit") && object.contours?.length) {
+			if (object.type === "PathObject" && (object.shape || object.outline) || (object.scoped || object.type === "CompositeObject" || object.type === "CompositeGraphicUnit") && object.contours?.length) {
 				node.classList.add("edit-contour");
 				const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
 				svg.classList.add("edit-outline");
 				svg.setAttribute("aria-hidden", "true");
 				svg.setAttribute("preserveAspectRatio", "none");
 				let contour;
-				if (object.type === "PathObject") {
+				if (object.type === "PathObject" && !object.scoped) {
 					contour = document.createElementNS("http://www.w3.org/2000/svg", object.shape === "line" ? "line" : object.shape === "ellipse" ? "ellipse" : object.shape === "rectangle" ? "rect" : "path");
 					if (!object.shape) contour.setAttribute("d", object.outline);
 					svg.append(contour);
@@ -950,6 +950,11 @@ export class CanvasEditor {
 			event.preventDefault();
 			event.stopPropagation();
 			this.setTool("");
+			return;
+		}
+		if (event.key === "Escape" && !this.input && this.enabled && !this.options.busy() && !this.nudge && this.options.onExitScope?.()) {
+			event.preventDefault();
+			event.stopPropagation();
 			return;
 		}
 		if (this.input || !this.enabled || !this.selected || this.options.busy() || this.nudgeCommit || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) {

@@ -241,10 +241,12 @@ func (r *Reader) loadRes(resPath string) {
 	for i := range res.DrawParams.DrawParam {
 		dp := &res.DrawParams.DrawParam[i]
 		r.drawParamCache[dp.ID] = dp
+		r.resourceFiles[dp.ID] = fullPath
 	}
 	for i := range res.CompositeGraphicUnits.CompositeGraphicUnit {
 		cgu := &res.CompositeGraphicUnits.CompositeGraphicUnit[i]
 		r.compositeGraphicUnitCache[cgu.ID] = cgu
+		r.resourceFiles[cgu.ID] = fullPath
 	}
 	r.resourcesRead[fullPath] = true
 }

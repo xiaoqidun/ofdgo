@@ -320,7 +320,7 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 		for _, layer := range page.Content.Layer {
 			for _, object := range layer.Objects {
 				before, exists := original[editorObjectID(object)]
-				if origin := e.objectOrigin(editorObjectID(object)); origin != nil && (!exists || before.Type != object.Type) {
+				if origin := e.objectOrigin(editorObjectID(object)); origin != nil && (!exists || before.Type != object.Type || !reflect.DeepEqual(before.CompositeGraphicUnit, object.CompositeGraphicUnit)) {
 					for _, name := range origin.page.original.PageRes {
 						files[e.source.reader.ResPath(resolveResourcePath(origin.page.ref.BaseLoc, "", name))] = true
 					}
@@ -335,7 +335,7 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 				}
 				switch object.Type {
 				case "CompositeObject", "CompositeGraphicUnit":
-					used[object.CompositeGraphicUnit.ResourceID] = true
+					collectCompositeReferences(object.CompositeGraphicUnit, used)
 				case "TextObject":
 					used[object.TextObject.Font] = true
 					if e.source != nil && (!exists || before.Type != object.Type || before.TextObject.Font != object.TextObject.Font) {
@@ -353,6 +353,14 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 						}
 					}
 				}
+			}
+		}
+	}
+	for i := len(e.resources) - 1; i >= 0; i-- {
+		resource := e.resources[i]
+		if resource.composite != "" && used[resource.composite] {
+			for _, id := range resource.references {
+				used[id] = true
 			}
 		}
 	}

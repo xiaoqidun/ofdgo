@@ -350,6 +350,13 @@ func (e *Editor) UpdateObjects(page int, objects []GraphicObject) error {
 // 入参: page 页面索引, objects 新对象, preserveContent 是否保留原内容
 // 返回: error 错误信息
 func (e *Editor) updateObjects(page int, objects []GraphicObject, preserveContent bool) error {
+	return e.updateObjectOrigins(page, objects, preserveContent, nil)
+}
+
+// updateObjectOrigins 原子提交对象及原文来源，撤销时一并恢复
+// 入参: page 页面索引, objects 新对象, preserveContent 是否保留原内容, origins 新原文来源
+// 返回: error 错误信息
+func (e *Editor) updateObjectOrigins(page int, objects []GraphicObject, preserveContent bool, origins map[string]*editorObjectOrigin) error {
 	ids := make([]string, len(objects))
 	for i, object := range objects {
 		ids[i] = editorObjectID(object)
@@ -415,6 +422,13 @@ func (e *Editor) updateObjects(page int, objects []GraphicObject, preserveConten
 					return err
 				}
 			}
+		}
+		if next := origins[ids[i]]; next != nil {
+			if beforeOrigins == nil {
+				beforeOrigins = make(map[string]*editorObjectOrigin)
+				afterOrigins = make(map[string]*editorObjectOrigin)
+			}
+			beforeOrigins[ids[i]], afterOrigins[ids[i]] = origin, next
 		}
 	}
 	if reflect.DeepEqual(before, after) {
@@ -612,7 +626,7 @@ func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) 
 	if _, err := reader.PageContentByIndex(page); err != nil {
 		return nil, err
 	}
-	renderer := NewRenderer(reader)
+	renderer := NewRenderer(reader, WithFontFS(e.fontFS...))
 	boxes := make([]Box, len(objects))
 	for i, object := range objects {
 		layer, _, findErr := e.findObject(page, editorObjectID(object))
