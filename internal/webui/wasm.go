@@ -293,12 +293,15 @@ func configureDocument(args []js.Value) (any, error) {
 	return currentSession.Summary(), nil
 }
 
-// documentInfo 获取首屏之后加载的字体统计和验签结果
+// documentInfo 获取字体统计和验签结果，首个参数为true时逐页扫描
 // 入参: args 浏览器参数
 // 返回: any 文档信息, error 错误信息
 func documentInfo(args []js.Value) (any, error) {
 	if currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	if len(args) > 0 && args[0].Bool() && !currentSession.scanFontInfo() {
+		return map[string]bool{"detailsPending": true}, nil
 	}
 	return currentSession.Info(), nil
 }
@@ -2731,7 +2734,14 @@ func editDocument(args []js.Value) (any, error) {
 		return nil, err
 	}
 	editor.SetHistoryLimit(100)
-	return previewEditor(editor, currentSession.Renderer.RenderAnnotations)
+	if currentSession.fontFS != nil {
+		editor.SetFontFS(currentSession.fontFS)
+	}
+	currentEditor = editor
+	currentSession.editing = true
+	copiedObjects = nil
+	copiedStyle = nil
+	return editorSummary(), nil
 }
 
 // previewEditor 通过内存快照更新预览，不生成中间压缩包

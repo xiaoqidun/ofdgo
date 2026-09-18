@@ -98,18 +98,22 @@ type SignatureStampInfo struct {
 
 // Session WebUI文档会话
 type Session struct {
-	Reader         *ofdgo.Reader
-	Renderer       *ofdgo.Renderer
-	fontFS         *ofdgo.FontFS
-	doc            *ofdgo.Document
-	pageCache      map[int]*ofdgo.PageContent
-	boxCache       map[int]ofdgo.Box
-	textCache      map[int]*ofdgo.PageText
-	svgFonts       map[string][]byte
-	signatures     []SignatureInfo
-	signatureError error
-	signaturesRead bool
-	editing        bool
+	Reader          *ofdgo.Reader
+	Renderer        *ofdgo.Renderer
+	fontFS          *ofdgo.FontFS
+	doc             *ofdgo.Document
+	pageCache       map[int]*ofdgo.PageContent
+	boxCache        map[int]ofdgo.Box
+	textCache       map[int]*ofdgo.PageText
+	svgFonts        map[string][]byte
+	fontScan        *ofdgo.FontInfoScanner
+	fontInfos       []FontInfo
+	fontsRead       bool
+	fontAnnotations bool
+	signatures      []SignatureInfo
+	signatureError  error
+	signaturesRead  bool
+	editing         bool
 }
 
 // DocumentInfo 文档信息
@@ -282,7 +286,42 @@ func (s *Session) SetFonts(fonts []FontFile) error {
 	}
 	clear(s.textCache)
 	clear(s.svgFonts)
+	s.resetFontInfo()
 	return nil
+}
+
+// resetFontInfo 清除字体统计及扫描状态，供字体或注解配置变更后重算
+func (s *Session) resetFontInfo() {
+	s.fontScan = nil
+	s.fontInfos = nil
+	s.fontsRead = false
+}
+
+// scanFontInfo 分步统计字体，每次最多处理一页，完成后保留当前会话的诊断
+// 返回: bool 是否完成
+func (s *Session) scanFontInfo() bool {
+	if s.fontAnnotations != s.Renderer.RenderAnnotations {
+		s.resetFontInfo()
+		s.fontAnnotations = s.Renderer.RenderAnnotations
+	}
+	if s.fontsRead {
+		return true
+	}
+	if s.fontScan == nil {
+		var err error
+		s.fontScan, err = s.Renderer.ScanFontInfos()
+		if err != nil {
+			s.fontsRead = true
+			return true
+		}
+	}
+	if s.fontScan.Next() {
+		return false
+	}
+	s.fontInfos, _ = s.fontScan.Infos()
+	s.fontsRead = true
+	s.fontScan = nil
+	return true
 }
 
 // PageText 获取指定页面文字，复用当前会话的文字索引
@@ -429,9 +468,9 @@ func (s *Session) Info() DocumentInfo {
 		}
 		info.Pages = append(info.Pages, pageInfo)
 	}
-	if fonts, err := s.Renderer.FontInfos(); err == nil {
-		info.Fonts = fonts
+	for !s.scanFontInfo() {
 	}
+	info.Fonts = s.fontInfos
 	info.FontCount = len(info.Fonts)
 	return info
 }

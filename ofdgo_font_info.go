@@ -149,11 +149,61 @@ func (r *Reader) embeddedFontFace(of Font) (*FontFace, error) {
 // FontInfos 获取OFD字体诊断信息
 // 返回: []FontInfo 字体诊断列表, error 错误信息
 func (r *Renderer) FontInfos() ([]FontInfo, error) {
+	scanner, err := r.ScanFontInfos()
+	if err != nil {
+		return nil, err
+	}
+	for scanner.Next() {
+	}
+	return scanner.Infos()
+}
+
+// FontInfoScanner 逐页统计字体用量，不保留页面图元，扫描期间不得修改阅读器或渲染器配置
+type FontInfoScanner struct {
+	renderer *Renderer
+	doc      *Document
+	index    int
+	usage    map[string]int
+}
+
+// ScanFontInfos 创建分步字体诊断，页面读取失败的处理与FontInfos一致
+// 返回: *FontInfoScanner 字体诊断扫描器, error 错误信息
+func (r *Renderer) ScanFontInfos() (*FontInfoScanner, error) {
 	doc, err := r.fontInfoDocument()
 	if err != nil {
 		return nil, err
 	}
-	return r.fontInfos(doc, nil)
+	return &FontInfoScanner{renderer: r, doc: doc, usage: make(map[string]int)}, nil
+}
+
+// Next 统计下一页或模板的字体用量
+// 返回: bool 是否处理了页面，false表示扫描结束
+func (s *FontInfoScanner) Next() bool {
+	pages := len(s.doc.Pages.Page)
+	if s.index < pages {
+		if counts, err := s.renderer.readPageFontUsage(s.doc.Pages.Page[s.index]); err == nil {
+			for id, count := range counts {
+				s.usage[id] += count
+			}
+		}
+	} else if index := s.index - pages; index < len(s.doc.CommonData.TemplatePage) {
+		if page := s.renderer.loadTemplate(s.doc.CommonData.TemplatePage[index].ID); page != nil {
+			s.renderer.countPageFonts(page, s.usage)
+		}
+	} else {
+		return false
+	}
+	s.index++
+	return true
+}
+
+// Infos 获取扫描结束后的字体诊断，不返回未完成的用量统计
+// 返回: []FontInfo 字体诊断列表, error 错误信息
+func (s *FontInfoScanner) Infos() ([]FontInfo, error) {
+	if s.index < len(s.doc.Pages.Page)+len(s.doc.CommonData.TemplatePage) {
+		return nil, fmt.Errorf("font info scan is not complete")
+	}
+	return s.renderer.fontInfos(s.usage)
 }
 
 // FontInfosFromPages 从页面内容获取OFD字体诊断信息
@@ -164,10 +214,7 @@ func (r *Renderer) FontInfosFromPages(pages []*PageContent) ([]FontInfo, error) 
 	if err != nil {
 		return nil, err
 	}
-	if pages == nil {
-		pages = []*PageContent{}
-	}
-	return r.fontInfos(doc, pages)
+	return r.fontInfos(r.fontUsage(doc, pages))
 }
 
 // fontInfoDocument 获取字体诊断文档结构
@@ -187,10 +234,9 @@ func (r *Renderer) fontInfoDocument() (*Document, error) {
 }
 
 // fontInfos 获取OFD字体诊断信息
-// 入参: doc 文档结构, pages 页面内容列表
+// 入参: usage 字体使用次数
 // 返回: []FontInfo 字体诊断列表, error 错误信息
-func (r *Renderer) fontInfos(doc *Document, pages []*PageContent) ([]FontInfo, error) {
-	usage := r.fontUsage(doc, pages)
+func (r *Renderer) fontInfos(usage map[string]int) ([]FontInfo, error) {
 	fonts, err := r.Reader.Fonts()
 	if err != nil {
 		return nil, err
@@ -271,23 +317,13 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 }
 
 // fontUsage 统计文档字体使用次数
-// 入参: doc 文档结构, pages 页面内容列表, nil表示读取文档页面
+// 入参: doc 文档结构, pages 页面内容列表
 // 返回: map[string]int 字体使用次数
 func (r *Renderer) fontUsage(doc *Document, pages []*PageContent) map[string]int {
 	usage := make(map[string]int)
-	if pages == nil {
-		for _, pageRef := range doc.Pages.Page {
-			if counts, err := r.readPageFontUsage(pageRef); err == nil {
-				for id, count := range counts {
-					usage[id] += count
-				}
-			}
-		}
-	} else {
-		for _, page := range pages {
-			if page != nil {
-				r.countPageFonts(page, usage)
-			}
+	for _, page := range pages {
+		if page != nil {
+			r.countPageFonts(page, usage)
 		}
 	}
 	for _, tpl := range doc.CommonData.TemplatePage {

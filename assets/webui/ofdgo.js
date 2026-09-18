@@ -2334,7 +2334,7 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 			updateControls();
 			loadDocumentDetails(openSeq);
 			for (const page of doc.pages) {
-				observeFlowPage(pageShell(page.index), page.index);
+				observeFlowPage(pageShell(page.index));
 				const button = el.pageList.querySelector(`[data-page-index="${page.index}"]`);
 				observeThumbnail(button, page.index, openSeq);
 			}
@@ -3343,15 +3343,17 @@ async function openDocument(options = {}) {
 }
 
 async function loadDocumentDetails(openSeq) {
-	await waitForPaint();
-	if (openSeq !== state.openSeq) {
-		return;
-	}
 	try {
-		const info = await callWASM("ofdgoDocumentInfo");
-		if (openSeq === state.openSeq) {
-			Object.assign(state.doc, info, { detailsPending: false, detailsError: "" });
-			renderMeta();
+		while (openSeq === state.openSeq) {
+			await waitForPaint();
+			if (openSeq !== state.openSeq) return;
+			const info = await callWASM("ofdgoDocumentInfo", true);
+			if (openSeq !== state.openSeq) return;
+			if (!info.detailsPending) {
+				Object.assign(state.doc, info, { detailsPending: false, detailsError: "" });
+				renderMeta();
+				return;
+			}
 		}
 	} catch (err) {
 		if (openSeq === state.openSeq) {
@@ -3607,12 +3609,12 @@ function renderPageFlow() {
 
 		shell.append(surface, placeholder);
 		fragment.append(shell);
-		targets.push([shell, page.index]);
+		targets.push(shell);
 	}
 	el.svgHost.append(fragment);
 	layoutPages();
-	for (const [shell, index] of targets) {
-		observeFlowPage(shell, index);
+	for (const shell of targets) {
+		observeFlowPage(shell);
 	}
 	el.emptyState.hidden = true;
 	el.pageFrame.hidden = false;
@@ -3642,11 +3644,7 @@ function resetPageLoading() {
 	}
 }
 
-function observeFlowPage(shell, index) {
-	const openSeq = state.openSeq;
-	if (index < 4 && index !== state.pageIndex) {
-		renderFlowPage(index, { openSeq, priority: 3 });
-	}
+function observeFlowPage(shell) {
 	const observer = flowPageObserver();
 	if (observer) {
 		observer.observe(shell);
@@ -5152,14 +5150,7 @@ function observeThumbnail(button, index, openSeq = state.openSeq) {
 	if (observer) {
 		observer.observe(button);
 	}
-	if (index === state.pageIndex || index < 6) {
-		renderThumbnail(index, openSeq);
-		return;
-	}
-	if (observer) {
-		return;
-	}
-	if (index < 8) {
+	if (index === state.pageIndex || !observer && index < 8) {
 		renderThumbnail(index, openSeq);
 	}
 }
@@ -5271,7 +5262,7 @@ function renderMeta(keepDetails = false) {
 	renderMetaContent(el.attachmentList, [doc.attachments, doc.attachmentError], renderAttachments);
 	renderMetaContent(el.signatureList, [doc.signatures, doc.signatureError], renderSignatures);
 	renderMetaContent(el.docFontList, doc.fonts || [], renderDocumentFonts);
-	updateTextFonts(canvasEditor.selected, true);
+	refreshEditorFonts();
 	updateLocalFontButton();
 }
 
