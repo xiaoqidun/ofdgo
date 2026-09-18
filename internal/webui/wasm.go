@@ -898,9 +898,15 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 				mixed = true
 			}
 		}
-		objects = append(objects, map[string]any{"id": "annotation:" + annotation.ID, "type": "Annotation", "annotationType": annotation.Type,
-			"x": box.X, "y": box.Y, "width": box.W, "height": box.H, "contours": paths, "remark": annotation.Remark, "creator": annotation.Creator,
-			"alpha": alpha, "alphaMixed": mixed, "capabilities": capabilities})
+		item := map[string]any{"id": "annotation:" + annotation.ID, "type": "Annotation", "annotationType": annotation.Type,
+			"x": box.X, "y": box.Y, "width": box.W, "height": box.H, "remark": annotation.Remark, "creator": annotation.Creator,
+			"alpha": alpha, "alphaMixed": mixed, "capabilities": capabilities}
+		if len(annotation.Appearance.Objects) == 0 && strings.TrimSpace(annotation.Remark) != "" {
+			item["note"] = true
+		} else {
+			item["contours"] = paths
+		}
+		objects = append(objects, item)
 	}
 	return objects, nil
 }
@@ -1066,13 +1072,6 @@ func writeAnnotation(args []js.Value) (any, error) {
 				switch options.Kind {
 				case "note":
 					annotation.Type, annotation.Remark = "Path", options.Text
-					shape, shapeErr := ofdgo.NewShape(ofdgo.ShapeRectangle, ofdgo.Box{W: box.W, H: box.H})
-					if shapeErr != nil {
-						return shapeErr
-					}
-					shape.LineWidth = 0.3
-					shape.StrokeColor = &ofdgo.StrokeColor{Value: "0 128 112"}
-					annotation.Appearance.Objects = []ofdgo.GraphicObject{{Type: "PathObject", PathObject: shape}}
 				case "watermark", "stamp":
 					annotation.Type = "Watermark"
 					if options.Kind == "stamp" {

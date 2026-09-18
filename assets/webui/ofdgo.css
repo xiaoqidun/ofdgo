@@ -1316,6 +1316,7 @@ button.outline-link:hover {
 .navigation-tabs[hidden],
 .page-selection-tools[hidden],
 .form-row[hidden],
+.form-pair[hidden],
 .form-actions > [hidden],
 .annotation-detail[hidden],
 .tool-group[hidden],
@@ -1644,10 +1645,6 @@ button.outline-link:hover {
 	content: "";
 }
 
-.edit-object.selected {
-	background: rgba(15, 123, 104, 0.04);
-}
-
 .edit-object.erasing {
 	background: var(--accent-soft);
 	outline-style: dashed;
@@ -1847,6 +1844,19 @@ button.outline-link:hover {
 
 .annotation-note.no-rotate {
 	--note-rotation: calc(-1 * var(--surface-rotation, 0deg));
+}
+
+.edit-note-icon {
+	position: absolute;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	border: 1px solid var(--line-strong);
+	background: var(--panel);
+	color: var(--accent-strong);
+	font-size: 16px;
+	line-height: 1;
+	pointer-events: none;
 }
 
 .annotation-detail {

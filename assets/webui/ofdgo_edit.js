@@ -303,14 +303,21 @@ export class CanvasEditor {
 			node.setAttribute("aria-label", { ImageObject: "图片对象", TextObject: "文字对象", PathObject: "图形对象", CompositeObject: "复合对象", CompositeGraphicUnit: "复合对象", Annotation: "注解对象" }[object.type]);
 			const item = { ...object, index, page: { width: page.width, height: page.height }, node, surface };
 			item.artwork = artwork.get(object.id)?.node;
-			if (object.type === "PathObject" && (object.shape || object.outline) || (object.scoped || object.type === "CompositeObject" || object.type === "CompositeGraphicUnit" || object.type === "Annotation") && object.contours?.length) {
+			if (object.note) {
+				const icon = document.createElement("span");
+				icon.className = "edit-note-icon";
+				icon.setAttribute("aria-hidden", "true");
+				icon.textContent = "\u24d8";
+				node.append(icon);
+			}
+			if (object.type === "PathObject" && (object.shape || object.outline || object.contours?.length)) {
 				node.classList.add("edit-contour");
 				const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
 				svg.classList.add("edit-outline");
 				svg.setAttribute("aria-hidden", "true");
 				svg.setAttribute("preserveAspectRatio", "none");
 				let contour;
-				if (object.type === "PathObject" && (object.shape || object.oriented || !object.contours?.length)) {
+				if (object.shape || object.oriented || !object.contours?.length) {
 					const shape = object.shape || object.oriented?.kind;
 					contour = document.createElementNS("http://www.w3.org/2000/svg", shape === "line" ? "line" : shape === "ellipse" ? "ellipse" : shape === "rectangle" ? "rect" : "path");
 					if (!shape) contour.setAttribute("d", object.outline);
