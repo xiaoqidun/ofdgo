@@ -144,6 +144,53 @@ type ObjectPosition struct {
 	Count     int
 }
 
+// ObjectInfo 对象的编辑能力及直接容器位置
+type ObjectInfo struct {
+	Capabilities ObjectCapabilities
+	Position     ObjectPosition
+}
+
+// PageObjectInfo 批量获取页面对象能力与位置，不重复扫描同一容器
+// 每次按当前页面计算，变更和撤销后无需失效旧缓存
+// 入参: page 页面索引
+// 返回: map[string]ObjectInfo 对象标识与信息, error 错误信息
+func (e *Editor) PageObjectInfo(page int) (map[string]ObjectInfo, error) {
+	content, err := e.page(page)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]ObjectInfo)
+	orderable := make(map[*editorXML]bool)
+	for i := range content.Content.Layer {
+		layer := &content.Content.Layer[i]
+		nodes := e.objectOrderNodes(page, layer)
+		groups := make(map[*editorXML][]string)
+		for _, object := range layer.Objects {
+			id := editorObjectID(object)
+			parent := e.objectOrderParent(nodes, id)
+			groups[parent] = append(groups[parent], id)
+			if id != "" {
+				result[id] = ObjectInfo{Capabilities: e.objectCapabilities(object, orderable)}
+			}
+		}
+		for parent, ids := range groups {
+			container := layer.ID
+			if parent != nil {
+				container = parent.attr("ID")
+			}
+			for index, id := range ids {
+				if id == "" {
+					continue
+				}
+				info := result[id]
+				info.Position = ObjectPosition{Layer: layer.ID, Container: container, Index: index, Count: len(ids)}
+				result[id] = info
+			}
+		}
+	}
+	return result, nil
+}
+
 // ObjectPosition 获取对象的直接容器及排序位置
 // 入参: page 页面索引, id 对象标识
 // 返回: ObjectPosition 对象位置, error 错误信息
@@ -170,34 +217,42 @@ func (e *Editor) ObjectPosition(page int, id string) (ObjectPosition, error) {
 // 入参: page 页面索引, layer 图层, id 对象标识
 // 返回: *editorXML 原始容器, []int 对象索引
 func (e *Editor) objectOrderIndexes(page int, layer *Layer, id string) (*editorXML, []int) {
-	var nodes map[string]*editorXML
-	var parent *editorXML
-	if e.originalPage(page) {
-		source := e.source.pages[e.pages[page].ID]
-		if slices.ContainsFunc(source.original.Content.Layer, func(original Layer) bool { return original.ID == layer.ID }) {
-			nodes = source.nodes
-		}
-	}
-	if nodes != nil {
-		if node := nodes[id]; node != nil {
-			parent = node.parent
-		} else if origin := e.objectOrigin(id); origin != nil {
-			parent = origin.node.parent
-		}
-	}
+	nodes := e.objectOrderNodes(page, layer)
+	parent := e.objectOrderParent(nodes, id)
 	var indexes []int
 	for i, object := range layer.Objects {
-		node := nodes[editorObjectID(object)]
-		if node == nil && nodes != nil {
-			if origin := e.objectOrigin(editorObjectID(object)); origin != nil {
-				node = origin.node
-			}
-		}
-		if node == nil && parent == nil || node != nil && node.parent == parent {
+		if e.objectOrderParent(nodes, editorObjectID(object)) == parent {
 			indexes = append(indexes, i)
 		}
 	}
 	return parent, indexes
+}
+
+// objectOrderNodes 获取原图层中的对象节点
+// 入参: page 页面索引, layer 当前图层
+// 返回: map[string]*editorXML 原节点映射
+func (e *Editor) objectOrderNodes(page int, layer *Layer) map[string]*editorXML {
+	if e.originalPage(page) {
+		source := e.source.pages[e.pages[page].ID]
+		if slices.ContainsFunc(source.original.Content.Layer, func(original Layer) bool { return original.ID == layer.ID }) {
+			return source.nodes
+		}
+	}
+	return nil
+}
+
+// objectOrderParent 获取对象的原始直接容器，新对象沿用所在图层
+// 入参: nodes 原节点映射, id 对象标识
+// 返回: *editorXML 原始容器
+func (e *Editor) objectOrderParent(nodes map[string]*editorXML, id string) *editorXML {
+	if nodes != nil {
+		if node := nodes[id]; node != nil {
+			return node.parent
+		} else if origin := e.objectOrigin(id); origin != nil {
+			return origin.node.parent
+		}
+	}
+	return nil
 }
 
 // OrderObjects 调整同一图层或页块内选区的绘制顺序，保留各组选中及未选中对象的相对顺序

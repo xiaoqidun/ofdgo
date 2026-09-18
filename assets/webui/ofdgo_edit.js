@@ -307,8 +307,8 @@ export class CanvasEditor {
 		const crop = this.crop?.item.index === index ? this.crop : null;
 		if (crop) this.closeCrop(true);
 		const pending = this.pendingSelection?.index === index;
-		const selected = pending ? this.pendingSelection.ids || page.objects.slice(-1).map(item => item.id)
-			: this.items().filter(item => item.index === index).map(item => item.id);
+		const selected = new Set(pending ? this.pendingSelection.ids || page.objects.slice(-1).map(item => item.id)
+			: this.items().filter(item => item.index === index).map(item => item.id));
 		const selection = [];
 		this.pages.set(surface, { index, width: page.width, height: page.height });
 		const layer = document.createElement("div");
@@ -359,24 +359,14 @@ export class CanvasEditor {
 			}
 			this.nodes.set(node, item);
 			node.addEventListener("focus", () => this.select(item));
-			const handles = !canEditObject(object, "transform") ? [] : lineShape(object.shape) ? ["start", "end"]
-				: object.shape || object.oriented || canEditObject(object, "stretch") ? ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
-					: object.type === "TextObject" && canEditObject(object, "reflow") && canEditObject(object, "layoutKnown")
-						? ["nw", "n", "ne", "e", "se", "s", "sw", "w"] : ["nw", "ne", "sw", "se"];
-			for (const corner of handles) {
-				const handle = document.createElement("span");
-				handle.className = `edit-handle edit-${corner}`;
-				handle.dataset.corner = corner;
-				node.append(handle);
-			}
 			this.place(item);
 			layer.append(node);
-			if (selected.includes(object.id)) {
+			if (selected.has(object.id)) {
 				selection.push(item);
 			}
 		}
 		surface.append(layer);
-		if (selected.length) this.setSelection(selection);
+		if (selected.size) this.setSelection(selection);
 		if (pending) this.pendingSelection = null;
 		if (crop && selection.length === 1 && selection[0].id === crop.item.id
 			&& ["x", "y", "width", "height"].every(key => selection[0][key] === crop.item[key])) {
@@ -487,6 +477,9 @@ export class CanvasEditor {
 		for (const item of this.items()) {
 			item.node.classList.remove("selected", "multi-selected");
 			item.node.setAttribute("aria-pressed", "false");
+			for (const handle of [...item.node.children]) {
+				if (handle.dataset.corner) handle.remove();
+			}
 		}
 		this.selected = items.length < 2 ? items[0] || null : { ...selectionBounds(items), items,
 			id: items.map(item => item.id), index: items[0].index, page: items[0].page, surface: items[0].surface };
@@ -503,6 +496,19 @@ export class CanvasEditor {
 			this.nodes.set(node, this.selected);
 			this.place(this.selected);
 			this.selected.surface.append(node);
+		} else if (items.length === 1) {
+			const item = items[0];
+			const handles = !canEditObject(item, "transform") ? [] : lineShape(item.shape) ? ["start", "end"]
+				: item.shape || item.oriented || canEditObject(item, "stretch") ? ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
+					: item.type === "TextObject" && canEditObject(item, "reflow") && canEditObject(item, "layoutKnown")
+						? ["nw", "n", "ne", "e", "se", "s", "sw", "w"] : ["nw", "ne", "sw", "se"];
+			for (const corner of handles) {
+				const handle = document.createElement("span");
+				handle.className = `edit-handle edit-${corner}`;
+				handle.dataset.corner = corner;
+				item.node.append(handle);
+			}
+			this.place(item);
 		}
 		for (const item of items) {
 			item.node.classList.add("selected");

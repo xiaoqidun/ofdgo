@@ -367,7 +367,14 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 	if err != nil {
 		return ObjectCapabilities{}, err
 	}
-	object := layer.Objects[index]
+	return e.objectCapabilities(layer.Objects[index], make(map[*editorXML]bool)), nil
+}
+
+// objectCapabilities 检查对象能力，在同次遍历中复用原容器排序检查
+// 入参: object 当前对象, orderable 原容器排序能力
+// 返回: ObjectCapabilities 操作能力
+func (e *Editor) objectCapabilities(object GraphicObject, orderable map[*editorXML]bool) ObjectCapabilities {
+	id := editorObjectID(object)
 	all := ObjectCapabilities{Update: true, Paint: object.Type == "TextObject" || object.Type == "PathObject", ReplaceFont: object.Type == "TextObject", Reflow: object.Type == "TextObject" && object.TextObject.ReadDirection == 0 && object.TextObject.CharDirection == 0, LayoutKnown: object.Type == "TextObject" && (e.objectOrigin(id) == nil || object.TextObject.layout != nil), Transform: true, Arrange: true, Copy: true, Delete: true, Order: true}
 	all.ResetCrop = object.Type == "ImageObject" && object.state.crop != nil
 	origin := e.objectOrigin(id)
@@ -377,22 +384,26 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 		all.ReplaceImage = object.Type == "ImageObject"
 		all.CropImage = all.ReplaceImage
 		all.FitImage = all.ReplaceImage && axisAlignedMatrix(NewMatrix(object.ImageObject.CTM))
-		return all, nil
+		return all
 	}
 	node := origin.node
 	if !editorXMLTransformable(node) {
-		return ObjectCapabilities{Reason: "object uses unsupported editing features", ReasonCode: EditUnsupportedObject}, nil
+		return ObjectCapabilities{Reason: "object uses unsupported editing features", ReasonCode: EditUnsupportedObject}
 	}
 	if origin.reason != nil && editReason(origin.reason) == EditUnsupportedStyle {
-		return ObjectCapabilities{Reason: origin.reason.Error(), ReasonCode: EditUnsupportedStyle}, nil
+		return ObjectCapabilities{Reason: origin.reason.Error(), ReasonCode: EditUnsupportedStyle}
 	}
 	if !editorXMLContainersSupported(node) {
-		return ObjectCapabilities{Reason: "object container uses unsupported editing features", ReasonCode: EditUnsupportedContainer}, nil
+		return ObjectCapabilities{Reason: "object container uses unsupported editing features", ReasonCode: EditUnsupportedContainer}
 	}
 	if err := validateEditorGeometry(object); err != nil {
-		return ObjectCapabilities{Reason: err.Error(), ReasonCode: EditInvalidObject}, nil
+		return ObjectCapabilities{Reason: err.Error(), ReasonCode: EditInvalidObject}
 	}
-	all.Order = editorContainerOrderable(node.parent)
+	var checked bool
+	if all.Order, checked = orderable[node.parent]; !checked {
+		all.Order = editorContainerOrderable(node.parent)
+		orderable[node.parent] = all.Order
+	}
 	all.Ungroup = all.Order && e.compositeUngroupable(node) && (object.CompositeGraphicUnit.ResourceID != "" || len(object.CompositeGraphicUnit.Objects) != 0)
 	all.Copy = editorXMLCopyable(node) && (origin.reason == nil || object.Type == "PathObject" && editReason(origin.reason) == EditUnsupportedColor)
 	if origin.reason != nil {
@@ -422,7 +433,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 		}
 	}
 	all.Stretch = all.Transform && e.objectStretchable(object, make(map[string]bool))
-	return all, nil
+	return all
 }
 
 // objectOrigin 获取原对象或其副本的保真来源

@@ -732,6 +732,10 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	info, err := currentEditor.PageObjectInfo(index)
+	if err != nil {
+		return nil, err
+	}
 	textBoxes := make(map[string]ofdgo.Box)
 	for _, run := range text.Runs {
 		for _, box := range run.Boxes {
@@ -770,10 +774,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 			default:
 				continue
 			}
-			capability, err := currentEditor.ObjectCapabilities(index, id)
-			if err != nil {
-				return nil, err
-			}
+			capability := info[id].Capabilities
 			var box ofdgo.Box
 			var contours []ofdgo.ObjectContour
 			switch object.Type {
@@ -786,10 +787,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 				continue
 			}
 			if box.W > 0 && box.H > 0 {
-				position, err := currentEditor.ObjectPosition(index, id)
-				if err != nil {
-					return nil, err
-				}
+				position := info[id].Position
 				item := map[string]any{"id": id, "type": object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": order, "position": position.Index, "count": position.Count, "container": position.Container,
 					"capabilities": editorCapabilities(capability, object.Type)}
 				editorAppearance(item, object, capability.Paint, editorPathScale(object.PathObject))

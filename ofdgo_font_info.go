@@ -353,6 +353,13 @@ func (p *fontUsagePage) decodeObjects(d *xml.Decoder, start xml.StartElement, de
 		switch node.Name.Local {
 		case "PageBlock":
 			return p.decodeObjects(d, node, defaults)
+		case "TextObject":
+			var obj TextObject
+			if err := d.DecodeElement(&obj, &node); err != nil {
+				return err
+			}
+			p.renderer.countObjectFonts(GraphicObject{Type: "TextObject", TextObject: obj}, p.usage, defaults, nil)
+			return nil
 		case "PathObject":
 			var obj struct {
 				PathObject
