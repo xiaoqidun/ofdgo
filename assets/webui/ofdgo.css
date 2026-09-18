@@ -1485,12 +1485,6 @@ button.outline-link:hover {
 	outline: none;
 }
 
-.edit-text::selection,
-.edit-text ::selection {
-	color: #fff;
-	background: var(--accent);
-}
-
 .editing-select .edit-layer {
 	display: block;
 }

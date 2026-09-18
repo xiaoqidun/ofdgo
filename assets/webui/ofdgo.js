@@ -1328,7 +1328,7 @@ function openPagePanel() {
 	for (const [input, key] of [[el.pageWidth, "width"], [el.pageHeight, "height"]]) {
 		const same = pages.every(page => page[key] === pages[0][key]);
 		input.value = same ? String(pages[0][key]) : "";
-		input.placeholder = same ? "" : "不同";
+		input.placeholder = same ? "" : "混合";
 	}
 	el.pageRangeRow.hidden = pages.length === 1;
 	el.pageRange.textContent = `共${pages.length}页`;
@@ -1446,7 +1446,7 @@ async function toggleEditor() {
 
 function confirmTextReflow(item) {
 	return canEditObject(item, "reflow") && (canEditObject(item, "layoutKnown")
-		|| window.confirm("原文排版未知，将重新排版。继续？"));
+		|| window.confirm("将重新排版原文，是否继续？"));
 }
 
 function openCreatePanel() {
@@ -2699,7 +2699,7 @@ async function loadWASM() {
 			} else if (data.type === "import") {
 				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.importing && !el.importCancel.disabled) {
 					const label = { ids: "正在检查", pages: "正在导入", resources: "正在读取", commit: "正在完成" }[data.phase];
-					el.importStatus.textContent = data.total ? `${label}${data.completed}/${data.total}页` : label;
+					el.importStatus.textContent = data.total ? `${label} ${data.completed} / ${data.total} 页` : label;
 					setProgress(label, data.total ? data.completed / data.total * 100 : null);
 					if (data.phase === "commit") el.importCancel.disabled = el.cancelExportButton.disabled = true;
 				}
@@ -2714,7 +2714,7 @@ async function loadWASM() {
 				if (data.ok) {
 					request.resolve(data.data);
 				} else {
-					const err = new Error(missingGlyphMessage(data.missingGlyphs) || (data.reasonCode === "layoutRequired" ? "请先设置段落排版，再跨段或换行修改" : data.error));
+					const err = new Error(missingGlyphMessage(data.missingGlyphs) || (data.reasonCode === "layoutRequired" ? "跨段或换行修改需先设置段落排版" : data.error));
 					if (data.canceled) {
 						err.name = "AbortError";
 					}
@@ -3513,9 +3513,10 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 	const fileName = saving && indices !== null ? `${baseFileName()}_选页.ofd` : whole ? `${baseFileName()}.${extension}` : pageFileName(extension);
 	const pageIndex = state.pageIndex;
 	const dpi = exportFormatUsesDPI(format.value) ? currentImageDPI() : 0;
+	const status = saving ? "正在保存文档" : whole ? STATUS.exporting : STATUS.pageExporting;
 	state.exporting = true;
 	updateControls();
-	setBusy(true, `正在生成 ${label}`, null, whole ? STATUS.exporting : STATUS.pageExporting);
+	setBusy(true, `正在生成 ${label}`, null, status);
 	try {
 		const file = window.showSaveFilePicker ? await window.showSaveFilePicker({
 			suggestedName: fileName,
@@ -3530,7 +3531,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 			if (!await canvasEditor.commitText()) return;
 			if (!await canvasEditor.commitCrop()) return;
 			openSeq = state.openSeq;
-			setBusy(true, `正在生成 ${label}`, null, whole ? STATUS.exporting : STATUS.pageExporting);
+			setBusy(true, `正在生成 ${label}`, null, status);
 		}
 		const result = saving ? await callWASM("ofdgoSaveDocument", indices, file) : whole
 			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, file)
@@ -3549,9 +3550,10 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 		return true;
 	} catch (err) {
 		if (openSeq === state.openSeq) {
-			if (el.batchPagesPanel.open) el.batchPagesStatus.textContent = err.name === "AbortError" ? "导出已取消" : err.message;
+			const canceled = saving ? "保存已取消" : "导出已取消";
+			if (el.batchPagesPanel.open) el.batchPagesStatus.textContent = err.name === "AbortError" ? canceled : err.message;
 			if (err.name === "AbortError") {
-				setStatus("导出已取消");
+				setStatus(canceled);
 			} else {
 				showError(err, false);
 			}
