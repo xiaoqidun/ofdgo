@@ -11,6 +11,31 @@ export function editTextValue(input) {
 	return text;
 }
 
+function editTextSelection(input, saved) {
+	const selection = document.getSelection();
+	const points = saved ? [[saved.startContainer, saved.startOffset], [saved.endContainer, saved.endOffset]]
+		: selection?.rangeCount ? [[selection.anchorNode, selection.anchorOffset], [selection.focusNode, selection.focusOffset]] : null;
+	if (!points || points.some(([node]) => !input.contains(node))) return null;
+	return points.map(([node, position]) => {
+		const range = document.createRange();
+		range.selectNodeContents(input);
+		range.setEnd(node, position);
+		return editTextValue(range.cloneContents()).length;
+	});
+}
+
+function restoreTextSelection(positions, caret, saved) {
+	if (!caret || !positions.length) return;
+	const endpoints = caret.map(point => {
+		const entry = positions.find(entry => entry.end >= point) || positions.at(-1);
+		return [entry.node, Math.max(0, Math.min(point - entry.start, entry.node.length))];
+	});
+	if (saved) {
+		saved.setStart(...endpoints[0]);
+		saved.setEnd(...endpoints[1]);
+	} else document.getSelection().setBaseAndExtent(...endpoints[0], ...endpoints[1]);
+}
+
 export function pagePoint(x, y, rect, page, rotation) {
 	const u = (x - rect.left) / rect.width;
 	const v = (y - rect.top) / rect.height;
@@ -1145,7 +1170,7 @@ export class CanvasEditor {
 		}
 	}
 
-	editText(item, face) {
+	editText(item, face, source = null) {
 		this.cancel();
 		this.closeText();
 		this.select(item);
@@ -1178,17 +1203,28 @@ export class CanvasEditor {
 			letterSpacing: `${(item.letterSpacing || 0) * PX_PER_MM}px`,
 			textIndent: `${(item.firstLineIndent || 0) * PX_PER_MM}px`,
 		});
-		this.input = { input, item, face, fontChoice: item.fontChoice };
+		this.input = { input, item, face, source: Boolean(source), fontChoice: item.fontChoice };
 		const editing = this.input;
+		if (source) editing.history = { entries: [{ value: item.text }], index: 0 };
 		item.artwork?.classList.add("edit-text-source");
 		item.node.classList.add("edit-text-source");
 		item.surface.append(input);
-		input.addEventListener("input", () => this.options.onTextChange());
-		input.addEventListener("compositionstart", () => { editing.composing = true; });
+		if (source) this.paintSourceText(source);
+		input.addEventListener("input", () => {
+			this.recordSourceText();
+			this.options.onTextChange();
+			this.previewSourceText();
+		});
+		input.addEventListener("compositionstart", () => {
+			this.rememberSourceSelection();
+			editing.composing = true;
+		});
 		input.addEventListener("compositionend", () => {
 			editing.composing = false;
+			this.recordSourceText();
 			Promise.resolve().then(() => {
 				if (this.input === editing && editing.commitAfterComposition) this.commitText();
+				else this.previewSourceText();
 			});
 		});
 		input.addEventListener("paste", event => {
@@ -1196,6 +1232,12 @@ export class CanvasEditor {
 			document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
 		});
 		input.addEventListener("beforeinput", event => {
+			if (editing.source && (event.inputType === "historyUndo" || event.inputType === "historyRedo")) {
+				event.preventDefault();
+				this.restoreSourceText(event.inputType === "historyUndo" ? -1 : 1);
+				return;
+			}
+			this.rememberSourceSelection();
 			if (event.inputType.startsWith("format")) event.preventDefault();
 			if (event.inputType === "insertLineBreak") {
 				event.preventDefault();
@@ -1221,7 +1263,10 @@ export class CanvasEditor {
 			if (event.isComposing || editing.composing || editing.saving) {
 				return;
 			}
-			if (event.key === "Escape") {
+			if (editing.source && (event.ctrlKey || event.metaKey) && !event.altKey && ["z", "y"].includes(event.key.toLowerCase())) {
+				event.preventDefault();
+				this.restoreSourceText(event.key.toLowerCase() === "y" || event.shiftKey ? 1 : -1);
+			} else if (event.key === "Escape") {
 				event.preventDefault();
 				this.closeText();
 				this.focus();
@@ -1234,6 +1279,107 @@ export class CanvasEditor {
 		if (!item.draft) document.getSelection().selectAllChildren(input);
 	}
 
+	rememberSourceSelection() {
+		const editing = this.input;
+		if (editing?.history && !editing.composing) editing.history.entries[editing.history.index].caret = editTextSelection(editing.input);
+	}
+
+	recordSourceText() {
+		const editing = this.input;
+		if (!editing?.history || editing.composing) return;
+		const { history, input } = editing, value = editTextValue(input);
+		if (history.entries[history.index].value === value) return;
+		history.entries.splice(++history.index, Infinity, { value, caret: editTextSelection(input) });
+	}
+
+	restoreSourceText(direction) {
+		const editing = this.input, history = editing?.history;
+		if (!history || editing.composing || editing.saving) return;
+		const index = history.index + direction;
+		if (index < 0 || index >= history.entries.length) return;
+		history.index = index;
+		const entry = history.entries[index], fragment = document.createDocumentFragment(), positions = [];
+		let position = 0;
+		for (const text of entry.value.split("\n")) {
+			const paragraph = document.createElement("div");
+			const node = document.createTextNode(text);
+			paragraph.append(node);
+			positions.push({ node, start: position, end: position + text.length });
+			if (!text) paragraph.append(document.createElement("br"));
+			fragment.append(paragraph);
+			position += text.length + 1;
+		}
+		editing.input.replaceChildren(fragment);
+		restoreTextSelection(positions, entry.caret);
+		this.options.onTextChange();
+		this.previewSourceText();
+	}
+
+	async previewSourceText() {
+		const editing = this.input;
+		if (!editing?.source || editing.composing || editing.saving) return;
+		const value = editTextValue(editing.input), font = editing.fontData, size = editing.style?.size || editing.item.size;
+		const current = () => this.input === editing && !editing.composing && !editing.saving && editing.fontData === font
+			&& (editing.style?.size || editing.item.size) === size && editTextValue(editing.input) === value;
+		try {
+			const source = await this.options.onPreviewText(editing.item, value, font, size);
+			if (!current()) return;
+			editing.input.removeAttribute("aria-invalid");
+			editing.input.removeAttribute("title");
+			this.paintSourceText(source);
+		} catch (err) {
+			if (!current()) return;
+			editing.input.setAttribute("aria-invalid", "true");
+			editing.input.title = err.message;
+		}
+	}
+
+	paintSourceText(source) {
+		const editing = this.input, { input, item, face } = editing;
+		const caret = editTextSelection(input, editing.range);
+		const size = (editing.style?.size || item.size) * PX_PER_MM;
+		const context = document.createElement("canvas").getContext("2d");
+		context.font = `${source.italic ? "italic" : "normal"} ${source.weight || 400} ${size}px "${face.family}"`;
+		const metrics = context.measureText("Mg"), baseline = (size + metrics.fontBoundingBoxAscent - metrics.fontBoundingBoxDescent) / 2;
+		Object.assign(input.style, { lineHeight: `${size}px`, fontWeight: String(source.weight || 400), fontStyle: source.italic ? "italic" : "normal" });
+		const fragment = document.createDocumentFragment(), positions = [];
+		let line, lineIndex = -1, naturalX = 0, position = 0, width = 0, height = 0;
+		for (const run of source.runs) {
+			if (!line || run.line) {
+				if (line) position++;
+				line = document.createElement("div");
+				fragment.append(line);
+				lineIndex++;
+				naturalX = 0;
+			}
+			let x = run.x * PX_PER_MM, y = run.y * PX_PER_MM, index = 0;
+			for (const char of run.text) {
+				const span = document.createElement("span"), node = document.createTextNode(char);
+				span.append(node);
+				Object.assign(span.style, { display: "inline-block", opacity: String((item.alpha ?? 255) / 255), transformOrigin: "left top", transform: `translate(${x - naturalX}px,${y - baseline - lineIndex * size}px) scaleX(${source.scale})` });
+				line.append(span);
+				positions.push({ node, start: position, end: position + char.length });
+				position += char.length;
+				const advance = context.measureText(char).width;
+				width = Math.max(width, x + advance * source.scale);
+				height = Math.max(height, y + size - baseline);
+				naturalX += advance;
+				x += run.dx?.length ? run.dx[Math.min(index, run.dx.length - 1)] * PX_PER_MM : run.dy?.length ? 0 : advance * source.scale;
+				y += run.dy?.length ? run.dy[Math.min(index, run.dy.length - 1)] * PX_PER_MM : 0;
+				index++;
+			}
+			if (!line.hasChildNodes()) {
+				const node = document.createTextNode("");
+				line.append(node, document.createElement("br"));
+				positions.push({ node, start: position, end: position });
+			}
+		}
+		input.replaceChildren(fragment);
+		input.style.width = `${Math.max(parseFloat(input.style.width), width + 4)}px`;
+		input.style.minHeight = `${Math.max(parseFloat(input.style.minHeight), height + 4)}px`;
+		restoreTextSelection(positions, caret, editing.range);
+	}
+
 	setTextFont(face, data) {
 		const editing = this.input;
 		document.fonts.add(face);
@@ -1243,6 +1389,7 @@ export class CanvasEditor {
 		editing.input.style.fontFamily = `"${face.family}"`;
 		this.options.onTextChange();
 		editing.input.focus({ preventScroll: true });
+		this.previewSourceText();
 	}
 
 	setTextStyle(values) {
@@ -1254,6 +1401,7 @@ export class CanvasEditor {
 		editing.input.style.fontSize = `${item.size * PX_PER_MM}px`;
 		editing.input.style.color = item.color;
 		this.options.onTextChange();
+		if ("size" in values) this.previewSourceText();
 	}
 
 	textChanged() {

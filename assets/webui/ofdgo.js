@@ -433,6 +433,7 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onDrawText: beginCanvasText,
 	onDrawAnnotation: placeAnnotation,
 	onDrawInk: (index, points, style, pressure) => changeDocument("ofdgoInsertInk", null, index, JSON.stringify(points), style.lineWidth, pressure, style.strokeColor),
+	onPreviewText: (item, value, font, size) => callWASM("ofdgoPreviewText", item.index, item.id, value, font || null, size),
 	onCommitText: (item, value, fontData, color = null) => item.draft
 		? changeDocument("ofdgoInsertText", null, item.index, value, fontData || item.fontData, item.x, item.y, item.size, item.color, item.width, item.wrap, item.align, item.paragraphHeight, item.letterSpacing, ...textIndents(item))
 		: changeDocument("ofdgoUpdateText", item, value, fontData || null, item.size, color),
@@ -1637,7 +1638,7 @@ async function editCanvasObject(item) {
 		return;
 	}
 	if (item.type === "TextObject") {
-		if (!confirmTextReflow(item)) return;
+		if (!canEditObject(item, "textContent")) return;
 	} else if (!canEditObject(item, item.type === "ImageObject" ? "replaceImage" : "update")) return;
 	if (item.type === "PathObject") {
 		el.shapeWidth.focus();
@@ -1652,8 +1653,9 @@ async function editCanvasObject(item) {
 		const data = await callWASM("ofdgoEditorFont", item.font);
 		const face = new FontFace(`ofdgo-edit-${item.font}`, data.bytes);
 		await face.load();
+		const source = canEditObject(item, "layoutKnown") ? null : await callWASM("ofdgoPreviewText", item.index, item.id, item.text);
 		if (openSeq === state.openSeq && item.node.isConnected) {
-			canvasEditor.editText(item, face);
+			canvasEditor.editText(item, face, source);
 		}
 	} catch (err) {
 		if (openSeq === state.openSeq) {
@@ -1828,7 +1830,7 @@ async function beginCanvasText(index, box, surface, page) {
 function editorFonts(item) {
 	const fonts = fontManager.editorFonts();
 	if (item) {
-		fonts.unshift({ id: `embedded:${item.font}`, name: item.fontName || item.font, embedded: true, disabled: !canEditObject(item, "update") });
+		fonts.unshift({ id: `embedded:${item.font}`, name: item.fontName || item.font, embedded: true, disabled: !canEditObject(item, "textContent") });
 	}
 	return fonts;
 }
@@ -2712,7 +2714,7 @@ async function loadWASM() {
 				if (data.ok) {
 					request.resolve(data.data);
 				} else {
-					const err = new Error(missingGlyphMessage(data.missingGlyphs) || data.error);
+					const err = new Error(missingGlyphMessage(data.missingGlyphs) || (data.reasonCode === "layoutRequired" ? "请先设置段落排版，再跨段或换行修改" : data.error));
 					if (data.canceled) {
 						err.name = "AbortError";
 					}
@@ -4710,7 +4712,7 @@ async function selectSearchMatch(index) {
 	if (state.editing) {
 		const node = [...pageShell(match.page).querySelectorAll(".edit-object")].find(node => canvasEditor.nodes.get(node)?.id === match.id);
 		const item = node && canvasEditor.nodes.get(node);
-		if (item?.type === "TextObject" && canEditObject(item, "update")) {
+		if (item?.type === "TextObject") {
 			state.selectObjects = true;
 			setPan(false);
 			canvasEditor.setTool("");
@@ -6036,7 +6038,7 @@ function updateObjectControls(item, reset = false) {
 	el.resetCropButton.disabled = canEditObject(item, "resetCrop") ? disabled : el.cropImageButton.disabled || !cropping && (item.scoped ? !item.cropped : !item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
 	el.objectDistribute.disabled = el.objectAlign.disabled || !item.items || item.items.length < 3;
 	el.editObjectButton.disabled = disabled || Boolean(item.items) || !canEditObject(item, "enter") && (item.type === "PathObject"
-		|| !canEditObject(item, item.type === "TextObject" ? "reflow" : item.type === "ImageObject" ? "replaceImage" : "update"));
+		|| !canEditObject(item, item.type === "TextObject" ? "textContent" : item.type === "ImageObject" ? "replaceImage" : "update"));
 	el.editObjectButton.textContent = canEditObject(item, "enter") ? "进入" : item?.type === "ImageObject" ? "替换" : "修改";
 	el.editObjectButton.title = canEditObject(item, "enter") ? item?.type === "Annotation" ? "进入注解" : "进入组合" : item?.type === "ImageObject" ? "替换图片" : item?.type === "Annotation" ? "修改注解" : "修改对象";
 	el.editObjectButton.setAttribute("aria-label", el.editObjectButton.title);

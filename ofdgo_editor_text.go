@@ -15,9 +15,11 @@
 package ofdgo
 
 import (
+	"errors"
 	"fmt"
 	"image/color"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/go-text/typesetting/segmenter"
 )
@@ -93,6 +95,186 @@ func (e *Editor) StyleText(page int, ids []string, style TextStyle) error {
 		return err
 	}
 	return e.UpdateObjects(page, updates)
+}
+
+// UpdateTextContent 修改文字内容及样式，原文保留定位，已知段落按会话选项重排
+// 原文等长替换保留全部位移，单个TextCode内增删仅调整局部步进，跨定位段增删需显式重排
+// 入参: page 页面索引, id 文字对象标识, value 新内容, style 样式增量
+// 返回: error 错误信息
+func (e *Editor) UpdateTextContent(page int, id, value string, style TextStyle) error {
+	capability, err := e.ObjectCapabilities(page, id)
+	if err != nil {
+		return err
+	}
+	if !capability.ReplaceFont {
+		return capability.editError()
+	}
+	object, err := e.Object(page, id)
+	if err != nil {
+		return err
+	}
+	updates, err := e.styleTextObjects([]GraphicObject{object}, style)
+	if err != nil {
+		return err
+	}
+	text := &updates[0].TextObject
+	if capability.LayoutKnown {
+		_, layout := text.TextLayout()
+		err = e.LayoutText(text, value, layout)
+	} else {
+		err = e.RewriteText(text, value)
+	}
+	if err != nil {
+		return err
+	}
+	return e.updateObjects(page, updates, true)
+}
+
+// RewriteText 保留普通横向原文的字形定位，不修改对象样式或文档
+// 等长替换保留各字原位；单段增删保留前缀和后缀步进，新增字符沿用局部字距
+// 不跨定位段增删或自动生成新行，复杂字形映射需单独处理
+// 入参: obj 原文字对象, value 新内容
+// 返回: error 错误信息
+func (e *Editor) RewriteText(obj *TextObject, value string) error {
+	if obj.ReadDirection != 0 || obj.CharDirection != 0 || len(obj.CGTransform) != 0 || obj.VScale != 0 || obj.Decoration != "" {
+		return &EditError{Code: EditUnsupportedObject, Err: fmt.Errorf("text positioning is not supported for content editing")}
+	}
+	value = strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
+	if !utf8.ValidString(value) || strings.Contains(value, "\t") || strings.Trim(value, "\n") == "" {
+		return fmt.Errorf("text must contain UTF-8 characters without tabs")
+	}
+	check := cloneEditorData(*obj)
+	if err := e.prepareText(&check); err != nil {
+		var missing *MissingGlyphError
+		if !errors.As(err, &missing) {
+			return err
+		}
+	}
+	sfnt, err := e.editorFont(obj.Font)
+	if err != nil {
+		return err
+	}
+	var missing []rune
+	for _, char := range value {
+		if char != '\n' && sfnt.GlyphIndex(char) == 0 {
+			missing = append(missing, char)
+		}
+	}
+	if err := missingGlyphError(obj.Font, missing); err != nil {
+		return err
+	}
+	old, next := []rune(obj.Text()), []rune(value)
+	codes := append([]TextCode(nil), obj.TextCode...)
+	if len(old) == len(next) {
+		offset := 0
+		for i := range codes {
+			if obj.textCodeLineBreak(i) {
+				if next[offset] != '\n' {
+					return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing text lines requires explicit layout")}
+				}
+				offset++
+			}
+			end := offset + len(textCodeRunes(codes[i].Value))
+			content := string(next[offset:end])
+			if strings.Contains(content, "\n") {
+				return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing text lines requires explicit layout")}
+			}
+			if content != string(textCodeRunes(codes[i].Value)) {
+				codes[i].Value = escapeOFDText(content)
+			}
+			offset = end
+		}
+	} else {
+		start := 0
+		for start < min(len(old), len(next)) && old[start] == next[start] {
+			start++
+		}
+		end, nextEnd := len(old), len(next)
+		for end > start && nextEnd > start && old[end-1] == next[nextEnd-1] {
+			end--
+			nextEnd--
+		}
+		if strings.ContainsAny(string(old[start:end])+string(next[start:nextEnd]), "\n") {
+			return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing text lines requires explicit layout")}
+		}
+		offset, changed := 0, false
+		for i := range codes {
+			if obj.textCodeLineBreak(i) {
+				offset++
+			}
+			runes := textCodeRunes(codes[i].Value)
+			limit := offset + len(runes)
+			if start >= offset && end <= limit {
+				from, to := start-offset, end-offset
+				replacement := next[start:nextEnd]
+				content := append(append(append([]rune(nil), runes[:from]...), replacement...), runes[to:]...)
+				if len(content) == 0 {
+					return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("removing a positioned text run requires explicit layout")}
+				}
+				unit := obj.Size / float64(sfnt.UnitsPerEm())
+				if obj.HScale != 0 {
+					unit *= obj.HScale
+				}
+				advance := func(char rune) float64 { return float64(sfnt.GlyphAdvance(sfnt.GlyphIndex(char))) * unit }
+				if codes[i].DeltaX != "" || codes[i].DeltaY == "" {
+					codes[i].DeltaX = rewriteTextDeltas(codes[i].DeltaX, runes, replacement, from, to, advance)
+				}
+				if codes[i].DeltaY != "" {
+					codes[i].DeltaY = rewriteTextDeltas(codes[i].DeltaY, runes, replacement, from, to, func(rune) float64 { return 0 })
+				}
+				codes[i].Value = escapeOFDText(string(content))
+				changed = true
+				break
+			}
+			offset = limit
+		}
+		if !changed {
+			return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("editing across positioned text runs requires explicit layout")}
+		}
+	}
+	check = *obj
+	check.TextCode = codes
+	if err := validateEditorGeometry(GraphicObject{Type: "TextObject", TextObject: check}); err != nil {
+		return err
+	}
+	obj.TextCode, obj.layout = codes, nil
+	return nil
+}
+
+// rewriteTextDeltas 局部替换字符步进，保留未修改字符及末尾附加位移
+// 入参: value 原位移, old 原字符, replacement 替换字符, start 起点, end 终点, advance 字体步进
+// 返回: string 更新后的位移数组
+func rewriteTextDeltas(value string, old, replacement []rune, start, end int, advance func(rune) float64) string {
+	deltas := parseFloatsWithG(value)
+	steps := make([]float64, len(old))
+	for i, char := range old {
+		steps[i] = advance(char)
+		if i < len(old)-1 || len(deltas) >= len(old) {
+			if delta, ok := textDelta(deltas, i); ok {
+				steps[i] = delta
+			}
+		}
+	}
+	tracking := 0.0
+	if len(old) > 0 && (len(old) > 1 || len(deltas) != 0) {
+		index := min(start, max(0, len(old)-2))
+		tracking = steps[index] - advance(old[index])
+	}
+	result := append([]float64(nil), steps[:start]...)
+	for _, char := range replacement {
+		result = append(result, advance(char)+tracking)
+	}
+	result = append(result, steps[end:]...)
+	if len(deltas) < len(old) {
+		result = result[:len(result)-1]
+	} else {
+		result = append(result, deltas[len(old):]...)
+	}
+	numbers := make([]string, len(result))
+	for i, delta := range result {
+		numbers[i] = ofdNumber(delta)
+	}
+	return strings.Join(numbers, " ")
 }
 
 // styleTextObjects 生成文字样式副本，不提交文档或历史

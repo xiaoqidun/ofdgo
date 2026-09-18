@@ -549,9 +549,12 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 			if err := e.prepareText(&text); err != nil {
 				capability.ReasonCode, capability.Reason = editReason(err), err.Error()
 				errors.As(err, &capability.MissingGlyphs)
-			} else if _, err := text.TextFrame(); err == nil {
-				capability.Reflow = text.ReadDirection == 0 && text.CharDirection == 0
-				capability.LayoutKnown = text.layout != nil
+			} else {
+				capability.TextContent = text.ReadDirection == 0 && text.CharDirection == 0
+				if _, err := text.TextFrame(); err == nil {
+					capability.Reflow = capability.TextContent
+					capability.LayoutKnown = text.layout != nil
+				}
 			}
 		}
 		if transform && node.object.Type == "ImageObject" && bounds.box.W > 0 && bounds.box.H > 0 {

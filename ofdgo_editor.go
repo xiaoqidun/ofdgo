@@ -47,6 +47,7 @@ type Editor struct {
 	resources       []editorResource
 	fonts           map[string]*font.SFNT
 	fontFS          []fs.FS
+	fontRenderer    *Renderer
 	images          map[string]image.Point
 	resourceID      map[editorResourceKey]string
 	maxID           int
@@ -60,10 +61,11 @@ type Editor struct {
 	outlines        []byte
 }
 
-// SetFontFS 设置几何度量使用的外部字体来源，与预览渲染器保持一致，不嵌入或替换文档字体
+// SetFontFS 设置编辑与几何度量使用的外部字体来源，不嵌入或替换文档字体
 // 入参: fsys 字体文件系统，空参数恢复默认来源
 func (e *Editor) SetFontFS(fsys ...fs.FS) {
 	e.fontFS = slices.Clone(fsys)
+	e.fontRenderer = nil
 }
 
 // editorResource 文档内嵌资源
@@ -1150,7 +1152,7 @@ func (e *Editor) prepareText(obj *TextObject) error {
 		return err
 	}
 	if !finite(obj.Size) || obj.Size <= 0 {
-		return fmt.Errorf("text requires an embedded font and a positive finite size")
+		return fmt.Errorf("text requires a positive finite size")
 	}
 	if len(obj.TextCode) == 0 {
 		return fmt.Errorf("text codes are empty")
@@ -1197,7 +1199,7 @@ func (e *Editor) prepareText(obj *TextObject) error {
 		}
 		for _, delta := range []string{code.DeltaX, code.DeltaY} {
 			if delta != "" {
-				if err := creationDeltas(delta, len(runes)-1); err != nil {
+				if err := creationDeltas(delta); err != nil {
 					return fmt.Errorf("invalid text delta: %w", err)
 				}
 			}
@@ -1214,19 +1216,16 @@ func (e *Editor) prepareText(obj *TextObject) error {
 }
 
 // creationDeltas 校验文字位移数组及g重复编码
-// 入参: value 位移数组, count 所需位移数量
+// 入参: value 位移数组
 // 返回: error 错误信息
-func creationDeltas(value string, count int) error {
+func creationDeltas(value string) error {
 	fields := strings.Fields(value)
-	numbers := 0
 	for i := 0; i < len(fields); i++ {
-		repeat := 1
 		if fields[i] == "g" {
 			if i+2 >= len(fields) {
 				return fmt.Errorf("incomplete delta repetition")
 			}
-			var err error
-			repeat, err = strconv.Atoi(fields[i+1])
+			repeat, err := strconv.Atoi(fields[i+1])
 			if err != nil || repeat <= 0 {
 				return fmt.Errorf("invalid delta repetition")
 			}
@@ -1235,13 +1234,6 @@ func creationDeltas(value string, count int) error {
 		if _, err := creationNumbers(fields[i], 1); err != nil {
 			return err
 		}
-		if repeat > count-numbers {
-			return fmt.Errorf("too many text deltas")
-		}
-		numbers += repeat
-	}
-	if numbers != count {
-		return fmt.Errorf("expected %d text deltas", count)
 	}
 	return nil
 }

@@ -32,6 +32,8 @@ const (
 	EditFontUnavailable EditReason = "fontUnavailable"
 	// EditMissingGlyphs 字体缺少文字所需字形
 	EditMissingGlyphs EditReason = "missingGlyphs"
+	// EditLayoutRequired 内容变化需要显式选择段落排版
+	EditLayoutRequired EditReason = "layoutRequired"
 	// EditInvalidObject 对象数据未通过校验
 	EditInvalidObject EditReason = "invalidObject"
 )

@@ -134,6 +134,7 @@ func RunWASM() {
 	registerAsyncCallback("ofdgoImportPages", importPages)
 	registerCallback("ofdgoInsertText", insertText)
 	registerCallback("ofdgoUpdateText", updateText)
+	registerCallback("ofdgoPreviewText", previewText)
 	registerCallback("ofdgoStyleText", styleText)
 	registerCallback("ofdgoCheckTextFont", checkTextFont)
 	registerCallback("ofdgoInsertImage", insertImage)
@@ -1615,6 +1616,7 @@ func pasteEditorSelection(page int, clipboard *editorClipboard, dx, dy float64) 
 func editorCapabilities(capability ofdgo.ObjectCapabilities, kind string) map[string]any {
 	result := map[string]any{"update": capability.Update, "paint": capability.Paint, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode),
 		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "fitImage": capability.FitImage, "resetCrop": capability.ResetCrop, "ungroup": capability.Ungroup, "stretch": capability.Stretch, "enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
+	result["textContent"] = capability.TextContent
 	if missing := capability.MissingGlyphs; missing != nil {
 		result["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
 	}
@@ -1985,18 +1987,112 @@ func changeCompositeText(page int, path ofdgo.ObjectPath, indexes []int, operati
 	return currentEditor.StyleCompositeText(page, path, indexes, style)
 }
 
-// editorFont 读取对象实际使用的内嵌字体，供画布输入使用
+// editorFont 读取对象编辑使用的字体，匹配的外部字体不嵌入文档
 // 入参: args 字体资源标识
 // 返回: any 字体数据, error 错误信息
 func editorFont(args []js.Value) (any, error) {
 	if currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
 	}
-	data, err := currentSession.Reader.FontData(args[0].String())
+	data, err := currentEditor.FontData(args[0].String())
 	if err != nil {
 		return nil, err
 	}
 	return successResult(map[string]any{"bytes": bytesToJS(data)}), nil
+}
+
+// previewText 生成保留原定位的输入预览，不修改文档或历史
+// 入参: args 页码、对象路径、新文字、可选字体数据和字号
+// 返回: any 定位段及字体样式, error 错误信息
+func previewText(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	page, key := args[0].Int(), args[1].String()
+	var object ofdgo.GraphicObject
+	if separator := strings.LastIndex(key, "/"); separator >= 0 {
+		path, err := compositePath(key[:separator])
+		if err != nil {
+			return nil, err
+		}
+		member, err := strconv.Atoi(key[separator+1:])
+		if err != nil {
+			return nil, err
+		}
+		members, err := currentEditor.CompositeObjectsAt(page, path, []int{member})
+		if err != nil {
+			return nil, err
+		}
+		object = members[0].Object
+	} else {
+		var err error
+		object, err = currentEditor.Object(page, key)
+		if err != nil {
+			return nil, err
+		}
+	}
+	text := object.TextObject
+	if object.Type != "TextObject" {
+		return nil, fmt.Errorf("object is not text")
+	}
+	editor := currentEditor
+	if len(args) > 3 && !args[3].IsNull() {
+		data, err := bytesFromJS(args[3])
+		if err != nil {
+			return nil, err
+		}
+		editor = ofdgo.NewEditor()
+		text.Font, err = editor.AddFont(FontFile{Data: data}, 0)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(args) > 4 && args[4].Float() != text.Size {
+		var x, y float64
+		if strings.Contains(key, "/") {
+			x, _ = strconv.ParseFloat(text.TextCode[0].X, 64)
+			y, _ = strconv.ParseFloat(text.TextCode[0].Y, 64)
+		}
+		text.Size = args[4].Float()
+		_, layout := text.TextLayout()
+		if err := editor.LayoutText(&text, args[2].String(), layout); err != nil {
+			return nil, err
+		}
+		if strings.Contains(key, "/") {
+			baseline, _ := strconv.ParseFloat(text.TextCode[0].Y, 64)
+			for i := range text.TextCode {
+				code := &text.TextCode[i]
+				cx, _ := strconv.ParseFloat(code.X, 64)
+				cy, _ := strconv.ParseFloat(code.Y, 64)
+				code.X, code.Y = fmt.Sprint(cx+x), fmt.Sprint(cy+y-baseline)
+			}
+		}
+	} else if err := editor.RewriteText(&text, args[2].String()); err != nil {
+		return nil, err
+	}
+	var runs []any
+	var x, y float64
+	value, offset := []rune(text.Text()), 0
+	for _, code := range text.TextCode {
+		if code.X != "" {
+			x, _ = strconv.ParseFloat(code.X, 64)
+		}
+		if code.Y != "" {
+			y, _ = strconv.ParseFloat(code.Y, 64)
+		}
+		line := offset < len(value) && value[offset] == '\n'
+		if line {
+			offset++
+		}
+		content := (ofdgo.TextObject{TextCode: []ofdgo.TextCode{code}}).Text()
+		runs = append(runs, map[string]any{"text": content, "x": x, "y": y, "dx": code.GetDeltaX(), "dy": code.GetDeltaY(), "line": line})
+		offset += len([]rune(content))
+	}
+	scale := text.HScale
+	if scale == 0 {
+		scale = 1
+	}
+	return map[string]any{"runs": runs, "scale": scale, "weight": text.Weight, "italic": text.Italic}, nil
 }
 
 // replaceImage 替换图片资源并更新预览
@@ -2704,6 +2800,24 @@ func updateText(args []js.Value) (any, error) {
 		}
 	}
 	if !args[2].IsNull() {
+		if args[4].Float() == object.TextObject.Size {
+			style := ofdgo.TextStyle{Font: object.TextObject.Font}
+			if !args[5].IsNull() {
+				var fill ofdgo.FillColor
+				if err := setEditorColor(&fill, args[5].String()); err != nil {
+					return nil, err
+				}
+				style.Color = fill.Value
+			}
+			revision := currentEditor.Revision()
+			if err := currentEditor.UpdateTextContent(page, id, args[2].String(), style); err != nil {
+				return nil, err
+			}
+			if currentEditor.Revision() == revision {
+				return editorSummary(), nil
+			}
+			return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+		}
 		object.TextObject.Size = args[4].Float()
 		_, layout := object.TextObject.TextLayout()
 		if err := currentEditor.LayoutText(&object.TextObject, args[2].String(), layout); err != nil {

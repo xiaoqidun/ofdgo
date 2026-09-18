@@ -20,8 +20,8 @@ import (
 	"strconv"
 )
 
-// UpdateCompositeText 修改内部普通横向文字，保留首行起点、变换、裁剪及未修改属性
-// 复杂字形定位不自动重排，空样式保留原字体、字号和颜色
+// UpdateCompositeText 修改内部普通横向文字，原文保留定位，已知段落按会话选项重排
+// 空样式保留原字体、字号和颜色，显式改变字号时重新排版并保留首行基线
 // 入参: page 页面索引, path 父复合路径, index 成员序号, value 文字, style 文字样式增量
 // 返回: error 错误信息
 func (e *Editor) UpdateCompositeText(page int, path ObjectPath, index int, value string, style TextStyle) error {
@@ -100,7 +100,12 @@ func (e *Editor) updateCompositeText(node *editorCompositeNode, member Composite
 		}
 		object.TextObject.Boundary, object.TextObject.CTM = text.Boundary, text.CTM
 	}
-	if options != nil || content != original || style.Size != 0 && style.Size != text.Size {
+	if options == nil && frame == nil && state.layout == nil && (style.Size == 0 || style.Size == text.Size) && content != original {
+		if err := e.RewriteText(&text, content); err != nil {
+			return err
+		}
+		object.TextObject.TextCode = text.TextCode
+	} else if options != nil || content != original || style.Size != 0 && style.Size != text.Size {
 		if style.Size != 0 {
 			text.Size = style.Size
 		}

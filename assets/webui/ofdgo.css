@@ -1655,6 +1655,7 @@ button.outline-link:hover {
 .edit-handle {
 	display: none;
 	position: absolute;
+	z-index: 1;
 	width: calc(9px / var(--surface-scale));
 	height: calc(9px / var(--surface-scale));
 	border: calc(1px / var(--surface-scale)) solid var(--accent);

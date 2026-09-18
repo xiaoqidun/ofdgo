@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/font"
 )
 
@@ -64,6 +65,7 @@ type editorSourcePage struct {
 // ObjectCapabilities 已有对象可执行的操作，Reason说明受限原因
 // Update表示完整替换内容，ReplaceFont表示可显式替换文字字体，Transform表示保留文字定位的几何变换，Order仅限同一图层或末级页块
 // Arrange表示可准确度量对齐与旋转范围；Reflow表示可重排文字，LayoutKnown表示段落选项可恢复
+// TextContent表示可修改文字内容，未知段落保持原定位，不自动重排
 // FitImage表示可按原始图片比例适应或填充现有边界
 // ResetCrop表示有可单独还原的会话裁剪
 // Paint表示可独立修改纯色填充和描边，不要求重新排版文字
@@ -72,6 +74,7 @@ type editorSourcePage struct {
 // Ungroup表示可移除组合容器并保留内部内容，Stretch表示图片及纯图片组合可独立调整宽高
 type ObjectCapabilities struct {
 	Update        bool
+	TextContent   bool
 	Paint         bool
 	ReplaceFont   bool
 	ReplaceImage  bool
@@ -369,6 +372,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 	all.ResetCrop = object.Type == "ImageObject" && object.state.crop != nil
 	origin := e.objectOrigin(id)
 	if origin == nil {
+		all.TextContent = all.Reflow
 		all.Stretch = object.Type == "ImageObject"
 		all.ReplaceImage = object.Type == "ImageObject"
 		all.CropImage = all.ReplaceImage
@@ -411,6 +415,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 		all.Reason, all.ReasonCode = "image actions cannot be transformed together with the border", EditUnsupportedObject
 	}
 	if object.Type == "TextObject" {
+		all.TextContent = all.Update && object.TextObject.ReadDirection == 0 && object.TextObject.CharDirection == 0
 		all.Arrange = all.Update || e.editorTextMeasurable(object.TextObject)
 		if _, err := object.TextObject.TextFrame(); err != nil {
 			all.Reflow = false
@@ -611,7 +616,7 @@ func editorGeometry(object GraphicObject) (string, string) {
 	return "", ""
 }
 
-// editorFont 按需解析原文档内嵌字体，不用系统回退替换原字体
+// editorFont 按需解析内嵌字体或名称匹配的外部字体，不使用无关回退字体
 // 入参: id 字体资源标识
 // 返回: *font.SFNT 字体, error 错误信息
 func (e *Editor) editorFont(id string) (*font.SFNT, error) {
@@ -619,6 +624,22 @@ func (e *Editor) editorFont(id string) (*font.SFNT, error) {
 		return sfnt, nil
 	}
 	if e.source != nil {
+		definition := e.source.reader.fontCache[id]
+		if definition != nil && definition.FontFile == "" {
+			if e.fontRenderer == nil {
+				e.fontRenderer = NewRenderer(e.source.reader, WithFontFS(e.fontFS...))
+			}
+			style := canvasFontStyle(definition)
+			for _, source := range e.fontRenderer.fontSources(id, definition, style) {
+				if !source.exact {
+					continue
+				}
+				if family := e.fontRenderer.loadFontSource(canvas.NewFontFamily(definition.FontName), source, style); family != nil {
+					return family.Face(12, style).Font.SFNT, nil
+				}
+			}
+			return nil, &EditError{Code: EditFontUnavailable, Err: fmt.Errorf("font %q is unavailable", definition.FontName)}
+		}
 		data, err := e.source.reader.FontData(id)
 		if err != nil {
 			return nil, &EditError{Code: EditFontUnavailable, Err: err}
@@ -630,7 +651,28 @@ func (e *Editor) editorFont(id string) (*font.SFNT, error) {
 		e.fonts[id] = sfnt
 		return sfnt, nil
 	}
-	return nil, &EditError{Code: EditFontUnavailable, Err: fmt.Errorf("embedded font %q not found", id)}
+	return nil, &EditError{Code: EditFontUnavailable, Err: fmt.Errorf("font %q not found", id)}
+}
+
+// FontData 获取编辑使用的字体数据，外部字体不写入文档资源
+// 入参: id 字体资源标识
+// 返回: []byte 独立字体数据, error 错误信息
+func (e *Editor) FontData(id string) ([]byte, error) {
+	for _, resource := range e.resources {
+		if resource.font != nil && resource.font.ID == id {
+			return bytes.Clone(resource.data), nil
+		}
+	}
+	if e.source != nil {
+		if definition := e.source.reader.fontCache[id]; definition != nil && definition.FontFile != "" {
+			return e.source.reader.FontData(id)
+		}
+	}
+	sfnt, err := e.editorFont(id)
+	if err != nil {
+		return nil, err
+	}
+	return sfnt.Write(), nil
 }
 
 // editorTextMeasurable 判断原字形能否在不使用回退字体的情况下度量
@@ -787,7 +829,7 @@ func validateEditorGeometry(object GraphicObject) error {
 			}
 			for _, value := range []string{code.DeltaX, code.DeltaY} {
 				if value != "" {
-					if err := creationDeltas(value, len(textCodeRunes(code.Value))-1); err != nil {
+					if err := creationDeltas(value); err != nil {
 						return err
 					}
 				}
