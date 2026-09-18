@@ -5897,6 +5897,10 @@ function restoreScaleAnchor(anchor) {
 	if (!anchor) {
 		return;
 	}
+	if (state.fitMode === "height" || (state.fitMode === "width" && anchor.y <= 0)) {
+		scrollToPage(anchor.index);
+		return;
+	}
 	const shell = pageShell(anchor.index);
 	if (!shell) {
 		return;
