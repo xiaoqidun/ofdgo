@@ -363,7 +363,7 @@ const fontManager = new FontManager({
 	onPermissionChange: updateFontPermissionHint,
 });
 const fontPicker = new FontPicker(el.textFont, el.textFontToggle, el.textFontList, changeTextFont, loadEditorFonts);
-const annotationFields = Object.fromEntries(["CreateForm", "CreateCancel", "Content", "Old", "Font", "Text", "TextRow", "Image", "ImageRow", "Author", "LinkKind", "Address", "AddressRow", "Target", "TargetRow", "X", "Y", "Width", "Height", "Angle", "Opacity", "Tile", "Pages"].map(key => [key, document.querySelector(`#annotation${key}`)]));
+const annotationFields = Object.fromEntries(["CreateForm", "CreateCancel", "Content", "Old", "Font", "Text", "TextRow", "Image", "ImageRow", "Author", "LinkKind", "Address", "AddressRow", "Target", "TargetRow", "X", "Y", "Width", "Height", "Angle", "Opacity", "Tile", "Placement", "PlacementLabel", "Pick", "Scope", "Pages"].map(key => [key, document.querySelector(`#annotation${key}`)]));
 el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
@@ -412,11 +412,26 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 		return true;
 	},
 	drawStyle: shapeStyle,
-	onTool: updateDrawingControls,
+	onTool: () => {
+		updateDrawingControls();
+		const entry = state.annotationCreate;
+		if (entry?.picking && canvasEditor.tool !== "annotation:watermark") {
+			queueMicrotask(() => {
+				if (state.annotationCreate === entry && entry.picking) {
+					entry.picking = false;
+					if (!state.editing || entry.openSeq !== state.openSeq || canvasEditor.tool) {
+						state.annotationCreate = null;
+						return;
+					}
+					el.annotationCreate.showModal();
+				}
+			});
+		}
+	},
 	onDraw: (index, shape, box, style) => changeDocument("ofdgoInsertShape", null, index, shape,
 		box.x, box.y, box.width, box.height, style.fill, style.fillColor, style.stroke, style.strokeColor, style.lineWidth),
 	onDrawText: beginCanvasText,
-	onDrawAnnotation: (index, kind, box) => openAnnotationCreate(kind, index, box),
+	onDrawAnnotation: placeAnnotation,
 	onDrawInk: (index, points, style, pressure) => changeDocument("ofdgoInsertInk", null, index, JSON.stringify(points), style.lineWidth, pressure, style.strokeColor),
 	onCommitText: (item, value, fontData, color = null) => item.draft
 		? changeDocument("ofdgoInsertText", null, item.index, value, fontData || item.fontData, item.x, item.y, item.size, item.color, item.width, item.wrap, item.align, item.paragraphHeight, item.letterSpacing, ...textIndents(item))
@@ -541,17 +556,24 @@ el.annotationTool.addEventListener("change", async () => {
 	}
 });
 annotationFields.CreateCancel.addEventListener("click", () => el.annotationCreate.close());
-el.annotationCreate.addEventListener("close", () => { state.annotationCreate = null; });
+el.annotationCreate.addEventListener("close", () => {
+	if (!state.annotationCreate?.picking) state.annotationCreate = null;
+});
 annotationFields.Content.addEventListener("change", updateAnnotationFields);
 annotationFields.Height.addEventListener("input", () => { state.annotationCreate.height = annotationFields.Height.value; });
 annotationFields.LinkKind.addEventListener("change", updateAnnotationFields);
 annotationFields.Old.addEventListener("change", () => { annotationFields.Text.value = annotationFields.Old.value; });
 annotationFields.Tile.addEventListener("change", () => {
-	if (annotationFields.Tile.value === "tile") {
-		annotationFields.X.value = 10;
-		annotationFields.Y.value = 10;
-	}
+	annotationFields.Placement.value = "page";
+	state.annotationCreate.area = null;
+	updateAnnotationFields();
 });
+annotationFields.Placement.addEventListener("change", () => {
+	if (annotationFields.Placement.value === "custom") pickWatermarkArea();
+	else state.annotationCreate.area = null;
+});
+annotationFields.Pick.addEventListener("click", pickWatermarkArea);
+annotationFields.Scope.addEventListener("change", updateAnnotationFields);
 annotationFields.CreateForm.addEventListener("submit", async event => {
 	event.preventDefault();
 	const entry = state.annotationCreate;
@@ -569,9 +591,12 @@ annotationFields.CreateForm.addEventListener("submit", async event => {
 		}
 		if (openSeq !== state.openSeq || state.annotationCreate !== entry) return;
 		const options = { kind: entry.kind, id: entry.item?.id.replace("annotation:", "") || "", text: value("Text"), old: value("Old"),
-			creator: value("Author"), pages: value("Pages"), uri: value("Address"), target: value("LinkKind") === "page" ? Number(value("Target")) : 0,
+			creator: value("Author"), pages: entry.kind === "watermark" && value("Scope") !== "custom"
+				? value("Scope") === "all" ? `1-${state.doc.pageCount}` : String(entry.index + 1) : value("Pages"),
+			uri: value("Address"), target: value("LinkKind") === "page" ? Number(value("Target")) : 0,
 			x: Number(value("X")), y: Number(value("Y")), width: entry.kind === "note" ? 5 : Number(value("Width")), height: entry.kind === "note" ? 5 : Number(value("Height")),
 			angle: Number(value("Angle")), alpha: Math.round((100 - Number(value("Opacity"))) * 255 / 100), tile: value("Tile") === "tile",
+			area: entry.kind === "watermark" && value("Placement") === "custom" ? entry.area : null,
 			size: state.textDefaults.size, color: state.textDefaults.color };
 		if (entry.kind === "link" && entry.item) {
 			options.base = entry.info?.linkBase || "";
@@ -1455,6 +1480,8 @@ async function createDocument(event) {
 		state.editorViews.clear();
 		state.styleClipboard = null;
 		state.fontRenderPending = false;
+		state.annotationCreate = null;
+		canvasEditor.setTool("");
 		canvasEditor.clear();
 		delete state.textDefaults.fontChoice;
 		updateTextFonts(null, true);
@@ -1514,7 +1541,7 @@ function openObjectPicker(items = canvasEditor.pageItems(state.pageIndex)) {
 function openAnnotationCreate(kind, index, box = null, item = null, info = null) {
 	const page = state.doc.pages[index];
 	const width = Math.min(60, page.width), height = 12;
-	state.annotationCreate = { kind, index, item, info, height: box?.height || height };
+	state.annotationCreate = { kind, index, item, info, openSeq: state.openSeq, height: box?.height || height };
 	annotationFields.CreateForm.reset();
 	annotationFields.Text.value = kind === "watermark" ? "水印" : "";
 	annotationFields.Pages.value = String(index + 1);
@@ -1541,6 +1568,38 @@ function openAnnotationCreate(kind, index, box = null, item = null, info = null)
 	focus?.focus();
 }
 
+function pickWatermarkArea() {
+	state.annotationCreate.picking = true;
+	annotationFields.Placement.value = state.annotationCreate.area ? "custom" : "page";
+	el.annotationCreate.close();
+	canvasEditor.select(null);
+	toggleDrawingTool("annotation:watermark");
+}
+
+function placeAnnotation(index, kind, box) {
+	const entry = state.annotationCreate;
+	if (kind !== "watermark" || !entry?.picking) {
+		openAnnotationCreate(kind, index, box);
+		return;
+	}
+	entry.picking = false;
+	const page = state.doc.pages[index], tile = annotationFields.Tile.value === "tile";
+	const x = Math.max(0, Math.min(1, box.x / page.width));
+	const y = Math.max(0, Math.min(1, box.y / page.height));
+	const right = Math.max(x, Math.min(1, (box.x + box.width) / page.width));
+	const bottom = Math.max(y, Math.min(1, (box.y + box.height) / page.height));
+	if (!tile || right > x && bottom > y) {
+		entry.index = index;
+		entry.area = tile ? { x, y, w: right - x, h: bottom - y } : { x: (x + right) / 2, y: (y + bottom) / 2, w: 0, h: 0 };
+		annotationFields.Placement.value = "custom";
+		if (annotationFields.Scope.value !== "custom") annotationFields.Pages.value = String(index + 1);
+		el.annotationCreateStatus.textContent = "";
+	} else {
+		el.annotationCreateStatus.textContent = "范围过小";
+	}
+	el.annotationCreate.showModal();
+}
+
 function updateAnnotationFields() {
 	const { kind, item } = state.annotationCreate;
 	for (const key of ["X", "Y", "Width", "Height", "Pages", "Author"]) annotationFields[key].closest(".form-row").hidden = false;
@@ -1553,6 +1612,15 @@ function updateAnnotationFields() {
 	annotationFields.TargetRow.hidden = kind !== "link" || annotationFields.LinkKind.value !== "page";
 	annotationFields.Height.value = image ? "" : state.annotationCreate.height;
 	annotationFields.Height.placeholder = image ? "等比" : "";
+	if (kind === "watermark") {
+		for (const key of ["X", "Y"]) annotationFields[key].closest(".form-row").hidden = true;
+		annotationFields.Pages.closest(".form-row").hidden = annotationFields.Scope.value !== "custom";
+		const tile = annotationFields.Tile.value === "tile";
+		annotationFields.PlacementLabel.textContent = tile ? "范围" : "位置";
+		annotationFields.Placement.options[0].textContent = tile ? "整页" : "居中";
+		annotationFields.Placement.options[1].textContent = tile ? "选区" : "指定";
+		annotationFields.Pick.textContent = tile ? "框选" : "定位";
+	}
 	if (kind === "link" && item) {
 		for (const key of ["X", "Y", "Width", "Height", "Pages", "Author"]) annotationFields[key].closest(".form-row").hidden = true;
 	}
@@ -2734,6 +2802,7 @@ async function openOFD(file) {
 		state.fileName = file.name || "ofdgo.ofd";
 		state.editing = false;
 		state.composite = null;
+		state.annotationCreate = null;
 		state.pageSelection.clear();
 		state.pageSelectionAnchor = null;
 		state.pageMultiSelect = false;

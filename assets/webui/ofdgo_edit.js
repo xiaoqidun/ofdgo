@@ -783,7 +783,7 @@ export class CanvasEditor {
 			this.viewer.releasePointerCapture(drag.pointerID);
 			if (drag.annotation) {
 				const point = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.page, drag.rotation);
-				const box = drag.box || { ...point, width: drag.annotation === "note" ? 5 : 40, height: drag.annotation === "note" ? 5 : 12 };
+				const box = drag.box || { ...point, width: drag.annotation === "watermark" ? 0 : drag.annotation === "note" ? 5 : 40, height: drag.annotation === "watermark" ? 0 : drag.annotation === "note" ? 5 : 12 };
 				drag.preview.remove();
 				this.setTool("");
 				this.options.onDrawAnnotation(drag.page.index, drag.annotation, box);
@@ -975,6 +975,9 @@ export class CanvasEditor {
 		const annotation = this.tool.startsWith("annotation:") ? this.tool.slice(11) : "";
 		const shape = annotation ? "rectangle" : this.tool;
 		const style = this.options.drawStyle();
+		if (annotation === "watermark") {
+			Object.assign(style, { fill: false, stroke: true, strokeColor: "var(--accent)", lineWidth: 1 });
+		}
 		if (lineShape(shape)) {
 			style.fill = false;
 			style.stroke = true;
@@ -982,6 +985,7 @@ export class CanvasEditor {
 		this.drag = { shape, annotation, page, surface, ...this.createPreview(surface, page, shape === "text" ? "rectangle" : shape, style), style, pointerID: event.pointerId,
 			rect: surface.getBoundingClientRect(), rotation: this.options.rotation(),
 			clientX: event.clientX, clientY: event.clientY };
+		if (annotation === "watermark") this.drag.node.setAttribute("vector-effect", "non-scaling-stroke");
 		this.viewer.setPointerCapture(event.pointerId);
 	}
 

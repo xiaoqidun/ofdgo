@@ -290,6 +290,8 @@
 					<label class="form-row"><span>透明</span><span class="form-unit"><input id="annotationOpacity" type="number" min="0" max="100" step="any" value="80" aria-label="透明度" required><span>%</span></span></label>
 				</div>
 				<label class="form-row" data-annotation="watermark"><span>排列</span><select id="annotationTile"><option value="single">单个</option><option value="tile">平铺</option></select></label>
+				<div class="form-row" data-annotation="watermark"><label id="annotationPlacementLabel" for="annotationPlacement">位置</label><div class="annotation-placement"><select id="annotationPlacement"><option value="page">居中</option><option value="custom">指定</option></select><button id="annotationPick" class="button" type="button">定位</button></div></div>
+				<label class="form-row" data-annotation="watermark"><span>应用</span><select id="annotationScope"><option value="current">本页</option><option value="all">全文</option><option value="custom">指定</option></select></label>
 				<label class="form-row" data-annotation="note watermark stamp link"><span>页面</span><input id="annotationPages" type="text" required></label>
 				<div class="form-actions"><div id="annotationCreateStatus" class="form-status" role="status"></div><button id="annotationCreateCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
