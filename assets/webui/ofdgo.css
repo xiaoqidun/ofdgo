@@ -670,11 +670,6 @@ button:not(:disabled):hover {
 	accent-color: var(--accent);
 }
 
-.form-pair .form-unit {
-	grid-template-columns: minmax(0, 1fr) auto;
-	gap: 4px;
-}
-
 .form-options {
 	display: flex;
 }
