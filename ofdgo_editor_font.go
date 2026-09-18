@@ -201,6 +201,16 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 	}
 	refs := editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool)}
 	composite := false
+	if e.source != nil {
+		for _, name := range e.annotationFiles() {
+			if data, changed := e.source.reader.files[name]; changed {
+				composite = true
+				if _, safe := refs.scan(bytes.NewReader(data), name); !safe {
+					return nil, nil
+				}
+			}
+		}
+	}
 	total := len(e.pages) + len(e.resources)
 	for i, page := range e.pages {
 		if err := progress.report("fonts", i, total); err != nil {

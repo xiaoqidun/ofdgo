@@ -109,6 +109,7 @@ func (e *Editor) WritePagesTo(writer io.Writer, indexes []int) (int64, error) {
 	if e.source != nil {
 		source := *e.source
 		source.pages = make(map[string]*editorSourcePage, len(indexes))
+		source.annotationPages = nil
 		for _, index := range indexes {
 			id := e.pages[index].ID
 			if page := e.source.pages[id]; page != nil {
@@ -324,6 +325,30 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 	used := make(map[string]bool)
 	promoted := make(map[string]bool)
 	files := make(map[string]bool)
+	if e.source != nil {
+		for _, name := range e.annotationFiles() {
+			data, changed := e.source.reader.files[name]
+			if !changed {
+				continue
+			}
+			refs := editorResourceRefs{ids: used, files: make(map[string]bool)}
+			if _, safe := refs.scan(bytes.NewReader(data), name); !safe {
+				for _, resource := range e.resources {
+					if resource.font != nil {
+						used[resource.font.ID] = true
+					}
+					if resource.image != nil {
+						used[resource.image.ID] = true
+					}
+					if resource.space != nil {
+						used[resource.space.ID] = true
+					}
+					used[resource.definition()] = true
+				}
+			}
+		}
+		maps.Copy(promoted, used)
+	}
 	for _, page := range e.pages {
 		var original map[string]GraphicObject
 		if e.source != nil {

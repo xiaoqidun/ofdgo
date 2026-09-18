@@ -29,6 +29,7 @@ import (
 	"io"
 	"math"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall/js"
@@ -119,6 +120,10 @@ func RunWASM() {
 	registerCallback("ofdgoBatchPages", batchPages)
 	registerCallback("ofdgoChangeOutline", changeOutline)
 	registerCallback("ofdgoChangeAnnotations", changeAnnotations)
+	registerCallback("ofdgoChangeSelection", changeSelection)
+	registerCallback("ofdgoWriteAnnotation", writeAnnotation)
+	registerCallback("ofdgoReadAnnotation", readAnnotation)
+	registerCallback("ofdgoInsertInk", insertInk)
 	registerCallback("ofdgoStyleObjects", styleObjects)
 	registerCallback("ofdgoMoveOutline", moveOutline)
 	registerCallback("ofdgoCaptureStyle", captureStyle)
@@ -635,9 +640,10 @@ var currentEditor *ofdgo.Editor
 
 // editorClipboard 当前编辑文档中的对象快照与剪贴板标识
 type editorClipboard struct {
-	token     string
-	objects   []ofdgo.GraphicObject
-	composite *ofdgo.CompositeSelection
+	token       string
+	objects     []ofdgo.GraphicObject
+	composite   *ofdgo.CompositeSelection
+	annotations *ofdgo.AnnotationSelection
 }
 
 // copiedObjects 当前对象剪贴板，不保存字体或图片的重复数据
@@ -852,6 +858,50 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 			}
 		}
 	}
+	for _, annotation := range currentSession.Reader.Annots[page.ID] {
+		if annotation.Visible != nil && !*annotation.Visible {
+			continue
+		}
+		box, contours, err := currentSession.Renderer.AnnotationGeometry(annotation)
+		capabilities := map[string]any{"update": true, "transform": true, "arrange": true, "copy": true, "delete": true, "enter": len(annotation.Appearance.Objects) != 0}
+		if err != nil {
+			capabilities["transform"], capabilities["arrange"], capabilities["enter"] = false, false, false
+			capabilities["reason"], capabilities["reasonCode"] = err.Error(), "invalidObject"
+		}
+		if box.W <= 0 || box.H <= 0 {
+			box, _ = ofdgo.ParseBox(annotation.Appearance.Boundary)
+		}
+		paths := make([]any, len(contours))
+		for i, contour := range contours {
+			paths[i] = map[string]any{"path": contour.Path, "evenOdd": contour.EvenOdd}
+		}
+		alpha, mixed := 255, false
+		for i, object := range annotation.Appearance.Objects {
+			var value *int
+			switch object.Type {
+			case "TextObject":
+				value = object.TextObject.Alpha
+			case "PathObject":
+				value = object.PathObject.Alpha
+			case "ImageObject":
+				value = object.ImageObject.Alpha
+			case "CompositeObject", "CompositeGraphicUnit":
+				value = object.CompositeGraphicUnit.Alpha
+			}
+			current := 255
+			if value != nil {
+				current = *value
+			}
+			if i == 0 {
+				alpha = current
+			} else if current != alpha {
+				mixed = true
+			}
+		}
+		objects = append(objects, map[string]any{"id": "annotation:" + annotation.ID, "type": "Annotation", "annotationType": annotation.Type,
+			"x": box.X, "y": box.Y, "width": box.W, "height": box.H, "contours": paths, "remark": annotation.Remark, "creator": annotation.Creator,
+			"alpha": alpha, "alphaMixed": mixed, "capabilities": capabilities})
+	}
 	return objects, nil
 }
 
@@ -878,6 +928,597 @@ func changeAnnotations(args []js.Value) (any, error) {
 			return fmt.Errorf("unsupported annotation action %q", args[2].String())
 		}
 	})
+}
+
+// annotationOptions 保存注解面板的输入，资源字节单独传输
+type annotationOptions struct {
+	Kind, ID, Text, Old, Creator, Pages, URI, Color string
+	Base                                            string
+	X, Y, Width, Height, Size, Angle                float64
+	Alpha                                           int
+	Tile                                            bool
+	Keep                                            bool
+	Target                                          int
+}
+
+// readAnnotation 获取编辑面板所需的注解内容，不修改文件
+// 入参: args 页面索引与注解标识
+// 返回: any 面板数据, error 错误信息
+func readAnnotation(args []js.Value) (any, error) {
+	annotation, err := currentEditor.Annotation(args[0].Int(), strings.TrimPrefix(args[1].String(), "annotation:"))
+	if err != nil {
+		return nil, err
+	}
+	texts := make([]string, 0)
+	visiting := make(map[string]bool)
+	var collect func([]ofdgo.GraphicObject)
+	collect = func(objects []ofdgo.GraphicObject) {
+		for _, object := range objects {
+			switch object.Type {
+			case "TextObject":
+				value := object.TextObject.Text()
+				if !slices.Contains(texts, value) {
+					texts = append(texts, value)
+				}
+			case "CompositeObject", "CompositeGraphicUnit":
+				collect(object.CompositeGraphicUnit.Objects)
+				id := object.CompositeGraphicUnit.ResourceID
+				if unit := currentSession.Renderer.CompositeGraphicUnits[id]; unit != nil && !visiting[id] {
+					visiting[id] = true
+					collect(unit.Objects)
+					delete(visiting, id)
+				}
+			}
+		}
+	}
+	collect(annotation.Appearance.Objects)
+	info := map[string]any{"texts": texts, "remark": annotation.Remark, "creator": annotation.Creator}
+	if annotation.Type == "Link" {
+		info["linkKind"] = "keep"
+		link, err := currentEditor.AnnotationLink(args[0].Int(), annotation.ID)
+		if err == nil && link.URI != nil {
+			info["linkKind"], info["linkURI"], info["linkBase"] = "uri", link.URI.URI, link.URI.Base
+		} else if err == nil && link.Goto != nil && link.Goto.Dest != nil {
+			for i, page := range currentSession.doc.Pages.Page {
+				if page.ID == link.Goto.Dest.PageID {
+					info["linkKind"], info["linkPage"] = "page", i+1
+					break
+				}
+			}
+		}
+	}
+	return info, nil
+}
+
+// writeAnnotation 原子创建多页注解或修改现有链接、重复文字
+// 入参: args 当前页面、JSON选项、字体字节、图片字节
+// 返回: any 文档信息及新选区, error 错误信息
+func writeAnnotation(args []js.Value) (any, error) {
+	var options annotationOptions
+	if err := json.Unmarshal([]byte(args[1].String()), &options); err != nil {
+		return nil, err
+	}
+	if options.Kind == "link" && options.ID != "" && options.Keep {
+		return editorSummary(), nil
+	}
+	page := args[0].Int()
+	var ids []string
+	result, err := changeObjects(func() error {
+		font, resource := "", ""
+		if !args[2].IsNull() {
+			data, err := bytesFromJS(args[2])
+			if err != nil {
+				return err
+			}
+			font, err = currentEditor.AddFont(FontFile{Data: data}, 0)
+			if err != nil {
+				return err
+			}
+		}
+		if !args[3].IsNull() {
+			data, err := bytesFromJS(args[3])
+			if err != nil {
+				return err
+			}
+			resource, err = currentEditor.AddImage(data)
+			if err != nil {
+				return err
+			}
+			config, _, err := image.DecodeConfig(bytes.NewReader(data))
+			if err != nil {
+				return err
+			}
+			options.Height = options.Width * float64(config.Height) / float64(config.Width)
+		}
+		if options.Kind == "replace" {
+			style := ofdgo.TextStyle{Font: font}
+			_, err := currentEditor.ReplaceAnnotationText(page, options.ID, options.Old, options.Text, style)
+			return err
+		}
+		target := ofdgo.AnnotationLink{URI: &ofdgo.URI{URI: options.URI, Base: options.Base}}
+		if options.Target > 0 {
+			if options.Target > currentEditor.PageCount() {
+				return fmt.Errorf("destination page is out of range")
+			}
+			page, err := currentEditor.Page(options.Target - 1)
+			if err != nil {
+				return err
+			}
+			target = ofdgo.AnnotationLink{Dest: &ofdgo.Dest{Type: "Fit", PageID: page.ID}}
+		}
+		if options.Kind == "link" && options.ID != "" {
+			return currentEditor.UpdateAnnotationLink(page, options.ID, target)
+		}
+		if options.Width <= 0 || options.Height <= 0 || options.Alpha < 0 || options.Alpha > 255 {
+			return fmt.Errorf("invalid annotation dimensions or opacity")
+		}
+		pages, err := ofdgo.ParsePageRange(options.Pages, currentEditor.PageCount())
+		if err != nil {
+			return err
+		}
+		for _, index := range pages {
+			box := ofdgo.Box{X: options.X, Y: options.Y, W: options.Width, H: options.Height}
+			var id string
+			if options.Kind == "link" {
+				id, err = currentEditor.AddLinkAnnotation(index, box, target, options.Creator)
+			} else {
+				annotation := ofdgo.Annotation{Creator: options.Creator, Appearance: ofdgo.Appearance{Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H)}}
+				switch options.Kind {
+				case "note":
+					annotation.Type, annotation.Remark = "Path", options.Text
+					shape, shapeErr := ofdgo.NewShape(ofdgo.ShapeRectangle, ofdgo.Box{W: box.W, H: box.H})
+					if shapeErr != nil {
+						return shapeErr
+					}
+					shape.LineWidth = 0.3
+					shape.StrokeColor = &ofdgo.StrokeColor{Value: "0 128 112"}
+					annotation.Appearance.Objects = []ofdgo.GraphicObject{{Type: "PathObject", PathObject: shape}}
+				case "watermark", "stamp":
+					annotation.Type = "Watermark"
+					if options.Kind == "stamp" {
+						annotation.Type = "Stamp"
+					}
+					var object ofdgo.GraphicObject
+					if resource != "" {
+						object = ofdgo.GraphicObject{Type: "ImageObject", ImageObject: ofdgo.ImageObject{ResourceID: resource, Boundary: fmt.Sprintf("0 0 %g %g", box.W, box.H), CTM: fmt.Sprintf("%g 0 0 %g 0 0", box.W, box.H), Alpha: &options.Alpha}}
+					} else {
+						if options.Kind == "stamp" {
+							return fmt.Errorf("stamp requires an image")
+						}
+						text := ofdgo.TextObject{Font: font, Size: options.Size, Boundary: fmt.Sprintf("0 0 %g %g", box.W, box.H), Alpha: &options.Alpha}
+						if err := currentEditor.LayoutText(&text, options.Text, ofdgo.TextLayout{Align: "center"}); err != nil {
+							return err
+						}
+						if err := setTextColor(&text, options.Color); err != nil {
+							return err
+						}
+						object = ofdgo.GraphicObject{Type: "TextObject", TextObject: text}
+					}
+					angle := options.Angle * math.Pi / 180
+					matrix := ofdgo.NewMatrix(fmt.Sprintf("%g %g %g %g 0 0", math.Cos(angle), math.Sin(angle), -math.Sin(angle), math.Cos(angle)))
+					matrix = ofdgo.TranslationMatrix(box.W/2, box.H/2).Multiply(matrix).Multiply(ofdgo.TranslationMatrix(-box.W/2, -box.H/2))
+					if object.Type == "TextObject" {
+						object.TextObject.CTM = matrix.String()
+					} else {
+						object.ImageObject.CTM = matrix.Multiply(ofdgo.NewMatrix(object.ImageObject.CTM)).String()
+					}
+					annotation.Appearance.Objects = []ofdgo.GraphicObject{object}
+				default:
+					return fmt.Errorf("unsupported annotation kind %q", options.Kind)
+				}
+				if options.Tile && options.Kind == "watermark" {
+					content, err := currentSession.pageContent(index)
+					if err != nil {
+						return err
+					}
+					page, err := currentSession.pageBox(index, content)
+					if err != nil {
+						return err
+					}
+					annotation.Appearance.Boundary = fmt.Sprintf("0 0 %g %g", page.W, page.H)
+					base := annotation.Appearance.Objects[0]
+					annotation.Appearance.Objects = nil
+					for y := box.Y; y < page.H; y += box.H + 10 {
+						for x := box.X; x < page.W; x += box.W + 10 {
+							object := base
+							boundary := fmt.Sprintf("%g %g %g %g", x, y, box.W, box.H)
+							if object.Type == "TextObject" {
+								object.TextObject.Boundary = boundary
+							} else {
+								object.ImageObject.Boundary = boundary
+							}
+							annotation.Appearance.Objects = append(annotation.Appearance.Objects, object)
+						}
+					}
+				}
+				id, err = currentEditor.AddAnnotation(index, annotation)
+			}
+			if err != nil {
+				return err
+			}
+			if index == page {
+				ids = append(ids, "annotation:"+id)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return editorSelectionInfo{editorInfo: result.(editorInfo), SelectedIDs: ids}, nil
+}
+
+// insertInk 将一笔采样写为一个标准矢量对象，复用内部插入与撤销逻辑
+// 入参: args 页面、JSON采样、线宽、压感开关、颜色及可选父路径
+// 返回: any 文档和选区, error 错误信息
+func insertInk(args []js.Value) (any, error) {
+	var points []ofdgo.InkPoint
+	if err := json.Unmarshal([]byte(args[1].String()), &points); err != nil {
+		return nil, err
+	}
+	path, err := ofdgo.NewInk(points, args[2].Float(), args[3].Bool())
+	if err != nil {
+		return nil, err
+	}
+	if path.Fill != nil && *path.Fill {
+		err = setEditorColor(path.FillColor, args[4].String())
+	} else {
+		err = setEditorColor((*ofdgo.FillColor)(path.StrokeColor), args[4].String())
+	}
+	if err != nil {
+		return nil, err
+	}
+	return insertEditorObject(args[0].Int(), ofdgo.GraphicObject{Type: "PathObject", PathObject: path}, args[5:])
+}
+
+// splitEditorSelection 区分页面对象与注解标识，不以外观大小或类型猜测
+// 入参: ids 画布选区
+// 返回: []string 正文标识, []string 注解标识
+func splitEditorSelection(ids []string) ([]string, []string) {
+	var objects, annotations []string
+	for _, id := range ids {
+		if value, ok := strings.CutPrefix(id, "annotation:"); ok {
+			annotations = append(annotations, value)
+		} else {
+			objects = append(objects, id)
+		}
+	}
+	return objects, annotations
+}
+
+// changeSelection 原子处理正文和注解混选，保持绘制顺序及统一历史
+// 入参: args 页面索引、标识列表、操作与参数
+// 返回: any 文档与新选区, error 错误信息
+func changeSelection(args []js.Value) (any, error) {
+	var selected []string
+	result, err := changeObjects(func() error {
+		page, operation := args[0].Int(), args[2].String()
+		objects, annotations := splitEditorSelection(stringsFromJS(args[1]))
+		switch operation {
+		case "align", "distribute":
+			return arrangeEditorSelection(page, stringsFromJS(args[1]), operation, args[3].String())
+		case "delete":
+			if err := currentEditor.DeleteObjects(page, objects); err != nil {
+				return err
+			}
+			return currentEditor.DeleteAnnotations(page, annotations)
+		case "copy":
+			clipboard, err := captureEditorSelection(page, stringsFromJS(args[1]))
+			if err != nil {
+				return err
+			}
+			selected, err = pasteEditorSelection(page, clipboard, args[3].Float(), args[4].Float())
+			return err
+		case "style":
+			style := objectStyle(args[3])
+			if err := currentEditor.StyleObjects(page, objects, style); err != nil {
+				return err
+			}
+			for _, id := range annotations {
+				path := ofdgo.ObjectPath{Annotation: id}
+				members, err := currentEditor.CompositeObjects(page, path)
+				if err != nil {
+					return err
+				}
+				indexes := make([]int, len(members))
+				for i := range indexes {
+					indexes[i] = i
+				}
+				if err := currentEditor.StyleCompositeObjects(page, path, indexes, style); err != nil {
+					return err
+				}
+			}
+			return nil
+		case "erase", "erasePath":
+			var box ofdgo.Box
+			var points []ofdgo.Point
+			if operation == "erase" {
+				box = ofdgo.Box{X: args[3].Float(), Y: args[4].Float(), W: args[5].Float(), H: args[6].Float()}
+				if err := currentEditor.EraseObjects(page, objects, box); err != nil {
+					return err
+				}
+			} else {
+				points = pointsFromJS(args[3])
+				if err := currentEditor.EraseObjectsPath(page, objects, points); err != nil {
+					return err
+				}
+			}
+			for _, id := range annotations {
+				path := ofdgo.ObjectPath{Annotation: id}
+				members, err := currentEditor.CompositeObjects(page, path)
+				if err != nil {
+					return err
+				}
+				indexes := make([]int, len(members))
+				for i := range indexes {
+					indexes[i] = i
+				}
+				if operation == "erase" {
+					err = currentEditor.EraseCompositeObjects(page, path, indexes, box)
+				} else {
+					err = currentEditor.EraseCompositeObjectsPath(page, path, indexes, points)
+				}
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		matrix := ofdgo.IdentityMatrix
+		if operation == "transform" {
+			dx, dy, scale := args[3].Float(), args[4].Float(), args[5].Float()
+			if scale <= 0 {
+				return fmt.Errorf("scale must be positive")
+			}
+			matrix = ofdgo.NewMatrix(fmt.Sprintf("%g 0 0 %g %g %g", scale, scale, dx, dy))
+		} else {
+			bounds, err := editorSelectionBounds(page, objects, annotations)
+			if err != nil {
+				return err
+			}
+			x, y := bounds.X+bounds.W/2, bounds.Y+bounds.H/2
+			switch operation {
+			case "rotate":
+				angle := float64(args[3].Int()) * math.Pi / 180
+				matrix = ofdgo.NewMatrix(fmt.Sprintf("%g %g %g %g 0 0", math.Cos(angle), math.Sin(angle), -math.Sin(angle), math.Cos(angle)))
+			case "flip":
+				if args[3].String() == "horizontal" {
+					matrix = ofdgo.NewMatrix("-1 0 0 1 0 0")
+				} else if args[3].String() == "vertical" {
+					matrix = ofdgo.NewMatrix("1 0 0 -1 0 0")
+				} else {
+					return fmt.Errorf("invalid flip axis")
+				}
+			case "resize":
+				sx, sy := args[5].Float()/bounds.W, args[6].Float()/bounds.H
+				if sx <= 0 || sy <= 0 {
+					return fmt.Errorf("size must be positive")
+				}
+				matrix = ofdgo.NewMatrix(fmt.Sprintf("%g 0 0 %g %g %g", sx, sy, args[3].Float()-bounds.X*sx, args[4].Float()-bounds.Y*sy))
+			default:
+				return fmt.Errorf("unsupported mixed selection operation %q", operation)
+			}
+			if operation != "resize" {
+				matrix = ofdgo.TranslationMatrix(x, y).Multiply(matrix).Multiply(ofdgo.TranslationMatrix(-x, -y))
+			}
+		}
+		if err := currentEditor.TransformObjectsMatrix(page, objects, matrix); err != nil {
+			return err
+		}
+		return currentEditor.TransformAnnotations(page, annotations, matrix)
+	})
+	if err != nil || selected == nil {
+		return result, err
+	}
+	return editorSelectionInfo{editorInfo: result.(editorInfo), SelectedIDs: selected}, nil
+}
+
+// arrangeEditorSelection 对正文和注解统一对齐或分布，不改变各自绘制层级
+// 入参: page 页面, ids 标识, operation 操作, direction 方向
+// 返回: error 错误信息
+func arrangeEditorSelection(page int, ids []string, operation, direction string) error {
+	if operation == "align" && !slices.Contains([]string{"left", "center", "right", "top", "middle", "bottom"}, direction) || operation == "distribute" && direction != "horizontal" && direction != "vertical" {
+		return fmt.Errorf("invalid arrangement direction")
+	}
+	boxes := make([]ofdgo.Box, len(ids))
+	var target ofdgo.Box
+	for i, id := range ids {
+		objects, annotations := splitEditorSelection([]string{id})
+		box, err := editorSelectionBounds(page, objects, annotations)
+		if err != nil {
+			return err
+		}
+		boxes[i] = box
+		if i == 0 {
+			target = box
+		} else {
+			x, y := math.Min(target.X, box.X), math.Min(target.Y, box.Y)
+			target = ofdgo.Box{X: x, Y: y, W: math.Max(target.X+target.W, box.X+box.W) - x, H: math.Max(target.Y+target.H, box.Y+box.H) - y}
+		}
+	}
+	if len(ids) == 1 {
+		content, err := currentSession.pageContent(page)
+		if err != nil {
+			return err
+		}
+		target, err = currentSession.pageBox(page, content)
+		if err != nil {
+			return err
+		}
+	}
+	translations := make([]ofdgo.Point, len(ids))
+	if operation == "align" {
+		for i, box := range boxes {
+			switch direction {
+			case "left":
+				translations[i].X = target.X - box.X
+			case "center":
+				translations[i].X = target.X + (target.W-box.W)/2 - box.X
+			case "right":
+				translations[i].X = target.X + target.W - box.X - box.W
+			case "top":
+				translations[i].Y = target.Y - box.Y
+			case "middle":
+				translations[i].Y = target.Y + (target.H-box.H)/2 - box.Y
+			case "bottom":
+				translations[i].Y = target.Y + target.H - box.Y - box.H
+			}
+		}
+	} else {
+		if len(ids) < 3 {
+			return nil
+		}
+		order := make([]int, len(ids))
+		position := func(i int) float64 {
+			if direction == "vertical" {
+				return boxes[i].Y
+			}
+			return boxes[i].X
+		}
+		size := func(i int) float64 {
+			if direction == "vertical" {
+				return boxes[i].H
+			}
+			return boxes[i].W
+		}
+		for i := range order {
+			order[i] = i
+		}
+		slices.SortStableFunc(order, func(a, b int) int {
+			if position(a) < position(b) {
+				return -1
+			}
+			if position(a) > position(b) {
+				return 1
+			}
+			return 0
+		})
+		total := 0.0
+		for _, i := range order {
+			total += size(i)
+		}
+		first, last := order[0], order[len(order)-1]
+		gap := (position(last) + size(last) - position(first) - total) / float64(len(order)-1)
+		next := position(first)
+		for _, i := range order {
+			if direction == "vertical" {
+				translations[i].Y = next - position(i)
+			} else {
+				translations[i].X = next - position(i)
+			}
+			next += size(i) + gap
+		}
+	}
+	for i, id := range ids {
+		objects, annotations := splitEditorSelection([]string{id})
+		matrix := ofdgo.TranslationMatrix(translations[i].X, translations[i].Y)
+		if err := currentEditor.TransformObjectsMatrix(page, objects, matrix); err != nil {
+			return err
+		}
+		if err := currentEditor.TransformAnnotations(page, annotations, matrix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// editorSelectionBounds 计算混合选区的实际内容范围
+// 入参: page 页面索引, objects 正文标识, annotations 注解标识
+// 返回: ofdgo.Box 页面毫米范围, error 错误信息
+func editorSelectionBounds(page int, objects, annotations []string) (ofdgo.Box, error) {
+	content, err := currentEditor.Page(page)
+	if err != nil {
+		return ofdgo.Box{}, err
+	}
+	var bounds ofdgo.Box
+	add := func(box ofdgo.Box) {
+		if box.W <= 0 || box.H <= 0 {
+			return
+		}
+		if bounds.W <= 0 || bounds.H <= 0 {
+			bounds = box
+			return
+		}
+		x, y := math.Min(bounds.X, box.X), math.Min(bounds.Y, box.Y)
+		bounds = ofdgo.Box{X: x, Y: y, W: math.Max(bounds.X+bounds.W, box.X+box.W) - x, H: math.Max(bounds.Y+bounds.H, box.Y+box.H) - y}
+	}
+	for _, layer := range content.Content.Layer {
+		for _, object := range layer.Objects {
+			var id string
+			switch object.Type {
+			case "TextObject":
+				id = object.TextObject.ID
+			case "PathObject":
+				id = object.PathObject.ID
+			case "ImageObject":
+				id = object.ImageObject.ID
+			case "CompositeObject", "CompositeGraphicUnit":
+				id = object.CompositeGraphicUnit.ID
+			}
+			if slices.Contains(objects, id) {
+				box, err := currentSession.Renderer.ObjectBounds(object, layer.DrawParam)
+				if err != nil {
+					return bounds, err
+				}
+				add(box)
+			}
+		}
+	}
+	for _, annotation := range currentSession.Reader.Annots[content.ID] {
+		if slices.Contains(annotations, annotation.ID) {
+			box, _, err := currentSession.Renderer.AnnotationGeometry(annotation)
+			if err != nil {
+				return bounds, err
+			}
+			if box.W <= 0 || box.H <= 0 {
+				box, _ = ofdgo.ParseBox(annotation.Appearance.Boundary)
+			}
+			add(box)
+		}
+	}
+	if bounds.W <= 0 || bounds.H <= 0 {
+		return bounds, fmt.Errorf("selection has no bounds")
+	}
+	return bounds, nil
+}
+
+// captureEditorSelection 捕获正文与注解的独立副本
+// 入参: page 页面索引, ids 画布标识
+// 返回: *editorClipboard 快照, error 错误信息
+func captureEditorSelection(page int, ids []string) (*editorClipboard, error) {
+	objects, annotations := splitEditorSelection(ids)
+	result := &editorClipboard{}
+	var err error
+	result.objects, err = currentEditor.Objects(page, objects)
+	if err == nil && len(annotations) != 0 {
+		result.annotations, err = currentEditor.CaptureAnnotations(page, annotations)
+	}
+	return result, err
+}
+
+// pasteEditorSelection 原子粘贴正文和注解，共享字体与图片数据
+// 入参: page 目标页, clipboard 快照, dx、dy 位移
+// 返回: []string 新画布标识, error 错误信息
+func pasteEditorSelection(page int, clipboard *editorClipboard, dx, dy float64) ([]string, error) {
+	var ids []string
+	err := currentEditor.Transaction(func(edit *ofdgo.Editor) error {
+		var err error
+		ids, err = edit.CopyObjects(page, clipboard.objects, dx, dy)
+		if err != nil {
+			return err
+		}
+		if clipboard.annotations != nil {
+			annotations, err := edit.PasteAnnotations(page, clipboard.annotations, dx, dy)
+			if err != nil {
+				return err
+			}
+			for _, id := range annotations {
+				ids = append(ids, "annotation:"+id)
+			}
+		}
+		return nil
+	})
+	return ids, err
 }
 
 // editorCapabilities 统一顶层与内部对象的操作能力和受限原因
@@ -932,6 +1573,9 @@ func editorAppearance(item map[string]any, object ofdgo.GraphicObject, paint boo
 func compositePath(value string) (ofdgo.ObjectPath, error) {
 	parts := strings.Split(value, "/")
 	path := ofdgo.ObjectPath{ID: parts[0]}
+	if id, ok := strings.CutPrefix(path.ID, "annotation:"); ok {
+		path.ID, path.Annotation = "", id
+	}
 	for _, part := range parts[1:] {
 		index, err := strconv.Atoi(part)
 		if err != nil || index < 0 {
@@ -1413,7 +2057,8 @@ func captureObjects(args []js.Value) (any, error) {
 		}
 		clipboard.composite, err = currentEditor.CaptureCompositeObjects(args[0].Int(), path, indexes)
 	} else {
-		clipboard.objects, err = currentEditor.Objects(args[0].Int(), stringsFromJS(args[1]))
+		clipboard, err = captureEditorSelection(args[0].Int(), stringsFromJS(args[1]))
+		clipboard.token = args[2].String()
 	}
 	if err != nil {
 		return nil, err
@@ -1435,6 +2080,9 @@ func pasteObjects(args []js.Value) (any, error) {
 	}
 	page, dx, dy := args[0].Int(), args[2].Float(), args[3].Float()
 	if key != "" {
+		if copiedObjects.annotations != nil {
+			return nil, fmt.Errorf("annotations cannot be nested in a page object")
+		}
 		path, err := compositePath(key)
 		if err != nil {
 			return nil, err
@@ -1463,7 +2111,12 @@ func pasteObjects(args []js.Value) (any, error) {
 		info, err := previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 		return editorSelectionInfo{info, ids}, err
 	}
-	return copyEditorObjects(page, copiedObjects.objects, dx, dy)
+	ids, err := pasteEditorSelection(page, copiedObjects, dx, dy)
+	if err != nil {
+		return nil, err
+	}
+	info, err := previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+	return editorSelectionInfo{info, ids}, err
 }
 
 // copyEditorObjects 复制快照并更新预览，返回新对象标识
@@ -2448,7 +3101,7 @@ func changeObjects(apply func() error) (any, error) {
 		return nil, fmt.Errorf("no document is being edited")
 	}
 	revision := currentEditor.Revision()
-	if err := apply(); err != nil {
+	if err := currentEditor.Transaction(func(*ofdgo.Editor) error { return apply() }); err != nil {
 		return nil, err
 	}
 	if currentEditor.Revision() == revision {

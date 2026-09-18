@@ -28,6 +28,7 @@ let textMeasure = null;
 const state = {
 	composite: null,
 	annotationEdit: null,
+	annotationCreate: null,
 	ready: false,
 	wasmExited: false,
 	wasmSeq: 0,
@@ -335,6 +336,12 @@ const el = {
 	signatureSummary: document.querySelector("#signatureSummary"),
 	signatureList: document.querySelector("#signatureList"),
 	annotationNote: document.querySelector("#annotationNote"),
+	annotationTool: document.querySelector("#annotationTool"),
+	penTool: document.querySelector("#penTool"),
+	annotationCreate: document.querySelector("#annotationCreate"),
+	annotationCreateStatus: document.querySelector("#annotationCreateStatus"),
+	objectPicker: document.querySelector("#objectPicker"),
+	objectPickerList: document.querySelector("#objectPickerList"),
 	annotationForm: document.querySelector("#annotationForm"),
 	annotationFields: document.querySelector("#annotationFields"),
 	annotationRemark: document.querySelector("#annotationRemark"),
@@ -356,6 +363,7 @@ const fontManager = new FontManager({
 	onPermissionChange: updateFontPermissionHint,
 });
 const fontPicker = new FontPicker(el.textFont, el.textFontToggle, el.textFontList, changeTextFont, loadEditorFonts);
+const annotationFields = Object.fromEntries(["CreateForm", "CreateCancel", "Content", "Old", "Font", "Text", "TextRow", "Image", "ImageRow", "Author", "LinkKind", "Address", "AddressRow", "Target", "TargetRow", "X", "Y", "Width", "Height", "Angle", "Opacity", "Tile", "Pages"].map(key => [key, document.querySelector(`#annotation${key}`)]));
 el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
@@ -371,9 +379,7 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 			setStatus(reason || pageStatus(state.pageIndex, state.doc.pageCount));
 		}
 	},
-	onTransform: (item, change) => (item.items || [item]).every(object => object.type === "Annotation")
-		? changeAnnotations(item, "move", change.x, change.y)
-		: changeDocument(item.items ? "ofdgoTransformObjects" : "ofdgoTransformObject", item,
+	onTransform: (item, change) => changeDocument(item.items ? "ofdgoTransformObjects" : "ofdgoTransformObject", item,
 		change.x + item.x * (1 - change.scale), change.y + item.y * (1 - change.scale), change.scale),
 	onNudgeChange: () => {
 		updatePendingChanges();
@@ -389,13 +395,8 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 		syncSelection();
 		if (state.fontRenderPending) window.setTimeout(refreshPendingFonts, 0);
 	},
-	onDelete: (item) => (item.items || [item]).every(object => object.type === "Annotation")
-		? changeAnnotations(item, "delete") : changeDocument(item.items ? "ofdgoDeleteObjects" : "ofdgoDeleteObject", item),
+	onDelete: (item) => changeDocument(item.items ? "ofdgoDeleteObjects" : "ofdgoDeleteObject", item),
 	onErase: (items, box, points) => {
-		if (items.some(item => item.type === "Annotation")) {
-			if (box || !items.every(item => item.type === "Annotation")) { setStatus(box ? "注解暂不支持局部擦除" : "注解与正文需分别操作"); return false; }
-			return changeAnnotations({ items, index: items[0].index, id: items.map(item => item.id) }, "delete");
-		}
 		const blocked = items.find(item => !canEditObject(item, box ? "arrange" : "delete"));
 		if (blocked) { setStatus(objectEditReason(blocked) || "对象暂不可擦除"); return false; }
 		const item = { index: items[0].index, id: items.map(item => item.id), scoped: items.every(item => item.scoped) };
@@ -404,6 +405,7 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 			: changeDocument("ofdgoDeleteObjects", item);
 	},
 	onEdit: editCanvasObject,
+	onPick: openObjectPicker,
 	onExitScope: () => {
 		if (!state.composite) return false;
 		exitCompositeScope();
@@ -414,6 +416,8 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onDraw: (index, shape, box, style) => changeDocument("ofdgoInsertShape", null, index, shape,
 		box.x, box.y, box.width, box.height, style.fill, style.fillColor, style.stroke, style.strokeColor, style.lineWidth),
 	onDrawText: beginCanvasText,
+	onDrawAnnotation: (index, kind, box) => openAnnotationCreate(kind, index, box),
+	onDrawInk: (index, points, style, pressure) => changeDocument("ofdgoInsertInk", null, index, JSON.stringify(points), style.lineWidth, pressure, style.strokeColor),
 	onCommitText: (item, value, fontData, color = null) => item.draft
 		? changeDocument("ofdgoInsertText", null, item.index, value, fontData || item.fontData, item.x, item.y, item.size, item.color, item.width, item.wrap, item.align, item.paragraphHeight, item.letterSpacing, ...textIndents(item))
 		: changeDocument("ofdgoUpdateText", item, value, fontData || null, item.size, color),
@@ -497,6 +501,86 @@ el.infoForm.addEventListener("submit", async event => {
 });
 el.annotationClose.addEventListener("click", () => el.annotationNote.close());
 el.annotationNote.addEventListener("close", () => { state.annotationEdit = null; });
+el.penTool.addEventListener("change", () => {
+	const tool = el.penTool.value;
+	el.penTool.value = "";
+	canvasEditor.select(null);
+	toggleDrawingTool(tool);
+});
+el.annotationTool.addEventListener("change", async () => {
+	const kind = el.annotationTool.value;
+	el.annotationTool.value = "";
+	if (kind === "objects") { openObjectPicker(); return; }
+	let selected = canvasEditor.selected;
+	if (state.composite?.key.startsWith("annotation:")) {
+		const id = state.composite.key.split("/")[0];
+		selected = { ...state.pageCache.get(state.composite.index)?.objects.find(item => item.id === id), index: state.composite.index, id, type: "Annotation" };
+	}
+	if (kind === "details" || kind === "replace") {
+		if (selected?.type !== "Annotation") { setStatus("请先选择注解"); return; }
+		try {
+			const info = await callWASM("ofdgoReadAnnotation", selected.index, selected.id);
+			if (kind === "details") editAnnotationDetails({ ...selected, ...info });
+			else openAnnotationCreate(kind, selected.index, null, selected, info);
+		} catch (error) { showError(error, false); }
+		return;
+	}
+	if (kind === "link" && selected?.annotationType === "Link") {
+		try {
+			const info = await callWASM("ofdgoReadAnnotation", selected.index, selected.id);
+			openAnnotationCreate(kind, selected.index, selected, selected, info);
+		} catch (error) { showError(error, false); }
+	} else {
+		resetCompositeScope();
+		updateControls();
+		if (kind === "watermark") openAnnotationCreate(kind, state.pageIndex);
+		else {
+			canvasEditor.select(null);
+			toggleDrawingTool(`annotation:${kind}`);
+		}
+	}
+});
+annotationFields.CreateCancel.addEventListener("click", () => el.annotationCreate.close());
+el.annotationCreate.addEventListener("close", () => { state.annotationCreate = null; });
+annotationFields.Content.addEventListener("change", updateAnnotationFields);
+annotationFields.Height.addEventListener("input", () => { state.annotationCreate.height = annotationFields.Height.value; });
+annotationFields.LinkKind.addEventListener("change", updateAnnotationFields);
+annotationFields.Old.addEventListener("change", () => { annotationFields.Text.value = annotationFields.Old.value; });
+annotationFields.Tile.addEventListener("change", () => {
+	if (annotationFields.Tile.value === "tile") {
+		annotationFields.X.value = 10;
+		annotationFields.Y.value = 10;
+	}
+});
+annotationFields.CreateForm.addEventListener("submit", async event => {
+	event.preventDefault();
+	const entry = state.annotationCreate;
+	if (!entry || !annotationFields.CreateForm.reportValidity() || document.body.hasAttribute("aria-busy")) return;
+	const openSeq = state.openSeq;
+	const value = key => annotationFields[key].value;
+	const image = entry.kind === "stamp" || entry.kind === "watermark" && value("Content") === "image";
+	let font = null, data = null;
+	try {
+		if (image) data = new Uint8Array(await annotationFields.Image.files[0].arrayBuffer());
+		if (entry.kind === "watermark" && !image || entry.kind === "replace" && value("Font") === "current") {
+			const choice = state.textDefaults.fontChoice || state.textFonts[Number(fontPicker.value)];
+			if (!choice || choice.disabled) throw new Error("请先选择可用字体");
+			font = await readTextFont(choice);
+		}
+		if (openSeq !== state.openSeq || state.annotationCreate !== entry) return;
+		const options = { kind: entry.kind, id: entry.item?.id.replace("annotation:", "") || "", text: value("Text"), old: value("Old"),
+			creator: value("Author"), pages: value("Pages"), uri: value("Address"), target: value("LinkKind") === "page" ? Number(value("Target")) : 0,
+			x: Number(value("X")), y: Number(value("Y")), width: entry.kind === "note" ? 5 : Number(value("Width")), height: entry.kind === "note" ? 5 : Number(value("Height")),
+			angle: Number(value("Angle")), alpha: Math.round((100 - Number(value("Opacity"))) * 255 / 100), tile: value("Tile") === "tile",
+			size: state.textDefaults.size, color: state.textDefaults.color };
+		if (entry.kind === "link" && entry.item) {
+			options.base = entry.info?.linkBase || "";
+			options.keep = value("LinkKind") === "keep" || value("LinkKind") === entry.info?.linkKind
+				&& (value("LinkKind") === "uri" ? value("Address") === entry.info.linkURI : Number(value("Target")) === entry.info.linkPage);
+		}
+		if (await changeDocument("ofdgoWriteAnnotation", null, entry.index, JSON.stringify(options), font, data)) el.annotationCreate.close();
+	} catch (error) { el.annotationCreateStatus.textContent = error.message; }
+});
 el.annotationForm.addEventListener("submit", async event => {
 	if (!state.annotationEdit) return;
 	event.preventDefault();
@@ -1021,7 +1105,7 @@ function handleKeyDown(event) {
 
 function formDialogOpen() {
 	return el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open
-		|| el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open;
+		|| el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
 function setObjectDimension(input, value) {
@@ -1053,6 +1137,7 @@ function openObjectBounds() {
 }
 
 function canCopyStyle(item) {
+	if (item?.type === "Annotation") return false;
 	if (!item?.scoped) return canEditObject(item, "update");
 	if (item.type === "TextObject") return canEditObject(item, "replaceFont") && canEditObject(item, "paint");
 	if (item.type === "PathObject") return canEditObject(item, "transform") && canEditObject(item, "paint");
@@ -1068,7 +1153,7 @@ function openObjectStyle() {
 	el.copyStyleButton.disabled = items.length !== 1 || !canCopyStyle(items[0]);
 	el.pasteStyleButton.disabled = !state.styleClipboard || !items.every(item => item.type === state.styleClipboard && canCopyStyle(item));
 	const shared = (key, fallback) => items.every(item => (item[key] ?? fallback) === (items[0][key] ?? fallback)) ? items[0][key] ?? fallback : null;
-	const alpha = shared("alpha", 255), dash = shared("dashPattern", "");
+	const alpha = items.some(item => item.alphaMixed) ? null : shared("alpha", 255), dash = shared("dashPattern", "");
 	el.objectOpacity.value = alpha === null ? "" : String(Math.round((1 - alpha / 255) * 10000) / 100);
 	el.objectOpacity.placeholder = alpha === null ? "混合" : "";
 	el.objectStrokeFields.hidden = !items.every(item => item.type === "PathObject" && (!item.scoped || canEditObject(item, "paint")));
@@ -1393,21 +1478,96 @@ async function createDocument(event) {
 	}
 }
 
+function editAnnotationDetails(item) {
+	state.annotationEdit = item;
+	el.annotationRemark.value = item.remark || "";
+	el.annotationCreator.value = item.creator || "";
+	el.annotationFields.hidden = el.annotationSubmit.hidden = false;
+	el.annotationDetail.hidden = true;
+	el.annotationStatus.textContent = "";
+	el.annotationClose.textContent = "取消";
+	el.annotationNote.showModal();
+	el.annotationRemark.focus();
+}
+
+function openObjectPicker(items = canvasEditor.pageItems(state.pageIndex)) {
+	el.objectPickerList.replaceChildren();
+	const labels = { TextObject: "文字", PathObject: "图形", ImageObject: "图片", CompositeObject: "组合", CompositeGraphicUnit: "组合", Annotation: "注解" };
+	const kinds = { Path: "批注", Stamp: "印章", Watermark: "水印", Link: "链接", Highlight: "高亮" };
+	for (const item of [...items].reverse()) {
+		const button = document.createElement("button");
+		button.className = "button";
+		button.type = "button";
+		button.textContent = `${kinds[item.annotationType] || labels[item.type] || "对象"} · ${item.text || item.remark || item.id.replace("annotation:", "")}`;
+		button.title = button.textContent;
+		button.addEventListener("click", () => {
+			el.objectPicker.close();
+			canvasEditor.select(item);
+			canvasEditor.focus();
+		});
+		el.objectPickerList.append(button);
+	}
+	if (!items.length) { setStatus("页面暂无对象"); return; }
+	el.objectPicker.showModal();
+}
+
+function openAnnotationCreate(kind, index, box = null, item = null, info = null) {
+	const page = state.doc.pages[index];
+	const width = Math.min(60, page.width), height = 12;
+	state.annotationCreate = { kind, index, item, info, height: box?.height || height };
+	annotationFields.CreateForm.reset();
+	annotationFields.Text.value = kind === "watermark" ? "水印" : "";
+	annotationFields.Pages.value = String(index + 1);
+	annotationFields.Target.max = state.doc.pageCount;
+	annotationFields.Target.value = String(index + 1);
+	annotationFields.LinkKind.querySelector('[value="keep"]').hidden = !item;
+	if (kind === "link" && info) {
+		annotationFields.LinkKind.value = info.linkKind;
+		annotationFields.Address.value = info.linkURI || "";
+		if (info.linkPage) annotationFields.Target.value = String(info.linkPage);
+	}
+	annotationFields.X.value = box?.x ?? (page.width - width) / 2;
+	annotationFields.Y.value = box?.y ?? (page.height - height) / 2;
+	annotationFields.Width.value = box?.width || width;
+	annotationFields.Angle.value = kind === "watermark" ? -30 : 0;
+	annotationFields.Opacity.value = kind === "watermark" ? 80 : 0;
+	annotationFields.Old.replaceChildren(...(info?.texts || []).map(text => new Option(text, text)));
+	if (kind === "replace") annotationFields.Text.value = info?.texts[0] || "";
+	el.annotationCreateStatus.textContent = "";
+	el.annotationCreate.setAttribute("aria-label", {note:"添加批注",watermark:"添加水印",stamp:"添加印章",link: item ? "修改链接" : "添加链接",replace:"替换文字"}[kind]);
+	updateAnnotationFields();
+	el.annotationCreate.showModal();
+	const focus = [annotationFields.Text, annotationFields.Image, annotationFields.Address].find(input => !input.disabled);
+	focus?.focus();
+}
+
+function updateAnnotationFields() {
+	const { kind, item } = state.annotationCreate;
+	for (const key of ["X", "Y", "Width", "Height", "Pages", "Author"]) annotationFields[key].closest(".form-row").hidden = false;
+	for (const row of el.annotationCreate.querySelectorAll("[data-annotation]")) row.hidden = !row.dataset.annotation.split(" ").includes(kind);
+	const image = kind === "stamp" || kind === "watermark" && annotationFields.Content.value === "image";
+	annotationFields.ImageRow.hidden = !image;
+	annotationFields.Image.required = image;
+	annotationFields.TextRow.hidden = !["note", "replace", "watermark"].includes(kind) || image;
+	annotationFields.AddressRow.hidden = kind !== "link" || annotationFields.LinkKind.value !== "uri";
+	annotationFields.TargetRow.hidden = kind !== "link" || annotationFields.LinkKind.value !== "page";
+	annotationFields.Height.value = image ? "" : state.annotationCreate.height;
+	annotationFields.Height.placeholder = image ? "等比" : "";
+	if (kind === "link" && item) {
+		for (const key of ["X", "Y", "Width", "Height", "Pages", "Author"]) annotationFields[key].closest(".form-row").hidden = true;
+	}
+	for (const input of annotationFields.CreateForm.querySelectorAll("input,select,textarea")) {
+		input.disabled = Boolean(input.closest("[hidden]")) || image && input === annotationFields.Height;
+	}
+}
+
 async function editCanvasObject(item) {
 	if (!state.editing || document.body.hasAttribute("aria-busy") || canvasEditor.input || item.items) return;
+	if (canEditObject(item, "enter")) return enterCompositeScope(item.index, item.id);
 	if (item.type === "Annotation") {
-		state.annotationEdit = item;
-		el.annotationRemark.value = item.remark || "";
-		el.annotationCreator.value = item.creator || "";
-		el.annotationFields.hidden = el.annotationSubmit.hidden = false;
-		el.annotationDetail.hidden = true;
-		el.annotationStatus.textContent = "";
-		el.annotationClose.textContent = "取消";
-		el.annotationNote.showModal();
-		el.annotationRemark.focus();
+		editAnnotationDetails(item);
 		return;
 	}
-	if (canEditObject(item, "enter")) return enterCompositeScope(item.index, item.id);
 	if (item.type === "TextObject") {
 		if (!confirmTextReflow(item)) return;
 	} else if (!canEditObject(item, item.type === "ImageObject" ? "replaceImage" : "update")) return;
@@ -1440,13 +1600,7 @@ async function editCanvasObject(item) {
 
 function mountEditorObjects(index, page, surface) {
 	const scope = state.composite?.index === index ? state.composite : null;
-	const annotations = state.renderAnnotations ? (page.annotations || []).filter(annotation => annotation.visible).map(annotation => ({
-		...annotation, id: `annotation:${annotation.id}`, type: "Annotation", width: annotation.width || 6, height: annotation.height || 6,
-		background: annotation.type === "Watermark" || annotation.x <= 0.1 && annotation.y <= 0.1
-			&& annotation.x + annotation.width >= page.width - 0.1 && annotation.y + annotation.height >= page.height - 0.1,
-		capabilities: { update: true, move: true, delete: true },
-	})) : [];
-	canvasEditor.mount(index, { ...page, objects: scope ? scope.objects : [...page.objects, ...annotations] }, surface);
+	canvasEditor.mount(index, { ...page, objects: scope ? scope.objects : page.objects.filter(item => state.renderAnnotations || item.type !== "Annotation") }, surface);
 }
 
 function changeAnnotations(item, action, ...args) {
@@ -1904,7 +2058,7 @@ function updateDrawingControls() {
 	const tool = canvasEditor.tool;
 	const path = selectedPath(canvasEditor.selected);
 	el.insertTextButton.setAttribute("aria-pressed", String(tool === "text"));
-	const line = lineShape(tool) || !tool && lineShape(path?.shape);
+	const line = lineShape(tool) || tool.startsWith("pen-") || !tool && lineShape(path?.shape);
 	if (line) {
 		el.shapeFill.checked = false;
 		el.shapeStroke.checked = true;
@@ -1913,6 +2067,9 @@ function updateDrawingControls() {
 	}
 	const disabled = !state.editing || !state.ready || state.exporting;
 	el.arrowTool.disabled = disabled || !pageCan("insert");
+	el.penTool.disabled = el.arrowTool.disabled;
+	el.penTool.classList.toggle("active", tool.startsWith("pen-"));
+	el.annotationTool.disabled = disabled;
 	for (const [button, name] of [[el.drawLineButton, "line"], [el.drawRectangleButton, "rectangle"], [el.drawEllipseButton, "ellipse"]]) {
 		button.disabled = disabled || !pageCan("insert");
 		button.setAttribute("aria-pressed", String(tool === name));
@@ -1953,11 +2110,15 @@ async function changeDocument(name, item, ...args) {
 			ofdgoDeleteObject: "delete", ofdgoDeleteObjects: "delete", ofdgoCopyObjects: "copy", ofdgoOrderObjects: "order", ofdgoGroupObjects: "group" }[name];
 		const members = item?.items || (item ? [item] : []);
 		const scoped = scope && members.length && members.every(member => member.scoped);
-		const inserting = ["ofdgoInsertShape", "ofdgoInsertText", "ofdgoInsertImage"].includes(name);
+		const ids = item ? Array.isArray(item.id) ? item.id : members.map(member => member.id) : [];
+		const annotated = !scoped && ids.some(id => id.startsWith("annotation:"));
+		const inserting = ["ofdgoInsertShape", "ofdgoInsertText", "ofdgoInsertImage", "ofdgoInsertInk"].includes(name);
+		const editingAnnotation = name === "ofdgoWriteAnnotation" && Boolean(state.annotationCreate?.item);
 		if (scope && inserting) args.push(scope.key);
 		if (scoped && !operation) throw new Error("内部对象暂不支持此操作");
 		const doc = scoped
 			? await callWASM("ofdgoChangeCompositeObjects", item.index, scope.key, Array.isArray(item.id) ? item.id : members.map(member => member.id), operation, ...args)
+			: annotated && operation ? await callWASM("ofdgoChangeSelection", item.index, ids, operation, ...args)
 			: await callWASM(name, ...(item ? [item.index, item.id] : []), ...args);
 		if (openSeq !== state.openSeq) {
 			return;
@@ -1975,7 +2136,7 @@ async function changeDocument(name, item, ...args) {
 		const restoredIndex = location ? doc.pages.findIndex(page => page.id === location.page) : -1;
 		if (restoredIndex >= 0) {
 			state.composite = location.scope ? { index: restoredIndex, key: location.scope, objects: [] } : null;
-		} else if (!item && !inserting && !(name === "ofdgoPasteObjects" && args[4])) {
+		} else if (!item && !inserting && !editingAnnotation && !(name === "ofdgoPasteObjects" && args[4])) {
 			resetCompositeScope();
 		}
 		if (restoring && JSON.stringify(doc.outlines) !== JSON.stringify(state.doc.outlines)) {
@@ -2000,17 +2161,17 @@ async function changeDocument(name, item, ...args) {
 			rememberEditorView(before, revision);
 			return true;
 		}
-		const clearSelection = !item || name === "ofdgoChangeAnnotations" && args[0] === "delete"
+		const clearSelection = !item && !editingAnnotation || name === "ofdgoChangeAnnotations" && args[0] === "delete"
 			|| ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoEraseObjects", "ofdgoEraseObjectsPath"].includes(name);
-		if (name === "ofdgoCopyObjects" || name === "ofdgoPasteObjects" || name === "ofdgoGroupObjects" || name === "ofdgoInsertShape" || name === "ofdgoInsertText" || name === "ofdgoInsertImage") {
+		if (name === "ofdgoCopyObjects" || name === "ofdgoPasteObjects" || name === "ofdgoGroupObjects" || inserting || name === "ofdgoWriteAnnotation" && !editingAnnotation) {
 			state.selectObjects = true;
-			canvasEditor.setTool("");
+			if (name !== "ofdgoInsertInk") canvasEditor.setTool("");
 			setPan(false);
-			canvasEditor.pendingSelection = { index: item?.index ?? args[0], ids: doc.selectedIDs };
+			canvasEditor.pendingSelection = { index: item?.index ?? args[0], ids: name === "ofdgoInsertInk" ? [] : doc.selectedIDs };
 		}
 		if (scoped && name === "ofdgoOrderObjects") canvasEditor.pendingSelection = { index: item.index, ids: doc.selectedIDs };
 		openSeq = ++state.openSeq;
-		if (item || name === "ofdgoPasteObjects" || name === "ofdgoInsertShape" || name === "ofdgoInsertText" || name === "ofdgoInsertImage") {
+		if (item || name === "ofdgoPasteObjects" || inserting || editingAnnotation) {
 			await refreshEditorPage(doc, item ? item.index : args[0], openSeq, clearSelection);
 		} else {
 			const samePage = doc.pages.findIndex((page) => page.id === previous.id);
@@ -2029,7 +2190,9 @@ async function changeDocument(name, item, ...args) {
 		}
 	} catch (err) {
 		if (openSeq === state.openSeq) {
-			if (el.annotationNote.open) {
+			if (el.annotationCreate.open) {
+				el.annotationCreateStatus.textContent = err.message;
+			} else if (el.annotationNote.open) {
 				el.annotationStatus.textContent = err.message;
 			} else if (el.batchPagesPanel.open) {
 				el.batchPagesStatus.textContent = err.message;
@@ -2588,6 +2751,8 @@ async function openOFD(file) {
 		el.paragraphPanel.close();
 		el.infoPanel.close();
 		el.annotationNote.close();
+		el.annotationCreate.close();
+		el.objectPicker.close();
 		el.importPanel.close();
 		el.batchPagesPanel.close();
 		el.objectStylePanel.close();
@@ -5800,7 +5965,7 @@ function updateObjectControls(item, reset = false) {
 	el.editObjectButton.disabled = disabled || Boolean(item.items) || !canEditObject(item, "enter") && (item.type === "PathObject"
 		|| !canEditObject(item, item.type === "TextObject" ? "reflow" : item.type === "ImageObject" ? "replaceImage" : "update"));
 	el.editObjectButton.textContent = canEditObject(item, "enter") ? "进入" : item?.type === "ImageObject" ? "替换" : "修改";
-	el.editObjectButton.title = canEditObject(item, "enter") ? "进入组合" : item?.type === "ImageObject" ? "替换图片" : item?.type === "Annotation" ? "修改注解" : "修改对象";
+	el.editObjectButton.title = canEditObject(item, "enter") ? item?.type === "Annotation" ? "进入注解" : "进入组合" : item?.type === "ImageObject" ? "替换图片" : item?.type === "Annotation" ? "修改注解" : "修改对象";
 	el.editObjectButton.setAttribute("aria-label", el.editObjectButton.title);
 	el.multiSelectButton.disabled = !state.editing || !canvasEditor.enabled || !state.ready || state.exporting;
 	const selection = selectedText(item);

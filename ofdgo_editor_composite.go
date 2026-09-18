@@ -27,11 +27,13 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
-// ObjectPath 定位页面顶层对象及复合对象内的成员，Children为从0开始的逐层绘制序号
+// ObjectPath 定位页面顶层对象或注解外观内的成员，Children为从0开始的逐层绘制序号
+// Annotation非空时定位该注解的Appearance，ID留空
 // 路径不依赖资源标识，几何变换、资源隔离及撤销重做不改变路径；成员增删或排序后需重新枚举
 type ObjectPath struct {
-	ID       string `json:"id"`
-	Children []int  `json:"children,omitempty"`
+	ID         string `json:"id"`
+	Annotation string `json:"annotation,omitempty"`
+	Children   []int  `json:"children,omitempty"`
 }
 
 // CompositeMember 复合对象的直接成员快照，Object包含有效样式，不用于整体替换原对象
@@ -294,6 +296,9 @@ func compositeOrientation(box Box, matrix Matrix) Matrix {
 // 入参: page 页面索引, path 复合对象路径
 // 返回: *Reader 预览读取器, *Renderer 度量器, *editorCompositeNode 顶层节点, []*editorCompositeNode 成员, error 错误信息
 func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, *editorCompositeNode, []*editorCompositeNode, error) {
+	if path.Annotation != "" {
+		return e.annotationScope(page, path)
+	}
 	layer, index, err := e.findObject(page, path.ID)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -361,6 +366,9 @@ func newEditorCompositeNode(data []byte) (*editorCompositeNode, error) {
 	var object GraphicObject
 	object.Type = node.name.Local
 	switch object.Type {
+	case "Appearance":
+		object.Type = "CompositeObject"
+		err = xml.Unmarshal(data, &object.CompositeGraphicUnit)
 	case "TextObject":
 		err = xml.Unmarshal(data, &object.TextObject)
 	case "PathObject":
@@ -771,6 +779,9 @@ func (e *Editor) editCompositeScope(page int, path ObjectPath, edit func(*Render
 	data, changed, err := e.writeCompositeNode(root)
 	if err != nil || !changed {
 		return err
+	}
+	if path.Annotation != "" {
+		return e.writeAnnotationScope(page, path.Annotation, data, root.states)
 	}
 	next, err := newEditorCompositeNode(data)
 	if err != nil {

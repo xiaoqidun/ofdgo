@@ -28,6 +28,9 @@ func (e *Editor) prunePageReferences(parts map[string][]byte) error {
 	for id := range e.source.pages {
 		removed[id] = true
 	}
+	for id := range e.source.annotationPages {
+		removed[id] = true
+	}
 	for _, page := range e.pages {
 		delete(removed, page.ID)
 	}

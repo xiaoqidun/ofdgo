@@ -22,6 +22,22 @@ import (
 	"slices"
 )
 
+// TransformObjectsMatrix 对同页对象施加可逆页面变换，保留原文、资源与裁剪
+// 入参: page 页面索引, ids 对象标识, matrix 页面变换
+// 返回: error 错误信息
+func (e *Editor) TransformObjectsMatrix(page int, ids []string, matrix Matrix) error {
+	if _, ok := matrix.Invert(); !ok || !finite(matrix.a) || !finite(matrix.b) || !finite(matrix.c) || !finite(matrix.d) || !finite(matrix.e) || !finite(matrix.f) {
+		return fmt.Errorf("object transform must be finite and invertible")
+	}
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil || len(objects) == 0 {
+		return err
+	}
+	return e.transformObjects(page, objects, func(object GraphicObject) (GraphicObject, error) {
+		return e.transformMatrix(object, matrix)
+	})
+}
+
 // RotateObject 绕对象可见范围中心旋转
 // 入参: page 页面索引, id 对象标识, degrees 顺时针角度
 // 返回: error 错误信息

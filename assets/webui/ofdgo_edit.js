@@ -178,7 +178,6 @@ function paintShape(node, shape, box) {
 export function canEditObject(item, capability) {
 	if (!item) return false;
 	const objects = item.items || [item];
-	if (objects.some(object => object.type === "Annotation") && objects.some(object => object.type !== "Annotation")) return false;
 	return objects.every(object => Boolean(object.capabilities?.[capability] || capability === "move" && object.capabilities?.transform));
 }
 
@@ -191,7 +190,6 @@ export function missingGlyphMessage(diagnostic, action = "请更换字体") {
 }
 
 export function objectEditReason(item) {
-	if (item?.items?.some(object => object.type === "Annotation") && item.items.some(object => object.type !== "Annotation")) return "注解与正文需分别操作";
 	const labels = { fontUnavailable: "字体不可用", unsupportedColor: "暂不支持此颜色", unsupportedStyle: "暂不支持此样式",
 		unsupportedContainer: "暂不支持此对象结构", invalidObject: "对象数据异常" };
 	const reasons = (item?.items || (item ? [item] : [])).map(object => {
@@ -231,6 +229,15 @@ export class CanvasEditor {
 		viewer.addEventListener("pointermove", (event) => this.move(event));
 		viewer.addEventListener("pointerup", (event) => this.end(event));
 		viewer.addEventListener("pointercancel", () => this.cancel());
+		viewer.addEventListener("contextmenu", event => {
+			if (!this.enabled || this.input || this.options.busy()) return;
+			const items = this.itemsAt(event);
+			if (items.length > 1) {
+				event.preventDefault();
+				this.cancel();
+				this.options.onPick?.(items);
+			}
+		});
 		viewer.addEventListener("lostpointercapture", () => this.cancel());
 		viewer.addEventListener("keydown", (event) => this.keyDown(event));
 		viewer.addEventListener("keyup", (event) => this.keyUp(event));
@@ -282,12 +289,10 @@ export class CanvasEditor {
 		const layer = document.createElement("div");
 		layer.className = "edit-layer";
 		const artwork = new Map([...surface.querySelectorAll("[data-ofd-object], [data-ofd-child]")].map((node, order) => [node.getAttribute("data-ofd-object") || node.getAttribute("data-ofd-child"), { node, order }]));
-		const objects = [...page.objects].sort((a, b) => Number(Boolean(b.background)) - Number(Boolean(a.background))
-			|| (artwork.get(a.id)?.order ?? 0) - (artwork.get(b.id)?.order ?? 0));
+		const objects = [...page.objects].sort((a, b) => (artwork.get(a.id)?.order ?? 0) - (artwork.get(b.id)?.order ?? 0));
 		for (const object of objects) {
 			const node = document.createElement("div");
 			node.className = "edit-object";
-			node.classList.toggle("edit-background", Boolean(object.background));
 			node.classList.toggle("read-only", !canEditObject(object, "move"));
 			node.title = objectEditReason(object);
 			if (lineShape(object.shape)) {
@@ -298,7 +303,7 @@ export class CanvasEditor {
 			node.setAttribute("aria-label", { ImageObject: "图片对象", TextObject: "文字对象", PathObject: "图形对象", CompositeObject: "复合对象", CompositeGraphicUnit: "复合对象", Annotation: "注解对象" }[object.type]);
 			const item = { ...object, index, page: { width: page.width, height: page.height }, node, surface };
 			item.artwork = artwork.get(object.id)?.node;
-			if (object.type === "PathObject" && (object.shape || object.outline) || (object.scoped || object.type === "CompositeObject" || object.type === "CompositeGraphicUnit") && object.contours?.length) {
+			if (object.type === "PathObject" && (object.shape || object.outline) || (object.scoped || object.type === "CompositeObject" || object.type === "CompositeGraphicUnit" || object.type === "Annotation") && object.contours?.length) {
 				node.classList.add("edit-contour");
 				const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
 				svg.classList.add("edit-outline");
@@ -519,6 +524,7 @@ export class CanvasEditor {
 		}
 		if (this.tool) {
 			if (this.tool.startsWith("erase-")) this.startErase(event);
+			else if (this.tool.startsWith("pen-")) this.startInk(event);
 			else this.startShape(event);
 			return;
 		}
@@ -533,9 +539,8 @@ export class CanvasEditor {
 		node = target?.node;
 		this.focus();
 		const additive = event.shiftKey || event.ctrlKey || event.metaKey || this.multiple;
-		if (!target || target.background && !this.items().includes(target)) {
+		if (!target) {
 			this.startMarquee(event, additive);
-			if (this.drag?.marquee) this.drag.target = target;
 			return;
 		}
 		if (additive && !event.target.dataset.corner) {
@@ -587,6 +592,10 @@ export class CanvasEditor {
 		return [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)).reverse().filter(item => this.contains(item, point, tolerance));
 	}
 
+	pageItems(index) {
+		return [...this.viewer.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)).filter(item => item?.index === index);
+	}
+
 	cycleSelection(event) {
 		const items = this.itemsAt(event);
 		if (!items.length) return;
@@ -602,6 +611,10 @@ export class CanvasEditor {
 		}
 		event.preventDefault();
 		drag.pointer = event;
+		if (drag.ink) {
+			this.moveInk(event, drag);
+			return;
+		}
 		if (drag.erase) {
 			this.moveErase(event, drag);
 			return;
@@ -729,6 +742,16 @@ export class CanvasEditor {
 			return;
 		}
 		this.move(event);
+		if (drag.ink) {
+			this.drag = null;
+			this.viewer.releasePointerCapture(drag.pointerID);
+			if (drag.pressure && drag.points.every(point => point.pressure === 0)) {
+				drag.preview.remove();
+				return;
+			}
+			Promise.resolve(this.options.onDrawInk(drag.page.index, drag.points, drag.style, drag.pressure)).finally(() => drag.preview.remove());
+			return;
+		}
 		if (drag.erase) {
 			const items = drag.erase === "erase-object" ? [...drag.erased] : drag.box
 				? drag.items.filter(item => item.x < drag.box.x + drag.box.width && item.x + item.width > drag.box.x
@@ -746,12 +769,19 @@ export class CanvasEditor {
 			this.drag = null;
 			drag.preview.remove();
 			this.viewer.releasePointerCapture(drag.pointerID);
-			if (drag.target && !drag.moved) this.setSelection([...drag.base, drag.target]);
 			return;
 		}
 		if (drag.shape) {
 			this.drag = null;
 			this.viewer.releasePointerCapture(drag.pointerID);
+			if (drag.annotation) {
+				const point = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.page, drag.rotation);
+				const box = drag.box || { ...point, width: drag.annotation === "note" ? 5 : 40, height: drag.annotation === "note" ? 5 : 12 };
+				drag.preview.remove();
+				this.setTool("");
+				this.options.onDrawAnnotation(drag.page.index, drag.annotation, box);
+				return;
+			}
 			if (drag.shape === "text") {
 				const from = pagePoint(drag.clientX, drag.clientY, drag.rect, drag.page, drag.rotation);
 				const x = Math.max(0, Math.min(from.x, drag.page.width - 1));
@@ -812,14 +842,56 @@ export class CanvasEditor {
 		}
 	}
 
+	startInk(event) {
+		const surface = event.target.closest(".page-surface") || this.nearestSurface(event), page = this.pages.get(surface);
+		if (!page || !this.options.canInsert(page.index)) return;
+		event.preventDefault();
+		this.focus();
+		const style = { ...this.options.drawStyle(), fill: false, stroke: true };
+		const pressure = this.tool === "pen-pressure";
+		const preview = this.createPreview(surface, page, "path", pressure ? { ...style, fill: true, fillColor: style.strokeColor, stroke: false } : style);
+		preview.node.setAttribute("stroke-linecap", "round");
+		preview.node.setAttribute("stroke-linejoin", "round");
+		this.drag = { ink: true, pressure, points: [], parts: [], page, surface, style, ...preview, pointerID: event.pointerId,
+			rect: surface.getBoundingClientRect(), rotation: this.options.rotation() };
+		this.viewer.setPointerCapture(event.pointerId);
+		this.moveInk(event, this.drag);
+	}
+
+	moveInk(event, drag) {
+		const coalesced = event.getCoalescedEvents?.() || [];
+		for (const sample of coalesced.length ? coalesced : [event]) {
+			const point = pagePoint(sample.clientX, sample.clientY, drag.rect, drag.page, drag.rotation);
+			const last = drag.points.at(-1);
+			point.pressure = sample.pointerType === "pen" ? event.type === "pointerup" ? last?.pressure ?? sample.pressure : sample.pressure : 0.5;
+			if (last && Math.hypot(point.x-last.x, point.y-last.y) < 0.05 && Math.abs(point.pressure-last.pressure) < 0.01) continue;
+			drag.points.push(point);
+			if (!drag.pressure) {
+				drag.parts.push(`${last ? "L" : "M"}${point.x} ${point.y}`);
+			} else {
+				const radius = drag.style.lineWidth * point.pressure / 2;
+				if (radius > 0) drag.parts.push(`M${point.x+radius} ${point.y}a${radius} ${radius} 0 1 1 ${-2*radius} 0a${radius} ${radius} 0 1 1 ${2*radius} 0Z`);
+				if (last) {
+					const r = drag.style.lineWidth * last.pressure / 2, dx = point.x-last.x, dy = point.y-last.y, length = Math.hypot(dx,dy);
+					if ((radius > 0 || r > 0) && length > Math.abs(radius-r)) {
+						const x = dx/length, y = dy/length, a = (r-radius)/length, b = Math.sqrt(1-a*a);
+						const nx = a*x-b*y, ny = a*y+b*x, mx = a*x+b*y, my = a*y-b*x;
+						drag.parts.push(`M${last.x+r*mx} ${last.y+r*my}L${point.x+radius*mx} ${point.y+radius*my}L${point.x+radius*nx} ${point.y+radius*ny}L${last.x+r*nx} ${last.y+r*ny}Z`);
+					}
+				}
+			}
+		}
+		const dot = drag.points.length === 1 && !drag.pressure ? `l0.001 0` : "";
+		drag.node.setAttribute("d", drag.parts.join(" ") + dot);
+	}
+
 	startErase(event) {
 		const surface = event.target.closest(".page-surface") || this.nearestSurface(event);
 		const page = this.pages.get(surface);
 		if (!page) return;
 		event.preventDefault();
 		this.focus();
-		this.drag = { erase: this.tool, page, surface, items: [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node))
-			.filter(item => this.tool === "erase-object" || !item.background),
+		this.drag = { erase: this.tool, page, surface, items: [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)),
 			erased: new Set(), shape: "rectangle", pointerID: event.pointerId, clientX: event.clientX, clientY: event.clientY,
 			rect: surface.getBoundingClientRect(), rotation: this.options.rotation() };
 		if (this.tool === "erase-region") Object.assign(this.drag, this.createPreview(surface, page, "rectangle",
@@ -875,12 +947,10 @@ export class CanvasEditor {
 		const box = { x: Math.min(from.x, to.x), y: Math.min(from.y, to.y), width: Math.abs(to.x-from.x), height: Math.abs(to.y-from.y) };
 		paintShape(drag.node, "rectangle", box);
 		if (Math.hypot(event.clientX-drag.clientX, event.clientY-drag.clientY) < 3) return;
-		drag.moved = true;
 		const items = [...drag.base];
 		for (const node of drag.surface.querySelectorAll(".edit-object")) {
 			const item = this.nodes.get(node);
-			if (item.background && (item.x < box.x || item.y < box.y || item.x + item.width > box.x + box.width || item.y + item.height > box.y + box.height)) continue;
-			if (!items.includes(item) && item.x <= box.x+box.width && item.x+item.width >= box.x && item.y <= box.y+box.height && item.y+item.height >= box.y) {
+			if (!items.includes(item) && item.x >= box.x && item.x+item.width <= box.x+box.width && item.y >= box.y && item.y+item.height <= box.y+box.height) {
 				items.push(item);
 			}
 		}
@@ -895,13 +965,14 @@ export class CanvasEditor {
 		}
 		event.preventDefault();
 		this.focus();
-		const shape = this.tool;
+		const annotation = this.tool.startsWith("annotation:") ? this.tool.slice(11) : "";
+		const shape = annotation ? "rectangle" : this.tool;
 		const style = this.options.drawStyle();
 		if (lineShape(shape)) {
 			style.fill = false;
 			style.stroke = true;
 		}
-		this.drag = { shape, page, surface, ...this.createPreview(surface, page, shape === "text" ? "rectangle" : shape, style), style, pointerID: event.pointerId,
+		this.drag = { shape, annotation, page, surface, ...this.createPreview(surface, page, shape === "text" ? "rectangle" : shape, style), style, pointerID: event.pointerId,
 			rect: surface.getBoundingClientRect(), rotation: this.options.rotation(),
 			clientX: event.clientX, clientY: event.clientY };
 		this.viewer.setPointerCapture(event.pointerId);
@@ -1024,6 +1095,15 @@ export class CanvasEditor {
 			return;
 		}
 		if (this.input || !this.enabled || !this.selected || this.options.busy() || this.nudgeCommit || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) {
+			return;
+		}
+		if (event.key === "Tab" && !this.drag && !this.nudge) {
+			const items = this.pageItems(this.selected.index);
+			if (items.length) {
+				event.preventDefault();
+				event.stopPropagation();
+				this.select(items[(items.indexOf(this.selected) + (event.shiftKey ? -1 : 1) + items.length) % items.length]);
+			}
 			return;
 		}
 		const directions = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };

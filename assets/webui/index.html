@@ -99,6 +99,8 @@
 				<button id="drawRectangleButton" class="button" type="button" title="矩形" aria-label="矩形" aria-pressed="false">矩形</button>
 				<button id="drawEllipseButton" class="button" type="button" title="椭圆" aria-label="椭圆" aria-pressed="false">椭圆</button>
 				<select id="arrowTool" aria-label="箭头" title="箭头"><option value="" hidden>箭头</option><option value="line">直线</option><option value="arrow">单向</option><option value="double-arrow">双向</option></select>
+				<select id="penTool" aria-label="画笔" title="画笔"><option value="" hidden>画笔</option><option value="pen-round">圆笔</option><option value="pen-pressure">钢笔</option></select>
+				<select id="annotationTool" aria-label="注解工具" title="注解工具"><option value="" hidden>注解</option><option value="note">批注</option><option value="watermark">水印</option><option value="stamp">印章</option><option value="link">链接</option><option value="details">说明</option><option value="replace">替换</option><option value="objects">选取</option></select>
 				<span>插入</span>
 			</div>
 			<div class="editor-group">
@@ -263,6 +265,37 @@
 				<label class="form-row"><span>作者</span><input id="infoAuthor" type="text"></label>
 				<div class="form-actions"><div id="infoStatus" class="form-status" role="status"></div><button id="infoCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
+		</dialog>
+		<dialog id="annotationCreate" class="form-dialog" aria-label="添加注解">
+			<form id="annotationCreateForm">
+				<label class="form-row" data-annotation="watermark"><span>类型</span><select id="annotationContent"><option value="text">文字</option><option value="image">图片</option></select></label>
+				<label class="form-row" data-annotation="replace"><span>原文</span><select id="annotationOld"></select></label>
+				<label class="form-row" data-annotation="replace"><span>字体</span><select id="annotationFont"><option value="keep">原字体</option><option value="current">当前字体</option></select></label>
+				<label class="form-row" id="annotationTextRow"><span>内容</span><textarea id="annotationText" rows="2" required></textarea></label>
+				<label class="form-row" id="annotationImageRow" hidden><span>图片</span><input id="annotationImage" type="file" accept="image/png,image/jpeg,image/bmp,image/tiff,image/gif,image/webp"></label>
+				<label class="form-row" data-annotation="note watermark stamp link"><span>作者</span><input id="annotationAuthor" type="text"></label>
+				<label class="form-row" data-annotation="link"><span>目标</span><select id="annotationLinkKind"><option value="uri">网址</option><option value="page">页面</option><option value="keep" hidden>原链接</option></select></label>
+				<label class="form-row" data-annotation="link" id="annotationAddressRow"><span>网址</span><input id="annotationAddress" type="text"></label>
+				<label class="form-row" data-annotation="link" id="annotationTargetRow"><span>页码</span><input id="annotationTarget" type="number" min="1" value="1"></label>
+				<div class="form-pair" data-annotation="note watermark stamp link">
+					<label class="form-row"><span>横向</span><span class="form-unit"><input id="annotationX" type="number" step="any" value="10" required><span>mm</span></span></label>
+					<label class="form-row"><span>纵向</span><span class="form-unit"><input id="annotationY" type="number" step="any" value="10" required><span>mm</span></span></label>
+				</div>
+				<div class="form-pair" data-annotation="watermark stamp link">
+					<label class="form-row"><span>宽度</span><span class="form-unit"><input id="annotationWidth" type="number" min="1" step="any" value="60" required><span>mm</span></span></label>
+					<label class="form-row"><span>高度</span><span class="form-unit"><input id="annotationHeight" type="number" min="1" step="any" value="12" required><span>mm</span></span></label>
+				</div>
+				<div class="form-pair" data-annotation="watermark stamp">
+					<label class="form-row"><span>角度</span><span class="form-unit"><input id="annotationAngle" type="number" min="-180" max="180" step="any" value="-30" required><span>°</span></span></label>
+					<label class="form-row"><span>透明</span><span class="form-unit"><input id="annotationOpacity" type="number" min="0" max="100" step="any" value="80" aria-label="透明度" required><span>%</span></span></label>
+				</div>
+				<label class="form-row" data-annotation="watermark"><span>排列</span><select id="annotationTile"><option value="single">单个</option><option value="tile">平铺</option></select></label>
+				<label class="form-row" data-annotation="note watermark stamp link"><span>页面</span><input id="annotationPages" type="text" required></label>
+				<div class="form-actions"><div id="annotationCreateStatus" class="form-status" role="status"></div><button id="annotationCreateCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
+			</form>
+		</dialog>
+		<dialog id="objectPicker" class="form-dialog" aria-label="选取对象">
+			<form method="dialog"><div id="objectPickerList" class="object-picker-list"></div><div class="form-actions"><button class="button" type="submit">关闭</button></div></form>
 		</dialog>
 		<dialog id="annotationNote" class="form-dialog" aria-label="注解">
 			<form id="annotationForm" method="dialog">

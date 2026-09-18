@@ -134,6 +134,24 @@ a:focus-visible {
 	grid-template-columns: repeat(4, max-content);
 }
 
+.editor-group:has(#penTool) {
+	grid-template-columns: repeat(4, max-content);
+}
+
+.object-picker-list {
+	display: grid;
+	gap: 4px;
+	max-height: 55vh;
+	overflow-y: auto;
+}
+
+.object-picker-list .button {
+	text-align: left;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
 .editor-field {
 	display: grid;
 	align-items: center;
@@ -1516,10 +1534,6 @@ button.outline-link:hover {
 	cursor: default;
 }
 
-.edit-object.edit-background:not(.selected):not(.erasing) {
-	outline: none;
-}
-
 .edit-object.edit-contour,
 .edit-object.edit-contour.selected,
 .edit-object.edit-contour.erasing {
@@ -2310,16 +2324,16 @@ button.outline-link:hover {
 
 @media (min-width: 901px) and (max-width: 1600px) and (pointer: fine) {
 	.editor-group {
-		padding-inline: 5px;
+		padding-inline: 3px;
 		column-gap: 3px;
 	}
 
 	.editor-toolbar .button {
-		padding-inline: 7px;
+		padding-inline: 6px;
 	}
 
 	.editor-group:has(#textFont) {
-		grid-template-columns: 144px 32px;
+		grid-template-columns: 136px 32px;
 	}
 
 	.editor-paragraph {

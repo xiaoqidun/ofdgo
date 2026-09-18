@@ -138,6 +138,12 @@ func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []Gra
 			} else {
 				owner.patches = append(owner.patches, editorXMLPatch{container.close, container.close, content})
 			}
+		} else if owner.node.name.Local == "Appearance" {
+			if owner.node.open == owner.node.end {
+				owner.patches = append(owner.patches, editorXMLContent(owner.data, owner.node, content))
+			} else {
+				owner.patches = append(owner.patches, editorXMLPatch{owner.node.close, owner.node.close, content})
+			}
 		} else {
 			content, err := editorXMLContainer("Content", nil, content)
 			if err != nil {

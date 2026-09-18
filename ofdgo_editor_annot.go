@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
-	"maps"
 	"path"
 	"strings"
 	"time"
@@ -284,25 +283,5 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 	if len(parts) == 0 {
 		return nil
 	}
-	files := maps.Clone(reader.files)
-	if files == nil {
-		files = make(map[string][]byte)
-	}
-	maps.Copy(files, parts)
-	updated := &Reader{Zip: reader.Zip, files: files}
-	if err := updated.initRoot(); err != nil {
-		return err
-	}
-	doc, err := updated.Doc()
-	if err != nil {
-		return err
-	}
-	before, after := e.source, *e.source
-	after.reader, after.document = updated, doc
-	e.source = &after
-	if change := e.recordChange(); change != nil {
-		change.undo = func(e *Editor) { e.source = before }
-		change.redo = func(e *Editor) { e.source = &after }
-	}
-	return nil
+	return e.commitAnnotationParts(e.source, parts)
 }

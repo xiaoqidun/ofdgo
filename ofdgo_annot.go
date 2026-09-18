@@ -156,8 +156,13 @@ func (r *Reader) parseAnnotations(doc *Document) error {
 	if r.Annots == nil {
 		r.Annots = make(map[string][]Annotation)
 	}
+	r.annotationFiles = make(map[string][]string)
 	for _, page := range annotations.Page {
 		annotPath := resolveResourcePath(annPath, "", page.FileLoc)
+		if file, ok := r.packageFile(annotPath); ok {
+			annotPath = cleanPackagePath(file.Name)
+		}
+		r.annotationFiles[annotPath] = append(r.annotationFiles[annotPath], page.PageID)
 		af, err := r.openFile(annotPath)
 		if err != nil {
 			continue

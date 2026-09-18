@@ -143,7 +143,7 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 	return SVGResources{Fonts: s.fonts, Images: s.images}, buffer.Flush()
 }
 
-// beginObject 标记直接对象及复合成员，模板与注解内部图元不单独标记
+// beginObject 标记直接对象及复合或注解成员，模板图元不单独标记
 // 入参: object 图形对象
 // 返回: bool 是否写入分组
 func (s *svgResourceRenderer) beginObject(object *GraphicObject) bool {
@@ -176,7 +176,7 @@ func (s *svgResourceRenderer) beginAnnotation(id string) bool {
 	if s.objects == nil {
 		return false
 	}
-	s.objectStack = append(s.objectStack, svgObjectGroup{})
+	s.objectStack = append(s.objectStack, svgObjectGroup{path: "annotation:" + id, composite: true})
 	fmt.Fprintf(s.writer, `<g data-ofd-object="annotation:%s">`, html.EscapeString(id))
 	return true
 }

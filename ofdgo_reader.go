@@ -45,6 +45,7 @@ type Reader struct {
 	doc                       *Document
 	Stamps                    map[string][]Stamp
 	Annots                    map[string][]Annotation
+	annotationFiles           map[string][]string
 	fileIndex                 map[string]*zip.File
 	fileIndexFold             map[string]*zip.File
 	files                     map[string][]byte

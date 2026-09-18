@@ -14,7 +14,74 @@
 
 package ofdgo
 
-import "slices"
+import (
+	"maps"
+	"slices"
+)
+
+// Transaction 将多项修改作为一次原子操作提交，失败时保留原文档及历史
+// 回调仅操作传入的编辑器，不可保留该实例供后续使用
+// 入参: edit 批量修改回调
+// 返回: error 修改错误
+func (e *Editor) Transaction(edit func(*Editor) error) error {
+	before := e.transactionSnapshot()
+	next := e.transactionSnapshot()
+	next.history, next.historyIndex, next.historyLimit = nil, 0, 0
+	*e = next
+	if err := edit(e); err != nil {
+		*e = before
+		return err
+	}
+	next = e.transactionSnapshot()
+	*e = before
+	changed := next.revision != before.revision
+	e.restoreTransaction(next)
+	if changed {
+		e.serial, e.revision = before.serial, before.revision
+		if change := e.recordChange(); change != nil {
+			after := e.transactionSnapshot()
+			before.history, after.history = nil, nil
+			change.undo = func(e *Editor) { e.restoreTransaction(before) }
+			change.redo = func(e *Editor) { e.restoreTransaction(after) }
+		}
+	}
+	return nil
+}
+
+// transactionSnapshot 复制可变容器，保留只读XML、图元及二进制资源的共享
+// 返回: Editor 独立事务状态
+func (e *Editor) transactionSnapshot() Editor {
+	next := *e
+	next.Info = cloneEditorData(e.Info)
+	next.pages = make([]PageContent, len(e.pages))
+	for i, page := range e.pages {
+		next.pages[i] = copyEditorPage(page)
+	}
+	next.resources = slices.Clone(e.resources)
+	next.fonts, next.images, next.resourceID = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID)
+	next.origins = maps.Clone(e.origins)
+	if e.source != nil {
+		source := *e.source
+		source.pages, source.origins = maps.Clone(source.pages), maps.Clone(source.origins)
+		next.source = &source
+	}
+	return next
+}
+
+// restoreTransaction 恢复文档状态并保留历史容器、共享资源和递增标识
+// 入参: state 文档状态
+func (e *Editor) restoreTransaction(state Editor) {
+	state = state.transactionSnapshot()
+	if len(e.resources) > len(state.resources) {
+		state.resources = append(state.resources, e.resources[len(state.resources):]...)
+	}
+	maps.Copy(state.fonts, e.fonts)
+	maps.Copy(state.images, e.images)
+	maps.Copy(state.resourceID, e.resourceID)
+	state.history, state.historyIndex, state.historyLimit = e.history, e.historyIndex, e.historyLimit
+	state.serial, state.maxID = max(e.serial, state.serial), max(e.maxID, state.maxID)
+	*e = state
+}
 
 // editorChange 页面或对象操作及其修订标识
 type editorChange struct {

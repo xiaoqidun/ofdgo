@@ -37,6 +37,35 @@ type ObjectContour struct {
 	EvenOdd bool   `json:"evenOdd,omitempty"`
 }
 
+// AnnotationGeometry 获取注解外观的实际内容轮廓，不将Appearance容器边界视为绘制内容
+// 链接保留透明对象定义的交互区域，图片按几何范围度量而不解码透明像素
+// 入参: annotation 注解
+// 返回: Box 页面范围, []ObjectContour 命中轮廓, error 错误信息
+func (r *Renderer) AnnotationGeometry(annotation Annotation) (Box, []ObjectContour, error) {
+	object := GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: CompositeGraphicUnit{Boundary: annotation.Appearance.Boundary, Objects: annotation.Appearance.Objects}}
+	box, contours, err := r.ObjectGeometry(object, "")
+	if err != nil {
+		return box, contours, err
+	}
+	for _, source := range r.annotationActionSources([]Annotation{annotation}) {
+		for _, action := range source.Actions {
+			if action.Event != "CLICK" {
+				continue
+			}
+			region, path := actionLinkRegion(source, action)
+			if region.W <= 0 || region.H <= 0 {
+				continue
+			}
+			if path == "" {
+				path = canvas.Rectangle(region.W, region.H).Translate(region.X, region.Y).ToSVG()
+			}
+			box = unionTextBox(box, region)
+			contours = append(contours, ObjectContour{Path: path})
+		}
+	}
+	return box, contours, nil
+}
+
 // ObjectContours 获取路径、图片或复合对象的实际绘制区域，包含描边、虚线、变换及对象裁剪
 // 图片不解码像素，底纹不展开图案单元；不包含页面边界或父级变换
 // 入参: object 路径、图片或复合对象, drawParam 图层绘制参数标识

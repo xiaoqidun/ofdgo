@@ -278,7 +278,12 @@ func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []in
 	slices.Sort(indexes)
 	var owner *editorCompositeNode
 	var container *editorXML
-	selection := &CompositeSelection{editor: e, page: e.pages[page].ID, path: ObjectPath{ID: path.ID, Children: slices.Clone(path.Children)}, source: e.objectOrigin(path.ID).page}
+	selection := &CompositeSelection{editor: e, page: e.pages[page].ID, path: ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: slices.Clone(path.Children)}}
+	if path.Annotation == "" {
+		selection.source = e.objectOrigin(path.ID).page
+	} else if e.source != nil {
+		selection.source = e.source.pages[e.pages[page].ID]
+	}
 	for j, i := range indexes {
 		if i < 0 || i >= len(nodes) || j > 0 && indexes[j-1] == i {
 			return nil, fmt.Errorf("invalid composite copy selection")
@@ -324,7 +329,7 @@ func (e *Editor) PasteCompositeObjects(page int, path ObjectPath, selection *Com
 	if _, err := e.page(page); err != nil {
 		return nil, err
 	}
-	if e.pages[page].ID != selection.page || path.ID != selection.path.ID || !slices.Equal(path.Children, selection.path.Children) {
+	if e.pages[page].ID != selection.page || path.ID != selection.path.ID || path.Annotation != selection.path.Annotation || !slices.Equal(path.Children, selection.path.Children) {
 		var result []int
 		err := e.pasteCompositeSelection(selection, func(objects []GraphicObject) error {
 			var err error
