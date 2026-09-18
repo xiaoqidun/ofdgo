@@ -21,7 +21,7 @@ set GOARCH=amd64
 go build -o ofdgo_webui.exe -trimpath -ldflags "-s -w -buildid=" ./cmd/webui/webui.go
 ```
 
-# 安装为库
+# 安装引擎
 ```shell
 go get -u github.com/xiaoqidun/ofdgo
 ```
