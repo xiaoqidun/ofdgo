@@ -1191,10 +1191,12 @@ export class CanvasEditor {
 		const left = item.leftIndent || 0, right = item.rightIndent || 0;
 		const frame = item.textFrame || { width: item.width, height: item.height, matrix: [1, 0, 0, 1, item.x, item.y] };
 		const [a, b, c, d, e, f] = frame.matrix;
+		const autoSize = !source && !item.wrap && (!item.align || item.align === "left");
 		Object.assign(input.style, {
 			left: "0px", top: "0px",
-			width: `${(Math.max(frame.width, item.wrap ? frame.width : 50) - left - right) * PX_PER_MM + 4}px`,
-			minHeight: `${frame.height * PX_PER_MM + 4}px`,
+			width: autoSize ? "max-content" : `${(frame.width - left - right) * PX_PER_MM + 4}px`,
+			minWidth: autoSize ? "calc(1em + 4px)" : "0px",
+			minHeight: autoSize ? "0px" : `${frame.height * PX_PER_MM + 4}px`,
 			transform: `matrix(${a},${b},${c},${d},${(e + a * left) * PX_PER_MM},${(f + b * left) * PX_PER_MM})`,
 			whiteSpace: item.wrap ? "pre-wrap" : "pre",
 			fontFamily: `"${face.family}"`, fontSize: `${item.size * PX_PER_MM}px`,
@@ -1203,7 +1205,7 @@ export class CanvasEditor {
 			letterSpacing: `${(item.letterSpacing || 0) * PX_PER_MM}px`,
 			textIndent: `${(item.firstLineIndent || 0) * PX_PER_MM}px`,
 		});
-		this.input = { input, item, face, source: Boolean(source), fontChoice: item.fontChoice };
+		this.input = { input, item, face, frame, source: Boolean(source), fontChoice: item.fontChoice };
 		const editing = this.input;
 		if (source) editing.history = { entries: [{ value: item.text }], index: 0 };
 		item.artwork?.classList.add("edit-text-source");
@@ -1335,7 +1337,7 @@ export class CanvasEditor {
 	}
 
 	paintSourceText(source) {
-		const editing = this.input, { input, item, face } = editing;
+		const editing = this.input, { input, item, face, frame } = editing;
 		const caret = editTextSelection(input, editing.range);
 		const size = (editing.style?.size || item.size) * PX_PER_MM;
 		const context = document.createElement("canvas").getContext("2d");
@@ -1343,7 +1345,8 @@ export class CanvasEditor {
 		const metrics = context.measureText("Mg"), baseline = (size + metrics.fontBoundingBoxAscent - metrics.fontBoundingBoxDescent) / 2;
 		Object.assign(input.style, { lineHeight: `${size}px`, fontWeight: String(source.weight || 400), fontStyle: source.italic ? "italic" : "normal" });
 		const fragment = document.createDocumentFragment(), positions = [];
-		let line, lineIndex = -1, naturalX = 0, position = 0, width = 0, height = 0;
+		let line, lineIndex = -1, naturalX = 0, position = 0;
+		let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
 		for (const run of source.runs) {
 			if (!line || run.line) {
 				if (line) position++;
@@ -1353,6 +1356,12 @@ export class CanvasEditor {
 				naturalX = 0;
 			}
 			let x = run.x * PX_PER_MM, y = run.y * PX_PER_MM, index = 0;
+			if (!run.text) {
+				left = Math.min(left, x);
+				top = Math.min(top, y - baseline);
+				right = Math.max(right, x);
+				bottom = Math.max(bottom, y + size - baseline);
+			}
 			for (const char of run.text) {
 				const span = document.createElement("span"), node = document.createTextNode(char);
 				span.append(node);
@@ -1361,8 +1370,10 @@ export class CanvasEditor {
 				positions.push({ node, start: position, end: position + char.length });
 				position += char.length;
 				const advance = context.measureText(char).width;
-				width = Math.max(width, x + advance * source.scale);
-				height = Math.max(height, y + size - baseline);
+				left = Math.min(left, x);
+				top = Math.min(top, y - baseline);
+				right = Math.max(right, x + advance * source.scale);
+				bottom = Math.max(bottom, y + size - baseline);
 				naturalX += advance;
 				x += run.dx?.length ? run.dx[Math.min(index, run.dx.length - 1)] * PX_PER_MM : run.dy?.length ? 0 : advance * source.scale;
 				y += run.dy?.length ? run.dy[Math.min(index, run.dy.length - 1)] * PX_PER_MM : 0;
@@ -1374,9 +1385,14 @@ export class CanvasEditor {
 				positions.push({ node, start: position, end: position });
 			}
 		}
+		for (const line of fragment.children) line.style.transform = `translate(${-left}px,${-top}px)`;
 		input.replaceChildren(fragment);
-		input.style.width = `${Math.max(parseFloat(input.style.width), width + 4)}px`;
-		input.style.minHeight = `${Math.max(parseFloat(input.style.minHeight), height + 4)}px`;
+		const [a, b, c, d, e, f] = frame.matrix;
+		Object.assign(input.style, {
+			width: `${Math.max(size, right - left) + 4}px`,
+			minHeight: "0px", height: `${bottom - top + 4}px`,
+			transform: `matrix(${a},${b},${c},${d},${e * PX_PER_MM + a * left + c * top},${f * PX_PER_MM + b * left + d * top})`,
+		});
 		restoreTextSelection(positions, caret, editing.range);
 	}
 
