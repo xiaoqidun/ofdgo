@@ -1,5 +1,5 @@
 # OFDGo [![PkgGoDev](https://pkg.go.dev/badge/github.com/xiaoqidun/ofdgo)](https://pkg.go.dev/github.com/xiaoqidun/ofdgo)
-首个原生、全平台兼容的纯 Go 语言 OFD 读写库
+首个原生、全平台、纯 Go 语言高性能 OFD 引擎
 
 # 在线体验
 [OFDGo WebUI](https://ofdgo.aite.me/)，将OFDGo编译为WASM提供服务

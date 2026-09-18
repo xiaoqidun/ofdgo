@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package ofdgo 首个原生、全平台兼容的纯 Go 语言 OFD 读写库
+// Package ofdgo 首个原生、全平台、纯 Go 语言高性能 OFD 引擎
 package ofdgo
 
 import (
