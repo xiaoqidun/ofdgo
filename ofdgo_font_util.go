@@ -704,6 +704,9 @@ func serializeOTF(tables map[string][]byte) ([]byte, error) {
 		pad := (4 - (len(data) % 4)) % 4
 		padded := make([]byte, len(data)+pad)
 		copy(padded, data)
+		if tag == "head" && len(data) >= 12 {
+			clear(padded[8:12])
+		}
 		cs := calcTableChecksum(padded)
 		records = append(records, otfTableRecord{tag, cs, offset, len(data), padded})
 		offset += len(padded)

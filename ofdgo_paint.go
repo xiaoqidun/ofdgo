@@ -16,12 +16,16 @@ package ofdgo
 
 import (
 	"image/color"
-	"math"
 	"strconv"
 	"strings"
-
-	"github.com/tdewolff/canvas"
 )
+
+// ResolveColor 按文档颜色空间和调色板解析颜色，返回预乘透明度的RGBA
+// 入参: value 颜色分量, index 调色板索引, space 颜色空间标识, alpha 透明度
+// 返回: color.RGBA 标准颜色
+func (r *Renderer) ResolveColor(value string, index *int, space string, alpha *int) color.RGBA {
+	return colorToRGBA(r.parseColorWithAlpha(value, index, space, alpha))
+}
 
 // parseColorWithAlpha 解析带透明度的颜色
 // 入参: value 颜色值, index 调色板索引, space 颜色空间标识, alpha 透明度
@@ -180,37 +184,11 @@ func (r *Renderer) parseFillColor(fillColor *FillColor) color.Color {
 	return r.parseColorWithAlpha(fillColor.Value, fillColor.Index, fillColor.ColorSpace, fillColor.Alpha)
 }
 
-// parseFillPaint 解析填充画刷
-// 入参: fillColor 填充颜色节点, x X坐标, y Y坐标, pageH 页面高度
-// 返回: any 填充画刷
-func (r *Renderer) parseFillPaint(fillColor *FillColor, x, y, pageH float64) any {
-	if fillColor == nil {
-		return nil
-	}
-	if fillColor.Pattern != nil {
-		return nil
-	}
-	if gradient := r.parseAxialShdGradient(fillColor.AxialShd, fillColor.Alpha, x, y, pageH); gradient != nil {
-		return newShdPaint(gradient, fillColor.AxialShd.Extend, fillColor.AxialShd.MapType, fillColor.AxialShd.MapUnit)
-	}
-	if paint := r.parseRadialShdPaint(fillColor.RadialShd, fillColor.Alpha, x, y, pageH); paint != nil {
-		return paint
-	}
-	return r.parseFillColor(fillColor)
-}
-
 // parseStrokeColor 解析勾边颜色
 // 入参: strokeColor 勾边颜色节点
 // 返回: color.Color 颜色对象
 func (r *Renderer) parseStrokeColor(strokeColor *StrokeColor) color.Color {
 	return r.parseFillColor((*FillColor)(strokeColor))
-}
-
-// parseStrokePaint 解析勾边画刷
-// 入参: strokeColor 勾边颜色节点, x X坐标, y Y坐标, pageH 页面高度
-// 返回: any 勾边画刷
-func (r *Renderer) parseStrokePaint(strokeColor *StrokeColor, x, y, pageH float64) any {
-	return r.parseFillPaint((*FillColor)(strokeColor), x, y, pageH)
 }
 
 // patternPaint 底纹画刷
@@ -241,11 +219,12 @@ func (r *Renderer) parseShdColor(segments []ShdSegment, alpha *int) color.Color 
 	return r.parseColorWithAlpha(c.Value, c.Index, c.ColorSpace, mergeAlpha(c.Alpha, alpha))
 }
 
-// parseShdSegments 解析渐变分段
+// GradientStops 解析OFD渐变分段的位置与透明度，返回独立数据并保留原分段顺序
+// GradientStops 解析OFD渐变分段的位置与透明度，返回独立数据并保留原分段顺序
 // 入参: segments 渐变分段, alpha 透明度
-// 返回: canvas.Grad 渐变分段
-func (r *Renderer) parseShdSegments(segments []ShdSegment, alpha *int) canvas.Grad {
-	gradient := canvas.NewGradient()
+// 返回: []RasterStop 后端无关的渐变分段
+func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) []RasterStop {
+	var gradient []RasterStop
 	position, step := 0.0, 0.0
 	for i, segment := range segments {
 		if !segment.positionMissing {
@@ -267,84 +246,12 @@ func (r *Renderer) parseShdSegments(segments []ShdSegment, alpha *int) canvas.Gr
 		offset := position
 		position += step
 		segmentAlpha := mergeAlpha(segment.Color.Alpha, alpha)
-		gradient.Add(offset, colorToRGBA(r.parseColorWithAlpha(segment.Color.Value, segment.Color.Index, segment.Color.ColorSpace, segmentAlpha)))
+		gradient = append(gradient, RasterStop{Offset: offset, Color: r.ResolveColor(segment.Color.Value, segment.Color.Index, segment.Color.ColorSpace, segmentAlpha)})
 	}
 	if len(gradient) == 0 {
 		return nil
 	}
 	return gradient
-}
-
-// parseAxialShdGradient 解析轴向渐变
-// 入参: axialShd 轴向渐变节点, alpha 透明度, x X坐标, y Y坐标, pageH 页面高度
-// 返回: canvas.Gradient 渐变对象
-func (r *Renderer) parseAxialShdGradient(axialShd *AxialShd, alpha *int, x, y, pageH float64) canvas.Gradient {
-	if axialShd == nil {
-		return nil
-	}
-	start := parseFloats(axialShd.StartPoint)
-	end := parseFloats(axialShd.EndPoint)
-	if len(start) < 2 || len(end) < 2 {
-		return nil
-	}
-	gradient := r.parseShdSegments(axialShd.Segment, alpha)
-	if gradient == nil {
-		return nil
-	}
-	startPoint := canvas.Point{X: x + start[0], Y: pageH - (y + start[1])}
-	endPoint := canvas.Point{X: x + end[0], Y: pageH - (y + end[1])}
-	if startPoint.Equals(endPoint) {
-		return nil
-	}
-	return gradient.ToLinear(startPoint, endPoint)
-}
-
-// axialShdClip 获取轴向渐变的延伸裁剪区域
-// 入参: gradient 轴向渐变, extend 延伸方向, bounds 可见区域
-// 返回: *canvas.Path 裁剪区域
-func axialShdClip(gradient *canvas.LinearGradient, extend int, bounds canvas.Rect) *canvas.Path {
-	if extend == 3 {
-		return nil
-	}
-	d := gradient.End.Sub(gradient.Start)
-	axis := canvas.Matrix{{d.X, -d.Y, gradient.Start.X}, {d.Y, d.X, gradient.Start.Y}}
-	area := bounds.Transform(axis.Inv())
-	if extend&1 == 0 {
-		area.X0 = math.Max(area.X0, 0)
-	}
-	if extend&2 == 0 {
-		area.X1 = math.Min(area.X1, 1)
-	}
-	if area.X1 <= area.X0 {
-		return &canvas.Path{}
-	}
-	return area.ToPath().Transform(axis)
-}
-
-// parseRadialShdPaint 解析径向渐变画刷
-// 入参: radialShd 径向渐变节点, alpha 透明度, x X坐标, y Y坐标, pageH 页面高度
-// 返回: *shdPaint 渐变画刷
-func (r *Renderer) parseRadialShdPaint(radialShd *RadialShd, alpha *int, x, y, pageH float64) *shdPaint {
-	if radialShd == nil || radialShd.EndRadius <= 0 {
-		return nil
-	}
-	start := parseFloats(radialShd.StartPoint)
-	end := parseFloats(radialShd.EndPoint)
-	if len(start) < 2 || len(end) < 2 {
-		return nil
-	}
-	gradient := r.parseShdSegments(radialShd.Segment, alpha)
-	if gradient == nil {
-		return nil
-	}
-	startPoint := canvas.Point{X: x + start[0], Y: pageH - (y + start[1])}
-	endPoint := canvas.Point{X: x + end[0], Y: pageH - (y + end[1])}
-	paint := newShdPaint(gradient.ToRadial(startPoint, radialShd.StartRadius, endPoint, radialShd.EndRadius), radialShd.Extend, radialShd.MapType, radialShd.MapUnit)
-	if e := radialShd.Eccentricity; 0 < e && e < 1 {
-		paint.view = canvas.Identity.Translate(startPoint.X, startPoint.Y).Rotate(-radialShd.Angle).Scale(1, math.Sqrt(1-e*e)).Translate(-startPoint.X, -startPoint.Y)
-		paint.gradient = gradient.ToRadial(startPoint, radialShd.StartRadius, paint.view.Inv().Dot(endPoint), radialShd.EndRadius)
-	}
-	return paint
 }
 
 // colorToRGBA 转换颜色对象

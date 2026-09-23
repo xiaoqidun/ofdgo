@@ -80,11 +80,11 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 				s.objects[object] = editorObjectID(*object)
 			}
 		}
-		if err := r.renderPageToContext(canvas.NewContext(s), page, true); err != nil {
+		if err := r.renderCanvasPageToContext(canvas.NewContext(s), page, !r.TransparentBackground); err != nil {
 			return SVGResources{}, err
 		}
 	} else {
-		c, err := r.renderPage(page)
+		c, err := r.renderCanvasPage(page)
 		if err != nil {
 			return SVGResources{}, err
 		}
@@ -188,7 +188,7 @@ func (s *svgResourceRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
 	font := text.MostCommonFontFace().Font
 	resource, ok := s.renderer.svgFontCache[font]
 	if !ok {
-		data := font.SFNT.Write()
+		data := fontSFNTData(font.SFNT)
 		resource = SVGFont{
 			Name:   fmt.Sprintf("ofdgo-%x-%d", sha256.Sum256(data), font.Style()),
 			Weight: font.Style().CSS(),

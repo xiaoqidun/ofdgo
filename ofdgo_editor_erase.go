@@ -20,8 +20,6 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-
-	"github.com/tdewolff/canvas"
 )
 
 // EraseObjects 擦除同页对象与矩形区域重叠的可见部分，一次撤销恢复全部
@@ -41,34 +39,41 @@ func (e *Editor) EraseObjects(page int, ids []string, box Box) error {
 // 入参: page 页面索引, ids 对象标识, points 页面毫米坐标，至少三个点
 // 返回: error 错误信息
 func (e *Editor) EraseObjectsPath(page int, ids []string, points []Point) error {
-	region, err := editorEraseRegion(points)
-	if err != nil || region.Empty() {
+	region, err := e.editorEraseRegion(points)
+	if err != nil || len(region) == 0 {
 		return err
 	}
-	bounds := region.FastBounds()
-	return e.eraseObjects(page, ids, Box{X: bounds.X0, Y: bounds.Y0, W: bounds.W(), H: bounds.H()}, points, region)
+	bounds, err := e.backends.Geometry.Bounds(region)
+	if err != nil {
+		return err
+	}
+	return e.eraseObjects(page, ids, bounds, points, region)
 }
 
 // editorEraseRegion 校验闭合折线并按奇偶规则构建擦除区域
 // 入参: points 页面毫米坐标
-// 返回: *canvas.Path 擦除区域, error 错误信息
-func editorEraseRegion(points []Point) (*canvas.Path, error) {
+// 返回: GeometryPath 擦除区域, error 错误信息
+func (e *Editor) editorEraseRegion(points []Point) (GeometryPath, error) {
+	geometry, err := e.Geometry()
+	if err != nil {
+		return nil, err
+	}
 	if len(points) < 3 {
 		return nil, fmt.Errorf("erase path requires at least three points")
 	}
-	region := &canvas.Path{}
+	region := make(GeometryPath, 0, len(points)+1)
 	for i, point := range points {
 		if !finite(point.X) || !finite(point.Y) {
 			return nil, fmt.Errorf("invalid erase path point %d", i)
 		}
+		verb := GeometryLine
 		if i == 0 {
-			region.MoveTo(point.X, point.Y)
-		} else {
-			region.LineTo(point.X, point.Y)
+			verb = GeometryMove
 		}
+		region = append(region, GeometrySegment{Verb: verb, End: point})
 	}
-	region.Close()
-	return region.Settle(canvas.EvenOdd), nil
+	region = append(region, GeometrySegment{Verb: GeometryClose, End: points[0]})
+	return geometry.Normalize(region, true)
 }
 
 // EraseCompositeObjects 擦除内部成员与矩形相交的部分，保留原始属性及共享资源
@@ -79,7 +84,7 @@ func (e *Editor) EraseCompositeObjects(page int, path ObjectPath, indexes []int,
 	if _, err := creationBox(editorBoxString(box)); err != nil {
 		return err
 	}
-	return e.eraseCompositeObjects(page, path, indexes, canvas.Rectangle(box.W, box.H).Translate(box.X, box.Y))
+	return e.eraseCompositeObjects(page, path, indexes, geometryRectangle(box))
 }
 
 // EraseCompositeObjectsPath 按闭合折线擦除内部成员，末点自动连接起点
@@ -87,8 +92,8 @@ func (e *Editor) EraseCompositeObjects(page int, path ObjectPath, indexes []int,
 // 入参: page 页面索引, path 父路径, indexes 成员序号, points 页面毫米坐标
 // 返回: error 错误信息
 func (e *Editor) EraseCompositeObjectsPath(page int, path ObjectPath, indexes []int, points []Point) error {
-	region, err := editorEraseRegion(points)
-	if err != nil || region.Empty() {
+	region, err := e.editorEraseRegion(points)
+	if err != nil || len(region) == 0 {
 		return err
 	}
 	return e.eraseCompositeObjects(page, path, indexes, region)
@@ -97,15 +102,30 @@ func (e *Editor) EraseCompositeObjectsPath(page int, path ObjectPath, indexes []
 // eraseCompositeObjects 按页面区域裁剪内部成员，全部成功后提交一次历史
 // 入参: page 页面索引, path 父路径, indexes 成员序号, region 擦除区域
 // 返回: error 错误信息
-func (e *Editor) eraseCompositeObjects(page int, path ObjectPath, indexes []int, region *canvas.Path) error {
+func (e *Editor) eraseCompositeObjects(page int, path ObjectPath, indexes []int, region GeometryPath) error {
+	geometry, err := e.Geometry()
+	if err != nil {
+		return err
+	}
 	return e.editCompositeObjects(page, path, indexes, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
 		for i, node := range nodes {
 			box := members[i].Bounds
-			bounds := canvas.Rectangle(box.W, box.H).Translate(box.X, box.Y)
-			if box.W <= 0 || box.H <= 0 || bounds.And(region).Empty() {
+			if box.W <= 0 || box.H <= 0 {
 				continue
 			}
-			if bounds.Not(region).Empty() {
+			bounds := geometryRectangle(box)
+			intersection, err := geometry.Combine(bounds, region, GeometryIntersect)
+			if err != nil {
+				return err
+			}
+			if len(intersection) == 0 {
+				continue
+			}
+			remainder, err := geometry.Combine(bounds, region, GeometrySubtract)
+			if err != nil {
+				return err
+			}
+			if len(remainder) == 0 {
 				node.owner.patches = append(node.owner.patches, editorXMLPatch{node.span.start, node.span.end, nil})
 				continue
 			}
@@ -117,8 +137,16 @@ func (e *Editor) eraseCompositeObjects(page int, path ObjectPath, indexes []int,
 			if !ok {
 				return fmt.Errorf("composite clip transform is not invertible")
 			}
-			outer := canvas.Rectangle(box.W+2, box.H+2).Translate(box.X-1, box.Y-1)
-			if err := appendCompositeClip(node, editorClipPath(outer.Not(region)), inverse, false); err != nil {
+			outer := geometryRectangle(Box{X: box.X - 1, Y: box.Y - 1, W: box.W + 2, H: box.H + 2})
+			remainder, err = geometry.Combine(outer, region, GeometrySubtract)
+			if err != nil {
+				return err
+			}
+			shape, err := geometryClipPath(remainder)
+			if err != nil {
+				return err
+			}
+			if err := appendCompositeClip(node, shape, inverse, false); err != nil {
 				return err
 			}
 		}
@@ -129,7 +157,7 @@ func (e *Editor) eraseCompositeObjects(page int, path ObjectPath, indexes []int,
 // eraseObjects 按矩形或闭合路径裁剪对象，只在全部对象处理成功后提交修改
 // 入参: page 页面索引, ids 对象标识, box 区域边界, points 折线点, region 奇偶填充后的路径
 // 返回: error 错误信息
-func (e *Editor) eraseObjects(page int, ids []string, box Box, points []Point, region *canvas.Path) error {
+func (e *Editor) eraseObjects(page int, ids []string, box Box, points []Point, region GeometryPath) error {
 	objects, indexes, err := e.selectedObjects(page, ids)
 	if err != nil || len(objects) == 0 {
 		return err
@@ -150,11 +178,19 @@ func (e *Editor) eraseObjects(page int, ids []string, box Box, points []Point, r
 		}
 		covered := x == bounds.X && y == bounds.Y && right == bounds.X+bounds.W && bottom == bounds.Y+bounds.H
 		if region != nil {
-			path := canvas.Rectangle(bounds.W, bounds.H).Translate(bounds.X, bounds.Y)
-			if path.And(region).Empty() {
+			path := geometryRectangle(bounds)
+			intersection, err := e.backends.Geometry.Combine(path, region, GeometryIntersect)
+			if err != nil {
+				return err
+			}
+			if len(intersection) == 0 {
 				continue
 			}
-			covered = path.Not(region).Empty()
+			remainder, err := e.backends.Geometry.Combine(path, region, GeometrySubtract)
+			if err != nil {
+				return err
+			}
+			covered = len(remainder) == 0
 		}
 		if covered {
 			removed[ids[i]] = true

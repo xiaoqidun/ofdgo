@@ -19,10 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf16"
-
-	"github.com/tdewolff/canvas"
-	canvastext "github.com/tdewolff/canvas/text"
-	"github.com/tdewolff/font"
 )
 
 // Text 获取定位后的文字，横向换行以换行符分隔，字形索引以占位字符表示
@@ -75,26 +71,6 @@ func (obj TextObject) textCodeLineBreak(index int) bool {
 type textGlyph struct {
 	Text    string
 	GlyphID int
-}
-
-// textGlyphPathCacheKey 字形路径缓存键
-type textGlyphPathCacheKey struct {
-	font       *canvas.Font
-	size       float64
-	fauxBold   float64
-	fauxItalic float64
-	xOffset    int32
-	yOffset    int32
-	language   string
-	script     canvastext.Script
-	direction  canvastext.Direction
-	glyph      textGlyph
-}
-
-// textGlyphPathCacheValue 字形路径缓存值
-type textGlyphPathCacheValue struct {
-	path  *canvas.Path
-	width float64
 }
 
 // textGlyphTransform 字符到字形变换
@@ -193,82 +169,12 @@ func (r *Renderer) textGlyphFromID(fontID string, glyphID int) textGlyph {
 	return textGlyph{GlyphID: glyphID}
 }
 
-// textGlyphWidth 获取绘制字形宽度
-// 入参: face 字体, glyph 绘制字形
-// 返回: float64 字形宽度
-func textGlyphWidth(face *canvas.FontFace, glyph textGlyph) float64 {
-	if glyph.GlyphID >= 0 && glyph.GlyphID <= 0xFFFF {
-		return face.MmPerEm * float64(face.Font.GlyphAdvance(uint16(glyph.GlyphID)))
-	}
-	return face.TextWidth(glyph.Text)
-}
-
-// textGlyphPath 获取绘制字形路径
-// 入参: face 字体, glyph 绘制字形
-// 返回: *canvas.Path 字形路径, float64 字形宽度
-func textGlyphPath(face *canvas.FontFace, glyph textGlyph) (*canvas.Path, float64) {
-	if glyph.GlyphID < 0 || glyph.GlyphID > 0xFFFF {
-		return face.ToPath(glyph.Text)
-	}
-	p := &canvas.Path{}
-	glyphID := uint16(glyph.GlyphID)
-	_ = face.Font.GlyphPath(p, glyphID, face.PPEM(canvas.DefaultResolution), 0, 0, face.MmPerEm, font.NoHinting)
-	if face.FauxBold != 0 {
-		d := face.FauxBold * face.Size
-		if face.Font.IsTrueType {
-			d = -d
-		}
-		origFastStroke := canvas.FastStroke
-		canvas.FastStroke = true
-		p = p.Offset(d, canvas.Tolerance)
-		canvas.FastStroke = origFastStroke
-	}
-	if face.FauxItalic != 0 {
-		p = p.Transform(canvas.Identity.Shear(face.FauxItalic, 0))
-	}
-	return p, face.MmPerEm * float64(face.Font.GlyphAdvance(glyphID))
-}
-
-// cachedTextGlyphPath 获取缓存的字形路径
-// 入参: face 字体, glyph 绘制字形
-// 返回: *canvas.Path 字形路径, float64 字形宽度
-func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (*canvas.Path, float64) {
-	key := textGlyphPathCacheKey{
-		font:       face.Font,
-		size:       face.Size,
-		fauxBold:   face.FauxBold,
-		fauxItalic: face.FauxItalic,
-		xOffset:    face.XOffset,
-		yOffset:    face.YOffset,
-		language:   face.Language,
-		script:     face.Script,
-		direction:  face.Direction,
-		glyph:      glyph,
-	}
-	if cached, ok := r.textGlyphPathCache[key]; ok {
-		return cached.path, cached.width
-	}
-	path, width := textGlyphPath(face, glyph)
-	r.textGlyphPathCache[key] = textGlyphPathCacheValue{path: path, width: width}
-	return path, width
-}
-
 // hasTextMatrix 判断文本是否需要应用字形变换
 // 入参: ctm 变换矩阵
 // 返回: bool 是否需要变换
 func hasTextMatrix(ctm Matrix) bool {
 	const eps = 1e-9
 	return math.Abs(ctm.a-1) > eps || math.Abs(ctm.b) > eps || math.Abs(ctm.c) > eps || math.Abs(ctm.d-1) > eps
-}
-
-// textMatrix 获取文本字形变换矩阵
-// 入参: ctm OFD变换矩阵
-// 返回: canvas.Matrix 画布变换矩阵
-func textMatrix(ctm Matrix) canvas.Matrix {
-	return canvas.Matrix{
-		{ctm.a, -ctm.c, 0},
-		{-ctm.b, ctm.d, 0},
-	}
 }
 
 // fontGlyphRune 获取字形ID对应的包装字体字符

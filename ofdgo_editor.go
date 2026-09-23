@@ -48,7 +48,8 @@ type Editor struct {
 	fonts           map[string]*font.SFNT
 	fontFS          []fs.FS
 	fontRenderer    *Renderer
-	compiler        PageCompiler
+	fontMetrics     map[string]FontMetrics
+	backends        RenderBackends
 	images          map[string]image.Point
 	resourceID      map[editorResourceKey]string
 	maxID           int
@@ -67,25 +68,38 @@ type Editor struct {
 func (e *Editor) SetFontFS(fsys ...fs.FS) {
 	e.fontFS = slices.Clone(fsys)
 	e.fontRenderer = nil
+	e.fontMetrics = make(map[string]FontMetrics)
 }
 
 // SetPageCompiler 设置编辑对象度量使用的页面编译器，不改变文档或撤销历史
 // 与Renderer使用相同实例可统一显示、搜索和选区，nil禁用度量，不隐式回退
 // 入参: compiler 页面编译器
 func (e *Editor) SetPageCompiler(compiler PageCompiler) {
-	e.compiler = compiler
+	e.backends.Compiler = compiler
 	if e.fontRenderer != nil {
 		e.fontRenderer.backends.Compiler = compiler
 	}
 }
 
-// newRenderer 使用编辑器字体来源和页面编译器创建资源度量器
+// SetRenderBackends 设置完整后端组合并重置字体度量，不改变文档或撤销历史
+// 入参: backends 后端组合，未配置的能力不会沿用默认实现
+func (e *Editor) SetRenderBackends(backends RenderBackends) {
+	e.backends = backends
+	e.fontRenderer = nil
+	e.fontMetrics = make(map[string]FontMetrics)
+}
+
+// Backends 返回编辑器后端配置副本
+// 返回: RenderBackends 后端组合
+func (e *Editor) Backends() RenderBackends {
+	return e.backends
+}
+
+// newRenderer 使用编辑器字体来源和完整后端配置创建资源度量器
 // 入参: reader 当前文档快照
 // 返回: *Renderer 度量器
 func (e *Editor) newRenderer(reader *Reader) *Renderer {
-	backends := defaultRenderBackends()
-	backends.Compiler = e.compiler
-	return NewRenderer(reader, WithFontFS(e.fontFS...), WithRenderBackends(backends))
+	return NewRenderer(reader, WithFontFS(e.fontFS...), WithRenderBackends(e.backends))
 }
 
 // editorResource 文档内嵌资源
@@ -130,10 +144,11 @@ func NewEditor() *Editor {
 			DocID:        hex.EncodeToString(id[:]),
 			CreationDate: time.Now().Format("2006-01-02"),
 		},
-		fonts:      make(map[string]*font.SFNT),
-		images:     make(map[string]image.Point),
-		resourceID: make(map[editorResourceKey]string),
-		compiler:   CanvasBackend{},
+		fonts:       make(map[string]*font.SFNT),
+		images:      make(map[string]image.Point),
+		resourceID:  make(map[editorResourceKey]string),
+		fontMetrics: make(map[string]FontMetrics),
+		backends:    defaultRenderBackends(),
 	}
 }
 
@@ -1064,102 +1079,19 @@ func scaleTextNumbers(value string, scale float64) string {
 	return strings.Join(fields, " ")
 }
 
-// LayoutText 按嵌入字体度量和段落选项重排横向文字，保留绘制属性，不进行复杂文字塑形
-// 不修改文档，通过AddObject或UpdateObject提交；选项仅供当前编辑过程使用，保存为标准文字定位
+// LayoutText 使用编辑器字体后端重排文字，不修改文档和历史
 // 入参: obj 文字对象, value 原文, options 段落排版选项
-// 返回: error 错误信息
+// 返回: error 字体或排版错误
 func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) error {
-	if obj.ReadDirection != 0 || obj.CharDirection != 0 {
-		return fmt.Errorf("automatic text layout requires horizontal text")
-	}
-	sfnt, err := e.editorFont(obj.Font)
+	metrics, err := e.editorFont(obj.Font)
 	if err != nil {
 		return err
 	}
-	if !finite(obj.Size) || obj.Size <= 0 || !finite(obj.HScale) || obj.HScale < 0 {
-		return fmt.Errorf("invalid text dimensions")
-	}
-	value = strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
-	if !utf8.ValidString(value) || strings.Contains(value, "\t") || strings.Trim(value, "\n") == "" {
-		return fmt.Errorf("text must contain UTF-8 characters without tabs")
-	}
-	lineHeight := options.LineHeight
-	if !finite(lineHeight) || lineHeight < 0 {
-		return fmt.Errorf("line height must be finite and nonnegative")
-	}
-	if !finite(options.LetterSpacing) {
-		return fmt.Errorf("letter spacing must be finite")
-	}
-	if !finite(options.LeftIndent) || !finite(options.RightIndent) || !finite(options.FirstLineIndent) {
-		return fmt.Errorf("paragraph indents must be finite")
-	}
-	if !slices.Contains([]string{"", "left", "center", "right", "justify"}, options.Align) {
-		return fmt.Errorf("invalid text alignment %q", options.Align)
-	}
-	var width float64
-	if options.Wrap || options.Align != "" && options.Align != "left" || options.LeftIndent != 0 || options.RightIndent != 0 || options.FirstLineIndent != 0 {
-		box, err := obj.TextFrame()
-		if err != nil {
-			return err
-		}
-		width = box.W - options.LeftIndent - options.RightIndent
-		if !finite(width) || width <= 0 || !finite(width-options.FirstLineIndent) || width-options.FirstLineIndent <= 0 {
-			return fmt.Errorf("paragraph indents leave no text width")
-		}
-	}
-	hScale := obj.HScale
-	if hScale == 0 {
-		hScale = 1
-	}
-	ascender, descender, gap := sfnt.VerticalMetrics()
-	unit := obj.Size / float64(sfnt.UnitsPerEm())
-	if lineHeight == 0 {
-		lineHeight = math.Max(obj.Size, float64(int(ascender)-int(descender)+int(gap))*unit)
-	}
-	var codes []TextCode
-	var missing []rune
-	for _, paragraph := range strings.Split(value, "\n") {
-		runes := []rune(paragraph)
-		advances := make([]float64, len(runes))
-		for i, char := range runes {
-			glyph := sfnt.GlyphIndex(char)
-			if glyph == 0 {
-				missing = append(missing, char)
-				continue
-			}
-			advances[i] = float64(sfnt.GlyphAdvance(glyph)) * unit * hScale
-		}
-		if len(missing) != 0 {
-			continue
-		}
-		spaceTextAdvances(runes, advances, options.LetterSpacing)
-		for _, advance := range advances {
-			if !finite(advance) {
-				return fmt.Errorf("text advance exceeds finite range")
-			}
-		}
-		lines := breakTextLines(runes, advances, width, options.Wrap, options.LetterSpacing, options.FirstLineIndent)
-		for i, line := range lines {
-			indent := 0.0
-			if i == 0 {
-				indent = options.FirstLineIndent
-			}
-			x, deltas := alignTextLine(runes[line[0]:line[1]], advances[line[0]:line[1]], width-indent, options.Align, i+1 < len(lines), options.LetterSpacing)
-			x += options.LeftIndent + indent
-			y := float64(ascender)*unit + float64(len(codes))*lineHeight
-			if !finite(x) || !finite(y) {
-				return fmt.Errorf("text position exceeds finite range")
-			}
-			codes = append(codes, TextCode{X: ofdNumber(x), Y: ofdNumber(y), DeltaX: deltas, Value: escapeOFDText(string(runes[line[0]:line[1]]))})
-		}
-	}
-	if err := missingGlyphError(obj.Font, missing); err != nil {
+	if err := LayoutText(obj, value, options, metrics); err != nil {
 		return err
 	}
-	obj.TextCode = codes
-	obj.layout = nil
-	if options != (TextLayout{}) || e.objectOrigin(obj.ID) != nil {
-		obj.layout = &textLayout{value: value, options: options}
+	if obj.layout == nil && e.objectOrigin(obj.ID) != nil {
+		obj.layout = &textLayout{value: obj.Text(), options: options}
 	}
 	return nil
 }

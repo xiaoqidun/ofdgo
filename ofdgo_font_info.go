@@ -298,11 +298,10 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 		}
 		return info
 	}
-	if source, family := r.fontSourceMatch(font.ID, &font); family != nil {
-		info.Matched = source.name
-		face := fontFaceInfo(family.Face(12, canvasFontStyle(&font)).Font.SFNT.Tables["name"], source.face)
-		info.MatchedFace = &face
-		if source.exact {
+	if resolved, err := r.ResolveFont(font.ID, false); err == nil && resolved.Source != "" {
+		info.Matched = resolved.Source
+		info.MatchedFace = resolved.Face
+		if resolved.Exact {
 			info.Status = FontStatusMatched
 			info.Detail = "使用外部字体文件"
 		} else {

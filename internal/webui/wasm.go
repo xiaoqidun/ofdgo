@@ -29,6 +29,7 @@ import (
 	"io"
 	"math"
 	"path"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -374,8 +375,8 @@ func renderPage(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if currentEditor != nil {
-		currentEditor.SetPageCompiler(currentSession.Renderer.Backends().Compiler)
+	if currentEditor != nil && !reflect.DeepEqual(currentEditor.Backends(), currentSession.Renderer.Backends()) {
+		currentEditor.SetRenderBackends(currentSession.Renderer.Backends())
 	}
 	text, err := currentSession.PageText(args[0].Int())
 	if err != nil {
@@ -844,7 +845,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 					if kind != "" && capability.Update {
 						item["shape"] = string(kind)
 						item["geometry"] = map[string]any{"x": geometry.X, "y": geometry.Y, "width": geometry.W, "height": geometry.H}
-					} else if outline, err := path.Outline(); err == nil {
+					} else if outline, err := currentSession.Renderer.PathOutline(path); err == nil {
 						item["outline"] = outline
 					}
 					if kind == "" && capability.Update {
@@ -1162,7 +1163,7 @@ func writeAnnotation(args []js.Value) (any, error) {
 				}
 				if options.Kind == "watermark" {
 					if watermarkBounds.W == 0 {
-						watermarkBounds, err = measureWatermark(annotation.Appearance.Objects[0], fontData)
+						watermarkBounds, err = measureWatermark(annotation.Appearance.Objects[0], fontData, currentEditor.Backends())
 						if err != nil {
 							return err
 						}
@@ -1195,9 +1196,9 @@ func writeAnnotation(args []js.Value) (any, error) {
 }
 
 // measureWatermark 复用标准渲染度量水印，临时文档保留尚未提交的字体引用
-// 入参: object 水印图元, fontData 字体字节
+// 入参: object 水印图元, fontData 字体字节, backends 当前后端配置
 // 返回: ofdgo.Box 实际绘制范围, error 错误信息
-func measureWatermark(object ofdgo.GraphicObject, fontData []byte) (ofdgo.Box, error) {
+func measureWatermark(object ofdgo.GraphicObject, fontData []byte, backends ofdgo.RenderBackends) (ofdgo.Box, error) {
 	if object.Type == "ImageObject" {
 		return ofdgo.NewMatrix(object.ImageObject.CTM).TransformBox(ofdgo.Box{W: 1, H: 1}), nil
 	}
@@ -1221,7 +1222,7 @@ func measureWatermark(object ofdgo.GraphicObject, fontData []byte) (ofdgo.Box, e
 	if _, err := reader.PageContentByIndex(0); err != nil {
 		return ofdgo.Box{}, err
 	}
-	bounds, err := ofdgo.NewRenderer(reader).ObjectBounds(ofdgo.GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: ofdgo.CompositeGraphicUnit{
+	bounds, err := ofdgo.NewRenderer(reader, ofdgo.WithRenderBackends(backends)).ObjectBounds(ofdgo.GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: ofdgo.CompositeGraphicUnit{
 		Boundary: object.TextObject.Boundary, Objects: []ofdgo.GraphicObject{object},
 	}}, "")
 	if err != nil {
@@ -2781,7 +2782,7 @@ func editDocument(args []js.Value) (any, error) {
 	if currentSession.fontFS != nil {
 		editor.SetFontFS(currentSession.fontFS)
 	}
-	editor.SetPageCompiler(currentSession.Renderer.Backends().Compiler)
+	editor.SetRenderBackends(currentSession.Renderer.Backends())
 	currentEditor = editor
 	currentSession.editing = true
 	copiedObjects = nil
@@ -2811,7 +2812,7 @@ func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 		}
 		_ = currentSession.Close()
 	}
-	editor.SetPageCompiler(session.Renderer.Backends().Compiler)
+	editor.SetRenderBackends(session.Renderer.Backends())
 	currentSession = session
 	session.editing = true
 	if currentEditor != editor {

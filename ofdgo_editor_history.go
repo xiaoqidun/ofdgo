@@ -60,6 +60,7 @@ func (e *Editor) transactionSnapshot() Editor {
 	next.resources = slices.Clone(e.resources)
 	next.fonts, next.images, next.resourceID = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID)
 	next.origins = maps.Clone(e.origins)
+	next.fontMetrics = maps.Clone(e.fontMetrics)
 	if e.source != nil {
 		source := *e.source
 		source.pages, source.origins = maps.Clone(source.pages), maps.Clone(source.origins)
@@ -80,6 +81,8 @@ func (e *Editor) restoreTransaction(state Editor) {
 	maps.Copy(state.resourceID, e.resourceID)
 	state.history, state.historyIndex, state.historyLimit = e.history, e.historyIndex, e.historyLimit
 	state.serial, state.maxID = max(e.serial, state.serial), max(e.maxID, state.maxID)
+	state.backends, state.fontFS = e.backends, e.fontFS
+	state.fontRenderer, state.fontMetrics = e.fontRenderer, e.fontMetrics
 	*e = state
 }
 

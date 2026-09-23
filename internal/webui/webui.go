@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"reflect"
 	"strings"
 	"time"
 
@@ -536,7 +537,11 @@ func (s *Session) SetRenderBackend(name string) error {
 	if err != nil {
 		return err
 	}
-	if s.Renderer.Backends().Info().Compiler != backends.Info().Compiler {
+	if reflect.DeepEqual(s.Renderer.Backends(), backends) {
+		return nil
+	}
+	previous, next := s.Renderer.Backends().Info(), backends.Info()
+	if previous.Compiler != next.Compiler || previous.Fonts != next.Fonts || previous.Geometry != next.Geometry {
 		clear(s.textCache)
 	}
 	ofdgo.WithRenderBackends(backends)(s.Renderer)

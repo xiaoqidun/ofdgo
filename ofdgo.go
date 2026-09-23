@@ -79,7 +79,6 @@ func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 	for _, opt := range opts {
 		opt(r)
 	}
-	r.initCommon()
 	return r
 }
 

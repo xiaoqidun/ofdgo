@@ -71,8 +71,8 @@ type pdfOutline struct {
 
 // newPDFNavigation 创建PDF导航信息
 // 入参: renderer 渲染器, doc 文档结构, pages 页面数据
-// 返回: *pdfNavigation PDF导航信息
-func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentPage) *pdfNavigation {
+// 返回: *pdfNavigation PDF导航信息, error 几何错误
+func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentPage) (*pdfNavigation, error) {
 	navigation := &pdfNavigation{
 		Anchor:  make(map[int][]pdfAnchor),
 		Link:    make(map[int][]pdfLink),
@@ -98,7 +98,10 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentP
 				if action.Event != "CLICK" {
 					continue
 				}
-				box, _ := actionLinkRegion(source, action)
+				box, _, err := renderer.actionLinkRegion(source, action)
+				if err != nil {
+					return nil, err
+				}
 				if box.W <= 0 || box.H <= 0 {
 					continue
 				}
@@ -110,7 +113,7 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentP
 	if doc != nil {
 		navigation.addOutlines(doc.Outlines.OutlineElem, 0, bookmarks, pageIndex, pages)
 	}
-	return navigation
+	return navigation, nil
 }
 
 // addAction 添加PDF动作
@@ -171,25 +174,6 @@ func (n *pdfNavigation) apply(renderer *pdf.PDF, page int) {
 	for _, outline := range n.Outline[page] {
 		renderer.AddOutline(outline.Name, outline.Level, outline.Y)
 	}
-}
-
-// outlineDest 获取大纲跳转目标
-// 入参: outline 大纲节点, bookmarks 书签
-// 返回: *Dest 跳转目标
-func outlineDest(outline OutlineElem, bookmarks map[string]Dest) *Dest {
-	for _, action := range outline.Actions {
-		if action.Goto != nil {
-			if dest := gotoDest(action.Goto, bookmarks); dest != nil {
-				return dest
-			}
-		}
-	}
-	for _, child := range outline.OutlineElem {
-		if dest := outlineDest(child, bookmarks); dest != nil {
-			return dest
-		}
-	}
-	return nil
 }
 
 // pdfSourceRect 转换PDF动作区域

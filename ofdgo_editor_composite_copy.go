@@ -19,9 +19,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
-
-	"github.com/tdewolff/canvas"
 )
 
 // CompositeSelection 同一内部容器的独立选区快照，共享不可变字体和图片资源
@@ -107,7 +104,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 			object = style
 		}
 		object = mergeGraphicObjectAlpha(object, source.alpha)
-		if !source.visible || source.clip != nil && source.clip.Empty() {
+		if !source.visible || source.clip != nil && len(*source.clip) == 0 {
 			visible := false
 			switch object.Type {
 			case "TextObject":
@@ -135,8 +132,11 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 		if err := e.isolateCompositeStyle(copy); err != nil {
 			return err
 		}
-		if source.clip != nil && !source.clip.Empty() {
-			shape := compositeClipPath(source.clip)
+		if source.clip != nil && len(*source.clip) != 0 {
+			shape, err := geometryClipPath(*source.clip)
+			if err != nil {
+				return err
+			}
 			clips := *editorObjectClips(&copy.object)
 			matrix, ok := copy.matrix(clips == nil || clips.TransFlag == nil || *clips.TransFlag).Invert()
 			if !ok {
@@ -222,44 +222,6 @@ func (n *editorCompositeNode) convertCoordinates(parent Matrix, inward bool) err
 	}
 	n.data, n.node, n.object = data, next.node, next.object
 	return nil
-}
-
-// compositeClipPath 将已解析的父裁剪转换为标准紧缩路径，使用页面毫米坐标
-// 入参: path 画布裁剪
-// 返回: PathObject 标准裁剪路径
-func compositeClipPath(path *canvas.Path) PathObject {
-	return editorClipPath(path.Copy().Transform(canvas.Matrix{{1, 0, 0}, {0, -1, 0}}))
-}
-
-// editorClipPath 将页面坐标路径写为标准紧缩裁剪路径
-// 入参: path 页面毫米路径
-// 返回: PathObject 标准裁剪路径
-func editorClipPath(path *canvas.Path) PathObject {
-	path = path.ReplaceArcs()
-	data := path.Data()
-	var value strings.Builder
-	for i := 0; i < len(data); {
-		switch data[i] {
-		case canvas.MoveToCmd, canvas.LineToCmd:
-			command := "L"
-			if data[i] == canvas.MoveToCmd {
-				command = "M"
-			}
-			fmt.Fprintf(&value, "%s %s %s ", command, ofdNumber(data[i+1]), ofdNumber(data[i+2]))
-			i += 4
-		case canvas.QuadToCmd:
-			fmt.Fprintf(&value, "Q %s %s %s %s ", ofdNumber(data[i+1]), ofdNumber(data[i+2]), ofdNumber(data[i+3]), ofdNumber(data[i+4]))
-			i += 6
-		case canvas.CubeToCmd:
-			fmt.Fprintf(&value, "B %s %s %s %s %s %s ", ofdNumber(data[i+1]), ofdNumber(data[i+2]), ofdNumber(data[i+3]), ofdNumber(data[i+4]), ofdNumber(data[i+5]), ofdNumber(data[i+6]))
-			i += 8
-		case canvas.CloseCmd:
-			value.WriteString("C ")
-			i += 4
-		}
-	}
-	fill, stroke := true, false
-	return PathObject{Boundary: "0 0 1 1", Fill: &fill, Stroke: &stroke, AbbreviatedData: strings.TrimSpace(value.String())}
 }
 
 // CaptureCompositeObjects 捕获内部选区，不修改文档或分配资源

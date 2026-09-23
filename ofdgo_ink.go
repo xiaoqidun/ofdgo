@@ -17,8 +17,6 @@ package ofdgo
 import (
 	"fmt"
 	"math"
-
-	"github.com/tdewolff/canvas"
 )
 
 // InkPoint 手写采样点，X和Y为毫米，Pressure为0到1的压力
@@ -36,24 +34,30 @@ func NewInk(points []InkPoint, width float64, pressure bool) (PathObject, error)
 	if len(points) == 0 || !finite(width) || width <= 0 {
 		return PathObject{}, fmt.Errorf("ink requires points and a positive finite width")
 	}
-	path := &canvas.Path{}
+	var path GeometryPath
 	stationary := true
+	x0, y0, x1, y1 := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
 	for i, point := range points {
 		if !finite(point.X) || !finite(point.Y) || !finite(point.Pressure) || point.Pressure < 0 || point.Pressure > 1 {
 			return PathObject{}, fmt.Errorf("invalid ink point %d", i)
 		}
 		stationary = stationary && point.X == points[0].X && point.Y == points[0].Y
+		radius := 0.0
+		if pressure {
+			radius = width * point.Pressure / 2
+		}
+		x0, y0 = math.Min(x0, point.X-radius), math.Min(y0, point.Y-radius)
+		x1, y1 = math.Max(x1, point.X+radius), math.Max(y1, point.Y+radius)
 		if !pressure {
+			verb := GeometryLine
 			if i == 0 {
-				path.MoveTo(point.X, point.Y)
-			} else {
-				path.LineTo(point.X, point.Y)
+				verb = GeometryMove
 			}
+			path = append(path, GeometrySegment{Verb: verb, End: Point{X: point.X, Y: point.Y}})
 			continue
 		}
-		radius := width * point.Pressure / 2
 		if radius > 0 {
-			path = path.Append(canvas.Circle(radius).Translate(point.X, point.Y))
+			path = append(path, inkCircle(point.X, point.Y, radius)...)
 		}
 		if i == 0 {
 			continue
@@ -69,25 +73,32 @@ func NewInk(points []InkPoint, width float64, pressure bool) (PathObject, error)
 		a := (r - radius) / length
 		b := math.Sqrt(1 - a*a)
 		nx, ny, mx, my := a*x-b*y, a*y+b*x, a*x+b*y, a*y-b*x
-		segment := &canvas.Path{}
-		segment.MoveTo(previous.X+r*mx, previous.Y+r*my)
-		segment.LineTo(point.X+radius*mx, point.Y+radius*my)
-		segment.LineTo(point.X+radius*nx, point.Y+radius*ny)
-		segment.LineTo(previous.X+r*nx, previous.Y+r*ny)
-		segment.Close()
-		path = path.Append(segment)
+		start := Point{X: previous.X + r*mx, Y: previous.Y + r*my}
+		path = append(path,
+			GeometrySegment{Verb: GeometryMove, End: start},
+			GeometrySegment{Verb: GeometryLine, End: Point{X: point.X + radius*mx, Y: point.Y + radius*my}},
+			GeometrySegment{Verb: GeometryLine, End: Point{X: point.X + radius*nx, Y: point.Y + radius*ny}},
+			GeometrySegment{Verb: GeometryLine, End: Point{X: previous.X + r*nx, Y: previous.Y + r*ny}},
+			GeometrySegment{Verb: GeometryClose, End: start})
 	}
 	filled := pressure || stationary
 	if !pressure && stationary {
-		path = canvas.Circle(width/2).Translate(points[0].X, points[0].Y)
+		path = inkCircle(points[0].X, points[0].Y, width/2)
+		x0, y0, x1, y1 = x0-width/2, y0-width/2, x1+width/2, y1+width/2
 	}
-	if path.Empty() {
+	if len(path) == 0 {
 		return PathObject{}, fmt.Errorf("ink has no visible stroke")
 	}
-	box := path.Bounds()
 	padding := width / 2
-	boundary := Box{X: box.X0 - padding, Y: box.Y0 - padding, W: math.Max(box.W(), width) + width, H: math.Max(box.H(), width) + width}
-	object := editorClipPath(path.Translate(-boundary.X, -boundary.Y))
+	boundary := Box{X: x0 - padding, Y: y0 - padding, W: math.Max(x1-x0, width) + width, H: math.Max(y1-y0, width) + width}
+	for i := range path {
+		path[i].End.X -= boundary.X
+		path[i].End.Y -= boundary.Y
+	}
+	object, err := geometryClipPath(path)
+	if err != nil {
+		return PathObject{}, err
+	}
 	object.Boundary = editorBoxString(boundary)
 	stroke := !filled
 	object.Fill, object.Stroke = &filled, &stroke
@@ -98,4 +109,17 @@ func NewInk(points []InkPoint, width float64, pressure bool) (PathObject, error)
 		object.StrokeColor = &StrokeColor{Value: "0 0 0"}
 	}
 	return object, nil
+}
+
+// inkCircle 使用两个半圆弧构造笔迹圆点，不扁平化圆形轮廓
+// 入参: x、y 圆心, radius 半径
+// 返回: GeometryPath 圆形路径
+func inkCircle(x, y, radius float64) GeometryPath {
+	start := Point{X: x + radius, Y: y}
+	return GeometryPath{
+		{Verb: GeometryMove, End: start},
+		{Verb: GeometryArc, End: Point{X: x - radius, Y: y}, RadiusX: radius, RadiusY: radius, Sweep: true},
+		{Verb: GeometryArc, End: start, RadiusX: radius, RadiusY: radius, Sweep: true},
+		{Verb: GeometryClose, End: start},
+	}
 }

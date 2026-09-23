@@ -25,9 +25,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-
-	"github.com/tdewolff/canvas"
-	"github.com/tdewolff/font"
 )
 
 // editorSource 保留输入包及按需加载的原始页面
@@ -629,40 +626,40 @@ func editorGeometry(object GraphicObject) (string, string) {
 
 // editorFont 按需解析内嵌字体或名称匹配的外部字体，不使用无关回退字体
 // 入参: id 字体资源标识
-// 返回: *font.SFNT 字体, error 错误信息
-func (e *Editor) editorFont(id string) (*font.SFNT, error) {
-	if sfnt := e.fonts[id]; sfnt != nil {
-		return sfnt, nil
+// 返回: FontMetrics 字体度量, error 错误信息
+func (e *Editor) editorFont(id string) (FontMetrics, error) {
+	if metrics := e.fontMetrics[id]; metrics != nil {
+		return metrics, nil
 	}
-	if e.source != nil {
-		definition := e.source.reader.fontCache[id]
-		if definition != nil && definition.FontFile == "" {
-			if e.fontRenderer == nil {
-				e.fontRenderer = e.newRenderer(e.source.reader)
-			}
-			style := canvasFontStyle(definition)
-			for _, source := range e.fontRenderer.fontSources(id, definition, style) {
-				if !source.exact {
-					continue
-				}
-				if family := e.fontRenderer.loadFontSource(canvas.NewFontFamily(definition.FontName), source, style); family != nil {
-					return family.Face(12, style).Font.SFNT, nil
-				}
-			}
-			return nil, &EditError{Code: EditFontUnavailable, Err: fmt.Errorf("font %q is unavailable", definition.FontName)}
+	if e.backends.Fonts == nil {
+		return nil, &EditError{Code: EditFontUnavailable, Err: fmt.Errorf("fonts: %w", ErrBackendUnavailable)}
+	}
+	var data []byte
+	for _, resource := range e.resources {
+		if resource.font != nil && resource.font.ID == id {
+			data = resource.data
+			break
 		}
-		data, err := e.source.reader.FontData(id)
+	}
+	if data == nil && e.source != nil {
+		if e.fontRenderer == nil {
+			e.fontRenderer = e.newRenderer(e.source.reader)
+		}
+		resolved, err := e.fontRenderer.ResolveFont(id, true)
 		if err != nil {
 			return nil, &EditError{Code: EditFontUnavailable, Err: err}
 		}
-		sfnt, err := font.ParseSFNT(data, 0)
-		if err != nil {
-			return nil, &EditError{Code: EditFontUnavailable, Err: err}
-		}
-		e.fonts[id] = sfnt
-		return sfnt, nil
+		data = resolved.Data
 	}
-	return nil, &EditError{Code: EditFontUnavailable, Err: fmt.Errorf("font %q not found", id)}
+	if data == nil {
+		return nil, &EditError{Code: EditFontUnavailable, Err: fmt.Errorf("font %q not found", id)}
+	}
+	metrics, err := e.backends.Fonts.OpenFont(data)
+	if err != nil {
+		return nil, &EditError{Code: EditFontUnavailable, Err: err}
+	}
+	e.fontMetrics[id] = metrics
+	return metrics, nil
 }
 
 // FontData 获取编辑使用的字体数据，外部字体不写入文档资源

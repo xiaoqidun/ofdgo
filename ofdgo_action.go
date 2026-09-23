@@ -18,8 +18,6 @@ import (
 	"encoding/xml"
 	"net/url"
 	"strconv"
-
-	"github.com/tdewolff/canvas"
 )
 
 // Action 动作
@@ -346,7 +344,11 @@ func (r *Renderer) appendGraphicActionSources(sources []actionSource, object Gra
 			source.Box.W, source.Box.H = box.W, box.H
 		}
 		if box.W > 0 && box.H > 0 && !axisAlignedMatrix(placement) {
-			source.Path = canvas.Rectangle(box.W, box.H).Transform(actionCanvasMatrix(placement)).ToSVG()
+			path := geometryRectangle(Box{W: box.W, H: box.H})
+			for i := range path {
+				path[i].End.X, path[i].End.Y = placement.Transform(path[i].End.X, path[i].End.Y)
+			}
+			source.Path, _ = path.SVG()
 		}
 		sources = append(sources, source)
 	}
@@ -366,93 +368,27 @@ func (r *Renderer) appendGraphicActionSources(sources []actionSource, object Gra
 	return sources
 }
 
-// actionCanvasMatrix 转换页面坐标矩阵，不翻转Y轴
-// 入参: matrix 页面变换
-// 返回: canvas.Matrix 路径变换
-func actionCanvasMatrix(matrix Matrix) canvas.Matrix {
-	return canvas.Matrix{{matrix.a, matrix.c, matrix.e}, {matrix.b, matrix.d, matrix.f}}
-}
-
-// actionRegionPath 解析复杂点击区域并转换为页面坐标
-// 入参: region 动作区域, matrix 坐标变换
-// 返回: *canvas.Path 点击路径
-func actionRegionPath(region *Region, matrix Matrix) *canvas.Path {
-	path := &canvas.Path{}
-	for _, area := range region.Area {
-		start := parseFloats(area.Start)
-		if len(start) != 2 {
-			continue
-		}
-		part := &canvas.Path{}
-		part.MoveTo(start[0], start[1])
-		for _, command := range area.Command {
-			p1, p2, p3 := parseFloats(command.Point1), parseFloats(command.Point2), parseFloats(command.Point3)
-			switch command.Type {
-			case "Move":
-				if len(p1) == 2 {
-					part.Close()
-					part.MoveTo(p1[0], p1[1])
-				}
-			case "Line":
-				if len(p1) == 2 {
-					part.LineTo(p1[0], p1[1])
-				}
-			case "QuadraticBezier":
-				if len(p1) == 2 && len(p2) == 2 {
-					part.QuadTo(p1[0], p1[1], p2[0], p2[1])
-				}
-			case "CubicBezier":
-				if len(p3) == 2 {
-					first, second := part.Pos(), canvas.Point{X: p3[0], Y: p3[1]}
-					if len(p1) == 2 {
-						first = canvas.Point{X: p1[0], Y: p1[1]}
-					}
-					if len(p2) == 2 {
-						second = canvas.Point{X: p2[0], Y: p2[1]}
-					}
-					part.CubeTo(first.X, first.Y, second.X, second.Y, p3[0], p3[1])
-				}
-			case "Arc":
-				size, end := parseFloats(command.EllipseSize), parseFloats(command.EndPoint)
-				angle, err := strconv.ParseFloat(command.RotationAngle, 64)
-				large, largeErr := strconv.ParseBool(command.LargeArc)
-				sweep, sweepErr := strconv.ParseBool(command.SweepDirection)
-				if len(end) == 2 && err == nil && largeErr == nil && sweepErr == nil {
-					rx, ry := 0.0, 0.0
-					if len(size) > 0 {
-						rx, ry = size[0], size[0]
-					}
-					if len(size) > 1 {
-						ry = size[1]
-					}
-					part.ArcTo(rx, ry, angle, large, sweep, end[0], end[1])
-				}
-			case "Close":
-				part.Close()
-			}
-		}
-		part.Close()
-		path = path.Append(part)
-	}
-	if canvas.Equal(matrix.a*matrix.d-matrix.b*matrix.c, 0) {
-		path = path.ReplaceArcs()
-	}
-	return path.Transform(actionCanvasMatrix(matrix))
-}
-
 // actionLinkRegion 获取动作点击区域
 // 入参: source 动作来源, action 动作
-// 返回: Box 外接矩形, string 精确路径
-func actionLinkRegion(source actionSource, action Action) (Box, string) {
+// 返回: Box 外接矩形, string 精确路径, error 几何错误
+func (r *Renderer) actionLinkRegion(source actionSource, action Action) (Box, string, error) {
 	if action.Region == nil {
-		return source.Box, source.Path
+		return source.Box, source.Path, nil
 	}
-	path := actionRegionPath(action.Region, source.Matrix)
-	if path.Empty() {
-		return Box{}, ""
+	geometry, err := r.Geometry()
+	if err != nil {
+		return Box{}, "", err
 	}
-	box := path.Bounds()
-	return Box{X: box.X0, Y: box.Y0, W: box.W(), H: box.H()}, path.ToSVG()
+	path, err := geometry.Region(action.Region, source.Matrix)
+	if err != nil {
+		return Box{}, "", err
+	}
+	box, err := geometry.Bounds(path)
+	if err != nil {
+		return Box{}, "", err
+	}
+	outline, err := path.SVG()
+	return box, outline, err
 }
 
 // resolveActionURI 解析URI动作地址
@@ -471,4 +407,23 @@ func resolveActionURI(action URI) string {
 		return action.URI
 	}
 	return base.ResolveReference(target).String()
+}
+
+// outlineDest 获取大纲跳转目标
+// 入参: outline 大纲节点, bookmarks 书签
+// 返回: *Dest 跳转目标
+func outlineDest(outline OutlineElem, bookmarks map[string]Dest) *Dest {
+	for _, action := range outline.Actions {
+		if action.Goto != nil {
+			if dest := gotoDest(action.Goto, bookmarks); dest != nil {
+				return dest
+			}
+		}
+	}
+	for _, child := range outline.OutlineElem {
+		if dest := outlineDest(child, bookmarks); dest != nil {
+			return dest
+		}
+	}
+	return nil
 }

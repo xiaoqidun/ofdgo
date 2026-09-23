@@ -332,6 +332,8 @@ const el = {
 	renderPDF: document.querySelector("#renderPDF"),
 	renderEPS: document.querySelector("#renderEPS"),
 	renderCompiler: document.querySelector("#renderCompiler"),
+	renderFonts: document.querySelector("#renderFonts"),
+	renderGeometry: document.querySelector("#renderGeometry"),
 	offlineStatus: document.querySelector("#offlineStatus"),
 	refreshAppButton: document.querySelector("#refreshAppButton"),
 	metaFile: document.querySelector("#metaFile"),
@@ -3140,6 +3142,7 @@ function updateRenderBackend() {
 	el.renderDPI.value = String(state.renderDPI);
 	el.renderBackend.disabled = !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
 	el.renderDPI.disabled = el.renderBackend.disabled || displayMode() === "svg";
+	el.renderDPI.title = displayMode() === "svg" ? "矢量预览无需DPI" : "预览DPI（仅位图）";
 	el.renderVectorButton.disabled = el.renderRasterButton.disabled = el.renderBackend.disabled || state.editing;
 	el.renderVectorButton.setAttribute("aria-pressed", String(displayMode() === "svg"));
 	el.renderRasterButton.setAttribute("aria-pressed", String(displayMode() === "raster"));
@@ -3152,6 +3155,8 @@ function updateRenderBackend() {
 	el.renderPDF.textContent = renderBackendLabel(backend?.pdf);
 	el.renderEPS.textContent = renderBackendLabel(backend?.eps);
 	el.renderCompiler.textContent = renderBackendLabel(backend?.compiler);
+	el.renderFonts.textContent = renderBackendLabel(backend?.fonts);
+	el.renderGeometry.textContent = renderBackendLabel(backend?.geometry);
 }
 
 async function refreshRenderBackend(anchor = scaleAnchor(0)) {
@@ -6348,6 +6353,7 @@ function exportFormatUsesDPI(value) {
 
 function updateDPIControl() {
 	el.imageDPI.disabled = state.exporting || !state.doc || !exportFormatUsesDPI(el.exportFormat.value);
+	el.imageDPI.title = exportFormatUsesDPI(el.exportFormat.value) ? "导出DPI（仅PNG/JPG）" : "当前格式无需DPI";
 }
 
 function currentImageDPI() {

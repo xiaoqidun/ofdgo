@@ -104,6 +104,8 @@ type EPSBackend interface {
 // RenderBackends 按职责组合后端，nil表示明确禁用，不隐式回退
 // 实例及其Renderer需串行使用，第三方实现无需引用任何内置绘图库
 type RenderBackends struct {
+	Fonts    FontBackend
+	Geometry GeometryBackend
 	Compiler PageCompiler
 	Raster   RasterBackend
 	SVG      SVGBackend
@@ -113,6 +115,8 @@ type RenderBackends struct {
 
 // BackendInfo 描述各项能力实际使用的后端，空标识表示未配置
 type BackendInfo struct {
+	Fonts    string `json:"fonts"`
+	Geometry string `json:"geometry"`
 	Compiler string `json:"compiler"`
 	Raster   string `json:"raster"`
 	SVG      string `json:"svg"`
@@ -150,13 +154,13 @@ func RenderBackendInfos() map[string]BackendInfo {
 // 返回: RenderBackends 默认后端组合
 func defaultRenderBackends() RenderBackends {
 	backend := CanvasBackend{}
-	return RenderBackends{Compiler: backend, Raster: backend, SVG: backend, PDF: backend, EPS: backend}
+	return RenderBackends{Fonts: backend, Geometry: backend, Compiler: backend, Raster: backend, SVG: backend, PDF: backend, EPS: backend}
 }
 
 // Info 返回配置中各能力的提供者，不依赖WebUI推断
 // 返回: BackendInfo 后端能力
 func (b RenderBackends) Info() BackendInfo {
-	return BackendInfo{Compiler: backendName(b.Compiler), Raster: backendName(b.Raster), SVG: backendName(b.SVG), PDF: backendName(b.PDF), EPS: backendName(b.EPS)}
+	return BackendInfo{Fonts: backendName(b.Fonts), Geometry: backendName(b.Geometry), Compiler: backendName(b.Compiler), Raster: backendName(b.Raster), SVG: backendName(b.SVG), PDF: backendName(b.PDF), EPS: backendName(b.EPS)}
 }
 
 // backendName 获取已配置的后端标识
@@ -173,7 +177,10 @@ func backendName(backend Backend) string {
 // 入参: backends 后端组合
 // 返回: RendererOption 渲染选项
 func WithRenderBackends(backends RenderBackends) RendererOption {
-	return func(r *Renderer) { r.backends = backends }
+	return func(r *Renderer) {
+		r.backends = backends
+		r.resetFontCache()
+	}
 }
 
 // Backends 返回当前后端配置副本，可修改后通过WithRenderBackends应用

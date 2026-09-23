@@ -17,15 +17,15 @@ package ofdgo
 import (
 	"image"
 	"io/fs"
-
-	"github.com/tdewolff/canvas"
 )
 
 // Renderer 渲染器实现
 // 通过NewRenderer创建，实例及共享的Reader需串行使用
 // OnPageText可选，接收页面绘制时同步提取的文字，不包含图案和签名外观
 // OnExportProgress可选，同步回报文档导出的已处理页数及总页数，返回错误则停止，页数完成不代表写入成功
+// TransparentBackground关闭页面白底，供嵌套图案和印章保持透明背景
 type Renderer struct {
+	canvasFontState
 	Reader                *Reader
 	DPI                   float64
 	RenderAnnotations     bool
@@ -33,18 +33,6 @@ type Renderer struct {
 	OnExportProgress      func(completed, total int) error
 	DrawParams            map[string]*DrawParam
 	CompositeGraphicUnits map[string]*CompositeGraphicUnit
-	fontFamily            *canvas.FontFamily
-	defaultFontLoaded     bool
-	fontMap               map[string]*canvas.FontFamily
-	fontGIDMap            map[string]map[uint16]rune
-	fontCIDMap            map[string]map[uint16]rune
-	fontCache             map[fontCacheKey]*canvas.FontFamily
-	svgFontCache          map[*canvas.Font]SVGFont
-	fontSourceCache       map[string][]fontSource
-	fontSourceUsed        map[string]fontSource
-	fontDirCandidates     map[string][]fontFileCandidate
-	fontFSCandidates      map[int][]fontFileCandidate
-	textGlyphPathCache    map[textGlyphPathCacheKey]textGlyphPathCacheValue
 	templatePageCache     map[string]*PageContent
 	imageCache            map[string]image.Image
 	fontDirs              []string
@@ -53,6 +41,9 @@ type Renderer struct {
 	pageText              *PageText
 	textOnly              bool
 	backends              RenderBackends
+	resolvedFonts         map[resolvedFontKey]resolvedFontResult
+	renderError           error
+	TransparentBackground bool
 }
 
 // RendererOption 渲染器配置选项
@@ -72,195 +63,6 @@ func (r *Renderer) FontSources() ([]string, []fs.FS) {
 	return append([]string(nil), r.fontDirs...), append([]fs.FS(nil), r.fontFS...)
 }
 
-// resetFontCache 重置字体匹配、加载和字形缓存
-func (r *Renderer) resetFontCache() {
-	r.fontMap = make(map[string]*canvas.FontFamily)
-	r.fontGIDMap = make(map[string]map[uint16]rune)
-	r.fontCIDMap = make(map[string]map[uint16]rune)
-	r.fontCache = make(map[fontCacheKey]*canvas.FontFamily)
-	r.svgFontCache = make(map[*canvas.Font]SVGFont)
-	r.fontSourceCache = make(map[string][]fontSource)
-	r.fontSourceUsed = make(map[string]fontSource)
-	r.fontDirCandidates = make(map[string][]fontFileCandidate)
-	r.fontFSCandidates = make(map[int][]fontFileCandidate)
-	r.textGlyphPathCache = make(map[textGlyphPathCacheKey]textGlyphPathCacheValue)
-}
-
-// RenderPage 编译页面为与绘图库无关的只读绘制数据
-// 入参: page 页面内容
-// 返回: *RasterPage 绘制页面, error 错误信息
-func (r *Renderer) RenderPage(page *PageContent) (*RasterPage, error) {
-	return r.CompilePage(page)
-}
-
-// renderPage 渲染特定页面内容
-// 入参: page 页面内容
-// 返回: *canvas.Canvas 画布实例, error 错误信息
-func (r *Renderer) renderPage(page *PageContent) (*canvas.Canvas, error) {
-	box, err := r.GetPageBox(page)
-	if err != nil {
-		return nil, err
-	}
-	width, height := box.W, box.H
-	c := canvas.New(width, height)
-	ctx := canvas.NewContext(c)
-	if err := r.renderPageToContext(ctx, page, true); err != nil {
-		return nil, err
-	}
-	return c, nil
-}
-
-// GetPageBox 获取页面物理区域
-// 入参: page 页面内容
-// 返回: Box 区域, error 错误信息
-func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
-	area, err := r.Reader.resolvePageArea(page.Area, page.Template)
-	if err != nil {
-		return Box{}, err
-	}
-	boxStr := area.PhysicalBox
-	if boxStr == "" {
-		boxStr = area.ApplicationBox
-	}
-	if boxStr == "" {
-		boxStr = area.ContentBox
-	}
-	if boxStr == "" {
-		boxStr = "0 0 210 297"
-	}
-	return ParseBox(boxStr)
-}
-
-// renderCanvasContext 渲染页面到默认解释器上下文
-// 入参: ctx 画布上下文, page 页面内容
-// 返回: error 错误信息
-func (r *Renderer) renderCanvasContext(ctx *canvas.Context, page *PageContent) error {
-	renderer := *r
-	renderer.decodeImages = true
-	return renderer.renderPageToContext(ctx, page, true)
-}
-
-// renderPageToContext 渲染页面到指定上下文
-// 入参: ctx 画布上下文, page 页面内容, drawBackground 是否绘制页面背景
-// 返回: error 错误信息
-func (r *Renderer) renderPageToContext(ctx *canvas.Context, page *PageContent, drawBackground bool) error {
-	box, err := r.GetPageBox(page)
-	if err != nil {
-		return err
-	}
-	if r.OnPageText != nil {
-		renderer := *r
-		renderer.pageText = &PageText{}
-		r = &renderer
-	}
-	pageH := box.H
-	if drawBackground {
-		ctx.SetFillColor(canvas.White)
-		ctx.DrawPath(0, 0, canvas.Rectangle(box.W, box.H))
-	}
-	for order := range 3 {
-		if r.Reader.doc != nil {
-			for _, tplRef := range page.Template {
-				kind := tplRef.ZOrder
-				if kind == "" {
-					kind = "Background"
-				}
-				if layerOrder(kind) == order {
-					r.renderTemplate(ctx, tplRef.TemplateID, pageH)
-				}
-			}
-		}
-		r.renderLayers(ctx, page.Content.Layer, pageH, order)
-	}
-	if r.RenderAnnotations {
-		r.renderAnnotations(ctx, page.ID, pageH)
-	}
-	if stamps, ok := r.Reader.Stamps[page.ID]; ok {
-		for _, stamp := range stamps {
-			r.renderStamp(ctx, stamp, pageH)
-		}
-	}
-	if r.OnPageText != nil {
-		r.OnPageText(page, r.pageText)
-	}
-	return nil
-}
-
-// PageLinks 获取页面、模板和可见注释的点击链接，包含复杂区域、组合图元和附件动作
-// 入参: page 页面内容
-// 返回: []PageLink 页面链接, error 错误信息
-func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
-	box, err := r.GetPageBox(page)
-	if err != nil {
-		return nil, err
-	}
-	sources := r.pageActionSources(page, box)
-	if r.RenderAnnotations {
-		sources = append(sources, r.annotationActionSources(r.Reader.Annots[page.ID])...)
-	}
-	var links []PageLink
-	var bookmarks map[string]Dest
-	for sourceIndex, source := range sources {
-		start := len(links)
-		for _, action := range source.Actions {
-			if action.Event != "CLICK" {
-				continue
-			}
-			box, path := actionLinkRegion(source, action)
-			if box.W <= 0 || box.H <= 0 {
-				continue
-			}
-			link := PageLink{Box: box, Path: path}
-			if action.Goto != nil {
-				if bookmarks == nil {
-					doc, err := r.Reader.Doc()
-					if err != nil {
-						return nil, err
-					}
-					bookmarks = make(map[string]Dest, len(doc.Bookmarks.Bookmark))
-					for _, bookmark := range doc.Bookmarks.Bookmark {
-						bookmarks[bookmark.Name] = bookmark.Dest
-					}
-				}
-				if dest := gotoDest(action.Goto, bookmarks); dest != nil {
-					value := *dest
-					link.Dest = &value
-					links = append(links, link)
-				}
-			} else if action.URI != nil && action.URI.URI != "" {
-				link.URI = resolveActionURI(*action.URI)
-				links = append(links, link)
-			} else if action.GotoA != nil {
-				link.Attachment = action.GotoA.AttachID
-				links = append(links, link)
-			}
-		}
-		if len(links)-start > 1 {
-			for i := start; i < len(links); i++ {
-				links[i].Group = sourceIndex + 1
-			}
-		}
-	}
-	return links, nil
-}
-
-// RenderPageByIndex 按索引渲染页面
-// 入参: index 页面索引，从0开始
-// 返回: *RasterPage 绘制页面, error 错误信息
-func (r *Renderer) RenderPageByIndex(index int) (*RasterPage, error) {
-	page, err := r.Reader.PageContentByIndex(index)
-	if err != nil {
-		return nil, err
-	}
-	return r.RenderPage(page)
-}
-
-// initCommon 初始化公共资源
-func (r *Renderer) initCommon() {
-	r.fontFamily = canvas.NewFontFamily("default")
-	r.defaultFontLoaded = r.loadDefaultFonts()
-}
-
 // childRenderer 创建继承当前配置的子渲染器
 // 入参: reader 子阅读器
 // 返回: *Renderer 子渲染器
@@ -268,6 +70,7 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 	opts := []RendererOption{
 		WithDPI(r.DPI),
 		WithAnnotations(r.RenderAnnotations),
+		WithRenderBackends(r.backends),
 	}
 	if len(r.fontDirs) > 0 {
 		opts = append(opts, WithFontDirs(r.fontDirs...))
@@ -277,5 +80,40 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 	}
 	renderer := NewRenderer(reader, opts...)
 	renderer.decodeImages = r.decodeImages
+	renderer.TransparentBackground = r.TransparentBackground
 	return renderer
+}
+
+// loadTemplate 加载模板页面并复用解析结果
+// 入参: templateID 模板ID
+// 返回: *PageContent 模板页面
+func (r *Renderer) loadTemplate(templateID string) *PageContent {
+	if page := r.templatePageCache[templateID]; page != nil {
+		return page
+	}
+	for _, tpl := range r.Reader.doc.CommonData.TemplatePage {
+		if tpl.ID != templateID {
+			continue
+		}
+		page, err := r.Reader.PageContent(Page{BaseLoc: tpl.BaseLoc})
+		if err != nil {
+			return nil
+		}
+		r.templatePageCache[templateID] = page
+		return page
+	}
+	return nil
+}
+
+// layerOrder 获取图层类型的绘制顺序
+// 入参: kind 图层类型
+// 返回: int 绘制顺序
+func layerOrder(kind string) int {
+	switch kind {
+	case "Background":
+		return 0
+	case "Foreground":
+		return 2
+	}
+	return 1
 }

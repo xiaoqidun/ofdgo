@@ -21,71 +21,6 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
-// canvasGeometryPath 将页面坐标路径转换为默认几何引擎的向上纵轴
-// 入参: path 独立几何路径，nil表示不裁剪
-// 返回: *canvas.Path 默认引擎路径, error 不支持的路径指令
-func canvasGeometryPath(path *GeometryPath) (*canvas.Path, error) {
-	if path == nil {
-		return nil, nil
-	}
-	p := &canvas.Path{}
-	for _, segment := range *path {
-		switch segment.Verb {
-		case GeometryMove:
-			p.MoveTo(segment.End.X, -segment.End.Y)
-		case GeometryLine:
-			p.LineTo(segment.End.X, -segment.End.Y)
-		case GeometryQuad:
-			p.QuadTo(segment.Control1.X, -segment.Control1.Y, segment.End.X, -segment.End.Y)
-		case GeometryCubic:
-			p.CubeTo(segment.Control1.X, -segment.Control1.Y, segment.Control2.X, -segment.Control2.Y, segment.End.X, -segment.End.Y)
-		case GeometryArc:
-			p.ArcTo(segment.RadiusX, segment.RadiusY, -segment.Rotation, segment.Large, !segment.Sweep, segment.End.X, -segment.End.Y)
-		case GeometryClose:
-			p.Close()
-		default:
-			return nil, fmt.Errorf("unsupported geometry command %d", segment.Verb)
-		}
-	}
-	return p, nil
-}
-
-// geometryCanvasPath 将默认引擎路径转换为独立的页面坐标路径，保留曲线和椭圆弧
-// 入参: path 默认引擎路径
-// 返回: *GeometryPath 独立路径，nil表示不裁剪
-func geometryCanvasPath(path *canvas.Path) *GeometryPath {
-	if path == nil {
-		return nil
-	}
-	result := make(GeometryPath, 0, path.Len())
-	scanner := path.Scanner()
-	for scanner.Scan() {
-		end := scanner.End()
-		segment := GeometrySegment{End: Point{X: end.X, Y: -end.Y}}
-		switch scanner.Cmd() {
-		case canvas.MoveToCmd:
-			segment.Verb = GeometryMove
-		case canvas.LineToCmd:
-			segment.Verb = GeometryLine
-		case canvas.QuadToCmd:
-			control := scanner.CP1()
-			segment.Verb, segment.Control1 = GeometryQuad, Point{X: control.X, Y: -control.Y}
-		case canvas.CubeToCmd:
-			c1, c2 := scanner.CP1(), scanner.CP2()
-			segment.Verb = GeometryCubic
-			segment.Control1, segment.Control2 = Point{X: c1.X, Y: -c1.Y}, Point{X: c2.X, Y: -c2.Y}
-		case canvas.ArcToCmd:
-			segment.Verb = GeometryArc
-			segment.RadiusX, segment.RadiusY, segment.Rotation, segment.Large, segment.Sweep = scanner.Arc()
-			segment.Rotation, segment.Sweep = -segment.Rotation, !segment.Sweep
-		case canvas.CloseCmd:
-			segment.Verb = GeometryClose
-		}
-		result = append(result, segment)
-	}
-	return &result
-}
-
 // MeasureObject 使用默认解释器度量对象，不分配页面像素
 // 入参: r 渲染器, object 图形对象, options 度量上下文
 // 返回: ObjectMeasurement 度量结果, error 错误信息
@@ -102,12 +37,13 @@ func (CanvasBackend) MeasureObject(r *Renderer, object GraphicObject, options Me
 			return ObjectMeasurement{}, err
 		}
 	}
-	clip, err := canvasGeometryPath(options.Clip)
+	clip, err := geometryToCanvasPath(options.Clip)
 	if err != nil {
 		return ObjectMeasurement{}, err
 	}
 	bounds := &boundsRenderer{collect: options.Contours}
 	renderer := *r
+	renderer.renderError = nil
 	renderer.pageText = nil
 	renderer.textOnly = false
 	defaults := options.Defaults
@@ -127,7 +63,7 @@ func (CanvasBackend) MeasureObject(r *Renderer, object GraphicObject, options Me
 				box = unionTextBox(box, glyph)
 			}
 		}
-		return ObjectMeasurement{Bounds: box}, nil
+		return ObjectMeasurement{Bounds: box}, renderer.renderError
 	case "PathObject":
 		obj := object.PathObject
 		defaults = renderer.drawParamDefaults(obj.DrawParam, defaults)
@@ -146,7 +82,7 @@ func (CanvasBackend) MeasureObject(r *Renderer, object GraphicObject, options Me
 	case "CompositeObject", "CompositeGraphicUnit":
 		renderer.renderCompositeGraphicUnit(ctx, object.CompositeGraphicUnit, 0, defaults, options.Parent, options.BoundaryInCTM, clip)
 	}
-	return ObjectMeasurement{Bounds: bounds.box, Contours: bounds.contours}, nil
+	return ObjectMeasurement{Bounds: bounds.box, Contours: bounds.contours}, renderer.renderError
 }
 
 // measureImage 复用图片变换与裁剪语义度量范围，不读取像素数据
@@ -261,7 +197,7 @@ func (CanvasBackend) PageText(r *Renderer, page *PageContent) (*PageText, error)
 	renderer.OnPageText = nil
 	renderer.pageText = &PageText{}
 	renderer.textOnly = true
-	if err := renderer.renderPageToContext(canvas.NewContext(canvas.New(box.W, box.H)), page, false); err != nil {
+	if err := renderer.renderCanvasPageToContext(canvas.NewContext(canvas.New(box.W, box.H)), page, false); err != nil {
 		return nil, err
 	}
 	return renderer.pageText, nil

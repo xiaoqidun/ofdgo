@@ -38,7 +38,7 @@ func (CanvasBackend) RenderSVG(r *Renderer, page *PageContent, writer io.Writer,
 	case SVGObjects:
 		return r.renderSVGResources(page, writer, true, true)
 	case SVGEmbedded:
-		c, err := r.renderPage(page)
+		c, err := r.renderCanvasPage(page)
 		if err != nil {
 			return SVGResources{}, err
 		}
@@ -58,7 +58,7 @@ func (CanvasBackend) RenderSVG(r *Renderer, page *PageContent, writer io.Writer,
 // 入参: r 渲染器, page 页面内容, writer 输出流
 // 返回: error 错误信息
 func (CanvasBackend) RenderEPS(r *Renderer, page *PageContent, writer io.Writer) error {
-	c, err := r.renderPage(page)
+	c, err := r.renderCanvasPage(page)
 	if err != nil {
 		return err
 	}
@@ -80,7 +80,10 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	if len(pages) == 0 {
 		return fmt.Errorf("no pages found")
 	}
-	navigation := newPDFNavigation(r, r.Reader.doc, pages)
+	navigation, err := newPDFNavigation(r, r.Reader.doc, pages)
+	if err != nil {
+		return err
+	}
 	buf, direct := writer.(*bytes.Buffer)
 	if !direct {
 		buf = &bytes.Buffer{}
@@ -98,7 +101,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 			p.NewPage(page.Box.W, page.Box.H)
 		}
 		navigation.apply(p, i)
-		if err := r.renderPageToContext(canvas.NewContext(renderer), page.Content, true); err != nil {
+		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), page.Content, !r.TransparentBackground); err != nil {
 			buf.Truncate(start)
 			return fmt.Errorf("failed to render page %d: %w", i+1, err)
 		}
@@ -118,7 +121,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	if direct {
 		return nil
 	}
-	_, err := writer.Write(data)
+	_, err = writer.Write(data)
 	return err
 }
 

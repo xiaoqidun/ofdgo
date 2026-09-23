@@ -23,8 +23,6 @@ import (
 	"math"
 	"reflect"
 	"slices"
-
-	"github.com/tdewolff/canvas"
 )
 
 // ObjectPath 定位页面顶层对象或注解外观内的成员，Children为从0开始的逐层绘制序号
@@ -60,7 +58,7 @@ type editorCompositeNode struct {
 	boundaryInCTM bool
 	defaults      *DrawParam
 	drawParams    []string
-	clip          *canvas.Path
+	clip          *GeometryPath
 	visible       bool
 	alpha         *int
 	ref           *editorCompositeNode
@@ -404,7 +402,17 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 			copy.TransFlag = nil
 			clips, clipMatrix = &copy, boundary
 		}
-		clip := intersectClipPath(n.clip, renderer.buildClipPath(clips, 0, 0, 0, clipMatrix))
+		clip := n.clip
+		if clips != nil {
+			geometry, err := renderer.Geometry()
+			if err != nil {
+				return nil, err
+			}
+			clip, err = geometry.Clip(renderer, clips, clipMatrix, n.clip)
+			if err != nil {
+				return nil, err
+			}
+		}
 		defaults := renderer.drawParamDefaults(c.DrawParam, n.defaults)
 		drawParams := append(slices.Clone(n.drawParams), c.DrawParam)
 		visible := n.visible && (c.Visible == nil || *c.Visible)
@@ -529,7 +537,7 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		}
 		if node.visible {
 			var err error
-			bounds, err = renderer.MeasureObject(object, MeasureOptions{Defaults: node.defaults, Parent: &node.parent, BoundaryInCTM: node.boundaryInCTM, Clip: geometryCanvasPath(node.clip), Contours: true})
+			bounds, err = renderer.MeasureObject(object, MeasureOptions{Defaults: node.defaults, Parent: &node.parent, BoundaryInCTM: node.boundaryInCTM, Clip: node.clip, Contours: true})
 			if err != nil {
 				return nil, err
 			}

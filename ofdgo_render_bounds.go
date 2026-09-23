@@ -48,7 +48,10 @@ func (r *Renderer) AnnotationGeometry(annotation Annotation) (Box, []ObjectConto
 			if action.Event != "CLICK" {
 				continue
 			}
-			region, path := actionLinkRegion(source, action)
+			region, path, err := r.actionLinkRegion(source, action)
+			if err != nil {
+				return Box{}, nil, err
+			}
 			if region.W <= 0 || region.H <= 0 {
 				continue
 			}

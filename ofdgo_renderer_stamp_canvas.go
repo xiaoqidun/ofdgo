@@ -17,12 +17,8 @@ package ofdgo
 import (
 	"bytes"
 	"image"
-	"image/color"
-	"image/draw"
-	"math"
 
 	"github.com/tdewolff/canvas"
-	"github.com/tdewolff/canvas/renderers/rasterizer"
 )
 
 // renderStamp 渲染印章
@@ -56,8 +52,12 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 					ctx.Push()
 					ctx.Translate(s.Box.X, pageH-(s.Box.Y+s.Box.H))
 					ctx.Scale(s.Box.W/sealBox.W, s.Box.H/sealBox.H)
-					renderer.renderPageToContext(ctx, content, false)
+					err = renderer.renderCanvasPageToContext(ctx, content, false)
 					ctx.Pop()
+					if err != nil {
+						r.renderError = err
+						return
+					}
 				}
 				return
 			}
@@ -90,20 +90,18 @@ func (r *Renderer) renderOFDStampImage(data []byte) image.Image {
 	}
 	renderer := r.childRenderer(reader)
 	renderer.decodeImages = true
+	renderer.TransparentBackground = true
 	for _, pageRef := range doc.Pages.Page {
 		content, err := reader.PageContent(pageRef)
 		if err != nil {
 			continue
 		}
-		sealBox, err := renderer.GetPageBox(content)
+		img, err := renderer.RenderToImage(content)
 		if err != nil {
-			continue
+			r.renderError = err
+			return nil
 		}
-		c := canvas.New(sealBox.W, sealBox.H)
-		if err := renderer.renderPageToContext(canvas.NewContext(c), content, false); err != nil {
-			continue
-		}
-		return rasterizer.Draw(c, canvas.DPMM(r.DPI/25.4), canvas.DefaultColorSpace)
+		return img
 	}
 	return nil
 }
@@ -124,52 +122,4 @@ func (r *Renderer) renderStampImage(ctx *canvas.Context, img image.Image, s Stam
 	ctx.Scale(box.W/float64(img.Bounds().Dx()), box.H/float64(img.Bounds().Dy()))
 	ctx.DrawImage(0, 0, img, canvas.DPMM(1.0))
 	ctx.Pop()
-}
-
-// clipStampImage 裁剪印章图像
-// 入参: img 印章图像, box 印章区域, clip 裁剪区域
-// 返回: image.Image 裁剪后的印章图像
-func clipStampImage(img image.Image, box, clip Box) image.Image {
-	bounds := img.Bounds()
-	x0 := int(math.Floor(clip.X / box.W * float64(bounds.Dx())))
-	y0 := int(math.Floor(clip.Y / box.H * float64(bounds.Dy())))
-	x1 := int(math.Ceil((clip.X + clip.W) / box.W * float64(bounds.Dx())))
-	y1 := int(math.Ceil((clip.Y + clip.H) / box.H * float64(bounds.Dy())))
-	out := image.NewNRGBA(image.Rect(0, 0, x1-x0, y1-y0))
-	draw.Draw(out, out.Bounds(), img, image.Pt(bounds.Min.X+x0, bounds.Min.Y+y0), draw.Src)
-	return out
-}
-
-// stampImageWithTransparentWhite 处理印章图片白色底色
-// 入参: img 印章图片对象
-// 返回: image.Image 处理后的印章图片对象
-func stampImageWithTransparentWhite(img image.Image) image.Image {
-	if opaque, ok := img.(interface{ Opaque() bool }); ok && !opaque.Opaque() {
-		return img
-	}
-	bounds := img.Bounds()
-	out := image.NewNRGBA(bounds)
-	hasAlpha := false
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			c := color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
-			if c.A < 255 {
-				hasAlpha = true
-			}
-			out.SetNRGBA(x, y, c)
-		}
-	}
-	if hasAlpha {
-		return img
-	}
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			c := out.NRGBAAt(x, y)
-			if c.R >= 250 && c.G >= 250 && c.B >= 250 {
-				c.A = 0
-				out.SetNRGBA(x, y, c)
-			}
-		}
-	}
-	return out
 }
