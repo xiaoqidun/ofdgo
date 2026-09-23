@@ -37,7 +37,14 @@ type editorImportEntry struct {
 type editorPageImport struct {
 	reader        *Reader
 	doc           *Document
-	prefix        string
+	directory     string
+	target        *Reader
+	paths         map[string]string
+	evidence      map[string]string
+	resourceXML   []byte
+	pageParts     []byte
+	documentXML   []byte
+	documentRoot  *editorXML
 	maximum       int
 	ids           map[string]string
 	pages         map[string]bool
@@ -116,12 +123,20 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 			return nil, err
 		}
 	}
-	prefix := path.Join(base.directory, "Import_"+strconv.Itoa(maximum+1))
-	for editorDirectoryExists(base.reader, prefix) {
-		prefix += "_"
-	}
-	m := &editorPageImport{reader: source, doc: doc, prefix: prefix, maximum: maximum, copyPage: copyPage, progress: progress,
+	m := &editorPageImport{reader: source, doc: doc, directory: e.packageDirectory(), target: base.reader, maximum: maximum, copyPage: copyPage, progress: progress,
+		paths: make(map[string]string), evidence: make(map[string]string),
 		ids: make(map[string]string), pages: selected, files: make(map[string][]byte), resources: make(map[string]editorImportEntry), used: make(map[string][]byte), templates: make(map[string]TemplatePage), templateParts: make(map[string][]byte), attachments: make(map[string][]byte)}
+	for _, resource := range e.resources {
+		m.files[resource.name] = nil
+	}
+	m.documentXML, err = m.readFile(source.ResPath(source.OFD.DocBody[0].DocRoot))
+	if err != nil {
+		return nil, err
+	}
+	m.documentRoot, err = parseEditorXML(m.documentXML)
+	if err != nil {
+		return nil, err
+	}
 	if copyPage {
 		for _, page := range doc.Pages.Page {
 			if !selected[page.ID] {
@@ -155,11 +170,16 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 		}
 		page := doc.Pages.Page[index]
 		ids[i] = m.id(page.ID)
-		name, err := m.copyXML(source.ResPath(page.BaseLoc))
+		name, err := m.copyXML(source.ResPath(page.BaseLoc), packagePagePath(m.directory, ids[i]))
 		if err != nil {
 			return nil, err
 		}
 		refs[i] = Page{ID: ids[i], BaseLoc: name}
+		entry, err := m.documentReference("Pages", "Page", page.ID, ids[i], name)
+		if err != nil {
+			return nil, err
+		}
+		m.pageParts = append(m.pageParts, entry...)
 	}
 	if err := progress.report("pages", len(indexes), len(indexes)); err != nil {
 		return nil, err
@@ -205,7 +225,12 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 		if err != nil {
 			return nil, err
 		}
-		m.files[path.Join(prefix, "Resources.xml")] = resources
+		if len(resourceContent) != 0 {
+			m.resourceXML = resources
+		}
+	}
+	for _, resource := range e.resources {
+		delete(m.files, resource.name)
 	}
 	next, err := m.merge(base, refs, annotations, signatures)
 	if err != nil {
@@ -387,6 +412,27 @@ func (m *editorPageImport) outlines() ([]byte, error) {
 	if len(editorOutlineChildren(root)) == 0 {
 		return nil, nil
 	}
+	var validate func(*editorXML) error
+	validate = func(node *editorXML) error {
+		for _, attr := range node.attrs {
+			if attr.Name.Space == "" || attr.Name.Space == "xmlns" {
+				continue
+			}
+			if attr.Name.Space == "http://www.w3.org/2001/XMLSchema-instance" && (attr.Name.Local == "schemaLocation" || attr.Name.Local == "noNamespaceSchemaLocation") {
+				continue
+			}
+			return fmt.Errorf("cannot remap outline extension attribute %q", attr.Name.Local)
+		}
+		for _, child := range node.children {
+			if err := validate(child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := validate(root); err != nil {
+		return nil, err
+	}
 	return m.encode(editorImportEntry{name: name, data: data}, root)
 }
 
@@ -522,11 +568,11 @@ func (m *editorPageImport) reference(value string) (string, error) {
 	if template, ok := m.templates[value]; ok {
 		if _, seen := m.templateParts[value]; !seen {
 			m.templateParts[value] = nil
-			name, err := m.copyXML(m.reader.ResPath(template.BaseLoc))
+			name, err := m.copyXML(m.reader.ResPath(template.BaseLoc), path.Join(m.directory, "Templates", "Template_"+m.id(value), "Content.xml"))
 			if err != nil {
 				return "", err
 			}
-			data, err := editorXMLContainer("TemplatePage", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: m.id(value)}, {Name: xml.Name{Local: "Name"}, Value: template.Name}, {Name: xml.Name{Local: "BaseLoc"}, Value: name}, {Name: xml.Name{Local: "ZOrder"}, Value: template.ZOrder}}, nil)
+			data, err := m.documentReference("CommonData", "TemplatePage", value, m.id(value), name)
 			if err != nil {
 				return "", err
 			}
@@ -534,6 +580,35 @@ func (m *editorPageImport) reference(value string) (string, error) {
 		}
 	}
 	return m.id(value), nil
+}
+
+// documentReference 迁移页面或模板引用，只替换标识与路径并保留未知属性
+// 入参: group 父节点名称, kind 引用节点名称, source 原标识, id 新标识, loc 新路径
+// 返回: []byte 引用XML, error 错误信息
+func (m *editorPageImport) documentReference(group, kind, source, id, loc string) ([]byte, error) {
+	if parent := m.documentRoot.child(group); parent != nil {
+		for _, node := range parent.children {
+			if node.name.Local != kind || node.attr("ID") != source {
+				continue
+			}
+			data, err := editorXMLStandalone(m.documentXML[node.start:node.end], node)
+			if err != nil {
+				return nil, err
+			}
+			for _, attr := range [][2]string{{"ID", id}, {"BaseLoc", loc}} {
+				root, err := parseEditorXML(data)
+				if err != nil {
+					return nil, err
+				}
+				data, err = editorXMLAttribute(data, root, attr[0], attr[1])
+				if err != nil {
+					return nil, err
+				}
+			}
+			return data, nil
+		}
+	}
+	return nil, fmt.Errorf("missing %s reference %q", kind, source)
 }
 
 // resolve 按所在XML解析包内路径，兼容阅读器接受的文档相对路径
@@ -551,33 +626,40 @@ func (m *editorPageImport) resolve(name, base, value string) (string, error) {
 	return "", fmt.Errorf("import reference %q in %s not found", value, name)
 }
 
-// copyData 复制二进制资源或签名引用原文，返回绝对包路径
-// 入参: name 来源路径, evidence 是否原始签名凭据
+// copyData 复制二进制资源或签名引用原文，凭据与当前引用使用独立映射
+// 入参: name 来源路径, relative 文档内候选路径, evidence 是否原始签名凭据
 // 返回: string 新路径, error 错误信息
-func (m *editorPageImport) copyData(name string, evidence bool) (string, error) {
-	directory := m.prefix
+func (m *editorPageImport) copyData(name, relative string, evidence bool) (string, error) {
+	paths := m.paths
 	if evidence {
-		directory = path.Join(directory, "Signed")
+		paths = m.evidence
+		relative = path.Join("Signs", "Signed", path.Base(name))
 	}
-	target := path.Join(directory, name)
-	if _, exists := m.files[target]; !exists {
-		data, err := m.readFile(name)
-		if err != nil {
-			return "", err
-		}
-		m.files[target] = data
+	key := strings.ToLower(cleanPackagePath(name))
+	if target := paths[key]; target != "" {
+		return "/" + target, nil
 	}
+	if m.copyPage && !evidence {
+		return "/" + cleanPackagePath(name), nil
+	}
+	target := packageAvailableName(m.target, m.files, path.Join(m.directory, relative))
+	data, err := m.readFile(name)
+	if err != nil {
+		return "", err
+	}
+	paths[key], m.files[target] = target, data
 	return "/" + target, nil
 }
 
 // copyXML 复制页面或标准关联XML并重映射引用
-// 入参: name 来源路径
+// 入参: name 来源路径, candidate 目标候选路径
 // 返回: string 新路径, error 错误信息
-func (m *editorPageImport) copyXML(name string) (string, error) {
-	target := path.Join(m.prefix, name)
-	if _, exists := m.files[target]; exists {
+func (m *editorPageImport) copyXML(name, candidate string) (string, error) {
+	key := strings.ToLower(cleanPackagePath(name))
+	if target := m.paths[key]; target != "" {
 		return "/" + target, nil
 	}
+	target := packageAvailableName(m.target, m.files, candidate)
 	data, err := m.readFile(name)
 	if err != nil {
 		return "", err
@@ -586,7 +668,7 @@ func (m *editorPageImport) copyXML(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	m.files[target] = nil
+	m.paths[key], m.files[target] = target, nil
 	if root.name.Local == "Page" {
 		for _, child := range root.children {
 			if child.name.Local == "PageRes" {
@@ -660,11 +742,9 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 		if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" {
 			continue
 		}
-		if attr.Name.Space == "http://www.w3.org/2001/XMLSchema-instance" && (attr.Name.Local == "schemaLocation" || attr.Name.Local == "noNamespaceSchemaLocation") {
-			continue
-		}
 		if attr.Name.Space != "" {
-			return nil, fmt.Errorf("cannot remap extension attribute %q", attr.Name.Local)
+			attrs = append(attrs, attr)
+			continue
 		}
 		key, value := attr.Name.Local, attr.Value
 		var err error
@@ -682,9 +762,13 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 				return nil, resolveErr
 			}
 			if key == "FileRef" {
-				value, err = m.copyData(loc, true)
+				value, err = m.copyData(loc, "", true)
 			} else {
-				value, err = m.copyXML(loc)
+				directory := "Res"
+				if name == "Signature" {
+					directory = path.Join("Signs", "Sign_"+m.id("Signature:"+node.attr("ID")))
+				}
+				value, err = m.copyXML(loc, path.Join(m.directory, directory, path.Base(loc)))
 			}
 		case "AttachID":
 			value, err = m.attachment(value)
@@ -698,40 +782,39 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 		attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "ColorSpace"}, Value: m.defaultCS})
 	}
 	var content []byte
-	if name == "Page" {
+	pageContent := name == "Page" && node.parent == nil
+	if pageContent {
 		area := m.doc.CommonData.PageArea
-		if local := node.child("Area"); local != nil {
-			var own PageArea
-			if err := xml.Unmarshal(entry.data[local.start:local.end], &own); err != nil {
-				return nil, err
-			}
-			if own.PhysicalBox != "" {
-				area.PhysicalBox = own.PhysicalBox
-			}
-			if own.ApplicationBox != "" {
-				area.ApplicationBox = own.ApplicationBox
-			}
-			if own.ContentBox != "" {
-				area.ContentBox = own.ContentBox
-			}
-			if own.BleedBox != "" {
-				area.BleedBox = own.BleedBox
-			}
-		}
+		local := node.child("Area")
 		var fields []byte
 		for _, field := range [][2]string{{"PhysicalBox", area.PhysicalBox}, {"ApplicationBox", area.ApplicationBox}, {"ContentBox", area.ContentBox}, {"BleedBox", area.BleedBox}} {
-			if field[1] != "" {
+			if field[1] != "" && (local == nil || local.child(field[0]) == nil) {
 				fields = append(fields, editorXMLText(field[0], field[1])...)
 			}
 		}
-		encoded, err := editorXMLContainer("Area", nil, fields)
-		if err != nil {
-			return nil, err
+		if local == nil {
+			encoded, err := editorXMLContainer("Area", nil, fields)
+			if err != nil {
+				return nil, err
+			}
+			content = encoded
+		} else {
+			encoded, err := m.encode(entry, local)
+			if err != nil {
+				return nil, err
+			}
+			root, err := parseEditorXML(encoded)
+			if err != nil {
+				return nil, err
+			}
+			if root.open != root.end {
+				fields = append(bytes.Clone(encoded[root.open:root.close]), fields...)
+			}
+			content = editorPatchXML(encoded, []editorXMLPatch{editorXMLContent(encoded, root, fields)})
 		}
-		content = bytes.TrimPrefix(encoded, []byte(xml.Header))
 	}
 	for _, child := range node.children {
-		if name == "Page" && child.name.Local == "Area" {
+		if pageContent && child.name.Local == "Area" {
 			continue
 		}
 		if name == "Goto" && child.name.Local == "Bookmark" {
@@ -774,16 +857,38 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			if resolveErr != nil {
 				return nil, resolveErr
 			}
-			value, err = m.copyData(loc, false)
+			directory := "Res"
+			file := path.Base(loc)
+			owner := node.parent.attr("ID")
+			switch name {
+			case "FontFile":
+				directory = "Res/Fonts"
+				if owner != "" {
+					file = "Font_" + m.id(owner) + strings.ToLower(path.Ext(loc))
+				}
+			case "MediaFile":
+				directory = "Res/Images"
+				if node.parent.attr("Type") != "Image" {
+					directory = "Res/Media"
+				} else if owner != "" {
+					file = "Image_" + m.id(owner) + strings.ToLower(path.Ext(loc))
+				}
+			case "Profile":
+				directory = "Res/ColorSpaces"
+			case "SignedValue", "BaseLoc":
+				directory = "Signs"
+			}
+			value, err = m.copyData(loc, path.Join(directory, file), false)
 		case "FileLoc":
 			loc, resolveErr := m.resolve(entry.name, "", strings.TrimSpace(value))
 			if resolveErr != nil {
 				return nil, resolveErr
 			}
 			if node.parent.name.Local == "Attachment" {
-				value, err = m.copyData(loc, false)
+				value, err = m.copyData(loc, path.Join("Attachments", path.Base(loc)), false)
 			} else {
-				value, err = m.copyXML(loc)
+				candidate := path.Join(m.directory, "Annotations", "Page_"+m.id(node.parent.attr("PageID"))+".xml")
+				value, err = m.copyXML(loc, candidate)
 			}
 		case "Font", "Substitution":
 			value, err = m.reference(strings.TrimSpace(value))
@@ -924,6 +1029,9 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 	}
 	maps.Copy(files, m.files)
 	name := base.reader.ResPath(base.reader.OFD.DocBody[0].DocRoot)
+	if file, ok := base.reader.packageFile(name); ok {
+		name = cleanPackagePath(file.Name)
+	}
 	data, err := base.reader.readFile(name)
 	if err != nil {
 		return nil, err
@@ -944,20 +1052,41 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 		}
 	}
 	var content []byte
-	if m.files[path.Join(m.prefix, "Resources.xml")] != nil {
-		content = editorXMLText("DocumentRes", "/"+path.Join(m.prefix, "Resources.xml"))
+	if len(m.resourceXML) != 0 {
+		name, added, err := mergePackageResources(base.reader, files, base.document, m.directory, m.resourceXML)
+		if err != nil {
+			return nil, err
+		}
+		if added {
+			content = editorXMLText("DocumentRes", "/"+strings.TrimPrefix(name, "/"))
+		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(m.templateParts)) {
 		content = append(content, m.templateParts[id]...)
 	}
 	data = editorPatchXML(data, []editorXMLPatch{{position, position, content}})
+	root, err = parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	pages := root.child("Pages")
+	if pages == nil {
+		return nil, fmt.Errorf("document has no Pages")
+	}
+	content = bytes.Clone(m.pageParts)
+	if pages.open != pages.end {
+		content = append(bytes.Clone(data[pages.open:pages.close]), content...)
+	}
+	data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, pages, content)})
 	if len(annotations) != 0 {
-		loc, err := mergeImportIndex(base.reader, files, base.document.Annotations, path.Join(m.prefix, "Annotations.xml"), "Annotations", annotations)
+		loc, err := mergeImportIndex(base.reader, files, base.document.Annotations, path.Join(m.directory, "Annotations.xml"), "Annotations", annotations)
 		if err != nil {
 			return nil, err
 		}
-		root, _ = parseEditorXML(data)
-		data = editorXMLSetText(data, root, [][2]string{{"Annotations", loc}})
+		if base.document.Annotations == "" {
+			root, _ = parseEditorXML(data)
+			data = editorXMLSetText(data, root, [][2]string{{"Annotations", loc}})
+		}
 	}
 	if len(m.attachments) != 0 {
 		var entries []byte
@@ -970,16 +1099,28 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 			content := append(bytes.Clone(data[node.open:node.close]), entries...)
 			data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, content)})
 		} else {
-			loc, err := mergeImportIndex(base.reader, files, base.document.Attachments.Path, path.Join(m.prefix, "Attachments.xml"), "Attachments", entries)
+			loc, err := mergeImportIndex(base.reader, files, base.document.Attachments.Path, path.Join(m.directory, "Attachments.xml"), "Attachments", entries)
 			if err != nil {
 				return nil, err
 			}
-			data = editorXMLSetText(data, root, [][2]string{{"Attachments", loc}})
+			if base.document.Attachments.Path == "" {
+				data = editorXMLSetText(data, root, [][2]string{{"Attachments", loc}})
+			}
 		}
 	}
+	root, err = parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	common = root.child("CommonData")
+	patch := editorXMLPatch{common.open, common.open, editorXMLText("MaxUnitID", strconv.Itoa(m.maximum))}
+	if maximum := common.child("MaxUnitID"); maximum != nil {
+		patch = editorXMLContent(data, maximum, []byte(strconv.Itoa(m.maximum)))
+	}
+	data = editorPatchXML(data, []editorXMLPatch{patch})
 	files[name] = data
 	if len(signatures) != 0 {
-		loc, err := mergeImportIndex(base.reader, files, base.document.Signatures, path.Join(m.prefix, "Signatures.xml"), "Signatures", signatures)
+		loc, err := mergeImportIndex(base.reader, files, base.document.Signatures, path.Join(m.directory, "Signs", "Signatures.xml"), "Signatures", signatures)
 		if err != nil {
 			return nil, err
 		}
@@ -992,7 +1133,11 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 			if err != nil {
 				return nil, err
 			}
-			files["OFD.xml"] = editorXMLSetText(ofd, root.child("DocBody"), [][2]string{{"Signatures", loc}})
+			name := "OFD.xml"
+			if file, ok := base.reader.packageFile(name); ok {
+				name = cleanPackagePath(file.Name)
+			}
+			files[name] = editorXMLSetText(ofd, root.child("DocBody"), [][2]string{{"Signatures", loc}})
 		}
 	}
 	reader := &Reader{Zip: base.reader.Zip, files: files}
@@ -1026,10 +1171,18 @@ func mergeImportIndex(reader *Reader, files map[string][]byte, loc, fallback, ro
 	var data []byte
 	var err error
 	if loc == "" {
+		name = packageAvailableName(reader, files, fallback)
 		data, err = editorXMLContainer(rootName, nil, entries)
 	} else {
-		name = reader.ResPath(loc)
-		data, err = reader.readFile(name)
+		name, err = editorPageLocation(reader, files, "", "/"+reader.ResPath(loc))
+		if err != nil {
+			return "", err
+		}
+		var exists bool
+		data, exists = files[name]
+		if !exists {
+			data, err = reader.readFile(name)
+		}
 		if err != nil {
 			return "", err
 		}

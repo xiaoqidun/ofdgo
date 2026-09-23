@@ -26,13 +26,39 @@ const (
 	GeometryXor
 )
 
-// StrokeOptions 描述毫米单位的描边，Cap和Join使用OFD名称
-// Tolerance为曲线展开误差，0采用后端默认精度，Dashes和DashOffset为绝对长度
+// StrokeOptions 描述描边参数，长度单位为毫米
 type StrokeOptions struct {
-	Width                             float64
-	Cap, Join                         string
-	MiterLimit, DashOffset, Tolerance float64
-	Dashes                            []float64
+	// Width为正有限描边宽度
+	Width float64
+	// Cap和Join使用OFD名称，空值分别采用Butt和Miter
+	Cap, Join string
+	// MiterLimit为尖角长度与半线宽的比值上限，0采用默认值
+	MiterLimit float64
+	// DashOffset为绝对长度的虚线相位，允许负值
+	DashOffset float64
+	// Tolerance为曲线展开误差目标，0采用后端默认精度
+	Tolerance float64
+	// Dashes为交替绘制和留空的绝对长度，奇数项按重复一遍处理
+	Dashes []float64
+}
+
+// GeometryBackend 操作库自有路径，坐标以页面左上角为原点，不修改任何输入
+// Clip返回nil表示不裁剪，空路径指针表示完全裁去，矩阵映射到页面坐标
+type GeometryBackend interface {
+	Backend
+	Path(object PathObject) (GeometryPath, error)
+	Region(region *Region, matrix Matrix) (GeometryPath, error)
+	Bounds(path GeometryPath) (Box, error)
+	Transform(path GeometryPath, matrix Matrix) (GeometryPath, error)
+	Normalize(path GeometryPath, evenOdd bool) (GeometryPath, error)
+	Combine(left, right GeometryPath, operation GeometryOperation) (GeometryPath, error)
+	Stroke(path GeometryPath, options StrokeOptions) (GeometryPath, error)
+	Clip(renderer *Renderer, clips *Clips, matrix Matrix, parent *GeometryPath) (*GeometryPath, error)
+}
+
+// GeometryCurves 将椭圆弧转换为光栅后端可消费的贝塞尔曲线，不改变源路径
+type GeometryCurves interface {
+	Curves(path GeometryPath) (GeometryPath, error)
 }
 
 // validateStroke 校验各后端共用的描边参数
@@ -54,25 +80,6 @@ func validateStroke(options StrokeOptions) error {
 		}
 	}
 	return nil
-}
-
-// GeometryBackend 操作库自有路径，坐标以页面左上角为原点，不修改任何输入
-// Clip返回nil表示不裁剪，空路径指针表示完全裁去，矩阵映射到页面坐标
-type GeometryBackend interface {
-	Backend
-	Path(object PathObject) (GeometryPath, error)
-	Region(region *Region, matrix Matrix) (GeometryPath, error)
-	Bounds(path GeometryPath) (Box, error)
-	Transform(path GeometryPath, matrix Matrix) (GeometryPath, error)
-	Normalize(path GeometryPath, evenOdd bool) (GeometryPath, error)
-	Combine(left, right GeometryPath, operation GeometryOperation) (GeometryPath, error)
-	Stroke(path GeometryPath, options StrokeOptions) (GeometryPath, error)
-	Clip(renderer *Renderer, clips *Clips, matrix Matrix, parent *GeometryPath) (*GeometryPath, error)
-}
-
-// GeometryCurves 将椭圆弧转换为光栅后端可消费的贝塞尔曲线，不改变源路径
-type GeometryCurves interface {
-	Curves(path GeometryPath) (GeometryPath, error)
 }
 
 // Geometry 返回当前几何后端，不隐式恢复默认实现

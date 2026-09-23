@@ -35,11 +35,36 @@ type FontOutlines interface {
 	GlyphOutline(glyph uint16, size float64) (GeometryPath, error)
 }
 
+// FontOutlineBatch 批量提取指定字形，不经过字符映射或文字塑形
+// 返回路径与输入编号一一对应，允许重复编号和空轮廓，路径只读
+type FontOutlineBatch interface {
+	FontOutlines
+	GlyphOutlines(glyphs []uint16, size float64) ([]GeometryPath, error)
+}
+
 // FontShaper 提供可选的横向文字塑形，仅用于显式新建或重排
 // 字形按逻辑簇顺序排列，Cluster使用原文的符文索引，坐标为毫米且纵轴向下
 type FontShaper interface {
 	FontMetrics
 	ShapeText(value string, size float64) ([]ShapedGlyph, error)
+}
+
+// TextShapeOptions 指定单一方向文字的塑形参数，不执行双向段落分析或字体回退
+// Direction为空或ltr时从左向右，rtl时从右向左；Script为四字母ISO15924代码，空值自动检测
+// Language为语言标签，Features为逗号分隔的全局OpenType特性，如kern=0,liga=1，不接受字符区间
+// 零值保持原有FontShaper行为，非零值要求FontShaperOptions能力
+type TextShapeOptions struct {
+	Direction string
+	Script    string
+	Language  string
+	Features  string
+}
+
+// FontShaperOptions 提供显式可配置塑形，簇与坐标遵循FontShaper约定
+// 右向左文字仍按逻辑簇返回，视觉顺序由X和Y保留
+type FontShaperOptions interface {
+	FontShaper
+	ShapeTextWithOptions(value string, size float64, options TextShapeOptions) ([]ShapedGlyph, error)
 }
 
 // ShapedGlyph 保存塑形后的字形、原文簇和基线定位
@@ -55,6 +80,15 @@ type ResolvedFont struct {
 	Source string
 	Face   *FontFace
 	Exact  bool
+}
+
+// PreparedFont 保存绘制用字体及GID、CID到包装字符的映射，所有数据只读
+// Data可与源编码不同，原始资源仍由ResolveFont和Reader保留
+type PreparedFont struct {
+	ResolvedFont
+	Glyphs map[uint16]rune
+	CIDs   map[uint16]rune
+	digest [32]byte
 }
 
 // FontBackend 统一字体来源与度量，exact禁止使用无关回退字体
@@ -116,15 +150,6 @@ func (r *Renderer) ResolveFont(id string, exact bool) (ResolvedFont, error) {
 	key.definition = r.Reader.fontCache[id]
 	r.resolvedFonts[key] = resolvedFontResult{font: resolved, err: err}
 	return resolved, err
-}
-
-// PreparedFont 保存绘制用字体及GID、CID到包装字符的映射，所有数据只读
-// Data可与源编码不同，原始资源仍由ResolveFont和Reader保留
-type PreparedFont struct {
-	ResolvedFont
-	Glyphs map[uint16]rune
-	CIDs   map[uint16]rune
-	digest [32]byte
 }
 
 // PrepareFont 统一处理内嵌字体包装和索引映射，供各编译器复用

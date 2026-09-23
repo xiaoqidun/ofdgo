@@ -97,9 +97,9 @@ func (d *sm3Digest) Write(p []byte) (int, error) {
 	return nn, nil
 }
 
-// Sum 返回SM3杂凑值
+// Sum 将SM3杂凑值追加到前缀数据后，不改变当前状态
 // 入参: in 前缀数据
-// 返回: []byte 杂凑值
+// 返回: []byte 前缀数据及杂凑值
 func (d *sm3Digest) Sum(in []byte) []byte {
 	dd := *d
 	hash := dd.checkSum()

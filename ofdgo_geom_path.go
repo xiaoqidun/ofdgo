@@ -24,6 +24,29 @@ import (
 // 坐标以左上角为原点，单位为毫米，子路径从Move开始，Close回到当前子路径起点
 type GeometryPath []GeometrySegment
 
+// GeometryVerb 表示几何路径指令
+type GeometryVerb uint8
+
+const (
+	GeometryMove GeometryVerb = iota
+	GeometryLine
+	GeometryQuad
+	GeometryCubic
+	GeometryArc
+	GeometryClose
+)
+
+// GeometrySegment 保存路径端点、贝塞尔控制点或端点式椭圆弧参数
+// 弧线Rotation单位为度，Sweep为true表示顺时针，Large表示大弧
+type GeometrySegment struct {
+	Verb               GeometryVerb
+	End                Point
+	Control1, Control2 Point
+	RadiusX, RadiusY   float64
+	Rotation           float64
+	Large, Sweep       bool
+}
+
 // ParseGeometryPath 解析标准OFD紧缩路径，保留弧线和原始数值精度
 // 入参: data 紧缩路径
 // 返回: GeometryPath 独立路径, error 指令或参数错误
@@ -125,40 +148,12 @@ func closedGeometry(path GeometryPath) GeometryPath {
 			result = append(result, GeometrySegment{Verb: GeometryClose})
 		}
 		result = append(result, segment)
-		if segment.Verb == GeometryMove {
-			open = true
-		}
-		if segment.Verb == GeometryClose {
-			open = false
-		}
+		open = segment.Verb != GeometryClose
 	}
 	if open {
 		result = append(result, GeometrySegment{Verb: GeometryClose})
 	}
 	return result
-}
-
-// GeometryVerb 表示几何路径指令
-type GeometryVerb uint8
-
-const (
-	GeometryMove GeometryVerb = iota
-	GeometryLine
-	GeometryQuad
-	GeometryCubic
-	GeometryArc
-	GeometryClose
-)
-
-// GeometrySegment 保存路径端点、贝塞尔控制点或端点式椭圆弧参数
-// 弧线Rotation单位为度，Sweep为true表示顺时针，Large表示大弧
-type GeometrySegment struct {
-	Verb               GeometryVerb
-	End                Point
-	Control1, Control2 Point
-	RadiusX, RadiusY   float64
-	Rotation           float64
-	Large, Sweep       bool
 }
 
 // SVG 将几何路径编码为SVG路径，不改变曲线或坐标精度

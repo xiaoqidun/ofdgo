@@ -27,6 +27,9 @@ import (
 // 入参: obj 文字对象, value 原文, options 段落排版选项, metrics 字体度量
 // 返回: error 错误信息
 func LayoutText(obj *TextObject, value string, options TextLayout, metrics FontMetrics) error {
+	if obj == nil || metrics == nil {
+		return fmt.Errorf("text object and font metrics are required")
+	}
 	if metrics.UnitsPerEm() == 0 {
 		return fmt.Errorf("font units per em must be positive")
 	}
@@ -73,7 +76,7 @@ func LayoutText(obj *TextObject, value string, options TextLayout, metrics FontM
 	if lineHeight == 0 {
 		lineHeight = math.Max(obj.Size, float64(int(ascender)+int(descender)+int(gap))*unit)
 	}
-	if options.Shape {
+	if options.Shape || options.Shaping != (TextShapeOptions{}) {
 		return layoutShapedText(obj, value, options, metrics, width, lineHeight, hScale, float64(ascender)*unit)
 	}
 	var codes []TextCode

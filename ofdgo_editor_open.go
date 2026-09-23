@@ -144,10 +144,7 @@ func (r *Reader) Editor() (*Editor, error) {
 	}
 	e := NewEditor()
 	e.Info, e.maxID = cloneEditorData(*info), maximum
-	directory := path.Join(cleanPackagePath(reader.RootDir), "Edit")
-	for i := 1; editorDirectoryExists(reader, directory); i++ {
-		directory = path.Join(cleanPackagePath(reader.RootDir), "Edit_"+strconv.Itoa(i))
-	}
+	directory := cleanPackagePath(reader.RootDir)
 	e.source = &editorSource{reader: reader, document: doc, info: cloneEditorData(*info), directory: directory, pages: make(map[string]*editorSourcePage), origins: make(map[string]*editorObjectOrigin)}
 	for _, page := range doc.Pages.Page {
 		if page.ID == "" || e.source.pages[page.ID] != nil {
@@ -157,23 +154,6 @@ func (r *Reader) Editor() (*Editor, error) {
 		e.pages = append(e.pages, PageContent{ID: page.ID})
 	}
 	return e, nil
-}
-
-// editorDirectoryExists 判断包内目录是否已经使用，避免覆盖原始资源
-// 入参: reader 输入包, directory 目录路径
-// 返回: bool 是否存在
-func editorDirectoryExists(reader *Reader, directory string) bool {
-	for name := range reader.fileIndex {
-		if strings.EqualFold(name, directory) || strings.HasPrefix(strings.ToLower(name), strings.ToLower(directory)+"/") {
-			return true
-		}
-	}
-	for name := range reader.files {
-		if strings.EqualFold(name, directory) || strings.HasPrefix(strings.ToLower(name), strings.ToLower(directory)+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 // prepareSourceIDs 首次新增内容前流式核对原包标识，不依赖可能缺失或过期的MaxUnitID
@@ -260,15 +240,6 @@ func editorXMLMaxID(input io.Reader) (int, error) {
 			}
 		}
 	}
-}
-
-// resourceDirectory 获取新增二进制资源的目录
-// 返回: string 包内路径
-func (e *Editor) resourceDirectory() string {
-	if e.source != nil {
-		return e.source.directory + "/Res"
-	}
-	return "Doc_0/Res"
 }
 
 // originalPage 判断索引是否指向原文档页面

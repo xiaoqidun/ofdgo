@@ -137,7 +137,7 @@ func (e *Editor) annotationXML(index int, id string) ([]byte, error) {
 	}
 	var result []byte
 	for _, ref := range root.children {
-		if ref.name.Space != root.name.Space || ref.name.Local != "Page" || ref.attr("PageID") != e.pages[index].ID || ref.child("FileLoc") == nil {
+		if !packageOFDNode(ref, "Page") || ref.attr("PageID") != e.pages[index].ID || ref.child("FileLoc") == nil {
 			continue
 		}
 		file, err := editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, ref.child("FileLoc"))))
@@ -153,7 +153,7 @@ func (e *Editor) annotationXML(index int, id string) ([]byte, error) {
 			return nil, err
 		}
 		for _, node := range page.children {
-			if node.name.Local != "Annot" || node.name.Space != page.name.Space || node.attr("ID") != id {
+			if !packageOFDNode(node, "Annot") || node.attr("ID") != id {
 				continue
 			}
 			if result != nil {
@@ -187,7 +187,7 @@ func (e *Editor) appendAnnotations(index int, annotations []byte) error {
 	name := reader.ResPath(base.document.Annotations)
 	var data []byte
 	if base.document.Annotations == "" {
-		name = path.Join(base.directory, "Annotations.xml")
+		name = e.packageName("Annotations.xml")
 		data, err = editorXMLContainer("Annotations", nil, nil)
 	} else {
 		if file, ok := reader.packageFile(name); ok {
@@ -209,7 +209,7 @@ func (e *Editor) appendAnnotations(index int, annotations []byte) error {
 		return err
 	}
 	for _, item := range root.children {
-		if item.name.Local == "Page" && item.name.Space == root.name.Space && item.attr("PageID") == e.pages[index].ID {
+		if packageOFDNode(item, "Page") && item.attr("PageID") == e.pages[index].ID {
 			ref = item
 			loc := item.child("FileLoc")
 			if loc == nil {
@@ -240,7 +240,7 @@ func (e *Editor) appendAnnotations(index int, annotations []byte) error {
 	file := existing
 	if file != "" {
 		for _, other := range root.children {
-			if other == ref || other.name.Local != "Page" || other.name.Space != root.name.Space || other.child("FileLoc") == nil {
+			if other == ref || !packageOFDNode(other, "Page") || other.child("FileLoc") == nil {
 				continue
 			}
 			shared, err := editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, other.child("FileLoc"))))
@@ -251,13 +251,15 @@ func (e *Editor) appendAnnotations(index int, annotations []byte) error {
 		}
 	}
 	if file == "" {
-		file = path.Join(base.directory, "Annotations", e.nextID()+".xml")
+		file = e.packageName(path.Join("Annotations", "Page_"+e.pages[index].ID+".xml"))
 	}
 	if ref != nil {
-		loc := ref.child("FileLoc")
-		var value bytes.Buffer
-		_ = xml.EscapeText(&value, []byte("/"+file))
-		data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, loc, value.Bytes())})
+		if file != existing {
+			loc := ref.child("FileLoc")
+			var value bytes.Buffer
+			_ = xml.EscapeText(&value, []byte("/"+file))
+			data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, loc, value.Bytes())})
+		}
 	} else {
 		entry, err := editorXMLContainer("Page", ofdAttrs{{Name: xml.Name{Local: "PageID"}, Value: e.pages[index].ID}}, editorXMLText("FileLoc", "/"+file))
 		if err != nil {
@@ -288,7 +290,13 @@ func (e *Editor) appendAnnotations(index int, annotations []byte) error {
 				break
 			}
 		}
-		parts[docName] = editorPatchXML(docData, []editorXMLPatch{{position, position, editorXMLText("Annotations", "/"+name)}})
+		patch := editorXMLPatch{position, position, editorXMLText("Annotations", "/"+name)}
+		if node := doc.child("Annotations"); node != nil {
+			var value bytes.Buffer
+			_ = xml.EscapeText(&value, []byte("/"+name))
+			patch = editorXMLContent(docData, node, value.Bytes())
+		}
+		parts[docName] = editorPatchXML(docData, []editorXMLPatch{patch})
 	}
 	if err := e.commitAnnotationParts(base, parts); err != nil {
 		return err
@@ -335,7 +343,12 @@ func (e *Editor) commitAnnotationParts(base *editorSource, parts map[string][]by
 	if files == nil {
 		files = make(map[string][]byte)
 	}
-	maps.Copy(files, parts)
+	for name, data := range parts {
+		if file, ok := base.reader.packageFile(name); ok {
+			name = cleanPackagePath(file.Name)
+		}
+		files[name] = data
+	}
 	reader := &Reader{Zip: base.reader.Zip, files: files}
 	if err := reader.initRoot(); err != nil {
 		return err

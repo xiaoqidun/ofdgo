@@ -23,6 +23,12 @@ import (
 	"github.com/go-text/typesetting/segmenter"
 )
 
+// configuredTextShaper 将会话选项传递给每次换行后的塑形
+type configuredTextShaper struct {
+	FontShaperOptions
+	options TextShapeOptions
+}
+
 // layoutShapedText 将显式塑形结果保存为标准文字定位，成功前不修改对象
 // 入参: obj 文字对象, value 原文, options 排版选项, metrics 字体度量, width 行宽, lineHeight 行高, hScale 横向比例, baseline 首行基线
 // 返回: error 塑形或排版错误
@@ -31,12 +37,19 @@ func layoutShapedText(obj *TextObject, value string, options TextLayout, metrics
 	if !ok {
 		return fmt.Errorf("font shaping: %w", ErrBackendUnavailable)
 	}
+	if options.Shaping != (TextShapeOptions{}) {
+		configured, ok := metrics.(FontShaperOptions)
+		if !ok {
+			return fmt.Errorf("font shaping options: %w", ErrBackendUnavailable)
+		}
+		shaper = configuredTextShaper{FontShaperOptions: configured, options: options.Shaping}
+	}
 	var codes []TextCode
 	var transforms []CGTransform
 	offset := 0
 	for _, paragraph := range strings.Split(value, "\n") {
 		runes := []rune(paragraph)
-		_, advances, err := shapeTextLine(shaper, runes, obj.Font, obj.Size, hScale, options.LetterSpacing)
+		paragraphGlyphs, advances, err := shapeTextLine(shaper, runes, obj.Font, obj.Size, hScale, options.LetterSpacing)
 		if err != nil {
 			return err
 		}
@@ -48,9 +61,12 @@ func layoutShapedText(obj *TextObject, value string, options TextLayout, metrics
 				indent = options.FirstLineIndent
 			}
 			available := width - indent
-			glyphs, lineAdvances, err := shapeTextLine(shaper, runes[line[0]:line[1]], obj.Font, obj.Size, hScale, options.LetterSpacing)
-			if err != nil {
-				return err
+			glyphs, lineAdvances := paragraphGlyphs, advances
+			if line[0] != 0 || line[1] != len(runes) {
+				glyphs, lineAdvances, err = shapeTextLine(shaper, runes[line[0]:line[1]], obj.Font, obj.Size, hScale, options.LetterSpacing)
+				if err != nil {
+					return err
+				}
 			}
 			for options.Wrap && shapedLineWidth(runes[line[0]:line[1]], lineAdvances, options.LetterSpacing) > available {
 				var seg segmenter.Segmenter
@@ -77,6 +93,11 @@ func layoutShapedText(obj *TextObject, value string, options TextLayout, metrics
 			}
 			chars := runes[line[0]:line[1]]
 			x, delta := alignTextLine(chars, lineAdvances, available, options.Align, i+1 < len(lines), options.LetterSpacing)
+			if options.Shaping.Direction == "rtl" {
+				for j := len(chars) - 1; j >= 0 && chars[j] == ' '; j-- {
+					x -= lineAdvances[j]
+				}
+			}
 			x += options.LeftIndent + indent
 			y := baseline + float64(len(codes))*lineHeight
 			if !finite(x) || !finite(y) {
@@ -99,7 +120,12 @@ func layoutShapedText(obj *TextObject, value string, options TextLayout, metrics
 			var dx, dy []string
 			var lastX, lastY float64
 			for j, glyph := range glyphs {
-				gx, gy := x+glyph.X*hScale+extra[glyph.Cluster], y+glyph.Y
+				shift := extra[glyph.Cluster]
+				if options.Shaping.Direction == "rtl" {
+					// 逻辑簇后的间距位于视觉左侧，整行不计末尾字距
+					shift = extra[len(chars)] - extra[glyph.Cluster] - options.LetterSpacing
+				}
+				gx, gy := x+glyph.X*hScale+shift, y+glyph.Y
 				if !finite(gx) || !finite(gy) {
 					return fmt.Errorf("shaped position exceeds finite range")
 				}
@@ -136,6 +162,13 @@ func layoutShapedText(obj *TextObject, value string, options TextLayout, metrics
 	return nil
 }
 
+// ShapeText 使用固定选项塑形单行原文
+// 入参: value 原文, size 毫米字号
+// 返回: []ShapedGlyph 字形, error 塑形错误
+func (s configuredTextShaper) ShapeText(value string, size float64) ([]ShapedGlyph, error) {
+	return s.ShapeTextWithOptions(value, size, s.options)
+}
+
 // shapeTextLine 检查可选后端的簇映射，按原文字符分配塑形步进
 // 入参: shaper 字体塑形器, runes 单行字符, font 字体标识, size 字号, scale 横向比例, spacing 字距
 // 返回: []ShapedGlyph 字形, []float64 含字距的字符步进, error 塑形错误
@@ -150,16 +183,10 @@ func shapeTextLine(shaper FontShaper, runes []rune, font string, size, scale, sp
 	advances := make([]float64, len(runes))
 	var missing []rune
 	for i, glyph := range glyphs {
-		if glyph.Cluster < 0 || glyph.Cluster >= len(runes) || i > 0 && glyph.Cluster < glyphs[i-1].Cluster || !finite(glyph.X) || !finite(glyph.Y) || !finite(glyph.Advance) {
+		if glyph.Cluster < 0 || glyph.Cluster >= len(runes) || i > 0 && glyph.Cluster < glyphs[i-1].Cluster || glyph.Glyph >= shaper.NumGlyphs() || !finite(glyph.X) || !finite(glyph.Y) || !finite(glyph.Advance) {
 			return nil, nil, fmt.Errorf("invalid shaped glyph")
 		}
-		if glyph.Glyph == 0 {
-			missing = append(missing, runes[glyph.Cluster])
-		}
 		advances[glyph.Cluster] += glyph.Advance * scale
-	}
-	if err := missingGlyphError(font, missing); err != nil {
-		return nil, nil, err
 	}
 	for i := 0; i < len(glyphs); {
 		end := i + 1
@@ -171,11 +198,25 @@ func shapeTextLine(shaper FontShaper, runes []rune, font string, size, scale, sp
 			next = glyphs[end].Cluster
 		}
 		start := glyphs[i].Cluster
+		if slices.ContainsFunc(glyphs[i:end], func(glyph ShapedGlyph) bool { return glyph.Glyph == 0 }) {
+			before := len(missing)
+			for _, char := range runes[start:next] {
+				if shaper.GlyphIndex(char) == 0 {
+					missing = append(missing, char)
+				}
+			}
+			if len(missing) == before {
+				missing = append(missing, runes[start:next]...)
+			}
+		}
 		advance := advances[start] / float64(next-start)
 		for j := start; j < next; j++ {
 			advances[j] = advance
 		}
 		i = end
+	}
+	if err := missingGlyphError(font, missing); err != nil {
+		return nil, nil, err
 	}
 	spaceTextAdvances(runes, advances, spacing)
 	if slices.ContainsFunc(advances, func(value float64) bool { return !finite(value) }) {

@@ -35,7 +35,7 @@ type ObjectPath struct {
 }
 
 // CompositeMember 复合对象的直接成员快照，Object包含有效样式，不用于整体替换原对象
-// Bounds与Contours使用页面毫米坐标，Matrix将对象局部坐标映射至页面，StrokeScale为描边倍率
+// Bounds与Contours使用页面毫米坐标，StrokeScale为描边倍率，Matrix将对象局部坐标映射至页面
 // Position表示当前范围内的直接容器位置，结构操作后需重新枚举
 type CompositeMember struct {
 	Object       GraphicObject
@@ -1033,7 +1033,7 @@ func (e *Editor) compositeResource(id string, data []byte) (editorResource, erro
 	if err != nil {
 		return editorResource{}, err
 	}
-	return editorResource{name: e.resourceDirectory() + "/Composite_" + id + ".xml", data: data, composite: id, references: refs}, nil
+	return editorResource{name: e.packageName("Res/Composites/Composite_" + id + ".xml"), data: data, composite: id, references: refs}, nil
 }
 
 // editorResourceReferences 收集标准资源XML中的对象引用

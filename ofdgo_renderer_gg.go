@@ -35,24 +35,71 @@ func (GGBackend) Name() string { return "gg" }
 // 入参: page 只读页面
 // 返回: RasterScene 可重复绘制场景, error 准备错误
 func (b GGBackend) Prepare(page *RasterPage) (RasterScene, error) {
-	w, h, err := page.PixelSize()
-	if err != nil {
+	return b.prepareShared(page, nil)
+}
+
+// PrepareReuse 复用同配置GG场景的派生数据，其他后端场景不参与复用
+// 入参: page 新页面, previous 前次场景
+// 返回: RasterScene 独立快照, error 准备错误
+func (b GGBackend) PrepareReuse(page *RasterPage, previous RasterScene) (RasterScene, error) {
+	scene, _ := previous.(*ggRasterScene)
+	return b.prepareShared(page, scene)
+}
+
+// prepareShared 为新快照复用同配置的派生缓存，不改变旧快照
+// 入参: page 新页面, previous 前次同渲染器场景
+// 返回: *ggRasterScene 独立场景, error 准备错误
+func (b GGBackend) prepareShared(page *RasterPage, previous *ggRasterScene) (*ggRasterScene, error) {
+	scene := &ggRasterScene{
+		mu:       &sync.Mutex{},
+		backend:  b,
+		masks:    &renderCache[[32]byte, *image.Alpha]{limit: 16 << 20},
+		prepared: &renderCache[[32]byte, ggRasterCommand]{limit: 16 << 20},
+		images:   &renderCache[image.Image, *gg.ImageBuf]{limit: 16 << 20},
+	}
+	if previous != nil && sameBackend(b.StrokeGeometry, previous.backend.StrokeGeometry) {
+		scene.mu, scene.masks, scene.prepared, scene.images = previous.mu, previous.masks, previous.prepared, previous.images
+	}
+	if err := scene.Update(page); err != nil {
 		return nil, err
 	}
+	return scene, nil
+}
+
+// Update 按内容复用未编辑的指令，成功后原子替换场景快照
+// 入参: page 编辑后的只读页面
+// 返回: error 准备错误，失败时保留原场景
+func (scene *ggRasterScene) Update(page *RasterPage) error {
+	scene.mu.Lock()
+	defer scene.mu.Unlock()
+	w, h, err := page.PixelSize()
+	if err != nil {
+		return err
+	}
 	page = cloneRasterPage(page)
-	scene := &ggRasterScene{page: page, width: w, height: h, masks: renderCache[[32]byte, *image.Alpha]{limit: 16 << 20}}
+	commands := make([]ggRasterCommand, 0, len(page.Commands))
 	for i, cmd := range page.Commands {
-		if cmd.Stroke != nil && !ggNativeStroke(cmd, page.DPI/25.4) {
-			cmd, err = b.expandStroke(cmd)
+		if cmd.Image != nil {
+			cmd.Stroke = nil
+			prepared, err := ggPrepareImage(page, cmd, scene.masks, scene.images)
 			if err != nil {
-				return nil, fmt.Errorf("gg command %d: %w", i, err)
+				return fmt.Errorf("gg command %d: %w", i, err)
+			}
+			commands = append(commands, prepared)
+			continue
+		}
+		key := rasterCommandKey(page, cmd)
+		if prepared, ok := scene.prepared.get(key); ok {
+			commands = append(commands, prepared)
+			continue
+		}
+		if cmd.Stroke != nil && !ggNativeStroke(cmd, page.DPI/25.4) {
+			cmd, err = scene.backend.expandStroke(cmd)
+			if err != nil {
+				return fmt.Errorf("gg command %d: %w", i, err)
 			}
 		}
 		m := page.PixelTransform(cmd.Transform, h)
-		if cmd.Image != nil {
-			scene.commands = append(scene.commands, ggRasterCommand{command: cmd})
-			continue
-		}
 		path := gg.NewPath()
 		for _, s := range cmd.Path {
 			end, c1, c2 := m.Apply(s.End), m.Apply(s.Control1), m.Apply(s.Control2)
@@ -68,31 +115,25 @@ func (b GGBackend) Prepare(page *RasterPage) (RasterScene, error) {
 			case RasterClose:
 				path.Close()
 			default:
-				return nil, fmt.Errorf("gg command %d: unsupported path verb %d", i, s.Verb)
+				return fmt.Errorf("gg command %d: unsupported path verb %d", i, s.Verb)
 			}
 		}
 		paint := gg.NewPaint()
 		paint.SetFillBrush(gg.SolidBrush{Color: ggRGBA(cmd.Paint.Color)})
 		if g := cmd.Paint.Gradient; g != nil {
-			if g.Kind != RasterLinear && g.Kind != RasterRadial {
-				return nil, fmt.Errorf("gg command %d: unsupported gradient %d", i, g.Kind)
-			}
-			inverse, err := m.Inverse()
+			brush, err := ggGradientBrush(g, m)
 			if err != nil {
-				return nil, fmt.Errorf("gg command %d: %w", i, err)
+				return fmt.Errorf("gg command %d: %w", i, err)
 			}
-			paint.SetFillBrush(gg.NewCustomBrush(func(x, y float64) gg.RGBA {
-				p := inverse.Apply(RasterPoint{X: x, Y: y})
-				return ggRGBA(g.At(p.X, p.Y))
-			}))
+			paint.SetFillBrush(brush)
 		}
 		if cmd.EvenOdd && cmd.Stroke == nil {
 			paint.FillRule = gg.FillRuleEvenOdd
 		}
 		if cmd.Clip != nil {
-			mask, err := rasterClipMask(GGBackend{}, page, cmd.Clip, &scene.masks)
+			mask, err := rasterClipMask(GGBackend{}, page, cmd.Clip, scene.masks)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			if mask.Rect.Empty() {
 				continue
@@ -103,14 +144,17 @@ func (b GGBackend) Prepare(page *RasterPage) (RasterScene, error) {
 		if cmd.Stroke != nil {
 			style, err := ggStroke(*cmd.Stroke, page.DPI/25.4)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			paint.SetStroke(style)
 			paint.SetStrokeBrush(paint.FillBrush())
 		}
-		scene.commands = append(scene.commands, ggRasterCommand{command: cmd, path: path, paint: paint})
+		prepared := ggRasterCommand{command: cmd, path: path, paint: paint}
+		scene.prepared.put(key, prepared, rasterCommandCost(cmd)+len(paint.ClipMask))
+		commands = append(commands, prepared)
 	}
-	return scene, nil
+	scene.page, scene.width, scene.height, scene.commands = page, w, h, commands
+	return nil
 }
 
 // ggRasterCommand 保存已转换的像素路径和样式
@@ -122,11 +166,14 @@ type ggRasterCommand struct {
 
 // ggRasterScene 复用路径和局部裁剪，串行保护掩码缓存
 type ggRasterScene struct {
-	mu            sync.Mutex
+	mu            *sync.Mutex
+	backend       GGBackend
 	page          *RasterPage
 	width, height int
 	commands      []ggRasterCommand
-	masks         renderCache[[32]byte, *image.Alpha]
+	masks         *renderCache[[32]byte, *image.Alpha]
+	prepared      *renderCache[[32]byte, ggRasterCommand]
+	images        *renderCache[image.Image, *gg.ImageBuf]
 }
 
 // Render 绘制独立像素缓冲，不累积上次内容
@@ -140,8 +187,8 @@ func (s *ggRasterScene) Render() (image.Image, error) {
 	for i, cmd := range s.commands {
 		var err error
 		switch {
-		case cmd.command.Image != nil:
-			err = drawRasterImageCommand(GGBackend{}, s.page, img, imagePixelSource(cmd.command.Image), cmd.command, &s.masks)
+		case cmd.command.Image != nil && cmd.path == nil:
+			err = drawRasterImageCommand(GGBackend{}, s.page, img, imagePixelSource(cmd.command.Image), cmd.command, s.masks)
 		case cmd.command.Stroke != nil:
 			err = raster.Stroke(pixmap, cmd.path, cmd.paint)
 		default:

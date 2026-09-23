@@ -174,14 +174,11 @@ func (r *Renderer) exportProgress(completed, total int) error {
 // 入参: page 页面内容
 // 返回: image.Image 图像对象, error 错误信息
 func (r *Renderer) RenderToImage(page *PageContent) (image.Image, error) {
-	if r.backends.Raster == nil {
-		return nil, fmt.Errorf("raster: %w", ErrBackendUnavailable)
-	}
-	scene, err := r.CompilePage(page)
+	scene, err := r.PreparePage(page)
 	if err != nil {
 		return nil, err
 	}
-	return r.backends.Raster.Render(scene)
+	return scene.Render()
 }
 
 // RenderToPNG 渲染为PNG，像素尺寸由DPI决定

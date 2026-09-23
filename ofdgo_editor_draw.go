@@ -125,6 +125,6 @@ func (e *Editor) copyDrawParam(id, base string, visited map[string]bool) (string
 	if err != nil {
 		return "", err
 	}
-	e.resources = append(e.resources, editorResource{name: e.resourceDirectory() + "/DrawParam_" + draw.ID + ".xml", data: data, draw: &draw, drawSource: id, references: refs})
+	e.resources = append(e.resources, editorResource{name: e.packageName("Res/DrawParams/DrawParam_" + draw.ID + ".xml"), data: data, draw: &draw, drawSource: id, references: refs})
 	return draw.ID, nil
 }

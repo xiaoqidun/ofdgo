@@ -55,10 +55,10 @@ type RasterSegment struct {
 }
 
 // RasterCommand 填充路径或绘制图像，Image非空时为图像指令
-// Transform将局部坐标映射到页面，图像局部坐标与image.Image的像素坐标一致
-// Stroke非空时为描边，宽度与虚线使用页面毫米，不随Transform再次缩放
 // EvenOdd仅控制填充规则，不影响描边
+// Transform将局部坐标映射到页面，图像局部坐标与image.Image的像素坐标一致
 // Clip为页面坐标裁剪，适用于路径和图像，nil表示不裁剪，空切片表示全部裁去
+// Stroke非空时为描边，宽度与虚线使用页面毫米，不随Transform再次缩放
 type RasterCommand struct {
 	Path      []RasterSegment
 	Paint     RasterPaint

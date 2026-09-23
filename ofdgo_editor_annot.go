@@ -178,7 +178,7 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 	found := make(map[string]bool, len(ids))
 	remaining := 0
 	for _, ref := range root.children {
-		if ref.name.Local != "Page" || ref.name.Space != root.name.Space {
+		if !packageOFDNode(ref, "Page") {
 			continue
 		}
 		remaining++
@@ -204,7 +204,7 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 		var changes []editorXMLPatch
 		count := 0
 		for _, node := range page.children {
-			if node.name.Local != "Annot" || node.name.Space != page.name.Space {
+			if !packageOFDNode(node, "Annot") {
 				continue
 			}
 			count++
@@ -232,7 +232,7 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 		}
 		sharedFile := false
 		for _, other := range root.children {
-			if other == ref || other.name.Local != "Page" || other.name.Space != root.name.Space || other.child("FileLoc") == nil {
+			if other == ref || !packageOFDNode(other, "Page") || other.child("FileLoc") == nil {
 				continue
 			}
 			shared, err := editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, other.child("FileLoc"))))
@@ -250,7 +250,7 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 			continue
 		}
 		if sharedFile {
-			file = path.Join(e.source.directory, "Annotations", e.pages[index].ID, file)
+			file = packageAvailableName(reader, parts, e.packageName(path.Join("Annotations", "Page_"+e.pages[index].ID+".xml")))
 			var escaped bytes.Buffer
 			_ = xml.EscapeText(&escaped, []byte("/"+file))
 			patches = append(patches, editorXMLContent(data, loc, escaped.Bytes()))

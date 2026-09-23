@@ -121,6 +121,13 @@ func (c *semanticCompiler) addImage(img image.Image, matrix Matrix, clip *Geomet
 // 入参: stamp 印章
 // 返回: error 印章解析或编译错误
 func (c *semanticCompiler) DrawStamp(stamp Stamp) error {
+	return c.sharedStamp(stamp, (*semanticCompiler).drawStampContent)
+}
+
+// drawStampContent 解释未缓存的签章内容，保持嵌套文档及裁剪语义
+// 入参: stamp 印章
+// 返回: error 印章解析或编译错误
+func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 	if c.textOnly || c.measure || len(stamp.Data) == 0 {
 		return nil
 	}

@@ -82,6 +82,71 @@ func (r *Renderer) preparedOutline(prepared *PreparedFont, metrics FontMetrics, 
 	return path, err
 }
 
+// preparedOutlines 批量提取缓存未命中的字形，保留原始编号顺序，不触发塑形
+// 入参: prepared 字体, metrics 度量, glyphs 字形编号, size 毫米字号
+// 返回: []GeometryPath 同序只读轮廓, error 能力或解析错误
+func (r *Renderer) preparedOutlines(prepared *PreparedFont, metrics FontMetrics, glyphs []uint16, size float64) ([]GeometryPath, error) {
+	result := make([]GeometryPath, len(glyphs))
+	var indices []int
+	missing := make([]uint16, 0)
+	unique := make(map[uint16]int)
+	for i, glyph := range glyphs {
+		if path, ok := r.glyphOutlines.get(glyphOutlineKey{prepared, glyph, size}); ok {
+			result[i] = path
+			continue
+		}
+		if indices == nil {
+			indices = make([]int, len(glyphs))
+			for j := range indices {
+				indices[j] = -1
+			}
+		}
+		index, ok := unique[glyph]
+		if !ok {
+			index = len(missing)
+			unique[glyph] = index
+			missing = append(missing, glyph)
+		}
+		indices[i] = index
+	}
+	if len(missing) == 0 {
+		return result, nil
+	}
+	var paths []GeometryPath
+	if batch, ok := metrics.(FontOutlineBatch); ok {
+		var err error
+		paths, err = batch.GlyphOutlines(missing, size)
+		if err != nil {
+			return nil, err
+		}
+		if len(paths) != len(missing) {
+			return nil, fmt.Errorf("font outline batch returned %d paths for %d glyphs", len(paths), len(missing))
+		}
+	} else {
+		provider, ok := metrics.(FontOutlines)
+		if !ok {
+			return nil, fmt.Errorf("font outlines: %w", ErrBackendUnavailable)
+		}
+		paths = make([]GeometryPath, len(missing))
+		for i, glyph := range missing {
+			var err error
+			paths[i], err = provider.GlyphOutline(glyph, size)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	for i, path := range paths {
+		r.glyphOutlines.put(glyphOutlineKey{prepared, missing[i], size}, path, len(path)*96+128)
+	}
+	for i, index := range indices {
+		if index >= 0 {
+			result[i] = paths[index]
+		}
+	}
+	return result, nil
+}
+
 // renderObjectMatrix 统一边界、局部变换与父变换的组合顺序
 // 入参: boundary 对象边界, local 局部矩阵, state 继承状态
 // 返回: Matrix 页面矩阵, Matrix 不含边界平移的组合矩阵
@@ -237,19 +302,25 @@ func (r *Renderer) PositionText(object TextObject, state RenderState) (*Position
 				spans[i] = [2]int{0, 1}
 			}
 		}
-		positioner := NewTextPositioner(code, object.ReadDirection)
+		ids := make([]uint16, len(glyphs))
 		for i, glyph := range glyphs {
+			if glyph.GlyphID > math.MaxUint16 || glyph.GlyphID < 0 && glyph.Text == "" {
+				return nil, fmt.Errorf("invalid glyph index %d", glyph.GlyphID)
+			}
 			gid := uint16(glyph.GlyphID)
 			if glyph.GlyphID < 0 {
 				characters := []rune(glyph.Text)
-				if len(characters) > 0 {
-					gid = metrics.GlyphIndex(characters[0])
-				}
+				gid = metrics.GlyphIndex(characters[0])
 			}
-			path, err := r.preparedOutline(prepared, metrics, gid, size)
-			if err != nil {
-				return nil, err
-			}
+			ids[i] = gid
+		}
+		paths, err := r.preparedOutlines(prepared, metrics, ids, size)
+		if err != nil {
+			return nil, err
+		}
+		positioner := NewTextPositioner(code, object.ReadDirection)
+		for i, gid := range ids {
+			path := paths[i]
 			width := float64(metrics.GlyphAdvance(gid)) * unit
 			advance := width * horizontal
 			if (object.ReadDirection-object.CharDirection)%180 != 0 {

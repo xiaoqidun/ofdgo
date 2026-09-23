@@ -32,7 +32,32 @@ type RasterSceneBackend interface {
 	Prepare(page *RasterPage) (RasterScene, error)
 }
 
-// PreparePage 编译并准备当前配置的页面场景，不自动跟踪后续编辑
+// RasterSceneUpdater 可选的增量场景能力，保持原后端与显式几何配置
+// Update按新页面的完整内容及DPI使派生数据失效，失败时原场景仍可绘制
+// 图片仍为只读借用，编辑图片应提供新资源；修改后端配置应重新Prepare
+type RasterSceneUpdater interface {
+	RasterScene
+	Update(page *RasterPage) error
+}
+
+// RasterSceneReuseBackend 可选的跨快照复用能力，不改变显式后端选择
+// 实现必须验证前次场景及配置，返回独立快照，不能修改仍可使用的旧场景
+type RasterSceneReuseBackend interface {
+	RasterSceneBackend
+	PrepareReuse(page *RasterPage, previous RasterScene) (RasterScene, error)
+}
+
+// rasterPreparationKey 隔离渲染器私有的前次场景
+type rasterPreparationKey struct{}
+
+// rasterPreparationState 记录前次场景及实际后端配置
+type rasterPreparationState struct {
+	backend RasterBackend
+	scene   RasterScene
+}
+
+// PreparePage 编译并准备当前配置的独立页面快照，按后端能力复用未修改指令
+// 每次重新解释源页面，按内容使模板、签章、字体及样式派生数据失效
 // 入参: page 源页面
 // 返回: RasterScene 可重复绘制场景, error 编译或准备错误
 func (r *Renderer) PreparePage(page *PageContent) (RasterScene, error) {
@@ -42,6 +67,19 @@ func (r *Renderer) PreparePage(page *PageContent) (RasterScene, error) {
 	compiled, err := r.CompilePage(page)
 	if err != nil {
 		return nil, err
+	}
+	if backend, ok := r.backends.Raster.(RasterSceneReuseBackend); ok {
+		state, _ := r.backendStates[rasterPreparationKey{}].(rasterPreparationState)
+		var previous RasterScene
+		if sameBackend(state.backend, r.backends.Raster) {
+			previous = state.scene
+		}
+		scene, err := backend.PrepareReuse(compiled, previous)
+		if err != nil {
+			return nil, err
+		}
+		r.backendStates[rasterPreparationKey{}] = rasterPreparationState{backend: r.backends.Raster, scene: scene}
+		return scene, nil
 	}
 	return PrepareRasterScene(r.backends.Raster, compiled)
 }

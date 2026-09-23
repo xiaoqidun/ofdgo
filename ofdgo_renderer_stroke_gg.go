@@ -16,6 +16,11 @@ package ofdgo
 
 import "fmt"
 
+// ggStrokeFiller 将仅用于光栅填充的描边与可参与区域运算的轮廓分开
+type ggStrokeFiller interface {
+	strokeFill(path GeometryPath, options StrokeOptions) (GeometryPath, error)
+}
+
 // ggNativeStroke 判断GG当前可保真处理的描边范围
 // 入参: command 描边指令, scale 每毫米像素数
 // 返回: bool 是否可使用原生描边
@@ -63,7 +68,11 @@ func (b GGBackend) expandStroke(command RasterCommand) (RasterCommand, error) {
 	if err != nil {
 		return RasterCommand{}, err
 	}
-	path, err = b.StrokeGeometry.Stroke(path, *command.Stroke)
+	if filler, ok := b.StrokeGeometry.(ggStrokeFiller); ok {
+		path, err = filler.strokeFill(path, *command.Stroke)
+	} else {
+		path, err = b.StrokeGeometry.Stroke(path, *command.Stroke)
+	}
 	if err != nil {
 		return RasterCommand{}, err
 	}

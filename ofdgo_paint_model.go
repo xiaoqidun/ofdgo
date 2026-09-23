@@ -16,7 +16,7 @@ package ofdgo
 
 import "image/color"
 
-// ColorStop 保存预乘RGBA颜色节点及渐变区间位置
+// ColorStop 保存渐变区间位置及预乘RGBA颜色节点
 type ColorStop struct {
 	Offset float64
 	Color  color.RGBA

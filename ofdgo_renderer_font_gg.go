@@ -16,13 +16,33 @@ package ofdgo
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
 	"math"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
+	typefont "github.com/go-text/typesetting/font"
+	"github.com/go-text/typesetting/harfbuzz"
+	"github.com/go-text/typesetting/language"
 	ggtext "github.com/gogpu/gg/text"
+	xlanguage "golang.org/x/text/language"
 )
+
+// ggFontMetrics 适配GG设计单位度量与字形轮廓，按需缓存可配置塑形器
+type ggFontMetrics struct {
+	font        ggtext.ParsedFont
+	data        []byte
+	source      *ggtext.FontSource
+	shaper      *ggtext.OwnShaper
+	shapeMu     sync.Mutex
+	shapeFont   *harfbuzz.Font
+	shapeBuffer *harfbuzz.Buffer
+}
 
 // ResolveFont 使用公共字体来源匹配，不创建Canvas字体
 // 入参: r 渲染器, id 字体ID, exact 是否禁止无关回退
@@ -43,16 +63,8 @@ func (GGBackend) OpenFont(data []byte) (FontMetrics, error) {
 	return &ggFontMetrics{font: source.Parsed(), data: data, source: source, shaper: ggtext.NewOwnShaper()}, nil
 }
 
-// ggFontMetrics 适配GG设计单位度量与字形轮廓
-type ggFontMetrics struct {
-	font   ggtext.ParsedFont
-	data   []byte
-	source *ggtext.FontSource
-	shaper *ggtext.OwnShaper
-}
-
 // ShapeText 使用GG执行横向字偶距与连字塑形，不改动原文定位
-// 当前支持拉丁、希腊、西里尔和东亚文字，复杂文字需提供其他FontShaper
+// 当前支持拉丁、希腊、西里尔和东亚文字，复杂文字可通过ShapeTextWithOptions指定脚本与方向
 // 入参: value 单行原文, size 毫米字号
 // 返回: []ShapedGlyph 定位字形, error 字符或能力错误
 func (f *ggFontMetrics) ShapeText(value string, size float64) ([]ShapedGlyph, error) {
@@ -60,7 +72,7 @@ func (f *ggFontMetrics) ShapeText(value string, size float64) ([]ShapedGlyph, er
 		return nil, fmt.Errorf("invalid shaping text or size")
 	}
 	for _, char := range value {
-		if unicode.IsControl(char) {
+		if unicode.IsControl(char) || char == '\u2028' || char == '\u2029' {
 			return nil, fmt.Errorf("shaping requires a single text line")
 		}
 		if !unicode.In(char, unicode.Latin, unicode.Greek, unicode.Cyrillic, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul, unicode.Common, unicode.Inherited) {
@@ -72,6 +84,107 @@ func (f *ggFontMetrics) ShapeText(value string, size float64) ([]ShapedGlyph, er
 	for i, glyph := range glyphs {
 		result[i] = ShapedGlyph{Glyph: uint16(glyph.GID), Cluster: glyph.Cluster, X: glyph.X, Y: -glyph.Y, Advance: glyph.XAdvance}
 	}
+	return result, nil
+}
+
+// ShapeTextWithOptions 使用现有纯Go塑形引擎处理单一方向原文，保留逻辑簇和视觉位置
+// 不执行混合方向分段，调用方应将双向段落拆为单向文字对象
+// 入参: value 单行原文, size 毫米字号, options 塑形选项
+// 返回: []ShapedGlyph 定位字形, error 字符或选项错误
+func (f *ggFontMetrics) ShapeTextWithOptions(value string, size float64, options TextShapeOptions) ([]ShapedGlyph, error) {
+	if options == (TextShapeOptions{}) {
+		return f.ShapeText(value, size)
+	}
+	if !rasterPositive(size) || !utf8.ValidString(value) {
+		return nil, fmt.Errorf("invalid shaping text or size")
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) || char == '\u2028' || char == '\u2029' {
+			return nil, fmt.Errorf("shaping requires a single text line")
+		}
+	}
+	props := harfbuzz.SegmentProperties{Direction: harfbuzz.LeftToRight}
+	switch options.Direction {
+	case "", "ltr":
+	case "rtl":
+		props.Direction = harfbuzz.RightToLeft
+	default:
+		return nil, fmt.Errorf("shaping direction %q: %w", options.Direction, ErrBackendUnavailable)
+	}
+	if options.Script != "" {
+		if len(options.Script) != 4 || strings.ContainsFunc(options.Script, func(c rune) bool { return c < 'A' || c > 'Z' && c < 'a' || c > 'z' }) {
+			return nil, fmt.Errorf("invalid shaping script %q", options.Script)
+		}
+		props.Script, _ = language.ParseScript(options.Script)
+	}
+	if options.Language != "" {
+		tag, err := xlanguage.Parse(options.Language)
+		if err != nil {
+			return nil, fmt.Errorf("shaping language: %w", err)
+		}
+		props.Language = language.NewLanguage(tag.String())
+	}
+	var features []harfbuzz.Feature
+	if options.Features != "" {
+		for _, setting := range strings.Split(options.Features, ",") {
+			setting = strings.TrimSpace(setting)
+			if strings.ContainsAny(setting, "[]") {
+				return nil, fmt.Errorf("shaping feature ranges: %w", ErrBackendUnavailable)
+			}
+			tag, value, hasValue := strings.Cut(setting, "=")
+			if len(tag) != 4 || strings.ContainsFunc(tag, func(c rune) bool { return c < '0' || c > '9' && c < 'A' || c > 'Z' && c < 'a' || c > 'z' }) {
+				return nil, fmt.Errorf("invalid shaping feature %q", setting)
+			}
+			if hasValue {
+				if _, err := strconv.ParseUint(value, 10, 32); err != nil {
+					return nil, fmt.Errorf("shaping feature %q: %w", setting, err)
+				}
+			}
+			feature, err := harfbuzz.ParseFeature(setting)
+			if err != nil {
+				return nil, fmt.Errorf("shaping feature %q: %w", setting, err)
+			}
+			if feature.Start != harfbuzz.FeatureGlobalStart || feature.End != harfbuzz.FeatureGlobalEnd {
+				return nil, fmt.Errorf("shaping feature ranges: %w", ErrBackendUnavailable)
+			}
+			features = append(features, feature)
+		}
+	}
+	f.shapeMu.Lock()
+	defer f.shapeMu.Unlock()
+	if f.shapeFont == nil {
+		face, err := typefont.ParseTTF(bytes.NewReader(f.data))
+		if err != nil {
+			return nil, fmt.Errorf("shaping font: %w", err)
+		}
+		f.shapeFont = harfbuzz.NewFont(face)
+		f.shapeBuffer = harfbuzz.NewBuffer()
+	}
+	buffer := f.shapeBuffer
+	buffer.Clear()
+	buffer.Props = props
+	runes := []rune(value)
+	buffer.AddRunes(runes, 0, len(runes))
+	buffer.GuessSegmentProperties()
+	buffer.Shape(f.shapeFont, features)
+	unit := size / float64(f.UnitsPerEm())
+	result := make([]ShapedGlyph, len(buffer.Info))
+	var x, y float64
+	for i, info := range buffer.Info {
+		if info.Glyph >= typefont.GID(f.NumGlyphs()) {
+			return nil, fmt.Errorf("invalid shaped glyph index %d", info.Glyph)
+		}
+		position := buffer.Pos[i]
+		result[i] = ShapedGlyph{Glyph: uint16(info.Glyph), Cluster: info.Cluster,
+			X: (x + float64(position.XOffset)) * unit, Y: -(y + float64(position.YOffset)) * unit,
+			Advance: float64(position.XAdvance) * unit}
+		if !finite(result[i].X) || !finite(result[i].Y) || !finite(result[i].Advance) {
+			return nil, fmt.Errorf("shaped position exceeds finite range")
+		}
+		x += float64(position.XAdvance)
+		y += float64(position.YAdvance)
+	}
+	slices.SortStableFunc(result, func(a, b ShapedGlyph) int { return cmp.Compare(a.Cluster, b.Cluster) })
 	return result, nil
 }
 
@@ -117,7 +230,49 @@ func (f *ggFontMetrics) GlyphOutline(glyph uint16, size float64) (GeometryPath, 
 	if err != nil || outline == nil {
 		return nil, err
 	}
-	result := make(GeometryPath, 0, len(outline.Segments)+1)
+	return ggOutlinePath(outline)
+}
+
+// GlyphOutlines 按指定编号批量提取轮廓，重复字形只解析一次
+// 入参: glyphs 字形编号, size 毫米字号
+// 返回: []GeometryPath 同序只读轮廓, error 轮廓解析错误
+func (f *ggFontMetrics) GlyphOutlines(glyphs []uint16, size float64) ([]GeometryPath, error) {
+	if !rasterPositive(size) {
+		return nil, fmt.Errorf("invalid glyph size")
+	}
+	for _, glyph := range glyphs {
+		if int(glyph) >= f.font.NumGlyphs() {
+			return nil, fmt.Errorf("invalid glyph index %d", glyph)
+		}
+	}
+	result := make([]GeometryPath, len(glyphs))
+	paths := make(map[uint16]GeometryPath, len(glyphs))
+	for i, glyph := range glyphs {
+		path, ok := paths[glyph]
+		if !ok {
+			var err error
+			path, err = f.GlyphOutline(glyph, size)
+			if err != nil {
+				return nil, err
+			}
+			paths[glyph] = path
+		}
+		result[i] = path
+	}
+	return result, nil
+}
+
+// ggOutlinePath 将GG轮廓转换为闭合的公共字形路径
+// 入参: outline GG字形轮廓
+// 返回: GeometryPath 公共路径, error 未知轮廓指令
+func ggOutlinePath(outline *ggtext.GlyphOutline) (GeometryPath, error) {
+	capacity := len(outline.Segments)
+	for _, segment := range outline.Segments {
+		if segment.Op == ggtext.OutlineOpMoveTo {
+			capacity++
+		}
+	}
+	result := make(GeometryPath, 0, capacity)
 	point := func(p ggtext.OutlinePoint) Point { return Point{X: float64(p.X), Y: float64(p.Y)} }
 	for _, s := range outline.Segments {
 		segment := GeometrySegment{End: point(s.Points[0])}

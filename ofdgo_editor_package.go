@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"path"
 	"reflect"
 	"slices"
 	"strconv"
@@ -54,7 +53,7 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 				parts[reader.ResPath(original.ref.BaseLoc)] = data
 			}
 		} else {
-			name := path.Join(source.directory, "Pages", page.ID+".xml")
+			name := e.packageName(packagePagePath("", page.ID))
 			data, err := e.sourceNewPageXML(page)
 			if err != nil {
 				return nil, err
@@ -79,13 +78,17 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 		})
 	}
 	if len(fonts)+len(images)+len(spaces) != 0 {
-		resourcePath := path.Join(source.directory, "Resources.xml")
-		resourceFiles = append(resourceFiles, resourcePath)
 		data, err := encodeOFDXML(func(x *ofdXML) { x.resources(fonts, images, spaces) })
 		if err != nil {
 			return nil, err
 		}
-		parts[resourcePath] = data
+		resourcePath, added, err := mergePackageResources(reader, parts, source.document, source.directory, data)
+		if err != nil {
+			return nil, err
+		}
+		if added {
+			resourceFiles = append(resourceFiles, resourcePath)
+		}
 		for _, resource := range append(fonts, images...) {
 			if resource.name != "" {
 				parts[resource.name] = resource.data
@@ -135,17 +138,17 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 			if pages == nil {
 				return nil, fmt.Errorf("document has no Pages")
 			}
-			var encoded bytes.Buffer
+			var entries [][]byte
 			for _, page := range pageRefs {
 				var original *editorXML
 				for _, child := range pages.children {
-					if child.attr("ID") == page.ID {
+					if packageOFDNode(child, "Page") && child.attr("ID") == page.ID {
 						original = child
 						break
 					}
 				}
 				if original != nil {
-					encoded.Write(data[original.start:original.end])
+					entries = append(entries, data[original.start:original.end])
 				} else {
 					item, err := encodeOFDXML(func(x *ofdXML) {
 						x.root("Page", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: page.ID}, {Name: xml.Name{Local: "BaseLoc"}, Value: page.BaseLoc}})
@@ -154,10 +157,29 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 					if err != nil {
 						return nil, err
 					}
-					encoded.Write(bytes.TrimPrefix(item, []byte(xml.Header)))
+					entries = append(entries, bytes.TrimPrefix(item, []byte(xml.Header)))
 				}
 			}
-			patches = append(patches, editorXMLContent(data, pages, encoded.Bytes()))
+			position := 0
+			for _, child := range pages.children {
+				if !packageOFDNode(child, "Page") {
+					continue
+				}
+				var entry []byte
+				if position < len(entries) {
+					entry = entries[position]
+					position++
+				}
+				patches = append(patches, editorXMLPatch{child.start, child.end, entry})
+			}
+			if position < len(entries) {
+				added := bytes.Join(entries[position:], nil)
+				if pages.open == pages.end {
+					patches = append(patches, editorXMLContent(data, pages, added))
+				} else {
+					patches = append(patches, editorXMLPatch{pages.close, pages.close, added})
+				}
+			}
 		}
 		updated := editorPatchXML(data, patches)
 		if !bytes.Equal(data, updated) {

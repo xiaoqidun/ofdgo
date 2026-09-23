@@ -14,7 +14,12 @@
 
 package ofdgo
 
-import "container/list"
+import (
+	"container/list"
+	"crypto/sha256"
+	"encoding/binary"
+	"math"
+)
 
 // renderCache 按估算字节数限制派生渲染数据，淘汰不修改源资源
 type renderCache[K comparable, V any] struct {
@@ -65,4 +70,85 @@ func (c *renderCache[K, V]) put(key K, value V, cost int) {
 	}
 	c.entries[key] = c.order.PushFront(renderCacheEntry[K, V]{key, value, cost})
 	c.used += cost
+}
+
+// rasterCommandCost 估算指令快照及后端路径的缓存成本，不含借用图片
+// 入参: command 绘制指令
+// 返回: int 字节成本
+func rasterCommandCost(command RasterCommand) int {
+	cost := 512 + (len(command.Path)+len(command.Clip))*208
+	if command.Stroke != nil {
+		cost += 128 + len(command.Stroke.Dashes)*16
+	}
+	if command.Paint.Gradient != nil {
+		cost += 256 + len(command.Paint.Gradient.Stops)*64
+	}
+	return cost
+}
+
+// rasterCommandKey 按完整路径、样式、裁剪及像素配置标识非图片指令
+// 入参: page 页面尺寸和DPI, command 绘制指令
+// 返回: [32]byte 内容键
+func rasterCommandKey(page *RasterPage, command RasterCommand) [32]byte {
+	h := sha256.New()
+	path, clip := rasterClipKey(page, command.Path), rasterClipKey(page, command.Clip)
+	h.Write(path[:])
+	h.Write(clip[:])
+	var data [8]byte
+	number := func(value float64) {
+		binary.LittleEndian.PutUint64(data[:], math.Float64bits(value))
+		h.Write(data[:])
+	}
+	flag := func(value bool) {
+		if value {
+			h.Write([]byte{1})
+		} else {
+			h.Write([]byte{0})
+		}
+	}
+	word := func(value string) {
+		number(float64(len(value)))
+		h.Write([]byte(value))
+	}
+	flag(command.Clip != nil)
+	flag(command.EvenOdd)
+	for _, value := range command.Transform {
+		number(value)
+	}
+	c := command.Paint.Color
+	h.Write([]byte{c.R, c.G, c.B, c.A})
+	flag(command.Stroke != nil)
+	if stroke := command.Stroke; stroke != nil {
+		number(stroke.Width)
+		number(stroke.MiterLimit)
+		number(stroke.Tolerance)
+		number(stroke.DashOffset)
+		word(stroke.Cap)
+		word(stroke.Join)
+		number(float64(len(stroke.Dashes)))
+		for _, dash := range stroke.Dashes {
+			number(dash)
+		}
+	}
+	flag(command.Paint.Gradient != nil)
+	if g := command.Paint.Gradient; g != nil {
+		h.Write([]byte{byte(g.Kind)})
+		for _, value := range []float64{g.Start.X, g.Start.Y, g.End.X, g.End.Y, g.R0, g.R1} {
+			number(value)
+		}
+		flag(g.Spread != nil)
+		if spread := g.Spread; spread != nil {
+			number(float64(spread.Extend))
+			number(spread.Period)
+			word(spread.MapType)
+		}
+		for _, stop := range g.Stops {
+			number(stop.Offset)
+			c := stop.Color
+			h.Write([]byte{c.R, c.G, c.B, c.A})
+		}
+	}
+	var key [32]byte
+	copy(key[:], h.Sum(nil))
+	return key
 }

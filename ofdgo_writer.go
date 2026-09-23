@@ -263,10 +263,10 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error, progress edi
 		}
 		x.end("CommonData")
 		x.start("Pages", nil)
-		for i, page := range e.pages {
+		for _, page := range e.pages {
 			var attrs ofdAttrs
 			attrs.add("ID", page.ID)
-			attrs.add("BaseLoc", fmt.Sprintf("Pages/%d/Content.xml", i+1))
+			attrs.add("BaseLoc", packagePagePath("", page.ID))
 			x.start("Page", attrs)
 			x.end("Page")
 		}
@@ -284,7 +284,7 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error, progress edi
 		if err := progress.report("pages", i, len(e.pages)); err != nil {
 			return err
 		}
-		name := fmt.Sprintf("Doc_0/Pages/%d/Content.xml", i+1)
+		name := packagePagePath(e.packageDirectory(), page.ID)
 		if len(e.origins) == 0 {
 			if err := writeXML(name, func(x *ofdXML) { x.page(page) }); err != nil {
 				return err

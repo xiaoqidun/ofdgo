@@ -283,7 +283,7 @@ func (e *Editor) addEditorDrawParam(draw DrawParam) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resource := editorResource{name: e.resourceDirectory() + "/DrawParam_" + draw.ID + ".xml", data: data, draw: &draw, references: refs}
+	resource := editorResource{name: e.packageName("Res/DrawParams/DrawParam_" + draw.ID + ".xml"), data: data, draw: &draw, references: refs}
 	e.resources = append(e.resources, resource)
 	return draw.ID, nil
 }

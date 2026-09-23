@@ -22,7 +22,6 @@ import (
 )
 
 // Outline 使用默认几何后端获取SVG轮廓，自定义后端使用Renderer.PathOutline
-// 入参: p 路径对象
 // 返回: string SVG路径数据, error 错误信息
 func (p PathObject) Outline() (string, error) {
 	r := &Renderer{backends: defaultRenderBackends()}

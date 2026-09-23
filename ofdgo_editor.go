@@ -592,7 +592,7 @@ func (e *Editor) AddFont(file FontFile, index int) (string, error) {
 		extension = ".otf"
 	}
 	resource := editorResource{
-		name: e.resourceDirectory() + "/Font_" + id + extension,
+		name: e.packageName("Res/Fonts/Font_" + id + extension),
 		data: data,
 		font: &Font{
 			ID: id, FontName: name,
@@ -603,7 +603,7 @@ func (e *Editor) AddFont(file FontFile, index int) (string, error) {
 			FixedWidth: sfnt.Post.IsFixedPitch != 0,
 		},
 	}
-	resource.font.FontFile = "Font_" + id + extension
+	resource.font.FontFile = "/" + resource.name
 	e.resources = append(e.resources, resource)
 	e.fonts[id] = sfnt
 	e.resourceID[key] = id
@@ -655,11 +655,11 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 	} else if extension == "jbig2" {
 		extension = "jb2"
 	}
-	name := "Image_" + id + "." + extension
+	name := e.packageName("Res/Images/Image_" + id + "." + extension)
 	e.resources = append(e.resources, editorResource{
-		name:  e.resourceDirectory() + "/" + name,
+		name:  name,
 		data:  bytes.Clone(data),
-		image: &MultiMedia{ID: id, Type: "Image", Format: strings.ToUpper(format), MediaFile: name},
+		image: &MultiMedia{ID: id, Type: "Image", Format: strings.ToUpper(format), MediaFile: "/" + name},
 	})
 	e.images[id] = image.Pt(config.Width, config.Height)
 	e.resourceID[key] = id

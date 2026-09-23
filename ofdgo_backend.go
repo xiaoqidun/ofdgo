@@ -190,7 +190,7 @@ func WithRenderBackends(backends RenderBackends) RendererOption {
 	}
 }
 
-// sameBackend 判断可比较值配置是否未变，指针配置重新应用时刷新可变状态
+// sameBackend 判断不可变值配置是否未变，包含指针的配置重新应用时刷新可变状态
 // 入参: left 原后端, right 新后端
 // 返回: bool 是否为同一配置
 func sameBackend(left, right Backend) bool {
@@ -198,7 +198,32 @@ func sameBackend(left, right Backend) bool {
 		return left == nil && right == nil
 	}
 	a, b := reflect.ValueOf(left), reflect.ValueOf(right)
-	return a.Kind() != reflect.Pointer && b.Kind() != reflect.Pointer && a.Comparable() && b.Comparable() && left == right
+	return a.Comparable() && b.Comparable() && left == right && immutableBackendValue(a)
+}
+
+// immutableBackendValue 检查嵌套配置是否仅包含不可变值，不绑定具体后端类型
+// 入参: value 配置值
+// 返回: bool 是否可按值比较复用
+func immutableBackendValue(value reflect.Value) bool {
+	switch value.Kind() {
+	case reflect.Pointer, reflect.UnsafePointer, reflect.Chan, reflect.Map, reflect.Slice, reflect.Func:
+		return false
+	case reflect.Interface:
+		return value.IsNil() || immutableBackendValue(value.Elem())
+	case reflect.Struct:
+		for i := range value.NumField() {
+			if !immutableBackendValue(value.Field(i)) {
+				return false
+			}
+		}
+	case reflect.Array:
+		for i := range value.Len() {
+			if !immutableBackendValue(value.Index(i)) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Backends 返回当前后端配置副本，可修改后通过WithRenderBackends应用
