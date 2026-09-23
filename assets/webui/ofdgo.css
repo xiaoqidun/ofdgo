@@ -645,6 +645,16 @@ button:not(:disabled):hover {
 	padding: 12px;
 }
 
+.form-title {
+	margin: -12px -12px 12px;
+	padding: 10px 12px;
+	border-bottom: 1px solid var(--line);
+	background: #eef1f4;
+	font-size: 14px;
+	font-weight: 600;
+	line-height: 1.5;
+}
+
 .security-dialog {
 	width: 360px;
 }

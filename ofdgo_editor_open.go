@@ -57,6 +57,7 @@ type editorSourcePage struct {
 	root     *editorXML
 	original *PageContent
 	nodes    map[string]*editorXML
+	repaired bool
 }
 
 // ObjectCapabilities 已有对象可执行的操作，Reason说明受限原因
@@ -260,6 +261,103 @@ func (e *Editor) sourceRGB() bool {
 	return space != nil && space.Type == "RGB" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0
 }
 
+// repairSourceObjectIDs 按实际节点区分重复对象，只修复没有引用歧义的编号
+// 入参: data 页面原文, root 页面节点
+// 返回: []byte 编辑副本, bool 是否修复, error 错误信息
+func (e *Editor) repairSourceObjectIDs(data []byte, root *editorXML) ([]byte, bool, error) {
+	seen := make(map[string]bool)
+	duplicates := make(map[string]bool)
+	var nodes []*editorXML
+	var visit func(*editorXML) error
+	visit = func(parent *editorXML) error {
+		for _, node := range parent.children {
+			id := node.attr("ID")
+			if id != "" && seen[id] {
+				switch node.name.Local {
+				case "TextObject", "PathObject", "ImageObject", "CompositeObject":
+					nodes = append(nodes, node)
+					duplicates[id] = true
+				default:
+					return fmt.Errorf("duplicate container ID %q", id)
+				}
+			}
+			seen[id] = true
+			if node.name.Local == "PageBlock" {
+				if err := visit(node); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if content := root.child("Content"); content != nil {
+		for _, layer := range content.children {
+			if layer.name.Local == "Layer" {
+				if err := visit(layer); err != nil {
+					return nil, false, err
+				}
+			}
+		}
+	}
+	if len(nodes) == 0 {
+		return data, false, nil
+	}
+	if err := e.checkDuplicateObjectReferences(duplicates); err != nil {
+		return nil, false, err
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return nil, false, err
+	}
+	maximum := e.maxID
+	var patches []editorXMLPatch
+	for _, node := range nodes {
+		maximum++
+		encoded, err := editorXMLAttribute(data, node, "ID", strconv.Itoa(maximum))
+		if err != nil {
+			return nil, false, err
+		}
+		patches = append(patches, editorXMLPatch{node.start, node.end, encoded})
+	}
+	e.maxID = maximum
+	return editorPatchXML(data, patches), true, nil
+}
+
+// checkDuplicateObjectReferences 拒绝无法判定目标的编号引用，不猜测其所属对象
+// 入参: duplicates 重复编号
+// 返回: error 引用歧义或读取错误
+func (e *Editor) checkDuplicateObjectReferences(duplicates map[string]bool) error {
+	reader := e.source.reader
+	for _, name := range reader.fileNamesFold {
+		if !strings.EqualFold(path.Ext(name), ".xml") {
+			continue
+		}
+		input, err := reader.openFile(name)
+		if err != nil {
+			return err
+		}
+		decoder := xml.NewDecoder(input)
+		for {
+			token, readErr := decoder.Token()
+			if readErr != nil {
+				input.Close()
+				if readErr != io.EOF {
+					return readErr
+				}
+				break
+			}
+			if node, ok := token.(xml.StartElement); ok {
+				for _, attr := range node.Attr {
+					if editorObjectReference(attr.Name.Local) && duplicates[editorResourceID(attr.Value)] {
+						input.Close()
+						return fmt.Errorf("ambiguous reference to duplicate object ID %q in %s", attr.Value, name)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // loadSourcePage 首次访问时解析原始页面，不加载图片或字体二进制数据
 // 入参: index 页面索引
 // 返回: error 错误信息
@@ -281,6 +379,21 @@ func (e *Editor) loadSourcePage(index int) error {
 	if err != nil {
 		return err
 	}
+	data, repaired, err := e.repairSourceObjectIDs(data, root)
+	if err != nil {
+		return err
+	}
+	if repaired {
+		root, err = parseEditorXML(data)
+		if err != nil {
+			return err
+		}
+		var updated PageContent
+		if err := xml.Unmarshal(data, &updated); err != nil {
+			return err
+		}
+		page.Content = updated.Content
+	}
 	nodes := make(map[string]*editorXML)
 	if content := root.child("Content"); content != nil {
 		for _, layer := range content.children {
@@ -293,6 +406,7 @@ func (e *Editor) loadSourcePage(index int) error {
 		}
 	}
 	source.data, source.root, source.nodes = data, root, nodes
+	source.repaired = repaired
 	for i := range page.Content.Layer {
 		layer := &page.Content.Layer[i]
 		for j, object := range layer.Objects {

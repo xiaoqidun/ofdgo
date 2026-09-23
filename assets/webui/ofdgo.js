@@ -350,6 +350,7 @@ const el = {
 	exportPageButton: document.querySelector("#exportPageButton"),
 	exportButton: document.querySelector("#exportButton"),
 	exportPanel: document.querySelector("#exportPanel"),
+	exportTitle: document.querySelector("#exportTitle"),
 	exportForm: document.querySelector("#exportForm"),
 	exportAll: document.querySelector("#exportAll"),
 	exportSpecified: document.querySelector("#exportSpecified"),
@@ -1602,7 +1603,7 @@ async function toggleEditor() {
 	const openSeq = ++state.openSeq;
 	setBusy(true, "正在准备编辑", null, "正在准备编辑");
 	try {
-		const doc = await callWASM("ofdgoEditDocument");
+		const doc = await callWASM("ofdgoEditDocument", pageIndex);
 		if (openSeq !== state.openSeq) return;
 		state.savedRevision = doc.revision;
 		state.editorViews.clear();
@@ -3961,7 +3962,7 @@ function openExportPanel(encrypted = false) {
 	el.encryptionFields.hidden = !encrypted;
 	el.encryptionPassword.required = el.encryptionConfirm.required = encrypted;
 	updateEncryptionType();
-	el.exportPanel.setAttribute("aria-label", encrypted ? "加密另存" : "导出文档");
+	el.exportTitle.textContent = encrypted ? "加密另存" : "导出文档";
 	el.exportSubmit.textContent = encrypted ? "保存" : "导出";
 	if (state.editing && state.pageSelection.size) {
 		el.exportSpecified.checked = true;
@@ -5851,9 +5852,9 @@ function renderSignatures() {
 
 		head.append(badges, name);
 		row.append(head);
-		appendInfoLine(row, "章名", signature.sealName);
 		appendInfoLine(row, "签署人", signature.signer);
 		appendInfoLine(row, "时间", formatDocumentTime(signature.signatureDateTime));
+		appendInfoLine(row, "章名", signature.sealName);
 		appendInfoLine(row, "机构", signatureAgency(signature));
 		appendSignatureCheck(row, "信任", signature.certTrustChecked, signature.certTrustOK);
 		appendInfoLine(row, "保护文件", signatureReferenceText(signature), signatureReferenceStatus(signature));
@@ -5864,25 +5865,25 @@ function renderSignatures() {
 		checks.append(checksTitle);
 		appendSignatureCheck(checks, "原文", signature.dataHashChecked, signature.dataHashOK);
 		appendSignatureCheck(checks, "签名", signature.signedValueChecked, signature.signedValueOK);
+		appendSignatureCheck(checks, "证书", signature.certChecked, signature.certOK);
+		appendSignaturePolicy(checks, "证书期限", signature.certTimeChecked, signature.certTimeOK);
+		appendInfoLine(checks, "信任错误", signature.certTrustError, "fail");
+		appendSignaturePolicy(checks, "签署时间", signature.signatureTimeChecked, signature.signatureTimeOK);
 		if (signature.type !== "Sign") {
 			appendSignatureCheck(checks, "印章", signature.sealChecked, signature.sealOK);
 			appendSignaturePolicy(checks, "印章匹配", signature.sealMatchChecked, signature.sealMatchOK);
+			appendSignaturePolicy(checks, "印章期限", signature.sealTimeChecked, signature.sealTimeOK);
+			if (signature.sealCertTimeChecked) {
+				appendInfoLine(checks, "制章证书", signature.sealCertTimeOK ? "有效" : "失效", signature.sealCertTimeOK ? "ok" : "fail");
+			}
 		}
-		appendSignatureCheck(checks, "证书", signature.certChecked, signature.certOK);
-		appendSignaturePolicy(checks, "签署时间", signature.signatureTimeChecked, signature.signatureTimeOK);
-		appendSignaturePolicy(checks, "印章期限", signature.sealTimeChecked, signature.sealTimeOK);
-		if (signature.sealCertTimeChecked) {
-			appendInfoLine(checks, "制章证书", signature.sealCertTimeOK ? "有效" : "失效", signature.sealCertTimeOK ? "ok" : "fail");
-		}
-		appendSignaturePolicy(checks, "证书期限", signature.certTimeChecked, signature.certTimeOK);
-		appendSignatureCheck(checks, "策略", signature.policyChecked, signature.policyOK);
 		appendSignatureCheck(checks, "覆盖", signature.coverageChecked, signature.coverageOK);
-		appendSignatureCheck(checks, "时间戳", signature.timestampChecked, signature.timestampOK);
-		appendSignatureCheck(checks, "撤销", signature.revocationChecked, signature.revocationOK);
-		appendInfoLine(checks, "策略错误", signature.policyError, "fail");
-		appendInfoLine(checks, "信任错误", signature.certTrustError, "fail");
 		appendInfoLine(checks, "覆盖错误", signature.coverageError, "fail");
 		appendInfoLine(checks, "未保护", signature.uncoveredFiles?.join("、"), "fail");
+		appendSignatureCheck(checks, "策略", signature.policyChecked, signature.policyOK);
+		appendInfoLine(checks, "策略错误", signature.policyError, "fail");
+		appendSignatureCheck(checks, "时间戳", signature.timestampChecked, signature.timestampOK);
+		appendSignatureCheck(checks, "撤销", signature.revocationChecked, signature.revocationOK);
 		row.append(checks);
 		for (const timestamp of signature.timestamps || []) {
 			const details = document.createElement("details");
@@ -5917,17 +5918,17 @@ function renderSignatures() {
 		title.textContent = "签章信息";
 		details.append(title);
 		appendInfoLine(details, "编号", signature.id);
-		appendInfoLine(details, "版本", signature.version);
-		appendInfoLine(details, "章图", signature.sealType);
-		appendInfoLine(details, "章号", signature.sealId);
-		appendInfoLine(details, "厂商", signature.sealVendor);
 		appendInfoLine(details, "文档", signature.docRoot);
 		appendInfoLine(details, "算法", signature.signatureMethod);
 		appendInfoLine(details, "摘要", signature.digestMethod);
-		appendInfoLine(details, "序列号", signature.signSerial);
 		appendInfoLine(details, "证书主体", signature.signSubject);
 		appendInfoLine(details, "颁发者", signature.signIssuer);
+		appendInfoLine(details, "序列号", signature.signSerial);
+		appendInfoLine(details, "章号", signature.sealId);
+		appendInfoLine(details, "章图", signature.sealType);
 		appendInfoLine(details, "制章证书", signature.sealSubject);
+		appendInfoLine(details, "印章厂商", signature.sealVendor);
+		appendInfoLine(details, "组件版本", signature.version);
 		row.append(details);
 		fragment.append(row);
 	}

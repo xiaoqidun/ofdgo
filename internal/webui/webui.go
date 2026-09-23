@@ -43,65 +43,65 @@ type FontInfo = ofdgo.FontInfo
 type SignatureInfo struct {
 	DocIndex             int                  `json:"docIndex"`
 	DocRoot              string               `json:"docRoot,omitempty"`
+	ID                   string               `json:"id"`
+	Type                 string               `json:"type"`
+	Status               string               `json:"status"`
 	IntegrityValid       bool                 `json:"integrityValid"`
 	TrustedValid         bool                 `json:"trustedValid"`
-	PolicyChecked        bool                 `json:"policyChecked"`
-	PolicyOK             bool                 `json:"policyOK"`
-	PolicyError          string               `json:"policyError,omitempty"`
+	Error                string               `json:"error,omitempty"`
+	Signer               string               `json:"signer,omitempty"`
+	SignatureDateTime    string               `json:"signatureDateTime,omitempty"`
+	SealName             string               `json:"sealName,omitempty"`
+	Provider             string               `json:"provider,omitempty"`
+	Company              string               `json:"company,omitempty"`
+	SealType             string               `json:"sealType,omitempty"`
+	SealID               string               `json:"sealId,omitempty"`
+	SealVendor           string               `json:"sealVendor,omitempty"`
+	Version              string               `json:"version,omitempty"`
+	SignSubject          string               `json:"signSubject,omitempty"`
+	SignIssuer           string               `json:"signIssuer,omitempty"`
+	SignSerial           string               `json:"signSerial,omitempty"`
+	SealSubject          string               `json:"sealSubject,omitempty"`
+	SignatureMethod      string               `json:"signatureMethod,omitempty"`
+	DigestMethod         string               `json:"digestMethod,omitempty"`
+	ReferenceCount       int                  `json:"referenceCount"`
+	ReferenceChecked     int                  `json:"referenceChecked"`
+	ReferencePassed      int                  `json:"referencePassed"`
+	Stamps               []SignatureStampInfo `json:"stamps,omitempty"`
+	DataHashChecked      bool                 `json:"dataHashChecked"`
+	DataHashOK           bool                 `json:"dataHashOK"`
+	SignedValueChecked   bool                 `json:"signedValueChecked"`
+	SignedValueOK        bool                 `json:"signedValueOK"`
+	CertChecked          bool                 `json:"certChecked"`
+	CertOK               bool                 `json:"certOK"`
+	CertTimeChecked      bool                 `json:"certTimeChecked,omitempty"`
+	CertTimeOK           bool                 `json:"certTimeOK,omitempty"`
+	CertTrustChecked     bool                 `json:"certTrustChecked,omitempty"`
+	CertTrustOK          bool                 `json:"certTrustOK,omitempty"`
+	CertTrustError       string               `json:"certTrustError,omitempty"`
+	SignatureTimeChecked bool                 `json:"signatureTimeChecked,omitempty"`
+	SignatureTimeOK      bool                 `json:"signatureTimeOK,omitempty"`
+	SealChecked          bool                 `json:"sealChecked"`
+	SealOK               bool                 `json:"sealOK"`
+	SealMatchChecked     bool                 `json:"sealMatchChecked"`
+	SealMatchOK          bool                 `json:"sealMatchOK"`
+	SealTimeChecked      bool                 `json:"sealTimeChecked,omitempty"`
+	SealTimeOK           bool                 `json:"sealTimeOK,omitempty"`
+	SealCertTimeChecked  bool                 `json:"sealCertTimeChecked,omitempty"`
+	SealCertTimeOK       bool                 `json:"sealCertTimeOK,omitempty"`
 	CoverageChecked      bool                 `json:"coverageChecked"`
 	CoverageOK           bool                 `json:"coverageOK"`
 	CoverageError        string               `json:"coverageError,omitempty"`
 	UncoveredFiles       []string             `json:"uncoveredFiles,omitempty"`
+	PolicyChecked        bool                 `json:"policyChecked"`
+	PolicyOK             bool                 `json:"policyOK"`
+	PolicyError          string               `json:"policyError,omitempty"`
 	TimestampChecked     bool                 `json:"timestampChecked"`
 	TimestampOK          bool                 `json:"timestampOK"`
 	Timestamps           []TimestampInfo      `json:"timestamps,omitempty"`
 	RevocationChecked    bool                 `json:"revocationChecked"`
 	RevocationOK         bool                 `json:"revocationOK"`
 	Revocations          []RevocationInfo     `json:"revocations,omitempty"`
-	ID                   string               `json:"id"`
-	Type                 string               `json:"type"`
-	Status               string               `json:"status"`
-	Version              string               `json:"version,omitempty"`
-	SealType             string               `json:"sealType,omitempty"`
-	SealID               string               `json:"sealId,omitempty"`
-	SealName             string               `json:"sealName,omitempty"`
-	SealVendor           string               `json:"sealVendor,omitempty"`
-	Signer               string               `json:"signer,omitempty"`
-	SignatureDateTime    string               `json:"signatureDateTime,omitempty"`
-	Provider             string               `json:"provider,omitempty"`
-	Company              string               `json:"company,omitempty"`
-	DataHashChecked      bool                 `json:"dataHashChecked"`
-	DataHashOK           bool                 `json:"dataHashOK"`
-	SignedValueChecked   bool                 `json:"signedValueChecked"`
-	SignedValueOK        bool                 `json:"signedValueOK"`
-	SealChecked          bool                 `json:"sealChecked"`
-	SealOK               bool                 `json:"sealOK"`
-	SealMatchChecked     bool                 `json:"sealMatchChecked"`
-	SealMatchOK          bool                 `json:"sealMatchOK"`
-	CertChecked          bool                 `json:"certChecked"`
-	CertOK               bool                 `json:"certOK"`
-	SignatureTimeChecked bool                 `json:"signatureTimeChecked,omitempty"`
-	SignatureTimeOK      bool                 `json:"signatureTimeOK,omitempty"`
-	SealTimeChecked      bool                 `json:"sealTimeChecked,omitempty"`
-	SealTimeOK           bool                 `json:"sealTimeOK,omitempty"`
-	SealCertTimeChecked  bool                 `json:"sealCertTimeChecked,omitempty"`
-	SealCertTimeOK       bool                 `json:"sealCertTimeOK,omitempty"`
-	CertTimeChecked      bool                 `json:"certTimeChecked,omitempty"`
-	CertTimeOK           bool                 `json:"certTimeOK,omitempty"`
-	CertTrustChecked     bool                 `json:"certTrustChecked,omitempty"`
-	CertTrustOK          bool                 `json:"certTrustOK,omitempty"`
-	CertTrustError       string               `json:"certTrustError,omitempty"`
-	ReferenceCount       int                  `json:"referenceCount"`
-	ReferenceChecked     int                  `json:"referenceChecked"`
-	ReferencePassed      int                  `json:"referencePassed"`
-	SignatureMethod      string               `json:"signatureMethod,omitempty"`
-	DigestMethod         string               `json:"digestMethod,omitempty"`
-	SignSerial           string               `json:"signSerial,omitempty"`
-	SignSubject          string               `json:"signSubject,omitempty"`
-	SignIssuer           string               `json:"signIssuer,omitempty"`
-	SealSubject          string               `json:"sealSubject,omitempty"`
-	Stamps               []SignatureStampInfo `json:"stamps,omitempty"`
-	Error                string               `json:"error,omitempty"`
 }
 
 // TimestampInfo 独立展示时间戳绑定、签名、信任和证书时效
@@ -681,63 +681,63 @@ func signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
 	info := SignatureInfo{
 		DocIndex:             report.DocIndex,
 		DocRoot:              report.DocRoot,
-		IntegrityValid:       report.IntegrityValid(),
-		TrustedValid:         report.TrustedValid(),
-		PolicyChecked:        report.PolicyChecked,
-		PolicyOK:             report.PolicyOK,
-		PolicyError:          report.PolicyError,
-		CoverageChecked:      report.CoverageChecked,
-		CoverageOK:           report.CoverageOK,
-		CoverageError:        report.CoverageError,
-		UncoveredFiles:       report.UncoveredFiles,
-		TimestampChecked:     report.TimestampChecked,
-		TimestampOK:          report.TimestampOK,
-		RevocationChecked:    report.RevocationChecked,
-		RevocationOK:         report.RevocationOK,
 		ID:                   report.ID,
 		Type:                 string(report.Type),
 		Status:               status,
-		Version:              report.Provider.Version,
-		SealType:             report.SealType,
-		SealID:               report.SealInfo.ID,
-		SealName:             report.SealInfo.Name,
-		SealVendor:           report.SealInfo.VendorID,
+		IntegrityValid:       report.IntegrityValid(),
+		TrustedValid:         report.TrustedValid(),
+		Error:                signatureReportError(report),
 		Signer:               signatureSigner(report),
 		SignatureDateTime:    dateTime,
+		SealName:             report.SealInfo.Name,
 		Provider:             report.Provider.ProviderName,
 		Company:              report.Provider.Company,
+		SealType:             report.SealType,
+		SealID:               report.SealInfo.ID,
+		SealVendor:           report.SealInfo.VendorID,
+		Version:              report.Provider.Version,
+		SignSubject:          report.SignCert.Subject,
+		SignIssuer:           report.SignCert.Issuer,
+		SignSerial:           report.SignCert.SerialNumber,
+		SealSubject:          report.SealCert.Subject,
+		SignatureMethod:      report.SignatureMethod,
+		DigestMethod:         report.DigestMethod,
+		ReferenceCount:       len(report.References),
+		ReferenceChecked:     checked,
+		ReferencePassed:      passed,
+		Stamps:               signatureStampInfos(report.StampPositions),
 		DataHashChecked:      report.DataHashChecked,
 		DataHashOK:           report.DataHashOK,
 		SignedValueChecked:   report.SignedValueChecked,
 		SignedValueOK:        report.SignedValueOK,
-		SealChecked:          report.SealChecked,
-		SealOK:               report.SealOK,
-		SealMatchChecked:     report.SealMatchChecked,
-		SealMatchOK:          report.SealMatchOK,
 		CertChecked:          report.CertChecked,
 		CertOK:               report.CertOK,
-		SignatureTimeChecked: report.SignatureTimeChecked,
-		SignatureTimeOK:      report.SignatureTimeOK,
-		SealTimeChecked:      report.SealTimeChecked,
-		SealTimeOK:           report.SealTimeOK,
-		SealCertTimeChecked:  report.SealCertTimeChecked,
-		SealCertTimeOK:       report.SealCertTimeOK,
 		CertTimeChecked:      report.CertTimeChecked,
 		CertTimeOK:           report.CertTimeOK,
 		CertTrustChecked:     report.CertTrustChecked,
 		CertTrustOK:          report.CertTrustOK,
 		CertTrustError:       report.CertTrustError,
-		ReferenceCount:       len(report.References),
-		ReferenceChecked:     checked,
-		ReferencePassed:      passed,
-		SignatureMethod:      report.SignatureMethod,
-		DigestMethod:         report.DigestMethod,
-		SignSerial:           report.SignCert.SerialNumber,
-		SignSubject:          report.SignCert.Subject,
-		SignIssuer:           report.SignCert.Issuer,
-		SealSubject:          report.SealCert.Subject,
-		Stamps:               signatureStampInfos(report.StampPositions),
-		Error:                signatureReportError(report),
+		SignatureTimeChecked: report.SignatureTimeChecked,
+		SignatureTimeOK:      report.SignatureTimeOK,
+		SealChecked:          report.SealChecked,
+		SealOK:               report.SealOK,
+		SealMatchChecked:     report.SealMatchChecked,
+		SealMatchOK:          report.SealMatchOK,
+		SealTimeChecked:      report.SealTimeChecked,
+		SealTimeOK:           report.SealTimeOK,
+		SealCertTimeChecked:  report.SealCertTimeChecked,
+		SealCertTimeOK:       report.SealCertTimeOK,
+		CoverageChecked:      report.CoverageChecked,
+		CoverageOK:           report.CoverageOK,
+		CoverageError:        report.CoverageError,
+		UncoveredFiles:       report.UncoveredFiles,
+		PolicyChecked:        report.PolicyChecked,
+		PolicyOK:             report.PolicyOK,
+		PolicyError:          report.PolicyError,
+		TimestampChecked:     report.TimestampChecked,
+		TimestampOK:          report.TimestampOK,
+		RevocationChecked:    report.RevocationChecked,
+		RevocationOK:         report.RevocationOK,
 	}
 	for _, stamp := range report.Timestamps {
 		info.Timestamps = append(info.Timestamps, TimestampInfo{

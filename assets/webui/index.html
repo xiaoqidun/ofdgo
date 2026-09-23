@@ -353,8 +353,9 @@
 				</div>
 			</form>
 		</dialog>
-		<dialog id="signPanel" class="form-dialog security-dialog" aria-label="签章">
+		<dialog id="signPanel" class="form-dialog security-dialog" aria-labelledby="signTitle">
 			<form id="signForm" autocomplete="off">
+				<h2 id="signTitle" class="form-title">签署文档</h2>
 				<div class="form-row"><label for="signCertificate">证书</label><input id="signCertificate" type="file" accept=".pem,.cer,.crt,.der" required></div>
 				<div class="form-row"><label for="signKey">私钥</label><input id="signKey" type="file" accept=".pem,.key,.der" required></div>
 				<div class="form-row"><label for="signKeyPassword">私钥口令</label><input id="signKeyPassword" type="password" autocomplete="off"></div>
@@ -374,8 +375,9 @@
 				<div class="form-actions"><div id="signStatus" class="form-status" role="status" aria-live="polite"></div><button id="signCancel" class="button" type="button">取消</button><button class="button" type="submit" title="签署另存">签署</button></div>
 			</form>
 		</dialog>
-		<dialog id="verifyPanel" class="form-dialog security-dialog" aria-label="验签">
+		<dialog id="verifyPanel" class="form-dialog security-dialog" aria-labelledby="verifyTitle">
 			<form id="verifyForm">
+				<h2 id="verifyTitle" class="form-title">验证签名</h2>
 				<div class="form-row"><label for="verifyRoots">信任根</label><input id="verifyRoots" type="file" accept=".pem,.cer,.crt,.der" multiple></div>
 				<div class="form-row"><label for="verifyCerts">证书</label><input id="verifyCerts" type="file" accept=".pem,.cer,.crt,.der" multiple></div>
 				<div class="form-row"><label for="verifyTimeRoots">时间戳根</label><input id="verifyTimeRoots" type="file" accept=".pem,.cer,.crt,.der" multiple></div>
@@ -386,8 +388,9 @@
 				<div class="form-actions"><div id="verifyStatus" class="form-status" role="status" aria-live="polite"></div><button id="verifyCancel" class="button" type="button">取消</button><button class="button" type="submit">验签</button></div>
 			</form>
 		</dialog>
-		<dialog id="credentialsPanel" class="form-dialog security-dialog" aria-label="解锁文档">
+		<dialog id="credentialsPanel" class="form-dialog security-dialog" aria-labelledby="credentialsTitle">
 			<form id="credentialsForm" autocomplete="off">
+				<h2 id="credentialsTitle" class="form-title">解锁文档</h2>
 				<div class="form-row"><label for="credentialsType">方式</label><select id="credentialsType"><option value="password">口令</option><option value="certificate">证书</option></select></div>
 				<div class="form-row"><label for="credentialsUser">用户</label><input id="credentialsUser" type="text" autocomplete="off" spellcheck="false"></div>
 				<div id="credentialsPasswordRow" class="form-row"><label for="credentialsPassword">口令</label><input id="credentialsPassword" type="password" autocomplete="off" required autofocus></div>
@@ -397,8 +400,9 @@
 				<div class="form-actions"><div id="credentialsStatus" class="form-status" role="status" aria-live="polite"></div><button id="credentialsCancel" class="button" type="button">取消</button><button class="button" type="submit">解锁</button></div>
 			</form>
 		</dialog>
-		<dialog id="exportPanel" class="form-dialog" aria-label="导出文档">
+		<dialog id="exportPanel" class="form-dialog" aria-labelledby="exportTitle">
 			<form id="exportForm">
+				<h2 id="exportTitle" class="form-title">导出文档</h2>
 				<div id="encryptionFields" hidden>
 					<div class="form-row"><label for="encryptionType">方式</label><select id="encryptionType"><option value="password">口令</option><option value="certificate">证书</option></select></div>
 					<div id="encryptionUserRow" class="form-row"><label for="encryptionUser">用户</label><input id="encryptionUser" type="text" autocomplete="off" spellcheck="false"></div>

@@ -46,32 +46,20 @@ import (
 type SignatureVerifyReport struct {
 	DocIndex             int
 	DocRoot              string
-	PolicyChecked        bool
-	PolicyOK             bool
-	PolicyError          string
-	CoverageChecked      bool
-	CoverageOK           bool
-	CoverageError        string
-	CoveredFiles         []string
-	UncoveredFiles       []string
-	TimestampChecked     bool
-	TimestampOK          bool
-	Timestamps           []SignatureTimestampReport
-	RevocationChecked    bool
-	RevocationOK         bool
-	Revocations          []SignatureRevocationReport
 	ID                   string
 	BaseLoc              string
 	Type                 SignType
-	Provider             SignatureProvider
+	Valid                bool
+	Error                string
 	Signer               string
-	SignCert             SignatureCertInfo
-	SealCert             SignatureCertInfo
-	SealInfo             SignatureSealInfo
-	SealType             string
-	SignatureMethod      string
 	SignatureDateTime    string
 	SignatureTime        time.Time
+	Provider             SignatureProvider
+	SealInfo             SignatureSealInfo
+	SealType             string
+	SignCert             SignatureCertInfo
+	SealCert             SignatureCertInfo
+	SignatureMethod      string
 	DigestMethod         string
 	References           []SignatureReferenceVerify
 	Stamps               []SignatureStamp
@@ -82,25 +70,37 @@ type SignatureVerifyReport struct {
 	DataHashOK           bool
 	SignedValueChecked   bool
 	SignedValueOK        bool
-	SealChecked          bool
-	SealOK               bool
-	SealMatchChecked     bool
-	SealMatchOK          bool
 	CertChecked          bool
 	CertOK               bool
-	SignatureTimeChecked bool
-	SignatureTimeOK      bool
-	SealCertTimeChecked  bool
-	SealCertTimeOK       bool
-	SealTimeChecked      bool
-	SealTimeOK           bool
 	CertTimeChecked      bool
 	CertTimeOK           bool
 	CertTrustChecked     bool
 	CertTrustOK          bool
 	CertTrustError       string
-	Valid                bool
-	Error                string
+	SignatureTimeChecked bool
+	SignatureTimeOK      bool
+	SealChecked          bool
+	SealOK               bool
+	SealMatchChecked     bool
+	SealMatchOK          bool
+	SealTimeChecked      bool
+	SealTimeOK           bool
+	SealCertTimeChecked  bool
+	SealCertTimeOK       bool
+	CoverageChecked      bool
+	CoverageOK           bool
+	CoverageError        string
+	CoveredFiles         []string
+	UncoveredFiles       []string
+	PolicyChecked        bool
+	PolicyOK             bool
+	PolicyError          string
+	TimestampChecked     bool
+	TimestampOK          bool
+	Timestamps           []SignatureTimestampReport
+	RevocationChecked    bool
+	RevocationOK         bool
+	Revocations          []SignatureRevocationReport
 }
 
 // IntegrityValid 判断签名完整性是否有效

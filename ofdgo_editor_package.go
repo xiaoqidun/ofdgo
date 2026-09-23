@@ -49,7 +49,7 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 			if err != nil {
 				return nil, err
 			}
-			if !bytes.Equal(data, original.data) {
+			if original.repaired || !bytes.Equal(data, original.data) {
 				parts[reader.ResPath(original.ref.BaseLoc)] = data
 			}
 		} else {

@@ -498,6 +498,15 @@ func renderPage(args []js.Value) (any, error) {
 		dpi = args[2].Float()
 	}
 	raster := len(args) > 3 && args[3].Bool()
+	if currentEditor != nil {
+		page, err := currentEditor.Page(args[0].Int())
+		if err != nil {
+			return nil, err
+		}
+		if err := syncEditorPageIDs(args[0].Int(), page); err != nil {
+			return nil, err
+		}
+	}
 	page, err := currentSession.RenderPage(args[0].Int(), backend, dpi, raster)
 	if err != nil {
 		return nil, err
@@ -569,7 +578,7 @@ func renderPage(args []js.Value) (any, error) {
 }
 
 // pageTextString 提取OFD页面原文
-// 入参: args 浏览器参数
+// 入参: args 页面索引
 // 返回: any 页面原文, error 错误信息
 func pageTextString(args []js.Value) (any, error) {
 	if currentSession == nil {
@@ -2906,7 +2915,7 @@ func updateInfo(args []js.Value) (any, error) {
 }
 
 // editDocument 将已打开文档接入编辑器，沿用页面、资源及字体配置
-// 入参: args 浏览器参数
+// 入参: args 当前页索引，省略时使用首页
 // 返回: any 编辑状态, error 错误信息
 func editDocument(args []js.Value) (any, error) {
 	if currentSession == nil {
@@ -2924,11 +2933,45 @@ func editDocument(args []js.Value) (any, error) {
 		editor.SetFontFS(currentSession.fontFS)
 	}
 	editor.SetRenderBackends(currentSession.Renderer.Backends())
+	page := 0
+	if len(args) != 0 {
+		page = args[0].Int()
+	}
+	content, err := editor.Page(page)
+	if err != nil {
+		return nil, err
+	}
+	if err := syncEditorPageIDs(page, content); err != nil {
+		return nil, err
+	}
 	currentEditor = editor
 	currentSession.editing = true
 	copiedObjects = nil
 	copiedStyle = nil
 	return editorSummary(), nil
+}
+
+// syncEditorPageIDs 同步编辑副本的对象编号，不改变原渲染属性或丢弃正常页面缓存
+// 入参: index 页面索引, content 编辑页面
+// 返回: error 页面读取错误
+func syncEditorPageIDs(index int, content *ofdgo.PageContent) error {
+	page, err := currentSession.pageContent(index)
+	if err != nil {
+		return err
+	}
+	for i, layer := range content.Content.Layer {
+		for j, object := range layer.Objects {
+			before := &page.Content.Layer[i].Objects[j]
+			if before.TextObject.ID != object.TextObject.ID || before.PathObject.ID != object.PathObject.ID || before.ImageObject.ID != object.ImageObject.ID || before.CompositeGraphicUnit.ID != object.CompositeGraphicUnit.ID {
+				before.TextObject.ID = object.TextObject.ID
+				before.PathObject.ID = object.PathObject.ID
+				before.ImageObject.ID = object.ImageObject.ID
+				before.CompositeGraphicUnit.ID = object.CompositeGraphicUnit.ID
+				delete(currentSession.textCache, index)
+			}
+		}
+	}
+	return nil
 }
 
 // previewEditor 通过内存快照更新预览，不生成中间压缩包
