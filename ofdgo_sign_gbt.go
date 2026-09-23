@@ -29,6 +29,7 @@ const (
 
 // digitalVerifyResult 数字签名验证结果
 type digitalVerifyResult struct {
+	Timestamps      []signatureTimestampEvidence
 	DataHashChecked bool
 	DataHashOK      bool
 	SignedChecked   bool
@@ -42,6 +43,7 @@ type digitalVerifyResult struct {
 
 // gbtSignedData GB/T 35275 SignedData结构
 type gbtSignedData struct {
+	Version       int
 	ContentDigest []byte
 	Certs         []gbtCertificate
 	Signers       []gbtSignerInfo
@@ -56,6 +58,8 @@ type gbtCertificate struct {
 
 // gbtSignerInfo SignedData签名者信息
 type gbtSignerInfo struct {
+	Version      int
+	UnauthAttrs  asn1.RawValue
 	Issuer       []byte
 	Serial       *big.Int
 	DigestAlg    string
@@ -70,6 +74,15 @@ type gbtSignerInfo struct {
 // 返回: *digitalVerifyResult 验证结果, error 错误信息
 func verifyDigitalSignature(method, digestMethod string, signedValue, signedData []byte, options *signatureVerifyOptions) (*digitalVerifyResult, error) {
 	if value, ok := normalizeGBT35275SignedValue(signedValue); ok {
+		sd, err := parseGBT35275SignedData(value)
+		if err != nil {
+			return nil, err
+		}
+		for _, signer := range sd.Signers {
+			if method != "" && !signatureAlgorithmEquivalent(method, signer.SignatureAlg, signer.DigestAlg) {
+				return nil, fmt.Errorf("signature method does not match SignedData")
+			}
+		}
 		return verifyGBT35275SignedData(value, signedData, options)
 	}
 	if isSM2SignatureMethod(method) {
@@ -99,7 +112,7 @@ func verifyRawDigitalSignature(signedValue, signedData []byte, options *signatur
 		result.SignerCerts = [][]byte{cert}
 		result.CertInfo = signatureCertInfo(cert)
 		result.SignedChecked = true
-		if sm2VerifySignature(pub, nil, signedData, signedValue) {
+		if verifySM2Signature(pub, nil, signedData, signedValue) {
 			result.SignedOK = true
 			return result, nil
 		}
@@ -144,6 +157,15 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 	if err != nil {
 		return nil, err
 	}
+	if options.Policy != nil && len(options.Policy.SignedDataVersions) != 0 {
+		allowed := false
+		for _, v := range options.Policy.SignedDataVersions {
+			allowed = allowed || v == sd.Version
+		}
+		if !allowed {
+			return nil, rejectSignaturePolicy("SignedData version rejected: %d", sd.Version)
+		}
+	}
 	for _, cert := range options.SignCerts {
 		c, err := parseGBTCertificate(cert)
 		if err == nil {
@@ -155,6 +177,12 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 	}
 	result := &digitalVerifyResult{Certs: sd.rawCerts()}
 	for index, signer := range sd.Signers {
+		if err := signatureSignerDigest(signer.SignatureAlg, signer.DigestAlg); err != nil {
+			return result, err
+		}
+		if err := signatureAlgorithmPolicy(options.Policy, signer.SignatureAlg, signer.DigestAlg); err != nil {
+			return result, err
+		}
 		digest, err := signatureDigest(signer.DigestAlg, signedData)
 		if err != nil {
 			return nil, err
@@ -184,6 +212,13 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 			return result, nil
 		}
 		result.SignerCerts = append(result.SignerCerts, cert.Raw)
+		tokens, err := signatureTimestampAttributes(signer.UnauthAttrs)
+		if err != nil {
+			return result, err
+		}
+		for _, token := range tokens {
+			result.Timestamps = append(result.Timestamps, signatureTimestampEvidence{Token: token, Data: signer.Signature})
+		}
 		result.CertInfo = signatureCertInfo(cert.Raw)
 		if isSM2SignatureMethod(signer.SignatureAlg) {
 			pub, err := parseSM2PublicKeyFromCert(cert.Raw)
@@ -191,7 +226,7 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 				result.CertOK = false
 				return result, err
 			}
-			if !sm2VerifySignature(pub, nil, plain, signer.Signature) {
+			if !verifySM2Signature(pub, nil, plain, signer.Signature) {
 				result.SignedChecked = true
 				result.CertChecked = index == len(sd.Signers)-1
 				result.CertOK = true
@@ -376,7 +411,11 @@ func parseGBT35275SignedData(data []byte) (*gbtSignedData, error) {
 	if !ok || len(items) < 4 {
 		return nil, fmt.Errorf("invalid signed data")
 	}
-	sd := &gbtSignedData{}
+	version, err := asn1Integer(items[0])
+	if err != nil || version != 1 && version != 3 {
+		return nil, fmt.Errorf("unsupported GB/T signed data version: %d", version)
+	}
+	sd := &gbtSignedData{Version: version}
 	contentOID, content, hasContent, err := parseGBTContentInfo(items[2])
 	if err != nil {
 		return nil, err
@@ -431,7 +470,7 @@ func parseGBTContentInfoBytes(data []byte) (string, asn1.RawValue, bool, error) 
 // 返回: string 内容类型, asn1.RawValue 内容, bool 是否存在内容, error 错误信息
 func parseGBTContentInfo(raw asn1.RawValue) (string, asn1.RawValue, bool, error) {
 	items, ok := asn1Children(raw.Bytes)
-	if !ok || len(items) == 0 {
+	if !ok || len(items) == 0 || len(items) > 2 || raw.Class != asn1.ClassUniversal || raw.Tag != asn1.TagSequence || !raw.IsCompound {
 		return "", asn1.RawValue{}, false, fmt.Errorf("invalid content info")
 	}
 	oid, err := asn1OIDString(items[0])
@@ -477,8 +516,8 @@ func parseGBTCertificate(data []byte) (gbtCertificate, error) {
 	}
 	return gbtCertificate{
 		Raw:    cert.Raw,
-		Issuer: cert.Issuer,
-		Serial: cert.Serial,
+		Issuer: cert.RawIssuer,
+		Serial: cert.SerialNumber,
 	}, nil
 }
 
@@ -508,6 +547,10 @@ func parseGBTSignerInfo(raw asn1.RawValue) (gbtSignerInfo, error) {
 	items, ok := asn1Children(raw.Bytes)
 	if !ok || len(items) < 5 {
 		return gbtSignerInfo{}, fmt.Errorf("invalid signer info")
+	}
+	version, err := asn1Integer(items[0])
+	if err != nil || version != 1 {
+		return gbtSignerInfo{}, fmt.Errorf("unsupported signer info version")
 	}
 	issuer, serial, err := parseGBTIssuerAndSerial(items[1])
 	if err != nil {
@@ -539,7 +582,16 @@ func parseGBTSignerInfo(raw asn1.RawValue) (gbtSignerInfo, error) {
 	if err != nil {
 		return gbtSignerInfo{}, err
 	}
+	var unauth asn1.RawValue
+	if len(items) > idx+2 {
+		unauth = items[idx+2]
+		if len(items) != idx+3 || unauth.Class != asn1.ClassContextSpecific || unauth.Tag != 1 || !unauth.IsCompound {
+			return gbtSignerInfo{}, fmt.Errorf("invalid unauthenticated attributes")
+		}
+	}
 	return gbtSignerInfo{
+		Version:      version,
+		UnauthAttrs:  unauth,
 		Issuer:       issuer,
 		Serial:       serial,
 		DigestAlg:    digestAlg,
@@ -587,20 +639,29 @@ func parseGBTMessageDigestAttr(raw asn1.RawValue) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("invalid authenticated attributes")
 	}
+	var digest []byte
+	found := false
 	for _, attr := range attrs {
 		items, ok := asn1Children(attr.Bytes)
-		if !ok || len(items) < 2 {
-			continue
+		if !ok || len(items) != 2 {
+			return nil, fmt.Errorf("invalid authenticated attribute")
 		}
 		oid, err := asn1OIDString(items[0])
 		if err != nil || oid != signAttrMessageDigest {
 			continue
 		}
 		values, ok := asn1Children(items[1].Bytes)
-		if !ok || len(values) == 0 {
+		if !ok || len(values) != 1 || found {
 			return nil, fmt.Errorf("invalid message digest attribute")
 		}
-		return asn1OctetString(values[0])
+		digest, err = asn1OctetString(values[0])
+		if err != nil {
+			return nil, err
+		}
+		found = true
+	}
+	if found {
+		return digest, nil
 	}
 	return nil, fmt.Errorf("message digest attribute not found")
 }

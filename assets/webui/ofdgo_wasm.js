@@ -7,7 +7,7 @@ self.onmessage = ({ data }) => {
 		operations.get(data.id)?.abort();
 		return;
 	}
-	if (data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoImportPages") {
+	if (data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveEncrypted" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
 		operations.set(data.id, new AbortController());
 	}
 	pending = pending.then(() => handleMessage(data));
@@ -17,6 +17,10 @@ async function handleMessage({ id, name, args }) {
 	let channel;
 	const signal = operations.get(id)?.signal;
 	const importing = name === "ofdgoImportPages";
+	const saving = name === "ofdgoSaveDocument" || name === "ofdgoSaveEncrypted" || name === "ofdgoSaveSigned";
+	const key = name === "ofdgoOpen" ? args[3]?.key : name === "ofdgoSaveSigned" || name === "ofdgoLoadImport" ? args[1]?.key : null;
+	const keyPassword = name === "ofdgoOpen" ? args[3]?.keyPassword : name === "ofdgoSaveSigned" || name === "ofdgoLoadImport" ? args[1]?.keyPassword : null;
+	const password = name === "ofdgoOpen" ? args[3]?.password : name === "ofdgoSaveEncrypted" || name === "ofdgoLoadImport" ? args[1]?.password : null;
 	try {
 		signal?.throwIfAborted();
 		const chunks = [];
@@ -37,7 +41,7 @@ async function handleMessage({ id, name, args }) {
 				});
 			} else {
 				const file = args.pop();
-				const indices = name === "ofdgoSaveDocument" ? args.shift() : null;
+				const indices = saving ? args.shift() : null;
 				if (file) output = await file.createWritable();
 				signal.throwIfAborted();
 				args.push((bytes, done) => {
@@ -58,7 +62,7 @@ async function handleMessage({ id, name, args }) {
 						self.postMessage({ id, type: "export", stage: "pages", completed, total });
 						finish(done);
 					});
-				} else if (name === "ofdgoSaveDocument") {
+				} else if (saving) {
 					args.push((phase, completed, total, done) => {
 						self.postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
 						finish(done);
@@ -94,6 +98,9 @@ async function handleMessage({ id, name, args }) {
 		}
 		self.postMessage(result);
 	} finally {
+		password?.fill(0);
+		key?.fill(0);
+		keyPassword?.fill(0);
 		channel?.port1.close();
 		channel?.port2.close();
 		operations.delete(id);

@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -91,6 +92,7 @@ var copiedStyle *ofdgo.GraphicObject
 // apiResult 浏览器接口返回结果
 type apiResult struct {
 	OK            bool                     `json:"ok"`
+	Code          string                   `json:"code,omitempty"`
 	Error         string                   `json:"error,omitempty"`
 	Data          any                      `json:"data,omitempty"`
 	MissingGlyphs *ofdgo.MissingGlyphError `json:"missingGlyphs,omitempty"`
@@ -102,6 +104,7 @@ func RunWASM() {
 	registerCallback("ofdgoOpen", openDocument)
 	registerCallback("ofdgoConfigure", configureDocument)
 	registerCallback("ofdgoDocumentInfo", documentInfo)
+	registerCallback("ofdgoVerifySignatures", verifySignatures)
 	registerCallback("ofdgoRenderPage", renderPage)
 	registerCallback("ofdgoRenderBackends", renderBackends)
 	registerCallback("ofdgoSVGFontData", svgFontData)
@@ -171,6 +174,8 @@ func RunWASM() {
 	registerCallback("ofdgoUndo", func([]js.Value) (any, error) { return restoreEditor(false) })
 	registerCallback("ofdgoRedo", func([]js.Value) (any, error) { return restoreEditor(true) })
 	registerAsyncCallback("ofdgoSaveDocument", saveDocument)
+	registerAsyncCallback("ofdgoSaveEncrypted", saveEncrypted)
+	registerAsyncCallback("ofdgoSaveSigned", saveSigned)
 	select {}
 }
 
@@ -214,6 +219,16 @@ func callbackResult(fn func([]js.Value) (any, error), args []js.Value) any {
 	data, err := safeCall(fn, args)
 	if err != nil {
 		result := apiResult{Error: err.Error()}
+		switch {
+		case errors.Is(err, ofdgo.ErrCredentialsRequired):
+			result.Code, result.Error = "credentialsRequired", "文档已加密"
+		case errors.Is(err, ofdgo.ErrInvalidCredentials):
+			result.Code, result.Error = "invalidCredentials", "凭据无效或文件损坏"
+		case errors.Is(err, ofdgo.ErrUnsupportedEncryption):
+			result.Code, result.Error = "unsupportedEncryption", "不支持此加密方式"
+		case errors.Is(err, ofdgo.ErrEncryptionPolicyRequired):
+			result.Code, result.Error = "encryptionPolicyRequired", "请设置加密方式"
+		}
 		var failure *ofdgo.EditError
 		if errors.As(err, &failure) {
 			result.ReasonCode = failure.Code
@@ -257,6 +272,19 @@ func openDocument(args []js.Value) (any, error) {
 		return nil, err
 	}
 	renderAnnotations := args[2].Bool()
+	options := OpenOptions{Fonts: fonts, RenderAnnotations: renderAnnotations}
+	if len(args) > 3 && !args[3].IsNull() && !args[3].IsUndefined() {
+		credentials, err := credentialsFromJS(args[3])
+		if err != nil {
+			return nil, err
+		}
+		defer clear(credentials.Password)
+		options.ReaderOptions = append(options.ReaderOptions, ofdgo.WithCredentials(credentials))
+	}
+	session, err := Open(data, options)
+	if err != nil {
+		return nil, err
+	}
 	clearImport()
 	currentEditor = nil
 	copiedObjects = nil
@@ -265,12 +293,47 @@ func openDocument(args []js.Value) (any, error) {
 		_ = currentSession.Close()
 		currentSession = nil
 	}
-	session, err := Open(data, OpenOptions{Fonts: fonts, RenderAnnotations: renderAnnotations})
-	if err != nil {
-		return nil, err
-	}
 	currentSession = session
 	return currentSession.Summary(), nil
+}
+
+// credentialsFromJS 解析本次打开的口令或本机证书私钥
+// 入参: value 解锁表单数据
+// 返回: ofdgo.Credentials 会话凭据, error 错误信息
+func credentialsFromJS(value js.Value) (ofdgo.Credentials, error) {
+	credentials := ofdgo.Credentials{UserName: value.Get("userName").String()}
+	if keyValue := value.Get("key"); !keyValue.IsNull() && !keyValue.IsUndefined() {
+		key, err := bytesFromJS(keyValue)
+		if err != nil {
+			return credentials, err
+		}
+		defer clear(key)
+		certificate, err := bytesFromJS(value.Get("certificate"))
+		if err != nil {
+			return credentials, err
+		}
+		var password []byte
+		if field := value.Get("keyPassword"); !field.IsUndefined() && !field.IsNull() {
+			password, err = bytesFromJS(field)
+			if err != nil {
+				return credentials, err
+			}
+			defer clear(password)
+		}
+		signer, certificate, err := ofdgo.ParseSignatureIdentity(certificate, key, password)
+		if err != nil {
+			return credentials, ofdgo.ErrInvalidCredentials
+		}
+		decrypter, ok := signer.(crypto.Decrypter)
+		if !ok {
+			return credentials, ofdgo.ErrInvalidCredentials
+		}
+		credentials.Certificate, credentials.Decrypter = certificate, decrypter
+		return credentials, nil
+	}
+	var err error
+	credentials.Password, err = bytesFromJS(value.Get("password"))
+	return credentials, err
 }
 
 // configureDocument 更新当前会话的字体和注解设置
@@ -313,6 +376,70 @@ func documentInfo(args []js.Value) (any, error) {
 		return map[string]bool{"detailsPending": true}, nil
 	}
 	return currentSession.Info(), nil
+}
+
+// securityFilesFromJS 读取会话内的本机证据文件
+// 入参: value 二进制数组列表
+// 返回: [][]byte 文件内容, error 错误信息
+func securityFilesFromJS(value js.Value) ([][]byte, error) {
+	if value.IsUndefined() || value.IsNull() {
+		return nil, nil
+	}
+	files := make([][]byte, value.Length())
+	for i := range files {
+		var err error
+		files[i], err = bytesFromJS(value.Index(i))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return files, nil
+}
+
+// verifySignatures 按本机信任锚和离线证据重新验签，不设置联网回调
+// 入参: args 信任根、辅助证书、时间戳及撤销证据
+// 返回: any 分项报告, error 错误信息
+func verifySignatures(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) == 0 {
+		return nil, fmt.Errorf("missing signature verification arguments")
+	}
+	input := args[0]
+	files := make(map[string][][]byte)
+	for _, name := range []string{"roots", "certificates", "timestampRoots", "tokens", "crls", "ocsp"} {
+		data, err := securityFilesFromJS(input.Get(name))
+		if err != nil {
+			return nil, err
+		}
+		files[name] = data
+	}
+	now := time.Now()
+	policy := ofdgo.SignaturePolicy{RejectWeakAlgorithms: true, RequireDocumentCoverage: true,
+		RequireTimestamp: input.Get("requireTimestamp").Bool(), RequireRevocation: input.Get("requireRevocation").Bool()}
+	options := []ofdgo.SignatureVerifyOption{
+		ofdgo.WithSignatureVerifyTime(now), ofdgo.WithSignaturePolicy(policy),
+		ofdgo.WithSignatureTrustCerts(files["roots"]...), ofdgo.WithSignatureCerts(files["certificates"]...),
+	}
+	if policy.RequireTimestamp || len(files["timestampRoots"])+len(files["tokens"]) > 0 {
+		options = append(options, ofdgo.WithSignatureTimestamp(ofdgo.SignatureTimestampOptions{
+			TrustCerts: files["timestampRoots"], Certificates: files["certificates"], Tokens: files["tokens"], Required: policy.RequireTimestamp, VerifyTime: &now,
+		}))
+	}
+	if policy.RequireRevocation || len(files["crls"])+len(files["ocsp"]) > 0 {
+		options = append(options, ofdgo.WithSignatureRevocation(ofdgo.SignatureRevocationOptions{
+			SignatureRevocationEvidence: ofdgo.SignatureRevocationEvidence{CRLs: files["crls"], OCSPResponses: files["ocsp"]},
+			Certificates:                append(files["certificates"], files["roots"]...), Required: policy.RequireRevocation, VerifyTime: &now,
+		}))
+	}
+	reports, err := currentSession.Reader.VerifySignatures(options...)
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]SignatureInfo, len(reports))
+	for i, report := range reports {
+		infos[i] = signatureInfo(report)
+	}
+	currentSession.signatures, currentSession.signatureError, currentSession.signaturesRead = infos, nil, true
+	return map[string]any{"signatures": infos, "signatureCount": len(infos), "signatureError": ""}, nil
 }
 
 // exportAttachment 分块导出附件
@@ -2686,7 +2813,16 @@ func loadImport(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	reader, err := ofdgo.NewReader(bytes.NewReader(data), int64(len(data)))
+	var options []ofdgo.ReaderOption
+	if len(args) > 1 && !args[1].IsNull() && !args[1].IsUndefined() {
+		credentials, err := credentialsFromJS(args[1])
+		if err != nil {
+			return nil, err
+		}
+		defer clear(credentials.Password)
+		options = append(options, ofdgo.WithCredentials(credentials))
+	}
+	reader, err := ofdgo.NewReader(bytes.NewReader(data), int64(len(data)), options...)
 	if err != nil {
 		return nil, err
 	}
@@ -2700,7 +2836,7 @@ func loadImport(args []js.Value) (any, error) {
 		return nil, fmt.Errorf("document has no pages")
 	}
 	pendingImport = reader
-	return map[string]any{"pageCount": len(doc.Pages.Page), "signed": doc.Signatures != ""}, nil
+	return map[string]any{"pageCount": len(doc.Pages.Page), "signed": doc.Signatures != "", "encrypted": reader.Encryption().Encrypted}, nil
 }
 
 // importPages 插入指定来源页面并保持目标文档元数据
@@ -2727,8 +2863,13 @@ func importPages(args []js.Value) (any, error) {
 	}
 	at := args[1].Int()
 	options := ofdgo.PageImportOptions{Outlines: len(args) > 2 && args[2].Bool()}
-	if len(args) > 3 {
-		options.OnProgress = editorOperationProgress(args[3])
+	progressIndex := 3
+	if len(args) > 3 && args[3].Type() == js.TypeBoolean {
+		options.AllowDecrypted = args[3].Bool()
+		progressIndex = 4
+	}
+	if len(args) > progressIndex {
+		options.OnProgress = editorOperationProgress(args[progressIndex])
 	}
 	if _, err := currentEditor.ImportPagesWithOptions(pendingImport, indexes, at, options); err != nil {
 		return nil, err
@@ -3454,16 +3595,172 @@ func saveDocument(args []js.Value) (any, error) {
 	if currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
 	}
-	if len(args) > 1 {
-		currentEditor.OnWriteProgress = editorOperationProgress(args[1])
+	return saveEditor(currentEditor, args)
+}
+
+// saveEncrypted 以独立快照加密另存，不修改当前文档的输出策略
+// 入参: args 加密选项、写出回调、进度回调和可选页面索引
+// 返回: any 保存结果, error 错误信息
+func saveEncrypted(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) < 3 {
+		return nil, fmt.Errorf("missing encrypted save arguments")
+	}
+	password, err := bytesFromJS(args[0].Get("password"))
+	if err != nil {
+		return nil, err
+	}
+	defer clear(password)
+	options := &ofdgo.EncryptionOptions{Password: password, UserName: args[0].Get("userName").String()}
+	if recipients := args[0].Get("recipients"); !recipients.IsUndefined() && !recipients.IsNull() {
+		for i := 0; i < recipients.Length(); i++ {
+			item := recipients.Index(i)
+			data, err := bytesFromJS(item.Get("certificate"))
+			if err != nil {
+				return nil, err
+			}
+			certificate, err := ofdgo.ParseEncryptionCertificate(data)
+			if err != nil {
+				return nil, fmt.Errorf("接收者证书无效或不支持SM2加密")
+			}
+			options.Recipients = append(options.Recipients, ofdgo.EncryptionRecipient{UserName: item.Get("userName").String(), Certificate: certificate})
+		}
+	}
+	if len(password) == 0 && len(options.Recipients) == 0 {
+		return nil, ofdgo.ErrEncryptionPolicyRequired
+	}
+	reader := currentSession.Reader
+	if currentEditor != nil {
+		reader, err = currentEditor.Reader()
+		if err != nil {
+			return nil, err
+		}
+		defer reader.Close()
+	}
+	editor, err := reader.Editor()
+	if err != nil {
+		return nil, err
+	}
+	if err := editor.SetEncryption(options); err != nil {
+		return nil, err
+	}
+	return saveEditor(editor, args[1:])
+}
+
+// saveSigned 调用库层最终包签署并在回验成功后交付浏览器
+// 入参: args 本机证书私钥、信任根、印章位置、写出回调及进度回调
+// 返回: any 保存结果, error 错误信息
+func saveSigned(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) < 3 {
+		return nil, fmt.Errorf("missing signature arguments")
+	}
+	input := args[0]
+	key, err := bytesFromJS(input.Get("key"))
+	if err != nil {
+		return nil, err
+	}
+	defer clear(key)
+	certificate, err := bytesFromJS(input.Get("certificate"))
+	if err != nil {
+		return nil, err
+	}
+	var password []byte
+	if field := input.Get("keyPassword"); !field.IsUndefined() && !field.IsNull() {
+		password, err = bytesFromJS(field)
+		if err != nil {
+			return nil, err
+		}
+		defer clear(password)
+	}
+	signer, certificate, err := ofdgo.ParseSignatureIdentity(certificate, key, password)
+	if err != nil {
+		return nil, fmt.Errorf("证书、私钥或口令无效")
+	}
+	roots, err := securityFilesFromJS(input.Get("roots"))
+	if err != nil {
+		return nil, err
+	}
+	intermediates, err := securityFilesFromJS(input.Get("intermediates"))
+	if err != nil {
+		return nil, err
+	}
+	options := ofdgo.SignatureWriteOptions{Signer: signer, Certificate: certificate, TrustRoots: roots,
+		Intermediates: intermediates, Lock: input.Get("lock").Bool()}
+	switch input.Get("mode").String() {
+	case "append":
+		options.Mode = ofdgo.SignatureAppend
+	case "replace":
+		options.Mode = ofdgo.SignatureReplace
+	default:
+		return nil, fmt.Errorf("invalid signature mode")
+	}
+	if seal := input.Get("seal"); !seal.IsNull() && !seal.IsUndefined() {
+		options.Seal, err = bytesFromJS(seal)
+		if err != nil {
+			return nil, err
+		}
+		count, err := currentSession.Reader.PageCount()
+		if err != nil {
+			return nil, err
+		}
+		indices, err := ofdgo.ParsePageRange(input.Get("pages").String(), count)
+		if err != nil {
+			return nil, err
+		}
+		box := ofdgo.Box{X: input.Get("x").Float(), Y: input.Get("y").Float(), W: input.Get("width").Float(), H: input.Get("height").Float()}
+		if input.Get("placement").String() == "seam" {
+			pages := make([]int, len(indices))
+			for i, index := range indices {
+				pages[i] = index + 1
+			}
+			options.Stamps, err = currentSession.Reader.SignatureSeamStamps(pages, box)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			for _, index := range indices {
+				options.Stamps = append(options.Stamps, ofdgo.SignatureStamp{PageRef: currentSession.doc.Pages.Page[index].ID,
+					Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H)})
+			}
+		}
+	}
+	progress := editorOperationProgress(args[2])
+	if err := progress("sign", 0, 1); err != nil {
+		return nil, err
+	}
+	var output bytes.Buffer
+	if currentEditor != nil {
+		currentEditor.OnWriteProgress = progress
 		defer func() { currentEditor.OnWriteProgress = nil }()
+		_, err = ofdgo.SignEditorTo(&output, currentEditor, options)
+	} else {
+		_, err = currentSession.Reader.SignTo(&output, options)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := progress("sign", 1, 1); err != nil {
+		return nil, err
+	}
+	if _, err := (exportWriter{write: args[1]}).Write(output.Bytes()); err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"mime": "application/ofd", "label": "OFD"}), nil
+}
+
+// saveEditor 统一分块写出及进度取消，加密策略由库层执行
+// 入参: editor 待写出文档, args 写出回调、进度回调和可选页面索引
+// 返回: any 保存结果, error 错误信息
+func saveEditor(editor *ofdgo.Editor, args []js.Value) (any, error) {
+	if len(args) > 1 {
+		editor.OnWriteProgress = editorOperationProgress(args[1])
+		defer func() { editor.OnWriteProgress = nil }()
 	}
 	writer := bufio.NewWriterSize(exportWriter{write: args[0]}, 1<<20)
 	var err error
 	if len(args) > 2 {
-		_, err = currentEditor.WritePagesTo(writer, indexesFromJS(args[2]))
+		_, err = editor.WritePagesTo(writer, indexesFromJS(args[2]))
 	} else {
-		_, err = currentEditor.WriteTo(writer)
+		_, err = editor.WriteTo(writer)
 	}
 	if err != nil {
 		return nil, err

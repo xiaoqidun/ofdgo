@@ -645,6 +645,23 @@ button:not(:disabled):hover {
 	padding: 12px;
 }
 
+.security-dialog {
+	width: 360px;
+}
+
+.security-dialog .form-row {
+	grid-template-columns: 4em minmax(0, 1fr);
+}
+
+#verifyForm .form-row {
+	grid-template-columns: 5em minmax(0, 1fr);
+}
+
+.security-dialog .form-row > label,
+.security-dialog .form-row > span {
+	text-align-last: justify;
+}
+
 .form-row {
 	display: grid;
 	grid-template-columns: 2em minmax(0, 1fr);
@@ -711,6 +728,7 @@ button:not(:disabled):hover {
 }
 
 .form-row input[type="text"],
+.form-row input[type="password"],
 .form-row input[type="number"],
 .form-row input[type="file"],
 .form-row select,
@@ -895,6 +913,8 @@ body[data-hide-meta] .meta-panel {
 	border-right: 1px solid var(--line);
 	background: var(--panel);
 	overflow: auto;
+	font-size: 13px;
+	line-height: 1.5;
 }
 
 .page-list-panel {
@@ -1168,7 +1188,7 @@ body[data-hide-meta] .meta-panel {
 	gap: 6px;
 	margin: 8px 0;
 	color: var(--text-muted);
-	font-size: 11px;
+	font-size: 12px;
 	font-variant-numeric: tabular-nums;
 }
 
@@ -1205,7 +1225,7 @@ body[data-hide-meta] .meta-panel {
 	display: block;
 	margin-bottom: 3px;
 	color: var(--text-muted);
-	font-size: 11px;
+	font-size: 12px;
 }
 
 .search-result mark {
@@ -1284,7 +1304,13 @@ button.outline-link:hover {
 	transition: border-color 0.16s ease, background-color 0.16s ease;
 }
 
-.page-list-item[aria-current] {
+.page-list-item:not(:disabled):hover {
+	border-color: var(--line-strong);
+	background: #f0f5f4;
+}
+
+.page-list-item[aria-current],
+.page-list-item[aria-current]:hover {
 	border-color: var(--accent);
 	color: var(--accent-strong);
 	font-weight: 700;
@@ -1297,7 +1323,8 @@ button.outline-link:hover {
 }
 
 .page-list-item[aria-current]:not([aria-pressed="false"]),
-.page-list-item[aria-pressed="true"] {
+.page-list-item[aria-pressed="true"],
+.page-list-item[aria-pressed="true"]:hover {
 	border-color: var(--accent);
 	background: #e4f3ef;
 	color: var(--accent-strong);
@@ -1351,7 +1378,7 @@ button.outline-link:hover {
 }
 
 .thumb-size {
-	font-size: 11px;
+	font-size: 12px;
 	color: var(--text-muted);
 	font-weight: 400;
 }
@@ -2037,7 +2064,8 @@ button.outline-link:hover {
 .font-panel,
 .doc-font-panel,
 .attachment-panel,
-.signature-panel {
+.signature-panel,
+.security-panel {
 	margin-top: 18px;
 	padding-top: 12px;
 	border-top: 1px solid var(--line);
@@ -2070,7 +2098,7 @@ button.outline-link:hover {
 
 .attachment-detail {
 	color: var(--text-muted);
-	font-size: 11px;
+	font-size: 12px;
 }
 
 .count-pill {
@@ -2083,7 +2111,7 @@ button.outline-link:hover {
 	border: 1px solid var(--line);
 	background: #ffffff;
 	color: var(--text-muted);
-	font-size: 11px;
+	font-size: 12px;
 	text-align: center;
 	white-space: nowrap;
 }
@@ -2104,7 +2132,6 @@ button.outline-link:hover {
 	transition: border-color 0.16s ease, background-color 0.16s ease;
 }
 
-.page-list-item:not(:disabled):hover,
 .doc-font-row:hover,
 .signature-row:hover,
 .font-row:hover {
@@ -2194,10 +2221,6 @@ button.outline-link:hover {
 	flex-wrap: wrap;
 	justify-content: flex-end;
 	gap: 4px;
-}
-
-.doc-font-badges,
-.signature-badges {
 	float: right;
 	margin-left: 8px;
 }
@@ -2210,7 +2233,7 @@ button.outline-link:hover {
 	padding: 3px 6px;
 	background: #eef1f4;
 	color: var(--text-muted);
-	font-size: 11px;
+	font-size: 12px;
 	line-height: 1.35;
 	white-space: nowrap;
 }
@@ -2235,17 +2258,38 @@ button.outline-link:hover {
 
 .info-line {
 	display: grid;
-	grid-template-columns: 30px minmax(0, 1fr);
+	grid-template-columns: 2em minmax(0, 1fr);
 	align-items: start;
 	gap: 7px;
 	color: var(--text-muted);
-	font-size: 11px;
-	line-height: 1.35;
+	font-size: 12px;
+	line-height: 1.5;
 }
 
 .info-label {
-	color: #7b8791;
+	color: var(--text-muted);
 	white-space: nowrap;
+}
+
+.meta-panel .info-line {
+	grid-template-columns: 4em minmax(0, 1fr);
+}
+
+.meta-panel .info-label {
+	text-align-last: justify;
+}
+
+.signature-row details {
+	font-size: 12px;
+}
+
+.signature-row summary {
+	cursor: pointer;
+	color: var(--accent-strong);
+}
+
+.signature-row details[open] > .info-line {
+	margin-top: 6px;
 }
 
 .info-value {
@@ -2263,8 +2307,8 @@ button.outline-link:hover {
 
 .doc-font-detail {
 	color: var(--text-muted);
-	font-size: 11px;
-	line-height: 1.35;
+	font-size: 12px;
+	line-height: 1.5;
 	overflow-wrap: anywhere;
 }
 
@@ -2337,7 +2381,7 @@ button.outline-link:hover {
 	border: 1px solid var(--line);
 	background: #f8fafb;
 	color: var(--text-muted);
-	font-size: 11px;
+	font-size: 12px;
 	text-align: center;
 	white-space: nowrap;
 }
@@ -2348,7 +2392,7 @@ button.outline-link:hover {
 	gap: 3px;
 	height: 26px;
 	color: var(--text-muted);
-	font-size: 11px;
+	font-size: 12px;
 	white-space: nowrap;
 }
 

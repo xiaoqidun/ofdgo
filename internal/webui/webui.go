@@ -30,6 +30,7 @@ import (
 type OpenOptions struct {
 	Fonts             []FontFile
 	RenderAnnotations bool
+	ReaderOptions     []ofdgo.ReaderOption
 }
 
 // FontFile 字体文件
@@ -40,6 +41,23 @@ type FontInfo = ofdgo.FontInfo
 
 // SignatureInfo 签名验证信息
 type SignatureInfo struct {
+	DocIndex             int                  `json:"docIndex"`
+	DocRoot              string               `json:"docRoot,omitempty"`
+	IntegrityValid       bool                 `json:"integrityValid"`
+	TrustedValid         bool                 `json:"trustedValid"`
+	PolicyChecked        bool                 `json:"policyChecked"`
+	PolicyOK             bool                 `json:"policyOK"`
+	PolicyError          string               `json:"policyError,omitempty"`
+	CoverageChecked      bool                 `json:"coverageChecked"`
+	CoverageOK           bool                 `json:"coverageOK"`
+	CoverageError        string               `json:"coverageError,omitempty"`
+	UncoveredFiles       []string             `json:"uncoveredFiles,omitempty"`
+	TimestampChecked     bool                 `json:"timestampChecked"`
+	TimestampOK          bool                 `json:"timestampOK"`
+	Timestamps           []TimestampInfo      `json:"timestamps,omitempty"`
+	RevocationChecked    bool                 `json:"revocationChecked"`
+	RevocationOK         bool                 `json:"revocationOK"`
+	Revocations          []RevocationInfo     `json:"revocations,omitempty"`
 	ID                   string               `json:"id"`
 	Type                 string               `json:"type"`
 	Status               string               `json:"status"`
@@ -72,6 +90,7 @@ type SignatureInfo struct {
 	CertTimeOK           bool                 `json:"certTimeOK,omitempty"`
 	CertTrustChecked     bool                 `json:"certTrustChecked,omitempty"`
 	CertTrustOK          bool                 `json:"certTrustOK,omitempty"`
+	CertTrustError       string               `json:"certTrustError,omitempty"`
 	ReferenceCount       int                  `json:"referenceCount"`
 	ReferenceChecked     int                  `json:"referenceChecked"`
 	ReferencePassed      int                  `json:"referencePassed"`
@@ -83,6 +102,34 @@ type SignatureInfo struct {
 	SealSubject          string               `json:"sealSubject,omitempty"`
 	Stamps               []SignatureStampInfo `json:"stamps,omitempty"`
 	Error                string               `json:"error,omitempty"`
+}
+
+// TimestampInfo 独立展示时间戳绑定、签名、信任和证书时效
+type TimestampInfo struct {
+	Time               string `json:"time,omitempty"`
+	Valid              bool   `json:"valid"`
+	BindingChecked     bool   `json:"bindingChecked"`
+	BindingOK          bool   `json:"bindingOK"`
+	SignedValueChecked bool   `json:"signedValueChecked"`
+	SignedValueOK      bool   `json:"signedValueOK"`
+	CertTrustChecked   bool   `json:"certTrustChecked"`
+	CertTrustOK        bool   `json:"certTrustOK"`
+	CertTimeChecked    bool   `json:"certTimeChecked"`
+	CertTimeOK         bool   `json:"certTimeOK"`
+	Error              string `json:"error,omitempty"`
+}
+
+// RevocationInfo 仅表示签者或制章证书的离线撤销状态
+type RevocationInfo struct {
+	Subject    string `json:"subject,omitempty"`
+	Source     string `json:"source,omitempty"`
+	Status     string `json:"status"`
+	Checked    bool   `json:"checked"`
+	OK         bool   `json:"ok"`
+	ThisUpdate string `json:"thisUpdate,omitempty"`
+	NextUpdate string `json:"nextUpdate,omitempty"`
+	RevokedAt  string `json:"revokedAt,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // SignatureStampInfo 签名外观信息
@@ -119,6 +166,7 @@ type Session struct {
 
 // DocumentInfo 文档信息
 type DocumentInfo struct {
+	Encryption      EncryptionInfo   `json:"encryption"`
 	Version         string           `json:"version"`
 	DocType         string           `json:"docType"`
 	Title           string           `json:"title"`
@@ -137,6 +185,21 @@ type DocumentInfo struct {
 	Pages           []PageInfo       `json:"pages"`
 	Outlines        []OutlineInfo    `json:"outlines,omitempty"`
 	DetailsPending  bool             `json:"detailsPending,omitempty"`
+}
+
+// EncryptionInfo 仅向界面传递非敏感加密状态
+type EncryptionInfo struct {
+	Encrypted bool     `json:"encrypted"`
+	Method    string   `json:"method,omitempty"`
+	Users     []string `json:"users,omitempty"`
+	Layers    int      `json:"layers,omitempty"`
+}
+
+// encryptionInfo 获取当前文档的加密来源，不包含凭据
+// 返回: EncryptionInfo 加密状态
+func (s *Session) encryptionInfo() EncryptionInfo {
+	info := s.Reader.Encryption()
+	return EncryptionInfo{Encrypted: info.Encrypted, Method: info.Method, Users: info.Users, Layers: info.Layers}
 }
 
 // OutlineInfo 目录节点信息
@@ -222,7 +285,7 @@ func Open(data []byte, opts OpenOptions) (*Session, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("empty ofd data")
 	}
-	reader, err := ofdgo.NewReader(bytes.NewReader(data), int64(len(data)))
+	reader, err := ofdgo.NewReader(bytes.NewReader(data), int64(len(data)), opts.ReaderOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -381,6 +444,7 @@ func (s *Session) SearchPage(index int, query string) ([]ofdgo.TextMatch, error)
 // 返回: DocumentInfo 文档信息
 func (s *Session) Summary() DocumentInfo {
 	info := DocumentInfo{
+		Encryption:     s.encryptionInfo(),
 		Version:        s.Reader.Version(),
 		DocType:        s.Reader.DocType(),
 		PageCount:      len(s.doc.Pages.Page),
@@ -425,11 +489,12 @@ func (s *Session) Summary() DocumentInfo {
 // 返回: DocumentInfo 文档信息
 func (s *Session) Info() DocumentInfo {
 	info := DocumentInfo{
-		Version:   s.Reader.Version(),
-		DocType:   s.Reader.DocType(),
-		PageCount: len(s.doc.Pages.Page),
-		Pages:     make([]PageInfo, 0, len(s.doc.Pages.Page)),
-		Outlines:  s.doc.OutlineInfos(),
+		Encryption: s.encryptionInfo(),
+		Version:    s.Reader.Version(),
+		DocType:    s.Reader.DocType(),
+		PageCount:  len(s.doc.Pages.Page),
+		Pages:      make([]PageInfo, 0, len(s.doc.Pages.Page)),
+		Outlines:   s.doc.OutlineInfos(),
 	}
 	if attachments, err := s.Reader.Attachments(); err == nil {
 		for _, attachment := range attachments {
@@ -613,7 +678,22 @@ func signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
 		dateTime = report.SignatureTime.Format(time.RFC3339Nano)
 	}
 	checked, passed := signatureReferenceCounts(report.References)
-	return SignatureInfo{
+	info := SignatureInfo{
+		DocIndex:             report.DocIndex,
+		DocRoot:              report.DocRoot,
+		IntegrityValid:       report.IntegrityValid(),
+		TrustedValid:         report.TrustedValid(),
+		PolicyChecked:        report.PolicyChecked,
+		PolicyOK:             report.PolicyOK,
+		PolicyError:          report.PolicyError,
+		CoverageChecked:      report.CoverageChecked,
+		CoverageOK:           report.CoverageOK,
+		CoverageError:        report.CoverageError,
+		UncoveredFiles:       report.UncoveredFiles,
+		TimestampChecked:     report.TimestampChecked,
+		TimestampOK:          report.TimestampOK,
+		RevocationChecked:    report.RevocationChecked,
+		RevocationOK:         report.RevocationOK,
 		ID:                   report.ID,
 		Type:                 string(report.Type),
 		Status:               status,
@@ -646,6 +726,7 @@ func signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
 		CertTimeOK:           report.CertTimeOK,
 		CertTrustChecked:     report.CertTrustChecked,
 		CertTrustOK:          report.CertTrustOK,
+		CertTrustError:       report.CertTrustError,
 		ReferenceCount:       len(report.References),
 		ReferenceChecked:     checked,
 		ReferencePassed:      passed,
@@ -658,6 +739,33 @@ func signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
 		Stamps:               signatureStampInfos(report.StampPositions),
 		Error:                signatureReportError(report),
 	}
+	for _, stamp := range report.Timestamps {
+		info.Timestamps = append(info.Timestamps, TimestampInfo{
+			Time: securityTime(stamp.Time), Valid: stamp.Valid,
+			BindingChecked: stamp.BindingChecked, BindingOK: stamp.BindingOK,
+			SignedValueChecked: stamp.SignedValueChecked, SignedValueOK: stamp.SignedValueOK,
+			CertTrustChecked: stamp.CertTrustChecked, CertTrustOK: stamp.CertTrustOK,
+			CertTimeChecked: stamp.CertTimeChecked, CertTimeOK: stamp.CertTimeOK, Error: stamp.Error,
+		})
+	}
+	for _, revocation := range report.Revocations {
+		info.Revocations = append(info.Revocations, RevocationInfo{
+			Subject: revocation.Certificate.Subject, Source: revocation.Source, Status: revocation.Status,
+			Checked: revocation.Checked, OK: revocation.OK, ThisUpdate: securityTime(revocation.ThisUpdate),
+			NextUpdate: securityTime(revocation.NextUpdate), RevokedAt: securityTime(revocation.RevokedAt), Error: revocation.Error,
+		})
+	}
+	return info
+}
+
+// securityTime 格式化已提供的安全证据时间，零值不展示
+// 入参: value 时间
+// 返回: string 标准时间文本
+func securityTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Format(time.RFC3339Nano)
 }
 
 // signatureSigner 获取签名人名称

@@ -538,7 +538,7 @@ func (e *Editor) sourceReader(progress editorProgress) (*Reader, error) {
 		files = make(map[string][]byte)
 	}
 	maps.Copy(files, parts)
-	reader := &Reader{Zip: e.source.reader.Zip, files: files}
+	reader := &Reader{Zip: e.source.reader.Zip, files: files, encryption: e.encryption}
 	if err := reader.initRoot(); err != nil {
 		return nil, err
 	}

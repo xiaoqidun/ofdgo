@@ -24,6 +24,7 @@ let wasmWorker = null;
 let wasmRequestID = 0;
 let wasmRecoveryTimer = 0;
 let textMeasure = null;
+let credentialRequest = null;
 
 const state = {
 	composite: null,
@@ -35,6 +36,8 @@ const state = {
 	wasmRecovering: false,
 	wasmRecoveries: 0,
 	exporting: false,
+	signing: false,
+	signCanceled: false,
 	exportRequestID: 0,
 	editing: false,
 	selectObjects: true,
@@ -44,6 +47,7 @@ const state = {
 	savedRevision: null,
 	insertObject: null,
 	importPageCount: 0,
+	importEncrypted: false,
 	importing: false,
 	pageSelection: new Set(),
 	pageSelectionAnchor: null,
@@ -102,11 +106,74 @@ const state = {
 	exportFormats: [],
 	exportPages: null,
 	exportBackdrop: false,
+	exportEncrypted: false,
 	showPages: !COMPACT_LAYOUT.matches,
 	showMeta: !COMPACT_LAYOUT.matches,
 };
 
 const el = {
+	signButton: document.querySelector("#signButton"),
+	signPanel: document.querySelector("#signPanel"),
+	signForm: document.querySelector("#signForm"),
+	signCertificate: document.querySelector("#signCertificate"),
+	signKey: document.querySelector("#signKey"),
+	signKeyPassword: document.querySelector("#signKeyPassword"),
+	signRoots: document.querySelector("#signRoots"),
+	signIntermediates: document.querySelector("#signIntermediates"),
+	signSeal: document.querySelector("#signSeal"),
+	signPlacementFields: document.querySelector("#signPlacementFields"),
+	signPlacement: document.querySelector("#signPlacement"),
+	signPages: document.querySelector("#signPages"),
+	signX: document.querySelector("#signX"),
+	signY: document.querySelector("#signY"),
+	signWidth: document.querySelector("#signWidth"),
+	signHeight: document.querySelector("#signHeight"),
+	signMode: document.querySelector("#signMode"),
+	signLock: document.querySelector("#signLock"),
+	signStatus: document.querySelector("#signStatus"),
+	signCancel: document.querySelector("#signCancel"),
+	verifyButton: document.querySelector("#verifyButton"),
+	verifyPanel: document.querySelector("#verifyPanel"),
+	verifyForm: document.querySelector("#verifyForm"),
+	verifyRoots: document.querySelector("#verifyRoots"),
+	verifyCerts: document.querySelector("#verifyCerts"),
+	verifyTimeRoots: document.querySelector("#verifyTimeRoots"),
+	verifyTokens: document.querySelector("#verifyTokens"),
+	verifyCRLs: document.querySelector("#verifyCRLs"),
+	verifyOCSP: document.querySelector("#verifyOCSP"),
+	verifyRequireTime: document.querySelector("#verifyRequireTime"),
+	verifyRequireRevocation: document.querySelector("#verifyRequireRevocation"),
+	verifyStatus: document.querySelector("#verifyStatus"),
+	verifyCancel: document.querySelector("#verifyCancel"),
+	securityPanel: document.querySelector("#securityPanel"),
+	securityEncryption: document.querySelector("#securityEncryption"),
+	securityMethod: document.querySelector("#securityMethod"),
+	securityMethodRow: document.querySelector("#securityMethodRow"),
+	encryptSaveButton: document.querySelector("#encryptSaveButton"),
+	credentialsPanel: document.querySelector("#credentialsPanel"),
+	credentialsType: document.querySelector("#credentialsType"),
+	credentialsPasswordRow: document.querySelector("#credentialsPasswordRow"),
+	credentialsCertificateRow: document.querySelector("#credentialsCertificateRow"),
+	credentialsKeyRow: document.querySelector("#credentialsKeyRow"),
+	credentialsCertificate: document.querySelector("#credentialsCertificate"),
+	credentialsKey: document.querySelector("#credentialsKey"),
+	credentialsKeyPassword: document.querySelector("#credentialsKeyPassword"),
+	credentialsKeyPasswordRow: document.querySelector("#credentialsKeyPasswordRow"),
+	credentialsForm: document.querySelector("#credentialsForm"),
+	credentialsUser: document.querySelector("#credentialsUser"),
+	credentialsPassword: document.querySelector("#credentialsPassword"),
+	credentialsStatus: document.querySelector("#credentialsStatus"),
+	credentialsCancel: document.querySelector("#credentialsCancel"),
+	encryptionFields: document.querySelector("#encryptionFields"),
+	encryptionType: document.querySelector("#encryptionType"),
+	encryptionUserRow: document.querySelector("#encryptionUserRow"),
+	encryptionPasswordRow: document.querySelector("#encryptionPasswordRow"),
+	encryptionConfirmRow: document.querySelector("#encryptionConfirmRow"),
+	encryptionCertificatesRow: document.querySelector("#encryptionCertificatesRow"),
+	encryptionCertificates: document.querySelector("#encryptionCertificates"),
+	encryptionUser: document.querySelector("#encryptionUser"),
+	encryptionPassword: document.querySelector("#encryptionPassword"),
+	encryptionConfirm: document.querySelector("#encryptionConfirm"),
 	ofdInput: document.querySelector("#ofdInput"),
 	ofdButton: document.querySelector("#ofdButton"),
 	newButton: document.querySelector("#newButton"),
@@ -755,6 +822,7 @@ el.importPanel.addEventListener("cancel", event => {
 });
 el.importPanel.addEventListener("close", () => {
 	state.importPageCount = 0;
+	state.importEncrypted = false;
 	el.importForm.reset();
 	if (state.ready) callWASM("ofdgoLoadImport", null).catch(err => showError(err, false));
 });
@@ -770,7 +838,12 @@ el.importForm.addEventListener("submit", async event => {
 	event.preventDefault();
 	if (document.body.hasAttribute("aria-busy") || !state.importPageCount || !el.importForm.reportValidity()) return;
 	const position = { before:state.pageIndex, after:state.pageIndex+1, first:0, last:state.doc.pageCount }[el.importPosition.value];
-	const saved = await changeDocument("ofdgoImportPages", null, el.importRange.value === "custom" ? el.importPages.value : "", position, el.importOutlines.checked);
+	const options = [];
+	if (state.importEncrypted) {
+		if (!window.confirm(state.doc.encryption?.encrypted ? "按目标文档的加密策略导入，是否继续？" : "目标未加密，导入内容将按明文保存，是否继续？")) return;
+		options.push(true);
+	}
+	const saved = await changeDocument("ofdgoImportPages", null, el.importRange.value === "custom" ? el.importPages.value : "", position, el.importOutlines.checked, ...options);
 	if (saved) el.importPanel.close();
 });
 editorClick(el.copyPageButton, () => changeSelectedPages("copy"));
@@ -926,6 +999,60 @@ el.insertPanel.addEventListener("close", () => { state.insertObject = null; });
 el.insertForm.addEventListener("submit", insertObject);
 el.textFontAdd.addEventListener("click", () => openFontFile(el.fontInput));
 el.saveButton.addEventListener("click", () => exportFile(true, null, "ofd"));
+el.encryptSaveButton.addEventListener("click", () => openExportPanel(true));
+el.signButton.addEventListener("click", () => {
+	if (!state.doc || document.body.hasAttribute("aria-busy")) return;
+	el.signForm.reset();
+	el.signPages.value = state.editing && state.pageSelection.size ? selectedPageRange() : String(state.pageIndex + 1);
+	el.signStatus.textContent = "";
+	updateSignPlacement();
+	el.signPanel.showModal();
+});
+el.signSeal.addEventListener("change", updateSignPlacement);
+el.signPlacement.addEventListener("change", updateSignPlacement);
+el.signCancel.addEventListener("click", () => state.signing ? cancelSigning() : el.signPanel.close());
+el.signPanel.addEventListener("cancel", event => {
+	if (state.signing) { event.preventDefault(); cancelSigning(); }
+});
+el.signPanel.addEventListener("close", () => { if (!el.signPanel.open) el.signForm.reset(); });
+el.signForm.addEventListener("submit", signDocument);
+el.verifyButton.addEventListener("click", () => {
+	if (!state.doc || document.body.hasAttribute("aria-busy")) return;
+	el.verifyForm.reset();
+	el.verifyStatus.textContent = "";
+	el.verifyPanel.showModal();
+});
+el.verifyCancel.addEventListener("click", () => el.verifyPanel.close());
+el.verifyPanel.addEventListener("close", () => { if (!el.verifyPanel.open) el.verifyForm.reset(); });
+el.verifyForm.addEventListener("submit", verifyDocument);
+el.credentialsCancel.addEventListener("click", () => finishCredentials(null));
+el.credentialsPanel.addEventListener("cancel", event => { event.preventDefault(); finishCredentials(null); });
+el.credentialsPanel.addEventListener("close", () => { if (!el.credentialsPanel.open) finishCredentials(null); });
+el.credentialsType.addEventListener("change", updateCredentialsType);
+el.credentialsForm.addEventListener("submit", async event => {
+	event.preventDefault();
+	if (!credentialRequest) return;
+	if (el.credentialsType.value === "certificate") {
+		const request = credentialRequest;
+		let key;
+		const keyPassword = new TextEncoder().encode(el.credentialsKeyPassword.value);
+		el.credentialsKeyPassword.value = "";
+		try {
+			key = (await securityFiles(el.credentialsKey))[0];
+			const certificate = (await securityFiles(el.credentialsCertificate))[0];
+			if (credentialRequest !== request) { key?.fill(0); keyPassword.fill(0); return; }
+			if (!key || !certificate) { el.credentialsStatus.textContent = "请选择证书和私钥"; key?.fill(0); keyPassword.fill(0); return; }
+			finishCredentials({password:new Uint8Array(), key, keyPassword, certificate, userName:el.credentialsUser.value.trim()});
+		} catch {
+			key?.fill(0);
+			keyPassword.fill(0);
+			if (credentialRequest === request) el.credentialsStatus.textContent = "文件读取失败";
+		}
+		return;
+	}
+	if (!el.credentialsPassword.value) return;
+	finishCredentials({ password: new TextEncoder().encode(el.credentialsPassword.value), userName: el.credentialsUser.value.trim() });
+});
 el.togglePagesButton.addEventListener("click", () => toggleSidebar("pages"));
 el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
 el.pagesTab.addEventListener("click", () => showNavigation(el.pagesTab));
@@ -983,8 +1110,10 @@ el.viewerPanel.addEventListener("paste", pasteEditorContent);
 document.addEventListener("selectionchange", syncSelection);
 el.exportFormat.addEventListener("change", () => updateDPIControl());
 el.exportPageButton.addEventListener("click", () => exportFile(false));
-el.exportButton.addEventListener("click", openExportPanel);
+el.exportButton.addEventListener("click", () => openExportPanel());
 el.exportCancel.addEventListener("click", () => el.exportPanel.close());
+el.exportPanel.addEventListener("close", () => { if (!el.exportPanel.open) clearEncryptionForm(); });
+el.encryptionType.addEventListener("change", updateEncryptionType);
 el.cancelExportButton.addEventListener("click", cancelExport);
 el.exportPanel.addEventListener("pointerdown", (event) => {
 	state.exportBackdrop = event.target === el.exportPanel;
@@ -1000,9 +1129,32 @@ el.exportSpecified.addEventListener("change", () => {
 	el.exportRange.focus();
 });
 el.exportRange.addEventListener("input", updateExportRange);
-el.exportForm.addEventListener("submit", (event) => {
+el.exportForm.addEventListener("submit", async (event) => {
 	event.preventDefault();
 	if (!el.exportSubmit.disabled) {
+		if (state.exportEncrypted) {
+			const certificates = el.encryptionType.value === "certificate";
+			if (certificates && !el.encryptionCertificates.files?.length) {
+				el.exportRangeStatus.textContent = "请选择接收者证书";
+				return;
+			}
+			if (!certificates && !el.encryptionPassword.value) {
+				el.exportRangeStatus.textContent = "请输入口令";
+				el.encryptionPassword.focus();
+				return;
+			}
+			if (!certificates && el.encryptionPassword.value !== el.encryptionConfirm.value) {
+				el.exportRangeStatus.textContent = "口令不一致";
+				el.encryptionConfirm.focus();
+				return;
+			}
+			const encryption = certificates
+				? {password:new Uint8Array(), userName:"", recipientFiles:Array.from(el.encryptionCertificates.files)}
+				: { password: new TextEncoder().encode(el.encryptionPassword.value), userName: el.encryptionUser.value.trim() };
+			clearEncryptionForm();
+			try { return await exportFile(true, state.exportPages, "ofd", encryption); }
+			finally { encryption.password.fill(0); }
+		}
 		return exportFile(true, state.exportPages);
 	}
 });
@@ -1317,18 +1469,20 @@ async function loadImportFile() {
 	const file = el.importFile.files[0];
 	const openSeq = state.openSeq;
 	state.importPageCount = 0;
+	state.importEncrypted = false;
 	el.importSubmit.disabled = true;
 	el.importStatus.textContent = "";
 	setBusy(true);
 	try {
 		const data = file ? new Uint8Array(await file.arrayBuffer()) : null;
 		if (openSeq !== state.openSeq) return;
-		const info = await callWASM("ofdgoLoadImport", data);
+		const info = data ? await openWithCredentials(null, openSeq, data, true) : await callWASM("ofdgoLoadImport", null);
 		if (openSeq !== state.openSeq || !el.importPanel.open) {
 			await callWASM("ofdgoLoadImport", null);
 			return;
 		}
 		state.importPageCount = info?.pageCount || 0;
+		state.importEncrypted = Boolean(info?.encrypted);
 		el.importPages.title = state.importPageCount ? `页码 1-${state.importPageCount}` : "页码";
 		el.importStatus.textContent = info?.signed ? "保留签章外观，原签名不再有效" : "";
 		el.importSubmit.disabled = !state.importPageCount;
@@ -1494,6 +1648,7 @@ async function createDocument(event) {
 		return;
 	}
 	const title = el.createName.value.trim() || "未命名";
+	clearSecurityForms();
 	const openSeq = ++state.openSeq;
 	setBusy(true, "正在新建文档", null, "正在新建文档");
 	try {
@@ -2714,10 +2869,11 @@ async function loadWASM() {
 				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.exporting) {
 					if (data.stage === "save") {
 						el.cancelExportButton.disabled = true;
+						if (state.signing) el.signCancel.disabled = true;
 						setProgress("正在保存", null);
 					} else if (!el.cancelExportButton.disabled) {
 						if (data.stage === "prepare") {
-							const label = { snapshot: "正在准备", ids: "正在检查", commit: "正在整理", fonts: "正在处理字体", pages: "正在处理页面", references: "正在检查引用", resources: "正在整理资源", write: "正在写入" }[data.phase];
+							const label = { snapshot: "正在准备", ids: "正在检查", commit: "正在整理", fonts: "正在处理字体", pages: "正在处理页面", references: "正在检查引用", resources: "正在整理资源", write: "正在写入", sign: "正在签署", encrypt: "正在加密" }[data.phase];
 							setProgress(label, data.total ? data.completed / data.total * 100 : null);
 						} else if (data.completed === data.total) {
 							setProgress("正在收尾", null);
@@ -2753,6 +2909,7 @@ async function loadWASM() {
 					request.resolve(data.data);
 				} else {
 					const err = new Error(missingGlyphMessage(data.missingGlyphs) || (data.reasonCode === "layoutRequired" ? "跨段或换行修改需先设置段落排版" : data.error));
+					err.code = data.code;
 					if (data.canceled) {
 						err.name = "AbortError";
 					}
@@ -2768,6 +2925,7 @@ function markWASMExited(wasmSeq = state.wasmSeq, err) {
 		return;
 	}
 	state.ready = false;
+	clearSecurityForms();
 	state.wasmExited = true;
 	wasmWorker?.terminate();
 	wasmWorker = null;
@@ -2830,6 +2988,7 @@ async function openOFD(file) {
 	if (!discardChanges()) {
 		return;
 	}
+	clearSecurityForms();
 	state.wasmRecoveries = 0;
 	const openSeq = ++state.openSeq;
 	setBusy(true, "正在读取文档", 10, STATUS.opening);
@@ -3306,6 +3465,86 @@ function updateFontPermissionHint() {
 	el.fontPermissionHint.hidden = !fontManager.canReadLocal() || fontManager.permission === "granted";
 }
 
+function clearSecurityForms() {
+	finishCredentials(null);
+	clearEncryptionForm();
+	el.signKey.value = "";
+	el.signKeyPassword.value = "";
+	if (el.signPanel.open) el.signPanel.close();
+	if (el.verifyPanel.open) el.verifyPanel.close();
+}
+
+function updateCredentialsType() {
+	const certificate = el.credentialsType.value === "certificate";
+	el.credentialsStatus.textContent = "";
+	el.credentialsPasswordRow.hidden = certificate;
+	el.credentialsCertificateRow.hidden = el.credentialsKeyRow.hidden = !certificate;
+	el.credentialsKeyPasswordRow.hidden = !certificate;
+	el.credentialsPassword.required = !certificate;
+	el.credentialsCertificate.required = el.credentialsKey.required = certificate;
+	el.credentialsPassword.value = "";
+	el.credentialsCertificate.value = el.credentialsKey.value = "";
+	el.credentialsKeyPassword.value = "";
+}
+
+function finishCredentials(credentials) {
+	const request = credentialRequest;
+	credentialRequest = null;
+	el.credentialsPassword.value = "";
+	el.credentialsUser.value = "";
+	el.credentialsCertificate.value = el.credentialsKey.value = "";
+	el.credentialsKeyPassword.value = "";
+	if (el.credentialsPanel.open) el.credentialsPanel.close();
+	if (request && request.openSeq === state.openSeq) request.resolve(credentials);
+	else {
+		credentials?.password.fill(0);
+		credentials?.key?.fill(0);
+		credentials?.keyPassword?.fill(0);
+		request?.resolve(null);
+	}
+}
+
+function requestCredentials(code, openSeq) {
+	finishCredentials(null);
+	el.credentialsStatus.textContent = code === "invalidCredentials" ? "解锁失败，请重试" : "";
+	el.progressPanel.hidden = true;
+	return new Promise(resolve => {
+		credentialRequest = { resolve, openSeq };
+		el.credentialsPanel.showModal();
+		(el.credentialsType.value === "certificate" ? el.credentialsCertificate : el.credentialsPassword).focus();
+	});
+}
+
+async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, importing = false) {
+	let credentials = null;
+	try {
+		while (openSeq === state.openSeq) {
+			try {
+				return importing ? await callWASM("ofdgoLoadImport", data.slice(), credentials)
+					: await callWASM("ofdgoOpen", data, fonts, state.renderAnnotations, credentials);
+			} catch (err) {
+				if (openSeq !== state.openSeq || !["credentialsRequired", "invalidCredentials"].includes(err.code)) throw err;
+				credentials?.password.fill(0);
+				credentials?.key?.fill(0);
+				credentials?.keyPassword?.fill(0);
+				credentials = await requestCredentials(err.code, openSeq);
+				if (!credentials || openSeq !== state.openSeq) {
+					const canceled = new Error("打开已取消");
+					canceled.name = "AbortError";
+					throw canceled;
+				}
+			}
+		}
+		const canceled = new Error("打开已取消");
+		canceled.name = "AbortError";
+		throw canceled;
+	} finally {
+		credentials?.password.fill(0);
+		credentials?.key?.fill(0);
+		credentials?.keyPassword?.fill(0);
+	}
+}
+
 async function openDocument(options = {}) {
 	if (!state.ofdBytes && !state.editorInfo) {
 		return;
@@ -3341,7 +3580,7 @@ async function openDocument(options = {}) {
 		}
 		const doc = options.doc || (options.reuseSession
 			? await callWASM("ofdgoConfigure", fonts, state.renderAnnotations)
-			: await callWASM("ofdgoOpen", state.ofdBytes, fonts, state.renderAnnotations));
+			: await openWithCredentials(fonts, openSeq));
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -3439,6 +3678,12 @@ async function openDocument(options = {}) {
 			return;
 		}
 		if (options.throwError) throw err;
+		if (!options.reuseSession && !options.doc) {
+			state.ofdBytes = null;
+			state.doc = null;
+			renderSecurity();
+			updateControls();
+		}
 		showError(err, true);
 	} finally {
 		if (openSeq === state.openSeq) {
@@ -3522,6 +3767,7 @@ async function downloadAttachment(attachment) {
 	if (!state.doc || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
+	if (state.doc.encryption?.encrypted && !window.confirm("附件将按明文下载，是否继续？")) return;
 	const openSeq = state.openSeq;
 	state.exporting = true;
 	updateControls();
@@ -3558,11 +3804,165 @@ async function downloadAttachment(attachment) {
 	}
 }
 
-function openExportPanel() {
+function updateEncryptionType() {
+	const certificates = el.encryptionType.value === "certificate";
+	el.encryptionUserRow.hidden = el.encryptionPasswordRow.hidden = el.encryptionConfirmRow.hidden = certificates;
+	el.encryptionCertificatesRow.hidden = !certificates;
+	el.encryptionPassword.required = el.encryptionConfirm.required = state.exportEncrypted && !certificates;
+	el.encryptionCertificates.required = state.exportEncrypted && certificates;
+	el.encryptionPassword.value = el.encryptionConfirm.value = "";
+	el.encryptionCertificates.value = "";
+}
+
+async function encryptionRecipients(files) {
+	const names = new Set();
+	return Promise.all(files.map(async file => {
+		const base = file.name.replace(/\.[^.]+$/, "") || "用户";
+		let name = base, index = 2;
+		while (names.has(name)) name = `${base} ${index++}`;
+		names.add(name);
+		return {userName:name, certificate:new Uint8Array(await file.arrayBuffer())};
+	}));
+}
+
+function clearEncryptionForm() {
+	el.encryptionPassword.value = "";
+	el.encryptionConfirm.value = "";
+	el.encryptionUser.value = "";
+	el.encryptionCertificates.value = "";
+	state.exportEncrypted = false;
+}
+
+function renderSecurity() {
+	const encryption = state.doc?.encryption;
+	el.securityPanel.hidden = !state.doc;
+	el.securityEncryption.textContent = encryption?.encrypted ? "已加密" : "未加密";
+	el.securityMethod.textContent = encryption?.method || "";
+	el.securityMethodRow.hidden = !encryption?.method;
+	el.encryptSaveButton.disabled = !state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
+	el.verifyButton.disabled = el.encryptSaveButton.disabled;
+	el.signButton.disabled = el.encryptSaveButton.disabled;
+}
+
+function cancelSigning() {
+	if (el.signCancel.disabled) return;
+	state.signCanceled = true;
+	el.signStatus.textContent = "正在取消";
+	cancelExport();
+}
+
+function updateSignPlacement() {
+	const stamp = Boolean(el.signSeal.files?.length);
+	el.signPlacementFields.hidden = !stamp;
+	el.signPages.required = stamp;
+	el.signX.disabled = !stamp || el.signPlacement.value === "seam";
+}
+
+async function signDocument(event) {
+	event.preventDefault();
+	if (!state.doc || document.body.hasAttribute("aria-busy")) return;
+	if (!el.signCertificate.files?.length || !el.signKey.files?.length || !el.signRoots.files?.length) {
+		el.signStatus.textContent = "请选择证书、私钥和信任根";
+		return;
+	}
+	if (el.signMode.value === "replace" && !window.confirm("替换现有签名，是否继续？")) return;
+	let openSeq = state.openSeq;
+	let key;
+	const keyPassword = new TextEncoder().encode(el.signKeyPassword.value);
+	el.signKeyPassword.value = "";
+	state.exporting = true;
+	state.signing = true;
+	state.signCanceled = false;
+	el.signCancel.disabled = false;
+	setBusy(true, "正在签署", null, "正在签署");
+	el.signForm.querySelectorAll("input, select, button[type=submit]").forEach(input => { input.disabled = true; });
+	try {
+		const name = `${baseFileName()}_签章.ofd`;
+		const file = window.showSaveFilePicker ? await window.showSaveFilePicker({suggestedName:name, types:[{description:"OFD",accept:{"application/ofd":[".ofd"]}}]}) : null;
+		if (openSeq !== state.openSeq || state.signCanceled) return;
+		if (canvasEditor.input || canvasEditor.crop || canvasEditor.nudge || canvasEditor.nudgeCommit) {
+			setBusy(false);
+			if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop()) return;
+			openSeq = state.openSeq;
+			setBusy(true, "正在签署", null, "正在签署");
+		}
+		key = (await securityFiles(el.signKey))[0];
+		const options = {
+			key, keyPassword, certificate:(await securityFiles(el.signCertificate))[0], roots:await securityFiles(el.signRoots),
+			intermediates:await securityFiles(el.signIntermediates), seal:(await securityFiles(el.signSeal))[0] || null,
+			pages:el.signPages.value.trim(), placement:el.signPlacement.value,
+			x:Number(el.signX.value), y:Number(el.signY.value), width:Number(el.signWidth.value), height:Number(el.signHeight.value),
+			mode:el.signMode.value, lock:el.signLock.checked,
+		};
+		el.signKey.value = "";
+		if (openSeq !== state.openSeq || state.signCanceled || !el.signPanel.open) return;
+		const result = await callWASM("ofdgoSaveSigned", null, options, file);
+		if (openSeq !== state.openSeq) return;
+		if (result.blob) downloadBytes(result.blob, result.mime, name);
+		el.signPanel.close();
+		setStatus("签署已另存");
+	} catch (err) {
+		if (openSeq === state.openSeq) el.signStatus.textContent = err.name === "AbortError" ? "签署已取消" : err.message;
+	} finally {
+		key?.fill(0);
+		keyPassword.fill(0);
+		el.signKey.value = "";
+		el.signForm.querySelectorAll("input, select, button[type=submit]").forEach(input => { input.disabled = false; });
+		el.signCancel.disabled = false;
+		if (state.signCanceled && openSeq === state.openSeq) el.signStatus.textContent = "签署已取消";
+		state.signing = false;
+		updateSignPlacement();
+		state.exporting = false;
+		state.exportRequestID = 0;
+		el.cancelExportButton.hidden = true;
+		if (openSeq === state.openSeq) { setBusy(false); updateControls(); }
+	}
+}
+
+async function securityFiles(input) {
+	return Promise.all(Array.from(input.files || [], async file => new Uint8Array(await file.arrayBuffer())));
+}
+
+async function verifyDocument(event) {
+	event.preventDefault();
+	if (!state.doc || document.body.hasAttribute("aria-busy")) return;
+	const openSeq = state.openSeq;
+	setBusy(true, "正在验签", null, "正在验签");
+	el.verifyForm.inert = true;
+	try {
+		const options = {
+			roots: await securityFiles(el.verifyRoots), certificates: await securityFiles(el.verifyCerts),
+			timestampRoots: await securityFiles(el.verifyTimeRoots), tokens: await securityFiles(el.verifyTokens),
+			crls: await securityFiles(el.verifyCRLs), ocsp: await securityFiles(el.verifyOCSP),
+			requireTimestamp: el.verifyRequireTime.checked, requireRevocation: el.verifyRequireRevocation.checked,
+		};
+		if (openSeq !== state.openSeq || !el.verifyPanel.open) return;
+		const info = await callWASM("ofdgoVerifySignatures", options);
+		if (openSeq !== state.openSeq || !el.verifyPanel.open) return;
+		Object.assign(state.doc, info);
+		renderMeta();
+		el.verifyPanel.close();
+		setStatus(info.signatureCount ? "验签完成" : "无签名");
+	} catch (err) {
+		if (openSeq === state.openSeq) el.verifyStatus.textContent = err.message;
+	} finally {
+		el.verifyForm.inert = false;
+		if (openSeq === state.openSeq) setBusy(false);
+	}
+}
+
+function openExportPanel(encrypted = false) {
 	if (!state.doc || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
 	el.exportForm.reset();
+	clearEncryptionForm();
+	state.exportEncrypted = encrypted;
+	el.encryptionFields.hidden = !encrypted;
+	el.encryptionPassword.required = el.encryptionConfirm.required = encrypted;
+	updateEncryptionType();
+	el.exportPanel.setAttribute("aria-label", encrypted ? "加密另存" : "导出文档");
+	el.exportSubmit.textContent = encrypted ? "保存" : "导出";
 	if (state.editing && state.pageSelection.size) {
 		el.exportSpecified.checked = true;
 		el.exportRange.value = selectedPageRange();
@@ -3600,14 +4000,15 @@ async function updateExportRange() {
 	}
 }
 
-async function exportFile(whole, indices = null, value = el.exportFormat.value) {
+async function exportFile(whole, indices = null, value = el.exportFormat.value, encryption = null) {
 	if (!state.doc || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
 	const saving = value === "ofd";
-	if (saving && !state.editorInfo) {
+	if (saving && !state.editorInfo && !encryption) {
 		return;
 	}
+	if (!saving && state.doc.encryption?.encrypted && !window.confirm("此格式将输出明文，是否继续？")) return;
 	const format = saving ? { value: "ofd", label: "OFD", extension: "ofd", mime: "application/ofd" } : exportFormatInfo(value);
 	if (!format) {
 		return;
@@ -3640,7 +4041,12 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 			openSeq = state.openSeq;
 			setBusy(true, `正在生成 ${label}`, null, status);
 		}
-		const result = saving ? await callWASM("ofdgoSaveDocument", indices, file) : whole
+		if (encryption?.recipientFiles) {
+			encryption.recipients = await encryptionRecipients(encryption.recipientFiles);
+			delete encryption.recipientFiles;
+			if (openSeq !== state.openSeq) return;
+		}
+		const result = encryption ? await callWASM("ofdgoSaveEncrypted", indices, encryption, file) : saving ? await callWASM("ofdgoSaveDocument", indices, file) : whole
 			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, state.renderBackend, file)
 			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, state.renderBackend, file);
 		if (openSeq !== state.openSeq) {
@@ -3649,7 +4055,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 		if (result.blob) {
 			downloadBytes(result.blob, result.mime, fileName);
 		}
-		if (saving && indices === null) {
+		if (saving && indices === null && state.editorInfo) {
 			state.savedRevision = state.editorInfo.revision;
 			setDirty(false);
 		}
@@ -5344,6 +5750,7 @@ function markThumbnailError(index) {
 }
 
 function renderMeta(keepDetails = false) {
+	renderSecurity();
 	const doc = state.doc || {};
 	el.metaPanel.setAttribute("aria-busy", String(!!doc.detailsPending));
 	document.title = `OFDGo WebUI - ${state.fileName}`;
@@ -5440,41 +5847,88 @@ function renderSignatures() {
 
 		const badges = document.createElement("div");
 		badges.className = "signature-badges";
-		badges.append(fontBadge(signature.status === "valid" ? "通过" : signature.status === "invalid" ? "异常" : "未验", signature.status));
+		badges.append(fontBadge(signature.trustedValid ? "可信" : signature.status === "valid" ? "完整" : signature.status === "invalid" ? "异常" : "未验", signature.status));
 
 		head.append(badges, name);
 		row.append(head);
-		appendInfoLine(row, "编号", signature.id);
-		appendInfoLine(row, "版本", signature.version);
-		appendInfoLine(row, "章图", signature.sealType);
-		appendInfoLine(row, "章号", signature.sealId);
 		appendInfoLine(row, "章名", signature.sealName);
-		appendInfoLine(row, "厂商", signature.sealVendor);
-		appendInfoLine(row, "签者", signature.signer);
+		appendInfoLine(row, "签署人", signature.signer);
 		appendInfoLine(row, "时间", formatDocumentTime(signature.signatureDateTime));
 		appendInfoLine(row, "机构", signatureAgency(signature));
-		appendSignatureCheck(row, "原文", signature.dataHashChecked, signature.dataHashOK);
-		appendSignatureCheck(row, "签名", signature.signedValueChecked, signature.signedValueOK);
-		if (signature.type !== "Sign") {
-			appendSignatureCheck(row, "章验", signature.sealChecked, signature.sealOK);
-			appendSignaturePolicy(row, "一致", signature.sealMatchChecked, signature.sealMatchOK);
-		}
-		appendSignatureCheck(row, "证书", signature.certChecked, signature.certOK);
-		appendSignaturePolicy(row, "签期", signature.signatureTimeChecked, signature.signatureTimeOK);
-		appendSignaturePolicy(row, "章期", signature.sealTimeChecked, signature.sealTimeOK);
-		if (signature.sealCertTimeChecked) {
-			appendInfoLine(row, "制期", signature.sealCertTimeOK ? "有效" : "失效", signature.sealCertTimeOK ? "ok" : "");
-		}
-		appendSignaturePolicy(row, "时效", signature.certTimeChecked, signature.certTimeOK);
 		appendSignatureCheck(row, "信任", signature.certTrustChecked, signature.certTrustOK);
-		appendInfoLine(row, "保护", signatureReferenceText(signature), signatureReferenceStatus(signature));
-		appendInfoLine(row, "算法", signature.signatureMethod);
-		appendInfoLine(row, "散列", signature.digestMethod);
-		appendInfoLine(row, "序号", signature.signSerial);
-		appendInfoLine(row, "主体", signature.signSubject && signature.signSubject !== signature.signer ? signature.signSubject : "");
-		appendInfoLine(row, "颁发", signature.signIssuer);
-		appendInfoLine(row, "章证", signature.sealSubject);
+		appendInfoLine(row, "保护文件", signatureReferenceText(signature), signatureReferenceStatus(signature));
 		appendInfoLine(row, "错误", signature.error, "fail");
+		const checks = document.createElement("details");
+		const checksTitle = document.createElement("summary");
+		checksTitle.textContent = "校验详情";
+		checks.append(checksTitle);
+		appendSignatureCheck(checks, "原文", signature.dataHashChecked, signature.dataHashOK);
+		appendSignatureCheck(checks, "签名", signature.signedValueChecked, signature.signedValueOK);
+		if (signature.type !== "Sign") {
+			appendSignatureCheck(checks, "印章", signature.sealChecked, signature.sealOK);
+			appendSignaturePolicy(checks, "印章匹配", signature.sealMatchChecked, signature.sealMatchOK);
+		}
+		appendSignatureCheck(checks, "证书", signature.certChecked, signature.certOK);
+		appendSignaturePolicy(checks, "签署时间", signature.signatureTimeChecked, signature.signatureTimeOK);
+		appendSignaturePolicy(checks, "印章期限", signature.sealTimeChecked, signature.sealTimeOK);
+		if (signature.sealCertTimeChecked) {
+			appendInfoLine(checks, "制章证书", signature.sealCertTimeOK ? "有效" : "失效", signature.sealCertTimeOK ? "ok" : "fail");
+		}
+		appendSignaturePolicy(checks, "证书期限", signature.certTimeChecked, signature.certTimeOK);
+		appendSignatureCheck(checks, "策略", signature.policyChecked, signature.policyOK);
+		appendSignatureCheck(checks, "覆盖", signature.coverageChecked, signature.coverageOK);
+		appendSignatureCheck(checks, "时间戳", signature.timestampChecked, signature.timestampOK);
+		appendSignatureCheck(checks, "撤销", signature.revocationChecked, signature.revocationOK);
+		appendInfoLine(checks, "策略错误", signature.policyError, "fail");
+		appendInfoLine(checks, "信任错误", signature.certTrustError, "fail");
+		appendInfoLine(checks, "覆盖错误", signature.coverageError, "fail");
+		appendInfoLine(checks, "未保护", signature.uncoveredFiles?.join("、"), "fail");
+		row.append(checks);
+		for (const timestamp of signature.timestamps || []) {
+			const details = document.createElement("details");
+			const title = document.createElement("summary");
+			title.textContent = timestamp.valid ? "可信时间戳" : "时间戳详情";
+			details.append(title);
+			appendInfoLine(details, timestamp.valid ? "时间" : "声明时间", formatDocumentTime(timestamp.time));
+			appendSignatureCheck(details, "绑定", timestamp.bindingChecked, timestamp.bindingOK);
+			appendSignatureCheck(details, "签名", timestamp.signedValueChecked, timestamp.signedValueOK);
+			appendSignatureCheck(details, "信任", timestamp.certTrustChecked, timestamp.certTrustOK);
+			appendSignatureCheck(details, "时效", timestamp.certTimeChecked, timestamp.certTimeOK);
+			appendInfoLine(details, "错误", timestamp.error, "fail");
+			row.append(details);
+		}
+		for (const revocation of signature.revocations || []) {
+			const details = document.createElement("details");
+			const title = document.createElement("summary");
+			title.textContent = "撤销详情";
+			details.append(title);
+			appendInfoLine(details, "证书", revocation.subject);
+			appendInfoLine(details, "来源", revocation.source);
+			const valid = revocation.checked && revocation.ok && revocation.status === "good";
+			appendInfoLine(details, "状态", !revocation.checked ? "未验" : valid ? "未撤销" : revocation.status === "revoked" ? "已撤销" : "未知", valid ? "ok" : revocation.checked ? "fail" : "");
+			appendInfoLine(details, "更新", formatDocumentTime(revocation.thisUpdate));
+			appendInfoLine(details, "截止", formatDocumentTime(revocation.nextUpdate));
+			appendInfoLine(details, "撤销时间", formatDocumentTime(revocation.revokedAt));
+			appendInfoLine(details, "错误", revocation.error, "fail");
+			row.append(details);
+		}
+		const details = document.createElement("details");
+		const title = document.createElement("summary");
+		title.textContent = "签章信息";
+		details.append(title);
+		appendInfoLine(details, "编号", signature.id);
+		appendInfoLine(details, "版本", signature.version);
+		appendInfoLine(details, "章图", signature.sealType);
+		appendInfoLine(details, "章号", signature.sealId);
+		appendInfoLine(details, "厂商", signature.sealVendor);
+		appendInfoLine(details, "文档", signature.docRoot);
+		appendInfoLine(details, "算法", signature.signatureMethod);
+		appendInfoLine(details, "摘要", signature.digestMethod);
+		appendInfoLine(details, "序列号", signature.signSerial);
+		appendInfoLine(details, "证书主体", signature.signSubject);
+		appendInfoLine(details, "颁发者", signature.signIssuer);
+		appendInfoLine(details, "制章证书", signature.sealSubject);
+		row.append(details);
 		fragment.append(row);
 	}
 	el.signatureList.append(fragment);
@@ -5493,11 +5947,11 @@ function signatureSummary(signatures) {
 	if (unchecked) {
 		parts.push(`未验 ${unchecked}`);
 	}
-	return parts.length > 1 ? parts.join(" · ") : `通过 ${signatures.length}`;
+	return parts.length > 1 ? parts.join(" · ") : `${signatures.every(signature => signature.trustedValid) ? "可信" : "完整"} ${signatures.length}`;
 }
 
 function signatureNameNode(signature) {
-	const stamps = signature.stamps || [];
+	const stamps = signature.docIndex ? [] : signature.stamps || [];
 	const name = document.createElement("div");
 	name.className = "signature-name";
 	if (!stamps.length) {
@@ -6060,6 +6514,7 @@ function updateFitSpace() {
 }
 
 function updateControls() {
+	renderSecurity();
 	const hasDoc = Boolean(state.doc);
 	updateRenderBackend();
 	updateEditorTools();
@@ -6221,11 +6676,11 @@ async function callWASM(name, ...args) {
 	return new Promise((resolve, reject) => {
 		const id = ++wasmRequestID;
 		wasmRequests.set(id, { resolve, reject, openSeq: state.openSeq });
-		if (name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument" || name === "ofdgoImportPages") {
+		if (name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument" || name === "ofdgoSaveEncrypted" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
 			state.exportRequestID = id;
 			el.cancelExportButton.hidden = false;
 			el.cancelExportButton.disabled = false;
-			el.cancelExportButton.title = { ofdgoSaveDocument: "取消保存", ofdgoImportPages: "取消导入", ofdgoExportAttachment: "取消下载" }[name] || "取消导出";
+			el.cancelExportButton.title = { ofdgoSaveDocument: "取消保存", ofdgoSaveEncrypted: "取消保存", ofdgoSaveSigned: "取消签署", ofdgoImportPages: "取消导入", ofdgoExportAttachment: "取消下载" }[name] || "取消导出";
 			el.cancelExportButton.setAttribute("aria-label", el.cancelExportButton.title);
 		}
 		try {
@@ -6253,6 +6708,7 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("aria-busy", busy);
+	renderSecurity();
 	updateRenderBackend();
 	el.editButton.disabled = busy || !state.doc || !state.ready || state.exporting;
 	el.createForm.inert = busy;

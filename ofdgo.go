@@ -24,9 +24,9 @@ import (
 
 // Open 打开OFD文件
 // 返回的阅读器持有文件，使用完毕后需调用Close
-// 入参: path 文件路径
+// 入参: path 文件路径, options 阅读选项
 // 返回: *Reader 阅读器实例, error 错误信息
-func Open(path string) (*Reader, error) {
+func Open(path string, options ...ReaderOption) (*Reader, error) {
 	r, err := zip.OpenReader(path)
 	if err != nil {
 		return nil, err
@@ -36,7 +36,7 @@ func Open(path string) (*Reader, error) {
 		Zip:    &r.Reader,
 		Closer: r,
 	}
-	if err := reader.initRoot(); err != nil {
+	if err := reader.open(options); err != nil {
 		reader.Close()
 		return nil, err
 	}
@@ -45,9 +45,9 @@ func Open(path string) (*Reader, error) {
 
 // NewReader 从IO读取器创建OFD阅读器
 // 读取器的生命周期由调用方管理，Reader.Close不会关闭它
-// 入参: r IO读取器, size 数据大小
+// 入参: r IO读取器, size 数据大小, options 阅读选项
 // 返回: *Reader 阅读器实例, error 错误信息
-func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
+func NewReader(r io.ReaderAt, size int64, options ...ReaderOption) (*Reader, error) {
 	zr, err := zip.NewReader(r, size)
 	if err != nil {
 		return nil, err
@@ -55,7 +55,7 @@ func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 	reader := &Reader{
 		Zip: zr,
 	}
-	if err := reader.initRoot(); err != nil {
+	if err := reader.open(options); err != nil {
 		return nil, err
 	}
 	return reader, nil

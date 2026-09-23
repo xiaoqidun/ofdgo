@@ -49,6 +49,8 @@ type Reader struct {
 	fileIndex                 map[string]*zip.File
 	fileIndexFold             map[string]*zip.File
 	files                     map[string][]byte
+	fileNamesFold             map[string]string
+	encryption                *encryptionState
 }
 
 // Close 关闭阅读器
@@ -63,17 +65,8 @@ func (r *Reader) Close() error {
 // initRoot 读取根节点信息
 // 返回: error 错误信息
 func (r *Reader) initRoot() error {
-	r.fileIndex = make(map[string]*zip.File)
-	r.fileIndexFold = make(map[string]*zip.File)
-	if r.Zip != nil {
-		for _, f := range r.Zip.File {
-			name := cleanPackagePath(f.Name)
-			r.fileIndex[name] = f
-			fold := strings.ToLower(name)
-			if _, ok := r.fileIndexFold[fold]; !ok {
-				r.fileIndexFold[fold] = f
-			}
-		}
+	if err := r.indexPackage(); err != nil {
+		return err
 	}
 	data, err := r.readFile("OFD.xml")
 	if err != nil {
@@ -96,11 +89,58 @@ func (r *Reader) initRoot() error {
 	return nil
 }
 
+// indexPackage 建立包路径索引，拒绝会使显示与验签产生歧义的同名条目
+// 返回: error 错误信息
+func (r *Reader) indexPackage() error {
+	r.fileIndex = make(map[string]*zip.File)
+	r.fileIndexFold = make(map[string]*zip.File)
+	r.fileNamesFold = make(map[string]string)
+	if r.Zip != nil {
+		for _, f := range r.Zip.File {
+			if f.FileInfo().IsDir() {
+				continue
+			}
+			name := cleanPackagePath(f.Name)
+			if !validPackagePath(name) {
+				return fmt.Errorf("invalid package path: %q", f.Name)
+			}
+			fold := strings.ToLower(name)
+			if previous, ok := r.fileIndexFold[fold]; ok {
+				return fmt.Errorf("ambiguous package paths: %q and %q", previous.Name, f.Name)
+			}
+			r.fileIndex[name] = f
+			r.fileIndexFold[fold] = f
+			r.fileNamesFold[fold] = name
+		}
+	}
+	for name := range r.files {
+		if name != cleanPackagePath(name) || !validPackagePath(name) {
+			return fmt.Errorf("invalid package path: %q", name)
+		}
+		fold := strings.ToLower(name)
+		if previous, ok := r.fileNamesFold[fold]; ok && previous != name {
+			return fmt.Errorf("ambiguous package paths: %q and %q", previous, name)
+		}
+		r.fileNamesFold[fold] = name
+	}
+	return nil
+}
+
+// validPackagePath 判断规范化路径是否位于包内
+// 入参: name 规范化路径
+// 返回: bool 是否有效
+func validPackagePath(name string) bool {
+	return name != "." && name != ".." && !strings.HasPrefix(name, "../") && !strings.HasPrefix(name, "/") && !strings.ContainsAny(name, ":\x00")
+}
+
 // readFile 读取文档内的文件
 // 入参: name 文件名
 // 返回: []byte 文件内容, error 错误信息
 func (r *Reader) readFile(name string) ([]byte, error) {
 	name = cleanPackagePath(name)
+	if actual, ok := r.fileNamesFold[strings.ToLower(name)]; ok {
+		name = actual
+	}
 	if data, ok := r.files[name]; ok {
 		return bytes.Clone(data), nil
 	}
@@ -118,6 +158,9 @@ func (r *Reader) readFile(name string) ([]byte, error) {
 // 返回: io.ReadCloser 文件流, error 错误信息
 func (r *Reader) openFile(name string) (io.ReadCloser, error) {
 	name = cleanPackagePath(name)
+	if actual, ok := r.fileNamesFold[strings.ToLower(name)]; ok {
+		name = actual
+	}
 	if data, ok := r.files[name]; ok {
 		return io.NopCloser(bytes.NewReader(data)), nil
 	}

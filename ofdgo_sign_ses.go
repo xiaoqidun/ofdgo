@@ -16,11 +16,14 @@ package ofdgo
 
 import (
 	"bytes"
+	"crypto/ecdsa"
 	"encoding/asn1"
 	"fmt"
-	"math/big"
 	"strings"
 	"time"
+
+	"github.com/emmansun/gmsm/sm2"
+	"github.com/emmansun/gmsm/sm3"
 )
 
 const (
@@ -30,14 +33,12 @@ const (
 	signMethodSM2SM3   = "1.2.156.10197.1.501"
 	signMethodSM2SM3B  = "1.2.156.10197.501"
 	signMethodSM2Sign  = "1.2.156.10197.1.301.1"
-	signCurveSM2P256   = "1.2.156.10197.1.301"
-	signECPublicKey    = "1.2.840.10045.2.1"
 	signASN1Sequence   = 16
-	signPublicKeySize  = 65
 )
 
 // sesSignature SES签章值
 type sesSignature struct {
+	Timestamp []byte
 	ToSign    []byte
 	Cert      []byte
 	SignAlg   string
@@ -49,15 +50,16 @@ type sesSignature struct {
 
 // sesSeal SES电子印章
 type sesSeal struct {
-	Raw       []byte
-	SignData  []byte
-	Cert      []byte
-	SignAlg   string
-	Signature []byte
-	PicType   string
-	PicData   []byte
-	CertList  sesCertList
-	Info      SignatureSealInfo
+	TimestampRaw []byte
+	Raw          []byte
+	SignData     []byte
+	Cert         []byte
+	SignAlg      string
+	Signature    []byte
+	PicType      string
+	PicData      []byte
+	CertList     sesCertList
+	Info         SignatureSealInfo
 }
 
 // sesCertList SES印章证书列表
@@ -74,6 +76,8 @@ type sesCertDigest struct {
 
 // sesVerifyResult SES签章验证结果
 type sesVerifyResult struct {
+	SignatureMethod string
+	Timestamps      []signatureTimestampEvidence
 	DataHashChecked bool
 	DataHashOK      bool
 	SignedChecked   bool
@@ -147,7 +151,22 @@ func parseSESSignature(data []byte) (*sesSignature, error) {
 	if err != nil {
 		return nil, err
 	}
+	if version != 4 {
+		return nil, fmt.Errorf("unsupported ses version: %d", version)
+	}
+	var timestamp []byte
+	if len(items) == 5 {
+		value, parseErr := asn1Explicit(items[4])
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid ses timestamp tag: %w", parseErr)
+		}
+		timestamp, err = asn1BitStringBytes(value)
+		if err != nil || len(timestamp) == 0 {
+			return nil, fmt.Errorf("invalid ses timestamp")
+		}
+	}
 	return &sesSignature{
+		Timestamp: timestamp,
 		ToSign:    append([]byte(nil), items[0].FullBytes...),
 		Cert:      cert,
 		SignAlg:   alg,
@@ -175,7 +194,7 @@ func parseSESSignatureV1(items []asn1.RawValue) (*sesSignature, error) {
 		return nil, err
 	}
 	version, err := asn1Integer(tbsItems[0])
-	if err != nil || version != seal.Info.Version {
+	if err != nil || version != seal.Info.Version || version != 1 {
 		return nil, fmt.Errorf("invalid ses version")
 	}
 	signatureTime := parseSESSignatureTimeV1(tbsItems[2])
@@ -233,7 +252,16 @@ func verifySESSignature(data, signedData []byte, options *signatureVerifyOptions
 	if !isSM2SignatureMethod(sig.SignAlg) || !isSM2SignatureMethod(sig.Seal.SignAlg) {
 		return nil, fmt.Errorf("unsupported signature method")
 	}
+	for _, method := range []string{sig.SignAlg, sig.Seal.SignAlg} {
+		if err := signatureAlgorithmPolicy(options.Policy, method, "SM3"); err != nil {
+			return nil, err
+		}
+	}
 	result := &sesVerifyResult{}
+	result.SignatureMethod = sig.SignAlg
+	if len(sig.Timestamp) != 0 {
+		result.Timestamps = append(result.Timestamps, signatureTimestampEvidence{Token: sig.Timestamp, Data: sig.Signature})
+	}
 	result.SignCert = signatureCertInfo(sig.Cert)
 	result.SealCert = signatureCertInfo(sig.Seal.Cert)
 	result.SignCertRaw = sig.Cert
@@ -255,9 +283,9 @@ func verifySESSignature(data, signedData []byte, options *signatureVerifyOptions
 		return result, err
 	}
 	result.SignedChecked = true
-	result.SignedOK = sm2VerifySignature(signPub, nil, sig.ToSign, sig.Signature)
+	result.SignedOK = verifySM2Signature(signPub, nil, sig.ToSign, sig.Signature)
 	result.SealChecked = true
-	result.SealOK = sm2VerifySignature(sealPub, nil, sig.Seal.SignData, sig.Seal.Signature)
+	result.SealOK = verifySM2Signature(sealPub, nil, sig.Seal.SignData, sig.Seal.Signature)
 	result.CertChecked = true
 	result.CertOK = sesCertInList(sig.Cert, sig.Seal.CertList)
 	return result, nil
@@ -297,20 +325,29 @@ func parseSESSeal(raw asn1.RawValue) (*sesSeal, error) {
 	if err != nil {
 		return nil, err
 	}
+	var timestampRaw []byte
+	if len(items) == 5 {
+		if info.Version != 5 {
+			return nil, fmt.Errorf("unexpected timestamp in ses seal version %d", info.Version)
+		}
+		// V5仅保留解析能力, 不将未验证的制章时间戳当作可信时间
+		timestampRaw = append([]byte(nil), items[4].FullBytes...)
+	}
 	picType, picData, err := parseSESPicture(infoItems[3])
 	if err != nil {
 		return nil, err
 	}
 	return &sesSeal{
-		Raw:       append([]byte(nil), raw.FullBytes...),
-		SignData:  append([]byte(nil), items[0].FullBytes...),
-		Cert:      cert,
-		SignAlg:   alg,
-		Signature: signature,
-		PicType:   picType,
-		PicData:   picData,
-		CertList:  certList,
-		Info:      info,
+		TimestampRaw: timestampRaw,
+		Raw:          append([]byte(nil), raw.FullBytes...),
+		SignData:     append([]byte(nil), items[0].FullBytes...),
+		Cert:         cert,
+		SignAlg:      alg,
+		Signature:    signature,
+		PicType:      picType,
+		PicData:      picData,
+		CertList:     certList,
+		Info:         info,
 	}, nil
 }
 
@@ -531,62 +568,25 @@ func parseSESPicture(raw asn1.RawValue) (string, []byte, error) {
 
 // parseSM2PublicKeyFromCert 从证书解析SM2公钥
 // 入参: data DER编码证书
-// 返回: sm2PublicKey SM2公钥, error 错误信息
-func parseSM2PublicKeyFromCert(data []byte) (sm2PublicKey, error) {
+// 返回: *ecdsa.PublicKey SM2公钥, error 错误信息
+func parseSM2PublicKeyFromCert(data []byte) (*ecdsa.PublicKey, error) {
 	cert, err := parseSignatureCertificate(data)
 	if err != nil {
-		return sm2PublicKey{}, err
+		return nil, err
 	}
-	return parseSM2PublicKeyInfo(cert.PublicKey)
-}
-
-// parseSM2PublicKeyInfo 解析SM2公钥信息
-// 入参: raw SubjectPublicKeyInfo原始值
-// 返回: sm2PublicKey SM2公钥, error 错误信息
-func parseSM2PublicKeyInfo(raw asn1.RawValue) (sm2PublicKey, error) {
-	var spki struct {
-		Algorithm        asn1.RawValue
-		SubjectPublicKey asn1.BitString
+	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok || !sm2.IsSM2PublicKey(pub) {
+		return nil, fmt.Errorf("SM2 public key required")
 	}
-	rest, err := asn1.Unmarshal(raw.FullBytes, &spki)
-	if err != nil {
-		return sm2PublicKey{}, err
-	}
-	if len(rest) != 0 {
-		return sm2PublicKey{}, fmt.Errorf("invalid subject public key info")
-	}
-	algItems, ok := asn1Children(spki.Algorithm.Bytes)
-	if !ok || len(algItems) < 2 {
-		return sm2PublicKey{}, fmt.Errorf("invalid public key algorithm")
-	}
-	alg, err := asn1OIDString(algItems[0])
-	if err != nil {
-		return sm2PublicKey{}, err
-	}
-	curve, err := asn1OIDString(algItems[1])
-	if err != nil {
-		return sm2PublicKey{}, err
-	}
-	if alg != signECPublicKey || curve != signCurveSM2P256 {
-		return sm2PublicKey{}, fmt.Errorf("unsupported public key algorithm")
-	}
-	key := spki.SubjectPublicKey.Bytes
-	if len(key) != signPublicKeySize || key[0] != 4 {
-		return sm2PublicKey{}, fmt.Errorf("invalid sm2 public key")
-	}
-	return sm2PublicKey{
-		X: new(big.Int).SetBytes(key[1:33]),
-		Y: new(big.Int).SetBytes(key[33:65]),
-	}, nil
+	return pub, nil
 }
 
 // signSM3 计算SM3摘要
 // 入参: data 原文数据
 // 返回: []byte 摘要值
 func signSM3(data []byte) []byte {
-	h := newSM3()
-	h.Write(data)
-	return h.Sum(nil)
+	digest := sm3.Sum(data)
+	return digest[:]
 }
 
 // isSM2SignatureMethod 判断是否为SM2签名算法

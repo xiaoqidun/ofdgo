@@ -61,6 +61,7 @@ type Editor struct {
 	source          *editorSource
 	origins         map[string]*editorObjectOrigin
 	outlines        []byte
+	encryption      *encryptionState
 }
 
 // SetFontFS 设置编辑与几何度量使用的外部字体来源，不嵌入或替换文档字体

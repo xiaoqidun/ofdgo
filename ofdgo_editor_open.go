@@ -116,17 +116,7 @@ type PageCapabilities struct {
 // 页面按需解析，未修改条目直接保留；编辑器及其Reader快照使用期间不得关闭输入Reader
 // 返回: *Editor 编辑器, error 错误信息
 func (r *Reader) Editor() (*Editor, error) {
-	if r.Zip != nil {
-		seen := make(map[string]bool)
-		for _, file := range r.Zip.File {
-			name := cleanPackagePath(file.Name)
-			if seen[name] {
-				return nil, fmt.Errorf("ambiguous package entry %q", file.Name)
-			}
-			seen[name] = true
-		}
-	}
-	reader := &Reader{Zip: r.Zip, files: r.files}
+	reader := &Reader{Zip: r.Zip, files: r.files, encryption: r.encryption}
 	if err := reader.initRoot(); err != nil {
 		return nil, err
 	}
@@ -143,6 +133,7 @@ func (r *Reader) Editor() (*Editor, error) {
 		return nil, err
 	}
 	e := NewEditor()
+	e.encryption = r.encryption
 	e.Info, e.maxID = cloneEditorData(*info), maximum
 	directory := cleanPackagePath(reader.RootDir)
 	e.source = &editorSource{reader: reader, document: doc, info: cloneEditorData(*info), directory: directory, pages: make(map[string]*editorSourcePage), origins: make(map[string]*editorObjectOrigin)}

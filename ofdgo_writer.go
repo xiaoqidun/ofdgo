@@ -50,6 +50,16 @@ func (progress editorProgress) report(stage string, completed, total int) error 
 // 入参: writer 输出流
 // 返回: int64 已写入字节数, error 错误信息
 func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
+	if e.encryption != nil {
+		return e.writeEncrypted(writer)
+	}
+	return e.writePlaintext(writer)
+}
+
+// writePlaintext 写出未加密包，供显式明文输出与加密封装共用
+// 入参: writer 输出流
+// 返回: int64 写入字节数, error 错误信息
+func (e *Editor) writePlaintext(writer io.Writer) (int64, error) {
 	if err := e.validate(); err != nil {
 		return 0, err
 	}
@@ -129,6 +139,7 @@ func (e *Editor) WritePagesTo(writer io.Writer, indexes []int) (int64, error) {
 	}
 	defer reader.Close()
 	selected := NewEditor()
+	selected.encryption = e.encryption
 	id := selected.Info.DocID
 	selected.Info = cloneEditorData(e.Info)
 	selected.Info.DocID = id
@@ -156,7 +167,7 @@ func (e *Editor) reader(progress editorProgress) (*Reader, error) {
 	if e.source != nil {
 		return e.sourceReader(progress)
 	}
-	r := &Reader{files: make(map[string][]byte)}
+	r := &Reader{files: make(map[string][]byte), encryption: e.encryption}
 	if err := e.writeParts(func(name string, data []byte, _ bool) error {
 		r.files[name] = data
 		return nil

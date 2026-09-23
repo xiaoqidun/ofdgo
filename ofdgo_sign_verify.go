@@ -24,7 +24,6 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/subtle"
-	"crypto/x509"
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/pem"
@@ -35,13 +34,32 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/emmansun/gmsm/sm2"
+	"github.com/emmansun/gmsm/smx509"
 )
 
 // SignatureVerifyReport 签名验证报告
-// Valid表示签名完整性、签名时间语义及调用方指定的证书策略均通过
+// Valid表示签名完整性、签名时间语义及调用方指定的全部策略均通过
 // Checked表示对应检查已得出结论, 未检查时不能将OK的零值视为失败
 // SealCertTimeOK仅提供制章证书在签名时间的状态信息, 不参与Valid判断
 type SignatureVerifyReport struct {
+	DocIndex             int
+	DocRoot              string
+	PolicyChecked        bool
+	PolicyOK             bool
+	PolicyError          string
+	CoverageChecked      bool
+	CoverageOK           bool
+	CoverageError        string
+	CoveredFiles         []string
+	UncoveredFiles       []string
+	TimestampChecked     bool
+	TimestampOK          bool
+	Timestamps           []SignatureTimestampReport
+	RevocationChecked    bool
+	RevocationOK         bool
+	Revocations          []SignatureRevocationReport
 	ID                   string
 	BaseLoc              string
 	Type                 SignType
@@ -80,6 +98,7 @@ type SignatureVerifyReport struct {
 	CertTimeOK           bool
 	CertTrustChecked     bool
 	CertTrustOK          bool
+	CertTrustError       string
 	Valid                bool
 	Error                string
 }
@@ -87,7 +106,10 @@ type SignatureVerifyReport struct {
 // IntegrityValid 判断签名完整性是否有效
 // 返回: bool 是否有效
 func (report SignatureVerifyReport) IntegrityValid() bool {
-	return report.Error == "" && report.DigestOK && report.DataHashOK && report.SignedValueOK && report.SealOK && report.SealMatchOK && report.CertOK
+	sealOK := report.Type == SignTypeSign || report.SealChecked && report.SealOK
+	return report.Error == "" && report.DigestOK && referencesOK(report.References) &&
+		report.DataHashChecked && report.DataHashOK && report.SignedValueChecked && report.SignedValueOK &&
+		sealOK && report.SealMatchOK && report.CertChecked && report.CertOK
 }
 
 // TrustedValid 判断签名是否可信有效
@@ -151,6 +173,11 @@ type signatureVerifyOptions struct {
 	SignCerts  [][]byte
 	TrustCerts [][]byte
 	VerifyTime *time.Time
+	Policy     *SignaturePolicy
+	Timestamp  *SignatureTimestampOptions
+	Revocation *SignatureRevocationOptions
+	DocIndex   int
+	DocRoot    string
 }
 
 var signatureMethodReplacer = strings.NewReplacer("-", "", "_", "", " ", "")
@@ -177,6 +204,7 @@ func WithSignatureCerts(certs ...[]byte) SignatureVerifyOption {
 }
 
 // WithSignatureTrustCert 添加签名信任证书
+// 指定信任后同时验证证书链有效期，默认使用当前时间
 // 入参: cert DER或PEM编码证书
 // 返回: SignatureVerifyOption 签名验证选项
 func WithSignatureTrustCert(cert []byte) SignatureVerifyOption {
@@ -186,6 +214,7 @@ func WithSignatureTrustCert(cert []byte) SignatureVerifyOption {
 }
 
 // WithSignatureTrustCerts 添加多张签名信任证书
+// 指定信任后同时验证证书链有效期，默认使用当前时间
 // 入参: certs DER或PEM编码证书列表
 // 返回: SignatureVerifyOption 签名验证选项
 func WithSignatureTrustCerts(certs ...[]byte) SignatureVerifyOption {
@@ -246,19 +275,56 @@ func VerifySignaturesReader(r io.ReaderAt, size int64, opts ...SignatureVerifyOp
 // 入参: opts 签名验证选项
 // 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
 func (r *Reader) VerifySignatures(opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	if r.OFD == nil || len(r.OFD.DocBody) == 0 {
+		return nil, fmt.Errorf("no docbody found")
+	}
+	if _, err := r.Doc(); err != nil {
+		return nil, err
+	}
+	var reports []SignatureVerifyReport
+	for i := range r.OFD.DocBody {
+		items, err := r.VerifyDocumentSignatures(i, opts...)
+		reports = append(reports, items...)
+		if err != nil {
+			return reports, fmt.Errorf("document %d: %w", i, err)
+		}
+	}
+	return reports, nil
+}
+
+// VerifyDocumentSignatures 验证指定DocBody的签名且不切换阅读器当前文档
+// 入参: index 从0开始的文档索引, opts 签名验证选项
+// 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
+func (r *Reader) VerifyDocumentSignatures(index int, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	if r.OFD == nil || index < 0 || index >= len(r.OFD.DocBody) {
+		return nil, fmt.Errorf("document index out of range: %d", index)
+	}
 	options := signatureVerifyOptions{}
 	for _, opt := range opts {
-		opt(&options)
+		if opt != nil {
+			opt(&options)
+		}
 	}
-	doc, err := r.Doc()
+	body := r.OFD.DocBody[index]
+	options.DocIndex, options.DocRoot = index, r.signatureCoveragePath(body.DocRoot)
+	data, err := r.readFile(body.DocRoot)
 	if err != nil {
 		return nil, err
+	}
+	var doc Document
+	if err := xml.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	if doc.Signatures == "" {
+		doc.Signatures = body.Signatures
 	}
 	if doc.Signatures == "" {
 		return nil, nil
 	}
-	sigListPath := r.ResPath(doc.Signatures)
-	data, err := r.readFileExact(sigListPath)
+	view := *r
+	view.doc, view.RootDir = &doc, path.Dir(body.DocRoot)
+	sigListPath := view.ResPath(doc.Signatures)
+	data, err = view.readFile(sigListPath)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +334,7 @@ func (r *Reader) VerifySignatures(opts ...SignatureVerifyOption) ([]SignatureVer
 	}
 	reports := make([]SignatureVerifyReport, 0, len(signatures.List))
 	for _, sigRef := range signatures.List {
-		reports = append(reports, r.verifySignature(sigListPath, sigRef, &options))
+		reports = append(reports, view.verifySignature(sigListPath, sigRef, &options))
 	}
 	return reports, nil
 }
@@ -279,6 +345,8 @@ func (r *Reader) VerifySignatures(opts ...SignatureVerifyOption) ([]SignatureVer
 func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *signatureVerifyOptions) SignatureVerifyReport {
 	sigPath := signatureRefPath(sigListPath, sigRef.BaseLoc)
 	report := SignatureVerifyReport{
+		DocIndex:    options.DocIndex,
+		DocRoot:     options.DocRoot,
 		ID:          sigRef.ID,
 		BaseLoc:     sigRef.BaseLoc,
 		Type:        sigRef.Type,
@@ -287,7 +355,7 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 	if report.Type == "" {
 		report.Type = SignTypeSeal
 	}
-	sigData, err := r.readFileExact(sigPath)
+	sigData, err := r.readFile(sigPath)
 	if err != nil {
 		report.Error = err.Error()
 		return report
@@ -311,8 +379,10 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 		report.StampPositionError = err.Error()
 	}
 	report.DigestOK = referencesOK(report.References)
+	r.applySignatureCoverage(&report, sigListPath, options)
+	report.applySignaturePolicy(options, r.OFD.Version, 0, report.SignatureMethod, report.DigestMethod)
 	signedValuePath := signatureRefPath(sigPath, sigFile.SignedValue)
-	signedValue, err := r.readFileExact(signedValuePath)
+	signedValue, err := r.readFile(signedValuePath)
 	if err != nil {
 		report.Error = err.Error()
 		return report
@@ -331,6 +401,7 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 			report.Signer = result.CertInfo.CommonName
 		}
 		if err != nil {
+			report.applySignaturePolicyError(err)
 			report.Error = err.Error()
 			return report
 		}
@@ -338,6 +409,7 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 		report.SignatureTime = parseSignatureDateTime(report.SignatureDateTime)
 		report.applySignatureTimePolicy()
 		report.applySignatureCertificatePolicy(options, result.SignerCerts, result.Certs)
+		report.applySignatureEvidence(options, signedValue, result.Timestamps, result.SignerCerts, result.Certs)
 		report.Valid = report.IntegrityValid() && report.certificatePolicyOK()
 		return report
 	case SignTypeSeal:
@@ -363,14 +435,21 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 		report.Signer = sesResult.SignCert.CommonName
 	}
 	if err != nil {
+		report.applySignaturePolicyError(err)
 		report.Error = err.Error()
 		return report
 	}
 	report.applySignatureTimePolicy()
+	if report.SignatureMethod != "" && !signatureAlgorithmEquivalent(report.SignatureMethod, sesResult.SignatureMethod, "SM3") {
+		report.Error = "signature method does not match SES"
+		return report
+	}
 	report.applySignatureCertificatePolicy(options, [][]byte{sesResult.SignCertRaw, sesResult.SealCertRaw}, sesResult.Certs)
+	report.applySignaturePolicy(options, r.OFD.Version, sesResult.SealInfo.Version, sesResult.SignatureMethod, "SM3")
+	report.applySignatureEvidence(options, signedValue, sesResult.Timestamps, [][]byte{sesResult.SignCertRaw, sesResult.SealCertRaw}, sesResult.Certs)
 	if sigFile.SignedInfo.Seal.BaseLoc != "" {
 		sealPath := signatureRefPath(sigPath, sigFile.SignedInfo.Seal.BaseLoc)
-		sealData, err := r.readFileExact(sealPath)
+		sealData, err := r.readFile(sealPath)
 		if err != nil {
 			report.Error = err.Error()
 			return report
@@ -407,7 +486,7 @@ func (r *Reader) verifySignatureReference(sigPath, method string, ref SignatureR
 		result.Error = err.Error()
 		return result
 	}
-	data, err := r.readFileExact(refPath)
+	data, err := r.readFile(refPath)
 	if err != nil {
 		result.Error = err.Error()
 		return result
@@ -433,20 +512,6 @@ func parseSignatureFile(data []byte) (*SignatureFile, error) {
 		return nil, err
 	}
 	return &sigFile, nil
-}
-
-// readFileExact 读取OFD包内文件
-// 入参: name 包内文件路径
-// 返回: []byte 文件数据, error 错误信息
-func (r *Reader) readFileExact(name string) ([]byte, error) {
-	name = cleanPackagePath(name)
-	if data, ok := r.files[name]; ok {
-		return bytes.Clone(data), nil
-	}
-	if f, ok := r.fileIndex[name]; ok {
-		return readZipFile(f)
-	}
-	return nil, fmt.Errorf("file not found: %s", name)
 }
 
 // signatureDigest 计算签名摘要
@@ -612,7 +677,7 @@ func verifyPublicKeySignature(method, digestMethod string, cert, signedData, sig
 	if len(digest) == 0 {
 		return false, fmt.Errorf("unsupported digest method")
 	}
-	x509Cert, err := x509.ParseCertificate(cert)
+	x509Cert, err := parseSignatureCertificate(cert)
 	if err != nil {
 		return false, err
 	}
@@ -630,6 +695,23 @@ func verifyPublicKeySignature(method, digestMethod string, cert, signedData, sig
 	default:
 		return false, fmt.Errorf("unsupported public key algorithm")
 	}
+}
+
+// verifySM2Signature 验证DER或定长拼接编码的SM2签名值
+// 入参: pub 公钥, userID 用户标识, msg 原文, sig 签名值
+// 返回: bool 是否验证通过
+func verifySM2Signature(pub *ecdsa.PublicKey, userID, msg, sig []byte) bool {
+	if sm2.VerifyASN1WithSM2(pub, userID, msg, sig) {
+		return true
+	}
+	if len(sig) != 64 {
+		return false
+	}
+	digest, err := sm2.CalculateSM2Hash(pub, msg, userID)
+	if err != nil {
+		return false
+	}
+	return sm2.Verify(pub, digest, new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:]))
 }
 
 // verifyECDSASignature 验证ECDSA签名
@@ -668,7 +750,7 @@ func referencesOK(refs []SignatureReferenceVerify) bool {
 		return false
 	}
 	for _, ref := range refs {
-		if !ref.OK {
+		if !ref.Checked || !ref.OK || ref.Error != "" {
 			return false
 		}
 	}
@@ -679,9 +761,14 @@ func referencesOK(refs []SignatureReferenceVerify) bool {
 // 入参: options 验证选项, certs 待验证证书, extraCerts 证书池
 func (report *SignatureVerifyReport) applySignatureCertificatePolicy(options *signatureVerifyOptions, certs [][]byte, extraCerts [][]byte) {
 	certs = compactSignatureCerts(certs)
-	if options.VerifyTime != nil {
+	verifyTime := options.VerifyTime
+	if verifyTime == nil && len(options.TrustCerts) != 0 {
+		now := time.Now()
+		verifyTime = &now
+	}
+	if verifyTime != nil {
 		report.CertTimeChecked = true
-		report.CertTimeOK = signatureCertsValidAt(certs, *options.VerifyTime)
+		report.CertTimeOK = signatureCertsValidAt(certs, *verifyTime)
 	}
 	if len(options.TrustCerts) != 0 {
 		report.CertTrustChecked = true
@@ -691,13 +778,15 @@ func (report *SignatureVerifyReport) applySignatureCertificatePolicy(options *si
 		pool = append(pool, extraCerts...)
 		pool = compactSignatureCerts(pool)
 		for _, cert := range certs {
-			if !signatureCertTrustedBy(cert, pool, options.TrustCerts, options.VerifyTime) {
+			if err := verifySignatureCertificateTrust(cert, pool, options.TrustCerts, *verifyTime); err != nil {
 				report.CertTrustOK = false
+				report.CertTrustError = err.Error()
 				break
 			}
 		}
 		if len(certs) == 0 {
 			report.CertTrustOK = false
+			report.CertTrustError = "signature certificate missing"
 		}
 	}
 }
@@ -728,6 +817,10 @@ func timeInRange(t, start, end time.Time) bool {
 // certificatePolicyOK 判断证书策略是否通过
 // 返回: bool 是否通过
 func (report SignatureVerifyReport) certificatePolicyOK() bool {
+	if report.PolicyChecked && !report.PolicyOK || report.CoverageChecked && !report.CoverageOK ||
+		report.TimestampChecked && !report.TimestampOK || report.RevocationChecked && !report.RevocationOK {
+		return false
+	}
 	if report.SignatureTimeChecked && !report.SignatureTimeOK {
 		return false
 	}
@@ -759,112 +852,51 @@ func signatureCertsValidAt(certs [][]byte, t time.Time) bool {
 	return true
 }
 
-// signatureCertMaxChecks 最大证书签名验证次数
-const signatureCertMaxChecks = 100
-
-// signatureCertPathState 证书路径状态
-type signatureCertPathState struct {
-	Visited         map[string]bool
-	SignatureChecks int
-}
-
-// signatureCertTrustedBy 判断证书是否可链到信任证书
-// 入参: cert 证书, pool 证书池, trusts 信任证书, verifyTime 中间证书验证时间
-// 返回: bool 是否受信任
-func signatureCertTrustedBy(cert []byte, pool, trusts [][]byte, verifyTime *time.Time) bool {
-	state := signatureCertPathState{Visited: make(map[string]bool)}
-	return signatureCertPathTrustedBy(cert, pool, trusts, verifyTime, &state, 0, true)
-}
-
-// signatureCertPathTrustedBy 验证证书路径
-// 入参: cert 证书, pool 证书池, trusts 信任证书, verifyTime 中间证书验证时间, state 路径状态, caBelow 下级非自颁发中间CA数量, target 是否目标证书
-// 返回: bool 是否受信任
-func signatureCertPathTrustedBy(cert []byte, pool, trusts [][]byte, verifyTime *time.Time, state *signatureCertPathState, caBelow int, target bool) bool {
-	if len(cert) == 0 {
-		return false
-	}
-	trusted := false
-	for _, trust := range trusts {
-		if bytes.Equal(cert, trust) {
-			trusted = true
-			break
-		}
-	}
-	if trusted && !target {
-		return true
-	}
-	key := string(cert)
-	if state.Visited[key] {
-		return false
-	}
-	state.Visited[key] = true
-	defer delete(state.Visited, key)
+// verifySignatureCertificateTrust 按指定时间验证签署证书到显式信任根的证书链
+// 入参: cert 证书, pool 证书池, trusts 信任证书, at 验证时间
+// 返回: error 验证错误
+func verifySignatureCertificateTrust(cert []byte, pool, trusts [][]byte, at time.Time) error {
 	c, err := parseSignatureCertificate(cert)
 	if err != nil {
-		return false
+		return err
 	}
-	if c.UnhandledCritical {
-		return false
+	if c.KeyUsage != 0 && c.KeyUsage&(smx509.KeyUsageDigitalSignature|smx509.KeyUsageContentCommitment) == 0 {
+		return fmt.Errorf("certificate does not authorize digital signatures")
 	}
-	if !target && verifyTime != nil && (verifyTime.Before(c.NotBefore) || verifyTime.After(c.NotAfter)) {
-		return false
-	}
-	if target {
-		if c.KeyUsage != 0 && c.KeyUsage&(x509.KeyUsageDigitalSignature|x509.KeyUsageContentCommitment) == 0 {
-			return false
-		}
-	} else {
-		if !c.IsCA {
-			return false
-		}
-		if c.KeyUsage != 0 && c.KeyUsage&x509.KeyUsageCertSign == 0 {
-			return false
-		}
-		if c.MaxPathLen != nil && c.MaxPathLen.Cmp(big.NewInt(int64(caBelow))) < 0 {
-			return false
-		}
-	}
-	if trusted {
-		return true
-	}
-	nextCABelow := caBelow
-	if !target && !bytes.Equal(c.Issuer, c.Subject) {
-		nextCABelow++
-	}
-	for _, issuerCert := range pool {
-		if state.SignatureChecks >= signatureCertMaxChecks {
-			return false
-		}
-		if bytes.Equal(cert, issuerCert) {
-			continue
-		}
-		issuer, err := parseSignatureCertificate(issuerCert)
-		if err != nil || !bytes.Equal(c.Issuer, issuer.Subject) {
-			continue
-		}
-		state.SignatureChecks++
-		if ok, err := verifyCertificateSignature(c, issuerCert); err != nil || !ok {
-			continue
-		}
-		if signatureCertPathTrustedBy(issuerCert, pool, trusts, verifyTime, state, nextCABelow, false) {
-			return true
+	return verifySignatureCertificateChain(c, pool, trusts, at, smx509.ExtKeyUsageAny)
+}
+
+// verifySignatureCertificateChain 使用统一X.509实现验证证书链
+// 入参: cert 目标证书, pool 中间证书, trusts 信任根, at 验证时间, usage 扩展用途
+// 返回: error 验证错误
+func verifySignatureCertificateChain(cert *smx509.Certificate, pool, trusts [][]byte, at time.Time, usage smx509.ExtKeyUsage) error {
+	roots, intermediates := smx509.NewCertPool(), smx509.NewCertPool()
+	for _, group := range []struct {
+		data [][]byte
+		pool *smx509.CertPool
+	}{{trusts, roots}, {pool, intermediates}} {
+		for _, data := range group.data {
+			ca, err := parseSignatureCertificate(data)
+			if err != nil {
+				return err
+			}
+			group.pool.AddCert(ca)
 		}
 	}
-	return false
+	_, err := cert.Verify(smx509.VerifyOptions{Roots: roots, Intermediates: intermediates, CurrentTime: at, KeyUsages: []smx509.ExtKeyUsage{usage}})
+	return err
 }
 
 // verifyCertificateSignature 验证证书签名
 // 入参: cert 证书信息, issuerCert 颁发者证书
 // 返回: bool 是否验证通过, error 错误信息
-func verifyCertificateSignature(cert signatureCertificate, issuerCert []byte) (bool, error) {
-	if isSM2SignatureMethod(cert.SignatureAlg) {
-		pub, err := parseSM2PublicKeyFromCert(issuerCert)
-		if err != nil {
-			return false, err
-		}
-		return sm2VerifySignature(pub, nil, cert.TBS, cert.Signature), nil
+func verifyCertificateSignature(cert *smx509.Certificate, issuerCert []byte) (bool, error) {
+	issuer, err := parseSignatureCertificate(issuerCert)
+	if err != nil {
+		return false, err
 	}
-	return verifyPublicKeySignature(cert.SignatureAlg, "", issuerCert, cert.TBS, cert.Signature)
+	err = issuer.CheckSignature(cert.SignatureAlgorithm, cert.RawTBSCertificate, cert.Signature)
+	return err == nil, err
 }
 
 // compactSignatureCerts 清理证书列表
@@ -895,21 +927,16 @@ func signatureCertInfo(data []byte) SignatureCertInfo {
 	if err != nil {
 		return SignatureCertInfo{}
 	}
-	subject := certificateNameValues(cert.SubjectValue)
-	issuer := certificateNameValues(cert.IssuerValue)
-	info := SignatureCertInfo{
-		Raw:          append([]byte(nil), data...),
-		Subject:      certificateNameString(subject),
-		CommonName:   certificateNameFirst(subject, "2.5.4.3"),
-		Organization: certificateNameFirst(subject, "2.5.4.10"),
-		Issuer:       certificateNameString(issuer),
+	return SignatureCertInfo{
+		Raw:          bytes.Clone(cert.Raw),
+		Subject:      cert.Subject.String(),
+		CommonName:   cert.Subject.CommonName,
+		Organization: strings.Join(cert.Subject.Organization, ", "),
+		Issuer:       cert.Issuer.String(),
 		NotBefore:    cert.NotBefore,
 		NotAfter:     cert.NotAfter,
+		SerialNumber: cert.SerialNumber.String(),
 	}
-	if cert.Serial != nil {
-		info.SerialNumber = cert.Serial.String()
-	}
-	return info
 }
 
 // parseSignatureDateTime 解析带时区的签名时间
@@ -929,227 +956,17 @@ func parseSignatureDateTime(value string) time.Time {
 	return time.Time{}
 }
 
-const (
-	signatureExtensionKeyUsage         = "2.5.29.15"
-	signatureExtensionBasicConstraints = "2.5.29.19"
-)
-
-// signatureCertificateExtensions 签名证书扩展
-type signatureCertificateExtensions struct {
-	IsCA              bool
-	MaxPathLen        *big.Int
-	KeyUsage          x509.KeyUsage
-	UnhandledCritical bool
-}
-
-// signatureCertificate 签名证书结构
-type signatureCertificate struct {
-	Raw          []byte
-	TBS          []byte
-	Issuer       []byte
-	IssuerValue  asn1.RawValue
-	Subject      []byte
-	SubjectValue asn1.RawValue
-	PublicKey    asn1.RawValue
-	Serial       *big.Int
-	NotBefore    time.Time
-	NotAfter     time.Time
-	SignatureAlg string
-	Signature    []byte
-	signatureCertificateExtensions
-}
-
-// parseSignatureCertificate 解析签名证书
-// 入参: data DER编码证书
-// 返回: signatureCertificate 签名证书结构, error 错误信息
-func parseSignatureCertificate(data []byte) (signatureCertificate, error) {
-	var cert struct {
-		TBSCertificate     asn1.RawValue
-		SignatureAlgorithm asn1.RawValue
-		SignatureValue     asn1.BitString
-	}
-	rest, err := asn1.Unmarshal(data, &cert)
-	if err != nil || len(rest) != 0 {
-		return signatureCertificate{}, fmt.Errorf("invalid certificate")
-	}
-	items, ok := asn1Children(cert.TBSCertificate.Bytes)
-	if !ok {
-		return signatureCertificate{}, fmt.Errorf("invalid tbs certificate")
-	}
-	idx := 0
-	if len(items) > 0 && items[0].Class == asn1.ClassContextSpecific && items[0].Tag == 0 {
-		idx++
-	}
-	if len(items) <= idx+5 {
-		return signatureCertificate{}, fmt.Errorf("invalid certificate")
-	}
-	if !bytes.Equal(items[idx+1].FullBytes, cert.SignatureAlgorithm.FullBytes) {
-		return signatureCertificate{}, fmt.Errorf("certificate signature algorithm mismatch")
-	}
-	serial, err := asn1IntegerBig(items[idx])
-	if err != nil {
-		return signatureCertificate{}, err
-	}
-	validity, err := parseCertificateValidity(items[idx+3])
-	if err != nil {
-		return signatureCertificate{}, err
-	}
-	extensions, err := parseSignatureCertificateExtensions(items[idx+6:])
-	if err != nil {
-		return signatureCertificate{}, err
-	}
-	alg, err := parseGBTAlgorithm(cert.SignatureAlgorithm)
-	if err != nil {
-		return signatureCertificate{}, err
-	}
-	if cert.SignatureValue.BitLength%8 != 0 {
-		return signatureCertificate{}, fmt.Errorf("invalid certificate signature")
-	}
-	return signatureCertificate{
-		Raw:                            append([]byte(nil), data...),
-		TBS:                            append([]byte(nil), cert.TBSCertificate.FullBytes...),
-		Issuer:                         append([]byte(nil), items[idx+2].FullBytes...),
-		IssuerValue:                    items[idx+2],
-		Subject:                        append([]byte(nil), items[idx+4].FullBytes...),
-		SubjectValue:                   items[idx+4],
-		PublicKey:                      items[idx+5],
-		Serial:                         serial,
-		NotBefore:                      validity[0],
-		NotAfter:                       validity[1],
-		SignatureAlg:                   alg,
-		Signature:                      append([]byte(nil), cert.SignatureValue.Bytes...),
-		signatureCertificateExtensions: extensions,
-	}, nil
-}
-
-// parseSignatureCertificateExtensions 解析签名证书扩展
-// 入参: items TBS证书剩余字段
-// 返回: signatureCertificateExtensions 签名证书扩展, error 错误信息
-func parseSignatureCertificateExtensions(items []asn1.RawValue) (signatureCertificateExtensions, error) {
-	var out signatureCertificateExtensions
-	var extensions []struct {
-		ID       asn1.ObjectIdentifier
-		Critical bool `asn1:"optional"`
-		Value    []byte
-	}
-	found := false
-	for _, item := range items {
-		if item.Class != asn1.ClassContextSpecific || item.Tag != 3 {
-			continue
+// parseSignatureCertificate 解析唯一的PEM或DER证书
+// 入参: data 证书数据
+// 返回: *smx509.Certificate 证书, error 错误信息
+func parseSignatureCertificate(data []byte) (*smx509.Certificate, error) {
+	if block, rest := pem.Decode(data); block != nil {
+		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 || len(bytes.TrimSpace(rest)) != 0 {
+			return nil, fmt.Errorf("expected one certificate")
 		}
-		if found || !item.IsCompound {
-			return out, fmt.Errorf("invalid certificate extensions")
-		}
-		found = true
-		rest, err := asn1.Unmarshal(item.Bytes, &extensions)
-		if err != nil || len(rest) != 0 {
-			return out, fmt.Errorf("invalid certificate extensions")
-		}
+		data = block.Bytes
 	}
-	seen := make(map[string]bool)
-	for _, extension := range extensions {
-		oid := extension.ID.String()
-		if seen[oid] {
-			return out, fmt.Errorf("duplicate certificate extension: %s", oid)
-		}
-		seen[oid] = true
-		switch oid {
-		case signatureExtensionBasicConstraints:
-			isCA, maxPathLen, err := parseSignatureBasicConstraints(extension.Value)
-			if err != nil {
-				return out, err
-			}
-			out.IsCA = isCA
-			out.MaxPathLen = maxPathLen
-		case signatureExtensionKeyUsage:
-			keyUsage, err := parseSignatureKeyUsage(extension.Value)
-			if err != nil {
-				return out, err
-			}
-			out.KeyUsage = keyUsage
-		default:
-			if extension.Critical {
-				out.UnhandledCritical = true
-			}
-		}
-	}
-	return out, nil
-}
-
-// parseSignatureBasicConstraints 解析证书基本约束
-// 入参: data 扩展DER数据
-// 返回: bool 是否为CA, *big.Int 路径长度限制, error 错误信息
-func parseSignatureBasicConstraints(data []byte) (bool, *big.Int, error) {
-	var raw asn1.RawValue
-	rest, err := asn1.Unmarshal(data, &raw)
-	if err != nil || len(rest) != 0 || raw.Tag != asn1.TagSequence || !raw.IsCompound {
-		return false, nil, fmt.Errorf("invalid basic constraints")
-	}
-	items, ok := asn1Children(raw.Bytes)
-	if !ok || len(items) > 2 {
-		return false, nil, fmt.Errorf("invalid basic constraints")
-	}
-	idx := 0
-	isCA := false
-	if len(items) > 0 && items[0].Tag == asn1.TagBoolean {
-		rest, err := asn1.Unmarshal(items[0].FullBytes, &isCA)
-		if err != nil || len(rest) != 0 {
-			return false, nil, fmt.Errorf("invalid basic constraints")
-		}
-		idx++
-	}
-	var maxPathLen *big.Int
-	if idx < len(items) {
-		maxPathLen, err = asn1IntegerBig(items[idx])
-		if err != nil || maxPathLen.Sign() < 0 {
-			return false, nil, fmt.Errorf("invalid basic constraints")
-		}
-		idx++
-	}
-	if idx != len(items) || (maxPathLen != nil && !isCA) {
-		return false, nil, fmt.Errorf("invalid basic constraints")
-	}
-	return isCA, maxPathLen, nil
-}
-
-// parseSignatureKeyUsage 解析证书密钥用途
-// 入参: data 扩展DER数据
-// 返回: x509.KeyUsage 密钥用途, error 错误信息
-func parseSignatureKeyUsage(data []byte) (x509.KeyUsage, error) {
-	var bits asn1.BitString
-	rest, err := asn1.Unmarshal(data, &bits)
-	if err != nil || len(rest) != 0 || bits.BitLength == 0 || bits.BitLength > 9 {
-		return 0, fmt.Errorf("invalid key usage")
-	}
-	var out x509.KeyUsage
-	for i := 0; i < bits.BitLength; i++ {
-		if bits.At(i) != 0 {
-			out |= 1 << uint(i)
-		}
-	}
-	if out == 0 {
-		return 0, fmt.Errorf("invalid key usage")
-	}
-	return out, nil
-}
-
-// parseCertificateValidity 解析证书有效期
-// 入参: raw 证书有效期ASN.1值
-// 返回: [2]time.Time 生效和失效时间, error 错误信息
-func parseCertificateValidity(raw asn1.RawValue) ([2]time.Time, error) {
-	items, ok := asn1Children(raw.Bytes)
-	if !ok || len(items) != 2 {
-		return [2]time.Time{}, fmt.Errorf("invalid certificate validity")
-	}
-	notBefore, err := asn1Time(items[0])
-	if err != nil {
-		return [2]time.Time{}, err
-	}
-	notAfter, err := asn1Time(items[1])
-	if err != nil {
-		return [2]time.Time{}, err
-	}
-	return [2]time.Time{notBefore, notAfter}, nil
+	return smx509.ParseCertificate(data)
 }
 
 // asn1Time 解析ASN.1时间
@@ -1164,82 +981,15 @@ func asn1Time(raw asn1.RawValue) (time.Time, error) {
 	return t, nil
 }
 
-// certificateNameValues 解析证书名称字段
-// 入参: raw 名称原始值
-// 返回: map[string][]string OID字段列表
-func certificateNameValues(raw asn1.RawValue) map[string][]string {
-	out := make(map[string][]string)
-	sets, ok := asn1Children(raw.Bytes)
-	if !ok {
-		return out
-	}
-	for _, set := range sets {
-		attrs, ok := asn1Children(set.Bytes)
-		if !ok {
-			continue
-		}
-		for _, attr := range attrs {
-			items, ok := asn1Children(attr.Bytes)
-			if !ok || len(items) < 2 {
-				continue
-			}
-			oid, err := asn1OIDString(items[0])
-			if err != nil {
-				continue
-			}
-			if value := strings.TrimSpace(asn1String(items[1])); value != "" {
-				out[oid] = append(out[oid], value)
-			}
-		}
-	}
-	return out
-}
-
-// certificateNameFirst 获取证书名称字段首值
-// 入参: values OID字段列表, oid 字段OID
-// 返回: string 字段值
-func certificateNameFirst(values map[string][]string, oid string) string {
-	if items := values[oid]; len(items) > 0 {
-		return items[0]
-	}
-	return ""
-}
-
-// certificateNameString 格式化证书名称
-// 入参: values OID字段列表
-// 返回: string 证书名称
-func certificateNameString(values map[string][]string) string {
-	var parts []string
-	for _, item := range []struct {
-		OID   string
-		Label string
-	}{
-		{"2.5.4.3", "CN"},
-		{"2.5.4.10", "O"},
-		{"2.5.4.11", "OU"},
-		{"2.5.4.6", "C"},
-		{"2.5.4.8", "ST"},
-		{"2.5.4.7", "L"},
-		{"2.5.4.5", "SN"},
-		{"1.2.840.113549.1.9.1", "E"},
-	} {
-		for _, value := range values[item.OID] {
-			parts = append(parts, item.Label+"="+value)
-		}
-	}
-	return strings.Join(parts, ", ")
-}
-
 // parseSignatureCerts 解析签名验证证书
 // 入参: data DER或PEM编码证书
 // 返回: [][]byte DER编码证书列表
 func parseSignatureCerts(data []byte) [][]byte {
-	data = bytes.TrimSpace(data)
 	if len(data) == 0 {
 		return nil
 	}
 	var certs [][]byte
-	rest := data
+	rest := bytes.TrimSpace(data)
 	hasPEM := false
 	for {
 		block, next := pem.Decode(rest)

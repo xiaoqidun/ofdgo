@@ -62,9 +62,11 @@ type editorPageImport struct {
 // PageImportOptions 页面导入选项，零值仅导入页面及其关联资源
 // OnProgress按ids、pages、resources、commit阶段回报进度，total为0表示总量未知
 // 回调返回错误则取消导入，commit检查点之后统一提交；回调不可重入修改编辑器
+// AllowDecrypted显式允许将加密来源导入未加密目标，不影响原文件
 type PageImportOptions struct {
-	Outlines   bool
-	OnProgress func(stage string, completed, total int) error
+	Outlines       bool
+	AllowDecrypted bool
+	OnProgress     func(stage string, completed, total int) error
 }
 
 // ImportPages 将来源主文档中的指定页面插入目标位置，保持输入顺序并作为一次撤销操作
@@ -83,6 +85,9 @@ func (e *Editor) ImportPages(source *Reader, indexes []int, at int) ([]string, e
 // 入参: source 来源阅读器, indexes 来源页面索引, at 目标插入位置, options 导入选项
 // 返回: []string 新页面标识, error 错误信息
 func (e *Editor) ImportPagesWithOptions(source *Reader, indexes []int, at int, options PageImportOptions) ([]string, error) {
+	if source.encryption != nil && e.encryption == nil && !options.AllowDecrypted {
+		return nil, ErrEncryptionPolicyRequired
+	}
 	return e.importPages(source, indexes, at, false, options)
 }
 
