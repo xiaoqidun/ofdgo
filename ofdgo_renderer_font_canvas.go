@@ -15,9 +15,6 @@
 package ofdgo
 
 import (
-	"fmt"
-	"path"
-
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/font"
 )
@@ -25,54 +22,8 @@ import (
 // ResolveFont 按需加载字体资源，保留内嵌数据及外部字体的名称、样式和集合索引匹配
 // 入参: r 渲染器, id 字体标识, exact 是否禁止无关回退
 // 返回: ResolvedFont 字体与来源, error 字体不可用错误
-func (CanvasBackend) ResolveFont(r *Renderer, id string, exact bool) (ResolvedFont, error) {
-	definition := r.Reader.fontCache[id]
-	if definition == nil && !r.Reader.fontResourcesRead && r.Reader.OFD != nil {
-		if _, err := r.Reader.Fonts(); err != nil {
-			return ResolvedFont{}, err
-		}
-		definition = r.Reader.fontCache[id]
-	}
-	if definition == nil {
-		if exact {
-			return ResolvedFont{}, fmt.Errorf("font %q not found", id)
-		}
-		return r.canvasFallbackFont(), nil
-	}
-	if definition.FontFile != "" {
-		data, err := r.Reader.FontData(id)
-		if err != nil {
-			return ResolvedFont{}, err
-		}
-		face, err := r.Reader.embeddedFontFace(*definition)
-		if err != nil {
-			return ResolvedFont{}, err
-		}
-		return ResolvedFont{Data: data, Source: path.Base(definition.FontFile), Face: face, Exact: true}, nil
-	}
-	style := canvasFontStyle(definition)
-	if source, family := r.fontSourceMatch(id, definition, exact); family != nil {
-		sfnt := family.Face(12, style).Font.SFNT
-		face := fontFaceInfo(sfnt.Tables["name"], source.face)
-		r.canvasState().fontSourceUsed[id] = source
-		return ResolvedFont{Data: fontSFNTData(sfnt), Source: source.name, Face: &face, Exact: source.exact}, nil
-	}
-	if !exact {
-		return r.canvasFallbackFont(), nil
-	}
-	return ResolvedFont{}, fmt.Errorf("font %q is unavailable", definition.FontName)
-}
-
-// canvasFallbackFont 按需加载默认阅读字体，不用于精确编辑匹配
-// 返回: ResolvedFont 默认字体，未安装时数据为空
-func (r *Renderer) canvasFallbackFont() ResolvedFont {
-	if r.canvasState().fontFamily == nil {
-		r.initCanvasFonts()
-	}
-	if r.canvasState().defaultFontLoaded {
-		return ResolvedFont{Data: fontSFNTData(r.canvasState().fontFamily.Face(12, canvas.FontRegular).Font.SFNT)}
-	}
-	return ResolvedFont{}
+func (b CanvasBackend) ResolveFont(r *Renderer, id string, exact bool) (ResolvedFont, error) {
+	return r.resolveFontSource(b, id, exact)
 }
 
 // OpenFont 解析独立SFNT数据，度量与原有编辑排版保持一致
@@ -97,8 +48,13 @@ func (f canvasFontMetrics) Write() []byte {
 	return fontSFNTData(f.SFNT)
 }
 
-// initCanvasFonts 初始化Canvas默认字体
-func (r *Renderer) initCanvasFonts() {
-	r.canvasState().fontFamily = canvas.NewFontFamily("default")
-	r.canvasState().defaultFontLoaded = r.loadDefaultFonts()
+// GlyphOutline 返回基线原点、纵轴向下的字形轮廓
+// 入参: glyph 字形编号, size 字号，单位为毫米
+// 返回: GeometryPath 字形路径, error 字形解析错误
+func (f canvasFontMetrics) GlyphOutline(glyph uint16, size float64) (GeometryPath, error) {
+	path := &canvas.Path{}
+	if err := f.GlyphPath(path, glyph, 0, 0, 0, size/float64(f.UnitsPerEm()), font.NoHinting); err != nil {
+		return nil, err
+	}
+	return *geometryFromCanvasPath(path), nil
 }

@@ -12,18 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build js && wasm
+//go:build !js || !wasm
 
 package ofdgo
 
-// loadDefaultFonts 加载默认字体
-// 返回: bool 是否加载成功
-func (r *Renderer) loadDefaultFonts() bool {
-	return false
-}
-
-// canLoadSystemFonts 判断是否可以加载系统字体
-// 返回: bool 是否可以加载系统字体
-func canLoadSystemFonts() bool {
-	return false
-}
+// canLoadSystemFonts 判断是否可以读取系统字体
+// 返回: bool 是否可以读取
+func canLoadSystemFonts() bool { return true }

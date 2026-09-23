@@ -56,13 +56,14 @@ type RasterSegment struct {
 
 // RasterCommand 填充路径或绘制图像，Image非空时为图像指令
 // Transform将局部坐标映射到页面，图像局部坐标与image.Image的像素坐标一致
-// 字形和描边由页面编译器生成轮廓，裁剪与底纹在编译时解析
+// 字形和描边由页面编译器生成轮廓，Clip为页面坐标图像裁剪，nil表示不裁剪
 type RasterCommand struct {
 	Path      []RasterSegment
 	Paint     RasterPaint
 	EvenOdd   bool
 	Transform RasterMatrix
 	Image     image.Image
+	Clip      []RasterSegment
 }
 
 // RasterPaint 预乘RGBA纯色或渐变，Gradient非空时忽略Color
@@ -79,12 +80,20 @@ const (
 	RasterRadial
 )
 
-// RasterGradient 局部坐标下的线性或双圆径向渐变，区间外延续边界颜色
+// RasterGradient 局部坐标下的线性或双圆径向渐变，Spread为空时延续边界颜色
 type RasterGradient struct {
 	Kind       RasterGradientKind
 	Start, End RasterPoint
 	R0, R1     float64
 	Stops      []ColorStop
+	Spread     *RasterSpread
+}
+
+// RasterSpread 保存OFD渐变延伸和周期，nil表示连续延伸
+type RasterSpread struct {
+	Extend  int
+	MapType string
+	Period  float64
 }
 
 // PixelSize 检查页面尺寸并计算目标像素大小
@@ -135,8 +144,30 @@ func (g *RasterGradient) At(x, y float64) color.RGBA {
 		dr := g.R1 - g.R0
 		a, b, c := dx*dx+dy*dy-dr*dr, -2*(px*dx+py*dy+g.R0*dr), px*px+py*py-g.R0*g.R0
 		t = rasterRadialPosition(a, b, c, g.R0, dr)
+		if g.Spread != nil && math.Hypot(dx, dy) < math.Abs(dr) {
+			d := b*b - 4*a*c
+			if d < 0 {
+				return color.RGBA{}
+			}
+			t = (-b - math.Copysign(math.Sqrt(d), dr)) / (2 * a)
+		}
 	} else if length := dx*dx + dy*dy; length > 0 {
 		t = (px*dx + py*dy) / length
+	}
+	if spread := g.Spread; spread != nil {
+		if t < 0 && spread.Extend&1 == 0 || t > 1 && spread.Extend&2 == 0 {
+			return color.RGBA{}
+		}
+		period := spread.Period
+		if period <= 0 {
+			period = 1
+		}
+		switch spread.MapType {
+		case "Repeat":
+			t = t/period - math.Floor(t/period)
+		case "Reflect":
+			t = reflectShdPosition(t / period)
+		}
 	}
 	return g.colorAt(t)
 }

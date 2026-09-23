@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"image"
+	"image/color"
 
 	"golang.org/x/image/draw"
 	"golang.org/x/image/math/f64"
@@ -25,6 +26,23 @@ import (
 // 入参: dst 目标图像, src 源图像, m 像素坐标变换
 func drawRasterImage(dst draw.Image, src image.Image, m RasterMatrix) {
 	draw.CatmullRom.Transform(dst, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, src, src.Bounds(), draw.Over, nil)
+}
+
+// drawRasterImageCommand 使用当前后端生成裁剪蒙版，共用高质量图像采样
+// 入参: backend 当前后端, page 页面, dst 目标图像, src 原始图像, command 图像指令
+// 返回: error 裁剪绘制错误
+func drawRasterImageCommand(backend RasterBackend, page *RasterPage, dst draw.Image, src image.Image, command RasterCommand) error {
+	m := page.PixelTransform(command.Transform, dst.Bounds().Dy())
+	if command.Clip == nil {
+		drawRasterImage(dst, src, m)
+		return nil
+	}
+	mask, err := backend.Render(&RasterPage{Width: page.Width, Height: page.Height, DPI: page.DPI, Commands: []RasterCommand{{Path: command.Clip, Paint: RasterPaint{Color: color.RGBA{255, 255, 255, 255}}, Transform: RasterMatrix{1, 0, 0, 1, 0, 0}}}})
+	if err != nil {
+		return err
+	}
+	draw.CatmullRom.Transform(dst, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, imagePixelSource(src), src.Bounds(), draw.Over, &draw.Options{DstMask: mask})
+	return nil
 }
 
 // PixelTransform 将页面毫米变换转换为像素变换，保留尺寸取整后的原点位置

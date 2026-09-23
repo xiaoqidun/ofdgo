@@ -43,6 +43,9 @@ type Renderer struct {
 	backendStates         map[any]any
 	resolvedFonts         map[resolvedFontKey]resolvedFontResult
 	preparedFonts         map[string]*PreparedFont
+	fontSourcesCache      *fontSourceCache
+	fontMetrics           map[*PreparedFont]FontMetrics
+	glyphOutlines         map[glyphOutlineKey]GeometryPath
 	renderError           error
 	TransparentBackground bool
 }

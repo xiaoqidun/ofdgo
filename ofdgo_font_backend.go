@@ -28,6 +28,13 @@ type FontMetrics interface {
 	Write() []byte
 }
 
+// FontOutlines 提供基线原点、纵轴向下的字形轮廓，不绑定字体实现
+// GlyphOutline返回只读路径，字号与路径单位为毫米
+type FontOutlines interface {
+	FontMetrics
+	GlyphOutline(glyph uint16, size float64) (GeometryPath, error)
+}
+
 // ResolvedFont 保存字体来源和只读字体数据，不将外部字体写入文档
 type ResolvedFont struct {
 	Data   []byte
@@ -57,11 +64,27 @@ type resolvedFontResult struct {
 	err  error
 }
 
-// resetFontCache 重置字体解析及后端私有缓存，不预先创建任何绘图库对象
+// resetFontCache 重置字体解析及字形缓存，保留图片和非字体后端状态
 func (r *Renderer) resetFontCache() {
+	r.fontSourcesCache = newFontSourceCache()
+	r.resetFontBackendCache()
+}
+
+// resetFontBackendCache 清理后端字体对象，保留字体文件和图片缓存
+func (r *Renderer) resetFontBackendCache() {
 	r.preparedFonts = make(map[string]*PreparedFont)
 	r.resolvedFonts = make(map[resolvedFontKey]resolvedFontResult)
-	r.backendStates = make(map[any]any)
+	if r.fontSourcesCache != nil {
+		r.fontSourcesCache.fallback = ResolvedFont{}
+		r.fontSourcesCache.fallbackRead = false
+	}
+	r.fontMetrics = make(map[*PreparedFont]FontMetrics)
+	r.glyphOutlines = make(map[glyphOutlineKey]GeometryPath)
+	for _, state := range r.backendStates {
+		if fonts, ok := state.(interface{ resetFonts() }); ok {
+			fonts.resetFonts()
+		}
+	}
 }
 
 // ResolveFont 使用配置的字体后端解析资源，保留精确匹配与回退的区别
@@ -121,8 +144,6 @@ func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
 			}
 		}
 	}
-	if definition != nil {
-		r.preparedFonts[id] = prepared
-	}
+	r.preparedFonts[id] = prepared
 	return prepared, nil
 }

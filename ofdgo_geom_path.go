@@ -23,6 +23,30 @@ import (
 // 坐标以左上角为原点，单位为毫米，子路径从Move开始，Close回到当前子路径起点
 type GeometryPath []GeometrySegment
 
+// closedGeometry 为填充轮廓补齐隐式闭合边，不改变源路径
+// 入参: path 填充路径
+// 返回: GeometryPath 显式闭合路径
+func closedGeometry(path GeometryPath) GeometryPath {
+	result := make(GeometryPath, 0, len(path)+1)
+	open := false
+	for _, segment := range path {
+		if segment.Verb == GeometryMove && open {
+			result = append(result, GeometrySegment{Verb: GeometryClose})
+		}
+		result = append(result, segment)
+		if segment.Verb == GeometryMove {
+			open = true
+		}
+		if segment.Verb == GeometryClose {
+			open = false
+		}
+	}
+	if open {
+		result = append(result, GeometrySegment{Verb: GeometryClose})
+	}
+	return result
+}
+
 // GeometryVerb 表示几何路径指令
 type GeometryVerb uint8
 

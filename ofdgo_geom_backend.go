@@ -49,6 +49,11 @@ type GeometryBackend interface {
 	Clip(renderer *Renderer, clips *Clips, matrix Matrix, parent *GeometryPath) (*GeometryPath, error)
 }
 
+// GeometryCurves 将椭圆弧转换为光栅后端可消费的贝塞尔曲线，不改变源路径
+type GeometryCurves interface {
+	Curves(path GeometryPath) (GeometryPath, error)
+}
+
 // Geometry 返回当前几何后端，不隐式恢复默认实现
 // 返回: GeometryBackend 几何后端, error 未配置错误
 func (r *Renderer) Geometry() (GeometryBackend, error) {

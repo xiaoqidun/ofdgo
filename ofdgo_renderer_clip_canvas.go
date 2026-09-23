@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"fmt"
 	"image"
 
 	"github.com/tdewolff/canvas"
@@ -68,28 +69,7 @@ func (r *clipRenderer) RenderImage(img image.Image, m canvas.Matrix) {}
 // 入参: clips 裁剪对象, pageH 页面高度, bx 边界X坐标, by 边界Y坐标, objectCTM 对象CTM, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM
 // 返回: *canvas.Path 路径对象
 func (r *Renderer) buildObjectClipPath(clips *Clips, pageH float64, bx, by float64, objectCTM Matrix, parentCTM *Matrix, boundaryInCTM bool) *canvas.Path {
-	if clips == nil {
-		return nil
-	}
-	if !boundaryInCTM && parentCTM != nil {
-		objectCTM = parentCTM.Multiply(objectCTM)
-	}
-	if clips.TransFlag != nil && !*clips.TransFlag {
-		copy := *clips
-		copy.TransFlag = nil
-		clips = &copy
-		objectCTM = NewMatrix("")
-	}
-	matrix := TranslationMatrix(bx, by).Multiply(objectCTM)
-	if boundaryInCTM && parentCTM != nil {
-		matrix = parentCTM.Multiply(matrix)
-	}
-	geometry, err := r.Geometry()
-	if err != nil {
-		r.renderError = err
-		return nil
-	}
-	path, err := geometry.Clip(r, clips, matrix, nil)
+	path, err := r.objectGeometryClip(clips, fmt.Sprintf("%g %g 0 0", bx, by), objectCTM, RenderState{Parent: parentCTM, BoundaryInCTM: boundaryInCTM})
 	if err != nil {
 		r.renderError = err
 		return nil

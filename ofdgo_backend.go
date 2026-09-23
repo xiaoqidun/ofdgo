@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"reflect"
 )
 
 // ErrBackendUnavailable 表示未配置所需后端，不会自动切换其他实现
@@ -124,7 +125,7 @@ type BackendInfo struct {
 	EPS      string `json:"eps"`
 }
 
-// NewRenderBackends 创建内置后端组合，gg仅替换光栅绘制，其他能力通过Info明确报告
+// NewRenderBackends 创建内置后端组合，各项能力通过Info报告实际提供者
 // 入参: name canvas或gg
 // 返回: RenderBackends 后端组合, error 未知后端错误
 func NewRenderBackends(name string) (RenderBackends, error) {
@@ -132,6 +133,9 @@ func NewRenderBackends(name string) (RenderBackends, error) {
 	switch name {
 	case "canvas":
 	case "gg":
+		backends.Fonts = GGBackend{}
+		backends.Geometry = GGGeometryBackend{GeometryBackend: backends.Geometry}
+		backends.Compiler = GGBackend{}
 		backends.Raster = GGBackend{}
 	default:
 		return RenderBackends{}, fmt.Errorf("unknown render backend %q", name)
@@ -178,9 +182,23 @@ func backendName(backend Backend) string {
 // 返回: RendererOption 渲染选项
 func WithRenderBackends(backends RenderBackends) RendererOption {
 	return func(r *Renderer) {
+		fontsChanged := !sameBackend(r.backends.Fonts, backends.Fonts)
 		r.backends = backends
-		r.resetFontCache()
+		if fontsChanged {
+			r.resetFontBackendCache()
+		}
 	}
+}
+
+// sameBackend 判断可比较值配置是否未变，指针配置重新应用时刷新可变状态
+// 入参: left 原后端, right 新后端
+// 返回: bool 是否为同一配置
+func sameBackend(left, right Backend) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	a, b := reflect.ValueOf(left), reflect.ValueOf(right)
+	return a.Kind() != reflect.Pointer && b.Kind() != reflect.Pointer && a.Comparable() && b.Comparable() && left == right
 }
 
 // Backends 返回当前后端配置副本，可修改后通过WithRenderBackends应用

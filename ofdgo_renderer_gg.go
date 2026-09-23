@@ -22,7 +22,7 @@ import (
 	"github.com/gogpu/gg"
 )
 
-// GGBackend 不注册全局GPU设备或回退到其他绘图库的CPU后端
+// GGBackend 提供字体、页面编译和CPU绘制，不注册全局GPU设备或隐式切换后端
 type GGBackend struct{}
 
 // Name 返回后端标识
@@ -43,7 +43,9 @@ func (GGBackend) Render(page *RasterPage) (image.Image, error) {
 	for i, cmd := range page.Commands {
 		m := page.PixelTransform(cmd.Transform, h)
 		if cmd.Image != nil {
-			drawRasterImage(img, cmd.Image, m)
+			if err := drawRasterImageCommand(GGBackend{}, page, img, imagePixelSource(cmd.Image), cmd); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		path := gg.NewPath()

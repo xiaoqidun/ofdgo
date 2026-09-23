@@ -23,15 +23,8 @@ import (
 // canvasBackendState 保存Canvas字体、字形和编码图片适配缓存
 type canvasBackendState struct {
 	images             map[*EncodedImage]image.Image
-	fontFamily         *canvas.FontFamily
-	defaultFontLoaded  bool
 	fontMap            map[string]*canvas.FontFamily
-	fontCache          map[fontCacheKey]*canvas.FontFamily
 	svgFontCache       map[*canvas.Font]SVGFont
-	fontSourceCache    map[string][]fontSource
-	fontSourceUsed     map[string]fontSource
-	fontDirCandidates  map[string][]fontFileCandidate
-	fontFSCandidates   map[int][]fontFileCandidate
 	textGlyphPathCache map[textGlyphPathCacheKey]textGlyphPathCacheValue
 }
 
@@ -43,16 +36,16 @@ func (r *Renderer) canvasState() *canvasBackendState {
 		return state.(*canvasBackendState)
 	}
 	state := &canvasBackendState{
-		images:             make(map[*EncodedImage]image.Image),
-		fontMap:            make(map[string]*canvas.FontFamily),
-		fontCache:          make(map[fontCacheKey]*canvas.FontFamily),
-		svgFontCache:       make(map[*canvas.Font]SVGFont),
-		fontSourceCache:    make(map[string][]fontSource),
-		fontSourceUsed:     make(map[string]fontSource),
-		fontDirCandidates:  make(map[string][]fontFileCandidate),
-		fontFSCandidates:   make(map[int][]fontFileCandidate),
-		textGlyphPathCache: make(map[textGlyphPathCacheKey]textGlyphPathCacheValue),
+		images: make(map[*EncodedImage]image.Image),
 	}
+	state.resetFonts()
 	r.backendStates[key] = state
 	return state
+}
+
+// resetFonts 清除Canvas字体及字形缓存，保留编码图片适配对象
+func (s *canvasBackendState) resetFonts() {
+	s.fontMap = make(map[string]*canvas.FontFamily)
+	s.svgFontCache = make(map[*canvas.Font]SVGFont)
+	s.textGlyphPathCache = make(map[textGlyphPathCacheKey]textGlyphPathCacheValue)
 }

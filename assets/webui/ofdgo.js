@@ -3134,7 +3134,7 @@ function displayMode() {
 }
 
 function renderBackendLabel(name) {
-	return { svg: "SVG", canvas: "Canvas", gg: "GoGPU" }[name] || name || "无";
+	return { svg: "SVG", canvas: "Canvas", gg: "GoGPU", "gg+canvas": "GoGPU + Canvas" }[name] || name || "无";
 }
 
 function updateRenderBackend() {

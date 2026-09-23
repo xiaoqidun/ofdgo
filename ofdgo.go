@@ -74,6 +74,7 @@ func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 		templatePageCache:     make(map[string]*PageContent),
 		imageCache:            make(map[string]image.Image),
 		backends:              defaultRenderBackends(),
+		backendStates:         make(map[any]any),
 	}
 	r.resetFontCache()
 	for _, opt := range opts {

@@ -21,6 +21,28 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
+// canvasNativeStroke 判断描边是否仍由Canvas提供，组合几何不改变矢量描边编码
+// 入参: geometry 几何后端
+// 返回: bool 是否采用原生描边
+func canvasNativeStroke(geometry GeometryBackend) bool {
+	if combined, ok := geometry.(GGGeometryBackend); ok {
+		return canvasNativeStroke(combined.GeometryBackend)
+	}
+	_, ok := geometry.(CanvasBackend)
+	return ok
+}
+
+// Curves 在输出边界转换椭圆弧，其他曲线保持原样
+// 入参: path 页面路径
+// 返回: GeometryPath 贝塞尔路径, error 路径错误
+func (CanvasBackend) Curves(path GeometryPath) (GeometryPath, error) {
+	p, err := geometryToCanvasPath(&path)
+	if err != nil {
+		return nil, err
+	}
+	return *geometryFromCanvasPath(p.ReplaceArcs()), nil
+}
+
 // canvasStrokeOptions 转换Canvas描边样式，虚线由调用方传入
 // 入参: width 描边宽度, cap 线帽, join 连接, tolerance 展开误差
 // 返回: StrokeOptions 公共描边样式

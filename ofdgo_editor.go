@@ -81,12 +81,17 @@ func (e *Editor) SetPageCompiler(compiler PageCompiler) {
 	}
 }
 
-// SetRenderBackends 设置完整后端组合并重置字体度量，不改变文档或撤销历史
+// SetRenderBackends 设置完整后端组合，字体能力变化时更新度量，不改变文档或撤销历史
 // 入参: backends 后端组合，未配置的能力不会沿用默认实现
 func (e *Editor) SetRenderBackends(backends RenderBackends) {
+	fontsChanged := !sameBackend(e.backends.Fonts, backends.Fonts)
 	e.backends = backends
-	e.fontRenderer = nil
-	e.fontMetrics = make(map[string]FontMetrics)
+	if e.fontRenderer != nil {
+		WithRenderBackends(backends)(e.fontRenderer)
+	}
+	if fontsChanged {
+		e.fontMetrics = make(map[string]FontMetrics)
+	}
 }
 
 // Backends 返回编辑器后端配置副本

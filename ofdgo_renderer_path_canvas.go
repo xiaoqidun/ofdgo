@@ -173,6 +173,22 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	if r.textOnly {
 		return
 	}
+	if bounds, ok := ctx.Renderer.(*boundsRenderer); ok {
+		compiler, err := newSemanticCompiler(r)
+		if err != nil {
+			r.renderError = err
+			return
+		}
+		compiler.measure, compiler.contours = true, bounds.collect
+		err = compiler.pathObject(obj, RenderState{Defaults: defaults, Parent: parentCTM, BoundaryInCTM: boundaryInCTM, Clip: geometryFromCanvasPath(parentClip)})
+		if err != nil {
+			r.renderError = err
+			return
+		}
+		bounds.box = unionTextBox(bounds.box, compiler.measurement.Bounds)
+		bounds.contours = append(bounds.contours, compiler.measurement.Contours...)
+		return
+	}
 	if obj.Visible != nil && !*obj.Visible {
 		return
 	}
@@ -280,8 +296,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		}
 		strokeClip := intersectClipPath(clipPath, shadingClip)
 		_, repeat := strokePaint.(*repeatAxialGradient)
-		_, nativeGeometry := r.backends.Geometry.(CanvasBackend)
-		if strokeClip != nil || strokeView != canvas.Identity || repeat || style.strokePattern != nil || !nativeGeometry {
+		if strokeClip != nil || strokeView != canvas.Identity || repeat || style.strokePattern != nil || !canvasNativeStroke(r.backends.Geometry) {
 			sp = sp.Copy()
 			sp = r.strokeCanvasPath(sp, style.lineWidth, style.lineCap, style.lineJoin)
 			sp = applyClipPath(sp, strokeClip)
@@ -458,41 +473,14 @@ func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix, boundary
 // 入参: obj 路径对象, pageH 页面高度, ctm 变换矩阵, bx 边界X坐标, by 边界Y坐标
 // 返回: *canvas.Path 路径对象
 func (r *Renderer) buildTinyFillRectPath(obj PathObject, pageH float64, ctm Matrix, bx, by float64) *canvas.Path {
-	if obj.Fill == nil || !*obj.Fill || obj.Stroke == nil || *obj.Stroke {
+	path := tinyFillRectPath(obj, TranslationMatrix(bx, by).Multiply(ctm))
+	if path == nil {
 		return nil
 	}
-	box, err := ParseBox(obj.Boundary)
-	if err != nil || box.W <= 0 || box.H <= 0 || box.W > 0.6 || box.H > 0.6 {
+	p, err := geometryToCanvasPath(&path)
+	if err != nil {
+		r.renderError = err
 		return nil
 	}
-	tokens := strings.Fields(obj.AbbreviatedData)
-	if len(tokens) != 11 || tokens[0] != "M" || tokens[3] != "L" || tokens[6] != "L" || tokens[9] != "L" || tokens[10] != "C" {
-		return nil
-	}
-	points := make([][2]float64, 0, 4)
-	for i := 1; i < 10; i += 3 {
-		x, errX := strconv.ParseFloat(tokens[i], 64)
-		y, errY := strconv.ParseFloat(tokens[i+1], 64)
-		if errX != nil || errY != nil {
-			return nil
-		}
-		tx, ty := ctm.Transform(x, y)
-		points = append(points, [2]float64{tx + bx, pageH - (ty + by)})
-	}
-	minX, maxX := points[0][0], points[0][0]
-	minY, maxY := points[0][1], points[0][1]
-	for _, point := range points[1:] {
-		minX = math.Min(minX, point[0])
-		maxX = math.Max(maxX, point[0])
-		minY = math.Min(minY, point[1])
-		maxY = math.Max(maxY, point[1])
-	}
-	expand := math.Min(box.W, box.H) * 0.08
-	p := &canvas.Path{}
-	p.MoveTo(minX-expand, minY-expand)
-	p.LineTo(maxX+expand, minY-expand)
-	p.LineTo(maxX+expand, maxY+expand)
-	p.LineTo(minX-expand, maxY+expand)
-	p.Close()
-	return p
+	return p.Translate(0, pageH)
 }

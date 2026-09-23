@@ -287,15 +287,3 @@ func reflectShdGrad(gradient canvas.Grad, period, lo, hi float64) canvas.Grad {
 	}
 	return append(result, canvas.Stop{Offset: 1, Color: gradient.At(reflectShdPosition(hi / period))})
 }
-
-// reflectShdPosition 获取镜像周期内的位置
-// 入参: position 渐变位置
-// 返回: float64 周期内的位置
-func reflectShdPosition(position float64) float64 {
-	index := math.Floor(position)
-	position -= index
-	if math.Mod(index, 2) != 0 {
-		return 1 - position
-	}
-	return position
-}
