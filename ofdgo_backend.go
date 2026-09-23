@@ -136,7 +136,7 @@ func NewRenderBackends(name string) (RenderBackends, error) {
 		backends.Fonts = GGBackend{}
 		backends.Geometry = GGGeometryBackend{GeometryBackend: backends.Geometry}
 		backends.Compiler = GGBackend{}
-		backends.Raster = GGBackend{}
+		backends.Raster = GGBackend{StrokeGeometry: backends.Geometry}
 	default:
 		return RenderBackends{}, fmt.Errorf("unknown render backend %q", name)
 	}

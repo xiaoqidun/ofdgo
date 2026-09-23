@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"fmt"
 	"image"
+	"math"
 	"slices"
 )
 
@@ -157,6 +158,17 @@ func (c *semanticCompiler) DrawStamp(stamp Stamp) error {
 			matrix := TranslationMatrix(stamp.Box.X, stamp.Box.Y).Multiply(Matrix{a: stamp.Box.W / page.Width, d: stamp.Box.H / page.Height})
 			for _, command := range page.Commands {
 				command.Transform = RasterMatrix(matrix.Multiply(MatrixFromValues([6]float64(command.Transform))).Values())
+				if command.Stroke != nil {
+					stroke := *command.Stroke
+					scale := math.Sqrt(math.Abs(matrix.a*matrix.d - matrix.b*matrix.c))
+					stroke.Width *= scale
+					stroke.DashOffset *= scale
+					stroke.Dashes = slices.Clone(stroke.Dashes)
+					for i := range stroke.Dashes {
+						stroke.Dashes[i] *= scale
+					}
+					command.Stroke = &stroke
+				}
 				if command.Clip != nil {
 					command.Clip = slices.Clone(command.Clip)
 					for i := range command.Clip {

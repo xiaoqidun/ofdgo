@@ -96,20 +96,8 @@ func (r *Renderer) strokeCanvasPath(path *canvas.Path, width float64, cap canvas
 // Path 解析对象的标准紧缩路径并转换到页面坐标
 // 入参: object 路径对象
 // 返回: GeometryPath 页面路径, error 无效路径错误
-func (CanvasBackend) Path(object PathObject) (GeometryPath, error) {
-	if err := creationPath(object.AbbreviatedData); err != nil {
-		return nil, err
-	}
-	if _, err := creationBox(object.Boundary); err != nil {
-		return nil, err
-	}
-	if object.CTM != "" {
-		if _, err := creationNumbers(object.CTM, 6); err != nil {
-			return nil, err
-		}
-	}
-	p := (&Renderer{}).buildPath(object, 0, NewMatrix(object.CTM), false)
-	return *geometryFromCanvasPath(p), nil
+func (b CanvasBackend) Path(object PathObject) (GeometryPath, error) {
+	return objectGeometryPath(b, object)
 }
 
 // Region 解析动作区域并保持椭圆弧及退化变换的既有处理
@@ -210,19 +198,8 @@ func (CanvasBackend) Combine(left, right GeometryPath, operation GeometryOperati
 // 入参: path 页面路径, options 描边样式
 // 返回: GeometryPath 描边区域, error 样式或路径错误
 func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (GeometryPath, error) {
-	if !finite(options.Width) || options.Width <= 0 || !finite(options.Tolerance) || options.Tolerance < 0 || !finite(options.DashOffset) || !finite(options.MiterLimit) || options.MiterLimit < 0 {
-		return nil, fmt.Errorf("invalid stroke width or tolerance")
-	}
-	if options.Cap != "" && options.Cap != "Butt" && options.Cap != "Round" && options.Cap != "Square" {
-		return nil, fmt.Errorf("invalid stroke cap %q", options.Cap)
-	}
-	if options.Join != "" && options.Join != "Miter" && options.Join != "Round" && options.Join != "Bevel" {
-		return nil, fmt.Errorf("invalid stroke join %q", options.Join)
-	}
-	for _, dash := range options.Dashes {
-		if !finite(dash) || dash < 0 {
-			return nil, fmt.Errorf("invalid stroke dash")
-		}
+	if err := validateStroke(options); err != nil {
+		return nil, err
 	}
 	p, err := geometryToCanvasPath(&path)
 	if err != nil {
@@ -264,25 +241,56 @@ func geometryToCanvasPath(path *GeometryPath) (*canvas.Path, error) {
 		return nil, nil
 	}
 	p := &canvas.Path{}
-	for _, segment := range *path {
-		switch segment.Verb {
+	for _, s := range *path {
+		switch s.Verb {
 		case GeometryMove:
-			p.MoveTo(segment.End.X, -segment.End.Y)
+			p.MoveTo(s.End.X, -s.End.Y)
 		case GeometryLine:
-			p.LineTo(segment.End.X, -segment.End.Y)
+			p.LineTo(s.End.X, -s.End.Y)
 		case GeometryQuad:
-			p.QuadTo(segment.Control1.X, -segment.Control1.Y, segment.End.X, -segment.End.Y)
+			p.QuadTo(s.Control1.X, -s.Control1.Y, s.End.X, -s.End.Y)
 		case GeometryCubic:
-			p.CubeTo(segment.Control1.X, -segment.Control1.Y, segment.Control2.X, -segment.Control2.Y, segment.End.X, -segment.End.Y)
+			p.CubeTo(s.Control1.X, -s.Control1.Y, s.Control2.X, -s.Control2.Y, s.End.X, -s.End.Y)
 		case GeometryArc:
-			p.ArcTo(segment.RadiusX, segment.RadiusY, -segment.Rotation, segment.Large, !segment.Sweep, segment.End.X, -segment.End.Y)
+			p.ArcTo(s.RadiusX, s.RadiusY, -s.Rotation, s.Large, !s.Sweep, s.End.X, -s.End.Y)
 		case GeometryClose:
 			p.Close()
 		default:
-			return nil, fmt.Errorf("unsupported geometry command %d", segment.Verb)
+			return nil, fmt.Errorf("unsupported geometry command %d", s.Verb)
 		}
 	}
 	return p, nil
+}
+
+// canvasObjectPath 建立对象局部路径，保留折返线和退化贝塞尔的原始端点
+// 入参: path 独立路径
+// 返回: *canvas.Path 适配路径, error 不支持的指令
+func canvasObjectPath(path GeometryPath) (*canvas.Path, error) {
+	var data []float64
+	for _, s := range path {
+		end := s.End
+		switch s.Verb {
+		case GeometryMove:
+			data = append(data, canvas.MoveToCmd, end.X, end.Y, canvas.MoveToCmd)
+		case GeometryLine:
+			data = append(data, canvas.LineToCmd, end.X, end.Y, canvas.LineToCmd)
+		case GeometryQuad:
+			data = append(data, canvas.QuadToCmd, s.Control1.X, s.Control1.Y, end.X, end.Y, canvas.QuadToCmd)
+		case GeometryCubic:
+			data = append(data, canvas.CubeToCmd, s.Control1.X, s.Control1.Y, s.Control2.X, s.Control2.Y, end.X, end.Y, canvas.CubeToCmd)
+		case GeometryArc:
+			p := canvas.NewPathFromData(data)
+			p.ArcTo(s.RadiusX, s.RadiusY, s.Rotation, s.Large, s.Sweep, end.X, end.Y)
+			data = p.Data()
+		case GeometryClose:
+			p := canvas.NewPathFromData(data)
+			p.Close()
+			data = p.Data()
+		default:
+			return nil, fmt.Errorf("unsupported geometry command %d", s.Verb)
+		}
+	}
+	return canvas.NewPathFromData(data), nil
 }
 
 // geometryFromCanvasPath 将默认引擎路径转换为独立的页面坐标路径，保留曲线和椭圆弧

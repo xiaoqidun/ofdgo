@@ -35,6 +35,27 @@ type StrokeOptions struct {
 	Dashes                            []float64
 }
 
+// validateStroke 校验各后端共用的描边参数
+// 入参: options 描边样式
+// 返回: error 无效样式
+func validateStroke(options StrokeOptions) error {
+	if !finite(options.Width) || options.Width <= 0 || !finite(options.Tolerance) || options.Tolerance < 0 || !finite(options.DashOffset) || !finite(options.MiterLimit) || options.MiterLimit < 0 {
+		return fmt.Errorf("invalid stroke width or tolerance")
+	}
+	if options.Cap != "" && options.Cap != "Butt" && options.Cap != "Round" && options.Cap != "Square" {
+		return fmt.Errorf("invalid stroke cap %q", options.Cap)
+	}
+	if options.Join != "" && options.Join != "Miter" && options.Join != "Round" && options.Join != "Bevel" {
+		return fmt.Errorf("invalid stroke join %q", options.Join)
+	}
+	for _, dash := range options.Dashes {
+		if !finite(dash) || dash < 0 {
+			return fmt.Errorf("invalid stroke dash")
+		}
+	}
+	return nil
+}
+
 // GeometryBackend 操作库自有路径，坐标以页面左上角为原点，不修改任何输入
 // Clip返回nil表示不裁剪，空路径指针表示完全裁去，矩阵映射到页面坐标
 type GeometryBackend interface {

@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"unicode"
+	"unicode/utf8"
 
 	ggtext "github.com/gogpu/gg/text"
 )
@@ -38,13 +40,39 @@ func (GGBackend) OpenFont(data []byte) (FontMetrics, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ggFontMetrics{font: source.Parsed(), data: data}, nil
+	return &ggFontMetrics{font: source.Parsed(), data: data, source: source, shaper: ggtext.NewOwnShaper()}, nil
 }
 
 // ggFontMetrics 适配GG设计单位度量与字形轮廓
 type ggFontMetrics struct {
-	font ggtext.ParsedFont
-	data []byte
+	font   ggtext.ParsedFont
+	data   []byte
+	source *ggtext.FontSource
+	shaper *ggtext.OwnShaper
+}
+
+// ShapeText 使用GG执行横向字偶距与连字塑形，不改动原文定位
+// 当前支持拉丁、希腊、西里尔和东亚文字，复杂文字需提供其他FontShaper
+// 入参: value 单行原文, size 毫米字号
+// 返回: []ShapedGlyph 定位字形, error 字符或能力错误
+func (f *ggFontMetrics) ShapeText(value string, size float64) ([]ShapedGlyph, error) {
+	if !rasterPositive(size) || !utf8.ValidString(value) {
+		return nil, fmt.Errorf("invalid shaping text or size")
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) {
+			return nil, fmt.Errorf("shaping requires a single text line")
+		}
+		if !unicode.In(char, unicode.Latin, unicode.Greek, unicode.Cyrillic, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul, unicode.Common, unicode.Inherited) {
+			return nil, fmt.Errorf("GG shaping for U+%04X: %w", char, ErrBackendUnavailable)
+		}
+	}
+	glyphs := f.shaper.Shape(value, f.source.Face(size))
+	result := make([]ShapedGlyph, len(glyphs))
+	for i, glyph := range glyphs {
+		result[i] = ShapedGlyph{Glyph: uint16(glyph.GID), Cluster: glyph.Cluster, X: glyph.X, Y: -glyph.Y, Advance: glyph.XAdvance}
+	}
+	return result, nil
 }
 
 // UnitsPerEm 返回字体设计单位

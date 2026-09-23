@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"math"
 	"strings"
@@ -47,14 +48,18 @@ type glyphOutlineKey struct {
 // 入参: prepared 已包装字体
 // 返回: FontMetrics 字体度量, error 字体解析错误
 func (r *Renderer) preparedMetrics(prepared *PreparedFont) (FontMetrics, error) {
-	if metrics := r.fontMetrics[prepared]; metrics != nil {
+	if prepared.digest == ([32]byte{}) {
+		prepared.digest = sha256.Sum256(prepared.Data)
+	}
+	key := prepared.digest
+	if metrics, ok := r.fontMetrics.get(key); ok {
 		return metrics, nil
 	}
 	metrics, err := r.backends.Fonts.OpenFont(prepared.Data)
 	if err != nil {
 		return nil, err
 	}
-	r.fontMetrics[prepared] = metrics
+	r.fontMetrics.put(key, metrics, len(prepared.Data)*2+256)
 	return metrics, nil
 }
 
@@ -63,7 +68,7 @@ func (r *Renderer) preparedMetrics(prepared *PreparedFont) (FontMetrics, error) 
 // 返回: GeometryPath 字形路径, error 能力或解析错误
 func (r *Renderer) preparedOutline(prepared *PreparedFont, metrics FontMetrics, glyph uint16, size float64) (GeometryPath, error) {
 	key := glyphOutlineKey{prepared, glyph, size}
-	if path, ok := r.glyphOutlines[key]; ok {
+	if path, ok := r.glyphOutlines.get(key); ok {
 		return path, nil
 	}
 	provider, ok := metrics.(FontOutlines)
@@ -72,7 +77,7 @@ func (r *Renderer) preparedOutline(prepared *PreparedFont, metrics FontMetrics, 
 	}
 	path, err := provider.GlyphOutline(glyph, size)
 	if err == nil {
-		r.glyphOutlines[key] = path
+		r.glyphOutlines.put(key, path, len(path)*96+128)
 	}
 	return path, err
 }

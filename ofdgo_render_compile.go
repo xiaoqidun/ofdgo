@@ -29,6 +29,7 @@ type semanticCompiler struct {
 	text                                 PageText
 	measurement                          ObjectMeasurement
 	measure, contours, textOnly, pattern bool
+	patterns                             *renderCache[patternCellKey, []RasterCommand]
 }
 
 // newSemanticCompiler 绑定当前字体和几何能力
@@ -39,7 +40,7 @@ func newSemanticCompiler(r *Renderer) (*semanticCompiler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &semanticCompiler{renderer: r, geometry: geometry}, nil
+	return &semanticCompiler{renderer: r, geometry: geometry, patterns: &renderCache[patternCellKey, []RasterCommand]{limit: 8 << 20}}, nil
 }
 
 // DrawObject 解释叶子对象，不调用任何具体页面编译器
@@ -132,6 +133,9 @@ func (c *semanticCompiler) fill(path GeometryPath, paint Paint, evenOdd bool, cl
 	if len(path) == 0 || paint.Kind == PaintNone || paint.Kind == PaintSolid && paint.Color.A == 0 {
 		return nil
 	}
+	if !c.measure && paint.Kind != PaintPattern {
+		return c.command(path, paint, evenOdd, clip, shadingMatrix, nil)
+	}
 	var err error
 	if clip != nil || paint.Kind == PaintPattern || paint.Gradient != nil {
 		path = closedGeometry(path)
@@ -159,7 +163,22 @@ func (c *semanticCompiler) fill(path GeometryPath, paint Paint, evenOdd bool, cl
 	if paint.Kind == PaintPattern {
 		return c.fillPattern(path, paint.Pattern, matrix)
 	}
+	return nil
+}
+
+// command 保留路径、画刷与绘制裁剪，不提前求几何交集或展开描边
+// 入参: path 页面路径, paint 画刷, evenOdd 奇偶规则, clip 绘制裁剪, shadingMatrix 渐变矩阵, stroke 页面描边样式
+// 返回: error 路径或矩阵错误
+func (c *semanticCompiler) command(path GeometryPath, paint Paint, evenOdd bool, clip *GeometryPath, shadingMatrix Matrix, stroke *StrokeOptions) error {
+	var err error
 	command := RasterCommand{Paint: RasterPaint{Color: paint.Color}, EvenOdd: evenOdd, Transform: RasterMatrix{1, 0, 0, 1, 0, 0}}
+	command.Stroke = stroke
+	if clip != nil {
+		command.Clip, err = c.segments(*clip)
+		if err != nil {
+			return err
+		}
+	}
 	if paint.Gradient != nil {
 		gradient, view := semanticGradient(paint, shadingMatrix)
 		inverse, ok := view.Invert()
@@ -179,6 +198,23 @@ func (c *semanticCompiler) fill(path GeometryPath, paint Paint, evenOdd bool, cl
 	}
 	c.page.Commands = append(c.page.Commands, command)
 	return nil
+}
+
+// stroke 将普通描边交给绘制后端，度量和底纹仍使用精确几何轮廓
+// 入参: path 页面路径, paint 画刷, options 页面描边样式, clip 对象裁剪, matrix 图案矩阵, shadingMatrix 渐变矩阵
+// 返回: error 描边或编译错误
+func (c *semanticCompiler) stroke(path GeometryPath, paint Paint, options StrokeOptions, clip *GeometryPath, matrix, shadingMatrix Matrix) error {
+	if len(path) == 0 || paint.Kind == PaintNone || paint.Kind == PaintSolid && paint.Color.A == 0 {
+		return nil
+	}
+	if !c.measure && paint.Kind != PaintPattern {
+		return c.command(path, paint, false, clip, shadingMatrix, &options)
+	}
+	outline, err := c.geometry.Stroke(path, options)
+	if err != nil {
+		return err
+	}
+	return c.fill(outline, paint, false, clip, matrix, shadingMatrix)
 }
 
 // semanticGradient 保留渐变周期、延伸与椭圆坐标
@@ -324,11 +360,7 @@ func (c *semanticCompiler) pathObject(object PathObject, state RenderState) erro
 		}
 	}
 	if object.Stroke == nil || *object.Stroke {
-		stroke, err := c.geometry.Stroke(path, style.options)
-		if err != nil {
-			return err
-		}
-		return c.fill(stroke, c.renderer.ResolvePaint(style.stroke), false, clip, matrix, shading)
+		return c.stroke(path, c.renderer.ResolvePaint(style.stroke), style.options, clip, matrix, shading)
 	}
 	return nil
 }
@@ -369,11 +401,7 @@ func (c *semanticCompiler) textObject(object TextObject, state RenderState) erro
 			}
 		}
 		if object.Stroke != nil && *object.Stroke && len(glyph.Path) > 0 {
-			path, err := c.geometry.Stroke(glyph.Path, style.options)
-			if err != nil {
-				return err
-			}
-			if err := c.fill(path, c.renderer.ResolvePaint(style.stroke), false, positioned.Clip, positioned.Matrix, shading); err != nil {
+			if err := c.stroke(glyph.Path, c.renderer.ResolvePaint(style.stroke), style.options, positioned.Clip, positioned.Matrix, shading); err != nil {
 				return err
 			}
 		}
@@ -405,10 +433,10 @@ func (c *semanticCompiler) fillPattern(clip GeometryPath, pattern *PatternPaint,
 		return err
 	}
 	box = inverse.TransformBox(box)
-	prior := c.pattern
-	c.pattern = true
-	defer func() { c.pattern = prior }()
-	defaults := &DrawParam{FillColor: &pattern.Color, StrokeColor: (*StrokeColor)(&pattern.Color)}
+	segments, err := c.segments(clip)
+	if err != nil {
+		return err
+	}
 	for x, end := int(math.Floor(box.X/xstep))-1, int(math.Ceil((box.X+box.W)/xstep))+1; x <= end; x++ {
 		for y, end := int(math.Floor(box.Y/ystep))-1, int(math.Ceil((box.Y+box.H)/ystep))+1; y <= end; y++ {
 			tile := matrix.Multiply(TranslationMatrix(float64(x)*xstep, float64(y)*ystep))
@@ -418,11 +446,12 @@ func (c *semanticCompiler) fillPattern(clip GeometryPath, pattern *PatternPaint,
 			if y%2 != 0 && (pattern.ReflectMethod == "Row" || pattern.ReflectMethod == "RowAndColumn") {
 				tile = tile.Multiply(Matrix{a: 1, d: -1, f: pattern.Height})
 			}
-			for _, object := range pattern.CellContent.Objects {
-				object = mergeGraphicObjectAlpha(object, pattern.Alpha)
-				if err := c.renderer.WalkObject(&object, RenderState{Defaults: defaults, Parent: &tile, BoundaryInCTM: true, Clip: &clip}, c); err != nil {
-					return err
-				}
+			commands, err := c.patternCell(pattern, tile)
+			if err != nil {
+				return err
+			}
+			if err := c.appendPatternCell(commands, clip, segments); err != nil {
+				return err
 			}
 		}
 	}

@@ -44,8 +44,8 @@ type Renderer struct {
 	resolvedFonts         map[resolvedFontKey]resolvedFontResult
 	preparedFonts         map[string]*PreparedFont
 	fontSourcesCache      *fontSourceCache
-	fontMetrics           map[*PreparedFont]FontMetrics
-	glyphOutlines         map[glyphOutlineKey]GeometryPath
+	fontMetrics           renderCache[[32]byte, FontMetrics]
+	glyphOutlines         renderCache[glyphOutlineKey, GeometryPath]
 	renderError           error
 	TransparentBackground bool
 }

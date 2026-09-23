@@ -180,6 +180,7 @@ func subsetSourceFont(data []byte, usage *editorFontUsage) []byte {
 type editorFontSubset struct {
 	glyphs []uint16
 	data   []byte
+	mapped bool
 }
 
 // subsetFonts 收集新增字体实际使用的字形，仅裁剪保存结果，保留完整编辑字体
@@ -187,6 +188,7 @@ type editorFontSubset struct {
 // 返回: map[string][]byte 包内字体子集, error 错误信息
 func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error) {
 	used := make(map[string]map[uint16]bool)
+	mapped := make(map[string]bool)
 	for _, resource := range e.resources {
 		if resource.font == nil {
 			continue
@@ -248,6 +250,17 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 						glyphs[e.fonts[obj.Font].GlyphIndex(char)] = true
 					}
 				}
+				for _, transform := range obj.CGTransform {
+					mapped[obj.Font] = true
+					for _, value := range strings.Fields(transform.Glyphs) {
+						id, err := strconv.ParseUint(value, 10, 16)
+						if err != nil || id >= uint64(e.fonts[obj.Font].NumGlyphs()) {
+							delete(used, obj.Font)
+							break
+						}
+						glyphs[uint16(id)] = true
+					}
+				}
 			}
 		}
 	}
@@ -295,15 +308,15 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 			ids = append(ids, id)
 		}
 		slices.Sort(ids)
-		if resource.subset == nil || !slices.Equal(resource.subset.glyphs, ids) {
-			data, err := subsetEditorFont(resource.data, ids)
+		if resource.subset == nil || resource.subset.mapped != mapped[resource.font.ID] || !slices.Equal(resource.subset.glyphs, ids) {
+			data, err := subsetEditorFont(resource.data, ids, mapped[resource.font.ID])
 			if err != nil {
 				return nil, fmt.Errorf("subset font %s: %w", resource.font.FontName, err)
 			}
 			if len(data) >= len(resource.data) {
 				data = nil
 			}
-			resource.subset = &editorFontSubset{glyphs: ids, data: data}
+			resource.subset = &editorFontSubset{glyphs: ids, data: data, mapped: mapped[resource.font.ID]}
 		}
 		if resource.subset.data != nil {
 			result[resource.name] = resource.subset.data
@@ -316,12 +329,35 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 }
 
 // subsetEditorFont 裁剪TrueType字形及复合依赖，保留字符映射、名称、度量和提示指令
-// 入参: data 字体数据, glyphs 已排序的字形编号，包含0
+// 入参: data 字体数据, glyphs 已排序的字形编号，包含0, mapped 是否保留显式字形编号
 // 返回: []byte 字体子集, error 错误信息
-func subsetEditorFont(data []byte, glyphs []uint16) ([]byte, error) {
+func subsetEditorFont(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 	sfnt, err := font.ParseSFNT(bytes.Clone(data), 0)
 	if err != nil {
 		return nil, err
+	}
+	if mapped {
+		usage := newEditorFontUsage()
+		for _, id := range glyphs {
+			usage.glyphs[id] = true
+			for _, char := range sfnt.Cmap.ToUnicode(id) {
+				usage.chars[char] = true
+			}
+		}
+		tables := make(map[string][]byte)
+		for _, tag := range []string{"cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "cvt ", "fpgm", "prep", "gasp"} {
+			if table := sfnt.Tables[tag]; table != nil {
+				tables[tag] = table
+			}
+		}
+		fixed, err := serializeOTF(tables)
+		if err != nil {
+			return nil, err
+		}
+		if subset := subsetSourceFont(fixed, usage); subset != nil {
+			return subset, nil
+		}
+		return fixed, nil
 	}
 	subset, err := sfnt.Subset(glyphs, font.SubsetOptions{Tables: []string{
 		"cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "glyf", "loca", "cvt ", "fpgm", "prep", "gasp",

@@ -24,19 +24,22 @@ import (
 // GeometryBackend不可为空，椭圆弧保持精确表示，不为接入GG而预先离散化
 type GGGeometryBackend struct{ GeometryBackend }
 
+// Path 解析库自有路径并使用GG几何变换，不经过Canvas路径构建器
+// 入参: object 路径对象
+// 返回: GeometryPath 页面路径, error 参数或变换错误
+func (b GGGeometryBackend) Path(object PathObject) (GeometryPath, error) {
+	return objectGeometryPath(b, object)
+}
+
 // Name 返回实际几何提供者组合
 // 返回: string 后端组合标识
 func (b GGGeometryBackend) Name() string { return "gg+" + backendName(b.GeometryBackend) }
 
-// Curves 通过显式配置的曲线适配器展开椭圆弧
+// Curves 使用公共弧线转换，不调用组合几何后端
 // 入参: path 页面路径
 // 返回: GeometryPath 贝塞尔路径, error 能力或路径错误
 func (b GGGeometryBackend) Curves(path GeometryPath) (GeometryPath, error) {
-	curves, ok := b.GeometryBackend.(GeometryCurves)
-	if !ok {
-		return nil, fmt.Errorf("geometry curves: %w", ErrBackendUnavailable)
-	}
-	return curves.Curves(path)
+	return path.Curves(.0001)
 }
 
 // Bounds 使用GG计算贝塞尔曲线极值，椭圆弧交给配置的几何后端

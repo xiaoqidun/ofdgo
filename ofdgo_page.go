@@ -156,6 +156,7 @@ type TextCode struct {
 }
 
 // CGTransform 字符到字形的映射
+// CodePosition在内存中为整个TextObject的字符索引，保存时转换为所在TextCode的局部索引
 type CGTransform struct {
 	CodePosition int    `xml:"CodePosition,attr"`
 	CodeCount    int    `xml:"CodeCount,attr"`

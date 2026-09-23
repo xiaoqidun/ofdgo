@@ -35,6 +35,20 @@ type FontOutlines interface {
 	GlyphOutline(glyph uint16, size float64) (GeometryPath, error)
 }
 
+// FontShaper 提供可选的横向文字塑形，仅用于显式新建或重排
+// 字形按逻辑簇顺序排列，Cluster使用原文的符文索引，坐标为毫米且纵轴向下
+type FontShaper interface {
+	FontMetrics
+	ShapeText(value string, size float64) ([]ShapedGlyph, error)
+}
+
+// ShapedGlyph 保存塑形后的字形、原文簇和基线定位
+type ShapedGlyph struct {
+	Glyph         uint16
+	Cluster       int
+	X, Y, Advance float64
+}
+
 // ResolvedFont 保存字体来源和只读字体数据，不将外部字体写入文档
 type ResolvedFont struct {
 	Data   []byte
@@ -78,8 +92,8 @@ func (r *Renderer) resetFontBackendCache() {
 		r.fontSourcesCache.fallback = ResolvedFont{}
 		r.fontSourcesCache.fallbackRead = false
 	}
-	r.fontMetrics = make(map[*PreparedFont]FontMetrics)
-	r.glyphOutlines = make(map[glyphOutlineKey]GeometryPath)
+	r.fontMetrics = renderCache[[32]byte, FontMetrics]{limit: 32 << 20}
+	r.glyphOutlines = renderCache[glyphOutlineKey, GeometryPath]{limit: 16 << 20}
 	for _, state := range r.backendStates {
 		if fonts, ok := state.(interface{ resetFonts() }); ok {
 			fonts.resetFonts()
@@ -110,6 +124,7 @@ type PreparedFont struct {
 	ResolvedFont
 	Glyphs map[uint16]rune
 	CIDs   map[uint16]rune
+	digest [32]byte
 }
 
 // PrepareFont 统一处理内嵌字体包装和索引映射，供各编译器复用

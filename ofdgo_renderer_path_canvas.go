@@ -17,8 +17,6 @@ package ofdgo
 import (
 	"image/color"
 	"math"
-	"strconv"
-	"strings"
 
 	"github.com/tdewolff/canvas"
 )
@@ -222,9 +220,9 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	if boundaryInCTM {
 		pathCTM = localCTM
 	}
-	p := r.buildPath(obj, pageH, pathCTM, false)
-	if rectPath := r.buildTinyFillRectPath(obj, pageH, pathCTM, bx, by); rectPath != nil {
-		p = rectPath
+	p := r.buildTinyFillRectPath(obj, pageH, pathCTM, bx, by)
+	if p == nil {
+		p = r.buildPath(obj, pageH, pathCTM, false)
 	}
 	if boundaryInCTM && parentCTM != nil {
 		p = p.Transform(canvas.Matrix{
@@ -396,72 +394,21 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 // 入参: obj 路径对象, pageH 页面高度, ctm 变换矩阵, boundaryInCTM 边界是否参与CTM变换
 // 返回: *canvas.Path 路径对象
 func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix, boundaryInCTM bool) *canvas.Path {
-	bx, by := 0.0, 0.0
-	if obj.Boundary != "" {
-		if box, err := ParseBox(obj.Boundary); err == nil {
-			bx, by = box.X, box.Y
-		}
+	path, err := ParseGeometryPath(obj.AbbreviatedData)
+	if err != nil {
+		r.renderError = err
+		return &canvas.Path{}
 	}
+	p, err := canvasObjectPath(path)
+	if err != nil {
+		r.renderError = err
+		return &canvas.Path{}
+	}
+	box, _ := ParseBox(obj.Boundary)
 	if boundaryInCTM {
-		ctm = ctm.Multiply(TranslationMatrix(bx, by))
+		ctm = ctm.Multiply(TranslationMatrix(box.X, box.Y))
 	} else {
-		ctm = TranslationMatrix(bx, by).Multiply(ctm)
-	}
-	p := &canvas.Path{}
-	tokens := strings.Fields(obj.AbbreviatedData)
-	for i := 0; i < len(tokens); {
-		cmd := tokens[i]
-		i++
-		switch cmd {
-		case "M", "S":
-			if i+1 < len(tokens) {
-				x, _ := strconv.ParseFloat(tokens[i], 64)
-				y, _ := strconv.ParseFloat(tokens[i+1], 64)
-				p.MoveTo(x, y)
-				i += 2
-			}
-		case "L":
-			if i+1 < len(tokens) {
-				x, _ := strconv.ParseFloat(tokens[i], 64)
-				y, _ := strconv.ParseFloat(tokens[i+1], 64)
-				p.LineTo(x, y)
-				i += 2
-			}
-		case "B":
-			if i+5 < len(tokens) {
-				x1, _ := strconv.ParseFloat(tokens[i], 64)
-				y1, _ := strconv.ParseFloat(tokens[i+1], 64)
-				x2, _ := strconv.ParseFloat(tokens[i+2], 64)
-				y2, _ := strconv.ParseFloat(tokens[i+3], 64)
-				x3, _ := strconv.ParseFloat(tokens[i+4], 64)
-				y3, _ := strconv.ParseFloat(tokens[i+5], 64)
-				p.CubeTo(x1, y1, x2, y2, x3, y3)
-				i += 6
-			}
-		case "Q":
-			if i+3 < len(tokens) {
-				x1, _ := strconv.ParseFloat(tokens[i], 64)
-				y1, _ := strconv.ParseFloat(tokens[i+1], 64)
-				x2, _ := strconv.ParseFloat(tokens[i+2], 64)
-				y2, _ := strconv.ParseFloat(tokens[i+3], 64)
-				p.QuadTo(x1, y1, x2, y2)
-				i += 4
-			}
-		case "A":
-			if i+6 < len(tokens) {
-				rx, _ := strconv.ParseFloat(tokens[i], 64)
-				ry, _ := strconv.ParseFloat(tokens[i+1], 64)
-				rot, _ := strconv.ParseFloat(tokens[i+2], 64)
-				large, _ := strconv.ParseBool(tokens[i+3])
-				sweep, _ := strconv.ParseBool(tokens[i+4])
-				x, _ := strconv.ParseFloat(tokens[i+5], 64)
-				y, _ := strconv.ParseFloat(tokens[i+6], 64)
-				p.ArcTo(rx, ry, rot, large, sweep, x, y)
-				i += 7
-			}
-		case "C":
-			p.Close()
-		}
+		ctm = TranslationMatrix(box.X, box.Y).Multiply(ctm)
 	}
 	if canvas.Equal(ctm.a*ctm.d-ctm.b*ctm.c, 0) {
 		p = p.ReplaceArcs()

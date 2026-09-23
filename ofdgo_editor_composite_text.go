@@ -105,7 +105,7 @@ func (e *Editor) updateCompositeText(node *editorCompositeNode, member Composite
 			return err
 		}
 		object.TextObject.TextCode = text.TextCode
-	} else if options != nil || content != original || style.Size != 0 && style.Size != text.Size {
+	} else if options != nil || content != original || style.Size != 0 && style.Size != text.Size || state.layout != nil && state.layout.options.Shape && style.Font != "" && style.Font != object.TextObject.Font {
 		if style.Size != 0 {
 			text.Size = style.Size
 		}
@@ -123,6 +123,7 @@ func (e *Editor) updateCompositeText(node *editorCompositeNode, member Composite
 			return err
 		}
 		object.TextObject.Size, object.TextObject.TextCode = text.Size, text.TextCode
+		object.TextObject.CGTransform = text.CGTransform
 		state.layout = &textLayout{value: content, options: layout}
 	}
 	if style.Font != "" && style.Font != object.TextObject.Font {

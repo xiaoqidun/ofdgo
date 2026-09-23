@@ -63,7 +63,9 @@ func missingGlyphError(id string, characters []rune) error {
 // LineHeight为毫米单位的基线间距，0使用字体度量；LetterSpacing为字素间的附加毫米间距，可为负
 // LeftIndent和RightIndent为左右缩进，FirstLineIndent为每段首行相对左缩进的偏移，单位为毫米
 // 零值保持显式换行和左对齐
+// Shape显式启用FontShaper，保存为标准TextCode和CGTransform，不改变阅读时的原文定位
 type TextLayout struct {
+	Shape           bool
 	Wrap            bool
 	Align           string
 	LineHeight      float64

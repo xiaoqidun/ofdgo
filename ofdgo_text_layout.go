@@ -22,7 +22,7 @@ import (
 	"unicode/utf8"
 )
 
-// LayoutText 按自有字体度量重排横向文字，保留绘制属性，不进行复杂文字塑形
+// LayoutText 按自有字体度量重排横向文字，保留绘制属性，可显式启用字体塑形
 // 不修改文档，通过AddObject或UpdateObject提交；选项仅供当前编辑过程使用，保存为标准文字定位
 // 入参: obj 文字对象, value 原文, options 段落排版选项, metrics 字体度量
 // 返回: error 错误信息
@@ -73,6 +73,9 @@ func LayoutText(obj *TextObject, value string, options TextLayout, metrics FontM
 	if lineHeight == 0 {
 		lineHeight = math.Max(obj.Size, float64(int(ascender)+int(descender)+int(gap))*unit)
 	}
+	if options.Shape {
+		return layoutShapedText(obj, value, options, metrics, width, lineHeight, hScale, float64(ascender)*unit)
+	}
 	var codes []TextCode
 	var missing []rune
 	for _, paragraph := range strings.Split(value, "\n") {
@@ -114,6 +117,7 @@ func LayoutText(obj *TextObject, value string, options TextLayout, metrics FontM
 		return err
 	}
 	obj.TextCode = codes
+	obj.CGTransform = nil
 	obj.layout = nil
 	if options != (TextLayout{}) {
 		obj.layout = &textLayout{value: value, options: options}

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers/rasterizer"
@@ -46,6 +47,7 @@ func (b CanvasBackend) Render(page *RasterPage) (image.Image, error) {
 		space = canvas.DefaultColorSpace
 	}
 	r := rasterizer.FromImage(img, canvas.DPMM(page.DPI/25.4), space)
+	masks := renderCache[[32]byte, *image.Alpha]{limit: 16 << 20}
 	for i, cmd := range page.Commands {
 		if cmd.Image != nil {
 			source := cmd.Image
@@ -58,7 +60,7 @@ func (b CanvasBackend) Render(page *RasterPage) (image.Image, error) {
 				}
 				source = converted
 			}
-			if err := drawRasterImageCommand(b, page, img, source, cmd); err != nil {
+			if err := drawRasterImageCommand(b, page, img, source, cmd, &masks); err != nil {
 				return nil, err
 			}
 			continue
@@ -104,10 +106,74 @@ func (b CanvasBackend) Render(page *RasterPage) (image.Image, error) {
 			style.FillRule = canvas.EvenOdd
 		}
 		m := cmd.Transform
-		r.RenderPath(p, style, canvas.Matrix{{m[0], m[2], m[4]}, {-m[1], -m[3], page.Height - m[5]}})
+		if cmd.Stroke != nil {
+			options := *cmd.Stroke
+			if err := validateStroke(options); err != nil {
+				return nil, err
+			}
+			p = p.Transform(canvas.Matrix{{m[0], m[2], m[4]}, {m[1], m[3], m[5]}})
+			if cmd.Paint.Gradient != nil {
+				inverse, err := m.Inverse()
+				if err != nil {
+					return nil, err
+				}
+				paint = canvas.Paint{Gradient: rasterStrokeGradientCanvas{rasterGradientCanvas{cmd.Paint.Gradient}, inverse}}
+			}
+			line := pathStyle{lineJoin: canvas.MiterJoin, miterLimit: defaultMiterLimit}
+			line.applyLineJoin(options.Join, options.MiterLimit)
+			style = canvas.Style{Stroke: paint, StrokeWidth: options.Width, StrokeCapper: pathLineCap(options.Cap, canvas.ButtCap), StrokeJoiner: line.lineJoin, FillRule: canvas.NonZero}
+			if len(options.Dashes) > 0 {
+				style.DashOffset = options.DashOffset / options.Width
+				style.Dashes = make([]float64, len(options.Dashes))
+				for i, dash := range options.Dashes {
+					style.Dashes[i] = dash / options.Width
+				}
+			}
+			m = RasterMatrix{1, 0, 0, 1, 0, 0}
+		}
+		matrix := canvas.Matrix{{m[0], m[2], m[4]}, {-m[1], -m[3], page.Height - m[5]}}
+		if cmd.Clip == nil {
+			r.RenderPath(p, style, matrix)
+			continue
+		}
+		mask, err := rasterClipMask(b, page, cmd.Clip, &masks)
+		if err != nil {
+			return nil, err
+		}
+		if mask.Rect.Empty() {
+			continue
+		}
+		part := image.NewRGBA(image.Rect(0, 0, mask.Rect.Dx(), mask.Rect.Dy()))
+		local := rasterizer.FromImage(part, canvas.DPMM(page.DPI/25.4), space)
+		matrix[0][2] -= float64(mask.Rect.Min.X) / (page.DPI / 25.4)
+		matrix[1][2] -= float64(h-mask.Rect.Max.Y) / (page.DPI / 25.4)
+		local.RenderPath(p, style, matrix)
+		draw.DrawMask(img, mask.Rect, part, image.Point{}, mask, mask.Rect.Min, draw.Over)
 	}
 	r.Close()
 	return img, nil
+}
+
+// rasterStrokeGradientCanvas 保留页面坐标描边的局部渐变定位
+type rasterStrokeGradientCanvas struct {
+	rasterGradientCanvas
+	inverse RasterMatrix
+}
+
+// At 返回原局部坐标的描边渐变颜色
+// 入参: x 页面横坐标, y 页面纵坐标
+// 返回: color.RGBA 预乘颜色
+func (g rasterStrokeGradientCanvas) At(x, y float64) color.RGBA {
+	p := g.inverse.Apply(RasterPoint{x, y})
+	return g.gradient.At(p.X, p.Y)
+}
+
+// SetColorSpace 转换描边渐变颜色，不修改共享分段
+// 入参: space 颜色空间
+// 返回: canvas.Gradient 独立渐变
+func (g rasterStrokeGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
+	g.rasterGradientCanvas = g.rasterGradientCanvas.SetColorSpace(space).(rasterGradientCanvas)
+	return g
 }
 
 // rasterGradientCanvas 将公共渐变交给Canvas采样，不改变OFD周期语义

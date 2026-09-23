@@ -736,13 +736,28 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		x.clips(object.TextObject.Clips)
 		x.color("FillColor", fill)
 		x.color("StrokeColor", stroke)
+		offset, index := 0, 0
 		for _, code := range object.TextObject.TextCode {
+			end := offset + len(textCodeRunes(code.Value))
+			for index < len(object.TextObject.CGTransform) && object.TextObject.CGTransform[index].CodePosition < end {
+				transform := object.TextObject.CGTransform[index]
+				attrs := ofdAttrs{
+					{Name: xml.Name{Local: "CodePosition"}, Value: strconv.Itoa(transform.CodePosition - offset)},
+					{Name: xml.Name{Local: "CodeCount"}, Value: strconv.Itoa(transform.CodeCount)},
+					{Name: xml.Name{Local: "GlyphCount"}, Value: strconv.Itoa(transform.GlyphCount)},
+				}
+				x.start("CGTransform", attrs)
+				x.text("Glyphs", transform.Glyphs)
+				x.end("CGTransform")
+				index++
+			}
 			var attrs ofdAttrs
 			attrs.add("X", code.X)
 			attrs.add("Y", code.Y)
 			attrs.add("DeltaX", code.DeltaX)
 			attrs.add("DeltaY", code.DeltaY)
 			x.textCode(code.Value, attrs)
+			offset = end
 		}
 	}
 	x.end(object.Type)

@@ -949,7 +949,7 @@ func (e *Editor) AddText(page int, box Box, value, fontID string, size float64) 
 }
 
 // UpdateText 按现有段落选项重排横向文字，保留对象标识、顺序、边界及绘制属性
-// 自定义文字定位使用UpdateObject，不进行复杂文字塑形
+// 自定义文字定位使用UpdateObject，字体塑形沿用既有段落选项
 // 入参: page 页面索引, id 文字对象标识, value 原文, fontID 字体资源标识, size 字号
 // 返回: error 错误信息
 func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) error {
@@ -1115,8 +1115,11 @@ func (e *Editor) prepareText(obj *TextObject) error {
 	if len(obj.TextCode) == 0 {
 		return fmt.Errorf("text codes are empty")
 	}
-	if obj.VScale != 0 || obj.Decoration != "" || len(obj.CGTransform) != 0 {
-		return &EditError{Code: EditUnsupportedObject, Err: fmt.Errorf("text extensions and glyph transforms are not supported for creation")}
+	if obj.VScale != 0 || obj.Decoration != "" {
+		return &EditError{Code: EditUnsupportedObject, Err: fmt.Errorf("text extensions are not supported for creation")}
+	}
+	if err := validateTextGlyphs(*obj, sfnt.NumGlyphs()); err != nil {
+		return err
 	}
 	if !finite(obj.HScale) || obj.HScale < 0 || !finite(obj.LineWidth) || obj.LineWidth < 0 || !finite(obj.MiterLimit) || obj.MiterLimit < 0 {
 		return fmt.Errorf("invalid text dimensions")
@@ -1131,6 +1134,7 @@ func (e *Editor) prepareText(obj *TextObject) error {
 	}
 	obj.TextCode = append([]TextCode(nil), obj.TextCode...)
 	var missing []rune
+	position, transform := 0, 0
 	x, y := "", ""
 	for i := range obj.TextCode {
 		code := &obj.TextCode[i]
@@ -1151,9 +1155,14 @@ func (e *Editor) prepareText(obj *TextObject) error {
 		code.X, code.Y = x, y
 		runes := textCodeRunes(code.Value)
 		for _, char := range runes {
-			if sfnt.GlyphIndex(char) == 0 {
+			for transform < len(obj.CGTransform) && position >= obj.CGTransform[transform].CodePosition+obj.CGTransform[transform].CodeCount {
+				transform++
+			}
+			mapped := transform < len(obj.CGTransform) && position >= obj.CGTransform[transform].CodePosition
+			if !mapped && sfnt.GlyphIndex(char) == 0 {
 				missing = append(missing, char)
 			}
+			position++
 		}
 		for _, delta := range []string{code.DeltaX, code.DeltaY} {
 			if delta != "" {
@@ -1200,40 +1209,11 @@ func creationDeltas(value string) error {
 // 入参: value 路径数据
 // 返回: error 错误信息
 func creationPath(value string) error {
-	tokens := strings.Fields(value)
-	if len(tokens) == 0 || (tokens[0] != "M" && tokens[0] != "S") {
-		return fmt.Errorf("path must start with M or S")
+	path, err := ParseGeometryPath(value)
+	if err == nil && len(path) == 0 {
+		return fmt.Errorf("empty path")
 	}
-	for i := 0; i < len(tokens); {
-		command := tokens[i]
-		i++
-		count := 0
-		switch command {
-		case "M", "S", "L":
-			count = 2
-		case "Q":
-			count = 4
-		case "B":
-			count = 6
-		case "A":
-			count = 7
-		case "C":
-		default:
-			return fmt.Errorf("invalid path command %q", command)
-		}
-		if len(tokens)-i < count {
-			return fmt.Errorf("missing arguments for path command %s", command)
-		}
-		values, err := creationNumbers(strings.Join(tokens[i:i+count], " "), count)
-		if err != nil {
-			return err
-		}
-		if command == "A" && (values[0] < 0 || values[1] < 0 || (values[3] != 0 && values[3] != 1) || (values[4] != 0 && values[4] != 1)) {
-			return fmt.Errorf("invalid arc radii or flags")
-		}
-		i += count
-	}
-	return nil
+	return err
 }
 
 // creationNumbers 解析创建接口的有限十进制数值序列
