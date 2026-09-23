@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"maps"
 	"path"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -117,14 +119,12 @@ type PageCapabilities struct {
 // 页面按需解析，未修改条目直接保留；编辑器及其Reader快照使用期间不得关闭输入Reader
 // 返回: *Editor 编辑器, error 错误信息
 func (r *Reader) Editor() (*Editor, error) {
-	reader := &Reader{Zip: r.Zip, files: r.files, encryption: r.encryption}
-	if err := reader.initRoot(); err != nil {
-		return nil, err
-	}
-	doc, err := reader.Doc()
+	_, err := r.Doc()
 	if err != nil {
 		return nil, err
 	}
+	reader := cloneEditorReader(r)
+	doc := reader.doc
 	maximum := doc.CommonData.MaxUnitID
 	if maximum < 0 {
 		return nil, fmt.Errorf("invalid MaxUnitID")
@@ -137,15 +137,58 @@ func (r *Reader) Editor() (*Editor, error) {
 	e.encryption = r.encryption
 	e.Info, e.maxID = cloneEditorData(*info), maximum
 	directory := cleanPackagePath(reader.RootDir)
-	e.source = &editorSource{reader: reader, document: doc, info: cloneEditorData(*info), directory: directory, pages: make(map[string]*editorSourcePage), origins: make(map[string]*editorObjectOrigin)}
-	for _, page := range doc.Pages.Page {
+	e.source = &editorSource{reader: reader, document: doc, info: cloneEditorData(*info), directory: directory, pages: make(map[string]*editorSourcePage, len(doc.Pages.Page)), origins: make(map[string]*editorObjectOrigin)}
+	e.pages = make([]PageContent, len(doc.Pages.Page))
+	sourcePages := make([]editorSourcePage, len(doc.Pages.Page))
+	for i, page := range doc.Pages.Page {
 		if page.ID == "" || e.source.pages[page.ID] != nil {
 			return nil, fmt.Errorf("missing or duplicate page ID %q", page.ID)
 		}
-		e.source.pages[page.ID] = &editorSourcePage{ref: page}
-		e.pages = append(e.pages, PageContent{ID: page.ID})
+		sourcePages[i].ref = page
+		e.source.pages[page.ID] = &sourcePages[i]
+		e.pages[i] = PageContent{ID: page.ID}
 	}
 	return e, nil
+}
+
+// cloneEditorReader 复用已验证的只读包索引，独立保存可变文档与读取缓存
+// 入参: reader 已加载主文档的阅读器
+// 返回: *Reader 不拥有输入文件的独立阅读器
+func cloneEditorReader(reader *Reader) *Reader {
+	next := *reader
+	next.Closer = nil
+	next.OFD = cloneEditorData(reader.OFD)
+	doc := *reader.doc
+	pages := doc.Pages.Page
+	doc.Pages.Page = nil
+	doc = cloneEditorData(doc)
+	doc.Pages.Page = slices.Clone(pages)
+	next.doc = &doc
+	next.files = maps.Clone(reader.files)
+	next.ResMap = maps.Clone(reader.ResMap)
+	next.resourcesRead = maps.Clone(reader.resourcesRead)
+	next.resourceFiles = maps.Clone(reader.resourceFiles)
+	next.fontCache = cloneEditorMap(reader.fontCache)
+	next.fontFaces = maps.Clone(reader.fontFaces)
+	next.colorSpaceCache = cloneEditorMap(reader.colorSpaceCache)
+	next.drawParamCache = cloneEditorMap(reader.drawParamCache)
+	next.compositeGraphicUnitCache = cloneEditorMap(reader.compositeGraphicUnitCache)
+	next.pageHeaderCache = maps.Clone(reader.pageHeaderCache)
+	next.Stamps = cloneEditorMap(reader.Stamps)
+	next.Annots = cloneEditorMap(reader.Annots)
+	next.annotationFiles = cloneEditorMap(reader.annotationFiles)
+	return &next
+}
+
+// cloneEditorMap 复制对外可变缓存值，避免快照之间共享嵌套切片或指针
+// 入参: values 原缓存
+// 返回: map[string]T 独立缓存
+func cloneEditorMap[T any](values map[string]T) map[string]T {
+	result := maps.Clone(values)
+	for key, value := range result {
+		result[key] = cloneEditorData(value)
+	}
+	return result
 }
 
 // prepareSourceIDs 首次新增内容前流式核对原包标识，不依赖可能缺失或过期的MaxUnitID
@@ -366,6 +409,8 @@ func (e *Editor) loadSourcePage(index int) error {
 	if source == nil || source.original != nil {
 		return nil
 	}
+	loaded := *source
+	source = &loaded
 	reader := e.source.reader
 	data, err := reader.readFile(reader.ResPath(source.ref.BaseLoc))
 	if err != nil {
@@ -426,6 +471,7 @@ func (e *Editor) loadSourcePage(index int) error {
 		}
 	}
 	source.original = page
+	e.source.pages[source.ref.ID] = source
 	e.pages[index] = copyEditorPage(*page)
 	return nil
 }

@@ -151,7 +151,7 @@ type Session struct {
 	fontFS          *ofdgo.FontFS
 	doc             *ofdgo.Document
 	pageCache       map[int]*ofdgo.PageContent
-	boxCache        map[int]ofdgo.Box
+	boxCache        []pageBoxInfo
 	textCache       map[int]*ofdgo.PageText
 	svgFonts        map[string][]byte
 	fontScan        *ofdgo.FontInfoScanner
@@ -162,6 +162,12 @@ type Session struct {
 	signatureError  error
 	signaturesRead  bool
 	editing         bool
+}
+
+// pageBoxInfo 按页索引缓存真实区域，valid区分未读取与零值区域
+type pageBoxInfo struct {
+	box   ofdgo.Box
+	valid bool
 }
 
 // DocumentInfo 文档信息
@@ -318,7 +324,7 @@ func newSession(reader *ofdgo.Reader, opts OpenOptions) (*Session, error) {
 		fontFS:    fontFS,
 		doc:       doc,
 		pageCache: make(map[int]*ofdgo.PageContent),
-		boxCache:  make(map[int]ofdgo.Box),
+		boxCache:  make([]pageBoxInfo, len(doc.Pages.Page)),
 		textCache: make(map[int]*ofdgo.PageText),
 		svgFonts:  make(map[string][]byte),
 	}, nil
@@ -388,6 +394,25 @@ func (s *Session) scanFontInfo() bool {
 	return true
 }
 
+// scanFontInfoBatch 为大文档批量统计字体，限制每次处理的页数与耗时
+// 返回: bool 是否完成
+func (s *Session) scanFontInfoBatch() bool {
+	limit := 1
+	if len(s.doc.Pages.Page) > 256 {
+		limit = 64
+	}
+	start := time.Now()
+	for range limit {
+		if s.scanFontInfo() {
+			return true
+		}
+		if time.Since(start) >= 8*time.Millisecond {
+			break
+		}
+	}
+	return false
+}
+
 // PageText 获取指定页面文字，复用当前会话的文字索引
 // 入参: index 页面索引
 // 返回: *ofdgo.PageText 页面文字, error 错误信息
@@ -448,7 +473,7 @@ func (s *Session) Summary() DocumentInfo {
 		Version:        s.Reader.Version(),
 		DocType:        s.Reader.DocType(),
 		PageCount:      len(s.doc.Pages.Page),
-		Pages:          make([]PageInfo, 0, len(s.doc.Pages.Page)),
+		Pages:          s.pageInfos(),
 		Outlines:       s.doc.OutlineInfos(),
 		DetailsPending: true,
 	}
@@ -458,15 +483,6 @@ func (s *Session) Summary() DocumentInfo {
 		info.Subject = docInfo.Subject
 		info.CreationDate = docInfo.CreationDate
 		info.ModDate = docInfo.ModDate
-	}
-	for index, page := range s.doc.Pages.Page {
-		box, ok := s.boxCache[index]
-		if !ok {
-			if area, err := s.Reader.PageArea(page); err == nil {
-				box, _ = s.pageBox(index, &ofdgo.PageContent{Area: area})
-			}
-		}
-		info.Pages = append(info.Pages, PageInfo{Index: index, ID: page.ID, Width: box.W, Height: box.H})
 	}
 	if fonts, err := s.Reader.Fonts(); err == nil {
 		for _, font := range fonts {
@@ -485,6 +501,23 @@ func (s *Session) Summary() DocumentInfo {
 	return info
 }
 
+// pageInfos 获取全部真实页面尺寸，首屏、配置及详情共用区域缓存
+// 返回: []PageInfo 独立页面信息列表
+func (s *Session) pageInfos() []PageInfo {
+	pages := make([]PageInfo, len(s.doc.Pages.Page))
+	for index, page := range s.doc.Pages.Page {
+		cached := s.boxCache[index]
+		box := cached.box
+		if !cached.valid {
+			if area, err := s.Reader.PageArea(page); err == nil {
+				box, _ = s.pageBox(index, &ofdgo.PageContent{Area: area})
+			}
+		}
+		pages[index] = PageInfo{Index: index, ID: page.ID, Width: box.W, Height: box.H}
+	}
+	return pages
+}
+
 // Info 获取完整文档信息
 // 返回: DocumentInfo 文档信息
 func (s *Session) Info() DocumentInfo {
@@ -493,7 +526,7 @@ func (s *Session) Info() DocumentInfo {
 		Version:    s.Reader.Version(),
 		DocType:    s.Reader.DocType(),
 		PageCount:  len(s.doc.Pages.Page),
-		Pages:      make([]PageInfo, 0, len(s.doc.Pages.Page)),
+		Pages:      s.pageInfos(),
 		Outlines:   s.doc.OutlineInfos(),
 	}
 	if attachments, err := s.Reader.Attachments(); err == nil {
@@ -523,16 +556,6 @@ func (s *Session) Info() DocumentInfo {
 		info.Subject = docInfo.Subject
 		info.CreationDate = docInfo.CreationDate
 		info.ModDate = docInfo.ModDate
-	}
-	for index, pageRef := range s.doc.Pages.Page {
-		pageInfo := PageInfo{Index: index, ID: pageRef.ID}
-		if area, err := s.Reader.PageArea(pageRef); err == nil {
-			if box, err := s.pageBox(index, &ofdgo.PageContent{Area: area}); err == nil {
-				pageInfo.Width = box.W
-				pageInfo.Height = box.H
-			}
-		}
-		info.Pages = append(info.Pages, pageInfo)
 	}
 	for !s.scanFontInfo() {
 	}
@@ -891,13 +914,13 @@ func (s *Session) pageContent(index int) (*ofdgo.PageContent, error) {
 // 入参: index 页面索引, page 页面内容
 // 返回: ofdgo.Box 页面物理区域, error 错误信息
 func (s *Session) pageBox(index int, page *ofdgo.PageContent) (ofdgo.Box, error) {
-	if box, ok := s.boxCache[index]; ok {
-		return box, nil
+	if cached := s.boxCache[index]; cached.valid {
+		return cached.box, nil
 	}
 	box, err := s.Renderer.GetPageBox(page)
 	if err != nil {
 		return ofdgo.Box{}, err
 	}
-	s.boxCache[index] = box
+	s.boxCache[index] = pageBoxInfo{box: box, valid: true}
 	return box, nil
 }

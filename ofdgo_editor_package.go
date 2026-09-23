@@ -35,12 +35,14 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 	source := e.source
 	reader := source.reader
 	pageRefs := make([]Page, len(e.pages))
+	originalCount := 0
 	for i, page := range e.pages {
 		if err := progress.report("pages", i, len(e.pages)); err != nil {
 			return nil, err
 		}
 		original := source.pages[page.ID]
 		if original != nil {
+			originalCount++
 			pageRefs[i] = original.ref
 			if original.original == nil {
 				continue
@@ -95,8 +97,8 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 			}
 		}
 	}
-	pagesChanged := !reflect.DeepEqual(pageRefs, source.document.Pages.Page)
-	if len(parts) != 0 || pagesChanged {
+	pagesChanged := !slices.Equal(pageRefs, source.document.Pages.Page)
+	if pagesChanged || len(resourceFiles) != 0 || len(parts) != 0 && e.maxID != source.document.CommonData.MaxUnitID {
 		name := reader.ResPath(reader.OFD.DocBody[0].DocRoot)
 		data, err := reader.readFile(name)
 		if err != nil {
@@ -138,15 +140,18 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 			if pages == nil {
 				return nil, fmt.Errorf("document has no Pages")
 			}
-			var entries [][]byte
-			for _, page := range pageRefs {
-				var original *editorXML
-				for _, child := range pages.children {
-					if packageOFDNode(child, "Page") && child.attr("ID") == page.ID {
-						original = child
-						break
+			originals := make(map[string]*editorXML, len(pages.children))
+			for _, child := range pages.children {
+				if packageOFDNode(child, "Page") {
+					id := child.attr("ID")
+					if originals[id] == nil {
+						originals[id] = child
 					}
 				}
+			}
+			entries := make([][]byte, 0, len(pageRefs))
+			for _, page := range pageRefs {
+				original := originals[page.ID]
 				if original != nil {
 					entries = append(entries, data[original.start:original.end])
 				} else {
@@ -209,8 +214,10 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 		}
 		parts[name] = updated
 	}
-	if err := e.prunePageReferences(parts); err != nil {
-		return nil, err
+	if originalCount != len(source.pages) || len(source.annotationPages) != 0 {
+		if err := e.prunePageReferences(parts); err != nil {
+			return nil, err
+		}
 	}
 	for name, data := range maps.Clone(parts) {
 		if file, ok := reader.packageFile(name); ok {
@@ -481,6 +488,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 	archive := zip.NewWriter(output)
 	if reader.Zip != nil {
 		_ = archive.SetComment(reader.Zip.Comment)
+		buffer := make([]byte, 32*1024)
 		for _, file := range reader.Zip.File {
 			if file.FileInfo().IsDir() {
 				header := file.FileHeader
@@ -503,8 +511,19 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 					return output.count, err
 				}
 				delete(remaining, name)
-			} else if err := archive.Copy(file); err != nil {
-				return output.count, err
+			} else {
+				input, err := file.OpenRaw()
+				if err != nil {
+					return output.count, err
+				}
+				header := file.FileHeader
+				entry, err := archive.CreateRaw(&header)
+				if err != nil {
+					return output.count, err
+				}
+				if _, err := io.CopyBuffer(entry, input, buffer); err != nil {
+					return output.count, err
+				}
 			}
 		}
 	}
@@ -533,6 +552,33 @@ func (e *Editor) sourceReader(progress editorProgress) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
+	otherParts := maps.Clone(parts)
+	if len(parts) != 0 {
+		for _, page := range e.source.pages {
+			if page.original != nil {
+				name := e.source.reader.ResPath(page.ref.BaseLoc)
+				if file, ok := e.source.reader.packageFile(name); ok {
+					name = cleanPackagePath(file.Name)
+				}
+				delete(otherParts, name)
+			}
+		}
+	}
+	if len(otherParts) == 0 {
+		reader := cloneEditorReader(e.source.reader)
+		if reader.files == nil {
+			reader.files = make(map[string][]byte)
+		}
+		maps.Copy(reader.files, parts)
+		reader.encryption = e.encryption
+		for name := range reader.pageHeaderCache {
+			actual := reader.fileNamesFold[strings.ToLower(name)]
+			if _, changed := parts[actual]; changed {
+				delete(reader.pageHeaderCache, name)
+			}
+		}
+		return reader, nil
+	}
 	files := maps.Clone(e.source.reader.files)
 	if files == nil {
 		files = make(map[string][]byte)
@@ -546,7 +592,8 @@ func (e *Editor) sourceReader(progress editorProgress) (*Reader, error) {
 		return nil, err
 	}
 	for name, header := range e.source.reader.pageHeaderCache {
-		if _, changed := parts[name]; !changed {
+		actual := e.source.reader.fileNamesFold[strings.ToLower(name)]
+		if _, changed := parts[actual]; !changed {
 			reader.pageHeaderCache[name] = header
 		}
 	}

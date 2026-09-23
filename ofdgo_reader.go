@@ -92,9 +92,13 @@ func (r *Reader) initRoot() error {
 // indexPackage 建立包路径索引，拒绝会使显示与验签产生歧义的同名条目
 // 返回: error 错误信息
 func (r *Reader) indexPackage() error {
-	r.fileIndex = make(map[string]*zip.File)
-	r.fileIndexFold = make(map[string]*zip.File)
-	r.fileNamesFold = make(map[string]string)
+	count := 0
+	if r.Zip != nil {
+		count = len(r.Zip.File)
+	}
+	r.fileIndex = make(map[string]*zip.File, count)
+	r.fileIndexFold = make(map[string]*zip.File, count)
+	r.fileNamesFold = make(map[string]string, count+len(r.files))
 	if r.Zip != nil {
 		for _, f := range r.Zip.File {
 			if f.FileInfo().IsDir() {

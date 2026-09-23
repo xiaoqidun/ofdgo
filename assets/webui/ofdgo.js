@@ -6,6 +6,7 @@ const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const DEFAULT_IMAGE_DPI = 300;
 const PAGE_CACHE_LIMIT = 16;
 const PAGE_CACHE_BYTES = 32 * 1024 * 1024;
+const SCROLL_SEGMENT_SIZE = 1000000;
 const OBJECT_CLIPBOARD_TYPE = "application/x-ofdgo-objects";
 const STATUS = {
 	ready: "选择 OFD 文件",
@@ -100,6 +101,11 @@ const state = {
 	pageObserver: null,
 	visiblePages: new Set(),
 	scrollFrame: 0,
+	pageWindow: null,
+	thumbnailWindow: null,
+	thumbnailFrame: 0,
+	pageDragIndex: null,
+	pageListCurrent: null,
 	thumbnailInFlight: new Set(),
 	thumbnailObserver: null,
 	visibleThumbnails: new Set(),
@@ -334,6 +340,7 @@ const el = {
 	localFontButton: document.querySelector("#localFontButton"),
 	prevButton: document.querySelector("#prevButton"),
 	nextButton: document.querySelector("#nextButton"),
+	pageControl: document.querySelector(".page-control"),
 	pageInput: document.querySelector("#pageInput"),
 	pageTotal: document.querySelector("#pageTotal"),
 	zoomOutButton: document.querySelector("#zoomOutButton"),
@@ -1172,6 +1179,28 @@ COMPACT_LAYOUT.addEventListener("change", syncLayoutMode);
 el.viewerPanel.addEventListener("scroll", () => {
 	schedulePageSync();
 });
+el.navigationContent.addEventListener("scroll", () => {
+	if (state.thumbnailFrame) return;
+	state.thumbnailFrame = requestAnimationFrame(() => {
+		state.thumbnailFrame = 0;
+		syncThumbnailWindow();
+	});
+});
+for (const [viewport, current] of [[el.viewerPanel, () => state.pageWindow], [el.navigationContent, () => el.pageList.hidden ? null : state.thumbnailWindow]]) {
+	viewport.addEventListener("wheel", event => {
+		const view = current();
+		if (!view || view.total <= SCROLL_SEGMENT_SIZE || event.ctrlKey || event.shiftKey || !event.deltaY) return;
+		event.preventDefault();
+		view.relativeScroll = false;
+		const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1;
+		scrollPageWindowBy(view, event.deltaY * unit);
+		viewport.scrollLeft += event.deltaX * unit;
+	}, { passive: false });
+	viewport.addEventListener("pointerdown", event => {
+		const view = current();
+		if (view) view.relativeScroll = event.pointerType === "touch" || state.editing && !!event.target.closest(".page-shell");
+	});
+}
 el.viewerPanel.addEventListener("pointerdown", startPan);
 el.viewerPanel.addEventListener("pointermove", movePan);
 el.viewerPanel.addEventListener("pointerup", endPan);
@@ -1228,6 +1257,24 @@ function handleKeyDown(event) {
 	}
 	if (document.body.hasAttribute("aria-busy") || formDialogOpen()) {
 		return;
+	}
+	if (state.pageWindow && (!event.shiftKey || key === " ") && el.viewerPanel.contains(target)
+		&& !target.closest("input, textarea, select, button, a, [contenteditable]")) {
+		const view = state.pageWindow;
+		const delta = { ArrowUp: -40, ArrowDown: 40, PageUp: -el.viewerPanel.clientHeight * 0.9, PageDown: el.viewerPanel.clientHeight * 0.9,
+			" ": el.viewerPanel.clientHeight * 0.9 * (event.shiftKey ? -1 : 1) }[key];
+		if (key === "Home" || key === "End") {
+			event.preventDefault();
+			view.relativeScroll = false;
+			syncPageWindow(view, key === "Home" ? -windowInset(view) : view.total);
+			syncCurrentPageFromScroll();
+			return;
+		}
+		if (delta !== undefined && !event.ctrlKey && !event.metaKey && view.total > SCROLL_SEGMENT_SIZE) {
+			event.preventDefault();
+			scrollPageWindowBy(view, delta);
+			return;
+		}
 	}
 	if (event.ctrlKey || event.metaKey) {
 		if (state.editing && !target.closest("input, textarea, select, [contenteditable]")
@@ -2519,11 +2566,8 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 			renderMeta(true);
 			updateControls();
 			loadDocumentDetails(openSeq);
-			for (const page of doc.pages) {
-				observeFlowPage(pageShell(page.index));
-				const button = el.pageList.querySelector(`[data-page-index="${page.index}"]`);
-				observeThumbnail(button, page.index, openSeq);
-			}
+			for (const shell of el.svgHost.children) observeFlowPage(shell);
+			for (const button of el.pageList.children) observeThumbnail(button, Number(button.dataset.pageIndex), openSeq);
 		}
 	}
 }
@@ -2627,6 +2671,7 @@ function syncLayoutMode(event) {
 
 function resizeViewer() {
 	if (state.doc) {
+		syncThumbnailWindow();
 		applyFit(false);
 		if (state.fitMode !== "free") {
 			scrollToPage(state.pageIndex);
@@ -3551,6 +3596,7 @@ async function openDocument(options = {}) {
 		return;
 	}
 	const openSeq = options.openSeq || (state.openSeq += 1);
+	const previewPosition = options.previewScroll && state.pageWindow ? pageWindowAnchor(state.pageWindow) : null;
 	const previewIDs = options.keepPreview ? [...new Set([...state.visiblePages, ...state.visibleThumbnails])].map((index) => state.doc.pages[index].id) : [];
 	if (!state.ready || state.wasmExited) {
 		await ensureWASM();
@@ -3658,6 +3704,8 @@ async function openDocument(options = {}) {
 				restoreScaleAnchor(options.previewAnchor);
 			} else if (options.previewScroll) {
 				Object.assign(el.viewerPanel, options.previewScroll);
+				if (previewPosition && state.pageWindow) syncPageWindow(state.pageWindow,
+					state.pageWindow.offsets[previewPosition.index] + previewPosition.offset);
 			} else {
 				scrollToPage(pageIndex);
 			}
@@ -3741,6 +3789,8 @@ async function renderPage(index, options = {}) {
 			applyFit(false);
 		}
 		if (options.scroll !== false) {
+			scrollToPage(index);
+		} else if (state.pageWindow && (!pageShell(index) || pageShell(index).style.visibility === "hidden")) {
 			scrollToPage(index);
 		}
 		const page = await renderFlowPage(index, { throwError: true, openSeq, priority: 0 });
@@ -4096,8 +4146,123 @@ function cancelExport() {
 	wasmWorker.postMessage({ type: "cancel", id: state.exportRequestID });
 }
 
+function virtualIndex(offsets, top) {
+	let low = 0, high = offsets.length - 1;
+	while (low + 1 < high) {
+		const mid = (low + high) >>> 1;
+		if (offsets[mid] <= top) low = mid;
+		else high = mid;
+	}
+	return low;
+}
+
+function createPageWindow(host, viewport, overscan, create, release, observe) {
+	host.classList.add("virtual-pages");
+	return { host, viewport, overscan, create, release, observe, nodes: new Map(), offsets: new Float64Array(1), origin: 0, total: 0, gap: 0 };
+}
+
+function windowInset(view) {
+	return view.host.getBoundingClientRect().top - view.viewport.getBoundingClientRect().top
+		+ view.viewport.scrollTop - view.viewport.clientTop;
+}
+
+function pageWindowTop(view) {
+	const inset = windowInset(view);
+	if (view.total <= SCROLL_SEGMENT_SIZE) return view.viewport.scrollTop - inset;
+	const delta = view.viewport.scrollTop - view.scrollTop;
+	if (!delta) return view.logicalTop;
+	if (view.relativeScroll) return view.logicalTop + delta;
+	const max = view.viewport.scrollHeight - view.viewport.clientHeight;
+	return view.viewport.scrollTop / Math.max(1, max) * (max + view.total - SCROLL_SEGMENT_SIZE) - inset;
+}
+
+function scrollPageWindowBy(view, delta) {
+	if (view) syncPageWindow(view, pageWindowTop(view) + delta);
+}
+
+function scrollViewerBy(delta) {
+	if (state.pageWindow) scrollPageWindowBy(state.pageWindow, delta);
+	else el.viewerPanel.scrollTop += delta;
+}
+
+function syncPageWindow(view, target = null) {
+	if (!view || view.offsets.length < 2) return;
+	const { host, viewport, offsets, nodes } = view;
+	const extent = Math.min(SCROLL_SEGMENT_SIZE, view.total);
+	host.style.height = `${extent}px`;
+	const inset = windowInset(view), height = viewport.clientHeight;
+	const maxTop = Math.max(0, viewport.scrollHeight - height);
+	const logicalMax = maxTop + view.total - extent;
+	const logical = Math.max(-inset, Math.min(logicalMax - inset, target ?? pageWindowTop(view)));
+	viewport.scrollTop = logicalMax > 0 ? (logical + inset) * maxTop / logicalMax : 0;
+	view.scrollTop = viewport.scrollTop;
+	view.logicalTop = logical;
+	view.origin = logical - viewport.scrollTop + inset;
+	const first = virtualIndex(offsets, Math.max(view.origin, logical - view.overscan));
+	const last = virtualIndex(offsets, Math.min(view.origin + extent, logical + height + view.overscan));
+	const selection = host === el.svgHost && state.documentSelection ? document.getSelection() : null;
+	const selected = selection?.rangeCount && isDocumentSelection(selection.getRangeAt(0));
+	let changed = false;
+	for (const [index, node] of nodes) {
+		if ((index < first || index > last) && view.release(node, index)) {
+			node.remove();
+			nodes.delete(index);
+			changed = true;
+		}
+	}
+	for (let index = first; index <= last; index++) {
+		if (nodes.has(index)) continue;
+		const node = view.create(state.doc.pages[index]);
+		nodes.set(index, node);
+		const next = [...host.children].find(child => Number(child.dataset.pageIndex) > index);
+		host.insertBefore(node, next || null);
+		changed = true;
+		node.style.top = `${offsets[index] - view.origin}px`;
+		view.observe(node, index);
+	}
+	for (const [index, node] of nodes) {
+		const top = offsets[index] - view.origin;
+		const itemHeight = offsets[index + 1] - offsets[index] - view.gap;
+		node.style.top = `${Math.max(-itemHeight, Math.min(extent, top))}px`;
+		node.style.visibility = top + itemHeight < 0 || top >= extent ? "hidden" : "";
+	}
+	if (selected && changed) selection.getRangeAt(0).selectNodeContents(host);
+	view.anchor = pageWindowAnchor(view);
+}
+
+function pageWindowAnchor(view) {
+	const top = pageWindowTop(view);
+	const index = virtualIndex(view.offsets, top);
+	return { index, offset: top - view.offsets[index] };
+}
+
+function releaseFlowShell(shell, index) {
+	if (shell.contains(document.activeElement) || canvasEditor.drag?.item?.index === index) return false;
+	unmountPage(index);
+	if (state.selectedPages.has(index)) return false;
+	state.pageObserver?.unobserve(shell);
+	state.visiblePages.delete(index);
+	return true;
+}
+
+function createFlowShell(page) {
+	const shell = document.createElement("div");
+	shell.className = "page-shell";
+	shell.dataset.pageIndex = String(page.index);
+	const surface = document.createElement("div");
+	surface.className = "page-surface";
+	const placeholder = document.createElement("div");
+	placeholder.className = "page-placeholder";
+	placeholder.textContent = `第 ${page.index + 1} 页`;
+	shell.append(surface, placeholder);
+	layoutPageShell(shell, page);
+	return shell;
+}
+
 function renderPageFlow() {
 	el.svgHost.replaceChildren();
+	state.pageWindow = null;
+	state.visiblePages.clear();
 	el.viewerPanel.classList.remove("single-page-fits-height");
 	if (!state.doc) {
 		return;
@@ -4105,31 +4270,10 @@ function renderPageFlow() {
 	if (state.pageObserver) {
 		state.pageObserver.disconnect();
 	}
-	const fragment = document.createDocumentFragment();
-	const targets = [];
-	for (const page of state.doc.pages || []) {
-		const shell = document.createElement("div");
-		shell.className = "page-shell";
-		shell.dataset.pageIndex = String(page.index);
-
-		const surface = document.createElement("div");
-		surface.className = "page-surface";
-
-		const placeholder = document.createElement("div");
-		placeholder.className = "page-placeholder";
-		placeholder.textContent = `第 ${page.index + 1} 页`;
-
-		shell.append(surface, placeholder);
-		fragment.append(shell);
-		targets.push(shell);
-	}
-	el.svgHost.append(fragment);
-	layoutPages();
-	for (const shell of targets) {
-		observeFlowPage(shell);
-	}
 	el.emptyState.hidden = true;
 	el.pageFrame.hidden = false;
+	state.pageWindow = createPageWindow(el.svgHost, el.viewerPanel, 600, createFlowShell, releaseFlowShell, observeFlowPage);
+	layoutPages();
 }
 
 function resetPageFlow(keepCache = false) {
@@ -4157,9 +4301,14 @@ function resetPageLoading() {
 }
 
 function observeFlowPage(shell) {
+	if (!shell) return;
 	const observer = flowPageObserver();
 	if (observer) {
 		observer.observe(shell);
+	} else {
+		const index = Number(shell.dataset.pageIndex);
+		state.visiblePages.add(index);
+		renderFlowPage(index, { priority: 4 });
 	}
 }
 
@@ -4175,6 +4324,7 @@ function flowPageObserver() {
 			}
 			for (const entry of entries) {
 				const index = Number.parseInt(entry.target.dataset.pageIndex, 10);
+				if (state.pageWindow && state.pageWindow.nodes.get(index) !== entry.target) continue;
 				if (!entry.isIntersecting) {
 					state.visiblePages.delete(index);
 					unmountPage(index);
@@ -4195,6 +4345,7 @@ function flowPageObserver() {
 
 function unmountPage(index) {
 	const shell = pageShell(index);
+	if (!shell) return;
 	const selection = document.getSelection();
 	const range = !selection.isCollapsed && selection.rangeCount ? selection.getRangeAt(0) : null;
 	if (canvasEditor.input?.item.index === index || canvasEditor.crop?.item.index === index
@@ -4219,7 +4370,7 @@ async function renderFlowPage(index, options = {}) {
 		}
 		if (page) {
 			const shell = pageShell(index);
-			if (!shell?.classList.contains("rendered") && (!state.pageObserver || state.visiblePages.has(index) || index === state.pageIndex)) {
+			if (shell && !shell.classList.contains("rendered") && (!state.pageObserver || state.visiblePages.has(index) || index === state.pageIndex)) {
 				mountPageSVG(index, page, openSeq);
 			}
 			updateThumbnail(index, openSeq);
@@ -4337,6 +4488,9 @@ async function processPageRenderQueue() {
 
 function trimPageCache() {
 	const protectedPages = new Set([state.pageIndex, ...state.visiblePages, ...state.visibleThumbnails, ...state.selectedPages]);
+	for (const view of [state.pageWindow, state.thumbnailWindow]) {
+		for (const index of view?.nodes.keys() || []) protectedPages.add(index);
+	}
 	for (const task of state.pageInFlight.values()) {
 		protectedPages.add(task.index);
 	}
@@ -4547,9 +4701,10 @@ async function navigateDestination(dest) {
 		point.x = Math.min(point.x, bottom.x);
 		point.y = Math.min(point.y, bottom.y);
 	}
+	if (state.pageWindow) syncPageWindow(state.pageWindow, state.pageWindow.offsets[index]);
 	const shell = pageShell(index).getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
 	el.viewerPanel.scrollLeft += shell.left - viewer.left + point.x * MM_TO_PX * state.scale - space;
-	el.viewerPanel.scrollTop += shell.top - viewer.top + point.y * MM_TO_PX * state.scale - pageBlockSpace();
+	scrollViewerBy(shell.top - viewer.top + point.y * MM_TO_PX * state.scale - pageBlockSpace());
 }
 
 function createTextLayer(text) {
@@ -4834,13 +4989,19 @@ function queueNearbyPages(index, openSeq = state.openSeq) {
 }
 
 function pageShell(index) {
-	return el.svgHost.children.item(index);
+	return state.pageWindow?.nodes.get(index) || null;
 }
 
 function scrollToPage(index) {
+	if (state.pageWindow) syncPageWindow(state.pageWindow, state.pageWindow.offsets[index]);
 	const shell = pageShell(index);
 	if (shell) {
-		if (state.fitMode === "height" && !state.continuous) {
+		if (state.pageWindow) {
+			const shellRect = shell.getBoundingClientRect(), viewerRect = el.viewerPanel.getBoundingClientRect();
+			const space = state.fitMode === "height" && !state.continuous
+				? (el.viewerPanel.clientHeight - shellRect.height) / 2 : pageBlockSpace();
+			scrollViewerBy(shellRect.top - viewerRect.top - space);
+		} else if (state.fitMode === "height" && !state.continuous) {
 			shell.scrollIntoView({ block: "center", inline: "nearest" });
 		} else {
 			const viewerRect = el.viewerPanel.getBoundingClientRect();
@@ -4870,6 +5031,7 @@ function schedulePageSync() {
 }
 
 function syncCurrentPageFromScroll() {
+	syncPageWindow(state.pageWindow);
 	const shell = pageShellFromView();
 	if (!shell) {
 		return;
@@ -4879,6 +5041,17 @@ function syncCurrentPageFromScroll() {
 		setCurrentPage(nextIndex);
 		queueNearbyPages(nextIndex);
 	}
+	prunePageRenderQueue();
+}
+
+function prunePageRenderQueue() {
+	state.pageRenderQueue = state.pageRenderQueue.filter(task => {
+		if (task.priority < 2 || Math.abs(task.index - state.pageIndex) <= 2
+			|| state.pageWindow?.nodes.has(task.index) || state.thumbnailWindow?.nodes.has(task.index)) return true;
+		state.pageInFlight.delete(task.key);
+		task.resolve(null);
+		return false;
+	});
 }
 
 function pageShellFromView() {
@@ -4917,6 +5090,11 @@ function setCurrentPage(index) {
 }
 
 function updatePageListCurrent(force = false) {
+	if (state.thumbnailWindow) {
+		if (!force && state.pageListCurrent === state.pageIndex) return;
+		state.pageListCurrent = state.pageIndex;
+		if (state.showPages && !el.pageList.hidden) revealThumbnail(state.pageIndex);
+	}
 	const current = el.pageList.querySelector(".page-list-item[aria-current]");
 	if (current) {
 		if (!force && Number.parseInt(current.dataset.pageIndex, 10) === state.pageIndex) {
@@ -4927,7 +5105,7 @@ function updatePageListCurrent(force = false) {
 	const next = el.pageList.querySelector(`.page-list-item[data-page-index="${state.pageIndex}"]`);
 	if (next) {
 		setPageItemCurrent(next, true);
-		if (state.showPages && !el.pageList.hidden) {
+		if (state.showPages && !el.pageList.hidden && !state.thumbnailWindow) {
 			const panel = el.navigationContent.getBoundingClientRect();
 			const item = next.getBoundingClientRect();
 			if (item.top < panel.top) {
@@ -4952,12 +5130,25 @@ function layoutPages() {
 		return;
 	}
 	canvasEditor.cancel();
-	for (const page of state.doc.pages || []) {
-		const shell = pageShell(page.index);
-		if (shell) {
-			layoutPageShell(shell, page);
-		}
+	const view = state.pageWindow;
+	if (!view) return;
+	const anchor = view.offsets.length > 1 ? pageWindowAnchor(view) : { index: state.pageIndex, offset: 0 };
+	const gap = Number.parseFloat(getComputedStyle(el.svgHost).rowGap) || 0;
+	const offsets = new Float64Array(state.doc.pages.length + 1);
+	const fittedWidth = state.scale * pageViewSize(currentPageInfo()).width;
+	let width = 1;
+	for (let index = 0; index < state.doc.pages.length; index++) {
+		const size = pageViewSize(state.doc.pages[index]);
+		const scale = state.fitMode === "width" ? fittedWidth / size.width : state.scale;
+		offsets[index + 1] = offsets[index] + Math.max(1, size.height * MM_TO_PX) * scale + gap;
+		width = Math.max(width, Math.max(1, size.width * MM_TO_PX) * scale);
 	}
+	view.offsets = offsets;
+	view.gap = gap;
+	view.total = Math.max(0, offsets.at(-1) - gap);
+	view.host.style.width = `${width}px`;
+	for (const [index, shell] of view.nodes) layoutPageShell(shell, state.doc.pages[index]);
+	syncPageWindow(view, offsets[anchor.index] + anchor.offset);
 }
 
 function layoutPageShell(shell, page) {
@@ -5057,6 +5248,7 @@ function showNavigation(selected) {
 	}
 	el.pageSelectionTools.hidden = !state.editing || !state.pageMultiSelect || selected !== el.pagesTab;
 	el.navigationContent.scrollTop = state.navigationScroll.get(selected) || 0;
+	if (selected === el.pagesTab) syncThumbnailWindow();
 }
 
 function renderOutlines(reset = true) {
@@ -5212,7 +5404,7 @@ async function selectSearchMatch(index) {
 	if (mark) {
 		const box = mark.getBoundingClientRect();
 		const viewer = el.viewerPanel.getBoundingClientRect();
-		el.viewerPanel.scrollTop += box.top + box.height / 2 - viewer.top - el.viewerPanel.clientHeight / 2;
+		scrollViewerBy(box.top + box.height / 2 - viewer.top - el.viewerPanel.clientHeight / 2);
 		if (box.left < viewer.left) {
 			el.viewerPanel.scrollLeft += box.left - viewer.left;
 		} else if (box.right > viewer.left + el.viewerPanel.clientWidth) {
@@ -5456,6 +5648,18 @@ el.pageList.addEventListener("contextmenu", event => {
 });
 
 el.pageList.addEventListener("keydown", event => {
+	const button = event.target?.closest(".page-list-item");
+	if (state.thumbnailWindow && button && !event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing) {
+		const index = Number(button.dataset.pageIndex);
+		const next = { ArrowUp: index - 1, ArrowDown: index + 1, Home: 0, End: state.doc.pageCount - 1,
+			Tab: index + (event.shiftKey ? -1 : 1) }[event.key];
+		if (next >= 0 && next < state.doc.pageCount) {
+			event.preventDefault();
+			revealThumbnail(next);
+			state.thumbnailWindow.nodes.get(next)?.focus({ preventScroll: true });
+			return;
+		}
+	}
 	if (!state.editing || event.isComposing || document.body.hasAttribute("aria-busy")) return;
 	if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "a") {
 		state.pageSelection = new Set(state.doc.pages.map(page => page.id));
@@ -5472,6 +5676,9 @@ el.pageList.addEventListener("keydown", event => {
 
 function renderPageList() {
 	el.pageList.replaceChildren();
+	state.thumbnailWindow = null;
+	state.pageListCurrent = null;
+	state.visibleThumbnails.clear();
 	if (!state.doc) {
 		return;
 	}
@@ -5480,41 +5687,98 @@ function renderPageList() {
 	}
 	const ids = new Set(state.doc.pages.map(page => page.id));
 	for (const id of state.pageSelection) if (!ids.has(id) || !state.editing) state.pageSelection.delete(id);
-	const fragment = document.createDocumentFragment();
-	const thumbnailTargets = [];
-	const openSeq = state.openSeq;
-	for (const page of state.doc.pages || []) {
-		const button = document.createElement("button");
-		button.type = "button";
-		button.className = "page-list-item";
-		button.dataset.pageIndex = String(page.index);
-		button.title = `${formatSize(page.width)} x ${formatSize(page.height)} mm`;
-		setPageItemCurrent(button, page.index === state.pageIndex);
-		layoutThumbnail(button, page);
-
-		const thumb = document.createElement("span");
-		thumb.className = "thumb-paper";
-		thumb.setAttribute("aria-hidden", "true");
-		setThumbnailContent(thumb, state.pageCache.get(page.index)?.svg, page.index, openSeq);
-
-		const label = document.createElement("span");
-		label.className = "thumb-label";
-		label.textContent = `第 ${page.index + 1} 页`;
-
-		const size = document.createElement("span");
-		size.className = "thumb-size";
-		size.textContent = `${formatSize(page.width)} x ${formatSize(page.height)} mm`;
-
-		button.append(thumb, label, size);
-		if (state.editing && pageCan("move", page.index)) enablePageDrag(button, page.index);
-		button.addEventListener("click", event => selectThumbnailPage(event, page.index));
-		fragment.append(button);
-		thumbnailTargets.push([button, page.index]);
-	}
-	el.pageList.append(fragment);
+	state.thumbnailWindow = createPageWindow(el.pageList, el.navigationContent, 180, createThumbnail, releaseThumbnail, observeThumbnail);
+	layoutThumbnails();
 	syncPageSelection();
-	for (const [button, index] of thumbnailTargets) {
-		observeThumbnail(button, index, openSeq);
+}
+
+function createThumbnail(page) {
+	const openSeq = state.openSeq;
+	const button = document.createElement("button");
+	button.type = "button";
+	button.className = "page-list-item";
+	button.dataset.pageIndex = String(page.index);
+	button.setAttribute("aria-posinset", String(page.index + 1));
+	button.setAttribute("aria-setsize", String(state.doc.pageCount));
+	if (state.editing) button.setAttribute("aria-pressed", String(state.pageSelection.has(page.id)));
+	button.title = `${formatSize(page.width)} x ${formatSize(page.height)} mm`;
+	setPageItemCurrent(button, page.index === state.pageIndex);
+	layoutThumbnail(button, page);
+
+	const thumb = document.createElement("span");
+	thumb.className = "thumb-paper";
+	thumb.setAttribute("aria-hidden", "true");
+	setThumbnailContent(thumb, state.pageCache.get(page.index)?.svg, page.index, openSeq);
+
+	const label = document.createElement("span");
+	label.className = "thumb-label";
+	label.textContent = `第 ${page.index + 1} 页`;
+
+	const size = document.createElement("span");
+	size.className = "thumb-size";
+	size.textContent = `${formatSize(page.width)} x ${formatSize(page.height)} mm`;
+
+	button.append(thumb, label, size);
+	if (state.editing && pageCan("move", page.index)) enablePageDrag(button, page.index);
+	button.addEventListener("click", event => selectThumbnailPage(event, page.index));
+	button.style.height = `${state.thumbnailWindow.offsets[page.index + 1] - state.thumbnailWindow.offsets[page.index] - 12}px`;
+	return button;
+}
+
+function releaseThumbnail(button, index) {
+	if (state.pageDragIndex === index || button.contains(document.activeElement)) return false;
+	state.thumbnailObserver?.unobserve(button);
+	state.visibleThumbnails.delete(index);
+	return true;
+}
+
+function layoutThumbnails() {
+	const view = state.thumbnailWindow;
+	if (!view) return;
+	const visible = !el.pageList.hidden && state.showPages;
+	const anchor = visible && view.offsets.length > 1 ? pageWindowAnchor(view) : view.anchor || { index: state.pageIndex, offset: 0 };
+	const width = el.navigationContent.clientWidth || view.width || 180;
+	view.width = width;
+	view.rotation = state.rotation;
+	const offsets = new Float64Array(state.doc.pages.length + 1);
+	for (let index = 0; index < state.doc.pages.length; index++) {
+		const size = pageViewSize(state.doc.pages[index]);
+		const ratio = size.width > 0 && size.height > 0 ? size.height / size.width : 1 / 0.707;
+		offsets[index + 1] = offsets[index] + Math.max(1, width - 20) * ratio + 70 + 12;
+	}
+	view.offsets = offsets;
+	view.gap = 12;
+	view.total = Math.max(0, offsets.at(-1) - 12);
+	for (const [index, button] of view.nodes) {
+		layoutThumbnail(button, state.doc.pages[index]);
+		button.style.height = `${offsets[index + 1] - offsets[index] - 12}px`;
+	}
+	view.pendingTop = offsets[anchor.index] + anchor.offset;
+	view.host.style.height = `${Math.min(SCROLL_SEGMENT_SIZE, view.total)}px`;
+	if (visible) {
+		syncPageWindow(view, view.pendingTop);
+		view.pendingTop = null;
+	}
+}
+
+function syncThumbnailWindow() {
+	const view = state.thumbnailWindow;
+	if (!view || el.pageList.hidden || !state.showPages) return;
+	if (el.navigationContent.clientWidth && (view.width !== el.navigationContent.clientWidth || view.rotation !== state.rotation)) layoutThumbnails();
+	syncPageWindow(view, view.pendingTop ?? null);
+	view.pendingTop = null;
+	prunePageRenderQueue();
+}
+
+function revealThumbnail(index) {
+	syncThumbnailWindow();
+	const view = state.thumbnailWindow;
+	if (!view) return;
+	const top = pageWindowTop(view);
+	const start = view.offsets[index], end = view.offsets[index + 1] - view.gap;
+	if (start < top || end > top + el.navigationContent.clientHeight) {
+		const target = start < top ? Math.floor(start) : Math.min(start, Math.ceil(end - el.navigationContent.clientHeight));
+		syncPageWindow(view, target);
 	}
 }
 
@@ -5555,6 +5819,7 @@ function enablePageDrag(button, index) {
 		event.stopPropagation();
 		const seq = state.openSeq, pointer = event.pointerId;
 		const indexes = selectDragPages(index);
+		state.pageDragIndex = index;
 		let x = event.clientX, y = event.clientY, position = null, marker = null, frame = 0, dragging = false;
 		const clearMarker = () => { marker?.classList.remove("drop-before", "drop-after"); marker = null; };
 		const locate = () => {
@@ -5575,7 +5840,11 @@ function enablePageDrag(button, index) {
 			if (dragging) {
 				const rect = el.navigationContent.getBoundingClientRect();
 				const delta = y < rect.top + 48 ? -10 : y > rect.bottom - 48 ? 10 : 0;
-				if (delta) el.navigationContent.scrollTop += delta;
+				if (delta) {
+					if (state.thumbnailWindow) scrollPageWindowBy(state.thumbnailWindow, delta);
+					else el.navigationContent.scrollTop += delta;
+				}
+				syncThumbnailWindow();
 				locate();
 			}
 			frame = requestAnimationFrame(tick);
@@ -5588,6 +5857,7 @@ function enablePageDrag(button, index) {
 			if (dragging) locate();
 		};
 		const finish = async commit => {
+			state.pageDragIndex = null;
 			cancelAnimationFrame(frame);
 			grip.removeEventListener("pointermove", move);
 			grip.removeEventListener("pointerup", up);
@@ -5616,7 +5886,10 @@ function enablePageDrag(button, index) {
 		const target = direction < 0 ? indexes[0] - 1 : indexes.at(-1) + 1;
 		if (target >= 0 && target < state.doc.pageCount && await canvasEditor.commitText() && await canvasEditor.commitCrop()) {
 			const focus = (direction < 0 ? target : target - indexes.length + 1) + indexes.indexOf(index);
-			if (await changeSelectedPages("move", direction)) el.pageList.querySelector(`[data-page-index="${focus}"]`)?.focus();
+			if (await changeSelectedPages("move", direction)) {
+				revealThumbnail(focus);
+				el.pageList.querySelector(`[data-page-index="${focus}"]`)?.focus({ preventScroll: true });
+			}
 		}
 	});
 }
@@ -5658,11 +5931,13 @@ function setThumbnailContent(container, svgText, index, openSeq = state.openSeq)
 }
 
 function observeThumbnail(button, index, openSeq = state.openSeq) {
+	if (!button) return;
 	const observer = thumbnailObserver();
 	if (observer) {
 		observer.observe(button);
 	}
-	if (index === state.pageIndex || !observer && index < 8) {
+	if (index === state.pageIndex || !observer) {
+		if (!observer) state.visibleThumbnails.add(index);
 		renderThumbnail(index, openSeq);
 	}
 }
@@ -5679,6 +5954,7 @@ function thumbnailObserver() {
 			}
 			for (const entry of entries) {
 				const index = Number.parseInt(entry.target.dataset.pageIndex, 10);
+				if (state.thumbnailWindow && state.thumbnailWindow.nodes.get(index) !== entry.target) continue;
 				if (!entry.isIntersecting) {
 					state.visibleThumbnails.delete(index);
 					const thumb = entry.target.querySelector(".thumb-paper");
@@ -6014,8 +6290,8 @@ function signatureReferenceStatus(signature) {
 }
 
 function formatDocumentTime(value) {
-	const text = String(value || "").trim();
-	return text.replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/, "$1-$2-$3 $4:$5:$6$7$8").replace("T", " ");
+	const text = String(value || "").trim().replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/, "$1-$2-$3 $4:$5:$6$7$8").replace("T", " ");
+	return /^0001[-/]0?1[-/]0?1(?: 0{1,2}:00:00(?:\.0+)?(?:Z|[+-]00:?00)?)?$/.test(text) ? "" : text;
 }
 
 function appendInfoLine(row, label, value, status = "") {
@@ -6079,7 +6355,13 @@ function highlightPageRegion(region) {
 	mark.style.width = `${region.width * MM_TO_PX}px`;
 	mark.style.height = `${region.height * MM_TO_PX}px`;
 	shell.querySelector(".page-surface").append(mark);
-	mark.scrollIntoView({ block: "nearest", inline: "nearest" });
+	if (state.pageWindow) {
+		const box = mark.getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
+		if (box.top < viewer.top) scrollViewerBy(box.top - viewer.top);
+		else if (box.bottom > viewer.top + el.viewerPanel.clientHeight) scrollViewerBy(Math.min(box.top - viewer.top, box.bottom - viewer.top - el.viewerPanel.clientHeight));
+		if (box.left < viewer.left) el.viewerPanel.scrollLeft += box.left - viewer.left;
+		else if (box.right > viewer.left + el.viewerPanel.clientWidth) el.viewerPanel.scrollLeft += box.right - viewer.left - el.viewerPanel.clientWidth;
+	} else mark.scrollIntoView({ block: "nearest", inline: "nearest" });
 	window.setTimeout(() => mark.remove(), 1800);
 }
 
@@ -6249,6 +6531,10 @@ function setContinuous(continuous) {
 function toggleContinuous() {
 	const anchor = state.fitMode === "free" ? scaleAnchor() : null;
 	setContinuous(!state.continuous);
+	if (state.pageWindow) {
+		updateFitSpace();
+		layoutPages();
+	}
 	clearRegionHighlights();
 	if (state.fitMode === "free") {
 		restoreScaleAnchor(anchor);
@@ -6266,9 +6552,7 @@ function rotatePages() {
 	clearRegionHighlights();
 	el.viewerPanel.classList.remove("single-page-fits-height");
 	layoutPages();
-	for (const page of state.doc.pages) {
-		layoutThumbnail(el.pageList.children.item(page.index), page);
-	}
+	layoutThumbnails();
 	if (state.fitMode === "free") {
 		updateFitSpace();
 	} else {
@@ -6305,7 +6589,8 @@ function startPan(event) {
 		return;
 	}
 	event.preventDefault();
-	state.pan = { id: event.pointerId, x: event.clientX + el.viewerPanel.scrollLeft, y: event.clientY + el.viewerPanel.scrollTop };
+	state.pan = { id: event.pointerId, x: event.clientX + el.viewerPanel.scrollLeft,
+		y: event.clientY + (state.pageWindow ? pageWindowTop(state.pageWindow) : el.viewerPanel.scrollTop) };
 	el.viewerPanel.setPointerCapture(event.pointerId);
 	el.viewerPanel.classList.add("panning");
 	canvasEditor.focus();
@@ -6317,7 +6602,8 @@ function movePan(event) {
 		return;
 	}
 	el.viewerPanel.scrollLeft = pan.x - event.clientX;
-	el.viewerPanel.scrollTop = pan.y - event.clientY;
+	if (state.pageWindow) syncPageWindow(state.pageWindow, pan.y - event.clientY);
+	else el.viewerPanel.scrollTop = pan.y - event.clientY;
 }
 
 function endPan(event) {
@@ -6349,13 +6635,17 @@ function fitWidthScale(page) {
 	const width = Math.max(1, page.width * MM_TO_PX);
 	let available = Math.max(1, el.viewerPanel.clientWidth - space * 2);
 	if (!viewerHasVerticalScrollbar()) {
-		const height = state.continuous
-			? state.doc.pages.reduce((total, item) => {
+		const limit = Math.max(1, el.viewerPanel.clientHeight - space * 2);
+		let height = Math.max(1, page.height * MM_TO_PX) * (available / width);
+		if (state.continuous) {
+			height = 0;
+			for (const item of state.doc.pages) {
 				const size = pageViewSize(item);
-				return total + available * size.height / size.width;
-			}, 0)
-			: Math.max(1, page.height * MM_TO_PX) * (available / width);
-		if (height > Math.max(1, el.viewerPanel.clientHeight - space * 2)) {
+				height += available * size.height / size.width;
+				if (height > limit) break;
+			}
+		}
+		if (height > limit) {
 			available = Math.max(1, available - scrollbarWidth());
 		}
 	}
@@ -6423,6 +6713,7 @@ function setScale(nextScale, updateStatus = true, fitMode = "free") {
 		layoutPages();
 	}
 	updateFitSpace();
+	if (state.pageWindow && state.pageWindow.gap !== (Number.parseFloat(getComputedStyle(el.svgHost).rowGap) || 0)) layoutPages();
 	if (layoutChanged) {
 		restoreScaleAnchor(anchor);
 	}
@@ -6456,6 +6747,11 @@ function restoreScaleAnchor(anchor) {
 		scrollToPage(anchor.index);
 		return;
 	}
+	if (state.pageWindow) {
+		const view = state.pageWindow;
+		const height = view.offsets[anchor.index + 1] - view.offsets[anchor.index] - view.gap;
+		syncPageWindow(view, view.offsets[anchor.index] + height * anchor.y - el.viewerPanel.clientHeight * anchor.viewY);
+	}
 	const shell = pageShell(anchor.index);
 	if (!shell) {
 		return;
@@ -6463,7 +6759,7 @@ function restoreScaleAnchor(anchor) {
 	const viewerRect = el.viewerPanel.getBoundingClientRect();
 	const shellRect = shell.getBoundingClientRect();
 	el.viewerPanel.scrollLeft += shellRect.left + shellRect.width * anchor.x - viewerRect.left - viewerRect.width / 2;
-	el.viewerPanel.scrollTop += shellRect.top + shellRect.height * anchor.y - viewerRect.top - viewerRect.height * anchor.viewY;
+	scrollViewerBy(shellRect.top + shellRect.height * anchor.y - viewerRect.top - viewerRect.height * anchor.viewY);
 }
 
 function currentPageInfo() {
@@ -6525,6 +6821,7 @@ function updateControls() {
 	el.pageInput.disabled = !hasDoc;
 	el.pageInput.max = String(pageCount || 1);
 	el.pageInput.value = String(hasDoc ? state.pageIndex + 1 : 0);
+	el.pageControl.style.setProperty("--page-width", `${String(pageCount || 1).length + 0.5}ch`);
 	el.zoomOutButton.disabled = !hasDoc || state.scale <= 0.2;
 	el.zoomInButton.disabled = !hasDoc || state.scale >= 4;
 	el.fitButton.disabled = !hasDoc;

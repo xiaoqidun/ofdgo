@@ -313,6 +313,9 @@ func (e *Editor) appendAnnotations(index int, annotations []byte) error {
 // annotationFiles 获取仍被引用的注解文件，保留原文件中的未知页引用
 // 返回: []string 文件路径
 func (e *Editor) annotationFiles() []string {
+	if len(e.source.reader.annotationFiles) == 0 {
+		return nil
+	}
 	removed := make(map[string]bool)
 	for id := range e.source.pages {
 		removed[id] = true

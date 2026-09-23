@@ -365,14 +365,14 @@ func configureDocument(args []js.Value) (any, error) {
 	return currentSession.Summary(), nil
 }
 
-// documentInfo 获取字体统计和验签结果，首个参数为true时逐页扫描
+// documentInfo 获取字体统计和验签结果，首个参数为true时分批扫描
 // 入参: args 浏览器参数
 // 返回: any 文档信息, error 错误信息
 func documentInfo(args []js.Value) (any, error) {
 	if currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	if len(args) > 0 && args[0].Bool() && !currentSession.scanFontInfo() {
+	if len(args) > 0 && args[0].Bool() && !currentSession.scanFontInfoBatch() {
 		return map[string]bool{"detailsPending": true}, nil
 	}
 	return currentSession.Info(), nil

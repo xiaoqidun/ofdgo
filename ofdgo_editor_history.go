@@ -24,7 +24,8 @@ import (
 // 入参: edit 批量修改回调
 // 返回: error 修改错误
 func (e *Editor) Transaction(edit func(*Editor) error) error {
-	before := e.transactionSnapshot()
+	before := *e
+	before.Info = cloneEditorData(e.Info)
 	next := e.transactionSnapshot()
 	next.history, next.historyIndex, next.historyLimit = nil, 0, 0
 	*e = next
@@ -32,10 +33,10 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 		*e = before
 		return err
 	}
-	next = e.transactionSnapshot()
-	*e = before
-	changed := next.revision != before.revision
-	e.restoreTransaction(next)
+	changed := e.revision != before.revision
+	e.history, e.historyIndex, e.historyLimit = before.history, before.historyIndex, before.historyLimit
+	e.backends, e.fontFS = before.backends, before.fontFS
+	e.fontRenderer, e.fontMetrics = before.fontRenderer, before.fontMetrics
 	if changed {
 		e.serial, e.revision = before.serial, before.revision
 		if change := e.recordChange(); change != nil {

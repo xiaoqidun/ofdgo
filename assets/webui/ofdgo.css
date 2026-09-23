@@ -568,7 +568,7 @@ button:not(:disabled):hover {
 
 .page-control {
 	display: inline-grid;
-	grid-template-columns: 4ch auto 4ch;
+	grid-template-columns: max(4ch, var(--page-width, 4ch)) auto max(4ch, var(--page-width, 4ch));
 	align-items: center;
 	gap: 6px;
 	height: var(--control-height);
@@ -1303,6 +1303,39 @@ button.outline-link:hover {
 	gap: 12px;
 }
 
+.virtual-pages {
+	position: relative;
+	display: block;
+	overflow-y: clip;
+	overflow-anchor: none;
+}
+
+.page-list.virtual-pages > .page-list-item,
+.svg-host.virtual-pages > .page-shell {
+	position: absolute;
+}
+
+.svg-host.virtual-pages > .page-shell {
+	left: 50%;
+	transform: translateX(-50%);
+}
+
+.page-list.virtual-pages > .page-list-item {
+	grid-template-rows: minmax(0, 1fr) 20px 18px;
+}
+
+.page-list.virtual-pages .thumb-paper {
+	aspect-ratio: auto;
+}
+
+.page-list.virtual-pages .thumb-label {
+	line-height: 20px;
+}
+
+.page-list.virtual-pages .thumb-size {
+	line-height: 18px;
+}
+
 .page-list-item {
 	display: grid;
 	gap: 6px;
@@ -1398,6 +1431,7 @@ button.outline-link:hover {
 	min-width: 0;
 	min-height: 0;
 	overflow: auto;
+	overflow-anchor: none;
 	background:
 		linear-gradient(90deg, rgba(31, 36, 40, 0.05) 1px, transparent 1px),
 		linear-gradient(0deg, rgba(31, 36, 40, 0.05) 1px, transparent 1px),
@@ -1553,6 +1587,10 @@ button.outline-link:hover {
 	gap: var(--fit-gap, var(--fit-space, var(--page-space)));
 	width: max-content;
 	margin: 0 auto;
+}
+
+.svg-host.virtual-pages {
+	display: block;
 }
 
 .page-shell {
@@ -2613,7 +2651,7 @@ button.outline-link:hover {
 	}
 
 	.page-control {
-		grid-template-columns: 3ch auto 3ch;
+		grid-template-columns: max(3ch, var(--page-width, 3ch)) auto max(3ch, var(--page-width, 3ch));
 		gap: 4px;
 		padding: 0 6px;
 	}
