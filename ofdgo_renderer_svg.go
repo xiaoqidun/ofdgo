@@ -15,19 +15,8 @@
 package ofdgo
 
 import (
-	"bufio"
-	"bytes"
-	"crypto/sha256"
 	"fmt"
-	"html"
-	"image"
-	"image/png"
 	"io"
-	"strings"
-
-	"github.com/tdewolff/canvas"
-	canvasimage "github.com/tdewolff/canvas/image"
-	"github.com/tdewolff/canvas/renderers/svg"
 )
 
 // SVGFont SVG引用的字体资源，Name为CSS字体族标识，Data为只读字体数据
@@ -51,33 +40,11 @@ type SVGResources struct {
 	Images []SVGImage
 }
 
-// svgResourceRenderer 分离外部资源的SVG渲染器
-type svgResourceRenderer struct {
-	*svg.SVG
-	renderer    *Renderer
-	writer      io.Writer
-	fonts       []SVGFont
-	images      []SVGImage
-	imageNames  map[image.Image]string
-	seen        map[string]bool
-	styles      strings.Builder
-	err         error
-	objects     map[*GraphicObject]string
-	objectStack []svgObjectGroup
-}
-
-// svgObjectGroup 记录编辑分组的稳定路径，不把底纹内部绘制当作成员
-type svgObjectGroup struct {
-	path      string
-	next      int
-	composite bool
-}
-
 // RenderToSVGWithFonts 渲染为SVG并返回页面引用的字体资源，不在SVG中嵌入字体
 // 入参: page 页面内容, writer 输出流
 // 返回: []SVGFont 字体资源，可按Name复用并按Weight、Style注册，error 错误信息
 func (r *Renderer) RenderToSVGWithFonts(page *PageContent, writer io.Writer) ([]SVGFont, error) {
-	resources, err := r.renderSVGResources(page, writer, false, false)
+	resources, err := r.renderSVG(page, writer, SVGExternalFonts)
 	return resources.Fonts, err
 }
 
@@ -85,170 +52,22 @@ func (r *Renderer) RenderToSVGWithFonts(page *PageContent, writer io.Writer) ([]
 // 入参: page 页面内容, writer 输出流
 // 返回: SVGResources 可跨页面复用的资源, error 错误信息
 func (r *Renderer) RenderToSVGWithResources(page *PageContent, writer io.Writer) (SVGResources, error) {
-	return r.renderSVGResources(page, writer, true, false)
+	return r.renderSVG(page, writer, SVGExternalResources)
 }
 
 // RenderToSVGWithObjects 渲染SVG并为页面对象和注解添加data-ofd-object分组，注解标识使用annotation:前缀
 // 入参: page 页面内容, writer 输出流
 // 返回: SVGResources 字体和图片资源, error 错误信息
 func (r *Renderer) RenderToSVGWithObjects(page *PageContent, writer io.Writer) (SVGResources, error) {
-	return r.renderSVGResources(page, writer, true, true)
+	return r.renderSVG(page, writer, SVGObjects)
 }
 
-// renderSVGResources 渲染SVG并收集外部资源
-// 入参: page 页面内容, writer 输出流, images 是否分离图片, objects 是否标识页面直接对象
-// 返回: SVGResources 外部资源, error 错误信息
-func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, images, objects bool) (SVGResources, error) {
-	box, err := r.GetPageBox(page)
-	if err != nil {
-		return SVGResources{}, err
+// renderSVG 将SVG输出及对象分组交给指定后端
+// 入参: page 页面内容, writer 输出流, mode 资源封装方式
+// 返回: SVGResources 字体和图片资源, error 输出错误
+func (r *Renderer) renderSVG(page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error) {
+	if r.backends.SVG == nil {
+		return SVGResources{}, fmt.Errorf("svg: %w", ErrBackendUnavailable)
 	}
-	options := svg.DefaultOptions
-	options.EmbedFonts = false
-	buffer := bufio.NewWriter(writer)
-	s := &svgResourceRenderer{
-		SVG:      svg.New(buffer, box.W, box.H, &options),
-		renderer: r,
-		writer:   buffer,
-		seen:     make(map[string]bool),
-	}
-	if images {
-		s.imageNames = make(map[image.Image]string)
-	}
-	if objects {
-		s.objects = make(map[*GraphicObject]string)
-		for i := range page.Content.Layer {
-			for j := range page.Content.Layer[i].Objects {
-				object := &page.Content.Layer[i].Objects[j]
-				s.objects[object] = editorObjectID(*object)
-			}
-		}
-		if err := r.renderPageToContext(canvas.NewContext(s), page, true); err != nil {
-			return SVGResources{}, err
-		}
-	} else {
-		c, err := r.renderPage(page)
-		if err != nil {
-			return SVGResources{}, err
-		}
-		c.RenderTo(s)
-	}
-	if s.err != nil {
-		return SVGResources{}, s.err
-	}
-	s.SetCustomStyle(s.styles.String())
-	if err := s.Close(); err != nil {
-		return SVGResources{}, err
-	}
-	return SVGResources{Fonts: s.fonts, Images: s.images}, buffer.Flush()
-}
-
-// beginObject 标记直接对象及复合或注解成员，模板图元不单独标记
-// 入参: object 图形对象
-// 返回: bool 是否写入分组
-func (s *svgResourceRenderer) beginObject(object *GraphicObject) bool {
-	id := s.objects[object]
-	attribute := "data-ofd-object"
-	if id == "" {
-		if len(s.objectStack) == 0 || !s.objectStack[len(s.objectStack)-1].composite {
-			return false
-		}
-		parent := &s.objectStack[len(s.objectStack)-1]
-		id = fmt.Sprintf("%s/%d", parent.path, parent.next)
-		parent.next++
-		attribute = "data-ofd-child"
-	}
-	s.objectStack = append(s.objectStack, svgObjectGroup{path: id, composite: object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit"})
-	fmt.Fprintf(s.writer, `<g %s="%s">`, attribute, html.EscapeString(id))
-	return true
-}
-
-// endObject 结束对象分组
-func (s *svgResourceRenderer) endObject() {
-	s.objectStack = s.objectStack[:len(s.objectStack)-1]
-	fmt.Fprint(s.writer, `</g>`)
-}
-
-// beginAnnotation 标记完整注解外观，内部图元保持原有层级和绘制顺序
-// 入参: id 注解标识
-// 返回: bool 是否写入分组
-func (s *svgResourceRenderer) beginAnnotation(id string) bool {
-	if s.objects == nil {
-		return false
-	}
-	s.objectStack = append(s.objectStack, svgObjectGroup{path: "annotation:" + id, composite: true})
-	fmt.Fprintf(s.writer, `<g data-ofd-object="annotation:%s">`, html.EscapeString(id))
-	return true
-}
-
-// skipObjects 为不可见资源保留内部成员序号
-// 入参: count 直接成员数量
-func (s *svgResourceRenderer) skipObjects(count int) {
-	if len(s.objectStack) > 0 {
-		s.objectStack[len(s.objectStack)-1].next += count
-	}
-}
-
-// RenderImage 绘制图片，分离资源时保持原始编码、尺寸和变换
-// 入参: img 图片对象, m 变换矩阵
-func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
-	if s.imageNames == nil {
-		s.SVG.RenderImage(img, m)
-		return
-	}
-	name, ok := s.imageNames[img]
-	if !ok {
-		resource := SVGImage{MIME: "image/png"}
-		if encoded, ok := img.(*canvasimage.Image); ok {
-			resource.MIME, resource.Data = encoded.Mimetype, encoded.Bytes
-		} else {
-			var buffer bytes.Buffer
-			if err := png.Encode(&buffer, img); err != nil {
-				s.err = err
-				return
-			}
-			resource.Data = buffer.Bytes()
-		}
-		name = fmt.Sprintf("ofdgo-image-%x", sha256.Sum256(resource.Data))
-		resource.Name = name
-		s.imageNames[img] = name
-		if !s.seen[name] {
-			s.seen[name] = true
-			s.images = append(s.images, resource)
-		}
-	}
-	_, height := s.Size()
-	size := img.Bounds().Size()
-	fmt.Fprintf(s.writer, `<image transform="%s" width="%d" height="%d" xlink:href="%s"/>`, m.Translate(0, float64(size.Y)).ToSVG(height), size.X, size.Y, name)
-}
-
-// RenderText 绘制文字并记录实际使用的字体资源
-// 入参: text 文字对象, m 变换矩阵
-func (s *svgResourceRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
-	if text.Empty() {
-		return
-	}
-	font := text.MostCommonFontFace().Font
-	resource, ok := s.renderer.svgFontCache[font]
-	if !ok {
-		data := font.SFNT.Write()
-		resource = SVGFont{
-			Name:   fmt.Sprintf("ofdgo-%x-%d", sha256.Sum256(data), font.Style()),
-			Weight: font.Style().CSS(),
-			Style:  "normal",
-			Data:   data,
-		}
-		if font.Style().Italic() {
-			resource.Style = "italic"
-		}
-		s.renderer.svgFontCache[font] = resource
-	}
-	if !s.seen[resource.Name] {
-		s.seen[resource.Name] = true
-		s.fonts = append(s.fonts, resource)
-		fmt.Fprintf(&s.styles, ".%s{font-family:%s!important}", resource.Name, resource.Name)
-	}
-	s.SetClass(resource.Name)
-	s.SVG.RenderText(text, m)
-	s.SetClass()
+	return r.backends.SVG.RenderSVG(r, page, writer, mode)
 }

@@ -400,7 +400,7 @@ func (e *Editor) annotationScope(page int, path ObjectPath) (*Reader, *Renderer,
 		reader.Close()
 		return nil, nil, nil, nil, err
 	}
-	renderer := NewRenderer(reader, WithFontFS(e.fontFS...))
+	renderer := e.newRenderer(reader)
 	root.parent, root.visible = IdentityMatrix, true
 	scope := root
 	for depth := 0; ; depth++ {

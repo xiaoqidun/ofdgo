@@ -48,6 +48,7 @@ type Editor struct {
 	fonts           map[string]*font.SFNT
 	fontFS          []fs.FS
 	fontRenderer    *Renderer
+	compiler        PageCompiler
 	images          map[string]image.Point
 	resourceID      map[editorResourceKey]string
 	maxID           int
@@ -66,6 +67,25 @@ type Editor struct {
 func (e *Editor) SetFontFS(fsys ...fs.FS) {
 	e.fontFS = slices.Clone(fsys)
 	e.fontRenderer = nil
+}
+
+// SetPageCompiler 设置编辑对象度量使用的页面编译器，不改变文档或撤销历史
+// 与Renderer使用相同实例可统一显示、搜索和选区，nil禁用度量，不隐式回退
+// 入参: compiler 页面编译器
+func (e *Editor) SetPageCompiler(compiler PageCompiler) {
+	e.compiler = compiler
+	if e.fontRenderer != nil {
+		e.fontRenderer.backends.Compiler = compiler
+	}
+}
+
+// newRenderer 使用编辑器字体来源和页面编译器创建资源度量器
+// 入参: reader 当前文档快照
+// 返回: *Renderer 度量器
+func (e *Editor) newRenderer(reader *Reader) *Renderer {
+	backends := defaultRenderBackends()
+	backends.Compiler = e.compiler
+	return NewRenderer(reader, WithFontFS(e.fontFS...), WithRenderBackends(backends))
 }
 
 // editorResource 文档内嵌资源
@@ -113,6 +133,7 @@ func NewEditor() *Editor {
 		fonts:      make(map[string]*font.SFNT),
 		images:     make(map[string]image.Point),
 		resourceID: make(map[editorResourceKey]string),
+		compiler:   CanvasBackend{},
 	}
 }
 

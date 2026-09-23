@@ -479,6 +479,18 @@ func (s *Session) Info() DocumentInfo {
 // 入参: index 页面索引
 // 返回: PageSVG 页面SVG结果, error 错误信息
 func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
+	return s.RenderPage(index, "", 0, false)
+}
+
+// RenderPage 按显示后端生成页面，光栅结果复用SVG容器和独立交互信息
+// 入参: index 页面索引, backend 后端组合，空值沿用会话配置, dpi 光栅分辨率, raster 是否光栅显示
+// 返回: PageSVG 页面结果, error 错误信息
+func (s *Session) RenderPage(index int, backend string, dpi float64, raster bool) (PageSVG, error) {
+	if backend != "" {
+		if err := s.SetRenderBackend(backend); err != nil {
+			return PageSVG{}, err
+		}
+	}
 	page, err := s.pageContent(index)
 	if err != nil {
 		return PageSVG{}, err
@@ -494,11 +506,10 @@ func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
 			s.textCache[index] = text
 		}
 	}
-	renderSVG := renderer.RenderToSVGWithResources
-	if s.editing {
-		renderSVG = renderer.RenderToSVGWithObjects
+	if raster {
+		renderer.DPI = dpi
 	}
-	resources, err := renderSVG(page, &buf)
+	resources, err := renderer.RenderPreview(page, &buf, ofdgo.PreviewOptions{Raster: raster, Objects: !raster && s.editing})
 	if err != nil {
 		return PageSVG{}, err
 	}
@@ -515,6 +526,21 @@ func (s *Session) RenderPageSVG(index int) (PageSVG, error) {
 		resources.Fonts[i].Data = nil
 	}
 	return PageSVG{Index: index, Number: index + 1, ID: page.ID, Width: box.W, Height: box.H, SVG: buf.String(), Links: links, Fonts: resources.Fonts, Images: resources.Images, Annotations: annotations}, nil
+}
+
+// SetRenderBackend 设置库提供的后端组合，不改变文档数据
+// 入参: name 后端名称
+// 返回: error 错误信息
+func (s *Session) SetRenderBackend(name string) error {
+	backends, err := ofdgo.NewRenderBackends(name)
+	if err != nil {
+		return err
+	}
+	if s.Renderer.Backends().Info().Compiler != backends.Info().Compiler {
+		clear(s.textCache)
+	}
+	ofdgo.WithRenderBackends(backends)(s.Renderer)
+	return nil
 }
 
 // SVGFontData 获取已渲染页面引用的字体数据

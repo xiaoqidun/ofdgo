@@ -200,7 +200,7 @@ func (e *Editor) transformMatrix(object GraphicObject, matrix Matrix) (GraphicOb
 		return GraphicObject{}, err
 	}
 	defer reader.Close()
-	return e.transformBorderedImage(object, matrix, origin, NewRenderer(reader, WithFontFS(e.fontFS...)))
+	return e.transformBorderedImage(object, matrix, origin, e.newRenderer(reader))
 }
 
 // objectStretchable 允许图片及纯图片资源独立调整宽高，内联组合仍保持比例

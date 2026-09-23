@@ -81,6 +81,10 @@ const state = {
 	fitMode: "width",
 	continuous: false,
 	renderAnnotations: true,
+	renderBackend: "canvas",
+	renderMode: "svg",
+	renderBackends: {},
+	renderDPI: 150,
 	pageCache: new Map(),
 	svgFonts: new Map(),
 	svgImages: new Map(),
@@ -318,6 +322,16 @@ const el = {
 	searchResults: document.querySelector("#searchResults"),
 	metaPanel: document.querySelector(".meta-panel"),
 	appPanel: document.querySelector("#appPanel"),
+	renderBackend: document.querySelector("#renderBackend"),
+	renderDPI: document.querySelector("#renderDPI"),
+	renderVectorButton: document.querySelector("#renderVectorButton"),
+	renderRasterButton: document.querySelector("#renderRasterButton"),
+	renderDisplay: document.querySelector("#renderDisplay"),
+	renderImages: document.querySelector("#renderImages"),
+	renderSVG: document.querySelector("#renderSVG"),
+	renderPDF: document.querySelector("#renderPDF"),
+	renderEPS: document.querySelector("#renderEPS"),
+	renderCompiler: document.querySelector("#renderCompiler"),
 	offlineStatus: document.querySelector("#offlineStatus"),
 	refreshAppButton: document.querySelector("#refreshAppButton"),
 	metaFile: document.querySelector("#metaFile"),
@@ -948,6 +962,10 @@ el.ofdInput.addEventListener("change", () => openOFD(el.ofdInput.files[0]));
 el.fontInput.addEventListener("change", openSelectedFonts);
 el.fontDirectoryInput.addEventListener("change", openSelectedFonts);
 el.prevButton.addEventListener("click", () => renderPage(state.pageIndex - 1));
+el.renderBackend.addEventListener("change", () => changeRenderBackend());
+el.renderDPI.addEventListener("change", () => changeRenderBackend());
+el.renderVectorButton.addEventListener("click", () => changeRenderBackend("svg"));
+el.renderRasterButton.addEventListener("click", () => changeRenderBackend("raster"));
 el.nextButton.addEventListener("click", () => renderPage(state.pageIndex + 1));
 el.zoomOutButton.addEventListener("click", () => setScale(state.scale - 0.1));
 el.zoomInButton.addEventListener("click", () => setScale(state.scale + 0.1));
@@ -1407,6 +1425,16 @@ async function toggleEditor() {
 		}
 		updateControls();
 		renderOutlines(false);
+		if (state.renderMode !== "svg") {
+			try {
+				await refreshRenderBackend(anchor);
+			} catch (err) {
+				state.editing = !state.editing;
+				updateControls();
+				showError(err, false);
+			}
+			return;
+		}
 		renderPageList();
 		applyFit(false);
 		restoreScaleAnchor(anchor);
@@ -2704,6 +2732,14 @@ async function loadWASM() {
 					if (data.phase === "commit") el.importCancel.disabled = el.cancelExportButton.disabled = true;
 				}
 			} else if (data.type === "ready") {
+				state.renderBackends = data.backends;
+				el.renderBackend.replaceChildren();
+				for (const name of Object.keys(data.backends)) {
+					const option = document.createElement("option");
+					option.value = name;
+					option.textContent = renderBackendLabel(name);
+					el.renderBackend.append(option);
+				}
 				state.ready = true;
 				resolve();
 			} else if (data.type === "exit") {
@@ -3091,6 +3127,69 @@ async function toggleAnnotations() {
 	});
 }
 
+function displayMode() {
+	return state.editing ? "svg" : state.renderMode;
+}
+
+function renderBackendLabel(name) {
+	return { svg: "SVG", canvas: "Canvas", gg: "GoGPU" }[name] || name || "无";
+}
+
+function updateRenderBackend() {
+	el.renderBackend.value = state.renderBackend;
+	el.renderDPI.value = String(state.renderDPI);
+	el.renderBackend.disabled = !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
+	el.renderDPI.disabled = el.renderBackend.disabled || displayMode() === "svg";
+	el.renderVectorButton.disabled = el.renderRasterButton.disabled = el.renderBackend.disabled || state.editing;
+	el.renderVectorButton.setAttribute("aria-pressed", String(displayMode() === "svg"));
+	el.renderRasterButton.setAttribute("aria-pressed", String(displayMode() === "raster"));
+	el.renderVectorButton.title = state.editing ? "编辑使用矢量显示" : "矢量显示";
+	el.renderRasterButton.title = state.editing ? "阅读时可用" : "位图显示";
+	const backend = state.renderBackends[state.renderBackend];
+	el.renderDisplay.textContent = displayMode() === "svg" ? "SVG" : renderBackendLabel(backend?.raster);
+	el.renderImages.textContent = renderBackendLabel(backend?.raster);
+	el.renderSVG.textContent = renderBackendLabel(backend?.svg);
+	el.renderPDF.textContent = renderBackendLabel(backend?.pdf);
+	el.renderEPS.textContent = renderBackendLabel(backend?.eps);
+	el.renderCompiler.textContent = renderBackendLabel(backend?.compiler);
+}
+
+async function refreshRenderBackend(anchor = scaleAnchor(0)) {
+	const selection = state.editing ? { index: canvasEditor.selected?.index ?? state.pageIndex, ids: canvasEditor.items().map(item => item.id) } : null;
+	await openDocument({
+		pageIndex: state.pageIndex, fitMode: state.fitMode, scale: state.scale,
+		skipAutoFonts: true, reuseSession: true, keepPreview: true, keepSearch: true,
+		previewAnchor: anchor, selection, throwError: true,
+	});
+}
+
+async function changeRenderBackend(mode = state.renderMode) {
+	if (document.body.hasAttribute("aria-busy")) return;
+	const backend = el.renderBackend.value, dpi = Number(el.renderDPI.value);
+	if (state.renderBackend === backend && state.renderDPI === dpi && state.renderMode === mode) return;
+	if (state.editing && (!await canvasEditor.commitText() || !await canvasEditor.commitCrop())) {
+		updateRenderBackend();
+		return;
+	}
+	const previous = { backend: state.renderBackend, dpi: state.renderDPI, mode: state.renderMode };
+	state.renderBackend = backend;
+	state.renderDPI = dpi;
+	state.renderMode = mode;
+	updateRenderBackend();
+	if (!state.doc) return;
+	try {
+		await refreshRenderBackend();
+	} catch (err) {
+		state.renderBackend = previous.backend;
+		state.renderDPI = previous.dpi;
+		state.renderMode = previous.mode;
+		resetPageLoading();
+		state.pageCache.clear();
+		updateRenderBackend();
+		showError(err, false);
+	}
+}
+
 async function changeFont(font, changes) {
 	if (document.body.hasAttribute("aria-busy")) {
 		return;
@@ -3215,7 +3314,7 @@ async function openDocument(options = {}) {
 		return;
 	}
 	const resetLocalFonts = !options.skipAutoFonts;
-	resetSearch();
+	if (!options.keepSearch) resetSearch();
 	if (resetLocalFonts) {
 		fontManager.localFonts = [];
 		updateFontSummary();
@@ -3334,6 +3433,7 @@ async function openDocument(options = {}) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
+		if (options.throwError) throw err;
 		showError(err, true);
 	} finally {
 		if (openSeq === state.openSeq) {
@@ -3536,8 +3636,8 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 			setBusy(true, `正在生成 ${label}`, null, status);
 		}
 		const result = saving ? await callWASM("ofdgoSaveDocument", indices, file) : whole
-			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, file)
-			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, file);
+			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, state.renderBackend, file)
+			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, state.renderBackend, file);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -3779,7 +3879,7 @@ async function processPageRenderQueue() {
 					task.resolve(state.pageCache.get(task.index));
 					continue;
 				}
-				const page = await callWASM("ofdgoRenderPage", task.index);
+				const page = await callWASM("ofdgoRenderPage", task.index, state.renderBackend, state.renderDPI, displayMode() === "raster");
 				const scope = state.composite;
 				if (scope?.index === task.index) {
 					const objects = await callWASM("ofdgoCompositeObjects", task.index, scope.key);
@@ -3900,7 +4000,7 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 	svg.classList.add("ofd-svg");
 	surface.replaceChildren(svg);
 	surface.append(createTextLayer(page.text));
-	if (state.editorInfo) {
+	if (state.editorInfo && displayMode() === "svg") {
 		mountEditorObjects(index, page, surface);
 	}
 	mountAnnotationNotes(index, surface, page.annotations);
@@ -5956,6 +6056,7 @@ function updateFitSpace() {
 
 function updateControls() {
 	const hasDoc = Boolean(state.doc);
+	updateRenderBackend();
 	updateEditorTools();
 	const pageCount = state.doc ? state.doc.pageCount : 0;
 	el.prevButton.disabled = !hasDoc || state.pageIndex <= 0;
@@ -6147,6 +6248,7 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("aria-busy", busy);
+	updateRenderBackend();
 	el.editButton.disabled = busy || !state.doc || !state.ready || state.exporting;
 	el.createForm.inert = busy;
 	el.insertForm.inert = busy;

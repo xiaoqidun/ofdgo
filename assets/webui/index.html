@@ -431,6 +431,26 @@
 						</div>
 					</div>
 				</section>
+				<section id="renderPanel" class="render-panel" aria-label="渲染">
+					<div class="panel-row">
+						<label class="panel-title compact" for="renderBackend">渲染</label>
+						<select id="renderBackend" title="渲染后端" disabled></select>
+					</div>
+					<div class="render-mode-row">
+						<span id="renderModeLabel">显示</span>
+						<div class="render-controls">
+							<div class="render-modes" role="group" aria-labelledby="renderModeLabel">
+								<button id="renderVectorButton" class="small-button" type="button" aria-pressed="true" title="矢量显示" disabled>矢量</button>
+								<button id="renderRasterButton" class="small-button" type="button" aria-pressed="false" title="位图显示" disabled>位图</button>
+							</div>
+							<select id="renderDPI" aria-label="精度" title="位图精度" disabled><option value="96">96 dpi</option><option value="150" selected>150 dpi</option><option value="300">300 dpi</option></select>
+						</div>
+					</div>
+					<details class="render-support">
+						<summary>详情</summary>
+						<dl><div><dt>显示</dt><dd id="renderDisplay">SVG</dd></div><div><dt>编辑</dt><dd>SVG</dd></div><div><dt>编译</dt><dd id="renderCompiler"></dd></div><div><dt>图片</dt><dd id="renderImages"></dd></div><div><dt>SVG</dt><dd id="renderSVG"></dd></div><div><dt>PDF</dt><dd id="renderPDF"></dd></div><div><dt>EPS</dt><dd id="renderEPS"></dd></div></dl>
+					</details>
+				</section>
 				<div class="panel-row">
 					<div class="panel-title compact">文档</div>
 					<button id="infoButton" class="small-button" type="button" aria-label="修改文档信息" aria-haspopup="dialog" aria-controls="infoPanel" hidden>修改</button>

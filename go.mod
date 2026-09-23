@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/go-text/typesetting v0.3.5
+	github.com/gogpu/gg v0.52.5
 	github.com/tdewolff/canvas v0.0.0-20260913163248-dd4999d1c76a
 	github.com/tdewolff/font v0.0.0-20260913163313-54f98bb59ee6
 	github.com/xiaoqidun/jbig2 v1.1.1
@@ -22,6 +23,8 @@ require (
 	github.com/benoitkugler/textlayout v0.3.2 // indirect
 	github.com/benoitkugler/textprocessing v0.0.6 // indirect
 	github.com/go-fonts/latin-modern v0.3.3 // indirect
+	github.com/gogpu/gpucontext v0.28.0 // indirect
+	github.com/gogpu/gputypes v0.5.2 // indirect
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/srwiley/scanx v0.0.0-20190309010443-e94503791388 // indirect

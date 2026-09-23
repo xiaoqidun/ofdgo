@@ -157,7 +157,7 @@ func (e *Editor) CompositeObjects(page int, path ObjectPath) ([]CompositeMember,
 		return nil, err
 	}
 	defer reader.Close()
-	return e.measureCompositeMembers(renderer, members), nil
+	return e.measureCompositeMembers(renderer, members)
 }
 
 // CompositeObject 读取指定内部成员，仅度量该成员并保留完整容器位置
@@ -200,7 +200,10 @@ func (e *Editor) CompositeObjectsAt(page int, path ObjectPath, indexes []int) ([
 		position.Count++
 		containers[node.span.parent] = position
 	}
-	members := e.measureCompositeMembers(renderer, selected)
+	members, err := e.measureCompositeMembers(renderer, selected)
+	if err != nil {
+		return nil, err
+	}
 	for i, index := range indexes {
 		members[i].Position = positions[index]
 		members[i].Position.Count = containers[nodes[index].span.parent].Count
@@ -328,7 +331,7 @@ func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, 
 		reader.Close()
 		return nil, nil, nil, nil, err
 	}
-	renderer := NewRenderer(reader, WithFontFS(e.fontFS...))
+	renderer := e.newRenderer(reader)
 	root.parent, root.visible, root.defaults = IdentityMatrix, true, renderer.drawParamDefaults(layer.DrawParam, nil)
 	root.drawParams = []string{layer.DrawParam}
 	scope := root
@@ -501,8 +504,8 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 
 // measureCompositeMembers 按父变换、裁剪和继承样式度量成员，透明对象保留选区，未着色路径按轮廓度量
 // 入参: renderer 渲染器, nodes 成员
-// 返回: []CompositeMember 独立快照及操作能力
-func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorCompositeNode) []CompositeMember {
+// 返回: []CompositeMember 独立快照及操作能力, error 度量错误
+func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorCompositeNode) ([]CompositeMember, error) {
 	result := make([]CompositeMember, len(nodes))
 	positions := make(map[*editorXML]ObjectPosition)
 	orderable := make(map[*editorXML]bool)
@@ -517,7 +520,7 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		positions[parent] = position
 	}
 	for i, node := range nodes {
-		bounds := &boundsRenderer{collect: true}
+		var bounds ObjectMeasurement
 		object := node.object
 		object.TextObject.Alpha, object.PathObject.Alpha = nil, nil
 		object.ImageObject.Alpha, object.CompositeGraphicUnit.Alpha = nil, nil
@@ -525,10 +528,14 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 			object.PathObject.Stroke = nil
 		}
 		if node.visible {
-			renderer.renderObject(canvas.NewContext(bounds), &object, 0, node.defaults, &node.parent, node.boundaryInCTM, node.clip)
+			var err error
+			bounds, err = renderer.MeasureObject(object, MeasureOptions{Defaults: node.defaults, Parent: &node.parent, BoundaryInCTM: node.boundaryInCTM, Clip: geometryCanvasPath(node.clip), Contours: true})
+			if err != nil {
+				return nil, err
+			}
 		}
 		transform := node.transformable()
-		capability := ObjectCapabilities{Transform: transform, Arrange: transform && bounds.box.W > 0 && bounds.box.H > 0,
+		capability := ObjectCapabilities{Transform: transform, Arrange: transform && bounds.Bounds.W > 0 && bounds.Bounds.H > 0,
 			Delete: true, Copy: transform && editorXMLCopyable(node.node), Order: orderable[node.span.parent], ReplaceImage: node.object.Type == "ImageObject"}
 		capability.Ungroup = transform && capability.Order && e.compositeUngroupable(node.node) && (node.object.CompositeGraphicUnit.ResourceID != "" || len(node.object.CompositeGraphicUnit.Objects) != 0)
 		capability.Stretch = transform && e.objectStretchable(node.object, make(map[string]bool))
@@ -557,7 +564,7 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 				}
 			}
 		}
-		if transform && node.object.Type == "ImageObject" && bounds.box.W > 0 && bounds.box.H > 0 {
+		if transform && node.object.Type == "ImageObject" && bounds.Bounds.W > 0 && bounds.Bounds.H > 0 {
 			clips := node.object.ImageObject.Clips
 			_, capability.CropImage = node.matrix(clips == nil || clips.TransFlag == nil || *clips.TransFlag).Invert()
 			capability.FitImage = capability.CropImage && axisAlignedMatrix(NewMatrix(node.object.ImageObject.CTM))
@@ -566,11 +573,11 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		_, ctm := editorGeometry(node.object)
 		matrix := node.parent.Multiply(NewMatrix(ctm))
 		position := positions[node.span.parent]
-		result[i] = CompositeMember{Object: style, Bounds: bounds.box, Contours: bounds.contours, Matrix: node.matrix(true), StrokeScale: math.Sqrt(math.Abs(matrix.a*matrix.d - matrix.b*matrix.c)), Capabilities: capability, Position: position, Transform: transform, Cropped: node.states[editorObjectID(node.object)].crop != nil}
+		result[i] = CompositeMember{Object: style, Bounds: bounds.Bounds, Contours: bounds.Contours, Matrix: node.matrix(true), StrokeScale: math.Sqrt(math.Abs(matrix.a*matrix.d - matrix.b*matrix.c)), Capabilities: capability, Position: position, Transform: transform, Cropped: node.states[editorObjectID(node.object)].crop != nil}
 		position.Index++
 		positions[node.span.parent] = position
 	}
-	return result
+	return result, nil
 }
 
 // transformable 校验内部对象能否保留原文进行几何操作，不执行绘制测量
@@ -741,7 +748,11 @@ func (e *Editor) editCompositeObjects(page int, path ObjectPath, indexes []int, 
 		if len(selected) == 0 {
 			return nil
 		}
-		return edit(renderer, selectedNodes, e.measureCompositeMembers(renderer, selectedNodes))
+		members, err := e.measureCompositeMembers(renderer, selectedNodes)
+		if err != nil {
+			return err
+		}
+		return edit(renderer, selectedNodes, members)
 	})
 }
 

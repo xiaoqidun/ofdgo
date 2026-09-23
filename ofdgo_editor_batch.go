@@ -20,8 +20,6 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
-
-	"github.com/tdewolff/canvas"
 )
 
 // editorObjectPosition 对象所属图层及层内索引
@@ -395,7 +393,7 @@ func editorDistribution(boxes []Box, indexes []editorObjectPosition, axis string
 	gap := (positions[last] + sizes[last] - positions[first] - total) / float64(len(order)-1)
 	for i, index := range order[:len(order)-1] {
 		step := sizes[index] + gap
-		if canvas.Equal(step, 0) {
+		if geometryEqual(step, 0) {
 			step = 0
 		}
 		if step < 0 || step == 0 && compareEditorPosition(indexes[index], indexes[order[i+1]]) > 0 {
@@ -406,7 +404,7 @@ func editorDistribution(boxes []Box, indexes []editorObjectPosition, axis string
 	for _, index := range order[1 : len(order)-1] {
 		position := next
 		next += sizes[index] + gap
-		if canvas.Equal(position, positions[index]) {
+		if geometryEqual(position, positions[index]) {
 			continue
 		}
 		dx, dy := position-positions[index], 0.0
@@ -633,10 +631,10 @@ func editorAlignment(box, target Box, alignment string) Matrix {
 	case "bottom":
 		matrix.f = target.Y + target.H - box.H - box.Y
 	}
-	if canvas.Equal(matrix.e, 0) {
+	if geometryEqual(matrix.e, 0) {
 		matrix.e = 0
 	}
-	if canvas.Equal(matrix.f, 0) {
+	if geometryEqual(matrix.f, 0) {
 		matrix.f = 0
 	}
 	return matrix
@@ -737,7 +735,7 @@ func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) 
 	if _, err := reader.PageContentByIndex(page); err != nil {
 		return nil, err
 	}
-	renderer := NewRenderer(reader, WithFontFS(e.fontFS...))
+	renderer := e.newRenderer(reader)
 	boxes := make([]Box, len(objects))
 	for i, object := range objects {
 		layer, _, findErr := e.findObject(page, editorObjectID(object))

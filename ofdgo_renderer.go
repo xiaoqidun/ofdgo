@@ -52,6 +52,7 @@ type Renderer struct {
 	decodeImages          bool
 	pageText              *PageText
 	textOnly              bool
+	backends              RenderBackends
 }
 
 // RendererOption 渲染器配置选项
@@ -62,6 +63,13 @@ type RendererOption func(*Renderer)
 func (r *Renderer) SetFontFS(fsys ...fs.FS) {
 	r.fontFS = append([]fs.FS(nil), fsys...)
 	r.resetFontCache()
+}
+
+// FontSources 返回外部字体配置副本，供自定义编译器和导出后端读取
+// 内嵌字体通过Reader.FontData读取，系统字体由各实现自行匹配
+// 返回: []string 字体目录, []fs.FS 字体文件系统
+func (r *Renderer) FontSources() ([]string, []fs.FS) {
+	return append([]string(nil), r.fontDirs...), append([]fs.FS(nil), r.fontFS...)
 }
 
 // resetFontCache 重置字体匹配、加载和字形缓存
@@ -78,13 +86,11 @@ func (r *Renderer) resetFontCache() {
 	r.textGlyphPathCache = make(map[textGlyphPathCacheKey]textGlyphPathCacheValue)
 }
 
-// RenderPage 渲染特定页面内容
+// RenderPage 编译页面为与绘图库无关的只读绘制数据
 // 入参: page 页面内容
-// 返回: *canvas.Canvas 画布实例, error 错误信息
-func (r *Renderer) RenderPage(page *PageContent) (*canvas.Canvas, error) {
-	renderer := *r
-	renderer.decodeImages = true
-	return renderer.renderPage(page)
+// 返回: *RasterPage 绘制页面, error 错误信息
+func (r *Renderer) RenderPage(page *PageContent) (*RasterPage, error) {
+	return r.CompilePage(page)
 }
 
 // renderPage 渲染特定页面内容
@@ -125,10 +131,10 @@ func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
 	return ParseBox(boxStr)
 }
 
-// RenderPageToContext 渲染页面到指定上下文
+// renderCanvasContext 渲染页面到默认解释器上下文
 // 入参: ctx 画布上下文, page 页面内容
 // 返回: error 错误信息
-func (r *Renderer) RenderPageToContext(ctx *canvas.Context, page *PageContent) error {
+func (r *Renderer) renderCanvasContext(ctx *canvas.Context, page *PageContent) error {
 	renderer := *r
 	renderer.decodeImages = true
 	return renderer.renderPageToContext(ctx, page, true)
@@ -240,8 +246,8 @@ func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
 
 // RenderPageByIndex 按索引渲染页面
 // 入参: index 页面索引，从0开始
-// 返回: *canvas.Canvas 画布实例, error 错误信息
-func (r *Renderer) RenderPageByIndex(index int) (*canvas.Canvas, error) {
+// 返回: *RasterPage 绘制页面, error 错误信息
+func (r *Renderer) RenderPageByIndex(index int) (*RasterPage, error) {
 	page, err := r.Reader.PageContentByIndex(index)
 	if err != nil {
 		return nil, err

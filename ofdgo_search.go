@@ -21,8 +21,6 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
-
-	"github.com/tdewolff/canvas"
 )
 
 // textPageTokens 保留文字及其复合图元和裁剪，跳过独立路径与图片
@@ -92,22 +90,14 @@ type TextMatch struct {
 	Boxes  []Box  `json:"boxes"`
 }
 
-// PageText 提取页面及启用注释的原文，复用当前字体配置和渲染位置计算
+// PageText 提取页面及启用注释的原文，复用当前编译器的字体和几何语义
 // 入参: page 页面内容
 // 返回: *PageText 页面文字, error 错误信息
 func (r *Renderer) PageText(page *PageContent) (*PageText, error) {
-	box, err := r.GetPageBox(page)
-	if err != nil {
-		return nil, err
+	if r.backends.Compiler == nil {
+		return nil, fmt.Errorf("%w: page text", ErrBackendUnavailable)
 	}
-	renderer := *r
-	renderer.OnPageText = nil
-	renderer.pageText = &PageText{}
-	renderer.textOnly = true
-	if err := renderer.renderPageToContext(canvas.NewContext(canvas.New(box.W, box.H)), page, false); err != nil {
-		return nil, err
-	}
-	return renderer.pageText, nil
+	return r.backends.Compiler.PageText(r, page)
 }
 
 // PageTextByIndex 按页面索引提取文字，避免解析独立路径和图片图元
@@ -230,17 +220,6 @@ func textGlyphSpans(runes []rune, transforms map[int]textGlyphTransform, offset 
 	return spans
 }
 
-// textPathBox 将字形轮廓转换为页面区域
-// 入参: path 字形轮廓, pageH 页面高度
-// 返回: Box 字符区域
-func textPathBox(path *canvas.Path, pageH float64) Box {
-	if path.Empty() {
-		return Box{}
-	}
-	bounds := path.Bounds()
-	return Box{X: bounds.X0, Y: pageH - bounds.Y1, W: bounds.X1 - bounds.X0, H: bounds.Y1 - bounds.Y0}
-}
-
 // unionTextBox 合并同一字符的字形区域
 // 入参: a 已有区域, b 新区域
 // 返回: Box 合并区域
@@ -253,37 +232,4 @@ func unionTextBox(a, b Box) Box {
 	}
 	x, y := math.Min(a.X, b.X), math.Min(a.Y, b.Y)
 	return Box{X: x, Y: y, W: math.Max(a.X+a.W, b.X+b.W) - x, H: math.Max(a.Y+a.H, b.Y+b.H) - y}
-}
-
-// addSpan 收集字形选择区域，同一原文区间的多个字形合并为一项
-// 入参: start 起始字符, end 结束字符, bounds 字形布局区域, m 字形变换, clip 裁剪路径, pageH 页面高度
-func (run *TextRun) addSpan(start, end int, bounds canvas.Rect, m canvas.Matrix, clip *canvas.Path, pageH float64) {
-	if m.Det() == 0 {
-		return
-	}
-	if clip != nil {
-		path := canvas.Rectangle(bounds.W(), bounds.H()).Translate(bounds.X0, bounds.Y0).Transform(m)
-		path = applyClipPath(path, clip)
-		if path.Empty() {
-			return
-		}
-		bounds = path.Transform(m.Inv()).Bounds()
-	}
-	if bounds.W() < 0 || bounds.H() <= 0 {
-		return
-	}
-	m = canvas.Matrix{{1, 0, 0}, {0, -1, pageH}}.Mul(m).Translate(bounds.X0, bounds.Y1).Scale(bounds.W(), -bounds.H())
-	span := TextSpan{Start: start, End: end}
-	if n := len(run.Spans); n > 0 && run.Spans[n-1].Start == start && run.Spans[n-1].End == end {
-		span = run.Spans[n-1]
-		v := span.Matrix
-		previous := canvas.Matrix{{v[0], v[2], v[4]}, {v[1], v[3], v[5]}}
-		if previous.Det() != 0 {
-			bounds = canvas.Rect{X1: 1, Y1: 1}.Add(canvas.Rect{X1: 1, Y1: 1}.Transform(previous.Inv().Mul(m)))
-			m = previous.Translate(bounds.X0, bounds.Y0).Scale(bounds.W(), bounds.H())
-		}
-		run.Spans = run.Spans[:n-1]
-	}
-	span.Matrix = [6]float64{m[0][0], m[1][0], m[0][1], m[1][1], m[0][2], m[1][2]}
-	run.Spans = append(run.Spans, span)
 }

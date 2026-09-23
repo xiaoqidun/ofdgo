@@ -638,7 +638,7 @@ func (e *Editor) editorFont(id string) (*font.SFNT, error) {
 		definition := e.source.reader.fontCache[id]
 		if definition != nil && definition.FontFile == "" {
 			if e.fontRenderer == nil {
-				e.fontRenderer = NewRenderer(e.source.reader, WithFontFS(e.fontFS...))
+				e.fontRenderer = e.newRenderer(e.source.reader)
 			}
 			style := canvasFontStyle(definition)
 			for _, source := range e.fontRenderer.fontSources(id, definition, style) {

@@ -55,9 +55,9 @@ const (
 )
 
 // NewShape 创建使用标准紧缩路径的图形，默认黑色描边、不填充
-// 可调整返回对象的颜色、线宽等属性后通过 Editor.AddObject 写入
+// 可调整返回对象的颜色、线宽等属性后通过Editor.AddObject写入
 // 水平、垂直直线使用正尺寸边界，路径端点不变
-// 入参: kind 图形类型, box 图形范围；直线从 (X,Y) 到 (X+W,Y+H)，W、H 可为负或零
+// 入参: kind 图形类型, box 图形范围；直线从(X,Y)到(X+W,Y+H)，W、H可为负或零
 // 返回: PathObject 路径对象, error 错误信息
 func NewShape(kind ShapeKind, box Box) (PathObject, error) {
 	if !finite(box.X) || !finite(box.Y) || !finite(box.W) || !finite(box.H) || !finite(box.X+box.W) || !finite(box.Y+box.H) {

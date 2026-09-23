@@ -82,7 +82,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 		return err
 	}
 	defer reader.Close()
-	renderer := NewRenderer(reader, WithFontFS(e.fontFS...))
+	renderer := e.newRenderer(reader)
 	var objects []GraphicObject
 	for _, source := range selection.nodes {
 		copy, err := newEditorCompositeNode(source.data)

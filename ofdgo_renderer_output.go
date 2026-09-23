@@ -16,8 +16,6 @@ package ofdgo
 
 import (
 	"archive/zip"
-	"bufio"
-	"bytes"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -26,13 +24,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/tdewolff/canvas"
-	"github.com/tdewolff/canvas/renderers/pdf"
-	"github.com/tdewolff/canvas/renderers/ps"
-	"github.com/tdewolff/canvas/renderers/rasterizer"
-	"github.com/tdewolff/canvas/renderers/svg"
 	"golang.org/x/image/draw"
-	"golang.org/x/image/math/f64"
 )
 
 // RenderTo 按格式渲染单页，JPEG使用95画质
@@ -178,56 +170,18 @@ func (r *Renderer) exportProgress(completed, total int) error {
 	return nil
 }
 
-// rasterRenderer 保留页面物理尺寸的光栅渲染器
-type rasterRenderer struct {
-	*rasterizer.Rasterizer
-	width, height float64
-	dpmm          float64
-	linear        bool
-}
-
-// Size 返回页面物理尺寸
-// 返回: float64 宽度, float64 高度
-func (r *rasterRenderer) Size() (float64, float64) {
-	return r.width, r.height
-}
-
-// RenderImage 使用底层图片完成平移和缩放
-// 入参: img 图片对象, m 图片变换矩阵
-func (r *rasterRenderer) RenderImage(img image.Image, m canvas.Matrix) {
-	if !r.linear || m[0][1] != 0 || m[1][0] != 0 {
-		r.Rasterizer.RenderImage(img, m)
-		return
-	}
-	origin := m.Dot(canvas.Point{Y: float64(img.Bounds().Dy())}).Mul(r.dpmm)
-	m = m.Scale(r.dpmm, r.dpmm)
-	transform := f64.Aff3{m[0][0], -m[0][1], origin.X, -m[1][0], m[1][1], float64(r.Bounds().Dy()) - origin.Y}
-	draw.CatmullRom.Transform(r.Image, transform, img, img.Bounds(), draw.Over, nil)
-}
-
 // RenderToImage 渲染为光栅图
 // 入参: page 页面内容
 // 返回: image.Image 图像对象, error 错误信息
 func (r *Renderer) RenderToImage(page *PageContent) (image.Image, error) {
-	box, err := r.GetPageBox(page)
+	if r.backends.Raster == nil {
+		return nil, fmt.Errorf("raster: %w", ErrBackendUnavailable)
+	}
+	scene, err := r.CompilePage(page)
 	if err != nil {
 		return nil, err
 	}
-	dpmm := r.DPI / 25.4
-	colorSpace := canvas.DefaultColorSpace
-	_, linear := colorSpace.(canvas.LinearColorSpace)
-	raster := &rasterRenderer{
-		Rasterizer: rasterizer.New(box.W, box.H, canvas.DPMM(dpmm), colorSpace),
-		width:      box.W,
-		height:     box.H,
-		dpmm:       dpmm,
-		linear:     linear,
-	}
-	if err := r.RenderPageToContext(canvas.NewContext(raster), page); err != nil {
-		return nil, err
-	}
-	raster.Close()
-	return raster.Image, nil
+	return r.backends.Raster.Render(scene)
 }
 
 // RenderToPNG 渲染为PNG，像素尺寸由DPI决定
@@ -281,31 +235,8 @@ func fillWhiteBackground(img image.Image) image.Image {
 // 入参: page 页面内容, writer 输出流
 // 返回: error 错误信息
 func (r *Renderer) RenderToSVG(page *PageContent, writer io.Writer) error {
-	c, err := r.renderPage(page)
-	if err != nil {
-		return err
-	}
-	buffer := bufio.NewWriter(writer)
-	renderer := svg.New(buffer, c.W, c.H, nil)
-	c.RenderTo(renderer)
-	if err := renderer.Close(); err != nil {
-		return err
-	}
-	return buffer.Flush()
-}
-
-// replacePDFProducer 替换PDF的Producer属性
-// 入参: data PDF字节数据
-// 返回: []byte 替换后的PDF字节数据
-func replacePDFProducer(data []byte) []byte {
-	old := []byte("/Producer(tdewolff/canvas)")
-	idx := bytes.LastIndex(data, old)
-	if idx < 0 {
-		return data
-	}
-	dst := []byte("/Producer(xiaoqidun/ofdgo)")
-	copy(data[idx:idx+len(old)], dst)
-	return data
+	_, err := r.renderSVG(page, writer, SVGEmbedded)
+	return err
 }
 
 // RenderToPDF 渲染为PDF
@@ -316,7 +247,7 @@ func (r *Renderer) RenderToPDF(page *PageContent, writer io.Writer) error {
 	if err != nil {
 		return err
 	}
-	pages := []pdfPage{{Content: page, Box: box}}
+	pages := []RenderDocumentPage{{Content: page, Box: box}}
 	return r.renderPDFPages(pages, writer, nil)
 }
 
@@ -324,19 +255,10 @@ func (r *Renderer) RenderToPDF(page *PageContent, writer io.Writer) error {
 // 入参: page 页面内容, writer 输出流
 // 返回: error 错误信息
 func (r *Renderer) RenderToEPS(page *PageContent, writer io.Writer) error {
-	c, err := r.renderPage(page)
-	if err != nil {
-		return err
+	if r.backends.EPS == nil {
+		return fmt.Errorf("eps: %w", ErrBackendUnavailable)
 	}
-	options := ps.DefaultOptions
-	options.Format = ps.EncapsulatedPostScript
-	buffer := bufio.NewWriter(writer)
-	renderer := ps.New(buffer, c.W, c.H, &options)
-	c.RenderTo(renderer)
-	if err := renderer.Close(); err != nil {
-		return err
-	}
-	return buffer.Flush()
+	return r.backends.EPS.RenderEPS(r, page, writer)
 }
 
 // RenderToMultiPagePDF 将文档页面导出为多页PDF
@@ -354,7 +276,7 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer, indices ...int) error 
 	if err := r.exportProgress(0, len(indices)); err != nil {
 		return err
 	}
-	pages := make([]pdfPage, len(indices))
+	pages := make([]RenderDocumentPage, len(indices))
 	for i, index := range indices {
 		page, err := r.Reader.PageContent(doc.Pages.Page[index])
 		if err != nil {
@@ -364,7 +286,7 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer, indices ...int) error 
 		if err != nil {
 			return fmt.Errorf("failed to read page %d area: %w", index+1, err)
 		}
-		pages[i] = pdfPage{Content: page, Box: box}
+		pages[i] = RenderDocumentPage{Content: page, Box: box}
 	}
 	return r.renderPDFPages(pages, writer, r.OnExportProgress)
 }
@@ -379,59 +301,23 @@ func (r *Renderer) RenderPagesToPDF(contents []*PageContent, writer io.Writer) e
 	if err := r.exportProgress(0, len(contents)); err != nil {
 		return err
 	}
-	pages := make([]pdfPage, len(contents))
+	pages := make([]RenderDocumentPage, len(contents))
 	for i, page := range contents {
 		box, err := r.GetPageBox(page)
 		if err != nil {
 			return fmt.Errorf("failed to read page %d area: %w", i+1, err)
 		}
-		pages[i] = pdfPage{Content: page, Box: box}
+		pages[i] = RenderDocumentPage{Content: page, Box: box}
 	}
 	return r.renderPDFPages(pages, writer, r.OnExportProgress)
 }
 
-// renderPDFPages 渲染页面并复用调用方的字节缓冲
+// renderPDFPages 将已解析页面交给指定PDF后端
 // 入参: pages 页面列表, writer 输出流, progress 页面处理进度
 // 返回: error 错误信息
-func (r *Renderer) renderPDFPages(pages []pdfPage, writer io.Writer, progress func(int, int) error) error {
-	navigation := newPDFNavigation(r, r.Reader.doc, pages)
-	buf, direct := writer.(*bytes.Buffer)
-	if !direct {
-		buf = &bytes.Buffer{}
+func (r *Renderer) renderPDFPages(pages []RenderDocumentPage, writer io.Writer, progress func(int, int) error) error {
+	if r.backends.PDF == nil {
+		return fmt.Errorf("pdf: %w", ErrBackendUnavailable)
 	}
-	start := buf.Len()
-	p := pdf.New(buf, pages[0].Box.W, pages[0].Box.H, nil)
-	renderer := &pdfRenderer{PDF: p, glyphPaths: make(map[*canvas.Path]*canvas.Path)}
-	var info DocInfo
-	if docInfo, err := r.Reader.DocInfo(); err == nil {
-		info = *docInfo
-	}
-	p.SetInfo(info.Title, info.Subject, "", info.Author, "xiaoqidun/ofdgo")
-	for i, page := range pages {
-		if i > 0 {
-			p.NewPage(page.Box.W, page.Box.H)
-		}
-		navigation.apply(p, i)
-		if err := r.renderPageToContext(canvas.NewContext(renderer), page.Content, true); err != nil {
-			buf.Truncate(start)
-			return fmt.Errorf("failed to render page %d: %w", i+1, err)
-		}
-		pages[i].Content = nil
-		if progress != nil {
-			if err := progress(i+1, len(pages)); err != nil {
-				buf.Truncate(start)
-				return err
-			}
-		}
-	}
-	if err := p.Close(); err != nil {
-		buf.Truncate(start)
-		return err
-	}
-	data := replacePDFProducer(buf.Bytes()[start:])
-	if direct {
-		return nil
-	}
-	_, err := writer.Write(data)
-	return err
+	return r.backends.PDF.RenderPDF(r, pages, writer, progress)
 }

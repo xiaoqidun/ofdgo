@@ -32,6 +32,13 @@ type Point struct {
 	X, Y float64
 }
 
+// geometryEqual 比较毫米坐标，使用固定绝对误差，不受绘图库全局精度影响
+// 入参: a、b 待比较的坐标
+// 返回: bool 是否在容差内相等
+func geometryEqual(a, b float64) bool {
+	return math.Abs(a-b) <= 1e-10
+}
+
 // ParseBox 解析Box字符串
 // 入参: s 字符串
 // 返回: Box 矩形对象, error 错误信息
@@ -62,6 +69,19 @@ type Matrix struct {
 
 // IdentityMatrix 单位矩阵
 var IdentityMatrix = Matrix{1, 0, 0, 1, 0, 0}
+
+// MatrixFromValues 从a、b、c、d、e、f构造矩阵，不经过文本格式化
+// 入参: values 矩阵分量
+// 返回: Matrix 变换矩阵
+func MatrixFromValues(values [6]float64) Matrix {
+	return Matrix{a: values[0], b: values[1], c: values[2], d: values[3], e: values[4], f: values[5]}
+}
+
+// Values 返回a、b、c、d、e、f的独立副本，保留原始浮点精度
+// 返回: [6]float64 矩阵分量
+func (m Matrix) Values() [6]float64 {
+	return [6]float64{m.a, m.b, m.c, m.d, m.e, m.f}
+}
 
 // NewMatrix 解析CTM字符串
 // 入参: s 字符串

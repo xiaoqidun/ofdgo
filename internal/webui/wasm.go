@@ -102,6 +102,7 @@ func RunWASM() {
 	registerCallback("ofdgoConfigure", configureDocument)
 	registerCallback("ofdgoDocumentInfo", documentInfo)
 	registerCallback("ofdgoRenderPage", renderPage)
+	registerCallback("ofdgoRenderBackends", renderBackends)
 	registerCallback("ofdgoSVGFontData", svgFontData)
 	registerCallback("ofdgoSearchPage", searchPage)
 	registerCallback("ofdgoPageTextString", pageTextString)
@@ -179,6 +180,13 @@ func registerCallback(name string, fn func([]js.Value) (any, error)) {
 		return callbackResult(fn, args)
 	})
 	js.Global().Set(name, cb)
+}
+
+// renderBackends 返回库提供的内置后端能力
+// 入参: args 浏览器参数
+// 返回: any 后端能力, error 错误信息
+func renderBackends(args []js.Value) (any, error) {
+	return ofdgo.RenderBackendInfos(), nil
 }
 
 // registerAsyncCallback 注册异步回调，为浏览器处理数据和取消请求让出事件循环
@@ -345,7 +353,7 @@ func svgFontData(args []js.Value) (any, error) {
 }
 
 // renderPage 渲染OFD页面
-// 入参: args 浏览器参数
+// 入参: args 页面索引、后端组合、DPI和光栅显示开关
 // 返回: any 页面SVG结果, error 错误信息
 func renderPage(args []js.Value) (any, error) {
 	if currentSession == nil {
@@ -354,9 +362,20 @@ func renderPage(args []js.Value) (any, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("missing page index")
 	}
-	page, err := currentSession.RenderPageSVG(args[0].Int())
+	backend, dpi := "canvas", 150.0
+	if len(args) > 1 {
+		backend = args[1].String()
+	}
+	if len(args) > 2 {
+		dpi = args[2].Float()
+	}
+	raster := len(args) > 3 && args[3].Bool()
+	page, err := currentSession.RenderPage(args[0].Int(), backend, dpi, raster)
 	if err != nil {
 		return nil, err
+	}
+	if currentEditor != nil {
+		currentEditor.SetPageCompiler(currentSession.Renderer.Backends().Compiler)
 	}
 	text, err := currentSession.PageText(args[0].Int())
 	if err != nil {
@@ -472,8 +491,12 @@ func exportPage(args []js.Value) (any, error) {
 	if len(args) < 4 {
 		return nil, fmt.Errorf("missing export page arguments")
 	}
-	writer := bufio.NewWriterSize(exportWriter{write: args[3]}, 1<<20)
-	format, err := currentSession.ExportPage(args[0].Int(), args[1].String(), args[2].Float(), writer)
+	session, writerIndex, err := exportSession(args)
+	if err != nil {
+		return nil, err
+	}
+	writer := bufio.NewWriterSize(exportWriter{write: args[writerIndex]}, 1<<20)
+	format, err := session.ExportPage(args[0].Int(), args[1].String(), args[2].Float(), writer)
 	if err != nil {
 		return nil, err
 	}
@@ -493,9 +516,13 @@ func exportDocument(args []js.Value) (any, error) {
 	if currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	renderer := currentSession.Renderer
+	session, writerIndex, err := exportSession(args)
+	if err != nil {
+		return nil, err
+	}
+	renderer := session.Renderer
 	renderer.OnExportProgress = func(completed, total int) error {
-		return awaitExport(args[4], completed, total)
+		return awaitExport(args[writerIndex+1], completed, total)
 	}
 	defer func() { renderer.OnExportProgress = nil }()
 	var indices []int
@@ -505,8 +532,8 @@ func exportDocument(args []js.Value) (any, error) {
 			indices[i] = args[2].Index(i).Int()
 		}
 	}
-	writer := bufio.NewWriterSize(exportWriter{write: args[3]}, 1<<20)
-	format, err := currentSession.ExportDocument(args[0].String(), args[1].Float(), writer, indices...)
+	writer := bufio.NewWriterSize(exportWriter{write: args[writerIndex]}, 1<<20)
+	format, err := session.ExportDocument(args[0].String(), args[1].Float(), writer, indices...)
 	if err != nil {
 		return nil, err
 	}
@@ -517,6 +544,23 @@ func exportDocument(args []js.Value) (any, error) {
 		"label": format.Label,
 		"mime":  format.MIME,
 	}), nil
+}
+
+// exportSession 创建独立导出配置，写入回调前可指定光栅后端
+// 入参: args 浏览器参数
+// 返回: *Session 导出会话, int 写入回调位置, error 错误信息
+func exportSession(args []js.Value) (*Session, int, error) {
+	session := *currentSession
+	renderer := *session.Renderer
+	session.Renderer = &renderer
+	writerIndex := 3
+	if args[3].Type() == js.TypeString {
+		if err := session.SetRenderBackend(args[3].String()); err != nil {
+			return nil, 0, err
+		}
+		writerIndex++
+	}
+	return &session, writerIndex, nil
 }
 
 // successResult 创建成功接口结果
@@ -2737,6 +2781,7 @@ func editDocument(args []js.Value) (any, error) {
 	if currentSession.fontFS != nil {
 		editor.SetFontFS(currentSession.fontFS)
 	}
+	editor.SetPageCompiler(currentSession.Renderer.Backends().Compiler)
 	currentEditor = editor
 	currentSession.editing = true
 	copiedObjects = nil
@@ -2758,6 +2803,7 @@ func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 	}
 	editor.SetFontFS()
 	if currentSession != nil {
+		ofdgo.WithRenderBackends(currentSession.Renderer.Backends())(session.Renderer)
 		if currentSession.fontFS != nil {
 			session.fontFS = currentSession.fontFS
 			session.Renderer.SetFontFS(session.fontFS)
@@ -2765,6 +2811,7 @@ func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 		}
 		_ = currentSession.Close()
 	}
+	editor.SetPageCompiler(session.Renderer.Backends().Compiler)
 	currentSession = session
 	session.editing = true
 	if currentEditor != editor {

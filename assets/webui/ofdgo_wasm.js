@@ -114,7 +114,9 @@ async function loadWASM() {
 	self.postMessage({ type: "progress", text: "正在启动引擎", percent: 58 });
 	go.run(instance).then(exitWASM, exitWASM);
 	if (!go.exited) {
-		self.postMessage({ type: "ready" });
+		const backends = JSON.parse(globalThis.ofdgoRenderBackends());
+		if (!backends.ok) throw new Error(backends.error);
+		self.postMessage({ type: "ready", backends: backends.data });
 	}
 }
 

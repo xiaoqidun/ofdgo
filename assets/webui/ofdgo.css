@@ -607,7 +607,8 @@ button:not(:disabled):hover {
 }
 
 .format-select,
-.order-select {
+.order-select,
+.render-panel select {
 	width: 58px;
 	height: var(--control-height);
 	min-width: 0;
@@ -981,6 +982,104 @@ body[data-hide-meta] .meta-panel {
 .app-status {
 	color: var(--text-muted);
 	font-size: 12px;
+}
+
+.render-panel {
+	position: relative;
+	margin-bottom: 12px;
+	padding-bottom: 12px;
+	border-bottom: 1px solid var(--line);
+}
+
+.render-panel select {
+	width: 180px;
+	max-width: calc(100% - 76px);
+	height: 28px;
+	font-size: 12px;
+}
+
+.render-mode-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	font-size: 12px;
+}
+
+.render-panel .panel-row {
+	flex-wrap: nowrap;
+	margin-bottom: 6px;
+}
+
+.render-controls {
+	display: flex;
+	align-items: center;
+	width: 180px;
+	max-width: calc(100% - 76px);
+	gap: 8px;
+}
+
+.render-modes {
+	display: flex;
+	flex: none;
+}
+
+.render-modes .small-button {
+	width: 36px;
+	height: 28px;
+	padding: 0;
+}
+
+.render-modes .small-button + .small-button {
+	margin-left: -1px;
+}
+
+.render-modes .small-button[aria-pressed="true"] {
+	position: relative;
+	border-color: var(--accent);
+	background: var(--accent-soft);
+	color: var(--accent-strong);
+}
+
+.render-controls select {
+	flex: 1;
+	width: 0;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.render-support {
+	font-size: 12px;
+	color: var(--text-muted);
+}
+
+.render-support summary {
+	position: absolute;
+	top: 0;
+	left: 32px;
+	width: fit-content;
+	line-height: 28px;
+	cursor: pointer;
+	color: var(--accent-strong);
+}
+
+.render-support dl {
+	margin: 8px 0 0;
+}
+
+.render-support dl > div {
+	display: flex;
+	justify-content: space-between;
+	gap: 16px;
+	margin-top: 6px;
+}
+
+.render-support dd {
+	min-width: 0;
+	margin: 0;
+	text-align: right;
+	overflow-wrap: anywhere;
+	color: #1f2428;
 }
 
 .app-refresh {

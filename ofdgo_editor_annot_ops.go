@@ -249,7 +249,11 @@ func (e *Editor) ReplaceAnnotationText(page int, id, old, value string, style Te
 			visiting := make(map[string]bool)
 			var replace func([]*editorCompositeNode) error
 			replace = func(nodes []*editorCompositeNode) error {
-				for i, member := range edit.measureCompositeMembers(renderer, nodes) {
+				members, err := edit.measureCompositeMembers(renderer, nodes)
+				if err != nil {
+					return err
+				}
+				for i, member := range members {
 					if member.Object.Type == "TextObject" && member.Object.TextObject.Text() == old {
 						if err := edit.updateCompositeText(nodes[i], member, &value, style, nil, nil); err != nil {
 							return err

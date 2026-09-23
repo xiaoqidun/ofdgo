@@ -42,12 +42,6 @@ func (r *pdfRenderer) glyphPath(path *canvas.Path, matrix canvas.Matrix) *canvas
 	return converted
 }
 
-// pdfPage PDF页面数据
-type pdfPage struct {
-	Content *PageContent
-	Box     Box
-}
-
 // pdfNavigation PDF导航信息
 type pdfNavigation struct {
 	Anchor  map[int][]pdfAnchor
@@ -78,7 +72,7 @@ type pdfOutline struct {
 // newPDFNavigation 创建PDF导航信息
 // 入参: renderer 渲染器, doc 文档结构, pages 页面数据
 // 返回: *pdfNavigation PDF导航信息
-func newPDFNavigation(renderer *Renderer, doc *Document, pages []pdfPage) *pdfNavigation {
+func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentPage) *pdfNavigation {
 	navigation := &pdfNavigation{
 		Anchor:  make(map[int][]pdfAnchor),
 		Link:    make(map[int][]pdfLink),
@@ -121,7 +115,7 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []pdfPage) *pdfNa
 
 // addAction 添加PDF动作
 // 入参: page 页面索引, rect 动作区域, action 动作, bookmarks 书签, pageIndex 页面索引表, pages 页面数据
-func (n *pdfNavigation) addAction(page int, rect canvas.Rect, action Action, bookmarks map[string]Dest, pageIndex map[string]int, pages []pdfPage) {
+func (n *pdfNavigation) addAction(page int, rect canvas.Rect, action Action, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) {
 	if action.Goto != nil {
 		dest := gotoDest(action.Goto, bookmarks)
 		if dest == nil {
@@ -148,7 +142,7 @@ func (n *pdfNavigation) addAction(page int, rect canvas.Rect, action Action, boo
 
 // addOutlines 添加PDF大纲
 // 入参: outlines 大纲节点, level 节点层级, bookmarks 书签, pageIndex 页面索引表, pages 页面数据
-func (n *pdfNavigation) addOutlines(outlines []OutlineElem, level int, bookmarks map[string]Dest, pageIndex map[string]int, pages []pdfPage) {
+func (n *pdfNavigation) addOutlines(outlines []OutlineElem, level int, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) {
 	for _, outline := range outlines {
 		nextLevel := level
 		if dest := outlineDest(outline, bookmarks); dest != nil {
