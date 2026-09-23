@@ -120,6 +120,6 @@ func (r *Renderer) renderStampImage(ctx *canvas.Context, img image.Image, s Stam
 	ctx.Push()
 	ctx.Translate(box.X, pageH-(box.Y+box.H))
 	ctx.Scale(box.W/float64(img.Bounds().Dx()), box.H/float64(img.Bounds().Dy()))
-	ctx.DrawImage(0, 0, img, canvas.DPMM(1.0))
+	ctx.DrawImage(0, 0, r.canvasEncodedImage(img), canvas.DPMM(1.0))
 	ctx.Pop()
 }

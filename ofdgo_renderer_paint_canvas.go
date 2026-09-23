@@ -15,27 +15,24 @@
 package ofdgo
 
 import (
-	"github.com/tdewolff/canvas"
 	"math"
+
+	"github.com/tdewolff/canvas"
 )
 
-// parseFillPaint 解析填充画刷
+// parseFillPaint 将公共画刷转换为Canvas对象
 // 入参: fillColor 填充颜色节点, x X坐标, y Y坐标, pageH 页面高度
 // 返回: any 填充画刷
 func (r *Renderer) parseFillPaint(fillColor *FillColor, x, y, pageH float64) any {
-	if fillColor == nil {
+	paint := r.ResolvePaint(fillColor)
+	switch paint.Kind {
+	case PaintNone, PaintPattern:
 		return nil
+	case PaintLinear, PaintRadial:
+		return canvasShading(paint, x, y, pageH)
+	default:
+		return paint.Color
 	}
-	if fillColor.Pattern != nil {
-		return nil
-	}
-	if gradient := r.parseAxialShdGradient(fillColor.AxialShd, fillColor.Alpha, x, y, pageH); gradient != nil {
-		return newShdPaint(gradient, fillColor.AxialShd.Extend, fillColor.AxialShd.MapType, fillColor.AxialShd.MapUnit)
-	}
-	if paint := r.parseRadialShdPaint(fillColor.RadialShd, fillColor.Alpha, x, y, pageH); paint != nil {
-		return paint
-	}
-	return r.parseFillColor(fillColor)
 }
 
 // parseStrokePaint 解析勾边画刷
@@ -45,39 +42,34 @@ func (r *Renderer) parseStrokePaint(strokeColor *StrokeColor, x, y, pageH float6
 	return r.parseFillPaint((*FillColor)(strokeColor), x, y, pageH)
 }
 
-// parseShdSegments 将通用渐变分段转换为Canvas画刷
-// 入参: segments 渐变分段, alpha 透明度
+// canvasGradient 将公共颜色节点转换为Canvas渐变
+// 入参: stops 渐变分段
 // 返回: canvas.Grad 渐变分段
-func (r *Renderer) parseShdSegments(segments []ShdSegment, alpha *int) canvas.Grad {
+func canvasGradient(stops []ColorStop) canvas.Grad {
 	var gradient canvas.Grad
-	for _, stop := range r.GradientStops(segments, alpha) {
+	for _, stop := range stops {
 		gradient.Add(stop.Offset, stop.Color)
 	}
 	return gradient
 }
 
-// parseAxialShdGradient 解析轴向渐变
-// 入参: axialShd 轴向渐变节点, alpha 透明度, x X坐标, y Y坐标, pageH 页面高度
-// 返回: canvas.Gradient 渐变对象
-func (r *Renderer) parseAxialShdGradient(axialShd *AxialShd, alpha *int, x, y, pageH float64) canvas.Gradient {
-	if axialShd == nil {
-		return nil
+// canvasShading 转换坐标与椭圆渐变变换，不重新解析OFD样式
+// 入参: paint 公共渐变画刷, x X坐标, y Y坐标, pageH 页面高度
+// 返回: *shdPaint Canvas渐变画刷
+func canvasShading(paint Paint, x, y, pageH float64) *shdPaint {
+	source := paint.Gradient
+	gradient := canvasGradient(source.Stops)
+	start := canvas.Point{X: x + source.Start.X, Y: pageH - y - source.Start.Y}
+	end := canvas.Point{X: x + source.End.X, Y: pageH - y - source.End.Y}
+	if paint.Kind == PaintLinear {
+		return newShdPaint(gradient.ToLinear(start, end), source.Extend, source.MapType, source.MapUnit)
 	}
-	start := parseFloats(axialShd.StartPoint)
-	end := parseFloats(axialShd.EndPoint)
-	if len(start) < 2 || len(end) < 2 {
-		return nil
+	result := newShdPaint(gradient.ToRadial(start, source.StartRadius, end, source.EndRadius), source.Extend, source.MapType, source.MapUnit)
+	if e := source.Eccentricity; 0 < e && e < 1 {
+		result.view = canvas.Identity.Translate(start.X, start.Y).Rotate(-source.Angle).Scale(1, math.Sqrt(1-e*e)).Translate(-start.X, -start.Y)
+		result.gradient = gradient.ToRadial(start, source.StartRadius, result.view.Inv().Dot(end), source.EndRadius)
 	}
-	gradient := r.parseShdSegments(axialShd.Segment, alpha)
-	if gradient == nil {
-		return nil
-	}
-	startPoint := canvas.Point{X: x + start[0], Y: pageH - (y + start[1])}
-	endPoint := canvas.Point{X: x + end[0], Y: pageH - (y + end[1])}
-	if startPoint.Equals(endPoint) {
-		return nil
-	}
-	return gradient.ToLinear(startPoint, endPoint)
+	return result
 }
 
 // axialShdClip 获取轴向渐变的延伸裁剪区域
@@ -100,30 +92,4 @@ func axialShdClip(gradient *canvas.LinearGradient, extend int, bounds canvas.Rec
 		return &canvas.Path{}
 	}
 	return area.ToPath().Transform(axis)
-}
-
-// parseRadialShdPaint 解析径向渐变画刷
-// 入参: radialShd 径向渐变节点, alpha 透明度, x X坐标, y Y坐标, pageH 页面高度
-// 返回: *shdPaint 渐变画刷
-func (r *Renderer) parseRadialShdPaint(radialShd *RadialShd, alpha *int, x, y, pageH float64) *shdPaint {
-	if radialShd == nil || radialShd.EndRadius <= 0 {
-		return nil
-	}
-	start := parseFloats(radialShd.StartPoint)
-	end := parseFloats(radialShd.EndPoint)
-	if len(start) < 2 || len(end) < 2 {
-		return nil
-	}
-	gradient := r.parseShdSegments(radialShd.Segment, alpha)
-	if gradient == nil {
-		return nil
-	}
-	startPoint := canvas.Point{X: x + start[0], Y: pageH - (y + start[1])}
-	endPoint := canvas.Point{X: x + end[0], Y: pageH - (y + end[1])}
-	paint := newShdPaint(gradient.ToRadial(startPoint, radialShd.StartRadius, endPoint, radialShd.EndRadius), radialShd.Extend, radialShd.MapType, radialShd.MapUnit)
-	if e := radialShd.Eccentricity; 0 < e && e < 1 {
-		paint.view = canvas.Identity.Translate(startPoint.X, startPoint.Y).Rotate(-radialShd.Angle).Scale(1, math.Sqrt(1-e*e)).Translate(-startPoint.X, -startPoint.Y)
-		paint.gradient = gradient.ToRadial(startPoint, radialShd.StartRadius, paint.view.Inv().Dot(endPoint), radialShd.EndRadius)
-	}
-	return paint
 }

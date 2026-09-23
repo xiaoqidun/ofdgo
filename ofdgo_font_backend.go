@@ -57,6 +57,13 @@ type resolvedFontResult struct {
 	err  error
 }
 
+// resetFontCache 重置字体解析及后端私有缓存，不预先创建任何绘图库对象
+func (r *Renderer) resetFontCache() {
+	r.preparedFonts = make(map[string]*PreparedFont)
+	r.resolvedFonts = make(map[resolvedFontKey]resolvedFontResult)
+	r.backendStates = make(map[any]any)
+}
+
 // ResolveFont 使用配置的字体后端解析资源，保留精确匹配与回退的区别
 // 入参: id 字体资源标识, exact 是否要求精确匹配
 // 返回: ResolvedFont 字体与来源, error 解析错误
@@ -72,4 +79,50 @@ func (r *Renderer) ResolveFont(id string, exact bool) (ResolvedFont, error) {
 	key.definition = r.Reader.fontCache[id]
 	r.resolvedFonts[key] = resolvedFontResult{font: resolved, err: err}
 	return resolved, err
+}
+
+// PreparedFont 保存绘制用字体及GID、CID到包装字符的映射，所有数据只读
+// Data可与源编码不同，原始资源仍由ResolveFont和Reader保留
+type PreparedFont struct {
+	ResolvedFont
+	Glyphs map[uint16]rune
+	CIDs   map[uint16]rune
+}
+
+// PrepareFont 统一处理内嵌字体包装和索引映射，供各编译器复用
+// 入参: id 字体资源标识
+// 返回: *PreparedFont 绘制字体, error 字体解析错误
+func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
+	if cached := r.preparedFonts[id]; cached != nil {
+		return cached, nil
+	}
+	resolved, err := r.ResolveFont(id, false)
+	if err != nil {
+		return nil, err
+	}
+	prepared := &PreparedFont{ResolvedFont: resolved}
+	definition := r.Reader.fontCache[id]
+	if definition != nil && definition.FontFile != "" {
+		prepared.CIDs = getCFFCIDRuneMap(resolved.Data)
+		if _, data, mapping, _, err := FixFontDataAggressive(resolved.Data, true, true); err == nil {
+			prepared.Data = data
+			if mapping != nil {
+				prepared.Glyphs = make(map[uint16]rune)
+				for character, glyph := range mapping {
+					if character == packedGlyphRune(glyph) {
+						prepared.Glyphs[glyph] = character
+					}
+				}
+				for character, glyph := range mapping {
+					if _, ok := prepared.Glyphs[glyph]; !ok {
+						prepared.Glyphs[glyph] = character
+					}
+				}
+			}
+		}
+	}
+	if definition != nil {
+		r.preparedFonts[id] = prepared
+	}
+	return prepared, nil
 }

@@ -25,7 +25,6 @@ import (
 // OnExportProgress可选，同步回报文档导出的已处理页数及总页数，返回错误则停止，页数完成不代表写入成功
 // TransparentBackground关闭页面白底，供嵌套图案和印章保持透明背景
 type Renderer struct {
-	canvasFontState
 	Reader                *Reader
 	DPI                   float64
 	RenderAnnotations     bool
@@ -41,7 +40,9 @@ type Renderer struct {
 	pageText              *PageText
 	textOnly              bool
 	backends              RenderBackends
+	backendStates         map[any]any
 	resolvedFonts         map[resolvedFontKey]resolvedFontResult
+	preparedFonts         map[string]*PreparedFont
 	renderError           error
 	TransparentBackground bool
 }

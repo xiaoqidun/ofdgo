@@ -79,18 +79,12 @@ const (
 	RasterRadial
 )
 
-// RasterStop 按Offset升序排列的预乘RGBA颜色节点
-type RasterStop struct {
-	Offset float64
-	Color  color.RGBA
-}
-
 // RasterGradient 局部坐标下的线性或双圆径向渐变，区间外延续边界颜色
 type RasterGradient struct {
 	Kind       RasterGradientKind
 	Start, End RasterPoint
 	R0, R1     float64
-	Stops      []RasterStop
+	Stops      []ColorStop
 }
 
 // PixelSize 检查页面尺寸并计算目标像素大小

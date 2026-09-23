@@ -92,11 +92,11 @@ func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (
 		direction:  face.Direction,
 		glyph:      glyph,
 	}
-	if cached, ok := r.textGlyphPathCache[key]; ok {
+	if cached, ok := r.canvasState().textGlyphPathCache[key]; ok {
 		return cached.path, cached.width
 	}
 	path, width := textGlyphPath(face, glyph)
-	r.textGlyphPathCache[key] = textGlyphPathCacheValue{path: path, width: width}
+	r.canvasState().textGlyphPathCache[key] = textGlyphPathCacheValue{path: path, width: width}
 	return path, width
 }
 

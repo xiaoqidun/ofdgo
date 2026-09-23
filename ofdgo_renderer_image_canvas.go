@@ -15,10 +15,9 @@
 package ofdgo
 
 import (
-	"bufio"
+	"bytes"
 	"fmt"
 	"image"
-	"io"
 	"math"
 
 	"github.com/tdewolff/canvas"
@@ -90,10 +89,33 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		m[0][2] -= m[0][0]*p + m[0][1]*p
 		m[1][2] -= m[1][0]*p + m[1][1]*p
 	}
-	ctx.RenderImage(img, ctx.CoordSystemView().Mul(ctx.View()).Mul(m))
+	ctx.RenderImage(r.canvasEncodedImage(img), ctx.CoordSystemView().Mul(ctx.View()).Mul(m))
 	if obj.Border != nil {
 		r.renderImageBorder(ctx, obj, box, pageH, parentCTM, boundaryInCTM, clipPath)
 	}
+}
+
+// canvasEncodedImage 在Canvas输出边界保留原始编码，不重新压缩图片
+// 入参: img 库图片
+// 返回: image.Image Canvas可直接嵌入的图片
+func (r *Renderer) canvasEncodedImage(img image.Image) image.Image {
+	source, ok := img.(*EncodedImage)
+	if !ok {
+		return img
+	}
+	state := r.canvasState()
+	if encoded, ok := state.images[source]; ok {
+		return encoded
+	}
+	var encoded *canvasimage.Image
+	if source.format == "jpeg" {
+		encoded, _ = canvasimage.NewJPEGImage(bytes.NewReader(source.Bytes()))
+	} else {
+		encoded, _ = canvasimage.NewPNGImage(bytes.NewReader(source.Bytes()))
+	}
+	encoded.Bytes = source.Bytes()
+	state.images[source] = encoded
+	return encoded
 }
 
 // renderImageBorder 渲染图像边框
@@ -166,7 +188,7 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		bounds, w, h = resized.Bounds(), nw, nh
 	}
 	clip := clipPath.Copy().Transform(m.Inv())
-	compiler := &canvasPageCompiler{page: &RasterPage{Width: float64(w), Height: float64(h), DPI: 25.4}}
+	compiler := &canvasPageCompiler{page: &RasterPage{Width: float64(w), Height: float64(h), DPI: 25.4}, geometry: r.backends.Geometry}
 	ctx := canvas.NewContext(compiler)
 	ctx.SetFillColor(canvas.White)
 	ctx.SetStrokeColor(canvas.Transparent)
@@ -215,62 +237,4 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		}
 	}
 	return out
-}
-
-// decodeImageResource 解码图片资源
-// 入参: resPath 图片资源路径
-// 返回: image.Image 图片对象, error 错误信息
-func (r *Renderer) decodeImageResource(resPath string) (image.Image, error) {
-	resPath = cleanPackagePath(r.Reader.ResPath(resPath))
-	img, ok := r.imageCache[resPath]
-	if !ok {
-		var err error
-		img, err = r.readImageResource(resPath)
-		if err != nil {
-			return nil, err
-		}
-		if r.imageCache == nil {
-			r.imageCache = make(map[string]image.Image)
-		}
-		r.imageCache[resPath] = img
-	}
-	if r.decodeImages {
-		if source, ok := img.(*canvasimage.Image); ok {
-			return source.Image()
-		}
-	}
-	return img, nil
-}
-
-// readImageResource 读取图片资源并保留可直接嵌入的原始编码
-// 入参: resPath 图片资源路径
-// 返回: image.Image 图片对象, error 错误信息
-func (r *Renderer) readImageResource(resPath string) (image.Image, error) {
-	rc, err := r.Reader.openFile(resPath)
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
-	reader := bufio.NewReaderSize(rc, 8)
-	header, _ := reader.Peek(8)
-	if isJPEGData(header) {
-		img, err := canvasimage.NewJPEGImage(reader)
-		if err != nil {
-			return nil, err
-		}
-		return img, nil
-	}
-	if isPNGData(header) {
-		img, err := canvasimage.NewPNGImage(reader)
-		if err != nil {
-			return nil, err
-		}
-		return img, nil
-	}
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, err
-	}
-	img, _, err := decodeImageData(data)
-	return img, err
 }

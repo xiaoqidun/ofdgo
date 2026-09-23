@@ -29,8 +29,8 @@ type pathStyle struct {
 	strokeColor   color.Color
 	fillPaint     any
 	strokePaint   any
-	fillPattern   *patternPaint
-	strokePattern *patternPaint
+	fillPattern   *PatternPaint
+	strokePattern *PatternPaint
 	lineWidth     float64
 	lineCap       canvas.Capper
 	lineJoin      canvas.Joiner
@@ -280,9 +280,10 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		}
 		strokeClip := intersectClipPath(clipPath, shadingClip)
 		_, repeat := strokePaint.(*repeatAxialGradient)
-		if strokeClip != nil || strokeView != canvas.Identity || repeat || style.strokePattern != nil {
+		_, nativeGeometry := r.backends.Geometry.(CanvasBackend)
+		if strokeClip != nil || strokeView != canvas.Identity || repeat || style.strokePattern != nil || !nativeGeometry {
 			sp = sp.Copy()
-			sp = sp.Stroke(style.lineWidth, style.lineCap, style.lineJoin, canvas.Tolerance)
+			sp = r.strokeCanvasPath(sp, style.lineWidth, style.lineCap, style.lineJoin)
 			sp = applyClipPath(sp, strokeClip)
 			if style.strokePattern != nil {
 				r.renderPattern(ctx, style.strokePattern, pageH, sp, objectCTM)
@@ -300,9 +301,9 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 
 // renderPattern 渲染图案填充
 // 入参: ctx 画布上下文, pattern 底纹画刷, pageH 页面高度, clip 绘制区域, objectCTM 对象变换矩阵
-func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *patternPaint, pageH float64, clip *canvas.Path, objectCTM Matrix) {
+func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pageH float64, clip *canvas.Path, objectCTM Matrix) {
 	if bounds, ok := ctx.Renderer.(*boundsRenderer); ok {
-		if pattern.alpha == nil || *pattern.alpha > 0 {
+		if pattern.Alpha == nil || *pattern.Alpha > 0 {
 			bounds.add(clip)
 		}
 		return
@@ -358,7 +359,7 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *patternPaint, pag
 	endX := int(math.Ceil(maxX/xStep)) + 1
 	startY := int(math.Floor(minY/yStep)) - 1
 	endY := int(math.Ceil(maxY/yStep)) + 1
-	defaults := &DrawParam{FillColor: &pattern.color, StrokeColor: (*StrokeColor)(&pattern.color)}
+	defaults := &DrawParam{FillColor: &pattern.Color, StrokeColor: (*StrokeColor)(&pattern.Color)}
 	for ix := startX; ix <= endX; ix++ {
 		for iy := startY; iy <= endY; iy++ {
 			tileCTM := patternCTM.Multiply(TranslationMatrix(float64(ix)*xStep, float64(iy)*yStep))
@@ -369,7 +370,7 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *patternPaint, pag
 				tileCTM = tileCTM.Multiply(Matrix{a: 1, d: -1, f: pattern.Height})
 			}
 			for _, obj := range pattern.CellContent.Objects {
-				obj = mergeGraphicObjectAlpha(obj, pattern.alpha)
+				obj = mergeGraphicObjectAlpha(obj, pattern.Alpha)
 				r.renderObject(ctx, &obj, pageH, defaults, &tileCTM, true, clip)
 			}
 		}

@@ -185,10 +185,14 @@ func (r *Renderer) fontGlyphRune(fontID string, glyphID int) (rune, bool) {
 		return 0, false
 	}
 	id := uint16(glyphID)
-	if mapped, ok := r.fontCIDMap[fontID][id]; ok {
+	prepared := r.preparedFonts[fontID]
+	if prepared == nil {
+		return 0, false
+	}
+	if mapped, ok := prepared.CIDs[id]; ok {
 		return mapped, true
 	}
-	if mapped, ok := r.fontGIDMap[fontID][id]; ok {
+	if mapped, ok := prepared.Glyphs[id]; ok {
 		return mapped, true
 	}
 	return 0, false

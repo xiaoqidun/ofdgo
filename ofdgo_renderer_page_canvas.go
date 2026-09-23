@@ -63,27 +63,8 @@ func (r *Renderer) renderCanvasPageToContext(ctx *canvas.Context, page *PageCont
 		ctx.SetFillColor(canvas.White)
 		ctx.DrawPath(0, 0, canvas.Rectangle(box.W, box.H))
 	}
-	for order := range 3 {
-		if r.Reader.doc != nil {
-			for _, tplRef := range page.Template {
-				kind := tplRef.ZOrder
-				if kind == "" {
-					kind = "Background"
-				}
-				if layerOrder(kind) == order {
-					r.renderTemplate(ctx, tplRef.TemplateID, pageH)
-				}
-			}
-		}
-		r.renderLayers(ctx, page.Content.Layer, pageH, order)
-	}
-	if r.RenderAnnotations {
-		r.renderAnnotations(ctx, page.ID, pageH)
-	}
-	if stamps, ok := r.Reader.Stamps[page.ID]; ok {
-		for _, stamp := range stamps {
-			r.renderStamp(ctx, stamp, pageH)
-		}
+	if err := r.WalkPage(page, &canvasPageVisitor{r, ctx, pageH}); err != nil {
+		return err
 	}
 	if r.renderError != nil {
 		return r.renderError

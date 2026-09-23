@@ -191,21 +191,21 @@ func (r *Renderer) parseStrokeColor(strokeColor *StrokeColor) color.Color {
 	return r.parseFillColor((*FillColor)(strokeColor))
 }
 
-// patternPaint 底纹画刷
-type patternPaint struct {
+// PatternPaint 底纹画刷
+type PatternPaint struct {
 	*Pattern
-	color FillColor
-	alpha *int
+	Color FillColor
+	Alpha *int
 }
 
 // parsePatternPaint 解析底纹画刷
 // 入参: fill 填充颜色节点
-// 返回: *patternPaint 底纹画刷
-func parsePatternPaint(fill *FillColor) *patternPaint {
+// 返回: *PatternPaint 底纹画刷
+func parsePatternPaint(fill *FillColor) *PatternPaint {
 	if fill.Pattern == nil {
 		return nil
 	}
-	return &patternPaint{Pattern: fill.Pattern, color: FillColor{Value: fill.Value, Index: fill.Index, ColorSpace: fill.ColorSpace}, alpha: fill.Alpha}
+	return &PatternPaint{Pattern: fill.Pattern, Color: FillColor{Value: fill.Value, Index: fill.Index, ColorSpace: fill.ColorSpace}, Alpha: fill.Alpha}
 }
 
 // parseShdColor 解析渐变颜色
@@ -220,11 +220,10 @@ func (r *Renderer) parseShdColor(segments []ShdSegment, alpha *int) color.Color 
 }
 
 // GradientStops 解析OFD渐变分段的位置与透明度，返回独立数据并保留原分段顺序
-// GradientStops 解析OFD渐变分段的位置与透明度，返回独立数据并保留原分段顺序
 // 入参: segments 渐变分段, alpha 透明度
-// 返回: []RasterStop 后端无关的渐变分段
-func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) []RasterStop {
-	var gradient []RasterStop
+// 返回: []ColorStop 后端无关的渐变分段
+func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) []ColorStop {
+	var gradient []ColorStop
 	position, step := 0.0, 0.0
 	for i, segment := range segments {
 		if !segment.positionMissing {
@@ -246,7 +245,7 @@ func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) []RasterStop
 		offset := position
 		position += step
 		segmentAlpha := mergeAlpha(segment.Color.Alpha, alpha)
-		gradient = append(gradient, RasterStop{Offset: offset, Color: r.ResolveColor(segment.Color.Value, segment.Color.Index, segment.Color.ColorSpace, segmentAlpha)})
+		gradient = append(gradient, ColorStop{Offset: offset, Color: r.ResolveColor(segment.Color.Value, segment.Color.Index, segment.Color.ColorSpace, segmentAlpha)})
 	}
 	if len(gradient) == 0 {
 		return nil

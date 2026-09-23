@@ -186,7 +186,7 @@ func (s *svgResourceRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
 		return
 	}
 	font := text.MostCommonFontFace().Font
-	resource, ok := s.renderer.svgFontCache[font]
+	resource, ok := s.renderer.canvasState().svgFontCache[font]
 	if !ok {
 		data := fontSFNTData(font.SFNT)
 		resource = SVGFont{
@@ -198,7 +198,7 @@ func (s *svgResourceRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
 		if font.Style().Italic() {
 			resource.Style = "italic"
 		}
-		s.renderer.svgFontCache[font] = resource
+		s.renderer.canvasState().svgFontCache[font] = resource
 	}
 	if !s.seen[resource.Name] {
 		s.seen[resource.Name] = true

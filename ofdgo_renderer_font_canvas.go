@@ -54,7 +54,7 @@ func (CanvasBackend) ResolveFont(r *Renderer, id string, exact bool) (ResolvedFo
 	if source, family := r.fontSourceMatch(id, definition, exact); family != nil {
 		sfnt := family.Face(12, style).Font.SFNT
 		face := fontFaceInfo(sfnt.Tables["name"], source.face)
-		r.fontSourceUsed[id] = source
+		r.canvasState().fontSourceUsed[id] = source
 		return ResolvedFont{Data: fontSFNTData(sfnt), Source: source.name, Face: &face, Exact: source.exact}, nil
 	}
 	if !exact {
@@ -66,11 +66,11 @@ func (CanvasBackend) ResolveFont(r *Renderer, id string, exact bool) (ResolvedFo
 // canvasFallbackFont 按需加载默认阅读字体，不用于精确编辑匹配
 // 返回: ResolvedFont 默认字体，未安装时数据为空
 func (r *Renderer) canvasFallbackFont() ResolvedFont {
-	if r.fontFamily == nil {
+	if r.canvasState().fontFamily == nil {
 		r.initCanvasFonts()
 	}
-	if r.defaultFontLoaded {
-		return ResolvedFont{Data: fontSFNTData(r.fontFamily.Face(12, canvas.FontRegular).Font.SFNT)}
+	if r.canvasState().defaultFontLoaded {
+		return ResolvedFont{Data: fontSFNTData(r.canvasState().fontFamily.Face(12, canvas.FontRegular).Font.SFNT)}
 	}
 	return ResolvedFont{}
 }
@@ -97,39 +97,8 @@ func (f canvasFontMetrics) Write() []byte {
 	return fontSFNTData(f.SFNT)
 }
 
-// canvasFontState 保存默认适配器的字体与字形缓存，不向后端接口暴露绘图库类型
-type canvasFontState struct {
-	fontFamily         *canvas.FontFamily
-	defaultFontLoaded  bool
-	fontMap            map[string]*canvas.FontFamily
-	fontGIDMap         map[string]map[uint16]rune
-	fontCIDMap         map[string]map[uint16]rune
-	fontCache          map[fontCacheKey]*canvas.FontFamily
-	svgFontCache       map[*canvas.Font]SVGFont
-	fontSourceCache    map[string][]fontSource
-	fontSourceUsed     map[string]fontSource
-	fontDirCandidates  map[string][]fontFileCandidate
-	fontFSCandidates   map[int][]fontFileCandidate
-	textGlyphPathCache map[textGlyphPathCacheKey]textGlyphPathCacheValue
-}
-
-// resetFontCache 重置字体匹配、加载和字形缓存
-func (r *Renderer) resetFontCache() {
-	r.resolvedFonts = make(map[resolvedFontKey]resolvedFontResult)
-	r.fontMap = make(map[string]*canvas.FontFamily)
-	r.fontGIDMap = make(map[string]map[uint16]rune)
-	r.fontCIDMap = make(map[string]map[uint16]rune)
-	r.fontCache = make(map[fontCacheKey]*canvas.FontFamily)
-	r.svgFontCache = make(map[*canvas.Font]SVGFont)
-	r.fontSourceCache = make(map[string][]fontSource)
-	r.fontSourceUsed = make(map[string]fontSource)
-	r.fontDirCandidates = make(map[string][]fontFileCandidate)
-	r.fontFSCandidates = make(map[int][]fontFileCandidate)
-	r.textGlyphPathCache = make(map[textGlyphPathCacheKey]textGlyphPathCacheValue)
-}
-
 // initCanvasFonts 初始化Canvas默认字体
 func (r *Renderer) initCanvasFonts() {
-	r.fontFamily = canvas.NewFontFamily("default")
-	r.defaultFontLoaded = r.loadDefaultFonts()
+	r.canvasState().fontFamily = canvas.NewFontFamily("default")
+	r.canvasState().defaultFontLoaded = r.loadDefaultFonts()
 }

@@ -23,7 +23,6 @@ import (
 	_ "image/gif"
 	"math"
 
-	canvasimage "github.com/tdewolff/canvas/image"
 	_ "github.com/xiaoqidun/jbig2"
 	_ "golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
@@ -34,15 +33,12 @@ import (
 // 入参: data 图片数据
 // 返回: image.Image 图片对象, string 图片格式, error 错误信息
 func decodeImageData(data []byte) (image.Image, string, error) {
-	if isJPEGData(data) {
-		if img, err := canvasimage.NewJPEGImage(bytes.NewReader(data)); err == nil {
-			return img, "jpeg", nil
+	if isJPEGData(data) || isPNGData(data) {
+		img, err := newEncodedImage(data)
+		if err != nil {
+			return nil, "", err
 		}
-	}
-	if isPNGData(data) {
-		if img, err := canvasimage.NewPNGImage(bytes.NewReader(data)); err == nil {
-			return img, "png", nil
-		}
+		return img, img.format, nil
 	}
 	img, format, err := image.Decode(bytes.NewReader(data))
 	if err == nil {
@@ -412,7 +408,7 @@ func imageWithTransparentEdge(img image.Image) (image.Image, int) {
 	if w == 0 || h == 0 {
 		return img, 0
 	}
-	if src, ok := img.(*canvasimage.Image); ok && src.Mimetype == "image/jpeg" && src.Mask == nil {
+	if src, ok := img.(*EncodedImage); ok && src.MIME() == "image/jpeg" {
 		return img, 0
 	}
 	source := imagePixelSource(img)

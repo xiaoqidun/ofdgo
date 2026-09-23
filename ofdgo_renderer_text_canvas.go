@@ -76,7 +76,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	sizePt := sizeMM * ptPerMM
 	fillColor := colorWithAlpha(canvas.Black, obj.Alpha)
 	var fillPaint any = fillColor
-	var fillPattern *patternPaint
+	var fillPattern *PatternPaint
 	var fillColorNode *FillColor
 	if defaults != nil {
 		fillColorNode = defaults.FillColor
@@ -187,15 +187,6 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	hasUnderline := strings.Contains(obj.Decoration, "Underline")
 	_, shadedFill := fillPaint.(canvas.Gradient)
 	verticalAdvance := (obj.ReadDirection-obj.CharDirection)%180 != 0
-	advanceX, advanceY := 1.0, 0.0
-	switch obj.ReadDirection {
-	case 90:
-		advanceX, advanceY = 0, 1
-	case 180:
-		advanceX = -1
-	case 270:
-		advanceX, advanceY = 0, -1
-	}
 	codePos := 0
 	textPos := 0
 	for index, tc := range obj.TextCode {
@@ -215,17 +206,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		if textRun != nil && tc.Index == "" {
 			spans = textGlyphSpans(runes, glyphTransforms, codePos)
 		}
-		dxs, dys := parseFloats(tc.DeltaX), parseFloats(tc.DeltaY)
-		xs, ys := parseFloats(tc.X), parseFloats(tc.Y)
+		positioner := NewTextPositioner(tc, obj.ReadDirection)
+		dxs, dys, xs, ys := positioner.dxs, positioner.dys, positioner.xs, positioner.ys
 		drawAsPath := embeddedFont || face.FauxBold > 0 || textCodePositioned(tc, xs, ys) || fillClip != nil || shadedFill || fillPattern != nil || shouldStroke
-		cx, cy := 0.0, 0.0
-		previousAdvance := 0.0
-		if len(xs) > 0 {
-			cx = xs[0]
-		}
-		if len(ys) > 0 {
-			cy = ys[0]
-		}
 		for i, glyph := range glyphs {
 			str := glyph.Text
 			drawAsGlyphPath := drawAsPath || glyph.GlyphID >= 0
@@ -244,28 +227,12 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			} else {
 				glyphWidth = textGlyphWidth(face, glyph)
 			}
-			if i < len(xs) {
-				cx = xs[i]
-			} else if i > 0 {
-				if dx, ok := textDelta(dxs, i-1); ok {
-					cx += dx
-				} else if len(dys) == 0 {
-					cx += previousAdvance * advanceX
-				}
-			}
-			if i < len(ys) {
-				cy = ys[i]
-			} else if i > 0 {
-				if dy, ok := textDelta(dys, i-1); ok {
-					cy += dy
-				} else if len(dxs) == 0 {
-					cy += previousAdvance * advanceY
-				}
-			}
-			previousAdvance = glyphWidth * hScale
+			advance := glyphWidth * hScale
 			if verticalAdvance {
-				previousAdvance = sizeMM
+				advance = sizeMM
 			}
+			position := positioner.Next(advance)
+			cx, cy := position.X, position.Y
 			var canvasX, canvasY float64
 			if boundaryInCTM && parentCTM != nil {
 				tx, ty := localCTM.Transform(cx, cy)
@@ -328,7 +295,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				if len(strokeStyle.dashPattern) > 0 {
 					path = path.Dash(strokeStyle.dashOffset, strokeStyle.dashPattern...)
 				}
-				path = path.Stroke(strokeStyle.lineWidth, strokeStyle.lineCap, strokeStyle.lineJoin, canvas.Tolerance)
+				path = r.strokeCanvasPath(path, strokeStyle.lineWidth, strokeStyle.lineCap, strokeStyle.lineJoin)
 				path = applyClipPath(path, strokeClip)
 				if strokeStyle.strokePattern != nil {
 					r.renderPattern(ctx, strokeStyle.strokePattern, pageH, path, objectCTM)
@@ -341,7 +308,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					underline := &canvas.Path{}
 					underline.MoveTo(0, -sizeMM*0.1)
 					underline.LineTo(glyphWidth*scaleX, -sizeMM*0.1)
-					underline = underline.Stroke(sizeMM*0.05, canvas.ButtCap, canvas.MiterJoin, canvas.Tolerance)
+					underline = r.strokeCanvasPath(underline, sizeMM*0.05, canvas.ButtCap, canvas.MiterJoin)
 					if shouldFill && fillPattern != nil {
 						r.renderPattern(ctx, fillPattern, pageH, applyClipPath(underline.Transform(transform), clipPath), objectCTM)
 					} else if shouldFill {
@@ -380,7 +347,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 						underline := &canvas.Path{}
 						underline.MoveTo(0, -off)
 						underline.LineTo(textWidth, -off)
-						underline = underline.Stroke(uw, canvas.ButtCap, canvas.MiterJoin, canvas.Tolerance)
+						underline = r.strokeCanvasPath(underline, uw, canvas.ButtCap, canvas.MiterJoin)
 						underline = applyClipPath(underline.Transform(textTransform), clipPath)
 						if fillPattern != nil {
 							r.renderPattern(ctx, fillPattern, pageH, underline, objectCTM)

@@ -68,15 +68,39 @@ func (r *clipRenderer) RenderImage(img image.Image, m canvas.Matrix) {}
 // 入参: clips 裁剪对象, pageH 页面高度, bx 边界X坐标, by 边界Y坐标, objectCTM 对象CTM, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM
 // 返回: *canvas.Path 路径对象
 func (r *Renderer) buildObjectClipPath(clips *Clips, pageH float64, bx, by float64, objectCTM Matrix, parentCTM *Matrix, boundaryInCTM bool) *canvas.Path {
+	if clips == nil {
+		return nil
+	}
 	if !boundaryInCTM && parentCTM != nil {
 		objectCTM = parentCTM.Multiply(objectCTM)
 	}
-	p := r.buildClipPath(clips, pageH, bx, by, objectCTM)
-	if p != nil && boundaryInCTM && parentCTM != nil {
-		p = p.Transform(canvas.Matrix{
-			{parentCTM.a, -parentCTM.c, parentCTM.c*pageH + parentCTM.e},
-			{-parentCTM.b, parentCTM.d, pageH*(1-parentCTM.d) - parentCTM.f},
-		})
+	if clips.TransFlag != nil && !*clips.TransFlag {
+		copy := *clips
+		copy.TransFlag = nil
+		clips = &copy
+		objectCTM = NewMatrix("")
+	}
+	matrix := TranslationMatrix(bx, by).Multiply(objectCTM)
+	if boundaryInCTM && parentCTM != nil {
+		matrix = parentCTM.Multiply(matrix)
+	}
+	geometry, err := r.Geometry()
+	if err != nil {
+		r.renderError = err
+		return nil
+	}
+	path, err := geometry.Clip(r, clips, matrix, nil)
+	if err != nil {
+		r.renderError = err
+		return nil
+	}
+	p, err := geometryToCanvasPath(path)
+	if err != nil {
+		r.renderError = err
+		return nil
+	}
+	if p != nil {
+		p = p.Translate(0, pageH)
 	}
 	return p
 }

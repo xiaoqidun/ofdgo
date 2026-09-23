@@ -22,7 +22,7 @@ import "github.com/tdewolff/canvas"
 // 返回: bool 是否加载成功
 func (r *Renderer) loadDefaultFonts() bool {
 	for _, name := range fontDefaultSystemNames() {
-		if err := r.fontFamily.LoadSystemFont(name, canvas.FontRegular); err == nil {
+		if err := r.canvasState().fontFamily.LoadSystemFont(name, canvas.FontRegular); err == nil {
 			return true
 		}
 	}

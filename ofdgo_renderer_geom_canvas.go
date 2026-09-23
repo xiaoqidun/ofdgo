@@ -21,6 +21,56 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
+// canvasStrokeOptions 转换Canvas描边样式，虚线由调用方传入
+// 入参: width 描边宽度, cap 线帽, join 连接, tolerance 展开误差
+// 返回: StrokeOptions 公共描边样式
+func canvasStrokeOptions(width float64, cap canvas.Capper, join canvas.Joiner, tolerance float64) StrokeOptions {
+	options := StrokeOptions{Width: width, Cap: "Butt", Join: "Miter", MiterLimit: defaultMiterLimit, Tolerance: tolerance}
+	switch cap.(type) {
+	case canvas.RoundCapper:
+		options.Cap = "Round"
+	case canvas.SquareCapper:
+		options.Cap = "Square"
+	}
+	switch value := join.(type) {
+	case canvas.RoundJoiner:
+		options.Join = "Round"
+	case canvas.BevelJoiner:
+		options.Join = "Bevel"
+	case canvas.MiterJoiner:
+		options.MiterLimit = value.Limit
+	}
+	return options
+}
+
+// canvasStrokePath 通过配置的几何后端生成描边，不修改源路径
+// 入参: geometry 几何后端, path Canvas路径, options 描边样式
+// 返回: *canvas.Path 描边轮廓, error 几何错误
+func canvasStrokePath(geometry GeometryBackend, path *canvas.Path, options StrokeOptions) (*canvas.Path, error) {
+	outline, err := geometry.Stroke(*geometryFromCanvasPath(path), options)
+	if err != nil {
+		return nil, err
+	}
+	return geometryToCanvasPath(&outline)
+}
+
+// strokeCanvasPath 将文字和复杂画刷的描边交给配置的几何后端
+// 入参: path Canvas路径, width 描边宽度, cap 线帽, join 连接
+// 返回: *canvas.Path 描边轮廓
+func (r *Renderer) strokeCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner) *canvas.Path {
+	geometry, err := r.Geometry()
+	if err != nil {
+		r.renderError = err
+		return &canvas.Path{}
+	}
+	result, err := canvasStrokePath(geometry, path, canvasStrokeOptions(width, cap, join, canvas.Tolerance))
+	if err != nil {
+		r.renderError = err
+		return &canvas.Path{}
+	}
+	return result
+}
+
 // Path 解析对象的标准紧缩路径并转换到页面坐标
 // 入参: object 路径对象
 // 返回: GeometryPath 页面路径, error 无效路径错误

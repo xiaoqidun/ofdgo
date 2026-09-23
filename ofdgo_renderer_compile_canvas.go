@@ -22,7 +22,7 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
-// CompilePage 使用默认字体和几何解释器生成独立绘制数据
+// CompilePage 使用Canvas页面解释器和配置的字体、几何后端生成独立绘制数据
 // 入参: r 渲染器, page 页面内容
 // 返回: *RasterPage 绘制页面, error 编译错误
 func (CanvasBackend) CompilePage(r *Renderer, page *PageContent) (*RasterPage, error) {
@@ -34,7 +34,11 @@ func (CanvasBackend) CompilePage(r *Renderer, page *PageContent) (*RasterPage, e
 	if _, _, err := result.PixelSize(); err != nil {
 		return nil, err
 	}
-	compiler := &canvasPageCompiler{page: result}
+	geometry, err := r.Geometry()
+	if err != nil {
+		return nil, err
+	}
+	compiler := &canvasPageCompiler{page: result, geometry: geometry}
 	if err := r.renderCanvasContext(canvas.NewContext(compiler), page); err != nil {
 		return nil, err
 	}
@@ -46,8 +50,9 @@ func (CanvasBackend) CompilePage(r *Renderer, page *PageContent) (*RasterPage, e
 
 // canvasPageCompiler 将已解释的页面绘制转换为自有数据，不保存第三方绘图对象
 type canvasPageCompiler struct {
-	page *RasterPage
-	err  error
+	page     *RasterPage
+	geometry GeometryBackend
+	err      error
 }
 
 // Size 返回物理页面尺寸
@@ -69,7 +74,12 @@ func (c *canvasPageCompiler) RenderPath(path *canvas.Path, style canvas.Style, m
 			offset, dashes := canvas.ScaleDash(style.StrokeWidth, style.DashOffset, style.Dashes)
 			stroke = stroke.Dash(offset, dashes...)
 		}
-		stroke = stroke.Stroke(style.StrokeWidth, style.StrokeCapper, style.StrokeJoiner, canvas.PixelTolerance/(c.page.DPI/25.4))
+		var err error
+		stroke, err = canvasStrokePath(c.geometry, stroke, canvasStrokeOptions(style.StrokeWidth, style.StrokeCapper, style.StrokeJoiner, canvas.PixelTolerance/(c.page.DPI/25.4)))
+		if err != nil {
+			c.err = err
+			return
+		}
 		c.fill(stroke, style.Stroke, style.FillRule, m)
 	}
 }
@@ -100,9 +110,9 @@ func (c *canvasPageCompiler) fill(path *canvas.Path, paint canvas.Paint, rule ca
 			c.err = fmt.Errorf("unsupported raster gradient %T", paint.Gradient)
 			return
 		}
-		g.Stops = make([]RasterStop, len(stops))
+		g.Stops = make([]ColorStop, len(stops))
 		for i, stop := range stops {
-			g.Stops[i] = RasterStop{Offset: stop.Offset, Color: stop.Color}
+			g.Stops[i] = ColorStop{Offset: stop.Offset, Color: stop.Color}
 		}
 		cmd.Paint.Gradient = g
 	}
