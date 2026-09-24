@@ -28,10 +28,12 @@ import (
 
 // PDFImportOptions 指定PDF转换的运行时后端、进度通知与检查策略
 // Strict禁止恢复缺失资源或丢失内容语义，默认在报告中记录警告
+// OnProgress按open、pages、convert及write.*阶段报告进度，total为0表示总量未知
 type PDFImportOptions struct {
-	Backends *RenderBackends
-	Progress func(int) error
-	Strict   bool
+	Backends   *RenderBackends
+	Progress   func(int) error
+	OnProgress func(stage string, completed, total int) error
+	Strict     bool
 }
 
 // PDFImportReport 汇总转换页数、对象数、链接数和转换警告
@@ -73,6 +75,11 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	if err := ctx.Err(); err != nil {
 		return nil, PDFImportReport{}, err
 	}
+	if options.OnProgress != nil {
+		if err := options.OnProgress("open", 0, 0); err != nil {
+			return nil, PDFImportReport{}, err
+		}
+	}
 	reader, err := pdfgo.NewReader(source, size)
 	if err != nil {
 		return nil, PDFImportReport{}, err
@@ -82,6 +89,11 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		editor.SetRenderBackends(*options.Backends)
 	}
 	importer := pdfImporter{ctx: ctx, reader: reader, editor: editor, fontIDs: map[*pdfgo.Font]string{}, fontMetrics: map[string]FontMetrics{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
+	if options.OnProgress != nil {
+		if err := options.OnProgress("pages", 0, 0); err != nil {
+			return nil, PDFImportReport{}, err
+		}
+	}
 	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
 		_, width, height := pdfPageMatrix(page)
 		if _, err := editor.AddPage(width, height); err != nil {
@@ -89,10 +101,18 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		}
 		importer.pages[page.Reference] = page
 		importer.pageIDs[page.Reference] = editor.pages[index].ID
+		if options.OnProgress != nil {
+			return options.OnProgress("pages", index+1, 0)
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, PDFImportReport{}, err
+	}
+	if options.OnProgress != nil {
+		if err := options.OnProgress("convert", 0, len(editor.pages)); err != nil {
+			return nil, PDFImportReport{}, err
+		}
 	}
 	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
 		matrix, width, height := pdfPageMatrix(page)
@@ -125,6 +145,11 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
 		importer.report.Pages++
+		if options.OnProgress != nil {
+			if err := options.OnProgress("convert", index+1, len(editor.pages)); err != nil {
+				return err
+			}
+		}
 		if options.Progress != nil {
 			return options.Progress(index + 1)
 		}
@@ -162,6 +187,14 @@ func ConvertPDF(ctx context.Context, source io.ReaderAt, size int64, output io.W
 	}
 	if err := ctx.Err(); err != nil {
 		return PDFImportReport{}, err
+	}
+	if options.OnProgress != nil {
+		if err := options.OnProgress("write", 0, 0); err != nil {
+			return PDFImportReport{}, err
+		}
+		editor.OnWriteProgress = func(stage string, completed, total int) error {
+			return options.OnProgress("write."+stage, completed, total)
+		}
 	}
 	_, err = editor.WriteTo(output)
 	return report, err

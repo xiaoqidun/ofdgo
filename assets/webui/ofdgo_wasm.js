@@ -7,7 +7,7 @@ self.onmessage = ({ data }) => {
 		operations.get(data.id)?.abort();
 		return;
 	}
-	if (data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveEncrypted" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
+	if (data.name === "ofdgoConvertPDF" || data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveEncrypted" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
 		operations.set(data.id, new AbortController());
 	}
 	pending = pending.then(() => handleMessage(data));
@@ -17,6 +17,7 @@ async function handleMessage({ id, name, args }) {
 	let channel;
 	const signal = operations.get(id)?.signal;
 	const importing = name === "ofdgoImportPages";
+	const converting = name === "ofdgoConvertPDF";
 	const saving = name === "ofdgoSaveDocument" || name === "ofdgoSaveEncrypted" || name === "ofdgoSaveSigned";
 	const key = name === "ofdgoOpen" ? args[3]?.key : name === "ofdgoSaveSigned" || name === "ofdgoLoadImport" ? args[1]?.key : null;
 	const keyPassword = name === "ofdgoOpen" ? args[3]?.keyPassword : name === "ofdgoSaveSigned" || name === "ofdgoLoadImport" ? args[1]?.keyPassword : null;
@@ -34,10 +35,10 @@ async function handleMessage({ id, name, args }) {
 				};
 				channel.port2.postMessage(null);
 			};
-			if (importing) {
+			if (importing || converting) {
 				args.push((phase, completed, total, done) => {
-					self.postMessage({ id, type: "import", phase, completed, total });
-					finish(done, null, phase === "commit");
+					self.postMessage({ id, type: importing ? "import" : "conversion", phase, completed, total });
+					finish(done, null, importing && phase === "commit");
 				});
 			} else {
 				const file = args.pop();
@@ -74,7 +75,7 @@ async function handleMessage({ id, name, args }) {
 		const payload = await globalThis[name](...args);
 		signal?.throwIfAborted();
 		const result = typeof payload === "string" ? JSON.parse(payload) : payload;
-		if (signal && !importing && result.ok) {
+		if (signal && !importing && !converting && result.ok) {
 			operations.delete(id);
 			result.data.size = size;
 			self.postMessage({ id, type: "export", stage: "save" });
@@ -93,7 +94,7 @@ async function handleMessage({ id, name, args }) {
 		await output?.abort().catch(() => {});
 		const result = { id, ok: false, error: err.message };
 		if (signal?.aborted) {
-			result.error = importing ? "导入已取消" : "导出已取消";
+			result.error = importing ? "导入已取消" : converting ? "转换已取消" : "导出已取消";
 			result.canceled = true;
 		}
 		self.postMessage(result);

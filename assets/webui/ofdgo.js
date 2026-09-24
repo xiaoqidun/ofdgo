@@ -3215,6 +3215,14 @@ async function loadWASM() {
 			}
 			if (data.type === "progress") {
 				setProgress(data.text, data.percent);
+			} else if (data.type === "conversion") {
+				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && !el.cancelExportButton.disabled) {
+					if (data.phase === "open") setProgress("正在读取 PDF", null);
+					else if (data.phase === "pages") setProgress(data.completed ? `正在整理 ${data.completed} 页` : "正在整理页面", null);
+					else if (data.phase === "convert") setProgress(`正在转换 ${data.completed} / ${data.total} 页`, data.total ? 28 + data.completed / data.total * 22 : null);
+					else if (data.phase === "write.fonts") setProgress("正在处理字体", null);
+					else setProgress("正在生成 OFD", null);
+				}
 			} else if (data.type === "export") {
 				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.exporting) {
 					if (data.stage === "save") {
@@ -3344,7 +3352,15 @@ async function openOFD(file) {
 			setProgress("正在转换 PDF", 25);
 			await ensureWASM();
 			if (openSeq !== state.openSeq) return;
-			const converted = await callWASM("ofdgoConvertPDF", bytes);
+			let converted;
+			try {
+				converted = await callWASM("ofdgoConvertPDF", bytes);
+			} finally {
+				if (openSeq === state.openSeq) {
+					state.exportRequestID = 0;
+					el.cancelExportButton.hidden = true;
+				}
+			}
 			if (openSeq !== state.openSeq) return;
 			bytes = converted.bytes;
 			warnings = JSON.parse(converted.warnings || "null") || [];
@@ -3384,7 +3400,8 @@ async function openOFD(file) {
 		await openDocument({ pageIndex: 0, resetScroll: true, openSeq });
 	} catch (err) {
 		if (openSeq === state.openSeq) {
-			showError(err, !state.doc);
+			if (err.name === "AbortError") setStatus("转换已取消");
+			else showError(err, !state.doc);
 			setBusy(false);
 		}
 	}
@@ -7299,11 +7316,11 @@ async function callWASM(name, ...args) {
 	return new Promise((resolve, reject) => {
 		const id = ++wasmRequestID;
 		wasmRequests.set(id, { resolve, reject, openSeq: state.openSeq });
-		if (name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument" || name === "ofdgoSaveEncrypted" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
+		if (name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument" || name === "ofdgoSaveEncrypted" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
 			state.exportRequestID = id;
 			el.cancelExportButton.hidden = false;
 			el.cancelExportButton.disabled = false;
-			el.cancelExportButton.title = { ofdgoSaveDocument: "取消保存", ofdgoSaveEncrypted: "取消保存", ofdgoSaveSigned: "取消签署", ofdgoImportPages: "取消导入", ofdgoExportAttachment: "取消下载" }[name] || "取消导出";
+			el.cancelExportButton.title = { ofdgoConvertPDF: "取消转换", ofdgoSaveDocument: "取消保存", ofdgoSaveEncrypted: "取消保存", ofdgoSaveSigned: "取消签署", ofdgoImportPages: "取消导入", ofdgoExportAttachment: "取消下载" }[name] || "取消导出";
 			el.cancelExportButton.setAttribute("aria-label", el.cancelExportButton.title);
 		}
 		try {
