@@ -126,32 +126,19 @@ type BackendInfo struct {
 }
 
 // NewRenderBackends 创建内置后端组合，各项能力通过Info报告实际提供者
-// 入参: name canvas或gg
+// 入参: name 内置后端标识
 // 返回: RenderBackends 后端组合, error 未知后端错误
 func NewRenderBackends(name string) (RenderBackends, error) {
-	backends := defaultRenderBackends()
-	switch name {
-	case "canvas":
-	case "gg":
-		backends.Fonts = GGBackend{}
-		backends.Geometry = GGGeometryBackend{GeometryBackend: backends.Geometry}
-		backends.Compiler = GGBackend{}
-		backends.Raster = GGBackend{StrokeGeometry: backends.Geometry}
-	default:
+	if name != "canvas" {
 		return RenderBackends{}, fmt.Errorf("unknown render backend %q", name)
 	}
-	return backends, nil
+	return defaultRenderBackends(), nil
 }
 
 // RenderBackendInfos 列出内置组合及其实际能力，供原生程序和WASM共用
 // 返回: map[string]BackendInfo 后端能力
 func RenderBackendInfos() map[string]BackendInfo {
-	result := make(map[string]BackendInfo, 2)
-	for _, name := range []string{"canvas", "gg"} {
-		backends, _ := NewRenderBackends(name)
-		result[name] = backends.Info()
-	}
-	return result
+	return map[string]BackendInfo{"canvas": defaultRenderBackends().Info()}
 }
 
 // defaultRenderBackends 创建独立的默认配置

@@ -16,10 +16,17 @@ package ofdgo
 
 import "image/color"
 
+// OFDCompiler 使用库自有页面语义，字体和几何操作交给当前后端配置
+type OFDCompiler struct{}
+
+// Name 返回页面编译器标识
+// 返回: string 编译器标识
+func (OFDCompiler) Name() string { return "ofd" }
+
 // CompilePage 使用公共OFD语义和配置的字形、几何能力编译页面
 // 入参: r 渲染器, page 页面
 // 返回: *RasterPage 绘制页面, error 编译错误
-func (GGBackend) CompilePage(r *Renderer, page *PageContent) (*RasterPage, error) {
+func (OFDCompiler) CompilePage(r *Renderer, page *PageContent) (*RasterPage, error) {
 	box, err := r.GetPageBox(page)
 	if err != nil {
 		return nil, err
@@ -46,10 +53,10 @@ func (GGBackend) CompilePage(r *Renderer, page *PageContent) (*RasterPage, error
 	return c.page, nil
 }
 
-// PageText 提取与GG页面绘制相同定位的原文，不读取图片像素
+// PageText 提取与页面绘制相同定位的原文，不读取图片像素
 // 入参: r 渲染器, page 页面
 // 返回: *PageText 页面文字, error 定位错误
-func (GGBackend) PageText(r *Renderer, page *PageContent) (*PageText, error) {
+func (OFDCompiler) PageText(r *Renderer, page *PageContent) (*PageText, error) {
 	if _, err := r.GetPageBox(page); err != nil {
 		return nil, err
 	}
@@ -67,7 +74,7 @@ func (GGBackend) PageText(r *Renderer, page *PageContent) (*PageText, error) {
 // MeasureObject 复用文字和图形编译规则收集范围，不分配页面像素
 // 入参: r 渲染器, object 对象, options 度量上下文
 // 返回: ObjectMeasurement 对象范围与轮廓, error 度量错误
-func (GGBackend) MeasureObject(r *Renderer, object GraphicObject, options MeasureOptions) (ObjectMeasurement, error) {
+func (OFDCompiler) MeasureObject(r *Renderer, object GraphicObject, options MeasureOptions) (ObjectMeasurement, error) {
 	c, err := newSemanticCompiler(r)
 	if err != nil {
 		return ObjectMeasurement{}, err

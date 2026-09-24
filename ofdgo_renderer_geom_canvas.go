@@ -21,13 +21,10 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
-// canvasNativeStroke 判断描边是否仍由Canvas提供，组合几何不改变矢量描边编码
+// canvasNativeStroke 判断描边是否由Canvas提供
 // 入参: geometry 几何后端
 // 返回: bool 是否采用原生描边
 func canvasNativeStroke(geometry GeometryBackend) bool {
-	if combined, ok := geometry.(GGGeometryBackend); ok {
-		return canvasNativeStroke(combined.GeometryBackend)
-	}
 	_, ok := geometry.(CanvasBackend)
 	return ok
 }

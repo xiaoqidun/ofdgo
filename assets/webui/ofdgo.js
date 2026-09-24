@@ -3339,16 +3339,17 @@ function displayMode() {
 }
 
 function renderBackendLabel(name) {
-	return { svg: "SVG", canvas: "Canvas", gg: "GoGPU", "gg+canvas": "GoGPU + Canvas" }[name] || name || "无";
+	return { svg: "SVG", canvas: "Canvas", ofd: "OFD" }[name] || name || "无";
 }
 
 function updateRenderBackend() {
 	el.renderBackend.value = state.renderBackend;
 	el.renderDPI.value = String(state.renderDPI);
-	el.renderBackend.disabled = !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
-	el.renderDPI.disabled = el.renderBackend.disabled || displayMode() === "svg";
+	const disabled = !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
+	el.renderBackend.disabled = disabled || Object.keys(state.renderBackends).length < 2;
+	el.renderDPI.disabled = disabled || displayMode() === "svg";
 	el.renderDPI.title = displayMode() === "svg" ? "矢量预览无需DPI" : "预览DPI（仅位图）";
-	el.renderVectorButton.disabled = el.renderRasterButton.disabled = el.renderBackend.disabled || state.editing;
+	el.renderVectorButton.disabled = el.renderRasterButton.disabled = disabled || state.editing;
 	el.renderVectorButton.setAttribute("aria-pressed", String(displayMode() === "svg"));
 	el.renderRasterButton.setAttribute("aria-pressed", String(displayMode() === "raster"));
 	el.renderVectorButton.title = state.editing ? "编辑使用矢量显示" : "矢量显示";

@@ -15,6 +15,8 @@
 package ofdgo
 
 import (
+	"fmt"
+
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/font"
 )
@@ -34,12 +36,15 @@ func (CanvasBackend) OpenFont(data []byte) (FontMetrics, error) {
 	if err != nil {
 		return nil, err
 	}
-	return canvasFontMetrics{sfnt}, nil
+	metrics := &canvasFontMetrics{SFNT: sfnt}
+	metrics.fontShaper = &fontShaper{metrics: metrics}
+	return metrics, nil
 }
 
 // canvasFontMetrics 保留默认字体度量，写出时不更新原始时间
 type canvasFontMetrics struct {
 	*font.SFNT
+	*fontShaper
 }
 
 // Write 返回字体数据，不修改字体元信息
@@ -52,9 +57,36 @@ func (f canvasFontMetrics) Write() []byte {
 // 入参: glyph 字形编号, size 字号，单位为毫米
 // 返回: GeometryPath 字形路径, error 字形解析错误
 func (f canvasFontMetrics) GlyphOutline(glyph uint16, size float64) (GeometryPath, error) {
+	if !rasterPositive(size) || glyph >= f.NumGlyphs() {
+		return nil, fmt.Errorf("invalid glyph or size")
+	}
 	path := &canvas.Path{}
 	if err := f.GlyphPath(path, glyph, 0, 0, 0, size/float64(f.UnitsPerEm()), font.NoHinting); err != nil {
 		return nil, err
 	}
 	return *geometryFromCanvasPath(path), nil
+}
+
+// GlyphOutlines 批量提取字形轮廓，重复编号只解析一次
+// 入参: glyphs 字形编号, size 毫米字号
+// 返回: []GeometryPath 同序只读轮廓, error 轮廓错误
+func (f canvasFontMetrics) GlyphOutlines(glyphs []uint16, size float64) ([]GeometryPath, error) {
+	if !rasterPositive(size) {
+		return nil, fmt.Errorf("invalid glyph size")
+	}
+	result := make([]GeometryPath, len(glyphs))
+	paths := make(map[uint16]GeometryPath, len(glyphs))
+	for i, glyph := range glyphs {
+		path, ok := paths[glyph]
+		if !ok {
+			var err error
+			path, err = f.GlyphOutline(glyph, size)
+			if err != nil {
+				return nil, err
+			}
+			paths[glyph] = path
+		}
+		result[i] = path
+	}
+	return result, nil
 }
