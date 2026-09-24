@@ -26,6 +26,7 @@ let wasmRequestID = 0;
 let wasmRecoveryTimer = 0;
 let textMeasure = null;
 let credentialRequest = null;
+let cancelPageTouch = null;
 
 const state = {
 	composite: null,
@@ -5569,8 +5570,6 @@ el.finishPageSelection.addEventListener("click", () => {
 	syncPageSelection();
 	updateControls();
 });
-
-let cancelPageTouch = null;
 
 el.pageList.addEventListener("pointerdown", event => {
 	cancelPageTouch?.();

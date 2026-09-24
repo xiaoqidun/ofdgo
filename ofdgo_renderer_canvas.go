@@ -40,7 +40,7 @@ func init() {
 // 返回: RenderBackends 默认后端组合
 func defaultRenderBackends() RenderBackends {
 	backend := CanvasBackend{}
-	return RenderBackends{Resources: SFNTBackend{}, Fonts: backend, Geometry: backend, Compiler: backend, Raster: backend, SVG: backend, PDF: backend, EPS: backend}
+	return RenderBackends{FontResources: SFNTBackend{}, Fonts: backend, Geometry: backend, Compiler: backend, Raster: backend, SVG: backend, PDF: backend, EPS: backend}
 }
 
 // Name 返回后端标识

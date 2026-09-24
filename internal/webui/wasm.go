@@ -45,6 +45,79 @@ type exportWriter struct {
 	write js.Value
 }
 
+// apiResult 浏览器接口返回结果
+type apiResult struct {
+	OK            bool                     `json:"ok"`
+	Code          string                   `json:"code,omitempty"`
+	Error         string                   `json:"error,omitempty"`
+	Data          any                      `json:"data,omitempty"`
+	MissingGlyphs *ofdgo.MissingGlyphError `json:"missingGlyphs,omitempty"`
+	ReasonCode    ofdgo.EditReason         `json:"reasonCode,omitempty"`
+}
+
+// editorClipboard 当前编辑文档中的对象快照与剪贴板标识
+type editorClipboard struct {
+	token       string
+	objects     []ofdgo.GraphicObject
+	composite   *ofdgo.CompositeSelection
+	annotations *ofdgo.AnnotationSelection
+}
+
+// editorInfo 编辑文档信息与操作状态
+type editorInfo struct {
+	DocumentInfo
+	Revision         uint64   `json:"revision"`
+	CanUndo          bool     `json:"canUndo"`
+	CanRedo          bool     `json:"canRedo"`
+	PageCapabilities []uint   `json:"pageCapabilities"`
+	EditWarnings     []string `json:"editWarnings,omitempty"`
+}
+
+// editorPageInfo 页面操作结果与目标页面
+type editorPageInfo struct {
+	editorInfo
+	PageIndex int `json:"pageIndex"`
+}
+
+// editorSelectionInfo 对象复制结果及新选区
+type editorSelectionInfo struct {
+	editorInfo
+	SelectedIDs []string `json:"selectedIDs"`
+}
+
+// editorOutlineInfo 目录操作后的位置
+type editorOutlineInfo struct {
+	editorInfo
+	OutlinePath []int `json:"outlinePath"`
+}
+
+// annotationOptions 保存注解面板的输入，资源字节单独传输
+type annotationOptions struct {
+	Kind, ID, Text, Old, Creator, Pages, URI, Color string
+	Base                                            string
+	X, Y, Width, Height, Size, Angle                float64
+	Alpha                                           int
+	Tile                                            bool
+	Keep                                            bool
+	Target                                          int
+	Area                                            *ofdgo.Box
+}
+
+// currentSession 当前WebUI文档会话
+var currentSession *Session
+
+// currentEditor 当前编辑文档
+var currentEditor *ofdgo.Editor
+
+// pendingImport 待插页文档，仅保留文件数据与索引，不创建渲染会话
+var pendingImport *ofdgo.Reader
+
+// copiedObjects 当前对象剪贴板，不保存字体或图片的重复数据
+var copiedObjects *editorClipboard
+
+// copiedStyle 当前文档中的独立样式快照
+var copiedStyle *ofdgo.GraphicObject
+
 // Write 将数据块交给浏览器保存
 // 入参: data 导出数据
 // 返回: int 写入长度, error 错误信息
@@ -78,25 +151,6 @@ func awaitExport(fn js.Value, args ...any) error {
 	defer callback.Release()
 	fn.Invoke(append(args, callback)...)
 	return <-done
-}
-
-// currentSession 当前WebUI文档会话
-var currentSession *Session
-
-// pendingImport 待插页文档，仅保留文件数据与索引，不创建渲染会话
-var pendingImport *ofdgo.Reader
-
-// copiedStyle 当前文档中的独立样式快照
-var copiedStyle *ofdgo.GraphicObject
-
-// apiResult 浏览器接口返回结果
-type apiResult struct {
-	OK            bool                     `json:"ok"`
-	Code          string                   `json:"code,omitempty"`
-	Error         string                   `json:"error,omitempty"`
-	Data          any                      `json:"data,omitempty"`
-	MissingGlyphs *ofdgo.MissingGlyphError `json:"missingGlyphs,omitempty"`
-	ReasonCode    ofdgo.EditReason         `json:"reasonCode,omitempty"`
 }
 
 // RunWASM 注册浏览器WASM接口并阻塞运行
@@ -297,45 +351,6 @@ func openDocument(args []js.Value) (any, error) {
 	return currentSession.Summary(), nil
 }
 
-// credentialsFromJS 解析本次打开的口令或本机证书私钥
-// 入参: value 解锁表单数据
-// 返回: ofdgo.Credentials 会话凭据, error 错误信息
-func credentialsFromJS(value js.Value) (ofdgo.Credentials, error) {
-	credentials := ofdgo.Credentials{UserName: value.Get("userName").String()}
-	if keyValue := value.Get("key"); !keyValue.IsNull() && !keyValue.IsUndefined() {
-		key, err := bytesFromJS(keyValue)
-		if err != nil {
-			return credentials, err
-		}
-		defer clear(key)
-		certificate, err := bytesFromJS(value.Get("certificate"))
-		if err != nil {
-			return credentials, err
-		}
-		var password []byte
-		if field := value.Get("keyPassword"); !field.IsUndefined() && !field.IsNull() {
-			password, err = bytesFromJS(field)
-			if err != nil {
-				return credentials, err
-			}
-			defer clear(password)
-		}
-		signer, certificate, err := ofdgo.ParseSignatureIdentity(certificate, key, password)
-		if err != nil {
-			return credentials, ofdgo.ErrInvalidCredentials
-		}
-		decrypter, ok := signer.(crypto.Decrypter)
-		if !ok {
-			return credentials, ofdgo.ErrInvalidCredentials
-		}
-		credentials.Certificate, credentials.Decrypter = certificate, decrypter
-		return credentials, nil
-	}
-	var err error
-	credentials.Password, err = bytesFromJS(value.Get("password"))
-	return credentials, err
-}
-
 // configureDocument 更新当前会话的字体和注解设置
 // 入参: args 浏览器参数
 // 返回: any 文档信息, error 错误信息
@@ -376,70 +391,6 @@ func documentInfo(args []js.Value) (any, error) {
 		return map[string]bool{"detailsPending": true}, nil
 	}
 	return currentSession.Info(), nil
-}
-
-// securityFilesFromJS 读取会话内的本机证据文件
-// 入参: value 二进制数组列表
-// 返回: [][]byte 文件内容, error 错误信息
-func securityFilesFromJS(value js.Value) ([][]byte, error) {
-	if value.IsUndefined() || value.IsNull() {
-		return nil, nil
-	}
-	files := make([][]byte, value.Length())
-	for i := range files {
-		var err error
-		files[i], err = bytesFromJS(value.Index(i))
-		if err != nil {
-			return nil, err
-		}
-	}
-	return files, nil
-}
-
-// verifySignatures 按本机信任锚和离线证据重新验签，不设置联网回调
-// 入参: args 信任根、辅助证书、时间戳及撤销证据
-// 返回: any 分项报告, error 错误信息
-func verifySignatures(args []js.Value) (any, error) {
-	if currentSession == nil || len(args) == 0 {
-		return nil, fmt.Errorf("missing signature verification arguments")
-	}
-	input := args[0]
-	files := make(map[string][][]byte)
-	for _, name := range []string{"roots", "certificates", "timestampRoots", "tokens", "crls", "ocsp"} {
-		data, err := securityFilesFromJS(input.Get(name))
-		if err != nil {
-			return nil, err
-		}
-		files[name] = data
-	}
-	now := time.Now()
-	policy := ofdgo.SignaturePolicy{RejectWeakAlgorithms: true, RequireDocumentCoverage: true,
-		RequireTimestamp: input.Get("requireTimestamp").Bool(), RequireRevocation: input.Get("requireRevocation").Bool()}
-	options := []ofdgo.SignatureVerifyOption{
-		ofdgo.WithSignatureVerifyTime(now), ofdgo.WithSignaturePolicy(policy),
-		ofdgo.WithSignatureTrustCerts(files["roots"]...), ofdgo.WithSignatureCerts(files["certificates"]...),
-	}
-	if policy.RequireTimestamp || len(files["timestampRoots"])+len(files["tokens"]) > 0 {
-		options = append(options, ofdgo.WithSignatureTimestamp(ofdgo.SignatureTimestampOptions{
-			TrustCerts: files["timestampRoots"], Certificates: files["certificates"], Tokens: files["tokens"], Required: policy.RequireTimestamp, VerifyTime: &now,
-		}))
-	}
-	if policy.RequireRevocation || len(files["crls"])+len(files["ocsp"]) > 0 {
-		options = append(options, ofdgo.WithSignatureRevocation(ofdgo.SignatureRevocationOptions{
-			SignatureRevocationEvidence: ofdgo.SignatureRevocationEvidence{CRLs: files["crls"], OCSPResponses: files["ocsp"]},
-			Certificates:                append(files["certificates"], files["roots"]...), Required: policy.RequireRevocation, VerifyTime: &now,
-		}))
-	}
-	reports, err := currentSession.Reader.VerifySignatures(options...)
-	if err != nil {
-		return nil, err
-	}
-	infos := make([]SignatureInfo, len(reports))
-	for i, report := range reports {
-		infos[i] = signatureInfo(report)
-	}
-	currentSession.signatures, currentSession.signatureError, currentSession.signaturesRead = infos, nil, true
-	return map[string]any{"signatures": infos, "signatureCount": len(infos), "signatureError": ""}, nil
 }
 
 // exportAttachment 分块导出附件
@@ -820,42 +771,6 @@ func encodeResult(result apiResult) string {
 	return string(data)
 }
 
-// currentEditor 当前编辑文档
-var currentEditor *ofdgo.Editor
-
-// editorClipboard 当前编辑文档中的对象快照与剪贴板标识
-type editorClipboard struct {
-	token       string
-	objects     []ofdgo.GraphicObject
-	composite   *ofdgo.CompositeSelection
-	annotations *ofdgo.AnnotationSelection
-}
-
-// copiedObjects 当前对象剪贴板，不保存字体或图片的重复数据
-var copiedObjects *editorClipboard
-
-// editorInfo 编辑文档信息与操作状态
-type editorInfo struct {
-	DocumentInfo
-	Revision         uint64   `json:"revision"`
-	CanUndo          bool     `json:"canUndo"`
-	CanRedo          bool     `json:"canRedo"`
-	PageCapabilities []uint   `json:"pageCapabilities"`
-	EditWarnings     []string `json:"editWarnings,omitempty"`
-}
-
-// editorPageInfo 页面操作结果与目标页面
-type editorPageInfo struct {
-	editorInfo
-	PageIndex int `json:"pageIndex"`
-}
-
-// editorSelectionInfo 对象复制结果及新选区
-type editorSelectionInfo struct {
-	editorInfo
-	SelectedIDs []string `json:"selectedIDs"`
-}
-
 // editorSummary 获取当前编辑文档状态
 // 返回: editorInfo 文档信息
 func editorSummary() editorInfo {
@@ -1117,18 +1032,6 @@ func changeAnnotations(args []js.Value) (any, error) {
 			return fmt.Errorf("unsupported annotation action %q", args[2].String())
 		}
 	})
-}
-
-// annotationOptions 保存注解面板的输入，资源字节单独传输
-type annotationOptions struct {
-	Kind, ID, Text, Old, Creator, Pages, URI, Color string
-	Base                                            string
-	X, Y, Width, Height, Size, Angle                float64
-	Alpha                                           int
-	Tile                                            bool
-	Keep                                            bool
-	Target                                          int
-	Area                                            *ofdgo.Box
 }
 
 // readAnnotation 获取编辑面板所需的注解内容，不修改文件
@@ -2277,6 +2180,233 @@ func previewText(args []js.Value) (any, error) {
 	return map[string]any{"runs": runs, "scale": scale, "weight": text.Weight, "italic": text.Italic}, nil
 }
 
+// updateText 修改文字，null内容保留定位且允许替换字体，null字体数据和颜色沿用对象属性
+// 入参: args 页码、对象标识、内容、字体数据、字号和颜色
+// 返回: any 文档信息, error 错误信息
+func updateText(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	page, id := args[0].Int(), args[1].String()
+	object, err := currentEditor.Object(page, id)
+	if err != nil {
+		return nil, err
+	}
+	if object.Type != "TextObject" {
+		return nil, fmt.Errorf("object %q is not text", id)
+	}
+	if !args[3].IsNull() {
+		data, err := bytesFromJS(args[3])
+		if err != nil {
+			return nil, err
+		}
+		value := object.TextObject.Text()
+		if !args[2].IsNull() {
+			value = args[2].String()
+		}
+		if err := checkFontGlyphs(data, value); err != nil {
+			return nil, err
+		}
+		object.TextObject.Font, err = currentEditor.AddFont(FontFile{Data: data}, 0)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !args[2].IsNull() {
+		if args[4].Float() == object.TextObject.Size {
+			style := ofdgo.TextStyle{Font: object.TextObject.Font}
+			if !args[5].IsNull() {
+				var fill ofdgo.FillColor
+				if err := setEditorColor(&fill, args[5].String()); err != nil {
+					return nil, err
+				}
+				style.Color = fill.Value
+			}
+			revision := currentEditor.Revision()
+			if err := currentEditor.UpdateTextContent(page, id, args[2].String(), style); err != nil {
+				return nil, err
+			}
+			if currentEditor.Revision() == revision {
+				return editorSummary(), nil
+			}
+			return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+		}
+		object.TextObject.Size = args[4].Float()
+		_, layout := object.TextObject.TextLayout()
+		if err := currentEditor.LayoutText(&object.TextObject, args[2].String(), layout); err != nil {
+			return nil, err
+		}
+	}
+	if !args[5].IsNull() {
+		if err := setTextColor(&object.TextObject, args[5].String()); err != nil {
+			return nil, err
+		}
+	}
+	revision := currentEditor.Revision()
+	if err := currentEditor.UpdateObject(page, id, object); err != nil {
+		return nil, err
+	}
+	if currentEditor.Revision() == revision {
+		return editorSummary(), nil
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
+// checkFontGlyphs 只检查候选字体，不注册资源或改变文档
+// 入参: data 字体数据, value 待替换文字
+// 返回: error 缺字或字体格式错误
+func checkFontGlyphs(data []byte, value string) error {
+	missing, err := (FontFile{Data: data}).MissingGlyphs(0, value)
+	if err != nil {
+		return err
+	}
+	if missing != "" {
+		return &ofdgo.MissingGlyphError{Characters: missing}
+	}
+	return nil
+}
+
+// checkTextFont 为画布输入预检候选字体
+// 入参: args 字体数据和输入文字
+// 返回: any 空结果, error 缺字或字体格式错误
+func checkTextFont(args []js.Value) (any, error) {
+	data, err := bytesFromJS(args[0])
+	if err != nil {
+		return nil, err
+	}
+	return nil, checkFontGlyphs(data, args[1].String())
+}
+
+// styleText 批量修改文字样式，字体预检通过后交由库原子提交
+// 入参: args 页码、对象标识、字体数据、字号和颜色，null字体与颜色保持原值
+// 返回: any 文档信息, error 错误信息
+func styleText(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		page, ids := args[0].Int(), stringsFromJS(args[1])
+		style := ofdgo.TextStyle{Size: args[3].Float()}
+		if !args[2].IsNull() {
+			data, err := bytesFromJS(args[2])
+			if err != nil {
+				return err
+			}
+			var value strings.Builder
+			for _, id := range ids {
+				object, err := currentEditor.Object(page, id)
+				if err != nil {
+					return err
+				}
+				if object.Type != "TextObject" {
+					return fmt.Errorf("object %q is not text", id)
+				}
+				value.WriteString(object.TextObject.Text())
+			}
+			if err := checkFontGlyphs(data, value.String()); err != nil {
+				return err
+			}
+			style.Font, err = currentEditor.AddFont(FontFile{Data: data}, 0)
+			if err != nil {
+				return err
+			}
+		}
+		if !args[4].IsNull() {
+			var color ofdgo.FillColor
+			if err := setEditorColor(&color, args[4].String()); err != nil {
+				return err
+			}
+			style.Color = color.Value
+		}
+		return currentEditor.StyleText(page, ids, style)
+	})
+}
+
+// setTextColor 将浏览器RGB色值写入文字对象，保留颜色透明度
+// 入参: object 文字对象, value 十六进制色值
+// 返回: error 错误信息
+func setTextColor(object *ofdgo.TextObject, value string) error {
+	if object.FillColor == nil {
+		object.FillColor = &ofdgo.FillColor{}
+	}
+	return setEditorColor(object.FillColor, value)
+}
+
+// insertText 使用选定字体创建文字对象
+// 入参: args 页码、内容、字体数据、横纵坐标、字号、颜色、框宽、折行、对齐、行距、字距及左右和首行缩进
+// 返回: any 文档信息, error 错误信息
+func insertText(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	data, err := bytesFromJS(args[2])
+	if err != nil {
+		return nil, err
+	}
+	fontID, err := currentEditor.AddFont(FontFile{Data: data}, 0)
+	if err != nil {
+		return nil, err
+	}
+	page := args[0].Int()
+	content, err := currentSession.pageContent(page)
+	if err != nil {
+		return nil, err
+	}
+	box, err := currentSession.pageBox(page, content)
+	if err != nil {
+		return nil, err
+	}
+	x, y := args[3].Float(), args[4].Float()
+	width := args[7].Float()
+	if width == 0 {
+		width = 80
+	}
+	box = ofdgo.Box{X: x, Y: y, W: math.Min(width, box.W-x), H: box.H - y}
+	object := ofdgo.GraphicObject{Type: "TextObject", TextObject: ofdgo.TextObject{
+		Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
+		Font:     fontID, Size: args[5].Float(),
+	}}
+	if err := currentEditor.LayoutText(&object.TextObject, args[1].String(), ofdgo.TextLayout{Wrap: args[8].Bool(), Align: args[9].String(), LineHeight: args[10].Float(), LetterSpacing: args[11].Float(), LeftIndent: args[12].Float(), RightIndent: args[13].Float(), FirstLineIndent: args[14].Float()}); err != nil {
+		return nil, err
+	}
+	if err := setTextColor(&object.TextObject, args[6].String()); err != nil {
+		return nil, err
+	}
+	return insertEditorObject(page, object, args[15:])
+}
+
+// layoutText 调整文字框和段落排版，保留软换行前的原文
+// 入参: args 页码、对象标识、本地左侧偏移、宽度、折行、对齐、行距、字距及左右和首行缩进
+// 返回: any 文档信息, error 错误信息
+func layoutText(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	page, id := args[0].Int(), args[1].String()
+	object, err := currentEditor.Object(page, id)
+	if err != nil {
+		return nil, err
+	}
+	if object.Type != "TextObject" {
+		return nil, fmt.Errorf("object is not text")
+	}
+	if !args[2].IsNull() {
+		object.TextObject, err = object.TextObject.ResizeTextFrame(args[2].Float(), args[3].Float())
+		if err != nil {
+			return nil, err
+		}
+	}
+	value, _ := object.TextObject.TextLayout()
+	if err := currentEditor.LayoutText(&object.TextObject, value, ofdgo.TextLayout{Wrap: args[4].Bool(), Align: args[5].String(), LineHeight: args[6].Float(), LetterSpacing: args[7].Float(), LeftIndent: args[8].Float(), RightIndent: args[9].Float(), FirstLineIndent: args[10].Float()}); err != nil {
+		return nil, err
+	}
+	revision := currentEditor.Revision()
+	if err := currentEditor.UpdateObject(page, id, object); err != nil {
+		return nil, err
+	}
+	if currentEditor.Revision() == revision {
+		return editorSummary(), nil
+	}
+	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
+}
+
 // replaceImage 替换图片资源并更新预览
 // 入参: args 页码、对象标识、图片数据和适应方式
 // 返回: any 文档信息, error 错误信息
@@ -2651,12 +2781,6 @@ func batchPages(args []js.Value) (any, error) {
 	return editorPageInfo{info.(editorInfo), index}, nil
 }
 
-// editorOutlineInfo 目录操作后的位置
-type editorOutlineInfo struct {
-	editorInfo
-	OutlinePath []int `json:"outlinePath"`
-}
-
 // indexesFromJS 读取整数索引列表
 // 入参: value JavaScript数组
 // 返回: []int 索引列表
@@ -3007,155 +3131,6 @@ func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 	return editorSummary(), nil
 }
 
-// updateText 修改文字，null内容保留定位且允许替换字体，null字体数据和颜色沿用对象属性
-// 入参: args 页码、对象标识、内容、字体数据、字号和颜色
-// 返回: any 文档信息, error 错误信息
-func updateText(args []js.Value) (any, error) {
-	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being edited")
-	}
-	page, id := args[0].Int(), args[1].String()
-	object, err := currentEditor.Object(page, id)
-	if err != nil {
-		return nil, err
-	}
-	if object.Type != "TextObject" {
-		return nil, fmt.Errorf("object %q is not text", id)
-	}
-	if !args[3].IsNull() {
-		data, err := bytesFromJS(args[3])
-		if err != nil {
-			return nil, err
-		}
-		value := object.TextObject.Text()
-		if !args[2].IsNull() {
-			value = args[2].String()
-		}
-		if err := checkFontGlyphs(data, value); err != nil {
-			return nil, err
-		}
-		object.TextObject.Font, err = currentEditor.AddFont(FontFile{Data: data}, 0)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if !args[2].IsNull() {
-		if args[4].Float() == object.TextObject.Size {
-			style := ofdgo.TextStyle{Font: object.TextObject.Font}
-			if !args[5].IsNull() {
-				var fill ofdgo.FillColor
-				if err := setEditorColor(&fill, args[5].String()); err != nil {
-					return nil, err
-				}
-				style.Color = fill.Value
-			}
-			revision := currentEditor.Revision()
-			if err := currentEditor.UpdateTextContent(page, id, args[2].String(), style); err != nil {
-				return nil, err
-			}
-			if currentEditor.Revision() == revision {
-				return editorSummary(), nil
-			}
-			return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
-		}
-		object.TextObject.Size = args[4].Float()
-		_, layout := object.TextObject.TextLayout()
-		if err := currentEditor.LayoutText(&object.TextObject, args[2].String(), layout); err != nil {
-			return nil, err
-		}
-	}
-	if !args[5].IsNull() {
-		if err := setTextColor(&object.TextObject, args[5].String()); err != nil {
-			return nil, err
-		}
-	}
-	revision := currentEditor.Revision()
-	if err := currentEditor.UpdateObject(page, id, object); err != nil {
-		return nil, err
-	}
-	if currentEditor.Revision() == revision {
-		return editorSummary(), nil
-	}
-	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
-}
-
-// checkFontGlyphs 只检查候选字体，不注册资源或改变文档
-// 入参: data 字体数据, value 待替换文字
-// 返回: error 缺字或字体格式错误
-func checkFontGlyphs(data []byte, value string) error {
-	missing, err := (FontFile{Data: data}).MissingGlyphs(0, value)
-	if err != nil {
-		return err
-	}
-	if missing != "" {
-		return &ofdgo.MissingGlyphError{Characters: missing}
-	}
-	return nil
-}
-
-// checkTextFont 为画布输入预检候选字体
-// 入参: args 字体数据和输入文字
-// 返回: any 空结果, error 缺字或字体格式错误
-func checkTextFont(args []js.Value) (any, error) {
-	data, err := bytesFromJS(args[0])
-	if err != nil {
-		return nil, err
-	}
-	return nil, checkFontGlyphs(data, args[1].String())
-}
-
-// styleText 批量修改文字样式，字体预检通过后交由库原子提交
-// 入参: args 页码、对象标识、字体数据、字号和颜色，null字体与颜色保持原值
-// 返回: any 文档信息, error 错误信息
-func styleText(args []js.Value) (any, error) {
-	return changeObjects(func() error {
-		page, ids := args[0].Int(), stringsFromJS(args[1])
-		style := ofdgo.TextStyle{Size: args[3].Float()}
-		if !args[2].IsNull() {
-			data, err := bytesFromJS(args[2])
-			if err != nil {
-				return err
-			}
-			var value strings.Builder
-			for _, id := range ids {
-				object, err := currentEditor.Object(page, id)
-				if err != nil {
-					return err
-				}
-				if object.Type != "TextObject" {
-					return fmt.Errorf("object %q is not text", id)
-				}
-				value.WriteString(object.TextObject.Text())
-			}
-			if err := checkFontGlyphs(data, value.String()); err != nil {
-				return err
-			}
-			style.Font, err = currentEditor.AddFont(FontFile{Data: data}, 0)
-			if err != nil {
-				return err
-			}
-		}
-		if !args[4].IsNull() {
-			var color ofdgo.FillColor
-			if err := setEditorColor(&color, args[4].String()); err != nil {
-				return err
-			}
-			style.Color = color.Value
-		}
-		return currentEditor.StyleText(page, ids, style)
-	})
-}
-
-// setTextColor 将浏览器RGB色值写入文字对象，保留颜色透明度
-// 入参: object 文字对象, value 十六进制色值
-// 返回: error 错误信息
-func setTextColor(object *ofdgo.TextObject, value string) error {
-	if object.FillColor == nil {
-		object.FillColor = &ofdgo.FillColor{}
-	}
-	return setEditorColor(object.FillColor, value)
-}
-
 // setEditorColor 写入当前文档的RGB纯色，保留透明度并替换原颜色空间和索引
 // 入参: fill 颜色, value 十六进制色值
 // 返回: error 错误信息
@@ -3292,84 +3267,6 @@ func updatePathStyle(args []js.Value) (any, error) {
 		}
 		return currentEditor.UpdateObjects(page, objects)
 	})
-}
-
-// insertText 使用选定字体创建文字对象
-// 入参: args 页码、内容、字体数据、横纵坐标、字号、颜色、框宽、折行、对齐、行距、字距及左右和首行缩进
-// 返回: any 文档信息, error 错误信息
-func insertText(args []js.Value) (any, error) {
-	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being edited")
-	}
-	data, err := bytesFromJS(args[2])
-	if err != nil {
-		return nil, err
-	}
-	fontID, err := currentEditor.AddFont(FontFile{Data: data}, 0)
-	if err != nil {
-		return nil, err
-	}
-	page := args[0].Int()
-	content, err := currentSession.pageContent(page)
-	if err != nil {
-		return nil, err
-	}
-	box, err := currentSession.pageBox(page, content)
-	if err != nil {
-		return nil, err
-	}
-	x, y := args[3].Float(), args[4].Float()
-	width := args[7].Float()
-	if width == 0 {
-		width = 80
-	}
-	box = ofdgo.Box{X: x, Y: y, W: math.Min(width, box.W-x), H: box.H - y}
-	object := ofdgo.GraphicObject{Type: "TextObject", TextObject: ofdgo.TextObject{
-		Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
-		Font:     fontID, Size: args[5].Float(),
-	}}
-	if err := currentEditor.LayoutText(&object.TextObject, args[1].String(), ofdgo.TextLayout{Wrap: args[8].Bool(), Align: args[9].String(), LineHeight: args[10].Float(), LetterSpacing: args[11].Float(), LeftIndent: args[12].Float(), RightIndent: args[13].Float(), FirstLineIndent: args[14].Float()}); err != nil {
-		return nil, err
-	}
-	if err := setTextColor(&object.TextObject, args[6].String()); err != nil {
-		return nil, err
-	}
-	return insertEditorObject(page, object, args[15:])
-}
-
-// layoutText 调整文字框和段落排版，保留软换行前的原文
-// 入参: args 页码、对象标识、本地左侧偏移、宽度、折行、对齐、行距、字距及左右和首行缩进
-// 返回: any 文档信息, error 错误信息
-func layoutText(args []js.Value) (any, error) {
-	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being edited")
-	}
-	page, id := args[0].Int(), args[1].String()
-	object, err := currentEditor.Object(page, id)
-	if err != nil {
-		return nil, err
-	}
-	if object.Type != "TextObject" {
-		return nil, fmt.Errorf("object is not text")
-	}
-	if !args[2].IsNull() {
-		object.TextObject, err = object.TextObject.ResizeTextFrame(args[2].Float(), args[3].Float())
-		if err != nil {
-			return nil, err
-		}
-	}
-	value, _ := object.TextObject.TextLayout()
-	if err := currentEditor.LayoutText(&object.TextObject, value, ofdgo.TextLayout{Wrap: args[4].Bool(), Align: args[5].String(), LineHeight: args[6].Float(), LetterSpacing: args[7].Float(), LeftIndent: args[8].Float(), RightIndent: args[9].Float(), FirstLineIndent: args[10].Float()}); err != nil {
-		return nil, err
-	}
-	revision := currentEditor.Revision()
-	if err := currentEditor.UpdateObject(page, id, object); err != nil {
-		return nil, err
-	}
-	if currentEditor.Revision() == revision {
-		return editorSummary(), nil
-	}
-	return previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 }
 
 // editorBox 将库层毫米边界传递给画布交互层
@@ -3631,14 +3528,107 @@ func editorOperationProgress(callback js.Value) func(string, int, int) error {
 	}
 }
 
-// saveDocument 分块写出当前编辑文档或指定页面
-// 入参: args 数据写出回调、可选准备进度回调和可选页面索引
-// 返回: any 保存结果, error 错误信息
-func saveDocument(args []js.Value) (any, error) {
-	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being edited")
+// credentialsFromJS 解析本次打开的口令或本机证书私钥
+// 入参: value 解锁表单数据
+// 返回: ofdgo.Credentials 会话凭据, error 错误信息
+func credentialsFromJS(value js.Value) (ofdgo.Credentials, error) {
+	credentials := ofdgo.Credentials{UserName: value.Get("userName").String()}
+	if keyValue := value.Get("key"); !keyValue.IsNull() && !keyValue.IsUndefined() {
+		key, err := bytesFromJS(keyValue)
+		if err != nil {
+			return credentials, err
+		}
+		defer clear(key)
+		certificate, err := bytesFromJS(value.Get("certificate"))
+		if err != nil {
+			return credentials, err
+		}
+		var password []byte
+		if field := value.Get("keyPassword"); !field.IsUndefined() && !field.IsNull() {
+			password, err = bytesFromJS(field)
+			if err != nil {
+				return credentials, err
+			}
+			defer clear(password)
+		}
+		signer, certificate, err := ofdgo.ParseSignatureIdentity(certificate, key, password)
+		if err != nil {
+			return credentials, ofdgo.ErrInvalidCredentials
+		}
+		decrypter, ok := signer.(crypto.Decrypter)
+		if !ok {
+			return credentials, ofdgo.ErrInvalidCredentials
+		}
+		credentials.Certificate, credentials.Decrypter = certificate, decrypter
+		return credentials, nil
 	}
-	return saveEditor(currentEditor, args)
+	var err error
+	credentials.Password, err = bytesFromJS(value.Get("password"))
+	return credentials, err
+}
+
+// securityFilesFromJS 读取会话内的本机证据文件
+// 入参: value 二进制数组列表
+// 返回: [][]byte 文件内容, error 错误信息
+func securityFilesFromJS(value js.Value) ([][]byte, error) {
+	if value.IsUndefined() || value.IsNull() {
+		return nil, nil
+	}
+	files := make([][]byte, value.Length())
+	for i := range files {
+		var err error
+		files[i], err = bytesFromJS(value.Index(i))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return files, nil
+}
+
+// verifySignatures 按本机信任锚和离线证据重新验签，不设置联网回调
+// 入参: args 信任根、辅助证书、时间戳及撤销证据
+// 返回: any 分项报告, error 错误信息
+func verifySignatures(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) == 0 {
+		return nil, fmt.Errorf("missing signature verification arguments")
+	}
+	input := args[0]
+	files := make(map[string][][]byte)
+	for _, name := range []string{"roots", "certificates", "timestampRoots", "tokens", "crls", "ocsp"} {
+		data, err := securityFilesFromJS(input.Get(name))
+		if err != nil {
+			return nil, err
+		}
+		files[name] = data
+	}
+	now := time.Now()
+	policy := ofdgo.SignaturePolicy{RejectWeakAlgorithms: true, RequireDocumentCoverage: true,
+		RequireTimestamp: input.Get("requireTimestamp").Bool(), RequireRevocation: input.Get("requireRevocation").Bool()}
+	options := []ofdgo.SignatureVerifyOption{
+		ofdgo.WithSignatureVerifyTime(now), ofdgo.WithSignaturePolicy(policy),
+		ofdgo.WithSignatureTrustCerts(files["roots"]...), ofdgo.WithSignatureCerts(files["certificates"]...),
+	}
+	if policy.RequireTimestamp || len(files["timestampRoots"])+len(files["tokens"]) > 0 {
+		options = append(options, ofdgo.WithSignatureTimestamp(ofdgo.SignatureTimestampOptions{
+			TrustCerts: files["timestampRoots"], Certificates: files["certificates"], Tokens: files["tokens"], Required: policy.RequireTimestamp, VerifyTime: &now,
+		}))
+	}
+	if policy.RequireRevocation || len(files["crls"])+len(files["ocsp"]) > 0 {
+		options = append(options, ofdgo.WithSignatureRevocation(ofdgo.SignatureRevocationOptions{
+			SignatureRevocationEvidence: ofdgo.SignatureRevocationEvidence{CRLs: files["crls"], OCSPResponses: files["ocsp"]},
+			Certificates:                append(files["certificates"], files["roots"]...), Required: policy.RequireRevocation, VerifyTime: &now,
+		}))
+	}
+	reports, err := currentSession.Reader.VerifySignatures(options...)
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]SignatureInfo, len(reports))
+	for i, report := range reports {
+		infos[i] = signatureInfo(report)
+	}
+	currentSession.signatures, currentSession.signatureError, currentSession.signaturesRead = infos, nil, true
+	return map[string]any{"signatures": infos, "signatureCount": len(infos), "signatureError": ""}, nil
 }
 
 // saveEncrypted 以独立快照加密另存，不修改当前文档的输出策略
@@ -3788,6 +3778,16 @@ func saveSigned(args []js.Value) (any, error) {
 		return nil, err
 	}
 	return successResult(map[string]any{"mime": "application/ofd", "label": "OFD"}), nil
+}
+
+// saveDocument 分块写出当前编辑文档或指定页面
+// 入参: args 数据写出回调、可选准备进度回调和可选页面索引
+// 返回: any 保存结果, error 错误信息
+func saveDocument(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	return saveEditor(currentEditor, args)
 }
 
 // saveEditor 统一分块写出及进度取消，加密策略由库层执行

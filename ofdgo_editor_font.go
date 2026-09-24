@@ -16,14 +16,12 @@ package ofdgo
 
 import (
 	"bytes"
-	"encoding/binary"
+	"crypto/sha256"
 	"fmt"
 	"maps"
 	"slices"
 	"strconv"
 	"strings"
-
-	"github.com/tdewolff/font"
 )
 
 // editorFontUsage 汇总原文档字体的字符、显式字形及无法确定的引用
@@ -31,6 +29,47 @@ type editorFontUsage struct {
 	chars  map[rune]bool
 	glyphs map[uint16]bool
 	unsafe bool
+}
+
+// editorFontSubset 保存单个新增字体最近一次裁剪结果，不保留历史字形集合
+type editorFontSubset struct {
+	glyphs []uint16
+	data   []byte
+	mapped bool
+}
+
+// AddFont 注册OpenType字体，集合字体按索引提取，重复资源复用标识，引用后写入文档
+// 入参: file 字体文件, index 集合内字体索引，单字体为0
+// 返回: string 字体资源标识, error 错误信息
+func (e *Editor) AddFont(file FontFile, index int) (string, error) {
+	if e.backends.FontResources == nil {
+		return "", fmt.Errorf("font resources: %w", ErrBackendUnavailable)
+	}
+	parsed, err := e.backends.FontResources.OpenFontResource(file, index)
+	if err != nil {
+		return "", err
+	}
+	data := parsed.Data
+	key := editorResourceKey{checksum: sha256.Sum256(data)}
+	if id, ok := e.resourceID[key]; ok {
+		return id, nil
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return "", err
+	}
+	id := e.nextID()
+	definition := parsed.Font
+	definition.ID = id
+	resource := editorResource{
+		name: e.packageName("Res/Fonts/Font_" + id + parsed.Extension),
+		data: data,
+		font: &definition,
+	}
+	resource.font.FontFile = "/" + resource.name
+	e.resources = append(e.resources, resource)
+	e.fonts[id] = parsed
+	e.resourceID[key] = id
+	return id, nil
 }
 
 // newEditorFontUsage 创建字体用字记录
@@ -84,110 +123,11 @@ func (u *editorFontUsage) merge(other *editorFontUsage, unsafe bool) {
 	}
 }
 
-// subsetSourceFont 裁剪静态TrueType原有字体，保留字形编号、复合依赖、度量及提示指令
-// 集合、字形替换、可变、彩色和未知表保持原样，不对不完整的引用或异常字体猜测修复
-// 入参: data 字体数据, usage 全包用字记录
-// 返回: []byte 更小的字体子集，无确定收益时为空
-func subsetSourceFont(data []byte, usage *editorFontUsage) []byte {
-	if usage.unsafe || len(usage.chars)+len(usage.glyphs) == 0 || bytes.HasPrefix(data, []byte("ttcf")) {
-		return nil
-	}
-	sfnt, err := font.ParseSFNT(data, 0)
-	if err != nil || !sfnt.IsTrueType {
-		return nil
-	}
-	for tag := range sfnt.Tables {
-		switch tag {
-		case "cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "cvt ", "fpgm", "prep", "gasp", "kern", "vhea", "vmtx", "hdmx", "LTSH", "VDMX", "GDEF", "GPOS", "DSIG", "FFTM":
-		default:
-			return nil
-		}
-	}
-	var unicodeTables []uint16
-	subtables := make(map[uint32]uint16)
-	for i, record := range sfnt.Cmap.EncodingRecords {
-		if record.Format == 14 {
-			return nil
-		}
-		offset := binary.BigEndian.Uint32(sfnt.Tables["cmap"][8+8*i:])
-		index, ok := subtables[offset]
-		if !ok {
-			index = uint16(len(subtables))
-			subtables[offset] = index
-		}
-		if record.PlatformID == 0 || record.PlatformID == 3 && (record.EncodingID == 1 || record.EncodingID == 10) {
-			unicodeTables = append(unicodeTables, index)
-		}
-	}
-	if len(unicodeTables) == 0 {
-		return nil
-	}
-	glyphs := maps.Clone(usage.glyphs)
-	glyphs[0] = true
-	mapping := make(map[rune]uint16, len(usage.chars))
-	for char := range usage.chars {
-		id := sfnt.GlyphIndex(char)
-		for _, index := range unicodeTables {
-			if alternate, ok := sfnt.Cmap.Subtables[index].Get(char); ok && alternate != id {
-				return nil
-			}
-		}
-		glyphs[id] = true
-		if id != 0 {
-			mapping[char] = id
-		}
-	}
-	for id := range glyphs {
-		if id >= sfnt.NumGlyphs() {
-			return nil
-		}
-		dependencies, err := sfnt.Glyf.Dependencies(id)
-		if err != nil {
-			return nil
-		}
-		for _, dependency := range dependencies {
-			glyphs[dependency] = true
-		}
-	}
-	var glyf, loca []byte
-	for id := 0; id <= int(sfnt.NumGlyphs()); id++ {
-		if sfnt.Head.IndexToLocFormat == 0 {
-			loca = binary.BigEndian.AppendUint16(loca, uint16(len(glyf)/2))
-		} else {
-			loca = binary.BigEndian.AppendUint32(loca, uint32(len(glyf)))
-		}
-		if id < int(sfnt.NumGlyphs()) && glyphs[uint16(id)] {
-			glyf = append(glyf, sfnt.Glyf.Get(uint16(id))...)
-			if len(glyf)%2 != 0 {
-				glyf = append(glyf, 0)
-			}
-		}
-	}
-	tables := maps.Clone(sfnt.Tables)
-	tables["glyf"], tables["loca"] = glyf, loca
-	tables["cmap"] = buildCmapTable(uint16(sfnt.NumGlyphs()), mapping)
-	tables["head"] = bytes.Clone(tables["head"])
-	clear(tables["head"][8:12])
-	delete(tables, "DSIG")
-	result, err := serializeOTF(tables)
-	if err != nil || len(result) >= len(data) {
-		return nil
-	}
-	return result
-}
-
-// editorFontSubset 保存单个新增字体最近一次裁剪结果，不保留历史字形集合
-type editorFontSubset struct {
-	glyphs []uint16
-	data   []byte
-	mapped bool
-}
-
 // subsetFonts 收集新增字体实际使用的字形，仅裁剪保存结果，保留完整编辑字体
 // 入参: progress 保存进度回调
 // 返回: map[string][]byte 包内字体子集, error 错误信息
 func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error) {
-	if e.backends.Resources == nil {
+	if e.backends.FontResources == nil {
 		return nil, nil
 	}
 	used := make(map[string]map[uint16]bool)
@@ -196,16 +136,16 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		if resource.font == nil {
 			continue
 		}
-		sfnt := e.fonts[resource.font.ID]
-		if sfnt == nil {
+		resourceFont := e.fonts[resource.font.ID]
+		if resourceFont == nil {
 			var err error
-			sfnt, err = e.backends.Resources.OpenFontResource(FontFile{Data: resource.data}, 0)
+			resourceFont, err = e.backends.FontResources.OpenFontResource(FontFile{Data: resource.data}, 0)
 			if err != nil {
 				return nil, err
 			}
-			e.fonts[resource.font.ID] = sfnt
+			e.fonts[resource.font.ID] = resourceFont
 		}
-		if sfnt.CanSubset {
+		if resourceFont.CanSubset {
 			used[resource.font.ID] = make(map[uint16]bool)
 		}
 	}
@@ -320,7 +260,7 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		}
 		slices.Sort(ids)
 		if resource.subset == nil || resource.subset.mapped != mapped[resource.font.ID] || !slices.Equal(resource.subset.glyphs, ids) {
-			data, err := e.backends.Resources.SubsetFont(resource.data, ids, mapped[resource.font.ID])
+			data, err := e.backends.FontResources.SubsetFont(resource.data, ids, mapped[resource.font.ID])
 			if err != nil {
 				return nil, fmt.Errorf("subset font %s: %w", resource.font.FontName, err)
 			}
@@ -337,46 +277,4 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		return nil, err
 	}
 	return result, nil
-}
-
-// subsetEditorFont 裁剪TrueType字形及复合依赖，保留字符映射、名称、度量和提示指令
-// 入参: data 字体数据, glyphs 已排序的字形编号，包含0, mapped 是否保留显式字形编号
-// 返回: []byte 字体子集, error 错误信息
-func subsetEditorFont(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
-	sfnt, err := font.ParseSFNT(bytes.Clone(data), 0)
-	if err != nil {
-		return nil, err
-	}
-	if mapped {
-		usage := newEditorFontUsage()
-		for _, id := range glyphs {
-			usage.glyphs[id] = true
-			for _, char := range sfnt.Cmap.ToUnicode(id) {
-				usage.chars[char] = true
-			}
-		}
-		tables := make(map[string][]byte)
-		for _, tag := range []string{"cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "cvt ", "fpgm", "prep", "gasp"} {
-			if table := sfnt.Tables[tag]; table != nil {
-				tables[tag] = table
-			}
-		}
-		fixed, err := serializeOTF(tables)
-		if err != nil {
-			return nil, err
-		}
-		if subset := subsetSourceFont(fixed, usage); subset != nil {
-			return subset, nil
-		}
-		return fixed, nil
-	}
-	subset, err := sfnt.Subset(glyphs, font.SubsetOptions{Tables: []string{
-		"cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "glyf", "loca", "cvt ", "fpgm", "prep", "gasp",
-	}})
-	if err != nil {
-		return nil, err
-	}
-	subset.Tables["name"] = sfnt.Tables["name"]
-	clear(subset.Tables["head"][8:12])
-	return serializeOTF(subset.Tables)
 }

@@ -39,6 +39,97 @@ type FontFile = ofdgo.FontFile
 // FontInfo OFD字体信息
 type FontInfo = ofdgo.FontInfo
 
+// Session WebUI文档会话
+type Session struct {
+	Reader          *ofdgo.Reader
+	Renderer        *ofdgo.Renderer
+	fontFS          *ofdgo.FontFS
+	doc             *ofdgo.Document
+	pageCache       map[int]*ofdgo.PageContent
+	boxCache        []pageBoxInfo
+	textCache       map[int]*ofdgo.PageText
+	svgFonts        map[string][]byte
+	fontScan        *ofdgo.FontInfoScanner
+	fontInfos       []FontInfo
+	fontsRead       bool
+	fontAnnotations bool
+	signatures      []SignatureInfo
+	signatureError  error
+	signaturesRead  bool
+	editing         bool
+}
+
+// pageBoxInfo 按页索引缓存真实区域，valid区分未读取与零值区域
+type pageBoxInfo struct {
+	box   ofdgo.Box
+	valid bool
+}
+
+// DocumentInfo 文档信息
+type DocumentInfo struct {
+	Encryption      EncryptionInfo   `json:"encryption"`
+	Version         string           `json:"version"`
+	DocType         string           `json:"docType"`
+	Title           string           `json:"title"`
+	Author          string           `json:"author"`
+	Subject         string           `json:"subject"`
+	CreationDate    string           `json:"creationDate"`
+	ModDate         string           `json:"modDate"`
+	PageCount       int              `json:"pageCount"`
+	FontCount       int              `json:"fontCount"`
+	SignatureCount  int              `json:"signatureCount"`
+	SignatureError  string           `json:"signatureError,omitempty"`
+	AttachmentError string           `json:"attachmentError,omitempty"`
+	Attachments     []AttachmentInfo `json:"attachments,omitempty"`
+	Fonts           []FontInfo       `json:"fonts"`
+	Signatures      []SignatureInfo  `json:"signatures"`
+	Pages           []PageInfo       `json:"pages"`
+	Outlines        []OutlineInfo    `json:"outlines,omitempty"`
+	DetailsPending  bool             `json:"detailsPending,omitempty"`
+}
+
+// OutlineInfo 目录节点信息
+type OutlineInfo = ofdgo.OutlineInfo
+
+// AttachmentInfo 可见附件信息，Size单位为KB
+type AttachmentInfo struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Format   string   `json:"format,omitempty"`
+	Size     *float64 `json:"size,omitempty"`
+	FileName string   `json:"fileName"`
+}
+
+// PageInfo 页面信息
+type PageInfo struct {
+	Index  int     `json:"index"`
+	ID     string  `json:"id"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+// PageSVG 页面SVG结果
+type PageSVG struct {
+	Index       int                    `json:"index"`
+	Number      int                    `json:"number"`
+	ID          string                 `json:"id"`
+	Width       float64                `json:"width"`
+	Height      float64                `json:"height"`
+	SVG         string                 `json:"svg"`
+	Links       []ofdgo.PageLink       `json:"-"`
+	Fonts       []ofdgo.SVGFont        `json:"-"`
+	Images      []ofdgo.SVGImage       `json:"-"`
+	Annotations []ofdgo.AnnotationInfo `json:"annotations,omitempty"`
+}
+
+// ExportFormat 导出格式
+type ExportFormat struct {
+	Value     string `json:"value"`
+	Label     string `json:"label"`
+	Extension string `json:"extension"`
+	MIME      string `json:"mime"`
+}
+
 // SignatureInfo 签名验证信息
 type SignatureInfo struct {
 	DocIndex             int                  `json:"docIndex"`
@@ -144,110 +235,12 @@ type SignatureStampInfo struct {
 	Height   float64 `json:"height,omitempty"`
 }
 
-// Session WebUI文档会话
-type Session struct {
-	Reader          *ofdgo.Reader
-	Renderer        *ofdgo.Renderer
-	fontFS          *ofdgo.FontFS
-	doc             *ofdgo.Document
-	pageCache       map[int]*ofdgo.PageContent
-	boxCache        []pageBoxInfo
-	textCache       map[int]*ofdgo.PageText
-	svgFonts        map[string][]byte
-	fontScan        *ofdgo.FontInfoScanner
-	fontInfos       []FontInfo
-	fontsRead       bool
-	fontAnnotations bool
-	signatures      []SignatureInfo
-	signatureError  error
-	signaturesRead  bool
-	editing         bool
-}
-
-// pageBoxInfo 按页索引缓存真实区域，valid区分未读取与零值区域
-type pageBoxInfo struct {
-	box   ofdgo.Box
-	valid bool
-}
-
-// DocumentInfo 文档信息
-type DocumentInfo struct {
-	Encryption      EncryptionInfo   `json:"encryption"`
-	Version         string           `json:"version"`
-	DocType         string           `json:"docType"`
-	Title           string           `json:"title"`
-	Author          string           `json:"author"`
-	Subject         string           `json:"subject"`
-	CreationDate    string           `json:"creationDate"`
-	ModDate         string           `json:"modDate"`
-	PageCount       int              `json:"pageCount"`
-	FontCount       int              `json:"fontCount"`
-	SignatureCount  int              `json:"signatureCount"`
-	SignatureError  string           `json:"signatureError,omitempty"`
-	AttachmentError string           `json:"attachmentError,omitempty"`
-	Attachments     []AttachmentInfo `json:"attachments,omitempty"`
-	Fonts           []FontInfo       `json:"fonts"`
-	Signatures      []SignatureInfo  `json:"signatures"`
-	Pages           []PageInfo       `json:"pages"`
-	Outlines        []OutlineInfo    `json:"outlines,omitempty"`
-	DetailsPending  bool             `json:"detailsPending,omitempty"`
-}
-
 // EncryptionInfo 仅向界面传递非敏感加密状态
 type EncryptionInfo struct {
 	Encrypted bool     `json:"encrypted"`
 	Method    string   `json:"method,omitempty"`
 	Users     []string `json:"users,omitempty"`
 	Layers    int      `json:"layers,omitempty"`
-}
-
-// encryptionInfo 获取当前文档的加密来源，不包含凭据
-// 返回: EncryptionInfo 加密状态
-func (s *Session) encryptionInfo() EncryptionInfo {
-	info := s.Reader.Encryption()
-	return EncryptionInfo{Encrypted: info.Encrypted, Method: info.Method, Users: info.Users, Layers: info.Layers}
-}
-
-// OutlineInfo 目录节点信息
-type OutlineInfo = ofdgo.OutlineInfo
-
-// AttachmentInfo 可见附件信息，Size单位为KB
-type AttachmentInfo struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Format   string   `json:"format,omitempty"`
-	Size     *float64 `json:"size,omitempty"`
-	FileName string   `json:"fileName"`
-}
-
-// PageInfo 页面信息
-type PageInfo struct {
-	Index  int     `json:"index"`
-	ID     string  `json:"id"`
-	Width  float64 `json:"width"`
-	Height float64 `json:"height"`
-}
-
-// PageSVG 页面SVG结果
-type PageSVG struct {
-	Index       int                    `json:"index"`
-	Number      int                    `json:"number"`
-	ID          string                 `json:"id"`
-	Width       float64                `json:"width"`
-	Height      float64                `json:"height"`
-	SVG         string                 `json:"svg"`
-	Links       []ofdgo.PageLink       `json:"-"`
-	Fonts       []ofdgo.SVGFont        `json:"-"`
-	Images      []ofdgo.SVGImage       `json:"-"`
-	Annotations []ofdgo.AnnotationInfo `json:"annotations,omitempty"`
-}
-
-// ExportFormat 导出格式
-type ExportFormat struct {
-	Value     string `json:"value"`
-	Label     string `json:"label"`
-	Extension string `json:"extension"`
-	MIME      string `json:"mime"`
 }
 
 // supportedExportFormats 导出格式列表
@@ -258,30 +251,6 @@ var supportedExportFormats = []ExportFormat{
 	{Value: "png", Label: "PNG", Extension: "png", MIME: "image/png"},
 	{Value: "jpg", Label: "JPG", Extension: "jpg", MIME: "image/jpeg"},
 	{Value: "txt", Label: "TXT", Extension: "txt", MIME: "text/plain"},
-}
-
-// ExportFormats 获取导出格式
-// 返回: []ExportFormat 导出格式列表
-func ExportFormats() []ExportFormat {
-	formats := make([]ExportFormat, len(supportedExportFormats))
-	copy(formats, supportedExportFormats)
-	return formats
-}
-
-// exportFormat 获取导出格式
-// 入参: value 格式值
-// 返回: ExportFormat 导出格式, bool 是否支持
-func exportFormat(value string) (ExportFormat, bool) {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "jpeg" {
-		value = "jpg"
-	}
-	for _, format := range supportedExportFormats {
-		if format.Value == value {
-			return format, true
-		}
-	}
-	return ExportFormat{}, false
 }
 
 // Open 打开浏览器内存中的OFD文档
@@ -647,6 +616,64 @@ func (s *Session) SVGFontData(name string) ([]byte, error) {
 	return data, nil
 }
 
+// pageContent 读取页面，复用最近一次解析结果
+// 入参: index 页面索引
+// 返回: *ofdgo.PageContent 页面内容, error 错误信息
+func (s *Session) pageContent(index int) (*ofdgo.PageContent, error) {
+	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	if page, ok := s.pageCache[index]; ok {
+		return page, nil
+	}
+	clear(s.pageCache)
+	page, err := s.Reader.PageContentByIndex(index)
+	if err != nil {
+		return nil, err
+	}
+	s.pageCache[index] = page
+	return page, nil
+}
+
+// pageBox 获取页面物理区域
+// 入参: index 页面索引, page 页面内容
+// 返回: ofdgo.Box 页面物理区域, error 错误信息
+func (s *Session) pageBox(index int, page *ofdgo.PageContent) (ofdgo.Box, error) {
+	if cached := s.boxCache[index]; cached.valid {
+		return cached.box, nil
+	}
+	box, err := s.Renderer.GetPageBox(page)
+	if err != nil {
+		return ofdgo.Box{}, err
+	}
+	s.boxCache[index] = pageBoxInfo{box: box, valid: true}
+	return box, nil
+}
+
+// ExportFormats 获取导出格式
+// 返回: []ExportFormat 导出格式列表
+func ExportFormats() []ExportFormat {
+	formats := make([]ExportFormat, len(supportedExportFormats))
+	copy(formats, supportedExportFormats)
+	return formats
+}
+
+// exportFormat 获取导出格式
+// 入参: value 格式值
+// 返回: ExportFormat 导出格式, bool 是否支持
+func exportFormat(value string) (ExportFormat, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "jpeg" {
+		value = "jpg"
+	}
+	for _, format := range supportedExportFormats {
+		if format.Value == value {
+			return format, true
+		}
+	}
+	return ExportFormat{}, false
+}
+
 // ExportPage 导出单页
 // 入参: index 页面索引, value 导出格式, dpi 图片DPI, writer 输出流
 // 返回: ExportFormat 导出格式, error 错误信息
@@ -664,6 +691,48 @@ func (s *Session) ExportPage(index int, value string, dpi float64, writer io.Wri
 		renderer.DPI = dpi
 	}
 	return format, renderer.RenderTo(page, writer, format.Value)
+}
+
+// ExportDocument 导出文档为PDF、TXT或逐页打包ZIP
+// 入参: value 导出格式, dpi 图片DPI, writer 输出流, indices 零基页面索引，省略则全部
+// 返回: ExportFormat 导出格式, error 错误信息
+func (s *Session) ExportDocument(value string, dpi float64, writer io.Writer, indices ...int) (ExportFormat, error) {
+	format, ok := exportFormat(value)
+	if !ok {
+		return ExportFormat{}, fmt.Errorf("unsupported export format %s", value)
+	}
+	if format.Value == "pdf" {
+		return format, s.ExportPDF(writer, indices...)
+	}
+	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
+		return ExportFormat{}, fmt.Errorf("ofd document is not opened")
+	}
+	if format.Value == "txt" {
+		return format, s.Renderer.RenderToMultiPageText(writer, indices...)
+	}
+	renderer := *s.Renderer
+	if dpi > 0 && (format.Value == "png" || format.Value == "jpg") {
+		renderer.DPI = dpi
+	}
+	err := renderer.RenderToZIP(writer, format.Value, indices...)
+	return ExportFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}, err
+}
+
+// ExportPDF 导出文档为PDF
+// 入参: writer 输出流, indices 零基页面索引，省略则全部
+// 返回: error 错误信息
+func (s *Session) ExportPDF(writer io.Writer, indices ...int) error {
+	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
+		return fmt.Errorf("ofd document is not opened")
+	}
+	return s.Renderer.RenderToMultiPagePDF(writer, indices...)
+}
+
+// encryptionInfo 获取当前文档的加密来源，不包含凭据
+// 返回: EncryptionInfo 加密状态
+func (s *Session) encryptionInfo() EncryptionInfo {
+	info := s.Reader.Encryption()
+	return EncryptionInfo{Encrypted: info.Encrypted, Method: info.Method, Users: info.Users, Layers: info.Layers}
 }
 
 // signatureInfos 获取签名验证信息
@@ -854,73 +923,4 @@ func signatureStampInfos(positions []ofdgo.SignatureStampPosition) []SignatureSt
 		})
 	}
 	return infos
-}
-
-// ExportDocument 导出文档为PDF、TXT或逐页打包ZIP
-// 入参: value 导出格式, dpi 图片DPI, writer 输出流, indices 零基页面索引，省略则全部
-// 返回: ExportFormat 导出格式, error 错误信息
-func (s *Session) ExportDocument(value string, dpi float64, writer io.Writer, indices ...int) (ExportFormat, error) {
-	format, ok := exportFormat(value)
-	if !ok {
-		return ExportFormat{}, fmt.Errorf("unsupported export format %s", value)
-	}
-	if format.Value == "pdf" {
-		return format, s.ExportPDF(writer, indices...)
-	}
-	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
-		return ExportFormat{}, fmt.Errorf("ofd document is not opened")
-	}
-	if format.Value == "txt" {
-		return format, s.Renderer.RenderToMultiPageText(writer, indices...)
-	}
-	renderer := *s.Renderer
-	if dpi > 0 && (format.Value == "png" || format.Value == "jpg") {
-		renderer.DPI = dpi
-	}
-	err := renderer.RenderToZIP(writer, format.Value, indices...)
-	return ExportFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}, err
-}
-
-// ExportPDF 导出文档为PDF
-// 入参: writer 输出流, indices 零基页面索引，省略则全部
-// 返回: error 错误信息
-func (s *Session) ExportPDF(writer io.Writer, indices ...int) error {
-	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
-		return fmt.Errorf("ofd document is not opened")
-	}
-	return s.Renderer.RenderToMultiPagePDF(writer, indices...)
-}
-
-// pageContent 读取页面，复用最近一次解析结果
-// 入参: index 页面索引
-// 返回: *ofdgo.PageContent 页面内容, error 错误信息
-func (s *Session) pageContent(index int) (*ofdgo.PageContent, error) {
-	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
-		return nil, fmt.Errorf("ofd document is not opened")
-	}
-	if page, ok := s.pageCache[index]; ok {
-		return page, nil
-	}
-	clear(s.pageCache)
-	page, err := s.Reader.PageContentByIndex(index)
-	if err != nil {
-		return nil, err
-	}
-	s.pageCache[index] = page
-	return page, nil
-}
-
-// pageBox 获取页面物理区域
-// 入参: index 页面索引, page 页面内容
-// 返回: ofdgo.Box 页面物理区域, error 错误信息
-func (s *Session) pageBox(index int, page *ofdgo.PageContent) (ofdgo.Box, error) {
-	if cached := s.boxCache[index]; cached.valid {
-		return cached.box, nil
-	}
-	box, err := s.Renderer.GetPageBox(page)
-	if err != nil {
-		return ofdgo.Box{}, err
-	}
-	s.boxCache[index] = pageBoxInfo{box: box, valid: true}
-	return box, nil
 }

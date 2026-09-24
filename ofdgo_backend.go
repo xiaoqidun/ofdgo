@@ -20,7 +20,6 @@ import (
 	"image"
 	"io"
 	"reflect"
-	"sync"
 )
 
 // ErrBackendUnavailable 表示未配置所需后端，不会自动切换其他实现
@@ -106,83 +105,32 @@ type EPSBackend interface {
 // RenderBackends 按职责组合后端，nil表示明确禁用，不隐式回退
 // 实例及其Renderer需串行使用，第三方实现无需引用任何内置绘图库
 type RenderBackends struct {
-	Resources FontResourceBackend
-	Fonts     FontBackend
-	Geometry  GeometryBackend
-	Compiler  PageCompiler
-	Raster    RasterBackend
-	SVG       SVGBackend
-	PDF       PDFBackend
-	EPS       EPSBackend
+	FontResources FontResourceBackend
+	Fonts         FontBackend
+	Geometry      GeometryBackend
+	Compiler      PageCompiler
+	Raster        RasterBackend
+	SVG           SVGBackend
+	PDF           PDFBackend
+	EPS           EPSBackend
 }
 
 // BackendInfo 描述各项能力实际使用的后端，空标识表示未配置
 type BackendInfo struct {
-	Resources string `json:"resources"`
-	Fonts     string `json:"fonts"`
-	Geometry  string `json:"geometry"`
-	Compiler  string `json:"compiler"`
-	Raster    string `json:"raster"`
-	SVG       string `json:"svg"`
-	PDF       string `json:"pdf"`
-	EPS       string `json:"eps"`
-}
-
-// NewRenderBackends 创建已注册后端组合，各项能力通过Info报告实际提供者
-// 入参: name 已注册后端标识
-// 返回: RenderBackends 后端组合, error 未知后端错误
-func NewRenderBackends(name string) (RenderBackends, error) {
-	backendRegistry.RLock()
-	factory := backendRegistry.factories[name]
-	backendRegistry.RUnlock()
-	if factory == nil {
-		return RenderBackends{}, fmt.Errorf("unknown render backend %q", name)
-	}
-	return factory(), nil
-}
-
-// RenderBackendInfos 列出已注册组合及其实际能力，供原生程序和WASM共用
-// 返回: map[string]BackendInfo 后端能力
-func RenderBackendInfos() map[string]BackendInfo {
-	backendRegistry.RLock()
-	factories := make(map[string]func() RenderBackends, len(backendRegistry.factories))
-	for name, factory := range backendRegistry.factories {
-		factories[name] = factory
-	}
-	backendRegistry.RUnlock()
-	result := make(map[string]BackendInfo, len(factories))
-	for name, factory := range factories {
-		result[name] = factory().Info()
-	}
-	return result
-}
-
-// backendRegistry 保存后端工厂，不共享有状态的后端实例
-var backendRegistry = struct {
-	sync.RWMutex
-	factories map[string]func() RenderBackends
-}{factories: make(map[string]func() RenderBackends)}
-
-// RegisterRenderBackend 注册后端组合，工厂应返回独立实例，重复标识不会覆盖已有实现
-// 入参: name 后端标识, factory 后端工厂
-// 返回: error 无效或重复注册错误
-func RegisterRenderBackend(name string, factory func() RenderBackends) error {
-	if name == "" || factory == nil {
-		return fmt.Errorf("backend name and factory are required")
-	}
-	backendRegistry.Lock()
-	defer backendRegistry.Unlock()
-	if _, exists := backendRegistry.factories[name]; exists {
-		return fmt.Errorf("render backend %q already registered", name)
-	}
-	backendRegistry.factories[name] = factory
-	return nil
+	FontResources string `json:"fontResources"`
+	Fonts         string `json:"fonts"`
+	Geometry      string `json:"geometry"`
+	Compiler      string `json:"compiler"`
+	Raster        string `json:"raster"`
+	SVG           string `json:"svg"`
+	PDF           string `json:"pdf"`
+	EPS           string `json:"eps"`
 }
 
 // Info 返回配置中各能力的提供者，不依赖WebUI推断
 // 返回: BackendInfo 后端能力
 func (b RenderBackends) Info() BackendInfo {
-	return BackendInfo{Resources: backendName(b.Resources), Fonts: backendName(b.Fonts), Geometry: backendName(b.Geometry), Compiler: backendName(b.Compiler), Raster: backendName(b.Raster), SVG: backendName(b.SVG), PDF: backendName(b.PDF), EPS: backendName(b.EPS)}
+	return BackendInfo{FontResources: backendName(b.FontResources), Fonts: backendName(b.Fonts), Geometry: backendName(b.Geometry), Compiler: backendName(b.Compiler), Raster: backendName(b.Raster), SVG: backendName(b.SVG), PDF: backendName(b.PDF), EPS: backendName(b.EPS)}
 }
 
 // backendName 获取已配置的后端标识

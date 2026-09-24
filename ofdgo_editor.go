@@ -85,7 +85,7 @@ func (e *Editor) SetPageCompiler(compiler PageCompiler) {
 // 入参: backends 后端组合，未配置的能力不会沿用默认实现
 func (e *Editor) SetRenderBackends(backends RenderBackends) {
 	fontsChanged := !sameBackend(e.backends.Fonts, backends.Fonts)
-	if !sameBackend(e.backends.Resources, backends.Resources) {
+	if !sameBackend(e.backends.FontResources, backends.FontResources) {
 		e.fonts = make(map[string]*FontResource)
 		for i := range e.resources {
 			e.resources[i].subset = nil
@@ -563,40 +563,6 @@ func (e *Editor) ResizePages(indexes []int, width, height float64) error {
 func (e *Editor) nextID() string {
 	e.maxID++
 	return strconv.Itoa(e.maxID)
-}
-
-// AddFont 注册OpenType字体，集合字体按索引提取，重复资源复用标识，引用后写入文档
-// 入参: file 字体文件, index 集合内字体索引，单字体为0
-// 返回: string 字体资源标识, error 错误信息
-func (e *Editor) AddFont(file FontFile, index int) (string, error) {
-	if e.backends.Resources == nil {
-		return "", fmt.Errorf("font resources: %w", ErrBackendUnavailable)
-	}
-	parsed, err := e.backends.Resources.OpenFontResource(file, index)
-	if err != nil {
-		return "", err
-	}
-	data := parsed.Data
-	key := editorResourceKey{checksum: sha256.Sum256(data)}
-	if id, ok := e.resourceID[key]; ok {
-		return id, nil
-	}
-	if err := e.prepareSourceIDs(); err != nil {
-		return "", err
-	}
-	id := e.nextID()
-	definition := parsed.Font
-	definition.ID = id
-	resource := editorResource{
-		name: e.packageName("Res/Fonts/Font_" + id + parsed.Extension),
-		data: data,
-		font: &definition,
-	}
-	resource.font.FontFile = "/" + resource.name
-	e.resources = append(e.resources, resource)
-	e.fonts[id] = parsed
-	e.resourceID[key] = id
-	return id, nil
 }
 
 // AddImage 注册PNG或JPEG图片，重复资源复用标识，引用后写入文档
