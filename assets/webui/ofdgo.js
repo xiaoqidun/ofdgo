@@ -88,8 +88,7 @@ const state = {
 	renderAnnotations: true,
 	renderBackend: "canvas",
 	renderMode: "svg",
-	renderBackends: {},
-	renderDPI: 150,
+	renderDPI: DEFAULT_IMAGE_DPI,
 	pageCache: new Map(),
 	svgFonts: new Map(),
 	svgImages: new Map(),
@@ -353,6 +352,8 @@ const el = {
 	continuousButton: document.querySelector("#continuousButton"),
 	annotationButton: document.querySelector("#annotationButton"),
 	imageDPI: document.querySelector("#imageDPI"),
+	dpiValue: document.querySelector("#dpiValue"),
+	formatValue: document.querySelector("#formatValue"),
 	exportFormat: document.querySelector("#exportFormat"),
 	exportPageButton: document.querySelector("#exportPageButton"),
 	exportButton: document.querySelector("#exportButton"),
@@ -397,18 +398,8 @@ const el = {
 	searchResults: document.querySelector("#searchResults"),
 	metaPanel: document.querySelector(".meta-panel"),
 	appPanel: document.querySelector("#appPanel"),
-	renderBackend: document.querySelector("#renderBackend"),
-	renderDPI: document.querySelector("#renderDPI"),
 	renderVectorButton: document.querySelector("#renderVectorButton"),
 	renderRasterButton: document.querySelector("#renderRasterButton"),
-	renderDisplay: document.querySelector("#renderDisplay"),
-	renderImages: document.querySelector("#renderImages"),
-	renderSVG: document.querySelector("#renderSVG"),
-	renderPDF: document.querySelector("#renderPDF"),
-	renderEPS: document.querySelector("#renderEPS"),
-	renderCompiler: document.querySelector("#renderCompiler"),
-	renderFonts: document.querySelector("#renderFonts"),
-	renderGeometry: document.querySelector("#renderGeometry"),
 	offlineStatus: document.querySelector("#offlineStatus"),
 	refreshAppButton: document.querySelector("#refreshAppButton"),
 	metaFile: document.querySelector("#metaFile"),
@@ -1099,10 +1090,9 @@ el.ofdInput.addEventListener("change", () => openOFD(el.ofdInput.files[0]));
 el.fontInput.addEventListener("change", openSelectedFonts);
 el.fontDirectoryInput.addEventListener("change", openSelectedFonts);
 el.prevButton.addEventListener("click", () => renderPage(state.pageIndex - 1));
-el.renderBackend.addEventListener("change", () => changeRenderBackend());
-el.renderDPI.addEventListener("change", () => changeRenderBackend());
-el.renderVectorButton.addEventListener("click", () => changeRenderBackend("svg"));
-el.renderRasterButton.addEventListener("click", () => changeRenderBackend("raster"));
+el.imageDPI.addEventListener("change", () => changeDisplayMode());
+el.renderVectorButton.addEventListener("click", () => changeDisplayMode("svg"));
+el.renderRasterButton.addEventListener("click", () => changeDisplayMode("raster"));
 el.nextButton.addEventListener("click", () => renderPage(state.pageIndex + 1));
 el.zoomOutButton.addEventListener("click", () => setScale(state.scale - 0.1));
 el.zoomInButton.addEventListener("click", () => setScale(state.scale + 0.1));
@@ -1631,7 +1621,7 @@ async function toggleEditor() {
 		renderOutlines(false);
 		if (state.renderMode !== "svg") {
 			try {
-				await refreshRenderBackend(anchor);
+				await refreshPageDisplay(anchor);
 			} catch (err) {
 				state.editing = !state.editing;
 				updateControls();
@@ -2936,14 +2926,6 @@ async function loadWASM() {
 					if (data.phase === "commit") el.importCancel.disabled = el.cancelExportButton.disabled = true;
 				}
 			} else if (data.type === "ready") {
-				state.renderBackends = data.backends;
-				el.renderBackend.replaceChildren();
-				for (const name of Object.keys(data.backends)) {
-					const option = document.createElement("option");
-					option.value = name;
-					option.textContent = renderBackendLabel(name);
-					el.renderBackend.append(option);
-				}
 				state.ready = true;
 				resolve();
 			} else if (data.type === "exit") {
@@ -3338,34 +3320,17 @@ function displayMode() {
 	return state.editing ? "svg" : state.renderMode;
 }
 
-function renderBackendLabel(name) {
-	return { svg: "SVG", canvas: "Canvas", ofd: "OFD" }[name] || name || "无";
-}
-
-function updateRenderBackend() {
-	el.renderBackend.value = state.renderBackend;
-	el.renderDPI.value = String(state.renderDPI);
-	const disabled = !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
-	el.renderBackend.disabled = disabled || Object.keys(state.renderBackends).length < 2;
-	el.renderDPI.disabled = disabled || displayMode() === "svg";
-	el.renderDPI.title = displayMode() === "svg" ? "矢量预览无需DPI" : "预览DPI（仅位图）";
+function updateDisplayControls() {
+	const disabled = !state.ready || !state.doc || state.exporting || document.body.hasAttribute("aria-busy");
 	el.renderVectorButton.disabled = el.renderRasterButton.disabled = disabled || state.editing;
 	el.renderVectorButton.setAttribute("aria-pressed", String(displayMode() === "svg"));
 	el.renderRasterButton.setAttribute("aria-pressed", String(displayMode() === "raster"));
 	el.renderVectorButton.title = state.editing ? "编辑使用矢量显示" : "矢量显示";
 	el.renderRasterButton.title = state.editing ? "阅读时可用" : "位图显示";
-	const backend = state.renderBackends[state.renderBackend];
-	el.renderDisplay.textContent = displayMode() === "svg" ? "SVG" : renderBackendLabel(backend?.raster);
-	el.renderImages.textContent = renderBackendLabel(backend?.raster);
-	el.renderSVG.textContent = renderBackendLabel(backend?.svg);
-	el.renderPDF.textContent = renderBackendLabel(backend?.pdf);
-	el.renderEPS.textContent = renderBackendLabel(backend?.eps);
-	el.renderCompiler.textContent = renderBackendLabel(backend?.compiler);
-	el.renderFonts.textContent = renderBackendLabel(backend?.fonts);
-	el.renderGeometry.textContent = renderBackendLabel(backend?.geometry);
+	updateDPIControl();
 }
 
-async function refreshRenderBackend(anchor = scaleAnchor(0)) {
+async function refreshPageDisplay(anchor = scaleAnchor(0)) {
 	const selection = state.editing ? { index: canvasEditor.selected?.index ?? state.pageIndex, ids: canvasEditor.items().map(item => item.id) } : null;
 	await openDocument({
 		pageIndex: state.pageIndex, fitMode: state.fitMode, scale: state.scale,
@@ -3374,29 +3339,29 @@ async function refreshRenderBackend(anchor = scaleAnchor(0)) {
 	});
 }
 
-async function changeRenderBackend(mode = state.renderMode) {
-	if (document.body.hasAttribute("aria-busy")) return;
-	const backend = el.renderBackend.value, dpi = Number(el.renderDPI.value);
-	if (state.renderBackend === backend && state.renderDPI === dpi && state.renderMode === mode) return;
-	if (state.editing && (!await canvasEditor.commitText() || !await canvasEditor.commitCrop())) {
-		updateRenderBackend();
+async function changeDisplayMode(mode = state.renderMode) {
+	if (document.body.hasAttribute("aria-busy")) {
+		el.imageDPI.value = String(state.renderDPI);
+		updateDPIControl();
 		return;
 	}
-	const previous = { backend: state.renderBackend, dpi: state.renderDPI, mode: state.renderMode };
-	state.renderBackend = backend;
+	if (state.editing) mode = state.renderMode;
+	const dpi = currentImageDPI();
+	if (state.renderDPI === dpi && state.renderMode === mode) return;
+	const previous = { dpi: state.renderDPI, mode: state.renderMode };
 	state.renderDPI = dpi;
 	state.renderMode = mode;
-	updateRenderBackend();
-	if (!state.doc) return;
+	updateDisplayControls();
+	if (!state.doc || state.editing || (previous.mode === mode && mode === "svg")) return;
 	try {
-		await refreshRenderBackend();
+		await refreshPageDisplay();
 	} catch (err) {
-		state.renderBackend = previous.backend;
 		state.renderDPI = previous.dpi;
 		state.renderMode = previous.mode;
+		el.imageDPI.value = String(previous.dpi);
 		resetPageLoading();
 		state.pageCache.clear();
-		updateRenderBackend();
+		updateDisplayControls();
 		showError(err, false);
 	}
 }
@@ -6814,7 +6779,7 @@ function updateFitSpace() {
 function updateControls() {
 	renderSecurity();
 	const hasDoc = Boolean(state.doc);
-	updateRenderBackend();
+	updateDisplayControls();
 	updateEditorTools();
 	const pageCount = state.doc ? state.doc.pageCount : 0;
 	el.prevButton.disabled = !hasDoc || state.pageIndex <= 0;
@@ -7008,7 +6973,7 @@ function showError(err, empty = !state.doc) {
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("aria-busy", busy);
 	renderSecurity();
-	updateRenderBackend();
+	updateDisplayControls();
 	el.editButton.disabled = busy || !state.doc || !state.ready || state.exporting;
 	el.createForm.inert = busy;
 	el.insertForm.inert = busy;
@@ -7107,8 +7072,12 @@ function exportFormatUsesDPI(value) {
 }
 
 function updateDPIControl() {
-	el.imageDPI.disabled = state.exporting || !state.doc || !exportFormatUsesDPI(el.exportFormat.value);
-	el.imageDPI.title = exportFormatUsesDPI(el.exportFormat.value) ? "导出DPI（仅PNG/JPG）" : "当前格式无需DPI";
+	el.imageDPI.disabled = state.exporting || !state.doc || document.body.hasAttribute("aria-busy") || (displayMode() !== "raster" && !exportFormatUsesDPI(el.exportFormat.value));
+	el.imageDPI.title = `DPI：${currentImageDPI()}`;
+	el.dpiValue.textContent = String(currentImageDPI());
+	const format = exportFormatInfo(el.exportFormat.value);
+	el.formatValue.textContent = format?.label || "";
+	el.exportFormat.title = format ? `导出格式：${format.label}` : "导出格式";
 }
 
 function currentImageDPI() {
