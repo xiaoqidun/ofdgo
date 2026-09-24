@@ -260,7 +260,7 @@ func (c *semanticCompiler) objectStyle(object PathObject, defaults *DrawParam, l
 	if defaults != nil {
 		style.fill = defaults.FillColor
 		style.stroke = (*FillColor)(defaults.StrokeColor)
-		if defaults.LineWidth > 0 {
+		if defaults.LineWidth > 0 || defaults.LineWidthSet {
 			style.options.Width = defaults.LineWidth
 		}
 		if defaults.Cap != "" {
@@ -283,7 +283,7 @@ func (c *semanticCompiler) objectStyle(object PathObject, defaults *DrawParam, l
 	if object.StrokeColor != nil {
 		style.stroke = (*FillColor)(object.StrokeColor)
 	}
-	if object.LineWidth > 0 {
+	if object.LineWidth > 0 || object.LineWidthSet {
 		style.options.Width = object.LineWidth
 	}
 	if object.Cap != "" {
@@ -312,6 +312,9 @@ func (c *semanticCompiler) objectStyle(object PathObject, defaults *DrawParam, l
 		for i := range style.options.Dashes {
 			style.options.Dashes[i] *= scale
 		}
+	}
+	if style.options.Width == 0 {
+		style.options.Width = 25.4 / c.renderer.DPI
 	}
 	return style
 }
@@ -389,7 +392,7 @@ func (c *semanticCompiler) textObject(object TextObject, state RenderState) erro
 		return nil
 	}
 	_, linear := renderObjectMatrix(object.Boundary, NewMatrix(object.CTM), state)
-	style := c.objectStyle(PathObject{DrawParam: object.DrawParam, FillColor: object.FillColor, StrokeColor: object.StrokeColor, Alpha: object.Alpha, LineWidth: object.LineWidth, Join: object.Join, MiterLimit: object.MiterLimit}, state.Defaults, linear)
+	style := c.objectStyle(PathObject{DrawParam: object.DrawParam, FillColor: object.FillColor, StrokeColor: object.StrokeColor, Alpha: object.Alpha, LineWidth: object.LineWidth, LineWidthSet: object.LineWidthSet, Join: object.Join, MiterLimit: object.MiterLimit}, state.Defaults, linear)
 	if style.fill == nil {
 		style.fill = withFillAlpha(&FillColor{}, object.Alpha)
 	}

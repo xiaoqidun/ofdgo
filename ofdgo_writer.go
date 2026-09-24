@@ -668,6 +668,9 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.number("ReadDirection", float64(obj.ReadDirection))
 		attrs.number("CharDirection", float64(obj.CharDirection))
 		attrs.number("LineWidth", obj.LineWidth)
+		if obj.LineWidthSet && obj.LineWidth == 0 {
+			attrs.add("LineWidth", "0")
+		}
 		attrs.number("MiterLimit", obj.MiterLimit)
 		attrs.add("Join", obj.Join)
 		if obj.Italic {
@@ -686,6 +689,9 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.add("Boundary", obj.Boundary)
 		attrs.add("CTM", obj.CTM)
 		attrs.number("LineWidth", obj.LineWidth)
+		if obj.LineWidthSet && obj.LineWidth == 0 {
+			attrs.add("LineWidth", "0")
+		}
 		attrs.number("MiterLimit", obj.MiterLimit)
 		attrs.add("Join", obj.Join)
 		attrs.add("Cap", obj.Cap)

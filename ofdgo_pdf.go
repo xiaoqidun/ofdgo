@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -57,6 +58,9 @@ type pdfImporter struct {
 	pages       map[pdfgo.Reference]*pdfgo.Page
 	pageIDs     map[pdfgo.Reference]string
 	imageIDs    map[*pdfgo.Stream]string
+	maskClips   map[*pdfgo.SoftMask]pdfgo.Path
+	pageBox     pdfgo.Rectangle
+	pendingPath *pdfgo.PathMark
 }
 
 // ImportPDF 将PDF内容转换为独立OFD编辑文档，失败时不返回部分结果
@@ -91,7 +95,12 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		matrix, _, _ := pdfPageMatrix(page)
 		importer.matrix = matrix
 		importer.page = index
+		importer.pageBox = page.CropBox
+		importer.maskClips = make(map[*pdfgo.SoftMask]pdfgo.Path)
 		visitor := pdfgo.Visitor{Path: importer.path, Text: importer.text, Image: importer.image}
+		visitor.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
+			return importer.group(mark, walk, visitor)
+		}
 		if !options.Strict {
 			visitor.Warning = func(warning pdfgo.Diagnostic) {
 				warning.Page = index + 1
@@ -99,6 +108,9 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 			}
 		}
 		if err := reader.WalkPage(ctx, page, visitor); err != nil {
+			return fmt.Errorf("import PDF page %d: %w", index+1, err)
+		}
+		if err := importer.flushPath(); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
 		if err := importer.links(page); err != nil {
@@ -249,10 +261,52 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) *Clips {
 	return clips
 }
 
-// path 添加独立可编辑路径
+// path 合并相同状态下的不透明描边，保留独立子路径与绘制顺序
 // 入参: mark PDF路径绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) path(mark pdfgo.PathMark) error {
+	if !mark.Stroke || mark.Fill || mark.Style.Stroke.Alpha != 1 {
+		if err := p.flushPath(); err != nil {
+			return err
+		}
+		return p.appendPath(mark)
+	}
+	if p.pendingPath != nil && !reflect.DeepEqual(p.pendingPath.Style, mark.Style) {
+		if err := p.flushPath(); err != nil {
+			return err
+		}
+	}
+	if p.pendingPath == nil {
+		p.pendingPath = &mark
+	} else {
+		p.pendingPath.Path.Segments = append(p.pendingPath.Path.Segments, mark.Path.Segments...)
+	}
+	if len(p.pendingPath.Path.Segments) >= 512 {
+		return p.flushPath()
+	}
+	return nil
+}
+
+// flushPath 写入连续描边批次，保持后续图元的叠放位置
+// 返回: error 转换错误
+func (p *pdfImporter) flushPath() error {
+	if p.pendingPath == nil {
+		return nil
+	}
+	mark := *p.pendingPath
+	p.pendingPath = nil
+	return p.appendPath(mark)
+}
+
+// appendPath 添加独立可编辑路径
+// 入参: mark PDF路径绘制信息
+// 返回: error 错误信息
+func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
+	var err error
+	mark.Style, err = p.maskStyle(mark.Style)
+	if err != nil {
+		return err
+	}
 	if mark.Fill && mark.Style.FillOverprint && !pdfOpaqueBlack(mark.Style.Fill) || mark.Stroke && mark.Style.StrokeOverprint && !pdfOpaqueBlack(mark.Style.Stroke) {
 		return &pdfgo.UnsupportedError{Feature: "color separation overprint"}
 	}
@@ -271,8 +325,9 @@ func (p *pdfImporter) path(mark pdfgo.PathMark) error {
 		margin := mark.Style.LineWidth * scale / 2 * math.Max(1, mark.Style.MiterLimit)
 		box = Box{box.X - margin, box.Y - margin, box.W + 2*margin, box.H + 2*margin}
 	}
-	strokeColor := StrokeColor(*p.color(mark.Style.Stroke))
-	object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: p.pathData(mark.Path, box), Fill: &mark.Fill, Stroke: &mark.Stroke, FillColor: p.color(mark.Style.Fill), StrokeColor: &strokeColor, LineWidth: mark.Style.LineWidth * scale, Cap: []string{"Butt", "Round", "Square"}[mark.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[mark.Style.Join], MiterLimit: mark.Style.MiterLimit, Clips: p.clips(mark.Style.Clips, box)}
+	strokeColor := StrokeColor(*p.pathColor(mark.Style.Stroke, box))
+	object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: p.pathData(mark.Path, box), Fill: &mark.Fill, Stroke: &mark.Stroke, FillColor: p.pathColor(mark.Style.Fill, box), StrokeColor: &strokeColor, LineWidth: mark.Style.LineWidth * scale, Cap: []string{"Butt", "Round", "Square"}[mark.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[mark.Style.Join], MiterLimit: mark.Style.MiterLimit, Clips: p.clips(mark.Style.Clips, box)}
+	object.LineWidthSet = object.LineWidth == 0
 	if mark.Path.EvenOdd {
 		object.Rule = "Even-Odd"
 	}
@@ -288,6 +343,32 @@ func (p *pdfImporter) path(mark pdfgo.PathMark) error {
 	p.objects = append(p.objects, GraphicObject{Type: "PathObject", PathObject: object})
 	p.report.PathObjects++
 	return nil
+}
+
+// pathColor 将页面渐变轴转换为对象局部坐标
+// 入参: paint PDF画刷, box 对象边界
+// 返回: *FillColor OFD颜色或渐变
+func (p *pdfImporter) pathColor(paint pdfgo.Paint, box Box) *FillColor {
+	color := p.color(paint)
+	if paint.Axial == nil {
+		return color
+	}
+	gradient := paint.Axial
+	start, end := p.matrix.Apply(gradient.Start), p.matrix.Apply(gradient.End)
+	extend := 0
+	if gradient.Extend[0] {
+		extend |= 1
+	}
+	if gradient.Extend[1] {
+		extend |= 2
+	}
+	shading := &AxialShd{StartPoint: pdfNumbers(start.X-box.X, start.Y-box.Y), EndPoint: pdfNumbers(end.X-box.X, end.Y-box.Y), Extend: strconv.Itoa(extend)}
+	for _, stop := range gradient.Stops {
+		shading.Segment = append(shading.Segment, ShdSegment{Position: stop.Position, Color: ShdColor{Value: pdfNumbers(math.Round(stop.RGB[0]*255), math.Round(stop.RGB[1]*255), math.Round(stop.RGB[2]*255))}})
+	}
+	color.Value = ""
+	color.AxialShd = shading
+	return color
 }
 
 // pdfOpaqueBlack 判断不受底层分色影响的全黑设备色

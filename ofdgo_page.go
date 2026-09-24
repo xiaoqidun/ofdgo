@@ -109,7 +109,8 @@ type TextObject struct {
 	TextCode      []TextCode    `xml:"TextCode"`
 	Clips         *Clips        `xml:"Clips"`
 	Actions       []Action      `xml:"Actions>Action"`
-	layout        *textLayout
+	LineWidthSet bool `xml:"-"`
+	layout       *textLayout
 }
 
 // FillColor 填充颜色
@@ -166,15 +167,14 @@ type CGTransform struct {
 
 // PathObject 路径对象
 type PathObject struct {
-	ID              string   `xml:"ID,attr"`
-	Boundary        string   `xml:"Boundary,attr"`
-	DrawParam       string   `xml:"DrawParam,attr"`
-	LineWidth       float64  `xml:"LineWidth,attr"`
-	Join            string   `xml:"Join,attr"`
-	Cap             string   `xml:"Cap,attr"`
-	DashOffset      *float64 `xml:"DashOffset,attr"`
-	DashPattern     string   `xml:"DashPattern,attr"`
-	dashPatternSet  bool
+	ID              string       `xml:"ID,attr"`
+	Boundary        string       `xml:"Boundary,attr"`
+	DrawParam       string       `xml:"DrawParam,attr"`
+	LineWidth       float64      `xml:"LineWidth,attr"`
+	Join            string       `xml:"Join,attr"`
+	Cap             string       `xml:"Cap,attr"`
+	DashOffset      *float64     `xml:"DashOffset,attr"`
+	DashPattern     string       `xml:"DashPattern,attr"`
 	MiterLimit      float64      `xml:"MiterLimit,attr"`
 	CTM             string       `xml:"CTM,attr"`
 	Alpha           *int         `xml:"Alpha,attr"`
@@ -187,6 +187,8 @@ type PathObject struct {
 	AbbreviatedData string       `xml:"AbbreviatedData"`
 	Clips           *Clips       `xml:"Clips"`
 	Actions         []Action     `xml:"Actions>Action"`
+	LineWidthSet   bool `xml:"-"`
+	dashPatternSet bool
 }
 
 // StrokeColor 勾边颜色

@@ -175,7 +175,7 @@ func (CanvasBackend) Combine(left, right GeometryPath, operation GeometryOperati
 	var result *canvas.Path
 	switch operation {
 	case GeometryIntersect:
-		result = a.And(b)
+		result = applyClipPath(a, b)
 	case GeometryUnion:
 		result = a.Or(b)
 	case GeometrySubtract:

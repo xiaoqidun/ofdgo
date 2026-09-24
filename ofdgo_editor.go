@@ -886,7 +886,7 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 				layout.options.FirstLineIndent *= scale
 				obj.layout = &layout
 			}
-			if obj.LineWidth == 0 && obj.Stroke != nil && *obj.Stroke {
+			if obj.LineWidth == 0 && !obj.LineWidthSet && obj.Stroke != nil && *obj.Stroke {
 				obj.LineWidth = defaultPathLineWidth
 			}
 			obj.LineWidth *= scale

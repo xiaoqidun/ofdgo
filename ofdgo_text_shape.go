@@ -128,7 +128,6 @@ func layoutShapedText(obj *TextObject, value string, options TextLayout, metrics
 				if options.Shaping.Bidi {
 					shift = visualShifts[glyph.Cluster]
 				} else if options.Shaping.Direction == "rtl" {
-					// 逻辑簇后的间距位于视觉左侧，整行不计末尾字距
 					shift = extra[len(chars)] - extra[glyph.Cluster] - options.LetterSpacing
 				}
 				gx, gy := x+glyph.X*hScale+shift, y+glyph.Y

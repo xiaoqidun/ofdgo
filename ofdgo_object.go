@@ -35,7 +35,7 @@ func (o GraphicObject) Actions() []Action {
 	return nil
 }
 
-// UnmarshalXML 解析路径并区分省略的虚线样式与显式实线
+// UnmarshalXML 解析路径并区分省略样式、显式实线与零线宽
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
 func (p *PathObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
@@ -48,6 +48,11 @@ func (p *PathObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 		return err
 	}
 	*p = PathObject(value.plain)
+	for _, attr := range start.Attr {
+		if attr.Name.Local == "LineWidth" {
+			p.LineWidthSet = p.LineWidth == 0
+		}
+	}
 	if value.DashPattern != nil {
 		p.DashPattern = *value.DashPattern
 		p.dashPatternSet = p.DashPattern == ""
@@ -55,7 +60,7 @@ func (p *PathObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 	return nil
 }
 
-// UnmarshalXML 解析绘制参数并保留显式实线对基础参数的覆盖
+// UnmarshalXML 解析绘制参数并保留显式实线和零线宽对基础参数的覆盖
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
 func (p *DrawParam) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
@@ -68,6 +73,11 @@ func (p *DrawParam) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 		return err
 	}
 	*p = DrawParam(value.plain)
+	for _, attr := range start.Attr {
+		if attr.Name.Local == "LineWidth" {
+			p.LineWidthSet = p.LineWidth == 0
+		}
+	}
 	if value.DashPattern != nil {
 		p.DashPattern = *value.DashPattern
 		p.dashPatternSet = p.DashPattern == ""

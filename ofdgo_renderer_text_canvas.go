@@ -110,7 +110,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		if obj.StrokeColor != nil {
 			strokeStyle.applyStrokeColor(r, obj.StrokeColor, bx, by, pageH, obj.Alpha)
 		}
-		if obj.LineWidth > 0 {
+		if obj.LineWidth > 0 || obj.LineWidthSet {
 			strokeStyle.lineWidth = obj.LineWidth
 		}
 		strokeStyle.applyLineJoin(obj.Join, obj.MiterLimit)
@@ -118,6 +118,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			strokeStyle.strokePaint = colorWithAlpha(canvas.Black, obj.Alpha)
 		}
 		strokeStyle.scale(ctm)
+		if strokeStyle.lineWidth == 0 {
+			strokeStyle.lineWidth = 25.4 / r.DPI
+		}
 		transformShdPaint(strokeStyle.strokePaint, parentCTM, bx, by, pageH, boundaryInCTM)
 		strokeStyle.strokePaint, shadingClip, strokeView = resolveShdPaint(ctx, strokeStyle.strokePaint)
 		strokeClip = intersectClipPath(strokeClip, shadingClip)

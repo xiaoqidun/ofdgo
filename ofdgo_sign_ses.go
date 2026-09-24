@@ -330,7 +330,6 @@ func parseSESSeal(raw asn1.RawValue) (*sesSeal, error) {
 		if info.Version != 5 {
 			return nil, fmt.Errorf("unexpected timestamp in ses seal version %d", info.Version)
 		}
-		// V5仅保留解析能力, 不将未验证的制章时间戳当作可信时间
 		timestampRaw = append([]byte(nil), items[4].FullBytes...)
 	}
 	picType, picData, err := parseSESPicture(infoItems[3])

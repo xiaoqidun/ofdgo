@@ -610,7 +610,7 @@ func (e *Editor) compositeMemberStyle(node *editorCompositeNode) (GraphicObject,
 		base = &DrawParam{}
 	}
 	object, err := e.resolveEditorStyleDefaults(node.object, base)
-	if err == nil && object.Type == "PathObject" && object.PathObject.LineWidth == 0 {
+	if err == nil && object.Type == "PathObject" && object.PathObject.LineWidth == 0 && !object.PathObject.LineWidthSet {
 		object.PathObject.LineWidth = defaultPathLineWidth
 	}
 	return object, err

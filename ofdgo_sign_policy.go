@@ -260,7 +260,6 @@ func (r *Reader) applySignatureCoverage(report *SignatureVerifyReport, listPath 
 		for name := range r.files {
 			include(name)
 		}
-		// 可达文件始终必需, 不允许伪装为签名载体后排除
 		if err := r.signatureCoverageReferences(o.DocRoot, required); err != nil {
 			report.CoverageOK, report.CoverageError = false, err.Error()
 		}

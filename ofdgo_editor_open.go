@@ -610,10 +610,12 @@ func editorPreservedObject(before, after GraphicObject) bool {
 		a, b := &before.TextObject, after.TextObject
 		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
 		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
+		a.LineWidthSet = b.LineWidthSet
 	case "PathObject":
 		a, b := &before.PathObject, after.PathObject
 		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
 		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
+		a.LineWidthSet = b.LineWidthSet
 		a.DashOffset, a.DashPattern, a.Cap, a.Join = b.DashOffset, b.DashPattern, b.Cap, b.Join
 		a.dashPatternSet = b.dashPatternSet
 	case "ImageObject":

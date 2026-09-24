@@ -3445,12 +3445,13 @@ func setPathStyle(object *ofdgo.PathObject, args []js.Value) error {
 	}
 	if !args[4].IsNull() {
 		width := args[4].Float()
-		if width <= 0 || math.IsNaN(width) || math.IsInf(width, 0) {
-			return fmt.Errorf("line width must be positive and finite")
+		if width < 0 || math.IsNaN(width) || math.IsInf(width, 0) {
+			return fmt.Errorf("line width must be nonnegative and finite")
 		}
 		if scale := editorPathScale(*object); width != object.LineWidth*scale {
 			object.LineWidth = width / scale
 		}
+		object.LineWidthSet = width == 0
 	}
 	if !args[1].IsNull() {
 		if object.FillColor == nil {

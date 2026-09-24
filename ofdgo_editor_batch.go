@@ -565,14 +565,7 @@ func (e *Editor) TransformObjects(page int, ids []string, dx, dy, scale float64)
 				return GraphicObject{}, err
 			}
 		}
-		after, err := e.transformObject(object, dx, dy, scale)
-		if err != nil {
-			return GraphicObject{}, err
-		}
-		if origin := e.objectOrigin(editorObjectID(object)); origin != nil && origin.node.attr("LineWidth") == "0" && object.Type == "TextObject" && object.TextObject.LineWidth == 0 {
-			after.TextObject.LineWidth = 0
-		}
-		return after, nil
+		return e.transformObject(object, dx, dy, scale)
 	})
 }
 

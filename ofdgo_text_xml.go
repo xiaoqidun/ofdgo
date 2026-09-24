@@ -68,5 +68,10 @@ func (obj *TextObject) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement
 		}
 	}
 	*obj = TextObject(value)
+	for _, attr := range start.Attr {
+		if attr.Name.Local == "LineWidth" {
+			obj.LineWidthSet = obj.LineWidth == 0
+		}
+	}
 	return nil
 }

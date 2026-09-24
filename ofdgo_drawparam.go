@@ -58,8 +58,9 @@ func (r *Renderer) drawParamDefaults(id string, defaults *DrawParam) *DrawParam 
 // 入参: base 基础绘制参数, dp 覆盖绘制参数
 // 返回: *DrawParam 合并后的绘制参数
 func mergeDrawParam(base DrawParam, dp *DrawParam) *DrawParam {
-	if dp.LineWidth > 0 {
+	if dp.LineWidth > 0 || dp.LineWidthSet {
 		base.LineWidth = dp.LineWidth
+		base.LineWidthSet = dp.LineWidthSet
 	}
 	if dp.Join != "" {
 		base.Join = dp.Join

@@ -33,6 +33,17 @@ import (
 // 入参: mark PDF图像绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
+	if err := p.flushPath(); err != nil {
+		return err
+	}
+	if mark.Image.ImageMask && mark.Style.Fill.Axial != nil {
+		return &pdfgo.UnsupportedError{Feature: "gradient stencil image"}
+	}
+	var err error
+	mark.Style, err = p.maskStyle(mark.Style)
+	if err != nil {
+		return err
+	}
 	if mark.Style.FillOverprint {
 		return &pdfgo.UnsupportedError{Feature: "image color separation overprint"}
 	}
@@ -102,6 +113,17 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 // 入参: mark PDF文字绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) text(mark pdfgo.TextMark) error {
+	if err := p.flushPath(); err != nil {
+		return err
+	}
+	if mark.Style.Fill.Axial != nil || mark.Style.Stroke.Axial != nil {
+		return &pdfgo.UnsupportedError{Feature: "gradient text paint"}
+	}
+	var err error
+	mark.Style, err = p.maskStyle(mark.Style)
+	if err != nil {
+		return err
+	}
 	if (mark.Mode == 0 || mark.Mode == 2) && mark.Style.FillOverprint && !pdfOpaqueBlack(mark.Style.Fill) || (mark.Mode == 1 || mark.Mode == 2) && mark.Style.StrokeOverprint && !pdfOpaqueBlack(mark.Style.Stroke) {
 		return &pdfgo.UnsupportedError{Feature: "text color separation overprint"}
 	}
@@ -192,6 +214,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		color := StrokeColor(*p.color(mark.Style.Stroke))
 		object.StrokeColor = &color
 		object.LineWidth = mark.Style.LineWidth * unit
+		object.LineWidthSet = object.LineWidth == 0
 		object.Join = []string{"Miter", "Round", "Bevel"}[mark.Style.Join]
 		object.MiterLimit = mark.Style.MiterLimit
 		if len(mark.Style.Dash) > 0 {
@@ -234,6 +257,18 @@ func pdfFontProgram(source *pdfgo.Font) ([]byte, error) {
 		return nil, fmt.Errorf("embedded PDF font has no glyphs")
 	}
 	changed := false
+	metrics := int(binary.BigEndian.Uint16(tables["hhea"][34:36]))
+	if metrics == 0 || metrics > int(count) {
+		return nil, fmt.Errorf("invalid embedded PDF font metric count")
+	}
+	metricLength := 4*metrics + 2*(int(count)-metrics)
+	if len(tables["hmtx"]) < metricLength {
+		return nil, fmt.Errorf("incomplete embedded PDF font metrics")
+	}
+	if len(tables["hmtx"]) > metricLength {
+		tables["hmtx"] = tables["hmtx"][:metricLength]
+		changed = true
+	}
 	if len(tables["cmap"]) == 0 {
 		mapping := map[rune]uint16{}
 		for code := range source.Unicode {

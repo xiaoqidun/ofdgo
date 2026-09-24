@@ -263,6 +263,9 @@ func (e *Editor) addEditorDrawParam(draw DrawParam) (string, error) {
 			attrs.add(pair[0], pair[1])
 		}
 		attrs.number("LineWidth", draw.LineWidth)
+		if draw.LineWidthSet && draw.LineWidth == 0 {
+			attrs.add("LineWidth", "0")
+		}
 		attrs.number("MiterLimit", draw.MiterLimit)
 		if draw.Relative == "" || draw.dashPatternSet || draw.DashPattern != "" {
 			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: draw.DashPattern})

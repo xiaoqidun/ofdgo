@@ -108,7 +108,7 @@ func (s *pathStyle) applyLineJoin(join string, limit float64) {
 // applyDrawParam 应用绘制参数样式
 // 入参: r 渲染器, dp 绘制参数, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, alpha 对象透明度
 func (s *pathStyle) applyDrawParam(r *Renderer, dp *DrawParam, bx, by, pageH float64, alpha *int) {
-	if dp.LineWidth > 0 {
+	if dp.LineWidth > 0 || dp.LineWidthSet {
 		s.lineWidth = dp.LineWidth
 	}
 	if dp.FillColor != nil {
@@ -132,7 +132,7 @@ func (s *pathStyle) applyDrawParam(r *Renderer, dp *DrawParam, bx, by, pageH flo
 // applyPathObject 应用路径对象样式
 // 入参: r 渲染器, obj 路径对象, bx 边界X坐标, by 边界Y坐标, pageH 页面高度
 func (s *pathStyle) applyPathObject(r *Renderer, obj PathObject, bx, by, pageH float64) {
-	if obj.LineWidth > 0 {
+	if obj.LineWidth > 0 || obj.LineWidthSet {
 		s.lineWidth = obj.LineWidth
 	}
 	if obj.FillColor != nil {
@@ -210,6 +210,9 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	}
 	style.applyPathObject(r, obj, bx, by, pageH)
 	style.scale(ctm)
+	if style.lineWidth == 0 {
+		style.lineWidth = 25.4 / r.DPI
+	}
 	objectCTM := TranslationMatrix(bx, by).Multiply(ctm)
 	if boundaryInCTM && parentCTM != nil {
 		objectCTM = parentCTM.Multiply(TranslationMatrix(bx, by)).Multiply(localCTM)

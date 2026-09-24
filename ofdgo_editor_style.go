@@ -285,11 +285,12 @@ func (e *Editor) resolveEditorStyleDefaults(object GraphicObject, base *DrawPara
 	style := mergeDrawParam(*base, dp)
 	if object.Type == "PathObject" {
 		obj := &object.PathObject
-		style = mergeDrawParam(*style, &DrawParam{LineWidth: obj.LineWidth, Join: obj.Join, Cap: obj.Cap,
+		style = mergeDrawParam(*style, &DrawParam{LineWidth: obj.LineWidth, LineWidthSet: obj.LineWidthSet, Join: obj.Join, Cap: obj.Cap,
 			MiterLimit: obj.MiterLimit, DashPattern: obj.DashPattern, dashPatternSet: obj.dashPatternSet, DashOffset: obj.DashOffset,
 			FillColor: obj.FillColor, StrokeColor: obj.StrokeColor})
 		obj.DrawParam = ""
 		obj.LineWidth, obj.Join, obj.Cap = style.LineWidth, style.Join, style.Cap
+		obj.LineWidthSet = style.LineWidthSet
 		obj.MiterLimit, obj.DashPattern, obj.DashOffset = style.MiterLimit, style.DashPattern, style.DashOffset
 		obj.dashPatternSet = style.dashPatternSet
 		obj.FillColor, obj.StrokeColor = style.FillColor, style.StrokeColor
@@ -298,12 +299,13 @@ func (e *Editor) resolveEditorStyleDefaults(object GraphicObject, base *DrawPara
 		if style.Cap != "" && style.Cap != "Butt" || style.DashPattern != "" || style.DashOffset != nil && *style.DashOffset != 0 {
 			return GraphicObject{}, &EditError{Code: EditUnsupportedStyle, Err: fmt.Errorf("text draw parameters require unsupported stroke styles")}
 		}
-		style = mergeDrawParam(*style, &DrawParam{LineWidth: obj.LineWidth, Join: obj.Join,
+		style = mergeDrawParam(*style, &DrawParam{LineWidth: obj.LineWidth, LineWidthSet: obj.LineWidthSet, Join: obj.Join,
 			MiterLimit: obj.MiterLimit, FillColor: obj.FillColor, StrokeColor: obj.StrokeColor})
 		text := mergeDrawParam(*dp, &DrawParam{Font: obj.Font, Size: obj.Size, Weight: obj.Weight, Italic: obj.Italic})
 		obj.DrawParam = ""
 		obj.Font, obj.Size, obj.Weight, obj.Italic = text.Font, text.Size, text.Weight, text.Italic
 		obj.LineWidth, obj.Join, obj.MiterLimit = style.LineWidth, style.Join, style.MiterLimit
+		obj.LineWidthSet = style.LineWidthSet
 		obj.FillColor, obj.StrokeColor = style.FillColor, style.StrokeColor
 	}
 	for _, color := range []*FillColor{style.FillColor, (*FillColor)(style.StrokeColor)} {
@@ -396,10 +398,11 @@ func (e *Editor) styleObject(object GraphicObject, style ObjectStyle) (GraphicOb
 			path.StrokeColor = (*StrokeColor)(editorStyleColor((*FillColor)(style.StrokeColor), (*FillColor)(path.StrokeColor)))
 		}
 		if style.LineWidth != nil {
-			if !finite(*style.LineWidth) || *style.LineWidth <= 0 {
-				return GraphicObject{}, fmt.Errorf("line width must be positive")
+			if !finite(*style.LineWidth) || *style.LineWidth < 0 {
+				return GraphicObject{}, fmt.Errorf("line width must be nonnegative")
 			}
 			path.LineWidth = *style.LineWidth
+			path.LineWidthSet = path.LineWidth == 0
 		}
 		if style.DashPattern != nil {
 			path.DashPattern = *style.DashPattern
@@ -547,8 +550,9 @@ func copyEditorPathStyle(to, from PathObject, scale float64) PathObject {
 	to.Fill, to.Stroke, to.Alpha = from.Fill, from.Stroke, from.Alpha
 	to.FillColor, to.StrokeColor = from.FillColor, from.StrokeColor
 	to.LineWidth, to.Cap, to.Join, to.MiterLimit = from.LineWidth, from.Cap, from.Join, from.MiterLimit
+	to.LineWidthSet = from.LineWidthSet
 	to.DashPattern, to.DashOffset, to.dashPatternSet = from.DashPattern, from.DashOffset, true
-	if to.LineWidth == 0 {
+	if to.LineWidth == 0 && !to.LineWidthSet {
 		to.LineWidth = defaultPathLineWidth
 	}
 	if to.Cap == "" {
