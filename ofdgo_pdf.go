@@ -113,13 +113,12 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		if err := importer.flushPath(); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
-		if err := importer.links(page); err != nil {
+		if err := importer.annotations(ctx, page); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
-		if _, err := editor.CopyObjects(importer.page, importer.objects, 0, 0); err != nil {
+		if err := importer.commitObjects(); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
-		importer.objects = nil
 		importer.report.Pages++
 		if options.Progress != nil {
 			return options.Progress(index + 1)
@@ -133,6 +132,19 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		return nil, PDFImportReport{}, fmt.Errorf("PDF contains no pages")
 	}
 	return editor, importer.report, nil
+}
+
+// commitObjects 将当前页面待转换对象写入编辑文档
+// 返回: error 对象写入错误
+func (p *pdfImporter) commitObjects() error {
+	if len(p.objects) == 0 {
+		return nil
+	}
+	if _, err := p.editor.CopyObjects(p.page, p.objects, 0, 0); err != nil {
+		return err
+	}
+	p.objects = nil
+	return nil
 }
 
 // ConvertPDF 将PDF转换并写入OFD，转换阶段失败时不写入目标
@@ -265,6 +277,9 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) *Clips {
 // 入参: mark PDF路径绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) path(mark pdfgo.PathMark) error {
+	if mark.Style.BlendMode == "Multiply" {
+		return &pdfgo.UnsupportedError{Feature: "multiply path"}
+	}
 	if !mark.Stroke || mark.Fill || mark.Style.Stroke.Alpha != 1 {
 		if err := p.flushPath(); err != nil {
 			return err

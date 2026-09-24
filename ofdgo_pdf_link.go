@@ -15,21 +15,28 @@
 package ofdgo
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// links 将无外观链接转换为OFD点击区域，其他注解或外观返回不支持错误
-// 入参: page PDF页面
+// annotations 将链接和签名外观按页面顺序转换为OFD对象
+// 入参: ctx 取消上下文, page PDF页面
 // 返回: error 错误信息
-func (p *pdfImporter) links(page *pdfgo.Page) error {
+func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page) error {
 	annotations, err := page.Annotations()
 	if err != nil {
 		return err
 	}
 	for _, annotation := range annotations {
 		dict := annotation.Dictionary
+		if annotation.Subtype == "Widget" {
+			if err := p.signatureWidget(ctx, page, annotation); err != nil {
+				return err
+			}
+			continue
+		}
 		if annotation.Subtype != "Link" {
 			return &pdfgo.UnsupportedError{Feature: "annotation " + string(annotation.Subtype)}
 		}

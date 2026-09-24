@@ -1333,7 +1333,8 @@ function handleKeyDown(event) {
 	}
 	const key = event.key;
 	const target = event.target;
-	if ((event.ctrlKey || event.metaKey) && !event.shiftKey && key.toLowerCase() === "s" && state.editorInfo) {
+	if ((event.ctrlKey || event.metaKey) && !event.shiftKey && key.toLowerCase() === "s" && state.doc
+		&& (state.editorInfo || state.ofdBytes)) {
 		event.preventDefault();
 		if (!document.body.hasAttribute("aria-busy") && !formDialogOpen()) exportFile(true, null, "ofd");
 		return;
@@ -1938,7 +1939,7 @@ async function toggleEditor() {
 		canvasEditor.clear();
 		setPan(false);
 		await openDocument({ doc, openSeq, skipAutoFonts: true, pageIndex, fitMode, scale,
-			keepPreview: true, previewAnchor: anchor });
+			keepPreview: true, preserveThumbnails: true, previewAnchor: anchor });
 	} catch (err) {
 		if (openSeq === state.openSeq) showError(err, false);
 	} finally {
@@ -3888,7 +3889,13 @@ async function openDocument(options = {}) {
 	}
 	const openSeq = options.openSeq || (state.openSeq += 1);
 	const previewPosition = options.previewScroll && state.pageWindow ? pageWindowAnchor(state.pageWindow) : null;
-	const previewIDs = options.keepPreview ? [...new Set([...state.visiblePages, ...state.visibleThumbnails])].map((index) => state.doc.pages[index].id) : [];
+	const viewport = options.keepPreview ? el.viewerPanel.getBoundingClientRect() : null;
+	const previewIDs = viewport ? [...state.visiblePages].filter((index) => {
+		const bounds = pageShell(index)?.getBoundingClientRect();
+		return bounds && bounds.bottom > viewport.top && bounds.top < viewport.bottom;
+	}).map((index) => state.doc.pages[index].id) : [];
+	const thumbnailPreviews = options.preserveThumbnails ? new Map([...state.pageCache.values()]
+		.filter((page) => page.id !== state.doc.pages[state.pageIndex].id).map((page) => [page.id, page])) : null;
 	if (!state.ready || state.wasmExited) {
 		await ensureWASM();
 	}
@@ -3958,6 +3965,12 @@ async function openDocument(options = {}) {
 		if (options.keepPreview) {
 			resetPageLoading();
 			state.pageCache.clear();
+			if (thumbnailPreviews) {
+				for (const page of doc.pages) {
+					const preview = thumbnailPreviews.get(page.id);
+					if (preview) state.pageCache.set(page.index, { ...preview, previewOnly: true });
+				}
+			}
 			const indices = new Set([pageIndex, ...doc.pages.filter((page) => previewIDs.includes(page.id)).map((page) => page.index)]);
 			for (const index of indices) {
 				await loadPageData(index, { openSeq, priority: 0, refresh: true });
@@ -3977,7 +3990,7 @@ async function openDocument(options = {}) {
 		renderPageFlow();
 		if (options.keepPreview) {
 			for (const [index, page] of state.pageCache) {
-				mountPageSVG(index, page, openSeq);
+				if (!page.previewOnly) mountPageSVG(index, page, openSeq);
 			}
 			releasePageResources();
 		}
@@ -4347,7 +4360,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 		return;
 	}
 	const saving = value === "ofd";
-	if (saving && !state.editorInfo && !encryption) {
+	if (saving && !state.editorInfo && !state.ofdBytes && !encryption) {
 		return;
 	}
 	if (!saving && state.doc.encryption?.encrypted && !window.confirm("此格式将输出明文，是否继续？")) return;
@@ -4388,11 +4401,20 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			delete encryption.recipientFiles;
 			if (openSeq !== state.openSeq) return;
 		}
-		const result = encryption ? await callWASM("ofdgoSaveEncrypted", indices, encryption, file) : saving ? await callWASM("ofdgoSaveDocument", indices, file) : whole
+		const readingSave = saving && !state.editorInfo && !encryption && indices === null;
+		const result = readingSave
+			? { label: "OFD", size: state.ofdBytes.byteLength, mime, blob: state.ofdBytes }
+			: encryption ? await callWASM("ofdgoSaveEncrypted", indices, encryption, file) : saving ? await callWASM("ofdgoSaveDocument", indices, file) : whole
 			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, state.renderBackend, file)
 			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, state.renderBackend, file);
 		if (openSeq !== state.openSeq) {
 			return;
+		}
+		if (readingSave && file) {
+			const writer = await file.createWritable();
+			await writer.write(result.blob);
+			await writer.close();
+			delete result.blob;
 		}
 		if (result.blob) {
 			downloadBytes(result.blob, result.mime, fileName);
@@ -4655,7 +4677,8 @@ async function renderFlowPage(index, options = {}) {
 		return null;
 	}
 	try {
-		const page = await loadPageData(index, { openSeq, priority: options.priority ?? 2 });
+		const page = await loadPageData(index, { openSeq, priority: options.priority ?? 2,
+			refresh: state.editing && state.pageCache.get(index)?.previewOnly });
 		if (openSeq !== state.openSeq) {
 			return null;
 		}
@@ -7147,7 +7170,8 @@ function updateEditorTools() {
 	el.editorTools.hidden = !state.editing;
 	const pagesDisabled = !state.editing || !state.ready || state.exporting;
 	el.insertTextButton.disabled = el.insertImageButton.disabled = pagesDisabled || !pageCan("insert");
-	el.saveButton.disabled = el.addPageButton.disabled = pagesDisabled;
+	el.saveButton.disabled = !state.doc || !state.ready || state.exporting || (!state.editorInfo && !state.ofdBytes);
+	el.addPageButton.disabled = pagesDisabled;
 	const selectedPages = state.editing ? selectedPageIndexes() : [state.pageIndex];
 	const selectionDisabled = pagesDisabled || !selectedPages.length;
 	el.batchPagesButton.disabled = selectionDisabled;

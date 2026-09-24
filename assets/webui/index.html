@@ -18,6 +18,7 @@
 			<div class="tool-group">
 				<button id="ofdButton" class="icon-button" type="button" title="打开" aria-label="打开" aria-keyshortcuts="Control+O Meta+O"><span class="open-icon" aria-hidden="true"></span></button>
 				<button id="newButton" class="icon-button" type="button" title="新建" aria-label="新建"><span class="new-icon" aria-hidden="true"></span></button>
+				<button id="saveButton" class="icon-button" type="button" title="保存" aria-label="保存" aria-keyshortcuts="Control+S Meta+S" disabled><span class="save-icon" aria-hidden="true"></span></button>
 				<button id="editButton" class="icon-button" type="button" title="编辑" aria-label="编辑" aria-pressed="false" disabled><span class="edit-icon" aria-hidden="true"></span></button>
 				<button id="togglePagesButton" class="icon-button" type="button" title="页面栏" aria-label="页面栏" aria-pressed="true">&#9776;</button>
 				<button id="toggleMetaButton" class="icon-button" type="button" title="信息栏" aria-label="信息栏" aria-pressed="true">&#9432;</button>
@@ -60,11 +61,10 @@
 			</div>
 		</header>
 		<div id="editorTools" class="editor-toolbar" role="toolbar" aria-label="编辑工具" hidden>
-			<div class="editor-group editor-file">
-				<button id="saveButton" class="button" type="button" title="另存为OFD" aria-label="另存为OFD" aria-keyshortcuts="Control+S Meta+S">保存</button>
+			<div class="editor-group editor-actions">
 				<button id="undoButton" class="button" type="button" disabled>撤销</button>
 				<button id="redoButton" class="button" type="button" disabled>重做</button>
-				<span>文件</span>
+				<span>操作</span>
 			</div>
 			<div class="editor-group editor-objects">
 				<button id="compositeBackButton" class="button" type="button" title="返回上层" hidden>返回</button>

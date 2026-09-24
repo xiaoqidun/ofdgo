@@ -33,6 +33,9 @@ import (
 // 入参: mark PDF图像绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
+	if mark.Style.BlendMode == "Multiply" {
+		return &pdfgo.UnsupportedError{Feature: "multiply image outside annotation appearance"}
+	}
 	if err := p.flushPath(); err != nil {
 		return err
 	}
@@ -113,6 +116,9 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 // 入参: mark PDF文字绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) text(mark pdfgo.TextMark) error {
+	if mark.Style.BlendMode == "Multiply" {
+		return &pdfgo.UnsupportedError{Feature: "multiply text"}
+	}
 	if err := p.flushPath(); err != nil {
 		return err
 	}
@@ -209,11 +215,15 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	box := pdfBounds(points)
 	fill, stroke, visible := mark.Mode == 0 || mark.Mode == 2, mark.Mode == 1 || mark.Mode == 2, mark.Mode != 3
 	if stroke {
-		margin := mark.Style.LineWidth * unit * math.Hypot(m[0], m[1]) / 2 * math.Max(1, mark.Style.MiterLimit)
+		scale := math.Sqrt(math.Abs(m[0]*m[3] - m[1]*m[2]))
+		if scale == 0 || math.IsNaN(scale) || math.IsInf(scale, 0) {
+			return &pdfgo.UnsupportedError{Feature: "degenerate text stroke matrix"}
+		}
+		margin := mark.Style.LineWidth * unit / 2 * math.Max(1, mark.Style.MiterLimit)
 		box = Box{box.X - margin, box.Y - margin, box.W + 2*margin, box.H + 2*margin}
 		color := StrokeColor(*p.color(mark.Style.Stroke))
 		object.StrokeColor = &color
-		object.LineWidth = mark.Style.LineWidth * unit
+		object.LineWidth = mark.Style.LineWidth * unit / scale
 		object.LineWidthSet = object.LineWidth == 0
 		object.Join = []string{"Miter", "Round", "Bevel"}[mark.Style.Join]
 		object.MiterLimit = mark.Style.MiterLimit
