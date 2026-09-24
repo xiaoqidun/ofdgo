@@ -27,7 +27,7 @@ import (
 )
 
 // PDFImportOptions 指定PDF转换的运行时后端、进度通知与源文件检查策略
-// Strict禁止恢复缺失的图形状态资源，默认恢复并在报告中记录警告
+// Strict禁止恢复缺失的图形状态资源和无目标链接，默认恢复并在报告中记录警告
 type PDFImportOptions struct {
 	Backends *RenderBackends
 	Progress func(int) error
@@ -113,7 +113,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		if err := importer.flushPath(); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
-		if err := importer.annotations(ctx, page); err != nil {
+		if err := importer.annotations(ctx, page, options.Strict); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
 		if err := importer.commitObjects(); err != nil {

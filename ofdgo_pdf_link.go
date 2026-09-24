@@ -16,15 +16,16 @@ package ofdgo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/xiaoqidun/pdfgo"
 )
 
 // annotations 将链接和签名外观按页面顺序转换为OFD对象
-// 入参: ctx 取消上下文, page PDF页面
+// 入参: ctx取消上下文, page为PDF页面, strict严格检查开关
 // 返回: error 错误信息
-func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page) error {
+func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict bool) error {
 	annotations, err := page.Annotations()
 	if err != nil {
 		return err
@@ -112,6 +113,10 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page) error {
 		if action.URI == nil {
 			destination, err := p.reader.ReadDestination(target)
 			if err != nil {
+				if !strict && errors.Is(err, pdfgo.ErrDestinationNotFound) {
+					p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("%v; link omitted", err)})
+					continue
+				}
 				return err
 			}
 			targetPage := p.pages[destination.Page]
