@@ -30,108 +30,64 @@ import (
 )
 
 // image 转换图像样本，不将整页或其他对象栅格化
+// 入参: mark PDF图像绘制信息
+// 返回: error 错误信息
 func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
+	if mark.Style.FillOverprint {
+		return &pdfgo.UnsupportedError{Feature: "image color separation overprint"}
+	}
 	source := mark.Image
-	filter, err := p.reader.Resolve(source.Stream.Dictionary["Filter"])
-	if err != nil {
-		return err
-	}
-	jpegOriginal := filter == pdfgo.Name("DCTDecode") && len(source.Decode) == 0 && !source.ImageMask && source.ColorSpace != pdfgo.Name("DeviceCMYK")
-	if source.Mask != nil || source.SoftMask != nil {
-		return &pdfgo.UnsupportedError{Feature: "image mask conversion"}
-	}
-	if !source.ImageMask && source.ColorSpace != pdfgo.Name("DeviceRGB") && source.ColorSpace != pdfgo.Name("DeviceGray") && source.ColorSpace != pdfgo.Name("DeviceCMYK") {
-		return &pdfgo.UnsupportedError{Feature: "image color management"}
-	}
-	if source.Stream.Dictionary["Intent"] != nil || source.Stream.Dictionary["SMaskInData"] != nil {
-		return &pdfgo.UnsupportedError{Feature: "image rendering attributes"}
-	}
-	decoded, err := source.DecodeSamples()
-	if err != nil {
-		return err
-	}
-	if len(source.Decode) > 0 {
-		components := 1
-		if source.ColorSpace == pdfgo.Name("DeviceRGB") {
-			components = 3
-		} else if source.ColorSpace == pdfgo.Name("DeviceCMYK") {
-			components = 4
-		}
-		if len(source.Decode) != components*2 {
-			return fmt.Errorf("invalid PDF image field %q", "Decode")
-		}
-		ranges := make([]float64, len(source.Decode))
-		for n, v := range source.Decode {
-			switch v := v.(type) {
-			case pdfgo.Integer:
-				ranges[n] = float64(v)
-			case pdfgo.Real:
-				ranges[n] = float64(v)
-			default:
-				return fmt.Errorf("invalid PDF image field %q", "Decode")
-			}
-		}
-		adjusted := image.NewNRGBA64(image.Rect(0, 0, source.Width, source.Height))
-		for y := 0; y < source.Height; y++ {
-			for x := 0; x < source.Width; x++ {
-				if components == 4 {
-					cmyk, ok := decoded.At(x, y).(color.CMYK)
-					if !ok {
-						return fmt.Errorf("invalid CMYK image samples")
-					}
-					values := []uint8{cmyk.C, cmyk.M, cmyk.Y, cmyk.K}
-					for c := range values {
-						value := ranges[2*c] + float64(values[c])/255*(ranges[2*c+1]-ranges[2*c])
-						values[c] = uint8(math.Round(math.Max(0, math.Min(1, value)) * 255))
-					}
-					adjusted.Set(x, y, color.CMYK{C: values[0], M: values[1], Y: values[2], K: values[3]})
-					continue
-				}
-				r, g, b, _ := decoded.At(x, y).RGBA()
-				values := []uint32{r, g, b}
-				for c := range values {
-					index := c
-					if components == 1 {
-						index = 0
-					}
-					value := ranges[2*index] + float64(values[c])/65535*(ranges[2*index+1]-ranges[2*index])
-					values[c] = uint32(math.Round(math.Max(0, math.Min(1, value)) * 65535))
-				}
-				adjusted.SetNRGBA64(x, y, color.NRGBA64{R: uint16(values[0]), G: uint16(values[1]), B: uint16(values[2]), A: 65535})
-			}
-		}
-		decoded = adjusted
-	}
+	id := p.imageIDs[source.Stream]
 	if source.ImageMask {
-		if mark.Style.Fill.CMYK != nil {
-			return &pdfgo.UnsupportedError{Feature: "CMYK stencil image"}
-		}
-		stencil := image.NewNRGBA64(image.Rect(0, 0, source.Width, source.Height))
-		fill := mark.Style.Fill.RGB
-		for y := 0; y < source.Height; y++ {
-			for x := 0; x < source.Width; x++ {
-				gray, _, _, _ := decoded.At(x, y).RGBA()
-				stencil.SetNRGBA64(x, y, color.NRGBA64{
-					R: uint16(math.Round(fill[0] * 65535)),
-					G: uint16(math.Round(fill[1] * 65535)),
-					B: uint16(math.Round(fill[2] * 65535)),
-					A: uint16(65535 - gray),
-				})
-			}
-		}
-		decoded = stencil
+		id = ""
 	}
-	var encoded bytes.Buffer
-	if jpegOriginal {
-		encoded.Write(source.Stream.Data)
-	} else {
-		if err := png.Encode(&encoded, decoded); err != nil {
+	if id == "" {
+		filter, err := p.reader.Resolve(source.Stream.Dictionary["Filter"])
+		if err != nil {
 			return err
 		}
-	}
-	id, err := p.editor.AddImage(encoded.Bytes())
-	if err != nil {
-		return err
+		jpegOriginal := filter == pdfgo.Name("DCTDecode") && len(source.Decode) == 0 && !source.ImageMask && source.ColorSpace != pdfgo.Name("DeviceCMYK") && source.Mask == nil && source.SoftMask == nil
+		decoded, err := source.DecodeImage()
+		if err != nil {
+			return err
+		}
+		if source.ImageMask {
+			if mark.Style.Fill.CMYK != nil {
+				return &pdfgo.UnsupportedError{Feature: "CMYK stencil image"}
+			}
+			stencil := image.NewNRGBA64(image.Rect(0, 0, source.Width, source.Height))
+			fill := mark.Style.Fill.RGB
+			for y := 0; y < source.Height; y++ {
+				for x := 0; x < source.Width; x++ {
+					gray, _, _, _ := decoded.At(x, y).RGBA()
+					stencil.SetNRGBA64(x, y, color.NRGBA64{
+						R: uint16(math.Round(fill[0] * 65535)),
+						G: uint16(math.Round(fill[1] * 65535)),
+						B: uint16(math.Round(fill[2] * 65535)),
+						A: uint16(65535 - gray),
+					})
+				}
+			}
+			decoded = stencil
+		}
+		var encoded bytes.Buffer
+		if jpegOriginal {
+			encoded.Write(source.Stream.Data)
+		} else {
+			if err := png.Encode(&encoded, decoded); err != nil {
+				return err
+			}
+		}
+		id, err = p.editor.AddImage(encoded.Bytes())
+		if err != nil {
+			return err
+		}
+		if !source.ImageMask {
+			if p.imageIDs == nil {
+				p.imageIDs = map[*pdfgo.Stream]string{}
+			}
+			p.imageIDs[source.Stream] = id
+		}
 	}
 	m := p.matrix.Mul(mark.Matrix).Mul(pdfgo.Matrix{1, 0, 0, -1, 0, 1})
 	box := pdfBounds([]pdfgo.Point{m.Apply(pdfgo.Point{}), m.Apply(pdfgo.Point{X: 1}), m.Apply(pdfgo.Point{Y: 1}), m.Apply(pdfgo.Point{X: 1, Y: 1})})
@@ -143,12 +99,17 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 }
 
 // text 保留原字体、字形编号与逐字基线，不重新塑形
+// 入参: mark PDF文字绘制信息
+// 返回: error 错误信息
 func (p *pdfImporter) text(mark pdfgo.TextMark) error {
+	if (mark.Mode == 0 || mark.Mode == 2) && mark.Style.FillOverprint && !pdfOpaqueBlack(mark.Style.Fill) || (mark.Mode == 1 || mark.Mode == 2) && mark.Style.StrokeOverprint && !pdfOpaqueBlack(mark.Style.Stroke) {
+		return &pdfgo.UnsupportedError{Feature: "text color separation overprint"}
+	}
 	font := mark.Font
 	if len(font.Program) == 0 {
 		return &pdfgo.UnsupportedError{Feature: "text without embedded font"}
 	}
-	if font.ProgramType != "FontFile2" && font.ProgramType != "OpenType" {
+	if font.ProgramType != "FontFile2" && font.ProgramType != "OpenType" && font.ProgramType != "Type1C" && font.ProgramType != "CIDFontType0C" {
 		return &pdfgo.UnsupportedError{Feature: "font program " + string(font.ProgramType)}
 	}
 	id := p.fontIDs[font]
@@ -187,6 +148,13 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	position := 0
 	for n, glyph := range mark.Glyphs {
 		gid := glyph.ID
+		if glyph.Text == "" && glyph.HasID {
+			character := getUnicodeFromName(glyph.Name)
+			if character == 0 {
+				character = packedGlyphRune(gid)
+			}
+			glyph.Text = string(character)
+		}
 		if !glyph.HasID {
 			if utf8.RuneCountInString(glyph.Text) != 1 {
 				return &pdfgo.UnsupportedError{Feature: "simple font glyph ligature mapping"}
@@ -242,9 +210,19 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	return nil
 }
 
-// pdfFontProgram 为PDF子集字体补齐封装表，不改动字形轮廓、编号或原始度量
+// pdfFontProgram 为PDF子集字体补齐封装表，保留字形轮廓和编号
+// 入参: source PDF字体
+// 返回: []byte 封装后的字体数据, error 错误信息
 func pdfFontProgram(source *pdfgo.Font) ([]byte, error) {
-	tables, err := fontFileTables(source.Program, 0)
+	program := source.Program
+	if source.ProgramType == "Type1C" || source.ProgramType == "CIDFontType0C" {
+		var err error
+		program, _, err = wrapCFFToOTF(source.Program)
+		if err != nil {
+			return nil, err
+		}
+	}
+	tables, err := fontFileTables(program, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +288,7 @@ func pdfFontProgram(source *pdfgo.Font) ([]byte, error) {
 		changed = true
 	}
 	if !changed {
-		return source.Program, nil
+		return program, nil
 	}
 	return serializeOTF(tables)
 }

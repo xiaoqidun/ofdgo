@@ -29,6 +29,7 @@ let credentialRequest = null;
 let cancelPageTouch = null;
 
 const state = {
+	conversionWarnings: [],
 	composite: null,
 	annotationEdit: null,
 	annotationCreate: null,
@@ -440,6 +441,8 @@ const el = {
 	refreshAppButton: document.querySelector("#refreshAppButton"),
 	metaFile: document.querySelector("#metaFile"),
 	metaTitle: document.querySelector("#metaTitle"),
+	conversionNotice: document.querySelector("#conversionNotice"),
+	conversionWarnings: document.querySelector("#conversionWarnings"),
 	metaSubject: document.querySelector("#metaSubject"),
 	metaAuthor: document.querySelector("#metaAuthor"),
 	metaCreationDate: document.querySelector("#metaCreationDate"),
@@ -1929,6 +1932,7 @@ async function toggleEditor() {
 		state.composite = null;
 		state.selectObjects = true;
 		state.ofdBytes = null;
+		state.conversionWarnings = [];
 		state.objectClipboard = null;
 		state.styleClipboard = null;
 		canvasEditor.clear();
@@ -3331,6 +3335,7 @@ async function openOFD(file) {
 	setBusy(true, "正在读取文档", 10, STATUS.opening);
 	try {
 		let bytes = new Uint8Array(await file.arrayBuffer());
+		let warnings = [];
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -3341,8 +3346,10 @@ async function openOFD(file) {
 			const converted = await callWASM("ofdgoConvertPDF", bytes);
 			if (openSeq !== state.openSeq) return;
 			bytes = converted.bytes;
+			warnings = JSON.parse(converted.warnings || "null") || [];
 		}
 		state.ofdBytes = bytes;
+		state.conversionWarnings = warnings;
 		state.fileName = (file.name || "ofdgo.ofd").replace(/\.pdf$/i, ".ofd");
 		state.editing = false;
 		state.composite = null;
@@ -6310,6 +6317,14 @@ function markThumbnailError(index) {
 
 function renderMeta(keepDetails = false) {
 	renderSecurity();
+	el.conversionNotice.hidden = !state.conversionWarnings.length;
+	renderMetaContent(el.conversionWarnings, state.conversionWarnings, () => {
+		el.conversionWarnings.replaceChildren(...state.conversionWarnings.map(warning => {
+			const item = document.createElement("p");
+			item.textContent = `第${warning.Page}页 · 位置${warning.Offset}：${warning.Message}`;
+			return item;
+		}));
+	});
 	const doc = state.doc || {};
 	el.metaPanel.setAttribute("aria-busy", String(!!doc.detailsPending));
 	document.title = `OFDGo WebUI - ${state.fileName}`;

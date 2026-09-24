@@ -2161,6 +2161,19 @@ button.outline-link:hover {
 	text-decoration: underline;
 }
 
+.conversion-notice {
+	margin-block: 12px;
+}
+
+.conversion-notice > summary {
+	cursor: pointer;
+}
+
+.conversion-notice p {
+	margin-block: 8px;
+	overflow-wrap: anywhere;
+}
+
 .attachment-detail {
 	color: var(--text-muted);
 	font-size: 12px;

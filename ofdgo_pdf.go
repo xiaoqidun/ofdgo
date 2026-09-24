@@ -25,18 +25,22 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// PDFImportOptions 指定PDF转换的运行时后端与进度通知
+// PDFImportOptions 指定PDF转换的运行时后端、进度通知与源文件检查策略
+// Strict禁止恢复缺失的图形状态资源，默认恢复并在报告中记录警告
 type PDFImportOptions struct {
 	Backends *RenderBackends
 	Progress func(int) error
+	Strict   bool
 }
 
-// PDFImportReport 汇总成功转换的页面和可编辑对象
+// PDFImportReport 汇总转换页数、对象数、链接数和源文件恢复警告
 type PDFImportReport struct {
 	Pages        int
 	TextObjects  int
 	PathObjects  int
 	ImageObjects int
+	Links        int
+	Warnings     []pdfgo.Diagnostic
 }
 
 // pdfImporter 保存单次转换的对象与资源状态
@@ -50,6 +54,9 @@ type pdfImporter struct {
 	fontMetrics map[string]FontMetrics
 	cmykSpace   string
 	objects     []GraphicObject
+	pages       map[pdfgo.Reference]*pdfgo.Page
+	pageIDs     map[pdfgo.Reference]string
+	imageIDs    map[*pdfgo.Stream]string
 }
 
 // ImportPDF 将PDF内容转换为独立OFD编辑文档，失败时不返回部分结果
@@ -67,15 +74,34 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	if options.Backends != nil {
 		editor.SetRenderBackends(*options.Backends)
 	}
-	importer := pdfImporter{reader: reader, editor: editor, fontIDs: map[*pdfgo.Font]string{}, fontMetrics: map[string]FontMetrics{}}
+	importer := pdfImporter{reader: reader, editor: editor, fontIDs: map[*pdfgo.Font]string{}, fontMetrics: map[string]FontMetrics{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
 	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
-		matrix, width, height := pdfPageMatrix(page)
-		importer.matrix = matrix
-		importer.page, err = editor.AddPage(width, height)
-		if err != nil {
+		_, width, height := pdfPageMatrix(page)
+		if _, err := editor.AddPage(width, height); err != nil {
 			return err
 		}
-		if err := reader.WalkPage(ctx, page, pdfgo.Visitor{Path: importer.path, Text: importer.text, Image: importer.image}); err != nil {
+		importer.pages[page.Reference] = page
+		importer.pageIDs[page.Reference] = editor.pages[index].ID
+		return nil
+	})
+	if err != nil {
+		return nil, PDFImportReport{}, err
+	}
+	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
+		matrix, _, _ := pdfPageMatrix(page)
+		importer.matrix = matrix
+		importer.page = index
+		visitor := pdfgo.Visitor{Path: importer.path, Text: importer.text, Image: importer.image}
+		if !options.Strict {
+			visitor.Warning = func(warning pdfgo.Diagnostic) {
+				warning.Page = index + 1
+				importer.report.Warnings = append(importer.report.Warnings, warning)
+			}
+		}
+		if err := reader.WalkPage(ctx, page, visitor); err != nil {
+			return fmt.Errorf("import PDF page %d: %w", index+1, err)
+		}
+		if err := importer.links(page); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
 		if _, err := editor.CopyObjects(importer.page, importer.objects, 0, 0); err != nil {
@@ -113,6 +139,8 @@ func ConvertPDF(ctx context.Context, source io.ReaderAt, size int64, output io.W
 }
 
 // pdfPageMatrix 将裁剪框、用户单位及页面旋转转换为OFD毫米坐标
+// 入参: page PDF页面
+// 返回: pdfgo.Matrix 坐标变换, float64 页面宽度, float64 页面高度
 func pdfPageMatrix(page *pdfgo.Page) (pdfgo.Matrix, float64, float64) {
 	b := page.CropBox
 	scale := 25.4 / 72 * page.UserUnit
@@ -132,6 +160,8 @@ func pdfPageMatrix(page *pdfgo.Page) (pdfgo.Matrix, float64, float64) {
 }
 
 // pdfNumbers 按OFD数值格式序列化坐标
+// 入参: values 数值列表
+// 返回: string 空格分隔的数值
 func pdfNumbers(values ...float64) string {
 	parts := make([]string, len(values))
 	for n, v := range values {
@@ -141,9 +171,13 @@ func pdfNumbers(values ...float64) string {
 }
 
 // pdfBoundary 序列化对象边界
+// 入参: b 对象边界
+// 返回: string OFD边界数据
 func pdfBoundary(b Box) string { return pdfNumbers(b.X, b.Y, b.W, b.H) }
 
 // pdfBounds 计算点集合的包围框
+// 入参: points 坐标点集合
+// 返回: Box 包围框
 func pdfBounds(points []pdfgo.Point) Box {
 	if len(points) == 0 {
 		return Box{}
@@ -159,6 +193,8 @@ func pdfBounds(points []pdfgo.Point) Box {
 }
 
 // color 保留设备色彩分量并复用文档颜色空间
+// 入参: paint PDF颜色与不透明度
+// 返回: *FillColor OFD颜色
 func (p *pdfImporter) color(paint pdfgo.Paint) *FillColor {
 	alpha := int(math.Round(paint.Alpha * 255))
 	if paint.CMYK != nil {
@@ -173,6 +209,8 @@ func (p *pdfImporter) color(paint pdfgo.Paint) *FillColor {
 }
 
 // pathData 将PDF路径转换为相对对象边界的OFD路径
+// 入参: path PDF路径, origin 对象边界
+// 返回: string OFD路径数据
 func (p *pdfImporter) pathData(path pdfgo.Path, origin Box) string {
 	var parts []string
 	for _, segment := range path.Segments {
@@ -186,6 +224,8 @@ func (p *pdfImporter) pathData(path pdfgo.Path, origin Box) string {
 }
 
 // clips 保持裁剪路径的交集，不随对象CTM重复变换
+// 入参: paths 裁剪路径, origin 对象边界
+// 返回: *Clips OFD裁剪区域，无裁剪时为空
 func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) *Clips {
 	if len(paths) == 0 {
 		return nil
@@ -210,7 +250,12 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) *Clips {
 }
 
 // path 添加独立可编辑路径
+// 入参: mark PDF路径绘制信息
+// 返回: error 错误信息
 func (p *pdfImporter) path(mark pdfgo.PathMark) error {
+	if mark.Fill && mark.Style.FillOverprint && !pdfOpaqueBlack(mark.Style.Fill) || mark.Stroke && mark.Style.StrokeOverprint && !pdfOpaqueBlack(mark.Style.Stroke) {
+		return &pdfgo.UnsupportedError{Feature: "color separation overprint"}
+	}
 	var points []pdfgo.Point
 	for _, segment := range mark.Path.Segments {
 		for _, point := range segment.Points {
@@ -243,4 +288,11 @@ func (p *pdfImporter) path(mark pdfgo.PathMark) error {
 	p.objects = append(p.objects, GraphicObject{Type: "PathObject", PathObject: object})
 	p.report.PathObjects++
 	return nil
+}
+
+// pdfOpaqueBlack 判断不受底层分色影响的全黑设备色
+// 入参: paint PDF颜色与不透明度
+// 返回: bool 是否为不透明全黑CMYK颜色
+func pdfOpaqueBlack(paint pdfgo.Paint) bool {
+	return paint.Alpha == 1 && paint.CMYK != nil && paint.CMYK[3] == 1
 }
