@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"image"
 	"io/fs"
+	"maps"
 	"math"
 	"reflect"
 	"slices"
@@ -59,6 +60,7 @@ type Editor struct {
 	serial          uint64
 	source          *editorSource
 	origins         map[string]*editorObjectOrigin
+	removedPages    map[string]bool
 	outlines        []byte
 	encryption      *encryptionState
 }
@@ -271,89 +273,16 @@ func (e *Editor) CopyPages(indexes []int) ([]int, error) {
 		return nil, nil
 	}
 	at := len(e.pages)
-	if e.source != nil {
-		source, err := e.Reader()
-		if err != nil {
-			return nil, err
-		}
-		if _, err := e.importPages(source, indexes, at, true, PageImportOptions{}); err != nil {
-			return nil, err
-		}
-		result := make([]int, len(indexes))
-		for i := range result {
-			result[i] = at + i
-		}
-		return result, nil
+	source, err := e.Reader()
+	if err != nil {
+		return nil, err
 	}
-	pages := make([]PageContent, len(indexes))
-	for n, index := range indexes {
-		source := &e.pages[index]
-		page := &pages[n]
-		*page = PageContent{Area: source.Area, Content: Content{Layer: make([]Layer, len(source.Content.Layer))}}
-		for i, layer := range source.Content.Layer {
-			page.Content.Layer[i] = Layer{Type: layer.Type, Objects: make([]GraphicObject, len(layer.Objects))}
-			for j, object := range layer.Objects {
-				copy, err := cloneEditorObject(object)
-				if err != nil {
-					return nil, err
-				}
-				page.Content.Layer[i].Objects[j] = copy
-			}
-		}
+	if _, err := e.importPages(source, indexes, at, true, PageImportOptions{}); err != nil {
+		return nil, err
 	}
-	result := make([]int, len(pages))
-	maximum := e.maxID
-	origins := make(map[string]*editorObjectOrigin)
-	for n := range pages {
-		page := &pages[n]
-		maximum++
-		page.ID = strconv.Itoa(maximum)
-		for i := range page.Content.Layer {
-			layer := &page.Content.Layer[i]
-			maximum++
-			layer.ID = strconv.Itoa(maximum)
-			for j := range layer.Objects {
-				object := &layer.Objects[j]
-				before := *object
-				maximum++
-				id := strconv.Itoa(maximum)
-				switch object.Type {
-				case "TextObject":
-					object.TextObject.ID = id
-				case "PathObject":
-					object.PathObject.ID = id
-				case "ImageObject":
-					object.ImageObject.ID = id
-				case "CompositeObject", "CompositeGraphicUnit":
-					object.CompositeGraphicUnit.ID = id
-				}
-				copied, origin, err := e.copyObjectOrigin(before, *object, &maximum)
-				if err != nil {
-					return nil, err
-				}
-				*object = copied
-				if origin != nil {
-					origins[id] = origin
-				}
-			}
-		}
-		result[n] = at + n
-	}
-	e.maxID = maximum
-	for id, origin := range origins {
-		e.setObjectOrigin(id, origin)
-	}
-	e.pages = append(e.pages, pages...)
-	if change := e.recordChange(); change != nil {
-		for i := range pages {
-			pages[i] = copyEditorPage(pages[i])
-		}
-		change.undo = func(e *Editor) { e.pages = e.pages[:at] }
-		change.redo = func(e *Editor) {
-			for _, page := range pages {
-				e.pages = append(e.pages, copyEditorPage(page))
-			}
-		}
+	result := make([]int, len(indexes))
+	for i := range result {
+		result[i] = at + i
 	}
 	return result, nil
 }
@@ -386,6 +315,13 @@ func (e *Editor) DeletePages(indexes []int) error {
 		saved[i] = copyEditorPage(*page)
 	}
 	remove := func(e *Editor) {
+		e.removedPages = maps.Clone(e.removedPages)
+		if e.removedPages == nil {
+			e.removedPages = make(map[string]bool)
+		}
+		for _, page := range saved {
+			e.removedPages[page.ID] = true
+		}
 		kept, next := e.pages[:0], 0
 		for index, page := range e.pages {
 			if next < len(indexes) && index == indexes[next] {
@@ -397,8 +333,10 @@ func (e *Editor) DeletePages(indexes []int) error {
 		clear(e.pages[len(kept):])
 		e.pages = kept
 	}
+	previousRemoved := e.removedPages
 	if change := e.recordChange(); change != nil {
 		change.undo = func(e *Editor) {
+			e.removedPages = previousRemoved
 			pages := make([]PageContent, len(e.pages)+len(saved))
 			kept, removed := 0, 0
 			for index := range pages {

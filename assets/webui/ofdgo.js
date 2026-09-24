@@ -290,6 +290,14 @@ const el = {
 	objectOpacity: document.querySelector("#objectOpacity"),
 	objectGradientFields: document.querySelector("#objectGradientFields"),
 	gradientTarget: document.querySelector("#gradientTarget"),
+	objectBorderFields: document.querySelector("#objectBorderFields"),
+	borderEnabled: document.querySelector("#borderEnabled"),
+	borderWidth: document.querySelector("#borderWidth"),
+	borderColor: document.querySelector("#borderColor"),
+	borderColorOriginal: document.querySelector("#borderColorOriginal"),
+	borderHorizontal: document.querySelector("#borderHorizontal"),
+	borderVertical: document.querySelector("#borderVertical"),
+	patternTarget: document.querySelector("#patternTarget"),
 	gradientKind: document.querySelector("#gradientKind"),
 	gradientControls: document.querySelector("#gradientControls"),
 	gradientAngle: document.querySelector("#gradientAngle"),
@@ -994,6 +1002,14 @@ el.gradientKind.addEventListener("change", () => {
 	el.gradientAngle.disabled = el.gradientKind.value !== "linear";
 	for (const input of el.gradientStops.querySelectorAll("input")) input.disabled = el.gradientKind.value === "keep";
 });
+el.gradientTarget.addEventListener("change", () => {
+	state.gradientForms[state.gradientTarget].form = gradientForm();
+	loadGradientForm(el.gradientTarget.value);
+});
+el.patternTarget.addEventListener("change", () => {
+	state.patternForms[state.patternTarget] = patternForm();
+	loadPatternForm(el.patternTarget.value);
+});
 el.gradientAdd.addEventListener("click", () => addGradientStop(50, "#808080", 0));
 el.objectDash.addEventListener("change", () => {
 	el.objectDashRow.hidden = el.objectDash.value !== "custom";
@@ -1442,21 +1458,47 @@ function openObjectStyle() {
 	el.copyStyleButton.disabled = items.length !== 1 || !canCopyStyle(items[0]);
 	el.pasteStyleButton.disabled = !state.styleClipboard || !items.every(item => item.type === state.styleClipboard && canCopyStyle(item));
 	const shared = (key, fallback) => items.every(item => (item[key] ?? fallback) === (items[0][key] ?? fallback)) ? items[0][key] ?? fallback : null;
-	const pattern = items.length === 1 && !items[0].scoped ? items[0].fillPattern : null;
+	el.objectBorderFields.hidden = items.length !== 1 || items[0].scoped || items[0].type !== "ImageObject";
+	const border = items[0].borderStyle ? JSON.parse(items[0].borderStyle) : null;
+	el.borderEnabled.checked = Boolean(border);
+	el.borderWidth.value = String(border?.LineWidth ?? .353);
+	el.borderHorizontal.value = String(border?.HorizonalCornerRadius ?? 0);
+	el.borderVertical.value = String(border?.VerticalCornerRadius ?? 0);
+	el.borderColor.value = items[0].borderColor || "#000000";
+	el.borderColor.disabled = Boolean(border && !items[0].borderColor);
+	el.borderColor.hidden = el.borderColor.disabled;
+	el.borderColorOriginal.hidden = !el.borderColor.disabled;
+	state.borderOriginal = {
+		Enabled: el.borderEnabled.checked, LineWidth: el.borderWidth.value,
+		HorizontalRadius: el.borderHorizontal.value, VerticalRadius: el.borderVertical.value,
+		Color: el.borderColor.value
+	};
 	el.objectGradientFields.hidden = items.length !== 1 || items[0].scoped || items[0].type !== "PathObject" || !items[0].paintSize || !canEditObject(items[0], "paint");
-	el.gradientKind.value = "keep";
-	el.gradientTarget.value = "fill";
-	el.gradientControls.hidden = true;
-	el.gradientAngle.value = "0";
-	el.gradientAngle.disabled = true;
-	el.gradientStops.replaceChildren();
-	addGradientStop(0, "#000000", 0);
-	addGradientStop(100, "#ffffff", 0);
-	el.objectPatternFields.hidden = !pattern;
-	for (const [input, key] of [[el.patternWidth, "width"], [el.patternHeight, "height"], [el.patternXStep, "xStep"], [el.patternYStep, "yStep"], [el.patternCTM, "ctm"]]) {
-		input.value = pattern?.[key] ?? "";
-		input.disabled = !pattern;
+	state.gradientForms = {};
+	for (const target of ["fill", "stroke"]) {
+		const gradient = items[0][`${target}Gradient`], base = gradient ? JSON.parse(gradient.paint) : null;
+		const node = base?.AxialShd || base?.RadialShd;
+		const start = node?.StartPoint.split(/\s+/).map(Number), end = node?.EndPoint.split(/\s+/).map(Number);
+		const form = {
+			kind: base?.AxialShd ? "linear" : base?.RadialShd ? "radial" : "keep",
+			angle: String(base?.AxialShd ? Math.atan2(end[1] - start[1], end[0] - start[0]) * 180 / Math.PI : 0),
+			stops: gradient ? gradient.stops.map((stop, i) => ({ position: String(stop.position), color: stop.color, transparency: String(stop.transparency), source: node.Segment[i] }))
+				: [{ position: "0", color: "#000000", transparency: "0" }, { position: "100", color: "#ffffff", transparency: "0" }]
+		};
+		state.gradientForms[target] = { base, form, original: JSON.stringify(form) };
 	}
+	el.gradientTarget.value = "fill";
+	loadGradientForm("fill");
+	state.patternForms = {};
+	for (const target of ["fill", "stroke"]) {
+		const pattern = items.length === 1 && !items[0].scoped ? items[0][`${target}Pattern`] : null;
+		if (pattern) state.patternForms[target] = Object.fromEntries(Object.entries(pattern).map(([key, value]) => [key, String(value)]));
+	}
+	state.patternOriginal = JSON.stringify(state.patternForms);
+	el.objectPatternFields.hidden = !Object.keys(state.patternForms).length;
+	el.patternTarget.disabled = Object.keys(state.patternForms).length < 2;
+	el.patternTarget.value = state.patternForms.fill ? "fill" : "stroke";
+	loadPatternForm(el.patternTarget.value);
 	const alpha = items.some(item => item.alphaMixed) ? null : shared("alpha", 255), dash = shared("dashPattern", "");
 	el.objectOpacity.value = alpha === null ? "" : String(Math.round((1 - alpha / 255) * 10000) / 100);
 	el.objectOpacity.placeholder = alpha === null ? "混合" : "";
@@ -1468,31 +1510,69 @@ function openObjectStyle() {
 	el.objectDashOffset.value = shared("dashOffset", 0) ?? "";
 	el.objectCap.value = shared("cap", "") || (shared("cap", "") === null ? "mixed" : "Butt");
 	el.objectJoin.value = shared("join", "") || (shared("join", "") === null ? "mixed" : "Miter");
-	state.styleOriginal = Object.fromEntries(["objectOpacity", "objectDash", "objectDashPattern", "objectDashOffset", "objectCap", "objectJoin", "patternWidth", "patternHeight", "patternXStep", "patternYStep", "patternCTM"].map(key => [key, el[key].value]));
+	state.styleOriginal = Object.fromEntries(["objectOpacity", "objectDash", "objectDashPattern", "objectDashOffset", "objectCap", "objectJoin"].map(key => [key, el[key].value]));
 	el.objectStyleStatus.textContent = "";
 	el.objectStylePanel.showModal();
 }
 
 function readObjectStyle() {
 	const style = {}, changed = key => el[key].value !== state.styleOriginal[key];
-	if (!el.objectGradientFields.hidden && el.gradientKind.value !== "keep") {
-		const [width, height] = canvasEditor.selected.paintSize;
-		const Segment = [...el.gradientStops.children].map(row => ({Position: Number(row.children[1].value) / 100, Color: {Value: row.children[0].value, Alpha: Math.round(255 * (1 - Number(row.children[2].value) / 100))}})).sort((a, b) => a.Position - b.Position);
-		const angle = Number(el.gradientAngle.value) * Math.PI / 180, x = Math.cos(angle), y = Math.sin(angle);
-		const length = Math.abs(width * x) + Math.abs(height * y);
-		const paint = el.gradientKind.value === "linear"
-			? {AxialShd: {StartPoint: `${width / 2 - x * length / 2} ${height / 2 - y * length / 2}`, EndPoint: `${width / 2 + x * length / 2} ${height / 2 + y * length / 2}`, Extend: "3", Segment}}
-			: {RadialShd: {StartPoint: `${width / 2} ${height / 2}`, EndPoint: `${width / 2} ${height / 2}`, EndRadius: Math.max(width, height) / 2, Extend: "3", Segment}};
-		const target = el.gradientTarget.value;
-		style[`${target}Paint`] = JSON.stringify(paint);
-		style[target] = true;
+	if (!el.objectBorderFields.hidden) {
+		const border = {};
+		if (el.borderEnabled.checked !== state.borderOriginal.Enabled) border.Enabled = el.borderEnabled.checked;
+		if (el.borderEnabled.checked) {
+			for (const [input, key] of [[el.borderWidth, "LineWidth"], [el.borderHorizontal, "HorizontalRadius"], [el.borderVertical, "VerticalRadius"]]) {
+				if (input.value !== state.borderOriginal[key] || !state.borderOriginal.Enabled) border[key] = Number(input.value);
+			}
+			if (!el.borderColor.disabled && (el.borderColor.value !== state.borderOriginal.Color || !state.borderOriginal.Enabled)) {
+				border.Color = { Value: el.borderColor.value };
+			}
+		}
+		if (Object.keys(border).length) style.borderStyle = JSON.stringify(border);
+	}
+	if (!el.objectGradientFields.hidden) {
+		state.gradientForms[state.gradientTarget].form = gradientForm();
+		for (const target of ["fill", "stroke"]) {
+			const { base, form, original } = state.gradientForms[target];
+			if (form.kind === "keep" || JSON.stringify(form) === original) continue;
+			const [width, height] = canvasEditor.selected.paintSize;
+			const previous = JSON.parse(original);
+			const Segment = form.stops.map(stop => {
+				const old = previous.stops.find(entry => entry.source && JSON.stringify(entry.source) === JSON.stringify(stop.source));
+				const Color = old && old.color === stop.color ? { ...stop.source.Color } : { Value: stop.color };
+				if (!old || old.transparency !== stop.transparency || old.color !== stop.color) Color.Alpha = Math.round(255 * (1 - Number(stop.transparency) / 100));
+				return { Position: Number(stop.position) / 100, Color };
+			}).sort((a, b) => a.Position - b.Position);
+			const angle = Number(form.angle) * Math.PI / 180, x = Math.cos(angle), y = Math.sin(angle);
+			const length = Math.abs(width * x) + Math.abs(height * y);
+			let paint = form.kind === "linear"
+				? { AxialShd: { StartPoint: `${width / 2 - x * length / 2} ${height / 2 - y * length / 2}`, EndPoint: `${width / 2 + x * length / 2} ${height / 2 + y * length / 2}`, Extend: "3", Segment } }
+				: { RadialShd: { StartPoint: `${width / 2} ${height / 2}`, EndPoint: `${width / 2} ${height / 2}`, EndRadius: Math.max(width, height) / 2, Extend: "3", Segment } };
+			if (base && form.kind === previous.kind) {
+				paint = JSON.parse(JSON.stringify(base));
+				const node = paint.AxialShd || paint.RadialShd;
+				node.Segment = Segment;
+				if (paint.AxialShd && form.angle !== previous.angle) {
+					const start = node.StartPoint.split(/\s+/).map(Number), end = node.EndPoint.split(/\s+/).map(Number);
+					const half = Math.hypot(end[0] - start[0], end[1] - start[1]) / 2, cx = (start[0] + end[0]) / 2, cy = (start[1] + end[1]) / 2;
+					node.StartPoint = `${cx - x * half} ${cy - y * half}`;
+					node.EndPoint = `${cx + x * half} ${cy + y * half}`;
+				}
+			}
+			style[`${target}Paint`] = JSON.stringify(paint);
+			style[target] = true;
+		}
 	}
 	if (!el.objectPatternFields.hidden) {
-		const pattern = {};
-		for (const [input, key] of [["patternWidth", "Width"], ["patternHeight", "Height"], ["patternXStep", "XStep"], ["patternYStep", "YStep"], ["patternCTM", "CTM"]]) {
-			if (changed(input)) pattern[key] = key === "CTM" ? el[input].value.trim() : Number(el[input].value);
+		state.patternForms[state.patternTarget] = patternForm();
+		const original = JSON.parse(state.patternOriginal);
+		for (const [target, form] of Object.entries(state.patternForms)) {
+			const pattern = {};
+			for (const [key, field] of [["width", "Width"], ["height", "Height"], ["xStep", "XStep"], ["yStep", "YStep"], ["ctm", "CTM"]]) {
+				if (form[key] !== original[target][key]) pattern[field] = key === "ctm" ? form[key].trim() : Number(form[key]);
+			}
+			if (Object.keys(pattern).length) style[`${target}PatternStyle`] = JSON.stringify(pattern);
 		}
-		if (Object.keys(pattern).length) style.patternStyle = JSON.stringify(pattern);
 	}
 	if (changed("objectOpacity") && el.objectOpacity.value !== "") style.alpha = Math.round((1 - Number(el.objectOpacity.value) / 100) * 255);
 	if (!el.objectStrokeFields.hidden) {
@@ -1507,8 +1587,40 @@ function readObjectStyle() {
 	return style;
 }
 
-function addGradientStop(position, color, transparency) {
+function gradientForm() {
+	return {
+		kind: el.gradientKind.value, angle: el.gradientAngle.value,
+		stops: [...el.gradientStops.children].map(row => ({ position: row.children[1].value, color: row.children[0].value, transparency: row.children[2].value, source: row.paintSource }))
+	};
+}
+
+function loadGradientForm(target) {
+	state.gradientTarget = target;
+	const form = state.gradientForms[target].form;
+	el.gradientKind.value = form.kind;
+	el.gradientAngle.value = form.angle;
+	el.gradientControls.hidden = form.kind === "keep";
+	el.gradientAngle.disabled = form.kind !== "linear";
+	el.gradientStops.replaceChildren();
+	for (const stop of form.stops) addGradientStop(stop.position, stop.color, stop.transparency, stop.source);
+}
+
+function patternForm() {
+	return { width: el.patternWidth.value, height: el.patternHeight.value, xStep: el.patternXStep.value, yStep: el.patternYStep.value, ctm: el.patternCTM.value };
+}
+
+function loadPatternForm(target) {
+	state.patternTarget = target;
+	const pattern = state.patternForms[target];
+	for (const [input, key] of [[el.patternWidth, "width"], [el.patternHeight, "height"], [el.patternXStep, "xStep"], [el.patternYStep, "yStep"], [el.patternCTM, "ctm"]]) {
+		input.value = pattern?.[key] ?? "";
+		input.disabled = !pattern;
+	}
+}
+
+function addGradientStop(position, color, transparency, source) {
 	const row = document.createElement("div");
+	row.paintSource = source;
 	row.className = "gradient-stop-row";
 	for (const [type, value, label] of [["color", color, "色标颜色"], ["number", position, "色标位置"], ["number", transparency, "色标透明度"]]) {
 		const input = document.createElement("input");

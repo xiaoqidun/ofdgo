@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 )
 
@@ -24,7 +25,10 @@ import (
 // 入参: parts 输出覆盖条目
 // 返回: error 读取或解析错误
 func (e *Editor) prunePageReferences(parts map[string][]byte) error {
-	removed := make(map[string]bool)
+	removed := maps.Clone(e.removedPages)
+	if removed == nil {
+		removed = make(map[string]bool)
+	}
 	for id := range e.source.pages {
 		removed[id] = true
 	}
@@ -152,6 +156,36 @@ func (e *Editor) prunePageReferences(parts map[string][]byte) error {
 		}
 	}
 	return nil
+}
+
+// pruneCreatedPageReferences 清理创作文档中被明确删除页面的直接跳转，不检查其他目标是否可达
+// 入参: data 创作XML, removed 已删除页面标识
+// 返回: []byte 更新后的XML, error 解析错误
+func pruneCreatedPageReferences(data []byte, removed map[string]bool) ([]byte, error) {
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	var patches []editorXMLPatch
+	var walk func(*editorXML)
+	walk = func(node *editorXML) {
+		if node.name.Space != ofdNamespace {
+			return
+		}
+		if node.name.Local == "Action" {
+			if target := node.child("Goto"); target != nil {
+				if dest := target.child("Dest"); dest != nil && removed[dest.attr("PageID")] {
+					patches = append(patches, editorXMLPatch{start: node.start, end: node.end})
+					return
+				}
+			}
+		}
+		for _, child := range node.children {
+			walk(child)
+		}
+	}
+	walk(root)
+	return editorPatchXML(data, patches), nil
 }
 
 // editorPageLocation 解析标准XML引用，优先使用所在文件的相对路径

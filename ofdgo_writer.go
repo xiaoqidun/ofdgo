@@ -22,9 +22,11 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"path"
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -214,6 +216,19 @@ func (e *Editor) validate() error {
 // 入参: write 条目写入方法, progress 保存进度回调，预览时为nil
 // 返回: error 错误信息
 func (e *Editor) writeParts(write func(string, []byte, bool) error, progress editorProgress) error {
+	if len(e.removedPages) != 0 {
+		output := write
+		write = func(name string, data []byte, binary bool) error {
+			if !binary && strings.EqualFold(path.Ext(name), ".xml") {
+				var err error
+				data, err = pruneCreatedPageReferences(data, e.removedPages)
+				if err != nil {
+					return err
+				}
+			}
+			return output(name, data, binary)
+		}
+	}
 	fonts, images, spaces, definitions := e.usedResources()
 	writeXML := func(name string, encode func(*ofdXML)) error {
 		data, err := encodeOFDXML(encode)

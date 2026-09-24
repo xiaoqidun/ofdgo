@@ -184,6 +184,18 @@
 				<div class="form-row"><span>组合</span><div class="form-format"><button id="groupObjectsButton" class="button" type="button">组合</button><button id="ungroupObjectButton" class="button" type="button">解组</button></div></div>
 				<div class="form-row"><span>格式</span><div class="form-format"><button id="copyStyleButton" class="button" type="button" aria-label="复制格式">复制</button><button id="pasteStyleButton" class="button" type="button" aria-label="粘贴格式">粘贴</button></div></div>
 				<div class="form-row"><label for="objectOpacity">透明</label><div class="form-unit"><input id="objectOpacity" type="number" min="0" max="100" step="any" aria-label="透明度" autofocus><span>%</span></div></div>
+				<details id="objectBorderFields" hidden>
+					<summary>边框</summary>
+					<div class="form-row"><label for="borderEnabled">显示</label><input id="borderEnabled" type="checkbox"></div>
+					<div class="form-pair">
+						<div class="form-row"><label for="borderWidth">线宽</label><div class="form-unit"><input id="borderWidth" type="number" min="0" step="any"><span>mm</span></div></div>
+						<div class="form-row"><label for="borderColor">颜色</label><input id="borderColor" class="color-input" type="color"><span id="borderColorOriginal" hidden>原样</span></div>
+					</div>
+					<div class="form-pair">
+						<div class="form-row"><label for="borderHorizontal">横径</label><div class="form-unit"><input id="borderHorizontal" type="number" min="0" step="any" aria-label="水平圆角半径"><span>mm</span></div></div>
+						<div class="form-row"><label for="borderVertical">纵径</label><div class="form-unit"><input id="borderVertical" type="number" min="0" step="any" aria-label="垂直圆角半径"><span>mm</span></div></div>
+					</div>
+				</details>
 				<details id="objectGradientFields" hidden>
 					<summary>渐变</summary>
 					<div class="form-pair">
@@ -199,6 +211,7 @@
 				</details>
 				<details id="objectPatternFields" hidden>
 					<summary>图案</summary>
+					<div class="form-row"><label for="patternTarget">作用</label><select id="patternTarget"><option value="fill">填充</option><option value="stroke">描边</option></select></div>
 					<div class="form-pair">
 						<div class="form-row"><label for="patternWidth">宽度</label><div class="form-unit"><input id="patternWidth" type="number" min="0" step="any"><span>mm</span></div></div>
 						<div class="form-row"><label for="patternHeight">高度</label><div class="form-unit"><input id="patternHeight" type="number" min="0" step="any"><span>mm</span></div></div>

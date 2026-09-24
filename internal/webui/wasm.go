@@ -937,7 +937,7 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 						local := inverse.TransformBox(box)
 						width := math.Max(object.TextObject.Size, local.X+local.W)
 						if layout.Wrap {
-							width = frame.W
+							item["paragraphWidth"] = frame.W
 						}
 						frame = ofdgo.Box{W: width, H: math.Max(object.TextObject.Size, local.Y+local.H)}
 						item["textFrame"] = map[string]any{"width": frame.W, "height": frame.H, "matrix": editorMatrix(matrix)}
@@ -1712,10 +1712,11 @@ func editorCapabilities(capability ofdgo.ObjectCapabilities, kind string) map[st
 // 入参: item 前端对象, object 有效样式, paint 是否可改色, scale 描边页面倍率
 func editorAppearance(item map[string]any, object ofdgo.GraphicObject, paint bool, scale float64) {
 	var alpha *int
-	var fill *ofdgo.FillColor
+	var fill, stroke *ofdgo.FillColor
 	switch object.Type {
 	case "TextObject":
 		fill = object.TextObject.FillColor
+		stroke = (*ofdgo.FillColor)(object.TextObject.StrokeColor)
 		alpha = object.TextObject.Alpha
 		if paint {
 			item["color"] = editorColorHex(object.TextObject.FillColor)
@@ -1723,9 +1724,17 @@ func editorAppearance(item map[string]any, object ofdgo.GraphicObject, paint boo
 	case "ImageObject":
 		alpha = object.ImageObject.Alpha
 		item["imageBorder"] = object.ImageObject.Border != nil
+		item["borderColor"] = "#000000"
+		if border := object.ImageObject.Border; border != nil {
+			item["borderColor"] = editorColorHex((*ofdgo.FillColor)(border.BorderColor))
+		}
+		if data, err := json.Marshal(object.ImageObject.Border); err == nil {
+			item["borderStyle"] = string(data)
+		}
 	case "PathObject":
 		path := object.PathObject
 		fill = path.FillColor
+		stroke = (*ofdgo.FillColor)(path.StrokeColor)
 		if box, err := ofdgo.ParseBox(path.Boundary); err == nil {
 			item["paintSize"] = []any{box.W, box.H}
 		}
@@ -1746,9 +1755,34 @@ func editorAppearance(item map[string]any, object ofdgo.GraphicObject, paint boo
 	if alpha != nil {
 		item["alpha"] = *alpha
 	}
-	if fill != nil && fill.Pattern != nil {
-		p := fill.Pattern
-		item["fillPattern"] = map[string]any{"width": p.Width, "height": p.Height, "xStep": p.XStep, "yStep": p.YStep, "ctm": p.CTM}
+	for key, paint := range map[string]*ofdgo.FillColor{"fill": fill, "stroke": stroke} {
+		if paint == nil {
+			continue
+		}
+		if p := paint.Pattern; p != nil {
+			item[key+"Pattern"] = map[string]any{"width": p.Width, "height": p.Height, "xStep": p.XStep, "yStep": p.YStep, "ctm": p.CTM}
+		}
+		var segments []ofdgo.ShdSegment
+		if paint.AxialShd != nil {
+			segments = paint.AxialShd.Segment
+		} else if paint.RadialShd != nil {
+			segments = paint.RadialShd.Segment
+		}
+		if len(segments) == 0 {
+			continue
+		}
+		stops, err := currentEditor.GradientStops(segments, nil)
+		if err != nil {
+			continue
+		}
+		values := make([]any, len(stops))
+		for i, stop := range stops {
+			c := segments[i].Color
+			values[i] = map[string]any{"position": stop.Offset * 100, "color": editorColorHex(&ofdgo.FillColor{Value: c.Value, Index: c.Index, ColorSpace: c.ColorSpace}), "transparency": (1 - float64(stop.Color.A)/255) * 100}
+		}
+		if data, err := json.Marshal(paint); err == nil {
+			item[key+"Gradient"] = map[string]any{"paint": string(data), "stops": values}
+		}
 	}
 }
 
@@ -1827,7 +1861,7 @@ func compositeObjects(args []js.Value) (any, error) {
 					if err != nil {
 						return nil, err
 					}
-					width = frame.W
+					item["paragraphWidth"] = frame.W
 				}
 				frame := ofdgo.Box{W: width, H: math.Max(object.Size, local.Y+local.H)}
 				item["textFrame"] = map[string]any{"width": frame.W, "height": frame.H, "matrix": editorMatrix(member.Matrix)}
@@ -2904,10 +2938,20 @@ func changeOutline(args []js.Value) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func styleObjects(args []js.Value) (any, error) {
 	style := objectStyle(args[2])
-	var pattern *ofdgo.PatternStyle
-	if field := args[2].Get("patternStyle"); !field.IsUndefined() {
-		if err := json.Unmarshal([]byte(field.String()), &pattern); err != nil {
+	var border *ofdgo.ImageBorderStyle
+	if field := args[2].Get("borderStyle"); !field.IsUndefined() {
+		if err := json.Unmarshal([]byte(field.String()), &border); err != nil {
 			return nil, err
+		}
+	}
+	patterns := make(map[bool]*ofdgo.PatternStyle)
+	for key, stroke := range map[string]bool{"fillPatternStyle": false, "strokePatternStyle": true} {
+		if field := args[2].Get(key); !field.IsUndefined() {
+			var pattern ofdgo.PatternStyle
+			if err := json.Unmarshal([]byte(field.String()), &pattern); err != nil {
+				return nil, err
+			}
+			patterns[stroke] = &pattern
 		}
 	}
 	if field := args[2].Get("fillPaint"); !field.IsUndefined() {
@@ -2923,6 +2967,14 @@ func styleObjects(args []js.Value) (any, error) {
 	return changeObjects(func() error {
 		return currentEditor.Transaction(func(editor *ofdgo.Editor) error {
 			page, ids := args[0].Int(), stringsFromJS(args[1])
+			if border != nil {
+				if err := resolveStylePaint((*ofdgo.FillColor)(border.Color)); err != nil {
+					return err
+				}
+				if err := editor.StyleImageBorders(page, ids, *border); err != nil {
+					return err
+				}
+			}
 			for _, paint := range []*ofdgo.FillColor{style.FillColor, (*ofdgo.FillColor)(style.StrokeColor)} {
 				if err := resolveStylePaint(paint); err != nil {
 					return err
@@ -2931,8 +2983,10 @@ func styleObjects(args []js.Value) (any, error) {
 			if err := editor.StyleObjects(page, ids, style); err != nil {
 				return err
 			}
-			if pattern != nil {
-				return editor.StylePatterns(page, ids, false, *pattern)
+			for stroke, pattern := range patterns {
+				if err := editor.StylePatterns(page, ids, stroke, *pattern); err != nil {
+					return err
+				}
 			}
 			return nil
 		})
@@ -2945,6 +2999,9 @@ func styleObjects(args []js.Value) (any, error) {
 func resolveStylePaint(paint *ofdgo.FillColor) error {
 	if paint == nil {
 		return nil
+	}
+	if strings.HasPrefix(paint.Value, "#") {
+		return setEditorColor(paint, paint.Value)
 	}
 	var segments []ofdgo.ShdSegment
 	if paint.AxialShd != nil {

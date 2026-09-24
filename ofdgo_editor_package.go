@@ -214,7 +214,7 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 		}
 		parts[name] = updated
 	}
-	if originalCount != len(source.pages) || len(source.annotationPages) != 0 {
+	if originalCount != len(source.pages) || len(source.annotationPages) != 0 || len(e.removedPages) != 0 {
 		if err := e.prunePageReferences(parts); err != nil {
 			return nil, err
 		}

@@ -737,7 +737,7 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			for _, bookmark := range m.doc.Bookmarks.Bookmark {
 				bookmarks[bookmark.Name] = bookmark.Dest
 			}
-			if dest := gotoDest(&action, bookmarks); dest == nil || !m.pages[dest.PageID] && !m.copyPage {
+			if dest := gotoDest(&action, bookmarks); !m.copyPage && (dest == nil || !m.pages[dest.PageID]) {
 				return nil, nil
 			}
 		}
@@ -759,7 +759,11 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 				value = name + ":" + value
 			}
 			value = m.id(value)
-		case "Font", "ResourceID", "Substitution", "ImageMask", "Relative", "DrawParam", "ColorSpace", "Thumbnail", "TemplateID", "PageID", "PageRef", "RefId":
+		case "PageID":
+			if !m.copyPage || m.pages[value] {
+				value, err = m.reference(value)
+			}
+		case "Font", "ResourceID", "Substitution", "ImageMask", "Relative", "DrawParam", "ColorSpace", "Thumbnail", "TemplateID", "PageRef", "RefId":
 			value, err = m.reference(value)
 		case "BaseLoc", "FileRef":
 			loc, resolveErr := m.resolve(entry.name, "", value)

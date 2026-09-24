@@ -21,6 +21,30 @@ import (
 	"strings"
 )
 
+// ObjectStyle 对象外观，nil字段保持原值，颜色的Alpha为nil时保留原颜色透明度
+// StyleObjects使用对象坐标毫米，StyleCompositeObjects的LineWidth使用页面毫米
+type ObjectStyle struct {
+	Alpha       *int
+	Fill        *bool
+	Stroke      *bool
+	FillColor   *FillColor
+	StrokeColor *StrokeColor
+	LineWidth   *float64
+	DashPattern *string
+	DashOffset  *float64
+	Cap         *string
+	Join        *string
+}
+
+// ImageBorderStyle 图片边框增量，nil字段及未指定的颜色透明度保留原值，尺寸单位为毫米
+type ImageBorderStyle struct {
+	Enabled          *bool
+	LineWidth        *float64
+	HorizontalRadius *float64
+	VerticalRadius   *float64
+	Color            *StrokeColor
+}
+
 // AddDrawParam 注册绘制参数，保留继承引用，未引用的资源不写入文档
 // 入参: draw 绘制参数，ID由编辑器分配
 // 返回: string 资源标识, error 错误信息
@@ -157,21 +181,6 @@ func (e *Editor) resolveEditorStyleDefaults(object GraphicObject, base *DrawPara
 		}
 	}
 	return cloneEditorObject(object)
-}
-
-// ObjectStyle 对象外观，nil字段保持原值，颜色的Alpha为nil时保留原颜色透明度
-// StyleObjects使用对象坐标毫米，StyleCompositeObjects的LineWidth使用页面毫米
-type ObjectStyle struct {
-	Alpha       *int
-	Fill        *bool
-	Stroke      *bool
-	FillColor   *FillColor
-	StrokeColor *StrokeColor
-	LineWidth   *float64
-	DashPattern *string
-	DashOffset  *float64
-	Cap         *string
-	Join        *string
 }
 
 // StyleObjects 原子更新对象透明度、文字颜色及路径填充和描边样式
@@ -442,6 +451,56 @@ func editorStrokeScale(ctm string) float64 {
 		return scale
 	}
 	return 1
+}
+
+// StyleImageBorders 原子修改图片边框，保留未修改的颜色、线型及原文扩展
+// 入参: page 页面索引, ids 图片标识, style 边框增量
+// 返回: error 错误信息
+func (e *Editor) StyleImageBorders(page int, ids []string, style ImageBorderStyle) error {
+	for _, value := range []*float64{style.LineWidth, style.HorizontalRadius, style.VerticalRadius} {
+		if value != nil && (!finite(*value) || *value < 0) {
+			return fmt.Errorf("border dimensions must be finite and nonnegative")
+		}
+	}
+	if style.Color != nil {
+		if err := e.editorColor((*FillColor)(style.Color)); err != nil {
+			return err
+		}
+	}
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil {
+		return err
+	}
+	for i := range objects {
+		if objects[i].Type != "ImageObject" {
+			return fmt.Errorf("object %q is not an image", ids[i])
+		}
+		if style.Enabled != nil && !*style.Enabled {
+			objects[i].ImageObject.Border = nil
+			continue
+		}
+		border := cloneEditorData(objects[i].ImageObject.Border)
+		if border == nil {
+			if style == (ImageBorderStyle{}) {
+				continue
+			}
+			border = &ImageBorder{}
+		}
+		if style.LineWidth != nil {
+			border.LineWidth = cloneEditorData(style.LineWidth)
+		}
+		if style.HorizontalRadius != nil {
+			border.HorizonalCornerRadius = *style.HorizontalRadius
+		}
+		if style.VerticalRadius != nil {
+			border.VerticalCornerRadius = *style.VerticalRadius
+		}
+		if style.Color != nil {
+			border.BorderColor = (*StrokeColor)(editorStyleColor((*FillColor)(style.Color), (*FillColor)(border.BorderColor)))
+		}
+		objects[i].ImageObject.Border = border
+	}
+	return e.updateObjects(page, objects, true)
 }
 
 // SetImageBorders 原子替换图片边框，nil移除边框

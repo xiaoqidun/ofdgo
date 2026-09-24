@@ -1195,7 +1195,8 @@ export class CanvasEditor {
 			input.append(paragraph);
 		}
 		const left = item.leftIndent || 0, right = item.rightIndent || 0;
-		const frame = item.textFrame || { width: item.width, height: item.height, matrix: [1, 0, 0, 1, item.x, item.y] };
+		const frame = { ...(item.textFrame || { width: item.width, height: item.height, matrix: [1, 0, 0, 1, item.x, item.y] }) };
+		if (item.wrap && item.paragraphWidth != null) frame.width = item.paragraphWidth;
 		const [a, b, c, d, e, f] = frame.matrix;
 		const autoSize = !source && !item.wrap && (!item.align || item.align === "left");
 		Object.assign(input.style, {

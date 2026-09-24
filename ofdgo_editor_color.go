@@ -32,6 +32,22 @@ type PatternStyle struct {
 	CTM    *string
 }
 
+// GradientStops 解析当前文档的渐变分段，保留顺序并合并透明度
+// 入参: segments 渐变分段, alpha 外层透明度
+// 返回: []ColorStop 后端无关的色标, error 颜色解析错误
+func (e *Editor) GradientStops(segments []ShdSegment, alpha *int) ([]ColorStop, error) {
+	positions := gradientPositions(segments)
+	stops := make([]ColorStop, len(segments))
+	for i, segment := range segments {
+		c, err := e.Color(&FillColor{Value: segment.Color.Value, Index: segment.Color.Index, ColorSpace: segment.Color.ColorSpace, Alpha: mergeAlpha(segment.Color.Alpha, alpha)})
+		if err != nil {
+			return nil, err
+		}
+		stops[i] = ColorStop{Offset: positions[i], Color: colorToRGBA(c)}
+	}
+	return stops, nil
+}
+
 // StylePatterns 修改已有图案布局，保留单元内容、资源引用和未知扩展
 // 入参: page 页面索引, ids 对象标识, stroke 是否修改描边, style 图案布局增量
 // 返回: error 错误信息

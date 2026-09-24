@@ -61,6 +61,7 @@ func (e *Editor) transactionSnapshot() Editor {
 	next.resources = slices.Clone(e.resources)
 	next.fonts, next.images, next.resourceID = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID)
 	next.origins = maps.Clone(e.origins)
+	next.removedPages = maps.Clone(e.removedPages)
 	next.fontMetrics = maps.Clone(e.fontMetrics)
 	if e.source != nil {
 		source := *e.source

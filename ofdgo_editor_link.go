@@ -27,6 +27,62 @@ type AnnotationLink struct {
 	Dest *Dest
 }
 
+// SetObjectLink 修改对象的单个点击链接，保留其他事件和点击区域，nil移除链接
+// 入参: page 页面索引, ids 对象标识, link 链接目标，不检查可达性
+// 返回: error 错误信息
+func (e *Editor) SetObjectLink(page int, ids []string, link *AnnotationLink) error {
+	if link != nil {
+		if _, err := annotationLinkXML(*link); err != nil {
+			return err
+		}
+	}
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil {
+		return err
+	}
+	for i := range objects {
+		var actions *[]Action
+		switch objects[i].Type {
+		case "TextObject":
+			actions = &objects[i].TextObject.Actions
+		case "PathObject":
+			actions = &objects[i].PathObject.Actions
+		case "ImageObject":
+			actions = &objects[i].ImageObject.Actions
+		case "CompositeObject", "CompositeGraphicUnit":
+			actions = &objects[i].CompositeGraphicUnit.Actions
+		default:
+			return fmt.Errorf("object %q cannot contain links", ids[i])
+		}
+		*actions = cloneEditorData(*actions)
+		index := -1
+		for j, action := range *actions {
+			if action.Event == "CLICK" && (action.URI != nil || action.Goto != nil) {
+				if index >= 0 {
+					return fmt.Errorf("object %q contains multiple click links", ids[i])
+				}
+				index = j
+			}
+		}
+		if link == nil {
+			if index >= 0 {
+				*actions = slices.Delete(*actions, index, index+1)
+			}
+			continue
+		}
+		if index < 0 {
+			index = len(*actions)
+			*actions = append(*actions, Action{Event: "CLICK"})
+		}
+		action := &(*actions)[index]
+		action.URI, action.Goto = cloneEditorData(link.URI), nil
+		if link.Dest != nil {
+			action.Goto = &Goto{Dest: cloneEditorData(link.Dest)}
+		}
+	}
+	return e.updateObjects(page, objects, true)
+}
+
 // SetObjectActions 原子替换普通对象的链接动作，空列表移除动作
 // 入参: page 页面索引, ids 对象标识, actions 链接动作
 // 返回: error 错误信息
