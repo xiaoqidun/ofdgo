@@ -2916,7 +2916,7 @@ async function openOFDFromDrop(event) {
 		return;
 	}
 	const file = event.dataTransfer.files[0];
-	if (file && isOFDFile(file)) {
+	if (file && isDocumentFile(file)) {
 		await requestLocalFontsBeforeOpen();
 	}
 	await openOFD(file);
@@ -3317,7 +3317,7 @@ async function openOFD(file) {
 	if (!file) {
 		return;
 	}
-	if (!isOFDFile(file)) {
+	if (!isDocumentFile(file)) {
 		el.ofdInput.value = "";
 		showError(new Error("选择 OFD 文件"), !state.doc);
 		return;
@@ -3330,12 +3330,20 @@ async function openOFD(file) {
 	const openSeq = ++state.openSeq;
 	setBusy(true, "正在读取文档", 10, STATUS.opening);
 	try {
-		const bytes = new Uint8Array(await file.arrayBuffer());
+		let bytes = new Uint8Array(await file.arrayBuffer());
 		if (openSeq !== state.openSeq) {
 			return;
 		}
+		if (/\.pdf$/i.test(file.name || "")) {
+			setProgress("正在转换 PDF", 25);
+			await ensureWASM();
+			if (openSeq !== state.openSeq) return;
+			const converted = await callWASM("ofdgoConvertPDF", bytes);
+			if (openSeq !== state.openSeq) return;
+			bytes = converted.bytes;
+		}
 		state.ofdBytes = bytes;
-		state.fileName = file.name || "ofdgo.ofd";
+		state.fileName = (file.name || "ofdgo.ofd").replace(/\.pdf$/i, ".ofd");
 		state.editing = false;
 		state.composite = null;
 		state.annotationCreate = null;
@@ -3368,14 +3376,14 @@ async function openOFD(file) {
 		await openDocument({ pageIndex: 0, resetScroll: true, openSeq });
 	} catch (err) {
 		if (openSeq === state.openSeq) {
-			showError(err, true);
+			showError(err, !state.doc);
 			setBusy(false);
 		}
 	}
 }
 
-function isOFDFile(file) {
-	return /\.ofd$/i.test(file.name || "");
+function isDocumentFile(file) {
+	return /\.(ofd|pdf)$/i.test(file.name || "");
 }
 
 async function openSelectedFonts(event) {

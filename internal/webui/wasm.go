@@ -156,6 +156,7 @@ func awaitExport(fn js.Value, args ...any) error {
 // RunWASM 注册浏览器WASM接口并阻塞运行
 func RunWASM() {
 	registerCallback("ofdgoOpen", openDocument)
+	registerCallback("ofdgoConvertPDF", convertPDFDocument)
 	registerCallback("ofdgoConfigure", configureDocument)
 	registerCallback("ofdgoDocumentInfo", documentInfo)
 	registerCallback("ofdgoVerifySignatures", verifySignatures)
@@ -309,6 +310,25 @@ func safeCall(fn func([]js.Value) (any, error), args []js.Value) (data any, err 
 		}
 	}()
 	return fn(args)
+}
+
+// convertPDFDocument 通过库转换PDF，不替换当前文档会话
+// 入参: args PDF数据
+// 返回: any OFD数据, error 错误信息
+func convertPDFDocument(args []js.Value) (any, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("missing PDF data")
+	}
+	data, err := bytesFromJS(args[0])
+	if err != nil {
+		return nil, err
+	}
+	var output bytes.Buffer
+	_, err = ofdgo.ConvertPDF(context.Background(), bytes.NewReader(data), int64(len(data)), &output, ofdgo.PDFImportOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"bytes": bytesToJS(output.Bytes())}), nil
 }
 
 // openDocument 打开OFD文档

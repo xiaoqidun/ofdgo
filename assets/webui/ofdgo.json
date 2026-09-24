@@ -11,7 +11,8 @@
 		{
 			"action": "./",
 			"accept": {
-				"application/ofd": [".ofd"]
+				"application/ofd": [".ofd"],
+				"application/pdf": [".pdf"]
 			},
 			"launch_type": "multiple-clients"
 		}
