@@ -26,15 +26,15 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// PDFImportOptions 指定PDF转换的运行时后端、进度通知与源文件检查策略
-// Strict禁止恢复缺失的图形状态资源和无目标链接，默认恢复并在报告中记录警告
+// PDFImportOptions 指定PDF转换的运行时后端、进度通知与检查策略
+// Strict禁止恢复缺失资源或丢失内容语义，默认在报告中记录警告
 type PDFImportOptions struct {
 	Backends *RenderBackends
 	Progress func(int) error
 	Strict   bool
 }
 
-// PDFImportReport 汇总转换页数、对象数、链接数和源文件恢复警告
+// PDFImportReport 汇总转换页数、对象数、链接数和转换警告
 type PDFImportReport struct {
 	Pages        int
 	TextObjects  int
@@ -46,6 +46,7 @@ type PDFImportReport struct {
 
 // pdfImporter 保存单次转换的对象与资源状态
 type pdfImporter struct {
+	ctx         context.Context
 	reader      *pdfgo.Reader
 	editor      *Editor
 	report      PDFImportReport
@@ -60,6 +61,8 @@ type pdfImporter struct {
 	imageIDs    map[*pdfgo.Stream]string
 	maskClips   map[*pdfgo.SoftMask]pdfgo.Path
 	pageBox     pdfgo.Rectangle
+	pageWidth   float64
+	pageHeight  float64
 	pendingPath *pdfgo.PathMark
 }
 
@@ -78,7 +81,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	if options.Backends != nil {
 		editor.SetRenderBackends(*options.Backends)
 	}
-	importer := pdfImporter{reader: reader, editor: editor, fontIDs: map[*pdfgo.Font]string{}, fontMetrics: map[string]FontMetrics{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
+	importer := pdfImporter{ctx: ctx, reader: reader, editor: editor, fontIDs: map[*pdfgo.Font]string{}, fontMetrics: map[string]FontMetrics{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
 	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
 		_, width, height := pdfPageMatrix(page)
 		if _, err := editor.AddPage(width, height); err != nil {
@@ -92,10 +95,12 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		return nil, PDFImportReport{}, err
 	}
 	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
-		matrix, _, _ := pdfPageMatrix(page)
+		matrix, width, height := pdfPageMatrix(page)
 		importer.matrix = matrix
 		importer.page = index
 		importer.pageBox = page.CropBox
+		importer.pageWidth = width
+		importer.pageHeight = height
 		importer.maskClips = make(map[*pdfgo.SoftMask]pdfgo.Path)
 		visitor := pdfgo.Visitor{Path: importer.path, Text: importer.text, Image: importer.image}
 		visitor.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
@@ -322,7 +327,7 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 	if err != nil {
 		return err
 	}
-	if mark.Fill && mark.Style.FillOverprint && !pdfOpaqueBlack(mark.Style.Fill) || mark.Stroke && mark.Style.StrokeOverprint && !pdfOpaqueBlack(mark.Style.Stroke) {
+	if mark.Fill && mark.Style.FillOverprint && pdfOverprintNeedsSeparation(mark.Style.Fill) || mark.Stroke && mark.Style.StrokeOverprint && pdfOverprintNeedsSeparation(mark.Style.Stroke) {
 		return &pdfgo.UnsupportedError{Feature: "color separation overprint"}
 	}
 	var points []pdfgo.Point
@@ -391,4 +396,11 @@ func (p *pdfImporter) pathColor(paint pdfgo.Paint, box Box) *FillColor {
 // 返回: bool 是否为不透明全黑CMYK颜色
 func pdfOpaqueBlack(paint pdfgo.Paint) bool {
 	return paint.Alpha == 1 && paint.CMYK != nil && paint.CMYK[3] == 1
+}
+
+// pdfOverprintNeedsSeparation 判断彩色CMYK套印是否依赖分色输出
+// 入参: paint PDF颜色与不透明度
+// 返回: bool 是否需要保留分色语义
+func pdfOverprintNeedsSeparation(paint pdfgo.Paint) bool {
+	return paint.CMYK != nil && !pdfOpaqueBlack(paint)
 }

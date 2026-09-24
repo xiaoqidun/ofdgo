@@ -89,6 +89,17 @@ type DocumentInfo struct {
 	DetailsPending  bool               `json:"detailsPending,omitempty"`
 }
 
+// DocumentDetails 不含页面数组的文档补充信息
+type DocumentDetails struct {
+	FontCount       int              `json:"fontCount"`
+	SignatureCount  int              `json:"signatureCount"`
+	SignatureError  string           `json:"signatureError,omitempty"`
+	AttachmentError string           `json:"attachmentError,omitempty"`
+	Attachments     []AttachmentInfo `json:"attachments,omitempty"`
+	Fonts           []FontInfo       `json:"fonts"`
+	Signatures      []SignatureInfo  `json:"signatures"`
+}
+
 // OutlineInfo 目录节点信息
 type OutlineInfo = ofdgo.OutlineInfo
 
@@ -491,17 +502,10 @@ func (s *Session) pageInfos() []PageInfo {
 	return pages
 }
 
-// Info 获取完整文档信息
-// 返回: DocumentInfo 文档信息
-func (s *Session) Info() DocumentInfo {
-	info := DocumentInfo{
-		Encryption: s.encryptionInfo(),
-		Version:    s.Reader.Version(),
-		DocType:    s.Reader.DocType(),
-		PageCount:  len(s.doc.Pages.Page),
-		Pages:      s.pageInfos(),
-		Outlines:   s.doc.OutlineInfos(),
-	}
+// Details 获取无需逐页扫描的附件、签名及字体匹配结果
+// 返回: DocumentDetails 文档补充信息
+func (s *Session) Details() DocumentDetails {
+	info := DocumentDetails{}
 	if attachments, err := s.Reader.Attachments(); err == nil {
 		for _, attachment := range attachments {
 			if attachment.Visible {
@@ -523,20 +527,28 @@ func (s *Session) Info() DocumentInfo {
 		info.SignatureError = err.Error()
 	}
 	info.SignatureCount = len(info.Signatures)
-	if docInfo, err := s.Reader.DocInfo(); err == nil && docInfo != nil {
-		info.Title = docInfo.Title
-		info.Author = docInfo.Author
-		info.Subject = docInfo.Subject
-		if docInfo.CustomDatas != nil {
-			info.CustomData = append([]ofdgo.CustomData(nil), docInfo.CustomDatas.CustomData...)
-		}
-		info.CreationDate = docInfo.CreationDate
-		info.ModDate = docInfo.ModDate
+	if fonts, err := s.Renderer.DeclaredFontInfos(); err == nil {
+		info.Fonts = fonts
+		info.FontCount = len(fonts)
 	}
+	return info
+}
+
+// Info 获取完整文档信息及逐页字体用量
+// 返回: DocumentInfo 文档信息
+func (s *Session) Info() DocumentInfo {
+	info := s.Summary()
+	details := s.Details()
+	info.Attachments = details.Attachments
+	info.AttachmentError = details.AttachmentError
+	info.Signatures = details.Signatures
+	info.SignatureCount = details.SignatureCount
+	info.SignatureError = details.SignatureError
 	for !s.scanFontInfo() {
 	}
 	info.Fonts = s.fontInfos
 	info.FontCount = len(info.Fonts)
+	info.DetailsPending = false
 	return info
 }
 

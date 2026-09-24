@@ -56,14 +56,22 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		id = ""
 	}
 	if id == "" {
+		jbig2Original, err := source.JBIG2File()
+		if err != nil {
+			return err
+		}
 		filter, err := p.reader.Resolve(source.Stream.Dictionary["Filter"])
 		if err != nil {
 			return err
 		}
-		jpegOriginal := filter == pdfgo.Name("DCTDecode") && len(source.Decode) == 0 && !source.ImageMask && source.ColorSpace != pdfgo.Name("DeviceCMYK") && source.Mask == nil && source.SoftMask == nil
-		decoded, err := source.DecodeImage()
-		if err != nil {
-			return err
+		space, _ := source.ColorSpace.(pdfgo.Name)
+		jpegOriginal := filter == pdfgo.Name("DCTDecode") && len(source.Decode) == 0 && !source.ImageMask && (space == "DeviceGray" || space == "DeviceRGB") && source.Mask == nil && source.SoftMask == nil
+		var decoded image.Image
+		if len(jbig2Original) == 0 {
+			decoded, err = source.DecodeImage()
+			if err != nil {
+				return err
+			}
 		}
 		if source.ImageMask {
 			if mark.Style.Fill.CMYK != nil {
@@ -85,7 +93,9 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 			decoded = stencil
 		}
 		var encoded bytes.Buffer
-		if jpegOriginal {
+		if len(jbig2Original) != 0 {
+			encoded.Write(jbig2Original)
+		} else if jpegOriginal {
 			encoded.Write(source.Stream.Data)
 		} else {
 			if err := png.Encode(&encoded, decoded); err != nil {
@@ -112,10 +122,25 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	return nil
 }
 
-// text 保留原字体、字形编号与逐字基线，不重新塑形
+// text 保留内嵌字形及逐字基线，外部字体保留名称引用
 // 入参: mark PDF文字绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) text(mark pdfgo.TextMark) error {
+	if mark.Font.Subtype == pdfgo.Name("Type3") {
+		if err := p.flushPath(); err != nil {
+			return err
+		}
+		visitor := pdfgo.Visitor{Path: p.path, Image: p.image}
+		visitor.Group = func(group pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
+			return p.group(group, walk, visitor)
+		}
+		for index := range mark.Glyphs {
+			if err := p.reader.WalkType3Glyph(p.ctx, mark, index, visitor); err != nil {
+				return err
+			}
+		}
+		return p.flushPath()
+	}
 	if mark.Style.BlendMode == "Multiply" {
 		return &pdfgo.UnsupportedError{Feature: "multiply text"}
 	}
@@ -130,44 +155,50 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	if err != nil {
 		return err
 	}
-	if (mark.Mode == 0 || mark.Mode == 2) && mark.Style.FillOverprint && !pdfOpaqueBlack(mark.Style.Fill) || (mark.Mode == 1 || mark.Mode == 2) && mark.Style.StrokeOverprint && !pdfOpaqueBlack(mark.Style.Stroke) {
+	if (mark.Mode == 0 || mark.Mode == 2) && mark.Style.FillOverprint && pdfOverprintNeedsSeparation(mark.Style.Fill) || (mark.Mode == 1 || mark.Mode == 2) && mark.Style.StrokeOverprint && pdfOverprintNeedsSeparation(mark.Style.Stroke) {
 		return &pdfgo.UnsupportedError{Feature: "text color separation overprint"}
 	}
 	font := mark.Font
-	if len(font.Program) == 0 {
-		return &pdfgo.UnsupportedError{Feature: "text without embedded font"}
-	}
-	if font.ProgramType != "FontFile2" && font.ProgramType != "OpenType" && font.ProgramType != "Type1C" && font.ProgramType != "CIDFontType0C" {
+	embedded := len(font.Program) != 0
+	if embedded && font.ProgramType != "FontFile2" && font.ProgramType != "OpenType" && font.ProgramType != "Type1C" && font.ProgramType != "CIDFontType0C" {
 		return &pdfgo.UnsupportedError{Feature: "font program " + string(font.ProgramType)}
 	}
 	id := p.fontIDs[font]
 	if id == "" {
 		var err error
-		program, err := pdfFontProgram(font)
-		if err != nil {
-			return err
+		if embedded {
+			program, err := pdfFontProgram(font)
+			if err != nil {
+				return err
+			}
+			id, err = p.editor.AddFont(FontFile{Name: font.Name + ".ttf", Data: program}, 0)
+		} else {
+			id, err = p.editor.AddExternalFont(font.Name)
 		}
-		id, err = p.editor.AddFont(FontFile{Name: font.Name + ".ttf", Data: program}, 0)
 		if err != nil {
 			return err
 		}
 		p.fontIDs[font] = id
 	}
-	metrics := p.fontMetrics[id]
-	if metrics == nil {
-		if p.editor.backends.Fonts == nil {
-			return fmt.Errorf("PDF font backend unavailable")
+	var metrics FontMetrics
+	var outline FontOutlines
+	if embedded {
+		metrics = p.fontMetrics[id]
+		if metrics == nil {
+			if p.editor.backends.Fonts == nil {
+				return fmt.Errorf("PDF font backend unavailable")
+			}
+			metrics, err = p.editor.backends.Fonts.OpenFont(p.editor.fonts[id].Data)
+			if err != nil {
+				return err
+			}
+			p.fontMetrics[id] = metrics
 		}
-		var err error
-		metrics, err = p.editor.backends.Fonts.OpenFont(p.editor.fonts[id].Data)
-		if err != nil {
-			return err
+		var ok bool
+		outline, ok = metrics.(FontOutlines)
+		if !ok {
+			return fmt.Errorf("PDF font backend does not provide glyph outlines")
 		}
-		p.fontMetrics[id] = metrics
-	}
-	outline, ok := metrics.(FontOutlines)
-	if !ok {
-		return fmt.Errorf("PDF font backend does not provide glyph outlines")
 	}
 	const unit = 25.4 / 72
 	m := p.matrix.Mul(mark.Matrix).Mul(pdfgo.Matrix{1 / unit, 0, 0, -1 / unit, 0, 0})
@@ -183,7 +214,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			}
 			glyph.Text = string(character)
 		}
-		if !glyph.HasID {
+		if embedded && !glyph.HasID {
 			if utf8.RuneCountInString(glyph.Text) != 1 {
 				return &pdfgo.UnsupportedError{Feature: "simple font glyph ligature mapping"}
 			}
@@ -193,23 +224,34 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 				return fmt.Errorf("missing PDF glyph for %U", char)
 			}
 		}
-		if gid >= metrics.NumGlyphs() {
+		if embedded && gid >= metrics.NumGlyphs() {
 			return fmt.Errorf("PDF glyph index outside embedded font")
+		}
+		if !embedded && glyph.Text == "" {
+			return &pdfgo.UnsupportedError{Feature: "unmapped external font character"}
 		}
 		origin := mark.Positions[n]
 		object.TextCode = append(object.TextCode, TextCode{X: pdfNumbers(origin.X * unit), Y: pdfNumbers(-origin.Y * unit), Value: glyph.Text})
-		object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: position, CodeCount: utf8.RuneCountInString(glyph.Text), GlyphCount: 1, Glyphs: strconv.Itoa(int(gid))})
-		position += utf8.RuneCountInString(glyph.Text)
-		path, err := outline.GlyphOutline(gid, object.Size)
-		if err != nil {
-			return err
-		}
-		bounds, err := path.Bounds()
-		if err != nil {
-			return err
-		}
-		for _, point := range []pdfgo.Point{{X: bounds.X, Y: bounds.Y}, {X: bounds.X + bounds.W, Y: bounds.Y}, {X: bounds.X, Y: bounds.Y + bounds.H}, {X: bounds.X + bounds.W, Y: bounds.Y + bounds.H}} {
-			points = append(points, m.Apply(pdfgo.Point{X: origin.X*unit + point.X*mark.HorizontalScale, Y: -origin.Y*unit + point.Y}))
+		if embedded {
+			count := utf8.RuneCountInString(glyph.Text)
+			object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: position, CodeCount: count, GlyphCount: 1, Glyphs: strconv.Itoa(int(gid))})
+			position += count
+			path, err := outline.GlyphOutline(gid, object.Size)
+			if err != nil {
+				return err
+			}
+			bounds, err := path.Bounds()
+			if err != nil {
+				return err
+			}
+			for _, point := range []pdfgo.Point{{X: bounds.X, Y: bounds.Y}, {X: bounds.X + bounds.W, Y: bounds.Y}, {X: bounds.X, Y: bounds.Y + bounds.H}, {X: bounds.X + bounds.W, Y: bounds.Y + bounds.H}} {
+				points = append(points, m.Apply(pdfgo.Point{X: origin.X*unit + point.X*mark.HorizontalScale, Y: -origin.Y*unit + point.Y}))
+			}
+		} else {
+			width := glyph.Width / 1000 * object.Size * mark.HorizontalScale
+			for _, point := range []pdfgo.Point{{X: 0, Y: -object.Size}, {X: width, Y: -object.Size}, {X: 0, Y: object.Size / 4}, {X: width, Y: object.Size / 4}} {
+				points = append(points, m.Apply(pdfgo.Point{X: origin.X*unit + point.X, Y: -origin.Y*unit + point.Y}))
+			}
 		}
 	}
 	box := pdfBounds(points)
@@ -232,6 +274,9 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		}
 	}
 	object.Boundary = pdfBoundary(box)
+	if box.X >= p.pageWidth || box.Y >= p.pageHeight || box.X+box.W <= 0 || box.Y+box.H <= 0 {
+		visible = false
+	}
 	object.CTM = pdfNumbers(m[0], m[1], m[2], m[3], m[4]-box.X, m[5]-box.Y)
 	object.Fill = &fill
 	object.Stroke = &stroke

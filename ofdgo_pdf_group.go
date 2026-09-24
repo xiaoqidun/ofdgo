@@ -72,7 +72,7 @@ func (p *pdfImporter) group(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error
 			if stroke {
 				color, overprint = path.Style.Stroke, path.Style.StrokeOverprint
 			}
-			if color.Alpha != 1 || color.Axial != nil || overprint && !pdfOpaqueBlack(color) {
+			if color.Alpha != 1 || color.Axial != nil || overprint && pdfOverprintNeedsSeparation(color) {
 				return &pdfgo.UnsupportedError{Feature: "transparent or overprinted group content"}
 			}
 			if paint == nil {

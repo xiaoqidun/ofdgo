@@ -176,6 +176,15 @@ func (r *Renderer) ScanFontInfos() (*FontInfoScanner, error) {
 	return &FontInfoScanner{renderer: r, doc: doc, usage: make(map[string]int)}, nil
 }
 
+// DeclaredFontInfos 获取已声明字体的匹配结果，不扫描页面用量
+// 返回: []FontInfo 字体诊断列表, error 错误信息
+func (r *Renderer) DeclaredFontInfos() ([]FontInfo, error) {
+	if r == nil || r.Reader == nil {
+		return nil, fmt.Errorf("ofd renderer is not initialized")
+	}
+	return r.fontInfos(nil)
+}
+
 // Next 统计下一页或模板的字体用量
 // 返回: bool 是否处理了页面，false表示扫描结束
 func (s *FontInfoScanner) Next() bool {
@@ -298,17 +307,27 @@ func (r *Renderer) fontInfo(font Font) FontInfo {
 		}
 		return info
 	}
-	if resolved, err := r.ResolveFont(font.ID, false); err == nil && resolved.Source != "" {
-		info.Matched = resolved.Source
-		info.MatchedFace = resolved.Face
-		if resolved.Exact {
-			info.Status = FontStatusMatched
-			info.Detail = "使用外部字体文件"
-		} else {
-			info.Status = FontStatusFallback
-			info.Detail = "使用外部字体回退"
+	if r.backends.Fonts != nil {
+		if source, metrics := r.fontSourceMatch(r.backends.Fonts, font.ID, &font, false); metrics != nil {
+			data, err := r.readFontSource(source, &font)
+			if err == nil {
+				faces, err := (FontFile{Data: data}).Faces()
+				if err == nil && len(faces) != 0 {
+					face := faces[0]
+					face.Index = source.face
+					info.Matched = source.name
+					info.MatchedFace = &face
+					if source.exact {
+						info.Status = FontStatusMatched
+						info.Detail = "使用外部字体文件"
+					} else {
+						info.Status = FontStatusFallback
+						info.Detail = "使用外部字体回退"
+					}
+					return info
+				}
+			}
 		}
-		return info
 	}
 	info.Status = FontStatusMissing
 	info.Detail = "可用字体文件缺失"

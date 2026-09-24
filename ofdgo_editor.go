@@ -503,7 +503,7 @@ func (e *Editor) nextID() string {
 	return strconv.Itoa(e.maxID)
 }
 
-// AddImage 注册PNG或JPEG图片，重复资源复用标识，引用后写入文档
+// AddImage 注册PNG、JPEG或JBIG2图片，重复资源复用标识，引用后写入文档
 // 不透明纯黑白PNG仅在无损JBIG2编码更小时转换，其他图片保留原始编码
 // 入参: data 图片数据
 // 返回: string 图片资源标识, error 错误信息
@@ -512,8 +512,8 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if (format != "png" && format != "jpeg") || config.Width <= 0 || config.Height <= 0 {
-		return "", fmt.Errorf("only PNG and JPEG images are supported")
+	if (format != "png" && format != "jpeg" && format != "jbig2") || config.Width <= 0 || config.Height <= 0 {
+		return "", fmt.Errorf("only PNG, JPEG and JBIG2 images are supported")
 	}
 	key := editorResourceKey{checksum: sha256.Sum256(data), index: -1}
 	if id, ok := e.resourceID[key]; ok {
@@ -991,9 +991,20 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 // 入参: obj 文字对象
 // 返回: error 错误信息
 func (e *Editor) prepareText(obj *TextObject) error {
-	sfnt, err := e.editorFont(obj.Font)
-	if err != nil {
-		return err
+	var sfnt FontMetrics
+	external := false
+	for _, resource := range e.resources {
+		if resource.font != nil && resource.font.ID == obj.Font && resource.font.FontFile == "" {
+			external = true
+			break
+		}
+	}
+	if !external {
+		var err error
+		sfnt, err = e.editorFont(obj.Font)
+		if err != nil {
+			return err
+		}
 	}
 	if !finite(obj.Size) || obj.Size <= 0 {
 		return fmt.Errorf("text requires a positive finite size")
@@ -1004,8 +1015,14 @@ func (e *Editor) prepareText(obj *TextObject) error {
 	if obj.VScale != 0 || obj.Decoration != "" {
 		return &EditError{Code: EditUnsupportedObject, Err: fmt.Errorf("text extensions are not supported for creation")}
 	}
-	if err := validateTextGlyphs(*obj, sfnt.NumGlyphs()); err != nil {
-		return err
+	if external {
+		if len(obj.CGTransform) != 0 {
+			return fmt.Errorf("external font text cannot use glyph indices")
+		}
+	} else {
+		if err := validateTextGlyphs(*obj, sfnt.NumGlyphs()); err != nil {
+			return err
+		}
 	}
 	if !finite(obj.HScale) || obj.HScale < 0 || !finite(obj.LineWidth) || obj.LineWidth < 0 || !finite(obj.MiterLimit) || obj.MiterLimit < 0 {
 		return fmt.Errorf("invalid text dimensions")
@@ -1045,7 +1062,7 @@ func (e *Editor) prepareText(obj *TextObject) error {
 				transform++
 			}
 			mapped := transform < len(obj.CGTransform) && position >= obj.CGTransform[transform].CodePosition
-			if !mapped && sfnt.GlyphIndex(char) == 0 {
+			if !external && !mapped && sfnt.GlyphIndex(char) == 0 {
 				missing = append(missing, char)
 			}
 			position++

@@ -412,10 +412,13 @@ func documentInfo(args []js.Value) (any, error) {
 	if currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	if len(args) > 0 && args[0].Bool() && !currentSession.scanFontInfoBatch() {
-		return map[string]bool{"detailsPending": true}, nil
+	if len(args) > 0 && args[0].Bool() {
+		if !currentSession.scanFontInfoBatch() {
+			return map[string]bool{"detailsPending": true}, nil
+		}
+		return map[string]any{"fonts": currentSession.fontInfos, "fontCount": len(currentSession.fontInfos), "detailsPending": false}, nil
 	}
-	return currentSession.Info(), nil
+	return currentSession.Details(), nil
 }
 
 // exportAttachment 分块导出附件

@@ -72,6 +72,28 @@ func (e *Editor) AddFont(file FontFile, index int) (string, error) {
 	return id, nil
 }
 
+// AddExternalFont 注册不含字体文件的名称引用，由阅读环境匹配
+// 入参: name 字体名称
+// 返回: string 字体资源标识, error 错误信息
+func (e *Editor) AddExternalFont(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("empty external font name")
+	}
+	for _, resource := range e.resources {
+		if resource.font != nil && resource.font.FontFile == "" && resource.font.FontName == name {
+			return resource.font.ID, nil
+		}
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return "", err
+	}
+	id := e.nextID()
+	e.resources = append(e.resources, editorResource{font: &Font{ID: id, FontName: name, FamilyName: name}})
+	e.fontRenderer = nil
+	return id, nil
+}
+
 // newEditorFontUsage 创建字体用字记录
 // 返回: *editorFontUsage 用字记录
 func newEditorFontUsage() *editorFontUsage {
@@ -133,7 +155,7 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 	used := make(map[string]map[uint16]bool)
 	mapped := make(map[string]bool)
 	for _, resource := range e.resources {
-		if resource.font == nil {
+		if resource.font == nil || resource.font.FontFile == "" {
 			continue
 		}
 		resourceFont := e.fonts[resource.font.ID]

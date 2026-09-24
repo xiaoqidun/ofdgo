@@ -781,17 +781,30 @@ func (e *Editor) editorFont(id string) (FontMetrics, error) {
 		return nil, &EditError{Code: EditFontUnavailable, Err: fmt.Errorf("fonts: %w", ErrBackendUnavailable)}
 	}
 	var data []byte
+	createdExternal := false
 	for _, resource := range e.resources {
 		if resource.font != nil && resource.font.ID == id {
 			data = resource.data
+			createdExternal = resource.font.FontFile == ""
 			break
 		}
 	}
-	if data == nil && e.source != nil {
+	if data == nil && e.source != nil && !createdExternal {
 		if e.fontRenderer == nil {
 			e.fontRenderer = e.newRenderer(e.source.reader)
 		}
 		resolved, err := e.fontRenderer.ResolveFont(id, true)
+		if err != nil {
+			return nil, &EditError{Code: EditFontUnavailable, Err: err}
+		}
+		data = resolved.Data
+	}
+	if data == nil && createdExternal {
+		reader, err := e.Reader()
+		if err != nil {
+			return nil, &EditError{Code: EditFontUnavailable, Err: err}
+		}
+		resolved, err := e.newRenderer(reader).ResolveFont(id, false)
 		if err != nil {
 			return nil, &EditError{Code: EditFontUnavailable, Err: err}
 		}
@@ -813,7 +826,7 @@ func (e *Editor) editorFont(id string) (FontMetrics, error) {
 // 返回: []byte 独立字体数据, error 错误信息
 func (e *Editor) FontData(id string) ([]byte, error) {
 	for _, resource := range e.resources {
-		if resource.font != nil && resource.font.ID == id {
+		if resource.font != nil && resource.font.ID == id && len(resource.data) != 0 {
 			return bytes.Clone(resource.data), nil
 		}
 	}

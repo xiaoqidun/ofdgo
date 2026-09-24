@@ -4047,6 +4047,10 @@ async function openDocument(options = {}) {
 
 async function loadDocumentDetails(openSeq) {
 	try {
+		const details = await callWASM("ofdgoDocumentInfo");
+		if (openSeq !== state.openSeq) return;
+		Object.assign(state.doc, details, { detailsPending: false, detailsError: "" });
+		renderMeta();
 		while (openSeq === state.openSeq) {
 			await waitForPaint();
 			if (openSeq !== state.openSeq) return;

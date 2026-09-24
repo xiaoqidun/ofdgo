@@ -307,6 +307,9 @@ func (r *Reader) VerifyDocumentSignatures(index int, opts ...SignatureVerifyOpti
 	}
 	body := r.OFD.DocBody[index]
 	options.DocIndex, options.DocRoot = index, r.signatureCoveragePath(body.DocRoot)
+	if index == 0 && r.doc != nil && r.doc.Signatures == "" {
+		return nil, nil
+	}
 	data, err := r.readFile(body.DocRoot)
 	if err != nil {
 		return nil, err

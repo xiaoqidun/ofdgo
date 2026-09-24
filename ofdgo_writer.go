@@ -330,6 +330,9 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error, progress edi
 	}
 	for _, resources := range [][]editorResource{fonts, images} {
 		for _, resource := range resources {
+			if resource.name == "" {
+				continue
+			}
 			if err := write(resource.name, resource.data, resource.image != nil); err != nil {
 				return err
 			}
