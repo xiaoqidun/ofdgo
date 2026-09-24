@@ -1186,10 +1186,12 @@ export class CanvasEditor {
 		input.setAttribute("aria-label", "编辑文字");
 		input.setAttribute("role", "textbox");
 		input.setAttribute("aria-multiline", "true");
+		input.setAttribute("dir", "auto");
 		input.contentEditable = "true";
 		input.spellcheck = false;
 		for (const text of item.text.split("\n")) {
 			const paragraph = document.createElement("div");
+			paragraph.setAttribute("dir", "auto");
 			if (text) paragraph.textContent = text;
 			else paragraph.append(document.createElement("br"));
 			input.append(paragraph);
@@ -1206,6 +1208,7 @@ export class CanvasEditor {
 			minHeight: autoSize ? "0px" : `${frame.height * PX_PER_MM + 4}px`,
 			transform: `matrix(${a},${b},${c},${d},${(e + a * left) * PX_PER_MM},${(f + b * left) * PX_PER_MM})`,
 			whiteSpace: item.wrap ? "pre-wrap" : "pre",
+			unicodeBidi: "plaintext",
 			fontFamily: `"${face.family}"`, fontSize: `${item.size * PX_PER_MM}px`,
 			lineHeight: item.paragraphHeight || item.lineHeight ? `${(item.paragraphHeight || item.lineHeight) * PX_PER_MM}px` : "normal", color: item.color,
 			textAlign: item.align || "left",

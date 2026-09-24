@@ -184,6 +184,7 @@ func RunWASM() {
 	registerCallback("ofdgoReadAnnotation", readAnnotation)
 	registerCallback("ofdgoInsertInk", insertInk)
 	registerCallback("ofdgoStyleObjects", styleObjects)
+	registerCallback("ofdgoPreviewPositionedText", previewPositionedText)
 	registerCallback("ofdgoMoveOutline", moveOutline)
 	registerCallback("ofdgoCaptureStyle", captureStyle)
 	registerCallback("ofdgoGroupObjects", groupObjects)
@@ -1702,6 +1703,7 @@ func editorCapabilities(capability ofdgo.ObjectCapabilities, kind string) map[st
 	result := map[string]any{"update": capability.Update, "paint": capability.Paint, "replaceFont": capability.ReplaceFont, "reflow": capability.Reflow, "layoutKnown": capability.LayoutKnown, "transform": capability.Transform, "arrange": capability.Arrange, "copy": capability.Copy, "delete": capability.Delete, "order": capability.Order, "reason": capability.Reason, "reasonCode": string(capability.ReasonCode),
 		"replaceImage": capability.ReplaceImage, "cropImage": capability.CropImage, "fitImage": capability.FitImage, "resetCrop": capability.ResetCrop, "ungroup": capability.Ungroup, "stretch": capability.Stretch, "enter": capability.Transform && (kind == "CompositeObject" || kind == "CompositeGraphicUnit")}
 	result["textContent"] = capability.TextContent
+	result["rewriteText"] = capability.RewriteText
 	if missing := capability.MissingGlyphs; missing != nil {
 		result["missingGlyphs"] = map[string]any{"fontID": missing.FontID, "characters": missing.Characters}
 	}
@@ -1711,6 +1713,16 @@ func editorCapabilities(capability ofdgo.ObjectCapabilities, kind string) map[st
 // editorAppearance 提供对象自身透明度及有效绘制外观，不混入父对象透明度
 // 入参: item 前端对象, object 有效样式, paint 是否可改色, scale 描边页面倍率
 func editorAppearance(item map[string]any, object ofdgo.GraphicObject, paint bool, scale float64) {
+	links := 0
+	for _, action := range object.Actions() {
+		if action.Event == "CLICK" && (action.URI != nil || action.Goto != nil) {
+			links++
+			if data, err := json.Marshal(action); err == nil {
+				item["link"] = string(data)
+			}
+		}
+	}
+	item["linkCount"] = links
 	var alpha *int
 	var fill, stroke *ofdgo.FillColor
 	switch object.Type {
@@ -1945,7 +1957,7 @@ func changeCompositeObjects(args []js.Value) (any, error) {
 			if len(indexes) != 1 {
 				return fmt.Errorf("text layout requires one member")
 			}
-			layout := ofdgo.TextLayout{Wrap: args[6].Bool(), Align: args[7].String(), LineHeight: args[8].Float(), LetterSpacing: args[9].Float(), LeftIndent: args[10].Float(), RightIndent: args[11].Float(), FirstLineIndent: args[12].Float()}
+			layout := ofdgo.TextLayout{AutoBidi: true, Wrap: args[6].Bool(), Align: args[7].String(), LineHeight: args[8].Float(), LetterSpacing: args[9].Float(), LeftIndent: args[10].Float(), RightIndent: args[11].Float(), FirstLineIndent: args[12].Float()}
 			if !args[4].IsNull() {
 				return currentEditor.ResizeCompositeTextFrame(page, path, indexes[0], args[4].Float(), args[5].Float(), layout)
 			}
@@ -2224,6 +2236,40 @@ func previewText(args []js.Value) (any, error) {
 	return map[string]any{"runs": runs, "scale": scale, "weight": text.Weight, "italic": text.Italic}, nil
 }
 
+// previewPositionedText 预览保留定位的文字替换，不修改编辑器或撤销记录
+// 入参: args 页面、对象标识和内容
+// 返回: any SVG预览, error 错误信息
+func previewPositionedText(args []js.Value) (any, error) {
+	object, err := currentEditor.Object(args[0].Int(), args[1].String())
+	if err != nil {
+		return nil, err
+	}
+	if object.Type != "TextObject" {
+		return nil, fmt.Errorf("object is not text")
+	}
+	if err := currentEditor.RewriteText(&object.TextObject, args[2].String()); err != nil {
+		return nil, err
+	}
+	measured, err := currentSession.Renderer.MeasureObject(object, ofdgo.MeasureOptions{})
+	if err != nil {
+		return nil, err
+	}
+	box := measured.Bounds
+	margin := object.TextObject.Size / 4
+	box.X, box.Y, box.W, box.H = box.X-margin, box.Y-margin, box.W+2*margin, box.H+2*margin
+	boundary, err := ofdgo.ParseBox(object.TextObject.Boundary)
+	if err != nil {
+		return nil, err
+	}
+	object.TextObject.Boundary = fmt.Sprintf("%g %g %g %g", boundary.X-box.X, boundary.Y-box.Y, boundary.W, boundary.H)
+	page := &ofdgo.PageContent{Area: ofdgo.PageArea{PhysicalBox: fmt.Sprintf("0 0 %g %g", box.W, box.H)}, Content: ofdgo.Content{Layer: []ofdgo.Layer{{Objects: []ofdgo.GraphicObject{object}}}}}
+	var output bytes.Buffer
+	if err := currentSession.Renderer.RenderToSVG(page, &output); err != nil {
+		return nil, err
+	}
+	return output.String(), nil
+}
+
 // updateText 修改文字，null内容保留定位且允许替换字体，null字体数据和颜色沿用对象属性
 // 入参: args 页码、对象标识、内容、字体数据、字号和颜色
 // 返回: any 文档信息, error 错误信息
@@ -2258,7 +2304,10 @@ func updateText(args []js.Value) (any, error) {
 	}
 	if !args[2].IsNull() {
 		if args[4].Float() == object.TextObject.Size {
-			style := ofdgo.TextStyle{Font: object.TextObject.Font}
+			var style ofdgo.TextStyle
+			if !args[3].IsNull() {
+				style.Font = object.TextObject.Font
+			}
 			if !args[5].IsNull() {
 				var fill ofdgo.FillColor
 				if err := setEditorColor(&fill, args[5].String()); err != nil {
@@ -2407,7 +2456,7 @@ func insertText(args []js.Value) (any, error) {
 		Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
 		Font:     fontID, Size: args[5].Float(),
 	}}
-	if err := currentEditor.LayoutText(&object.TextObject, args[1].String(), ofdgo.TextLayout{Wrap: args[8].Bool(), Align: args[9].String(), LineHeight: args[10].Float(), LetterSpacing: args[11].Float(), LeftIndent: args[12].Float(), RightIndent: args[13].Float(), FirstLineIndent: args[14].Float()}); err != nil {
+	if err := currentEditor.LayoutText(&object.TextObject, args[1].String(), ofdgo.TextLayout{AutoBidi: true, Wrap: args[8].Bool(), Align: args[9].String(), LineHeight: args[10].Float(), LetterSpacing: args[11].Float(), LeftIndent: args[12].Float(), RightIndent: args[13].Float(), FirstLineIndent: args[14].Float()}); err != nil {
 		return nil, err
 	}
 	if err := setTextColor(&object.TextObject, args[6].String()); err != nil {
@@ -2438,7 +2487,7 @@ func layoutText(args []js.Value) (any, error) {
 		}
 	}
 	value, _ := object.TextObject.TextLayout()
-	if err := currentEditor.LayoutText(&object.TextObject, value, ofdgo.TextLayout{Wrap: args[4].Bool(), Align: args[5].String(), LineHeight: args[6].Float(), LetterSpacing: args[7].Float(), LeftIndent: args[8].Float(), RightIndent: args[9].Float(), FirstLineIndent: args[10].Float()}); err != nil {
+	if err := currentEditor.LayoutText(&object.TextObject, value, ofdgo.TextLayout{AutoBidi: true, Wrap: args[4].Bool(), Align: args[5].String(), LineHeight: args[6].Float(), LetterSpacing: args[7].Float(), LeftIndent: args[8].Float(), RightIndent: args[9].Float(), FirstLineIndent: args[10].Float()}); err != nil {
 		return nil, err
 	}
 	revision := currentEditor.Revision()
@@ -2938,6 +2987,13 @@ func changeOutline(args []js.Value) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func styleObjects(args []js.Value) (any, error) {
 	style := objectStyle(args[2])
+	linkField := args[2].Get("link")
+	var link *ofdgo.AnnotationLink
+	if !linkField.IsUndefined() && !linkField.IsNull() {
+		if err := json.Unmarshal([]byte(linkField.String()), &link); err != nil {
+			return nil, err
+		}
+	}
 	var border *ofdgo.ImageBorderStyle
 	if field := args[2].Get("borderStyle"); !field.IsUndefined() {
 		if err := json.Unmarshal([]byte(field.String()), &border); err != nil {
@@ -2967,6 +3023,11 @@ func styleObjects(args []js.Value) (any, error) {
 	return changeObjects(func() error {
 		return currentEditor.Transaction(func(editor *ofdgo.Editor) error {
 			page, ids := args[0].Int(), stringsFromJS(args[1])
+			if !linkField.IsUndefined() {
+				if err := editor.SetObjectLink(page, ids, link); err != nil {
+					return err
+				}
+			}
 			if border != nil {
 				if err := resolveStylePaint((*ofdgo.FillColor)(border.Color)); err != nil {
 					return err

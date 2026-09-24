@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"encoding/xml"
 	"fmt"
 	"image/color"
 	"math"
@@ -43,6 +44,136 @@ type ImageBorderStyle struct {
 	HorizontalRadius *float64
 	VerticalRadius   *float64
 	Color            *StrokeColor
+}
+
+// DrawParam 读取绘制参数，resolved为true时合并继承链，返回独立副本
+// 入参: id 资源标识, resolved 是否解析继承
+// 返回: *DrawParam 绘制参数, error 错误信息
+func (e *Editor) DrawParam(id string, resolved bool) (*DrawParam, error) {
+	if resolved {
+		return e.editorDrawParam(id, make(map[string]bool))
+	}
+	for _, resource := range e.resources {
+		if resource.draw != nil && resource.draw.ID == id {
+			return cloneEditorData(resource.draw), nil
+		}
+	}
+	if e.source != nil {
+		if value := e.source.reader.drawParamCache[id]; value != nil {
+			return cloneEditorData(value), nil
+		}
+	}
+	return nil, &EditError{Code: EditUnsupportedStyle, Err: fmt.Errorf("draw parameter %q not found", id)}
+}
+
+// SetObjectDrawParam 修改对象的绘制参数引用，保留局部覆盖和原文扩展，空标识恢复图层继承
+// 入参: page 页面索引, ids 对象标识, id 绘制参数标识
+// 返回: error 错误信息
+func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
+	if _, err := e.editorDrawParam(id, make(map[string]bool)); err != nil {
+		return err
+	}
+	objects, indexes, err := e.selectedObjects(page, ids)
+	if err != nil {
+		return err
+	}
+	origins := make(map[string]*editorObjectOrigin)
+	for i, object := range objects {
+		if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+			return fmt.Errorf("object %q does not support draw parameters", ids[i])
+		}
+		origin := e.objectOrigin(ids[i])
+		if origin != nil && origin.node.attr("DrawParam") == id {
+			continue
+		}
+		var data []byte
+		if origin != nil {
+			before, resolveErr := e.resolveEditorStyle(origin.object, e.pages[page].Content.Layer[indexes[i].layer].DrawParam)
+			if resolveErr != nil {
+				return resolveErr
+			}
+			oldXML, encodeErr := editorObjectXML(before)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			comparison := object
+			comparison.TextObject.DrawParam, comparison.PathObject.DrawParam = "", ""
+			newXML, encodeErr := editorObjectXML(comparison)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			data, err = editorXMLMerge(origin.data, origin.node, oldXML, newXML)
+			if err == nil {
+				data, err = editorXMLStandalone(data, origin.node)
+			}
+		} else {
+			data, err = editorObjectXML(object)
+		}
+		if err != nil {
+			return err
+		}
+		root, err := parseEditorXML(data)
+		if err != nil {
+			return err
+		}
+		if id == "" {
+			before, encodeErr := editorXMLContainer(root.name.Local, ofdAttrs{{Name: xml.Name{Local: "DrawParam"}, Value: root.attr("DrawParam")}}, nil)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			after, encodeErr := editorXMLContainer(root.name.Local, nil, nil)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			data, err = editorXMLMerge(data, root, before, after)
+		} else {
+			data, err = editorXMLAttribute(data, root, "DrawParam", id)
+		}
+		if err != nil {
+			return err
+		}
+		next := GraphicObject{Type: object.Type, state: object.state}
+		var target any
+		switch object.Type {
+		case "TextObject":
+			target = &next.TextObject
+		case "PathObject":
+			target = &next.PathObject
+		default:
+			target = &next.CompositeGraphicUnit
+		}
+		if err := xml.Unmarshal(data, target); err != nil {
+			return err
+		}
+		next, err = e.resolveEditorStyle(next, e.pages[page].Content.Layer[indexes[i].layer].DrawParam)
+		if err != nil {
+			return err
+		}
+		if next.TextObject.Font == object.TextObject.Font && next.TextObject.Size == object.TextObject.Size {
+			next.TextObject.layout = object.TextObject.layout
+		}
+		switch next.Type {
+		case "TextObject":
+			next.TextObject.DrawParam = id
+		case "PathObject":
+			next.PathObject.DrawParam = id
+		}
+		next.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
+		root, err = parseEditorXML(data)
+		if err != nil {
+			return err
+		}
+		updated := &editorObjectOrigin{editor: e, data: data, node: root, object: next}
+		if origin != nil {
+			updated.page, root.parent = origin.page, origin.node.parent
+		} else {
+			content := &editorXML{name: xml.Name{Local: "Content"}}
+			root.parent = &editorXML{name: xml.Name{Local: "Layer"}, parent: content, children: []*editorXML{root}}
+			content.children = []*editorXML{root.parent}
+		}
+		objects[i], origins[ids[i]] = next, updated
+	}
+	return e.updateObjectOrigins(page, objects, true, origins)
 }
 
 // AddDrawParam 注册绘制参数，保留继承引用，未引用的资源不写入文档

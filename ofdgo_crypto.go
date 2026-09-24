@@ -28,7 +28,7 @@ var (
 	ErrEncryptionPolicyRequired = errors.New("explicit encryption policy required")
 )
 
-// Credentials 解密凭据，UserName为空时尝试匹配用户；证书采用DER编码
+// Credentials 解密凭据，UserName用于筛选接收者，留空自动匹配，不参与口令派生；证书采用DER编码
 // Password与Decrypter分别用于口令和证书方案，私钥可由外部密码设备持有
 type Credentials struct {
 	UserName    string
@@ -86,6 +86,7 @@ type EncryptionRecipient struct {
 }
 
 // EncryptionOptions 设置GM/T0099加密，口令与证书方案二选一
+// UserName标记口令接收者，不参与口令派生，留空使用User
 // 口令方案应使用足够长的随机口令；标准密钥派生不提供慢速口令哈希
 type EncryptionOptions struct {
 	Password   []byte

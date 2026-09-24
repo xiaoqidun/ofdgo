@@ -293,20 +293,18 @@ func validateTextGlyphs(obj TextObject, glyphCount uint16) error {
 		total += len(textCodeRunes(code.Value))
 		ends = append(ends, total)
 	}
-	previous := 0
+	previous, boundary := 0, 0
 	for _, transform := range obj.CGTransform {
 		start, count := transform.CodePosition, transform.CodeCount
 		if start < previous || count <= 0 || start >= total || count > total-start {
 			return fmt.Errorf("invalid glyph character range")
 		}
 		end := start + count
-		for _, boundary := range ends {
-			if start < boundary {
-				if end > boundary {
-					return fmt.Errorf("glyph mapping crosses text codes")
-				}
-				break
-			}
+		for ends[boundary] <= start {
+			boundary++
+		}
+		if end > ends[boundary] {
+			return fmt.Errorf("glyph mapping crosses text codes")
 		}
 		ids := strings.Fields(transform.Glyphs)
 		if len(ids) == 0 || len(ids) != transform.GlyphCount {

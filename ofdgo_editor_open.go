@@ -71,10 +71,12 @@ type editorSourcePage struct {
 // Paint表示可独立修改纯色填充和描边，不要求重新排版文字
 // ReplaceImage表示可替换图片数据，CropImage表示可裁剪图片；内部裁剪与原裁剪取交集
 // MissingGlyphs提供缺字导致操作受限时的结构化诊断
+// RewriteText表示可保留原定位修改，具体替换仍需校验长度、字形映射和字体覆盖
 // Ungroup表示可移除组合容器并保留内部内容，Stretch表示图片及纯图片组合可独立调整宽高
 type ObjectCapabilities struct {
 	Update        bool
 	TextContent   bool
+	RewriteText   bool
 	Paint         bool
 	ReplaceFont   bool
 	ReplaceImage  bool
@@ -504,6 +506,7 @@ func (e *Editor) objectCapabilities(object GraphicObject, orderable map[*editorX
 	origin := e.objectOrigin(id)
 	if origin == nil {
 		all.TextContent = all.Reflow
+		all.RewriteText = object.Type == "TextObject"
 		all.Stretch = object.Type == "ImageObject"
 		all.ReplaceImage = object.Type == "ImageObject"
 		all.CropImage = all.ReplaceImage
@@ -551,7 +554,12 @@ func (e *Editor) objectCapabilities(object GraphicObject, orderable map[*editorX
 		all.Reason, all.ReasonCode = "image actions cannot be transformed together with the border", EditUnsupportedObject
 	}
 	if object.Type == "TextObject" {
-		all.TextContent = all.Update && object.TextObject.ReadDirection == 0 && object.TextObject.CharDirection == 0
+		all.TextContent = all.Update && object.TextObject.ReadDirection == 0 && object.TextObject.CharDirection == 0 && (all.LayoutKnown || len(object.TextObject.CGTransform) == 0)
+		all.RewriteText = all.TextContent
+		if !all.RewriteText {
+			text := object.TextObject
+			all.RewriteText = e.RewriteText(&text, text.Text()) == nil
+		}
 		all.Arrange = all.Update || e.editorTextMeasurable(object.TextObject)
 		if _, err := object.TextObject.TextFrame(); err != nil {
 			all.Reflow = false

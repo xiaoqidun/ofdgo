@@ -236,7 +236,22 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 // 返回: []byte 页面XML, error 错误信息
 func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, error) {
 	page := e.pages[index]
-	if reflect.DeepEqual(page, *source.original) {
+	unchanged := reflect.DeepEqual(page, *source.original)
+	if unchanged && len(e.origins) != 0 {
+		for _, layer := range page.Content.Layer {
+			for _, object := range layer.Objects {
+				id := editorObjectID(object)
+				if origin := e.origins[id]; origin != nil && origin.node != source.nodes[id] {
+					unchanged = false
+					break
+				}
+			}
+			if !unchanged {
+				break
+			}
+		}
+	}
+	if unchanged {
 		return source.data, nil
 	}
 	if source.root.open == source.root.end {
@@ -314,11 +329,11 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 			if exists {
 				nextID := editorObjectID(next)
 				origin := source.nodes[nextID]
-				if origin != nil && reflect.DeepEqual(before[nextID], next) {
+				current := e.objectOrigin(nextID)
+				if origin != nil && current.node == origin && reflect.DeepEqual(before[nextID], next) {
 					encoded = data[origin.start:origin.end]
 				} else {
 					var err error
-					current := e.objectOrigin(nextID)
 					encoded, err = editorXMLObject(current.data, current.node, current.object, next)
 					if err != nil {
 						return nil, err

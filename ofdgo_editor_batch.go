@@ -526,7 +526,7 @@ func (e *Editor) updateObjectOrigins(page int, objects []GraphicObject, preserve
 			beforeOrigins[ids[i]], afterOrigins[ids[i]] = origin, next
 		}
 	}
-	if reflect.DeepEqual(before, after) {
+	if reflect.DeepEqual(before, after) && len(afterOrigins) == 0 {
 		return nil
 	}
 	apply := func(e *Editor, objects []GraphicObject, origins map[string]*editorObjectOrigin) {

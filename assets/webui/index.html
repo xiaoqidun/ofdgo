@@ -183,6 +183,12 @@
 			<form id="objectStyleForm">
 				<div class="form-row"><span>组合</span><div class="form-format"><button id="groupObjectsButton" class="button" type="button">组合</button><button id="ungroupObjectButton" class="button" type="button">解组</button></div></div>
 				<div class="form-row"><span>格式</span><div class="form-format"><button id="copyStyleButton" class="button" type="button" aria-label="复制格式">复制</button><button id="pasteStyleButton" class="button" type="button" aria-label="粘贴格式">粘贴</button></div></div>
+				<details id="objectLinkFields" hidden>
+					<summary>链接</summary>
+					<div class="form-row"><label for="objectLinkKind">目标</label><select id="objectLinkKind"><option value="none">不设</option><option value="uri">网址</option><option value="page">页面</option><option value="keep">原有</option></select></div>
+					<div class="form-row" id="objectLinkAddressRow" hidden><label for="objectLinkAddress">地址</label><input id="objectLinkAddress" type="text"></div>
+					<div class="form-row" id="objectLinkPageRow" hidden><label for="objectLinkPage">页码</label><input id="objectLinkPage" type="number" min="1" step="1"></div>
+				</details>
 				<div class="form-row"><label for="objectOpacity">透明</label><div class="form-unit"><input id="objectOpacity" type="number" min="0" max="100" step="any" aria-label="透明度" autofocus><span>%</span></div></div>
 				<details id="objectBorderFields" hidden>
 					<summary>边框</summary>
@@ -341,6 +347,14 @@
 		</dialog>
 		<dialog id="objectPicker" class="form-dialog" aria-label="选取对象">
 			<form method="dialog"><div id="objectPickerList" class="object-picker-list"></div><div class="form-actions"><button class="button" type="submit">关闭</button></div></form>
+		</dialog>
+		<dialog id="sourceTextPanel" class="form-dialog" aria-label="保留排版">
+			<form id="sourceTextForm">
+				<h2 class="form-title">保留排版</h2>
+				<div class="form-row"><label for="sourceTextValue">内容</label><textarea id="sourceTextValue" rows="3" dir="auto" aria-label="文字内容" required></textarea></div>
+				<div id="sourceTextPreview" aria-label="文字预览"></div>
+				<div class="form-actions"><span id="sourceTextStatus" class="form-status" role="status"></span><button id="sourceTextCancel" class="button" type="button">取消</button><button class="button primary" type="submit">确定</button></div>
+			</form>
 		</dialog>
 		<dialog id="annotationNote" class="form-dialog" aria-label="注解">
 			<form id="annotationForm" method="dialog">

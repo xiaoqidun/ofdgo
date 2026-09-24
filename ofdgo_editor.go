@@ -79,7 +79,7 @@ func (e *Editor) SetFontFS(fsys ...fs.FS) {
 func (e *Editor) SetPageCompiler(compiler PageCompiler) {
 	e.backends.Compiler = compiler
 	if e.fontRenderer != nil {
-		e.fontRenderer.backends.Compiler = compiler
+		WithRenderBackends(e.backends)(e.fontRenderer)
 	}
 }
 

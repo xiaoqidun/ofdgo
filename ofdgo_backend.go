@@ -149,6 +149,17 @@ func backendName(backend Backend) string {
 func WithRenderBackends(backends RenderBackends) RendererOption {
 	return func(r *Renderer) {
 		fontsChanged := !sameBackend(r.backends.Fonts, backends.Fonts)
+		for _, pair := range [][2]Backend{
+			{r.backends.FontResources, backends.FontResources}, {r.backends.Fonts, backends.Fonts},
+			{r.backends.Geometry, backends.Geometry}, {r.backends.Compiler, backends.Compiler},
+			{r.backends.Raster, backends.Raster}, {r.backends.SVG, backends.SVG},
+			{r.backends.PDF, backends.PDF}, {r.backends.EPS, backends.EPS},
+		} {
+			if !sameBackend(pair[0], pair[1]) {
+				r.backendStates = make(map[any]any)
+				break
+			}
+		}
 		r.backends = backends
 		if fontsChanged {
 			r.resetFontBackendCache()
@@ -202,7 +213,12 @@ func (r *Renderer) Backends() RenderBackends {
 // 入参: backend 光栅后端，nil禁用图像输出
 // 返回: RendererOption 渲染选项
 func WithRasterBackend(backend RasterBackend) RendererOption {
-	return func(r *Renderer) { r.backends.Raster = backend }
+	return func(r *Renderer) {
+		if !sameBackend(r.backends.Raster, backend) {
+			r.backendStates = make(map[any]any)
+		}
+		r.backends.Raster = backend
+	}
 }
 
 // CompilePage 编译与后端无关的光栅页面，可交给任意RasterBackend绘制

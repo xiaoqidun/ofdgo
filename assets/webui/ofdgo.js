@@ -284,10 +284,22 @@ const el = {
 	objectHeight: document.querySelector("#objectHeight"),
 	objectAspect: document.querySelector("#objectAspect"),
 	objectStylePanel: document.querySelector("#objectStylePanel"),
+	sourceTextPanel: document.querySelector("#sourceTextPanel"),
+	sourceTextForm: document.querySelector("#sourceTextForm"),
+	sourceTextValue: document.querySelector("#sourceTextValue"),
+	sourceTextPreview: document.querySelector("#sourceTextPreview"),
+	sourceTextStatus: document.querySelector("#sourceTextStatus"),
+	sourceTextCancel: document.querySelector("#sourceTextCancel"),
 	objectStyleForm: document.querySelector("#objectStyleForm"),
 	groupObjectsButton: document.querySelector("#groupObjectsButton"),
 	ungroupObjectButton: document.querySelector("#ungroupObjectButton"),
 	objectOpacity: document.querySelector("#objectOpacity"),
+	objectLinkFields: document.querySelector("#objectLinkFields"),
+	objectLinkKind: document.querySelector("#objectLinkKind"),
+	objectLinkAddress: document.querySelector("#objectLinkAddress"),
+	objectLinkPage: document.querySelector("#objectLinkPage"),
+	objectLinkAddressRow: document.querySelector("#objectLinkAddressRow"),
+	objectLinkPageRow: document.querySelector("#objectLinkPageRow"),
 	objectGradientFields: document.querySelector("#objectGradientFields"),
 	gradientTarget: document.querySelector("#gradientTarget"),
 	objectBorderFields: document.querySelector("#objectBorderFields"),
@@ -997,6 +1009,23 @@ el.objectBoundsForm.addEventListener("submit", async event => {
 	if (saved) el.objectBoundsPanel.close();
 });
 el.objectStyleCancel.addEventListener("click", () => el.objectStylePanel.close());
+el.sourceTextCancel.addEventListener("click", () => el.sourceTextPanel.close());
+el.sourceTextValue.addEventListener("input", () => {
+	clearTimeout(state.sourceTextTimer);
+	state.sourceTextTimer = setTimeout(previewPositionedText, 150);
+});
+el.sourceTextPanel.addEventListener("close", () => {
+	clearTimeout(state.sourceTextTimer);
+	state.sourceText = null;
+	el.sourceTextPreview.replaceChildren();
+});
+el.sourceTextForm.addEventListener("submit", async event => {
+	event.preventDefault();
+	const item = state.sourceText?.item;
+	if (!item) return;
+	if (await changeDocument("ofdgoUpdateText", item, el.sourceTextValue.value, null, item.size, null)) el.sourceTextPanel.close();
+});
+el.objectLinkKind.addEventListener("change", updateObjectLinkFields);
 el.gradientKind.addEventListener("change", () => {
 	el.gradientControls.hidden = el.gradientKind.value === "keep";
 	el.gradientAngle.disabled = el.gradientKind.value !== "linear";
@@ -1410,7 +1439,7 @@ function handleKeyDown(event) {
 
 function formDialogOpen() {
 	return el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open
-		|| el.batchPagesPanel.open || el.objectStylePanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
+		|| el.batchPagesPanel.open || el.objectStylePanel.open || el.sourceTextPanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
 function setObjectDimension(input, value) {
@@ -1458,6 +1487,16 @@ function openObjectStyle() {
 	el.copyStyleButton.disabled = items.length !== 1 || !canCopyStyle(items[0]);
 	el.pasteStyleButton.disabled = !state.styleClipboard || !items.every(item => item.type === state.styleClipboard && canCopyStyle(item));
 	const shared = (key, fallback) => items.every(item => (item[key] ?? fallback) === (items[0][key] ?? fallback)) ? items[0][key] ?? fallback : null;
+	el.objectLinkFields.hidden = items.length !== 1 || items[0].scoped;
+	const link = items[0].link ? JSON.parse(items[0].link) : null;
+	const targetPage = link?.Goto?.Dest ? state.doc.pages.findIndex(page => page.id === link.Goto.Dest.PageID) : -1;
+	el.objectLinkKind.value = items[0].linkCount > 1 ? "keep" : link?.URI ? "uri" : targetPage >= 0 ? "page" : link ? "keep" : "none";
+	el.objectLinkKind.disabled = items[0].linkCount > 1;
+	el.objectLinkAddress.value = link?.URI?.URI || "";
+	el.objectLinkPage.value = String(targetPage >= 0 ? targetPage + 1 : 1);
+	el.objectLinkPage.max = String(state.doc?.pages.length || 1);
+	state.objectLinkOriginal = { kind: el.objectLinkKind.value, address: el.objectLinkAddress.value, page: el.objectLinkPage.value, link };
+	updateObjectLinkFields();
 	el.objectBorderFields.hidden = items.length !== 1 || items[0].scoped || items[0].type !== "ImageObject";
 	const border = items[0].borderStyle ? JSON.parse(items[0].borderStyle) : null;
 	el.borderEnabled.checked = Boolean(border);
@@ -1517,6 +1556,14 @@ function openObjectStyle() {
 
 function readObjectStyle() {
 	const style = {}, changed = key => el[key].value !== state.styleOriginal[key];
+	if (!el.objectLinkFields.hidden) {
+		const original = state.objectLinkOriginal, kind = el.objectLinkKind.value;
+		if (kind !== "keep" && (kind !== original.kind || kind === "uri" && el.objectLinkAddress.value !== original.address || kind === "page" && el.objectLinkPage.value !== original.page)) {
+			style.link = kind === "none" ? null : JSON.stringify(kind === "uri"
+				? { URI: { ...original.link?.URI, URI: el.objectLinkAddress.value.trim() } }
+				: { Dest: { ...(original.link?.Goto?.Dest || { Type: "Fit" }), PageID: state.doc.pages[Number(el.objectLinkPage.value) - 1].id } });
+		}
+	}
 	if (!el.objectBorderFields.hidden) {
 		const border = {};
 		if (el.borderEnabled.checked !== state.borderOriginal.Enabled) border.Enabled = el.borderEnabled.checked;
@@ -1585,6 +1632,16 @@ function readObjectStyle() {
 		if (changed("objectJoin") && el.objectJoin.value !== "mixed") style.join = el.objectJoin.value;
 	}
 	return style;
+}
+
+function updateObjectLinkFields() {
+	const kind = el.objectLinkKind.value, visible = !el.objectLinkFields.hidden;
+	el.objectLinkAddressRow.hidden = !visible || kind !== "uri";
+	el.objectLinkPageRow.hidden = !visible || kind !== "page";
+	el.objectLinkAddress.disabled = el.objectLinkAddressRow.hidden;
+	el.objectLinkPage.disabled = el.objectLinkPageRow.hidden;
+	el.objectLinkAddress.required = visible && kind === "uri";
+	el.objectLinkPage.required = visible && kind === "page";
 }
 
 function gradientForm() {
@@ -2084,7 +2141,18 @@ async function editCanvasObject(item) {
 		return;
 	}
 	if (item.type === "TextObject") {
-		if (!canEditObject(item, "textContent")) return;
+		if (!canEditObject(item, "textContent")) {
+			if (!item.scoped && canEditObject(item, "rewriteText")) {
+				state.sourceText = { item, openSeq: state.openSeq };
+				el.sourceTextValue.value = item.text;
+				el.sourceTextStatus.textContent = "";
+				el.sourceTextPreview.replaceChildren();
+				el.sourceTextPanel.showModal();
+				el.sourceTextValue.focus();
+				await previewPositionedText();
+			}
+			return;
+		}
 	} else if (!canEditObject(item, item.type === "ImageObject" ? "replaceImage" : "update")) return;
 	if (item.type === "PathObject") {
 		el.shapeWidth.focus();
@@ -2110,6 +2178,22 @@ async function editCanvasObject(item) {
 	} finally {
 		if (openSeq === state.openSeq) {
 			setBusy(false);
+		}
+	}
+}
+
+async function previewPositionedText() {
+	const request = state.sourceText, value = el.sourceTextValue.value;
+	if (!request || !el.sourceTextPanel.open) return;
+	try {
+		const svg = await callWASM("ofdgoPreviewPositionedText", request.item.index, request.item.id, value);
+		if (state.sourceText !== request || request.openSeq !== state.openSeq || el.sourceTextValue.value !== value) return;
+		el.sourceTextPreview.replaceChildren(parseSVG(svg));
+		el.sourceTextStatus.textContent = "";
+	} catch (error) {
+		if (state.sourceText === request && request.openSeq === state.openSeq && el.sourceTextValue.value === value) {
+			el.sourceTextPreview.replaceChildren();
+			el.sourceTextStatus.textContent = error.message;
 		}
 	}
 }
@@ -2714,6 +2798,8 @@ async function changeDocument(name, item, ...args) {
 				el.batchPagesStatus.textContent = err.message;
 			} else if (el.objectStylePanel.open) {
 				el.objectStyleStatus.textContent = err.message;
+			} else if (el.sourceTextPanel.open) {
+				el.sourceTextStatus.textContent = err.message;
 			} else if (el.objectBoundsPanel.open) {
 				el.objectBoundsStatus.textContent = err.message;
 			} else if (el.outlinePanel.open) {
@@ -3275,6 +3361,7 @@ async function openOFD(file) {
 		el.importPanel.close();
 		el.batchPagesPanel.close();
 		el.objectStylePanel.close();
+		el.sourceTextPanel.close();
 		el.objectBoundsPanel.close();
 		el.outlinePanel.close();
 		updateControls();
@@ -7077,7 +7164,7 @@ function updateObjectControls(item, reset = false) {
 	el.resetCropButton.disabled = canEditObject(item, "resetCrop") ? disabled : el.cropImageButton.disabled || !cropping && (item.scoped ? !item.cropped : !item.imageBounds || ["x", "y", "width", "height"].every(key => Math.abs(item[key] - item.imageBounds[key]) < 1e-9));
 	el.objectDistribute.disabled = el.objectAlign.disabled || !item.items || item.items.length < 3;
 	el.editObjectButton.disabled = disabled || Boolean(item.items) || !canEditObject(item, "enter") && (item.type === "PathObject"
-		|| !canEditObject(item, item.type === "TextObject" ? "textContent" : item.type === "ImageObject" ? "replaceImage" : "update"));
+		|| !(item.type === "TextObject" && !item.scoped && canEditObject(item, "rewriteText")) && !canEditObject(item, item.type === "TextObject" ? "textContent" : item.type === "ImageObject" ? "replaceImage" : "update"));
 	el.editObjectButton.textContent = canEditObject(item, "enter") ? "进入" : item?.type === "ImageObject" ? "替换" : "修改";
 	el.editObjectButton.title = canEditObject(item, "enter") ? item?.type === "Annotation" ? "进入注解" : "进入组合" : item?.type === "ImageObject" ? "替换图片" : item?.type === "Annotation" ? "修改注解" : "修改对象";
 	el.editObjectButton.setAttribute("aria-label", el.editObjectButton.title);

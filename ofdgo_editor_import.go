@@ -56,6 +56,7 @@ type editorPageImport struct {
 	defaultCS     string
 	attachments   map[string][]byte
 	copyPage      bool
+	strictLinks   bool
 	progress      editorProgress
 }
 
@@ -67,6 +68,152 @@ type PageImportOptions struct {
 	Outlines       bool
 	AllowDecrypted bool
 	OnProgress     func(stage string, completed, total int) error
+}
+
+// ObjectImportOptions 跨文档对象迁移选项，位移单位为毫米
+// AllowDecrypted显式允许将加密来源导入未加密目标，进度回调返回错误时撤销整个操作
+type ObjectImportOptions struct {
+	DX, DY         float64
+	AllowDecrypted bool
+	OnProgress     func(stage string, completed, total int) error
+}
+
+// ImportObjects 迁移选区及引用资源，不改变来源与目标页面结构，提交一次撤销记录
+// 保留对象原文与图层继承，同页链接映射到目标页，无法迁移的跨页链接明确报错
+// 返回后可关闭来源阅读器，后续修改来源不影响副本
+// 入参: source 来源编辑器, sourcePage 来源页, ids 对象标识, page 目标页, options 迁移选项
+// 返回: []string 新对象标识, error 错误信息
+func (e *Editor) ImportObjects(source *Editor, sourcePage int, ids []string, page int, options ObjectImportOptions) ([]string, error) {
+	if !finite(options.DX) || !finite(options.DY) {
+		return nil, fmt.Errorf("import requires finite offsets")
+	}
+	if source.encryption != nil && e.encryption == nil && !options.AllowDecrypted {
+		return nil, ErrEncryptionPolicyRequired
+	}
+	objects, err := source.Objects(sourcePage, ids)
+	if err != nil {
+		return nil, err
+	}
+	target, err := e.page(page)
+	if err != nil || len(objects) == 0 {
+		return nil, err
+	}
+	if source == e {
+		return e.CopyObjects(page, objects, options.DX, options.DY)
+	}
+	reader, err := source.Reader()
+	if err != nil {
+		return nil, err
+	}
+	doc, err := reader.Doc()
+	if err != nil {
+		return nil, err
+	}
+	ref := doc.Pages.Page[sourcePage]
+	progress := editorProgress(options.OnProgress)
+	base, migration, err := e.prepareImport(reader, doc, map[string]bool{ref.ID: true}, false, progress)
+	if err != nil {
+		return nil, err
+	}
+	migration.ids[ref.ID], migration.strictLinks = target.ID, true
+	pageName := reader.ResPath(ref.BaseLoc)
+	content, err := reader.PageContentByIndex(sourcePage)
+	if err != nil {
+		return nil, err
+	}
+	for _, value := range content.PageRes {
+		name, err := migration.resolve(pageName, "", value)
+		if err != nil {
+			return nil, err
+		}
+		if err := migration.resourceIndex(name); err != nil {
+			return nil, err
+		}
+	}
+	layers := make([][]byte, len(objects))
+	for i, object := range objects {
+		if err := progress.report("objects", i, len(objects)); err != nil {
+			return nil, err
+		}
+		var data []byte
+		var attrs ofdAttrs
+		if origin := object.origin; origin != nil {
+			data, err = editorXMLObject(origin.data, origin.node, origin.object, object)
+			if err == nil {
+				data, err = editorXMLStandalone(data, origin.node)
+			}
+			for parent := origin.node.parent; parent != nil; parent = parent.parent {
+				if parent.name.Local == "Layer" {
+					attrs.add("DrawParam", parent.attr("DrawParam"))
+					break
+				}
+			}
+		} else {
+			data, err = editorObjectXML(object)
+		}
+		if err != nil {
+			return nil, err
+		}
+		data, err = editorXMLContainer("Layer", attrs, data)
+		if err != nil {
+			return nil, err
+		}
+		root, err := parseEditorXML(data)
+		if err != nil {
+			return nil, err
+		}
+		layers[i], err = migration.encode(editorImportEntry{name: pageName, data: data}, root)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := migration.encodeResources(); err != nil {
+		return nil, err
+	}
+	for _, resource := range e.resources {
+		delete(migration.files, resource.name)
+	}
+	next, err := migration.merge(base, nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var copied []string
+	err = e.Transaction(func(editor *Editor) error {
+		if err := progress.report("commit", 0, 0); err != nil {
+			return err
+		}
+		editor.bindImportResources()
+		editor.source, editor.maxID = next, migration.maximum
+		next.idsReady = true
+		imported := make([]GraphicObject, len(layers))
+		for i, data := range layers {
+			data, err := editorXMLContainer("Content", nil, data)
+			if err != nil {
+				return err
+			}
+			var content Content
+			if err := xml.Unmarshal(data, &content); err != nil {
+				return err
+			}
+			layer := content.Layer[0]
+			root, err := parseEditorXML(data)
+			if err != nil {
+				return err
+			}
+			object := layer.Objects[0]
+			imported[i], err = editor.copiedObjectStyle(object, layer.DrawParam)
+			if err != nil {
+				return err
+			}
+			imported[i].TextObject.layout = objects[i].TextObject.layout
+			imported[i].state = objects[i].state
+			imported[i].CompositeGraphicUnit.states = remapCompositeStates(objects[i].CompositeGraphicUnit.states, migration.ids)
+			imported[i].origin = &editorObjectOrigin{editor: editor, data: data, node: root.child("Layer").children[0], object: object}
+		}
+		copied, err = editor.CopyObjects(page, imported, options.DX, options.DY)
+		return err
+	})
+	return copied, err
 }
 
 // ImportPages 将来源主文档中的指定页面插入目标位置，保持输入顺序并作为一次撤销操作
@@ -117,55 +264,9 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 		return nil, nil
 	}
 	progress := editorProgress(options.OnProgress)
-	maximum, err := e.sourceMaxID(progress)
+	base, m, err := e.prepareImport(source, doc, selected, copyPage, progress)
 	if err != nil {
 		return nil, err
-	}
-	base := e.source
-	if base == nil {
-		base, err = e.importBase()
-		if err != nil {
-			return nil, err
-		}
-	}
-	m := &editorPageImport{reader: source, doc: doc, directory: e.packageDirectory(), target: base.reader, maximum: maximum, copyPage: copyPage, progress: progress,
-		paths: make(map[string]string), evidence: make(map[string]string),
-		ids: make(map[string]string), pages: selected, files: make(map[string][]byte), resources: make(map[string]editorImportEntry), used: make(map[string][]byte), templates: make(map[string]TemplatePage), templateParts: make(map[string][]byte), attachments: make(map[string][]byte)}
-	for _, resource := range e.resources {
-		m.files[resource.name] = nil
-	}
-	m.documentXML, err = m.readFile(source.ResPath(source.OFD.DocBody[0].DocRoot))
-	if err != nil {
-		return nil, err
-	}
-	m.documentRoot, err = parseEditorXML(m.documentXML)
-	if err != nil {
-		return nil, err
-	}
-	if copyPage {
-		for _, page := range doc.Pages.Page {
-			if !selected[page.ID] {
-				m.ids[page.ID] = page.ID
-			}
-		}
-	}
-	for _, name := range append(slices.Clone(doc.CommonData.PublicRes), doc.CommonData.DocumentRes...) {
-		if err := m.resourceIndex(source.ResPath(name)); err != nil {
-			return nil, err
-		}
-	}
-	for _, template := range doc.CommonData.TemplatePage {
-		m.templates[template.ID] = template
-	}
-	if doc.CommonData.DefaultCS != 0 {
-		m.defaultCS, err = m.reference(strconv.Itoa(doc.CommonData.DefaultCS))
-		if err != nil {
-			return nil, err
-		}
-	} else if !e.sourceRGB() {
-		m.defaultCS = m.id("defaultRGB")
-		m.used["defaultRGB"] = []byte(`<ofd:ColorSpace ID="` + m.defaultCS + `" Type="RGB" BitsPerComponent="8"/>`)
-		m.resources["defaultRGB"] = editorImportEntry{group: "ColorSpaces"}
 	}
 	refs := make([]Page, len(indexes))
 	ids := make([]string, len(indexes))
@@ -209,29 +310,8 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 		}
 	}
 	if !copyPage {
-		var resourceContent []byte
-		for _, group := range []string{"ColorSpaces", "DrawParams", "Fonts", "MultiMedias", "CompositeGraphicUnits"} {
-			var entries []byte
-			for _, id := range slices.Sorted(maps.Keys(m.used)) {
-				if m.resources[id].group == group {
-					entries = append(entries, m.used[id]...)
-				}
-			}
-			if len(entries) == 0 {
-				continue
-			}
-			encoded, err := editorXMLContainer(group, nil, entries)
-			if err != nil {
-				return nil, err
-			}
-			resourceContent = append(resourceContent, encoded...)
-		}
-		resources, err := editorXMLContainer("Res", nil, resourceContent)
-		if err != nil {
+		if err := m.encodeResources(); err != nil {
 			return nil, err
-		}
-		if len(resourceContent) != 0 {
-			m.resourceXML = resources
 		}
 	}
 	for _, resource := range e.resources {
@@ -281,19 +361,7 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 	if err := progress.report("commit", 0, 0); err != nil {
 		return nil, err
 	}
-	if e.source == nil {
-		for i := range e.resources {
-			resource := &e.resources[i]
-			if resource.font != nil {
-				resource.font = cloneEditorData(resource.font)
-				resource.font.FontFile = "/" + resource.name
-			}
-			if resource.image != nil {
-				resource.image = cloneEditorData(resource.image)
-				resource.image.MediaFile = "/" + resource.name
-			}
-		}
-	}
+	e.bindImportResources()
 	e.source, e.maxID = next, m.maximum
 	next.idsReady = true
 	e.outlines = outlines
@@ -318,6 +386,111 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 		}
 	}
 	return ids, nil
+}
+
+// bindImportResources 将新建文档资源路径绑定到包根，保持迁移前后的解析一致
+func (e *Editor) bindImportResources() {
+	if e.source != nil {
+		return
+	}
+	for i := range e.resources {
+		resource := &e.resources[i]
+		if resource.font != nil {
+			resource.font = cloneEditorData(resource.font)
+			resource.font.FontFile = "/" + resource.name
+		}
+		if resource.image != nil {
+			resource.image = cloneEditorData(resource.image)
+			resource.image.MediaFile = "/" + resource.name
+		}
+	}
+}
+
+// prepareImport 建立页面和对象迁移共用的资源图，不修改目标编辑器
+// 入参: source 来源, doc 来源文档, selected 页面映射范围, copyPage 是否同文档, progress 进度
+// 返回: *editorSource 目标基础, *editorPageImport 资源图, error 错误信息
+func (e *Editor) prepareImport(source *Reader, doc *Document, selected map[string]bool, copyPage bool, progress editorProgress) (*editorSource, *editorPageImport, error) {
+	maximum, err := e.sourceMaxID(progress)
+	if err != nil {
+		return nil, nil, err
+	}
+	base := e.source
+	if base == nil {
+		base, err = e.importBase()
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	m := &editorPageImport{reader: source, doc: doc, directory: e.packageDirectory(), target: base.reader, maximum: maximum, copyPage: copyPage, progress: progress,
+		paths: make(map[string]string), evidence: make(map[string]string), ids: make(map[string]string), pages: selected,
+		files: make(map[string][]byte), resources: make(map[string]editorImportEntry), used: make(map[string][]byte),
+		templates: make(map[string]TemplatePage), templateParts: make(map[string][]byte), attachments: make(map[string][]byte)}
+	for _, resource := range e.resources {
+		m.files[resource.name] = nil
+	}
+	m.documentXML, err = m.readFile(source.ResPath(source.OFD.DocBody[0].DocRoot))
+	if err != nil {
+		return nil, nil, err
+	}
+	m.documentRoot, err = parseEditorXML(m.documentXML)
+	if err != nil {
+		return nil, nil, err
+	}
+	if copyPage {
+		for _, page := range doc.Pages.Page {
+			if !selected[page.ID] {
+				m.ids[page.ID] = page.ID
+			}
+		}
+	}
+	for _, name := range append(slices.Clone(doc.CommonData.PublicRes), doc.CommonData.DocumentRes...) {
+		if err := m.resourceIndex(source.ResPath(name)); err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, template := range doc.CommonData.TemplatePage {
+		m.templates[template.ID] = template
+	}
+	if doc.CommonData.DefaultCS != 0 {
+		m.defaultCS, err = m.reference(strconv.Itoa(doc.CommonData.DefaultCS))
+		if err != nil {
+			return nil, nil, err
+		}
+	} else if !e.sourceRGB() {
+		m.defaultCS = m.id("defaultRGB")
+		m.used["defaultRGB"] = []byte(`<ofd:ColorSpace ID="` + m.defaultCS + `" Type="RGB" BitsPerComponent="8"/>`)
+		m.resources["defaultRGB"] = editorImportEntry{group: "ColorSpaces"}
+	}
+	return base, m, nil
+}
+
+// encodeResources 编码本次迁移实际引用的资源，不包含未使用的资源定义
+// 返回: error 编码错误
+func (m *editorPageImport) encodeResources() error {
+	var content []byte
+	ids := slices.Sorted(maps.Keys(m.used))
+	for _, group := range []string{"ColorSpaces", "DrawParams", "Fonts", "MultiMedias", "CompositeGraphicUnits"} {
+		var entries []byte
+		for _, id := range ids {
+			if m.resources[id].group == group {
+				entries = append(entries, m.used[id]...)
+			}
+		}
+		if len(entries) == 0 {
+			continue
+		}
+		encoded, err := editorXMLContainer(group, nil, entries)
+		if err != nil {
+			return err
+		}
+		content = append(content, encoded...)
+	}
+	if len(content) == 0 {
+		return nil
+	}
+	var err error
+	m.resourceXML, err = editorXMLContainer("Res", nil, content)
+	return err
 }
 
 // readFile 分块读取导入条目，允许资源解压过程中取消，不共享来源内存
@@ -738,6 +911,9 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 				bookmarks[bookmark.Name] = bookmark.Dest
 			}
 			if dest := gotoDest(&action, bookmarks); !m.copyPage && (dest == nil || !m.pages[dest.PageID]) {
+				if m.strictLinks {
+					return nil, fmt.Errorf("object link targets a page outside the imported selection")
+				}
 				return nil, nil
 			}
 		}
@@ -1073,20 +1249,24 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 	for _, id := range slices.Sorted(maps.Keys(m.templateParts)) {
 		content = append(content, m.templateParts[id]...)
 	}
-	data = editorPatchXML(data, []editorXMLPatch{{position, position, content}})
-	root, err = parseEditorXML(data)
-	if err != nil {
-		return nil, err
+	patches := []editorXMLPatch{{position, position, content}}
+	patch := editorXMLPatch{common.open, common.open, editorXMLText("MaxUnitID", strconv.Itoa(m.maximum))}
+	if maximum := common.child("MaxUnitID"); maximum != nil {
+		patch = editorXMLContent(data, maximum, []byte(strconv.Itoa(m.maximum)))
 	}
+	patches = append(patches, patch)
 	pages := root.child("Pages")
 	if pages == nil {
 		return nil, fmt.Errorf("document has no Pages")
 	}
-	content = bytes.Clone(m.pageParts)
-	if pages.open != pages.end {
-		content = append(bytes.Clone(data[pages.open:pages.close]), content...)
+	if len(m.pageParts) != 0 {
+		if pages.open == pages.end {
+			patches = append(patches, editorXMLContent(data, pages, m.pageParts))
+		} else {
+			patches = append(patches, editorXMLPatch{pages.close, pages.close, m.pageParts})
+		}
 	}
-	data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, pages, content)})
+	data = editorPatchXML(data, patches)
 	if len(annotations) != 0 {
 		loc, err := mergeImportIndex(base.reader, files, base.document.Annotations, path.Join(m.directory, "Annotations.xml"), "Annotations", annotations)
 		if err != nil {
@@ -1117,16 +1297,6 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 			}
 		}
 	}
-	root, err = parseEditorXML(data)
-	if err != nil {
-		return nil, err
-	}
-	common = root.child("CommonData")
-	patch := editorXMLPatch{common.open, common.open, editorXMLText("MaxUnitID", strconv.Itoa(m.maximum))}
-	if maximum := common.child("MaxUnitID"); maximum != nil {
-		patch = editorXMLContent(data, maximum, []byte(strconv.Itoa(m.maximum)))
-	}
-	data = editorPatchXML(data, []editorXMLPatch{patch})
 	files[name] = data
 	if len(signatures) != 0 {
 		loc, err := mergeImportIndex(base.reader, files, base.document.Signatures, path.Join(m.directory, "Signs", "Signatures.xml"), "Signatures", signatures)

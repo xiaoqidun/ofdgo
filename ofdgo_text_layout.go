@@ -20,6 +20,8 @@ import (
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/bidi"
 )
 
 // LayoutText 按自有字体度量重排横向文字，保留绘制属性，可显式启用字体塑形
@@ -75,6 +77,18 @@ func LayoutText(obj *TextObject, value string, options TextLayout, metrics FontM
 	unit := obj.Size / float64(metrics.UnitsPerEm())
 	if lineHeight == 0 {
 		lineHeight = math.Max(obj.Size, float64(int(ascender)+int(descender)+int(gap))*unit)
+	}
+	if options.AutoBidi && !options.Shaping.Bidi {
+		for _, char := range value {
+			properties, _ := bidi.LookupRune(char)
+			switch properties.Class() {
+			case bidi.R, bidi.AL, bidi.RLE, bidi.RLO, bidi.RLI, bidi.FSI:
+				options.Shaping.Bidi = true
+			}
+			if options.Shaping.Bidi {
+				break
+			}
+		}
 	}
 	if options.Shape || options.Shaping != (TextShapeOptions{}) {
 		return layoutShapedText(obj, value, options, metrics, width, lineHeight, hScale, float64(ascender)*unit)

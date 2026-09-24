@@ -53,6 +53,14 @@ type Renderer struct {
 // RendererOption 渲染器配置选项
 type RendererOption func(*Renderer)
 
+// ClearCache 释放派生字体、图片、模板与后端缓存，不改变文档和渲染配置
+func (r *Renderer) ClearCache() {
+	r.backendStates = make(map[any]any)
+	r.imageCache = make(map[string]image.Image)
+	r.templatePageCache = make(map[string]*PageContent)
+	r.resetFontCache()
+}
+
 // SetFontFS 替换外部字体文件系统并重置字体缓存
 // 入参: fsys 字体文件系统
 func (r *Renderer) SetFontFS(fsys ...fs.FS) {

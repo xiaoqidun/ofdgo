@@ -66,8 +66,9 @@ func missingGlyphError(id string, characters []rune) error {
 // Wrap按CTM变换前的边界宽度折行，Align为left、center、right或justify
 // LineHeight为毫米单位的基线间距，0使用字体度量；LetterSpacing为字素间的附加毫米间距，可为负
 // LeftIndent和RightIndent为左右缩进，FirstLineIndent为每段首行相对左缩进的偏移，单位为毫米
-// 零值保持显式换行和左对齐
+// AutoBidi自动识别双向文字并启用塑形，零值保持显式换行和左对齐
 type TextLayout struct {
+	AutoBidi        bool
 	Shape           bool
 	Shaping         TextShapeOptions
 	Wrap            bool
@@ -256,7 +257,7 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 	}
 	check = *obj
 	check.TextCode = codes
-	position := 0
+	position, mapping := 0, 0
 	for i, code := range codes {
 		before, after := textCodeRunes(obj.TextCode[i].Value), textCodeRunes(code.Value)
 		if len(before) == len(after) {
@@ -264,11 +265,11 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 				if before[j] == char {
 					continue
 				}
-				for k := range transforms {
-					transform := &transforms[k]
-					if position+j < transform.CodePosition || position+j >= transform.CodePosition+transform.CodeCount {
-						continue
-					}
+				for mapping < len(transforms) && position+j >= transforms[mapping].CodePosition+transforms[mapping].CodeCount {
+					mapping++
+				}
+				if mapping < len(transforms) && position+j >= transforms[mapping].CodePosition {
+					transform := &transforms[mapping]
 					if transform.CodeCount != 1 || transform.GlyphCount != 1 {
 						return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing a combined glyph requires explicit layout")}
 					}

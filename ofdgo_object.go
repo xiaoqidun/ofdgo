@@ -19,6 +19,22 @@ import (
 	"strconv"
 )
 
+// Actions 返回对象动作的独立副本，不修改原对象
+// 返回: []Action 动作列表
+func (o GraphicObject) Actions() []Action {
+	switch o.Type {
+	case "TextObject":
+		return cloneEditorData(o.TextObject.Actions)
+	case "PathObject", "Path":
+		return cloneEditorData(o.PathObject.Actions)
+	case "ImageObject":
+		return cloneEditorData(o.ImageObject.Actions)
+	case "CompositeObject", "CompositeGraphicUnit":
+		return cloneEditorData(o.CompositeGraphicUnit.Actions)
+	}
+	return nil
+}
+
 // UnmarshalXML 解析路径并区分省略的虚线样式与显式实线
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
