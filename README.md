@@ -26,84 +26,6 @@ go build -o ofdgo_webui.exe -trimpath -ldflags "-s -w -buildid=" ./cmd/webui/web
 go get -u github.com/xiaoqidun/ofdgo
 ```
 
-# 渲染输出
-```go
-package main
-
-import (
-	"log"
-	"os"
-
-	"github.com/xiaoqidun/ofdgo"
-)
-
-func main() {
-	// 1. 打开OFD文件
-	reader, err := ofdgo.Open("test.ofd")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer reader.Close()
-	// 2. 创建PDF文件
-	pdfFile, err := os.Create("test.pdf")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer pdfFile.Close()
-	// 3. 渲染PDF文件
-	renderer := ofdgo.NewRenderer(reader)
-	if err := renderer.RenderToMultiPagePDF(pdfFile); err != nil {
-		log.Fatal(err)
-	}
-}
-```
-
-# 签名验证
-```go
-package main
-
-import (
-	"log"
-	"os"
-
-	"github.com/xiaoqidun/ofdgo"
-)
-
-func main() {
-	// 1. 打开OFD文件
-	data, err := os.ReadFile("test.ofd")
-	if err != nil {
-		log.Fatal(err)
-	}
-	// 2. 验证OFD签名
-	reports, err := ofdgo.VerifySignaturesBytes(data)
-	if err != nil {
-		log.Fatal(err)
-	}
-	// 3. 判断验证结果
-	if len(reports) == 0 {
-		log.Println("文件未发现签名")
-		return
-	}
-	valid := true
-	for _, report := range reports {
-		if report.IntegrityValid() {
-			log.Printf("签名%s验证通过", report.ID)
-			continue
-		}
-		valid = false
-		if report.Error == "" {
-			log.Printf("签名%s验证失败", report.ID)
-		} else {
-			log.Printf("签名%s验证失败: %s", report.ID, report.Error)
-		}
-	}
-	if !valid {
-		os.Exit(1)
-	}
-}
-```
-
 # 创建文档
 ```go
 package main
@@ -180,6 +102,125 @@ func main() {
 	defer ofdFile.Close()
 	if _, err := editor.WriteTo(ofdFile); err != nil {
 		log.Fatal(err)
+	}
+}
+```
+
+# 转换文档
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	"github.com/xiaoqidun/ofdgo"
+)
+
+func main() {
+	// 1. 打开文档
+	pdfFile, err := os.Open("test.pdf")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer pdfFile.Close()
+	info, err := pdfFile.Stat()
+	if err != nil {
+		log.Fatal(err)
+	}
+	// 2. 创建文件
+	ofdFile, err := os.Create("test.ofd")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer ofdFile.Close()
+	// 3. 转换文档
+	report, err := ofdgo.ConvertPDF(context.Background(), pdfFile, info.Size(), ofdFile, ofdgo.PDFImportOptions{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// 4. 查看警告
+	for _, warning := range report.Warnings {
+		log.Printf("第%d页: %s", warning.Page, warning.Message)
+	}
+}
+```
+
+# 渲染文档
+```go
+package main
+
+import (
+	"log"
+	"os"
+
+	"github.com/xiaoqidun/ofdgo"
+)
+
+func main() {
+	// 1. 打开OFD文件
+	reader, err := ofdgo.Open("test.ofd")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer reader.Close()
+	// 2. 创建PDF文件
+	pdfFile, err := os.Create("test.pdf")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer pdfFile.Close()
+	// 3. 渲染PDF文件
+	renderer := ofdgo.NewRenderer(reader)
+	if err := renderer.RenderToMultiPagePDF(pdfFile); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+# 验证签名
+```go
+package main
+
+import (
+	"log"
+	"os"
+
+	"github.com/xiaoqidun/ofdgo"
+)
+
+func main() {
+	// 1. 打开OFD文件
+	data, err := os.ReadFile("test.ofd")
+	if err != nil {
+		log.Fatal(err)
+	}
+	// 2. 验证OFD签名
+	reports, err := ofdgo.VerifySignaturesBytes(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// 3. 判断验证结果
+	if len(reports) == 0 {
+		log.Println("文件未发现签名")
+		return
+	}
+	valid := true
+	for _, report := range reports {
+		if report.IntegrityValid() {
+			log.Printf("签名%s验证通过", report.ID)
+			continue
+		}
+		valid = false
+		if report.Error == "" {
+			log.Printf("签名%s验证失败", report.ID)
+		} else {
+			log.Printf("签名%s验证失败: %s", report.ID, report.Error)
+		}
+	}
+	if !valid {
+		os.Exit(1)
 	}
 }
 ```
