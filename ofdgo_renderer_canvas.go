@@ -29,6 +29,20 @@ type CanvasBackend struct {
 	ColorSpace canvas.ColorSpace
 }
 
+// init 注册Canvas适配器和默认组合
+func init() {
+	if err := RegisterRenderBackend("canvas", defaultRenderBackends); err != nil {
+		panic(err)
+	}
+}
+
+// defaultRenderBackends 创建默认组合，调用方可按职责替换任意后端
+// 返回: RenderBackends 默认后端组合
+func defaultRenderBackends() RenderBackends {
+	backend := CanvasBackend{}
+	return RenderBackends{Resources: SFNTBackend{}, Fonts: backend, Geometry: backend, Compiler: backend, Raster: backend, SVG: backend, PDF: backend, EPS: backend}
+}
+
 // Name 返回后端标识
 // 返回: string 后端标识
 func (CanvasBackend) Name() string { return "canvas" }

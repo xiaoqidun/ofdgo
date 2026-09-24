@@ -31,7 +31,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/tdewolff/font"
 	"github.com/xiaoqidun/jbig2"
 )
 
@@ -45,7 +44,7 @@ type Editor struct {
 	Info            DocInfo
 	pages           []PageContent
 	resources       []editorResource
-	fonts           map[string]*font.SFNT
+	fonts           map[string]*FontResource
 	fontFS          []fs.FS
 	fontRenderer    *Renderer
 	fontMetrics     map[string]FontMetrics
@@ -86,6 +85,12 @@ func (e *Editor) SetPageCompiler(compiler PageCompiler) {
 // 入参: backends 后端组合，未配置的能力不会沿用默认实现
 func (e *Editor) SetRenderBackends(backends RenderBackends) {
 	fontsChanged := !sameBackend(e.backends.Fonts, backends.Fonts)
+	if !sameBackend(e.backends.Resources, backends.Resources) {
+		e.fonts = make(map[string]*FontResource)
+		for i := range e.resources {
+			e.resources[i].subset = nil
+		}
+	}
 	e.backends = backends
 	if e.fontRenderer != nil {
 		WithRenderBackends(backends)(e.fontRenderer)
@@ -150,7 +155,7 @@ func NewEditor() *Editor {
 			DocID:        hex.EncodeToString(id[:]),
 			CreationDate: time.Now().Format("2006-01-02"),
 		},
-		fonts:       make(map[string]*font.SFNT),
+		fonts:       make(map[string]*FontResource),
 		images:      make(map[string]image.Point),
 		resourceID:  make(map[editorResourceKey]string),
 		fontMetrics: make(map[string]FontMetrics),
@@ -564,65 +569,34 @@ func (e *Editor) nextID() string {
 // 入参: file 字体文件, index 集合内字体索引，单字体为0
 // 返回: string 字体资源标识, error 错误信息
 func (e *Editor) AddFont(file FontFile, index int) (string, error) {
-	data, err := font.ToSFNT(file.Data)
+	if e.backends.Resources == nil {
+		return "", fmt.Errorf("font resources: %w", ErrBackendUnavailable)
+	}
+	parsed, err := e.backends.Resources.OpenFontResource(file, index)
 	if err != nil {
 		return "", err
 	}
-	key := editorResourceKey{checksum: sha256.Sum256(data), index: index}
+	data := parsed.Data
+	key := editorResourceKey{checksum: sha256.Sum256(data)}
 	if id, ok := e.resourceID[key]; ok {
 		return id, nil
-	}
-	data, err = (FontFile{Data: data}).Face(index)
-	if err != nil {
-		return "", err
-	}
-	sfnt, err := font.ParseSFNT(data, 0)
-	if err != nil {
-		return "", err
-	}
-	name := editorFontName(sfnt, font.NamePostScript, font.NameFull, font.NameFontFamily)
-	if name == "" {
-		return "", fmt.Errorf("font has no name")
 	}
 	if err := e.prepareSourceIDs(); err != nil {
 		return "", err
 	}
 	id := e.nextID()
-	extension := ".ttf"
-	if sfnt.IsCFF {
-		extension = ".otf"
-	}
+	definition := parsed.Font
+	definition.ID = id
 	resource := editorResource{
-		name: e.packageName("Res/Fonts/Font_" + id + extension),
+		name: e.packageName("Res/Fonts/Font_" + id + parsed.Extension),
 		data: data,
-		font: &Font{
-			ID: id, FontName: name,
-			FamilyName: editorFontName(sfnt, font.NamePreferredFamily, font.NameFontFamily),
-			Charset:    "unicode",
-			Bold:       sfnt.Head.MacStyle[0],
-			Italic:     sfnt.Head.MacStyle[1],
-			FixedWidth: sfnt.Post.IsFixedPitch != 0,
-		},
+		font: &definition,
 	}
 	resource.font.FontFile = "/" + resource.name
 	e.resources = append(e.resources, resource)
-	e.fonts[id] = sfnt
+	e.fonts[id] = parsed
 	e.resourceID[key] = id
 	return id, nil
-}
-
-// editorFontName 获取字体中的名称
-// 入参: sfnt 字体, names 名称类型，按顺序查找
-// 返回: string 字体名称
-func editorFontName(sfnt *font.SFNT, names ...font.NameID) string {
-	for _, name := range names {
-		for _, record := range sfnt.Name.Get(name) {
-			if value := record.String(); value != "" {
-				return value
-			}
-		}
-	}
-	return ""
 }
 
 // AddImage 注册PNG或JPEG图片，重复资源复用标识，引用后写入文档

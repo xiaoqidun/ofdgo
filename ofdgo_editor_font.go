@@ -187,6 +187,9 @@ type editorFontSubset struct {
 // 入参: progress 保存进度回调
 // 返回: map[string][]byte 包内字体子集, error 错误信息
 func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error) {
+	if e.backends.Resources == nil {
+		return nil, nil
+	}
 	used := make(map[string]map[uint16]bool)
 	mapped := make(map[string]bool)
 	for _, resource := range e.resources {
@@ -194,7 +197,15 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 			continue
 		}
 		sfnt := e.fonts[resource.font.ID]
-		if sfnt.IsTrueType && !slices.ContainsFunc([]string{"fvar", "COLR", "CBDT", "sbix", "SVG "}, func(tag string) bool { return sfnt.Tables[tag] != nil }) {
+		if sfnt == nil {
+			var err error
+			sfnt, err = e.backends.Resources.OpenFontResource(FontFile{Data: resource.data}, 0)
+			if err != nil {
+				return nil, err
+			}
+			e.fonts[resource.font.ID] = sfnt
+		}
+		if sfnt.CanSubset {
 			used[resource.font.ID] = make(map[uint16]bool)
 		}
 	}
@@ -309,7 +320,7 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 		}
 		slices.Sort(ids)
 		if resource.subset == nil || resource.subset.mapped != mapped[resource.font.ID] || !slices.Equal(resource.subset.glyphs, ids) {
-			data, err := subsetEditorFont(resource.data, ids, mapped[resource.font.ID])
+			data, err := e.backends.Resources.SubsetFont(resource.data, ids, mapped[resource.font.ID])
 			if err != nil {
 				return nil, fmt.Errorf("subset font %s: %w", resource.font.FontName, err)
 			}

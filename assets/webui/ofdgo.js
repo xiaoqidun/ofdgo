@@ -5714,7 +5714,7 @@ function layoutThumbnails() {
 	}
 	view.offsets = offsets;
 	view.gap = 12;
-	view.total = Math.max(0, offsets.at(-1) - 12);
+	view.total = Math.ceil(offsets.at(-1));
 	for (const [index, button] of view.nodes) {
 		layoutThumbnail(button, state.doc.pages[index]);
 		button.style.height = `${offsets[index + 1] - offsets[index] - 12}px`;

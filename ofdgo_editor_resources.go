@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"maps"
 	"path"
@@ -172,14 +173,18 @@ func (e *Editor) compactSourceResources(parts map[string][]byte, progress editor
 		}
 		key := strings.ToLower(cleanPackagePath(name))
 		usage := fontFiles[key]
-		if usage == nil || usage.unsafe || refs.files[key] || removed[key] || parts[name] != nil {
+		if e.backends.Resources == nil || usage == nil || usage.unsafe || refs.files[key] || removed[key] || parts[name] != nil {
 			continue
 		}
 		data, err := reader.readFile(name)
 		if err != nil {
 			return nil, err
 		}
-		if subset := subsetSourceFont(data, usage); subset != nil {
+		subset, err := e.backends.Resources.SubsetSourceFont(data, FontUsage{Characters: slices.Sorted(maps.Keys(usage.chars)), Glyphs: slices.Sorted(maps.Keys(usage.glyphs)), Unsafe: usage.unsafe})
+		if err != nil {
+			return nil, fmt.Errorf("subset font %s: %w", name, err)
+		}
+		if subset != nil {
 			updates[name] = subset
 		}
 	}
