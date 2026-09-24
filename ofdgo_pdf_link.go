@@ -23,7 +23,7 @@ import (
 )
 
 // annotations 将链接和签名外观按页面顺序转换为OFD对象
-// 入参: ctx取消上下文, page为PDF页面, strict严格检查开关
+// 入参: ctx 取消上下文, page PDF页面, strict 严格检查开关
 // 返回: error 错误信息
 func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict bool) error {
 	annotations, err := page.Annotations()
