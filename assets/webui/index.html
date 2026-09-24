@@ -184,6 +184,31 @@
 				<div class="form-row"><span>组合</span><div class="form-format"><button id="groupObjectsButton" class="button" type="button">组合</button><button id="ungroupObjectButton" class="button" type="button">解组</button></div></div>
 				<div class="form-row"><span>格式</span><div class="form-format"><button id="copyStyleButton" class="button" type="button" aria-label="复制格式">复制</button><button id="pasteStyleButton" class="button" type="button" aria-label="粘贴格式">粘贴</button></div></div>
 				<div class="form-row"><label for="objectOpacity">透明</label><div class="form-unit"><input id="objectOpacity" type="number" min="0" max="100" step="any" aria-label="透明度" autofocus><span>%</span></div></div>
+				<details id="objectGradientFields" hidden>
+					<summary>渐变</summary>
+					<div class="form-pair">
+						<div class="form-row"><label for="gradientTarget">作用</label><select id="gradientTarget"><option value="fill">填充</option><option value="stroke">描边</option></select></div>
+						<div class="form-row"><label for="gradientKind">类型</label><select id="gradientKind"><option value="keep">保持</option><option value="linear">线性</option><option value="radial">径向</option></select></div>
+					</div>
+					<div id="gradientControls" hidden>
+						<div class="form-row"><label for="gradientAngle">角度</label><div class="form-unit"><input id="gradientAngle" type="number" step="any" value="0"><span>°</span></div></div>
+						<div class="gradient-stop-row gradient-stop-head"><span>颜色</span><span>位置%</span><span>透明%</span><span></span></div>
+						<div id="gradientStops"></div>
+						<button id="gradientAdd" class="small-button" type="button" title="添加色标" aria-label="添加色标">+</button>
+					</div>
+				</details>
+				<details id="objectPatternFields" hidden>
+					<summary>图案</summary>
+					<div class="form-pair">
+						<div class="form-row"><label for="patternWidth">宽度</label><div class="form-unit"><input id="patternWidth" type="number" min="0" step="any"><span>mm</span></div></div>
+						<div class="form-row"><label for="patternHeight">高度</label><div class="form-unit"><input id="patternHeight" type="number" min="0" step="any"><span>mm</span></div></div>
+					</div>
+					<div class="form-pair">
+						<div class="form-row"><label for="patternXStep">横距</label><div class="form-unit"><input id="patternXStep" type="number" min="0" step="any"><span>mm</span></div></div>
+						<div class="form-row"><label for="patternYStep">纵距</label><div class="form-unit"><input id="patternYStep" type="number" min="0" step="any"><span>mm</span></div></div>
+					</div>
+					<div class="form-row"><label for="patternCTM">矩阵</label><input id="patternCTM" type="text" spellcheck="false" autocomplete="off"></div>
+				</details>
 				<div id="objectStrokeFields">
 					<div class="form-row"><label for="objectDash">线型</label><select id="objectDash"><option value="mixed" hidden>混合</option><option value="solid">实线</option><option value="dash">虚线</option><option value="dot">点线</option><option value="dashdot">点划</option><option value="custom">自定</option></select></div>
 					<div id="objectDashRow" class="form-row" hidden><label for="objectDashPattern">间隔</label><div class="form-unit"><input id="objectDashPattern" type="text" autocomplete="off" spellcheck="false"><span>mm</span></div></div>
@@ -267,6 +292,7 @@
 				<label class="form-row"><span>标题</span><input id="infoTitle" type="text" autofocus></label>
 				<label class="form-row"><span>主题</span><input id="infoSubject" type="text"></label>
 				<label class="form-row"><span>作者</span><input id="infoAuthor" type="text"></label>
+				<details class="info-custom"><summary>扩展</summary><div id="infoCustomRows"></div><button id="infoCustomAdd" class="small-button" type="button" title="添加字段" aria-label="添加字段">+</button></details>
 				<div class="form-actions"><div id="infoStatus" class="form-status" role="status"></div><button id="infoCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>

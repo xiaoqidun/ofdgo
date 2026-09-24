@@ -1068,25 +1068,6 @@ func collectCompositeReferences(composite CompositeGraphicUnit, used map[string]
 	used[composite.ResourceID] = true
 	used[composite.DrawParam] = true
 	for _, object := range composite.Objects {
-		var fill, stroke *FillColor
-		switch object.Type {
-		case "TextObject":
-			used[object.TextObject.Font] = true
-			used[object.TextObject.DrawParam] = true
-			fill, stroke = object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor)
-		case "PathObject":
-			used[object.PathObject.DrawParam] = true
-			fill, stroke = object.PathObject.FillColor, (*FillColor)(object.PathObject.StrokeColor)
-		case "ImageObject":
-			used[object.ImageObject.ResourceID] = true
-			used[object.ImageObject.ImageMask] = true
-		case "CompositeObject", "CompositeGraphicUnit":
-			collectCompositeReferences(object.CompositeGraphicUnit, used)
-		}
-		for _, color := range []*FillColor{fill, stroke} {
-			if color != nil {
-				used[color.ColorSpace] = true
-			}
-		}
+		collectObjectReferences(object, used)
 	}
 }

@@ -224,6 +224,19 @@ func (r *Renderer) parseShdColor(segments []ShdSegment, alpha *int) color.Color 
 // 返回: []ColorStop 后端无关的渐变分段
 func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) []ColorStop {
 	var gradient []ColorStop
+	positions := gradientPositions(segments)
+	for i, segment := range segments {
+		segmentAlpha := mergeAlpha(segment.Color.Alpha, alpha)
+		gradient = append(gradient, ColorStop{Offset: positions[i], Color: r.ResolveColor(segment.Color.Value, segment.Color.Index, segment.Color.ColorSpace, segmentAlpha)})
+	}
+	return gradient
+}
+
+// gradientPositions 按显式锚点补全渐变分段位置，保留原顺序
+// 入参: segments 渐变分段
+// 返回: []float64 分段位置
+func gradientPositions(segments []ShdSegment) []float64 {
+	positions := make([]float64, len(segments))
 	position, step := 0.0, 0.0
 	for i, segment := range segments {
 		if !segment.positionMissing {
@@ -242,15 +255,10 @@ func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) []ColorStop 
 			}
 			step = (end - position) / float64(next-i)
 		}
-		offset := position
+		positions[i] = position
 		position += step
-		segmentAlpha := mergeAlpha(segment.Color.Alpha, alpha)
-		gradient = append(gradient, ColorStop{Offset: offset, Color: r.ResolveColor(segment.Color.Value, segment.Color.Index, segment.Color.ColorSpace, segmentAlpha)})
 	}
-	if len(gradient) == 0 {
-		return nil
-	}
-	return gradient
+	return positions
 }
 
 // colorToRGBA 转换颜色对象

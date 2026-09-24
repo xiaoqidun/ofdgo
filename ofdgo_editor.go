@@ -783,7 +783,9 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 			}
 		}
 		if obj.Border != nil {
-			return GraphicObject{}, fmt.Errorf("image borders are not supported for creation")
+			if err := e.validateImageBorder(obj.Border); err != nil {
+				return GraphicObject{}, err
+			}
 		}
 		obj.ID = id
 		boundary, ctm = obj.Boundary, obj.CTM
@@ -802,8 +804,13 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 	} else if object.Type == "ImageObject" {
 		object.ImageObject.CTM = fmt.Sprintf("%s 0 0 %s 0 0", ofdNumber(box.W), ofdNumber(box.H))
 	}
-	if drawParam != "" || len(actions) != 0 {
-		return GraphicObject{}, fmt.Errorf("draw parameter references and actions are not supported for creation")
+	if drawParam != "" {
+		if _, err := e.editorDrawParam(drawParam, make(map[string]bool)); err != nil {
+			return GraphicObject{}, err
+		}
+	}
+	if err := validateObjectActions(actions); err != nil {
+		return GraphicObject{}, err
 	}
 	if err := e.validateObjectClips(clips); err != nil {
 		return GraphicObject{}, err

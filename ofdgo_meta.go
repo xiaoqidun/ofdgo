@@ -52,6 +52,7 @@ type CustomDatas struct {
 
 // CustomData 自定义数据项
 type CustomData struct {
-	Name  string `xml:"Name,attr"`
-	Value string `xml:",chardata"`
+	Name        string `xml:"Name,attr"`
+	Value       string `xml:",chardata"`
+	sourceIndex int
 }

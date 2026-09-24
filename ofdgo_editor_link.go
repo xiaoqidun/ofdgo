@@ -27,6 +27,88 @@ type AnnotationLink struct {
 	Dest *Dest
 }
 
+// SetObjectActions 原子替换普通对象的链接动作，空列表移除动作
+// 入参: page 页面索引, ids 对象标识, actions 链接动作
+// 返回: error 错误信息
+func (e *Editor) SetObjectActions(page int, ids []string, actions []Action) error {
+	if err := validateObjectActions(actions); err != nil {
+		return err
+	}
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil {
+		return err
+	}
+	for i := range objects {
+		switch objects[i].Type {
+		case "TextObject":
+			objects[i].TextObject.Actions = cloneEditorData(actions)
+		case "PathObject", "Path":
+			objects[i].PathObject.Actions = cloneEditorData(actions)
+		case "ImageObject":
+			objects[i].ImageObject.Actions = cloneEditorData(actions)
+		case "CompositeObject", "CompositeGraphicUnit":
+			objects[i].CompositeGraphicUnit.Actions = cloneEditorData(actions)
+		default:
+			return fmt.Errorf("object %q cannot contain actions", ids[i])
+		}
+	}
+	return e.updateObjects(page, objects, true)
+}
+
+// validateObjectActions 校验新建对象的链接动作，目标不必可达
+// 入参: actions 动作列表
+// 返回: error 错误信息
+func validateObjectActions(actions []Action) error {
+	for _, action := range actions {
+		if !slices.Contains([]string{"CLICK", "DO", "PO"}, action.Event) {
+			return fmt.Errorf("unsupported action event %q", action.Event)
+		}
+		if action.GotoA != nil || action.Sound != nil || action.Movie != nil {
+			return fmt.Errorf("new attachment and multimedia actions require resource registration")
+		}
+		if (action.URI == nil) == (action.Goto == nil) {
+			return fmt.Errorf("specify one URI or goto action")
+		}
+		if action.Goto != nil {
+			if (action.Goto.Dest == nil) == (action.Goto.Bookmark == nil) {
+				return fmt.Errorf("specify one destination or bookmark")
+			}
+			if action.Goto.Dest != nil {
+				if _, err := annotationLinkXML(AnnotationLink{Dest: action.Goto.Dest}); err != nil {
+					return err
+				}
+			}
+		}
+		if action.Region != nil {
+			for _, area := range action.Region.Area {
+				if _, err := creationNumbers(area.Start, 2); err != nil {
+					return err
+				}
+				for _, command := range area.Command {
+					var points []string
+					switch command.Type {
+					case "Line":
+						points = []string{command.Point1}
+					case "QuadraticBezier":
+						points = []string{command.Point1, command.Point2}
+					case "CubicBezier":
+						points = []string{command.Point1, command.Point2, command.Point3}
+					case "Close":
+					default:
+						return fmt.Errorf("unsupported new action region command %q", command.Type)
+					}
+					for _, point := range points {
+						if _, err := creationNumbers(point, 2); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // AnnotationLink 读取注解中唯一的点击跳转，书签目标保持原始动作
 // 入参: page 页面索引, id 注解标识
 // 返回: Action 跳转动作, error 错误信息
@@ -201,9 +283,6 @@ func (e *Editor) UpdateAnnotationLink(page int, id string, target AnnotationLink
 					return nil, err
 				}
 				position := objects[0].open
-				if clips := objects[0].child("Clips"); clips != nil {
-					position = clips.end
-				}
 				data = editorPatchXML(data, []editorXMLPatch{{position, position, bytes.TrimPrefix(actions, []byte(xml.Header))}})
 			}
 		}

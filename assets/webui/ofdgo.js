@@ -213,6 +213,8 @@ const el = {
 	infoPanel: document.querySelector("#infoPanel"),
 	infoForm: document.querySelector("#infoForm"),
 	infoTitle: document.querySelector("#infoTitle"),
+	infoCustomRows: document.querySelector("#infoCustomRows"),
+	infoCustomAdd: document.querySelector("#infoCustomAdd"),
 	infoAuthor: document.querySelector("#infoAuthor"),
 	infoSubject: document.querySelector("#infoSubject"),
 	infoCancel: document.querySelector("#infoCancel"),
@@ -286,6 +288,19 @@ const el = {
 	groupObjectsButton: document.querySelector("#groupObjectsButton"),
 	ungroupObjectButton: document.querySelector("#ungroupObjectButton"),
 	objectOpacity: document.querySelector("#objectOpacity"),
+	objectGradientFields: document.querySelector("#objectGradientFields"),
+	gradientTarget: document.querySelector("#gradientTarget"),
+	gradientKind: document.querySelector("#gradientKind"),
+	gradientControls: document.querySelector("#gradientControls"),
+	gradientAngle: document.querySelector("#gradientAngle"),
+	gradientStops: document.querySelector("#gradientStops"),
+	gradientAdd: document.querySelector("#gradientAdd"),
+	objectPatternFields: document.querySelector("#objectPatternFields"),
+	patternWidth: document.querySelector("#patternWidth"),
+	patternHeight: document.querySelector("#patternHeight"),
+	patternXStep: document.querySelector("#patternXStep"),
+	patternYStep: document.querySelector("#patternYStep"),
+	patternCTM: document.querySelector("#patternCTM"),
 	objectStrokeFields: document.querySelector("#objectStrokeFields"),
 	objectDash: document.querySelector("#objectDash"),
 	objectDashRow: document.querySelector("#objectDashRow"),
@@ -590,14 +605,41 @@ editorClick(el.paragraphButton, () => {
 el.paragraphCancel.addEventListener("click", () => el.paragraphPanel.close());
 editorClick(el.infoButton, () => {
 	for (const key of ["Title", "Author", "Subject"]) el[`info${key}`].value = state.doc[key.toLowerCase()] || "";
+	el.infoCustomRows.replaceChildren();
+	for (const [index, field] of (state.doc.customData || []).entries()) addCustomDataRow(field, index);
 	el.infoStatus.textContent = "";
 	el.infoPanel.showModal();
 });
 el.infoCancel.addEventListener("click", () => el.infoPanel.close());
+el.infoCustomAdd.addEventListener("click", () => addCustomDataRow());
 el.infoForm.addEventListener("submit", async event => {
 	event.preventDefault();
-	if (await changeDocument("ofdgoUpdateInfo", null, el.infoTitle.value, el.infoAuthor.value, el.infoSubject.value)) el.infoPanel.close();
+	const fields = [...el.infoCustomRows.children].map(row => ({Name: row.children[0].value, Value: row.children[1].value, Source: row.sourceIndex}));
+	if (await changeDocument("ofdgoUpdateInfo", null, el.infoTitle.value, el.infoAuthor.value, el.infoSubject.value, JSON.stringify(fields))) el.infoPanel.close();
 });
+
+function addCustomDataRow(field = {Name: "", Value: ""}, sourceIndex) {
+	const row = document.createElement("div");
+	row.sourceIndex = sourceIndex;
+	row.className = "info-custom-row";
+	for (const [key, label] of [["Name", "名称"], ["Value", "内容"]]) {
+		const input = document.createElement("input");
+		input.type = "text";
+		input.value = field[key];
+		input.setAttribute("aria-label", label);
+		input.placeholder = label;
+		row.append(input);
+	}
+	const remove = document.createElement("button");
+	remove.type = "button";
+	remove.className = "small-button";
+	remove.textContent = "×";
+	remove.title = "删除字段";
+	remove.setAttribute("aria-label", "删除字段");
+	remove.addEventListener("click", () => row.remove());
+	row.append(remove);
+	el.infoCustomRows.append(row);
+}
 el.annotationClose.addEventListener("click", () => el.annotationNote.close());
 el.annotationNote.addEventListener("close", () => { state.annotationEdit = null; });
 el.penTool.addEventListener("change", () => {
@@ -947,12 +989,22 @@ el.objectBoundsForm.addEventListener("submit", async event => {
 	if (saved) el.objectBoundsPanel.close();
 });
 el.objectStyleCancel.addEventListener("click", () => el.objectStylePanel.close());
+el.gradientKind.addEventListener("change", () => {
+	el.gradientControls.hidden = el.gradientKind.value === "keep";
+	el.gradientAngle.disabled = el.gradientKind.value !== "linear";
+	for (const input of el.gradientStops.querySelectorAll("input")) input.disabled = el.gradientKind.value === "keep";
+});
+el.gradientAdd.addEventListener("click", () => addGradientStop(50, "#808080", 0));
 el.objectDash.addEventListener("change", () => {
 	el.objectDashRow.hidden = el.objectDash.value !== "custom";
 	el.objectDashPattern.required = !el.objectDashRow.hidden;
 });
 el.objectStyleForm.addEventListener("submit", async event => {
 	event.preventDefault();
+	if (!el.objectGradientFields.hidden && el.gradientKind.value !== "keep" && el.gradientStops.children.length < 2) {
+		el.objectStyleStatus.textContent = "至少保留两个色标";
+		return;
+	}
 	const style = readObjectStyle();
 	const item = canvasEditor.selected;
 	if (await changeDocument("ofdgoStyleObjects", { ...item, id: canvasEditor.items().map(member => member.id) }, style)) el.objectStylePanel.close();
@@ -1390,6 +1442,21 @@ function openObjectStyle() {
 	el.copyStyleButton.disabled = items.length !== 1 || !canCopyStyle(items[0]);
 	el.pasteStyleButton.disabled = !state.styleClipboard || !items.every(item => item.type === state.styleClipboard && canCopyStyle(item));
 	const shared = (key, fallback) => items.every(item => (item[key] ?? fallback) === (items[0][key] ?? fallback)) ? items[0][key] ?? fallback : null;
+	const pattern = items.length === 1 && !items[0].scoped ? items[0].fillPattern : null;
+	el.objectGradientFields.hidden = items.length !== 1 || items[0].scoped || items[0].type !== "PathObject" || !items[0].paintSize || !canEditObject(items[0], "paint");
+	el.gradientKind.value = "keep";
+	el.gradientTarget.value = "fill";
+	el.gradientControls.hidden = true;
+	el.gradientAngle.value = "0";
+	el.gradientAngle.disabled = true;
+	el.gradientStops.replaceChildren();
+	addGradientStop(0, "#000000", 0);
+	addGradientStop(100, "#ffffff", 0);
+	el.objectPatternFields.hidden = !pattern;
+	for (const [input, key] of [[el.patternWidth, "width"], [el.patternHeight, "height"], [el.patternXStep, "xStep"], [el.patternYStep, "yStep"], [el.patternCTM, "ctm"]]) {
+		input.value = pattern?.[key] ?? "";
+		input.disabled = !pattern;
+	}
 	const alpha = items.some(item => item.alphaMixed) ? null : shared("alpha", 255), dash = shared("dashPattern", "");
 	el.objectOpacity.value = alpha === null ? "" : String(Math.round((1 - alpha / 255) * 10000) / 100);
 	el.objectOpacity.placeholder = alpha === null ? "混合" : "";
@@ -1401,13 +1468,32 @@ function openObjectStyle() {
 	el.objectDashOffset.value = shared("dashOffset", 0) ?? "";
 	el.objectCap.value = shared("cap", "") || (shared("cap", "") === null ? "mixed" : "Butt");
 	el.objectJoin.value = shared("join", "") || (shared("join", "") === null ? "mixed" : "Miter");
-	state.styleOriginal = Object.fromEntries(["objectOpacity", "objectDash", "objectDashPattern", "objectDashOffset", "objectCap", "objectJoin"].map(key => [key, el[key].value]));
+	state.styleOriginal = Object.fromEntries(["objectOpacity", "objectDash", "objectDashPattern", "objectDashOffset", "objectCap", "objectJoin", "patternWidth", "patternHeight", "patternXStep", "patternYStep", "patternCTM"].map(key => [key, el[key].value]));
 	el.objectStyleStatus.textContent = "";
 	el.objectStylePanel.showModal();
 }
 
 function readObjectStyle() {
 	const style = {}, changed = key => el[key].value !== state.styleOriginal[key];
+	if (!el.objectGradientFields.hidden && el.gradientKind.value !== "keep") {
+		const [width, height] = canvasEditor.selected.paintSize;
+		const Segment = [...el.gradientStops.children].map(row => ({Position: Number(row.children[1].value) / 100, Color: {Value: row.children[0].value, Alpha: Math.round(255 * (1 - Number(row.children[2].value) / 100))}})).sort((a, b) => a.Position - b.Position);
+		const angle = Number(el.gradientAngle.value) * Math.PI / 180, x = Math.cos(angle), y = Math.sin(angle);
+		const length = Math.abs(width * x) + Math.abs(height * y);
+		const paint = el.gradientKind.value === "linear"
+			? {AxialShd: {StartPoint: `${width / 2 - x * length / 2} ${height / 2 - y * length / 2}`, EndPoint: `${width / 2 + x * length / 2} ${height / 2 + y * length / 2}`, Extend: "3", Segment}}
+			: {RadialShd: {StartPoint: `${width / 2} ${height / 2}`, EndPoint: `${width / 2} ${height / 2}`, EndRadius: Math.max(width, height) / 2, Extend: "3", Segment}};
+		const target = el.gradientTarget.value;
+		style[`${target}Paint`] = JSON.stringify(paint);
+		style[target] = true;
+	}
+	if (!el.objectPatternFields.hidden) {
+		const pattern = {};
+		for (const [input, key] of [["patternWidth", "Width"], ["patternHeight", "Height"], ["patternXStep", "XStep"], ["patternYStep", "YStep"], ["patternCTM", "CTM"]]) {
+			if (changed(input)) pattern[key] = key === "CTM" ? el[input].value.trim() : Number(el[input].value);
+		}
+		if (Object.keys(pattern).length) style.patternStyle = JSON.stringify(pattern);
+	}
 	if (changed("objectOpacity") && el.objectOpacity.value !== "") style.alpha = Math.round((1 - Number(el.objectOpacity.value) / 100) * 255);
 	if (!el.objectStrokeFields.hidden) {
 		if (changed("objectDash") || changed("objectDashPattern")) {
@@ -1419,6 +1505,30 @@ function readObjectStyle() {
 		if (changed("objectJoin") && el.objectJoin.value !== "mixed") style.join = el.objectJoin.value;
 	}
 	return style;
+}
+
+function addGradientStop(position, color, transparency) {
+	const row = document.createElement("div");
+	row.className = "gradient-stop-row";
+	for (const [type, value, label] of [["color", color, "色标颜色"], ["number", position, "色标位置"], ["number", transparency, "色标透明度"]]) {
+		const input = document.createElement("input");
+		input.type = type;
+		input.value = value;
+		input.disabled = el.gradientKind.value === "keep";
+		input.setAttribute("aria-label", label);
+		input.title = label;
+		if (type === "number") { input.min = "0"; input.max = "100"; input.step = "any"; input.required = true; }
+		row.append(input);
+	}
+	const remove = document.createElement("button");
+	remove.type = "button";
+	remove.className = "small-button";
+	remove.textContent = "×";
+	remove.title = "删除色标";
+	remove.setAttribute("aria-label", "删除色标");
+	remove.addEventListener("click", () => row.remove());
+	row.append(remove);
+	el.gradientStops.append(row);
 }
 
 function openOutlinePanel(action) {
@@ -2439,7 +2549,7 @@ async function changeDocument(name, item, ...args) {
 		}
 		setEditorInfo(doc);
 		if (name === "ofdgoUpdateInfo") {
-			Object.assign(state.doc, { title: doc.title, author: doc.author, subject: doc.subject });
+			Object.assign(state.doc, { title: doc.title, author: doc.author, subject: doc.subject, customData: doc.customData });
 			renderMeta();
 			updateControls();
 			rememberEditorView(before, revision);

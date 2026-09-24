@@ -774,6 +774,8 @@ button:not(:disabled):hover {
 	outline-offset: 2px;
 }
 
+.info-custom-row input,
+.gradient-stop-row input,
 .form-row input[type="text"],
 .form-row input[type="password"],
 .form-row input[type="number"],
@@ -796,6 +798,56 @@ button:not(:disabled):hover {
 	padding: 6px;
 	line-height: 1.5;
 	resize: vertical;
+}
+
+.form-dialog details {
+	margin-bottom: 12px;
+}
+
+.form-dialog details > summary {
+	cursor: pointer;
+}
+
+.form-dialog details[open] > summary {
+	margin-bottom: 12px;
+}
+
+#infoCustomRows {
+	max-height: 240px;
+	overflow-y: auto;
+}
+
+.info-custom-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) var(--control-height);
+	gap: 6px;
+	margin: 6px 0;
+}
+
+#infoCustomRows > :first-child {
+	margin-top: 0;
+}
+
+.gradient-stop-row {
+	display: grid;
+	grid-template-columns: 44px minmax(0, 1fr) minmax(0, 1fr) var(--control-height);
+	gap: 6px;
+	margin: 6px 0;
+	align-items: center;
+}
+
+.gradient-stop-head {
+	font-size: 12px;
+}
+
+#gradientStops {
+	max-height: 180px;
+	overflow-y: auto;
+}
+
+#infoCustomRows :focus-visible,
+#gradientStops :focus-visible {
+	outline-offset: -2px;
 }
 
 .color-input {

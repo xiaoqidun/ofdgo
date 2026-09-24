@@ -133,6 +133,11 @@ func (r *Reader) Editor() (*Editor, error) {
 	if err != nil {
 		return nil, err
 	}
+	if info.CustomDatas != nil {
+		for i := range info.CustomDatas.CustomData {
+			info.CustomDatas.CustomData[i].sourceIndex = i + 1
+		}
+	}
 	e := NewEditor()
 	e.encryption = r.encryption
 	e.Info, e.maxID = cloneEditorData(*info), maximum
@@ -527,6 +532,7 @@ func (e *Editor) objectCapabilities(object GraphicObject, orderable map[*editorX
 	all.Copy = editorXMLCopyable(node) && (origin.reason == nil || object.Type == "PathObject" && editReason(origin.reason) == EditUnsupportedColor)
 	if origin.reason != nil {
 		all.Update, all.Reflow, all.ReplaceFont, all.Paint = false, false, false, false
+		all.Paint = (object.Type == "TextObject" || object.Type == "PathObject") && editReason(origin.reason) == EditUnsupportedColor
 		all.Reason, all.ReasonCode = origin.reason.Error(), editReason(origin.reason)
 	} else if !editorXMLSupported(node) {
 		all.Update, all.Reflow, all.ReplaceFont = false, false, false
@@ -632,6 +638,14 @@ func editorPreservedObject(before, after GraphicObject) bool {
 // 返回: GraphicObject 独立副本, error 错误信息
 func (e *Editor) prepareCopiedObject(id string, object GraphicObject) (GraphicObject, error) {
 	origin := e.snapshotOrigin(object)
+	if origin == nil && object.origin != nil {
+		references := make(map[string]bool)
+		collectObjectReferences(object, references)
+		delete(references, "")
+		if len(references) != 0 {
+			return GraphicObject{}, fmt.Errorf("copying a foreign snapshot requires importing its resources")
+		}
+	}
 	object.origin = nil
 	if origin == nil {
 		return e.prepareObject(id, object)

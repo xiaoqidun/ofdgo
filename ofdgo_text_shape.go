@@ -119,9 +119,15 @@ func layoutShapedText(obj *TextObject, value string, options TextLayout, metrics
 			code := TextCode{X: ofdNumber(x), Y: ofdNumber(y), Value: escapeOFDText(string(chars))}
 			var dx, dy []string
 			var lastX, lastY float64
+			var visualShifts map[int]float64
+			if options.Shaping.Bidi {
+				visualShifts = bidiClusterShifts(glyphs, extra)
+			}
 			for j, glyph := range glyphs {
 				shift := extra[glyph.Cluster]
-				if options.Shaping.Direction == "rtl" {
+				if options.Shaping.Bidi {
+					shift = visualShifts[glyph.Cluster]
+				} else if options.Shaping.Direction == "rtl" {
 					// 逻辑簇后的间距位于视觉左侧，整行不计末尾字距
 					shift = extra[len(chars)] - extra[glyph.Cluster] - options.LetterSpacing
 				}
@@ -160,6 +166,37 @@ func layoutShapedText(obj *TextObject, value string, options TextLayout, metrics
 	obj.TextCode, obj.CGTransform = codes, transforms
 	obj.layout = &textLayout{value: value, options: options}
 	return nil
+}
+
+// bidiClusterShifts 按视觉簇顺序累计字距和两端对齐产生的偏移
+// 入参: glyphs 逻辑顺序字形, extra 逻辑字符累计偏移
+// 返回: map[int]float64 各簇的视觉偏移
+func bidiClusterShifts(glyphs []ShapedGlyph, extra []float64) map[int]float64 {
+	type cluster struct {
+		index, order int
+		extra        float64
+	}
+	var clusters []cluster
+	for i := 0; i < len(glyphs); {
+		end := i + 1
+		for end < len(glyphs) && glyphs[end].Cluster == glyphs[i].Cluster {
+			end++
+		}
+		next := len(extra) - 1
+		if end < len(glyphs) {
+			next = glyphs[end].Cluster
+		}
+		clusters = append(clusters, cluster{glyphs[i].Cluster, glyphs[i].VisualOrder, extra[next] - extra[glyphs[i].Cluster]})
+		i = end
+	}
+	slices.SortFunc(clusters, func(a, b cluster) int { return a.order - b.order })
+	shifts := make(map[int]float64, len(clusters))
+	var offset float64
+	for _, cluster := range clusters {
+		shifts[cluster.index] = offset
+		offset += cluster.extra
+	}
+	return shifts
 }
 
 // ShapeText 使用固定选项塑形单行原文

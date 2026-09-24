@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -112,12 +113,21 @@ func (e *Editor) UpdateTextContent(page int, id, value string, style TextStyle) 
 	if err != nil {
 		return err
 	}
-	if !capability.ReplaceFont {
+	if !capability.ReplaceFont && (style != (TextStyle{}) || !capability.Transform) {
 		return capability.editError()
 	}
 	object, err := e.Object(page, id)
 	if err != nil {
 		return err
+	}
+	if !capability.LayoutKnown && style == (TextStyle{}) {
+		if object.Type != "TextObject" {
+			return fmt.Errorf("object %q is not text", id)
+		}
+		if err := e.RewriteText(&object.TextObject, value); err != nil {
+			return err
+		}
+		return e.updateObjects(page, []GraphicObject{object}, true)
 	}
 	updates, err := e.styleTextObjects([]GraphicObject{object}, style)
 	if err != nil {
@@ -136,20 +146,18 @@ func (e *Editor) UpdateTextContent(page int, id, value string, style TextStyle) 
 	return e.updateObjects(page, updates, true)
 }
 
-// RewriteText 保留普通横向原文的字形定位，不修改对象样式或文档
+// RewriteText 保留原文的字形定位，不修改对象样式或文档
 // 等长替换保留各字原位；单段增删保留前缀和后缀步进，新增字符沿用局部字距
-// 不跨定位段增删或自动生成新行，复杂字形映射需单独处理
+// 方向、缩放和修饰原样保留；复杂布局仅支持等长替换，合并字形需显式重排
 // 入参: obj 原文字对象, value 新内容
 // 返回: error 错误信息
 func (e *Editor) RewriteText(obj *TextObject, value string) error {
-	if obj.ReadDirection != 0 || obj.CharDirection != 0 || len(obj.CGTransform) != 0 || obj.VScale != 0 || obj.Decoration != "" {
-		return &EditError{Code: EditUnsupportedObject, Err: fmt.Errorf("text positioning is not supported for content editing")}
-	}
 	value = strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
 	if !utf8.ValidString(value) || strings.Contains(value, "\t") || strings.Trim(value, "\n") == "" {
 		return fmt.Errorf("text must contain UTF-8 characters without tabs")
 	}
 	check := cloneEditorData(*obj)
+	check.VScale, check.Decoration = 0, ""
 	if err := e.prepareText(&check); err != nil {
 		var missing *MissingGlyphError
 		if !errors.As(err, &missing) {
@@ -160,8 +168,16 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 	if err != nil {
 		return err
 	}
+	old, next := []rune(obj.Text()), []rune(value)
+	complex := obj.ReadDirection != 0 || obj.CharDirection != 0 || len(obj.CGTransform) != 0 || obj.VScale != 0 || obj.Decoration != ""
+	if complex && len(old) != len(next) {
+		return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing positioned text length requires explicit layout")}
+	}
 	var missing []rune
-	for _, char := range value {
+	for i, char := range next {
+		if len(old) == len(next) && old[i] == char {
+			continue
+		}
 		if char != '\n' && sfnt.GlyphIndex(char) == 0 {
 			missing = append(missing, char)
 		}
@@ -169,8 +185,8 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 	if err := missingGlyphError(obj.Font, missing); err != nil {
 		return err
 	}
-	old, next := []rune(obj.Text()), []rune(value)
 	codes := append([]TextCode(nil), obj.TextCode...)
+	transforms := append([]CGTransform(nil), obj.CGTransform...)
 	if len(old) == len(next) {
 		offset := 0
 		for i := range codes {
@@ -240,10 +256,33 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 	}
 	check = *obj
 	check.TextCode = codes
+	position := 0
+	for i, code := range codes {
+		before, after := textCodeRunes(obj.TextCode[i].Value), textCodeRunes(code.Value)
+		if len(before) == len(after) {
+			for j, char := range after {
+				if before[j] == char {
+					continue
+				}
+				for k := range transforms {
+					transform := &transforms[k]
+					if position+j < transform.CodePosition || position+j >= transform.CodePosition+transform.CodeCount {
+						continue
+					}
+					if transform.CodeCount != 1 || transform.GlyphCount != 1 {
+						return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing a combined glyph requires explicit layout")}
+					}
+					transform.Glyphs = strconv.Itoa(int(sfnt.GlyphIndex(char)))
+				}
+			}
+		}
+		position += len(after)
+	}
+	check.CGTransform = transforms
 	if err := validateEditorGeometry(GraphicObject{Type: "TextObject", TextObject: check}); err != nil {
 		return err
 	}
-	obj.TextCode, obj.layout = codes, nil
+	obj.TextCode, obj.CGTransform, obj.layout = codes, transforms, nil
 	return nil
 }
 

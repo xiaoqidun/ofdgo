@@ -93,8 +93,10 @@ func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []Gra
 				return err
 			}
 			if node.object.Type == "PathObject" {
-				_, styleErr := e.resolveEditorStyle(node.object, e.copiedLayerStyle(source))
-				if styleErr != nil && editReason(styleErr) == EditUnsupportedColor || !e.editorPaintable(node.object) {
+				style, styleErr := e.resolveEditorStyle(node.object, e.copiedLayerStyle(source))
+				_, fillErr := e.Color(style.PathObject.FillColor)
+				_, strokeErr := e.Color((*FillColor)(style.PathObject.StrokeColor))
+				if styleErr != nil && editReason(styleErr) == EditUnsupportedColor || fillErr != nil || strokeErr != nil {
 					node, err = e.wrapCompositePath(node)
 					if err != nil {
 						return err
@@ -235,11 +237,11 @@ func (e *Editor) neutralDrawParam() (string, error) {
 	return e.addEditorDrawParam(DrawParam{LineWidth: defaultPathLineWidth, Cap: "Butt", Join: "Miter", MiterLimit: defaultMiterLimit, DashOffset: &zero, dashPatternSet: true, FillColor: fill, StrokeColor: (*StrokeColor)(fill)})
 }
 
-// addEditorDrawParam 注册完整有效绘制参数，相同外观复用资源
-// 入参: draw 不含继承关系的有效参数
+// addEditorDrawParam 注册已校验的绘制参数，相同定义复用资源
+// 入参: draw 绘制参数
 // 返回: string 资源标识, error 错误信息
 func (e *Editor) addEditorDrawParam(draw DrawParam) (string, error) {
-	draw.ID, draw.Relative, draw.ResourceID, draw.BaseLoc, draw.Link = "", "", "", "", ""
+	draw.ID, draw.ResourceID, draw.BaseLoc, draw.Link = "", "", "", ""
 	for _, resource := range e.resources {
 		if resource.draw != nil {
 			previous := *resource.draw
@@ -257,10 +259,14 @@ func (e *Editor) addEditorDrawParam(draw DrawParam) (string, error) {
 		x.root("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "."}})
 		x.start("DrawParams", nil)
 		attrs := ofdAttrs{}
-		for _, pair := range [][2]string{{"ID", draw.ID}, {"LineWidth", ofdNumber(draw.LineWidth)}, {"Cap", draw.Cap}, {"Join", draw.Join}, {"MiterLimit", ofdNumber(draw.MiterLimit)}, {"Font", draw.Font}} {
+		for _, pair := range [][2]string{{"ID", draw.ID}, {"Relative", draw.Relative}, {"Cap", draw.Cap}, {"Join", draw.Join}, {"Font", draw.Font}} {
 			attrs.add(pair[0], pair[1])
 		}
-		attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: draw.DashPattern})
+		attrs.number("LineWidth", draw.LineWidth)
+		attrs.number("MiterLimit", draw.MiterLimit)
+		if draw.Relative == "" || draw.dashPatternSet || draw.DashPattern != "" {
+			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: draw.DashPattern})
+		}
 		if draw.DashOffset != nil {
 			attrs.add("DashOffset", ofdNumber(*draw.DashOffset))
 		}

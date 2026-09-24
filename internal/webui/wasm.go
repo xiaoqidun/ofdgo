@@ -1712,8 +1712,10 @@ func editorCapabilities(capability ofdgo.ObjectCapabilities, kind string) map[st
 // 入参: item 前端对象, object 有效样式, paint 是否可改色, scale 描边页面倍率
 func editorAppearance(item map[string]any, object ofdgo.GraphicObject, paint bool, scale float64) {
 	var alpha *int
+	var fill *ofdgo.FillColor
 	switch object.Type {
 	case "TextObject":
+		fill = object.TextObject.FillColor
 		alpha = object.TextObject.Alpha
 		if paint {
 			item["color"] = editorColorHex(object.TextObject.FillColor)
@@ -1723,6 +1725,10 @@ func editorAppearance(item map[string]any, object ofdgo.GraphicObject, paint boo
 		item["imageBorder"] = object.ImageObject.Border != nil
 	case "PathObject":
 		path := object.PathObject
+		fill = path.FillColor
+		if box, err := ofdgo.ParseBox(path.Boundary); err == nil {
+			item["paintSize"] = []any{box.W, box.H}
+		}
 		alpha = path.Alpha
 		item["dashPattern"], item["cap"], item["join"], item["dashOffset"] = path.DashPattern, path.Cap, path.Join, 0.0
 		if path.DashOffset != nil {
@@ -1739,6 +1745,10 @@ func editorAppearance(item map[string]any, object ofdgo.GraphicObject, paint boo
 	item["alpha"] = 255
 	if alpha != nil {
 		item["alpha"] = *alpha
+	}
+	if fill != nil && fill.Pattern != nil {
+		p := fill.Pattern
+		item["fillPattern"] = map[string]any{"width": p.Width, "height": p.Height, "xStep": p.XStep, "yStep": p.YStep, "ctm": p.CTM}
 	}
 }
 
@@ -2889,13 +2899,70 @@ func changeOutline(args []js.Value) (any, error) {
 	return editorOutlineInfo{info.(editorInfo), path}, nil
 }
 
-// styleObjects 原子更新对象透明度和路径描边属性
+// styleObjects 原子更新对象外观和图案布局
 // 入参: args 页面索引、对象标识数组及样式，省略字段保持原值
 // 返回: any 文档信息, error 错误信息
 func styleObjects(args []js.Value) (any, error) {
+	style := objectStyle(args[2])
+	var pattern *ofdgo.PatternStyle
+	if field := args[2].Get("patternStyle"); !field.IsUndefined() {
+		if err := json.Unmarshal([]byte(field.String()), &pattern); err != nil {
+			return nil, err
+		}
+	}
+	if field := args[2].Get("fillPaint"); !field.IsUndefined() {
+		if err := json.Unmarshal([]byte(field.String()), &style.FillColor); err != nil {
+			return nil, err
+		}
+	}
+	if field := args[2].Get("strokePaint"); !field.IsUndefined() {
+		if err := json.Unmarshal([]byte(field.String()), &style.StrokeColor); err != nil {
+			return nil, err
+		}
+	}
 	return changeObjects(func() error {
-		return currentEditor.StyleObjects(args[0].Int(), stringsFromJS(args[1]), objectStyle(args[2]))
+		return currentEditor.Transaction(func(editor *ofdgo.Editor) error {
+			page, ids := args[0].Int(), stringsFromJS(args[1])
+			for _, paint := range []*ofdgo.FillColor{style.FillColor, (*ofdgo.FillColor)(style.StrokeColor)} {
+				if err := resolveStylePaint(paint); err != nil {
+					return err
+				}
+			}
+			if err := editor.StyleObjects(page, ids, style); err != nil {
+				return err
+			}
+			if pattern != nil {
+				return editor.StylePatterns(page, ids, false, *pattern)
+			}
+			return nil
+		})
 	})
+}
+
+// resolveStylePaint 将渐变色标中的浏览器色值转换为文档颜色空间
+// 入参: paint 颜色数据
+// 返回: error 错误信息
+func resolveStylePaint(paint *ofdgo.FillColor) error {
+	if paint == nil {
+		return nil
+	}
+	var segments []ofdgo.ShdSegment
+	if paint.AxialShd != nil {
+		segments = paint.AxialShd.Segment
+	} else if paint.RadialShd != nil {
+		segments = paint.RadialShd.Segment
+	}
+	for i := range segments {
+		stop := &segments[i].Color
+		if strings.HasPrefix(stop.Value, "#") {
+			color := ofdgo.FillColor{Alpha: stop.Alpha}
+			if err := setEditorColor(&color, stop.Value); err != nil {
+				return err
+			}
+			*stop = ofdgo.ShdColor{Value: color.Value, ColorSpace: color.ColorSpace, Alpha: color.Alpha}
+		}
+	}
+	return nil
 }
 
 // objectStyle 读取高级面板提交的外观字段，省略字段保持原值
@@ -2903,6 +2970,14 @@ func styleObjects(args []js.Value) (any, error) {
 // 返回: ofdgo.ObjectStyle 库层样式
 func objectStyle(value js.Value) ofdgo.ObjectStyle {
 	style := ofdgo.ObjectStyle{}
+	if field := value.Get("fill"); !field.IsUndefined() {
+		v := field.Bool()
+		style.Fill = &v
+	}
+	if field := value.Get("stroke"); !field.IsUndefined() {
+		v := field.Bool()
+		style.Stroke = &v
+	}
 	if field := value.Get("alpha"); !field.IsUndefined() {
 		v := field.Int()
 		style.Alpha = &v
@@ -3026,13 +3101,39 @@ func createDocument(args []js.Value) (any, error) {
 	return previewEditor(editor, args[3].Bool())
 }
 
-// updateInfo 修改标题、作者和主题，保留其他元数据及创建程序标识
-// 入参: args 标题、作者、主题
+// updateInfo 修改文档信息和自定义字段，保留其他元数据及创建程序标识
+// 入参: args 标题、作者、主题、可选自定义字段JSON
 // 返回: any 编辑状态, error 错误信息
 func updateInfo(args []js.Value) (any, error) {
 	return changeObjects(func() error {
 		info := currentEditor.Info
 		info.Title, info.Author, info.Subject = args[0].String(), args[1].String(), args[2].String()
+		if len(args) > 3 {
+			var submitted []struct {
+				ofdgo.CustomData
+				Source *int
+			}
+			if err := json.Unmarshal([]byte(args[3].String()), &submitted); err != nil {
+				return err
+			}
+			var previous []ofdgo.CustomData
+			if info.CustomDatas != nil {
+				previous = info.CustomDatas.CustomData
+			}
+			fields := make([]ofdgo.CustomData, len(submitted))
+			for i, field := range submitted {
+				if field.Source != nil {
+					if *field.Source < 0 || *field.Source >= len(previous) {
+						return fmt.Errorf("invalid custom data source")
+					}
+					fields[i] = previous[*field.Source]
+				}
+				fields[i].Name, fields[i].Value = field.Name, field.Value
+			}
+			if !slices.Equal(previous, fields) {
+				info.CustomDatas = &ofdgo.CustomDatas{CustomData: fields}
+			}
+		}
 		currentEditor.SetInfo(info)
 		return nil
 	})

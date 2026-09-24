@@ -67,25 +67,26 @@ type pageBoxInfo struct {
 
 // DocumentInfo 文档信息
 type DocumentInfo struct {
-	Encryption      EncryptionInfo   `json:"encryption"`
-	Version         string           `json:"version"`
-	DocType         string           `json:"docType"`
-	Title           string           `json:"title"`
-	Author          string           `json:"author"`
-	Subject         string           `json:"subject"`
-	CreationDate    string           `json:"creationDate"`
-	ModDate         string           `json:"modDate"`
-	PageCount       int              `json:"pageCount"`
-	FontCount       int              `json:"fontCount"`
-	SignatureCount  int              `json:"signatureCount"`
-	SignatureError  string           `json:"signatureError,omitempty"`
-	AttachmentError string           `json:"attachmentError,omitempty"`
-	Attachments     []AttachmentInfo `json:"attachments,omitempty"`
-	Fonts           []FontInfo       `json:"fonts"`
-	Signatures      []SignatureInfo  `json:"signatures"`
-	Pages           []PageInfo       `json:"pages"`
-	Outlines        []OutlineInfo    `json:"outlines,omitempty"`
-	DetailsPending  bool             `json:"detailsPending,omitempty"`
+	Encryption      EncryptionInfo     `json:"encryption"`
+	Version         string             `json:"version"`
+	DocType         string             `json:"docType"`
+	Title           string             `json:"title"`
+	Author          string             `json:"author"`
+	Subject         string             `json:"subject"`
+	CustomData      []ofdgo.CustomData `json:"customData,omitempty"`
+	CreationDate    string             `json:"creationDate"`
+	ModDate         string             `json:"modDate"`
+	PageCount       int                `json:"pageCount"`
+	FontCount       int                `json:"fontCount"`
+	SignatureCount  int                `json:"signatureCount"`
+	SignatureError  string             `json:"signatureError,omitempty"`
+	AttachmentError string             `json:"attachmentError,omitempty"`
+	Attachments     []AttachmentInfo   `json:"attachments,omitempty"`
+	Fonts           []FontInfo         `json:"fonts"`
+	Signatures      []SignatureInfo    `json:"signatures"`
+	Pages           []PageInfo         `json:"pages"`
+	Outlines        []OutlineInfo      `json:"outlines,omitempty"`
+	DetailsPending  bool               `json:"detailsPending,omitempty"`
 }
 
 // OutlineInfo 目录节点信息
@@ -450,6 +451,9 @@ func (s *Session) Summary() DocumentInfo {
 		info.Title = docInfo.Title
 		info.Author = docInfo.Author
 		info.Subject = docInfo.Subject
+		if docInfo.CustomDatas != nil {
+			info.CustomData = append([]ofdgo.CustomData(nil), docInfo.CustomDatas.CustomData...)
+		}
 		info.CreationDate = docInfo.CreationDate
 		info.ModDate = docInfo.ModDate
 	}
@@ -523,6 +527,9 @@ func (s *Session) Info() DocumentInfo {
 		info.Title = docInfo.Title
 		info.Author = docInfo.Author
 		info.Subject = docInfo.Subject
+		if docInfo.CustomDatas != nil {
+			info.CustomData = append([]ofdgo.CustomData(nil), docInfo.CustomDatas.CustomData...)
+		}
 		info.CreationDate = docInfo.CreationDate
 		info.ModDate = docInfo.ModDate
 	}

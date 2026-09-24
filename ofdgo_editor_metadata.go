@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"reflect"
 )
 
@@ -62,7 +63,7 @@ func (e *Editor) sourceInfoXML() ([]byte, error) {
 	return data, nil
 }
 
-// editorCustomDatas 更新自定义字段，保留容器扩展与同名字段的未知属性和子节点
+// editorCustomDatas 更新自定义字段，保留原字段及容器的扩展内容
 // 入参: data 原XML, info 文档信息节点, values 新字段
 // 返回: []byte 修改后的XML, error 编码错误
 func editorCustomDatas(data []byte, info *editorXML, values *CustomDatas) ([]byte, error) {
@@ -82,9 +83,26 @@ func editorCustomDatas(data []byte, info *editorXML, values *CustomDatas) ([]byt
 		}
 	}
 	var encoded [][]byte
+	used := make(map[*editorXML]bool)
 	for _, item := range items {
-		matches := byName[item.Name]
-		if len(matches) == 0 {
+		if item.sourceIndex > 0 && item.sourceIndex <= len(nodes) {
+			used[nodes[item.sourceIndex-1]] = true
+		}
+	}
+	for _, item := range items {
+		var node *editorXML
+		if item.sourceIndex > 0 && item.sourceIndex <= len(nodes) {
+			node = nodes[item.sourceIndex-1]
+		} else {
+			for _, candidate := range byName[item.Name] {
+				if !used[candidate] {
+					node = candidate
+					used[node] = true
+					break
+				}
+			}
+		}
+		if node == nil {
 			entry, err := xml.Marshal(struct {
 				XMLName xml.Name
 				CustomData
@@ -95,26 +113,30 @@ func editorCustomDatas(data []byte, info *editorXML, values *CustomDatas) ([]byt
 			encoded = append(encoded, entry)
 			continue
 		}
-		node := matches[0]
-		byName[item.Name] = matches[1:]
 		var original CustomData
 		if err := xml.Unmarshal(data[node.start:node.end], &original); err != nil {
 			return nil, err
 		}
-		if original.Value == item.Value {
-			encoded = append(encoded, data[node.start:node.end])
+		if original.Name != item.Name {
+			entry, err := editorXMLAttribute(data, node, "Name", item.Name)
+			if err != nil {
+				return nil, err
+			}
+			renamed, err := parseEditorXML(entry)
+			if err != nil {
+				return nil, err
+			}
+			updated, err := editorCustomDataValue(entry, renamed, original.Value, item.Value)
+			if err != nil {
+				return nil, err
+			}
+			encoded = append(encoded, updated)
 			continue
 		}
-		var content bytes.Buffer
-		if err := xml.EscapeText(&content, []byte(item.Value)); err != nil {
+		entry, err := editorCustomDataValue(data, node, original.Value, item.Value)
+		if err != nil {
 			return nil, err
 		}
-		for _, child := range node.children {
-			content.Write(data[child.start:child.end])
-		}
-		patch := editorXMLContent(data, node, content.Bytes())
-		entry := append(bytes.Clone(data[node.start:patch.start]), patch.data...)
-		entry = append(entry, data[patch.end:node.end]...)
 		encoded = append(encoded, entry)
 	}
 	if container == nil {
@@ -146,4 +168,45 @@ func editorCustomDatas(data []byte, info *editorXML, values *CustomDatas) ([]byt
 		}
 	}
 	return editorPatchXML(data, patches), nil
+}
+
+// editorCustomDataValue 修改字段文本，保留扩展子节点和注释
+// 入参: data 原XML, node 字段节点, before 原值, after 新值
+// 返回: []byte 字段XML, error 编码错误
+func editorCustomDataValue(data []byte, node *editorXML, before, after string) ([]byte, error) {
+	if before == after {
+		return data[node.start:node.end], nil
+	}
+	var content bytes.Buffer
+	if err := xml.EscapeText(&content, []byte(after)); err != nil {
+		return nil, err
+	}
+	if node.open < node.close {
+		inner := data[node.open:node.close]
+		decoder := xml.NewDecoder(bytes.NewReader(inner))
+		depth := 0
+		for {
+			start := decoder.InputOffset()
+			token, err := decoder.RawToken()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, err
+			}
+			_, text := token.(xml.CharData)
+			if !text || depth != 0 {
+				content.Write(inner[start:decoder.InputOffset()])
+			}
+			switch token.(type) {
+			case xml.StartElement:
+				depth++
+			case xml.EndElement:
+				depth--
+			}
+		}
+	}
+	patch := editorXMLContent(data, node, content.Bytes())
+	entry := append(bytes.Clone(data[node.start:patch.start]), patch.data...)
+	return append(entry, data[patch.end:node.end]...), nil
 }

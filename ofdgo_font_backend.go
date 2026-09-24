@@ -49,11 +49,13 @@ type FontShaper interface {
 	ShapeText(value string, size float64) ([]ShapedGlyph, error)
 }
 
-// TextShapeOptions 指定单一方向文字的塑形参数，不执行双向段落分析或字体回退
+// TextShapeOptions 指定文字塑形参数，Bidi启用双向及脚本分段，不执行字体回退
 // Direction为空或ltr时从左向右，rtl时从右向左；Script为四字母ISO15924代码，空值自动检测
+// Bidi启用时Direction指定段落方向，各文字片段按双向算法排列
 // Language为语言标签，Features为逗号分隔的全局OpenType特性，如kern=0,liga=1，不接受字符区间
 // 零值保持原有FontShaper行为，非零值要求FontShaperOptions能力
 type TextShapeOptions struct {
+	Bidi      bool
 	Direction string
 	Script    string
 	Language  string
@@ -68,9 +70,11 @@ type FontShaperOptions interface {
 }
 
 // ShapedGlyph 保存塑形后的字形、原文簇和基线定位
+// Bidi模式下VisualOrder为簇从左到右的零起始顺序，同簇字形共用顺序
 type ShapedGlyph struct {
 	Glyph         uint16
 	Cluster       int
+	VisualOrder   int
 	X, Y, Advance float64
 }
 

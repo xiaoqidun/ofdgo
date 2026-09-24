@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"cmp"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,9 +26,12 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/go-text/typesetting/di"
 	typefont "github.com/go-text/typesetting/font"
 	"github.com/go-text/typesetting/harfbuzz"
 	"github.com/go-text/typesetting/language"
+	"github.com/go-text/typesetting/shaping"
+	"golang.org/x/image/math/fixed"
 	xlanguage "golang.org/x/text/language"
 )
 
@@ -36,6 +40,7 @@ type fontShaper struct {
 	metrics     FontMetrics
 	shapeMu     sync.Mutex
 	shapeFont   *harfbuzz.Font
+	shapeFace   *typefont.Face
 	shapeBuffer *harfbuzz.Buffer
 }
 
@@ -46,8 +51,7 @@ func (f *fontShaper) ShapeText(value string, size float64) ([]ShapedGlyph, error
 	return f.ShapeTextWithOptions(value, size, TextShapeOptions{})
 }
 
-// ShapeTextWithOptions 使用现有纯Go塑形引擎处理单一方向原文，保留逻辑簇和视觉位置
-// 不执行混合方向分段，调用方应将双向段落拆为单向文字对象
+// ShapeTextWithOptions 使用纯Go塑形引擎保留逻辑簇和视觉位置，可显式启用双向分段
 // 入参: value 单行原文, size 毫米字号, options 塑形选项
 // 返回: []ShapedGlyph 定位字形, error 字符或选项错误
 func (f *fontShaper) ShapeTextWithOptions(value string, size float64, options TextShapeOptions) ([]ShapedGlyph, error) {
@@ -114,7 +118,11 @@ func (f *fontShaper) ShapeTextWithOptions(value string, size float64, options Te
 			return nil, fmt.Errorf("shaping font: %w", err)
 		}
 		f.shapeFont = harfbuzz.NewFont(face)
+		f.shapeFace = face
 		f.shapeBuffer = harfbuzz.NewBuffer()
+	}
+	if options.Bidi {
+		return f.shapeBidiText([]rune(value), size, props, features)
 	}
 	buffer := f.shapeBuffer
 	buffer.Clear()
@@ -139,6 +147,78 @@ func (f *fontShaper) ShapeTextWithOptions(value string, size float64, options Te
 		}
 		x += float64(position.XAdvance)
 		y += float64(position.YAdvance)
+	}
+	slices.SortStableFunc(result, func(a, b ShapedGlyph) int { return cmp.Compare(a.Cluster, b.Cluster) })
+	return result, nil
+}
+
+// shapingFace 固定双向排版的字体来源，不隐式替换字体
+type shapingFace struct{ face *typefont.Face }
+
+// ResolveFace 返回指定字体
+// 入参: char 字符
+// 返回: *typefont.Face 字体
+func (f shapingFace) ResolveFace(char rune) *typefont.Face { return f.face }
+
+// shapeBidiText 使用现有分段和行排列引擎生成单行双向字形
+// 入参: runes 原文, size 毫米字号, props 段落属性, features 字体特性
+// 返回: []ShapedGlyph 字形, error 错误信息
+func (f *fontShaper) shapeBidiText(runes []rune, size float64, props harfbuzz.SegmentProperties, features []harfbuzz.Feature) ([]ShapedGlyph, error) {
+	if len(runes) == 0 {
+		return nil, nil
+	}
+	direction := di.DirectionLTR
+	if props.Direction == harfbuzz.RightToLeft {
+		direction = di.DirectionRTL
+	}
+	input := shaping.Input{Text: runes, RunEnd: len(runes), Direction: direction, Face: f.shapeFace, Size: fixed.I(int(f.metrics.UnitsPerEm())), Script: props.Script, Language: props.Language}
+	for _, feature := range features {
+		input.FontFeatures = append(input.FontFeatures, shaping.FontFeature{Tag: feature.Tag, Value: feature.Value})
+	}
+	var segmenter shaping.Segmenter
+	var shaper shaping.HarfbuzzShaper
+	var wrapper shaping.LineWrapper
+	var runs []shaping.Output
+	var advance int64
+	for _, part := range segmenter.Split(input, shapingFace{f.shapeFace}) {
+		if props.Script != 0 {
+			part.Script = props.Script
+		}
+		if props.Language != "" {
+			part.Language = props.Language
+		}
+		run := shaper.Shape(part)
+		for _, glyph := range run.Glyphs {
+			advance += int64(glyph.Advance)
+		}
+		if advance < 0 || advance >= math.MaxInt32 {
+			return nil, fmt.Errorf("shaped line exceeds coordinate range")
+		}
+		runs = append(runs, run)
+	}
+	lines, truncated := wrapper.WrapParagraphF(shaping.WrapConfig{Direction: direction, DisableTrailingWhitespaceTrim: true}, fixed.Int26_6(math.MaxInt32), runes, shaping.NewSliceIterator(runs))
+	if truncated != 0 || len(lines) != 1 {
+		return nil, fmt.Errorf("shaping requires a single text line")
+	}
+	slices.SortFunc(lines[0], func(a, b shaping.Output) int { return cmp.Compare(a.VisualIndex, b.VisualIndex) })
+	unit := size / float64(f.metrics.UnitsPerEm()) / 64
+	var result []ShapedGlyph
+	var x float64
+	visual := make(map[int]int)
+	for _, run := range lines[0] {
+		for _, glyph := range run.Glyphs {
+			if glyph.GlyphID >= typefont.GID(f.metrics.NumGlyphs()) {
+				return nil, fmt.Errorf("invalid shaped glyph index %d", glyph.GlyphID)
+			}
+			cluster := glyph.TextIndex()
+			order, exists := visual[cluster]
+			if !exists {
+				order = len(visual)
+				visual[cluster] = order
+			}
+			result = append(result, ShapedGlyph{Glyph: uint16(glyph.GlyphID), Cluster: cluster, VisualOrder: order, X: (x + float64(glyph.XOffset)) * unit, Y: -float64(glyph.YOffset) * unit, Advance: float64(glyph.Advance) * unit})
+			x += float64(glyph.Advance)
+		}
 	}
 	slices.SortStableFunc(result, func(a, b ShapedGlyph) int { return cmp.Compare(a.Cluster, b.Cluster) })
 	return result, nil

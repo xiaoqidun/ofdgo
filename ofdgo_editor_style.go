@@ -21,6 +21,37 @@ import (
 	"strings"
 )
 
+// AddDrawParam 注册绘制参数，保留继承引用，未引用的资源不写入文档
+// 入参: draw 绘制参数，ID由编辑器分配
+// 返回: string 资源标识, error 错误信息
+func (e *Editor) AddDrawParam(draw DrawParam) (string, error) {
+	if draw.ResourceID != "" || draw.BaseLoc != "" || draw.Link != "" {
+		return "", fmt.Errorf("external draw parameter references cannot be registered directly")
+	}
+	base, err := e.editorDrawParam(draw.Relative, make(map[string]bool))
+	if err != nil {
+		return "", err
+	}
+	effective := mergeDrawParam(*base, &draw)
+	if err := validateEditorStroke(PathObject{LineWidth: draw.LineWidth, Cap: draw.Cap, Join: draw.Join, MiterLimit: draw.MiterLimit, DashPattern: draw.DashPattern, DashOffset: draw.DashOffset}); err != nil {
+		return "", err
+	}
+	if !finite(draw.Size) || draw.Size < 0 || draw.Weight < 0 || draw.Weight > 900 || draw.Weight%100 != 0 {
+		return "", fmt.Errorf("invalid draw parameter font size or weight")
+	}
+	if effective.Font != "" {
+		if _, err := e.editorFont(effective.Font); err != nil {
+			return "", err
+		}
+	}
+	for _, paint := range []*FillColor{draw.FillColor, (*FillColor)(draw.StrokeColor)} {
+		if err := e.editorColor(paint); err != nil {
+			return "", err
+		}
+	}
+	return e.addEditorDrawParam(cloneEditorData(draw))
+}
+
 // editorDrawParam 解析原文档的绘制参数继承链，缺失或循环引用不进入编辑快照
 // 入参: id 绘制参数标识, visited 已访问标识
 // 返回: *DrawParam 合并参数, error 错误信息
@@ -121,7 +152,7 @@ func (e *Editor) resolveEditorStyleDefaults(object GraphicObject, base *DrawPara
 		obj.FillColor, obj.StrokeColor = style.FillColor, style.StrokeColor
 	}
 	for _, color := range []*FillColor{style.FillColor, (*FillColor)(style.StrokeColor)} {
-		if err := e.editorColor(color); err != nil {
+		if _, err := e.Color(color); err != nil {
 			return GraphicObject{}, &EditError{Code: EditUnsupportedColor, Err: fmt.Errorf("unsupported draw parameter color: %w", err)}
 		}
 	}
@@ -411,6 +442,48 @@ func editorStrokeScale(ctm string) float64 {
 		return scale
 	}
 	return 1
+}
+
+// SetImageBorders 原子替换图片边框，nil移除边框
+// 入参: page 页面索引, ids 图片标识, border 边框样式
+// 返回: error 错误信息
+func (e *Editor) SetImageBorders(page int, ids []string, border *ImageBorder) error {
+	if err := e.validateImageBorder(border); err != nil {
+		return err
+	}
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil {
+		return err
+	}
+	for i := range objects {
+		if objects[i].Type != "ImageObject" {
+			return fmt.Errorf("object %q is not an image", ids[i])
+		}
+		objects[i].ImageObject.Border = cloneEditorData(border)
+	}
+	return e.updateObjects(page, objects, true)
+}
+
+// validateImageBorder 校验图片边框的线型、圆角和绘制颜色
+// 入参: border 边框
+// 返回: error 错误信息
+func (e *Editor) validateImageBorder(border *ImageBorder) error {
+	if border == nil {
+		return nil
+	}
+	for _, radius := range []float64{border.HorizonalCornerRadius, border.VerticalCornerRadius} {
+		if !finite(radius) || radius < 0 {
+			return fmt.Errorf("image corner radius must be finite and nonnegative")
+		}
+	}
+	stroke := PathObject{DashPattern: border.DashPattern, DashOffset: &border.DashOffset}
+	if border.LineWidth != nil {
+		stroke.LineWidth = *border.LineWidth
+	}
+	if err := validateEditorStroke(stroke); err != nil {
+		return err
+	}
+	return e.editorColor((*FillColor)(border.BorderColor))
 }
 
 // validateEditorStroke 校验路径描边尺寸、端点和虚线

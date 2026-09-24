@@ -375,44 +375,14 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 		for _, layer := range page.Content.Layer {
 			for _, object := range layer.Objects {
 				before, exists := original[editorObjectID(object)]
+				collectObjectReferences(object, used)
+				if e.source != nil && (!exists || !reflect.DeepEqual(before, object)) {
+					collectObjectReferences(object, promoted)
+				}
 				if origin := e.objectOrigin(editorObjectID(object)); origin != nil && origin.page != nil && (!exists || before.Type != object.Type || !reflect.DeepEqual(before.CompositeGraphicUnit, object.CompositeGraphicUnit)) {
 					for _, name := range origin.page.original.PageRes {
 						files[e.source.reader.ResPath(resolveResourcePath(origin.page.ref.BaseLoc, "", name))] = true
 					}
-				}
-				for _, value := range []*FillColor{object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor), object.PathObject.FillColor, (*FillColor)(object.PathObject.StrokeColor)} {
-					if value != nil && value.ColorSpace != "" {
-						used[value.ColorSpace] = true
-						if e.source != nil && (!exists || !reflect.DeepEqual(before, object)) {
-							promoted[value.ColorSpace] = true
-						}
-					}
-				}
-				switch object.Type {
-				case "CompositeObject", "CompositeGraphicUnit":
-					collectCompositeReferences(object.CompositeGraphicUnit, used)
-					if e.source != nil && (!exists || !reflect.DeepEqual(before.CompositeGraphicUnit, object.CompositeGraphicUnit)) {
-						collectCompositeReferences(object.CompositeGraphicUnit, promoted)
-					}
-				case "TextObject":
-					used[object.TextObject.DrawParam] = true
-					used[object.TextObject.Font] = true
-					if e.source != nil && (!exists || before.Type != object.Type || before.TextObject.Font != object.TextObject.Font) {
-						promoted[object.TextObject.Font] = true
-					}
-				case "ImageObject":
-					used[object.ImageObject.ResourceID] = true
-					if e.source != nil && (!exists || before.Type != object.Type || before.ImageObject.ResourceID != object.ImageObject.ResourceID) {
-						promoted[object.ImageObject.ResourceID] = true
-					}
-					if object.ImageObject.ImageMask != "" {
-						used[object.ImageObject.ImageMask] = true
-						if e.source != nil && (!exists || before.Type != object.Type || before.ImageObject.ImageMask != object.ImageObject.ImageMask) {
-							promoted[object.ImageObject.ImageMask] = true
-						}
-					}
-				case "PathObject":
-					used[object.PathObject.DrawParam] = true
 				}
 			}
 		}
@@ -663,6 +633,7 @@ func encodeOFDXML(encode func(*ofdXML)) ([]byte, error) {
 func (x *ofdXML) object(object GraphicObject, root bool) {
 	var attrs ofdAttrs
 	var fill, stroke *FillColor
+	var actions []Action
 	if root {
 		attrs.add("xmlns:ofd", ofdNamespace)
 	}
@@ -676,6 +647,8 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.add("Font", obj.Font)
 		attrs.number("Size", obj.Size)
 		attrs.number("HScale", obj.HScale)
+		attrs.number("VScale", obj.VScale)
+		attrs.add("Decoration", obj.Decoration)
 		attrs.number("Weight", float64(obj.Weight))
 		attrs.number("ReadDirection", float64(obj.ReadDirection))
 		attrs.number("CharDirection", float64(obj.CharDirection))
@@ -690,6 +663,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.flag("Fill", obj.Fill)
 		attrs.alpha(obj.Alpha)
 		fill, stroke = obj.FillColor, (*FillColor)(obj.StrokeColor)
+		actions = obj.Actions
 	case "PathObject", "Path":
 		obj := object.PathObject
 		attrs.add("ID", obj.ID)
@@ -714,6 +688,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.flag("Fill", obj.Fill)
 		attrs.alpha(obj.Alpha)
 		fill, stroke = obj.FillColor, (*FillColor)(obj.StrokeColor)
+		actions = obj.Actions
 	case "ImageObject":
 		obj := object.ImageObject
 		attrs.add("ID", obj.ID)
@@ -723,6 +698,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.add("ImageMask", obj.ImageMask)
 		attrs.flag("Visible", obj.Visible)
 		attrs.alpha(obj.Alpha)
+		actions = obj.Actions
 	case "CompositeObject", "CompositeGraphicUnit":
 		obj := object.CompositeGraphicUnit
 		attrs.add("ID", obj.ID)
@@ -732,10 +708,13 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.add("DrawParam", obj.DrawParam)
 		attrs.flag("Visible", obj.Visible)
 		attrs.alpha(obj.Alpha)
+		actions = obj.Actions
 	}
 	x.start(object.Type, attrs)
+	x.actions(actions)
 	if object.Type == "ImageObject" {
 		x.clips(object.ImageObject.Clips)
+		x.border(object.ImageObject.Border)
 	} else if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
 		x.clips(object.CompositeGraphicUnit.Clips)
 	} else if object.Type == "PathObject" || object.Type == "Path" {
@@ -816,7 +795,7 @@ func (x *ofdXML) textCode(value string, attrs ofdAttrs) {
 	x.err = x.encoder.EncodeElement(content, xml.StartElement{Name: xml.Name{Local: "ofd:TextCode"}, Attr: attrs})
 }
 
-// color 写出基本颜色
+// color 写出纯色、渐变和图案，保留颜色空间与透明度
 // 入参: name 节点名, color 颜色
 func (x *ofdXML) color(name string, color *FillColor) {
 	if color == nil {
@@ -830,5 +809,168 @@ func (x *ofdXML) color(name string, color *FillColor) {
 	}
 	attrs.alpha(color.Alpha)
 	x.start(name, attrs)
+	if color.AxialShd != nil {
+		shading := color.AxialShd
+		x.shading("AxialShd", shadingAttrs(shading.MapType, shading.MapUnit, shading.Extend, shading.StartPoint, shading.EndPoint), shading.Segment)
+	}
+	if color.RadialShd != nil {
+		shading := color.RadialShd
+		attrs := shadingAttrs(shading.MapType, shading.MapUnit, shading.Extend, shading.StartPoint, shading.EndPoint)
+		attrs.add("StartRadius", ofdNumber(shading.StartRadius))
+		attrs.add("EndRadius", ofdNumber(shading.EndRadius))
+		attrs.number("Eccentricity", shading.Eccentricity)
+		attrs.number("Angle", shading.Angle)
+		x.shading("RadialShd", attrs, shading.Segment)
+	}
+	if color.Pattern != nil {
+		x.pattern(color.Pattern)
+	}
 	x.end(name)
+}
+
+// shadingAttrs 编码轴向和径向渐变的共同属性
+// 入参: mapType 映射方式, mapUnit 映射周期, extend 延伸方式, start、end 渐变端点
+// 返回: ofdAttrs 属性集合
+func shadingAttrs(mapType string, mapUnit float64, extend, start, end string) ofdAttrs {
+	var attrs ofdAttrs
+	attrs.add("MapType", mapType)
+	attrs.number("MapUnit", mapUnit)
+	attrs.add("Extend", extend)
+	attrs.add("StartPoint", start)
+	attrs.add("EndPoint", end)
+	return attrs
+}
+
+// shading 写出渐变分段，保留未显式设置的位置
+// 入参: name 渐变类型, attrs 属性, segments 色标
+func (x *ofdXML) shading(name string, attrs ofdAttrs, segments []ShdSegment) {
+	x.start(name, attrs)
+	for _, segment := range segments {
+		var attrs ofdAttrs
+		if !segment.positionMissing {
+			attrs.add("Position", ofdNumber(segment.Position))
+		}
+		x.start("Segment", attrs)
+		x.element("Color", segment.Color)
+		x.end("Segment")
+	}
+	x.end(name)
+}
+
+// element 写出具有标准XML标签的子树，显式声明OFD命名空间
+// 入参: name 元素名称, value 元素内容
+func (x *ofdXML) element(name string, value any) {
+	if x.err == nil {
+		x.err = x.encoder.EncodeElement(value, xml.StartElement{Name: xml.Name{Space: ofdNamespace, Local: name}})
+	}
+}
+
+// border 写出图片边框及其绘制颜色
+// 入参: border 边框，nil不输出节点
+func (x *ofdXML) border(border *ImageBorder) {
+	if border == nil {
+		return
+	}
+	var attrs ofdAttrs
+	if border.LineWidth != nil {
+		attrs.add("LineWidth", ofdNumber(*border.LineWidth))
+	}
+	attrs.number("HorizonalCornerRadius", border.HorizonalCornerRadius)
+	attrs.number("VerticalCornerRadius", border.VerticalCornerRadius)
+	attrs.number("DashOffset", border.DashOffset)
+	attrs.add("DashPattern", border.DashPattern)
+	x.start("Border", attrs)
+	x.color("BorderColor", (*FillColor)(border.BorderColor))
+	x.end("Border")
+}
+
+// pattern 写出图案单元，保留对象绘制顺序
+// 入参: pattern 图案
+func (x *ofdXML) pattern(pattern *Pattern) {
+	var attrs ofdAttrs
+	attrs.number("Width", pattern.Width)
+	attrs.number("Height", pattern.Height)
+	attrs.number("XStep", pattern.XStep)
+	attrs.number("YStep", pattern.YStep)
+	attrs.add("ReflectMethod", pattern.ReflectMethod)
+	attrs.add("RelativeTo", pattern.RelativeTo)
+	attrs.add("CTM", pattern.CTM)
+	x.start("Pattern", attrs)
+	x.start("CellContent", nil)
+	for _, object := range pattern.CellContent.Objects {
+		x.object(object, false)
+	}
+	x.end("CellContent")
+	x.end("Pattern")
+}
+
+// actions 写出对象动作及精确点击区域，不检查链接可达性
+// 入参: actions 动作列表
+func (x *ofdXML) actions(actions []Action) {
+	if len(actions) == 0 {
+		return
+	}
+	x.start("Actions", nil)
+	for _, action := range actions {
+		var attrs ofdAttrs
+		attrs.add("Event", action.Event)
+		x.start("Action", attrs)
+		if action.Region != nil {
+			x.start("Region", nil)
+			for _, area := range action.Region.Area {
+				x.start("Area", ofdAttrs{{Name: xml.Name{Local: "Start"}, Value: area.Start}})
+				for _, command := range area.Command {
+					var attrs ofdAttrs
+					for _, pair := range [][2]string{{"Point1", command.Point1}, {"Point2", command.Point2}, {"Point3", command.Point3}, {"EllipseSize", command.EllipseSize}, {"RotationAngle", command.RotationAngle}, {"LargeArc", command.LargeArc}, {"SweepDirection", command.SweepDirection}, {"EndPoint", command.EndPoint}} {
+						attrs.add(pair[0], pair[1])
+					}
+					x.start(command.Type, attrs)
+					x.end(command.Type)
+				}
+				x.end("Area")
+			}
+			x.end("Region")
+		}
+		if action.Goto != nil {
+			x.start("Goto", nil)
+			if dest := action.Goto.Dest; dest != nil {
+				attrs := ofdAttrs{{Name: xml.Name{Local: "Type"}, Value: dest.Type}, {Name: xml.Name{Local: "PageID"}, Value: dest.PageID}}
+				switch dest.Type {
+				case "XYZ":
+					attrs.add("Left", ofdNumber(dest.Left))
+					attrs.add("Top", ofdNumber(dest.Top))
+					attrs.add("Zoom", ofdNumber(dest.Zoom))
+				case "FitH":
+					attrs.add("Top", ofdNumber(dest.Top))
+				case "FitV":
+					attrs.add("Left", ofdNumber(dest.Left))
+				case "FitR":
+					attrs.add("Left", ofdNumber(dest.Left))
+					attrs.add("Right", ofdNumber(dest.Right))
+					attrs.add("Top", ofdNumber(dest.Top))
+					attrs.add("Bottom", ofdNumber(dest.Bottom))
+				}
+				x.start("Dest", attrs)
+				x.end("Dest")
+			}
+			if action.Goto.Bookmark != nil {
+				x.element("Bookmark", action.Goto.Bookmark)
+			}
+			x.end("Goto")
+		}
+		if action.URI != nil {
+			x.element("URI", action.URI)
+		}
+		if action.GotoA != nil {
+			x.element("GotoA", action.GotoA)
+		}
+		if action.Sound != nil {
+			x.element("Sound", action.Sound)
+		}
+		if action.Movie != nil {
+			x.element("Movie", action.Movie)
+		}
+		x.end("Action")
+	}
+	x.end("Actions")
 }
