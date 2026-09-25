@@ -41,7 +41,7 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		if annotation.Subtype != "Link" {
 			return &pdfgo.UnsupportedError{Feature: "annotation " + string(annotation.Subtype)}
 		}
-		for _, key := range []pdfgo.Name{"AP", "AA", "BS", "OC"} {
+		for _, key := range []pdfgo.Name{"AP", "AA", "OC"} {
 			if dict[key] != nil {
 				return &pdfgo.UnsupportedError{Feature: fmt.Sprintf("link annotation field %q", key)}
 			}
@@ -57,13 +57,31 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 				return &pdfgo.UnsupportedError{Feature: "link annotation flags"}
 			}
 		}
-		border, err := p.reader.Resolve(dict["Border"])
+		borderStyle, err := p.reader.Resolve(dict["BS"])
 		if err != nil {
 			return err
 		}
-		array, ok := border.(pdfgo.Array)
-		if !ok || len(array) != 3 || (array[2] != pdfgo.Integer(0) && array[2] != pdfgo.Real(0)) {
-			return &pdfgo.UnsupportedError{Feature: "visible link border"}
+		if borderStyle != nil {
+			style, ok := borderStyle.(pdfgo.Dictionary)
+			if !ok {
+				return fmt.Errorf("invalid PDF link border style")
+			}
+			width, err := p.reader.Resolve(style["W"])
+			if err != nil {
+				return err
+			}
+			if width != pdfgo.Integer(0) && width != pdfgo.Real(0) {
+				return &pdfgo.UnsupportedError{Feature: "visible link border"}
+			}
+		} else {
+			border, err := p.reader.Resolve(dict["Border"])
+			if err != nil {
+				return err
+			}
+			array, ok := border.(pdfgo.Array)
+			if !ok || len(array) < 3 || (array[2] != pdfgo.Integer(0) && array[2] != pdfgo.Real(0)) {
+				return &pdfgo.UnsupportedError{Feature: "visible link border"}
+			}
 		}
 		action := Action{Event: "CLICK"}
 		target := dict["Dest"]
