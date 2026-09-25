@@ -378,8 +378,8 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 		margin := mark.Style.LineWidth * scale / 2 * math.Max(1, mark.Style.MiterLimit)
 		box = Box{box.X - margin, box.Y - margin, box.W + 2*margin, box.H + 2*margin}
 	}
-	strokeColor := StrokeColor(*p.pathColor(mark.Style.Stroke, box))
-	object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: p.pathData(mark.Path, box), Fill: &mark.Fill, Stroke: &mark.Stroke, FillColor: p.pathColor(mark.Style.Fill, box), StrokeColor: &strokeColor, LineWidth: mark.Style.LineWidth * scale, Cap: []string{"Butt", "Round", "Square"}[mark.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[mark.Style.Join], MiterLimit: mark.Style.MiterLimit, Clips: p.clips(mark.Style.Clips, box)}
+	strokeColor := StrokeColor(*p.paintColor(mark.Style.Stroke, box))
+	object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: p.pathData(mark.Path, box), Fill: &mark.Fill, Stroke: &mark.Stroke, FillColor: p.paintColor(mark.Style.Fill, box), StrokeColor: &strokeColor, LineWidth: mark.Style.LineWidth * scale, Cap: []string{"Butt", "Round", "Square"}[mark.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[mark.Style.Join], MiterLimit: mark.Style.MiterLimit, Clips: p.clips(mark.Style.Clips, box)}
 	object.LineWidthSet = object.LineWidth == 0
 	if mark.Path.EvenOdd {
 		object.Rule = "Even-Odd"
@@ -398,11 +398,30 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 	return nil
 }
 
-// pathColor 将页面渐变轴转换为对象局部坐标
+// paintColor 将页面渐变转换为对象局部坐标
 // 入参: paint PDF画刷, box 对象边界
 // 返回: *FillColor OFD颜色或渐变
-func (p *pdfImporter) pathColor(paint pdfgo.Paint, box Box) *FillColor {
+func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) *FillColor {
 	color := p.color(paint)
+	if paint.Radial != nil {
+		gradient := paint.Radial
+		start, end := p.matrix.Apply(gradient.Start), p.matrix.Apply(gradient.End)
+		scale := math.Hypot(p.matrix[0], p.matrix[1])
+		extend := 0
+		if gradient.Extend[0] {
+			extend |= 1
+		}
+		if gradient.Extend[1] {
+			extend |= 2
+		}
+		shading := &RadialShd{StartPoint: pdfNumbers(start.X-box.X, start.Y-box.Y), EndPoint: pdfNumbers(end.X-box.X, end.Y-box.Y), StartRadius: gradient.StartRadius * scale, EndRadius: gradient.EndRadius * scale, Extend: strconv.Itoa(extend)}
+		for _, stop := range gradient.Stops {
+			shading.Segment = append(shading.Segment, ShdSegment{Position: stop.Position, Color: ShdColor{Value: pdfNumbers(math.Round(stop.RGB[0]*255), math.Round(stop.RGB[1]*255), math.Round(stop.RGB[2]*255))}})
+		}
+		color.Value = ""
+		color.RadialShd = shading
+		return color
+	}
 	if paint.Axial == nil {
 		return color
 	}

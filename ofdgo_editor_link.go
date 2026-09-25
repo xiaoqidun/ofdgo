@@ -372,6 +372,12 @@ func annotationLinkXML(target AnnotationLink) ([]byte, error) {
 			if !finite(value.value) {
 				return nil, fmt.Errorf("destination coordinates must be finite")
 			}
+			omit := dest.Type == "XYZ" && (value.name == "Left" && dest.OmitLeft || value.name == "Top" && dest.OmitTop || value.name == "Zoom" && dest.OmitZoom)
+			omit = omit || dest.Type == "FitH" && value.name == "Top" && dest.OmitTop
+			omit = omit || dest.Type == "FitV" && value.name == "Left" && dest.OmitLeft
+			if omit {
+				continue
+			}
 			if dest.Type == "XYZ" && slices.Contains([]string{"Left", "Top", "Zoom"}, value.name) || dest.Type == "FitH" && value.name == "Top" || dest.Type == "FitV" && value.name == "Left" || dest.Type == "FitR" && value.name != "Zoom" {
 				attrs.add(value.name, ofdNumber(value.value))
 			}

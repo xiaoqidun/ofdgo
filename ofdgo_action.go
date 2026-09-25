@@ -39,13 +39,16 @@ type Goto struct {
 
 // Dest 文档内跳转目标
 type Dest struct {
-	Type   string  `xml:"Type,attr"`
-	PageID string  `xml:"PageID,attr"`
-	Left   float64 `xml:"Left"`
-	Right  float64 `xml:"Right"`
-	Top    float64 `xml:"Top"`
-	Bottom float64 `xml:"Bottom"`
-	Zoom   float64 `xml:"Zoom"`
+	Type     string  `xml:"Type,attr"`
+	PageID   string  `xml:"PageID,attr"`
+	Left     float64 `xml:"Left"`
+	Right    float64 `xml:"Right"`
+	Top      float64 `xml:"Top"`
+	Bottom   float64 `xml:"Bottom"`
+	Zoom     float64 `xml:"Zoom"`
+	OmitLeft bool    `xml:"-"`
+	OmitTop  bool    `xml:"-"`
+	OmitZoom bool    `xml:"-"`
 }
 
 // GotoBookmark 书签跳转目标
@@ -151,6 +154,17 @@ func (dest *Dest) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	}
 	dest.Type = attrValue(start, "Type")
 	dest.PageID = attrValue(start, "PageID")
+	dest.OmitLeft, dest.OmitTop, dest.OmitZoom = true, true, true
+	for _, attr := range start.Attr {
+		switch attr.Name.Local {
+		case "Left":
+			dest.OmitLeft = false
+		case "Top":
+			dest.OmitTop = false
+		case "Zoom":
+			dest.OmitZoom = false
+		}
+	}
 	dest.Left = actionFloatAttr(start, "Left")
 	dest.Right = actionFloatAttr(start, "Right")
 	dest.Top = actionFloatAttr(start, "Top")
@@ -161,18 +175,21 @@ func (dest *Dest) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	}
 	if value.Left != nil {
 		dest.Left = *value.Left
+		dest.OmitLeft = false
 	}
 	if value.Right != nil {
 		dest.Right = *value.Right
 	}
 	if value.Top != nil {
 		dest.Top = *value.Top
+		dest.OmitTop = false
 	}
 	if value.Bottom != nil {
 		dest.Bottom = *value.Bottom
 	}
 	if value.Zoom != nil {
 		dest.Zoom = *value.Zoom
+		dest.OmitZoom = false
 	}
 	return nil
 }

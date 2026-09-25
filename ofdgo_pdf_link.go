@@ -41,7 +41,7 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		if annotation.Subtype != "Link" {
 			return &pdfgo.UnsupportedError{Feature: "annotation " + string(annotation.Subtype)}
 		}
-		for _, key := range []pdfgo.Name{"AP", "AA", "BS", "QuadPoints", "OC"} {
+		for _, key := range []pdfgo.Name{"AP", "AA", "BS", "OC"} {
 			if dict[key] != nil {
 				return &pdfgo.UnsupportedError{Feature: fmt.Sprintf("link annotation field %q", key)}
 			}
@@ -127,6 +127,7 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			dest := &Dest{Type: string(destination.Mode), PageID: p.pageIDs[destination.Page]}
 			if destination.Mode == "XYZ" {
 				values := [3]float64{}
+				retained := [3]bool{}
 				for n, v := range destination.Parameters {
 					switch v := v.(type) {
 					case pdfgo.Integer:
@@ -134,13 +135,16 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 					case pdfgo.Real:
 						values[n] = float64(v)
 					case nil:
-						if n < 2 {
-							return &pdfgo.UnsupportedError{Feature: "retained destination coordinates"}
-						}
+						retained[n] = true
 					}
 				}
 				point := matrix.Apply(pdfgo.Point{X: values[0], Y: values[1]})
 				dest.Left, dest.Top, dest.Zoom = point.X, point.Y, values[2]
+				dest.OmitLeft, dest.OmitTop = retained[0], retained[1]
+				if targetPage.Rotation == 90 || targetPage.Rotation == 270 {
+					dest.OmitLeft, dest.OmitTop = retained[1], retained[0]
+				}
+				dest.OmitZoom = retained[2] || values[2] == 0
 			} else if destination.Mode != "Fit" {
 				return &pdfgo.UnsupportedError{Feature: "destination mode " + string(destination.Mode)}
 			}
@@ -154,9 +158,59 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		}
 		no := false
 		object.Fill, object.Stroke = &no, &no
+		action.Region, err = p.linkRegion(annotation, box)
+		if err != nil {
+			return err
+		}
 		object.Actions = []Action{action}
 		p.objects = append(p.objects, GraphicObject{Type: "PathObject", PathObject: object})
 		p.report.Links++
 	}
 	return nil
+}
+
+// linkRegion 将PDF链接四边形映射为OFD动作区域，越出注解矩形时使用矩形
+// 入参: annotation PDF链接注解, box OFD对象边界
+// 返回: *Region 点击区域, error 解析错误
+func (p *pdfImporter) linkRegion(annotation pdfgo.Annotation, box Box) (*Region, error) {
+	value, err := p.reader.Resolve(annotation.Dictionary["QuadPoints"])
+	if err != nil || value == nil {
+		return nil, err
+	}
+	array, ok := value.(pdfgo.Array)
+	if !ok || len(array) == 0 || len(array)%8 != 0 {
+		return nil, nil
+	}
+	region := &Region{Area: make([]RegionArea, 0, len(array)/8)}
+	for start := 0; start < len(array); start += 8 {
+		var points [4]pdfgo.Point
+		for index := range points {
+			coordinates := [2]float64{}
+			for axis := range coordinates {
+				resolved, err := p.reader.Resolve(array[start+index*2+axis])
+				if err != nil {
+					return nil, err
+				}
+				switch number := resolved.(type) {
+				case pdfgo.Integer:
+					coordinates[axis] = float64(number)
+				case pdfgo.Real:
+					coordinates[axis] = float64(number)
+				default:
+					return nil, nil
+				}
+			}
+			x, y := coordinates[0], coordinates[1]
+			if !finite(x) || !finite(y) || x < annotation.Rect.XMin || x > annotation.Rect.XMax || y < annotation.Rect.YMin || y > annotation.Rect.YMax {
+				return nil, nil
+			}
+			points[index] = p.matrix.Apply(pdfgo.Point{X: x, Y: y})
+		}
+		area := RegionArea{Start: pdfNumbers(points[0].X-box.X, points[0].Y-box.Y)}
+		for _, point := range points[1:] {
+			area.Command = append(area.Command, RegionCommand{Type: "Line", Point1: pdfNumbers(point.X-box.X, point.Y-box.Y)})
+		}
+		region.Area = append(region.Area, area)
+	}
+	return region, nil
 }

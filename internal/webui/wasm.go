@@ -529,7 +529,8 @@ func renderPage(args []js.Value) (any, error) {
 		}
 		if dest := link.Dest; dest != nil {
 			item["dest"] = map[string]any{"type": dest.Type, "pageID": dest.PageID, "left": dest.Left, "top": dest.Top,
-				"right": dest.Right, "bottom": dest.Bottom, "zoom": dest.Zoom}
+				"right": dest.Right, "bottom": dest.Bottom, "zoom": dest.Zoom,
+				"omitLeft": dest.OmitLeft, "omitTop": dest.OmitTop, "omitZoom": dest.OmitZoom}
 		}
 		links[i] = item
 	}

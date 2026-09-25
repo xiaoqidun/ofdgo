@@ -39,7 +39,7 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	if err := p.flushPath(); err != nil {
 		return err
 	}
-	if mark.Image.ImageMask && mark.Style.Fill.Axial != nil {
+	if mark.Image.ImageMask && (mark.Style.Fill.Axial != nil || mark.Style.Fill.Radial != nil) {
 		return &pdfgo.UnsupportedError{Feature: "gradient stencil image"}
 	}
 	var err error
@@ -147,9 +147,6 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	if err := p.flushPath(); err != nil {
 		return err
 	}
-	if mark.Style.Fill.Axial != nil || mark.Style.Stroke.Axial != nil {
-		return &pdfgo.UnsupportedError{Feature: "gradient text paint"}
-	}
 	var err error
 	mark.Style, err = p.maskStyle(mark.Style)
 	if err != nil {
@@ -167,7 +164,8 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	if id == "" {
 		var err error
 		if embedded {
-			program, err := pdfFontProgram(font)
+			var program []byte
+			program, err = pdfFontProgram(font)
 			if err != nil {
 				return err
 			}
@@ -225,7 +223,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			}
 		}
 		if embedded && gid >= metrics.NumGlyphs() {
-			return fmt.Errorf("PDF glyph index outside embedded font")
+			return fmt.Errorf("PDF glyph index %d outside embedded font %s (%d glyphs)", gid, font.Name, metrics.NumGlyphs())
 		}
 		if !embedded && glyph.Text == "" {
 			return &pdfgo.UnsupportedError{Feature: "unmapped external font character"}
@@ -263,8 +261,6 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		}
 		margin := mark.Style.LineWidth * unit / 2 * math.Max(1, mark.Style.MiterLimit)
 		box = Box{box.X - margin, box.Y - margin, box.W + 2*margin, box.H + 2*margin}
-		color := StrokeColor(*p.color(mark.Style.Stroke))
-		object.StrokeColor = &color
 		object.LineWidth = mark.Style.LineWidth * unit / scale
 		object.LineWidthSet = object.LineWidth == 0
 		object.Join = []string{"Miter", "Round", "Bevel"}[mark.Style.Join]
@@ -274,6 +270,10 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		}
 	}
 	object.Boundary = pdfBoundary(box)
+	if stroke {
+		color := StrokeColor(*p.paintColor(mark.Style.Stroke, box))
+		object.StrokeColor = &color
+	}
 	if box.X >= p.pageWidth || box.Y >= p.pageHeight || box.X+box.W <= 0 || box.Y+box.H <= 0 {
 		visible = false
 	}
@@ -281,7 +281,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	object.Fill = &fill
 	object.Stroke = &stroke
 	object.Visible = &visible
-	object.FillColor = p.color(mark.Style.Fill)
+	object.FillColor = p.paintColor(mark.Style.Fill, box)
 	object.Clips = p.clips(mark.Style.Clips, box)
 	p.objects = append(p.objects, GraphicObject{Type: "TextObject", TextObject: object})
 	p.report.TextObjects++
@@ -293,7 +293,8 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 // 返回: []byte 封装后的字体数据, error 错误信息
 func pdfFontProgram(source *pdfgo.Font) ([]byte, error) {
 	program := source.Program
-	if source.ProgramType == "Type1C" || source.ProgramType == "CIDFontType0C" {
+	bareCFF := len(program) >= 4 && program[0] == 1 && program[1] == 0 && program[2] >= 4 && program[3] >= 1 && program[3] <= 4
+	if source.ProgramType == "Type1C" || source.ProgramType == "CIDFontType0C" || bareCFF {
 		var err error
 		program, _, err = wrapCFFToOTF(source.Program)
 		if err != nil {
@@ -377,7 +378,7 @@ func pdfFontProgram(source *pdfgo.Font) ([]byte, error) {
 		tables["OS/2"] = buildOS2TableWithMetrics(int16(binary.BigEndian.Uint16(hhea[4:6])), int16(binary.BigEndian.Uint16(hhea[6:8])))
 		changed = true
 	}
-	if !changed {
+	if !changed && len(program)%4 == 0 {
 		return program, nil
 	}
 	return serializeOTF(tables)

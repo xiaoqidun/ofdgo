@@ -961,13 +961,23 @@ func (x *ofdXML) actions(actions []Action) {
 				attrs := ofdAttrs{{Name: xml.Name{Local: "Type"}, Value: dest.Type}, {Name: xml.Name{Local: "PageID"}, Value: dest.PageID}}
 				switch dest.Type {
 				case "XYZ":
-					attrs.add("Left", ofdNumber(dest.Left))
-					attrs.add("Top", ofdNumber(dest.Top))
-					attrs.add("Zoom", ofdNumber(dest.Zoom))
+					if !dest.OmitLeft {
+						attrs.add("Left", ofdNumber(dest.Left))
+					}
+					if !dest.OmitTop {
+						attrs.add("Top", ofdNumber(dest.Top))
+					}
+					if !dest.OmitZoom {
+						attrs.add("Zoom", ofdNumber(dest.Zoom))
+					}
 				case "FitH":
-					attrs.add("Top", ofdNumber(dest.Top))
+					if !dest.OmitTop {
+						attrs.add("Top", ofdNumber(dest.Top))
+					}
 				case "FitV":
-					attrs.add("Left", ofdNumber(dest.Left))
+					if !dest.OmitLeft {
+						attrs.add("Left", ofdNumber(dest.Left))
+					}
 				case "FitR":
 					attrs.add("Left", ofdNumber(dest.Left))
 					attrs.add("Right", ofdNumber(dest.Right))

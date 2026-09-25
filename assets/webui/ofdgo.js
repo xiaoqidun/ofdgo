@@ -4996,6 +4996,13 @@ function destinationPoint(page, x, y) {
 	return { x, y };
 }
 
+function sourcePoint(page, x, y) {
+	if (state.rotation === 90) return { x: y, y: page.height - x };
+	if (state.rotation === 180) return { x: page.width - x, y: page.height - y };
+	if (state.rotation === 270) return { x: page.width - y, y: x };
+	return { x, y };
+}
+
 async function navigateDestination(dest) {
 	if (document.body.hasAttribute("aria-busy")) return;
 	const index = state.doc.pages.findIndex(page => page.id === dest.pageID);
@@ -5008,11 +5015,22 @@ async function navigateDestination(dest) {
 		return;
 	}
 	const seq = state.openSeq, scale = state.scale;
+	let retained = null;
+	if (dest.omitLeft || dest.omitTop) {
+		const current = state.doc.pages[state.pageIndex], shell = pageShell(state.pageIndex)?.getBoundingClientRect();
+		if (current && shell) {
+			const viewer = el.viewerPanel.getBoundingClientRect();
+			retained = sourcePoint(current,
+				(viewer.left + pageSpace() - shell.left) / (MM_TO_PX * scale),
+				(viewer.top + pageBlockSpace() - shell.top) / (MM_TO_PX * scale));
+		}
+	}
 	await renderPage(index, { fit: false, scroll: false });
 	if (seq !== state.openSeq || state.pageIndex !== index) return;
 	const page = state.doc.pages[index], size = pageViewSize(page), space = pageSpace();
 	const width = el.viewerPanel.clientWidth - space * 2, height = el.viewerPanel.clientHeight - space * 2;
-	let left = dest.left, top = dest.top;
+	let left = dest.omitLeft && retained ? retained.x : dest.left;
+	let top = dest.omitTop && retained ? retained.y : dest.top;
 	if (dest.type === "Fit") {
 		fitHeight(false);
 		scrollToPage(index);
@@ -5028,7 +5046,7 @@ async function navigateDestination(dest) {
 		if (dest.right <= dest.left || dest.bottom <= dest.top) return;
 		setScale(Math.min(width / Math.abs(b.x - a.x), height / Math.abs(b.y - a.y)) / MM_TO_PX, false);
 	} else {
-		setScale(dest.zoom > 0 ? dest.zoom : scale, false);
+		setScale(!dest.omitZoom && dest.zoom > 0 ? dest.zoom : scale, false);
 	}
 	const point = destinationPoint(page, left, top);
 	if (dest.type === "FitR") {

@@ -72,7 +72,7 @@ func (p *pdfImporter) group(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error
 			if stroke {
 				color, overprint = path.Style.Stroke, path.Style.StrokeOverprint
 			}
-			if color.Alpha != 1 || color.Axial != nil || overprint && pdfOverprintNeedsSeparation(color) {
+			if color.Alpha != 1 || color.Axial != nil || color.Radial != nil || overprint && pdfOverprintNeedsSeparation(color) {
 				return &pdfgo.UnsupportedError{Feature: "transparent or overprinted group content"}
 			}
 			if paint == nil {
@@ -230,7 +230,7 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 	}
 	visitor.Path = func(mark pdfgo.PathMark) error {
 		paint := mark.Style.Fill
-		if !mark.Fill || mark.Stroke || paint.Alpha != 1 || paint.CMYK != nil || paint.Axial != nil || paint.RGB[0] != paint.RGB[1] || paint.RGB[1] != paint.RGB[2] || mark.Style.SoftMask != nil {
+		if !mark.Fill || mark.Stroke || paint.Alpha != 1 || paint.CMYK != nil || paint.Axial != nil || paint.Radial != nil || paint.RGB[0] != paint.RGB[1] || paint.RGB[1] != paint.RGB[2] || mark.Style.SoftMask != nil {
 			return &pdfgo.UnsupportedError{Feature: "nonbinary mask graphic"}
 		}
 		visible, err := opacity(paint.RGB[0])
