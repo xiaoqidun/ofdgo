@@ -22,7 +22,7 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// annotations 将链接和签名外观按页面顺序转换为OFD对象
+// annotations 将链接、印章和签名外观按页面顺序转换为OFD对象
 // 入参: ctx 取消上下文, page PDF页面, strict 严格检查开关
 // 返回: error 错误信息
 func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict bool) error {
@@ -38,10 +38,29 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			}
 			continue
 		}
+		if annotation.Subtype == "Stamp" {
+			if err := p.stampAnnotation(ctx, page, annotation); err != nil {
+				return err
+			}
+			continue
+		}
 		if annotation.Subtype != "Link" {
 			return &pdfgo.UnsupportedError{Feature: "annotation " + string(annotation.Subtype)}
 		}
-		for _, key := range []pdfgo.Name{"AP", "AA", "OC"} {
+		if dict["AP"] != nil {
+			visitor := pdfgo.Visitor{
+				Path:  func(pdfgo.PathMark) error { return &pdfgo.UnsupportedError{Feature: "visible link appearance"} },
+				Text:  func(pdfgo.TextMark) error { return &pdfgo.UnsupportedError{Feature: "visible link appearance"} },
+				Image: func(pdfgo.ImageMark) error { return &pdfgo.UnsupportedError{Feature: "visible link appearance"} },
+			}
+			visitor.Group = func(_ pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
+				return walk(visitor)
+			}
+			if err := p.reader.WalkAnnotationAppearance(ctx, page, annotation, visitor); err != nil {
+				return err
+			}
+		}
+		for _, key := range []pdfgo.Name{"AA", "OC"} {
 			if dict[key] != nil {
 				return &pdfgo.UnsupportedError{Feature: fmt.Sprintf("link annotation field %q", key)}
 			}
@@ -139,6 +158,10 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			}
 			targetPage := p.pages[destination.Page]
 			if targetPage == nil {
+				if !strict {
+					p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF link targets a page outside the document page tree; link omitted"})
+					continue
+				}
 				return fmt.Errorf("PDF destination page missing")
 			}
 			matrix, _, _ := pdfPageMatrix(targetPage)

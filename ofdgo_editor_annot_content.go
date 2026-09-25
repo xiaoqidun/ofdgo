@@ -27,7 +27,7 @@ import (
 
 // AddAnnotation 新增标准注解并分配独立标识，外观中的基本对象使用注解局部毫米坐标
 // Appearance.Objects为空时使用分类对象集合，输入对象及资源不被修改
-// 入参: index 页面索引, annotation 注解内容，ID和LastModDate由编辑器生成
+// 入参: index 页面索引, annotation 注解内容，ID由编辑器生成，空LastModDate使用当前日期
 // 返回: string 注解标识, error 错误信息
 func (e *Editor) AddAnnotation(index int, annotation Annotation) (string, error) {
 	var id string
@@ -76,8 +76,14 @@ func (e *Editor) AddAnnotation(index int, annotation Annotation) (string, error)
 		if err != nil {
 			return err
 		}
+		date := annotation.LastModDate
+		if date == "" {
+			date = time.Now().Format("2006-01-02")
+		} else if _, err := time.Parse("2006-01-02", date); err != nil {
+			return fmt.Errorf("invalid annotation date %q: %w", date, err)
+		}
 		attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: id}, {Name: xml.Name{Local: "Type"}, Value: annotation.Type},
-			{Name: xml.Name{Local: "Creator"}, Value: annotation.Creator}, {Name: xml.Name{Local: "LastModDate"}, Value: time.Now().Format("2006-01-02")}}
+			{Name: xml.Name{Local: "Creator"}, Value: annotation.Creator}, {Name: xml.Name{Local: "LastModDate"}, Value: date}}
 		attrs.add("Subtype", annotation.Subtype)
 		attrs.flag("Visible", annotation.Visible)
 		if annotation.NoZoom {
@@ -367,7 +373,9 @@ func (e *Editor) commitAnnotationParts(base *editorSource, parts map[string][]by
 			resource := &e.resources[i]
 			if resource.font != nil {
 				resource.font = cloneEditorData(resource.font)
-				resource.font.FontFile = "/" + resource.name
+				if resource.name != "" {
+					resource.font.FontFile = "/" + resource.name
+				}
 			}
 			if resource.image != nil {
 				resource.image = cloneEditorData(resource.image)

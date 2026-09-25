@@ -325,6 +325,34 @@ func collectObjectReferences(object GraphicObject, used map[string]bool) {
 // 入参: value 颜色
 // 返回: error 错误信息
 func (e *Editor) editorColor(value *FillColor) error {
+	if value != nil && value.Pattern != nil {
+		pattern := value.Pattern
+		if value.unsupported || value.AxialShd != nil || value.RadialShd != nil || !finite(pattern.Width) || !finite(pattern.Height) || pattern.Width <= 0 || pattern.Height <= 0 || !finite(pattern.XStep) || !finite(pattern.YStep) || pattern.XStep < pattern.Width || pattern.YStep < pattern.Height {
+			return fmt.Errorf("invalid pattern paint")
+		}
+		if pattern.RelativeTo != "" && pattern.RelativeTo != "Page" && pattern.RelativeTo != "Object" {
+			return fmt.Errorf("invalid pattern reference")
+		}
+		if pattern.CTM != "" {
+			if _, err := creationNumbers(pattern.CTM, 6); err != nil {
+				return err
+			}
+		}
+		base := *value
+		base.Pattern = nil
+		if _, err := e.Color(&base); err != nil {
+			return err
+		}
+		for _, object := range pattern.CellContent.Objects {
+			if object.Type == "PathObject" && (object.PathObject.FillColor != nil && object.PathObject.FillColor.Pattern != nil || object.PathObject.StrokeColor != nil && object.PathObject.StrokeColor.Pattern != nil) || object.Type == "TextObject" && (object.TextObject.FillColor != nil && object.TextObject.FillColor.Pattern != nil || object.TextObject.StrokeColor != nil && object.TextObject.StrokeColor.Pattern != nil) {
+				return fmt.Errorf("nested pattern paint is not supported")
+			}
+			if _, err := e.prepareObject("", object); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	if value == nil || value.AxialShd == nil && value.RadialShd == nil {
 		_, err := e.Color(value)
 		return err

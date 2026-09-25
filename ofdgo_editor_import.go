@@ -397,7 +397,9 @@ func (e *Editor) bindImportResources() {
 		resource := &e.resources[i]
 		if resource.font != nil {
 			resource.font = cloneEditorData(resource.font)
-			resource.font.FontFile = "/" + resource.name
+			if resource.name != "" {
+				resource.font.FontFile = "/" + resource.name
+			}
 		}
 		if resource.image != nil {
 			resource.image = cloneEditorData(resource.image)

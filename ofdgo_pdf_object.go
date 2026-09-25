@@ -74,11 +74,14 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 			}
 		}
 		if source.ImageMask {
+			fill := mark.Style.Fill.RGB
 			if mark.Style.Fill.CMYK != nil {
-				return &pdfgo.UnsupportedError{Feature: "CMYK stencil image"}
+				if *mark.Style.Fill.CMYK != [4]float64{} {
+					return &pdfgo.UnsupportedError{Feature: "CMYK stencil image"}
+				}
+				fill = [3]float64{1, 1, 1}
 			}
 			stencil := image.NewNRGBA64(image.Rect(0, 0, source.Width, source.Height))
-			fill := mark.Style.Fill.RGB
 			for y := 0; y < source.Height; y++ {
 				for x := 0; x < source.Width; x++ {
 					gray, _, _, _ := decoded.At(x, y).RGBA()
@@ -167,14 +170,14 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			var program []byte
 			program, err = pdfFontProgram(font)
 			if err != nil {
-				return err
+				return fmt.Errorf("PDF font %s program: %w", font.Name, err)
 			}
 			id, err = p.editor.AddFont(FontFile{Name: font.Name + ".ttf", Data: program}, 0)
 		} else {
 			id, err = p.editor.AddExternalFont(font.Name)
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("PDF font %s resource: %w", font.Name, err)
 		}
 		p.fontIDs[font] = id
 	}
@@ -188,7 +191,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			}
 			metrics, err = p.editor.backends.Fonts.OpenFont(p.editor.fonts[id].Data)
 			if err != nil {
-				return err
+				return fmt.Errorf("PDF font %s metrics: %w", font.Name, err)
 			}
 			p.fontMetrics[id] = metrics
 		}
@@ -271,7 +274,11 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	}
 	object.Boundary = pdfBoundary(box)
 	if stroke {
-		color := StrokeColor(*p.paintColor(mark.Style.Stroke, box))
+		strokePaint, err := p.paintColor(mark.Style.Stroke, box)
+		if err != nil {
+			return err
+		}
+		color := StrokeColor(*strokePaint)
 		object.StrokeColor = &color
 	}
 	if box.X >= p.pageWidth || box.Y >= p.pageHeight || box.X+box.W <= 0 || box.Y+box.H <= 0 {
@@ -281,7 +288,10 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	object.Fill = &fill
 	object.Stroke = &stroke
 	object.Visible = &visible
-	object.FillColor = p.paintColor(mark.Style.Fill, box)
+	object.FillColor, err = p.paintColor(mark.Style.Fill, box)
+	if err != nil {
+		return err
+	}
 	object.Clips = p.clips(mark.Style.Clips, box)
 	p.objects = append(p.objects, GraphicObject{Type: "TextObject", TextObject: object})
 	p.report.TextObjects++
@@ -377,6 +387,12 @@ func pdfFontProgram(source *pdfgo.Font) ([]byte, error) {
 		hhea := tables["hhea"]
 		tables["OS/2"] = buildOS2TableWithMetrics(int16(binary.BigEndian.Uint16(hhea[4:6])), int16(binary.BigEndian.Uint16(hhea[6:8])))
 		changed = true
+	}
+	for _, tag := range []string{"cvt ", "fpgm", "prep"} {
+		if data, ok := tables[tag]; ok && len(data) == 0 {
+			delete(tables, tag)
+			changed = true
+		}
 	}
 	if !changed && len(program)%4 == 0 {
 		return program, nil

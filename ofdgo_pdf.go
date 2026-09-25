@@ -274,15 +274,21 @@ func (p *pdfImporter) color(paint pdfgo.Paint) *FillColor {
 // 入参: path PDF路径, origin 对象边界
 // 返回: string OFD路径数据
 func (p *pdfImporter) pathData(path pdfgo.Path, origin Box) string {
-	var parts []string
-	for _, segment := range path.Segments {
-		parts = append(parts, segment.Operator)
+	data := make([]byte, 0, len(path.Segments)*48)
+	for index, segment := range path.Segments {
+		if index != 0 {
+			data = append(data, ' ')
+		}
+		data = append(data, segment.Operator...)
 		for _, point := range segment.Points {
 			point = p.matrix.Apply(point)
-			parts = append(parts, pdfNumbers(point.X-origin.X, point.Y-origin.Y))
+			data = append(data, ' ')
+			data = strconv.AppendFloat(data, point.X-origin.X, 'g', -1, 64)
+			data = append(data, ' ')
+			data = strconv.AppendFloat(data, point.Y-origin.Y, 'g', -1, 64)
 		}
 	}
-	return strings.Join(parts, " ")
+	return string(data)
 }
 
 // clips 保持裁剪路径的交集，不随对象CTM重复变换
@@ -378,8 +384,16 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 		margin := mark.Style.LineWidth * scale / 2 * math.Max(1, mark.Style.MiterLimit)
 		box = Box{box.X - margin, box.Y - margin, box.W + 2*margin, box.H + 2*margin}
 	}
-	strokeColor := StrokeColor(*p.paintColor(mark.Style.Stroke, box))
-	object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: p.pathData(mark.Path, box), Fill: &mark.Fill, Stroke: &mark.Stroke, FillColor: p.paintColor(mark.Style.Fill, box), StrokeColor: &strokeColor, LineWidth: mark.Style.LineWidth * scale, Cap: []string{"Butt", "Round", "Square"}[mark.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[mark.Style.Join], MiterLimit: mark.Style.MiterLimit, Clips: p.clips(mark.Style.Clips, box)}
+	fillColor, err := p.paintColor(mark.Style.Fill, box)
+	if err != nil {
+		return err
+	}
+	strokePaint, err := p.paintColor(mark.Style.Stroke, box)
+	if err != nil {
+		return err
+	}
+	strokeColor := StrokeColor(*strokePaint)
+	object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: p.pathData(mark.Path, box), Fill: &mark.Fill, Stroke: &mark.Stroke, FillColor: fillColor, StrokeColor: &strokeColor, LineWidth: mark.Style.LineWidth * scale, Cap: []string{"Butt", "Round", "Square"}[mark.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[mark.Style.Join], MiterLimit: mark.Style.MiterLimit, Clips: p.clips(mark.Style.Clips, box)}
 	object.LineWidthSet = object.LineWidth == 0
 	if mark.Path.EvenOdd {
 		object.Rule = "Even-Odd"
@@ -400,9 +414,17 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 
 // paintColor 将页面渐变转换为对象局部坐标
 // 入参: paint PDF画刷, box 对象边界
-// 返回: *FillColor OFD颜色或渐变
-func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) *FillColor {
+// 返回: *FillColor OFD颜色或渐变, error 图案转换错误
+func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error) {
 	color := p.color(paint)
+	if paint.Tiling != nil {
+		pattern, err := p.tilingPattern(paint.Tiling, paint)
+		if err != nil {
+			return nil, err
+		}
+		color.Pattern = pattern
+		return color, nil
+	}
 	if paint.Radial != nil {
 		gradient := paint.Radial
 		start, end := p.matrix.Apply(gradient.Start), p.matrix.Apply(gradient.End)
@@ -420,10 +442,10 @@ func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) *FillColor {
 		}
 		color.Value = ""
 		color.RadialShd = shading
-		return color
+		return color, nil
 	}
 	if paint.Axial == nil {
-		return color
+		return color, nil
 	}
 	gradient := paint.Axial
 	start, end := p.matrix.Apply(gradient.Start), p.matrix.Apply(gradient.End)
@@ -440,7 +462,38 @@ func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) *FillColor {
 	}
 	color.Value = ""
 	color.AxialShd = shading
-	return color
+	return color, nil
+}
+
+// tilingPattern 保留PDF图案单元与页面坐标之间的仿射关系
+// 入参: source 平铺图案, base 无色图案基色
+// 返回: *Pattern OFD图案, error 转换错误
+func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Paint) (*Pattern, error) {
+	const unit = 25.4 / 72
+	box := source.BBox
+	width, height := box.XMax-box.XMin, box.YMax-box.YMin
+	if width <= 0 || height <= 0 || source.XStep < width || source.YStep < height {
+		return nil, &pdfgo.UnsupportedError{Feature: "overlapping or empty tiling pattern cell"}
+	}
+	localToPDF := pdfgo.Matrix{1 / unit, 0, 0, -1 / unit, box.XMin, box.YMax}
+	m := p.matrix.Mul(source.Matrix).Mul(localToPDF)
+	pattern := &Pattern{Width: width * unit, Height: height * unit, XStep: source.XStep * unit, YStep: source.YStep * unit, RelativeTo: "Page", CTM: pdfNumbers(m[:]...)}
+	cell := *p
+	cell.matrix = pdfgo.Matrix{unit, 0, 0, -unit, -box.XMin * unit, box.YMax * unit}
+	cell.pageWidth, cell.pageHeight = pattern.Width, pattern.Height
+	cell.objects, cell.pendingPath = nil, nil
+	visitor := pdfgo.Visitor{Path: cell.path, Text: cell.text, Image: cell.image}
+	visitor.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
+		return cell.group(mark, walk, visitor)
+	}
+	if err := source.Walk(p.ctx, base, visitor); err != nil {
+		return nil, err
+	}
+	if err := cell.flushPath(); err != nil {
+		return nil, err
+	}
+	pattern.CellContent.Objects = cell.objects
+	return pattern, nil
 }
 
 // pdfOpaqueBlack 判断不受底层分色影响的全黑设备色
