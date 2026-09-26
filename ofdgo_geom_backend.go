@@ -14,7 +14,10 @@
 
 package ofdgo
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // GeometryOperation 指定路径填充区域的布尔运算
 type GeometryOperation uint8
@@ -126,4 +129,27 @@ func geometryRectangle(box Box) GeometryPath {
 		{Verb: GeometryLine, End: Point{X: box.X, Y: box.Y + box.H}},
 		{Verb: GeometryClose, End: Point{X: box.X, Y: box.Y}},
 	}
+}
+
+// geometryRectangleBounds 识别单个轴对齐矩形，不用包围盒代替实际路径
+// 入参: path 填充路径
+// 返回: Box 矩形范围, bool 是否为非退化矩形
+func geometryRectangleBounds(path GeometryPath) (Box, bool) {
+	if len(path) > 0 && path[len(path)-1].Verb == GeometryClose {
+		path = path[:len(path)-1]
+	}
+	if len(path) == 5 && path[4].Verb == GeometryLine && path[4].End == path[0].End {
+		path = path[:4]
+	}
+	if len(path) != 4 || path[0].Verb != GeometryMove || path[1].Verb != GeometryLine || path[2].Verb != GeometryLine || path[3].Verb != GeometryLine {
+		return Box{}, false
+	}
+	a, b, c, d := path[0].End, path[1].End, path[2].End, path[3].End
+	if a.X == c.X || a.Y == c.Y {
+		return Box{}, false
+	}
+	if !(a.X == b.X && b.Y == c.Y && c.X == d.X && d.Y == a.Y || a.Y == b.Y && b.X == c.X && c.Y == d.Y && d.X == a.X) {
+		return Box{}, false
+	}
+	return Box{X: min(a.X, c.X), Y: min(a.Y, c.Y), W: math.Abs(c.X - a.X), H: math.Abs(c.Y - a.Y)}, true
 }
