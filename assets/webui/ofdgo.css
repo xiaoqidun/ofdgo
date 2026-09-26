@@ -691,7 +691,7 @@ button:not(:disabled):hover {
 }
 
 .convert-dialog {
-	--convert-format-width: 64px;
+	--convert-control-width: 64px;
 	width: 720px;
 }
 
@@ -704,13 +704,13 @@ button:not(:disabled):hover {
 .convert-options {
 	flex: none;
 	display: grid;
-	grid-template-columns: calc(2em + 8px + var(--convert-format-width)) 132px calc(2em + 8px + var(--convert-format-width));
+	grid-template-columns: calc(2em + 8px + var(--convert-control-width)) 132px calc(2em + 8px + var(--convert-control-width));
 	gap: 12px;
 	margin: 0 auto;
 }
 
 .convert-options:has(#convertDPIRow[hidden]) {
-	grid-template-columns: repeat(2, calc(2em + 8px + var(--convert-format-width)));
+	grid-template-columns: repeat(2, calc(2em + 8px + var(--convert-control-width)));
 }
 
 .convert-options .form-row {
@@ -743,7 +743,7 @@ button:not(:disabled):hover {
 .convert-table td {
 	padding: 8px;
 	border-bottom: 1px solid var(--line);
-	text-align: left;
+	text-align: center;
 	vertical-align: middle;
 }
 
@@ -755,35 +755,64 @@ button:not(:disabled):hover {
 	font-weight: 500;
 }
 
-.convert-table th:nth-child(2) {
-	width: 112px;
-}
-
+.convert-table th:nth-child(2),
 .convert-table th:nth-child(3),
 .convert-table th:nth-child(4) {
-	width: calc(var(--convert-format-width) + 16px);
+	width: calc(var(--convert-control-width) + 16px);
+}
+
+.convert-table th:last-child {
+	width: 48px;
 }
 
 .convert-table select,
 .convert-table input {
-	width: 100%;
+	width: var(--convert-control-width);
 	min-width: 0;
 	height: var(--control-height);
 	padding: 0 6px;
+	vertical-align: middle;
+	text-align: center;
+	font: inherit;
 	border: 1px solid var(--line);
 	border-radius: 0;
 	background: #fff;
 	color: inherit;
 }
 
+.convert-table .icon-button {
+	vertical-align: middle;
+}
+
 .convert-table input {
 	font-variant-numeric: tabular-nums;
 }
 
-.convert-table th:last-child,
-.convert-table td:last-child {
-	width: 48px;
-	text-align: center;
+.convert-format {
+	position: relative;
+	display: inline-flex;
+	width: var(--convert-control-width);
+	vertical-align: middle;
+}
+
+.convert-format select {
+	appearance: none;
+	padding: 0 12px;
+}
+
+.convert-format::after {
+	position: absolute;
+	right: 6px;
+	top: calc(50% - 2px);
+	border: 3px solid transparent;
+	border-bottom: 0;
+	border-top-color: currentColor;
+	pointer-events: none;
+	content: "";
+}
+
+.convert-format:has(select:disabled)::after {
+	opacity: 0.48;
 }
 
 .convert-table tbody tr:last-child td {
@@ -804,7 +833,6 @@ button:not(:disabled):hover {
 .convert-table .convert-details > td {
 	width: auto;
 	padding-top: 0;
-	text-align: left;
 }
 
 .convert-table .convert-details details {
@@ -889,7 +917,7 @@ button:not(:disabled):hover {
 
 @media (max-width: 620px) {
 	.convert-options {
-		grid-template-columns: calc(2em + 8px + var(--convert-format-width)) 132px;
+		grid-template-columns: calc(2em + 8px + var(--convert-control-width)) 132px;
 	}
 	.convert-table table,
 	.convert-table tbody { display: block; }
@@ -905,18 +933,18 @@ button:not(:disabled):hover {
 	.convert-table tr:last-child { border-bottom: 0; }
 	.convert-table tr:has(+ .convert-details) { padding-bottom: 0; border-bottom: 0; }
 	.convert-table td { min-width: 0; padding: 0; border: 0; }
-	.convert-table td:first-child { flex: 0 0 calc(100% - var(--convert-format-width) - var(--control-height) - 16px); }
-	.convert-table td:nth-child(4) { order: 1; flex: 0 0 var(--convert-format-width); text-align: right; }
+	.convert-table td:first-child { flex: 0 0 calc(100% - var(--convert-control-width) - var(--control-height) - 16px); }
+	.convert-table td:nth-child(4) { order: 1; flex: 0 0 var(--convert-control-width); }
 	.convert-table td:last-child { order: 2; flex: 0 0 var(--control-height); }
 	.convert-table td[data-label] {
 		order: 3;
+		flex: 1 1 0;
 		display: grid;
-		grid-template-columns: 2em minmax(0, 1fr);
+		grid-template-columns: 2em var(--convert-control-width);
 		align-items: center;
+		justify-content: center;
 		gap: 8px;
 	}
-	.convert-table td:nth-child(2) { flex: 1 1 0; }
-	.convert-table td:nth-child(3) { flex: 0 0 calc(2em + 8px + var(--convert-format-width)); }
 	.convert-table td[data-label]::before { content: attr(data-label); color: var(--text-muted); }
 	.convert-table .convert-details > td { flex: 0 0 100%; }
 }

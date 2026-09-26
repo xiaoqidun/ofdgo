@@ -4461,13 +4461,16 @@ function renderBatchList() {
 		pagesCell.append(pages);
 		const formatCell = row.insertCell();
 		formatCell.dataset.label = "格式";
+		const formatControl = document.createElement("span");
+		formatControl.className = "convert-format";
 		const format = document.createElement("select");
 		format.setAttribute("aria-label", `${item.file.name}的输出格式`);
 		format.append(new Option("默认", ""), ...batch.formats.map(value => new Option(value.label, value.value)));
 		format.value = item.format;
 		format.disabled = batch.running;
 		format.addEventListener("change", () => { item.format = format.value; reset(); });
-		formatCell.append(format);
+		formatControl.append(format);
+		formatCell.append(formatControl);
 		item.cell = row.insertCell();
 		item.cell.textContent = item.text;
 		item.cell.dataset.status = item.status;
