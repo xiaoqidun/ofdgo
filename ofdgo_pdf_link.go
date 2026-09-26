@@ -22,7 +22,7 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// annotations 将链接、印章和签名外观按页面顺序转换为OFD对象
+// annotations 将链接、印章和表单外观按页面顺序转换为OFD对象
 // 入参: ctx 取消上下文, page PDF页面, strict 严格检查开关
 // 返回: error 错误信息
 func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict bool) error {
@@ -33,7 +33,17 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 	for _, annotation := range annotations {
 		dict := annotation.Dictionary
 		if annotation.Subtype == "Widget" {
-			if err := p.signatureWidget(ctx, page, annotation); err != nil {
+			field, err := p.reader.ReadField(annotation)
+			if err != nil {
+				return err
+			}
+			annotation.Dictionary = field
+			if field["FT"] == pdfgo.Name("Sig") && field["V"] != nil {
+				err = p.signatureWidget(ctx, page, annotation)
+			} else {
+				err = p.formWidget(ctx, page, annotation, strict)
+			}
+			if err != nil {
 				return err
 			}
 			continue

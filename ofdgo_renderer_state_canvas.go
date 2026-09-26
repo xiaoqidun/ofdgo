@@ -26,6 +26,7 @@ type canvasBackendState struct {
 	fontMap            map[string]*canvas.FontFamily
 	svgFontCache       map[*canvas.Font]SVGFont
 	textGlyphPathCache map[textGlyphPathCacheKey]textGlyphPathCacheValue
+	fontOutlines       map[*canvas.Font]*sfntOutliner
 }
 
 // canvasState 获取当前渲染器的Canvas私有缓存，按需创建且不向其他后端暴露
@@ -48,4 +49,5 @@ func (s *canvasBackendState) resetFonts() {
 	s.fontMap = make(map[string]*canvas.FontFamily)
 	s.svgFontCache = make(map[*canvas.Font]SVGFont)
 	s.textGlyphPathCache = make(map[textGlyphPathCacheKey]textGlyphPathCacheValue)
+	s.fontOutlines = make(map[*canvas.Font]*sfntOutliner)
 }

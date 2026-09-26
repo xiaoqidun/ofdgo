@@ -17,7 +17,6 @@ package ofdgo
 import (
 	"github.com/tdewolff/canvas"
 	canvastext "github.com/tdewolff/canvas/text"
-	"github.com/tdewolff/font"
 )
 
 // textGlyphPathCacheKey 字形路径缓存键
@@ -51,15 +50,29 @@ func textGlyphWidth(face *canvas.FontFace, glyph textGlyph) float64 {
 }
 
 // textGlyphPath 获取绘制字形路径
-// 入参: face 字体, glyph 绘制字形
-// 返回: *canvas.Path 字形路径, float64 字形宽度
-func textGlyphPath(face *canvas.FontFace, glyph textGlyph) (*canvas.Path, float64) {
-	if glyph.GlyphID < 0 || glyph.GlyphID > 0xFFFF {
-		return face.ToPath(glyph.Text)
-	}
+// 入参: face 字体, glyph 绘制字形, outlines 轮廓解析器
+// 返回: *canvas.Path 字形路径, float64 字形宽度, error 字形解析错误
+func textGlyphPath(face *canvas.FontFace, glyph textGlyph, outlines *sfntOutliner) (*canvas.Path, float64, error) {
 	p := &canvas.Path{}
-	glyphID := uint16(glyph.GlyphID)
-	_ = face.Font.GlyphPath(p, glyphID, face.PPEM(canvas.DefaultResolution), 0, 0, face.MmPerEm, font.NoHinting)
+	width := 0.0
+	if glyph.GlyphID < 0 || glyph.GlyphID > 0xFFFF {
+		x, y := face.XOffset, face.YOffset
+		for _, shaped := range face.Glyphs(glyph.Text) {
+			part := &canvas.Path{}
+			if err := outlines.path(part, shaped.ID, face.MmPerEm); err != nil {
+				return nil, 0, err
+			}
+			p = p.Append(part.Translate(face.MmPerEm*float64(x+shaped.XOffset), face.MmPerEm*float64(y+shaped.YOffset)))
+			x, y = x+shaped.XAdvance, y+shaped.YAdvance
+		}
+		width = face.MmPerEm * float64(x)
+	} else {
+		glyphID := uint16(glyph.GlyphID)
+		if err := outlines.path(p, glyphID, face.MmPerEm); err != nil {
+			return nil, 0, err
+		}
+		width = face.MmPerEm * float64(face.Font.GlyphAdvance(glyphID))
+	}
 	if face.FauxBold != 0 {
 		d := face.FauxBold * face.Size
 		if face.Font.IsTrueType {
@@ -73,7 +86,7 @@ func textGlyphPath(face *canvas.FontFace, glyph textGlyph) (*canvas.Path, float6
 	if face.FauxItalic != 0 {
 		p = p.Transform(canvas.Identity.Shear(face.FauxItalic, 0))
 	}
-	return p, face.MmPerEm * float64(face.Font.GlyphAdvance(glyphID))
+	return p, width, nil
 }
 
 // cachedTextGlyphPath 获取缓存的字形路径
@@ -95,7 +108,16 @@ func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (
 	if cached, ok := r.canvasState().textGlyphPathCache[key]; ok {
 		return cached.path, cached.width
 	}
-	path, width := textGlyphPath(face, glyph)
+	outlines := r.canvasState().fontOutlines[face.Font]
+	if outlines == nil {
+		outlines = &sfntOutliner{font: face.Font.SFNT}
+		r.canvasState().fontOutlines[face.Font] = outlines
+	}
+	path, width, err := textGlyphPath(face, glyph, outlines)
+	if err != nil {
+		r.renderError = err
+		return &canvas.Path{}, 0
+	}
 	r.canvasState().textGlyphPathCache[key] = textGlyphPathCacheValue{path: path, width: width}
 	return path, width
 }

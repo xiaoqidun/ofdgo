@@ -36,7 +36,7 @@ func (CanvasBackend) OpenFont(data []byte) (FontMetrics, error) {
 	if err != nil {
 		return nil, err
 	}
-	metrics := &canvasFontMetrics{SFNT: sfnt}
+	metrics := &canvasFontMetrics{SFNT: sfnt, outlines: &sfntOutliner{font: sfnt}}
 	metrics.fontShaper = &fontShaper{metrics: metrics}
 	return metrics, nil
 }
@@ -45,6 +45,7 @@ func (CanvasBackend) OpenFont(data []byte) (FontMetrics, error) {
 type canvasFontMetrics struct {
 	*font.SFNT
 	*fontShaper
+	outlines *sfntOutliner
 }
 
 // Write 返回字体数据，不修改字体元信息
@@ -61,7 +62,7 @@ func (f canvasFontMetrics) GlyphOutline(glyph uint16, size float64) (GeometryPat
 		return nil, fmt.Errorf("invalid glyph or size")
 	}
 	path := &canvas.Path{}
-	if err := f.GlyphPath(path, glyph, 0, 0, 0, size/float64(f.UnitsPerEm()), font.NoHinting); err != nil {
+	if err := f.outlines.path(path, glyph, size/float64(f.UnitsPerEm())); err != nil {
 		return nil, err
 	}
 	return *geometryFromCanvasPath(path), nil

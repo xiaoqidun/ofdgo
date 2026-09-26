@@ -239,6 +239,40 @@ func (p *pdfImporter) darkenStampAppearance(page *pdfgo.Page, box Box, mark pdfg
 	return nil
 }
 
+// formWidget 将表单当前外观转换为页面对象并报告交互语义差异
+// 入参: ctx 取消上下文, page PDF页面, annotation 表单控件, strict 严格检查开关
+// 返回: error 外观或转换错误
+func (p *pdfImporter) formWidget(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation, strict bool) error {
+	if strict {
+		return &pdfgo.UnsupportedError{Feature: "interactive PDF form conversion"}
+	}
+	value, err := p.reader.Resolve(annotation.Dictionary["F"])
+	if err != nil {
+		return err
+	}
+	flags, ok := value.(pdfgo.Integer)
+	if value != nil && !ok {
+		return fmt.Errorf("invalid PDF widget flags")
+	}
+	if flags&(1|2|32) != 0 {
+		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "hidden PDF form field not transferred"})
+		return nil
+	}
+	if flags&(8|16) != 0 || annotation.Dictionary["OC"] != nil {
+		return &pdfgo.UnsupportedError{Feature: "widget viewing behavior"}
+	}
+	visitor := pdfgo.Visitor{Path: p.path, Text: p.text, Image: p.image, Warning: p.warning}
+	visitor.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error { return p.group(mark, walk, visitor) }
+	if err := p.reader.WalkAnnotationAppearance(ctx, page, annotation, visitor); err != nil {
+		return err
+	}
+	if err := p.flushPath(); err != nil {
+		return err
+	}
+	p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF form field appearance imported; interactive behavior not transferred"})
+	return nil
+}
+
 // signatureWidget 转换可见签名外观，不将PDF签名误写成OFD签名
 // 入参: ctx 取消上下文, page PDF页面, annotation 签名控件
 // 返回: error 外观或转换错误

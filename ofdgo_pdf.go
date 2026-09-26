@@ -26,10 +26,12 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// PDFImportOptions 指定PDF转换的运行时后端、进度通知与检查策略
+// PDFImportOptions 指定PDF转换的密码、运行时后端、进度通知与检查策略
+// Password按PDFDocEncoding字节传入，空值尝试默认空密码
 // Strict禁止恢复缺失资源或丢失内容语义，默认在报告中记录警告
 // OnProgress按open、pages、convert及write.*阶段报告进度，total为0表示总量未知
 type PDFImportOptions struct {
+	Password   []byte
 	Backends   *RenderBackends
 	Progress   func(int) error
 	OnProgress func(stage string, completed, total int) error
@@ -84,7 +86,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 			return nil, PDFImportReport{}, err
 		}
 	}
-	reader, err := pdfgo.NewReader(source, size)
+	reader, err := pdfgo.NewReaderWithPassword(source, size, options.Password)
 	if err != nil {
 		return nil, PDFImportReport{}, err
 	}
@@ -93,6 +95,12 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		editor.SetRenderBackends(*options.Backends)
 	}
 	importer := pdfImporter{ctx: ctx, reader: reader, editor: editor, fontIDs: map[*pdfgo.Font]string{}, fontMetrics: map[string]FontMetrics{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
+	if security := reader.Encryption(); security != nil && !security.Owner && security.Permissions&0xf3c != 0xf3c {
+		if options.Strict {
+			return nil, PDFImportReport{}, &pdfgo.UnsupportedError{Feature: "PDF access permission conversion"}
+		}
+		importer.report.Warnings = append(importer.report.Warnings, pdfgo.Diagnostic{Message: "PDF access permissions not transferred to OFD"})
+	}
 	if !options.Strict {
 		importer.warning = func(warning pdfgo.Diagnostic) {
 			warning.Page = importer.page + 1
@@ -358,7 +366,7 @@ func (p *pdfImporter) path(mark pdfgo.PathMark) error {
 		}
 		return p.appendPath(mark)
 	}
-	if p.pendingPath != nil && !reflect.DeepEqual(p.pendingPath.Style, mark.Style) {
+	if p.pendingPath != nil && (p.pendingPath.StrokeMatrix != mark.StrokeMatrix || !reflect.DeepEqual(p.pendingPath.Style, mark.Style)) {
 		if err := p.flushPath(); err != nil {
 			return err
 		}
@@ -408,15 +416,42 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 	}
 	box := pdfBounds(points)
 	scale := math.Hypot(p.matrix[0], p.matrix[1])
+	drawing, origin, ctm := *p, box, ""
+	marginScale := scale
+	if mark.StrokeMatrix != (pdfgo.Matrix{}) {
+		inverse, ok := mark.StrokeMatrix.Inverse()
+		if !ok {
+			return fmt.Errorf("invalid PDF stroke matrix")
+		}
+		if mark.Style.Fill.Radial != nil || mark.Style.Stroke.Radial != nil {
+			return &pdfgo.UnsupportedError{Feature: "radial gradient with anisotropic path stroke"}
+		}
+		drawing.matrix, origin, scale = inverse, Box{}, 1
+		m := p.matrix.Mul(mark.StrokeMatrix)
+		marginScale = math.Max(math.Hypot(m[0], m[2]), math.Hypot(m[1], m[3]))
+	}
 	if mark.Stroke {
-		margin := mark.Style.LineWidth * scale / 2 * math.Max(1, mark.Style.MiterLimit)
+		margin := mark.Style.LineWidth * marginScale / 2 * math.Max(1, mark.Style.MiterLimit)
 		box = Box{box.X - margin, box.Y - margin, box.W + 2*margin, box.H + 2*margin}
 	}
-	fillColor, err := p.paintColor(mark.Style.Fill, box)
+	if mark.StrokeMatrix == (pdfgo.Matrix{}) {
+		origin = box
+	} else {
+		m := p.matrix.Mul(mark.StrokeMatrix)
+		m[4], m[5] = m[4]-box.X, m[5]-box.Y
+		ctm = pdfNumbers(m[:]...)
+	}
+	paint := func(value pdfgo.Paint) (*FillColor, error) {
+		if value.Tiling != nil {
+			return p.paintColor(value, box)
+		}
+		return drawing.paintColor(value, origin)
+	}
+	fillColor, err := paint(mark.Style.Fill)
 	if err != nil {
 		return err
 	}
-	strokePaint, err := p.paintColor(mark.Style.Stroke, box)
+	strokePaint, err := paint(mark.Style.Stroke)
 	if err != nil {
 		return err
 	}
@@ -425,7 +460,7 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 	if err != nil {
 		return err
 	}
-	object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: p.pathData(mark.Path, box), Fill: &mark.Fill, Stroke: &mark.Stroke, FillColor: fillColor, StrokeColor: &strokeColor, LineWidth: mark.Style.LineWidth * scale, Cap: []string{"Butt", "Round", "Square"}[mark.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[mark.Style.Join], MiterLimit: mark.Style.MiterLimit, Clips: clips}
+	object := PathObject{Boundary: pdfBoundary(box), CTM: ctm, AbbreviatedData: drawing.pathData(mark.Path, origin), Fill: &mark.Fill, Stroke: &mark.Stroke, FillColor: fillColor, StrokeColor: &strokeColor, LineWidth: mark.Style.LineWidth * scale, Cap: []string{"Butt", "Round", "Square"}[mark.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[mark.Style.Join], MiterLimit: mark.Style.MiterLimit, Clips: clips}
 	object.LineWidthSet = object.LineWidth == 0
 	if mark.Path.EvenOdd {
 		object.Rule = "Even-Odd"
@@ -480,7 +515,19 @@ func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error)
 		return color, nil
 	}
 	gradient := paint.Axial
-	start, end := p.matrix.Apply(gradient.Start), p.matrix.Apply(gradient.End)
+	start := p.matrix.Apply(gradient.Start)
+	inverse, ok := p.matrix.Inverse()
+	if !ok {
+		return nil, fmt.Errorf("invalid PDF gradient matrix")
+	}
+	dx, dy := gradient.End.X-gradient.Start.X, gradient.End.Y-gradient.Start.Y
+	gx, gy := inverse[0]*dx+inverse[1]*dy, inverse[2]*dx+inverse[3]*dy
+	length := gx*gx + gy*gy
+	if length == 0 {
+		return nil, fmt.Errorf("invalid PDF axial gradient axis")
+	}
+	factor := (dx*dx + dy*dy) / length
+	end := pdfgo.Point{X: start.X + gx*factor, Y: start.Y + gy*factor}
 	extend := 0
 	if gradient.Extend[0] {
 		extend |= 1

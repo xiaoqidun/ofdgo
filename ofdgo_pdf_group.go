@@ -87,13 +87,35 @@ func (p *pdfImporter) group(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error
 			outline := shape
 			evenOdd := path.Path.EvenOdd
 			if stroke {
+				strokeShape, strokeScale, tolerance := shape, scale, 0.001
+				var strokeTransform pdfgo.Matrix
+				if path.StrokeMatrix != (pdfgo.Matrix{}) {
+					inverse, ok := path.StrokeMatrix.Inverse()
+					if !ok {
+						return fmt.Errorf("invalid PDF stroke matrix")
+					}
+					local := pdfImporter{matrix: inverse}
+					strokeShape, err = ParseGeometryPath(local.pathData(path.Path, Box{}))
+					if err != nil {
+						return err
+					}
+					strokeScale = 1
+					strokeTransform = p.matrix.Mul(path.StrokeMatrix)
+					tolerance /= math.Max(math.Hypot(strokeTransform[0], strokeTransform[2]), math.Hypot(strokeTransform[1], strokeTransform[3]))
+				}
 				dashes := make([]float64, len(path.Style.Dash))
 				for i, dash := range path.Style.Dash {
-					dashes[i] = dash * scale
+					dashes[i] = dash * strokeScale
 				}
-				outline, err = geometry.Stroke(shape, StrokeOptions{Width: path.Style.LineWidth * scale, Cap: []string{"Butt", "Round", "Square"}[path.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[path.Style.Join], MiterLimit: path.Style.MiterLimit, DashOffset: path.Style.DashPhase * scale, Dashes: dashes, Tolerance: 0.001})
+				outline, err = geometry.Stroke(strokeShape, StrokeOptions{Width: path.Style.LineWidth * strokeScale, Cap: []string{"Butt", "Round", "Square"}[path.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[path.Style.Join], MiterLimit: path.Style.MiterLimit, DashOffset: path.Style.DashPhase * strokeScale, Dashes: dashes, Tolerance: tolerance})
 				if err != nil {
 					return err
+				}
+				if strokeTransform != (pdfgo.Matrix{}) {
+					outline, err = geometry.Transform(outline, NewMatrix(pdfNumbers(strokeTransform[:]...)))
+					if err != nil {
+						return err
+					}
 				}
 				evenOdd = false
 			}
