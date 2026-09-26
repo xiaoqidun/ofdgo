@@ -29,13 +29,17 @@ import (
 // PDFImportOptions 指定PDF转换的密码、运行时后端、进度通知与检查策略
 // Password按PDFDocEncoding字节传入，空值尝试默认空密码
 // Strict禁止恢复缺失资源或丢失内容语义，默认在报告中记录警告
+// RendererOptions复用渲染器字体来源和后端配置，Backends优先于其中的后端设置
+// RasterDPI指定局部透明效果合成精度，0沿用渲染器DPI，默认300dpi，Strict禁用局部合成
 // OnProgress按open、pages、convert及write.*阶段报告进度，total为0表示总量未知
 type PDFImportOptions struct {
-	Password   []byte
-	Backends   *RenderBackends
-	Progress   func(int) error
-	OnProgress func(stage string, completed, total int) error
-	Strict     bool
+	Password        []byte
+	Backends        *RenderBackends
+	RendererOptions []RendererOption
+	Progress        func(int) error
+	OnProgress      func(stage string, completed, total int) error
+	Strict          bool
+	RasterDPI       float64
 }
 
 // PDFImportReport 汇总转换页数、对象数、链接数和转换警告
@@ -53,12 +57,14 @@ type pdfImporter struct {
 	ctx             context.Context
 	reader          *pdfgo.Reader
 	editor          *Editor
+	renderer        *Renderer
 	report          PDFImportReport
 	matrix          pdfgo.Matrix
 	page            int
 	fontIDs         map[*pdfgo.Font]string
 	fontMetrics     map[string]FontMetrics
 	fontRepairLimit map[*pdfgo.Font]uint16
+	fontWarnings    map[string]bool
 	type1Glyphs     map[*pdfgo.Font]map[string]uint16
 	clipTexts       map[*pdfgo.TextClip]TextObject
 	cmykSpace       string
@@ -72,6 +78,9 @@ type pdfImporter struct {
 	pageHeight      float64
 	pendingPath     *pdfgo.PathMark
 	warning         func(pdfgo.Diagnostic)
+	rasterDPI       float64
+	rasterWarned    bool
+	compositeCache  *pdfCompositeCache
 }
 
 // ImportPDF 将PDF内容转换为独立OFD编辑文档，失败时不返回部分结果
@@ -80,6 +89,19 @@ type pdfImporter struct {
 func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFImportOptions) (*Editor, PDFImportReport, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, PDFImportReport{}, err
+	}
+	if !finite(options.RasterDPI) || options.RasterDPI < 0 {
+		return nil, PDFImportReport{}, fmt.Errorf("invalid PDF raster DPI")
+	}
+	renderer := NewRenderer(&Reader{}, options.RendererOptions...)
+	if options.Backends != nil {
+		WithRenderBackends(*options.Backends)(renderer)
+	}
+	if options.RasterDPI != 0 {
+		renderer.DPI = options.RasterDPI
+	}
+	if !finite(renderer.DPI) || renderer.DPI <= 0 {
+		return nil, PDFImportReport{}, fmt.Errorf("invalid PDF raster DPI")
 	}
 	if options.OnProgress != nil {
 		if err := options.OnProgress("open", 0, 0); err != nil {
@@ -91,10 +113,9 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		return nil, PDFImportReport{}, err
 	}
 	editor := NewEditor()
-	if options.Backends != nil {
-		editor.SetRenderBackends(*options.Backends)
-	}
-	importer := pdfImporter{ctx: ctx, reader: reader, editor: editor, fontIDs: map[*pdfgo.Font]string{}, fontMetrics: map[string]FontMetrics{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
+	editor.SetRenderBackends(renderer.Backends())
+	editor.fontDirs, editor.fontFS = renderer.FontSources()
+	importer := pdfImporter{ctx: ctx, reader: reader, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, fontIDs: map[*pdfgo.Font]string{}, fontMetrics: map[string]FontMetrics{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
 	if security := reader.Encryption(); security != nil && !security.Owner && security.Permissions&0xf3c != 0xf3c {
 		if options.Strict {
 			return nil, PDFImportReport{}, &pdfgo.UnsupportedError{Feature: "PDF access permission conversion"}
@@ -136,13 +157,18 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		matrix, width, height := pdfPageMatrix(page)
 		importer.matrix = matrix
 		importer.page = index
+		importer.rasterWarned = false
 		importer.pageBox = page.CropBox
 		importer.pageWidth = width
 		importer.pageHeight = height
 		importer.maskClips = make(map[*pdfgo.SoftMask]pdfgo.Path)
+		importer.compositeCache = nil
 		importer.clipTexts = make(map[*pdfgo.TextClip]TextObject)
 		visitor := pdfgo.Visitor{Path: importer.path, Text: importer.text, Image: importer.image, Warning: importer.warning}
 		visitor.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
+			if mark.Page && mark.ColorSpace != nil && mark.ColorSpace.Model == "DeviceCMYK" && !mark.ColorSpace.Calibrated() {
+				return importer.compositePage(mark.ColorSpace, walk)
+			}
 			return importer.group(mark, walk, visitor)
 		}
 		if err := reader.WalkPage(ctx, page, visitor); err != nil {
@@ -339,7 +365,16 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 		for _, mark := range path.Text {
 			object, ok := p.clipTexts[mark]
 			if !ok {
-				return nil, fmt.Errorf("missing PDF text clipping glyphs")
+				if err := p.flushPath(); err != nil {
+					return nil, err
+				}
+				count := len(p.objects)
+				if err := p.text(pdfgo.TextMark{Font: mark.Font, Glyphs: mark.Glyphs, Positions: mark.Positions, Matrix: mark.Matrix, Size: mark.Size, HorizontalScale: mark.HorizontalScale, Mode: 7, Clip: mark, Style: pdfgo.Style{Fill: pdfgo.Paint{Alpha: 1}}}); err != nil {
+					return nil, err
+				}
+				p.objects = p.objects[:count]
+				p.report.TextObjects--
+				object = p.clipTexts[mark]
 			}
 			box, err := ParseBox(object.Boundary)
 			if err != nil {
@@ -357,8 +392,8 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 // 入参: mark PDF路径绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) path(mark pdfgo.PathMark) error {
-	if mark.Style.BlendMode == "Multiply" {
-		return &pdfgo.UnsupportedError{Feature: "multiply path"}
+	if mark.Style.BlendMode != "" && mark.Style.BlendMode != "Normal" && mark.Style.BlendMode != "Compatible" {
+		return &pdfgo.UnsupportedError{Feature: "path blend mode " + string(mark.Style.BlendMode)}
 	}
 	if !mark.Stroke || mark.Fill || mark.Style.Stroke.Alpha != 1 {
 		if err := p.flushPath(); err != nil {
@@ -400,10 +435,18 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 	var err error
 	mark.Style, err = p.maskStyle(mark.Style)
 	if err != nil {
+		if p.rasterMaskAllowed(err) {
+			mask := mark.Style.SoftMask
+			mark.Style.SoftMask = nil
+			return p.rasterGroup(pdfgo.GroupMark{Alpha: 1, SoftMask: mask}, func(v pdfgo.Visitor) error { return v.Path(mark) })
+		}
 		return err
 	}
 	if mark.Fill && mark.Style.FillOverprint && pdfOverprintNeedsSeparation(mark.Style.Fill) || mark.Stroke && mark.Style.StrokeOverprint && pdfOverprintNeedsSeparation(mark.Style.Stroke) {
 		return &pdfgo.UnsupportedError{Feature: "color separation overprint"}
+	}
+	if p.warning != nil && (mark.Fill && pdfGradientError(mark.Style.Fill) != nil || mark.Stroke && pdfGradientError(mark.Style.Stroke) != nil) {
+		return p.gradientPath(mark)
 	}
 	var points []pdfgo.Point
 	for _, segment := range mark.Path.Segments {
@@ -447,13 +490,18 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 		}
 		return drawing.paintColor(value, origin)
 	}
-	fillColor, err := paint(mark.Style.Fill)
-	if err != nil {
-		return err
+	fillColor, strokePaint := p.color(mark.Style.Fill), p.color(mark.Style.Stroke)
+	if mark.Fill {
+		fillColor, err = paint(mark.Style.Fill)
+		if err != nil {
+			return err
+		}
 	}
-	strokePaint, err := paint(mark.Style.Stroke)
-	if err != nil {
-		return err
+	if mark.Stroke {
+		strokePaint, err = paint(mark.Style.Stroke)
+		if err != nil {
+			return err
+		}
 	}
 	strokeColor := StrokeColor(*strokePaint)
 	clips, err := p.clips(mark.Style.Clips, box)
@@ -504,8 +552,10 @@ func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error)
 			extend |= 2
 		}
 		shading := &RadialShd{StartPoint: pdfNumbers(start.X-box.X, start.Y-box.Y), EndPoint: pdfNumbers(end.X-box.X, end.Y-box.Y), StartRadius: gradient.StartRadius * scale, EndRadius: gradient.EndRadius * scale, Extend: strconv.Itoa(extend)}
-		for _, stop := range gradient.Stops {
-			shading.Segment = append(shading.Segment, ShdSegment{Position: stop.Position, Color: ShdColor{Value: pdfNumbers(math.Round(stop.RGB[0]*255), math.Round(stop.RGB[1]*255), math.Round(stop.RGB[2]*255))}})
+		var err error
+		shading.Segment, err = pdfGradientSegments(gradient.Stops, gradient.Space)
+		if err != nil {
+			return nil, err
 		}
 		color.Value = ""
 		color.RadialShd = shading
@@ -536,8 +586,10 @@ func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error)
 		extend |= 2
 	}
 	shading := &AxialShd{StartPoint: pdfNumbers(start.X-box.X, start.Y-box.Y), EndPoint: pdfNumbers(end.X-box.X, end.Y-box.Y), Extend: strconv.Itoa(extend)}
-	for _, stop := range gradient.Stops {
-		shading.Segment = append(shading.Segment, ShdSegment{Position: stop.Position, Color: ShdColor{Value: pdfNumbers(math.Round(stop.RGB[0]*255), math.Round(stop.RGB[1]*255), math.Round(stop.RGB[2]*255))}})
+	var err error
+	shading.Segment, err = pdfGradientSegments(gradient.Stops, gradient.Space)
+	if err != nil {
+		return nil, err
 	}
 	color.Value = ""
 	color.AxialShd = shading

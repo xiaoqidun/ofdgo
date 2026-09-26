@@ -39,7 +39,7 @@ func wrapCFFToOTF(cffData []byte) ([]byte, map[rune]uint16, error) {
 	if err == nil {
 		cffData = sanitized
 	}
-	cffData, err = normalizeCFFDotsection(cffData)
+	cffData, err = normalizeCFFCharstrings(cffData)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -83,10 +83,10 @@ func wrapCFFToOTF(cffData []byte) ([]byte, map[rune]uint16, error) {
 // cffDict 使用float64存储所有数值，以统一处理整数和实数
 type cffDict map[int][]float64
 
-// normalizeCFFDotsection 移除旧版Type2字形程序中无效果的dotsection指令
+// normalizeCFFCharstrings 规范化Type2提示指令的等价编码，保留轮廓和提示数据
 // 入参: data CFF字体数据
 // 返回: []byte 标准化后的CFF数据, error 错误信息
-func normalizeCFFDotsection(data []byte) ([]byte, error) {
+func normalizeCFFCharstrings(data []byte) ([]byte, error) {
 	if len(data) < 4 || int(data[2]) >= len(data) {
 		return nil, fmt.Errorf("invalid CFF header")
 	}
@@ -107,18 +107,23 @@ func normalizeCFFDotsection(data []byte) ([]byte, error) {
 	if charStart < topStart+topSize || charSize == 0 || charStart+charSize > len(data) {
 		return nil, fmt.Errorf("invalid CFF charstrings")
 	}
-	if !bytes.Contains(data[charStart:charStart+charSize], []byte{12, 0}) {
-		return data, nil
-	}
 	chars := readCFFIndexItems(data, charStart)
 	changed := false
 	for index, charstring := range chars {
-		normalized, removed, err := stripType2Dotsection(charstring)
+		normalized, inserted, err := explicitType2CounterStems(charstring)
 		if err != nil {
 			return nil, err
 		}
+		changed = changed || inserted
+		if bytes.Contains(normalized, []byte{12, 0}) {
+			var removed bool
+			normalized, removed, err = stripType2Dotsection(normalized)
+			if err != nil {
+				return nil, err
+			}
+			changed = changed || removed
+		}
 		chars[index] = normalized
-		changed = changed || removed
 	}
 	if !changed {
 		return data, nil
@@ -163,6 +168,54 @@ func normalizeCFFDotsection(data []byte) ([]byte, error) {
 	result = append(result, encodedChars...)
 	result = append(result, data[charStart+charSize:]...)
 	return result, nil
+}
+
+// explicitType2CounterStems 将计数掩码前省略的vstemhm补为显式指令，不改变笔画提示及掩码
+// 入参: data Type2字形程序
+// 返回: []byte 等价程序, bool 是否发生变更, error 字节码错误
+func explicitType2CounterStems(data []byte) ([]byte, bool, error) {
+	operands, hints := 0, 0
+	for index := 0; index < len(data); {
+		start, op := index, data[index]
+		index++
+		switch {
+		case op == 28:
+			index += 2
+			operands++
+		case op == 255:
+			index += 4
+			operands++
+		case op >= 247:
+			index++
+			operands++
+		case op >= 32:
+			operands++
+		case op == 1 || op == 3 || op == 18 || op == 23:
+			hints += operands / 2
+			operands = 0
+		case op == 19 || op == 20:
+			hints += operands / 2
+			index += (hints + 7) / 8
+			if index > len(data) {
+				return nil, false, fmt.Errorf("incomplete Type2 hint mask")
+			}
+			if op == 20 && operands >= 2 {
+				result := make([]byte, 0, len(data)+1)
+				result = append(result, data[:start]...)
+				result = append(result, 23)
+				return append(result, data[start:]...), true, nil
+			}
+			operands = 0
+		case op == 12 && index < len(data) && data[index] == 0:
+			index++
+		default:
+			return data, false, nil
+		}
+		if index > len(data) {
+			return nil, false, fmt.Errorf("incomplete Type2 operand")
+		}
+	}
+	return data, false, nil
 }
 
 // stripType2Dotsection 保留字形指令与掩码并移除无效果的旧指令

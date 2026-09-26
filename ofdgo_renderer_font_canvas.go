@@ -68,6 +68,13 @@ func (f canvasFontMetrics) GlyphOutline(glyph uint16, size float64) (GeometryPat
 	return *geometryFromCanvasPath(path), nil
 }
 
+// GlyphWarning 返回字形指令栈下溢后保留设计轮廓的提示，原始字体不变
+// 入参: glyph 字形编号
+// 返回: error 恢复原因，无恢复时为空
+func (f canvasFontMetrics) GlyphWarning(glyph uint16) error {
+	return f.outlines.glyphWarning(glyph)
+}
+
 // GlyphOutlines 批量提取字形轮廓，重复编号只解析一次
 // 入参: glyphs 字形编号, size 毫米字号
 // 返回: []GeometryPath 同序只读轮廓, error 轮廓错误

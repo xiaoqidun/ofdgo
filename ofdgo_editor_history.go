@@ -35,7 +35,7 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 	}
 	changed := e.revision != before.revision
 	e.history, e.historyIndex, e.historyLimit = before.history, before.historyIndex, before.historyLimit
-	e.backends, e.fontFS = before.backends, before.fontFS
+	e.backends, e.fontDirs, e.fontFS = before.backends, before.fontDirs, before.fontFS
 	e.fontRenderer, e.fontMetrics = before.fontRenderer, before.fontMetrics
 	if changed {
 		e.serial, e.revision = before.serial, before.revision
@@ -83,7 +83,7 @@ func (e *Editor) restoreTransaction(state Editor) {
 	maps.Copy(state.resourceID, e.resourceID)
 	state.history, state.historyIndex, state.historyLimit = e.history, e.historyIndex, e.historyLimit
 	state.serial, state.maxID = max(e.serial, state.serial), max(e.maxID, state.maxID)
-	state.backends, state.fontFS = e.backends, e.fontFS
+	state.backends, state.fontDirs, state.fontFS = e.backends, e.fontDirs, e.fontFS
 	state.fontRenderer, state.fontMetrics = e.fontRenderer, e.fontMetrics
 	*e = state
 }

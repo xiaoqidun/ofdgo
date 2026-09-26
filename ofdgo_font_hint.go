@@ -16,10 +16,14 @@ package ofdgo
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
 )
+
+// errTTStackUnderflow 表示字形程序缺少必需的栈参数
+var errTTStackUnderflow = errors.New("TrueType instruction stack underflow")
 
 // ttPoint 保存TrueType当前坐标、原始坐标及点状态，坐标使用26.6定点数
 type ttPoint struct {
@@ -112,7 +116,7 @@ func (v *ttInterpreter) clone() *ttInterpreter {
 // 返回: int32 操作数
 func (v *ttInterpreter) pop() int32 {
 	if len(v.stack) == 0 {
-		v.err = fmt.Errorf("TrueType instruction stack underflow")
+		v.err = errTTStackUnderflow
 		return 0
 	}
 	x := v.stack[len(v.stack)-1]
@@ -319,7 +323,7 @@ func (v *ttInterpreter) execute(code []byte, depth int) error {
 					g.freedom = axis
 				}
 			case op >= 6 && op <= 9 || op == 0x86 || op == 0x87:
-				p2, p1 := v.point(g.zone[2], v.pop()), v.point(g.zone[1], v.pop())
+				p1, p2 := v.point(g.zone[2], v.pop()), v.point(g.zone[1], v.pop())
 				direction := func(x, y int32) [2]float64 {
 					a, b := float64(x), float64(y)
 					if op&1 != 0 {
@@ -443,7 +447,7 @@ func (v *ttInterpreter) execute(code []byte, depth int) error {
 				}
 				for n := int32(0); n < count; n++ {
 					if err = v.execute(body, depth+1); err != nil {
-						return err
+						return fmt.Errorf("TrueType function %d: %w", id, err)
 					}
 				}
 			case op == 0x2c || op == 0x89:
@@ -563,9 +567,9 @@ func (v *ttInterpreter) execute(code []byte, depth int) error {
 			case op == 0x49 || op == 0x4a:
 				p1, p2 := v.point(g.zone[1], v.pop()), v.point(g.zone[0], v.pop())
 				if op&1 == 0 {
-					v.push(ttProject(p1.ox-p2.ox, p1.oy-p2.oy, g.dual))
+					v.push(ttProject(p2.ox-p1.ox, p2.oy-p1.oy, g.dual))
 				} else {
-					v.push(ttProject(p1.x-p2.x, p1.y-p2.y, g.projection))
+					v.push(ttProject(p2.x-p1.x, p2.y-p1.y, g.projection))
 				}
 			case op == 0x4b:
 				v.push(v.units)

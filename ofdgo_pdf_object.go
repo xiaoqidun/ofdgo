@@ -33,8 +33,8 @@ import (
 // 入参: mark PDF图像绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
-	if mark.Style.BlendMode == "Multiply" {
-		return &pdfgo.UnsupportedError{Feature: "multiply image outside annotation appearance"}
+	if mark.Style.BlendMode != "" && mark.Style.BlendMode != "Normal" && mark.Style.BlendMode != "Compatible" {
+		return &pdfgo.UnsupportedError{Feature: "image blend mode " + string(mark.Style.BlendMode)}
 	}
 	if err := p.flushPath(); err != nil {
 		return err
@@ -45,6 +45,11 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	var err error
 	mark.Style, err = p.maskStyle(mark.Style)
 	if err != nil {
+		if p.rasterMaskAllowed(err) {
+			mask := mark.Style.SoftMask
+			mark.Style.SoftMask = nil
+			return p.rasterGroup(pdfgo.GroupMark{Alpha: 1, SoftMask: mask}, func(v pdfgo.Visitor) error { return v.Image(mark) })
+		}
 		return err
 	}
 	if mark.Style.FillOverprint {
@@ -60,12 +65,10 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		if err != nil {
 			return err
 		}
-		filter, err := p.reader.Resolve(source.Stream.Dictionary["Filter"])
+		jpegOriginal, err := source.JPEGFile()
 		if err != nil {
 			return err
 		}
-		space, _ := source.ColorSpace.(pdfgo.Name)
-		jpegOriginal := filter == pdfgo.Name("DCTDecode") && len(source.Decode) == 0 && !source.ImageMask && (space == "DeviceGray" || space == "DeviceRGB") && source.Mask == nil && source.SoftMask == nil
 		var decoded image.Image
 		if len(jbig2Original) == 0 {
 			decoded, err = source.DecodeImage()
@@ -106,8 +109,8 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		var encoded bytes.Buffer
 		if len(jbig2Original) != 0 {
 			encoded.Write(jbig2Original)
-		} else if jpegOriginal {
-			encoded.Write(source.Stream.Data)
+		} else if len(jpegOriginal) != 0 {
+			encoded.Write(jpegOriginal)
 		} else {
 			if err := png.Encode(&encoded, decoded); err != nil {
 				return err
@@ -124,6 +127,13 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 			p.imageIDs[source.Stream] = id
 		}
 	}
+	return p.appendImage(mark, id)
+}
+
+// appendImage 定位已注册的图像资源，保留透明度与裁剪
+// 入参: mark 图像绘制信息, id 资源编号
+// 返回: error 裁剪错误
+func (p *pdfImporter) appendImage(mark pdfgo.ImageMark, id string) error {
 	m := p.matrix.Mul(mark.Matrix).Mul(pdfgo.Matrix{1, 0, 0, -1, 0, 1})
 	box := pdfBounds([]pdfgo.Point{m.Apply(pdfgo.Point{}), m.Apply(pdfgo.Point{X: 1}), m.Apply(pdfgo.Point{Y: 1}), m.Apply(pdfgo.Point{X: 1, Y: 1})})
 	alpha := int(math.Round(mark.Style.Fill.Alpha * 255))
@@ -141,6 +151,9 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 // 入参: mark PDF文字绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) text(mark pdfgo.TextMark) error {
+	if mark.Style.BlendMode != "" && mark.Style.BlendMode != "Normal" && mark.Style.BlendMode != "Compatible" {
+		return &pdfgo.UnsupportedError{Feature: "text blend mode " + string(mark.Style.BlendMode)}
+	}
 	if mark.Font.Subtype == pdfgo.Name("Type3") {
 		if mark.Clip != nil {
 			return &pdfgo.UnsupportedError{Feature: "Type3 text clipping"}
@@ -159,20 +172,25 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		}
 		return p.flushPath()
 	}
-	if mark.Style.BlendMode == "Multiply" {
-		return &pdfgo.UnsupportedError{Feature: "multiply text"}
-	}
 	if err := p.flushPath(); err != nil {
 		return err
 	}
 	var err error
 	mark.Style, err = p.maskStyle(mark.Style)
 	if err != nil {
+		if mark.Clip == nil && p.rasterMaskAllowed(err) {
+			mask := mark.Style.SoftMask
+			mark.Style.SoftMask = nil
+			return p.rasterGroup(pdfgo.GroupMark{Alpha: 1, SoftMask: mask}, func(v pdfgo.Visitor) error { return v.Text(mark) })
+		}
 		return err
 	}
 	paintMode := mark.Mode % 4
 	if (paintMode == 0 || paintMode == 2) && mark.Style.FillOverprint && pdfOverprintNeedsSeparation(mark.Style.Fill) || (paintMode == 1 || paintMode == 2) && mark.Style.StrokeOverprint && pdfOverprintNeedsSeparation(mark.Style.Stroke) {
 		return &pdfgo.UnsupportedError{Feature: "text color separation overprint"}
+	}
+	if p.warning != nil && ((paintMode == 0 || paintMode == 2) && pdfGradientError(mark.Style.Fill) != nil || (paintMode == 1 || paintMode == 2) && pdfGradientError(mark.Style.Stroke) != nil) {
+		return p.compositeRegion(nil, pdfCompositeNode{text: &mark}, &pdfgo.ColorSpace{Model: "DeviceRGB"}, false)
 	}
 	font := mark.Font
 	embedded := len(font.Program) != 0
@@ -290,7 +308,21 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			position += count
 			path, err := outline.GlyphOutline(gid, object.Size)
 			if err != nil {
-				return err
+				return fmt.Errorf("PDF font %s outline: %w", font.Name, err)
+			}
+			if diagnostics, ok := outline.(FontGlyphDiagnostics); ok {
+				if err := diagnostics.GlyphWarning(gid); err != nil {
+					if p.warning == nil {
+						return fmt.Errorf("PDF font %s glyph %d hinting: %w", font.Name, gid, err)
+					}
+					if p.fontWarnings == nil {
+						p.fontWarnings = make(map[string]bool)
+					}
+					if !p.fontWarnings[id] {
+						p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF font %s has invalid hinting instructions; design outlines and original font retained", font.Name)})
+						p.fontWarnings[id] = true
+					}
+				}
 			}
 			bounds, err := path.Bounds()
 			if err != nil {
@@ -309,13 +341,22 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	box := pdfBounds(points)
 	fill, stroke, visible := paintMode == 0 || paintMode == 2, paintMode == 1 || paintMode == 2, paintMode != 3
 	if stroke {
+		strokeMatrix := mark.StrokeMatrix
+		if strokeMatrix == (pdfgo.Matrix{}) {
+			strokeMatrix = pdfgo.Identity()
+		}
+		sx, sy := math.Hypot(strokeMatrix[0], strokeMatrix[1]), math.Hypot(strokeMatrix[2], strokeMatrix[3])
+		if math.Abs(sx-sy) > 1e-8*math.Max(1, sx) || math.Abs(strokeMatrix[0]*strokeMatrix[2]+strokeMatrix[1]*strokeMatrix[3]) > 1e-8*math.Max(1, sx*sy) {
+			return &pdfgo.UnsupportedError{Feature: "anisotropic text stroke"}
+		}
 		scale := math.Sqrt(math.Abs(m[0]*m[3] - m[1]*m[2]))
 		if scale == 0 || math.IsNaN(scale) || math.IsInf(scale, 0) {
 			return &pdfgo.UnsupportedError{Feature: "degenerate text stroke matrix"}
 		}
-		margin := mark.Style.LineWidth * unit / 2 * math.Max(1, mark.Style.MiterLimit)
+		lineWidth := mark.Style.LineWidth * math.Hypot(p.matrix[0], p.matrix[1]) * sx
+		margin := lineWidth / 2 * math.Max(1, mark.Style.MiterLimit)
 		box = Box{box.X - margin, box.Y - margin, box.W + 2*margin, box.H + 2*margin}
-		object.LineWidth = mark.Style.LineWidth * unit / scale
+		object.LineWidth = lineWidth / scale
 		object.LineWidthSet = object.LineWidth == 0
 		object.Join = []string{"Miter", "Round", "Bevel"}[mark.Style.Join]
 		object.MiterLimit = mark.Style.MiterLimit
@@ -339,9 +380,12 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	object.Fill = &fill
 	object.Stroke = &stroke
 	object.Visible = &visible
-	object.FillColor, err = p.paintColor(mark.Style.Fill, box)
-	if err != nil {
-		return err
+	object.FillColor = p.color(mark.Style.Fill)
+	if fill {
+		object.FillColor, err = p.paintColor(mark.Style.Fill, box)
+		if err != nil {
+			return err
+		}
 	}
 	object.Clips, err = p.clips(mark.Style.Clips, box)
 	if err != nil {
@@ -354,6 +398,9 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		*clipObject.Fill = true
 		*clipObject.Stroke = false
 		clipObject.Visible = nil
+		if p.clipTexts == nil {
+			p.clipTexts = make(map[*pdfgo.TextClip]TextObject)
+		}
 		p.clipTexts[mark.Clip] = clipObject
 	}
 	p.objects = append(p.objects, GraphicObject{Type: "TextObject", TextObject: object})

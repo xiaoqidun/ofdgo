@@ -44,6 +44,7 @@ type ConvertProgress struct {
 // PageRange使用一基页码表达式，与Pages互斥，空字符串表示全部页面
 // SkipUnchanged在源格式与目标相同且未选页时不写出数据，不校验或重新生成源文档
 // PDF先转换为OFD对象再输出，PDF选项中的进度回调仍会调用
+// RendererOptions同时用于PDF局部合成和输出，在PDF.RendererOptions之后应用
 // Backends统一配置转换与输出，优先于PDF和RendererOptions中的后端设置
 // PageOutput仅用于逐页格式，同步调用export写出一页并自行处理提交或回滚；此时output可为nil
 // 未提供PageOutput时，逐页格式打包ZIP；所有回调返回错误均会停止转换
@@ -180,9 +181,12 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 	switch report.Input {
 	case "pdf":
 		pdfOptions := options.PDF
+		pdfOptions.RendererOptions = append(append([]RendererOption(nil), pdfOptions.RendererOptions...), options.RendererOptions...)
 		if options.Backends != nil {
 			pdfOptions.Backends = options.Backends
 		}
+		options.RendererOptions = pdfOptions.RendererOptions
+		options.Backends = pdfOptions.Backends
 		pdfOptions.OnProgress = func(stage string, completed, total int) error {
 			if err := progress(stage, completed, total); err != nil {
 				return err

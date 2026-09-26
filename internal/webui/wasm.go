@@ -367,18 +367,25 @@ func safeCall(fn func([]js.Value) (any, error), args []js.Value) (data any, err 
 }
 
 // convertPDFDocument 通过库转换PDF，不替换当前文档会话
-// 入参: args PDF数据
+// 入参: args PDF数据、外部字体及进度回调
 // 返回: any OFD数据及转换警告, error 错误信息
 func convertPDFDocument(args []js.Value) (any, error) {
-	if len(args) != 2 {
+	if len(args) != 3 {
 		return nil, fmt.Errorf("missing PDF data")
 	}
 	data, err := bytesFromJS(args[0])
 	if err != nil {
 		return nil, err
 	}
+	fonts, err := fontsFromJS(args[1])
+	if err != nil {
+		return nil, err
+	}
 	var output bytes.Buffer
-	options := ofdgo.PDFImportOptions{OnProgress: editorOperationProgress(args[1])}
+	options := ofdgo.PDFImportOptions{OnProgress: editorOperationProgress(args[2])}
+	if len(fonts) > 0 {
+		options.RendererOptions = []ofdgo.RendererOption{ofdgo.WithFontFS(ofdgo.NewFontFS(fonts))}
+	}
 	report, err := ofdgo.ConvertPDF(context.Background(), bytes.NewReader(data), int64(len(data)), &output, options)
 	if err != nil {
 		return nil, err

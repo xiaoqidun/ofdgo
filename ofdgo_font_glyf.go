@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -25,10 +26,12 @@ import (
 
 // sfntOutliner 缓存字体程序并提取独立字形轮廓
 type sfntOutliner struct {
-	font    *font.SFNT
-	once    sync.Once
-	program *ttInterpreter
-	err     error
+	font     *font.SFNT
+	once     sync.Once
+	program  *ttInterpreter
+	err      error
+	mu       sync.Mutex
+	warnings map[uint16]error
 }
 
 // ttGlyph 保存字形轮廓及四个度量虚拟点
@@ -36,6 +39,7 @@ type ttGlyph struct {
 	points  []ttPoint
 	ends    []uint16
 	metrics *[4]ttPoint
+	warning error
 }
 
 // path 按TrueType指令和隐含点规则生成闭合轮廓，CFF保留原有解析
@@ -128,6 +132,9 @@ func (f *sfntOutliner) glyph(id uint16, active map[uint16]bool) (ttGlyph, error)
 	if err != nil {
 		return result, err
 	}
+	if result.warning != nil {
+		f.recordGlyphWarning(id, result.warning)
+	}
 	left := int32(int16(binary.BigEndian.Uint16(data[2:]))) - int32(f.font.Hmtx.LeftSideBearing(id))
 	top := int32(int16(binary.BigEndian.Uint16(data[8:])))
 	if result.metrics != nil {
@@ -153,11 +160,37 @@ func (f *sfntOutliner) glyph(id uint16, active map[uint16]bool) (ttGlyph, error)
 		return result, nil
 	}
 	vm := f.program.clone()
-	vm.zones[1], vm.ends = result.points, result.ends
+	vm.zones[1], vm.ends = append([]ttPoint(nil), result.points...), result.ends
 	if err := vm.run(program); err != nil {
+		if errors.Is(err, errTTStackUnderflow) {
+			result.warning = err
+			f.recordGlyphWarning(id, err)
+			return result, nil
+		}
 		return result, fmt.Errorf("TrueType glyph %d: %w", id, err)
 	}
+	result.points = vm.zones[1]
 	return result, nil
+}
+
+// recordGlyphWarning 记录字形恢复提示，允许并发提取轮廓
+// 入参: id 字形编号, warning 恢复原因
+func (f *sfntOutliner) recordGlyphWarning(id uint16, warning error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.warnings == nil {
+		f.warnings = make(map[uint16]error)
+	}
+	f.warnings[id] = warning
+}
+
+// glyphWarning 返回字形恢复为执行前轮廓的原因
+// 入参: id 字形编号
+// 返回: error 恢复原因，无恢复时为空
+func (f *sfntOutliner) glyphWarning(id uint16) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.warnings[id]
 }
 
 // readTTSimple 读取简单字形的重复标志、差分坐标和字节码
@@ -300,6 +333,9 @@ func (f *sfntOutliner) composite(data []byte, active map[uint16]bool) (ttGlyph, 
 		part, err := f.glyph(id, active)
 		if err != nil {
 			return result, nil, err
+		}
+		if part.warning != nil {
+			result.warning = fmt.Errorf("TrueType component %d: %w", id, part.warning)
 		}
 		if flags&0x200 != 0 {
 			result.metrics = new([4]ttPoint)

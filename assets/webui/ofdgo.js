@@ -3376,7 +3376,7 @@ async function openOFD(file) {
 			if (openSeq !== state.openSeq) return;
 			let converted;
 			try {
-				converted = await callWASM("ofdgoConvertPDF", bytes);
+				converted = await callWASM("ofdgoConvertPDF", bytes, await fontManager.files(fontManager.records()));
 			} finally {
 				if (openSeq === state.openSeq) {
 					state.exportRequestID = 0;
@@ -4474,6 +4474,7 @@ function renderBatchList() {
 		item.cell = row.insertCell();
 		item.cell.textContent = item.text;
 		item.cell.dataset.status = item.status;
+		item.cell.dataset.label = "状态";
 		const action = row.insertCell();
 		const remove = document.createElement("button");
 		remove.type = "button";

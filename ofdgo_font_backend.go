@@ -42,6 +42,13 @@ type FontOutlineBatch interface {
 	GlyphOutlines(glyphs []uint16, size float64) ([]GeometryPath, error)
 }
 
+// FontGlyphDiagnostics 提供已提取字形的恢复提示，不将提示作为轮廓解析失败
+// 字形不存在或不支持的指令仍由GlyphOutline返回错误
+type FontGlyphDiagnostics interface {
+	FontMetrics
+	GlyphWarning(glyph uint16) error
+}
+
 // FontShaper 提供可选的横向文字塑形，仅用于显式新建或重排
 // 字形按逻辑簇顺序排列，Cluster使用原文的符文索引，坐标为毫米且纵轴向下
 type FontShaper interface {

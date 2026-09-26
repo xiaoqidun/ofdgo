@@ -46,6 +46,7 @@ type Editor struct {
 	pages           []PageContent
 	resources       []editorResource
 	fonts           map[string]*FontResource
+	fontDirs        []string
 	fontFS          []fs.FS
 	fontRenderer    *Renderer
 	fontMetrics     map[string]FontMetrics
@@ -65,8 +66,16 @@ type Editor struct {
 	encryption      *encryptionState
 }
 
+// SetFontDirs 设置编辑与几何度量使用的外部字体目录，不嵌入或替换文档字体
+// 入参: dirs 字体目录，空参数清除目录配置
+func (e *Editor) SetFontDirs(dirs ...string) {
+	e.fontDirs = slices.Clone(dirs)
+	e.fontRenderer = nil
+	e.fontMetrics = make(map[string]FontMetrics)
+}
+
 // SetFontFS 设置编辑与几何度量使用的外部字体来源，不嵌入或替换文档字体
-// 入参: fsys 字体文件系统，空参数恢复默认来源
+// 入参: fsys 字体文件系统，空参数清除文件系统配置
 func (e *Editor) SetFontFS(fsys ...fs.FS) {
 	e.fontFS = slices.Clone(fsys)
 	e.fontRenderer = nil
@@ -112,7 +121,7 @@ func (e *Editor) Backends() RenderBackends {
 // 入参: reader 当前文档快照
 // 返回: *Renderer 度量器
 func (e *Editor) newRenderer(reader *Reader) *Renderer {
-	return NewRenderer(reader, WithFontFS(e.fontFS...), WithRenderBackends(e.backends))
+	return NewRenderer(reader, WithFontDirs(e.fontDirs...), WithFontFS(e.fontFS...), WithRenderBackends(e.backends))
 }
 
 // editorResource 文档内嵌资源
