@@ -727,7 +727,7 @@ button:not(:disabled):hover {
 
 .convert-table {
 	max-height: 40dvh;
-	min-height: 120px;
+	min-height: 0;
 	overflow: auto;
 	border: 1px solid var(--line);
 	background: #fff;
@@ -753,6 +753,10 @@ button:not(:disabled):hover {
 	z-index: 1;
 	background: #eef1f4;
 	font-weight: 500;
+}
+
+.convert-table tbody td:first-child {
+	text-align: left;
 }
 
 .convert-table th:nth-child(2),
@@ -878,6 +882,10 @@ button:not(:disabled):hover {
 	margin-top: 12px;
 }
 
+.convert-progress:has(#convertStatus:empty) {
+	display: none;
+}
+
 .convert-dialog .form-actions {
 	display: flex;
 	align-items: center;
@@ -920,13 +928,11 @@ button:not(:disabled):hover {
 	.convert-progress,
 	.convert-dialog .form-actions { flex-shrink: 0; }
 	.convert-table {
-		min-height: min(120px, 18dvh);
 		max-height: 50dvh;
 	}
-	.convert-progress:has(#convertStatus:empty) { display: none; }
 	.convert-dialog .form-actions {
 		display: grid;
-		grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
 		row-gap: 12px;
 	}
 	.convert-dialog .form-actions > .button { grid-row: 2; }
@@ -935,24 +941,26 @@ button:not(:disabled):hover {
 		grid-row: 1;
 		grid-template-columns: repeat(3, minmax(0, 1fr));
 		width: 100%;
-		max-width: 360px;
-		margin: 0 auto;
+		margin: 0;
 	}
 	.convert-options:has(#convertDPIRow[hidden]) {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
-		max-width: 240px;
 	}
 	.convert-options .form-row {
 		grid-template-columns: minmax(0, 1fr);
 		gap: 6px;
-		text-align: center;
+		text-align: left;
+	}
+	.convert-options:has(#convertDPIRow[hidden]) .form-row {
+		grid-template-columns: 2em minmax(0, 1fr);
+		gap: 8px;
 	}
 	.convert-options label { width: auto; }
 	#convertAdd { grid-column: 1; }
 	#convertClear { grid-column: 2; }
-	#convertClose { grid-column: 4; }
+	#convertClose { grid-column: 3; }
 	#convertCancel,
-	#convertStart { grid-column: 5; }
+	#convertStart { grid-column: 4; }
 }
 
 @media (max-width: 620px) {
@@ -976,6 +984,9 @@ button:not(:disabled):hover {
 		padding-right: calc(var(--control-height) + 12px);
 	}
 	.convert-name {
+		display: flex;
+		align-items: center;
+		min-height: var(--control-height);
 		overflow-wrap: anywhere;
 		white-space: normal;
 		line-height: 1.5;
