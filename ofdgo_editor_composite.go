@@ -565,7 +565,7 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 				capability.ReasonCode, capability.Reason = editReason(err), err.Error()
 				errors.As(err, &capability.MissingGlyphs)
 			} else {
-				capability.TextContent = text.ReadDirection == 0 && text.CharDirection == 0
+				capability.TextContent = text.ReadDirection == 0 && text.CharDirection == 0 && (text.layout != nil || len(text.CGTransform) == 0)
 				if _, err := text.TextFrame(); err == nil {
 					capability.Reflow = capability.TextContent
 					capability.LayoutKnown = text.layout != nil

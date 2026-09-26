@@ -148,7 +148,11 @@ func (p *pdfImporter) group(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error
 		}
 		region.paint.Alpha = mark.Alpha
 		fill, stroke := true, false
-		object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: data, Fill: &fill, Stroke: &stroke, FillColor: p.color(region.paint), Clips: p.clips(clips, box)}
+		objectClips, err := p.clips(clips, box)
+		if err != nil {
+			return err
+		}
+		object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: data, Fill: &fill, Stroke: &stroke, FillColor: p.color(region.paint), Clips: objectClips}
 		p.objects = append(p.objects, GraphicObject{Type: "PathObject", PathObject: object})
 		p.report.PathObjects++
 	}

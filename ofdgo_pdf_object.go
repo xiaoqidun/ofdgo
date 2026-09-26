@@ -75,20 +75,28 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		}
 		if source.ImageMask {
 			fill := mark.Style.Fill.RGB
+			tint := color.NRGBA64{
+				R: uint16(math.Round(fill[0] * 65535)),
+				G: uint16(math.Round(fill[1] * 65535)),
+				B: uint16(math.Round(fill[2] * 65535)),
+			}
 			if mark.Style.Fill.CMYK != nil {
-				if *mark.Style.Fill.CMYK != [4]float64{} {
-					return &pdfgo.UnsupportedError{Feature: "CMYK stencil image"}
-				}
-				fill = [3]float64{1, 1, 1}
+				components := *mark.Style.Fill.CMYK
+				tint = color.NRGBA64Model.Convert(color.CMYK{
+					C: uint8(math.Round(components[0] * 255)),
+					M: uint8(math.Round(components[1] * 255)),
+					Y: uint8(math.Round(components[2] * 255)),
+					K: uint8(math.Round(components[3] * 255)),
+				}).(color.NRGBA64)
 			}
 			stencil := image.NewNRGBA64(image.Rect(0, 0, source.Width, source.Height))
 			for y := 0; y < source.Height; y++ {
 				for x := 0; x < source.Width; x++ {
 					gray, _, _, _ := decoded.At(x, y).RGBA()
 					stencil.SetNRGBA64(x, y, color.NRGBA64{
-						R: uint16(math.Round(fill[0] * 65535)),
-						G: uint16(math.Round(fill[1] * 65535)),
-						B: uint16(math.Round(fill[2] * 65535)),
+						R: tint.R,
+						G: tint.G,
+						B: tint.B,
 						A: uint16(65535 - gray),
 					})
 				}
@@ -119,7 +127,11 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	m := p.matrix.Mul(mark.Matrix).Mul(pdfgo.Matrix{1, 0, 0, -1, 0, 1})
 	box := pdfBounds([]pdfgo.Point{m.Apply(pdfgo.Point{}), m.Apply(pdfgo.Point{X: 1}), m.Apply(pdfgo.Point{Y: 1}), m.Apply(pdfgo.Point{X: 1, Y: 1})})
 	alpha := int(math.Round(mark.Style.Fill.Alpha * 255))
-	object := ImageObject{Boundary: pdfBoundary(box), ResourceID: id, CTM: pdfNumbers(m[0], m[1], m[2], m[3], m[4]-box.X, m[5]-box.Y), Alpha: &alpha, Clips: p.clips(mark.Style.Clips, box)}
+	clips, err := p.clips(mark.Style.Clips, box)
+	if err != nil {
+		return err
+	}
+	object := ImageObject{Boundary: pdfBoundary(box), ResourceID: id, CTM: pdfNumbers(m[0], m[1], m[2], m[3], m[4]-box.X, m[5]-box.Y), Alpha: &alpha, Clips: clips}
 	p.objects = append(p.objects, GraphicObject{Type: "ImageObject", ImageObject: object})
 	p.report.ImageObjects++
 	return nil
@@ -130,6 +142,9 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 // 返回: error 错误信息
 func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	if mark.Font.Subtype == pdfgo.Name("Type3") {
+		if mark.Clip != nil {
+			return &pdfgo.UnsupportedError{Feature: "Type3 text clipping"}
+		}
 		if err := p.flushPath(); err != nil {
 			return err
 		}
@@ -155,22 +170,43 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	if err != nil {
 		return err
 	}
-	if (mark.Mode == 0 || mark.Mode == 2) && mark.Style.FillOverprint && pdfOverprintNeedsSeparation(mark.Style.Fill) || (mark.Mode == 1 || mark.Mode == 2) && mark.Style.StrokeOverprint && pdfOverprintNeedsSeparation(mark.Style.Stroke) {
+	paintMode := mark.Mode % 4
+	if (paintMode == 0 || paintMode == 2) && mark.Style.FillOverprint && pdfOverprintNeedsSeparation(mark.Style.Fill) || (paintMode == 1 || paintMode == 2) && mark.Style.StrokeOverprint && pdfOverprintNeedsSeparation(mark.Style.Stroke) {
 		return &pdfgo.UnsupportedError{Feature: "text color separation overprint"}
 	}
 	font := mark.Font
 	embedded := len(font.Program) != 0
-	if embedded && font.ProgramType != "FontFile2" && font.ProgramType != "OpenType" && font.ProgramType != "Type1C" && font.ProgramType != "CIDFontType0C" {
+	if embedded && font.ProgramType != "FontFile" && font.ProgramType != "FontFile2" && font.ProgramType != "OpenType" && font.ProgramType != "Type1C" && font.ProgramType != "CIDFontType0C" {
 		return &pdfgo.UnsupportedError{Feature: "font program " + string(font.ProgramType)}
 	}
 	id := p.fontIDs[font]
 	if id == "" {
 		var err error
 		if embedded {
+			var type1 *type1Program
+			if font.ProgramType == "FontFile" {
+				parsed, err := parseType1Program(font.Program)
+				if err != nil {
+					return fmt.Errorf("PDF font %s program: %w", font.Name, err)
+				}
+				type1 = &parsed
+				if p.type1Glyphs == nil {
+					p.type1Glyphs = make(map[*pdfgo.Font]map[string]uint16)
+				}
+				p.type1Glyphs[font] = parsed.glyphIDs()
+			}
 			var program []byte
-			program, err = pdfFontProgram(font)
+			var limit uint16
+			program, limit, err = pdfFontProgram(font, type1)
 			if err != nil {
 				return fmt.Errorf("PDF font %s program: %w", font.Name, err)
+			}
+			if limit != 0 {
+				if p.fontRepairLimit == nil {
+					p.fontRepairLimit = make(map[*pdfgo.Font]uint16)
+				}
+				p.fontRepairLimit[font] = limit
+				p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF embedded font lacks trailing side bearings; unused metrics reconstructed from glyph bounds"})
 			}
 			id, err = p.editor.AddFont(FontFile{Name: font.Name + ".ttf", Data: program}, 0)
 		} else {
@@ -180,6 +216,13 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			return fmt.Errorf("PDF font %s resource: %w", font.Name, err)
 		}
 		p.fontIDs[font] = id
+	}
+	if limit := p.fontRepairLimit[font]; limit != 0 {
+		for _, glyph := range mark.Glyphs {
+			if glyph.HasID && glyph.ID >= limit {
+				return &pdfgo.UnsupportedError{Feature: "embedded font glyph with missing side bearing"}
+			}
+		}
 	}
 	var metrics FontMetrics
 	var outline FontOutlines
@@ -208,6 +251,14 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	position := 0
 	for n, glyph := range mark.Glyphs {
 		gid := glyph.ID
+		if embedded && font.ProgramType == "FontFile" {
+			var found bool
+			gid, found = p.type1Glyphs[font][glyph.Name]
+			if !found {
+				return fmt.Errorf("missing Type1 glyph %q in PDF font %s", glyph.Name, font.Name)
+			}
+			glyph.HasID = true
+		}
 		if glyph.Text == "" && glyph.HasID {
 			character := getUnicodeFromName(glyph.Name)
 			if character == 0 {
@@ -256,7 +307,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		}
 	}
 	box := pdfBounds(points)
-	fill, stroke, visible := mark.Mode == 0 || mark.Mode == 2, mark.Mode == 1 || mark.Mode == 2, mark.Mode != 3
+	fill, stroke, visible := paintMode == 0 || paintMode == 2, paintMode == 1 || paintMode == 2, paintMode != 3
 	if stroke {
 		scale := math.Sqrt(math.Abs(m[0]*m[3] - m[1]*m[2]))
 		if scale == 0 || math.IsNaN(scale) || math.IsInf(scale, 0) {
@@ -292,44 +343,81 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	if err != nil {
 		return err
 	}
-	object.Clips = p.clips(mark.Style.Clips, box)
+	object.Clips, err = p.clips(mark.Style.Clips, box)
+	if err != nil {
+		return err
+	}
+	if mark.Clip != nil {
+		clipObject := object
+		clipObject.Clips = nil
+		clipObject.Fill, clipObject.Stroke = new(bool), new(bool)
+		*clipObject.Fill = true
+		*clipObject.Stroke = false
+		clipObject.Visible = nil
+		p.clipTexts[mark.Clip] = clipObject
+	}
 	p.objects = append(p.objects, GraphicObject{Type: "TextObject", TextObject: object})
 	p.report.TextObjects++
 	return nil
 }
 
 // pdfFontProgram 为PDF子集字体补齐封装表，保留字形轮廓和编号
-// 入参: source PDF字体
-// 返回: []byte 封装后的字体数据, error 错误信息
-func pdfFontProgram(source *pdfgo.Font) ([]byte, error) {
+// 入参: source PDF字体, type1 已解析的Type1程序，nil时按需解析
+// 返回: []byte 封装后的字体数据, uint16 缺失度量前的完整字形数, error 错误信息
+func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, error) {
 	program := source.Program
+	if source.ProgramType == "FontFile" {
+		if type1 == nil {
+			parsed, err := parseType1Program(program)
+			if err != nil {
+				return nil, 0, err
+			}
+			type1 = &parsed
+		}
+		var err error
+		program, err = type1.toCFF(source.Name)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
 	bareCFF := len(program) >= 4 && program[0] == 1 && program[1] == 0 && program[2] >= 4 && program[3] >= 1 && program[3] <= 4
 	if source.ProgramType == "Type1C" || source.ProgramType == "CIDFontType0C" || bareCFF {
 		var err error
-		program, _, err = wrapCFFToOTF(source.Program)
+		program, _, err = wrapCFFToOTF(program)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 	tables, err := fontFileTables(program, 0)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if len(tables["head"]) < 54 || len(tables["maxp"]) < 6 || len(tables["hhea"]) < 36 || len(tables["hmtx"]) == 0 {
-		return nil, fmt.Errorf("embedded PDF font lacks required metrics")
+		return nil, 0, fmt.Errorf("embedded PDF font lacks required metrics")
 	}
 	count := binary.BigEndian.Uint16(tables["maxp"][4:6])
 	if count == 0 {
-		return nil, fmt.Errorf("embedded PDF font has no glyphs")
+		return nil, 0, fmt.Errorf("embedded PDF font has no glyphs")
 	}
 	changed := false
+	var repairedLimit uint16
 	metrics := int(binary.BigEndian.Uint16(tables["hhea"][34:36]))
 	if metrics == 0 || metrics > int(count) {
-		return nil, fmt.Errorf("invalid embedded PDF font metric count")
+		return nil, 0, fmt.Errorf("invalid embedded PDF font metric count")
 	}
 	metricLength := 4*metrics + 2*(int(count)-metrics)
 	if len(tables["hmtx"]) < metricLength {
-		return nil, fmt.Errorf("incomplete embedded PDF font metrics")
+		if len(tables["hmtx"]) < 4*metrics || len(tables["hmtx"])%2 != 0 {
+			return nil, 0, fmt.Errorf("incomplete embedded PDF font metrics: have %d, need %d", len(tables["hmtx"]), metricLength)
+		}
+		limit := metrics + (len(tables["hmtx"])-4*metrics)/2
+		missing, err := pdfMissingLeftBearings(tables, limit, int(count))
+		if err != nil {
+			return nil, 0, err
+		}
+		tables["hmtx"] = append(bytes.Clone(tables["hmtx"]), missing...)
+		repairedLimit = uint16(limit)
+		changed = true
 	}
 	if len(tables["hmtx"]) > metricLength {
 		tables["hmtx"] = tables["hmtx"][:metricLength]
@@ -340,10 +428,10 @@ func pdfFontProgram(source *pdfgo.Font) ([]byte, error) {
 		for code := range source.Unicode {
 			glyphs, err := source.Decode([]byte(code))
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			if len(glyphs) != 1 || !glyphs[0].HasID {
-				return nil, &pdfgo.UnsupportedError{Feature: "font without explicit glyph mapping"}
+				return nil, 0, &pdfgo.UnsupportedError{Feature: "font without explicit glyph mapping"}
 			}
 			glyph := glyphs[0]
 			if utf8.RuneCountInString(glyph.Text) == 1 {
@@ -360,7 +448,7 @@ func pdfFontProgram(source *pdfgo.Font) ([]byte, error) {
 	if len(fontNamesFromTable(tables["name"])) == 0 {
 		name := utf16.Encode([]rune(source.Name))
 		if len(name) == 0 || len(name) > 32767 {
-			return nil, fmt.Errorf("PDF font name missing or excessive")
+			return nil, 0, fmt.Errorf("PDF font name missing or excessive")
 		}
 		data := make([]byte, 42+len(name)*2)
 		binary.BigEndian.PutUint16(data[2:], 3)
@@ -394,8 +482,72 @@ func pdfFontProgram(source *pdfgo.Font) ([]byte, error) {
 			changed = true
 		}
 	}
-	if !changed && len(program)%4 == 0 {
-		return program, nil
+	if !changed && !pdfSFNTMissingPadding(program) {
+		return program, repairedLimit, nil
 	}
-	return serializeOTF(tables)
+	result, err := serializeOTF(tables)
+	return result, repairedLimit, err
+}
+
+// pdfSFNTMissingPadding 判断字体表目录是否引用了未写入的末尾对齐字节
+// 入参: program OpenType字体数据
+// 返回: bool 是否需要重新封装
+func pdfSFNTMissingPadding(program []byte) bool {
+	if len(program) < 12 {
+		return true
+	}
+	count := int(binary.BigEndian.Uint16(program[4:6]))
+	if count > (len(program)-12)/16 {
+		return true
+	}
+	for index := range count {
+		record := program[12+16*index:]
+		offset := int(binary.BigEndian.Uint32(record[8:12]))
+		length := int(binary.BigEndian.Uint32(record[12:16]))
+		if offset > len(program) || length > len(program)-offset || (4-length%4)%4 > len(program)-offset-length {
+			return true
+		}
+	}
+	return false
+}
+
+// pdfMissingLeftBearings 从轮廓边界恢复缺失的尾部左侧边距
+// 入参: tables 字体表, start 首个缺失字形, count 字形总数
+// 返回: []byte 补齐的hmtx数据, error 无法读取轮廓
+func pdfMissingLeftBearings(tables map[string][]byte, start, count int) ([]byte, error) {
+	head, loca, glyf := tables["head"], tables["loca"], tables["glyf"]
+	if len(head) < 54 || len(glyf) == 0 {
+		return nil, fmt.Errorf("embedded PDF font lacks glyph outlines for missing metrics")
+	}
+	format := int(int16(binary.BigEndian.Uint16(head[50:52])))
+	entrySize := 2
+	if format == 1 {
+		entrySize = 4
+	} else if format != 0 {
+		return nil, fmt.Errorf("invalid embedded PDF font location format")
+	}
+	if len(loca) < (count+1)*entrySize {
+		return nil, fmt.Errorf("incomplete embedded PDF font glyph locations")
+	}
+	location := func(index int) int {
+		if format == 0 {
+			return int(binary.BigEndian.Uint16(loca[index*2:])) * 2
+		}
+		return int(binary.BigEndian.Uint32(loca[index*4:]))
+	}
+	result := make([]byte, 2*(count-start))
+	for index := start; index < count; index++ {
+		from, to := location(index), location(index+1)
+		if from > to || to > len(glyf) {
+			return nil, fmt.Errorf("invalid embedded PDF font glyph location")
+		}
+		if from == to {
+			continue
+		}
+		if to-from < 10 {
+			return nil, fmt.Errorf("incomplete embedded PDF font glyph outline")
+		}
+		copy(result[(index-start)*2:], glyf[from+2:from+4])
+	}
+	return result, nil
 }

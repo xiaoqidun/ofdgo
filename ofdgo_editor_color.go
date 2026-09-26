@@ -302,22 +302,40 @@ func collectPaintReferences(paint *FillColor, used map[string]bool) {
 // collectObjectReferences 收集对象和嵌套绘制内容引用的资源
 // 入参: object 图形对象, used 引用集合
 func collectObjectReferences(object GraphicObject, used map[string]bool) {
+	var clips *Clips
 	switch object.Type {
-	case "TextObject":
+	case "TextObject", "Text":
 		used[object.TextObject.Font], used[object.TextObject.DrawParam] = true, true
 		collectPaintReferences(object.TextObject.FillColor, used)
 		collectPaintReferences((*FillColor)(object.TextObject.StrokeColor), used)
+		clips = object.TextObject.Clips
 	case "PathObject", "Path":
 		used[object.PathObject.DrawParam] = true
 		collectPaintReferences(object.PathObject.FillColor, used)
 		collectPaintReferences((*FillColor)(object.PathObject.StrokeColor), used)
+		clips = object.PathObject.Clips
 	case "ImageObject":
 		used[object.ImageObject.ResourceID], used[object.ImageObject.ImageMask] = true, true
 		if object.ImageObject.Border != nil {
 			collectPaintReferences((*FillColor)(object.ImageObject.Border.BorderColor), used)
 		}
+		clips = object.ImageObject.Clips
 	case "CompositeObject", "CompositeGraphicUnit":
 		collectCompositeReferences(object.CompositeGraphicUnit, used)
+	}
+	if clips == nil {
+		return
+	}
+	for _, clip := range clips.Clip {
+		for _, area := range clip.Area {
+			used[area.DrawParam] = true
+			for _, path := range area.Path {
+				collectObjectReferences(GraphicObject{Type: "Path", PathObject: path}, used)
+			}
+			for _, text := range area.Text {
+				collectObjectReferences(GraphicObject{Type: "Text", TextObject: text}, used)
+			}
+		}
 	}
 }
 

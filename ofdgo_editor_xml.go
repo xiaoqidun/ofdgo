@@ -238,8 +238,11 @@ func editorXMLAttributes(node *editorXML, allowed string) bool {
 func editorXMLSupported(node *editorXML) bool {
 	var allowed, children string
 	switch node.name.Local {
-	case "TextObject":
-		allowed, children = "ID Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Italic Visible Stroke Fill Alpha", "Clips FillColor StrokeColor TextCode"
+	case "TextObject", "Text":
+		allowed, children = "ID Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Italic Visible Stroke Fill Alpha", "Clips FillColor StrokeColor CGTransform TextCode"
+	case "CGTransform":
+		allowed, children = "CodePosition CodeCount GlyphCount", "Glyphs"
+	case "Glyphs":
 	case "PathObject", "Path":
 		allowed, children = "Boundary CTM LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha", "StrokeColor FillColor AbbreviatedData"
 		if node.name.Local == "PathObject" {
@@ -257,7 +260,7 @@ func editorXMLSupported(node *editorXML) bool {
 	case "Clip":
 		children = "Area"
 	case "Area":
-		allowed, children = "CTM", "Path"
+		allowed, children = "CTM", "Path Text"
 	case "AbbreviatedData":
 	default:
 		return false

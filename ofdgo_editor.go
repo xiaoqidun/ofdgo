@@ -767,7 +767,7 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 	return cloneEditorObject(object)
 }
 
-// validateObjectClips 校验对象的路径裁剪，仅接受无资源引用及嵌套裁剪的路径
+// validateObjectClips 校验对象的路径与文字裁剪，拒绝嵌套裁剪和无效资源
 // 入参: clips 裁剪集合，nil表示无裁剪
 // 返回: error 错误信息
 func (e *Editor) validateObjectClips(clips *Clips) error {
@@ -782,8 +782,8 @@ func (e *Editor) validateObjectClips(clips *Clips) error {
 			return fmt.Errorf("clip must contain an area")
 		}
 		for _, area := range clip.Area {
-			if len(area.Path) == 0 || area.DrawParam != "" || len(area.Text) != 0 {
-				return fmt.Errorf("clips only support paths without draw parameter references")
+			if len(area.Path)+len(area.Text) == 0 || area.DrawParam != "" {
+				return fmt.Errorf("clip area requires paths or text without draw parameter references")
 			}
 			if area.CTM != "" {
 				if _, err := creationNumbers(area.CTM, 6); err != nil {
@@ -795,6 +795,14 @@ func (e *Editor) validateObjectClips(clips *Clips) error {
 					return fmt.Errorf("clip paths must not have object IDs or nested clips")
 				}
 				if _, err := e.prepareObject("", GraphicObject{Type: "PathObject", PathObject: path}); err != nil {
+					return err
+				}
+			}
+			for _, text := range area.Text {
+				if text.ID != "" || text.Clips != nil || text.Actions != nil {
+					return fmt.Errorf("clip text must not have object IDs, actions or nested clips")
+				}
+				if _, err := e.prepareObject("", GraphicObject{Type: "TextObject", TextObject: text}); err != nil {
 					return err
 				}
 			}

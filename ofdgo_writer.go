@@ -656,7 +656,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.add("xmlns:ofd", ofdNamespace)
 	}
 	switch object.Type {
-	case "TextObject":
+	case "TextObject", "Text":
 		obj := object.TextObject
 		attrs.add("ID", obj.ID)
 		attrs.add("DrawParam", obj.DrawParam)
@@ -746,7 +746,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		x.color("StrokeColor", stroke)
 		x.color("FillColor", fill)
 		x.text("AbbreviatedData", object.PathObject.AbbreviatedData)
-	} else if object.Type == "TextObject" {
+	} else if object.Type == "TextObject" || object.Type == "Text" {
 		x.clips(object.TextObject.Clips)
 		x.color("FillColor", fill)
 		x.color("StrokeColor", stroke)
@@ -777,7 +777,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 	x.end(object.Type)
 }
 
-// clips 写出对象路径裁剪，保留裁剪集合、区域及路径的变换
+// clips 写出对象裁剪，保留区域内的路径与文字
 // 入参: clips 裁剪集合，nil不输出节点
 func (x *ofdXML) clips(clips *Clips) {
 	if clips == nil {
@@ -795,6 +795,9 @@ func (x *ofdXML) clips(clips *Clips) {
 			x.start("Area", attrs)
 			for _, path := range area.Path {
 				x.object(GraphicObject{Type: "Path", PathObject: path}, false)
+			}
+			for _, text := range area.Text {
+				x.object(GraphicObject{Type: "Text", TextObject: text}, false)
 			}
 			x.end("Area")
 		}

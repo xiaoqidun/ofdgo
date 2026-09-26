@@ -555,6 +555,7 @@ func (e *Editor) objectCapabilities(object GraphicObject, orderable map[*editorX
 	}
 	if object.Type == "TextObject" {
 		all.TextContent = all.Update && object.TextObject.ReadDirection == 0 && object.TextObject.CharDirection == 0 && (all.LayoutKnown || len(object.TextObject.CGTransform) == 0)
+		all.Reflow = all.Reflow && (all.LayoutKnown || len(object.TextObject.CGTransform) == 0)
 		all.RewriteText = all.TextContent
 		if !all.RewriteText {
 			text := object.TextObject

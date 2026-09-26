@@ -39,12 +39,13 @@ func wrapCFFToOTF(cffData []byte) ([]byte, map[rune]uint16, error) {
 	if err == nil {
 		cffData = sanitized
 	}
+	cffData, err = normalizeCFFDotsection(cffData)
+	if err != nil {
+		return nil, nil, err
+	}
 	widths, err := parseCFFWidths(cffData, numGlyphs)
 	if err != nil {
-		widths = make([]uint16, numGlyphs)
-		for i := range widths {
-			widths[i] = 500
-		}
+		return nil, nil, fmt.Errorf("CFF glyph widths: %w", err)
 	}
 	var unitsPerEm uint16 = 1000
 	if len(cffData) > 4 {
@@ -81,6 +82,144 @@ func wrapCFFToOTF(cffData []byte) ([]byte, map[rune]uint16, error) {
 
 // cffDict 使用float64存储所有数值，以统一处理整数和实数
 type cffDict map[int][]float64
+
+// normalizeCFFDotsection 移除旧版Type2字形程序中无效果的dotsection指令
+// 入参: data CFF字体数据
+// 返回: []byte 标准化后的CFF数据, error 错误信息
+func normalizeCFFDotsection(data []byte) ([]byte, error) {
+	if len(data) < 4 || int(data[2]) >= len(data) {
+		return nil, fmt.Errorf("invalid CFF header")
+	}
+	headerEnd := int(data[2])
+	_, nameSize := getCFFIndexCount(data, headerEnd)
+	topStart := headerEnd + nameSize
+	topData, topSize := getCFFIndexData(data, topStart)
+	if topData == nil || topStart+topSize > len(data) {
+		return nil, fmt.Errorf("invalid CFF top dictionary")
+	}
+	dict := parseCFFDict(topData)
+	charOffset := dict[17]
+	if len(charOffset) != 1 {
+		return nil, fmt.Errorf("missing CFF charstrings")
+	}
+	charStart := int(charOffset[0])
+	_, charSize := getCFFIndexCount(data, charStart)
+	if charStart < topStart+topSize || charSize == 0 || charStart+charSize > len(data) {
+		return nil, fmt.Errorf("invalid CFF charstrings")
+	}
+	if !bytes.Contains(data[charStart:charStart+charSize], []byte{12, 0}) {
+		return data, nil
+	}
+	chars := readCFFIndexItems(data, charStart)
+	changed := false
+	for index, charstring := range chars {
+		normalized, removed, err := stripType2Dotsection(charstring)
+		if err != nil {
+			return nil, err
+		}
+		chars[index] = normalized
+		changed = changed || removed
+	}
+	if !changed {
+		return data, nil
+	}
+	encodedChars := encodeCFFIndex(chars)
+	topEnd := topStart + topSize
+	newTop := encodeCFFIndex([][]byte{encodeCFFDict(dict)})
+	for range 6 {
+		shift := len(newTop) - topSize
+		shiftTail := shift + len(encodedChars) - charSize
+		for _, op := range []int{15, 16, 17, 1236, 1237} {
+			values := dict[op]
+			if len(values) != 1 || op == 15 && values[0] <= 2 || op == 16 && values[0] <= 1 {
+				continue
+			}
+			original := parseCFFDict(topData)[op]
+			offset := int(original[0])
+			if offset >= charStart+charSize {
+				dict[op] = []float64{float64(offset + shiftTail)}
+			} else if offset >= topEnd {
+				dict[op] = []float64{float64(offset + shift)}
+			}
+		}
+		if values := dict[18]; len(values) == 2 {
+			original := parseCFFDict(topData)[18]
+			offset := int(original[1])
+			if offset >= charStart+charSize {
+				dict[18] = []float64{values[0], float64(offset + shiftTail)}
+			}
+		}
+		updated := encodeCFFIndex([][]byte{encodeCFFDict(dict)})
+		if len(updated) == len(newTop) {
+			newTop = updated
+			break
+		}
+		newTop = updated
+	}
+	result := make([]byte, 0, len(data)+len(newTop)-topSize+len(encodedChars)-charSize)
+	result = append(result, data[:topStart]...)
+	result = append(result, newTop...)
+	result = append(result, data[topEnd:charStart]...)
+	result = append(result, encodedChars...)
+	result = append(result, data[charStart+charSize:]...)
+	return result, nil
+}
+
+// stripType2Dotsection 保留字形指令与掩码并移除无效果的旧指令
+// 入参: data Type2字形程序
+// 返回: []byte 标准化后的程序, bool 是否发生变更, error 错误信息
+func stripType2Dotsection(data []byte) ([]byte, bool, error) {
+	var result []byte
+	stack, hints := 0, 0
+	for index := 0; index < len(data); {
+		start := index
+		operator := int(data[index])
+		index++
+		switch {
+		case operator == 28:
+			index += 2
+			stack++
+		case operator == 255:
+			index += 4
+			stack++
+		case operator >= 247 && operator <= 254:
+			index++
+			stack++
+		case operator >= 32:
+			stack++
+		case operator == 12:
+			if index >= len(data) {
+				return nil, false, fmt.Errorf("incomplete Type2 operator")
+			}
+			operator = 1200 + int(data[index])
+			index++
+			if operator == 1200 {
+				if result == nil {
+					result = append(make([]byte, 0, len(data)-2), data[:start]...)
+				}
+				continue
+			}
+		default:
+			if operator == 1 || operator == 3 || operator == 18 || operator == 23 || operator == 19 || operator == 20 {
+				hints += stack / 2
+			}
+			if operator == 19 || operator == 20 {
+				index += (hints + 7) / 8
+			}
+			stack = 0
+		}
+		if index > len(data) {
+			return nil, false, fmt.Errorf("incomplete Type2 charstring")
+		}
+		if result != nil {
+			result = append(result, data[start:index]...)
+		}
+	}
+	if result == nil {
+		return data, false, nil
+	}
+	return result, true, nil
+}
 
 // sanitizeCFF 尝试清洗CFF数据，转换CID字体并合并FontMatrix
 // 入参: data 原始CFF数据
@@ -1501,6 +1640,26 @@ func getUnicodeFromName(name string) rune {
 		return '.'
 	case "slash":
 		return '/'
+	case "zero":
+		return '0'
+	case "one":
+		return '1'
+	case "two":
+		return '2'
+	case "three":
+		return '3'
+	case "four":
+		return '4'
+	case "five":
+		return '5'
+	case "six":
+		return '6'
+	case "seven":
+		return '7'
+	case "eight":
+		return '8'
+	case "nine":
+		return '9'
 	case "colon":
 		return ':'
 	case "semicolon":

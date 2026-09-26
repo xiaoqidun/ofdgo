@@ -48,24 +48,27 @@ type PDFImportReport struct {
 
 // pdfImporter 保存单次转换的对象与资源状态
 type pdfImporter struct {
-	ctx         context.Context
-	reader      *pdfgo.Reader
-	editor      *Editor
-	report      PDFImportReport
-	matrix      pdfgo.Matrix
-	page        int
-	fontIDs     map[*pdfgo.Font]string
-	fontMetrics map[string]FontMetrics
-	cmykSpace   string
-	objects     []GraphicObject
-	pages       map[pdfgo.Reference]*pdfgo.Page
-	pageIDs     map[pdfgo.Reference]string
-	imageIDs    map[*pdfgo.Stream]string
-	maskClips   map[*pdfgo.SoftMask]pdfgo.Path
-	pageBox     pdfgo.Rectangle
-	pageWidth   float64
-	pageHeight  float64
-	pendingPath *pdfgo.PathMark
+	ctx             context.Context
+	reader          *pdfgo.Reader
+	editor          *Editor
+	report          PDFImportReport
+	matrix          pdfgo.Matrix
+	page            int
+	fontIDs         map[*pdfgo.Font]string
+	fontMetrics     map[string]FontMetrics
+	fontRepairLimit map[*pdfgo.Font]uint16
+	type1Glyphs     map[*pdfgo.Font]map[string]uint16
+	clipTexts       map[*pdfgo.TextClip]TextObject
+	cmykSpace       string
+	objects         []GraphicObject
+	pages           map[pdfgo.Reference]*pdfgo.Page
+	pageIDs         map[pdfgo.Reference]string
+	imageIDs        map[*pdfgo.Stream]string
+	maskClips       map[*pdfgo.SoftMask]pdfgo.Path
+	pageBox         pdfgo.Rectangle
+	pageWidth       float64
+	pageHeight      float64
+	pendingPath     *pdfgo.PathMark
 }
 
 // ImportPDF 将PDF内容转换为独立OFD编辑文档，失败时不返回部分结果
@@ -122,6 +125,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		importer.pageWidth = width
 		importer.pageHeight = height
 		importer.maskClips = make(map[*pdfgo.SoftMask]pdfgo.Path)
+		importer.clipTexts = make(map[*pdfgo.TextClip]TextObject)
 		visitor := pdfgo.Visitor{Path: importer.path, Text: importer.text, Image: importer.image}
 		visitor.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
 			return importer.group(mark, walk, visitor)
@@ -293,28 +297,44 @@ func (p *pdfImporter) pathData(path pdfgo.Path, origin Box) string {
 
 // clips 保持裁剪路径的交集，不随对象CTM重复变换
 // 入参: paths 裁剪路径, origin 对象边界
-// 返回: *Clips OFD裁剪区域，无裁剪时为空
-func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) *Clips {
+// 返回: *Clips OFD裁剪区域，无裁剪时为空, error 未解析的裁剪字形
+func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 	if len(paths) == 0 {
-		return nil
+		return nil, nil
 	}
 	flag := false
 	clips := &Clips{TransFlag: &flag}
 	for _, path := range paths {
+		area := ClipArea{}
 		var points []pdfgo.Point
 		for _, segment := range path.Segments {
 			for _, point := range segment.Points {
 				points = append(points, p.matrix.Apply(point))
 			}
 		}
-		box := pdfBounds(points)
-		rule := "NonZero"
-		if path.EvenOdd {
-			rule = "Even-Odd"
+		if len(path.Segments) != 0 {
+			box := pdfBounds(points)
+			rule := "NonZero"
+			if path.EvenOdd {
+				rule = "Even-Odd"
+			}
+			area.Path = append(area.Path, PathObject{Boundary: pdfBoundary(Box{box.X - origin.X, box.Y - origin.Y, box.W, box.H}), AbbreviatedData: p.pathData(path, box), Rule: rule})
 		}
-		clips.Clip = append(clips.Clip, Clip{Area: []ClipArea{{Path: []PathObject{{Boundary: pdfBoundary(Box{box.X - origin.X, box.Y - origin.Y, box.W, box.H}), AbbreviatedData: p.pathData(path, box), Rule: rule}}}}})
+		for _, mark := range path.Text {
+			object, ok := p.clipTexts[mark]
+			if !ok {
+				return nil, fmt.Errorf("missing PDF text clipping glyphs")
+			}
+			box, err := ParseBox(object.Boundary)
+			if err != nil {
+				return nil, err
+			}
+			object.Boundary = pdfBoundary(Box{box.X - origin.X, box.Y - origin.Y, box.W, box.H})
+			area.Text = append(area.Text, object)
+		}
+		clips.Clip = append(clips.Clip, Clip{Area: []ClipArea{area}})
 	}
-	return clips
+	return clips, nil
 }
 
 // path 合并相同状态下的不透明描边，保留独立子路径与绘制顺序
@@ -393,7 +413,11 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 		return err
 	}
 	strokeColor := StrokeColor(*strokePaint)
-	object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: p.pathData(mark.Path, box), Fill: &mark.Fill, Stroke: &mark.Stroke, FillColor: fillColor, StrokeColor: &strokeColor, LineWidth: mark.Style.LineWidth * scale, Cap: []string{"Butt", "Round", "Square"}[mark.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[mark.Style.Join], MiterLimit: mark.Style.MiterLimit, Clips: p.clips(mark.Style.Clips, box)}
+	clips, err := p.clips(mark.Style.Clips, box)
+	if err != nil {
+		return err
+	}
+	object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: p.pathData(mark.Path, box), Fill: &mark.Fill, Stroke: &mark.Stroke, FillColor: fillColor, StrokeColor: &strokeColor, LineWidth: mark.Style.LineWidth * scale, Cap: []string{"Butt", "Round", "Square"}[mark.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[mark.Style.Join], MiterLimit: mark.Style.MiterLimit, Clips: clips}
 	object.LineWidthSet = object.LineWidth == 0
 	if mark.Path.EvenOdd {
 		object.Rule = "Even-Odd"
