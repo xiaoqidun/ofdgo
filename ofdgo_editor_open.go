@@ -34,6 +34,7 @@ type editorSource struct {
 	reader           *Reader
 	document         *Document
 	info             DocInfo
+	fallbackDocID    string
 	directory        string
 	pages            map[string]*editorSourcePage
 	origins          map[string]*editorObjectOrigin
@@ -142,9 +143,9 @@ func (r *Reader) Editor() (*Editor, error) {
 	}
 	e := NewEditor()
 	e.encryption = r.encryption
-	e.Info, e.maxID = cloneEditorData(*info), maximum
 	directory := cleanPackagePath(reader.RootDir)
-	e.source = &editorSource{reader: reader, document: doc, info: cloneEditorData(*info), directory: directory, pages: make(map[string]*editorSourcePage, len(doc.Pages.Page)), origins: make(map[string]*editorObjectOrigin)}
+	e.source = &editorSource{reader: reader, document: doc, info: cloneEditorData(*info), fallbackDocID: e.Info.DocID, directory: directory, pages: make(map[string]*editorSourcePage, len(doc.Pages.Page)), origins: make(map[string]*editorObjectOrigin)}
+	e.Info, e.maxID = cloneEditorData(*info), maximum
 	e.pages = make([]PageContent, len(doc.Pages.Page))
 	sourcePages := make([]editorSourcePage, len(doc.Pages.Page))
 	for i, page := range doc.Pages.Page {

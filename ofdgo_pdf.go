@@ -69,6 +69,7 @@ type pdfImporter struct {
 	pageWidth       float64
 	pageHeight      float64
 	pendingPath     *pdfgo.PathMark
+	warning         func(pdfgo.Diagnostic)
 }
 
 // ImportPDF 将PDF内容转换为独立OFD编辑文档，失败时不返回部分结果
@@ -92,6 +93,12 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		editor.SetRenderBackends(*options.Backends)
 	}
 	importer := pdfImporter{ctx: ctx, reader: reader, editor: editor, fontIDs: map[*pdfgo.Font]string{}, fontMetrics: map[string]FontMetrics{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
+	if !options.Strict {
+		importer.warning = func(warning pdfgo.Diagnostic) {
+			warning.Page = importer.page + 1
+			importer.report.Warnings = append(importer.report.Warnings, warning)
+		}
+	}
 	if options.OnProgress != nil {
 		if err := options.OnProgress("pages", 0, 0); err != nil {
 			return nil, PDFImportReport{}, err
@@ -126,15 +133,9 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		importer.pageHeight = height
 		importer.maskClips = make(map[*pdfgo.SoftMask]pdfgo.Path)
 		importer.clipTexts = make(map[*pdfgo.TextClip]TextObject)
-		visitor := pdfgo.Visitor{Path: importer.path, Text: importer.text, Image: importer.image}
+		visitor := pdfgo.Visitor{Path: importer.path, Text: importer.text, Image: importer.image, Warning: importer.warning}
 		visitor.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
 			return importer.group(mark, walk, visitor)
-		}
-		if !options.Strict {
-			visitor.Warning = func(warning pdfgo.Diagnostic) {
-				warning.Page = index + 1
-				importer.report.Warnings = append(importer.report.Warnings, warning)
-			}
 		}
 		if err := reader.WalkPage(ctx, page, visitor); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)

@@ -64,7 +64,10 @@ func (b CanvasBackend) Render(page *RasterPage) (image.Image, error) {
 	masks := renderCache[[32]byte, *image.Alpha]{limit: 16 << 20}
 	for i, cmd := range page.Commands {
 		if cmd.Image != nil {
-			source := cmd.Image
+			source, err := imagePixelData(cmd.Image)
+			if err != nil {
+				return nil, fmt.Errorf("canvas image %d: %w", i, err)
+			}
 			if _, linear := space.(canvas.LinearColorSpace); !linear {
 				converted := image.NewRGBA(source.Bounds())
 				for y := source.Bounds().Min.Y; y < source.Bounds().Max.Y; y++ {

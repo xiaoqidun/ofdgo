@@ -450,6 +450,24 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		return 0, err
 	}
 	reader := e.source.reader
+	if len(parts) != 0 || len(removed) != 0 {
+		name := "OFD.xml"
+		if file, ok := reader.packageFile(name); ok {
+			name = cleanPackagePath(file.Name)
+		}
+		data, ok := parts[name]
+		if !ok {
+			data, err = reader.readFile(name)
+			if err != nil {
+				return 0, err
+			}
+		}
+		data, err = editorCreatorXML(data, e.source.fallbackDocID)
+		if err != nil {
+			return 0, err
+		}
+		parts[name] = data
+	}
 	remaining := maps.Clone(reader.files)
 	if remaining == nil {
 		remaining = make(map[string][]byte)

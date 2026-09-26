@@ -22,24 +22,16 @@ import (
 	"reflect"
 )
 
-// sourceInfoXML 更新公开元数据，保留原创建程序和未识别字段
+// sourceInfoXML 更新文档描述字段，保留未识别内容
 // 返回: []byte 根索引XML, error 错误信息
 func (e *Editor) sourceInfoXML() ([]byte, error) {
 	data, err := e.source.reader.readFile("OFD.xml")
 	if err != nil {
 		return nil, err
 	}
-	root, err := parseEditorXML(data)
+	data, info, err := editorDocInfoXML(data, e.source.fallbackDocID)
 	if err != nil {
 		return nil, err
-	}
-	body := root.child("DocBody")
-	if body == nil {
-		return nil, fmt.Errorf("document has no DocBody")
-	}
-	info := body.child("DocInfo")
-	if info == nil {
-		return nil, fmt.Errorf("document has no DocInfo")
 	}
 	before, after := e.source.info, e.Info
 	var values [][2]string
@@ -54,13 +46,51 @@ func (e *Editor) sourceInfoXML() ([]byte, error) {
 	}
 	data = editorXMLSetText(data, info, values)
 	if !reflect.DeepEqual(before.CustomDatas, after.CustomDatas) {
-		root, err = parseEditorXML(data)
+		root, err := parseEditorXML(data)
 		if err != nil {
 			return nil, err
 		}
 		return editorCustomDatas(data, root.child("DocBody").child("DocInfo"), after.CustomDatas)
 	}
 	return data, nil
+}
+
+// editorCreatorXML 更新首份文档的制作软件，移除原软件版本，保留其余根索引内容
+// 入参: data 当前根索引XML, docID 缺少文档描述时使用的标识
+// 返回: []byte 修改后的XML, error 解析错误
+func editorCreatorXML(data []byte, docID string) ([]byte, error) {
+	data, info, err := editorDocInfoXML(data, docID)
+	if err != nil {
+		return nil, err
+	}
+	return editorXMLSetText(data, info, [][2]string{{"Creator", ofdCreator}, {"CreatorVersion", ""}}), nil
+}
+
+// editorDocInfoXML 获取文档描述，修改缺少描述的源文件时补建标准容器及标识
+// 入参: data 根索引XML, docID 缺少文档描述时使用的标识
+// 返回: []byte 根索引XML, *editorXML 描述节点, error 解析错误
+func editorDocInfoXML(data []byte, docID string) ([]byte, *editorXML, error) {
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	body := root.child("DocBody")
+	if body == nil {
+		return nil, nil, fmt.Errorf("document has no DocBody")
+	}
+	if info := body.child("DocInfo"); info != nil {
+		return data, info, nil
+	}
+	info, err := editorXMLContainer("DocInfo", nil, editorXMLText("DocID", docID))
+	if err != nil {
+		return nil, nil, err
+	}
+	data = editorPatchXML(data, []editorXMLPatch{{body.open, body.open, info}})
+	root, err = parseEditorXML(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	return data, root.child("DocBody").child("DocInfo"), nil
 }
 
 // editorCustomDatas 更新自定义字段，保留原字段及容器的扩展内容

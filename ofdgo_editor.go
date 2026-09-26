@@ -156,6 +156,7 @@ func NewEditor() *Editor {
 		Info: DocInfo{
 			DocID:        hex.EncodeToString(id[:]),
 			CreationDate: time.Now().Format("2006-01-02"),
+			Creator:      ofdCreator,
 		},
 		fonts:       make(map[string]*FontResource),
 		images:      make(map[string]image.Point),
@@ -307,14 +308,10 @@ func (e *Editor) DeletePages(indexes []int) error {
 	indexes = slices.Clone(indexes)
 	slices.Sort(indexes)
 	saved := make([]PageContent, len(indexes))
-	for i, index := range indexes {
-		page, err := e.page(index)
-		if err != nil {
-			return err
-		}
-		saved[i] = copyEditorPage(*page)
-	}
 	remove := func(e *Editor) {
+		for i, index := range indexes {
+			saved[i] = copyEditorPage(e.pages[index])
+		}
 		e.removedPages = maps.Clone(e.removedPages)
 		if e.removedPages == nil {
 			e.removedPages = make(map[string]bool)
@@ -377,11 +374,11 @@ func (e *Editor) validatePageIndexes(indexes []int) error {
 // 入参: from 原页面索引, to 移动后的页面索引
 // 返回: error 错误信息
 func (e *Editor) MovePage(from, to int) error {
-	if _, err := e.page(from); err != nil {
-		return err
+	if from < 0 || from >= len(e.pages) {
+		return fmt.Errorf("page index %d out of range", from)
 	}
-	if _, err := e.page(to); err != nil {
-		return err
+	if to < 0 || to >= len(e.pages) {
+		return fmt.Errorf("page index %d out of range", to)
 	}
 	if from == to {
 		return nil

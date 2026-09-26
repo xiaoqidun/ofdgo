@@ -16,7 +16,9 @@ package ofdgo
 
 import (
 	"archive/zip"
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/jpeg"
 	"image/png"
@@ -26,6 +28,53 @@ import (
 
 	"golang.org/x/image/draw"
 )
+
+// creatorXMP 记录独立导出文件的制作软件
+const creatorXMP = `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/"><xmp:CreatorTool>` + ofdCreator + `</xmp:CreatorTool></rdf:Description></rdf:RDF>`
+
+// imageMetadataWriter 在图像固定头之后插入元数据，不缓存图像主体
+type imageMetadataWriter struct {
+	writer io.Writer
+	skip   int
+	data   []byte
+}
+
+// Write 交付图像数据并在头部边界写入元数据
+// 入参: data 编码后的图像片段
+// 返回: int 已处理字节数, error 写入错误
+func (w *imageMetadataWriter) Write(data []byte) (int, error) {
+	n := 0
+	if w.skip > 0 {
+		size := min(w.skip, len(data))
+		written, err := w.writer.Write(data[:size])
+		n, w.skip = written, w.skip-written
+		data = data[written:]
+		if err != nil {
+			return n, err
+		}
+		if written != size {
+			return n, io.ErrShortWrite
+		}
+	}
+	if w.skip == 0 && w.data != nil {
+		written, err := w.writer.Write(w.data)
+		if err != nil {
+			return n, err
+		}
+		if written != len(w.data) {
+			return n, io.ErrShortWrite
+		}
+		w.data = nil
+	}
+	if len(data) == 0 {
+		return n, nil
+	}
+	written, err := w.writer.Write(data)
+	if err == nil && written != len(data) {
+		err = io.ErrShortWrite
+	}
+	return n + written, err
+}
 
 // RenderTo 按格式渲染单页，JPEG使用95画质
 // 入参: page 页面内容, writer 输出流, format svg、pdf、eps、png、jpg、jpeg或txt
@@ -189,7 +238,13 @@ func (r *Renderer) RenderToPNG(page *PageContent, writer io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return png.Encode(writer, img)
+	text := []byte("Software\x00" + ofdCreator)
+	chunk := make([]byte, len(text)+12)
+	binary.BigEndian.PutUint32(chunk, uint32(len(text)))
+	copy(chunk[4:], "tEXt")
+	copy(chunk[8:], text)
+	binary.BigEndian.PutUint32(chunk[len(chunk)-4:], crc32.ChecksumIEEE(chunk[4:len(chunk)-4]))
+	return png.Encode(&imageMetadataWriter{writer: writer, skip: 33, data: chunk}, img)
 }
 
 // RenderToJPEG 渲染为白底JPEG，像素尺寸由DPI决定
@@ -200,7 +255,12 @@ func (r *Renderer) RenderToJPEG(page *PageContent, writer io.Writer, options *jp
 	if err != nil {
 		return err
 	}
-	return jpeg.Encode(writer, fillWhiteBackground(img), options)
+	metadata := []byte("http://ns.adobe.com/xap/1.0/\x00" + creatorXMP)
+	segment := make([]byte, len(metadata)+4)
+	segment[0], segment[1] = 0xff, 0xe1
+	binary.BigEndian.PutUint16(segment[2:], uint16(len(metadata)+2))
+	copy(segment[4:], metadata)
+	return jpeg.Encode(&imageMetadataWriter{writer: writer, skip: 2, data: segment}, fillWhiteBackground(img), options)
 }
 
 // fillWhiteBackground 填充白色背景，复用当前导出图片的RGBA像素

@@ -23,17 +23,20 @@ import (
 	"strconv"
 )
 
+// type1Program 保存解密后的Type1字形与子程序
 type type1Program struct {
 	glyphs []type1Glyph
 	subrs  [][]byte
 	lenIV  int
 }
 
+// type1Glyph 保存字形名称及指令
 type type1Glyph struct {
 	name string
 	data []byte
 }
 
+// type1Scanner 按词项和显式长度读取Type1程序
 type type1Scanner struct {
 	data []byte
 	pos  int
@@ -235,10 +238,12 @@ func type1HexEncoded(data []byte) bool {
 	return false
 }
 
+// type1HexDigit 判断字节是否为十六进制数字
 func type1HexDigit(value byte) bool {
 	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
 }
 
+// type1Space 判断PostScript空白字节
 func type1Space(value byte) bool {
 	return value == ' ' || value == '\t' || value == '\r' || value == '\n' || value == '\f' || value == 0
 }
@@ -293,10 +298,12 @@ func (s *type1Scanner) binary(length int) ([]byte, error) {
 	return data, nil
 }
 
+// type1BinaryStart 判断Type1二进制数据起始操作符
 func type1BinaryStart(token string) bool {
 	return token == "RD" || token == "-|"
 }
 
+// type1Outline 保存字形指令的操作数栈及轮廓位置
 type type1Outline struct {
 	program    *type1Program
 	args       []float64
@@ -381,9 +388,10 @@ func (s *type1Outline) run(data []byte, depth int) (bool, error) {
 			if len(s.args) == 0 {
 				return false, fmt.Errorf("Type1 callsubr has no index")
 			}
-			index := int(s.args[len(s.args)-1])
+			value := s.args[len(s.args)-1]
+			index := int(value)
 			s.args = s.args[:len(s.args)-1]
-			if index < 0 || index >= len(s.program.subrs) || s.program.subrs[index] == nil {
+			if value != float64(index) || index < 0 || index >= len(s.program.subrs) || s.program.subrs[index] == nil {
 				return false, fmt.Errorf("invalid Type1 subroutine index %d", index)
 			}
 			ended, err := s.run(s.program.subrs[index], depth+1)
@@ -413,9 +421,12 @@ func (s *type1Outline) run(data []byte, depth int) (bool, error) {
 // 返回: error 错误信息
 func (s *type1Outline) operator(op int) error {
 	a := s.args
-	s.args = nil
+	s.args = a[:0]
 	switch op {
-	case 1, 3, 1200, 1201, 1202:
+	case 1200:
+		s.args = a
+		return nil
+	case 1, 3, 1201, 1202:
 		return nil
 	case 13:
 		if s.defined || len(a) != 2 {
@@ -501,18 +512,21 @@ func (s *type1Outline) operator(op int) error {
 	case 9:
 		s.open = false
 	case 1212:
-		if len(a) != 2 || a[1] == 0 {
+		if len(a) < 2 || a[len(a)-1] == 0 {
 			return fmt.Errorf("invalid Type1 division")
 		}
-		s.args = []float64{a[0] / a[1]}
+		a[len(a)-2] /= a[len(a)-1]
+		s.args = a[:len(a)-1]
 	case 1216:
 		if len(a) < 2 {
 			return fmt.Errorf("invalid Type1 callothersubr")
 		}
 		count, number := int(a[len(a)-2]), int(a[len(a)-1])
-		if count < 0 || count != len(a)-2 {
+		if float64(count) != a[len(a)-2] || float64(number) != a[len(a)-1] || count < 0 || count > len(a)-2 {
 			return fmt.Errorf("invalid Type1 callothersubr arguments")
 		}
+		s.args = a[:len(a)-count-2]
+		a = a[len(a)-count-2 : len(a)-2]
 		switch number {
 		case 0:
 			if !s.flex || count != 3 || len(s.flexPoints) != 7 {

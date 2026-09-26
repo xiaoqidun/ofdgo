@@ -76,6 +76,8 @@ type DocumentInfo struct {
 	CustomData      []ofdgo.CustomData `json:"customData,omitempty"`
 	CreationDate    string             `json:"creationDate"`
 	ModDate         string             `json:"modDate"`
+	Creator         string             `json:"creator"`
+	CreatorVersion  string             `json:"creatorVersion,omitempty"`
 	PageCount       int                `json:"pageCount"`
 	FontCount       int                `json:"fontCount"`
 	SignatureCount  int                `json:"signatureCount"`
@@ -467,6 +469,8 @@ func (s *Session) Summary() DocumentInfo {
 		}
 		info.CreationDate = docInfo.CreationDate
 		info.ModDate = docInfo.ModDate
+		info.Creator = docInfo.Creator
+		info.CreatorVersion = docInfo.CreatorVersion
 	}
 	if fonts, err := s.Reader.Fonts(); err == nil {
 		for _, font := range fonts {

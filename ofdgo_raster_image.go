@@ -21,7 +21,7 @@ import (
 	"golang.org/x/image/math/f64"
 )
 
-// drawRasterImage 按页面变换采样图像，两后端共享相同的高质量图像插值
+// drawRasterImage 按页面变换对图像执行高质量采样
 // 入参: dst 目标图像, src 源图像, m 像素坐标变换
 func drawRasterImage(dst draw.Image, src image.Image, m RasterMatrix) {
 	draw.CatmullRom.Transform(dst, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, src, src.Bounds(), draw.Over, nil)

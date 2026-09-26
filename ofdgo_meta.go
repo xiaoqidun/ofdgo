@@ -16,6 +16,9 @@ package ofdgo
 
 import "encoding/xml"
 
+// ofdCreator 标识本库生成的文档
+const ofdCreator = "xiaoqidun/ofdgo"
+
 // OFD OFD入口结构
 // 代表OFD文档的根节点
 type OFD struct {
@@ -35,14 +38,16 @@ type DocBody struct {
 
 // DocInfo 文档元数据
 type DocInfo struct {
-	DocID        string       `xml:"DocID"`
-	Title        string       `xml:"Title"`
-	Author       string       `xml:"Author"`
-	Subject      string       `xml:"Subject"`
-	Abstract     string       `xml:"Abstract"`
-	CreationDate string       `xml:"CreationDate"`
-	ModDate      string       `xml:"ModDate"`
-	CustomDatas  *CustomDatas `xml:"CustomDatas"`
+	DocID          string       `xml:"DocID"`
+	Title          string       `xml:"Title"`
+	Author         string       `xml:"Author"`
+	Subject        string       `xml:"Subject"`
+	Abstract       string       `xml:"Abstract"`
+	CreationDate   string       `xml:"CreationDate"`
+	ModDate        string       `xml:"ModDate"`
+	Creator        string       `xml:"Creator"`
+	CreatorVersion string       `xml:"CreatorVersion"`
+	CustomDatas    *CustomDatas `xml:"CustomDatas"`
 }
 
 // CustomDatas 自定义数据集合

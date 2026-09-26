@@ -30,6 +30,9 @@ import (
 	"github.com/tdewolff/canvas/renderers/svg"
 )
 
+// svgCreatorMetadata 记录SVG制作软件，不参与页面绘制
+const svgCreatorMetadata = `<metadata>` + creatorXMP + `</metadata>`
+
 // svgResourceRenderer 分离外部资源的SVG渲染器
 type svgResourceRenderer struct {
 	*svg.SVG
@@ -69,6 +72,7 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 		writer:   buffer,
 		seen:     make(map[string]bool),
 	}
+	io.WriteString(buffer, svgCreatorMetadata)
 	if images {
 		s.imageNames = make(map[image.Image]string)
 	}

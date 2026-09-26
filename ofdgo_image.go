@@ -109,6 +109,9 @@ func decodeBMPImage(data []byte) (image.Image, error) {
 	if compression != 0 {
 		return nil, fmt.Errorf("unsupported bmp compression")
 	}
+	if bpp != 16 && bpp != 24 && bpp != 32 {
+		return nil, fmt.Errorf("unsupported bmp depth")
+	}
 	topDown := height < 0
 	if topDown {
 		height = -height
@@ -116,10 +119,11 @@ func decodeBMPImage(data []byte) (image.Image, error) {
 	if width <= 0 || height <= 0 {
 		return nil, fmt.Errorf("invalid bmp size")
 	}
-	rowStride := ((width*int(bpp) + 31) / 32) * 4
-	if offset+rowStride*height > len(data) {
+	stride := ((int64(width)*int64(bpp) + 31) / 32) * 4
+	if stride > int64(len(data)-offset)/int64(height) {
 		return nil, fmt.Errorf("truncated bmp")
 	}
+	rowStride := int(stride)
 	img := image.NewNRGBA(image.Rect(0, 0, width, height))
 	for y := 0; y < height; y++ {
 		srcY := y
@@ -143,8 +147,6 @@ func decodeBMPImage(data []byte) (image.Image, error) {
 			case 32:
 				p := x * 4
 				img.SetNRGBA(x, y, color.NRGBA{R: row[p+2], G: row[p+1], B: row[p], A: 255})
-			default:
-				return nil, fmt.Errorf("unsupported bmp")
 			}
 		}
 	}
@@ -163,12 +165,15 @@ func parseBMPHeader(data []byte) (int, int, int, uint16, uint32, error) {
 	if dibSize < 40 {
 		return 0, 0, 0, 0, 0, fmt.Errorf("unsupported bmp")
 	}
+	if uint64(dibSize)+14 > uint64(len(data)) || offset < 0 || uint64(offset) < uint64(dibSize)+14 || offset > len(data) {
+		return 0, 0, 0, 0, 0, fmt.Errorf("invalid bmp pixel offset")
+	}
 	width := int(int32(binary.LittleEndian.Uint32(data[18:22])))
 	height := int(int32(binary.LittleEndian.Uint32(data[22:26])))
 	planes := binary.LittleEndian.Uint16(data[26:28])
 	bpp := binary.LittleEndian.Uint16(data[28:30])
 	compression := binary.LittleEndian.Uint32(data[30:34])
-	if planes != 1 {
+	if planes != 1 || width <= 0 || height == 0 || int64(height) == -int64(^uint(0)>>1)-1 {
 		return 0, 0, 0, 0, 0, fmt.Errorf("invalid bmp")
 	}
 	return offset, width, height, bpp, compression, nil
@@ -260,12 +265,20 @@ func imageWithAlpha(img image.Image, alpha *int) image.Image {
 // 入参: img 图片对象
 // 返回: image.Image 图片像素源
 func imagePixelSource(img image.Image) image.Image {
-	if src, ok := img.(interface{ Image() (image.Image, error) }); ok {
-		if decoded, err := src.Image(); err == nil {
-			return decoded
-		}
+	if decoded, err := imagePixelData(img); err == nil {
+		return decoded
 	}
 	return img
+}
+
+// imagePixelData 获取像素并保留惰性解码错误，供绘制和像素处理入口校验
+// 入参: img 图片对象
+// 返回: image.Image 解码像素, error 解码错误
+func imagePixelData(img image.Image) (image.Image, error) {
+	if src, ok := img.(interface{ Image() (image.Image, error) }); ok {
+		return src.Image()
+	}
+	return img, nil
 }
 
 // imageGrayAt 获取图片灰度像素

@@ -44,6 +44,7 @@ func (CanvasBackend) RenderSVG(r *Renderer, page *PageContent, writer io.Writer,
 		}
 		buffer := bufio.NewWriter(writer)
 		renderer := svg.New(buffer, c.W, c.H, nil)
+		io.WriteString(buffer, svgCreatorMetadata)
 		c.RenderTo(renderer)
 		if err := renderer.Close(); err != nil {
 			return SVGResources{}, err
@@ -65,12 +66,30 @@ func (CanvasBackend) RenderEPS(r *Renderer, page *PageContent, writer io.Writer)
 	options := ps.DefaultOptions
 	options.Format = ps.EncapsulatedPostScript
 	buffer := bufio.NewWriter(writer)
-	renderer := ps.New(buffer, c.W, c.H, &options)
+	renderer := ps.New(canvasEPSWriter{buffer}, c.W, c.H, &options)
 	c.RenderTo(renderer)
 	if err := renderer.Close(); err != nil {
 		return err
 	}
 	return buffer.Flush()
+}
+
+// canvasEPSWriter 在EPS头部写入本库制作软件，不改动绘图内容
+type canvasEPSWriter struct {
+	io.Writer
+}
+
+// Write 写入EPS片段并替换独立的制作软件声明
+// 入参: data EPS片段
+// 返回: int 已处理字节数, error 写入错误
+func (w canvasEPSWriter) Write(data []byte) (int, error) {
+	if bytes.Equal(data, []byte("%%Creator: tdewolff/canvas\n")) {
+		if _, err := io.WriteString(w.Writer, "%%Creator: "+ofdCreator+"\n"); err != nil {
+			return 0, err
+		}
+		return len(data), nil
+	}
+	return w.Writer.Write(data)
 }
 
 // RenderPDF 使用canvas输出PDF，保留导航与文字并复用输出缓冲
@@ -95,7 +114,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	if docInfo, err := r.Reader.DocInfo(); err == nil {
 		info = *docInfo
 	}
-	p.SetInfo(info.Title, info.Subject, "", info.Author, "xiaoqidun/ofdgo")
+	p.SetInfo(info.Title, info.Subject, "", info.Author, ofdCreator)
 	for i, page := range pages {
 		if i > 0 {
 			p.NewPage(page.Box.W, page.Box.H)
@@ -134,7 +153,7 @@ func replacePDFProducer(data []byte) []byte {
 	if idx < 0 {
 		return data
 	}
-	dst := []byte("/Producer(xiaoqidun/ofdgo)")
+	dst := []byte("/Producer(" + ofdCreator + ")")
 	copy(data[idx:idx+len(old)], dst)
 	return data
 }

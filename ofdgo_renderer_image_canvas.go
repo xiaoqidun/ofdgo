@@ -35,22 +35,37 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		r.measureImage(ctx, obj, pageH, parentCTM, boundaryInCTM, parentClip)
 		return
 	}
-	if obj.Visible != nil && !*obj.Visible {
+	if obj.Visible != nil && !*obj.Visible || obj.Alpha != nil && *obj.Alpha == 0 {
 		return
 	}
 	resPath, ok := r.Reader.ResMap[obj.ResourceID]
 	if !ok {
+		r.renderError = fmt.Errorf("image resource %q not found", obj.ResourceID)
 		return
 	}
 	img, err := r.decodeImageResource(resPath)
 	if err != nil {
+		r.renderError = err
 		return
 	}
 	box, _ := ParseBox(obj.Boundary)
-	if maskPath, ok := r.Reader.ResMap[obj.ImageMask]; ok {
-		if mask, err := r.decodeImageResource(maskPath); err == nil {
-			img = imageWithMask(img, mask)
+	if obj.ImageMask != "" || obj.Alpha != nil && *obj.Alpha < 255 {
+		img, err = imagePixelData(img)
+		if err != nil {
+			r.renderError = err
+			return
 		}
+	}
+	if obj.ImageMask != "" {
+		mask, err := r.ImageResource(obj.ImageMask)
+		if err == nil {
+			mask, err = imagePixelData(mask)
+		}
+		if err != nil {
+			r.renderError = err
+			return
+		}
+		img = imageWithMask(img, mask)
 	}
 	img = imageWithAlpha(img, obj.Alpha)
 	imgBounds := img.Bounds()
@@ -82,6 +97,9 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	}
 	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, box.X, box.Y, localCTM, parentCTM, boundaryInCTM))
 	img = r.imageWithClip(img, clipPath, m, 96)
+	if r.renderError != nil {
+		return
+	}
 	m = m.Scale(imgW/float64(img.Bounds().Dx()), imgH/float64(img.Bounds().Dy()))
 	img, pad := imageWithTransparentEdge(img)
 	if pad > 0 {
@@ -158,6 +176,12 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 	} else if clipPath.Contains(imagePath) {
 		return img
 	}
+	source, err := imagePixelData(img)
+	if err != nil {
+		r.renderError = err
+		return img
+	}
+	img = source
 	scale := math.Max(math.Hypot(m[0][0], m[1][0]), math.Hypot(m[0][1], m[1][1])) * dpi / 25.4
 	scale = math.Min(scale, math.Sqrt((16<<20)/(float64(w)*float64(h))))
 	if scale > 1 {
@@ -195,7 +219,7 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 	if mask.Opaque() {
 		return img
 	}
-	source := imagePixelSource(img)
+	source = img
 	out := &image.NRGBA{Pix: mask.Pix, Stride: mask.Stride, Rect: bounds}
 	if src, ok := source.(*image.NRGBA); ok {
 		for y := 0; y < h; y++ {

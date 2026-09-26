@@ -56,8 +56,17 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 		if err != nil {
 			return err
 		}
+		if object.ImageMask != "" || object.Alpha != nil && *object.Alpha < 255 {
+			img, err = imagePixelData(img)
+			if err != nil {
+				return err
+			}
+		}
 		if object.ImageMask != "" {
 			mask, err := c.renderer.ImageResource(object.ImageMask)
+			if err == nil {
+				mask, err = imagePixelData(mask)
+			}
 			if err != nil {
 				return err
 			}

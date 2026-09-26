@@ -48,6 +48,7 @@ func (progress editorProgress) report(stage string, completed, total int) error 
 // WriteTo 逐个条目写出OFD，不关闭调用方输出流，出错时应丢弃本次输出
 // 新增资源仅写入实际引用的部分，静态TrueType轮廓字体按实际文字生成子集
 // 原有字体在全包引用可确定时保留字形编号裁剪；编辑资源、复杂字体及无法确定的引用保持原样
+// 制作软件统一为xiaoqidun/ofdgo，未修改的文档保留原制作软件及版本
 // 重开子集文档后输入未包含的文字，需要通过AddFont注册完整字体并替换原字体引用
 // 入参: writer 输出流
 // 返回: int64 已写入字节数, error 错误信息
@@ -251,7 +252,7 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error, progress edi
 			{"DocID", e.Info.DocID}, {"Title", e.Info.Title}, {"Author", e.Info.Author},
 			{"Subject", e.Info.Subject}, {"Abstract", e.Info.Abstract},
 			{"CreationDate", e.Info.CreationDate}, {"ModDate", e.Info.ModDate},
-			{"Creator", "xiaoqidun/ofdgo"},
+			{"Creator", ofdCreator},
 		} {
 			if field[1] != "" {
 				x.text(field[0], field[1])

@@ -447,6 +447,7 @@ const el = {
 	metaAuthor: document.querySelector("#metaAuthor"),
 	metaCreationDate: document.querySelector("#metaCreationDate"),
 	metaModDate: document.querySelector("#metaModDate"),
+	metaCreator: document.querySelector("#metaCreator"),
 	metaType: document.querySelector("#metaType"),
 	metaVersion: document.querySelector("#metaVersion"),
 	metaSignatures: document.querySelector("#metaSignatures"),
@@ -2877,15 +2878,19 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 }
 
 function releasePageResources() {
-	const pages = [...state.pageCache.values()];
+	const images = new Set(), fonts = new Set();
+	for (const page of state.pageCache.values()) {
+		for (const name of page.imageNames) images.add(name);
+		for (const font of page.fonts) fonts.add(font.name);
+	}
 	for (const [name, image] of state.svgImages) {
-		if (!pages.some((page) => page.imageNames.includes(name))) {
+		if (!images.has(name)) {
 			URL.revokeObjectURL(image.url);
 			state.svgImages.delete(name);
 		}
 	}
 	for (const [name, font] of state.svgFonts) {
-		if (!pages.some((page) => page.fonts.some((item) => item.name === name))) {
+		if (!fonts.has(name)) {
 			document.fonts.delete(font);
 			state.svgFonts.delete(name);
 		}
@@ -4063,6 +4068,7 @@ async function openDocument(options = {}) {
 }
 
 async function loadDocumentDetails(openSeq) {
+	if (openSeq !== state.openSeq || !state.doc) return;
 	try {
 		const details = await callWASM("ofdgoDocumentInfo");
 		if (openSeq !== state.openSeq) return;
@@ -4766,8 +4772,11 @@ async function processPageRenderQueue() {
 	try {
 		await nextFrame();
 		while (state.pageRenderQueue.length) {
-			state.pageRenderQueue.sort(comparePageRenderTask);
-			const task = state.pageRenderQueue.shift();
+			let next = 0;
+			for (let index = 1; index < state.pageRenderQueue.length; index++) {
+				if (comparePageRenderTask(state.pageRenderQueue[index], state.pageRenderQueue[next]) < 0) next = index;
+			}
+			const [task] = state.pageRenderQueue.splice(next, 1);
 			try {
 				if (task.openSeq !== state.openSeq) {
 					task.resolve(null);
@@ -4778,13 +4787,17 @@ async function processPageRenderQueue() {
 					continue;
 				}
 				const page = await callWASM("ofdgoRenderPage", task.index, state.renderBackend, state.renderDPI, displayMode() === "raster");
+				if (state.pageInFlight.get(task.key) !== task) {
+					task.resolve(null);
+					continue;
+				}
 				const scope = state.composite;
 				if (scope?.index === task.index) {
 					const objects = await callWASM("ofdgoCompositeObjects", task.index, scope.key);
 					if (scope === state.composite && task.openSeq === state.openSeq) scope.objects = objects;
 				}
 				await loadSVGFonts(page.fonts, task.openSeq);
-				if (task.openSeq === state.openSeq) {
+				if (task.openSeq === state.openSeq && state.pageInFlight.get(task.key) === task) {
 					for (const image of page.images) {
 						if (!state.svgImages.has(image.name)) {
 							const blob = new Blob([image.bytes], { type: image.mime });
@@ -4800,7 +4813,7 @@ async function processPageRenderQueue() {
 							return image.decode();
 						}));
 					}
-					if (task.openSeq !== state.openSeq) {
+					if (task.openSeq !== state.openSeq || state.pageInFlight.get(task.key) !== task) {
 						task.resolve(null);
 						continue;
 					}
@@ -4813,7 +4826,7 @@ async function processPageRenderQueue() {
 			} catch (err) {
 				task.reject(err);
 			} finally {
-				state.pageInFlight.delete(task.key);
+				if (state.pageInFlight.get(task.key) === task) state.pageInFlight.delete(task.key);
 			}
 		}
 	} finally {
@@ -6397,6 +6410,7 @@ function renderMeta(keepDetails = false) {
 		[el.metaSubject, (doc.subject || "").trim()],
 		[el.metaCreationDate, formatDocumentTime(doc.creationDate)],
 		[el.metaModDate, formatDocumentTime(doc.modDate)],
+		[el.metaCreator, [doc.creator, doc.creatorVersion].filter(Boolean).join(" ")],
 	]) {
 		field.textContent = value;
 		field.parentElement.hidden = !value;

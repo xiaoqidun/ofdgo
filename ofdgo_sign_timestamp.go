@@ -76,6 +76,7 @@ type SignatureTimestampReport struct {
 	Error              string
 }
 
+// signatureTimestampEvidence 保存时间戳令牌及其绑定数据
 type signatureTimestampEvidence struct {
 	Token []byte
 	Data  []byte
