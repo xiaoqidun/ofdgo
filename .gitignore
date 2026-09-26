@@ -1,6 +1,8 @@
 .idea/
 .vscode/
 .devcontainer/
+go.work
+go.work.sum
 assets/webui/ofdgo.wasm
 *.exe
 *.exe~
