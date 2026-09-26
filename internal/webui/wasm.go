@@ -17,6 +17,7 @@
 package webui
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"context"
@@ -28,6 +29,7 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"io/fs"
 	"math"
 	"path"
 	"reflect"
@@ -43,6 +45,16 @@ import (
 // exportWriter 分块传递导出数据
 type exportWriter struct {
 	write js.Value
+}
+
+// browserReaderAt 分块读取浏览器文件，只缓存最近的一个数据块
+type browserReaderAt struct {
+	read       js.Value
+	checkpoint js.Value
+	size       int64
+	offset     int64
+	data       []byte
+	checked    time.Time
 }
 
 // apiResult 浏览器接口返回结果
@@ -133,6 +145,45 @@ func (w exportWriter) Write(data []byte) (int, error) {
 	return size, nil
 }
 
+// ReadAt 按需读取文件片段并定期交付取消检查点
+// 入参: data 目标缓冲, offset 文件偏移
+// 返回: int 读取字节数, error 读取错误
+func (r *browserReaderAt) ReadAt(data []byte, offset int64) (int, error) {
+	if offset < 0 {
+		return 0, fmt.Errorf("negative file offset")
+	}
+	n := 0
+	for len(data) > 0 {
+		if offset >= r.size {
+			return n, io.EOF
+		}
+		if time.Since(r.checked) >= 50*time.Millisecond {
+			if err := awaitExport(r.checkpoint); err != nil {
+				return n, err
+			}
+			r.checked = time.Now()
+		}
+		if len(r.data) == 0 || offset < r.offset || offset-r.offset >= int64(len(r.data)) {
+			r.offset = offset / (256 << 10) * (256 << 10)
+			size := int(min(int64(256<<10), r.size-r.offset))
+			if cap(r.data) < size {
+				r.data = make([]byte, size)
+			} else {
+				r.data = r.data[:size]
+			}
+			value := r.read.Invoke(float64(r.offset), size)
+			if js.CopyBytesToGo(r.data, value) != size {
+				return n, io.ErrUnexpectedEOF
+			}
+		}
+		copied := copy(data, r.data[offset-r.offset:])
+		n += copied
+		offset += int64(copied)
+		data = data[copied:]
+	}
+	return n, nil
+}
+
 // awaitExport 等待浏览器处理导出检查点
 // 入参: fn 浏览器回调, args 回调参数
 // 返回: error 写入错误或取消原因
@@ -157,6 +208,9 @@ func awaitExport(fn js.Value, args ...any) error {
 func RunWASM() {
 	registerCallback("ofdgoOpen", openDocument)
 	registerAsyncCallback("ofdgoConvertPDF", convertPDFDocument)
+	registerAsyncCallback("ofdgoConvertFile", convertFile)
+	registerAsyncCallback("ofdgoPackFiles", packFiles)
+	registerCallback("ofdgoOutputFormats", func([]js.Value) (any, error) { return ofdgo.OutputFormats(), nil })
 	registerCallback("ofdgoConfigure", configureDocument)
 	registerCallback("ofdgoDocumentInfo", documentInfo)
 	registerCallback("ofdgoVerifySignatures", verifySignatures)
@@ -334,6 +388,131 @@ func convertPDFDocument(args []js.Value) (any, error) {
 		return nil, err
 	}
 	return successResult(map[string]any{"bytes": bytesToJS(output.Bytes()), "warnings": string(warnings)}), nil
+}
+
+// convertFile 使用库转换独立文件，不读取或修改当前阅读和编辑会话
+// 入参: args 随机读取、文件大小、转换选项、写出、进度、文件边界、取消检查及字体
+// 返回: any 转换报告, error 转换错误
+func convertFile(args []js.Value) (any, error) {
+	if len(args) != 8 {
+		return nil, fmt.Errorf("missing conversion arguments")
+	}
+	settings := args[2]
+	backends, err := ofdgo.NewRenderBackends(settings.Get("backend").String())
+	if err != nil {
+		return nil, err
+	}
+	fonts, err := fontsFromJS(args[7])
+	if err != nil {
+		return nil, err
+	}
+	options := ofdgo.ConvertOptions{
+		Format: settings.Get("format").String(), PageRange: settings.Get("pages").String(),
+		SkipUnchanged:   true,
+		Backends:        &backends,
+		RendererOptions: []ofdgo.RendererOption{ofdgo.WithDPI(settings.Get("dpi").Float())},
+		OnProgress: func(progress ofdgo.ConvertProgress) error {
+			return awaitExport(args[4], progress.Stage, progress.Completed, progress.Total)
+		},
+	}
+	if len(fonts) > 0 {
+		options.RendererOptions = append(options.RendererOptions, ofdgo.WithFontFS(ofdgo.NewFontFS(fonts)))
+	}
+	if value := settings.Get("credentials"); !value.IsNull() && !value.IsUndefined() {
+		credentials, err := credentialsFromJS(value)
+		if err != nil {
+			return nil, err
+		}
+		defer clear(credentials.Password)
+		options.ReaderOptions = append(options.ReaderOptions, ofdgo.WithCredentials(credentials))
+	}
+	var format ofdgo.OutputFormat
+	for _, item := range ofdgo.OutputFormats() {
+		if item.Value == options.Format {
+			format = item
+		}
+	}
+	writer := bufio.NewWriterSize(exportWriter{write: args[3]}, 1<<20)
+	if format.Paged {
+		options.PageOutput = func(index int, export func(io.Writer) error) error {
+			name := fmt.Sprintf("%06d.%s", index+1, format.Extension)
+			if err := awaitExport(args[5], "open", name); err != nil {
+				return err
+			}
+			if err := export(writer); err != nil {
+				return err
+			}
+			if err := writer.Flush(); err != nil {
+				return err
+			}
+			return awaitExport(args[5], "close", name)
+		}
+	} else if err := awaitExport(args[5], "open", "document."+format.Extension); err != nil {
+		return nil, err
+	}
+	source := &browserReaderAt{read: args[0], checkpoint: args[6], size: int64(args[1].Float())}
+	report, err := ofdgo.Convert(context.Background(), source, source.size, writer, options)
+	if err != nil {
+		return nil, err
+	}
+	if report.Unchanged {
+		return report, nil
+	}
+	if err := writer.Flush(); err != nil {
+		return nil, err
+	}
+	if !format.Paged {
+		if err := awaitExport(args[5], "close", "document."+format.Extension); err != nil {
+			return nil, err
+		}
+	}
+	return report, nil
+}
+
+// packFiles 将已经成功转换的文件逐个打包，不重复转换或读取整个文件
+// 入参: args 文件列表、分块读取、分块写出、进度及取消检查
+// 返回: any 输出格式, error 打包错误
+func packFiles(args []js.Value) (any, error) {
+	if len(args) != 5 {
+		return nil, fmt.Errorf("missing archive arguments")
+	}
+	writer := bufio.NewWriterSize(exportWriter{write: args[2]}, 1<<20)
+	archive := zip.NewWriter(writer)
+	files := args[0]
+	for i := 0; i < files.Length(); i++ {
+		if err := awaitExport(args[3], i, files.Length()); err != nil {
+			return nil, err
+		}
+		file := files.Index(i)
+		name := file.Get("name").String()
+		if !fs.ValidPath(name) || strings.Contains(name, "\\") {
+			return nil, fmt.Errorf("invalid archive path %q", name)
+		}
+		method := uint16(zip.Deflate)
+		switch strings.ToLower(path.Ext(name)) {
+		case ".ofd", ".pdf", ".png", ".jpg", ".jpeg":
+			method = zip.Store
+		}
+		entry, err := archive.CreateHeader(&zip.FileHeader{Name: name, Method: method})
+		if err != nil {
+			return nil, err
+		}
+		read := args[1].Invoke(i)
+		source := &browserReaderAt{read: read, checkpoint: args[4], size: int64(file.Get("size").Float())}
+		if _, err := io.Copy(entry, io.NewSectionReader(source, 0, source.size)); err != nil {
+			return nil, err
+		}
+	}
+	if err := archive.Close(); err != nil {
+		return nil, err
+	}
+	if err := writer.Flush(); err != nil {
+		return nil, err
+	}
+	if err := awaitExport(args[3], files.Length(), files.Length()); err != nil {
+		return nil, err
+	}
+	return map[string]any{"mime": "application/zip"}, nil
 }
 
 // openDocument 打开OFD文档

@@ -14,7 +14,11 @@
 
 package ofdgo
 
-import "github.com/tdewolff/canvas"
+import (
+	"fmt"
+
+	"github.com/tdewolff/canvas"
+)
 
 // loadFont 加载字体
 // 入参: fontID 字体ID
@@ -30,6 +34,13 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	}
 	of := r.Reader.fontCache[fontID]
 	if len(resolved.Data) == 0 {
+		if !r.textOnly {
+			name := fontID
+			if of != nil && of.FontName != "" {
+				name = of.FontName
+			}
+			r.renderError = fmt.Errorf("font %q is unavailable", name)
+		}
 		return nil
 	}
 	if of == nil {

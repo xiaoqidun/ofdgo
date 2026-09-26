@@ -137,12 +137,7 @@ type PageSVG struct {
 }
 
 // ExportFormat 导出格式
-type ExportFormat struct {
-	Value     string `json:"value"`
-	Label     string `json:"label"`
-	Extension string `json:"extension"`
-	MIME      string `json:"mime"`
-}
+type ExportFormat = ofdgo.OutputFormat
 
 // SignatureInfo 签名验证信息
 type SignatureInfo struct {
@@ -255,16 +250,6 @@ type EncryptionInfo struct {
 	Method    string   `json:"method,omitempty"`
 	Users     []string `json:"users,omitempty"`
 	Layers    int      `json:"layers,omitempty"`
-}
-
-// supportedExportFormats 导出格式列表
-var supportedExportFormats = []ExportFormat{
-	{Value: "pdf", Label: "PDF", Extension: "pdf", MIME: "application/pdf"},
-	{Value: "svg", Label: "SVG", Extension: "svg", MIME: "image/svg+xml"},
-	{Value: "eps", Label: "EPS", Extension: "eps", MIME: "application/postscript"},
-	{Value: "png", Label: "PNG", Extension: "png", MIME: "image/png"},
-	{Value: "jpg", Label: "JPG", Extension: "jpg", MIME: "image/jpeg"},
-	{Value: "txt", Label: "TXT", Extension: "txt", MIME: "text/plain"},
 }
 
 // Open 打开浏览器内存中的OFD文档
@@ -676,9 +661,7 @@ func (s *Session) pageBox(index int, page *ofdgo.PageContent) (ofdgo.Box, error)
 // ExportFormats 获取导出格式
 // 返回: []ExportFormat 导出格式列表
 func ExportFormats() []ExportFormat {
-	formats := make([]ExportFormat, len(supportedExportFormats))
-	copy(formats, supportedExportFormats)
-	return formats
+	return ofdgo.OutputFormats()[1:]
 }
 
 // exportFormat 获取导出格式
@@ -689,7 +672,7 @@ func exportFormat(value string) (ExportFormat, bool) {
 	if value == "jpeg" {
 		value = "jpg"
 	}
-	for _, format := range supportedExportFormats {
+	for _, format := range ExportFormats() {
 		if format.Value == value {
 			return format, true
 		}

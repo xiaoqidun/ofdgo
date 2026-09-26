@@ -19,6 +19,8 @@ const STATUS = {
 };
 const wasmRequests = new Map();
 const metaContents = new WeakMap();
+const batch = { items: [], formats: [], running: false, canceled: false, worker: null, requests: new Map(), sequence: 0, activeID: 0, progressTime: 0 };
+const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Destination", "DPIRow", "DPI", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
 
 let wasmPromise = null;
 let wasmWorker = null;
@@ -1086,6 +1088,18 @@ el.pageForm.addEventListener("submit", async (event) => {
 	}
 });
 el.ofdButton.addEventListener("click", openOFDFile);
+batchElements.Button.addEventListener("click", () => { updateBatchControls(); batchElements.Panel.showModal(); });
+batchElements.Add.addEventListener("click", () => batchElements.Input.click());
+batchElements.Input.addEventListener("change", () => { addBatchFiles(batchElements.Input.files); batchElements.Input.value = ""; });
+batchElements.Clear.addEventListener("click", () => { batch.items = []; renderBatchList(); batchElements.Status.textContent = ""; batchElements.Progress.value = 0; });
+batchElements.Format.addEventListener("change", updateBatchControls);
+batchElements.Close.addEventListener("click", () => batchElements.Panel.close());
+batchElements.Cancel.addEventListener("click", cancelBatch);
+batchElements.Form.addEventListener("submit", event => { event.preventDefault(); runBatch(); });
+batchElements.Panel.addEventListener("dragover", event => { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = batch.running ? "none" : "copy"; });
+batchElements.Panel.addEventListener("drop", event => { event.preventDefault(); event.stopPropagation(); if (!batch.running) addBatchFiles(event.dataTransfer.files); });
+batchElements.Destination.querySelector('[value="directory"]').disabled = !window.showDirectoryPicker;
+batchElements.Destination.value = window.showDirectoryPicker ? "directory" : "archive";
 el.newButton.addEventListener("click", openCreatePanel);
 el.editButton.addEventListener("click", toggleEditor);
 el.editButton.addEventListener("pointerdown", (event) => {
@@ -1443,7 +1457,7 @@ function handleKeyDown(event) {
 }
 
 function formDialogOpen() {
-	return el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open
+	return batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open
 		|| el.batchPagesPanel.open || el.objectStylePanel.open || el.sourceTextPanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
@@ -3173,6 +3187,9 @@ async function refreshApplication() {
 }
 
 async function loadExportFormats() {
+	batch.formats = await callWASM("ofdgoOutputFormats");
+	batchElements.Format.replaceChildren(...batch.formats.map(format => new Option(format.label, format.value)));
+	updateBatchControls();
 	const formats = await callWASM("ofdgoExportFormats") || [];
 	state.exportFormats = formats;
 	el.exportFormat.replaceChildren();
@@ -4379,6 +4396,307 @@ async function updateExportRange() {
 			el.exportRange.setAttribute("aria-invalid", "true");
 			el.exportRangeStatus.textContent = "页码无效";
 		}
+	}
+}
+
+function addBatchFiles(files) {
+	let rejected = false;
+	for (const file of files) {
+		if (!/\.(ofd|pdf)$/i.test(file.name)) { rejected = true; continue; }
+		batch.items.push({ file, format: "", pages: "", status: "pending", text: "待转", details: [] });
+	}
+	if (rejected) batchElements.Status.textContent = "仅支持PDF、OFD";
+	renderBatchList();
+}
+
+function renderBatchList() {
+	const fragment = document.createDocumentFragment();
+	for (const item of batch.items) {
+		const row = document.createElement("tr");
+		const name = row.insertCell();
+		const label = document.createElement("span");
+		label.className = "convert-name";
+		label.textContent = item.file.name;
+		label.title = item.file.name;
+		name.append(label);
+		let detailRow;
+		if (item.details.length) {
+			detailRow = document.createElement("tr");
+			detailRow.className = "convert-details";
+			const cell = detailRow.insertCell();
+			cell.colSpan = 5;
+			const details = document.createElement("details");
+			const summary = document.createElement("summary");
+			summary.textContent = "提示";
+			const messages = document.createElement("ul");
+			messages.className = "convert-messages";
+			messages.tabIndex = 0;
+			messages.setAttribute("aria-label", `${item.file.name}的转换提示`);
+			for (const message of item.details) {
+				const entry = document.createElement("li");
+				entry.textContent = message;
+				messages.append(entry);
+			}
+			details.append(summary, messages);
+			cell.append(details);
+		}
+		const reset = () => {
+			item.details = [];
+			detailRow?.remove();
+			batchStatus(item, "pending", "待转");
+			batchElements.Status.textContent = "";
+			batchElements.Progress.value = 0;
+			updateBatchControls();
+		};
+		const pagesCell = row.insertCell();
+		pagesCell.dataset.label = "页码";
+		const pages = document.createElement("input");
+		pages.type = "text";
+		pages.placeholder = "全部";
+		pages.title = "如1-3,5；留空为全部";
+		pages.setAttribute("aria-label", `${item.file.name}的输出页码`);
+		pages.value = item.pages;
+		pages.disabled = batch.running;
+		pages.addEventListener("change", () => { item.pages = pages.value; reset(); });
+		pagesCell.append(pages);
+		const formatCell = row.insertCell();
+		formatCell.dataset.label = "格式";
+		const format = document.createElement("select");
+		format.setAttribute("aria-label", `${item.file.name}的输出格式`);
+		format.append(new Option("默认", ""), ...batch.formats.map(value => new Option(value.label, value.value)));
+		format.value = item.format;
+		format.disabled = batch.running;
+		format.addEventListener("change", () => { item.format = format.value; reset(); });
+		formatCell.append(format);
+		item.cell = row.insertCell();
+		item.cell.textContent = item.text;
+		item.cell.dataset.status = item.status;
+		const action = row.insertCell();
+		const remove = document.createElement("button");
+		remove.type = "button";
+		remove.className = "icon-button";
+		remove.textContent = "×";
+		remove.title = "移除";
+		remove.setAttribute("aria-label", `移除${item.file.name}`);
+		remove.disabled = batch.running;
+		remove.addEventListener("click", () => { batch.items.splice(batch.items.indexOf(item), 1); renderBatchList(); });
+		action.append(remove);
+		fragment.append(row);
+		if (detailRow) fragment.append(detailRow);
+	}
+	batchElements.List.replaceChildren(fragment);
+	batchElements.Empty.hidden = batch.items.length > 0;
+	updateBatchControls();
+}
+
+function updateBatchControls() {
+	for (const name of ["Add", "Clear", "Format", "Destination", "DPI"]) batchElements[name].disabled = batch.running;
+	batchElements.Clear.disabled ||= !batch.items.length;
+	batchElements.Start.disabled = batch.running || !batch.items.length || !batch.formats.length;
+	batchElements.Start.hidden = batch.running;
+	batchElements.Cancel.hidden = !batch.running;
+	batchElements.Cancel.disabled = batch.canceled;
+	batchElements.Close.textContent = batch.running ? "收起" : "关闭";
+	batchElements.Count.textContent = batch.items.length ? `${batch.items.length}个文件` : "";
+	const formats = batch.items.length ? batch.items.map(item => item.format || batchElements.Format.value) : [batchElements.Format.value];
+	batchElements.DPIRow.hidden = !formats.some(value => batch.formats.find(format => format.value === value)?.raster);
+	batchElements.Button.toggleAttribute("data-running", batch.running);
+}
+
+function batchStatus(item, status, text) {
+	item.status = status;
+	item.text = text;
+	item.cell.textContent = text;
+	item.cell.dataset.status = status;
+}
+
+function batchProgress(item, position, count, progress) {
+	const now = performance.now();
+	if (now - batch.progressTime < 80 && progress.completed !== progress.total) return;
+	batch.progressTime = now;
+	const stage = progress.phase?.startsWith("write.") ? "写入" : { open: "读取", pages: "解析", convert: "转换", prepare: "准备", fonts: "字体", resources: "资源", references: "检查", write: "写入", export: "导出", pack: "打包", commit: "保存" }[progress.phase] || "处理";
+	const detail = progress.total > 0 ? `${progress.completed}/${progress.total}` : "";
+	if (item) batchStatus(item, "running", stage);
+	batchElements.Status.textContent = progress.phase === "pack" ? `打包 ${detail}` : `文件 ${position + 1}/${count} · ${stage}${detail ? ` ${detail}` : ""}`;
+	batchElements.Progress.max = count;
+	batchElements.Progress.value = progress.phase === "pack" && progress.total > 0 ? progress.completed / progress.total : position;
+}
+
+function batchCall(name, args, onProgress) {
+	return new Promise((resolve, reject) => {
+		if (batch.workerError) { reject(batch.workerError); return; }
+		const id = ++batch.sequence;
+		batch.activeID = id;
+		batch.requests.set(id, { resolve, reject, onProgress, destination: name === "ofdgoConvertFile" ? args[3] : null });
+		try { batch.worker.postMessage({ id, name, args }); }
+		catch (err) { batch.requests.delete(id); batch.activeID = 0; reject(err); }
+	});
+}
+
+function startBatchWorker() {
+	batch.workerError = null;
+	return new Promise((resolve, reject) => {
+		const worker = new Worker("./ofdgo_wasm.js");
+		batch.worker = worker;
+		const fail = async error => {
+			batch.workerError = error;
+			worker.terminate();
+			reject(error);
+			const requests = [...batch.requests.values()];
+			batch.requests.clear();
+			for (const request of requests) {
+				if (request.destination && request.outputName) {
+					try { await request.destination.removeEntry(request.outputName, { recursive: true }); }
+					catch (err) { error = new Error(`${error.message}；清理失败：${err.message}`); }
+				}
+				request.reject(error);
+			}
+		};
+		worker.onerror = event => fail(new Error(event.message || "转换引擎异常"));
+		worker.onmessageerror = () => fail(new Error("转换数据传递失败"));
+		worker.onmessage = ({ data }) => {
+			if (data.type === "ready") { resolve(); return; }
+			if (data.type === "exit") { fail(new Error(data.error)); return; }
+			if (data.type === "progress") { batchElements.Status.textContent = data.text; return; }
+			const request = batch.requests.get(data.id);
+			if (!request) return;
+			if (data.type === "output") { request.outputName = data.name; return; }
+			if (data.type === "conversion") { request.onProgress?.(data); return; }
+			batch.requests.delete(data.id);
+			if (batch.activeID === data.id) batch.activeID = 0;
+			if (data.ok) request.resolve(data.data);
+			else request.reject(Object.assign(new Error(data.error), { code: data.code, name: data.canceled ? "AbortError" : "Error" }));
+		};
+	});
+}
+
+function cancelBatch() {
+	batch.canceled = true;
+	batchElements.Cancel.disabled = true;
+	batchElements.Status.textContent = "正在取消";
+	if (batch.activeID) batch.worker.postMessage({ type: "cancel", id: batch.activeID });
+}
+
+function warnBatch(event) {
+	if (batch.running) { event.preventDefault(); event.returnValue = ""; }
+}
+
+async function runBatch() {
+	if (batch.running || !batch.items.length) return;
+	const defaultFormat = batch.formats.find(format => format.value === batchElements.Format.value);
+	if (!defaultFormat) return;
+	const pageRange = item => item.pages.trim() === "全部" ? "" : item.pages.trim();
+	const dpi = Number(batchElements.DPI.value);
+	const archive = batchElements.Destination.value === "archive";
+	const backend = state.renderBackend;
+	for (const item of batch.items) {
+		const format = batch.formats.find(format => format.value === (item.format || defaultFormat.value));
+		const key = JSON.stringify([format.value, pageRange(item), format.raster ? dpi : 0, archive, backend]);
+		if (item.settingsKey !== key) {
+			item.status = "pending";
+			item.text = "待转";
+			item.details = [];
+			item.settingsKey = key;
+		}
+	}
+	renderBatchList();
+	let jobs = batch.items.filter(item => item.status !== "done" && item.status !== "unchanged");
+	if (!jobs.length) {
+		jobs = [...batch.items];
+		for (const item of jobs) { item.status = "pending"; item.text = "待转"; item.details = []; }
+	}
+	batch.running = true;
+	batch.canceled = false;
+	renderBatchList();
+	window.addEventListener("beforeunload", warnBatch);
+	let destination = null;
+	let zipFile = null;
+	let storage = null;
+	let stagingName = "";
+	let packed = false;
+	const entries = [];
+	try {
+		if (archive) {
+			if (window.showSaveFilePicker) zipFile = await window.showSaveFilePicker({ suggestedName: "转换结果.zip", types: [{ description: "ZIP", accept: { "application/zip": [".zip"] } }] });
+			if (navigator.storage?.getDirectory) {
+				storage = await navigator.storage.getDirectory();
+				stagingName = `ofdgo-convert-${crypto.randomUUID()}`;
+				destination = await storage.getDirectoryHandle(stagingName, { create: true });
+			}
+		} else destination = await window.showDirectoryPicker({ mode: "readwrite" });
+		if (batch.canceled) return;
+		batchElements.Status.textContent = "正在准备引擎";
+		await startBatchWorker();
+		const fonts = await fontManager.files(fontManager.records());
+		const names = new Set();
+		for (const [position, item] of jobs.entries()) {
+			if (batch.canceled) break;
+			item.details = [];
+			const format = batch.formats.find(format => format.value === (item.format || defaultFormat.value));
+			const base = item.file.name.replace(/\.[^.]+$/, "").replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/g, "") || "document";
+			let unique = base;
+			const outputName = () => (format.paged ? unique : `${unique}.${format.extension}`).toLowerCase();
+			for (let suffix = 2; archive && names.has(outputName()); suffix++) unique = `${base} (${suffix})`;
+			names.add(outputName());
+			const options = { format: format.value, pages: pageRange(item), dpi, backend, archive, base: unique, credentials: null };
+			try {
+				for (;;) {
+					try {
+						const result = await batchCall("ofdgoConvertFile", [item.file, options, fonts, destination], progress => batchProgress(item, position, jobs.length, progress));
+						for (const file of result.files) entries.push(file);
+						item.details = (result.pdf?.Warnings || []).map(warning => `${warning.Page ? `第${warning.Page}页：` : ""}${warning.Message}`);
+						if (result.unchanged) {
+							batchStatus(item, "unchanged", "原样");
+							item.details = ["无需转换，源文件未改动"];
+						} else batchStatus(item, archive ? "ready" : "done", archive ? "待存" : "完成");
+						break;
+					} catch (err) {
+						if (batch.canceled || !["credentialsRequired", "invalidCredentials"].includes(err.code)) throw err;
+						options.credentials?.password?.fill(0);
+						options.credentials?.key?.fill(0);
+						options.credentials?.keyPassword?.fill(0);
+						options.credentials = await requestCredentials(err.code, state.openSeq);
+						if (!options.credentials) throw new DOMException("已取消解锁", "AbortError");
+						if (!window.confirm("转换结果将不保留原加密，是否继续？")) throw new DOMException("已取消转换", "AbortError");
+					}
+				}
+			} catch (err) {
+				batchStatus(item, err.name === "AbortError" ? "canceled" : "failed", err.name === "AbortError" ? "取消" : "失败");
+				item.details = [err.message];
+				if (batch.workerError) throw err;
+			} finally {
+				options.credentials?.password?.fill(0);
+				options.credentials?.key?.fill(0);
+				options.credentials?.keyPassword?.fill(0);
+			}
+			batchElements.Progress.max = jobs.length;
+			batchElements.Progress.value = position + 1;
+		}
+		if (archive && entries.length && !batch.canceled) {
+			const result = await batchCall("ofdgoPackFiles", [entries, zipFile], progress => batchProgress(null, 0, 1, progress));
+			if (result.blob) downloadBytes(result.blob, "application/zip", "转换结果.zip");
+			packed = true;
+			for (const item of jobs) if (item.status === "ready") batchStatus(item, "done", "完成");
+		}
+		const done = jobs.filter(item => item.status === "done").length;
+		const failed = jobs.filter(item => item.status === "failed").length;
+		const unchanged = batch.items.filter(item => item.status === "unchanged").length;
+		batchElements.Status.textContent = `${batch.canceled ? "已取消 · " : ""}完成 ${done}${failed ? ` · 失败 ${failed}` : ""}${unchanged ? ` · 原样 ${unchanged}` : ""}`;
+	} catch (err) {
+		batchElements.Status.textContent = err.name === "AbortError" ? "转换已取消" : err.message;
+	} finally {
+		if (archive && !packed) for (const item of jobs) if (item.status === "ready") { item.status = "pending"; item.text = "待转"; }
+		batch.worker?.terminate();
+		batch.worker = null;
+		batch.requests.clear();
+		batch.activeID = 0;
+		if (storage && stagingName) {
+			try { await storage.removeEntry(stagingName, { recursive: true }); }
+			catch { batchElements.Status.textContent += " · 临时文件清理失败"; }
+		}
+		batch.running = false;
+		window.removeEventListener("beforeunload", warnBatch);
+		renderBatchList();
 	}
 }
 

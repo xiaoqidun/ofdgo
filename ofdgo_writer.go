@@ -501,7 +501,9 @@ func (x *ofdXML) resources(fonts, images []editorResource, spaces []ColorSpace) 
 				attrs.add("FixedWidth", "true")
 			}
 			x.start("Font", attrs)
-			x.text("FontFile", font.FontFile)
+			if font.FontFile != "" {
+				x.text("FontFile", font.FontFile)
+			}
 			x.end("Font")
 		}
 		x.end("Fonts")

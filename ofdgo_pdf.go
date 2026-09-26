@@ -197,11 +197,18 @@ func ConvertPDF(ctx context.Context, source io.ReaderAt, size int64, output io.W
 		if err := options.OnProgress("write", 0, 0); err != nil {
 			return PDFImportReport{}, err
 		}
-		editor.OnWriteProgress = func(stage string, completed, total int) error {
+	}
+	editor.OnWriteProgress = func(stage string, completed, total int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if options.OnProgress != nil {
 			return options.OnProgress("write."+stage, completed, total)
 		}
+		return nil
 	}
-	_, err = editor.WriteTo(output)
+	var written int64
+	_, err = editor.WriteTo(convertWriter{context: ctx, writer: output, count: &written})
 	return report, err
 }
 

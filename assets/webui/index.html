@@ -20,6 +20,7 @@
 				<button id="newButton" class="icon-button" type="button" title="新建" aria-label="新建"><span class="new-icon" aria-hidden="true"></span></button>
 				<button id="saveButton" class="icon-button" type="button" title="保存" aria-label="保存" aria-keyshortcuts="Control+S Meta+S" disabled><span class="save-icon" aria-hidden="true"></span></button>
 				<button id="editButton" class="icon-button" type="button" title="编辑" aria-label="编辑" aria-pressed="false" disabled><span class="edit-icon" aria-hidden="true"></span></button>
+				<button id="convertButton" class="icon-button" type="button" title="转换" aria-label="转换" aria-haspopup="dialog" aria-controls="convertPanel"><span aria-hidden="true">&#8644;</span></button>
 				<button id="togglePagesButton" class="icon-button" type="button" title="页面栏" aria-label="页面栏" aria-pressed="true">&#9776;</button>
 				<button id="toggleMetaButton" class="icon-button" type="button" title="信息栏" aria-label="信息栏" aria-pressed="true">&#9432;</button>
 			</div>
@@ -171,6 +172,23 @@
 				<button id="batchPagesButton" class="editor-group-action" type="button" title="批量页面" aria-label="批量页面" aria-haspopup="dialog" aria-controls="batchPagesPanel">页面</button>
 			</div>
 		</div>
+		<dialog id="convertPanel" class="form-dialog convert-dialog" aria-labelledby="convertTitle">
+			<form id="convertForm">
+				<h2 id="convertTitle" class="form-title">批量转换<span id="convertCount"></span></h2>
+				<input id="convertInput" class="file-input" type="file" accept=".pdf,.ofd" multiple>
+				<div class="convert-table"><table><thead><tr><th scope="col">文件</th><th scope="col">页码</th><th scope="col">格式</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead><tbody id="convertList"></tbody></table><div id="convertEmpty" class="convert-empty">暂无文件</div></div>
+				<div class="convert-progress"><progress id="convertProgress" max="1" value="0" aria-label="转换进度"></progress><div id="convertStatus" role="status" aria-live="polite"></div></div>
+				<div class="form-actions">
+					<button id="convertAdd" class="button" type="button">添加</button><button id="convertClear" class="button" type="button">清空</button>
+					<div class="convert-options">
+						<div class="form-row"><label for="convertFormat">格式</label><select id="convertFormat" required></select></div>
+						<div id="convertDPIRow" class="form-row" hidden><label for="convertDPI">精度</label><select id="convertDPI"><option value="96">96 dpi</option><option value="150">150 dpi</option><option value="300" selected>300 dpi</option><option value="600">600 dpi</option></select></div>
+						<div class="form-row"><label for="convertDestination">保存</label><select id="convertDestination"><option value="directory">目录</option><option value="archive">打包</option></select></div>
+					</div>
+					<button id="convertClose" class="button" type="button">关闭</button><button id="convertCancel" class="button" type="button" hidden>取消</button><button id="convertStart" class="button" type="submit" disabled>转换</button>
+				</div>
+			</form>
+		</dialog>
 		<dialog id="batchPagesPanel" class="form-dialog" aria-label="批量页面">
 			<form id="batchPagesForm">
 				<div class="form-row"><label for="batchPageAction">操作</label><select id="batchPageAction"><option value="copy">复制</option><option value="move">移动</option><option value="delete">删除</option><option value="save">另存</option></select></div>
