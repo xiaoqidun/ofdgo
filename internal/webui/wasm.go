@@ -398,10 +398,10 @@ func convertPDFDocument(args []js.Value) (any, error) {
 }
 
 // convertFile 使用库转换独立文件，不读取或修改当前阅读和编辑会话
-// 入参: args 随机读取、文件大小、转换选项、写出、进度、文件边界、取消检查及字体
+// 入参: args 随机读取、文件大小、转换选项、写出、进度、文件边界、取消检查、字体及按需字体读取
 // 返回: any 转换报告, error 转换错误
 func convertFile(args []js.Value) (any, error) {
-	if len(args) != 8 {
+	if len(args) != 9 {
 		return nil, fmt.Errorf("missing conversion arguments")
 	}
 	settings := args[2]
@@ -422,9 +422,13 @@ func convertFile(args []js.Value) (any, error) {
 			return awaitExport(args[4], progress.Stage, progress.Completed, progress.Total)
 		},
 	}
-	if len(fonts) > 0 {
-		options.RendererOptions = append(options.RendererOptions, ofdgo.WithFontFS(ofdgo.NewFontFS(fonts)))
+	fontSources := []fs.FS{ofdgo.NewFontFS(fonts)}
+	if names := settings.Get("fontNames"); !names.IsUndefined() && names.Length() > 0 {
+		fontSources = append(fontSources, ofdgo.NewLazyFontFS(stringsFromJS(names), func(name string) ([]byte, error) {
+			return loadConversionFont(args[8], name)
+		}))
 	}
+	options.RendererOptions = append(options.RendererOptions, ofdgo.WithFontFS(fontSources...))
 	if value := settings.Get("credentials"); !value.IsNull() && !value.IsUndefined() {
 		credentials, err := credentialsFromJS(value)
 		if err != nil {
@@ -474,6 +478,30 @@ func convertFile(args []js.Value) (any, error) {
 		}
 	}
 	return report, nil
+}
+
+// loadConversionFont 按需读取浏览器已授权字体，不预读系统字体目录
+// 入参: load 浏览器读取函数, name 字体文件名
+// 返回: []byte 字体内容, error 读取错误或取消原因
+func loadConversionFont(load js.Value, name string) ([]byte, error) {
+	done := make(chan error, 1)
+	var data []byte
+	callback := js.FuncOf(func(this js.Value, args []js.Value) any {
+		var err error
+		if args[2].Bool() {
+			err = context.Canceled
+		} else if message := args[1].String(); message != "" {
+			err = fmt.Errorf("%s", message)
+		} else {
+			data, err = bytesFromJS(args[0])
+		}
+		done <- err
+		return nil
+	})
+	defer callback.Release()
+	load.Invoke(name, callback)
+	err := <-done
+	return data, err
 }
 
 // packFiles 将已经成功转换的文件逐个打包，不重复转换或读取整个文件

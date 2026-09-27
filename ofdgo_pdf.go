@@ -164,14 +164,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		importer.maskClips = make(map[*pdfgo.SoftMask]pdfgo.Path)
 		importer.compositeCache = nil
 		importer.clipTexts = make(map[*pdfgo.TextClip]TextObject)
-		visitor := pdfgo.Visitor{Path: importer.path, Text: importer.text, Image: importer.image, Warning: importer.warning}
-		visitor.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
-			if mark.Page && mark.ColorSpace != nil && mark.ColorSpace.Model == "DeviceCMYK" && !mark.ColorSpace.Calibrated() {
-				return importer.compositePage(mark.ColorSpace, walk)
-			}
-			return importer.group(mark, walk, visitor)
-		}
-		if err := reader.WalkPage(ctx, page, visitor); err != nil {
+		if err := importer.compositePage(nil, func(visitor pdfgo.Visitor) error { return reader.WalkPage(ctx, page, visitor) }); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
 		if err := importer.flushPath(); err != nil {
@@ -466,9 +459,6 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 		if !ok {
 			return fmt.Errorf("invalid PDF stroke matrix")
 		}
-		if mark.Style.Fill.Radial != nil || mark.Style.Stroke.Radial != nil {
-			return &pdfgo.UnsupportedError{Feature: "radial gradient with anisotropic path stroke"}
-		}
 		drawing.matrix, origin, scale = inverse, Box{}, 1
 		m := p.matrix.Mul(mark.StrokeMatrix)
 		marginScale = math.Max(math.Hypot(m[0], m[2]), math.Hypot(m[1], m[3]))
@@ -531,6 +521,9 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 // 入参: paint PDF画刷, box 对象边界
 // 返回: *FillColor OFD颜色或渐变, error 图案转换错误
 func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error) {
+	if paint.Mesh != nil {
+		return nil, &pdfgo.UnsupportedError{Feature: "bicubic mesh conversion"}
+	}
 	color := p.color(paint)
 	if paint.Tiling != nil {
 		pattern, err := p.tilingPattern(paint.Tiling, paint)
@@ -542,8 +535,20 @@ func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error)
 	}
 	if paint.Radial != nil {
 		gradient := paint.Radial
-		start, end := p.matrix.Apply(gradient.Start), p.matrix.Apply(gradient.End)
-		scale := math.Hypot(p.matrix[0], p.matrix[1])
+		matrix := p.matrix
+		if gradient.Matrix != (pdfgo.Matrix{}) {
+			matrix = matrix.Mul(gradient.Matrix)
+		}
+		start, end := matrix.Apply(gradient.Start), matrix.Apply(gradient.End)
+		xx, yy, xy := matrix[0]*matrix[0]+matrix[2]*matrix[2], matrix[1]*matrix[1]+matrix[3]*matrix[3], matrix[0]*matrix[1]+matrix[2]*matrix[3]
+		major := (xx + yy + math.Hypot(xx-yy, 2*xy)) / 2
+		determinant := matrix[0]*matrix[3] - matrix[1]*matrix[2]
+		if major <= 0 || determinant == 0 {
+			return nil, fmt.Errorf("invalid PDF radial gradient matrix")
+		}
+		scale := math.Sqrt(major)
+		eccentricity := math.Sqrt(math.Max(0, 1-determinant*determinant/(major*major)))
+		angle := math.Atan2(2*xy, xx-yy) * 90 / math.Pi
 		extend := 0
 		if gradient.Extend[0] {
 			extend |= 1
@@ -551,9 +556,9 @@ func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error)
 		if gradient.Extend[1] {
 			extend |= 2
 		}
-		shading := &RadialShd{StartPoint: pdfNumbers(start.X-box.X, start.Y-box.Y), EndPoint: pdfNumbers(end.X-box.X, end.Y-box.Y), StartRadius: gradient.StartRadius * scale, EndRadius: gradient.EndRadius * scale, Extend: strconv.Itoa(extend)}
+		shading := &RadialShd{StartPoint: pdfNumbers(start.X-box.X, start.Y-box.Y), EndPoint: pdfNumbers(end.X-box.X, end.Y-box.Y), StartRadius: gradient.StartRadius * scale, EndRadius: gradient.EndRadius * scale, Eccentricity: eccentricity, Angle: angle, Extend: strconv.Itoa(extend)}
 		var err error
-		shading.Segment, err = pdfGradientSegments(gradient.Stops, gradient.Space)
+		shading.Segment, err = p.gradientSegments(gradient.Stops, gradient.Space)
 		if err != nil {
 			return nil, err
 		}
@@ -587,7 +592,7 @@ func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error)
 	}
 	shading := &AxialShd{StartPoint: pdfNumbers(start.X-box.X, start.Y-box.Y), EndPoint: pdfNumbers(end.X-box.X, end.Y-box.Y), Extend: strconv.Itoa(extend)}
 	var err error
-	shading.Segment, err = pdfGradientSegments(gradient.Stops, gradient.Space)
+	shading.Segment, err = p.gradientSegments(gradient.Stops, gradient.Space)
 	if err != nil {
 		return nil, err
 	}

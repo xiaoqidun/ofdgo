@@ -37,6 +37,7 @@ type pdfCompositePixel struct {
 	values [4]float64
 	alpha  float64
 	effect float64
+	shape  float64
 }
 
 // pdfCompositor 在指定局部区域中按源颜色空间合成PDF图元
@@ -47,6 +48,7 @@ type pdfCompositor struct {
 	inverse       pdfgo.Matrix
 	cache         *pdfCompositeCache
 	masks         map[*pdfgo.SoftMask][]float64
+	meshes        map[pdfMeshKey][]pdfMeshPixel
 }
 
 // pdfCompositeKey 区分图元的填充与描边几何
@@ -68,13 +70,14 @@ type pdfCompositeCache struct {
 	geometry map[pdfCompositeKey]pdfCompositeGeometry
 	images   map[*pdfgo.Image]*pdfgo.ImageComponents
 	masks    map[*pdfgo.SoftMask][]pdfCompositeNode
+	meshes   map[*pdfgo.MeshGradient][]pdfMeshTriangle
 }
 
 // compositingCache 按需创建单页合成缓存，页面切换时由导入器释放
 // 返回: *pdfCompositeCache 当前页面缓存
 func (p *pdfImporter) compositingCache() *pdfCompositeCache {
 	if p.compositeCache == nil {
-		p.compositeCache = &pdfCompositeCache{geometry: map[pdfCompositeKey]pdfCompositeGeometry{}, images: map[*pdfgo.Image]*pdfgo.ImageComponents{}, masks: map[*pdfgo.SoftMask][]pdfCompositeNode{}}
+		p.compositeCache = &pdfCompositeCache{geometry: map[pdfCompositeKey]pdfCompositeGeometry{}, images: map[*pdfgo.Image]*pdfgo.ImageComponents{}, masks: map[*pdfgo.SoftMask][]pdfCompositeNode{}, meshes: map[*pdfgo.MeshGradient][]pdfMeshTriangle{}}
 	}
 	return p.compositeCache
 }
@@ -162,8 +165,17 @@ func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Vis
 	if err != nil {
 		return err
 	}
+	if len(nodes) == 1 && nodes[0].group != nil && nodes[0].group.Page {
+		space = nodes[0].group.ColorSpace
+		if !nodes[0].group.Knockout {
+			nodes = nodes[0].children
+		}
+	}
+	if space == nil {
+		space = &pdfgo.ColorSpace{Model: "DeviceRGB"}
+	}
 	for i, node := range nodes {
-		if node.opaque(space) {
+		if node.opaque(space) || space.SRGBEquivalent() && node.direct() {
 			if err := node.emit(p.visitor()); err != nil {
 				return fmt.Errorf("convert graphic %d: %w", i+1, err)
 			}
@@ -188,7 +200,7 @@ func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Vis
 func (n pdfCompositeNode) opaque(space *pdfgo.ColorSpace) bool {
 	if n.group != nil {
 		g := n.group
-		if g.Alpha != 1 || g.SoftMask != nil || !pdfNormalBlend(g.BlendMode) || g.ColorSpace != nil && !g.ColorSpace.Equal(space) {
+		if g.Knockout || g.Alpha != 1 || g.SoftMask != nil || !pdfNormalBlend(g.BlendMode) || g.ColorSpace != nil && !g.ColorSpace.Equal(space) {
 			return false
 		}
 		for _, child := range n.children {
@@ -212,6 +224,24 @@ func (n pdfCompositeNode) opaque(space *pdfgo.ColorSpace) bool {
 		return false
 	}
 	return true
+}
+
+// direct 检查sRGB图元能否使用标准OFD透明度而无需背景合成
+// 返回: bool 是否可直接转换
+func (n pdfCompositeNode) direct() bool {
+	if g := n.group; g != nil {
+		if g.Knockout || !pdfNormalBlend(g.BlendMode) || g.ColorSpace != nil && !g.ColorSpace.SRGBEquivalent() {
+			return false
+		}
+		for _, child := range n.children {
+			if !child.direct() {
+				return false
+			}
+		}
+		return true
+	}
+	s, fill, stroke := n.style()
+	return pdfNormalBlend(s.BlendMode) && !(fill && s.FillOverprint && pdfOverprintNeedsSeparation(s.Fill) || stroke && s.StrokeOverprint && pdfOverprintNeedsSeparation(s.Stroke))
 }
 
 // style 获取图元实际使用的图形状态

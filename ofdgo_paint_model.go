@@ -68,7 +68,7 @@ func (r *Renderer) ResolvePaint(fill *FillColor) Paint {
 	paint := Paint{Kind: PaintSolid, Color: colorToRGBA(base)}
 	if node := fill.AxialShd; node != nil {
 		start, end := parseFloats(node.StartPoint), parseFloats(node.EndPoint)
-		stops := r.GradientStops(node.Segment, fill.Alpha)
+		stops := r.renderGradientStops(node.Segment, fill.Alpha)
 		if len(start) >= 2 && len(end) >= 2 && len(stops) != 0 && (!geometryEqual(start[0], end[0]) || !geometryEqual(start[1], end[1])) {
 			paint.Kind = PaintLinear
 			paint.Gradient = &Shading{Start: Point{X: start[0], Y: start[1]}, End: Point{X: end[0], Y: end[1]}, Stops: stops, Extend: node.Extend, MapType: node.MapType, MapUnit: node.MapUnit}
@@ -77,7 +77,7 @@ func (r *Renderer) ResolvePaint(fill *FillColor) Paint {
 	}
 	if node := fill.RadialShd; node != nil && node.EndRadius > 0 {
 		start, end := parseFloats(node.StartPoint), parseFloats(node.EndPoint)
-		stops := r.GradientStops(node.Segment, fill.Alpha)
+		stops := r.renderGradientStops(node.Segment, fill.Alpha)
 		if len(start) >= 2 && len(end) >= 2 && len(stops) != 0 {
 			paint.Kind = PaintRadial
 			paint.Gradient = &Shading{Start: Point{X: start[0], Y: start[1]}, End: Point{X: end[0], Y: end[1]}, StartRadius: node.StartRadius, EndRadius: node.EndRadius, Stops: stops, Extend: node.Extend, MapType: node.MapType, MapUnit: node.MapUnit, Eccentricity: node.Eccentricity, Angle: node.Angle}

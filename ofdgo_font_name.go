@@ -33,7 +33,7 @@ type fontNameRecord struct {
 	Offset   uint16
 }
 
-// appendFontFileNames 使用字体内部名称匹配，缺失时保留文件名
+// appendFontFileNames 建立各字体的内部名称与文件别名匹配候选
 // 入参: candidates 字体候选, index 文件候选索引, faces 各字体内部名称
 // 返回: []fontFileCandidate 字体候选列表
 func appendFontFileNames(candidates []fontFileCandidate, index int, faces [][]string) []fontFileCandidate {
@@ -41,8 +41,12 @@ func appendFontFileNames(candidates []fontFileCandidate, index int, faces [][]st
 	replaced := false
 	for face, names := range faces {
 		file.face = face
-		for _, name := range names {
-			file.normalized = fontNormalizeName(name)
+		file.names = make([]string, len(names))
+		for i, name := range names {
+			file.names[i] = fontNormalizeName(name)
+		}
+		for _, name := range file.names {
+			file.normalized = name
 			if !replaced {
 				candidates[index] = file
 				replaced = true

@@ -396,6 +396,20 @@ export class FontManager {
 		return `${name}.ttf`;
 	}
 
+	localEntries(fonts = this.catalog) {
+		const entries = new Map();
+		const disabled = new Set(this.localFonts.filter(font => !font.enabled).map(font => font.name));
+		for (const font of fonts) {
+			if (disabled.has(this.localName(font))) continue;
+			const names = [this.localName(font), font.postscriptName && `${font.postscriptName}.ttf`,
+				font.family && `${[font.family, font.style].filter(Boolean).join(" ")}.ttf`];
+			for (const name of names) {
+				if (name && !entries.has(name)) entries.set(name, font);
+			}
+		}
+		return entries;
+	}
+
 	canReadLocal() {
 		return typeof window.queryLocalFonts === "function";
 	}

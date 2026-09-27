@@ -210,12 +210,12 @@ func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
 	seen := make(map[fontSourceKey]bool)
 	for _, dir := range r.fontDirs {
 		for _, match := range r.matchFontFiles(dir, names, bold, italic) {
-			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.name, face: match.face, exact: true, priority: min(match.priority, 0)})
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.name, face: match.face, exact: match.rank == fontMatchExact, priority: min(match.priority, 0)})
 		}
 	}
 	for index := range r.fontFS {
 		for _, match := range r.matchFontFS(index, names, bold, italic) {
-			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: match.name, face: match.face, exact: true, priority: min(match.priority, 0)})
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: match.name, face: match.face, exact: match.rank == fontMatchExact, priority: min(match.priority, 0)})
 		}
 	}
 	sortFontSources(sources)
@@ -223,7 +223,7 @@ func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
 	if canLoadSystemFonts() {
 		for _, dir := range systemFontDirs() {
 			for _, match := range r.matchFontFiles(dir, names, bold, italic) {
-				sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.name, face: match.face, exact: true, priority: min(match.priority, 0)})
+				sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.name, face: match.face, exact: match.rank == fontMatchExact, priority: min(match.priority, 0)})
 			}
 		}
 		for _, name := range fontSystemNames(names...) {

@@ -21,6 +21,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,9 +31,10 @@ type FontFile struct {
 	Data []byte
 }
 
-// FontFS 内存字体文件系统
+// FontFS 缓存字体数据及名称索引的只读文件系统
 type FontFS struct {
 	files      map[string][]byte
+	loaders    map[string]func() ([]byte, error)
 	names      []string
 	candidates []fontFileCandidate
 }
@@ -62,6 +64,32 @@ func NewFontFS(fonts []FontFile) *FontFS {
 	return fsys
 }
 
+// NewLazyFontFS 创建按需读取的字体文件系统，按文件名匹配，不预读字体内容
+// 每个文件的读取结果仅缓存一次；目录条目大小为0，打开后可获取实际大小
+// 入参: names 包含字体名称和样式的文件名, load 按原文件名读取独立字体的非nil函数
+// 返回: *FontFS 字体文件系统
+func NewLazyFontFS(names []string, load func(string) ([]byte, error)) *FontFS {
+	fsys := &FontFS{files: make(map[string][]byte), loaders: make(map[string]func() ([]byte, error))}
+	for _, original := range names {
+		name := cleanFontName(original)
+		if name == "." || !isFontFileName(name) {
+			continue
+		}
+		if _, exists := fsys.files[name]; exists {
+			continue
+		}
+		fsys.names = append(fsys.names, name)
+		fsys.files[name] = nil
+		fsys.loaders[name] = sync.OnceValues(func() ([]byte, error) {
+			data, err := load(original)
+			return bytes.Clone(data), err
+		})
+	}
+	sort.Strings(fsys.names)
+	fsys.candidates = fontFileCandidates(fsys.names, path.Base)
+	return fsys
+}
+
 // Len 获取字体文件数量
 // 返回: int 字体文件数量
 func (fsys *FontFS) Len() int {
@@ -84,6 +112,13 @@ func (fsys *FontFS) Open(name string) (fs.File, error) {
 	data, ok := fsys.files[strings.ToLower(name)]
 	if !ok {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	if load := fsys.loaders[strings.ToLower(name)]; load != nil {
+		var err error
+		data, err = load()
+		if err != nil {
+			return nil, &fs.PathError{Op: "open", Path: name, Err: err}
+		}
 	}
 	return &fontMemFile{
 		Reader: bytes.NewReader(data),
@@ -281,7 +316,9 @@ type fontFileCandidate struct {
 	face       int
 	base       string
 	lowerBase  string
+	filename   string
 	normalized string
+	names      []string
 	fold       string
 }
 
@@ -293,11 +330,13 @@ func fontFileCandidates(names []string, base func(string) string) []fontFileCand
 	for _, name := range names {
 		if isFontFileName(name) {
 			baseName := base(name)
+			normalized := fontNormalizeName(strings.TrimSuffix(baseName, path.Ext(baseName)))
 			files = append(files, fontFileCandidate{
 				name:       name,
 				base:       baseName,
 				lowerBase:  strings.ToLower(baseName),
-				normalized: fontNormalizeName(baseName),
+				filename:   normalized,
+				normalized: normalized,
 				fold:       strings.ToLower(name),
 			})
 		}
@@ -370,7 +409,7 @@ func (m fontPatternMatcher) rankCandidate(file fontFileCandidate) int {
 		}
 		return fontMatchNone
 	}
-	name := file.normalized
+	name := m.candidateName(file)
 	if name == m.stem {
 		return fontMatchExact
 	}
@@ -399,6 +438,26 @@ func (m fontPatternMatcher) rankCandidate(file fontFileCandidate) int {
 		}
 	}
 	return fontMatchNone
+}
+
+// candidateName 保留同族内部名称的区分，只有无关联时使用调用方文件别名
+// 入参: file 字体文件候选
+// 返回: string 用于统一匹配名称与样式的规范名称
+func (m fontPatternMatcher) candidateName(file fontFileCandidate) string {
+	if len(file.names) == 0 || file.base == "" || m.stem == "" {
+		return file.normalized
+	}
+	for _, name := range file.names {
+		if strings.HasPrefix(name, m.stem) {
+			return file.normalized
+		}
+		for _, alias := range m.aliases {
+			if strings.HasPrefix(name, alias) {
+				return file.normalized
+			}
+		}
+	}
+	return file.filename
 }
 
 // styleSuffixNormalized 获取规范字体名称的样式后缀
@@ -441,7 +500,7 @@ func appendFontFileMatch(matches *[]fontFileMatch, seen map[fontFileKey]int, mat
 	if rank == fontMatchNone {
 		return
 	}
-	suffix := matcher.styleSuffixNormalized(file.normalized)
+	suffix := matcher.styleSuffixNormalized(matcher.candidateName(file))
 	if rank == fontMatchFuzzy {
 		suffix = matcher.styleSuffixNormalized(fontNormalizeName(file.base))
 	}

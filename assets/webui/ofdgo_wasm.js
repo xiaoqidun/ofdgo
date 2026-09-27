@@ -2,7 +2,14 @@ importScripts("./wasm_exec.js");
 
 let pending = Promise.resolve();
 const operations = new Map();
+const fontRequests = new Map();
+let fontSequence = 0;
 self.onmessage = ({ data }) => {
+	if (data.type === "font") {
+		fontRequests.get(data.request)?.(data);
+		fontRequests.delete(data.request);
+		return;
+	}
 	if (data.type === "cancel") {
 		operations.get(data.id)?.abort();
 		return;
@@ -96,7 +103,20 @@ async function handleBatchMessage({ id, name, args }) {
 					finish(done);
 				},
 				(action, pageName, done) => boundary(action, pageName).then(() => finish(done), err => finish(done, err)),
-				done => finish(done), fonts);
+				done => finish(done), fonts, (name, done) => {
+					if (signal.aborted) { done(null, "", true); return; }
+					const request = ++fontSequence;
+					const cancel = () => {
+						fontRequests.delete(request);
+						done(null, "", true);
+					};
+					signal.addEventListener("abort", cancel, { once: true });
+					fontRequests.set(request, result => {
+						signal.removeEventListener("abort", cancel);
+						done(result.bytes, result.error || "", signal.aborted);
+					});
+					self.postMessage({ id, type: "font", request, name });
+				});
 		} else {
 			const [entries, handle] = args;
 			if (handle) output = await handle.createWritable();

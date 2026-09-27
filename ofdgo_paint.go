@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"image/color"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -31,6 +32,29 @@ func (r *Renderer) ResolveColor(value string, index *int, space string, alpha *i
 // 入参: value 颜色值, index 调色板索引, space 颜色空间标识, alpha 透明度
 // 返回: color.Color 颜色对象
 func (r *Renderer) parseColorWithAlpha(value string, index *int, space string, alpha *int) color.Color {
+	kind, values := r.colorComponents(value, index, space)
+	var components [4]uint8
+	for i, value := range values {
+		components[i] = uint8(math.Round(value * 255))
+	}
+	red, green, blue := components[0], components[1], components[2]
+	switch kind {
+	case "GRAY":
+		green, blue = red, red
+	case "CMYK":
+		red, green, blue = color.CMYKToRGB(components[0], components[1], components[2], components[3])
+	}
+	a := 255
+	if alpha != nil {
+		a = clampColor(*alpha)
+	}
+	return color.RGBA{R: uint8(int(red) * a / 255), G: uint8(int(green) * a / 255), B: uint8(int(blue) * a / 255), A: uint8(a)}
+}
+
+// colorComponents 读取颜色空间及归一化分量，保留源位深供渐变插值
+// 入参: value 颜色值, index 调色板索引, space 颜色空间标识
+// 返回: string 颜色模型, [4]float64 单位分量
+func (r *Renderer) colorComponents(value string, index *int, space string) (string, [4]float64) {
 	if space == "" && r.Reader.doc != nil {
 		space = strconv.Itoa(r.Reader.doc.CommonData.DefaultCS)
 	}
@@ -53,30 +77,19 @@ func (r *Renderer) parseColorWithAlpha(value string, index *int, space string, a
 		count = 4
 	}
 	parts := strings.Fields(value)
-	var components [4]uint8
+	var components [4]float64
 	limit := 1<<bits - 1
 	if len(parts) >= count {
 		for i, part := range parts[:count] {
 			v, err := parseColorComponent(part)
 			if err != nil || v < 0 || limit < v {
-				components = [4]uint8{}
+				components = [4]float64{}
 				break
 			}
-			components[i] = uint8((v*255 + limit/2) / limit)
+			components[i] = float64(v) / float64(limit)
 		}
 	}
-	red, green, blue := components[0], components[1], components[2]
-	switch kind {
-	case "GRAY":
-		green, blue = red, red
-	case "CMYK":
-		red, green, blue = color.CMYKToRGB(components[0], components[1], components[2], components[3])
-	}
-	a := 255
-	if alpha != nil {
-		a = clampColor(*alpha)
-	}
-	return color.RGBA{R: uint8(int(red) * a / 255), G: uint8(int(green) * a / 255), B: uint8(int(blue) * a / 255), A: uint8(a)}
+	return kind, components
 }
 
 // parseColorComponent 解析颜色分量
@@ -230,6 +243,55 @@ func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) []ColorStop 
 		gradient = append(gradient, ColorStop{Offset: positions[i], Color: r.ResolveColor(segment.Color.Value, segment.Color.Index, segment.Color.ColorSpace, segmentAlpha)})
 	}
 	return gradient
+}
+
+// renderGradientStops 在CMYK分量空间插值，将RGB分段误差控制在半个8位灰阶内
+// 入参: segments 原始颜色分段, alpha 对象透明度
+// 返回: []ColorStop 仅供绘制的颜色节点，不改变原始分段
+func (r *Renderer) renderGradientStops(segments []ShdSegment, alpha *int) []ColorStop {
+	stops := r.GradientStops(segments, alpha)
+	if len(stops) < 2 {
+		return stops
+	}
+	var result []ColorStop
+	for i, stop := range stops {
+		if i > 0 && stops[i-1].Offset < stop.Offset {
+			a, b := segments[i-1].Color, segments[i].Color
+			leftKind, left := r.colorComponents(a.Value, a.Index, a.ColorSpace)
+			rightKind, right := r.colorComponents(b.Value, b.Index, b.ColorSpace)
+			if leftKind == "CMYK" && rightKind == "CMYK" {
+				a0, a1 := float64(stops[i-1].Color.A)/255, float64(stop.Color.A)/255
+				dk, da := right[3]-left[3], a1-a0
+				bound := 0.0
+				for c := 0; c < 3; c++ {
+					dc := right[c] - left[c]
+					bound = math.Max(bound, 2*math.Abs(dc*dk)+2*math.Abs(da)*(math.Abs(dc)+math.Abs(dk)))
+				}
+				steps := int(math.Ceil(math.Sqrt(bound * 255 / 4)))
+				if steps > 1 && result == nil {
+					result = append(make([]ColorStop, 0, len(stops)+steps-1), stops[:i]...)
+				}
+				for j := 1; j < steps; j++ {
+					t := float64(j) / float64(steps)
+					var values [4]float64
+					for c := range values {
+						values[c] = left[c]*(1-t) + right[c]*t
+					}
+					opacity := a0*(1-t) + a1*t
+					black := (1 - values[3]) * opacity * 255
+					color := color.RGBA{R: uint8(math.Round((1 - values[0]) * black)), G: uint8(math.Round((1 - values[1]) * black)), B: uint8(math.Round((1 - values[2]) * black)), A: uint8(math.Round(opacity * 255))}
+					result = append(result, ColorStop{Offset: stops[i-1].Offset*(1-t) + stop.Offset*t, Color: color})
+				}
+			}
+		}
+		if result != nil {
+			result = append(result, stop)
+		}
+	}
+	if result == nil {
+		return stops
+	}
+	return result
 }
 
 // gradientPositions 按显式锚点补全渐变分段位置，保留原顺序

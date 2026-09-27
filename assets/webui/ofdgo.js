@@ -3575,19 +3575,7 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 }
 
 async function selectLocalFonts(fonts) {
-	const available = new Map();
-	for (const font of fonts) {
-		const names = [
-			fontManager.localName(font),
-			font.postscriptName && `${font.postscriptName}.ttf`,
-			font.family && `${[font.family, font.style].filter(Boolean).join(" ")}.ttf`,
-		];
-		for (const name of names) {
-			if (name && !available.has(name)) {
-				available.set(name, font);
-			}
-		}
-	}
+	const available = fontManager.localEntries(fonts);
 	const matched = await callWASM("ofdgoMatchFontFiles", [...available.keys()]);
 	return [...new Set(matched.map((name) => available.get(name)))];
 }
@@ -4502,9 +4490,13 @@ function updateBatchControls() {
 	batchElements.Cancel.disabled = batch.canceled;
 	batchElements.Close.textContent = batch.running ? "收起" : "关闭";
 	batchElements.Count.textContent = batch.items.length ? `${batch.items.length}个文件` : "";
-	const formats = batch.items.length ? batch.items.map(item => item.format || batchElements.Format.value) : [batchElements.Format.value];
-	batchElements.DPIRow.hidden = !formats.some(value => batch.formats.find(format => format.value === value)?.raster);
+	batchElements.DPIRow.hidden = !(batch.items.length ? batch.items : [null]).some(batchUsesDPI);
 	batchElements.Button.toggleAttribute("data-running", batch.running);
+}
+
+function batchUsesDPI(item) {
+	const format = item?.format || batchElements.Format.value;
+	return Boolean(batch.formats.find(value => value.value === format)?.raster || item && /\.pdf$/i.test(item.file.name));
 }
 
 function batchStatus(item, status, text) {
@@ -4558,12 +4550,24 @@ function startBatchWorker() {
 		};
 		worker.onerror = event => fail(new Error(event.message || "转换引擎异常"));
 		worker.onmessageerror = () => fail(new Error("转换数据传递失败"));
-		worker.onmessage = ({ data }) => {
+		worker.onmessage = async ({ data }) => {
 			if (data.type === "ready") { resolve(); return; }
 			if (data.type === "exit") { fail(new Error(data.error)); return; }
 			if (data.type === "progress") { batchElements.Status.textContent = data.text; return; }
 			const request = batch.requests.get(data.id);
 			if (!request) return;
+			if (data.type === "font") {
+				try {
+					const font = batch.localFonts.get(data.name);
+					if (!font) throw new Error("系统字体不可用");
+					if (!batch.fontData.has(font)) batch.fontData.set(font, fontManager.read(font));
+					const bytes = await batch.fontData.get(font);
+					worker.postMessage({ type: "font", request: data.request, bytes });
+				} catch (err) {
+					worker.postMessage({ type: "font", request: data.request, error: err.message });
+				}
+				return;
+			}
 			if (data.type === "output") { request.outputName = data.name; return; }
 			if (data.type === "conversion") { request.onProgress?.(data); return; }
 			batch.requests.delete(data.id);
@@ -4593,9 +4597,10 @@ async function runBatch() {
 	const dpi = Number(batchElements.DPI.value);
 	const archive = batchElements.Destination.value === "archive";
 	const backend = state.renderBackend;
+	const fontKey = [fontManager.permission, fontManager.records().map(font => [font.id, font.name, font.enabled, font.checksum])];
 	for (const item of batch.items) {
 		const format = batch.formats.find(format => format.value === (item.format || defaultFormat.value));
-		const key = JSON.stringify([format.value, pageRange(item), format.raster ? dpi : 0, archive, backend]);
+		const key = JSON.stringify([format.value, pageRange(item), batchUsesDPI(item) ? dpi : 0, archive, backend, fontKey]);
 		if (item.settingsKey !== key) {
 			item.status = "pending";
 			item.text = "待转";
@@ -4629,6 +4634,12 @@ async function runBatch() {
 			}
 		} else destination = await window.showDirectoryPicker({ mode: "readwrite" });
 		if (batch.canceled) return;
+		if (jobs.some(item => /\.pdf$/i.test(item.file.name) || !["ofd", "txt"].includes(item.format || defaultFormat.value))) {
+			await requestLocalFontsBeforeOpen();
+		}
+		if (batch.canceled) return;
+		batch.localFonts = fontManager.localEntries();
+		batch.fontData = new Map();
 		batchElements.Status.textContent = "正在准备引擎";
 		await startBatchWorker();
 		const fonts = await fontManager.files(fontManager.records());
@@ -4642,7 +4653,8 @@ async function runBatch() {
 			const outputName = () => (format.paged ? unique : `${unique}.${format.extension}`).toLowerCase();
 			for (let suffix = 2; archive && names.has(outputName()); suffix++) unique = `${base} (${suffix})`;
 			names.add(outputName());
-			const options = { format: format.value, pages: pageRange(item), dpi, backend, archive, base: unique, credentials: null };
+			const options = { format: format.value, pages: pageRange(item), dpi, backend, archive, base: unique, credentials: null,
+				fontNames: [...batch.localFonts.keys()] };
 			try {
 				for (;;) {
 					try {
@@ -4694,6 +4706,8 @@ async function runBatch() {
 		batch.worker = null;
 		batch.requests.clear();
 		batch.activeID = 0;
+		batch.fontData?.clear();
+		batch.localFonts?.clear();
 		if (storage && stagingName) {
 			try { await storage.removeEntry(stagingName, { recursive: true }); }
 			catch { batchElements.Status.textContent += " · 临时文件清理失败"; }

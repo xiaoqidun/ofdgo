@@ -39,6 +39,9 @@ type pdfPaintRegion struct {
 // 入参: mark 组边界状态, walk 组内容访问函数, visitor 页面访问器
 // 返回: error 不支持的组内容或转换错误
 func (p *pdfImporter) group(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error, visitor pdfgo.Visitor) error {
+	if mark.Knockout {
+		return &pdfgo.UnsupportedError{Feature: "knockout group outside page compositing"}
+	}
 	if mark.BlendMode != "" && mark.BlendMode != "Normal" && mark.BlendMode != "Compatible" {
 		return &pdfgo.UnsupportedError{Feature: "group blend mode " + string(mark.BlendMode)}
 	}
@@ -152,7 +155,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			if stroke {
 				color, overprint = path.Style.Stroke, path.Style.StrokeOverprint
 			}
-			if color.Tiling != nil || color.Axial != nil || color.Radial != nil || overprint && pdfOverprintNeedsSeparation(color) {
+			if color.Tiling != nil || color.Axial != nil || color.Radial != nil || color.Mesh != nil || overprint && pdfOverprintNeedsSeparation(color) {
 				return fmt.Errorf("%w: patterned or overprinted group content", errPDFGroupRaster)
 			}
 			if color.Alpha == 0 {

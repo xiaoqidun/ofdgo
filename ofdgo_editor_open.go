@@ -783,15 +783,17 @@ func (e *Editor) editorFont(id string) (FontMetrics, error) {
 		return nil, &EditError{Code: EditFontUnavailable, Err: fmt.Errorf("fonts: %w", ErrBackendUnavailable)}
 	}
 	var data []byte
-	createdExternal := false
+	var external *Font
 	for _, resource := range e.resources {
 		if resource.font != nil && resource.font.ID == id {
 			data = resource.data
-			createdExternal = resource.font.FontFile == ""
+			if resource.font.FontFile == "" {
+				external = resource.font
+			}
 			break
 		}
 	}
-	if data == nil && e.source != nil && !createdExternal {
+	if data == nil && e.source != nil && external == nil {
 		if e.fontRenderer == nil {
 			e.fontRenderer = e.newRenderer(e.source.reader)
 		}
@@ -801,12 +803,9 @@ func (e *Editor) editorFont(id string) (FontMetrics, error) {
 		}
 		data = resolved.Data
 	}
-	if data == nil && createdExternal {
-		reader, err := e.Reader()
-		if err != nil {
-			return nil, &EditError{Code: EditFontUnavailable, Err: err}
-		}
-		resolved, err := e.newRenderer(reader).ResolveFont(id, false)
+	if data == nil && external != nil {
+		reader := &Reader{doc: &Document{}, fontResourcesRead: true, fontCache: map[string]*Font{id: external}}
+		resolved, err := e.newRenderer(reader).ResolveFont(id, true)
 		if err != nil {
 			return nil, &EditError{Code: EditFontUnavailable, Err: err}
 		}
