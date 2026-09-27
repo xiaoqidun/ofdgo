@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -171,16 +172,42 @@ func (p *PageText) writeTo(writer io.Writer, separator bool) (int64, error) {
 // 返回: []TextMatch 匹配结果及上下文
 func (p *PageText) Search(query string) []TextMatch {
 	var matches []TextMatch
-	if query == "" {
-		return matches
+	_ = p.SearchEach(context.Background(), query, func(match TextMatch) error {
+		matches = append(matches, match)
+		return nil
+	})
+	return matches
+}
+
+// SearchEach 逐项返回忽略大小写的字面匹配，不累积全部结果，在对象与匹配之间检查取消
+// 入参: ctx 取消上下文, query 搜索文字, visit 匹配访问函数，可返回错误停止
+// 返回: error 取消或访问错误
+func (p *PageText) SearchEach(ctx context.Context, query string, visit func(TextMatch) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	query = foldText(query)
+	return p.searchEach(ctx, foldText(query), visit)
+}
+
+// searchEach 使用预折叠的查询执行搜索，供跨页搜索复用
+// 入参: ctx 取消上下文, query 已折叠查询, visit 匹配访问函数
+// 返回: error 取消或访问错误
+func (p *PageText) searchEach(ctx context.Context, query string, visit func(TextMatch) error) error {
+	if query == "" {
+		return ctx.Err()
+	}
 	length := utf8.RuneCountInString(query)
 	for index, run := range p.Runs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		text := foldText(run.Text)
 		var runes []rune
 		codeOffset := 0
 		for offset := 0; offset < len(text); {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			found := strings.Index(text[offset:], query)
 			if found < 0 {
 				break
@@ -203,12 +230,48 @@ func (p *PageText) Search(query string) []TextMatch {
 					match.Boxes = append(match.Boxes, box)
 				}
 			}
-			matches = append(matches, match)
+			if err := visit(match); err != nil {
+				return err
+			}
 			offset += len(query)
 			codeOffset = end
 		}
 	}
-	return matches
+	return ctx.Err()
+}
+
+// SearchText 逐页搜索原文并立即返回匹配，不保留整本文字或识别图像
+// 入参: ctx 取消上下文，页面提取之间及匹配时检查, query 搜索文字, visit 零基页码和匹配访问函数, indices 页码，省略则全部，按原页序去重
+// 返回: error 页面提取、取消或访问错误
+func (r *Renderer) SearchText(ctx context.Context, query string, visit func(int, TextMatch) error, indices ...int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if query == "" {
+		return nil
+	}
+	count, err := r.Reader.PageCount()
+	if err != nil {
+		return err
+	}
+	indices, err = exportPageIndices(count, indices)
+	if err != nil {
+		return err
+	}
+	query = foldText(query)
+	for _, index := range indices {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		text, err := r.PageTextByIndex(index)
+		if err != nil {
+			return fmt.Errorf("failed to search page %d: %w", index+1, err)
+		}
+		if err := text.searchEach(ctx, query, func(match TextMatch) error { return visit(index, match) }); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
 }
 
 // foldText 统一Unicode大小写等价字符，保留字符数量

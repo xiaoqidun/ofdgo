@@ -20,14 +20,25 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
+	"unicode/utf8"
 )
+
+// Attachments 获取当前编辑状态的附件列表，返回值与编辑器相互独立
+// 返回: []Attachment 附件信息, error 结构错误
+func (e *Editor) Attachments() ([]Attachment, error) {
+	if e.source == nil {
+		return nil, nil
+	}
+	return e.source.reader.Attachments()
+}
 
 // AddAttachment 添加文档附件，保留原始数据，一次操作计入一条撤销记录
 // 入参: name 显示文件名, data 文件数据
 // 返回: string 附件标识, error 文件名或文档结构错误
 func (e *Editor) AddAttachment(name string, data []byte) (string, error) {
-	if strings.TrimSpace(name) == "" {
-		return "", fmt.Errorf("attachment name is required")
+	if err := validateAttachmentName(name); err != nil {
+		return "", err
 	}
 	if err := e.prepareSourceIDs(); err != nil {
 		return "", err
@@ -102,4 +113,132 @@ func (e *Editor) AddAttachment(name string, data []byte) (string, error) {
 		return "", err
 	}
 	return id, nil
+}
+
+// RenameAttachment 修改附件显示名称，保留格式、内容及扩展字段，相同名称不产生撤销记录
+// 入参: id 附件标识, name 显示名称
+// 返回: error 名称或附件结构错误
+func (e *Editor) RenameAttachment(id, name string) error {
+	if err := validateAttachmentName(name); err != nil {
+		return err
+	}
+	return e.editAttachment(id, func(data []byte, node *editorXML, parts map[string][]byte) ([]byte, error) {
+		if node.attr("Name") == name {
+			return data, nil
+		}
+		return editorXMLAttribute(data, node, "Name", name)
+	})
+}
+
+// ReplaceAttachment 替换附件内容，使用独立资源避免影响共享引用，保留名称和格式
+// 入参: id 附件标识, data 文件数据，调用后可复用
+// 返回: error 附件结构或提交错误
+func (e *Editor) ReplaceAttachment(id string, data []byte) error {
+	return e.editAttachment(id, func(fragment []byte, node *editorXML, parts map[string][]byte) ([]byte, error) {
+		if err := e.prepareSourceIDs(); err != nil {
+			return nil, err
+		}
+		file := e.packageName("Attachments/Attachment_" + e.nextID())
+		var location bytes.Buffer
+		if err := xml.EscapeText(&location, []byte("/"+file)); err != nil {
+			return nil, err
+		}
+		if child := node.child("FileLoc"); child != nil {
+			fragment = editorPatchXML(fragment, []editorXMLPatch{editorXMLContent(fragment, child, location.Bytes())})
+		} else if node.open == node.end {
+			fragment = editorPatchXML(fragment, []editorXMLPatch{editorXMLContent(fragment, node, editorXMLText("FileLoc", "/"+file))})
+		} else {
+			fragment = editorPatchXML(fragment, []editorXMLPatch{{node.open, node.open, editorXMLText("FileLoc", "/"+file)}})
+		}
+		for _, attr := range []struct{ name, value string }{
+			{"Size", ofdNumber(float64(len(data)) / 1024)}, {"ModDate", time.Now().UTC().Format(time.RFC3339)},
+		} {
+			root, err := parseEditorXML(fragment)
+			if err != nil {
+				return nil, err
+			}
+			fragment, err = editorXMLAttribute(fragment, root, attr.name, attr.value)
+			if err != nil {
+				return nil, err
+			}
+		}
+		parts[file] = bytes.Clone(data)
+		return fragment, nil
+	})
+}
+
+// editAttachment 对单个附件片段执行原子编辑，兼容独立附件文件及内联声明
+// 入参: id 附件标识, change 片段及资源修改函数
+// 返回: error 结构、标识或提交错误
+func (e *Editor) editAttachment(id string, change func([]byte, *editorXML, map[string][]byte) ([]byte, error)) error {
+	base := e.source
+	if base == nil {
+		return fmt.Errorf("attachment not found: %s", id)
+	}
+	name := cleanPackagePath(base.reader.OFD.DocBody[0].DocRoot)
+	external := strings.TrimSpace(base.document.Attachments.Path) != ""
+	if external {
+		name = base.reader.ResPath(base.document.Attachments.Path)
+	}
+	data, err := base.reader.readFile(name)
+	if err != nil {
+		return err
+	}
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return err
+	}
+	if !external {
+		root = root.child("Attachments")
+	}
+	var found *editorXML
+	if root != nil {
+		for _, child := range root.children {
+			if child.name.Local == "Attachment" && child.attr("ID") == id {
+				if found != nil {
+					return fmt.Errorf("duplicate attachment ID: %s", id)
+				}
+				found = child
+			}
+		}
+	}
+	if found == nil {
+		return fmt.Errorf("attachment not found: %s", id)
+	}
+	fragment, err := editorXMLStandalone(data[found.start:found.end], found)
+	if err != nil {
+		return err
+	}
+	node, err := parseEditorXML(fragment)
+	if err != nil {
+		return err
+	}
+	parts := make(map[string][]byte)
+	updated, err := change(fragment, node, parts)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(updated, fragment) && len(parts) == 0 {
+		return nil
+	}
+	parts[name] = editorPatchXML(data, []editorXMLPatch{{found.start, found.end, updated}})
+	return e.commitAnnotationParts(base, parts)
+}
+
+// validateAttachmentName 校验非空附件名及XML可无损表示的Unicode字符
+// 入参: name 显示名称
+// 返回: error 名称错误
+func validateAttachmentName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("attachment name is required")
+	}
+	if !utf8.ValidString(name) {
+		return fmt.Errorf("attachment name is not valid UTF-8")
+	}
+	for _, char := range name {
+		if char < 0x20 && char != '\t' && char != '\n' && char != '\r' || char == 0xfffe || char == 0xffff {
+			return fmt.Errorf("attachment name contains an invalid XML character")
+		}
+	}
+	return nil
 }

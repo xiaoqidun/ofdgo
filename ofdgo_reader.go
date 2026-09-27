@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -600,7 +601,7 @@ func (r *Reader) Bookmarks() ([]Bookmark, error) {
 	return doc.Bookmarks.Bookmark, nil
 }
 
-// Attachments 获取附件列表
+// Attachments 获取独立的附件列表，修改返回值不影响阅读器缓存
 // 返回: []Attachment 附件列表, error 错误信息
 func (r *Reader) Attachments() ([]Attachment, error) {
 	doc, err := r.Doc()
@@ -624,7 +625,14 @@ func (r *Reader) Attachments() ([]Attachment, error) {
 		}
 		doc.Attachments.Attachment = attachments.Attachment
 	}
-	return doc.Attachments.Attachment, nil
+	attachments := slices.Clone(doc.Attachments.Attachment)
+	for i := range attachments {
+		if attachments[i].Size != nil {
+			size := *attachments[i].Size
+			attachments[i].Size = &size
+		}
+	}
+	return attachments, nil
 }
 
 // OpenAttachment 打开附件文件流，调用方负责关闭，完整读取后校验ZIP数据
