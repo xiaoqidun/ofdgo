@@ -3920,6 +3920,8 @@ async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, import
 					canceled.name = "AbortError";
 					throw canceled;
 				}
+				setProgress(pdf ? "正在读取 PDF" : "正在解析文档", null);
+				el.progressPanel.hidden = false;
 			}
 		}
 		const canceled = new Error("打开已取消");
