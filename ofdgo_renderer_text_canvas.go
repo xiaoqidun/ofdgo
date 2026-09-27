@@ -295,10 +295,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					ctx.SetStrokeColor(canvas.Transparent)
 					r.drawShdPath(ctx, applyClipPath(path.Copy(), fillClip), fillView)
 				}
-				if len(strokeStyle.dashPattern) > 0 {
-					path = path.Dash(strokeStyle.dashOffset, strokeStyle.dashPattern...)
-				}
-				path = r.strokeCanvasPath(path, strokeStyle.lineWidth, strokeStyle.lineCap, strokeStyle.lineJoin)
+				path = r.strokeDashedCanvasPath(path, strokeStyle.lineWidth, strokeStyle.lineCap, strokeStyle.lineJoin, strokeStyle.dashOffset, strokeStyle.dashPattern)
 				path = applyClipPath(path, strokeClip)
 				if strokeStyle.strokePattern != nil {
 					r.renderPattern(ctx, strokeStyle.strokePattern, pageH, path, objectCTM)

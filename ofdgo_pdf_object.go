@@ -473,7 +473,21 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, er
 		tables["hmtx"] = tables["hmtx"][:metricLength]
 		changed = true
 	}
-	if len(tables["cmap"]) == 0 || source.Subtype == "Type0" && pdfCmapOverlaps(tables["cmap"]) {
+	invalidCmap := false
+	if source.Subtype == "TrueType" || source.Subtype == "Type0" {
+		mapping := parseCmapMappings(tables["cmap"])
+		for char, glyph := range mapping {
+			if glyph >= count {
+				delete(mapping, char)
+				invalidCmap = true
+			}
+		}
+		if invalidCmap && source.Subtype == "TrueType" {
+			tables["cmap"] = buildCmapTable(count, mapping)
+			changed = true
+		}
+	}
+	if len(tables["cmap"]) == 0 || source.Subtype == "Type0" && (invalidCmap || pdfCmapOverlaps(tables["cmap"])) {
 		mapping := map[rune]uint16{}
 		for _, code := range slices.Sorted(maps.Keys(source.Unicode)) {
 			glyphs, err := source.Decode([]byte(code))
@@ -484,6 +498,9 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, er
 				return nil, 0, &pdfgo.UnsupportedError{Feature: "font without explicit glyph mapping"}
 			}
 			glyph := glyphs[0]
+			if glyph.ID >= count {
+				return nil, 0, fmt.Errorf("PDF font glyph %d exceeds glyph count %d", glyph.ID, count)
+			}
 			if utf8.RuneCountInString(glyph.Text) == 1 {
 				char, _ := utf8.DecodeRuneInString(glyph.Text)
 				if _, exists := mapping[char]; !exists {

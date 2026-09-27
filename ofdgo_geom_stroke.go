@@ -21,15 +21,16 @@ import (
 
 // geometryPolyline 保存展开后的子路径，独立记录闭合状态
 type geometryPolyline struct {
-	points []Point
-	closed bool
+	points    []Point
+	closed    bool
+	direction Point
 }
 
-// Stroke 将曲线、正长度虚线及线帽连接转换为非零填充轮廓
+// Stroke 将曲线、虚线及线帽连接转换为非零填充轮廓
 // 曲线按Tolerance展开，默认误差为0.001毫米，重叠轮廓保持同向绕数
 // 结果未做布尔整理，按非零规则填充，区域运算需能处理重叠子路径的后端
 // 入参: options 描边样式
-// 返回: GeometryPath 描边轮廓, error 无效参数、不支持的零长度语义或精度限制
+// 返回: GeometryPath 描边轮廓, error 无效参数或精度限制
 func (p GeometryPath) Stroke(options StrokeOptions) (GeometryPath, error) {
 	if err := validateStroke(options); err != nil {
 		return nil, err
@@ -51,11 +52,6 @@ func (p GeometryPath) Stroke(options StrokeOptions) (GeometryPath, error) {
 	if total == 0 {
 		dashes = nil
 	} else {
-		for _, d := range dashes {
-			if d == 0 {
-				return nil, fmt.Errorf("zero-length stroke dash: %w", ErrBackendUnavailable)
-			}
-		}
 		if len(dashes)%2 != 0 {
 			dashes = append(dashes, dashes...)
 			total *= 2
@@ -199,7 +195,7 @@ func (p GeometryPath) strokePolylines(tolerance float64) ([]geometryPolyline, er
 }
 
 // dash 按子路径重置相位并合并跨闭合接缝的连续虚线
-// 入参: pattern 正长度偶数虚线数组, total 周期, offset 偏移
+// 入参: pattern 非负偶数虚线数组, total 周期, offset 偏移
 // 返回: []geometryPolyline 虚线段, error 长度或细分限制
 func (line geometryPolyline) dash(pattern []float64, total, offset float64) ([]geometryPolyline, error) {
 	phase := math.Mod(offset, total)
@@ -207,7 +203,7 @@ func (line geometryPolyline) dash(pattern []float64, total, offset float64) ([]g
 		phase += total
 	}
 	index := 0
-	for phase >= pattern[index] {
+	for phase > 0 && phase >= pattern[index] {
 		phase -= pattern[index]
 		index = (index + 1) % len(pattern)
 	}
@@ -233,7 +229,24 @@ func (line geometryPolyline) dash(pattern []float64, total, offset float64) ([]g
 		if !finite(length) {
 			return nil, fmt.Errorf("stroke dash length overflow")
 		}
-		for at := 0.0; at < length; {
+		for at := 0.0; ; {
+			for remaining == 0 {
+				steps++
+				if steps > 1<<18 {
+					return nil, fmt.Errorf("stroke dash subdivision limit exceeded")
+				}
+				if pattern[index] == 0 && index%2 == 0 && len(run) == 0 {
+					result = append(result, geometryPolyline{points: []Point{geometryLerp(a, b, at/length)}, direction: Point{(b.X - a.X) / length, (b.Y - a.Y) / length}})
+				}
+				index = (index + 1) % len(pattern)
+				remaining = pattern[index]
+				if index%2 == 1 && remaining > 0 {
+					flush()
+				}
+			}
+			if at == length {
+				break
+			}
 			step := math.Min(remaining, length-at)
 			if at+step == at || steps > 1<<18 {
 				return nil, fmt.Errorf("stroke dash subdivision limit exceeded")
@@ -247,11 +260,6 @@ func (line geometryPolyline) dash(pattern []float64, total, offset float64) ([]g
 			}
 			at += step
 			remaining -= step
-			if remaining == 0 {
-				flush()
-				index = (index + 1) % len(pattern)
-				remaining = pattern[index]
-			}
 		}
 	}
 	flush()
@@ -259,7 +267,7 @@ func (line geometryPolyline) dash(pattern []float64, total, offset float64) ([]g
 		first, last := &result[0], &result[len(result)-1]
 		if first.points[0] == line.points[0] && last.points[len(last.points)-1] == line.points[0] {
 			if len(result) == 1 {
-				first.closed = true
+				first.closed = len(first.points) > 1
 			} else {
 				first.points = append(last.points[:len(last.points)-1], first.points...)
 				result = result[:len(result)-1]
@@ -316,7 +324,13 @@ func (line geometryPolyline) stroke(options StrokeOptions) (GeometryPath, error)
 		if options.Cap == "Round" {
 			disk(points[0])
 		} else if options.Cap == "Square" {
-			return nil, fmt.Errorf("directionless square stroke cap: %w", ErrBackendUnavailable)
+			d := line.direction
+			if d == (Point{}) {
+				return nil, fmt.Errorf("directionless square stroke cap: %w", ErrBackendUnavailable)
+			}
+			p := points[0]
+			u, v := Point{d.X * half, d.Y * half}, Point{-d.Y * half, d.X * half}
+			polygon(Point{p.X - u.X - v.X, p.Y - u.Y - v.Y}, Point{p.X + u.X - v.X, p.Y + u.Y - v.Y}, Point{p.X + u.X + v.X, p.Y + u.Y + v.Y}, Point{p.X - u.X + v.X, p.Y - u.Y + v.Y})
 		}
 		return result, nil
 	}

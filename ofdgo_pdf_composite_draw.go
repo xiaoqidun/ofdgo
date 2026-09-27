@@ -98,6 +98,14 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 		return err
 	}
 	style, _, _ := node.style()
+	var processMask [4]bool
+	processOverprint := false
+	if node.image != nil && overprint && space.Model == "DeviceCMYK" && !space.Calibrated() {
+		processMask, processOverprint, err = pdfImageProcessColorants(node.image.Image)
+		if err != nil {
+			return err
+		}
+	}
 	compatible := overprint && style.OverprintMode == 1 && node.image == nil && space.Model == "DeviceCMYK" && !space.Calibrated() && (paint.CMYK != nil || paint.Space != nil && paint.Space.Model == "DeviceCMYK" && !paint.Space.Calibrated())
 	step := 25.4 / c.importer.rasterDPI
 	uniform := node.image == nil && paint.Axial == nil && paint.Radial == nil && paint.Tiling == nil && paint.Mesh == nil
@@ -156,12 +164,28 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 			}
 			if initial != nil {
 				pixel := initial[index]
+				if processOverprint {
+					for c := range values {
+						if !processMask[c] {
+							values[c] = pixel.values[c] * pixel.alpha
+						}
+					}
+				}
 				if err := pdfCompositePaintOver(&pixel, values, opacity, space, mode, compatible); err != nil {
 					return err
 				}
 				pdfCompositeInterpolate(&pixels[index], pixel, shape)
-			} else if err := pdfCompositePaintOver(&pixels[index], values, shape*opacity, space, mode, compatible); err != nil {
-				return err
+			} else {
+				if processOverprint {
+					for c := range values {
+						if !processMask[c] {
+							values[c] = pixels[index].values[c] * pixels[index].alpha
+						}
+					}
+				}
+				if err := pdfCompositePaintOver(&pixels[index], values, shape*opacity, space, mode, compatible); err != nil {
+					return err
+				}
 			}
 			pixels[index].shape += shape * (1 - pixels[index].shape)
 		}
@@ -359,8 +383,33 @@ func (c *pdfCompositor) imageColor(mark pdfgo.ImageMark, point pdfgo.Point, spac
 		return [4]float64{}, 0, nil
 	}
 	x, y := point.X*float64(source.Rect.Dx())-.5, (1-point.Y)*float64(source.Rect.Dy())-.5
+	process := mark.Style.FillOverprint && space.Model == "DeviceCMYK" && !space.Calibrated() && len(source.Colorants) > 0
+	var indices [4]int
+	if process {
+		for i, name := range source.Colorants {
+			index := -1
+			for j, known := range []pdfgo.Name{"Cyan", "Magenta", "Yellow", "Black"} {
+				if name == known {
+					index = j
+				}
+			}
+			if index < 0 {
+				process = false
+				break
+			}
+			indices[i] = index
+		}
+	}
 	sample := func(x, y int) ([4]float64, float64) {
-		return source.ValuesAt(max(0, min(source.Rect.Dx()-1, x)), max(0, min(source.Rect.Dy()-1, y)))
+		x, y = max(0, min(source.Rect.Dx()-1, x)), max(0, min(source.Rect.Dy()-1, y))
+		values, alpha := source.ValuesAt(x, y)
+		if process {
+			values = [4]float64{}
+			for j, tint := range source.TintsAt(x, y) {
+				values[indices[j]] = float64(tint) / 65535
+			}
+		}
+		return values, alpha
 	}
 	values, alpha := sample(int(math.Floor(x+.5)), int(math.Floor(y+.5)))
 	if mark.Image.Interpolate {
@@ -381,7 +430,7 @@ func (c *pdfCompositor) imageColor(mark pdfgo.ImageMark, point pdfgo.Point, spac
 				}
 				v, a := sample(ix+i, iy+j)
 				alpha += a * weight
-				for k := 0; k < source.Space.Components(); k++ {
+				for k := range values {
 					values[k] += v[k] * a * weight
 				}
 			}
@@ -399,8 +448,39 @@ func (c *pdfCompositor) imageColor(mark pdfgo.ImageMark, point pdfgo.Point, spac
 		}
 		return color, alpha * (1 - values[0]), err
 	}
+	if process {
+		return values, alpha, nil
+	}
 	values, err := space.Convert(values[:source.Space.Components()], source.Space, mark.Style.RenderingIntent)
 	return values, alpha, err
+}
+
+// pdfImageProcessColorants 识别可在四色设备上直接绘制的专色色料
+// 入参: image PDF图像
+// 返回: [4]bool 参与绘制的四色通道, bool 是否全部属于印刷原色, error 色空间错误
+func pdfImageProcessColorants(image *pdfgo.Image) ([4]bool, bool, error) {
+	var mask [4]bool
+	names, err := image.Colorants()
+	if err != nil {
+		return mask, false, err
+	}
+	if len(names) == 0 {
+		return mask, false, nil
+	}
+	for _, name := range names {
+		found := false
+		for j, known := range []pdfgo.Name{"Cyan", "Magenta", "Yellow", "Black"} {
+			if name == known {
+				mask[j] = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			return [4]bool{}, false, nil
+		}
+	}
+	return mask, true, nil
 }
 
 // pdfCompositeColor 将原始画刷变换到混合空间，渐变在源空间求值

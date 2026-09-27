@@ -24,6 +24,31 @@ import (
 // 坐标以左上角为原点，单位为毫米，子路径从Move开始，Close回到当前子路径起点
 type GeometryPath []GeometrySegment
 
+// stationaryEndpoint 判断贝塞尔曲线端点是否具有零一阶导数
+// 返回: bool 是否存在驻点端点
+func (p GeometryPath) stationaryEndpoint() bool {
+	var current, start Point
+	for _, segment := range p {
+		switch segment.Verb {
+		case GeometryMove:
+			start = segment.End
+		case GeometryCubic:
+			if segment.Control1 == current || segment.Control2 == segment.End {
+				return true
+			}
+		case GeometryQuad:
+			if segment.Control1 == current || segment.Control1 == segment.End {
+				return true
+			}
+		case GeometryClose:
+			current = start
+			continue
+		}
+		current = segment.End
+	}
+	return false
+}
+
 // GeometryVerb 表示几何路径指令
 type GeometryVerb uint8
 

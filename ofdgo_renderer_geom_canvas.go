@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 
 	"github.com/tdewolff/canvas"
@@ -77,12 +78,21 @@ func canvasStrokePath(geometry GeometryBackend, path *canvas.Path, options Strok
 // 入参: path Canvas路径, width 描边宽度, cap 线帽, join 连接
 // 返回: *canvas.Path 描边轮廓
 func (r *Renderer) strokeCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner) *canvas.Path {
+	return r.strokeDashedCanvasPath(path, width, cap, join, 0, nil)
+}
+
+// strokeDashedCanvasPath 通过公共几何后端展开虚线和线帽，保留零长度绘制段
+// 入参: path 路径, width 线宽, cap 线帽, join 连接, offset 虚线偏移, dashes 虚线数组
+// 返回: *canvas.Path 描边填充轮廓
+func (r *Renderer) strokeDashedCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner, offset float64, dashes []float64) *canvas.Path {
 	geometry, err := r.Geometry()
 	if err != nil {
 		r.renderError = err
 		return &canvas.Path{}
 	}
-	result, err := canvasStrokePath(geometry, path, canvasStrokeOptions(width, cap, join, canvas.Tolerance))
+	options := canvasStrokeOptions(width, cap, join, canvas.Tolerance)
+	options.DashOffset, options.Dashes = offset, dashes
+	result, err := canvasStrokePath(geometry, path, options)
 	if err != nil {
 		r.renderError = err
 		return &canvas.Path{}
@@ -191,12 +201,15 @@ func (CanvasBackend) Combine(left, right GeometryPath, operation GeometryOperati
 	return *geometryFromCanvasPath(result), nil
 }
 
-// Stroke 将绝对长度虚线与描边转换为填充区域
+// Stroke 将绝对长度虚线与描边转换为填充区域，驻点曲线按指定精度展开
 // 入参: path 页面路径, options 描边样式
 // 返回: GeometryPath 描边区域, error 样式或路径错误
 func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (GeometryPath, error) {
 	if err := validateStroke(options); err != nil {
 		return nil, err
+	}
+	if slices.Contains(options.Dashes, 0) {
+		return path.Stroke(options)
 	}
 	p, err := geometryToCanvasPath(&path)
 	if err != nil {
@@ -209,7 +222,11 @@ func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (GeometryP
 	style := pathStyle{lineJoin: canvas.MiterJoin, lineCap: canvas.ButtCap, miterLimit: defaultMiterLimit}
 	style.applyLineJoin(options.Join, options.MiterLimit)
 	style.lineCap = pathLineCap(options.Cap, style.lineCap)
-	p = p.Dash(options.DashOffset, options.Dashes...).Stroke(options.Width, style.lineCap, style.lineJoin, tolerance)
+	p = p.Dash(options.DashOffset, options.Dashes...)
+	if path.stationaryEndpoint() {
+		p = p.Flatten(tolerance)
+	}
+	p = p.Stroke(options.Width, style.lineCap, style.lineJoin, tolerance)
 	return *geometryFromCanvasPath(p), nil
 }
 

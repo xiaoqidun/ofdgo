@@ -89,10 +89,23 @@ func (f FontFile) Face(index int) ([]byte, error) {
 		return nil, err
 	}
 	if bytes.HasPrefix(data, []byte("ttcf")) {
-		return extractCollectionFont(data, index)
+		data, err = extractCollectionFont(data, index)
+		if err != nil {
+			return nil, err
+		}
+		index = 0
 	}
-	if _, err := fontFileTables(data, index); err != nil {
+	tables, err := fontFileTables(data, index)
+	if err != nil {
 		return nil, err
+	}
+	cmap, err := normalizeCmap(tables["cmap"])
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(cmap, tables["cmap"]) {
+		tables["cmap"] = cmap
+		return serializeOTF(tables)
 	}
 	return bytes.Clone(data), nil
 }

@@ -173,6 +173,31 @@ func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Vis
 	}
 	if space == nil {
 		space = &pdfgo.ColorSpace{Model: "DeviceRGB"}
+		var needsProcess func([]pdfCompositeNode) (bool, error)
+		needsProcess = func(items []pdfCompositeNode) (bool, error) {
+			for _, item := range items {
+				if item.group != nil {
+					found, err := needsProcess(item.children)
+					if err != nil || found {
+						return found, err
+					}
+				}
+				if item.image != nil && item.image.Style.FillOverprint {
+					_, found, err := pdfImageProcessColorants(item.image.Image)
+					if err != nil || found {
+						return found, err
+					}
+				}
+			}
+			return false, nil
+		}
+		found, err := needsProcess(nodes)
+		if err != nil {
+			return err
+		}
+		if found {
+			space = &pdfgo.ColorSpace{Model: "DeviceCMYK"}
+		}
 	}
 	for i, node := range nodes {
 		if node.opaque(space) || space.SRGBEquivalent() && node.direct() {
@@ -211,6 +236,9 @@ func (n pdfCompositeNode) opaque(space *pdfgo.ColorSpace) bool {
 		return true
 	}
 	style, fill, stroke := n.style()
+	if n.image != nil && style.FillOverprint {
+		return false
+	}
 	if style.SoftMask != nil || !pdfNormalBlend(style.BlendMode) || fill && style.Fill.Alpha != 1 || stroke && style.Stroke.Alpha != 1 {
 		return false
 	}
@@ -241,6 +269,9 @@ func (n pdfCompositeNode) direct() bool {
 		return true
 	}
 	s, fill, stroke := n.style()
+	if n.image != nil && s.FillOverprint {
+		return false
+	}
 	return pdfNormalBlend(s.BlendMode) && !(fill && s.FillOverprint && pdfOverprintNeedsSeparation(s.Fill) || stroke && s.StrokeOverprint && pdfOverprintNeedsSeparation(s.Stroke))
 }
 

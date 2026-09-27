@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"bytes"
 	"encoding/binary"
 )
 
@@ -52,6 +53,14 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 	}
 	if existingTables["CFF "] != nil {
 		isCFFSfnt = true
+	}
+	cmap, err := normalizeCmap(existingTables["cmap"])
+	if err != nil {
+		return false, data, nil, false, err
+	}
+	if !bytes.Equal(cmap, existingTables["cmap"]) {
+		existingTables["cmap"] = cmap
+		malformedDirectory = true
 	}
 	missingHead := existingTables["head"] == nil
 	if !missingHead {

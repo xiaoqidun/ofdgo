@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"image/color"
 	"math"
+	"slices"
 
 	"github.com/tdewolff/canvas"
 )
@@ -291,15 +292,20 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		ctx.SetStrokeCapper(style.lineCap)
 		ctx.SetStrokeJoiner(style.lineJoin)
 		sp := p
-		if len(style.dashPattern) > 0 {
+		zeroDash := slices.Contains(style.dashPattern, 0)
+		if len(style.dashPattern) > 0 && !zeroDash {
 			sp = sp.Dash(style.dashOffset, style.dashPattern...)
 			ctx.SetDashes(0)
 		}
 		strokeClip := intersectClipPath(clipPath, shadingClip)
 		_, repeat := strokePaint.(*repeatAxialGradient)
-		if strokeClip != nil || strokeView != canvas.Identity || repeat || style.strokePattern != nil || !canvasNativeStroke(r.backends.Geometry) {
+		if strokeClip != nil || strokeView != canvas.Identity || repeat || style.strokePattern != nil || !canvasNativeStroke(r.backends.Geometry) || zeroDash {
 			sp = sp.Copy()
-			sp = r.strokeCanvasPath(sp, style.lineWidth, style.lineCap, style.lineJoin)
+			if zeroDash {
+				sp = r.strokeDashedCanvasPath(sp, style.lineWidth, style.lineCap, style.lineJoin, style.dashOffset, style.dashPattern)
+			} else {
+				sp = r.strokeCanvasPath(sp, style.lineWidth, style.lineCap, style.lineJoin)
+			}
 			sp = applyClipPath(sp, strokeClip)
 			if style.strokePattern != nil {
 				r.renderPattern(ctx, style.strokePattern, pageH, sp, objectCTM)

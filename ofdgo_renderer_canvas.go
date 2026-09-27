@@ -19,6 +19,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"slices"
 
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers/rasterizer"
@@ -147,6 +148,14 @@ func (b CanvasBackend) Render(page *RasterPage) (image.Image, error) {
 				for i, dash := range options.Dashes {
 					style.Dashes[i] = dash / options.Width
 				}
+			}
+			if slices.Contains(options.Dashes, 0) {
+				var err error
+				p, err = canvasStrokePath(b, p, options)
+				if err != nil {
+					return nil, err
+				}
+				style = canvas.Style{Fill: paint, FillRule: canvas.NonZero}
 			}
 			m = RasterMatrix{1, 0, 0, 1, 0, 0}
 		}

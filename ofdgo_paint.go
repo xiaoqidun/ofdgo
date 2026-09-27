@@ -182,7 +182,7 @@ func (r *Renderer) parseFillColor(fillColor *FillColor) color.Color {
 	if fillColor == nil {
 		return nil
 	}
-	if fillColor.Pattern != nil {
+	if fillColor.Pattern != nil || fillColor.GouraudShd != nil || fillColor.LaGouraudShd != nil {
 		return nil
 	}
 	if fillColor.AxialShd != nil {

@@ -70,12 +70,12 @@ func (c *canvasPageCompiler) RenderPath(path *canvas.Path, style canvas.Style, m
 	}
 	if style.HasStroke() {
 		stroke := path
+		options := canvasStrokeOptions(style.StrokeWidth, style.StrokeCapper, style.StrokeJoiner, canvas.PixelTolerance/(c.page.DPI/25.4))
 		if len(style.Dashes) > 0 {
-			offset, dashes := canvas.ScaleDash(style.StrokeWidth, style.DashOffset, style.Dashes)
-			stroke = stroke.Dash(offset, dashes...)
+			options.DashOffset, options.Dashes = canvas.ScaleDash(style.StrokeWidth, style.DashOffset, style.Dashes)
 		}
 		var err error
-		stroke, err = canvasStrokePath(c.geometry, stroke, canvasStrokeOptions(style.StrokeWidth, style.StrokeCapper, style.StrokeJoiner, canvas.PixelTolerance/(c.page.DPI/25.4)))
+		stroke, err = canvasStrokePath(c.geometry, stroke, options)
 		if err != nil {
 			c.err = err
 			return
