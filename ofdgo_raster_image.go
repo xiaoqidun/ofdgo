@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"image"
+	"math"
 
 	"golang.org/x/image/draw"
 	"golang.org/x/image/math/f64"
@@ -43,11 +44,33 @@ func drawRasterImageCommand(backend RasterBackend, page *RasterPage, dst draw.Im
 	if mask.Rect.Empty() {
 		return nil
 	}
-	bounds := mask.Rect.Intersect(dst.Bounds())
+	bounds := mask.Rect.Intersect(dst.Bounds()).Intersect(rasterImageBounds(src.Bounds(), m, dst.Bounds()))
+	if bounds.Empty() {
+		return nil
+	}
 	layer := image.NewRGBA64(bounds)
 	draw.CatmullRom.Transform(layer, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, imagePixelSource(src), src.Bounds(), draw.Src, nil)
 	draw.DrawMask(dst, bounds, layer, bounds.Min, mask, bounds.Min, draw.Over)
 	return nil
+}
+
+// rasterImageBounds 计算采样器可能写入的像素范围，并在整数转换前裁至目标边界
+// 入参: source 原始像素边界, m 像素变换, target 目标边界
+// 返回: image.Rectangle 受影响的目标像素区域
+func rasterImageBounds(source image.Rectangle, m RasterMatrix, target image.Rectangle) image.Rectangle {
+	minX, minY, maxX, maxY := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+	for _, p := range [4]image.Point{source.Min, {X: source.Max.X, Y: source.Min.Y}, {X: source.Min.X, Y: source.Max.Y}, source.Max} {
+		x := math.Floor(float64(m[0]*float64(p.X)) + float64(m[2]*float64(p.Y)) + m[4])
+		y := math.Floor(float64(m[1]*float64(p.X)) + float64(m[3]*float64(p.Y)) + m[5])
+		minX, minY = math.Min(minX, x), math.Min(minY, y)
+		maxX, maxY = math.Max(maxX, x+1), math.Max(maxY, y+1)
+	}
+	minX, minY = math.Max(minX, float64(target.Min.X)), math.Max(minY, float64(target.Min.Y))
+	maxX, maxY = math.Min(maxX, float64(target.Max.X)), math.Min(maxY, float64(target.Max.Y))
+	if minX >= maxX || minY >= maxY {
+		return image.Rectangle{}
+	}
+	return image.Rect(int(minX), int(minY), int(maxX), int(maxY))
 }
 
 // PixelTransform 将页面毫米变换转换为像素变换，保留尺寸取整后的原点位置

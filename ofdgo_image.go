@@ -330,27 +330,25 @@ func imageNRGBAAt(img image.Image, x, y int) color.NRGBA {
 // 返回: color.NRGBA 颜色, bool 是否存在
 func transparentEdgeColor(img *image.NRGBA, x, y int) (color.NRGBA, bool) {
 	bounds := img.Bounds()
-	var best color.NRGBA
-	for dy := -1; dy <= 1; dy++ {
-		for dx := -1; dx <= 1; dx++ {
-			if dx == 0 && dy == 0 {
-				continue
+	best, alpha := 0, uint8(0)
+	left, right := max(x-1, bounds.Min.X), min(x+2, bounds.Max.X)
+scan:
+	for ny := max(y-1, bounds.Min.Y); ny < min(y+2, bounds.Max.Y); ny++ {
+		offset := img.PixOffset(left, ny)
+		for nx := left; nx < right; nx++ {
+			if (nx != x || ny != y) && img.Pix[offset+3] > alpha {
+				best, alpha = offset, img.Pix[offset+3]
+				if alpha == 255 {
+					break scan
+				}
 			}
-			nx, ny := x+dx, y+dy
-			if nx < bounds.Min.X || nx >= bounds.Max.X || ny < bounds.Min.Y || ny >= bounds.Max.Y {
-				continue
-			}
-			c := img.NRGBAAt(nx, ny)
-			if c.A > best.A {
-				best = c
-			}
+			offset += 4
 		}
 	}
-	if best.A == 0 {
+	if alpha == 0 {
 		return color.NRGBA{}, false
 	}
-	best.A = 1
-	return best, true
+	return color.NRGBA{R: img.Pix[best], G: img.Pix[best+1], B: img.Pix[best+2], A: 1}, true
 }
 
 // transparentPaddingColor 获取透明补齐颜色
