@@ -161,6 +161,8 @@ const el = {
 	encryptSaveButton: document.querySelector("#encryptSaveButton"),
 	credentialsPanel: document.querySelector("#credentialsPanel"),
 	credentialsType: document.querySelector("#credentialsType"),
+	credentialsTypeRow: document.querySelector("#credentialsTypeRow"),
+	credentialsUserRow: document.querySelector("#credentialsUserRow"),
 	credentialsPasswordRow: document.querySelector("#credentialsPasswordRow"),
 	credentialsCertificateRow: document.querySelector("#credentialsCertificateRow"),
 	credentialsKeyRow: document.querySelector("#credentialsKeyRow"),
@@ -3387,7 +3389,7 @@ async function openOFD(file) {
 			if (openSeq !== state.openSeq) return;
 			let converted;
 			try {
-				converted = await callWASM("ofdgoConvertPDF", bytes, await fontManager.files(fontManager.records()));
+				converted = await openWithCredentials(await fontManager.files(fontManager.records()), openSeq, bytes, false, true);
 			} finally {
 				if (openSeq === state.openSeq) {
 					state.exportRequestID = 0;
@@ -3881,8 +3883,14 @@ function finishCredentials(credentials) {
 	}
 }
 
-function requestCredentials(code, openSeq) {
+function requestCredentials(code, openSeq, pdf = false) {
 	finishCredentials(null);
+	el.credentialsTypeRow.hidden = pdf;
+	el.credentialsUserRow.hidden = pdf;
+	if (pdf) {
+		el.credentialsType.value = "password";
+		updateCredentialsType();
+	}
 	el.credentialsStatus.textContent = code === "invalidCredentials" ? "解锁失败，请重试" : "";
 	el.progressPanel.hidden = true;
 	return new Promise(resolve => {
@@ -3892,19 +3900,21 @@ function requestCredentials(code, openSeq) {
 	});
 }
 
-async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, importing = false) {
+async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, importing = false, pdf = false) {
 	let credentials = null;
 	try {
 		while (openSeq === state.openSeq) {
 			try {
-				return importing ? await callWASM("ofdgoLoadImport", data.slice(), credentials)
+				return pdf ? await callWASM("ofdgoConvertPDF", data, fonts, credentials?.password || null)
+					: importing ? await callWASM("ofdgoLoadImport", data.slice(), credentials)
 					: await callWASM("ofdgoOpen", data, fonts, state.renderAnnotations, credentials);
 			} catch (err) {
-				if (openSeq !== state.openSeq || !["credentialsRequired", "invalidCredentials"].includes(err.code)) throw err;
+				if (openSeq !== state.openSeq || !(pdf ? err.code === "pdfPassword" : ["credentialsRequired", "invalidCredentials"].includes(err.code))) throw err;
+				const code = pdf ? credentials ? "invalidCredentials" : "credentialsRequired" : err.code;
 				credentials?.password.fill(0);
 				credentials?.key?.fill(0);
 				credentials?.keyPassword?.fill(0);
-				credentials = await requestCredentials(err.code, openSeq);
+				credentials = await requestCredentials(code, openSeq, pdf);
 				if (!credentials || openSeq !== state.openSeq) {
 					const canceled = new Error("打开已取消");
 					canceled.name = "AbortError";
@@ -4283,6 +4293,7 @@ async function openSealPosition() {
 	const file = el.signSeal.files?.[0];
 	if (!file || !state.doc || document.body.hasAttribute("aria-busy")) return;
 	const sequence = state.openSeq;
+	let preview;
 	setBusy(true);
 	try {
 		const range = el.signPages.value.trim(), mode = el.signPlacement.value;
@@ -4291,8 +4302,10 @@ async function openSealPosition() {
 		const result = await callWASM("ofdgoPreviewSignatureSeal", new Uint8Array(await file.arrayBuffer()), `1-${state.doc.pageCount}`);
 		if (sequence !== state.openSeq || !el.signPanel.open || file !== el.signSeal.files?.[0]) return;
 		sealPreview = {pages:result.pages, selected, range, mode, ratio:document.querySelector("#signKeepRatio").checked ? result.width / result.height : 0, sequence, enabled:canvasEditor.enabled, status:el.statusText.textContent, url:URL.createObjectURL(new Blob([result.svg], {type:"image/svg+xml"}))};
+		preview = sealPreview;
 		sealPosition.Image.src = sealPreview.url;
 		await sealPosition.Image.decode();
+		if (sealPreview !== preview) return;
 		if (sequence !== state.openSeq || !el.signPanel.open) { finishSealPosition(false); return; }
 		canvasEditor.enabled = false;
 		if (COMPACT_LAYOUT.matches) {
@@ -4305,7 +4318,12 @@ async function openSealPosition() {
 		el.signStatus.textContent = "";
 		setStatus("拖动选取签章区域，Esc 取消");
 		el.viewerPanel.focus({preventScroll:true});
-	} catch (error) { finishSealPosition(); el.signStatus.textContent = error.message; }
+	} catch (error) {
+		if (sequence === state.openSeq && (!preview || sealPreview === preview)) {
+			finishSealPosition();
+			el.signStatus.textContent = error.message;
+		}
+	}
 	finally { if (sequence === state.openSeq) setBusy(false); }
 }
 

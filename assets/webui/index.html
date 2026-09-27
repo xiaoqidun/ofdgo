@@ -472,8 +472,8 @@
 		<dialog id="credentialsPanel" class="form-dialog security-dialog" aria-labelledby="credentialsTitle">
 			<form id="credentialsForm" autocomplete="off">
 				<h2 id="credentialsTitle" class="form-title">解锁文档</h2>
-				<div class="form-row"><label for="credentialsType">方式</label><select id="credentialsType"><option value="password">口令</option><option value="certificate">证书</option></select></div>
-				<div class="form-row"><label for="credentialsUser">用户</label><input id="credentialsUser" type="text" autocomplete="off" spellcheck="false"></div>
+				<div id="credentialsTypeRow" class="form-row"><label for="credentialsType">方式</label><select id="credentialsType"><option value="password">口令</option><option value="certificate">证书</option></select></div>
+				<div id="credentialsUserRow" class="form-row"><label for="credentialsUser">用户</label><input id="credentialsUser" type="text" autocomplete="off" spellcheck="false"></div>
 				<div id="credentialsPasswordRow" class="form-row"><label for="credentialsPassword">口令</label><input id="credentialsPassword" type="password" autocomplete="off" required autofocus></div>
 				<div id="credentialsCertificateRow" class="form-row" hidden><label for="credentialsCertificate">证书</label><input id="credentialsCertificate" type="file" accept=".pem,.cer,.crt,.der"></div>
 				<div id="credentialsKeyRow" class="form-row" hidden><label for="credentialsKey">私钥</label><input id="credentialsKey" type="file" accept=".pem,.key,.der"></div>

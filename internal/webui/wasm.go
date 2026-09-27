@@ -332,6 +332,8 @@ func callbackResult(fn func([]js.Value) (any, error), args []js.Value) any {
 	if err != nil {
 		result := apiResult{Error: err.Error()}
 		switch {
+		case errors.Is(err, ofdgo.ErrPDFPassword):
+			result.Code, result.Error = "pdfPassword", "PDF密码缺失或错误"
 		case errors.Is(err, ofdgo.ErrCredentialsRequired):
 			result.Code, result.Error = "credentialsRequired", "文档已加密"
 		case errors.Is(err, ofdgo.ErrInvalidCredentials):
@@ -369,10 +371,10 @@ func safeCall(fn func([]js.Value) (any, error), args []js.Value) (data any, err 
 }
 
 // convertPDFDocument 通过库转换PDF，不替换当前文档会话
-// 入参: args PDF数据、外部字体及进度回调
+// 入参: args PDF数据、外部字体、UTF-8密码及进度回调
 // 返回: any OFD数据及转换警告, error 错误信息
 func convertPDFDocument(args []js.Value) (any, error) {
-	if len(args) != 3 {
+	if len(args) != 4 {
 		return nil, fmt.Errorf("missing PDF data")
 	}
 	data, err := bytesFromJS(args[0])
@@ -384,7 +386,14 @@ func convertPDFDocument(args []js.Value) (any, error) {
 		return nil, err
 	}
 	var output bytes.Buffer
-	options := ofdgo.PDFImportOptions{OnProgress: editorOperationProgress(args[2])}
+	options := ofdgo.PDFImportOptions{OnProgress: editorOperationProgress(args[3]), PasswordUTF8: true}
+	if !args[2].IsNull() && !args[2].IsUndefined() {
+		options.Password, err = bytesFromJS(args[2])
+		if err != nil {
+			return nil, err
+		}
+		defer clear(options.Password)
+	}
 	if len(fonts) > 0 {
 		options.RendererOptions = []ofdgo.RendererOption{ofdgo.WithFontFS(ofdgo.NewFontFS(fonts))}
 	}

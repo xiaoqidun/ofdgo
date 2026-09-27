@@ -168,7 +168,7 @@ async function handleMessage({ id, name, args }) {
 	const saving = name === "ofdgoSaveDocument" || name === "ofdgoSaveEncrypted" || name === "ofdgoSaveSigned";
 	const key = name === "ofdgoOpen" ? args[3]?.key : name === "ofdgoSaveSigned" || name === "ofdgoLoadImport" ? args[1]?.key : null;
 	const keyPassword = name === "ofdgoOpen" ? args[3]?.keyPassword : name === "ofdgoSaveSigned" || name === "ofdgoLoadImport" ? args[1]?.keyPassword : null;
-	const password = name === "ofdgoOpen" ? args[3]?.password : name === "ofdgoSaveEncrypted" || name === "ofdgoLoadImport" ? args[1]?.password : null;
+	const password = converting ? args[2] : name === "ofdgoOpen" ? args[3]?.password : name === "ofdgoSaveEncrypted" || name === "ofdgoLoadImport" ? args[1]?.password : null;
 	try {
 		signal?.throwIfAborted();
 		const chunks = [];

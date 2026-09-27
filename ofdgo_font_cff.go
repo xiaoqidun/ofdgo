@@ -397,8 +397,18 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 	var finalPrivData []byte
 	if len(privDictData) > 0 {
 		pDict := parseCFFDict(privDictData)
+		if err := normalizeCFFPrivate(pDict); err != nil {
+			return nil, err
+		}
 		if _, ok := pDict[19]; ok || len(localSubrData) > 0 {
-			pDict[19] = []float64{float64(privateLen)}
+			pDict[19] = []float64{0}
+			for {
+				length := len(encodeCFFDict(pDict))
+				if pDict[19][0] == float64(length) {
+					break
+				}
+				pDict[19][0] = float64(length)
+			}
 		}
 		finalPrivData = encodeCFFDict(pDict)
 		privateLen = len(finalPrivData)
@@ -436,6 +446,21 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 		newCFF.Write(localSubrData)
 	}
 	return newCFF.Bytes(), nil
+}
+
+// normalizeCFFPrivate 移除旧版CFF中不生效的缺省字段，拒绝需要额外解释的取值
+// 入参: dict 私有字典
+// 返回: error 不支持的旧版行为
+func normalizeCFFPrivate(dict cffDict) error {
+	for op, value := range map[int]float64{1215: 0, 1216: -1} {
+		if values, ok := dict[op]; ok {
+			if len(values) != 1 || values[0] != value {
+				return fmt.Errorf("unsupported legacy CFF private operator %d", op)
+			}
+			delete(dict, op)
+		}
+	}
+	return nil
 }
 
 // sanitizeMultiFDCFF 清洗多FD的CID CFF数据
@@ -479,6 +504,9 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 		}
 	}
 	delete(privateDict, 19)
+	if err := normalizeCFFPrivate(privateDict); err != nil {
+		return nil, err
+	}
 	finalPrivData := encodeCFFDict(privateDict)
 	privateLen := len(finalPrivData)
 	charStringsData := encodeCFFIndex(inlined)

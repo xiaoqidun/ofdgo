@@ -26,14 +26,18 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// ErrPDFPassword 表示PDF需要正确的用户或所有者密码
+var ErrPDFPassword = pdfgo.ErrPassword
+
 // PDFImportOptions 指定PDF转换的密码、运行时后端、进度通知与检查策略
-// Password按PDFDocEncoding字节传入，空值尝试默认空密码
+// Password默认使用PDF安全处理器编码，PasswordUTF8启用UTF-8输入及标准密码准备，空值尝试空密码
 // Strict禁止恢复缺失资源或丢失内容语义，默认在报告中记录警告
 // RendererOptions复用渲染器字体来源和后端配置，Backends优先于其中的后端设置
 // RasterDPI指定局部透明效果合成精度，0沿用渲染器DPI，默认300dpi，Strict禁用局部合成
 // OnProgress按open、pages、convert及write.*阶段报告进度，total为0表示总量未知
 type PDFImportOptions struct {
 	Password        []byte
+	PasswordUTF8    bool
 	Backends        *RenderBackends
 	RendererOptions []RendererOption
 	Progress        func(int) error
@@ -108,7 +112,11 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 			return nil, PDFImportReport{}, err
 		}
 	}
-	reader, err := pdfgo.NewReaderWithPassword(source, size, options.Password)
+	open := pdfgo.NewReaderWithPassword
+	if options.PasswordUTF8 {
+		open = pdfgo.NewReaderWithUTF8Password
+	}
+	reader, err := open(source, size, options.Password)
 	if err != nil {
 		return nil, PDFImportReport{}, err
 	}
