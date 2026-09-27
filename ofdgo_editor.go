@@ -152,6 +152,7 @@ func (r editorResource) definition() string {
 type editorResourceKey struct {
 	checksum [32]byte
 	index    int
+	kind     string
 }
 
 // NewEditor 创建空白文档，保存前至少添加一页

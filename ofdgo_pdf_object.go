@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"image"
@@ -425,7 +426,7 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, er
 			type1 = &parsed
 		}
 		var err error
-		program, err = type1.toCFF(source.Name)
+		program, err = type1.toCFF(pdfFontIdentity(source))
 		if err != nil {
 			return nil, 0, err
 		}
@@ -513,9 +514,10 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, er
 		changed = true
 	}
 	if len(fontNamesFromTable(tables["name"])) == 0 {
-		name := utf16.Encode([]rune(source.Name))
-		if len(name) == 0 || len(name) > 32767 {
-			return nil, 0, fmt.Errorf("PDF font name missing or excessive")
+		fontName := pdfFontIdentity(source)
+		name := utf16.Encode([]rune(fontName))
+		if len(name) > 32767 {
+			return nil, 0, fmt.Errorf("PDF font name exceeds name table capacity")
 		}
 		data := make([]byte, 42+len(name)*2)
 		binary.BigEndian.PutUint16(data[2:], 3)
@@ -554,6 +556,17 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, er
 	}
 	result, err := serializeOTF(tables)
 	return result, repairedLimit, err
+}
+
+// pdfFontIdentity 返回字体名称或由原始程序生成的稳定封装标识
+// 入参: source PDF字体
+// 返回: string 字体标识
+func pdfFontIdentity(source *pdfgo.Font) string {
+	if source.Name != "" {
+		return source.Name
+	}
+	checksum := sha256.Sum256(source.Program)
+	return fmt.Sprintf("PDF-%x", checksum[:28])
 }
 
 // pdfCmapOverlaps 检查格式4字符映射是否包含交叠区段

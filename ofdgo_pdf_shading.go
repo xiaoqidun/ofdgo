@@ -64,7 +64,13 @@ func pdfGradientStopsError(stops []pdfgo.GradientStop, space *pdfgo.ColorSpace) 
 // 返回: error 不可等价表达的渐变
 func pdfGradientError(paint pdfgo.Paint) error {
 	if paint.Mesh != nil {
-		return &pdfgo.UnsupportedError{Feature: "bicubic mesh conversion"}
+		mesh := paint.Mesh
+		if len(mesh.Patches) != 0 || len(mesh.Triangles) == 0 || mesh.UsesFunction() {
+			return &pdfgo.UnsupportedError{Feature: "nonlinear mesh conversion"}
+		}
+		if mesh.Space.Calibrated() && !mesh.Space.SRGBEquivalent() {
+			return &pdfgo.UnsupportedError{Feature: "nonlinear ICC mesh conversion"}
+		}
 	}
 	if paint.Axial != nil {
 		return pdfGradientStopsError(paint.Axial.Stops, paint.Axial.Space)

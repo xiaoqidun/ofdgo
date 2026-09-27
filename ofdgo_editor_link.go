@@ -83,8 +83,8 @@ func (e *Editor) SetObjectLink(page int, ids []string, link *AnnotationLink) err
 	return e.updateObjects(page, objects, true)
 }
 
-// SetObjectActions 原子替换普通对象的链接动作，空列表移除动作
-// 入参: page 页面索引, ids 对象标识, actions 链接动作
+// SetObjectActions 原子替换普通对象的动作，空列表移除动作
+// 入参: page 页面索引, ids 对象标识, actions 动作及已注册的资源引用
 // 返回: error 错误信息
 func (e *Editor) SetObjectActions(page int, ids []string, actions []Action) error {
 	if err := validateObjectActions(actions); err != nil {
@@ -111,7 +111,7 @@ func (e *Editor) SetObjectActions(page int, ids []string, actions []Action) erro
 	return e.updateObjects(page, objects, true)
 }
 
-// validateObjectActions 校验新建对象的链接动作，目标不必可达
+// validateObjectActions 校验新建对象的动作结构，目标不必可达
 // 入参: actions 动作列表
 // 返回: error 错误信息
 func validateObjectActions(actions []Action) error {
@@ -119,11 +119,27 @@ func validateObjectActions(actions []Action) error {
 		if !slices.Contains([]string{"CLICK", "DO", "PO"}, action.Event) {
 			return fmt.Errorf("unsupported action event %q", action.Event)
 		}
-		if action.GotoA != nil || action.Sound != nil || action.Movie != nil {
-			return fmt.Errorf("new attachment and multimedia actions require resource registration")
+		count := 0
+		for _, present := range []bool{action.URI != nil, action.Goto != nil, action.GotoA != nil, action.Sound != nil, action.Movie != nil} {
+			if present {
+				count++
+			}
 		}
-		if (action.URI == nil) == (action.Goto == nil) {
-			return fmt.Errorf("specify one URI or goto action")
+		if count != 1 {
+			return fmt.Errorf("specify one action target")
+		}
+		if action.GotoA != nil && action.GotoA.AttachID == "" {
+			return fmt.Errorf("attachment action requires an attachment ID")
+		}
+		if sound := action.Sound; sound != nil {
+			if sound.ResourceID == "" || sound.Volume != nil && (*sound.Volume < 0 || *sound.Volume > 100) {
+				return fmt.Errorf("invalid sound action resource or volume")
+			}
+		}
+		if movie := action.Movie; movie != nil {
+			if movie.ResourceID == "" || !slices.Contains([]string{"", "Play", "Stop", "Pause", "Resume"}, movie.Operator) {
+				return fmt.Errorf("invalid movie action resource or operator")
+			}
 		}
 		if action.Goto != nil {
 			if (action.Goto.Dest == nil) == (action.Goto.Bookmark == nil) {

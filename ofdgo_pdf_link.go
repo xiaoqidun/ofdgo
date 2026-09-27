@@ -32,6 +32,51 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 	}
 	for _, annotation := range annotations {
 		dict := annotation.Dictionary
+		if annotation.Subtype == "Sound" {
+			sound, err := p.reader.ReadSound(dict["Sound"])
+			if err != nil {
+				return err
+			}
+			data, err := pdfSoundWAV(sound)
+			if err != nil {
+				return err
+			}
+			id, err := p.editor.AddMedia("Audio", "WAV", data)
+			if err != nil {
+				return err
+			}
+			if err := p.appearanceAnnotation(ctx, page, annotation, Action{Event: "CLICK", Sound: &Sound{ResourceID: id}}); err != nil {
+				return err
+			}
+			continue
+		}
+		if annotation.Subtype == "Movie" {
+			if err := p.movieAnnotation(ctx, page, annotation); err != nil {
+				return err
+			}
+			continue
+		}
+		if annotation.Subtype == "FileAttachment" {
+			file, err := p.reader.ReadFileSpecification(dict["FS"])
+			if err != nil {
+				return err
+			}
+			if file.Embedded == nil {
+				return &pdfgo.UnsupportedError{Feature: "external file attachment"}
+			}
+			data, err := file.Embedded.Decode()
+			if err != nil {
+				return err
+			}
+			id, err := p.editor.AddAttachment(file.Name, data)
+			if err != nil {
+				return err
+			}
+			if err := p.appearanceAnnotation(ctx, page, annotation, Action{Event: "CLICK", GotoA: &GotoA{AttachID: id}}); err != nil {
+				return err
+			}
+			continue
+		}
 		if annotation.Subtype == "Widget" {
 			field, err := p.reader.ReadField(annotation)
 			if err != nil {
@@ -48,7 +93,7 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			}
 			continue
 		}
-		if pdfAnnotationType(annotation.Subtype) != "" {
+		if annotation.Subtype != "Link" && pdfAnnotationType(annotation.Subtype) != "" {
 			if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
 				return err
 			}
@@ -57,59 +102,9 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		if annotation.Subtype != "Link" {
 			return &pdfgo.UnsupportedError{Feature: "annotation " + string(annotation.Subtype)}
 		}
-		if dict["AP"] != nil {
-			visitor := pdfgo.Visitor{
-				Path:  func(pdfgo.PathMark) error { return &pdfgo.UnsupportedError{Feature: "visible link appearance"} },
-				Text:  func(pdfgo.TextMark) error { return &pdfgo.UnsupportedError{Feature: "visible link appearance"} },
-				Image: func(pdfgo.ImageMark) error { return &pdfgo.UnsupportedError{Feature: "visible link appearance"} },
-			}
-			visitor.Group = func(_ pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
-				return walk(visitor)
-			}
-			if err := p.reader.WalkAnnotationAppearance(ctx, page, annotation, visitor); err != nil {
-				return err
-			}
-		}
 		for _, key := range []pdfgo.Name{"AA", "OC"} {
 			if dict[key] != nil {
 				return &pdfgo.UnsupportedError{Feature: fmt.Sprintf("link annotation field %q", key)}
-			}
-		}
-		if value, err := p.reader.Resolve(dict["F"]); err != nil {
-			return err
-		} else if value != nil {
-			flags, ok := value.(pdfgo.Integer)
-			if !ok {
-				return fmt.Errorf("invalid PDF annotation flags")
-			}
-			if flags != 0 && flags != 4 {
-				return &pdfgo.UnsupportedError{Feature: "link annotation flags"}
-			}
-		}
-		borderStyle, err := p.reader.Resolve(dict["BS"])
-		if err != nil {
-			return err
-		}
-		if borderStyle != nil {
-			style, ok := borderStyle.(pdfgo.Dictionary)
-			if !ok {
-				return fmt.Errorf("invalid PDF link border style")
-			}
-			width, err := p.reader.Resolve(style["W"])
-			if err != nil {
-				return err
-			}
-			if width != pdfgo.Integer(0) && width != pdfgo.Real(0) {
-				return &pdfgo.UnsupportedError{Feature: "visible link border"}
-			}
-		} else {
-			border, err := p.reader.Resolve(dict["Border"])
-			if err != nil {
-				return err
-			}
-			array, ok := border.(pdfgo.Array)
-			if !ok || len(array) < 3 || (array[2] != pdfgo.Integer(0) && array[2] != pdfgo.Real(0)) {
-				return &pdfgo.UnsupportedError{Feature: "visible link border"}
 			}
 		}
 		action := Action{Event: "CLICK"}
@@ -162,6 +157,9 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			if err != nil {
 				if !strict && errors.Is(err, pdfgo.ErrDestinationNotFound) {
 					p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("%v; link omitted", err)})
+					if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
+						return err
+					}
 					continue
 				}
 				return err
@@ -170,6 +168,9 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			if targetPage == nil {
 				if !strict {
 					p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF link targets a page outside the document page tree; link omitted"})
+					if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
+						return err
+					}
 					continue
 				}
 				return fmt.Errorf("PDF destination page missing")
@@ -221,18 +222,13 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		}
 		b := annotation.Rect
 		box := pdfBounds([]pdfgo.Point{p.matrix.Apply(pdfgo.Point{X: b.XMin, Y: b.YMin}), p.matrix.Apply(pdfgo.Point{X: b.XMax, Y: b.YMax})})
-		object, err := NewShape(ShapeRectangle, box)
-		if err != nil {
-			return err
-		}
-		no := false
-		object.Fill, object.Stroke = &no, &no
 		action.Region, err = p.linkRegion(annotation, box)
 		if err != nil {
 			return err
 		}
-		object.Actions = []Action{action}
-		p.objects = append(p.objects, GraphicObject{Type: "PathObject", PathObject: object})
+		if err := p.appearanceAnnotation(ctx, page, annotation, action); err != nil {
+			return err
+		}
 		p.report.Links++
 	}
 	return nil

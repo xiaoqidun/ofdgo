@@ -43,7 +43,10 @@ func drawRasterImageCommand(backend RasterBackend, page *RasterPage, dst draw.Im
 	if mask.Rect.Empty() {
 		return nil
 	}
-	draw.CatmullRom.Transform(dst, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, imagePixelSource(src), src.Bounds(), draw.Over, &draw.Options{DstMask: mask})
+	bounds := mask.Rect.Intersect(dst.Bounds())
+	layer := image.NewRGBA64(bounds)
+	draw.CatmullRom.Transform(layer, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, imagePixelSource(src), src.Bounds(), draw.Src, nil)
+	draw.DrawMask(dst, bounds, layer, bounds.Min, mask, bounds.Min, draw.Over)
 	return nil
 }
 

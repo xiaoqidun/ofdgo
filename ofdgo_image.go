@@ -462,32 +462,53 @@ func imageWithTransparentEdge(img image.Image) (image.Image, int) {
 	if !hasZero || !hasVisible {
 		return img, 0
 	}
-	srcBounds := src.Bounds()
-	out := image.NewNRGBA(image.Rect(0, 0, w+2, h+2))
-	draw.Draw(out, out.Bounds().Inset(1), src, srcBounds.Min, draw.Src)
-	for y := 0; y < h; y++ {
-		sy := srcBounds.Min.Y + y
-		offset := src.PixOffset(srcBounds.Min.X, sy) + 3
-		for x := 0; x < w; x++ {
-			if src.Pix[offset] == 0 {
-				if edge, ok := transparentEdgeColor(src, srcBounds.Min.X+x, sy); ok {
-					out.SetNRGBA(x+1, y+1, edge)
-				}
-			}
-			offset += 4
+	return &transparentEdgeImage{source: src, rect: image.Rect(0, 0, w+2, h+2)}, 1
+}
+
+// transparentEdgeImage 共享只读像素并按需计算透明边缘和采样边距
+type transparentEdgeImage struct {
+	source *image.NRGBA
+	rect   image.Rectangle
+}
+
+// Bounds 返回含采样边距的图像边界
+// 返回: image.Rectangle 图像边界
+func (s *transparentEdgeImage) Bounds() image.Rectangle { return s.rect }
+
+// ColorModel 返回非预乘颜色模型
+// 返回: color.Model 颜色模型
+func (s *transparentEdgeImage) ColorModel() color.Model { return color.NRGBAModel }
+
+// NRGBAAt 读取原始像素或按邻域补齐透明边缘，边界外透明
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.NRGBA 非预乘颜色
+func (s *transparentEdgeImage) NRGBAAt(x, y int) color.NRGBA {
+	if !image.Pt(x, y).In(s.rect) {
+		return color.NRGBA{}
+	}
+	b := s.source.Bounds()
+	sx, sy := b.Min.X+min(max(x-1, 0), b.Dx()-1), b.Min.Y+min(max(y-1, 0), b.Dy()-1)
+	c := s.source.NRGBAAt(sx, sy)
+	if c.A == 0 {
+		if edge, ok := transparentEdgeColor(s.source, sx, sy); ok {
+			c = edge
 		}
 	}
-	for x := 0; x < w; x++ {
-		out.SetNRGBA(x+1, 0, transparentPaddingColor(out.NRGBAAt(x+1, 1)))
-		out.SetNRGBA(x+1, h+1, transparentPaddingColor(out.NRGBAAt(x+1, h)))
+	if x == 0 || y == 0 || x == s.rect.Max.X-1 || y == s.rect.Max.Y-1 {
+		c = transparentPaddingColor(c)
 	}
-	for y := 0; y < h; y++ {
-		out.SetNRGBA(0, y+1, transparentPaddingColor(out.NRGBAAt(1, y+1)))
-		out.SetNRGBA(w+1, y+1, transparentPaddingColor(out.NRGBAAt(w, y+1)))
-	}
-	out.SetNRGBA(0, 0, transparentPaddingColor(out.NRGBAAt(1, 1)))
-	out.SetNRGBA(w+1, 0, transparentPaddingColor(out.NRGBAAt(w, 1)))
-	out.SetNRGBA(0, h+1, transparentPaddingColor(out.NRGBAAt(1, h)))
-	out.SetNRGBA(w+1, h+1, transparentPaddingColor(out.NRGBAAt(w, h)))
-	return out, 1
+	return c
+}
+
+// At 返回非预乘像素颜色
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.Color 像素颜色
+func (s *transparentEdgeImage) At(x, y int) color.Color { return s.NRGBAAt(x, y) }
+
+// RGBA64At 返回预乘十六位像素，供采样器无装箱读取
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.RGBA64 预乘颜色
+func (s *transparentEdgeImage) RGBA64At(x, y int) color.RGBA64 {
+	r, g, b, a := s.NRGBAAt(x, y).RGBA()
+	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
 }

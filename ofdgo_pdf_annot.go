@@ -30,10 +30,13 @@ import (
 )
 
 // appearanceAnnotation 将PDF静态外观转换为对应类型的OFD注解
-// 入参: ctx取消上下文, page PDF页面, annotation PDF注解
+// 入参: ctx取消上下文, page PDF页面, annotation PDF注解, actions 外观区域的动作
 // 返回: error 外观或转换错误
-func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation) error {
-	for _, key := range []pdfgo.Name{"AA", "OC"} {
+func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation, actions ...Action) error {
+	for _, key := range []pdfgo.Name{"AA", "OC", "A"} {
+		if key == "A" && (annotation.Subtype == "Link" || annotation.Subtype == "Movie") {
+			continue
+		}
 		if annotation.Dictionary[key] != nil {
 			return &pdfgo.UnsupportedError{Feature: fmt.Sprintf("annotation field %q", key)}
 		}
@@ -66,6 +69,7 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 	stamp.report = PDFImportReport{}
 	var darkenImages []pdfgo.ImageMark
 	visitor := pdfgo.Visitor{
+		Warning: p.warning,
 		Path: func(mark pdfgo.PathMark) error {
 			if mark.Style.BlendMode == "Darken" {
 				return &pdfgo.UnsupportedError{Feature: "darken stamp path"}
@@ -108,6 +112,15 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF darken stamp appearance flattened over page content"})
 	}
 	converted := Annotation{Type: pdfAnnotationType(annotation.Subtype), Subtype: string(annotation.Subtype), Appearance: Appearance{Boundary: pdfBoundary(box), Objects: stamp.objects}}
+	if len(actions) != 0 {
+		region, err := NewShape(ShapeRectangle, Box{W: box.W, H: box.H})
+		if err != nil {
+			return err
+		}
+		no := false
+		region.Fill, region.Stroke, region.Actions = &no, &no, actions
+		converted.Appearance.Objects = append(converted.Appearance.Objects, GraphicObject{Type: "PathObject", PathObject: region})
+	}
 	if value, err := p.reader.Resolve(annotation.Dictionary["Contents"]); err != nil {
 		return err
 	} else if value != nil {
@@ -189,6 +202,7 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 	p.report.TextObjects += stamp.report.TextObjects
 	p.report.PathObjects += stamp.report.PathObjects
 	p.report.ImageObjects += stamp.report.ImageObjects
+	p.report.Warnings = append(p.report.Warnings, stamp.report.Warnings...)
 	if flags&64 != 0 {
 		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF annotation read-only flag not transferred"})
 	}
@@ -206,7 +220,7 @@ func pdfAnnotationType(subtype pdfgo.Name) string {
 		return "Watermark"
 	case "Highlight", "Underline", "Squiggly", "StrikeOut":
 		return "Highlight"
-	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink":
+	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link":
 		return "Path"
 	}
 	return ""

@@ -17,7 +17,7 @@ package ofdgo
 import (
 	"fmt"
 	"image"
-	"image/draw"
+	"image/color"
 
 	"github.com/tdewolff/canvas"
 )
@@ -120,8 +120,21 @@ func (c *canvasPageCompiler) fill(path *canvas.Path, paint canvas.Paint, rule ca
 		}
 		cmd.Paint.Gradient = g
 	}
+	var err error
+	cmd.Path, err = canvasRasterPath(path)
+	if err != nil {
+		c.err = err
+		return
+	}
+	c.page.Commands = append(c.page.Commands, cmd)
+}
+
+// canvasRasterPath 转换曲线路径，保留各子路径和闭合标记
+// 入参: path Canvas路径
+// 返回: []RasterSegment 独立路径, error 未知指令错误
+func canvasRasterPath(path *canvas.Path) ([]RasterSegment, error) {
 	path = path.ReplaceArcs()
-	cmd.Path = make([]RasterSegment, 0, path.Len())
+	segments := make([]RasterSegment, 0, path.Len())
 	scanner := path.Scanner()
 	for scanner.Scan() {
 		s := RasterSegment{End: rasterPoint(scanner.End())}
@@ -137,12 +150,11 @@ func (c *canvasPageCompiler) fill(path *canvas.Path, paint canvas.Paint, rule ca
 		case canvas.CloseCmd:
 			s.Verb = RasterClose
 		default:
-			c.err = fmt.Errorf("unsupported raster path command %g", scanner.Cmd())
-			return
+			return nil, fmt.Errorf("unsupported raster path command %g", scanner.Cmd())
 		}
-		cmd.Path = append(cmd.Path, s)
+		segments = append(segments, s)
 	}
-	c.page.Commands = append(c.page.Commands, cmd)
+	return segments, nil
 }
 
 // rasterPoint 转换局部坐标点
@@ -167,12 +179,43 @@ func (c *canvasPageCompiler) RenderImage(img image.Image, m canvas.Matrix) {
 	img = imagePixelSource(img)
 	if (m[0][1] != 0 || m[1][0] != 0) && (m[0][0] != 0 || m[1][1] == 0) {
 		bounds := img.Bounds()
-		padded := image.NewRGBA(image.Rect(0, 0, bounds.Dx()+8, bounds.Dy()+8))
-		draw.Draw(padded, image.Rect(4, 4, bounds.Dx()+4, bounds.Dy()+4), img, bounds.Min, draw.Src)
-		img = padded
+		img = &rasterPaddedImage{source: img, rect: image.Rect(0, 0, bounds.Dx()+8, bounds.Dy()+8)}
 		m = m.Translate(-4, -4)
 	}
 	h := float64(img.Bounds().Dy())
 	t := RasterMatrix{m[0][0], -m[1][0], -m[0][1], m[1][1], m[0][2] + m[0][1]*h, c.page.Height - m[1][2] - m[1][1]*h}
 	c.page.Commands = append(c.page.Commands, RasterCommand{Image: img, Transform: t})
+}
+
+// rasterPaddedImage 为旋转采样提供透明边距，共享原图而不复制整幅像素
+type rasterPaddedImage struct {
+	source image.Image
+	rect   image.Rectangle
+}
+
+// Bounds 返回含四像素边距的图像边界
+// 返回: image.Rectangle 图像边界
+func (s *rasterPaddedImage) Bounds() image.Rectangle { return s.rect }
+
+// ColorModel 返回预乘八位颜色模型，与实体补边图像保持一致
+// 返回: color.Model 颜色模型
+func (s *rasterPaddedImage) ColorModel() color.Model { return color.RGBAModel }
+
+// At 读取补边图像的预乘像素，边距及图像外透明
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.Color 像素颜色
+func (s *rasterPaddedImage) At(x, y int) color.Color {
+	if !image.Pt(x, y).In(s.rect.Inset(4)) {
+		return color.RGBA{}
+	}
+	b := s.source.Bounds()
+	return color.RGBAModel.Convert(s.source.At(x-4+b.Min.X, y-4+b.Min.Y))
+}
+
+// RGBA64At 返回预乘十六位像素供采样器读取
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.RGBA64 像素颜色
+func (s *rasterPaddedImage) RGBA64At(x, y int) color.RGBA64 {
+	r, g, b, a := s.At(x, y).RGBA()
+	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
 }

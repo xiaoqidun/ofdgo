@@ -96,7 +96,14 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		}
 	}
 	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, box.X, box.Y, localCTM, parentCTM, boundaryInCTM))
-	img = r.imageWithClip(img, clipPath, m, 96)
+	imageClip := clipPath
+	compiler, compiled := ctx.Renderer.(*canvasPageCompiler)
+	if compiled && imageClip != nil && imageClipContains(img, imageClip, m) {
+		imageClip = nil
+	}
+	if !compiled {
+		img = r.imageWithClip(img, clipPath, m, 96)
+	}
 	if r.renderError != nil {
 		return
 	}
@@ -108,6 +115,15 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		m[1][2] -= m[1][0]*p + m[1][1]*p
 	}
 	ctx.RenderImage(r.canvasEncodedImage(img), ctx.CoordSystemView().Mul(ctx.View()).Mul(m))
+	if compiled && imageClip != nil && compiler.err == nil {
+		view := (canvas.Matrix{{1, 0, 0}, {0, -1, compiler.page.Height}}).Mul(ctx.CoordSystemView()).Mul(ctx.View())
+		segments, err := canvasRasterPath(imageClip.Copy().Transform(view))
+		if err != nil {
+			compiler.err = err
+			return
+		}
+		compiler.page.Commands[len(compiler.page.Commands)-1].Clip = segments
+	}
 	if obj.Border != nil {
 		r.renderImageBorder(ctx, obj, box, pageH, parentCTM, boundaryInCTM, clipPath)
 	}
@@ -146,6 +162,18 @@ func (r *Renderer) renderImageBorder(ctx *canvas.Context, obj ImageObject, box B
 	r.renderPath(ctx, border, pageH, nil, parentCTM, boundaryInCTM, clipPath)
 }
 
+// imageClipContains 判断裁剪是否完整包含变换后的图像，避免重复削弱边缘覆盖率
+// 入参: img 图片, clipPath 裁剪路径, m 图片到页面变换
+// 返回: bool 是否完整包含
+func imageClipContains(img image.Image, clipPath *canvas.Path, m canvas.Matrix) bool {
+	b := img.Bounds()
+	outline := canvas.Rectangle(float64(b.Dx()), float64(b.Dy())).Transform(m)
+	if rect, ok := rectangularPath(clipPath); ok {
+		return rect.Contains(outline.FastBounds())
+	}
+	return clipPath.Contains(outline)
+}
+
 // imageWithClip 应用图片裁剪区域
 // 低分辨率图片按最低精度细化蒙版，细化后的像素上限16Mi，不降低原图分辨率
 // 入参: img 图片对象, clipPath 裁剪路径, m 图片变换矩阵, dpi 最低蒙版分辨率，0保留原图精度
@@ -159,21 +187,7 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 	if w == 0 || h == 0 {
 		return img
 	}
-	p0 := m.Dot(canvas.Point{})
-	p1 := m.Dot(canvas.Point{X: float64(w)})
-	p2 := m.Dot(canvas.Point{X: float64(w), Y: float64(h)})
-	p3 := m.Dot(canvas.Point{Y: float64(h)})
-	imagePath := &canvas.Path{}
-	imagePath.MoveTo(p0.X, p0.Y)
-	imagePath.LineTo(p1.X, p1.Y)
-	imagePath.LineTo(p2.X, p2.Y)
-	imagePath.LineTo(p3.X, p3.Y)
-	imagePath.Close()
-	if rect, ok := rectangularPath(clipPath); ok {
-		if rect.Contains(imagePath.FastBounds()) {
-			return img
-		}
-	} else if clipPath.Contains(imagePath) {
+	if imageClipContains(img, clipPath, m) {
 		return img
 	}
 	source, err := imagePixelData(img)

@@ -21,6 +21,44 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// meshColor 将线性三角网格映射为OFD高洛德渐变，保留顶点和覆盖顺序
+// 入参: paint PDF网格画刷, box 对象边界
+// 返回: *FillColor OFD渐变, error 不可线性表达的颜色或坐标错误
+func (p *pdfImporter) meshColor(paint pdfgo.Paint, box Box) (*FillColor, error) {
+	if err := pdfGradientError(paint); err != nil {
+		return nil, err
+	}
+	mesh := paint.Mesh
+	matrix := p.matrix.Mul(mesh.Matrix)
+	shading := &GouraudShd{}
+	for _, triangle := range mesh.Triangles {
+		if err := p.ctx.Err(); err != nil {
+			return nil, err
+		}
+		for i, point := range triangle.Points {
+			point = matrix.Apply(point)
+			if !finite(point.X) || !finite(point.Y) {
+				return nil, fmt.Errorf("nonfinite mesh vertex")
+			}
+			values := triangle.Colors[i]
+			rgb, err := mesh.Space.RGB(values[:mesh.Space.Components()], mesh.Intent)
+			if err != nil {
+				return nil, err
+			}
+			color := pdfgo.Paint{RGB: rgb, Alpha: 1}
+			if mesh.Space.Model == "DeviceCMYK" && !mesh.Space.Calibrated() {
+				color.CMYK = &values
+			}
+			converted := p.color(color)
+			shading.Point = append(shading.Point, ShdPoint{X: point.X - box.X, Y: point.Y - box.Y, Color: ShdColor{Value: converted.Value, ColorSpace: converted.ColorSpace}})
+		}
+	}
+	color := p.color(paint)
+	color.Value = ""
+	color.GouraudShd = shading
+	return color, nil
+}
+
 // pdfMeshVertex 保存局部毫米坐标及原曲面参数
 type pdfMeshVertex struct {
 	point pdfgo.Point
@@ -106,6 +144,17 @@ func (p *pdfImporter) meshTriangles(mesh *pdfgo.MeshGradient) ([]pdfMeshTriangle
 			}
 			row[n] = left
 		}
+	}
+	for index, triangle := range mesh.Triangles {
+		if err := p.ctx.Err(); err != nil {
+			return nil, err
+		}
+		vertices := [3]pdfMeshVertex{
+			{matrix.Apply(triangle.Points[0]), 0, 0},
+			{matrix.Apply(triangle.Points[1]), 1, 0},
+			{matrix.Apply(triangle.Points[2]), 0, 1},
+		}
+		triangles = append(triangles, pdfMeshTriangle{vertices, len(mesh.Patches) + index})
 	}
 	return triangles, nil
 }

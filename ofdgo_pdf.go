@@ -522,7 +522,7 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 // 返回: *FillColor OFD颜色或渐变, error 图案转换错误
 func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error) {
 	if paint.Mesh != nil {
-		return nil, &pdfgo.UnsupportedError{Feature: "bicubic mesh conversion"}
+		return p.meshColor(paint, box)
 	}
 	color := p.color(paint)
 	if paint.Tiling != nil {
