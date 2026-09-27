@@ -21,7 +21,9 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -409,6 +411,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 }
 
 // pdfFontProgram 为PDF子集字体补齐封装表，保留字形轮廓和编号
+// 复合字体的重复映射区段按PDF字符映射重建，不改变CID对应的字形
 // 入参: source PDF字体, type1 已解析的Type1程序，nil时按需解析
 // 返回: []byte 封装后的字体数据, uint16 缺失度量前的完整字形数, error 错误信息
 func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, error) {
@@ -470,9 +473,9 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, er
 		tables["hmtx"] = tables["hmtx"][:metricLength]
 		changed = true
 	}
-	if len(tables["cmap"]) == 0 {
+	if len(tables["cmap"]) == 0 || source.Subtype == "Type0" && pdfCmapOverlaps(tables["cmap"]) {
 		mapping := map[rune]uint16{}
-		for code := range source.Unicode {
+		for _, code := range slices.Sorted(maps.Keys(source.Unicode)) {
 			glyphs, err := source.Decode([]byte(code))
 			if err != nil {
 				return nil, 0, err
@@ -534,6 +537,42 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, er
 	}
 	result, err := serializeOTF(tables)
 	return result, repairedLimit, err
+}
+
+// pdfCmapOverlaps 检查格式4字符映射是否包含交叠区段
+// 入参: data cmap表数据
+// 返回: bool 是否存在交叠
+func pdfCmapOverlaps(data []byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	count := int(binary.BigEndian.Uint16(data[2:]))
+	if count > (len(data)-4)/8 {
+		return false
+	}
+	for index := range count {
+		offset := uint64(binary.BigEndian.Uint32(data[8+8*index:]))
+		if offset > uint64(len(data)) || uint64(len(data))-offset < 16 {
+			continue
+		}
+		sub := data[int(offset):]
+		if binary.BigEndian.Uint16(sub) != 4 {
+			continue
+		}
+		length := int(binary.BigEndian.Uint16(sub[2:]))
+		segments := int(binary.BigEndian.Uint16(sub[6:])) / 2
+		if length > len(sub) || 16+8*segments > length {
+			continue
+		}
+		for i := 1; i < segments; i++ {
+			previous := binary.BigEndian.Uint16(sub[14+2*(i-1):])
+			start := binary.BigEndian.Uint16(sub[16+2*segments+2*i:])
+			if start <= previous {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // pdfSFNTMissingPadding 判断字体表目录是否引用了未写入的末尾对齐字节

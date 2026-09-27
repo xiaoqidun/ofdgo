@@ -152,28 +152,29 @@ func (r *Renderer) resolveFontSource(backend FontBackend, id string, exact bool)
 		}
 		definition = r.Reader.fontCache[id]
 	}
-	if definition != nil {
-		if definition.FontFile != "" {
-			data, err := r.Reader.FontData(id)
-			if err != nil {
-				return ResolvedFont{}, err
-			}
-			face, err := r.Reader.embeddedFontFace(*definition)
-			if err != nil {
-				return ResolvedFont{}, err
-			}
-			return ResolvedFont{Data: data, Source: path.Base(definition.FontFile), Face: face, Exact: true}, nil
+	if definition == nil {
+		definition = &Font{ID: id}
+	}
+	if definition.FontFile != "" {
+		data, err := r.Reader.FontData(id)
+		if err != nil {
+			return ResolvedFont{}, err
 		}
-		if source, metrics := r.fontSourceMatch(backend, id, definition, exact); metrics != nil {
-			data := metrics.Write()
-			faces, err := (FontFile{Data: data}).Faces()
-			if err != nil {
-				return ResolvedFont{}, err
-			}
-			face := faces[0]
-			face.Index = source.face
-			return ResolvedFont{Data: data, Source: source.name, Face: &face, Exact: source.exact}, nil
+		face, err := r.Reader.embeddedFontFace(*definition)
+		if err != nil {
+			return ResolvedFont{}, err
 		}
+		return ResolvedFont{Data: data, Source: path.Base(definition.FontFile), Face: face, Exact: true}, nil
+	}
+	if source, metrics := r.fontSourceMatch(backend, id, definition, exact); metrics != nil {
+		data := metrics.Write()
+		faces, err := (FontFile{Data: data}).Faces()
+		if err != nil {
+			return ResolvedFont{}, err
+		}
+		face := faces[0]
+		face.Index = source.face
+		return ResolvedFont{Data: data, Source: source.name, Face: &face, Exact: source.exact}, nil
 	}
 	if exact {
 		return ResolvedFont{}, fmt.Errorf("font %q is unavailable", id)
@@ -238,6 +239,11 @@ func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
 		}
 	}
 	sortFontSources(sources[systemStart:])
+	for _, dir := range r.fontDirs {
+		for _, match := range r.matchFontFiles(dir, nil, bold, italic) {
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.name, face: match.face})
+		}
+	}
 	for index := range r.fontFS {
 		for _, match := range r.matchFontFS(index, nil, bold, italic) {
 			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: match.name, face: match.face})

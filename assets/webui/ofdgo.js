@@ -4085,8 +4085,18 @@ async function loadDocumentDetails(openSeq) {
 			const info = await callWASM("ofdgoDocumentInfo", true);
 			if (openSeq !== state.openSeq) return;
 			if (!info.detailsPending) {
+				const knownFonts = new Set((state.doc.fonts || []).map(font => font.id));
+				const missingFonts = info.fonts?.some(font => font.used > 0 && font.status === "missing" && !knownFonts.has(font.id));
 				Object.assign(state.doc, info, { detailsPending: false, detailsError: "" });
 				renderMeta();
+				if (missingFonts && fontManager.permission === "granted" && !state.editorInfo && !document.body.hasAttribute("aria-busy")) {
+					setBusy(true);
+					try {
+						if (await autoLoadDocumentLocalFonts(openSeq) && openSeq === state.openSeq) await applyFontChange();
+					} finally {
+						if (openSeq === state.openSeq) setBusy(false);
+					}
+				}
 				return;
 			}
 		}

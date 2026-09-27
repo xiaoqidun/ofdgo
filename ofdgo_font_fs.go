@@ -182,13 +182,18 @@ func FontFileMatches(files []string, bold, italic bool, names ...string) []strin
 	return fontFileMatchNames(fontFileMatches(fontFileCandidates(files, path.Base), names, bold, italic))
 }
 
-// MatchFontFiles 按文档字体名称和样式选择首选文件，跳过内嵌字体
-// 入参: files 可用字体文件名
+// MatchFontFiles 按文档字体名称和样式选择首选文件，未声明的使用编号按默认规则回退
+// 入参: files 可用字体文件名, ids 已发现的使用编号，省略时仅匹配声明字体
 // 返回: []string 所需字体文件名, error 错误信息
-func (r *Reader) MatchFontFiles(files []string) ([]string, error) {
+func (r *Reader) MatchFontFiles(files []string, ids ...string) ([]string, error) {
 	fonts, err := r.Fonts()
 	if err != nil {
 		return nil, err
+	}
+	for _, id := range ids {
+		if r.fontCache[id] == nil {
+			fonts = append(fonts, Font{ID: id})
+		}
 	}
 	candidates := fontFileCandidates(files, path.Base)
 	names := make([]string, 0, len(fonts))

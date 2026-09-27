@@ -44,7 +44,7 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 		return nil
 	}
 	if of == nil {
-		of = &Font{ID: fontID, FontName: "default"}
+		of = &Font{ID: fontID, FontName: "OFDGoFallback"}
 	}
 	fontData := resolved.Data
 	fontStyle := canvasFontStyle(of)

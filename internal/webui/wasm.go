@@ -921,7 +921,13 @@ func matchFontFiles(args []js.Value) (any, error) {
 	if currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	return currentSession.Reader.MatchFontFiles(stringsFromJS(args[0]))
+	ids := make([]string, 0, len(currentSession.fontInfos))
+	for _, info := range currentSession.fontInfos {
+		if info.Used > 0 {
+			ids = append(ids, info.ID)
+		}
+	}
+	return currentSession.Reader.MatchFontFiles(stringsFromJS(args[0]), ids...)
 }
 
 // fontFaces 读取上传字体的名称和集合索引

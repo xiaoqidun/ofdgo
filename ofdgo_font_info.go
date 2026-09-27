@@ -262,13 +262,13 @@ func (r *Renderer) fontInfos(usage map[string]int) ([]FontInfo, error) {
 		if seen[id] {
 			continue
 		}
-		infos = append(infos, FontInfo{
-			ID:       id,
-			FontName: id,
-			Status:   FontStatusMissing,
-			Detail:   "字体资源未被声明",
-			Used:     used,
-		})
+		info := r.fontInfo(Font{ID: id})
+		info.FontName, info.Used = id, used
+		info.Detail = "字体资源未被声明"
+		if info.Status == FontStatusFallback {
+			info.Detail += "，使用外部字体回退"
+		}
+		infos = append(infos, info)
 	}
 	sort.SliceStable(infos, func(i, j int) bool {
 		if infos[i].Used == 0 && infos[j].Used > 0 {
