@@ -25,7 +25,41 @@ import (
 // drawRasterImage 按页面变换对图像执行高质量采样
 // 入参: dst 目标图像, src 源图像, m 像素坐标变换
 func drawRasterImage(dst draw.Image, src image.Image, m RasterMatrix) {
-	draw.CatmullRom.Transform(dst, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, src, src.Bounds(), draw.Over, nil)
+	drawRasterImagePixels(dst, src, m, draw.Over)
+}
+
+// drawRasterImagePixels 对整像素边界的轴向缩小使用可分离采样，其余变换保留通用路径
+// 入参: dst 目标图像, src 源图像, m 像素变换, op 合成操作
+func drawRasterImagePixels(dst draw.Image, src image.Image, m RasterMatrix, op draw.Op) {
+	b := src.Bounds()
+	if dr, ok := rasterScaleBounds(b, m); ok {
+		if dr.Intersect(dst.Bounds()).Empty() {
+			return
+		}
+		draw.CatmullRom.Scale(dst, dr, src, b, op, nil)
+		return
+	}
+	draw.CatmullRom.Transform(dst, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, src, b, op, nil)
+}
+
+// rasterScaleBounds 检查变换是否可无几何取整地使用缩放器，并避开其整数溢出范围
+// 入参: b 源边界, m 像素变换
+// 返回: image.Rectangle 缩放边界, bool 是否适用
+func rasterScaleBounds(b image.Rectangle, m RasterMatrix) (image.Rectangle, bool) {
+	if b.Empty() || m[1] != 0 || m[2] != 0 || m[0] <= 0 || m[0] > 1 || m[3] <= 0 || m[3] > 1 || m[0] == 1 && m[3] == 1 {
+		return image.Rectangle{}, false
+	}
+	x0, y0 := float64(m[0]*float64(b.Min.X))+m[4], float64(m[3]*float64(b.Min.Y))+m[5]
+	x1, y1 := float64(m[0]*float64(b.Max.X))+m[4], float64(m[3]*float64(b.Max.Y))+m[5]
+	for _, v := range [4]float64{x0, y0, x1, y1} {
+		if v != math.Floor(v) || v < math.MinInt32 || v > math.MaxInt32 {
+			return image.Rectangle{}, false
+		}
+	}
+	if x1 <= x0 || y1 <= y0 || b.Dx() > math.MaxInt32 || b.Dy() > math.MaxInt32 || (x1-x0)*float64(b.Dy()) > float64(min(math.MaxInt32, int(^uint(0)>>1)/32)) {
+		return image.Rectangle{}, false
+	}
+	return image.Rect(int(x0), int(y0), int(x1), int(y1)), true
 }
 
 // drawRasterImageCommand 使用当前后端生成裁剪蒙版，共用高质量图像采样
@@ -49,7 +83,7 @@ func drawRasterImageCommand(backend RasterBackend, page *RasterPage, dst draw.Im
 		return nil
 	}
 	layer := image.NewRGBA64(bounds)
-	draw.CatmullRom.Transform(layer, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, imagePixelSource(src), src.Bounds(), draw.Src, nil)
+	drawRasterImagePixels(layer, imagePixelSource(src), m, draw.Src)
 	draw.DrawMask(dst, bounds, layer, bounds.Min, mask, bounds.Min, draw.Over)
 	return nil
 }
