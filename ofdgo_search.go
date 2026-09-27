@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"encoding/xml"
 	"fmt"
+	"io"
 	"math"
 	"strings"
 	"unicode"
@@ -62,7 +63,7 @@ type PageText struct {
 }
 
 // TextRun 文本对象原文及逐字符区域，坐标以页面左上角为原点，单位为毫米
-// Boxes与Text的Unicode字符一一对应，缺少字体时使用文本对象区域
+// Boxes与Text的Unicode字符一一对应，缺少字体时使用文本对象区域，缺省区域不影响文字搜索
 type TextRun struct {
 	ID    string     `json:"id"`
 	Text  string     `json:"text"`
@@ -122,16 +123,47 @@ func (r *Renderer) PageTextByIndex(index int) (*PageText, error) {
 // 返回: string 页面原文
 func (p *PageText) String() string {
 	var text strings.Builder
+	_, _ = p.WriteTo(&text)
+	return text.String()
+}
+
+// WriteTo 按文本对象顺序输出UTF-8原文，以换行分隔非空对象，不拼接整页字符串
+// 入参: writer 输出流
+// 返回: int64 已写字节数, error 写入错误，出错时可能已有部分输出
+func (p *PageText) WriteTo(writer io.Writer) (int64, error) {
+	return p.writeTo(writer, false)
+}
+
+// writeTo 输出非空文本对象，可在首个对象前分隔上一页
+// 入参: writer 输出流, separator 是否需要前导换行
+// 返回: int64 已写字节数, error 写入错误
+func (p *PageText) writeTo(writer io.Writer, separator bool) (int64, error) {
+	var written int64
 	for _, run := range p.Runs {
 		if run.Text == "" {
 			continue
 		}
-		if text.Len() > 0 {
-			text.WriteByte('\n')
+		if separator {
+			n, err := io.WriteString(writer, "\n")
+			written += int64(n)
+			if err != nil {
+				return written, err
+			}
+			if n != 1 {
+				return written, io.ErrShortWrite
+			}
 		}
-		text.WriteString(run.Text)
+		n, err := io.WriteString(writer, run.Text)
+		written += int64(n)
+		if err != nil {
+			return written, err
+		}
+		if n != len(run.Text) {
+			return written, io.ErrShortWrite
+		}
+		separator = true
 	}
-	return text.String()
+	return written, nil
 }
 
 // Search 按原文进行忽略大小写的字面匹配，不跨文本对象拼接或识别图像
@@ -166,7 +198,7 @@ func (p *PageText) Search(query string) []TextMatch {
 				Text:   string(runes[start:end]),
 				After:  string(runes[end:min(len(runes), end+16)]),
 			}
-			for _, box := range run.Boxes[start:end] {
+			for _, box := range run.Boxes[min(start, len(run.Boxes)):min(end, len(run.Boxes))] {
 				if box.W > 0 && box.H > 0 && (len(match.Boxes) == 0 || match.Boxes[len(match.Boxes)-1] != box) {
 					match.Boxes = append(match.Boxes, box)
 				}
@@ -184,6 +216,12 @@ func (p *PageText) Search(query string) []TextMatch {
 // 返回: string 匹配用文字
 func foldText(text string) string {
 	return strings.Map(func(char rune) rune {
+		if char < utf8.RuneSelf {
+			if char >= 'a' && char <= 'z' {
+				return char - ('a' - 'A')
+			}
+			return char
+		}
 		folded := char
 		for next := unicode.SimpleFold(char); next != char; next = unicode.SimpleFold(next) {
 			folded = min(folded, next)

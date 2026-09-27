@@ -166,7 +166,7 @@ func (r *Renderer) RenderToText(page *PageContent, writer io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = io.WriteString(writer, text.String())
+	_, err = text.WriteTo(writer)
 	return err
 }
 
@@ -191,17 +191,11 @@ func (r *Renderer) RenderToMultiPageText(writer io.Writer, indices ...int) error
 		if err != nil {
 			return fmt.Errorf("failed to extract page %d text: %w", index+1, err)
 		}
-		if value := text.String(); value != "" {
-			if written {
-				if _, err := io.WriteString(writer, "\n"); err != nil {
-					return err
-				}
-			}
-			if _, err := io.WriteString(writer, value); err != nil {
-				return err
-			}
-			written = true
+		n, err := text.writeTo(writer, written)
+		if err != nil {
+			return err
 		}
+		written = written || n > 0
 		if err := r.exportProgress(i+1, len(indices)); err != nil {
 			return err
 		}
