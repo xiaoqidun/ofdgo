@@ -22,7 +22,7 @@ type ColorStop struct {
 	Color  color.RGBA
 }
 
-// PaintKind 区分无画刷、纯色、轴向渐变、径向渐变和图案
+// PaintKind 区分无画刷、纯色、轴向渐变、径向渐变、图案和网格渐变
 type PaintKind uint8
 
 const (
@@ -31,6 +31,7 @@ const (
 	PaintLinear
 	PaintRadial
 	PaintPattern
+	PaintMesh
 )
 
 // Paint 保存后端无关的颜色、渐变和图案，不修改源节点
@@ -39,6 +40,7 @@ type Paint struct {
 	Color    color.RGBA
 	Gradient *Shading
 	Pattern  *PatternPaint
+	Mesh     *MeshShading
 }
 
 // Shading 保存OFD对象局部坐标中的渐变，单位为毫米，纵轴向下
@@ -53,17 +55,24 @@ type Shading struct {
 
 // ResolvePaint 解析颜色、透明度、渐变分段和图案，不依赖绘图库
 // 入参: fill 填充或转换后的描边节点
-// 返回: Paint 只读画刷
-func (r *Renderer) ResolvePaint(fill *FillColor) Paint {
+// 返回: Paint 只读画刷, error 无效渐变
+func (r *Renderer) ResolvePaint(fill *FillColor) (Paint, error) {
 	if fill == nil {
-		return Paint{}
+		return Paint{}, nil
 	}
 	if fill.Pattern != nil {
-		return Paint{Kind: PaintPattern, Pattern: parsePatternPaint(fill)}
+		return Paint{Kind: PaintPattern, Pattern: parsePatternPaint(fill)}, nil
+	}
+	if fill.GouraudShd != nil || fill.LaGouraudShd != nil {
+		mesh, err := r.resolveMesh(fill)
+		if err != nil {
+			return Paint{}, err
+		}
+		return Paint{Kind: PaintMesh, Mesh: mesh}, nil
 	}
 	base := r.parseFillColor(fill)
 	if base == nil {
-		return Paint{}
+		return Paint{}, nil
 	}
 	paint := Paint{Kind: PaintSolid, Color: colorToRGBA(base)}
 	if node := fill.AxialShd; node != nil {
@@ -72,7 +81,7 @@ func (r *Renderer) ResolvePaint(fill *FillColor) Paint {
 		if len(start) >= 2 && len(end) >= 2 && len(stops) != 0 && (!geometryEqual(start[0], end[0]) || !geometryEqual(start[1], end[1])) {
 			paint.Kind = PaintLinear
 			paint.Gradient = &Shading{Start: Point{X: start[0], Y: start[1]}, End: Point{X: end[0], Y: end[1]}, Stops: stops, Extend: node.Extend, MapType: node.MapType, MapUnit: node.MapUnit}
-			return paint
+			return paint, nil
 		}
 	}
 	if node := fill.RadialShd; node != nil && node.EndRadius > 0 {
@@ -83,5 +92,5 @@ func (r *Renderer) ResolvePaint(fill *FillColor) Paint {
 			paint.Gradient = &Shading{Start: Point{X: start[0], Y: start[1]}, End: Point{X: end[0], Y: end[1]}, StartRadius: node.StartRadius, EndRadius: node.EndRadius, Stops: stops, Extend: node.Extend, MapType: node.MapType, MapUnit: node.MapUnit, Eccentricity: node.Eccentricity, Angle: node.Angle}
 		}
 	}
-	return paint
+	return paint, nil
 }

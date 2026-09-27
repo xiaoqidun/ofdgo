@@ -79,6 +79,9 @@ func rasterCommandCost(command RasterCommand) int {
 	}
 	if command.Paint.Gradient != nil {
 		cost += 256 + len(command.Paint.Gradient.Stops)*64
+		if mesh := command.Paint.Gradient.Mesh; mesh != nil {
+			cost += 32 + len(mesh.Triangles)*240
+		}
 	}
 	return cost
 }

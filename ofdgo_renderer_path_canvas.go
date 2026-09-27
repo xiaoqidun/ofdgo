@@ -269,7 +269,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			ctx.SetFillRule(fillRule)
 			ctx.SetFill(fillPaint)
 			ctx.SetStrokeColor(canvas.Transparent)
-			drawShdPath(ctx, fp, fillView)
+			r.drawShdPath(ctx, fp, fillView)
 		}
 	}
 	shouldStroke := true
@@ -306,7 +306,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			} else {
 				ctx.SetFill(strokePaint)
 				ctx.SetStrokeColor(canvas.Transparent)
-				drawShdPath(ctx, sp, strokeView)
+				r.drawShdPath(ctx, sp, strokeView)
 			}
 		} else {
 			ctx.DrawPath(0, 0, sp)

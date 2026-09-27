@@ -137,10 +137,10 @@ func (c *semanticCompiler) fill(path GeometryPath, paint Paint, evenOdd bool, cl
 		return c.command(path, paint, evenOdd, clip, shadingMatrix, nil)
 	}
 	var err error
-	if clip != nil || paint.Kind == PaintPattern || paint.Gradient != nil {
+	if clip != nil || paint.Kind == PaintPattern || paint.Gradient != nil || paint.Mesh != nil {
 		path = closedGeometry(path)
 	}
-	if evenOdd && (clip != nil || paint.Kind == PaintPattern || paint.Gradient != nil) {
+	if evenOdd && (clip != nil || paint.Kind == PaintPattern || paint.Gradient != nil || paint.Mesh != nil) {
 		path, err = c.geometry.Normalize(path, true)
 		if err != nil {
 			return err
@@ -158,6 +158,20 @@ func (c *semanticCompiler) fill(path GeometryPath, paint Paint, evenOdd bool, cl
 		}
 	}
 	if c.measure {
+		if paint.Mesh != nil && paint.Mesh.Background.A == 0 {
+			outline, err := c.geometry.Normalize(paint.Mesh.outline(), false)
+			if err != nil {
+				return err
+			}
+			outline, err = c.geometry.Transform(outline, shadingMatrix)
+			if err != nil {
+				return err
+			}
+			path, err = clipGeometry(c.geometry, path, &outline)
+			if err != nil {
+				return err
+			}
+		}
 		return c.addBounds(path, evenOdd)
 	}
 	if paint.Kind == PaintPattern {
@@ -191,6 +205,18 @@ func (c *semanticCompiler) command(path GeometryPath, paint Paint, evenOdd bool,
 		}
 		command.Transform = RasterMatrix(view.Values())
 		command.Paint.Gradient = gradient
+	}
+	if paint.Mesh != nil {
+		inverse, ok := shadingMatrix.Invert()
+		if !ok {
+			return fmt.Errorf("invalid mesh shading transform")
+		}
+		path, err = c.geometry.Transform(path, inverse)
+		if err != nil {
+			return err
+		}
+		command.Transform = RasterMatrix(shadingMatrix.Values())
+		command.Paint.Gradient = &RasterGradient{Kind: RasterMesh, Mesh: paint.Mesh}
 	}
 	command.Path, err = c.segments(path)
 	if err != nil {
@@ -237,9 +263,6 @@ func semanticGradient(paint Paint, matrix Matrix) (*RasterGradient, Matrix) {
 			inverse, _ := view.Invert()
 			g.End.X, g.End.Y = inverse.Transform(g.End.X, g.End.Y)
 			matrix = matrix.Multiply(view)
-		}
-		if math.Hypot(g.End.X-g.Start.X, g.End.Y-g.Start.Y) >= math.Abs(g.R1-g.R0) {
-			g.Spread = nil
 		}
 	}
 	return g, matrix
@@ -358,12 +381,20 @@ func (c *semanticCompiler) pathObject(object PathObject, state RenderState) erro
 	style := c.objectStyle(object, state.Defaults, linear)
 	shading, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
 	if object.Fill != nil && *object.Fill {
-		if err := c.fill(path, c.renderer.ResolvePaint(style.fill), object.Rule == "Even-Odd", clip, matrix, shading); err != nil {
+		paint, err := c.renderer.ResolvePaint(style.fill)
+		if err != nil {
+			return err
+		}
+		if err := c.fill(path, paint, object.Rule == "Even-Odd", clip, matrix, shading); err != nil {
 			return err
 		}
 	}
 	if object.Stroke == nil || *object.Stroke {
-		return c.stroke(path, c.renderer.ResolvePaint(style.stroke), style.options, clip, matrix, shading)
+		paint, err := c.renderer.ResolvePaint(style.stroke)
+		if err != nil {
+			return err
+		}
+		return c.stroke(path, paint, style.options, clip, matrix, shading)
 	}
 	return nil
 }
@@ -397,18 +428,29 @@ func (c *semanticCompiler) textObject(object TextObject, state RenderState) erro
 		style.fill = withFillAlpha(&FillColor{}, object.Alpha)
 	}
 	shading, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
+	fill, err := c.renderer.ResolvePaint(style.fill)
+	if err != nil {
+		return err
+	}
+	var stroke Paint
+	if object.Stroke != nil && *object.Stroke {
+		stroke, err = c.renderer.ResolvePaint(style.stroke)
+		if err != nil {
+			return err
+		}
+	}
 	for _, glyph := range positioned.Glyphs {
 		if object.Fill == nil || *object.Fill {
-			if err := c.fill(glyph.Path, c.renderer.ResolvePaint(style.fill), false, positioned.Clip, positioned.Matrix, shading); err != nil {
+			if err := c.fill(glyph.Path, fill, false, positioned.Clip, positioned.Matrix, shading); err != nil {
 				return err
 			}
 		}
 		if object.Stroke != nil && *object.Stroke && len(glyph.Path) > 0 {
-			if err := c.stroke(glyph.Path, c.renderer.ResolvePaint(style.stroke), style.options, positioned.Clip, positioned.Matrix, shading); err != nil {
+			if err := c.stroke(glyph.Path, stroke, style.options, positioned.Clip, positioned.Matrix, shading); err != nil {
 				return err
 			}
 		}
-		if err := c.fill(glyph.Underline, c.renderer.ResolvePaint(style.fill), false, positioned.Clip, positioned.Matrix, shading); err != nil {
+		if err := c.fill(glyph.Underline, fill, false, positioned.Clip, positioned.Matrix, shading); err != nil {
 			return err
 		}
 	}

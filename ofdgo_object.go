@@ -92,12 +92,16 @@ func (c *FillColor) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	type plain FillColor
 	var value struct {
 		plain
-		Other *struct{} `xml:",any"`
+		LegacyMesh *LaGouraudShd `xml:"LaGourandShd"`
+		Other      *struct{}     `xml:",any"`
 	}
 	if err := d.DecodeElement(&value, &start); err != nil {
 		return err
 	}
 	*c = FillColor(value.plain)
+	if c.LaGouraudShd == nil {
+		c.LaGouraudShd = value.LegacyMesh
+	}
 	c.unsupported = value.Other != nil
 	return nil
 }

@@ -127,6 +127,11 @@ func cloneRasterPage(page *RasterPage) *RasterPage {
 		if cmd.Paint.Gradient != nil {
 			gradient := *cmd.Paint.Gradient
 			gradient.Stops = slices.Clone(gradient.Stops)
+			if gradient.Mesh != nil {
+				mesh := *gradient.Mesh
+				mesh.Triangles = slices.Clone(mesh.Triangles)
+				gradient.Mesh = &mesh
+			}
 			if gradient.Spread != nil {
 				spread := *gradient.Spread
 				gradient.Spread = &spread

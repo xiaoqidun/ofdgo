@@ -100,6 +100,10 @@ func (c *canvasPageCompiler) fill(path *canvas.Path, paint canvas.Paint, rule ca
 		g := &RasterGradient{}
 		var stops canvas.Grad
 		switch source := paint.Gradient.(type) {
+		case rasterGradientCanvas:
+			copy := *source.gradient
+			g = &copy
+			stops = canvasGradient(g.Stops)
 		case *canvas.LinearGradient:
 			g.Kind, g.Start, g.End = RasterLinear, rasterPoint(source.Start), rasterPoint(source.End)
 			stops = source.Grad

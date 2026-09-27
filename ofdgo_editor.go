@@ -1173,7 +1173,7 @@ func creationColor(color *FillColor) error {
 	if color == nil {
 		return nil
 	}
-	if color.ColorSpace != "" || color.Index != nil || color.Pattern != nil || color.AxialShd != nil || color.RadialShd != nil || color.unsupported {
+	if color.ColorSpace != "" || color.Index != nil || color.Pattern != nil || color.AxialShd != nil || color.RadialShd != nil || color.GouraudShd != nil || color.LaGouraudShd != nil || color.unsupported {
 		return fmt.Errorf("only direct RGB colors are supported for creation")
 	}
 	values, err := creationNumbers(color.Value, 3)

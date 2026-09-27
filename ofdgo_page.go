@@ -115,14 +115,16 @@ type TextObject struct {
 
 // FillColor 填充颜色
 type FillColor struct {
-	Value       string     `xml:"Value,attr"`
-	Index       *int       `xml:"Index,attr"`
-	ColorSpace  string     `xml:"ColorSpace,attr"`
-	Alpha       *int       `xml:"Alpha,attr"`
-	Pattern     *Pattern   `xml:"Pattern"`
-	AxialShd    *AxialShd  `xml:"AxialShd"`
-	RadialShd   *RadialShd `xml:"RadialShd"`
-	unsupported bool
+	Value        string        `xml:"Value,attr"`
+	Index        *int          `xml:"Index,attr"`
+	ColorSpace   string        `xml:"ColorSpace,attr"`
+	Alpha        *int          `xml:"Alpha,attr"`
+	Pattern      *Pattern      `xml:"Pattern"`
+	AxialShd     *AxialShd     `xml:"AxialShd"`
+	RadialShd    *RadialShd    `xml:"RadialShd"`
+	GouraudShd   *GouraudShd   `xml:"GouraudShd"`
+	LaGouraudShd *LaGouraudShd `xml:"LaGouraudShd"`
+	unsupported  bool
 }
 
 // Pattern 图案填充

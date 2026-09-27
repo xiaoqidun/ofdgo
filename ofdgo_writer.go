@@ -855,6 +855,42 @@ func (x *ofdXML) color(name string, color *FillColor) {
 	if color.Pattern != nil {
 		x.pattern(color.Pattern)
 	}
+	if color.GouraudShd != nil {
+		node := color.GouraudShd
+		x.meshShading("GouraudShd", node.Extend, 0, node.Point, node.BackColor)
+	}
+	if color.LaGouraudShd != nil {
+		node := color.LaGouraudShd
+		x.meshShading("LaGouraudShd", node.Extend, node.VerticesPerRow, node.Point, node.BackColor)
+	}
+	x.end(name)
+}
+
+// meshShading 写出网格控制点，仅非格构渐变保存共享边标志
+// 入参: name 元素名称, extend 延伸标志, columns 格构列数, points 控制点, back 背景颜色
+func (x *ofdXML) meshShading(name string, extend, columns int, points []ShdPoint, back *ShdColor) {
+	var attrs ofdAttrs
+	if extend != 0 {
+		attrs.add("Extend", strconv.Itoa(extend))
+	}
+	if columns != 0 {
+		attrs.add("VerticesPerRow", strconv.Itoa(columns))
+	}
+	x.start(name, attrs)
+	for _, point := range points {
+		var attrs ofdAttrs
+		attrs.add("X", ofdNumber(point.X))
+		attrs.add("Y", ofdNumber(point.Y))
+		if columns == 0 && point.EdgeFlag != 0 {
+			attrs.add("EdgeFlag", strconv.Itoa(point.EdgeFlag))
+		}
+		x.start("Point", attrs)
+		x.element("Color", point.Color)
+		x.end("Point")
+	}
+	if back != nil {
+		x.element("BackColor", back)
+	}
 	x.end(name)
 }
 

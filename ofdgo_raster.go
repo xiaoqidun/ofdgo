@@ -81,15 +81,18 @@ type RasterGradientKind uint8
 const (
 	RasterLinear RasterGradientKind = iota
 	RasterRadial
+	RasterMesh
 )
 
-// RasterGradient 局部坐标下的线性或双圆径向渐变，Spread为空时延续边界颜色
+// RasterGradient 局部坐标下的轴向、双圆径向或三角网格渐变
+// 轴向及径向渐变的Spread为空时延续边界颜色，网格渐变使用Mesh
 type RasterGradient struct {
 	Kind       RasterGradientKind
 	Start, End RasterPoint
 	R0, R1     float64
 	Stops      []ColorStop
 	Spread     *RasterSpread
+	Mesh       *MeshShading
 }
 
 // RasterSpread 保存OFD渐变延伸和周期，nil表示连续延伸
@@ -140,19 +143,30 @@ func (m RasterMatrix) Inverse() (RasterMatrix, error) {
 // 入参: x 横坐标, y 纵坐标
 // 返回: color.RGBA 采样颜色
 func (g *RasterGradient) At(x, y float64) color.RGBA {
+	if g.Kind == RasterMesh {
+		return g.Mesh.At(x, y)
+	}
 	dx, dy := g.End.X-g.Start.X, g.End.Y-g.Start.Y
 	px, py := x-g.Start.X, y-g.Start.Y
 	t := 0.0
 	if g.Kind == RasterRadial {
 		dr := g.R1 - g.R0
 		a, b, c := dx*dx+dy*dy-dr*dr, -2*(px*dx+py*dy+g.R0*dr), px*px+py*py-g.R0*g.R0
-		t = rasterRadialPosition(a, b, c, g.R0, dr)
-		if g.Spread != nil && math.Hypot(dx, dy) < math.Abs(dr) {
-			d := b*b - 4*a*c
-			if d < 0 {
+		if g.Spread != nil && math.Hypot(dx, dy) >= math.Abs(dr) {
+			var ok bool
+			t, ok = rasterRadialDomain(a, b, c, g.R0, dr, g.Spread.Extend)
+			if !ok {
 				return color.RGBA{}
 			}
-			t = (-b - math.Copysign(math.Sqrt(d), dr)) / (2 * a)
+		} else {
+			t = rasterRadialPosition(a, b, c, g.R0, dr)
+			if g.Spread != nil && math.Hypot(dx, dy) < math.Abs(dr) {
+				d := b*b - 4*a*c
+				if d < 0 {
+					return color.RGBA{}
+				}
+				t = (-b - math.Copysign(math.Sqrt(d), dr)) / (2 * a)
+			}
 		}
 	} else if length := dx*dx + dy*dy; length > 0 {
 		t = (px*dx + py*dy) / length
@@ -173,6 +187,33 @@ func (g *RasterGradient) At(x, y float64) color.RGBA {
 		}
 	}
 	return g.colorAt(t)
+}
+
+// rasterRadialDomain 求延伸区间内半径非负的最后一个双圆参数
+// 入参: a、b、c 方程系数, radius 起始半径, delta 半径变化, extend 延伸标志
+// 返回: float64 参数, bool 是否覆盖采样点
+func rasterRadialDomain(a, b, c, radius, delta float64, extend int) (float64, bool) {
+	x, y := math.NaN(), math.NaN()
+	if a == 0 {
+		if b != 0 {
+			x = -c / b
+		}
+	} else if d := b*b - 4*a*c; d >= 0 {
+		q := -.5 * (b + math.Copysign(math.Sqrt(d), b))
+		if q == 0 {
+			x = -b / (2 * a)
+		} else {
+			x, y = q/a, c/q
+		}
+	}
+	best := math.Inf(-1)
+	for _, t := range []float64{x, y} {
+		if !finite(t) || radius+delta*t < 0 || t < 0 && extend&1 == 0 || t > 1 && extend&2 == 0 {
+			continue
+		}
+		best = math.Max(best, t)
+	}
+	return best, !math.IsInf(best, -1)
 }
 
 // rasterRadialPosition 求双圆渐变中半径非负的有效参数

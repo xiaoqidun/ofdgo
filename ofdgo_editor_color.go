@@ -111,7 +111,7 @@ func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
 	if value == nil {
 		return color.NRGBA{A: 255}, nil
 	}
-	if value.Pattern != nil || value.AxialShd != nil || value.RadialShd != nil || value.unsupported {
+	if value.Pattern != nil || value.AxialShd != nil || value.RadialShd != nil || value.GouraudShd != nil || value.LaGouraudShd != nil || value.unsupported {
 		return color.NRGBA{}, fmt.Errorf("color is not a supported solid color")
 	}
 	id := value.ColorSpace
@@ -292,6 +292,20 @@ func collectPaintReferences(paint *FillColor, used map[string]bool) {
 	for _, segment := range segments {
 		used[segment.Color.ColorSpace] = true
 	}
+	var points []ShdPoint
+	var back *ShdColor
+	if node := paint.GouraudShd; node != nil {
+		points, back = node.Point, node.BackColor
+	}
+	if node := paint.LaGouraudShd; node != nil {
+		points, back = node.Point, node.BackColor
+	}
+	for _, point := range points {
+		used[point.Color.ColorSpace] = true
+	}
+	if back != nil {
+		used[back.ColorSpace] = true
+	}
 	if paint.Pattern != nil {
 		for _, object := range paint.Pattern.CellContent.Objects {
 			collectObjectReferences(object, used)
@@ -339,10 +353,54 @@ func collectObjectReferences(object GraphicObject, used map[string]bool) {
 	}
 }
 
+// editorMeshColor 校验网格拓扑和文档颜色引用
+// 入参: value 网格颜色
+// 返回: error 非法拓扑或颜色
+func (e *Editor) editorMeshColor(value *FillColor) error {
+	if value.unsupported || value.Pattern != nil || value.AxialShd != nil || value.RadialShd != nil || value.GouraudShd != nil && value.LaGouraudShd != nil || value.Value != "" || value.Index != nil {
+		return fmt.Errorf("specify one paint source")
+	}
+	if value.Alpha != nil && (*value.Alpha < 0 || *value.Alpha > 255) {
+		return fmt.Errorf("color alpha must be between 0 and 255")
+	}
+	var points []ShdPoint
+	var back *ShdColor
+	var columns, extend int
+	if node := value.GouraudShd; node != nil {
+		points, back, extend = node.Point, node.BackColor, node.Extend
+	} else {
+		points, back = value.LaGouraudShd.Point, value.LaGouraudShd.BackColor
+		columns, extend = value.LaGouraudShd.VerticesPerRow, value.LaGouraudShd.Extend
+		if columns == 0 {
+			return fmt.Errorf("invalid lattice shading dimensions")
+		}
+	}
+	colors := make([]ShdColor, 0, len(points)+1)
+	for _, point := range points {
+		colors = append(colors, point.Color)
+	}
+	if back != nil {
+		colors = append(colors, *back)
+	}
+	for _, color := range colors {
+		if color.ColorSpace == "" {
+			color.ColorSpace = value.ColorSpace
+		}
+		if _, err := e.Color(&FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}); err != nil {
+			return err
+		}
+	}
+	_, err := meshTriangleIndices(points, columns, extend)
+	return err
+}
+
 // editorColor 校验当前文档的纯色和渐变
 // 入参: value 颜色
 // 返回: error 错误信息
 func (e *Editor) editorColor(value *FillColor) error {
+	if value != nil && (value.GouraudShd != nil || value.LaGouraudShd != nil) {
+		return e.editorMeshColor(value)
+	}
 	if value != nil && value.Pattern != nil {
 		pattern := value.Pattern
 		if value.unsupported || value.AxialShd != nil || value.RadialShd != nil || !finite(pattern.Width) || !finite(pattern.Height) || pattern.Width <= 0 || pattern.Height <= 0 || !finite(pattern.XStep) || !finite(pattern.YStep) || pattern.XStep < pattern.Width || pattern.YStep < pattern.Height {

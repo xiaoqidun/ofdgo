@@ -24,12 +24,18 @@ import (
 // 入参: fillColor 填充颜色节点, x X坐标, y Y坐标, pageH 页面高度
 // 返回: any 填充画刷
 func (r *Renderer) parseFillPaint(fillColor *FillColor, x, y, pageH float64) any {
-	paint := r.ResolvePaint(fillColor)
+	paint, err := r.ResolvePaint(fillColor)
+	if err != nil {
+		r.renderError = err
+		return nil
+	}
 	switch paint.Kind {
 	case PaintNone, PaintPattern:
 		return nil
 	case PaintLinear, PaintRadial:
 		return canvasShading(paint, x, y, pageH)
+	case PaintMesh:
+		return &shdPaint{gradient: rasterGradientCanvas{gradient: &RasterGradient{Kind: RasterMesh, Mesh: paint.Mesh}}, view: canvas.Matrix{{1, 0, x}, {0, -1, pageH - y}}}
 	default:
 		return paint.Color
 	}

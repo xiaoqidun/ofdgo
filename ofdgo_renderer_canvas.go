@@ -111,11 +111,13 @@ func (b CanvasBackend) Render(page *RasterPage) (image.Image, error) {
 				paint = canvas.Paint{Gradient: stops.ToLinear(start, end)}
 			case RasterRadial:
 				paint = canvas.Paint{Gradient: stops.ToRadial(start, g.R0, end, g.R1)}
+			case RasterMesh:
+				paint = canvas.Paint{Gradient: rasterGradientCanvas{gradient: g}}
 			default:
 				return nil, fmt.Errorf("canvas command %d: unsupported gradient %d", i, g.Kind)
 			}
 			if g.Spread != nil {
-				paint = canvas.Paint{Gradient: rasterGradientCanvas{g}}
+				paint = canvas.Paint{Gradient: rasterGradientCanvas{gradient: g}}
 			}
 		}
 		style := canvas.Style{Fill: paint, FillRule: canvas.NonZero}
@@ -134,7 +136,7 @@ func (b CanvasBackend) Render(page *RasterPage) (image.Image, error) {
 				if err != nil {
 					return nil, err
 				}
-				paint = canvas.Paint{Gradient: rasterStrokeGradientCanvas{rasterGradientCanvas{cmd.Paint.Gradient}, inverse}}
+				paint = canvas.Paint{Gradient: rasterStrokeGradientCanvas{rasterGradientCanvas{gradient: cmd.Paint.Gradient}, inverse}}
 			}
 			line := pathStyle{lineJoin: canvas.MiterJoin, miterLimit: defaultMiterLimit}
 			line.applyLineJoin(options.Join, options.MiterLimit)
@@ -182,7 +184,7 @@ type rasterStrokeGradientCanvas struct {
 // 返回: color.RGBA 预乘颜色
 func (g rasterStrokeGradientCanvas) At(x, y float64) color.RGBA {
 	p := g.inverse.Apply(RasterPoint{x, y})
-	return g.gradient.At(p.X, p.Y)
+	return g.rasterGradientCanvas.At(p.X, p.Y)
 }
 
 // SetColorSpace 转换描边渐变颜色，不修改共享分段
@@ -194,21 +196,34 @@ func (g rasterStrokeGradientCanvas) SetColorSpace(space canvas.ColorSpace) canva
 }
 
 // rasterGradientCanvas 将公共渐变交给Canvas采样，不改变OFD周期语义
-type rasterGradientCanvas struct{ gradient *RasterGradient }
+type rasterGradientCanvas struct {
+	gradient *RasterGradient
+	space    canvas.ColorSpace
+}
 
 // At 返回局部坐标的预乘颜色
 // 入参: x 横坐标, y 纵坐标
 // 返回: color.RGBA 渐变颜色
-func (g rasterGradientCanvas) At(x, y float64) color.RGBA { return g.gradient.At(x, y) }
+func (g rasterGradientCanvas) At(x, y float64) color.RGBA {
+	value := g.gradient.At(x, y)
+	if g.space != nil {
+		return g.space.ToLinear(value)
+	}
+	return value
+}
 
 // SetColorSpace 返回转换颜色空间后的独立渐变
 // 入参: space 目标颜色空间
 // 返回: canvas.Gradient 采样器
 func (g rasterGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
+	if g.gradient.Mesh != nil {
+		g.space = space
+		return g
+	}
 	copy := *g.gradient
 	copy.Stops = append([]ColorStop(nil), copy.Stops...)
 	for i := range copy.Stops {
 		copy.Stops[i].Color = space.ToLinear(copy.Stops[i].Color)
 	}
-	return rasterGradientCanvas{&copy}
+	return rasterGradientCanvas{gradient: &copy}
 }

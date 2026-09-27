@@ -15,12 +15,50 @@
 package ofdgo
 
 import (
+	"fmt"
 	"image/color"
 	"math"
 	"strconv"
 
 	"github.com/tdewolff/canvas"
 )
+
+// drawSampledShading 按输出精度采样后端不能原生表达的局部渐变，不改写OFD对象
+// 入参: ctx 绘制上下文, path 已裁剪轮廓, view 渐变变换, gradient 渐变采样器
+func (r *Renderer) drawSampledShading(ctx *canvas.Context, path *canvas.Path, view canvas.Matrix, gradient rasterGradientCanvas) {
+	if path.Empty() {
+		return
+	}
+	bounds := path.FastBounds().And(shdCanvasBounds(ctx))
+	if bounds.W() <= 0 || bounds.H() <= 0 {
+		return
+	}
+	scale := r.DPI / 25.4
+	w, h := math.Ceil(bounds.W()*scale), math.Ceil(bounds.H()*scale)
+	page := &RasterPage{Width: w / scale, Height: h / scale, DPI: r.DPI}
+	if _, _, err := page.PixelSize(); err != nil {
+		r.renderError = err
+		return
+	}
+	compiler := &canvasPageCompiler{page: page, geometry: r.backends.Geometry}
+	style := ctx.Style
+	style.Fill = canvas.Paint{Gradient: gradient}
+	compiler.RenderPath(path.Copy().Transform(view.Inv()), style, canvas.Identity.Translate(-bounds.X0, -bounds.Y0).Mul(view))
+	if compiler.err != nil {
+		r.renderError = compiler.err
+		return
+	}
+	if r.backends.Raster == nil {
+		r.renderError = fmt.Errorf("shading raster: %w", ErrBackendUnavailable)
+		return
+	}
+	img, err := r.backends.Raster.Render(page)
+	if err != nil {
+		r.renderError = err
+		return
+	}
+	ctx.DrawImage(bounds.X0, bounds.Y0, img, canvas.DPMM(scale))
+}
 
 // shdPaint 渐变画刷
 type shdPaint struct {
@@ -84,6 +122,13 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 		return nil, &canvas.Path{}, canvas.Identity
 	}
 	switch g := s.gradient.(type) {
+	case rasterGradientCanvas:
+		if g.gradient.Mesh != nil && g.gradient.Mesh.Background.A == 0 {
+			outline := g.gradient.Mesh.outline()
+			clip, _ := canvasObjectPath(outline)
+			return g, clip.Settle(canvas.NonZero).Transform(s.view), s.view
+		}
+		return g, nil, s.view
 	case *canvas.LinearGradient:
 		bounds := shdCanvasBounds(ctx).Transform(s.view.Inv())
 		clip := axialShdClip(g, s.extend, bounds)
@@ -108,8 +153,13 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 	case *canvas.RadialGradient:
 		d, dr := g.C1.Sub(g.C0), g.R1-g.R0
 		length := d.Length()
-		if length >= math.Abs(dr) {
-			return g, nil, s.view
+		if length >= math.Abs(dr) || s.mapType == "Repeat" {
+			stops := make([]ColorStop, len(g.Grad))
+			for i, stop := range g.Grad {
+				stops[i] = ColorStop{Offset: stop.Offset, Color: stop.Color}
+			}
+			gradient := &RasterGradient{Kind: RasterRadial, Start: rasterPoint(g.C0), End: rasterPoint(g.C1), R0: g.R0, R1: g.R1, Stops: stops, Spread: &RasterSpread{Extend: s.extend, MapType: s.mapType, Period: s.period}}
+			return rasterGradientCanvas{gradient: gradient}, nil, s.view
 		}
 		bounds := shdCanvasBounds(ctx).Transform(s.view.Inv())
 		clip := radialShdClip(g, s.extend, bounds)
@@ -161,7 +211,15 @@ func transformShdPaint(paint any, parentCTM *Matrix, bx, by, pageH float64, boun
 
 // drawShdPath 绘制渐变路径并保持图形轮廓不变
 // 入参: ctx 画布上下文, path 填充路径, view 渐变变换
-func drawShdPath(ctx *canvas.Context, path *canvas.Path, view canvas.Matrix) {
+func (r *Renderer) drawShdPath(ctx *canvas.Context, path *canvas.Path, view canvas.Matrix) {
+	if gradient, ok := ctx.Style.Fill.Gradient.(rasterGradientCanvas); ok {
+		if _, compiling := ctx.Renderer.(*canvasPageCompiler); !compiling {
+			if _, measuring := ctx.Renderer.(*boundsRenderer); !measuring {
+				r.drawSampledShading(ctx, path, view, gradient)
+				return
+			}
+		}
+	}
 	if gradient, ok := ctx.Style.Fill.Gradient.(*repeatAxialGradient); ok {
 		drawRepeatAxialPath(ctx, path, gradient, view)
 		return

@@ -293,7 +293,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				} else if shouldFill && fillPaint != nil {
 					ctx.SetFill(fillPaint)
 					ctx.SetStrokeColor(canvas.Transparent)
-					drawShdPath(ctx, applyClipPath(path.Copy(), fillClip), fillView)
+					r.drawShdPath(ctx, applyClipPath(path.Copy(), fillClip), fillView)
 				}
 				if len(strokeStyle.dashPattern) > 0 {
 					path = path.Dash(strokeStyle.dashOffset, strokeStyle.dashPattern...)
@@ -305,7 +305,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				} else {
 					ctx.SetFill(strokeStyle.strokePaint)
 					ctx.SetStrokeColor(canvas.Transparent)
-					drawShdPath(ctx, path, strokeView)
+					r.drawShdPath(ctx, path, strokeView)
 				}
 				if hasUnderline {
 					underline := &canvas.Path{}
@@ -320,7 +320,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					} else if strokeStyle.strokePattern != nil {
 						r.renderPattern(ctx, strokeStyle.strokePattern, pageH, applyClipPath(underline.Transform(transform), strokeClip), objectCTM)
 					} else {
-						drawShdPath(ctx, applyClipPath(underline.Transform(transform), strokeClip), strokeView)
+						r.drawShdPath(ctx, applyClipPath(underline.Transform(transform), strokeClip), strokeView)
 					}
 				}
 				continue
@@ -342,7 +342,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					if fillPattern != nil {
 						r.renderPattern(ctx, fillPattern, pageH, glyphPath, objectCTM)
 					} else {
-						drawShdPath(ctx, glyphPath, fillView)
+						r.drawShdPath(ctx, glyphPath, fillView)
 					}
 					if hasUnderline {
 						uw := sizeMM * 0.05

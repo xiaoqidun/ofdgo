@@ -34,6 +34,9 @@ func reflectShdPosition(position float64) float64 {
 func (c *semanticCompiler) shadingClip(path GeometryPath, paint Paint, matrix Matrix) (GeometryPath, error) {
 	gradient, view := semanticGradient(paint, matrix)
 	spread := gradient.Spread
+	if gradient.Kind == RasterRadial && math.Hypot(gradient.End.X-gradient.Start.X, gradient.End.Y-gradient.Start.Y) >= math.Abs(gradient.R1-gradient.R0) {
+		return path, nil
+	}
 	if spread == nil || spread.Extend == 3 {
 		return path, nil
 	}
