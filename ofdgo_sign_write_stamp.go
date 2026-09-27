@@ -21,6 +21,29 @@ import (
 	"strings"
 )
 
+// SignaturePageStamps 生成所选页面相同毫米坐标的印章位置并检查页内范围
+// 入参: pages 从1开始且不重复的页码, box 完整印章区域
+// 返回: []SignatureStamp 可传入签署选项的位置, error 错误信息
+func (r *Reader) SignaturePageStamps(pages []int, box Box) ([]SignatureStamp, error) {
+	if r == nil || len(pages) == 0 || !signatureWriteBoxValid(box) {
+		return nil, fmt.Errorf("invalid page stamp parameters")
+	}
+	doc, err := r.Doc()
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int]bool)
+	stamps := make([]SignatureStamp, 0, len(pages))
+	for _, page := range pages {
+		if page < 1 || page > len(doc.Pages.Page) || seen[page] {
+			return nil, fmt.Errorf("invalid stamp page: %d", page)
+		}
+		seen[page] = true
+		stamps = append(stamps, SignatureStamp{PageRef: doc.Pages.Page[page-1].ID, Boundary: signatureWriteBox(box)})
+	}
+	return signatureWriteStamps(r, stamps, true)
+}
+
 // SignatureSeamStamps 生成页面右侧的等宽骑缝印章位置
 // 页码从1开始，按传入顺序分割同一印章；box.X为右侧内缩，Y为纵坐标，W/H为完整印章尺寸
 // 入参: pages 至少两页且不重复, box 印章参数，单位毫米

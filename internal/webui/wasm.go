@@ -286,6 +286,8 @@ func RunWASM() {
 	registerAsyncCallback("ofdgoSaveDocument", saveDocument)
 	registerAsyncCallback("ofdgoSaveEncrypted", saveEncrypted)
 	registerAsyncCallback("ofdgoSaveSigned", saveSigned)
+	registerCallback("ofdgoPreviewSignatureSeal", previewSignatureSeal)
+	registerCallback("ofdgoSignaturePlacement", signaturePlacement)
 	select {}
 }
 
@@ -4148,6 +4150,105 @@ func saveEncrypted(args []js.Value) (any, error) {
 	return saveEditor(editor, args[1:])
 }
 
+// previewSignatureSeal 渲染独立印章预览并读取所选页面区域，不接触私钥或修改文档
+// 入参: args 印章数据和页码范围
+// 返回: any 印章图像、声明尺寸和页面区域, error 错误信息
+func previewSignatureSeal(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) < 2 {
+		return nil, fmt.Errorf("missing seal preview arguments")
+	}
+	data, err := bytesFromJS(args[0])
+	if err != nil {
+		return nil, err
+	}
+	seal, err := ofdgo.ParseSignatureSeal(data)
+	if err != nil {
+		return nil, err
+	}
+	indices, err := ofdgo.ParsePageRange(args[1].String(), len(currentSession.doc.Pages.Page))
+	if err != nil {
+		return nil, err
+	}
+	pages := make([]map[string]any, 0, len(indices))
+	for _, index := range indices {
+		area, err := currentSession.Reader.PageArea(currentSession.doc.Pages.Page[index])
+		if err != nil {
+			return nil, err
+		}
+		box, err := ofdgo.ParseBox(area.PhysicalBox)
+		if err != nil {
+			return nil, err
+		}
+		pages = append(pages, map[string]any{"index": index, "x": box.X, "y": box.Y, "width": box.W, "height": box.H})
+	}
+	editor := ofdgo.NewEditor()
+	if _, err := editor.AddPage(seal.Width, seal.Height); err != nil {
+		return nil, err
+	}
+	reader, err := editor.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	doc, err := reader.Doc()
+	if err != nil {
+		return nil, err
+	}
+	reader.Stamps = map[string][]ofdgo.Stamp{doc.Pages.Page[0].ID: {{Box: ofdgo.Box{W: seal.Width, H: seal.Height}, Type: seal.Type, Data: seal.Data}}}
+	renderer := ofdgo.NewRenderer(reader, ofdgo.WithRenderBackends(currentSession.Renderer.Backends()))
+	renderer.TransparentBackground = true
+	if currentSession.fontFS != nil {
+		renderer.SetFontFS(currentSession.fontFS)
+	}
+	page, err := reader.PageContentByIndex(0)
+	if err != nil {
+		return nil, err
+	}
+	var svg bytes.Buffer
+	if err := renderer.RenderToSVG(page, &svg); err != nil {
+		return nil, err
+	}
+	return map[string]any{"svg": svg.String(), "width": seal.Width, "height": seal.Height, "pages": pages}, nil
+}
+
+// signatureStampsFromJS 复用库层坐标校验生成页面或骑缝印章位置
+// 入参: input 页面和毫米坐标参数
+// 返回: []ofdgo.SignatureStamp 印章位置, error 校验错误
+func signatureStampsFromJS(input js.Value) ([]ofdgo.SignatureStamp, error) {
+	count, err := currentSession.Reader.PageCount()
+	if err != nil {
+		return nil, err
+	}
+	indices, err := ofdgo.ParsePageRange(input.Get("pages").String(), count)
+	if err != nil {
+		return nil, err
+	}
+	pages := make([]int, len(indices))
+	for i, index := range indices {
+		pages[i] = index + 1
+	}
+	box := ofdgo.Box{X: input.Get("x").Float(), Y: input.Get("y").Float(), W: input.Get("width").Float(), H: input.Get("height").Float()}
+	switch input.Get("placement").String() {
+	case "normal":
+		return currentSession.Reader.SignaturePageStamps(pages, box)
+	case "seam":
+		return currentSession.Reader.SignatureSeamStamps(pages, box)
+	default:
+		return nil, fmt.Errorf("invalid stamp placement")
+	}
+}
+
+// signaturePlacement 校验预览确认的印章范围，不生成签名
+// 入参: args 页面和毫米坐标参数
+// 返回: any 校验结果, error 错误信息
+func signaturePlacement(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) == 0 {
+		return nil, fmt.Errorf("missing stamp placement arguments")
+	}
+	_, err := signatureStampsFromJS(args[0])
+	return successResult(nil), err
+}
+
 // saveSigned 调用库层最终包签署并在回验成功后交付浏览器
 // 入参: args 本机证书私钥、信任根、印章位置、写出回调及进度回调
 // 返回: any 保存结果, error 错误信息
@@ -4200,29 +4301,9 @@ func saveSigned(args []js.Value) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		count, err := currentSession.Reader.PageCount()
+		options.Stamps, err = signatureStampsFromJS(input)
 		if err != nil {
 			return nil, err
-		}
-		indices, err := ofdgo.ParsePageRange(input.Get("pages").String(), count)
-		if err != nil {
-			return nil, err
-		}
-		box := ofdgo.Box{X: input.Get("x").Float(), Y: input.Get("y").Float(), W: input.Get("width").Float(), H: input.Get("height").Float()}
-		if input.Get("placement").String() == "seam" {
-			pages := make([]int, len(indices))
-			for i, index := range indices {
-				pages[i] = index + 1
-			}
-			options.Stamps, err = currentSession.Reader.SignatureSeamStamps(pages, box)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			for _, index := range indices {
-				options.Stamps = append(options.Stamps, ofdgo.SignatureStamp{PageRef: currentSession.doc.Pages.Page[index].ID,
-					Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H)})
-			}
 		}
 	}
 	progress := editorOperationProgress(args[2])

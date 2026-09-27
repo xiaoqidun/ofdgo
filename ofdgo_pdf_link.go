@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -30,8 +31,59 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 	if err != nil {
 		return err
 	}
-	for _, annotation := range annotations {
+	parents := make(map[pdfgo.Reference]int)
+	for i, annotation := range annotations {
+		if annotation.Reference != (pdfgo.Reference{}) && annotation.Subtype != "Popup" {
+			parents[annotation.Reference] = i
+		}
+	}
+	attached := make(map[int]bool)
+	for i, annotation := range annotations {
+		if annotation.Subtype != "Popup" {
+			continue
+		}
+		popup, err := p.reader.ReadPopupAnnotation(annotation.Dictionary)
+		if err != nil {
+			return err
+		}
+		if parent, ok := parents[popup.Parent]; ok {
+			dict := maps.Clone(annotations[parent].Dictionary)
+			if previous := dict["Popup"]; previous != nil {
+				if reference, ok := previous.(pdfgo.Reference); !ok || reference != annotation.Reference {
+					return fmt.Errorf("inconsistent PDF popup parent")
+				}
+			}
+			dict["Popup"] = annotation.Dictionary
+			annotations[parent].Dictionary = dict
+			attached[i] = true
+		} else {
+			annotations[i].Dictionary = popup.Dictionary
+		}
+	}
+	for i, annotation := range annotations {
+		if attached[i] {
+			continue
+		}
 		dict := annotation.Dictionary
+		popupObject := dict["Popup"]
+		if annotation.Subtype == "Popup" {
+			popupObject = dict
+		}
+		if popupObject != nil {
+			popup, err := p.reader.ReadPopupAnnotation(popupObject)
+			if err != nil {
+				return err
+			}
+			if annotation.Subtype != "Popup" && popup.Parent != (pdfgo.Reference{}) && popup.Parent != annotation.Reference {
+				return fmt.Errorf("inconsistent PDF popup parent")
+			}
+			if popup.Open {
+				if strict {
+					return &pdfgo.UnsupportedError{Feature: "initially open annotation popup"}
+				}
+				p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF popup open state retained as annotation parameter"})
+			}
+		}
 		if annotation.Subtype == "Sound" {
 			sound, err := p.reader.ReadSound(dict["Sound"])
 			if err != nil {

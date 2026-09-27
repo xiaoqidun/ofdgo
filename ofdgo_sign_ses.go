@@ -36,6 +36,46 @@ const (
 	signASN1Sequence   = 16
 )
 
+// ParsedSignatureSeal 保存电子印章声明信息、图像和毫米尺寸，不代表验签或信任结果
+type ParsedSignatureSeal struct {
+	Info   SignatureSealInfo
+	Type   string
+	Data   []byte
+	Width  float64
+	Height float64
+}
+
+// ParseSignatureSeal 解析独立SES印章供展示使用，不验证授权、有效期或制章者信任
+// 入参: data DER编码的电子印章
+// 返回: *ParsedSignatureSeal 印章信息及独立图像副本, error 解析错误
+func ParseSignatureSeal(data []byte) (*ParsedSignatureSeal, error) {
+	var raw asn1.RawValue
+	rest, err := asn1.Unmarshal(data, &raw)
+	if err != nil || len(rest) != 0 || raw.Tag != asn1.TagSequence || raw.Class != asn1.ClassUniversal {
+		return nil, fmt.Errorf("invalid SES seal DER")
+	}
+	seal, err := parseSESSeal(raw)
+	if err != nil {
+		return nil, err
+	}
+	items, _ := asn1Children(raw.Bytes)
+	info, _ := asn1Children(items[0].Bytes)
+	picture, _ := asn1Children(info[3].Bytes)
+	width, err := asn1Integer(picture[2])
+	if err != nil || width <= 0 {
+		return nil, fmt.Errorf("invalid seal picture width")
+	}
+	height, err := asn1Integer(picture[3])
+	if err != nil || height <= 0 {
+		return nil, fmt.Errorf("invalid seal picture height")
+	}
+	format, image := probeSealMedia(seal.PicData)
+	if len(image) == 0 || format != seal.PicType {
+		return nil, fmt.Errorf("invalid seal picture")
+	}
+	return &ParsedSignatureSeal{Info: seal.Info, Type: format, Data: append([]byte(nil), image...), Width: float64(width), Height: float64(height)}, nil
+}
+
 // sesSignature SES签章值
 type sesSignature struct {
 	Timestamp []byte

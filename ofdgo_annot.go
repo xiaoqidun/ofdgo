@@ -39,16 +39,28 @@ type PageAnnot struct {
 
 // Annotation 页面注释
 type Annotation struct {
-	ID          string `xml:"ID,attr"`
-	Type        string `xml:"Type,attr"`
-	Subtype     string `xml:"Subtype,attr"`
-	Creator     string `xml:"Creator,attr"`
-	LastModDate string `xml:"LastModDate,attr"`
-	Visible     *bool  `xml:"Visible,attr"`
-	NoZoom      bool   `xml:"NoZoom,attr"`
-	NoRotate    bool   `xml:"NoRotate,attr"`
-	Remark      string `xml:"Remark"`
+	ID          string                `xml:"ID,attr"`
+	Type        string                `xml:"Type,attr"`
+	Subtype     string                `xml:"Subtype,attr"`
+	Creator     string                `xml:"Creator,attr"`
+	LastModDate string                `xml:"LastModDate,attr"`
+	Visible     *bool                 `xml:"Visible,attr"`
+	NoZoom      bool                  `xml:"NoZoom,attr"`
+	NoRotate    bool                  `xml:"NoRotate,attr"`
+	Remark      string                `xml:"Remark"`
+	Parameters  *AnnotationParameters `xml:"Parameters,omitempty"`
 	Appearance  Appearance
+}
+
+// AnnotationParameters 保存注释参数集合
+type AnnotationParameters struct {
+	Parameter []AnnotationParameter `xml:"Parameter"`
+}
+
+// AnnotationParameter 保存标准注释参数的名称和值
+type AnnotationParameter struct {
+	Name  string `xml:"Name,attr"`
+	Value string `xml:",chardata"`
 }
 
 // AnnotationInfo 注释信息，Page从1开始，位置和尺寸使用页面毫米坐标

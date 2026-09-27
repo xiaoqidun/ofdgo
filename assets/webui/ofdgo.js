@@ -1129,8 +1129,15 @@ el.signCancel.addEventListener("click", () => state.signing ? cancelSigning() : 
 el.signPanel.addEventListener("cancel", event => {
 	if (state.signing) { event.preventDefault(); cancelSigning(); }
 });
-el.signPanel.addEventListener("close", () => { if (!el.signPanel.open) el.signForm.reset(); });
+el.signPanel.addEventListener("close", () => { if (!el.signPanel.open && !sealPreview) el.signForm.reset(); });
 el.signForm.addEventListener("submit", signDocument);
+const sealPosition = Object.fromEntries(["Layer", "Stamp", "Image"].map(name => [name, document.querySelector(`#signPosition${name}`)]));
+let sealPreview = null;
+document.querySelector("#signPick").addEventListener("click", openSealPosition);
+el.viewerPanel.addEventListener("pointerdown", beginSealDrag, true);
+el.viewerPanel.addEventListener("pointermove", moveSealDrag, true);
+el.viewerPanel.addEventListener("pointerup", confirmSealPosition, true);
+el.viewerPanel.addEventListener("pointercancel", () => { if (sealPreview) finishSealPosition(); }, true);
 el.verifyButton.addEventListener("click", () => {
 	if (!state.doc || document.body.hasAttribute("aria-busy")) return;
 	el.verifyForm.reset();
@@ -1343,6 +1350,10 @@ updateSidebarState();
 boot();
 
 function handleKeyDown(event) {
+	if (sealPreview) {
+		if (event.key === "Escape") { event.preventDefault(); finishSealPosition(); }
+		return;
+	}
 	if (event.defaultPrevented || event.isComposing || event.altKey) {
 		return;
 	}
@@ -1457,7 +1468,7 @@ function handleKeyDown(event) {
 }
 
 function formDialogOpen() {
-	return batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open
+	return Boolean(sealPreview) || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open
 		|| el.batchPagesPanel.open || el.objectStylePanel.open || el.sourceTextPanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
@@ -3831,6 +3842,7 @@ function updateFontPermissionHint() {
 }
 
 function clearSecurityForms() {
+	if (sealPreview) finishSealPosition(false);
 	finishCredentials(null);
 	clearEncryptionForm();
 	el.signKey.value = "";
@@ -4248,11 +4260,134 @@ function cancelSigning() {
 	cancelExport();
 }
 
+function finishSealPosition(returnToForm = true) {
+	const preview = sealPreview;
+	if (!preview) return;
+	sealPreview = null;
+	if (preview.pointer != null && el.viewerPanel.hasPointerCapture(preview.pointer)) el.viewerPanel.releasePointerCapture(preview.pointer);
+	URL.revokeObjectURL(preview.url);
+	sealPosition.Layer.remove();
+	sealPosition.Image.removeAttribute("src");
+	el.viewerPanel.classList.remove("seal-picking");
+	canvasEditor.enabled = preview.enabled;
+	if (preview.sidebar && COMPACT_LAYOUT.matches) {
+		Object.assign(state, preview.sidebar);
+		updateSidebarState();
+	}
+	setBusy(document.body.hasAttribute("aria-busy"));
+	if (returnToForm && preview.sequence === state.openSeq && !el.signPanel.open) el.signPanel.showModal();
+	if (preview.sequence === state.openSeq) setStatus(preview.status);
+}
+
+async function openSealPosition() {
+	const file = el.signSeal.files?.[0];
+	if (!file || !state.doc || document.body.hasAttribute("aria-busy")) return;
+	const sequence = state.openSeq;
+	setBusy(true);
+	try {
+		const range = el.signPages.value.trim(), mode = el.signPlacement.value;
+		const selected = await callWASM("ofdgoParsePageRange", range);
+		if (mode === "seam" && selected.length < 2) throw new Error("骑缝签章至少选择两页");
+		const result = await callWASM("ofdgoPreviewSignatureSeal", new Uint8Array(await file.arrayBuffer()), `1-${state.doc.pageCount}`);
+		if (sequence !== state.openSeq || !el.signPanel.open || file !== el.signSeal.files?.[0]) return;
+		sealPreview = {pages:result.pages, selected, range, mode, ratio:document.querySelector("#signKeepRatio").checked ? result.width / result.height : 0, sequence, enabled:canvasEditor.enabled, status:el.statusText.textContent, url:URL.createObjectURL(new Blob([result.svg], {type:"image/svg+xml"}))};
+		sealPosition.Image.src = sealPreview.url;
+		await sealPosition.Image.decode();
+		if (sequence !== state.openSeq || !el.signPanel.open) { finishSealPosition(false); return; }
+		canvasEditor.enabled = false;
+		if (COMPACT_LAYOUT.matches) {
+			sealPreview.sidebar = {showPages:state.showPages, showMeta:state.showMeta};
+			state.showPages = state.showMeta = false;
+			updateSidebarState();
+		}
+		el.viewerPanel.classList.add("seal-picking");
+		el.signPanel.close();
+		el.signStatus.textContent = "";
+		setStatus("拖动选取签章区域，Esc 取消");
+		el.viewerPanel.focus({preventScroll:true});
+	} catch (error) { finishSealPosition(); el.signStatus.textContent = error.message; }
+	finally { if (sequence === state.openSeq) setBusy(false); }
+}
+
+function sealPointer(event) {
+	const preview = sealPreview;
+	const point = pagePoint(event.clientX, event.clientY, preview.surface.getBoundingClientRect(), preview.page, state.rotation);
+	return {x:preview.page.x + point.x, y:preview.page.y + point.y};
+}
+
+function beginSealDrag(event) {
+	const preview = sealPreview;
+	if (!preview || preview.confirming || event.button !== 0) return;
+	const surface = event.target.closest(".page-surface");
+	if (!surface) return;
+	event.preventDefault();
+	event.stopImmediatePropagation();
+	const index = Number(surface.closest(".page-shell").dataset.pageIndex);
+	if ((preview.mode === "seam" || preview.selected.length > 1) && !preview.selected.includes(index)) {
+		setStatus("请在所选页码范围内定位");
+		return;
+	}
+	preview.page = preview.pages[index];
+	preview.surface = surface;
+	preview.start = sealPointer(event);
+	preview.pointer = event.pointerId;
+	preview.box = null;
+	sealPosition.Stamp.hidden = true;
+	surface.append(sealPosition.Layer);
+	el.viewerPanel.setPointerCapture(event.pointerId);
+}
+
+function moveSealDrag(event) {
+	const preview = sealPreview;
+	if (!preview?.start || preview.pointer !== event.pointerId) return;
+	event.preventDefault();
+	event.stopImmediatePropagation();
+	const point = sealPointer(event), start = preview.start, page = preview.page;
+	const dx = point.x - start.x, dy = point.y - start.y;
+	let width = Math.abs(dx), height = Math.abs(dy);
+	const count = preview.mode === "seam" ? preview.selected.length : 1;
+	if (preview.ratio) {
+		width = Math.min(width, height * preview.ratio / count);
+		height = width * count / preview.ratio;
+	}
+	const x = dx < 0 ? start.x - width : start.x, y = dy < 0 ? start.y - height : start.y;
+	preview.box = {x:preview.mode === "seam" ? page.x + page.width - x - width : x, y, width:width * count, height};
+	sealPosition.Stamp.hidden = false;
+	Object.assign(sealPosition.Stamp.style, {left:`${(x-page.x)/page.width*100}%`, top:`${(y-page.y)/page.height*100}%`, width:`${width/page.width*100}%`, height:`${height/page.height*100}%`});
+	Object.assign(sealPosition.Image.style, {width:`${count*100}%`, left:`${preview.mode === "seam" ? -preview.selected.indexOf(page.index)*100 : 0}%`});
+}
+
+async function confirmSealPosition(event) {
+	const preview = sealPreview;
+	if (!preview?.start || preview.pointer !== event.pointerId || preview.confirming) return;
+	moveSealDrag(event);
+	preview.start = null;
+	el.viewerPanel.releasePointerCapture(event.pointerId);
+	const box = preview.box;
+	if (!box || box.width < 0.01 || box.height < 0.01) { sealPosition.Layer.remove(); return; }
+	preview.confirming = true;
+	const range = preview.mode === "normal" && preview.selected.length === 1 ? String(preview.page.index + 1) : preview.range;
+	try {
+		await callWASM("ofdgoSignaturePlacement", {...box, pages:range, placement:preview.mode});
+		if (sealPreview !== preview || preview.sequence !== state.openSeq) return;
+		el.signPages.value = range;
+		for (const [name, key] of [["X", "x"], ["Y", "y"], ["Width", "width"], ["Height", "height"]]) el[`sign${name}`].value = String(box[key]);
+		finishSealPosition();
+	} catch (error) {
+		if (sealPreview === preview) { finishSealPosition(); el.signStatus.textContent = error.message; }
+	}
+}
+
 function updateSignPlacement() {
 	const stamp = Boolean(el.signSeal.files?.length);
 	el.signPlacementFields.hidden = !stamp;
-	el.signPages.required = stamp;
-	el.signX.disabled = !stamp || el.signPlacement.value === "seam";
+	el.signPlacement.disabled = !stamp;
+	for (const input of [el.signPages, el.signX, el.signY, el.signWidth, el.signHeight]) {
+		input.disabled = !stamp;
+		input.required = stamp;
+	}
+	document.querySelector('label[for="signX"]').textContent = el.signPlacement.value === "seam" ? "右侧内缩" : "横坐标";
+	el.signX.setAttribute("aria-label", el.signPlacement.value === "seam" ? "右侧内缩（毫米）" : "横坐标（毫米）");
 }
 
 async function signDocument(event) {
@@ -5637,6 +5772,7 @@ async function pasteEditorContent(event) {
 }
 
 function copySelection(event) {
+	if (sealPreview) return;
 	if (event.target.closest?.("input, textarea, [contenteditable]")) {
 		return;
 	}
@@ -7580,7 +7716,7 @@ function updateEditorTools() {
 	const moveDisabled = selectionDisabled || selectedPages.some(index => !pageCan("move", index));
 	el.movePagePrevButton.disabled = moveDisabled || selectedPages[0] === 0;
 	el.movePageNextButton.disabled = moveDisabled || selectedPages.at(-1) === state.doc?.pageCount - 1;
-	const enabled = state.editing && state.selectObjects && !state.panMode;
+	const enabled = state.editing && state.selectObjects && !state.panMode && !sealPreview;
 	canvasEditor.setEnabled(enabled);
 	updateObjectControls(canvasEditor.selected);
 	el.undoButton.disabled = !state.editorInfo?.canUndo || !state.ready || state.exporting;
@@ -7728,7 +7864,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("aria-busy", busy);
 	renderSecurity();
 	updateDisplayControls();
-	el.editButton.disabled = busy || !state.doc || !state.ready || state.exporting;
+	el.editButton.disabled = busy || Boolean(sealPreview) || !state.doc || !state.ready || state.exporting;
 	el.createForm.inert = busy;
 	el.insertForm.inert = busy;
 	el.pageForm.inert = busy;
@@ -7746,7 +7882,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	el.outlineList.inert = busy;
 	el.navigationTabs.inert = busy;
 	el.pageList.inert = busy;
-	el.editorTools.inert = busy;
+	el.editorTools.inert = busy || Boolean(sealPreview);
 	el.fontList.inert = busy;
 	if (!busy) {
 		el.progressPanel.hidden = true;

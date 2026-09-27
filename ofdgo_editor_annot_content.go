@@ -96,6 +96,28 @@ func (e *Editor) AddAnnotation(index int, annotation Annotation) (string, error)
 		if annotation.Remark != "" {
 			content = editorXMLText("Remark", annotation.Remark)
 		}
+		if annotation.Parameters != nil && len(annotation.Parameters.Parameter) != 0 {
+			var parameters []byte
+			for _, parameter := range annotation.Parameters.Parameter {
+				if parameter.Name == "" {
+					return fmt.Errorf("empty annotation parameter name")
+				}
+				var value bytes.Buffer
+				if err := xml.EscapeText(&value, []byte(parameter.Value)); err != nil {
+					return err
+				}
+				data, err := editorXMLContainer("Parameter", ofdAttrs{{Name: xml.Name{Local: "Name"}, Value: parameter.Name}}, value.Bytes())
+				if err != nil {
+					return err
+				}
+				parameters = append(parameters, bytes.TrimPrefix(data, []byte(xml.Header))...)
+			}
+			data, err := editorXMLContainer("Parameters", nil, parameters)
+			if err != nil {
+				return err
+			}
+			content = append(content, bytes.TrimPrefix(data, []byte(xml.Header))...)
+		}
 		content = append(content, bytes.TrimPrefix(appearance, []byte(xml.Header))...)
 		data, err := editorXMLContainer("Annot", attrs, content)
 		if err != nil {

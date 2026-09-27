@@ -112,6 +112,20 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF darken stamp appearance flattened over page content"})
 	}
 	converted := Annotation{Type: pdfAnnotationType(annotation.Subtype), Subtype: string(annotation.Subtype), Appearance: Appearance{Boundary: pdfBoundary(box), Objects: stamp.objects}}
+	popupObject := annotation.Dictionary["Popup"]
+	if annotation.Subtype == "Popup" {
+		popupObject = annotation.Dictionary
+	}
+	if popupObject != nil {
+		popup, err := p.reader.ReadPopupAnnotation(popupObject)
+		if err != nil {
+			return err
+		}
+		converted.Parameters = &AnnotationParameters{Parameter: []AnnotationParameter{
+			{Name: "PDF.Popup.Open", Value: strconv.FormatBool(popup.Open)},
+			{Name: "PDF.Popup.Rect", Value: fmt.Sprintf("%g %g %g %g", popup.Rect.XMin, popup.Rect.YMin, popup.Rect.XMax, popup.Rect.YMax)},
+		}}
+	}
 	if len(actions) != 0 {
 		region, err := NewShape(ShapeRectangle, Box{W: box.W, H: box.H})
 		if err != nil {
@@ -220,7 +234,7 @@ func pdfAnnotationType(subtype pdfgo.Name) string {
 		return "Watermark"
 	case "Highlight", "Underline", "Squiggly", "StrikeOut":
 		return "Highlight"
-	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link":
+	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Popup":
 		return "Path"
 	}
 	return ""

@@ -1041,6 +1041,43 @@ button:not(:disabled):hover {
 	height: 100%;
 }
 
+.seal-position-options,
+.seal-position-options label {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+
+.seal-picking .page-surface {
+	cursor: crosshair;
+	touch-action: none;
+}
+
+.seal-picking .edit-layer {
+	visibility: hidden;
+}
+
+.seal-position-layer {
+	position: absolute;
+	inset: 0;
+	z-index: 10;
+	pointer-events: none;
+	overflow: hidden;
+}
+
+.seal-position-stamp {
+	position: absolute;
+	overflow: hidden;
+	outline: 1px solid var(--accent);
+}
+
+.seal-position-stamp img {
+	position: absolute;
+	max-width: none;
+	height: 100%;
+	pointer-events: none;
+}
+
 .security-dialog {
 	width: 360px;
 }

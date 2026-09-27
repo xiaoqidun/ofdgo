@@ -438,6 +438,7 @@
 				<div class="form-row"><label for="signIntermediates">中间证书</label><input id="signIntermediates" type="file" accept=".pem,.cer,.crt,.der" multiple></div>
 				<div class="form-row"><label for="signSeal">电子印章</label><input id="signSeal" type="file" accept=".esl,.ses,.der" aria-label="SES电子印章"></div>
 				<div id="signPlacementFields" hidden>
+					<div class="form-row"><span>预览</span><div class="seal-position-options"><button id="signPick" class="button" type="button">定位</button><label><input id="signKeepRatio" type="checkbox" checked>等比</label></div></div>
 					<div class="form-row"><label for="signPlacement">位置</label><select id="signPlacement"><option value="normal">页面</option><option value="seam">骑缝</option></select></div>
 					<div class="form-row"><label for="signPages">页码</label><input id="signPages" type="text" autocomplete="off" spellcheck="false"></div>
 					<div class="form-row"><label for="signX">横坐标</label><div class="form-unit"><input id="signX" type="number" min="0" step="any" value="10" aria-label="横坐标（毫米）"><span>mm</span></div></div>
@@ -450,6 +451,11 @@
 				<div class="form-actions"><div id="signStatus" class="form-status" role="status" aria-live="polite"></div><button id="signCancel" class="button" type="button">取消</button><button class="button" type="submit" title="签署另存">签署</button></div>
 			</form>
 		</dialog>
+		<div hidden>
+			<div id="signPositionLayer" class="seal-position-layer" aria-hidden="true">
+				<div id="signPositionStamp" class="seal-position-stamp" hidden><img id="signPositionImage" alt="" draggable="false"></div>
+			</div>
+		</div>
 		<dialog id="verifyPanel" class="form-dialog security-dialog" aria-labelledby="verifyTitle">
 			<form id="verifyForm">
 				<h2 id="verifyTitle" class="form-title">验证签名</h2>
