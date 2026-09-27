@@ -99,7 +99,7 @@ func (r *Renderer) walkAnnotation(annotation Annotation, visitor PageVisitor) er
 	}
 	box, _ := ParseBox(annotation.Appearance.Boundary)
 	matrix := TranslationMatrix(box.X, box.Y)
-	state := RenderState{Parent: &matrix}
+	state := RenderState{Parent: &matrix, BoundaryInCTM: true}
 	for i := range annotation.Appearance.Objects {
 		if err := r.WalkObject(&annotation.Appearance.Objects[i], state, visitor); err != nil {
 			return err

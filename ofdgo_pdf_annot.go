@@ -29,10 +29,15 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// stampAnnotation 将PDF印章外观转换为OFD注解
-// 入参: ctx取消上下文, page PDF页面, annotation PDF印章
+// appearanceAnnotation 将PDF静态外观转换为对应类型的OFD注解
+// 入参: ctx取消上下文, page PDF页面, annotation PDF注解
 // 返回: error 外观或转换错误
-func (p *pdfImporter) stampAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation) error {
+func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation) error {
+	for _, key := range []pdfgo.Name{"AA", "OC"} {
+		if annotation.Dictionary[key] != nil {
+			return &pdfgo.UnsupportedError{Feature: fmt.Sprintf("annotation field %q", key)}
+		}
+	}
 	flags := int64(0)
 	if value := annotation.Dictionary["F"]; value != nil {
 		resolved, err := p.reader.Resolve(value)
@@ -44,6 +49,9 @@ func (p *pdfImporter) stampAnnotation(ctx context.Context, page *pdfgo.Page, ann
 			return fmt.Errorf("invalid PDF annotation flags")
 		}
 		flags = int64(number)
+	}
+	if flags&256 != 0 {
+		return &pdfgo.UnsupportedError{Feature: "annotation ToggleNoView flag"}
 	}
 	box := pdfBounds([]pdfgo.Point{
 		p.matrix.Apply(pdfgo.Point{X: annotation.Rect.XMin, Y: annotation.Rect.YMin}),
@@ -69,7 +77,7 @@ func (p *pdfImporter) stampAnnotation(ctx context.Context, page *pdfgo.Page, ann
 				return &pdfgo.UnsupportedError{Feature: "darken stamp text"}
 			}
 			if err := stamp.text(mark); err != nil {
-				return fmt.Errorf("stamp text: %w", err)
+				return fmt.Errorf("annotation text: %w", err)
 			}
 			return nil
 		},
@@ -99,8 +107,20 @@ func (p *pdfImporter) stampAnnotation(ctx context.Context, page *pdfgo.Page, ann
 		}
 		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF darken stamp appearance flattened over page content"})
 	}
-	converted := Annotation{Type: "Stamp", Appearance: Appearance{Boundary: pdfBoundary(box), Objects: stamp.objects}}
-	if flags&(1|2|32) != 0 {
+	converted := Annotation{Type: pdfAnnotationType(annotation.Subtype), Subtype: string(annotation.Subtype), Appearance: Appearance{Boundary: pdfBoundary(box), Objects: stamp.objects}}
+	if value, err := p.reader.Resolve(annotation.Dictionary["Contents"]); err != nil {
+		return err
+	} else if value != nil {
+		contents, ok := value.(pdfgo.String)
+		if !ok {
+			return fmt.Errorf("invalid PDF annotation contents")
+		}
+		converted.Remark, err = pdfgo.DecodeTextString(contents)
+		if err != nil {
+			return err
+		}
+	}
+	if flags&(2|32) != 0 {
 		visible := false
 		converted.Visible = &visible
 	}
@@ -113,7 +133,7 @@ func (p *pdfImporter) stampAnnotation(ctx context.Context, page *pdfgo.Page, ann
 		}
 		creator, ok := resolved.(pdfgo.String)
 		if !ok {
-			return fmt.Errorf("invalid PDF stamp creator")
+			return fmt.Errorf("invalid PDF annotation creator")
 		}
 		converted.Creator, err = pdfgo.DecodeTextString(creator)
 		if err != nil {
@@ -127,7 +147,7 @@ func (p *pdfImporter) stampAnnotation(ctx context.Context, page *pdfgo.Page, ann
 		}
 		encoded, ok := resolved.(pdfgo.String)
 		if !ok {
-			return fmt.Errorf("invalid PDF stamp modification date")
+			return fmt.Errorf("invalid PDF annotation modification date")
 		}
 		date, err := pdfgo.DecodeTextString(encoded)
 		if err != nil {
@@ -135,44 +155,61 @@ func (p *pdfImporter) stampAnnotation(ctx context.Context, page *pdfgo.Page, ann
 		}
 		date = strings.TrimPrefix(date, "D:")
 		if len(date) < 4 {
-			return fmt.Errorf("invalid PDF stamp modification date")
+			return fmt.Errorf("invalid PDF annotation modification date")
 		}
 		year, err := strconv.Atoi(date[:4])
 		if err != nil {
-			return fmt.Errorf("invalid PDF stamp modification date: %w", err)
+			return fmt.Errorf("invalid PDF annotation modification date: %w", err)
 		}
 		month, day := 1, 1
 		if len(date) >= 6 {
 			month, err = strconv.Atoi(date[4:6])
 			if err != nil {
-				return fmt.Errorf("invalid PDF stamp modification month: %w", err)
+				return fmt.Errorf("invalid PDF annotation modification month: %w", err)
 			}
 		}
 		if len(date) >= 8 {
 			day, err = strconv.Atoi(date[6:8])
 			if err != nil {
-				return fmt.Errorf("invalid PDF stamp modification day: %w", err)
+				return fmt.Errorf("invalid PDF annotation modification day: %w", err)
 			}
 		}
 		parsed := time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
 		if parsed.Year() != year || int(parsed.Month()) != month || parsed.Day() != day {
-			return fmt.Errorf("invalid PDF stamp modification date")
+			return fmt.Errorf("invalid PDF annotation modification date")
 		}
 		converted.LastModDate = parsed.Format("2006-01-02")
 		if len(date) > 8 {
-			p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF stamp modification time cannot fit OFD annotation date"})
+			p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF annotation modification time cannot fit OFD annotation date"})
 		}
 	}
 	if _, err := p.editor.AddAnnotation(p.page, converted); err != nil {
-		return fmt.Errorf("stamp annotation: %w", err)
+		return fmt.Errorf("PDF annotation: %w", err)
 	}
 	p.report.TextObjects += stamp.report.TextObjects
 	p.report.PathObjects += stamp.report.PathObjects
 	p.report.ImageObjects += stamp.report.ImageObjects
 	if flags&64 != 0 {
-		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF stamp read-only flag not transferred"})
+		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF annotation read-only flag not transferred"})
 	}
 	return nil
+}
+
+// pdfAnnotationType 将具有静态外观的PDF注解类别对应到OFD注解类别
+// 入参: subtype PDF注解类别
+// 返回: string OFD注解类别，空字符串表示需单独处理
+func pdfAnnotationType(subtype pdfgo.Name) string {
+	switch subtype {
+	case "Stamp":
+		return "Stamp"
+	case "Watermark":
+		return "Watermark"
+	case "Highlight", "Underline", "Squiggly", "StrikeOut":
+		return "Highlight"
+	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink":
+		return "Path"
+	}
+	return ""
 }
 
 // darkenStampAppearance 按PDF的Darken公式合成印章范围

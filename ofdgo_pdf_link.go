@@ -22,7 +22,7 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// annotations 将链接、印章和表单外观按页面顺序转换为OFD对象
+// annotations 将链接、静态注解和表单外观按页面顺序转换为OFD对象
 // 入参: ctx 取消上下文, page PDF页面, strict 严格检查开关
 // 返回: error 错误信息
 func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict bool) error {
@@ -48,8 +48,8 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			}
 			continue
 		}
-		if annotation.Subtype == "Stamp" {
-			if err := p.stampAnnotation(ctx, page, annotation); err != nil {
+		if pdfAnnotationType(annotation.Subtype) != "" {
+			if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
 				return err
 			}
 			continue
@@ -196,6 +196,24 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 					dest.OmitLeft, dest.OmitTop = retained[1], retained[0]
 				}
 				dest.OmitZoom = retained[2] || values[2] == 0
+			} else if destination.Mode == "FitR" {
+				values := [4]float64{}
+				for n, v := range destination.Parameters {
+					switch v := v.(type) {
+					case pdfgo.Integer:
+						values[n] = float64(v)
+					case pdfgo.Real:
+						values[n] = float64(v)
+					default:
+						return fmt.Errorf("invalid PDF FitR destination coordinate")
+					}
+				}
+				bounds := pdfBounds([]pdfgo.Point{
+					matrix.Apply(pdfgo.Point{X: values[0], Y: values[1]}),
+					matrix.Apply(pdfgo.Point{X: values[2], Y: values[3]}),
+				})
+				dest.Left, dest.Top = bounds.X, bounds.Y
+				dest.Right, dest.Bottom = bounds.X+bounds.W, bounds.Y+bounds.H
 			} else if destination.Mode != "Fit" {
 				return &pdfgo.UnsupportedError{Feature: "destination mode " + string(destination.Mode)}
 			}

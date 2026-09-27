@@ -608,15 +608,16 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 	const unit = 25.4 / 72
 	box := source.BBox
 	width, height := box.XMax-box.XMin, box.YMax-box.YMin
-	if width <= 0 || height <= 0 || source.XStep < width || source.YStep < height {
-		return nil, &pdfgo.UnsupportedError{Feature: "overlapping or empty tiling pattern cell"}
+	xstep, ystep := math.Abs(source.XStep), math.Abs(source.YStep)
+	if width <= 0 || height <= 0 || !finite(xstep) || !finite(ystep) || xstep == 0 || ystep == 0 {
+		return nil, fmt.Errorf("invalid PDF tiling pattern dimensions")
 	}
 	localToPDF := pdfgo.Matrix{1 / unit, 0, 0, -1 / unit, box.XMin, box.YMax}
 	m := p.matrix.Mul(source.Matrix).Mul(localToPDF)
-	pattern := &Pattern{Width: width * unit, Height: height * unit, XStep: source.XStep * unit, YStep: source.YStep * unit, RelativeTo: "Page", CTM: pdfNumbers(m[:]...)}
+	pattern := &Pattern{Width: math.Min(width, xstep) * unit, Height: math.Min(height, ystep) * unit, XStep: xstep * unit, YStep: ystep * unit, RelativeTo: "Page", CTM: pdfNumbers(m[:]...)}
 	cell := *p
 	cell.matrix = pdfgo.Matrix{unit, 0, 0, -unit, -box.XMin * unit, box.YMax * unit}
-	cell.pageWidth, cell.pageHeight = pattern.Width, pattern.Height
+	cell.pageWidth, cell.pageHeight = width*unit, height*unit
 	cell.objects, cell.pendingPath = nil, nil
 	visitor := pdfgo.Visitor{Path: cell.path, Text: cell.text, Image: cell.image}
 	visitor.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
@@ -629,6 +630,42 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 		return nil, err
 	}
 	pattern.CellContent.Objects = cell.objects
+	if width > xstep || height > ystep {
+		columns, rows := math.Ceil(width/xstep), math.Ceil(height/ystep)
+		if !finite(columns*rows) || columns*rows > float64(int(^uint(0)>>1)) {
+			return nil, fmt.Errorf("PDF tiling pattern instance count overflow")
+		}
+		bounds := make([]Box, len(cell.objects))
+		for index, object := range cell.objects {
+			if object.Type == "PathObject" && object.PathObject.Stroke != nil && !*object.PathObject.Stroke {
+				var err error
+				bounds[index], err = ParseBox(object.PathObject.Boundary)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		pattern.CellContent.Objects = nil
+		for row := 1 - int(rows); row <= 0; row++ {
+			for column := 1 - int(columns); column <= 0; column++ {
+				if err := p.ctx.Err(); err != nil {
+					return nil, err
+				}
+				dx, dy := float64(column)*xstep*unit, float64(row)*ystep*unit
+				for index, object := range cell.objects {
+					b := bounds[index]
+					if b.W > 0 && b.H > 0 && (b.X+dx+b.W < 0 || b.Y+dy+b.H < 0 || b.X+dx > pattern.Width || b.Y+dy > pattern.Height) {
+						continue
+					}
+					translated, err := transformEditorObject(object, dx, dy, 1)
+					if err != nil {
+						return nil, err
+					}
+					pattern.CellContent.Objects = append(pattern.CellContent.Objects, translated)
+				}
+			}
+		}
+	}
 	return pattern, nil
 }
 
