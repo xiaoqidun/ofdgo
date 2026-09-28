@@ -22,10 +22,10 @@ import (
 
 // canvasBackendState 保存Canvas字体、字形和编码图片适配缓存
 type canvasBackendState struct {
-	images             map[*EncodedImage]image.Image
+	images             renderCache[*EncodedImage, image.Image]
 	fontMap            map[string]*canvas.FontFamily
 	svgFontCache       map[*canvas.Font]SVGFont
-	textGlyphPathCache map[textGlyphPathCacheKey]textGlyphPathCacheValue
+	textGlyphPathCache renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue]
 	fontOutlines       map[*canvas.Font]*sfntOutliner
 }
 
@@ -37,7 +37,7 @@ func (r *Renderer) canvasState() *canvasBackendState {
 		return state.(*canvasBackendState)
 	}
 	state := &canvasBackendState{
-		images: make(map[*EncodedImage]image.Image),
+		images: renderCache[*EncodedImage, image.Image]{limit: imageCacheLimit},
 	}
 	state.resetFonts()
 	r.backendStates[key] = state
@@ -48,6 +48,6 @@ func (r *Renderer) canvasState() *canvasBackendState {
 func (s *canvasBackendState) resetFonts() {
 	s.fontMap = make(map[string]*canvas.FontFamily)
 	s.svgFontCache = make(map[*canvas.Font]SVGFont)
-	s.textGlyphPathCache = make(map[textGlyphPathCacheKey]textGlyphPathCacheValue)
+	s.textGlyphPathCache = renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue]{limit: 16 << 20}
 	s.fontOutlines = make(map[*canvas.Font]*sfntOutliner)
 }

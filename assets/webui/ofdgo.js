@@ -2912,7 +2912,7 @@ function releasePageResources() {
 	const images = new Set(), fonts = new Set();
 	for (const page of state.pageCache.values()) {
 		for (const name of page.imageNames) images.add(name);
-		for (const font of page.fonts) fonts.add(font.name);
+		for (const font of page.fonts || []) fonts.add(font.name);
 	}
 	for (const [name, image] of state.svgImages) {
 		if (!images.has(name)) {
@@ -5495,6 +5495,7 @@ function trimPageCache() {
 			}
 		}
 	}
+	if (!state.pageInFlight.size) releasePageResources();
 }
 
 async function loadSVGFonts(fonts, openSeq) {

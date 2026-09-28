@@ -72,7 +72,7 @@ func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 		DrawParams:            reader.drawParamCache,
 		CompositeGraphicUnits: reader.compositeGraphicUnitCache,
 		templatePageCache:     make(map[string]*PageContent),
-		imageCache:            make(map[string]image.Image),
+		imageCache:            renderCache[string, image.Image]{limit: imageCacheLimit},
 		backends:              defaultRenderBackends(),
 		backendStates:         make(map[any]any),
 	}

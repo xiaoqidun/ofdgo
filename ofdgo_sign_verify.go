@@ -29,6 +29,7 @@ import (
 	"encoding/pem"
 	"encoding/xml"
 	"fmt"
+	"hash"
 	"io"
 	"math/big"
 	"path"
@@ -36,6 +37,7 @@ import (
 	"time"
 
 	"github.com/emmansun/gmsm/sm2"
+	"github.com/emmansun/gmsm/sm3"
 	"github.com/emmansun/gmsm/smx509"
 )
 
@@ -489,16 +491,36 @@ func (r *Reader) verifySignatureReference(sigPath, method string, ref SignatureR
 		result.Error = err.Error()
 		return result
 	}
-	data, err := r.readFile(refPath)
+	var digest hash.Hash
+	switch {
+	case strings.TrimSpace(method) == "":
+		digest = md5.New()
+	case isSM3DigestMethod(method):
+		digest = sm3.New()
+	default:
+		algorithm, ok := signatureDigestHash(method)
+		if !ok {
+			result.Error = fmt.Sprintf("unsupported digest method: %s", method)
+			return result
+		}
+		digest = algorithm.New()
+	}
+	input, err := r.openFile(refPath)
 	if err != nil {
 		result.Error = err.Error()
 		return result
 	}
-	actual, err := signatureDigest(method, data)
+	_, err = io.Copy(digest, input)
+	closeErr := input.Close()
 	if err != nil {
 		result.Error = err.Error()
 		return result
 	}
+	if closeErr != nil {
+		result.Error = closeErr.Error()
+		return result
+	}
+	actual := digest.Sum(nil)
 	result.CheckValue = checkValue
 	result.Actual = actual
 	result.Checked = true

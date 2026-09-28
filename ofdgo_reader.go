@@ -55,11 +55,13 @@ type Reader struct {
 	encryption                *encryptionState
 }
 
-// Close 关闭阅读器
+// Close 关闭阅读器持有的文件，重复调用不再关闭底层文件
 // 返回: error 错误信息
 func (r *Reader) Close() error {
 	if r.Closer != nil {
-		return r.Closer.Close()
+		closer := r.Closer
+		r.Closer = nil
+		return closer.Close()
 	}
 	return nil
 }

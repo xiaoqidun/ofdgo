@@ -48,6 +48,12 @@ select {
 	font: inherit;
 }
 
+select,
+option {
+	text-align: left;
+	text-align-last: left;
+}
+
 button {
 	border: 1px solid var(--line-strong);
 	background: #ffffff;
@@ -135,7 +141,6 @@ a:focus-visible {
 	border-radius: 0;
 	background: #fff;
 	color: #1f2428;
-	text-align: center;
 }
 
 .editor-paragraph > .editor-field,
@@ -650,7 +655,8 @@ button:not(:disabled):hover {
 	inset: 0;
 	display: flex;
 	align-items: center;
-	justify-content: center;
+	justify-content: flex-start;
+	padding-left: 4px;
 	padding-right: 12px;
 	pointer-events: none;
 }
@@ -789,7 +795,6 @@ button:not(:disabled):hover {
 	height: var(--control-height);
 	padding: 0 6px;
 	vertical-align: middle;
-	text-align: center;
 	font: inherit;
 	border: 1px solid var(--line);
 	border-radius: 0;
@@ -802,6 +807,7 @@ button:not(:disabled):hover {
 }
 
 .convert-table input {
+	text-align: center;
 	font-variant-numeric: tabular-nums;
 }
 

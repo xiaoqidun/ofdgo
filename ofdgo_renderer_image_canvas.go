@@ -138,7 +138,7 @@ func (r *Renderer) canvasEncodedImage(img image.Image) image.Image {
 		return img
 	}
 	state := r.canvasState()
-	if encoded, ok := state.images[source]; ok {
+	if encoded, ok := state.images.get(source); ok {
 		return encoded
 	}
 	var encoded *canvasimage.Image
@@ -148,7 +148,7 @@ func (r *Renderer) canvasEncodedImage(img image.Image) image.Image {
 		encoded, _ = canvasimage.NewPNGImage(bytes.NewReader(source.Bytes()))
 	}
 	encoded.Bytes = source.Bytes()
-	state.images[source] = encoded
+	state.images.put(source, encoded, 2*imageResourceCost(source, state.images.limit/2))
 	return encoded
 }
 

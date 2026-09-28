@@ -34,7 +34,7 @@ type Renderer struct {
 	DrawParams            map[string]*DrawParam
 	CompositeGraphicUnits map[string]*CompositeGraphicUnit
 	templatePageCache     map[string]*PageContent
-	imageCache            map[string]image.Image
+	imageCache            renderCache[string, image.Image]
 	fontDirs              []string
 	fontFS                []fs.FS
 	decodeImages          bool
@@ -57,7 +57,7 @@ type RendererOption func(*Renderer)
 // ClearCache 释放派生字体、图片、模板与后端缓存，不改变文档和渲染配置
 func (r *Renderer) ClearCache() {
 	r.backendStates = make(map[any]any)
-	r.imageCache = make(map[string]image.Image)
+	r.imageCache = renderCache[string, image.Image]{limit: imageCacheLimit}
 	r.templatePageCache = make(map[string]*PageContent)
 	r.resetFontCache()
 }

@@ -74,14 +74,7 @@ func textGlyphPath(face *canvas.FontFace, glyph textGlyph, outlines *sfntOutline
 		width = face.MmPerEm * float64(face.Font.GlyphAdvance(glyphID))
 	}
 	if face.FauxBold != 0 {
-		d := face.FauxBold * face.Size
-		if face.Font.IsTrueType {
-			d = -d
-		}
-		origFastStroke := canvas.FastStroke
-		canvas.FastStroke = true
-		p = p.Offset(d, canvas.Tolerance)
-		canvas.FastStroke = origFastStroke
+		p = p.Offset(face.FauxBold*face.Size, canvas.Tolerance)
 	}
 	if face.FauxItalic != 0 {
 		p = p.Transform(canvas.Identity.Shear(face.FauxItalic, 0))
@@ -105,7 +98,7 @@ func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (
 		direction:  face.Direction,
 		glyph:      glyph,
 	}
-	if cached, ok := r.canvasState().textGlyphPathCache[key]; ok {
+	if cached, ok := r.canvasState().textGlyphPathCache.get(key); ok {
 		return cached.path, cached.width
 	}
 	outlines := r.canvasState().fontOutlines[face.Font]
@@ -118,7 +111,7 @@ func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (
 		r.renderError = err
 		return &canvas.Path{}, 0
 	}
-	r.canvasState().textGlyphPathCache[key] = textGlyphPathCacheValue{path: path, width: width}
+	r.canvasState().textGlyphPathCache.put(key, textGlyphPathCacheValue{path: path, width: width}, 256+len(path.Data())*8+len(glyph.Text)+len(face.Language))
 	return path, width
 }
 

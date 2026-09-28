@@ -25,6 +25,9 @@ import (
 	"sync"
 )
 
+// imageCacheLimit 限制图片缓存的编码数据及预计解码内存
+const imageCacheLimit = 64 << 20
+
 // EncodedImage 保留PNG或JPEG原始编码，首次读取像素时解码
 // Bytes返回只读数据，Image返回共享只读像素，解码错误由Image返回
 type EncodedImage struct {
@@ -110,19 +113,35 @@ func newEncodedImage(data []byte) (*EncodedImage, error) {
 // 返回: image.Image 图片对象, error 读取错误
 func (r *Renderer) cachedImageResource(resPath string) (image.Image, error) {
 	resPath = cleanPackagePath(r.Reader.ResPath(resPath))
-	img, ok := r.imageCache[resPath]
+	img, ok := r.imageCache.get(resPath)
 	if !ok {
 		var err error
 		img, err = r.readImageResource(resPath)
 		if err != nil {
 			return nil, err
 		}
-		if r.imageCache == nil {
-			r.imageCache = make(map[string]image.Image)
-		}
-		r.imageCache[resPath] = img
+		r.imageCache.put(resPath, img, imageResourceCost(img, r.imageCache.limit))
 	}
 	return img, nil
+}
+
+// imageResourceCost 预留十六位像素展开空间，超预算图片不进入缓存
+// 入参: img 图片资源, limit 缓存预算
+// 返回: int 估算字节数或超预算标记
+func imageResourceCost(img image.Image, limit int) int {
+	cost := 256
+	w, h := img.Bounds().Dx(), img.Bounds().Dy()
+	if limit < cost || w <= 0 || h <= 0 || w > (limit-cost)/8/h {
+		return limit + 1
+	}
+	cost += w * h * 8
+	if encoded, ok := img.(*EncodedImage); ok {
+		if len(encoded.data) > limit-cost {
+			return limit + 1
+		}
+		cost += len(encoded.data)
+	}
+	return cost
 }
 
 // decodeImageResource 读取或复用图片资源，按输出需要解码像素

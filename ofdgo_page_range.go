@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"strconv"
@@ -25,7 +26,7 @@ import (
 // 入参: value 页码表达式，如1-6,7,8-10, count 文档总页数
 // 返回: []int 页面索引, error 错误信息
 func ParsePageRange(value string, count int) ([]int, error) {
-	selected := make(map[int]bool)
+	var intervals [][2]int
 	for _, part := range strings.Split(strings.ReplaceAll(value, "，", ","), ",") {
 		first, last, interval := strings.Cut(strings.TrimSpace(part), "-")
 		start, err := strconv.Atoi(strings.TrimSpace(first))
@@ -42,15 +43,27 @@ func ParsePageRange(value string, count int) ([]int, error) {
 		if start < 1 || end < start || end > count {
 			return nil, fmt.Errorf("page range %q outside 1-%d", part, count)
 		}
-		for index := start - 1; index < end; index++ {
-			selected[index] = true
+		intervals = append(intervals, [2]int{start - 1, end})
+	}
+	slices.SortFunc(intervals, func(a, b [2]int) int { return cmp.Compare(a[0], b[0]) })
+	merged := intervals[:0]
+	for _, interval := range intervals {
+		if len(merged) != 0 && interval[0] <= merged[len(merged)-1][1] {
+			merged[len(merged)-1][1] = max(merged[len(merged)-1][1], interval[1])
+		} else {
+			merged = append(merged, interval)
 		}
 	}
-	indices := make([]int, 0, len(selected))
-	for index := range selected {
-		indices = append(indices, index)
+	length := 0
+	for _, interval := range merged {
+		length += interval[1] - interval[0]
 	}
-	slices.Sort(indices)
+	indices := make([]int, 0, length)
+	for _, interval := range merged {
+		for index := interval[0]; index < interval[1]; index++ {
+			indices = append(indices, index)
+		}
+	}
 	return indices, nil
 }
 
