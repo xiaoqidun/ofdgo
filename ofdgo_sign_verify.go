@@ -883,11 +883,34 @@ func verifySignatureCertificateChain(cert *smx509.Certificate, pool, trusts [][]
 			if err != nil {
 				return err
 			}
-			group.pool.AddCert(ca)
+			addSignatureCertificate(group.pool, ca)
 		}
 	}
 	_, err := cert.Verify(smx509.VerifyOptions{Roots: roots, Intermediates: intermediates, CurrentTime: at, KeyUsages: []smx509.ExtKeyUsage{usage}})
 	return err
+}
+
+// addSignatureCertificate 添加证书并按RFC5280排除自颁发中间证书的路径长度
+// 入参: pool 证书池, cert 证书
+func addSignatureCertificate(pool *smx509.CertPool, cert *smx509.Certificate) {
+	if !cert.BasicConstraintsValid || cert.MaxPathLen < 0 {
+		pool.AddCert(cert)
+		return
+	}
+	copy := *cert
+	copy.MaxPathLen, copy.MaxPathLenZero = -1, false
+	pool.AddCertWithConstraint(&copy, func(chain []*smx509.Certificate) error {
+		length := 0
+		for i, intermediate := range chain {
+			if i > 0 && !bytes.Equal(intermediate.RawSubject, intermediate.RawIssuer) {
+				length++
+			}
+		}
+		if length > cert.MaxPathLen {
+			return smx509.CertificateInvalidError{Cert: cert, Reason: smx509.TooManyIntermediates}
+		}
+		return nil
+	})
 }
 
 // verifyCertificateSignature 验证证书签名

@@ -74,7 +74,8 @@ async function isBundleComplete(bundle) {
 	}
 	const cache = await caches.open(bundle.name);
 	const keys = await cache.keys();
-	return bundle.assets.every((url) => keys.some((key) => key.url === url));
+	const urls = new Set(keys.map(key => key.url));
+	return bundle.assets.every(url => urls.has(url));
 }
 
 async function currentBundle(meta) {

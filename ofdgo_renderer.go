@@ -21,6 +21,7 @@ import (
 
 // Renderer 渲染器实现
 // 通过NewRenderer创建，实例及共享的Reader需串行使用
+// 外部字体缺失且无可用回退时不绘制对应文字，其余内容继续；字体状态可通过FontInfos查询
 // OnPageText可选，接收页面绘制时同步提取的文字，不包含图案和签名外观
 // OnExportProgress可选，同步回报文档导出的已处理页数及总页数，返回错误则停止，页数完成不代表写入成功
 // TransparentBackground关闭页面白底，供嵌套图案和印章保持透明背景

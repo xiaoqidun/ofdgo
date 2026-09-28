@@ -204,6 +204,7 @@ const el = {
 	objectFlip: document.querySelector("#objectFlip"),
 	imageFit: document.querySelector("#imageFit"),
 	cropImageButton: document.querySelector("#cropImageButton"),
+	saveImageButton: document.querySelector("#saveImageButton"),
 	resetCropButton: document.querySelector("#resetCropButton"),
 	multiSelectButton: document.querySelector("#multiSelectButton"),
 	textAlign: document.querySelector("#textAlign"),
@@ -1523,7 +1524,7 @@ function openObjectStyle() {
 	const shared = (key, fallback) => items.every(item => (item[key] ?? fallback) === (items[0][key] ?? fallback)) ? items[0][key] ?? fallback : null;
 	el.objectLinkFields.hidden = items.length !== 1 || items[0].scoped;
 	const link = items[0].link ? JSON.parse(items[0].link) : null;
-	const targetPage = link?.Goto?.Dest ? state.doc.pages.findIndex(page => page.id === link.Goto.Dest.PageID) : -1;
+	const targetPage = link?.Goto?.Dest ? pageIndexByID(state.doc.pages, link.Goto.Dest.PageID) : -1;
 	el.objectLinkKind.value = items[0].linkCount > 1 ? "keep" : link?.URI ? "uri" : targetPage >= 0 ? "page" : link ? "keep" : "none";
 	el.objectLinkKind.disabled = items[0].linkCount > 1;
 	el.objectLinkAddress.value = link?.URI?.URI || "";
@@ -2769,7 +2770,7 @@ async function changeDocument(name, item, ...args) {
 		const clipboard = state.objectClipboard;
 		if (reindexed && clipboard?.scope?.startsWith(reindexed.scope + "/") && clipboard.page === reindexed.page) state.objectClipboard = null;
 		const location = name === "ofdgoUndo" ? view?.before : view?.after;
-		const restoredIndex = location ? doc.pages.findIndex(page => page.id === location.page) : -1;
+		const restoredIndex = location ? pageIndexByID(doc.pages, location.page) : -1;
 		if (restoredIndex >= 0) {
 			state.composite = location.scope ? { index: restoredIndex, key: location.scope, objects: [] } : null;
 		} else if (!item && !inserting && !editingAnnotation && !(name === "ofdgoPasteObjects" && args[4])) {
@@ -2810,7 +2811,7 @@ async function changeDocument(name, item, ...args) {
 		if (item || name === "ofdgoPasteObjects" || inserting || editingAnnotation) {
 			await refreshEditorPage(doc, item ? item.index : args[0], openSeq, clearSelection);
 		} else {
-			const samePage = doc.pages.findIndex((page) => page.id === previous.id);
+			const samePage = pageIndexByID(doc.pages, previous.id);
 			const pageIndex = restoredIndex >= 0 ? restoredIndex : doc.pageIndex ?? (samePage < 0 ? Math.min(state.pageIndex, doc.pageCount - 1) : samePage);
 			const page = doc.pages[pageIndex];
 			const keepScroll = doc.pageIndex === undefined && page.id === previous.id && pageIndex === state.pageIndex
@@ -4120,7 +4121,7 @@ async function openDocument(options = {}) {
 					if (preview) state.pageCache.set(page.index, { ...preview, previewOnly: true });
 				}
 			}
-			const indices = new Set([pageIndex, ...doc.pages.filter((page) => previewIDs.includes(page.id)).map((page) => page.index)]);
+			const indices = new Set([pageIndex, ...previewIDs.map(id => pageIndexByID(doc.pages, id)).filter(index => index >= 0)]);
 			for (const index of indices) {
 				await loadPageData(index, { openSeq, priority: 0, refresh: true });
 				if (openSeq !== state.openSeq) {
@@ -4282,28 +4283,46 @@ async function renderPage(index, options = {}) {
 	}
 }
 
-async function downloadAttachment(attachment) {
+function downloadAttachment(attachment) {
+	return downloadResource(attachment, "ofdgoExportAttachment", "附件");
+}
+
+async function saveDocumentImage(resource) {
+	if (!resource || !state.doc || document.body.hasAttribute("aria-busy")) return;
+	const seq = state.openSeq;
+	try {
+		const image = await callWASM("ofdgoImages", resource);
+		if (seq !== state.openSeq) return;
+		await downloadResource({id: image.id, fileName: image.name}, "ofdgoExportImages", "图片");
+	} catch (err) {
+		if (seq === state.openSeq) showError(err, false);
+	}
+}
+
+el.saveImageButton.addEventListener("click", () => saveDocumentImage(canvasEditor.selected?.imageResource));
+
+async function downloadResource(attachment, api, label) {
 	if (!state.doc || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
-	if (state.doc.encryption?.encrypted && !window.confirm("附件将按明文下载，是否继续？")) return;
+	if (state.doc.encryption?.encrypted && !window.confirm(`${label}将按明文下载，是否继续？`)) return;
 	const openSeq = state.openSeq;
 	state.exporting = true;
 	updateControls();
-	setBusy(true, "正在读取附件", null, "正在读取附件");
+	setBusy(true, `正在读取${label}`, null, `正在读取${label}`);
 	try {
 		const file = window.showSaveFilePicker ? await window.showSaveFilePicker({ suggestedName: attachment.fileName }) : null;
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const result = await callWASM("ofdgoExportAttachment", attachment.id, file);
+		const result = await callWASM(api, attachment.id, file);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
 		if (result.blob) {
 			downloadBytes(result.blob, result.mime, attachment.fileName);
 		}
-		setStatus(`附件已下载（${formatBytes(result.size)}）`);
+		setStatus(`${label}已下载（${formatBytes(result.size)}）`);
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			if (err.name === "AbortError") {
@@ -5531,7 +5550,7 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 
 function pageLinkTarget(link) {
 	if (link.dest) {
-		const target = state.doc.pages.findIndex(page => page.id === link.dest.pageID);
+		const target = pageIndexByID(state.doc.pages, link.dest.pageID);
 		return { href: target < 0 ? "#" : `#page-${target + 1}`, title: target < 0 ? "文档链接" : `第${target + 1}页`, activate: () => navigateDestination(link.dest) };
 	}
 	if (link.attachment) {
@@ -5621,7 +5640,7 @@ function sourcePoint(page, x, y) {
 
 async function navigateDestination(dest) {
 	if (document.body.hasAttribute("aria-busy")) return;
-	const index = state.doc.pages.findIndex(page => page.id === dest.pageID);
+	const index = pageIndexByID(state.doc.pages, dest.pageID);
 	if (index < 0) {
 		setStatus("目标页面不存在");
 		return;
@@ -6498,9 +6517,21 @@ function createOutlineList(outlines, path = []) {
 	return list;
 }
 
+const pageIndexes = new WeakMap();
+
+function pageIndexByID(pages, id) {
+	let indexes = pageIndexes.get(pages);
+	if (!indexes) {
+		indexes = new Map(pages.map((page, position) => [page.id, {page, position}]));
+		pageIndexes.set(pages, indexes);
+	}
+	const entry = indexes.get(id);
+	return entry ? entry.page.index ?? entry.position : -1;
+}
+
 function selectedPageIndexes() {
 	if (!state.pageSelection.size) return state.pageMultiSelect ? [] : [state.pageIndex];
-	return state.doc.pages.filter(page => state.pageSelection.has(page.id)).map(page => page.index);
+	return [...state.pageSelection].map(id => pageIndexByID(state.doc.pages, id)).filter(index => index >= 0).sort((a, b) => a - b);
 }
 
 function changeSelectedPages(action, direction = 0) {
@@ -6546,7 +6577,7 @@ function selectThumbnailPage(event, index) {
 		const page = state.doc.pages[index], additive = event.ctrlKey || event.metaKey || state.pageMultiSelect;
 		if (!additive) state.pageSelection.clear();
 		if (event.shiftKey) {
-			let anchor = state.doc.pages.findIndex(page => page.id === state.pageSelectionAnchor);
+			let anchor = pageIndexByID(state.doc.pages, state.pageSelectionAnchor);
 			if (anchor < 0) anchor = state.pageIndex;
 			for (let i = Math.min(anchor, index); i <= Math.max(anchor, index); i++) state.pageSelection.add(state.doc.pages[i].id);
 		} else {
@@ -7859,6 +7890,7 @@ function updateObjectControls(item, reset = false) {
 	el.objectAlign.disabled = disabled || cropping || !canEditObject(item, "arrange");
 	el.objectRotate.disabled = el.objectFlip.disabled = disabled || cropping || !canEditObject(item, state.composite ? "transform" : "arrange");
 	el.cropImageButton.disabled = disabled || item.type !== "ImageObject" || !canEditObject(item, "cropImage");
+	el.saveImageButton.disabled = disabled || !item.imageResource;
 	el.imageFit.disabled = el.cropImageButton.disabled || cropping || Boolean(item.scoped && !canEditObject(item, "fitImage"));
 	el.cropImageButton.textContent = cropping ? "完成" : "裁剪";
 	el.cropImageButton.setAttribute("aria-label", cropping ? "完成裁剪" : "裁剪图片");
@@ -7958,7 +7990,7 @@ async function callWASM(name, ...args) {
 			request.fontData = new Map();
 			args.push([...request.localFonts.keys()]);
 		}
-		if (name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument" || name === "ofdgoSaveEncrypted" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
+		if (name === "ofdgoExportImages" || name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument" || name === "ofdgoSaveEncrypted" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
 			state.exportRequestID = id;
 			el.cancelExportButton.hidden = false;
 			el.cancelExportButton.disabled = false;

@@ -204,6 +204,8 @@ func RunWASM() {
 	registerAsyncCallback("ofdgoExportPage", exportPage)
 	registerAsyncCallback("ofdgoExportDocument", exportDocument)
 	registerAsyncCallback("ofdgoExportAttachment", exportAttachment)
+	registerCallback("ofdgoImages", documentImages)
+	registerAsyncCallback("ofdgoExportImages", exportImages)
 	registerCallback("ofdgoMatchFontFiles", matchFontFiles)
 	registerCallback("ofdgoFontFaces", fontFaces)
 	registerCallback("ofdgoFontFace", fontFace)
@@ -651,6 +653,49 @@ func documentInfo(args []js.Value) (any, error) {
 	return currentSession.Details(), nil
 }
 
+// documentImages 读取当前文档的原始图片目录
+// 入参: args 浏览器参数
+// 返回: any 图片目录, error 读取错误
+func documentImages(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	if len(args) != 0 {
+		return currentSession.Reader.Image(context.Background(), args[0].String())
+	}
+	return currentSession.Reader.Images(context.Background())
+}
+
+// exportImages 分块保存单幅原始图片或图片归档
+// 入参: args 图片标识和写出回调，空标识保存全部
+// 返回: any 文件类型, error 读写错误
+func exportImages(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	writer := bufio.NewWriterSize(exportWriter{write: args[1]}, 1<<20)
+	mime := "application/octet-stream"
+	if id := args[0].String(); id != "" {
+		input, err := currentSession.Reader.OpenImage(context.Background(), id)
+		if err != nil {
+			return nil, err
+		}
+		defer input.Close()
+		if _, err := io.Copy(writer, input); err != nil {
+			return nil, err
+		}
+	} else {
+		mime = "application/zip"
+		if err := currentSession.Reader.WriteImages(context.Background(), writer); err != nil {
+			return nil, err
+		}
+	}
+	if err := writer.Flush(); err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"mime": mime}), nil
+}
+
 // exportAttachment 分块导出附件
 // 入参: args 浏览器参数
 // 返回: any 附件数据, error 错误信息
@@ -736,6 +781,20 @@ func renderPage(args []js.Value) (any, error) {
 		return nil, err
 	}
 	links := make([]any, len(page.Links))
+	attachmentNames := make(map[string]string)
+	for _, link := range page.Links {
+		if link.Attachment == "" {
+			continue
+		}
+		attachments, err := currentSession.Reader.Attachments()
+		if err != nil {
+			return nil, err
+		}
+		for _, attachment := range attachments {
+			attachmentNames[attachment.ID] = path.Base(currentSession.Reader.ResPath(attachment.FileLoc))
+		}
+		break
+	}
 	for i, link := range page.Links {
 		item := map[string]any{
 			"uri":    link.URI,
@@ -748,13 +807,7 @@ func renderPage(args []js.Value) (any, error) {
 		}
 		if link.Attachment != "" {
 			item["attachment"] = link.Attachment
-			attachments, _ := currentSession.Reader.Attachments()
-			for _, attachment := range attachments {
-				if attachment.ID == link.Attachment {
-					item["fileName"] = path.Base(currentSession.Reader.ResPath(attachment.FileLoc))
-					break
-				}
-			}
+			item["fileName"] = attachmentNames[link.Attachment]
 		}
 		if dest := link.Dest; dest != nil {
 			item["dest"] = map[string]any{"type": dest.Type, "pageID": dest.PageID, "left": dest.Left, "top": dest.Top,
@@ -1183,6 +1236,9 @@ func editorObjects(index int, text *ofdgo.PageText) ([]any, error) {
 						return nil, err
 					}
 					item["imageBounds"] = editorBox(full)
+				}
+				if object.Type == "ImageObject" {
+					item["imageResource"] = object.ImageObject.ResourceID
 				}
 				if object.Type == "TextObject" {
 					item["bounds"] = editorBox(box)
@@ -2114,6 +2170,9 @@ func compositeObjects(args []js.Value) (any, error) {
 		item := map[string]any{"id": fmt.Sprintf("%s/%d", key, i), "type": member.Object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": i, "position": member.Position.Index, "count": member.Position.Count, "container": key + ":" + member.Position.Container, "scoped": true, "contours": member.Contours,
 			"capabilities": editorCapabilities(member.Capabilities, member.Object.Type)}
 		editorAppearance(item, member.Object, member.Capabilities.Paint, member.StrokeScale)
+		if member.Object.Type == "ImageObject" {
+			item["imageResource"] = member.Object.ImageObject.ResourceID
+		}
 		if kind, geometry := member.Shape(); kind != "" {
 			item["shape"], item["geometry"] = string(kind), editorBox(geometry)
 		} else if kind, box, matrix := member.ShapeFrame(); kind != "" {

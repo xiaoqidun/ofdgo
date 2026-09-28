@@ -36,6 +36,7 @@ type Reader struct {
 	ResMap                    map[string]string
 	resourcesRead             map[string]bool
 	resourceFiles             map[string]string
+	imageCatalog              []ImageInfo
 	fontCache                 map[string]*Font
 	fontResourcesRead         bool
 	fontFaces                 map[string][]*FontFace

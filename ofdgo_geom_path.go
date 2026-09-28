@@ -153,8 +153,19 @@ func objectGeometryPath(geometry GeometryBackend, object PathObject) (GeometryPa
 // 入参: path 填充路径
 // 返回: GeometryPath 显式闭合路径
 func closedGeometry(path GeometryPath) GeometryPath {
+	open, missing := false, false
+	for _, segment := range path {
+		if segment.Verb == GeometryMove && open {
+			missing = true
+			break
+		}
+		open = segment.Verb != GeometryClose
+	}
+	if !missing && !open {
+		return path
+	}
 	result := make(GeometryPath, 0, len(path)+1)
-	open := false
+	open = false
 	for _, segment := range path {
 		if segment.Verb == GeometryMove && open {
 			result = append(result, GeometrySegment{Verb: GeometryClose})

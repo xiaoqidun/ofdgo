@@ -86,6 +86,7 @@ a:focus-visible {
 }
 
 .editor-toolbar {
+	--editor-control-width: 58px;
 	display: flex;
 	max-height: 40dvh;
 	overflow: auto;
@@ -103,8 +104,8 @@ a:focus-visible {
 	display: grid;
 	flex: 1 0 auto;
 	justify-content: center;
-	grid-template-columns: repeat(3, max-content);
-	grid-template-rows: repeat(2, 28px) 16px;
+	grid-template-columns: repeat(3, var(--editor-control-width));
+	grid-template-rows: repeat(2, var(--control-height)) 16px;
 	column-gap: 4px;
 	row-gap: 4px;
 	padding: 0 8px;
@@ -112,17 +113,29 @@ a:focus-visible {
 }
 
 .editor-image {
-	grid-template-columns: repeat(2, max-content);
+	grid-template-columns: repeat(2, var(--editor-control-width));
 }
 
 .editor-actions,
 .editor-transform,
 .editor-erase {
-	grid-template-columns: max-content;
+	grid-template-columns: var(--editor-control-width);
 }
 
-.editor-image > select {
-	grid-column: 1 / -1;
+.editor-group > .button,
+.editor-group > select {
+	min-width: 0;
+	width: 100%;
+}
+
+.editor-group > select {
+	height: var(--control-height);
+	padding: 0 4px;
+	border: 1px solid var(--line-strong);
+	border-radius: 0;
+	background: #fff;
+	color: #1f2428;
+	text-align: center;
 }
 
 .editor-paragraph > .editor-field,
@@ -131,11 +144,11 @@ a:focus-visible {
 }
 
 .editor-objects {
-	grid-template-columns: repeat(4, max-content);
+	grid-template-columns: repeat(4, var(--editor-control-width));
 }
 
 .editor-group:has(#penTool) {
-	grid-template-columns: repeat(4, max-content);
+	grid-template-columns: repeat(4, var(--editor-control-width));
 }
 
 .object-picker-list {
@@ -208,7 +221,7 @@ a:focus-visible {
 }
 
 .editor-paragraph {
-	grid-template-columns: 54px 120px;
+	grid-template-columns: var(--editor-control-width) 120px;
 }
 
 .editor-group:has(#shapeFill) {
@@ -2917,6 +2930,10 @@ button.outline-link:hover {
 }
 
 @media (min-width: 901px) and (max-width: 1600px) and (pointer: fine) {
+	.editor-toolbar {
+		--editor-control-width: 54px;
+	}
+
 	.editor-group {
 		padding-inline: 3px;
 		column-gap: 3px;
@@ -2931,7 +2948,7 @@ button.outline-link:hover {
 	}
 
 	.editor-paragraph {
-		grid-template-columns: 54px 108px;
+		grid-template-columns: var(--editor-control-width) 108px;
 	}
 
 	.toolbar {
