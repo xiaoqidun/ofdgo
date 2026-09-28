@@ -23,6 +23,7 @@ const batch = { items: [], formats: [], running: false, canceled: false, worker:
 const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Destination", "DPIRow", "DPI", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
 
 let wasmPromise = null;
+let remoteDownload = null;
 let wasmWorker = null;
 let wasmRequestID = 0;
 let wasmRecoveryTimer = 0;
@@ -3050,6 +3051,12 @@ async function boot() {
 				}).catch((err) => showError(err, !state.doc));
 			});
 		}
+		try {
+			const remote = remoteDocumentOptions(window.location.hash);
+			if (remote) await openOFD({ name: remote.name }, remote);
+		} catch (err) {
+			showError(err, !state.doc);
+		}
 	} catch (err) {
 		setStatus("引擎加载失败");
 		setEmpty(String(err.message || err));
@@ -3361,11 +3368,79 @@ async function recoverWASM() {
 	}
 }
 
-async function openOFD(file) {
+function remoteDocumentOptions(hash) {
+	const params = new URLSearchParams(hash.replace(/^#/, ""));
+	for (const key of ["url", "name", "page"]) {
+		if (params.getAll(key).length > 1) throw new Error(`重复的链接参数：${key}`);
+	}
+	if (!params.has("url")) return null;
+	let url;
+	try { url = new URL(params.get("url")); } catch { throw new Error("文件地址无效"); }
+	if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new Error("文件地址必须为不含账号密码的 HTTP 或 HTTPS 地址");
+	if (window.location.protocol === "https:" && url.protocol !== "https:") throw new Error("请使用 HTTPS 文件地址");
+	const page = params.get("page") || "1";
+	return { url: url.href, name: params.get("name") || "", pageIndex: /^[1-9]\d*$/.test(page) ? Math.min(Number(page), Number.MAX_SAFE_INTEGER) - 1 : 0 };
+}
+
+function remoteDocumentName(name) {
+	return String(name || "").split(/[\\/]/).pop().replace(/[\u0000-\u001f\u007f]/g, "").trim();
+}
+
+async function downloadRemoteDocument(options) {
+	const controller = new AbortController();
+	remoteDownload = controller;
+	el.cancelExportButton.hidden = false;
+	el.cancelExportButton.disabled = false;
+	el.cancelExportButton.title = "取消下载";
+	el.cancelExportButton.setAttribute("aria-label", "取消下载");
+	setProgress("正在下载文档", null);
+	try {
+		const response = await fetch(options.url, { mode: "cors", credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store", signal: controller.signal });
+		if (!response.ok) throw new Error(`文件下载失败（HTTP ${response.status}）`);
+		const total = Number(response.headers.get("Content-Length")) || 0;
+		if (!response.body) throw new Error("下载内容为空");
+		const chunks = [];
+		let received = 0;
+		const reader = response.body.getReader();
+		try {
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				chunks.push(value);
+				received += value.byteLength;
+				setProgress(`正在下载 ${(received / 1048576).toFixed(1)} MB`, total > 0 && received <= total ? received / total * 20 : null);
+			}
+		} finally { reader.releaseLock(); }
+		controller.signal.throwIfAborted();
+		const bytes = new Uint8Array(received);
+		let offset = 0;
+		for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+		const pdf = new TextDecoder("latin1").decode(bytes.subarray(0, 1024)).includes("%PDF-");
+		if (!pdf && !(bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 3 && bytes[3] === 4)) throw new Error("下载内容不是 OFD 或 PDF 文档");
+		const disposition = response.headers.get("Content-Disposition") || "";
+		let supplied = /(?:^|;)\s*filename\*=UTF-8'[^']*'([^;]+)/i.exec(disposition)?.[1];
+		if (supplied) { try { supplied = decodeURIComponent(supplied.trim()); } catch { supplied = ""; } }
+		if (!supplied) supplied = /(?:^|;)\s*filename\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^;]*))/i.exec(disposition)?.slice(1).find(value => value !== undefined)?.replace(/\\(.)/g, "$1");
+		let pathName = new URL(response.url || options.url).pathname.split("/").pop();
+		try { pathName = decodeURIComponent(pathName); } catch { pathName = ""; }
+		const name = remoteDocumentName(options.name) || remoteDocumentName(supplied) || remoteDocumentName(pathName) || `ofdgo.${pdf ? "pdf" : "ofd"}`;
+		return { bytes, pdf, name };
+	} catch (err) {
+		if (err instanceof TypeError) throw new Error("下载失败，请检查网络、链接及跨域配置");
+		throw err;
+	} finally {
+		if (remoteDownload === controller) {
+			remoteDownload = null;
+			el.cancelExportButton.hidden = true;
+		}
+	}
+}
+
+async function openOFD(file, remote = null) {
 	if (!file) {
 		return;
 	}
-	if (!isDocumentFile(file)) {
+	if (!remote && !isDocumentFile(file)) {
 		el.ofdInput.value = "";
 		showError(new Error("选择 OFD 文件"), !state.doc);
 		return;
@@ -3373,17 +3448,20 @@ async function openOFD(file) {
 	if (!discardChanges()) {
 		return;
 	}
+	remoteDownload?.abort();
 	clearSecurityForms();
 	state.wasmRecoveries = 0;
 	const openSeq = ++state.openSeq;
 	setBusy(true, "正在读取文档", 10, STATUS.opening);
 	try {
-		let bytes = new Uint8Array(await file.arrayBuffer());
+		const downloaded = remote ? await downloadRemoteDocument(remote) : null;
+		let bytes = downloaded ? downloaded.bytes : new Uint8Array(await file.arrayBuffer());
+		const name = downloaded ? downloaded.name : file.name;
 		let warnings = [];
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		if (/\.pdf$/i.test(file.name || "")) {
+		if (downloaded ? downloaded.pdf : /\.pdf$/i.test(file.name || "")) {
 			setProgress("正在转换 PDF", 25);
 			await ensureWASM();
 			if (openSeq !== state.openSeq) return;
@@ -3400,9 +3478,12 @@ async function openOFD(file) {
 			bytes = converted.bytes;
 			warnings = JSON.parse(converted.warnings || "null") || [];
 		}
+		const remoteDoc = remote ? await openWithCredentials(await fontManager.files(fontManager.records()), openSeq, bytes) : null;
+		if (openSeq !== state.openSeq) return;
 		state.ofdBytes = bytes;
 		state.conversionWarnings = warnings;
-		state.fileName = (file.name || "ofdgo.ofd").replace(/\.pdf$/i, ".ofd");
+		state.fileName = (name || "ofdgo.ofd").replace(/\.pdf$/i, ".ofd");
+		if (remote && !/\.ofd$/i.test(state.fileName)) state.fileName += ".ofd";
 		state.editing = false;
 		state.composite = null;
 		state.annotationCreate = null;
@@ -3432,7 +3513,7 @@ async function openOFD(file) {
 		el.objectBoundsPanel.close();
 		el.outlinePanel.close();
 		updateControls();
-		await openDocument({ pageIndex: 0, resetScroll: true, openSeq });
+		await openDocument({ ...(remoteDoc ? { doc: remoteDoc } : {}), pageIndex: remote?.pageIndex || 0, resetScroll: true, openSeq });
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			if (err.name === "AbortError") setStatus("转换已取消");
@@ -4975,6 +5056,10 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 }
 
 function cancelExport() {
+	if (remoteDownload) {
+		remoteDownload.abort();
+		return;
+	}
 	if (!state.exportRequestID || el.cancelExportButton.disabled) {
 		return;
 	}

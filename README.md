@@ -4,6 +4,25 @@
 # 在线体验
 [OFDGo WebUI](https://ofdgo.aite.me/)，将OFDGo编译为WASM提供服务
 
+# 链接接入
+```text
+https://ofdgo.aite.me/#url=<URL编码后的文件地址>
+```
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `url` | 是 | 文件地址，支持OFD、PDF |
+| `name` | 否 | 文件名称，默认自动获取 |
+| `page` | 否 | 物理页码，默认1，超过总页数取末页 |
+
+参数用`&`连接，参数值需URL编码。跨域访问时，响应头需包含：
+
+```http
+Access-Control-Allow-Origin: https://ofdgo.aite.me
+```
+
+公开资源可设为`*`；自建阅读器替换为对应源（协议、域名及端口）。
+
 # 一键部署
 ```shell
 docker run -d -p 80:80 ccr.ccs.tencentyun.com/xiaoqidun/ofdgo:latest
