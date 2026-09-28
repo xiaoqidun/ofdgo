@@ -69,6 +69,21 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 	stamp.clipTexts = make(map[*pdfgo.TextClip]TextObject)
 	stamp.pageWidth, stamp.pageHeight = box.W, box.H
 	nodes, err := p.collectCompositeNodes(func(visitor pdfgo.Visitor) error {
+		if annotation.Subtype == "Widget" {
+			visitor.MarkedContent = func(mark pdfgo.MarkedContentMark) error {
+				if mark.Tag == "Tx" && len(mark.Properties) == 0 {
+					return nil
+				}
+				if mark.Operator == "EMC" {
+					return nil
+				}
+				if p.warning == nil {
+					return &pdfgo.UnsupportedError{Feature: "widget marked content " + string(mark.Tag)}
+				}
+				p.warning(pdfgo.Diagnostic{Message: "PDF widget marked content " + string(mark.Tag) + " not preserved"})
+				return nil
+			}
+		}
 		return p.reader.WalkAnnotationAppearance(ctx, page, annotation, visitor)
 	})
 	if err != nil {
@@ -238,7 +253,7 @@ func (p *pdfImporter) formWidget(ctx context.Context, page *pdfgo.Page, annotati
 		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "hidden PDF form field not transferred"})
 		return nil
 	}
-	if flags&(8|16) != 0 || annotation.Dictionary["OC"] != nil {
+	if annotation.Dictionary["OC"] != nil {
 		return &pdfgo.UnsupportedError{Feature: "widget viewing behavior"}
 	}
 	if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
