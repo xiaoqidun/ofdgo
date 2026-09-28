@@ -203,6 +203,11 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 			mapping[char] = id
 		}
 	}
+	for id := 0; id < int(sfnt.NumGlyphs()); id++ {
+		if _, err := trueTypeGlyphData(sfnt.Tables, uint16(id)); err != nil {
+			return nil
+		}
+	}
 	for id := range glyphs {
 		if id >= sfnt.NumGlyphs() {
 			return nil

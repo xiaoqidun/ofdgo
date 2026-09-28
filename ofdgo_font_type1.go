@@ -306,10 +306,15 @@ func type1BinaryStart(token string) bool {
 // type1Outline 保存字形指令的操作数栈及轮廓位置
 type type1Outline struct {
 	program    *type1Program
+	active     map[string]bool
 	args       []float64
 	postscript []float64
 	flexPoints [][2]float64
 	width      float64
+	sideX      float64
+	sideY      float64
+	originX    float64
+	originY    float64
 	x          float64
 	y          float64
 	pointX     float64
@@ -324,7 +329,7 @@ type type1Outline struct {
 // 入参: glyph 字形数据
 // 返回: []byte Type2字形程序, error 错误信息
 func (p *type1Program) outline(glyph type1Glyph) ([]byte, error) {
-	state := type1Outline{program: p}
+	state := type1Outline{program: p, active: map[string]bool{glyph.name: true}}
 	ended, err := state.run(glyph.data, 0)
 	if err != nil {
 		return nil, fmt.Errorf("Type1 glyph %s: %w", glyph.name, err)
@@ -412,6 +417,9 @@ func (s *type1Outline) run(data []byte, depth int) (bool, error) {
 		if err := s.operator(op); err != nil {
 			return false, err
 		}
+		if op == 1206 {
+			return true, nil
+		}
 	}
 	return false, nil
 }
@@ -433,11 +441,15 @@ func (s *type1Outline) operator(op int) error {
 			return fmt.Errorf("invalid Type1 hsbw")
 		}
 		s.x, s.width, s.defined = a[0], a[1], true
+		s.sideX = s.x
+		s.x, s.y = s.x+s.originX, s.originY
 	case 1207:
 		if s.defined || len(a) != 4 || a[3] != 0 {
 			return fmt.Errorf("invalid Type1 sbw")
 		}
 		s.x, s.y, s.width, s.defined = a[0], a[1], a[2], true
+		s.sideX, s.sideY = s.x, s.y
+		s.x, s.y = s.x+s.originX, s.y+s.originY
 	case 4, 21, 22:
 		if !s.defined || op == 4 && len(a) != 1 || op == 21 && len(a) != 2 || op == 22 && len(a) != 1 {
 			return fmt.Errorf("invalid Type1 move")
@@ -542,10 +554,10 @@ func (s *type1Outline) operator(op int) error {
 			if err := s.curve([6]float64{first[4][0], first[4][1], first[5][0], first[5][1], first[6][0], first[6][1]}); err != nil {
 				return err
 			}
-			if s.x != a[1] || s.y != a[2] {
+			if s.x != a[1]+s.originX || s.y != a[2]+s.originY {
 				return fmt.Errorf("Type1 Flex endpoint differs from outline")
 			}
-			s.postscript = []float64{s.x, s.y}
+			s.postscript = []float64{s.x - s.originX, s.y - s.originY}
 			s.flexPoints = nil
 			s.flex = false
 		case 1:
@@ -576,14 +588,73 @@ func (s *type1Outline) operator(op int) error {
 		if len(a) != 2 {
 			return fmt.Errorf("invalid Type1 setcurrentpoint")
 		}
-		s.x, s.y = a[0], a[1]
+		s.x, s.y = a[0]+s.originX, a[1]+s.originY
 	case 1206:
-		return fmt.Errorf("unsupported Type1 seac")
+		if !s.defined || len(a) != 5 || s.path.Len() != 0 {
+			return fmt.Errorf("invalid Type1 seac")
+		}
+		if err := s.component(a[3], s.originX, s.originY); err != nil {
+			return err
+		}
+		return s.component(a[4], s.originX+s.sideX+a[1]-a[0], s.originY+s.sideY+a[2])
 	default:
 		return fmt.Errorf("unsupported Type1 operator %d", op)
 	}
 	return nil
 }
+
+// component 将标准编码引用的字形展开为当前Type2轮廓，保留复合字形字宽
+// 入参: code 标准编码, x 横向原点, y 纵向原点
+// 返回: error 字形缺失、循环或指令错误
+func (s *type1Outline) component(code, x, y float64) error {
+	if code < 0 || code > 255 || code != math.Trunc(code) {
+		return fmt.Errorf("invalid Type1 component code")
+	}
+	name := type1StandardNames[byte(code)]
+	if name == "" {
+		return fmt.Errorf("undefined Type1 component code %g", code)
+	}
+	if s.active[name] {
+		return fmt.Errorf("cyclic Type1 component %s", name)
+	}
+	for _, glyph := range s.program.glyphs {
+		if glyph.name != name {
+			continue
+		}
+		child := type1Outline{program: s.program, active: s.active, originX: x, originY: y, pointX: s.pointX, pointY: s.pointY}
+		s.active[name] = true
+		ended, err := child.run(glyph.data, 0)
+		delete(s.active, name)
+		if err != nil {
+			return err
+		}
+		if !ended || !child.defined {
+			return fmt.Errorf("incomplete Type1 component %s", name)
+		}
+		s.path.Write(child.path.Bytes())
+		s.pointX, s.pointY = child.pointX, child.pointY
+		return nil
+	}
+	return fmt.Errorf("missing Type1 component %s", name)
+}
+
+// type1StandardNames 保存Adobe标准编码的字形名称，用于复合字形引用
+var type1StandardNames = func() [256]string {
+	var names [256]string
+	copy(names[32:127], cffStandardStrings[1:96])
+	for code, name := range map[byte]string{
+		161: "exclamdown", 162: "cent", 163: "sterling", 164: "fraction", 165: "yen", 166: "florin", 167: "section", 168: "currency",
+		169: "quotesingle", 170: "quotedblleft", 171: "guillemotleft", 172: "guilsinglleft", 173: "guilsinglright", 174: "fi", 175: "fl",
+		177: "endash", 178: "dagger", 179: "daggerdbl", 180: "periodcentered", 182: "paragraph", 183: "bullet", 184: "quotesinglbase",
+		185: "quotedblbase", 186: "quotedblright", 187: "guillemotright", 188: "ellipsis", 189: "perthousand", 191: "questiondown",
+		193: "grave", 194: "acute", 195: "circumflex", 196: "tilde", 197: "macron", 198: "breve", 199: "dotaccent", 200: "dieresis",
+		202: "ring", 203: "cedilla", 205: "hungarumlaut", 206: "ogonek", 207: "caron", 208: "emdash", 225: "AE", 227: "ordfeminine",
+		232: "Lslash", 233: "Oslash", 234: "OE", 235: "ordmasculine", 241: "ae", 245: "dotlessi", 248: "lslash", 249: "oslash", 250: "oe", 251: "germandbls",
+	} {
+		names[code] = name
+	}
+	return names
+}()
 
 // move 在Type2字形程序中建立新轮廓
 // 返回: error 错误信息

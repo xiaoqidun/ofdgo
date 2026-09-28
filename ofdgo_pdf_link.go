@@ -249,6 +249,31 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 					dest.OmitLeft, dest.OmitTop = retained[1], retained[0]
 				}
 				dest.OmitZoom = retained[2] || values[2] == 0
+			} else if destination.Mode == "FitH" || destination.Mode == "FitV" {
+				var coordinate float64
+				switch value := destination.Parameters[0].(type) {
+				case pdfgo.Integer:
+					coordinate = float64(value)
+				case pdfgo.Real:
+					coordinate = float64(value)
+				}
+				point := pdfgo.Point{X: coordinate}
+				if destination.Mode == "FitH" {
+					point = pdfgo.Point{Y: coordinate}
+				}
+				point = matrix.Apply(point)
+				if targetPage.Rotation == 90 || targetPage.Rotation == 270 {
+					if dest.Type == "FitH" {
+						dest.Type = "FitV"
+					} else {
+						dest.Type = "FitH"
+					}
+				}
+				if dest.Type == "FitH" {
+					dest.Top, dest.OmitTop = point.Y, destination.Parameters[0] == nil
+				} else {
+					dest.Left, dest.OmitLeft = point.X, destination.Parameters[0] == nil
+				}
 			} else if destination.Mode == "FitR" {
 				values := [4]float64{}
 				for n, v := range destination.Parameters {

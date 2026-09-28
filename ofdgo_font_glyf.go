@@ -114,7 +114,10 @@ func (f *sfntOutliner) glyph(id uint16, active map[uint16]bool) (ttGlyph, error)
 	}
 	active[id] = true
 	defer delete(active, id)
-	data := f.font.Glyf.Get(id)
+	data, err := trueTypeGlyphData(f.font.Tables, id)
+	if err != nil {
+		return result, err
+	}
 	if len(data) == 0 {
 		data = make([]byte, 12)
 	}
@@ -123,7 +126,6 @@ func (f *sfntOutliner) glyph(id uint16, active map[uint16]bool) (ttGlyph, error)
 	}
 	n := int(int16(binary.BigEndian.Uint16(data)))
 	var program []byte
-	var err error
 	if n >= 0 {
 		result, program, err = readTTSimple(data, n)
 	} else {
@@ -171,6 +173,37 @@ func (f *sfntOutliner) glyph(id uint16, active map[uint16]bool) (ttGlyph, error)
 	}
 	result.points = vm.zones[1]
 	return result, nil
+}
+
+// trueTypeGlyphData 按loca索引读取字形，拒绝倒序或越界的数据范围
+// 入参: tables 字体表, id 字形编号
+// 返回: []byte 字形数据, error 索引错误
+func trueTypeGlyphData(tables map[string][]byte, id uint16) ([]byte, error) {
+	head, loca, glyf := tables["head"], tables["loca"], tables["glyf"]
+	if len(head) < 52 {
+		return nil, fmt.Errorf("truncated TrueType head")
+	}
+	var start, end uint64
+	switch binary.BigEndian.Uint16(head[50:]) {
+	case 0:
+		offset := int(id) * 2
+		if offset+4 > len(loca) {
+			return nil, fmt.Errorf("truncated TrueType loca")
+		}
+		start, end = uint64(binary.BigEndian.Uint16(loca[offset:]))*2, uint64(binary.BigEndian.Uint16(loca[offset+2:]))*2
+	case 1:
+		offset := int(id) * 4
+		if offset+8 > len(loca) {
+			return nil, fmt.Errorf("truncated TrueType loca")
+		}
+		start, end = uint64(binary.BigEndian.Uint32(loca[offset:])), uint64(binary.BigEndian.Uint32(loca[offset+4:]))
+	default:
+		return nil, fmt.Errorf("invalid TrueType loca format")
+	}
+	if start > end || end > uint64(len(glyf)) {
+		return nil, fmt.Errorf("invalid TrueType glyph %d range", id)
+	}
+	return glyf[start:end], nil
 }
 
 // recordGlyphWarning 记录字形恢复提示，允许并发提取轮廓
