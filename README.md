@@ -21,7 +21,7 @@ https://ofdgo.aite.me/#url=<URL编码后的文件地址>
 Access-Control-Allow-Origin: https://ofdgo.aite.me
 ```
 
-公开资源可设为`*`；自建阅读器替换为对应源（协议、域名及端口）。
+公开资源可设为`*`；自建编辑器替换为对应源（协议、域名及端口）。
 
 # 一键部署
 ```shell
