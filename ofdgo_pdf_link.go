@@ -65,6 +65,22 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			continue
 		}
 		dict := annotation.Dictionary
+		if dict["OC"] != nil {
+			if strict {
+				return &pdfgo.UnsupportedError{Feature: "annotation optional content conversion"}
+			}
+			visible, err := p.reader.OptionalContentVisible(dict["OC"])
+			if err != nil {
+				return err
+			}
+			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF annotation optional content default visibility applied; layer switching not transferred"})
+			if !visible {
+				continue
+			}
+			dict = maps.Clone(dict)
+			delete(dict, "OC")
+			annotation.Dictionary = dict
+		}
 		if annotation.Subtype == "Text" {
 			value, err := p.reader.Resolve(dict["Open"])
 			if err != nil {
@@ -169,178 +185,50 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		if annotation.Subtype != "Link" {
 			return &pdfgo.UnsupportedError{Feature: "annotation " + string(annotation.Subtype)}
 		}
-		for _, key := range []pdfgo.Name{"AA", "OC"} {
-			if dict[key] != nil {
-				return &pdfgo.UnsupportedError{Feature: fmt.Sprintf("link annotation field %q", key)}
-			}
+		if dict["AA"] != nil {
+			return &pdfgo.UnsupportedError{Feature: "link annotation field \"AA\""}
 		}
-		action := Action{Event: "CLICK"}
-		target := dict["Dest"]
-		if dict["A"] != nil {
-			value, err := p.reader.Resolve(dict["A"])
+		var actions []Action
+		currentPage := p.page
+		appendAction := func(dict pdfgo.Dictionary) error {
+			current := annotation
+			current.Dictionary = dict
+			action, err := p.linkAction(current, strict, &currentPage)
 			if err != nil {
 				return err
 			}
-			a, ok := value.(pdfgo.Dictionary)
-			if !ok {
-				return fmt.Errorf("invalid PDF link action")
+			if action != nil {
+				actions = append(actions, *action)
 			}
-			if a["Next"] != nil {
-				return &pdfgo.UnsupportedError{Feature: "chained link actions"}
-			}
-			switch a["S"] {
-			case pdfgo.Name("GoTo"):
-				target = a["D"]
-			case pdfgo.Name("Named"):
-				value, err := p.reader.Resolve(a["N"])
-				if err != nil {
-					return err
-				}
-				index := p.page
-				switch value {
-				case pdfgo.Name("FirstPage"):
-					index = 0
-				case pdfgo.Name("LastPage"):
-					index = len(p.editor.pages) - 1
-				case pdfgo.Name("NextPage"):
-					index = min(index+1, len(p.editor.pages)-1)
-				case pdfgo.Name("PrevPage"):
-					index = max(index-1, 0)
-				default:
-					return &pdfgo.UnsupportedError{Feature: "named link action"}
-				}
-				action.Goto = &Goto{Dest: &Dest{Type: "XYZ", PageID: p.editor.pages[index].ID, OmitLeft: true, OmitTop: true, OmitZoom: true}}
-			case pdfgo.Name("URI"):
-				value, err := p.reader.Resolve(a["URI"])
-				if err != nil {
-					return err
-				}
-				uri, ok := value.(pdfgo.String)
-				if !ok {
-					return fmt.Errorf("invalid PDF URI")
-				}
-				isMap, err := p.reader.Resolve(a["IsMap"])
-				if err != nil {
-					return err
-				}
-				if isMap != nil && isMap != pdfgo.Boolean(false) && isMap != pdfgo.Boolean(true) {
-					return fmt.Errorf("invalid PDF URI image map flag")
-				}
-				if isMap == pdfgo.Boolean(true) {
-					return &pdfgo.UnsupportedError{Feature: "URI image map"}
-				}
-				base, err := p.reader.BaseURI()
-				if err != nil {
-					return err
-				}
-				action.URI = &URI{URI: string(uri), Base: base}
-			default:
-				return &pdfgo.UnsupportedError{Feature: "link action"}
-			}
+			return nil
 		}
-		if action.URI == nil && action.Goto == nil {
-			destination, err := p.reader.ReadDestination(target)
-			if err != nil {
-				if !strict && errors.Is(err, pdfgo.ErrDestinationNotFound) {
-					p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("%v; link omitted", err)})
-					if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
-						return err
-					}
-					continue
-				}
+		if dict["A"] == nil {
+			if err := appendAction(dict); err != nil {
 				return err
 			}
-			targetPage := p.pages[destination.Page]
-			if targetPage == nil {
-				if !strict {
-					p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF link targets a page outside the document page tree; link omitted"})
-					if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
-						return err
-					}
-					continue
-				}
-				return fmt.Errorf("PDF destination page missing")
-			}
-			matrix, _, _ := pdfPageMatrix(targetPage)
-			dest := &Dest{Type: string(destination.Mode), PageID: p.pageIDs[destination.Page]}
-			if destination.Mode == "XYZ" {
-				values := [3]float64{}
-				retained := [3]bool{}
-				for n, v := range destination.Parameters {
-					switch v := v.(type) {
-					case pdfgo.Integer:
-						values[n] = float64(v)
-					case pdfgo.Real:
-						values[n] = float64(v)
-					case nil:
-						retained[n] = true
-					}
-				}
-				point := matrix.Apply(pdfgo.Point{X: values[0], Y: values[1]})
-				dest.Left, dest.Top, dest.Zoom = point.X, point.Y, values[2]
-				dest.OmitLeft, dest.OmitTop = retained[0], retained[1]
-				if targetPage.Rotation == 90 || targetPage.Rotation == 270 {
-					dest.OmitLeft, dest.OmitTop = retained[1], retained[0]
-				}
-				dest.OmitZoom = retained[2] || values[2] == 0
-			} else if destination.Mode == "FitH" || destination.Mode == "FitV" {
-				var coordinate float64
-				switch value := destination.Parameters[0].(type) {
-				case pdfgo.Integer:
-					coordinate = float64(value)
-				case pdfgo.Real:
-					coordinate = float64(value)
-				}
-				point := pdfgo.Point{X: coordinate}
-				if destination.Mode == "FitH" {
-					point = pdfgo.Point{Y: coordinate}
-				}
-				point = matrix.Apply(point)
-				if targetPage.Rotation == 90 || targetPage.Rotation == 270 {
-					if dest.Type == "FitH" {
-						dest.Type = "FitV"
-					} else {
-						dest.Type = "FitH"
-					}
-				}
-				if dest.Type == "FitH" {
-					dest.Top, dest.OmitTop = point.Y, destination.Parameters[0] == nil
-				} else {
-					dest.Left, dest.OmitLeft = point.X, destination.Parameters[0] == nil
-				}
-			} else if destination.Mode == "FitR" {
-				values := [4]float64{}
-				for n, v := range destination.Parameters {
-					switch v := v.(type) {
-					case pdfgo.Integer:
-						values[n] = float64(v)
-					case pdfgo.Real:
-						values[n] = float64(v)
-					default:
-						return fmt.Errorf("invalid PDF FitR destination coordinate")
-					}
-				}
-				bounds := pdfBounds([]pdfgo.Point{
-					matrix.Apply(pdfgo.Point{X: values[0], Y: values[1]}),
-					matrix.Apply(pdfgo.Point{X: values[2], Y: values[3]}),
-				})
-				dest.Left, dest.Top = bounds.X, bounds.Y
-				dest.Right, dest.Bottom = bounds.X+bounds.W, bounds.Y+bounds.H
-			} else if destination.Mode != "Fit" {
-				return &pdfgo.UnsupportedError{Feature: "destination mode " + string(destination.Mode)}
-			}
-			action.Goto = &Goto{Dest: dest}
+		} else if err := p.reader.WalkActions(ctx, dict["A"], func(info pdfgo.ActionInfo) error {
+			current := maps.Clone(dict)
+			current["A"] = info.Dictionary
+			return appendAction(current)
+		}); err != nil {
+			return err
 		}
+
 		b := annotation.Rect
 		box := pdfBounds([]pdfgo.Point{p.matrix.Apply(pdfgo.Point{X: b.XMin, Y: b.YMin}), p.matrix.Apply(pdfgo.Point{X: b.XMax, Y: b.YMax})})
-		action.Region, err = p.linkRegion(annotation, box)
+		region, err := p.linkRegion(annotation, box)
 		if err != nil {
 			return err
 		}
-		if err := p.appearanceAnnotation(ctx, page, annotation, action); err != nil {
+		for i := range actions {
+			actions[i].Region = region
+		}
+		if err := p.appearanceAnnotation(ctx, page, annotation, actions...); err != nil {
 			return err
 		}
-		p.report.Links++
+		if len(actions) != 0 {
+			p.report.Links++
+		}
 	}
 	return nil
 }
@@ -389,4 +277,168 @@ func (p *pdfImporter) linkRegion(annotation pdfgo.Annotation, box Box) (*Region,
 		region.Area = append(region.Area, area)
 	}
 	return region, nil
+}
+
+// linkAction 将单个链接动作转换为OFD动作，失效目标按导入策略报告
+// 入参: annotation 链接注解, strict 严格检查开关, currentPage 动作链当前页
+// 返回: *Action 动作，失效目标为空, error 转换错误
+func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, currentPage *int) (*Action, error) {
+	dict := annotation.Dictionary
+	action := Action{Event: "CLICK"}
+	target, err := p.reader.Resolve(dict["Dest"])
+	if err != nil {
+		return nil, err
+	}
+	if target == nil && dict["A"] == nil {
+		return nil, nil
+	}
+	if dict["A"] != nil {
+		value, err := p.reader.Resolve(dict["A"])
+		if err != nil {
+			return nil, err
+		}
+		a, ok := value.(pdfgo.Dictionary)
+		if !ok {
+			return nil, fmt.Errorf("invalid PDF link action")
+		}
+		switch a["S"] {
+		case pdfgo.Name("GoTo"):
+			target = a["D"]
+		case pdfgo.Name("Named"):
+			value, err := p.reader.Resolve(a["N"])
+			if err != nil {
+				return nil, err
+			}
+			index := *currentPage
+			switch value {
+			case pdfgo.Name("FirstPage"):
+				index = 0
+			case pdfgo.Name("LastPage"):
+				index = len(p.editor.pages) - 1
+			case pdfgo.Name("NextPage"):
+				index = min(index+1, len(p.editor.pages)-1)
+			case pdfgo.Name("PrevPage"):
+				index = max(index-1, 0)
+			default:
+				return nil, &pdfgo.UnsupportedError{Feature: "named link action"}
+			}
+			action.Goto = &Goto{Dest: &Dest{Type: "XYZ", PageID: p.editor.pages[index].ID, OmitLeft: true, OmitTop: true, OmitZoom: true}}
+			*currentPage = index
+		case pdfgo.Name("URI"):
+			value, err := p.reader.Resolve(a["URI"])
+			if err != nil {
+				return nil, err
+			}
+			uri, ok := value.(pdfgo.String)
+			if !ok {
+				return nil, fmt.Errorf("invalid PDF URI")
+			}
+			isMap, err := p.reader.Resolve(a["IsMap"])
+			if err != nil {
+				return nil, err
+			}
+			if isMap != nil && isMap != pdfgo.Boolean(false) && isMap != pdfgo.Boolean(true) {
+				return nil, fmt.Errorf("invalid PDF URI image map flag")
+			}
+			if isMap == pdfgo.Boolean(true) {
+				return nil, &pdfgo.UnsupportedError{Feature: "URI image map"}
+			}
+			base, err := p.reader.BaseURI()
+			if err != nil {
+				return nil, err
+			}
+			action.URI = &URI{URI: string(uri), Base: base}
+		default:
+			return nil, &pdfgo.UnsupportedError{Feature: "link action"}
+		}
+	}
+	if action.URI == nil && action.Goto == nil {
+		destination, err := p.reader.ReadDestination(target)
+		if err != nil {
+			if !strict && errors.Is(err, pdfgo.ErrDestinationNotFound) {
+				p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("%v; link omitted", err)})
+				return nil, nil
+			}
+			return nil, err
+		}
+		targetPage := p.pages[destination.Page]
+		if targetPage == nil {
+			if !strict {
+				p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF link targets a page outside the document page tree; link omitted"})
+				return nil, nil
+			}
+			return nil, fmt.Errorf("PDF destination page missing")
+		}
+		matrix, _, _ := pdfPageMatrix(targetPage)
+		dest := &Dest{Type: string(destination.Mode), PageID: p.pageIDs[destination.Page]}
+		if destination.Mode == "XYZ" {
+			values := [3]float64{}
+			retained := [3]bool{}
+			for n, v := range destination.Parameters {
+				switch v := v.(type) {
+				case pdfgo.Integer:
+					values[n] = float64(v)
+				case pdfgo.Real:
+					values[n] = float64(v)
+				case nil:
+					retained[n] = true
+				}
+			}
+			point := matrix.Apply(pdfgo.Point{X: values[0], Y: values[1]})
+			dest.Left, dest.Top, dest.Zoom = point.X, point.Y, values[2]
+			dest.OmitLeft, dest.OmitTop = retained[0], retained[1]
+			if targetPage.Rotation == 90 || targetPage.Rotation == 270 {
+				dest.OmitLeft, dest.OmitTop = retained[1], retained[0]
+			}
+			dest.OmitZoom = retained[2] || values[2] == 0
+		} else if destination.Mode == "FitH" || destination.Mode == "FitV" {
+			var coordinate float64
+			switch value := destination.Parameters[0].(type) {
+			case pdfgo.Integer:
+				coordinate = float64(value)
+			case pdfgo.Real:
+				coordinate = float64(value)
+			}
+			point := pdfgo.Point{X: coordinate}
+			if destination.Mode == "FitH" {
+				point = pdfgo.Point{Y: coordinate}
+			}
+			point = matrix.Apply(point)
+			if targetPage.Rotation == 90 || targetPage.Rotation == 270 {
+				if dest.Type == "FitH" {
+					dest.Type = "FitV"
+				} else {
+					dest.Type = "FitH"
+				}
+			}
+			if dest.Type == "FitH" {
+				dest.Top, dest.OmitTop = point.Y, destination.Parameters[0] == nil
+			} else {
+				dest.Left, dest.OmitLeft = point.X, destination.Parameters[0] == nil
+			}
+		} else if destination.Mode == "FitR" {
+			values := [4]float64{}
+			for n, v := range destination.Parameters {
+				switch v := v.(type) {
+				case pdfgo.Integer:
+					values[n] = float64(v)
+				case pdfgo.Real:
+					values[n] = float64(v)
+				default:
+					return nil, fmt.Errorf("invalid PDF FitR destination coordinate")
+				}
+			}
+			bounds := pdfBounds([]pdfgo.Point{
+				matrix.Apply(pdfgo.Point{X: values[0], Y: values[1]}),
+				matrix.Apply(pdfgo.Point{X: values[2], Y: values[3]}),
+			})
+			dest.Left, dest.Top = bounds.X, bounds.Y
+			dest.Right, dest.Bottom = bounds.X+bounds.W, bounds.Y+bounds.H
+		} else if destination.Mode != "Fit" {
+			return nil, &pdfgo.UnsupportedError{Feature: "destination mode " + string(destination.Mode)}
+		}
+		action.Goto = &Goto{Dest: dest}
+		*currentPage = p.pageIndexes[destination.Page]
+	}
+	return &action, nil
 }

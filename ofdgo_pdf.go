@@ -75,6 +75,7 @@ type pdfImporter struct {
 	objects         []GraphicObject
 	pages           map[pdfgo.Reference]*pdfgo.Page
 	pageIDs         map[pdfgo.Reference]string
+	pageIndexes     map[pdfgo.Reference]int
 	imageIDs        map[pdfImageKey]string
 	maskClips       map[*pdfgo.SoftMask]pdfgo.Path
 	pageBox         pdfgo.Rectangle
@@ -128,6 +129,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	editor.fontDirs, editor.fontFS = renderer.FontSources()
 	importer := pdfImporter{ctx: ctx, reader: reader, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, fontIDs: map[*pdfgo.Font]string{}, fontMetrics: map[string]FontMetrics{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
 	importer.report.Warnings = diagnostics
+	importer.pageIndexes = make(map[pdfgo.Reference]int)
 	if security := reader.Encryption(); security != nil && !security.Owner && security.Permissions&0xf3c != 0xf3c {
 		if options.Strict {
 			return nil, PDFImportReport{}, &pdfgo.UnsupportedError{Feature: "PDF access permission conversion"}
@@ -152,6 +154,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		}
 		importer.pages[page.Reference] = page
 		importer.pageIDs[page.Reference] = editor.pages[index].ID
+		importer.pageIndexes[page.Reference] = index
 		if options.OnProgress != nil {
 			return options.OnProgress("pages", index+1, 0)
 		}
