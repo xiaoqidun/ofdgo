@@ -241,10 +241,16 @@ func (c *pdfCompositor) drawGroup(node pdfCompositeNode, pixels []pdfCompositePi
 	}
 	initial := make([]pdfCompositePixel, len(pixels))
 	if !g.Isolated {
+		sameSpace := space.Equal(parent)
+		components := parent.Components()
 		for i, pixel := range pixels {
-			values, err := space.Convert(pixel.values[:parent.Components()], parent, "RelativeColorimetric")
-			if err != nil {
-				return err
+			values := pixel.values
+			if !sameSpace {
+				var err error
+				values, err = space.Convert(values[:components], parent, "RelativeColorimetric")
+				if err != nil {
+					return err
+				}
 			}
 			initial[i] = pdfCompositePixel{values: values, alpha: pixel.alpha}
 		}
@@ -313,18 +319,23 @@ func pdfCompositeKnockout(target *pdfCompositePixel, initial, source pdfComposit
 // 入参: pixels 父组输出, initial 初始背景, result 组结果, space 组空间, parent 父空间, opacity 组不透明度, mask 蒙版, mode 混合模式
 // 返回: error 颜色或混合错误
 func pdfCompositeGroup(pixels, initial, result []pdfCompositePixel, space, parent *pdfgo.ColorSpace, opacity float64, mask []float64, mode pdfgo.Name) error {
+	sameSpace := space.Equal(parent)
+	components := space.Components()
 	for i, pixel := range result {
 		pixels[i].shape += pixel.shape * (1 - pixels[i].shape)
 		if pixel.effect == 0 {
 			continue
 		}
 		values := pixel.values
-		for j := 0; j < space.Components(); j++ {
+		for j := 0; j < components; j++ {
 			values[j] = math.Max(0, math.Min(1, (pixel.values[j]*pixel.alpha-initial[i].values[j]*initial[i].alpha*(1-pixel.effect))/pixel.effect))
 		}
-		values, err := parent.Convert(values[:space.Components()], space, "RelativeColorimetric")
-		if err != nil {
-			return err
+		if !sameSpace {
+			var err error
+			values, err = parent.Convert(values[:components], space, "RelativeColorimetric")
+			if err != nil {
+				return err
+			}
 		}
 		alpha := pixel.effect * opacity
 		if mask != nil {
@@ -350,7 +361,7 @@ func (c *pdfCompositor) mask(mask *pdfgo.SoftMask, inherited *pdfgo.ColorSpace) 
 	nodes, ok := c.cache.masks[mask]
 	var err error
 	if !ok {
-		nodes, err = pdfCompositeNodes(mask.Walk, c.importer.warning)
+		nodes, err = c.importer.collectCompositeNodes(mask.Walk)
 		if err != nil {
 			return nil, err
 		}
@@ -379,7 +390,7 @@ func (c *pdfCompositor) mask(mask *pdfgo.SoftMask, inherited *pdfgo.ColorSpace) 
 				return nil, err
 			}
 		}
-		result[i] = math.Max(0, math.Min(1, mask.Transfer[0]+v*(mask.Transfer[1]-mask.Transfer[0])))
+		result[i] = mask.Transfer(v)
 	}
 	c.masks[mask] = result
 	return result, nil

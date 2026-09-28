@@ -85,6 +85,8 @@ type pdfImporter struct {
 	rasterDPI       float64
 	rasterWarned    bool
 	compositeCache  *pdfCompositeCache
+	compositeNodes  []pdfCompositeNode
+	compositeSpace  *pdfgo.ColorSpace
 }
 
 // ImportPDF 将PDF内容转换为独立OFD编辑文档，失败时不返回部分结果
@@ -112,11 +114,12 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 			return nil, PDFImportReport{}, err
 		}
 	}
-	open := pdfgo.NewReaderWithPassword
-	if options.PasswordUTF8 {
-		open = pdfgo.NewReaderWithUTF8Password
+	readOptions := pdfgo.ReaderOptions{Password: options.Password, PasswordUTF8: options.PasswordUTF8}
+	var diagnostics []pdfgo.Diagnostic
+	if !options.Strict {
+		readOptions.Warning = func(diagnostic pdfgo.Diagnostic) { diagnostics = append(diagnostics, diagnostic) }
 	}
-	reader, err := open(source, size, options.Password)
+	reader, err := pdfgo.NewReaderWithOptions(source, size, readOptions)
 	if err != nil {
 		return nil, PDFImportReport{}, err
 	}
@@ -124,6 +127,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	editor.SetRenderBackends(renderer.Backends())
 	editor.fontDirs, editor.fontFS = renderer.FontSources()
 	importer := pdfImporter{ctx: ctx, reader: reader, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, fontIDs: map[*pdfgo.Font]string{}, fontMetrics: map[string]FontMetrics{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
+	importer.report.Warnings = diagnostics
 	if security := reader.Encryption(); security != nil && !security.Owner && security.Permissions&0xf3c != 0xf3c {
 		if options.Strict {
 			return nil, PDFImportReport{}, &pdfgo.UnsupportedError{Feature: "PDF access permission conversion"}
@@ -171,6 +175,8 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		importer.pageHeight = height
 		importer.maskClips = make(map[*pdfgo.SoftMask]pdfgo.Path)
 		importer.compositeCache = nil
+		importer.compositeNodes = nil
+		importer.compositeSpace = nil
 		importer.clipTexts = make(map[*pdfgo.TextClip]TextObject)
 		if err := importer.compositePage(nil, func(visitor pdfgo.Visitor) error { return reader.WalkPage(ctx, page, visitor) }); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)

@@ -522,7 +522,7 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 		return pdfgo.Path{}, err
 	}
 	opacity := func(v float64) (bool, error) {
-		v = math.Max(0, math.Min(1, mask.Transfer[0]+v*(mask.Transfer[1]-mask.Transfer[0])))
+		v = mask.Transfer(v)
 		if v != 0 && v != 1 {
 			return false, &pdfgo.UnsupportedError{Feature: "nonbinary luminosity mask"}
 		}

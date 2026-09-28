@@ -44,7 +44,7 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 		return nil, fmt.Errorf("invalid PDF tiling pattern matrix")
 	}
 	if pattern == nil {
-		nodes, err := pdfCompositeNodes(func(v pdfgo.Visitor) error { return source.Walk(c.importer.ctx, paint, v) }, c.importer.warning)
+		nodes, err := c.importer.collectCompositeNodes(func(v pdfgo.Visitor) error { return source.Walk(c.importer.ctx, paint, v) })
 		if err != nil {
 			return nil, err
 		}

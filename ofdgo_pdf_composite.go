@@ -140,32 +140,62 @@ func (p *pdfImporter) compositeTextBounds(mark pdfgo.TextMark, stroke bool) Box 
 	return Box{X: box.X - marginX, Y: box.Y - marginY, W: box.W + 2*marginX, H: box.H + 2*marginY}
 }
 
-// pdfCompositeNodes 收集原始绘制顺序，语义警告只在首次解析时交付
-// 入参: walk 内容访问函数, warning 警告回调
+// collectCompositeNodes 收集原始绘制顺序并展开Type3字形，保留透明组层级
+// 入参: walk 内容访问函数
 // 返回: []pdfCompositeNode 原始图元, error 解析错误
-func pdfCompositeNodes(walk func(pdfgo.Visitor) error, warning func(pdfgo.Diagnostic)) ([]pdfCompositeNode, error) {
-	var nodes []pdfCompositeNode
-	v := pdfgo.Visitor{Warning: warning}
-	v.Path = func(mark pdfgo.PathMark) error { nodes = append(nodes, pdfCompositeNode{path: &mark}); return nil }
-	v.Text = func(mark pdfgo.TextMark) error { nodes = append(nodes, pdfCompositeNode{text: &mark}); return nil }
-	v.Image = func(mark pdfgo.ImageMark) error { nodes = append(nodes, pdfCompositeNode{image: &mark}); return nil }
-	v.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
-		children, err := pdfCompositeNodes(walk, warning)
-		if err != nil {
-			return err
+func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]pdfCompositeNode, error) {
+	active := make(map[*pdfgo.Font]map[string]bool)
+	var collect func(func(pdfgo.Visitor) error) ([]pdfCompositeNode, error)
+	collect = func(walk func(pdfgo.Visitor) error) ([]pdfCompositeNode, error) {
+		var nodes []pdfCompositeNode
+		v := pdfgo.Visitor{Warning: p.warning}
+		v.Path = func(mark pdfgo.PathMark) error { nodes = append(nodes, pdfCompositeNode{path: &mark}); return nil }
+		v.Text = func(mark pdfgo.TextMark) error {
+			if mark.Font.Subtype != "Type3" {
+				nodes = append(nodes, pdfCompositeNode{text: &mark})
+				return nil
+			}
+			if mark.Clip != nil {
+				return &pdfgo.UnsupportedError{Feature: "Type3 text clipping"}
+			}
+			glyphs := active[mark.Font]
+			if glyphs == nil {
+				glyphs = make(map[string]bool)
+				active[mark.Font] = glyphs
+			}
+			for index, glyph := range mark.Glyphs {
+				if glyphs[glyph.Name] {
+					return fmt.Errorf("recursive PDF Type3 glyph %q", glyph.Name)
+				}
+				glyphs[glyph.Name] = true
+				err := p.reader.WalkType3Glyph(p.ctx, mark, index, v)
+				delete(glyphs, glyph.Name)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
 		}
-		nodes = append(nodes, pdfCompositeNode{group: &mark, children: children})
-		return nil
+		v.Image = func(mark pdfgo.ImageMark) error { nodes = append(nodes, pdfCompositeNode{image: &mark}); return nil }
+		v.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
+			children, err := collect(walk)
+			if err != nil {
+				return err
+			}
+			nodes = append(nodes, pdfCompositeNode{group: &mark, children: children})
+			return nil
+		}
+		err := walk(v)
+		return nodes, err
 	}
-	err := walk(v)
-	return nodes, err
+	return collect(walk)
 }
 
 // compositePage 保留独立不透明对象，仅将需要背景参与的效果在局部区域合成
 // 入参: space 页面混合空间, walk 页面内容
 // 返回: error 转换错误
 func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Visitor) error) error {
-	nodes, err := pdfCompositeNodes(walk, p.warning)
+	nodes, err := p.collectCompositeNodes(walk)
 	if err != nil {
 		return err
 	}
@@ -203,6 +233,16 @@ func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Vis
 			space = &pdfgo.ColorSpace{Model: "DeviceCMYK"}
 		}
 	}
+	p.compositeNodes = nil
+	p.compositeSpace = space
+	return p.compositeObjects(nodes)
+}
+
+// compositeObjects 按绘制顺序转换图元并保留后续混合所需的背景
+// 入参: nodes 待转换图元
+// 返回: error 转换或合成错误
+func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
+	space := p.compositeSpace
 	for i, node := range nodes {
 		if node.opaque(space) || space.SRGBEquivalent() && node.direct() {
 			if err := node.emit(p.visitor()); err != nil {
@@ -215,10 +255,11 @@ func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Vis
 			if err := p.flushPath(); err != nil {
 				return err
 			}
-			if err := p.compositeRegion(nodes[:i], node, space, true); err != nil {
+			if err := p.compositeRegion(p.compositeNodes, node, space, true); err != nil {
 				return fmt.Errorf("composite graphic %d: %w", i+1, err)
 			}
 		}
+		p.compositeNodes = append(p.compositeNodes, node)
 	}
 	return p.flushPath()
 }

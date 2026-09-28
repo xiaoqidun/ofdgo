@@ -176,6 +176,25 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			switch a["S"] {
 			case pdfgo.Name("GoTo"):
 				target = a["D"]
+			case pdfgo.Name("Named"):
+				value, err := p.reader.Resolve(a["N"])
+				if err != nil {
+					return err
+				}
+				index := p.page
+				switch value {
+				case pdfgo.Name("FirstPage"):
+					index = 0
+				case pdfgo.Name("LastPage"):
+					index = len(p.editor.pages) - 1
+				case pdfgo.Name("NextPage"):
+					index = min(index+1, len(p.editor.pages)-1)
+				case pdfgo.Name("PrevPage"):
+					index = max(index-1, 0)
+				default:
+					return &pdfgo.UnsupportedError{Feature: "named link action"}
+				}
+				action.Goto = &Goto{Dest: &Dest{Type: "XYZ", PageID: p.editor.pages[index].ID, OmitLeft: true, OmitTop: true, OmitZoom: true}}
 			case pdfgo.Name("URI"):
 				value, err := p.reader.Resolve(a["URI"])
 				if err != nil {
@@ -204,7 +223,7 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 				return &pdfgo.UnsupportedError{Feature: "link action"}
 			}
 		}
-		if action.URI == nil {
+		if action.URI == nil && action.Goto == nil {
 			destination, err := p.reader.ReadDestination(target)
 			if err != nil {
 				if !strict && errors.Is(err, pdfgo.ErrDestinationNotFound) {
