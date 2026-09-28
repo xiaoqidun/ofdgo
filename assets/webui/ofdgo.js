@@ -671,6 +671,7 @@ function addCustomDataRow(field = {Name: "", Value: ""}, sourceIndex) {
 }
 el.annotationClose.addEventListener("click", () => el.annotationNote.close());
 el.annotationNote.addEventListener("close", () => { state.annotationEdit = null; });
+el.objectPicker.addEventListener("close", () => { if (!el.objectPicker.open) el.objectPickerList.replaceChildren(); });
 el.penTool.addEventListener("change", () => {
 	const tool = el.penTool.value;
 	el.penTool.value = "";
@@ -2027,6 +2028,7 @@ async function createDocument(event) {
 		setPan(false);
 		state.ofdBytes = null;
 		state.fileName = `${title.replace(/[\\/:*?"<>|]+/g, "_").replace(/\.ofd$/i, "")}.ofd`;
+		state.conversionWarnings = [];
 		state.savedRevision = null;
 		setEditorInfo(doc);
 		el.createPanel.close();
@@ -3478,7 +3480,9 @@ async function openOFD(file, remote = null) {
 			bytes = converted.bytes;
 			warnings = JSON.parse(converted.warnings || "null") || [];
 		}
-		const remoteDoc = remote ? await openWithCredentials(await fontManager.files(fontManager.records()), openSeq, bytes) : null;
+		await ensureWASM();
+		if (openSeq !== state.openSeq) return;
+		const doc = await openWithCredentials(await fontManager.files(fontManager.userFonts), openSeq, bytes);
 		if (openSeq !== state.openSeq) return;
 		state.ofdBytes = bytes;
 		state.conversionWarnings = warnings;
@@ -3513,7 +3517,7 @@ async function openOFD(file, remote = null) {
 		el.objectBoundsPanel.close();
 		el.outlinePanel.close();
 		updateControls();
-		await openDocument({ ...(remoteDoc ? { doc: remoteDoc } : {}), pageIndex: remote?.pageIndex || 0, resetScroll: true, openSeq });
+		await openDocument({ doc, pageIndex: remote?.pageIndex || 0, resetScroll: true, openSeq });
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			if (err.name === "AbortError") setStatus("转换已取消");

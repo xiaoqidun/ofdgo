@@ -301,10 +301,15 @@ func newSession(reader *ofdgo.Reader, opts OpenOptions) (*Session, error) {
 // Close 关闭文档会话
 // 返回: error 错误信息
 func (s *Session) Close() error {
-	if s == nil || s.Reader == nil {
+	if s == nil {
 		return nil
 	}
-	return s.Reader.Close()
+	reader := s.Reader
+	*s = Session{}
+	if reader != nil {
+		return reader.Close()
+	}
+	return nil
 }
 
 // SetFonts 更新字体配置并保留文档、页面和验签结果
