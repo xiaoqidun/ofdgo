@@ -4,6 +4,21 @@ let pending = Promise.resolve();
 const operations = new Map();
 const fontRequests = new Map();
 let fontSequence = 0;
+
+function requestFont(id, signal, name, done) {
+	if (signal.aborted) { done(null, "", true); return; }
+	const request = ++fontSequence;
+	const cancel = () => {
+		fontRequests.delete(request);
+		done(null, "", true);
+	};
+	signal.addEventListener("abort", cancel, { once: true });
+	fontRequests.set(request, result => {
+		signal.removeEventListener("abort", cancel);
+		done(result.bytes, result.error || "", signal.aborted);
+	});
+	self.postMessage({ id, type: "font", request, name });
+}
 self.onmessage = ({ data }) => {
 	if (data.type === "font") {
 		fontRequests.get(data.request)?.(data);
@@ -103,20 +118,7 @@ async function handleBatchMessage({ id, name, args }) {
 					finish(done);
 				},
 				(action, pageName, done) => boundary(action, pageName).then(() => finish(done), err => finish(done, err)),
-				done => finish(done), fonts, (name, done) => {
-					if (signal.aborted) { done(null, "", true); return; }
-					const request = ++fontSequence;
-					const cancel = () => {
-						fontRequests.delete(request);
-						done(null, "", true);
-					};
-					signal.addEventListener("abort", cancel, { once: true });
-					fontRequests.set(request, result => {
-						signal.removeEventListener("abort", cancel);
-						done(result.bytes, result.error || "", signal.aborted);
-					});
-					self.postMessage({ id, type: "font", request, name });
-				});
+				done => finish(done), fonts, (name, done) => requestFont(id, signal, name, done));
 		} else {
 			const [entries, handle] = args;
 			if (handle) output = await handle.createWritable();
@@ -187,6 +189,7 @@ async function handleMessage({ id, name, args }) {
 					self.postMessage({ id, type: importing ? "import" : "conversion", phase, completed, total });
 					finish(done, null, importing && phase === "commit");
 				});
+				if (converting) args.push((name, done) => requestFont(id, signal, name, done));
 			} else {
 				const file = args.pop();
 				const indices = saving ? args.shift() : null;

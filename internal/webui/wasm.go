@@ -371,10 +371,10 @@ func safeCall(fn func([]js.Value) (any, error), args []js.Value) (data any, err 
 }
 
 // convertPDFDocument 通过库转换PDF，不替换当前文档会话
-// 入参: args PDF数据、外部字体、UTF-8密码及进度回调
+// 入参: args PDF数据、外部字体、UTF-8密码、字体目录、进度及字体读取回调
 // 返回: any OFD数据及转换警告, error 错误信息
 func convertPDFDocument(args []js.Value) (any, error) {
-	if len(args) != 4 {
+	if len(args) != 6 {
 		return nil, fmt.Errorf("missing PDF data")
 	}
 	data, err := bytesFromJS(args[0])
@@ -386,7 +386,7 @@ func convertPDFDocument(args []js.Value) (any, error) {
 		return nil, err
 	}
 	var output bytes.Buffer
-	options := ofdgo.PDFImportOptions{OnProgress: editorOperationProgress(args[3]), PasswordUTF8: true}
+	options := ofdgo.PDFImportOptions{OnProgress: editorOperationProgress(args[4]), PasswordUTF8: true}
 	if !args[2].IsNull() && !args[2].IsUndefined() {
 		options.Password, err = bytesFromJS(args[2])
 		if err != nil {
@@ -394,9 +394,13 @@ func convertPDFDocument(args []js.Value) (any, error) {
 		}
 		defer clear(options.Password)
 	}
-	if len(fonts) > 0 {
-		options.RendererOptions = []ofdgo.RendererOption{ofdgo.WithFontFS(ofdgo.NewFontFS(fonts))}
+	fontSources := []fs.FS{ofdgo.NewFontFS(fonts)}
+	if names := stringsFromJS(args[3]); len(names) > 0 {
+		fontSources = append(fontSources, ofdgo.NewLazyFontFS(names, func(name string) ([]byte, error) {
+			return loadConversionFont(args[5], name)
+		}))
 	}
+	options.RendererOptions = []ofdgo.RendererOption{ofdgo.WithFontFS(fontSources...)}
 	report, err := ofdgo.ConvertPDF(context.Background(), bytes.NewReader(data), int64(len(data)), &output, options)
 	if err != nil {
 		return nil, err

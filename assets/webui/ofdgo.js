@@ -3253,8 +3253,21 @@ async function loadWASM() {
 		};
 		worker.onerror = (event) => fail(new Error(event.message || "引擎加载失败"));
 		worker.onmessageerror = () => fail(new Error("引擎通信失败"));
-		worker.onmessage = ({ data }) => {
+		worker.onmessage = async ({ data }) => {
 			if (worker !== wasmWorker) {
+				return;
+			}
+			if (data.type === "font") {
+				try {
+					const request = wasmRequests.get(data.id);
+					const font = request?.localFonts?.get(data.name);
+					if (!font || request.openSeq !== state.openSeq) throw new Error("系统字体不可用");
+					if (!request.fontData.has(font)) request.fontData.set(font, fontManager.read(font));
+					const bytes = await request.fontData.get(font);
+					if (worker === wasmWorker) worker.postMessage({ type: "font", request: data.request, bytes });
+				} catch (err) {
+					if (worker === wasmWorker) worker.postMessage({ type: "font", request: data.request, error: err.message });
+				}
 				return;
 			}
 			if (data.type === "progress") {
@@ -7939,6 +7952,12 @@ async function callWASM(name, ...args) {
 	return new Promise((resolve, reject) => {
 		const id = ++wasmRequestID;
 		wasmRequests.set(id, { resolve, reject, openSeq: state.openSeq });
+		if (name === "ofdgoConvertPDF") {
+			const request = wasmRequests.get(id);
+			request.localFonts = fontManager.localEntries();
+			request.fontData = new Map();
+			args.push([...request.localFonts.keys()]);
+		}
 		if (name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument" || name === "ofdgoSaveEncrypted" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
 			state.exportRequestID = id;
 			el.cancelExportButton.hidden = false;
