@@ -32,15 +32,10 @@ type semanticCompiler struct {
 	patterns                             *renderCache[patternCellKey, []RasterCommand]
 }
 
-// newSemanticCompiler 绑定当前字体和几何能力
-// 入参: r 渲染器
-// 返回: *semanticCompiler 编译器, error 能力错误
-func newSemanticCompiler(r *Renderer) (*semanticCompiler, error) {
-	geometry, err := r.Geometry()
-	if err != nil {
-		return nil, err
-	}
-	return &semanticCompiler{renderer: r, geometry: geometry, patterns: &renderCache[patternCellKey, []RasterCommand]{limit: 8 << 20}}, nil
+// semanticStyle 保存已继承的路径颜色和描边参数
+type semanticStyle struct {
+	fill, stroke *FillColor
+	options      StrokeOptions
 }
 
 // DrawObject 解释叶子对象，不调用任何具体页面编译器
@@ -62,6 +57,17 @@ func (c *semanticCompiler) DrawObject(object *GraphicObject, state RenderState) 
 		return fmt.Errorf("unsupported graphic object %q", object.Type)
 	}
 	return nil
+}
+
+// newSemanticCompiler 绑定当前字体和几何能力
+// 入参: r 渲染器
+// 返回: *semanticCompiler 编译器, error 能力错误
+func newSemanticCompiler(r *Renderer) (*semanticCompiler, error) {
+	geometry, err := r.Geometry()
+	if err != nil {
+		return nil, err
+	}
+	return &semanticCompiler{renderer: r, geometry: geometry, patterns: &renderCache[patternCellKey, []RasterCommand]{limit: 8 << 20}}, nil
 }
 
 // segments 转换光栅曲线，仅在输出边界展开椭圆弧
@@ -266,12 +272,6 @@ func semanticGradient(paint Paint, matrix Matrix) (*RasterGradient, Matrix) {
 		}
 	}
 	return g, matrix
-}
-
-// semanticStyle 保存已继承的路径颜色和描边参数
-type semanticStyle struct {
-	fill, stroke *FillColor
-	options      StrokeOptions
 }
 
 // objectStyle 合并继承与对象样式，不修改共享绘制参数

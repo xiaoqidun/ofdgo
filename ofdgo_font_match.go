@@ -20,15 +20,6 @@ import (
 	"strings"
 )
 
-// fontMatchRule 字体匹配规则
-type fontMatchRule struct {
-	Keys            []string
-	Names           []string
-	Files           []string
-	System          string
-	NoSyntheticBold bool
-}
-
 const (
 	fontMatchNone = iota
 	fontMatchExact
@@ -114,22 +105,13 @@ var fontMatchRules = normalizeFontMatchRules([]fontMatchRule{
 
 var fontNameReplacer = strings.NewReplacer(" ", "", "-", "", "_", "", "(", "", ")", "", "（", "", "）", "")
 
-// normalizeFontMatchRules 预处理固定字体规则的匹配名称，保留候选名称及顺序
-// 入参: rules 字体匹配规则
-// 返回: []fontMatchRule 预处理后的规则
-func normalizeFontMatchRules(rules []fontMatchRule) []fontMatchRule {
-	for i := range rules {
-		rule := &rules[i]
-		keys := append(append(rule.Keys, rule.Names...), rule.System)
-		rule.Keys = nil
-		for _, key := range keys {
-			key = fontNormalizeName(key)
-			if key != "" && !slices.Contains(rule.Keys, key) {
-				rule.Keys = append(rule.Keys, key)
-			}
-		}
-	}
-	return rules
+// fontMatchRule 字体匹配规则
+type fontMatchRule struct {
+	Keys            []string
+	Names           []string
+	Files           []string
+	System          string
+	NoSyntheticBold bool
 }
 
 // FontNormalizeName 规范化字体名称
@@ -158,6 +140,24 @@ func FontFilePatterns(names ...string) []string {
 // 返回: []string 系统字体名称
 func FontSystemNames(names ...string) []string {
 	return fontSystemNames(names...)
+}
+
+// normalizeFontMatchRules 预处理固定字体规则的匹配名称，保留候选名称及顺序
+// 入参: rules 字体匹配规则
+// 返回: []fontMatchRule 预处理后的规则
+func normalizeFontMatchRules(rules []fontMatchRule) []fontMatchRule {
+	for i := range rules {
+		rule := &rules[i]
+		keys := append(append(rule.Keys, rule.Names...), rule.System)
+		rule.Keys = nil
+		for _, key := range keys {
+			key = fontNormalizeName(key)
+			if key != "" && !slices.Contains(rule.Keys, key) {
+				rule.Keys = append(rule.Keys, key)
+			}
+		}
+	}
+	return rules
 }
 
 // fontNormalizeName 规范化字体名称

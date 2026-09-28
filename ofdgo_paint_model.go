@@ -16,15 +16,6 @@ package ofdgo
 
 import "image/color"
 
-// ColorStop 保存渐变区间位置及预乘RGBA颜色节点
-type ColorStop struct {
-	Offset float64
-	Color  color.RGBA
-}
-
-// PaintKind 区分无画刷、纯色、轴向渐变、径向渐变、图案和网格渐变
-type PaintKind uint8
-
 const (
 	PaintNone PaintKind = iota
 	PaintSolid
@@ -33,6 +24,15 @@ const (
 	PaintPattern
 	PaintMesh
 )
+
+// ColorStop 保存渐变区间位置及预乘RGBA颜色节点
+type ColorStop struct {
+	Offset float64
+	Color  color.RGBA
+}
+
+// PaintKind 区分无画刷、纯色、轴向渐变、径向渐变、图案和网格渐变
+type PaintKind uint8
 
 // Paint 保存后端无关的颜色、渐变和图案，不修改源节点
 type Paint struct {

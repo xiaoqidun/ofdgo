@@ -27,21 +27,6 @@ type pdfRenderer struct {
 	glyphPaths map[*canvas.Path]*canvas.Path
 }
 
-// glyphPath 复用相似变换下的PDF字形圆弧转换
-// 入参: path 缓存字形路径, matrix 字形变换
-// 返回: *canvas.Path PDF字形路径
-func (r *pdfRenderer) glyphPath(path *canvas.Path, matrix canvas.Matrix) *canvas.Path {
-	if !matrix.IsSimilarity() {
-		return path
-	}
-	if cached, ok := r.glyphPaths[path]; ok {
-		return cached
-	}
-	converted := path.ReplaceArcs()
-	r.glyphPaths[path] = converted
-	return converted
-}
-
 // pdfNavigation PDF导航信息
 type pdfNavigation struct {
 	Anchor  map[int][]pdfAnchor
@@ -67,6 +52,21 @@ type pdfOutline struct {
 	Name  string
 	Level int
 	Y     float64
+}
+
+// glyphPath 复用相似变换下的PDF字形圆弧转换
+// 入参: path 缓存字形路径, matrix 字形变换
+// 返回: *canvas.Path PDF字形路径
+func (r *pdfRenderer) glyphPath(path *canvas.Path, matrix canvas.Matrix) *canvas.Path {
+	if !matrix.IsSimilarity() {
+		return path
+	}
+	if cached, ok := r.glyphPaths[path]; ok {
+		return cached
+	}
+	converted := path.ReplaceArcs()
+	r.glyphPaths[path] = converted
+	return converted
 }
 
 // newPDFNavigation 创建PDF导航信息

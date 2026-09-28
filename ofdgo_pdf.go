@@ -204,19 +204,6 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	return editor, importer.report, nil
 }
 
-// commitObjects 将当前页面待转换对象写入编辑文档
-// 返回: error 对象写入错误
-func (p *pdfImporter) commitObjects() error {
-	if len(p.objects) == 0 {
-		return nil
-	}
-	if _, err := p.editor.CopyObjects(p.page, p.objects, 0, 0); err != nil {
-		return err
-	}
-	p.objects = nil
-	return nil
-}
-
 // ConvertPDF 将PDF转换并写入OFD，转换阶段失败时不写入目标
 // 入参: ctx 取消上下文, source PDF数据, size 字节数, output OFD输出, options 转换选项
 // 返回: PDFImportReport 转换统计, error 错误信息
@@ -245,6 +232,19 @@ func ConvertPDF(ctx context.Context, source io.ReaderAt, size int64, output io.W
 	var written int64
 	_, err = editor.WriteTo(convertWriter{context: ctx, writer: output, count: &written})
 	return report, err
+}
+
+// commitObjects 将当前页面待转换对象写入编辑文档
+// 返回: error 对象写入错误
+func (p *pdfImporter) commitObjects() error {
+	if len(p.objects) == 0 {
+		return nil
+	}
+	if _, err := p.editor.CopyObjects(p.page, p.objects, 0, 0); err != nil {
+		return err
+	}
+	p.objects = nil
+	return nil
 }
 
 // pdfPageMatrix 将裁剪框、用户单位及页面旋转转换为OFD毫米坐标

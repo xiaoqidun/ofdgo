@@ -20,41 +20,6 @@ import (
 	"slices"
 )
 
-// validate 校验公共路径指令、子路径起点和有限坐标
-// 返回: error 无效路径
-func (p GeometryPath) validate() error {
-	started := false
-	for _, s := range p {
-		points := []Point{s.End}
-		switch s.Verb {
-		case GeometryMove:
-			started = true
-		case GeometryLine:
-		case GeometryQuad:
-			points = append(points, s.Control1)
-		case GeometryCubic:
-			points = append(points, s.Control1, s.Control2)
-		case GeometryArc:
-			if !finite(s.RadiusX) || !finite(s.RadiusY) || !finite(s.Rotation) || s.RadiusX < 0 || s.RadiusY < 0 {
-				return fmt.Errorf("invalid arc parameters")
-			}
-		case GeometryClose:
-			points = nil
-		default:
-			return fmt.Errorf("unsupported geometry command %d", s.Verb)
-		}
-		if !started {
-			return fmt.Errorf("geometry path must start with move")
-		}
-		for _, point := range points {
-			if !finite(point.X) || !finite(point.Y) {
-				return fmt.Errorf("non-finite geometry coordinate")
-			}
-		}
-	}
-	return nil
-}
-
 // Transform 精确变换控制点和椭圆轴，退化弧沿投影极值分段保留折返
 // 入参: matrix 仿射变换
 // 返回: GeometryPath 独立路径, error 无效路径或数值溢出
@@ -157,4 +122,39 @@ func (p GeometryPath) Transform(matrix Matrix) (GeometryPath, error) {
 		return nil, err
 	}
 	return result, nil
+}
+
+// validate 校验公共路径指令、子路径起点和有限坐标
+// 返回: error 无效路径
+func (p GeometryPath) validate() error {
+	started := false
+	for _, s := range p {
+		points := []Point{s.End}
+		switch s.Verb {
+		case GeometryMove:
+			started = true
+		case GeometryLine:
+		case GeometryQuad:
+			points = append(points, s.Control1)
+		case GeometryCubic:
+			points = append(points, s.Control1, s.Control2)
+		case GeometryArc:
+			if !finite(s.RadiusX) || !finite(s.RadiusY) || !finite(s.Rotation) || s.RadiusX < 0 || s.RadiusY < 0 {
+				return fmt.Errorf("invalid arc parameters")
+			}
+		case GeometryClose:
+			points = nil
+		default:
+			return fmt.Errorf("unsupported geometry command %d", s.Verb)
+		}
+		if !started {
+			return fmt.Errorf("geometry path must start with move")
+		}
+		for _, point := range points {
+			if !finite(point.X) || !finite(point.Y) {
+				return fmt.Errorf("non-finite geometry coordinate")
+			}
+		}
+	}
+	return nil
 }

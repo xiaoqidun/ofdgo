@@ -28,14 +28,18 @@ type editorObjectPosition struct {
 	index int
 }
 
-// compareEditorPosition 比较对象在页面结构中的先后顺序
-// 入参: a、b 对象位置
-// 返回: int 比较结果
-func compareEditorPosition(a, b editorObjectPosition) int {
-	if value := cmp.Compare(a.layer, b.layer); value != 0 {
-		return value
-	}
-	return cmp.Compare(a.index, b.index)
+// ObjectPosition 对象在图层或页块直接成员中的位置，Index从0开始，Count不含嵌套页块的对象
+type ObjectPosition struct {
+	Layer     string
+	Container string
+	Index     int
+	Count     int
+}
+
+// ObjectInfo 对象的编辑能力及直接容器位置
+type ObjectInfo struct {
+	Capabilities ObjectCapabilities
+	Position     ObjectPosition
 }
 
 // Objects 按绘制顺序获取选区的独立快照，保留编辑中的段落信息
@@ -134,20 +138,6 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 	return result, nil
 }
 
-// ObjectPosition 对象在图层或页块直接成员中的位置，Index从0开始，Count不含嵌套页块的对象
-type ObjectPosition struct {
-	Layer     string
-	Container string
-	Index     int
-	Count     int
-}
-
-// ObjectInfo 对象的编辑能力及直接容器位置
-type ObjectInfo struct {
-	Capabilities ObjectCapabilities
-	Position     ObjectPosition
-}
-
 // PageObjectInfo 批量获取页面对象能力与位置，不重复扫描同一容器
 // 每次按当前页面计算，变更和撤销后无需失效旧缓存
 // 入参: page 页面索引
@@ -211,6 +201,187 @@ func (e *Editor) ObjectPosition(page int, id string) (ObjectPosition, error) {
 	return position, nil
 }
 
+// OrderObjects 调整同一图层或页块内选区的绘制顺序，保留各组选中及未选中对象的相对顺序
+// 入参: page 页面索引, ids 对象标识, order 为up、down、top或bottom
+// 返回: error 错误信息
+func (e *Editor) OrderObjects(page int, ids []string, order string) error {
+	if !slices.Contains([]string{"up", "down", "top", "bottom"}, order) {
+		return fmt.Errorf("invalid object order %q", order)
+	}
+	_, indexes, err := e.selectedObjects(page, ids)
+	if err != nil || len(indexes) == 0 {
+		return err
+	}
+	layer := &e.pages[page].Content.Layer[indexes[0].layer]
+	_, siblings := e.objectOrderIndexes(page, layer, ids[0])
+	for i, id := range ids {
+		capability, err := e.ObjectCapabilities(page, id)
+		if err != nil {
+			return err
+		}
+		if !capability.Order || indexes[i].layer != indexes[0].layer || !slices.Contains(siblings, indexes[i].index) {
+			return fmt.Errorf("ordering requires editable objects in the same container")
+		}
+	}
+	layers := copyEditorPage(e.pages[page]).Content.Layer
+	objects := make([]GraphicObject, len(siblings))
+	for i, index := range siblings {
+		objects[i] = layer.Objects[index]
+	}
+	selected := make([]bool, len(objects))
+	for _, index := range indexes {
+		selected[slices.Index(siblings, index.index)] = true
+	}
+	orderEditorObjects(objects, selected, order)
+	for i, index := range siblings {
+		layers[indexes[0].layer].Objects[index] = objects[i]
+	}
+	e.replaceLayers(page, layers)
+	return nil
+}
+
+// DistributeObjects 按可见范围等距分布同页对象，固定两端对象，保留绘制顺序
+// 不足三个对象时不修改；允许负间距，无法保持位置顺序的重叠布局返回错误
+// 入参: page 页面索引, ids 对象标识, axis 为horizontal或vertical
+// 返回: error 错误信息
+func (e *Editor) DistributeObjects(page int, ids []string, axis string) error {
+	if axis != "horizontal" && axis != "vertical" {
+		return fmt.Errorf("invalid distribution axis %q", axis)
+	}
+	objects, indexes, err := e.selectedObjects(page, ids)
+	if err != nil || len(objects) < 3 {
+		return err
+	}
+	boxes, err := e.objectBounds(page, objects)
+	if err != nil {
+		return err
+	}
+	matrices, err := editorDistribution(boxes, indexes, axis)
+	if err != nil {
+		return err
+	}
+	var updates []GraphicObject
+	for i, matrix := range matrices {
+		if matrix == IdentityMatrix {
+			continue
+		}
+		object, err := cloneEditorObject(objects[i])
+		if err != nil {
+			return err
+		}
+		object, err = e.transformObject(object, matrix.e, matrix.f, 1)
+		if err != nil {
+			return err
+		}
+		updates = append(updates, object)
+	}
+	return e.updateObjects(page, updates, true)
+}
+
+// UpdateObjects 原子替换同页对象，按各对象ID定位，全部校验通过后提交一次历史记录
+// 入参: page 页面索引, objects 新对象内容，ID不得重复
+// 返回: error 错误信息
+func (e *Editor) UpdateObjects(page int, objects []GraphicObject) error {
+	return e.updateObjects(page, objects, false)
+}
+
+// TransformObjects 同页对象以页面原点等比缩放后统一平移，保持相对位置，一次撤销恢复全部
+// 入参: page 页面索引, ids 对象标识, dx、dy 位移, scale 正缩放比例
+// 返回: error 错误信息
+func (e *Editor) TransformObjects(page int, ids []string, dx, dy, scale float64) error {
+	if !finite(dx) || !finite(dy) || !finite(scale) || scale <= 0 {
+		return fmt.Errorf("transform requires finite offsets and a positive finite scale")
+	}
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil {
+		return err
+	}
+	if dx == 0 && dy == 0 && scale == 1 {
+		return nil
+	}
+	return e.transformObjects(page, objects, func(object GraphicObject) (GraphicObject, error) {
+		if e.originalPage(page) {
+			if err := validateEditorGeometry(object); err != nil {
+				return GraphicObject{}, err
+			}
+		}
+		return e.transformObject(object, dx, dy, scale)
+	})
+}
+
+// AlignObjects 单对象对齐页面，多对象相互对齐至选区边界，文字采用实际字形范围
+// 入参: page 页面索引, ids 对象标识, alignment 为left、center、right、top、middle或bottom
+// 返回: error 错误信息
+func (e *Editor) AlignObjects(page int, ids []string, alignment string) error {
+	if !slices.Contains([]string{"left", "center", "right", "top", "middle", "bottom"}, alignment) {
+		return fmt.Errorf("invalid alignment %q", alignment)
+	}
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil || len(objects) == 0 {
+		return err
+	}
+	boxes, err := e.objectBounds(page, objects)
+	if err != nil {
+		return err
+	}
+	target, _ := ParseBox(e.pages[page].Area.PhysicalBox)
+	if len(objects) > 1 {
+		target = Box{}
+		for _, box := range boxes {
+			target = unionTextBox(target, box)
+		}
+	}
+	for i, box := range boxes {
+		matrix := editorAlignment(box, target, alignment)
+		objects[i], err = cloneEditorObject(objects[i])
+		if err != nil {
+			return err
+		}
+		objects[i], err = e.transformObject(objects[i], matrix.e, matrix.f, 1)
+		if err != nil {
+			return err
+		}
+	}
+	return e.updateObjects(page, objects, true)
+}
+
+// DeleteObjects 原子删除同页对象，保留其余对象顺序，一次撤销恢复全部
+// 入参: page 页面索引, ids 对象标识
+// 返回: error 错误信息
+func (e *Editor) DeleteObjects(page int, ids []string) error {
+	_, indexes, err := e.selectedObjects(page, ids)
+	if err != nil || len(indexes) == 0 {
+		return err
+	}
+	for _, id := range ids {
+		capability, err := e.ObjectCapabilities(page, id)
+		if err != nil {
+			return err
+		}
+		if !capability.Delete {
+			return fmt.Errorf("object %q cannot be deleted: %w", id, capability.editError())
+		}
+	}
+	layers := copyEditorPage(e.pages[page]).Content.Layer
+	slices.SortFunc(indexes, compareEditorPosition)
+	for _, index := range slices.Backward(indexes) {
+		layer := &layers[index.layer]
+		layer.Objects = slices.Delete(layer.Objects, index.index, index.index+1)
+	}
+	e.replaceLayers(page, layers)
+	return nil
+}
+
+// compareEditorPosition 比较对象在页面结构中的先后顺序
+// 入参: a、b 对象位置
+// 返回: int 比较结果
+func compareEditorPosition(a, b editorObjectPosition) int {
+	if value := cmp.Compare(a.layer, b.layer); value != 0 {
+		return value
+	}
+	return cmp.Compare(a.index, b.index)
+}
+
 // objectOrderIndexes 获取同一直接容器的对象索引，不跨越图层或页块
 // 入参: page 页面索引, layer 图层, id 对象标识
 // 返回: *editorXML 原始容器, []int 对象索引
@@ -253,45 +424,6 @@ func (e *Editor) objectOrderParent(nodes map[string]*editorXML, id string) *edit
 	return nil
 }
 
-// OrderObjects 调整同一图层或页块内选区的绘制顺序，保留各组选中及未选中对象的相对顺序
-// 入参: page 页面索引, ids 对象标识, order 为up、down、top或bottom
-// 返回: error 错误信息
-func (e *Editor) OrderObjects(page int, ids []string, order string) error {
-	if !slices.Contains([]string{"up", "down", "top", "bottom"}, order) {
-		return fmt.Errorf("invalid object order %q", order)
-	}
-	_, indexes, err := e.selectedObjects(page, ids)
-	if err != nil || len(indexes) == 0 {
-		return err
-	}
-	layer := &e.pages[page].Content.Layer[indexes[0].layer]
-	_, siblings := e.objectOrderIndexes(page, layer, ids[0])
-	for i, id := range ids {
-		capability, err := e.ObjectCapabilities(page, id)
-		if err != nil {
-			return err
-		}
-		if !capability.Order || indexes[i].layer != indexes[0].layer || !slices.Contains(siblings, indexes[i].index) {
-			return fmt.Errorf("ordering requires editable objects in the same container")
-		}
-	}
-	layers := copyEditorPage(e.pages[page]).Content.Layer
-	objects := make([]GraphicObject, len(siblings))
-	for i, index := range siblings {
-		objects[i] = layer.Objects[index]
-	}
-	selected := make([]bool, len(objects))
-	for _, index := range indexes {
-		selected[slices.Index(siblings, index.index)] = true
-	}
-	orderEditorObjects(objects, selected, order)
-	for i, index := range siblings {
-		layers[indexes[0].layer].Objects[index] = objects[i]
-	}
-	e.replaceLayers(page, layers)
-	return nil
-}
-
 // orderEditorObjects 调整选区层级，保持选中及未选中对象各自的相对顺序
 // 入参: objects 同容器对象, selected 选中状态, order 排序方向
 func orderEditorObjects[T any](objects []T, selected []bool, order string) {
@@ -321,44 +453,6 @@ func orderEditorObjects[T any](objects []T, selected []bool, order string) {
 		}
 		copy(objects, ordered)
 	}
-}
-
-// DistributeObjects 按可见范围等距分布同页对象，固定两端对象，保留绘制顺序
-// 不足三个对象时不修改；允许负间距，无法保持位置顺序的重叠布局返回错误
-// 入参: page 页面索引, ids 对象标识, axis 为horizontal或vertical
-// 返回: error 错误信息
-func (e *Editor) DistributeObjects(page int, ids []string, axis string) error {
-	if axis != "horizontal" && axis != "vertical" {
-		return fmt.Errorf("invalid distribution axis %q", axis)
-	}
-	objects, indexes, err := e.selectedObjects(page, ids)
-	if err != nil || len(objects) < 3 {
-		return err
-	}
-	boxes, err := e.objectBounds(page, objects)
-	if err != nil {
-		return err
-	}
-	matrices, err := editorDistribution(boxes, indexes, axis)
-	if err != nil {
-		return err
-	}
-	var updates []GraphicObject
-	for i, matrix := range matrices {
-		if matrix == IdentityMatrix {
-			continue
-		}
-		object, err := cloneEditorObject(objects[i])
-		if err != nil {
-			return err
-		}
-		object, err = e.transformObject(object, matrix.e, matrix.f, 1)
-		if err != nil {
-			return err
-		}
-		updates = append(updates, object)
-	}
-	return e.updateObjects(page, updates, true)
 }
 
 // editorDistribution 计算等间距平移，位置相同时按原绘制顺序排序
@@ -432,13 +526,6 @@ func (e *Editor) replaceLayers(page int, layers []Layer) {
 		change.undo = func(e *Editor) { apply(e, before) }
 		change.redo = func(e *Editor) { apply(e, after) }
 	}
-}
-
-// UpdateObjects 原子替换同页对象，按各对象ID定位，全部校验通过后提交一次历史记录
-// 入参: page 页面索引, objects 新对象内容，ID不得重复
-// 返回: error 错误信息
-func (e *Editor) UpdateObjects(page int, objects []GraphicObject) error {
-	return e.updateObjects(page, objects, false)
 }
 
 // updateObjects 校验内容更新或几何与外观变换，原子提交跨图层选区
@@ -545,66 +632,6 @@ func (e *Editor) updateObjectOrigins(page int, objects []GraphicObject, preserve
 	return nil
 }
 
-// TransformObjects 同页对象以页面原点等比缩放后统一平移，保持相对位置，一次撤销恢复全部
-// 入参: page 页面索引, ids 对象标识, dx、dy 位移, scale 正缩放比例
-// 返回: error 错误信息
-func (e *Editor) TransformObjects(page int, ids []string, dx, dy, scale float64) error {
-	if !finite(dx) || !finite(dy) || !finite(scale) || scale <= 0 {
-		return fmt.Errorf("transform requires finite offsets and a positive finite scale")
-	}
-	objects, _, err := e.selectedObjects(page, ids)
-	if err != nil {
-		return err
-	}
-	if dx == 0 && dy == 0 && scale == 1 {
-		return nil
-	}
-	return e.transformObjects(page, objects, func(object GraphicObject) (GraphicObject, error) {
-		if e.originalPage(page) {
-			if err := validateEditorGeometry(object); err != nil {
-				return GraphicObject{}, err
-			}
-		}
-		return e.transformObject(object, dx, dy, scale)
-	})
-}
-
-// AlignObjects 单对象对齐页面，多对象相互对齐至选区边界，文字采用实际字形范围
-// 入参: page 页面索引, ids 对象标识, alignment 为left、center、right、top、middle或bottom
-// 返回: error 错误信息
-func (e *Editor) AlignObjects(page int, ids []string, alignment string) error {
-	if !slices.Contains([]string{"left", "center", "right", "top", "middle", "bottom"}, alignment) {
-		return fmt.Errorf("invalid alignment %q", alignment)
-	}
-	objects, _, err := e.selectedObjects(page, ids)
-	if err != nil || len(objects) == 0 {
-		return err
-	}
-	boxes, err := e.objectBounds(page, objects)
-	if err != nil {
-		return err
-	}
-	target, _ := ParseBox(e.pages[page].Area.PhysicalBox)
-	if len(objects) > 1 {
-		target = Box{}
-		for _, box := range boxes {
-			target = unionTextBox(target, box)
-		}
-	}
-	for i, box := range boxes {
-		matrix := editorAlignment(box, target, alignment)
-		objects[i], err = cloneEditorObject(objects[i])
-		if err != nil {
-			return err
-		}
-		objects[i], err = e.transformObject(objects[i], matrix.e, matrix.f, 1)
-		if err != nil {
-			return err
-		}
-	}
-	return e.updateObjects(page, objects, true)
-}
-
 // editorAlignment 计算对象范围到目标边缘或中心的平移
 // 入参: box 对象范围, target 目标范围, alignment 对齐方式
 // 返回: Matrix 页面平移
@@ -631,33 +658,6 @@ func editorAlignment(box, target Box, alignment string) Matrix {
 		matrix.f = 0
 	}
 	return matrix
-}
-
-// DeleteObjects 原子删除同页对象，保留其余对象顺序，一次撤销恢复全部
-// 入参: page 页面索引, ids 对象标识
-// 返回: error 错误信息
-func (e *Editor) DeleteObjects(page int, ids []string) error {
-	_, indexes, err := e.selectedObjects(page, ids)
-	if err != nil || len(indexes) == 0 {
-		return err
-	}
-	for _, id := range ids {
-		capability, err := e.ObjectCapabilities(page, id)
-		if err != nil {
-			return err
-		}
-		if !capability.Delete {
-			return fmt.Errorf("object %q cannot be deleted: %w", id, capability.editError())
-		}
-	}
-	layers := copyEditorPage(e.pages[page]).Content.Layer
-	slices.SortFunc(indexes, compareEditorPosition)
-	for _, index := range slices.Backward(indexes) {
-		layer := &layers[index.layer]
-		layer.Objects = slices.Delete(layer.Objects, index.index, index.index+1)
-	}
-	e.replaceLayers(page, layers)
-	return nil
 }
 
 // selectedObjects 校验同页选择，返回内部只读对象与对应索引

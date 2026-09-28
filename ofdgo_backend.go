@@ -22,6 +22,13 @@ import (
 	"reflect"
 )
 
+const (
+	SVGEmbedded SVGMode = iota
+	SVGExternalFonts
+	SVGExternalResources
+	SVGObjects
+)
+
 // ErrBackendUnavailable 表示未配置所需后端，不会自动切换其他实现
 var ErrBackendUnavailable = errors.New("render backend unavailable")
 
@@ -67,13 +74,6 @@ type ObjectMeasurement struct {
 
 // SVGMode 指定SVG资源封装方式，Objects模式还需保留稳定的对象分组
 type SVGMode uint8
-
-const (
-	SVGEmbedded SVGMode = iota
-	SVGExternalFonts
-	SVGExternalResources
-	SVGObjects
-)
 
 // SVGBackend 输出SVG及资源，不得修改源页面或省略不支持的内容
 // renderer提供文档和排版能力，输出时不得再次调用RenderToSVG系列方法
@@ -133,16 +133,6 @@ func (b RenderBackends) Info() BackendInfo {
 	return BackendInfo{FontResources: backendName(b.FontResources), Fonts: backendName(b.Fonts), Geometry: backendName(b.Geometry), Compiler: backendName(b.Compiler), Raster: backendName(b.Raster), SVG: backendName(b.SVG), PDF: backendName(b.PDF), EPS: backendName(b.EPS)}
 }
 
-// backendName 获取已配置的后端标识
-// 入参: backend 后端实例
-// 返回: string 后端标识，未配置时为空
-func backendName(backend Backend) string {
-	if backend == nil {
-		return ""
-	}
-	return backend.Name()
-}
-
 // WithRenderBackends 替换完整后端组合，未配置的能力不会沿用默认实现
 // 入参: backends 后端组合
 // 返回: RendererOption 渲染选项
@@ -165,6 +155,45 @@ func WithRenderBackends(backends RenderBackends) RendererOption {
 			r.resetFontBackendCache()
 		}
 	}
+}
+
+// Backends 返回当前后端配置副本，可修改后通过WithRenderBackends应用
+// 返回: RenderBackends 后端组合
+func (r *Renderer) Backends() RenderBackends {
+	return r.backends
+}
+
+// WithRasterBackend 选择当前渲染器的图像、PNG和JPEG后端，不改变SVG、PDF或OFD保存
+// 入参: backend 光栅后端，nil禁用图像输出
+// 返回: RendererOption 渲染选项
+func WithRasterBackend(backend RasterBackend) RendererOption {
+	return func(r *Renderer) {
+		if !sameBackend(r.backends.Raster, backend) {
+			r.backendStates = make(map[any]any)
+		}
+		r.backends.Raster = backend
+	}
+}
+
+// CompilePage 编译与后端无关的光栅页面，可交给任意RasterBackend绘制
+// 字形、描边、裁剪和底纹沿用文档语义，不交由后端重新排版
+// 入参: page 页面内容
+// 返回: *RasterPage 只读绘制页面, error 编译错误
+func (r *Renderer) CompilePage(page *PageContent) (*RasterPage, error) {
+	if r.backends.Compiler == nil {
+		return nil, fmt.Errorf("page compiler: %w", ErrBackendUnavailable)
+	}
+	return r.backends.Compiler.CompilePage(r, page)
+}
+
+// backendName 获取已配置的后端标识
+// 入参: backend 后端实例
+// 返回: string 后端标识，未配置时为空
+func backendName(backend Backend) string {
+	if backend == nil {
+		return ""
+	}
+	return backend.Name()
 }
 
 // sameBackend 判断不可变值配置是否未变，包含指针的配置重新应用时刷新可变状态
@@ -201,33 +230,4 @@ func immutableBackendValue(value reflect.Value) bool {
 		}
 	}
 	return true
-}
-
-// Backends 返回当前后端配置副本，可修改后通过WithRenderBackends应用
-// 返回: RenderBackends 后端组合
-func (r *Renderer) Backends() RenderBackends {
-	return r.backends
-}
-
-// WithRasterBackend 选择当前渲染器的图像、PNG和JPEG后端，不改变SVG、PDF或OFD保存
-// 入参: backend 光栅后端，nil禁用图像输出
-// 返回: RendererOption 渲染选项
-func WithRasterBackend(backend RasterBackend) RendererOption {
-	return func(r *Renderer) {
-		if !sameBackend(r.backends.Raster, backend) {
-			r.backendStates = make(map[any]any)
-		}
-		r.backends.Raster = backend
-	}
-}
-
-// CompilePage 编译与后端无关的光栅页面，可交给任意RasterBackend绘制
-// 字形、描边、裁剪和底纹沿用文档语义，不交由后端重新排版
-// 入参: page 页面内容
-// 返回: *RasterPage 只读绘制页面, error 编译错误
-func (r *Renderer) CompilePage(page *PageContent) (*RasterPage, error) {
-	if r.backends.Compiler == nil {
-		return nil, fmt.Errorf("page compiler: %w", ErrBackendUnavailable)
-	}
-	return r.backends.Compiler.CompilePage(r, page)
 }

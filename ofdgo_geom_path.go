@@ -20,13 +20,6 @@ import (
 	"strings"
 )
 
-// GeometryPath 保存独立于绘图库的几何路径，不扁平化曲线或舍入坐标
-// 坐标以左上角为原点，单位为毫米，子路径从Move开始，Close回到当前子路径起点
-type GeometryPath []GeometrySegment
-
-// GeometryVerb 表示几何路径指令
-type GeometryVerb uint8
-
 const (
 	GeometryMove GeometryVerb = iota
 	GeometryLine
@@ -35,6 +28,13 @@ const (
 	GeometryArc
 	GeometryClose
 )
+
+// GeometryPath 保存独立于绘图库的几何路径，不扁平化曲线或舍入坐标
+// 坐标以左上角为原点，单位为毫米，子路径从Move开始，Close回到当前子路径起点
+type GeometryPath []GeometrySegment
+
+// GeometryVerb 表示几何路径指令
+type GeometryVerb uint8
 
 // GeometrySegment 保存路径端点、贝塞尔控制点或端点式椭圆弧参数
 // 弧线Rotation单位为度，Sweep为true表示顺时针，Large表示大弧
@@ -117,6 +117,18 @@ func ParseGeometryPath(data string) (GeometryPath, error) {
 	return result, nil
 }
 
+// SVG 将几何路径编码为SVG路径，不改变曲线或坐标精度
+// 返回: string SVG路径, error 不支持的路径指令
+func (p GeometryPath) SVG() (string, error) {
+	return p.encode(true)
+}
+
+// OFD 将几何路径编码为OFD紧缩路径
+// 返回: string 紧缩路径, error 不支持的路径指令
+func (p GeometryPath) OFD() (string, error) {
+	return p.encode(false)
+}
+
 // objectGeometryPath 解析对象路径并由当前几何实现应用页面变换
 // 入参: geometry 几何后端, object 路径对象
 // 返回: GeometryPath 页面路径, error 参数或变换错误
@@ -154,18 +166,6 @@ func closedGeometry(path GeometryPath) GeometryPath {
 		result = append(result, GeometrySegment{Verb: GeometryClose})
 	}
 	return result
-}
-
-// SVG 将几何路径编码为SVG路径，不改变曲线或坐标精度
-// 返回: string SVG路径, error 不支持的路径指令
-func (p GeometryPath) SVG() (string, error) {
-	return p.encode(true)
-}
-
-// OFD 将几何路径编码为OFD紧缩路径
-// 返回: string 紧缩路径, error 不支持的路径指令
-func (p GeometryPath) OFD() (string, error) {
-	return p.encode(false)
 }
 
 // encode 按目标格式写入路径，圆弧标志采用两种格式均支持的0和1

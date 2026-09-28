@@ -85,67 +85,6 @@ type editorCompositeCrop struct {
 	exists  bool
 }
 
-// setStates 独立保存当前XML子树的会话信息，共享不可变记录
-// 入参: states 来源记录
-func (n *editorCompositeNode) setStates(states map[string]editorCompositeState) {
-	n.states = make(map[string]editorCompositeState)
-	var visit func(*editorXML)
-	visit = func(node *editorXML) {
-		if state, ok := states[node.attr("ID")]; ok {
-			n.states[node.attr("ID")] = state
-		}
-		for _, child := range node.children {
-			visit(child)
-		}
-	}
-	visit(n.node)
-	n.object.TextObject.layout = n.states[editorObjectID(n.object)].layout
-}
-
-// setState 替换当前对象的会话记录并计入本次事务
-// 入参: state 新记录
-func (n *editorCompositeNode) setState(state editorCompositeState) {
-	id := editorObjectID(n.object)
-	if reflect.DeepEqual(n.states[id], state) {
-		return
-	}
-	if n.states == nil {
-		n.states = make(map[string]editorCompositeState)
-	}
-	if state == (editorCompositeState{}) {
-		delete(n.states, id)
-	} else {
-		n.states[id] = state
-	}
-	n.object.TextObject.layout = state.layout
-	n.changed = true
-}
-
-// remapCompositeStates 随XML标识重映射会话记录，仅保留当前子树的对象
-// 入参: states 原记录, ids 标识映射
-// 返回: map[string]editorCompositeState 新记录
-func remapCompositeStates(states map[string]editorCompositeState, ids map[string]string) map[string]editorCompositeState {
-	var result map[string]editorCompositeState
-	for id, next := range ids {
-		if state, ok := states[id]; ok {
-			if result == nil {
-				result = make(map[string]editorCompositeState)
-			}
-			result[next] = state
-		}
-	}
-	return result
-}
-
-// removeCompositeStates 清除子树旧记录，再由写入结果合并新记录
-// 入参: states 目标记录, node 子树根节点
-func removeCompositeStates(states map[string]editorCompositeState, node *editorXML) {
-	delete(states, node.attr("ID"))
-	for _, child := range node.children {
-		removeCompositeStates(states, child)
-	}
-}
-
 // CompositeObjects 枚举复合对象的直接可绘制成员，资源引用层不占用路径层级
 // 入参: page 页面索引, path 复合对象路径
 // 返回: []CompositeMember 按绘制顺序排列的成员, error 错误信息
@@ -283,6 +222,143 @@ func (e *Editor) ResizeCompositeObjects(page int, path ObjectPath, indexes []int
 		}
 		return nil
 	})
+}
+
+// StyleCompositeObjects 原子修改成员透明度、文字颜色及路径填充、描边和线宽
+// 不重排文字，不改写继承参数；显式实线覆盖原虚线继承
+// 入参: page 页面索引, path 父路径, indexes 成员序号, style 待修改属性，线宽使用页面毫米
+// 返回: error 错误信息
+func (e *Editor) StyleCompositeObjects(page int, path ObjectPath, indexes []int, style ObjectStyle) error {
+	return e.editCompositeObjects(page, path, indexes, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
+		paint := style.Fill != nil || style.Stroke != nil || style.FillColor != nil || style.StrokeColor != nil || style.LineWidth != nil || style.DashPattern != nil || style.DashOffset != nil || style.Cap != nil || style.Join != nil
+		for i, node := range nodes {
+			capability := members[i].Capabilities
+			if !capability.Transform || paint && !capability.Paint {
+				return fmt.Errorf("composite member %d cannot accept this style: %w", indexes[i], capability.editError())
+			}
+			local := style
+			switch members[i].Object.Type {
+			case "TextObject":
+				local.FillColor = editorStyleColor(style.FillColor, members[i].Object.TextObject.FillColor)
+			case "PathObject":
+				p := members[i].Object.PathObject
+				local.FillColor = editorStyleColor(style.FillColor, p.FillColor)
+				local.StrokeColor = (*StrokeColor)(editorStyleColor((*FillColor)(style.StrokeColor), (*FillColor)(p.StrokeColor)))
+				if style.LineWidth != nil {
+					width := *style.LineWidth / members[i].StrokeScale
+					local.LineWidth = &width
+				}
+			}
+			object, err := e.styleObject(node.object, local)
+			if err != nil {
+				return err
+			}
+			if err := node.update(object); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// AlignCompositeObjects 将内部多选成员对齐至选区边界，单选时对齐页面
+// 入参: page 页面索引, path 父路径, indexes 成员序号, alignment 为left、center、right、top、middle或bottom
+// 返回: error 错误信息
+func (e *Editor) AlignCompositeObjects(page int, path ObjectPath, indexes []int, alignment string) error {
+	if !slices.Contains([]string{"left", "center", "right", "top", "middle", "bottom"}, alignment) {
+		return fmt.Errorf("invalid alignment %q", alignment)
+	}
+	return e.arrangeCompositeObjects(page, path, indexes, func(boxes []Box) ([]Matrix, error) {
+		target, _ := ParseBox(e.pages[page].Area.PhysicalBox)
+		if len(boxes) > 1 {
+			target = Box{}
+			for _, box := range boxes {
+				target = unionTextBox(target, box)
+			}
+		}
+		matrices := make([]Matrix, len(boxes))
+		for i, box := range boxes {
+			matrices[i] = editorAlignment(box, target, alignment)
+		}
+		return matrices, nil
+	})
+}
+
+// DistributeCompositeObjects 按可见范围等距分布内部成员，固定两端并保留绘制顺序
+// 入参: page 页面索引, path 父路径, indexes 成员序号, axis 为horizontal或vertical
+// 返回: error 错误信息
+func (e *Editor) DistributeCompositeObjects(page int, path ObjectPath, indexes []int, axis string) error {
+	if axis != "horizontal" && axis != "vertical" {
+		return fmt.Errorf("invalid distribution axis %q", axis)
+	}
+	return e.arrangeCompositeObjects(page, path, indexes, func(boxes []Box) ([]Matrix, error) {
+		positions := make([]editorObjectPosition, len(indexes))
+		for i, index := range indexes {
+			positions[i].index = index
+		}
+		return editorDistribution(boxes, positions, axis)
+	})
+}
+
+// setStates 独立保存当前XML子树的会话信息，共享不可变记录
+// 入参: states 来源记录
+func (n *editorCompositeNode) setStates(states map[string]editorCompositeState) {
+	n.states = make(map[string]editorCompositeState)
+	var visit func(*editorXML)
+	visit = func(node *editorXML) {
+		if state, ok := states[node.attr("ID")]; ok {
+			n.states[node.attr("ID")] = state
+		}
+		for _, child := range node.children {
+			visit(child)
+		}
+	}
+	visit(n.node)
+	n.object.TextObject.layout = n.states[editorObjectID(n.object)].layout
+}
+
+// setState 替换当前对象的会话记录并计入本次事务
+// 入参: state 新记录
+func (n *editorCompositeNode) setState(state editorCompositeState) {
+	id := editorObjectID(n.object)
+	if reflect.DeepEqual(n.states[id], state) {
+		return
+	}
+	if n.states == nil {
+		n.states = make(map[string]editorCompositeState)
+	}
+	if state == (editorCompositeState{}) {
+		delete(n.states, id)
+	} else {
+		n.states[id] = state
+	}
+	n.object.TextObject.layout = state.layout
+	n.changed = true
+}
+
+// remapCompositeStates 随XML标识重映射会话记录，仅保留当前子树的对象
+// 入参: states 原记录, ids 标识映射
+// 返回: map[string]editorCompositeState 新记录
+func remapCompositeStates(states map[string]editorCompositeState, ids map[string]string) map[string]editorCompositeState {
+	var result map[string]editorCompositeState
+	for id, next := range ids {
+		if state, ok := states[id]; ok {
+			if result == nil {
+				result = make(map[string]editorCompositeState)
+			}
+			result[next] = state
+		}
+	}
+	return result
+}
+
+// removeCompositeStates 清除子树旧记录，再由写入结果合并新记录
+// 入参: states 目标记录, node 子树根节点
+func removeCompositeStates(states map[string]editorCompositeState, node *editorXML) {
+	delete(states, node.attr("ID"))
+	for _, child := range node.children {
+		removeCompositeStates(states, child)
+	}
 }
 
 // compositeOrientation 将旋转或镜像中心移至选区中心
@@ -614,82 +690,6 @@ func (e *Editor) compositeMemberStyle(node *editorCompositeNode) (GraphicObject,
 		object.PathObject.LineWidth = defaultPathLineWidth
 	}
 	return object, err
-}
-
-// StyleCompositeObjects 原子修改成员透明度、文字颜色及路径填充、描边和线宽
-// 不重排文字，不改写继承参数；显式实线覆盖原虚线继承
-// 入参: page 页面索引, path 父路径, indexes 成员序号, style 待修改属性，线宽使用页面毫米
-// 返回: error 错误信息
-func (e *Editor) StyleCompositeObjects(page int, path ObjectPath, indexes []int, style ObjectStyle) error {
-	return e.editCompositeObjects(page, path, indexes, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
-		paint := style.Fill != nil || style.Stroke != nil || style.FillColor != nil || style.StrokeColor != nil || style.LineWidth != nil || style.DashPattern != nil || style.DashOffset != nil || style.Cap != nil || style.Join != nil
-		for i, node := range nodes {
-			capability := members[i].Capabilities
-			if !capability.Transform || paint && !capability.Paint {
-				return fmt.Errorf("composite member %d cannot accept this style: %w", indexes[i], capability.editError())
-			}
-			local := style
-			switch members[i].Object.Type {
-			case "TextObject":
-				local.FillColor = editorStyleColor(style.FillColor, members[i].Object.TextObject.FillColor)
-			case "PathObject":
-				p := members[i].Object.PathObject
-				local.FillColor = editorStyleColor(style.FillColor, p.FillColor)
-				local.StrokeColor = (*StrokeColor)(editorStyleColor((*FillColor)(style.StrokeColor), (*FillColor)(p.StrokeColor)))
-				if style.LineWidth != nil {
-					width := *style.LineWidth / members[i].StrokeScale
-					local.LineWidth = &width
-				}
-			}
-			object, err := e.styleObject(node.object, local)
-			if err != nil {
-				return err
-			}
-			if err := node.update(object); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-// AlignCompositeObjects 将内部多选成员对齐至选区边界，单选时对齐页面
-// 入参: page 页面索引, path 父路径, indexes 成员序号, alignment 为left、center、right、top、middle或bottom
-// 返回: error 错误信息
-func (e *Editor) AlignCompositeObjects(page int, path ObjectPath, indexes []int, alignment string) error {
-	if !slices.Contains([]string{"left", "center", "right", "top", "middle", "bottom"}, alignment) {
-		return fmt.Errorf("invalid alignment %q", alignment)
-	}
-	return e.arrangeCompositeObjects(page, path, indexes, func(boxes []Box) ([]Matrix, error) {
-		target, _ := ParseBox(e.pages[page].Area.PhysicalBox)
-		if len(boxes) > 1 {
-			target = Box{}
-			for _, box := range boxes {
-				target = unionTextBox(target, box)
-			}
-		}
-		matrices := make([]Matrix, len(boxes))
-		for i, box := range boxes {
-			matrices[i] = editorAlignment(box, target, alignment)
-		}
-		return matrices, nil
-	})
-}
-
-// DistributeCompositeObjects 按可见范围等距分布内部成员，固定两端并保留绘制顺序
-// 入参: page 页面索引, path 父路径, indexes 成员序号, axis 为horizontal或vertical
-// 返回: error 错误信息
-func (e *Editor) DistributeCompositeObjects(page int, path ObjectPath, indexes []int, axis string) error {
-	if axis != "horizontal" && axis != "vertical" {
-		return fmt.Errorf("invalid distribution axis %q", axis)
-	}
-	return e.arrangeCompositeObjects(page, path, indexes, func(boxes []Box) ([]Matrix, error) {
-		positions := make([]editorObjectPosition, len(indexes))
-		for i, index := range indexes {
-			positions[i].index = index
-		}
-		return editorDistribution(boxes, positions, axis)
-	})
 }
 
 // arrangeCompositeObjects 按成员实际轮廓计算独立页面变换并提交一次历史记录

@@ -14,6 +14,15 @@
 
 package ofdgo
 
+const (
+	sceneObject sceneCommandKind = iota
+	sceneStamp
+	sceneBeginObject
+	sceneBeginAnnotation
+	sceneEnd
+	sceneSkip
+)
+
 // PageScene 保存后端无关的页面语义与绘制顺序，不提前展开文字或重新编码图片
 // 场景借用源页面及资源的只读引用，编辑文档后应重新构建
 type PageScene struct {
@@ -35,14 +44,8 @@ type sceneCommand struct {
 // sceneCommandKind 区分场景中的绘制和分组事件
 type sceneCommandKind uint8
 
-const (
-	sceneObject sceneCommandKind = iota
-	sceneStamp
-	sceneBeginObject
-	sceneBeginAnnotation
-	sceneEnd
-	sceneSkip
-)
+// sceneRecorder 收集公共遍历事件，不解释绘制外观
+type sceneRecorder PageScene
 
 // CompileScene 展开页面结构，保留原文、字形索引、动作和对象标识
 // 不提前绘制文字或图片，裁剪轮廓按几何后端需求解析
@@ -102,19 +105,6 @@ func (s *PageScene) Walk(visitor PageVisitor) error {
 	return nil
 }
 
-// closeSceneGroups 在访问器失败时配对结束已建立的分组
-// 入参: groups 分组访问器, stack 分组状态
-func closeSceneGroups(groups PageGroups, stack []bool) {
-	for i := len(stack) - 1; i >= 0; i-- {
-		if stack[i] {
-			groups.EndObject()
-		}
-	}
-}
-
-// sceneRecorder 收集公共遍历事件，不解释绘制外观
-type sceneRecorder PageScene
-
 // DrawObject 保留源对象及继承状态
 // 入参: object 源对象, state 继承状态
 // 返回: error 固定为空
@@ -154,4 +144,14 @@ func (s *sceneRecorder) EndObject() { s.commands = append(s.commands, sceneComma
 // 入参: count 对象数量
 func (s *sceneRecorder) SkipObjects(count int) {
 	s.commands = append(s.commands, sceneCommand{kind: sceneSkip, count: count})
+}
+
+// closeSceneGroups 在访问器失败时配对结束已建立的分组
+// 入参: groups 分组访问器, stack 分组状态
+func closeSceneGroups(groups PageGroups, stack []bool) {
+	for i := len(stack) - 1; i >= 0; i-- {
+		if stack[i] {
+			groups.EndObject()
+		}
+	}
 }

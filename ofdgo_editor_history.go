@@ -19,6 +19,14 @@ import (
 	"slices"
 )
 
+// editorChange 页面或对象操作及其修订标识
+type editorChange struct {
+	undo   func(*Editor)
+	redo   func(*Editor)
+	before uint64
+	after  uint64
+}
+
 // Transaction 将多项修改作为一次原子操作提交，失败时保留原文档及历史
 // 回调仅操作传入的编辑器，不可保留该实例供后续使用
 // 入参: edit 批量修改回调
@@ -47,53 +55,6 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 		}
 	}
 	return nil
-}
-
-// transactionSnapshot 复制可变容器，保留只读XML、图元及二进制资源的共享
-// 返回: Editor 独立事务状态
-func (e *Editor) transactionSnapshot() Editor {
-	next := *e
-	next.Info = cloneEditorData(e.Info)
-	next.pages = make([]PageContent, len(e.pages))
-	for i, page := range e.pages {
-		next.pages[i] = copyEditorPage(page)
-	}
-	next.resources = slices.Clone(e.resources)
-	next.fonts, next.images, next.resourceID = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID)
-	next.origins = maps.Clone(e.origins)
-	next.removedPages = maps.Clone(e.removedPages)
-	next.fontMetrics = maps.Clone(e.fontMetrics)
-	if e.source != nil {
-		source := *e.source
-		source.pages, source.origins = maps.Clone(source.pages), maps.Clone(source.origins)
-		next.source = &source
-	}
-	return next
-}
-
-// restoreTransaction 恢复文档状态并保留历史容器、共享资源和递增标识
-// 入参: state 文档状态
-func (e *Editor) restoreTransaction(state Editor) {
-	state = state.transactionSnapshot()
-	if len(e.resources) > len(state.resources) {
-		state.resources = append(state.resources, e.resources[len(state.resources):]...)
-	}
-	maps.Copy(state.fonts, e.fonts)
-	maps.Copy(state.images, e.images)
-	maps.Copy(state.resourceID, e.resourceID)
-	state.history, state.historyIndex, state.historyLimit = e.history, e.historyIndex, e.historyLimit
-	state.serial, state.maxID = max(e.serial, state.serial), max(e.maxID, state.maxID)
-	state.backends, state.fontDirs, state.fontFS = e.backends, e.fontDirs, e.fontFS
-	state.fontRenderer, state.fontMetrics = e.fontRenderer, e.fontMetrics
-	*e = state
-}
-
-// editorChange 页面或对象操作及其修订标识
-type editorChange struct {
-	undo   func(*Editor)
-	redo   func(*Editor)
-	before uint64
-	after  uint64
 }
 
 // SetHistoryLimit 设置撤销和重做记录的总上限，默认关闭，非正数关闭并释放记录
@@ -158,6 +119,45 @@ func (e *Editor) Redo() bool {
 // 返回: uint64 修订标识
 func (e *Editor) Revision() uint64 {
 	return e.revision
+}
+
+// transactionSnapshot 复制可变容器，保留只读XML、图元及二进制资源的共享
+// 返回: Editor 独立事务状态
+func (e *Editor) transactionSnapshot() Editor {
+	next := *e
+	next.Info = cloneEditorData(e.Info)
+	next.pages = make([]PageContent, len(e.pages))
+	for i, page := range e.pages {
+		next.pages[i] = copyEditorPage(page)
+	}
+	next.resources = slices.Clone(e.resources)
+	next.fonts, next.images, next.resourceID = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID)
+	next.origins = maps.Clone(e.origins)
+	next.removedPages = maps.Clone(e.removedPages)
+	next.fontMetrics = maps.Clone(e.fontMetrics)
+	if e.source != nil {
+		source := *e.source
+		source.pages, source.origins = maps.Clone(source.pages), maps.Clone(source.origins)
+		next.source = &source
+	}
+	return next
+}
+
+// restoreTransaction 恢复文档状态并保留历史容器、共享资源和递增标识
+// 入参: state 文档状态
+func (e *Editor) restoreTransaction(state Editor) {
+	state = state.transactionSnapshot()
+	if len(e.resources) > len(state.resources) {
+		state.resources = append(state.resources, e.resources[len(state.resources):]...)
+	}
+	maps.Copy(state.fonts, e.fonts)
+	maps.Copy(state.images, e.images)
+	maps.Copy(state.resourceID, e.resourceID)
+	state.history, state.historyIndex, state.historyLimit = e.history, e.historyIndex, e.historyLimit
+	state.serial, state.maxID = max(e.serial, state.serial), max(e.maxID, state.maxID)
+	state.backends, state.fontDirs, state.fontFS = e.backends, e.fontDirs, e.fontFS
+	state.fontRenderer, state.fontMetrics = e.fontRenderer, e.fontMetrics
+	*e = state
 }
 
 // recordChange 分配修订标识并为已完成的有效修改预留记录

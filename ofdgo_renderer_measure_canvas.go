@@ -21,6 +21,13 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
+// boundsRenderer 收集绘制范围，不分配页面像素或合并独立图形轮廓
+type boundsRenderer struct {
+	box      Box
+	collect  bool
+	contours []ObjectContour
+}
+
 // MeasureObject 使用默认解释器度量对象，不分配页面像素
 // 入参: r 渲染器, object 图形对象, options 度量上下文
 // 返回: ObjectMeasurement 度量结果, error 错误信息
@@ -85,82 +92,10 @@ func (CanvasBackend) MeasureObject(r *Renderer, object GraphicObject, options Me
 	return ObjectMeasurement{Bounds: bounds.box, Contours: bounds.contours}, renderer.renderError
 }
 
-// measureImage 复用图片变换与裁剪语义度量范围，不读取像素数据
-// 入参: ctx 度量画布, obj 图片, pageH 页面高度, parentCTM 父变换, boundaryInCTM 边界是否参与变换, parentClip 父裁剪
-func (r *Renderer) measureImage(ctx *canvas.Context, obj ImageObject, pageH float64, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
-	if obj.Visible != nil && !*obj.Visible || obj.Alpha != nil && *obj.Alpha == 0 {
-		return
-	}
-	box, _ := ParseBox(obj.Boundary)
-	ctm := NewMatrix(obj.CTM)
-	if obj.CTM == "" {
-		ctm = Matrix{a: box.W, d: box.H}
-	}
-	m := TranslationMatrix(box.X, box.Y).Multiply(ctm)
-	if parentCTM != nil {
-		if boundaryInCTM {
-			m = parentCTM.Multiply(m)
-		} else {
-			m = TranslationMatrix(box.X, box.Y).Multiply(*parentCTM).Multiply(ctm)
-		}
-	}
-	p := canvas.Rectangle(1, 1).Transform(canvas.Matrix{{m.a, m.c, m.e}, {-m.b, -m.d, pageH - m.f}})
-	clip := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, box.X, box.Y, ctm, parentCTM, boundaryInCTM))
-	ctx.Renderer.(*boundsRenderer).add(applyClipPath(p, clip))
-	if obj.Border != nil {
-		border := *obj.Border
-		border.BorderColor = (*StrokeColor)(boundsColor((*FillColor)(border.BorderColor)))
-		obj.Border = &border
-		r.renderImageBorder(ctx, obj, box, pageH, parentCTM, boundaryInCTM, clip)
-	}
-}
-
-// boundsColor 以底纹的基础颜色和透明度度量轮廓，不修改原画刷
-// 入参: color 填充或描边颜色
-// 返回: *FillColor 用于度量的颜色
-func boundsColor(color *FillColor) *FillColor {
-	if color == nil || color.Pattern == nil {
-		return color
-	}
-	return &FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}
-}
-
-// boundsRenderer 收集绘制范围，不分配页面像素或合并独立图形轮廓
-type boundsRenderer struct {
-	box      Box
-	collect  bool
-	contours []ObjectContour
-}
-
 // Size 返回不限定边界的度量画布尺寸
 // 返回: float64 宽度, float64 高度
 func (r *boundsRenderer) Size() (float64, float64) {
 	return 0, 0
-}
-
-// add 合并路径的精确曲线范围并转换为向下的纵轴
-// 入参: path 绘制路径
-func (r *boundsRenderer) add(path *canvas.Path) {
-	r.addContour(path, false)
-}
-
-// addContour 合并范围并按需保留独立填充区域
-// 入参: path 绘制路径, evenOdd 是否使用奇偶规则
-func (r *boundsRenderer) addContour(path *canvas.Path, evenOdd bool) {
-	if path.Empty() {
-		return
-	}
-	rect := path.Bounds()
-	r.box = unionTextBox(r.box, Box{X: rect.X0, Y: -rect.Y1, W: rect.W(), H: rect.H()})
-	if r.collect {
-		outline := &canvas.Path{}
-		for _, subpath := range path.Split() {
-			subpath = subpath.Copy()
-			subpath.Close()
-			outline = outline.Append(subpath)
-		}
-		r.contours = append(r.contours, ObjectContour{Path: outline.Transform(canvas.Matrix{{1, 0, 0}, {0, -1, 0}}).ToSVG(), EvenOdd: evenOdd})
-	}
 }
 
 // RenderPath 收集填充与描边范围，保持线帽、连接和虚线语义
@@ -201,6 +136,71 @@ func (CanvasBackend) PageText(r *Renderer, page *PageContent) (*PageText, error)
 		return nil, err
 	}
 	return renderer.pageText, nil
+}
+
+// measureImage 复用图片变换与裁剪语义度量范围，不读取像素数据
+// 入参: ctx 度量画布, obj 图片, pageH 页面高度, parentCTM 父变换, boundaryInCTM 边界是否参与变换, parentClip 父裁剪
+func (r *Renderer) measureImage(ctx *canvas.Context, obj ImageObject, pageH float64, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
+	if obj.Visible != nil && !*obj.Visible || obj.Alpha != nil && *obj.Alpha == 0 {
+		return
+	}
+	box, _ := ParseBox(obj.Boundary)
+	ctm := NewMatrix(obj.CTM)
+	if obj.CTM == "" {
+		ctm = Matrix{a: box.W, d: box.H}
+	}
+	m := TranslationMatrix(box.X, box.Y).Multiply(ctm)
+	if parentCTM != nil {
+		if boundaryInCTM {
+			m = parentCTM.Multiply(m)
+		} else {
+			m = TranslationMatrix(box.X, box.Y).Multiply(*parentCTM).Multiply(ctm)
+		}
+	}
+	p := canvas.Rectangle(1, 1).Transform(canvas.Matrix{{m.a, m.c, m.e}, {-m.b, -m.d, pageH - m.f}})
+	clip := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, box.X, box.Y, ctm, parentCTM, boundaryInCTM))
+	ctx.Renderer.(*boundsRenderer).add(applyClipPath(p, clip))
+	if obj.Border != nil {
+		border := *obj.Border
+		border.BorderColor = (*StrokeColor)(boundsColor((*FillColor)(border.BorderColor)))
+		obj.Border = &border
+		r.renderImageBorder(ctx, obj, box, pageH, parentCTM, boundaryInCTM, clip)
+	}
+}
+
+// boundsColor 以底纹的基础颜色和透明度度量轮廓，不修改原画刷
+// 入参: color 填充或描边颜色
+// 返回: *FillColor 用于度量的颜色
+func boundsColor(color *FillColor) *FillColor {
+	if color == nil || color.Pattern == nil {
+		return color
+	}
+	return &FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}
+}
+
+// add 合并路径的精确曲线范围并转换为向下的纵轴
+// 入参: path 绘制路径
+func (r *boundsRenderer) add(path *canvas.Path) {
+	r.addContour(path, false)
+}
+
+// addContour 合并范围并按需保留独立填充区域
+// 入参: path 绘制路径, evenOdd 是否使用奇偶规则
+func (r *boundsRenderer) addContour(path *canvas.Path, evenOdd bool) {
+	if path.Empty() {
+		return
+	}
+	rect := path.Bounds()
+	r.box = unionTextBox(r.box, Box{X: rect.X0, Y: -rect.Y1, W: rect.W(), H: rect.H()})
+	if r.collect {
+		outline := &canvas.Path{}
+		for _, subpath := range path.Split() {
+			subpath = subpath.Copy()
+			subpath.Close()
+			outline = outline.Append(subpath)
+		}
+		r.contours = append(r.contours, ObjectContour{Path: outline.Transform(canvas.Matrix{{1, 0, 0}, {0, -1, 0}}).ToSVG(), EvenOdd: evenOdd})
+	}
 }
 
 // textPathBox 将字形轮廓转换为页面区域

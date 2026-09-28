@@ -19,6 +19,15 @@ import (
 	"strconv"
 )
 
+// graphicObjectTarget 图形对象集合
+type graphicObjectTarget struct {
+	objects   *[]GraphicObject
+	text      *[]TextObject
+	path      *[]PathObject
+	image     *[]ImageObject
+	composite *[]CompositeGraphicUnit
+}
+
 // Actions 返回对象动作的独立副本，不修改原对象
 // 返回: []Action 动作列表
 func (o GraphicObject) Actions() []Action {
@@ -113,13 +122,65 @@ func (c *StrokeColor) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error
 	return (*FillColor)(c).UnmarshalXML(d, start)
 }
 
-// graphicObjectTarget 图形对象集合
-type graphicObjectTarget struct {
-	objects   *[]GraphicObject
-	text      *[]TextObject
-	path      *[]PathObject
-	image     *[]ImageObject
-	composite *[]CompositeGraphicUnit
+// UnmarshalXML 解析图层并保留对象顺序
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (l *Layer) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*l = Layer{}
+	l.ID = attrValue(start, "ID")
+	l.Type = attrValue(start, "Type")
+	l.DrawParam = attrValue(start, "DrawParam")
+	return decodeObjectContainer(d, start, l.decodeObject)
+}
+
+// UnmarshalXML 解析复合图元并保留对象顺序
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (c *CompositeGraphicUnit) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*c = CompositeGraphicUnit{}
+	c.ID = attrValue(start, "ID")
+	c.BaseLoc = attrValue(start, "BaseLoc")
+	c.ResourceID = attrValue(start, "ResourceID")
+	c.Boundary = attrValue(start, "Boundary")
+	c.CTM = attrValue(start, "CTM")
+	c.DrawParam = attrValue(start, "DrawParam")
+	if value := attrValue(start, "Alpha"); value != "" {
+		if alpha, err := strconv.Atoi(value); err == nil {
+			c.Alpha = &alpha
+		}
+	}
+	if value := attrValue(start, "Visible"); value != "" {
+		if visible, err := strconv.ParseBool(value); err == nil {
+			c.Visible = &visible
+		}
+	}
+	return decodeObjectContainer(d, start, c.decodeObject)
+}
+
+// UnmarshalXML 解析注释外观并保留对象顺序
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (a *Appearance) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*a = Appearance{}
+	a.Boundary = attrValue(start, "Boundary")
+	return decodeObjectContainer(d, start, a.decodeObject)
+}
+
+// UnmarshalXML 解析图案单元内容并保留对象顺序
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (p *PatternContent) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*p = PatternContent{}
+	return decodeObjectContainer(d, start, p.decodeObject)
+}
+
+// UnmarshalXML 解析渐变分段并保留位置的缺省状态
+// 入参: d XML解码器, start 起始节点
+// 返回: error 错误信息
+func (s *ShdSegment) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type segment ShdSegment
+	*s = ShdSegment{positionMissing: attrValue(start, "Position") == ""}
+	return d.DecodeElement((*segment)(s), &start)
 }
 
 // decodeGraphicObject 解析图形对象
@@ -183,17 +244,6 @@ func decodeObjectContainer(d *xml.Decoder, start xml.StartElement, decode func(*
 	}
 }
 
-// UnmarshalXML 解析图层并保留对象顺序
-// 入参: d XML解码器, start 起始节点
-// 返回: error 错误信息
-func (l *Layer) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	*l = Layer{}
-	l.ID = attrValue(start, "ID")
-	l.Type = attrValue(start, "Type")
-	l.DrawParam = attrValue(start, "DrawParam")
-	return decodeObjectContainer(d, start, l.decodeObject)
-}
-
 // decodeObject 解析图层子对象
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
@@ -212,30 +262,6 @@ func (l *Layer) decodeObject(d *xml.Decoder, start xml.StartElement) error {
 		return decodeObjectContainer(d, start, l.decodeObject)
 	}
 	return d.Skip()
-}
-
-// UnmarshalXML 解析复合图元并保留对象顺序
-// 入参: d XML解码器, start 起始节点
-// 返回: error 错误信息
-func (c *CompositeGraphicUnit) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	*c = CompositeGraphicUnit{}
-	c.ID = attrValue(start, "ID")
-	c.BaseLoc = attrValue(start, "BaseLoc")
-	c.ResourceID = attrValue(start, "ResourceID")
-	c.Boundary = attrValue(start, "Boundary")
-	c.CTM = attrValue(start, "CTM")
-	c.DrawParam = attrValue(start, "DrawParam")
-	if value := attrValue(start, "Alpha"); value != "" {
-		if alpha, err := strconv.Atoi(value); err == nil {
-			c.Alpha = &alpha
-		}
-	}
-	if value := attrValue(start, "Visible"); value != "" {
-		if visible, err := strconv.ParseBool(value); err == nil {
-			c.Visible = &visible
-		}
-	}
-	return decodeObjectContainer(d, start, c.decodeObject)
 }
 
 // decodeObject 解析复合图元子对象
@@ -275,15 +301,6 @@ func (c *CompositeGraphicUnit) decodeObject(d *xml.Decoder, start xml.StartEleme
 	return nil
 }
 
-// UnmarshalXML 解析注释外观并保留对象顺序
-// 入参: d XML解码器, start 起始节点
-// 返回: error 错误信息
-func (a *Appearance) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	*a = Appearance{}
-	a.Boundary = attrValue(start, "Boundary")
-	return decodeObjectContainer(d, start, a.decodeObject)
-}
-
 // decodeObject 解析注释外观子对象
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
@@ -304,14 +321,6 @@ func (a *Appearance) decodeObject(d *xml.Decoder, start xml.StartElement) error 
 	return d.Skip()
 }
 
-// UnmarshalXML 解析图案单元内容并保留对象顺序
-// 入参: d XML解码器, start 起始节点
-// 返回: error 错误信息
-func (p *PatternContent) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	*p = PatternContent{}
-	return decodeObjectContainer(d, start, p.decodeObject)
-}
-
 // decodeObject 解析图案单元内容子对象
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
@@ -330,15 +339,6 @@ func (p *PatternContent) decodeObject(d *xml.Decoder, start xml.StartElement) er
 		return decodeObjectContainer(d, start, p.decodeObject)
 	}
 	return d.Skip()
-}
-
-// UnmarshalXML 解析渐变分段并保留位置的缺省状态
-// 入参: d XML解码器, start 起始节点
-// 返回: error 错误信息
-func (s *ShdSegment) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	type segment ShdSegment
-	*s = ShdSegment{positionMissing: attrValue(start, "Position") == ""}
-	return d.DecodeElement((*segment)(s), &start)
 }
 
 // attrValue 获取XML属性值

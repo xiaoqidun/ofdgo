@@ -63,155 +63,6 @@ func (r *Reader) Close() error {
 	return nil
 }
 
-// initRoot 读取根节点信息
-// 返回: error 错误信息
-func (r *Reader) initRoot() error {
-	if err := r.indexPackage(); err != nil {
-		return err
-	}
-	data, err := r.readFile("OFD.xml")
-	if err != nil {
-		return fmt.Errorf("failed to read ofd.xml: %w", err)
-	}
-	var ofd OFD
-	if err := xml.Unmarshal(data, &ofd); err != nil {
-		return fmt.Errorf("failed to unmarshal ofd.xml: %w", err)
-	}
-	r.OFD = &ofd
-	r.ResMap = make(map[string]string)
-	r.resourcesRead = make(map[string]bool)
-	r.resourceFiles = make(map[string]string)
-	r.fontCache = make(map[string]*Font)
-	r.fontFaces = make(map[string][]*FontFace)
-	r.colorSpaceCache = make(map[string]*ColorSpace)
-	r.drawParamCache = make(map[string]*DrawParam)
-	r.compositeGraphicUnitCache = make(map[string]*CompositeGraphicUnit)
-	r.pageHeaderCache = make(map[string]PageContent)
-	return nil
-}
-
-// indexPackage 建立包路径索引，拒绝会使显示与验签产生歧义的同名条目
-// 返回: error 错误信息
-func (r *Reader) indexPackage() error {
-	count := 0
-	if r.Zip != nil {
-		count = len(r.Zip.File)
-	}
-	r.fileIndex = make(map[string]*zip.File, count)
-	r.fileIndexFold = make(map[string]*zip.File, count)
-	r.fileNamesFold = make(map[string]string, count+len(r.files))
-	if r.Zip != nil {
-		for _, f := range r.Zip.File {
-			if f.FileInfo().IsDir() {
-				continue
-			}
-			name := cleanPackagePath(f.Name)
-			if !validPackagePath(name) {
-				return fmt.Errorf("invalid package path: %q", f.Name)
-			}
-			fold := strings.ToLower(name)
-			if previous, ok := r.fileIndexFold[fold]; ok {
-				return fmt.Errorf("ambiguous package paths: %q and %q", previous.Name, f.Name)
-			}
-			r.fileIndex[name] = f
-			r.fileIndexFold[fold] = f
-			r.fileNamesFold[fold] = name
-		}
-	}
-	for name := range r.files {
-		if name != cleanPackagePath(name) || !validPackagePath(name) {
-			return fmt.Errorf("invalid package path: %q", name)
-		}
-		fold := strings.ToLower(name)
-		if previous, ok := r.fileNamesFold[fold]; ok && previous != name {
-			return fmt.Errorf("ambiguous package paths: %q and %q", previous, name)
-		}
-		r.fileNamesFold[fold] = name
-	}
-	return nil
-}
-
-// validPackagePath 判断规范化路径是否位于包内
-// 入参: name 规范化路径
-// 返回: bool 是否有效
-func validPackagePath(name string) bool {
-	return name != "." && name != ".." && !strings.HasPrefix(name, "../") && !strings.HasPrefix(name, "/") && !strings.ContainsAny(name, ":\x00")
-}
-
-// readFile 读取文档内的文件
-// 入参: name 文件名
-// 返回: []byte 文件内容, error 错误信息
-func (r *Reader) readFile(name string) ([]byte, error) {
-	name = cleanPackagePath(name)
-	if actual, ok := r.fileNamesFold[strings.ToLower(name)]; ok {
-		name = actual
-	}
-	if data, ok := r.files[name]; ok {
-		return bytes.Clone(data), nil
-	}
-	if f, ok := r.packageFile(name); ok {
-		if data, ok := r.files[cleanPackagePath(f.Name)]; ok {
-			return bytes.Clone(data), nil
-		}
-		return readZipFile(f)
-	}
-	return nil, fmt.Errorf("file not found: %s", name)
-}
-
-// openFile 打开文档内的文件流
-// 入参: name 文件名
-// 返回: io.ReadCloser 文件流, error 错误信息
-func (r *Reader) openFile(name string) (io.ReadCloser, error) {
-	name = cleanPackagePath(name)
-	if actual, ok := r.fileNamesFold[strings.ToLower(name)]; ok {
-		name = actual
-	}
-	if data, ok := r.files[name]; ok {
-		return io.NopCloser(bytes.NewReader(data)), nil
-	}
-	if f, ok := r.packageFile(name); ok {
-		if data, ok := r.files[cleanPackagePath(f.Name)]; ok {
-			return io.NopCloser(bytes.NewReader(data)), nil
-		}
-		return f.Open()
-	}
-	return nil, fmt.Errorf("file not found: %s", name)
-}
-
-// cleanPackagePath 清理包内文件路径
-// 入参: name 文件路径
-// 返回: string 清理后的文件路径
-func cleanPackagePath(name string) string {
-	name = strings.ReplaceAll(name, "\\", "/")
-	name = strings.TrimPrefix(name, "/")
-	return path.Clean(name)
-}
-
-// packageFile 获取包内文件
-// 入参: name 文件路径
-// 返回: *zip.File 压缩包文件, bool 是否存在
-func (r *Reader) packageFile(name string) (*zip.File, bool) {
-	if f, ok := r.fileIndex[name]; ok {
-		return f, true
-	}
-	if f, ok := r.fileIndexFold[strings.ToLower(name)]; ok {
-		return f, true
-	}
-	return nil, false
-}
-
-// readZipFile 读取zip文件内容
-// 入参: f zip文件对象
-// 返回: []byte 文件内容, error 错误信息
-func readZipFile(f *zip.File) ([]byte, error) {
-	rc, err := f.Open()
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
-	return io.ReadAll(rc)
-}
-
 // Doc 获取主文档结构
 // 返回: *Document 文档结构, error 错误信息
 func (r *Reader) Doc() (*Document, error) {
@@ -247,116 +98,12 @@ func (r *Reader) Doc() (*Document, error) {
 	return r.doc, nil
 }
 
-// loadRes 加载资源文件
-// 入参: resPath 资源路径
-func (r *Reader) loadRes(resPath string) {
-	if resPath == "" {
-		return
-	}
-	fullPath := r.ResPath(resPath)
-	if r.resourcesRead[fullPath] {
-		return
-	}
-	data, err := r.readFile(fullPath)
-	if err != nil {
-		return
-	}
-	var res Res
-	if err := xml.Unmarshal(data, &res); err != nil {
-		return
-	}
-	baseLoc := res.BaseLoc
-	for i := range res.ColorSpaces.ColorSpace {
-		cs := &res.ColorSpaces.ColorSpace[i]
-		r.colorSpaceCache[cs.ID] = cs
-		r.resourceFiles[cs.ID] = fullPath
-	}
-	for _, mm := range res.MultiMedias.MultiMedia {
-		if mm.MediaFile != "" {
-			if finalPath := resolveResourcePath(resPath, baseLoc, mm.MediaFile); finalPath != "" {
-				r.ResMap[mm.ID] = finalPath
-				r.resourceFiles[mm.ID] = fullPath
-			}
-		}
-	}
-	for i := range res.Fonts.Font {
-		f := &res.Fonts.Font[i]
-		if f.FontFile != "" {
-			f.FontFile = resolveResourcePath(resPath, baseLoc, f.FontFile)
-		}
-		r.fontCache[f.ID] = f
-		r.resourceFiles[f.ID] = fullPath
-	}
-	for i := range res.DrawParams.DrawParam {
-		dp := &res.DrawParams.DrawParam[i]
-		r.drawParamCache[dp.ID] = dp
-		r.resourceFiles[dp.ID] = fullPath
-	}
-	for i := range res.CompositeGraphicUnits.CompositeGraphicUnit {
-		cgu := &res.CompositeGraphicUnits.CompositeGraphicUnit[i]
-		r.compositeGraphicUnitCache[cgu.ID] = cgu
-		r.resourceFiles[cgu.ID] = fullPath
-	}
-	r.resourcesRead[fullPath] = true
-}
-
-// resolveResourcePath 解析资源文件路径
-// 入参: resPath 资源文件路径, baseLoc 资源基准路径, filePath 文件路径
-// 返回: string 资源文件路径
-func resolveResourcePath(resPath, baseLoc, filePath string) string {
-	p := strings.TrimSpace(filePath)
-	if p == "" {
-		return ""
-	}
-	p = strings.ReplaceAll(p, "\\", "/")
-	if strings.HasPrefix(p, "/") {
-		return strings.TrimPrefix(path.Clean(p), "/")
-	}
-	dir := path.Dir(resPath)
-	if baseLoc != "" {
-		if dir != baseLoc {
-			dir = path.Join(dir, baseLoc)
-		}
-	}
-	return path.Join(dir, p)
-}
-
 // PageContent 获取页面内容
 // 每次返回独立的页面内容，修改后可传入Renderer重绘，不会写回原文件
 // 入参: page 页面对象
 // 返回: *PageContent 页面内容, error 错误信息
 func (r *Reader) PageContent(page Page) (*PageContent, error) {
 	return r.readPageContent(page, false)
-}
-
-// readPageContent 读取页面，可跳过文字提取不使用的独立路径和图片
-// 入参: page 页面对象, textOnly 是否仅用于文字提取
-// 返回: *PageContent 页面内容, error 错误信息
-func (r *Reader) readPageContent(page Page, textOnly bool) (*PageContent, error) {
-	fullPath := r.ResPath(page.BaseLoc)
-	data, err := r.readFile(fullPath)
-	if err != nil {
-		return nil, err
-	}
-	var content PageContent
-	if textOnly {
-		decoder := &textPageTokens{Decoder: xml.NewDecoder(bytes.NewReader(data))}
-		err = xml.NewTokenDecoder(decoder).Decode(&content)
-	} else {
-		err = xml.Unmarshal(data, &content)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal page content: %w", err)
-	}
-	content.ID = page.ID
-	for _, res := range content.PageRes {
-		r.loadRes(resolveResourcePath(page.BaseLoc, "", res))
-	}
-	content.Area, err = r.resolvePageArea(content.Area, content.Template)
-	if err != nil {
-		return nil, err
-	}
-	return &content, nil
 }
 
 // PageCount 获取当前文档总页数
@@ -394,100 +141,6 @@ func (r *Reader) PageArea(page Page) (PageArea, error) {
 	return r.resolvePageArea(content.Area, content.Template)
 }
 
-// loadPageResources 加载页面资源，不解析图元
-// 入参: page 页面引用
-func (r *Reader) loadPageResources(page Page) {
-	header, err := r.readPageHeader(page)
-	if err != nil {
-		return
-	}
-	for _, res := range header.PageRes {
-		r.loadRes(resolveResourcePath(page.BaseLoc, "", res))
-	}
-}
-
-// readPageHeader 读取页面区域、模板引用和资源声明
-// 入参: page 页面对象
-// 返回: PageContent 页面头部, error 错误信息
-func (r *Reader) readPageHeader(page Page) (PageContent, error) {
-	name := r.ResPath(page.BaseLoc)
-	if content, ok := r.pageHeaderCache[name]; ok {
-		return content, nil
-	}
-	f, err := r.openFile(name)
-	if err != nil {
-		return PageContent{}, err
-	}
-	defer f.Close()
-	var content PageContent
-	d := xml.NewDecoder(f)
-scan:
-	for {
-		token, err := d.Token()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return PageContent{}, err
-		}
-		if start, ok := token.(xml.StartElement); ok {
-			switch start.Name.Local {
-			case "Page":
-				continue
-			case "Template":
-				var template Template
-				if err := d.DecodeElement(&template, &start); err != nil {
-					return PageContent{}, err
-				}
-				content.Template = append(content.Template, template)
-			case "Area":
-				if err := d.DecodeElement(&content.Area, &start); err != nil {
-					return PageContent{}, err
-				}
-			case "PageRes":
-				var res string
-				if err := d.DecodeElement(&res, &start); err != nil {
-					return PageContent{}, err
-				}
-				content.PageRes = append(content.PageRes, res)
-			case "Content":
-				break scan
-			default:
-				if err := d.Skip(); err != nil {
-					return PageContent{}, err
-				}
-			}
-		}
-	}
-	r.pageHeaderCache[name] = content
-	return content, nil
-}
-
-// resolvePageArea 解析页面区域的继承关系
-// 入参: area 页面区域, templates 模板引用
-// 返回: PageArea 页面区域, error 错误信息
-func (r *Reader) resolvePageArea(area PageArea, templates []Template) (PageArea, error) {
-	if area != (PageArea{}) || r.doc == nil {
-		return area, nil
-	}
-	for _, ref := range templates {
-		for _, template := range r.doc.CommonData.TemplatePage {
-			if template.ID != ref.TemplateID {
-				continue
-			}
-			content, err := r.readPageHeader(Page{BaseLoc: template.BaseLoc})
-			if err != nil {
-				return PageArea{}, err
-			}
-			if content.Area != (PageArea{}) {
-				return content.Area, nil
-			}
-			break
-		}
-	}
-	return r.doc.CommonData.PageArea, nil
-}
-
 // ResPath 获取资源的完整路径
 // 入参: resLink 资源链接
 // 返回: string 完整路径
@@ -517,21 +170,6 @@ func (r *Reader) ResPath(resLink string) string {
 func (r *Reader) ResData(resLink string) ([]byte, error) {
 	fullPath := r.ResPath(resLink)
 	return r.readFile(fullPath)
-}
-
-// readDocumentPart 读取文档关联文件
-// 入参: loc 文件位置, value 文档结构
-// 返回: string 文件路径, error 错误信息
-func (r *Reader) readDocumentPart(loc string, value any) (string, error) {
-	fullPath := r.ResPath(strings.TrimSpace(loc))
-	data, err := r.readFile(fullPath)
-	if err != nil {
-		return "", err
-	}
-	if err := xml.Unmarshal(data, value); err != nil {
-		return "", fmt.Errorf("failed to unmarshal %s: %w", path.Base(fullPath), err)
-	}
-	return fullPath, nil
 }
 
 // Version 获取OFD版本号
@@ -727,4 +365,366 @@ func (r *Reader) Extensions() ([]Extension, error) {
 		doc.Extensions.Extension = extensions.Extension
 	}
 	return doc.Extensions.Extension, nil
+}
+
+// initRoot 读取根节点信息
+// 返回: error 错误信息
+func (r *Reader) initRoot() error {
+	if err := r.indexPackage(); err != nil {
+		return err
+	}
+	data, err := r.readFile("OFD.xml")
+	if err != nil {
+		return fmt.Errorf("failed to read ofd.xml: %w", err)
+	}
+	var ofd OFD
+	if err := xml.Unmarshal(data, &ofd); err != nil {
+		return fmt.Errorf("failed to unmarshal ofd.xml: %w", err)
+	}
+	r.OFD = &ofd
+	r.ResMap = make(map[string]string)
+	r.resourcesRead = make(map[string]bool)
+	r.resourceFiles = make(map[string]string)
+	r.fontCache = make(map[string]*Font)
+	r.fontFaces = make(map[string][]*FontFace)
+	r.colorSpaceCache = make(map[string]*ColorSpace)
+	r.drawParamCache = make(map[string]*DrawParam)
+	r.compositeGraphicUnitCache = make(map[string]*CompositeGraphicUnit)
+	r.pageHeaderCache = make(map[string]PageContent)
+	return nil
+}
+
+// indexPackage 建立包路径索引，拒绝会使显示与验签产生歧义的同名条目
+// 返回: error 错误信息
+func (r *Reader) indexPackage() error {
+	count := 0
+	if r.Zip != nil {
+		count = len(r.Zip.File)
+	}
+	r.fileIndex = make(map[string]*zip.File, count)
+	r.fileIndexFold = make(map[string]*zip.File, count)
+	r.fileNamesFold = make(map[string]string, count+len(r.files))
+	if r.Zip != nil {
+		for _, f := range r.Zip.File {
+			if f.FileInfo().IsDir() {
+				continue
+			}
+			name := cleanPackagePath(f.Name)
+			if !validPackagePath(name) {
+				return fmt.Errorf("invalid package path: %q", f.Name)
+			}
+			fold := strings.ToLower(name)
+			if previous, ok := r.fileIndexFold[fold]; ok {
+				return fmt.Errorf("ambiguous package paths: %q and %q", previous.Name, f.Name)
+			}
+			r.fileIndex[name] = f
+			r.fileIndexFold[fold] = f
+			r.fileNamesFold[fold] = name
+		}
+	}
+	for name := range r.files {
+		if name != cleanPackagePath(name) || !validPackagePath(name) {
+			return fmt.Errorf("invalid package path: %q", name)
+		}
+		fold := strings.ToLower(name)
+		if previous, ok := r.fileNamesFold[fold]; ok && previous != name {
+			return fmt.Errorf("ambiguous package paths: %q and %q", previous, name)
+		}
+		r.fileNamesFold[fold] = name
+	}
+	return nil
+}
+
+// validPackagePath 判断规范化路径是否位于包内
+// 入参: name 规范化路径
+// 返回: bool 是否有效
+func validPackagePath(name string) bool {
+	return name != "." && name != ".." && !strings.HasPrefix(name, "../") && !strings.HasPrefix(name, "/") && !strings.ContainsAny(name, ":\x00")
+}
+
+// readFile 读取文档内的文件
+// 入参: name 文件名
+// 返回: []byte 文件内容, error 错误信息
+func (r *Reader) readFile(name string) ([]byte, error) {
+	name = cleanPackagePath(name)
+	if actual, ok := r.fileNamesFold[strings.ToLower(name)]; ok {
+		name = actual
+	}
+	if data, ok := r.files[name]; ok {
+		return bytes.Clone(data), nil
+	}
+	if f, ok := r.packageFile(name); ok {
+		if data, ok := r.files[cleanPackagePath(f.Name)]; ok {
+			return bytes.Clone(data), nil
+		}
+		return readZipFile(f)
+	}
+	return nil, fmt.Errorf("file not found: %s", name)
+}
+
+// openFile 打开文档内的文件流
+// 入参: name 文件名
+// 返回: io.ReadCloser 文件流, error 错误信息
+func (r *Reader) openFile(name string) (io.ReadCloser, error) {
+	name = cleanPackagePath(name)
+	if actual, ok := r.fileNamesFold[strings.ToLower(name)]; ok {
+		name = actual
+	}
+	if data, ok := r.files[name]; ok {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+	if f, ok := r.packageFile(name); ok {
+		if data, ok := r.files[cleanPackagePath(f.Name)]; ok {
+			return io.NopCloser(bytes.NewReader(data)), nil
+		}
+		return f.Open()
+	}
+	return nil, fmt.Errorf("file not found: %s", name)
+}
+
+// cleanPackagePath 清理包内文件路径
+// 入参: name 文件路径
+// 返回: string 清理后的文件路径
+func cleanPackagePath(name string) string {
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = strings.TrimPrefix(name, "/")
+	return path.Clean(name)
+}
+
+// packageFile 获取包内文件
+// 入参: name 文件路径
+// 返回: *zip.File 压缩包文件, bool 是否存在
+func (r *Reader) packageFile(name string) (*zip.File, bool) {
+	if f, ok := r.fileIndex[name]; ok {
+		return f, true
+	}
+	if f, ok := r.fileIndexFold[strings.ToLower(name)]; ok {
+		return f, true
+	}
+	return nil, false
+}
+
+// readZipFile 读取zip文件内容
+// 入参: f zip文件对象
+// 返回: []byte 文件内容, error 错误信息
+func readZipFile(f *zip.File) ([]byte, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+// loadRes 加载资源文件
+// 入参: resPath 资源路径
+func (r *Reader) loadRes(resPath string) {
+	if resPath == "" {
+		return
+	}
+	fullPath := r.ResPath(resPath)
+	if r.resourcesRead[fullPath] {
+		return
+	}
+	data, err := r.readFile(fullPath)
+	if err != nil {
+		return
+	}
+	var res Res
+	if err := xml.Unmarshal(data, &res); err != nil {
+		return
+	}
+	baseLoc := res.BaseLoc
+	for i := range res.ColorSpaces.ColorSpace {
+		cs := &res.ColorSpaces.ColorSpace[i]
+		r.colorSpaceCache[cs.ID] = cs
+		r.resourceFiles[cs.ID] = fullPath
+	}
+	for _, mm := range res.MultiMedias.MultiMedia {
+		if mm.MediaFile != "" {
+			if finalPath := resolveResourcePath(resPath, baseLoc, mm.MediaFile); finalPath != "" {
+				r.ResMap[mm.ID] = finalPath
+				r.resourceFiles[mm.ID] = fullPath
+			}
+		}
+	}
+	for i := range res.Fonts.Font {
+		f := &res.Fonts.Font[i]
+		if f.FontFile != "" {
+			f.FontFile = resolveResourcePath(resPath, baseLoc, f.FontFile)
+		}
+		r.fontCache[f.ID] = f
+		r.resourceFiles[f.ID] = fullPath
+	}
+	for i := range res.DrawParams.DrawParam {
+		dp := &res.DrawParams.DrawParam[i]
+		r.drawParamCache[dp.ID] = dp
+		r.resourceFiles[dp.ID] = fullPath
+	}
+	for i := range res.CompositeGraphicUnits.CompositeGraphicUnit {
+		cgu := &res.CompositeGraphicUnits.CompositeGraphicUnit[i]
+		r.compositeGraphicUnitCache[cgu.ID] = cgu
+		r.resourceFiles[cgu.ID] = fullPath
+	}
+	r.resourcesRead[fullPath] = true
+}
+
+// resolveResourcePath 解析资源文件路径
+// 入参: resPath 资源文件路径, baseLoc 资源基准路径, filePath 文件路径
+// 返回: string 资源文件路径
+func resolveResourcePath(resPath, baseLoc, filePath string) string {
+	p := strings.TrimSpace(filePath)
+	if p == "" {
+		return ""
+	}
+	p = strings.ReplaceAll(p, "\\", "/")
+	if strings.HasPrefix(p, "/") {
+		return strings.TrimPrefix(path.Clean(p), "/")
+	}
+	dir := path.Dir(resPath)
+	if baseLoc != "" {
+		if dir != baseLoc {
+			dir = path.Join(dir, baseLoc)
+		}
+	}
+	return path.Join(dir, p)
+}
+
+// readPageContent 读取页面，可跳过文字提取不使用的独立路径和图片
+// 入参: page 页面对象, textOnly 是否仅用于文字提取
+// 返回: *PageContent 页面内容, error 错误信息
+func (r *Reader) readPageContent(page Page, textOnly bool) (*PageContent, error) {
+	fullPath := r.ResPath(page.BaseLoc)
+	data, err := r.readFile(fullPath)
+	if err != nil {
+		return nil, err
+	}
+	var content PageContent
+	if textOnly {
+		decoder := &textPageTokens{Decoder: xml.NewDecoder(bytes.NewReader(data))}
+		err = xml.NewTokenDecoder(decoder).Decode(&content)
+	} else {
+		err = xml.Unmarshal(data, &content)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal page content: %w", err)
+	}
+	content.ID = page.ID
+	for _, res := range content.PageRes {
+		r.loadRes(resolveResourcePath(page.BaseLoc, "", res))
+	}
+	content.Area, err = r.resolvePageArea(content.Area, content.Template)
+	if err != nil {
+		return nil, err
+	}
+	return &content, nil
+}
+
+// loadPageResources 加载页面资源，不解析图元
+// 入参: page 页面引用
+func (r *Reader) loadPageResources(page Page) {
+	header, err := r.readPageHeader(page)
+	if err != nil {
+		return
+	}
+	for _, res := range header.PageRes {
+		r.loadRes(resolveResourcePath(page.BaseLoc, "", res))
+	}
+}
+
+// readPageHeader 读取页面区域、模板引用和资源声明
+// 入参: page 页面对象
+// 返回: PageContent 页面头部, error 错误信息
+func (r *Reader) readPageHeader(page Page) (PageContent, error) {
+	name := r.ResPath(page.BaseLoc)
+	if content, ok := r.pageHeaderCache[name]; ok {
+		return content, nil
+	}
+	f, err := r.openFile(name)
+	if err != nil {
+		return PageContent{}, err
+	}
+	defer f.Close()
+	var content PageContent
+	d := xml.NewDecoder(f)
+scan:
+	for {
+		token, err := d.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return PageContent{}, err
+		}
+		if start, ok := token.(xml.StartElement); ok {
+			switch start.Name.Local {
+			case "Page":
+				continue
+			case "Template":
+				var template Template
+				if err := d.DecodeElement(&template, &start); err != nil {
+					return PageContent{}, err
+				}
+				content.Template = append(content.Template, template)
+			case "Area":
+				if err := d.DecodeElement(&content.Area, &start); err != nil {
+					return PageContent{}, err
+				}
+			case "PageRes":
+				var res string
+				if err := d.DecodeElement(&res, &start); err != nil {
+					return PageContent{}, err
+				}
+				content.PageRes = append(content.PageRes, res)
+			case "Content":
+				break scan
+			default:
+				if err := d.Skip(); err != nil {
+					return PageContent{}, err
+				}
+			}
+		}
+	}
+	r.pageHeaderCache[name] = content
+	return content, nil
+}
+
+// resolvePageArea 解析页面区域的继承关系
+// 入参: area 页面区域, templates 模板引用
+// 返回: PageArea 页面区域, error 错误信息
+func (r *Reader) resolvePageArea(area PageArea, templates []Template) (PageArea, error) {
+	if area != (PageArea{}) || r.doc == nil {
+		return area, nil
+	}
+	for _, ref := range templates {
+		for _, template := range r.doc.CommonData.TemplatePage {
+			if template.ID != ref.TemplateID {
+				continue
+			}
+			content, err := r.readPageHeader(Page{BaseLoc: template.BaseLoc})
+			if err != nil {
+				return PageArea{}, err
+			}
+			if content.Area != (PageArea{}) {
+				return content.Area, nil
+			}
+			break
+		}
+	}
+	return r.doc.CommonData.PageArea, nil
+}
+
+// readDocumentPart 读取文档关联文件
+// 入参: loc 文件位置, value 文档结构
+// 返回: string 文件路径, error 错误信息
+func (r *Reader) readDocumentPart(loc string, value any) (string, error) {
+	fullPath := r.ResPath(strings.TrimSpace(loc))
+	data, err := r.readFile(fullPath)
+	if err != nil {
+		return "", err
+	}
+	if err := xml.Unmarshal(data, value); err != nil {
+		return "", fmt.Errorf("failed to unmarshal %s: %w", path.Base(fullPath), err)
+	}
+	return fullPath, nil
 }

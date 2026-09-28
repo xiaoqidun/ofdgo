@@ -21,11 +21,31 @@ import (
 	"strings"
 )
 
+// PatternPaint 底纹画刷
+type PatternPaint struct {
+	*Pattern
+	Color FillColor
+	Alpha *int
+}
+
 // ResolveColor 按文档颜色空间和调色板解析颜色，返回预乘透明度的RGBA
 // 入参: value 颜色分量, index 调色板索引, space 颜色空间标识, alpha 透明度
 // 返回: color.RGBA 标准颜色
 func (r *Renderer) ResolveColor(value string, index *int, space string, alpha *int) color.RGBA {
 	return colorToRGBA(r.parseColorWithAlpha(value, index, space, alpha))
+}
+
+// GradientStops 解析OFD渐变分段的位置与透明度，返回独立数据并保留原分段顺序
+// 入参: segments 渐变分段, alpha 透明度
+// 返回: []ColorStop 后端无关的渐变分段
+func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) []ColorStop {
+	var gradient []ColorStop
+	positions := gradientPositions(segments)
+	for i, segment := range segments {
+		segmentAlpha := mergeAlpha(segment.Color.Alpha, alpha)
+		gradient = append(gradient, ColorStop{Offset: positions[i], Color: r.ResolveColor(segment.Color.Value, segment.Color.Index, segment.Color.ColorSpace, segmentAlpha)})
+	}
+	return gradient
 }
 
 // parseColorWithAlpha 解析带透明度的颜色
@@ -204,13 +224,6 @@ func (r *Renderer) parseStrokeColor(strokeColor *StrokeColor) color.Color {
 	return r.parseFillColor((*FillColor)(strokeColor))
 }
 
-// PatternPaint 底纹画刷
-type PatternPaint struct {
-	*Pattern
-	Color FillColor
-	Alpha *int
-}
-
 // parsePatternPaint 解析底纹画刷
 // 入参: fill 填充颜色节点
 // 返回: *PatternPaint 底纹画刷
@@ -230,19 +243,6 @@ func (r *Renderer) parseShdColor(segments []ShdSegment, alpha *int) color.Color 
 	}
 	c := segments[0].Color
 	return r.parseColorWithAlpha(c.Value, c.Index, c.ColorSpace, mergeAlpha(c.Alpha, alpha))
-}
-
-// GradientStops 解析OFD渐变分段的位置与透明度，返回独立数据并保留原分段顺序
-// 入参: segments 渐变分段, alpha 透明度
-// 返回: []ColorStop 后端无关的渐变分段
-func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) []ColorStop {
-	var gradient []ColorStop
-	positions := gradientPositions(segments)
-	for i, segment := range segments {
-		segmentAlpha := mergeAlpha(segment.Color.Alpha, alpha)
-		gradient = append(gradient, ColorStop{Offset: positions[i], Color: r.ResolveColor(segment.Color.Value, segment.Color.Index, segment.Color.ColorSpace, segmentAlpha)})
-	}
-	return gradient
 }
 
 // renderGradientStops 在CMYK分量空间插值，将RGB分段误差控制在半个8位灰阶内

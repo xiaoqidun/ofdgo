@@ -46,9 +46,30 @@ type SignaturePolicy struct {
 // signaturePolicyRejection 区分策略拒绝与解析失败
 type signaturePolicyRejection struct{ message string }
 
+// signatureCoverageNode 收集OFD结构中的包内路径引用
+type signatureCoverageNode struct {
+	XMLName  xml.Name
+	Attrs    []xml.Attr              `xml:",any,attr"`
+	Text     string                  `xml:",chardata"`
+	Children []signatureCoverageNode `xml:",any"`
+}
+
 // Error 返回策略拒绝原因
 // 返回: string 错误信息
 func (e signaturePolicyRejection) Error() string { return e.message }
+
+// WithSignaturePolicy 设置签名策略
+// 入参: policy 签名策略
+// 返回: SignatureVerifyOption 验签选项
+func WithSignaturePolicy(policy SignaturePolicy) SignatureVerifyOption {
+	policy.OFDVersions = append([]string(nil), policy.OFDVersions...)
+	policy.SESVersions = append([]int(nil), policy.SESVersions...)
+	policy.SignedDataVersions = append([]int(nil), policy.SignedDataVersions...)
+	policy.DigestMethods = append([]string(nil), policy.DigestMethods...)
+	policy.SignatureMethods = append([]string(nil), policy.SignatureMethods...)
+	policy.RequiredFiles = append([]string(nil), policy.RequiredFiles...)
+	return func(o *signatureVerifyOptions) { o.Policy = &policy }
+}
 
 // rejectSignaturePolicy 构造可识别的策略拒绝错误
 // 入参: format 消息模板, values 模板参数
@@ -64,19 +85,6 @@ func (report *SignatureVerifyReport) applySignaturePolicyError(err error) {
 	if errors.As(err, &rejection) {
 		report.PolicyChecked, report.PolicyOK, report.PolicyError = true, false, rejection.Error()
 	}
-}
-
-// WithSignaturePolicy 设置签名策略
-// 入参: policy 签名策略
-// 返回: SignatureVerifyOption 验签选项
-func WithSignaturePolicy(policy SignaturePolicy) SignatureVerifyOption {
-	policy.OFDVersions = append([]string(nil), policy.OFDVersions...)
-	policy.SESVersions = append([]int(nil), policy.SESVersions...)
-	policy.SignedDataVersions = append([]int(nil), policy.SignedDataVersions...)
-	policy.DigestMethods = append([]string(nil), policy.DigestMethods...)
-	policy.SignatureMethods = append([]string(nil), policy.SignatureMethods...)
-	policy.RequiredFiles = append([]string(nil), policy.RequiredFiles...)
-	return func(o *signatureVerifyOptions) { o.Policy = &policy }
 }
 
 // applySignaturePolicy 应用版本和算法限制
@@ -282,14 +290,6 @@ func (r *Reader) signatureCoveragePath(name string) string {
 		return actual
 	}
 	return name
-}
-
-// signatureCoverageNode 收集OFD结构中的包内路径引用
-type signatureCoverageNode struct {
-	XMLName  xml.Name
-	Attrs    []xml.Attr              `xml:",any,attr"`
-	Text     string                  `xml:",chardata"`
-	Children []signatureCoverageNode `xml:",any"`
 }
 
 // signatureCoverageReferences 收集标准OFD引用的传递闭包且包含跨文档资源

@@ -29,6 +29,107 @@ import (
 	_ "golang.org/x/image/tiff"
 )
 
+// transparentEdgeImage 共享只读像素并按需计算透明边缘和采样边距
+type transparentEdgeImage struct {
+	source *image.NRGBA
+	rect   image.Rectangle
+}
+
+// transparentEdgeImage64 按需补齐十六位像素边缘，保留原始只读图像
+type transparentEdgeImage64 struct {
+	source image.Image
+	rect   image.Rectangle
+}
+
+// Bounds 返回含采样边距的图像边界
+// 返回: image.Rectangle 图像边界
+func (s *transparentEdgeImage) Bounds() image.Rectangle { return s.rect }
+
+// ColorModel 返回非预乘颜色模型
+// 返回: color.Model 颜色模型
+func (s *transparentEdgeImage) ColorModel() color.Model { return color.NRGBAModel }
+
+// NRGBAAt 读取原始像素或按邻域补齐透明边缘，边界外透明
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.NRGBA 非预乘颜色
+func (s *transparentEdgeImage) NRGBAAt(x, y int) color.NRGBA {
+	if !image.Pt(x, y).In(s.rect) {
+		return color.NRGBA{}
+	}
+	b := s.source.Bounds()
+	sx, sy := b.Min.X+min(max(x-1, 0), b.Dx()-1), b.Min.Y+min(max(y-1, 0), b.Dy()-1)
+	c := s.source.NRGBAAt(sx, sy)
+	if c.A == 0 {
+		if edge, ok := transparentEdgeColor(s.source, sx, sy); ok {
+			c = edge
+		}
+	}
+	if x == 0 || y == 0 || x == s.rect.Max.X-1 || y == s.rect.Max.Y-1 {
+		c = transparentPaddingColor(c)
+	}
+	return c
+}
+
+// At 返回非预乘像素颜色
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.Color 像素颜色
+func (s *transparentEdgeImage) At(x, y int) color.Color { return s.NRGBAAt(x, y) }
+
+// RGBA64At 返回预乘十六位像素，供采样器无装箱读取
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.RGBA64 预乘颜色
+func (s *transparentEdgeImage) RGBA64At(x, y int) color.RGBA64 {
+	r, g, b, a := s.NRGBAAt(x, y).RGBA()
+	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
+}
+
+// Bounds 返回含采样边距的图像边界
+// 返回: image.Rectangle 图像边界
+func (s *transparentEdgeImage64) Bounds() image.Rectangle { return s.rect }
+
+// ColorModel 返回十六位非预乘颜色模型
+// 返回: color.Model 颜色模型
+func (s *transparentEdgeImage64) ColorModel() color.Model { return color.NRGBA64Model }
+
+// At 读取十六位原始颜色，透明邻域使用最小非零透明度保留边缘颜色
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.Color 非预乘颜色
+func (s *transparentEdgeImage64) At(x, y int) color.Color {
+	if !image.Pt(x, y).In(s.rect) {
+		return color.NRGBA64{}
+	}
+	b := s.source.Bounds()
+	sx, sy := b.Min.X+min(max(x-1, 0), b.Dx()-1), b.Min.Y+min(max(y-1, 0), b.Dy()-1)
+	c := color.NRGBA64Model.Convert(s.source.At(sx, sy)).(color.NRGBA64)
+	if c.A == 0 {
+		var best color.NRGBA64
+		for ny := max(sy-1, b.Min.Y); ny < min(sy+2, b.Max.Y); ny++ {
+			for nx := max(sx-1, b.Min.X); nx < min(sx+2, b.Max.X); nx++ {
+				v := color.NRGBA64Model.Convert(s.source.At(nx, ny)).(color.NRGBA64)
+				if v.A > best.A {
+					best = v
+				}
+			}
+		}
+		if best.A != 0 {
+			best.A = 1
+			c = best
+		}
+	}
+	if x == 0 || y == 0 || x == s.rect.Max.X-1 || y == s.rect.Max.Y-1 {
+		c.A = 1
+	}
+	return c
+}
+
+// RGBA64At 返回保留原采样精度的预乘颜色
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.RGBA64 预乘颜色
+func (s *transparentEdgeImage64) RGBA64At(x, y int) color.RGBA64 {
+	r, g, b, a := s.At(x, y).RGBA()
+	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
+}
+
 // decodeImageData 解码图片数据
 // 入参: data 图片数据
 // 返回: image.Image 图片对象, string 图片格式, error 错误信息
@@ -466,54 +567,6 @@ func imageWithTransparentEdge(img image.Image) (image.Image, int) {
 	return &transparentEdgeImage{source: src, rect: image.Rect(0, 0, w+2, h+2)}, 1
 }
 
-// transparentEdgeImage 共享只读像素并按需计算透明边缘和采样边距
-type transparentEdgeImage struct {
-	source *image.NRGBA
-	rect   image.Rectangle
-}
-
-// Bounds 返回含采样边距的图像边界
-// 返回: image.Rectangle 图像边界
-func (s *transparentEdgeImage) Bounds() image.Rectangle { return s.rect }
-
-// ColorModel 返回非预乘颜色模型
-// 返回: color.Model 颜色模型
-func (s *transparentEdgeImage) ColorModel() color.Model { return color.NRGBAModel }
-
-// NRGBAAt 读取原始像素或按邻域补齐透明边缘，边界外透明
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.NRGBA 非预乘颜色
-func (s *transparentEdgeImage) NRGBAAt(x, y int) color.NRGBA {
-	if !image.Pt(x, y).In(s.rect) {
-		return color.NRGBA{}
-	}
-	b := s.source.Bounds()
-	sx, sy := b.Min.X+min(max(x-1, 0), b.Dx()-1), b.Min.Y+min(max(y-1, 0), b.Dy()-1)
-	c := s.source.NRGBAAt(sx, sy)
-	if c.A == 0 {
-		if edge, ok := transparentEdgeColor(s.source, sx, sy); ok {
-			c = edge
-		}
-	}
-	if x == 0 || y == 0 || x == s.rect.Max.X-1 || y == s.rect.Max.Y-1 {
-		c = transparentPaddingColor(c)
-	}
-	return c
-}
-
-// At 返回非预乘像素颜色
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.Color 像素颜色
-func (s *transparentEdgeImage) At(x, y int) color.Color { return s.NRGBAAt(x, y) }
-
-// RGBA64At 返回预乘十六位像素，供采样器无装箱读取
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.RGBA64 预乘颜色
-func (s *transparentEdgeImage) RGBA64At(x, y int) color.RGBA64 {
-	r, g, b, a := s.NRGBAAt(x, y).RGBA()
-	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
-}
-
 // imageWithTransparentEdge64 保留十六位颜色和透明度，不经八位图像中转
 // 入参: original 原始图像, source 已解码的像素源
 // 返回: image.Image 边缘处理结果, int 补齐像素数
@@ -537,57 +590,4 @@ func imageWithTransparentEdge64(original, source image.Image) (image.Image, int)
 		return original, 0
 	}
 	return &transparentEdgeImage64{source: source, rect: image.Rect(0, 0, bounds.Dx()+2, bounds.Dy()+2)}, 1
-}
-
-// transparentEdgeImage64 按需补齐十六位像素边缘，保留原始只读图像
-type transparentEdgeImage64 struct {
-	source image.Image
-	rect   image.Rectangle
-}
-
-// Bounds 返回含采样边距的图像边界
-// 返回: image.Rectangle 图像边界
-func (s *transparentEdgeImage64) Bounds() image.Rectangle { return s.rect }
-
-// ColorModel 返回十六位非预乘颜色模型
-// 返回: color.Model 颜色模型
-func (s *transparentEdgeImage64) ColorModel() color.Model { return color.NRGBA64Model }
-
-// At 读取十六位原始颜色，透明邻域使用最小非零透明度保留边缘颜色
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.Color 非预乘颜色
-func (s *transparentEdgeImage64) At(x, y int) color.Color {
-	if !image.Pt(x, y).In(s.rect) {
-		return color.NRGBA64{}
-	}
-	b := s.source.Bounds()
-	sx, sy := b.Min.X+min(max(x-1, 0), b.Dx()-1), b.Min.Y+min(max(y-1, 0), b.Dy()-1)
-	c := color.NRGBA64Model.Convert(s.source.At(sx, sy)).(color.NRGBA64)
-	if c.A == 0 {
-		var best color.NRGBA64
-		for ny := max(sy-1, b.Min.Y); ny < min(sy+2, b.Max.Y); ny++ {
-			for nx := max(sx-1, b.Min.X); nx < min(sx+2, b.Max.X); nx++ {
-				v := color.NRGBA64Model.Convert(s.source.At(nx, ny)).(color.NRGBA64)
-				if v.A > best.A {
-					best = v
-				}
-			}
-		}
-		if best.A != 0 {
-			best.A = 1
-			c = best
-		}
-	}
-	if x == 0 || y == 0 || x == s.rect.Max.X-1 || y == s.rect.Max.Y-1 {
-		c.A = 1
-	}
-	return c
-}
-
-// RGBA64At 返回保留原采样精度的预乘颜色
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.RGBA64 预乘颜色
-func (s *transparentEdgeImage64) RGBA64At(x, y int) color.RGBA64 {
-	r, g, b, a := s.At(x, y).RGBA()
-	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
 }

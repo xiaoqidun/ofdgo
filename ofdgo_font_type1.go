@@ -23,6 +23,24 @@ import (
 	"strconv"
 )
 
+// type1StandardNames 保存Adobe标准编码的字形名称，用于复合字形引用
+var type1StandardNames = func() [256]string {
+	var names [256]string
+	copy(names[32:127], cffStandardStrings[1:96])
+	for code, name := range map[byte]string{
+		161: "exclamdown", 162: "cent", 163: "sterling", 164: "fraction", 165: "yen", 166: "florin", 167: "section", 168: "currency",
+		169: "quotesingle", 170: "quotedblleft", 171: "guillemotleft", 172: "guilsinglleft", 173: "guilsinglright", 174: "fi", 175: "fl",
+		177: "endash", 178: "dagger", 179: "daggerdbl", 180: "periodcentered", 182: "paragraph", 183: "bullet", 184: "quotesinglbase",
+		185: "quotedblbase", 186: "quotedblright", 187: "guillemotright", 188: "ellipsis", 189: "perthousand", 191: "questiondown",
+		193: "grave", 194: "acute", 195: "circumflex", 196: "tilde", 197: "macron", 198: "breve", 199: "dotaccent", 200: "dieresis",
+		202: "ring", 203: "cedilla", 205: "hungarumlaut", 206: "ogonek", 207: "caron", 208: "emdash", 225: "AE", 227: "ordfeminine",
+		232: "Lslash", 233: "Oslash", 234: "OE", 235: "ordmasculine", 241: "ae", 245: "dotlessi", 248: "lslash", 249: "oslash", 250: "oe", 251: "germandbls",
+	} {
+		names[code] = name
+	}
+	return names
+}()
+
 // type1Program 保存解密后的Type1字形与子程序
 type type1Program struct {
 	glyphs []type1Glyph
@@ -40,6 +58,28 @@ type type1Glyph struct {
 type type1Scanner struct {
 	data []byte
 	pos  int
+}
+
+// type1Outline 保存字形指令的操作数栈及轮廓位置
+type type1Outline struct {
+	program    *type1Program
+	active     map[string]bool
+	args       []float64
+	postscript []float64
+	flexPoints [][2]float64
+	width      float64
+	sideX      float64
+	sideY      float64
+	originX    float64
+	originY    float64
+	x          float64
+	y          float64
+	pointX     float64
+	pointY     float64
+	open       bool
+	defined    bool
+	flex       bool
+	path       bytes.Buffer
 }
 
 // parseType1Program 读取Type1字体的字形程序及子程序
@@ -301,28 +341,6 @@ func (s *type1Scanner) binary(length int) ([]byte, error) {
 // type1BinaryStart 判断Type1二进制数据起始操作符
 func type1BinaryStart(token string) bool {
 	return token == "RD" || token == "-|"
-}
-
-// type1Outline 保存字形指令的操作数栈及轮廓位置
-type type1Outline struct {
-	program    *type1Program
-	active     map[string]bool
-	args       []float64
-	postscript []float64
-	flexPoints [][2]float64
-	width      float64
-	sideX      float64
-	sideY      float64
-	originX    float64
-	originY    float64
-	x          float64
-	y          float64
-	pointX     float64
-	pointY     float64
-	open       bool
-	defined    bool
-	flex       bool
-	path       bytes.Buffer
 }
 
 // outline 将Type1字形指令转换为保留三次曲线的Type2程序
@@ -637,24 +655,6 @@ func (s *type1Outline) component(code, x, y float64) error {
 	}
 	return fmt.Errorf("missing Type1 component %s", name)
 }
-
-// type1StandardNames 保存Adobe标准编码的字形名称，用于复合字形引用
-var type1StandardNames = func() [256]string {
-	var names [256]string
-	copy(names[32:127], cffStandardStrings[1:96])
-	for code, name := range map[byte]string{
-		161: "exclamdown", 162: "cent", 163: "sterling", 164: "fraction", 165: "yen", 166: "florin", 167: "section", 168: "currency",
-		169: "quotesingle", 170: "quotedblleft", 171: "guillemotleft", 172: "guilsinglleft", 173: "guilsinglright", 174: "fi", 175: "fl",
-		177: "endash", 178: "dagger", 179: "daggerdbl", 180: "periodcentered", 182: "paragraph", 183: "bullet", 184: "quotesinglbase",
-		185: "quotedblbase", 186: "quotedblright", 187: "guillemotright", 188: "ellipsis", 189: "perthousand", 191: "questiondown",
-		193: "grave", 194: "acute", 195: "circumflex", 196: "tilde", 197: "macron", 198: "breve", 199: "dotaccent", 200: "dieresis",
-		202: "ring", 203: "cedilla", 205: "hungarumlaut", 206: "ogonek", 207: "caron", 208: "emdash", 225: "AE", 227: "ordfeminine",
-		232: "Lslash", 233: "Oslash", 234: "OE", 235: "ordmasculine", 241: "ae", 245: "dotlessi", 248: "lslash", 249: "oslash", 250: "oe", 251: "germandbls",
-	} {
-		names[code] = name
-	}
-	return names
-}()
 
 // move 在Type2字形程序中建立新轮廓
 // 返回: error 错误信息

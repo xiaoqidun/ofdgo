@@ -21,18 +21,6 @@ import (
 	"slices"
 )
 
-// siblings 获取同一原始容器内的直接绘制成员，不跨越资源和页块
-// 返回: []*editorCompositeNode 按绘制顺序排列的成员
-func (n *editorCompositeNode) siblings() []*editorCompositeNode {
-	var result []*editorCompositeNode
-	for _, member := range n.owner.children {
-		if member.span.parent == n.span.parent {
-			result = append(result, member)
-		}
-	}
-	return result
-}
-
 // DeleteCompositeObjects 删除内部成员，保留容器、未选对象及其他实例，一次撤销恢复全部
 // 入参: page 页面索引, path 父复合路径, indexes 成员序号
 // 返回: error 错误信息
@@ -83,33 +71,6 @@ func (e *Editor) CopyCompositeObjects(page int, path ObjectPath, indexes []int, 
 		return nil, err
 	}
 	return result, nil
-}
-
-// copyCompositeNodes 复制成员原文并统一重映射标识，保持副本之间的引用
-// 入参: renderer 渲染器, nodes 快照, dx、dy 页面位移
-// 返回: []byte 副本XML, map[string]editorCompositeState 会话信息, error 错误信息
-func (e *Editor) copyCompositeNodes(renderer *Renderer, nodes []*editorCompositeNode, dx, dy float64) ([]byte, map[string]editorCompositeState, error) {
-	ids := make(map[string]string)
-	for _, node := range nodes {
-		if err := e.collectCompositeIDs(node.node, ids); err != nil {
-			return nil, nil, err
-		}
-	}
-	var data []byte
-	states := make(map[string]editorCompositeState)
-	for _, node := range nodes {
-		copy := *node
-		if err := e.transformCompositeMember(renderer, &copy, TranslationMatrix(dx, dy)); err != nil {
-			return nil, nil, err
-		}
-		fragment, err := editorXMLRemapIDs(copy.data, copy.node, ids)
-		if err != nil {
-			return nil, nil, err
-		}
-		maps.Copy(states, remapCompositeStates(node.states, ids))
-		data = append(data, fragment...)
-	}
-	return data, states, nil
 }
 
 // OrderCompositeObjects 调整同一直接容器内的绘制顺序，不改变页块和其他实例
@@ -165,22 +126,6 @@ func (e *Editor) ReplaceCompositeImage(page int, path ObjectPath, index int, dat
 		object.ImageObject.ResourceID = id
 		return node.update(object)
 	})
-}
-
-// update 合并成员属性变化，不重写原文中未修改的字段
-// 入参: object 修改后的对象
-// 返回: error 错误信息
-func (n *editorCompositeNode) update(object GraphicObject) error {
-	data, err := editorXMLObject(n.data, n.node, n.object, object)
-	if err != nil || bytes.Equal(data, n.data) {
-		return err
-	}
-	next, err := newEditorCompositeNode(data)
-	if err != nil {
-		return err
-	}
-	n.data, n.node, n.object, n.changed = data, next.node, next.object, true
-	return nil
 }
 
 // Shape 获取内部基本路径的页面几何，矩形和椭圆要求轴对齐，其他成员返回空类型
@@ -249,6 +194,78 @@ func (e *Editor) ReshapeCompositeFrame(page int, path ObjectPath, index int, box
 	})
 }
 
+// ReshapeCompositeLine 修改内部直线的页面端点及箭头，保留原始属性和父变换
+// 入参: page 页面索引, path 父路径, index 成员序号, kind 直线类型, box 页面端点
+// 返回: error 错误信息
+func (e *Editor) ReshapeCompositeLine(page int, path ObjectPath, index int, kind ShapeKind, box Box) error {
+	if kind != "" && !lineShapeKind(kind) {
+		return fmt.Errorf("unsupported line kind %q", kind)
+	}
+	return e.reshapeCompositeObject(page, path, index, kind, box, true)
+}
+
+// ReshapeCompositeObject 调整内部基本路径的页面几何，保留绘制样式、变换与裁剪
+// 入参: page 页面索引, path 父路径, index 成员序号, box 页面范围，直线使用有符号端点位移
+// 返回: error 错误信息
+func (e *Editor) ReshapeCompositeObject(page int, path ObjectPath, index int, box Box) error {
+	return e.reshapeCompositeObject(page, path, index, "", box, false)
+}
+
+// siblings 获取同一原始容器内的直接绘制成员，不跨越资源和页块
+// 返回: []*editorCompositeNode 按绘制顺序排列的成员
+func (n *editorCompositeNode) siblings() []*editorCompositeNode {
+	var result []*editorCompositeNode
+	for _, member := range n.owner.children {
+		if member.span.parent == n.span.parent {
+			result = append(result, member)
+		}
+	}
+	return result
+}
+
+// copyCompositeNodes 复制成员原文并统一重映射标识，保持副本之间的引用
+// 入参: renderer 渲染器, nodes 快照, dx、dy 页面位移
+// 返回: []byte 副本XML, map[string]editorCompositeState 会话信息, error 错误信息
+func (e *Editor) copyCompositeNodes(renderer *Renderer, nodes []*editorCompositeNode, dx, dy float64) ([]byte, map[string]editorCompositeState, error) {
+	ids := make(map[string]string)
+	for _, node := range nodes {
+		if err := e.collectCompositeIDs(node.node, ids); err != nil {
+			return nil, nil, err
+		}
+	}
+	var data []byte
+	states := make(map[string]editorCompositeState)
+	for _, node := range nodes {
+		copy := *node
+		if err := e.transformCompositeMember(renderer, &copy, TranslationMatrix(dx, dy)); err != nil {
+			return nil, nil, err
+		}
+		fragment, err := editorXMLRemapIDs(copy.data, copy.node, ids)
+		if err != nil {
+			return nil, nil, err
+		}
+		maps.Copy(states, remapCompositeStates(node.states, ids))
+		data = append(data, fragment...)
+	}
+	return data, states, nil
+}
+
+// update 合并成员属性变化，不重写原文中未修改的字段
+// 入参: object 修改后的对象
+// 返回: error 错误信息
+func (n *editorCompositeNode) update(object GraphicObject) error {
+	data, err := editorXMLObject(n.data, n.node, n.object, object)
+	if err != nil || bytes.Equal(data, n.data) {
+		return err
+	}
+	next, err := newEditorCompositeNode(data)
+	if err != nil {
+		return err
+	}
+	n.data, n.node, n.object, n.changed = data, next.node, next.object, true
+	return nil
+}
+
 // shapeParent 获取路径所在坐标到页面的变换，兼容旧式内联边界
 // 返回: Matrix 路径父坐标变换, bool 是否可逆
 func (m CompositeMember) shapeParent() (Matrix, bool) {
@@ -265,23 +282,6 @@ func transformLineBox(box Box, matrix Matrix) Box {
 	x, y := matrix.Transform(box.X, box.Y)
 	w, h := matrixVector(matrix, box.W, box.H)
 	return Box{X: x, Y: y, W: w, H: h}
-}
-
-// ReshapeCompositeLine 修改内部直线的页面端点及箭头，保留原始属性和父变换
-// 入参: page 页面索引, path 父路径, index 成员序号, kind 直线类型, box 页面端点
-// 返回: error 错误信息
-func (e *Editor) ReshapeCompositeLine(page int, path ObjectPath, index int, kind ShapeKind, box Box) error {
-	if kind != "" && !lineShapeKind(kind) {
-		return fmt.Errorf("unsupported line kind %q", kind)
-	}
-	return e.reshapeCompositeObject(page, path, index, kind, box, true)
-}
-
-// ReshapeCompositeObject 调整内部基本路径的页面几何，保留绘制样式、变换与裁剪
-// 入参: page 页面索引, path 父路径, index 成员序号, box 页面范围，直线使用有符号端点位移
-// 返回: error 错误信息
-func (e *Editor) ReshapeCompositeObject(page int, path ObjectPath, index int, box Box) error {
-	return e.reshapeCompositeObject(page, path, index, "", box, false)
 }
 
 // reshapeCompositeObject 按页面几何修改单个内部路径，可选修改箭头类型

@@ -22,6 +22,19 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
+// canvasPageCompiler 将已解释的页面绘制转换为自有数据，不保存第三方绘图对象
+type canvasPageCompiler struct {
+	page     *RasterPage
+	geometry GeometryBackend
+	err      error
+}
+
+// rasterPaddedImage 为旋转采样提供透明边距，共享原图而不复制整幅像素
+type rasterPaddedImage struct {
+	source image.Image
+	rect   image.Rectangle
+}
+
 // CompilePage 使用Canvas页面解释器和配置的字体、几何后端生成独立绘制数据
 // 入参: r 渲染器, page 页面内容
 // 返回: *RasterPage 绘制页面, error 编译错误
@@ -46,13 +59,6 @@ func (CanvasBackend) CompilePage(r *Renderer, page *PageContent) (*RasterPage, e
 		return nil, compiler.err
 	}
 	return result, nil
-}
-
-// canvasPageCompiler 将已解释的页面绘制转换为自有数据，不保存第三方绘图对象
-type canvasPageCompiler struct {
-	page     *RasterPage
-	geometry GeometryBackend
-	err      error
 }
 
 // Size 返回物理页面尺寸
@@ -82,6 +88,58 @@ func (c *canvasPageCompiler) RenderPath(path *canvas.Path, style canvas.Style, m
 		}
 		c.fill(stroke, style.Stroke, style.FillRule, m)
 	}
+}
+
+// RenderText 展开已定位字形，使用与目标DPI一致的字形精度
+// 入参: text 文字, m 变换矩阵
+func (c *canvasPageCompiler) RenderText(text *canvas.Text, m canvas.Matrix) {
+	if c.err == nil {
+		text.RenderTo(c, m, canvas.DPMM(c.page.DPI/25.4))
+	}
+}
+
+// RenderImage 记录按像素左上原点定位的图片，旋转或斜切时补充透明采样边距
+// 入参: img 图片, m 变换矩阵
+func (c *canvasPageCompiler) RenderImage(img image.Image, m canvas.Matrix) {
+	if c.err != nil {
+		return
+	}
+	img = imagePixelSource(img)
+	if (m[0][1] != 0 || m[1][0] != 0) && (m[0][0] != 0 || m[1][1] == 0) {
+		bounds := img.Bounds()
+		img = &rasterPaddedImage{source: img, rect: image.Rect(0, 0, bounds.Dx()+8, bounds.Dy()+8)}
+		m = m.Translate(-4, -4)
+	}
+	h := float64(img.Bounds().Dy())
+	t := RasterMatrix{m[0][0], -m[1][0], -m[0][1], m[1][1], m[0][2] + m[0][1]*h, c.page.Height - m[1][2] - m[1][1]*h}
+	c.page.Commands = append(c.page.Commands, RasterCommand{Image: img, Transform: t})
+}
+
+// Bounds 返回含四像素边距的图像边界
+// 返回: image.Rectangle 图像边界
+func (s *rasterPaddedImage) Bounds() image.Rectangle { return s.rect }
+
+// ColorModel 返回预乘八位颜色模型，与实体补边图像保持一致
+// 返回: color.Model 颜色模型
+func (s *rasterPaddedImage) ColorModel() color.Model { return color.RGBAModel }
+
+// At 读取补边图像的预乘像素，边距及图像外透明
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.Color 像素颜色
+func (s *rasterPaddedImage) At(x, y int) color.Color {
+	if !image.Pt(x, y).In(s.rect.Inset(4)) {
+		return color.RGBA{}
+	}
+	b := s.source.Bounds()
+	return color.RGBAModel.Convert(s.source.At(x-4+b.Min.X, y-4+b.Min.Y))
+}
+
+// RGBA64At 返回预乘十六位像素供采样器读取
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.RGBA64 像素颜色
+func (s *rasterPaddedImage) RGBA64At(x, y int) color.RGBA64 {
+	r, g, b, a := s.At(x, y).RGBA()
+	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
 }
 
 // fill 转换路径和画刷，未知类型返回错误而非丢弃内容
@@ -161,61 +219,3 @@ func canvasRasterPath(path *canvas.Path) ([]RasterSegment, error) {
 // 入参: p 默认引擎坐标点
 // 返回: RasterPoint 独立坐标点
 func rasterPoint(p canvas.Point) RasterPoint { return RasterPoint{X: p.X, Y: p.Y} }
-
-// RenderText 展开已定位字形，使用与目标DPI一致的字形精度
-// 入参: text 文字, m 变换矩阵
-func (c *canvasPageCompiler) RenderText(text *canvas.Text, m canvas.Matrix) {
-	if c.err == nil {
-		text.RenderTo(c, m, canvas.DPMM(c.page.DPI/25.4))
-	}
-}
-
-// RenderImage 记录按像素左上原点定位的图片，旋转或斜切时补充透明采样边距
-// 入参: img 图片, m 变换矩阵
-func (c *canvasPageCompiler) RenderImage(img image.Image, m canvas.Matrix) {
-	if c.err != nil {
-		return
-	}
-	img = imagePixelSource(img)
-	if (m[0][1] != 0 || m[1][0] != 0) && (m[0][0] != 0 || m[1][1] == 0) {
-		bounds := img.Bounds()
-		img = &rasterPaddedImage{source: img, rect: image.Rect(0, 0, bounds.Dx()+8, bounds.Dy()+8)}
-		m = m.Translate(-4, -4)
-	}
-	h := float64(img.Bounds().Dy())
-	t := RasterMatrix{m[0][0], -m[1][0], -m[0][1], m[1][1], m[0][2] + m[0][1]*h, c.page.Height - m[1][2] - m[1][1]*h}
-	c.page.Commands = append(c.page.Commands, RasterCommand{Image: img, Transform: t})
-}
-
-// rasterPaddedImage 为旋转采样提供透明边距，共享原图而不复制整幅像素
-type rasterPaddedImage struct {
-	source image.Image
-	rect   image.Rectangle
-}
-
-// Bounds 返回含四像素边距的图像边界
-// 返回: image.Rectangle 图像边界
-func (s *rasterPaddedImage) Bounds() image.Rectangle { return s.rect }
-
-// ColorModel 返回预乘八位颜色模型，与实体补边图像保持一致
-// 返回: color.Model 颜色模型
-func (s *rasterPaddedImage) ColorModel() color.Model { return color.RGBAModel }
-
-// At 读取补边图像的预乘像素，边距及图像外透明
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.Color 像素颜色
-func (s *rasterPaddedImage) At(x, y int) color.Color {
-	if !image.Pt(x, y).In(s.rect.Inset(4)) {
-		return color.RGBA{}
-	}
-	b := s.source.Bounds()
-	return color.RGBAModel.Convert(s.source.At(x-4+b.Min.X, y-4+b.Min.Y))
-}
-
-// RGBA64At 返回预乘十六位像素供采样器读取
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.RGBA64 像素颜色
-func (s *rasterPaddedImage) RGBA64At(x, y int) color.RGBA64 {
-	r, g, b, a := s.At(x, y).RGBA()
-	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
-}

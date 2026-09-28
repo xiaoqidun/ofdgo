@@ -21,6 +21,18 @@ import (
 	"unicode/utf16"
 )
 
+// textGlyph 绘制字形
+type textGlyph struct {
+	Text    string
+	GlyphID int
+}
+
+// textGlyphTransform 字符到字形变换
+type textGlyphTransform struct {
+	CodeCount int
+	Glyphs    []textGlyph
+}
+
 // Text 获取定位后的文字，横向换行以换行符分隔，字形索引以占位字符表示
 // 返回: string 原文
 func (obj TextObject) Text() string {
@@ -36,6 +48,18 @@ func (obj TextObject) Text() string {
 		}
 	}
 	return text.String()
+}
+
+// GetDeltaX 获取X轴偏移量数组
+// 返回: []float64 偏移量数组
+func (tc *TextCode) GetDeltaX() []float64 {
+	return parseFloats(tc.DeltaX)
+}
+
+// GetDeltaY 获取Y轴偏移量数组
+// 返回: []float64 偏移量数组
+func (tc *TextCode) GetDeltaY() []float64 {
+	return parseFloats(tc.DeltaY)
 }
 
 // textCodeLineBreak 判断横向文字的行首回退，或有足够行距且水平范围重叠的对齐段落
@@ -65,18 +89,6 @@ func (obj TextObject) textCodeLineBreak(index int) bool {
 		right += dx
 	}
 	return x <= right
-}
-
-// textGlyph 绘制字形
-type textGlyph struct {
-	Text    string
-	GlyphID int
-}
-
-// textGlyphTransform 字符到字形变换
-type textGlyphTransform struct {
-	CodeCount int
-	Glyphs    []textGlyph
 }
 
 // textObjectFontID 获取文本对象字体ID
@@ -304,16 +316,4 @@ func textCodeRunes(value string) []rune {
 		written++
 	}
 	return runes[:written]
-}
-
-// GetDeltaX 获取X轴偏移量数组
-// 返回: []float64 偏移量数组
-func (tc *TextCode) GetDeltaX() []float64 {
-	return parseFloats(tc.DeltaX)
-}
-
-// GetDeltaY 获取Y轴偏移量数组
-// 返回: []float64 偏移量数组
-func (tc *TextCode) GetDeltaY() []float64 {
-	return parseFloats(tc.DeltaY)
 }

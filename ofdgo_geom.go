@@ -22,6 +22,9 @@ import (
 	"strings"
 )
 
+// IdentityMatrix 单位矩阵
+var IdentityMatrix = Matrix{1, 0, 0, 1, 0, 0}
+
 // Box 矩形区域
 type Box struct {
 	X, Y, W, H float64
@@ -32,11 +35,9 @@ type Point struct {
 	X, Y float64
 }
 
-// geometryEqual 比较毫米坐标，使用固定绝对误差，不受绘图库全局精度影响
-// 入参: a、b 待比较的坐标
-// 返回: bool 是否在容差内相等
-func geometryEqual(a, b float64) bool {
-	return math.Abs(a-b) <= 1e-10
+// Matrix 2D仿射变换矩阵
+type Matrix struct {
+	a, b, c, d, e, f float64
 }
 
 // ParseBox 解析Box字符串
@@ -61,14 +62,6 @@ func ParseBox(s string) (Box, error) {
 	}
 	return Box{X: values[0], Y: values[1], W: values[2], H: values[3]}, nil
 }
-
-// Matrix 2D仿射变换矩阵
-type Matrix struct {
-	a, b, c, d, e, f float64
-}
-
-// IdentityMatrix 单位矩阵
-var IdentityMatrix = Matrix{1, 0, 0, 1, 0, 0}
 
 // MatrixFromValues 从a、b、c、d、e、f构造矩阵，不经过文本格式化
 // 入参: values 矩阵分量
@@ -140,20 +133,6 @@ func (m Matrix) String() string {
 	return fmt.Sprintf("%s %s %s %s %s %s", ofdNumber(m.a), ofdNumber(m.b), ofdNumber(m.c), ofdNumber(m.d), ofdNumber(m.e), ofdNumber(m.f))
 }
 
-// axisAlignedMatrix 判断变换是否保持坐标轴平行，含直角旋转与镜像
-// 入参: m 仿射变换矩阵
-// 返回: bool 是否为非退化的轴对齐变换
-func axisAlignedMatrix(m Matrix) bool {
-	return m.b == 0 && m.c == 0 && m.a != 0 && m.d != 0 || m.a == 0 && m.d == 0 && m.b != 0 && m.c != 0
-}
-
-// matrixVector 变换位移，不包含平移分量
-// 入参: m 仿射变换矩阵, x、y 原始位移
-// 返回: float64 变换后的X位移, float64 变换后的Y位移
-func matrixVector(m Matrix, x, y float64) (float64, float64) {
-	return m.a*x + m.c*y, m.b*x + m.d*y
-}
-
 // Invert 求逆矩阵
 // 返回: Matrix 逆矩阵, bool 是否可逆
 func (m Matrix) Invert() (Matrix, bool) {
@@ -182,6 +161,27 @@ func TranslationMatrix(x, y float64) Matrix {
 // 返回: float64 缩放比例
 func (m Matrix) YScale() float64 {
 	return math.Sqrt(m.c*m.c + m.d*m.d)
+}
+
+// geometryEqual 比较毫米坐标，使用固定绝对误差，不受绘图库全局精度影响
+// 入参: a、b 待比较的坐标
+// 返回: bool 是否在容差内相等
+func geometryEqual(a, b float64) bool {
+	return math.Abs(a-b) <= 1e-10
+}
+
+// axisAlignedMatrix 判断变换是否保持坐标轴平行，含直角旋转与镜像
+// 入参: m 仿射变换矩阵
+// 返回: bool 是否为非退化的轴对齐变换
+func axisAlignedMatrix(m Matrix) bool {
+	return m.b == 0 && m.c == 0 && m.a != 0 && m.d != 0 || m.a == 0 && m.d == 0 && m.b != 0 && m.c != 0
+}
+
+// matrixVector 变换位移，不包含平移分量
+// 入参: m 仿射变换矩阵, x、y 原始位移
+// 返回: float64 变换后的X位移, float64 变换后的Y位移
+func matrixVector(m Matrix, x, y float64) (float64, float64) {
+	return m.a*x + m.c*y, m.b*x + m.d*y
 }
 
 // parseFloats 解析浮点数数组

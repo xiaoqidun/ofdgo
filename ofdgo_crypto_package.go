@@ -88,6 +88,23 @@ type encryptionEntry struct {
 	Seed          string `xml:"DecryptSeedLoc,attr,omitempty"`
 }
 
+// EncryptPackage 对完整OFD包进行GM/T0099加密，保留全部条目的原始内容
+// 先签后加密可保留对明文的验签能力；出错不返回部分密文，已有加密包须先解密
+// 入参: data 明文OFD包, options 加密策略
+// 返回: []byte 加密OFD包, error 错误信息
+func EncryptPackage(data []byte, options EncryptionOptions) ([]byte, error) {
+	r, err := NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	parts, err := r.packageData()
+	if err != nil {
+		return nil, err
+	}
+	return encryptPackageParts(parts, options, nil)
+}
+
 // open 初始化包索引并在解析OFD根节点前解密
 // 入参: options 阅读选项
 // 返回: error 错误信息
@@ -404,23 +421,6 @@ func inheritedEncryptionOptions(seed encryptionSeed, credential Credentials, pro
 		options.Recipients = append(options.Recipients, EncryptionRecipient{UserName: user.Name, UserType: user.Role, Certificate: certificate})
 	}
 	return options
-}
-
-// EncryptPackage 对完整OFD包进行GM/T0099加密，保留全部条目的原始内容
-// 先签后加密可保留对明文的验签能力；出错不返回部分密文，已有加密包须先解密
-// 入参: data 明文OFD包, options 加密策略
-// 返回: []byte 加密OFD包, error 错误信息
-func EncryptPackage(data []byte, options EncryptionOptions) ([]byte, error) {
-	r, err := NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-	parts, err := r.packageData()
-	if err != nil {
-		return nil, err
-	}
-	return encryptPackageParts(parts, options, nil)
 }
 
 // encryptPackageParts 加密所有原条目，再生成标准入口、密钥描述与映射

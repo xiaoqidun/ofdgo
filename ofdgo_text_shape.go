@@ -29,6 +29,13 @@ type configuredTextShaper struct {
 	options TextShapeOptions
 }
 
+// ShapeText 使用固定选项塑形单行原文
+// 入参: value 原文, size 毫米字号
+// 返回: []ShapedGlyph 字形, error 塑形错误
+func (s configuredTextShaper) ShapeText(value string, size float64) ([]ShapedGlyph, error) {
+	return s.ShapeTextWithOptions(value, size, s.options)
+}
+
 // layoutShapedText 将显式塑形结果保存为标准文字定位，成功前不修改对象
 // 入参: obj 文字对象, value 原文, options 排版选项, metrics 字体度量, width 行宽, lineHeight 行高, hScale 横向比例, baseline 首行基线
 // 返回: error 塑形或排版错误
@@ -196,13 +203,6 @@ func bidiClusterShifts(glyphs []ShapedGlyph, extra []float64) map[int]float64 {
 		offset += cluster.extra
 	}
 	return shifts
-}
-
-// ShapeText 使用固定选项塑形单行原文
-// 入参: value 原文, size 毫米字号
-// 返回: []ShapedGlyph 字形, error 塑形错误
-func (s configuredTextShaper) ShapeText(value string, size float64) ([]ShapedGlyph, error) {
-	return s.ShapeTextWithOptions(value, size, s.options)
 }
 
 // shapeTextLine 检查可选后端的簇映射，按原文字符分配塑形步进

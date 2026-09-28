@@ -23,15 +23,15 @@ import (
 	"strings"
 )
 
-// SignType 签名类型
-type SignType string
-
 const (
 	// SignTypeSeal 印章签名
 	SignTypeSeal SignType = "Seal"
 	// SignTypeSign 数字签名
 	SignTypeSign SignType = "Sign"
 )
+
+// SignType 签名类型
+type SignType string
 
 // Signatures 签名列表
 type Signatures struct {
@@ -105,6 +105,14 @@ type SignatureReferences struct {
 type SignatureReference struct {
 	FileRef    string `xml:"FileRef,attr"`
 	CheckValue string `xml:"CheckValue"`
+}
+
+// Stamp 印章信息结构
+type Stamp struct {
+	Box  Box
+	Clip *Box
+	Type string
+	Data []byte
 }
 
 // SignatureStampPositions 获取签名外观位置信息
@@ -419,14 +427,6 @@ func probeImageMedia(data []byte) (string, []byte) {
 		return "", nil
 	}
 	return normalizeSealType(format), data
-}
-
-// Stamp 印章信息结构
-type Stamp struct {
-	Box  Box
-	Clip *Box
-	Type string
-	Data []byte
 }
 
 // addStamp 添加印章到页面

@@ -25,6 +25,18 @@ import (
 	"time"
 )
 
+var _ fs.FS = (*FontFS)(nil)
+
+var _ fs.ReadDirFS = (*FontFS)(nil)
+
+var _ fs.GlobFS = (*FontFS)(nil)
+
+var _ fs.File = (*fontMemFile)(nil)
+
+var _ fs.ReadDirFile = (*fontDir)(nil)
+
+var _ fs.DirEntry = (*fontDirEntry)(nil)
+
 // FontFile 内存字体文件
 type FontFile struct {
 	Name string
@@ -37,6 +49,67 @@ type FontFS struct {
 	loaders    map[string]func() ([]byte, error)
 	names      []string
 	candidates []fontFileCandidate
+}
+
+// fontFileCandidate 字体文件候选
+type fontFileCandidate struct {
+	name       string
+	face       int
+	base       string
+	lowerBase  string
+	filename   string
+	normalized string
+	names      []string
+	fold       string
+}
+
+// fontPatternMatcher 字体文件匹配器
+type fontPatternMatcher struct {
+	pattern      string
+	lowerPattern string
+	stem         string
+	aliases      []string
+	priority     int
+}
+
+// fontFileMatch 字体文件匹配结果
+type fontFileMatch struct {
+	name      string
+	face      int
+	priority  int
+	rank      int
+	styleRank int
+	sortName  string
+}
+
+// fontFileKey 字体文件与集合索引的去重键
+type fontFileKey struct {
+	name string
+	face int
+}
+
+// fontMemFile 内存字体文件
+type fontMemFile struct {
+	*bytes.Reader
+	info fontFileInfo
+}
+
+// fontDir 字体目录
+type fontDir struct {
+	offset  int
+	entries []fs.DirEntry
+}
+
+// fontDirEntry 字体目录条目
+type fontDirEntry struct {
+	info fontFileInfo
+}
+
+// fontFileInfo 字体文件信息
+type fontFileInfo struct {
+	name string
+	size int64
+	mode fs.FileMode
 }
 
 // NewFontFS 创建内存字体文件系统
@@ -217,6 +290,121 @@ func (r *Reader) MatchFontFiles(files []string, ids ...string) ([]string, error)
 	return names, nil
 }
 
+// Stat 获取字体文件信息
+// 返回: fs.FileInfo 文件信息, error 错误信息
+func (f *fontMemFile) Stat() (fs.FileInfo, error) {
+	return f.info, nil
+}
+
+// Close 关闭字体文件
+// 返回: error 错误信息
+func (f *fontMemFile) Close() error {
+	return nil
+}
+
+// Stat 获取字体目录信息
+// 返回: fs.FileInfo 文件信息, error 错误信息
+func (d *fontDir) Stat() (fs.FileInfo, error) {
+	return fontFileInfo{name: ".", mode: fs.ModeDir}, nil
+}
+
+// Read 字体目录不提供字节内容，始终返回EOF
+// 入参: []byte 读取缓冲区，不使用
+// 返回: int 始终为0, error 始终为io.EOF
+func (d *fontDir) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+// Close 关闭字体目录
+// 返回: error 错误信息
+func (d *fontDir) Close() error {
+	return nil
+}
+
+// ReadDir 读取字体目录条目
+// 入参: count 读取数量
+// 返回: []fs.DirEntry 目录条目, error 错误信息
+func (d *fontDir) ReadDir(count int) ([]fs.DirEntry, error) {
+	if d.offset >= len(d.entries) {
+		if count <= 0 {
+			return nil, nil
+		}
+		return nil, io.EOF
+	}
+	if count <= 0 || d.offset+count > len(d.entries) {
+		count = len(d.entries) - d.offset
+	}
+	entries := d.entries[d.offset : d.offset+count]
+	d.offset += count
+	return entries, nil
+}
+
+// Name 获取目录条目名称
+// 返回: string 目录条目名称
+func (e fontDirEntry) Name() string {
+	return e.info.Name()
+}
+
+// IsDir 判断是否为目录
+// 返回: bool 是否为目录
+func (e fontDirEntry) IsDir() bool {
+	return false
+}
+
+// Type 获取目录条目类型
+// 返回: fs.FileMode 文件模式
+func (e fontDirEntry) Type() fs.FileMode {
+	return e.info.Mode().Type()
+}
+
+// Info 获取目录条目信息
+// 返回: fs.FileInfo 文件信息, error 错误信息
+func (e fontDirEntry) Info() (fs.FileInfo, error) {
+	return e.info, nil
+}
+
+// Name 获取文件名
+// 返回: string 文件名
+func (i fontFileInfo) Name() string {
+	if i.name == "" {
+		return "."
+	}
+	return i.name
+}
+
+// Size 获取文件大小
+// 返回: int64 文件大小
+func (i fontFileInfo) Size() int64 {
+	return i.size
+}
+
+// Mode 获取文件模式
+// 返回: fs.FileMode 文件模式
+func (i fontFileInfo) Mode() fs.FileMode {
+	if i.mode != 0 {
+		return i.mode
+	}
+	return 0444
+}
+
+// ModTime 获取文件修改时间
+// 返回: time.Time 修改时间
+func (i fontFileInfo) ModTime() time.Time {
+	return time.Time{}
+}
+
+// IsDir 判断是否为目录
+// 返回: bool 是否为目录
+func (i fontFileInfo) IsDir() bool {
+	return i.mode.IsDir()
+}
+
+// Sys 获取底层文件信息
+// 返回: any 底层文件信息
+func (i fontFileInfo) Sys() any {
+	return nil
+}
+
 // matchStyle 匹配指定样式的字体名称
 // 入参: names 字体名称列表, bold 是否粗体, italic 是否斜体
 // 返回: []fontFileMatch 字体匹配列表
@@ -315,18 +503,6 @@ func cleanFontName(name string) string {
 	return strings.ToLower(name)
 }
 
-// fontFileCandidate 字体文件候选
-type fontFileCandidate struct {
-	name       string
-	face       int
-	base       string
-	lowerBase  string
-	filename   string
-	normalized string
-	names      []string
-	fold       string
-}
-
 // fontFileCandidates 筛选字体文件候选
 // 入参: names 文件名列表, base 文件名提取函数
 // 返回: []fontFileCandidate 字体文件候选列表
@@ -347,15 +523,6 @@ func fontFileCandidates(names []string, base func(string) string) []fontFileCand
 		}
 	}
 	return files
-}
-
-// fontPatternMatcher 字体文件匹配器
-type fontPatternMatcher struct {
-	pattern      string
-	lowerPattern string
-	stem         string
-	aliases      []string
-	priority     int
 }
 
 // newFontPatternMatcher 创建字体文件匹配器
@@ -481,22 +648,6 @@ func (m fontPatternMatcher) styleSuffixNormalized(name string) string {
 		}
 	}
 	return ""
-}
-
-// fontFileMatch 字体文件匹配结果
-type fontFileMatch struct {
-	name      string
-	face      int
-	priority  int
-	rank      int
-	styleRank int
-	sortName  string
-}
-
-// fontFileKey 字体文件与集合索引的去重键
-type fontFileKey struct {
-	name string
-	face int
 }
 
 // appendFontFileMatch 追加字体文件匹配结果
@@ -632,149 +783,3 @@ func fontFileKnownStyleSuffix(suffix string) bool {
 		return false
 	}
 }
-
-// fontMemFile 内存字体文件
-type fontMemFile struct {
-	*bytes.Reader
-	info fontFileInfo
-}
-
-// Stat 获取字体文件信息
-// 返回: fs.FileInfo 文件信息, error 错误信息
-func (f *fontMemFile) Stat() (fs.FileInfo, error) {
-	return f.info, nil
-}
-
-// Close 关闭字体文件
-// 返回: error 错误信息
-func (f *fontMemFile) Close() error {
-	return nil
-}
-
-// fontDir 字体目录
-type fontDir struct {
-	offset  int
-	entries []fs.DirEntry
-}
-
-// Stat 获取字体目录信息
-// 返回: fs.FileInfo 文件信息, error 错误信息
-func (d *fontDir) Stat() (fs.FileInfo, error) {
-	return fontFileInfo{name: ".", mode: fs.ModeDir}, nil
-}
-
-// Read 字体目录不提供字节内容，始终返回EOF
-// 入参: []byte 读取缓冲区，不使用
-// 返回: int 始终为0, error 始终为io.EOF
-func (d *fontDir) Read([]byte) (int, error) {
-	return 0, io.EOF
-}
-
-// Close 关闭字体目录
-// 返回: error 错误信息
-func (d *fontDir) Close() error {
-	return nil
-}
-
-// ReadDir 读取字体目录条目
-// 入参: count 读取数量
-// 返回: []fs.DirEntry 目录条目, error 错误信息
-func (d *fontDir) ReadDir(count int) ([]fs.DirEntry, error) {
-	if d.offset >= len(d.entries) {
-		if count <= 0 {
-			return nil, nil
-		}
-		return nil, io.EOF
-	}
-	if count <= 0 || d.offset+count > len(d.entries) {
-		count = len(d.entries) - d.offset
-	}
-	entries := d.entries[d.offset : d.offset+count]
-	d.offset += count
-	return entries, nil
-}
-
-// fontDirEntry 字体目录条目
-type fontDirEntry struct {
-	info fontFileInfo
-}
-
-// Name 获取目录条目名称
-// 返回: string 目录条目名称
-func (e fontDirEntry) Name() string {
-	return e.info.Name()
-}
-
-// IsDir 判断是否为目录
-// 返回: bool 是否为目录
-func (e fontDirEntry) IsDir() bool {
-	return false
-}
-
-// Type 获取目录条目类型
-// 返回: fs.FileMode 文件模式
-func (e fontDirEntry) Type() fs.FileMode {
-	return e.info.Mode().Type()
-}
-
-// Info 获取目录条目信息
-// 返回: fs.FileInfo 文件信息, error 错误信息
-func (e fontDirEntry) Info() (fs.FileInfo, error) {
-	return e.info, nil
-}
-
-// fontFileInfo 字体文件信息
-type fontFileInfo struct {
-	name string
-	size int64
-	mode fs.FileMode
-}
-
-// Name 获取文件名
-// 返回: string 文件名
-func (i fontFileInfo) Name() string {
-	if i.name == "" {
-		return "."
-	}
-	return i.name
-}
-
-// Size 获取文件大小
-// 返回: int64 文件大小
-func (i fontFileInfo) Size() int64 {
-	return i.size
-}
-
-// Mode 获取文件模式
-// 返回: fs.FileMode 文件模式
-func (i fontFileInfo) Mode() fs.FileMode {
-	if i.mode != 0 {
-		return i.mode
-	}
-	return 0444
-}
-
-// ModTime 获取文件修改时间
-// 返回: time.Time 修改时间
-func (i fontFileInfo) ModTime() time.Time {
-	return time.Time{}
-}
-
-// IsDir 判断是否为目录
-// 返回: bool 是否为目录
-func (i fontFileInfo) IsDir() bool {
-	return i.mode.IsDir()
-}
-
-// Sys 获取底层文件信息
-// 返回: any 底层文件信息
-func (i fontFileInfo) Sys() any {
-	return nil
-}
-
-var _ fs.FS = (*FontFS)(nil)
-var _ fs.ReadDirFS = (*FontFS)(nil)
-var _ fs.GlobFS = (*FontFS)(nil)
-var _ fs.File = (*fontMemFile)(nil)
-var _ fs.ReadDirFile = (*fontDir)(nil)
-var _ fs.DirEntry = (*fontDirEntry)(nil)

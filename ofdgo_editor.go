@@ -66,6 +66,28 @@ type Editor struct {
 	encryption      *encryptionState
 }
 
+// editorResource 文档内嵌资源
+type editorResource struct {
+	name       string
+	data       []byte
+	font       *Font
+	image      *MultiMedia
+	space      *ColorSpace
+	composite  string
+	references []string
+	subset     *editorFontSubset
+	states     map[string]editorCompositeState
+	draw       *DrawParam
+	drawSource string
+}
+
+// editorResourceKey 资源内容和字体集合索引
+type editorResourceKey struct {
+	checksum [32]byte
+	index    int
+	kind     string
+}
+
 // SetFontDirs 设置编辑与几何度量使用的外部字体目录，不嵌入或替换文档字体
 // 入参: dirs 字体目录，空参数清除目录配置
 func (e *Editor) SetFontDirs(dirs ...string) {
@@ -115,44 +137,6 @@ func (e *Editor) SetRenderBackends(backends RenderBackends) {
 // 返回: RenderBackends 后端组合
 func (e *Editor) Backends() RenderBackends {
 	return e.backends
-}
-
-// newRenderer 使用编辑器字体来源和完整后端配置创建资源度量器
-// 入参: reader 当前文档快照
-// 返回: *Renderer 度量器
-func (e *Editor) newRenderer(reader *Reader) *Renderer {
-	return NewRenderer(reader, WithFontDirs(e.fontDirs...), WithFontFS(e.fontFS...), WithRenderBackends(e.backends))
-}
-
-// editorResource 文档内嵌资源
-type editorResource struct {
-	name       string
-	data       []byte
-	font       *Font
-	image      *MultiMedia
-	space      *ColorSpace
-	composite  string
-	references []string
-	subset     *editorFontSubset
-	states     map[string]editorCompositeState
-	draw       *DrawParam
-	drawSource string
-}
-
-// definition 获取独立定义资源的标识
-// 返回: string 复合资源或绘制参数标识
-func (r editorResource) definition() string {
-	if r.draw != nil {
-		return r.draw.ID
-	}
-	return r.composite
-}
-
-// editorResourceKey 资源内容和字体集合索引
-type editorResourceKey struct {
-	checksum [32]byte
-	index    int
-	kind     string
 }
 
 // NewEditor 创建空白文档，保存前至少添加一页
@@ -224,21 +208,6 @@ func (e *Editor) Page(index int) (*PageContent, error) {
 		}
 	}
 	return &result, nil
-}
-
-// page 按索引获取内部页面
-// 入参: index 页面索引
-// 返回: *PageContent 页面内容, error 错误信息
-func (e *Editor) page(index int) (*PageContent, error) {
-	if index < 0 || index >= len(e.pages) {
-		return nil, fmt.Errorf("page index %d out of range", index)
-	}
-	if e.source != nil {
-		if err := e.loadSourcePage(index); err != nil {
-			return nil, err
-		}
-	}
-	return &e.pages[index], nil
 }
 
 // AddPage 添加页面及默认正文图层
@@ -363,23 +332,6 @@ func (e *Editor) DeletePages(indexes []int) error {
 	return nil
 }
 
-// validatePageIndexes 校验页面索引范围和重复值
-// 入参: indexes 页面索引
-// 返回: error 错误信息
-func (e *Editor) validatePageIndexes(indexes []int) error {
-	seen := make(map[int]bool, len(indexes))
-	for _, index := range indexes {
-		if index < 0 || index >= len(e.pages) {
-			return fmt.Errorf("page index %d out of range", index)
-		}
-		if seen[index] {
-			return fmt.Errorf("duplicate page index %d", index)
-		}
-		seen[index] = true
-	}
-	return nil
-}
-
 // MovePage 移动页面，保留页面及对象标识
 // 入参: from 原页面索引, to 移动后的页面索引
 // 返回: error 错误信息
@@ -445,15 +397,6 @@ func (e *Editor) MovePages(indexes []int, to int) error {
 	return nil
 }
 
-// reorderPages 按原页面索引序列调整页面顺序
-// 入参: order 页面索引序列
-func (e *Editor) reorderPages(order []int) {
-	pages := slices.Clone(e.pages)
-	for index, previous := range order {
-		e.pages[index] = pages[previous]
-	}
-}
-
 // ResizePage 调整页面尺寸，不缩放或移动页面内的对象
 // 入参: index 页面索引, width 页面宽度, height 页面高度
 // 返回: error 错误信息
@@ -503,13 +446,6 @@ func (e *Editor) ResizePages(indexes []int, width, height float64) error {
 	return nil
 }
 
-// nextID 分配文档内唯一标识
-// 返回: string 对象标识
-func (e *Editor) nextID() string {
-	e.maxID++
-	return strconv.Itoa(e.maxID)
-}
-
 // AddImage 注册PNG、JPEG或JBIG2图片，重复资源复用标识，引用后写入文档
 // 不透明纯黑白PNG仅在无损JBIG2编码更小时转换，其他图片保留原始编码
 // 入参: data 图片数据
@@ -550,21 +486,6 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 	e.images[id] = image.Pt(config.Width, config.Height)
 	e.resourceID[key] = id
 	return id, nil
-}
-
-// editorBinaryImage 尝试纯黑白无损编码，不二值化，不改变透明度，无体积收益时保留原图
-// 入参: data PNG图片数据
-// 返回: []byte 更小的JBIG2数据，不适用时为nil
-func editorBinaryImage(data []byte) []byte {
-	img, _, err := image.Decode(bytes.NewReader(data))
-	if err != nil {
-		return nil
-	}
-	var output bytes.Buffer
-	if err := jbig2.Encode(&output, img, &jbig2.Options{MaxPageBytes: uint64(len(data))}); err != nil || output.Len() >= len(data) {
-		return nil
-	}
-	return output.Bytes()
 }
 
 // AddObject 按添加顺序放入正文图层，支持文字、路径和图片，自动分配对象ID
@@ -656,6 +577,175 @@ func (e *Editor) MoveObject(page int, id string, to int) error {
 	}
 	e.replaceLayers(page, layers)
 	return nil
+}
+
+// AddText 添加文字，按显式换行和嵌入字体度量定位，不自动折行或进行复杂文字塑形
+// 入参: page 页面索引, box 文字边界, value 原文, fontID 字体资源标识, size 字号
+// 返回: string 对象标识, error 错误信息
+func (e *Editor) AddText(page int, box Box, value, fontID string, size float64) (string, error) {
+	object := GraphicObject{Type: "TextObject", TextObject: TextObject{
+		Boundary: fmt.Sprintf("%s %s %s %s", ofdNumber(box.X), ofdNumber(box.Y), ofdNumber(box.W), ofdNumber(box.H)),
+		Font:     fontID, Size: size,
+	}}
+	if err := e.LayoutText(&object.TextObject, value, TextLayout{}); err != nil {
+		return "", err
+	}
+	return e.AddObject(page, object)
+}
+
+// UpdateText 按现有段落选项重排横向文字，保留对象标识、顺序、边界及绘制属性
+// 自定义文字定位使用UpdateObject，字体塑形沿用既有段落选项
+// 入参: page 页面索引, id 文字对象标识, value 原文, fontID 字体资源标识, size 字号
+// 返回: error 错误信息
+func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) error {
+	layer, index, err := e.findObject(page, id)
+	if err != nil {
+		return err
+	}
+	object := layer.Objects[index]
+	if object.Type != "TextObject" {
+		return fmt.Errorf("object %q is not text", id)
+	}
+	object.TextObject.Font, object.TextObject.Size = fontID, size
+	_, layout := object.TextObject.TextLayout()
+	if err := e.LayoutText(&object.TextObject, value, layout); err != nil {
+		return err
+	}
+	return e.UpdateObject(page, id, object)
+}
+
+// TransformObject 以页面原点等比缩放后平移对象，文字同步缩放字号和字距，保留原有排版
+// 带边框图片缩放时转为保留原图片与边框的复合对象，标识不变
+// 入参: page 页面索引, id 对象标识, dx 横向位移, dy 纵向位移, scale 正缩放比例
+// 返回: error 错误信息
+func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) error {
+	return e.TransformObjects(page, []string{id}, dx, dy, scale)
+}
+
+// ReplaceImage 替换图片资源，保留对象标识和绘制顺序，一次撤销恢复资源及布局
+// 入参: page 页面索引, id 图片对象标识, data PNG或JPEG数据, fit 为contain、cover或空，空值保留原变换和裁剪
+// 返回: error 错误信息
+func (e *Editor) ReplaceImage(page int, id string, data []byte, fit string) error {
+	object, err := e.Object(page, id)
+	if err != nil {
+		return err
+	}
+	if object.Type != "ImageObject" {
+		return fmt.Errorf("object %q is not an image", id)
+	}
+	object.ImageObject.ResourceID, err = e.AddImage(data)
+	if err != nil {
+		return err
+	}
+	if fit != "" {
+		if err := e.fitImage(&object.ImageObject, fit); err != nil {
+			return err
+		}
+	}
+	return e.UpdateObject(page, id, object)
+}
+
+// AlignObject 将对象对齐页面，文字采用实际字形范围，路径和图片采用对象边界
+// 入参: page 页面索引, id 对象标识, alignment 为left、center、right、top、middle或bottom
+// 返回: error 错误信息
+func (e *Editor) AlignObject(page int, id, alignment string) error {
+	return e.AlignObjects(page, []string{id}, alignment)
+}
+
+// LayoutText 使用编辑器字体后端重排文字，不修改文档和历史
+// 入参: obj 文字对象, value 原文, options 段落排版选项
+// 返回: error 字体或排版错误
+func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) error {
+	metrics, err := e.editorFont(obj.Font)
+	if err != nil {
+		return err
+	}
+	if err := LayoutText(obj, value, options, metrics); err != nil {
+		return err
+	}
+	if obj.layout == nil && e.objectOrigin(obj.ID) != nil {
+		obj.layout = &textLayout{value: obj.Text(), options: options}
+	}
+	return nil
+}
+
+// newRenderer 使用编辑器字体来源和完整后端配置创建资源度量器
+// 入参: reader 当前文档快照
+// 返回: *Renderer 度量器
+func (e *Editor) newRenderer(reader *Reader) *Renderer {
+	return NewRenderer(reader, WithFontDirs(e.fontDirs...), WithFontFS(e.fontFS...), WithRenderBackends(e.backends))
+}
+
+// definition 获取独立定义资源的标识
+// 返回: string 复合资源或绘制参数标识
+func (r editorResource) definition() string {
+	if r.draw != nil {
+		return r.draw.ID
+	}
+	return r.composite
+}
+
+// page 按索引获取内部页面
+// 入参: index 页面索引
+// 返回: *PageContent 页面内容, error 错误信息
+func (e *Editor) page(index int) (*PageContent, error) {
+	if index < 0 || index >= len(e.pages) {
+		return nil, fmt.Errorf("page index %d out of range", index)
+	}
+	if e.source != nil {
+		if err := e.loadSourcePage(index); err != nil {
+			return nil, err
+		}
+	}
+	return &e.pages[index], nil
+}
+
+// validatePageIndexes 校验页面索引范围和重复值
+// 入参: indexes 页面索引
+// 返回: error 错误信息
+func (e *Editor) validatePageIndexes(indexes []int) error {
+	seen := make(map[int]bool, len(indexes))
+	for _, index := range indexes {
+		if index < 0 || index >= len(e.pages) {
+			return fmt.Errorf("page index %d out of range", index)
+		}
+		if seen[index] {
+			return fmt.Errorf("duplicate page index %d", index)
+		}
+		seen[index] = true
+	}
+	return nil
+}
+
+// reorderPages 按原页面索引序列调整页面顺序
+// 入参: order 页面索引序列
+func (e *Editor) reorderPages(order []int) {
+	pages := slices.Clone(e.pages)
+	for index, previous := range order {
+		e.pages[index] = pages[previous]
+	}
+}
+
+// nextID 分配文档内唯一标识
+// 返回: string 对象标识
+func (e *Editor) nextID() string {
+	e.maxID++
+	return strconv.Itoa(e.maxID)
+}
+
+// editorBinaryImage 尝试纯黑白无损编码，不二值化，不改变透明度，无体积收益时保留原图
+// 入参: data PNG图片数据
+// 返回: []byte 更小的JBIG2数据，不适用时为nil
+func editorBinaryImage(data []byte) []byte {
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil
+	}
+	var output bytes.Buffer
+	if err := jbig2.Encode(&output, img, &jbig2.Options{MaxPageBytes: uint64(len(data))}); err != nil || output.Len() >= len(data) {
+		return nil
+	}
+	return output.Bytes()
 }
 
 // findObject 查找页面各图层中的对象
@@ -835,49 +925,6 @@ func cloneEditorObject(object GraphicObject) (GraphicObject, error) {
 	return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
 }
 
-// AddText 添加文字，按显式换行和嵌入字体度量定位，不自动折行或进行复杂文字塑形
-// 入参: page 页面索引, box 文字边界, value 原文, fontID 字体资源标识, size 字号
-// 返回: string 对象标识, error 错误信息
-func (e *Editor) AddText(page int, box Box, value, fontID string, size float64) (string, error) {
-	object := GraphicObject{Type: "TextObject", TextObject: TextObject{
-		Boundary: fmt.Sprintf("%s %s %s %s", ofdNumber(box.X), ofdNumber(box.Y), ofdNumber(box.W), ofdNumber(box.H)),
-		Font:     fontID, Size: size,
-	}}
-	if err := e.LayoutText(&object.TextObject, value, TextLayout{}); err != nil {
-		return "", err
-	}
-	return e.AddObject(page, object)
-}
-
-// UpdateText 按现有段落选项重排横向文字，保留对象标识、顺序、边界及绘制属性
-// 自定义文字定位使用UpdateObject，字体塑形沿用既有段落选项
-// 入参: page 页面索引, id 文字对象标识, value 原文, fontID 字体资源标识, size 字号
-// 返回: error 错误信息
-func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) error {
-	layer, index, err := e.findObject(page, id)
-	if err != nil {
-		return err
-	}
-	object := layer.Objects[index]
-	if object.Type != "TextObject" {
-		return fmt.Errorf("object %q is not text", id)
-	}
-	object.TextObject.Font, object.TextObject.Size = fontID, size
-	_, layout := object.TextObject.TextLayout()
-	if err := e.LayoutText(&object.TextObject, value, layout); err != nil {
-		return err
-	}
-	return e.UpdateObject(page, id, object)
-}
-
-// TransformObject 以页面原点等比缩放后平移对象，文字同步缩放字号和字距，保留原有排版
-// 带边框图片缩放时转为保留原图片与边框的复合对象，标识不变
-// 入参: page 页面索引, id 对象标识, dx 横向位移, dy 纵向位移, scale 正缩放比例
-// 返回: error 错误信息
-func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) error {
-	return e.TransformObjects(page, []string{id}, dx, dy, scale)
-}
-
 // transformEditorObject 变换独立对象副本，保留绘制属性和编辑中的段落信息
 // 入参: object 对象副本, dx 横向位移, dy 纵向位移, scale 正缩放比例
 // 返回: GraphicObject 变换后的对象, error 错误信息
@@ -940,36 +987,6 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 	return object, nil
 }
 
-// ReplaceImage 替换图片资源，保留对象标识和绘制顺序，一次撤销恢复资源及布局
-// 入参: page 页面索引, id 图片对象标识, data PNG或JPEG数据, fit 为contain、cover或空，空值保留原变换和裁剪
-// 返回: error 错误信息
-func (e *Editor) ReplaceImage(page int, id string, data []byte, fit string) error {
-	object, err := e.Object(page, id)
-	if err != nil {
-		return err
-	}
-	if object.Type != "ImageObject" {
-		return fmt.Errorf("object %q is not an image", id)
-	}
-	object.ImageObject.ResourceID, err = e.AddImage(data)
-	if err != nil {
-		return err
-	}
-	if fit != "" {
-		if err := e.fitImage(&object.ImageObject, fit); err != nil {
-			return err
-		}
-	}
-	return e.UpdateObject(page, id, object)
-}
-
-// AlignObject 将对象对齐页面，文字采用实际字形范围，路径和图片采用对象边界
-// 入参: page 页面索引, id 对象标识, alignment 为left、center、right、top、middle或bottom
-// 返回: error 错误信息
-func (e *Editor) AlignObject(page int, id, alignment string) error {
-	return e.AlignObjects(page, []string{id}, alignment)
-}
-
 // scaleTextNumbers 缩放已校验的文字定位数值，保留g重复编码
 // 入参: value 定位数值, scale 缩放比例
 // 返回: string 缩放后的数值
@@ -983,23 +1000,6 @@ func scaleTextNumbers(value string, scale float64) string {
 		fields[i] = ofdNumber(number * scale)
 	}
 	return strings.Join(fields, " ")
-}
-
-// LayoutText 使用编辑器字体后端重排文字，不修改文档和历史
-// 入参: obj 文字对象, value 原文, options 段落排版选项
-// 返回: error 字体或排版错误
-func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) error {
-	metrics, err := e.editorFont(obj.Font)
-	if err != nil {
-		return err
-	}
-	if err := LayoutText(obj, value, options, metrics); err != nil {
-		return err
-	}
-	if obj.layout == nil && e.objectOrigin(obj.ID) != nil {
-		obj.layout = &textLayout{value: obj.Text(), options: options}
-	}
-	return nil
 }
 
 // prepareText 校验并补全标准文字定位，避免依赖阅读器的缺省字距补偿

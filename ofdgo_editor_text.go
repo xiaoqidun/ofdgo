@@ -32,34 +32,6 @@ type MissingGlyphError struct {
 	Characters string `json:"characters"`
 }
 
-// Error 返回缺失字符的Unicode码点
-// 返回: string 错误描述
-func (e *MissingGlyphError) Error() string {
-	var codes []string
-	for _, char := range e.Characters {
-		codes = append(codes, fmt.Sprintf("U+%04X", char))
-	}
-	return fmt.Sprintf("font %q does not contain %s", e.FontID, strings.Join(codes, ", "))
-}
-
-// missingGlyphError 汇总缺失字符，无缺字时返回nil
-// 入参: id 字体资源标识, characters 缺失字符
-// 返回: error 缺字诊断
-func missingGlyphError(id string, characters []rune) error {
-	if len(characters) == 0 {
-		return nil
-	}
-	seen := make(map[rune]bool)
-	var value strings.Builder
-	for _, char := range characters {
-		if !seen[char] {
-			seen[char] = true
-			value.WriteRune(char)
-		}
-	}
-	return &MissingGlyphError{FontID: id, Characters: value.String()}
-}
-
 // TextLayout 本地横向段落选项
 // Shape显式启用FontShaper，保存为标准TextCode和CGTransform，不改变阅读时的原文定位
 // Shaping提供可比较的塑形选项，非零值也会启用塑形，并随会话内文字编辑保留
@@ -87,6 +59,22 @@ type TextStyle struct {
 	Font  string
 	Size  float64
 	Color string
+}
+
+// textLayout 保存编辑中的原文与选项，不写入OFD，也不参与渲染
+type textLayout struct {
+	value   string
+	options TextLayout
+}
+
+// Error 返回缺失字符的Unicode码点
+// 返回: string 错误描述
+func (e *MissingGlyphError) Error() string {
+	var codes []string
+	for _, char := range e.Characters {
+		codes = append(codes, fmt.Sprintf("U+%04X", char))
+	}
+	return fmt.Sprintf("font %q does not contain %s", e.FontID, strings.Join(codes, ", "))
 }
 
 // StyleText 原子更新同页文字样式，全部校验通过后提交一次撤销记录
@@ -287,6 +275,34 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 	return nil
 }
 
+// TextLayout 获取最近一次排版的原文与选项，区分软换行和显式换行
+// 信息仅在当前编辑过程保留，读取OFD时返回定位后的文字和默认选项
+// 返回: string 原文, TextLayout 排版选项
+func (obj TextObject) TextLayout() (string, TextLayout) {
+	if obj.layout != nil {
+		return obj.layout.value, obj.layout.options
+	}
+	return obj.Text(), TextLayout{}
+}
+
+// missingGlyphError 汇总缺失字符，无缺字时返回nil
+// 入参: id 字体资源标识, characters 缺失字符
+// 返回: error 缺字诊断
+func missingGlyphError(id string, characters []rune) error {
+	if len(characters) == 0 {
+		return nil
+	}
+	seen := make(map[rune]bool)
+	var value strings.Builder
+	for _, char := range characters {
+		if !seen[char] {
+			seen[char] = true
+			value.WriteRune(char)
+		}
+	}
+	return &MissingGlyphError{FontID: id, Characters: value.String()}
+}
+
 // rewriteTextDeltas 局部替换字符步进，保留未修改字符及末尾附加位移
 // 入参: value 原位移, old 原字符, replacement 替换字符, start 起点, end 终点, advance 字体步进
 // 返回: string 更新后的位移数组
@@ -370,22 +386,6 @@ func (e *Editor) styleTextObjects(objects []GraphicObject, style TextStyle) ([]G
 		}
 	}
 	return updates, nil
-}
-
-// textLayout 保存编辑中的原文与选项，不写入OFD，也不参与渲染
-type textLayout struct {
-	value   string
-	options TextLayout
-}
-
-// TextLayout 获取最近一次排版的原文与选项，区分软换行和显式换行
-// 信息仅在当前编辑过程保留，读取OFD时返回定位后的文字和默认选项
-// 返回: string 原文, TextLayout 排版选项
-func (obj TextObject) TextLayout() (string, TextLayout) {
-	if obj.layout != nil {
-		return obj.layout.value, obj.layout.options
-	}
-	return obj.Text(), TextLayout{}
 }
 
 // breakTextLines 优先使用Unicode断行机会，过长词仅在字素边界折行，不丢弃空白

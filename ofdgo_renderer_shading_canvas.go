@@ -23,6 +23,37 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
+// shdPaint 渐变画刷
+type shdPaint struct {
+	gradient canvas.Gradient
+	view     canvas.Matrix
+	extend   int
+	mapType  string
+	period   float64
+}
+
+// repeatAxialGradient 轴向重复渐变
+type repeatAxialGradient struct {
+	*canvas.LinearGradient
+	period float64
+}
+
+// At 获取重复区间内的渐变颜色
+// 入参: x X坐标, y Y坐标
+// 返回: color.RGBA 渐变颜色
+func (g *repeatAxialGradient) At(x, y float64) color.RGBA {
+	d := g.End.Sub(g.Start)
+	t := (canvas.Point{X: x, Y: y}).Sub(g.Start).Dot(d) / d.Dot(d) / g.period
+	return g.Grad.At(t - math.Floor(t))
+}
+
+// SetColorSpace 转换重复渐变颜色空间
+// 入参: space 颜色空间
+// 返回: canvas.Gradient 渐变对象
+func (g *repeatAxialGradient) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
+	return &repeatAxialGradient{LinearGradient: g.LinearGradient.SetColorSpace(space).(*canvas.LinearGradient), period: g.period}
+}
+
 // drawSampledShading 按输出精度采样后端不能原生表达的局部渐变，不改写OFD对象
 // 入参: ctx 绘制上下文, path 已裁剪轮廓, view 渐变变换, gradient 渐变采样器
 func (r *Renderer) drawSampledShading(ctx *canvas.Context, path *canvas.Path, view canvas.Matrix, gradient rasterGradientCanvas) {
@@ -58,37 +89,6 @@ func (r *Renderer) drawSampledShading(ctx *canvas.Context, path *canvas.Path, vi
 		return
 	}
 	ctx.DrawImage(bounds.X0, bounds.Y0, img, canvas.DPMM(scale))
-}
-
-// shdPaint 渐变画刷
-type shdPaint struct {
-	gradient canvas.Gradient
-	view     canvas.Matrix
-	extend   int
-	mapType  string
-	period   float64
-}
-
-// repeatAxialGradient 轴向重复渐变
-type repeatAxialGradient struct {
-	*canvas.LinearGradient
-	period float64
-}
-
-// At 获取重复区间内的渐变颜色
-// 入参: x X坐标, y Y坐标
-// 返回: color.RGBA 渐变颜色
-func (g *repeatAxialGradient) At(x, y float64) color.RGBA {
-	d := g.End.Sub(g.Start)
-	t := (canvas.Point{X: x, Y: y}).Sub(g.Start).Dot(d) / d.Dot(d) / g.period
-	return g.Grad.At(t - math.Floor(t))
-}
-
-// SetColorSpace 转换重复渐变颜色空间
-// 入参: space 颜色空间
-// 返回: canvas.Gradient 渐变对象
-func (g *repeatAxialGradient) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
-	return &repeatAxialGradient{LinearGradient: g.LinearGradient.SetColorSpace(space).(*canvas.LinearGradient), period: g.period}
 }
 
 // newShdPaint 创建渐变画刷

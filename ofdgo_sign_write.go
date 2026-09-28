@@ -29,15 +29,15 @@ import (
 	"time"
 )
 
-// SignatureWriteMode 签署方式
-type SignatureWriteMode uint8
-
 const (
 	// SignatureAppend 追加签署，要求原活动签名有效且未保护签名列表
 	SignatureAppend SignatureWriteMode = iota
 	// SignatureReplace 重新签署，替换全部活动签名，保留原签名数据文件
 	SignatureReplace
 )
+
+// SignatureWriteMode 签署方式
+type SignatureWriteMode uint8
 
 // SignatureWriteOptions 最终包签署选项，不修改Editor或调用方的原件
 // SM2数字签名使用GB/T 35275-2017消息结构；RSA/ECDSA使用裸签名，验签需WithSignatureCert
@@ -62,6 +62,16 @@ type SignatureWriteOptions struct {
 	ReaderOptions []ReaderOption
 	Encryption    *EncryptionOptions
 	progress      editorProgress
+}
+
+// signatureWriteInfo 写出签名信息，省略数字签名中不存在的印章
+type signatureWriteInfo struct {
+	Provider          SignatureProvider   `xml:"Provider"`
+	SignatureMethod   string              `xml:"SignatureMethod"`
+	SignatureDateTime string              `xml:"SignatureDateTime"`
+	References        SignatureReferences `xml:"References"`
+	Stamps            []SignatureStamp    `xml:"StampAnnot,omitempty"`
+	Seal              *SignatureSeal      `xml:"Seal,omitempty"`
 }
 
 // SignPackage 签署最终OFD包，失败时返回nil且不修改输入
@@ -434,16 +444,6 @@ func signatureWriteIDs(list *Signatures, listPath string, parts map[string][]byt
 	}
 	list.MaxSignID = "s" + strconv.FormatUint(maximum, 10)
 	return id, stamps, nil
-}
-
-// signatureWriteInfo 写出签名信息，省略数字签名中不存在的印章
-type signatureWriteInfo struct {
-	Provider          SignatureProvider   `xml:"Provider"`
-	SignatureMethod   string              `xml:"SignatureMethod"`
-	SignatureDateTime string              `xml:"SignatureDateTime"`
-	References        SignatureReferences `xml:"References"`
-	Stamps            []SignatureStamp    `xml:"StampAnnot,omitempty"`
-	Seal              *SignatureSeal      `xml:"Seal,omitempty"`
 }
 
 // signatureWriteXML 编码带OFD命名空间的签名文件

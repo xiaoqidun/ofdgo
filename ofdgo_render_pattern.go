@@ -39,6 +39,15 @@ type stampContentState struct {
 // stampContentStateKey 隔离渲染器私有的共享签章数据
 type stampContentStateKey struct{}
 
+// patternCellKey 区分共享底纹、颜色、透明度和影响单元语义的页面变换
+type patternCellKey struct {
+	pattern      *Pattern
+	color, space string
+	index, alpha int
+	colorAlpha   int
+	matrix       [6]float64
+}
+
 // resetFonts 使包含文字的签章编译结果随字体配置失效
 func (s *stampContentState) resetFonts() {
 	s.cache = renderCache[stampContentKey, []RasterCommand]{limit: 16 << 20}
@@ -86,15 +95,6 @@ func (c *semanticCompiler) sharedStamp(stamp Stamp, compile func(*semanticCompil
 	}
 	c.page.Commands = append(c.page.Commands, translatePatternCommands(commands, stamp.Box.X, stamp.Box.Y)...)
 	return nil
-}
-
-// patternCellKey 区分共享底纹、颜色、透明度和影响单元语义的页面变换
-type patternCellKey struct {
-	pattern      *Pattern
-	color, space string
-	index, alpha int
-	colorAlpha   int
-	matrix       [6]float64
 }
 
 // patternCell 复用同次编译中相同底纹单元，不缓存外部对象的裁剪

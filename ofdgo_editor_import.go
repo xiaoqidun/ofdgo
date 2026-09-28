@@ -78,6 +78,14 @@ type ObjectImportOptions struct {
 	OnProgress     func(stage string, completed, total int) error
 }
 
+// editorProgressReader 为输入流提供可取消的分块读取检查点
+type editorProgressReader struct {
+	io.Reader
+	progress  editorProgress
+	stage     string
+	completed int
+}
+
 // ImportObjects 迁移选区及引用资源，不改变来源与目标页面结构，提交一次撤销记录
 // 保留对象原文与图层继承，同页链接映射到目标页，无法迁移的跨页链接明确报错
 // 返回后可关闭来源阅读器，后续修改来源不影响副本
@@ -236,6 +244,18 @@ func (e *Editor) ImportPagesWithOptions(source *Reader, indexes []int, at int, o
 		return nil, ErrEncryptionPolicyRequired
 	}
 	return e.importPages(source, indexes, at, false, options)
+}
+
+// Read 读取数据并在下一块开始前检查取消
+// 入参: data 接收缓冲区
+// 返回: int 读取字节数, error 错误信息
+func (r *editorProgressReader) Read(data []byte) (int, error) {
+	if err := r.progress.report(r.stage, r.completed, 0); err != nil {
+		return 0, err
+	}
+	n, err := r.Reader.Read(data[:min(len(data), 1<<20)])
+	r.completed += n
+	return n, err
 }
 
 // importPages 迁移页面，同文档复制时复用原资源并保留其他页面的跳转
@@ -505,26 +525,6 @@ func (m *editorPageImport) readFile(name string) ([]byte, error) {
 	}
 	defer input.Close()
 	return io.ReadAll(&editorProgressReader{Reader: input, progress: m.progress, stage: "resources"})
-}
-
-// editorProgressReader 为输入流提供可取消的分块读取检查点
-type editorProgressReader struct {
-	io.Reader
-	progress  editorProgress
-	stage     string
-	completed int
-}
-
-// Read 读取数据并在下一块开始前检查取消
-// 入参: data 接收缓冲区
-// 返回: int 读取字节数, error 错误信息
-func (r *editorProgressReader) Read(data []byte) (int, error) {
-	if err := r.progress.report(r.stage, r.completed, 0); err != nil {
-		return 0, err
-	}
-	n, err := r.Reader.Read(data[:min(len(data), 1<<20)])
-	r.completed += n
-	return n, err
 }
 
 // outlines 筛选指向导入页面的目录树并复用标准动作迁移

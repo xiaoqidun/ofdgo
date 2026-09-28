@@ -19,15 +19,15 @@ import (
 	"math"
 )
 
-// GeometryOperation 指定路径填充区域的布尔运算
-type GeometryOperation uint8
-
 const (
 	GeometryIntersect GeometryOperation = iota
 	GeometryUnion
 	GeometrySubtract
 	GeometryXor
 )
+
+// GeometryOperation 指定路径填充区域的布尔运算
+type GeometryOperation uint8
 
 // StrokeOptions 描述描边参数，长度单位为毫米
 type StrokeOptions struct {
@@ -64,27 +64,6 @@ type GeometryCurves interface {
 	Curves(path GeometryPath) (GeometryPath, error)
 }
 
-// validateStroke 校验各后端共用的描边参数
-// 入参: options 描边样式
-// 返回: error 无效样式
-func validateStroke(options StrokeOptions) error {
-	if !finite(options.Width) || options.Width <= 0 || !finite(options.Tolerance) || options.Tolerance < 0 || !finite(options.DashOffset) || !finite(options.MiterLimit) || options.MiterLimit < 0 {
-		return fmt.Errorf("invalid stroke width or tolerance")
-	}
-	if options.Cap != "" && options.Cap != "Butt" && options.Cap != "Round" && options.Cap != "Square" {
-		return fmt.Errorf("invalid stroke cap %q", options.Cap)
-	}
-	if options.Join != "" && options.Join != "Miter" && options.Join != "Round" && options.Join != "Bevel" {
-		return fmt.Errorf("invalid stroke join %q", options.Join)
-	}
-	for _, dash := range options.Dashes {
-		if !finite(dash) || dash < 0 {
-			return fmt.Errorf("invalid stroke dash")
-		}
-	}
-	return nil
-}
-
 // Geometry 返回当前几何后端，不隐式恢复默认实现
 // 返回: GeometryBackend 几何后端, error 未配置错误
 func (r *Renderer) Geometry() (GeometryBackend, error) {
@@ -116,6 +95,27 @@ func (r *Renderer) PathOutline(object PathObject) (string, error) {
 		return "", err
 	}
 	return path.SVG()
+}
+
+// validateStroke 校验各后端共用的描边参数
+// 入参: options 描边样式
+// 返回: error 无效样式
+func validateStroke(options StrokeOptions) error {
+	if !finite(options.Width) || options.Width <= 0 || !finite(options.Tolerance) || options.Tolerance < 0 || !finite(options.DashOffset) || !finite(options.MiterLimit) || options.MiterLimit < 0 {
+		return fmt.Errorf("invalid stroke width or tolerance")
+	}
+	if options.Cap != "" && options.Cap != "Butt" && options.Cap != "Round" && options.Cap != "Square" {
+		return fmt.Errorf("invalid stroke cap %q", options.Cap)
+	}
+	if options.Join != "" && options.Join != "Miter" && options.Join != "Round" && options.Join != "Bevel" {
+		return fmt.Errorf("invalid stroke join %q", options.Join)
+	}
+	for _, dash := range options.Dashes {
+		if !finite(dash) || dash < 0 {
+			return fmt.Errorf("invalid stroke dash")
+		}
+	}
+	return nil
 }
 
 // geometryRectangle 构建页面坐标矩形，保留输入精度

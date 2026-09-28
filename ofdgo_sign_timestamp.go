@@ -99,17 +99,6 @@ func WithSignatureTimestamp(options SignatureTimestampOptions) SignatureVerifyOp
 	return func(o *signatureVerifyOptions) { o.Timestamp = &options }
 }
 
-// cloneSignatureEvidence 深拷贝离线证据
-// 入参: values 原证据列表
-// 返回: [][]byte 独立证据列表
-func cloneSignatureEvidence(values [][]byte) [][]byte {
-	out := make([][]byte, len(values))
-	for i := range values {
-		out[i] = bytes.Clone(values[i])
-	}
-	return out
-}
-
 // VerifySignatureTimestamp 验证RFC3161令牌与原始字节的绑定
 // 入参: token DER编码TimeStampToken, data 被时间戳保护的原始字节, options 验证选项
 // 返回: SignatureTimestampReport 验证报告
@@ -120,6 +109,17 @@ func VerifySignatureTimestamp(token, data []byte, options SignatureTimestampOpti
 	}
 	report.Valid = err == nil && report.BindingChecked && report.BindingOK && report.SignedValueChecked && report.SignedValueOK && report.CertTrustChecked && report.CertTrustOK && report.CertTimeChecked && report.CertTimeOK
 	return report
+}
+
+// cloneSignatureEvidence 深拷贝离线证据
+// 入参: values 原证据列表
+// 返回: [][]byte 独立证据列表
+func cloneSignatureEvidence(values [][]byte) [][]byte {
+	out := make([][]byte, len(values))
+	for i := range values {
+		out[i] = bytes.Clone(values[i])
+	}
+	return out
 }
 
 // verifySignatureTimestamp 检查令牌绑定、签名与TSA信任

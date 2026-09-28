@@ -207,6 +207,171 @@ func (e *Editor) AddDrawParam(draw DrawParam) (string, error) {
 	return e.addEditorDrawParam(cloneEditorData(draw))
 }
 
+// StyleObjects 原子更新对象透明度、文字颜色及路径填充和描边样式
+// 入参: page 页面索引, ids 对象标识, style 待修改属性
+// 返回: error 错误信息
+func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil {
+		return err
+	}
+	for i := range objects {
+		if style.Fill != nil || style.Stroke != nil || style.FillColor != nil || style.StrokeColor != nil || style.LineWidth != nil {
+			capability, err := e.ObjectCapabilities(page, ids[i])
+			if err != nil {
+				return err
+			}
+			if !capability.Paint {
+				return fmt.Errorf("object %q cannot be painted: %w", ids[i], capability.editError())
+			}
+		}
+		objects[i], err = e.styleObject(objects[i], style)
+		if err != nil {
+			return err
+		}
+	}
+	return e.updateObjects(page, objects, true)
+}
+
+// CopyStyle 将同类型对象的外观复制到选区，不复制内容、位置、资源数据或动作
+// 文字复制字体、字号、颜色及透明度，沿用目标段落设置；字体标识须属于当前文档
+// 路径按页面中的实际线宽和虚线长度复制，保持目标变换
+// 入参: page 目标页面索引, ids 目标对象标识, source 样式来源快照
+// 返回: error 错误信息
+func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err error) {
+	if err := e.validateCopyStyle(source); err != nil {
+		return err
+	}
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil || len(objects) == 0 {
+		return err
+	}
+	for _, object := range objects {
+		if object.Type != source.Type {
+			return fmt.Errorf("style requires objects of the same type")
+		}
+	}
+	count, maximum := len(e.resources), e.maxID
+	ready := e.source != nil && e.source.idsReady
+	defer func() {
+		if err != nil {
+			clear(e.resources[count:])
+			e.resources, e.maxID = e.resources[:count], maximum
+			if e.source != nil {
+				e.source.idsReady = ready
+			}
+		}
+	}()
+	if source.Type == "TextObject" && source.TextObject.FillColor == nil || source.Type == "PathObject" && (source.PathObject.FillColor == nil || source.PathObject.StrokeColor == nil) {
+		black, err := e.RGBColor(color.NRGBA{A: 255})
+		if err != nil {
+			return err
+		}
+		if source.Type == "TextObject" {
+			source.TextObject.FillColor = black
+		} else {
+			if source.PathObject.FillColor == nil {
+				source.PathObject.FillColor = black
+			}
+			if source.PathObject.StrokeColor == nil {
+				source.PathObject.StrokeColor = (*StrokeColor)(black)
+			}
+		}
+	}
+	if source.Type == "TextObject" {
+		objects, err = e.styleTextObjects(objects, TextStyle{Font: source.TextObject.Font, Size: source.TextObject.Size})
+		if err != nil {
+			return err
+		}
+		for i := range objects {
+			objects[i].TextObject.FillColor = cloneEditorData(source.TextObject.FillColor)
+			objects[i].TextObject.Alpha = cloneEditorData(source.TextObject.Alpha)
+		}
+		return e.UpdateObjects(page, objects)
+	}
+	for i, object := range objects {
+		object = cloneEditorData(object)
+		switch source.Type {
+		case "PathObject":
+			object.PathObject = copyEditorPathStyle(object.PathObject, source.PathObject, editorStrokeScale(source.PathObject.CTM)/editorStrokeScale(object.PathObject.CTM))
+		case "ImageObject":
+			object.ImageObject.Alpha = source.ImageObject.Alpha
+		}
+		objects[i] = object
+	}
+	return e.updateObjects(page, objects, true)
+}
+
+// StyleImageBorders 原子修改图片边框，保留未修改的颜色、线型及原文扩展
+// 入参: page 页面索引, ids 图片标识, style 边框增量
+// 返回: error 错误信息
+func (e *Editor) StyleImageBorders(page int, ids []string, style ImageBorderStyle) error {
+	for _, value := range []*float64{style.LineWidth, style.HorizontalRadius, style.VerticalRadius} {
+		if value != nil && (!finite(*value) || *value < 0) {
+			return fmt.Errorf("border dimensions must be finite and nonnegative")
+		}
+	}
+	if style.Color != nil {
+		if err := e.editorColor((*FillColor)(style.Color)); err != nil {
+			return err
+		}
+	}
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil {
+		return err
+	}
+	for i := range objects {
+		if objects[i].Type != "ImageObject" {
+			return fmt.Errorf("object %q is not an image", ids[i])
+		}
+		if style.Enabled != nil && !*style.Enabled {
+			objects[i].ImageObject.Border = nil
+			continue
+		}
+		border := cloneEditorData(objects[i].ImageObject.Border)
+		if border == nil {
+			if style == (ImageBorderStyle{}) {
+				continue
+			}
+			border = &ImageBorder{}
+		}
+		if style.LineWidth != nil {
+			border.LineWidth = cloneEditorData(style.LineWidth)
+		}
+		if style.HorizontalRadius != nil {
+			border.HorizonalCornerRadius = *style.HorizontalRadius
+		}
+		if style.VerticalRadius != nil {
+			border.VerticalCornerRadius = *style.VerticalRadius
+		}
+		if style.Color != nil {
+			border.BorderColor = (*StrokeColor)(editorStyleColor((*FillColor)(style.Color), (*FillColor)(border.BorderColor)))
+		}
+		objects[i].ImageObject.Border = border
+	}
+	return e.updateObjects(page, objects, true)
+}
+
+// SetImageBorders 原子替换图片边框，nil移除边框
+// 入参: page 页面索引, ids 图片标识, border 边框样式
+// 返回: error 错误信息
+func (e *Editor) SetImageBorders(page int, ids []string, border *ImageBorder) error {
+	if err := e.validateImageBorder(border); err != nil {
+		return err
+	}
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil {
+		return err
+	}
+	for i := range objects {
+		if objects[i].Type != "ImageObject" {
+			return fmt.Errorf("object %q is not an image", ids[i])
+		}
+		objects[i].ImageObject.Border = cloneEditorData(border)
+	}
+	return e.updateObjects(page, objects, true)
+}
+
 // editorDrawParam 解析原文档的绘制参数继承链，缺失或循环引用不进入编辑快照
 // 入参: id 绘制参数标识, visited 已访问标识
 // 返回: *DrawParam 合并参数, error 错误信息
@@ -316,32 +481,6 @@ func (e *Editor) resolveEditorStyleDefaults(object GraphicObject, base *DrawPara
 	return cloneEditorObject(object)
 }
 
-// StyleObjects 原子更新对象透明度、文字颜色及路径填充和描边样式
-// 入参: page 页面索引, ids 对象标识, style 待修改属性
-// 返回: error 错误信息
-func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
-	objects, _, err := e.selectedObjects(page, ids)
-	if err != nil {
-		return err
-	}
-	for i := range objects {
-		if style.Fill != nil || style.Stroke != nil || style.FillColor != nil || style.StrokeColor != nil || style.LineWidth != nil {
-			capability, err := e.ObjectCapabilities(page, ids[i])
-			if err != nil {
-				return err
-			}
-			if !capability.Paint {
-				return fmt.Errorf("object %q cannot be painted: %w", ids[i], capability.editError())
-			}
-		}
-		objects[i], err = e.styleObject(objects[i], style)
-		if err != nil {
-			return err
-		}
-	}
-	return e.updateObjects(page, objects, true)
-}
-
 // styleObject 仅替换请求的外观字段，保留内容、定位及未修改样式
 // 入参: object 原对象, style 待修改属性
 // 返回: GraphicObject 修改后的独立对象, error 错误信息
@@ -439,75 +578,6 @@ func editorStyleColor(color, before *FillColor) *FillColor {
 	return result
 }
 
-// CopyStyle 将同类型对象的外观复制到选区，不复制内容、位置、资源数据或动作
-// 文字复制字体、字号、颜色及透明度，沿用目标段落设置；字体标识须属于当前文档
-// 路径按页面中的实际线宽和虚线长度复制，保持目标变换
-// 入参: page 目标页面索引, ids 目标对象标识, source 样式来源快照
-// 返回: error 错误信息
-func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err error) {
-	if err := e.validateCopyStyle(source); err != nil {
-		return err
-	}
-	objects, _, err := e.selectedObjects(page, ids)
-	if err != nil || len(objects) == 0 {
-		return err
-	}
-	for _, object := range objects {
-		if object.Type != source.Type {
-			return fmt.Errorf("style requires objects of the same type")
-		}
-	}
-	count, maximum := len(e.resources), e.maxID
-	ready := e.source != nil && e.source.idsReady
-	defer func() {
-		if err != nil {
-			clear(e.resources[count:])
-			e.resources, e.maxID = e.resources[:count], maximum
-			if e.source != nil {
-				e.source.idsReady = ready
-			}
-		}
-	}()
-	if source.Type == "TextObject" && source.TextObject.FillColor == nil || source.Type == "PathObject" && (source.PathObject.FillColor == nil || source.PathObject.StrokeColor == nil) {
-		black, err := e.RGBColor(color.NRGBA{A: 255})
-		if err != nil {
-			return err
-		}
-		if source.Type == "TextObject" {
-			source.TextObject.FillColor = black
-		} else {
-			if source.PathObject.FillColor == nil {
-				source.PathObject.FillColor = black
-			}
-			if source.PathObject.StrokeColor == nil {
-				source.PathObject.StrokeColor = (*StrokeColor)(black)
-			}
-		}
-	}
-	if source.Type == "TextObject" {
-		objects, err = e.styleTextObjects(objects, TextStyle{Font: source.TextObject.Font, Size: source.TextObject.Size})
-		if err != nil {
-			return err
-		}
-		for i := range objects {
-			objects[i].TextObject.FillColor = cloneEditorData(source.TextObject.FillColor)
-			objects[i].TextObject.Alpha = cloneEditorData(source.TextObject.Alpha)
-		}
-		return e.UpdateObjects(page, objects)
-	}
-	for i, object := range objects {
-		object = cloneEditorData(object)
-		switch source.Type {
-		case "PathObject":
-			object.PathObject = copyEditorPathStyle(object.PathObject, source.PathObject, editorStrokeScale(source.PathObject.CTM)/editorStrokeScale(object.PathObject.CTM))
-		case "ImageObject":
-			object.ImageObject.Alpha = source.ImageObject.Alpha
-		}
-		objects[i] = object
-	}
-	return e.updateObjects(page, objects, true)
-}
-
 // validateCopyStyle 校验样式来源，不分配资源或改写对象
 // 入参: source 有效外观快照
 // 返回: error 错误信息
@@ -586,76 +656,6 @@ func editorStrokeScale(ctm string) float64 {
 		return scale
 	}
 	return 1
-}
-
-// StyleImageBorders 原子修改图片边框，保留未修改的颜色、线型及原文扩展
-// 入参: page 页面索引, ids 图片标识, style 边框增量
-// 返回: error 错误信息
-func (e *Editor) StyleImageBorders(page int, ids []string, style ImageBorderStyle) error {
-	for _, value := range []*float64{style.LineWidth, style.HorizontalRadius, style.VerticalRadius} {
-		if value != nil && (!finite(*value) || *value < 0) {
-			return fmt.Errorf("border dimensions must be finite and nonnegative")
-		}
-	}
-	if style.Color != nil {
-		if err := e.editorColor((*FillColor)(style.Color)); err != nil {
-			return err
-		}
-	}
-	objects, _, err := e.selectedObjects(page, ids)
-	if err != nil {
-		return err
-	}
-	for i := range objects {
-		if objects[i].Type != "ImageObject" {
-			return fmt.Errorf("object %q is not an image", ids[i])
-		}
-		if style.Enabled != nil && !*style.Enabled {
-			objects[i].ImageObject.Border = nil
-			continue
-		}
-		border := cloneEditorData(objects[i].ImageObject.Border)
-		if border == nil {
-			if style == (ImageBorderStyle{}) {
-				continue
-			}
-			border = &ImageBorder{}
-		}
-		if style.LineWidth != nil {
-			border.LineWidth = cloneEditorData(style.LineWidth)
-		}
-		if style.HorizontalRadius != nil {
-			border.HorizonalCornerRadius = *style.HorizontalRadius
-		}
-		if style.VerticalRadius != nil {
-			border.VerticalCornerRadius = *style.VerticalRadius
-		}
-		if style.Color != nil {
-			border.BorderColor = (*StrokeColor)(editorStyleColor((*FillColor)(style.Color), (*FillColor)(border.BorderColor)))
-		}
-		objects[i].ImageObject.Border = border
-	}
-	return e.updateObjects(page, objects, true)
-}
-
-// SetImageBorders 原子替换图片边框，nil移除边框
-// 入参: page 页面索引, ids 图片标识, border 边框样式
-// 返回: error 错误信息
-func (e *Editor) SetImageBorders(page int, ids []string, border *ImageBorder) error {
-	if err := e.validateImageBorder(border); err != nil {
-		return err
-	}
-	objects, _, err := e.selectedObjects(page, ids)
-	if err != nil {
-		return err
-	}
-	for i := range objects {
-		if objects[i].Type != "ImageObject" {
-			return fmt.Errorf("object %q is not an image", ids[i])
-		}
-		objects[i].ImageObject.Border = cloneEditorData(border)
-	}
-	return e.updateObjects(page, objects, true)
 }
 
 // validateImageBorder 校验图片边框的线型、圆角和绘制颜色

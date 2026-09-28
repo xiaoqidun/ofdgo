@@ -266,38 +266,6 @@ func Open(data []byte, opts OpenOptions) (*Session, error) {
 	return newSession(reader, opts)
 }
 
-// newSession 从文档快照创建阅读会话
-// 入参: reader 文档读取器, opts 打开选项
-// 返回: *Session 文档会话, error 错误信息
-func newSession(reader *ofdgo.Reader, opts OpenOptions) (*Session, error) {
-	doc, err := reader.Doc()
-	if err != nil {
-		reader.Close()
-		return nil, err
-	}
-	var rendererOptions []ofdgo.RendererOption
-	var fontFS *ofdgo.FontFS
-	if len(opts.Fonts) > 0 {
-		fontFS = ofdgo.NewFontFS(opts.Fonts)
-		if fontFS.Len() == 0 {
-			reader.Close()
-			return nil, fmt.Errorf("invalid font file")
-		}
-		rendererOptions = append(rendererOptions, ofdgo.WithFontFS(fontFS))
-	}
-	rendererOptions = append(rendererOptions, ofdgo.WithAnnotations(opts.RenderAnnotations))
-	return &Session{
-		Reader:    reader,
-		Renderer:  ofdgo.NewRenderer(reader, rendererOptions...),
-		fontFS:    fontFS,
-		doc:       doc,
-		pageCache: make(map[int]*ofdgo.PageContent),
-		boxCache:  make([]pageBoxInfo, len(doc.Pages.Page)),
-		textCache: make(map[int]*ofdgo.PageText),
-		svgFonts:  make(map[string][]byte),
-	}, nil
-}
-
 // Close 关闭文档会话
 // 返回: error 错误信息
 func (s *Session) Close() error {
@@ -333,59 +301,6 @@ func (s *Session) SetFonts(fonts []FontFile) error {
 	return nil
 }
 
-// resetFontInfo 清除字体统计及扫描状态，供字体或注解配置变更后重算
-func (s *Session) resetFontInfo() {
-	s.fontScan = nil
-	s.fontInfos = nil
-	s.fontsRead = false
-}
-
-// scanFontInfo 分步统计字体，每次最多处理一页，完成后保留当前会话的诊断
-// 返回: bool 是否完成
-func (s *Session) scanFontInfo() bool {
-	if s.fontAnnotations != s.Renderer.RenderAnnotations {
-		s.resetFontInfo()
-		s.fontAnnotations = s.Renderer.RenderAnnotations
-	}
-	if s.fontsRead {
-		return true
-	}
-	if s.fontScan == nil {
-		var err error
-		s.fontScan, err = s.Renderer.ScanFontInfos()
-		if err != nil {
-			s.fontsRead = true
-			return true
-		}
-	}
-	if s.fontScan.Next() {
-		return false
-	}
-	s.fontInfos, _ = s.fontScan.Infos()
-	s.fontsRead = true
-	s.fontScan = nil
-	return true
-}
-
-// scanFontInfoBatch 为大文档批量统计字体，限制每次处理的页数与耗时
-// 返回: bool 是否完成
-func (s *Session) scanFontInfoBatch() bool {
-	limit := 1
-	if len(s.doc.Pages.Page) > 256 {
-		limit = 64
-	}
-	start := time.Now()
-	for range limit {
-		if s.scanFontInfo() {
-			return true
-		}
-		if time.Since(start) >= 8*time.Millisecond {
-			break
-		}
-	}
-	return false
-}
-
 // PageText 获取指定页面文字，复用当前会话的文字索引
 // 入参: index 页面索引
 // 返回: *ofdgo.PageText 页面文字, error 错误信息
@@ -415,16 +330,6 @@ func (s *Session) PageTextString(index int) (string, error) {
 		}
 	}
 	return text.String(), nil
-}
-
-// readPageText 复用已加载页面，否则只解析文字所需图元
-// 入参: index 页面索引
-// 返回: *ofdgo.PageText 页面文字, error 错误信息
-func (s *Session) readPageText(index int) (*ofdgo.PageText, error) {
-	if page := s.pageCache[index]; page != nil {
-		return s.Renderer.PageText(page)
-	}
-	return s.Renderer.PageTextByIndex(index)
 }
 
 // SearchPage 搜索指定页面，复用当前会话的文字索引
@@ -477,23 +382,6 @@ func (s *Session) Summary() DocumentInfo {
 	}
 	info.FontCount = len(info.Fonts)
 	return info
-}
-
-// pageInfos 获取全部真实页面尺寸，首屏、配置及详情共用区域缓存
-// 返回: []PageInfo 独立页面信息列表
-func (s *Session) pageInfos() []PageInfo {
-	pages := make([]PageInfo, len(s.doc.Pages.Page))
-	for index, page := range s.doc.Pages.Page {
-		cached := s.boxCache[index]
-		box := cached.box
-		if !cached.valid {
-			if area, err := s.Reader.PageArea(page); err == nil {
-				box, _ = s.pageBox(index, &ofdgo.PageContent{Area: area})
-			}
-		}
-		pages[index] = PageInfo{Index: index, ID: page.ID, Width: box.W, Height: box.H}
-	}
-	return pages
 }
 
 // Details 获取无需逐页扫描的附件、签名及字体匹配结果
@@ -629,60 +517,10 @@ func (s *Session) SVGFontData(name string) ([]byte, error) {
 	return data, nil
 }
 
-// pageContent 读取页面，复用最近一次解析结果
-// 入参: index 页面索引
-// 返回: *ofdgo.PageContent 页面内容, error 错误信息
-func (s *Session) pageContent(index int) (*ofdgo.PageContent, error) {
-	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
-		return nil, fmt.Errorf("ofd document is not opened")
-	}
-	if page, ok := s.pageCache[index]; ok {
-		return page, nil
-	}
-	clear(s.pageCache)
-	page, err := s.Reader.PageContentByIndex(index)
-	if err != nil {
-		return nil, err
-	}
-	s.pageCache[index] = page
-	return page, nil
-}
-
-// pageBox 获取页面物理区域
-// 入参: index 页面索引, page 页面内容
-// 返回: ofdgo.Box 页面物理区域, error 错误信息
-func (s *Session) pageBox(index int, page *ofdgo.PageContent) (ofdgo.Box, error) {
-	if cached := s.boxCache[index]; cached.valid {
-		return cached.box, nil
-	}
-	box, err := s.Renderer.GetPageBox(page)
-	if err != nil {
-		return ofdgo.Box{}, err
-	}
-	s.boxCache[index] = pageBoxInfo{box: box, valid: true}
-	return box, nil
-}
-
 // ExportFormats 获取导出格式
 // 返回: []ExportFormat 导出格式列表
 func ExportFormats() []ExportFormat {
 	return ofdgo.OutputFormats()[1:]
-}
-
-// exportFormat 获取导出格式
-// 入参: value 格式值
-// 返回: ExportFormat 导出格式, bool 是否支持
-func exportFormat(value string) (ExportFormat, bool) {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "jpeg" {
-		value = "jpg"
-	}
-	for _, format := range ExportFormats() {
-		if format.Value == value {
-			return format, true
-		}
-	}
-	return ExportFormat{}, false
 }
 
 // ExportPage 导出单页
@@ -737,6 +575,168 @@ func (s *Session) ExportPDF(writer io.Writer, indices ...int) error {
 		return fmt.Errorf("ofd document is not opened")
 	}
 	return s.Renderer.RenderToMultiPagePDF(writer, indices...)
+}
+
+// newSession 从文档快照创建阅读会话
+// 入参: reader 文档读取器, opts 打开选项
+// 返回: *Session 文档会话, error 错误信息
+func newSession(reader *ofdgo.Reader, opts OpenOptions) (*Session, error) {
+	doc, err := reader.Doc()
+	if err != nil {
+		reader.Close()
+		return nil, err
+	}
+	var rendererOptions []ofdgo.RendererOption
+	var fontFS *ofdgo.FontFS
+	if len(opts.Fonts) > 0 {
+		fontFS = ofdgo.NewFontFS(opts.Fonts)
+		if fontFS.Len() == 0 {
+			reader.Close()
+			return nil, fmt.Errorf("invalid font file")
+		}
+		rendererOptions = append(rendererOptions, ofdgo.WithFontFS(fontFS))
+	}
+	rendererOptions = append(rendererOptions, ofdgo.WithAnnotations(opts.RenderAnnotations))
+	return &Session{
+		Reader:    reader,
+		Renderer:  ofdgo.NewRenderer(reader, rendererOptions...),
+		fontFS:    fontFS,
+		doc:       doc,
+		pageCache: make(map[int]*ofdgo.PageContent),
+		boxCache:  make([]pageBoxInfo, len(doc.Pages.Page)),
+		textCache: make(map[int]*ofdgo.PageText),
+		svgFonts:  make(map[string][]byte),
+	}, nil
+}
+
+// resetFontInfo 清除字体统计及扫描状态，供字体或注解配置变更后重算
+func (s *Session) resetFontInfo() {
+	s.fontScan = nil
+	s.fontInfos = nil
+	s.fontsRead = false
+}
+
+// scanFontInfo 分步统计字体，每次最多处理一页，完成后保留当前会话的诊断
+// 返回: bool 是否完成
+func (s *Session) scanFontInfo() bool {
+	if s.fontAnnotations != s.Renderer.RenderAnnotations {
+		s.resetFontInfo()
+		s.fontAnnotations = s.Renderer.RenderAnnotations
+	}
+	if s.fontsRead {
+		return true
+	}
+	if s.fontScan == nil {
+		var err error
+		s.fontScan, err = s.Renderer.ScanFontInfos()
+		if err != nil {
+			s.fontsRead = true
+			return true
+		}
+	}
+	if s.fontScan.Next() {
+		return false
+	}
+	s.fontInfos, _ = s.fontScan.Infos()
+	s.fontsRead = true
+	s.fontScan = nil
+	return true
+}
+
+// scanFontInfoBatch 为大文档批量统计字体，限制每次处理的页数与耗时
+// 返回: bool 是否完成
+func (s *Session) scanFontInfoBatch() bool {
+	limit := 1
+	if len(s.doc.Pages.Page) > 256 {
+		limit = 64
+	}
+	start := time.Now()
+	for range limit {
+		if s.scanFontInfo() {
+			return true
+		}
+		if time.Since(start) >= 8*time.Millisecond {
+			break
+		}
+	}
+	return false
+}
+
+// readPageText 复用已加载页面，否则只解析文字所需图元
+// 入参: index 页面索引
+// 返回: *ofdgo.PageText 页面文字, error 错误信息
+func (s *Session) readPageText(index int) (*ofdgo.PageText, error) {
+	if page := s.pageCache[index]; page != nil {
+		return s.Renderer.PageText(page)
+	}
+	return s.Renderer.PageTextByIndex(index)
+}
+
+// pageInfos 获取全部真实页面尺寸，首屏、配置及详情共用区域缓存
+// 返回: []PageInfo 独立页面信息列表
+func (s *Session) pageInfos() []PageInfo {
+	pages := make([]PageInfo, len(s.doc.Pages.Page))
+	for index, page := range s.doc.Pages.Page {
+		cached := s.boxCache[index]
+		box := cached.box
+		if !cached.valid {
+			if area, err := s.Reader.PageArea(page); err == nil {
+				box, _ = s.pageBox(index, &ofdgo.PageContent{Area: area})
+			}
+		}
+		pages[index] = PageInfo{Index: index, ID: page.ID, Width: box.W, Height: box.H}
+	}
+	return pages
+}
+
+// pageContent 读取页面，复用最近一次解析结果
+// 入参: index 页面索引
+// 返回: *ofdgo.PageContent 页面内容, error 错误信息
+func (s *Session) pageContent(index int) (*ofdgo.PageContent, error) {
+	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	if page, ok := s.pageCache[index]; ok {
+		return page, nil
+	}
+	clear(s.pageCache)
+	page, err := s.Reader.PageContentByIndex(index)
+	if err != nil {
+		return nil, err
+	}
+	s.pageCache[index] = page
+	return page, nil
+}
+
+// pageBox 获取页面物理区域
+// 入参: index 页面索引, page 页面内容
+// 返回: ofdgo.Box 页面物理区域, error 错误信息
+func (s *Session) pageBox(index int, page *ofdgo.PageContent) (ofdgo.Box, error) {
+	if cached := s.boxCache[index]; cached.valid {
+		return cached.box, nil
+	}
+	box, err := s.Renderer.GetPageBox(page)
+	if err != nil {
+		return ofdgo.Box{}, err
+	}
+	s.boxCache[index] = pageBoxInfo{box: box, valid: true}
+	return box, nil
+}
+
+// exportFormat 获取导出格式
+// 入参: value 格式值
+// 返回: ExportFormat 导出格式, bool 是否支持
+func exportFormat(value string) (ExportFormat, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "jpeg" {
+		value = "jpg"
+	}
+	for _, format := range ExportFormats() {
+		if format.Value == value {
+			return format, true
+		}
+	}
+	return ExportFormat{}, false
 }
 
 // encryptionInfo 获取当前文档的加密来源，不包含凭据

@@ -22,6 +22,13 @@ import (
 	"slices"
 )
 
+// DrawStamp 保留签章图片和嵌套OFD的绘制顺序，不混入正文搜索
+// 入参: stamp 印章
+// 返回: error 印章解析或编译错误
+func (c *semanticCompiler) DrawStamp(stamp Stamp) error {
+	return c.sharedStamp(stamp, (*semanticCompiler).drawStampContent)
+}
+
 // imageObject 共用图片定位、裁剪和边框，不在度量时读取像素
 // 入参: object 图片对象, state 继承状态
 // 返回: error 资源或几何错误
@@ -133,13 +140,6 @@ func (c *semanticCompiler) addImage(img image.Image, matrix Matrix, clip *Geomet
 	}
 	c.page.Commands = append(c.page.Commands, command)
 	return nil
-}
-
-// DrawStamp 保留签章图片和嵌套OFD的绘制顺序，不混入正文搜索
-// 入参: stamp 印章
-// 返回: error 印章解析或编译错误
-func (c *semanticCompiler) DrawStamp(stamp Stamp) error {
-	return c.sharedStamp(stamp, (*semanticCompiler).drawStampContent)
 }
 
 // drawStampContent 解释未缓存的签章内容，保持嵌套文档及裁剪语义

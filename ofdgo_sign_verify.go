@@ -39,6 +39,8 @@ import (
 	"github.com/emmansun/gmsm/smx509"
 )
 
+var signatureMethodReplacer = strings.NewReplacer("-", "", "_", "", " ", "")
+
 // SignatureVerifyReport 签名验证报告
 // Valid表示签名完整性、签名时间语义及调用方指定的全部策略均通过
 // Checked表示对应检查已得出结论, 未检查时不能将OK的零值视为失败
@@ -103,36 +105,6 @@ type SignatureVerifyReport struct {
 	Revocations          []SignatureRevocationReport
 }
 
-// IntegrityValid 判断签名完整性是否有效
-// 返回: bool 是否有效
-func (report SignatureVerifyReport) IntegrityValid() bool {
-	sealOK := report.Type == SignTypeSign || report.SealChecked && report.SealOK
-	return report.Error == "" && report.DigestOK && referencesOK(report.References) &&
-		report.DataHashChecked && report.DataHashOK && report.SignedValueChecked && report.SignedValueOK &&
-		sealOK && report.SealMatchOK && report.CertChecked && report.CertOK
-}
-
-// TrustedValid 判断签名是否可信有效
-// 返回: bool 签名完整性、时间语义、证书信任及证书有效期是否均验证通过
-func (report SignatureVerifyReport) TrustedValid() bool {
-	return report.IntegrityValid() && report.certificatePolicyOK() && report.CertTrustChecked && report.CertTimeChecked
-}
-
-// HasFailure 判断已完成的签名检查是否存在失败
-// 返回: bool 是否存在失败, 未完成检查时仍需判断Valid和Error
-func (report SignatureVerifyReport) HasFailure() bool {
-	for _, ref := range report.References {
-		if ref.Checked && !ref.OK {
-			return true
-		}
-	}
-	return report.DataHashChecked && !report.DataHashOK ||
-		report.SignedValueChecked && !report.SignedValueOK ||
-		report.SealChecked && !report.SealOK ||
-		report.SealMatchChecked && !report.SealMatchOK ||
-		report.CertChecked && !report.CertOK || !report.certificatePolicyOK()
-}
-
 // SignatureCertInfo 签名证书信息
 type SignatureCertInfo struct {
 	Raw          []byte
@@ -180,10 +152,38 @@ type signatureVerifyOptions struct {
 	DocRoot    string
 }
 
-var signatureMethodReplacer = strings.NewReplacer("-", "", "_", "", " ", "")
-
 // SignatureVerifyOption 签名验证选项函数
 type SignatureVerifyOption func(*signatureVerifyOptions)
+
+// IntegrityValid 判断签名完整性是否有效
+// 返回: bool 是否有效
+func (report SignatureVerifyReport) IntegrityValid() bool {
+	sealOK := report.Type == SignTypeSign || report.SealChecked && report.SealOK
+	return report.Error == "" && report.DigestOK && referencesOK(report.References) &&
+		report.DataHashChecked && report.DataHashOK && report.SignedValueChecked && report.SignedValueOK &&
+		sealOK && report.SealMatchOK && report.CertChecked && report.CertOK
+}
+
+// TrustedValid 判断签名是否可信有效
+// 返回: bool 签名完整性、时间语义、证书信任及证书有效期是否均验证通过
+func (report SignatureVerifyReport) TrustedValid() bool {
+	return report.IntegrityValid() && report.certificatePolicyOK() && report.CertTrustChecked && report.CertTimeChecked
+}
+
+// HasFailure 判断已完成的签名检查是否存在失败
+// 返回: bool 是否存在失败, 未完成检查时仍需判断Valid和Error
+func (report SignatureVerifyReport) HasFailure() bool {
+	for _, ref := range report.References {
+		if ref.Checked && !ref.OK {
+			return true
+		}
+	}
+	return report.DataHashChecked && !report.DataHashOK ||
+		report.SignedValueChecked && !report.SignedValueOK ||
+		report.SealChecked && !report.SealOK ||
+		report.SealMatchChecked && !report.SealMatchOK ||
+		report.CertChecked && !report.CertOK || !report.certificatePolicyOK()
+}
 
 // WithSignatureCert 添加数字签名验证证书
 // 入参: cert DER或PEM编码证书
@@ -230,16 +230,6 @@ func WithSignatureVerifyTime(t time.Time) SignatureVerifyOption {
 	return func(o *signatureVerifyOptions) {
 		o.VerifyTime = &t
 	}
-}
-
-// appendSignatureCerts 追加签名证书
-// 入参: dst 目标证书列表, certs DER或PEM编码证书列表
-// 返回: [][]byte 证书列表
-func appendSignatureCerts(dst [][]byte, certs ...[]byte) [][]byte {
-	for _, cert := range certs {
-		dst = append(dst, parseSignatureCerts(cert)...)
-	}
-	return dst
 }
 
 // VerifySignaturesBytes 验证OFD字节数据签名
@@ -340,6 +330,16 @@ func (r *Reader) VerifyDocumentSignatures(index int, opts ...SignatureVerifyOpti
 		reports = append(reports, view.verifySignature(sigListPath, sigRef, &options))
 	}
 	return reports, nil
+}
+
+// appendSignatureCerts 追加签名证书
+// 入参: dst 目标证书列表, certs DER或PEM编码证书列表
+// 返回: [][]byte 证书列表
+func appendSignatureCerts(dst [][]byte, certs ...[]byte) [][]byte {
+	for _, cert := range certs {
+		dst = append(dst, parseSignatureCerts(cert)...)
+	}
+	return dst
 }
 
 // verifySignature 验证单个签名

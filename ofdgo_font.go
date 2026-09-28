@@ -20,14 +20,6 @@ import (
 	"github.com/tdewolff/font"
 )
 
-// fontSFNTData 保留字体原始表数据和时间，重新计算目录与校验和
-// 入参: sfnt 已解析的字体
-// 返回: []byte 独立SFNT数据
-func fontSFNTData(sfnt *font.SFNT) []byte {
-	data, _ := serializeOTF(sfnt.Tables)
-	return data
-}
-
 // FixFontDataAggressive 激进修复字体数据
 // 尝试修复缺失表(OS/2, cmap等)的TrueType字体或包装CFF裸数据
 // 对显式字形映射补充私有字符cmap，便于按glyph id渲染
@@ -57,6 +49,14 @@ func FixFontDataAggressive(data []byte, fixCmap, fixName bool) (bool, []byte, ma
 	}
 	fixed, newData, mapping, mc, err := fixTrueType(data, fixCmap, fixName)
 	return fixed, newData, mapping, mc, err
+}
+
+// fontSFNTData 保留字体原始表数据和时间，重新计算目录与校验和
+// 入参: sfnt 已解析的字体
+// 返回: []byte 独立SFNT数据
+func fontSFNTData(sfnt *font.SFNT) []byte {
+	data, _ := serializeOTF(sfnt.Tables)
+	return data
 }
 
 // isBareCFFData 检查是否为CFF裸字体数据

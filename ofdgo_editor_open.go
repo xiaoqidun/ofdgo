@@ -98,16 +98,6 @@ type ObjectCapabilities struct {
 	MissingGlyphs *MissingGlyphError
 }
 
-// editError 将操作受限原因转为错误，保留可供调用方识别的缺字诊断
-// 返回: error 受限原因
-func (c ObjectCapabilities) editError() error {
-	var err error = errors.New(c.Reason)
-	if c.MissingGlyphs != nil {
-		err = c.MissingGlyphs
-	}
-	return &EditError{Code: c.ReasonCode, Err: err}
-}
-
 // PageCapabilities 页面可执行的操作，Insert表示可以添加RGB对象；新增空白页面始终可用
 type PageCapabilities struct {
 	Insert bool
@@ -157,6 +147,60 @@ func (r *Reader) Editor() (*Editor, error) {
 		e.pages[i] = PageContent{ID: page.ID}
 	}
 	return e, nil
+}
+
+// PageCapabilities 获取页面操作范围，复制和删除由库统一维护标准引用
+// 入参: index 页面索引
+// 返回: PageCapabilities 操作能力, error 错误信息
+func (e *Editor) PageCapabilities(index int) (PageCapabilities, error) {
+	if index < 0 || index >= len(e.pages) {
+		return PageCapabilities{}, fmt.Errorf("page index %d out of range", index)
+	}
+	return PageCapabilities{Insert: e.sourceRGB(), Copy: true, Delete: true, Move: true, Resize: true}, nil
+}
+
+// ObjectCapabilities 获取对象可执行的操作，不支持的内容保持原文，不强制转换
+// 字体缺失或子集不包含原文时仍可保真移动、复制和删除，不自动重新排版
+// 显式提供可用字体后可通过UpdateObject替换；原文布局未知时不自动推断段落选项
+// 入参: page 页面索引, id 对象标识
+// 返回: ObjectCapabilities 操作能力, error 错误信息
+func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, error) {
+	layer, index, err := e.findObject(page, id)
+	if err != nil {
+		return ObjectCapabilities{}, err
+	}
+	return e.objectCapabilities(layer.Objects[index], make(map[*editorXML]bool)), nil
+}
+
+// FontData 获取编辑使用的字体数据，外部字体不写入文档资源
+// 入参: id 字体资源标识
+// 返回: []byte 独立字体数据, error 错误信息
+func (e *Editor) FontData(id string) ([]byte, error) {
+	for _, resource := range e.resources {
+		if resource.font != nil && resource.font.ID == id && len(resource.data) != 0 {
+			return bytes.Clone(resource.data), nil
+		}
+	}
+	if e.source != nil {
+		if definition := e.source.reader.fontCache[id]; definition != nil && definition.FontFile != "" {
+			return e.source.reader.FontData(id)
+		}
+	}
+	sfnt, err := e.editorFont(id)
+	if err != nil {
+		return nil, err
+	}
+	return sfnt.Write(), nil
+}
+
+// editError 将操作受限原因转为错误，保留可供调用方识别的缺字诊断
+// 返回: error 受限原因
+func (c ObjectCapabilities) editError() error {
+	var err error = errors.New(c.Reason)
+	if c.MissingGlyphs != nil {
+		err = c.MissingGlyphs
+	}
+	return &EditError{Code: c.ReasonCode, Err: err}
 }
 
 // cloneEditorReader 复用已验证的只读包索引，独立保存可变文档与读取缓存
@@ -290,16 +334,6 @@ func editorXMLMaxID(input io.Reader) (int, error) {
 // 返回: bool 是否为原始页面
 func (e *Editor) originalPage(index int) bool {
 	return e.source != nil && index >= 0 && index < len(e.pages) && e.source.pages[e.pages[index].ID] != nil
-}
-
-// PageCapabilities 获取页面操作范围，复制和删除由库统一维护标准引用
-// 入参: index 页面索引
-// 返回: PageCapabilities 操作能力, error 错误信息
-func (e *Editor) PageCapabilities(index int) (PageCapabilities, error) {
-	if index < 0 || index >= len(e.pages) {
-		return PageCapabilities{}, fmt.Errorf("page index %d out of range", index)
-	}
-	return PageCapabilities{Insert: e.sourceRGB(), Copy: true, Delete: true, Move: true, Resize: true}, nil
 }
 
 // sourceRGB 判断新建RGB对象能否直接使用文档默认颜色空间
@@ -482,19 +516,6 @@ func (e *Editor) loadSourcePage(index int) error {
 	e.source.pages[source.ref.ID] = source
 	e.pages[index] = copyEditorPage(*page)
 	return nil
-}
-
-// ObjectCapabilities 获取对象可执行的操作，不支持的内容保持原文，不强制转换
-// 字体缺失或子集不包含原文时仍可保真移动、复制和删除，不自动重新排版
-// 显式提供可用字体后可通过UpdateObject替换；原文布局未知时不自动推断段落选项
-// 入参: page 页面索引, id 对象标识
-// 返回: ObjectCapabilities 操作能力, error 错误信息
-func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, error) {
-	layer, index, err := e.findObject(page, id)
-	if err != nil {
-		return ObjectCapabilities{}, err
-	}
-	return e.objectCapabilities(layer.Objects[index], make(map[*editorXML]bool)), nil
 }
 
 // objectCapabilities 检查对象能力，在同次遍历中复用原容器排序检查
@@ -820,27 +841,6 @@ func (e *Editor) editorFont(id string) (FontMetrics, error) {
 	}
 	e.fontMetrics[id] = metrics
 	return metrics, nil
-}
-
-// FontData 获取编辑使用的字体数据，外部字体不写入文档资源
-// 入参: id 字体资源标识
-// 返回: []byte 独立字体数据, error 错误信息
-func (e *Editor) FontData(id string) ([]byte, error) {
-	for _, resource := range e.resources {
-		if resource.font != nil && resource.font.ID == id && len(resource.data) != 0 {
-			return bytes.Clone(resource.data), nil
-		}
-	}
-	if e.source != nil {
-		if definition := e.source.reader.fontCache[id]; definition != nil && definition.FontFile != "" {
-			return e.source.reader.FontData(id)
-		}
-	}
-	sfnt, err := e.editorFont(id)
-	if err != nil {
-		return nil, err
-	}
-	return sfnt.Write(), nil
 }
 
 // editorTextMeasurable 判断原字形能否在不使用回退字体的情况下度量

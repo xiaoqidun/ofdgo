@@ -55,6 +55,70 @@ type svgObjectGroup struct {
 	composite bool
 }
 
+// RenderImage 绘制图片，分离资源时保持原始编码、尺寸和变换
+// 入参: img 图片对象, m 变换矩阵
+func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
+	if s.imageNames == nil {
+		s.SVG.RenderImage(img, m)
+		return
+	}
+	name, ok := s.imageNames[img]
+	if !ok {
+		resource := SVGImage{MIME: "image/png"}
+		if encoded, ok := img.(*canvasimage.Image); ok {
+			resource.MIME, resource.Data = encoded.Mimetype, encoded.Bytes
+		} else {
+			var buffer bytes.Buffer
+			if err := png.Encode(&buffer, img); err != nil {
+				s.err = err
+				return
+			}
+			resource.Data = buffer.Bytes()
+		}
+		name = fmt.Sprintf("ofdgo-image-%x", sha256.Sum256(resource.Data))
+		resource.Name = name
+		s.imageNames[img] = name
+		if !s.seen[name] {
+			s.seen[name] = true
+			s.images = append(s.images, resource)
+		}
+	}
+	_, height := s.Size()
+	size := img.Bounds().Size()
+	fmt.Fprintf(s.writer, `<image transform="%s" width="%d" height="%d" xlink:href="%s"/>`, m.Translate(0, float64(size.Y)).ToSVG(height), size.X, size.Y, name)
+}
+
+// RenderText 绘制文字并记录实际使用的字体资源
+// 入参: text 文字对象, m 变换矩阵
+func (s *svgResourceRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
+	if text.Empty() {
+		return
+	}
+	font := text.MostCommonFontFace().Font
+	resource, ok := s.renderer.canvasState().svgFontCache[font]
+	if !ok {
+		data := fontSFNTData(font.SFNT)
+		resource = SVGFont{
+			Name:   fmt.Sprintf("ofdgo-%x-%d", sha256.Sum256(data), font.Style()),
+			Weight: font.Style().CSS(),
+			Style:  "normal",
+			Data:   data,
+		}
+		if font.Style().Italic() {
+			resource.Style = "italic"
+		}
+		s.renderer.canvasState().svgFontCache[font] = resource
+	}
+	if !s.seen[resource.Name] {
+		s.seen[resource.Name] = true
+		s.fonts = append(s.fonts, resource)
+		fmt.Fprintf(&s.styles, ".%s{font-family:%s!important}", resource.Name, resource.Name)
+	}
+	s.SetClass(resource.Name)
+	s.SVG.RenderText(text, m)
+	s.SetClass()
+}
+
 // renderSVGResources 渲染SVG并收集外部资源
 // 入参: page 页面内容, writer 输出流, images 是否分离图片, objects 是否标识页面直接对象
 // 返回: SVGResources 外部资源, error 错误信息
@@ -148,68 +212,4 @@ func (s *svgResourceRenderer) skipObjects(count int) {
 	if len(s.objectStack) > 0 {
 		s.objectStack[len(s.objectStack)-1].next += count
 	}
-}
-
-// RenderImage 绘制图片，分离资源时保持原始编码、尺寸和变换
-// 入参: img 图片对象, m 变换矩阵
-func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
-	if s.imageNames == nil {
-		s.SVG.RenderImage(img, m)
-		return
-	}
-	name, ok := s.imageNames[img]
-	if !ok {
-		resource := SVGImage{MIME: "image/png"}
-		if encoded, ok := img.(*canvasimage.Image); ok {
-			resource.MIME, resource.Data = encoded.Mimetype, encoded.Bytes
-		} else {
-			var buffer bytes.Buffer
-			if err := png.Encode(&buffer, img); err != nil {
-				s.err = err
-				return
-			}
-			resource.Data = buffer.Bytes()
-		}
-		name = fmt.Sprintf("ofdgo-image-%x", sha256.Sum256(resource.Data))
-		resource.Name = name
-		s.imageNames[img] = name
-		if !s.seen[name] {
-			s.seen[name] = true
-			s.images = append(s.images, resource)
-		}
-	}
-	_, height := s.Size()
-	size := img.Bounds().Size()
-	fmt.Fprintf(s.writer, `<image transform="%s" width="%d" height="%d" xlink:href="%s"/>`, m.Translate(0, float64(size.Y)).ToSVG(height), size.X, size.Y, name)
-}
-
-// RenderText 绘制文字并记录实际使用的字体资源
-// 入参: text 文字对象, m 变换矩阵
-func (s *svgResourceRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
-	if text.Empty() {
-		return
-	}
-	font := text.MostCommonFontFace().Font
-	resource, ok := s.renderer.canvasState().svgFontCache[font]
-	if !ok {
-		data := fontSFNTData(font.SFNT)
-		resource = SVGFont{
-			Name:   fmt.Sprintf("ofdgo-%x-%d", sha256.Sum256(data), font.Style()),
-			Weight: font.Style().CSS(),
-			Style:  "normal",
-			Data:   data,
-		}
-		if font.Style().Italic() {
-			resource.Style = "italic"
-		}
-		s.renderer.canvasState().svgFontCache[font] = resource
-	}
-	if !s.seen[resource.Name] {
-		s.seen[resource.Name] = true
-		s.fonts = append(s.fonts, resource)
-		fmt.Fprintf(&s.styles, ".%s{font-family:%s!important}", resource.Name, resource.Name)
-	}
-	s.SetClass(resource.Name)
-	s.SVG.RenderText(text, m)
-	s.SetClass()
 }

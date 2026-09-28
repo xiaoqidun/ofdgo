@@ -90,6 +90,13 @@ func (r *Renderer) WalkPage(page *PageContent, visitor PageVisitor) error {
 	return nil
 }
 
+// WalkObject 访问单个对象或展开复合图元，保留父级裁剪和源对象标识
+// 入参: object 源对象, state 继承状态, visitor 页面访问器
+// 返回: error 遍历或访问器错误
+func (r *Renderer) WalkObject(object *GraphicObject, state RenderState, visitor PageVisitor) error {
+	return r.walkObject(object, state, visitor, nil)
+}
+
 // walkAnnotation 访问注解外观并保持独立分组和定位
 // 入参: annotation 注解, visitor 页面访问器
 // 返回: error 遍历或访问器错误
@@ -147,13 +154,6 @@ func (r *Renderer) walkLayers(layers []Layer, order int, visitor PageVisitor) er
 		}
 	}
 	return nil
-}
-
-// WalkObject 访问单个对象或展开复合图元，保留父级裁剪和源对象标识
-// 入参: object 源对象, state 继承状态, visitor 页面访问器
-// 返回: error 遍历或访问器错误
-func (r *Renderer) WalkObject(object *GraphicObject, state RenderState, visitor PageVisitor) error {
-	return r.walkObject(object, state, visitor, nil)
 }
 
 // walkObject 访问对象并传递当前资源引用链

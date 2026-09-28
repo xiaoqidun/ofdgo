@@ -16,6 +16,12 @@ package ofdgo
 
 import "fmt"
 
+// ObjectContour 页面坐标中的填充轮廓，Path为SVG路径，EvenOdd表示奇偶填充
+type ObjectContour struct {
+	Path    string `json:"path"`
+	EvenOdd bool   `json:"evenOdd,omitempty"`
+}
+
 // ObjectBounds 获取文字、路径、图片或复合对象在页面坐标中的轴对齐范围，不修改对象
 // 文字采用字形范围，路径包含描边与裁剪，图片采用裁剪后的几何范围，不解码像素或排除透明像素
 // 底纹按填充或描边轮廓度量，不展开图案单元
@@ -25,12 +31,6 @@ import "fmt"
 func (r *Renderer) ObjectBounds(object GraphicObject, drawParam string) (Box, error) {
 	result, err := r.MeasureObject(object, MeasureOptions{Defaults: r.drawParamDefaults(drawParam, nil)})
 	return result.Bounds, err
-}
-
-// ObjectContour 页面坐标中的填充轮廓，Path为SVG路径，EvenOdd表示奇偶填充
-type ObjectContour struct {
-	Path    string `json:"path"`
-	EvenOdd bool   `json:"evenOdd,omitempty"`
 }
 
 // AnnotationGeometry 获取注解外观的实际内容轮廓，不将Appearance容器边界视为绘制内容

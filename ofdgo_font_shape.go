@@ -44,6 +44,9 @@ type fontShaper struct {
 	shapeBuffer *harfbuzz.Buffer
 }
 
+// shapingFace 固定双向排版的字体来源，不隐式替换字体
+type shapingFace struct{ face *typefont.Face }
+
 // ShapeText 使用默认选项塑形单行文字，不改动原文定位
 // 入参: value 单行原文, size 毫米字号
 // 返回: []ShapedGlyph 定位字形, error 塑形错误
@@ -151,9 +154,6 @@ func (f *fontShaper) ShapeTextWithOptions(value string, size float64, options Te
 	slices.SortStableFunc(result, func(a, b ShapedGlyph) int { return cmp.Compare(a.Cluster, b.Cluster) })
 	return result, nil
 }
-
-// shapingFace 固定双向排版的字体来源，不隐式替换字体
-type shapingFace struct{ face *typefont.Face }
 
 // ResolveFace 返回指定字体
 // 入参: char 字符

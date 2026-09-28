@@ -37,6 +37,13 @@ import (
 	"github.com/emmansun/gmsm/smx509"
 )
 
+// signatureWriteKey 已验证签署身份
+type signatureWriteKey struct {
+	cert   *smx509.Certificate
+	method string
+	digest string
+}
+
 // ParseSignatureIdentity 解析签署私钥和证书，并检查公私钥对应关系
 // 支持普通PKCS8、SEC1、PKCS1以及加密PKCS8，不支持传统加密PEM
 // 不加载系统信任或暗中信任该证书，返回的SM2/RSA私钥同时实现crypto.Decrypter
@@ -95,13 +102,6 @@ func ParseSignatureIdentity(certificate, privateKey []byte, password ...[]byte) 
 		return nil, nil, err
 	}
 	return signer, bytes.Clone(cert.Raw), nil
-}
-
-// signatureWriteKey 已验证签署身份
-type signatureWriteKey struct {
-	cert   *smx509.Certificate
-	method string
-	digest string
 }
 
 // signatureWriteIdentity 检查签署身份、证书信任与印章授权

@@ -42,6 +42,21 @@ import (
 	"github.com/xiaoqidun/ofdgo"
 )
 
+// currentSession 当前WebUI文档会话
+var currentSession *Session
+
+// currentEditor 当前编辑文档
+var currentEditor *ofdgo.Editor
+
+// pendingImport 待插页文档，仅保留文件数据与索引，不创建渲染会话
+var pendingImport *ofdgo.Reader
+
+// copiedObjects 当前对象剪贴板，不保存字体或图片的重复数据
+var copiedObjects *editorClipboard
+
+// copiedStyle 当前文档中的独立样式快照
+var copiedStyle *ofdgo.GraphicObject
+
 // exportWriter 分块传递导出数据
 type exportWriter struct {
 	write js.Value
@@ -115,21 +130,6 @@ type annotationOptions struct {
 	Area                                            *ofdgo.Box
 }
 
-// currentSession 当前WebUI文档会话
-var currentSession *Session
-
-// currentEditor 当前编辑文档
-var currentEditor *ofdgo.Editor
-
-// pendingImport 待插页文档，仅保留文件数据与索引，不创建渲染会话
-var pendingImport *ofdgo.Reader
-
-// copiedObjects 当前对象剪贴板，不保存字体或图片的重复数据
-var copiedObjects *editorClipboard
-
-// copiedStyle 当前文档中的独立样式快照
-var copiedStyle *ofdgo.GraphicObject
-
 // Write 将数据块交给浏览器保存
 // 入参: data 导出数据
 // 返回: int 写入长度, error 错误信息
@@ -182,26 +182,6 @@ func (r *browserReaderAt) ReadAt(data []byte, offset int64) (int, error) {
 		data = data[copied:]
 	}
 	return n, nil
-}
-
-// awaitExport 等待浏览器处理导出检查点
-// 入参: fn 浏览器回调, args 回调参数
-// 返回: error 写入错误或取消原因
-func awaitExport(fn js.Value, args ...any) error {
-	done := make(chan error)
-	callback := js.FuncOf(func(this js.Value, args []js.Value) any {
-		var err error
-		if args[1].Bool() {
-			err = context.Canceled
-		} else if message := args[0].String(); message != "" {
-			err = fmt.Errorf("%s", message)
-		}
-		done <- err
-		return nil
-	})
-	defer callback.Release()
-	fn.Invoke(append(args, callback)...)
-	return <-done
 }
 
 // RunWASM 注册浏览器WASM接口并阻塞运行
@@ -289,6 +269,26 @@ func RunWASM() {
 	registerCallback("ofdgoPreviewSignatureSeal", previewSignatureSeal)
 	registerCallback("ofdgoSignaturePlacement", signaturePlacement)
 	select {}
+}
+
+// awaitExport 等待浏览器处理导出检查点
+// 入参: fn 浏览器回调, args 回调参数
+// 返回: error 写入错误或取消原因
+func awaitExport(fn js.Value, args ...any) error {
+	done := make(chan error)
+	callback := js.FuncOf(func(this js.Value, args []js.Value) any {
+		var err error
+		if args[1].Bool() {
+			err = context.Canceled
+		} else if message := args[0].String(); message != "" {
+			err = fmt.Errorf("%s", message)
+		}
+		done <- err
+		return nil
+	})
+	defer callback.Release()
+	fn.Invoke(append(args, callback)...)
+	return <-done
 }
 
 // registerCallback 注册浏览器回调函数

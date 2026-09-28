@@ -57,6 +57,37 @@ type MeshShading struct {
 	Background color.RGBA
 }
 
+// At 按三角形面积权重插值原颜色分量，返回预乘RGBA
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.RGBA 采样颜色
+func (m *MeshShading) At(x, y float64) color.RGBA {
+	for i := len(m.Triangles) - 1; i >= 0; i-- {
+		t := m.Triangles[i]
+		a, b, c := t[0].Point, t[1].Point, t[2].Point
+		d := (b.Y-c.Y)*(a.X-c.X) + (c.X-b.X)*(a.Y-c.Y)
+		if d == 0 {
+			continue
+		}
+		u := ((b.Y-c.Y)*(x-c.X) + (c.X-b.X)*(y-c.Y)) / d
+		v := ((c.Y-a.Y)*(x-c.X) + (a.X-c.X)*(y-c.Y)) / d
+		w := 1 - u - v
+		if u < -1e-12 || v < -1e-12 || w < -1e-12 {
+			continue
+		}
+		var values [4]float64
+		alpha := 0.0
+		for j, weight := range [3]float64{u, v, w} {
+			alpha += weight * t[j].Alpha
+			for k := range values {
+				values[k] += weight * t[j].Values[k]
+			}
+		}
+		red, green, blue := meshRGB(t[0].Space, values)
+		return color.RGBA{meshByte(red * alpha), meshByte(green * alpha), meshByte(blue * alpha), meshByte(alpha)}
+	}
+	return m.Background
+}
+
 // outline 返回方向一致的三角形轮廓，供绘制裁剪和对象度量共用
 // 返回: GeometryPath 非零绕数填充轮廓
 func (m *MeshShading) outline() GeometryPath {
@@ -177,37 +208,6 @@ func meshTriangleIndices(points []ShdPoint, columns, extend int) ([][3]int, erro
 		result = append(result, triangle)
 	}
 	return result, nil
-}
-
-// At 按三角形面积权重插值原颜色分量，返回预乘RGBA
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.RGBA 采样颜色
-func (m *MeshShading) At(x, y float64) color.RGBA {
-	for i := len(m.Triangles) - 1; i >= 0; i-- {
-		t := m.Triangles[i]
-		a, b, c := t[0].Point, t[1].Point, t[2].Point
-		d := (b.Y-c.Y)*(a.X-c.X) + (c.X-b.X)*(a.Y-c.Y)
-		if d == 0 {
-			continue
-		}
-		u := ((b.Y-c.Y)*(x-c.X) + (c.X-b.X)*(y-c.Y)) / d
-		v := ((c.Y-a.Y)*(x-c.X) + (a.X-c.X)*(y-c.Y)) / d
-		w := 1 - u - v
-		if u < -1e-12 || v < -1e-12 || w < -1e-12 {
-			continue
-		}
-		var values [4]float64
-		alpha := 0.0
-		for j, weight := range [3]float64{u, v, w} {
-			alpha += weight * t[j].Alpha
-			for k := range values {
-				values[k] += weight * t[j].Values[k]
-			}
-		}
-		red, green, blue := meshRGB(t[0].Space, values)
-		return color.RGBA{meshByte(red * alpha), meshByte(green * alpha), meshByte(blue * alpha), meshByte(alpha)}
-	}
-	return m.Background
 }
 
 // meshRGB 将插值后的颜色分量转换为RGB

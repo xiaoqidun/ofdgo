@@ -31,33 +31,6 @@ type textPageTokens struct {
 	parents []string
 }
 
-// Token 读取文字页面所需的XML节点
-// 返回: xml.Token XML节点, error 错误信息
-func (d *textPageTokens) Token() (xml.Token, error) {
-	for {
-		token, err := d.Decoder.Token()
-		if err != nil {
-			return nil, err
-		}
-		switch node := token.(type) {
-		case xml.StartElement:
-			if len(d.parents) > 0 && (node.Name.Local == "PathObject" || node.Name.Local == "ImageObject") {
-				switch d.parents[len(d.parents)-1] {
-				case "Layer", "PageBlock", "CompositeGraphicUnit", "CompositeObject":
-					if err := d.Decoder.Skip(); err != nil {
-						return nil, err
-					}
-					continue
-				}
-			}
-			d.parents = append(d.parents, node.Name.Local)
-		case xml.EndElement:
-			d.parents = d.parents[:len(d.parents)-1]
-		}
-		return token, nil
-	}
-}
-
 // PageText 页面文字，按绘制顺序保留文本对象，不包含图像和签名外观
 type PageText struct {
 	Runs []TextRun `json:"runs"`
@@ -90,6 +63,33 @@ type TextMatch struct {
 	Text   string `json:"text"`
 	After  string `json:"after"`
 	Boxes  []Box  `json:"boxes"`
+}
+
+// Token 读取文字页面所需的XML节点
+// 返回: xml.Token XML节点, error 错误信息
+func (d *textPageTokens) Token() (xml.Token, error) {
+	for {
+		token, err := d.Decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		switch node := token.(type) {
+		case xml.StartElement:
+			if len(d.parents) > 0 && (node.Name.Local == "PathObject" || node.Name.Local == "ImageObject") {
+				switch d.parents[len(d.parents)-1] {
+				case "Layer", "PageBlock", "CompositeGraphicUnit", "CompositeObject":
+					if err := d.Decoder.Skip(); err != nil {
+						return nil, err
+					}
+					continue
+				}
+			}
+			d.parents = append(d.parents, node.Name.Local)
+		case xml.EndElement:
+			d.parents = d.parents[:len(d.parents)-1]
+		}
+		return token, nil
+	}
 }
 
 // PageText 提取页面及启用注释的原文，复用当前编译器的字体和几何语义
@@ -135,6 +135,62 @@ func (p *PageText) WriteTo(writer io.Writer) (int64, error) {
 	return p.writeTo(writer, false)
 }
 
+// Search 按原文进行忽略大小写的字面匹配，不跨文本对象拼接或识别图像
+// 入参: query 搜索文字
+// 返回: []TextMatch 匹配结果及上下文
+func (p *PageText) Search(query string) []TextMatch {
+	var matches []TextMatch
+	_ = p.SearchEach(context.Background(), query, func(match TextMatch) error {
+		matches = append(matches, match)
+		return nil
+	})
+	return matches
+}
+
+// SearchEach 逐项返回忽略大小写的字面匹配，不累积全部结果，在对象与匹配之间检查取消
+// 入参: ctx 取消上下文, query 搜索文字, visit 匹配访问函数，可返回错误停止
+// 返回: error 取消或访问错误
+func (p *PageText) SearchEach(ctx context.Context, query string, visit func(TextMatch) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return p.searchEach(ctx, foldText(query), visit)
+}
+
+// SearchText 逐页搜索原文并立即返回匹配，不保留整本文字或识别图像
+// 入参: ctx 取消上下文，页面提取之间及匹配时检查, query 搜索文字, visit 零基页码和匹配访问函数, indices 页码，省略则全部，按原页序去重
+// 返回: error 页面提取、取消或访问错误
+func (r *Renderer) SearchText(ctx context.Context, query string, visit func(int, TextMatch) error, indices ...int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if query == "" {
+		return nil
+	}
+	count, err := r.Reader.PageCount()
+	if err != nil {
+		return err
+	}
+	indices, err = exportPageIndices(count, indices)
+	if err != nil {
+		return err
+	}
+	query = foldText(query)
+	for _, index := range indices {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		text, err := r.PageTextByIndex(index)
+		if err != nil {
+			return fmt.Errorf("failed to search page %d: %w", index+1, err)
+		}
+		if err := text.searchEach(ctx, query, func(match TextMatch) error { return visit(index, match) }); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
 // writeTo 输出非空文本对象，可在首个对象前分隔上一页
 // 入参: writer 输出流, separator 是否需要前导换行
 // 返回: int64 已写字节数, error 写入错误
@@ -165,28 +221,6 @@ func (p *PageText) writeTo(writer io.Writer, separator bool) (int64, error) {
 		separator = true
 	}
 	return written, nil
-}
-
-// Search 按原文进行忽略大小写的字面匹配，不跨文本对象拼接或识别图像
-// 入参: query 搜索文字
-// 返回: []TextMatch 匹配结果及上下文
-func (p *PageText) Search(query string) []TextMatch {
-	var matches []TextMatch
-	_ = p.SearchEach(context.Background(), query, func(match TextMatch) error {
-		matches = append(matches, match)
-		return nil
-	})
-	return matches
-}
-
-// SearchEach 逐项返回忽略大小写的字面匹配，不累积全部结果，在对象与匹配之间检查取消
-// 入参: ctx 取消上下文, query 搜索文字, visit 匹配访问函数，可返回错误停止
-// 返回: error 取消或访问错误
-func (p *PageText) SearchEach(ctx context.Context, query string, visit func(TextMatch) error) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return p.searchEach(ctx, foldText(query), visit)
 }
 
 // searchEach 使用预折叠的查询执行搜索，供跨页搜索复用
@@ -235,40 +269,6 @@ func (p *PageText) searchEach(ctx context.Context, query string, visit func(Text
 			}
 			offset += len(query)
 			codeOffset = end
-		}
-	}
-	return ctx.Err()
-}
-
-// SearchText 逐页搜索原文并立即返回匹配，不保留整本文字或识别图像
-// 入参: ctx 取消上下文，页面提取之间及匹配时检查, query 搜索文字, visit 零基页码和匹配访问函数, indices 页码，省略则全部，按原页序去重
-// 返回: error 页面提取、取消或访问错误
-func (r *Renderer) SearchText(ctx context.Context, query string, visit func(int, TextMatch) error, indices ...int) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if query == "" {
-		return nil
-	}
-	count, err := r.Reader.PageCount()
-	if err != nil {
-		return err
-	}
-	indices, err = exportPageIndices(count, indices)
-	if err != nil {
-		return err
-	}
-	query = foldText(query)
-	for _, index := range indices {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		text, err := r.PageTextByIndex(index)
-		if err != nil {
-			return fmt.Errorf("failed to search page %d: %w", index+1, err)
-		}
-		if err := text.searchEach(ctx, query, func(match TextMatch) error { return visit(index, match) }); err != nil {
-			return err
 		}
 	}
 	return ctx.Err()

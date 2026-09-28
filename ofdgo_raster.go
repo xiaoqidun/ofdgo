@@ -21,6 +21,20 @@ import (
 	"math"
 )
 
+const (
+	RasterMove RasterVerb = iota
+	RasterLine
+	RasterQuad
+	RasterCubic
+	RasterClose
+)
+
+const (
+	RasterLinear RasterGradientKind = iota
+	RasterRadial
+	RasterMesh
+)
+
 // RasterPage 已解析的光栅绘制页面，单位为毫米，页面坐标原点在左上角
 // DPI决定像素尺寸和编译时的字形、描边精度，修改DPI后应重新编译
 // 页面及其引用资源在渲染期间只读，不用于重建或保存OFD
@@ -38,14 +52,6 @@ type RasterPoint struct{ X, Y float64 }
 
 // RasterVerb 路径指令
 type RasterVerb uint8
-
-const (
-	RasterMove RasterVerb = iota
-	RasterLine
-	RasterQuad
-	RasterCubic
-	RasterClose
-)
 
 // RasterSegment 路径片段，RasterMove和RasterLine使用End，RasterQuad使用Control1和End
 type RasterSegment struct {
@@ -78,12 +84,6 @@ type RasterPaint struct {
 // RasterGradientKind 渐变类型
 type RasterGradientKind uint8
 
-const (
-	RasterLinear RasterGradientKind = iota
-	RasterRadial
-	RasterMesh
-)
-
 // RasterGradient 局部坐标下的轴向、双圆径向或三角网格渐变
 // 轴向及径向渐变的Spread为空时延续边界颜色，网格渐变使用Mesh
 type RasterGradient struct {
@@ -115,11 +115,6 @@ func (p *RasterPage) PixelSize() (int, int, error) {
 	}
 	return int(w), int(h), nil
 }
-
-// rasterPositive 判断正有限数
-// 入参: v 待检查数值
-// 返回: bool 是否为正有限数
-func rasterPositive(v float64) bool { return v > 0 && !math.IsInf(v, 0) && !math.IsNaN(v) }
 
 // Apply 将局部点映射到目标坐标
 // 入参: p 局部点
@@ -188,6 +183,11 @@ func (g *RasterGradient) At(x, y float64) color.RGBA {
 	}
 	return g.colorAt(t)
 }
+
+// rasterPositive 判断正有限数
+// 入参: v 待检查数值
+// 返回: bool 是否为正有限数
+func rasterPositive(v float64) bool { return v > 0 && !math.IsInf(v, 0) && !math.IsNaN(v) }
 
 // rasterRadialDomain 求延伸区间内半径非负的最后一个双圆参数
 // 入参: a、b、c 方程系数, radius 起始半径, delta 半径变化, extend 延伸标志

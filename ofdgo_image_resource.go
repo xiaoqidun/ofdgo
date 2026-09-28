@@ -43,20 +43,6 @@ func NewEncodedImage(data []byte) (*EncodedImage, error) {
 	return newEncodedImage(bytes.Clone(data))
 }
 
-// newEncodedImage 接管编码数据并读取头信息
-// 入参: data 原始编码
-// 返回: *EncodedImage 惰性图片, error 头信息或格式错误
-func newEncodedImage(data []byte) (*EncodedImage, error) {
-	config, format, err := image.DecodeConfig(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	if format != "jpeg" && format != "png" {
-		return nil, fmt.Errorf("unsupported encoded image %q", format)
-	}
-	return &EncodedImage{data: data, format: format, config: config}, nil
-}
-
 // Bytes 返回只读原始编码，调用方不得修改
 // 返回: []byte 原始编码
 func (img *EncodedImage) Bytes() []byte { return img.data }
@@ -103,6 +89,20 @@ func (r *Renderer) ImageResource(id string) (image.Image, error) {
 		return nil, fmt.Errorf("image resource %q not found", id)
 	}
 	return r.cachedImageResource(path)
+}
+
+// newEncodedImage 接管编码数据并读取头信息
+// 入参: data 原始编码
+// 返回: *EncodedImage 惰性图片, error 头信息或格式错误
+func newEncodedImage(data []byte) (*EncodedImage, error) {
+	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	if format != "jpeg" && format != "png" {
+		return nil, fmt.Errorf("unsupported encoded image %q", format)
+	}
+	return &EncodedImage{data: data, format: format, config: config}, nil
 }
 
 // cachedImageResource 复用原始图片资源，不依赖输出后端

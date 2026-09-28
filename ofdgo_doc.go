@@ -190,6 +190,12 @@ type ValidPeriod struct {
 	EndDate   string `xml:"EndDate,attr"`
 }
 
+// print 打印权限节点
+type print struct {
+	Printable *bool `xml:"Printable,attr"`
+	Copies    *int  `xml:"Copies,attr"`
+}
+
 // OutlineInfos 获取目录层级和目标页码
 // 返回: []OutlineInfo 目录节点信息
 func (doc *Document) OutlineInfos() []OutlineInfo {
@@ -205,31 +211,6 @@ func (doc *Document) OutlineInfos() []OutlineInfo {
 		pages[page.ID] = index + 1
 	}
 	return outlineInfos(doc.Outlines.OutlineElem, bookmarks, pages)
-}
-
-// outlineInfos 转换目录节点信息
-// 入参: outlines 大纲节点, bookmarks 书签, pages 页码索引
-// 返回: []OutlineInfo 目录节点信息
-func outlineInfos(outlines []OutlineElem, bookmarks map[string]Dest, pages map[string]int) []OutlineInfo {
-	infos := make([]OutlineInfo, 0, len(outlines))
-	for _, outline := range outlines {
-		info := OutlineInfo{Title: outline.Title, Expanded: outline.Expanded}
-		for _, action := range outline.Actions {
-			if action.Goto != nil {
-				if dest := gotoDest(action.Goto, bookmarks); dest != nil {
-					info.Page = pages[dest.PageID]
-					if info.Page != 0 {
-						break
-					}
-				}
-			}
-		}
-		if len(outline.OutlineElem) > 0 {
-			info.Children = outlineInfos(outline.OutlineElem, bookmarks, pages)
-		}
-		infos = append(infos, info)
-	}
-	return infos
 }
 
 // UnmarshalXML 解析文档并应用权限默认值
@@ -327,10 +308,29 @@ func (p *Permissions) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error
 	return nil
 }
 
-// print 打印权限节点
-type print struct {
-	Printable *bool `xml:"Printable,attr"`
-	Copies    *int  `xml:"Copies,attr"`
+// outlineInfos 转换目录节点信息
+// 入参: outlines 大纲节点, bookmarks 书签, pages 页码索引
+// 返回: []OutlineInfo 目录节点信息
+func outlineInfos(outlines []OutlineElem, bookmarks map[string]Dest, pages map[string]int) []OutlineInfo {
+	infos := make([]OutlineInfo, 0, len(outlines))
+	for _, outline := range outlines {
+		info := OutlineInfo{Title: outline.Title, Expanded: outline.Expanded}
+		for _, action := range outline.Actions {
+			if action.Goto != nil {
+				if dest := gotoDest(action.Goto, bookmarks); dest != nil {
+					info.Page = pages[dest.PageID]
+					if info.Page != 0 {
+						break
+					}
+				}
+			}
+		}
+		if len(outline.OutlineElem) > 0 {
+			info.Children = outlineInfos(outline.OutlineElem, bookmarks, pages)
+		}
+		infos = append(infos, info)
+	}
+	return infos
 }
 
 // defaultPermissions 获取默认文档权限

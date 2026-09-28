@@ -111,76 +111,6 @@ func (e *Editor) SetObjectActions(page int, ids []string, actions []Action) erro
 	return e.updateObjects(page, objects, true)
 }
 
-// validateObjectActions 校验新建对象的动作结构，目标不必可达
-// 入参: actions 动作列表
-// 返回: error 错误信息
-func validateObjectActions(actions []Action) error {
-	for _, action := range actions {
-		if !slices.Contains([]string{"CLICK", "DO", "PO"}, action.Event) {
-			return fmt.Errorf("unsupported action event %q", action.Event)
-		}
-		count := 0
-		for _, present := range []bool{action.URI != nil, action.Goto != nil, action.GotoA != nil, action.Sound != nil, action.Movie != nil} {
-			if present {
-				count++
-			}
-		}
-		if count != 1 {
-			return fmt.Errorf("specify one action target")
-		}
-		if action.GotoA != nil && action.GotoA.AttachID == "" {
-			return fmt.Errorf("attachment action requires an attachment ID")
-		}
-		if sound := action.Sound; sound != nil {
-			if sound.ResourceID == "" || sound.Volume != nil && (*sound.Volume < 0 || *sound.Volume > 100) {
-				return fmt.Errorf("invalid sound action resource or volume")
-			}
-		}
-		if movie := action.Movie; movie != nil {
-			if movie.ResourceID == "" || !slices.Contains([]string{"", "Play", "Stop", "Pause", "Resume"}, movie.Operator) {
-				return fmt.Errorf("invalid movie action resource or operator")
-			}
-		}
-		if action.Goto != nil {
-			if (action.Goto.Dest == nil) == (action.Goto.Bookmark == nil) {
-				return fmt.Errorf("specify one destination or bookmark")
-			}
-			if action.Goto.Dest != nil {
-				if _, err := annotationLinkXML(AnnotationLink{Dest: action.Goto.Dest}); err != nil {
-					return err
-				}
-			}
-		}
-		if action.Region != nil {
-			for _, area := range action.Region.Area {
-				if _, err := creationNumbers(area.Start, 2); err != nil {
-					return err
-				}
-				for _, command := range area.Command {
-					var points []string
-					switch command.Type {
-					case "Line":
-						points = []string{command.Point1}
-					case "QuadraticBezier":
-						points = []string{command.Point1, command.Point2}
-					case "CubicBezier":
-						points = []string{command.Point1, command.Point2, command.Point3}
-					case "Close":
-					default:
-						return fmt.Errorf("unsupported new action region command %q", command.Type)
-					}
-					for _, point := range points {
-						if _, err := creationNumbers(point, 2); err != nil {
-							return err
-						}
-					}
-				}
-			}
-		}
-	}
-	return nil
-}
-
 // AnnotationLink 读取注解中唯一的点击跳转，书签目标保持原始动作
 // 入参: page 页面索引, id 注解标识
 // 返回: Action 跳转动作, error 错误信息
@@ -201,36 +131,6 @@ func (e *Editor) AnnotationLink(page int, id string) (Action, error) {
 	node := targets[0].parent
 	err = xml.Unmarshal(data[node.start:node.end], &action)
 	return action, err
-}
-
-// annotationLinkNodes 获取外观内的点击跳转和基本对象，不进入私有扩展
-// 入参: root 注解根节点
-// 返回: []*editorXML 跳转目标, []*editorXML 基本对象
-func annotationLinkNodes(root *editorXML) ([]*editorXML, []*editorXML) {
-	var targets, objects []*editorXML
-	var walk func(*editorXML)
-	walk = func(n *editorXML) {
-		if n.name.Space != root.name.Space {
-			return
-		}
-		if n.name.Local == "Action" && n.attr("Event") == "CLICK" {
-			for _, child := range n.children {
-				if child.name.Space == n.name.Space && (child.name.Local == "URI" || child.name.Local == "Goto") {
-					targets = append(targets, child)
-				}
-			}
-		}
-		if slices.Contains([]string{"TextObject", "PathObject", "ImageObject"}, n.name.Local) {
-			objects = append(objects, n)
-		}
-		for _, child := range n.children {
-			walk(child)
-		}
-	}
-	if appearance := root.child("Appearance"); appearance != nil {
-		walk(appearance)
-	}
-	return targets, objects
 }
 
 // AddLinkAnnotation 新增标准链接注解，区域位于页面毫米坐标，不检查目标是否可达
@@ -360,6 +260,106 @@ func (e *Editor) UpdateAnnotationLink(page int, id string, target AnnotationLink
 		}
 		return editorAnnotationDate(data)
 	})
+}
+
+// validateObjectActions 校验新建对象的动作结构，目标不必可达
+// 入参: actions 动作列表
+// 返回: error 错误信息
+func validateObjectActions(actions []Action) error {
+	for _, action := range actions {
+		if !slices.Contains([]string{"CLICK", "DO", "PO"}, action.Event) {
+			return fmt.Errorf("unsupported action event %q", action.Event)
+		}
+		count := 0
+		for _, present := range []bool{action.URI != nil, action.Goto != nil, action.GotoA != nil, action.Sound != nil, action.Movie != nil} {
+			if present {
+				count++
+			}
+		}
+		if count != 1 {
+			return fmt.Errorf("specify one action target")
+		}
+		if action.GotoA != nil && action.GotoA.AttachID == "" {
+			return fmt.Errorf("attachment action requires an attachment ID")
+		}
+		if sound := action.Sound; sound != nil {
+			if sound.ResourceID == "" || sound.Volume != nil && (*sound.Volume < 0 || *sound.Volume > 100) {
+				return fmt.Errorf("invalid sound action resource or volume")
+			}
+		}
+		if movie := action.Movie; movie != nil {
+			if movie.ResourceID == "" || !slices.Contains([]string{"", "Play", "Stop", "Pause", "Resume"}, movie.Operator) {
+				return fmt.Errorf("invalid movie action resource or operator")
+			}
+		}
+		if action.Goto != nil {
+			if (action.Goto.Dest == nil) == (action.Goto.Bookmark == nil) {
+				return fmt.Errorf("specify one destination or bookmark")
+			}
+			if action.Goto.Dest != nil {
+				if _, err := annotationLinkXML(AnnotationLink{Dest: action.Goto.Dest}); err != nil {
+					return err
+				}
+			}
+		}
+		if action.Region != nil {
+			for _, area := range action.Region.Area {
+				if _, err := creationNumbers(area.Start, 2); err != nil {
+					return err
+				}
+				for _, command := range area.Command {
+					var points []string
+					switch command.Type {
+					case "Line":
+						points = []string{command.Point1}
+					case "QuadraticBezier":
+						points = []string{command.Point1, command.Point2}
+					case "CubicBezier":
+						points = []string{command.Point1, command.Point2, command.Point3}
+					case "Close":
+					default:
+						return fmt.Errorf("unsupported new action region command %q", command.Type)
+					}
+					for _, point := range points {
+						if _, err := creationNumbers(point, 2); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// annotationLinkNodes 获取外观内的点击跳转和基本对象，不进入私有扩展
+// 入参: root 注解根节点
+// 返回: []*editorXML 跳转目标, []*editorXML 基本对象
+func annotationLinkNodes(root *editorXML) ([]*editorXML, []*editorXML) {
+	var targets, objects []*editorXML
+	var walk func(*editorXML)
+	walk = func(n *editorXML) {
+		if n.name.Space != root.name.Space {
+			return
+		}
+		if n.name.Local == "Action" && n.attr("Event") == "CLICK" {
+			for _, child := range n.children {
+				if child.name.Space == n.name.Space && (child.name.Local == "URI" || child.name.Local == "Goto") {
+					targets = append(targets, child)
+				}
+			}
+		}
+		if slices.Contains([]string{"TextObject", "PathObject", "ImageObject"}, n.name.Local) {
+			objects = append(objects, n)
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	if appearance := root.child("Appearance"); appearance != nil {
+		walk(appearance)
+	}
+	return targets, objects
 }
 
 // annotationLinkXML 序列化标准跳转目标，不改写其他动作或命名空间

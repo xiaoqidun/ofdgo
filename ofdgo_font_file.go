@@ -60,26 +60,6 @@ func (f FontFile) Faces() ([]FontFace, error) {
 	return faces, nil
 }
 
-// fontFaceInfo 从名称表读取字体信息
-// 入参: data 名称表数据, index 零起始字体索引
-// 返回: FontFace 字体信息
-func fontFaceInfo(data []byte, index int) FontFace {
-	records, values := fontNameValues(data)
-	name := func(ids ...uint16) string {
-		for _, id := range ids {
-			for _, record := range records {
-				if record.Name == id {
-					if value := strings.TrimSpace(values[[4]uint16{record.Platform, record.Encoding, record.Language, id}]); value != "" {
-						return value
-					}
-				}
-			}
-		}
-		return ""
-	}
-	return FontFace{Index: index, FullName: name(4, 6, 16, 1), Family: name(16, 1), Style: name(17, 2), PostScriptName: name(6), Names: fontNamesFromTable(data)}
-}
-
 // Face 提取指定字体，返回独立的OpenType数据，可用于预览或AddFont，且不修改原文件
 // 入参: index 零起始字体索引，非集合文件只能为0
 // 返回: []byte 独立字体数据, error 格式或索引错误
@@ -137,6 +117,26 @@ func (f FontFile) MissingGlyphs(index int, text string) (string, error) {
 		}
 	}
 	return missing.String(), nil
+}
+
+// fontFaceInfo 从名称表读取字体信息
+// 入参: data 名称表数据, index 零起始字体索引
+// 返回: FontFace 字体信息
+func fontFaceInfo(data []byte, index int) FontFace {
+	records, values := fontNameValues(data)
+	name := func(ids ...uint16) string {
+		for _, id := range ids {
+			for _, record := range records {
+				if record.Name == id {
+					if value := strings.TrimSpace(values[[4]uint16{record.Platform, record.Encoding, record.Language, id}]); value != "" {
+						return value
+					}
+				}
+			}
+		}
+		return ""
+	}
+	return FontFace{Index: index, FullName: name(4, 6, 16, 1), Family: name(16, 1), Style: name(17, 2), PostScriptName: name(6), Names: fontNamesFromTable(data)}
 }
 
 // fontFileCount 校验字体或集合头并读取字体数量

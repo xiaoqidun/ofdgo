@@ -22,6 +22,18 @@ import (
 	"golang.org/x/image/math/f64"
 )
 
+// PixelTransform 将页面毫米变换转换为像素变换，保留尺寸取整后的原点位置
+// 入参: m 局部到页面变换, height 目标像素高度
+// 返回: RasterMatrix 局部到像素变换
+func (p *RasterPage) PixelTransform(m RasterMatrix, height int) RasterMatrix {
+	scale := p.DPI / 25.4
+	for i := range m {
+		m[i] *= scale
+	}
+	m[5] += float64(height) - p.Height*scale
+	return m
+}
+
 // drawRasterImage 按页面变换对图像执行高质量采样
 // 入参: dst 目标图像, src 源图像, m 像素坐标变换
 func drawRasterImage(dst draw.Image, src image.Image, m RasterMatrix) {
@@ -105,16 +117,4 @@ func rasterImageBounds(source image.Rectangle, m RasterMatrix, target image.Rect
 		return image.Rectangle{}
 	}
 	return image.Rect(int(minX), int(minY), int(maxX), int(maxY))
-}
-
-// PixelTransform 将页面毫米变换转换为像素变换，保留尺寸取整后的原点位置
-// 入参: m 局部到页面变换, height 目标像素高度
-// 返回: RasterMatrix 局部到像素变换
-func (p *RasterPage) PixelTransform(m RasterMatrix, height int) RasterMatrix {
-	scale := p.DPI / 25.4
-	for i := range m {
-		m[i] *= scale
-	}
-	m[5] += float64(height) - p.Height*scale
-	return m
 }

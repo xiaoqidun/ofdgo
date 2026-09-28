@@ -53,6 +53,146 @@ func (e *Editor) PasteCompositeSelection(page int, selection *CompositeSelection
 	return result, err
 }
 
+// CaptureCompositeObjects 捕获内部选区，不修改文档或分配资源
+// 入参: page 页面索引, path 父复合路径, indexes 同一容器的成员序号
+// 返回: *CompositeSelection 独立快照, error 错误信息
+func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []int) (*CompositeSelection, error) {
+	reader, _, root, nodes, err := e.compositeScope(page, path)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	if len(indexes) == 0 {
+		return nil, fmt.Errorf("composite selection is empty")
+	}
+	indexes = slices.Clone(indexes)
+	slices.Sort(indexes)
+	var owner *editorCompositeNode
+	var container *editorXML
+	selection := &CompositeSelection{editor: e, page: e.pages[page].ID, path: ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: slices.Clone(path.Children)}}
+	if path.Annotation == "" {
+		selection.source = e.objectOrigin(path.ID).page
+	} else if e.source != nil {
+		selection.source = e.source.pages[e.pages[page].ID]
+	}
+	for j, i := range indexes {
+		if i < 0 || i >= len(nodes) || j > 0 && indexes[j-1] == i {
+			return nil, fmt.Errorf("invalid composite copy selection")
+		}
+		node := nodes[i]
+		if !node.transformable() || !editorXMLCopyable(node.node) {
+			return nil, fmt.Errorf("composite member cannot be copied")
+		}
+		if j == 0 {
+			owner, container = node.owner, node.span.parent
+		} else if node.span.parent != container {
+			return nil, fmt.Errorf("copy requires members in the same container")
+		}
+		copy := *node
+		copy.owner, copy.span = nil, nil
+		selection.nodes = append(selection.nodes, &copy)
+	}
+	scope := root.loadedScope(path.Children)
+	for scope != owner {
+		scope = scope.ref
+		selection.references++
+	}
+	for node := container; node != owner.node; node = node.parent {
+		containers := compositeContainers(node.parent)
+		selection.containers = append(selection.containers, slices.Index(containers, node))
+	}
+	slices.Reverse(selection.containers)
+	return selection, nil
+}
+
+// PasteCompositeObjects 将快照粘贴至内部范围末尾，不依赖源成员当前的序号或存在性
+// 同范围沿用原容器和当前继承样式，跨范围固定对象的源外观，位移使用页面毫米
+// 目标范围的父透明度及裁剪仍作用于新成员，全部成员提交一次撤销记录
+// 入参: page 页面索引, path 父复合路径, selection 捕获的快照, dx、dy 页面位移
+// 返回: []int 新成员序号, error 错误信息
+func (e *Editor) PasteCompositeObjects(page int, path ObjectPath, selection *CompositeSelection, dx, dy float64) ([]int, error) {
+	if selection == nil || selection.editor != e {
+		return nil, fmt.Errorf("composite selection belongs to another editor")
+	}
+	if !finite(dx) || !finite(dy) {
+		return nil, fmt.Errorf("paste requires finite offsets")
+	}
+	if _, err := e.page(page); err != nil {
+		return nil, err
+	}
+	if e.pages[page].ID != selection.page || path.ID != selection.path.ID || path.Annotation != selection.path.Annotation || !slices.Equal(path.Children, selection.path.Children) {
+		var result []int
+		err := e.pasteCompositeSelection(selection, func(objects []GraphicObject) error {
+			var err error
+			result, err = e.CopyObjectsToComposite(page, path, objects, dx, dy)
+			return err
+		})
+		return result, err
+	}
+	var result []int
+	err := e.editCompositeScope(page, path, func(renderer *Renderer, root *editorCompositeNode, _ []*editorCompositeNode) error {
+		scope := root.loadedScope(path.Children)
+		owner := scope
+		for i := 0; i < selection.references; i++ {
+			owner = owner.ref
+			if owner == nil {
+				return fmt.Errorf("composite resource container no longer exists")
+			}
+		}
+		container := owner.node
+		for _, index := range selection.containers {
+			containers := compositeContainers(container)
+			if index >= len(containers) {
+				return fmt.Errorf("composite page block no longer exists")
+			}
+			container = containers[index]
+		}
+		box, _ := ParseBox(owner.object.CompositeGraphicUnit.Boundary)
+		parent := owner.parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(NewMatrix(owner.object.CompositeGraphicUnit.CTM))
+		nodes := make([]*editorCompositeNode, len(selection.nodes))
+		for i, node := range selection.nodes {
+			copy := *node
+			copy.parent, copy.boundaryInCTM = parent, owner.boundaryInCTM
+			nodes[i] = &copy
+		}
+		data, states, err := e.copyCompositeNodes(renderer, nodes, dx, dy)
+		if err != nil {
+			return err
+		}
+		maps.Copy(owner.states, states)
+		next, reached := 0, false
+		var count func(*editorCompositeNode)
+		count = func(node *editorCompositeNode) {
+			if node.ref != nil {
+				count(node.ref)
+			}
+			if reached {
+				return
+			}
+			for _, child := range node.children {
+				if node != owner || child.span.start < container.close {
+					next++
+				}
+			}
+			reached = node == owner
+		}
+		count(scope)
+		patch := editorXMLPatch{container.close, container.close, data}
+		if container.open == container.end {
+			patch = editorXMLContent(owner.data, container, data)
+		}
+		owner.patches = append(owner.patches, patch)
+		for i := range nodes {
+			result = append(result, next+i)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // pasteCompositeSelection 固定内部快照的页面几何和外观，粘贴失败时回收新增绘制资源
 // 入参: selection 独立内部快照, paste 目标范围粘贴操作
 // 返回: error 错误信息
@@ -222,146 +362,6 @@ func (n *editorCompositeNode) convertCoordinates(parent Matrix, inward bool) err
 	}
 	n.data, n.node, n.object = data, next.node, next.object
 	return nil
-}
-
-// CaptureCompositeObjects 捕获内部选区，不修改文档或分配资源
-// 入参: page 页面索引, path 父复合路径, indexes 同一容器的成员序号
-// 返回: *CompositeSelection 独立快照, error 错误信息
-func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []int) (*CompositeSelection, error) {
-	reader, _, root, nodes, err := e.compositeScope(page, path)
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
-	if len(indexes) == 0 {
-		return nil, fmt.Errorf("composite selection is empty")
-	}
-	indexes = slices.Clone(indexes)
-	slices.Sort(indexes)
-	var owner *editorCompositeNode
-	var container *editorXML
-	selection := &CompositeSelection{editor: e, page: e.pages[page].ID, path: ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: slices.Clone(path.Children)}}
-	if path.Annotation == "" {
-		selection.source = e.objectOrigin(path.ID).page
-	} else if e.source != nil {
-		selection.source = e.source.pages[e.pages[page].ID]
-	}
-	for j, i := range indexes {
-		if i < 0 || i >= len(nodes) || j > 0 && indexes[j-1] == i {
-			return nil, fmt.Errorf("invalid composite copy selection")
-		}
-		node := nodes[i]
-		if !node.transformable() || !editorXMLCopyable(node.node) {
-			return nil, fmt.Errorf("composite member cannot be copied")
-		}
-		if j == 0 {
-			owner, container = node.owner, node.span.parent
-		} else if node.span.parent != container {
-			return nil, fmt.Errorf("copy requires members in the same container")
-		}
-		copy := *node
-		copy.owner, copy.span = nil, nil
-		selection.nodes = append(selection.nodes, &copy)
-	}
-	scope := root.loadedScope(path.Children)
-	for scope != owner {
-		scope = scope.ref
-		selection.references++
-	}
-	for node := container; node != owner.node; node = node.parent {
-		containers := compositeContainers(node.parent)
-		selection.containers = append(selection.containers, slices.Index(containers, node))
-	}
-	slices.Reverse(selection.containers)
-	return selection, nil
-}
-
-// PasteCompositeObjects 将快照粘贴至内部范围末尾，不依赖源成员当前的序号或存在性
-// 同范围沿用原容器和当前继承样式，跨范围固定对象的源外观，位移使用页面毫米
-// 目标范围的父透明度及裁剪仍作用于新成员，全部成员提交一次撤销记录
-// 入参: page 页面索引, path 父复合路径, selection 捕获的快照, dx、dy 页面位移
-// 返回: []int 新成员序号, error 错误信息
-func (e *Editor) PasteCompositeObjects(page int, path ObjectPath, selection *CompositeSelection, dx, dy float64) ([]int, error) {
-	if selection == nil || selection.editor != e {
-		return nil, fmt.Errorf("composite selection belongs to another editor")
-	}
-	if !finite(dx) || !finite(dy) {
-		return nil, fmt.Errorf("paste requires finite offsets")
-	}
-	if _, err := e.page(page); err != nil {
-		return nil, err
-	}
-	if e.pages[page].ID != selection.page || path.ID != selection.path.ID || path.Annotation != selection.path.Annotation || !slices.Equal(path.Children, selection.path.Children) {
-		var result []int
-		err := e.pasteCompositeSelection(selection, func(objects []GraphicObject) error {
-			var err error
-			result, err = e.CopyObjectsToComposite(page, path, objects, dx, dy)
-			return err
-		})
-		return result, err
-	}
-	var result []int
-	err := e.editCompositeScope(page, path, func(renderer *Renderer, root *editorCompositeNode, _ []*editorCompositeNode) error {
-		scope := root.loadedScope(path.Children)
-		owner := scope
-		for i := 0; i < selection.references; i++ {
-			owner = owner.ref
-			if owner == nil {
-				return fmt.Errorf("composite resource container no longer exists")
-			}
-		}
-		container := owner.node
-		for _, index := range selection.containers {
-			containers := compositeContainers(container)
-			if index >= len(containers) {
-				return fmt.Errorf("composite page block no longer exists")
-			}
-			container = containers[index]
-		}
-		box, _ := ParseBox(owner.object.CompositeGraphicUnit.Boundary)
-		parent := owner.parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(NewMatrix(owner.object.CompositeGraphicUnit.CTM))
-		nodes := make([]*editorCompositeNode, len(selection.nodes))
-		for i, node := range selection.nodes {
-			copy := *node
-			copy.parent, copy.boundaryInCTM = parent, owner.boundaryInCTM
-			nodes[i] = &copy
-		}
-		data, states, err := e.copyCompositeNodes(renderer, nodes, dx, dy)
-		if err != nil {
-			return err
-		}
-		maps.Copy(owner.states, states)
-		next, reached := 0, false
-		var count func(*editorCompositeNode)
-		count = func(node *editorCompositeNode) {
-			if node.ref != nil {
-				count(node.ref)
-			}
-			if reached {
-				return
-			}
-			for _, child := range node.children {
-				if node != owner || child.span.start < container.close {
-					next++
-				}
-			}
-			reached = node == owner
-		}
-		count(scope)
-		patch := editorXMLPatch{container.close, container.close, data}
-		if container.open == container.end {
-			patch = editorXMLContent(owner.data, container, data)
-		}
-		owner.patches = append(owner.patches, patch)
-		for i := range nodes {
-			result = append(result, next+i)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return result, nil
 }
 
 // loadedScope 获取已由compositeScope展开并校验的范围

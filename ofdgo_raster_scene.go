@@ -56,6 +56,12 @@ type rasterPreparationState struct {
 	scene   RasterScene
 }
 
+// rasterScene 复用后端无关指令，图片保持只读引用
+type rasterScene struct {
+	backend RasterBackend
+	page    *RasterPage
+}
+
 // PreparePage 编译并准备当前配置的独立页面快照，按后端能力复用未修改指令
 // 每次重新解释源页面，按内容使模板、签章、字体及样式派生数据失效
 // 入参: page 源页面
@@ -98,12 +104,6 @@ func PrepareRasterScene(backend RasterBackend, page *RasterPage) (RasterScene, e
 		return provider.Prepare(page)
 	}
 	return &rasterScene{backend: backend, page: cloneRasterPage(page)}, nil
-}
-
-// rasterScene 复用后端无关指令，图片保持只读引用
-type rasterScene struct {
-	backend RasterBackend
-	page    *RasterPage
 }
 
 // Render 绘制固定快照

@@ -30,18 +30,16 @@ type CanvasBackend struct {
 	ColorSpace canvas.ColorSpace
 }
 
-// init 注册Canvas适配器和默认组合
-func init() {
-	if err := RegisterRenderBackend("canvas", defaultRenderBackends); err != nil {
-		panic(err)
-	}
+// rasterStrokeGradientCanvas 保留页面坐标描边的局部渐变定位
+type rasterStrokeGradientCanvas struct {
+	rasterGradientCanvas
+	inverse RasterMatrix
 }
 
-// defaultRenderBackends 创建默认组合，调用方可按职责替换任意后端
-// 返回: RenderBackends 默认后端组合
-func defaultRenderBackends() RenderBackends {
-	backend := CanvasBackend{}
-	return RenderBackends{FontResources: SFNTBackend{}, Fonts: backend, Geometry: backend, Compiler: backend, Raster: backend, SVG: backend, PDF: backend, EPS: backend}
+// rasterGradientCanvas 将公共渐变交给Canvas采样，不改变OFD周期语义
+type rasterGradientCanvas struct {
+	gradient *RasterGradient
+	space    canvas.ColorSpace
 }
 
 // Name 返回后端标识
@@ -182,12 +180,6 @@ func (b CanvasBackend) Render(page *RasterPage) (image.Image, error) {
 	return img, nil
 }
 
-// rasterStrokeGradientCanvas 保留页面坐标描边的局部渐变定位
-type rasterStrokeGradientCanvas struct {
-	rasterGradientCanvas
-	inverse RasterMatrix
-}
-
 // At 返回原局部坐标的描边渐变颜色
 // 入参: x 页面横坐标, y 页面纵坐标
 // 返回: color.RGBA 预乘颜色
@@ -202,12 +194,6 @@ func (g rasterStrokeGradientCanvas) At(x, y float64) color.RGBA {
 func (g rasterStrokeGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
 	g.rasterGradientCanvas = g.rasterGradientCanvas.SetColorSpace(space).(rasterGradientCanvas)
 	return g
-}
-
-// rasterGradientCanvas 将公共渐变交给Canvas采样，不改变OFD周期语义
-type rasterGradientCanvas struct {
-	gradient *RasterGradient
-	space    canvas.ColorSpace
 }
 
 // At 返回局部坐标的预乘颜色
@@ -235,4 +221,18 @@ func (g rasterGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Grad
 		copy.Stops[i].Color = space.ToLinear(copy.Stops[i].Color)
 	}
 	return rasterGradientCanvas{gradient: &copy}
+}
+
+// init 注册Canvas适配器和默认组合
+func init() {
+	if err := RegisterRenderBackend("canvas", defaultRenderBackends); err != nil {
+		panic(err)
+	}
+}
+
+// defaultRenderBackends 创建默认组合，调用方可按职责替换任意后端
+// 返回: RenderBackends 默认后端组合
+func defaultRenderBackends() RenderBackends {
+	backend := CanvasBackend{}
+	return RenderBackends{FontResources: SFNTBackend{}, Fonts: backend, Geometry: backend, Compiler: backend, Raster: backend, SVG: backend, PDF: backend, EPS: backend}
 }

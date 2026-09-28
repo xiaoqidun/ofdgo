@@ -21,6 +21,13 @@ import (
 	"github.com/tdewolff/font"
 )
 
+// canvasFontMetrics 保留默认字体度量，写出时不更新原始时间
+type canvasFontMetrics struct {
+	*font.SFNT
+	*fontShaper
+	outlines *sfntOutliner
+}
+
 // ResolveFont 按需加载字体资源，保留内嵌数据及外部字体的名称、样式和集合索引匹配
 // 入参: r 渲染器, id 字体标识, exact 是否禁止无关回退
 // 返回: ResolvedFont 字体与来源, error 字体不可用错误
@@ -39,13 +46,6 @@ func (CanvasBackend) OpenFont(data []byte) (FontMetrics, error) {
 	metrics := &canvasFontMetrics{SFNT: sfnt, outlines: &sfntOutliner{font: sfnt}}
 	metrics.fontShaper = &fontShaper{metrics: metrics}
 	return metrics, nil
-}
-
-// canvasFontMetrics 保留默认字体度量，写出时不更新原始时间
-type canvasFontMetrics struct {
-	*font.SFNT
-	*fontShaper
-	outlines *sfntOutliner
 }
 
 // Write 返回字体数据，不修改字体元信息

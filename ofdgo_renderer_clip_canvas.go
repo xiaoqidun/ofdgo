@@ -45,16 +45,6 @@ func (r *clipRenderer) RenderPath(path *canvas.Path, style canvas.Style, m canva
 	}
 }
 
-// add 合并裁剪轮廓
-// 入参: path 裁剪路径
-func (r *clipRenderer) add(path *canvas.Path) {
-	if r.path == nil {
-		r.path = path
-	} else {
-		r.path = unionClipPath(r.path, path)
-	}
-}
-
 // RenderText 合并文字字形轮廓
 // 入参: text 文字, m 变换矩阵
 func (r *clipRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
@@ -64,6 +54,16 @@ func (r *clipRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
 // RenderImage 裁剪区不包含图像对象
 // 入参: img 图像, m 变换矩阵
 func (r *clipRenderer) RenderImage(img image.Image, m canvas.Matrix) {}
+
+// add 合并裁剪轮廓
+// 入参: path 裁剪路径
+func (r *clipRenderer) add(path *canvas.Path) {
+	if r.path == nil {
+		r.path = path
+	} else {
+		r.path = unionClipPath(r.path, path)
+	}
+}
 
 // buildObjectClipPath 构建对象裁剪路径并应用父级变换
 // 入参: clips 裁剪对象, pageH 页面高度, bx 边界X坐标, by 边界Y坐标, objectCTM 对象CTM, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM

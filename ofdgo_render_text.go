@@ -44,160 +44,6 @@ type glyphOutlineKey struct {
 	size  float64
 }
 
-// preparedMetrics 复用已包装字体的后端度量，不混用不同后端实例
-// 入参: prepared 已包装字体
-// 返回: FontMetrics 字体度量, error 字体解析错误
-func (r *Renderer) preparedMetrics(prepared *PreparedFont) (FontMetrics, error) {
-	if prepared.digest == ([32]byte{}) {
-		prepared.digest = sha256.Sum256(prepared.Data)
-	}
-	key := prepared.digest
-	if metrics, ok := r.fontMetrics.get(key); ok {
-		return metrics, nil
-	}
-	metrics, err := r.backends.Fonts.OpenFont(prepared.Data)
-	if err != nil {
-		return nil, err
-	}
-	r.fontMetrics.put(key, metrics, len(prepared.Data)*2+256)
-	return metrics, nil
-}
-
-// preparedOutline 按字形和字号复用只读轮廓
-// 入参: prepared 字体, metrics 度量, glyph 字形编号, size 毫米字号
-// 返回: GeometryPath 字形路径, error 能力或解析错误
-func (r *Renderer) preparedOutline(prepared *PreparedFont, metrics FontMetrics, glyph uint16, size float64) (GeometryPath, error) {
-	key := glyphOutlineKey{prepared, glyph, size}
-	if path, ok := r.glyphOutlines.get(key); ok {
-		return path, nil
-	}
-	provider, ok := metrics.(FontOutlines)
-	if !ok {
-		return nil, fmt.Errorf("font outlines: %w", ErrBackendUnavailable)
-	}
-	path, err := provider.GlyphOutline(glyph, size)
-	if err == nil {
-		r.glyphOutlines.put(key, path, len(path)*96+128)
-	}
-	return path, err
-}
-
-// preparedOutlines 批量提取缓存未命中的字形，保留原始编号顺序，不触发塑形
-// 入参: prepared 字体, metrics 度量, glyphs 字形编号, size 毫米字号
-// 返回: []GeometryPath 同序只读轮廓, error 能力或解析错误
-func (r *Renderer) preparedOutlines(prepared *PreparedFont, metrics FontMetrics, glyphs []uint16, size float64) ([]GeometryPath, error) {
-	result := make([]GeometryPath, len(glyphs))
-	var indices []int
-	missing := make([]uint16, 0)
-	unique := make(map[uint16]int)
-	for i, glyph := range glyphs {
-		if path, ok := r.glyphOutlines.get(glyphOutlineKey{prepared, glyph, size}); ok {
-			result[i] = path
-			continue
-		}
-		if indices == nil {
-			indices = make([]int, len(glyphs))
-			for j := range indices {
-				indices[j] = -1
-			}
-		}
-		index, ok := unique[glyph]
-		if !ok {
-			index = len(missing)
-			unique[glyph] = index
-			missing = append(missing, glyph)
-		}
-		indices[i] = index
-	}
-	if len(missing) == 0 {
-		return result, nil
-	}
-	var paths []GeometryPath
-	if batch, ok := metrics.(FontOutlineBatch); ok {
-		var err error
-		paths, err = batch.GlyphOutlines(missing, size)
-		if err != nil {
-			return nil, err
-		}
-		if len(paths) != len(missing) {
-			return nil, fmt.Errorf("font outline batch returned %d paths for %d glyphs", len(paths), len(missing))
-		}
-	} else {
-		provider, ok := metrics.(FontOutlines)
-		if !ok {
-			return nil, fmt.Errorf("font outlines: %w", ErrBackendUnavailable)
-		}
-		paths = make([]GeometryPath, len(missing))
-		for i, glyph := range missing {
-			var err error
-			paths[i], err = provider.GlyphOutline(glyph, size)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-	for i, path := range paths {
-		r.glyphOutlines.put(glyphOutlineKey{prepared, missing[i], size}, path, len(path)*96+128)
-	}
-	for i, index := range indices {
-		if index >= 0 {
-			result[i] = paths[index]
-		}
-	}
-	return result, nil
-}
-
-// renderObjectMatrix 统一边界、局部变换与父变换的组合顺序
-// 入参: boundary 对象边界, local 局部矩阵, state 继承状态
-// 返回: Matrix 页面矩阵, Matrix 不含边界平移的组合矩阵
-func renderObjectMatrix(boundary string, local Matrix, state RenderState) (Matrix, Matrix) {
-	box, _ := ParseBox(boundary)
-	linear := local
-	if state.Parent != nil {
-		linear = state.Parent.Multiply(local)
-	}
-	matrix := TranslationMatrix(box.X, box.Y).Multiply(linear)
-	if state.BoundaryInCTM && state.Parent != nil {
-		matrix = state.Parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(local)
-	}
-	return matrix, linear
-}
-
-// objectGeometryClip 解析对象裁剪并合并父裁剪
-// 入参: clips 对象裁剪, boundary 边界, local 局部矩阵, state 继承状态
-// 返回: *GeometryPath 页面裁剪, error 几何错误
-func (r *Renderer) objectGeometryClip(clips *Clips, boundary string, local Matrix, state RenderState) (*GeometryPath, error) {
-	if clips == nil {
-		return state.Clip, nil
-	}
-	matrix, _ := renderObjectMatrix(boundary, local, state)
-	if clips.TransFlag != nil && !*clips.TransFlag {
-		copy := *clips
-		copy.TransFlag = nil
-		clips = &copy
-		box, _ := ParseBox(boundary)
-		matrix = TranslationMatrix(box.X, box.Y)
-		if state.BoundaryInCTM && state.Parent != nil {
-			matrix = state.Parent.Multiply(matrix)
-		}
-	}
-	geometry, err := r.Geometry()
-	if err != nil {
-		return nil, err
-	}
-	return geometry.Clip(r, clips, matrix, state.Clip)
-}
-
-// clipGeometry 将非零填充路径与页面裁剪相交
-// 入参: geometry 几何后端, path 页面路径, clip 页面裁剪
-// 返回: GeometryPath 裁剪路径, error 几何错误
-func clipGeometry(geometry GeometryBackend, path GeometryPath, clip *GeometryPath) (GeometryPath, error) {
-	if clip == nil {
-		return path, nil
-	}
-	return geometry.Combine(path, *clip, GeometryIntersect)
-}
-
 // PositionText 定位文字、字形与搜索范围，不依赖页面输出后端
 // 入参: object 文字对象, state 继承状态
 // 返回: *PositionedText 定位结果, error 字体或几何错误
@@ -401,6 +247,160 @@ func (r *Renderer) PositionText(object TextObject, state RenderState) (*Position
 		}
 	}
 	return result, nil
+}
+
+// preparedMetrics 复用已包装字体的后端度量，不混用不同后端实例
+// 入参: prepared 已包装字体
+// 返回: FontMetrics 字体度量, error 字体解析错误
+func (r *Renderer) preparedMetrics(prepared *PreparedFont) (FontMetrics, error) {
+	if prepared.digest == ([32]byte{}) {
+		prepared.digest = sha256.Sum256(prepared.Data)
+	}
+	key := prepared.digest
+	if metrics, ok := r.fontMetrics.get(key); ok {
+		return metrics, nil
+	}
+	metrics, err := r.backends.Fonts.OpenFont(prepared.Data)
+	if err != nil {
+		return nil, err
+	}
+	r.fontMetrics.put(key, metrics, len(prepared.Data)*2+256)
+	return metrics, nil
+}
+
+// preparedOutline 按字形和字号复用只读轮廓
+// 入参: prepared 字体, metrics 度量, glyph 字形编号, size 毫米字号
+// 返回: GeometryPath 字形路径, error 能力或解析错误
+func (r *Renderer) preparedOutline(prepared *PreparedFont, metrics FontMetrics, glyph uint16, size float64) (GeometryPath, error) {
+	key := glyphOutlineKey{prepared, glyph, size}
+	if path, ok := r.glyphOutlines.get(key); ok {
+		return path, nil
+	}
+	provider, ok := metrics.(FontOutlines)
+	if !ok {
+		return nil, fmt.Errorf("font outlines: %w", ErrBackendUnavailable)
+	}
+	path, err := provider.GlyphOutline(glyph, size)
+	if err == nil {
+		r.glyphOutlines.put(key, path, len(path)*96+128)
+	}
+	return path, err
+}
+
+// preparedOutlines 批量提取缓存未命中的字形，保留原始编号顺序，不触发塑形
+// 入参: prepared 字体, metrics 度量, glyphs 字形编号, size 毫米字号
+// 返回: []GeometryPath 同序只读轮廓, error 能力或解析错误
+func (r *Renderer) preparedOutlines(prepared *PreparedFont, metrics FontMetrics, glyphs []uint16, size float64) ([]GeometryPath, error) {
+	result := make([]GeometryPath, len(glyphs))
+	var indices []int
+	missing := make([]uint16, 0)
+	unique := make(map[uint16]int)
+	for i, glyph := range glyphs {
+		if path, ok := r.glyphOutlines.get(glyphOutlineKey{prepared, glyph, size}); ok {
+			result[i] = path
+			continue
+		}
+		if indices == nil {
+			indices = make([]int, len(glyphs))
+			for j := range indices {
+				indices[j] = -1
+			}
+		}
+		index, ok := unique[glyph]
+		if !ok {
+			index = len(missing)
+			unique[glyph] = index
+			missing = append(missing, glyph)
+		}
+		indices[i] = index
+	}
+	if len(missing) == 0 {
+		return result, nil
+	}
+	var paths []GeometryPath
+	if batch, ok := metrics.(FontOutlineBatch); ok {
+		var err error
+		paths, err = batch.GlyphOutlines(missing, size)
+		if err != nil {
+			return nil, err
+		}
+		if len(paths) != len(missing) {
+			return nil, fmt.Errorf("font outline batch returned %d paths for %d glyphs", len(paths), len(missing))
+		}
+	} else {
+		provider, ok := metrics.(FontOutlines)
+		if !ok {
+			return nil, fmt.Errorf("font outlines: %w", ErrBackendUnavailable)
+		}
+		paths = make([]GeometryPath, len(missing))
+		for i, glyph := range missing {
+			var err error
+			paths[i], err = provider.GlyphOutline(glyph, size)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	for i, path := range paths {
+		r.glyphOutlines.put(glyphOutlineKey{prepared, missing[i], size}, path, len(path)*96+128)
+	}
+	for i, index := range indices {
+		if index >= 0 {
+			result[i] = paths[index]
+		}
+	}
+	return result, nil
+}
+
+// renderObjectMatrix 统一边界、局部变换与父变换的组合顺序
+// 入参: boundary 对象边界, local 局部矩阵, state 继承状态
+// 返回: Matrix 页面矩阵, Matrix 不含边界平移的组合矩阵
+func renderObjectMatrix(boundary string, local Matrix, state RenderState) (Matrix, Matrix) {
+	box, _ := ParseBox(boundary)
+	linear := local
+	if state.Parent != nil {
+		linear = state.Parent.Multiply(local)
+	}
+	matrix := TranslationMatrix(box.X, box.Y).Multiply(linear)
+	if state.BoundaryInCTM && state.Parent != nil {
+		matrix = state.Parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(local)
+	}
+	return matrix, linear
+}
+
+// objectGeometryClip 解析对象裁剪并合并父裁剪
+// 入参: clips 对象裁剪, boundary 边界, local 局部矩阵, state 继承状态
+// 返回: *GeometryPath 页面裁剪, error 几何错误
+func (r *Renderer) objectGeometryClip(clips *Clips, boundary string, local Matrix, state RenderState) (*GeometryPath, error) {
+	if clips == nil {
+		return state.Clip, nil
+	}
+	matrix, _ := renderObjectMatrix(boundary, local, state)
+	if clips.TransFlag != nil && !*clips.TransFlag {
+		copy := *clips
+		copy.TransFlag = nil
+		clips = &copy
+		box, _ := ParseBox(boundary)
+		matrix = TranslationMatrix(box.X, box.Y)
+		if state.BoundaryInCTM && state.Parent != nil {
+			matrix = state.Parent.Multiply(matrix)
+		}
+	}
+	geometry, err := r.Geometry()
+	if err != nil {
+		return nil, err
+	}
+	return geometry.Clip(r, clips, matrix, state.Clip)
+}
+
+// clipGeometry 将非零填充路径与页面裁剪相交
+// 入参: geometry 几何后端, path 页面路径, clip 页面裁剪
+// 返回: GeometryPath 裁剪路径, error 几何错误
+func clipGeometry(geometry GeometryBackend, path GeometryPath, clip *GeometryPath) (GeometryPath, error) {
+	if clip == nil {
+		return path, nil
+	}
+	return geometry.Combine(path, *clip, GeometryIntersect)
 }
 
 // addGeometrySpan 以公共几何语义收集文字选择区域，保留旋转和斜切

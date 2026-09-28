@@ -57,27 +57,6 @@ type readerOptions struct {
 	provider    CryptoProvider
 }
 
-// WithCredentials 添加解密凭据，多次调用可解开多层加密
-// 入参: credentials 解密凭据
-// 返回: ReaderOption 阅读选项
-func WithCredentials(credentials Credentials) ReaderOption {
-	credentials.Password = bytes.Clone(credentials.Password)
-	credentials.Certificate = bytes.Clone(credentials.Certificate)
-	return func(options *readerOptions) {
-		copy := credentials
-		copy.Password = bytes.Clone(credentials.Password)
-		copy.Certificate = bytes.Clone(credentials.Certificate)
-		options.credentials = append(options.credentials, copy)
-	}
-}
-
-// WithCryptoProvider 设置文档解密的密码提供者
-// 入参: provider 密码提供者，nil使用内置实现
-// 返回: ReaderOption 阅读选项
-func WithCryptoProvider(provider CryptoProvider) ReaderOption {
-	return func(options *readerOptions) { options.provider = provider }
-}
-
 // EncryptionRecipient 证书加密接收者，Certificate为SM2公钥证书的DER编码
 type EncryptionRecipient struct {
 	UserName    string
@@ -108,6 +87,27 @@ type EncryptionInfo struct {
 type encryptionState struct {
 	info    EncryptionInfo
 	options *EncryptionOptions
+}
+
+// WithCredentials 添加解密凭据，多次调用可解开多层加密
+// 入参: credentials 解密凭据
+// 返回: ReaderOption 阅读选项
+func WithCredentials(credentials Credentials) ReaderOption {
+	credentials.Password = bytes.Clone(credentials.Password)
+	credentials.Certificate = bytes.Clone(credentials.Certificate)
+	return func(options *readerOptions) {
+		copy := credentials
+		copy.Password = bytes.Clone(credentials.Password)
+		copy.Certificate = bytes.Clone(credentials.Certificate)
+		options.credentials = append(options.credentials, copy)
+	}
+}
+
+// WithCryptoProvider 设置文档解密的密码提供者
+// 入参: provider 密码提供者，nil使用内置实现
+// 返回: ReaderOption 阅读选项
+func WithCryptoProvider(provider CryptoProvider) ReaderOption {
+	return func(options *readerOptions) { options.provider = provider }
 }
 
 // Encryption 获取文档加密状态，不暴露口令或私钥

@@ -50,6 +50,29 @@ func (e *Editor) EraseObjectsPath(page int, ids []string, points []Point) error 
 	return e.eraseObjects(page, ids, bounds, points, region)
 }
 
+// EraseCompositeObjects 擦除内部成员与矩形相交的部分，保留原始属性及共享资源
+// 全部覆盖时删除成员，部分覆盖追加标准裁剪，不用于敏感信息脱敏
+// 入参: page 页面索引, path 父路径, indexes 成员序号, box 页面毫米范围
+// 返回: error 错误信息
+func (e *Editor) EraseCompositeObjects(page int, path ObjectPath, indexes []int, box Box) error {
+	if _, err := creationBox(editorBoxString(box)); err != nil {
+		return err
+	}
+	return e.eraseCompositeObjects(page, path, indexes, geometryRectangle(box))
+}
+
+// EraseCompositeObjectsPath 按闭合折线擦除内部成员，末点自动连接起点
+// 与矩形擦除共用原子提交和撤销逻辑，不用于敏感信息脱敏
+// 入参: page 页面索引, path 父路径, indexes 成员序号, points 页面毫米坐标
+// 返回: error 错误信息
+func (e *Editor) EraseCompositeObjectsPath(page int, path ObjectPath, indexes []int, points []Point) error {
+	region, err := e.editorEraseRegion(points)
+	if err != nil || len(region) == 0 {
+		return err
+	}
+	return e.eraseCompositeObjects(page, path, indexes, region)
+}
+
 // editorEraseRegion 校验闭合折线并按奇偶规则构建擦除区域
 // 入参: points 页面毫米坐标
 // 返回: GeometryPath 擦除区域, error 错误信息
@@ -74,29 +97,6 @@ func (e *Editor) editorEraseRegion(points []Point) (GeometryPath, error) {
 	}
 	region = append(region, GeometrySegment{Verb: GeometryClose, End: points[0]})
 	return geometry.Normalize(region, true)
-}
-
-// EraseCompositeObjects 擦除内部成员与矩形相交的部分，保留原始属性及共享资源
-// 全部覆盖时删除成员，部分覆盖追加标准裁剪，不用于敏感信息脱敏
-// 入参: page 页面索引, path 父路径, indexes 成员序号, box 页面毫米范围
-// 返回: error 错误信息
-func (e *Editor) EraseCompositeObjects(page int, path ObjectPath, indexes []int, box Box) error {
-	if _, err := creationBox(editorBoxString(box)); err != nil {
-		return err
-	}
-	return e.eraseCompositeObjects(page, path, indexes, geometryRectangle(box))
-}
-
-// EraseCompositeObjectsPath 按闭合折线擦除内部成员，末点自动连接起点
-// 与矩形擦除共用原子提交和撤销逻辑，不用于敏感信息脱敏
-// 入参: page 页面索引, path 父路径, indexes 成员序号, points 页面毫米坐标
-// 返回: error 错误信息
-func (e *Editor) EraseCompositeObjectsPath(page int, path ObjectPath, indexes []int, points []Point) error {
-	region, err := e.editorEraseRegion(points)
-	if err != nil || len(region) == 0 {
-		return err
-	}
-	return e.eraseCompositeObjects(page, path, indexes, region)
 }
 
 // eraseCompositeObjects 按页面区域裁剪内部成员，全部成功后提交一次历史

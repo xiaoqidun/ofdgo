@@ -26,6 +26,11 @@ import (
 	"github.com/tdewolff/canvas/renderers/svg"
 )
 
+// canvasEPSWriter 在EPS头部写入本库制作软件，不改动绘图内容
+type canvasEPSWriter struct {
+	io.Writer
+}
+
 // RenderSVG 使用canvas输出SVG，按模式保留资源和对象分组
 // 入参: r 渲染器, page 页面内容, writer 输出流, mode 资源模式
 // 返回: SVGResources 外部资源, error 错误信息
@@ -72,11 +77,6 @@ func (CanvasBackend) RenderEPS(r *Renderer, page *PageContent, writer io.Writer)
 		return err
 	}
 	return buffer.Flush()
-}
-
-// canvasEPSWriter 在EPS头部写入本库制作软件，不改动绘图内容
-type canvasEPSWriter struct {
-	io.Writer
 }
 
 // Write 写入EPS片段并替换独立的制作软件声明

@@ -35,15 +35,20 @@ const ofdNamespace = "http://www.ofdspec.org/2016"
 // editorProgress 保存准备阶段的进度检查点，内存预览使用nil
 type editorProgress func(stage string, completed, total int) error
 
-// report 回报进度并原样传递调用方停止原因
-// 入参: stage 阶段, completed 已处理项, total 总项数
-// 返回: error 调用方停止原因
-func (progress editorProgress) report(stage string, completed, total int) error {
-	if progress != nil {
-		return progress(stage, completed, total)
-	}
-	return nil
+// ofdCountingWriter 记录实际输出字节数
+type ofdCountingWriter struct {
+	writer io.Writer
+	count  int64
 }
+
+// ofdXML 使用标准ofd命名空间写出XML
+type ofdXML struct {
+	encoder *xml.Encoder
+	err     error
+}
+
+// ofdAttrs OFD节点属性
+type ofdAttrs []xml.Attr
 
 // WriteTo 逐个条目写出OFD，不关闭调用方输出流，出错时应丢弃本次输出
 // 新增资源仅写入实际引用的部分，静态TrueType轮廓字体按实际文字生成子集
@@ -57,47 +62,6 @@ func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
 		return e.writeEncrypted(writer)
 	}
 	return e.writePlaintext(writer)
-}
-
-// writePlaintext 写出未加密包，供显式明文输出与加密封装共用
-// 入参: writer 输出流
-// 返回: int64 写入字节数, error 错误信息
-func (e *Editor) writePlaintext(writer io.Writer) (int64, error) {
-	if err := e.validate(); err != nil {
-		return 0, err
-	}
-	progress := editorProgress(e.OnWriteProgress)
-	fonts, err := e.subsetFonts(progress)
-	if err != nil {
-		return 0, err
-	}
-	if e.source != nil {
-		return e.writeSource(writer, fonts, progress)
-	}
-	if err := progress.report("write", 0, 0); err != nil {
-		return 0, err
-	}
-	output := &ofdCountingWriter{writer: writer}
-	archive := zip.NewWriter(output)
-	err = e.writeParts(func(name string, data []byte, compressed bool) error {
-		if subset, ok := fonts[name]; ok {
-			data = subset
-		}
-		method := uint16(zip.Deflate)
-		if compressed {
-			method = zip.Store
-		}
-		entry, err := archive.CreateHeader(&zip.FileHeader{Name: name, Method: method})
-		if err != nil {
-			return err
-		}
-		_, err = entry.Write(data)
-		return err
-	}, progress)
-	if err == nil {
-		err = archive.Close()
-	}
-	return output.count, err
 }
 
 // WritePagesTo 按指定顺序将页面另存为独立OFD，不修改当前文档或撤销记录
@@ -158,6 +122,69 @@ func (e *Editor) WritePagesTo(writer io.Writer, indexes []int) (int64, error) {
 // 返回: *Reader 阅读器, error 错误信息
 func (e *Editor) Reader() (*Reader, error) {
 	return e.reader(nil)
+}
+
+// Write 写入并累计字节数
+// 入参: data 数据
+// 返回: int 字节数, error 错误信息
+func (w *ofdCountingWriter) Write(data []byte) (int, error) {
+	n, err := w.writer.Write(data)
+	w.count += int64(n)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	return n, err
+}
+
+// report 回报进度并原样传递调用方停止原因
+// 入参: stage 阶段, completed 已处理项, total 总项数
+// 返回: error 调用方停止原因
+func (progress editorProgress) report(stage string, completed, total int) error {
+	if progress != nil {
+		return progress(stage, completed, total)
+	}
+	return nil
+}
+
+// writePlaintext 写出未加密包，供显式明文输出与加密封装共用
+// 入参: writer 输出流
+// 返回: int64 写入字节数, error 错误信息
+func (e *Editor) writePlaintext(writer io.Writer) (int64, error) {
+	if err := e.validate(); err != nil {
+		return 0, err
+	}
+	progress := editorProgress(e.OnWriteProgress)
+	fonts, err := e.subsetFonts(progress)
+	if err != nil {
+		return 0, err
+	}
+	if e.source != nil {
+		return e.writeSource(writer, fonts, progress)
+	}
+	if err := progress.report("write", 0, 0); err != nil {
+		return 0, err
+	}
+	output := &ofdCountingWriter{writer: writer}
+	archive := zip.NewWriter(output)
+	err = e.writeParts(func(name string, data []byte, compressed bool) error {
+		if subset, ok := fonts[name]; ok {
+			data = subset
+		}
+		method := uint16(zip.Deflate)
+		if compressed {
+			method = zip.Store
+		}
+		entry, err := archive.CreateHeader(&zip.FileHeader{Name: name, Method: method})
+		if err != nil {
+			return err
+		}
+		_, err = entry.Write(data)
+		return err
+	}, progress)
+	if err == nil {
+		err = archive.Close()
+	}
+	return output.count, err
 }
 
 // reader 生成内存快照，保存时复用准备进度，预览时不触发回调
@@ -525,30 +552,6 @@ func (x *ofdXML) resources(fonts, images []editorResource, spaces []ColorSpace) 
 	x.end("Res")
 }
 
-// ofdCountingWriter 记录实际输出字节数
-type ofdCountingWriter struct {
-	writer io.Writer
-	count  int64
-}
-
-// Write 写入并累计字节数
-// 入参: data 数据
-// 返回: int 字节数, error 错误信息
-func (w *ofdCountingWriter) Write(data []byte) (int, error) {
-	n, err := w.writer.Write(data)
-	w.count += int64(n)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	return n, err
-}
-
-// ofdXML 使用标准ofd命名空间写出XML
-type ofdXML struct {
-	encoder *xml.Encoder
-	err     error
-}
-
 // newOFDXML 创建XML编码器
 // 入参: writer 输出流
 // 返回: *ofdXML 编码器
@@ -600,9 +603,6 @@ func (x *ofdXML) finish() error {
 	}
 	return x.encoder.Close()
 }
-
-// ofdAttrs OFD节点属性
-type ofdAttrs []xml.Attr
 
 // add 添加非空属性
 // 入参: name 属性名, value 属性值

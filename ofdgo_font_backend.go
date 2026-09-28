@@ -123,29 +123,6 @@ type resolvedFontResult struct {
 	err  error
 }
 
-// resetFontCache 重置字体解析及字形缓存，保留图片和非字体后端状态
-func (r *Renderer) resetFontCache() {
-	r.fontSourcesCache = newFontSourceCache()
-	r.resetFontBackendCache()
-}
-
-// resetFontBackendCache 清理后端字体对象，保留字体文件和图片缓存
-func (r *Renderer) resetFontBackendCache() {
-	r.preparedFonts = make(map[string]*PreparedFont)
-	r.resolvedFonts = make(map[resolvedFontKey]resolvedFontResult)
-	if r.fontSourcesCache != nil {
-		r.fontSourcesCache.fallback = ResolvedFont{}
-		r.fontSourcesCache.fallbackRead = false
-	}
-	r.fontMetrics = renderCache[[32]byte, FontMetrics]{limit: 32 << 20}
-	r.glyphOutlines = renderCache[glyphOutlineKey, GeometryPath]{limit: 16 << 20}
-	for _, state := range r.backendStates {
-		if fonts, ok := state.(interface{ resetFonts() }); ok {
-			fonts.resetFonts()
-		}
-	}
-}
-
 // ResolveFont 使用配置的字体后端解析资源，保留精确匹配与回退的区别
 // 入参: id 字体资源标识, exact 是否要求精确匹配
 // 返回: ResolvedFont 字体与来源, error 解析错误
@@ -197,4 +174,27 @@ func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
 	}
 	r.preparedFonts[id] = prepared
 	return prepared, nil
+}
+
+// resetFontCache 重置字体解析及字形缓存，保留图片和非字体后端状态
+func (r *Renderer) resetFontCache() {
+	r.fontSourcesCache = newFontSourceCache()
+	r.resetFontBackendCache()
+}
+
+// resetFontBackendCache 清理后端字体对象，保留字体文件和图片缓存
+func (r *Renderer) resetFontBackendCache() {
+	r.preparedFonts = make(map[string]*PreparedFont)
+	r.resolvedFonts = make(map[resolvedFontKey]resolvedFontResult)
+	if r.fontSourcesCache != nil {
+		r.fontSourcesCache.fallback = ResolvedFont{}
+		r.fontSourcesCache.fallbackRead = false
+	}
+	r.fontMetrics = renderCache[[32]byte, FontMetrics]{limit: 32 << 20}
+	r.glyphOutlines = renderCache[glyphOutlineKey, GeometryPath]{limit: 16 << 20}
+	for _, state := range r.backendStates {
+		if fonts, ok := state.(interface{ resetFonts() }); ok {
+			fonts.resetFonts()
+		}
+	}
 }

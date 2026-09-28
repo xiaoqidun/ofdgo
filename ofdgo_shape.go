@@ -21,16 +21,6 @@ import (
 	"strings"
 )
 
-// Outline 使用默认几何后端获取SVG轮廓，自定义后端使用Renderer.PathOutline
-// 返回: string SVG路径数据, error 错误信息
-func (p PathObject) Outline() (string, error) {
-	r := &Renderer{backends: defaultRenderBackends()}
-	return r.PathOutline(p)
-}
-
-// ShapeKind 基本图形类型
-type ShapeKind string
-
 const (
 	ShapeLine        ShapeKind = "line"
 	ShapeArrow       ShapeKind = "arrow"
@@ -38,6 +28,16 @@ const (
 	ShapeRectangle   ShapeKind = "rectangle"
 	ShapeEllipse     ShapeKind = "ellipse"
 )
+
+// ShapeKind 基本图形类型
+type ShapeKind string
+
+// Outline 使用默认几何后端获取SVG轮廓，自定义后端使用Renderer.PathOutline
+// 返回: string SVG路径数据, error 错误信息
+func (p PathObject) Outline() (string, error) {
+	r := &Renderer{backends: defaultRenderBackends()}
+	return r.PathOutline(p)
+}
 
 // NewShape 创建使用标准紧缩路径的图形，默认黑色描边、不填充
 // 可调整返回对象的颜色、线宽等属性后通过Editor.AddObject写入
@@ -222,26 +222,6 @@ func (p PathObject) ReshapeFrame(box Box) (PathObject, error) {
 	return p, nil
 }
 
-// sameShapePath 比较基本路径的命令与数值，忽略数值格式差异
-// 入参: a、b 路径词元
-// 返回: bool 是否相同
-func sameShapePath(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i, token := range a {
-		if token == b[i] {
-			continue
-		}
-		x, errX := strconv.ParseFloat(token, 64)
-		y, errY := strconv.ParseFloat(b[i], 64)
-		if errX != nil || errY != nil || !finite(x) || !finite(y) || math.Abs(x-y) > 1e-10*math.Max(1, math.Max(math.Abs(x), math.Abs(y))) {
-			return false
-		}
-	}
-	return true
-}
-
 // Reshape 调整基本路径在所在坐标系中的几何范围，保留对象标识、方向、缩放和绘制属性，不缩放线宽
 // 返回对象可通过Editor.UpdateObject写入；仅支持Shape可识别的路径
 // 入参: box 新几何范围，直线使用起点和有符号的端点位移
@@ -260,6 +240,26 @@ func (p PathObject) ReshapeLine(kind ShapeKind, box Box) (PathObject, error) {
 		return PathObject{}, fmt.Errorf("path is not a supported line")
 	}
 	return p.reshape(kind, box)
+}
+
+// sameShapePath 比较基本路径的命令与数值，忽略数值格式差异
+// 入参: a、b 路径词元
+// 返回: bool 是否相同
+func sameShapePath(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, token := range a {
+		if token == b[i] {
+			continue
+		}
+		x, errX := strconv.ParseFloat(token, 64)
+		y, errY := strconv.ParseFloat(b[i], 64)
+		if errX != nil || errY != nil || !finite(x) || !finite(y) || math.Abs(x-y) > 1e-10*math.Max(1, math.Max(math.Abs(x), math.Abs(y))) {
+			return false
+		}
+	}
+	return true
 }
 
 // lineShapeKind 判断基本图形是否使用直线端点

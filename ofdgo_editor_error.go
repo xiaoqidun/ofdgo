@@ -16,9 +16,6 @@ package ofdgo
 
 import "errors"
 
-// EditReason 编辑操作受限的原因，不依赖错误描述的语言或文案
-type EditReason string
-
 const (
 	// EditUnsupportedObject 对象包含尚不支持编辑的特性
 	EditUnsupportedObject EditReason = "unsupportedObject"
@@ -37,6 +34,9 @@ const (
 	// EditInvalidObject 对象数据未通过校验
 	EditInvalidObject EditReason = "invalidObject"
 )
+
+// EditReason 编辑操作受限的原因，不依赖错误描述的语言或文案
+type EditReason string
 
 // EditError 编辑受限原因及原始错误，可通过errors.As取得Code和更具体的诊断
 type EditError struct {

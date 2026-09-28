@@ -29,14 +29,20 @@ import (
 	"github.com/tdewolff/font"
 )
 
-// fontSourceKind 字体来源类型
-type fontSourceKind uint8
-
 const (
 	fontSourceFile fontSourceKind = iota
 	fontSourceFS
 	fontSourceSystem
 )
+
+// systemFontIndex 串行初始化系统字体索引，不注册绘图后端
+var systemFontIndex struct {
+	sync.Mutex
+	fonts *font.SystemFonts
+}
+
+// fontSourceKind 字体来源类型
+type fontSourceKind uint8
 
 // fontSource 字体来源
 type fontSource struct {
@@ -76,12 +82,6 @@ type fontSourceData struct {
 // 返回: *fontSourceCache 字体来源缓存
 func newFontSourceCache() *fontSourceCache {
 	return &fontSourceCache{candidates: make(map[string][]fontSource), directories: make(map[string][]fontFileCandidate), filesystems: make(map[int][]fontFileCandidate), data: make(map[fontSourceKey]fontSourceData)}
-}
-
-// systemFontIndex 串行初始化系统字体索引，不注册绘图后端
-var systemFontIndex struct {
-	sync.Mutex
-	fonts *font.SystemFonts
 }
 
 // readFontSource 读取并拆出独立字体，保留集合中的名称和样式选择

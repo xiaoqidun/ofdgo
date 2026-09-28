@@ -21,6 +21,36 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// pdfMeshVertex 保存局部毫米坐标及原曲面参数
+type pdfMeshVertex struct {
+	point pdfgo.Point
+	u, v  float64
+}
+
+// pdfMeshTriangle 保存按输出精度细分的曲面网格
+type pdfMeshTriangle struct {
+	vertices [3]pdfMeshVertex
+	patch    int
+}
+
+// pdfMeshKey 区分网格及其输出混合空间
+type pdfMeshKey struct {
+	mesh  *pdfgo.MeshGradient
+	space *pdfgo.ColorSpace
+}
+
+// pdfMeshPixel 保存抗锯齿覆盖率与源空间合成分量
+type pdfMeshPixel struct {
+	values [4]float64
+	shape  float64
+}
+
+// pdfMeshSample 保存采样点参数，patch为一基编号，零表示未覆盖
+type pdfMeshSample struct {
+	u, v  float64
+	patch int
+}
+
 // meshColor 将线性三角网格映射为OFD高洛德渐变，保留顶点和覆盖顺序
 // 入参: paint PDF网格画刷, box 对象边界
 // 返回: *FillColor OFD渐变, error 不可线性表达的颜色或坐标错误
@@ -57,36 +87,6 @@ func (p *pdfImporter) meshColor(paint pdfgo.Paint, box Box) (*FillColor, error) 
 	color.Value = ""
 	color.GouraudShd = shading
 	return color, nil
-}
-
-// pdfMeshVertex 保存局部毫米坐标及原曲面参数
-type pdfMeshVertex struct {
-	point pdfgo.Point
-	u, v  float64
-}
-
-// pdfMeshTriangle 保存按输出精度细分的曲面网格
-type pdfMeshTriangle struct {
-	vertices [3]pdfMeshVertex
-	patch    int
-}
-
-// pdfMeshKey 区分网格及其输出混合空间
-type pdfMeshKey struct {
-	mesh  *pdfgo.MeshGradient
-	space *pdfgo.ColorSpace
-}
-
-// pdfMeshPixel 保存抗锯齿覆盖率与源空间合成分量
-type pdfMeshPixel struct {
-	values [4]float64
-	shape  float64
-}
-
-// pdfMeshSample 保存采样点参数，patch为一基编号，零表示未覆盖
-type pdfMeshSample struct {
-	u, v  float64
-	patch int
 }
 
 // meshTriangles 按曲面二阶导数界细分，将几何误差控制在输出像素的十六分之一内
