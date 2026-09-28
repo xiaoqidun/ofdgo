@@ -65,6 +65,21 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			continue
 		}
 		dict := annotation.Dictionary
+		if annotation.Subtype == "Text" {
+			value, err := p.reader.Resolve(dict["Open"])
+			if err != nil {
+				return err
+			}
+			if value != nil && value != pdfgo.Boolean(false) && value != pdfgo.Boolean(true) {
+				return fmt.Errorf("invalid PDF text annotation open state")
+			}
+			if value == pdfgo.Boolean(true) {
+				if strict {
+					return &pdfgo.UnsupportedError{Feature: "initially open text annotation"}
+				}
+				p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF text annotation open state retained as annotation parameter"})
+			}
+		}
 		popupObject := dict["Popup"]
 		if annotation.Subtype == "Popup" {
 			popupObject = dict

@@ -81,6 +81,13 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 		p.compositeNodes = stamp.compositeNodes
 	}
 	converted := Annotation{Type: pdfAnnotationType(annotation.Subtype), Subtype: string(annotation.Subtype), Appearance: Appearance{Boundary: pdfBoundary(box), Objects: stamp.objects}}
+	if annotation.Subtype == "Text" {
+		value, err := p.reader.Resolve(annotation.Dictionary["Open"])
+		if err != nil {
+			return err
+		}
+		converted.Parameters = &AnnotationParameters{Parameter: []AnnotationParameter{{Name: "PDF.Text.Open", Value: strconv.FormatBool(value == pdfgo.Boolean(true))}}}
+	}
 	popupObject := annotation.Dictionary["Popup"]
 	if annotation.Subtype == "Popup" {
 		popupObject = annotation.Dictionary
@@ -90,10 +97,13 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 		if err != nil {
 			return err
 		}
-		converted.Parameters = &AnnotationParameters{Parameter: []AnnotationParameter{
+		if converted.Parameters == nil {
+			converted.Parameters = &AnnotationParameters{}
+		}
+		converted.Parameters.Parameter = append(converted.Parameters.Parameter, []AnnotationParameter{
 			{Name: "PDF.Popup.Open", Value: strconv.FormatBool(popup.Open)},
 			{Name: "PDF.Popup.Rect", Value: fmt.Sprintf("%g %g %g %g", popup.Rect.XMin, popup.Rect.YMin, popup.Rect.XMax, popup.Rect.YMax)},
-		}}
+		}...)
 	}
 	if len(actions) != 0 {
 		region, err := NewShape(ShapeRectangle, Box{W: box.W, H: box.H})
@@ -120,8 +130,8 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 		visible := false
 		converted.Visible = &visible
 	}
-	converted.NoZoom = flags&8 != 0
-	converted.NoRotate = flags&16 != 0
+	converted.NoZoom = flags&8 != 0 || annotation.Subtype == "Text"
+	converted.NoRotate = flags&16 != 0 || annotation.Subtype == "Text"
 	if value := annotation.Dictionary["T"]; value != nil {
 		resolved, err := p.reader.Resolve(value)
 		if err != nil {
@@ -203,7 +213,7 @@ func pdfAnnotationType(subtype pdfgo.Name) string {
 		return "Watermark"
 	case "Highlight", "Underline", "Squiggly", "StrikeOut":
 		return "Highlight"
-	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Popup", "Widget":
+	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Popup", "Widget", "PrinterMark", "TrapNet":
 		return "Path"
 	}
 	return ""
