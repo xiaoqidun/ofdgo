@@ -245,15 +245,11 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	if shouldFill {
 		fillPaint, shadingClip, fillView := resolveShdPaint(ctx, style.fillPaint)
 		fillClip := intersectClipPath(clipPath, shadingClip)
-		fp := p
-		_, repeat := fillPaint.(*repeatAxialGradient)
-		if fillClip != nil || repeat {
-			paths := canvas.Paths(p.Copy().Split())
-			for _, path := range paths {
-				path.Close()
-			}
-			fp = paths.Merge()
+		paths := canvas.Paths(p.Copy().Split())
+		for _, path := range paths {
+			path.Close()
 		}
+		fp := paths.Merge()
 		fillRule := canvas.NonZero
 		if obj.Rule == "Even-Odd" {
 			fillRule = canvas.EvenOdd

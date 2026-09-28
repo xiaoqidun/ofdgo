@@ -139,13 +139,11 @@ func (c *semanticCompiler) fill(path GeometryPath, paint Paint, evenOdd bool, cl
 	if len(path) == 0 || paint.Kind == PaintNone || paint.Kind == PaintSolid && paint.Color.A == 0 {
 		return nil
 	}
+	path = closedGeometry(path)
 	if !c.measure && paint.Kind != PaintPattern {
 		return c.command(path, paint, evenOdd, clip, shadingMatrix, nil)
 	}
 	var err error
-	if clip != nil || paint.Kind == PaintPattern || paint.Gradient != nil || paint.Mesh != nil {
-		path = closedGeometry(path)
-	}
 	if evenOdd && (clip != nil || paint.Kind == PaintPattern || paint.Gradient != nil || paint.Mesh != nil) {
 		path, err = c.geometry.Normalize(path, true)
 		if err != nil {

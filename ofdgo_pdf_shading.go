@@ -52,7 +52,7 @@ func pdfGradientStopsError(stops []pdfgo.GradientStop, space *pdfgo.ColorSpace) 
 		for i := 1; i < len(stops); i++ {
 			a, b := stops[i-1], stops[i]
 			if a.Position != b.Position && a.Values != b.Values {
-				return &pdfgo.UnsupportedError{Feature: "nonlinear ICC gradient conversion"}
+				return &pdfgo.UnsupportedError{Feature: "nonlinear calibrated gradient conversion"}
 			}
 		}
 	}
@@ -69,7 +69,7 @@ func pdfGradientError(paint pdfgo.Paint) error {
 			return &pdfgo.UnsupportedError{Feature: "nonlinear mesh conversion"}
 		}
 		if mesh.Space.Calibrated() && !mesh.Space.SRGBEquivalent() {
-			return &pdfgo.UnsupportedError{Feature: "nonlinear ICC mesh conversion"}
+			return &pdfgo.UnsupportedError{Feature: "nonlinear calibrated mesh conversion"}
 		}
 	}
 	if paint.Axial != nil {
@@ -99,7 +99,7 @@ func (p *pdfImporter) gradientPath(mark pdfgo.PathMark) error {
 		case paint.Mesh != nil:
 			space = paint.Mesh.Space
 		}
-		if paint.CMYK == nil && (space == nil || space.Model != "DeviceCMYK" || space.Calibrated()) {
+		if space != nil && space.Calibrated() || paint.CMYK == nil && (space == nil || space.Model != "DeviceCMYK") {
 			cmyk = false
 			break
 		}

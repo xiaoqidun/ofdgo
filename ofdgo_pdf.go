@@ -315,7 +315,7 @@ func pdfBounds(points []pdfgo.Point) Box {
 // 返回: *FillColor OFD颜色
 func (p *pdfImporter) color(paint pdfgo.Paint) *FillColor {
 	alpha := int(math.Round(paint.Alpha * 255))
-	if paint.CMYK != nil {
+	if paint.CMYK != nil && (paint.Space == nil || !paint.Space.Calibrated()) {
 		if p.cmykSpace == "" {
 			p.cmykSpace = p.editor.nextID()
 			p.editor.resources = append(p.editor.resources, editorResource{space: &ColorSpace{ID: p.cmykSpace, Type: "CMYK", BitsPerComponent: 16}})
