@@ -19,6 +19,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"runtime"
 
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -83,6 +84,7 @@ func (p *pdfImporter) compositingCache() *pdfCompositeCache {
 }
 
 // coverage 复用已编译的覆盖场景，跳过与当前区域无交集的图元
+// 几何编译前让出调度，避免单线程运行时积累已失效的临时对象
 // 入参: node 图元, stroke 是否描边
 // 返回: image.Image 当前区域覆盖或空值, error 编译或渲染错误
 func (c *pdfCompositor) coverage(node pdfCompositeNode, stroke bool) (image.Image, error) {
@@ -95,6 +97,7 @@ func (c *pdfCompositor) coverage(node pdfCompositeNode, stroke bool) (image.Imag
 	key := pdfCompositeKey{path: node.path, text: node.text, image: node.image, stroke: stroke}
 	geometry, ok := c.cache.geometry[key]
 	if !ok {
+		runtime.Gosched()
 		var err error
 		geometry.scene, geometry.box, err = c.importer.compileGroup(func(local *pdfImporter) error { return node.coverage(local, stroke) })
 		if err != nil {

@@ -378,22 +378,6 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 	delete(topDict, 1234)
 	delete(topDict, 15)
 	delete(topDict, 16)
-	topDict[18] = []float64{float64(privSize), 0}
-	var newCFF bytes.Buffer
-	newCFF.Write(data[:hdrSize])
-	newCFF.Write(nameIndexData)
-	dummyDict := make(map[int][]float64)
-	for k, v := range topDict {
-		dummyDict[k] = v
-	}
-	dummyDict[17] = []float64{0}
-	dummyDict[18] = []float64{float64(privSize), 0}
-	dummyTopData := encodeCFFDict(dummyDict)
-	topIdxSize := 2 + 1 + 8 + len(dummyTopData)
-	dataStart := hdrSize + len(nameIndexData) + topIdxSize + len(stringIndexData) + len(globalSubrIndexData)
-	charStringsPos := dataStart
-	privatePos := charStringsPos + len(charStringsData)
-	privateLen := privSize
 	var finalPrivData []byte
 	if len(privDictData) > 0 {
 		pDict := parseCFFDict(privDictData)
@@ -411,41 +395,8 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 			}
 		}
 		finalPrivData = encodeCFFDict(pDict)
-		privateLen = len(finalPrivData)
 	}
-	localSubrsPos := privatePos + privateLen
-	topDict[17] = []float64{float64(charStringsPos)}
-	topDict[18] = []float64{float64(privateLen), float64(privatePos)}
-	finalTopData := encodeCFFDict(topDict)
-	topIndex := encodeCFFIndex([]([]byte){finalTopData})
-	newCFF.Reset()
-	newCFF.Write(data[:hdrSize])
-	newCFF.Write(nameIndexData)
-	newCFF.Write(topIndex)
-	newCFF.Write(stringIndexData)
-	newCFF.Write(globalSubrIndexData)
-	if newCFF.Len() != dataStart {
-		diff := newCFF.Len() - dataStart
-		charStringsPos += diff
-		privatePos += diff
-		localSubrsPos += diff
-		topDict[17] = []float64{float64(charStringsPos)}
-		topDict[18] = []float64{float64(privateLen), float64(privatePos)}
-		finalTopData = encodeCFFDict(topDict)
-		topIndex = encodeCFFIndex([]([]byte){finalTopData})
-		newCFF.Reset()
-		newCFF.Write(data[:hdrSize])
-		newCFF.Write(nameIndexData)
-		newCFF.Write(topIndex)
-		newCFF.Write(stringIndexData)
-		newCFF.Write(globalSubrIndexData)
-	}
-	newCFF.Write(charStringsData)
-	newCFF.Write(finalPrivData)
-	if len(localSubrData) > 0 {
-		newCFF.Write(localSubrData)
-	}
-	return newCFF.Bytes(), nil
+	return encodeSanitizedCFF(data[:hdrSize], nameIndexData, topDict, stringIndexData, globalSubrIndexData, charStringsData, finalPrivData, localSubrData), nil
 }
 
 // normalizeCFFPrivate 移除旧版CFF中不生效的缺省字段，拒绝需要额外解释的取值
@@ -508,48 +459,35 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 		return nil, err
 	}
 	finalPrivData := encodeCFFDict(privateDict)
-	privateLen := len(finalPrivData)
 	charStringsData := encodeCFFIndex(inlined)
-	topDict[18] = []float64{float64(privateLen), 0}
-	var newCFF bytes.Buffer
-	dummyDict := make(cffDict)
-	for k, v := range topDict {
-		dummyDict[k] = v
+	return encodeSanitizedCFF(data[:hdrSize], nameIndexData, topDict, stringIndexData, globalSubrIndexData, charStringsData, finalPrivData, nil), nil
+}
+
+// encodeSanitizedCFF 按字典编码长度收敛偏移并组装规范化字体
+// 入参: header 头部, names 名称索引, dict 顶层字典, strings 字符串索引, globals 全局子程序索引
+// 入参: chars 字形索引, private 私有字典, locals 局部子程序索引
+// 返回: []byte CFF字体数据
+func encodeSanitizedCFF(header, names []byte, dict cffDict, strings, globals, chars, private, locals []byte) []byte {
+	dict[17] = []float64{0}
+	dict[18] = []float64{float64(len(private)), 0}
+	prefix := len(header) + len(names) + len(strings) + len(globals)
+	var top []byte
+	for {
+		top = encodeCFFIndex([][]byte{encodeCFFDict(dict)})
+		charOffset := prefix + len(top)
+		privateOffset := charOffset + len(chars)
+		if dict[17][0] == float64(charOffset) && dict[18][1] == float64(privateOffset) {
+			break
+		}
+		dict[17][0] = float64(charOffset)
+		dict[18][1] = float64(privateOffset)
 	}
-	dummyDict[17] = []float64{0}
-	dummyDict[18] = []float64{float64(privateLen), 0}
-	dummyTopData := encodeCFFDict(dummyDict)
-	topIdxSize := 2 + 1 + 8 + len(dummyTopData)
-	dataStart := hdrSize + len(nameIndexData) + topIdxSize + len(stringIndexData) + len(globalSubrIndexData)
-	charStringsPos := dataStart
-	privatePos := charStringsPos + len(charStringsData)
-	topDict[17] = []float64{float64(charStringsPos)}
-	topDict[18] = []float64{float64(privateLen), float64(privatePos)}
-	finalTopData := encodeCFFDict(topDict)
-	topIndex := encodeCFFIndex([][]byte{finalTopData})
-	newCFF.Write(data[:hdrSize])
-	newCFF.Write(nameIndexData)
-	newCFF.Write(topIndex)
-	newCFF.Write(stringIndexData)
-	newCFF.Write(globalSubrIndexData)
-	if newCFF.Len() != dataStart {
-		diff := newCFF.Len() - dataStart
-		charStringsPos += diff
-		privatePos += diff
-		topDict[17] = []float64{float64(charStringsPos)}
-		topDict[18] = []float64{float64(privateLen), float64(privatePos)}
-		finalTopData = encodeCFFDict(topDict)
-		topIndex = encodeCFFIndex([][]byte{finalTopData})
-		newCFF.Reset()
-		newCFF.Write(data[:hdrSize])
-		newCFF.Write(nameIndexData)
-		newCFF.Write(topIndex)
-		newCFF.Write(stringIndexData)
-		newCFF.Write(globalSubrIndexData)
+	var out bytes.Buffer
+	out.Grow(prefix + len(top) + len(chars) + len(private) + len(locals))
+	for _, part := range [][]byte{header, names, top, strings, globals, chars, private, locals} {
+		out.Write(part)
 	}
-	newCFF.Write(charStringsData)
-	newCFF.Write(finalPrivData)
-	return newCFF.Bytes(), nil
+	return out.Bytes()
 }
 
 // parseCFFAndCountGlyphs 解析CFF头部并统计字形数量

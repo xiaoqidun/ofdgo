@@ -201,7 +201,7 @@ func (CanvasBackend) Combine(left, right GeometryPath, operation GeometryOperati
 	return *geometryFromCanvasPath(result), nil
 }
 
-// Stroke 将绝对长度虚线与描边转换为填充区域，驻点曲线按指定精度展开
+// Stroke 将绝对长度虚线与描边转换为填充区域，曲线按指定精度展开
 // 入参: path 页面路径, options 描边样式
 // 返回: GeometryPath 描边区域, error 样式或路径错误
 func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (GeometryPath, error) {
@@ -223,9 +223,7 @@ func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (GeometryP
 	style.applyLineJoin(options.Join, options.MiterLimit)
 	style.lineCap = pathLineCap(options.Cap, style.lineCap)
 	p = p.Dash(options.DashOffset, options.Dashes...)
-	if path.stationaryEndpoint() {
-		p = p.Flatten(tolerance)
-	}
+	p = p.Flatten(tolerance)
 	p = p.Stroke(options.Width, style.lineCap, style.lineJoin, tolerance)
 	return *geometryFromCanvasPath(p), nil
 }
