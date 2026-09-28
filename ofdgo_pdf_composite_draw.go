@@ -570,23 +570,120 @@ func pdfCompositeOver(backdrop *pdfCompositePixel, source [4]float64, alpha floa
 		return nil
 	}
 	combined := alpha + backdrop.alpha*(1-alpha)
+	nonseparable := mode == "Hue" || mode == "Saturation" || mode == "Color" || mode == "Luminosity"
+	var blend [4]float64
+	if nonseparable {
+		blend = pdfNonseparableBlend(backdrop.values, source, space, mode)
+	}
 	for i := 0; i < space.Components(); i++ {
-		b, s := backdrop.values[i], source[i]
-		if space.Model == "DeviceCMYK" {
-			b, s = 1-b, 1-s
-		}
-		mixed, err := pdfSeparableBlend(b, s, mode)
-		if err != nil {
-			return err
-		}
-		if space.Model == "DeviceCMYK" {
-			mixed = 1 - mixed
+		mixed := blend[i]
+		if !nonseparable {
+			b, s := backdrop.values[i], source[i]
+			if space.Model == "DeviceCMYK" {
+				b, s = 1-b, 1-s
+			}
+			var err error
+			mixed, err = pdfSeparableBlend(b, s, mode)
+			if err != nil {
+				return err
+			}
+			if space.Model == "DeviceCMYK" {
+				mixed = 1 - mixed
+			}
 		}
 		backdrop.values[i] = math.Max(0, math.Min(1, ((1-alpha)*backdrop.alpha*backdrop.values[i]+alpha*((1-backdrop.alpha)*source[i]+backdrop.alpha*mixed))/combined))
 	}
 	backdrop.alpha = combined
 	backdrop.effect = alpha + backdrop.effect*(1-alpha)
 	return nil
+}
+
+// pdfNonseparableBlend 按PDF非分离混合规则计算颜色，CMYK黑版独立取值
+// 入参: b 背景颜色, s 源颜色, space 混合空间, mode 混合模式
+// 返回: [4]float64 混合分量
+func pdfNonseparableBlend(b, s [4]float64, space *pdfgo.ColorSpace, mode pdfgo.Name) [4]float64 {
+	if space.Model == "DeviceGray" {
+		if mode == "Luminosity" {
+			return s
+		}
+		return b
+	}
+	if space.Model == "DeviceCMYK" {
+		for i := 0; i < 3; i++ {
+			b[i], s[i] = 1-b[i], 1-s[i]
+		}
+	}
+	result := b
+	switch mode {
+	case "Hue":
+		result = pdfSetLuminosity(pdfSetSaturation(s, pdfSaturation(b)), pdfLuminosity(b))
+	case "Saturation":
+		result = pdfSetLuminosity(pdfSetSaturation(b, pdfSaturation(s)), pdfLuminosity(b))
+	case "Color":
+		result = pdfSetLuminosity(s, pdfLuminosity(b))
+	case "Luminosity":
+		result = pdfSetLuminosity(b, pdfLuminosity(s))
+	}
+	if space.Model == "DeviceCMYK" {
+		for i := 0; i < 3; i++ {
+			result[i] = 1 - result[i]
+		}
+		result[3] = b[3]
+		if mode == "Luminosity" {
+			result[3] = s[3]
+		}
+	}
+	return result
+}
+
+// pdfLuminosity 计算非分离混合使用的亮度
+// 入参: c 加色分量
+// 返回: float64 亮度
+func pdfLuminosity(c [4]float64) float64 { return .3*c[0] + .59*c[1] + .11*c[2] }
+
+// pdfSaturation 计算非分离混合使用的饱和度
+// 入参: c 加色分量
+// 返回: float64 饱和度
+func pdfSaturation(c [4]float64) float64 {
+	return math.Max(c[0], math.Max(c[1], c[2])) - math.Min(c[0], math.Min(c[1], c[2]))
+}
+
+// pdfSetSaturation 保持分量顺序并调整饱和度
+// 入参: c 加色分量, saturation 目标饱和度
+// 返回: [4]float64 调整后分量
+func pdfSetSaturation(c [4]float64, saturation float64) [4]float64 {
+	minimum := math.Min(c[0], math.Min(c[1], c[2]))
+	span := pdfSaturation(c)
+	for i := 0; i < 3; i++ {
+		if span == 0 {
+			c[i] = 0
+		} else {
+			c[i] = (c[i] - minimum) * saturation / span
+		}
+	}
+	return c
+}
+
+// pdfSetLuminosity 调整亮度并按PDF ClipColor规则压缩超界分量
+// 入参: c 加色分量, luminosity 目标亮度
+// 返回: [4]float64 调整后分量
+func pdfSetLuminosity(c [4]float64, luminosity float64) [4]float64 {
+	delta := luminosity - pdfLuminosity(c)
+	for i := 0; i < 3; i++ {
+		c[i] += delta
+	}
+	minimum, maximum := math.Min(c[0], math.Min(c[1], c[2])), math.Max(c[0], math.Max(c[1], c[2]))
+	if minimum < 0 {
+		for i := 0; i < 3; i++ {
+			c[i] = luminosity + (c[i]-luminosity)*luminosity/(luminosity-minimum)
+		}
+	}
+	if maximum > 1 {
+		for i := 0; i < 3; i++ {
+			c[i] = luminosity + (c[i]-luminosity)*(1-luminosity)/(maximum-luminosity)
+		}
+	}
+	return c
 }
 
 // pdfSeparableBlend 计算标准可分离混合函数
@@ -644,6 +741,6 @@ func pdfSeparableBlend(b, s float64, mode pdfgo.Name) (float64, error) {
 	case "Exclusion":
 		return b + s - 2*b*s, nil
 	default:
-		return 0, &pdfgo.UnsupportedError{Feature: "nonseparable blend mode " + string(mode)}
+		return 0, &pdfgo.UnsupportedError{Feature: "blend mode " + string(mode)}
 	}
 }
