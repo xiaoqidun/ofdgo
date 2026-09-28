@@ -72,6 +72,7 @@ type pdfCompositeCache struct {
 	images   map[*pdfgo.Image]*pdfgo.ImageComponents
 	masks    map[*pdfgo.SoftMask][]pdfCompositeNode
 	meshes   map[*pdfgo.MeshGradient][]pdfMeshTriangle
+	patterns map[pdfgo.Paint]*pdfCompositePattern
 }
 
 // compositingCache 按需创建单页合成缓存，页面切换时由导入器释放

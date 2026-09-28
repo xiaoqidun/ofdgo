@@ -109,6 +109,17 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 	compatible := overprint && style.OverprintMode == 1 && node.image == nil && space.Model == "DeviceCMYK" && !space.Calibrated() && (paint.CMYK != nil || paint.Space != nil && paint.Space.Model == "DeviceCMYK" && !paint.Space.Calibrated())
 	step := 25.4 / c.importer.rasterDPI
 	uniform := node.image == nil && paint.Axial == nil && paint.Radial == nil && paint.Tiling == nil && paint.Mesh == nil
+	var pattern []pdfCompositePixel
+	if paint.Tiling != nil && (node.image == nil || node.image.Image.ImageMask) {
+		backdrop := pixels
+		if initial != nil {
+			backdrop = initial
+		}
+		pattern, err = c.tiling(paint, backdrop, space)
+		if err != nil {
+			return err
+		}
+	}
 	var mesh []pdfMeshPixel
 	if paint.Mesh != nil {
 		mesh, err = c.mesh(paint.Mesh, space)
@@ -133,7 +144,20 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 				opacity *= mask[index]
 			}
 			var values [4]float64
-			if mesh != nil {
+			if pattern != nil {
+				sample := pattern[index]
+				values = sample.values
+				shape *= sample.shape
+				if sample.shape != 0 {
+					opacity *= sample.alpha / sample.shape
+				}
+				if node.image != nil {
+					point := c.inverse.Apply(pdfgo.Point{X: c.box.X + (float64(x)+.5)*step, Y: c.box.Y + (float64(y)+.5)*step})
+					var alpha float64
+					_, alpha, err = c.imageColor(*node.image, point, space)
+					opacity *= alpha
+				}
+			} else if mesh != nil {
 				values = mesh[index].values
 				shape *= mesh[index].shape
 			} else if uniform {
@@ -442,6 +466,9 @@ func (c *pdfCompositor) imageColor(mark pdfgo.ImageMark, point pdfgo.Point, spac
 		}
 	}
 	if mark.Image.ImageMask {
+		if mark.Style.Fill.Tiling != nil {
+			return [4]float64{}, alpha * (1 - values[0]), nil
+		}
 		color, visible, err := pdfCompositeColor(mark.Style.Fill, mark.Matrix.Apply(point), space, mark.Style.RenderingIntent)
 		if !visible {
 			return color, 0, err
