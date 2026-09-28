@@ -32,6 +32,12 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// pdfImageKey 区分同一图像流在不同渲染意图下的资源
+type pdfImageKey struct {
+	stream *pdfgo.Stream
+	intent pdfgo.Name
+}
+
 // image 转换图像样本，不将整页或其他对象栅格化
 // 入参: mark PDF图像绘制信息
 // 返回: error 错误信息
@@ -59,7 +65,8 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		return &pdfgo.UnsupportedError{Feature: "image color separation overprint"}
 	}
 	source := mark.Image
-	id := p.imageIDs[source.Stream]
+	key := pdfImageKey{stream: source.Stream, intent: source.Intent}
+	id := p.imageIDs[key]
 	if source.ImageMask {
 		id = ""
 	}
@@ -125,9 +132,9 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		}
 		if !source.ImageMask {
 			if p.imageIDs == nil {
-				p.imageIDs = map[*pdfgo.Stream]string{}
+				p.imageIDs = map[pdfImageKey]string{}
 			}
-			p.imageIDs[source.Stream] = id
+			p.imageIDs[key] = id
 		}
 	}
 	return p.appendImage(mark, id)

@@ -390,7 +390,10 @@ func (c *pdfCompositor) mask(mask *pdfgo.SoftMask, inherited *pdfgo.ColorSpace) 
 				return nil, err
 			}
 		}
-		result[i] = mask.Transfer(v)
+		result[i], err = mask.Transfer(v)
+		if err != nil {
+			return nil, err
+		}
 	}
 	c.masks[mask] = result
 	return result, nil
