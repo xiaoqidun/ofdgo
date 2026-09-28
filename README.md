@@ -1,7 +1,7 @@
 # OFDGo [![PkgGoDev](https://pkg.go.dev/badge/github.com/xiaoqidun/ofdgo)](https://pkg.go.dev/github.com/xiaoqidun/ofdgo)
 首个原生、全平台、纯 Go 语言高性能 OFD 引擎
 
-# 在线体验
+# 在线使用
 [OFDGo WebUI](https://ofdgo.aite.me/)，将OFDGo编译为WASM提供服务
 
 # 链接接入
@@ -15,7 +15,7 @@ https://ofdgo.aite.me/#url=<URL编码后的文件地址>
 | `name` | 否 | 文件名称，默认自动获取 |
 | `page` | 否 | 物理页码，默认1，超过总页数取末页 |
 
-参数用`&`连接，参数值需URL编码。跨域访问时，响应头需包含：
+参数用`&`连接，参数值需URL编码。跨域访问时，服务器头需包含：
 
 ```http
 Access-Control-Allow-Origin: https://ofdgo.aite.me
