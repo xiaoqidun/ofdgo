@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto"
 	"encoding/base64"
 	"encoding/xml"
@@ -27,6 +28,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/xiaoqidun/pdfgo"
 )
 
 const (
@@ -61,7 +64,9 @@ type SignatureWriteOptions struct {
 	// ReaderOptions用于打开加密包；Encryption为空时继承阅读器的加密策略
 	ReaderOptions []ReaderOption
 	Encryption    *EncryptionOptions
-	progress      editorProgress
+	// Compression在签名计算前优化图片，已有签名的资源不额外改写
+	Compression CompressionOptions
+	progress    editorProgress
 }
 
 // signatureWriteInfo 写出签名信息，省略数字签名中不存在的印章
@@ -208,11 +213,14 @@ func signatureWriteParts(r *Reader) (map[string][]byte, error) {
 	return r.packageData()
 }
 
-// signatureWritePackage 基于未重新编码的文件字节创建签名
+// signatureWritePackage 完成输出优化后计算签名，不改写已有签名保护的资源
 // 签名目录采用Sign_N兼容OFDRW容器，标识使用独立的sN签章域
 // 入参: parts 独立包文件, options 签署选项
 // 返回: []byte 完整包, error 错误信息
 func signatureWritePackage(parts map[string][]byte, options SignatureWriteOptions) ([]byte, error) {
+	if err := options.Compression.Validate(); err != nil {
+		return nil, err
+	}
 	if options.Mode != SignatureAppend && options.Mode != SignatureReplace {
 		return nil, fmt.Errorf("unsupported signature write mode")
 	}
@@ -226,6 +234,38 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 	doc, err := r.Doc()
 	if err != nil {
 		return nil, err
+	}
+	if options.Compression.Mode != CompressionUnchanged && doc.Signatures == "" {
+		images, err := r.Images(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		var masks map[string]bool
+		if options.Compression.Mode == CompressionLossy {
+			masks, err = r.compressionMaskFiles(context.Background(), images)
+			if err != nil {
+				return nil, err
+			}
+		}
+		seen := make(map[string]bool)
+		for i, img := range images {
+			if err := options.progress.report("compress", i, len(images)); err != nil {
+				return nil, err
+			}
+			if seen[img.Location] {
+				continue
+			}
+			seen[img.Location] = true
+			if data, ok := parts[img.Location]; ok {
+				compression := options.Compression
+				if masks[strings.ToLower(cleanPackagePath(img.Location))] {
+					compression.Mode = CompressionLossless
+				}
+				if optimized, err := pdfgo.OptimizeImage(context.Background(), data, compression); err == nil {
+					parts[img.Location] = optimized
+				}
+			}
+		}
 	}
 	if options.Time.IsZero() {
 		options.Time = time.Now()
@@ -358,7 +398,7 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 	if err != nil {
 		return nil, err
 	}
-	output, err := signatureWriteZIP(parts)
+	output, err := signatureWriteZIP(parts, options.Compression)
 	if err != nil {
 		return nil, err
 	}
@@ -477,11 +517,12 @@ func signatureWriteAvailable(parts map[string][]byte, name string) string {
 }
 
 // signatureWriteZIP 写出完整包，不重新编码受保护文件
-// 入参: parts 文件集合
+// 入参: parts 文件集合, compression 封装压缩配置
 // 返回: []byte 包字节, error 错误信息
-func signatureWriteZIP(parts map[string][]byte) ([]byte, error) {
+func signatureWriteZIP(parts map[string][]byte, compression CompressionOptions) ([]byte, error) {
 	var out bytes.Buffer
 	w := zip.NewWriter(&out)
+	configureArchive(w, compression)
 	names := make([]string, 0, len(parts))
 	for name := range parts {
 		names = append(names, name)

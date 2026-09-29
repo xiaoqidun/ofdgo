@@ -450,7 +450,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		return 0, err
 	}
 	reader := e.source.reader
-	if len(parts) != 0 || len(removed) != 0 {
+	if len(parts) != 0 || len(removed) != 0 || e.output != nil && e.output.options.Mode != CompressionUnchanged && !e.output.protected {
 		name := "OFD.xml"
 		if file, ok := reader.packageFile(name); ok {
 			name = cleanPackagePath(file.Name)
@@ -500,14 +500,23 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 			}
 			if data, ok := remaining[name]; ok {
 				header := file.FileHeader
-				entry, err := archive.CreateHeader(&header)
-				if err != nil {
-					return output.count, err
-				}
-				if _, err := entry.Write(data); err != nil {
+				if err := e.writeOutputEntry(archive, header, data); err != nil {
 					return output.count, err
 				}
 				delete(remaining, name)
+			} else if e.output != nil && e.output.options.Mode != CompressionUnchanged && file.UncompressedSize64 <= 64<<20 {
+				input, err := file.Open()
+				if err != nil {
+					return output.count, err
+				}
+				data, err := io.ReadAll(imageInput{ReadCloser: input, context: e.output.ctx})
+				input.Close()
+				if err != nil {
+					return output.count, err
+				}
+				if err := e.writeOutputEntry(archive, file.FileHeader, data); err != nil {
+					return output.count, err
+				}
 			} else {
 				input, err := file.OpenRaw()
 				if err != nil {
@@ -529,11 +538,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		if strings.HasSuffix(strings.ToLower(name), ".xml") {
 			method = zip.Deflate
 		}
-		entry, err := archive.CreateHeader(&zip.FileHeader{Name: name, Method: method})
-		if err != nil {
-			return output.count, err
-		}
-		if _, err := entry.Write(remaining[name]); err != nil {
+		if err := e.writeOutputEntry(archive, zip.FileHeader{Name: name, Method: method}, remaining[name]); err != nil {
 			return output.count, err
 		}
 	}

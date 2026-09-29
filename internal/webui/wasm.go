@@ -17,7 +17,6 @@
 package webui
 
 import (
-	"archive/zip"
 	"bufio"
 	"bytes"
 	"context"
@@ -440,6 +439,11 @@ func convertFile(args []js.Value) (any, error) {
 			return awaitExport(args[4], progress.Stage, progress.Completed, progress.Total)
 		},
 	}
+	if value := settings.Get("compression"); !value.IsNull() && !value.IsUndefined() {
+		if err := compressionFromJS(value, &options.Compression); err != nil {
+			return nil, err
+		}
+	}
 	fontSources := []fs.FS{ofdgo.NewFontFS(fonts)}
 	if names := settings.Get("fontNames"); !names.IsUndefined() && names.Length() > 0 {
 		fontSources = append(fontSources, ofdgo.NewLazyFontFS(stringsFromJS(names), func(name string) ([]byte, error) {
@@ -454,6 +458,8 @@ func convertFile(args []js.Value) (any, error) {
 		}
 		defer clear(credentials.Password)
 		options.ReaderOptions = append(options.ReaderOptions, ofdgo.WithCredentials(credentials))
+		options.PDF.Password = credentials.Password
+		options.PDF.PasswordUTF8 = true
 	}
 	var format ofdgo.OutputFormat
 	for _, item := range ofdgo.OutputFormats() {
@@ -480,11 +486,11 @@ func convertFile(args []js.Value) (any, error) {
 		return nil, err
 	}
 	source := &browserReaderAt{read: args[0], checkpoint: args[6], size: int64(args[1].Float())}
-	report, err := ofdgo.Convert(context.Background(), source, source.size, writer, options)
+	report, err := ofdgo.Convert(newOutputContext(args[6]), source, source.size, writer, options)
 	if err != nil {
 		return nil, err
 	}
-	if report.Unchanged {
+	if report.Unchanged && report.Bytes == 0 {
 		return report, nil
 	}
 	if err := writer.Flush(); err != nil {
@@ -526,43 +532,29 @@ func loadConversionFont(load js.Value, name string) ([]byte, error) {
 // 入参: args 文件列表、分块读取、分块写出、进度及取消检查
 // 返回: any 输出格式, error 打包错误
 func packFiles(args []js.Value) (any, error) {
-	if len(args) != 5 {
+	if len(args) < 5 {
 		return nil, fmt.Errorf("missing archive arguments")
 	}
 	writer := bufio.NewWriterSize(exportWriter{write: args[2]}, 1<<20)
-	archive := zip.NewWriter(writer)
 	files := args[0]
+	entries := make([]ofdgo.ArchiveFile, files.Length())
 	for i := 0; i < files.Length(); i++ {
-		if err := awaitExport(args[3], i, files.Length()); err != nil {
-			return nil, err
-		}
 		file := files.Index(i)
 		name := file.Get("name").String()
-		if !fs.ValidPath(name) || strings.Contains(name, "\\") {
-			return nil, fmt.Errorf("invalid archive path %q", name)
-		}
-		method := uint16(zip.Deflate)
-		switch strings.ToLower(path.Ext(name)) {
-		case ".ofd", ".pdf", ".png", ".jpg", ".jpeg":
-			method = zip.Store
-		}
-		entry, err := archive.CreateHeader(&zip.FileHeader{Name: name, Method: method})
-		if err != nil {
-			return nil, err
-		}
 		read := args[1].Invoke(i)
 		source := &browserReaderAt{read: read, checkpoint: args[4], size: int64(file.Get("size").Float())}
-		if _, err := io.Copy(entry, io.NewSectionReader(source, 0, source.size)); err != nil {
+		entries[i] = ofdgo.ArchiveFile{Name: name, Source: source, Size: source.size}
+	}
+	options := ofdgo.ArchiveOptions{OnProgress: func(completed, total int) error { return awaitExport(args[3], completed, total) }}
+	if len(args) > 5 && !args[5].IsUndefined() && !args[5].IsNull() {
+		if err := compressionFromJS(args[5], &options.Compression); err != nil {
 			return nil, err
 		}
 	}
-	if err := archive.Close(); err != nil {
+	if _, err := ofdgo.WriteArchive(newOutputContext(args[4]), writer, entries, options); err != nil {
 		return nil, err
 	}
 	if err := writer.Flush(); err != nil {
-		return nil, err
-	}
-	if err := awaitExport(args[3], files.Length(), files.Length()); err != nil {
 		return nil, err
 	}
 	return map[string]any{"mime": "application/zip"}, nil
@@ -961,6 +953,15 @@ func exportSession(args []js.Value) (*Session, int, error) {
 			return nil, 0, err
 		}
 		writerIndex++
+	}
+	if args[writerIndex].Type() == js.TypeObject {
+		if err := compressionFromJS(args[writerIndex], &renderer.Compression); err != nil {
+			return nil, 0, err
+		}
+		writerIndex++
+		if len(args) > writerIndex+1 {
+			renderer.OutputContext = newOutputContext(args[len(args)-1])
+		}
 	}
 	return &session, writerIndex, nil
 }
@@ -4404,6 +4405,11 @@ func saveSigned(args []js.Value) (any, error) {
 	}
 	options := ofdgo.SignatureWriteOptions{Signer: signer, Certificate: certificate, TrustRoots: roots,
 		Intermediates: intermediates, Lock: input.Get("lock").Bool()}
+	if compression := input.Get("compression"); !compression.IsUndefined() && !compression.IsNull() {
+		if err := compressionFromJS(compression, &options.Compression); err != nil {
+			return nil, err
+		}
+	}
 	switch input.Get("mode").String() {
 	case "append":
 		options.Mode = ofdgo.SignatureAppend
@@ -4451,13 +4457,20 @@ func saveSigned(args []js.Value) (any, error) {
 // 返回: any 保存结果, error 错误信息
 func saveDocument(args []js.Value) (any, error) {
 	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being edited")
+		if currentSession == nil {
+			return nil, fmt.Errorf("ofd document is not opened")
+		}
+		editor, err := currentSession.Reader.Editor()
+		if err != nil {
+			return nil, err
+		}
+		return saveEditor(editor, args)
 	}
 	return saveEditor(currentEditor, args)
 }
 
 // saveEditor 统一分块写出及进度取消，加密策略由库层执行
-// 入参: editor 待写出文档, args 写出回调、进度回调和可选页面索引
+// 入参: editor 待写出文档, args 写出回调、进度回调及可选页面索引、压缩配置、取消检查
 // 返回: any 保存结果, error 错误信息
 func saveEditor(editor *ofdgo.Editor, args []js.Value) (any, error) {
 	if len(args) > 1 {
@@ -4466,10 +4479,20 @@ func saveEditor(editor *ofdgo.Editor, args []js.Value) (any, error) {
 	}
 	writer := bufio.NewWriterSize(exportWriter{write: args[0]}, 1<<20)
 	var err error
-	if len(args) > 2 {
-		_, err = editor.WritePagesTo(writer, indexesFromJS(args[2]))
+	var options ofdgo.WriteOptions
+	ctx := context.Background()
+	if len(args) > 3 {
+		if err := compressionFromJS(args[3], &options.Compression); err != nil {
+			return nil, err
+		}
+	}
+	if len(args) > 4 {
+		ctx = newOutputContext(args[4])
+	}
+	if len(args) > 2 && !args[2].IsNull() && !args[2].IsUndefined() {
+		_, err = editor.WritePagesToWithOptions(ctx, writer, indexesFromJS(args[2]), options)
 	} else {
-		_, err = editor.WriteTo(writer)
+		_, err = editor.WriteToWithOptions(ctx, writer, options)
 	}
 	if err != nil {
 		return nil, err
@@ -4478,4 +4501,45 @@ func saveEditor(editor *ofdgo.Editor, args []js.Value) (any, error) {
 		return nil, err
 	}
 	return successResult(map[string]any{"mime": "application/ofd", "label": "OFD"}), nil
+}
+
+// compressionFromJS 读取压缩配置并交给库层校验
+// 入参: value 浏览器配置, options 目标配置
+// 返回: error 配置错误
+func compressionFromJS(value js.Value, options *ofdgo.CompressionOptions) error {
+	if err := json.Unmarshal([]byte(js.Global().Get("JSON").Call("stringify", value).String()), options); err != nil {
+		return err
+	}
+	return options.Validate()
+}
+
+// outputContext 定期让出浏览器线程，将取消请求传入库层压缩循环
+type outputContext struct {
+	context.Context
+	cancel     context.CancelFunc
+	checkpoint js.Value
+	checked    time.Time
+}
+
+// newOutputContext 创建单次串行导出的取消上下文
+// 入参: checkpoint 浏览器取消检查回调
+// 返回: context.Context 导出上下文
+func newOutputContext(checkpoint js.Value) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &outputContext{Context: ctx, cancel: cancel, checkpoint: checkpoint}
+}
+
+// Err 在取消检查间隙处理浏览器消息，不为每个像素触发跨语言回调
+// 返回: error 取消错误
+func (c *outputContext) Err() error {
+	if err := c.Context.Err(); err != nil {
+		return err
+	}
+	if time.Since(c.checked) >= 50*time.Millisecond {
+		c.checked = time.Now()
+		if err := awaitExport(c.checkpoint); err != nil {
+			c.cancel()
+		}
+	}
+	return c.Context.Err()
 }

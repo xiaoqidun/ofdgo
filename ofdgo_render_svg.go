@@ -66,6 +66,9 @@ func (r *Renderer) RenderToSVGWithObjects(page *PageContent, writer io.Writer) (
 // 入参: page 页面内容, writer 输出流, mode 资源封装方式
 // 返回: SVGResources 字体和图片资源, error 输出错误
 func (r *Renderer) renderSVG(page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error) {
+	if err := r.Compression.Validate(); err != nil {
+		return SVGResources{}, err
+	}
 	if r.backends.SVG == nil {
 		return SVGResources{}, fmt.Errorf("svg: %w", ErrBackendUnavailable)
 	}

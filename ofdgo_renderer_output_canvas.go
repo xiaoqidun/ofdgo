@@ -24,6 +24,7 @@ import (
 	"github.com/tdewolff/canvas/renderers/pdf"
 	"github.com/tdewolff/canvas/renderers/ps"
 	"github.com/tdewolff/canvas/renderers/svg"
+	"github.com/xiaoqidun/pdfgo"
 )
 
 // canvasEPSWriter 在EPS头部写入本库制作软件，不改动绘图内容
@@ -48,7 +49,7 @@ func (CanvasBackend) RenderSVG(r *Renderer, page *PageContent, writer io.Writer,
 			return SVGResources{}, err
 		}
 		buffer := bufio.NewWriter(writer)
-		renderer := &svgResourceRenderer{SVG: svg.New(buffer, c.W, c.H, nil), writer: buffer, embeddedFonts: true}
+		renderer := &svgResourceRenderer{SVG: svg.New(buffer, c.W, c.H, nil), renderer: r, writer: buffer, embeddedFonts: true}
 		io.WriteString(buffer, svgCreatorMetadata)
 		io.WriteString(buffer, `<g style="image-orientation:none">`)
 		c.RenderTo(renderer)
@@ -77,7 +78,15 @@ func (CanvasBackend) RenderEPS(r *Renderer, page *PageContent, writer io.Writer)
 	options.Format = ps.EncapsulatedPostScript
 	buffer := bufio.NewWriter(writer)
 	renderer := ps.New(canvasEPSWriter{buffer}, c.W, c.H, &options)
-	c.RenderTo(renderer)
+	if r.Compression.Mode == CompressionUnchanged {
+		c.RenderTo(renderer)
+	} else {
+		optimized := &epsImageRenderer{PS: renderer, writer: buffer, options: r.Compression, ctx: r.outputContext()}
+		c.RenderTo(optimized)
+		if optimized.err != nil {
+			return optimized.err
+		}
+	}
 	if err := renderer.Close(); err != nil {
 		return err
 	}
@@ -109,6 +118,9 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		return err
 	}
 	buf, direct := writer.(*bytes.Buffer)
+	if r.Compression.Mode != CompressionUnchanged {
+		direct = false
+	}
 	if !direct {
 		buf = &bytes.Buffer{}
 	}
@@ -142,6 +154,20 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		return err
 	}
 	data := replacePDFProducer(buf.Bytes()[start:])
+	if r.Compression.Mode != CompressionUnchanged {
+		reader, err := pdfgo.NewReader(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			return err
+		}
+		defer reader.Close()
+		_, err = reader.OptimizeTo(r.outputContext(), writer, pdfgo.OptimizeOptions{Compression: r.Compression, OnProgress: func(_ string, _, _ int) error {
+			if progress != nil {
+				return progress(len(pages), len(pages))
+			}
+			return nil
+		}})
+		return err
+	}
 	if direct {
 		return nil
 	}

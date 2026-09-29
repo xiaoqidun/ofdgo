@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/xiaoqidun/pdfgo"
 )
 
 // OutputFormat 描述文档输出格式，Paged表示逐页文件，Raster表示受DPI控制的位图
@@ -42,8 +44,8 @@ type ConvertProgress struct {
 // ConvertOptions 设置文档转换格式、页码、阅读和渲染选项
 // Input为空时识别源格式，Format为输出格式，Pages使用零基索引，nil表示全部页面
 // PageRange使用一基页码表达式，与Pages互斥，空字符串表示全部页面
-// SkipUnchanged在源格式与目标相同且未选页时不写出数据，不校验或重新生成源文档
-// PDF先转换为OFD对象再输出，PDF选项中的进度回调仍会调用
+// SkipUnchanged仅在未压缩、源格式与目标相同且未选页时不写出数据
+// 整份PDF同格式压缩直接重写PDF对象，其余PDF先转换为OFD对象再输出
 // RendererOptions同时用于PDF局部合成和输出，在PDF.RendererOptions之后应用
 // Backends统一配置转换与输出，优先于PDF和RendererOptions中的后端设置
 // PageOutput仅用于逐页格式，同步调用export写出一页并自行处理提交或回滚；此时output可为nil
@@ -54,6 +56,7 @@ type ConvertOptions struct {
 	Pages           []int
 	PageRange       string
 	SkipUnchanged   bool
+	Compression     CompressionOptions
 	Backends        *RenderBackends
 	ReaderOptions   []ReaderOption
 	RendererOptions []RendererOption
@@ -63,7 +66,7 @@ type ConvertOptions struct {
 }
 
 // ConvertReport 汇总源格式、输出格式、页数、字节数及PDF转换诊断
-// Unchanged表示无需转换或完整OFD原样复制，Bytes仅统计实际输出，不包含调用方额外封装
+// Unchanged表示无需转换或原样交付源文件，Bytes仅统计实际输出，不包含调用方额外封装
 type ConvertReport struct {
 	Input     string          `json:"input"`
 	Format    OutputFormat    `json:"format"`
@@ -101,12 +104,15 @@ func OutputFormats() []OutputFormat {
 }
 
 // Convert 将PDF或OFD转换为指定格式，不关闭调用方的输入和输出
-// 完整OFD另存保持源字节，包括制作软件、签名及加密；选页和跨格式输出重新生成文档
+// 不变模式完整OFD另存保持源字节；选页和跨格式输出重新生成文档，压缩仅作用于输出副本
 // 输入按需随机读取，输出分块写出；解析对象及后端可能缓存资源，不保证恒定内存
 // 出错时报告保留已有诊断，调用方应丢弃未完成输出；只有返回nil才表示转换成功
 // 入参: ctx 取消上下文, source 源数据, size 源字节数, output 输出流, options 转换选项
 // 返回: ConvertReport 转换报告, error 错误信息
 func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writer, options ConvertOptions) (report ConvertReport, err error) {
+	if err = options.Compression.Validate(); err != nil {
+		return report, err
+	}
 	if err = ctx.Err(); err != nil {
 		return report, err
 	}
@@ -173,12 +179,25 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 	if report.Input != "pdf" && report.Input != "ofd" {
 		return report, fmt.Errorf("unsupported input format")
 	}
-	if options.SkipUnchanged && report.Input == format && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
+	if options.SkipUnchanged && options.Compression.Mode == CompressionUnchanged && report.Input == format && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
 		report.Unchanged = true
 		return report, nil
 	}
 	if output == nil && options.PageOutput == nil {
 		return report, fmt.Errorf("missing output writer")
+	}
+	if report.Input == "pdf" && format == "pdf" && options.Compression.Mode != CompressionUnchanged && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
+		pdfReader, openErr := pdfgo.NewReaderWithOptions(source, size, pdfgo.ReaderOptions{Password: options.PDF.Password, PasswordUTF8: options.PDF.PasswordUTF8})
+		if openErr != nil {
+			return report, openErr
+		}
+		defer pdfReader.Close()
+		if pageErr := pdfReader.WalkPages(ctx, func(_ int, _ *pdfgo.Page) error { report.Pages++; return nil }); pageErr != nil {
+			return report, pageErr
+		}
+		result, optimizeErr := pdfReader.OptimizeTo(ctx, output, pdfgo.OptimizeOptions{Compression: options.Compression, Creator: ofdCreator, OnProgress: writeProgress})
+		report.Bytes, report.Unchanged = result.Bytes, result.Preserved
+		return report, optimizeErr
 	}
 	switch report.Input {
 	case "pdf":
@@ -227,7 +246,7 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 	report.Pages = len(indices)
 	writer := convertWriter{context: ctx, writer: output, count: &report.Bytes}
 	if format == "ofd" {
-		if options.Pages == nil && editor == nil {
+		if options.Pages == nil && editor == nil && options.Compression.Mode == CompressionUnchanged {
 			if err = progress("write", 0, 0); err != nil {
 				return report, err
 			}
@@ -243,9 +262,9 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 		}
 		editor.OnWriteProgress = writeProgress
 		if options.Pages == nil {
-			_, err = editor.WriteTo(writer)
+			_, err = editor.WriteToWithOptions(ctx, writer, WriteOptions{Compression: options.Compression})
 		} else {
-			_, err = editor.WritePagesTo(writer, indices)
+			_, err = editor.WritePagesToWithOptions(ctx, writer, indices, WriteOptions{Compression: options.Compression})
 		}
 		return report, err
 	}
@@ -260,6 +279,8 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 		defer reader.Close()
 	}
 	renderer := NewRenderer(reader, options.RendererOptions...)
+	renderer.Compression = options.Compression
+	renderer.OutputContext = ctx
 	if options.Backends != nil {
 		WithRenderBackends(*options.Backends)(renderer)
 	}

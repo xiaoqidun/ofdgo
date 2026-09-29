@@ -20,7 +20,7 @@ const STATUS = {
 const wasmRequests = new Map();
 const metaContents = new WeakMap();
 const batch = { items: [], formats: [], running: false, canceled: false, worker: null, requests: new Map(), sequence: 0, activeID: 0, progressTime: 0 };
-const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Destination", "DPIRow", "DPI", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
+const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "Destination", "DPIRow", "DPI", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
 
 let wasmPromise = null;
 let remoteDownload = null;
@@ -403,6 +403,8 @@ const el = {
 	continuousButton: document.querySelector("#continuousButton"),
 	annotationButton: document.querySelector("#annotationButton"),
 	imageDPI: document.querySelector("#imageDPI"),
+	outputCompression: document.querySelector("#outputCompression"),
+	compressionValue: document.querySelector("#compressionValue"),
 	dpiValue: document.querySelector("#dpiValue"),
 	formatValue: document.querySelector("#formatValue"),
 	exportFormat: document.querySelector("#exportFormat"),
@@ -1250,6 +1252,10 @@ document.addEventListener("cut", copySelection);
 el.viewerPanel.addEventListener("paste", pasteEditorContent);
 document.addEventListener("selectionchange", syncSelection);
 el.exportFormat.addEventListener("change", () => updateDPIControl());
+el.outputCompression.addEventListener("change", () => {
+	el.compressionValue.textContent = el.outputCompression.selectedOptions[0].textContent;
+	el.compressionValue.dataset.short = ["原", "无", "有"][Number(el.outputCompression.value)];
+});
 el.exportPageButton.addEventListener("click", () => exportFile(false));
 el.exportButton.addEventListener("click", () => openExportPanel());
 el.exportCancel.addEventListener("click", () => el.exportPanel.close());
@@ -4640,6 +4646,7 @@ async function signDocument(event) {
 			pages:el.signPages.value.trim(), placement:el.signPlacement.value,
 			x:Number(el.signX.value), y:Number(el.signY.value), width:Number(el.signWidth.value), height:Number(el.signHeight.value),
 			mode:el.signMode.value, lock:el.signLock.checked,
+			compression: { mode: Number(el.outputCompression.value) || 0 },
 		};
 		el.signKey.value = "";
 		if (openSeq !== state.openSeq || state.signCanceled || !el.signPanel.open) return;
@@ -4842,7 +4849,8 @@ function renderBatchList() {
 }
 
 function updateBatchControls() {
-	for (const name of ["Add", "Clear", "Format", "Destination", "DPI"]) batchElements[name].disabled = batch.running;
+	for (const name of ["Add", "Clear", "Format", "Compression", "Destination", "DPI"]) batchElements[name].disabled = batch.running;
+	batchElements.Compression.disabled ||= (batch.items.length ? batch.items : [null]).every(item => (item?.format || batchElements.Format.value) === "txt");
 	batchElements.Clear.disabled ||= !batch.items.length;
 	batchElements.Start.disabled = batch.running || !batch.items.length || !batch.formats.length;
 	batchElements.Start.hidden = batch.running;
@@ -4957,12 +4965,13 @@ async function runBatch() {
 	if (!defaultFormat) return;
 	const pageRange = item => item.pages.trim() === "全部" ? "" : item.pages.trim();
 	const dpi = Number(batchElements.DPI.value);
+	const compression = { mode: Number(batchElements.Compression.value) || 0 };
 	const archive = batchElements.Destination.value === "archive";
 	const backend = state.renderBackend;
 	const fontKey = [fontManager.permission, fontManager.records().map(font => [font.id, font.name, font.enabled, font.checksum])];
 	for (const item of batch.items) {
 		const format = batch.formats.find(format => format.value === (item.format || defaultFormat.value));
-		const key = JSON.stringify([format.value, pageRange(item), batchUsesDPI(item) ? dpi : 0, archive, backend, fontKey]);
+		const key = JSON.stringify([format.value, pageRange(item), batchUsesDPI(item) ? dpi : 0, archive, backend, fontKey, compression]);
 		if (item.settingsKey !== key) {
 			item.status = "pending";
 			item.text = "待转";
@@ -5015,7 +5024,7 @@ async function runBatch() {
 			const outputName = () => (format.paged ? unique : `${unique}.${format.extension}`).toLowerCase();
 			for (let suffix = 2; archive && names.has(outputName()); suffix++) unique = `${base} (${suffix})`;
 			names.add(outputName());
-			const options = { format: format.value, pages: pageRange(item), dpi, backend, archive, base: unique, credentials: null,
+			const options = { format: format.value, pages: pageRange(item), dpi, backend, archive, compression, base: unique, credentials: null,
 				fontNames: [...batch.localFonts.keys()] };
 			try {
 				for (;;) {
@@ -5023,19 +5032,21 @@ async function runBatch() {
 						const result = await batchCall("ofdgoConvertFile", [item.file, options, fonts, destination], progress => batchProgress(item, position, jobs.length, progress));
 						for (const file of result.files) entries.push(file);
 						item.details = (result.pdf?.Warnings || []).map(warning => `${warning.Page ? `第${warning.Page}页：` : ""}${warning.Message}`);
-						if (result.unchanged) {
+						if (result.unchanged && !result.bytes) {
 							batchStatus(item, "unchanged", "原样");
 							item.details = ["无需转换，源文件未改动"];
 						} else batchStatus(item, archive ? "ready" : "done", archive ? "待存" : "完成");
 						break;
 					} catch (err) {
-						if (batch.canceled || !["credentialsRequired", "invalidCredentials"].includes(err.code)) throw err;
+						if (batch.canceled || !["credentialsRequired", "invalidCredentials", "pdfPassword"].includes(err.code)) throw err;
+						const code = err.code === "pdfPassword" ? options.credentials ? "invalidCredentials" : "credentialsRequired" : err.code;
 						options.credentials?.password?.fill(0);
 						options.credentials?.key?.fill(0);
 						options.credentials?.keyPassword?.fill(0);
-						options.credentials = await requestCredentials(err.code, state.openSeq);
+						options.credentials = await requestCredentials(code, state.openSeq, err.code === "pdfPassword");
 						if (!options.credentials) throw new DOMException("已取消解锁", "AbortError");
-						if (!window.confirm("转换结果将不保留原加密，是否继续？")) throw new DOMException("已取消转换", "AbortError");
+						const preservesEncryption = err.code === "pdfPassword" && format.value === "pdf" && compression.mode !== 0 && !options.pages;
+						if (!preservesEncryption && !window.confirm("转换结果将不保留原加密，是否继续？")) throw new DOMException("已取消转换", "AbortError");
 					}
 				}
 			} catch (err) {
@@ -5051,7 +5062,7 @@ async function runBatch() {
 			batchElements.Progress.value = position + 1;
 		}
 		if (archive && entries.length && !batch.canceled) {
-			const result = await batchCall("ofdgoPackFiles", [entries, zipFile], progress => batchProgress(null, 0, 1, progress));
+			const result = await batchCall("ofdgoPackFiles", [entries, zipFile, compression], progress => batchProgress(null, 0, 1, progress));
 			if (result.blob) downloadBytes(result.blob, "application/zip", "转换结果.zip");
 			packed = true;
 			for (const item of jobs) if (item.status === "ready") batchStatus(item, "done", "完成");
@@ -5085,6 +5096,8 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 		return;
 	}
 	const saving = value === "ofd";
+	const compression = { mode: Number(el.outputCompression.value) || 0 };
+	const outputOptions = compression.mode ? [compression] : [];
 	if (saving && !state.editorInfo && !state.ofdBytes && !encryption) {
 		return;
 	}
@@ -5126,12 +5139,12 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			delete encryption.recipientFiles;
 			if (openSeq !== state.openSeq) return;
 		}
-		const readingSave = saving && !state.editorInfo && !encryption && indices === null;
+		const readingSave = saving && !state.editorInfo && !encryption && indices === null && compression.mode === 0;
 		const result = readingSave
 			? { label: "OFD", size: state.ofdBytes.byteLength, mime, blob: state.ofdBytes }
-			: encryption ? await callWASM("ofdgoSaveEncrypted", indices, encryption, file) : saving ? await callWASM("ofdgoSaveDocument", indices, file) : whole
-			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, state.renderBackend, file)
-			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, state.renderBackend, file);
+			: encryption ? await callWASM("ofdgoSaveEncrypted", indices, encryption, ...outputOptions, file) : saving ? await callWASM("ofdgoSaveDocument", indices, ...outputOptions, file) : whole
+			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, state.renderBackend, ...outputOptions, file)
+			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, state.renderBackend, ...outputOptions, file);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -7925,6 +7938,7 @@ function updateControls() {
 	el.fitHeightButton.toggleAttribute("aria-pressed", hasDoc && state.fitMode === "height");
 	updateAnnotationButton();
 	el.exportFormat.disabled = !hasDoc || state.exporting || !state.exportFormats.length;
+	el.outputCompression.disabled = !hasDoc || state.exporting;
 	el.exportPageButton.disabled = !hasDoc || state.exporting || !state.exportFormats.length;
 	el.exportButton.disabled = !hasDoc || state.exporting || !state.exportFormats.length;
 	updateDPIControl();

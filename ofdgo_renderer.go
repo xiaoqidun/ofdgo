@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"context"
 	"image"
 	"io/fs"
 )
@@ -25,9 +26,12 @@ import (
 // OnPageText可选，接收页面绘制时同步提取的文字，不包含图案和签名外观
 // OnExportProgress可选，同步回报文档导出的已处理页数及总页数，返回错误则停止，页数完成不代表写入成功
 // TransparentBackground关闭页面白底，供嵌套图案和印章保持透明背景
+// Compression仅控制导出编码，OutputContext可取消输出压缩，nil使用后台上下文
 type Renderer struct {
 	Reader                *Reader
 	DPI                   float64
+	Compression           CompressionOptions
+	OutputContext         context.Context
 	RenderAnnotations     bool
 	OnPageText            func(*PageContent, *PageText)
 	OnExportProgress      func(completed, total int) error

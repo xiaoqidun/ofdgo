@@ -29,6 +29,7 @@ import (
 	"github.com/tdewolff/canvas"
 	canvasimage "github.com/tdewolff/canvas/image"
 	"github.com/tdewolff/canvas/renderers/svg"
+	"github.com/xiaoqidun/pdfgo"
 )
 
 // svgCreatorMetadata 记录SVG制作软件，不参与页面绘制
@@ -57,7 +58,7 @@ type svgObjectGroup struct {
 	composite bool
 }
 
-// RenderImage 绘制图片，分离资源时保持原始编码、尺寸和变换
+// RenderImage 按输出策略编码图片，分离资源时保持尺寸和变换
 // 入参: img 图片对象, m 变换矩阵
 func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 	name, ok := s.imageNames[img]
@@ -73,6 +74,16 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 				return
 			}
 			resource.Data = buffer.Bytes()
+		}
+		if s.renderer != nil && s.renderer.Compression.Mode != CompressionUnchanged {
+			data, err := pdfgo.OptimizeImage(s.renderer.outputContext(), resource.Data, s.renderer.Compression)
+			if err != nil {
+				if s.err = s.renderer.outputContext().Err(); s.err != nil {
+					return
+				}
+			} else {
+				resource.Data = data
+			}
 		}
 		if s.imageNames != nil {
 			name = fmt.Sprintf("ofdgo-image-%x", sha256.Sum256(resource.Data))

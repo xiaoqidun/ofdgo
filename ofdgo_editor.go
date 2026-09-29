@@ -64,6 +64,7 @@ type Editor struct {
 	removedPages    map[string]bool
 	outlines        []byte
 	encryption      *encryptionState
+	output          *outputOptimization
 }
 
 // editorResource 文档内嵌资源

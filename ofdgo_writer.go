@@ -114,6 +114,9 @@ func (e *Editor) WritePagesTo(writer io.Writer, indexes []int) (int64, error) {
 	if _, err := selected.ImportPagesWithOptions(reader, positions, 0, PageImportOptions{Outlines: true, OnProgress: e.OnWriteProgress}); err != nil {
 		return 0, err
 	}
+	if e.output != nil {
+		return selected.WriteToWithOptions(e.output.ctx, writer, WriteOptions{Compression: e.output.options})
+	}
 	return selected.WriteTo(writer)
 }
 
@@ -174,12 +177,7 @@ func (e *Editor) writePlaintext(writer io.Writer) (int64, error) {
 		if compressed {
 			method = zip.Store
 		}
-		entry, err := archive.CreateHeader(&zip.FileHeader{Name: name, Method: method})
-		if err != nil {
-			return err
-		}
-		_, err = entry.Write(data)
-		return err
+		return e.writeOutputEntry(archive, zip.FileHeader{Name: name, Method: method}, data)
 	}, progress)
 	if err == nil {
 		err = archive.Close()

@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -26,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/xiaoqidun/pdfgo"
 	"golang.org/x/image/draw"
 )
 
@@ -104,6 +106,7 @@ func (r *Renderer) RenderToZIP(writer io.Writer, format string, indices ...int) 
 		return err
 	}
 	archive := zip.NewWriter(writer)
+	configureArchive(archive, r.Compression)
 	method := zip.Deflate
 	if extension == "png" || extension == "jpg" {
 		method = zip.Store
@@ -194,6 +197,9 @@ func (r *Renderer) RenderToImage(page *PageContent) (image.Image, error) {
 // 入参: page 页面内容, writer 输出流
 // 返回: error 错误信息
 func (r *Renderer) RenderToPNG(page *PageContent, writer io.Writer) error {
+	if err := r.Compression.Validate(); err != nil {
+		return err
+	}
 	img, err := r.RenderToImage(page)
 	if err != nil {
 		return err
@@ -204,13 +210,23 @@ func (r *Renderer) RenderToPNG(page *PageContent, writer io.Writer) error {
 	copy(chunk[4:], "tEXt")
 	copy(chunk[8:], text)
 	binary.BigEndian.PutUint32(chunk[len(chunk)-4:], crc32.ChecksumIEEE(chunk[4:len(chunk)-4]))
-	return png.Encode(&imageMetadataWriter{writer: writer, skip: 33, data: chunk}, img)
+	if r.Compression.Mode == CompressionUnchanged {
+		return png.Encode(&imageMetadataWriter{writer: writer, skip: 33, data: chunk}, img)
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&imageMetadataWriter{writer: &encoded, skip: 33, data: chunk}, img); err != nil {
+		return err
+	}
+	return r.writeCompressedImage(writer, encoded.Bytes())
 }
 
 // RenderToJPEG 渲染为白底JPEG，像素尺寸由DPI决定
 // 入参: page 页面内容, writer 输出流, options 编码选项，nil使用标准库默认值
 // 返回: error 错误信息
 func (r *Renderer) RenderToJPEG(page *PageContent, writer io.Writer, options *jpeg.Options) error {
+	if err := r.Compression.Validate(); err != nil {
+		return err
+	}
 	img, err := r.RenderToImage(page)
 	if err != nil {
 		return err
@@ -220,7 +236,26 @@ func (r *Renderer) RenderToJPEG(page *PageContent, writer io.Writer, options *jp
 	segment[0], segment[1] = 0xff, 0xe1
 	binary.BigEndian.PutUint16(segment[2:], uint16(len(metadata)+2))
 	copy(segment[4:], metadata)
-	return jpeg.Encode(&imageMetadataWriter{writer: writer, skip: 2, data: segment}, fillWhiteBackground(img), options)
+	if r.Compression.Mode == CompressionUnchanged {
+		return jpeg.Encode(&imageMetadataWriter{writer: writer, skip: 2, data: segment}, fillWhiteBackground(img), options)
+	}
+	if r.Compression.Mode == CompressionLossy {
+		quality := jpeg.DefaultQuality
+		if options != nil {
+			quality = max(1, min(100, options.Quality))
+		}
+		options = &jpeg.Options{Quality: min(quality, r.Compression.ImageQuality())}
+	}
+	var encoded bytes.Buffer
+	if err := jpeg.Encode(&imageMetadataWriter{writer: &encoded, skip: 2, data: segment}, fillWhiteBackground(img), options); err != nil {
+		return err
+	}
+	optimized, err := pdfgo.OptimizeJPEG(r.outputContext(), encoded.Bytes())
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(writer, bytes.NewReader(optimized))
+	return err
 }
 
 // RenderToSVG 渲染为SVG
@@ -247,6 +282,9 @@ func (r *Renderer) RenderToPDF(page *PageContent, writer io.Writer) error {
 // 入参: page 页面内容, writer 输出流
 // 返回: error 错误信息
 func (r *Renderer) RenderToEPS(page *PageContent, writer io.Writer) error {
+	if err := r.Compression.Validate(); err != nil {
+		return err
+	}
 	if r.backends.EPS == nil {
 		return fmt.Errorf("eps: %w", ErrBackendUnavailable)
 	}
@@ -367,6 +405,9 @@ func fillWhiteBackground(img image.Image) image.Image {
 // 入参: pages 页面列表, writer 输出流, progress 页面处理进度
 // 返回: error 错误信息
 func (r *Renderer) renderPDFPages(pages []RenderDocumentPage, writer io.Writer, progress func(int, int) error) error {
+	if err := r.Compression.Validate(); err != nil {
+		return err
+	}
 	if r.backends.PDF == nil {
 		return fmt.Errorf("pdf: %w", ErrBackendUnavailable)
 	}

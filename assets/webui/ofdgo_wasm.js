@@ -120,12 +120,12 @@ async function handleBatchMessage({ id, name, args }) {
 				(action, pageName, done) => boundary(action, pageName).then(() => finish(done), err => finish(done, err)),
 				done => finish(done), fonts, (name, done) => requestFont(id, signal, name, done));
 		} else {
-			const [entries, handle] = args;
+			const [entries, handle, compression] = args;
 			if (handle) output = await handle.createWritable();
 			payload = await globalThis.ofdgoPackFiles(entries.map(entry => ({ name: entry.name, size: entry.file.size })),
 				index => read(entries[index].file), write,
 				(completed, total, done) => { self.postMessage({ id, type: "conversion", phase: "pack", completed, total }); finish(done); },
-				done => finish(done));
+				done => finish(done), compression);
 		}
 		signal.throwIfAborted();
 		const result = typeof payload === "string" ? JSON.parse(payload) : payload;
@@ -134,7 +134,7 @@ async function handleBatchMessage({ id, name, args }) {
 			if (output) { await output.close(); output = null; }
 			else result.data.blob = new Blob(chunks, { type: "application/zip" });
 		} else {
-			if (result.data.unchanged) {
+			if (result.data.unchanged && !result.data.bytes) {
 				if (output) { await output.abort(); output = null; }
 				if (root && created) { await root.removeEntry(created, { recursive: true }); created = null; }
 				files = [];
@@ -200,6 +200,7 @@ async function handleMessage({ id, name, args }) {
 				if (converting) args.push((name, done) => requestFont(id, signal, name, done));
 			} else {
 				const file = args.pop();
+				const compression = saving && name !== "ofdgoSaveSigned" && args.at(-1)?.mode !== undefined ? args.pop() : null;
 				const indices = saving ? args.shift() : null;
 				if (file) output = await file.createWritable();
 				signal.throwIfAborted();
@@ -226,8 +227,10 @@ async function handleMessage({ id, name, args }) {
 						self.postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
 						finish(done);
 					});
-					if (indices != null) args.push(indices);
+					if (compression) args.push(indices, compression, done => finish(done));
+					else if (indices != null) args.push(indices);
 				}
+				if (!saving && args.some(value => value?.mode !== undefined)) args.push(done => finish(done));
 			}
 		}
 		const payload = await globalThis[name](...args);
