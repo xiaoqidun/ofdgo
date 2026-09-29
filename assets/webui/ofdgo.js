@@ -162,6 +162,8 @@ const el = {
 	securityEncryption: document.querySelector("#securityEncryption"),
 	securityMethod: document.querySelector("#securityMethod"),
 	securityMethodRow: document.querySelector("#securityMethodRow"),
+	securityScheme: document.querySelector("#securityScheme"),
+	securitySchemeRow: document.querySelector("#securitySchemeRow"),
 	encryptSaveButton: document.querySelector("#encryptSaveButton"),
 	credentialsPanel: document.querySelector("#credentialsPanel"),
 	credentialsType: document.querySelector("#credentialsType"),
@@ -4455,17 +4457,20 @@ function updateEncryptionType() {
 	const password = mode === "password" && !existing;
 	const certificates = mode === "certificate" && !existing;
 	el.encryptionCurrentRow.hidden = !existing;
-	el.encryptionCurrent.textContent = mode === "password" ? "已设置" : (state.doc?.encryption?.users || []).join("、") || "已加密";
+	el.encryptionCurrent.textContent = mode === "password" ? state.encryptionDirty ? "待保存" : "已加密" : (state.doc?.encryption?.users || []).join("、") || "已加密";
 	el.encryptionChange.hidden = mode === "keep";
 	el.encryptionUserRow.hidden = el.encryptionPasswordRow.hidden = el.encryptionConfirmRow.hidden = !password;
 	el.encryptionCertificatesRow.hidden = !certificates;
 	el.encryptionPassword.required = el.encryptionConfirm.required = password;
 	el.encryptionCertificates.required = certificates;
-	el.encryptionUser.value = mode === "password" && encryptionMode() === mode ? state.doc.encryption.users?.[0] || "" : "";
+	const user = mode === "password" && encryptionMode() === mode ? state.doc.encryption.users?.[0] || "" : "";
+	el.encryptionUser.value = user === "User" ? "" : user;
 	el.encryptionPassword.value = el.encryptionConfirm.value = "";
 	el.encryptionCertificates.value = "";
-	el.encryptionStatus.textContent = mode === "keep" && state.doc?.encryption?.policyRequired ? "请重新设置加密方式" : "";
+	el.encryptionStatus.textContent = mode === "keep" && state.doc?.encryption?.policyRequired ? "请重新选择加密方式" : "";
 	el.encryptionSubmit.disabled = mode === "keep" && Boolean(state.doc?.encryption?.policyRequired);
+	el.encryptionSubmit.textContent = mode === encryptionMode() && !state.encryptionChanged ? "确定"
+		: mode === "none" ? "解密" : mode !== encryptionMode() ? "加密" : mode === "password" ? "改密" : "修改";
 }
 
 async function applyEncryption(event) {
@@ -4491,9 +4496,11 @@ async function applyEncryption(event) {
 		return;
 	}
 	const openSeq = state.openSeq;
+	const status = mode === "none" ? "保存后将解密" : mode !== encryptionMode() ? "保存后将加密"
+		: mode === "password" ? "保存后将改密" : "保存后将生效";
 	const options = mode === "none" ? null : { password: new TextEncoder().encode(el.encryptionPassword.value), userName: el.encryptionUser.value.trim() };
 	el.encryptionForm.inert = true;
-	setBusy(true, "正在设置加密");
+	setBusy(true, "正在处理文档");
 	try {
 		if (mode === "certificate") options.recipients = await encryptionRecipients(Array.from(el.encryptionCertificates.files));
 		if (openSeq !== state.openSeq) return;
@@ -4506,7 +4513,7 @@ async function applyEncryption(event) {
 		state.ofdBytes = null;
 		el.encryptionPanel.close();
 		renderSecurity();
-		setStatus("加密设置已更新");
+		setStatus(status);
 	} catch (err) {
 		if (openSeq === state.openSeq) el.encryptionStatus.textContent = err.message;
 	} finally {
@@ -4542,9 +4549,12 @@ function clearEncryptionForm() {
 function renderSecurity() {
 	const encryption = state.doc?.encryption;
 	el.securityPanel.hidden = !state.doc;
-	el.securityEncryption.textContent = encryption?.encrypted ? "已加密" : "未加密";
-	el.securityMethod.textContent = encryption?.method || "";
-	el.securityMethodRow.hidden = !encryption?.method;
+	el.securityEncryption.textContent = state.encryptionDirty ? "待保存" : encryption?.encrypted ? "已加密" : "未加密";
+	const scheme = { "1.1.1": "口令", "1.1.2": "证书" }[encryption?.method];
+	el.securityScheme.textContent = encryption?.layers > 1 ? "多重" : scheme || encryption?.method || "";
+	el.securitySchemeRow.hidden = !encryption?.encrypted;
+	el.securityMethod.textContent = scheme ? "SM4-CBC" : "";
+	el.securityMethodRow.hidden = !encryption?.encrypted || !scheme;
 	el.encryptSaveButton.disabled = !state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
 	el.verifyButton.disabled = el.encryptSaveButton.disabled;
 	el.signButton.disabled = el.encryptSaveButton.disabled;
