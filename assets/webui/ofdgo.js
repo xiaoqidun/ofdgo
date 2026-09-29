@@ -4856,7 +4856,9 @@ function updateBatchControls() {
 
 function batchUsesDPI(item) {
 	const format = item?.format || batchElements.Format.value;
-	return Boolean(batch.formats.find(value => value.value === format)?.raster || item && /\.pdf$/i.test(item.file.name));
+	if (batch.formats.find(value => value.value === format)?.raster) return true;
+	return Boolean(item && /\.pdf$/i.test(item.file.name) && format !== "txt"
+		&& (format !== "pdf" || item.pages.trim()));
 }
 
 function batchStatus(item, status, text) {
