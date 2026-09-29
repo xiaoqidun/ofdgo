@@ -43,7 +43,7 @@ const (
 // CompressionMode 选择默认、无损或有损输出策略
 type CompressionMode = pdfgo.CompressionMode
 
-// CompressionLevel 选择轻压、中压或强压，仅用于有损模式
+// CompressionLevel 选择轻压、均衡或强压，仅用于有损模式
 type CompressionLevel = pdfgo.CompressionLevel
 
 // CompressionOptions 配置输出压缩，默认模式沿用现有输出策略，不额外优化
