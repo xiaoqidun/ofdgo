@@ -241,11 +241,20 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 			return nil, err
 		}
 		var masks map[string]bool
+		geometry := false
 		if options.Compression.Mode == CompressionLossy {
-			masks, err = r.compressionMaskFiles(context.Background(), images)
+			masks, geometry, err = r.compressionImageSafety(context.Background(), images)
 			if err != nil {
 				return nil, err
 			}
+		}
+		dpi := 0
+		if geometry {
+			dpi = options.Compression.ImageDPI()
+		}
+		sizes, err := r.compressionImageSizes(context.Background(), images, dpi)
+		if err != nil {
+			return nil, err
 		}
 		seen := make(map[string]bool)
 		for i, img := range images {
@@ -261,7 +270,7 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 				if masks[strings.ToLower(cleanPackagePath(img.Location))] {
 					compression.Mode = CompressionLossless
 				}
-				if optimized, err := pdfgo.OptimizeImage(context.Background(), data, compression); err == nil {
+				if optimized, err := pdfgo.OptimizeImageSize(context.Background(), data, compression, sizes[strings.ToLower(cleanPackagePath(img.Location))]); err == nil {
 					parts[img.Location] = optimized
 				}
 			}

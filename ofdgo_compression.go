@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/xml"
 	"hash/crc32"
+	"image"
 	"io"
 	"maps"
 	"slices"
@@ -34,14 +35,20 @@ const (
 	CompressionUnchanged = pdfgo.CompressionUnchanged
 	CompressionLossless  = pdfgo.CompressionLossless
 	CompressionLossy     = pdfgo.CompressionLossy
+	CompressionLight     = pdfgo.CompressionLight
+	CompressionMedium    = pdfgo.CompressionMedium
+	CompressionStrong    = pdfgo.CompressionStrong
 )
 
-// CompressionMode 选择默认、无损或有损输出，不改变导出分辨率
+// CompressionMode 选择默认、无损或有损输出策略
 type CompressionMode = pdfgo.CompressionMode
 
+// CompressionLevel 选择轻压、中压或强压，仅用于有损模式
+type CompressionLevel = pdfgo.CompressionLevel
+
 // CompressionOptions 配置输出压缩，默认模式沿用现有输出策略，不额外优化
-// Mode零值CompressionUnchanged表示默认模式，Quality为有损质量1至100，0使用85
-// 无损表示不引入额外损失，不保证跨格式转换可逆；有损仅降低图片画质，不栅格化文字和矢量
+// Quality和MaxDPI为零时按Level使用预设，不改变页面尺寸或整页导出精度
+// 无损表示不引入额外损失，不保证跨格式转换可逆；有损不栅格化文字和矢量
 type CompressionOptions = pdfgo.CompressionOptions
 
 // WriteOptions 配置OFD输出副本，不修改编辑资源和撤销记录
@@ -52,6 +59,7 @@ type outputOptimization struct {
 	ctx       context.Context
 	options   CompressionOptions
 	images    map[string]bool
+	sizes     map[string]image.Point
 	protected bool
 	completed int
 	deflater  *flate.Writer
@@ -135,21 +143,27 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 		if err != nil {
 			return nil, err
 		}
-		masks, err := reader.compressionMaskFiles(ctx, images)
+		masks, geometry, err := reader.compressionImageSafety(ctx, images)
 		if err != nil {
 			return nil, err
 		}
 		for name := range masks {
 			snapshot.output.images[name] = false
 		}
+		if geometry {
+			snapshot.output.sizes, err = reader.compressionImageSizes(ctx, images, options.Compression.ImageDPI())
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 	return &snapshot, nil
 }
 
-// compressionMaskFiles 查找包括模板和注释在内的独立蒙版资源，解析不完整时保留所有图片像素
+// compressionImageSafety 保护蒙版资源，识别不能可靠降采样的图案及隐藏内容
 // 入参: ctx 取消上下文, images 图片资源
-// 返回: map[string]bool 只能无损处理的资源路径, error 读取或取消错误
-func (r *Reader) compressionMaskFiles(ctx context.Context, images []ImageInfo) (map[string]bool, error) {
+// 返回: map[string]bool 只能无损处理的资源路径, bool 是否可分析尺寸, error 读取或取消错误
+func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo) (map[string]bool, bool, error) {
 	names := make(map[string]bool)
 	for name := range r.fileIndex {
 		names[name] = true
@@ -159,16 +173,17 @@ func (r *Reader) compressionMaskFiles(ctx context.Context, images []ImageInfo) (
 	}
 	masks := make(map[string]bool)
 	safe := true
+	geometry := len(r.OFD.DocBody) == 1
 	for _, name := range slices.Sorted(maps.Keys(names)) {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if strings.HasSuffix(name, "/") {
 			continue
 		}
 		input, err := r.openFile(name)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		buffer := bufio.NewReader(imageInput{ReadCloser: input, context: ctx})
 		header, _ := buffer.Peek(512)
@@ -185,10 +200,24 @@ func (r *Reader) compressionMaskFiles(ctx context.Context, images []ImageInfo) (
 					break
 				}
 				if element, ok := token.(xml.StartElement); ok {
+					if element.Name.Local == "Pattern" {
+						geometry = false
+					}
+					resource, masked := "", false
 					for _, attr := range element.Attr {
+						if attr.Name.Local == "Visible" && (attr.Value == "false" || attr.Value == "0") {
+							geometry = false
+						}
+						if attr.Name.Local == "ResourceID" {
+							resource = strings.TrimSpace(attr.Value)
+						}
 						if attr.Name.Local == "ImageMask" {
 							masks[strings.TrimSpace(attr.Value)] = true
+							masked = true
 						}
+					}
+					if masked {
+						masks[resource] = true
 					}
 				}
 			}
@@ -204,7 +233,7 @@ func (r *Reader) compressionMaskFiles(ctx context.Context, images []ImageInfo) (
 			paths[strings.ToLower(cleanPackagePath(img.Location))] = true
 		}
 	}
-	return paths, ctx.Err()
+	return paths, safe && geometry, ctx.Err()
 }
 
 // hasOutputSignatures 检查包中各文档，避免改写其他文档签名保护的共享资源
@@ -251,7 +280,7 @@ func (e *Editor) writeOutputEntry(archive *zip.Writer, header zip.FileHeader, da
 		if !lossy {
 			options.Mode = CompressionLossless
 		}
-		candidate, err := pdfgo.OptimizeImage(e.output.ctx, data, options)
+		candidate, err := pdfgo.OptimizeImageSize(e.output.ctx, data, options, e.output.sizes[strings.ToLower(cleanPackagePath(header.Name))])
 		if err != nil {
 			if e.output.ctx.Err() != nil {
 				return e.output.ctx.Err()

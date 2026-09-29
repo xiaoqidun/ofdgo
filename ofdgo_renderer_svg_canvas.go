@@ -24,6 +24,7 @@ import (
 	"image"
 	"image/png"
 	"io"
+	"math"
 	"strings"
 
 	"github.com/tdewolff/canvas"
@@ -42,13 +43,19 @@ type svgResourceRenderer struct {
 	writer        io.Writer
 	fonts         []SVGFont
 	images        []SVGImage
-	imageNames    map[image.Image]string
+	imageNames    map[svgImageKey]string
 	seen          map[string]bool
 	styles        strings.Builder
 	err           error
 	objects       map[*GraphicObject]string
 	objectStack   []svgObjectGroup
 	embeddedFonts bool
+}
+
+// svgImageKey 按原图及输出精度复用图片编码，避免不同显示尺寸共用低清结果
+type svgImageKey struct {
+	image image.Image
+	size  image.Point
 }
 
 // svgObjectGroup 记录编辑分组的稳定路径，不把底纹内部绘制当作成员
@@ -61,7 +68,13 @@ type svgObjectGroup struct {
 // RenderImage 按输出策略编码图片，分离资源时保持尺寸和变换
 // 入参: img 图片对象, m 变换矩阵
 func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
-	name, ok := s.imageNames[img]
+	var target image.Point
+	if s.renderer != nil && s.renderer.Compression.ImageDPI() > 0 {
+		bounds := img.Bounds()
+		target = compressionImageSize(math.Hypot(m[0][0], m[1][0])*float64(bounds.Dx()), math.Hypot(m[0][1], m[1][1])*float64(bounds.Dy()), s.renderer.Compression.ImageDPI())
+	}
+	key := svgImageKey{image: img, size: target}
+	name, ok := s.imageNames[key]
 	var resource SVGImage
 	if !ok {
 		resource = SVGImage{MIME: "image/png"}
@@ -76,7 +89,7 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 			resource.Data = buffer.Bytes()
 		}
 		if s.renderer != nil && s.renderer.Compression.Mode != CompressionUnchanged {
-			data, err := pdfgo.OptimizeImage(s.renderer.outputContext(), resource.Data, s.renderer.Compression)
+			data, err := pdfgo.OptimizeImageSize(s.renderer.outputContext(), resource.Data, s.renderer.Compression, target)
 			if err != nil {
 				if s.err = s.renderer.outputContext().Err(); s.err != nil {
 					return
@@ -88,7 +101,7 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 		if s.imageNames != nil {
 			name = fmt.Sprintf("ofdgo-image-%x", sha256.Sum256(resource.Data))
 			resource.Name = name
-			s.imageNames[img] = name
+			s.imageNames[key] = name
 			if !s.seen[name] {
 				s.seen[name] = true
 				s.images = append(s.images, resource)
@@ -174,7 +187,7 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 	// 图片方向由文档变换决定，不再由浏览器应用EXIF方向。
 	io.WriteString(buffer, `<g style="image-orientation:none">`)
 	if images {
-		s.imageNames = make(map[image.Image]string)
+		s.imageNames = make(map[svgImageKey]string)
 	}
 	if objects {
 		s.objects = make(map[*GraphicObject]string)

@@ -1254,7 +1254,7 @@ document.addEventListener("selectionchange", syncSelection);
 el.exportFormat.addEventListener("change", () => updateDPIControl());
 el.outputCompression.addEventListener("change", () => {
 	el.compressionValue.textContent = el.outputCompression.selectedOptions[0].textContent;
-	el.compressionValue.dataset.short = ["默", "无", "有"][Number(el.outputCompression.value)];
+	el.compressionValue.dataset.short = ["默", "无", "轻", "中", "强"][Number(el.outputCompression.value)];
 });
 el.exportPageButton.addEventListener("click", () => exportFile(false));
 el.exportButton.addEventListener("click", () => openExportPanel());
@@ -4646,7 +4646,7 @@ async function signDocument(event) {
 			pages:el.signPages.value.trim(), placement:el.signPlacement.value,
 			x:Number(el.signX.value), y:Number(el.signY.value), width:Number(el.signWidth.value), height:Number(el.signHeight.value),
 			mode:el.signMode.value, lock:el.signLock.checked,
-			compression: { mode: Number(el.outputCompression.value) || 0 },
+			compression: compressionOptions(el.outputCompression.value),
 		};
 		el.signKey.value = "";
 		if (openSeq !== state.openSeq || state.signCanceled || !el.signPanel.open) return;
@@ -4966,7 +4966,7 @@ async function runBatch() {
 	if (!defaultFormat) return;
 	const pageRange = item => item.pages.trim() === "全部" ? "" : item.pages.trim();
 	const dpi = Number(batchElements.DPI.value);
-	const compression = { mode: Number(batchElements.Compression.value) || 0 };
+	const compression = compressionOptions(batchElements.Compression.value);
 	const archive = batchElements.Destination.value === "archive";
 	const backend = state.renderBackend;
 	const fontKey = [fontManager.permission, fontManager.records().map(font => [font.id, font.name, font.enabled, font.checksum])];
@@ -5092,12 +5092,17 @@ async function runBatch() {
 	}
 }
 
+function compressionOptions(value) {
+	const preset = Number(value) || 0;
+	return preset > 2 ? { mode: 2, level: preset - 2 } : { mode: preset };
+}
+
 async function exportFile(whole, indices = null, value = el.exportFormat.value, encryption = null) {
 	if (!state.doc || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
 	const saving = value === "ofd";
-	const compression = { mode: Number(el.outputCompression.value) || 0 };
+	const compression = compressionOptions(el.outputCompression.value);
 	const outputOptions = compression.mode ? [compression] : [];
 	if (saving && !state.editorInfo && !state.ofdBytes && !encryption) {
 		return;

@@ -961,9 +961,12 @@ button:not(:disabled):hover {
 	}
 	.convert-dialog .form-actions {
 		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
 		row-gap: 12px;
 	}
-	.convert-dialog .form-actions > .button { grid-row: 2; }
+	.convert-dialog .form-actions > .button { grid-row: 2; width: 100%; }
+	#convertClose { grid-column: 3; }
+	#convertCancel, #convertStart { grid-column: 4; }
 	.convert-options {
 		grid-column: 1 / -1;
 		grid-row: 1;

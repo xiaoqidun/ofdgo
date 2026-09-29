@@ -23,6 +23,7 @@ import (
 	"image"
 	"image/jpeg"
 	"io"
+	"math"
 
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers/ps"
@@ -38,11 +39,23 @@ type epsImageRenderer struct {
 	err     error
 }
 
-// RenderImage 写出Flate或更小的JPEG图片，保留原尺寸与变换
+// RenderImage 写出Flate或更小的JPEG图片，保留显示尺寸与变换
 // 入参: img 图片, matrix 绘制变换
 func (r *epsImageRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 	if r.err != nil {
 		return
+	}
+	if dpi := r.options.ImageDPI(); dpi > 0 {
+		original := img.Bounds().Size()
+		target := compressionImageSize(math.Hypot(matrix[0][0], matrix[1][0])*float64(original.X), math.Hypot(matrix[0][1], matrix[1][1])*float64(original.Y), dpi)
+		img, r.err = pdfgo.ResizeImage(r.ctx, img, target)
+		if r.err != nil {
+			return
+		}
+		size := img.Bounds().Size()
+		if size.X > 0 && size.Y > 0 {
+			matrix = matrix.Scale(float64(original.X)/float64(size.X), float64(original.Y)/float64(size.Y))
+		}
 	}
 	bounds := img.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
