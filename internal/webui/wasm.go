@@ -3738,7 +3738,7 @@ func setEditorColor(fill *ofdgo.FillColor, value string) error {
 }
 
 // editorColorHex 将当前文档纯色转换为浏览器色值
-// 入参: color 颜色
+// 入参: value 颜色
 // 返回: string 十六进制色值
 func editorColorHex(value *ofdgo.FillColor) string {
 	converted, err := currentEditor.Color(value)

@@ -106,7 +106,7 @@ func (m *MeshShading) outline() GeometryPath {
 	return path
 }
 
-// resolveMesh 按GB/T 33190的三角形连接规则解析网格
+// resolveMesh 按GB/T33190的三角形连接规则解析网格
 // 入参: fill 网格颜色
 // 返回: *MeshShading 网格画刷, error 无效控制点
 func (r *Renderer) resolveMesh(fill *FillColor) (*MeshShading, error) {

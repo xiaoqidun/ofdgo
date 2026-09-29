@@ -1203,7 +1203,7 @@ func parseCFFWidths(data []byte, numGlyphs int) ([]uint16, error) {
 }
 
 // scanCharStringWidth 扫描CharString获取宽度
-// 入参: data CharString数据, nominal, def 默认宽度值
+// 入参: data CharString数据, nominal 名义宽度, def 默认宽度
 // 返回: float64 宽度值
 func scanCharStringWidth(data []byte, nominal, def float64) float64 {
 	stackDepth := 0

@@ -494,7 +494,7 @@ func (e *Editor) addImage(data []byte, config image.Config, format string, decod
 }
 
 // AddObject 按添加顺序放入正文图层，支持文字、路径和图片，自动分配对象ID
-// 支持基本颜色、直接资源引用及路径裁剪，不支持动作、渐变及复合图元
+// 支持已注册资源、颜色、渐变、裁剪和动作；复合图元仅支持当前文档原对象的保真复制
 // 入参: page 页面索引, object 对象内容，添加后不再引用调用方的可变数据
 // 返回: string 对象标识, error 错误信息
 func (e *Editor) AddObject(page int, object GraphicObject) (string, error) {

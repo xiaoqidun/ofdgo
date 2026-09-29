@@ -40,8 +40,8 @@ const (
 type SignatureWriteMode uint8
 
 // SignatureWriteOptions 最终包签署选项，不修改Editor或调用方的原件
-// SM2数字签名使用GB/T 35275-2017消息结构；RSA/ECDSA使用裸签名，验签需WithSignatureCert
-// Seal仅接受已有合法SES v4电子印章，使用SM2/SM3，不声明GM/T 0031-2025兼容
+// SM2数字签名使用GB/T35275-2017消息结构；RSA/ECDSA使用裸签名，验签需WithSignatureCert
+// Seal仅接受已有合法SES v4电子印章，使用SM2/SM3，不声明GM/T0031-2025兼容
 // TrustRoots必须显式指定；证书吊销状态和外部业务授权由调用方在签署前检查
 type SignatureWriteOptions struct {
 	Signer        crypto.Signer

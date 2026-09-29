@@ -28,6 +28,8 @@ type imagePageInfo struct {
 }
 
 // imagePageMetadata 读取PNG物理尺寸与JPEG的JFIF、EXIF信息，EXIF密度优先于JFIF
+// 入参: data 图片数据, format 图像格式, dpi 缺少物理密度时使用的DPI
+// 返回: imagePageInfo 方向与横纵DPI, error 元数据错误
 func imagePageMetadata(data []byte, format string, dpi float64) (imagePageInfo, error) {
 	info := imagePageInfo{orientation: 1, xdpi: dpi, ydpi: dpi}
 	var exif []byte
@@ -121,6 +123,8 @@ func imagePageMetadata(data []byte, format string, dpi float64) (imagePageInfo, 
 }
 
 // imageExifMetadata 只读取主图IFD中的方向和密度，不跟随缩略图与其他目录
+// 入参: data EXIF中的TIFF数据
+// 返回: int EXIF方向值，未声明时为1, float64 横向DPI, float64 纵向DPI, error 元数据错误
 func imageExifMetadata(data []byte) (int, float64, float64, error) {
 	invalid := fmt.Errorf("invalid EXIF image metadata")
 	if len(data) < 8 {

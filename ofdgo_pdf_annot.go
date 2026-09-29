@@ -25,7 +25,7 @@ import (
 )
 
 // appearanceAnnotation 将PDF静态外观转换为对应类型的OFD注解
-// 入参: ctx取消上下文, page PDF页面, annotation PDF注解, actions 外观区域的动作
+// 入参: ctx 取消上下文, page PDF页面, annotation PDF注解, actions 外观区域的动作
 // 返回: error 外观或转换错误
 func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation, actions ...Action) error {
 	for _, key := range []pdfgo.Name{"AA", "OC", "A"} {

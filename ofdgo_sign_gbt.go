@@ -41,7 +41,7 @@ type digitalVerifyResult struct {
 	CertInfo        SignatureCertInfo
 }
 
-// gbtSignedData GB/T 35275 SignedData结构
+// gbtSignedData GB/T35275 SignedData结构
 type gbtSignedData struct {
 	Version       int
 	ContentDigest []byte
@@ -149,7 +149,7 @@ func verifyRawPublicKeySignature(method, digestMethod string, signedValue, signe
 	return result, nil
 }
 
-// verifyGBT35275SignedData 验证GB/T 35275 SignedData签名值
+// verifyGBT35275SignedData 验证GB/T35275 SignedData签名值
 // 入参: signedValue 签名值, signedData 被签名原文, options 验证选项
 // 返回: *digitalVerifyResult 验证结果, error 错误信息
 func verifyGBT35275SignedData(signedValue, signedData []byte, options *signatureVerifyOptions) (*digitalVerifyResult, error) {
@@ -256,7 +256,7 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 	return result, nil
 }
 
-// normalizeGBT35275SignedValue 规范化GB/T 35275 SignedData编码
+// normalizeGBT35275SignedValue 规范化GB/T35275 SignedData编码
 // 入参: data 签名值数据
 // 返回: []byte 定长编码数据, bool 是否为SignedData
 func normalizeGBT35275SignedValue(data []byte) ([]byte, bool) {
@@ -274,7 +274,7 @@ func normalizeGBT35275SignedValue(data []byte) ([]byte, bool) {
 	return der, true
 }
 
-// gbtContentType 读取GB/T 35275内容类型
+// gbtContentType 读取GB/T35275内容类型
 // 入参: data DER编码数据
 // 返回: string 内容类型, bool 是否完成解析
 func gbtContentType(data []byte) (string, bool) {
@@ -391,7 +391,7 @@ func wrapBERValue(tag, content []byte) []byte {
 	return append(out, content...)
 }
 
-// parseGBT35275SignedData 解析GB/T 35275 SignedData
+// parseGBT35275SignedData 解析GB/T35275 SignedData
 // 入参: data 签名值数据
 // 返回: *gbtSignedData SignedData结构, error 错误信息
 func parseGBT35275SignedData(data []byte) (*gbtSignedData, error) {

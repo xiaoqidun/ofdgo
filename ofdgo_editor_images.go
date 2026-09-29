@@ -107,6 +107,8 @@ func (e *Editor) ImportImages(ctx context.Context, sources []ImagePageSource, at
 }
 
 // addImagePage 保留原图并按方向、物理尺寸与纸张选项建页
+// 入参: data 图片数据, options 建页选项
+// 返回: int 从0开始的页面索引, error 错误信息
 func (e *Editor) addImagePage(data []byte, options ImagePageOptions) (int, error) {
 	config, format, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
@@ -155,6 +157,8 @@ func (e *Editor) addImagePage(data []byte, options ImagePageOptions) (int, error
 }
 
 // imagePageOrientation 将EXIF方向映射为单位图像到页面局部坐标的变换
+// 入参: orientation EXIF方向值, w、h 图片在页面上的宽高，单位为毫米
+// 返回: Matrix 图像坐标变换
 func imagePageOrientation(orientation int, w, h float64) Matrix {
 	switch orientation {
 	case 2:
