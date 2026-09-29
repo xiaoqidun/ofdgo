@@ -7346,25 +7346,23 @@ function renderAttachments() {
 		item.addEventListener("click", () => downloadAttachment(attachment));
 		row.append(item);
 		if (state.editing) {
-			const actions = document.createElement("select");
-			actions.className = "small-button attachment-actions";
-			actions.title = "附件操作";
+			const actions = document.createElement("div");
+			actions.className = "panel-actions attachment-actions";
+			actions.setAttribute("role", "group");
 			actions.setAttribute("aria-label", `${attachment.name} 操作`);
-			for (const [value, text] of [["", "操作"], ["rename", "改名"], ["replace", "替换"], ["delete", "删除"]]) {
-				const option = document.createElement("option");
-				option.value = value;
-				option.textContent = text;
-				actions.append(option);
+			for (const [action, text] of [["rename", "改名"], ["replace", "替换"], ["delete", "删除"]]) {
+				const button = document.createElement("button");
+				button.type = "button";
+				button.className = "small-button";
+				button.textContent = text;
+				button.title = `${text}附件`;
+				editorClick(button, async () => {
+					if (action === "delete") {
+						if (window.confirm(`删除附件“${attachment.name}”？`) && await changeDocument("ofdgoChangeAttachment", null, action, attachment.id, [], [])) setStatus("附件已删除");
+					} else openAttachmentDialog(action, attachment);
+				});
+				actions.append(button);
 			}
-			actions.addEventListener("change", async () => {
-				const action = actions.value;
-				actions.value = "";
-				if ((canvasEditor.nudge || canvasEditor.nudgeCommit) && !await canvasEditor.commitNudge()) return;
-				if (!await canvasEditor.commitText() || !await canvasEditor.commitCrop()) return;
-				if (action === "delete") {
-					if (window.confirm(`删除附件“${attachment.name}”？`) && await changeDocument("ofdgoChangeAttachment", null, action, attachment.id, [], [])) setStatus("附件已删除");
-				} else if (action) openAttachmentDialog(action, attachment);
-			});
 			row.append(actions);
 		}
 		el.attachmentList.append(row);
