@@ -47,12 +47,14 @@ type CompressionOptions = pdfgo.CompressionOptions
 // WriteOptions 配置OFD输出副本，不修改编辑资源和撤销记录
 type WriteOptions struct{ Compression CompressionOptions }
 
-// outputOptimization 保存单次写出的配置及图片路径，不缓存资源数据
+// outputOptimization 保存单次写出的配置、图片路径及压缩进度，复用压缩器
 type outputOptimization struct {
 	ctx       context.Context
 	options   CompressionOptions
 	images    map[string]bool
 	protected bool
+	completed int
+	deflater  *flate.Writer
 }
 
 // WriteToWithOptions 按压缩策略写出OFD，签名文档不额外改写资源内容
@@ -241,7 +243,7 @@ func (e *Editor) writeOutputEntry(archive *zip.Writer, header zip.FileHeader, da
 		_, err = entry.Write(data)
 		return err
 	}
-	if err := editorProgress(e.OnWriteProgress).report("compress", 0, 0); err != nil {
+	if err := editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0); err != nil {
 		return err
 	}
 	if lossy, ok := e.output.images[strings.ToLower(cleanPackagePath(header.Name))]; ok {
@@ -259,7 +261,13 @@ func (e *Editor) writeOutputEntry(archive *zip.Writer, header zip.FileHeader, da
 		}
 	}
 	var compressed bytes.Buffer
-	deflater, _ := flate.NewWriter(&compressed, flate.BestCompression)
+	deflater := e.output.deflater
+	if deflater == nil {
+		deflater, _ = flate.NewWriter(&compressed, flate.BestCompression)
+		e.output.deflater = deflater
+	} else {
+		deflater.Reset(&compressed)
+	}
 	for offset := 0; offset < len(data); {
 		if err := e.output.ctx.Err(); err != nil {
 			deflater.Close()
@@ -288,8 +296,11 @@ func (e *Editor) writeOutputEntry(archive *zip.Writer, header zip.FileHeader, da
 	if err != nil {
 		return err
 	}
-	_, err = entry.Write(payload)
-	return err
+	if _, err = entry.Write(payload); err != nil {
+		return err
+	}
+	e.output.completed++
+	return editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0)
 }
 
 // WithCompression 设置导出策略，不修改文档资源和渲染缓存

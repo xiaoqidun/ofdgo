@@ -3366,8 +3366,8 @@ async function loadWASM() {
 						setProgress("正在保存", null);
 					} else if (!el.cancelExportButton.disabled) {
 						if (data.stage === "prepare") {
-							const label = { snapshot: "正在准备", ids: "正在检查", commit: "正在整理", fonts: "正在处理字体", pages: "正在处理页面", references: "正在检查引用", resources: "正在整理资源", write: "正在写入", sign: "正在签署", encrypt: "正在加密" }[data.phase];
-							setProgress(label, data.total ? data.completed / data.total * 100 : null);
+							const label = { snapshot: "正在准备", ids: "正在检查", commit: "正在整理", fonts: "正在处理字体", pages: "正在处理页面", references: "正在检查引用", resources: "正在整理资源", compress: "正在压缩", write: "正在写入", sign: "正在签署", encrypt: "正在加密" }[data.phase];
+							setProgress(data.phase === "compress" && data.completed ? `${label} · 已处理 ${data.completed} 项` : label, data.total ? data.completed / data.total * 100 : null);
 						} else if (data.completed === data.total) {
 							setProgress("正在收尾", null);
 						} else {
@@ -4880,8 +4880,9 @@ function batchProgress(item, position, count, progress) {
 	const now = performance.now();
 	if (now - batch.progressTime < 80 && progress.completed !== progress.total) return;
 	batch.progressTime = now;
-	const stage = progress.phase?.startsWith("write.") ? "写入" : { open: "读取", pages: "解析", convert: "转换", prepare: "准备", fonts: "字体", resources: "资源", references: "检查", write: "写入", export: "导出", pack: "打包", commit: "保存" }[progress.phase] || "处理";
-	const detail = progress.total > 0 ? `${progress.completed}/${progress.total}` : "";
+	const compressing = progress.phase === "compress" || progress.phase === "write.compress";
+	const stage = compressing ? "压缩" : progress.phase?.startsWith("write.") ? "写入" : { open: "读取", pages: "解析", convert: "转换", prepare: "准备", fonts: "字体", resources: "资源", references: "检查", write: "写入", export: "导出", pack: "打包", commit: "保存" }[progress.phase] || "处理";
+	const detail = progress.total > 0 ? `${progress.completed}/${progress.total}` : compressing && progress.completed ? `已处理 ${progress.completed} 项` : "";
 	if (item) batchStatus(item, "running", stage);
 	batchElements.Status.textContent = progress.phase === "pack" ? `打包 ${detail}` : `文件 ${position + 1}/${count} · ${stage}${detail ? ` ${detail}` : ""}`;
 	batchElements.Progress.max = count;
