@@ -3363,15 +3363,15 @@ async function loadWASM() {
 					if (data.stage === "save") {
 						el.cancelExportButton.disabled = true;
 						if (state.signing) el.signCancel.disabled = true;
-						setProgress("正在保存", null);
+						setProgress("正在保存文件", null);
 					} else if (!el.cancelExportButton.disabled) {
 						if (data.stage === "prepare") {
-							const label = { snapshot: "正在准备", ids: "正在检查", commit: "正在整理", fonts: "正在处理字体", pages: "正在处理页面", references: "正在检查引用", resources: "正在整理资源", compress: "正在压缩", write: "正在写入", sign: "正在签署", encrypt: "正在加密" }[data.phase];
+							const label = { snapshot: "正在准备文档", ids: "正在检查标识", commit: "正在整理文档", fonts: "正在处理字体", pages: "正在处理页面", references: "正在检查引用", resources: "正在整理资源", compress: "正在压缩文件", write: "正在写入文件", sign: "正在签署文档", encrypt: "正在加密文档" }[data.phase];
 							setProgress(data.phase === "compress" && data.completed ? `${label} · 已处理 ${data.completed} 项` : label, data.total ? data.completed / data.total * 100 : null);
 						} else if (data.completed === data.total) {
-							setProgress("正在收尾", null);
+							setProgress("正在整理文件", null);
 						} else {
-							setProgress(`正在导出 ${data.completed} / ${data.total} 页`, data.completed / data.total * 100);
+							setProgress(`正在导出页面 · ${data.completed} / ${data.total} 页`, data.completed / data.total * 100);
 						}
 					}
 				}
@@ -4627,7 +4627,7 @@ async function signDocument(event) {
 	state.signing = true;
 	state.signCanceled = false;
 	el.signCancel.disabled = false;
-	setBusy(true, "正在签署", null, "正在签署");
+	setBusy(true, "正在签署文档", null, "正在签署文档");
 	el.signForm.querySelectorAll("input, select, button[type=submit]").forEach(input => { input.disabled = true; });
 	try {
 		const name = `${baseFileName()}_签章.ofd`;
@@ -4637,7 +4637,7 @@ async function signDocument(event) {
 			setBusy(false);
 			if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop()) return;
 			openSeq = state.openSeq;
-			setBusy(true, "正在签署", null, "正在签署");
+			setBusy(true, "正在签署文档", null, "正在签署文档");
 		}
 		key = (await securityFiles(el.signKey))[0];
 		const options = {
@@ -5118,7 +5118,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 	const status = saving ? "正在保存文档" : whole ? STATUS.exporting : STATUS.pageExporting;
 	state.exporting = true;
 	updateControls();
-	setBusy(true, `正在生成 ${label}`, null, status);
+	setBusy(true, "正在生成文件", null, status);
 	try {
 		const file = window.showSaveFilePicker ? await window.showSaveFilePicker({
 			suggestedName: fileName,
@@ -5133,7 +5133,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			if (!await canvasEditor.commitText()) return;
 			if (!await canvasEditor.commitCrop()) return;
 			openSeq = state.openSeq;
-			setBusy(true, `正在生成 ${label}`, null, status);
+			setBusy(true, "正在生成文件", null, status);
 		}
 		if (encryption?.recipientFiles) {
 			encryption.recipients = await encryptionRecipients(encryption.recipientFiles);
