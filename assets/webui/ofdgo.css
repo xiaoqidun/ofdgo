@@ -2937,7 +2937,7 @@ button.outline-link:hover {
 
 @media (min-width: 901px) and (max-width: 1600px) and (pointer: fine) {
 	.editor-toolbar {
-		--editor-control-width: 54px;
+		--editor-control-width: 52px;
 	}
 
 	.editor-group {
@@ -2950,7 +2950,7 @@ button.outline-link:hover {
 	}
 
 	.editor-group:has(#textFont) {
-		grid-template-columns: 136px 32px;
+		grid-template-columns: 128px 32px;
 	}
 
 	.editor-paragraph {

@@ -20,11 +20,15 @@ import (
 	"io"
 	"path"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/xiaoqidun/ofdgo"
 )
+
+// sessionTextCacheLimit 限制会话保留的页面文字索引数量
+const sessionTextCacheLimit = 32
 
 // OpenOptions 打开OFD文档选项
 type OpenOptions struct {
@@ -48,6 +52,7 @@ type Session struct {
 	pageCache       map[int]*ofdgo.PageContent
 	boxCache        []pageBoxInfo
 	textCache       map[int]*ofdgo.PageText
+	textOrder       []int
 	svgFonts        map[string][]byte
 	fontScan        *ofdgo.FontInfoScanner
 	fontInfos       []FontInfo
@@ -296,6 +301,7 @@ func (s *Session) SetFonts(fonts []FontFile) error {
 		s.fontFS = nil
 	}
 	clear(s.textCache)
+	s.textOrder = nil
 	clear(s.svgFonts)
 	s.resetFontInfo()
 	return nil
@@ -305,23 +311,44 @@ func (s *Session) SetFonts(fonts []FontFile) error {
 // 入参: index 页面索引
 // 返回: *ofdgo.PageText 页面文字, error 错误信息
 func (s *Session) PageText(index int) (*ofdgo.PageText, error) {
-	text := s.textCache[index]
+	text := s.cachedPageText(index)
 	if text == nil {
 		var err error
 		text, err = s.readPageText(index)
 		if err != nil {
 			return nil, err
 		}
-		s.textCache[index] = text
+		s.cachePageText(index, text)
 	}
 	return text, nil
+}
+
+// cachedPageText 获取缓存索引并更新最近访问顺序
+func (s *Session) cachedPageText(index int) *ofdgo.PageText {
+	text := s.textCache[index]
+	if text != nil {
+		s.cachePageText(index, text)
+	}
+	return text
+}
+
+// cachePageText 保留最近访问的文字索引，避免全文搜索持续占用内存
+func (s *Session) cachePageText(index int, text *ofdgo.PageText) {
+	if position := slices.Index(s.textOrder, index); position >= 0 {
+		s.textOrder = slices.Delete(s.textOrder, position, position+1)
+	} else if len(s.textOrder) == sessionTextCacheLimit {
+		delete(s.textCache, s.textOrder[0])
+		s.textOrder = slices.Delete(s.textOrder, 0, 1)
+	}
+	s.textOrder = append(s.textOrder, index)
+	s.textCache[index] = text
 }
 
 // PageTextString 获取页面原文，不为全文复制保留额外的页面和文字索引
 // 入参: index 页面索引
 // 返回: string 页面原文, error 错误信息
 func (s *Session) PageTextString(index int) (string, error) {
-	text := s.textCache[index]
+	text := s.cachedPageText(index)
 	if text == nil {
 		var err error
 		text, err = s.readPageText(index)
@@ -460,9 +487,9 @@ func (s *Session) RenderPage(index int, backend string, dpi float64, raster bool
 	}
 	var buf bytes.Buffer
 	renderer := *s.Renderer
-	if s.textCache[index] == nil {
+	if s.cachedPageText(index) == nil {
 		renderer.OnPageText = func(_ *ofdgo.PageContent, text *ofdgo.PageText) {
-			s.textCache[index] = text
+			s.cachePageText(index, text)
 		}
 	}
 	if raster {
@@ -480,6 +507,7 @@ func (s *Session) RenderPage(index int, backend string, dpi float64, raster bool
 	if err != nil {
 		return PageSVG{}, err
 	}
+	clear(s.svgFonts)
 	for i, font := range resources.Fonts {
 		s.svgFonts[font.Name] = font.Data
 		resources.Fonts[i].Data = nil
@@ -501,12 +529,13 @@ func (s *Session) SetRenderBackend(name string) error {
 	previous, next := s.Renderer.Backends().Info(), backends.Info()
 	if previous.Compiler != next.Compiler || previous.Fonts != next.Fonts || previous.Geometry != next.Geometry {
 		clear(s.textCache)
+		s.textOrder = nil
 	}
 	ofdgo.WithRenderBackends(backends)(s.Renderer)
 	return nil
 }
 
-// SVGFontData 获取已渲染页面引用的字体数据
+// SVGFontData 获取最近渲染页面引用的字体数据
 // 入参: name 字体资源标识
 // 返回: []byte 字体数据, error 错误信息
 func (s *Session) SVGFontData(name string) ([]byte, error) {

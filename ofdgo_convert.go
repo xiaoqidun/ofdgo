@@ -137,9 +137,11 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 			return err
 		}
 		if options.OnProgress != nil {
-			return options.OnProgress(ConvertProgress{Stage: stage, Completed: completed, Total: total})
+			if err := options.OnProgress(ConvertProgress{Stage: stage, Completed: completed, Total: total}); err != nil {
+				return err
+			}
 		}
-		return nil
+		return ctx.Err()
 	}
 	writeProgress := func(stage string, completed, total int) error {
 		if stage == "write" {

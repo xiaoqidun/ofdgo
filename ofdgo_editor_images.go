@@ -87,6 +87,9 @@ func (e *Editor) ImportImages(ctx context.Context, sources []ImagePageSource, at
 			if err != nil {
 				return fmt.Errorf("image %q: %w", source.Name, err)
 			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			page, err := e.addImagePage(data, options)
 			if err != nil {
 				return fmt.Errorf("image %q: %w", source.Name, err)
@@ -112,7 +115,8 @@ func (e *Editor) addImagePage(data []byte, options ImagePageOptions) (int, error
 	if format != "png" && format != "jpeg" && format != "jbig2" {
 		return 0, fmt.Errorf("only PNG, JPEG and JBIG2 images are supported")
 	}
-	if _, _, err := image.Decode(bytes.NewReader(data)); err != nil {
+	decoded, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
 		return 0, err
 	}
 	metadata, err := imagePageMetadata(data, format, options.DPI)
@@ -133,7 +137,7 @@ func (e *Editor) addImagePage(data []byte, options ImagePageOptions) (int, error
 	if !finite(w) || !finite(h) || w <= 0 || h <= 0 {
 		return 0, fmt.Errorf("invalid image page dimensions")
 	}
-	resource, err := e.AddImage(data)
+	resource, err := e.addImage(data, config, format, decoded)
 	if err != nil {
 		return 0, err
 	}

@@ -634,6 +634,7 @@ func configureDocument(args []js.Value) (any, error) {
 	if currentSession.Renderer.RenderAnnotations != args[1].Bool() {
 		currentSession.Renderer.RenderAnnotations = args[1].Bool()
 		clear(currentSession.textCache)
+		currentSession.textOrder = nil
 	}
 	return currentSession.Summary(), nil
 }

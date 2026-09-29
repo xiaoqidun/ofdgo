@@ -455,6 +455,11 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return e.addImage(data, config, format, nil)
+}
+
+// addImage 注册图片资源，复用调用方已完成解码的像素数据
+func (e *Editor) addImage(data []byte, config image.Config, format string, decoded image.Image) (string, error) {
 	if (format != "png" && format != "jpeg" && format != "jbig2") || config.Width <= 0 || config.Height <= 0 {
 		return "", fmt.Errorf("only PNG, JPEG and JBIG2 images are supported")
 	}
@@ -466,7 +471,7 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 		return "", err
 	}
 	if format == "png" && uint64(config.Width)*uint64(config.Height) <= 64<<20 {
-		if compact := editorBinaryImage(data); compact != nil {
+		if compact := editorBinaryImage(data, decoded); compact != nil {
 			data, format = compact, "jbig2"
 		}
 	}
@@ -734,12 +739,15 @@ func (e *Editor) nextID() string {
 }
 
 // editorBinaryImage 尝试纯黑白无损编码，不二值化，不改变透明度，无体积收益时保留原图
-// 入参: data PNG图片数据
+// 入参: data PNG图片数据, img 已解码像素，为nil时读取原图
 // 返回: []byte 更小的JBIG2数据，不适用时为nil
-func editorBinaryImage(data []byte) []byte {
-	img, _, err := image.Decode(bytes.NewReader(data))
-	if err != nil {
-		return nil
+func editorBinaryImage(data []byte, img image.Image) []byte {
+	if img == nil {
+		var err error
+		img, _, err = image.Decode(bytes.NewReader(data))
+		if err != nil {
+			return nil
+		}
 	}
 	var output bytes.Buffer
 	if err := jbig2.Encode(&output, img, &jbig2.Options{MaxPageBytes: uint64(len(data))}); err != nil || output.Len() >= len(data) {
