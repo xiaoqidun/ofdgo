@@ -78,8 +78,11 @@ func (e *Editor) compressResourceParts(parts map[string][]byte, reader *Reader, 
 				return err
 			}
 		}
-		resource, safe := refs.scan(input, name)
+		resource, safe := refs.scan(imageInput{ReadCloser: input, context: e.output.ctx}, name)
 		input.Close()
+		if err := e.output.ctx.Err(); err != nil {
+			return err
+		}
 		if !safe {
 			return nil
 		}

@@ -37,8 +37,13 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 	next := e.transactionSnapshot()
 	next.history, next.historyIndex, next.historyLimit = nil, 0, 0
 	*e = next
+	committed := false
+	defer func() {
+		if !committed {
+			*e = before
+		}
+	}()
 	if err := edit(e); err != nil {
-		*e = before
 		return err
 	}
 	changed := e.revision != before.revision
@@ -54,6 +59,7 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 			change.redo = func(e *Editor) { e.restoreTransaction(after) }
 		}
 	}
+	committed = true
 	return nil
 }
 

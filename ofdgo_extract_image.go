@@ -40,7 +40,7 @@ type imageOutput struct {
 	writer  io.Writer
 }
 
-// imageInput 在读取原始图片时检查调用方取消状态
+// imageInput 在读取资源数据时检查调用方取消状态
 type imageInput struct {
 	io.ReadCloser
 	context context.Context

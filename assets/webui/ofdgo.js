@@ -3618,7 +3618,7 @@ async function openOFD(file, remote = null) {
 		await openDocument({ doc, pageIndex: remote?.pageIndex || 0, resetScroll: true, openSeq });
 	} catch (err) {
 		if (openSeq === state.openSeq) {
-			if (err.name === "AbortError") setStatus("转换已取消");
+			if (err.name === "AbortError") setStatus("打开已取消");
 			else showError(err, !state.doc);
 			setBusy(false);
 		}

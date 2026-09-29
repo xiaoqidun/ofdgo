@@ -545,7 +545,12 @@ func packFiles(args []js.Value) (any, error) {
 		source := &browserReaderAt{read: read, checkpoint: args[4], size: int64(file.Get("size").Float())}
 		entries[i] = ofdgo.ArchiveFile{Name: name, Source: source, Size: source.size}
 	}
-	options := ofdgo.ArchiveOptions{OnProgress: func(completed, total int) error { return awaitExport(args[3], completed, total) }}
+	options := ofdgo.ArchiveOptions{OnProgress: func(completed, total int) error {
+		if completed > 0 {
+			entries[completed-1].Source.(*browserReaderAt).data = nil
+		}
+		return awaitExport(args[3], completed, total)
+	}}
 	if len(args) > 5 && !args[5].IsUndefined() && !args[5].IsNull() {
 		if err := compressionFromJS(args[5], &options.Compression); err != nil {
 			return nil, err
@@ -1422,7 +1427,6 @@ func writeAnnotation(args []js.Value) (any, error) {
 	var ids []string
 	result, err := changeObjects(func() error {
 		font, resource := "", ""
-		var fontData []byte
 		if !args[2].IsNull() {
 			data, err := bytesFromJS(args[2])
 			if err != nil {
@@ -1432,7 +1436,6 @@ func writeAnnotation(args []js.Value) (any, error) {
 			if err != nil {
 				return err
 			}
-			fontData = data
 		}
 		if !args[3].IsNull() {
 			data, err := bytesFromJS(args[3])
@@ -1475,11 +1478,31 @@ func writeAnnotation(args []js.Value) (any, error) {
 		if err != nil {
 			return err
 		}
-		var watermarkBounds ofdgo.Box
 		if options.Kind == "watermark" {
-			if area := options.Area; area != nil && (area.X < 0 || area.Y < 0 || area.W < 0 || area.H < 0 || area.X+area.W > 1 || area.Y+area.H > 1 || options.Tile && (area.W == 0 || area.H == 0)) {
-				return fmt.Errorf("invalid watermark area")
+			boundary := fmt.Sprintf("0 0 %g %g", options.Width, options.Height)
+			var object ofdgo.GraphicObject
+			if resource != "" {
+				object = ofdgo.GraphicObject{Type: "ImageObject", ImageObject: ofdgo.ImageObject{ResourceID: resource, Boundary: boundary, Alpha: &options.Alpha}}
+			} else {
+				text := ofdgo.TextObject{Font: font, Size: options.Size, Boundary: boundary, Alpha: &options.Alpha}
+				if err := currentEditor.LayoutText(&text, options.Text, ofdgo.TextLayout{Align: "center"}); err != nil {
+					return err
+				}
+				if err := setTextColor(&text, options.Color); err != nil {
+					return err
+				}
+				object = ofdgo.GraphicObject{Type: "TextObject", TextObject: text}
 			}
+			added, err := currentEditor.AddWatermarks(context.Background(), pages, object, ofdgo.WatermarkOptions{Creator: options.Creator, Angle: options.Angle, Tile: options.Tile, Area: options.Area})
+			if err != nil {
+				return err
+			}
+			for i, index := range pages {
+				if index == page {
+					ids = append(ids, "annotation:"+added[i])
+				}
+			}
+			return nil
 		}
 		for _, index := range pages {
 			box := ofdgo.Box{X: options.X, Y: options.Y, W: options.Width, H: options.Height}
@@ -1491,55 +1514,19 @@ func writeAnnotation(args []js.Value) (any, error) {
 				switch options.Kind {
 				case "note":
 					annotation.Type, annotation.Remark = "Path", options.Text
-				case "watermark", "stamp":
-					annotation.Type = "Watermark"
-					if options.Kind == "stamp" {
-						annotation.Type = "Stamp"
+				case "stamp":
+					annotation.Type = "Stamp"
+					if resource == "" {
+						return fmt.Errorf("stamp requires an image")
 					}
-					var object ofdgo.GraphicObject
-					if resource != "" {
-						object = ofdgo.GraphicObject{Type: "ImageObject", ImageObject: ofdgo.ImageObject{ResourceID: resource, Boundary: fmt.Sprintf("0 0 %g %g", box.W, box.H), CTM: fmt.Sprintf("%g 0 0 %g 0 0", box.W, box.H), Alpha: &options.Alpha}}
-					} else {
-						if options.Kind == "stamp" {
-							return fmt.Errorf("stamp requires an image")
-						}
-						text := ofdgo.TextObject{Font: font, Size: options.Size, Boundary: fmt.Sprintf("0 0 %g %g", box.W, box.H), Alpha: &options.Alpha}
-						if err := currentEditor.LayoutText(&text, options.Text, ofdgo.TextLayout{Align: "center"}); err != nil {
-							return err
-						}
-						if err := setTextColor(&text, options.Color); err != nil {
-							return err
-						}
-						object = ofdgo.GraphicObject{Type: "TextObject", TextObject: text}
-					}
+					object := ofdgo.GraphicObject{Type: "ImageObject", ImageObject: ofdgo.ImageObject{ResourceID: resource, Boundary: fmt.Sprintf("0 0 %g %g", box.W, box.H), CTM: fmt.Sprintf("%g 0 0 %g 0 0", box.W, box.H), Alpha: &options.Alpha}}
 					angle := options.Angle * math.Pi / 180
 					matrix := ofdgo.NewMatrix(fmt.Sprintf("%g %g %g %g 0 0", math.Cos(angle), math.Sin(angle), -math.Sin(angle), math.Cos(angle)))
 					matrix = ofdgo.TranslationMatrix(box.W/2, box.H/2).Multiply(matrix).Multiply(ofdgo.TranslationMatrix(-box.W/2, -box.H/2))
-					if object.Type == "TextObject" {
-						object.TextObject.CTM = matrix.String()
-					} else {
-						object.ImageObject.CTM = matrix.Multiply(ofdgo.NewMatrix(object.ImageObject.CTM)).String()
-					}
+					object.ImageObject.CTM = matrix.Multiply(ofdgo.NewMatrix(object.ImageObject.CTM)).String()
 					annotation.Appearance.Objects = []ofdgo.GraphicObject{object}
 				default:
 					return fmt.Errorf("unsupported annotation kind %q", options.Kind)
-				}
-				if options.Kind == "watermark" {
-					if watermarkBounds.W == 0 {
-						watermarkBounds, err = measureWatermark(annotation.Appearance.Objects[0], fontData, currentEditor.Backends())
-						if err != nil {
-							return err
-						}
-					}
-					content, err := currentSession.pageContent(index)
-					if err != nil {
-						return err
-					}
-					page, err := currentSession.pageBox(index, content)
-					if err != nil {
-						return err
-					}
-					layoutWatermark(&annotation, watermarkBounds, options, page)
 				}
 				id, err = currentEditor.AddAnnotation(index, annotation)
 			}
@@ -1556,94 +1543,6 @@ func writeAnnotation(args []js.Value) (any, error) {
 		return nil, err
 	}
 	return editorSelectionInfo{editorInfo: result.(editorInfo), SelectedIDs: ids}, nil
-}
-
-// measureWatermark 复用标准渲染度量水印，临时文档保留尚未提交的字体引用
-// 入参: object 水印图元, fontData 字体字节, backends 当前后端配置
-// 返回: ofdgo.Box 实际绘制范围, error 错误信息
-func measureWatermark(object ofdgo.GraphicObject, fontData []byte, backends ofdgo.RenderBackends) (ofdgo.Box, error) {
-	if object.Type == "ImageObject" {
-		return ofdgo.NewMatrix(object.ImageObject.CTM).TransformBox(ofdgo.Box{W: 1, H: 1}), nil
-	}
-	editor := ofdgo.NewEditor()
-	if _, err := editor.AddPage(210, 297); err != nil {
-		return ofdgo.Box{}, err
-	}
-	font, err := editor.AddFont(FontFile{Data: fontData}, 0)
-	if err != nil {
-		return ofdgo.Box{}, err
-	}
-	object.TextObject.Font, object.TextObject.Alpha = font, nil
-	if _, err := editor.AddObject(0, object); err != nil {
-		return ofdgo.Box{}, err
-	}
-	reader, err := editor.Reader()
-	if err != nil {
-		return ofdgo.Box{}, err
-	}
-	defer reader.Close()
-	if _, err := reader.PageContentByIndex(0); err != nil {
-		return ofdgo.Box{}, err
-	}
-	bounds, err := ofdgo.NewRenderer(reader, ofdgo.WithRenderBackends(backends)).ObjectBounds(ofdgo.GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: ofdgo.CompositeGraphicUnit{
-		Boundary: object.TextObject.Boundary, Objects: []ofdgo.GraphicObject{object},
-	}}, "")
-	if err != nil {
-		return ofdgo.Box{}, err
-	}
-	if bounds.W <= 0 || bounds.H <= 0 {
-		return ofdgo.Box{}, fmt.Errorf("watermark has no visible content")
-	}
-	return bounds, nil
-}
-
-// layoutWatermark 按实际绘制边界居中水印或均匀平铺，选区按页面比例映射
-// 入参: annotation 水印注解, bounds 绘制范围, options 输入选项, page 页面范围
-func layoutWatermark(annotation *ofdgo.Annotation, bounds ofdgo.Box, options annotationOptions, page ofdgo.Box) {
-	base := annotation.Appearance.Objects[0]
-	area := ofdgo.Box{W: page.W, H: page.H}
-	if options.Area != nil {
-		area = ofdgo.Box{X: options.Area.X * page.W, Y: options.Area.Y * page.H, W: options.Area.W * page.W, H: options.Area.H * page.H}
-	}
-	scale := 1.0
-	if area.W > 0 && area.H > 0 {
-		scale = math.Min(1, math.Min(area.W/bounds.W, area.H/bounds.H))
-	}
-	if scale != 1 {
-		matrix := ofdgo.NewMatrix(fmt.Sprintf("%g 0 0 %g 0 0", scale, scale))
-		if base.Type == "TextObject" {
-			base.TextObject.CTM = matrix.Multiply(ofdgo.NewMatrix(base.TextObject.CTM)).String()
-		} else {
-			base.ImageObject.CTM = matrix.Multiply(ofdgo.NewMatrix(base.ImageObject.CTM)).String()
-		}
-		bounds = matrix.TransformBox(bounds)
-	}
-	columns, rows := 1, 1
-	if options.Tile {
-		angle := options.Angle * math.Pi / 180
-		width := math.Max(bounds.W, (math.Abs(math.Cos(angle))*options.Width+math.Abs(math.Sin(angle))*options.Height)*scale)
-		height := math.Max(bounds.H, (math.Abs(math.Sin(angle))*options.Width+math.Abs(math.Cos(angle))*options.Height)*scale)
-		columns = max(1, int((area.W+10)/(width+10)))
-		rows = max(1, int((area.H+10)/(height+10)))
-	} else {
-		area = ofdgo.Box{X: area.X + (area.W-bounds.W)/2, Y: area.Y + (area.H-bounds.H)/2, W: bounds.W, H: bounds.H}
-	}
-	annotation.Appearance.Boundary = fmt.Sprintf("%g %g %g %g", area.X, area.Y, area.W, area.H)
-	annotation.Appearance.Objects = make([]ofdgo.GraphicObject, 0, columns*rows)
-	for row := range rows {
-		for column := range columns {
-			x := (float64(column)+0.5)*area.W/float64(columns) - bounds.X - bounds.W/2
-			y := (float64(row)+0.5)*area.H/float64(rows) - bounds.Y - bounds.H/2
-			object := base
-			boundary := fmt.Sprintf("%g %g %g %g", x, y, options.Width, options.Height)
-			if object.Type == "TextObject" {
-				object.TextObject.Boundary = boundary
-			} else {
-				object.ImageObject.Boundary = boundary
-			}
-			annotation.Appearance.Objects = append(annotation.Appearance.Objects, object)
-		}
-	}
 }
 
 // insertInk 将一笔采样写为一个标准矢量对象，复用内部插入与撤销逻辑
@@ -4473,6 +4372,9 @@ func saveDocument(args []js.Value) (any, error) {
 // 入参: editor 待写出文档, args 写出回调、进度回调及可选页面索引、压缩配置、取消检查
 // 返回: any 保存结果, error 错误信息
 func saveEditor(editor *ofdgo.Editor, args []js.Value) (any, error) {
+	if len(args) == 0 || args[0].Type() != js.TypeFunction {
+		return nil, fmt.Errorf("missing output callback")
+	}
 	if len(args) > 1 {
 		editor.OnWriteProgress = editorOperationProgress(args[1])
 		defer func() { editor.OnWriteProgress = nil }()
