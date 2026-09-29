@@ -36,10 +36,11 @@ const (
 	CompressionLossy     = pdfgo.CompressionLossy
 )
 
-// CompressionMode 选择不变、无损或有损输出，不改变导出分辨率
+// CompressionMode 选择默认、无损或有损输出，不改变导出分辨率
 type CompressionMode = pdfgo.CompressionMode
 
-// CompressionOptions 配置输出压缩，零值保留现有行为，Quality为有损质量1至100，0使用85
+// CompressionOptions 配置输出压缩，默认模式沿用现有输出策略，不额外优化
+// Mode零值CompressionUnchanged表示默认模式，Quality为有损质量1至100，0使用85
 // 无损表示不引入额外损失，不保证跨格式转换可逆；有损仅降低图片画质，不栅格化文字和矢量
 type CompressionOptions = pdfgo.CompressionOptions
 

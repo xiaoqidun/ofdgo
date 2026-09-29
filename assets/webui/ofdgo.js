@@ -1254,7 +1254,7 @@ document.addEventListener("selectionchange", syncSelection);
 el.exportFormat.addEventListener("change", () => updateDPIControl());
 el.outputCompression.addEventListener("change", () => {
 	el.compressionValue.textContent = el.outputCompression.selectedOptions[0].textContent;
-	el.compressionValue.dataset.short = ["原", "无", "有"][Number(el.outputCompression.value)];
+	el.compressionValue.dataset.short = ["默", "无", "有"][Number(el.outputCompression.value)];
 });
 el.exportPageButton.addEventListener("click", () => exportFile(false));
 el.exportButton.addEventListener("click", () => openExportPanel());
