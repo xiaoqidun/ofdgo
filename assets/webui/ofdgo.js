@@ -2806,7 +2806,7 @@ async function changeDocument(name, item, ...args) {
 	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages";
 	state.imageImporting = name === "ofdgoImportImages";
 	if (importing) state.importing = true;
-	setBusy(true, importing ? "正在导入" : "", null);
+	setBusy(true, importing ? "正在导入页面" : "", null);
 	try {
 		args = await Promise.all(args);
 		if (openSeq !== state.openSeq) {
@@ -3352,11 +3352,11 @@ async function loadWASM() {
 				setProgress(data.text, data.percent);
 			} else if (data.type === "conversion") {
 				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && !el.cancelExportButton.disabled) {
-					if (data.phase === "open") setProgress("正在读取 PDF", null);
-					else if (data.phase === "pages") setProgress(data.completed ? `正在整理 ${data.completed} 页` : "正在整理页面", null);
-					else if (data.phase === "convert") setProgress(`正在转换 ${data.completed} / ${data.total} 页`, data.total ? 28 + data.completed / data.total * 22 : null);
+					if (data.phase === "open") setProgress("正在读取文档", null);
+					else if (data.phase === "pages") setProgress(data.completed ? `正在整理页面 · ${data.completed} 页` : "正在整理页面", null);
+					else if (data.phase === "convert") setProgress(`正在转换页面 · ${data.completed} / ${data.total} 页`, data.total ? 28 + data.completed / data.total * 22 : null);
 					else if (data.phase === "write.fonts") setProgress("正在处理字体", null);
-					else setProgress("正在生成 OFD", null);
+					else setProgress("正在生成文档", null);
 				}
 			} else if (data.type === "export") {
 				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.exporting) {
@@ -3377,15 +3377,15 @@ async function loadWASM() {
 				}
 			} else if (data.type === "import") {
 				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.imageImporting) {
-					const text = data.phase === "commit" ? "正在完成" : `正在导入 ${data.completed} / ${data.total} 张`;
+					const text = data.phase === "commit" ? "正在完成导入" : `正在导入图片 · ${data.completed} / ${data.total} 张`;
 					el.createStatus.textContent = text;
 					setProgress(text, data.total ? data.completed / data.total * 100 : null);
 					if (data.phase === "commit") el.createCancel.disabled = el.cancelExportButton.disabled = true;
 					return;
 				}
 				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.importing && !el.importCancel.disabled) {
-					const label = { ids: "正在检查", pages: "正在导入", resources: "正在读取", commit: "正在完成" }[data.phase];
-					el.importStatus.textContent = data.total ? `${label} ${data.completed} / ${data.total} 页` : label;
+					const label = { ids: "正在检查标识", pages: "正在导入页面", resources: "正在读取资源", commit: "正在完成导入" }[data.phase];
+					el.importStatus.textContent = data.total ? `${label} · ${data.completed} / ${data.total} 页` : label;
 					setProgress(label, data.total ? data.completed / data.total * 100 : null);
 					if (data.phase === "commit") el.importCancel.disabled = el.cancelExportButton.disabled = true;
 				}
@@ -3508,7 +3508,7 @@ async function downloadRemoteDocument(options) {
 				if (done) break;
 				chunks.push(value);
 				received += value.byteLength;
-				setProgress(`正在下载 ${(received / 1048576).toFixed(1)} MB`, total > 0 && received <= total ? received / total * 20 : null);
+				setProgress(`正在下载文档 · ${(received / 1048576).toFixed(1)} MB`, total > 0 && received <= total ? received / total * 20 : null);
 			}
 		} finally { reader.releaseLock(); }
 		controller.signal.throwIfAborted();
@@ -3562,7 +3562,7 @@ async function openOFD(file, remote = null) {
 			return;
 		}
 		if (downloaded ? downloaded.pdf : /\.pdf$/i.test(file.name || "")) {
-			setProgress("正在转换 PDF", 25);
+			setProgress("正在转换文档", 25);
 			await ensureWASM();
 			if (openSeq !== state.openSeq) return;
 			let converted;
@@ -3646,7 +3646,7 @@ async function openSelectedFonts(event) {
 	try {
 		const fonts = [];
 		for (let i = 0; i < files.length; i += 1) {
-			setProgress(`正在读取字体 ${i + 1} / ${files.length}`, 10 + Math.round(i / files.length * 60));
+			setProgress(`正在读取字体 · ${i + 1} / ${files.length}`, 10 + Math.round(i / files.length * 60));
 			const file = files[i];
 			fonts.push(fontManager.record(file.name, new Uint8Array(await file.arrayBuffer()), "upload"));
 		}
@@ -3755,7 +3755,7 @@ async function loadDocumentLocalFonts(available, openSeq = state.openSeq) {
 	const emptyStatus = available.length === 0 ? "暂无系统字体" : "暂无匹配字体";
 	const fonts = [];
 	for (let i = 0; i < selected.length; i += 1) {
-		setProgress(`正在读取字体 ${i + 1} / ${selected.length}`, 20 + Math.round(i / selected.length * 60));
+		setProgress(`正在读取字体 · ${i + 1} / ${selected.length}`, 20 + Math.round(i / selected.length * 60));
 		const item = selected[i];
 		const data = await fontManager.read(item);
 		if (openSeq !== state.openSeq) {
@@ -4103,7 +4103,7 @@ async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, import
 					canceled.name = "AbortError";
 					throw canceled;
 				}
-				setProgress(pdf ? "正在读取 PDF" : "正在解析文档", null);
+				setProgress(pdf ? "正在读取文档" : "正在解析文档", null);
 				el.progressPanel.hidden = false;
 			}
 		}
@@ -4469,7 +4469,7 @@ function renderSecurity() {
 function cancelSigning() {
 	if (el.signCancel.disabled) return;
 	state.signCanceled = true;
-	el.signStatus.textContent = "正在取消";
+	el.signStatus.textContent = "正在取消操作";
 	cancelExport();
 }
 
@@ -4681,7 +4681,7 @@ async function verifyDocument(event) {
 	event.preventDefault();
 	if (!state.doc || document.body.hasAttribute("aria-busy")) return;
 	const openSeq = state.openSeq;
-	setBusy(true, "正在验签", null, "正在验签");
+	setBusy(true, "正在验证签名", null, "正在验证签名");
 	el.verifyForm.inert = true;
 	try {
 		const options = {
@@ -4733,7 +4733,7 @@ async function updateExportRange() {
 	el.exportRangeRow.hidden = !specified;
 	el.exportRange.removeAttribute("aria-invalid");
 	el.exportSubmit.disabled = specified;
-	el.exportRangeStatus.textContent = specified && value ? "正在校验" : "";
+	el.exportRangeStatus.textContent = specified && value ? "正在校验页码" : "";
 	if (!specified || !value) {
 		return;
 	}
@@ -4952,7 +4952,7 @@ function startBatchWorker() {
 function cancelBatch() {
 	batch.canceled = true;
 	batchElements.Cancel.disabled = true;
-	batchElements.Status.textContent = "正在取消";
+	batchElements.Status.textContent = "正在取消操作";
 	if (batch.activeID) batch.worker.postMessage({ type: "cancel", id: batch.activeID });
 }
 
@@ -5201,12 +5201,12 @@ function cancelExport() {
 	el.cancelExportButton.disabled = true;
 	if (state.imageImporting) {
 		el.createCancel.disabled = true;
-		el.createStatus.textContent = "正在取消";
+		el.createStatus.textContent = "正在取消操作";
 	} else if (state.importing) {
 		el.importCancel.disabled = true;
-		el.importStatus.textContent = "正在取消";
+		el.importStatus.textContent = "正在取消操作";
 	}
-	setProgress("正在取消", null);
+	setProgress("正在取消操作", null);
 	wasmWorker.postMessage({ type: "cancel", id: state.exportRequestID });
 }
 
@@ -5872,7 +5872,7 @@ async function selectDocumentText() {
 	const count = state.doc.pageCount;
 	try {
 		for (let index = 0; index < count; index += 1) {
-			setStatus(`正在全选 ${index + 1} / ${count} 页`);
+			setStatus(`正在全选文字 · ${index + 1} / ${count} 页`);
 			const text = await callWASM("ofdgoPageTextString", index);
 			if (!active()) {
 				return;
@@ -6415,7 +6415,7 @@ async function searchDocument() {
 			if (seq !== state.searchSeq || openSeq !== state.openSeq) {
 				return;
 			}
-			el.searchStatus.textContent = `正在搜索 ${page + 1} / ${pageCount} 页`;
+			el.searchStatus.textContent = `正在搜索文字 · ${page + 1} / ${pageCount} 页`;
 			if (!matches?.length) {
 				continue;
 			}
@@ -7158,7 +7158,7 @@ function renderMeta(keepDetails = false) {
 	el.metaFonts.textContent = String(doc.fontCount || 0);
 	el.pageTotal.textContent = String(doc.pageCount || 0);
 	if (keepDetails && doc.detailsPending) return;
-	el.metaSignatures.textContent = doc.detailsPending ? "正在检查" : doc.detailsError ? "读取失败" : String(doc.signatureCount || 0);
+	el.metaSignatures.textContent = doc.detailsPending ? "正在检查签名" : doc.detailsError ? "读取失败" : String(doc.signatureCount || 0);
 	renderMetaContent(el.attachmentList, [doc.attachments, doc.attachmentError], renderAttachments);
 	renderMetaContent(el.signatureList, [doc.signatures, doc.signatureError], renderSignatures);
 	renderMetaContent(el.docFontList, doc.fonts || [], renderDocumentFonts);
@@ -8228,7 +8228,7 @@ function exportFormatUsesDPI(value) {
 
 function updateDPIControl() {
 	el.imageDPI.disabled = state.exporting || !state.doc || document.body.hasAttribute("aria-busy") || (displayMode() !== "raster" && !exportFormatUsesDPI(el.exportFormat.value));
-	el.imageDPI.title = `DPI：${currentImageDPI()}`;
+	el.imageDPI.title = `输出精度：${currentImageDPI()} DPI`;
 	el.dpiValue.textContent = String(currentImageDPI());
 	const format = exportFormatInfo(el.exportFormat.value);
 	el.formatValue.textContent = format?.label || "";

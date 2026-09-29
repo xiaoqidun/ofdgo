@@ -63,6 +63,7 @@ type outputOptimization struct {
 	protected bool
 	completed int
 	deflater  *flate.Writer
+	optimized map[string]bool
 }
 
 // WriteToWithOptions 按压缩策略写出OFD，签名文档不额外改写资源内容
@@ -275,7 +276,7 @@ func (e *Editor) writeOutputEntry(archive *zip.Writer, header zip.FileHeader, da
 	if err := editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0); err != nil {
 		return err
 	}
-	if lossy, ok := e.output.images[strings.ToLower(cleanPackagePath(header.Name))]; ok {
+	if lossy, ok := e.output.images[strings.ToLower(cleanPackagePath(header.Name))]; ok && !e.output.optimized[strings.ToLower(cleanPackagePath(header.Name))] {
 		options := e.output.options
 		if !lossy {
 			options.Mode = CompressionLossless

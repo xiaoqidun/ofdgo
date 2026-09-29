@@ -89,13 +89,16 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 			resource.Data = buffer.Bytes()
 		}
 		if s.renderer != nil && s.renderer.Compression.Mode != CompressionUnchanged {
-			data, err := pdfgo.OptimizeImageSize(s.renderer.outputContext(), resource.Data, s.renderer.Compression, target)
+			data, err := pdfgo.OptimizeImageResource(s.renderer.outputContext(), resource.Data, s.renderer.Compression, target)
 			if err != nil {
 				if s.err = s.renderer.outputContext().Err(); s.err != nil {
 					return
 				}
 			} else {
 				resource.Data = data
+				if bytes.HasPrefix(data, []byte{255, 216}) {
+					resource.MIME = "image/jpeg"
+				}
 			}
 		}
 		if s.imageNames != nil {

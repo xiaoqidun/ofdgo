@@ -169,6 +169,33 @@ func (e *Editor) writePlaintext(writer io.Writer) (int64, error) {
 	}
 	output := &ofdCountingWriter{writer: writer}
 	archive := zip.NewWriter(output)
+	if e.output != nil && e.output.options.Mode != CompressionUnchanged {
+		parts := make(map[string][]byte)
+		err := e.writeParts(func(name string, data []byte, _ bool) error {
+			if subset, ok := fonts[name]; ok {
+				data = subset
+			}
+			parts[name] = data
+			return nil
+		}, progress)
+		if err != nil {
+			return 0, err
+		}
+		removed := make(map[string]bool)
+		if err := e.compressResourceParts(parts, nil, removed); err != nil {
+			return 0, err
+		}
+		for _, name := range slices.Sorted(maps.Keys(parts)) {
+			if removed[strings.ToLower(cleanPackagePath(name))] {
+				continue
+			}
+			if err := e.writeOutputEntry(archive, zip.FileHeader{Name: name, Method: zip.Deflate}, parts[name]); err != nil {
+				return output.count, err
+			}
+		}
+		err = archive.Close()
+		return output.count, err
+	}
 	err = e.writeParts(func(name string, data []byte, compressed bool) error {
 		if subset, ok := fonts[name]; ok {
 			data = subset

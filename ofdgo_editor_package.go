@@ -450,6 +450,12 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		return 0, err
 	}
 	reader := e.source.reader
+	if removed == nil {
+		removed = make(map[string]bool)
+	}
+	if err := e.compressResourceParts(parts, reader, removed); err != nil {
+		return 0, err
+	}
 	if len(parts) != 0 || len(removed) != 0 || e.output != nil && e.output.options.Mode != CompressionUnchanged && !e.output.protected {
 		name := "OFD.xml"
 		if file, ok := reader.packageFile(name); ok {

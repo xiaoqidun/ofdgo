@@ -28,8 +28,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/xiaoqidun/pdfgo"
 )
 
 const (
@@ -256,24 +254,30 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 		if err != nil {
 			return nil, err
 		}
-		seen := make(map[string]bool)
-		for i, img := range images {
-			if err := options.progress.report("compress", i, len(images)); err != nil {
-				return nil, err
+		optimizer := &Editor{output: &outputOptimization{ctx: context.Background(), options: options.Compression, sizes: sizes, images: make(map[string]bool)}}
+		optimizer.OnWriteProgress = func(stage string, completed, total int) error {
+			return options.progress.report(stage, completed, total)
+		}
+		for _, img := range images {
+			key := strings.ToLower(cleanPackagePath(img.Location))
+			optimizer.output.images[key] = !masks[key]
+		}
+		removed := make(map[string]bool)
+		if err := optimizer.compressResourceParts(parts, nil, removed); err != nil {
+			return nil, err
+		}
+		for name := range parts {
+			if removed[strings.ToLower(cleanPackagePath(name))] {
+				delete(parts, name)
 			}
-			if seen[img.Location] {
-				continue
-			}
-			seen[img.Location] = true
-			if data, ok := parts[img.Location]; ok {
-				compression := options.Compression
-				if masks[strings.ToLower(cleanPackagePath(img.Location))] {
-					compression.Mode = CompressionLossless
-				}
-				if optimized, err := pdfgo.OptimizeImageSize(context.Background(), data, compression, sizes[strings.ToLower(cleanPackagePath(img.Location))]); err == nil {
-					parts[img.Location] = optimized
-				}
-			}
+		}
+		r = &Reader{files: parts}
+		if err := r.initRoot(); err != nil {
+			return nil, err
+		}
+		doc, err = r.Doc()
+		if err != nil {
+			return nil, err
 		}
 	}
 	if options.Time.IsZero() {
