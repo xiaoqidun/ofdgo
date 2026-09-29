@@ -4463,8 +4463,7 @@ function updateEncryptionType() {
 	el.encryptionCertificatesRow.hidden = !certificates;
 	el.encryptionPassword.required = el.encryptionConfirm.required = password;
 	el.encryptionCertificates.required = certificates;
-	const user = mode === "password" && encryptionMode() === mode ? state.doc.encryption.users?.[0] || "" : "";
-	el.encryptionUser.value = user === "User" ? "" : user;
+	el.encryptionUser.value = mode === "password" && encryptionMode() === mode ? state.doc.encryption.users?.[0] || "" : "";
 	el.encryptionPassword.value = el.encryptionConfirm.value = "";
 	el.encryptionCertificates.value = "";
 	el.encryptionStatus.textContent = mode === "keep" && state.doc?.encryption?.policyRequired ? "请重新选择加密方式" : "";

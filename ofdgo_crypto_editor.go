@@ -40,11 +40,7 @@ func (e *Editor) SetEncryption(options *EncryptionOptions) error {
 	}
 	info := EncryptionInfo{Encrypted: true, Method: "1.1.1", Layers: 1}
 	if len(options.Password) != 0 {
-		name := options.UserName
-		if name == "" {
-			name = "User"
-		}
-		info.Users = []string{name}
+		info.Users = []string{options.UserName}
 	} else {
 		info.Method = "1.1.2"
 		for _, recipient := range options.Recipients {

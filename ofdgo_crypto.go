@@ -65,7 +65,7 @@ type EncryptionRecipient struct {
 }
 
 // EncryptionOptions 设置GM/T0099加密，口令与证书方案二选一
-// UserName标记口令接收者，不参与口令派生，留空使用User
+// UserName标记口令接收者，不参与口令派生，留空不写入用户名
 // 口令方案应使用足够长的随机口令；标准密钥派生不提供慢速口令哈希
 type EncryptionOptions struct {
 	Password   []byte

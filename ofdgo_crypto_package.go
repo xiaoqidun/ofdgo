@@ -67,7 +67,7 @@ type encryptionParams struct {
 
 // encryptionUser 保存单个接收者的公开信息及包装密钥
 type encryptionUser struct {
-	Name        string `xml:"UserName,attr"`
+	Name        string `xml:"UserName,attr,omitempty"`
 	Role        string `xml:"UserType,attr,omitempty"`
 	Certificate string `xml:"UserCert,omitempty"`
 	Key         string `xml:"EncryptedWK"`
@@ -453,11 +453,7 @@ func encryptPackageParts(parts map[string][]byte, options EncryptionOptions, pro
 		if err != nil {
 			return nil, err
 		}
-		name := options.UserName
-		if name == "" {
-			name = "User"
-		}
-		seed.Users = []encryptionUser{{Name: name, Role: options.UserType, Key: base64.StdEncoding.EncodeToString(wrapped), IV: base64.StdEncoding.EncodeToString(iv)}}
+		seed.Users = []encryptionUser{{Name: options.UserName, Role: options.UserType, Key: base64.StdEncoding.EncodeToString(wrapped), IV: base64.StdEncoding.EncodeToString(iv)}}
 	} else {
 		seed.Method = "1.1.2"
 		for _, recipient := range options.Recipients {
