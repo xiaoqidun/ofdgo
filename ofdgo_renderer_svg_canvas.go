@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"html"
 	"image"
@@ -36,16 +37,17 @@ const svgCreatorMetadata = `<metadata>` + creatorXMP + `</metadata>`
 // svgResourceRenderer 分离外部资源的SVG渲染器
 type svgResourceRenderer struct {
 	*svg.SVG
-	renderer    *Renderer
-	writer      io.Writer
-	fonts       []SVGFont
-	images      []SVGImage
-	imageNames  map[image.Image]string
-	seen        map[string]bool
-	styles      strings.Builder
-	err         error
-	objects     map[*GraphicObject]string
-	objectStack []svgObjectGroup
+	renderer      *Renderer
+	writer        io.Writer
+	fonts         []SVGFont
+	images        []SVGImage
+	imageNames    map[image.Image]string
+	seen          map[string]bool
+	styles        strings.Builder
+	err           error
+	objects       map[*GraphicObject]string
+	objectStack   []svgObjectGroup
+	embeddedFonts bool
 }
 
 // svgObjectGroup 记录编辑分组的稳定路径，不把底纹内部绘制当作成员
@@ -58,13 +60,10 @@ type svgObjectGroup struct {
 // RenderImage 绘制图片，分离资源时保持原始编码、尺寸和变换
 // 入参: img 图片对象, m 变换矩阵
 func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
-	if s.imageNames == nil {
-		s.SVG.RenderImage(img, m)
-		return
-	}
 	name, ok := s.imageNames[img]
+	var resource SVGImage
 	if !ok {
-		resource := SVGImage{MIME: "image/png"}
+		resource = SVGImage{MIME: "image/png"}
 		if encoded, ok := img.(*canvasimage.Image); ok {
 			resource.MIME, resource.Data = encoded.Mimetype, encoded.Bytes
 		} else {
@@ -75,22 +74,46 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 			}
 			resource.Data = buffer.Bytes()
 		}
-		name = fmt.Sprintf("ofdgo-image-%x", sha256.Sum256(resource.Data))
-		resource.Name = name
-		s.imageNames[img] = name
-		if !s.seen[name] {
-			s.seen[name] = true
-			s.images = append(s.images, resource)
+		if s.imageNames != nil {
+			name = fmt.Sprintf("ofdgo-image-%x", sha256.Sum256(resource.Data))
+			resource.Name = name
+			s.imageNames[img] = name
+			if !s.seen[name] {
+				s.seen[name] = true
+				s.images = append(s.images, resource)
+			}
 		}
 	}
 	_, height := s.Size()
 	size := img.Bounds().Size()
-	fmt.Fprintf(s.writer, `<image transform="%s" width="%d" height="%d" xlink:href="%s"/>`, m.Translate(0, float64(size.Y)).ToSVG(height), size.X, size.Y, name)
+	m = m.Translate(0, float64(size.Y))
+	// 直接写出换轴后的矩阵，原坐标平移为零时仍需保留页面高度补偿。
+	matrix := Matrix{a: m[0][0], b: -m[1][0], c: -m[0][1], d: m[1][1], e: m[0][2], f: height - m[1][2]}
+	fmt.Fprintf(s.writer, `<image transform="matrix(%s)" width="%d" height="%d" xlink:href="`, matrix.String(), size.X, size.Y)
+	if s.imageNames != nil {
+		io.WriteString(s.writer, name)
+	} else {
+		fmt.Fprintf(s.writer, "data:%s;base64,", resource.MIME)
+		encoder := base64.NewEncoder(base64.StdEncoding, s.writer)
+		if _, err := encoder.Write(resource.Data); err != nil {
+			s.err = err
+			return
+		}
+		if err := encoder.Close(); err != nil {
+			s.err = err
+			return
+		}
+	}
+	io.WriteString(s.writer, `"/>`)
 }
 
 // RenderText 绘制文字并记录实际使用的字体资源
 // 入参: text 文字对象, m 变换矩阵
 func (s *svgResourceRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
+	if s.embeddedFonts {
+		s.SVG.RenderText(text, m)
+		return
+	}
 	if text.Empty() {
 		return
 	}
@@ -137,6 +160,8 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 		seen:     make(map[string]bool),
 	}
 	io.WriteString(buffer, svgCreatorMetadata)
+	// 图片方向由文档变换决定，不再由浏览器应用EXIF方向。
+	io.WriteString(buffer, `<g style="image-orientation:none">`)
 	if images {
 		s.imageNames = make(map[image.Image]string)
 	}
@@ -161,6 +186,7 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 	if s.err != nil {
 		return SVGResources{}, s.err
 	}
+	io.WriteString(buffer, `</g>`)
 	s.SetCustomStyle(s.styles.String())
 	if err := s.Close(); err != nil {
 		return SVGResources{}, err

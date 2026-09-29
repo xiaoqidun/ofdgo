@@ -48,9 +48,14 @@ func (CanvasBackend) RenderSVG(r *Renderer, page *PageContent, writer io.Writer,
 			return SVGResources{}, err
 		}
 		buffer := bufio.NewWriter(writer)
-		renderer := svg.New(buffer, c.W, c.H, nil)
+		renderer := &svgResourceRenderer{SVG: svg.New(buffer, c.W, c.H, nil), writer: buffer, embeddedFonts: true}
 		io.WriteString(buffer, svgCreatorMetadata)
+		io.WriteString(buffer, `<g style="image-orientation:none">`)
 		c.RenderTo(renderer)
+		if renderer.err != nil {
+			return SVGResources{}, renderer.err
+		}
+		io.WriteString(buffer, `</g>`)
 		if err := renderer.Close(); err != nil {
 			return SVGResources{}, err
 		}

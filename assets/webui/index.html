@@ -164,7 +164,7 @@
 				<span>擦除</span>
 			</div>
 			<div class="editor-group">
-				<select id="addPageButton" aria-label="新增页面" title="新增页面"><option value="" hidden>新增</option><option value="blank">空白</option><option value="import">插页</option></select>
+				<select id="addPageButton" aria-label="新增页面" title="新增页面"><option value="" hidden>新增</option><option value="blank">空白</option><option value="import">插页</option><option value="images">图片</option></select>
 				<button id="copyPageButton" class="button" type="button" aria-label="复制页面">复制</button>
 				<button id="deletePageButton" class="button" type="button" aria-label="删除页面">删除</button>
 				<button id="movePagePrevButton" class="button" type="button" aria-label="页面前移">前移</button>
@@ -284,11 +284,14 @@
 		</dialog>
 		<dialog id="createPanel" class="form-dialog" aria-label="新建文档">
 			<form id="createForm">
+				<div id="createModeRow" class="form-row"><label for="createMode">来源</label><select id="createMode"><option value="blank">空白</option><option value="images">图片</option></select></div>
 				<div class="form-row">
 					<label for="createName">名称</label>
 					<input id="createName" type="text" value="未命名" required autofocus>
 				</div>
-				<div class="form-pair">
+				<div id="createImagesRow" class="form-row" hidden><label for="createImages">图片</label><input id="createImages" type="file" accept=".png,.jpg,.jpeg,.jb2,.jbig2" multiple disabled></div>
+				<div id="createSizeRow" class="form-row" hidden><label for="createSize">尺寸</label><select id="createSize" disabled><option value="image">随图</option><option value="custom">自定</option></select></div>
+				<div id="createDimensions" class="form-pair">
 					<div class="form-row">
 						<label for="createWidth">宽度</label>
 						<div class="form-unit"><input id="createWidth" type="number" value="210" min="1" step="any" required><span>mm</span></div>
@@ -298,10 +301,12 @@
 						<div class="form-unit"><input id="createHeight" type="number" value="297" min="1" step="any" required><span>mm</span></div>
 					</div>
 				</div>
+				<div id="createMarginRow" class="form-row" hidden><label for="createMargin">边距</label><div class="form-unit"><input id="createMargin" type="number" value="0" min="0" step="any" required disabled><span>mm</span></div></div>
+				<div id="createPositionRow" class="form-row" hidden><label for="createPosition">位置</label><select id="createPosition" disabled><option value="before">页前</option><option value="after" selected>页后</option><option value="first">开头</option><option value="last">末尾</option></select></div>
 				<div class="form-actions">
 					<div id="createStatus" class="form-status" role="status"></div>
 					<button id="createCancel" class="button" type="button">取消</button>
-					<button class="button" type="submit">新建</button>
+					<button id="createSubmit" class="button" type="submit">新建</button>
 				</div>
 			</form>
 		</dialog>

@@ -210,6 +210,7 @@ func RunWASM() {
 	registerCallback("ofdgoFontFaces", fontFaces)
 	registerCallback("ofdgoFontFace", fontFace)
 	registerCallback("ofdgoCreateDocument", createDocument)
+	registerAsyncCallback("ofdgoImportImages", importImages)
 	registerCallback("ofdgoEditDocument", editDocument)
 	registerCallback("ofdgoUpdateInfo", updateInfo)
 	registerCallback("ofdgoChangePage", changePage)
@@ -3526,6 +3527,48 @@ func importPages(args []js.Value) (any, error) {
 	clearImport()
 	info, err := previewEditor(currentEditor, currentSession.Renderer.RenderAnnotations)
 	return editorPageInfo{info, at}, err
+}
+
+// importImages 逐张读取图片并建页，负数位置表示新建文档
+// 入参: args 文件名、选项、插入位置、标题、注解设置、读取与进度回调
+// 返回: any 文档信息, error 错误信息
+func importImages(args []js.Value) (any, error) {
+	var options ofdgo.ImagePageOptions
+	if err := json.Unmarshal([]byte(js.Global().Get("JSON").Call("stringify", args[1]).String()), &options); err != nil {
+		return nil, err
+	}
+	at := args[2].Int()
+	editor := currentEditor
+	if at < 0 {
+		editor = ofdgo.NewEditor()
+		editor.Info.Title = args[3].String()
+	} else if editor == nil {
+		return nil, fmt.Errorf("document is not editable")
+	}
+	if args[0].Length() == 0 {
+		return nil, fmt.Errorf("请选择图片")
+	}
+	sources := make([]ofdgo.ImagePageSource, args[0].Length())
+	for i := range sources {
+		sources[i] = ofdgo.ImagePageSource{Name: args[0].Index(i).String(), Read: func(context.Context) ([]byte, error) {
+			result := args[5].Invoke(i)
+			if message := result.Get("error"); message.Type() == js.TypeString {
+				return nil, fmt.Errorf("%s", message.String())
+			}
+			return bytesFromJS(result.Get("bytes"))
+		}}
+	}
+	options.OnProgress = editorOperationProgress(args[6])
+	position := max(at, 0)
+	if err := editor.ImportImages(context.Background(), sources, position, options); err != nil {
+		return nil, err
+	}
+	if at < 0 {
+		editor.SetHistoryLimit(100)
+	}
+	clearImport()
+	info, err := previewEditor(editor, args[4].Bool())
+	return editorPageInfo{info, position}, err
 }
 
 // createDocument 新建单页文档

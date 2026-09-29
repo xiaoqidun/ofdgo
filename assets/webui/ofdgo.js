@@ -55,6 +55,8 @@ const state = {
 	importPageCount: 0,
 	importEncrypted: false,
 	importing: false,
+	imageImporting: false,
+	createInsert: false,
 	pageSelection: new Set(),
 	pageSelectionAnchor: null,
 	pageMultiSelect: false,
@@ -359,6 +361,12 @@ const el = {
 	pageCancel: document.querySelector("#pageCancel"),
 	saveButton: document.querySelector("#saveButton"),
 	createPanel: document.querySelector("#createPanel"),
+	createMode: document.querySelector("#createMode"),
+	createImages: document.querySelector("#createImages"),
+	createSize: document.querySelector("#createSize"),
+	createMargin: document.querySelector("#createMargin"),
+	createPosition: document.querySelector("#createPosition"),
+	createSubmit: document.querySelector("#createSubmit"),
 	createForm: document.querySelector("#createForm"),
 	createName: document.querySelector("#createName"),
 	createWidth: document.querySelector("#createWidth"),
@@ -886,6 +894,7 @@ el.addPageButton.addEventListener("change", async () => {
 	if (canvasEditor.input && !await canvasEditor.commitText()) return;
 	if (canvasEditor.crop && !await canvasEditor.commitCrop()) return;
 	if (action === "import") { openImportPanel(); return; }
+	if (action === "images") { openCreatePanel(true); return; }
 	const page = currentPageInfo();
 	return changeDocument("ofdgoChangePage", null, "add", state.pageIndex, page.width, page.height);
 });
@@ -1110,7 +1119,13 @@ el.editButton.addEventListener("click", toggleEditor);
 el.editButton.addEventListener("pointerdown", (event) => {
 	if (canvasEditor.input) event.preventDefault();
 });
-el.createCancel.addEventListener("click", () => el.createPanel.close());
+el.createCancel.addEventListener("click", () => state.imageImporting ? cancelExport() : el.createPanel.close());
+el.createPanel.addEventListener("cancel", event => {
+	if (state.imageImporting) { event.preventDefault(); cancelExport(); }
+});
+el.createPanel.addEventListener("close", () => { el.createImages.value = ""; });
+el.createMode.addEventListener("change", updateCreateOptions);
+el.createSize.addEventListener("change", updateCreateOptions);
 el.createForm.addEventListener("submit", createDocument);
 editorClick(el.insertTextButton, toggleTextTool);
 editorClick(el.insertImageButton, () => openInsertPanel());
@@ -1987,30 +2002,75 @@ function confirmTextReflow(item) {
 		|| window.confirm("将重新排版原文，是否继续？"));
 }
 
-function openCreatePanel() {
+function openCreatePanel(insert = false) {
 	if (document.body.hasAttribute("aria-busy")) {
 		return;
 	}
 	el.createForm.reset();
+	state.createInsert = insert === true;
+	el.createMode.value = state.createInsert ? "images" : "blank";
+	el.createSubmit.textContent = state.createInsert ? "插入" : "新建";
+	el.createPanel.setAttribute("aria-label", state.createInsert ? "插入图片" : "新建文档");
+	el.createCancel.disabled = false;
+	updateCreateOptions();
 	el.createStatus.textContent = "";
 	el.createPanel.showModal();
 }
 
+function updateCreateOptions() {
+	const images = el.createMode.value === "images", busy = Boolean(state.imageImporting);
+	const toggle = (id, visible) => { document.getElementById(id).hidden = !visible; };
+	toggle("createModeRow", !state.createInsert);
+	el.createName.closest(".form-row").hidden = Boolean(state.createInsert);
+	el.createName.disabled = busy || Boolean(state.createInsert);
+	el.createMode.disabled = busy;
+	for (const [id, input] of [["createImagesRow", el.createImages], ["createSizeRow", el.createSize], ["createMarginRow", el.createMargin]]) {
+		toggle(id, images);
+		input.disabled = busy || !images;
+	}
+	el.createImages.required = images;
+	const custom = !images || el.createSize.value === "custom";
+	toggle("createDimensions", custom);
+	el.createWidth.disabled = el.createHeight.disabled = busy || !custom;
+	toggle("createPositionRow", Boolean(state.createInsert));
+	el.createPosition.disabled = busy || !state.createInsert;
+	el.createSubmit.disabled = busy;
+}
+
+function imagePageRequest() {
+	const files = [...el.createImages.files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+	const size = el.createSize.value;
+	return [files, {
+		Width: size === "image" ? 0 : Number(el.createWidth.value),
+		Height: size === "image" ? 0 : Number(el.createHeight.value),
+		Margin: Number(el.createMargin.value),
+	}];
+}
+
 async function createDocument(event) {
 	event.preventDefault();
+	if (state.createInsert) {
+		const at = { before: state.pageIndex, after: state.pageIndex + 1, first: 0, last: state.doc.pageCount }[el.createPosition.value];
+		if (await changeDocument("ofdgoImportImages", null, ...imagePageRequest(), at, "", state.renderAnnotations)) el.createPanel.close();
+		return;
+	}
 	if (document.body.hasAttribute("aria-busy") || !discardChanges()) {
 		return;
 	}
 	const title = el.createName.value.trim() || "未命名";
 	clearSecurityForms();
 	const openSeq = ++state.openSeq;
+	const images = el.createMode.value === "images";
+	state.imageImporting = images;
 	setBusy(true, "正在新建文档", null, "正在新建文档");
 	try {
 		await ensureWASM();
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const doc = await callWASM("ofdgoCreateDocument", title, Number(el.createWidth.value), Number(el.createHeight.value), state.renderAnnotations);
+		const doc = images
+			? await callWASM("ofdgoImportImages", ...imagePageRequest(), -1, title, state.renderAnnotations)
+			: await callWASM("ofdgoCreateDocument", title, Number(el.createWidth.value), Number(el.createHeight.value), state.renderAnnotations);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -2039,6 +2099,12 @@ async function createDocument(event) {
 			el.createStatus.textContent = err.message;
 		}
 	} finally {
+		if (images) {
+			state.imageImporting = false;
+			state.exportRequestID = 0;
+			el.cancelExportButton.hidden = true;
+			el.createCancel.disabled = false;
+		}
 		if (openSeq === state.openSeq) {
 			setBusy(false);
 			updateControls();
@@ -2731,7 +2797,8 @@ async function changeDocument(name, item, ...args) {
 	const before = editorLocation(), revision = state.editorInfo.revision;
 	const restoring = name === "ofdgoUndo" || name === "ofdgoRedo";
 	const { scrollLeft, scrollTop } = el.viewerPanel;
-	const importing = name === "ofdgoImportPages";
+	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages";
+	state.imageImporting = name === "ofdgoImportImages";
 	if (importing) state.importing = true;
 	setBusy(true, importing ? "正在导入" : "", null);
 	try {
@@ -2847,6 +2914,8 @@ async function changeDocument(name, item, ...args) {
 				el.pageStatus.textContent = err.message;
 			} else if (el.paragraphPanel.open) {
 				el.paragraphStatus.textContent = err.message;
+			} else if (el.createPanel.open) {
+				el.createStatus.textContent = err.message;
 			} else if (el.importPanel.open) {
 				el.importStatus.textContent = err.message;
 			} else {
@@ -2856,6 +2925,8 @@ async function changeDocument(name, item, ...args) {
 	} finally {
 		if (importing) {
 			state.importing = false;
+			state.imageImporting = false;
+			el.createCancel.disabled = false;
 			state.exportRequestID = 0;
 			el.cancelExportButton.hidden = true;
 			el.importCancel.disabled = false;
@@ -3299,6 +3370,13 @@ async function loadWASM() {
 					}
 				}
 			} else if (data.type === "import") {
+				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.imageImporting) {
+					const text = data.phase === "commit" ? "正在完成" : `正在导入 ${data.completed} / ${data.total} 张`;
+					el.createStatus.textContent = text;
+					setProgress(text, data.total ? data.completed / data.total * 100 : null);
+					if (data.phase === "commit") el.createCancel.disabled = el.cancelExportButton.disabled = true;
+					return;
+				}
 				if (wasmRequests.get(data.id)?.openSeq === state.openSeq && state.importing && !el.importCancel.disabled) {
 					const label = { ids: "正在检查", pages: "正在导入", resources: "正在读取", commit: "正在完成" }[data.phase];
 					el.importStatus.textContent = data.total ? `${label} ${data.completed} / ${data.total} 页` : label;
@@ -5100,7 +5178,10 @@ function cancelExport() {
 		return;
 	}
 	el.cancelExportButton.disabled = true;
-	if (state.importing) {
+	if (state.imageImporting) {
+		el.createCancel.disabled = true;
+		el.createStatus.textContent = "正在取消";
+	} else if (state.importing) {
 		el.importCancel.disabled = true;
 		el.importStatus.textContent = "正在取消";
 	}
@@ -7991,11 +8072,11 @@ async function callWASM(name, ...args) {
 			request.fontData = new Map();
 			args.push([...request.localFonts.keys()]);
 		}
-		if (name === "ofdgoExportImages" || name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument" || name === "ofdgoSaveEncrypted" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
+		if (name === "ofdgoImportImages" || name === "ofdgoExportImages" || name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument" || name === "ofdgoSaveEncrypted" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
 			state.exportRequestID = id;
 			el.cancelExportButton.hidden = false;
 			el.cancelExportButton.disabled = false;
-			el.cancelExportButton.title = { ofdgoConvertPDF: "取消转换", ofdgoSaveDocument: "取消保存", ofdgoSaveEncrypted: "取消保存", ofdgoSaveSigned: "取消签署", ofdgoImportPages: "取消导入", ofdgoExportAttachment: "取消下载" }[name] || "取消导出";
+			el.cancelExportButton.title = { ofdgoImportImages: "取消导入", ofdgoConvertPDF: "取消转换", ofdgoSaveDocument: "取消保存", ofdgoSaveEncrypted: "取消保存", ofdgoSaveSigned: "取消签署", ofdgoImportPages: "取消导入", ofdgoExportAttachment: "取消下载" }[name] || "取消导出";
 			el.cancelExportButton.setAttribute("aria-label", el.cancelExportButton.title);
 		}
 		try {
@@ -8026,7 +8107,8 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	renderSecurity();
 	updateDisplayControls();
 	el.editButton.disabled = busy || Boolean(sealPreview) || !state.doc || !state.ready || state.exporting;
-	el.createForm.inert = busy;
+	el.createForm.inert = busy && !state.imageImporting;
+	updateCreateOptions();
 	el.insertForm.inert = busy;
 	el.pageForm.inert = busy;
 	el.paragraphForm.inert = busy;

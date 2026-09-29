@@ -29,7 +29,7 @@ self.onmessage = ({ data }) => {
 		operations.get(data.id)?.abort();
 		return;
 	}
-	if (data.name === "ofdgoExportImages" || data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" || data.name === "ofdgoConvertPDF" || data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveEncrypted" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
+	if (data.name === "ofdgoImportImages" || data.name === "ofdgoExportImages" || data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" || data.name === "ofdgoConvertPDF" || data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveEncrypted" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
 		operations.set(data.id, new AbortController());
 	}
 	pending = pending.then(() => data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" ? handleBatchMessage(data) : handleMessage(data));
@@ -165,7 +165,7 @@ async function handleMessage({ id, name, args }) {
 	let output;
 	let channel;
 	const signal = operations.get(id)?.signal;
-	const importing = name === "ofdgoImportPages";
+	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages";
 	const converting = name === "ofdgoConvertPDF";
 	const saving = name === "ofdgoSaveDocument" || name === "ofdgoSaveEncrypted" || name === "ofdgoSaveSigned";
 	const key = name === "ofdgoOpen" ? args[3]?.key : name === "ofdgoSaveSigned" || name === "ofdgoLoadImport" ? args[1]?.key : null;
@@ -173,6 +173,14 @@ async function handleMessage({ id, name, args }) {
 	const password = converting ? args[2] : name === "ofdgoOpen" ? args[3]?.password : name === "ofdgoSaveEncrypted" || name === "ofdgoLoadImport" ? args[1]?.password : null;
 	try {
 		signal?.throwIfAborted();
+		if (name === "ofdgoImportImages") {
+			const files = args[0], reader = new FileReaderSync();
+			args[0] = files.map(file => file.name);
+			args.push(index => {
+				try { return { bytes: new Uint8Array(reader.readAsArrayBuffer(files[index])) }; }
+				catch (err) { return { error: err.message }; }
+			});
+		}
 		const chunks = [];
 		let size = 0;
 		if (signal) {
