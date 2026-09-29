@@ -51,6 +51,7 @@ const state = {
 	editorInfo: null,
 	editorViews: new Map(),
 	savedRevision: null,
+	encryptionDirty: false,
 	insertObject: null,
 	importPageCount: 0,
 	importEncrypted: false,
@@ -118,7 +119,7 @@ const state = {
 	exportFormats: [],
 	exportPages: null,
 	exportBackdrop: false,
-	exportEncrypted: false,
+	encryptionChanged: false,
 	showPages: !COMPACT_LAYOUT.matches,
 	showMeta: !COMPACT_LAYOUT.matches,
 };
@@ -178,7 +179,15 @@ const el = {
 	credentialsPassword: document.querySelector("#credentialsPassword"),
 	credentialsStatus: document.querySelector("#credentialsStatus"),
 	credentialsCancel: document.querySelector("#credentialsCancel"),
-	encryptionFields: document.querySelector("#encryptionFields"),
+	encryptionPanel: document.querySelector("#encryptionPanel"),
+	encryptionForm: document.querySelector("#encryptionForm"),
+	encryptionKeep: document.querySelector("#encryptionKeep"),
+	encryptionCurrentRow: document.querySelector("#encryptionCurrentRow"),
+	encryptionCurrent: document.querySelector("#encryptionCurrent"),
+	encryptionChange: document.querySelector("#encryptionChange"),
+	encryptionCancel: document.querySelector("#encryptionCancel"),
+	encryptionSubmit: document.querySelector("#encryptionSubmit"),
+	encryptionStatus: document.querySelector("#encryptionStatus"),
 	encryptionType: document.querySelector("#encryptionType"),
 	encryptionUserRow: document.querySelector("#encryptionUserRow"),
 	encryptionPasswordRow: document.querySelector("#encryptionPasswordRow"),
@@ -588,7 +597,7 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 });
 
 function updatePendingChanges() {
-	setDirty(Boolean(state.editorInfo) && (state.editorInfo.revision !== state.savedRevision
+	setDirty(state.encryptionDirty || Boolean(state.editorInfo) && (state.editorInfo.revision !== state.savedRevision
 		|| canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged()));
 }
 
@@ -1136,7 +1145,7 @@ el.insertPanel.addEventListener("close", () => { state.insertObject = null; });
 el.insertForm.addEventListener("submit", insertObject);
 el.textFontAdd.addEventListener("click", () => openFontFile(el.fontInput));
 el.saveButton.addEventListener("click", () => exportFile(true, null, "ofd"));
-el.encryptSaveButton.addEventListener("click", () => openExportPanel(true));
+editorClick(el.encryptSaveButton, openEncryptionPanel);
 el.signButton.addEventListener("click", () => {
 	if (!state.doc || document.body.hasAttribute("aria-busy")) return;
 	el.signForm.reset();
@@ -1259,8 +1268,19 @@ el.outputCompression.addEventListener("change", () => {
 el.exportPageButton.addEventListener("click", () => exportFile(false));
 el.exportButton.addEventListener("click", () => openExportPanel());
 el.exportCancel.addEventListener("click", () => el.exportPanel.close());
-el.exportPanel.addEventListener("close", () => { if (!el.exportPanel.open) clearEncryptionForm(); });
-el.encryptionType.addEventListener("change", updateEncryptionType);
+el.encryptionPanel.addEventListener("close", () => { if (!el.encryptionPanel.open) clearEncryptionForm(); });
+el.encryptionPanel.addEventListener("cancel", event => { if (el.encryptionForm.inert) event.preventDefault(); });
+el.encryptionCancel.addEventListener("click", () => el.encryptionPanel.close());
+el.encryptionType.addEventListener("change", () => {
+	state.encryptionChanged = false;
+	updateEncryptionType();
+});
+el.encryptionChange.addEventListener("click", () => {
+	state.encryptionChanged = true;
+	updateEncryptionType();
+	(el.encryptionType.value === "password" ? el.encryptionPassword : el.encryptionCertificates).focus();
+});
+el.encryptionForm.addEventListener("submit", applyEncryption);
 el.cancelExportButton.addEventListener("click", cancelExport);
 el.exportPanel.addEventListener("pointerdown", (event) => {
 	state.exportBackdrop = event.target === el.exportPanel;
@@ -1279,29 +1299,6 @@ el.exportRange.addEventListener("input", updateExportRange);
 el.exportForm.addEventListener("submit", async (event) => {
 	event.preventDefault();
 	if (!el.exportSubmit.disabled) {
-		if (state.exportEncrypted) {
-			const certificates = el.encryptionType.value === "certificate";
-			if (certificates && !el.encryptionCertificates.files?.length) {
-				el.exportRangeStatus.textContent = "请选择接收者证书";
-				return;
-			}
-			if (!certificates && !el.encryptionPassword.value) {
-				el.exportRangeStatus.textContent = "请输入口令";
-				el.encryptionPassword.focus();
-				return;
-			}
-			if (!certificates && el.encryptionPassword.value !== el.encryptionConfirm.value) {
-				el.exportRangeStatus.textContent = "口令不一致";
-				el.encryptionConfirm.focus();
-				return;
-			}
-			const encryption = certificates
-				? {password:new Uint8Array(), userName:"", recipientFiles:Array.from(el.encryptionCertificates.files)}
-				: { password: new TextEncoder().encode(el.encryptionPassword.value), userName: el.encryptionUser.value.trim() };
-			clearEncryptionForm();
-			try { return await exportFile(true, state.exportPages, "ofd", encryption); }
-			finally { encryption.password.fill(0); }
-		}
 		return exportFile(true, state.exportPages);
 	}
 });
@@ -1494,7 +1491,7 @@ function handleKeyDown(event) {
 }
 
 function formDialogOpen() {
-	return Boolean(sealPreview) || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open
+	return Boolean(sealPreview) || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open
 		|| el.batchPagesPanel.open || el.objectStylePanel.open || el.sourceTextPanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
@@ -1918,7 +1915,7 @@ function discardChanges() {
 function setEditorInfo(doc) {
 	state.editorInfo = { revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 		pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || [] };
-	setDirty(doc.revision !== state.savedRevision);
+	setDirty(state.encryptionDirty || doc.revision !== state.savedRevision);
 }
 
 function editorLocation() {
@@ -2097,6 +2094,7 @@ async function createDocument(event) {
 		state.fileName = `${title.replace(/[\\/:*?"<>|]+/g, "_").replace(/\.ofd$/i, "")}.ofd`;
 		state.conversionWarnings = [];
 		state.savedRevision = null;
+		state.encryptionDirty = false;
 		setEditorInfo(doc);
 		el.createPanel.close();
 		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true });
@@ -3558,6 +3556,7 @@ async function openOFD(file, remote = null) {
 		let bytes = downloaded ? downloaded.bytes : new Uint8Array(await file.arrayBuffer());
 		const name = downloaded ? downloaded.name : file.name;
 		let warnings = [];
+		let convertedDoc;
 		if (openSeq !== state.openSeq) {
 			return;
 		}
@@ -3576,11 +3575,12 @@ async function openOFD(file, remote = null) {
 			}
 			if (openSeq !== state.openSeq) return;
 			bytes = converted.bytes;
+			convertedDoc = converted.doc;
 			warnings = JSON.parse(converted.warnings || "null") || [];
 		}
 		await ensureWASM();
 		if (openSeq !== state.openSeq) return;
-		const doc = await openWithCredentials(await fontManager.files(fontManager.userFonts), openSeq, bytes);
+		const doc = convertedDoc || await openWithCredentials(await fontManager.files(fontManager.userFonts), openSeq, bytes);
 		if (openSeq !== state.openSeq) return;
 		state.ofdBytes = bytes;
 		state.conversionWarnings = warnings;
@@ -3598,6 +3598,7 @@ async function openOFD(file, remote = null) {
 		state.editorViews.clear();
 		state.fontRenderPending = false;
 		state.savedRevision = null;
+		state.encryptionDirty = false;
 		canvasEditor.clear();
 		setDirty(false);
 		el.createPanel.close();
@@ -4030,6 +4031,7 @@ function clearSecurityForms() {
 	if (sealPreview) finishSealPosition(false);
 	finishCredentials(null);
 	clearEncryptionForm();
+	el.encryptionPanel.close();
 	el.signKey.value = "";
 	el.signKeyPassword.value = "";
 	if (el.signPanel.open) el.signPanel.close();
@@ -4088,8 +4090,13 @@ async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, import
 	try {
 		while (openSeq === state.openSeq) {
 			try {
-				return pdf ? await callWASM("ofdgoConvertPDF", data, fonts, credentials?.password || null)
-					: importing ? await callWASM("ofdgoLoadImport", data.slice(), credentials)
+				if (pdf) {
+					const converted = await callWASM("ofdgoConvertPDF", data, fonts, credentials?.password || null);
+					if (openSeq !== state.openSeq) return converted;
+					converted.doc = await callWASM("ofdgoOpen", converted.bytes, fonts, state.renderAnnotations, credentials);
+					return converted;
+				}
+				return importing ? await callWASM("ofdgoLoadImport", data.slice(), credentials)
 					: await callWASM("ofdgoOpen", data, fonts, state.renderAnnotations, credentials);
 			} catch (err) {
 				if (openSeq !== state.openSeq || !(pdf ? err.code === "pdfPassword" : ["credentialsRequired", "invalidCredentials"].includes(err.code))) throw err;
@@ -4426,14 +4433,90 @@ async function downloadResource(attachment, api, label) {
 	}
 }
 
+function encryptionMode() {
+	const info = state.doc?.encryption;
+	if (!info?.encrypted) return "none";
+	if (info.layers !== 1 || info.policyRequired) return "keep";
+	return info.method === "1.1.1" ? "password" : info.method === "1.1.2" ? "certificate" : "keep";
+}
+
+function openEncryptionPanel() {
+	if (!state.doc || document.body.hasAttribute("aria-busy")) return;
+	clearEncryptionForm();
+	el.encryptionType.value = encryptionMode();
+	el.encryptionKeep.hidden = el.encryptionType.value !== "keep";
+	updateEncryptionType();
+	el.encryptionPanel.showModal();
+}
+
 function updateEncryptionType() {
-	const certificates = el.encryptionType.value === "certificate";
-	el.encryptionUserRow.hidden = el.encryptionPasswordRow.hidden = el.encryptionConfirmRow.hidden = certificates;
+	const mode = el.encryptionType.value;
+	const existing = mode !== "none" && mode === encryptionMode() && !state.encryptionChanged;
+	const password = mode === "password" && !existing;
+	const certificates = mode === "certificate" && !existing;
+	el.encryptionCurrentRow.hidden = !existing;
+	el.encryptionCurrent.textContent = mode === "password" ? "已设置" : (state.doc?.encryption?.users || []).join("、") || "已加密";
+	el.encryptionChange.hidden = mode === "keep";
+	el.encryptionUserRow.hidden = el.encryptionPasswordRow.hidden = el.encryptionConfirmRow.hidden = !password;
 	el.encryptionCertificatesRow.hidden = !certificates;
-	el.encryptionPassword.required = el.encryptionConfirm.required = state.exportEncrypted && !certificates;
-	el.encryptionCertificates.required = state.exportEncrypted && certificates;
+	el.encryptionPassword.required = el.encryptionConfirm.required = password;
+	el.encryptionCertificates.required = certificates;
+	el.encryptionUser.value = mode === "password" && encryptionMode() === mode ? state.doc.encryption.users?.[0] || "" : "";
 	el.encryptionPassword.value = el.encryptionConfirm.value = "";
 	el.encryptionCertificates.value = "";
+	el.encryptionStatus.textContent = mode === "keep" && state.doc?.encryption?.policyRequired ? "请重新设置加密方式" : "";
+	el.encryptionSubmit.disabled = mode === "keep" && Boolean(state.doc?.encryption?.policyRequired);
+}
+
+async function applyEncryption(event) {
+	event.preventDefault();
+	if (!state.doc || document.body.hasAttribute("aria-busy") || el.encryptionSubmit.disabled) return;
+	const mode = el.encryptionType.value;
+	if (mode === encryptionMode() && !state.encryptionChanged) {
+		el.encryptionPanel.close();
+		return;
+	}
+	if (mode === "password" && !el.encryptionPassword.value) {
+		el.encryptionStatus.textContent = "请输入口令";
+		el.encryptionPassword.focus();
+		return;
+	}
+	if (mode === "password" && el.encryptionPassword.value !== el.encryptionConfirm.value) {
+		el.encryptionStatus.textContent = "口令不一致";
+		el.encryptionConfirm.focus();
+		return;
+	}
+	if (mode === "certificate" && !el.encryptionCertificates.files?.length) {
+		el.encryptionStatus.textContent = "请选择接收者证书";
+		return;
+	}
+	const openSeq = state.openSeq;
+	const options = mode === "none" ? null : { password: new TextEncoder().encode(el.encryptionPassword.value), userName: el.encryptionUser.value.trim() };
+	el.encryptionForm.inert = true;
+	setBusy(true, "正在设置加密");
+	try {
+		if (mode === "certificate") options.recipients = await encryptionRecipients(Array.from(el.encryptionCertificates.files));
+		if (openSeq !== state.openSeq) return;
+		const doc = await callWASM("ofdgoSetEncryption", options);
+		if (openSeq !== state.openSeq) return;
+		if (!state.editorInfo) state.savedRevision = doc.revision;
+		state.encryptionDirty = true;
+		setEditorInfo(doc);
+		state.doc.encryption = doc.encryption;
+		state.ofdBytes = null;
+		el.encryptionPanel.close();
+		renderSecurity();
+		setStatus("加密设置已更新");
+	} catch (err) {
+		if (openSeq === state.openSeq) el.encryptionStatus.textContent = err.message;
+	} finally {
+		options?.password.fill(0);
+		if (openSeq === state.openSeq) {
+			el.encryptionPassword.value = el.encryptionConfirm.value = "";
+			el.encryptionForm.inert = false;
+			setBusy(false);
+		}
+	}
 }
 
 async function encryptionRecipients(files) {
@@ -4448,11 +4531,12 @@ async function encryptionRecipients(files) {
 }
 
 function clearEncryptionForm() {
+	el.encryptionForm.inert = false;
 	el.encryptionPassword.value = "";
 	el.encryptionConfirm.value = "";
 	el.encryptionUser.value = "";
 	el.encryptionCertificates.value = "";
-	state.exportEncrypted = false;
+	state.encryptionChanged = false;
 }
 
 function renderSecurity() {
@@ -4705,18 +4789,11 @@ async function verifyDocument(event) {
 	}
 }
 
-function openExportPanel(encrypted = false) {
+function openExportPanel() {
 	if (!state.doc || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
 	el.exportForm.reset();
-	clearEncryptionForm();
-	state.exportEncrypted = encrypted;
-	el.encryptionFields.hidden = !encrypted;
-	el.encryptionPassword.required = el.encryptionConfirm.required = encrypted;
-	updateEncryptionType();
-	el.exportTitle.textContent = encrypted ? "加密另存" : "导出文档";
-	el.exportSubmit.textContent = encrypted ? "保存" : "导出";
 	if (state.editing && state.pageSelection.size) {
 		el.exportSpecified.checked = true;
 		el.exportRange.value = selectedPageRange();
@@ -5097,14 +5174,14 @@ function compressionOptions(value) {
 	return preset > 2 ? { mode: 2, level: preset - 2 } : { mode: preset };
 }
 
-async function exportFile(whole, indices = null, value = el.exportFormat.value, encryption = null) {
+async function exportFile(whole, indices = null, value = el.exportFormat.value) {
 	if (!state.doc || document.body.hasAttribute("aria-busy")) {
 		return;
 	}
 	const saving = value === "ofd";
 	const compression = compressionOptions(el.outputCompression.value);
 	const outputOptions = compression.mode ? [compression] : [];
-	if (saving && !state.editorInfo && !state.ofdBytes && !encryption) {
+	if (saving && !state.editorInfo && !state.ofdBytes) {
 		return;
 	}
 	if (!saving && state.doc.encryption?.encrypted && !window.confirm("此格式将输出明文，是否继续？")) return;
@@ -5140,15 +5217,10 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			openSeq = state.openSeq;
 			setBusy(true, "正在生成文件", null, status);
 		}
-		if (encryption?.recipientFiles) {
-			encryption.recipients = await encryptionRecipients(encryption.recipientFiles);
-			delete encryption.recipientFiles;
-			if (openSeq !== state.openSeq) return;
-		}
-		const readingSave = saving && !state.editorInfo && !encryption && indices === null && compression.mode === 0;
+		const readingSave = saving && !state.editorInfo && indices === null && compression.mode === 0;
 		const result = readingSave
 			? { label: "OFD", size: state.ofdBytes.byteLength, mime, blob: state.ofdBytes }
-			: encryption ? await callWASM("ofdgoSaveEncrypted", indices, encryption, ...outputOptions, file) : saving ? await callWASM("ofdgoSaveDocument", indices, ...outputOptions, file) : whole
+			: saving ? await callWASM("ofdgoSaveDocument", indices, ...outputOptions, file) : whole
 			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, state.renderBackend, ...outputOptions, file)
 			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, state.renderBackend, ...outputOptions, file);
 		if (openSeq !== state.openSeq) {
@@ -5165,6 +5237,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 		}
 		if (saving && indices === null && state.editorInfo) {
 			state.savedRevision = state.editorInfo.revision;
+			state.encryptionDirty = false;
 			setDirty(false);
 		}
 		setStatus(`${result.label}已${saving ? "保存" : "导出"}（${formatBytes(result.size)}）`);
@@ -8094,11 +8167,11 @@ async function callWASM(name, ...args) {
 			request.fontData = new Map();
 			args.push([...request.localFonts.keys()]);
 		}
-		if (name === "ofdgoImportImages" || name === "ofdgoExportImages" || name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument" || name === "ofdgoSaveEncrypted" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
+		if (name === "ofdgoImportImages" || name === "ofdgoExportImages" || name === "ofdgoConvertPDF" || name === "ofdgoExportPage" || name === "ofdgoExportDocument" || name === "ofdgoExportAttachment" || name === "ofdgoSaveDocument" || name === "ofdgoSaveSigned" || name === "ofdgoImportPages") {
 			state.exportRequestID = id;
 			el.cancelExportButton.hidden = false;
 			el.cancelExportButton.disabled = false;
-			el.cancelExportButton.title = { ofdgoImportImages: "取消导入", ofdgoConvertPDF: "取消转换", ofdgoSaveDocument: "取消保存", ofdgoSaveEncrypted: "取消保存", ofdgoSaveSigned: "取消签署", ofdgoImportPages: "取消导入", ofdgoExportAttachment: "取消下载" }[name] || "取消导出";
+			el.cancelExportButton.title = { ofdgoImportImages: "取消导入", ofdgoConvertPDF: "取消转换", ofdgoSaveDocument: "取消保存", ofdgoSaveSigned: "取消签署", ofdgoImportPages: "取消导入", ofdgoExportAttachment: "取消下载" }[name] || "取消导出";
 			el.cancelExportButton.setAttribute("aria-label", el.cancelExportButton.title);
 		}
 		try {

@@ -1135,6 +1135,23 @@ button:not(:disabled):hover {
 	gap: 12px;
 }
 
+.encryption-current {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	min-height: var(--control-height);
+}
+
+.encryption-current > span {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.encryption-current > button {
+	flex-shrink: 0;
+}
+
 .annotation-placement {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) auto;

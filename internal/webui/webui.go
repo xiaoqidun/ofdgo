@@ -62,6 +62,7 @@ type Session struct {
 	signatureError  error
 	signaturesRead  bool
 	editing         bool
+	editor          *ofdgo.Editor
 }
 
 // pageBoxInfo 按页索引缓存真实区域，valid区分未读取与零值区域
@@ -251,10 +252,11 @@ type SignatureStampInfo struct {
 
 // EncryptionInfo 仅向界面传递非敏感加密状态
 type EncryptionInfo struct {
-	Encrypted bool     `json:"encrypted"`
-	Method    string   `json:"method,omitempty"`
-	Users     []string `json:"users,omitempty"`
-	Layers    int      `json:"layers,omitempty"`
+	Encrypted      bool     `json:"encrypted"`
+	Method         string   `json:"method,omitempty"`
+	Users          []string `json:"users,omitempty"`
+	Layers         int      `json:"layers,omitempty"`
+	PolicyRequired bool     `json:"policyRequired,omitempty"`
 }
 
 // Open 打开浏览器内存中的OFD文档
@@ -768,11 +770,14 @@ func exportFormat(value string) (ExportFormat, bool) {
 	return ExportFormat{}, false
 }
 
-// encryptionInfo 获取当前文档的加密来源，不包含凭据
+// encryptionInfo 获取当前文档的保存策略，不包含凭据
 // 返回: EncryptionInfo 加密状态
 func (s *Session) encryptionInfo() EncryptionInfo {
 	info := s.Reader.Encryption()
-	return EncryptionInfo{Encrypted: info.Encrypted, Method: info.Method, Users: info.Users, Layers: info.Layers}
+	if s.editor != nil {
+		info = s.editor.Encryption()
+	}
+	return EncryptionInfo{Encrypted: info.Encrypted, Method: info.Method, Users: info.Users, Layers: info.Layers, PolicyRequired: info.PolicyRequired}
 }
 
 // signatureInfos 获取签名验证信息

@@ -489,16 +489,21 @@
 				<div class="form-actions"><div id="credentialsStatus" class="form-status" role="status" aria-live="polite"></div><button id="credentialsCancel" class="button" type="button">取消</button><button class="button" type="submit">解锁</button></div>
 			</form>
 		</dialog>
+		<dialog id="encryptionPanel" class="form-dialog" aria-labelledby="encryptionTitle">
+			<form id="encryptionForm">
+				<h2 id="encryptionTitle" class="form-title">加密设置</h2>
+				<div class="form-row"><label for="encryptionType">方式</label><select id="encryptionType" autofocus><option value="none">明文</option><option value="password">口令</option><option value="certificate">证书</option><option id="encryptionKeep" value="keep" hidden>保留</option></select></div>
+				<div id="encryptionCurrentRow" class="form-row" hidden><span>状态</span><div class="encryption-current"><span id="encryptionCurrent"></span><button id="encryptionChange" class="button" type="button">修改</button></div></div>
+				<div id="encryptionUserRow" class="form-row"><label for="encryptionUser">用户</label><input id="encryptionUser" type="text" autocomplete="off" spellcheck="false"></div>
+				<div id="encryptionPasswordRow" class="form-row"><label for="encryptionPassword">口令</label><input id="encryptionPassword" type="password" autocomplete="new-password"></div>
+				<div id="encryptionConfirmRow" class="form-row"><label for="encryptionConfirm">确认</label><input id="encryptionConfirm" type="password" autocomplete="new-password"></div>
+				<div id="encryptionCertificatesRow" class="form-row" hidden><label for="encryptionCertificates">证书</label><input id="encryptionCertificates" type="file" accept=".pem,.cer,.crt,.der" multiple></div>
+				<div class="form-actions"><div id="encryptionStatus" class="form-status" role="status" aria-live="polite"></div><button id="encryptionCancel" class="button" type="button">取消</button><button id="encryptionSubmit" class="button" type="submit">确定</button></div>
+			</form>
+		</dialog>
 		<dialog id="exportPanel" class="form-dialog" aria-labelledby="exportTitle">
 			<form id="exportForm">
 				<h2 id="exportTitle" class="form-title">导出文档</h2>
-				<div id="encryptionFields" hidden>
-					<div class="form-row"><label for="encryptionType">方式</label><select id="encryptionType"><option value="password">口令</option><option value="certificate">证书</option></select></div>
-					<div id="encryptionUserRow" class="form-row"><label for="encryptionUser">用户</label><input id="encryptionUser" type="text" autocomplete="off" spellcheck="false"></div>
-					<div id="encryptionPasswordRow" class="form-row"><label for="encryptionPassword">口令</label><input id="encryptionPassword" type="password" autocomplete="new-password"></div>
-					<div id="encryptionConfirmRow" class="form-row"><label for="encryptionConfirm">确认</label><input id="encryptionConfirm" type="password" autocomplete="new-password"></div>
-					<div id="encryptionCertificatesRow" class="form-row" hidden><label for="encryptionCertificates">证书</label><input id="encryptionCertificates" type="file" accept=".pem,.cer,.crt,.der" multiple></div>
-				</div>
 				<div class="form-row">
 					<span id="exportScopeLabel">范围</span>
 					<div class="form-options" role="radiogroup" aria-labelledby="exportScopeLabel">
@@ -631,7 +636,7 @@
 					<div id="conversionWarnings" class="attachment-detail"></div>
 				</details>
 				<section id="securityPanel" class="security-panel" aria-labelledby="securityPanelTitle" hidden>
-					<div class="panel-row"><div id="securityPanelTitle" class="panel-title compact">安全</div><div class="panel-actions"><button id="encryptSaveButton" class="small-button" type="button" title="加密另存" aria-label="加密另存" aria-haspopup="dialog" aria-controls="exportPanel" disabled>加密</button><button id="signButton" class="small-button" type="button" aria-haspopup="dialog" aria-controls="signPanel" disabled>签章</button><button id="verifyButton" class="small-button" type="button" aria-haspopup="dialog" aria-controls="verifyPanel" disabled>验签</button></div></div>
+					<div class="panel-row"><div id="securityPanelTitle" class="panel-title compact">安全</div><div class="panel-actions"><button id="encryptSaveButton" class="small-button" type="button" title="加密设置" aria-label="加密设置" aria-haspopup="dialog" aria-controls="encryptionPanel" disabled>加密</button><button id="signButton" class="small-button" type="button" aria-haspopup="dialog" aria-controls="signPanel" disabled>签章</button><button id="verifyButton" class="small-button" type="button" aria-haspopup="dialog" aria-controls="verifyPanel" disabled>验签</button></div></div>
 					<dl class="meta-list"><div><dt>加密</dt><dd id="securityEncryption">未加密</dd></div><div id="securityMethodRow" hidden><dt>算法</dt><dd id="securityMethod"></dd></div></dl>
 				</section>
 				<section id="attachmentPanel" class="attachment-panel" aria-labelledby="attachmentPanelTitle" hidden>

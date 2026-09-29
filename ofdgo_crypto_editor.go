@@ -19,6 +19,12 @@ import (
 	"io"
 )
 
+// Encryption 获取当前保存策略，不暴露口令或私钥
+// 返回: EncryptionInfo 加密状态
+func (e *Editor) Encryption() EncryptionInfo {
+	return e.encryption.summary()
+}
+
 // SetEncryption 设置后续保存的加密策略，nil显式选择明文保存
 // 打开单用户口令或证书加密文档时默认继承原策略；多人口令和多层加密需显式选择输出策略
 // 新的加密密钥与初始向量在每次保存时独立生成，设置不改变文档内容或撤销历史

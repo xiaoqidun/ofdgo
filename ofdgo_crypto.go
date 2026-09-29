@@ -76,11 +76,13 @@ type EncryptionOptions struct {
 }
 
 // EncryptionInfo 不含敏感凭据的文档加密信息
+// PolicyRequired表示无法继承原策略，保存前需显式设置加密方式
 type EncryptionInfo struct {
-	Encrypted bool
-	Method    string
-	Users     []string
-	Layers    int
+	Encrypted      bool
+	Method         string
+	Users          []string
+	Layers         int
+	PolicyRequired bool
 }
 
 // encryptionState 保存解密来源与可继承的输出策略
@@ -113,10 +115,17 @@ func WithCryptoProvider(provider CryptoProvider) ReaderOption {
 // Encryption 获取文档加密状态，不暴露口令或私钥
 // 返回: EncryptionInfo 加密状态
 func (r *Reader) Encryption() EncryptionInfo {
-	if r.encryption == nil {
+	return r.encryption.summary()
+}
+
+// summary 复制不含凭据的加密状态
+// 返回: EncryptionInfo 加密状态
+func (s *encryptionState) summary() EncryptionInfo {
+	if s == nil {
 		return EncryptionInfo{}
 	}
-	info := r.encryption.info
+	info := s.info
+	info.PolicyRequired = s.options == nil
 	info.Users = append([]string(nil), info.Users...)
 	return info
 }

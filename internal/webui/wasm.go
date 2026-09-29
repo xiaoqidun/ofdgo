@@ -266,7 +266,7 @@ func RunWASM() {
 	registerCallback("ofdgoUndo", func([]js.Value) (any, error) { return restoreEditor(false) })
 	registerCallback("ofdgoRedo", func([]js.Value) (any, error) { return restoreEditor(true) })
 	registerAsyncCallback("ofdgoSaveDocument", saveDocument)
-	registerAsyncCallback("ofdgoSaveEncrypted", saveEncrypted)
+	registerAsyncCallback("ofdgoSetEncryption", setEncryption)
 	registerAsyncCallback("ofdgoSaveSigned", saveSigned)
 	registerCallback("ofdgoPreviewSignatureSeal", previewSignatureSeal)
 	registerCallback("ofdgoSignaturePlacement", signaturePlacement)
@@ -403,8 +403,19 @@ func convertPDFDocument(args []js.Value) (any, error) {
 		}))
 	}
 	options.RendererOptions = []ofdgo.RendererOption{ofdgo.WithFontFS(fontSources...)}
-	report, err := ofdgo.ConvertPDF(context.Background(), bytes.NewReader(data), int64(len(data)), &output, options)
+	editor, report, err := ofdgo.ImportPDF(context.Background(), bytes.NewReader(data), int64(len(data)), options)
 	if err != nil {
+		return nil, err
+	}
+	if len(options.Password) != 0 {
+		if err := editor.SetEncryption(&ofdgo.EncryptionOptions{Password: options.Password}); err != nil {
+			return nil, err
+		}
+	}
+	editor.OnWriteProgress = func(stage string, completed, total int) error {
+		return options.OnProgress("write."+stage, completed, total)
+	}
+	if _, err := editor.WriteTo(&output); err != nil {
 		return nil, err
 	}
 	warnings, err := json.Marshal(report.Warnings)
@@ -3555,6 +3566,7 @@ func editDocument(args []js.Value) (any, error) {
 		return nil, err
 	}
 	currentEditor = editor
+	currentSession.editor = editor
 	currentSession.editing = true
 	copiedObjects = nil
 	copiedStyle = nil
@@ -3608,6 +3620,7 @@ func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 	}
 	editor.SetRenderBackends(session.Renderer.Backends())
 	currentSession = session
+	session.editor = editor
 	session.editing = true
 	if currentEditor != editor {
 		copiedObjects = nil
@@ -4118,20 +4131,60 @@ func verifySignatures(args []js.Value) (any, error) {
 	return map[string]any{"signatures": infos, "signatureCount": len(infos), "signatureError": ""}, nil
 }
 
-// saveEncrypted 以独立快照加密另存，不修改当前文档的输出策略
-// 入参: args 加密选项、写出回调、进度回调和可选页面索引
-// 返回: any 保存结果, error 错误信息
-func saveEncrypted(args []js.Value) (any, error) {
-	if currentSession == nil || len(args) < 3 {
-		return nil, fmt.Errorf("missing encrypted save arguments")
+// setEncryption 设置当前文档的保存策略，不修改页面或撤销历史
+// 入参: args 加密选项，null选择明文保存
+// 返回: any 编辑状态, error 错误信息
+func setEncryption(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) != 1 {
+		return nil, fmt.Errorf("missing encryption arguments")
 	}
-	password, err := bytesFromJS(args[0].Get("password"))
+	options, err := encryptionOptionsFromJS(args[0])
 	if err != nil {
 		return nil, err
 	}
-	defer clear(password)
-	options := &ofdgo.EncryptionOptions{Password: password, UserName: args[0].Get("userName").String()}
-	if recipients := args[0].Get("recipients"); !recipients.IsUndefined() && !recipients.IsNull() {
+	if options != nil {
+		defer clear(options.Password)
+	}
+	if currentEditor == nil {
+		if _, err := editDocument(nil); err != nil {
+			return nil, err
+		}
+	}
+	if err := currentEditor.SetEncryption(options); err != nil {
+		return nil, err
+	}
+	return editorSummary(), nil
+}
+
+// encryptionOptionsFromJS 读取加密选项并校验接收者证书
+// 入参: value 加密选项，null选择明文保存
+// 返回: *ofdgo.EncryptionOptions 加密选项, error 错误信息
+func encryptionOptionsFromJS(value js.Value) (*ofdgo.EncryptionOptions, error) {
+	if value.IsNull() {
+		return nil, nil
+	}
+	if value.Type() != js.TypeObject {
+		return nil, ofdgo.ErrEncryptionPolicyRequired
+	}
+	var password []byte
+	if field := value.Get("password"); !field.IsNull() && !field.IsUndefined() {
+		var err error
+		password, err = bytesFromJS(field)
+		if err != nil {
+			return nil, err
+		}
+	}
+	options := &ofdgo.EncryptionOptions{Password: password}
+	success := false
+	defer func() {
+		if !success {
+			clear(password)
+		}
+	}()
+	if user := value.Get("userName"); user.Type() == js.TypeString {
+		options.UserName = user.String()
+	}
+	if recipients := value.Get("recipients"); !recipients.IsUndefined() && !recipients.IsNull() {
 		for i := 0; i < recipients.Length(); i++ {
 			item := recipients.Index(i)
 			data, err := bytesFromJS(item.Get("certificate"))
@@ -4148,22 +4201,8 @@ func saveEncrypted(args []js.Value) (any, error) {
 	if len(password) == 0 && len(options.Recipients) == 0 {
 		return nil, ofdgo.ErrEncryptionPolicyRequired
 	}
-	reader := currentSession.Reader
-	if currentEditor != nil {
-		reader, err = currentEditor.Reader()
-		if err != nil {
-			return nil, err
-		}
-		defer reader.Close()
-	}
-	editor, err := reader.Editor()
-	if err != nil {
-		return nil, err
-	}
-	if err := editor.SetEncryption(options); err != nil {
-		return nil, err
-	}
-	return saveEditor(editor, args[1:])
+	success = true
+	return options, nil
 }
 
 // previewSignatureSeal 渲染独立印章预览并读取所选页面区域，不接触私钥或修改文档
