@@ -1904,6 +1904,7 @@ button.outline-link:hover {
 .empty-state[hidden],
 .editor-group > [hidden],
 .panel-row > [hidden],
+.panel-actions > [hidden],
 .meta-list > [hidden],
 .navigation-tabs[hidden],
 .page-selection-tools[hidden],
@@ -2547,6 +2548,26 @@ button.outline-link:hover {
 .attachment-list {
 	display: grid;
 	gap: 8px;
+}
+
+.attachment-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.attachment-row .attachment-item {
+	min-width: 0;
+	flex: 1;
+}
+
+.attachment-actions {
+	flex: 0 0 60px;
+	width: 60px;
+	border: 1px solid var(--line-strong);
+	background: #ffffff;
+	color: #1f2428;
+	cursor: pointer;
 }
 
 .attachment-item {

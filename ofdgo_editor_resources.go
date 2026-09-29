@@ -34,7 +34,7 @@ type editorResourceRefs struct {
 	fonts map[string]*editorFontUsage
 }
 
-// compactSourceResources 在保存副本中清理无引用字体和图片，并裁剪可完整确认用字的原有字体
+// compactSourceResources 在保存副本中清理无引用字体、图片和已删除附件，并裁剪可完整确认用字的原有字体
 // 按GB/T33190-2016附录A检查标识和路径引用，包括模板、注释、底纹、裁剪、版本和其他文档
 // 全包检查保留孤立XML中的引用；未知命名空间、扩展数据或无法解析的XML使本次清理跳过
 // 入参: parts 已修改和新增的包内条目, progress 保存进度回调
@@ -89,7 +89,10 @@ func (e *Editor) compactSourceResources(parts map[string][]byte, progress editor
 	if err := progress.report("references", len(ordered), len(ordered)); err != nil {
 		return nil, err
 	}
-	removed := make(map[string]bool)
+	removed := maps.Clone(e.source.retiredAttachments)
+	if removed == nil {
+		removed = make(map[string]bool)
+	}
 	usedFiles := maps.Clone(refs.files)
 	updates := make(map[string][]byte)
 	fontFiles := make(map[string]*editorFontUsage)

@@ -481,6 +481,17 @@ const el = {
 	metaFonts: document.querySelector("#metaFonts"),
 	attachmentPanel: document.querySelector("#attachmentPanel"),
 	attachmentList: document.querySelector("#attachmentList"),
+	attachmentAdd: document.querySelector("#attachmentAdd"),
+	attachmentDialog: document.querySelector("#attachmentDialog"),
+	attachmentForm: document.querySelector("#attachmentForm"),
+	attachmentTitle: document.querySelector("#attachmentTitle"),
+	attachmentFile: document.querySelector("#attachmentFile"),
+	attachmentFileRow: document.querySelector("#attachmentFileRow"),
+	attachmentName: document.querySelector("#attachmentName"),
+	attachmentNameRow: document.querySelector("#attachmentNameRow"),
+	attachmentStatus: document.querySelector("#attachmentStatus"),
+	attachmentCancel: document.querySelector("#attachmentCancel"),
+	attachmentSubmit: document.querySelector("#attachmentSubmit"),
 	signaturePanel: document.querySelector("#signaturePanel"),
 	signatureSummary: document.querySelector("#signatureSummary"),
 	signatureList: document.querySelector("#signatureList"),
@@ -2916,6 +2927,8 @@ async function changeDocument(name, item, ...args) {
 				el.outlineStatus.textContent = err.message;
 			} else if (el.infoPanel.open) {
 				el.infoStatus.textContent = err.message;
+			} else if (el.attachmentDialog.open) {
+				el.attachmentStatus.textContent = err.message;
 			} else if (el.pagePanel.open) {
 				el.pageStatus.textContent = err.message;
 			} else if (el.paragraphPanel.open) {
@@ -4378,6 +4391,43 @@ async function renderPage(index, options = {}) {
 
 function downloadAttachment(attachment) {
 	return downloadResource(attachment, "ofdgoExportAttachment", "附件");
+}
+
+editorClick(el.attachmentAdd, () => openAttachmentDialog("add"));
+el.attachmentCancel.addEventListener("click", () => el.attachmentDialog.close());
+el.attachmentDialog.addEventListener("cancel", event => { if (el.attachmentForm.inert) event.preventDefault(); });
+el.attachmentDialog.addEventListener("close", () => {
+	el.attachmentForm.reset();
+	delete el.attachmentDialog.attachmentEdit;
+});
+el.attachmentForm.addEventListener("submit", async event => {
+	event.preventDefault();
+	const edit = el.attachmentDialog.attachmentEdit;
+	if (!edit || edit.openSeq !== state.openSeq || !el.attachmentForm.reportValidity()) return;
+	const files = Array.from(el.attachmentFile.files);
+	const names = edit.action === "rename" ? [el.attachmentName.value] : files.map(file => file.name);
+	if (await changeDocument("ofdgoChangeAttachment", null, edit.action, edit.id, names, files)) {
+		el.attachmentDialog.close();
+		setStatus({add:"附件已添加", rename:"附件已改名", replace:"附件已替换"}[edit.action]);
+	}
+});
+
+function openAttachmentDialog(action, attachment) {
+	if (!state.editing || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
+	const rename = action === "rename";
+	el.attachmentForm.reset();
+	el.attachmentDialog.attachmentEdit = {action, id: attachment?.id || "", openSeq: state.openSeq};
+	el.attachmentTitle.textContent = {add:"添加附件", rename:"附件改名", replace:"替换附件"}[action];
+	el.attachmentSubmit.textContent = {add:"添加", rename:"确定", replace:"替换"}[action];
+	el.attachmentFileRow.hidden = rename;
+	el.attachmentFile.required = !rename;
+	el.attachmentFile.multiple = action === "add";
+	el.attachmentNameRow.hidden = !rename;
+	el.attachmentName.required = rename;
+	el.attachmentName.value = attachment?.name || "";
+	el.attachmentStatus.textContent = "";
+	el.attachmentDialog.showModal();
+	(rename ? el.attachmentName : el.attachmentFile).focus();
 }
 
 async function saveDocumentImage(resource) {
@@ -7241,7 +7291,7 @@ function renderMeta(keepDetails = false) {
 	el.pageTotal.textContent = String(doc.pageCount || 0);
 	if (keepDetails && doc.detailsPending) return;
 	el.metaSignatures.textContent = doc.detailsPending ? "正在检查签名" : doc.detailsError ? "读取失败" : String(doc.signatureCount || 0);
-	renderMetaContent(el.attachmentList, [doc.attachments, doc.attachmentError], renderAttachments);
+	renderMetaContent(el.attachmentList, [doc.attachments, doc.attachmentError, state.editing], renderAttachments);
 	renderMetaContent(el.signatureList, [doc.signatures, doc.signatureError], renderSignatures);
 	renderMetaContent(el.docFontList, doc.fonts || [], renderDocumentFonts);
 	refreshEditorFonts();
@@ -7256,8 +7306,9 @@ function renderMetaContent(node, value, render) {
 }
 
 function renderAttachments() {
-	const attachments = state.doc?.attachments || [];
-	el.attachmentPanel.hidden = !attachments.length && !state.doc?.attachmentError;
+	const attachments = (state.doc?.attachments || []).filter(item => state.editing || item.visible !== false);
+	el.attachmentPanel.hidden = !state.doc || !state.editing && !attachments.length && !state.doc.attachmentError;
+	el.attachmentAdd.hidden = !state.editing;
 	el.attachmentList.replaceChildren();
 	if (state.doc?.attachmentError) {
 		const error = document.createElement("div");
@@ -7267,17 +7318,25 @@ function renderAttachments() {
 		el.attachmentList.append(error);
 		return;
 	}
+	if (!attachments.length) {
+		const empty = document.createElement("div");
+		empty.className = "attachment-detail";
+		empty.textContent = "暂无附件";
+		el.attachmentList.append(empty);
+	}
 	for (const attachment of attachments) {
+		const row = document.createElement("div");
+		row.className = "attachment-row";
 		const item = document.createElement("button");
 		item.type = "button";
 		item.className = "attachment-item";
-		item.title = `下载 ${attachment.fileName}`;
-		item.setAttribute("aria-label", `下载 ${attachment.name}`);
+		item.title = `另存 ${attachment.fileName}`;
+		item.setAttribute("aria-label", `另存 ${attachment.name}`);
 		const name = document.createElement("span");
 		name.className = "attachment-name";
 		name.textContent = attachment.name;
 		item.append(name);
-		const detail = [attachment.format, attachment.size == null ? "" : formatBytes(attachment.size * 1024)].filter(Boolean).join(" · ");
+		const detail = [attachment.format, attachment.size == null ? "" : formatBytes(attachment.size * 1024), attachment.visible === false ? "隐藏" : ""].filter(Boolean).join(" · ");
 		if (detail) {
 			const meta = document.createElement("span");
 			meta.className = "attachment-detail";
@@ -7285,7 +7344,30 @@ function renderAttachments() {
 			item.append(meta);
 		}
 		item.addEventListener("click", () => downloadAttachment(attachment));
-		el.attachmentList.append(item);
+		row.append(item);
+		if (state.editing) {
+			const actions = document.createElement("select");
+			actions.className = "small-button attachment-actions";
+			actions.title = "附件操作";
+			actions.setAttribute("aria-label", `${attachment.name} 操作`);
+			for (const [value, text] of [["", "操作"], ["rename", "改名"], ["replace", "替换"], ["delete", "删除"]]) {
+				const option = document.createElement("option");
+				option.value = value;
+				option.textContent = text;
+				actions.append(option);
+			}
+			actions.addEventListener("change", async () => {
+				const action = actions.value;
+				actions.value = "";
+				if ((canvasEditor.nudge || canvasEditor.nudgeCommit) && !await canvasEditor.commitNudge()) return;
+				if (!await canvasEditor.commitText() || !await canvasEditor.commitCrop()) return;
+				if (action === "delete") {
+					if (window.confirm(`删除附件“${attachment.name}”？`) && await changeDocument("ofdgoChangeAttachment", null, action, attachment.id, [], [])) setStatus("附件已删除");
+				} else if (action) openAttachmentDialog(action, attachment);
+			});
+			row.append(actions);
+		}
+		el.attachmentList.append(row);
 	}
 }
 
@@ -8005,6 +8087,8 @@ function updateFitSpace() {
 
 function updateControls() {
 	renderSecurity();
+	el.attachmentAdd.disabled = !state.editing || !state.ready || state.exporting;
+	renderMetaContent(el.attachmentList, [state.doc?.attachments, state.doc?.attachmentError, state.editing], renderAttachments);
 	const hasDoc = Boolean(state.doc);
 	updateDisplayControls();
 	updateEditorTools();
@@ -8217,6 +8301,8 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	el.pageForm.inert = busy;
 	el.paragraphForm.inert = busy;
 	el.infoForm.inert = busy;
+	el.attachmentForm.inert = busy;
+	el.attachmentPanel.inert = busy;
 	el.annotationForm.inert = busy;
 	el.importForm.inert = busy && !state.importing;
 	for (const input of [el.importFile, el.importRange, el.importPosition, el.importOutlines]) input.disabled = busy;

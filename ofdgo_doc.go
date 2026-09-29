@@ -14,7 +14,11 @@
 
 package ofdgo
 
-import "encoding/xml"
+import (
+	"encoding/xml"
+	"path"
+	"strings"
+)
 
 // Document 文档结构
 type Document struct {
@@ -224,6 +228,25 @@ func (doc *Document) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 	}
 	*doc = Document(value)
 	return nil
+}
+
+// FileName 获取另存文件名，优先使用带扩展名的显示名称，剔除目录及文件名非法字符
+// 返回: string 文件名
+func (a Attachment) FileName() string {
+	name := path.Base(strings.ReplaceAll(a.Name, "\\", "/"))
+	file := path.Base(strings.ReplaceAll(a.FileLoc, "\\", "/"))
+	if name == "." || name == "/" || path.Ext(name) == "" && path.Ext(file) != "" {
+		name = file
+	}
+	if name == "." || name == "/" {
+		name = "attachment"
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 32 || strings.ContainsRune(`<>:"/\|?*`, r) {
+			return '_'
+		}
+		return r
+	}, name)
 }
 
 // UnmarshalXML 解析附件并应用默认值

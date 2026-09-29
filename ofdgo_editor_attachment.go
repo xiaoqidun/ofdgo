@@ -18,9 +18,9 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"maps"
 	"path"
 	"strings"
-	"time"
 	"unicode/utf8"
 )
 
@@ -130,7 +130,7 @@ func (e *Editor) RenameAttachment(id, name string) error {
 	})
 }
 
-// ReplaceAttachment 替换附件内容，使用独立资源避免影响共享引用，保留名称和格式
+// ReplaceAttachment 替换附件内容，使用独立资源避免影响共享引用，保留名称和格式，不新增日期
 // 入参: id 附件标识, data 文件数据，调用后可复用
 // 返回: error 附件结构或提交错误
 func (e *Editor) ReplaceAttachment(id string, data []byte) error {
@@ -150,20 +150,25 @@ func (e *Editor) ReplaceAttachment(id string, data []byte) error {
 		} else {
 			fragment = editorPatchXML(fragment, []editorXMLPatch{{node.open, node.open, editorXMLText("FileLoc", "/"+file)}})
 		}
-		for _, attr := range []struct{ name, value string }{
-			{"Size", ofdNumber(float64(len(data)) / 1024)}, {"ModDate", time.Now().UTC().Format(time.RFC3339)},
-		} {
-			root, err := parseEditorXML(fragment)
-			if err != nil {
-				return nil, err
-			}
-			fragment, err = editorXMLAttribute(fragment, root, attr.name, attr.value)
-			if err != nil {
-				return nil, err
-			}
+		root, err := parseEditorXML(fragment)
+		if err != nil {
+			return nil, err
+		}
+		fragment, err = editorXMLAttribute(fragment, root, "Size", ofdNumber(float64(len(data))/1024))
+		if err != nil {
+			return nil, err
 		}
 		parts[file] = bytes.Clone(data)
 		return fragment, nil
+	})
+}
+
+// DeleteAttachment 删除附件声明，保存时清理可确认无引用的内容，支持撤销和重做
+// 入参: id 附件标识
+// 返回: error 附件结构或提交错误
+func (e *Editor) DeleteAttachment(id string) error {
+	return e.editAttachment(id, func([]byte, *editorXML, map[string][]byte) ([]byte, error) {
+		return nil, nil
 	})
 }
 
@@ -194,7 +199,7 @@ func (e *Editor) editAttachment(id string, change func([]byte, *editorXML, map[s
 	var found *editorXML
 	if root != nil {
 		for _, child := range root.children {
-			if child.name.Local == "Attachment" && child.attr("ID") == id {
+			if packageOFDNode(child, "Attachment") && child.attr("ID") == id {
 				if found != nil {
 					return fmt.Errorf("duplicate attachment ID: %s", id)
 				}
@@ -222,7 +227,21 @@ func (e *Editor) editAttachment(id string, change func([]byte, *editorXML, map[s
 		return nil
 	}
 	parts[name] = editorPatchXML(data, []editorXMLPatch{{found.start, found.end, updated}})
-	return e.commitAnnotationParts(base, parts)
+	if err := e.commitAnnotationParts(base, parts); err != nil {
+		return err
+	}
+	if file := node.child("FileLoc"); file != nil {
+		location := strings.TrimSpace(editorImportText(fragment, file))
+		if location != "" {
+			retired := maps.Clone(base.retiredAttachments)
+			if retired == nil {
+				retired = make(map[string]bool)
+			}
+			retired[strings.ToLower(cleanPackagePath(base.reader.ResPath(location)))] = true
+			e.source.retiredAttachments = retired
+		}
+	}
+	return nil
 }
 
 // validateAttachmentName 校验非空附件名及XML可无损表示的Unicode字符

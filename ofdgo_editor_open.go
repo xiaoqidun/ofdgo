@@ -31,16 +31,17 @@ import (
 
 // editorSource 保留输入包及按需加载的原始页面
 type editorSource struct {
-	reader           *Reader
-	document         *Document
-	info             DocInfo
-	fallbackDocID    string
-	directory        string
-	pages            map[string]*editorSourcePage
-	origins          map[string]*editorObjectOrigin
-	idsReady         bool
-	annotationStates map[string]map[string]editorCompositeState
-	annotationPages  map[string]bool
+	reader             *Reader
+	document           *Document
+	info               DocInfo
+	fallbackDocID      string
+	directory          string
+	pages              map[string]*editorSourcePage
+	origins            map[string]*editorObjectOrigin
+	idsReady           bool
+	annotationStates   map[string]map[string]editorCompositeState
+	annotationPages    map[string]bool
+	retiredAttachments map[string]bool
 }
 
 // editorObjectOrigin 保留原对象的XML语义，供复制和局部更新复用

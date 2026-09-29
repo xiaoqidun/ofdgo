@@ -489,6 +489,18 @@
 				<div class="form-actions"><div id="credentialsStatus" class="form-status" role="status" aria-live="polite"></div><button id="credentialsCancel" class="button" type="button">取消</button><button class="button" type="submit">解锁</button></div>
 			</form>
 		</dialog>
+		<dialog id="attachmentDialog" class="form-dialog" aria-labelledby="attachmentTitle">
+			<form id="attachmentForm">
+				<h2 id="attachmentTitle" class="form-title">添加附件</h2>
+				<div id="attachmentFileRow" class="form-row"><label for="attachmentFile">文件</label><input id="attachmentFile" type="file" multiple required></div>
+				<div id="attachmentNameRow" class="form-row" hidden><label for="attachmentName">名称</label><input id="attachmentName" type="text" autocomplete="off" spellcheck="false"></div>
+				<div class="form-actions">
+					<div id="attachmentStatus" class="form-status" role="status"></div>
+					<button id="attachmentCancel" class="button" type="button">取消</button>
+					<button id="attachmentSubmit" class="button" type="submit">添加</button>
+				</div>
+			</form>
+		</dialog>
 		<dialog id="encryptionPanel" class="form-dialog" aria-labelledby="encryptionTitle">
 			<form id="encryptionForm">
 				<h2 id="encryptionTitle" class="form-title">加密文档</h2>
@@ -640,7 +652,7 @@
 					<dl class="meta-list"><div><dt>加密</dt><dd id="securityEncryption">未加密</dd></div><div id="securitySchemeRow" hidden><dt>方式</dt><dd id="securityScheme"></dd></div><div id="securityMethodRow" hidden><dt>算法</dt><dd id="securityMethod"></dd></div></dl>
 				</section>
 				<section id="attachmentPanel" class="attachment-panel" aria-labelledby="attachmentPanelTitle" hidden>
-					<div id="attachmentPanelTitle" class="panel-title">附件</div>
+					<div class="panel-row"><div id="attachmentPanelTitle" class="panel-title compact">附件</div><div class="panel-actions"><button id="attachmentAdd" class="small-button" type="button" title="添加附件" aria-haspopup="dialog" aria-controls="attachmentDialog" hidden>添加</button></div></div>
 					<div id="attachmentList" class="attachment-list"></div>
 				</section>
 				<section id="signaturePanel" class="signature-panel" aria-labelledby="signaturePanelTitle" hidden>

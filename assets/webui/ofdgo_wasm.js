@@ -173,6 +173,13 @@ async function handleMessage({ id, name, args }) {
 	const password = converting ? args[2] : name === "ofdgoSetEncryption" ? args[0]?.password : name === "ofdgoOpen" ? args[3]?.password : name === "ofdgoLoadImport" ? args[1]?.password : null;
 	try {
 		signal?.throwIfAborted();
+		if (name === "ofdgoChangeAttachment" && (args[0] === "add" || args[0] === "replace")) {
+			const files = args[3], reader = new FileReaderSync();
+			args[3] = index => {
+				try { return { bytes: new Uint8Array(reader.readAsArrayBuffer(files[index])) }; }
+				catch (err) { return { error: err.message }; }
+			};
+		}
 		if (name === "ofdgoImportImages") {
 			const files = args[0], reader = new FileReaderSync();
 			args[0] = files.map(file => file.name);

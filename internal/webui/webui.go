@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"path"
 	"reflect"
 	"slices"
 	"strings"
@@ -111,13 +110,14 @@ type DocumentDetails struct {
 // OutlineInfo 目录节点信息
 type OutlineInfo = ofdgo.OutlineInfo
 
-// AttachmentInfo 可见附件信息，Size单位为KB
+// AttachmentInfo 附件信息，Size单位为KB
 type AttachmentInfo struct {
 	ID       string   `json:"id"`
 	Name     string   `json:"name"`
 	Format   string   `json:"format,omitempty"`
 	Size     *float64 `json:"size,omitempty"`
 	FileName string   `json:"fileName"`
+	Visible  bool     `json:"visible"`
 }
 
 // PageInfo 页面信息
@@ -419,13 +419,14 @@ func (s *Session) Details() DocumentDetails {
 	info := DocumentDetails{}
 	if attachments, err := s.Reader.Attachments(); err == nil {
 		for _, attachment := range attachments {
-			if attachment.Visible {
+			if attachment.Visible || s.editing {
 				info.Attachments = append(info.Attachments, AttachmentInfo{
 					ID:       attachment.ID,
 					Name:     attachment.Name,
 					Format:   attachment.Format,
 					Size:     attachment.Size,
-					FileName: path.Base(s.Reader.ResPath(attachment.FileLoc)),
+					FileName: attachment.FileName(),
+					Visible:  attachment.Visible,
 				})
 			}
 		}

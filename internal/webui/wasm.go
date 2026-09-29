@@ -30,7 +30,6 @@ import (
 	"io"
 	"io/fs"
 	"math"
-	"path"
 	"reflect"
 	"slices"
 	"strconv"
@@ -212,6 +211,7 @@ func RunWASM() {
 	registerAsyncCallback("ofdgoImportImages", importImages)
 	registerCallback("ofdgoEditDocument", editDocument)
 	registerCallback("ofdgoUpdateInfo", updateInfo)
+	registerCallback("ofdgoChangeAttachment", changeAttachment)
 	registerCallback("ofdgoChangePage", changePage)
 	registerCallback("ofdgoBatchPages", batchPages)
 	registerCallback("ofdgoChangeOutline", changeOutline)
@@ -801,7 +801,7 @@ func renderPage(args []js.Value) (any, error) {
 			return nil, err
 		}
 		for _, attachment := range attachments {
-			attachmentNames[attachment.ID] = path.Base(currentSession.Reader.ResPath(attachment.FileLoc))
+			attachmentNames[attachment.ID] = attachment.FileName()
 		}
 		break
 	}
@@ -3532,6 +3532,45 @@ func updateInfo(args []js.Value) (any, error) {
 		}
 		currentEditor.SetInfo(info)
 		return nil
+	})
+}
+
+// changeAttachment 编辑附件，逐个读取文件并复用库层事务和历史
+// 入参: args 操作、附件标识、名称列表、文件读取回调
+// 返回: any 编辑状态, error 错误信息
+func changeAttachment(args []js.Value) (any, error) {
+	return changeObjects(func() error {
+		action, id := args[0].String(), args[1].String()
+		switch action {
+		case "rename":
+			return currentEditor.RenameAttachment(id, args[2].Index(0).String())
+		case "delete":
+			return currentEditor.DeleteAttachment(id)
+		case "add", "replace":
+			count := args[2].Length()
+			if count == 0 || action == "replace" && count != 1 {
+				return fmt.Errorf("请选择附件")
+			}
+			for i := range count {
+				result := args[3].Invoke(i)
+				if message := result.Get("error"); message.Type() == js.TypeString {
+					return fmt.Errorf("%s", message.String())
+				}
+				data, err := bytesFromJS(result.Get("bytes"))
+				if err != nil {
+					return err
+				}
+				if action == "replace" {
+					return currentEditor.ReplaceAttachment(id, data)
+				}
+				if _, err := currentEditor.AddAttachment(args[2].Index(i).String(), data); err != nil {
+					return err
+				}
+			}
+			return nil
+		default:
+			return fmt.Errorf("unsupported attachment action %q", action)
+		}
 	})
 }
 
