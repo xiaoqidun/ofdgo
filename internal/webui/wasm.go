@@ -82,10 +82,9 @@ type apiResult struct {
 
 // editorClipboard 当前编辑文档中的对象快照与剪贴板标识
 type editorClipboard struct {
-	token       string
-	objects     []ofdgo.GraphicObject
-	composite   *ofdgo.CompositeSelection
-	annotations *ofdgo.AnnotationSelection
+	token     string
+	selection *ofdgo.ObjectSelection
+	composite *ofdgo.CompositeSelection
 }
 
 // editorInfo 编辑文档信息与操作状态
@@ -1669,10 +1668,7 @@ func captureEditorSelection(page int, ids []string) (*editorClipboard, error) {
 	objects, annotations := splitEditorSelection(ids)
 	result := &editorClipboard{}
 	var err error
-	result.objects, err = currentEditor.Objects(page, objects)
-	if err == nil && len(annotations) != 0 {
-		result.annotations, err = currentEditor.CaptureAnnotations(page, annotations)
-	}
+	result.selection, err = currentEditor.CaptureSelection(page, objects, annotations)
 	return result, err
 }
 
@@ -1680,24 +1676,10 @@ func captureEditorSelection(page int, ids []string) (*editorClipboard, error) {
 // 入参: page 目标页, clipboard 快照, dx、dy 位移
 // 返回: []string 新画布标识, error 错误信息
 func pasteEditorSelection(page int, clipboard *editorClipboard, dx, dy float64) ([]string, error) {
-	var ids []string
-	err := currentEditor.Transaction(func(edit *ofdgo.Editor) error {
-		var err error
-		ids, err = edit.CopyObjects(page, clipboard.objects, dx, dy)
-		if err != nil {
-			return err
-		}
-		if clipboard.annotations != nil {
-			annotations, err := edit.PasteAnnotations(page, clipboard.annotations, dx, dy)
-			if err != nil {
-				return err
-			}
-			for _, id := range annotations {
-				ids = append(ids, "annotation:"+id)
-			}
-		}
-		return nil
-	})
+	ids, annotations, err := currentEditor.PasteSelection(page, clipboard.selection, dx, dy)
+	for _, id := range annotations {
+		ids = append(ids, "annotation:"+id)
+	}
 	return ids, err
 }
 
@@ -2677,9 +2659,6 @@ func pasteObjects(args []js.Value) (any, error) {
 	}
 	page, dx, dy := args[0].Int(), args[2].Float(), args[3].Float()
 	if key != "" {
-		if copiedObjects.annotations != nil {
-			return nil, fmt.Errorf("annotations cannot be nested in a page object")
-		}
 		path, err := compositePath(key)
 		if err != nil {
 			return nil, err
@@ -2688,7 +2667,7 @@ func pasteObjects(args []js.Value) (any, error) {
 		if copiedObjects.composite != nil {
 			indexes, err = currentEditor.PasteCompositeObjects(page, path, copiedObjects.composite, dx, dy)
 		} else {
-			indexes, err = currentEditor.CopyObjectsToComposite(page, path, copiedObjects.objects, dx, dy)
+			indexes, err = currentEditor.PasteSelectionToComposite(page, path, copiedObjects.selection, dx, dy)
 		}
 		if err != nil {
 			return nil, err

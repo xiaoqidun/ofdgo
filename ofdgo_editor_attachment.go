@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"maps"
 	"path"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -40,18 +41,18 @@ func (e *Editor) AddAttachment(name string, data []byte) (string, error) {
 	if err := validateAttachmentName(name); err != nil {
 		return "", err
 	}
-	if err := e.prepareSourceIDs(); err != nil {
+	maximum, err := e.sourceMaxID(nil)
+	if err != nil {
 		return "", err
 	}
 	base := e.source
-	var err error
 	if base == nil {
 		base, err = e.importBase()
 		if err != nil {
 			return "", err
 		}
 	}
-	id := e.nextID()
+	id := strconv.Itoa(maximum + 1)
 	file := e.packageName("Attachments/Attachment_" + id)
 	attrs := ofdAttrs{}
 	attrs.add("ID", id)
@@ -112,6 +113,7 @@ func (e *Editor) AddAttachment(name string, data []byte) (string, error) {
 	if err := e.commitAnnotationParts(base, parts); err != nil {
 		return "", err
 	}
+	e.maxID, e.source.idsReady = maximum+1, true
 	return id, nil
 }
 
@@ -134,11 +136,14 @@ func (e *Editor) RenameAttachment(id, name string) error {
 // 入参: id 附件标识, data 文件数据，调用后可复用
 // 返回: error 附件结构或提交错误
 func (e *Editor) ReplaceAttachment(id string, data []byte) error {
-	return e.editAttachment(id, func(fragment []byte, node *editorXML, parts map[string][]byte) ([]byte, error) {
-		if err := e.prepareSourceIDs(); err != nil {
+	var maximum int
+	err := e.editAttachment(id, func(fragment []byte, node *editorXML, parts map[string][]byte) ([]byte, error) {
+		var err error
+		maximum, err = e.sourceMaxID(nil)
+		if err != nil {
 			return nil, err
 		}
-		file := e.packageName("Attachments/Attachment_" + e.nextID())
+		file := e.packageName("Attachments/Attachment_" + strconv.Itoa(maximum+1))
 		var location bytes.Buffer
 		if err := xml.EscapeText(&location, []byte("/"+file)); err != nil {
 			return nil, err
@@ -161,6 +166,11 @@ func (e *Editor) ReplaceAttachment(id string, data []byte) error {
 		parts[file] = bytes.Clone(data)
 		return fragment, nil
 	})
+	if err != nil {
+		return err
+	}
+	e.maxID, e.source.idsReady = maximum+1, true
+	return nil
 }
 
 // DeleteAttachment 删除附件声明，保存时清理可确认无引用的内容，支持撤销和重做

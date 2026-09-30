@@ -19,7 +19,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"maps"
-	"slices"
 )
 
 // AnnotationSelection 保存当前编辑器内可重复粘贴的注解原文及资源上下文
@@ -151,10 +150,18 @@ func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, 
 				return err
 			}
 			common := root.child("CommonData")
+			registered := make(map[string]bool)
+			for _, name := range edit.source.document.CommonData.PublicRes {
+				registered[reader.ResPath(name)] = true
+			}
+			for _, name := range edit.source.document.CommonData.DocumentRes {
+				registered[reader.ResPath(name)] = true
+			}
 			var added []byte
 			for _, name := range selection.resources {
-				if !slices.ContainsFunc(append(slices.Clone(edit.source.document.CommonData.PublicRes), edit.source.document.CommonData.DocumentRes...), func(value string) bool { return reader.ResPath(value) == name }) {
+				if !registered[name] {
 					added = append(added, editorXMLText("DocumentRes", "/"+name)...)
+					registered[name] = true
 				}
 			}
 			if len(added) != 0 {

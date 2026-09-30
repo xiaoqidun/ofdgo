@@ -212,10 +212,15 @@ func (e *Editor) OrderObjects(page int, ids []string, order string) error {
 	}
 	layer := &e.pages[page].Content.Layer[indexes[0].layer]
 	_, siblings := e.objectOrderIndexes(page, layer, ids[0])
+	positions := make(map[int]int, len(siblings))
+	for i, index := range siblings {
+		positions[index] = i
+	}
 	orderable := make(map[*editorXML]bool)
 	for i, object := range selectedObjects {
 		capability := e.objectCapabilities(object, orderable)
-		if !capability.Order || indexes[i].layer != indexes[0].layer || !slices.Contains(siblings, indexes[i].index) {
+		_, exists := positions[indexes[i].index]
+		if !capability.Order || indexes[i].layer != indexes[0].layer || !exists {
 			return fmt.Errorf("ordering requires editable objects in the same container")
 		}
 	}
@@ -226,7 +231,7 @@ func (e *Editor) OrderObjects(page int, ids []string, order string) error {
 	}
 	selected := make([]bool, len(objects))
 	for _, index := range indexes {
-		selected[slices.Index(siblings, index.index)] = true
+		selected[positions[index.index]] = true
 	}
 	orderEditorObjects(objects, selected, order)
 	for i, index := range siblings {
@@ -507,11 +512,17 @@ func editorDistribution(boxes []Box, indexes []editorObjectPosition, axis string
 // replaceLayers 替换图层容器，隔离历史快照与后续的增删、排序操作
 // 入参: page 页面索引, layers 新图层列表
 func (e *Editor) replaceLayers(page int, layers []Layer) {
-	before := copyEditorPage(e.pages[page]).Content.Layer
+	before := e.pages[page].Content.Layer
 	if reflect.DeepEqual(before, layers) {
 		return
 	}
 	after := copyEditorPage(PageContent{Content: Content{Layer: layers}}).Content.Layer
+	if e.historyLimit == 0 {
+		e.pages[page].Content.Layer = after
+		e.recordChange()
+		return
+	}
+	before = copyEditorPage(PageContent{Content: Content{Layer: before}}).Content.Layer
 	apply := func(e *Editor, layers []Layer) {
 		e.pages[page].Content.Layer = copyEditorPage(PageContent{Content: Content{Layer: layers}}).Content.Layer
 	}

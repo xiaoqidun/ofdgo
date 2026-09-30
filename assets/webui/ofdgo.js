@@ -5687,6 +5687,7 @@ async function processPageRenderQueue() {
 		}
 	} finally {
 		state.pageRenderRunning = false;
+		if (!state.pageInFlight.size) releasePageResources();
 	}
 }
 
