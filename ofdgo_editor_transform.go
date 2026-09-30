@@ -51,12 +51,11 @@ func (e *Editor) RotateObject(page int, id string, degrees int) error {
 // 入参: page 页面索引, ids 对象标识, degrees 顺时针角度，仅支持90度的整数倍
 // 返回: error 错误信息
 func (e *Editor) RotateObjects(page int, ids []string, degrees int) error {
-	if degrees%90 != 0 {
-		return fmt.Errorf("rotation must be a multiple of 90 degrees")
+	matrix, err := editorRotation(degrees)
+	if err != nil {
+		return err
 	}
-	turn := (degrees%360 + 360) % 360 / 90
-	m := []Matrix{IdentityMatrix, {b: 1, c: -1}, {a: -1, d: -1}, {b: -1, c: 1}}[turn]
-	return e.orientObjects(page, ids, m)
+	return e.orientObjects(page, ids, matrix)
 }
 
 // FlipObject 绕对象可见范围中心镜像
@@ -71,16 +70,11 @@ func (e *Editor) FlipObject(page int, id, axis string) error {
 // 入参: page 页面索引, ids 对象标识, axis 为horizontal或vertical
 // 返回: error 错误信息
 func (e *Editor) FlipObjects(page int, ids []string, axis string) error {
-	m := IdentityMatrix
-	switch axis {
-	case "horizontal":
-		m.a = -1
-	case "vertical":
-		m.d = -1
-	default:
-		return fmt.Errorf("invalid flip axis %q", axis)
+	matrix, err := editorFlip(axis)
+	if err != nil {
+		return err
 	}
-	return e.orientObjects(page, ids, m)
+	return e.orientObjects(page, ids, matrix)
 }
 
 // ResizeObjects 按选区可见范围计算目标矩形的变换，图片及纯图片资源支持独立宽高，描边遵循OFD变换规则
@@ -230,6 +224,33 @@ func (e *Editor) transformObject(object GraphicObject, dx, dy, scale float64) (G
 		return transformEditorMatrix(object, Matrix{a: scale, d: scale, e: dx, f: dy}), nil
 	}
 	return transformEditorObject(object, dx, dy, scale)
+}
+
+// editorRotation 返回无浮点误差的直角旋转矩阵
+// 入参: degrees 顺时针角度，仅支持90度的整数倍
+// 返回: Matrix 旋转, error 角度错误
+func editorRotation(degrees int) (Matrix, error) {
+	if degrees%90 != 0 {
+		return Matrix{}, fmt.Errorf("rotation must be a multiple of 90 degrees")
+	}
+	turn := (degrees%360 + 360) % 360 / 90
+	return [...]Matrix{IdentityMatrix, {b: 1, c: -1}, {a: -1, d: -1}, {b: -1, c: 1}}[turn], nil
+}
+
+// editorFlip 返回指定方向的镜像矩阵
+// 入参: axis 为horizontal或vertical
+// 返回: Matrix 镜像, error 方向错误
+func editorFlip(axis string) (Matrix, error) {
+	matrix := IdentityMatrix
+	switch axis {
+	case "horizontal":
+		matrix.a = -1
+	case "vertical":
+		matrix.d = -1
+	default:
+		return Matrix{}, fmt.Errorf("invalid flip axis %q", axis)
+	}
+	return matrix, nil
 }
 
 // orientObjects 更新Boundary与CTM，不重排文字或重采样图片

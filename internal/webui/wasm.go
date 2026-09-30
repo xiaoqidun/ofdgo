@@ -1599,17 +1599,14 @@ func splitEditorSelection(ids []string) ([]string, []string) {
 // 返回: any 文档与新选区, error 错误信息
 func changeSelection(args []js.Value) (any, error) {
 	var selected []string
-	result, err := changeObjects(func() error {
+	result, err := changeAtomicObjects(func() error {
 		page, operation := args[0].Int(), args[2].String()
 		objects, annotations := splitEditorSelection(stringsFromJS(args[1]))
 		switch operation {
 		case "align", "distribute":
 			return arrangeEditorSelection(page, stringsFromJS(args[1]), operation, args[3].String())
 		case "delete":
-			if err := currentEditor.DeleteObjects(page, objects); err != nil {
-				return err
-			}
-			return currentEditor.DeleteAnnotations(page, annotations)
+			return currentEditor.DeleteSelection(page, objects, annotations)
 		case "copy":
 			clipboard, err := captureEditorSelection(page, stringsFromJS(args[1]))
 			if err != nil {
@@ -1618,102 +1615,31 @@ func changeSelection(args []js.Value) (any, error) {
 			selected, err = pasteEditorSelection(page, clipboard, args[3].Float(), args[4].Float())
 			return err
 		case "style":
-			style := objectStyle(args[3])
-			if err := currentEditor.StyleObjects(page, objects, style); err != nil {
-				return err
-			}
-			for _, id := range annotations {
-				path := ofdgo.ObjectPath{Annotation: id}
-				members, err := currentEditor.CompositeObjects(page, path)
-				if err != nil {
-					return err
-				}
-				indexes := make([]int, len(members))
-				for i := range indexes {
-					indexes[i] = i
-				}
-				if err := currentEditor.StyleCompositeObjects(page, path, indexes, style); err != nil {
-					return err
-				}
-			}
-			return nil
-		case "erase", "erasePath":
-			var box ofdgo.Box
-			var points []ofdgo.Point
-			if operation == "erase" {
-				box = ofdgo.Box{X: args[3].Float(), Y: args[4].Float(), W: args[5].Float(), H: args[6].Float()}
-				if err := currentEditor.EraseObjects(page, objects, box); err != nil {
-					return err
-				}
-			} else {
-				points = pointsFromJS(args[3])
-				if err := currentEditor.EraseObjectsPath(page, objects, points); err != nil {
-					return err
-				}
-			}
-			for _, id := range annotations {
-				path := ofdgo.ObjectPath{Annotation: id}
-				members, err := currentEditor.CompositeObjects(page, path)
-				if err != nil {
-					return err
-				}
-				indexes := make([]int, len(members))
-				for i := range indexes {
-					indexes[i] = i
-				}
-				if operation == "erase" {
-					err = currentEditor.EraseCompositeObjects(page, path, indexes, box)
-				} else {
-					err = currentEditor.EraseCompositeObjectsPath(page, path, indexes, points)
-				}
-				if err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-		matrix := ofdgo.IdentityMatrix
-		if operation == "transform" {
+			return currentEditor.StyleSelection(page, objects, annotations, objectStyle(args[3]))
+		case "erase":
+			return currentEditor.EraseSelection(page, objects, annotations, ofdgo.Box{
+				X: args[3].Float(), Y: args[4].Float(), W: args[5].Float(), H: args[6].Float(),
+			})
+		case "erasePath":
+			return currentEditor.EraseSelectionPath(page, objects, annotations, pointsFromJS(args[3]))
+		case "rotate":
+			return currentEditor.RotateSelection(page, objects, annotations, args[3].Int())
+		case "flip":
+			return currentEditor.FlipSelection(page, objects, annotations, args[3].String())
+		case "resize":
+			return currentEditor.ResizeSelection(page, objects, annotations, ofdgo.Box{
+				X: args[3].Float(), Y: args[4].Float(), W: args[5].Float(), H: args[6].Float(),
+			})
+		case "transform":
 			dx, dy, scale := args[3].Float(), args[4].Float(), args[5].Float()
 			if scale <= 0 {
 				return fmt.Errorf("scale must be positive")
 			}
-			matrix = ofdgo.NewMatrix(fmt.Sprintf("%g 0 0 %g %g %g", scale, scale, dx, dy))
-		} else {
-			bounds, err := editorSelectionBounds(page, objects, annotations)
-			if err != nil {
-				return err
-			}
-			x, y := bounds.X+bounds.W/2, bounds.Y+bounds.H/2
-			switch operation {
-			case "rotate":
-				angle := float64(args[3].Int()) * math.Pi / 180
-				matrix = ofdgo.NewMatrix(fmt.Sprintf("%g %g %g %g 0 0", math.Cos(angle), math.Sin(angle), -math.Sin(angle), math.Cos(angle)))
-			case "flip":
-				if args[3].String() == "horizontal" {
-					matrix = ofdgo.NewMatrix("-1 0 0 1 0 0")
-				} else if args[3].String() == "vertical" {
-					matrix = ofdgo.NewMatrix("1 0 0 -1 0 0")
-				} else {
-					return fmt.Errorf("invalid flip axis")
-				}
-			case "resize":
-				sx, sy := args[5].Float()/bounds.W, args[6].Float()/bounds.H
-				if sx <= 0 || sy <= 0 {
-					return fmt.Errorf("size must be positive")
-				}
-				matrix = ofdgo.NewMatrix(fmt.Sprintf("%g 0 0 %g %g %g", sx, sy, args[3].Float()-bounds.X*sx, args[4].Float()-bounds.Y*sy))
-			default:
-				return fmt.Errorf("unsupported mixed selection operation %q", operation)
-			}
-			if operation != "resize" {
-				matrix = ofdgo.TranslationMatrix(x, y).Multiply(matrix).Multiply(ofdgo.TranslationMatrix(-x, -y))
-			}
+			matrix := ofdgo.NewMatrix(fmt.Sprintf("%g 0 0 %g %g %g", scale, scale, dx, dy))
+			return currentEditor.TransformSelection(page, objects, annotations, matrix)
+		default:
+			return fmt.Errorf("unsupported mixed selection operation %q", operation)
 		}
-		if err := currentEditor.TransformObjectsMatrix(page, objects, matrix); err != nil {
-			return err
-		}
-		return currentEditor.TransformAnnotations(page, annotations, matrix)
 	})
 	if err != nil || selected == nil {
 		return result, err
@@ -1734,13 +1660,6 @@ func arrangeEditorSelection(page int, ids []string, operation, direction string)
 	default:
 		return fmt.Errorf("invalid arrangement operation %q", operation)
 	}
-}
-
-// editorSelectionBounds 计算混合选区的实际内容范围
-// 入参: page 页面索引, objects 正文标识, annotations 注解标识
-// 返回: ofdgo.Box 页面毫米范围, error 错误信息
-func editorSelectionBounds(page int, objects, annotations []string) (ofdgo.Box, error) {
-	return currentEditor.SelectionBounds(page, objects, annotations)
 }
 
 // captureEditorSelection 捕获正文与注解的独立副本
@@ -3828,11 +3747,20 @@ func eraseObjects(args []js.Value) (any, error) {
 // 入参: apply 待执行的编辑操作
 // 返回: any 文档信息, error 错误信息
 func changeObjects(apply func() error) (any, error) {
+	return changeAtomicObjects(func() error {
+		return currentEditor.Transaction(func(*ofdgo.Editor) error { return apply() })
+	})
+}
+
+// changeAtomicObjects 执行库层原子操作，按文档版本更新预览
+// 入参: apply 已具备事务保证的编辑操作
+// 返回: any 文档信息, error 错误信息
+func changeAtomicObjects(apply func() error) (any, error) {
 	if currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
 	}
 	revision := currentEditor.Revision()
-	if err := currentEditor.Transaction(func(*ofdgo.Editor) error { return apply() }); err != nil {
+	if err := apply(); err != nil {
 		return nil, err
 	}
 	if currentEditor.Revision() == revision {

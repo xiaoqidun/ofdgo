@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	"math"
 	"slices"
 )
 
@@ -35,6 +36,88 @@ func (e *Editor) SelectionBounds(page int, objects, annotations []string) (Box, 
 		return Box{}, fmt.Errorf("selection has no visible bounds")
 	}
 	return bounds, nil
+}
+
+// TransformSelection 原子变换正文与注解，失败回滚，一次撤销恢复全部
+// 入参: page 页面索引, objects 正文标识, annotations 注解标识, matrix 有限可逆变换
+// 返回: error 标识、变换或编辑错误
+func (e *Editor) TransformSelection(page int, objects, annotations []string, matrix Matrix) error {
+	if _, ok := matrix.Invert(); !ok || !finite(matrix.a) || !finite(matrix.b) || !finite(matrix.c) || !finite(matrix.d) || !finite(matrix.e) || !finite(matrix.f) {
+		return fmt.Errorf("selection transform must be finite and invertible")
+	}
+	if matrix == IdentityMatrix {
+		if _, _, err := e.selectedObjects(page, objects); err != nil {
+			return err
+		}
+		seen := make(map[string]bool, len(annotations))
+		for _, id := range annotations {
+			if seen[id] {
+				return fmt.Errorf("duplicate annotation ID %q", id)
+			}
+			seen[id] = true
+			if _, err := e.Annotation(page, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return e.Transaction(func(edit *Editor) error {
+		if err := edit.TransformObjectsMatrix(page, objects, matrix); err != nil {
+			return err
+		}
+		return edit.TransformAnnotations(page, annotations, matrix)
+	})
+}
+
+// RotateSelection 绕正文与注解的共同可见范围中心旋转，保留相对位置及资源
+// 入参: page 页面索引, objects 正文标识, annotations 注解标识, degrees 顺时针角度，仅支持90度的整数倍
+// 返回: error 标识、度量或编辑错误
+func (e *Editor) RotateSelection(page int, objects, annotations []string, degrees int) error {
+	matrix, err := editorRotation(degrees)
+	if err != nil {
+		return err
+	}
+	return e.orientSelection(page, objects, annotations, matrix)
+}
+
+// FlipSelection 绕正文与注解的共同可见范围中心镜像，保留绘制层级
+// 入参: page 页面索引, objects 正文标识, annotations 注解标识, axis 为horizontal或vertical
+// 返回: error 标识、度量或编辑错误
+func (e *Editor) FlipSelection(page int, objects, annotations []string, axis string) error {
+	matrix, err := editorFlip(axis)
+	if err != nil {
+		return err
+	}
+	return e.orientSelection(page, objects, annotations, matrix)
+}
+
+// ResizeSelection 按共同可见范围调整正文与注解的位置及尺寸，不重排文字或重采样图片
+// 正文独立宽高遵循ResizeObjects规则，一次撤销恢复全部
+// 入参: page 页面索引, objects 正文标识, annotations 注解标识, box 页面毫米目标范围
+// 返回: error 标识、度量或编辑错误
+func (e *Editor) ResizeSelection(page int, objects, annotations []string, box Box) error {
+	if _, err := creationBox(editorBoxString(box)); err != nil {
+		return err
+	}
+	bounds, err := e.SelectionBounds(page, objects, annotations)
+	if err != nil {
+		return err
+	}
+	sx, sy := box.W/bounds.W, box.H/bounds.H
+	if math.Abs(sx-sy) > 1e-9*math.Max(sx, sy) {
+		items, _, err := e.selectedObjects(page, objects)
+		if err != nil {
+			return err
+		}
+		for _, object := range items {
+			if !e.objectStretchable(object, make(map[string]bool)) {
+				return fmt.Errorf("nonuniform resizing requires images or image-only groups")
+			}
+		}
+	} else {
+		sy = sx
+	}
+	return e.TransformSelection(page, objects, annotations, Matrix{a: sx, d: sy, e: box.X - bounds.X*sx, f: box.Y - bounds.Y*sy})
 }
 
 // AlignSelection 将正文与注解统一对齐，单选对齐页面，多选对齐选区，一次撤销恢复全部
@@ -77,6 +160,104 @@ func (e *Editor) DistributeSelection(page int, objects, annotations []string, ax
 		return err
 	}
 	return e.transformSelection(page, objects, annotations, matrices)
+}
+
+// DeleteSelection 原子删除正文与注解，一次撤销恢复全部
+// 入参: page 页面索引, objects 正文标识, annotations 注解标识
+// 返回: error 标识或编辑错误
+func (e *Editor) DeleteSelection(page int, objects, annotations []string) error {
+	return e.Transaction(func(edit *Editor) error {
+		if err := edit.DeleteObjects(page, objects); err != nil {
+			return err
+		}
+		return edit.DeleteAnnotations(page, annotations)
+	})
+}
+
+// StyleSelection 原子设置正文与注解内部图元的样式，保留未指定属性
+// 入参: page 页面索引, objects 正文标识, annotations 注解标识, style 样式增量
+// 返回: error 标识、样式或编辑错误
+func (e *Editor) StyleSelection(page int, objects, annotations []string, style ObjectStyle) error {
+	return e.Transaction(func(edit *Editor) error {
+		if err := edit.StyleObjects(page, objects, style); err != nil {
+			return err
+		}
+		return edit.editSelectionAnnotations(page, annotations, func(path ObjectPath, indexes []int) error {
+			return edit.StyleCompositeObjects(page, path, indexes, style)
+		})
+	})
+}
+
+// EraseSelection 按页面矩形原子擦除正文与注解内部内容，不删除其他选区成员
+// 保留原始资源，不用于敏感信息脱敏
+// 入参: page 页面索引, objects 正文标识, annotations 注解标识, box 页面毫米擦除范围
+// 返回: error 标识、范围或编辑错误
+func (e *Editor) EraseSelection(page int, objects, annotations []string, box Box) error {
+	return e.Transaction(func(edit *Editor) error {
+		if err := edit.EraseObjects(page, objects, box); err != nil {
+			return err
+		}
+		return edit.editSelectionAnnotations(page, annotations, func(path ObjectPath, indexes []int) error {
+			return edit.EraseCompositeObjects(page, path, indexes, box)
+		})
+	})
+}
+
+// EraseSelectionPath 按页面多边形原子擦除正文与注解内部内容，不改变未擦除内容
+// 保留原始资源，不用于敏感信息脱敏
+// 入参: page 页面索引, objects 正文标识, annotations 注解标识, points 页面毫米多边形
+// 返回: error 标识、多边形或编辑错误
+func (e *Editor) EraseSelectionPath(page int, objects, annotations []string, points []Point) error {
+	return e.Transaction(func(edit *Editor) error {
+		if err := edit.EraseObjectsPath(page, objects, points); err != nil {
+			return err
+		}
+		return edit.editSelectionAnnotations(page, annotations, func(path ObjectPath, indexes []int) error {
+			return edit.EraseCompositeObjectsPath(page, path, indexes, points)
+		})
+	})
+}
+
+// orientSelection 将直角旋转或镜像定位到混合选区中心，恒等变换仅校验标识
+// 入参: page 页面索引, objects 正文标识, annotations 注解标识, matrix 方向变换
+// 返回: error 标识、度量或编辑错误
+func (e *Editor) orientSelection(page int, objects, annotations []string, matrix Matrix) error {
+	if matrix != IdentityMatrix {
+		bounds, err := e.SelectionBounds(page, objects, annotations)
+		if err != nil {
+			return err
+		}
+		x, y := bounds.X+bounds.W/2, bounds.Y+bounds.H/2
+		matrix = TranslationMatrix(x, y).Multiply(matrix).Multiply(TranslationMatrix(-x, -y))
+	}
+	return e.TransformSelection(page, objects, annotations, matrix)
+}
+
+// editSelectionAnnotations 对注解直接成员统一操作，重复或不存在的标识返回错误
+// 入参: page 页面索引, ids 注解标识, apply 成员操作
+// 返回: error 标识、度量或编辑错误
+func (e *Editor) editSelectionAnnotations(page int, ids []string, apply func(ObjectPath, []int) error) error {
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			return fmt.Errorf("duplicate annotation ID %q", id)
+		}
+		seen[id] = true
+		path := ObjectPath{Annotation: id}
+		reader, _, _, members, err := e.compositeScope(page, path)
+		if err != nil {
+			return err
+		}
+		reader.Close()
+		indexes := make([]int, len(members))
+		for i := range indexes {
+			indexes[i] = i
+		}
+		if err := apply(path, indexes); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // selectionGeometry 一次读取页面与资源，按正文、注解标识顺序度量并保留绘制位置

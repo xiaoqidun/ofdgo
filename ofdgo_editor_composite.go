@@ -162,10 +162,10 @@ func (e *Editor) TransformCompositeObjects(page int, path ObjectPath, indexes []
 // 入参: page 页面索引, path 父复合对象路径, indexes 成员序号, degrees 顺时针角度，为90度的整数倍
 // 返回: error 错误信息
 func (e *Editor) RotateCompositeObjects(page int, path ObjectPath, indexes []int, degrees int) error {
-	if degrees%90 != 0 {
-		return fmt.Errorf("rotation must be a multiple of 90 degrees")
+	m, err := editorRotation(degrees)
+	if err != nil {
+		return err
 	}
-	m := []Matrix{IdentityMatrix, {b: 1, c: -1}, {a: -1, d: -1}, {b: -1, c: 1}}[(degrees%360+360)%360/90]
 	return e.changeCompositeObjects(page, path, indexes, func(box Box) Matrix { return compositeOrientation(box, m) })
 }
 
@@ -173,14 +173,9 @@ func (e *Editor) RotateCompositeObjects(page int, path ObjectPath, indexes []int
 // 入参: page 页面索引, path 父复合对象路径, indexes 成员序号, axis 为horizontal或vertical
 // 返回: error 错误信息
 func (e *Editor) FlipCompositeObjects(page int, path ObjectPath, indexes []int, axis string) error {
-	m := IdentityMatrix
-	switch axis {
-	case "horizontal":
-		m.a = -1
-	case "vertical":
-		m.d = -1
-	default:
-		return fmt.Errorf("invalid flip axis %q", axis)
+	m, err := editorFlip(axis)
+	if err != nil {
+		return err
 	}
 	return e.changeCompositeObjects(page, path, indexes, func(box Box) Matrix { return compositeOrientation(box, m) })
 }
