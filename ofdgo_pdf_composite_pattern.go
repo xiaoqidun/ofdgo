@@ -33,37 +33,14 @@ type pdfCompositePattern struct {
 // 返回: []pdfCompositePixel 去除背景贡献的图案像素, error 解析或绘制错误
 func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, space *pdfgo.ColorSpace) ([]pdfCompositePixel, error) {
 	source := paint.Tiling
-	paint.Alpha = 1
-	if c.cache.patterns == nil {
-		c.cache.patterns = make(map[pdfgo.Paint]*pdfCompositePattern)
-	}
-	pattern := c.cache.patterns[paint]
 	matrix := c.importer.matrix.Mul(source.Matrix)
 	inverse, ok := matrix.Inverse()
 	if !ok {
 		return nil, fmt.Errorf("invalid PDF tiling pattern matrix")
 	}
-	if pattern == nil {
-		nodes, err := c.importer.collectCompositeNodes(func(v pdfgo.Visitor) error { return source.Walk(c.importer.ctx, paint, v) })
-		if err != nil {
-			return nil, err
-		}
-		b := source.BBox
-		box := pdfBounds([]pdfgo.Point{
-			matrix.Apply(pdfgo.Point{X: b.XMin, Y: b.YMin}), matrix.Apply(pdfgo.Point{X: b.XMax, Y: b.YMin}),
-			matrix.Apply(pdfgo.Point{X: b.XMax, Y: b.YMax}), matrix.Apply(pdfgo.Point{X: b.XMin, Y: b.YMax}),
-		})
-		if box.W <= 0 || box.H <= 0 {
-			return nil, fmt.Errorf("invalid PDF tiling pattern bounds")
-		}
-		local := *c.importer
-		local.matrix = matrix
-		local.matrix[4] -= box.X
-		local.matrix[5] -= box.Y
-		local.pageWidth, local.pageHeight = box.W, box.H
-		local.compositeCache = nil
-		pattern = &pdfCompositePattern{nodes: nodes, local: local, box: box}
-		c.cache.patterns[paint] = pattern
+	pattern, err := c.importer.compositePattern(paint)
+	if err != nil {
+		return nil, err
 	}
 	xstep, ystep := math.Abs(source.XStep), math.Abs(source.YStep)
 	area := pdfBounds([]pdfgo.Point{
@@ -107,4 +84,110 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 		pixel.alpha = pixel.effect
 	}
 	return result, nil
+}
+
+// compositePattern 复用图案单元解析及几何上下文，供检查和局部合成共同使用
+// 入参: paint 图案画刷
+// 返回: *pdfCompositePattern 单元内容, error 解析或边界错误
+func (p *pdfImporter) compositePattern(paint pdfgo.Paint) (*pdfCompositePattern, error) {
+	paint.Alpha = 1
+	cache := p.compositingCache()
+	if cache.patterns == nil {
+		cache.patterns = make(map[pdfgo.Paint]*pdfCompositePattern)
+	}
+	if pattern := cache.patterns[paint]; pattern != nil {
+		return pattern, nil
+	}
+	source := paint.Tiling
+	nodes, err := p.collectCompositeNodes(func(v pdfgo.Visitor) error { return source.Walk(p.ctx, paint, v) })
+	if err != nil {
+		return nil, err
+	}
+	matrix := p.matrix.Mul(source.Matrix)
+	b := source.BBox
+	box := pdfBounds([]pdfgo.Point{
+		matrix.Apply(pdfgo.Point{X: b.XMin, Y: b.YMin}), matrix.Apply(pdfgo.Point{X: b.XMax, Y: b.YMin}),
+		matrix.Apply(pdfgo.Point{X: b.XMax, Y: b.YMax}), matrix.Apply(pdfgo.Point{X: b.XMin, Y: b.YMax}),
+	})
+	if box.W <= 0 || box.H <= 0 {
+		return nil, fmt.Errorf("invalid PDF tiling pattern bounds")
+	}
+	local := *p
+	local.matrix = matrix
+	local.matrix[4] -= box.X
+	local.matrix[5] -= box.Y
+	local.pageWidth, local.pageHeight = box.W, box.H
+	local.compositeCache = nil
+	pattern := &pdfCompositePattern{nodes: nodes, local: local, box: box}
+	cache.patterns[paint] = pattern
+	return pattern, nil
+}
+
+// directCompositeNode 检查图元及其图案单元能否独立保留，不忽略单元内的背景混合
+// 入参: node 图元, space 混合空间
+// 返回: bool 是否可直接转换, error 图案解析错误
+func (p *pdfImporter) directCompositeNode(node pdfCompositeNode, space *pdfgo.ColorSpace) (bool, error) {
+	if !node.opaque(space) && !(space.SRGBEquivalent() && node.direct()) {
+		return false, nil
+	}
+	if node.group != nil {
+		for _, child := range node.children {
+			if direct, err := p.directCompositeNode(child, space); err != nil || !direct {
+				return direct, err
+			}
+		}
+		return true, nil
+	}
+	style, fill, stroke := node.style()
+	for i, paint := range []pdfgo.Paint{style.Fill, style.Stroke} {
+		if i == 0 && !fill || i == 1 && !stroke || paint.Tiling == nil {
+			continue
+		}
+		pattern, err := p.compositePattern(paint)
+		if err != nil {
+			return false, err
+		}
+		for _, child := range pattern.nodes {
+			if direct, err := pattern.local.directCompositeNode(child, space); err != nil || !direct {
+				return direct, err
+			}
+		}
+	}
+	return true, nil
+}
+
+// processOverprint 检查图元、透明组和图案单元是否需要设备四色套印
+// 入参: nodes 原始图元
+// 返回: bool 是否需要四色混合, error 图像或图案解析错误
+func (p *pdfImporter) processOverprint(nodes []pdfCompositeNode) (bool, error) {
+	for _, node := range nodes {
+		if node.group != nil {
+			if found, err := p.processOverprint(node.children); err != nil || found {
+				return found, err
+			}
+			continue
+		}
+		style, fill, stroke := node.style()
+		if node.image != nil && style.FillOverprint {
+			if _, found, err := pdfImageProcessColorants(node.image.Image); err != nil || found {
+				return found, err
+			}
+		}
+		if fill && style.FillOverprint && pdfOverprintNeedsSeparation(style.Fill) || stroke && style.StrokeOverprint && pdfOverprintNeedsSeparation(style.Stroke) {
+			return true, nil
+		}
+		for i, paint := range []pdfgo.Paint{style.Fill, style.Stroke} {
+			if i == 0 && !fill || i == 1 && !stroke || paint.Tiling == nil {
+				continue
+			}
+			pattern, err := p.compositePattern(paint)
+			if err != nil {
+				return false, err
+			}
+			if found, err := pattern.local.processOverprint(pattern.nodes); err != nil || found {
+				return found, err
+			}
+		}
+	}
+	return false, nil
 }

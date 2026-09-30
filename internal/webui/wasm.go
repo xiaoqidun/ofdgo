@@ -2987,14 +2987,18 @@ func styleObjects(args []js.Value) (any, error) {
 			return nil, err
 		}
 	}
-	patterns := make(map[bool]*ofdgo.PatternStyle)
-	for key, stroke := range map[string]bool{"fillPatternStyle": false, "strokePatternStyle": true} {
+	appearance := ofdgo.ObjectAppearance{SetLink: !linkField.IsUndefined(), Link: link, Border: border}
+	for i, key := range []string{"fillPatternStyle", "strokePatternStyle"} {
 		if field := args[2].Get(key); !field.IsUndefined() {
 			var pattern ofdgo.PatternStyle
 			if err := json.Unmarshal([]byte(field.String()), &pattern); err != nil {
 				return nil, err
 			}
-			patterns[stroke] = &pattern
+			if i == 0 {
+				appearance.FillPattern = &pattern
+			} else {
+				appearance.StrokePattern = &pattern
+			}
 		}
 	}
 	if field := args[2].Get("fillPaint"); !field.IsUndefined() {
@@ -3008,36 +3012,18 @@ func styleObjects(args []js.Value) (any, error) {
 		}
 	}
 	return changeObjects(func() error {
-		return currentEditor.Transaction(func(editor *ofdgo.Editor) error {
-			page, ids := args[0].Int(), stringsFromJS(args[1])
-			if !linkField.IsUndefined() {
-				if err := editor.SetObjectLink(page, ids, link); err != nil {
-					return err
-				}
-			}
-			if border != nil {
-				if err := resolveStylePaint((*ofdgo.FillColor)(border.Color)); err != nil {
-					return err
-				}
-				if err := editor.StyleImageBorders(page, ids, *border); err != nil {
-					return err
-				}
-			}
-			for _, paint := range []*ofdgo.FillColor{style.FillColor, (*ofdgo.FillColor)(style.StrokeColor)} {
-				if err := resolveStylePaint(paint); err != nil {
-					return err
-				}
-			}
-			if err := editor.StyleObjects(page, ids, style); err != nil {
+		if border != nil {
+			if err := resolveStylePaint((*ofdgo.FillColor)(border.Color)); err != nil {
 				return err
 			}
-			for stroke, pattern := range patterns {
-				if err := editor.StylePatterns(page, ids, stroke, *pattern); err != nil {
-					return err
-				}
+		}
+		for _, paint := range []*ofdgo.FillColor{style.FillColor, (*ofdgo.FillColor)(style.StrokeColor)} {
+			if err := resolveStylePaint(paint); err != nil {
+				return err
 			}
-			return nil
-		})
+		}
+		appearance.Style = style
+		return currentEditor.ApplyAppearance(args[0].Int(), stringsFromJS(args[1]), appearance)
 	})
 }
 

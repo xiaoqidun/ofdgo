@@ -46,6 +46,46 @@ type ImageBorderStyle struct {
 	Color            *StrokeColor
 }
 
+// ObjectAppearance 对象外观组合更新，nil字段保持原值
+// SetLink为true时更新链接，Link为nil时删除链接
+type ObjectAppearance struct {
+	Style         ObjectStyle
+	SetLink       bool
+	Link          *AnnotationLink
+	Border        *ImageBorderStyle
+	FillPattern   *PatternStyle
+	StrokePattern *PatternStyle
+}
+
+// ApplyAppearance 原子更新外观、链接、图片边框及图案布局，支持一次撤销
+// 入参: page 页面索引, ids 对象标识, appearance 外观增量
+// 返回: error 错误信息
+func (e *Editor) ApplyAppearance(page int, ids []string, appearance ObjectAppearance) error {
+	return e.Transaction(func(editor *Editor) error {
+		if appearance.SetLink {
+			if err := editor.SetObjectLink(page, ids, appearance.Link); err != nil {
+				return err
+			}
+		}
+		if appearance.Border != nil {
+			if err := editor.StyleImageBorders(page, ids, *appearance.Border); err != nil {
+				return err
+			}
+		}
+		if err := editor.StyleObjects(page, ids, appearance.Style); err != nil {
+			return err
+		}
+		for i, pattern := range []*PatternStyle{appearance.FillPattern, appearance.StrokePattern} {
+			if pattern != nil {
+				if err := editor.StylePatterns(page, ids, i == 1, *pattern); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
 // DrawParam 读取绘制参数，resolved为true时合并继承链，返回独立副本
 // 入参: id 资源标识, resolved 是否解析继承
 // 返回: *DrawParam 绘制参数, error 错误信息

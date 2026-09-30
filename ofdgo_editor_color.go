@@ -208,8 +208,9 @@ func (e *Editor) RGBColor(value color.NRGBA) (*FillColor, error) {
 		}
 	}
 	for _, resource := range e.resources {
-		if resource.space != nil {
-			result.ColorSpace = resource.space.ID
+		space := resource.space
+		if space != nil && space.Type == "RGB" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0 {
+			result.ColorSpace = space.ID
 			return result, nil
 		}
 	}

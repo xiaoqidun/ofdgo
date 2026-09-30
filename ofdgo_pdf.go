@@ -124,6 +124,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	if err != nil {
 		return nil, PDFImportReport{}, err
 	}
+	defer reader.Close()
 	editor := NewEditor()
 	editor.SetRenderBackends(renderer.Backends())
 	editor.fontDirs, editor.fontFS = renderer.FontSources()

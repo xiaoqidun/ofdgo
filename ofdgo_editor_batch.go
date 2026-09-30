@@ -562,7 +562,11 @@ func (e *Editor) updateObjectOrigins(page int, objects []GraphicObject, preserve
 		if origin != nil {
 			capability := e.objectCapabilities(before[i], orderable)
 			if !capability.Transform {
-				return fmt.Errorf("object %q is read-only for this operation: %w", ids[i], capability.editError())
+				beforeBox, beforeCTM := editorGeometry(before[i])
+				afterBox, afterCTM := editorGeometry(object)
+				if !capability.Update && !(preserved && capability.Delete) || before[i].Type != object.Type || beforeBox != afterBox || beforeCTM != afterCTM {
+					return fmt.Errorf("object %q is read-only for this operation: %w", ids[i], capability.editError())
+				}
 			}
 			if !preserved && !capability.Update && editorPreservedObject(before[i], object) && capability.Paint {
 				if err := e.validatePreservedAppearance(before[i], object); err != nil {

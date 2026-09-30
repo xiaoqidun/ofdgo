@@ -207,25 +207,7 @@ func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Vis
 	}
 	if space == nil {
 		space = &pdfgo.ColorSpace{Model: "DeviceRGB"}
-		var needsProcess func([]pdfCompositeNode) (bool, error)
-		needsProcess = func(items []pdfCompositeNode) (bool, error) {
-			for _, item := range items {
-				if item.group != nil {
-					found, err := needsProcess(item.children)
-					if err != nil || found {
-						return found, err
-					}
-				}
-				if item.image != nil && item.image.Style.FillOverprint {
-					_, found, err := pdfImageProcessColorants(item.image.Image)
-					if err != nil || found {
-						return found, err
-					}
-				}
-			}
-			return false, nil
-		}
-		found, err := needsProcess(nodes)
+		found, err := p.processOverprint(nodes)
 		if err != nil {
 			return err
 		}
@@ -244,7 +226,11 @@ func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Vis
 func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
 	space := p.compositeSpace
 	for i, node := range nodes {
-		if node.opaque(space) || space.SRGBEquivalent() && node.direct() {
+		direct, err := p.directCompositeNode(node, space)
+		if err != nil {
+			return fmt.Errorf("inspect graphic %d: %w", i+1, err)
+		}
+		if direct {
 			if err := node.emit(p.visitor()); err != nil {
 				return fmt.Errorf("convert graphic %d: %w", i+1, err)
 			}
@@ -445,11 +431,14 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 	output := image.NewNRGBA(image.Rect(0, 0, w, h))
 	cache := p.compositingCache()
 	step := 25.4 / p.rasterDPI
+	buffer := make([]pdfCompositePixel, min(256, w)*min(256, h))
 	for y := 0; y < h; y += 256 {
 		for x := 0; x < w; x += 256 {
+			runtime.Gosched()
 			width, height := min(256, w-x), min(256, h-y)
 			c := pdfCompositor{importer: p, box: Box{X: box.X + float64(x)*step, Y: box.Y + float64(y)*step, W: float64(width) * step, H: float64(height) * step}, width: width, height: height, inverse: inverse, cache: cache, masks: map[*pdfgo.SoftMask][]float64{}}
-			pixels := make([]pdfCompositePixel, width*height)
+			pixels := buffer[:width*height]
+			clear(pixels)
 			if err := c.draw(backdrop, pixels, space); err != nil {
 				return err
 			}
