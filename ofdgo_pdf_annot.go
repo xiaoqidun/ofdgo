@@ -17,9 +17,8 @@ package ofdgo
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strconv"
-	"strings"
-	"time"
 
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -38,6 +37,14 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 		if annotation.Dictionary[key] != nil {
 			return &pdfgo.UnsupportedError{Feature: fmt.Sprintf("annotation field %q", key)}
 		}
+	}
+	remark, err := p.reader.ReadAnnotationText(annotation, "Contents", p.warning)
+	if err != nil {
+		return err
+	}
+	if annotation.Subtype == "FreeText" {
+		annotation.Dictionary = maps.Clone(annotation.Dictionary)
+		annotation.Dictionary["Contents"] = pdfgo.String("\xef\xbb\xbf" + remark)
 	}
 	flags := int64(0)
 	if value := annotation.Dictionary["F"]; value != nil {
@@ -95,7 +102,7 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 	if flags&(2|32) == 0 {
 		p.compositeNodes = stamp.compositeNodes
 	}
-	converted := Annotation{Type: pdfAnnotationType(annotation.Subtype), Subtype: string(annotation.Subtype), Appearance: Appearance{Boundary: pdfBoundary(box), Objects: stamp.objects}}
+	converted := Annotation{Type: pdfAnnotationType(annotation.Subtype), Subtype: string(annotation.Subtype), Remark: remark, Appearance: Appearance{Boundary: pdfBoundary(box), Objects: stamp.objects}}
 	if annotation.Subtype == "Text" {
 		value, err := p.reader.Resolve(annotation.Dictionary["Open"])
 		if err != nil {
@@ -129,80 +136,28 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 		region.Fill, region.Stroke, region.Actions = &no, &no, actions
 		converted.Appearance.Objects = append(converted.Appearance.Objects, GraphicObject{Type: "PathObject", PathObject: region})
 	}
-	if value, err := p.reader.Resolve(annotation.Dictionary["Contents"]); err != nil {
-		return err
-	} else if value != nil {
-		contents, ok := value.(pdfgo.String)
-		if !ok {
-			return fmt.Errorf("invalid PDF annotation contents")
-		}
-		converted.Remark, err = pdfgo.DecodeTextString(contents)
-		if err != nil {
-			return err
-		}
-	}
 	if flags&(2|32) != 0 {
 		visible := false
 		converted.Visible = &visible
 	}
 	converted.NoZoom = flags&8 != 0 || annotation.Subtype == "Text"
 	converted.NoRotate = flags&16 != 0 || annotation.Subtype == "Text"
-	if value := annotation.Dictionary["T"]; value != nil {
-		resolved, err := p.reader.Resolve(value)
-		if err != nil {
-			return err
-		}
-		creator, ok := resolved.(pdfgo.String)
-		if !ok {
-			return fmt.Errorf("invalid PDF annotation creator")
-		}
-		converted.Creator, err = pdfgo.DecodeTextString(creator)
-		if err != nil {
-			return err
-		}
+	converted.Creator, err = p.reader.ReadAnnotationText(annotation, "T", p.warning)
+	if err != nil {
+		return err
 	}
-	if value := annotation.Dictionary["M"]; value != nil {
-		resolved, err := p.reader.Resolve(value)
-		if err != nil {
-			return err
+	modified, err := p.reader.ReadAnnotationText(annotation, "M", p.warning)
+	if err != nil {
+		return err
+	}
+	if modified != "" {
+		if date, err := pdfgo.ParseDate(modified); err == nil && date.Year() > 0 {
+			converted.LastModDate = date.Format("2006-01-02")
 		}
-		encoded, ok := resolved.(pdfgo.String)
-		if !ok {
-			return fmt.Errorf("invalid PDF annotation modification date")
+		if converted.Parameters == nil {
+			converted.Parameters = &AnnotationParameters{}
 		}
-		date, err := pdfgo.DecodeTextString(encoded)
-		if err != nil {
-			return err
-		}
-		date = strings.TrimPrefix(date, "D:")
-		if len(date) < 4 {
-			return fmt.Errorf("invalid PDF annotation modification date")
-		}
-		year, err := strconv.Atoi(date[:4])
-		if err != nil {
-			return fmt.Errorf("invalid PDF annotation modification date: %w", err)
-		}
-		month, day := 1, 1
-		if len(date) >= 6 {
-			month, err = strconv.Atoi(date[4:6])
-			if err != nil {
-				return fmt.Errorf("invalid PDF annotation modification month: %w", err)
-			}
-		}
-		if len(date) >= 8 {
-			day, err = strconv.Atoi(date[6:8])
-			if err != nil {
-				return fmt.Errorf("invalid PDF annotation modification day: %w", err)
-			}
-		}
-		parsed := time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
-		if parsed.Year() != year || int(parsed.Month()) != month || parsed.Day() != day {
-			return fmt.Errorf("invalid PDF annotation modification date")
-		}
-		converted.LastModDate = parsed.Format("2006-01-02")
-		if len(date) > 8 {
-			p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF annotation modification time cannot fit OFD annotation date"})
-		}
+		converted.Parameters.Parameter = append(converted.Parameters.Parameter, AnnotationParameter{Name: "PDF.M", Value: modified})
 	}
 	if _, err := p.editor.AddAnnotation(p.page, converted); err != nil {
 		return fmt.Errorf("PDF annotation: %w", err)

@@ -153,6 +153,12 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			}
 			continue
 		}
+		if annotation.Subtype == "Screen" {
+			if err := p.screenAnnotation(ctx, page, annotation, strict); err != nil {
+				return err
+			}
+			continue
+		}
 		if annotation.Subtype == "3D" || annotation.Subtype == "RichMedia" {
 			if err := p.interactiveAnnotation(ctx, page, annotation, strict); err != nil {
 				return err

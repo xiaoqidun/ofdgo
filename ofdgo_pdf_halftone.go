@@ -21,7 +21,7 @@ import "github.com/xiaoqidun/pdfgo"
 // 返回: error 严格模式或非恒等传递函数无法表达
 func (p *pdfImporter) halftone(style pdfgo.Style) error {
 	h := style.Halftone
-	if h == nil {
+	if h == nil || h.Type == 0 {
 		return nil
 	}
 	identity, err := h.IdentityTransfer(p.reader)
