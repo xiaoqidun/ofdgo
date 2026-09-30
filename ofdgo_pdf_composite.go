@@ -119,13 +119,18 @@ func (c *pdfCompositor) coverage(node pdfCompositeNode, stroke bool) (image.Imag
 func (p *pdfImporter) compositeTextBounds(mark pdfgo.TextMark, stroke bool) Box {
 	b := mark.Font.BoundingBox
 	matrix := p.matrix.Mul(mark.Matrix)
-	var points []pdfgo.Point
+	minX, minY, maxX, maxY := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
 	for _, origin := range mark.Positions {
-		for _, point := range []pdfgo.Point{{X: b.XMin, Y: b.YMin}, {X: b.XMax, Y: b.YMin}, {X: b.XMax, Y: b.YMax}, {X: b.XMin, Y: b.YMax}} {
-			points = append(points, matrix.Apply(pdfgo.Point{X: origin.X + point.X*mark.Size*mark.HorizontalScale/1000, Y: origin.Y + point.Y*mark.Size/1000}))
+		for _, point := range [4]pdfgo.Point{{X: b.XMin, Y: b.YMin}, {X: b.XMax, Y: b.YMin}, {X: b.XMax, Y: b.YMax}, {X: b.XMin, Y: b.YMax}} {
+			point = matrix.Apply(pdfgo.Point{X: origin.X + point.X*mark.Size*mark.HorizontalScale/1000, Y: origin.Y + point.Y*mark.Size/1000})
+			minX, minY = math.Min(minX, point.X), math.Min(minY, point.Y)
+			maxX, maxY = math.Max(maxX, point.X), math.Max(maxY, point.Y)
 		}
 	}
-	box := pdfBounds(points)
+	box := Box{}
+	if len(mark.Positions) != 0 {
+		box = Box{X: minX, Y: minY, W: maxX - minX, H: maxY - minY}
+	}
 	marginX, marginY := 25.4/p.rasterDPI, 25.4/p.rasterDPI
 	if stroke {
 		m := mark.StrokeMatrix

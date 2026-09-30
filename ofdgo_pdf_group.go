@@ -553,6 +553,12 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 	}
 	identity := pdfImporter{matrix: pdfgo.Identity()}
 	var visitor pdfgo.Visitor
+	visitor.Text = func(pdfgo.TextMark) error {
+		return &pdfgo.UnsupportedError{Feature: "text mask graphic"}
+	}
+	visitor.Image = func(pdfgo.ImageMark) error {
+		return &pdfgo.UnsupportedError{Feature: "image mask graphic"}
+	}
 	visitor.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
 		if mark.Alpha != 1 || mark.SoftMask != nil || !pdfNormalBlend(mark.BlendMode) || mark.ColorSpace != nil && !mark.ColorSpace.Equal(mask.ColorSpace) {
 			return &pdfgo.UnsupportedError{Feature: "transparent mask group"}
@@ -561,7 +567,7 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 	}
 	visitor.Path = func(mark pdfgo.PathMark) error {
 		paint := mark.Style.Fill
-		if !mark.Fill || mark.Stroke || paint.Alpha != 1 || paint.CMYK != nil || paint.Axial != nil || paint.Radial != nil || paint.Tiling != nil || paint.Space != nil && paint.Space.Calibrated() || paint.RGB[0] != paint.RGB[1] || paint.RGB[1] != paint.RGB[2] || mark.Style.SoftMask != nil || !pdfNormalBlend(mark.Style.BlendMode) {
+		if !mark.Fill || mark.Stroke || paint.Alpha != 1 || paint.CMYK != nil || paint.Axial != nil || paint.Radial != nil || paint.Mesh != nil || paint.Tiling != nil || paint.Space != nil && paint.Space.Calibrated() || paint.RGB[0] != paint.RGB[1] || paint.RGB[1] != paint.RGB[2] || mark.Style.SoftMask != nil || !pdfNormalBlend(mark.Style.BlendMode) {
 			return &pdfgo.UnsupportedError{Feature: "nonbinary mask graphic"}
 		}
 		visible, err := opacity(paint.RGB[0])
