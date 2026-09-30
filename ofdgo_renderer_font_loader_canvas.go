@@ -14,7 +14,11 @@
 
 package ofdgo
 
-import "github.com/tdewolff/canvas"
+import (
+	"crypto/sha256"
+
+	"github.com/tdewolff/canvas"
+)
 
 // loadFont 加载字体
 // 入参: fontID 字体ID
@@ -37,12 +41,22 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	}
 	fontData := resolved.Data
 	fontStyle := canvasFontStyle(of)
+	if resolved.digest == ([32]byte{}) {
+		resolved.digest = sha256.Sum256(fontData)
+	}
+	key := canvasFontKey{digest: resolved.digest, name: of.FontName, style: fontStyle}
+	cache := r.canvasFontFamilies()
+	if ff, ok := cache.get(key); ok {
+		r.canvasState().fontMap[fontID] = ff
+		return ff
+	}
 	ff := canvas.NewFontFamily(of.FontName)
 	if err := ff.LoadFont(fontData, 0, fontStyle); err != nil {
 		r.renderError = err
 		return nil
 	}
 	r.canvasState().fontMap[fontID] = ff
+	cache.put(key, ff, min(len(fontData), cache.limit)*8+256)
 	return ff
 }
 

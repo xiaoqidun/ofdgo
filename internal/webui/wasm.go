@@ -1725,169 +1725,22 @@ func changeSelection(args []js.Value) (any, error) {
 // 入参: page 页面, ids 标识, operation 操作, direction 方向
 // 返回: error 错误信息
 func arrangeEditorSelection(page int, ids []string, operation, direction string) error {
-	if operation == "align" && !slices.Contains([]string{"left", "center", "right", "top", "middle", "bottom"}, direction) || operation == "distribute" && direction != "horizontal" && direction != "vertical" {
-		return fmt.Errorf("invalid arrangement direction")
+	objects, annotations := splitEditorSelection(ids)
+	switch operation {
+	case "align":
+		return currentEditor.AlignSelection(page, objects, annotations, direction)
+	case "distribute":
+		return currentEditor.DistributeSelection(page, objects, annotations, direction)
+	default:
+		return fmt.Errorf("invalid arrangement operation %q", operation)
 	}
-	boxes := make([]ofdgo.Box, len(ids))
-	var target ofdgo.Box
-	for i, id := range ids {
-		objects, annotations := splitEditorSelection([]string{id})
-		box, err := editorSelectionBounds(page, objects, annotations)
-		if err != nil {
-			return err
-		}
-		boxes[i] = box
-		if i == 0 {
-			target = box
-		} else {
-			x, y := math.Min(target.X, box.X), math.Min(target.Y, box.Y)
-			target = ofdgo.Box{X: x, Y: y, W: math.Max(target.X+target.W, box.X+box.W) - x, H: math.Max(target.Y+target.H, box.Y+box.H) - y}
-		}
-	}
-	if len(ids) == 1 {
-		content, err := currentSession.pageContent(page)
-		if err != nil {
-			return err
-		}
-		target, err = currentSession.pageBox(page, content)
-		if err != nil {
-			return err
-		}
-	}
-	translations := make([]ofdgo.Point, len(ids))
-	if operation == "align" {
-		for i, box := range boxes {
-			switch direction {
-			case "left":
-				translations[i].X = target.X - box.X
-			case "center":
-				translations[i].X = target.X + (target.W-box.W)/2 - box.X
-			case "right":
-				translations[i].X = target.X + target.W - box.X - box.W
-			case "top":
-				translations[i].Y = target.Y - box.Y
-			case "middle":
-				translations[i].Y = target.Y + (target.H-box.H)/2 - box.Y
-			case "bottom":
-				translations[i].Y = target.Y + target.H - box.Y - box.H
-			}
-		}
-	} else {
-		if len(ids) < 3 {
-			return nil
-		}
-		order := make([]int, len(ids))
-		position := func(i int) float64 {
-			if direction == "vertical" {
-				return boxes[i].Y
-			}
-			return boxes[i].X
-		}
-		size := func(i int) float64 {
-			if direction == "vertical" {
-				return boxes[i].H
-			}
-			return boxes[i].W
-		}
-		for i := range order {
-			order[i] = i
-		}
-		slices.SortStableFunc(order, func(a, b int) int {
-			if position(a) < position(b) {
-				return -1
-			}
-			if position(a) > position(b) {
-				return 1
-			}
-			return 0
-		})
-		total := 0.0
-		for _, i := range order {
-			total += size(i)
-		}
-		first, last := order[0], order[len(order)-1]
-		gap := (position(last) + size(last) - position(first) - total) / float64(len(order)-1)
-		next := position(first)
-		for _, i := range order {
-			if direction == "vertical" {
-				translations[i].Y = next - position(i)
-			} else {
-				translations[i].X = next - position(i)
-			}
-			next += size(i) + gap
-		}
-	}
-	for i, id := range ids {
-		objects, annotations := splitEditorSelection([]string{id})
-		matrix := ofdgo.TranslationMatrix(translations[i].X, translations[i].Y)
-		if err := currentEditor.TransformObjectsMatrix(page, objects, matrix); err != nil {
-			return err
-		}
-		if err := currentEditor.TransformAnnotations(page, annotations, matrix); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // editorSelectionBounds 计算混合选区的实际内容范围
 // 入参: page 页面索引, objects 正文标识, annotations 注解标识
 // 返回: ofdgo.Box 页面毫米范围, error 错误信息
 func editorSelectionBounds(page int, objects, annotations []string) (ofdgo.Box, error) {
-	content, err := currentEditor.Page(page)
-	if err != nil {
-		return ofdgo.Box{}, err
-	}
-	var bounds ofdgo.Box
-	add := func(box ofdgo.Box) {
-		if box.W <= 0 || box.H <= 0 {
-			return
-		}
-		if bounds.W <= 0 || bounds.H <= 0 {
-			bounds = box
-			return
-		}
-		x, y := math.Min(bounds.X, box.X), math.Min(bounds.Y, box.Y)
-		bounds = ofdgo.Box{X: x, Y: y, W: math.Max(bounds.X+bounds.W, box.X+box.W) - x, H: math.Max(bounds.Y+bounds.H, box.Y+box.H) - y}
-	}
-	for _, layer := range content.Content.Layer {
-		for _, object := range layer.Objects {
-			var id string
-			switch object.Type {
-			case "TextObject":
-				id = object.TextObject.ID
-			case "PathObject":
-				id = object.PathObject.ID
-			case "ImageObject":
-				id = object.ImageObject.ID
-			case "CompositeObject", "CompositeGraphicUnit":
-				id = object.CompositeGraphicUnit.ID
-			}
-			if slices.Contains(objects, id) {
-				box, err := currentSession.Renderer.ObjectBounds(object, layer.DrawParam)
-				if err != nil {
-					return bounds, err
-				}
-				add(box)
-			}
-		}
-	}
-	for _, annotation := range currentSession.Reader.Annots[content.ID] {
-		if slices.Contains(annotations, annotation.ID) {
-			box, _, err := currentSession.Renderer.AnnotationGeometry(annotation)
-			if err != nil {
-				return bounds, err
-			}
-			if box.W <= 0 || box.H <= 0 {
-				box, _ = ofdgo.ParseBox(annotation.Appearance.Boundary)
-			}
-			add(box)
-		}
-	}
-	if bounds.W <= 0 || bounds.H <= 0 {
-		return bounds, fmt.Errorf("selection has no bounds")
-	}
-	return bounds, nil
+	return currentEditor.SelectionBounds(page, objects, annotations)
 }
 
 // captureEditorSelection 捕获正文与注解的独立副本

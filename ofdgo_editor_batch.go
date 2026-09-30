@@ -52,12 +52,10 @@ func (e *Editor) Objects(page int, ids []string) ([]GraphicObject, error) {
 	}
 	slices.SortFunc(indexes, compareEditorPosition)
 	objects := make([]GraphicObject, len(indexes))
+	orderable := make(map[*editorXML]bool)
 	for i, index := range indexes {
 		object := e.pages[page].Content.Layer[index.layer].Objects[index.index]
-		capability, err := e.ObjectCapabilities(page, editorObjectID(object))
-		if err != nil {
-			return nil, err
-		}
+		capability := e.objectCapabilities(object, orderable)
 		if !capability.Copy {
 			return nil, fmt.Errorf("object %q cannot be copied: %w", editorObjectID(object), capability.editError())
 		}
@@ -208,17 +206,15 @@ func (e *Editor) OrderObjects(page int, ids []string, order string) error {
 	if !slices.Contains([]string{"up", "down", "top", "bottom"}, order) {
 		return fmt.Errorf("invalid object order %q", order)
 	}
-	_, indexes, err := e.selectedObjects(page, ids)
+	selectedObjects, indexes, err := e.selectedObjects(page, ids)
 	if err != nil || len(indexes) == 0 {
 		return err
 	}
 	layer := &e.pages[page].Content.Layer[indexes[0].layer]
 	_, siblings := e.objectOrderIndexes(page, layer, ids[0])
-	for i, id := range ids {
-		capability, err := e.ObjectCapabilities(page, id)
-		if err != nil {
-			return err
-		}
+	orderable := make(map[*editorXML]bool)
+	for i, object := range selectedObjects {
+		capability := e.objectCapabilities(object, orderable)
 		if !capability.Order || indexes[i].layer != indexes[0].layer || !slices.Contains(siblings, indexes[i].index) {
 			return fmt.Errorf("ordering requires editable objects in the same container")
 		}
@@ -349,17 +345,15 @@ func (e *Editor) AlignObjects(page int, ids []string, alignment string) error {
 // 入参: page 页面索引, ids 对象标识
 // 返回: error 错误信息
 func (e *Editor) DeleteObjects(page int, ids []string) error {
-	_, indexes, err := e.selectedObjects(page, ids)
+	objects, indexes, err := e.selectedObjects(page, ids)
 	if err != nil || len(indexes) == 0 {
 		return err
 	}
-	for _, id := range ids {
-		capability, err := e.ObjectCapabilities(page, id)
-		if err != nil {
-			return err
-		}
+	orderable := make(map[*editorXML]bool)
+	for _, object := range objects {
+		capability := e.objectCapabilities(object, orderable)
 		if !capability.Delete {
-			return fmt.Errorf("object %q cannot be deleted: %w", id, capability.editError())
+			return fmt.Errorf("object %q cannot be deleted: %w", editorObjectID(object), capability.editError())
 		}
 	}
 	layers := copyEditorPage(e.pages[page]).Content.Layer
@@ -549,15 +543,13 @@ func (e *Editor) updateObjectOrigins(page int, objects []GraphicObject, preserve
 	}
 	after := make([]GraphicObject, len(objects))
 	var beforeOrigins, afterOrigins map[string]*editorObjectOrigin
+	orderable := make(map[*editorXML]bool)
 	for i, object := range objects {
 		object.origin = nil
 		preserved := preserveContent
 		origin := e.objectOrigin(ids[i])
 		if origin != nil {
-			capability, err := e.ObjectCapabilities(page, ids[i])
-			if err != nil {
-				return err
-			}
+			capability := e.objectCapabilities(before[i], orderable)
 			if !capability.Transform {
 				return fmt.Errorf("object %q is read-only for this operation: %w", ids[i], capability.editError())
 			}
@@ -664,28 +656,39 @@ func editorAlignment(box, target Box, alignment string) Matrix {
 // 入参: page 页面索引, ids 对象标识，不得重复
 // 返回: []GraphicObject 所选对象, []editorObjectPosition 图层和对象索引, error 错误信息
 func (e *Editor) selectedObjects(page int, ids []string) ([]GraphicObject, []editorObjectPosition, error) {
-	if _, err := e.page(page); err != nil {
+	content, err := e.page(page)
+	if err != nil {
 		return nil, nil, err
 	}
 	objects := make([]GraphicObject, len(ids))
 	indexes := make([]editorObjectPosition, len(ids))
-	seen := make(map[string]bool, len(ids))
+	if len(ids) == 0 {
+		return objects, indexes, nil
+	}
+	selected := make(map[string]int, len(ids))
 	for i, id := range ids {
-		if seen[id] {
+		if _, exists := selected[id]; exists {
 			return nil, nil, fmt.Errorf("duplicate object %q", id)
 		}
-		seen[id] = true
-		layer, index, err := e.findObject(page, id)
-		if err != nil {
-			return nil, nil, err
-		}
-		for j := range e.pages[page].Content.Layer {
-			if &e.pages[page].Content.Layer[j] == layer {
-				indexes[i] = editorObjectPosition{j, index}
-				break
+		selected[id] = i
+	}
+	for i, layer := range content.Content.Layer {
+		for j, object := range layer.Objects {
+			id := editorObjectID(object)
+			if index, ok := selected[id]; ok && id != "" {
+				objects[index] = object
+				indexes[index] = editorObjectPosition{i, j}
+				delete(selected, id)
+				if len(selected) == 0 {
+					return objects, indexes, nil
+				}
 			}
 		}
-		objects[i] = layer.Objects[index]
+	}
+	for _, id := range ids {
+		if _, missing := selected[id]; missing {
+			return nil, nil, fmt.Errorf("object %q not found on page %d", id, page)
+		}
 	}
 	return objects, indexes, nil
 }
@@ -711,11 +714,9 @@ func editorObjectID(object GraphicObject) string {
 // 入参: page 页面索引, objects 待度量的对象
 // 返回: []Box 对象范围, error 错误信息
 func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) {
+	orderable := make(map[*editorXML]bool)
 	for _, object := range objects {
-		capability, err := e.ObjectCapabilities(page, editorObjectID(object))
-		if err != nil {
-			return nil, err
-		}
+		capability := e.objectCapabilities(object, orderable)
 		if !capability.Arrange {
 			return nil, fmt.Errorf("object %q cannot be arranged: %w", editorObjectID(object), capability.editError())
 		}
@@ -729,13 +730,25 @@ func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) 
 		return nil, err
 	}
 	renderer := e.newRenderer(reader)
+	objectLayers := make(map[string]int, len(objects))
+	for _, object := range objects {
+		objectLayers[editorObjectID(object)] = -1
+	}
+	for i, layer := range e.pages[page].Content.Layer {
+		for _, object := range layer.Objects {
+			id := editorObjectID(object)
+			if index, wanted := objectLayers[id]; wanted && index < 0 {
+				objectLayers[id] = i
+			}
+		}
+	}
 	boxes := make([]Box, len(objects))
 	for i, object := range objects {
-		layer, _, findErr := e.findObject(page, editorObjectID(object))
-		if findErr != nil {
-			return nil, findErr
+		layer := objectLayers[editorObjectID(object)]
+		if layer < 0 {
+			return nil, fmt.Errorf("object %q not found on page %d", editorObjectID(object), page)
 		}
-		boxes[i], err = renderer.ObjectBounds(object, layer.DrawParam)
+		boxes[i], err = renderer.ObjectBounds(object, e.pages[page].Content.Layer[layer].DrawParam)
 		if err != nil {
 			return nil, err
 		}

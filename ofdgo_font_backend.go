@@ -14,7 +14,10 @@
 
 package ofdgo
 
-import "fmt"
+import (
+	"crypto/sha256"
+	"fmt"
+)
 
 // FontMetrics 提供不依赖绘图库的字体度量，所有整数尺寸使用字体设计单位
 // VerticalMetrics依次返回非负的上升高度、下降高度和行间隙
@@ -141,6 +144,7 @@ func (r *Renderer) ResolveFont(id string, exact bool) (ResolvedFont, error) {
 }
 
 // PrepareFont 统一处理内嵌字体包装和索引映射，供各编译器复用
+// 子渲染器按原始内容复用只读包装结果，各文档保留独立的来源信息
 // 入参: id 字体资源标识
 // 返回: *PreparedFont 绘制字体, error 字体解析错误
 func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
@@ -154,6 +158,12 @@ func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
 	prepared := &PreparedFont{ResolvedFont: resolved}
 	definition := r.Reader.fontCache[id]
 	if definition != nil && definition.FontFile != "" {
+		key := sha256.Sum256(resolved.Data)
+		if content, ok := r.fontPreparations.get(key); ok {
+			prepared.Data, prepared.Glyphs, prepared.CIDs, prepared.digest = content.Data, content.Glyphs, content.CIDs, content.digest
+			r.preparedFonts[id] = prepared
+			return prepared, nil
+		}
 		prepared.CIDs = getCFFCIDRuneMap(resolved.Data)
 		if _, data, mapping, _, err := FixFontDataAggressive(resolved.Data, true, true); err == nil {
 			prepared.Data = data
@@ -171,6 +181,9 @@ func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
 				}
 			}
 		}
+		prepared.digest = sha256.Sum256(prepared.Data)
+		cost := min(len(prepared.Data), r.fontPreparations.limit)*2 + (len(prepared.Glyphs)+len(prepared.CIDs))*48 + 256
+		r.fontPreparations.put(key, PreparedFont{ResolvedFont: ResolvedFont{Data: prepared.Data}, Glyphs: prepared.Glyphs, CIDs: prepared.CIDs, digest: prepared.digest}, cost)
 	}
 	r.preparedFonts[id] = prepared
 	return prepared, nil
@@ -184,7 +197,9 @@ func (r *Renderer) resetFontCache() {
 
 // resetFontBackendCache 清理后端字体对象，保留字体文件和图片缓存
 func (r *Renderer) resetFontBackendCache() {
+	r.sharedBackendStates = make(map[any]any)
 	r.preparedFonts = make(map[string]*PreparedFont)
+	r.fontPreparations = &renderCache[[32]byte, PreparedFont]{limit: 16 << 20}
 	r.resolvedFonts = make(map[resolvedFontKey]resolvedFontResult)
 	if r.fontSourcesCache != nil {
 		r.fontSourcesCache.fallback = ResolvedFont{}

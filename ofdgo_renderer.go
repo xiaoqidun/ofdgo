@@ -46,8 +46,10 @@ type Renderer struct {
 	textOnly              bool
 	backends              RenderBackends
 	backendStates         map[any]any
+	sharedBackendStates   map[any]any
 	resolvedFonts         map[resolvedFontKey]resolvedFontResult
 	preparedFonts         map[string]*PreparedFont
+	fontPreparations      *renderCache[[32]byte, PreparedFont]
 	fontSourcesCache      *fontSourceCache
 	fontMetrics           renderCache[[32]byte, FontMetrics]
 	glyphOutlines         renderCache[glyphOutlineKey, GeometryPath]
@@ -96,6 +98,8 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 		opts = append(opts, WithFontFS(r.fontFS...))
 	}
 	renderer := NewRenderer(reader, opts...)
+	renderer.sharedBackendStates = r.sharedBackendStates
+	renderer.fontPreparations = r.fontPreparations
 	renderer.decodeImages = r.decodeImages
 	renderer.TransparentBackground = r.TransparentBackground
 	return renderer

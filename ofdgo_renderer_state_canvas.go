@@ -20,6 +20,13 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
+// canvasFontKey 按字体内容、名称及样式区分可复用的字体族，不依赖文档资源编号
+type canvasFontKey struct {
+	digest [32]byte
+	name   string
+	style  canvas.FontStyle
+}
+
 // canvasBackendState 保存Canvas字体、字形和编码图片适配缓存
 type canvasBackendState struct {
 	images             renderCache[*EncodedImage, image.Image]
@@ -27,6 +34,18 @@ type canvasBackendState struct {
 	svgFontCache       map[*canvas.Font]SVGFont
 	textGlyphPathCache renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue]
 	fontOutlines       map[*canvas.Font]*sfntOutliner
+}
+
+// canvasFontFamilies 获取子渲染器共享的只读字体族缓存，限制解析数据保留量
+// 返回: *renderCache[canvasFontKey, *canvas.FontFamily] 字体族缓存
+func (r *Renderer) canvasFontFamilies() *renderCache[canvasFontKey, *canvas.FontFamily] {
+	key := CanvasBackend{}
+	if state, ok := r.sharedBackendStates[key]; ok {
+		return state.(*renderCache[canvasFontKey, *canvas.FontFamily])
+	}
+	cache := &renderCache[canvasFontKey, *canvas.FontFamily]{limit: 32 << 20}
+	r.sharedBackendStates[key] = cache
+	return cache
 }
 
 // canvasState 获取当前渲染器的Canvas私有缓存，按需创建且不向其他后端暴露
