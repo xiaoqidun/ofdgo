@@ -432,6 +432,7 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 		maps.Copy(promoted, used)
 	}
 	for _, page := range e.pages {
+		collectActionReferences(page.Actions, used)
 		var original map[string]GraphicObject
 		if e.source != nil {
 			original = make(map[string]GraphicObject)
@@ -506,6 +507,7 @@ func (x *ofdXML) page(page PageContent) {
 		x.layer(layer)
 	}
 	x.end("Content")
+	x.actions(page.Actions)
 	x.end("Page")
 }
 

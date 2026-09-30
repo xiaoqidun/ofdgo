@@ -37,6 +37,7 @@ type Reader struct {
 	resourcesRead             map[string]bool
 	resourceFiles             map[string]string
 	imageCatalog              []ImageInfo
+	mediaCache                map[string]MultiMedia
 	fontCache                 map[string]*Font
 	fontResourcesRead         bool
 	fontFaces                 map[string][]*FontFace
@@ -387,6 +388,7 @@ func (r *Reader) initRoot() error {
 	r.OFD = &ofd
 	r.ResMap = make(map[string]string)
 	r.resourcesRead = make(map[string]bool)
+	r.mediaCache = make(map[string]MultiMedia)
 	r.resourceFiles = make(map[string]string)
 	r.fontCache = make(map[string]*Font)
 	r.fontFaces = make(map[string][]*FontFace)
@@ -546,6 +548,11 @@ func (r *Reader) loadRes(resPath string) {
 	for _, mm := range res.MultiMedias.MultiMedia {
 		if mm.MediaFile != "" {
 			if finalPath := resolveResourcePath(resPath, baseLoc, mm.MediaFile); finalPath != "" {
+				mm.MediaFile = finalPath
+				if r.mediaCache == nil {
+					r.mediaCache = make(map[string]MultiMedia)
+				}
+				r.mediaCache[mm.ID] = mm
 				r.ResMap[mm.ID] = finalPath
 				r.resourceFiles[mm.ID] = fullPath
 			}

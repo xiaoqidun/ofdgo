@@ -29,7 +29,7 @@ self.onmessage = ({ data }) => {
 		operations.get(data.id)?.abort();
 		return;
 	}
-	if (data.name === "ofdgoImportImages" || data.name === "ofdgoExportImages" || data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" || data.name === "ofdgoConvertPDF" || data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
+	if (data.name === "ofdgoImportImages" || data.name === "ofdgoExportImages" || data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" || data.name === "ofdgoConvertPDF" || data.name === "ofdgoExportPage" || data.name === "ofdgoExportDocument" || data.name === "ofdgoExportAttachment" || data.name === "ofdgoExportMedia" || data.name === "ofdgoSaveDocument" || data.name === "ofdgoSaveSigned" || data.name === "ofdgoImportPages") {
 		operations.set(data.id, new AbortController());
 	}
 	pending = pending.then(() => data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" ? handleBatchMessage(data) : handleMessage(data));
@@ -246,7 +246,7 @@ async function handleMessage({ id, name, args }) {
 		if (signal && !importing && !converting && result.ok) {
 			operations.delete(id);
 			result.data.size = size;
-			self.postMessage({ id, type: "export", stage: "save" });
+			if (name !== "ofdgoExportMedia") self.postMessage({ id, type: "export", stage: "save" });
 			if (output) {
 				await output.close();
 			} else {

@@ -154,8 +154,17 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 	collect = func(walk func(pdfgo.Visitor) error) ([]pdfCompositeNode, error) {
 		var nodes []pdfCompositeNode
 		v := pdfgo.Visitor{Warning: p.warning}
-		v.Path = func(mark pdfgo.PathMark) error { nodes = append(nodes, pdfCompositeNode{path: &mark}); return nil }
+		v.Path = func(mark pdfgo.PathMark) error {
+			if err := p.halftone(mark.Style); err != nil {
+				return err
+			}
+			nodes = append(nodes, pdfCompositeNode{path: &mark})
+			return nil
+		}
 		v.Text = func(mark pdfgo.TextMark) error {
+			if err := p.halftone(mark.Style); err != nil {
+				return err
+			}
 			if mark.Font.Subtype != "Type3" {
 				nodes = append(nodes, pdfCompositeNode{text: &mark})
 				return nil
@@ -181,7 +190,13 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 			}
 			return nil
 		}
-		v.Image = func(mark pdfgo.ImageMark) error { nodes = append(nodes, pdfCompositeNode{image: &mark}); return nil }
+		v.Image = func(mark pdfgo.ImageMark) error {
+			if err := p.halftone(mark.Style); err != nil {
+				return err
+			}
+			nodes = append(nodes, pdfCompositeNode{image: &mark})
+			return nil
+		}
 		v.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
 			children, err := collect(walk)
 			if err != nil {

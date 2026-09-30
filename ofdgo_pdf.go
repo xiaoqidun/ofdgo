@@ -35,6 +35,7 @@ var ErrPDFPassword = pdfgo.ErrPassword
 // RendererOptions复用渲染器字体来源和后端配置，Backends优先于其中的后端设置
 // RasterDPI指定局部透明效果合成精度，0沿用渲染器DPI，默认300dpi，Strict禁用局部合成
 // OnProgress按open、pages、convert及write.*阶段报告进度，total为0表示总量未知
+// ResolveFile读取PDF引用的外部媒体和附件，默认不访问网络或本地路径
 type PDFImportOptions struct {
 	Password        []byte
 	PasswordUTF8    bool
@@ -44,6 +45,7 @@ type PDFImportOptions struct {
 	OnProgress      func(stage string, completed, total int) error
 	Strict          bool
 	RasterDPI       float64
+	ResolveFile     pdfgo.FileResolver
 }
 
 // PDFImportReport 汇总转换页数、对象数、链接数和转换警告
@@ -58,36 +60,38 @@ type PDFImportReport struct {
 
 // pdfImporter 保存单次转换的对象与资源状态
 type pdfImporter struct {
-	ctx             context.Context
-	reader          *pdfgo.Reader
-	editor          *Editor
-	renderer        *Renderer
-	report          PDFImportReport
-	matrix          pdfgo.Matrix
-	page            int
-	fontIDs         map[*pdfgo.Font]string
-	fontMetrics     map[string]FontMetrics
-	fontRepairLimit map[*pdfgo.Font]uint16
-	fontWarnings    map[string]bool
-	type1Glyphs     map[*pdfgo.Font]map[string]uint16
-	clipTexts       map[*pdfgo.TextClip]TextObject
-	cmykSpace       string
-	objects         []GraphicObject
-	pages           map[pdfgo.Reference]*pdfgo.Page
-	pageIDs         map[pdfgo.Reference]string
-	pageIndexes     map[pdfgo.Reference]int
-	imageIDs        map[pdfImageKey]string
-	maskClips       map[*pdfgo.SoftMask]pdfgo.Path
-	pageBox         pdfgo.Rectangle
-	pageWidth       float64
-	pageHeight      float64
-	pendingPath     *pdfgo.PathMark
-	warning         func(pdfgo.Diagnostic)
-	rasterDPI       float64
-	rasterWarned    bool
-	compositeCache  *pdfCompositeCache
-	compositeNodes  []pdfCompositeNode
-	compositeSpace  *pdfgo.ColorSpace
+	ctx              context.Context
+	reader           *pdfgo.Reader
+	editor           *Editor
+	renderer         *Renderer
+	report           PDFImportReport
+	matrix           pdfgo.Matrix
+	page             int
+	fontIDs          map[*pdfgo.Font]string
+	fontMetrics      map[string]FontMetrics
+	fontRepairLimit  map[*pdfgo.Font]uint16
+	fontWarnings     map[string]bool
+	type1Glyphs      map[*pdfgo.Font]map[string]uint16
+	clipTexts        map[*pdfgo.TextClip]TextObject
+	cmykSpace        string
+	objects          []GraphicObject
+	pages            map[pdfgo.Reference]*pdfgo.Page
+	pageIDs          map[pdfgo.Reference]string
+	pageIndexes      map[pdfgo.Reference]int
+	imageIDs         map[pdfImageKey]string
+	maskClips        map[*pdfgo.SoftMask]pdfgo.Path
+	pageBox          pdfgo.Rectangle
+	pageWidth        float64
+	pageHeight       float64
+	pendingPath      *pdfgo.PathMark
+	warning          func(pdfgo.Diagnostic)
+	rasterDPI        float64
+	rasterWarned     bool
+	compositeCache   *pdfCompositeCache
+	compositeNodes   []pdfCompositeNode
+	compositeSpace   *pdfgo.ColorSpace
+	resolveFile      pdfgo.FileResolver
+	halftoneWarnings map[*pdfgo.Halftone]bool
 }
 
 // ImportPDF 将PDF内容转换为独立OFD编辑文档，失败时不返回部分结果
@@ -131,6 +135,8 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	importer := pdfImporter{ctx: ctx, reader: reader, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, fontIDs: map[*pdfgo.Font]string{}, fontMetrics: map[string]FontMetrics{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
 	importer.report.Warnings = diagnostics
 	importer.pageIndexes = make(map[pdfgo.Reference]int)
+	importer.resolveFile = options.ResolveFile
+	importer.halftoneWarnings = make(map[*pdfgo.Halftone]bool)
 	if security := reader.Encryption(); security != nil && !security.Owner && security.Permissions&0xf3c != 0xf3c {
 		if options.Strict {
 			return nil, PDFImportReport{}, &pdfgo.UnsupportedError{Feature: "PDF access permission conversion"}

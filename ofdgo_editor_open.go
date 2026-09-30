@@ -219,6 +219,7 @@ func cloneEditorReader(reader *Reader) *Reader {
 	next.doc = &doc
 	next.files = maps.Clone(reader.files)
 	next.ResMap = maps.Clone(reader.ResMap)
+	next.mediaCache = maps.Clone(reader.mediaCache)
 	next.resourcesRead = maps.Clone(reader.resourcesRead)
 	next.resourceFiles = maps.Clone(reader.resourceFiles)
 	next.fontCache = cloneEditorMap(reader.fontCache)

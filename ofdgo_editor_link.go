@@ -83,6 +83,19 @@ func (e *Editor) SetObjectLink(page int, ids []string, link *AnnotationLink) err
 	return e.updateObjects(page, objects, true)
 }
 
+// collectActionReferences 收集播放动作引用的音视频资源
+// 入参: actions 动作列表, used 引用集合
+func collectActionReferences(actions []Action, used map[string]bool) {
+	for _, action := range actions {
+		if action.Sound != nil {
+			used[action.Sound.ResourceID] = true
+		}
+		if action.Movie != nil {
+			used[action.Movie.ResourceID] = true
+		}
+	}
+}
+
 // SetObjectActions 原子替换普通对象的动作，空列表移除动作
 // 入参: page 页面索引, ids 对象标识, actions 动作及已注册的资源引用
 // 返回: error 错误信息

@@ -42,7 +42,7 @@ func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
 	return ParseBox(boxStr)
 }
 
-// PageLinks 获取页面、模板和可见注释的点击链接，包含复杂区域、组合图元和附件动作
+// PageLinks 获取页面、模板和可见注释的点击动作，保留复杂区域和组合图元
 // 入参: page 页面内容
 // 返回: []PageLink 页面链接, error 错误信息
 func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
@@ -91,6 +91,21 @@ func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
 				links = append(links, link)
 			} else if action.GotoA != nil {
 				link.Attachment = action.GotoA.AttachID
+				links = append(links, link)
+			} else if action.Sound != nil {
+				value := *action.Sound
+				if value.Volume != nil {
+					volume := *value.Volume
+					value.Volume = &volume
+				}
+				link.Sound = &value
+				links = append(links, link)
+			} else if action.Movie != nil {
+				value := *action.Movie
+				if value.Operator == "" {
+					value.Operator = "Play"
+				}
+				link.Movie = &value
 				links = append(links, link)
 			}
 		}

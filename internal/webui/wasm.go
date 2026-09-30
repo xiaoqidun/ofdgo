@@ -201,6 +201,7 @@ func RunWASM() {
 	registerAsyncCallback("ofdgoExportPage", exportPage)
 	registerAsyncCallback("ofdgoExportDocument", exportDocument)
 	registerAsyncCallback("ofdgoExportAttachment", exportAttachment)
+	registerAsyncCallback("ofdgoExportMedia", exportMedia)
 	registerCallback("ofdgoImages", documentImages)
 	registerAsyncCallback("ofdgoExportImages", exportImages)
 	registerCallback("ofdgoMatchFontFiles", matchFontFiles)
@@ -729,6 +730,32 @@ func exportAttachment(args []js.Value) (any, error) {
 	}), nil
 }
 
+// exportMedia 分块读取文档音视频，播放由浏览器负责
+// 入参: args 资源标识和分块接收函数
+// 返回: any 媒体格式, error 资源或读取错误
+func exportMedia(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	media, err := currentSession.Reader.Media(args[0].String())
+	if err != nil {
+		return nil, err
+	}
+	stream, err := currentSession.Reader.OpenMedia(media.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	writer := bufio.NewWriterSize(exportWriter{write: args[1]}, 1<<20)
+	if _, err := io.Copy(writer, stream); err != nil {
+		return nil, err
+	}
+	if err := writer.Flush(); err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"format": media.Format, "kind": media.Type}), nil
+}
+
 // svgFontData 读取SVG字体资源
 // 入参: args 浏览器参数
 // 返回: any 字体数据, error 错误信息
@@ -817,6 +844,16 @@ func renderPage(args []js.Value) (any, error) {
 		if link.Attachment != "" {
 			item["attachment"] = link.Attachment
 			item["fileName"] = attachmentNames[link.Attachment]
+		}
+		if sound := link.Sound; sound != nil {
+			volume := 100
+			if sound.Volume != nil {
+				volume = *sound.Volume
+			}
+			item["sound"] = map[string]any{"resourceID": sound.ResourceID, "volume": volume, "repeat": sound.Repeat, "synchronous": sound.Synchronous}
+		}
+		if movie := link.Movie; movie != nil {
+			item["movie"] = map[string]any{"resourceID": movie.ResourceID, "operator": movie.Operator}
 		}
 		if dest := link.Dest; dest != nil {
 			item["dest"] = map[string]any{"type": dest.Type, "pageID": dest.PageID, "left": dest.Left, "top": dest.Top,

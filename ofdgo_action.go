@@ -62,7 +62,7 @@ type URI struct {
 	Base string `xml:"Base,attr"`
 }
 
-// PageLink 页面链接，URI、Dest和Attachment分别表示外链、文档内跳转和附件
+// PageLink 页面点击动作，包含外链、跳转、附件和音视频播放
 // Box使用页面毫米坐标，Path为可选的页面坐标SVG路径，存在时作为精确点击区域
 // 同一来源的多个动作共享非零Group，组内按返回顺序执行
 type PageLink struct {
@@ -72,6 +72,8 @@ type PageLink struct {
 	Attachment string
 	Path       string
 	Group      int
+	Sound      *Sound
+	Movie      *Movie
 }
 
 // GotoA 附件动作

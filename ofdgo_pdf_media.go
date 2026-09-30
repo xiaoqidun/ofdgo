@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"net/url"
 	"path"
 	"strings"
 
@@ -73,18 +74,161 @@ func (p *pdfImporter) movieAnnotation(ctx context.Context, page *pdfgo.Page, ann
 	if movie.Rotate != 0 {
 		return &pdfgo.UnsupportedError{Feature: "rotated movie playback"}
 	}
-	if movie.File.Embedded == nil {
-		return fmt.Errorf("movie media is not embedded: %s", movie.File.Name)
-	}
-	data, err := movie.File.Embedded.Decode()
+	data, available, err := p.mediaData(ctx, movie.File)
 	if err != nil {
 		return err
 	}
-	id, err := p.editor.AddMedia("Video", strings.TrimPrefix(path.Ext(movie.File.Name), "."), data)
+	if !available {
+		return p.appearanceAnnotation(ctx, page, annotation)
+	}
+	id, err := p.editor.AddMedia("Video", pdfMediaFormat(movie.File), data)
 	if err != nil {
 		return err
 	}
 	return p.appearanceAnnotation(ctx, page, annotation, Action{Event: "CLICK", Movie: &Movie{ResourceID: id, Operator: "Play"}})
+}
+
+// interactiveAnnotation 保留3D或富媒体的静态外观和原始资源，不执行脚本
+// 入参: ctx 取消上下文, page PDF页面, annotation 交互注解, strict 严格检查开关
+// 返回: error 外观、资源或不可等价转换错误
+func (p *pdfImporter) interactiveAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation, strict bool) error {
+	if strict {
+		return &pdfgo.UnsupportedError{Feature: "interactive " + string(annotation.Subtype) + " conversion"}
+	}
+	var actions []Action
+	if annotation.Subtype == "3D" {
+		model, err := p.reader.ReadThreeD(annotation)
+		if err != nil {
+			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF 3D metadata unavailable; static appearance retained: " + err.Error()})
+			return p.appearanceAnnotation(ctx, page, annotation)
+		}
+		data, err := model.Stream.Decode()
+		if err != nil {
+			return err
+		}
+		id, err := p.editor.AddAttachment(fmt.Sprintf("Model_%d.%s", p.page+1, strings.ToLower(string(model.Format))), data)
+		if err != nil {
+			return err
+		}
+		actions = append(actions, Action{Event: "CLICK", GotoA: &GotoA{AttachID: id}})
+	} else {
+		media, err := p.reader.ReadRichMedia(ctx, annotation)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF rich media metadata unavailable; static appearance retained: " + err.Error()})
+			return p.appearanceAnnotation(ctx, page, annotation)
+		}
+		config := media.Configurations[media.ActiveConfiguration]
+		var playing *pdfgo.FileSpecification
+		if (config.Subtype == "Sound" || config.Subtype == "Video") && len(config.Instances) == 1 && config.Instances[0].Subtype == config.Subtype {
+			condition, err := p.reader.Resolve(media.Activation["Condition"])
+			if err != nil {
+				return err
+			}
+			style, err := p.reader.Resolve(media.Presentation["Style"])
+			if err != nil {
+				return err
+			}
+			if (condition == nil || condition == pdfgo.Name("XA")) && (style == nil || style == pdfgo.Name("Embedded")) && media.Activation["Scripts"] == nil {
+				file := config.Instances[0].Asset
+				data, available, err := p.mediaData(ctx, file)
+				if err != nil {
+					return err
+				}
+				if available {
+					kind := "Video"
+					if config.Subtype == "Sound" {
+						kind = "Audio"
+					}
+					id, err := p.editor.AddMedia(kind, pdfMediaFormat(file), data)
+					if err != nil {
+						return err
+					}
+					if kind == "Audio" {
+						actions = append(actions, Action{Event: "CLICK", Sound: &Sound{ResourceID: id}})
+					} else {
+						actions = append(actions, Action{Event: "CLICK", Movie: &Movie{ResourceID: id, Operator: "Play"}})
+					}
+				}
+				playing = &file
+			}
+		}
+		files := append([]pdfgo.MediaAsset(nil), media.Assets...)
+		seen := make(map[*pdfgo.Stream]bool)
+		external := make(map[string]bool)
+		if playing != nil {
+			if playing.Embedded != nil {
+				seen[playing.Embedded] = true
+			} else {
+				external[string(playing.FileSystem)+"\x00"+playing.Name] = true
+			}
+		}
+		for _, config := range media.Configurations {
+			for _, instance := range config.Instances {
+				files = append(files, pdfgo.MediaAsset{File: instance.Asset})
+			}
+		}
+		for index, asset := range files {
+			key := string(asset.File.FileSystem) + "\x00" + asset.File.Name
+			if asset.File.Embedded != nil && seen[asset.File.Embedded] || asset.File.Embedded == nil && external[key] {
+				continue
+			}
+			data, available, err := p.mediaData(ctx, asset.File)
+			if err != nil {
+				return err
+			}
+			if available {
+				name := path.Base(strings.ReplaceAll(asset.File.Name, "\\", "/"))
+				if name == "" || name == "." || name == "/" {
+					name = fmt.Sprintf("Media_%d_%d", p.page+1, index+1)
+				}
+				_, err = p.editor.AddAttachment(name, data)
+				if err != nil {
+					return err
+				}
+			}
+			if asset.File.Embedded != nil {
+				seen[asset.File.Embedded] = true
+			} else {
+				external[key] = true
+			}
+		}
+	}
+	if err := p.appearanceAnnotation(ctx, page, annotation, actions...); err != nil {
+		return err
+	}
+	p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF " + string(annotation.Subtype) + " appearance and available primary assets retained; advanced interaction not transferred to OFD"})
+	return nil
+}
+
+// mediaData 读取媒体或附件，宽松模式缺少外部读取器时报告资源不可用
+// 入参: ctx 取消上下文, file PDF文件说明
+// 返回: []byte 原始文件, bool 是否可用, error 解码、外部读取或严格模式错误
+func (p *pdfImporter) mediaData(ctx context.Context, file pdfgo.FileSpecification) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	if file.Embedded == nil && p.resolveFile == nil && p.warning != nil {
+		p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF external file unavailable: " + file.Name + "; appearance retained"})
+		return nil, false, nil
+	}
+	data, err := p.reader.ReadFileData(ctx, file, p.resolveFile)
+	return data, err == nil, err
+}
+
+// pdfMediaFormat 获取媒体文件扩展名，URL参数和片段不参与格式判断
+// 入参: file PDF文件说明
+// 返回: string 媒体格式，未声明扩展名时为空
+func pdfMediaFormat(file pdfgo.FileSpecification) string {
+	name := strings.ReplaceAll(file.Name, "\\", "/")
+	if file.FileSystem == "URL" {
+		if location, err := url.Parse(name); err == nil {
+			name = location.Path
+		}
+	}
+	return strings.TrimPrefix(path.Ext(name), ".")
 }
 
 // pdfSoundWAV 封装PDF采样音频，保持采样率、声道及数值，超过RIFF容量时使用RF64

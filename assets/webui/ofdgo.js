@@ -98,6 +98,7 @@ const state = {
 	renderMode: "svg",
 	renderDPI: DEFAULT_IMAGE_DPI,
 	pageCache: new Map(),
+	mediaPlayers: new Map(),
 	svgFonts: new Map(),
 	svgImages: new Map(),
 	selectedPages: new Set(),
@@ -1960,6 +1961,7 @@ async function toggleEditor() {
 		canvasEditor.clear();
 		canvasEditor.setTool("");
 		if (state.editing) {
+			releaseMediaPlayers();
 			state.selectObjects = true;
 			setPan(false);
 		}
@@ -1992,6 +1994,7 @@ async function toggleEditor() {
 		state.editorViews.clear();
 		setEditorInfo(doc);
 		state.editing = true;
+		releaseMediaPlayers();
 		state.composite = null;
 		state.selectObjects = true;
 		state.ofdBytes = null;
@@ -5484,6 +5487,7 @@ function resetPageFlow(keepCache = false) {
 }
 
 function resetPageLoading() {
+	releaseMediaPlayers();
 	for (const task of state.pageInFlight.values()) {
 		task.resolve(null);
 	}
@@ -5549,6 +5553,7 @@ function unmountPage(index) {
 		state.selectedPages.add(index);
 		return;
 	}
+	releaseMediaPlayers(shell.querySelector(".page-surface"));
 	shell.querySelector(".page-surface").replaceChildren();
 	shell.classList.remove("rendered");
 	state.selectedPages.delete(index);
@@ -5784,7 +5789,113 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 	}
 }
 
-function pageLinkTarget(link) {
+function releaseMediaPlayers(surface) {
+	for (const [id, entry] of state.mediaPlayers || []) {
+		if (surface && entry.surface !== surface) continue;
+		for (const [requestID, request] of wasmRequests) {
+			if (request.mediaID === id) wasmWorker?.postMessage({type: "cancel", id: requestID});
+		}
+		entry.finish?.();
+		if (entry.element) {
+			entry.element.pause();
+			entry.element.removeAttribute("src");
+			entry.element.load();
+			entry.element.remove();
+		}
+		if (entry.url) URL.revokeObjectURL(entry.url);
+		state.mediaPlayers.delete(id);
+	}
+}
+
+async function playMediaAction(link, page, surface) {
+	const action = link.sound || link.movie;
+	const id = action?.resourceID;
+	if (!id || !surface || !page) return;
+	const operator = link.sound ? "Play" : action.operator || "Play";
+	if (!["Play", "Stop", "Pause", "Resume"].includes(operator)) return;
+	const players = state.mediaPlayers ||= new Map();
+	let entry = players.get(id);
+	if (operator === "Stop" || operator === "Pause") {
+		if (entry) entry.operation = (entry.operation || 0) + 1;
+		if (entry?.element) {
+			entry.element.pause();
+			if (operator === "Stop") {
+				entry.element.currentTime = 0;
+				entry.finish?.();
+			}
+		}
+		return;
+	}
+	if (operator === "Resume" && !entry) return;
+	const seq = state.openSeq;
+	try {
+		if (!entry) {
+			entry = { surface };
+			players.set(id, entry);
+			entry.pending = callWASM("ofdgoExportMedia", id, null).then(data => {
+				if (seq !== state.openSeq || players.get(id) !== entry || !entry.surface.isConnected) return;
+				const element = document.createElement(data.kind === "Video" ? "video" : "audio");
+				entry.kind = data.kind;
+				entry.element = element;
+				entry.url = URL.createObjectURL(data.blob);
+				element.src = entry.url;
+				element.controls = true;
+				element.className = "page-media";
+				element.addEventListener("error", () => {
+					entry.finish?.();
+					if (seq === state.openSeq) setStatus("媒体无法播放");
+				});
+				entry.surface.append(element);
+			});
+		}
+		if (operator === "Play") entry.surface = surface;
+		const operation = entry.operation = (entry.operation || 0) + 1;
+		await entry.pending;
+		if (seq !== state.openSeq || players.get(id) !== entry || operation !== entry.operation || !entry.element?.isConnected) return false;
+		const element = entry.element;
+		if (link.sound) {
+			element.volume = Math.max(0, Math.min(100, action.volume ?? 100)) / 100;
+			element.loop = !!action.repeat;
+		}
+		if (operator === "Play") {
+			entry.finish?.();
+			element.style.left = `${link.x / page.width * 100}%`;
+			element.style.width = `${link.width / page.width * 100}%`;
+			if (entry.kind === "Video") {
+				element.style.top = `${link.y / page.height * 100}%`;
+				element.style.height = `${link.height / page.height * 100}%`;
+			} else {
+				element.style.bottom = `${Math.max(0, 100 - (link.y + link.height) / page.height * 100)}%`;
+			}
+			surface.append(element);
+			element.currentTime = 0;
+		}
+		let ended;
+		if (link.sound && action.synchronous && !action.repeat) {
+			ended = new Promise(resolve => {
+				entry.finish = event => {
+					element.removeEventListener("ended", entry.finish);
+					entry.finish = null;
+					resolve(event?.type === "ended");
+				};
+				element.addEventListener("ended", entry.finish);
+			});
+		}
+		try { await element.play(); } catch (err) { entry.finish?.(); throw err; }
+		if (ended) return await ended;
+	} catch (err) {
+		if (players.get(id) === entry && seq === state.openSeq) {
+			if (!entry?.element) players.delete(id);
+			setStatus(err.message || "媒体无法播放");
+		}
+		return false;
+	}
+}
+
+function pageLinkTarget(link, page, surface) {
+	if (link.sound || link.movie) {
+		return { href: "#", title: link.sound ? "音频播放" : "视频播放", activate: () => playMediaAction(link, page, surface) };
+	}
 	if (link.dest) {
 		const target = pageIndexByID(state.doc.pages, link.dest.pageID);
 		return { href: target < 0 ? "#" : `#page-${target + 1}`, title: target < 0 ? "文档链接" : `第${target + 1}页`, activate: () => navigateDestination(link.dest) };
@@ -5805,7 +5916,7 @@ function mountPageLinks(page, surface) {
 	const groups = new Map();
 	const mounted = new Map();
 	for (const [index, link] of page.links.entries()) {
-		const target = pageLinkTarget(link);
+		const target = pageLinkTarget(link, page, surface);
 		if (!target) continue;
 		target.order = index;
 		const key = link.group ? JSON.stringify([link.group, link.x, link.y, link.width, link.height, link.path]) : index;
@@ -5837,7 +5948,7 @@ function mountPageLinks(page, surface) {
 				}
 				for (const target of actions) {
 					if (openSeq !== state.openSeq) break;
-					await target.activate();
+					if (await target.activate() === false) break;
 				}
 			});
 		}
@@ -8253,6 +8364,7 @@ async function callWASM(name, ...args) {
 	return new Promise((resolve, reject) => {
 		const id = ++wasmRequestID;
 		wasmRequests.set(id, { resolve, reject, openSeq: state.openSeq });
+		if (name === "ofdgoExportMedia") wasmRequests.get(id).mediaID = args[0];
 		if (name === "ofdgoConvertPDF") {
 			const request = wasmRequests.get(id);
 			request.localFonts = fontManager.localEntries();

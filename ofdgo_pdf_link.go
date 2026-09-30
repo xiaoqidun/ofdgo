@@ -120,11 +120,25 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			if err != nil {
 				return err
 			}
-			data, err := pdfSoundWAV(sound)
+			var data []byte
+			format := "WAV"
+			if sound.File != nil {
+				var available bool
+				data, available, err = p.mediaData(ctx, *sound.File)
+				if err == nil && !available {
+					if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
+						return err
+					}
+					continue
+				}
+				format = pdfMediaFormat(*sound.File)
+			} else {
+				data, err = pdfSoundWAV(sound)
+			}
 			if err != nil {
 				return err
 			}
-			id, err := p.editor.AddMedia("Audio", "WAV", data)
+			id, err := p.editor.AddMedia("Audio", format, data)
 			if err != nil {
 				return err
 			}
@@ -139,17 +153,26 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			}
 			continue
 		}
+		if annotation.Subtype == "3D" || annotation.Subtype == "RichMedia" {
+			if err := p.interactiveAnnotation(ctx, page, annotation, strict); err != nil {
+				return err
+			}
+			continue
+		}
 		if annotation.Subtype == "FileAttachment" {
 			file, err := p.reader.ReadFileSpecification(dict["FS"])
 			if err != nil {
 				return err
 			}
-			if file.Embedded == nil {
-				return &pdfgo.UnsupportedError{Feature: "external file attachment"}
-			}
-			data, err := file.Embedded.Decode()
+			data, available, err := p.mediaData(ctx, file)
 			if err != nil {
 				return err
+			}
+			if !available {
+				if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
+					return err
+				}
+				continue
 			}
 			id, err := p.editor.AddAttachment(file.Name, data)
 			if err != nil {

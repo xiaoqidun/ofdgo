@@ -228,7 +228,7 @@ func pdfAnnotationType(subtype pdfgo.Name) string {
 		return "Watermark"
 	case "Highlight", "Underline", "Squiggly", "StrikeOut":
 		return "Highlight"
-	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Popup", "Widget", "PrinterMark", "TrapNet":
+	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Popup", "Widget", "PrinterMark", "TrapNet", "3D", "RichMedia":
 		return "Path"
 	}
 	return ""

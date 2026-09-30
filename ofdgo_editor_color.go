@@ -318,26 +318,32 @@ func collectPaintReferences(paint *FillColor, used map[string]bool) {
 // 入参: object 图形对象, used 引用集合
 func collectObjectReferences(object GraphicObject, used map[string]bool) {
 	var clips *Clips
+	var actions []Action
 	switch object.Type {
 	case "TextObject", "Text":
 		used[object.TextObject.Font], used[object.TextObject.DrawParam] = true, true
 		collectPaintReferences(object.TextObject.FillColor, used)
 		collectPaintReferences((*FillColor)(object.TextObject.StrokeColor), used)
 		clips = object.TextObject.Clips
+		actions = object.TextObject.Actions
 	case "PathObject", "Path":
 		used[object.PathObject.DrawParam] = true
 		collectPaintReferences(object.PathObject.FillColor, used)
 		collectPaintReferences((*FillColor)(object.PathObject.StrokeColor), used)
 		clips = object.PathObject.Clips
+		actions = object.PathObject.Actions
 	case "ImageObject":
 		used[object.ImageObject.ResourceID], used[object.ImageObject.ImageMask] = true, true
 		if object.ImageObject.Border != nil {
 			collectPaintReferences((*FillColor)(object.ImageObject.Border.BorderColor), used)
 		}
 		clips = object.ImageObject.Clips
+		actions = object.ImageObject.Actions
 	case "CompositeObject", "CompositeGraphicUnit":
 		collectCompositeReferences(object.CompositeGraphicUnit, used)
+		actions = object.CompositeGraphicUnit.Actions
 	}
+	collectActionReferences(actions, used)
 	if clips == nil {
 		return
 	}
