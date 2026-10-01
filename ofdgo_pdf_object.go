@@ -38,6 +38,39 @@ type pdfImageKey struct {
 	intent pdfgo.Name
 }
 
+// pdfStencilImage 按当前填充色读取模板图像，不分配整幅彩色样本
+type pdfStencilImage struct {
+	source image.Image
+	fill   color.NRGBA64
+}
+
+// ColorModel 保留填充色和模板的有效采样精度
+// 返回: color.Model 非预乘颜色模型
+func (s *pdfStencilImage) ColorModel() color.Model {
+	model := s.source.ColorModel()
+	if s.fill.R%257 == 0 && s.fill.G%257 == 0 && s.fill.B%257 == 0 && (model == color.GrayModel || model == color.NRGBAModel || model == color.RGBAModel) {
+		return color.NRGBAModel
+	}
+	return color.NRGBA64Model
+}
+
+// Bounds 返回模板图像的采样边界
+// 返回: image.Rectangle 图像边界
+func (s *pdfStencilImage) Bounds() image.Rectangle { return s.source.Bounds() }
+
+// At 以模板灰度计算填充覆盖率，不重复变换颜色
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.Color 非预乘颜色
+func (s *pdfStencilImage) At(x, y int) color.Color {
+	if !image.Pt(x, y).In(s.Bounds()) {
+		return color.NRGBA64{}
+	}
+	gray, _, _, _ := s.source.At(x, y).RGBA()
+	pixel := s.fill
+	pixel.A = uint16(65535 - gray)
+	return pixel
+}
+
 // image 转换图像样本，不将整页或其他对象栅格化
 // 入参: mark PDF图像绘制信息
 // 返回: error 错误信息
@@ -88,33 +121,19 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		}
 		if source.ImageMask {
 			fill := mark.Style.Fill.RGB
+			if values := mark.Style.Fill.CMYK; values != nil {
+				space := &pdfgo.ColorSpace{Model: "DeviceCMYK"}
+				fill, err = space.RGB(values[:], mark.Style.RenderingIntent)
+				if err != nil {
+					return err
+				}
+			}
 			tint := color.NRGBA64{
 				R: uint16(math.Round(fill[0] * 65535)),
 				G: uint16(math.Round(fill[1] * 65535)),
 				B: uint16(math.Round(fill[2] * 65535)),
 			}
-			if mark.Style.Fill.CMYK != nil {
-				components := *mark.Style.Fill.CMYK
-				tint = color.NRGBA64Model.Convert(color.CMYK{
-					C: uint8(math.Round(components[0] * 255)),
-					M: uint8(math.Round(components[1] * 255)),
-					Y: uint8(math.Round(components[2] * 255)),
-					K: uint8(math.Round(components[3] * 255)),
-				}).(color.NRGBA64)
-			}
-			stencil := image.NewNRGBA64(image.Rect(0, 0, source.Width, source.Height))
-			for y := 0; y < source.Height; y++ {
-				for x := 0; x < source.Width; x++ {
-					gray, _, _, _ := decoded.At(x, y).RGBA()
-					stencil.SetNRGBA64(x, y, color.NRGBA64{
-						R: tint.R,
-						G: tint.G,
-						B: tint.B,
-						A: uint16(65535 - gray),
-					})
-				}
-			}
-			decoded = stencil
+			decoded = &pdfStencilImage{source: decoded, fill: tint}
 		}
 		var encoded bytes.Buffer
 		if len(jbig2Original) != 0 {
