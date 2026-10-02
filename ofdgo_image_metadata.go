@@ -114,7 +114,6 @@ func imagePageMetadata(data []byte, format string, dpi float64) (imagePageInfo, 
 			return info, err
 		}
 		info.orientation = orientation
-		// PNG的物理尺寸由pHYs定义，EXIF只用于方向。
 		if format == "jpeg" && x > 0 && y > 0 {
 			info.xdpi, info.ydpi = x, y
 		}

@@ -114,7 +114,6 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 	_, height := s.Size()
 	size := img.Bounds().Size()
 	m = m.Translate(0, float64(size.Y))
-	// 直接写出换轴后的矩阵，原坐标平移为零时仍需保留页面高度补偿。
 	matrix := Matrix{a: m[0][0], b: -m[1][0], c: -m[0][1], d: m[1][1], e: m[0][2], f: height - m[1][2]}
 	fmt.Fprintf(s.writer, `<image transform="matrix(%s)" width="%d" height="%d" xlink:href="`, matrix.String(), size.X, size.Y)
 	if s.imageNames != nil {
@@ -187,7 +186,6 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 		seen:     make(map[string]bool),
 	}
 	io.WriteString(buffer, svgCreatorMetadata)
-	// 图片方向由文档变换决定，不再由浏览器应用EXIF方向。
 	io.WriteString(buffer, `<g style="image-orientation:none">`)
 	if images {
 		s.imageNames = make(map[svgImageKey]string)

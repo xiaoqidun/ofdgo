@@ -120,27 +120,15 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			if err != nil {
 				return err
 			}
-			var data []byte
-			format := "WAV"
-			if sound.File != nil {
-				var available bool
-				data, available, err = p.mediaData(ctx, *sound.File)
-				if err == nil && !available {
-					if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
-						return err
-					}
-					continue
+			id, err := p.soundResource(ctx, sound)
+			if err != nil {
+				return err
+			}
+			if id == "" {
+				if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
+					return err
 				}
-				format = pdfMediaFormat(*sound.File)
-			} else {
-				data, err = pdfSoundWAV(sound)
-			}
-			if err != nil {
-				return err
-			}
-			id, err := p.editor.AddMedia("Audio", format, data)
-			if err != nil {
-				return err
+				continue
 			}
 			if err := p.appearanceAnnotation(ctx, page, annotation, Action{Event: "CLICK", Sound: &Sound{ResourceID: id}}); err != nil {
 				return err
@@ -180,7 +168,7 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 				}
 				continue
 			}
-			id, err := p.editor.AddAttachment(file.Name, data)
+			id, err := p.attachmentFile(file.Name, data)
 			if err != nil {
 				return err
 			}
@@ -340,13 +328,30 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 		if !ok {
 			return nil, fmt.Errorf("invalid PDF link action")
 		}
-		switch a["S"] {
+		kind, err := p.reader.Resolve(a["S"])
+		if err != nil {
+			return nil, err
+		}
+		switch kind {
 		case pdfgo.Name("GoTo"):
 			target = a["D"]
+		case pdfgo.Name("GoToR"):
+			return p.remoteLinkAction(a, strict)
+		case pdfgo.Name("Sound"):
+			return p.soundLinkAction(a, strict)
+		case pdfgo.Name("GoToE"):
+			converted, local, err := p.embeddedLinkAction(a, strict)
+			if err != nil || local == nil {
+				return converted, err
+			}
+			target = local
 		case pdfgo.Name("Named"):
 			value, err := p.reader.Resolve(a["N"])
 			if err != nil {
 				return nil, err
+			}
+			if _, ok := value.(pdfgo.Name); !ok {
+				return nil, fmt.Errorf("invalid PDF named action")
 			}
 			index := *currentPage
 			switch value {
@@ -359,7 +364,7 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 			case pdfgo.Name("PrevPage"):
 				index = max(index-1, 0)
 			default:
-				return nil, &pdfgo.UnsupportedError{Feature: "named link action"}
+				return nil, nil
 			}
 			action.Goto = &Goto{Dest: &Dest{Type: "XYZ", PageID: p.editor.pages[index].ID, OmitLeft: true, OmitTop: true, OmitZoom: true}}
 			*currentPage = index

@@ -57,19 +57,24 @@ type GotoBookmark struct {
 }
 
 // URI URI动作
+// Target保留Schema属性，不推断窗口语义
 type URI struct {
-	URI  string `xml:"URI,attr"`
-	Base string `xml:"Base,attr"`
+	URI    string `xml:"URI,attr"`
+	Base   string `xml:"Base,attr"`
+	Target string `xml:"Target,attr,omitempty"`
 }
 
 // PageLink 页面点击动作，包含外链、跳转、附件和音视频播放
 // Box使用页面毫米坐标，Path为可选的页面坐标SVG路径，存在时作为精确点击区域
 // 同一来源的多个动作共享非零Group，组内按返回顺序执行
+// NewWindow用于附件动作，为空时采用OFD默认的新窗口
 type PageLink struct {
 	URI        string
+	Target     string
 	Box        Box
 	Dest       *Dest
 	Attachment string
+	NewWindow  *bool
 	Path       string
 	Group      int
 	Sound      *Sound

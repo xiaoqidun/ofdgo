@@ -70,13 +70,14 @@ type pdfImporter struct {
 	fontIDs          map[*pdfgo.Font]string
 	fonts            map[*pdfgo.Font]*pdfImportedFont
 	fontWarnings     map[string]bool
-	clipTexts        map[*pdfgo.TextClip]TextObject
+	clipTexts        map[*pdfgo.TextClip][]TextObject
 	cmykSpace        string
 	objects          []GraphicObject
 	pages            map[pdfgo.Reference]*pdfgo.Page
 	pageIDs          map[pdfgo.Reference]string
 	pageIndexes      map[pdfgo.Reference]int
 	imageIDs         map[pdfImageKey]string
+	attachmentIDs    map[pdfAttachmentKey]string
 	maskClips        map[*pdfgo.SoftMask]pdfgo.Path
 	pageBox          pdfgo.Rectangle
 	pageWidth        float64
@@ -187,7 +188,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		importer.compositeCache = nil
 		importer.compositeNodes = nil
 		importer.compositeSpace = nil
-		importer.clipTexts = make(map[*pdfgo.TextClip]TextObject)
+		importer.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
 		importer.annotationData = nil
 		if err := importer.compositePage(nil, func(visitor pdfgo.Visitor) error { return reader.WalkPage(ctx, page, visitor) }); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
@@ -387,25 +388,28 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 			area.Path = append(area.Path, PathObject{Boundary: pdfBoundary(Box{box.X - origin.X, box.Y - origin.Y, box.W, box.H}), AbbreviatedData: p.pathData(path, box), Rule: rule})
 		}
 		for _, mark := range path.Text {
-			object, ok := p.clipTexts[mark]
+			objects, ok := p.clipTexts[mark]
 			if !ok {
 				if err := p.flushPath(); err != nil {
 					return nil, err
 				}
 				count := len(p.objects)
+				textCount := p.report.TextObjects
 				if err := p.text(pdfgo.TextMark{Font: mark.Font, Glyphs: mark.Glyphs, Positions: mark.Positions, Matrix: mark.Matrix, Size: mark.Size, HorizontalScale: mark.HorizontalScale, Mode: 7, Clip: mark, Style: pdfgo.Style{Fill: pdfgo.Paint{Alpha: 1}}}); err != nil {
 					return nil, err
 				}
 				p.objects = p.objects[:count]
-				p.report.TextObjects--
-				object = p.clipTexts[mark]
+				p.report.TextObjects = textCount
+				objects = p.clipTexts[mark]
 			}
-			box, err := ParseBox(object.Boundary)
-			if err != nil {
-				return nil, err
+			for _, object := range objects {
+				box, err := ParseBox(object.Boundary)
+				if err != nil {
+					return nil, err
+				}
+				object.Boundary = pdfBoundary(Box{box.X - origin.X, box.Y - origin.Y, box.W, box.H})
+				area.Text = append(area.Text, object)
 			}
-			object.Boundary = pdfBoundary(Box{box.X - origin.X, box.Y - origin.Y, box.W, box.H})
-			area.Text = append(area.Text, object)
 		}
 		clips.Clip = append(clips.Clip, Clip{Area: []ClipArea{area}})
 	}

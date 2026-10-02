@@ -75,7 +75,7 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 	stamp.pendingPath = nil
 	stamp.report = PDFImportReport{}
 	stamp.compositeCache = nil
-	stamp.clipTexts = make(map[*pdfgo.TextClip]TextObject)
+	stamp.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
 	stamp.pageWidth, stamp.pageHeight = box.W, box.H
 	nodes, err := p.collectCompositeNodes(func(visitor pdfgo.Visitor) error {
 		if annotation.Subtype == "Widget" {

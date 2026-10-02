@@ -229,7 +229,7 @@ func (e *Editor) UpdateAnnotationLink(page int, id string, target AnnotationLink
 			} else {
 				var check func(*editorXML) bool
 				check = func(node *editorXML) bool {
-					allowed := map[string]string{"URI": "URI Base", "Goto": "", "Dest": "Type PageID Left Right Top Bottom Zoom", "Bookmark": "Name"}
+					allowed := map[string]string{"URI": "URI Base Target", "Goto": "", "Dest": "Type PageID Left Right Top Bottom Zoom", "Bookmark": "Name"}
 					attrs, known := allowed[node.name.Local]
 					if !known || node.name.Space != root.name.Space || !editorXMLAttributes(node, attrs) {
 						return false
@@ -387,6 +387,7 @@ func annotationLinkXML(target AnnotationLink) ([]byte, error) {
 	if target.URI != nil {
 		attrs := ofdAttrs{{Name: xml.Name{Local: "URI"}, Value: target.URI.URI}}
 		attrs.add("Base", target.URI.Base)
+		attrs.add("Target", target.URI.Target)
 		data, err = editorXMLContainer("URI", attrs, nil)
 	} else {
 		dest := target.Dest

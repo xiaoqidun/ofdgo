@@ -147,6 +147,10 @@ func parseType1Program(data []byte) (type1Program, error) {
 			section = "subrs"
 		case "/CharStrings":
 			section = "glyphs"
+		case "def", "ND", "|-":
+			if section == "subrs" {
+				section = ""
+			}
 		case "dup":
 			if section != "subrs" {
 				continue

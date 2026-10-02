@@ -88,9 +88,14 @@ func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
 				}
 			} else if action.URI != nil && action.URI.URI != "" {
 				link.URI = resolveActionURI(*action.URI)
+				link.Target = action.URI.Target
 				links = append(links, link)
 			} else if action.GotoA != nil {
 				link.Attachment = action.GotoA.AttachID
+				if action.GotoA.NewWindow != nil {
+					window := *action.GotoA.NewWindow
+					link.NewWindow = &window
+				}
 				links = append(links, link)
 			} else if action.Sound != nil {
 				value := *action.Sound

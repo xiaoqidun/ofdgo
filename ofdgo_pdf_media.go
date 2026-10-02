@@ -27,6 +27,68 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// soundResource 注册采样音频或调用方提供的外部音频，不自动访问文件
+// 入参: ctx 取消上下文, sound 音频对象
+// 返回: string 资源标识，不可用时为空, error 读取或封装错误
+func (p *pdfImporter) soundResource(ctx context.Context, sound pdfgo.Sound) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	var data []byte
+	var err error
+	format := "WAV"
+	if sound.File != nil {
+		var available bool
+		data, available, err = p.mediaData(ctx, *sound.File)
+		if err != nil || !available {
+			return "", err
+		}
+		format = pdfMediaFormat(*sound.File)
+	} else {
+		data, err = pdfSoundWAV(sound)
+	}
+	if err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return p.editor.AddMedia("Audio", format, data)
+}
+
+// soundLinkAction 保留音频点击动作，混音、交互限制及音量损失按策略报告
+// 入参: object 音频动作, strict 是否禁止播放参数损失
+// 返回: *Action 音频动作, error 结构、参数或资源错误
+func (p *pdfImporter) soundLinkAction(object pdfgo.Object, strict bool) (*Action, error) {
+	source, err := p.reader.ReadSoundAction(p.ctx, object)
+	if err != nil {
+		return nil, err
+	}
+	if source.Volume < 0 {
+		return nil, &pdfgo.UnsupportedError{Feature: "negative sound action volume conversion"}
+	}
+	if strict {
+		return nil, &pdfgo.UnsupportedError{Feature: "sound action playback policy conversion"}
+	}
+	volume := int(math.Round(source.Volume * 100))
+	if source.Mix {
+		p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF sound action mixing policy not transferred to OFD"})
+	} else {
+		p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF sound action exclusive playback policy not transferred to OFD"})
+	}
+	if source.Synchronous {
+		p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF sound action interaction restriction not transferred to OFD; action waiting retained"})
+	}
+	if float64(volume)/100 != source.Volume {
+		p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF sound action volume rounded to OFD integer volume"})
+	}
+	id, err := p.soundResource(p.ctx, source.Sound)
+	if err != nil || id == "" {
+		return nil, err
+	}
+	return &Action{Event: "CLICK", Sound: &Sound{ResourceID: id, Volume: &volume, Repeat: source.Repeat, Synchronous: source.Synchronous}}, nil
+}
+
 // movieAnnotation 转换内嵌视频及其点击播放动作，保留独立海报外观
 // 入参: ctx 取消上下文, page PDF页面, annotation 视频注解
 // 返回: error 媒体资源或播放参数无法表示时返回错误

@@ -199,6 +199,19 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		}
 		return p.flushPath()
 	}
+	if mark.Size == 0 || mark.HorizontalScale == 0 {
+		return p.degenerateText(mark)
+	}
+	if mark.Size < 0 || mark.HorizontalScale < 0 {
+		x, y := math.Copysign(1, mark.Size*mark.HorizontalScale), math.Copysign(1, mark.Size)
+		mark.Matrix = mark.Matrix.Mul(pdfgo.Matrix{x, 0, 0, y, 0, 0})
+		mark.Size, mark.HorizontalScale = math.Abs(mark.Size), math.Abs(mark.HorizontalScale)
+		positions := make([]pdfgo.Point, len(mark.Positions))
+		for index, position := range mark.Positions {
+			positions[index] = pdfgo.Point{X: position.X * x, Y: position.Y * y}
+		}
+		mark.Positions = positions
+	}
 	if err := p.flushPath(); err != nil {
 		return err
 	}
@@ -291,11 +304,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		}
 		gid := glyph.ID
 		if embedded && font.ProgramType == "FontFile" {
-			var found bool
-			gid, found = imported.type1Glyphs[glyph.Name]
-			if !found {
-				return fmt.Errorf("missing Type1 glyph %q in PDF font %s", glyph.Name, font.Name)
-			}
+			gid = imported.type1Glyphs[glyph.Name]
 			glyph.HasID = true
 		}
 		if glyph.Text == "" && glyph.HasID {
@@ -433,9 +442,9 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		*clipObject.Stroke = false
 		clipObject.Visible = nil
 		if p.clipTexts == nil {
-			p.clipTexts = make(map[*pdfgo.TextClip]TextObject)
+			p.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
 		}
-		p.clipTexts[mark.Clip] = clipObject
+		p.clipTexts[mark.Clip] = []TextObject{clipObject}
 	}
 	if outlineStroke {
 		for _, path := range glyphPaths {
@@ -458,5 +467,44 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	}
 	p.objects = append(p.objects, GraphicObject{Type: "TextObject", TextObject: object})
 	p.report.TextObjects++
+	return nil
+}
+
+// degenerateText 保留零字号或零水平缩放的逐字位置与退化字形
+// 入参: mark PDF文字绘制信息
+// 返回: error 转换错误
+func (p *pdfImporter) degenerateText(mark pdfgo.TextMark) error {
+	x, y := math.Copysign(1, mark.Size*mark.HorizontalScale), math.Copysign(1, mark.Size)
+	size, scale := math.Abs(mark.Size), math.Abs(mark.HorizontalScale)
+	if size == 0 {
+		size, x, y = 1, 0, 0
+	}
+	if scale == 0 {
+		scale, x = 1, 0
+	}
+	var clips []TextObject
+	for index, position := range mark.Positions {
+		glyph := mark
+		glyph.Size, glyph.HorizontalScale = size, scale
+		glyph.Matrix = mark.Matrix.Mul(pdfgo.Matrix{1, 0, 0, 1, position.X, position.Y}).Mul(pdfgo.Matrix{x, 0, 0, y, 0, 0})
+		glyph.Positions = []pdfgo.Point{{}}
+		glyph.Glyphs = mark.Glyphs[index : index+1]
+		if mark.Clip != nil {
+			glyph.Clip = new(pdfgo.TextClip)
+		}
+		if err := p.text(glyph); err != nil {
+			return err
+		}
+		if glyph.Clip != nil {
+			clips = append(clips, p.clipTexts[glyph.Clip]...)
+			delete(p.clipTexts, glyph.Clip)
+		}
+	}
+	if mark.Clip != nil {
+		if p.clipTexts == nil {
+			p.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
+		}
+		p.clipTexts[mark.Clip] = clips
+	}
 	return nil
 }

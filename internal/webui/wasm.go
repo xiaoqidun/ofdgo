@@ -834,6 +834,7 @@ func renderPage(args []js.Value) (any, error) {
 	for i, link := range page.Links {
 		item := map[string]any{
 			"uri":    link.URI,
+			"target": link.Target,
 			"path":   link.Path,
 			"group":  link.Group,
 			"x":      link.Box.X,
@@ -1447,6 +1448,7 @@ func readAnnotation(args []js.Value) (any, error) {
 		link, err := currentEditor.AnnotationLink(args[0].Int(), annotation.ID)
 		if err == nil && link.URI != nil {
 			info["linkKind"], info["linkURI"], info["linkBase"] = "uri", link.URI.URI, link.URI.Base
+			info["linkTarget"] = link.URI.Target
 		} else if err == nil && link.Goto != nil && link.Goto.Dest != nil {
 			for i, page := range currentSession.doc.Pages.Page {
 				if page.ID == link.Goto.Dest.PageID {
@@ -1516,6 +1518,15 @@ func writeAnnotation(args []js.Value) (any, error) {
 			target = ofdgo.AnnotationLink{Dest: &ofdgo.Dest{Type: "Fit", PageID: page.ID}}
 		}
 		if options.Kind == "link" && options.ID != "" {
+			if target.URI != nil {
+				previous, err := currentEditor.AnnotationLink(page, options.ID)
+				if err != nil {
+					return err
+				}
+				if previous.URI != nil {
+					target.URI.Target = previous.URI.Target
+				}
+			}
 			return currentEditor.UpdateAnnotationLink(page, options.ID, target)
 		}
 		if options.Width <= 0 || options.Height <= 0 || options.Alpha < 0 || options.Alpha > 255 {
