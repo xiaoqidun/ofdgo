@@ -22,15 +22,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
-
-// cffStandardStrings CFF标准字符串表
-var cffStandardStrings = []string{
-	".notdef", "space", "exclam", "quotedbl", "numbersign", "dollar", "percent", "ampersand", "quoteright", "parenleft", "parenright", "asterisk", "plus", "comma", "hyphen", "period", "slash", "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "colon", "semicolon", "less", "equal", "greater", "question", "at", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "bracketleft", "backslash", "bracketright", "asciicircum", "underscore", "quoteleft", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "braceleft", "bar", "braceright", "asciitilde", "exclamdown", "cent", "sterling", "fraction", "yen", "florin", "section", "currency", "quotesingle", "quotedblleft", "quotedblright", "guillemotleft", "guillemotright", "dagger", "daggerdbl", "fi", "fl", "endash", "emdash", "paragraph", "bullet", "quotesinglbase", "quotedblbase", "second", "circumflex", "breve", "dotaccent", "dieresis", "grave", "ring", "cedilla", "hungarumlaut", "ogonek", "caron", "emspace",
-	"AE", "ordfeminine", "Lslash", "Oslash", "OE", "ordmasculine", "ae", "dotlessi", "lslash", "oslash", "oe", "germandbls", "onesuperior", "logicalnot", "mu", "trademark", "Eth", "onehalf", "plusminus", "Thorn", "onequarter", "divide", "brokenbar", "degree", "thorn", "threequarters", "twosuperior", "registered", "minus", "eth", "multiply", "threesuperior", "copyright", "Aacute", "Acircumflex", "Adieresis", "Agrave", "Aring", "Atilde", "Ccedilla", "Eacute", "Ecircumflex", "Edieresis", "Egrave", "Iacute", "Icircumflex", "Idieresis", "Igrave", "Ntilde", "Oacute", "Ocircumflex", "Odieresis", "Ograve", "Otilde", "Scaron", "Uacute", "Ucircumflex", "Udieresis", "Ugrave", "Yacute", "Ydieresis", "Zcaron", "aacute", "acircumflex", "adieresis", "agrave", "aring", "atilde", "ccedilla", "eacute", "ecircumflex", "edieresis", "egrave", "iacute", "icircumflex", "idieresis", "igrave", "ntilde", "oacute", "ocircumflex", "odieresis", "ograve", "otilde", "scaron", "uacute", "ucircumflex", "udieresis", "ugrave", "yacute", "ydieresis", "zcaron", "exclamsmall", "Hungarumlautsmall", "dollaroldstyle", "dollarsuperior", "ampersandsmall", "Acutesmall", "parenleftsuperior", "parenrightsuperior", "2dotlead", "nbspace", "1dotlead", "zerooldstyle", "oneoldstyle", "twooldstyle", "threeoldstyle", "fouroldstyle", "fiveoldstyle", "sixoldstyle", "sevenoldstyle", "eightoldstyle", "nineoldstyle", "commasuperior", "threequartersemdash", "periodsuperior", "questionsmall", "asuperior", "bsuperior", "centsuperior", "dsuperior", "esuperior", "isuperior", "lsuperior", "msuperior", "nsuperior", "osuperior", "rsuperior", "ssuperior", "tsuperior", "ff", "ffi", "ffl", "parenleftinferior", "parenrightinferior", "Circumflexsmall", "hyphensuperior", "Gravesmall", "Asmall", "Bsmall", "Csmall", "Dsmall", "Esmall", "Fsmall", "Gsmall", "Hsmall", "Ismall", "Jsmall", "Ksmall", "Lsmall", "Msmall", "Nsmall", "Osmall", "Psmall", "Qsmall", "Rsmall", "Ssmall", "Tsmall", "Usmall", "Vsmall", "Wsmall", "Xsmall", "Ysmall", "Zsmall", "colonmonetary", "onefitted", "rupiah", "Tildesmall", "exclamdownsmall", "centoldstyle", "Lslashsmall", "Scaronsmall", "Zcaronsmall", "Dieresissmall", "Brevesmall", "Caronsmall", "Dotaccentsmall", "Macronsmall", "figuredash", "hypheninferior", "Ogoneksmall", "Ringsmall", "Cedillasmall", "questiondownsmall", "oneeighth", "threeeighths", "fiveeighths", "seveneighths", "onethird", "twothirds", "zerosuperior", "foursuperior", "fivesuperior", "sixsuperior", "sevensuperior", "eightsuperior", "ninesuperior", "zeroinferior", "oneinferior", "twoinferior", "threeinferior", "fourinferior", "fiveinferior", "sixinferior", "seveninferior", "eightinferior", "nineinferior", "centinferior", "dollarinferior", "periodinferior", "commainferior", "Agravesmall", "Aacutesmall", "Acircumflexsmall", "Atildesmall", "Adieresissmall", "Aringsmall", "AEsmall", "Ccedillasmall", "Egravesmall", "Eacutesmall", "Ecircumflexsmall", "Edieresissmall", "Igravesmall", "Iacutesmall", "Icircumflexsmall", "Idieresissmall", "Ethsmall", "Ntildesmall", "Ogravesmall", "Oacutesmall", "Ocircumflexsmall", "Otildesmall", "Odieresissmall", "OEsmall", "Oslashsmall", "Ugravesmall", "Uacutesmall", "Ucircumflexsmall", "Udieresissmall", "Yacutesmall", "Thornsmall", "Ydieresissmall", "001.000", "001.001", "001.002", "001.003", "Black", "Bold", "Book", "Light", "Medium", "Regular", "Roman", "Semibold",
-}
 
 // cffDict 使用float64存储所有数值，以统一处理整数和实数
 type cffDict map[int][]float64
@@ -95,7 +90,7 @@ func wrapCFFToOTF(cffData []byte) ([]byte, map[rune]uint16, error) {
 	return data, mapping, err
 }
 
-// normalizeCFFCharstrings 规范化Type2提示指令的等价编码，保留轮廓和提示数据
+// normalizeCFFCharstrings 展开预定义字符集并规范化Type2提示编码，保留轮廓和字宽
 // 入参: data CFF字体数据
 // 返回: []byte 标准化后的CFF数据, error 错误信息
 func normalizeCFFCharstrings(data []byte) ([]byte, error) {
@@ -121,6 +116,18 @@ func normalizeCFFCharstrings(data []byte) ([]byte, error) {
 	}
 	chars := readCFFIndexItems(data, charStart)
 	changed := false
+	var explicitCharset []byte
+	if charset := dict[15]; len(charset) == 1 && (charset[0] == 1 || charset[0] == 2) {
+		sids, _, _, _, ok := getCFFCharsetInfo(data, len(chars))
+		if !ok {
+			return nil, fmt.Errorf("invalid CFF charset")
+		}
+		explicitCharset = make([]byte, 1+2*(len(sids)-1))
+		for gid := 1; gid < len(sids); gid++ {
+			binary.BigEndian.PutUint16(explicitCharset[1+2*(gid-1):], uint16(sids[gid]))
+		}
+		changed = true
+	}
 	for index, charstring := range chars {
 		normalized, inserted, err := explicitType2CounterStems(charstring)
 		if err != nil {
@@ -142,16 +149,21 @@ func normalizeCFFCharstrings(data []byte) ([]byte, error) {
 	}
 	encodedChars := encodeCFFIndex(chars)
 	topEnd := topStart + topSize
+	originalDict := parseCFFDict(topData)
 	newTop := encodeCFFIndex([][]byte{encodeCFFDict(dict)})
 	for range 6 {
 		shift := len(newTop) - topSize
 		shiftTail := shift + len(encodedChars) - charSize
 		for _, op := range []int{15, 16, 17, 1236, 1237} {
+			if op == 15 && explicitCharset != nil {
+				dict[op] = []float64{float64(len(data) + shiftTail)}
+				continue
+			}
 			values := dict[op]
 			if len(values) != 1 || op == 15 && values[0] <= 2 || op == 16 && values[0] <= 1 {
 				continue
 			}
-			original := parseCFFDict(topData)[op]
+			original := originalDict[op]
 			offset := int(original[0])
 			if offset >= charStart+charSize {
 				dict[op] = []float64{float64(offset + shiftTail)}
@@ -160,10 +172,12 @@ func normalizeCFFCharstrings(data []byte) ([]byte, error) {
 			}
 		}
 		if values := dict[18]; len(values) == 2 {
-			original := parseCFFDict(topData)[18]
+			original := originalDict[18]
 			offset := int(original[1])
 			if offset >= charStart+charSize {
 				dict[18] = []float64{values[0], float64(offset + shiftTail)}
+			} else if offset >= topEnd {
+				dict[18] = []float64{values[0], float64(offset + shift)}
 			}
 		}
 		updated := encodeCFFIndex([][]byte{encodeCFFDict(dict)})
@@ -173,12 +187,13 @@ func normalizeCFFCharstrings(data []byte) ([]byte, error) {
 		}
 		newTop = updated
 	}
-	result := make([]byte, 0, len(data)+len(newTop)-topSize+len(encodedChars)-charSize)
+	result := make([]byte, 0, len(data)+len(newTop)-topSize+len(encodedChars)-charSize+len(explicitCharset))
 	result = append(result, data[:topStart]...)
 	result = append(result, newTop...)
 	result = append(result, data[topEnd:charStart]...)
 	result = append(result, encodedChars...)
 	result = append(result, data[charStart+charSize:]...)
+	result = append(result, explicitCharset...)
 	return result, nil
 }
 
@@ -1320,24 +1335,22 @@ func getCFFCharsetInfo(data []byte, numGlyphs int) ([]int, string, string, int, 
 	}
 	td := parseCFFDict(topDictData)
 	registry, ordering := getCFFROS(data, stringIndexOff, td)
-	charsetOff := 0
-	if vals, ok := td[15]; ok && len(vals) > 0 {
-		charsetOff = int(vals[0])
+	actual, err := parseCFFAndCountGlyphs(data)
+	if err != nil || numGlyphs < 1 || actual != numGlyphs {
+		return nil, "", "", 0, false
 	}
-	sids := make([]int, numGlyphs)
-	sids[0] = 0
-	if charsetOff > 2 {
-		sidsParsed := parseCFFCharset(data, charsetOff, numGlyphs)
-		copy(sids[1:], sidsParsed)
-	} else if charsetOff == 0 {
-		count := 228
-		if numGlyphs-1 < count {
-			count = numGlyphs - 1
+	charsetOff := 0
+	if values, ok := td[15]; ok {
+		if len(values) != 1 || !finite(values[0]) || values[0] < 0 || values[0] > float64(len(data)) || values[0] != math.Trunc(values[0]) {
+			return nil, "", "", 0, false
 		}
-		for i := 1; i <= count; i++ {
-			sids[i] = i
-		}
-	} else {
+		charsetOff = int(values[0])
+	}
+	if values, cid := td[1230]; cid && (len(values) != 3 || charsetOff <= 2) {
+		return nil, "", "", 0, false
+	}
+	sids, err := parseCFFCharset(data, charsetOff, numGlyphs)
+	if err != nil {
 		return nil, "", "", 0, false
 	}
 	return sids, registry, ordering, stringIndexOff, true
@@ -1479,47 +1492,76 @@ func getCFFData(data []byte) []byte {
 	return nil
 }
 
-// parseCFFCharset 解析CFF字符集并返回SID列表
-// 入参: data CFF数据, offset 偏移量, numGlyphs 字形数量
-// 返回: []int SID列表
-func parseCFFCharset(data []byte, offset int, numGlyphs int) []int {
-	if offset >= len(data) {
-		return nil
+// parseCFFCharset 按CFF规范第13节及附录C读取字符集，保留GID顺序
+// 入参: data CFF数据, offset 字符集预定义值或偏移, count 字形数量
+// 返回: []int SID或CID列表, error 错误信息
+func parseCFFCharset(data []byte, offset, count int) ([]int, error) {
+	charset := make([]int, count)
+	if offset <= 2 {
+		if offset == 0 {
+			if count > 229 {
+				return nil, fmt.Errorf("invalid ISOAdobe charset length")
+			}
+			for gid := range charset {
+				charset[gid] = gid
+			}
+		} else {
+			predefined := cffExpertCharset[:]
+			if offset == 2 {
+				predefined = cffExpertSubsetCharset[:]
+			}
+			if count > len(predefined) {
+				return nil, fmt.Errorf("invalid predefined CFF charset length")
+			}
+			for gid := range charset {
+				charset[gid] = int(predefined[gid])
+			}
+		}
+		return charset, nil
 	}
-	format := data[offset]
-	var sids []int
-	count := numGlyphs - 1
-	pos := offset + 1
-	switch format {
-	case 0:
-		for i := 0; i < count && pos+2 <= len(data); i++ {
-			sid := int(binary.BigEndian.Uint16(data[pos:]))
-			sids = append(sids, sid)
+	if offset >= len(data) {
+		return nil, fmt.Errorf("invalid CFF charset offset")
+	}
+	format, pos := data[offset], offset+1
+	if format > 2 {
+		return nil, fmt.Errorf("invalid CFF charset format")
+	}
+	seen := map[int]bool{0: true}
+	for gid := 1; gid < count; {
+		if pos+2 > len(data) {
+			return nil, fmt.Errorf("truncated CFF charset")
+		}
+		first := int(binary.BigEndian.Uint16(data[pos:]))
+		pos += 2
+		run := 1
+		switch format {
+		case 1:
+			if pos == len(data) {
+				return nil, fmt.Errorf("truncated CFF charset range")
+			}
+			run += int(data[pos])
+			pos++
+		case 2:
+			if pos+2 > len(data) {
+				return nil, fmt.Errorf("truncated CFF charset range")
+			}
+			run += int(binary.BigEndian.Uint16(data[pos:]))
 			pos += 2
 		}
-	case 1:
-		for len(sids) < count && pos+3 <= len(data) {
-			first := int(binary.BigEndian.Uint16(data[pos:]))
-			nLeft := int(data[pos+2])
-			pos += 3
-			for j := 0; j <= nLeft; j++ {
-				sids = append(sids, first+j)
-			}
+		if run > count-gid || first+run > 65536 {
+			return nil, fmt.Errorf("invalid CFF charset range")
 		}
-	case 2:
-		for len(sids) < count && pos+4 <= len(data) {
-			first := int(binary.BigEndian.Uint16(data[pos:]))
-			nLeft := int(binary.BigEndian.Uint16(data[pos+2:]))
-			pos += 4
-			for j := 0; j <= nLeft; j++ {
-				sids = append(sids, first+j)
+		for n := 0; n < run; n++ {
+			sid := first + n
+			if seen[sid] {
+				return nil, fmt.Errorf("duplicate CFF charset identifier")
 			}
+			seen[sid] = true
+			charset[gid] = sid
+			gid++
 		}
 	}
-	if len(sids) > count {
-		sids = sids[:count]
-	}
-	return sids
+	return charset, nil
 }
 
 // readStringIndexItem 读取CFF字符串索引项
@@ -1620,108 +1662,21 @@ func adobeGB1CIDToUnicode(cid int) (rune, bool) {
 // 入参: name 字形名称
 // 返回: rune Unicode字符
 func getUnicodeFromName(name string) rune {
+	name, _, _ = strings.Cut(name, ".")
+	if character := cffStandardNameUnicode[name]; character != 0 {
+		return character
+	}
+	digits := ""
 	if strings.HasPrefix(name, "uni") && len(name) == 7 {
-		hexStr := strings.ToUpper(name[3:])
-		if val, err := strconv.ParseInt(hexStr, 16, 32); err == nil {
-			return rune(val)
+		digits = name[3:]
+	} else if strings.HasPrefix(name, "u") && len(name) >= 5 && len(name) <= 7 {
+		digits = name[1:]
+	}
+	if digits != "" {
+		value, err := strconv.ParseUint(digits, 16, 32)
+		if err == nil && value <= utf8.MaxRune && utf8.ValidRune(rune(value)) {
+			return rune(value)
 		}
-	}
-	if strings.HasPrefix(name, "u") && len(name) >= 5 && len(name) <= 7 && !strings.HasPrefix(name, "uni") {
-		hexStr := strings.ToUpper(name[1:])
-		if val, err := strconv.ParseInt(hexStr, 16, 32); err == nil {
-			return rune(val)
-		}
-	}
-	switch name {
-	case "space":
-		return ' '
-	case "exclam":
-		return '!'
-	case "quotedbl":
-		return '"'
-	case "numbersign":
-		return '#'
-	case "dollar":
-		return '$'
-	case "percent":
-		return '%'
-	case "ampersand":
-		return '&'
-	case "quotesingle":
-		return '\''
-	case "parenleft":
-		return '('
-	case "parenright":
-		return ')'
-	case "asterisk":
-		return '*'
-	case "plus":
-		return '+'
-	case "comma":
-		return ','
-	case "hyphen":
-		return '-'
-	case "period":
-		return '.'
-	case "slash":
-		return '/'
-	case "zero":
-		return '0'
-	case "one":
-		return '1'
-	case "two":
-		return '2'
-	case "three":
-		return '3'
-	case "four":
-		return '4'
-	case "five":
-		return '5'
-	case "six":
-		return '6'
-	case "seven":
-		return '7'
-	case "eight":
-		return '8'
-	case "nine":
-		return '9'
-	case "colon":
-		return ':'
-	case "semicolon":
-		return ';'
-	case "less":
-		return '<'
-	case "equal":
-		return '='
-	case "greater":
-		return '>'
-	case "question":
-		return '?'
-	case "at":
-		return '@'
-	case "bracketleft":
-		return '['
-	case "backslash":
-		return '\\'
-	case "bracketright":
-		return ']'
-	case "asciicircum":
-		return '^'
-	case "underscore":
-		return '_'
-	case "grave":
-		return '`'
-	case "braceleft":
-		return '{'
-	case "bar":
-		return '|'
-	case "braceright":
-		return '}'
-	case "asciitilde":
-		return '~'
-	}
-	if len(name) == 1 {
-		return rune(name[0])
 	}
 	return 0
 }
