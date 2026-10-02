@@ -35,17 +35,19 @@ var ErrPDFPassword = pdfgo.ErrPassword
 // RendererOptions复用渲染器字体来源和后端配置，Backends优先于其中的后端设置
 // RasterDPI指定局部透明效果合成精度，0沿用渲染器DPI，默认300dpi，Strict禁用局部合成
 // OnProgress按open、pages、convert及write.*阶段报告进度，total为0表示总量未知
-// ResolveFile读取PDF引用的外部媒体和附件，默认不访问网络或本地路径
+// ResolveFile读取PDF引用的外部媒体、附件和页面，默认不访问网络或本地路径
+// ResolveReference可提供已解密的引用页面，目标阅读器由调用方维护
 type PDFImportOptions struct {
-	Password        []byte
-	PasswordUTF8    bool
-	Backends        *RenderBackends
-	RendererOptions []RendererOption
-	Progress        func(int) error
-	OnProgress      func(stage string, completed, total int) error
-	Strict          bool
-	RasterDPI       float64
-	ResolveFile     pdfgo.FileResolver
+	Password         []byte
+	PasswordUTF8     bool
+	Backends         *RenderBackends
+	RendererOptions  []RendererOption
+	Progress         func(int) error
+	OnProgress       func(stage string, completed, total int) error
+	Strict           bool
+	RasterDPI        float64
+	ResolveFile      pdfgo.FileResolver
+	ResolveReference pdfgo.ReferenceResolver
 }
 
 // PDFImportReport 汇总转换页数、对象数、链接数和转换警告
@@ -91,6 +93,10 @@ type pdfImporter struct {
 	compositeSpace   *pdfgo.ColorSpace
 	annotationData   []byte
 	resolveFile      pdfgo.FileResolver
+	resolveReference pdfgo.ReferenceResolver
+	referenceReaders map[[32]byte]*pdfgo.Reader
+	referenceStreams map[*pdfgo.Stream]*pdfgo.Reader
+	referencePages   map[pdfReferencePageKey]*pdfgo.Page
 	halftoneWarnings map[*pdfgo.Halftone]bool
 	transferBackdrop bool
 }
@@ -137,6 +143,11 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	importer.report.Warnings = diagnostics
 	importer.pageIndexes = make(map[pdfgo.Reference]int)
 	importer.resolveFile = options.ResolveFile
+	importer.resolveReference = options.ResolveReference
+	importer.referenceReaders = make(map[[32]byte]*pdfgo.Reader)
+	importer.referenceStreams = make(map[*pdfgo.Stream]*pdfgo.Reader)
+	importer.referencePages = make(map[pdfReferencePageKey]*pdfgo.Page)
+	defer importer.closeReferenceReaders()
 	importer.halftoneWarnings = make(map[*pdfgo.Halftone]bool)
 	if security := reader.Encryption(); security != nil && !security.Owner && security.Permissions&0xf3c != 0xf3c {
 		if options.Strict {
@@ -657,7 +668,7 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 	cell.matrix = pdfgo.Matrix{unit, 0, 0, -unit, -box.XMin * unit, box.YMax * unit}
 	cell.pageWidth, cell.pageHeight = width*unit, height*unit
 	cell.objects, cell.pendingPath = nil, nil
-	visitor := pdfgo.Visitor{Path: cell.path, Text: cell.text, Image: cell.image}
+	visitor := pdfgo.Visitor{Path: cell.path, Text: cell.text, Image: cell.image, Reference: p.referencePage}
 	visitor.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
 		return cell.group(mark, walk, visitor)
 	}
