@@ -91,21 +91,21 @@ func (s *transparentEdgeImage64) Bounds() image.Rectangle { return s.rect }
 // 返回: color.Model 颜色模型
 func (s *transparentEdgeImage64) ColorModel() color.Model { return color.NRGBA64Model }
 
-// At 读取十六位原始颜色，透明邻域使用最小非零透明度保留边缘颜色
+// NRGBA64At 读取十六位原始颜色，透明邻域使用最小非零透明度保留边缘颜色
 // 入参: x 横向坐标, y 纵向坐标
-// 返回: color.Color 非预乘颜色
-func (s *transparentEdgeImage64) At(x, y int) color.Color {
+// 返回: color.NRGBA64 非预乘颜色
+func (s *transparentEdgeImage64) NRGBA64At(x, y int) color.NRGBA64 {
 	if !image.Pt(x, y).In(s.rect) {
 		return color.NRGBA64{}
 	}
 	b := s.source.Bounds()
 	sx, sy := b.Min.X+min(max(x-1, 0), b.Dx()-1), b.Min.Y+min(max(y-1, 0), b.Dy()-1)
-	c := color.NRGBA64Model.Convert(s.source.At(sx, sy)).(color.NRGBA64)
+	c := imageNRGBA64At(s.source, sx, sy)
 	if c.A == 0 {
 		var best color.NRGBA64
 		for ny := max(sy-1, b.Min.Y); ny < min(sy+2, b.Max.Y); ny++ {
 			for nx := max(sx-1, b.Min.X); nx < min(sx+2, b.Max.X); nx++ {
-				v := color.NRGBA64Model.Convert(s.source.At(nx, ny)).(color.NRGBA64)
+				v := imageNRGBA64At(s.source, nx, ny)
 				if v.A > best.A {
 					best = v
 				}
@@ -122,11 +122,16 @@ func (s *transparentEdgeImage64) At(x, y int) color.Color {
 	return c
 }
 
+// At 返回非预乘十六位像素颜色
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.Color 像素颜色
+func (s *transparentEdgeImage64) At(x, y int) color.Color { return s.NRGBA64At(x, y) }
+
 // RGBA64At 返回保留原采样精度的预乘颜色
 // 入参: x 横向坐标, y 纵向坐标
 // 返回: color.RGBA64 预乘颜色
 func (s *transparentEdgeImage64) RGBA64At(x, y int) color.RGBA64 {
-	r, g, b, a := s.At(x, y).RGBA()
+	r, g, b, a := s.NRGBA64At(x, y).RGBA()
 	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
 }
 
@@ -424,6 +429,38 @@ func imageNRGBAAt(img image.Image, x, y int) color.NRGBA {
 		return color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)}
 	}
 	return color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+}
+
+// imageNRGBA64At 读取十六位非预乘像素，原生图像避免颜色装箱
+// 入参: img 图片对象, x X坐标, y Y坐标
+// 返回: color.NRGBA64 NRGBA64像素
+func imageNRGBA64At(img image.Image, x, y int) color.NRGBA64 {
+	switch src := img.(type) {
+	case *image.NRGBA64:
+		return src.NRGBA64At(x, y)
+	case *image.Gray16:
+		c := src.Gray16At(x, y)
+		return color.NRGBA64{R: c.Y, G: c.Y, B: c.Y, A: 0xffff}
+	case *image.Alpha16:
+		c := src.Alpha16At(x, y)
+		if c.A == 0 {
+			return color.NRGBA64{}
+		}
+		return color.NRGBA64{R: 0xffff, G: 0xffff, B: 0xffff, A: c.A}
+	case *image.RGBA, *image.RGBA64:
+		c := src.(image.RGBA64Image).RGBA64At(x, y)
+		if c.A == 0 {
+			return color.NRGBA64{}
+		}
+		r, g, b, a := uint32(c.R), uint32(c.G), uint32(c.B), uint32(c.A)
+		if a != 0xffff {
+			r = r * 0xffff / a
+			g = g * 0xffff / a
+			b = b * 0xffff / a
+		}
+		return color.NRGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: c.A}
+	}
+	return color.NRGBA64Model.Convert(img.At(x, y)).(color.NRGBA64)
 }
 
 // transparentEdgeColor 获取透明像素相邻的可见颜色

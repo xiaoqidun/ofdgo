@@ -40,10 +40,10 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 		tag := string(data[pos : pos+4])
 		offset := binary.BigEndian.Uint32(data[pos+8 : pos+12])
 		length := binary.BigEndian.Uint32(data[pos+12 : pos+16])
-		if uint32(len(data)) >= offset+length {
-			existingTables[tag] = data[offset : offset+length]
+		if uint64(offset)+uint64(length) <= uint64(len(data)) {
+			existingTables[tag] = data[int(offset) : int(offset)+int(length)]
 			padding := (4 - (length & 3)) & 3
-			if offset%4 != 0 || uint32(len(data))-offset-length < padding {
+			if offset%4 != 0 || len(data)-int(offset)-int(length) < int(padding) {
 				malformedDirectory = true
 			}
 		} else {
@@ -53,6 +53,18 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 	}
 	if existingTables["CFF "] != nil {
 		isCFFSfnt = true
+		sanitized, err := sanitizeCFF(existingTables["CFF "])
+		if err != nil {
+			return false, data, nil, false, err
+		}
+		normalized, err := normalizeCFFCharstrings(sanitized)
+		if err != nil {
+			return false, data, nil, false, err
+		}
+		if !bytes.Equal(normalized, existingTables["CFF "]) {
+			existingTables["CFF "] = normalized
+			malformedDirectory = true
+		}
 	}
 	cmap, err := normalizeCmap(existingTables["cmap"])
 	if err != nil {
