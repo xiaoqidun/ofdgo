@@ -1663,9 +1663,6 @@ func adobeGB1CIDToUnicode(cid int) (rune, bool) {
 // 返回: rune Unicode字符
 func getUnicodeFromName(name string) rune {
 	name, _, _ = strings.Cut(name, ".")
-	if character := cffStandardNameUnicode[name]; character != 0 {
-		return character
-	}
 	digits := ""
 	if strings.HasPrefix(name, "uni") && len(name) == 7 {
 		digits = name[3:]
@@ -1677,6 +1674,97 @@ func getUnicodeFromName(name string) rune {
 		if err == nil && value <= utf8.MaxRune && utf8.ValidRune(rune(value)) {
 			return rune(value)
 		}
+	}
+	switch name {
+	case "space":
+		return ' '
+	case "exclam":
+		return '!'
+	case "quotedbl":
+		return '"'
+	case "numbersign":
+		return '#'
+	case "dollar":
+		return '$'
+	case "percent":
+		return '%'
+	case "ampersand":
+		return '&'
+	case "quotesingle":
+		return '\''
+	case "parenleft":
+		return '('
+	case "parenright":
+		return ')'
+	case "asterisk":
+		return '*'
+	case "plus":
+		return '+'
+	case "comma":
+		return ','
+	case "hyphen":
+		return '-'
+	case "period":
+		return '.'
+	case "slash":
+		return '/'
+	case "zero":
+		return '0'
+	case "one":
+		return '1'
+	case "two":
+		return '2'
+	case "three":
+		return '3'
+	case "four":
+		return '4'
+	case "five":
+		return '5'
+	case "six":
+		return '6'
+	case "seven":
+		return '7'
+	case "eight":
+		return '8'
+	case "nine":
+		return '9'
+	case "colon":
+		return ':'
+	case "semicolon":
+		return ';'
+	case "less":
+		return '<'
+	case "equal":
+		return '='
+	case "greater":
+		return '>'
+	case "question":
+		return '?'
+	case "at":
+		return '@'
+	case "bracketleft":
+		return '['
+	case "backslash":
+		return '\\'
+	case "bracketright":
+		return ']'
+	case "asciicircum":
+		return '^'
+	case "underscore":
+		return '_'
+	case "grave":
+		return '`'
+	case "braceleft":
+		return '{'
+	case "bar":
+		return '|'
+	case "braceright":
+		return '}'
+	case "asciitilde":
+		return '~'
+	}
+	if len(name) == 1 {
+		return rune(name[0])
 	}
 	return 0
 }
