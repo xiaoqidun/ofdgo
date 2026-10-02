@@ -129,6 +129,15 @@ func (c *semanticCompiler) addImage(img image.Image, matrix Matrix, clip *Geomet
 			if box.X <= visible.X && box.Y <= visible.Y && visible.X+visible.W <= box.X+box.W && visible.Y+visible.H <= box.Y+box.H {
 				clip = nil
 			}
+		} else {
+			bounds := img.Bounds()
+			outline, err := geometryRectangle(Box{X: float64(bounds.Min.X), Y: float64(bounds.Min.Y), W: float64(bounds.Dx()), H: float64(bounds.Dy())}).Transform(matrix)
+			if err != nil {
+				return err
+			}
+			if geometryConvexContains(*clip, outline) {
+				clip = nil
+			}
 		}
 	}
 	if clip != nil {

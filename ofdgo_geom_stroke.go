@@ -216,9 +216,10 @@ func (line geometryPolyline) dash(pattern []float64, total, offset float64) ([]g
 	remaining := pattern[index] - phase
 	var result []geometryPolyline
 	var run []Point
+	var direction Point
 	flush := func() {
 		if len(run) != 0 {
-			result = append(result, geometryPolyline{points: run})
+			result = append(result, geometryPolyline{points: run, direction: direction})
 			run = nil
 		}
 	}
@@ -255,8 +256,12 @@ func (line geometryPolyline) dash(pattern []float64, total, offset float64) ([]g
 			if index%2 == 0 {
 				if len(run) == 0 {
 					run = append(run, geometryLerp(a, b, at/length))
+					direction = Point{(b.X - a.X) / length, (b.Y - a.Y) / length}
 				}
-				run = append(run, geometryLerp(a, b, (at+step)/length))
+				end := geometryLerp(a, b, (at+step)/length)
+				if end != run[len(run)-1] {
+					run = append(run, end)
+				}
 			}
 			at += step
 			remaining -= step

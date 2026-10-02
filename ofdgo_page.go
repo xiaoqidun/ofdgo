@@ -109,8 +109,8 @@ type TextObject struct {
 	TextCode      []TextCode    `xml:"TextCode"`
 	Clips         *Clips        `xml:"Clips"`
 	Actions       []Action      `xml:"Actions>Action"`
-	LineWidthSet bool `xml:"-"`
-	layout       *textLayout
+	LineWidthSet  bool          `xml:"-"`
+	layout        *textLayout
 }
 
 // FillColor 填充颜色
@@ -140,7 +140,9 @@ type Pattern struct {
 }
 
 // PatternContent 图案单元内容
+// Objects非空时保留绘制顺序，否则依次使用文字、路径、图片和复合图元数组
 type PatternContent struct {
+	Thumbnail            string                 `xml:"Thumbnail,attr"`
 	Objects              []GraphicObject        `xml:"-"`
 	TextObject           []TextObject           `xml:"TextObject"`
 	PathObject           []PathObject           `xml:"PathObject"`
@@ -189,8 +191,8 @@ type PathObject struct {
 	AbbreviatedData string       `xml:"AbbreviatedData"`
 	Clips           *Clips       `xml:"Clips"`
 	Actions         []Action     `xml:"Actions>Action"`
-	LineWidthSet   bool `xml:"-"`
-	dashPatternSet bool
+	LineWidthSet    bool         `xml:"-"`
+	dashPatternSet  bool
 }
 
 // StrokeColor 勾边颜色

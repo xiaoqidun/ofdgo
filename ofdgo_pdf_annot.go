@@ -15,7 +15,9 @@
 package ofdgo
 
 import (
+	"bytes"
 	"context"
+	"encoding/xml"
 	"fmt"
 	"maps"
 	"strconv"
@@ -42,7 +44,7 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 	if err != nil {
 		return err
 	}
-	if annotation.Subtype == "FreeText" {
+	if annotation.Subtype == "FreeText" || annotation.Subtype == "Line" {
 		annotation.Dictionary = maps.Clone(annotation.Dictionary)
 		annotation.Dictionary["Contents"] = pdfgo.String("\xef\xbb\xbf" + remark)
 	}
@@ -101,8 +103,12 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 	}
 	if flags&(2|32) == 0 {
 		p.compositeNodes = stamp.compositeNodes
+		p.transferBackdrop = stamp.transferBackdrop
 	}
 	converted := Annotation{Type: pdfAnnotationType(annotation.Subtype), Subtype: string(annotation.Subtype), Remark: remark, Appearance: Appearance{Boundary: pdfBoundary(box), Objects: stamp.objects}}
+	if annotation.Subtype == "Redact" {
+		converted.Parameters = &AnnotationParameters{Parameter: []AnnotationParameter{{Name: "PDF.Redact.Pending", Value: "true"}}}
+	}
 	if annotation.Subtype == "Text" {
 		value, err := p.reader.Resolve(annotation.Dictionary["Open"])
 		if err != nil {
@@ -159,9 +165,11 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 		}
 		converted.Parameters.Parameter = append(converted.Parameters.Parameter, AnnotationParameter{Name: "PDF.M", Value: modified})
 	}
-	if _, err := p.editor.AddAnnotation(p.page, converted); err != nil {
+	_, data, err := p.editor.prepareAnnotation(p.page, converted)
+	if err != nil {
 		return fmt.Errorf("PDF annotation: %w", err)
 	}
+	p.annotationData = append(p.annotationData, bytes.TrimPrefix(data, []byte(xml.Header))...)
 	p.report.TextObjects += stamp.report.TextObjects
 	p.report.PathObjects += stamp.report.PathObjects
 	p.report.ImageObjects += stamp.report.ImageObjects
@@ -183,7 +191,7 @@ func pdfAnnotationType(subtype pdfgo.Name) string {
 		return "Watermark"
 	case "Highlight", "Underline", "Squiggly", "StrikeOut":
 		return "Highlight"
-	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Popup", "Widget", "PrinterMark", "TrapNet", "3D", "RichMedia":
+	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Popup", "Widget", "PrinterMark", "TrapNet", "3D", "RichMedia", "Redact":
 		return "Path"
 	}
 	return ""

@@ -16,13 +16,15 @@ package ofdgo
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/xml"
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 )
 
-// GroupCompositeObjects 组合内部同一容器的连续成员，保留标识、绘制顺序及共享资源
+// GroupCompositeObjects 组合内部同一容器的连续成员，保留绘制顺序及共享资源
 // 入参: page 页面索引, path 父路径, indexes 至少两个成员序号
 // 返回: int 新组合序号, error 错误信息
 func (e *Editor) GroupCompositeObjects(page int, path ObjectPath, indexes []int) (int, error) {
@@ -30,7 +32,7 @@ func (e *Editor) GroupCompositeObjects(page int, path ObjectPath, indexes []int)
 		return 0, fmt.Errorf("grouping requires at least two objects")
 	}
 	var result int
-	err := e.editCompositeObjects(page, path, indexes, func(_ *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
+	err := e.editCompositeObjects(page, path, indexes, func(renderer *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
 		for _, member := range members {
 			if !member.Capabilities.Copy || !member.Capabilities.Order {
 				return fmt.Errorf("composite member cannot be grouped")
@@ -39,25 +41,32 @@ func (e *Editor) GroupCompositeObjects(page int, path ObjectPath, indexes []int)
 		slices.SortFunc(nodes, func(a, b *editorCompositeNode) int { return a.index - b.index })
 		siblings := nodes[0].siblings()
 		first := slices.Index(siblings, nodes[0])
-		var content []byte
+		copies := make([]*editorCompositeNode, len(nodes))
 		for i, node := range nodes {
 			if first+i >= len(siblings) || siblings[first+i] != node {
 				return fmt.Errorf("grouping requires consecutive members in the same container")
 			}
-			content = append(content, bytes.TrimPrefix(node.data, []byte(xml.Header))...)
+			copy, err := newEditorCompositeNode(node.data)
+			if err != nil {
+				return err
+			}
+			copy.setStates(node.states)
+			copy.defaults = node.defaults
+			if !node.boundaryInCTM {
+				if err := copy.convertCoordinates(node.parent, true); err != nil {
+					return err
+				}
+			}
+			copies[i] = copy
 		}
-		content, err := editorXMLContainer("Content", nil, content)
-		if err != nil {
-			return err
-		}
-		content, err = editorXMLContainer("CompositeObject", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: e.nextID()}, {Name: xml.Name{Local: "Boundary"}, Value: "0 0 1 1"}}, bytes.TrimPrefix(content, []byte(xml.Header)))
+		group, err := e.vectorInstance(renderer, copies)
 		if err != nil {
 			return err
 		}
 		for i, node := range nodes {
 			var replacement []byte
 			if i == 0 {
-				replacement = bytes.TrimPrefix(content, []byte(xml.Header))
+				replacement = bytes.TrimPrefix(group.data, []byte(xml.Header))
 			}
 			node.owner.patches = append(node.owner.patches, editorXMLPatch{node.span.start, node.span.end, replacement})
 		}
@@ -65,6 +74,74 @@ func (e *Editor) GroupCompositeObjects(page int, path ObjectPath, indexes []int)
 		return nil
 	})
 	return result, err
+}
+
+// vectorInstance 将同一坐标系的内容封装为标准矢量资源，独立分配内部标识
+// 入参: renderer 资源度量器, nodes 局部内容节点
+// 返回: *editorCompositeNode 资源实例, error 尺寸、内容或资源错误
+func (e *Editor) vectorInstance(renderer *Renderer, nodes []*editorCompositeNode) (*editorCompositeNode, error) {
+	if err := e.prepareSourceIDs(); err != nil {
+		return nil, err
+	}
+	var extent Box
+	for _, node := range nodes {
+		boundary, _ := editorGeometry(node.object)
+		box, err := creationBox(boundary)
+		if err != nil {
+			return nil, err
+		}
+		visible, err := renderer.MeasureObject(node.object, MeasureOptions{Defaults: node.defaults})
+		if err != nil {
+			return nil, err
+		}
+		extent = unionTextBox(extent, unionTextBox(box, visible.Bounds))
+	}
+	if !finite(extent.X) || !finite(extent.Y) || !finite(extent.W) || !finite(extent.H) || extent.W <= 0 || extent.H <= 0 {
+		return nil, fmt.Errorf("invalid vector dimensions")
+	}
+	var content []byte
+	states := make(map[string]editorCompositeState)
+	for _, node := range nodes {
+		object := transformEditorMatrix(cloneEditorData(node.object), TranslationMatrix(-extent.X, -extent.Y))
+		data, err := editorXMLObject(node.data, node.node, node.object, object)
+		if err != nil {
+			return nil, err
+		}
+		content = append(content, bytes.TrimPrefix(data, []byte(xml.Header))...)
+		maps.Copy(states, node.states)
+	}
+	content, err := editorXMLContainer("Content", nil, content)
+	if err != nil {
+		return nil, err
+	}
+	hash := sha256.New()
+	hash.Write([]byte(ofdNumber(extent.W) + " " + ofdNumber(extent.H)))
+	hash.Write(content)
+	key := [32]byte(hash.Sum(nil))
+	var resource string
+	for _, candidate := range e.resources {
+		if candidate.vectorKey == key && maps.Equal(candidate.vectorStates, states) {
+			resource = candidate.composite
+			break
+		}
+	}
+	if resource == "" {
+		data, err := editorXMLContainer("CompositeGraphicUnit", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: strconv.Itoa(e.maxID + 1)}, {Name: xml.Name{Local: "Width"}, Value: ofdNumber(extent.W)}, {Name: xml.Name{Local: "Height"}, Value: ofdNumber(extent.H)}}, bytes.TrimPrefix(content, []byte(xml.Header)))
+		if err != nil {
+			return nil, err
+		}
+		resource, err = e.addCompositeResource(data, states)
+		if err != nil {
+			return nil, err
+		}
+		added := &e.resources[len(e.resources)-1]
+		added.vectorKey, added.vectorStates = key, maps.Clone(states)
+	}
+	data, err := editorXMLContainer("CompositeObject", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: e.nextID()}, {Name: xml.Name{Local: "Boundary"}, Value: editorBoxString(extent)}, {Name: xml.Name{Local: "ResourceID"}, Value: resource}}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return newEditorCompositeNode(data)
 }
 
 // UngroupCompositeObject 展开内部组合，隔离引用资源并保留父容器的样式和裁剪

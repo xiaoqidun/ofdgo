@@ -51,9 +51,11 @@ type Renderer struct {
 	preparedFonts         map[string]*PreparedFont
 	fontPreparations      *renderCache[[32]byte, PreparedFont]
 	fontSourcesCache      *fontSourceCache
-	fontMetrics           renderCache[[32]byte, FontMetrics]
+	fontMetrics           *renderCache[[32]byte, FontMetrics]
 	glyphOutlines         renderCache[glyphOutlineKey, GeometryPath]
 	renderError           error
+	patternReferences     map[*Pattern]bool
+	patternPage           *Matrix
 	TransparentBackground bool
 }
 
@@ -100,6 +102,7 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 	renderer := NewRenderer(reader, opts...)
 	renderer.sharedBackendStates = r.sharedBackendStates
 	renderer.fontPreparations = r.fontPreparations
+	renderer.fontMetrics = r.fontMetrics
 	renderer.decodeImages = r.decodeImages
 	renderer.TransparentBackground = r.TransparentBackground
 	return renderer

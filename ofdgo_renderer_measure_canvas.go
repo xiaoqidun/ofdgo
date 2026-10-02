@@ -158,7 +158,7 @@ func (r *Renderer) measureImage(ctx *canvas.Context, obj ImageObject, pageH floa
 		}
 	}
 	p := canvas.Rectangle(1, 1).Transform(canvas.Matrix{{m.a, m.c, m.e}, {-m.b, -m.d, pageH - m.f}})
-	clip := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, box.X, box.Y, ctm, parentCTM, boundaryInCTM))
+	clip := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, ctm, parentCTM, boundaryInCTM))
 	ctx.Renderer.(*boundsRenderer).add(applyClipPath(p, clip))
 	if obj.Border != nil {
 		border := *obj.Border

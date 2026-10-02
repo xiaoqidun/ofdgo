@@ -231,7 +231,14 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 			if source.object.Type != "PathObject" || editReason(styleErr) != EditUnsupportedColor {
 				return styleErr
 			}
-			copy, err = e.wrapCompositePath(copy)
+			copy.setStates(source.states)
+			copy.defaults = source.defaults
+			if !source.boundaryInCTM {
+				if err := copy.convertCoordinates(source.parent, true); err != nil {
+					return err
+				}
+			}
+			copy, err = e.wrapCompositePath(renderer, copy)
 			if err != nil {
 				return err
 			}
@@ -260,7 +267,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 		if err := copy.update(object); err != nil {
 			return err
 		}
-		if !source.boundaryInCTM {
+		if !source.boundaryInCTM && styleErr == nil {
 			if err := copy.convertCoordinates(source.parent, true); err != nil {
 				return err
 			}

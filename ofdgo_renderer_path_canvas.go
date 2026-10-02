@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"fmt"
 	"image/color"
 	"math"
 	"slices"
@@ -234,7 +235,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			{-parentCTM.b, parentCTM.d, pageH*(1-parentCTM.d) - parentCTM.f},
 		})
 	}
-	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, bx, by, localCTM, parentCTM, boundaryInCTM))
+	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
 	shouldFill := false
 	if obj.Fill != nil {
 		shouldFill = *obj.Fill
@@ -331,9 +332,22 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 		r.pageText = nil
 		defer func() { r.pageText = text }()
 	}
-	if clip == nil || clip.Empty() || len(pattern.CellContent.Objects) == 0 {
+	if clip == nil || clip.Empty() || pattern.CellContent.empty() {
 		return
 	}
+	if r.patternReferences[pattern.Pattern] {
+		r.renderError = fmt.Errorf("cyclic pattern paint")
+		return
+	}
+	if r.patternReferences == nil {
+		r.patternReferences = make(map[*Pattern]bool)
+	}
+	r.patternReferences[pattern.Pattern] = true
+	parentPage := r.patternPage
+	defer func() {
+		delete(r.patternReferences, pattern.Pattern)
+		r.patternPage = parentPage
+	}()
 	xStep, yStep := pattern.XStep, pattern.YStep
 	if xStep < pattern.Width {
 		xStep = pattern.Width
@@ -347,6 +361,8 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 	patternCTM := NewMatrix(pattern.CTM)
 	if pattern.RelativeTo != "Page" {
 		patternCTM = objectCTM.Multiply(patternCTM)
+	} else if parentPage != nil {
+		patternCTM = parentPage.Multiply(patternCTM)
 	}
 	invCTM, ok := patternCTM.Invert()
 	if !ok {
@@ -387,9 +403,13 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 			if iy%2 != 0 && (pattern.ReflectMethod == "Row" || pattern.ReflectMethod == "RowAndColumn") {
 				tileCTM = tileCTM.Multiply(Matrix{a: 1, d: -1, f: pattern.Height})
 			}
-			for _, obj := range pattern.CellContent.Objects {
+			r.patternPage = &tileCTM
+			for obj := range pattern.CellContent.objects() {
 				obj = mergeGraphicObjectAlpha(obj, pattern.Alpha)
 				r.renderObject(ctx, &obj, pageH, defaults, &tileCTM, true, clip)
+				if r.renderError != nil {
+					return
+				}
 			}
 		}
 	}

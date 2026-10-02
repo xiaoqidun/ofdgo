@@ -16,20 +16,13 @@ package ofdgo
 
 import "github.com/xiaoqidun/pdfgo"
 
-// halftone 检查连续色调转换及不可忽略的传递函数，避免将打印网屏误用于屏幕显示
+// halftone 检查连续色调转换，避免将打印网屏误用于屏幕显示
 // 入参: style 图形状态
-// 返回: error 严格模式或非恒等传递函数无法表达
+// 返回: error 严格模式无法保留设备网屏
 func (p *pdfImporter) halftone(style pdfgo.Style) error {
 	h := style.Halftone
 	if h == nil || h.Type == 0 {
 		return nil
-	}
-	identity, err := h.IdentityTransfer(p.reader)
-	if err != nil {
-		return err
-	}
-	if !identity {
-		return &pdfgo.UnsupportedError{Feature: "halftone transfer function conversion"}
 	}
 	if p.warning == nil {
 		return &pdfgo.UnsupportedError{Feature: "device halftone conversion"}

@@ -205,7 +205,7 @@ func (r *Renderer) resetFontBackendCache() {
 		r.fontSourcesCache.fallback = ResolvedFont{}
 		r.fontSourcesCache.fallbackRead = false
 	}
-	r.fontMetrics = renderCache[[32]byte, FontMetrics]{limit: 32 << 20}
+	r.fontMetrics = &renderCache[[32]byte, FontMetrics]{limit: 32 << 20}
 	r.glyphOutlines = renderCache[glyphOutlineKey, GeometryPath]{limit: 16 << 20}
 	for _, state := range r.backendStates {
 		if fonts, ok := state.(interface{ resetFonts() }); ok {

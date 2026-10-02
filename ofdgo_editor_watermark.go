@@ -81,10 +81,16 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 		if _, err := creationNumbers(*ctm, 6); err != nil {
 			return nil, err
 		}
-	} else if object.Type == "ImageObject" {
-		*ctm = (Matrix{a: box.W, d: box.H}).String()
 	}
-	*ctm = rotation.Multiply(NewMatrix(*ctm)).String()
+	object = transformEditorMatrix(object, rotation)
+	if object.Type == "TextObject" {
+		boundary = &object.TextObject.Boundary
+	} else {
+		boundary = &object.ImageObject.Boundary
+	}
+	extent, _ := ParseBox(*boundary)
+	extent.X, extent.Y = 0, 0
+	*boundary = editorBoxString(extent)
 	preview := e.transactionSnapshot()
 	preview.SetHistoryLimit(0)
 	id, err := preview.AddObject(indexes[0], object)
@@ -169,12 +175,14 @@ func layoutWatermark(ctx context.Context, base GraphicObject, bounds, box Box, o
 	}
 	if scale != 1 {
 		matrix := Matrix{a: scale, d: scale}
-		if base.Type == "TextObject" {
-			base.TextObject.CTM = matrix.Multiply(NewMatrix(base.TextObject.CTM)).String()
-		} else {
-			base.ImageObject.CTM = matrix.Multiply(NewMatrix(base.ImageObject.CTM)).String()
-		}
+		base = transformEditorMatrix(base, matrix)
 		bounds = matrix.TransformBox(bounds)
+	}
+	var extent Box
+	if base.Type == "TextObject" {
+		extent, _ = ParseBox(base.TextObject.Boundary)
+	} else {
+		extent, _ = ParseBox(base.ImageObject.Boundary)
 	}
 	columns, rows := 1.0, 1.0
 	if options.Tile {
@@ -199,7 +207,7 @@ func layoutWatermark(ctx context.Context, base GraphicObject, bounds, box Box, o
 			x := (float64(column)+0.5)*area.W/columns - bounds.X - bounds.W/2
 			y := (float64(row)+0.5)*area.H/rows - bounds.Y - bounds.H/2
 			object := base
-			boundary := editorBoxString(Box{X: x, Y: y, W: box.W, H: box.H})
+			boundary := editorBoxString(Box{X: x, Y: y, W: extent.W, H: extent.H})
 			if object.Type == "TextObject" {
 				object.TextObject.Boundary = boundary
 			} else {

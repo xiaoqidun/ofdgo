@@ -49,8 +49,14 @@ func (e *Editor) AddFont(file FontFile, index int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	data := parsed.Data
-	key := editorResourceKey{checksum: sha256.Sum256(data)}
+	return e.addFontResource(parsed, sha256.Sum256(parsed.Data))
+}
+
+// addFontResource 注册已解析的只读字体，各文档独立分配标识和包内路径
+// 入参: parsed 字体资源, checksum 字体数据摘要
+// 返回: string 字体标识, error 标识准备错误
+func (e *Editor) addFontResource(parsed *FontResource, checksum [32]byte) (string, error) {
+	key := editorResourceKey{checksum: checksum}
 	if id, ok := e.resourceID[key]; ok {
 		return id, nil
 	}
@@ -62,7 +68,7 @@ func (e *Editor) AddFont(file FontFile, index int) (string, error) {
 	definition.ID = id
 	resource := editorResource{
 		name: e.packageName("Res/Fonts/Font_" + id + parsed.Extension),
-		data: data,
+		data: parsed.Data,
 		font: &definition,
 	}
 	resource.font.FontFile = "/" + resource.name

@@ -177,13 +177,15 @@ func ttProject(x, y int32, vector [2]float64) int32 {
 // 入参: point 点, distance 投影距离, touch 是否标记触及状态
 func (v *ttInterpreter) move(point *ttPoint, distance int32, touch bool) {
 	g := &v.graphics
-	dot := g.freedom[0]*g.projection[0] + g.freedom[1]*g.projection[1]
-	if math.Abs(dot) < 1.0/16384 {
-		v.err = fmt.Errorf("perpendicular TrueType movement vectors")
-		return
+	if distance != 0 {
+		dot := g.freedom[0]*g.projection[0] + g.freedom[1]*g.projection[1]
+		if math.Abs(dot) < 1.0/16384 {
+			v.err = fmt.Errorf("perpendicular TrueType movement vectors")
+			return
+		}
+		point.x += int32(math.Round(float64(distance) * g.freedom[0] / dot))
+		point.y += int32(math.Round(float64(distance) * g.freedom[1] / dot))
 	}
-	point.x += int32(math.Round(float64(distance) * g.freedom[0] / dot))
-	point.y += int32(math.Round(float64(distance) * g.freedom[1] / dot))
 	if touch {
 		point.tx = point.tx || g.freedom[0] != 0
 		point.ty = point.ty || g.freedom[1] != 0

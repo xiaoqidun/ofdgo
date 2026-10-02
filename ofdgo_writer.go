@@ -989,8 +989,10 @@ func (x *ofdXML) pattern(pattern *Pattern) {
 	attrs.add("RelativeTo", pattern.RelativeTo)
 	attrs.add("CTM", pattern.CTM)
 	x.start("Pattern", attrs)
-	x.start("CellContent", nil)
-	for _, object := range pattern.CellContent.Objects {
+	var content ofdAttrs
+	content.add("Thumbnail", pattern.CellContent.Thumbnail)
+	x.start("CellContent", content)
+	for object := range pattern.CellContent.objects() {
 		x.object(object, false)
 	}
 	x.end("CellContent")

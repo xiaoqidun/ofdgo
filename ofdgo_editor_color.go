@@ -32,6 +32,14 @@ type PatternStyle struct {
 	CTM    *string
 }
 
+// editorValidation 保存同次对象校验的底纹和矢量引用路径，允许共享但拒绝循环
+type editorValidation struct {
+	*Editor
+	patterns   map[*Pattern]bool
+	composites map[string]bool
+	vectors    map[string]*editorCompositeNode
+}
+
 // GradientStops 解析当前文档的渐变分段，保留顺序并合并透明度
 // 入参: segments 渐变分段, alpha 外层透明度
 // 返回: []ColorStop 后端无关的色标, error 颜色解析错误
@@ -308,7 +316,8 @@ func collectPaintReferences(paint *FillColor, used map[string]bool) {
 		used[back.ColorSpace] = true
 	}
 	if paint.Pattern != nil {
-		for _, object := range paint.Pattern.CellContent.Objects {
+		used[paint.Pattern.CellContent.Thumbnail] = true
+		for object := range paint.Pattern.CellContent.objects() {
 			collectObjectReferences(object, used)
 		}
 	}
@@ -401,17 +410,39 @@ func (e *Editor) editorMeshColor(value *FillColor) error {
 	return err
 }
 
-// editorColor 校验当前文档的纯色和渐变
+// editorColor 校验当前文档的纯色、渐变和底纹
 // 入参: value 颜色
 // 返回: error 错误信息
 func (e *Editor) editorColor(value *FillColor) error {
+	return (&editorValidation{Editor: e}).editorColor(value)
+}
+
+// editorColor 沿当前引用路径校验底纹单元及绘制颜色
+// 入参: value 颜色
+// 返回: error 错误信息
+func (v *editorValidation) editorColor(value *FillColor) error {
+	e := v.Editor
+	if value != nil && value.Pattern != nil {
+		pattern := value.Pattern
+		if v.patterns[pattern] {
+			return fmt.Errorf("cyclic pattern paint")
+		}
+		if v.patterns == nil {
+			v.patterns = make(map[*Pattern]bool)
+		}
+		v.patterns[pattern] = true
+		defer delete(v.patterns, pattern)
+	}
 	if value != nil && (value.GouraudShd != nil || value.LaGouraudShd != nil) {
 		return e.editorMeshColor(value)
 	}
 	if value != nil && value.Pattern != nil {
 		pattern := value.Pattern
-		if value.unsupported || value.AxialShd != nil || value.RadialShd != nil || !finite(pattern.Width) || !finite(pattern.Height) || pattern.Width <= 0 || pattern.Height <= 0 || !finite(pattern.XStep) || !finite(pattern.YStep) || pattern.XStep < pattern.Width || pattern.YStep < pattern.Height {
+		if value.unsupported || value.AxialShd != nil || value.RadialShd != nil || !finite(pattern.Width) || !finite(pattern.Height) || pattern.Width <= 0 || pattern.Height <= 0 || !finite(pattern.XStep) || !finite(pattern.YStep) {
 			return fmt.Errorf("invalid pattern paint")
+		}
+		if !slices.Contains([]string{"", "Normal", "Row", "Column", "RowAndColumn"}, pattern.ReflectMethod) {
+			return fmt.Errorf("invalid pattern reflection")
 		}
 		if pattern.RelativeTo != "" && pattern.RelativeTo != "Page" && pattern.RelativeTo != "Object" {
 			return fmt.Errorf("invalid pattern reference")
@@ -423,14 +454,20 @@ func (e *Editor) editorColor(value *FillColor) error {
 		}
 		base := *value
 		base.Pattern = nil
-		if _, err := e.Color(&base); err != nil {
+		if base.Value == "" && base.Index == nil {
+			if base.Alpha != nil && (*base.Alpha < 0 || *base.Alpha > 255) {
+				return fmt.Errorf("color alpha must be between 0 and 255")
+			}
+		} else if _, err := e.Color(&base); err != nil {
 			return err
 		}
-		for _, object := range pattern.CellContent.Objects {
-			if object.Type == "PathObject" && (object.PathObject.FillColor != nil && object.PathObject.FillColor.Pattern != nil || object.PathObject.StrokeColor != nil && object.PathObject.StrokeColor.Pattern != nil) || object.Type == "TextObject" && (object.TextObject.FillColor != nil && object.TextObject.FillColor.Pattern != nil || object.TextObject.StrokeColor != nil && object.TextObject.StrokeColor.Pattern != nil) {
-				return fmt.Errorf("nested pattern paint is not supported")
+		if pattern.CellContent.Thumbnail != "" {
+			if _, err := e.editorImage(pattern.CellContent.Thumbnail); err != nil {
+				return err
 			}
-			if _, err := e.prepareObject("", object); err != nil {
+		}
+		for object := range pattern.CellContent.objects() {
+			if _, err := v.prepareObject("", object); err != nil {
 				return err
 			}
 		}

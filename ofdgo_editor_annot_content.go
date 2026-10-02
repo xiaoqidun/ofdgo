@@ -32,94 +32,9 @@ import (
 func (e *Editor) AddAnnotation(index int, annotation Annotation) (string, error) {
 	var id string
 	err := e.Transaction(func(next *Editor) error {
-		if index < 0 || index >= len(next.pages) {
-			return fmt.Errorf("page index %d out of range", index)
-		}
-		if !slices.Contains([]string{"Link", "Path", "Highlight", "Stamp", "Watermark"}, annotation.Type) {
-			return fmt.Errorf("invalid annotation type %q", annotation.Type)
-		}
-		if _, err := creationBox(annotation.Appearance.Boundary); err != nil {
-			return err
-		}
-		if err := next.prepareSourceIDs(); err != nil {
-			return err
-		}
-		id = next.nextID()
-		objects := annotation.Appearance.Objects
-		if len(objects) == 0 {
-			for _, object := range annotation.Appearance.TextObject {
-				objects = append(objects, GraphicObject{Type: "TextObject", TextObject: object})
-			}
-			for _, object := range annotation.Appearance.PathObject {
-				objects = append(objects, GraphicObject{Type: "PathObject", PathObject: object})
-			}
-			for _, object := range annotation.Appearance.ImageObject {
-				objects = append(objects, GraphicObject{Type: "ImageObject", ImageObject: object})
-			}
-			if len(annotation.Appearance.CompositeGraphicUnit) != 0 {
-				return fmt.Errorf("use composite copy to insert existing complex content")
-			}
-		}
-		var content []byte
-		for _, object := range objects {
-			prepared, err := next.prepareObject(next.nextID(), cloneEditorData(object))
-			if err != nil {
-				return err
-			}
-			data, err := editorObjectXML(prepared)
-			if err != nil {
-				return err
-			}
-			content = append(content, bytes.TrimPrefix(data, []byte(xml.Header))...)
-		}
-		appearance, err := editorXMLContainer("Appearance", ofdAttrs{{Name: xml.Name{Local: "Boundary"}, Value: annotation.Appearance.Boundary}}, content)
-		if err != nil {
-			return err
-		}
-		date := annotation.LastModDate
-		if date == "" {
-			date = time.Now().Format("2006-01-02")
-		} else if _, err := time.Parse("2006-01-02", date); err != nil {
-			return fmt.Errorf("invalid annotation date %q: %w", date, err)
-		}
-		attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: id}, {Name: xml.Name{Local: "Type"}, Value: annotation.Type},
-			{Name: xml.Name{Local: "Creator"}, Value: annotation.Creator}, {Name: xml.Name{Local: "LastModDate"}, Value: date}}
-		attrs.add("Subtype", annotation.Subtype)
-		attrs.flag("Visible", annotation.Visible)
-		if annotation.NoZoom {
-			attrs.add("NoZoom", "true")
-		}
-		if annotation.NoRotate {
-			attrs.add("NoRotate", "true")
-		}
-		content = nil
-		if annotation.Remark != "" {
-			content = editorXMLText("Remark", annotation.Remark)
-		}
-		if annotation.Parameters != nil && len(annotation.Parameters.Parameter) != 0 {
-			var parameters []byte
-			for _, parameter := range annotation.Parameters.Parameter {
-				if parameter.Name == "" {
-					return fmt.Errorf("empty annotation parameter name")
-				}
-				var value bytes.Buffer
-				if err := xml.EscapeText(&value, []byte(parameter.Value)); err != nil {
-					return err
-				}
-				data, err := editorXMLContainer("Parameter", ofdAttrs{{Name: xml.Name{Local: "Name"}, Value: parameter.Name}}, value.Bytes())
-				if err != nil {
-					return err
-				}
-				parameters = append(parameters, bytes.TrimPrefix(data, []byte(xml.Header))...)
-			}
-			data, err := editorXMLContainer("Parameters", nil, parameters)
-			if err != nil {
-				return err
-			}
-			content = append(content, bytes.TrimPrefix(data, []byte(xml.Header))...)
-		}
-		content = append(content, bytes.TrimPrefix(appearance, []byte(xml.Header))...)
-		data, err := editorXMLContainer("Annot", attrs, content)
+		var data []byte
+		var err error
+		id, data, err = next.prepareAnnotation(index, annotation)
 		if err != nil {
 			return err
 		}
@@ -129,6 +44,102 @@ func (e *Editor) AddAnnotation(index int, annotation Annotation) (string, error)
 		return "", err
 	}
 	return id, nil
+}
+
+// prepareAnnotation 校验注解并分配外观标识，提交由调用方事务或独立导入文档负责
+// 入参: index 页面索引, annotation 注解内容
+// 返回: string 注解标识, []byte 标准XML, error 校验错误
+func (e *Editor) prepareAnnotation(index int, annotation Annotation) (string, []byte, error) {
+	if index < 0 || index >= len(e.pages) {
+		return "", nil, fmt.Errorf("page index %d out of range", index)
+	}
+	if !slices.Contains([]string{"Link", "Path", "Highlight", "Stamp", "Watermark"}, annotation.Type) {
+		return "", nil, fmt.Errorf("invalid annotation type %q", annotation.Type)
+	}
+	if _, err := creationBox(annotation.Appearance.Boundary); err != nil {
+		return "", nil, err
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return "", nil, err
+	}
+	id := e.nextID()
+	objects := annotation.Appearance.Objects
+	if len(objects) == 0 {
+		objects = nil
+		for _, object := range annotation.Appearance.TextObject {
+			objects = append(objects, GraphicObject{Type: "TextObject", TextObject: object})
+		}
+		for _, object := range annotation.Appearance.PathObject {
+			objects = append(objects, GraphicObject{Type: "PathObject", PathObject: object})
+		}
+		for _, object := range annotation.Appearance.ImageObject {
+			objects = append(objects, GraphicObject{Type: "ImageObject", ImageObject: object})
+		}
+		if len(annotation.Appearance.CompositeGraphicUnit) != 0 {
+			return "", nil, fmt.Errorf("use composite copy to insert existing complex content")
+		}
+	}
+	var content []byte
+	for _, object := range objects {
+		prepared, err := e.prepareObject(e.nextID(), cloneEditorData(object))
+		if err != nil {
+			return "", nil, err
+		}
+		data, err := editorObjectXML(prepared)
+		if err != nil {
+			return "", nil, err
+		}
+		content = append(content, bytes.TrimPrefix(data, []byte(xml.Header))...)
+	}
+	appearance, err := editorXMLContainer("Appearance", ofdAttrs{{Name: xml.Name{Local: "Boundary"}, Value: annotation.Appearance.Boundary}}, content)
+	if err != nil {
+		return "", nil, err
+	}
+	date := annotation.LastModDate
+	if date == "" {
+		date = time.Now().Format("2006-01-02")
+	} else if _, err := time.Parse("2006-01-02", date); err != nil {
+		return "", nil, fmt.Errorf("invalid annotation date %q: %w", date, err)
+	}
+	attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: id}, {Name: xml.Name{Local: "Type"}, Value: annotation.Type},
+		{Name: xml.Name{Local: "Creator"}, Value: annotation.Creator}, {Name: xml.Name{Local: "LastModDate"}, Value: date}}
+	attrs.add("Subtype", annotation.Subtype)
+	attrs.flag("Visible", annotation.Visible)
+	if annotation.NoZoom {
+		attrs.add("NoZoom", "true")
+	}
+	if annotation.NoRotate {
+		attrs.add("NoRotate", "true")
+	}
+	content = nil
+	if annotation.Remark != "" {
+		content = editorXMLText("Remark", annotation.Remark)
+	}
+	if annotation.Parameters != nil && len(annotation.Parameters.Parameter) != 0 {
+		var parameters []byte
+		for _, parameter := range annotation.Parameters.Parameter {
+			if parameter.Name == "" {
+				return "", nil, fmt.Errorf("empty annotation parameter name")
+			}
+			var value bytes.Buffer
+			if err := xml.EscapeText(&value, []byte(parameter.Value)); err != nil {
+				return "", nil, err
+			}
+			data, err := editorXMLContainer("Parameter", ofdAttrs{{Name: xml.Name{Local: "Name"}, Value: parameter.Name}}, value.Bytes())
+			if err != nil {
+				return "", nil, err
+			}
+			parameters = append(parameters, bytes.TrimPrefix(data, []byte(xml.Header))...)
+		}
+		data, err := editorXMLContainer("Parameters", nil, parameters)
+		if err != nil {
+			return "", nil, err
+		}
+		content = append(content, bytes.TrimPrefix(data, []byte(xml.Header))...)
+	}
+	content = append(content, bytes.TrimPrefix(appearance, []byte(xml.Header))...)
+	data, err := editorXMLContainer("Annot", attrs, content)
+	return id, data, err
 }
 
 // Annotation 获取注解的独立内容快照，修改原注解应使用局部编辑方法以保留扩展字段

@@ -129,28 +129,29 @@ func (p GeometryPath) Transform(matrix Matrix) (GeometryPath, error) {
 func (p GeometryPath) validate() error {
 	started := false
 	for _, s := range p {
-		points := []Point{s.End}
+		points := [3]Point{s.End, s.Control1, s.Control2}
+		count := 1
 		switch s.Verb {
 		case GeometryMove:
 			started = true
 		case GeometryLine:
 		case GeometryQuad:
-			points = append(points, s.Control1)
+			count = 2
 		case GeometryCubic:
-			points = append(points, s.Control1, s.Control2)
+			count = 3
 		case GeometryArc:
 			if !finite(s.RadiusX) || !finite(s.RadiusY) || !finite(s.Rotation) || s.RadiusX < 0 || s.RadiusY < 0 {
 				return fmt.Errorf("invalid arc parameters")
 			}
 		case GeometryClose:
-			points = nil
+			count = 0
 		default:
 			return fmt.Errorf("unsupported geometry command %d", s.Verb)
 		}
 		if !started {
 			return fmt.Errorf("geometry path must start with move")
 		}
-		for _, point := range points {
+		for _, point := range points[:count] {
 			if !finite(point.X) || !finite(point.Y) {
 				return fmt.Errorf("non-finite geometry coordinate")
 			}

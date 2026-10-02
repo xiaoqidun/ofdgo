@@ -95,7 +95,7 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 			{-ctm.b / imgW, ctm.d / imgH, pageH - box.Y - ctm.d - ctm.f},
 		}
 	}
-	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, box.X, box.Y, localCTM, parentCTM, boundaryInCTM))
+	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
 	imageClip := clipPath
 	compiler, compiled := ctx.Renderer.(*canvasPageCompiler)
 	if compiled && imageClip != nil && imageClipContains(img, imageClip, m) {
@@ -171,6 +171,9 @@ func imageClipContains(img image.Image, clipPath *canvas.Path, m canvas.Matrix) 
 	if rect, ok := rectangularPath(clipPath); ok {
 		return rect.Contains(outline.FastBounds())
 	}
+	if geometryConvexContains(*geometryFromCanvasPath(clipPath), *geometryFromCanvasPath(outline)) {
+		return true
+	}
 	return clipPath.Contains(outline)
 }
 
@@ -190,6 +193,7 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 	if imageClipContains(img, clipPath, m) {
 		return img
 	}
+	original := img
 	source, err := imagePixelData(img)
 	if err != nil {
 		r.renderError = err
@@ -231,6 +235,9 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		draw.Draw(mask, mask.Bounds(), result, result.Bounds().Min, draw.Src)
 	}
 	if mask.Opaque() {
+		if scale <= 1 {
+			return original
+		}
 		return img
 	}
 	source = img

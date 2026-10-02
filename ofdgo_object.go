@@ -16,7 +16,10 @@ package ofdgo
 
 import (
 	"encoding/xml"
+	"fmt"
+	"iter"
 	"strconv"
+	"strings"
 )
 
 // graphicObjectTarget 图形对象集合
@@ -144,6 +147,19 @@ func (c *CompositeGraphicUnit) UnmarshalXML(d *xml.Decoder, start xml.StartEleme
 	c.Boundary = attrValue(start, "Boundary")
 	c.CTM = attrValue(start, "CTM")
 	c.DrawParam = attrValue(start, "DrawParam")
+	for _, dimension := range []struct {
+		name  string
+		value *float64
+	}{{"Width", &c.Width}, {"Height", &c.Height}} {
+		if value := attrValue(start, dimension.name); value != "" {
+			c.extentSet = true
+			var err error
+			*dimension.value, err = strconv.ParseFloat(strings.TrimSpace(value), 64)
+			if err != nil {
+				return fmt.Errorf("invalid vector %s: %w", dimension.name, err)
+			}
+		}
+	}
 	if value := attrValue(start, "Alpha"); value != "" {
 		if alpha, err := strconv.Atoi(value); err == nil {
 			c.Alpha = &alpha
@@ -170,8 +186,55 @@ func (a *Appearance) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
 func (p *PatternContent) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	*p = PatternContent{}
+	*p = PatternContent{Thumbnail: attrValue(start, "Thumbnail")}
 	return decodeObjectContainer(d, start, p.decodeObject)
+}
+
+// objects 按绘制顺序访问底纹单元，Objects优先于分类数组
+// 返回: iter.Seq[GraphicObject] 图形对象序列
+func (p PatternContent) objects() iter.Seq[GraphicObject] {
+	return func(yield func(GraphicObject) bool) {
+		if len(p.Objects) != 0 {
+			for _, object := range p.Objects {
+				if !yield(object) {
+					return
+				}
+			}
+			return
+		}
+		for _, object := range p.TextObject {
+			if !yield(GraphicObject{Type: "TextObject", TextObject: object}) {
+				return
+			}
+		}
+		for _, object := range p.PathObject {
+			if !yield(GraphicObject{Type: "PathObject", PathObject: object}) {
+				return
+			}
+		}
+		for _, object := range p.ImageObject {
+			if !yield(GraphicObject{Type: "ImageObject", ImageObject: object}) {
+				return
+			}
+		}
+		for _, object := range p.CompositeGraphicUnit {
+			if !yield(GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: object}) {
+				return
+			}
+		}
+	}
+}
+
+// objects 按绘制顺序访问矢量内容，Objects优先于分类数组
+// 返回: iter.Seq[GraphicObject] 图形对象序列
+func (c CompositeGraphicUnit) objects() iter.Seq[GraphicObject] {
+	return (PatternContent{Objects: c.Objects, TextObject: c.TextObject, PathObject: c.PathObject, ImageObject: c.ImageObject, CompositeGraphicUnit: c.CompositeGraphicUnit}).objects()
+}
+
+// empty 检查底纹单元是否没有绘制内容，缩略图不参与绘制
+// 返回: bool 是否为空
+func (p PatternContent) empty() bool {
+	return len(p.Objects) == 0 && len(p.TextObject) == 0 && len(p.PathObject) == 0 && len(p.ImageObject) == 0 && len(p.CompositeGraphicUnit) == 0
 }
 
 // UnmarshalXML 解析渐变分段并保留位置的缺省状态
@@ -279,6 +342,16 @@ func (c *CompositeGraphicUnit) decodeObject(d *xml.Decoder, start xml.StartEleme
 		return err
 	}
 	switch start.Name.Local {
+	case "Thumbnail", "Substitution":
+		var reference string
+		if err := d.DecodeElement(&reference, &start); err != nil {
+			return err
+		}
+		if start.Name.Local == "Thumbnail" {
+			c.Thumbnail = strings.TrimSpace(reference)
+		} else {
+			c.Substitution = strings.TrimSpace(reference)
+		}
 	case "Clips":
 		var clips Clips
 		if err := d.DecodeElement(&clips, &start); err != nil {

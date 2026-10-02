@@ -421,8 +421,8 @@ func (e *Editor) transformBorderedImage(object GraphicObject, matrix Matrix, ori
 	return transformEditorMatrix(object, matrix), nil
 }
 
-// transformEditorMatrix 在页面坐标中变换基本对象，保留局部绘制数据和裁剪
-// 入参: object 对象, matrix 页面变换
+// transformEditorMatrix 在所在坐标系中变换对象，保留局部绘制数据和裁剪
+// 入参: object 对象, matrix 所在坐标系中的变换
 // 返回: GraphicObject 变换后的独立对象
 func transformEditorMatrix(object GraphicObject, matrix Matrix) GraphicObject {
 	var boundary, ctm *string
@@ -446,6 +446,30 @@ func transformEditorMatrix(object GraphicObject, matrix Matrix) GraphicObject {
 	*boundary = editorBoxString(after)
 	if clips := editorObjectClips(&object); *clips != nil && (*clips).TransFlag != nil && !*(*clips).TransFlag {
 		*clips = transformObjectClips(*clips, local)
+	}
+	if !axisAlignedMatrix(matrix) && before.W > 0 && before.H > 0 {
+		clips := editorObjectClips(&object)
+		if *clips == nil {
+			*clips = &Clips{}
+		} else {
+			copy := **clips
+			copy.Clip = slices.Clone(copy.Clip)
+			*clips = &copy
+		}
+		clipMatrix := local
+		if (*clips).TransFlag == nil || *(*clips).TransFlag {
+			if inverse, ok := NewMatrix(*ctm).Invert(); ok {
+				clipMatrix = inverse.Multiply(local)
+			} else {
+				*clips = transformObjectClips(*clips, NewMatrix(*ctm))
+				flag := false
+				(*clips).TransFlag = &flag
+			}
+		}
+		fill, stroke := true, false
+		path := PathObject{Boundary: editorBoxString(Box{W: before.W, H: before.H}), Fill: &fill, Stroke: &stroke,
+			AbbreviatedData: "M 0 0 L " + ofdNumber(before.W) + " 0 L " + ofdNumber(before.W) + " " + ofdNumber(before.H) + " L 0 " + ofdNumber(before.H) + " C"}
+		(*clips).Clip = append((*clips).Clip, Clip{Area: []ClipArea{{CTM: clipMatrix.String(), Path: []PathObject{path}}}})
 	}
 	return object
 }

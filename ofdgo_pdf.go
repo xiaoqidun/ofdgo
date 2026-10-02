@@ -68,10 +68,8 @@ type pdfImporter struct {
 	matrix           pdfgo.Matrix
 	page             int
 	fontIDs          map[*pdfgo.Font]string
-	fontMetrics      map[string]FontMetrics
-	fontRepairLimit  map[*pdfgo.Font]uint16
+	fonts            map[*pdfgo.Font]*pdfImportedFont
 	fontWarnings     map[string]bool
-	type1Glyphs      map[*pdfgo.Font]map[string]uint16
 	clipTexts        map[*pdfgo.TextClip]TextObject
 	cmykSpace        string
 	objects          []GraphicObject
@@ -90,8 +88,10 @@ type pdfImporter struct {
 	compositeCache   *pdfCompositeCache
 	compositeNodes   []pdfCompositeNode
 	compositeSpace   *pdfgo.ColorSpace
+	annotationData   []byte
 	resolveFile      pdfgo.FileResolver
 	halftoneWarnings map[*pdfgo.Halftone]bool
+	transferBackdrop bool
 }
 
 // ImportPDF 将PDF内容转换为独立OFD编辑文档，失败时不返回部分结果
@@ -132,7 +132,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	editor := NewEditor()
 	editor.SetRenderBackends(renderer.Backends())
 	editor.fontDirs, editor.fontFS = renderer.FontSources()
-	importer := pdfImporter{ctx: ctx, reader: reader, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, fontIDs: map[*pdfgo.Font]string{}, fontMetrics: map[string]FontMetrics{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
+	importer := pdfImporter{ctx: ctx, reader: reader, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
 	importer.report.Warnings = diagnostics
 	importer.pageIndexes = make(map[pdfgo.Reference]int)
 	importer.resolveFile = options.ResolveFile
@@ -188,6 +188,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		importer.compositeNodes = nil
 		importer.compositeSpace = nil
 		importer.clipTexts = make(map[*pdfgo.TextClip]TextObject)
+		importer.annotationData = nil
 		if err := importer.compositePage(nil, func(visitor pdfgo.Visitor) error { return reader.WalkPage(ctx, page, visitor) }); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
@@ -196,6 +197,12 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		}
 		if err := importer.annotations(ctx, page, options.Strict); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
+		}
+		if len(importer.annotationData) != 0 {
+			if err := editor.appendAnnotations(index, importer.annotationData); err != nil {
+				return fmt.Errorf("import PDF page %d: %w", index+1, err)
+			}
+			importer.annotationData = nil
 		}
 		if err := importer.commitObjects(); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
@@ -545,6 +552,9 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 // 入参: paint PDF画刷, box 对象边界
 // 返回: *FillColor OFD颜色或渐变, error 图案转换错误
 func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error) {
+	if err := pdfGradientError(paint); err != nil {
+		return nil, err
+	}
 	if paint.Mesh != nil {
 		return p.meshColor(paint, box)
 	}
@@ -704,5 +714,6 @@ func pdfOpaqueBlack(paint pdfgo.Paint) bool {
 // 入参: paint PDF颜色与不透明度
 // 返回: bool 是否需要保留分色语义
 func pdfOverprintNeedsSeparation(paint pdfgo.Paint) bool {
-	return paint.CMYK != nil && !pdfOpaqueBlack(paint)
+	_, process := paint.Process.CMYKMask()
+	return (paint.CMYK != nil || process) && !pdfOpaqueBlack(paint)
 }

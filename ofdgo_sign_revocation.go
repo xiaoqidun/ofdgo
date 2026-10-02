@@ -42,6 +42,7 @@ type SignatureRevocationRequest struct {
 
 // SignatureRevocationOptions 离线吊销检查选项
 // 检查签署者及制章者证书, 不代表整条证书链或TSA的吊销状态
+// CRL支持直接完整列表及增量合并, 尚不支持间接或带作用域列表
 // Fetch仅提供DER证据, 本库不主动联网, 缺少NextUpdate时必须显式设置MaxAge
 // VerifyTime缺省取验签指定时间或当前时间, 不采用签名自报时间
 type SignatureRevocationOptions struct {
@@ -120,8 +121,8 @@ func VerifySignatureRevocation(cert, issuer []byte, options SignatureRevocationO
 		evidence.OCSPResponses = append(cloneSignatureEvidence(evidence.OCSPResponses), fetched.OCSPResponses...)
 	}
 	var good *SignatureRevocationReport
-	for _, raw := range evidence.CRLs {
-		item := verifySignatureCRL(raw, cert, issuer, at, options.MaxAge)
+	if len(evidence.CRLs) != 0 {
+		item := verifySignatureCRLs(evidence.CRLs, c, i, at, options.MaxAge)
 		if item.Checked && item.Status == "revoked" {
 			return item
 		}
@@ -170,71 +171,6 @@ func signatureEvidenceFresh(thisUpdate, nextUpdate, at time.Time, maxAge time.Du
 		return maxAge > 0
 	}
 	return nextUpdate.After(thisUpdate) && at.Before(nextUpdate)
-}
-
-// verifySignatureCRL 验证直接完整CRL及目标序列号
-// 入参: raw CRL字节, cert 证书, issuer 颁发者, at 验证时间, maxAge 最大年龄
-// 返回: SignatureRevocationReport 吊销结果
-func verifySignatureCRL(raw, cert, issuer []byte, at time.Time, maxAge time.Duration) (result SignatureRevocationReport) {
-	result = SignatureRevocationReport{Certificate: signatureCertInfo(cert), Source: "CRL", Status: "unknown"}
-	err := func() error {
-		crl, err := smx509.ParseRevocationList(raw)
-		if err != nil {
-			return err
-		}
-		parent, err := parseSignatureCertificate(issuer)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(crl.RawIssuer, parent.RawSubject) {
-			return fmt.Errorf("CRL issuer mismatch")
-		}
-		if len(crl.AuthorityKeyId) != 0 && !bytes.Equal(crl.AuthorityKeyId, parent.SubjectKeyId) {
-			return fmt.Errorf("CRL authority key mismatch")
-		}
-		if err := crl.CheckSignatureFrom(parent); err != nil {
-			return err
-		}
-		for _, ext := range crl.Extensions {
-			if ext.Id.String() == "2.5.29.27" || ext.Id.String() == "2.5.29.28" {
-				return fmt.Errorf("delta or scoped CRL not supported")
-			}
-			if ext.Critical {
-				return fmt.Errorf("unsupported critical CRL extension")
-			}
-		}
-		result.ThisUpdate, result.NextUpdate = crl.ThisUpdate, crl.NextUpdate
-		if !signatureEvidenceFresh(crl.ThisUpdate, crl.NextUpdate, at, maxAge) {
-			return fmt.Errorf("stale or future CRL")
-		}
-		c, err := parseSignatureCertificate(cert)
-		if err != nil {
-			return err
-		}
-		for _, entry := range crl.RevokedCertificateEntries {
-			for _, ext := range entry.Extensions {
-				if ext.Critical || ext.Id.String() == "2.5.29.29" {
-					return fmt.Errorf("unsupported CRL entry extension")
-				}
-			}
-			if entry.SerialNumber.Cmp(c.SerialNumber) == 0 {
-				if entry.ReasonCode == 8 {
-					return fmt.Errorf("removeFromCRL requires delta processing")
-				}
-				if entry.RevocationTime.After(crl.ThisUpdate) {
-					return fmt.Errorf("CRL revocation time is in the future")
-				}
-				result.Checked, result.Status, result.RevokedAt = true, "revoked", entry.RevocationTime
-				return nil
-			}
-		}
-		result.Checked, result.OK, result.Status = true, true, "good"
-		return nil
-	}()
-	if err != nil {
-		result.Error = err.Error()
-	}
-	return result
 }
 
 // verifySignatureOCSP 验证OCSP签名、授权、颁发者绑定及状态

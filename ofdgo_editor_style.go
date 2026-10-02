@@ -702,6 +702,13 @@ func editorStrokeScale(ctm string) float64 {
 // 入参: border 边框
 // 返回: error 错误信息
 func (e *Editor) validateImageBorder(border *ImageBorder) error {
+	return (&editorValidation{Editor: e}).validateImageBorder(border)
+}
+
+// validateImageBorder 沿当前颜色引用路径校验图片边框
+// 入参: border 边框
+// 返回: error 错误信息
+func (v *editorValidation) validateImageBorder(border *ImageBorder) error {
 	if border == nil {
 		return nil
 	}
@@ -717,7 +724,7 @@ func (e *Editor) validateImageBorder(border *ImageBorder) error {
 	if err := validateEditorStroke(stroke); err != nil {
 		return err
 	}
-	return e.editorColor((*FillColor)(border.BorderColor))
+	return v.editorColor((*FillColor)(border.BorderColor))
 }
 
 // validateEditorStroke 校验路径描边尺寸、端点和虚线

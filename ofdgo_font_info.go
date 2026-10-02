@@ -66,6 +66,12 @@ type fontUsagePage struct {
 	usage    map[string]int
 }
 
+// fontUsageReferences 保存字体统计中的当前引用路径，不合并共享内容的用量
+type fontUsageReferences struct {
+	composites map[string]bool
+	patterns   map[*Pattern]bool
+}
+
 // Fonts 获取OFD声明的字体列表
 // 返回: []Font 字体列表, error 错误信息
 func (r *Reader) Fonts() ([]Font, error) {
@@ -492,8 +498,8 @@ func (r *Renderer) countLayerFonts(layer Layer, usage map[string]int) {
 }
 
 // countObjectFonts 统计图元字体使用次数
-// 入参: obj 图元对象, usage 字体使用次数, defaults 默认绘制参数, visited 已访问资源
-func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int, defaults *DrawParam, visited map[string]bool) {
+// 入参: obj 图元对象, usage 字体使用次数, defaults 默认绘制参数, visited 当前引用路径
+func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int, defaults *DrawParam, visited *fontUsageReferences) {
 	var fill *FillColor
 	var stroke *StrokeColor
 	var shouldFill, shouldStroke bool
@@ -539,50 +545,49 @@ func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int, def
 }
 
 // countCompositeFonts 统计复合图元字体使用次数
-// 入参: cgu 复合图元, usage 字体使用次数, defaults 默认绘制参数, visited 已访问资源
-func (r *Renderer) countCompositeFonts(cgu CompositeGraphicUnit, usage map[string]int, defaults *DrawParam, visited map[string]bool) {
+// 入参: cgu 复合图元, usage 字体使用次数, defaults 默认绘制参数, visited 当前引用路径
+func (r *Renderer) countCompositeFonts(cgu CompositeGraphicUnit, usage map[string]int, defaults *DrawParam, visited *fontUsageReferences) {
 	r.countClipFonts(cgu.Clips, usage)
 	defaults = r.drawParamDefaults(cgu.DrawParam, defaults)
 	if cgu.ResourceID != "" {
 		if visited == nil {
-			visited = make(map[string]bool)
+			visited = &fontUsageReferences{}
 		}
-		if visited[cgu.ResourceID] {
+		if visited.composites[cgu.ResourceID] {
 			return
 		}
-		visited[cgu.ResourceID] = true
+		if visited.composites == nil {
+			visited.composites = make(map[string]bool)
+		}
+		visited.composites[cgu.ResourceID] = true
 		if ref := r.CompositeGraphicUnits[cgu.ResourceID]; ref != nil {
 			r.countCompositeFonts(*ref, usage, defaults, visited)
 		}
-		defer delete(visited, cgu.ResourceID)
+		defer delete(visited.composites, cgu.ResourceID)
 	}
-	if len(cgu.Objects) > 0 {
-		for _, obj := range cgu.Objects {
-			r.countObjectFonts(obj, usage, defaults, visited)
-		}
-		return
-	}
-	for _, text := range cgu.TextObject {
-		r.countObjectFonts(GraphicObject{Type: "TextObject", TextObject: text}, usage, defaults, visited)
-	}
-	for _, path := range cgu.PathObject {
-		r.countObjectFonts(GraphicObject{Type: "PathObject", PathObject: path}, usage, defaults, visited)
-	}
-	for _, image := range cgu.ImageObject {
-		r.countObjectFonts(GraphicObject{Type: "ImageObject", ImageObject: image}, usage, defaults, visited)
-	}
-	for _, sub := range cgu.CompositeGraphicUnit {
-		r.countCompositeFonts(sub, usage, defaults, visited)
+	for object := range cgu.objects() {
+		r.countObjectFonts(object, usage, defaults, visited)
 	}
 }
 
 // countPatternFonts 统计底纹单元字体使用次数
-// 入参: fill 填充或描边颜色, usage 字体使用次数, visited 已访问资源
-func (r *Renderer) countPatternFonts(fill *FillColor, usage map[string]int, visited map[string]bool) {
+// 入参: fill 填充或描边颜色, usage 字体使用次数, visited 当前引用路径
+func (r *Renderer) countPatternFonts(fill *FillColor, usage map[string]int, visited *fontUsageReferences) {
 	if fill == nil || fill.Pattern == nil {
 		return
 	}
-	for _, obj := range fill.Pattern.CellContent.Objects {
+	if visited == nil {
+		visited = &fontUsageReferences{}
+	}
+	if visited.patterns[fill.Pattern] {
+		return
+	}
+	if visited.patterns == nil {
+		visited.patterns = make(map[*Pattern]bool)
+	}
+	visited.patterns[fill.Pattern] = true
+	defer delete(visited.patterns, fill.Pattern)
+	for obj := range fill.Pattern.CellContent.objects() {
 		r.countObjectFonts(obj, usage, nil, visited)
 	}
 }

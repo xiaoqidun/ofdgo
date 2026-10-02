@@ -49,7 +49,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if boundaryInCTM && parentCTM != nil {
 		objectCTM = parentCTM.Multiply(TranslationMatrix(bx, by)).Multiply(localCTM)
 	}
-	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, bx, by, localCTM, parentCTM, boundaryInCTM))
+	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
 	var dp *DrawParam
 	if obj.DrawParam != "" {
 		dp = r.getDrawParam(obj.DrawParam, nil)
@@ -325,7 +325,25 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			if fillPaint != nil || fillPattern != nil {
 				ctx.SetFill(fillPaint)
 				ctx.SetStrokeColor(canvas.Transparent)
-				if fillClip != nil || shadedFill || fillPattern != nil {
+				glyphClip := fillClip
+				if fillClip != nil && !embeddedFont && face.FauxBold == 0 && !textCodePositioned(tc, xs, ys) && !shadedFill && fillPattern == nil && glyph.GlyphID < 0 && !hasUnderline {
+					if rect, ok := rectangularPath(fillClip); ok {
+						transform := canvas.Identity.Translate(canvasX, canvasY)
+						if useTextMatrix {
+							transform = transform.Mul(glyphMatrix)
+						}
+						if rect.Contains(glyphPath.Copy().Transform(transform.Scale(hScale, 1)).Bounds()) {
+							available := true
+							for _, char := range str {
+								available = available && face.Font.GlyphIndex(char) != 0
+							}
+							if available {
+								glyphClip, drawAsGlyphPath = nil, false
+							}
+						}
+					}
+				}
+				if glyphClip != nil || shadedFill || fillPattern != nil {
 					scaleX := hScale
 					if advanceLimit > 0 && glyphWidth*scaleX > advanceLimit {
 						scaleX = advanceLimit / glyphWidth
@@ -335,7 +353,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					if useTextMatrix {
 						textTransform = textTransform.Mul(glyphMatrix)
 					}
-					glyphPath = applyClipPath(glyphPath.Copy().Transform(textTransform.Scale(scaleX, 1)), fillClip)
+					glyphPath = applyClipPath(glyphPath.Copy().Transform(textTransform.Scale(scaleX, 1)), glyphClip)
 					if fillPattern != nil {
 						r.renderPattern(ctx, fillPattern, pageH, glyphPath, objectCTM)
 					} else {

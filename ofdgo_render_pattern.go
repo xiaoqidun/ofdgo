@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"crypto/sha256"
+	"fmt"
 	"slices"
 )
 
@@ -101,6 +102,9 @@ func (c *semanticCompiler) sharedStamp(stamp Stamp, compile func(*semanticCompil
 // 入参: pattern 底纹画刷, matrix 单元到页面矩阵
 // 返回: []RasterCommand 只读单元指令, error 编译错误
 func (c *semanticCompiler) patternCell(pattern *PatternPaint, matrix Matrix) ([]RasterCommand, error) {
+	if c.patternReferences[pattern.Pattern] {
+		return nil, fmt.Errorf("cyclic pattern paint")
+	}
 	x, y := 0.0, 0.0
 	if patternCellTranslatable(pattern) {
 		x, y = matrix.e, matrix.f
@@ -119,9 +123,14 @@ func (c *semanticCompiler) patternCell(pattern *PatternPaint, matrix Matrix) ([]
 	if commands, ok := c.patterns.get(key); ok {
 		return translatePatternCommands(commands, x, y), nil
 	}
-	child := &semanticCompiler{renderer: c.renderer, geometry: c.geometry, page: &RasterPage{Width: c.page.Width, Height: c.page.Height, DPI: c.page.DPI}, pattern: true, patterns: c.patterns}
+	if c.patternReferences == nil {
+		c.patternReferences = make(map[*Pattern]bool)
+	}
+	c.patternReferences[pattern.Pattern] = true
+	defer delete(c.patternReferences, pattern.Pattern)
+	child := &semanticCompiler{renderer: c.renderer, geometry: c.geometry, page: &RasterPage{Width: c.page.Width, Height: c.page.Height, DPI: c.page.DPI}, pattern: true, patterns: c.patterns, patternReferences: c.patternReferences, patternPage: &matrix}
 	defaults := &DrawParam{FillColor: &pattern.Color, StrokeColor: (*StrokeColor)(&pattern.Color)}
-	for _, object := range pattern.CellContent.Objects {
+	for object := range pattern.CellContent.objects() {
 		object = mergeGraphicObjectAlpha(object, pattern.Alpha)
 		if err := c.renderer.WalkObject(&object, RenderState{Defaults: defaults, Parent: &matrix, BoundaryInCTM: true}, child); err != nil {
 			return nil, err
@@ -142,7 +151,7 @@ func patternCellTranslatable(pattern *PatternPaint) bool {
 	if pattern.Color.Pattern != nil {
 		return false
 	}
-	for _, object := range pattern.CellContent.Objects {
+	for object := range pattern.CellContent.objects() {
 		var fill, stroke *FillColor
 		switch object.Type {
 		case "PathObject":

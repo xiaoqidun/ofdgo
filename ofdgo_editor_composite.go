@@ -474,12 +474,23 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 			clips, clipMatrix = &copy, boundary
 		}
 		clip := n.clip
+		var err error
+		if c.Boundary != "" {
+			clip, err = renderer.geometryExtentClip(box.W, box.H, boundary, clip)
+			if err != nil {
+				return nil, err
+			}
+		}
+		clip, err = renderer.compositeExtentClip(c, matrix, clip)
+		if err != nil {
+			return nil, err
+		}
 		if clips != nil {
 			geometry, err := renderer.Geometry()
 			if err != nil {
 				return nil, err
 			}
-			clip, err = geometry.Clip(renderer, clips, clipMatrix, n.clip)
+			clip, err = geometry.Clip(renderer, clips, clipMatrix, clip)
 			if err != nil {
 				return nil, err
 			}
@@ -1043,6 +1054,11 @@ func editorResourceReferences(data []byte) ([]string, error) {
 	var collect func(*editorXML)
 	collect = func(node *editorXML) {
 		if node.name.Space == "" || node.name.Space == ofdNamespace || node.name.Space == "http://www.ofdspec.org" {
+			if node.name.Local == "Thumbnail" || node.name.Local == "Substitution" {
+				if id := editorResourceID(editorImportText(data, node)); id != "" {
+					refs[id] = true
+				}
+			}
 			for _, attr := range node.attrs {
 				if attr.Name.Space == "" && editorObjectReference(attr.Name.Local) {
 					refs[attr.Value] = true
@@ -1062,7 +1078,53 @@ func editorResourceReferences(data []byte) ([]string, error) {
 func collectCompositeReferences(composite CompositeGraphicUnit, used map[string]bool) {
 	used[composite.ResourceID] = true
 	used[composite.DrawParam] = true
-	for _, object := range composite.Objects {
+	used[composite.Thumbnail] = true
+	used[composite.Substitution] = true
+	for object := range composite.objects() {
 		collectObjectReferences(object, used)
 	}
+}
+
+// validateVector 校验共享矢量资源及嵌套绘制引用，不修改资源内容
+// 入参: id 矢量资源标识
+// 返回: error 尺寸、内容或引用错误
+func (v *editorValidation) validateVector(id string) error {
+	if v.composites[id] {
+		return fmt.Errorf("cyclic composite resource %q", id)
+	}
+	if v.composites == nil {
+		v.composites = make(map[string]bool)
+		v.vectors = make(map[string]*editorCompositeNode)
+	}
+	v.composites[id] = true
+	defer delete(v.composites, id)
+	node := v.vectors[id]
+	if node == nil {
+		var err error
+		node, err = v.compositeDefinition(id)
+		if err != nil {
+			return err
+		}
+		v.vectors[id] = node
+	}
+	unit := node.object.CompositeGraphicUnit
+	if node.node.attr("Width") == "" || node.node.attr("Height") == "" || !finite(unit.Width) || !finite(unit.Height) || unit.Width < 0 || unit.Height < 0 {
+		return fmt.Errorf("invalid vector dimensions")
+	}
+	if node.node.child("Content") == nil {
+		return fmt.Errorf("vector content is missing")
+	}
+	for _, image := range []string{unit.Thumbnail, unit.Substitution} {
+		if image != "" {
+			if _, err := v.editorImage(image); err != nil {
+				return err
+			}
+		}
+	}
+	for object := range unit.objects() {
+		if _, err := v.prepareObject(editorObjectID(object), object); err != nil {
+			return err
+		}
+	}
+	return nil
 }

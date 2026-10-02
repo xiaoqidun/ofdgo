@@ -1077,7 +1077,7 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 				candidate := path.Join(m.directory, "Annotations", "Page_"+m.id(node.parent.attr("PageID"))+".xml")
 				value, err = m.copyXML(loc, candidate)
 			}
-		case "Font", "Substitution":
+		case "Font", "Substitution", "Thumbnail":
 			value, err = m.reference(strings.TrimSpace(value))
 		}
 		if err != nil {

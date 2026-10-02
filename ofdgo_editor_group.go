@@ -26,7 +26,7 @@ import (
 // GroupObjects 将同一容器内连续的对象组合，保留标识、绘制顺序及原始内容
 // 入参: page 页面索引, ids 至少两个对象标识
 // 返回: string 组合标识, error 错误信息
-func (e *Editor) GroupObjects(page int, ids []string) (string, error) {
+func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
 	_, indexes, err := e.selectedObjects(page, ids)
 	if err != nil {
 		return "", err
@@ -48,11 +48,32 @@ func (e *Editor) GroupObjects(page int, ids []string) (string, error) {
 			return "", fmt.Errorf("grouping requires consecutive objects in the same container")
 		}
 	}
+	reader, err := e.Reader()
+	if err != nil {
+		return "", err
+	}
+	defer reader.Close()
+	renderer := e.newRenderer(reader)
+	var extent Box
+	for _, index := range indexes {
+		object := layer.Objects[index.index]
+		boundary, _ := editorGeometry(object)
+		box, err := creationBox(boundary)
+		if err != nil {
+			return "", err
+		}
+		visible, err := renderer.ObjectBounds(object, layer.DrawParam)
+		if err != nil {
+			return "", err
+		}
+		extent = unionTextBox(extent, unionTextBox(box, visible))
+	}
 	var content []byte
 	var source *editorSourcePage
 	states := make(map[string]editorCompositeState)
 	for _, index := range indexes {
-		object := layer.Objects[index.index]
+		before := layer.Objects[index.index]
+		object := transformEditorMatrix(cloneEditorData(before), TranslationMatrix(-extent.X, -extent.Y))
 		var data []byte
 		if origin := e.objectOrigin(editorObjectID(object)); origin != nil {
 			source = origin.page
@@ -79,12 +100,36 @@ func (e *Editor) GroupObjects(page int, ids []string) (string, error) {
 	if err := e.prepareSourceIDs(); err != nil {
 		return "", err
 	}
-	id := strconv.Itoa(e.maxID + 1)
+	maxID, resourceCount := e.maxID, len(e.resources)
+	defer func() {
+		if err != nil {
+			e.maxID, e.resources = maxID, e.resources[:resourceCount]
+		}
+	}()
+	id, resourceID := e.nextID(), e.nextID()
 	content, err = editorXMLContainer("Content", nil, content)
 	if err != nil {
 		return "", err
 	}
-	data, err := editorXMLContainer("CompositeObject", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: id}, {Name: xml.Name{Local: "Boundary"}, Value: "0 0 1 1"}}, bytes.TrimPrefix(content, []byte(xml.Header)))
+	data, err := editorXMLContainer("CompositeGraphicUnit", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: resourceID}, {Name: xml.Name{Local: "Width"}, Value: ofdNumber(extent.W)}, {Name: xml.Name{Local: "Height"}, Value: ofdNumber(extent.H)}}, bytes.TrimPrefix(content, []byte(xml.Header)))
+	if err != nil {
+		return "", err
+	}
+	data, err = editorXMLContainer("CompositeGraphicUnits", nil, bytes.TrimPrefix(data, []byte(xml.Header)))
+	if err != nil {
+		return "", err
+	}
+	data, err = editorXMLContainer("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "."}}, bytes.TrimPrefix(data, []byte(xml.Header)))
+	if err != nil {
+		return "", err
+	}
+	resource, err := e.compositeResource(resourceID, data)
+	if err != nil {
+		return "", err
+	}
+	resource.states = states
+	e.resources = append(e.resources, resource)
+	data, err = editorXMLContainer("CompositeObject", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: id}, {Name: xml.Name{Local: "Boundary"}, Value: editorBoxString(extent)}, {Name: xml.Name{Local: "ResourceID"}, Value: resourceID}}, nil)
 	if err != nil {
 		return "", err
 	}
@@ -98,7 +143,6 @@ func (e *Editor) GroupObjects(page int, ids []string) (string, error) {
 	group.node.parent = parent
 	group.object.CompositeGraphicUnit.states = states
 	origin := &editorObjectOrigin{page: source, data: data, node: group.node, object: group.object}
-	e.maxID++
 	e.replaceGroup(page, indexes, []GraphicObject{group.object}, map[string]*editorObjectOrigin{id: origin})
 	return id, nil
 }
@@ -148,16 +192,34 @@ func editorUngroupable(node *editorXML) bool {
 	if !editorXMLAttributes(node, "ID Boundary CTM DrawParam Alpha Visible ResourceID Width Height") {
 		return false
 	}
-	for _, child := range node.children {
-		switch child.name.Local {
-		case "Content":
-			if !editorXMLAttributes(child, "") {
+	var contentSupported func(*editorXML) bool
+	contentSupported = func(content *editorXML) bool {
+		attributes := ""
+		if content.name.Local == "PageBlock" {
+			attributes = "ID"
+		}
+		if !editorXMLAttributes(content, attributes) {
+			return false
+		}
+		for _, member := range content.children {
+			if member.name.Space != "" && member.name.Space != ofdNamespace && member.name.Space != "http://www.ofdspec.org" {
 				return false
 			}
-			for _, member := range child.children {
-				if member.name.Space != "" && member.name.Space != ofdNamespace && member.name.Space != "http://www.ofdspec.org" || !slices.Contains([]string{"TextObject", "PathObject", "ImageObject", "CompositeObject", "CompositeGraphicUnit"}, member.name.Local) {
+			if member.name.Local == "PageBlock" {
+				if !contentSupported(member) {
 					return false
 				}
+			} else if !slices.Contains([]string{"TextObject", "PathObject", "ImageObject", "CompositeObject", "CompositeGraphicUnit"}, member.name.Local) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, child := range node.children {
+		switch child.name.Local {
+		case "Content", "PageBlock":
+			if !contentSupported(child) {
+				return false
 			}
 		case "Clips":
 			if !editorXMLSupported(child) {

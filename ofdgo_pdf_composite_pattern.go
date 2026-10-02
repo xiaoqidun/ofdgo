@@ -23,9 +23,11 @@ import (
 
 // pdfCompositePattern 保存图案单元的原始图元和独立几何缓存
 type pdfCompositePattern struct {
-	nodes []pdfCompositeNode
-	local pdfImporter
-	box   Box
+	nodes           []pdfCompositeNode
+	local           pdfImporter
+	box             Box
+	transferChecked bool
+	transferOpaque  bool
 }
 
 // tiling 将图案作为非隔离组绘制，保留背景贡献及单元间隙
@@ -59,6 +61,9 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 	for i, pixel := range backdrop {
 		result[i] = pdfCompositePixel{values: pixel.values, alpha: pixel.alpha}
 	}
+	candidate := make([]pdfCompositePixel, len(backdrop))
+	disjoint := source.BBox.XMax-source.BBox.XMin <= xstep && source.BBox.YMax-source.BBox.YMin <= ystep
+	pixelStep := 25.4 / c.importer.rasterDPI
 	localInverse, _ := pattern.local.matrix.Inverse()
 	for row := int(top); row <= int(bottom); row++ {
 		for column := int(left); column <= int(right); column++ {
@@ -67,10 +72,35 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 			}
 			x, y := float64(column)*xstep, float64(row)*ystep
 			dx, dy := matrix[0]*x+matrix[2]*y+pattern.box.X, matrix[1]*x+matrix[3]*y+pattern.box.Y
-			cell := pdfCompositor{importer: &pattern.local, box: Box{X: c.box.X - dx, Y: c.box.Y - dy, W: c.box.W, H: c.box.H},
-				width: c.width, height: c.height, inverse: localInverse, cache: pattern.local.compositingCache(), masks: map[*pdfgo.SoftMask][]float64{}}
-			if err := cell.draw(pattern.nodes, result, space); err != nil {
+			left := int(math.Max(0, math.Min(float64(c.width), math.Floor((dx-c.box.X)/pixelStep)-1)))
+			right := int(math.Max(0, math.Min(float64(c.width), math.Ceil((dx+pattern.box.W-c.box.X)/pixelStep)+1)))
+			top := int(math.Max(0, math.Min(float64(c.height), math.Floor((dy-c.box.Y)/pixelStep)-1)))
+			bottom := int(math.Max(0, math.Min(float64(c.height), math.Ceil((dy+pattern.box.H-c.box.Y)/pixelStep)+1)))
+			width, height := right-left, bottom-top
+			if width <= 0 || height <= 0 {
+				continue
+			}
+			pixels := candidate[:width*height]
+			for y := range height {
+				for x := range width {
+					index := (top+y)*c.width + left + x
+					initial := result[index]
+					if disjoint {
+						initial = backdrop[index]
+					}
+					pixels[y*width+x] = pdfCompositePixel{values: initial.values, alpha: initial.alpha}
+				}
+			}
+			cell := pdfCompositor{importer: &pattern.local, box: Box{X: c.box.X + float64(left)*pixelStep - dx, Y: c.box.Y + float64(top)*pixelStep - dy, W: float64(width) * pixelStep, H: float64(height) * pixelStep},
+				width: width, height: height, inverse: localInverse, cache: pattern.local.compositingCache(), masks: map[*pdfgo.SoftMask][]float64{}}
+			if err := cell.draw(pattern.nodes, pixels, space); err != nil {
 				return nil, err
+			}
+			for y := range height {
+				for x := range width {
+					index := (top+y)*c.width + left + x
+					pdfCompositePatternCell(&result[index], backdrop[index], pixels[y*width+x], disjoint)
+				}
 			}
 		}
 	}
@@ -84,6 +114,29 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 		pixel.alpha = pixel.effect
 	}
 	return result, nil
+}
+
+// pdfCompositePatternCell 合并互不重叠单元的覆盖贡献，避免相邻抗锯齿边缘重复混合
+// 入参: target 图案累计结果, initial 原始背景, source 单元结果, disjoint 单元边界是否互不重叠
+func pdfCompositePatternCell(target *pdfCompositePixel, initial, source pdfCompositePixel, disjoint bool) {
+	if source.shape == 0 {
+		return
+	}
+	if disjoint {
+		alpha := math.Max(0, math.Min(1, target.alpha+source.alpha-initial.alpha))
+		if alpha != 0 {
+			for i := range target.values {
+				target.values[i] = (target.values[i]*target.alpha + source.values[i]*source.alpha - initial.values[i]*initial.alpha) / alpha
+			}
+		}
+		target.alpha = alpha
+		target.effect = math.Min(1, target.effect+source.effect)
+		target.shape = math.Min(1, target.shape+source.shape)
+	} else {
+		target.values, target.alpha = source.values, source.alpha
+		target.effect += source.effect * (1 - target.effect)
+		target.shape += source.shape * (1 - target.shape)
+	}
 }
 
 // compositePattern 复用图案单元解析及几何上下文，供检查和局部合成共同使用
@@ -127,7 +180,54 @@ func (p *pdfImporter) compositePattern(paint pdfgo.Paint) (*pdfCompositePattern,
 // 入参: node 图元, space 混合空间
 // 返回: bool 是否可直接转换, error 图案解析错误
 func (p *pdfImporter) directCompositeNode(node pdfCompositeNode, space *pdfgo.ColorSpace) (bool, error) {
+	if node.group == nil && space.Model == "DeviceCMYK" && !space.Calibrated() {
+		style, fill, stroke := node.style()
+		if style.ColorConversion != (pdfgo.ColorConversion{}) {
+			if node.image != nil && !node.image.Image.ImageMask {
+				source := p.compositingCache().images[node.image.Image]
+				if source == nil {
+					var err error
+					source, err = node.image.Image.DecodeComponents()
+					if err != nil {
+						return false, err
+					}
+					p.compositingCache().images[node.image.Image] = source
+				}
+				if source.Space.Model == "DeviceRGB" && source.Space.Device() {
+					return false, nil
+				}
+			} else {
+				for i, paint := range [2]pdfgo.Paint{style.Fill, style.Stroke} {
+					if i == 0 && !fill || i == 1 && !stroke || paint.None || paint.Tiling != nil {
+						continue
+					}
+					source := paint.Space
+					switch {
+					case paint.Axial != nil:
+						source = paint.Axial.Space
+					case paint.Radial != nil:
+						source = paint.Radial.Space
+					case paint.Function != nil:
+						source = paint.Function.Space
+					case paint.Mesh != nil:
+						source = paint.Mesh.Space
+					}
+					if source != nil && source.Model == "DeviceRGB" && source.Device() || source == nil && paint.CMYK == nil && paint.SourceSpace != "DeviceGray" {
+						return false, nil
+					}
+				}
+			}
+		}
+	}
 	if !node.opaque(space) && !(space.SRGBEquivalent() && node.direct()) {
+		if node.textObject != nil && space.SRGBEquivalent() {
+			for _, child := range node.children {
+				if direct, err := p.directCompositeNode(child, space); err != nil || !direct {
+					return direct, err
+				}
+			}
+			return p.disjointText(node)
+		}
 		return false, nil
 	}
 	if node.group != nil {
@@ -136,6 +236,9 @@ func (p *pdfImporter) directCompositeNode(node pdfCompositeNode, space *pdfgo.Co
 				return direct, err
 			}
 		}
+		return true, nil
+	}
+	if node.image != nil && !node.image.Image.ImageMask {
 		return true, nil
 	}
 	style, fill, stroke := node.style()
@@ -172,6 +275,9 @@ func (p *pdfImporter) processOverprint(nodes []pdfCompositeNode) (bool, error) {
 			if _, found, err := pdfImageProcessColorants(node.image.Image); err != nil || found {
 				return found, err
 			}
+		}
+		if node.image != nil && !node.image.Image.ImageMask {
+			continue
 		}
 		if fill && style.FillOverprint && pdfOverprintNeedsSeparation(style.Fill) || stroke && style.StrokeOverprint && pdfOverprintNeedsSeparation(style.Stroke) {
 			return true, nil

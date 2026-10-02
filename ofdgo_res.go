@@ -78,24 +78,24 @@ type DrawParams struct {
 
 // DrawParam 绘制参数
 type DrawParam struct {
-	ID          string       `xml:"ID,attr"`
-	Relative    string       `xml:"Relative,attr"`
-	ResourceID  string       `xml:"ResourceID,attr"`
-	BaseLoc     string       `xml:"BaseLoc,attr"`
-	Link        string       `xml:"Link,attr"`
-	LineWidth   float64      `xml:"LineWidth,attr"`
-	Join        string       `xml:"Join,attr"`
-	Cap         string       `xml:"Cap,attr"`
-	DashOffset  *float64     `xml:"DashOffset,attr"`
-	DashPattern string       `xml:"DashPattern,attr"`
-	MiterLimit  float64      `xml:"MiterLimit,attr"`
-	Font        string       `xml:"Font,attr"`
-	Size        float64      `xml:"Size,attr"`
-	Weight      int          `xml:"Weight,attr"`
-	Italic      bool         `xml:"Italic,attr"`
-	FillColor   *FillColor   `xml:"FillColor"`
-	StrokeColor *StrokeColor `xml:"StrokeColor"`
-	LineWidthSet   bool `xml:"-"`
+	ID             string       `xml:"ID,attr"`
+	Relative       string       `xml:"Relative,attr"`
+	ResourceID     string       `xml:"ResourceID,attr"`
+	BaseLoc        string       `xml:"BaseLoc,attr"`
+	Link           string       `xml:"Link,attr"`
+	LineWidth      float64      `xml:"LineWidth,attr"`
+	Join           string       `xml:"Join,attr"`
+	Cap            string       `xml:"Cap,attr"`
+	DashOffset     *float64     `xml:"DashOffset,attr"`
+	DashPattern    string       `xml:"DashPattern,attr"`
+	MiterLimit     float64      `xml:"MiterLimit,attr"`
+	Font           string       `xml:"Font,attr"`
+	Size           float64      `xml:"Size,attr"`
+	Weight         int          `xml:"Weight,attr"`
+	Italic         bool         `xml:"Italic,attr"`
+	FillColor      *FillColor   `xml:"FillColor"`
+	StrokeColor    *StrokeColor `xml:"StrokeColor"`
+	LineWidthSet   bool         `xml:"-"`
 	dashPatternSet bool
 }
 
@@ -105,6 +105,7 @@ type CompositeGraphicUnits struct {
 }
 
 // CompositeGraphicUnit 复合图元
+// Width、Height、Thumbnail和Substitution用于矢量资源定义
 type CompositeGraphicUnit struct {
 	ID                   string                 `xml:"ID,attr"`
 	BaseLoc              string                 `xml:"BaseLoc,attr"`
@@ -114,6 +115,10 @@ type CompositeGraphicUnit struct {
 	DrawParam            string                 `xml:"DrawParam,attr"`
 	Alpha                *int                   `xml:"Alpha,attr"`
 	Visible              *bool                  `xml:"Visible,attr"`
+	Width                float64                `xml:"Width,attr"`
+	Height               float64                `xml:"Height,attr"`
+	Thumbnail            string                 `xml:"Thumbnail"`
+	Substitution         string                 `xml:"Substitution"`
 	Objects              []GraphicObject        `xml:"-"`
 	TextObject           []TextObject           `xml:"TextObject"`
 	PathObject           []PathObject           `xml:"PathObject"`
@@ -122,4 +127,5 @@ type CompositeGraphicUnit struct {
 	Clips                *Clips                 `xml:"Clips"`
 	Actions              []Action               `xml:"Actions>Action"`
 	states               map[string]editorCompositeState
+	extentSet            bool
 }

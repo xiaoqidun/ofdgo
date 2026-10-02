@@ -198,6 +198,17 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 		boundary = state.Parent.Multiply(boundary)
 	}
 	matrix := boundary.Multiply(NewMatrix(object.CTM))
+	var err error
+	if object.Boundary != "" {
+		state.Clip, err = r.geometryExtentClip(box.W, box.H, boundary, state.Clip)
+		if err != nil {
+			return err
+		}
+	}
+	state.Clip, err = r.compositeExtentClip(object, matrix, state.Clip)
+	if err != nil {
+		return err
+	}
 	clips, clipMatrix := object.Clips, matrix
 	if clips != nil && clips.TransFlag != nil && !*clips.TransFlag {
 		copy := *clips
@@ -236,38 +247,48 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 			}
 		}
 	}
-	if len(object.Objects) != 0 {
-		for _, member := range object.Objects {
-			member = mergeGraphicObjectAlpha(member, object.Alpha)
-			if err := r.walkObject(&member, state, visitor, references); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	for _, member := range object.ImageObject {
-		member.Alpha = mergeAlpha(member.Alpha, object.Alpha)
-		if err := visitor.DrawObject(&GraphicObject{Type: "ImageObject", ImageObject: member}, state); err != nil {
-			return err
-		}
-	}
-	for _, member := range object.PathObject {
-		member.Alpha = mergeAlpha(member.Alpha, object.Alpha)
-		if err := visitor.DrawObject(&GraphicObject{Type: "PathObject", PathObject: member}, state); err != nil {
-			return err
-		}
-	}
-	for _, member := range object.TextObject {
-		member.Alpha = mergeAlpha(member.Alpha, object.Alpha)
-		if err := visitor.DrawObject(&GraphicObject{Type: "TextObject", TextObject: member}, state); err != nil {
-			return err
-		}
-	}
-	for _, member := range object.CompositeGraphicUnit {
-		member.Alpha = mergeAlpha(member.Alpha, object.Alpha)
-		if err := r.walkComposite(member, state, visitor, references); err != nil {
+	for member := range object.objects() {
+		member = mergeGraphicObjectAlpha(member, object.Alpha)
+		if err := r.walkObject(&member, state, visitor, references); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// compositeExtentClip 按矢量资源尺寸裁剪内容，资源裁剪随实例变换
+// 入参: object 矢量资源, matrix 资源到页面矩阵, parent 父裁剪
+// 返回: *GeometryPath 页面裁剪, error 尺寸或几何错误
+func (r *Renderer) compositeExtentClip(object CompositeGraphicUnit, matrix Matrix, parent *GeometryPath) (*GeometryPath, error) {
+	if !object.extentSet && object.Width == 0 && object.Height == 0 {
+		return parent, nil
+	}
+	return r.geometryExtentClip(object.Width, object.Height, matrix, parent)
+}
+
+// geometryExtentClip 按给定坐标系限制宽高并与父裁剪求交
+// 入参: width 宽度, height 高度, matrix 到页面矩阵, parent 父裁剪
+// 返回: *GeometryPath 页面裁剪, error 尺寸或几何错误
+func (r *Renderer) geometryExtentClip(width, height float64, matrix Matrix, parent *GeometryPath) (*GeometryPath, error) {
+	if !finite(width) || !finite(height) || width < 0 || height < 0 {
+		return nil, fmt.Errorf("invalid clipping dimensions")
+	}
+	if width == 0 || height == 0 {
+		return new(GeometryPath), nil
+	}
+	geometry, err := r.Geometry()
+	if err != nil {
+		return nil, err
+	}
+	clip, err := geometry.Transform(geometryRectangle(Box{W: width, H: height}), matrix)
+	if err != nil {
+		return nil, err
+	}
+	if parent != nil {
+		clip, err = clipGeometry(geometry, clip, parent)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &clip, nil
 }

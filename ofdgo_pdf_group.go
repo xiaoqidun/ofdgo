@@ -155,7 +155,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			if stroke {
 				color, overprint = path.Style.Stroke, path.Style.StrokeOverprint
 			}
-			if color.Tiling != nil || color.Axial != nil || color.Radial != nil || color.Mesh != nil || overprint && pdfOverprintNeedsSeparation(color) {
+			if color.Tiling != nil || color.Axial != nil || color.Radial != nil || color.Function != nil || color.Mesh != nil || overprint && pdfOverprintNeedsSeparation(color) {
 				return fmt.Errorf("%w: patterned or overprinted group content", errPDFGroupRaster)
 			}
 			if color.Alpha == 0 {
@@ -165,7 +165,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			if paint == nil {
 				paint, clips = &color, path.Style.Clips
 			} else if !reflect.DeepEqual(clips, path.Style.Clips) {
-				return &pdfgo.UnsupportedError{Feature: "independently clipped transparent group"}
+				return fmt.Errorf("%w: independently clipped group content", errPDFGroupRaster)
 			} else if color.Alpha != 1 || !reflect.DeepEqual(*paint, color) {
 				regions = append(regions, pdfPaintRegion{*paint, combined})
 				combined = nil
@@ -335,7 +335,10 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	if _, err := editor.AddPage(p.pageWidth, p.pageHeight); err != nil {
 		return nil, box, err
 	}
-	local := pdfImporter{ctx: p.ctx, reader: p.reader, editor: editor, renderer: p.renderer, matrix: p.matrix, pageBox: p.pageBox, pageWidth: p.pageWidth, pageHeight: p.pageHeight, rasterDPI: p.rasterDPI, warning: p.warning, rasterWarned: true, fontIDs: map[*pdfgo.Font]string{}, fontMetrics: map[string]FontMetrics{}}
+	if p.fonts == nil {
+		p.fonts = make(map[*pdfgo.Font]*pdfImportedFont)
+	}
+	local := pdfImporter{ctx: p.ctx, reader: p.reader, editor: editor, renderer: p.renderer, matrix: p.matrix, pageBox: p.pageBox, pageWidth: p.pageWidth, pageHeight: p.pageHeight, rasterDPI: p.rasterDPI, warning: p.warning, rasterWarned: true, fontIDs: map[*pdfgo.Font]string{}, fonts: p.fonts}
 	if err := build(&local); err != nil {
 		return nil, box, err
 	}
@@ -387,6 +390,7 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 // 返回: image.Image 透明图像, error 后端渲染错误
 func (p *pdfImporter) renderGroupScene(source *RasterPage, box Box) (image.Image, error) {
 	scene := *source
+	scene.DPI = p.rasterDPI
 	scene.Commands = append([]RasterCommand(nil), source.Commands...)
 	scene.Width, scene.Height = box.W, box.H
 	for i := range scene.Commands {
@@ -567,7 +571,7 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 	}
 	visitor.Path = func(mark pdfgo.PathMark) error {
 		paint := mark.Style.Fill
-		if !mark.Fill || mark.Stroke || paint.Alpha != 1 || paint.CMYK != nil || paint.Axial != nil || paint.Radial != nil || paint.Mesh != nil || paint.Tiling != nil || paint.Space != nil && paint.Space.Calibrated() || paint.RGB[0] != paint.RGB[1] || paint.RGB[1] != paint.RGB[2] || mark.Style.SoftMask != nil || !pdfNormalBlend(mark.Style.BlendMode) {
+		if !mark.Fill || mark.Stroke || paint.Alpha != 1 || paint.CMYK != nil || paint.Axial != nil || paint.Radial != nil || paint.Function != nil || paint.Mesh != nil || paint.Tiling != nil || paint.Space != nil && paint.Space.Calibrated() || paint.RGB[0] != paint.RGB[1] || paint.RGB[1] != paint.RGB[2] || mark.Style.SoftMask != nil || !pdfNormalBlend(mark.Style.BlendMode) {
 			return &pdfgo.UnsupportedError{Feature: "nonbinary mask graphic"}
 		}
 		visible, err := opacity(paint.RGB[0])

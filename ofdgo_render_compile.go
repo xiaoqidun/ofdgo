@@ -30,6 +30,8 @@ type semanticCompiler struct {
 	measurement                          ObjectMeasurement
 	measure, contours, textOnly, pattern bool
 	patterns                             *renderCache[patternCellKey, []RasterCommand]
+	patternReferences                    map[*Pattern]bool
+	patternPage                          *Matrix
 }
 
 // semanticStyle 保存已继承的路径颜色和描边参数
@@ -466,10 +468,15 @@ func (c *semanticCompiler) fillPattern(clip GeometryPath, pattern *PatternPaint,
 	matrix := NewMatrix(pattern.CTM)
 	if pattern.RelativeTo != "Page" {
 		matrix = object.Multiply(matrix)
+	} else if c.patternPage != nil {
+		matrix = c.patternPage.Multiply(matrix)
 	}
 	inverse, ok := matrix.Invert()
 	if !ok {
 		return fmt.Errorf("invalid pattern transform")
+	}
+	if pattern.CellContent.empty() {
+		return nil
 	}
 	box, err := c.geometry.Bounds(clip)
 	if err != nil {

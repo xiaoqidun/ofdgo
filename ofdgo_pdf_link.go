@@ -205,6 +205,16 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			}
 			continue
 		}
+		if annotation.Subtype == "Redact" {
+			if strict {
+				return &pdfgo.UnsupportedError{Feature: "pending PDF redaction conversion"}
+			}
+			if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
+				return err
+			}
+			p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF pending redaction appearance imported; content removal not applied; overlay data not transferred"})
+			continue
+		}
 		if annotation.Subtype != "Link" && pdfAnnotationType(annotation.Subtype) != "" {
 			if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
 				return err

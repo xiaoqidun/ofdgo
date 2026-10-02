@@ -70,17 +70,19 @@ type Editor struct {
 
 // editorResource 文档内嵌资源
 type editorResource struct {
-	name       string
-	data       []byte
-	font       *Font
-	image      *MultiMedia
-	space      *ColorSpace
-	composite  string
-	references []string
-	subset     *editorFontSubset
-	states     map[string]editorCompositeState
-	draw       *DrawParam
-	drawSource string
+	name         string
+	data         []byte
+	font         *Font
+	image        *MultiMedia
+	space        *ColorSpace
+	composite    string
+	vectorKey    [32]byte
+	vectorStates map[string]editorCompositeState
+	references   []string
+	subset       *editorFontSubset
+	states       map[string]editorCompositeState
+	draw         *DrawParam
+	drawSource   string
 }
 
 // editorResourceKey 资源内容和字体集合索引
@@ -495,8 +497,8 @@ func (e *Editor) addImage(data []byte, config image.Config, format string, decod
 	return id, nil
 }
 
-// AddObject 按添加顺序放入正文图层，支持文字、路径和图片，自动分配对象ID
-// 支持已注册资源、颜色、渐变、裁剪和动作；复合图元仅支持当前文档原对象的保真复制
+// AddObject 按添加顺序放入正文图层，支持文字、路径、图片和矢量资源实例，自动分配对象ID
+// 支持已注册资源、颜色、渐变、裁剪和动作；原对象复制保留原文结构
 // 入参: page 页面索引, object 对象内容，添加后不再引用调用方的可变数据
 // 返回: string 对象标识, error 错误信息
 func (e *Editor) AddObject(page int, object GraphicObject) (string, error) {
@@ -533,6 +535,8 @@ func (e *Editor) UpdateObject(page int, id string, object GraphicObject) error {
 		object.PathObject.ID = id
 	case "ImageObject":
 		object.ImageObject.ID = id
+	case "CompositeObject":
+		object.CompositeGraphicUnit.ID = id
 	default:
 		return fmt.Errorf("unsupported object type %q", object.Type)
 	}
@@ -781,6 +785,18 @@ func (e *Editor) findObject(page int, id string) (*Layer, int, error) {
 // 入参: id 对象标识, object 对象内容
 // 返回: GraphicObject 对象内容, error 错误信息
 func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, error) {
+	object, err := (&editorValidation{Editor: e}).prepareObject(id, object)
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	return cloneEditorObject(object)
+}
+
+// prepareObject 校验对象及嵌套颜色，不重复复制底纹单元
+// 入参: id 对象标识, object 对象内容
+// 返回: GraphicObject 对象内容, error 错误信息
+func (v *editorValidation) prepareObject(id string, object GraphicObject) (GraphicObject, error) {
+	e := v.Editor
 	var boundary, ctm, drawParam, join string
 	var alpha *int
 	var clips *Clips
@@ -828,12 +844,23 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 			}
 		}
 		if obj.Border != nil {
-			if err := e.validateImageBorder(obj.Border); err != nil {
+			if err := v.validateImageBorder(obj.Border); err != nil {
 				return GraphicObject{}, err
 			}
 		}
 		obj.ID = id
 		boundary, ctm = obj.Boundary, obj.CTM
+		alpha, clips, actions = obj.Alpha, obj.Clips, obj.Actions
+	case "CompositeObject":
+		obj := &object.CompositeGraphicUnit
+		if obj.ResourceID == "" || len(obj.Objects)+len(obj.TextObject)+len(obj.PathObject)+len(obj.ImageObject)+len(obj.CompositeGraphicUnit) != 0 || obj.extentSet || obj.Width != 0 || obj.Height != 0 || obj.Thumbnail != "" || obj.Substitution != "" {
+			return GraphicObject{}, fmt.Errorf("composite requires a vector resource without inline content")
+		}
+		if err := v.validateVector(obj.ResourceID); err != nil {
+			return GraphicObject{}, err
+		}
+		obj.ID = id
+		boundary, ctm, drawParam = obj.Boundary, obj.CTM, obj.DrawParam
 		alpha, clips, actions = obj.Alpha, obj.Clips, obj.Actions
 	default:
 		return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
@@ -850,34 +877,48 @@ func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, 
 		object.ImageObject.CTM = fmt.Sprintf("%s 0 0 %s 0 0", ofdNumber(box.W), ofdNumber(box.H))
 	}
 	if drawParam != "" {
-		if _, err := e.editorDrawParam(drawParam, make(map[string]bool)); err != nil {
+		defaults, err := e.editorDrawParam(drawParam, make(map[string]bool))
+		if err != nil {
 			return GraphicObject{}, err
+		}
+		if fill == nil {
+			fill = defaults.FillColor
+		}
+		if stroke == nil {
+			stroke = (*FillColor)(defaults.StrokeColor)
 		}
 	}
 	if err := validateObjectActions(actions); err != nil {
 		return GraphicObject{}, err
 	}
-	if err := e.validateObjectClips(clips); err != nil {
+	if err := v.validateObjectClips(clips); err != nil {
 		return GraphicObject{}, err
 	}
 	if alpha != nil && (*alpha < 0 || *alpha > 255) {
 		return GraphicObject{}, fmt.Errorf("alpha must be between 0 and 255")
 	}
 	for _, color := range []*FillColor{fill, stroke} {
-		if err := e.editorColor(color); err != nil {
+		if err := v.editorColor(color); err != nil {
 			return GraphicObject{}, &EditError{Code: EditUnsupportedColor, Err: err}
 		}
 	}
 	if join != "" && join != "Miter" && join != "Round" && join != "Bevel" {
 		return GraphicObject{}, fmt.Errorf("invalid line join %q", join)
 	}
-	return cloneEditorObject(object)
+	return object, nil
 }
 
 // validateObjectClips 校验对象的路径与文字裁剪，拒绝嵌套裁剪和无效资源
 // 入参: clips 裁剪集合，nil表示无裁剪
 // 返回: error 错误信息
 func (e *Editor) validateObjectClips(clips *Clips) error {
+	return (&editorValidation{Editor: e}).validateObjectClips(clips)
+}
+
+// validateObjectClips 沿当前颜色引用路径校验裁剪对象
+// 入参: clips 裁剪集合
+// 返回: error 错误信息
+func (v *editorValidation) validateObjectClips(clips *Clips) error {
 	if clips == nil {
 		return nil
 	}
@@ -901,7 +942,7 @@ func (e *Editor) validateObjectClips(clips *Clips) error {
 				if path.ID != "" || path.Clips != nil {
 					return fmt.Errorf("clip paths must not have object IDs or nested clips")
 				}
-				if _, err := e.prepareObject("", GraphicObject{Type: "PathObject", PathObject: path}); err != nil {
+				if _, err := v.prepareObject("", GraphicObject{Type: "PathObject", PathObject: path}); err != nil {
 					return err
 				}
 			}
@@ -909,7 +950,7 @@ func (e *Editor) validateObjectClips(clips *Clips) error {
 				if text.ID != "" || text.Clips != nil || text.Actions != nil {
 					return fmt.Errorf("clip text must not have object IDs, actions or nested clips")
 				}
-				if _, err := e.prepareObject("", GraphicObject{Type: "TextObject", TextObject: text}); err != nil {
+				if _, err := v.prepareObject("", GraphicObject{Type: "TextObject", TextObject: text}); err != nil {
 					return err
 				}
 			}

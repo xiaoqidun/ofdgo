@@ -145,11 +145,74 @@ func geometryRectangleBounds(path GeometryPath) (Box, bool) {
 		return Box{}, false
 	}
 	a, b, c, d := path[0].End, path[1].End, path[2].End, path[3].End
+	for _, point := range [...]Point{a, b, c, d} {
+		if !finite(point.X) || !finite(point.Y) {
+			return Box{}, false
+		}
+	}
 	if a.X == c.X || a.Y == c.Y {
 		return Box{}, false
 	}
 	if !(a.X == b.X && b.Y == c.Y && c.X == d.X && d.Y == a.Y || a.Y == b.Y && b.X == c.X && c.Y == d.Y && d.X == a.X) {
 		return Box{}, false
 	}
-	return Box{X: min(a.X, c.X), Y: min(a.Y, c.Y), W: math.Abs(c.X - a.X), H: math.Abs(c.Y - a.Y)}, true
+	width, height := math.Abs(c.X-a.X), math.Abs(c.Y-a.Y)
+	if !finite(width) || !finite(height) {
+		return Box{}, false
+	}
+	return Box{X: min(a.X, c.X), Y: min(a.Y, c.Y), W: width, H: height}, true
+}
+
+// clipGeometry 将非零填充路径与页面裁剪相交
+// 入参: geometry 几何后端, path 页面路径, clip 页面裁剪
+// 返回: GeometryPath 裁剪路径, error 几何错误
+func clipGeometry(geometry GeometryBackend, path GeometryPath, clip *GeometryPath) (GeometryPath, error) {
+	if clip == nil {
+		return path, nil
+	}
+	if len(*clip) == 0 {
+		return nil, nil
+	}
+	if rect, ok := geometryRectangleBounds(*clip); ok {
+		if bounds, ok := geometryRectangleBounds(path); ok {
+			left, top := max(rect.X, bounds.X), max(rect.Y, bounds.Y)
+			right, bottom := min(rect.X+rect.W, bounds.X+bounds.W), min(rect.Y+rect.H, bounds.Y+bounds.H)
+			if right <= left || bottom <= top {
+				return nil, nil
+			}
+			return geometryRectangle(Box{X: left, Y: top, W: right - left, H: bottom - top}), nil
+		}
+		if err := path.validate(); err != nil {
+			return nil, err
+		}
+		contained := true
+		for _, segment := range path {
+			if segment.Verb == GeometryArc {
+				contained = false
+				break
+			}
+			points := [3]Point{segment.End, segment.Control1, segment.Control2}
+			count := 1
+			if segment.Verb == GeometryQuad {
+				count = 2
+			} else if segment.Verb == GeometryCubic {
+				count = 3
+			} else if segment.Verb == GeometryClose {
+				continue
+			}
+			for _, point := range points[:count] {
+				if point.X < rect.X || point.Y < rect.Y || point.X > rect.X+rect.W || point.Y > rect.Y+rect.H {
+					contained = false
+					break
+				}
+			}
+			if !contained {
+				break
+			}
+		}
+		if contained {
+			return path, nil
+		}
+	}
+	return geometry.Combine(path, *clip, GeometryIntersect)
 }

@@ -180,7 +180,7 @@ func editorXMLRemapIDs(data []byte, root *editorXML, ids map[string]string) ([]b
 				}
 				patches = append(patches, editorXMLPatch{node.start, node.open, value})
 			}
-			if node.name.Local == "Font" || node.name.Local == "Substitution" {
+			if node.name.Local == "Font" || node.name.Local == "Substitution" || node.name.Local == "Thumbnail" {
 				if value := ids[editorResourceID(editorImportText(data, node))]; value != "" {
 					patches = append(patches, editorXMLContent(data, node, []byte(value)))
 				}

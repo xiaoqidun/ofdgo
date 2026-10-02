@@ -93,11 +93,12 @@ func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []Gra
 				return err
 			}
 			if node.object.Type == "PathObject" {
+				node.defaults = renderer.drawParamDefaults(e.copiedLayerStyle(source), nil)
 				style, styleErr := e.resolveEditorStyle(node.object, e.copiedLayerStyle(source))
 				_, fillErr := e.Color(style.PathObject.FillColor)
 				_, strokeErr := e.Color((*FillColor)(style.PathObject.StrokeColor))
 				if styleErr != nil && editReason(styleErr) == EditUnsupportedColor || fillErr != nil || strokeErr != nil {
-					node, err = e.wrapCompositePath(node)
+					node, err = e.wrapCompositePath(renderer, node)
 					if err != nil {
 						return err
 					}
@@ -166,19 +167,11 @@ func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []Gra
 	return result, nil
 }
 
-// wrapCompositePath 通过独立容器变换复杂路径，保持渐变坐标与原始颜色节点
-// 入参: node 复杂路径
+// wrapCompositePath 通过标准矢量实例变换复杂路径，保持渐变坐标与原始颜色节点
+// 入参: renderer 资源度量器, node 复杂路径
 // 返回: *editorCompositeNode 包装节点, error 错误信息
-func (e *Editor) wrapCompositePath(node *editorCompositeNode) (*editorCompositeNode, error) {
-	content, err := editorXMLContainer("Content", nil, bytes.TrimPrefix(node.data, []byte(xml.Header)))
-	if err != nil {
-		return nil, err
-	}
-	data, err := editorXMLContainer("CompositeObject", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: e.nextID()}, {Name: xml.Name{Local: "Boundary"}, Value: "0 0 1 1"}}, bytes.TrimPrefix(content, []byte(xml.Header)))
-	if err != nil {
-		return nil, err
-	}
-	return newEditorCompositeNode(data)
+func (e *Editor) wrapCompositePath(renderer *Renderer, node *editorCompositeNode) (*editorCompositeNode, error) {
+	return e.vectorInstance(renderer, []*editorCompositeNode{node})
 }
 
 // isolateCompositeStyle 固定对象的绘制参数，避免目标容器改变颜色、虚线和线帽

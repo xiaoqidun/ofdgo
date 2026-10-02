@@ -368,12 +368,27 @@ func renderObjectMatrix(boundary string, local Matrix, state RenderState) (Matri
 	return matrix, linear
 }
 
-// objectGeometryClip 解析对象裁剪并合并父裁剪
+// objectGeometryClip 合并对象外接矩形、显式裁剪和父裁剪
 // 入参: clips 对象裁剪, boundary 边界, local 局部矩阵, state 继承状态
 // 返回: *GeometryPath 页面裁剪, error 几何错误
 func (r *Renderer) objectGeometryClip(clips *Clips, boundary string, local Matrix, state RenderState) (*GeometryPath, error) {
+	clip := state.Clip
+	if boundary != "" {
+		box, err := ParseBox(boundary)
+		if err != nil {
+			return nil, err
+		}
+		if box.W <= 0 || box.H <= 0 {
+			return new(GeometryPath), nil
+		}
+		matrix, _ := renderObjectMatrix(boundary, IdentityMatrix, state)
+		clip, err = r.geometryExtentClip(box.W, box.H, matrix, clip)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if clips == nil {
-		return state.Clip, nil
+		return clip, nil
 	}
 	matrix, _ := renderObjectMatrix(boundary, local, state)
 	if clips.TransFlag != nil && !*clips.TransFlag {
@@ -390,17 +405,7 @@ func (r *Renderer) objectGeometryClip(clips *Clips, boundary string, local Matri
 	if err != nil {
 		return nil, err
 	}
-	return geometry.Clip(r, clips, matrix, state.Clip)
-}
-
-// clipGeometry 将非零填充路径与页面裁剪相交
-// 入参: geometry 几何后端, path 页面路径, clip 页面裁剪
-// 返回: GeometryPath 裁剪路径, error 几何错误
-func clipGeometry(geometry GeometryBackend, path GeometryPath, clip *GeometryPath) (GeometryPath, error) {
-	if clip == nil {
-		return path, nil
-	}
-	return geometry.Combine(path, *clip, GeometryIntersect)
+	return geometry.Clip(r, clips, matrix, clip)
 }
 
 // addGeometrySpan 以公共几何语义收集文字选择区域，保留旋转和斜切

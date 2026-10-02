@@ -35,14 +35,9 @@ type pdfMeshTriangle struct {
 
 // pdfMeshKey 区分网格及其输出混合空间
 type pdfMeshKey struct {
-	mesh  *pdfgo.MeshGradient
-	space *pdfgo.ColorSpace
-}
-
-// pdfMeshPixel 保存抗锯齿覆盖率与源空间合成分量
-type pdfMeshPixel struct {
-	values [4]float64
-	shape  float64
+	mesh       *pdfgo.MeshGradient
+	space      *pdfgo.ColorSpace
+	conversion pdfgo.ColorConversion
 }
 
 // pdfMeshSample 保存采样点参数，patch为一基编号，零表示未覆盖
@@ -77,7 +72,7 @@ func (p *pdfImporter) meshColor(paint pdfgo.Paint, box Box) (*FillColor, error) 
 			}
 			color := pdfgo.Paint{RGB: rgb, Alpha: 1}
 			if mesh.Space.Model == "DeviceCMYK" && !mesh.Space.Calibrated() {
-				color.CMYK = &values
+				color.CMYK = (*[4]float64)(values)
 			}
 			converted := p.color(color)
 			shading.Point = append(shading.Point, ShdPoint{X: point.X - box.X, Y: point.Y - box.Y, Color: ShdColor{Value: converted.Value, ColorSpace: converted.ColorSpace}})
@@ -160,10 +155,10 @@ func (p *pdfImporter) meshTriangles(mesh *pdfgo.MeshGradient) ([]pdfMeshTriangle
 }
 
 // mesh 对当前图块执行四倍超采样，曲面重叠按后补片及较大v、u取值
-// 入参: mesh 原曲面, space 输出混合空间
-// 返回: []pdfMeshPixel 颜色及覆盖, error 几何或颜色错误
-func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace) ([]pdfMeshPixel, error) {
-	key := pdfMeshKey{mesh, space}
+// 入参: mesh 原曲面, space 输出混合空间, conversion 设备转换函数
+// 返回: []pdfShadingPixel 颜色及覆盖, error 几何或颜色错误
+func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, conversion pdfgo.ColorConversion) ([]pdfShadingPixel, error) {
+	key := pdfMeshKey{mesh, space, conversion}
 	if pixels, ok := c.meshes[key]; ok {
 		return pixels, nil
 	}
@@ -222,23 +217,49 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace) 
 			}
 		}
 	}
-	pixels := make([]pdfMeshPixel, c.width*c.height)
+	pixels := make([]pdfShadingPixel, c.width*c.height)
+	var background [4]float64
+	if mesh.Background != nil {
+		var err error
+		background, err = space.ConvertWith(mesh.Background[:mesh.Space.Components()], mesh.Space, mesh.Intent, conversion)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var inverse pdfgo.Matrix
+	if mesh.Bounds != nil {
+		var ok bool
+		inverse, ok = c.importer.matrix.Mul(mesh.Matrix).Inverse()
+		if !ok {
+			return nil, fmt.Errorf("singular mesh bounds transform")
+		}
+	}
 	for y := 0; y < h; y++ {
 		if err := c.importer.ctx.Err(); err != nil {
 			return nil, err
 		}
 		for x := 0; x < w; x++ {
+			if box := mesh.Bounds; box != nil {
+				point := inverse.Apply(pdfgo.Point{X: c.box.X + (float64(x)+.5)/scale, Y: c.box.Y + (float64(y)+.5)/scale})
+				if point.X < box.XMin || point.X > box.XMax || point.Y < box.YMin || point.Y > box.YMax {
+					continue
+				}
+			}
 			sample := grid[y*w+x]
-			if sample.patch == 0 {
+			if sample.patch == 0 && mesh.Background == nil {
 				continue
 			}
-			values, err := mesh.ValuesAt(sample.patch-1, sample.u, sample.v)
-			if err != nil {
-				return nil, err
-			}
-			values, err = space.Convert(values[:mesh.Space.Components()], mesh.Space, mesh.Intent)
-			if err != nil {
-				return nil, err
+			values := background
+			if sample.patch != 0 {
+				var err error
+				values, err = mesh.ValuesAt(sample.patch-1, sample.u, sample.v)
+				if err != nil {
+					return nil, err
+				}
+				values, err = space.ConvertWith(values[:mesh.Space.Components()], mesh.Space, mesh.Intent, conversion)
+				if err != nil {
+					return nil, err
+				}
 			}
 			pixel := &pixels[(y/samples)*c.width+x/samples]
 			for i, value := range values {
@@ -258,7 +279,7 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace) 
 		pixel.shape /= samples * samples
 	}
 	if c.meshes == nil {
-		c.meshes = map[pdfMeshKey][]pdfMeshPixel{}
+		c.meshes = map[pdfMeshKey][]pdfShadingPixel{}
 	}
 	c.meshes[key] = pixels
 	return pixels, nil
