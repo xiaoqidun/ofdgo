@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"image/png"
 	"math"
 	"strconv"
 	"unicode/utf8"
@@ -57,12 +56,19 @@ func (s *pdfStencilImage) Bounds() image.Rectangle { return s.source.Bounds() }
 // 入参: x 横向坐标, y 纵向坐标
 // 返回: color.Color 非预乘颜色
 func (s *pdfStencilImage) At(x, y int) color.Color {
+	return s.NRGBA64At(x, y)
+}
+
+// NRGBA64At 直接读取模板覆盖率，保留填充色的有效精度
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.NRGBA64 非预乘颜色
+func (s *pdfStencilImage) NRGBA64At(x, y int) color.NRGBA64 {
 	if !image.Pt(x, y).In(s.Bounds()) {
 		return color.NRGBA64{}
 	}
-	gray, _, _, _ := s.source.At(x, y).RGBA()
+	gray := imageNRGBA64At(s.source, x, y)
 	pixel := s.fill
-	pixel.A = uint16(65535 - gray)
+	pixel.A = uint16(65535 - gray.R)
 	return pixel
 }
 
@@ -112,7 +118,7 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		}
 		var decoded image.Image
 		if len(jbig2Original) == 0 {
-			decoded, err = source.DecodeImage()
+			decoded, err = source.DecodeImageContext(p.ctx)
 			if err != nil {
 				return err
 			}
@@ -139,7 +145,7 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		} else if len(jpegOriginal) != 0 {
 			encoded.Write(jpegOriginal)
 		} else {
-			if err := png.Encode(&encoded, decoded); err != nil {
+			if err := pdfgo.EncodePNG(p.ctx, &encoded, decoded); err != nil {
 				return err
 			}
 		}

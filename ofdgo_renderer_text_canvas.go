@@ -115,7 +115,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		}
 		strokeStyle.applyLineJoin(obj.Join, obj.MiterLimit)
 		if strokeStyle.strokePaint == nil {
-			strokeStyle.strokePaint = colorWithAlpha(canvas.Black, obj.Alpha)
+			strokeStyle.strokePaint = canvas.Transparent
 		}
 		strokeStyle.scale(ctm)
 		if strokeStyle.lineWidth == 0 {
@@ -182,9 +182,21 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		return
 	}
 	face := ff.Face(sizePt, fillPaint, fontStyle, canvas.FontNormal)
+	recoverBaseline := len(obj.TextCode) > 0 && obj.TextCode[0].Y == ""
 	var metrics canvas.FontMetrics
-	if textRun != nil {
+	if textRun != nil || recoverBaseline {
 		metrics = face.Metrics()
+	}
+	ascent := metrics.Ascent
+	if scale := ctm.YScale(); scale > 0 && !useTextMatrix {
+		ascent /= scale
+	}
+	obj.TextCode = textCodeOrigins(obj.TextCode, ascent)
+	if textRun != nil && recoverBaseline {
+		if text := obj.Text(); text != textRun.Text {
+			textRun.Text = text
+			textRun.Boxes = make([]Box, len([]rune(text)))
+		}
 	}
 	glyphTransforms := r.textObjectGlyphTransforms(fontID, obj)
 	hasUnderline := strings.Contains(obj.Decoration, "Underline")

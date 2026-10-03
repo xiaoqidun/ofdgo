@@ -36,6 +36,7 @@ type textGlyphTransform struct {
 // Text 获取定位后的文字，横向换行以换行符分隔，字形索引以占位字符表示
 // 返回: string 原文
 func (obj TextObject) Text() string {
+	obj.TextCode = textCodeOrigins(obj.TextCode, 0)
 	var text strings.Builder
 	for i, code := range obj.TextCode {
 		if obj.textCodeLineBreak(i) {
@@ -66,12 +67,33 @@ func (tc *TextCode) GetDeltaY() []float64 {
 // 入参: index 文本编码索引
 // 返回: bool 是否换行
 func (obj TextObject) textCodeLineBreak(index int) bool {
-	if index == 0 || obj.ReadDirection != 0 || obj.CharDirection != 0 {
+	if index == 0 || obj.ReadDirection != 0 || obj.CharDirection != 0 || obj.TextCode[index].Y == "" {
 		return false
 	}
 	code, previous := obj.TextCode[index], obj.TextCode[index-1]
+	for i := index - 2; i >= 0 && (previous.X == "" || previous.Y == ""); i-- {
+		if previous.X == "" {
+			previous.X = obj.TextCode[i].X
+		}
+		if previous.Y == "" {
+			previous.Y = obj.TextCode[i].Y
+		}
+	}
+	if previous.X == "" {
+		previous.X = "0"
+	}
+	if previous.Y == "" {
+		previous.Y = "0"
+	}
+	if code.X == "" {
+		code.X = previous.X
+	}
+	startX := obj.TextCode[0].X
+	if startX == "" {
+		startX = "0"
+	}
 	x, ex := strconv.ParseFloat(code.X, 64)
-	start, es := strconv.ParseFloat(obj.TextCode[0].X, 64)
+	start, es := strconv.ParseFloat(startX, 64)
 	y, ey := strconv.ParseFloat(code.Y, 64)
 	prev, ep := strconv.ParseFloat(previous.Y, 64)
 	if ex != nil || es != nil || ey != nil || ep != nil {

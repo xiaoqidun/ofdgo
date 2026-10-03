@@ -436,7 +436,7 @@ func imageNRGBAAt(img image.Image, x, y int) color.NRGBA {
 // 返回: color.NRGBA64 NRGBA64像素
 func imageNRGBA64At(img image.Image, x, y int) color.NRGBA64 {
 	switch src := img.(type) {
-	case *image.NRGBA64:
+	case interface{ NRGBA64At(int, int) color.NRGBA64 }:
 		return src.NRGBA64At(x, y)
 	case *image.Gray16:
 		c := src.Gray16At(x, y)

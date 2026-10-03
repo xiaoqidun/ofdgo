@@ -22,6 +22,9 @@ import (
 	"golang.org/x/image/math/f64"
 )
 
+// rasterScaleBufferLimit 限制整像素缩放器的浮点中间缓冲，超出时使用逐行采样
+const rasterScaleBufferLimit = 8 << 20
+
 // PixelTransform 将页面毫米变换转换为像素变换，保留尺寸取整后的原点位置
 // 入参: m 局部到页面变换, height 目标像素高度
 // 返回: RasterMatrix 局部到像素变换
@@ -40,7 +43,7 @@ func drawRasterImage(dst draw.Image, src image.Image, m RasterMatrix) {
 	drawRasterImagePixels(dst, src, m, draw.Over)
 }
 
-// drawRasterImagePixels 对整像素边界的轴向缩小使用可分离采样，其余变换保留通用路径
+// drawRasterImagePixels 对轴向缩小使用可分离采样，其余变换保留通用路径
 // 入参: dst 目标图像, src 源图像, m 像素变换, op 合成操作
 func drawRasterImagePixels(dst draw.Image, src image.Image, m RasterMatrix, op draw.Op) {
 	b := src.Bounds()
@@ -51,10 +54,13 @@ func drawRasterImagePixels(dst draw.Image, src image.Image, m RasterMatrix, op d
 		draw.CatmullRom.Scale(dst, dr, src, b, op, nil)
 		return
 	}
+	if drawRasterAxisImage(dst, src, m, op) {
+		return
+	}
 	draw.CatmullRom.Transform(dst, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, src, b, op, nil)
 }
 
-// rasterScaleBounds 检查变换是否可无几何取整地使用缩放器，并避开其整数溢出范围
+// rasterScaleBounds 检查变换是否可无几何取整地使用缩放器，并限制其中间缓冲
 // 入参: b 源边界, m 像素变换
 // 返回: image.Rectangle 缩放边界, bool 是否适用
 func rasterScaleBounds(b image.Rectangle, m RasterMatrix) (image.Rectangle, bool) {
@@ -68,7 +74,7 @@ func rasterScaleBounds(b image.Rectangle, m RasterMatrix) (image.Rectangle, bool
 			return image.Rectangle{}, false
 		}
 	}
-	if x1 <= x0 || y1 <= y0 || b.Dx() > math.MaxInt32 || b.Dy() > math.MaxInt32 || (x1-x0)*float64(b.Dy()) > float64(min(math.MaxInt32, int(^uint(0)>>1)/32)) {
+	if x1 <= x0 || y1 <= y0 || b.Dx() > math.MaxInt32 || b.Dy() > math.MaxInt32 || (x1-x0)*float64(b.Dy()) > rasterScaleBufferLimit/32 {
 		return image.Rectangle{}, false
 	}
 	return image.Rect(int(x0), int(y0), int(x1), int(y1)), true

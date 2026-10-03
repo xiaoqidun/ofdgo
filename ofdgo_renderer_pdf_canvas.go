@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	"image"
 
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers/pdf"
@@ -52,6 +53,16 @@ type pdfOutline struct {
 	Name  string
 	Level int
 	Y     float64
+}
+
+// RenderImage 在图像局部保存状态前同步不透明画笔，避免恢复后的透明度与后端缓存不一致
+// 入参: img 图像, matrix 图像变换
+func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
+	style := canvas.DefaultStyle
+	style.Fill = canvas.Paint{Color: canvas.White}
+	style.Stroke = canvas.Paint{Color: canvas.Black}
+	r.PDF.RenderPath(&canvas.Path{}, style, canvas.Identity)
+	r.PDF.RenderImage(img, matrix)
 }
 
 // glyphPath 复用相似变换下的PDF字形圆弧转换

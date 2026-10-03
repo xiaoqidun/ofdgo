@@ -138,6 +138,7 @@ func (e *Editor) UpdateTextContent(page int, id, value string, style TextStyle) 
 // RewriteText 保留原文的字形定位，不修改对象样式或文档
 // 等长替换保留各字原位；单段增删保留前缀和后缀步进，新增字符沿用局部字距
 // 方向、缩放和修饰原样保留；复杂布局仅支持等长替换，合并字形需显式重排
+// 首段缺失坐标仅在临时校验中恢复，不改写源坐标
 // 入参: obj 原文字对象, value 新内容
 // 返回: error 错误信息
 func (e *Editor) RewriteText(obj *TextObject, value string) error {
@@ -147,6 +148,7 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 	}
 	check := cloneEditorData(*obj)
 	check.VScale, check.Decoration = 0, ""
+	check.TextCode = textCodeOrigins(check.TextCode, 0)
 	if err := e.prepareText(&check); err != nil {
 		var missing *MissingGlyphError
 		if !errors.As(err, &missing) {

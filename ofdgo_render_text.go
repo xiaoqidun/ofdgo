@@ -128,6 +128,14 @@ func (r *Renderer) PositionText(object TextObject, state RenderState) (*Position
 	}
 	ascent, descent, _ := metrics.VerticalMetrics()
 	unit := size / float64(metrics.UnitsPerEm())
+	recoverBaseline := len(object.TextCode) > 0 && object.TextCode[0].Y == ""
+	object.TextCode = textCodeOrigins(object.TextCode, float64(ascent)*unit)
+	if recoverBaseline {
+		if text := object.Text(); text != result.Run.Text {
+			result.Run.Text = text
+			result.Run.Boxes = make([]Box, len([]rune(text)))
+		}
+	}
 	transforms := r.textObjectGlyphTransforms(id, object)
 	codeOffset, textOffset := 0, 0
 	angle := float64(object.CharDirection) * math.Pi / 180

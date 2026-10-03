@@ -509,7 +509,7 @@ func (c *pdfCompositor) imageColor(mark *pdfgo.ImageMark, point pdfgo.Point, spa
 	source := c.cache.images[mark.Image]
 	if source == nil {
 		var err error
-		source, err = mark.Image.DecodeComponents()
+		source, err = mark.Image.DecodeComponentsContext(c.importer.ctx)
 		if err != nil {
 			return [4]float64{}, 0, err
 		}

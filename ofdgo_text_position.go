@@ -14,6 +14,8 @@
 
 package ofdgo
 
+import "slices"
+
 // TextPositioner 按OFD坐标及增量定位连续字形，不依赖字体或绘图库
 type TextPositioner struct {
 	xs, ys, dxs, dys []float64
@@ -21,6 +23,35 @@ type TextPositioner struct {
 	current          Point
 	previous         float64
 	index            int
+}
+
+// textCodeOrigins 按标准继承文本段原点，首段缺失坐标时以零横坐标和字体上升高度容错恢复
+// 入参: codes 文本段, ascent 对象坐标系下的字体上升高度
+// 返回: []TextCode 定位文本段，不修改原始数据
+func textCodeOrigins(codes []TextCode, ascent float64) []TextCode {
+	for i, code := range codes {
+		if code.X != "" && code.Y != "" {
+			continue
+		}
+		result := slices.Clone(codes)
+		var x, y string
+		if i > 0 {
+			x, y = codes[i-1].X, codes[i-1].Y
+		} else {
+			x, y = "0", ofdNumber(ascent)
+		}
+		for j := i; j < len(result); j++ {
+			if result[j].X == "" {
+				result[j].X = x
+			}
+			if result[j].Y == "" {
+				result[j].Y = y
+			}
+			x, y = result[j].X, result[j].Y
+		}
+		return result
+	}
+	return codes
 }
 
 // NewTextPositioner 创建单个TextCode的定位器，方向采用OFD角度

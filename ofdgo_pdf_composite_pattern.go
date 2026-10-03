@@ -187,7 +187,7 @@ func (p *pdfImporter) directCompositeNode(node pdfCompositeNode, space *pdfgo.Co
 				source := p.compositingCache().images[node.image.Image]
 				if source == nil {
 					var err error
-					source, err = node.image.Image.DecodeComponents()
+					source, err = node.image.Image.DecodeComponentsContext(p.ctx)
 					if err != nil {
 						return false, err
 					}

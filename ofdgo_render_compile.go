@@ -324,9 +324,6 @@ func (c *semanticCompiler) objectStyle(object PathObject, defaults *DrawParam, l
 	if object.DashOffset != nil {
 		style.options.DashOffset = *object.DashOffset
 	}
-	if style.stroke == nil {
-		style.stroke = &FillColor{}
-	}
 	style.fill = withFillAlpha(style.fill, object.Alpha)
 	style.stroke = withFillAlpha(style.stroke, object.Alpha)
 	if scale := math.Sqrt(math.Abs(linear.a*linear.d - linear.b*linear.c)); scale > 0 {
@@ -379,6 +376,9 @@ func (c *semanticCompiler) pathObject(object PathObject, state RenderState) erro
 		return err
 	}
 	style := c.objectStyle(object, state.Defaults, linear)
+	if style.stroke == nil {
+		style.stroke = withFillAlpha(&FillColor{}, object.Alpha)
+	}
 	shading, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
 	if object.Fill != nil && *object.Fill {
 		paint, err := c.renderer.ResolvePaint(style.fill)
