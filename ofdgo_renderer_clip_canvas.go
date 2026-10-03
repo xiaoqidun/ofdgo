@@ -160,11 +160,23 @@ func intersectClipPath(parent, current *canvas.Path) *canvas.Path {
 	if parent.Empty() || current.Empty() {
 		return &canvas.Path{}
 	}
-	if parentOK && parentRect.Contains(current.FastBounds()) {
-		return current
+	if parentOK {
+		bounds := current.Bounds()
+		if parentRect.Contains(bounds) {
+			return current
+		}
+		if !parentRect.Overlaps(bounds) {
+			return &canvas.Path{}
+		}
 	}
-	if currentOK && currentRect.Contains(parent.FastBounds()) {
-		return parent
+	if currentOK {
+		bounds := parent.Bounds()
+		if currentRect.Contains(bounds) {
+			return parent
+		}
+		if !currentRect.Overlaps(bounds) {
+			return &canvas.Path{}
+		}
 	}
 	if result, ok := intersectConvexCanvasPaths(parent, current); ok {
 		return result
@@ -199,7 +211,7 @@ func applyClipPath(path, clip *canvas.Path) *canvas.Path {
 		return &canvas.Path{}
 	}
 	if rect, ok := rectangularPath(clip); ok {
-		bounds := path.FastBounds()
+		bounds := path.Bounds()
 		if rect.Contains(bounds) {
 			return path
 		}
@@ -224,18 +236,25 @@ func rectangularPath(path *canvas.Path) (canvas.Rect, bool) {
 		return canvas.Rect{}, false
 	}
 	data := path.Data()
+	if len(data) != 20 {
+		return canvas.Rect{}, false
+	}
 	for i := 0; i < len(data); i += 4 {
-		if i+4 > len(data) || (data[i] != canvas.MoveToCmd && data[i] != canvas.LineToCmd && data[i] != canvas.CloseCmd) {
+		if data[i] != canvas.MoveToCmd && data[i] != canvas.LineToCmd && data[i] != canvas.CloseCmd {
 			return canvas.Rect{}, false
 		}
 	}
-	points := path.Coords()
-	if len(points) != 5 || !points[0].Equals(points[4]) {
+	if !(canvas.Point{X: data[1], Y: data[2]}).Equals(canvas.Point{X: data[17], Y: data[18]}) {
 		return canvas.Rect{}, false
 	}
 	rect := path.FastBounds()
 	corners := 0
-	for _, point := range points[:4] {
+	for i := 0; i < 16; i += 4 {
+		point := canvas.Point{X: data[i+1], Y: data[i+2]}
+		next := (i + 4) % 16
+		if !canvas.Equal(point.X, data[next+1]) && !canvas.Equal(point.Y, data[next+2]) {
+			return canvas.Rect{}, false
+		}
 		corner := 0
 		switch {
 		case canvas.Equal(point.X, rect.X0) && canvas.Equal(point.Y, rect.Y0):

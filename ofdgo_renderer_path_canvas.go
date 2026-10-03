@@ -368,7 +368,7 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 	if !ok {
 		return
 	}
-	bounds := clip.FastBounds()
+	bounds := clip.Bounds()
 	points := [][2]float64{
 		{bounds.X0, pageH - bounds.Y0},
 		{bounds.X1, pageH - bounds.Y0},

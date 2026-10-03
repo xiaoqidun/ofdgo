@@ -60,7 +60,7 @@ func (r *Renderer) drawSampledShading(ctx *canvas.Context, path *canvas.Path, vi
 	if path.Empty() {
 		return
 	}
-	bounds := path.FastBounds().And(shdCanvasBounds(ctx))
+	bounds := path.Bounds().And(shdCanvasBounds(ctx))
 	if bounds.W() <= 0 || bounds.H() <= 0 {
 		return
 	}
@@ -243,7 +243,7 @@ func drawRepeatAxialPath(ctx *canvas.Context, path *canvas.Path, gradient *repea
 	p = p.Transform(view.Inv())
 	d := gradient.End.Sub(gradient.Start).Mul(gradient.period)
 	axis := canvas.Matrix{{d.X, -d.Y, gradient.Start.X}, {d.Y, d.X, gradient.Start.Y}}
-	bounds := p.FastBounds().And(shdCanvasBounds(ctx).Transform(view.Inv()))
+	bounds := p.Bounds().And(shdCanvasBounds(ctx).Transform(view.Inv()))
 	area := bounds.Transform(axis.Inv())
 	origin := ctx.CoordView().Dot(canvas.Point{})
 	m := ctx.CoordSystemView().Mul(ctx.View()).Translate(origin.X, origin.Y).Mul(view)

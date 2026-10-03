@@ -684,6 +684,7 @@ func (e *Editor) importBase() (*editorSource, error) {
 		return nil, err
 	}
 	editor.source.idsReady = true
+	editor.source.fromNew = true
 	return editor.source, nil
 }
 

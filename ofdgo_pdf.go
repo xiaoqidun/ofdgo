@@ -78,7 +78,7 @@ type pdfImporter struct {
 	pages            map[pdfgo.Reference]*pdfgo.Page
 	pageIDs          map[pdfgo.Reference]string
 	pageIndexes      map[pdfgo.Reference]int
-	imageIDs         map[pdfImageKey]string
+	imageIDs         map[pdfImageKey][]pdfImageResource
 	attachmentIDs    map[pdfAttachmentKey]string
 	maskClips        map[*pdfgo.SoftMask]pdfgo.Path
 	pageBox          pdfgo.Rectangle

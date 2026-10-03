@@ -20,6 +20,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"reflect"
 	"strconv"
 	"unicode/utf8"
 
@@ -30,6 +31,12 @@ import (
 type pdfImageKey struct {
 	stream *pdfgo.Stream
 	intent pdfgo.Name
+}
+
+// pdfImageResource 保存图像的有效颜色空间及对应资源，避免跨资源重映射复用
+type pdfImageResource struct {
+	space pdfgo.Object
+	id    string
 }
 
 // pdfStencilImage 按当前填充色读取模板图像，不分配整幅彩色样本
@@ -103,9 +110,14 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	}
 	source := mark.Image
 	key := pdfImageKey{stream: source.Stream, intent: source.Intent}
-	id := p.imageIDs[key]
-	if source.ImageMask {
-		id = ""
+	id := ""
+	if !source.ImageMask {
+		for _, resource := range p.imageIDs[key] {
+			if reflect.DeepEqual(resource.space, source.ColorSpace) {
+				id = resource.id
+				break
+			}
+		}
 	}
 	if id == "" {
 		jbig2Original, err := source.JBIG2File()
@@ -155,9 +167,9 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		}
 		if !source.ImageMask {
 			if p.imageIDs == nil {
-				p.imageIDs = map[pdfImageKey]string{}
+				p.imageIDs = map[pdfImageKey][]pdfImageResource{}
 			}
-			p.imageIDs[key] = id
+			p.imageIDs[key] = append(p.imageIDs[key], pdfImageResource{space: source.ColorSpace, id: id})
 		}
 	}
 	return p.appendImage(mark, id)

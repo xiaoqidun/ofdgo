@@ -36,6 +36,7 @@ type editorSource struct {
 	info               DocInfo
 	fallbackDocID      string
 	directory          string
+	fromNew            bool
 	pages              map[string]*editorSourcePage
 	origins            map[string]*editorObjectOrigin
 	idsReady           bool

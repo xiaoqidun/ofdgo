@@ -330,7 +330,14 @@ func (e *Editor) documentRoot() string {
 // 返回: bool 是否为同一文档
 func (e *Editor) sameDocument(other *Editor) bool {
 	if e.source == nil || other.source == nil {
-		return e.source == nil && other.source == nil
+		if e.source == nil && other.source == nil {
+			return true
+		}
+		fresh, packaged := e, other
+		if fresh.source != nil {
+			fresh, packaged = other, e
+		}
+		return len(packaged.source.reader.OFD.DocBody) == 1 && (packaged.source.fromNew || fresh.Info.DocID != "" && fresh.Info.DocID == packaged.source.info.DocID)
 	}
 	return e.documentRoot() == other.documentRoot() && e.source.info.DocID == other.source.info.DocID
 }
