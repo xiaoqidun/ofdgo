@@ -26,7 +26,7 @@ type pdfTransferKey struct {
 // 入参: style 原始图形状态与有效输出状态
 // 返回: error 网屏传递函数错误
 func (p *pdfImporter) resolveTransfer(style *pdfgo.Style) error {
-	if style.Halftone == nil {
+	if style.Halftone == nil && style.Transfer == nil {
 		return nil
 	}
 	cache := p.compositingCache()
