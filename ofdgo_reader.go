@@ -83,6 +83,30 @@ func (r *Reader) DocumentIndex() int {
 	return r.documentIndex
 }
 
+// DocumentPageCount 获取指定文档页数，不切换当前文档或加载资源、注释和签名
+// 入参: index 文档索引，从0开始
+// 返回: int 页数, error 错误信息
+func (r *Reader) DocumentPageCount(index int) (int, error) {
+	if index < 0 || index >= r.DocumentCount() {
+		return 0, fmt.Errorf("document index %d out of range", index)
+	}
+	if index == r.documentIndex && r.doc != nil {
+		return len(r.doc.Pages.Page), nil
+	}
+	data, err := r.readFile(r.OFD.DocBody[index].DocRoot)
+	if err != nil {
+		return 0, err
+	}
+	var doc struct {
+		XMLName xml.Name `xml:"Document"`
+		Pages   Pages    `xml:"Pages"`
+	}
+	if err := xml.Unmarshal(data, &doc); err != nil {
+		return 0, fmt.Errorf("failed to unmarshal document.xml: %w", err)
+	}
+	return len(doc.Pages.Page), nil
+}
+
 // Document 创建指定文档的独立阅读器，不改变当前文档或混用资源缓存
 // 返回的阅读器不关闭输入文件，使用期间不得关闭持有输入文件的原阅读器
 // 入参: index 文档索引，从0开始

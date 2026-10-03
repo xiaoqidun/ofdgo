@@ -60,6 +60,9 @@ const state = {
 	imageImporting: false,
 	createInsert: false,
 	createPackage: false,
+	createDocumentAt: null,
+	documentManagement: null,
+	infoDocumentIndex: null,
 	pageSelection: new Set(),
 	pageSelectionAnchor: null,
 	pageMultiSelect: false,
@@ -235,8 +238,13 @@ const el = {
 	infoButton: document.querySelector("#infoButton"),
 	documentSelect: document.querySelector("#documentSelect"),
 	documentActions: document.querySelector("#documentActions"),
+	documentManageButton: document.querySelector("#documentManageButton"),
+	documentPanel: document.querySelector("#documentPanel"),
+	documentForm: document.querySelector("#documentForm"),
+	documentList: document.querySelector("#documentList"),
+	documentStatus: document.querySelector("#documentStatus"),
+	documentClose: document.querySelector("#documentClose"),
 	documentRow: document.querySelector("#documentRow"),
-	documentOrder: document.querySelector("#documentOrder"),
 	documentAddButton: document.querySelector("#documentAddButton"),
 	documentDeleteButton: document.querySelector("#documentDeleteButton"),
 	documentUpButton: document.querySelector("#documentUpButton"),
@@ -679,30 +687,54 @@ editorClick(el.paragraphButton, () => {
 });
 el.paragraphCancel.addEventListener("click", () => el.paragraphPanel.close());
 editorClick(el.documentAddButton, () => openCreatePanel(false, true));
+editorClick(el.documentManageButton, openDocumentManagement);
+el.documentClose.addEventListener("click", () => el.documentPanel.close());
+el.documentPanel.addEventListener("cancel", event => { if (el.documentForm.inert) event.preventDefault(); });
+el.documentPanel.addEventListener("close", () => {
+	if (!el.documentPanel.open) {
+		state.documentManagement = null;
+		el.documentList.replaceChildren();
+		el.documentStatus.textContent = "";
+	}
+});
+el.documentList.addEventListener("keydown", event => {
+	if (!state.documentManagement || !["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+	event.preventDefault();
+	const count = state.doc.documents.length, index = state.documentManagement.index;
+	selectManagedDocument(event.key === "Home" ? 0 : event.key === "End" ? count - 1
+		: Math.max(0, Math.min(count - 1, index + (event.key === "ArrowUp" ? -1 : 1))), true);
+});
 editorClick(el.documentDeleteButton, () => {
-	if (window.confirm("删除当前文档？")) return changeDocument("ofdgoChangeDocument", null, "delete", state.doc.documentIndex || 0);
+	const index = managedDocumentIndex(), entry = state.doc.documents[index];
+	if (window.confirm(`删除文档“${entry.title || "未命名"}”？`)) return changeDocument("ofdgoChangeDocument", null, "delete", index);
 });
 editorClick(el.documentUpButton, () => {
-	const index = state.doc.documentIndex || 0;
+	const index = managedDocumentIndex();
 	return changeDocument("ofdgoChangeDocument", null, "move", index, index - 1);
 });
 editorClick(el.documentDownButton, () => {
-	const index = state.doc.documentIndex || 0;
+	const index = managedDocumentIndex();
 	return changeDocument("ofdgoChangeDocument", null, "move", index, index + 1);
 });
 editorClick(el.infoButton, () => {
-	for (const key of ["Title", "Author", "Subject"]) el[`info${key}`].value = state.doc[key.toLowerCase()] || "";
+	state.infoDocumentIndex = managedDocumentIndex();
+	const info = state.documentManagement?.entries?.[state.infoDocumentIndex] || state.doc;
+	for (const key of ["Title", "Author", "Subject"]) el[`info${key}`].value = info[key.toLowerCase()] || "";
 	el.infoCustomRows.replaceChildren();
-	for (const [index, field] of (state.doc.customData || []).entries()) addCustomDataRow(field, index);
+	for (const [index, field] of (info.customData || []).entries()) addCustomDataRow(field, index);
 	el.infoStatus.textContent = "";
 	el.infoPanel.showModal();
 });
 el.infoCancel.addEventListener("click", () => el.infoPanel.close());
+el.infoPanel.addEventListener("cancel", event => { if (el.infoForm.inert) event.preventDefault(); });
+el.infoPanel.addEventListener("close", () => { if (!el.infoPanel.open) state.infoDocumentIndex = null; });
 el.infoCustomAdd.addEventListener("click", () => addCustomDataRow());
 el.infoForm.addEventListener("submit", async event => {
 	event.preventDefault();
 	const fields = [...el.infoCustomRows.children].map(row => ({Name: row.children[0].value, Value: row.children[1].value, Source: row.sourceIndex}));
-	if (await changeDocument("ofdgoUpdateInfo", null, el.infoTitle.value, el.infoAuthor.value, el.infoSubject.value, JSON.stringify(fields))) el.infoPanel.close();
+	const args = [el.infoTitle.value, el.infoAuthor.value, el.infoSubject.value, JSON.stringify(fields)];
+	if (state.infoDocumentIndex !== null) args.push(state.infoDocumentIndex);
+	if (await changeDocument("ofdgoUpdateInfo", null, ...args)) el.infoPanel.close();
 });
 
 function addCustomDataRow(field = {Name: "", Value: ""}, sourceIndex) {
@@ -1529,7 +1561,7 @@ function handleKeyDown(event) {
 }
 
 function formDialogOpen() {
-	return Boolean(sealPreview) || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open
+	return Boolean(sealPreview) || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
 		|| el.batchPagesPanel.open || el.objectStylePanel.open || el.sourceTextPanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
@@ -1956,6 +1988,93 @@ function setEditorInfo(doc) {
 	setDirty(state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision);
 }
 
+function managedDocumentIndex() {
+	return state.documentManagement?.index ?? state.doc?.documentIndex ?? 0;
+}
+
+function documentEntryKey(entry) {
+	return JSON.stringify([entry?.root, entry?.id]);
+}
+
+async function openDocumentManagement() {
+	if (!state.editing || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
+	const index = state.doc.documentIndex || 0;
+	state.documentManagement = { index, key: documentEntryKey(state.doc.documents[index]), entries: null, loading: false, failed: false };
+	renderDocumentManagement();
+	el.documentPanel.showModal();
+	await refreshDocumentManagement(true);
+}
+
+async function refreshDocumentManagement(focus = false) {
+	const manager = state.documentManagement, openSeq = state.openSeq;
+	if (!manager || !el.documentPanel.open) return;
+	manager.loading = true;
+	manager.failed = false;
+	el.documentStatus.textContent = "正在读取文档";
+	updateDocumentControls();
+	try {
+		const entries = await callWASM("ofdgoPackageDocuments");
+		if (state.documentManagement !== manager || !el.documentPanel.open) return;
+		if (openSeq !== state.openSeq) return await refreshDocumentManagement(focus);
+		const index = entries.findIndex(entry => documentEntryKey(entry) === manager.key);
+		manager.index = index < 0 ? Math.min(manager.index, entries.length - 1) : index;
+		manager.entries = entries;
+		manager.key = documentEntryKey(entries[manager.index]);
+		el.documentStatus.textContent = "";
+		renderDocumentManagement();
+		if (focus) el.documentList.children[manager.index]?.focus();
+	} catch (error) {
+		if (state.documentManagement === manager && openSeq === state.openSeq) {
+			manager.failed = true;
+			el.documentStatus.textContent = error.message;
+		}
+	} finally {
+		if (state.documentManagement === manager) {
+			manager.loading = false;
+			updateDocumentControls();
+		}
+	}
+}
+
+function renderDocumentManagement() {
+	const manager = state.documentManagement;
+	if (!manager) return;
+	const entries = manager.entries || state.doc.documents;
+	el.documentList.replaceChildren(...entries.map(entry => {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = "document-entry";
+		button.setAttribute("role", "option");
+		button.setAttribute("aria-selected", String(entry.index === manager.index));
+		button.tabIndex = entry.index === manager.index ? 0 : -1;
+		const name = document.createElement("span");
+		name.className = "document-name";
+		name.textContent = `${entry.index + 1} · ${entry.title || "未命名"}`;
+		button.title = name.textContent;
+		const pages = document.createElement("span");
+		pages.className = "document-pages";
+		const count = entry.pageCount ?? (entry.index === state.doc.documentIndex ? state.doc.pageCount : null);
+		pages.textContent = count === null ? "-" : `${count}页`;
+		button.append(name, pages);
+		button.addEventListener("click", () => selectManagedDocument(entry.index));
+		return button;
+	}));
+	updateDocumentControls();
+}
+
+function selectManagedDocument(index, focus = false) {
+	const manager = state.documentManagement;
+	if (!manager || manager.loading || document.body.hasAttribute("aria-busy") || index < 0 || index >= state.doc.documents.length) return;
+	manager.index = index;
+	manager.key = documentEntryKey(state.doc.documents[index]);
+	for (const [i, button] of [...el.documentList.children].entries()) {
+		button.setAttribute("aria-selected", String(i === index));
+		button.tabIndex = i === index ? 0 : -1;
+	}
+	updateDocumentControls();
+	if (focus) el.documentList.children[index]?.focus();
+}
+
 async function switchDocument(index) {
 	if (!state.doc || document.body.hasAttribute("aria-busy") || state.exporting || formDialogOpen()) return;
 	const previous = state.doc.documentIndex || 0;
@@ -2087,9 +2206,10 @@ function openCreatePanel(insert = false, packageDocument = false) {
 	el.createForm.reset();
 	state.createInsert = insert === true;
 	state.createPackage = packageDocument === true;
+	state.createDocumentAt = state.createPackage ? managedDocumentIndex() + 1 : null;
 	el.createMode.value = state.createInsert ? "images" : "blank";
-	el.createSubmit.textContent = state.createInsert ? "插入" : "新建";
-	el.createPanel.setAttribute("aria-label", state.createInsert ? "插入图片" : "新建文档");
+	el.createSubmit.textContent = state.createInsert ? "插入" : state.createPackage ? "新增" : "新建";
+	el.createPanel.setAttribute("aria-label", state.createInsert ? "插入图片" : state.createPackage ? "新增文档" : "新建文档");
 	el.createCancel.disabled = false;
 	updateCreateOptions();
 	el.createStatus.textContent = "";
@@ -2130,7 +2250,7 @@ async function createDocument(event) {
 	event.preventDefault();
 	if (state.createPackage) {
 		if (await changeDocument("ofdgoChangeDocument", null, "add", el.createName.value.trim() || "未命名",
-			Number(el.createWidth.value), Number(el.createHeight.value), (state.doc.documentIndex || 0) + 1)) el.createPanel.close();
+			Number(el.createWidth.value), Number(el.createHeight.value), state.createDocumentAt)) el.createPanel.close();
 		return;
 	}
 	if (state.createInsert) {
@@ -2884,6 +3004,7 @@ async function changeDocument(name, item, ...args) {
 	const restoring = name === "ofdgoUndo" || name === "ofdgoRedo";
 	const { scrollLeft, scrollTop } = el.viewerPanel;
 	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages";
+	let refreshManagement = false;
 	state.imageImporting = name === "ofdgoImportImages";
 	if (importing) state.importing = true;
 	setBusy(true, importing ? "正在导入页面" : "", null);
@@ -2916,12 +3037,16 @@ async function changeDocument(name, item, ...args) {
 		if (doc.revision === state.editorInfo?.revision) {
 			return true;
 		}
+		refreshManagement = el.documentPanel.open && (name === "ofdgoChangeDocument" || name === "ofdgoUpdateInfo" || restoring);
 		const previousDocument = state.doc.documents?.[state.doc.documentIndex || 0];
 		const nextDocument = doc.documents?.[doc.documentIndex || 0];
 		const documentChanged = previousDocument?.root !== nextDocument?.root || previousDocument?.id !== nextDocument?.id;
 		const packageChanged = documentChanged || name === "ofdgoChangeDocument" || restoring
 			&& JSON.stringify(doc.documents?.map(entry => [entry.root, entry.id])) !== JSON.stringify(state.doc.documents?.map(entry => [entry.root, entry.id]));
 		if (packageChanged) {
+			if (state.documentManagement && name === "ofdgoChangeDocument" && args[0] === "add") {
+				state.documentManagement.key = documentEntryKey(nextDocument);
+			}
 			resetCompositeScope();
 			state.objectClipboard = state.styleClipboard = null;
 			state.pageSelection.clear();
@@ -3010,6 +3135,7 @@ async function changeDocument(name, item, ...args) {
 			return true;
 		}
 	} catch (err) {
+		refreshManagement = false;
 		if (openSeq === state.openSeq) {
 			if (el.annotationCreate.open) {
 				el.annotationCreateStatus.textContent = err.message;
@@ -3037,6 +3163,8 @@ async function changeDocument(name, item, ...args) {
 				el.createStatus.textContent = err.message;
 			} else if (el.importPanel.open) {
 				el.importStatus.textContent = err.message;
+			} else if (el.documentPanel.open) {
+				el.documentStatus.textContent = err.message;
 			} else {
 				showError(err, false);
 			}
@@ -3052,6 +3180,7 @@ async function changeDocument(name, item, ...args) {
 		}
 		if (openSeq === state.openSeq) {
 			setBusy(false);
+			if (refreshManagement) await refreshDocumentManagement();
 			if (toolbarFocus?.isConnected && !toolbarFocus.disabled) toolbarFocus.focus({ preventScroll: true });
 		}
 	}
@@ -3722,6 +3851,9 @@ async function openOFD(file, remote = null) {
 		el.pagePanel.close();
 		el.paragraphPanel.close();
 		el.infoPanel.close();
+		el.documentPanel.close();
+		state.documentManagement = null;
+		state.infoDocumentIndex = null;
 		el.annotationNote.close();
 		el.annotationCreate.close();
 		el.objectPicker.close();
@@ -8305,15 +8437,20 @@ function updateFitSpace() {
 }
 
 function updateDocumentControls() {
-	const count = state.doc?.documents?.length || 0, index = state.doc?.documentIndex || 0;
-	const disabled = !state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
-	el.documentActions.hidden = el.documentOrder.hidden = !state.editing;
+	const count = state.doc?.documents?.length || 0, index = managedDocumentIndex(), manager = state.documentManagement;
+	const busy = document.body.hasAttribute("aria-busy");
+	const disabled = !state.doc || !state.ready || state.exporting || busy;
+	el.documentManageButton.hidden = !state.editing;
+	el.documentManageButton.disabled = disabled;
 	el.documentRow.hidden = !count || !state.editing && count < 2;
 	el.documentSelect.disabled = disabled;
-	el.documentAddButton.disabled = el.infoButton.disabled = disabled || !state.editing;
-	el.documentDeleteButton.disabled = disabled || !state.editing || count <= 1;
-	el.documentUpButton.disabled = disabled || !state.editing || index === 0;
-	el.documentDownButton.disabled = disabled || !state.editing || index >= count - 1;
+	const actionsDisabled = disabled || !state.editing || Boolean(manager?.loading || manager?.failed);
+	el.documentList.inert = busy || Boolean(manager?.loading);
+	el.documentAddButton.disabled = actionsDisabled;
+	el.infoButton.disabled = actionsDisabled || Boolean(manager && !manager.entries);
+	el.documentDeleteButton.disabled = actionsDisabled || count <= 1;
+	el.documentUpButton.disabled = actionsDisabled || index === 0;
+	el.documentDownButton.disabled = actionsDisabled || index >= count - 1;
 }
 
 function updateControls() {
@@ -8355,7 +8492,6 @@ function updateEditorTools() {
 	el.editButton.title = state.editing ? "阅读" : "编辑";
 	el.editButton.setAttribute("aria-label", el.editButton.title);
 	el.editNotice.textContent = state.editorInfo?.editWarnings?.join("；") || "";
-	el.infoButton.hidden = !state.editing;
 	el.editNotice.hidden = !state.editing || !el.editNotice.textContent;
 	el.editorTools.hidden = !state.editing;
 	const pagesDisabled = !state.editing || !state.ready || state.exporting;
@@ -8535,6 +8671,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	el.pageForm.inert = busy;
 	el.paragraphForm.inert = busy;
 	el.infoForm.inert = busy;
+	el.documentForm.inert = busy;
 	el.attachmentForm.inert = busy;
 	el.attachmentPanel.inert = busy;
 	el.annotationForm.inert = busy;

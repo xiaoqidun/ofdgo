@@ -23,6 +23,7 @@ import (
 	"io"
 	"maps"
 	"path"
+	"reflect"
 	"slices"
 	"strings"
 )
@@ -43,6 +44,50 @@ func (e *Editor) DocumentIndex() int {
 		return 0
 	}
 	return e.source.reader.DocumentIndex()
+}
+
+// DocumentInfo 获取指定文档信息的独立副本，不切换当前文档
+// 入参: index 文档索引，从0开始
+// 返回: DocInfo 文档信息, error 索引错误
+func (e *Editor) DocumentInfo(index int) (DocInfo, error) {
+	if index < 0 || index >= e.DocumentCount() {
+		return DocInfo{}, fmt.Errorf("document index %d out of range", index)
+	}
+	if index == e.DocumentIndex() {
+		return cloneEditorData(e.Info), nil
+	}
+	info := cloneEditorData(e.source.reader.OFD.DocBody[index].DocInfo)
+	if info.CustomDatas != nil {
+		for i := range info.CustomDatas.CustomData {
+			info.CustomDatas.CustomData[i].sourceIndex = i + 1
+		}
+	}
+	return info, nil
+}
+
+// SetDocumentInfo 修改指定文档信息，保留扩展内容，不切换当前文档，可通过Undo撤销
+// 入参: index 文档索引，从0开始, info 文档信息
+// 返回: error 修改错误
+func (e *Editor) SetDocumentInfo(index int, info DocInfo) error {
+	before, err := e.DocumentInfo(index)
+	if err != nil {
+		return err
+	}
+	if reflect.DeepEqual(before, info) {
+		return nil
+	}
+	if index == e.DocumentIndex() {
+		e.SetInfo(info)
+		return nil
+	}
+	return e.editDocuments(func(reader *Reader, data []byte, _ *editorXML) (int, error) {
+		updated, err := editorUpdateInfoXML(data, NewEditor().Info.DocID, index, before, info)
+		if err != nil {
+			return 0, err
+		}
+		reader.files[reader.fileNamesFold["ofd.xml"]] = updated
+		return reader.DocumentIndex(), nil
+	})
 }
 
 // AddDocument 在包内插入含一页的空白文档并选中，不修改输入包
@@ -116,26 +161,12 @@ func (e *Editor) AddDocument(title string, width, height float64, at int) (int, 
 // 入参: index 文档索引，从0开始, title 标题，空值移除标题
 // 返回: error 修改错误
 func (e *Editor) RenameDocument(index int, title string) error {
-	if index < 0 || index >= e.DocumentCount() {
-		return fmt.Errorf("document index %d out of range", index)
+	info, err := e.DocumentInfo(index)
+	if err != nil {
+		return err
 	}
-	if index == e.DocumentIndex() {
-		info := e.Info
-		info.Title = title
-		e.SetInfo(info)
-		return nil
-	}
-	if e.source.reader.OFD.DocBody[index].DocInfo.Title == title {
-		return nil
-	}
-	return e.editDocuments(func(reader *Reader, data []byte, _ *editorXML) (int, error) {
-		data, info, err := editorDocInfoXML(data, NewEditor().Info.DocID, index)
-		if err != nil {
-			return 0, err
-		}
-		reader.files[reader.fileNamesFold["ofd.xml"]] = editorXMLSetText(data, info, [][2]string{{"Title", title}})
-		return reader.DocumentIndex(), nil
-	})
+	info.Title = title
+	return e.SetDocumentInfo(index, info)
 }
 
 // MoveDocument 调整包内文档顺序，当前文档随条目移动，不重写内容，可通过Undo撤销

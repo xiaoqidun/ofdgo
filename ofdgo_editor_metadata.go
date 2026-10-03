@@ -29,16 +29,23 @@ func (e *Editor) sourceInfoXML() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, info, err := editorDocInfoXML(data, e.source.fallbackDocID, e.source.reader.documentIndex)
+	return editorUpdateInfoXML(data, e.source.fallbackDocID, e.source.reader.documentIndex, e.source.info, e.Info)
+}
+
+// editorUpdateInfoXML 更新指定文档的描述和自定义字段，保留未修改内容
+// 入参: data 根索引XML, docID 缺少描述时使用的标识, index 文档索引, before 原信息, after 新信息
+// 返回: []byte 修改后的XML, error 解析错误
+func editorUpdateInfoXML(data []byte, docID string, index int, before, after DocInfo) ([]byte, error) {
+	data, info, err := editorDocInfoXML(data, docID, index)
 	if err != nil {
 		return nil, err
 	}
-	before, after := e.source.info, e.Info
 	var values [][2]string
 	for _, field := range [][3]string{
 		{"DocID", before.DocID, after.DocID}, {"Title", before.Title, after.Title}, {"Author", before.Author, after.Author},
 		{"Subject", before.Subject, after.Subject}, {"Abstract", before.Abstract, after.Abstract},
 		{"CreationDate", before.CreationDate, after.CreationDate}, {"ModDate", before.ModDate, after.ModDate},
+		{"Creator", before.Creator, after.Creator}, {"CreatorVersion", before.CreatorVersion, after.CreatorVersion},
 	} {
 		if field[1] != field[2] {
 			values = append(values, [2]string{field[0], field[2]})
@@ -50,7 +57,7 @@ func (e *Editor) sourceInfoXML() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		return editorCustomDatas(data, root.childAt("DocBody", e.source.reader.documentIndex).child("DocInfo"), after.CustomDatas)
+		return editorCustomDatas(data, root.childAt("DocBody", index).child("DocInfo"), after.CustomDatas)
 	}
 	return data, nil
 }

@@ -332,6 +332,21 @@
 				<div class="form-actions"><div id="paragraphStatus" class="form-status" role="status"></div><button id="paragraphCancel" class="button" type="button">取消</button><button class="button" type="submit">确定</button></div>
 			</form>
 		</dialog>
+		<dialog id="documentPanel" class="form-dialog document-dialog" aria-labelledby="documentTitle">
+			<form id="documentForm">
+				<h2 id="documentTitle" class="form-title">文档管理</h2>
+				<div id="documentList" class="document-list" role="listbox" aria-label="文档列表"></div>
+				<div id="documentActions" class="document-actions" role="group" aria-label="文档操作">
+					<button id="documentAddButton" class="button" type="button" title="新增文档" aria-label="新增文档" aria-haspopup="dialog" aria-controls="createPanel">新增</button>
+					<button id="infoButton" class="button" type="button" title="修改文档" aria-label="修改文档信息" aria-haspopup="dialog" aria-controls="infoPanel">修改</button>
+					<button id="documentDeleteButton" class="button" type="button" title="删除文档" aria-label="删除文档">删除</button>
+					<button id="documentUpButton" class="button" type="button" title="前移文档" aria-label="前移文档">前移</button>
+					<button id="documentDownButton" class="button" type="button" title="后移文档" aria-label="后移文档">后移</button>
+					<button id="documentClose" class="button" type="button">关闭</button>
+				</div>
+				<div id="documentStatus" class="form-status" role="status"></div>
+			</form>
+		</dialog>
 		<dialog id="infoPanel" class="form-dialog" aria-label="文档信息">
 			<form id="infoForm">
 				<label class="form-row"><span>标题</span><input id="infoTitle" type="text" autofocus></label>
@@ -594,19 +609,11 @@
 				</section>
 				<div class="panel-row">
 					<div class="panel-title compact">文档</div>
-					<div id="documentActions" class="panel-actions" hidden>
-						<button id="documentAddButton" class="small-button" type="button" title="新建文档" aria-haspopup="dialog" aria-controls="createPanel">新建</button>
-						<button id="infoButton" class="small-button" type="button" title="修改文档" aria-label="修改文档信息" aria-haspopup="dialog" aria-controls="infoPanel" hidden>修改</button>
-						<button id="documentDeleteButton" class="small-button" type="button" title="删除文档">删除</button>
-					</div>
+					<button id="documentManageButton" class="small-button" type="button" title="文档管理" aria-label="文档管理" aria-haspopup="dialog" aria-controls="documentPanel" hidden>管理</button>
 				</div>
 				<div id="editNotice" class="font-permission-hint" role="status" hidden></div>
 				<div id="documentRow" class="document-row" hidden>
 					<select id="documentSelect" class="document-select" aria-label="选择文档" title="切换文档"></select>
-					<div id="documentOrder" class="panel-actions" hidden>
-						<button id="documentUpButton" class="small-button" type="button" title="前移文档" aria-label="前移文档">&#8593;</button>
-						<button id="documentDownButton" class="small-button" type="button" title="后移文档" aria-label="后移文档">&#8595;</button>
-					</div>
 				</div>
 				<dl class="meta-list">
 					<div>

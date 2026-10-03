@@ -98,12 +98,16 @@ type DocumentInfo struct {
 	DetailsPending  bool               `json:"detailsPending,omitempty"`
 }
 
-// DocumentEntry 包内文档入口，不预先解析其他文档的页面和资源
+// DocumentEntry 包内文档入口，管理列表按需补充元数据和页数
 type DocumentEntry struct {
-	Index int    `json:"index"`
-	Title string `json:"title"`
-	Root  string `json:"root"`
-	ID    string `json:"id"`
+	Index      int                `json:"index"`
+	Title      string             `json:"title"`
+	Root       string             `json:"root"`
+	ID         string             `json:"id"`
+	Author     string             `json:"author,omitempty"`
+	Subject    string             `json:"subject,omitempty"`
+	CustomData []ofdgo.CustomData `json:"customData,omitempty"`
+	PageCount  *int               `json:"pageCount,omitempty"`
 }
 
 // DocumentDetails 不含页面数组的文档补充信息

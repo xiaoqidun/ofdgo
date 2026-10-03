@@ -186,6 +186,7 @@ func RunWASM() {
 	registerCallback("ofdgoOpen", openDocument)
 	registerCallback("ofdgoSelectDocument", selectDocument)
 	registerCallback("ofdgoChangeDocument", changePackageDocument)
+	registerCallback("ofdgoPackageDocuments", packageDocuments)
 	registerAsyncCallback("ofdgoConvertPDF", convertPDFDocument)
 	registerAsyncCallback("ofdgoConvertFile", convertFile)
 	registerAsyncCallback("ofdgoPackFiles", packFiles)
@@ -3285,11 +3286,21 @@ func createDocument(args []js.Value) (any, error) {
 }
 
 // updateInfo 修改文档信息和自定义字段，保留其他元数据及创建程序标识
-// 入参: args 标题、作者、主题、可选自定义字段JSON
+// 入参: args 标题、作者、主题、可选自定义字段JSON及文档索引
 // 返回: any 编辑状态, error 错误信息
 func updateInfo(args []js.Value) (any, error) {
 	return changeObjects(func() error {
-		info := currentEditor.Info
+		if len(args) < 3 || len(args) > 5 {
+			return fmt.Errorf("invalid document info arguments")
+		}
+		index := currentEditor.DocumentIndex()
+		if len(args) > 4 {
+			index = args[4].Int()
+		}
+		info, err := currentEditor.DocumentInfo(index)
+		if err != nil {
+			return err
+		}
 		info.Title, info.Author, info.Subject = args[0].String(), args[1].String(), args[2].String()
 		if len(args) > 3 {
 			var submitted []struct {
@@ -3317,9 +3328,38 @@ func updateInfo(args []js.Value) (any, error) {
 				info.CustomDatas = &ofdgo.CustomDatas{CustomData: fields}
 			}
 		}
-		currentEditor.SetInfo(info)
-		return nil
+		return currentEditor.SetDocumentInfo(index, info)
 	})
+}
+
+// packageDocuments 按需读取管理列表的元数据和页数，不切换当前文档或解析页面内容
+// 入参: args 保留参数
+// 返回: any 文档列表, error 编辑状态错误
+func packageDocuments(args []js.Value) (any, error) {
+	if currentSession == nil || currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	entries := make([]DocumentEntry, currentEditor.DocumentCount())
+	for i := range entries {
+		info, err := currentEditor.DocumentInfo(i)
+		if err != nil {
+			return nil, err
+		}
+		entry := &entries[i]
+		body := currentSession.Reader.OFD.DocBody[i]
+		entry.Index, entry.Root, entry.ID = i, body.DocRoot, info.DocID
+		entry.Title, entry.Author, entry.Subject = info.Title, info.Author, info.Subject
+		if info.CustomDatas != nil {
+			entry.CustomData = info.CustomDatas.CustomData
+		}
+		if i == currentEditor.DocumentIndex() {
+			count := currentEditor.PageCount()
+			entry.PageCount = &count
+		} else if count, err := currentSession.Reader.DocumentPageCount(i); err == nil {
+			entry.PageCount = &count
+		}
+	}
+	return entries, nil
 }
 
 // changeAttachment 编辑附件，逐个读取文件并复用库层事务和历史

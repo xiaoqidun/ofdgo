@@ -1429,6 +1429,7 @@ body[data-hide-meta] .meta-panel {
 .viewer-panel,
 .search-results,
 .editor-toolbar,
+.document-list,
 .meta-panel {
 	scrollbar-width: thin;
 	scrollbar-color: var(--line-strong) transparent;
@@ -1523,16 +1524,6 @@ body[data-hide-meta] .meta-panel {
 	margin-bottom: 10px;
 }
 
-.document-row .panel-actions {
-	flex-wrap: nowrap;
-}
-
-.document-row .small-button {
-	width: 28px;
-	height: 28px;
-	padding: 0;
-}
-
 .document-select {
 	flex: 1;
 	width: 0;
@@ -1540,6 +1531,81 @@ body[data-hide-meta] .meta-panel {
 	height: 28px;
 	padding: 0 6px;
 	font-size: 12px;
+}
+
+.document-dialog {
+	width: 440px;
+}
+
+.document-dialog .form-status:not(:empty) {
+	margin-top: 8px;
+}
+
+.document-actions {
+	display: grid;
+	grid-template-columns: repeat(6, minmax(0, 1fr));
+	gap: 6px;
+}
+
+.document-actions > .button {
+	min-width: 0;
+	padding-inline: 6px;
+}
+
+.document-list {
+	max-height: 45dvh;
+	min-height: 80px;
+	margin-bottom: 12px;
+	border: 1px solid var(--line);
+	overflow: auto;
+}
+
+.document-entry {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) 4em;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	min-height: 38px;
+	padding: 8px 10px;
+	border: 0;
+	border-bottom: 1px solid var(--line);
+	text-align: left;
+}
+
+.document-entry:last-child {
+	border-bottom: 0;
+}
+
+.document-entry:hover,
+.document-entry[aria-selected="true"] {
+	background: var(--accent-soft);
+}
+
+.document-entry[aria-selected="true"] {
+	color: var(--accent-strong);
+}
+
+.document-entry:focus-visible {
+	outline-offset: -2px;
+}
+
+.document-name {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.document-pages {
+	font-size: 12px;
+	color: var(--text-muted);
+	white-space: nowrap;
+}
+
+.document-pages {
+	text-align: right;
+	font-variant-numeric: tabular-nums;
 }
 
 .app-panel {
@@ -3125,6 +3191,10 @@ audio.page-media {
 
 	.workspace {
 		grid-template-columns: 1fr;
+	}
+
+	.document-actions {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 	}
 
 	.tool-group + .tool-group::before {
