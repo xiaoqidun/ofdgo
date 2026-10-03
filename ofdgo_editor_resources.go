@@ -37,10 +37,11 @@ type editorResourceRefs struct {
 // compactSourceResources 在保存副本中清理无引用字体、图片和已删除附件，并裁剪可完整确认用字的原有字体
 // 按GB/T33190-2016附录A检查标识和路径引用，包括模板、注释、底纹、裁剪、版本和其他文档
 // 全包检查保留孤立XML中的引用；未知命名空间、扩展数据或无法解析的XML使本次清理跳过
+// 多文档包保留原资源，避免独立文档的同号资源和共享文件被误删或裁剪
 // 入参: parts 已修改和新增的包内条目, progress 保存进度回调
 // 返回: map[string]bool 可移除的二进制条目, error 读取错误
 func (e *Editor) compactSourceResources(parts map[string][]byte, progress editorProgress) (map[string]bool, error) {
-	if e.output != nil && e.output.protected {
+	if e.source.reader.DocumentCount() > 1 || e.output != nil && e.output.protected {
 		return nil, nil
 	}
 	if len(parts) == 0 && e.revision == 0 && (e.output == nil || e.output.options.Mode == CompressionUnchanged) {

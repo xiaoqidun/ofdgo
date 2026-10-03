@@ -108,7 +108,7 @@ type PageCapabilities struct {
 	Resize bool
 }
 
-// Editor 打开主文档进行保真编辑，不修改输入包，不以权限声明或签名限制编辑
+// Editor 打开当前文档进行保真编辑，不修改输入包，不以权限声明或签名限制编辑
 // 原权限和签名数据保留，修改受保护内容会使原签名失效，不重新签名
 // 页面按需解析，未修改条目直接保留；编辑器及其Reader快照使用期间不得关闭输入Reader
 // 返回: *Editor 编辑器, error 错误信息
@@ -205,7 +205,7 @@ func (c ObjectCapabilities) editError() error {
 }
 
 // cloneEditorReader 复用已验证的只读包索引，独立保存可变文档与读取缓存
-// 入参: reader 已加载主文档的阅读器
+// 入参: reader 已加载当前文档的阅读器
 // 返回: *Reader 不拥有输入文件的独立阅读器
 func cloneEditorReader(reader *Reader) *Reader {
 	next := *reader

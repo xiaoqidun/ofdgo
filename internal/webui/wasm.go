@@ -184,6 +184,7 @@ func (r *browserReaderAt) ReadAt(data []byte, offset int64) (int, error) {
 // RunWASM 注册浏览器WASM接口并阻塞运行
 func RunWASM() {
 	registerCallback("ofdgoOpen", openDocument)
+	registerCallback("ofdgoSelectDocument", selectDocument)
 	registerAsyncCallback("ofdgoConvertPDF", convertPDFDocument)
 	registerAsyncCallback("ofdgoConvertFile", convertFile)
 	registerAsyncCallback("ofdgoPackFiles", packFiles)
@@ -3359,6 +3360,27 @@ func changeAttachment(args []js.Value) (any, error) {
 	})
 }
 
+// selectDocument 切换包内文档，保留编辑快照并清除跨文档剪贴板
+// 入参: args 文档索引
+// 返回: any 文档信息, error 错误信息
+func selectDocument(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) == 0 {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	session, err := currentSession.Document(args[0].Int())
+	if err != nil {
+		return nil, err
+	}
+	_ = currentSession.Close()
+	currentSession, currentEditor = session, session.editor
+	if pendingImport != nil {
+		_ = pendingImport.Close()
+		pendingImport = nil
+	}
+	copiedObjects, copiedStyle = nil, nil
+	return editorSummary(), nil
+}
+
 // editDocument 将已打开文档接入编辑器，沿用页面、资源及字体配置
 // 入参: args 当前页索引，省略时使用首页
 // 返回: any 编辑状态, error 错误信息
@@ -3367,6 +3389,7 @@ func editDocument(args []js.Value) (any, error) {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
 	if currentEditor != nil {
+		currentSession.editing = true
 		return editorSummary(), nil
 	}
 	editor, err := currentSession.Reader.Editor()
@@ -3952,7 +3975,7 @@ func verifySignatures(args []js.Value) (any, error) {
 			Certificates:                append(files["certificates"], files["roots"]...), Required: policy.RequireRevocation, VerifyTime: &now,
 		}))
 	}
-	reports, err := currentSession.Reader.VerifySignatures(options...)
+	reports, err := currentSession.Reader.VerifyDocumentSignatures(currentSession.Reader.DocumentIndex(), options...)
 	if err != nil {
 		return nil, err
 	}

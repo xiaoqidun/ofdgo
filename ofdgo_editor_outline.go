@@ -264,7 +264,7 @@ func (e *Editor) outlineXML() ([]byte, error) {
 	}
 	if e.source != nil {
 		reader := e.source.reader
-		data, err := reader.readFile(reader.ResPath(reader.OFD.DocBody[0].DocRoot))
+		data, err := reader.readFile(reader.ResPath(reader.OFD.DocBody[reader.documentIndex].DocRoot))
 		if err != nil {
 			return nil, err
 		}

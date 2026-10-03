@@ -72,6 +72,8 @@ type pageBoxInfo struct {
 
 // DocumentInfo 文档信息
 type DocumentInfo struct {
+	DocumentIndex   int                `json:"documentIndex"`
+	Documents       []DocumentEntry    `json:"documents,omitempty"`
 	Encryption      EncryptionInfo     `json:"encryption"`
 	Version         string             `json:"version"`
 	DocType         string             `json:"docType"`
@@ -94,6 +96,12 @@ type DocumentInfo struct {
 	Pages           []PageInfo         `json:"pages"`
 	Outlines        []OutlineInfo      `json:"outlines,omitempty"`
 	DetailsPending  bool               `json:"detailsPending,omitempty"`
+}
+
+// DocumentEntry 包内文档入口，不预先解析其他文档的页面和资源
+type DocumentEntry struct {
+	Index int    `json:"index"`
+	Title string `json:"title"`
 }
 
 // DocumentDetails 不含页面数组的文档补充信息
@@ -287,6 +295,45 @@ func (s *Session) Close() error {
 	return nil
 }
 
+// Document 创建指定文档的会话，保留编辑内容和字体配置，不复用页面缓存
+// 不关闭原会话，输入文件的生命周期由原会话管理
+// 入参: index 文档索引，从0开始
+// 返回: *Session 文档会话, error 错误信息
+func (s *Session) Document(index int) (*Session, error) {
+	reader := s.Reader
+	if s.editor != nil {
+		var err error
+		reader, err = s.editor.Reader()
+		if err != nil {
+			return nil, err
+		}
+	}
+	reader, err := reader.Document(index)
+	if err != nil {
+		return nil, err
+	}
+	next, err := newSession(reader, OpenOptions{RenderAnnotations: s.Renderer.RenderAnnotations})
+	if err != nil {
+		return nil, err
+	}
+	ofdgo.WithRenderBackends(s.Renderer.Backends())(next.Renderer)
+	next.fontFS = s.fontFS
+	if next.fontFS != nil {
+		next.Renderer.SetFontFS(next.fontFS)
+	}
+	next.editor, err = reader.Editor()
+	if err != nil {
+		return nil, err
+	}
+	next.editor.SetHistoryLimit(100)
+	if next.fontFS != nil {
+		next.editor.SetFontFS(next.fontFS)
+	}
+	next.editor.SetRenderBackends(next.Renderer.Backends())
+	next.editing = true
+	return next, nil
+}
+
 // SetFonts 更新字体配置并保留文档、页面和验签结果
 // 入参: fonts 字体文件列表
 // 返回: error 错误信息
@@ -376,6 +423,7 @@ func (s *Session) SearchPage(index int, query string) ([]ofdgo.TextMatch, error)
 // 返回: DocumentInfo 文档信息
 func (s *Session) Summary() DocumentInfo {
 	info := DocumentInfo{
+		DocumentIndex:  s.Reader.DocumentIndex(),
 		Encryption:     s.encryptionInfo(),
 		Version:        s.Reader.Version(),
 		DocType:        s.Reader.DocType(),
@@ -383,6 +431,9 @@ func (s *Session) Summary() DocumentInfo {
 		Pages:          s.pageInfos(),
 		Outlines:       s.doc.OutlineInfos(),
 		DetailsPending: true,
+	}
+	for index, body := range s.Reader.OFD.DocBody {
+		info.Documents = append(info.Documents, DocumentEntry{Index: index, Title: body.DocInfo.Title})
 	}
 	if docInfo, err := s.Reader.DocInfo(); err == nil && docInfo != nil {
 		info.Title = docInfo.Title
@@ -788,7 +839,7 @@ func (s *Session) signatureInfos() ([]SignatureInfo, error) {
 		return s.signatures, s.signatureError
 	}
 	s.signaturesRead = true
-	reports, err := s.Reader.VerifySignatures()
+	reports, err := s.Reader.VerifyDocumentSignatures(s.Reader.DocumentIndex())
 	if err != nil {
 		s.signatureError = err
 		return nil, err

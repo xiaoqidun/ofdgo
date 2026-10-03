@@ -29,7 +29,7 @@ func (e *Editor) sourceInfoXML() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, info, err := editorDocInfoXML(data, e.source.fallbackDocID)
+	data, info, err := editorDocInfoXML(data, e.source.fallbackDocID, e.source.reader.documentIndex)
 	if err != nil {
 		return nil, err
 	}
@@ -50,16 +50,16 @@ func (e *Editor) sourceInfoXML() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		return editorCustomDatas(data, root.child("DocBody").child("DocInfo"), after.CustomDatas)
+		return editorCustomDatas(data, root.childAt("DocBody", e.source.reader.documentIndex).child("DocInfo"), after.CustomDatas)
 	}
 	return data, nil
 }
 
-// editorCreatorXML 更新首份文档的制作软件，移除原软件版本，保留其余根索引内容
-// 入参: data 当前根索引XML, docID 缺少文档描述时使用的标识
+// editorCreatorXML 更新指定文档的制作软件，移除原软件版本，保留其余根索引内容
+// 入参: data 当前根索引XML, docID 缺少文档描述时使用的标识, index 文档索引
 // 返回: []byte 修改后的XML, error 解析错误
-func editorCreatorXML(data []byte, docID string) ([]byte, error) {
-	data, info, err := editorDocInfoXML(data, docID)
+func editorCreatorXML(data []byte, docID string, index int) ([]byte, error) {
+	data, info, err := editorDocInfoXML(data, docID, index)
 	if err != nil {
 		return nil, err
 	}
@@ -67,14 +67,14 @@ func editorCreatorXML(data []byte, docID string) ([]byte, error) {
 }
 
 // editorDocInfoXML 获取文档描述，修改缺少描述的源文件时补建标准容器及标识
-// 入参: data 根索引XML, docID 缺少文档描述时使用的标识
+// 入参: data 根索引XML, docID 缺少文档描述时使用的标识, index 文档索引
 // 返回: []byte 根索引XML, *editorXML 描述节点, error 解析错误
-func editorDocInfoXML(data []byte, docID string) ([]byte, *editorXML, error) {
+func editorDocInfoXML(data []byte, docID string, index int) ([]byte, *editorXML, error) {
 	root, err := parseEditorXML(data)
 	if err != nil {
 		return nil, nil, err
 	}
-	body := root.child("DocBody")
+	body := root.childAt("DocBody", index)
 	if body == nil {
 		return nil, nil, fmt.Errorf("document has no DocBody")
 	}
@@ -90,7 +90,7 @@ func editorDocInfoXML(data []byte, docID string) ([]byte, *editorXML, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return data, root.child("DocBody").child("DocInfo"), nil
+	return data, root.childAt("DocBody", index).child("DocInfo"), nil
 }
 
 // editorCustomDatas 更新自定义字段，保留原字段及容器的扩展内容

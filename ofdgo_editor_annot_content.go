@@ -313,7 +313,7 @@ func (e *Editor) appendAnnotations(index int, annotations []byte) error {
 	}
 	parts := map[string][]byte{name: data, file: content}
 	if base.document.Annotations == "" {
-		docName := cleanPackagePath(reader.OFD.DocBody[0].DocRoot)
+		docName := cleanPackagePath(reader.OFD.DocBody[reader.documentIndex].DocRoot)
 		docData, err := reader.readFile(docName)
 		if err != nil {
 			return err
@@ -391,7 +391,7 @@ func (e *Editor) commitAnnotationParts(base *editorSource, parts map[string][]by
 		}
 		files[name] = data
 	}
-	reader := &Reader{Zip: base.reader.Zip, files: files}
+	reader := &Reader{Zip: base.reader.Zip, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex}
 	if err := reader.initRoot(); err != nil {
 		return err
 	}

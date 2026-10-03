@@ -224,7 +224,7 @@ func (e *Editor) ImportObjects(source *Editor, sourcePage int, ids []string, pag
 	return copied, err
 }
 
-// ImportPages 将来源主文档中的指定页面插入目标位置，保持输入顺序并作为一次撤销操作
+// ImportPages 将来源当前文档中的指定页面插入目标位置，保持输入顺序并作为一次撤销操作
 // 页面索引从0开始，at可等于当前页数；复制关联模板、注释、签章外观和实际引用的资源
 // 不导入来源元数据和目录，指向未选页面的跳转被移除；签名数据仅保留原始凭据，不代表合并后文档有效
 // 返回后可关闭来源Reader，目标原Reader的生命周期要求不变
@@ -450,7 +450,7 @@ func (e *Editor) prepareImport(source *Reader, doc *Document, selected map[strin
 	for _, resource := range e.resources {
 		m.files[resource.name] = nil
 	}
-	m.documentXML, err = m.readFile(source.ResPath(source.OFD.DocBody[0].DocRoot))
+	m.documentXML, err = m.readFile(source.ResPath(source.OFD.DocBody[source.documentIndex].DocRoot))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -530,7 +530,7 @@ func (m *editorPageImport) readFile(name string) ([]byte, error) {
 // outlines 筛选指向导入页面的目录树并复用标准动作迁移
 // 返回: []byte 目录片段, error 错误信息
 func (m *editorPageImport) outlines() ([]byte, error) {
-	name := m.reader.ResPath(m.reader.OFD.DocBody[0].DocRoot)
+	name := m.reader.ResPath(m.reader.OFD.DocBody[m.reader.documentIndex].DocRoot)
 	data, err := m.readFile(name)
 	if err != nil {
 		return nil, err
@@ -1132,7 +1132,7 @@ func (m *editorPageImport) attachment(id string) (string, error) {
 	if _, exists := m.attachments[id]; exists {
 		return m.id(id), nil
 	}
-	name := m.reader.ResPath(m.reader.OFD.DocBody[0].DocRoot)
+	name := m.reader.ResPath(m.reader.OFD.DocBody[m.reader.documentIndex].DocRoot)
 	if m.doc.Attachments.Path != "" {
 		name = m.reader.ResPath(m.doc.Attachments.Path)
 	}
@@ -1215,7 +1215,7 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 		files = make(map[string][]byte)
 	}
 	maps.Copy(files, m.files)
-	name := base.reader.ResPath(base.reader.OFD.DocBody[0].DocRoot)
+	name := base.reader.ResPath(base.reader.OFD.DocBody[base.reader.documentIndex].DocRoot)
 	if file, ok := base.reader.packageFile(name); ok {
 		name = cleanPackagePath(file.Name)
 	}
@@ -1318,10 +1318,10 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 			if file, ok := base.reader.packageFile(name); ok {
 				name = cleanPackagePath(file.Name)
 			}
-			files[name] = editorXMLSetText(ofd, root.child("DocBody"), [][2]string{{"Signatures", loc}})
+			files[name] = editorXMLSetText(ofd, root.childAt("DocBody", base.reader.documentIndex), [][2]string{{"Signatures", loc}})
 		}
 	}
-	reader := &Reader{Zip: base.reader.Zip, files: files}
+	reader := &Reader{Zip: base.reader.Zip, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex}
 	if err := reader.initRoot(); err != nil {
 		return nil, err
 	}

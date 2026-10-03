@@ -51,6 +51,7 @@ const state = {
 	editorInfo: null,
 	editorViews: new Map(),
 	savedRevision: null,
+	packageDirty: false,
 	encryptionDirty: false,
 	insertObject: null,
 	importPageCount: 0,
@@ -231,6 +232,7 @@ const el = {
 	textFontAdd: document.querySelector("#textFontAdd"),
 	paragraphButton: document.querySelector("#paragraphButton"),
 	infoButton: document.querySelector("#infoButton"),
+	documentSelect: document.querySelector("#documentSelect"),
 	infoPanel: document.querySelector("#infoPanel"),
 	infoForm: document.querySelector("#infoForm"),
 	infoTitle: document.querySelector("#infoTitle"),
@@ -611,9 +613,11 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 });
 
 function updatePendingChanges() {
-	setDirty(state.encryptionDirty || Boolean(state.editorInfo) && (state.editorInfo.revision !== state.savedRevision
+	setDirty(state.packageDirty || state.encryptionDirty || Boolean(state.editorInfo) && (state.editorInfo.revision !== state.savedRevision
 		|| canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged()));
 }
+
+el.documentSelect.addEventListener("change", () => switchDocument(Number(el.documentSelect.value)));
 
 el.editorTools.addEventListener("pointerdown", (event) => {
 	if ((canvasEditor.input || canvasEditor.nudge) && event.target.closest("button")) event.preventDefault();
@@ -1929,7 +1933,40 @@ function discardChanges() {
 function setEditorInfo(doc) {
 	state.editorInfo = { revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 		pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || [] };
-	setDirty(state.encryptionDirty || doc.revision !== state.savedRevision);
+	setDirty(state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision);
+}
+
+async function switchDocument(index) {
+	if (!state.doc || document.body.hasAttribute("aria-busy") || state.exporting || formDialogOpen()) return;
+	const previous = state.doc.documentIndex || 0;
+	if (index === previous) return;
+	if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop()) {
+		el.documentSelect.value = String(previous);
+		return;
+	}
+	const openSeq = ++state.openSeq;
+	setBusy(true, "正在切换文档");
+	try {
+		const doc = await callWASM("ofdgoSelectDocument", index);
+		if (openSeq !== state.openSeq) return;
+		state.packageDirty ||= state.dirty;
+		state.savedRevision = doc.revision;
+		state.editorViews.clear();
+		state.objectClipboard = state.styleClipboard = null;
+		resetCompositeScope();
+		canvasEditor.clear();
+		canvasEditor.setTool("");
+		state.ofdBytes = null;
+		setEditorInfo(doc);
+		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true, clearSelection: true, fitMode: state.fitMode, scale: state.scale });
+	} catch (error) {
+		if (openSeq === state.openSeq) {
+			el.documentSelect.value = String(previous);
+			showError(error, false);
+		}
+	} finally {
+		if (openSeq === state.openSeq) setBusy(false);
+	}
 }
 
 function editorLocation() {
@@ -2110,6 +2147,7 @@ async function createDocument(event) {
 		state.fileName = `${title.replace(/[\\/:*?"<>|]+/g, "_").replace(/\.ofd$/i, "")}.ofd`;
 		state.conversionWarnings = [];
 		state.savedRevision = null;
+		state.packageDirty = false;
 		state.encryptionDirty = false;
 		setEditorInfo(doc);
 		el.createPanel.close();
@@ -3616,6 +3654,7 @@ async function openOFD(file, remote = null) {
 		state.editorViews.clear();
 		state.fontRenderPending = false;
 		state.savedRevision = null;
+		state.packageDirty = false;
 		state.encryptionDirty = false;
 		canvasEditor.clear();
 		setDirty(false);
@@ -5299,6 +5338,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value) 
 		}
 		if (saving && indices === null && state.editorInfo) {
 			state.savedRevision = state.editorInfo.revision;
+			state.packageDirty = false;
 			state.encryptionDirty = false;
 			setDirty(false);
 		}
@@ -7383,6 +7423,16 @@ function renderMeta(keepDetails = false) {
 		}));
 	});
 	const doc = state.doc || {};
+	el.documentSelect.hidden = (doc.documents?.length || 0) < 2;
+	renderMetaContent(el.documentSelect, doc.documents || [], () => {
+		el.documentSelect.replaceChildren(...(doc.documents || []).map(entry => {
+			const option = document.createElement("option");
+			option.value = String(entry.index);
+			option.textContent = `${entry.index + 1} · ${entry.title || "未命名"}`;
+			return option;
+		}));
+	});
+	el.documentSelect.value = String(doc.documentIndex || 0);
 	el.metaPanel.setAttribute("aria-busy", String(!!doc.detailsPending));
 	document.title = `OFDGo WebUI - ${state.fileName}`;
 	el.metaFile.textContent = state.fileName;
@@ -8200,6 +8250,7 @@ function updateControls() {
 	el.attachmentAdd.disabled = !state.editing || !state.ready || state.exporting;
 	renderMetaContent(el.attachmentList, [state.doc?.attachments, state.doc?.attachmentError, state.editing], renderAttachments);
 	const hasDoc = Boolean(state.doc);
+	el.documentSelect.disabled = !hasDoc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
 	updateDisplayControls();
 	updateEditorTools();
 	const pageCount = state.doc ? state.doc.pageCount : 0;
@@ -8403,6 +8454,7 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("aria-busy", busy);
+	el.documentSelect.disabled = busy || !state.doc || !state.ready || state.exporting;
 	renderSecurity();
 	updateDisplayControls();
 	el.editButton.disabled = busy || Boolean(sealPreview) || !state.doc || !state.ready || state.exporting;

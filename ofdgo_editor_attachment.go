@@ -65,7 +65,7 @@ func (e *Editor) AddAttachment(name string, data []byte) (string, error) {
 		return "", err
 	}
 	entry = bytes.TrimPrefix(entry, []byte(xml.Header))
-	docName := cleanPackagePath(base.reader.OFD.DocBody[0].DocRoot)
+	docName := cleanPackagePath(base.reader.OFD.DocBody[base.reader.documentIndex].DocRoot)
 	docData, err := base.reader.readFile(docName)
 	if err != nil {
 		return "", err
@@ -190,7 +190,7 @@ func (e *Editor) editAttachment(id string, change func([]byte, *editorXML, map[s
 	if base == nil {
 		return fmt.Errorf("attachment not found: %s", id)
 	}
-	name := cleanPackagePath(base.reader.OFD.DocBody[0].DocRoot)
+	name := cleanPackagePath(base.reader.OFD.DocBody[base.reader.documentIndex].DocRoot)
 	external := strings.TrimSpace(base.document.Attachments.Path) != ""
 	if external {
 		name = base.reader.ResPath(base.document.Attachments.Path)

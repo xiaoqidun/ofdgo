@@ -109,6 +109,12 @@ func SignEditorTo(writer io.Writer, editor *Editor, options SignatureWriteOption
 	if err != nil {
 		return 0, err
 	}
+	if editor.source != nil {
+		r, err = r.Document(editor.source.reader.DocumentIndex())
+		if err != nil {
+			return 0, err
+		}
+	}
 	r.encryption = editor.encryption
 	options.progress = editorProgress(editor.OnWriteProgress)
 	return r.SignTo(writer, options)
@@ -167,7 +173,7 @@ func signatureWriteOutput(r *Reader, options SignatureWriteOptions) ([]byte, err
 	if err := options.progress.report("sign", 0, 1); err != nil {
 		return nil, err
 	}
-	data, err := signatureWritePackage(parts, options)
+	data, err := signatureWritePackage(parts, options, r.DocumentIndex())
 	if err != nil {
 		return nil, err
 	}
@@ -213,27 +219,49 @@ func signatureWriteParts(r *Reader) (map[string][]byte, error) {
 
 // signatureWritePackage 完成输出优化后计算签名，不改写已有签名保护的资源
 // 签名目录采用Sign_N兼容OFDRW容器，标识使用独立的sN签章域
-// 入参: parts 独立包文件, options 签署选项
+// 入参: parts 独立包文件, options 签署选项, index 文档索引
 // 返回: []byte 完整包, error 错误信息
-func signatureWritePackage(parts map[string][]byte, options SignatureWriteOptions) ([]byte, error) {
+func signatureWritePackage(parts map[string][]byte, options SignatureWriteOptions, index int) ([]byte, error) {
 	if err := options.Compression.Validate(); err != nil {
 		return nil, err
 	}
 	if options.Mode != SignatureAppend && options.Mode != SignatureReplace {
 		return nil, fmt.Errorf("unsupported signature write mode")
 	}
-	r := &Reader{files: parts}
+	r := &Reader{files: parts, documentIndex: index}
 	if err := r.initRoot(); err != nil {
 		return nil, err
-	}
-	if len(r.OFD.DocBody) != 1 {
-		return nil, fmt.Errorf("signature writing requires exactly one document")
 	}
 	doc, err := r.Doc()
 	if err != nil {
 		return nil, err
 	}
-	if options.Compression.Mode != CompressionUnchanged && doc.Signatures == "" {
+	protected := make(map[string][]byte)
+	for other := range r.OFD.DocBody {
+		if other == index {
+			continue
+		}
+		view, err := r.Document(other)
+		if err != nil {
+			return nil, err
+		}
+		if view.doc.Signatures == "" {
+			continue
+		}
+		reports, err := r.VerifyDocumentSignatures(other)
+		if err != nil {
+			return nil, err
+		}
+		for _, report := range reports {
+			if report.Error != "" {
+				return nil, fmt.Errorf("cannot preserve document %d signature: %s", other, report.Error)
+			}
+			for _, ref := range report.References {
+				protected[ref.Path] = bytes.Clone(parts[ref.Path])
+			}
+		}
+	}
+	if options.Compression.Mode != CompressionUnchanged && doc.Signatures == "" && len(protected) == 0 {
 		images, err := r.Images(context.Background())
 		if err != nil {
 			return nil, err
@@ -271,7 +299,7 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 				delete(parts, name)
 			}
 		}
-		r = &Reader{files: parts}
+		r = &Reader{files: parts, documentIndex: index}
 		if err := r.initRoot(); err != nil {
 			return nil, err
 		}
@@ -307,7 +335,7 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 	verifyOptions := append([]SignatureVerifyOption(nil), options.ExistingVerifyOptions...)
 	verifyOptions = append(verifyOptions, WithSignatureCert(identity.cert.Raw))
 	if options.Mode == SignatureAppend && oldCount > 0 {
-		reports, err := r.VerifySignatures(verifyOptions...)
+		reports, err := r.VerifyDocumentSignatures(index, verifyOptions...)
 		if err != nil {
 			return nil, err
 		}
@@ -330,7 +358,7 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 		if err != nil {
 			return nil, err
 		}
-		body := root.child("DocBody")
+		body := root.childAt("DocBody", index)
 		if body == nil {
 			return nil, fmt.Errorf("missing document body")
 		}
@@ -411,6 +439,11 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 	if err != nil {
 		return nil, err
 	}
+	for name, before := range protected {
+		if !bytes.Equal(before, parts[name]) {
+			return nil, fmt.Errorf("another document signature protects %s", name)
+		}
+	}
 	output, err := signatureWriteZIP(parts, options.Compression)
 	if err != nil {
 		return nil, err
@@ -419,7 +452,7 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 	if err != nil {
 		return nil, err
 	}
-	reports, err := check.VerifySignatures(verifyOptions...)
+	reports, err := check.VerifyDocumentSignatures(index, verifyOptions...)
 	if err != nil {
 		return nil, err
 	}

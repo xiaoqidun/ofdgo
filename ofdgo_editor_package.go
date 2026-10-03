@@ -99,7 +99,7 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 	}
 	pagesChanged := !slices.Equal(pageRefs, source.document.Pages.Page)
 	if pagesChanged || len(resourceFiles) != 0 || len(parts) != 0 && e.maxID != source.document.CommonData.MaxUnitID {
-		name := reader.ResPath(reader.OFD.DocBody[0].DocRoot)
+		name := reader.ResPath(reader.OFD.DocBody[reader.documentIndex].DocRoot)
 		data, err := reader.readFile(name)
 		if err != nil {
 			return nil, err
@@ -199,7 +199,7 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 		parts["OFD.xml"] = data
 	}
 	if e.outlines != nil {
-		name := reader.ResPath(reader.OFD.DocBody[0].DocRoot)
+		name := reader.ResPath(reader.OFD.DocBody[reader.documentIndex].DocRoot)
 		data, ok := parts[name]
 		if !ok {
 			var err error
@@ -468,7 +468,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 				return 0, err
 			}
 		}
-		data, err = editorCreatorXML(data, e.source.fallbackDocID)
+		data, err = editorCreatorXML(data, e.source.fallbackDocID, reader.documentIndex)
 		if err != nil {
 			return 0, err
 		}
@@ -592,7 +592,7 @@ func (e *Editor) sourceReader(progress editorProgress) (*Reader, error) {
 		files = make(map[string][]byte)
 	}
 	maps.Copy(files, parts)
-	reader := &Reader{Zip: e.source.reader.Zip, files: files, encryption: e.encryption}
+	reader := &Reader{Zip: e.source.reader.Zip, files: files, encryption: e.encryption, documentIndex: e.source.reader.documentIndex}
 	if err := reader.initRoot(); err != nil {
 		return nil, err
 	}

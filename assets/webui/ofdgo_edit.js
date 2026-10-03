@@ -536,6 +536,12 @@ export class CanvasEditor {
 	}
 
 	start(event) {
+		if (event.target === this.viewer) {
+			const rect = this.viewer.getBoundingClientRect();
+			const left = rect.left + (this.viewer.clientLeft || 0), top = rect.top + (this.viewer.clientTop || 0);
+			if (event.clientX < left || event.clientX >= left + this.viewer.clientWidth
+				|| event.clientY < top || event.clientY >= top + this.viewer.clientHeight) return;
+		}
 		if (this.nudge) {
 			this.commitNudge();
 			return;

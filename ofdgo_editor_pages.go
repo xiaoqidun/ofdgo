@@ -21,7 +21,7 @@ import (
 )
 
 // prunePageReferences 在输出快照中删除已移除页面的标准引用，不修改历史快照或其他文档
-// 沿主文档、页面、模板、资源、注释和签名索引检查，不进入附件、私有扩展和签名原始凭据
+// 沿当前文档、页面、模板、资源、注释和签名索引检查，不进入附件、私有扩展和签名原始凭据
 // 入参: parts 输出覆盖条目
 // 返回: error 读取或解析错误
 func (e *Editor) prunePageReferences(parts map[string][]byte) error {
@@ -48,7 +48,7 @@ func (e *Editor) prunePageReferences(parts map[string][]byte) error {
 			bookmarks[bookmark.Name] = true
 		}
 	}
-	queue := []string{reader.ResPath(reader.OFD.DocBody[0].DocRoot)}
+	queue := []string{reader.ResPath(reader.OFD.DocBody[reader.documentIndex].DocRoot)}
 	if name := e.source.document.Signatures; name != "" {
 		queue = append(queue, reader.ResPath(name))
 	}

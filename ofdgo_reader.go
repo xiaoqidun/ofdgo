@@ -46,6 +46,7 @@ type Reader struct {
 	compositeGraphicUnitCache map[string]*CompositeGraphicUnit
 	pageHeaderCache           map[string]PageContent
 	doc                       *Document
+	documentIndex             int
 	Stamps                    map[string][]Stamp
 	Annots                    map[string][]Annotation
 	annotationFiles           map[string][]string
@@ -67,16 +68,49 @@ func (r *Reader) Close() error {
 	return nil
 }
 
-// Doc 获取主文档结构
+// DocumentCount 获取包内文档数量
+// 返回: int 文档数量
+func (r *Reader) DocumentCount() int {
+	if r.OFD == nil {
+		return 0
+	}
+	return len(r.OFD.DocBody)
+}
+
+// DocumentIndex 获取当前文档索引，从0开始
+// 返回: int 文档索引
+func (r *Reader) DocumentIndex() int {
+	return r.documentIndex
+}
+
+// Document 创建指定文档的独立阅读器，不改变当前文档或混用资源缓存
+// 返回的阅读器不关闭输入文件，使用期间不得关闭持有输入文件的原阅读器
+// 入参: index 文档索引，从0开始
+// 返回: *Reader 文档阅读器, error 错误信息
+func (r *Reader) Document(index int) (*Reader, error) {
+	if index < 0 || index >= r.DocumentCount() {
+		return nil, fmt.Errorf("document index %d out of range", index)
+	}
+	next := &Reader{Path: r.Path, Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: index}
+	if err := next.initRoot(); err != nil {
+		return nil, err
+	}
+	if _, err := next.Doc(); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
+// Doc 获取当前文档结构
 // 返回: *Document 文档结构, error 错误信息
 func (r *Reader) Doc() (*Document, error) {
 	if r.doc != nil {
 		return r.doc, nil
 	}
-	if r.OFD == nil || len(r.OFD.DocBody) == 0 {
+	if r.OFD == nil || r.documentIndex < 0 || r.documentIndex >= len(r.OFD.DocBody) {
 		return nil, fmt.Errorf("no docbody found")
 	}
-	docAttr := r.OFD.DocBody[0]
+	docAttr := r.OFD.DocBody[r.documentIndex]
 	docRootPath := docAttr.DocRoot
 	r.RootDir = path.Dir(docRootPath)
 	data, err := r.readFile(docRootPath)
@@ -197,10 +231,10 @@ func (r *Reader) DocType() string {
 // DocInfo 获取文档元数据
 // 返回: *DocInfo 元数据, error 错误信息
 func (r *Reader) DocInfo() (*DocInfo, error) {
-	if r.OFD == nil || len(r.OFD.DocBody) == 0 {
+	if r.OFD == nil || r.documentIndex < 0 || r.documentIndex >= len(r.OFD.DocBody) {
 		return nil, fmt.Errorf("no docbody found")
 	}
-	return &r.OFD.DocBody[0].DocInfo, nil
+	return &r.OFD.DocBody[r.documentIndex].DocInfo, nil
 }
 
 // Permissions 获取文档权限信息

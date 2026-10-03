@@ -84,9 +84,19 @@ func parseEditorXML(data []byte) (*editorXML, error) {
 // 入参: name 节点名称
 // 返回: *editorXML 节点，不存在时为nil
 func (n *editorXML) child(name string) *editorXML {
+	return n.childAt(name, 0)
+}
+
+// childAt 查找指定序号的OFD直接子节点
+// 入参: name 节点名称, index 从0开始的节点序号
+// 返回: *editorXML 节点，不存在时为nil
+func (n *editorXML) childAt(name string, index int) *editorXML {
 	for _, child := range n.children {
 		if child.name.Local == name && (child.name.Space == n.name.Space || child.name.Space == ofdNamespace || child.name.Space == "") {
-			return child
+			if index == 0 {
+				return child
+			}
+			index--
 		}
 	}
 	return nil

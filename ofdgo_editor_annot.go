@@ -265,7 +265,7 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 	if len(patches) != 0 {
 		parts[name] = editorPatchXML(data, patches)
 		if remaining == 0 {
-			docName, err := editorPageLocation(reader, nil, "", "/"+cleanPackagePath(reader.OFD.DocBody[0].DocRoot))
+			docName, err := editorPageLocation(reader, nil, "", "/"+cleanPackagePath(reader.OFD.DocBody[reader.documentIndex].DocRoot))
 			if err != nil {
 				return err
 			}

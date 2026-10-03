@@ -1516,6 +1516,15 @@ body[data-hide-meta] .meta-panel {
 	white-space: nowrap;
 }
 
+.document-select {
+	width: 100%;
+	min-width: 0;
+	height: 28px;
+	margin-bottom: 10px;
+	padding: 0 6px;
+	font-size: 12px;
+}
+
 .app-panel {
 	margin-bottom: 12px;
 	padding-bottom: 12px;
