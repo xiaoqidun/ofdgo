@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"image"
 	"io"
 
 	"github.com/tdewolff/canvas"
@@ -126,7 +127,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	}
 	start := buf.Len()
 	p := pdf.New(buf, pages[0].Box.W, pages[0].Box.H, nil)
-	renderer := &pdfRenderer{PDF: p, glyphPaths: make(map[*canvas.Path]*canvas.Path)}
+	renderer := &pdfRenderer{PDF: p, glyphPaths: make(map[*canvas.Path]*canvas.Path), images: make([][]image.Image, 1)}
 	var info DocInfo
 	if docInfo, err := r.Reader.DocInfo(); err == nil {
 		info = *docInfo
@@ -135,6 +136,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	for i, page := range pages {
 		if i > 0 {
 			p.NewPage(page.Box.W, page.Box.H)
+			renderer.images = append(renderer.images, nil)
 		}
 		navigation.apply(p, i)
 		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), page.Content, !r.TransparentBackground); err != nil {
@@ -154,6 +156,16 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		return err
 	}
 	data := replacePDFProducer(buf.Bytes()[start:])
+	data, err = renderer.preserveImages(r.outputContext(), data)
+	if err != nil {
+		buf.Truncate(start)
+		return err
+	}
+	if direct && renderer.exactImages {
+		buf.Truncate(start)
+		_, err = buf.Write(data)
+		return err
+	}
 	if r.Compression.Mode != CompressionUnchanged {
 		reader, err := pdfgo.NewReader(bytes.NewReader(data), int64(len(data)))
 		if err != nil {
@@ -171,7 +183,10 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	if direct {
 		return nil
 	}
-	_, err = writer.Write(data)
+	n, err := writer.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
 	return err
 }
 

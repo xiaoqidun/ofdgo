@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/tdewolff/canvas"
+	"github.com/tdewolff/font"
 )
 
 const ptPerMM = 72.0 / 25.4
@@ -181,7 +182,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		ctx.Pop()
 		return
 	}
-	face := ff.Face(sizePt, fillPaint, fontStyle, canvas.FontNormal)
+	face := ff.Face(sizePt, fillPaint, fontStyle, canvas.FontNormal, font.NoHinting)
 	recoverBaseline := len(obj.TextCode) > 0 && obj.TextCode[0].Y == ""
 	var metrics canvas.FontMetrics
 	if textRun != nil || recoverBaseline {

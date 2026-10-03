@@ -108,11 +108,14 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		return
 	}
 	m = m.Scale(imgW/float64(img.Bounds().Dx()), imgH/float64(img.Bounds().Dy()))
-	img, pad := imageWithTransparentEdge(img)
-	if pad > 0 {
-		p := float64(pad)
-		m[0][2] -= m[0][0]*p + m[0][1]*p
-		m[1][2] -= m[1][0]*p + m[1][1]*p
+	if _, pdf := ctx.Renderer.(*pdfRenderer); !pdf {
+		var pad int
+		img, pad = imageWithTransparentEdge(img)
+		if pad > 0 {
+			p := float64(pad)
+			m[0][2] -= m[0][0]*p + m[0][1]*p
+			m[1][2] -= m[1][0]*p + m[1][1]*p
+		}
 	}
 	ctx.RenderImage(r.canvasEncodedImage(img), ctx.CoordSystemView().Mul(ctx.View()).Mul(m))
 	if compiled && imageClip != nil && compiler.err == nil {
