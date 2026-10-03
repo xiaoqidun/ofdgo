@@ -37,6 +37,7 @@ var ErrPDFPassword = pdfgo.ErrPassword
 // OnProgress按open、pages、convert及write.*阶段报告进度，total为0表示总量未知
 // ResolveFile读取PDF引用的外部媒体、附件和页面，默认不访问网络或本地路径
 // ResolveReference可提供已解密的引用页面，目标阅读器由调用方维护
+// Halftones提供只读设备命名网屏，所属阅读器由调用方维护，连续色调输出不网屏化
 type PDFImportOptions struct {
 	Password         []byte
 	PasswordUTF8     bool
@@ -48,6 +49,7 @@ type PDFImportOptions struct {
 	RasterDPI        float64
 	ResolveFile      pdfgo.FileResolver
 	ResolveReference pdfgo.ReferenceResolver
+	Halftones        map[string]*pdfgo.Halftone
 }
 
 // PDFImportReport 汇总转换页数、对象数、链接数和转换警告
@@ -98,6 +100,7 @@ type pdfImporter struct {
 	referenceStreams map[*pdfgo.Stream]*pdfgo.Reader
 	referencePages   map[pdfReferencePageKey]*pdfgo.Page
 	halftoneWarnings map[*pdfgo.Halftone]bool
+	halftones        map[string]*pdfgo.Halftone
 	transferBackdrop bool
 }
 
@@ -144,6 +147,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	importer.pageIndexes = make(map[pdfgo.Reference]int)
 	importer.resolveFile = options.ResolveFile
 	importer.resolveReference = options.ResolveReference
+	importer.halftones = options.Halftones
 	importer.referenceReaders = make(map[[32]byte]*pdfgo.Reader)
 	importer.referenceStreams = make(map[*pdfgo.Stream]*pdfgo.Reader)
 	importer.referencePages = make(map[pdfReferencePageKey]*pdfgo.Page)

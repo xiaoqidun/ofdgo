@@ -95,6 +95,7 @@ func pdfOpaqueVisitor(visitor pdfgo.Visitor) pdfgo.Visitor {
 	v := pdfgo.Visitor{
 		Reference:       visitor.Reference,
 		OptionalContent: visitor.OptionalContent,
+		Halftones:       visitor.Halftones,
 		Path:            func(m pdfgo.PathMark) error { return check(m.Style, m.Fill, m.Stroke) },
 		Text: func(m pdfgo.TextMark) error {
 			return check(m.Style, m.Mode%4 == 0 || m.Mode%4 == 2, m.Mode%4 == 1 || m.Mode%4 == 2)
@@ -138,6 +139,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 	collect := pdfgo.Visitor{
 		Reference:       visitor.Reference,
 		OptionalContent: visitor.OptionalContent,
+		Halftones:       visitor.Halftones,
 		Warning:         visitor.Warning,
 		Text:            func(pdfgo.TextMark) error { return errPDFGroupRaster },
 		Image:           func(pdfgo.ImageMark) error { return errPDFGroupRaster },
@@ -301,7 +303,7 @@ func (p *pdfImporter) rasterGroup(mark pdfgo.GroupMark, walk func(pdfgo.Visitor)
 // visitor 绑定当前导入器的图元与透明组访问函数
 // 返回: pdfgo.Visitor 页面访问器
 func (p *pdfImporter) visitor() pdfgo.Visitor {
-	v := pdfgo.Visitor{Path: p.path, Text: p.text, Image: p.image, Warning: p.warning, Reference: p.referencePage}
+	v := pdfgo.Visitor{Path: p.path, Text: p.text, Image: p.image, Warning: p.warning, Reference: p.referencePage, Halftones: p.halftones}
 	v.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error { return p.group(mark, walk, v) }
 	return v
 }

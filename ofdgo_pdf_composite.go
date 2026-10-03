@@ -245,7 +245,7 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 	var collect func(func(pdfgo.Visitor) error) ([]pdfCompositeNode, error)
 	collect = func(walk func(pdfgo.Visitor) error) ([]pdfCompositeNode, error) {
 		var nodes []pdfCompositeNode
-		v := pdfgo.Visitor{Warning: p.warning, Reference: p.referencePage}
+		v := pdfgo.Visitor{Warning: p.warning, Reference: p.referencePage, Halftones: p.halftones}
 		v.Path = func(mark pdfgo.PathMark) error {
 			if err := p.halftone(mark.Style); err != nil {
 				return err
