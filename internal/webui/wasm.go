@@ -185,6 +185,7 @@ func (r *browserReaderAt) ReadAt(data []byte, offset int64) (int, error) {
 func RunWASM() {
 	registerCallback("ofdgoOpen", openDocument)
 	registerCallback("ofdgoSelectDocument", selectDocument)
+	registerCallback("ofdgoChangeDocument", changePackageDocument)
 	registerAsyncCallback("ofdgoConvertPDF", convertPDFDocument)
 	registerAsyncCallback("ofdgoConvertFile", convertFile)
 	registerAsyncCallback("ofdgoPackFiles", packFiles)
@@ -1153,7 +1154,7 @@ func editorSummary() editorInfo {
 	if !currentSession.doc.Permissions.Edit {
 		info.EditWarnings = append(info.EditWarnings, "原文件声明不允许编辑")
 	}
-	if currentSession.doc.Signatures != "" {
+	if slices.ContainsFunc(currentSession.Reader.OFD.DocBody, func(body ofdgo.DocBody) bool { return body.Signatures != "" }) {
 		info.EditWarnings = append(info.EditWarnings, "修改文档可能使原签名失效")
 	}
 	info.PageCapabilities = make([]uint, currentEditor.PageCount())
@@ -3360,6 +3361,47 @@ func changeAttachment(args []js.Value) (any, error) {
 	})
 }
 
+// changePackageDocument 调用库层文档增删、改名或排序，不在浏览器内重写包结构
+// 入参: args 操作及标题、页面尺寸、文档索引或移动位置
+// 返回: any 文档信息, error 错误信息
+func changePackageDocument(args []js.Value) (any, error) {
+	if currentEditor == nil || len(args) == 0 {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	return changeAtomicObjects(func() error {
+		var err error
+		switch args[0].String() {
+		case "add":
+			if len(args) != 5 {
+				return fmt.Errorf("invalid document arguments")
+			}
+			_, err = currentEditor.AddDocument(args[1].String(), args[2].Float(), args[3].Float(), args[4].Int())
+		case "delete":
+			if len(args) != 2 {
+				return fmt.Errorf("invalid document arguments")
+			}
+			err = currentEditor.DeleteDocument(args[1].Int())
+		case "move":
+			if len(args) != 3 {
+				return fmt.Errorf("invalid document arguments")
+			}
+			err = currentEditor.MoveDocument(args[1].Int(), args[2].Int())
+		case "rename":
+			if len(args) != 3 {
+				return fmt.Errorf("invalid document arguments")
+			}
+			err = currentEditor.RenameDocument(args[1].Int(), args[2].String())
+		default:
+			return fmt.Errorf("invalid document operation")
+		}
+		if err == nil {
+			copiedObjects, copiedStyle = nil, nil
+			clearImport()
+		}
+		return err
+	})
+}
+
 // selectDocument 切换包内文档，保留编辑快照并清除跨文档剪贴板
 // 入参: args 文档索引
 // 返回: any 文档信息, error 错误信息
@@ -3457,6 +3499,12 @@ func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 	}
 	editor.SetFontFS()
 	if currentSession != nil {
+		previous := currentSession.Reader
+		oldBody, newBody := previous.OFD.DocBody[previous.DocumentIndex()], reader.OFD.DocBody[reader.DocumentIndex()]
+		if oldBody.DocRoot != newBody.DocRoot || oldBody.DocInfo.DocID != newBody.DocInfo.DocID {
+			copiedObjects, copiedStyle = nil, nil
+			clearImport()
+		}
 		ofdgo.WithRenderBackends(currentSession.Renderer.Backends())(session.Renderer)
 		if currentSession.fontFS != nil {
 			session.fontFS = currentSession.fontFS

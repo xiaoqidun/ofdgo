@@ -49,15 +49,14 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 	changed := e.revision != before.revision
 	e.history, e.historyIndex, e.historyLimit = before.history, before.historyIndex, before.historyLimit
 	e.backends, e.fontDirs, e.fontFS = before.backends, before.fontDirs, before.fontFS
-	e.fontRenderer, e.fontMetrics = before.fontRenderer, before.fontMetrics
+	if e.sameDocument(&before) {
+		e.fontRenderer, e.fontMetrics = before.fontRenderer, before.fontMetrics
+	} else {
+		e.fontRenderer, e.fontMetrics = nil, make(map[string]FontMetrics)
+	}
 	if changed {
 		e.serial, e.revision = before.serial, before.revision
-		if change := e.recordChange(); change != nil {
-			after := e.transactionSnapshot()
-			before.history, after.history = nil, nil
-			change.undo = func(e *Editor) { e.restoreTransaction(before) }
-			change.redo = func(e *Editor) { e.restoreTransaction(after) }
-		}
+		e.recordTransaction(before)
 	}
 	committed = true
 	return nil
@@ -65,7 +64,7 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 
 // SetHistoryLimit 设置撤销和重做记录的总上限，默认关闭，非正数关闭并释放记录
 // 缩减上限时优先保留最近的撤销记录，不影响当前文档及修订标识
-// 记录页面、对象及SetInfo操作，不包含Info的直接修改及字体、图片注册，资源继续共享
+// 记录文档、页面、对象及SetInfo操作，不包含Info的直接修改及字体、图片注册
 // 入参: limit 最大记录数
 func (e *Editor) SetHistoryLimit(limit int) {
 	e.historyLimit = max(0, limit)
@@ -149,21 +148,52 @@ func (e *Editor) transactionSnapshot() Editor {
 	return next
 }
 
-// restoreTransaction 恢复文档状态并保留历史容器、共享资源和递增标识
+// restoreTransaction 恢复文档状态，保留历史和配置，仅在同一文档内共享资源
 // 入参: state 文档状态
 func (e *Editor) restoreTransaction(state Editor) {
 	state = state.transactionSnapshot()
-	if len(e.resources) > len(state.resources) {
-		state.resources = append(state.resources, e.resources[len(state.resources):]...)
+	state.retainDocumentResources(e)
+	if !e.sameDocument(&state) {
+		state.fontRenderer, state.fontMetrics = nil, make(map[string]FontMetrics)
 	}
-	maps.Copy(state.fonts, e.fonts)
-	maps.Copy(state.images, e.images)
-	maps.Copy(state.resourceID, e.resourceID)
 	state.history, state.historyIndex, state.historyLimit = e.history, e.historyIndex, e.historyLimit
-	state.serial, state.maxID = max(e.serial, state.serial), max(e.maxID, state.maxID)
+	state.serial = max(e.serial, state.serial)
 	state.backends, state.fontDirs, state.fontFS = e.backends, e.fontDirs, e.fontFS
-	state.fontRenderer, state.fontMetrics = e.fontRenderer, e.fontMetrics
+	state.encryption, state.output, state.OnWriteProgress = e.encryption, e.output, e.OnWriteProgress
 	*e = state
+}
+
+// retainDocumentResources 保留同一文档后续注册的资源，不跨文档混用编号和字体缓存
+// 入参: source 当前文档状态
+func (e *Editor) retainDocumentResources(source *Editor) {
+	if !e.sameDocument(source) {
+		return
+	}
+	if len(source.resources) > len(e.resources) {
+		e.resources = append(e.resources, source.resources[len(e.resources):]...)
+	}
+	maps.Copy(e.fonts, source.fonts)
+	maps.Copy(e.images, source.images)
+	maps.Copy(e.resourceID, source.resourceID)
+	e.maxID = max(e.maxID, source.maxID)
+	e.fontRenderer, e.fontMetrics = source.fontRenderer, source.fontMetrics
+}
+
+// recordTransaction 记录事务快照，跨文档撤销前保留各文档后续注册的资源
+// 入参: before 修改前的文档状态
+func (e *Editor) recordTransaction(before Editor) {
+	if change := e.recordChange(); change != nil {
+		after := e.transactionSnapshot()
+		before.history, after.history = nil, nil
+		change.undo = func(e *Editor) {
+			after.retainDocumentResources(e)
+			e.restoreTransaction(before)
+		}
+		change.redo = func(e *Editor) {
+			before.retainDocumentResources(e)
+			e.restoreTransaction(after)
+		}
+	}
 }
 
 // recordChange 分配修订标识并为已完成的有效修改预留记录

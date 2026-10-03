@@ -102,6 +102,8 @@ type DocumentInfo struct {
 type DocumentEntry struct {
 	Index int    `json:"index"`
 	Title string `json:"title"`
+	Root  string `json:"root"`
+	ID    string `json:"id"`
 }
 
 // DocumentDetails 不含页面数组的文档补充信息
@@ -433,7 +435,7 @@ func (s *Session) Summary() DocumentInfo {
 		DetailsPending: true,
 	}
 	for index, body := range s.Reader.OFD.DocBody {
-		info.Documents = append(info.Documents, DocumentEntry{Index: index, Title: body.DocInfo.Title})
+		info.Documents = append(info.Documents, DocumentEntry{Index: index, Title: body.DocInfo.Title, Root: body.DocRoot, ID: body.DocInfo.DocID})
 	}
 	if docInfo, err := s.Reader.DocInfo(); err == nil && docInfo != nil {
 		info.Title = docInfo.Title

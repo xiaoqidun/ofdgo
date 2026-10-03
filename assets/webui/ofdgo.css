@@ -1516,11 +1516,28 @@ body[data-hide-meta] .meta-panel {
 	white-space: nowrap;
 }
 
+.document-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-bottom: 10px;
+}
+
+.document-row .panel-actions {
+	flex-wrap: nowrap;
+}
+
+.document-row .small-button {
+	width: 28px;
+	height: 28px;
+	padding: 0;
+}
+
 .document-select {
-	width: 100%;
+	flex: 1;
+	width: 0;
 	min-width: 0;
 	height: 28px;
-	margin-bottom: 10px;
 	padding: 0 6px;
 	font-size: 12px;
 }
@@ -1914,6 +1931,8 @@ button.outline-link:hover {
 .editor-group > [hidden],
 .panel-row > [hidden],
 .panel-actions > [hidden],
+.document-row[hidden],
+.document-row > [hidden],
 .meta-list > [hidden],
 .navigation-tabs[hidden],
 .page-selection-tools[hidden],

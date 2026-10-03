@@ -59,6 +59,7 @@ const state = {
 	importing: false,
 	imageImporting: false,
 	createInsert: false,
+	createPackage: false,
 	pageSelection: new Set(),
 	pageSelectionAnchor: null,
 	pageMultiSelect: false,
@@ -233,6 +234,13 @@ const el = {
 	paragraphButton: document.querySelector("#paragraphButton"),
 	infoButton: document.querySelector("#infoButton"),
 	documentSelect: document.querySelector("#documentSelect"),
+	documentActions: document.querySelector("#documentActions"),
+	documentRow: document.querySelector("#documentRow"),
+	documentOrder: document.querySelector("#documentOrder"),
+	documentAddButton: document.querySelector("#documentAddButton"),
+	documentDeleteButton: document.querySelector("#documentDeleteButton"),
+	documentUpButton: document.querySelector("#documentUpButton"),
+	documentDownButton: document.querySelector("#documentDownButton"),
 	infoPanel: document.querySelector("#infoPanel"),
 	infoForm: document.querySelector("#infoForm"),
 	infoTitle: document.querySelector("#infoTitle"),
@@ -670,6 +678,18 @@ editorClick(el.paragraphButton, () => {
 	el.paragraphPanel.showModal();
 });
 el.paragraphCancel.addEventListener("click", () => el.paragraphPanel.close());
+editorClick(el.documentAddButton, () => openCreatePanel(false, true));
+editorClick(el.documentDeleteButton, () => {
+	if (window.confirm("删除当前文档？")) return changeDocument("ofdgoChangeDocument", null, "delete", state.doc.documentIndex || 0);
+});
+editorClick(el.documentUpButton, () => {
+	const index = state.doc.documentIndex || 0;
+	return changeDocument("ofdgoChangeDocument", null, "move", index, index - 1);
+});
+editorClick(el.documentDownButton, () => {
+	const index = state.doc.documentIndex || 0;
+	return changeDocument("ofdgoChangeDocument", null, "move", index, index + 1);
+});
 editorClick(el.infoButton, () => {
 	for (const key of ["Title", "Author", "Subject"]) el[`info${key}`].value = state.doc[key.toLowerCase()] || "";
 	el.infoCustomRows.replaceChildren();
@@ -1956,6 +1976,8 @@ async function switchDocument(index) {
 		resetCompositeScope();
 		canvasEditor.clear();
 		canvasEditor.setTool("");
+		delete state.textDefaults.fontChoice;
+		updateTextFonts(null, true);
 		state.ofdBytes = null;
 		setEditorInfo(doc);
 		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true, clearSelection: true, fitMode: state.fitMode, scale: state.scale });
@@ -2058,12 +2080,13 @@ function confirmTextReflow(item) {
 		|| window.confirm("将重新排版原文，是否继续？"));
 }
 
-function openCreatePanel(insert = false) {
+function openCreatePanel(insert = false, packageDocument = false) {
 	if (document.body.hasAttribute("aria-busy")) {
 		return;
 	}
 	el.createForm.reset();
 	state.createInsert = insert === true;
+	state.createPackage = packageDocument === true;
 	el.createMode.value = state.createInsert ? "images" : "blank";
 	el.createSubmit.textContent = state.createInsert ? "插入" : "新建";
 	el.createPanel.setAttribute("aria-label", state.createInsert ? "插入图片" : "新建文档");
@@ -2076,7 +2099,7 @@ function openCreatePanel(insert = false) {
 function updateCreateOptions() {
 	const images = el.createMode.value === "images", busy = Boolean(state.imageImporting);
 	const toggle = (id, visible) => { document.getElementById(id).hidden = !visible; };
-	toggle("createModeRow", !state.createInsert);
+	toggle("createModeRow", !state.createInsert && !state.createPackage);
 	el.createName.closest(".form-row").hidden = Boolean(state.createInsert);
 	el.createName.disabled = busy || Boolean(state.createInsert);
 	el.createMode.disabled = busy;
@@ -2105,6 +2128,11 @@ function imagePageRequest() {
 
 async function createDocument(event) {
 	event.preventDefault();
+	if (state.createPackage) {
+		if (await changeDocument("ofdgoChangeDocument", null, "add", el.createName.value.trim() || "未命名",
+			Number(el.createWidth.value), Number(el.createHeight.value), (state.doc.documentIndex || 0) + 1)) el.createPanel.close();
+		return;
+	}
 	if (state.createInsert) {
 		const at = { before: state.pageIndex, after: state.pageIndex + 1, first: 0, last: state.doc.pageCount }[el.createPosition.value];
 		if (await changeDocument("ofdgoImportImages", null, ...imagePageRequest(), at, "", state.renderAnnotations)) el.createPanel.close();
@@ -2888,6 +2916,36 @@ async function changeDocument(name, item, ...args) {
 		if (doc.revision === state.editorInfo?.revision) {
 			return true;
 		}
+		const previousDocument = state.doc.documents?.[state.doc.documentIndex || 0];
+		const nextDocument = doc.documents?.[doc.documentIndex || 0];
+		const documentChanged = previousDocument?.root !== nextDocument?.root || previousDocument?.id !== nextDocument?.id;
+		const packageChanged = documentChanged || name === "ofdgoChangeDocument" || restoring
+			&& JSON.stringify(doc.documents?.map(entry => [entry.root, entry.id])) !== JSON.stringify(state.doc.documents?.map(entry => [entry.root, entry.id]));
+		if (packageChanged) {
+			resetCompositeScope();
+			state.objectClipboard = state.styleClipboard = null;
+			state.pageSelection.clear();
+			state.pageSelectionAnchor = null;
+			state.pageMultiSelect = false;
+			state.outlineSelection = null;
+			state.outlineExpanded.clear();
+			canvasEditor.clear();
+			canvasEditor.setTool("");
+			if (documentChanged) {
+				delete state.textDefaults.fontChoice;
+				updateTextFonts(null, true);
+			}
+			state.ofdBytes = null;
+			setEditorInfo(doc);
+			openSeq = ++state.openSeq;
+			await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: documentChanged, clearSelection: true,
+				pageIndex: documentChanged ? 0 : state.pageIndex, fitMode: state.fitMode, scale: state.scale });
+			if (openSeq === state.openSeq) {
+				if (!restoring) rememberEditorView(before, revision);
+				return true;
+			}
+			return;
+		}
 		const view = name === "ofdgoUndo" ? state.editorViews.get(revision) : name === "ofdgoRedo" ? state.editorViews.get(doc.revision) : null;
 		const reindex = !!scope && (scoped && ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoCopyObjects", "ofdgoOrderObjects", "ofdgoEraseObjects", "ofdgoEraseObjectsPath", "ofdgoGroupObjects"].includes(name)
 			|| inserting || name === "ofdgoPasteObjects" && !!args[4]);
@@ -2907,7 +2965,8 @@ async function changeDocument(name, item, ...args) {
 		}
 		setEditorInfo(doc);
 		if (name === "ofdgoUpdateInfo") {
-			Object.assign(state.doc, { title: doc.title, author: doc.author, subject: doc.subject, customData: doc.customData });
+			Object.assign(state.doc, { title: doc.title, author: doc.author, subject: doc.subject, customData: doc.customData,
+				documents: doc.documents, documentIndex: doc.documentIndex });
 			renderMeta();
 			updateControls();
 			rememberEditorView(before, revision);
@@ -7423,7 +7482,7 @@ function renderMeta(keepDetails = false) {
 		}));
 	});
 	const doc = state.doc || {};
-	el.documentSelect.hidden = (doc.documents?.length || 0) < 2;
+	updateDocumentControls();
 	renderMetaContent(el.documentSelect, doc.documents || [], () => {
 		el.documentSelect.replaceChildren(...(doc.documents || []).map(entry => {
 			const option = document.createElement("option");
@@ -8245,12 +8304,24 @@ function updateFitSpace() {
 	el.pageFrame.style.setProperty("--fit-gap", `${gap}px`);
 }
 
+function updateDocumentControls() {
+	const count = state.doc?.documents?.length || 0, index = state.doc?.documentIndex || 0;
+	const disabled = !state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
+	el.documentActions.hidden = el.documentOrder.hidden = !state.editing;
+	el.documentRow.hidden = !count || !state.editing && count < 2;
+	el.documentSelect.disabled = disabled;
+	el.documentAddButton.disabled = el.infoButton.disabled = disabled || !state.editing;
+	el.documentDeleteButton.disabled = disabled || !state.editing || count <= 1;
+	el.documentUpButton.disabled = disabled || !state.editing || index === 0;
+	el.documentDownButton.disabled = disabled || !state.editing || index >= count - 1;
+}
+
 function updateControls() {
 	renderSecurity();
 	el.attachmentAdd.disabled = !state.editing || !state.ready || state.exporting;
 	renderMetaContent(el.attachmentList, [state.doc?.attachments, state.doc?.attachmentError, state.editing], renderAttachments);
 	const hasDoc = Boolean(state.doc);
-	el.documentSelect.disabled = !hasDoc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy");
+	updateDocumentControls();
 	updateDisplayControls();
 	updateEditorTools();
 	const pageCount = state.doc ? state.doc.pageCount : 0;
@@ -8454,7 +8525,7 @@ function showError(err, empty = !state.doc) {
 
 function setBusy(busy, text = "", percent = 0, status = "") {
 	document.body.toggleAttribute("aria-busy", busy);
-	el.documentSelect.disabled = busy || !state.doc || !state.ready || state.exporting;
+	updateDocumentControls();
 	renderSecurity();
 	updateDisplayControls();
 	el.editButton.disabled = busy || Boolean(sealPreview) || !state.doc || !state.ready || state.exporting;

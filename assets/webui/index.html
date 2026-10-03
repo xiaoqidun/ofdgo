@@ -594,10 +594,20 @@
 				</section>
 				<div class="panel-row">
 					<div class="panel-title compact">文档</div>
-					<button id="infoButton" class="small-button" type="button" aria-label="修改文档信息" aria-haspopup="dialog" aria-controls="infoPanel" hidden>修改</button>
+					<div id="documentActions" class="panel-actions" hidden>
+						<button id="documentAddButton" class="small-button" type="button" title="新建文档" aria-haspopup="dialog" aria-controls="createPanel">新建</button>
+						<button id="infoButton" class="small-button" type="button" title="修改文档" aria-label="修改文档信息" aria-haspopup="dialog" aria-controls="infoPanel" hidden>修改</button>
+						<button id="documentDeleteButton" class="small-button" type="button" title="删除文档">删除</button>
+					</div>
 				</div>
 				<div id="editNotice" class="font-permission-hint" role="status" hidden></div>
-				<select id="documentSelect" class="document-select" aria-label="选择文档" title="切换文档" hidden></select>
+				<div id="documentRow" class="document-row" hidden>
+					<select id="documentSelect" class="document-select" aria-label="选择文档" title="切换文档"></select>
+					<div id="documentOrder" class="panel-actions" hidden>
+						<button id="documentUpButton" class="small-button" type="button" title="前移文档" aria-label="前移文档">&#8593;</button>
+						<button id="documentDownButton" class="small-button" type="button" title="后移文档" aria-label="后移文档">&#8595;</button>
+					</div>
+				</div>
 				<dl class="meta-list">
 					<div>
 						<dt>文件</dt>
