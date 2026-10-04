@@ -36,6 +36,55 @@ type pdfImportedFont struct {
 	repairLimit uint16
 }
 
+// embeddedTextFont 匹配同名内嵌字体，仅复用唯一且覆盖全部字符的字形程序
+// 入参: source 外部字体, glyphs 当前文字字形
+// 返回: *pdfImportedFont 可复用字体，无可靠匹配时为空
+func (p *pdfImporter) embeddedTextFont(source *pdfgo.Font, glyphs []pdfgo.Glyph) *pdfImportedFont {
+	name := pdfEmbeddedFontName(source.Name)
+	if name == "" || len(glyphs) == 0 {
+		return nil
+	}
+	var matched *pdfImportedFont
+	for _, imported := range p.fonts {
+		if pdfEmbeddedFontName(imported.resource.Font.FontName) != name {
+			continue
+		}
+		if matched != nil && matched.checksum != imported.checksum {
+			return nil
+		}
+		matched = imported
+	}
+	if matched == nil {
+		return nil
+	}
+	for _, glyph := range glyphs {
+		if utf8.RuneCountInString(glyph.Text) != 1 {
+			return nil
+		}
+		char, _ := utf8.DecodeRuneInString(glyph.Text)
+		id := matched.metrics.GlyphIndex(char)
+		if id == 0 || id >= matched.metrics.NumGlyphs() || matched.repairLimit != 0 && id >= matched.repairLimit {
+			return nil
+		}
+	}
+	return matched
+}
+
+// pdfEmbeddedFontName 去除标准六位大写子集前缀，保留字体名称和样式后缀
+// 入参: name PDF或内嵌字体名称
+// 返回: string 原字体名称
+func pdfEmbeddedFontName(name string) string {
+	if len(name) <= 7 || name[6] != '+' {
+		return name
+	}
+	for i := range 6 {
+		if name[i] < 'A' || name[i] > 'Z' {
+			return name
+		}
+	}
+	return name[7:]
+}
+
 // importedFont 按原PDF字体复用包装和解析结果，失败结果不进入缓存
 // 入参: source 源字体
 // 返回: *pdfImportedFont 只读导入字体, error 字体程序或后端错误

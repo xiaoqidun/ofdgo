@@ -21,6 +21,7 @@ import (
 	"image/color"
 	"math"
 	"reflect"
+	"slices"
 	"strconv"
 	"unicode/utf8"
 
@@ -120,11 +121,11 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		}
 	}
 	if id == "" {
-		jbig2Original, err := source.JBIG2File()
+		jbig2Original, err := source.JBIG2FileContext(p.ctx)
 		if err != nil {
 			return err
 		}
-		jpegOriginal, err := source.JPEGFile()
+		jpegOriginal, err := source.JPEGFileContext(p.ctx)
 		if err != nil {
 			return err
 		}
@@ -192,7 +193,7 @@ func (p *pdfImporter) appendImage(mark pdfgo.ImageMark, id string) error {
 	return nil
 }
 
-// text 保留内嵌字形及逐字基线，外部字体保留名称引用
+// text 保留字形及逐字基线，外部字体优先复用同名内嵌资源
 // 入参: mark PDF文字绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) text(mark pdfgo.TextMark) error {
@@ -256,14 +257,29 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		return &pdfgo.UnsupportedError{Feature: "font program " + string(font.ProgramType)}
 	}
 	var imported *pdfImportedFont
+	reused := false
 	if embedded {
 		imported, err = p.importedFont(font)
 		if err != nil {
 			return err
 		}
+	} else if imported = p.embeddedTextFont(font, mark.Glyphs); imported != nil {
+		reused, embedded = true, true
+		mark.Glyphs = slices.Clone(mark.Glyphs)
+		for index := range mark.Glyphs {
+			char, _ := utf8.DecodeRuneInString(mark.Glyphs[index].Text)
+			mark.Glyphs[index].ID = imported.metrics.GlyphIndex(char)
+			mark.Glyphs[index].HasID = true
+		}
 	}
 	id := p.fontIDs[font]
-	if id == "" {
+	if reused {
+		id, err = p.editor.addFontResource(imported.resource, imported.checksum)
+		if err != nil {
+			return fmt.Errorf("PDF font %s resource: %w", font.Name, err)
+		}
+		p.editor.fontMetrics[id] = imported.metrics
+	} else if id == "" {
 		var err error
 		if embedded {
 			if imported.repairLimit != 0 {
@@ -324,7 +340,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			return err
 		}
 		gid := glyph.ID
-		if embedded && font.ProgramType == "FontFile" {
+		if embedded && !reused && font.ProgramType == "FontFile" {
 			gid = imported.type1Glyphs[glyph.Name]
 			glyph.HasID = true
 		}

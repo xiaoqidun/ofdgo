@@ -122,7 +122,10 @@ func readType2Font(data []byte) (*type2Font, error) {
 	if err != nil {
 		return nil, err
 	}
-	dict := parseCFFDict(tops[0])
+	dict, err := readCFFDict(tops[0])
+	if err != nil {
+		return nil, err
+	}
 	if value, ok := dict[1206]; ok && (len(value) != 1 || value[0] != 2) {
 		return nil, fmt.Errorf("unsupported CFF charstring type")
 	}
@@ -158,7 +161,10 @@ func readType2Private(data []byte, values []float64, font *type2Font) (cffDict, 
 			return nil, fmt.Errorf("invalid CFF private range")
 		}
 		start := int(values[1])
-		private = parseCFFDict(data[start : start+int(values[0])])
+		private, err = readCFFDict(data[start : start+int(values[0])])
+		if err != nil {
+			return nil, err
+		}
 		for op, target := range map[int]*float64{20: &font.def, 21: &font.nominal} {
 			if value, ok := private[op]; ok {
 				if len(value) != 1 || !finite(value[0]) {

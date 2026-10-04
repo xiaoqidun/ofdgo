@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"reflect"
 	"slices"
@@ -73,6 +74,16 @@ func (e *Editor) Objects(page int, ids []string) ([]GraphicObject, error) {
 // 入参: page 目标页面索引, objects 对象快照, dx、dy 毫米位移
 // 返回: []string 按绘制顺序排列的新对象标识, error 错误信息
 func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) ([]string, error) {
+	return e.CopyObjectsContext(context.Background(), page, objects, dx, dy)
+}
+
+// CopyObjectsContext 复制对象快照，准备期间取消不提交对象或撤销记录
+// 入参: ctx 取消上下文, page 目标页, objects 对象快照, dx、dy 毫米位移
+// 返回: []string 新对象标识, error 校验或取消错误
+func (e *Editor) CopyObjectsContext(ctx context.Context, page int, objects []GraphicObject, dx, dy float64) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !finite(dx) || !finite(dy) {
 		return nil, fmt.Errorf("copy requires finite offsets")
 	}
@@ -86,12 +97,18 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 	if err := e.prepareSourceIDs(); err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	prepared := make([]GraphicObject, len(objects))
 	origins := make([]*editorObjectOrigin, len(objects))
 	result := make([]string, len(objects))
 	maximum := e.maxID + len(objects)
 	validation := &editorValidation{Editor: e}
 	for i, object := range objects {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		result[i] = strconv.Itoa(e.maxID + i + 1)
 		object, err := validation.prepareCopiedObject(result[i], object)
 		if err != nil {
@@ -110,6 +127,9 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 		if err != nil {
 			return nil, err
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	e.maxID = maximum
 	for i, origin := range origins {

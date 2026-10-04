@@ -75,6 +75,7 @@ type pdfImporter struct {
 	fonts            map[*pdfgo.Font]*pdfImportedFont
 	fontWarnings     map[string]bool
 	clipTexts        map[*pdfgo.TextClip][]TextObject
+	clipPaths        *renderCache[[32]byte, pdfClipPath]
 	cmykSpace        string
 	objects          []GraphicObject
 	pages            map[pdfgo.Reference]*pdfgo.Page
@@ -204,6 +205,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		importer.compositeNodes = nil
 		importer.compositeSpace = nil
 		importer.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
+		importer.clipPaths = nil
 		importer.annotationData = nil
 		if err := importer.compositePage(nil, func(visitor pdfgo.Visitor) error { return reader.WalkPage(ctx, page, visitor) }); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
@@ -279,7 +281,7 @@ func (p *pdfImporter) commitObjects() error {
 	if len(p.objects) == 0 {
 		return nil
 	}
-	if _, err := p.editor.CopyObjects(p.page, p.objects, 0, 0); err != nil {
+	if _, err := p.editor.CopyObjectsContext(p.ctx, p.page, p.objects, 0, 0); err != nil {
 		return err
 	}
 	p.objects = nil
@@ -340,6 +342,40 @@ func pdfBounds(points []pdfgo.Point) Box {
 	return Box{minX, minY, math.Max(maxX-minX, 1e-6), math.Max(maxY-minY, 1e-6)}
 }
 
+// pathBoundsContext 逐段计算变换后的控制点边界，不创建临时点集合
+// 入参: ctx 取消上下文, path PDF路径
+// 返回: Box 控制点边界，空路径返回零值, error 取消错误
+func (p *pdfImporter) pathBoundsContext(ctx context.Context, path pdfgo.Path) (Box, error) {
+	if err := ctx.Err(); err != nil {
+		return Box{}, err
+	}
+	minX, minY, maxX, maxY := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+	found := false
+	for _, segment := range path.Segments {
+		if err := ctx.Err(); err != nil {
+			return Box{}, err
+		}
+		for index, point := range segment.Points {
+			if index&255 == 0 {
+				if err := ctx.Err(); err != nil {
+					return Box{}, err
+				}
+			}
+			point = p.matrix.Apply(point)
+			minX, minY = math.Min(minX, point.X), math.Min(minY, point.Y)
+			maxX, maxY = math.Max(maxX, point.X), math.Max(maxY, point.Y)
+			found = true
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return Box{}, err
+	}
+	if !found {
+		return Box{}, nil
+	}
+	return Box{minX, minY, math.Max(maxX-minX, 1e-6), math.Max(maxY-minY, 1e-6)}, nil
+}
+
 // color 保留设备色彩分量并复用文档颜色空间
 // 入参: paint PDF颜色与不透明度
 // 返回: *FillColor OFD颜色
@@ -360,8 +396,22 @@ func (p *pdfImporter) color(paint pdfgo.Paint) *FillColor {
 // 入参: path PDF路径, origin 对象边界
 // 返回: string OFD路径数据
 func (p *pdfImporter) pathData(path pdfgo.Path, origin Box) string {
+	data, _ := p.pathDataContext(context.Background(), path, origin)
+	return data
+}
+
+// pathDataContext 转换路径并在分段处理时检查取消
+// 入参: ctx 取消上下文, path PDF路径, origin 对象边界
+// 返回: string OFD路径数据, error 取消错误
+func (p *pdfImporter) pathDataContext(ctx context.Context, path pdfgo.Path, origin Box) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	data := make([]byte, 0, len(path.Segments)*48)
 	for index, segment := range path.Segments {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if index != 0 {
 			data = append(data, ' ')
 		}
@@ -374,7 +424,10 @@ func (p *pdfImporter) pathData(path pdfgo.Path, origin Box) string {
 			data = strconv.AppendFloat(data, point.Y-origin.Y, 'g', -1, 64)
 		}
 	}
-	return string(data)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 // clips 保持裁剪路径的交集，不随对象CTM重复变换
@@ -387,20 +440,21 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 	flag := false
 	clips := &Clips{TransFlag: &flag}
 	for _, path := range paths {
-		area := ClipArea{}
-		var points []pdfgo.Point
-		for _, segment := range path.Segments {
-			for _, point := range segment.Points {
-				points = append(points, p.matrix.Apply(point))
-			}
+		if err := p.ctx.Err(); err != nil {
+			return nil, err
 		}
+		area := ClipArea{}
 		if len(path.Segments) != 0 {
-			box := pdfBounds(points)
+			encoded, err := p.clipPath(path)
+			if err != nil {
+				return nil, err
+			}
+			box := encoded.box
 			rule := "NonZero"
 			if path.EvenOdd {
 				rule = "Even-Odd"
 			}
-			area.Path = append(area.Path, PathObject{Boundary: pdfBoundary(Box{box.X - origin.X, box.Y - origin.Y, box.W, box.H}), AbbreviatedData: p.pathData(path, box), Rule: rule})
+			area.Path = append(area.Path, PathObject{Boundary: pdfBoundary(Box{box.X - origin.X, box.Y - origin.Y, box.W, box.H}), AbbreviatedData: encoded.data, Rule: rule})
 		}
 		for _, mark := range path.Text {
 			objects, ok := p.clipTexts[mark]
@@ -491,16 +545,13 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 	if p.warning != nil && (mark.Fill && pdfGradientError(mark.Style.Fill) != nil || mark.Stroke && pdfGradientError(mark.Style.Stroke) != nil) {
 		return p.gradientPath(mark)
 	}
-	var points []pdfgo.Point
-	for _, segment := range mark.Path.Segments {
-		for _, point := range segment.Points {
-			points = append(points, p.matrix.Apply(point))
-		}
+	box, err := p.pathBoundsContext(p.ctx, mark.Path)
+	if err != nil {
+		return err
 	}
-	if len(points) == 0 {
+	if box == (Box{}) {
 		return fmt.Errorf("empty PDF painted path")
 	}
-	box := pdfBounds(points)
 	scale := math.Hypot(p.matrix[0], p.matrix[1])
 	drawing, origin, ctm := *p, box, ""
 	marginScale := scale
@@ -548,7 +599,11 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 	if err != nil {
 		return err
 	}
-	object := PathObject{Boundary: pdfBoundary(box), CTM: ctm, AbbreviatedData: drawing.pathData(mark.Path, origin), Fill: &mark.Fill, Stroke: &mark.Stroke, FillColor: fillColor, StrokeColor: &strokeColor, LineWidth: mark.Style.LineWidth * scale, Cap: []string{"Butt", "Round", "Square"}[mark.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[mark.Style.Join], MiterLimit: mark.Style.MiterLimit, Clips: clips}
+	data, err := drawing.pathDataContext(p.ctx, mark.Path, origin)
+	if err != nil {
+		return err
+	}
+	object := PathObject{Boundary: pdfBoundary(box), CTM: ctm, AbbreviatedData: data, Fill: &mark.Fill, Stroke: &mark.Stroke, FillColor: fillColor, StrokeColor: &strokeColor, LineWidth: mark.Style.LineWidth * scale, Cap: []string{"Butt", "Round", "Square"}[mark.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[mark.Style.Join], MiterLimit: mark.Style.MiterLimit, Clips: clips}
 	object.LineWidthSet = object.LineWidth == 0
 	if mark.Path.EvenOdd {
 		object.Rule = "Even-Odd"

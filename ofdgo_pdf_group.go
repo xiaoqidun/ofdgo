@@ -146,10 +146,17 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 		Group:           func(pdfgo.GroupMark, func(pdfgo.Visitor) error) error { return errPDFGroupRaster },
 	}
 	collect.Path = func(path pdfgo.PathMark) error {
+		if err := p.ctx.Err(); err != nil {
+			return err
+		}
 		if path.Style.SoftMask != nil || path.Style.BlendMode != "" && path.Style.BlendMode != "Normal" && path.Style.BlendMode != "Compatible" {
 			return &pdfgo.UnsupportedError{Feature: "masked or blended transparent group content"}
 		}
-		shape, err := ParseGeometryPath(p.pathData(path.Path, Box{}))
+		data, err := p.pathDataContext(p.ctx, path.Path, Box{})
+		if err != nil {
+			return err
+		}
+		shape, err := ParseGeometryPath(data)
 		if err != nil {
 			return err
 		}
@@ -191,7 +198,11 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 						return fmt.Errorf("invalid PDF stroke matrix")
 					}
 					local := pdfImporter{matrix: inverse}
-					strokeShape, err = ParseGeometryPath(local.pathData(path.Path, Box{}))
+					data, err = local.pathDataContext(p.ctx, path.Path, Box{})
+					if err != nil {
+						return err
+					}
+					strokeShape, err = ParseGeometryPath(data)
 					if err != nil {
 						return err
 					}
@@ -219,11 +230,17 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			if err != nil {
 				return err
 			}
+			if err := p.ctx.Err(); err != nil {
+				return err
+			}
 			combined = append(combined, outline...)
 		}
 		return nil
 	}
 	if err := walk(collect); err != nil {
+		return err
+	}
+	if err := p.ctx.Err(); err != nil {
 		return err
 	}
 	if len(combined) == 0 {
@@ -238,6 +255,9 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 	}
 	var covered GeometryPath
 	for i := len(regions) - 1; i >= 0; i-- {
+		if err := p.ctx.Err(); err != nil {
+			return err
+		}
 		region := regions[i]
 		visible := region.path
 		if opaque && len(covered) > 0 {
@@ -344,8 +364,14 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	if p.fonts == nil {
 		p.fonts = make(map[*pdfgo.Font]*pdfImportedFont)
 	}
-	local := pdfImporter{ctx: p.ctx, reader: p.reader, editor: editor, renderer: p.renderer, matrix: p.matrix, pageBox: p.pageBox, pageWidth: p.pageWidth, pageHeight: p.pageHeight, rasterDPI: p.rasterDPI, warning: p.warning, rasterWarned: true, fontIDs: map[*pdfgo.Font]string{}, fonts: p.fonts}
+	if p.clipPaths == nil {
+		p.clipPaths = &renderCache[[32]byte, pdfClipPath]{limit: 8 << 20}
+	}
+	local := pdfImporter{ctx: p.ctx, reader: p.reader, editor: editor, renderer: p.renderer, matrix: p.matrix, pageBox: p.pageBox, pageWidth: p.pageWidth, pageHeight: p.pageHeight, rasterDPI: p.rasterDPI, warning: p.warning, rasterWarned: true, fontIDs: map[*pdfgo.Font]string{}, fonts: p.fonts, clipPaths: p.clipPaths}
 	if err := build(&local); err != nil {
+		return nil, box, err
+	}
+	if err := p.ctx.Err(); err != nil {
 		return nil, box, err
 	}
 	if err := local.flushPath(); err != nil {
@@ -357,19 +383,19 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	if err := local.commitObjects(); err != nil {
 		return nil, box, err
 	}
-	reader, err := editor.Reader()
+	reader, err := editor.resourceReader()
 	if err != nil {
 		return nil, box, err
 	}
 	defer reader.Close()
-	page, err := reader.PageContentByIndex(0)
-	if err != nil {
-		return nil, box, err
-	}
+	page := &editor.pages[0]
 	renderer := p.renderer.childRenderer(reader)
 	renderer.TransparentBackground = true
 	for _, layer := range page.Content.Layer {
 		for _, object := range layer.Objects {
+			if err := p.ctx.Err(); err != nil {
+				return nil, box, err
+			}
 			bounds, err := renderer.ObjectBounds(object, layer.DrawParam)
 			if err != nil {
 				return nil, box, err
@@ -388,6 +414,9 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 		return nil, box, nil
 	}
 	scene, err := renderer.CompilePage(page)
+	if canceled := p.ctx.Err(); canceled != nil {
+		return nil, box, canceled
+	}
 	return scene, box, err
 }
 
@@ -521,6 +550,9 @@ func pdfClippedVisitor(visitor pdfgo.Visitor, clip pdfgo.Path) pdfgo.Visitor {
 // 入参: mask PDF蒙版
 // 返回: pdfgo.Path 页面坐标裁剪路径, error 不可精确转换或几何错误
 func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
+	if err := p.ctx.Err(); err != nil {
+		return pdfgo.Path{}, err
+	}
 	if mask.Subtype != "Luminosity" || mask.ColorSpace == nil || mask.ColorSpace.Model != "DeviceGray" || mask.ColorSpace.Calibrated() {
 		return pdfgo.Path{}, &pdfgo.UnsupportedError{Feature: "nonbinary luminosity mask"}
 	}
@@ -576,6 +608,9 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 		return walk(visitor)
 	}
 	visitor.Path = func(mark pdfgo.PathMark) error {
+		if err := p.ctx.Err(); err != nil {
+			return err
+		}
 		paint := mark.Style.Fill
 		if !mark.Fill || mark.Stroke || paint.Alpha != 1 || paint.CMYK != nil || paint.Axial != nil || paint.Radial != nil || paint.Function != nil || paint.Mesh != nil || paint.Tiling != nil || paint.Space != nil && paint.Space.Calibrated() || paint.RGB[0] != paint.RGB[1] || paint.RGB[1] != paint.RGB[2] || mark.Style.SoftMask != nil || !pdfNormalBlend(mark.Style.BlendMode) {
 			return &pdfgo.UnsupportedError{Feature: "nonbinary mask graphic"}
@@ -584,7 +619,11 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 		if err != nil {
 			return err
 		}
-		shape, err := ParseGeometryPath(identity.pathData(mark.Path, Box{}))
+		data, err := identity.pathDataContext(p.ctx, mark.Path, Box{})
+		if err != nil {
+			return err
+		}
+		shape, err := ParseGeometryPath(data)
 		if err != nil {
 			return err
 		}
@@ -596,7 +635,11 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 			if len(clip.Text) != 0 {
 				return &pdfgo.UnsupportedError{Feature: "text-clipped binary mask"}
 			}
-			c, err := ParseGeometryPath(identity.pathData(clip, Box{}))
+			data, err := identity.pathDataContext(p.ctx, clip, Box{})
+			if err != nil {
+				return err
+			}
+			c, err := ParseGeometryPath(data)
 			if err != nil {
 				return err
 			}
@@ -621,6 +664,9 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 	}
 	path := pdfgo.Path{}
 	for _, segment := range region {
+		if err := p.ctx.Err(); err != nil {
+			return pdfgo.Path{}, err
+		}
 		point := func(p Point) pdfgo.Point { return pdfgo.Point{X: p.X, Y: p.Y} }
 		switch segment.Verb {
 		case GeometryMove:

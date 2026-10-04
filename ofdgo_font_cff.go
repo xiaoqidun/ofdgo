@@ -99,7 +99,10 @@ func normalizeCFFCharstrings(data []byte) ([]byte, error) {
 	if topData == nil || topStart+topSize > len(data) {
 		return nil, fmt.Errorf("invalid CFF top dictionary")
 	}
-	dict := parseCFFDict(topData)
+	dict, err := readCFFDict(topData)
+	if err != nil {
+		return nil, err
+	}
 	charOffset := dict[17]
 	if len(charOffset) != 1 {
 		return nil, fmt.Errorf("missing CFF charstrings")
@@ -216,7 +219,10 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 	}
 	_, glbSz := getCFFIndexCount(data, offset)
 	globalSubrIndexData := data[offset : offset+glbSz]
-	topDict := parseCFFDict(topDictData)
+	topDict, err := readCFFDict(topDictData)
+	if err != nil {
+		return nil, err
+	}
 	if _, isCID := topDict[1230]; !isCID {
 		return data, nil
 	}
@@ -233,7 +239,10 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 		return sanitizeMultiFDCFF(data, hdrSize, nameIndexData, topDict, stringIndexData, globalSubrIndexData, fdArrOff, fdCount)
 	}
 	fontDictData, _ := getCFFIndexData(data, fdArrOff)
-	fontDict := parseCFFDict(fontDictData)
+	fontDict, err := readCFFDict(fontDictData)
+	if err != nil {
+		return nil, err
+	}
 	if fdMat, ok := fontDict[1207]; ok && len(fdMat) == 6 {
 		topMat, hasTop := topDict[1207]
 		if !hasTop || len(topMat) != 6 {
@@ -255,7 +264,10 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 	}
 	var subrsOffRel int
 	if len(privDictData) > 0 {
-		pDict := parseCFFDict(privDictData)
+		pDict, err := readCFFDict(privDictData)
+		if err != nil {
+			return nil, err
+		}
 		if sVals, ok := pDict[19]; ok && len(sVals) > 0 {
 			subrsOffRel = int(sVals[0])
 		}
@@ -284,7 +296,10 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 	delete(topDict, 16)
 	var finalPrivData []byte
 	if len(privDictData) > 0 {
-		pDict := parseCFFDict(privDictData)
+		pDict, err := readCFFDict(privDictData)
+		if err != nil {
+			return nil, err
+		}
 		if err := normalizeCFFPrivate(pDict); err != nil {
 			return nil, err
 		}
@@ -358,7 +373,11 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 	privateDicts := make([]cffDict, fdCount)
 	for fd, item := range fdItems {
 		fonts[fd] = type2Font{data: data, chars: charStrings, globals: globalSubrs, seed: 1}
-		privateDicts[fd], err = readType2Private(data, parseCFFDict(item)[18], &fonts[fd])
+		fontDict, dictErr := readCFFDict(item)
+		if dictErr != nil {
+			return nil, dictErr
+		}
+		privateDicts[fd], err = readType2Private(data, fontDict[18], &fonts[fd])
 		if err != nil {
 			return nil, fmt.Errorf("CFF font dictionary %d: %w", fd, err)
 		}
@@ -452,7 +471,10 @@ func parseCFFAndCountGlyphs(data []byte) (int, error) {
 	}
 	topDictData, _ := getCFFIndexData(data, offset)
 	if topDictData != nil {
-		dict := parseCFFDict(topDictData)
+		dict, err := readCFFDict(topDictData)
+		if err != nil {
+			return 0, err
+		}
 		if offsetVals, ok := dict[17]; ok && len(offsetVals) > 0 {
 			charStrOff := int(offsetVals[0])
 			if charStrOff > 0 && charStrOff < len(data) {
@@ -478,62 +500,87 @@ func multiplyAffine(a, b []float64) []float64 {
 	}
 }
 
-// parseCFFDict 解析CFF字典数据
+// parseCFFDict 读取可选CFF字典，编码无效时返回nil
 // 入参: data 字典数据
 // 返回: cffDict 解析后的字典映射
 func parseCFFDict(data []byte) cffDict {
+	dict, _ := readCFFDict(data)
+	return dict
+}
+
+// readCFFDict 校验CFF字典编码、数值和48项操作数上限
+// 入参: data 字典数据
+// 返回: cffDict 字典映射, error 编码或操作数错误
+func readCFFDict(data []byte) (cffDict, error) {
 	dict := make(cffDict)
 	var operands []float64
 	i := 0
 	for i < len(data) {
 		b := data[i]
 		i++
-		if b <= 27 {
+		if b <= 21 {
 			op := int(b)
 			if b == 12 {
 				if i >= len(data) {
-					break
+					return nil, fmt.Errorf("truncated CFF operator")
 				}
 				op = 1200 + int(data[i])
 				i++
 			}
+			if len(operands) == 0 {
+				return nil, fmt.Errorf("missing CFF dictionary operands")
+			}
 			dict[op] = operands
 			operands = nil
 		} else if b == 28 {
-			if i+1 < len(data) {
-				val := int(int16(binary.BigEndian.Uint16(data[i:])))
-				operands = append(operands, float64(val))
-				i += 2
+			if len(data)-i < 2 {
+				return nil, fmt.Errorf("truncated CFF integer")
 			}
+			val := int(int16(binary.BigEndian.Uint16(data[i:])))
+			operands = append(operands, float64(val))
+			i += 2
 		} else if b == 29 {
-			if i+3 < len(data) {
-				val := int(int32(binary.BigEndian.Uint32(data[i:])))
-				operands = append(operands, float64(val))
-				i += 4
+			if len(data)-i < 4 {
+				return nil, fmt.Errorf("truncated CFF integer")
 			}
+			val := int(int32(binary.BigEndian.Uint32(data[i:])))
+			operands = append(operands, float64(val))
+			i += 4
 		} else if b == 30 {
 			s, n := parseCFFReal(data[i:])
-			if f, err := strconv.ParseFloat(s, 64); err == nil {
-				operands = append(operands, f)
+			f, err := strconv.ParseFloat(s, 64)
+			if n == 0 || err != nil || !finite(f) {
+				return nil, fmt.Errorf("invalid CFF real")
 			}
+			operands = append(operands, f)
 			i += n
 		} else if b >= 32 && b <= 246 {
 			operands = append(operands, float64(int(b)-139))
 		} else if b >= 247 && b <= 250 {
-			if i < len(data) {
-				b1 := int(data[i])
-				i++
-				operands = append(operands, float64((int(b)-247)*256+b1+108))
+			if i == len(data) {
+				return nil, fmt.Errorf("truncated CFF integer")
 			}
+			b1 := int(data[i])
+			i++
+			operands = append(operands, float64((int(b)-247)*256+b1+108))
 		} else if b >= 251 && b <= 254 {
-			if i < len(data) {
-				b1 := int(data[i])
-				i++
-				operands = append(operands, float64(-(int(b)-251)*256-b1-108))
+			if i == len(data) {
+				return nil, fmt.Errorf("truncated CFF integer")
 			}
+			b1 := int(data[i])
+			i++
+			operands = append(operands, float64(-(int(b)-251)*256-b1-108))
+		} else {
+			return nil, fmt.Errorf("invalid CFF dictionary byte")
+		}
+		if len(operands) > 48 {
+			return nil, fmt.Errorf("CFF dictionary operand limit exceeded")
 		}
 	}
-	return dict
+	if len(operands) != 0 {
+		return nil, fmt.Errorf("unused CFF dictionary operands")
+	}
+	return dict, nil
 }
 
 // parseCFFReal 解析CFF实数编码
@@ -549,6 +596,9 @@ func parseCFFReal(data []byte) (string, int) {
 		nibbles := []byte{b >> 4, b & 0x0F}
 		for _, n := range nibbles {
 			if n == 0xF {
+				if b>>4 == 15 && b&15 != 15 {
+					return "", 0
+				}
 				done = true
 				break
 			}
@@ -567,7 +617,13 @@ func parseCFFReal(data []byte) (string, int) {
 			if n == 0xE {
 				sb.WriteString("-")
 			}
+			if n == 0xD {
+				return "", 0
+			}
 		}
+	}
+	if !done {
+		return "", 0
 	}
 	return sb.String(), i
 }

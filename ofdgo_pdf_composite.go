@@ -242,6 +242,8 @@ func (p *pdfImporter) compositeTextBounds(mark pdfgo.TextMark, stroke bool) Box 
 // 返回: []pdfCompositeNode 原始图元, error 解析错误
 func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]pdfCompositeNode, error) {
 	active := make(map[*pdfgo.Font]map[string]bool)
+	var externalNames map[string]bool
+	var embeddedFonts map[*pdfgo.Font]bool
 	var collect func(func(pdfgo.Visitor) error) ([]pdfCompositeNode, error)
 	collect = func(walk func(pdfgo.Visitor) error) ([]pdfCompositeNode, error) {
 		var nodes []pdfCompositeNode
@@ -257,6 +259,24 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 			return nil
 		}
 		v.Text = func(mark pdfgo.TextMark) error {
+			if mark.Font.Subtype != "Type3" {
+				if len(mark.Font.Program) == 0 {
+					if externalNames == nil {
+						externalNames = make(map[string]bool)
+					}
+					name := pdfEmbeddedFontName(mark.Font.Name)
+					if !externalNames[fontNormalizeName(name)] {
+						for _, candidate := range fontExactCandidateNames(name) {
+							externalNames[fontNormalizeName(candidate)] = true
+						}
+					}
+				} else {
+					if embeddedFonts == nil {
+						embeddedFonts = make(map[*pdfgo.Font]bool)
+					}
+					embeddedFonts[mark.Font] = true
+				}
+			}
 			var text []pdfCompositeNode
 			if mark.Font.Subtype != "Type3" {
 				if err := p.halftone(mark.Style); err != nil {
@@ -327,7 +347,22 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 		err := walk(v)
 		return nodes, err
 	}
-	return collect(walk)
+	nodes, err := collect(walk)
+	if err != nil {
+		return nil, err
+	}
+	for font := range embeddedFonts {
+		if !externalNames[fontNormalizeName(pdfEmbeddedFontName(font.Name))] {
+			continue
+		}
+		if err := p.ctx.Err(); err != nil {
+			return nil, err
+		}
+		if _, err := p.importedFont(font); err != nil {
+			return nil, err
+		}
+	}
+	return nodes, nil
 }
 
 // compositePage 保留独立不透明对象，仅将需要背景参与的效果在局部区域合成

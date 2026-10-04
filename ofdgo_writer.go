@@ -241,6 +241,31 @@ func (e *Editor) reader(progress editorProgress) (*Reader, error) {
 	return r, nil
 }
 
+// resourceReader 为临时图元编译准备资源索引，不序列化页面或作为公共快照
+// 返回: *Reader 资源阅读器, error 资源错误
+func (e *Editor) resourceReader() (*Reader, error) {
+	if e.source != nil || len(e.origins) != 0 {
+		return nil, fmt.Errorf("resource reader requires created objects")
+	}
+	if err := e.validate(); err != nil {
+		return nil, err
+	}
+	r := &Reader{files: make(map[string][]byte)}
+	if err := e.writePartsWithPages(func(name string, data []byte, _ bool) error {
+		r.files[name] = data
+		return nil
+	}, nil, false); err != nil {
+		return nil, err
+	}
+	if err := r.initRoot(); err != nil {
+		return nil, err
+	}
+	if _, err := r.Doc(); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
 // validate 校验文档保存条件
 // 返回: error 错误信息
 func (e *Editor) validate() error {
@@ -269,6 +294,13 @@ func (e *Editor) validate() error {
 // 入参: write 条目写入方法, progress 保存进度回调，预览时为nil
 // 返回: error 错误信息
 func (e *Editor) writeParts(write func(string, []byte, bool) error, progress editorProgress) error {
+	return e.writePartsWithPages(write, progress, true)
+}
+
+// writePartsWithPages 统一生成包条目，临时编译可省去页面XML
+// 入参: write 条目写入方法, progress 保存进度回调, includePages 是否写出页面
+// 返回: error 写入错误
+func (e *Editor) writePartsWithPages(write func(string, []byte, bool) error, progress editorProgress, includePages bool) error {
 	if len(e.removedPages) != 0 {
 		output := write
 		write = func(name string, data []byte, binary bool) error {
@@ -359,27 +391,29 @@ func (e *Editor) writeParts(write func(string, []byte, bool) error, progress edi
 			return err
 		}
 	}
-	for i, page := range e.pages {
-		if err := progress.report("pages", i, len(e.pages)); err != nil {
+	if includePages {
+		for i, page := range e.pages {
+			if err := progress.report("pages", i, len(e.pages)); err != nil {
+				return err
+			}
+			name := packagePagePath(e.packageDirectory(), page.ID)
+			if len(e.origins) == 0 {
+				if err := writeXML(name, func(x *ofdXML) { x.page(page) }); err != nil {
+					return err
+				}
+			} else {
+				data, err := e.sourceNewPageXML(page)
+				if err != nil {
+					return err
+				}
+				if err := write(name, data, false); err != nil {
+					return err
+				}
+			}
+		}
+		if err := progress.report("pages", len(e.pages), len(e.pages)); err != nil {
 			return err
 		}
-		name := packagePagePath(e.packageDirectory(), page.ID)
-		if len(e.origins) == 0 {
-			if err := writeXML(name, func(x *ofdXML) { x.page(page) }); err != nil {
-				return err
-			}
-		} else {
-			data, err := e.sourceNewPageXML(page)
-			if err != nil {
-				return err
-			}
-			if err := write(name, data, false); err != nil {
-				return err
-			}
-		}
-	}
-	if err := progress.report("pages", len(e.pages), len(e.pages)); err != nil {
-		return err
 	}
 	for _, resources := range [][]editorResource{fonts, images} {
 		for _, resource := range resources {
