@@ -46,6 +46,7 @@ type type1Program struct {
 	glyphs []type1Glyph
 	subrs  [][]byte
 	lenIV  int
+	matrix []float64
 }
 
 // type1Glyph 保存字形名称及指令
@@ -63,6 +64,7 @@ type type1Scanner struct {
 // type1Outline 保存字形指令的操作数栈及轮廓位置
 type type1Outline struct {
 	program    *type1Program
+	steps      *int
 	active     map[string]bool
 	args       []float64
 	postscript []float64
@@ -91,12 +93,10 @@ func parseType1Program(data []byte) (type1Program, error) {
 	if err != nil {
 		return type1Program{}, err
 	}
-	marker := []byte("eexec")
-	start := bytes.Index(data, marker)
-	if start < 0 {
-		return type1Program{}, fmt.Errorf("Type1 font lacks eexec data")
+	matrix, start, err := readType1Header(data)
+	if err != nil {
+		return type1Program{}, err
 	}
-	start += len(marker)
 	for start < len(data) && type1Space(data[start]) {
 		start++
 	}
@@ -129,7 +129,7 @@ func parseType1Program(data []byte) (type1Program, error) {
 	}
 	decrypted := type1Decrypt(encrypted, 55665)[4:]
 	scanner := type1Scanner{data: decrypted}
-	program := type1Program{lenIV: 4}
+	program := type1Program{lenIV: 4, matrix: matrix}
 	section := ""
 	for {
 		token := scanner.next()
@@ -210,6 +210,46 @@ func parseType1Program(data []byte) (type1Program, error) {
 		}
 	}
 	return program, nil
+}
+
+// readType1Header 读取明文字体矩阵及加密数据起点
+// 入参: data Type1程序
+// 返回: []float64 字体矩阵, int 加密起点, error 头部错误
+func readType1Header(data []byte) ([]float64, int, error) {
+	scanner := type1Scanner{data: data}
+	var matrix []float64
+	for {
+		switch scanner.next() {
+		case "":
+			return nil, 0, fmt.Errorf("Type1 font lacks eexec data")
+		case "eexec":
+			return matrix, scanner.pos, nil
+		case "/FontMatrix":
+			closing := ""
+			switch scanner.next() {
+			case "[":
+				closing = "]"
+			case "{":
+				closing = "}"
+			default:
+				return nil, 0, fmt.Errorf("invalid Type1 FontMatrix array")
+			}
+			matrix = make([]float64, 6)
+			for index := range matrix {
+				value, err := strconv.ParseFloat(scanner.next(), 64)
+				if err != nil || !finite(value) {
+					return nil, 0, fmt.Errorf("invalid Type1 FontMatrix value")
+				}
+				matrix[index] = value
+			}
+			if scanner.next() != closing {
+				return nil, 0, fmt.Errorf("invalid Type1 FontMatrix length")
+			}
+			if _, err := readCFFMatrix(cffDict{1207: matrix}, [6]float64{}); err != nil {
+				return nil, 0, fmt.Errorf("invalid Type1 FontMatrix: %w", err)
+			}
+		}
+	}
 }
 
 // flattenType1 将PFB分段容器转换为连续的Type1程序
@@ -312,11 +352,41 @@ func (s *type1Scanner) next() string {
 		return ""
 	}
 	start := s.pos
-	if bytes.IndexByte([]byte("[]{}"), s.data[s.pos]) >= 0 {
+	if s.data[s.pos] == '(' {
+		depth := 1
+		s.pos++
+		for s.pos < len(s.data) && depth > 0 {
+			switch s.data[s.pos] {
+			case '\\':
+				if s.pos+1 < len(s.data) {
+					s.pos++
+				}
+			case '(':
+				depth++
+			case ')':
+				depth--
+			}
+			s.pos++
+		}
+		return string(s.data[start:s.pos])
+	}
+	if s.data[s.pos] == '<' && (s.pos+1 == len(s.data) || s.data[s.pos+1] != '<') {
+		for s.pos < len(s.data) && s.data[s.pos] != '>' {
+			s.pos++
+		}
+		if s.pos < len(s.data) {
+			s.pos++
+		}
+		return string(s.data[start:s.pos])
+	}
+	if bytes.IndexByte([]byte("[]{}()<>"), s.data[s.pos]) >= 0 {
 		s.pos++
 		return string(s.data[start:s.pos])
 	}
-	for s.pos < len(s.data) && !type1Space(s.data[s.pos]) && bytes.IndexByte([]byte("[]{}%"), s.data[s.pos]) < 0 {
+	if s.data[s.pos] == '/' {
+		s.pos++
+	}
+	for s.pos < len(s.data) && !type1Space(s.data[s.pos]) && bytes.IndexByte([]byte("[]{}%()/<>"), s.data[s.pos]) < 0 {
 		s.pos++
 	}
 	return string(s.data[start:s.pos])
@@ -375,7 +445,14 @@ func (s *type1Outline) run(data []byte, depth int) (bool, error) {
 	if depth > 32 {
 		return false, fmt.Errorf("Type1 subroutine recursion")
 	}
+	if s.steps == nil {
+		s.steps = new(int)
+	}
 	for index := 0; index < len(data); index++ {
+		(*s.steps)++
+		if *s.steps > 1<<20 {
+			return false, fmt.Errorf("Type1 execution limit exceeded")
+		}
 		op := int(data[index])
 		if op >= 32 {
 			var value float64
@@ -400,6 +477,9 @@ func (s *type1Outline) run(data []byte, depth int) (bool, error) {
 				}
 				value = float64(int32(binary.BigEndian.Uint32(data[index+1 : index+5])))
 				index += 4
+			}
+			if len(s.args) >= 24 {
+				return false, fmt.Errorf("Type1 operand limit exceeded")
 			}
 			s.args = append(s.args, value)
 			continue
@@ -443,7 +523,7 @@ func (s *type1Outline) run(data []byte, depth int) (bool, error) {
 			return true, nil
 		}
 	}
-	return false, nil
+	return false, fmt.Errorf("unterminated Type1 charstring")
 }
 
 // operator 执行单个Type1绘制指令并清空已消费的操作数
@@ -601,7 +681,7 @@ func (s *type1Outline) operator(op int) error {
 			return fmt.Errorf("unsupported Type1 OtherSubr %d", number)
 		}
 	case 1217:
-		if len(s.postscript) == 0 {
+		if len(s.postscript) == 0 || len(a) >= 24 {
 			return fmt.Errorf("invalid Type1 pop")
 		}
 		s.args = append(a, s.postscript[0])
@@ -629,6 +709,9 @@ func (s *type1Outline) operator(op int) error {
 // 入参: code 标准编码, x 横向原点, y 纵向原点
 // 返回: error 字形缺失、循环或指令错误
 func (s *type1Outline) component(code, x, y float64) error {
+	if len(s.active) >= 32 {
+		return fmt.Errorf("Type1 component recursion")
+	}
 	if code < 0 || code > 255 || code != math.Trunc(code) {
 		return fmt.Errorf("invalid Type1 component code")
 	}
@@ -643,7 +726,7 @@ func (s *type1Outline) component(code, x, y float64) error {
 		if glyph.name != name {
 			continue
 		}
-		child := type1Outline{program: s.program, active: s.active, originX: x, originY: y, pointX: s.pointX, pointY: s.pointY}
+		child := type1Outline{program: s.program, steps: s.steps, active: s.active, originX: x, originY: y, pointX: s.pointX, pointY: s.pointY}
 		s.active[name] = true
 		ended, err := child.run(glyph.data, 0)
 		delete(s.active, name)
@@ -798,6 +881,9 @@ func (p *type1Program) toCFF(name string) ([]byte, error) {
 	charIndex := encodeCFFIndex(chars)
 	topDict := make([]byte, 12)
 	topDict[0], topDict[5], topDict[6], topDict[11] = 29, 15, 29, 17
+	if p.matrix != nil {
+		topDict = append(topDict, encodeCFFDict(cffDict{1207: p.matrix})...)
+	}
 	topIndex := encodeCFFIndex([][]byte{topDict})
 	charsetOffset := 4 + len(nameIndex) + len(topIndex) + len(stringIndex) + len(globalSubrs)
 	charOffset := charsetOffset + len(charset)

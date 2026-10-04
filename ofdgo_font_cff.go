@@ -155,8 +155,17 @@ func normalizeCFFCharstringsAt(data []byte, unitsPerEm uint16) ([]byte, error) {
 	if !changed {
 		return data, nil
 	}
+	return replaceCFFCharstrings(data, dict, topStart, topSize, charStart, charSize, chars, explicitCharset), nil
+}
+
+// replaceCFFCharstrings 替换字形索引并调整后续数据及顶层字典的偏移
+// 入参: data 原始字体, dict 输出字典, topStart 顶层索引起点, topSize 顶层索引大小
+// 入参: charStart 字形索引起点, charSize 字形索引大小, chars 字形程序, explicitCharset 追加字符集
+// 返回: []byte 重建后的字体数据
+func replaceCFFCharstrings(data []byte, dict cffDict, topStart, topSize, charStart, charSize int, chars [][]byte, explicitCharset []byte) []byte {
 	encodedChars := encodeCFFIndex(chars)
 	topEnd := topStart + topSize
+	topData, _ := getCFFIndexData(data, topStart)
 	originalDict := parseCFFDict(topData)
 	newTop := encodeCFFIndex([][]byte{encodeCFFDict(dict)})
 	for range 6 {
@@ -179,7 +188,7 @@ func normalizeCFFCharstringsAt(data []byte, unitsPerEm uint16) ([]byte, error) {
 				dict[op] = []float64{float64(offset + shift)}
 			}
 		}
-		if values := dict[18]; len(values) == 2 {
+		if values := dict[18]; len(values) == 2 && values[0] != 0 {
 			original := originalDict[18]
 			offset := int(original[1])
 			if offset >= charStart+charSize {
@@ -202,7 +211,7 @@ func normalizeCFFCharstringsAt(data []byte, unitsPerEm uint16) ([]byte, error) {
 	result = append(result, encodedChars...)
 	result = append(result, data[charStart+charSize:]...)
 	result = append(result, explicitCharset...)
-	return result, nil
+	return result
 }
 
 // sanitizeCFF 尝试清洗CFF数据，转换CID字体并合并FontMatrix
@@ -243,7 +252,14 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	kind, err := cffCharstringType(topDict)
+	if err != nil {
+		return nil, err
+	}
 	if _, isCID := topDict[1230]; !isCID {
+		if kind == 1 {
+			return normalizeCFFType1(data, topDict)
+		}
 		return data, nil
 	}
 	fdArrOff, err := cffDictOffset(data, topDict, 1236)
@@ -266,7 +282,7 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if fdMatrix != [6]float64{1, 0, 0, 1, 0, 0} {
+	if kind == 1 || fdMatrix != [6]float64{1, 0, 0, 1, 0, 0} {
 		return sanitizeMultiFDCFF(data, hdrSize, nameIndexData, topDict, stringIndexData, globalSubrIndexData, fdArrOff, fdCount)
 	}
 	charStringsOff, err := cffDictOffset(data, topDict, 17)
@@ -344,6 +360,10 @@ func normalizeCFFPrivate(dict cffDict) error {
 // 入参: stringIndexData 字符串索引, globalSubrIndexData 全局子程序索引, fdArrOff FDArray偏移, fdCount FD数量
 // 返回: []byte 清洗后的CFF数据, error 错误信息
 func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict cffDict, stringIndexData []byte, globalSubrIndexData []byte, fdArrOff int, fdCount int) ([]byte, error) {
+	kind, err := cffCharstringType(topDict)
+	if err != nil {
+		return nil, err
+	}
 	charStringsOff, err := cffDictOffset(data, topDict, 17)
 	if err != nil {
 		return nil, err
@@ -375,6 +395,10 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 		return nil, fmt.Errorf("invalid CFF FDArray count")
 	}
 	fonts := make([]type2Font, fdCount)
+	var type1Fonts []*type1Program
+	if kind == 1 {
+		type1Fonts = make([]*type1Program, fdCount)
+	}
 	privateDicts := make([]cffDict, fdCount)
 	matrices := make([][6]float64, fdCount)
 	transformed := false
@@ -408,6 +432,13 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 		if err := normalizeCFFPrivate(privateDicts[fd]); err != nil {
 			return nil, fmt.Errorf("CFF font dictionary %d: %w", fd, err)
 		}
+		if kind == 1 {
+			type1Fonts[fd], err = readCFFType1Program(data, charStrings, fontDict[18], true)
+			if err != nil {
+				return nil, fmt.Errorf("CFF font dictionary %d: %w", fd, err)
+			}
+			fonts[fd].def, fonts[fd].nominal = 0, 0
+		}
 	}
 	target := &fonts[0]
 	if transformed {
@@ -417,6 +448,12 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 	var stack [48]float64
 	for gid, cs := range charStrings {
 		font := &fonts[fdSelect[gid]]
+		if kind == 1 {
+			cs, err = type1Fonts[fdSelect[gid]].outline(type1Glyph{name: fmt.Sprintf("gid%d", gid), data: cs})
+			if err != nil {
+				return nil, err
+			}
+		}
 		var output bytes.Buffer
 		steps := 0
 		state := type2State{font: font, args: stack[:0], widthTarget: target, width: font.def, seed: font.seed + uint64(gid), steps: &steps, output: &output, stripHints: true}
@@ -437,6 +474,7 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 	delete(topDict, 1234)
 	delete(topDict, 15)
 	delete(topDict, 16)
+	delete(topDict, 1206)
 	if transformed {
 		scale := 1 / float64(units)
 		topDict[1207] = []float64{scale, 0, 0, scale, 0, 0}
@@ -451,7 +489,7 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 		}
 	}
 	delete(privateDict, 19)
-	if transformed {
+	if transformed || kind == 1 {
 		privateDict = cffDict{20: {0}, 21: {0}}
 	}
 	if err := normalizeCFFPrivate(privateDict); err != nil {
