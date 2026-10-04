@@ -517,6 +517,7 @@ func (x *ofdXML) layer(layer Layer) {
 	var attrs ofdAttrs
 	attrs.add("ID", layer.ID)
 	attrs.add("Type", layer.Type)
+	attrs.add("DrawParam", layer.DrawParam)
 	x.start("Layer", attrs)
 	for _, object := range layer.Objects {
 		x.object(object, false)

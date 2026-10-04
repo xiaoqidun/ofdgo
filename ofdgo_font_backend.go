@@ -45,6 +45,13 @@ type FontOutlineBatch interface {
 	GlyphOutlines(glyphs []uint16, size float64) ([]GeometryPath, error)
 }
 
+// FontGlyphBounds 提供与字形轮廓一致的边界，字号及边界单位为毫米
+// 不使用字体全局边界替代单个字形，空轮廓返回零边界
+type FontGlyphBounds interface {
+	FontOutlines
+	GlyphBounds(glyph uint16, size float64) (Box, error)
+}
+
 // FontGlyphDiagnostics 提供已提取字形的恢复提示，不将提示作为轮廓解析失败
 // 字形不存在或不支持的指令仍由GlyphOutline返回错误
 type FontGlyphDiagnostics interface {

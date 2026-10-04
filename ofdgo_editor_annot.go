@@ -33,6 +33,9 @@ func (e *Editor) Annotations(index int) ([]AnnotationInfo, error) {
 	if e.source == nil {
 		return nil, nil
 	}
+	if _, err := e.source.reader.Doc(); err != nil {
+		return nil, err
+	}
 	return e.source.reader.annotationInfos(index, e.pages[index].ID), nil
 }
 

@@ -64,9 +64,10 @@ func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []Gra
 			}
 		}
 		var content []byte
+		validation := &editorValidation{Editor: e}
 		for _, source := range objects {
 			id := e.nextID()
-			object, err := e.prepareCopiedObject(id, source)
+			object, err := validation.prepareCopiedObject(id, source)
 			if err != nil {
 				return err
 			}

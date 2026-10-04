@@ -35,6 +35,9 @@ import (
 	"github.com/xiaoqidun/jbig2"
 )
 
+// editorPathValidationLimit 限制同次对象校验保留的路径数量
+const editorPathValidationLimit = 1024
+
 // Editor 编辑OFD文档，长度单位为毫米，页面索引从0开始，实例需串行使用
 // Info可修改文档元数据，通过方法管理页面、对象和资源，WriteTo另存结果，不覆盖输入
 // OnWriteProgress可选，按fonts、pages、references、resources、compress、write阶段同步回报进度，返回错误则停止保存
@@ -785,7 +788,14 @@ func (e *Editor) findObject(page int, id string) (*Layer, int, error) {
 // 入参: id 对象标识, object 对象内容
 // 返回: GraphicObject 对象内容, error 错误信息
 func (e *Editor) prepareObject(id string, object GraphicObject) (GraphicObject, error) {
-	object, err := (&editorValidation{Editor: e}).prepareObject(id, object)
+	return (&editorValidation{Editor: e}).prepareObjectCopy(id, object)
+}
+
+// prepareObjectCopy 校验对象并隔离输入数据，同次校验共用几何缓存
+// 入参: id 对象标识, object 对象内容
+// 返回: GraphicObject 独立副本, error 错误信息
+func (v *editorValidation) prepareObjectCopy(id string, object GraphicObject) (GraphicObject, error) {
+	object, err := v.prepareObject(id, object)
 	if err != nil {
 		return GraphicObject{}, err
 	}
@@ -819,7 +829,7 @@ func (v *editorValidation) prepareObject(id string, object GraphicObject) (Graph
 		fill, stroke = obj.FillColor, (*FillColor)(obj.StrokeColor)
 	case "PathObject":
 		obj := &object.PathObject
-		if err := creationPath(obj.AbbreviatedData); err != nil {
+		if err := v.creationPath(obj.AbbreviatedData); err != nil {
 			return GraphicObject{}, err
 		}
 		if obj.Rule != "" && obj.Rule != "NonZero" && obj.Rule != "Even-Odd" {
@@ -1183,6 +1193,23 @@ func creationPath(value string) error {
 		return fmt.Errorf("empty path")
 	}
 	return err
+}
+
+// creationPath 在同次校验中复用相同路径的成功结果，不缓存错误或依赖可变资源
+// 入参: value 路径数据
+// 返回: error 错误信息
+func (v *editorValidation) creationPath(value string) error {
+	if v.paths[value] {
+		return nil
+	}
+	if err := creationPath(value); err != nil {
+		return err
+	}
+	if v.paths == nil || len(v.paths) >= editorPathValidationLimit {
+		v.paths = make(map[string]bool)
+	}
+	v.paths[value] = true
+	return nil
 }
 
 // creationNumbers 解析创建接口的有限十进制数值序列

@@ -155,26 +155,16 @@ func (r *Reader) parseAnnotations(doc *Document) error {
 	if doc.Annotations == "" {
 		return nil
 	}
-	annPath := r.ResPath(doc.Annotations)
-	f, err := r.openFile(annPath)
+	annotations, err := r.annotationIndex(doc)
 	if err != nil {
-		return err
-	}
-	defer f.Close()
-	var annotations Annotations
-	if err := xml.NewDecoder(f).Decode(&annotations); err != nil {
 		return err
 	}
 	if r.Annots == nil {
 		r.Annots = make(map[string][]Annotation)
 	}
-	r.annotationFiles = make(map[string][]string)
+	annPath := r.ResPath(doc.Annotations)
 	for _, page := range annotations.Page {
 		annotPath := resolveResourcePath(annPath, "", page.FileLoc)
-		if file, ok := r.packageFile(annotPath); ok {
-			annotPath = cleanPackagePath(file.Name)
-		}
-		r.annotationFiles[annotPath] = append(r.annotationFiles[annotPath], page.PageID)
 		af, err := r.openFile(annotPath)
 		if err != nil {
 			continue
@@ -188,4 +178,32 @@ func (r *Reader) parseAnnotations(doc *Document) error {
 		r.Annots[page.PageID] = append(r.Annots[page.PageID], pageAnnot.Annot...)
 	}
 	return nil
+}
+
+// annotationIndex 读取注解文件索引，不解析页面外观
+// 入参: doc 文档结构
+// 返回: Annotations 注解索引, error 错误信息
+func (r *Reader) annotationIndex(doc *Document) (Annotations, error) {
+	if doc.Annotations == "" {
+		return Annotations{}, nil
+	}
+	annPath := r.ResPath(doc.Annotations)
+	f, err := r.openFile(annPath)
+	if err != nil {
+		return Annotations{}, err
+	}
+	defer f.Close()
+	var annotations Annotations
+	if err := xml.NewDecoder(f).Decode(&annotations); err != nil {
+		return Annotations{}, err
+	}
+	r.annotationFiles = make(map[string][]string)
+	for _, page := range annotations.Page {
+		annotPath := resolveResourcePath(annPath, "", page.FileLoc)
+		if file, ok := r.packageFile(annotPath); ok {
+			annotPath = cleanPackagePath(file.Name)
+		}
+		r.annotationFiles[annotPath] = append(r.annotationFiles[annotPath], page.PageID)
+	}
+	return annotations, nil
 }

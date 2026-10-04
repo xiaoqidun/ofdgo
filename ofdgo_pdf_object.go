@@ -313,8 +313,11 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	var glyphPaths []pdfgo.Path
 	const unit = 25.4 / 72
 	m := p.matrix.Mul(mark.Matrix).Mul(pdfgo.Matrix{1 / unit, 0, 0, -1 / unit, 0, 0})
-	var points []pdfgo.Point
-	object := TextObject{Font: id, Size: mark.Size * unit, HScale: mark.HorizontalScale}
+	points := make([]pdfgo.Point, 0, 4*len(mark.Glyphs))
+	object := TextObject{Font: id, Size: mark.Size * unit, HScale: mark.HorizontalScale, TextCode: make([]TextCode, 0, len(mark.Glyphs))}
+	if embedded {
+		object.CGTransform = make([]CGTransform, 0, len(mark.Glyphs))
+	}
 	position := 0
 	for n, glyph := range mark.Glyphs {
 		if err := p.ctx.Err(); err != nil {
@@ -360,7 +363,17 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			position += count
 		}
 		if embedded || outlineStroke {
-			path, err := outline.GlyphOutline(gid, object.Size)
+			var path GeometryPath
+			var bounds Box
+			var err error
+			if provider, ok := outline.(FontGlyphBounds); ok && !outlineStroke {
+				bounds, err = provider.GlyphBounds(gid, object.Size)
+			} else {
+				path, err = outline.GlyphOutline(gid, object.Size)
+				if err == nil {
+					bounds, err = path.Bounds()
+				}
+			}
 			if err != nil {
 				return fmt.Errorf("PDF font %s outline: %w", font.Name, err)
 			}
@@ -377,10 +390,6 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 						p.fontWarnings[id] = true
 					}
 				}
-			}
-			bounds, err := path.Bounds()
-			if err != nil {
-				return err
 			}
 			for _, point := range []pdfgo.Point{{X: bounds.X, Y: bounds.Y}, {X: bounds.X + bounds.W, Y: bounds.Y}, {X: bounds.X, Y: bounds.Y + bounds.H}, {X: bounds.X + bounds.W, Y: bounds.Y + bounds.H}} {
 				points = append(points, m.Apply(pdfgo.Point{X: origin.X*unit + point.X*mark.HorizontalScale, Y: -origin.Y*unit + point.Y}))

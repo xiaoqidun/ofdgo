@@ -27,18 +27,24 @@ import (
 // 入参: ctx 取消上下文, page PDF页面, strict 严格检查开关
 // 返回: error 错误信息
 func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict bool) error {
-	annotations, err := page.Annotations()
+	annotations, err := page.AnnotationsContext(ctx)
 	if err != nil {
 		return err
 	}
 	parents := make(map[pdfgo.Reference]int)
 	for i, annotation := range annotations {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if annotation.Reference != (pdfgo.Reference{}) && annotation.Subtype != "Popup" {
 			parents[annotation.Reference] = i
 		}
 	}
 	attached := make(map[int]bool)
 	for i, annotation := range annotations {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if annotation.Subtype != "Popup" {
 			continue
 		}
@@ -61,6 +67,9 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		}
 	}
 	for i, annotation := range annotations {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if attached[i] {
 			continue
 		}

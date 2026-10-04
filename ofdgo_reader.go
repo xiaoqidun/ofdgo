@@ -46,6 +46,7 @@ type Reader struct {
 	compositeGraphicUnitCache map[string]*CompositeGraphicUnit
 	pageHeaderCache           map[string]PageContent
 	doc                       *Document
+	relatedPending            bool
 	documentIndex             int
 	Stamps                    map[string][]Stamp
 	Annots                    map[string][]Annotation
@@ -128,6 +129,21 @@ func (r *Reader) Document(index int) (*Reader, error) {
 // Doc 获取当前文档结构
 // 返回: *Document 文档结构, error 错误信息
 func (r *Reader) Doc() (*Document, error) {
+	doc, err := r.docStructure()
+	if err != nil {
+		return nil, err
+	}
+	if r.relatedPending {
+		r.relatedPending = false
+		_ = r.parseAnnotations(doc)
+		_ = r.parseSignatures(doc)
+	}
+	return doc, nil
+}
+
+// docStructure 读取文档及资源索引，关联注解和签名由Doc按需解析
+// 返回: *Document 文档结构, error 错误信息
+func (r *Reader) docStructure() (*Document, error) {
 	if r.doc != nil {
 		return r.doc, nil
 	}
@@ -155,8 +171,7 @@ func (r *Reader) Doc() (*Document, error) {
 		r.loadRes(res)
 	}
 	r.doc = &doc
-	_ = r.parseAnnotations(&doc)
-	_ = r.parseSignatures(&doc)
+	r.relatedPending = true
 	return r.doc, nil
 }
 

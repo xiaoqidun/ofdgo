@@ -32,12 +32,13 @@ type PatternStyle struct {
 	CTM    *string
 }
 
-// editorValidation 保存同次对象校验的底纹和矢量引用路径，允许共享但拒绝循环
+// editorValidation 保存同次对象校验的引用路径及已验证几何，允许共享但拒绝循环
 type editorValidation struct {
 	*Editor
 	patterns   map[*Pattern]bool
 	composites map[string]bool
 	vectors    map[string]*editorCompositeNode
+	paths      map[string]bool
 }
 
 // GradientStops 解析当前文档的渐变分段，保留顺序并合并透明度

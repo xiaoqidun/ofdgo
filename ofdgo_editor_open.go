@@ -672,7 +672,8 @@ func editorPreservedObject(before, after GraphicObject) bool {
 // prepareCopiedObject 保真复制原对象，不重新生成字形或丢弃未修改字段
 // 入参: id 新标识, object 对象快照
 // 返回: GraphicObject 独立副本, error 错误信息
-func (e *Editor) prepareCopiedObject(id string, object GraphicObject) (GraphicObject, error) {
+func (v *editorValidation) prepareCopiedObject(id string, object GraphicObject) (GraphicObject, error) {
+	e := v.Editor
 	origin := e.snapshotOrigin(object)
 	if origin == nil && object.origin != nil {
 		references := make(map[string]bool)
@@ -684,7 +685,7 @@ func (e *Editor) prepareCopiedObject(id string, object GraphicObject) (GraphicOb
 	}
 	object.origin = nil
 	if origin == nil {
-		return e.prepareObject(id, object)
+		return v.prepareObjectCopy(id, object)
 	}
 	if !editorXMLTransformable(origin.node) || !editorXMLContainersSupported(origin.node) || !editorXMLCopyable(origin.node) || origin.reason != nil && (object.Type != "PathObject" || editReason(origin.reason) != EditUnsupportedColor) {
 		return GraphicObject{}, fmt.Errorf("object cannot be copied without changing its original structure")
@@ -704,7 +705,7 @@ func (e *Editor) prepareCopiedObject(id string, object GraphicObject) (GraphicOb
 		if !editorXMLSupported(origin.node) {
 			return GraphicObject{}, fmt.Errorf("copy would replace unsupported object content")
 		}
-		return e.prepareObject(id, object)
+		return v.prepareObjectCopy(id, object)
 	}
 	if err := validateEditorGeometry(object); err != nil {
 		return GraphicObject{}, err

@@ -16,16 +16,33 @@ package ofdgo
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/font"
 )
+
+// canvasGlyphBoundsLimit 限制单个字体保留的字形与字号边界数量
+const canvasGlyphBoundsLimit = 4096
 
 // canvasFontMetrics 保留默认字体度量，写出时不更新原始时间
 type canvasFontMetrics struct {
 	*font.SFNT
 	*fontShaper
 	outlines *sfntOutliner
+	bounds   *canvasFontBounds
+}
+
+// canvasFontBounds 缓存已成功提取的字形边界，不保留轮廓或失败结果
+type canvasFontBounds struct {
+	mu     sync.Mutex
+	values map[canvasGlyphSize]Box
+}
+
+// canvasGlyphSize 区分字形编号及精确毫米字号
+type canvasGlyphSize struct {
+	glyph uint16
+	size  float64
 }
 
 // ResolveFont 按需加载字体资源，保留内嵌数据及外部字体的名称、样式和集合索引匹配
@@ -43,7 +60,7 @@ func (CanvasBackend) OpenFont(data []byte) (FontMetrics, error) {
 	if err != nil {
 		return nil, err
 	}
-	metrics := &canvasFontMetrics{SFNT: sfnt, outlines: &sfntOutliner{font: sfnt}}
+	metrics := &canvasFontMetrics{SFNT: sfnt, outlines: &sfntOutliner{font: sfnt}, bounds: &canvasFontBounds{}}
 	metrics.fontShaper = &fontShaper{metrics: metrics}
 	return metrics, nil
 }
@@ -66,6 +83,38 @@ func (f canvasFontMetrics) GlyphOutline(glyph uint16, size float64) (GeometryPat
 		return nil, err
 	}
 	return *geometryFromCanvasPath(path), nil
+}
+
+// GlyphBounds 返回字形轮廓的精确边界，重复编号及字号复用有限缓存
+// 入参: glyph 字形编号, size 字号，单位为毫米
+// 返回: Box 字形边界, error 字形解析错误
+func (f canvasFontMetrics) GlyphBounds(glyph uint16, size float64) (Box, error) {
+	key := canvasGlyphSize{glyph: glyph, size: size}
+	if f.bounds != nil {
+		f.bounds.mu.Lock()
+		value, ok := f.bounds.values[key]
+		f.bounds.mu.Unlock()
+		if ok {
+			return value, nil
+		}
+	}
+	outline, err := f.GlyphOutline(glyph, size)
+	if err != nil {
+		return Box{}, err
+	}
+	value, err := outline.Bounds()
+	if err != nil {
+		return Box{}, err
+	}
+	if f.bounds != nil {
+		f.bounds.mu.Lock()
+		if f.bounds.values == nil || len(f.bounds.values) >= canvasGlyphBoundsLimit {
+			f.bounds.values = make(map[canvasGlyphSize]Box)
+		}
+		f.bounds.values[key] = value
+		f.bounds.mu.Unlock()
+	}
+	return value, nil
 }
 
 // GlyphWarning 返回字形指令栈下溢后保留设计轮廓的提示，原始字体不变

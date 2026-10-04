@@ -90,9 +90,10 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 	origins := make([]*editorObjectOrigin, len(objects))
 	result := make([]string, len(objects))
 	maximum := e.maxID + len(objects)
+	validation := &editorValidation{Editor: e}
 	for i, object := range objects {
 		result[i] = strconv.Itoa(e.maxID + i + 1)
-		object, err := e.prepareCopiedObject(result[i], object)
+		object, err := validation.prepareCopiedObject(result[i], object)
 		if err != nil {
 			return nil, err
 		}
@@ -124,13 +125,18 @@ func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) 
 	if target < len(layers) {
 		target = len(layers) - 1
 	}
-	for i, object := range prepared {
+	for i := 0; i < len(prepared); {
 		style := e.copiedLayerStyle(objects[i])
 		if target == len(layers) || layers[target].DrawParam != style {
 			layers = append(layers, Layer{ID: e.nextID(), Type: "Body", DrawParam: style})
 			target = len(layers) - 1
 		}
-		layers[target].Objects = append(layers[target].Objects, object)
+		end := i + 1
+		for end < len(prepared) && e.copiedLayerStyle(objects[end]) == style {
+			end++
+		}
+		layers[target].Objects = append(layers[target].Objects, prepared[i:end]...)
+		i = end
 	}
 	e.replaceLayers(page, layers)
 	return result, nil

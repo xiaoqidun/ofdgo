@@ -395,10 +395,11 @@ func (e *Editor) commitAnnotationParts(base *editorSource, parts map[string][]by
 	if err := reader.initRoot(); err != nil {
 		return err
 	}
-	doc, err := reader.Doc()
+	doc, err := reader.docStructure()
 	if err != nil {
 		return err
 	}
+	_, _ = reader.annotationIndex(doc)
 	before, after := e.source, *base
 	after.reader, after.document = reader, doc
 	if before == nil {

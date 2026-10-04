@@ -391,6 +391,18 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 // 入参: layer 图层
 // 返回: []byte 图层XML, error 错误信息
 func (e *Editor) sourceLayerXML(layer Layer) ([]byte, error) {
+	if !slices.ContainsFunc(layer.Objects, func(object GraphicObject) bool { return e.objectOrigin(editorObjectID(object)) != nil }) {
+		data, err := encodeOFDXML(func(x *ofdXML) {
+			attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: layer.ID}, {Name: xml.Name{Local: "Type"}, Value: layer.Type}}
+			attrs.add("DrawParam", layer.DrawParam)
+			x.root("Layer", attrs)
+			for _, object := range layer.Objects {
+				x.object(object, false)
+			}
+			x.end("Layer")
+		})
+		return bytes.TrimPrefix(data, []byte(xml.Header)), err
+	}
 	var content []byte
 	for _, object := range layer.Objects {
 		var data []byte
@@ -417,6 +429,17 @@ func (e *Editor) sourceLayerXML(layer Layer) ([]byte, error) {
 // 入参: page 页面
 // 返回: []byte 页面XML, error 错误信息
 func (e *Editor) sourceNewPageXML(page PageContent) ([]byte, error) {
+	preserved := false
+	for _, layer := range page.Content.Layer {
+		if slices.ContainsFunc(layer.Objects, func(object GraphicObject) bool { return e.objectOrigin(editorObjectID(object)) != nil }) {
+			preserved = true
+			break
+		}
+	}
+	if !preserved {
+		data, err := encodeOFDXML(func(x *ofdXML) { x.page(page) })
+		return bytes.TrimPrefix(data, []byte(xml.Header)), err
+	}
 	area, err := editorXMLContainer("Area", nil, editorXMLText("PhysicalBox", page.Area.PhysicalBox))
 	if err != nil {
 		return nil, err
@@ -433,7 +456,15 @@ func (e *Editor) sourceNewPageXML(page PageContent) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return editorXMLContainer("Page", nil, append(area, content...))
+	data := append(area, content...)
+	if len(page.Actions) != 0 {
+		actions, err := encodeOFDXML(func(x *ofdXML) { x.actions(page.Actions) })
+		if err != nil {
+			return nil, err
+		}
+		data = append(data, bytes.TrimPrefix(actions, []byte(xml.Header))...)
+	}
+	return editorXMLContainer("Page", nil, data)
 }
 
 // writeSource 将未修改ZIP条目直接复制到新包，逐项写入改动，不持有原资源解压副本
@@ -584,6 +615,9 @@ func (e *Editor) sourceReader(progress editorProgress) (*Reader, error) {
 			if _, changed := parts[actual]; changed {
 				delete(reader.pageHeaderCache, name)
 			}
+		}
+		if _, err := reader.Doc(); err != nil {
+			return nil, err
 		}
 		return reader, nil
 	}
