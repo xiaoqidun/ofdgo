@@ -132,6 +132,10 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 	step := 25.4 / c.importer.rasterDPI
 	uniform := node.image == nil && paint.Axial == nil && paint.Radial == nil && paint.Function == nil && paint.Tiling == nil && paint.Mesh == nil
 	compatible := overprint && !processOverprint && style.OverprintMode == 1 && uniform && paint.SourceSpace == "DeviceCMYK" && space.Model == "DeviceCMYK" && !space.Calibrated()
+	var marked *[4]bool
+	if processOverprint {
+		marked = &processMask
+	}
 	var pattern []pdfCompositePixel
 	if paint.Tiling != nil && (node.image == nil || node.image.Image.ImageMask) {
 		backdrop := pixels
@@ -241,26 +245,14 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 			}
 			if initial != nil {
 				pixel := initial[index]
-				if processOverprint {
-					for c := range values {
-						if !processMask[c] {
-							values[c] = pixel.values[c] * pixel.alpha
-						}
-					}
-				}
-				if err := pdfCompositePaintOver(&pixel, values, opacity, space, mode, compatible); err != nil {
+				if err := pdfCompositePaintOver(&pixel, values, opacity, space, mode, compatible, marked); err != nil {
 					return err
 				}
-				pdfCompositeInterpolate(&pixels[index], pixel, shape)
-			} else {
-				if processOverprint {
-					for c := range values {
-						if !processMask[c] {
-							values[c] = pixels[index].values[c] * pixels[index].alpha
-						}
-					}
+				if err := pdfCompositeInterpolate(&pixels[index], pixel, shape); err != nil {
+					return err
 				}
-				if err := pdfCompositePaintOver(&pixels[index], values, shape*opacity, space, mode, compatible); err != nil {
+			} else {
+				if err := pdfCompositePaintOver(&pixels[index], values, shape*opacity, space, mode, compatible, marked); err != nil {
 					return err
 				}
 			}
@@ -275,15 +267,14 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 
 // pdfCompositeInterpolate 按形状覆盖混合预乘颜色及累计透明度
 // 入参: target 原像素与输出, source 替换像素, shape 覆盖率
-func pdfCompositeInterpolate(target *pdfCompositePixel, source pdfCompositePixel, shape float64) {
-	alpha := target.alpha*(1-shape) + source.alpha*shape
-	if alpha != 0 {
-		for i := range target.values {
-			target.values[i] = (target.values[i]*target.alpha*(1-shape) + source.values[i]*source.alpha*shape) / alpha
-		}
+// 返回: error 像素或覆盖率错误
+func pdfCompositeInterpolate(target *pdfCompositePixel, source pdfCompositePixel, shape float64) error {
+	pixel := pdfgo.ColorantPixel{Values: target.values[:], Alpha: target.alpha, Shape: target.shape, Effect: target.effect}
+	if err := pixel.Interpolate(pdfgo.ColorantPixel{Values: source.values[:], Alpha: source.alpha, Shape: source.shape, Effect: source.effect}, shape); err != nil {
+		return err
 	}
-	target.alpha = alpha
-	target.effect = target.effect*(1-shape) + source.effect*shape
+	target.alpha, target.effect = pixel.Alpha, pixel.Effect
+	return nil
 }
 
 // drawGroup 按隔离标志保留初始背景，移除背景贡献后应用组透明度
@@ -391,7 +382,9 @@ func (c *pdfCompositor) drawKnockout(nodes []pdfCompositeNode, initial, pixels [
 		for y := region.Min.Y; y < region.Max.Y; y++ {
 			for x := region.Min.X; x < region.Max.X; x++ {
 				i := y*c.width + x
-				pdfCompositeKnockout(&pixels[i], initial[i], candidate[i])
+				if err := pdfCompositeKnockout(&pixels[i], initial[i], candidate[i]); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -400,51 +393,46 @@ func (c *pdfCompositor) drawKnockout(nodes []pdfCompositeNode, initial, pixels [
 
 // pdfCompositeKnockout 移除未覆盖区域的初始背景贡献，保留形状与不透明度差异
 // 入参: target 累计组结果, initial 初始背景, source 单个对象合成结果
-func pdfCompositeKnockout(target *pdfCompositePixel, initial, source pdfCompositePixel) {
-	f := source.shape
-	if f == 0 {
-		return
+// 返回: error 像素错误
+func pdfCompositeKnockout(target *pdfCompositePixel, initial, source pdfCompositePixel) error {
+	pixel := pdfgo.ColorantPixel{Values: target.values[:], Alpha: target.alpha, Shape: target.shape, Effect: target.effect}
+	if err := pixel.Knockout(
+		pdfgo.ColorantPixel{Values: initial.values[:], Alpha: initial.alpha, Shape: initial.shape, Effect: initial.effect},
+		pdfgo.ColorantPixel{Values: source.values[:], Alpha: source.alpha, Shape: source.shape, Effect: source.effect},
+	); err != nil {
+		return err
 	}
-	alpha := target.alpha*(1-f) + source.alpha - initial.alpha*(1-f)
-	if alpha > 0 {
-		for j := range target.values {
-			target.values[j] = math.Max(0, math.Min(1, (target.values[j]*target.alpha*(1-f)+source.values[j]*source.alpha-initial.values[j]*initial.alpha*(1-f))/alpha))
-		}
-	}
-	target.alpha = math.Max(0, math.Min(1, alpha))
-	target.effect = target.effect*(1-f) + source.effect
-	target.shape += f * (1 - target.shape)
+	target.alpha, target.effect, target.shape = pixel.Alpha, pixel.Effect, pixel.Shape
+	return nil
 }
 
 // pdfCompositeGroup 移除组初始背景贡献后，将组结果合成到父空间
 // 入参: pixels 父组输出, initial 初始背景, result 组结果, space 组空间, parent 父空间, opacity 组不透明度, mask 蒙版, mode 混合模式, intent 渲染意图, conversion 设备转换函数
 // 返回: error 颜色或混合错误
 func pdfCompositeGroup(pixels, initial, result []pdfCompositePixel, space, parent *pdfgo.ColorSpace, opacity float64, mask []float64, mode, intent pdfgo.Name, conversion pdfgo.ColorConversion) error {
-	sameSpace := space.Equal(parent)
-	components := space.Components()
+	if len(pixels) != len(initial) || len(pixels) != len(result) || mask != nil && len(mask) != len(pixels) {
+		return fmt.Errorf("invalid PDF transparency group buffers")
+	}
+	group, destination := pdfgo.ColorantGroup{Space: space}, pdfgo.ColorantGroup{Space: parent}
+	compositor, err := destination.PrepareGroup(&group, mode, intent, conversion)
+	if err != nil {
+		return err
+	}
+	components, parentComponents := space.Components(), parent.Components()
 	for i, pixel := range result {
-		pixels[i].shape += pixel.shape * (1 - pixels[i].shape)
-		if pixel.effect == 0 {
-			continue
-		}
-		values := pixel.values
-		for j := 0; j < components; j++ {
-			values[j] = math.Max(0, math.Min(1, (pixel.values[j]*pixel.alpha-initial[i].values[j]*initial[i].alpha*(1-pixel.effect))/pixel.effect))
-		}
-		if !sameSpace {
-			var err error
-			values, err = parent.ConvertWith(values[:components], space, intent, conversion)
-			if err != nil {
-				return err
-			}
-		}
-		alpha := pixel.effect * opacity
+		alpha := opacity
 		if mask != nil {
 			alpha *= mask[i]
 		}
-		if err := pdfCompositeOver(&pixels[i], values, alpha, parent, mode); err != nil {
+		target := pdfgo.ColorantPixel{Values: pixels[i].values[:parentComponents], Alpha: pixels[i].alpha, Shape: pixels[i].shape, Effect: pixels[i].effect}
+		if err := compositor.Composite(&target,
+			pdfgo.ColorantPixel{Values: initial[i].values[:components], Alpha: initial[i].alpha, Shape: initial[i].shape, Effect: initial[i].effect},
+			pdfgo.ColorantPixel{Values: pixel.values[:components], Alpha: pixel.alpha, Shape: pixel.shape, Effect: pixel.effect},
+			alpha,
+		); err != nil {
 			return err
 		}
+		pixels[i].alpha, pixels[i].effect, pixels[i].shape = target.Alpha, target.Effect, target.Shape
 	}
 	return nil
 }
@@ -737,17 +725,34 @@ func pdfCompositeColor(paint pdfgo.Paint, point pdfgo.Point, space *pdfgo.ColorS
 }
 
 // pdfCompositePaintOver 以兼容叠印计算零色料分量，再应用对象混合模式
-// 入参: backdrop 背景及输出, source 源分量, alpha 源透明度, space 混合空间, mode 混合模式, compatible 是否保留零色料背景
+// 入参: backdrop 背景及输出, source 源分量, alpha 源透明度, space 混合空间, mode 混合模式, compatible 是否保留零色料背景, marked 原生过程通道，nil使用普通空间
 // 返回: error 未支持的混合模式
-func pdfCompositePaintOver(backdrop *pdfCompositePixel, source [4]float64, alpha float64, space *pdfgo.ColorSpace, mode pdfgo.Name, compatible bool) error {
+func pdfCompositePaintOver(backdrop *pdfCompositePixel, source [4]float64, alpha float64, space *pdfgo.ColorSpace, mode pdfgo.Name, compatible bool, marked *[4]bool) error {
+	if !compatible && marked == nil {
+		return pdfCompositeOver(backdrop, source, alpha, space, mode)
+	}
+	if alpha == 0 {
+		return nil
+	}
+	mask := [4]bool{true, true, true, true}
+	if marked != nil {
+		mask = *marked
+	}
 	if compatible {
 		for i := range source {
 			if source[i] == 0 {
-				source[i] = backdrop.values[i] * backdrop.alpha
+				mask[i] = false
 			}
 		}
 	}
-	return pdfCompositeOver(backdrop, source, alpha, space, mode)
+	values, combined, err := space.CompositeOverprint(backdrop.values[:space.Components()], source[:space.Components()], backdrop.alpha, alpha, mode, mask[:space.Components()])
+	if err != nil {
+		return err
+	}
+	copy(backdrop.values[:space.Components()], values[:space.Components()])
+	backdrop.alpha = combined
+	backdrop.effect = alpha + backdrop.effect*(1-alpha)
+	return nil
 }
 
 // pdfCompositeOver 按PDF透明模型合成源颜色，四色混合使用分量补色
@@ -757,178 +762,12 @@ func pdfCompositeOver(backdrop *pdfCompositePixel, source [4]float64, alpha floa
 	if alpha == 0 {
 		return nil
 	}
-	combined := alpha + backdrop.alpha*(1-alpha)
-	nonseparable := mode == "Hue" || mode == "Saturation" || mode == "Color" || mode == "Luminosity"
-	var blend [4]float64
-	if nonseparable {
-		blend = pdfNonseparableBlend(backdrop.values, source, space, mode)
+	values, combined, err := space.Composite(backdrop.values[:space.Components()], source[:space.Components()], backdrop.alpha, alpha, mode)
+	if err != nil {
+		return err
 	}
-	for i := 0; i < space.Components(); i++ {
-		mixed := blend[i]
-		if !nonseparable {
-			b, s := backdrop.values[i], source[i]
-			if space.Model == "DeviceCMYK" {
-				b, s = 1-b, 1-s
-			}
-			var err error
-			mixed, err = pdfSeparableBlend(b, s, mode)
-			if err != nil {
-				return err
-			}
-			if space.Model == "DeviceCMYK" {
-				mixed = 1 - mixed
-			}
-		}
-		backdrop.values[i] = math.Max(0, math.Min(1, ((1-alpha)*backdrop.alpha*backdrop.values[i]+alpha*((1-backdrop.alpha)*source[i]+backdrop.alpha*mixed))/combined))
-	}
+	copy(backdrop.values[:space.Components()], values[:space.Components()])
 	backdrop.alpha = combined
 	backdrop.effect = alpha + backdrop.effect*(1-alpha)
 	return nil
-}
-
-// pdfNonseparableBlend 按PDF非分离混合规则计算颜色，CMYK黑版独立取值
-// 入参: b 背景颜色, s 源颜色, space 混合空间, mode 混合模式
-// 返回: [4]float64 混合分量
-func pdfNonseparableBlend(b, s [4]float64, space *pdfgo.ColorSpace, mode pdfgo.Name) [4]float64 {
-	if space.Model == "DeviceGray" {
-		if mode == "Luminosity" {
-			return s
-		}
-		return b
-	}
-	if space.Model == "DeviceCMYK" {
-		for i := 0; i < 3; i++ {
-			b[i], s[i] = 1-b[i], 1-s[i]
-		}
-	}
-	result := b
-	switch mode {
-	case "Hue":
-		result = pdfSetLuminosity(pdfSetSaturation(s, pdfSaturation(b)), pdfLuminosity(b))
-	case "Saturation":
-		result = pdfSetLuminosity(pdfSetSaturation(b, pdfSaturation(s)), pdfLuminosity(b))
-	case "Color":
-		result = pdfSetLuminosity(s, pdfLuminosity(b))
-	case "Luminosity":
-		result = pdfSetLuminosity(b, pdfLuminosity(s))
-	}
-	if space.Model == "DeviceCMYK" {
-		for i := 0; i < 3; i++ {
-			result[i] = 1 - result[i]
-		}
-		result[3] = b[3]
-		if mode == "Luminosity" {
-			result[3] = s[3]
-		}
-	}
-	return result
-}
-
-// pdfLuminosity 计算非分离混合使用的亮度
-// 入参: c 加色分量
-// 返回: float64 亮度
-func pdfLuminosity(c [4]float64) float64 { return .3*c[0] + .59*c[1] + .11*c[2] }
-
-// pdfSaturation 计算非分离混合使用的饱和度
-// 入参: c 加色分量
-// 返回: float64 饱和度
-func pdfSaturation(c [4]float64) float64 {
-	return math.Max(c[0], math.Max(c[1], c[2])) - math.Min(c[0], math.Min(c[1], c[2]))
-}
-
-// pdfSetSaturation 保持分量顺序并调整饱和度
-// 入参: c 加色分量, saturation 目标饱和度
-// 返回: [4]float64 调整后分量
-func pdfSetSaturation(c [4]float64, saturation float64) [4]float64 {
-	minimum := math.Min(c[0], math.Min(c[1], c[2]))
-	span := pdfSaturation(c)
-	for i := 0; i < 3; i++ {
-		if span == 0 {
-			c[i] = 0
-		} else {
-			c[i] = (c[i] - minimum) * saturation / span
-		}
-	}
-	return c
-}
-
-// pdfSetLuminosity 调整亮度并按PDF ClipColor规则压缩超界分量
-// 入参: c 加色分量, luminosity 目标亮度
-// 返回: [4]float64 调整后分量
-func pdfSetLuminosity(c [4]float64, luminosity float64) [4]float64 {
-	delta := luminosity - pdfLuminosity(c)
-	for i := 0; i < 3; i++ {
-		c[i] += delta
-	}
-	minimum, maximum := math.Min(c[0], math.Min(c[1], c[2])), math.Max(c[0], math.Max(c[1], c[2]))
-	if minimum < 0 {
-		for i := 0; i < 3; i++ {
-			c[i] = luminosity + (c[i]-luminosity)*luminosity/(luminosity-minimum)
-		}
-	}
-	if maximum > 1 {
-		for i := 0; i < 3; i++ {
-			c[i] = luminosity + (c[i]-luminosity)*(1-luminosity)/(maximum-luminosity)
-		}
-	}
-	return c
-}
-
-// pdfSeparableBlend 计算标准可分离混合函数
-// 入参: b 背景分量, s 源分量, mode 混合模式
-// 返回: float64 混合分量, error 未支持的模式
-func pdfSeparableBlend(b, s float64, mode pdfgo.Name) (float64, error) {
-	switch mode {
-	case "", "Normal", "Compatible":
-		return s, nil
-	case "Multiply":
-		return b * s, nil
-	case "Screen":
-		return b + s - b*s, nil
-	case "Overlay":
-		if b <= .5 {
-			return 2 * b * s, nil
-		}
-		return 1 - 2*(1-b)*(1-s), nil
-	case "Darken":
-		return math.Min(b, s), nil
-	case "Lighten":
-		return math.Max(b, s), nil
-	case "ColorDodge":
-		if b == 0 {
-			return 0, nil
-		}
-		if s == 1 {
-			return 1, nil
-		}
-		return math.Min(1, b/(1-s)), nil
-	case "ColorBurn":
-		if b == 1 {
-			return 1, nil
-		}
-		if s == 0 {
-			return 0, nil
-		}
-		return 1 - math.Min(1, (1-b)/s), nil
-	case "HardLight":
-		if s <= .5 {
-			return 2 * b * s, nil
-		}
-		return 1 - 2*(1-b)*(1-s), nil
-	case "SoftLight":
-		if s <= .5 {
-			return b - (1-2*s)*b*(1-b), nil
-		}
-		d := math.Sqrt(b)
-		if b <= .25 {
-			d = ((16*b-12)*b + 4) * b
-		}
-		return b + (2*s-1)*(d-b), nil
-	case "Difference":
-		return math.Abs(b - s), nil
-	case "Exclusion":
-		return b + s - 2*b*s, nil
-	default:
-		return 0, &pdfgo.UnsupportedError{Feature: "blend mode " + string(mode)}
-	}
 }

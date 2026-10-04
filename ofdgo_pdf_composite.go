@@ -465,6 +465,12 @@ func (n pdfCompositeNode) direct() bool {
 			if !child.direct() {
 				return false
 			}
+			if g.Alpha != 1 && child.group == nil {
+				style, _, _ := child.style()
+				if style.SoftMask != nil {
+					return false
+				}
+			}
 		}
 		return true
 	}
