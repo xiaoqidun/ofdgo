@@ -742,8 +742,12 @@ func encodeType2Number(target *bytes.Buffer, value float64) error {
 		}
 		return nil
 	}
+	fixed := math.Round(value * 65536)
+	if fixed < math.MinInt32 || fixed > math.MaxInt32 {
+		return fmt.Errorf("Type2 fixed operand out of range")
+	}
 	target.WriteByte(255)
-	_ = binary.Write(target, binary.BigEndian, int32(math.Round(value*65536)))
+	_ = binary.Write(target, binary.BigEndian, int32(fixed))
 	return nil
 }
 

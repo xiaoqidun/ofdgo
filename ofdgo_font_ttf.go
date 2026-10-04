@@ -57,7 +57,11 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 		if err != nil {
 			return false, data, nil, false, err
 		}
-		normalized, err := normalizeCFFCharstrings(sanitized)
+		var units uint16
+		if head := existingTables["head"]; len(head) >= 20 {
+			units = binary.BigEndian.Uint16(head[18:20])
+		}
+		normalized, err := normalizeCFFCharstringsAt(sanitized, units)
 		if err != nil {
 			return false, data, nil, false, err
 		}

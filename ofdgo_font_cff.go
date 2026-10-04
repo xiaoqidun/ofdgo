@@ -52,25 +52,17 @@ func wrapCFFToOTF(cffData []byte) ([]byte, map[rune]uint16, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("CFF glyph widths: %w", err)
 	}
-	var unitsPerEm uint16 = 1000
-	if len(cffData) > 4 {
-		hdrSize := int(cffData[2])
-		off := hdrSize
-		_, sz := getCFFIndexCount(cffData, off)
-		off += sz
-		topDictData, _ := getCFFIndexData(cffData, off)
-		if topDictData != nil {
-			td := parseCFFDict(topDictData)
-			if mat, ok := td[1207]; ok && len(mat) > 0 {
-				if mat[0] != 0 {
-					val := 1.0 / mat[0]
-					if val > 0 {
-						unitsPerEm = uint16(math.Round(val))
-					}
-				}
-			}
-		}
+	_, nameSize := getCFFIndexCount(cffData, int(cffData[2]))
+	topData, _ := getCFFIndexData(cffData, int(cffData[2])+nameSize)
+	top, err := readCFFDict(topData)
+	if err != nil {
+		return nil, nil, err
 	}
+	matrix, err := readCFFMatrix(top, [6]float64{0.001, 0, 0, 0.001, 0, 0})
+	if err != nil {
+		return nil, nil, err
+	}
+	unitsPerEm := cffUnitsPerEm(matrix)
 	tables := make(map[string][]byte)
 	tables["CFF "] = cffData
 	tables["head"] = buildHeadTable(unitsPerEm)
@@ -89,6 +81,13 @@ func wrapCFFToOTF(cffData []byte) ([]byte, map[rune]uint16, error) {
 // 入参: data CFF字体数据
 // 返回: []byte 标准化后的CFF数据, error 错误信息
 func normalizeCFFCharstrings(data []byte) ([]byte, error) {
+	return normalizeCFFCharstringsAt(data, 0)
+}
+
+// normalizeCFFCharstringsAt 统一CFF设计坐标，现有OpenType字体使用head表的设计单位
+// 入参: data CFF字体数据, unitsPerEm 设计单位，0时由字体矩阵确定
+// 返回: []byte 标准化后的CFF数据, error 错误信息
+func normalizeCFFCharstringsAt(data []byte, unitsPerEm uint16) ([]byte, error) {
 	if len(data) < 4 || int(data[2]) >= len(data) {
 		return nil, fmt.Errorf("invalid CFF header")
 	}
@@ -103,18 +102,43 @@ func normalizeCFFCharstrings(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	charOffset := dict[17]
-	if len(charOffset) != 1 {
-		return nil, fmt.Errorf("missing CFF charstrings")
+	charStart, err := cffDictOffset(data, dict, 17)
+	if err != nil {
+		return nil, err
 	}
-	charStart := int(charOffset[0])
 	_, charSize := getCFFIndexCount(data, charStart)
 	if charStart < topStart+topSize || charSize == 0 || charStart+charSize > len(data) {
 		return nil, fmt.Errorf("invalid CFF charstrings")
 	}
-	chars, changed, err := normalizeType2Programs(data)
+	matrix, err := readCFFMatrix(dict, [6]float64{0.001, 0, 0, 0.001, 0, 0})
 	if err != nil {
 		return nil, err
+	}
+	if unitsPerEm == 0 {
+		unitsPerEm = cffUnitsPerEm(matrix)
+	}
+	if unitsPerEm < 16 || unitsPerEm > 16384 {
+		return nil, fmt.Errorf("invalid CFF design units")
+	}
+	var transform *[6]float64
+	for i := range matrix {
+		matrix[i] *= float64(unitsPerEm)
+	}
+	if matrix != [6]float64{1, 0, 0, 1, 0, 0} {
+		transform = &matrix
+	}
+	chars, changed, err := normalizeType2ProgramsMatrix(data, transform)
+	if err != nil {
+		return nil, err
+	}
+	if transform != nil {
+		scale := 1 / float64(unitsPerEm)
+		dict[1207] = []float64{scale, 0, 0, scale, 0, 0}
+		delete(dict, 18)
+		if err := transformCFFBounds(dict, matrix); err != nil {
+			return nil, err
+		}
+		changed = true
 	}
 	var explicitCharset []byte
 	if charset := dict[15]; len(charset) == 1 && (charset[0] == 1 || charset[0] == 2) {
@@ -185,109 +209,95 @@ func normalizeCFFCharstrings(data []byte) ([]byte, error) {
 // 入参: data 原始CFF数据
 // 返回: []byte 清洗后的CFF数据, error 错误信息
 func sanitizeCFF(data []byte) ([]byte, error) {
-	if len(data) < 4 {
-		return nil, fmt.Errorf("data too short")
+	if !isBareCFFData(data) {
+		return nil, fmt.Errorf("invalid CFF header")
 	}
 	hdrSize := int(data[2])
 	offset := hdrSize
-	if offset >= len(data) {
-		return nil, fmt.Errorf("truncated")
+	names, end, err := readType2Index(data, offset)
+	if err != nil {
+		return nil, err
 	}
-	nameCount, nameSz := getCFFIndexCount(data, offset)
-	if nameCount != 1 {
+	if len(names) != 1 {
 		return nil, fmt.Errorf("multi-font cff not supported")
 	}
-	nameIndexData := data[offset : offset+nameSz]
-	offset += nameSz
-	if offset >= len(data) {
-		return nil, fmt.Errorf("truncated")
+	nameIndexData := data[offset:end]
+	tops, end, err := readType2Index(data, end)
+	if err != nil {
+		return nil, err
 	}
-	topCount, topSz := getCFFIndexCount(data, offset)
-	if topCount != 1 {
+	if len(tops) != 1 {
 		return nil, fmt.Errorf("top dict count != 1")
 	}
-	topDictData, _ := getCFFIndexData(data, offset)
-	offset += topSz
-	if offset >= len(data) {
-		return nil, fmt.Errorf("truncated")
+	_, stringEnd, err := readType2Index(data, end)
+	if err != nil {
+		return nil, err
 	}
-	_, strSz := getCFFIndexCount(data, offset)
-	stringIndexData := data[offset : offset+strSz]
-	offset += strSz
-	if offset >= len(data) {
-		return nil, fmt.Errorf("truncated")
+	stringIndexData := data[end:stringEnd]
+	_, globalEnd, err := readType2Index(data, stringEnd)
+	if err != nil {
+		return nil, err
 	}
-	_, glbSz := getCFFIndexCount(data, offset)
-	globalSubrIndexData := data[offset : offset+glbSz]
-	topDict, err := readCFFDict(topDictData)
+	globalSubrIndexData := data[stringEnd:globalEnd]
+	topDict, err := readCFFDict(tops[0])
 	if err != nil {
 		return nil, err
 	}
 	if _, isCID := topDict[1230]; !isCID {
 		return data, nil
 	}
-	fdArrOffs, ok := topDict[1236]
-	if !ok || len(fdArrOffs) == 0 {
-		return nil, fmt.Errorf("cid without fdarray")
-	}
-	fdArrOff := int(fdArrOffs[0])
-	if fdArrOff >= len(data) {
-		return nil, fmt.Errorf("fdarray offset oob")
-	}
-	fdCount, _ := getCFFIndexCount(data, fdArrOff)
-	if fdCount != 1 {
-		return sanitizeMultiFDCFF(data, hdrSize, nameIndexData, topDict, stringIndexData, globalSubrIndexData, fdArrOff, fdCount)
-	}
-	fontDictData, _ := getCFFIndexData(data, fdArrOff)
-	fontDict, err := readCFFDict(fontDictData)
+	fdArrOff, err := cffDictOffset(data, topDict, 1236)
 	if err != nil {
 		return nil, err
 	}
-	if fdMat, ok := fontDict[1207]; ok && len(fdMat) == 6 {
-		topMat, hasTop := topDict[1207]
-		if !hasTop || len(topMat) != 6 {
-			topMat = []float64{0.001, 0, 0, 0.001, 0, 0}
-		}
-		newMat := multiplyAffine(topMat, fdMat)
-		topDict[1207] = newMat
+	fdItems, _, err := readType2Index(data, fdArrOff)
+	if err != nil {
+		return nil, err
 	}
-	privVals, ok := fontDict[18]
-	if !ok || len(privVals) != 2 {
-		privVals = []float64{0, 0}
+	fdCount := len(fdItems)
+	if fdCount != 1 {
+		return sanitizeMultiFDCFF(data, hdrSize, nameIndexData, topDict, stringIndexData, globalSubrIndexData, fdArrOff, fdCount)
 	}
-	privSize := int(privVals[0])
-	privOff := int(privVals[1])
+	fontDict, err := readCFFDict(fdItems[0])
+	if err != nil {
+		return nil, err
+	}
+	fdMatrix, err := readCFFMatrix(fontDict, [6]float64{1, 0, 0, 1, 0, 0})
+	if err != nil {
+		return nil, err
+	}
+	if fdMatrix != [6]float64{1, 0, 0, 1, 0, 0} {
+		return sanitizeMultiFDCFF(data, hdrSize, nameIndexData, topDict, stringIndexData, globalSubrIndexData, fdArrOff, fdCount)
+	}
+	charStringsOff, err := cffDictOffset(data, topDict, 17)
+	if err != nil {
+		return nil, err
+	}
+	chars, charEnd, err := readType2Index(data, charStringsOff)
+	if err != nil || len(chars) == 0 {
+		return nil, fmt.Errorf("invalid CFF charstrings")
+	}
+	selectOffset, err := cffDictOffset(data, topDict, 1237)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := readType2FDSelect(data, selectOffset, len(chars), 1); err != nil {
+		return nil, err
+	}
+	pDict, err := readType2Private(data, fontDict[18], &type2Font{})
+	if err != nil {
+		return nil, err
+	}
 	var localSubrData []byte
-	var privDictData []byte
-	if privSize > 0 && privOff < len(data) && privOff+privSize <= len(data) {
-		privDictData = data[privOff : privOff+privSize]
-	}
-	var subrsOffRel int
-	if len(privDictData) > 0 {
-		pDict, err := readCFFDict(privDictData)
+	if values := pDict[19]; len(values) != 0 {
+		start := int(fontDict[18][1]) + int(values[0])
+		_, end, err := readType2Index(data, start)
 		if err != nil {
 			return nil, err
 		}
-		if sVals, ok := pDict[19]; ok && len(sVals) > 0 {
-			subrsOffRel = int(sVals[0])
-		}
+		localSubrData = data[start:end]
 	}
-	if subrsOffRel > 0 {
-		subrsAbs := privOff + subrsOffRel
-		if subrsAbs < len(data) {
-			_, subSz := getCFFIndexCount(data, subrsAbs)
-			if subrsAbs+subSz <= len(data) {
-				localSubrData = data[subrsAbs : subrsAbs+subSz]
-			}
-		}
-	}
-	charStringsOffs, ok := topDict[17]
-	if !ok || len(charStringsOffs) == 0 {
-		return nil, fmt.Errorf("missing charstrings")
-	}
-	charStringsOff := int(charStringsOffs[0])
-	_, charStrSz := getCFFIndexCount(data, charStringsOff)
-	charStringsData := data[charStringsOff : charStringsOff+charStrSz]
+	charStringsData := data[charStringsOff:charEnd]
 	delete(topDict, 1230)
 	delete(topDict, 1236)
 	delete(topDict, 1237)
@@ -295,11 +305,7 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 	delete(topDict, 15)
 	delete(topDict, 16)
 	var finalPrivData []byte
-	if len(privDictData) > 0 {
-		pDict, err := readCFFDict(privDictData)
-		if err != nil {
-			return nil, err
-		}
+	if len(pDict) > 0 {
 		if err := normalizeCFFPrivate(pDict); err != nil {
 			return nil, err
 		}
@@ -338,11 +344,10 @@ func normalizeCFFPrivate(dict cffDict) error {
 // 入参: stringIndexData 字符串索引, globalSubrIndexData 全局子程序索引, fdArrOff FDArray偏移, fdCount FD数量
 // 返回: []byte 清洗后的CFF数据, error 错误信息
 func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict cffDict, stringIndexData []byte, globalSubrIndexData []byte, fdArrOff int, fdCount int) ([]byte, error) {
-	charStringsOffs, ok := topDict[17]
-	if !ok || len(charStringsOffs) == 0 {
-		return nil, fmt.Errorf("missing charstrings")
+	charStringsOff, err := cffDictOffset(data, topDict, 17)
+	if err != nil {
+		return nil, err
 	}
-	charStringsOff := int(charStringsOffs[0])
 	charStrings, _, err := readType2Index(data, charStringsOff)
 	if err != nil {
 		return nil, err
@@ -371,16 +376,42 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 	}
 	fonts := make([]type2Font, fdCount)
 	privateDicts := make([]cffDict, fdCount)
+	matrices := make([][6]float64, fdCount)
+	transformed := false
+	topMatrix, err := readCFFMatrix(topDict, [6]float64{0.001, 0, 0, 0.001, 0, 0})
+	if err != nil {
+		return nil, err
+	}
+	units := cffUnitsPerEm(topMatrix)
+	for i := range topMatrix {
+		topMatrix[i] *= float64(units)
+	}
 	for fd, item := range fdItems {
 		fonts[fd] = type2Font{data: data, chars: charStrings, globals: globalSubrs, seed: 1}
 		fontDict, dictErr := readCFFDict(item)
 		if dictErr != nil {
 			return nil, dictErr
 		}
+		fdMatrix, matrixErr := readCFFMatrix(fontDict, [6]float64{1, 0, 0, 1, 0, 0})
+		if matrixErr != nil {
+			return nil, fmt.Errorf("CFF font dictionary %d: %w", fd, matrixErr)
+		}
+		matrices[fd], err = readCFFMatrix(cffDict{1207: multiplyAffine(topMatrix[:], fdMatrix[:])}, [6]float64{})
+		if err != nil {
+			return nil, fmt.Errorf("CFF font dictionary %d: %w", fd, err)
+		}
+		transformed = transformed || matrices[fd] != [6]float64{1, 0, 0, 1, 0, 0}
 		privateDicts[fd], err = readType2Private(data, fontDict[18], &fonts[fd])
 		if err != nil {
 			return nil, fmt.Errorf("CFF font dictionary %d: %w", fd, err)
 		}
+		if err := normalizeCFFPrivate(privateDicts[fd]); err != nil {
+			return nil, fmt.Errorf("CFF font dictionary %d: %w", fd, err)
+		}
+	}
+	target := &fonts[0]
+	if transformed {
+		target = &type2Font{}
 	}
 	inlined := make([][]byte, len(charStrings))
 	var stack [48]float64
@@ -388,7 +419,10 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 		font := &fonts[fdSelect[gid]]
 		var output bytes.Buffer
 		steps := 0
-		state := type2State{font: font, args: stack[:0], widthTarget: &fonts[0], width: font.def, seed: font.seed + uint64(gid), steps: &steps, output: &output, stripHints: true}
+		state := type2State{font: font, args: stack[:0], widthTarget: target, width: font.def, seed: font.seed + uint64(gid), steps: &steps, output: &output, stripHints: true}
+		if matrices[fdSelect[gid]] != [6]float64{1, 0, 0, 1, 0, 0} {
+			state.matrix = &matrices[fdSelect[gid]]
+		}
 		if len(cs) == 0 {
 			cs = []byte{14}
 		}
@@ -403,6 +437,13 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 	delete(topDict, 1234)
 	delete(topDict, 15)
 	delete(topDict, 16)
+	if transformed {
+		scale := 1 / float64(units)
+		topDict[1207] = []float64{scale, 0, 0, scale, 0, 0}
+		if err := transformCFFBounds(topDict, topMatrix); err != nil {
+			return nil, err
+		}
+	}
 	privateDict := make(cffDict)
 	if len(privateDicts) > 0 {
 		for k, v := range privateDicts[0] {
@@ -410,6 +451,9 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 		}
 	}
 	delete(privateDict, 19)
+	if transformed {
+		privateDict = cffDict{20: {0}, 21: {0}}
+	}
 	if err := normalizeCFFPrivate(privateDict); err != nil {
 		return nil, err
 	}
@@ -449,8 +493,8 @@ func encodeSanitizedCFF(header, names []byte, dict cffDict, strings, globals, ch
 // 入参: data CFF数据
 // 返回: int 字形数量, error 错误信息
 func parseCFFAndCountGlyphs(data []byte) (int, error) {
-	if len(data) < 4 {
-		return 0, fmt.Errorf("data too short")
+	if !isBareCFFData(data) {
+		return 0, fmt.Errorf("invalid CFF header")
 	}
 	hdrSize := int(data[2])
 	offset := hdrSize
@@ -475,12 +519,13 @@ func parseCFFAndCountGlyphs(data []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		if offsetVals, ok := dict[17]; ok && len(offsetVals) > 0 {
-			charStrOff := int(offsetVals[0])
-			if charStrOff > 0 && charStrOff < len(data) {
-				count, _ := getCFFIndexCount(data, charStrOff)
-				return count, nil
-			}
+		charStrOff, err := cffDictOffset(data, dict, 17)
+		if err != nil {
+			return 0, err
+		}
+		count, size := getCFFIndexCount(data, charStrOff)
+		if count > 0 && size > 0 {
+			return count, nil
 		}
 	}
 	return 0, fmt.Errorf("failed to parse top dict")
@@ -527,7 +572,7 @@ func readCFFDict(data []byte) (cffDict, error) {
 				op = 1200 + int(data[i])
 				i++
 			}
-			if len(operands) == 0 {
+			if len(operands) == 0 && !(op >= 6 && op <= 9 || op == 1212 || op == 1213) {
 				return nil, fmt.Errorf("missing CFF dictionary operands")
 			}
 			dict[op] = operands
@@ -640,6 +685,9 @@ func encodeCFFDict(dict cffDict) []byte {
 	sort.Ints(keys)
 	for _, op := range keys {
 		vals := dict[op]
+		if len(vals) == 0 && (op >= 6 && op <= 9 || op == 1212 || op == 1213) {
+			continue
+		}
 		for _, val := range vals {
 			encodeNumberCFF(buf, val)
 		}
@@ -656,7 +704,7 @@ func encodeCFFDict(dict cffDict) []byte {
 // encodeNumberCFF 编码单个数值到CFF格式
 // 入参: buf 缓冲区, val 数值
 func encodeNumberCFF(buf *bytes.Buffer, val float64) {
-	if val == math.Trunc(val) {
+	if val == math.Trunc(val) && val >= math.MinInt32 && val <= math.MaxInt32 {
 		iv := int(val)
 		if iv >= -107 && iv <= 107 {
 			buf.WriteByte(byte(iv + 139))
@@ -676,10 +724,11 @@ func encodeNumberCFF(buf *bytes.Buffer, val float64) {
 			binary.Write(buf, binary.BigEndian, int32(iv))
 		}
 	} else {
-		s := fmt.Sprintf("%g", val)
+		s := strconv.FormatFloat(val, 'g', -1, 64)
 		buf.WriteByte(30)
 		var nibbles []byte
-		for _, c := range s {
+		for i := 0; i < len(s); i++ {
+			c := s[i]
 			var n byte
 			switch c {
 			case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
@@ -688,6 +737,12 @@ func encodeNumberCFF(buf *bytes.Buffer, val float64) {
 				n = 0xA
 			case 'E', 'e':
 				n = 0xB
+				if i+1 < len(s) && s[i+1] == '-' {
+					n = 0xC
+					i++
+				} else if i+1 < len(s) && s[i+1] == '+' {
+					i++
+				}
 			case '-':
 				n = 0xE
 			}
@@ -756,95 +811,78 @@ func putOffset(buf *bytes.Buffer, val int, size int) {
 // 入参: data CFF数据, offset 偏移量
 // 返回: int 数量, int 索引结构总大小
 func getCFFIndexCount(data []byte, offset int) (int, int) {
-	if offset+2 > len(data) {
+	count, _, end, err := scanCFFIndex(data, offset)
+	if err != nil {
 		return 0, 0
+	}
+	return count, end - offset
+}
+
+// scanCFFIndex 无分配校验索引偏移、顺序和全部数据范围
+// 入参: data CFF数据, offset 索引偏移
+// 返回: int 项数, int 数据起点, int 索引终点, error 索引错误
+func scanCFFIndex(data []byte, offset int) (int, int, int, error) {
+	if offset < 0 || offset > len(data)-2 {
+		return 0, 0, 0, fmt.Errorf("truncated CFF index")
 	}
 	count := int(binary.BigEndian.Uint16(data[offset:]))
 	if count == 0 {
-		return 0, 2
+		return 0, offset + 2, offset + 2, nil
 	}
-	if offset+3 > len(data) {
-		return 0, 0
+	if offset > len(data)-3 {
+		return 0, 0, 0, fmt.Errorf("truncated CFF index header")
 	}
-	offSize := int(data[offset+2])
-	if offSize < 1 || offSize > 4 {
-		return 0, 0
+	width := int(data[offset+2])
+	if width < 1 || width > 4 || count+1 > (len(data)-offset-3)/width {
+		return 0, 0, 0, fmt.Errorf("invalid CFF index offsets")
 	}
-	dataSizeLen := (count + 1) * offSize
-	if offset+3+dataSizeLen > len(data) {
-		return 0, 0
+	base := offset + 3 + (count+1)*width
+	previous := uint64(0)
+	for index := 0; index <= count; index++ {
+		value := uint64(0)
+		for _, b := range data[offset+3+index*width : offset+3+(index+1)*width] {
+			value = value<<8 | uint64(b)
+		}
+		if value < 1 || value-1 > uint64(len(data)-base) || value < previous || index == 0 && value != 1 {
+			return 0, 0, 0, fmt.Errorf("invalid CFF index range")
+		}
+		previous = value
 	}
-	endOffsetPos := offset + 3 + count*offSize
-	if endOffsetPos+offSize > len(data) {
-		return 0, 0
+	return count, base, base + int(previous) - 1, nil
+}
+
+// cffDictOffset 读取必须为单个整数且位于字体数据内的字典偏移
+// 入参: data 字体数据, dict 字典, op 偏移操作符
+// 返回: int 偏移值, error 字典或范围错误
+func cffDictOffset(data []byte, dict cffDict, op int) (int, error) {
+	values := dict[op]
+	if len(values) != 1 || !finite(values[0]) || values[0] < 0 || values[0] >= float64(len(data)) || values[0] != math.Trunc(values[0]) {
+		return 0, fmt.Errorf("invalid CFF dictionary offset %d", op)
 	}
-	dataEnd := readCFFOffset(data, endOffsetPos, offSize)
-	if dataEnd < 1 {
-		return 0, 0
-	}
-	return count, 3 + (count+1)*offSize + (dataEnd - 1)
+	return int(values[0]), nil
 }
 
 // getCFFIndexData 读取CFF索引的数据块
 // 入参: data CFF数据, offset 偏移量
 // 返回: []byte 索引数据(已去除offsets), int 索引结构总大小
 func getCFFIndexData(data []byte, offset int) ([]byte, int) {
-	count, size := getCFFIndexCount(data, offset)
-	if count == 0 {
-		return nil, size
+	count, base, end, err := scanCFFIndex(data, offset)
+	if err != nil {
+		return nil, 0
 	}
-	if offset+3 > len(data) {
-		return nil, size
+	if count == 0 {
+		return nil, end - offset
 	}
 	offSize := int(data[offset+2])
-	if offset+3+offSize > len(data) {
-		return nil, size
-	}
-	off0 := readCFFOffset(data, offset+3, offSize)
-	if offset+3+offSize*2 > len(data) {
-		return nil, size
-	}
 	off1 := readCFFOffset(data, offset+3+offSize, offSize)
-	dataStartRel := 3 + (count+1)*offSize
-	dataStartAbs := offset + dataStartRel
-	start := dataStartAbs + (off0 - 1)
-	length := off1 - off0
-	if start < 0 || length < 0 || start+length > len(data) {
-		return nil, size
-	}
-	return data[start : start+length], size
+	return data[base : base+off1-1], end - offset
 }
 
 // readCFFIndexItems 读取CFF索引中的所有数据项
 // 入参: data CFF数据, offset 索引偏移
 // 返回: [][]byte 数据项列表
 func readCFFIndexItems(data []byte, offset int) [][]byte {
-	count, _ := getCFFIndexCount(data, offset)
-	if count == 0 || offset+3 > len(data) {
-		return nil
-	}
-	offSize := int(data[offset+2])
-	if offSize < 1 || offSize > 4 {
-		return nil
-	}
-	dataStart := offset + 3 + (count+1)*offSize
-	items := make([][]byte, 0, count)
-	for i := 0; i < count; i++ {
-		p1 := offset + 3 + i*offSize
-		p2 := p1 + offSize
-		if p2+offSize > len(data) {
-			return items
-		}
-		off1 := readCFFOffset(data, p1, offSize)
-		off2 := readCFFOffset(data, p2, offSize)
-		start := dataStart + off1 - 1
-		length := off2 - off1
-		if start < 0 || length < 0 || start+length > len(data) {
-			items = append(items, nil)
-			continue
-		}
-		items = append(items, data[start:start+length])
-	}
+	items, _, _ := readType2Index(data, offset)
 	return items
 }
 

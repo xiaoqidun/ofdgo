@@ -20,6 +20,7 @@ import (
 )
 
 // readType2FDSelect 校验CID字体的逐字形FD归属和范围终点
+// 单FD子集缺少.notdef范围时使用唯一FD，不恢复其他缺失范围
 // 入参: data 字体数据, offset FDSelect偏移, count 字形数, fonts FD数量
 // 返回: []int FD索引, error 格式或范围错误
 func readType2FDSelect(data []byte, offset, count, fonts int) ([]int, error) {
@@ -47,7 +48,8 @@ func readType2FDSelect(data []byte, offset, count, fonts int) ([]int, error) {
 		if ranges == 0 || ranges > (len(data)-start-2)/3 {
 			return nil, fmt.Errorf("invalid CFF FDSelect ranges")
 		}
-		if binary.BigEndian.Uint16(data[start:]) != 0 || int(binary.BigEndian.Uint16(data[start+3*ranges:])) != count {
+		first := int(binary.BigEndian.Uint16(data[start:]))
+		if first != 0 && !(first == 1 && fonts == 1) || int(binary.BigEndian.Uint16(data[start+3*ranges:])) != count {
 			return nil, fmt.Errorf("invalid CFF FDSelect endpoints")
 		}
 		for index := 0; index < ranges; index++ {

@@ -258,11 +258,17 @@ func (s *type2State) draw(op int) error {
 	if !valid || !finite(s.x+dx) || !finite(s.y+dy) {
 		return fmt.Errorf("invalid Type2 path operands for operator %d", op)
 	}
-	if err := s.emit(op, a); err != nil {
+	var err error
+	if s.matrix != nil {
+		err = s.emitTransformedPath(op, a)
+	} else {
+		err = s.emit(op, a)
+	}
+	if err != nil {
 		return err
 	}
 	s.x, s.y = s.x+dx, s.y+dy
-	s.outX, s.outY = s.x+s.originX, s.y+s.originY
+	s.outX, s.outY = s.transformedPoint()
 	s.args = s.args[:0]
 	return nil
 }
