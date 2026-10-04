@@ -48,18 +48,11 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 		annotation.Dictionary = maps.Clone(annotation.Dictionary)
 		annotation.Dictionary["Contents"] = pdfgo.String("\xef\xbb\xbf" + remark)
 	}
-	flags := int64(0)
-	if value := annotation.Dictionary["F"]; value != nil {
-		resolved, err := p.reader.Resolve(value)
-		if err != nil {
-			return err
-		}
-		number, ok := resolved.(pdfgo.Integer)
-		if !ok {
-			return fmt.Errorf("invalid PDF annotation flags")
-		}
-		flags = int64(number)
+	flags, err := p.reader.ReadAnnotationFlags(annotation)
+	if err != nil {
+		return err
 	}
+	invisible := flags&1 != 0 && !annotation.IsStandard()
 	if flags&256 != 0 {
 		return &pdfgo.UnsupportedError{Feature: "annotation ToggleNoView flag"}
 	}
@@ -101,7 +94,7 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 	if err := stamp.compositeObjects(nodes); err != nil {
 		return err
 	}
-	if flags&(2|32) == 0 {
+	if flags&(2|32) == 0 && !invisible {
 		p.compositeNodes = stamp.compositeNodes
 		p.transferBackdrop = stamp.transferBackdrop
 	}
@@ -142,7 +135,7 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 		region.Fill, region.Stroke, region.Actions = &no, &no, actions
 		converted.Appearance.Objects = append(converted.Appearance.Objects, GraphicObject{Type: "PathObject", PathObject: region})
 	}
-	if flags&(2|32) != 0 {
+	if flags&(2|32) != 0 || invisible {
 		visible := false
 		converted.Visible = &visible
 	}
@@ -192,6 +185,9 @@ func pdfAnnotationType(subtype pdfgo.Name) string {
 	case "Highlight", "Underline", "Squiggly", "StrikeOut":
 		return "Highlight"
 	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Popup", "Widget", "PrinterMark", "TrapNet", "3D", "RichMedia", "Redact":
+		return "Path"
+	}
+	if !(pdfgo.Annotation{Subtype: subtype}).IsStandard() {
 		return "Path"
 	}
 	return ""

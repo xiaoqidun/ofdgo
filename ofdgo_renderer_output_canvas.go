@@ -128,6 +128,11 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	start := buf.Len()
 	p := pdf.New(buf, pages[0].Box.W, pages[0].Box.H, nil)
 	renderer := &pdfRenderer{PDF: p, glyphPaths: make(map[*canvas.Path]*canvas.Path), images: make([][]image.Image, 1)}
+	defer func() {
+		if renderer.imageError != nil {
+			r.canvasState().images = renderCache[*EncodedImage, image.Image]{limit: imageCacheLimit}
+		}
+	}()
 	var info DocInfo
 	if docInfo, err := r.Reader.DocInfo(); err == nil {
 		info = *docInfo
@@ -142,6 +147,10 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), page.Content, !r.TransparentBackground); err != nil {
 			buf.Truncate(start)
 			return fmt.Errorf("failed to render page %d: %w", i+1, err)
+		}
+		if renderer.imageError != nil {
+			buf.Truncate(start)
+			return fmt.Errorf("failed to render page %d: %w", i+1, renderer.imageError)
 		}
 		pages[i].Content = nil
 		if progress != nil {

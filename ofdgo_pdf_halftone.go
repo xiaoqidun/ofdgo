@@ -21,8 +21,12 @@ import "github.com/xiaoqidun/pdfgo"
 // 返回: error 严格模式无法保留设备网屏
 func (p *pdfImporter) halftone(style pdfgo.Style) error {
 	h := style.Halftone
+	message := "PDF continuous-tone appearance retained; device halftone not transferred to OFD"
 	if h == nil || h.Type == 0 {
-		return nil
+		if style.HalftoneOrigin == nil {
+			return nil
+		}
+		message = "PDF continuous-tone appearance retained; device halftone origin not transferred to OFD"
 	}
 	if p.warning == nil {
 		return &pdfgo.UnsupportedError{Feature: "device halftone conversion"}
@@ -32,7 +36,7 @@ func (p *pdfImporter) halftone(style pdfgo.Style) error {
 	}
 	if !p.halftoneWarnings[h] {
 		p.halftoneWarnings[h] = true
-		p.warning(pdfgo.Diagnostic{Message: "PDF continuous-tone appearance retained; device halftone not transferred to OFD"})
+		p.warning(pdfgo.Diagnostic{Message: message})
 	}
 	return nil
 }

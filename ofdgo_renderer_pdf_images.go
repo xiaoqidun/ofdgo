@@ -23,10 +23,13 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// preserveImages 按实际绘制顺序恢复颜色及透明度精度，不依赖后端资源命名或对象编号
+// preserveImages 按绘制顺序恢复颜色及透明度精度，二值透明采用标准Matte预混合
 // 入参: ctx 取消上下文, data 后端PDF数据
 // 返回: []byte 保留图像精度的PDF数据, error 资源或写入错误
 func (r *pdfRenderer) preserveImages(ctx context.Context, data []byte) ([]byte, error) {
+	if r.imageError != nil {
+		return nil, r.imageError
+	}
 	if !r.exactImages {
 		return data, nil
 	}
@@ -98,8 +101,21 @@ func (r *pdfRenderer) preserveImages(ctx context.Context, data []byte) ([]byte, 
 	if pages != len(r.images) {
 		return nil, fmt.Errorf("PDF output page missing")
 	}
+	for ref, original := range images {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		pixels, err := imagePixelData(original)
+		if err != nil {
+			return nil, err
+		}
+		if pixels == nil || pixels.Bounds() != original.Bounds() {
+			return nil, fmt.Errorf("PDF output image pixel bounds differ")
+		}
+		images[ref] = pixels
+	}
 	var result bytes.Buffer
-	if _, err := reader.ReplaceImagesTo(ctx, &result, images); err != nil {
+	if _, err := reader.ReplaceImagesTo(ctx, &result, images, pdfgo.ImageWriteOptions{PreblendBinary: true}); err != nil {
 		return nil, err
 	}
 	return result.Bytes(), nil

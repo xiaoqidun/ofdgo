@@ -30,6 +30,7 @@ type pdfRenderer struct {
 	glyphPaths  map[*canvas.Path]*canvas.Path
 	images      [][]image.Image
 	exactImages bool
+	imageError  error
 }
 
 // pdfNavigation PDF导航信息
@@ -59,9 +60,23 @@ type pdfOutline struct {
 	Y     float64
 }
 
-// RenderImage 在图像局部保存状态前同步不透明画笔，避免恢复后的透明度与后端缓存不一致
+// RenderImage 校验惰性图片并同步不透明画笔，保留解码错误及后端透明度状态
 // 入参: img 图像, matrix 图像变换
 func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
+	if r.imageError != nil {
+		return
+	}
+	if source, ok := img.(interface{ Image() (image.Image, error) }); ok {
+		pixels, err := source.Image()
+		if err != nil {
+			r.imageError = err
+			return
+		}
+		if pixels == nil || pixels.Bounds() != img.Bounds() {
+			r.imageError = fmt.Errorf("PDF output image pixel bounds differ")
+			return
+		}
+	}
 	if len(r.images) != 0 {
 		var original image.Image
 		opaque := false
