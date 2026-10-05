@@ -91,6 +91,9 @@ func (p *pdfImporter) meshTriangles(mesh *pdfgo.MeshGradient) ([]pdfMeshTriangle
 	matrix := p.matrix.Mul(mesh.Matrix)
 	var triangles []pdfMeshTriangle
 	for index, patch := range mesh.Patches {
+		if err := p.ctx.Err(); err != nil {
+			return nil, err
+		}
 		for i := range patch.Points {
 			for j := range patch.Points[i] {
 				patch.Points[i][j] = matrix.Apply(patch.Points[i][j])
@@ -121,6 +124,11 @@ func (p *pdfImporter) meshTriangles(mesh *pdfgo.MeshGradient) ([]pdfMeshTriangle
 		n := int(steps)
 		row := make([]pdfMeshVertex, n+1)
 		for i := range row {
+			if i%pdfCompositeTileSize == 0 {
+				if err := p.ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			u := float64(i) / steps
 			row[i] = pdfMeshVertex{patch.PointAt(u, 0), u, 0}
 		}
@@ -158,9 +166,16 @@ func (p *pdfImporter) meshTriangles(mesh *pdfgo.MeshGradient) ([]pdfMeshTriangle
 // 入参: mesh 原曲面, space 输出混合空间, conversion 设备转换函数
 // 返回: []pdfShadingPixel 颜色及覆盖, error 几何或颜色错误
 func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, conversion pdfgo.ColorConversion) ([]pdfShadingPixel, error) {
+	if err := c.importer.ctx.Err(); err != nil {
+		return nil, err
+	}
 	key := pdfMeshKey{mesh, space, conversion}
 	if pixels, ok := c.meshes[key]; ok {
 		return pixels, nil
+	}
+	converter, err := space.PrepareConversion(mesh.Space, mesh.Intent, conversion)
+	if err != nil {
+		return nil, err
 	}
 	triangles, ok := c.cache.meshes[mesh]
 	if !ok {
@@ -200,6 +215,9 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, 
 		endX := int(math.Min(float64(w), math.Ceil(maxX)))
 		endY := int(math.Min(float64(h), math.Ceil(maxY)))
 		for y := int(math.Max(0, math.Floor(minY))); y < endY; y++ {
+			if err := c.importer.ctx.Err(); err != nil {
+				return nil, err
+			}
 			for x := int(math.Max(0, math.Floor(minX))); x < endX; x++ {
 				px, py := float64(x)+.5, float64(y)+.5
 				l0 := ((b.Y-d.Y)*(px-d.X) + (d.X-b.X)*(py-d.Y)) / denominator
@@ -221,7 +239,7 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, 
 	var background [4]float64
 	if mesh.Background != nil {
 		var err error
-		background, err = space.ConvertWith(mesh.Background[:mesh.Space.Components()], mesh.Space, mesh.Intent, conversion)
+		background, err = converter.Convert(mesh.Background[:mesh.Space.Components()])
 		if err != nil {
 			return nil, err
 		}
@@ -234,6 +252,7 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, 
 			return nil, fmt.Errorf("singular mesh bounds transform")
 		}
 	}
+	colors := make(map[[4]float64][4]float64)
 	for y := 0; y < h; y++ {
 		if err := c.importer.ctx.Err(); err != nil {
 			return nil, err
@@ -256,9 +275,17 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, 
 				if err != nil {
 					return nil, err
 				}
-				values, err = space.ConvertWith(values[:mesh.Space.Components()], mesh.Space, mesh.Intent, conversion)
-				if err != nil {
-					return nil, err
+				if cached, ok := colors[values]; ok {
+					values = cached
+				} else {
+					source := values
+					values, err = converter.Convert(values[:mesh.Space.Components()])
+					if err != nil {
+						return nil, err
+					}
+					if len(colors) < 2*pdfCompositeTileSize {
+						colors[source] = values
+					}
 				}
 			}
 			pixel := &pixels[(y/samples)*c.width+x/samples]

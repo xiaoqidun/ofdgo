@@ -23,10 +23,11 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// pdfClipPath 保存不可变的裁剪路径编码，不缓存对象位移或文字裁剪
+// pdfClipPath 保存导入器只读的裁剪几何，不缓存对象位移或文字裁剪
 type pdfClipPath struct {
 	box  Box
 	data string
+	path *[1]PathObject
 }
 
 // pdfClipPathKey 按路径完整内容与变换生成键，不依赖可变切片的地址
@@ -94,7 +95,12 @@ func (p *pdfImporter) clipPath(path pdfgo.Path) (pdfClipPath, error) {
 	if err != nil {
 		return pdfClipPath{}, err
 	}
-	result := pdfClipPath{box: box, data: data}
-	p.clipPaths.put(key, result, len(data)+256)
+	rule := "NonZero"
+	if path.EvenOdd {
+		rule = "Even-Odd"
+	}
+	boundary := pdfBoundary(box)
+	result := pdfClipPath{box: box, data: data, path: &[1]PathObject{{Boundary: boundary, AbbreviatedData: data, Rule: rule}}}
+	p.clipPaths.put(key, result, len(data)+len(boundary)+512)
 	return result, nil
 }

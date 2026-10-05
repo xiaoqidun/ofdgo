@@ -182,8 +182,10 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 	var uniformValues [4]float64
 	uniformReady := false
 	var sampler *pdfCompositeColorSampler
-	if g := paint.Axial; node.image == nil && shading == nil && g != nil && g.Bounds == nil && g.Background == nil &&
-		(g.Start.Y == g.End.Y && c.inverse[2] == 0 || g.Start.X == g.End.X && c.inverse[1] == 0) {
+	if g := paint.Axial; node.image == nil && shading == nil && g != nil && g.Bounds == nil && g.Background == nil {
+		sampler = &pdfCompositeColorSampler{paint: paint, space: space, intent: style.RenderingIntent, conversion: style.ColorConversion}
+	}
+	if g := paint.Radial; node.image == nil && shading == nil && g != nil && g.Bounds == nil && g.Background == nil {
 		sampler = &pdfCompositeColorSampler{paint: paint, space: space, intent: style.RenderingIntent, conversion: style.ColorConversion}
 	}
 	geometry, err := c.geometry(node, outline)
@@ -826,18 +828,50 @@ func pdfCompositeColor(paint pdfgo.Paint, point pdfgo.Point, space *pdfgo.ColorS
 // 返回: [4]float64 混合分量, bool 是否着色, error 颜色错误
 func (s *pdfCompositeColorSampler) color(point pdfgo.Point) ([4]float64, bool, error) {
 	g := s.paint.Axial
-	if g == nil || g.Bounds != nil || g.Background != nil || s.paint.Function != nil || s.paint.Tiling != nil {
+	r := s.paint.Radial
+	if g == nil && r == nil || g != nil && (g.Bounds != nil || g.Background != nil) || r != nil && (r.Bounds != nil || r.Background != nil) || s.paint.Function != nil || s.paint.Tiling != nil {
 		return pdfCompositeColor(s.paint, point, s.space, s.intent, s.conversion)
 	}
-	position, visible := pdfShadingPosition(s.paint, point)
+	if !s.prepared {
+		var err error
+		if g != nil {
+			s.position, err = g.PreparePosition()
+		} else {
+			s.position, err = r.PreparePosition()
+		}
+		if err != nil {
+			return [4]float64{}, false, err
+		}
+		s.prepared = true
+	}
+	position, visible := s.position.PositionAt(point)
 	if !visible {
 		return [4]float64{}, false, nil
 	}
 	if values, ok := s.values[position]; ok {
 		return values, true, nil
 	}
-	values, visible, err := pdfCompositeColor(s.paint, point, s.space, s.intent, s.conversion)
-	if err == nil && visible && len(s.values) < 2*pdfCompositeTileSize {
+	var values [4]float64
+	var source *pdfgo.ColorSpace
+	var intent pdfgo.Name
+	var err error
+	if g != nil {
+		values, err = g.ValuesAt(position)
+		source, intent = g.Space, g.Intent
+	} else {
+		values, err = r.ValuesAt(position)
+		source, intent = r.Space, r.Intent
+	}
+	if err == nil {
+		if !s.converted {
+			s.converter, err = s.space.PrepareConversion(source, intent, s.conversion)
+			s.converted = err == nil
+		}
+		if err == nil {
+			values, err = s.converter.Convert(values[:source.Components()])
+		}
+	}
+	if err == nil && g != nil && len(s.values) < 2*pdfCompositeTileSize {
 		if s.values == nil {
 			s.values = make(map[float64][4]float64)
 		}

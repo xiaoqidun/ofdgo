@@ -58,7 +58,18 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 		}
 	}
 	result := c.acquirePixels(len(backdrop))
+	complete := false
+	defer func() {
+		if !complete {
+			c.releasePixels(result)
+		}
+	}()
 	for i, pixel := range backdrop {
+		if i%pdfCompositeTileSize == 0 {
+			if err := c.importer.ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		result[i] = pdfCompositePixel{values: pixel.values, alpha: pixel.alpha}
 	}
 	candidate := c.acquirePixels(len(backdrop))
@@ -83,6 +94,9 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 			}
 			pixels := candidate[:width*height]
 			for y := range height {
+				if err := c.importer.ctx.Err(); err != nil {
+					return nil, err
+				}
 				for x := range width {
 					index := (top+y)*c.width + left + x
 					initial := result[index]
@@ -94,11 +108,15 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 			}
 			cell := pdfCompositor{importer: &pattern.local, box: Box{X: c.box.X + float64(left)*pixelStep - dx, Y: c.box.Y + float64(top)*pixelStep - dy, W: float64(width) * pixelStep, H: float64(height) * pixelStep},
 				width: width, height: height, inverse: localInverse, cache: pattern.local.compositingCache(), scratch: c.scratch, masks: map[*pdfgo.SoftMask][]float64{}}
-			if err := cell.draw(pattern.nodes, pixels, space); err != nil {
+			err := cell.draw(pattern.nodes, pixels, space)
+			cell.releaseMasks()
+			if err != nil {
 				return nil, err
 			}
-			cell.releaseMasks()
 			for y := range height {
+				if err := c.importer.ctx.Err(); err != nil {
+					return nil, err
+				}
 				for x := range width {
 					index := (top+y)*c.width + left + x
 					pdfCompositePatternCell(&result[index], backdrop[index], pixels[y*width+x], disjoint)
@@ -120,6 +138,7 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 		}
 		pixel.alpha = pixel.effect
 	}
+	complete = true
 	return result, nil
 }
 

@@ -73,13 +73,17 @@ type pdfCompositeGeometry struct {
 	box   Box
 }
 
-// pdfCompositeColorSampler 在单次绘制内复用完全相同参数的轴向颜色，不近似函数
+// pdfCompositeColorSampler 复用渐变几何和相同轴向参数的颜色，不近似函数
 type pdfCompositeColorSampler struct {
 	paint      pdfgo.Paint
 	space      *pdfgo.ColorSpace
 	intent     pdfgo.Name
 	conversion pdfgo.ColorConversion
 	values     map[float64][4]float64
+	position   pdfgo.GradientPosition
+	converter  pdfgo.ColorConverter
+	prepared   bool
+	converted  bool
 }
 
 // pdfCompositeCache 在单页内复用几何、图像分量及蒙版内容

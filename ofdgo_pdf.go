@@ -99,6 +99,7 @@ type pdfImporter struct {
 	compositeCache   *pdfCompositeCache
 	compositeNodes   []pdfCompositeNode
 	compositeSpace   *pdfgo.ColorSpace
+	patternCells     *renderCache[pdfPatternCellKey, *Pattern]
 	annotationData   []byte
 	resolveFile      pdfgo.FileResolver
 	resolveReference pdfgo.ReferenceResolver
@@ -210,6 +211,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		importer.compositeCache = nil
 		importer.compositeNodes = nil
 		importer.compositeSpace = nil
+		importer.patternCells = nil
 		importer.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
 		importer.clipPaths = nil
 		importer.annotationData = nil
@@ -457,7 +459,7 @@ func (p *pdfImporter) pathDataContext(ctx context.Context, path pdfgo.Path, orig
 	return string(data), nil
 }
 
-// clips 保持裁剪路径的交集，不随对象CTM重复变换
+// clips 复用只读裁剪几何，以区域CTM保留对象位移及路径交集
 // 入参: paths 裁剪路径, origin 对象边界
 // 返回: *Clips OFD裁剪区域，无裁剪时为空, error 未解析的裁剪字形
 func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
@@ -465,23 +467,24 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 		return nil, nil
 	}
 	flag := false
-	clips := &Clips{TransFlag: &flag}
-	for _, path := range paths {
+	clips := &Clips{TransFlag: &flag, Clip: make([]Clip, len(paths))}
+	areas := make([]ClipArea, len(paths))
+	translation := ""
+	if origin.X != 0 || origin.Y != 0 {
+		translation = pdfNumbers(1, 0, 0, 1, -origin.X, -origin.Y)
+	}
+	for index, path := range paths {
 		if err := p.ctx.Err(); err != nil {
 			return nil, err
 		}
-		area := ClipArea{}
+		area := &areas[index]
+		area.CTM = translation
 		if len(path.Segments) != 0 {
 			encoded, err := p.clipPath(path)
 			if err != nil {
 				return nil, err
 			}
-			box := encoded.box
-			rule := "NonZero"
-			if path.EvenOdd {
-				rule = "Even-Odd"
-			}
-			area.Path = append(area.Path, PathObject{Boundary: pdfBoundary(Box{box.X - origin.X, box.Y - origin.Y, box.W, box.H}), AbbreviatedData: encoded.data, Rule: rule})
+			area.Path = encoded.path[:1:1]
 		}
 		for _, mark := range path.Text {
 			objects, ok := p.clipTexts[mark]
@@ -498,16 +501,13 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 				p.report.TextObjects = textCount
 				objects = p.clipTexts[mark]
 			}
-			for _, object := range objects {
-				box, err := ParseBox(object.Boundary)
-				if err != nil {
-					return nil, err
-				}
-				object.Boundary = pdfBoundary(Box{box.X - origin.X, box.Y - origin.Y, box.W, box.H})
-				area.Text = append(area.Text, object)
+			if len(path.Text) == 1 {
+				area.Text = objects[:len(objects):len(objects)]
+			} else {
+				area.Text = append(area.Text, objects...)
 			}
 		}
-		clips.Clip = append(clips.Clip, Clip{Area: []ClipArea{area}})
+		clips.Clip[index].Area = areas[index : index+1 : index+1]
 	}
 	return clips, nil
 }
@@ -736,10 +736,10 @@ func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error)
 	return color, nil
 }
 
-// tilingPattern 保留PDF图案单元与页面坐标之间的仿射关系
+// buildTilingPattern 保留PDF图案单元与页面坐标之间的仿射关系
 // 入参: source 平铺图案, base 无色图案基色
 // 返回: *Pattern OFD图案, error 转换错误
-func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Paint) (*Pattern, error) {
+func (p *pdfImporter) buildTilingPattern(source *pdfgo.TilingPattern, base pdfgo.Paint) (*Pattern, error) {
 	const unit = 25.4 / 72
 	box := source.BBox
 	width, height := box.XMax-box.XMin, box.YMax-box.YMin
@@ -753,6 +753,10 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 	cell := *p
 	cell.matrix = pdfgo.Matrix{unit, 0, 0, -unit, -box.XMin * unit, box.YMax * unit}
 	cell.pageWidth, cell.pageHeight = width*unit, height*unit
+	cell.rasterDPI *= m.MaxScale()
+	if !finite(cell.rasterDPI) || cell.rasterDPI < 0 {
+		return nil, fmt.Errorf("invalid PDF tiling pattern raster scale")
+	}
 	cell.objects, cell.pendingPath = nil, nil
 	visitor := pdfgo.Visitor{Path: cell.path, Text: cell.text, Image: cell.image, Reference: p.referencePage}
 	visitor.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
@@ -769,24 +773,31 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 		return nil, err
 	}
 	pattern.CellContent.Objects = objects
-	if width > xstep || height > ystep {
+	if len(objects) != 0 && (width > xstep || height > ystep) {
 		columns, rows := math.Ceil(width/xstep), math.Ceil(height/ystep)
-		if !finite(columns*rows) || columns*rows > float64(int(^uint(0)>>1)) {
+		if !finite(columns*rows) || columns*rows >= float64(uint(^uint(0)>>1)+1) {
 			return nil, fmt.Errorf("PDF tiling pattern instance count overflow")
 		}
 		bounds := make([]Box, len(objects))
 		for index, object := range objects {
+			boundary := ""
 			if object.Type == "PathObject" && object.PathObject.Stroke != nil && !*object.PathObject.Stroke {
+				boundary = object.PathObject.Boundary
+			} else if object.Type == "ImageObject" && object.ImageObject.Border == nil {
+				boundary = object.ImageObject.Boundary
+			}
+			if boundary != "" {
 				var err error
-				bounds[index], err = ParseBox(object.PathObject.Boundary)
+				bounds[index], err = ParseBox(boundary)
 				if err != nil {
 					return nil, err
 				}
 			}
 		}
+		left, right, top, bottom := pdfPatternInstanceRange(columns, rows, bounds, pattern.Width, pattern.Height, xstep*unit, ystep*unit)
 		var expanded pdfObjectBuffer
-		for row := 1 - int(rows); row <= 0; row++ {
-			for column := 1 - int(columns); column <= 0; column++ {
+		for row := top; row <= bottom; row++ {
+			for column := left; column <= right; column++ {
 				if err := p.ctx.Err(); err != nil {
 					return nil, err
 				}

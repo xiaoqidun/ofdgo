@@ -17,7 +17,6 @@ package ofdgo
 import (
 	"fmt"
 	"image"
-	"math"
 
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -242,6 +241,22 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 			return make([]pdfShadingPixel, c.width*c.height), nil
 		}
 	}
+	var position pdfgo.GradientPosition
+	if paint.Axial != nil || paint.Radial != nil {
+		var err error
+		if paint.Axial != nil {
+			position, err = paint.Axial.PreparePosition()
+		} else {
+			position, err = paint.Radial.PreparePosition()
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	converter, err := space.PrepareConversion(source, intent, conversion)
+	if err != nil {
+		return nil, err
+	}
 	step := 25.4 / c.importer.rasterDPI
 	pixels := make([]pdfShadingPixel, c.width*c.height)
 	for y := range c.height {
@@ -283,11 +298,22 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 						if visible {
 							values, err = g.ValuesAt(local)
 							if err == nil {
-								values, err = space.ConvertWith(values[:source.Components()], source, intent, conversion)
+								values, err = converter.Convert(values[:source.Components()])
 							}
 						}
 					} else {
-						values, visible, err = pdfCompositeColor(paint, point, space, intent, conversion)
+						var parameter float64
+						parameter, visible = position.PositionAt(point)
+						if visible {
+							if paint.Axial != nil {
+								values, err = paint.Axial.ValuesAt(parameter)
+							} else {
+								values, err = paint.Radial.ValuesAt(parameter)
+							}
+							if err == nil {
+								values, err = converter.Convert(values[:source.Components()])
+							}
+						}
 					}
 					if err != nil {
 						return nil, err
@@ -359,40 +385,15 @@ func pdfShadingClippedNode(node pdfCompositeNode, box pdfgo.Rectangle, matrix pd
 // 入参: paint 渐变画刷, point 页面坐标
 // 返回: float64 归一化参数, bool 是否着色
 func pdfShadingPosition(paint pdfgo.Paint, point pdfgo.Point) (float64, bool) {
+	var geometry pdfgo.GradientPosition
+	var err error
 	if g := paint.Axial; g != nil {
-		dx, dy := g.End.X-g.Start.X, g.End.Y-g.Start.Y
-		t := ((point.X-g.Start.X)*dx + (point.Y-g.Start.Y)*dy) / (dx*dx + dy*dy)
-		return t, finite(t) && (t >= 0 || g.Extend[0]) && (t <= 1 || g.Extend[1])
+		geometry, err = g.PreparePosition()
+	} else {
+		geometry, err = paint.Radial.PreparePosition()
 	}
-	g := paint.Radial
-	if g.Matrix != (pdfgo.Matrix{}) {
-		inverse, ok := g.Matrix.Inverse()
-		if !ok {
-			return 0, false
-		}
-		point = inverse.Apply(point)
+	if err != nil {
+		return 0, false
 	}
-	dx, dy, dr := g.End.X-g.Start.X, g.End.Y-g.Start.Y, g.EndRadius-g.StartRadius
-	px, py := point.X-g.Start.X, point.Y-g.Start.Y
-	a, b, c := dx*dx+dy*dy-dr*dr, -2*(px*dx+py*dy+g.StartRadius*dr), px*px+py*py-g.StartRadius*g.StartRadius
-	roots := [2]float64{math.NaN(), math.NaN()}
-	if a == 0 {
-		if b != 0 {
-			roots[0] = -c / b
-		}
-	} else if discriminant := b*b - 4*a*c; discriminant >= 0 {
-		q := -.5 * (b + math.Copysign(math.Sqrt(discriminant), b))
-		if q == 0 {
-			roots[0] = -b / (2 * a)
-		} else {
-			roots[0], roots[1] = q/a, c/q
-		}
-	}
-	t := math.Inf(-1)
-	for _, root := range roots {
-		if finite(root) && g.StartRadius+root*dr >= 0 && (root >= 0 || g.Extend[0]) && (root <= 1 || g.Extend[1]) && root > t {
-			t = root
-		}
-	}
-	return t, finite(t)
+	return geometry.PositionAt(point)
 }
