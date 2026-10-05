@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
@@ -43,8 +44,13 @@ type ofdCountingWriter struct {
 
 // ofdXML 使用标准ofd命名空间写出XML
 type ofdXML struct {
-	encoder *xml.Encoder
-	err     error
+	encoder    *xml.Encoder
+	references *editorReferenceScan
+	ctx        context.Context
+	attrs      ofdAttrs
+	escaped    bytes.Buffer
+	spaces     bytes.Buffer
+	err        error
 }
 
 // ofdAttrs OFD节点属性
@@ -316,7 +322,7 @@ func (e *Editor) writePartsWithPages(write func(string, []byte, bool) error, pro
 	}
 	fonts, images, spaces, definitions := e.usedResources()
 	writeXML := func(name string, encode func(*ofdXML)) error {
-		data, err := encodeOFDXML(encode)
+		data, err := e.encodeXML(encode)
 		if err != nil {
 			return err
 		}
@@ -538,6 +544,9 @@ func (x *ofdXML) page(page PageContent) {
 	x.end("Area")
 	x.start("Content", nil)
 	for _, layer := range page.Content.Layer {
+		if x.err != nil {
+			return
+		}
 		x.layer(layer)
 	}
 	x.end("Content")
@@ -554,6 +563,9 @@ func (x *ofdXML) layer(layer Layer) {
 	attrs.add("DrawParam", layer.DrawParam)
 	x.start("Layer", attrs)
 	for _, object := range layer.Objects {
+		if x.err != nil {
+			return
+		}
 		x.object(object, false)
 	}
 	x.end("Layer")
@@ -566,6 +578,9 @@ func (x *ofdXML) resources(fonts, images []editorResource, spaces []ColorSpace) 
 	if len(spaces) != 0 {
 		x.start("ColorSpaces", nil)
 		for _, space := range spaces {
+			if x.err != nil {
+				return
+			}
 			x.start("ColorSpace", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: space.ID}, {Name: xml.Name{Local: "Type"}, Value: space.Type}, {Name: xml.Name{Local: "BitsPerComponent"}, Value: strconv.Itoa(space.BitsPerComponent)}})
 			x.end("ColorSpace")
 		}
@@ -574,6 +589,9 @@ func (x *ofdXML) resources(fonts, images []editorResource, spaces []ColorSpace) 
 	if len(fonts) != 0 {
 		x.start("Fonts", nil)
 		for _, resource := range fonts {
+			if x.err != nil {
+				return
+			}
 			font := resource.font
 			var attrs ofdAttrs
 			attrs.add("ID", font.ID)
@@ -600,6 +618,9 @@ func (x *ofdXML) resources(fonts, images []editorResource, spaces []ColorSpace) 
 	if len(images) != 0 {
 		x.start("MultiMedias", nil)
 		for _, resource := range images {
+			if x.err != nil {
+				return
+			}
 			image := resource.image
 			var attrs ofdAttrs
 			attrs.add("ID", image.ID)
@@ -625,9 +646,19 @@ func newOFDXML(writer io.Writer) *ofdXML {
 // token 写入XML标记并保留首个错误
 // 入参: token XML标记
 func (x *ofdXML) token(token xml.Token) {
-	if x.err == nil {
+	if x.checkContext() {
 		x.err = x.encoder.EncodeToken(token)
+		x.referenceToken(token)
 	}
+}
+
+// checkContext 保留首个编码或取消错误
+// 返回: bool 是否可以继续编码
+func (x *ofdXML) checkContext() bool {
+	if x.err == nil && x.ctx != nil {
+		x.err = x.ctx.Err()
+	}
+	return x.err == nil
 }
 
 // root 写入声明命名空间的根节点
@@ -660,7 +691,7 @@ func (x *ofdXML) text(name, value string) {
 // finish 完成XML输出
 // 返回: error 错误信息
 func (x *ofdXML) finish() error {
-	if x.err != nil {
+	if !x.checkContext() {
 		return x.err
 	}
 	return x.encoder.Close()
@@ -702,8 +733,30 @@ func (a *ofdAttrs) alpha(value *int) {
 // 入参: encode 节点写入方法
 // 返回: []byte XML数据, error 错误信息
 func encodeOFDXML(encode func(*ofdXML)) ([]byte, error) {
+	return encodeOFDXMLContext(nil, encode)
+}
+
+// encodeXML 按本次保存上下文编码，不改变普通快照的输出
+// 入参: encode 节点写入方法
+// 返回: []byte XML数据, error 编码或取消错误
+func (e *Editor) encodeXML(encode func(*ofdXML)) ([]byte, error) {
+	var ctx context.Context
+	if e.output != nil {
+		ctx = e.output.ctx
+	}
+	return encodeOFDXMLContext(ctx, encode)
+}
+
+// encodeOFDXMLContext 编码文档节点，失败时不返回部分数据
+// 入参: ctx 取消上下文，可为nil, encode 节点写入方法
+// 返回: []byte XML数据, error 编码或取消错误
+func encodeOFDXMLContext(ctx context.Context, encode func(*ofdXML)) ([]byte, error) {
 	var data bytes.Buffer
 	x := newOFDXML(&data)
+	x.ctx = ctx
+	if !x.checkContext() {
+		return nil, x.err
+	}
 	encode(x)
 	if err := x.finish(); err != nil {
 		return nil, err
@@ -714,7 +767,10 @@ func encodeOFDXML(encode func(*ofdXML)) ([]byte, error) {
 // object 按OFD规定顺序写出基本对象
 // 入参: object 图形对象, root 是否为根节点
 func (x *ofdXML) object(object GraphicObject, root bool) {
-	var attrs ofdAttrs
+	if !x.checkContext() {
+		return
+	}
+	attrs := x.attrs[:0]
 	var fill, stroke *FillColor
 	var actions []Action
 	if root {
@@ -799,6 +855,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.alpha(obj.Alpha)
 		actions = obj.Actions
 	}
+	x.attrs = attrs
 	x.start(object.Type, attrs)
 	x.actions(actions)
 	if object.Type == "ImageObject" {
@@ -817,24 +874,31 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		x.color("StrokeColor", stroke)
 		offset, index := 0, 0
 		for _, code := range object.TextObject.TextCode {
+			if x.err != nil {
+				return
+			}
 			end := offset + len(textCodeRunes(code.Value))
 			for index < len(object.TextObject.CGTransform) && object.TextObject.CGTransform[index].CodePosition < end {
-				transform := object.TextObject.CGTransform[index]
-				attrs := ofdAttrs{
-					{Name: xml.Name{Local: "CodePosition"}, Value: strconv.Itoa(transform.CodePosition - offset)},
-					{Name: xml.Name{Local: "CodeCount"}, Value: strconv.Itoa(transform.CodeCount)},
-					{Name: xml.Name{Local: "GlyphCount"}, Value: strconv.Itoa(transform.GlyphCount)},
+				if x.err != nil {
+					return
 				}
+				transform := object.TextObject.CGTransform[index]
+				attrs := x.attrs[:0]
+				attrs.add("CodePosition", strconv.Itoa(transform.CodePosition-offset))
+				attrs.add("CodeCount", strconv.Itoa(transform.CodeCount))
+				attrs.add("GlyphCount", strconv.Itoa(transform.GlyphCount))
+				x.attrs = attrs
 				x.start("CGTransform", attrs)
 				x.text("Glyphs", transform.Glyphs)
 				x.end("CGTransform")
 				index++
 			}
-			var attrs ofdAttrs
+			attrs := x.attrs[:0]
 			attrs.add("X", code.X)
 			attrs.add("Y", code.Y)
 			attrs.add("DeltaX", code.DeltaX)
 			attrs.add("DeltaY", code.DeltaY)
+			x.attrs = attrs
 			x.textCode(code.Value, attrs)
 			offset = end
 		}
@@ -845,23 +909,35 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 // clips 写出对象裁剪，保留区域内的路径与文字
 // 入参: clips 裁剪集合，nil不输出节点
 func (x *ofdXML) clips(clips *Clips) {
-	if clips == nil {
+	if clips == nil || !x.checkContext() {
 		return
 	}
 	var attrs ofdAttrs
 	attrs.flag("TransFlag", clips.TransFlag)
 	x.start("Clips", attrs)
 	for _, clip := range clips.Clip {
+		if x.err != nil {
+			return
+		}
 		x.start("Clip", nil)
 		for _, area := range clip.Area {
+			if x.err != nil {
+				return
+			}
 			var attrs ofdAttrs
 			attrs.add("CTM", area.CTM)
 			attrs.add("DrawParam", area.DrawParam)
 			x.start("Area", attrs)
 			for _, path := range area.Path {
+				if x.err != nil {
+					return
+				}
 				x.object(GraphicObject{Type: "Path", PathObject: path}, false)
 			}
 			for _, text := range area.Text {
+				if x.err != nil {
+					return
+				}
 				x.object(GraphicObject{Type: "Text", TextObject: text}, false)
 			}
 			x.end("Area")
@@ -874,23 +950,41 @@ func (x *ofdXML) clips(clips *Clips) {
 // textCode 使用XML字符引用转义空格，避免依赖阅读器保留原始空白
 // 入参: value OFD文字内容, attrs 文字定位属性
 func (x *ofdXML) textCode(value string, attrs ofdAttrs) {
-	if x.err != nil {
+	if !x.checkContext() {
 		return
 	}
-	var escaped bytes.Buffer
-	if x.err = xml.EscapeText(&escaped, []byte(value)); x.err != nil {
+	x.escaped.Reset()
+	if x.err = xml.EscapeText(&x.escaped, []byte(value)); x.err != nil {
 		return
+	}
+	data := x.escaped.Bytes()
+	if next := bytes.IndexByte(data, ' '); next >= 0 {
+		x.spaces.Reset()
+		for replaced := 0; next >= 0; replaced++ {
+			if replaced&255 == 0 && !x.checkContext() {
+				return
+			}
+			x.spaces.Write(data[:next])
+			x.spaces.WriteString("&#x20;")
+			data = data[next+1:]
+			next = bytes.IndexByte(data, ' ')
+		}
+		x.spaces.Write(data)
+		data = x.spaces.Bytes()
 	}
 	content := struct {
 		Text []byte `xml:",innerxml"`
-	}{Text: bytes.ReplaceAll(escaped.Bytes(), []byte(" "), []byte("&#x20;"))}
+	}{Text: data}
 	x.err = x.encoder.EncodeElement(content, xml.StartElement{Name: xml.Name{Local: "ofd:TextCode"}, Attr: attrs})
+	x.referenceToken(xml.StartElement{Name: xml.Name{Local: "ofd:TextCode"}, Attr: attrs})
+	x.referenceToken(xml.CharData(value))
+	x.referenceToken(xml.EndElement{Name: xml.Name{Local: "ofd:TextCode"}})
 }
 
 // color 写出纯色、渐变和图案，保留颜色空间与透明度
 // 入参: name 节点名, color 颜色
 func (x *ofdXML) color(name string, color *FillColor) {
-	if color == nil {
+	if color == nil || !x.checkContext() {
 		return
 	}
 	var attrs ofdAttrs
@@ -940,6 +1034,9 @@ func (x *ofdXML) meshShading(name string, extend, columns int, points []ShdPoint
 	}
 	x.start(name, attrs)
 	for _, point := range points {
+		if x.err != nil {
+			return
+		}
 		var attrs ofdAttrs
 		attrs.add("X", ofdNumber(point.X))
 		attrs.add("Y", ofdNumber(point.Y))
@@ -974,6 +1071,9 @@ func shadingAttrs(mapType string, mapUnit float64, extend, start, end string) of
 func (x *ofdXML) shading(name string, attrs ofdAttrs, segments []ShdSegment) {
 	x.start(name, attrs)
 	for _, segment := range segments {
+		if x.err != nil {
+			return
+		}
 		var attrs ofdAttrs
 		if !segment.positionMissing {
 			attrs.add("Position", ofdNumber(segment.Position))
@@ -988,15 +1088,16 @@ func (x *ofdXML) shading(name string, attrs ofdAttrs, segments []ShdSegment) {
 // element 写出具有标准XML标签的子树，显式声明OFD命名空间
 // 入参: name 元素名称, value 元素内容
 func (x *ofdXML) element(name string, value any) {
-	if x.err == nil {
+	if x.checkContext() {
 		x.err = x.encoder.EncodeElement(value, xml.StartElement{Name: xml.Name{Space: ofdNamespace, Local: name}})
+		x.referenceElement(name, value)
 	}
 }
 
 // border 写出图片边框及其绘制颜色
 // 入参: border 边框，nil不输出节点
 func (x *ofdXML) border(border *ImageBorder) {
-	if border == nil {
+	if border == nil || !x.checkContext() {
 		return
 	}
 	var attrs ofdAttrs
@@ -1015,6 +1116,9 @@ func (x *ofdXML) border(border *ImageBorder) {
 // pattern 写出图案单元，保留对象绘制顺序
 // 入参: pattern 图案
 func (x *ofdXML) pattern(pattern *Pattern) {
+	if !x.checkContext() {
+		return
+	}
 	var attrs ofdAttrs
 	attrs.number("Width", pattern.Width)
 	attrs.number("Height", pattern.Height)
@@ -1028,6 +1132,9 @@ func (x *ofdXML) pattern(pattern *Pattern) {
 	content.add("Thumbnail", pattern.CellContent.Thumbnail)
 	x.start("CellContent", content)
 	for object := range pattern.CellContent.objects() {
+		if x.err != nil {
+			return
+		}
 		x.object(object, false)
 	}
 	x.end("CellContent")
@@ -1037,19 +1144,28 @@ func (x *ofdXML) pattern(pattern *Pattern) {
 // actions 写出对象动作及精确点击区域，不检查链接可达性
 // 入参: actions 动作列表
 func (x *ofdXML) actions(actions []Action) {
-	if len(actions) == 0 {
+	if len(actions) == 0 || !x.checkContext() {
 		return
 	}
 	x.start("Actions", nil)
 	for _, action := range actions {
+		if x.err != nil {
+			return
+		}
 		var attrs ofdAttrs
 		attrs.add("Event", action.Event)
 		x.start("Action", attrs)
 		if action.Region != nil {
 			x.start("Region", nil)
 			for _, area := range action.Region.Area {
+				if x.err != nil {
+					return
+				}
 				x.start("Area", ofdAttrs{{Name: xml.Name{Local: "Start"}, Value: area.Start}})
 				for _, command := range area.Command {
+					if x.err != nil {
+						return
+					}
 					var attrs ofdAttrs
 					for _, pair := range [][2]string{{"Point1", command.Point1}, {"Point2", command.Point2}, {"Point3", command.Point3}, {"EllipseSize", command.EllipseSize}, {"RotationAngle", command.RotationAngle}, {"LargeArc", command.LargeArc}, {"SweepDirection", command.SweepDirection}, {"EndPoint", command.EndPoint}} {
 						attrs.add(pair[0], pair[1])

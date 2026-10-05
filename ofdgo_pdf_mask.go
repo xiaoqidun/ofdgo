@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"image/color"
 	"math"
 
 	"github.com/xiaoqidun/pdfgo"
@@ -36,6 +35,9 @@ func (p *pdfImporter) rasterMaskAllowed(err error) bool {
 // 入参: source 源图像, box 页面区域, mask PDF软蒙版
 // 返回: image.Image 合成图像, error 蒙版解释或渲染错误
 func (p *pdfImporter) applySoftMask(source image.Image, box Box, mask *pdfgo.SoftMask) (image.Image, error) {
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
 	inverse, ok := p.matrix.Inverse()
 	if !ok {
 		return nil, fmt.Errorf("invalid PDF mask transform")
@@ -44,20 +46,31 @@ func (p *pdfImporter) applySoftMask(source image.Image, box Box, mask *pdfgo.Sof
 	w, h := out.Rect.Dx(), out.Rect.Dy()
 	step := 25.4 / p.rasterDPI
 	cache := p.compositingCache()
-	for y := 0; y < h; y += 256 {
-		for x := 0; x < w; x += 256 {
-			width, height := min(256, w-x), min(256, h-y)
-			c := pdfCompositor{importer: p, box: Box{X: box.X + float64(x)*step, Y: box.Y + float64(y)*step, W: float64(width) * step, H: float64(height) * step}, width: width, height: height, inverse: inverse, cache: cache, masks: map[*pdfgo.SoftMask][]float64{}}
-			alpha, err := c.mask(mask, &pdfgo.ColorSpace{Model: "DeviceRGB"})
+	scratch := &pdfCompositeScratch{}
+	space := &pdfgo.ColorSpace{Model: "DeviceRGB"}
+	for y := 0; y < h; y += pdfCompositeTileSize {
+		for x := 0; x < w; x += pdfCompositeTileSize {
+			if err := p.ctx.Err(); err != nil {
+				return nil, err
+			}
+			width, height := min(pdfCompositeTileSize, w-x), min(pdfCompositeTileSize, h-y)
+			c := pdfCompositor{importer: p, box: Box{X: box.X + float64(x)*step, Y: box.Y + float64(y)*step, W: float64(width) * step, H: float64(height) * step}, width: width, height: height, inverse: inverse, cache: cache, scratch: scratch, masks: map[*pdfgo.SoftMask][]float64{}}
+			alpha, err := c.mask(mask, space)
 			if err != nil {
 				return nil, err
 			}
 			for i, opacity := range alpha {
+				if i%width == 0 {
+					if err := p.ctx.Err(); err != nil {
+						return nil, err
+					}
+				}
 				px, py := out.Rect.Min.X+x+i%width, out.Rect.Min.Y+y+i/width
-				pixel := color.NRGBAModel.Convert(source.At(px, py)).(color.NRGBA)
+				pixel := imageNRGBAAt(source, px, py)
 				pixel.A = uint8(math.Round(float64(pixel.A) * opacity))
 				out.SetNRGBA(px, py, pixel)
 			}
+			c.releaseMasks()
 		}
 	}
 	return out, nil

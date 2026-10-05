@@ -31,7 +31,22 @@ import (
 // 入参: progress 保存进度回调，预览时为nil
 // 返回: map[string][]byte 替换及新增条目, error 错误信息
 func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error) {
+	return e.sourcePartsReferences(progress, nil)
+}
+
+// sourcePartsReferences 生成保存快照，同步收集完全自产页面的实际编码引用
+// 入参: progress 保存进度回调, generated 本次自产页面引用，可为nil
+// 返回: map[string][]byte 输出条目, error 编码错误
+func (e *Editor) sourcePartsReferences(progress editorProgress, generated map[string]editorGeneratedReferences) (map[string][]byte, error) {
+	return e.sourcePartsPrepared(progress, generated, false)
+}
+
+// sourcePartsPrepared 准备保存条目，按需压缩暂存自产页面
+// 入参: progress 保存进度回调, generated 本次页面及引用, stage 是否压缩暂存
+// 返回: map[string][]byte 输出条目, error 编码错误
+func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[string]editorGeneratedReferences, stage bool) (map[string][]byte, error) {
 	parts := make(map[string][]byte)
+	var stager editorPageStager
 	source := e.source
 	reader := source.reader
 	pageRefs := make([]Page, len(e.pages))
@@ -56,11 +71,31 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 			}
 		} else {
 			name := e.packageName(packagePagePath("", page.ID))
-			data, err := e.sourceNewPageXML(page)
-			if err != nil {
-				return nil, err
+			var scan *editorReferenceScan
+			if generated != nil {
+				scan = &editorReferenceScan{refs: &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}, name: name, safe: true}
 			}
-			parts[name] = data
+			if stage && generated != nil && !e.sourcePagePreserved(page) {
+				data, err := stager.encode(e, page, scan)
+				if err != nil {
+					return nil, err
+				}
+				parts[name] = nil
+				known := editorGeneratedReferences{staged: data}
+				if scan != nil && scan.safe && scan.seen && len(scan.stack) == 0 {
+					known.refs = scan.refs
+				}
+				generated[name] = known
+			} else {
+				data, err := e.sourcePageData(page, scan)
+				if err != nil {
+					return nil, err
+				}
+				parts[name] = data
+				if scan != nil && scan.safe && scan.seen && len(scan.stack) == 0 {
+					generated[name] = editorGeneratedReferences{data: data, refs: scan.refs}
+				}
+			}
 			pageRefs[i] = Page{ID: page.ID, BaseLoc: "/" + name}
 		}
 	}
@@ -80,7 +115,7 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 		})
 	}
 	if len(fonts)+len(images)+len(spaces) != 0 {
-		data, err := encodeOFDXML(func(x *ofdXML) { x.resources(fonts, images, spaces) })
+		data, err := e.encodeXML(func(x *ofdXML) { x.resources(fonts, images, spaces) })
 		if err != nil {
 			return nil, err
 		}
@@ -155,7 +190,7 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 				if original != nil {
 					entries = append(entries, data[original.start:original.end])
 				} else {
-					item, err := encodeOFDXML(func(x *ofdXML) {
+					item, err := e.encodeXML(func(x *ofdXML) {
 						x.root("Page", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: page.ID}, {Name: xml.Name{Local: "BaseLoc"}, Value: page.BaseLoc}})
 						x.end("Page")
 					})
@@ -215,7 +250,7 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 		parts[name] = updated
 	}
 	if originalCount != len(source.pages) || len(source.annotationPages) != 0 || len(e.removedPages) != 0 {
-		if err := e.prunePageReferences(parts); err != nil {
+		if err := e.prunePageReferences(parts, generated); err != nil {
 			return nil, err
 		}
 	}
@@ -225,6 +260,10 @@ func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error)
 			if actual != name {
 				delete(parts, name)
 				parts[actual] = data
+				if known, ok := generated[name]; ok {
+					delete(generated, name)
+					generated[actual] = known
+				}
 			}
 		}
 	}
@@ -392,11 +431,14 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 // 返回: []byte 图层XML, error 错误信息
 func (e *Editor) sourceLayerXML(layer Layer) ([]byte, error) {
 	if !slices.ContainsFunc(layer.Objects, func(object GraphicObject) bool { return e.objectOrigin(editorObjectID(object)) != nil }) {
-		data, err := encodeOFDXML(func(x *ofdXML) {
+		data, err := e.encodeXML(func(x *ofdXML) {
 			attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: layer.ID}, {Name: xml.Name{Local: "Type"}, Value: layer.Type}}
 			attrs.add("DrawParam", layer.DrawParam)
 			x.root("Layer", attrs)
 			for _, object := range layer.Objects {
+				if x.err != nil {
+					return
+				}
 				x.object(object, false)
 			}
 			x.end("Layer")
@@ -429,16 +471,23 @@ func (e *Editor) sourceLayerXML(layer Layer) ([]byte, error) {
 // 入参: page 页面
 // 返回: []byte 页面XML, error 错误信息
 func (e *Editor) sourceNewPageXML(page PageContent) ([]byte, error) {
-	preserved := false
-	for _, layer := range page.Content.Layer {
-		if slices.ContainsFunc(layer.Objects, func(object GraphicObject) bool { return e.objectOrigin(editorObjectID(object)) != nil }) {
-			preserved = true
-			break
+	return e.sourcePageData(page, nil)
+}
+
+// sourcePageData 编码新增页面，仅在未保留原文时收集编码引用
+// 入参: page 页面内容, references 本次引用记录，可为nil
+// 返回: []byte 页面XML, error 编码错误
+func (e *Editor) sourcePageData(page PageContent, references *editorReferenceScan) ([]byte, error) {
+	if !e.sourcePagePreserved(page) {
+		var data bytes.Buffer
+		x := newOFDXML(&data)
+		if e.output != nil {
+			x.ctx = e.output.ctx
 		}
-	}
-	if !preserved {
-		data, err := encodeOFDXML(func(x *ofdXML) { x.page(page) })
-		return bytes.TrimPrefix(data, []byte(xml.Header)), err
+		x.references = references
+		x.page(page)
+		err := x.finish()
+		return bytes.TrimPrefix(data.Bytes(), []byte(xml.Header)), err
 	}
 	area, err := editorXMLContainer("Area", nil, editorXMLText("PhysicalBox", page.Area.PhysicalBox))
 	if err != nil {
@@ -458,7 +507,7 @@ func (e *Editor) sourceNewPageXML(page PageContent) ([]byte, error) {
 	}
 	data := append(area, content...)
 	if len(page.Actions) != 0 {
-		actions, err := encodeOFDXML(func(x *ofdXML) { x.actions(page.Actions) })
+		actions, err := e.encodeXML(func(x *ofdXML) { x.actions(page.Actions) })
 		if err != nil {
 			return nil, err
 		}
@@ -467,16 +516,29 @@ func (e *Editor) sourceNewPageXML(page PageContent) ([]byte, error) {
 	return editorXMLContainer("Page", nil, data)
 }
 
+// sourcePagePreserved 判断新增页面是否仍有对象原文需要保留
+// 入参: page 页面内容
+// 返回: bool 是否包含原文对象
+func (e *Editor) sourcePagePreserved(page PageContent) bool {
+	for _, layer := range page.Content.Layer {
+		if slices.ContainsFunc(layer.Objects, func(object GraphicObject) bool { return e.objectOrigin(editorObjectID(object)) != nil }) {
+			return true
+		}
+	}
+	return false
+}
+
 // writeSource 将未修改ZIP条目直接复制到新包，逐项写入改动，不持有原资源解压副本
 // 入参: writer 输出流, fonts 新增字体子集, progress 保存进度回调
 // 返回: int64 写入字节数, error 错误信息
 func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress editorProgress) (int64, error) {
-	parts, err := e.sourceParts(progress)
+	generated := make(map[string]editorGeneratedReferences)
+	parts, err := e.sourcePartsPrepared(progress, generated, true)
 	if err != nil {
 		return 0, err
 	}
 	maps.Copy(parts, fonts)
-	removed, err := e.compactSourceResources(parts, progress)
+	removed, err := e.compactSourceReferences(parts, progress, generated)
 	if err != nil {
 		return 0, err
 	}
@@ -484,7 +546,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 	if removed == nil {
 		removed = make(map[string]bool)
 	}
-	if err := e.compressResourceParts(parts, reader, removed); err != nil {
+	if err := e.compressResourceReferences(parts, reader, removed, generated); err != nil {
 		return 0, err
 	}
 	if len(parts) != 0 || len(removed) != 0 || e.output != nil && e.output.options.Mode != CompressionUnchanged && !e.output.protected {
@@ -537,7 +599,11 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 			}
 			if data, ok := remaining[name]; ok {
 				header := file.FileHeader
-				if err := e.writeOutputEntry(archive, header, data); err != nil {
+				if staged := generated[name].staged; data == nil && staged != nil {
+					if err := e.writeStagedPage(archive, header, staged); err != nil {
+						return output.count, err
+					}
+				} else if err := e.writeOutputEntry(archive, header, data); err != nil {
 					return output.count, err
 				}
 				delete(remaining, name)
@@ -575,7 +641,12 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		if strings.HasSuffix(strings.ToLower(name), ".xml") {
 			method = zip.Deflate
 		}
-		if err := e.writeOutputEntry(archive, zip.FileHeader{Name: name, Method: method}, remaining[name]); err != nil {
+		header := zip.FileHeader{Name: name, Method: method}
+		if staged := generated[name].staged; remaining[name] == nil && staged != nil {
+			if err := e.writeStagedPage(archive, header, staged); err != nil {
+				return output.count, err
+			}
+		} else if err := e.writeOutputEntry(archive, header, remaining[name]); err != nil {
 			return output.count, err
 		}
 	}

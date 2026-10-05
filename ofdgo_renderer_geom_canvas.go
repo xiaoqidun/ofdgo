@@ -67,6 +67,16 @@ func (CanvasBackend) Bounds(path GeometryPath) (Box, error) {
 // 入参: path 页面路径, matrix 页面变换
 // 返回: GeometryPath 新路径, error 无效路径错误
 func (CanvasBackend) Transform(path GeometryPath, matrix Matrix) (GeometryPath, error) {
+	curves := true
+	for _, segment := range path {
+		if segment.Verb == GeometryArc {
+			curves = false
+			break
+		}
+	}
+	if curves {
+		return path.Transform(matrix)
+	}
 	p, err := geometryToCanvasPath(&path)
 	if err != nil {
 		return nil, err

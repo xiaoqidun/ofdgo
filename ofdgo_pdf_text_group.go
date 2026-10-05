@@ -68,20 +68,9 @@ func (p *pdfImporter) disjointText(node pdfCompositeNode) (bool, error) {
 		}
 		var box Box
 		for _, command := range scene.Commands {
-			path := geometryFromRaster(command.Path)
-			if command.Image != nil {
-				b := command.Image.Bounds()
-				path = geometryRectangle(Box{X: float64(b.Min.X), Y: float64(b.Min.Y), W: float64(b.Dx()), H: float64(b.Dy())})
-			}
-			path, err = geometry.Transform(path, MatrixFromValues([6]float64(command.Transform)))
+			path, err := rasterCommandGeometry(geometry, command)
 			if err != nil {
 				return false, err
-			}
-			if command.Stroke != nil {
-				path, err = geometry.Stroke(path, *command.Stroke)
-				if err != nil {
-					return false, err
-				}
 			}
 			path, err = geometry.Transform(path, MatrixFromValues([6]float64(inverse)))
 			if err != nil {

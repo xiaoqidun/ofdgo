@@ -58,7 +58,7 @@ func (p *pdfImporter) embeddedTextFont(source *pdfgo.Font, glyphs []pdfgo.Glyph)
 		return nil
 	}
 	for _, glyph := range glyphs {
-		if utf8.RuneCountInString(glyph.Text) != 1 {
+		if glyph.Name == ".notdef" || utf8.RuneCountInString(glyph.Text) != 1 {
 			return nil
 		}
 		char, _ := utf8.DecodeRuneInString(glyph.Text)

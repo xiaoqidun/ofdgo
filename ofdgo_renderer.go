@@ -49,6 +49,7 @@ type Renderer struct {
 	sharedBackendStates   map[any]any
 	resolvedFonts         map[resolvedFontKey]resolvedFontResult
 	preparedFonts         map[string]*PreparedFont
+	fontDigests           *renderCache[fontDataKey, [32]byte]
 	fontPreparations      *renderCache[[32]byte, PreparedFont]
 	fontSourcesCache      *fontSourceCache
 	fontMetrics           *renderCache[[32]byte, FontMetrics]
@@ -84,7 +85,7 @@ func (r *Renderer) FontSources() ([]string, []fs.FS) {
 	return append([]string(nil), r.fontDirs...), append([]fs.FS(nil), r.fontFS...)
 }
 
-// childRenderer 创建继承当前配置的子渲染器
+// childRenderer 继承配置并复用字体文件索引与数据，文档匹配结果保持独立
 // 入参: reader 子阅读器
 // 返回: *Renderer 子渲染器
 func (r *Renderer) childRenderer(reader *Reader) *Renderer {
@@ -102,7 +103,9 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 	renderer := NewRenderer(reader, opts...)
 	renderer.sharedBackendStates = r.sharedBackendStates
 	renderer.fontPreparations = r.fontPreparations
+	renderer.fontDigests = r.fontDigests
 	renderer.fontMetrics = r.fontMetrics
+	renderer.fontSourcesCache = r.fontSourcesCache.child()
 	renderer.decodeImages = r.decodeImages
 	renderer.TransparentBackground = r.TransparentBackground
 	return renderer

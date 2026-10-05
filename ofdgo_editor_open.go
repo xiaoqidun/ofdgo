@@ -912,45 +912,6 @@ func (e *Editor) editorImage(id string) (image.Point, error) {
 	return size, nil
 }
 
-// cloneEditorData 深复制编辑快照，未导出的排版及原文来源保持不可变共享
-// 入参: value 原值
-// 返回: T 独立副本
-func cloneEditorData[T any](value T) T {
-	return cloneEditorValue(reflect.ValueOf(value)).Interface().(T)
-}
-
-// cloneEditorValue 复制结构体中的可变指针和切片
-// 入参: value 原值
-// 返回: reflect.Value 独立副本
-func cloneEditorValue(value reflect.Value) reflect.Value {
-	switch value.Kind() {
-	case reflect.Pointer:
-		if !value.IsNil() {
-			result := reflect.New(value.Type().Elem())
-			result.Elem().Set(cloneEditorValue(value.Elem()))
-			return result
-		}
-	case reflect.Slice:
-		if !value.IsNil() {
-			result := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
-			for i := range value.Len() {
-				result.Index(i).Set(cloneEditorValue(value.Index(i)))
-			}
-			return result
-		}
-	case reflect.Struct:
-		result := reflect.New(value.Type()).Elem()
-		result.Set(value)
-		for i := range value.NumField() {
-			if result.Field(i).CanSet() && value.Type().Field(i).IsExported() {
-				result.Field(i).Set(cloneEditorValue(value.Field(i)))
-			}
-		}
-		return result
-	}
-	return value
-}
-
 // editorObjectXML 编码可编辑对象，包含独立命名空间声明
 // 入参: object 对象
 // 返回: []byte XML片段, error 错误信息

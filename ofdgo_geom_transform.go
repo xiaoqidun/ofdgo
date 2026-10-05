@@ -42,6 +42,9 @@ func (p GeometryPath) Transform(matrix Matrix) (GeometryPath, error) {
 		return Point{x, y}
 	}
 	var result GeometryPath
+	if len(p) > 0 {
+		result = make(GeometryPath, 0, len(p))
+	}
 	var current, start Point
 	for _, s := range p {
 		originalSegment := s

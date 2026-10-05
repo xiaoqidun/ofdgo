@@ -16,15 +16,16 @@ package ofdgo
 
 import (
 	"fmt"
+	"io"
 	"maps"
 	"strings"
 )
 
 // prunePageReferences 在输出快照中删除已移除页面的标准引用，不修改历史快照或其他文档
 // 沿当前文档、页面、模板、资源、注释和签名索引检查，不进入附件、私有扩展和签名原始凭据
-// 入参: parts 输出覆盖条目
+// 入参: parts 输出覆盖条目, generated 本次自产页面及引用，可为nil
 // 返回: error 读取或解析错误
-func (e *Editor) prunePageReferences(parts map[string][]byte) error {
+func (e *Editor) prunePageReferences(parts map[string][]byte, generated map[string]editorGeneratedReferences) error {
 	removed := maps.Clone(e.removedPages)
 	if removed == nil {
 		removed = make(map[string]bool)
@@ -54,6 +55,11 @@ func (e *Editor) prunePageReferences(parts map[string][]byte) error {
 	}
 	seen := make(map[string]bool)
 	for len(queue) > 0 {
+		if e.output != nil {
+			if err := e.output.ctx.Err(); err != nil {
+				return err
+			}
+		}
 		name := queue[0]
 		queue = queue[1:]
 		if seen[strings.ToLower(name)] {
@@ -67,6 +73,17 @@ func (e *Editor) prunePageReferences(parts map[string][]byte) error {
 			if err != nil {
 				return err
 			}
+		} else if known := generated[name]; data == nil && known.staged != nil {
+			input := known.staged.open()
+			if e.output != nil {
+				input = imageInput{ReadCloser: input, context: e.output.ctx}
+			}
+			var err error
+			data, err = io.ReadAll(input)
+			input.Close()
+			if err != nil {
+				return err
+			}
 		}
 		root, err := parseEditorXML(data)
 		if err != nil {
@@ -75,6 +92,11 @@ func (e *Editor) prunePageReferences(parts map[string][]byte) error {
 		var patches []editorXMLPatch
 		var walk func(*editorXML) error
 		walk = func(node *editorXML) error {
+			if e.output != nil {
+				if err := e.output.ctx.Err(); err != nil {
+					return err
+				}
+			}
 			if node.name.Space != "" && node.name.Space != ofdNamespace && node.name.Space != "http://www.ofdspec.org" {
 				return nil
 			}
@@ -153,6 +175,7 @@ func (e *Editor) prunePageReferences(parts map[string][]byte) error {
 		}
 		if len(patches) != 0 {
 			parts[name] = editorPatchXML(data, patches)
+			delete(generated, name)
 		}
 	}
 	return nil

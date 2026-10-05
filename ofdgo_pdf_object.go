@@ -28,10 +28,11 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// pdfImageKey 区分同一图像流在不同渲染意图下的资源
+// pdfImageKey 区分同一图像流的渲染意图及模板填充色
 type pdfImageKey struct {
 	stream *pdfgo.Stream
 	intent pdfgo.Name
+	tint   color.NRGBA64
 }
 
 // pdfImageResource 保存图像的有效颜色空间及对应资源，避免跨资源重映射复用
@@ -84,6 +85,9 @@ func (s *pdfStencilImage) NRGBA64At(x, y int) color.NRGBA64 {
 // 入参: mark PDF图像绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
+	if err := p.ctx.Err(); err != nil {
+		return err
+	}
 	if mark.Style.BlendMode != "" && mark.Style.BlendMode != "Normal" && mark.Style.BlendMode != "Compatible" {
 		return &pdfgo.UnsupportedError{Feature: "image blend mode " + string(mark.Style.BlendMode)}
 	}
@@ -111,13 +115,27 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	}
 	source := mark.Image
 	key := pdfImageKey{stream: source.Stream, intent: source.Intent}
-	id := ""
-	if !source.ImageMask {
-		for _, resource := range p.imageIDs[key] {
-			if reflect.DeepEqual(resource.space, source.ColorSpace) {
-				id = resource.id
-				break
+	if source.ImageMask {
+		fill := mark.Style.Fill.RGB
+		if values := mark.Style.Fill.CMYK; values != nil {
+			space := &pdfgo.ColorSpace{Model: "DeviceCMYK"}
+			fill, err = space.RGB(values[:], mark.Style.RenderingIntent)
+			if err != nil {
+				return err
 			}
+		}
+		key.tint = color.NRGBA64{
+			R: uint16(math.Round(fill[0] * 65535)),
+			G: uint16(math.Round(fill[1] * 65535)),
+			B: uint16(math.Round(fill[2] * 65535)),
+			A: 65535,
+		}
+	}
+	id := ""
+	for _, resource := range p.imageIDs[key] {
+		if reflect.DeepEqual(resource.space, source.ColorSpace) {
+			id = resource.id
+			break
 		}
 	}
 	if id == "" {
@@ -137,41 +155,27 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 			}
 		}
 		if source.ImageMask {
-			fill := mark.Style.Fill.RGB
-			if values := mark.Style.Fill.CMYK; values != nil {
-				space := &pdfgo.ColorSpace{Model: "DeviceCMYK"}
-				fill, err = space.RGB(values[:], mark.Style.RenderingIntent)
-				if err != nil {
-					return err
-				}
-			}
-			tint := color.NRGBA64{
-				R: uint16(math.Round(fill[0] * 65535)),
-				G: uint16(math.Round(fill[1] * 65535)),
-				B: uint16(math.Round(fill[2] * 65535)),
-			}
-			decoded = &pdfStencilImage{source: decoded, fill: tint}
+			decoded = &pdfStencilImage{source: decoded, fill: key.tint}
 		}
-		var encoded bytes.Buffer
-		if len(jbig2Original) != 0 {
-			encoded.Write(jbig2Original)
-		} else if len(jpegOriginal) != 0 {
-			encoded.Write(jpegOriginal)
-		} else {
+		data := jbig2Original
+		if len(data) == 0 {
+			data = jpegOriginal
+		}
+		if len(data) == 0 {
+			var encoded bytes.Buffer
 			if err := pdfgo.EncodePNG(p.ctx, &encoded, decoded); err != nil {
 				return err
 			}
+			data = encoded.Bytes()
 		}
-		id, err = p.editor.AddImage(encoded.Bytes())
+		id, err = p.editor.AddImage(data)
 		if err != nil {
 			return err
 		}
-		if !source.ImageMask {
-			if p.imageIDs == nil {
-				p.imageIDs = map[pdfImageKey][]pdfImageResource{}
-			}
-			p.imageIDs[key] = append(p.imageIDs[key], pdfImageResource{space: source.ColorSpace, id: id})
+		if p.imageIDs == nil {
+			p.imageIDs = map[pdfImageKey][]pdfImageResource{}
 		}
+		p.imageIDs[key] = append(p.imageIDs[key], pdfImageResource{space: source.ColorSpace, id: id})
 	}
 	return p.appendImage(mark, id)
 }
@@ -188,7 +192,7 @@ func (p *pdfImporter) appendImage(mark pdfgo.ImageMark, id string) error {
 		return err
 	}
 	object := ImageObject{Boundary: pdfBoundary(box), ResourceID: id, CTM: pdfNumbers(m[0], m[1], m[2], m[3], m[4]-box.X, m[5]-box.Y), Alpha: &alpha, Clips: clips}
-	p.objects = append(p.objects, GraphicObject{Type: "ImageObject", ImageObject: object})
+	p.appendObject(GraphicObject{Type: "ImageObject", ImageObject: object})
 	p.report.ImageObjects++
 	return nil
 }
@@ -240,7 +244,8 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		if mark.Clip == nil && p.rasterMaskAllowed(err) {
 			mask := mark.Style.SoftMask
 			mark.Style.SoftMask = nil
-			return p.rasterGroup(pdfgo.GroupMark{Alpha: 1, SoftMask: mask}, func(v pdfgo.Visitor) error { return v.Text(mark) })
+			masked := mark
+			return p.rasterGroup(pdfgo.GroupMark{Alpha: 1, SoftMask: mask}, func(v pdfgo.Visitor) error { return v.Text(masked) })
 		}
 		return err
 	}
@@ -249,7 +254,8 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		return &pdfgo.UnsupportedError{Feature: "text color separation overprint"}
 	}
 	if p.warning != nil && ((paintMode == 0 || paintMode == 2) && pdfGradientError(mark.Style.Fill) != nil || (paintMode == 1 || paintMode == 2) && pdfGradientError(mark.Style.Stroke) != nil) {
-		return p.compositeRegion(nil, pdfCompositeNode{text: &mark}, &pdfgo.ColorSpace{Model: "DeviceRGB"}, false)
+		gradient := mark
+		return p.compositeRegion(nil, pdfCompositeNode{text: &gradient}, &pdfgo.ColorSpace{Model: "DeviceRGB"}, false)
 	}
 	font := mark.Font
 	embedded := len(font.Program) != 0
@@ -311,11 +317,18 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		outline = metrics.(FontOutlines)
 	}
 	fill, stroke, visible := paintMode == 0 || paintMode == 2, paintMode == 1 || paintMode == 2, paintMode != 3
-	if stroke && !embedded {
+	needOutline := stroke
+	for _, glyph := range mark.Glyphs {
+		needOutline = needOutline || glyph.Name == ".notdef"
+	}
+	if needOutline && !embedded {
 		if resolved, err := p.editor.editorFont(id); err == nil {
 			if provider, ok := resolved.(FontOutlines); ok {
 				metrics, outline = resolved, provider
 				for _, glyph := range mark.Glyphs {
+					if glyph.Name == ".notdef" {
+						continue
+					}
 					char, _ := utf8.DecodeRuneInString(glyph.Text)
 					if utf8.RuneCountInString(glyph.Text) != 1 || resolved.GlyphIndex(char) == 0 && char != 0 {
 						metrics, outline = nil, nil
@@ -329,7 +342,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	var glyphPaths []pdfgo.Path
 	const unit = 25.4 / 72
 	m := p.matrix.Mul(mark.Matrix).Mul(pdfgo.Matrix{1 / unit, 0, 0, -1 / unit, 0, 0})
-	points := make([]pdfgo.Point, 0, 4*len(mark.Glyphs))
+	var extent pdfPointBounds
 	object := TextObject{Font: id, Size: mark.Size * unit, HScale: mark.HorizontalScale, TextCode: make([]TextCode, 0, len(mark.Glyphs))}
 	if embedded {
 		object.CGTransform = make([]CGTransform, 0, len(mark.Glyphs))
@@ -340,16 +353,16 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			return err
 		}
 		gid := glyph.ID
+		undefined := glyph.Name == ".notdef"
+		if !embedded && undefined {
+			gid = 0
+		}
 		if embedded && !reused && font.ProgramType == "FontFile" {
 			gid = imported.type1Glyphs[glyph.Name]
 			glyph.HasID = true
 		}
-		if glyph.Text == "" && glyph.HasID {
-			character := getUnicodeFromName(glyph.Name)
-			if character == 0 {
-				character = packedGlyphRune(gid)
-			}
-			glyph.Text = string(character)
+		if glyph.Text == "" && (glyph.HasID || undefined) {
+			glyph.Text = "\u00a4"
 		}
 		if embedded && !glyph.HasID {
 			if utf8.RuneCountInString(glyph.Text) != 1 {
@@ -367,18 +380,18 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		if !embedded && glyph.Text == "" {
 			return &pdfgo.UnsupportedError{Feature: "unmapped external font character"}
 		}
-		if outlineStroke && !embedded {
+		if outlineStroke && !embedded && !undefined {
 			char, _ := utf8.DecodeRuneInString(glyph.Text)
 			gid = metrics.GlyphIndex(char)
 		}
 		origin := mark.Positions[n]
 		object.TextCode = append(object.TextCode, TextCode{X: pdfNumbers(origin.X * unit), Y: pdfNumbers(-origin.Y * unit), Value: glyph.Text})
-		if embedded {
-			count := utf8.RuneCountInString(glyph.Text)
+		count := utf8.RuneCountInString(glyph.Text)
+		if embedded || undefined {
 			object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: position, CodeCount: count, GlyphCount: 1, Glyphs: strconv.Itoa(int(gid))})
-			position += count
 		}
-		if embedded || outlineStroke {
+		position += count
+		if embedded || outlineStroke || undefined && outline != nil {
 			var path GeometryPath
 			var bounds Box
 			var err error
@@ -408,7 +421,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 				}
 			}
 			for _, point := range []pdfgo.Point{{X: bounds.X, Y: bounds.Y}, {X: bounds.X + bounds.W, Y: bounds.Y}, {X: bounds.X, Y: bounds.Y + bounds.H}, {X: bounds.X + bounds.W, Y: bounds.Y + bounds.H}} {
-				points = append(points, m.Apply(pdfgo.Point{X: origin.X*unit + point.X*mark.HorizontalScale, Y: -origin.Y*unit + point.Y}))
+				extent.add(m.Apply(pdfgo.Point{X: origin.X*unit + point.X*mark.HorizontalScale, Y: -origin.Y*unit + point.Y}))
 			}
 			if outlineStroke {
 				matrix := mark.Matrix.Mul(pdfgo.Matrix{mark.HorizontalScale / unit, 0, 0, -1 / unit, origin.X, origin.Y})
@@ -420,12 +433,22 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			}
 		} else {
 			width := glyph.Width / 1000 * object.Size * mark.HorizontalScale
-			for _, point := range []pdfgo.Point{{X: 0, Y: -object.Size}, {X: width, Y: -object.Size}, {X: 0, Y: object.Size / 4}, {X: width, Y: object.Size / 4}} {
-				points = append(points, m.Apply(pdfgo.Point{X: origin.X*unit + point.X, Y: -origin.Y*unit + point.Y}))
+			bounds := Box{X: 0, Y: -object.Size, W: width, H: object.Size * 1.25}
+			if undefined {
+				b := font.BoundingBox
+				if b == nil {
+					b = font.FallbackBoundingBox
+				}
+				if b != nil {
+					bounds = Box{X: b.XMin / 1000 * object.Size * mark.HorizontalScale, Y: -b.YMax / 1000 * object.Size, W: (b.XMax - b.XMin) / 1000 * object.Size * mark.HorizontalScale, H: (b.YMax - b.YMin) / 1000 * object.Size}
+				}
+			}
+			for _, point := range []pdfgo.Point{{X: bounds.X, Y: bounds.Y}, {X: bounds.X + bounds.W, Y: bounds.Y}, {X: bounds.X, Y: bounds.Y + bounds.H}, {X: bounds.X + bounds.W, Y: bounds.Y + bounds.H}} {
+				extent.add(m.Apply(pdfgo.Point{X: origin.X*unit + point.X, Y: -origin.Y*unit + point.Y}))
 			}
 		}
 	}
-	box := pdfBounds(points)
+	box := extent.box()
 	if stroke && !outlineStroke {
 		strokeMatrix := mark.StrokeMatrix
 		if strokeMatrix == (pdfgo.Matrix{}) {
@@ -508,7 +531,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		object.Visible = new(bool)
 		object.Fill, object.Stroke = new(bool), new(bool)
 	}
-	p.objects = append(p.objects, GraphicObject{Type: "TextObject", TextObject: object})
+	p.appendObject(GraphicObject{Type: "TextObject", TextObject: object})
 	p.report.TextObjects++
 	return nil
 }

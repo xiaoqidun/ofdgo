@@ -282,7 +282,7 @@ func shapedLineWidth(runes []rune, advances []float64, spacing float64) float64 
 // validateTextGlyphs 校验显式字形编号及原文区间，不允许跨TextCode或重叠映射
 // 入参: obj 文字对象, glyphCount 字体字形数量
 // 返回: error 无效映射
-func validateTextGlyphs(obj TextObject, glyphCount uint16) error {
+func validateTextGlyphs(obj TextObject, glyphCount int) error {
 	if len(obj.CGTransform) == 0 {
 		return nil
 	}

@@ -524,20 +524,40 @@ func validPackagePath(name string) bool {
 // 入参: name 文件名
 // 返回: []byte 文件内容, error 错误信息
 func (r *Reader) readFile(name string) ([]byte, error) {
+	data, borrowed, err := r.readFileData(name)
+	if borrowed {
+		data = bytes.Clone(data)
+	}
+	return data, err
+}
+
+// readFileView 借用已加载文件或读取压缩文件，返回数据不得修改
+// 入参: name 文件名
+// 返回: []byte 只读文件内容, error 错误信息
+func (r *Reader) readFileView(name string) ([]byte, error) {
+	data, _, err := r.readFileData(name)
+	return data, err
+}
+
+// readFileData 统一解析包内路径并区分缓存借用与独立读取
+// 入参: name 文件名
+// 返回: []byte 文件内容, bool 是否借用缓存, error 错误信息
+func (r *Reader) readFileData(name string) ([]byte, bool, error) {
 	name = cleanPackagePath(name)
 	if actual, ok := r.fileNamesFold[strings.ToLower(name)]; ok {
 		name = actual
 	}
 	if data, ok := r.files[name]; ok {
-		return bytes.Clone(data), nil
+		return data, true, nil
 	}
 	if f, ok := r.packageFile(name); ok {
 		if data, ok := r.files[cleanPackagePath(f.Name)]; ok {
-			return bytes.Clone(data), nil
+			return data, true, nil
 		}
-		return readZipFile(f)
+		data, err := readZipFile(f)
+		return data, false, err
 	}
-	return nil, fmt.Errorf("file not found: %s", name)
+	return nil, false, fmt.Errorf("file not found: %s", name)
 }
 
 // openFile 打开文档内的文件流

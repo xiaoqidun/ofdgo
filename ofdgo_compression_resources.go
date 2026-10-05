@@ -32,6 +32,13 @@ import (
 // 入参: parts 输出改动, reader 原包，可为空, removed 已移除条目
 // 返回: error 读取或取消错误
 func (e *Editor) compressResourceParts(parts map[string][]byte, reader *Reader, removed map[string]bool) error {
+	return e.compressResourceReferences(parts, reader, removed, nil)
+}
+
+// compressResourceReferences 优化资源，复用自产页面引用并流式读取暂存页面
+// 入参: parts 输出改动, reader 原包, removed 已移除条目, generated 本次自产页面及引用
+// 返回: error 读取或取消错误
+func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Reader, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
 	if e.output == nil || e.output.options.Mode == CompressionUnchanged || e.output.protected {
 		return nil
 	}
@@ -68,9 +75,18 @@ func (e *Editor) compressResourceParts(parts map[string][]byte, reader *Reader, 
 			return nil
 		}
 		actual[key] = name
+		data, replaced := parts[name]
+		if known, ok := generated[name]; ok && replaced && known.refs != nil && known.matches(data) {
+			refs.merge(known.refs)
+			continue
+		}
 		var input io.ReadCloser
-		if data, ok := parts[name]; ok {
-			input = io.NopCloser(bytes.NewReader(data))
+		if replaced {
+			if known := generated[name]; data == nil && known.staged != nil {
+				input = known.staged.open()
+			} else {
+				input = io.NopCloser(bytes.NewReader(data))
+			}
 		} else {
 			var err error
 			input, err = reader.openFile(name)

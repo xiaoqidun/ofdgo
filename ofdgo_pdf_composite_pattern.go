@@ -57,11 +57,12 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 			return nil, fmt.Errorf("PDF tiling pattern instance range overflow")
 		}
 	}
-	result := make([]pdfCompositePixel, len(backdrop))
+	result := c.acquirePixels(len(backdrop))
 	for i, pixel := range backdrop {
 		result[i] = pdfCompositePixel{values: pixel.values, alpha: pixel.alpha}
 	}
-	candidate := make([]pdfCompositePixel, len(backdrop))
+	candidate := c.acquirePixels(len(backdrop))
+	defer c.releasePixels(candidate)
 	disjoint := source.BBox.XMax-source.BBox.XMin <= xstep && source.BBox.YMax-source.BBox.YMin <= ystep
 	pixelStep := 25.4 / c.importer.rasterDPI
 	localInverse, _ := pattern.local.matrix.Inverse()
@@ -92,10 +93,11 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 				}
 			}
 			cell := pdfCompositor{importer: &pattern.local, box: Box{X: c.box.X + float64(left)*pixelStep - dx, Y: c.box.Y + float64(top)*pixelStep - dy, W: float64(width) * pixelStep, H: float64(height) * pixelStep},
-				width: width, height: height, inverse: localInverse, cache: pattern.local.compositingCache(), masks: map[*pdfgo.SoftMask][]float64{}}
+				width: width, height: height, inverse: localInverse, cache: pattern.local.compositingCache(), scratch: c.scratch, masks: map[*pdfgo.SoftMask][]float64{}}
 			if err := cell.draw(pattern.nodes, pixels, space); err != nil {
 				return nil, err
 			}
+			cell.releaseMasks()
 			for y := range height {
 				for x := range width {
 					index := (top+y)*c.width + left + x
@@ -105,6 +107,11 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 		}
 	}
 	for i := range result {
+		if i%pdfCompositeTileSize == 0 {
+			if err := c.importer.ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		pixel := &result[i]
 		if pixel.effect != 0 {
 			for j := 0; j < space.Components(); j++ {
@@ -187,7 +194,7 @@ func (p *pdfImporter) directCompositeNode(node pdfCompositeNode, space *pdfgo.Co
 				source := p.compositingCache().images[node.image.Image]
 				if source == nil {
 					var err error
-					source, err = node.image.Image.DecodeComponentsContext(p.ctx)
+					source, err = node.image.Image.DecodeComponentsViewContext(p.ctx)
 					if err != nil {
 						return false, err
 					}

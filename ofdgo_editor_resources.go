@@ -27,6 +27,12 @@ import (
 	"strings"
 )
 
+const (
+	editorReferenceNone = iota
+	editorReferenceID
+	editorReferenceFile
+)
+
 // editorResourceRefs 保存全包资源标识和直接文件引用，不以页面是否加载判断资源存活
 type editorResourceRefs struct {
 	ids   map[string]bool
@@ -41,6 +47,13 @@ type editorResourceRefs struct {
 // 入参: parts 已修改和新增的包内条目, progress 保存进度回调
 // 返回: map[string]bool 可移除的二进制条目, error 读取错误
 func (e *Editor) compactSourceResources(parts map[string][]byte, progress editorProgress) (map[string]bool, error) {
+	return e.compactSourceReferences(parts, progress, nil)
+}
+
+// compactSourceReferences 合并自产页面的已知引用，其他条目仍完整扫描
+// 入参: parts 输出条目, progress 保存进度回调, generated 自产页面及引用
+// 返回: map[string]bool 可移除条目, error 读取或取消错误
+func (e *Editor) compactSourceReferences(parts map[string][]byte, progress editorProgress, generated map[string]editorGeneratedReferences) (map[string]bool, error) {
 	if e.source.reader.DocumentCount() > 1 || e.output != nil && e.output.protected {
 		return nil, nil
 	}
@@ -68,9 +81,18 @@ func (e *Editor) compactSourceResources(parts map[string][]byte, progress editor
 		if strings.HasSuffix(name, "/") {
 			continue
 		}
+		data, replaced := parts[name]
+		if known, ok := generated[name]; ok && replaced && known.refs != nil && known.matches(data) {
+			refs.merge(known.refs)
+			continue
+		}
 		var input io.ReadCloser
-		if data, ok := parts[name]; ok {
-			input = io.NopCloser(bytes.NewReader(data))
+		if replaced {
+			if known := generated[name]; data == nil && known.staged != nil {
+				input = known.staged.open()
+			} else {
+				input = io.NopCloser(bytes.NewReader(data))
+			}
 		} else {
 			var err error
 			input, err = reader.openFile(name)
@@ -78,8 +100,14 @@ func (e *Editor) compactSourceResources(parts map[string][]byte, progress editor
 				return nil, err
 			}
 		}
+		if e.output != nil {
+			input = imageInput{ReadCloser: input, context: e.output.ctx}
+		}
 		resource, safe := refs.scan(input, name)
 		input.Close()
+		if e.output != nil && e.output.ctx.Err() != nil {
+			return nil, e.output.ctx.Err()
+		}
 		if !safe {
 			return nil, nil
 		}
@@ -224,79 +252,16 @@ func (r *editorResourceRefs) scan(input io.Reader, name string) (bool, bool) {
 		return false, !strings.EqualFold(path.Ext(name), ".xml")
 	}
 	decoder := xml.NewDecoder(buffer)
-	var stack []string
-	var fonts []*editorFontUsage
-	var text strings.Builder
-	resource, base := false, ""
+	scan := editorReferenceScan{refs: r, name: name, safe: true}
 	for {
 		token, err := decoder.Token()
 		if err == io.EOF {
-			return resource, len(stack) == 0
+			return scan.resource, len(scan.stack) == 0
 		}
 		if err != nil {
 			return false, false
 		}
-		switch token := token.(type) {
-		case xml.StartElement:
-			if token.Name.Space != "" && token.Name.Space != ofdNamespace {
-				return false, false
-			}
-			if token.Name.Local == "CustomTags" || token.Name.Local == "Extensions" || token.Name.Local == "ExtendData" || token.Name.Local == "Data" {
-				return false, false
-			}
-			if len(stack) == 0 {
-				resource = token.Name.Local == "Res"
-				if resource {
-					for _, attr := range token.Attr {
-						if attr.Name.Local == "BaseLoc" {
-							base = attr.Value
-						}
-					}
-				}
-			}
-			var usage *editorFontUsage
-			if len(fonts) != 0 {
-				usage = fonts[len(fonts)-1]
-				if usage != nil && (stack[len(stack)-1] == "TextCode" || stack[len(stack)-1] == "Glyphs") {
-					usage.unsafe = true
-				}
-			}
-			for _, attr := range token.Attr {
-				if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" || attr.Name.Space == "http://www.w3.org/XML/1998/namespace" {
-					continue
-				}
-				if attr.Name.Space != "" {
-					return false, false
-				}
-				if attr.Name.Local != "ID" {
-					r.reference(name, base, attr.Name.Local, attr.Value, resource)
-				}
-				if attr.Name.Local == "Font" {
-					usage = r.fontUsage(attr.Value)
-					if token.Name.Local != "TextObject" && token.Name.Local != "Text" {
-						usage.unsafe = true
-					}
-				} else if attr.Name.Local == "Substitution" {
-					r.fontUsage(attr.Value).unsafe = true
-				}
-			}
-			stack = append(stack, token.Name.Local)
-			fonts = append(fonts, usage)
-			text.Reset()
-		case xml.CharData:
-			text.Write(token)
-		case xml.EndElement:
-			r.reference(name, base, token.Name.Local, text.String(), resource)
-			if (token.Name.Local == "Substitution" || token.Name.Local == "Font") && strings.TrimSpace(text.String()) != "" {
-				r.fontUsage(text.String()).unsafe = true
-			}
-			if usage := fonts[len(fonts)-1]; usage != nil {
-				usage.text(token.Name.Local, text.String())
-			}
-			stack = stack[:len(stack)-1]
-			fonts = fonts[:len(fonts)-1]
-			text.Reset()
-		case xml.Directive:
+		if !scan.accept(token) {
 			return false, false
 		}
 	}
@@ -305,30 +270,42 @@ func (r *editorResourceRefs) scan(input io.Reader, name string) (bool, bool) {
 // reference 记录标准资源标识和路径引用，不将普通数字或资源自身ID视为引用
 // 入参: name 当前文件, base 资源目录, key 字段, value 值, resource 是否资源索引
 func (r *editorResourceRefs) reference(name, base, key, value string, resource bool) {
+	kind := editorResourceReferenceKind(key, resource)
+	if kind == editorReferenceNone {
+		return
+	}
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return
 	}
-	switch key {
-	case "Font", "ResourceID", "Substitution", "ImageMask", "Relative", "DrawParam", "ColorSpace", "DefaultCS", "Thumbnail", "TemplateID", "PageID", "PageRef", "RefId":
+	if kind == editorReferenceID {
 		if id := editorResourceID(value); id != "" {
 			r.ids[id] = true
 		}
 		return
-	case "DocRoot", "Signatures", "Cover", "PublicRes", "DocumentRes", "PageRes", "Annotations", "Attachments", "FileLoc", "FileRef", "Profile", "SignedValue", "SchemaLoc", "ExtendData", "File":
-	case "BaseLoc":
-		if resource {
-			return
-		}
-	case "FontFile", "MediaFile":
-		if resource {
-			return
-		}
-	default:
-		return
 	}
 	r.files[editorResourceLocation(name, base, value)] = true
 	r.files[strings.ToLower(cleanPackagePath(resolveResourcePath(name, base, value)))] = true
+}
+
+// editorResourceReferenceKind 区分标准标识和文件引用，其他文本不参与资源扫描
+// 入参: key 字段名称, resource 是否资源索引
+// 返回: int 引用类型
+func editorResourceReferenceKind(key string, resource bool) int {
+	switch key {
+	case "Font", "ResourceID", "Substitution", "ImageMask", "Relative", "DrawParam", "ColorSpace", "DefaultCS", "Thumbnail", "TemplateID", "PageID", "PageRef", "RefId":
+		return editorReferenceID
+	case "DocRoot", "Signatures", "Cover", "PublicRes", "DocumentRes", "PageRes", "Annotations", "Attachments", "FileLoc", "FileRef", "Profile", "SignedValue", "SchemaLoc", "ExtendData", "File":
+		return editorReferenceFile
+	case "BaseLoc":
+	case "FontFile", "MediaFile":
+	default:
+		return editorReferenceNone
+	}
+	if resource {
+		return editorReferenceNone
+	}
+	return editorReferenceFile
 }
 
 // editorResourceID 规范化ST_ID与ST_RefID的十进制表示

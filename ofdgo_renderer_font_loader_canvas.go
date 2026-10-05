@@ -14,11 +14,7 @@
 
 package ofdgo
 
-import (
-	"crypto/sha256"
-
-	"github.com/tdewolff/canvas"
-)
+import "github.com/tdewolff/canvas"
 
 // loadFont 加载字体
 // 入参: fontID 字体ID
@@ -42,7 +38,7 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	fontData := resolved.Data
 	fontStyle := canvasFontStyle(of)
 	if resolved.digest == ([32]byte{}) {
-		resolved.digest = sha256.Sum256(fontData)
+		resolved.digest = r.fontDigest(fontData)
 	}
 	key := canvasFontKey{digest: resolved.digest, name: of.FontName, style: fontStyle}
 	cache := r.canvasFontFamilies()

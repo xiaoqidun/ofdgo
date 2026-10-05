@@ -104,6 +104,13 @@ func (r *Reader) Fonts() ([]Font, error) {
 // 入参: id 字体资源标识
 // 返回: []byte 字体数据, error 资源缺失或集合解析错误
 func (r *Reader) FontData(id string) ([]byte, error) {
+	return r.fontData(id, false)
+}
+
+// fontData 按调用方所有权读取内嵌字体，集合字体始终独立提取
+// 入参: id 字体资源标识, readonly 是否允许借用只读资源
+// 返回: []byte 字体数据, error 资源或集合错误
+func (r *Reader) fontData(id string, readonly bool) ([]byte, error) {
 	if r.fontCache[id] == nil {
 		if _, err := r.Fonts(); err != nil {
 			return nil, err
@@ -113,7 +120,11 @@ func (r *Reader) FontData(id string) ([]byte, error) {
 	if f == nil || f.FontFile == "" {
 		return nil, fmt.Errorf("embedded font %q not found", id)
 	}
-	data, err := r.ResData(f.FontFile)
+	read := r.readFile
+	if readonly {
+		read = r.readFileView
+	}
+	data, err := read(r.ResPath(f.FontFile))
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +234,7 @@ func (r *Reader) embeddedFontFace(of Font) (*FontFace, error) {
 	name := r.ResPath(of.FontFile)
 	faces, ok := r.fontFaces[name]
 	if !ok {
-		data, err := r.readFile(name)
+		data, err := r.readFileView(name)
 		if err != nil {
 			return nil, err
 		}

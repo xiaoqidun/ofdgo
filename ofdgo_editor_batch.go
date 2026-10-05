@@ -155,11 +155,83 @@ func (e *Editor) CopyObjectsContext(ctx context.Context, page int, objects []Gra
 		for end < len(prepared) && e.copiedLayerStyle(objects[end]) == style {
 			end++
 		}
-		layers[target].Objects = append(layers[target].Objects, prepared[i:end]...)
+		if len(layers[target].Objects) == 0 {
+			layers[target].Objects = prepared[i:end:end]
+		} else {
+			layers[target].Objects = append(layers[target].Objects, prepared[i:end]...)
+		}
 		i = end
 	}
-	e.replaceLayers(page, layers)
+	e.replacePreparedLayers(page, layers)
 	return result, nil
+}
+
+// appendOwnedObjects 接收本库生成对象的所有权，全部校验后提交一次撤销记录
+// 入参: ctx 取消上下文, page 目标页, objects 无原文和标识且调用方不再修改的对象
+// 返回: error 校验或取消错误，失败时不提交页面内容
+func (e *Editor) appendOwnedObjects(ctx context.Context, page int, objects []GraphicObject) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := e.page(page); err != nil {
+		return err
+	}
+	if len(objects) == 0 {
+		return nil
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return err
+	}
+	validation := &editorValidation{Editor: e}
+	for i, object := range objects {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if object.origin != nil || editorObjectID(object) != "" {
+			return fmt.Errorf("owned objects must not have identifiers or original content")
+		}
+		prepared, err := validation.prepareObject("", object)
+		if err != nil {
+			return err
+		}
+		objects[i] = prepared
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for i := range objects {
+		id := strconv.Itoa(e.maxID + i + 1)
+		switch objects[i].Type {
+		case "TextObject":
+			objects[i].TextObject.ID = id
+		case "PathObject":
+			objects[i].PathObject.ID = id
+		case "ImageObject":
+			objects[i].ImageObject.ID = id
+		case "CompositeObject":
+			objects[i].CompositeGraphicUnit.ID = id
+		}
+	}
+	layers := copyEditorPage(e.pages[page]).Content.Layer
+	target := 0
+	if e.originalPage(page) {
+		target = len(e.source.pages[e.pages[page].ID].original.Content.Layer)
+	}
+	if target < len(layers) {
+		target = len(layers) - 1
+	}
+	e.maxID += len(objects)
+	if target == len(layers) || layers[target].DrawParam != "" {
+		layers = append(layers, Layer{ID: e.nextID(), Type: "Body"})
+		target = len(layers) - 1
+	}
+	if len(layers[target].Objects) == 0 {
+		layers[target].Objects = objects[:len(objects):len(objects)]
+	} else {
+		layers[target].Objects = append(layers[target].Objects, objects...)
+	}
+	e.replacePreparedLayers(page, layers)
+	return nil
 }
 
 // PageObjectInfo 批量获取页面对象能力与位置，不重复扫描同一容器
@@ -543,12 +615,18 @@ func (e *Editor) replaceLayers(page int, layers []Layer) {
 		return
 	}
 	after := copyEditorPage(PageContent{Content: Content{Layer: layers}}).Content.Layer
+	e.replacePreparedLayers(page, after)
+}
+
+// replacePreparedLayers 提交已隔离的图层容器，历史启用时仍保留独立快照
+// 入参: page 页面索引, after 已准备且不再由调用方修改的图层列表
+func (e *Editor) replacePreparedLayers(page int, after []Layer) {
 	if e.historyLimit == 0 {
 		e.pages[page].Content.Layer = after
 		e.recordChange()
 		return
 	}
-	before = copyEditorPage(PageContent{Content: Content{Layer: before}}).Content.Layer
+	before := copyEditorPage(e.pages[page]).Content.Layer
 	apply := func(e *Editor, layers []Layer) {
 		e.pages[page].Content.Layer = copyEditorPage(PageContent{Content: Content{Layer: layers}}).Content.Layer
 	}

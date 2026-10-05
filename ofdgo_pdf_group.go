@@ -297,7 +297,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			return err
 		}
 		object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: data, Fill: &fill, Stroke: &stroke, FillColor: p.color(region.paint), Clips: objectClips}
-		p.objects = append(p.objects, GraphicObject{Type: "PathObject", PathObject: object})
+		p.appendObject(GraphicObject{Type: "PathObject", PathObject: object})
 		p.report.PathObjects++
 	}
 	return nil
@@ -358,6 +358,7 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	editor.SetRenderBackends(p.editor.Backends())
 	editor.SetFontDirs(p.editor.fontDirs...)
 	editor.SetFontFS(p.editor.fontFS...)
+	editor.fontSourcesCache = p.renderer.fontSourcesCache
 	if _, err := editor.AddPage(p.pageWidth, p.pageHeight); err != nil {
 		return nil, box, err
 	}
@@ -377,7 +378,7 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	if err := local.flushPath(); err != nil {
 		return nil, box, err
 	}
-	if len(local.objects) == 0 {
+	if local.objects.len() == 0 {
 		return nil, box, nil
 	}
 	if err := local.commitObjects(); err != nil {
@@ -391,17 +392,23 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	page := &editor.pages[0]
 	renderer := p.renderer.childRenderer(reader)
 	renderer.TransparentBackground = true
-	for _, layer := range page.Content.Layer {
-		for _, object := range layer.Objects {
-			if err := p.ctx.Err(); err != nil {
-				return nil, box, err
-			}
-			bounds, err := renderer.ObjectBounds(object, layer.DrawParam)
-			if err != nil {
-				return nil, box, err
-			}
-			box = unionTextBox(box, bounds)
-		}
+	scene, err := renderer.CompilePage(page)
+	if canceled := p.ctx.Err(); canceled != nil {
+		return nil, box, canceled
+	}
+	if err != nil {
+		return nil, box, err
+	}
+	if scene == nil {
+		return nil, box, fmt.Errorf("PDF local compositing: invalid compiled scene")
+	}
+	geometry, err := renderer.Geometry()
+	if err != nil {
+		return nil, box, err
+	}
+	box, err = scene.BoundsContext(p.ctx, geometry)
+	if err != nil {
+		return nil, Box{}, err
 	}
 	if box.W <= 0 || box.H <= 0 {
 		return nil, box, nil
@@ -413,11 +420,7 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	if box.W <= 0 || box.H <= 0 {
 		return nil, box, nil
 	}
-	scene, err := renderer.CompilePage(page)
-	if canceled := p.ctx.Err(); canceled != nil {
-		return nil, box, canceled
-	}
-	return scene, box, err
+	return scene, box, nil
 }
 
 // renderGroupScene 在指定区域渲染已编译场景，不修改缓存的命令与裁剪
@@ -466,7 +469,7 @@ func (p *pdfImporter) appendRasterGroup(img image.Image, box Box, opacity float6
 	}
 	alpha := int(math.Round(opacity * 255))
 	object := ImageObject{ResourceID: id, Boundary: pdfBoundary(box), CTM: pdfNumbers(box.W, 0, 0, box.H, 0, 0), Alpha: &alpha}
-	p.objects = append(p.objects, GraphicObject{Type: "ImageObject", ImageObject: object})
+	p.appendObject(GraphicObject{Type: "ImageObject", ImageObject: object})
 	p.report.ImageObjects++
 	if !p.rasterWarned {
 		p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF effect locally composited at %g DPI; other objects retained", p.rasterDPI)})
@@ -659,7 +662,7 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 		region, err = geometry.Combine(region, shape, operation)
 		return err
 	}
-	if err := mask.Walk(visitor); err != nil {
+	if err := mask.WalkContext(p.ctx, visitor); err != nil {
 		return pdfgo.Path{}, err
 	}
 	path := pdfgo.Path{}

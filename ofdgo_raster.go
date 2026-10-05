@@ -102,14 +102,17 @@ type RasterSpread struct {
 	Period  float64
 }
 
-// PixelSize 检查页面尺寸并计算目标像素大小
+// PixelSize 检查页面尺寸并计算目标像素大小，合法正尺寸至少保留一个像素
 // 返回: int 宽度, int 高度, error 无效尺寸
 func (p *RasterPage) PixelSize() (int, int, error) {
 	if p == nil || !rasterPositive(p.Width) || !rasterPositive(p.Height) || !rasterPositive(p.DPI) {
 		return 0, 0, fmt.Errorf("invalid raster page size or DPI")
 	}
 	scale := p.DPI / 25.4
-	w, h := math.Floor(p.Width*scale+0.5), math.Floor(p.Height*scale+0.5)
+	if !rasterPositive(scale) {
+		return 0, 0, fmt.Errorf("invalid raster page size or DPI")
+	}
+	w, h := math.Max(1, math.Floor(p.Width*scale+0.5)), math.Max(1, math.Floor(p.Height*scale+0.5))
 	if !rasterPositive(w) || !rasterPositive(h) || w*h > math.MaxInt32/4 {
 		return 0, 0, fmt.Errorf("invalid raster pixel dimensions: %g x %g", w, h)
 	}

@@ -21,7 +21,6 @@ import (
 	"math"
 	"reflect"
 	"strconv"
-	"strings"
 
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -62,6 +61,12 @@ type PDFImportReport struct {
 	Warnings     []pdfgo.Diagnostic
 }
 
+// pdfPointBounds 逐点汇总边界，不保留文字或路径的临时坐标数组
+type pdfPointBounds struct {
+	minX, minY, maxX, maxY float64
+	found                  bool
+}
+
 // pdfImporter 保存单次转换的对象与资源状态
 type pdfImporter struct {
 	ctx              context.Context
@@ -77,7 +82,7 @@ type pdfImporter struct {
 	clipTexts        map[*pdfgo.TextClip][]TextObject
 	clipPaths        *renderCache[[32]byte, pdfClipPath]
 	cmykSpace        string
-	objects          []GraphicObject
+	objects          *pdfObjectBuffer
 	pages            map[pdfgo.Reference]*pdfgo.Page
 	pageIDs          map[pdfgo.Reference]string
 	pageIndexes      map[pdfgo.Reference]int
@@ -143,6 +148,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	editor := NewEditor()
 	editor.SetRenderBackends(renderer.Backends())
 	editor.fontDirs, editor.fontFS = renderer.FontSources()
+	editor.fontSourcesCache = renderer.fontSourcesCache
 	importer := pdfImporter{ctx: ctx, reader: reader, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}}
 	importer.report.Warnings = diagnostics
 	importer.pageIndexes = make(map[pdfgo.Reference]int)
@@ -270,18 +276,21 @@ func ConvertPDF(ctx context.Context, source io.ReaderAt, size int64, output io.W
 		}
 		return nil
 	}
-	var written int64
-	_, err = editor.WriteTo(convertWriter{context: ctx, writer: output, count: &written})
+	_, err = editor.WriteToWithOptions(ctx, output, WriteOptions{})
 	return report, err
 }
 
 // commitObjects 将当前页面待转换对象写入编辑文档
 // 返回: error 对象写入错误
 func (p *pdfImporter) commitObjects() error {
-	if len(p.objects) == 0 {
+	if p.objects.len() == 0 {
 		return nil
 	}
-	if _, err := p.editor.CopyObjectsContext(p.ctx, p.page, p.objects, 0, 0); err != nil {
+	objects, err := p.objects.data(p.ctx)
+	if err != nil {
+		return err
+	}
+	if err := p.editor.appendOwnedObjects(p.ctx, p.page, objects); err != nil {
 		return err
 	}
 	p.objects = nil
@@ -313,11 +322,15 @@ func pdfPageMatrix(page *pdfgo.Page) (pdfgo.Matrix, float64, float64) {
 // 入参: values 数值列表
 // 返回: string 空格分隔的数值
 func pdfNumbers(values ...float64) string {
-	parts := make([]string, len(values))
+	var buffer [128]byte
+	data := buffer[:0]
 	for n, v := range values {
-		parts[n] = strconv.FormatFloat(v, 'g', -1, 64)
+		if n != 0 {
+			data = append(data, ' ')
+		}
+		data = strconv.AppendFloat(data, v, 'g', -1, 64)
 	}
-	return strings.Join(parts, " ")
+	return string(data)
 }
 
 // pdfBoundary 序列化对象边界
@@ -329,17 +342,31 @@ func pdfBoundary(b Box) string { return pdfNumbers(b.X, b.Y, b.W, b.H) }
 // 入参: points 坐标点集合
 // 返回: Box 包围框
 func pdfBounds(points []pdfgo.Point) Box {
-	if len(points) == 0 {
+	var bounds pdfPointBounds
+	for _, point := range points {
+		bounds.add(point)
+	}
+	return bounds.box()
+}
+
+// add 按原顺序累计一个控制点的最小和最大坐标
+// 入参: point 坐标点
+func (b *pdfPointBounds) add(point pdfgo.Point) {
+	if !b.found {
+		b.minX, b.minY, b.maxX, b.maxY = point.X, point.Y, point.X, point.Y
+		b.found = true
+	}
+	b.minX, b.minY = math.Min(b.minX, point.X), math.Min(b.minY, point.Y)
+	b.maxX, b.maxY = math.Max(b.maxX, point.X), math.Max(b.maxY, point.Y)
+}
+
+// box 取得原精度边界，空集合仍返回零值
+// 返回: Box 坐标范围
+func (b *pdfPointBounds) box() Box {
+	if !b.found {
 		return Box{}
 	}
-	minX, minY, maxX, maxY := points[0].X, points[0].Y, points[0].X, points[0].Y
-	for _, p := range points {
-		minX = math.Min(minX, p.X)
-		minY = math.Min(minY, p.Y)
-		maxX = math.Max(maxX, p.X)
-		maxY = math.Max(maxY, p.Y)
-	}
-	return Box{minX, minY, math.Max(maxX-minX, 1e-6), math.Max(maxY-minY, 1e-6)}
+	return Box{b.minX, b.minY, math.Max(b.maxX-b.minX, 1e-6), math.Max(b.maxY-b.minY, 1e-6)}
 }
 
 // pathBoundsContext 逐段计算变换后的控制点边界，不创建临时点集合
@@ -462,12 +489,12 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 				if err := p.flushPath(); err != nil {
 					return nil, err
 				}
-				count := len(p.objects)
+				count := p.objects.len()
 				textCount := p.report.TextObjects
 				if err := p.text(pdfgo.TextMark{Font: mark.Font, Glyphs: mark.Glyphs, Positions: mark.Positions, Matrix: mark.Matrix, Size: mark.Size, HorizontalScale: mark.HorizontalScale, Mode: 7, Clip: mark, Style: pdfgo.Style{Fill: pdfgo.Paint{Alpha: 1}}}); err != nil {
 					return nil, err
 				}
-				p.objects = p.objects[:count]
+				p.objects.truncate(count)
 				p.report.TextObjects = textCount
 				objects = p.clipTexts[mark]
 			}
@@ -617,7 +644,7 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 		phase := mark.Style.DashPhase * scale
 		object.DashOffset = &phase
 	}
-	p.objects = append(p.objects, GraphicObject{Type: "PathObject", PathObject: object})
+	p.appendObject(GraphicObject{Type: "PathObject", PathObject: object})
 	p.report.PathObjects++
 	return nil
 }
@@ -737,14 +764,18 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 	if err := cell.flushPath(); err != nil {
 		return nil, err
 	}
-	pattern.CellContent.Objects = cell.objects
+	objects, err := cell.objects.data(p.ctx)
+	if err != nil {
+		return nil, err
+	}
+	pattern.CellContent.Objects = objects
 	if width > xstep || height > ystep {
 		columns, rows := math.Ceil(width/xstep), math.Ceil(height/ystep)
 		if !finite(columns*rows) || columns*rows > float64(int(^uint(0)>>1)) {
 			return nil, fmt.Errorf("PDF tiling pattern instance count overflow")
 		}
-		bounds := make([]Box, len(cell.objects))
-		for index, object := range cell.objects {
+		bounds := make([]Box, len(objects))
+		for index, object := range objects {
 			if object.Type == "PathObject" && object.PathObject.Stroke != nil && !*object.PathObject.Stroke {
 				var err error
 				bounds[index], err = ParseBox(object.PathObject.Boundary)
@@ -753,14 +784,19 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 				}
 			}
 		}
-		pattern.CellContent.Objects = nil
+		var expanded pdfObjectBuffer
 		for row := 1 - int(rows); row <= 0; row++ {
 			for column := 1 - int(columns); column <= 0; column++ {
 				if err := p.ctx.Err(); err != nil {
 					return nil, err
 				}
 				dx, dy := float64(column)*xstep*unit, float64(row)*ystep*unit
-				for index, object := range cell.objects {
+				for index, object := range objects {
+					if index%pdfObjectChunkLimit == 0 {
+						if err := p.ctx.Err(); err != nil {
+							return nil, err
+						}
+					}
 					b := bounds[index]
 					if b.W > 0 && b.H > 0 && (b.X+dx+b.W < 0 || b.Y+dy+b.H < 0 || b.X+dx > pattern.Width || b.Y+dy > pattern.Height) {
 						continue
@@ -769,9 +805,13 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 					if err != nil {
 						return nil, err
 					}
-					pattern.CellContent.Objects = append(pattern.CellContent.Objects, translated)
+					expanded.append(translated)
 				}
 			}
+		}
+		pattern.CellContent.Objects, err = expanded.data(p.ctx)
+		if err != nil {
+			return nil, err
 		}
 	}
 	return pattern, nil

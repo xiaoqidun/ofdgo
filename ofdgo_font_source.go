@@ -84,6 +84,14 @@ func newFontSourceCache() *fontSourceCache {
 	return &fontSourceCache{candidates: make(map[string][]fontSource), directories: make(map[string][]fontFileCandidate), filesystems: make(map[int][]fontFileCandidate), data: make(map[fontSourceKey]fontSourceData)}
 }
 
+// child 复用相同来源的文件索引与数据，匹配和回退状态保持独立
+// 返回: *fontSourceCache 独立文档缓存
+func (c *fontSourceCache) child() *fontSourceCache {
+	cache := newFontSourceCache()
+	cache.directories, cache.filesystems, cache.data = c.directories, c.filesystems, c.data
+	return cache
+}
+
 // readFontSource 读取并拆出独立字体，保留集合中的名称和样式选择
 // 入参: source 字体来源, definition 字体定义
 // 返回: []byte 字体数据, error 读取或集合错误
@@ -156,7 +164,7 @@ func (r *Renderer) resolveFontSource(backend FontBackend, id string, exact bool)
 		definition = &Font{ID: id}
 	}
 	if definition.FontFile != "" {
-		data, err := r.Reader.FontData(id)
+		data, err := r.Reader.fontData(id, true)
 		if err != nil {
 			return ResolvedFont{}, err
 		}

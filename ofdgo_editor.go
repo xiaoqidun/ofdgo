@@ -45,30 +45,31 @@ const editorPathValidationLimit = 1024
 // 阶段可重复，准备完成不代表保存成功
 // 回调不可重入修改编辑器，可返回context.Canceled等调用方停止原因
 type Editor struct {
-	OnWriteProgress func(stage string, completed, total int) error
-	Info            DocInfo
-	pages           []PageContent
-	resources       []editorResource
-	fonts           map[string]*FontResource
-	fontDirs        []string
-	fontFS          []fs.FS
-	fontRenderer    *Renderer
-	fontMetrics     map[string]FontMetrics
-	backends        RenderBackends
-	images          map[string]image.Point
-	resourceID      map[editorResourceKey]string
-	maxID           int
-	history         []editorChange
-	historyIndex    int
-	historyLimit    int
-	revision        uint64
-	serial          uint64
-	source          *editorSource
-	origins         map[string]*editorObjectOrigin
-	removedPages    map[string]bool
-	outlines        []byte
-	encryption      *encryptionState
-	output          *outputOptimization
+	OnWriteProgress  func(stage string, completed, total int) error
+	Info             DocInfo
+	pages            []PageContent
+	resources        []editorResource
+	fonts            map[string]*FontResource
+	fontDirs         []string
+	fontFS           []fs.FS
+	fontRenderer     *Renderer
+	fontSourcesCache *fontSourceCache
+	fontMetrics      map[string]FontMetrics
+	backends         RenderBackends
+	images           map[string]image.Point
+	resourceID       map[editorResourceKey]string
+	maxID            int
+	history          []editorChange
+	historyIndex     int
+	historyLimit     int
+	revision         uint64
+	serial           uint64
+	source           *editorSource
+	origins          map[string]*editorObjectOrigin
+	removedPages     map[string]bool
+	outlines         []byte
+	encryption       *encryptionState
+	output           *outputOptimization
 }
 
 // editorResource 文档内嵌资源
@@ -100,6 +101,7 @@ type editorResourceKey struct {
 func (e *Editor) SetFontDirs(dirs ...string) {
 	e.fontDirs = slices.Clone(dirs)
 	e.fontRenderer = nil
+	e.fontSourcesCache = nil
 	e.fontMetrics = make(map[string]FontMetrics)
 }
 
@@ -108,6 +110,7 @@ func (e *Editor) SetFontDirs(dirs ...string) {
 func (e *Editor) SetFontFS(fsys ...fs.FS) {
 	e.fontFS = slices.Clone(fsys)
 	e.fontRenderer = nil
+	e.fontSourcesCache = nil
 	e.fontMetrics = make(map[string]FontMetrics)
 }
 
@@ -687,7 +690,12 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 // 入参: reader 当前文档快照
 // 返回: *Renderer 度量器
 func (e *Editor) newRenderer(reader *Reader) *Renderer {
-	return NewRenderer(reader, WithFontDirs(e.fontDirs...), WithFontFS(e.fontFS...), WithRenderBackends(e.backends))
+	if e.fontSourcesCache == nil {
+		e.fontSourcesCache = newFontSourceCache()
+	}
+	renderer := NewRenderer(reader, WithFontDirs(e.fontDirs...), WithFontFS(e.fontFS...), WithRenderBackends(e.backends))
+	renderer.fontSourcesCache = e.fontSourcesCache.child()
+	return renderer
 }
 
 // definition 获取独立定义资源的标识
@@ -1091,14 +1099,12 @@ func (e *Editor) prepareText(obj *TextObject) error {
 	if obj.VScale != 0 || obj.Decoration != "" {
 		return &EditError{Code: EditUnsupportedObject, Err: fmt.Errorf("text extensions are not supported for creation")}
 	}
-	if external {
-		if len(obj.CGTransform) != 0 {
-			return fmt.Errorf("external font text cannot use glyph indices")
-		}
-	} else {
-		if err := validateTextGlyphs(*obj, sfnt.NumGlyphs()); err != nil {
-			return err
-		}
+	glyphCount := 1 << 16
+	if !external {
+		glyphCount = int(sfnt.NumGlyphs())
+	}
+	if err := validateTextGlyphs(*obj, glyphCount); err != nil {
+		return err
 	}
 	if !finite(obj.HScale) || obj.HScale < 0 || !finite(obj.LineWidth) || obj.LineWidth < 0 || !finite(obj.MiterLimit) || obj.MiterLimit < 0 {
 		return fmt.Errorf("invalid text dimensions")

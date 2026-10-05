@@ -49,6 +49,7 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 	changed := e.revision != before.revision
 	e.history, e.historyIndex, e.historyLimit = before.history, before.historyIndex, before.historyLimit
 	e.backends, e.fontDirs, e.fontFS = before.backends, before.fontDirs, before.fontFS
+	e.fontSourcesCache = before.fontSourcesCache
 	if e.sameDocument(&before) {
 		e.fontRenderer, e.fontMetrics = before.fontRenderer, before.fontMetrics
 	} else {
@@ -159,6 +160,7 @@ func (e *Editor) restoreTransaction(state Editor) {
 	state.history, state.historyIndex, state.historyLimit = e.history, e.historyIndex, e.historyLimit
 	state.serial = max(e.serial, state.serial)
 	state.backends, state.fontDirs, state.fontFS = e.backends, e.fontDirs, e.fontFS
+	state.fontSourcesCache = e.fontSourcesCache
 	state.encryption, state.output, state.OnWriteProgress = e.encryption, e.output, e.OnWriteProgress
 	*e = state
 }

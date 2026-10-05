@@ -133,6 +133,12 @@ type resolvedFontResult struct {
 	err  error
 }
 
+// fontDataKey 区分只读字体的起点和长度，指针保留源数据直到预算淘汰
+type fontDataKey struct {
+	data *byte
+	size int
+}
+
 // ResolveFont 使用配置的字体后端解析资源，保留精确匹配与回退的区别
 // 入参: id 字体资源标识, exact 是否要求精确匹配
 // 返回: ResolvedFont 字体与来源, error 解析错误
@@ -165,7 +171,7 @@ func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
 	prepared := &PreparedFont{ResolvedFont: resolved}
 	definition := r.Reader.fontCache[id]
 	if definition != nil && definition.FontFile != "" {
-		key := sha256.Sum256(resolved.Data)
+		key := r.fontDigest(resolved.Data)
 		if content, ok := r.fontPreparations.get(key); ok {
 			prepared.Data, prepared.Glyphs, prepared.CIDs, prepared.digest = content.Data, content.Glyphs, content.CIDs, content.digest
 			r.preparedFonts[id] = prepared
@@ -188,12 +194,28 @@ func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
 				}
 			}
 		}
-		prepared.digest = sha256.Sum256(prepared.Data)
+		prepared.digest = r.fontDigest(prepared.Data)
 		cost := min(len(prepared.Data), r.fontPreparations.limit)*2 + (len(prepared.Glyphs)+len(prepared.CIDs))*48 + 256
 		r.fontPreparations.put(key, PreparedFont{ResolvedFont: ResolvedFont{Data: prepared.Data}, Glyphs: prepared.Glyphs, CIDs: prepared.CIDs, digest: prepared.digest}, cost)
 	}
 	r.preparedFonts[id] = prepared
 	return prepared, nil
+}
+
+// fontDigest 在预算内复用只读字体摘要，内容副本仍按摘要复用解析结果
+// 入参: data 不得修改的字体数据
+// 返回: [32]byte 字体摘要
+func (r *Renderer) fontDigest(data []byte) [32]byte {
+	if len(data) == 0 {
+		return sha256.Sum256(nil)
+	}
+	key := fontDataKey{data: &data[0], size: len(data)}
+	if digest, ok := r.fontDigests.get(key); ok {
+		return digest
+	}
+	digest := sha256.Sum256(data)
+	r.fontDigests.put(key, digest, min(cap(data), r.fontDigests.limit)+256)
+	return digest
 }
 
 // resetFontCache 重置字体解析及字形缓存，保留图片和非字体后端状态
@@ -206,6 +228,7 @@ func (r *Renderer) resetFontCache() {
 func (r *Renderer) resetFontBackendCache() {
 	r.sharedBackendStates = make(map[any]any)
 	r.preparedFonts = make(map[string]*PreparedFont)
+	r.fontDigests = &renderCache[fontDataKey, [32]byte]{limit: 4 << 20}
 	r.fontPreparations = &renderCache[[32]byte, PreparedFont]{limit: 16 << 20}
 	r.resolvedFonts = make(map[resolvedFontKey]resolvedFontResult)
 	if r.fontSourcesCache != nil {

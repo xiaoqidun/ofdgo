@@ -19,6 +19,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // cmapSegment cmap表段结构
@@ -29,7 +31,7 @@ type cmapSegment struct {
 	offset     uint16
 }
 
-// normalizeCmap 转换旧式双字节子表，保留各编码记录及原字形编号
+// normalizeCmap 转换扩展字符子表，保留各编码记录及原字形编号
 // 入参: data 字符映射表
 // 返回: []byte 等价字符映射表, error 子表错误
 func normalizeCmap(data []byte) ([]byte, error) {
@@ -48,7 +50,8 @@ func normalizeCmap(data []byte) ([]byte, error) {
 		if uint64(offset)+2 > uint64(len(data)) {
 			return nil, fmt.Errorf("invalid cmap subtable offset")
 		}
-		if binary.BigEndian.Uint16(data[offset:]) != 2 {
+		format := binary.BigEndian.Uint16(data[offset:])
+		if format != 2 && format != 8 && format != 10 && format != 13 {
 			continue
 		}
 		if out == nil {
@@ -56,17 +59,35 @@ func normalizeCmap(data []byte) ([]byte, error) {
 		}
 		next, ok := converted[offset]
 		if !ok {
-			mapping, err := parseCmapFormat2(data[offset:])
+			var mapping map[rune]uint16
+			var err error
+			language := uint32(0)
+			if format == 2 {
+				mapping, err = parseCmapFormat2(data[offset:])
+				if err == nil {
+					language = uint32(binary.BigEndian.Uint16(data[offset+4:]))
+				}
+			} else {
+				mapping, err = parseCmapExtended(data[offset:])
+				if err == nil {
+					language = binary.BigEndian.Uint32(data[offset+8:])
+				}
+			}
 			if err != nil {
 				return nil, err
 			}
 			table := buildCmapTable(0, mapping)
+			if language > 65535 {
+				table = buildCmapTableFormat12(0, mapping)
+			}
 			subtable := table[binary.BigEndian.Uint32(table[8:]):]
-			language := binary.BigEndian.Uint16(data[offset+4:])
 			if binary.BigEndian.Uint16(subtable) == 12 {
-				binary.BigEndian.PutUint32(subtable[8:], uint32(language))
+				binary.BigEndian.PutUint32(subtable[8:], language)
 			} else {
-				binary.BigEndian.PutUint16(subtable[4:], language)
+				binary.BigEndian.PutUint16(subtable[4:], uint16(language))
+			}
+			if uint64(len(out))+uint64(len(subtable)) > 1<<32-1 {
+				return nil, fmt.Errorf("normalized cmap exceeds offset range")
 			}
 			next = uint32(len(out))
 			converted[offset] = next
@@ -78,6 +99,110 @@ func normalizeCmap(data []byte) ([]byte, error) {
 		return data, nil
 	}
 	return out, nil
+}
+
+// parseCmapExtended 读取混合字符、扩展数组及常量分组，限制到有效Unicode范围
+// 入参: data 格式8、10或13子表
+// 返回: map[rune]uint16 独立字符映射, error 结构或映射错误
+func parseCmapExtended(data []byte) (map[rune]uint16, error) {
+	if len(data) < 12 {
+		return nil, fmt.Errorf("truncated extended cmap")
+	}
+	length := uint64(binary.BigEndian.Uint32(data[4:]))
+	if length < 12 || length > uint64(len(data)) {
+		return nil, fmt.Errorf("invalid extended cmap length")
+	}
+	data = data[:int(length)]
+	format := binary.BigEndian.Uint16(data)
+	result := make(map[rune]uint16)
+	add := func(code uint32, glyph uint16) error {
+		char := rune(code)
+		if code > utf8.MaxRune {
+			high, low := rune(code>>16), rune(code&65535)
+			if format != 8 || high < 0xd800 || high > 0xdbff || low < 0xdc00 || low > 0xdfff {
+				return fmt.Errorf("invalid extended cmap character")
+			}
+			char = utf16.DecodeRune(high, low)
+		}
+		if glyph != 0 && utf8.ValidRune(char) {
+			if previous, exists := result[char]; exists && previous != glyph {
+				return fmt.Errorf("ambiguous extended cmap character")
+			}
+			result[char] = glyph
+		}
+		return nil
+	}
+	if format == 10 {
+		if len(data) < 20 {
+			return nil, fmt.Errorf("truncated cmap format 10")
+		}
+		first, count := uint64(binary.BigEndian.Uint32(data[12:])), uint64(binary.BigEndian.Uint32(data[16:]))
+		if count > uint64((len(data)-20)/2) || first+count > utf8.MaxRune+1 {
+			return nil, fmt.Errorf("invalid cmap format 10 range")
+		}
+		for index := uint64(0); index < count; index++ {
+			if err := add(uint32(first+index), binary.BigEndian.Uint16(data[20+int(index)*2:])); err != nil {
+				return nil, err
+			}
+		}
+		return result, nil
+	}
+	offset := 16
+	if format == 8 {
+		offset = 8208
+	} else if format != 13 {
+		return nil, fmt.Errorf("invalid extended cmap format %d", format)
+	}
+	if len(data) < offset {
+		return nil, fmt.Errorf("truncated cmap format %d", format)
+	}
+	count := uint64(binary.BigEndian.Uint32(data[offset-4:]))
+	if count > uint64((len(data)-offset)/12) {
+		return nil, fmt.Errorf("invalid extended cmap group count")
+	}
+	var previous uint32
+	for index := uint64(0); index < count; index++ {
+		group := data[offset+int(index)*12:]
+		first, last, glyph := binary.BigEndian.Uint32(group), binary.BigEndian.Uint32(group[4:]), uint64(binary.BigEndian.Uint32(group[8:]))
+		if first > last || index != 0 && first <= previous {
+			return nil, fmt.Errorf("invalid extended cmap group order")
+		}
+		previous = last
+		endGlyph := glyph
+		if format == 8 {
+			endGlyph += uint64(last) - uint64(first)
+			if first <= 65535 && last > 65535 {
+				return nil, fmt.Errorf("mixed cmap character range")
+			}
+			if last > utf8.MaxRune && (first>>16 != last>>16 || first>>16 < 0xd800 || last>>16 > 0xdbff || first&65535 < 0xdc00 || last&65535 > 0xdfff) {
+				return nil, fmt.Errorf("invalid UTF-16 cmap group")
+			}
+		} else if last > utf8.MaxRune {
+			return nil, fmt.Errorf("invalid cmap Unicode range")
+		}
+		if endGlyph > 65535 {
+			return nil, fmt.Errorf("extended cmap glyph index overflow")
+		}
+		for code := uint64(first); code <= uint64(last); code++ {
+			if format == 8 {
+				word := code
+				if code > 65535 {
+					word >>= 16
+				}
+				if (data[12+word/8]&(1<<(7-word%8)) != 0) != (code > 65535) {
+					return nil, fmt.Errorf("invalid cmap character width")
+				}
+			}
+			id := glyph
+			if format == 8 {
+				id += code - uint64(first)
+			}
+			if err := add(uint32(code), uint16(id)); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return result, nil
 }
 
 // parseCmapFormat2 解析混合单字节与双字节字符的子头映射
@@ -155,8 +280,8 @@ func parseCmapMappings(data []byte) map[rune]uint16 {
 		if platformID != 0 && platformID != 3 {
 			continue
 		}
-		offset := int(binary.BigEndian.Uint32(data[pos+4 : pos+8]))
-		if offset+2 > len(data) {
+		offset := uint64(binary.BigEndian.Uint32(data[pos+4 : pos+8]))
+		if offset+2 > uint64(len(data)) {
 			continue
 		}
 		switch binary.BigEndian.Uint16(data[offset : offset+2]) {
@@ -168,6 +293,19 @@ func parseCmapMappings(data []byte) map[rune]uint16 {
 			parseCmapFormat6(data[offset:], result)
 		case 12:
 			parseCmapFormat12(data[offset:], result)
+		case 2, 8, 10, 13:
+			var mapping map[rune]uint16
+			var err error
+			if binary.BigEndian.Uint16(data[offset:]) == 2 {
+				mapping, err = parseCmapFormat2(data[offset:])
+			} else {
+				mapping, err = parseCmapExtended(data[offset:])
+			}
+			if err == nil {
+				for char, glyph := range mapping {
+					result[char] = glyph
+				}
+			}
 		}
 	}
 	if len(result) == 0 {
@@ -263,26 +401,27 @@ func parseCmapFormat12(data []byte, result map[rune]uint16) {
 	if len(data) < 16 {
 		return
 	}
-	length := int(binary.BigEndian.Uint32(data[4:8]))
-	if length > len(data) {
-		length = len(data)
+	length := uint64(binary.BigEndian.Uint32(data[4:8]))
+	if length < 16 || length > uint64(len(data)) {
+		return
 	}
-	nGroups := int(binary.BigEndian.Uint32(data[12:16]))
-	for i := 0; i < nGroups; i++ {
-		pos := 16 + i*12
-		if pos+12 > length {
-			break
-		}
+	nGroups := uint64(binary.BigEndian.Uint32(data[12:16]))
+	if nGroups > (length-16)/12 {
+		return
+	}
+	for i := uint64(0); i < nGroups; i++ {
+		pos := 16 + int(i)*12
 		startChar := binary.BigEndian.Uint32(data[pos:])
 		endChar := binary.BigEndian.Uint32(data[pos+4:])
 		startGID := binary.BigEndian.Uint32(data[pos+8:])
-		for c := startChar; c <= endChar; c++ {
-			gid := startGID + c - startChar
-			if gid != 0 && gid <= 0xFFFF {
+		if startChar > endChar || startGID > 65535 || startChar > utf8.MaxRune {
+			continue
+		}
+		last := min(uint64(endChar), uint64(startChar)+65535-uint64(startGID), uint64(utf8.MaxRune))
+		for c := uint64(startChar); c <= last; c++ {
+			gid := uint64(startGID) + c - uint64(startChar)
+			if gid != 0 && utf8.ValidRune(rune(c)) {
 				result[rune(c)] = uint16(gid)
-			}
-			if c == endChar {
-				break
 			}
 		}
 	}

@@ -15,7 +15,6 @@
 package ofdgo
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"math"
 	"strings"
@@ -262,7 +261,7 @@ func (r *Renderer) PositionText(object TextObject, state RenderState) (*Position
 // 返回: FontMetrics 字体度量, error 字体解析错误
 func (r *Renderer) preparedMetrics(prepared *PreparedFont) (FontMetrics, error) {
 	if prepared.digest == ([32]byte{}) {
-		prepared.digest = sha256.Sum256(prepared.Data)
+		prepared.digest = r.fontDigest(prepared.Data)
 	}
 	key := prepared.digest
 	if metrics, ok := r.fontMetrics.get(key); ok {

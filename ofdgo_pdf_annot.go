@@ -98,7 +98,11 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 		p.compositeNodes = stamp.compositeNodes
 		p.transferBackdrop = stamp.transferBackdrop
 	}
-	converted := Annotation{Type: pdfAnnotationType(annotation.Subtype), Subtype: string(annotation.Subtype), Remark: remark, Appearance: Appearance{Boundary: pdfBoundary(box), Objects: stamp.objects}}
+	objects, err := stamp.objects.data(ctx)
+	if err != nil {
+		return err
+	}
+	converted := Annotation{Type: pdfAnnotationType(annotation.Subtype), Subtype: string(annotation.Subtype), Remark: remark, Appearance: Appearance{Boundary: pdfBoundary(box), Objects: objects}}
 	if annotation.Subtype == "Redact" {
 		converted.Parameters = &AnnotationParameters{Parameter: []AnnotationParameter{{Name: "PDF.Redact.Pending", Value: "true"}}}
 	}

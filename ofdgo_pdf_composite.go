@@ -50,6 +50,7 @@ type pdfCompositor struct {
 	width, height   int
 	inverse         pdfgo.Matrix
 	cache           *pdfCompositeCache
+	scratch         *pdfCompositeScratch
 	masks           map[*pdfgo.SoftMask][]float64
 	meshes          map[pdfMeshKey][]pdfShadingPixel
 	gradients       map[pdfGradientKey][]pdfShadingPixel
@@ -69,6 +70,15 @@ type pdfCompositeKey struct {
 type pdfCompositeGeometry struct {
 	scene *RasterPage
 	box   Box
+}
+
+// pdfCompositeColorSampler 在单次绘制内复用完全相同参数的轴向颜色，不近似函数
+type pdfCompositeColorSampler struct {
+	paint      pdfgo.Paint
+	space      *pdfgo.ColorSpace
+	intent     pdfgo.Name
+	conversion pdfgo.ColorConversion
+	values     map[float64][4]float64
 }
 
 // pdfCompositeCache 在单页内复用几何、图像分量及蒙版内容
@@ -242,8 +252,17 @@ func (p *pdfImporter) compositeTextBounds(mark pdfgo.TextMark, stroke bool) Box 
 // 返回: []pdfCompositeNode 原始图元, error 解析错误
 func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]pdfCompositeNode, error) {
 	active := make(map[*pdfgo.Font]map[string]bool)
+	var seenFonts map[*pdfgo.Font]bool
 	var externalNames map[string]bool
 	var embeddedFonts map[*pdfgo.Font]bool
+	var textMarks []pdfgo.TextMark
+	storeText := func(mark pdfgo.TextMark) *pdfgo.TextMark {
+		if len(textMarks) == cap(textMarks) {
+			textMarks = make([]pdfgo.TextMark, 0, min(64, max(8, cap(textMarks)*2)))
+		}
+		textMarks = append(textMarks, mark)
+		return &textMarks[len(textMarks)-1]
+	}
 	var collect func(func(pdfgo.Visitor) error) ([]pdfCompositeNode, error)
 	collect = func(walk func(pdfgo.Visitor) error) ([]pdfCompositeNode, error) {
 		var nodes []pdfCompositeNode
@@ -259,7 +278,11 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 			return nil
 		}
 		v.Text = func(mark pdfgo.TextMark) error {
-			if mark.Font.Subtype != "Type3" {
+			if mark.Font.Subtype != "Type3" && !seenFonts[mark.Font] {
+				if seenFonts == nil {
+					seenFonts = make(map[*pdfgo.Font]bool)
+				}
+				seenFonts[mark.Font] = true
 				if len(mark.Font.Program) == 0 {
 					if externalNames == nil {
 						externalNames = make(map[string]bool)
@@ -277,7 +300,13 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 					embeddedFonts[mark.Font] = true
 				}
 			}
-			var text []pdfCompositeNode
+			text := &nodes
+			if mark.Object != nil && mark.Object.Knockout {
+				if len(nodes) == 0 || nodes[len(nodes)-1].textObject != mark.Object {
+					nodes = append(nodes, pdfCompositeNode{group: &pdfgo.GroupMark{Alpha: 1, Knockout: true}, textObject: mark.Object})
+				}
+				text = &nodes[len(nodes)-1].children
+			}
 			if mark.Font.Subtype != "Type3" {
 				if err := p.halftone(mark.Style); err != nil {
 					return err
@@ -289,10 +318,10 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 					for i := range mark.Glyphs {
 						glyph := mark
 						glyph.Glyphs, glyph.Positions, glyph.Clip = mark.Glyphs[i:i+1], mark.Positions[i:i+1], nil
-						text = append(text, pdfCompositeNode{text: &glyph})
+						*text = append(*text, pdfCompositeNode{text: storeText(glyph)})
 					}
 				} else {
-					text = append(text, pdfCompositeNode{text: &mark})
+					*text = append(*text, pdfCompositeNode{text: storeText(mark)})
 				}
 			} else {
 				glyphs := active[mark.Font]
@@ -305,24 +334,16 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 						return fmt.Errorf("recursive PDF Type3 glyph %q", glyph.Name)
 					}
 					glyphs[glyph.Name] = true
-					children, err := collect(func(visitor pdfgo.Visitor) error { return p.reader.WalkType3Glyph(p.ctx, mark, index, visitor) })
+					source := mark
+					children, err := collect(func(visitor pdfgo.Visitor) error { return p.reader.WalkType3Glyph(p.ctx, source, index, visitor) })
 					delete(glyphs, glyph.Name)
 					if err != nil {
 						return err
 					}
 					part := mark
 					part.Glyphs, part.Positions = mark.Glyphs[index:index+1], mark.Positions[index:index+1]
-					text = append(text, pdfCompositeNode{group: &pdfgo.GroupMark{Alpha: 1}, children: children, glyph: &part})
+					*text = append(*text, pdfCompositeNode{group: &pdfgo.GroupMark{Alpha: 1}, children: children, glyph: &part})
 				}
-			}
-			if mark.Object != nil && mark.Object.Knockout {
-				if len(nodes) == 0 || nodes[len(nodes)-1].textObject != mark.Object {
-					nodes = append(nodes, pdfCompositeNode{group: &pdfgo.GroupMark{Alpha: 1, Knockout: true}, textObject: mark.Object})
-				}
-				node := &nodes[len(nodes)-1]
-				node.children = append(node.children, text...)
-			} else {
-				nodes = append(nodes, text...)
 			}
 			return nil
 		}
@@ -624,6 +645,9 @@ func (n pdfCompositeNode) coverage(p *pdfImporter, stroke bool) error {
 // 入参: backdrop 前序图元, node 当前效果, space 页面混合空间, flatten 是否合并页面背景
 // 返回: error 合成或保存错误
 func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompositeNode, space *pdfgo.ColorSpace, flatten bool) error {
+	if err := p.ctx.Err(); err != nil {
+		return err
+	}
 	scene, box, err := p.compileGroup(func(local *pdfImporter) error {
 		if node.group != nil {
 			return node.coverage(local, false)
@@ -650,21 +674,28 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 	if err != nil {
 		return err
 	}
+	if err := p.ctx.Err(); err != nil {
+		return err
+	}
 	output := image.NewNRGBA(image.Rect(0, 0, w, h))
 	cache := p.compositingCache()
 	step := 25.4 / p.rasterDPI
-	buffer := make([]pdfCompositePixel, min(256, w)*min(256, h))
+	buffer := make([]pdfCompositePixel, min(pdfCompositeTileSize, w)*min(pdfCompositeTileSize, h))
+	scratch := &pdfCompositeScratch{}
 	var transfers []*pdfgo.TransferFunction
 	var previousTransfers []*pdfgo.TransferFunction
 	if pdfCompositeHasTransfer(backdrop) || pdfCompositeHasTransfer([]pdfCompositeNode{node}) {
 		transfers = make([]*pdfgo.TransferFunction, len(buffer))
 		previousTransfers = make([]*pdfgo.TransferFunction, len(buffer))
 	}
-	for y := 0; y < h; y += 256 {
-		for x := 0; x < w; x += 256 {
+	for y := 0; y < h; y += pdfCompositeTileSize {
+		for x := 0; x < w; x += pdfCompositeTileSize {
+			if err := p.ctx.Err(); err != nil {
+				return err
+			}
 			runtime.Gosched()
-			width, height := min(256, w-x), min(256, h-y)
-			c := pdfCompositor{importer: p, box: Box{X: box.X + float64(x)*step, Y: box.Y + float64(y)*step, W: float64(width) * step, H: float64(height) * step}, width: width, height: height, inverse: inverse, cache: cache, masks: map[*pdfgo.SoftMask][]float64{}}
+			width, height := min(pdfCompositeTileSize, w-x), min(pdfCompositeTileSize, h-y)
+			c := pdfCompositor{importer: p, box: Box{X: box.X + float64(x)*step, Y: box.Y + float64(y)*step, W: float64(width) * step, H: float64(height) * step}, width: width, height: height, inverse: inverse, cache: cache, scratch: scratch, masks: map[*pdfgo.SoftMask][]float64{}}
 			if transfers != nil {
 				c.transfers = transfers[:width*height]
 				clear(c.transfers)
@@ -682,6 +713,11 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 				return err
 			}
 			for i, pixel := range pixels {
+				if i%pdfCompositeTileSize == 0 {
+					if err := p.ctx.Err(); err != nil {
+						return err
+					}
+				}
 				if pixel.effect == 0 && (c.transfers == nil || c.transfers[i] == previousTransfers[i]) {
 					continue
 				}
@@ -711,6 +747,7 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 				}
 				output.SetNRGBA(x+i%width, y+i/width, color.NRGBA{R: uint8(math.Round(rgb[0] * 255)), G: uint8(math.Round(rgb[1] * 255)), B: uint8(math.Round(rgb[2] * 255)), A: uint8(math.Round(alpha * 255))})
 			}
+			c.releaseMasks()
 		}
 	}
 	return p.appendRasterGroup(output, box, 1)
