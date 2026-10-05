@@ -294,6 +294,15 @@ func (p *pdfImporter) processOverprint(nodes []pdfCompositeNode) (bool, error) {
 			return true, nil
 		}
 		for i, paint := range []pdfgo.Paint{style.Fill, style.Stroke} {
+			if paint.Shading != nil && (i == 0 && fill || i == 1 && stroke) {
+				nodes, err := p.compositeShadingPattern(paint.Shading)
+				if err != nil {
+					return false, err
+				}
+				if found, err := p.processOverprint(nodes); err != nil || found {
+					return found, err
+				}
+			}
 			if i == 0 && !fill || i == 1 && !stroke || paint.Tiling == nil {
 				continue
 			}

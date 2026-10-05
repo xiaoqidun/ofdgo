@@ -3,14 +3,14 @@ module github.com/xiaoqidun/ofdgo
 go 1.26.0
 
 require (
-	github.com/emmansun/gmsm v0.44.1
+	github.com/emmansun/gmsm v0.45.0
 	github.com/go-fonts/latin-modern v0.3.3
 	github.com/go-text/typesetting v0.3.5
 	github.com/mububoki/jpeg2000 v1.0.0
 	github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c
 	github.com/tdewolff/font v0.0.0-20260913163313-54f98bb59ee6
 	github.com/xiaoqidun/jbig2 v1.1.1
-	github.com/xiaoqidun/pdfgo v0.0.0-20261005044242-0007b05b8143
+	github.com/xiaoqidun/pdfgo v0.0.0-20261005090911-e5eb2af5dff1
 	golang.org/x/crypto v0.57.0
 	golang.org/x/image v0.46.0
 	golang.org/x/text v0.42.0

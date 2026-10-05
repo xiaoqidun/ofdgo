@@ -94,7 +94,7 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	if err := p.flushPath(); err != nil {
 		return err
 	}
-	if mark.Image.ImageMask && (mark.Style.Fill.Axial != nil || mark.Style.Fill.Radial != nil || mark.Style.Fill.Function != nil || mark.Style.Fill.Mesh != nil) {
+	if mark.Image.ImageMask && (mark.Style.Fill.Axial != nil || mark.Style.Fill.Radial != nil || mark.Style.Fill.Function != nil || mark.Style.Fill.Mesh != nil || mark.Style.Fill.Shading != nil) {
 		if p.warning != nil {
 			return p.compositeRegion(nil, pdfCompositeNode{image: &mark}, &pdfgo.ColorSpace{Model: "DeviceRGB"}, false)
 		}

@@ -168,7 +168,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			if stroke {
 				color, overprint = path.Style.Stroke, path.Style.StrokeOverprint
 			}
-			if color.Tiling != nil || color.Axial != nil || color.Radial != nil || color.Function != nil || color.Mesh != nil || overprint && pdfOverprintNeedsSeparation(color) {
+			if color.Tiling != nil || color.Shading != nil || color.Axial != nil || color.Radial != nil || color.Function != nil || color.Mesh != nil || overprint && pdfOverprintNeedsSeparation(color) {
 				return fmt.Errorf("%w: patterned or overprinted group content", errPDFGroupRaster)
 			}
 			if color.Alpha == 0 {
@@ -615,7 +615,7 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 			return err
 		}
 		paint := mark.Style.Fill
-		if !mark.Fill || mark.Stroke || paint.Alpha != 1 || paint.CMYK != nil || paint.Axial != nil || paint.Radial != nil || paint.Function != nil || paint.Mesh != nil || paint.Tiling != nil || paint.Space != nil && paint.Space.Calibrated() || paint.RGB[0] != paint.RGB[1] || paint.RGB[1] != paint.RGB[2] || mark.Style.SoftMask != nil || !pdfNormalBlend(mark.Style.BlendMode) {
+		if !mark.Fill || mark.Stroke || paint.Alpha != 1 || paint.CMYK != nil || paint.Axial != nil || paint.Radial != nil || paint.Function != nil || paint.Mesh != nil || paint.Tiling != nil || paint.Shading != nil || paint.Space != nil && paint.Space.Calibrated() || paint.RGB[0] != paint.RGB[1] || paint.RGB[1] != paint.RGB[2] || mark.Style.SoftMask != nil || !pdfNormalBlend(mark.Style.BlendMode) {
 			return &pdfgo.UnsupportedError{Feature: "nonbinary mask graphic"}
 		}
 		visible, err := opacity(paint.RGB[0])

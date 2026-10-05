@@ -81,6 +81,9 @@ func pdfGradientStopsError(stops []pdfgo.GradientStop, space *pdfgo.ColorSpace) 
 // 入参: paint 画刷
 // 返回: error 不可等价表达的渐变
 func pdfGradientError(paint pdfgo.Paint) error {
+	if paint.Shading != nil {
+		return &pdfgo.UnsupportedError{Feature: "shading pattern state compositing"}
+	}
 	if paint.Function != nil {
 		return &pdfgo.UnsupportedError{Feature: "function shading conversion"}
 	}

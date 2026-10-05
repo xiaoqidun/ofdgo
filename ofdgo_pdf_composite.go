@@ -56,6 +56,7 @@ type pdfCompositor struct {
 	gradients       map[pdfGradientKey][]pdfShadingPixel
 	transfers       []*pdfgo.TransferFunction
 	transferBlocked bool
+	shadingSource   bool
 }
 
 // pdfCompositeKey 区分图元的填充与描边几何
@@ -83,16 +84,18 @@ type pdfCompositeColorSampler struct {
 
 // pdfCompositeCache 在单页内复用几何、图像分量及蒙版内容
 type pdfCompositeCache struct {
-	geometry     map[pdfCompositeKey]pdfCompositeGeometry
-	images       map[*pdfgo.Image]*pdfgo.ImageComponents
-	imageMatrix  map[*pdfgo.ImageMark]pdfgo.Matrix
-	masks        map[*pdfgo.SoftMask][]pdfCompositeNode
-	meshes       map[*pdfgo.MeshGradient][]pdfMeshTriangle
-	patterns     map[pdfgo.Paint]*pdfCompositePattern
-	shadings     map[pdfGradientKey]pdfCompositeGeometry
-	transfers    map[pdfTransferKey]*pdfgo.TransferFunction
-	textDisjoint map[*pdfgo.GroupMark]bool
-	groups       map[*pdfgo.GroupMark]Box
+	geometry        map[pdfCompositeKey]pdfCompositeGeometry
+	images          map[*pdfgo.Image]*pdfgo.ImageComponents
+	imageMatrix     map[*pdfgo.ImageMark]pdfgo.Matrix
+	masks           map[*pdfgo.SoftMask][]pdfCompositeNode
+	meshes          map[*pdfgo.MeshGradient][]pdfMeshTriangle
+	patterns        map[pdfgo.Paint]*pdfCompositePattern
+	shadingPatterns map[*pdfgo.ShadingPattern][]pdfCompositeNode
+	shadingSources  map[pdfShadingSourceKey][]pdfCompositeNode
+	shadings        map[pdfGradientKey]pdfCompositeGeometry
+	transfers       map[pdfTransferKey]*pdfgo.TransferFunction
+	textDisjoint    map[*pdfgo.GroupMark]bool
+	groups          map[*pdfgo.GroupMark]Box
 }
 
 // compositingCache 按需创建单页合成缓存，页面切换时由导入器释放
@@ -531,6 +534,9 @@ func (n pdfCompositeNode) direct() bool {
 		return true
 	}
 	s, fill, stroke := n.style()
+	if (n.image == nil || n.image.Image.ImageMask) && (fill && s.Fill.Shading != nil || stroke && s.Stroke.Shading != nil) {
+		return false
+	}
 	if fill && stroke && (s.Fill.Alpha != 1 || s.Stroke.Alpha != 1 || s.SoftMask != nil) {
 		return false
 	}

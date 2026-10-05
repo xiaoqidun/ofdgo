@@ -138,13 +138,24 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 		}
 	}
 	step := 25.4 / c.importer.rasterDPI
-	uniform := node.image == nil && paint.Axial == nil && paint.Radial == nil && paint.Function == nil && paint.Tiling == nil && paint.Mesh == nil
+	uniform := node.image == nil && paint.Axial == nil && paint.Radial == nil && paint.Function == nil && paint.Tiling == nil && paint.Mesh == nil && paint.Shading == nil
 	compatible := overprint && !processOverprint && style.OverprintMode == 1 && uniform && paint.SourceSpace == "DeviceCMYK" && space.Model == "DeviceCMYK" && !space.Calibrated()
 	var marked *[4]bool
 	if processOverprint {
 		marked = &processMask
 	}
 	var pattern []pdfCompositePixel
+	if paint.Shading != nil && (node.image == nil || node.image.Image.ImageMask) {
+		backdrop := pixels
+		if initial != nil {
+			backdrop = initial
+		}
+		pattern, err = c.shadingPattern(paint.Shading, node, outline, backdrop, space)
+		if err != nil {
+			return err
+		}
+		defer c.releasePixels(pattern)
+	}
 	if paint.Tiling != nil && (node.image == nil || node.image.Image.ImageMask) {
 		backdrop := pixels
 		if initial != nil {
@@ -199,11 +210,15 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 			if pattern != nil {
 				sample := pattern[index]
 				values = sample.values
-				shape *= sample.shape
+				if paint.Shading != nil {
+					shape = sample.shape
+				} else {
+					shape *= sample.shape
+				}
 				if sample.shape != 0 {
 					opacity *= sample.alpha / sample.shape
 				}
-				if node.image != nil {
+				if node.image != nil && paint.Shading == nil {
 					point := c.inverse.Apply(pdfgo.Point{X: c.box.X + (float64(x)+.5)*step, Y: c.box.Y + (float64(y)+.5)*step})
 					var alpha float64
 					_, alpha, err = c.imageColor(node.image, point, space)
@@ -226,7 +241,11 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 					if imageShape {
 						selectionShape = alpha
 					}
-					opacity *= alpha
+					if c.shadingSource {
+						shape *= alpha
+					} else {
+						opacity *= alpha
+					}
 				}
 			} else if uniform {
 				if !uniformReady {
@@ -242,7 +261,11 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 					if imageShape {
 						selectionShape = alpha
 					}
-					opacity *= alpha
+					if c.shadingSource {
+						shape *= alpha
+					} else {
+						opacity *= alpha
+					}
 				} else {
 					var visible bool
 					if sampler != nil {
@@ -651,7 +674,7 @@ func (c *pdfCompositor) imageColor(mark *pdfgo.ImageMark, point pdfgo.Point, spa
 		}
 	}
 	if mark.Image.ImageMask {
-		if mark.Style.Fill.Tiling != nil {
+		if mark.Style.Fill.Tiling != nil || mark.Style.Fill.Shading != nil {
 			return [4]float64{}, alpha * (1 - values[0]), nil
 		}
 		color, visible, err := pdfCompositeColor(mark.Style.Fill, mark.Matrix.Apply(point), space, mark.Style.RenderingIntent, mark.Style.ColorConversion)
@@ -706,6 +729,9 @@ func pdfImageProcessColorants(image *pdfgo.Image) ([4]bool, bool, error) {
 // 入参: paint 画刷, point 页面坐标, space 混合空间, intent 渲染意图, conversion 设备转换函数
 // 返回: [4]float64 混合分量, bool 是否着色, error 颜色错误
 func pdfCompositeColor(paint pdfgo.Paint, point pdfgo.Point, space *pdfgo.ColorSpace, intent pdfgo.Name, conversion pdfgo.ColorConversion) ([4]float64, bool, error) {
+	if paint.Shading != nil {
+		return [4]float64{}, false, &pdfgo.UnsupportedError{Feature: "local shading pattern compositing"}
+	}
 	if paint.Tiling != nil {
 		return [4]float64{}, false, &pdfgo.UnsupportedError{Feature: "local tiling pattern compositing"}
 	}

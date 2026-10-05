@@ -81,6 +81,12 @@ func (c *pdfCompositor) selectTransfer(node pdfCompositeNode, outline bool) (*pd
 	if style.Transfer == nil {
 		return nil, nil
 	}
+	if pattern := paint.Shading; pattern != nil && (node.image == nil || node.image.Image.ImageMask) {
+		inner := pattern.Style
+		if inner.Fill.Alpha != 1 || inner.SoftMask != nil || !pdfNormalBlend(inner.BlendMode) {
+			return nil, nil
+		}
+	}
 	if node.image != nil {
 		soft, err := node.image.Image.HasSoftMask()
 		if err != nil || soft {
@@ -148,6 +154,12 @@ func (p *pdfImporter) transferOpaque(node pdfCompositeNode) (bool, error) {
 		}
 	}
 	for i, paint := range [2]pdfgo.Paint{style.Fill, style.Stroke} {
+		if pattern := paint.Shading; pattern != nil && (i == 0 && fill || i == 1 && stroke) {
+			inner := pattern.Style
+			if inner.Fill.Alpha != 1 || inner.SoftMask != nil || !pdfNormalBlend(inner.BlendMode) {
+				return false, nil
+			}
+		}
 		if i == 0 && !fill || i == 1 && !stroke || paint.Tiling == nil {
 			continue
 		}
