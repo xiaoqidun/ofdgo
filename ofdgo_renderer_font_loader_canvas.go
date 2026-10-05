@@ -14,9 +14,13 @@
 
 package ofdgo
 
-import "github.com/tdewolff/canvas"
+import (
+	"fmt"
 
-// loadFont 加载字体
+	"github.com/tdewolff/canvas"
+)
+
+// loadFont 加载字体，绘图别名按数据和样式隔离，不改动原始字体名称
 // 入参: fontID 字体ID
 // 返回: *canvas.FontFamily 字体族
 func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
@@ -46,7 +50,7 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 		r.canvasState().fontMap[fontID] = ff
 		return ff
 	}
-	ff := canvas.NewFontFamily(of.FontName)
+	ff := canvas.NewFontFamily(fmt.Sprintf("ofdgo-%x-%d", resolved.digest, fontStyle))
 	if err := ff.LoadFont(fontData, 0, fontStyle); err != nil {
 		r.renderError = err
 		return nil
