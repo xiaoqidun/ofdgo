@@ -6230,12 +6230,12 @@ async function navigateDestination(dest) {
 	const seq = state.openSeq, scale = state.scale;
 	let retained = null;
 	if (dest.omitLeft || dest.omitTop) {
-		const current = state.doc.pages[state.pageIndex], shell = pageShell(state.pageIndex)?.getBoundingClientRect();
-		if (current && shell) {
-			const viewer = el.viewerPanel.getBoundingClientRect();
+		const current = state.doc.pages[state.pageIndex], node = pageShell(state.pageIndex);
+		if (current && node) {
+			const shell = node.getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
 			retained = sourcePoint(current,
-				(viewer.left + pageSpace() - shell.left) / (MM_TO_PX * scale),
-				(viewer.top + pageBlockSpace() - shell.top) / (MM_TO_PX * scale));
+				(viewer.left + (el.viewerPanel.clientLeft || 0) - shell.left - (node.clientLeft || 0)) / (MM_TO_PX * scale),
+				(viewer.top + (el.viewerPanel.clientTop || 0) - shell.top - (node.clientTop || 0)) / (MM_TO_PX * scale));
 		}
 	}
 	await renderPage(index, { fit: false, scroll: false });
@@ -6268,9 +6268,9 @@ async function navigateDestination(dest) {
 		point.y = Math.min(point.y, bottom.y);
 	}
 	if (state.pageWindow) syncPageWindow(state.pageWindow, state.pageWindow.offsets[index]);
-	const shell = pageShell(index).getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
-	el.viewerPanel.scrollLeft += shell.left - viewer.left + point.x * MM_TO_PX * state.scale - space;
-	scrollViewerBy(shell.top - viewer.top + point.y * MM_TO_PX * state.scale - pageBlockSpace());
+	const node = pageShell(index), shell = node.getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
+	el.viewerPanel.scrollLeft += shell.left + (node.clientLeft || 0) - viewer.left - (el.viewerPanel.clientLeft || 0) + point.x * MM_TO_PX * state.scale;
+	scrollViewerBy(shell.top + (node.clientTop || 0) - viewer.top - (el.viewerPanel.clientTop || 0) + point.y * MM_TO_PX * state.scale);
 }
 
 function createTextLayer(text) {
