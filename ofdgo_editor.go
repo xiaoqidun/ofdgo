@@ -70,6 +70,7 @@ type Editor struct {
 	outlines         []byte
 	encryption       *encryptionState
 	output           *outputOptimization
+	validatedPaths   *renderCache[string, bool]
 }
 
 // editorResource 文档内嵌资源
@@ -948,8 +949,17 @@ func (v *editorValidation) validateObjectClips(clips *Clips) error {
 			return fmt.Errorf("clip must contain an area")
 		}
 		for _, area := range clip.Area {
-			if len(area.Path)+len(area.Text) == 0 || area.DrawParam != "" {
-				return fmt.Errorf("clip area requires paths or text without draw parameter references")
+			if len(area.Path)+len(area.Text) == 0 {
+				return fmt.Errorf("clip area requires paths or text")
+			}
+			if area.DrawParam != "" {
+				dp, err := v.editorDrawParam(area.DrawParam, make(map[string]bool))
+				if err != nil {
+					return err
+				}
+				if err := validateEditorStroke(PathObject{LineWidth: dp.LineWidth, Cap: dp.Cap, Join: dp.Join, MiterLimit: dp.MiterLimit, DashPattern: dp.DashPattern, DashOffset: dp.DashOffset}); err != nil {
+					return err
+				}
 			}
 			if area.CTM != "" {
 				if _, err := creationNumbers(area.CTM, 6); err != nil {
@@ -1194,28 +1204,50 @@ func creationDeltas(value string) error {
 // 入参: value 路径数据
 // 返回: error 错误信息
 func creationPath(value string) error {
-	path, err := ParseGeometryPath(value)
-	if err == nil && len(path) == 0 {
+	count, err := walkGeometryPath(value, nil)
+	if err == nil && count == 0 {
 		return fmt.Errorf("empty path")
 	}
 	return err
 }
 
-// creationPath 在同次校验中复用相同路径的成功结果，不缓存错误或依赖可变资源
+// creationPath 复用相同路径的成功校验，不缓存错误或依赖可变资源
 // 入参: value 路径数据
 // 返回: error 错误信息
 func (v *editorValidation) creationPath(value string) error {
 	if v.paths[value] {
 		return nil
 	}
-	if err := creationPath(value); err != nil {
-		return err
+	var cache *renderCache[string, bool]
+	valid := false
+	if v.Editor != nil {
+		cache = v.pathValidationCache()
+		valid, _ = cache.get(value)
+	}
+	if !valid {
+		if err := creationPath(value); err != nil {
+			return err
+		}
+		if cache != nil {
+			if cost := len(value) + 128; cost <= cache.limit {
+				cache.put(strings.Clone(value), true, cost)
+			}
+		}
 	}
 	if v.paths == nil || len(v.paths) >= editorPathValidationLimit {
 		v.paths = make(map[string]bool)
 	}
 	v.paths[value] = true
 	return nil
+}
+
+// pathValidationCache 获取不依赖可变资源的路径语法缓存，按字节预算淘汰
+// 返回: *renderCache[string, bool] 校验缓存
+func (e *Editor) pathValidationCache() *renderCache[string, bool] {
+	if e.validatedPaths == nil {
+		e.validatedPaths = &renderCache[string, bool]{limit: 8 << 20}
+	}
+	return e.validatedPaths
 }
 
 // creationNumbers 解析创建接口的有限十进制数值序列

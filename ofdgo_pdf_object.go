@@ -146,6 +146,7 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 			break
 		}
 	}
+	streamCached := id != ""
 	var contentKey pdfImageContentKey
 	cacheable := false
 	if id == "" {
@@ -207,13 +208,15 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		if err != nil {
 			return err
 		}
+		if cacheable {
+			p.imageContents.put(contentKey, pdfImageContent{source: source, id: id}, len(source.Stream.Data)+65536)
+		}
+	}
+	if !streamCached {
 		if p.imageIDs == nil {
 			p.imageIDs = map[pdfImageKey][]pdfImageResource{}
 		}
 		p.imageIDs[key] = append(p.imageIDs[key], pdfImageResource{space: source.ColorSpace, id: id})
-		if cacheable {
-			p.imageContents.put(contentKey, pdfImageContent{source: source, id: id}, len(source.Stream.Data)+65536)
-		}
 	}
 	return p.appendImage(mark, id)
 }

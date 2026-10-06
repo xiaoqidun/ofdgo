@@ -214,5 +214,14 @@ func clipGeometry(geometry GeometryBackend, path GeometryPath, clip *GeometryPat
 			return path, nil
 		}
 	}
+	if rect, ok := geometryRectangleBounds(path); ok {
+		bounds, err := geometry.Bounds(*clip)
+		if err != nil {
+			return nil, err
+		}
+		if bounds.X >= rect.X && bounds.Y >= rect.Y && bounds.X+bounds.W <= rect.X+rect.W && bounds.Y+bounds.H <= rect.Y+rect.H {
+			return *clip, nil
+		}
+	}
 	return geometry.Combine(path, *clip, GeometryIntersect)
 }

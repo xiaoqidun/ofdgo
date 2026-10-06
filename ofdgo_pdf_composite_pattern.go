@@ -197,6 +197,8 @@ func (p *pdfImporter) compositePattern(paint pdfgo.Paint) (*pdfCompositePattern,
 	local.matrix[5] -= box.Y
 	local.pageWidth, local.pageHeight = box.W, box.H
 	local.compositeCache = nil
+	local.compositingCache().geometry = cache.geometryCache()
+	local.compositingCache().clips = cache.clipCache()
 	pattern := &pdfCompositePattern{nodes: nodes, local: local, box: box}
 	cache.patterns[paint] = pattern
 	return pattern, nil

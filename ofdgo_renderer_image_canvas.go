@@ -95,7 +95,7 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 			{-ctm.b / imgW, ctm.d / imgH, pageH - box.Y - ctm.d - ctm.f},
 		}
 	}
-	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
+	clipPath := r.intersectCachedClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
 	imageClip := clipPath
 	compiler, compiled := ctx.Renderer.(*canvasPageCompiler)
 	if compiled && imageClip != nil && imageClipContains(img, imageClip, m) {

@@ -359,6 +359,7 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	editor.SetFontDirs(p.editor.fontDirs...)
 	editor.SetFontFS(p.editor.fontFS...)
 	editor.fontSourcesCache = p.renderer.fontSourcesCache
+	editor.validatedPaths = p.editor.pathValidationCache()
 	if _, err := editor.AddPage(p.pageWidth, p.pageHeight); err != nil {
 		return nil, box, err
 	}
@@ -402,11 +403,18 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	if scene == nil {
 		return nil, box, fmt.Errorf("PDF local compositing: invalid compiled scene")
 	}
-	geometry, err := renderer.Geometry()
+	return p.groupSceneBounds(scene)
+}
+
+// groupSceneBounds 计算已编译场景在页面内的像素对齐区域
+// 入参: scene 中立绘制场景
+// 返回: *RasterPage 非空场景, Box 页面区域, error 度量错误
+func (p *pdfImporter) groupSceneBounds(scene *RasterPage) (*RasterPage, Box, error) {
+	geometry, err := p.renderer.Geometry()
 	if err != nil {
-		return nil, box, err
+		return nil, Box{}, err
 	}
-	box, err = scene.BoundsContext(p.ctx, geometry)
+	box, err := scene.BoundsContext(p.ctx, geometry)
 	if err != nil {
 		return nil, Box{}, err
 	}

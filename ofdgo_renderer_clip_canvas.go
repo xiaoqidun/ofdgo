@@ -15,7 +15,10 @@
 package ofdgo
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"image"
+	"math"
 	"slices"
 
 	"github.com/tdewolff/canvas"
@@ -101,14 +104,10 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ob
 				areaCTM = objectCTM.Multiply(areaCTM)
 			}
 			for _, pathObj := range area.Path {
-				ctm := areaCTM.Multiply(NewMatrix(pathObj.CTM))
-				cp := r.buildPath(pathObj, pageH, ctm, true)
-				cp.Translate(bx, -by)
-				cp.Close()
-				if pathObj.Rule == "Even-Odd" {
-					cp = cp.Settle(canvas.EvenOdd)
+				renderer.add(r.buildClipAreaPath(pathObj, area.DrawParam, areaCTM, pageH, bx, by))
+				if r.renderError != nil {
+					return nil
 				}
-				renderer.add(cp)
 			}
 			for _, textObj := range area.Text {
 				box, _ := ParseBox(textObj.Boundary)
@@ -138,9 +137,94 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ob
 		if renderer.path == nil {
 			renderer.path = &canvas.Path{}
 		}
-		p = intersectClipPath(p, renderer.path)
+		p = r.intersectCachedClipPath(p, renderer.path)
 	}
 	return p
+}
+
+// buildClipAreaPath 按绘制参数展开裁剪路径的填充及描边，再应用区域变换
+// 入参: obj 裁剪路径, drawParam 区域绘制参数, parent 区域变换, pageH 页面高度, bx 横向位移, by 纵向位移
+// 返回: *canvas.Path 裁剪轮廓
+func (r *Renderer) buildClipAreaPath(obj PathObject, drawParam string, parent Matrix, pageH, bx, by float64) *canvas.Path {
+	if obj.Visible != nil && !*obj.Visible {
+		return &canvas.Path{}
+	}
+	box, _ := ParseBox(obj.Boundary)
+	local := NewMatrix(obj.CTM)
+	m := parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(local)
+	clip := r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, local, &parent, true)
+	obj.Boundary = ""
+	p := r.buildPath(obj, 0, IdentityMatrix, false)
+	var result *canvas.Path
+	if obj.Fill != nil && *obj.Fill {
+		paths := canvas.Paths(p.Copy().Split())
+		for _, path := range paths {
+			path.Close()
+		}
+		result = paths.Merge()
+		if obj.Rule == "Even-Odd" {
+			result = result.Settle(canvas.EvenOdd)
+		}
+	}
+	if obj.Stroke == nil || *obj.Stroke {
+		dp := r.drawParamDefaults(obj.DrawParam, r.drawParamDefaults(drawParam, nil))
+		if dp != nil {
+			copy := *dp
+			copy.FillColor, copy.StrokeColor = nil, nil
+			dp = &copy
+		}
+		obj.FillColor, obj.StrokeColor = nil, nil
+		style := r.newPathStyle(dp, 0, 0, 0, nil)
+		style.applyPathObject(r, obj, 0, 0, 0)
+		if style.lineWidth == 0 {
+			style.lineWidth = 25.4 / r.DPI
+		}
+		result = unionClipPath(result, r.strokeDashedCanvasPath(p, style.lineWidth, style.lineCap, style.lineJoin, style.dashOffset, style.dashPattern, false))
+	}
+	if result == nil {
+		return &canvas.Path{}
+	}
+	result = result.Transform(canvas.Matrix{{m.a, -m.c, m.e}, {-m.b, m.d, pageH - m.f}})
+	return applyClipPath(result, clip).Translate(bx, -by)
+}
+
+// intersectCachedClipPath 按完整几何内容复用复杂裁剪交集，缓存命中时返回独立副本
+// 入参: parent 父级裁剪路径, current 当前裁剪路径
+// 返回: *canvas.Path 相交后的裁剪路径
+func (r *Renderer) intersectCachedClipPath(parent, current *canvas.Path) *canvas.Path {
+	if parent == nil || current == nil || len(parent.Data())+len(current.Data()) < 256 {
+		return intersectClipPath(parent, current)
+	}
+	hash := sha256.New()
+	var data [512]byte
+	binary.LittleEndian.PutUint64(data[:8], math.Float64bits(canvas.Tolerance))
+	binary.LittleEndian.PutUint64(data[8:16], math.Float64bits(canvas.Epsilon))
+	binary.LittleEndian.PutUint64(data[16:24], math.Float64bits(canvas.BentleyOttmannEpsilon))
+	hash.Write(data[:24])
+	for _, path := range []*canvas.Path{parent, current} {
+		values := path.Data()
+		binary.LittleEndian.PutUint64(data[:8], uint64(len(values)))
+		hash.Write(data[:8])
+		for len(values) > 0 {
+			count := min(len(values), len(data)/8)
+			for i, value := range values[:count] {
+				binary.LittleEndian.PutUint64(data[i*8:], math.Float64bits(value))
+			}
+			hash.Write(data[:count*8])
+			values = values[count:]
+		}
+	}
+	var key [32]byte
+	hash.Sum(key[:0])
+	cache := r.canvasClipIntersections()
+	if path, ok := cache.get(key); ok {
+		return path.Copy()
+	}
+	path := intersectClipPath(parent, current)
+	if cost := len(path.Data())*8 + 256; cost <= cache.limit {
+		cache.put(key, path.Copy(), cost)
+	}
+	return path
 }
 
 // intersectClipPath 求裁剪路径交集
@@ -184,6 +268,12 @@ func intersectClipPath(parent, current *canvas.Path) *canvas.Path {
 	}
 	if result, ok := intersectConvexCanvasPaths(parent, current); ok {
 		return result
+	}
+	if result, ok := intersectLinearCanvasContours(parent, current); ok {
+		return result.Settle(canvas.NonZero)
+	}
+	if result, ok := intersectLinearCanvasContours(current, parent); ok {
+		return result.Settle(canvas.NonZero)
 	}
 	return parent.And(current)
 }
@@ -241,6 +331,12 @@ func applyClipPath(path, clip *canvas.Path) *canvas.Path {
 	if result, ok := intersectConvexCanvasPaths(path, clip); ok {
 		return result
 	}
+	if result, ok := intersectLinearCanvasContours(path, clip); ok {
+		return result.Settle(canvas.NonZero)
+	}
+	if result, ok := intersectLinearCanvasContours(clip, path); ok {
+		return result.Settle(canvas.NonZero)
+	}
 	return path.And(clip)
 }
 
@@ -248,6 +344,11 @@ func applyClipPath(path, clip *canvas.Path) *canvas.Path {
 // 入参: path 非零填充描边, clip 裁剪路径
 // 返回: *canvas.Path 绘制轮廓
 func applyFillClipPath(path, clip *canvas.Path) *canvas.Path {
+	if path != nil && clip != nil && len(path.Data()) >= 64 {
+		if result, ok := intersectLinearCanvasContours(path, clip); ok {
+			return result
+		}
+	}
 	if path != nil && clip != nil && path.HasSubpaths() && len(path.Split()) >= 8 {
 		if result, ok := intersectCanvasContours(path, clip); ok {
 			return result

@@ -100,7 +100,8 @@ func (p *pdfImporter) clipPath(path pdfgo.Path) (pdfClipPath, error) {
 		rule = "Even-Odd"
 	}
 	boundary := pdfBoundary(box)
-	result := pdfClipPath{box: box, data: data, path: &[1]PathObject{{Boundary: boundary, AbbreviatedData: data, Rule: rule}}}
+	fill, stroke := true, false
+	result := pdfClipPath{box: box, data: data, path: &[1]PathObject{{Boundary: boundary, AbbreviatedData: data, Rule: rule, Fill: &fill, Stroke: &stroke}}}
 	p.clipPaths.put(key, result, len(data)+len(boundary)+512)
 	return result, nil
 }

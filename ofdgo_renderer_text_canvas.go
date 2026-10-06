@@ -50,7 +50,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if boundaryInCTM && parentCTM != nil {
 		objectCTM = parentCTM.Multiply(TranslationMatrix(bx, by)).Multiply(localCTM)
 	}
-	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
+	clipPath := r.intersectCachedClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
 	var dp *DrawParam
 	if obj.DrawParam != "" {
 		dp = r.getDrawParam(obj.DrawParam, nil)
@@ -99,7 +99,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	}
 	transformShdPaint(fillPaint, parentCTM, bx, by, pageH, boundaryInCTM)
 	fillPaint, shadingClip, fillView := resolveShdPaint(ctx, fillPaint)
-	fillClip := intersectClipPath(clipPath, shadingClip)
+	fillClip := r.intersectCachedClipPath(clipPath, shadingClip)
 	var strokeStyle pathStyle
 	strokeClip := clipPath
 	strokeView := canvas.Identity
@@ -124,7 +124,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		}
 		transformShdPaint(strokeStyle.strokePaint, parentCTM, bx, by, pageH, boundaryInCTM)
 		strokeStyle.strokePaint, shadingClip, strokeView = resolveShdPaint(ctx, strokeStyle.strokePaint)
-		strokeClip = intersectClipPath(strokeClip, shadingClip)
+		strokeClip = r.intersectCachedClipPath(strokeClip, shadingClip)
 	}
 	fontStyle := canvas.FontRegular
 	weight := obj.Weight

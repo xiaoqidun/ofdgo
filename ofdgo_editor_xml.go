@@ -254,9 +254,9 @@ func editorXMLSupported(node *editorXML) bool {
 		allowed, children = "CodePosition CodeCount GlyphCount", "Glyphs"
 	case "Glyphs":
 	case "PathObject", "Path":
-		allowed, children = "Boundary CTM LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha", "StrokeColor FillColor AbbreviatedData"
+		allowed, children = "Boundary CTM DrawParam LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha", "StrokeColor FillColor AbbreviatedData"
 		if node.name.Local == "PathObject" {
-			allowed += " ID DrawParam"
+			allowed += " ID"
 			children += " Clips"
 		}
 	case "ImageObject":
@@ -270,7 +270,7 @@ func editorXMLSupported(node *editorXML) bool {
 	case "Clip":
 		children = "Area"
 	case "Area":
-		allowed, children = "CTM", "Path Text"
+		allowed, children = "CTM DrawParam", "Path Text"
 	case "AbbreviatedData":
 	default:
 		return false

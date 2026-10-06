@@ -309,6 +309,7 @@ func (e *Editor) editDocuments(edit func(*Reader, []byte, *editorXML) (int, erro
 		next.OnWriteProgress, next.output = e.OnWriteProgress, e.output
 		next.encryption = e.encryption
 		next.backends, next.fontDirs, next.fontFS = e.backends, e.fontDirs, e.fontFS
+		next.validatedPaths = e.validatedPaths
 		*e = *next
 	}
 	e.recordTransaction(before)

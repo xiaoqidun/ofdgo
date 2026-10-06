@@ -194,7 +194,7 @@ func (CanvasBackend) Clip(r *Renderer, clips *Clips, matrix Matrix, parent *Geom
 	if renderer.renderError != nil {
 		return nil, renderer.renderError
 	}
-	return geometryFromCanvasPath(intersectClipPath(p, clip)), nil
+	return geometryFromCanvasPath(r.intersectCachedClipPath(p, clip)), nil
 }
 
 // canvasNativeStroke 判断描边是否由Canvas提供
@@ -303,10 +303,13 @@ func (r *Renderer) strokeDashedCanvasPath(path *canvas.Path, width float64, cap 
 
 // geometryToCanvasPath 将页面坐标路径转换为默认几何引擎的向上纵轴
 // 入参: path 独立几何路径，nil表示不裁剪
-// 返回: *canvas.Path 默认引擎路径, error 不支持的路径指令
+// 返回: *canvas.Path 默认引擎路径, error 无效路径
 func geometryToCanvasPath(path *GeometryPath) (*canvas.Path, error) {
 	if path == nil {
 		return nil, nil
+	}
+	if err := path.validate(); err != nil {
+		return nil, err
 	}
 	p := &canvas.Path{}
 	for _, s := range *path {

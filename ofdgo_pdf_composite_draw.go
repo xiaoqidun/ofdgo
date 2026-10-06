@@ -188,11 +188,11 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 	if g := paint.Radial; node.image == nil && shading == nil && g != nil && g.Bounds == nil && g.Background == nil {
 		sampler = &pdfCompositeColorSampler{paint: paint, space: space, intent: style.RenderingIntent, conversion: style.ColorConversion}
 	}
-	geometry, err := c.geometry(node, outline)
+	bounds, err := c.geometryBounds(node, outline)
 	if err != nil {
 		return err
 	}
-	region := c.pixelBounds(geometry.box)
+	region := c.pixelBounds(bounds)
 	for y := region.Min.Y; y < region.Max.Y; y++ {
 		if err := c.importer.ctx.Err(); err != nil {
 			return err

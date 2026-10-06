@@ -19,6 +19,7 @@ import (
 	"image/color"
 	"math"
 	"slices"
+	"strings"
 
 	"github.com/tdewolff/canvas"
 )
@@ -235,7 +236,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			{-parentCTM.b, parentCTM.d, pageH*(1-parentCTM.d) - parentCTM.f},
 		})
 	}
-	clipPath := intersectClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
+	clipPath := r.intersectCachedClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
 	shouldFill := false
 	if obj.Fill != nil {
 		shouldFill = *obj.Fill
@@ -245,7 +246,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	}
 	if shouldFill {
 		fillPaint, shadingClip, fillView := resolveShdPaint(ctx, style.fillPaint)
-		fillClip := intersectClipPath(clipPath, shadingClip)
+		fillClip := r.intersectCachedClipPath(clipPath, shadingClip)
 		paths := canvas.Paths(p.Copy().Split())
 		for _, path := range paths {
 			path.Close()
@@ -254,6 +255,9 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		fillRule := canvas.NonZero
 		if obj.Rule == "Even-Odd" {
 			fillRule = canvas.EvenOdd
+			if bounds, ok := rectangularPath(fillClip); ok && bounds.Contains(fp.Bounds()) {
+				fillClip = nil
+			}
 			if fillClip != nil || style.fillPattern != nil {
 				fp = fp.Settle(fillRule)
 			}
@@ -294,7 +298,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			sp = sp.Dash(style.dashOffset, style.dashPattern...)
 			ctx.SetDashes(0)
 		}
-		strokeClip := intersectClipPath(clipPath, shadingClip)
+		strokeClip := r.intersectCachedClipPath(clipPath, shadingClip)
 		_, repeat := strokePaint.(*repeatAxialGradient)
 		if strokeClip != nil || strokeView != canvas.Identity || repeat || style.strokePattern != nil || !canvasNativeStroke(r.backends.Geometry) || zeroDash {
 			sp = sp.Copy()
@@ -424,12 +428,7 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 // 入参: obj 路径对象, pageH 页面高度, ctm 变换矩阵, boundaryInCTM 边界是否参与CTM变换
 // 返回: *canvas.Path 路径对象
 func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix, boundaryInCTM bool) *canvas.Path {
-	path, err := ParseGeometryPath(obj.AbbreviatedData)
-	if err != nil {
-		r.renderError = err
-		return &canvas.Path{}
-	}
-	p, err := canvasObjectPath(path)
+	p, err := r.parseCanvasPath(obj.AbbreviatedData)
 	if err != nil {
 		r.renderError = err
 		return &canvas.Path{}
@@ -444,6 +443,30 @@ func (r *Renderer) buildPath(obj PathObject, pageH float64, ctm Matrix, boundary
 		p = p.ReplaceArcs()
 	}
 	return p.Transform(canvas.Matrix{{ctm.a, ctm.c, ctm.e}, {-ctm.b, -ctm.d, pageH - ctm.f}})
+}
+
+// parseCanvasPath 复用局部路径解析，返回独立副本且不缓存错误或超预算结果
+// 入参: data 紧缩路径
+// 返回: *canvas.Path 局部路径, error 解析错误
+func (r *Renderer) parseCanvasPath(data string) (*canvas.Path, error) {
+	key := canvasPathKey{data: data, epsilon: canvas.Epsilon}
+	cache := r.canvasParsedPaths()
+	if path, ok := cache.get(key); ok {
+		return path.Copy(), nil
+	}
+	geometry, err := ParseGeometryPath(data)
+	if err != nil {
+		return nil, err
+	}
+	path, err := canvasObjectPath(geometry)
+	if err != nil {
+		return nil, err
+	}
+	if cost := len(data) + len(path.Data())*8 + 256; cost <= cache.limit {
+		key.data = strings.Clone(data)
+		cache.put(key, path.Copy(), cost)
+	}
+	return path, nil
 }
 
 // buildTinyFillRectPath 构建微小填充矩形路径

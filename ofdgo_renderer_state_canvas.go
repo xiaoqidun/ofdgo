@@ -27,6 +27,18 @@ type canvasFontKey struct {
 	style  canvas.FontStyle
 }
 
+// canvasClipCacheKey 区分不依赖文档资源的共享裁剪缓存
+type canvasClipCacheKey struct{}
+
+// canvasPathCacheKey 区分不依赖文档资源的共享局部路径缓存
+type canvasPathCacheKey struct{}
+
+// canvasPathKey 按完整路径文本与几何容差区分解析结果
+type canvasPathKey struct {
+	data    string
+	epsilon float64
+}
+
 // canvasBackendState 保存Canvas字体、字形和编码图片适配缓存
 type canvasBackendState struct {
 	images             renderCache[*EncodedImage, image.Image]
@@ -34,6 +46,36 @@ type canvasBackendState struct {
 	svgFontCache       map[*canvas.Font]SVGFont
 	textGlyphPathCache renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue]
 	fontOutlines       map[*canvas.Font]*sfntOutliner
+}
+
+// canvasClipIntersections 获取子渲染器共享的几何交集缓存，限制结果保留量
+// 返回: *renderCache[[32]byte, *canvas.Path] 裁剪缓存
+func (r *Renderer) canvasClipIntersections() *renderCache[[32]byte, *canvas.Path] {
+	key := canvasClipCacheKey{}
+	if state, ok := r.sharedBackendStates[key]; ok {
+		return state.(*renderCache[[32]byte, *canvas.Path])
+	}
+	if r.sharedBackendStates == nil {
+		r.sharedBackendStates = make(map[any]any)
+	}
+	cache := &renderCache[[32]byte, *canvas.Path]{limit: 8 << 20}
+	r.sharedBackendStates[key] = cache
+	return cache
+}
+
+// canvasParsedPaths 获取子渲染器共享的局部路径缓存，不保留对象变换
+// 返回: *renderCache[canvasPathKey, *canvas.Path] 路径缓存
+func (r *Renderer) canvasParsedPaths() *renderCache[canvasPathKey, *canvas.Path] {
+	key := canvasPathCacheKey{}
+	if state, ok := r.sharedBackendStates[key]; ok {
+		return state.(*renderCache[canvasPathKey, *canvas.Path])
+	}
+	if r.sharedBackendStates == nil {
+		r.sharedBackendStates = make(map[any]any)
+	}
+	cache := &renderCache[canvasPathKey, *canvas.Path]{limit: 16 << 20}
+	r.sharedBackendStates[key] = cache
+	return cache
 }
 
 // canvasFontFamilies 获取子渲染器共享的只读字体族缓存，限制解析数据保留量

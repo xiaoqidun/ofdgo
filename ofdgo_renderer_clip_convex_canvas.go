@@ -35,6 +35,22 @@ func intersectConvexCanvasPaths(left, right *canvas.Path) (*canvas.Path, bool) {
 	return intersectCanvasPolygons(a, b)
 }
 
+// intersectLinearCanvasContours 精确裁剪直线轮廓，不展开曲线或改变填充绕数
+// 入参: path 绘制路径, clip 单个凸裁剪窗口
+// 返回: *canvas.Path 交集路径, bool 是否适用直线轮廓裁剪
+func intersectLinearCanvasContours(path, clip *canvas.Path) (*canvas.Path, bool) {
+	if path == nil {
+		return nil, false
+	}
+	data := path.Data()
+	for i := 0; i < len(data); i += 4 {
+		if i+4 > len(data) || data[i] != canvas.MoveToCmd && data[i] != canvas.LineToCmd && data[i] != canvas.CloseCmd {
+			return nil, false
+		}
+	}
+	return intersectCanvasContours(path, clip)
+}
+
 // intersectCanvasContours 按凸窗口裁剪闭合轮廓，保留绕向、孔洞和重叠透明度
 // 入参: path 绘制路径, clip 单个凸裁剪路径
 // 返回: *canvas.Path 交集路径, bool 是否适用分段裁剪

@@ -936,20 +936,22 @@ func (x *ofdXML) clips(clips *Clips) {
 			var attrs ofdAttrs
 			attrs.add("CTM", area.CTM)
 			attrs.add("DrawParam", area.DrawParam)
-			x.start("Area", attrs)
 			for _, path := range area.Path {
 				if x.err != nil {
 					return
 				}
+				x.start("Area", attrs)
 				x.object(GraphicObject{Type: "Path", PathObject: path}, false)
+				x.end("Area")
 			}
 			for _, text := range area.Text {
 				if x.err != nil {
 					return
 				}
+				x.start("Area", attrs)
 				x.object(GraphicObject{Type: "Text", TextObject: text}, false)
+				x.end("Area")
 			}
-			x.end("Area")
 		}
 		x.end("Clip")
 	}

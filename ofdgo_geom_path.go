@@ -51,70 +51,107 @@ type GeometrySegment struct {
 // 入参: data 紧缩路径
 // 返回: GeometryPath 独立路径, error 指令或参数错误
 func ParseGeometryPath(data string) (GeometryPath, error) {
-	tokens := strings.Fields(data)
-	if len(tokens) == 0 {
-		return nil, nil
+	count, err := walkGeometryPath(data, nil)
+	if err != nil || count == 0 {
+		return nil, err
 	}
-	if tokens[0] != "M" && tokens[0] != "S" {
-		return nil, fmt.Errorf("path must start with M or S")
-	}
-	var result GeometryPath
-	for i := 0; i < len(tokens); {
-		command := tokens[i]
-		i++
-		count := 0
-		switch command {
-		case "M", "S", "L":
-			count = 2
-		case "Q":
-			count = 4
-		case "B":
-			count = 6
-		case "A":
-			count = 7
-		case "C":
-		default:
-			return nil, fmt.Errorf("invalid path command %q", command)
-		}
-		if len(tokens)-i < count {
-			return nil, fmt.Errorf("missing arguments for path command %s", command)
-		}
-		var values [7]float64
-		for j, token := range tokens[i : i+count] {
-			if command == "A" && (j == 3 || j == 4) && (token == "true" || token == "false") {
-				if token == "true" {
-					values[j] = 1
-				}
-				continue
-			}
-			value, err := strconv.ParseFloat(token, 64)
-			if err != nil || !finite(value) || strings.ContainsAny(token, "xX_") {
-				return nil, fmt.Errorf("invalid number %q", token)
-			}
-			values[j] = value
-		}
-		i += count
-		segment := GeometrySegment{}
-		switch command {
-		case "M", "S":
-			segment.Verb, segment.End = GeometryMove, Point{values[0], values[1]}
-		case "L":
-			segment.Verb, segment.End = GeometryLine, Point{values[0], values[1]}
-		case "Q":
-			segment.Verb, segment.Control1, segment.End = GeometryQuad, Point{values[0], values[1]}, Point{values[2], values[3]}
-		case "B":
-			segment.Verb, segment.Control1, segment.Control2, segment.End = GeometryCubic, Point{values[0], values[1]}, Point{values[2], values[3]}, Point{values[4], values[5]}
-		case "A":
-			if values[0] < 0 || values[1] < 0 || values[3] != 0 && values[3] != 1 || values[4] != 0 && values[4] != 1 {
-				return nil, fmt.Errorf("invalid arc radii or flags")
-			}
-			segment = GeometrySegment{Verb: GeometryArc, RadiusX: values[0], RadiusY: values[1], Rotation: values[2], Large: values[3] != 0, Sweep: values[4] != 0, End: Point{values[5], values[6]}}
-		case "C":
-			segment.Verb = GeometryClose
-		}
+	result := make(GeometryPath, 0, count)
+	_, err = walkGeometryPath(data, func(segment GeometrySegment) {
 		result = append(result, segment)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
+}
+
+// walkGeometryPath 逐指令解析紧缩路径，纯校验时不分配路径或词元列表
+// 入参: data 紧缩路径, visit 指令访问器，nil仅校验
+// 返回: int 指令数量, error 指令或参数错误
+func walkGeometryPath(data string, visit func(GeometrySegment)) (int, error) {
+	var args [7]string
+	command := ""
+	count, read, segments := 0, 0, 0
+	for token := range strings.FieldsSeq(data) {
+		if command == "" {
+			if segments == 0 && token != "M" && token != "S" {
+				return 0, fmt.Errorf("path must start with M or S")
+			}
+			command, read = token, 0
+			switch command {
+			case "M", "S", "L":
+				count = 2
+			case "Q":
+				count = 4
+			case "B":
+				count = 6
+			case "A":
+				count = 7
+			case "C":
+				count = 0
+			default:
+				return 0, fmt.Errorf("invalid path command %q", command)
+			}
+		} else {
+			args[read] = token
+			read++
+		}
+		if read != count {
+			continue
+		}
+		segment, err := geometryPathSegment(command, args[:count])
+		if err != nil {
+			return 0, err
+		}
+		if visit != nil {
+			visit(segment)
+		}
+		segments++
+		command = ""
+	}
+	if command != "" {
+		return 0, fmt.Errorf("missing arguments for path command %s", command)
+	}
+	return segments, nil
+}
+
+// geometryPathSegment 校验单条指令参数并保留原始数值精度
+// 入参: command 标准指令, args 已按指令数量收集的参数
+// 返回: GeometrySegment 路径段, error 参数错误
+func geometryPathSegment(command string, args []string) (GeometrySegment, error) {
+	var values [7]float64
+	for i, token := range args {
+		if command == "A" && (i == 3 || i == 4) && (token == "true" || token == "false") {
+			if token == "true" {
+				values[i] = 1
+			}
+			continue
+		}
+		value, err := strconv.ParseFloat(token, 64)
+		if err != nil || !finite(value) || strings.ContainsAny(token, "xX_") {
+			return GeometrySegment{}, fmt.Errorf("invalid number %q", token)
+		}
+		values[i] = value
+	}
+	segment := GeometrySegment{}
+	switch command {
+	case "M", "S":
+		segment.Verb, segment.End = GeometryMove, Point{values[0], values[1]}
+	case "L":
+		segment.Verb, segment.End = GeometryLine, Point{values[0], values[1]}
+	case "Q":
+		segment.Verb, segment.Control1, segment.End = GeometryQuad, Point{values[0], values[1]}, Point{values[2], values[3]}
+	case "B":
+		segment.Verb, segment.Control1, segment.Control2, segment.End = GeometryCubic, Point{values[0], values[1]}, Point{values[2], values[3]}, Point{values[4], values[5]}
+	case "A":
+		if values[0] < 0 || values[1] < 0 || values[3] != 0 && values[3] != 1 || values[4] != 0 && values[4] != 1 {
+			return GeometrySegment{}, fmt.Errorf("invalid arc radii or flags")
+		}
+		segment = GeometrySegment{Verb: GeometryArc, RadiusX: values[0], RadiusY: values[1], Rotation: values[2], Large: values[3] != 0, Sweep: values[4] != 0, End: Point{values[5], values[6]}}
+	case "C":
+		segment.Verb = GeometryClose
+	}
+	return segment, nil
 }
 
 // SVG 将几何路径编码为SVG路径，不改变曲线或坐标精度
@@ -225,10 +262,15 @@ func (p GeometryPath) encode(svg bool) (string, error) {
 // 入参: path 页面毫米路径
 // 返回: PathObject 裁剪路径, error 无效指令错误
 func geometryClipPath(path GeometryPath) (PathObject, error) {
+	box, err := path.Bounds()
+	if err != nil {
+		return PathObject{}, err
+	}
 	data, err := path.OFD()
 	if err != nil {
 		return PathObject{}, err
 	}
 	fill, stroke := true, false
-	return PathObject{Boundary: "0 0 1 1", Fill: &fill, Stroke: &stroke, AbbreviatedData: data}, nil
+	box.W, box.H = max(box.W, 1e-6), max(box.H, 1e-6)
+	return PathObject{Boundary: editorBoxString(box), CTM: TranslationMatrix(-box.X, -box.Y).String(), Fill: &fill, Stroke: &stroke, AbbreviatedData: data}, nil
 }

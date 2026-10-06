@@ -523,6 +523,10 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 				area.Text = append(area.Text, objects...)
 			}
 		}
+		if len(area.Path)+len(area.Text) == 0 {
+			fill, stroke := true, false
+			area.Path = []PathObject{{Boundary: "0 0 1 1", AbbreviatedData: "M 0 0 C", Fill: &fill, Stroke: &stroke}}
+		}
 		clips.Clip[index].Area = areas[index : index+1 : index+1]
 	}
 	return clips, nil

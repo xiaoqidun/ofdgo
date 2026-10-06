@@ -95,11 +95,11 @@ func NewInk(points []InkPoint, width float64, pressure bool) (PathObject, error)
 		path[i].End.X -= boundary.X
 		path[i].End.Y -= boundary.Y
 	}
-	object, err := geometryClipPath(path)
+	data, err := path.OFD()
 	if err != nil {
 		return PathObject{}, err
 	}
-	object.Boundary = editorBoxString(boundary)
+	object := PathObject{Boundary: editorBoxString(boundary), AbbreviatedData: data}
 	stroke := !filled
 	object.Fill, object.Stroke = &filled, &stroke
 	object.Cap, object.Join, object.LineWidth = "Round", "Round", width

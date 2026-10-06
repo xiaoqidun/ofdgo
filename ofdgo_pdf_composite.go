@@ -67,6 +67,12 @@ type pdfCompositeKey struct {
 	stroke bool
 }
 
+// pdfCompositeSceneKey 隔离不同图案坐标系，在单页内共享场景缓存预算
+type pdfCompositeSceneKey struct {
+	owner *pdfCompositeCache
+	mark  pdfCompositeKey
+}
+
 // pdfCompositeGeometry 保存后端中立的绘制命令及其页面边界
 type pdfCompositeGeometry struct {
 	scene *RasterPage
@@ -88,7 +94,9 @@ type pdfCompositeColorSampler struct {
 
 // pdfCompositeCache 在单页内复用几何、图像分量及蒙版内容
 type pdfCompositeCache struct {
-	geometry        map[pdfCompositeKey]pdfCompositeGeometry
+	geometry        *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry]
+	clips           *renderCache[[32]byte, GeometryPath]
+	bounds          map[pdfCompositeKey]Box
 	images          map[*pdfgo.Image]*pdfgo.ImageComponents
 	imageMatrix     map[*pdfgo.ImageMark]pdfgo.Matrix
 	masks           map[*pdfgo.SoftMask][]pdfCompositeNode
@@ -106,9 +114,27 @@ type pdfCompositeCache struct {
 // 返回: *pdfCompositeCache 当前页面缓存
 func (p *pdfImporter) compositingCache() *pdfCompositeCache {
 	if p.compositeCache == nil {
-		p.compositeCache = &pdfCompositeCache{geometry: map[pdfCompositeKey]pdfCompositeGeometry{}, images: map[*pdfgo.Image]*pdfgo.ImageComponents{}, masks: map[*pdfgo.SoftMask][]pdfCompositeNode{}, meshes: map[*pdfgo.MeshGradient][]pdfMeshTriangle{}}
+		p.compositeCache = &pdfCompositeCache{images: map[*pdfgo.Image]*pdfgo.ImageComponents{}, masks: map[*pdfgo.SoftMask][]pdfCompositeNode{}, meshes: map[*pdfgo.MeshGradient][]pdfMeshTriangle{}}
 	}
 	return p.compositeCache
+}
+
+// geometryCache 限制完整覆盖场景的保留量，边界独立保存以便排除无交集图元
+// 返回: *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry] 单页场景缓存
+func (c *pdfCompositeCache) geometryCache() *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry] {
+	if c.geometry == nil {
+		c.geometry = &renderCache[pdfCompositeSceneKey, pdfCompositeGeometry]{limit: 64 << 20}
+	}
+	return c.geometry
+}
+
+// clipCache 限制页面及嵌套图案共享的只读裁剪轮廓
+// 返回: *renderCache[[32]byte, GeometryPath] 裁剪缓存
+func (c *pdfCompositeCache) clipCache() *renderCache[[32]byte, GeometryPath] {
+	if c.clips == nil {
+		c.clips = &renderCache[[32]byte, GeometryPath]{limit: 8 << 20}
+	}
+	return c.clips
 }
 
 // coverage 复用已编译的覆盖场景，跳过与当前区域无交集的图元
@@ -116,6 +142,10 @@ func (p *pdfImporter) compositingCache() *pdfCompositeCache {
 // 入参: node 图元, stroke 是否描边
 // 返回: image.Image 当前区域覆盖或空值, error 编译或渲染错误
 func (c *pdfCompositor) coverage(node pdfCompositeNode, stroke bool) (image.Image, error) {
+	key := pdfCompositeKey{path: node.path, text: node.text, image: node.image, stroke: stroke}
+	if b, ok := c.cache.bounds[key]; ok && (b.X >= c.box.X+c.box.W || b.Y >= c.box.Y+c.box.H || b.X+b.W <= c.box.X || b.Y+b.H <= c.box.Y) {
+		return nil, nil
+	}
 	if node.text != nil && len(node.text.Font.Program) == 0 && node.text.Font.BoundingBox != nil {
 		b := c.importer.compositeTextBounds(*node.text, stroke)
 		if b.X >= c.box.X+c.box.W || b.Y >= c.box.Y+c.box.H || b.X+b.W <= c.box.X || b.Y+b.H <= c.box.Y {
@@ -138,17 +168,46 @@ func (c *pdfCompositor) coverage(node pdfCompositeNode, stroke bool) (image.Imag
 // 返回: pdfCompositeGeometry 覆盖场景, error 编译错误
 func (c *pdfCompositor) geometry(node pdfCompositeNode, stroke bool) (pdfCompositeGeometry, error) {
 	key := pdfCompositeKey{path: node.path, text: node.text, image: node.image, stroke: stroke}
-	geometry, ok := c.cache.geometry[key]
+	cache := c.cache.geometryCache()
+	sceneKey := pdfCompositeSceneKey{owner: c.cache, mark: key}
+	geometry, ok := cache.get(sceneKey)
 	if !ok {
 		runtime.Gosched()
 		var err error
-		geometry.scene, geometry.box, err = c.importer.compileGroup(func(local *pdfImporter) error { return node.coverage(local, stroke) })
+		geometry.scene, geometry.box, err = c.importer.compileCoverage(node, stroke)
 		if err != nil {
 			return geometry, err
 		}
-		c.cache.geometry[key] = geometry
+		if c.cache.bounds == nil {
+			c.cache.bounds = make(map[pdfCompositeKey]Box)
+		}
+		c.cache.bounds[key] = geometry.box
+		cost := 256
+		if geometry.scene != nil {
+			for _, command := range geometry.scene.Commands {
+				part := rasterCommandCost(command)
+				if part <= 0 || part > cache.limit-cost {
+					cost = cache.limit + 1
+					break
+				}
+				cost += part
+			}
+		}
+		cache.put(sceneKey, geometry, cost)
 	}
 	return geometry, nil
+}
+
+// geometryBounds 复用已度量边界，场景淘汰后不因范围判断而重新编译
+// 入参: node 图元, stroke 是否描边
+// 返回: Box 覆盖范围, error 编译错误
+func (c *pdfCompositor) geometryBounds(node pdfCompositeNode, stroke bool) (Box, error) {
+	key := pdfCompositeKey{path: node.path, text: node.text, image: node.image, stroke: stroke}
+	if box, ok := c.cache.bounds[key]; ok {
+		return box, nil
+	}
+	geometry, err := c.geometry(node, stroke)
+	return geometry.box, err
 }
 
 // groupBounds 缓存组内实际覆盖范围，外部字体沿用描述符保守边界
@@ -198,11 +257,11 @@ func (c *pdfCompositor) markBounds(node pdfCompositeNode) (Box, error) {
 			box = unionTextBox(box, c.importer.compositeTextBounds(*node.text, outline))
 			continue
 		}
-		geometry, err := c.geometry(node, outline)
+		bounds, err := c.geometryBounds(node, outline)
 		if err != nil {
 			return Box{}, err
 		}
-		box = unionTextBox(box, geometry.box)
+		box = unionTextBox(box, bounds)
 	}
 	return box, nil
 }

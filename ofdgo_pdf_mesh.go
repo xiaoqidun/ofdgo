@@ -17,6 +17,8 @@ package ofdgo
 import (
 	"fmt"
 	"math"
+	"runtime"
+	"sync"
 
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -268,47 +270,72 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, 
 			return nil, fmt.Errorf("singular mesh bounds transform")
 		}
 	}
-	colors := make(map[[4]float64][4]float64)
-	for y := 0; y < h; y++ {
-		if err := c.importer.ctx.Err(); err != nil {
-			return nil, err
-		}
-		for x := 0; x < w; x++ {
-			if box := mesh.Bounds; box != nil {
-				point := inverse.Apply(pdfgo.Point{X: c.box.X + (float64(x)+.5)/scale, Y: c.box.Y + (float64(y)+.5)/scale})
-				if point.X < box.XMin || point.X > box.XMax || point.Y < box.YMin || point.Y > box.YMax {
+	sampleRows := func(start, end int) error {
+		colors := make(map[[4]float64][4]float64)
+		sampler := mesh.NewSampler()
+		for y := start * samples; y < end*samples; y++ {
+			if err := c.importer.ctx.Err(); err != nil {
+				return err
+			}
+			for x := 0; x < w; x++ {
+				if box := mesh.Bounds; box != nil {
+					point := inverse.Apply(pdfgo.Point{X: c.box.X + (float64(x)+.5)/scale, Y: c.box.Y + (float64(y)+.5)/scale})
+					if point.X < box.XMin || point.X > box.XMax || point.Y < box.YMin || point.Y > box.YMax {
+						continue
+					}
+				}
+				sample := grid[y*w+x]
+				if sample.patch == 0 && mesh.Background == nil {
 					continue
 				}
-			}
-			sample := grid[y*w+x]
-			if sample.patch == 0 && mesh.Background == nil {
-				continue
-			}
-			values := background
-			if sample.patch != 0 {
-				var err error
-				values, err = mesh.ValuesAt(sample.patch-1, sample.u, sample.v)
-				if err != nil {
-					return nil, err
-				}
-				if cached, ok := colors[values]; ok {
-					values = cached
-				} else {
-					source := values
-					values, err = converter.Convert(values[:mesh.Space.Components()])
+				values := background
+				if sample.patch != 0 {
+					var err error
+					values, err = sampler.ValuesAt(sample.patch-1, sample.u, sample.v)
 					if err != nil {
-						return nil, err
+						return err
 					}
-					if len(colors) < 2*pdfCompositeTileSize {
+					if cached, ok := colors[values]; ok {
+						values = cached
+					} else {
+						source := values
+						values, err = converter.Convert(values[:mesh.Space.Components()])
+						if err != nil {
+							return err
+						}
+						if len(colors) == 2*pdfCompositeTileSize {
+							clear(colors)
+						}
 						colors[source] = values
 					}
 				}
+				pixel := &pixels[(y/samples)*c.width+x/samples]
+				for i, value := range values {
+					pixel.values[i] += value
+				}
+				pixel.shape++
 			}
-			pixel := &pixels[(y/samples)*c.width+x/samples]
-			for i, value := range values {
-				pixel.values[i] += value
+		}
+		return c.importer.ctx.Err()
+	}
+	workers := min(runtime.GOMAXPROCS(0), 4, max(1, c.height/32))
+	if workers == 1 {
+		if err := sampleRows(0, c.height); err != nil {
+			return nil, err
+		}
+	} else {
+		var group sync.WaitGroup
+		errors := make([]error, workers)
+		for worker := range workers {
+			group.Go(func() {
+				errors[worker] = sampleRows(worker*c.height/workers, (worker+1)*c.height/workers)
+			})
+		}
+		group.Wait()
+		for _, err := range errors {
+			if err != nil {
+				return nil, err
 			}
-			pixel.shape++
 		}
 	}
 	for i := range pixels {
