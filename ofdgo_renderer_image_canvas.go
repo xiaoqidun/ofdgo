@@ -38,7 +38,7 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	if obj.Visible != nil && !*obj.Visible || obj.Alpha != nil && *obj.Alpha == 0 {
 		return
 	}
-	resPath, ok := r.Reader.ResMap[obj.ResourceID]
+	resPath, ok := resourceValue(r.Reader.ResMap, obj.ResourceID)
 	if !ok {
 		r.renderError = fmt.Errorf("image resource %q not found", obj.ResourceID)
 		return

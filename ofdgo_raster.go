@@ -86,6 +86,7 @@ type RasterGradientKind uint8
 
 // RasterGradient 局部坐标下的轴向、双圆径向或三角网格渐变
 // 轴向及径向渐变的Spread为空时延续边界颜色，网格渐变使用Mesh
+// Sample可选，按单位区间采样源颜色变换，优先于Stops且不负责几何延伸
 type RasterGradient struct {
 	Kind       RasterGradientKind
 	Start, End RasterPoint
@@ -93,6 +94,7 @@ type RasterGradient struct {
 	Stops      []ColorStop
 	Spread     *RasterSpread
 	Mesh       *MeshShading
+	Sample     func(float64) color.RGBA
 }
 
 // RasterSpread 保存OFD渐变延伸和周期，nil表示连续延伸
@@ -256,6 +258,9 @@ func rasterRadialPosition(a, b, c, radius, delta float64) float64 {
 // 入参: t 渐变位置
 // 返回: color.RGBA 预乘颜色
 func (g *RasterGradient) colorAt(t float64) color.RGBA {
+	if g.Sample != nil {
+		return g.Sample(t)
+	}
 	if len(g.Stops) == 0 {
 		return color.RGBA{}
 	}

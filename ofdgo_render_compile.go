@@ -261,6 +261,7 @@ func semanticGradient(paint Paint, matrix Matrix) (*RasterGradient, Matrix) {
 		period = s.MapUnit / length
 	}
 	g := &RasterGradient{Start: RasterPoint{s.Start.X, s.Start.Y}, End: RasterPoint{s.End.X, s.End.Y}, R0: s.StartRadius, R1: s.EndRadius, Stops: s.Stops, Spread: &RasterSpread{Extend: extend, MapType: s.MapType, Period: period}}
+	g.Sample = s.Sample
 	if paint.Kind == PaintRadial {
 		g.Kind = RasterRadial
 		if s.Eccentricity > 0 && s.Eccentricity < 1 {

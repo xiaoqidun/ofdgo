@@ -345,7 +345,7 @@ func (r *Reader) signatureCoverageReferences(root string, required map[string]bo
 				return
 			}
 			for _, attr := range current.Attrs {
-				if attr.Name.Local == "BaseLoc" && kind != "Res" || attr.Name.Local == "Link" && kind == "DrawParam" {
+				if attr.Name.Local == "BaseLoc" && kind != "Res" || attr.Name.Local == "Link" && kind == "DrawParam" || attr.Name.Local == "Profile" && kind == "ColorSpace" {
 					add(attr.Value, node.XMLName.Local == "Res")
 				}
 			}

@@ -105,32 +105,12 @@ func (p *pdfImporter) movieAnnotation(ctx context.Context, page *pdfgo.Page, ann
 		return p.appearanceAnnotation(ctx, page, annotation)
 	}
 	if activation != nil && activation != pdfgo.Boolean(true) {
-		dict, ok := activation.(pdfgo.Dictionary)
-		if !ok {
-			return fmt.Errorf("invalid movie activation")
+		parameters, err := p.reader.ReadMovieActivation(ctx, activation)
+		if err != nil {
+			return err
 		}
-		for key, value := range dict {
-			value, err = p.reader.Resolve(value)
-			if err != nil {
-				return err
-			}
-			if value == nil {
-				continue
-			}
-			allowed := false
-			switch key {
-			case "Start":
-				allowed = value == pdfgo.Integer(0)
-			case "Rate", "Volume":
-				allowed = value == pdfgo.Integer(1) || value == pdfgo.Real(1)
-			case "ShowControls", "Synchronous":
-				allowed = value == pdfgo.Boolean(false)
-			case "Mode":
-				allowed = value == pdfgo.Name("Once")
-			}
-			if !allowed {
-				return &pdfgo.UnsupportedError{Feature: fmt.Sprintf("movie activation field %q", key)}
-			}
+		if parameters.Start != nil && parameters.Start.Value != 0 || parameters.Duration != nil || parameters.Rate != 1 || parameters.Volume != 1 || parameters.ShowControls || parameters.Synchronous || parameters.Mode != "Once" || parameters.FloatingScale != nil {
+			return &pdfgo.UnsupportedError{Feature: "movie activation playback parameters conversion"}
 		}
 	}
 	if movie.Rotate != 0 {

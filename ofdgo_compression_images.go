@@ -29,11 +29,74 @@ type compressionImages struct {
 	sizes map[string]image.Point
 }
 
+// compressionImagePlan 分文档分析标识，按共享路径合并最大尺寸和保护条件
+// 入参: ctx 取消上下文, options 压缩配置
+// 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
+func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOptions) (map[string]bool, map[string]image.Point, error) {
+	images := make(map[string]bool)
+	sizes := make(map[string]image.Point)
+	blocked := make(map[string]bool)
+	for index := 0; index < r.DocumentCount(); index++ {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		document := r
+		if index != r.DocumentIndex() {
+			var err error
+			document, err = r.Document(index)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		catalog, err := document.Images(ctx)
+		if err != nil {
+			if document != r {
+				document.Close()
+			}
+			return nil, nil, err
+		}
+		var masks map[string]bool
+		var demands map[string]image.Point
+		if options.Mode == CompressionLossy {
+			var geometry bool
+			masks, geometry, err = document.compressionImageSafety(ctx, catalog)
+			if err == nil && geometry {
+				demands, err = document.compressionImageSizes(ctx, catalog, options.ImageDPI())
+			}
+		}
+		if document != r {
+			document.Close()
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, img := range catalog {
+			name := strings.ToLower(cleanPackagePath(img.Location))
+			if old, ok := images[name]; !ok || old {
+				images[name] = !masks[name]
+			}
+			size := demands[name]
+			if size.X <= 0 || size.Y <= 0 || masks[name] {
+				blocked[name] = true
+				delete(sizes, name)
+				continue
+			}
+			if !blocked[name] {
+				old := sizes[name]
+				sizes[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
+			}
+		}
+	}
+	return images, sizes, ctx.Err()
+}
+
 // compressionImageSize 将毫米显示尺寸换算为像素，非法尺寸不降采样
+// 整像素边界消除单位换算产生的单ULP上溢，不降低实际像素需求
 // 入参: width 显示宽度, height 显示高度, dpi 分辨率上限
 // 返回: image.Point 像素需求
 func compressionImageSize(width, height float64, dpi int) image.Point {
-	w, h := math.Ceil(width*float64(dpi)/25.4), math.Ceil(height*float64(dpi)/25.4)
+	w := math.Ceil(math.Nextafter(width*float64(dpi)/25.4, math.Inf(-1)))
+	h := math.Ceil(math.Nextafter(height*float64(dpi)/25.4, math.Inf(-1)))
 	if w <= 0 || h <= 0 || math.IsNaN(w) || math.IsNaN(h) || math.IsInf(w, 0) || math.IsInf(h, 0) || w > 1<<30 || h > 1<<30 {
 		return image.Point{}
 	}
@@ -71,10 +134,24 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 			return nil, ctx.Err()
 		}
 	}
+	for _, ref := range r.doc.CommonData.TemplatePage {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		template := renderer.loadTemplate(ref.ID)
+		if template == nil {
+			return nil, ctx.Err()
+		}
+		for order := range 3 {
+			if err := renderer.walkLayers(template.Content.Layer, order, visitor); err != nil {
+				return nil, ctx.Err()
+			}
+		}
+	}
 	result := make(map[string]image.Point)
 	for _, img := range images {
 		name := strings.ToLower(cleanPackagePath(img.Location))
-		size := visitor.sizes[img.ID]
+		size := visitor.sizes[editorResourceID(img.ID)]
 		old := result[name]
 		result[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
 	}
@@ -92,6 +169,10 @@ func (v *compressionImages) DrawObject(object *GraphicObject, state RenderState)
 		return nil
 	}
 	img := object.ImageObject
+	id := editorResourceID(img.ResourceID)
+	if id == "" {
+		return fmt.Errorf("invalid image resource")
+	}
 	box, err := ParseBox(img.Boundary)
 	if err != nil {
 		return err
@@ -105,8 +186,8 @@ func (v *compressionImages) DrawObject(object *GraphicObject, state RenderState)
 	if size.X == 0 || size.Y == 0 {
 		return fmt.Errorf("invalid image placement")
 	}
-	old := v.sizes[img.ResourceID]
-	v.sizes[img.ResourceID] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
+	old := v.sizes[id]
+	v.sizes[id] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
 	return nil
 }
 

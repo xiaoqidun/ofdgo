@@ -48,6 +48,7 @@ type ConvertProgress struct {
 // 整份PDF同格式压缩直接重写PDF对象，其余PDF先转换为OFD对象再输出
 // RendererOptions同时用于PDF局部合成和输出，在PDF.RendererOptions之后应用
 // Backends统一配置转换与输出，优先于PDF和RendererOptions中的后端设置
+// Compression统一配置输出及PDF图片导入，优先于PDF.Compression，文本输出不优化图片
 // PageOutput仅用于逐页格式，同步调用export写出一页并自行处理提交或回滚；此时output可为nil
 // 未提供PageOutput时，逐页格式打包ZIP；所有回调返回错误均会停止转换
 type ConvertOptions struct {
@@ -202,6 +203,10 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 	switch report.Input {
 	case "pdf":
 		pdfOptions := options.PDF
+		pdfOptions.Compression = options.Compression
+		if format == "txt" {
+			pdfOptions.Compression = CompressionOptions{}
+		}
 		pdfOptions.RendererOptions = append(append([]RendererOption(nil), pdfOptions.RendererOptions...), options.RendererOptions...)
 		if options.Backends != nil {
 			pdfOptions.Backends = options.Backends

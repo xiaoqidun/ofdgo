@@ -87,7 +87,7 @@ func (img *EncodedImage) At(x, y int) color.Color {
 // 入参: id 图片资源标识
 // 返回: image.Image 图片资源, error 读取错误
 func (r *Renderer) ImageResource(id string) (image.Image, error) {
-	path, ok := r.Reader.ResMap[id]
+	path, ok := resourceValue(r.Reader.ResMap, id)
 	if !ok {
 		return nil, fmt.Errorf("image resource %q not found", id)
 	}

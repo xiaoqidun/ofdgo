@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"fmt"
 	"image"
+	"math"
 
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -37,16 +38,118 @@ type pdfGradientKey struct {
 	conversion pdfgo.ColorConversion
 }
 
-// gradientSegments 保留线性源颜色的设备分量，校准颜色经源空间转换
-// 入参: stops 源颜色分段, space 源颜色空间
+// pdfICCKey 区分原始ICC空间及输出渲染意图
+type pdfICCKey struct {
+	space  *pdfgo.ColorSpace
+	intent pdfgo.Name
+}
+
+// pdfICCTransfer 检查OFD可原生表达的ICC模型与单位分量范围
+// 入参: space 源颜色空间
+// 返回: bool 是否可保留原始配置及颜色分量
+func pdfICCTransfer(space *pdfgo.ColorSpace) bool {
+	model, ranges := space.ICCSource()
+	if model != "GRAY" && model != "RGB" && model != "CMYK" {
+		return false
+	}
+	for i := range space.Components() {
+		if ranges[2*i] != 0 || ranges[2*i+1] != 1 {
+			return false
+		}
+	}
+	return true
+}
+
+// iccColorSpace 注册16位ICC空间，复用同一源空间与意图的资源
+// 入参: space 源颜色空间, intent 输出渲染意图
+// 返回: string OFD资源标识, error 配置或注册错误
+func (p *pdfImporter) iccColorSpace(space *pdfgo.ColorSpace, intent pdfgo.Name) (string, error) {
+	if p.ctx != nil {
+		if err := p.ctx.Err(); err != nil {
+			return "", err
+		}
+	}
+	key := pdfICCKey{space: space, intent: intent}
+	if id := p.iccSpaces[key]; id != "" {
+		return id, nil
+	}
+	if !pdfICCTransfer(space) {
+		return "", &pdfgo.UnsupportedError{Feature: "ICC source range conversion"}
+	}
+	for cached, id := range p.iccSpaces {
+		if cached.intent == intent && cached.space.Equal(space) {
+			p.iccSpaces[key] = id
+			return id, nil
+		}
+	}
+	model, _ := space.ICCSource()
+	id, err := p.editor.AddColorSpace(ColorSpace{Type: string(model), BitsPerComponent: 16}, space.ICCProfile(intent))
+	if err != nil {
+		return "", err
+	}
+	if p.iccSpaces == nil {
+		p.iccSpaces = make(map[pdfICCKey]string)
+	}
+	p.iccSpaces[key] = id
+	return id, nil
+}
+
+// pdfICCValues 将单位源分量量化到OFD16位颜色，不提前转换为显示RGB
+// 入参: values 单位分量, count 分量数
+// 返回: string OFD颜色分量, error 非有限或范围错误
+func pdfICCValues(values []float64, count int) (string, error) {
+	if count < 1 || count > 4 || len(values) < count {
+		return "", fmt.Errorf("invalid ICC shading component count")
+	}
+	var encoded [4]float64
+	for i := range count {
+		if !finite(values[i]) || values[i] < 0 || values[i] > 1 {
+			return "", fmt.Errorf("invalid ICC shading component")
+		}
+		encoded[i] = math.Round(values[i] * 65535)
+	}
+	return pdfNumbers(encoded[:count]...), nil
+}
+
+// gradientSegments 保留设备及ICC源分量，其他校准颜色经源空间转换
+// 入参: stops 源颜色分段, space 源颜色空间, intent 输出渲染意图
 // 返回: []ShdSegment OFD颜色分段, error 不可线性表达的变换
-func (p *pdfImporter) gradientSegments(stops []pdfgo.GradientStop, space *pdfgo.ColorSpace) ([]ShdSegment, error) {
+func (p *pdfImporter) gradientSegments(stops []pdfgo.GradientStop, space *pdfgo.ColorSpace, intent pdfgo.Name) ([]ShdSegment, error) {
+	if p.ctx != nil {
+		if err := p.ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	if err := pdfGradientStopsError(stops, space); err != nil {
 		return nil, err
 	}
 	cmyk := space != nil && space.Model == "DeviceCMYK" && !space.Calibrated()
 	segments := make([]ShdSegment, len(stops))
+	if pdfICCTransfer(space) {
+		id, err := p.iccColorSpace(space, intent)
+		if err != nil {
+			return nil, err
+		}
+		for i, stop := range stops {
+			if p.ctx != nil && i&255 == 0 {
+				if err := p.ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
+			value, err := pdfICCValues(stop.Values[:], space.Components())
+			if err != nil {
+				return nil, err
+			}
+			segments[i] = ShdSegment{Position: stop.Position, Color: ShdColor{Value: value, ColorSpace: id}}
+		}
+		return segments, nil
+	}
 	for i, stop := range stops {
+		if p.ctx != nil && i&255 == 0 {
+			if err := p.ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		paint := pdfgo.Paint{RGB: stop.RGB, Alpha: 1}
 		if cmyk {
 			paint.CMYK = &stop.Values
@@ -64,7 +167,7 @@ func pdfGradientStopsError(stops []pdfgo.GradientStop, space *pdfgo.ColorSpace) 
 	if len(stops) == 0 {
 		return &pdfgo.UnsupportedError{Feature: "nonlinear gradient conversion"}
 	}
-	calibrated := space != nil && space.Calibrated() && !space.SRGBEquivalent()
+	calibrated := space != nil && space.Calibrated() && !pdfICCTransfer(space) && !space.SRGBEquivalent()
 	if calibrated {
 		for i := 1; i < len(stops); i++ {
 			a, b := stops[i-1], stops[i]
@@ -76,7 +179,7 @@ func pdfGradientStopsError(stops []pdfgo.GradientStop, space *pdfgo.ColorSpace) 
 	return nil
 }
 
-// pdfGradientError 检查渐变能否精确映射为OFD线性分段
+// pdfGradientError 检查渐变函数与源空间能否原生映射为OFD分段
 // 入参: paint 画刷
 // 返回: error 不可等价表达的渐变
 func pdfGradientError(paint pdfgo.Paint) error {
@@ -91,7 +194,7 @@ func pdfGradientError(paint pdfgo.Paint) error {
 		if len(mesh.Patches) != 0 || len(mesh.Triangles) == 0 || mesh.UsesFunction() || mesh.Background != nil || mesh.Bounds != nil {
 			return &pdfgo.UnsupportedError{Feature: "nonlinear mesh conversion"}
 		}
-		if mesh.Space.Calibrated() && !mesh.Space.SRGBEquivalent() {
+		if mesh.Space.Calibrated() && !pdfICCTransfer(mesh.Space) && !mesh.Space.SRGBEquivalent() {
 			return &pdfgo.UnsupportedError{Feature: "nonlinear calibrated mesh conversion"}
 		}
 	}

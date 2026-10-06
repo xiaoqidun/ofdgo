@@ -68,9 +68,12 @@ func canvasShading(paint Paint, x, y, pageH float64) *shdPaint {
 	start := canvas.Point{X: x + source.Start.X, Y: pageH - y - source.Start.Y}
 	end := canvas.Point{X: x + source.End.X, Y: pageH - y - source.End.Y}
 	if paint.Kind == PaintLinear {
-		return newShdPaint(gradient.ToLinear(start, end), source.Extend, source.MapType, source.MapUnit)
+		result := newShdPaint(gradient.ToLinear(start, end), source.Extend, source.MapType, source.MapUnit)
+		result.sample = source.Sample
+		return result
 	}
 	result := newShdPaint(gradient.ToRadial(start, source.StartRadius, end, source.EndRadius), source.Extend, source.MapType, source.MapUnit)
+	result.sample = source.Sample
 	if e := source.Eccentricity; 0 < e && e < 1 {
 		result.view = canvas.Identity.Translate(start.X, start.Y).Rotate(-source.Angle).Scale(1, math.Sqrt(1-e*e)).Translate(-start.X, -start.Y)
 		result.gradient = gradient.ToRadial(start, source.StartRadius, result.view.Inv().Dot(end), source.EndRadius)

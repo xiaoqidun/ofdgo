@@ -960,6 +960,14 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			}
 		case "AttachID":
 			value, err = m.attachment(value)
+		case "Profile":
+			if name == "ColorSpace" {
+				loc, resolveErr := m.resolve(entry.name, entry.base, strings.TrimSpace(value))
+				if resolveErr != nil {
+					return nil, resolveErr
+				}
+				value, err = m.copyData(loc, path.Join("Res/ColorSpaces", path.Base(loc)), false)
+			}
 		}
 		if err != nil {
 			return nil, err

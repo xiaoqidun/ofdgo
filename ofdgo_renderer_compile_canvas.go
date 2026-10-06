@@ -81,12 +81,12 @@ func (c *canvasPageCompiler) RenderPath(path *canvas.Path, style canvas.Style, m
 			options.DashOffset, options.Dashes = canvas.ScaleDash(style.StrokeWidth, style.DashOffset, style.Dashes)
 		}
 		var err error
-		stroke, err = canvasStrokePath(c.geometry, stroke, options)
+		stroke, err = canvasStrokeFillPath(c.geometry, stroke, options)
 		if err != nil {
 			c.err = err
 			return
 		}
-		c.fill(stroke, style.Stroke, style.FillRule, m)
+		c.fill(stroke, style.Stroke, canvas.NonZero, m)
 	}
 }
 
@@ -191,26 +191,36 @@ func (c *canvasPageCompiler) fill(path *canvas.Path, paint canvas.Paint, rule ca
 // 入参: path Canvas路径
 // 返回: []RasterSegment 独立路径, error 未知指令错误
 func canvasRasterPath(path *canvas.Path) ([]RasterSegment, error) {
-	path = path.ReplaceArcs()
 	segments := make([]RasterSegment, 0, path.Len())
-	scanner := path.Scanner()
-	for scanner.Scan() {
-		s := RasterSegment{End: rasterPoint(scanner.End())}
-		switch scanner.Cmd() {
-		case canvas.MoveToCmd:
-			s.Verb = RasterMove
-		case canvas.LineToCmd:
-			s.Verb = RasterLine
-		case canvas.QuadToCmd:
-			s.Verb, s.Control1 = RasterQuad, rasterPoint(scanner.CP1())
-		case canvas.CubeToCmd:
-			s.Verb, s.Control1, s.Control2 = RasterCubic, rasterPoint(scanner.CP1()), rasterPoint(scanner.CP2())
-		case canvas.CloseCmd:
-			s.Verb = RasterClose
-		default:
-			return nil, fmt.Errorf("unsupported raster path command %g", scanner.Cmd())
+	parts := path.Split()
+	if len(parts) == 0 {
+		parts = []*canvas.Path{path}
+	}
+	for _, part := range parts {
+		scanner := part.ReplaceArcs().Scanner()
+		for scanner.Scan() {
+			s := RasterSegment{End: rasterPoint(scanner.End())}
+			switch scanner.Cmd() {
+			case canvas.MoveToCmd:
+				s.Verb = RasterMove
+			case canvas.LineToCmd:
+				s.Verb = RasterLine
+			case canvas.QuadToCmd:
+				s.Verb, s.Control1 = RasterQuad, rasterPoint(scanner.CP1())
+			case canvas.CubeToCmd:
+				s.Verb, s.Control1, s.Control2 = RasterCubic, rasterPoint(scanner.CP1()), rasterPoint(scanner.CP2())
+			case canvas.CloseCmd:
+				s.Verb = RasterClose
+			default:
+				return nil, fmt.Errorf("unsupported raster path command %g", scanner.Cmd())
+			}
+			segments = append(segments, s)
 		}
-		segments = append(segments, s)
+	}
+	data := path.Data()
+	last := parts[len(parts)-1].Data()
+	if len(data) >= 4 && data[len(data)-4] == canvas.MoveToCmd && len(last) != 0 && last[len(last)-1] != canvas.MoveToCmd {
+		segments = append(segments, RasterSegment{Verb: RasterMove, End: RasterPoint{X: data[len(data)-3], Y: data[len(data)-2]}})
 	}
 	return segments, nil
 }

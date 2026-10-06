@@ -1161,7 +1161,7 @@ func (e *Editor) prepareText(obj *TextObject) error {
 		}
 		code.Value = escapeOFDText(string(runes))
 	}
-	if strings.Trim(obj.Text(), "\n") == "" {
+	if position == 0 {
 		return fmt.Errorf("text codes are empty")
 	}
 	return missingGlyphError(obj.Font, missing)
@@ -1296,7 +1296,7 @@ func ofdNumber(value float64) string {
 func escapeOFDText(value string) string {
 	var text strings.Builder
 	for _, char := range value {
-		if char < ' ' || char == '\\' || char == '\ufffe' || char == '\uffff' {
+		if char <= ' ' || char == '\\' || char == '\ufffe' || char == '\uffff' {
 			fmt.Fprintf(&text, "\\%04X", char)
 		} else {
 			text.WriteRune(char)

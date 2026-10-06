@@ -21,7 +21,6 @@ import (
 	"encoding/xml"
 	"hash/crc32"
 	"io"
-	"unicode/utf8"
 )
 
 // editorStagedPage 保存单次写出的压缩页面及校验值，不持有未压缩XML
@@ -107,20 +106,7 @@ func (e *Editor) writeStagedPage(archive *zip.Writer, header zip.FileHeader, pag
 			return err
 		}
 	}
-	header.Method, header.ReaderVersion = zip.Deflate, 20
-	header.CreatorVersion = header.CreatorVersion&0xff00 | 20
-	header.CRC32, header.UncompressedSize64, header.CompressedSize64 = page.checksum, page.size, uint64(len(page.data))
-	header.Flags &^= 8
-	if header.NonUTF8 {
-		header.Flags &^= 0x800
-	} else if utf8.ValidString(header.Name) && utf8.ValidString(header.Comment) {
-		for _, value := range header.Name + header.Comment {
-			if value < 0x20 || value > 0x7d || value == 0x5c {
-				header.Flags |= 0x800
-				break
-			}
-		}
-	}
+	prepareOutputHeader(&header, zip.Deflate, page.size, uint64(len(page.data)), page.checksum)
 	entry, err := archive.CreateRaw(&header)
 	if err != nil {
 		return err

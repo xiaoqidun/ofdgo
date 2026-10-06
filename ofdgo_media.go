@@ -26,7 +26,7 @@ func (r *Reader) Media(id string) (MultiMedia, error) {
 	if _, err := r.Doc(); err != nil {
 		return MultiMedia{}, err
 	}
-	media, ok := r.mediaCache[id]
+	media, ok := resourceValue(r.mediaCache, id)
 	if !ok || media.Type != "Audio" && media.Type != "Video" {
 		return MultiMedia{}, fmt.Errorf("audio or video resource %q is unavailable", id)
 	}
@@ -41,5 +41,5 @@ func (r *Reader) OpenMedia(id string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	return r.openFile(media.MediaFile)
+	return r.openFile(r.ResPath(media.MediaFile))
 }

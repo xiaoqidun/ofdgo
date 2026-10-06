@@ -16,11 +16,10 @@ package ofdgo
 
 import (
 	"archive/zip"
-	"bufio"
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"maps"
 	"path"
 	"reflect"
@@ -217,7 +216,7 @@ func (e *Editor) DeleteDocument(index int) error {
 		return fmt.Errorf("package must contain at least one document")
 	}
 	return e.editDocuments(func(reader *Reader, data []byte, root *editorXML) (int, error) {
-		removed, err := editorDocumentFiles(reader, index)
+		removed, err := reader.documentFiles(context.Background(), index)
 		if err != nil {
 			return 0, err
 		}
@@ -236,7 +235,7 @@ func (e *Editor) DeleteDocument(index int) error {
 			if other == index {
 				continue
 			}
-			kept, err := editorDocumentFiles(reader, other)
+			kept, err := reader.documentFiles(context.Background(), other)
 			if err != nil {
 				return 0, err
 			}
@@ -340,116 +339,4 @@ func (e *Editor) sameDocument(other *Editor) bool {
 		return len(packaged.source.reader.OFD.DocBody) == 1 && (packaged.source.fromNew || fresh.Info.DocID != "" && fresh.Info.DocID == packaged.source.info.DocID)
 	}
 	return e.documentRoot() == other.documentRoot() && e.source.info.DocID == other.source.info.DocID
-}
-
-// editorDocumentFiles 按标准路径遍历文档依赖，签名摘要引用不作为内容依赖
-// 入参: reader 包快照, index 文档索引
-// 返回: map[string]bool 大小写折叠的文件路径, error 读取错误
-func editorDocumentFiles(reader *Reader, index int) (map[string]bool, error) {
-	body := reader.OFD.DocBody[index]
-	queue := []string{cleanPackagePath(body.DocRoot)}
-	data, err := reader.readFile("OFD.xml")
-	if err != nil {
-		return nil, err
-	}
-	root, err := parseEditorXML(data)
-	if err != nil {
-		return nil, err
-	}
-	var collect func(*editorXML)
-	collect = func(node *editorXML) {
-		if node.name.Local == "Cover" || node.name.Local == "Signatures" || node.name.Local == "DocRoot" {
-			if value := strings.TrimSpace(editorImportText(data, node)); value != "" {
-				queue = append(queue, resolveResourcePath("OFD.xml", "", value))
-			}
-		}
-		if node.name.Local == "Version" && node.attr("BaseLoc") != "" {
-			queue = append(queue, resolveResourcePath("OFD.xml", "", node.attr("BaseLoc")))
-		}
-		for _, child := range node.children {
-			collect(child)
-		}
-	}
-	collect(root.childAt("DocBody", index))
-	seen := make(map[string]bool)
-	for len(queue) > 0 {
-		name := queue[0]
-		queue = queue[1:]
-		key := strings.ToLower(name)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		actual, exists := reader.fileNamesFold[key]
-		if !exists {
-			continue
-		}
-		input, err := reader.openFile(actual)
-		if err != nil {
-			return nil, err
-		}
-		buffer := bufio.NewReader(input)
-		if prefix, _ := buffer.Peek(3); bytes.Equal(prefix, []byte{0xef, 0xbb, 0xbf}) {
-			buffer.Discard(3)
-		}
-		header, _ := buffer.Peek(128)
-		for len(header) > 0 && len(bytes.TrimSpace(header)) == 0 {
-			buffer.Discard(len(header))
-			header, _ = buffer.Peek(128)
-		}
-		if !bytes.HasPrefix(bytes.TrimSpace(header), []byte("<")) {
-			input.Close()
-			continue
-		}
-		decoder := xml.NewDecoder(buffer)
-		base, resource, depth := "", false, 0
-		var text strings.Builder
-		for {
-			token, err := decoder.Token()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				input.Close()
-				return nil, err
-			}
-			switch node := token.(type) {
-			case xml.StartElement:
-				if depth == 0 && node.Name.Space != "" && node.Name.Space != ofdNamespace && node.Name.Space != "http://www.ofdspec.org" {
-					input.Close()
-					goto nextFile
-				}
-				if node.Name.Space != "" && node.Name.Space != ofdNamespace && node.Name.Space != "http://www.ofdspec.org" {
-					input.Close()
-					return nil, fmt.Errorf("cannot determine document dependencies in %s", actual)
-				}
-				if depth == 0 {
-					resource = node.Name.Local == "Res"
-				}
-				for _, attr := range node.Attr {
-					if resource && depth == 0 && attr.Name.Local == "BaseLoc" {
-						base = attr.Value
-					} else if attr.Name.Local == "BaseLoc" || attr.Name.Local == "FileLoc" || node.Name.Local == "DrawParam" && attr.Name.Local == "Link" {
-						queue = append(queue, resolveResourcePath(actual, base, attr.Value))
-					}
-				}
-				depth++
-				text.Reset()
-			case xml.CharData:
-				text.Write(node)
-			case xml.EndElement:
-				switch node.Name.Local {
-				case "DocRoot", "Signatures", "Cover", "PublicRes", "DocumentRes", "PageRes", "Annotations", "Attachments", "FileLoc", "Profile", "SignedValue", "SchemaLoc", "ExtendData", "File", "FontFile", "MediaFile", "CustomTags", "Extensions":
-					if value := strings.TrimSpace(text.String()); value != "" {
-						queue = append(queue, resolveResourcePath(actual, base, value))
-					}
-				}
-				depth--
-				text.Reset()
-			}
-		}
-		input.Close()
-	nextFile:
-	}
-	return seen, nil
 }

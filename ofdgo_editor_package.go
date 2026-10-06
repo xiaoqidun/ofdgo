@@ -104,7 +104,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 	}
 	fonts, images, spaces, resourceFiles := e.usedResources()
 	for _, resource := range e.resources {
-		if resource.definition() != "" && slices.Contains(resourceFiles, resource.name) {
+		if resource.definition() != "" && slices.Contains(resourceFiles, resource.name) || resource.colorProfileUsed(spaces) {
 			parts[resource.name] = resource.data
 		}
 	}
@@ -607,17 +607,8 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 					return output.count, err
 				}
 				delete(remaining, name)
-			} else if e.output != nil && e.output.options.Mode != CompressionUnchanged && file.UncompressedSize64 <= 64<<20 {
-				input, err := file.Open()
-				if err != nil {
-					return output.count, err
-				}
-				data, err := io.ReadAll(imageInput{ReadCloser: input, context: e.output.ctx})
-				input.Close()
-				if err != nil {
-					return output.count, err
-				}
-				if err := e.writeOutputEntry(archive, file.FileHeader, data); err != nil {
+			} else if e.output != nil && e.output.options.Mode != CompressionUnchanged {
+				if err := e.writeOutputFile(archive, file, buffer); err != nil {
 					return output.count, err
 				}
 			} else {

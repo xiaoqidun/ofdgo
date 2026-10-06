@@ -45,18 +45,23 @@ type Paint struct {
 
 // Shading 保存OFD对象局部坐标中的渐变，单位为毫米，纵轴向下
 // Extend、MapType和MapUnit保留标准的延伸及重复语义
+// Sample存在时按单位区间采样源颜色变换，Stops仍保存各段的显示颜色
 type Shading struct {
 	Start, End                   Point
 	StartRadius, EndRadius       float64
 	Stops                        []ColorStop
 	Extend, MapType              string
 	MapUnit, Eccentricity, Angle float64
+	Sample                       func(float64) color.RGBA
 }
 
 // ResolvePaint 解析颜色、透明度、渐变分段和图案，不依赖绘图库
 // 入参: fill 填充或转换后的描边节点
 // 返回: Paint 只读画刷, error 无效渐变
 func (r *Renderer) ResolvePaint(fill *FillColor) (Paint, error) {
+	previous := r.renderError
+	r.renderError = nil
+	defer func() { r.renderError = previous }()
 	if fill == nil {
 		return Paint{}, nil
 	}
@@ -68,9 +73,15 @@ func (r *Renderer) ResolvePaint(fill *FillColor) (Paint, error) {
 		if err != nil {
 			return Paint{}, err
 		}
+		if r.renderError != nil {
+			return Paint{}, r.renderError
+		}
 		return Paint{Kind: PaintMesh, Mesh: mesh}, nil
 	}
 	base := r.parseFillColor(fill)
+	if r.renderError != nil {
+		return Paint{}, r.renderError
+	}
 	if base == nil {
 		return Paint{}, nil
 	}
@@ -78,18 +89,28 @@ func (r *Renderer) ResolvePaint(fill *FillColor) (Paint, error) {
 	if node := fill.AxialShd; node != nil {
 		start, end := parseFloats(node.StartPoint), parseFloats(node.EndPoint)
 		stops := r.renderGradientStops(node.Segment, fill.Alpha)
+		sample, err := r.profileGradient(node.Segment, fill.Alpha)
+		if err != nil {
+			return Paint{}, err
+		}
 		if len(start) >= 2 && len(end) >= 2 && len(stops) != 0 && (!geometryEqual(start[0], end[0]) || !geometryEqual(start[1], end[1])) {
 			paint.Kind = PaintLinear
 			paint.Gradient = &Shading{Start: Point{X: start[0], Y: start[1]}, End: Point{X: end[0], Y: end[1]}, Stops: stops, Extend: node.Extend, MapType: node.MapType, MapUnit: node.MapUnit}
+			paint.Gradient.Sample = sample
 			return paint, nil
 		}
 	}
 	if node := fill.RadialShd; node != nil && node.EndRadius > 0 {
 		start, end := parseFloats(node.StartPoint), parseFloats(node.EndPoint)
 		stops := r.renderGradientStops(node.Segment, fill.Alpha)
+		sample, err := r.profileGradient(node.Segment, fill.Alpha)
+		if err != nil {
+			return Paint{}, err
+		}
 		if len(start) >= 2 && len(end) >= 2 && len(stops) != 0 {
 			paint.Kind = PaintRadial
 			paint.Gradient = &Shading{Start: Point{X: start[0], Y: start[1]}, End: Point{X: end[0], Y: end[1]}, StartRadius: node.StartRadius, EndRadius: node.EndRadius, Stops: stops, Extend: node.Extend, MapType: node.MapType, MapUnit: node.MapUnit, Eccentricity: node.Eccentricity, Angle: node.Angle}
+			paint.Gradient.Sample = sample
 		}
 	}
 	return paint, nil

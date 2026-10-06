@@ -15,6 +15,8 @@
 package ofdgo
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"image/color"
 	"maps"
@@ -39,6 +41,70 @@ type editorValidation struct {
 	composites map[string]bool
 	vectors    map[string]*editorCompositeNode
 	paths      map[string]bool
+}
+
+// AddColorSpace 注册颜色空间和可选ICC快照，相同配置共用文件，ID与Profile由库生成
+// 入参: space 模型、位深和调色板, profile ICC文件，无配置时为nil
+// 返回: string 资源标识, error 定义或配置错误
+func (e *Editor) AddColorSpace(space ColorSpace, profile []byte) (string, error) {
+	space.ID, space.Profile, space.profile = "", "", nil
+	space.Type = strings.ToUpper(space.Type)
+	count := map[string]int{"GRAY": 1, "RGB": 3, "CMYK": 4}[space.Type]
+	if count == 0 {
+		return "", fmt.Errorf("unsupported color space %q", space.Type)
+	}
+	if space.BitsPerComponent == 0 {
+		space.BitsPerComponent = 8
+	}
+	if !slices.Contains([]int{1, 2, 4, 8, 16}, space.BitsPerComponent) {
+		return "", fmt.Errorf("unsupported color depth %d", space.BitsPerComponent)
+	}
+	limit := 1<<space.BitsPerComponent - 1
+	for _, entry := range space.Palette {
+		fields := strings.Fields(entry)
+		if len(fields) != count {
+			return "", fmt.Errorf("expected %d palette components", count)
+		}
+		for _, field := range fields {
+			value, err := parseColorComponent(field)
+			if err != nil || value < 0 || value > limit {
+				return "", fmt.Errorf("invalid palette component %q", field)
+			}
+		}
+	}
+	var key editorResourceKey
+	if len(profile) != 0 {
+		key = editorResourceKey{checksum: sha256.Sum256(profile), index: -1, kind: "ColorSpace/" + space.Type}
+		if id := e.resourceID[key]; id != "" {
+			for _, resource := range e.resources {
+				if resource.space != nil && resource.space.ID == id && bytes.Equal(resource.data, profile) {
+					space.profile, space.Profile = resource.space.profile, resource.space.Profile
+					break
+				}
+			}
+		}
+		if space.profile == nil {
+			var err error
+			space.profile, err = parseColorProfile(space.Type, profile)
+			if err != nil {
+				return "", err
+			}
+		}
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return "", err
+	}
+	space.ID = e.nextID()
+	space.Palette = slices.Clone(space.Palette)
+	resource := editorResource{space: &space}
+	if space.profile != nil && space.Profile == "" {
+		resource.name = e.packageName("Res/ColorSpaces/ColorSpace_" + space.ID + ".icc")
+		resource.data = bytes.Clone(profile)
+		space.Profile = "/" + resource.name
+		e.resourceID[key] = space.ID
+	}
+	e.resources = append(e.resources, resource)
+	return space.ID, nil
 }
 
 // GradientStops 解析当前文档的渐变分段，保留顺序并合并透明度
@@ -112,11 +178,11 @@ func (e *Editor) StylePatterns(page int, ids []string, stroke bool, style Patter
 	return e.updateObjects(page, objects, true)
 }
 
-// Color 解析当前文档的纯色，支持RGB、灰度、CMYK及调色板，不修改原颜色
+// Color 解析当前文档的纯色，支持RGB、灰度、CMYK、调色板及ICC配置，不修改原颜色
 // 入参: value 颜色，nil表示默认黑色
 // 返回: color.NRGBA 非预乘颜色, error 错误信息
 func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
-	space := ColorSpace{Type: "RGB", BitsPerComponent: 8}
+	space := &ColorSpace{Type: "RGB", BitsPerComponent: 8}
 	if value == nil {
 		return color.NRGBA{A: 255}, nil
 	}
@@ -130,7 +196,7 @@ func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
 	if id != "" {
 		var found *ColorSpace
 		if e.source != nil {
-			found = e.source.reader.colorSpaceCache[id]
+			found, _ = resourceValue(e.source.reader.colorSpaceCache, id)
 		}
 		for _, resource := range e.resources {
 			if resource.space != nil && resource.space.ID == id {
@@ -141,7 +207,7 @@ func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
 		if found == nil {
 			return color.NRGBA{}, fmt.Errorf("color space %q not found", id)
 		}
-		space = *found
+		space = found
 	}
 	bits := space.BitsPerComponent
 	if bits == 0 {
@@ -151,7 +217,8 @@ func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
 		return color.NRGBA{}, fmt.Errorf("unsupported color depth %d", bits)
 	}
 	count := 3
-	switch space.Type {
+	kind := strings.ToUpper(space.Type)
+	switch kind {
 	case "RGB":
 	case "GRAY":
 		count = 1
@@ -168,10 +235,11 @@ func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
 		text = space.Palette[*value.Index]
 	}
 	fields := strings.Fields(text)
-	if len(fields) != count {
+	if len(fields) != 0 && len(fields) != count {
 		return color.NRGBA{}, fmt.Errorf("expected %d color components", count)
 	}
 	var components [4]uint8
+	var normalized [4]float64
 	limit := 1<<bits - 1
 	for i, field := range fields {
 		v, err := parseColorComponent(field)
@@ -179,12 +247,28 @@ func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
 			return color.NRGBA{}, fmt.Errorf("invalid color component %q", field)
 		}
 		components[i] = uint8((v*255 + limit/2) / limit)
+		normalized[i] = float64(v) / float64(limit)
 	}
 	r, g, b := components[0], components[1], components[2]
-	if space.Type == "GRAY" {
+	if kind == "GRAY" {
 		g, b = r, r
-	} else if space.Type == "CMYK" {
+	} else if kind == "CMYK" {
 		r, g, b = color.CMYKToRGB(components[0], components[1], components[2], components[3])
+	}
+	var reader *Reader
+	if e.source != nil {
+		reader = e.source.reader
+	}
+	profile, err := reader.colorProfile(space)
+	if err != nil {
+		return color.NRGBA{}, err
+	}
+	if profile != nil {
+		rgb, err := profile.rgb(normalized)
+		if err != nil {
+			return color.NRGBA{}, err
+		}
+		r, g, b = meshByte(rgb[0]), meshByte(rgb[1]), meshByte(rgb[2])
 	}
 	a := 255
 	if value.Alpha != nil {
@@ -211,14 +295,14 @@ func (e *Editor) RGBColor(value color.NRGBA) (*FillColor, error) {
 	}
 	for _, id := range slices.Sorted(maps.Keys(e.source.reader.colorSpaceCache)) {
 		space := e.source.reader.colorSpaceCache[id]
-		if space.Type == "RGB" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0 {
+		if space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0 {
 			result.ColorSpace = id
 			return result, nil
 		}
 	}
 	for _, resource := range e.resources {
 		space := resource.space
-		if space != nil && space.Type == "RGB" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0 {
+		if space != nil && space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0 {
 			result.ColorSpace = space.ID
 			return result, nil
 		}
@@ -400,9 +484,6 @@ func (e *Editor) editorMeshColor(value *FillColor) error {
 		colors = append(colors, *back)
 	}
 	for _, color := range colors {
-		if color.ColorSpace == "" {
-			color.ColorSpace = value.ColorSpace
-		}
 		if _, err := e.Color(&FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}); err != nil {
 			return err
 		}
@@ -516,9 +597,6 @@ func (v *editorValidation) editorColor(value *FillColor) error {
 		}
 		previous = position
 		color := segment.Color
-		if color.ColorSpace == "" {
-			color.ColorSpace = value.ColorSpace
-		}
 		if _, err := e.Color(&FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}); err != nil {
 			return err
 		}

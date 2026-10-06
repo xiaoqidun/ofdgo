@@ -30,6 +30,7 @@ type shdPaint struct {
 	extend   int
 	mapType  string
 	period   float64
+	sample   func(float64) color.RGBA
 }
 
 // repeatAxialGradient 轴向重复渐变
@@ -135,6 +136,9 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 		if clip != nil && s.view != canvas.Identity {
 			clip = clip.Transform(s.view)
 		}
+		if s.sample != nil {
+			return s.sampledRaster(), clip, s.view
+		}
 		if s.mapType == "Repeat" {
 			return &repeatAxialGradient{LinearGradient: g, period: s.period}, clip, s.view
 		}
@@ -154,17 +158,15 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 		d, dr := g.C1.Sub(g.C0), g.R1-g.R0
 		length := d.Length()
 		if length >= math.Abs(dr) || s.mapType == "Repeat" {
-			stops := make([]ColorStop, len(g.Grad))
-			for i, stop := range g.Grad {
-				stops[i] = ColorStop{Offset: stop.Offset, Color: stop.Color}
-			}
-			gradient := &RasterGradient{Kind: RasterRadial, Start: rasterPoint(g.C0), End: rasterPoint(g.C1), R0: g.R0, R1: g.R1, Stops: stops, Spread: &RasterSpread{Extend: s.extend, MapType: s.mapType, Period: s.period}}
-			return rasterGradientCanvas{gradient: gradient}, nil, s.view
+			return s.sampledRaster(), nil, s.view
 		}
 		bounds := shdCanvasBounds(ctx).Transform(s.view.Inv())
 		clip := radialShdClip(g, s.extend, bounds)
 		if clip != nil && s.view != canvas.Identity {
 			clip = clip.Transform(s.view)
+		}
+		if s.sample != nil {
+			return s.sampledRaster(), clip, s.view
 		}
 		if s.mapType != "Reflect" {
 			return g, clip, s.view
@@ -190,6 +192,25 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 		return gradient.ToRadial(g.C0.Add(d.Mul(lo)), math.Max(0, g.R0+dr*lo), g.C0.Add(d.Mul(hi)), math.Max(0, g.R0+dr*hi)), clip, s.view
 	}
 	return s.gradient, nil, s.view
+}
+
+// sampledRaster 保留原双圆或轴向几何与周期，不把ICC采样器降为端点渐变
+// 返回: rasterGradientCanvas 局部坐标采样器
+func (s *shdPaint) sampledRaster() rasterGradientCanvas {
+	gradient := &RasterGradient{Sample: s.sample, Spread: &RasterSpread{Extend: s.extend, MapType: s.mapType, Period: s.period}}
+	var stops canvas.Grad
+	switch g := s.gradient.(type) {
+	case *canvas.LinearGradient:
+		gradient.Start, gradient.End, stops = rasterPoint(g.Start), rasterPoint(g.End), g.Grad
+	case *canvas.RadialGradient:
+		gradient.Kind = RasterRadial
+		gradient.Start, gradient.End, gradient.R0, gradient.R1, stops = rasterPoint(g.C0), rasterPoint(g.C1), g.R0, g.R1, g.Grad
+	}
+	gradient.Stops = make([]ColorStop, len(stops))
+	for i, stop := range stops {
+		gradient.Stops[i] = ColorStop{Offset: stop.Offset, Color: stop.Color}
+	}
+	return rasterGradientCanvas{gradient: gradient}
 }
 
 // transformShdPaint 应用渐变的父级坐标变换

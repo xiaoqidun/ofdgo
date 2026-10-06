@@ -115,7 +115,7 @@ func (b CanvasBackend) Render(page *RasterPage) (image.Image, error) {
 			default:
 				return nil, fmt.Errorf("canvas command %d: unsupported gradient %d", i, g.Kind)
 			}
-			if g.Spread != nil {
+			if g.Spread != nil || g.Sample != nil {
 				paint = canvas.Paint{Gradient: rasterGradientCanvas{gradient: g}}
 			}
 		}
@@ -211,7 +211,7 @@ func (g rasterGradientCanvas) At(x, y float64) color.RGBA {
 // 入参: space 目标颜色空间
 // 返回: canvas.Gradient 采样器
 func (g rasterGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
-	if g.gradient.Mesh != nil {
+	if g.gradient.Mesh != nil || g.gradient.Sample != nil {
 		g.space = space
 		return g
 	}

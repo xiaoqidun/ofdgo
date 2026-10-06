@@ -33,6 +33,7 @@ type pdfImageKey struct {
 	stream *pdfgo.Stream
 	intent pdfgo.Name
 	tint   color.NRGBA64
+	size   image.Point
 }
 
 // pdfImageResource 保存图像的有效颜色空间及对应资源，避免跨资源重映射复用
@@ -115,6 +116,13 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	}
 	source := mark.Image
 	key := pdfImageKey{stream: source.Stream, intent: source.Intent}
+	if !source.ImageMask && p.compression.Mode == CompressionLossy {
+		m := p.matrix.Mul(mark.Matrix)
+		key.size = compressionImageSize(math.Hypot(m[0], m[1]), math.Hypot(m[2], m[3]), p.compression.ImageDPI())
+		if key.size.X >= source.Width || key.size.Y >= source.Height {
+			key.size = image.Point{}
+		}
+	}
 	if source.ImageMask {
 		fill := mark.Style.Fill.RGB
 		if values := mark.Style.Fill.CMYK; values != nil {
@@ -138,6 +146,22 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 			break
 		}
 	}
+	var contentKey pdfImageContentKey
+	cacheable := false
+	if id == "" {
+		contentKey, cacheable, err = p.imageContentKey(source, key)
+		if err != nil {
+			return err
+		}
+		if cacheable {
+			if p.imageContents == nil {
+				p.imageContents = &renderCache[pdfImageContentKey, pdfImageContent]{limit: 8 << 20}
+			}
+			if cached, found := p.imageContents.get(contentKey); found && cached.matches(source) {
+				id = cached.id
+			}
+		}
+	}
 	if id == "" {
 		jbig2Original, err := source.JBIG2FileContext(p.ctx)
 		if err != nil {
@@ -148,8 +172,8 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 			return err
 		}
 		var decoded image.Image
-		if len(jbig2Original) == 0 {
-			decoded, err = source.DecodeImageContext(p.ctx)
+		if len(jbig2Original) == 0 && len(jpegOriginal) == 0 && (source.ImageMask || key.size != (image.Point{})) {
+			decoded, err = source.DecodeImageSizeContext(p.ctx, key.size)
 			if err != nil {
 				return err
 			}
@@ -163,10 +187,21 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		}
 		if len(data) == 0 {
 			var encoded bytes.Buffer
-			if err := pdfgo.EncodePNG(p.ctx, &encoded, decoded); err != nil {
+			if decoded != nil {
+				err = pdfgo.EncodePNG(p.ctx, &encoded, decoded)
+			} else {
+				err = source.EncodePNGContext(p.ctx, &encoded)
+			}
+			if err != nil {
 				return err
 			}
 			data = encoded.Bytes()
+		}
+		if !source.ImageMask && p.compression.Mode == CompressionLossy {
+			data, err = pdfgo.OptimizeImageResource(p.ctx, data, p.compression, key.size)
+			if err != nil {
+				return err
+			}
 		}
 		id, err = p.editor.AddImage(data)
 		if err != nil {
@@ -176,6 +211,9 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 			p.imageIDs = map[pdfImageKey][]pdfImageResource{}
 		}
 		p.imageIDs[key] = append(p.imageIDs[key], pdfImageResource{space: source.ColorSpace, id: id})
+		if cacheable {
+			p.imageContents.put(contentKey, pdfImageContent{source: source, id: id}, len(source.Stream.Data)+65536)
+		}
 	}
 	return p.appendImage(mark, id)
 }
@@ -385,7 +423,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			gid = metrics.GlyphIndex(char)
 		}
 		origin := mark.Positions[n]
-		object.TextCode = append(object.TextCode, TextCode{X: pdfNumbers(origin.X * unit), Y: pdfNumbers(-origin.Y * unit), Value: glyph.Text})
+		object.TextCode = append(object.TextCode, TextCode{X: pdfNumbers(origin.X * unit), Y: pdfNumbers(-origin.Y * unit), Value: escapeOFDText(glyph.Text)})
 		count := utf8.RuneCountInString(glyph.Text)
 		if embedded || undefined {
 			object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: position, CodeCount: count, GlyphCount: 1, Glyphs: strconv.Itoa(int(gid))})

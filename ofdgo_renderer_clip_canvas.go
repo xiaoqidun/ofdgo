@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"image"
+	"slices"
 
 	"github.com/tdewolff/canvas"
 )
@@ -152,6 +153,9 @@ func intersectClipPath(parent, current *canvas.Path) *canvas.Path {
 	if current == nil {
 		return parent
 	}
+	if slices.Equal(parent.Data(), current.Data()) {
+		return parent
+	}
 	parentRect, parentOK := rectangularPath(parent)
 	currentRect, currentOK := rectangularPath(current)
 	if parentOK && currentOK {
@@ -188,6 +192,15 @@ func intersectClipPath(parent, current *canvas.Path) *canvas.Path {
 // 入参: left 左侧裁剪路径, right 右侧裁剪路径
 // 返回: *canvas.Path 合并后的裁剪路径
 func unionClipPath(left, right *canvas.Path) *canvas.Path {
+	if left == nil {
+		return right
+	}
+	if right == nil {
+		return left
+	}
+	if slices.Equal(left.Data(), right.Data()) {
+		return left
+	}
 	leftRect, leftOK := rectangularPath(left)
 	rightRect, rightOK := rectangularPath(right)
 	if leftOK && rightOK {
@@ -205,6 +218,9 @@ func unionClipPath(left, right *canvas.Path) *canvas.Path {
 // 返回: *canvas.Path 裁剪后的绘制路径
 func applyClipPath(path, clip *canvas.Path) *canvas.Path {
 	if path == nil || clip == nil {
+		return path
+	}
+	if slices.Equal(path.Data(), clip.Data()) {
 		return path
 	}
 	if path.Empty() || clip.Empty() {
@@ -226,6 +242,18 @@ func applyClipPath(path, clip *canvas.Path) *canvas.Path {
 		return result
 	}
 	return path.And(clip)
+}
+
+// applyFillClipPath 为多段描边直接填充裁剪，不将相消轮廓用于几何测量
+// 入参: path 非零填充描边, clip 裁剪路径
+// 返回: *canvas.Path 绘制轮廓
+func applyFillClipPath(path, clip *canvas.Path) *canvas.Path {
+	if path != nil && clip != nil && path.HasSubpaths() && len(path.Split()) >= 8 {
+		if result, ok := intersectCanvasContours(path, clip); ok {
+			return result
+		}
+	}
+	return applyClipPath(path, clip)
 }
 
 // rectangularPath 获取矩形路径区域

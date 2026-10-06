@@ -56,6 +56,14 @@ func (p *pdfImporter) meshColor(paint pdfgo.Paint, box Box) (*FillColor, error) 
 	mesh := paint.Mesh
 	matrix := p.matrix.Mul(mesh.Matrix)
 	shading := &GouraudShd{}
+	icc := ""
+	if pdfICCTransfer(mesh.Space) {
+		var err error
+		icc, err = p.iccColorSpace(mesh.Space, mesh.Intent)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for _, triangle := range mesh.Triangles {
 		if err := p.ctx.Err(); err != nil {
 			return nil, err
@@ -66,6 +74,14 @@ func (p *pdfImporter) meshColor(paint pdfgo.Paint, box Box) (*FillColor, error) 
 				return nil, fmt.Errorf("nonfinite mesh vertex")
 			}
 			values := triangle.Colors[i]
+			if icc != "" {
+				value, err := pdfICCValues(values, mesh.Space.Components())
+				if err != nil {
+					return nil, err
+				}
+				shading.Point = append(shading.Point, ShdPoint{X: point.X - box.X, Y: point.Y - box.Y, Color: ShdColor{Value: value, ColorSpace: icc}})
+				continue
+			}
 			rgb, err := mesh.Space.RGB(values[:mesh.Space.Components()], mesh.Intent)
 			if err != nil {
 				return nil, err

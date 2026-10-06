@@ -635,12 +635,15 @@ func (r *Reader) loadRes(resPath string) {
 	baseLoc := res.BaseLoc
 	for i := range res.ColorSpaces.ColorSpace {
 		cs := &res.ColorSpaces.ColorSpace[i]
+		if cs.Profile != "" {
+			cs.Profile = r.resourceLocation(fullPath, baseLoc, cs.Profile)
+		}
 		r.colorSpaceCache[cs.ID] = cs
 		r.resourceFiles[cs.ID] = fullPath
 	}
 	for _, mm := range res.MultiMedias.MultiMedia {
 		if mm.MediaFile != "" {
-			if finalPath := resolveResourcePath(resPath, baseLoc, mm.MediaFile); finalPath != "" {
+			if finalPath := r.resourceLocation(fullPath, baseLoc, mm.MediaFile); finalPath != "" {
 				mm.MediaFile = finalPath
 				if r.mediaCache == nil {
 					r.mediaCache = make(map[string]MultiMedia)
@@ -654,7 +657,7 @@ func (r *Reader) loadRes(resPath string) {
 	for i := range res.Fonts.Font {
 		f := &res.Fonts.Font[i]
 		if f.FontFile != "" {
-			f.FontFile = resolveResourcePath(resPath, baseLoc, f.FontFile)
+			f.FontFile = r.resourceLocation(fullPath, baseLoc, f.FontFile)
 		}
 		r.fontCache[f.ID] = f
 		r.resourceFiles[f.ID] = fullPath
@@ -672,6 +675,21 @@ func (r *Reader) loadRes(resPath string) {
 	r.resourcesRead[fullPath] = true
 }
 
+// resourceLocation 按资源XML所在位置解析文件，文档目录外的共享文件保留绝对路径
+// 入参: name 资源XML包内路径, base 资源基准目录, file 文件声明
+// 返回: string 可供ResPath解析的文件位置
+func (r *Reader) resourceLocation(name, base, file string) string {
+	location := resolveResourcePath(name, base, file)
+	if location == "" {
+		return ""
+	}
+	root := cleanPackagePath(r.RootDir)
+	if root != "." && strings.HasPrefix(location, root+"/") {
+		return strings.TrimPrefix(location, root+"/")
+	}
+	return "/" + location
+}
+
 // resolveResourcePath 解析资源文件路径
 // 入参: resPath 资源文件路径, baseLoc 资源基准路径, filePath 文件路径
 // 返回: string 资源文件路径
@@ -684,11 +702,12 @@ func resolveResourcePath(resPath, baseLoc, filePath string) string {
 	if strings.HasPrefix(p, "/") {
 		return strings.TrimPrefix(path.Clean(p), "/")
 	}
-	dir := path.Dir(resPath)
-	if baseLoc != "" {
-		if dir != baseLoc {
-			dir = path.Join(dir, baseLoc)
-		}
+	dir := path.Dir(strings.ReplaceAll(strings.TrimSpace(resPath), "\\", "/"))
+	baseLoc = strings.ReplaceAll(strings.TrimSpace(baseLoc), "\\", "/")
+	if strings.HasPrefix(baseLoc, "/") {
+		dir = cleanPackagePath(baseLoc)
+	} else if baseLoc != "" {
+		dir = path.Join(dir, baseLoc)
 	}
 	return path.Join(dir, p)
 }

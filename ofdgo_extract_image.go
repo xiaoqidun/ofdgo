@@ -46,6 +46,16 @@ type imageInput struct {
 	context context.Context
 }
 
+// imageResourceKey 合并有效十进制标识，非标准标识保留原值，不相互混淆
+// 入参: id 图片标识
+// 返回: string 查找键
+func imageResourceKey(id string) string {
+	if key := editorResourceID(id); key != "" {
+		return key
+	}
+	return id
+}
+
 // Read 检查取消状态后读取原始数据
 // 入参: data 数据缓冲区
 // 返回: int 读取字节数, error 读取或取消错误
@@ -129,13 +139,14 @@ func (r *Reader) Images(ctx context.Context) ([]ImageInfo, error) {
 				return nil, fmt.Errorf("invalid image resource")
 			}
 			item := ImageInfo{ID: media.ID, Name: path.Base(location), Format: media.Format, Location: location}
-			if previous, ok := ids[item.ID]; ok {
-				if previous != item {
+			key := imageResourceKey(item.ID)
+			if previous, ok := ids[key]; ok {
+				if previous.Name != item.Name || previous.Format != item.Format || previous.Location != item.Location {
 					return nil, fmt.Errorf("conflicting image resource %q", item.ID)
 				}
 				continue
 			}
-			ids[item.ID] = item
+			ids[key] = item
 			items = append(items, item)
 		}
 	}
@@ -150,7 +161,8 @@ func (r *Reader) Image(ctx context.Context, id string) (ImageInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return ImageInfo{}, err
 	}
-	if name := r.resourceFiles[id]; name != "" {
+	name, _ := resourceValue(r.resourceFiles, id)
+	if name != "" {
 		data, err := r.readFile(name)
 		if err != nil {
 			return ImageInfo{}, err
@@ -160,7 +172,7 @@ func (r *Reader) Image(ctx context.Context, id string) (ImageInfo, error) {
 			return ImageInfo{}, err
 		}
 		for _, media := range res.MultiMedias.MultiMedia {
-			if media.ID == id && media.Type == "Image" && media.MediaFile != "" {
+			if imageResourceKey(media.ID) == imageResourceKey(id) && media.Type == "Image" && media.MediaFile != "" {
 				location := resolveResourcePath(name, res.BaseLoc, media.MediaFile)
 				return ImageInfo{ID: id, Name: path.Base(location), Format: media.Format, Location: location}, nil
 			}
@@ -172,7 +184,7 @@ func (r *Reader) Image(ctx context.Context, id string) (ImageInfo, error) {
 		return ImageInfo{}, err
 	}
 	for _, item := range items {
-		if item.ID == id {
+		if imageResourceKey(item.ID) == imageResourceKey(id) {
 			return item, nil
 		}
 	}
@@ -209,7 +221,8 @@ func (r *Reader) WriteImages(ctx context.Context, writer io.Writer, ids ...strin
 	} else {
 		seen := make(map[string]bool)
 		for _, id := range ids {
-			if seen[id] {
+			key := imageResourceKey(id)
+			if seen[key] {
 				continue
 			}
 			item, err := r.Image(ctx, id)
@@ -217,7 +230,7 @@ func (r *Reader) WriteImages(ctx context.Context, writer io.Writer, ids ...strin
 				return err
 			}
 			items = append(items, item)
-			seen[id] = true
+			seen[key] = true
 		}
 	}
 	archive := zip.NewWriter(imageOutput{ctx, writer})

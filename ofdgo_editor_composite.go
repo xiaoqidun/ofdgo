@@ -377,12 +377,14 @@ func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, 
 	}
 	object := layer.Objects[index]
 	origin := e.objectOrigin(path.ID)
+	var data []byte
 	if origin == nil {
-		return nil, nil, nil, nil, fmt.Errorf("composite requires original content")
-	}
-	data, err := editorXMLObject(origin.data, origin.node, origin.object, object)
-	if err == nil {
-		data, err = editorXMLStandalone(data, origin.node)
+		data, err = editorObjectXML(object)
+	} else {
+		data, err = editorXMLObject(origin.data, origin.node, origin.object, object)
+		if err == nil {
+			data, err = editorXMLStandalone(data, origin.node)
+		}
 	}
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -818,8 +820,11 @@ func (e *Editor) editCompositeScope(page int, path ObjectPath, edit func(*Render
 	next.setStates(root.states)
 	next.object.CompositeGraphicUnit.states = next.states
 	origin := e.objectOrigin(path.ID)
-	next.node.parent = origin.node.parent
-	updated := &editorObjectOrigin{page: origin.page, data: data, node: next.node, object: next.object}
+	updated := &editorObjectOrigin{data: data, node: next.node, object: next.object}
+	if origin != nil {
+		next.node.parent = origin.node.parent
+		updated.page = origin.page
+	}
 	return e.updateObjectOrigins(page, []GraphicObject{next.object}, true, map[string]*editorObjectOrigin{path.ID: updated})
 }
 

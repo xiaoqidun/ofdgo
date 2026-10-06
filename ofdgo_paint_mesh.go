@@ -45,10 +45,11 @@ type ShdPoint struct {
 
 // MeshVertex 保存局部毫米坐标、原颜色分量及非预乘透明度
 type MeshVertex struct {
-	Point  Point
-	Space  string
-	Values [4]float64
-	Alpha  float64
+	Point   Point
+	Space   string
+	Values  [4]float64
+	Alpha   float64
+	profile *colorProfile
 }
 
 // MeshShading 保存后端无关的三角网格，后出现的三角形覆盖先出现的三角形
@@ -82,7 +83,7 @@ func (m *MeshShading) At(x, y float64) color.RGBA {
 				values[k] += weight * t[j].Values[k]
 			}
 		}
-		red, green, blue := meshRGB(t[0].Space, values)
+		red, green, blue := t[0].rgb(values)
 		return color.RGBA{meshByte(red * alpha), meshByte(green * alpha), meshByte(blue * alpha), meshByte(alpha)}
 	}
 	return m.Background
@@ -129,22 +130,20 @@ func (r *Renderer) resolveMesh(fill *FillColor) (*MeshShading, error) {
 	vertices := make([]MeshVertex, len(points))
 	for i, point := range points {
 		space := point.Color.ColorSpace
-		if space == "" {
-			space = fill.ColorSpace
-		}
 		kind, values := r.colorComponents(point.Color.Value, point.Color.Index, space)
+		profile, err := r.Reader.colorProfile(r.colorDefinition(space))
+		if err != nil {
+			return nil, err
+		}
 		alpha := 1.0
 		if value := mergeAlpha(point.Color.Alpha, fill.Alpha); value != nil {
 			alpha = float64(*value) / 255
 		}
-		vertices[i] = MeshVertex{Point{point.X, point.Y}, kind, values, alpha}
+		vertices[i] = MeshVertex{Point: Point{point.X, point.Y}, Space: kind, Values: values, Alpha: alpha, profile: profile}
 	}
 	mesh := &MeshShading{}
 	if extend == 1 && back != nil {
 		space := back.ColorSpace
-		if space == "" {
-			space = fill.ColorSpace
-		}
 		mesh.Background = r.ResolveColor(back.Value, back.Index, space, mergeAlpha(back.Alpha, fill.Alpha))
 	}
 	for _, triangle := range indices {
@@ -152,14 +151,45 @@ func (r *Renderer) resolveMesh(fill *FillColor) (*MeshShading, error) {
 	}
 	for i := range mesh.Triangles {
 		t := &mesh.Triangles[i]
-		if t[0].Space != t[1].Space || t[0].Space != t[2].Space {
+		if !t[0].sameSpace(t[1]) || !t[0].sameSpace(t[2]) {
 			for j := range t {
-				r, g, b := meshRGB(t[j].Space, t[j].Values)
+				r, g, b := t[j].rgb(t[j].Values)
 				t[j].Space, t[j].Values = "RGB", [4]float64{r, g, b}
+				t[j].profile = nil
 			}
 		}
 	}
 	return mesh, nil
+}
+
+// sameSpace 判断分量能否在原颜色空间内插值，不混合不同ICC定义的分量
+// 入参: other 另一顶点
+// 返回: bool 模型及配置是否相同
+func (v MeshVertex) sameSpace(other MeshVertex) bool {
+	if v.Space != other.Space {
+		return false
+	}
+	if v.profile == other.profile {
+		return true
+	}
+	return v.profile != nil && other.profile != nil && v.profile.space.Equal(other.profile.space)
+}
+
+// rgb 转换采样分量，插值浮点误差裁切到源空间单位区间
+// 入参: values 插值分量
+// 返回: float64 红、绿、蓝分量
+func (v MeshVertex) rgb(values [4]float64) (float64, float64, float64) {
+	if v.profile != nil {
+		for i := range values {
+			values[i] = math.Max(0, math.Min(1, values[i]))
+		}
+		rgb, err := v.profile.rgb(values)
+		if err != nil {
+			return 0, 0, 0
+		}
+		return rgb[0], rgb[1], rgb[2]
+	}
+	return meshRGB(v.Space, values)
 }
 
 // meshTriangleIndices 校验控制点并生成共享边或格构三角形编号

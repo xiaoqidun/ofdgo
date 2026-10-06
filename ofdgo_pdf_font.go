@@ -171,6 +171,10 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, er
 		return nil, 0, fmt.Errorf("embedded PDF font has no glyphs")
 	}
 	changed := false
+	if head := tables["head"]; len(head) == 56 && binary.BigEndian.Uint32(head[:4]) == 0x00010000 && head[54] == 0 && head[55] == 0 {
+		tables["head"] = head[:54]
+		changed = true
+	}
 	if cff := tables["CFF "]; len(cff) != 0 {
 		sanitized, err := sanitizeCFF(cff)
 		if err != nil {

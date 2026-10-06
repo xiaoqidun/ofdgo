@@ -262,33 +262,13 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 		}
 	}
 	if options.Compression.Mode != CompressionUnchanged && doc.Signatures == "" && len(protected) == 0 {
-		images, err := r.Images(context.Background())
+		images, sizes, err := r.compressionImagePlan(context.Background(), options.Compression)
 		if err != nil {
 			return nil, err
 		}
-		var masks map[string]bool
-		geometry := false
-		if options.Compression.Mode == CompressionLossy {
-			masks, geometry, err = r.compressionImageSafety(context.Background(), images)
-			if err != nil {
-				return nil, err
-			}
-		}
-		dpi := 0
-		if geometry {
-			dpi = options.Compression.ImageDPI()
-		}
-		sizes, err := r.compressionImageSizes(context.Background(), images, dpi)
-		if err != nil {
-			return nil, err
-		}
-		optimizer := &Editor{output: &outputOptimization{ctx: context.Background(), options: options.Compression, sizes: sizes, images: make(map[string]bool)}}
+		optimizer := &Editor{output: &outputOptimization{ctx: context.Background(), options: options.Compression, sizes: sizes, images: images}}
 		optimizer.OnWriteProgress = func(stage string, completed, total int) error {
 			return options.progress.report(stage, completed, total)
-		}
-		for _, img := range images {
-			key := strings.ToLower(cleanPackagePath(img.Location))
-			optimizer.output.images[key] = !masks[key]
 		}
 		removed := make(map[string]bool)
 		if err := optimizer.compressResourceParts(parts, nil, removed); err != nil {

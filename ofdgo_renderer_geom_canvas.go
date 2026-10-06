@@ -144,10 +144,10 @@ func (CanvasBackend) Combine(left, right GeometryPath, operation GeometryOperati
 	return *geometryFromCanvasPath(result), nil
 }
 
-// Stroke 将绝对长度虚线与描边转换为填充区域，曲线按指定精度展开
+// Stroke 将绝对长度虚线与描边转换为填充区域，几何后端异常时使用本库非零描边
 // 入参: path 页面路径, options 描边样式
 // 返回: GeometryPath 描边区域, error 样式或路径错误
-func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (GeometryPath, error) {
+func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (result GeometryPath, err error) {
 	if err := validateStroke(options); err != nil {
 		return nil, err
 	}
@@ -162,6 +162,15 @@ func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (GeometryP
 	if tolerance == 0 {
 		tolerance = canvas.Tolerance
 	}
+	options.Tolerance = tolerance
+	defer func() {
+		if failure := recover(); failure != nil {
+			result, err = path.Stroke(options)
+			if err != nil {
+				err = fmt.Errorf("stroke fallback after %v: %w", failure, err)
+			}
+		}
+	}()
 	style := pathStyle{lineJoin: canvas.MiterJoin, lineCap: canvas.ButtCap, miterLimit: defaultMiterLimit}
 	style.applyLineJoin(options.Join, options.MiterLimit)
 	style.lineCap = pathLineCap(options.Cap, style.lineCap)
@@ -229,17 +238,50 @@ func canvasStrokePath(geometry GeometryBackend, path *canvas.Path, options Strok
 	return geometryToCanvasPath(&outline)
 }
 
+// canvasStrokeFillPath 为直接非零填充展开复杂描边，不将重叠轮廓交给区域运算
+// 入参: geometry 几何后端, path Canvas路径, options 描边样式
+// 返回: *canvas.Path 描边轮廓, error 几何错误
+func canvasStrokeFillPath(geometry GeometryBackend, path *canvas.Path, options StrokeOptions) (*canvas.Path, error) {
+	if canvasNativeStroke(geometry) && !slices.Contains(options.Dashes, 0) {
+		if options.Tolerance == 0 {
+			options.Tolerance = canvas.Tolerance
+		}
+		if err := validateStroke(options); err != nil {
+			return nil, err
+		}
+		if len(path.Dash(options.DashOffset, options.Dashes...).Data()) > 256 {
+			outline, err := geometryFromCanvasPath(path).Stroke(options)
+			if err != nil {
+				return canvasStrokePath(geometry, path, options)
+			}
+			return geometryToCanvasPath(&outline)
+		}
+	}
+	return canvasStrokePath(geometry, path, options)
+}
+
+// canvasFillClip 检查描边轮廓能否直接填充或按凸窗口独立裁剪
+// 入参: clip 裁剪路径
+// 返回: bool 是否不要求整理重叠区域
+func canvasFillClip(clip *canvas.Path) bool {
+	if clip == nil {
+		return true
+	}
+	_, ok := convexCanvasPolygon(clip)
+	return ok
+}
+
 // strokeCanvasPath 将文字和复杂画刷的描边交给配置的几何后端
 // 入参: path Canvas路径, width 描边宽度, cap 线帽, join 连接
 // 返回: *canvas.Path 描边轮廓
 func (r *Renderer) strokeCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner) *canvas.Path {
-	return r.strokeDashedCanvasPath(path, width, cap, join, 0, nil)
+	return r.strokeDashedCanvasPath(path, width, cap, join, 0, nil, false)
 }
 
 // strokeDashedCanvasPath 通过公共几何后端展开虚线和线帽，保留零长度绘制段
-// 入参: path 路径, width 线宽, cap 线帽, join 连接, offset 虚线偏移, dashes 虚线数组
+// 入参: path 路径, width 线宽, cap 线帽, join 连接, offset 虚线偏移, dashes 虚线数组, fill 是否直接填充或凸窗口裁剪
 // 返回: *canvas.Path 描边填充轮廓
-func (r *Renderer) strokeDashedCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner, offset float64, dashes []float64) *canvas.Path {
+func (r *Renderer) strokeDashedCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner, offset float64, dashes []float64, fill bool) *canvas.Path {
 	geometry, err := r.Geometry()
 	if err != nil {
 		r.renderError = err
@@ -247,7 +289,11 @@ func (r *Renderer) strokeDashedCanvasPath(path *canvas.Path, width float64, cap 
 	}
 	options := canvasStrokeOptions(width, cap, join, canvas.Tolerance)
 	options.DashOffset, options.Dashes = offset, dashes
-	result, err := canvasStrokePath(geometry, path, options)
+	stroke := canvasStrokePath
+	if fill {
+		stroke = canvasStrokeFillPath
+	}
+	result, err := stroke(geometry, path, options)
 	if err != nil {
 		r.renderError = err
 		return &canvas.Path{}

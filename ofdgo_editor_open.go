@@ -346,7 +346,7 @@ func (e *Editor) sourceRGB() bool {
 		return true
 	}
 	space := e.source.reader.colorSpaceCache[strconv.Itoa(e.source.document.CommonData.DefaultCS)]
-	return space != nil && space.Type == "RGB" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0
+	return space != nil && space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0
 }
 
 // repairSourceObjectIDs 按实际节点区分重复对象，只修复没有引用歧义的编号
@@ -891,14 +891,18 @@ func (e *Editor) editorTextMeasurable(text TextObject) bool {
 // 入参: id 图片资源标识
 // 返回: image.Point 图片尺寸, error 错误信息
 func (e *Editor) editorImage(id string) (image.Point, error) {
-	if size := e.images[id]; size.X > 0 {
+	if size, ok := resourceValue(e.images, id); ok && size.X > 0 {
 		return size, nil
 	}
 	if e.source == nil {
 		return image.Point{}, fmt.Errorf("image resource %q not found", id)
 	}
 	reader := e.source.reader
-	input, err := reader.openFile(reader.ResPath(reader.ResMap[id]))
+	name, ok := resourceValue(reader.ResMap, id)
+	if !ok {
+		return image.Point{}, fmt.Errorf("image resource %q not found", id)
+	}
+	input, err := reader.openFile(reader.ResPath(name))
 	if err != nil {
 		return image.Point{}, err
 	}

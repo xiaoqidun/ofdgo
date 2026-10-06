@@ -37,7 +37,9 @@ type ColorSpace struct {
 	ID               string   `xml:"ID,attr"`
 	Type             string   `xml:"Type,attr"`
 	BitsPerComponent int      `xml:"BitsPerComponent,attr"`
+	Profile          string   `xml:"Profile,attr,omitempty"`
 	Palette          []string `xml:"Palette>CV"`
+	profile          *colorProfile
 }
 
 // Fonts 字体集合
@@ -128,4 +130,33 @@ type CompositeGraphicUnit struct {
 	Actions              []Action               `xml:"Actions>Action"`
 	states               map[string]editorCompositeState
 	extentSet            bool
+}
+
+// resourceValue 优先查找原标识与标准十进制标识，回退别名有冲突时不猜测
+// 入参: values 已加载资源, id 标识文本
+// 返回: T 资源值, bool 是否存在唯一结果
+func resourceValue[T comparable](values map[string]T, id string) (T, bool) {
+	if value, ok := values[id]; ok {
+		return value, true
+	}
+	var value T
+	key := editorResourceID(id)
+	if key == "" {
+		return value, false
+	}
+	if value, ok := values[key]; ok {
+		return value, true
+	}
+	found := false
+	for alias, candidate := range values {
+		if editorResourceID(alias) != key {
+			continue
+		}
+		if found && value != candidate {
+			var zero T
+			return zero, false
+		}
+		value, found = candidate, true
+	}
+	return value, found
 }

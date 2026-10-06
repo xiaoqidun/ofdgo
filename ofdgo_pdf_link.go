@@ -54,8 +54,12 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		}
 		if parent, ok := parents[popup.Parent]; ok {
 			dict := maps.Clone(annotations[parent].Dictionary)
-			if previous := dict["Popup"]; previous != nil {
-				if reference, ok := previous.(pdfgo.Reference); !ok || reference != annotation.Reference {
+			previous, err := p.reader.Resolve(dict["Popup"])
+			if err != nil {
+				return err
+			}
+			if previous != nil {
+				if reference, ok := dict["Popup"].(pdfgo.Reference); !ok || reference != annotation.Reference {
 					return fmt.Errorf("inconsistent PDF popup parent")
 				}
 			}
@@ -74,7 +78,11 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			continue
 		}
 		dict := annotation.Dictionary
-		if dict["OC"] != nil {
+		optional, err := p.reader.Resolve(dict["OC"])
+		if err != nil {
+			return err
+		}
+		if optional != nil {
 			if strict {
 				return &pdfgo.UnsupportedError{Feature: "annotation optional content conversion"}
 			}
@@ -105,7 +113,10 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 				p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF text annotation open state retained as annotation parameter"})
 			}
 		}
-		popupObject := dict["Popup"]
+		popupObject, err := p.reader.Resolve(dict["Popup"])
+		if err != nil {
+			return err
+		}
 		if annotation.Subtype == "Popup" {
 			popupObject = dict
 		}
@@ -221,8 +232,16 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		if annotation.Subtype != "Link" {
 			return &pdfgo.UnsupportedError{Feature: "annotation " + string(annotation.Subtype)}
 		}
-		if dict["AA"] != nil {
+		additional, err := p.reader.Resolve(dict["AA"])
+		if err != nil {
+			return err
+		}
+		if additional != nil {
 			return &pdfgo.UnsupportedError{Feature: "link annotation field \"AA\""}
+		}
+		primary, err := p.reader.Resolve(dict["A"])
+		if err != nil {
+			return err
 		}
 		var actions []Action
 		currentPage := p.page
@@ -238,11 +257,11 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			}
 			return nil
 		}
-		if dict["A"] == nil {
+		if primary == nil {
 			if err := appendAction(dict); err != nil {
 				return err
 			}
-		} else if err := p.reader.WalkActions(ctx, dict["A"], func(info pdfgo.ActionInfo) error {
+		} else if err := p.reader.WalkActions(ctx, primary, func(info pdfgo.ActionInfo) error {
 			current := maps.Clone(dict)
 			current["A"] = info.Dictionary
 			return appendAction(current)
@@ -325,14 +344,14 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 	if err != nil {
 		return nil, err
 	}
-	if target == nil && dict["A"] == nil {
+	value, err := p.reader.Resolve(dict["A"])
+	if err != nil {
+		return nil, err
+	}
+	if target == nil && value == nil {
 		return nil, nil
 	}
-	if dict["A"] != nil {
-		value, err := p.reader.Resolve(dict["A"])
-		if err != nil {
-			return nil, err
-		}
+	if value != nil {
 		a, ok := value.(pdfgo.Dictionary)
 		if !ok {
 			return nil, fmt.Errorf("invalid PDF link action")
@@ -346,8 +365,12 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 			target = a["D"]
 		case pdfgo.Name("GoToR"):
 			return p.remoteLinkAction(a, strict)
+		case pdfgo.Name("Launch"):
+			return p.launchLinkAction(a, strict)
 		case pdfgo.Name("Sound"):
 			return p.soundLinkAction(a, strict)
+		case pdfgo.Name("JavaScript"), pdfgo.Name("ResetForm"), pdfgo.Name("ImportData"), pdfgo.Name("Hide"), pdfgo.Name("Movie"):
+			return p.staticLinkAction(a, kind.(pdfgo.Name), strict)
 		case pdfgo.Name("GoToE"):
 			converted, local, err := p.embeddedLinkAction(a, strict)
 			if err != nil || local == nil {
@@ -494,4 +517,31 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 		*currentPage = p.pageIndexes[destination.Page]
 	}
 	return &action, nil
+}
+
+// staticLinkAction 校验OFD无法等价表达的标准动作，按策略保留静态外观
+// 入参: object PDF动作, kind 动作类型, strict 是否禁止交互损失
+// 返回: *Action 空动作, error 无效参数或不可等价转换错误
+func (p *pdfImporter) staticLinkAction(object pdfgo.Object, kind pdfgo.Name, strict bool) (*Action, error) {
+	var err error
+	switch kind {
+	case "JavaScript":
+		_, err = p.reader.ReadJavaScriptAction(p.ctx, object)
+	case "ResetForm":
+		_, err = p.reader.ReadResetFormAction(p.ctx, object)
+	case "ImportData":
+		_, err = p.reader.ReadImportDataAction(p.ctx, object)
+	case "Hide":
+		_, err = p.reader.ReadHideAction(p.ctx, object)
+	case "Movie":
+		_, err = p.reader.ReadMovieAction(p.ctx, object)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if strict {
+		return nil, &pdfgo.UnsupportedError{Feature: "interactive " + string(kind) + " action conversion"}
+	}
+	p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF " + string(kind) + " action not transferred to OFD; static appearance retained"})
+	return nil, nil
 }

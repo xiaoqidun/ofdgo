@@ -36,7 +36,11 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 		if key == "A" && (annotation.Subtype == "Link" || annotation.Subtype == "Movie") {
 			continue
 		}
-		if annotation.Dictionary[key] != nil {
+		value, err := p.reader.Resolve(annotation.Dictionary[key])
+		if err != nil {
+			return err
+		}
+		if value != nil {
 			return &pdfgo.UnsupportedError{Feature: fmt.Sprintf("annotation field %q", key)}
 		}
 	}
@@ -113,7 +117,10 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 		}
 		converted.Parameters = &AnnotationParameters{Parameter: []AnnotationParameter{{Name: "PDF.Text.Open", Value: strconv.FormatBool(value == pdfgo.Boolean(true))}}}
 	}
-	popupObject := annotation.Dictionary["Popup"]
+	popupObject, err := p.reader.Resolve(annotation.Dictionary["Popup"])
+	if err != nil {
+		return err
+	}
 	if annotation.Subtype == "Popup" {
 		popupObject = annotation.Dictionary
 	}

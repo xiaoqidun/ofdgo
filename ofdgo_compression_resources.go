@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/xml"
 	"fmt"
+	"image"
 	"io"
 	"maps"
 	"path"
@@ -27,6 +28,13 @@ import (
 
 	"github.com/xiaoqidun/pdfgo"
 )
+
+// outputImageKey 区分相同图像的压缩配置和像素需求，不跨写出保留状态
+type outputImageKey struct {
+	hash    [32]byte
+	options CompressionOptions
+	size    image.Point
+}
 
 // compressResourceParts 优化输出图片并合并相同资源文件，保留资源标识及各自属性
 // 入参: parts 输出改动, reader 原包，可为空, removed 已移除条目
@@ -159,7 +167,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 	}
 	formats := make(map[string]string)
 	seen := make(map[string]map[[32]byte]string)
-	e.output.optimized = make(map[string]bool)
+	imageResults := make(map[outputImageKey][]byte)
 	for _, key := range slices.Sorted(maps.Keys(actual)) {
 		if refs.files[key] || files[resourceFile{key, "FontFile"}] && files[resourceFile{key, "MediaFile"}] {
 			continue
@@ -171,21 +179,48 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 			if err := editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0); err != nil {
 				return err
 			}
+			if data, ok := parts[actual[key]]; ok && len(data) > outputOptimizationBufferLimit {
+				continue
+			}
+			if reader != nil && parts[actual[key]] == nil {
+				if file, ok := reader.packageFile(actual[key]); ok && file.UncompressedSize64 > outputOptimizationBufferLimit {
+					continue
+				}
+			}
 			data, err := read(actual[key])
 			if err != nil {
 				return err
+			}
+			if len(data) > outputOptimizationBufferLimit {
+				continue
 			}
 			if role == "MediaFile" {
 				options := e.output.options
 				if !e.output.images[key] {
 					options.Mode = CompressionLossless
 				}
-				candidate, err := pdfgo.OptimizeImageResource(e.output.ctx, data, options, e.output.sizes[key])
+				demand := e.output.sizes[key]
+				if options.Mode != CompressionLossy {
+					options = CompressionOptions{Mode: options.Mode}
+					demand = image.Point{}
+				}
+				cacheKey := outputImageKey{hash: sha256.Sum256(data), options: options, size: demand}
+				candidate, cached := imageResults[cacheKey]
+				var err error
+				if !cached {
+					candidate, err = pdfgo.OptimizeImageResource(e.output.ctx, data, options, demand)
+					if err == nil {
+						imageResults[cacheKey] = nil
+						if len(candidate) < len(data) {
+							imageResults[cacheKey] = candidate
+						}
+					}
+				}
 				if err != nil {
 					if e.output.ctx.Err() != nil {
 						return e.output.ctx.Err()
 					}
-				} else if len(candidate) < len(data) {
+				} else if candidate != nil && len(candidate) < len(data) {
 					data = candidate
 					parts[actual[key]] = data
 				}
@@ -203,10 +238,8 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 						parts[name] = data
 						delete(parts, actual[key])
 						removed[key] = true
-						e.output.optimized[strings.ToLower(name)] = true
 					}
 				}
-				e.output.optimized[key] = true
 			}
 			if seen[role] == nil {
 				seen[role] = make(map[[32]byte]string)

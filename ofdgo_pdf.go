@@ -37,6 +37,7 @@ var ErrPDFPassword = pdfgo.ErrPassword
 // ResolveFile读取PDF引用的外部媒体、附件和页面，默认不访问网络或本地路径
 // ResolveReference可提供已解密的引用页面，目标阅读器由调用方维护
 // Halftones提供只读设备命名网屏，所属阅读器由调用方维护，连续色调输出不网屏化
+// Compression配置转换输出，有损模式按图片实际尺寸降采样，默认及无损保持完整采样
 type PDFImportOptions struct {
 	Password         []byte
 	PasswordUTF8     bool
@@ -49,6 +50,7 @@ type PDFImportOptions struct {
 	ResolveFile      pdfgo.FileResolver
 	ResolveReference pdfgo.ReferenceResolver
 	Halftones        map[string]*pdfgo.Halftone
+	Compression      CompressionOptions
 }
 
 // PDFImportReport 汇总转换页数、对象数、链接数和转换警告
@@ -82,11 +84,13 @@ type pdfImporter struct {
 	clipTexts        map[*pdfgo.TextClip][]TextObject
 	clipPaths        *renderCache[[32]byte, pdfClipPath]
 	cmykSpace        string
+	iccSpaces        map[pdfICCKey]string
 	objects          *pdfObjectBuffer
 	pages            map[pdfgo.Reference]*pdfgo.Page
 	pageIDs          map[pdfgo.Reference]string
 	pageIndexes      map[pdfgo.Reference]int
 	imageIDs         map[pdfImageKey][]pdfImageResource
+	imageContents    *renderCache[pdfImageContentKey, pdfImageContent]
 	attachmentIDs    map[pdfAttachmentKey]string
 	maskClips        map[*pdfgo.SoftMask]pdfgo.Path
 	pageBox          pdfgo.Rectangle
@@ -109,6 +113,7 @@ type pdfImporter struct {
 	halftoneWarnings map[*pdfgo.Halftone]bool
 	halftones        map[string]*pdfgo.Halftone
 	transferBackdrop bool
+	compression      CompressionOptions
 }
 
 // ImportPDF 将PDF内容转换为独立OFD编辑文档，失败时不返回部分结果
@@ -116,6 +121,9 @@ type pdfImporter struct {
 // 返回: *Editor 编辑文档, PDFImportReport 转换统计, error 错误信息
 func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFImportOptions) (*Editor, PDFImportReport, error) {
 	if err := ctx.Err(); err != nil {
+		return nil, PDFImportReport{}, err
+	}
+	if err := options.Compression.Validate(); err != nil {
 		return nil, PDFImportReport{}, err
 	}
 	if !finite(options.RasterDPI) || options.RasterDPI < 0 {
@@ -138,8 +146,10 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	}
 	readOptions := pdfgo.ReaderOptions{Password: options.Password, PasswordUTF8: options.PasswordUTF8}
 	var diagnostics []pdfgo.Diagnostic
+	var readWarning func(pdfgo.Diagnostic)
 	if !options.Strict {
-		readOptions.Warning = func(diagnostic pdfgo.Diagnostic) { diagnostics = append(diagnostics, diagnostic) }
+		readWarning = func(diagnostic pdfgo.Diagnostic) { diagnostics = append(diagnostics, diagnostic) }
+		readOptions.Warning = func(diagnostic pdfgo.Diagnostic) { readWarning(diagnostic) }
 	}
 	reader, err := pdfgo.NewReaderWithOptions(source, size, readOptions)
 	if err != nil {
@@ -156,6 +166,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	importer.resolveFile = options.ResolveFile
 	importer.resolveReference = options.ResolveReference
 	importer.halftones = options.Halftones
+	importer.compression = options.Compression
 	importer.referenceReaders = make(map[[32]byte]*pdfgo.Reader)
 	importer.referenceStreams = make(map[*pdfgo.Stream]*pdfgo.Reader)
 	importer.referencePages = make(map[pdfReferencePageKey]*pdfgo.Page)
@@ -172,6 +183,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 			warning.Page = importer.page + 1
 			importer.report.Warnings = append(importer.report.Warnings, warning)
 		}
+		readWarning = importer.warning
 	}
 	if options.OnProgress != nil {
 		if err := options.OnProgress("pages", 0, 0); err != nil {
@@ -278,7 +290,7 @@ func ConvertPDF(ctx context.Context, source io.ReaderAt, size int64, output io.W
 		}
 		return nil
 	}
-	_, err = editor.WriteToWithOptions(ctx, output, WriteOptions{})
+	_, err = editor.WriteToWithOptions(ctx, output, WriteOptions{Compression: options.Compression})
 	return report, err
 }
 
@@ -289,6 +301,10 @@ func (p *pdfImporter) commitObjects() error {
 		return nil
 	}
 	objects, err := p.objects.data(p.ctx)
+	if err != nil {
+		return err
+	}
+	objects, err = p.sharedClipObjects(objects)
 	if err != nil {
 		return err
 	}
@@ -693,7 +709,7 @@ func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error)
 		}
 		shading := &RadialShd{StartPoint: pdfNumbers(start.X-box.X, start.Y-box.Y), EndPoint: pdfNumbers(end.X-box.X, end.Y-box.Y), StartRadius: gradient.StartRadius * scale, EndRadius: gradient.EndRadius * scale, Eccentricity: eccentricity, Angle: angle, Extend: strconv.Itoa(extend)}
 		var err error
-		shading.Segment, err = p.gradientSegments(gradient.Stops, gradient.Space)
+		shading.Segment, err = p.gradientSegments(gradient.Stops, gradient.Space, gradient.Intent)
 		if err != nil {
 			return nil, err
 		}
@@ -727,7 +743,7 @@ func (p *pdfImporter) paintColor(paint pdfgo.Paint, box Box) (*FillColor, error)
 	}
 	shading := &AxialShd{StartPoint: pdfNumbers(start.X-box.X, start.Y-box.Y), EndPoint: pdfNumbers(end.X-box.X, end.Y-box.Y), Extend: strconv.Itoa(extend)}
 	var err error
-	shading.Segment, err = p.gradientSegments(gradient.Stops, gradient.Space)
+	shading.Segment, err = p.gradientSegments(gradient.Stops, gradient.Space, gradient.Intent)
 	if err != nil {
 		return nil, err
 	}

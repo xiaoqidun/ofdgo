@@ -36,6 +36,46 @@ type pdfEmbeddedFile struct {
 	data   []byte
 }
 
+// launchLinkAction 保留文件打开目标，不执行应用程序或猜测平台启动参数
+// 入参: object 启动动作, strict 是否禁止启动语义损失
+// 返回: *Action 附件动作, error 解析、取消或无法表达的语义
+func (p *pdfImporter) launchLinkAction(object pdfgo.Object, strict bool) (*Action, error) {
+	action, err := p.reader.ReadLaunchAction(p.ctx, object)
+	if err != nil {
+		return nil, err
+	}
+	if action.File == nil || action.Windows != nil || action.Mac != nil || action.Unix != nil {
+		if strict {
+			return nil, &pdfgo.UnsupportedError{Feature: "platform launch action conversion"}
+		}
+		p.warning(pdfgo.Diagnostic{Message: "PDF platform launch parameters not transferred to OFD; appearance retained"})
+		return nil, nil
+	}
+	if strict && action.NewWindow == nil {
+		return nil, &pdfgo.UnsupportedError{Feature: "launch reader window preference conversion"}
+	}
+	data, available, err := p.mediaData(p.ctx, *action.File)
+	if err != nil || !available {
+		return nil, err
+	}
+	pdfTarget := bytes.HasPrefix(bytes.TrimSpace(data[:min(len(data), 1024)]), []byte("%PDF-"))
+	if !pdfTarget && strict {
+		return nil, &pdfgo.UnsupportedError{Feature: "application or non-PDF launch action conversion"}
+	}
+	id, err := p.attachmentFile(action.File.Name, data)
+	if err != nil {
+		return nil, err
+	}
+	window := action.NewWindow
+	if !pdfTarget {
+		window = nil
+		p.warning(pdfgo.Diagnostic{Message: "PDF launch target retained as attachment; application execution not transferred to OFD"})
+	} else if window == nil {
+		p.warning(pdfgo.Diagnostic{Message: "PDF launch target retained as attachment; reader window preference not transferred to OFD"})
+	}
+	return &Action{Event: "CLICK", GotoA: &GotoA{AttachID: id, NewWindow: window}}, nil
+}
+
 // remoteLinkAction 保留调用方提供的远程文件，不生成OFD无法表达的文件内目标
 // 入参: object 远程跳转动作, strict 是否禁止目标语义损失
 // 返回: *Action 附件动作, error 结构、取消或转换错误

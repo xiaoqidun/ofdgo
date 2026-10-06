@@ -432,7 +432,7 @@ func (e *Editor) writePartsWithPages(write func(string, []byte, bool) error, pro
 		}
 	}
 	for _, resource := range e.resources {
-		if resource.definition() != "" && slices.Contains(definitions, resource.name) {
+		if resource.definition() != "" && slices.Contains(definitions, resource.name) || resource.colorProfileUsed(spaces) {
 			if err := write(resource.name, resource.data, false); err != nil {
 				return err
 			}
@@ -581,7 +581,16 @@ func (x *ofdXML) resources(fonts, images []editorResource, spaces []ColorSpace) 
 			if x.err != nil {
 				return
 			}
-			x.start("ColorSpace", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: space.ID}, {Name: xml.Name{Local: "Type"}, Value: space.Type}, {Name: xml.Name{Local: "BitsPerComponent"}, Value: strconv.Itoa(space.BitsPerComponent)}})
+			attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: space.ID}, {Name: xml.Name{Local: "Type"}, Value: space.Type}, {Name: xml.Name{Local: "BitsPerComponent"}, Value: strconv.Itoa(space.BitsPerComponent)}}
+			attrs.add("Profile", space.Profile)
+			x.start("ColorSpace", attrs)
+			if len(space.Palette) != 0 {
+				x.start("Palette", nil)
+				for _, entry := range space.Palette {
+					x.text("CV", entry)
+				}
+				x.end("Palette")
+			}
 			x.end("ColorSpace")
 		}
 		x.end("ColorSpaces")

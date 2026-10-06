@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"context"
+	"encoding/binary"
 	"encoding/xml"
 	"hash/crc32"
 	"image"
@@ -27,6 +28,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -39,6 +41,8 @@ const (
 	CompressionMedium    = pdfgo.CompressionMedium
 	CompressionStrong    = pdfgo.CompressionStrong
 )
+
+const outputOptimizationBufferLimit = 64 << 20
 
 // CompressionMode 选择默认、无损或有损输出策略
 type CompressionMode = pdfgo.CompressionMode
@@ -63,7 +67,22 @@ type outputOptimization struct {
 	protected bool
 	completed int
 	deflater  *flate.Writer
-	optimized map[string]bool
+}
+
+// outputCompressionBuffer 限制候选ZIP编码，不能缩小时终止本次压缩
+type outputCompressionBuffer struct {
+	buffer *bytes.Buffer
+	limit  int
+}
+
+// Write 写入有界候选编码，超过体积上限时返回短缓冲错误
+// 入参: data 编码数据
+// 返回: int 写入字节数, error 容量错误
+func (b outputCompressionBuffer) Write(data []byte) (int, error) {
+	if len(data) > b.limit-b.buffer.Len() {
+		return 0, io.ErrShortBuffer
+	}
+	return b.buffer.Write(data)
 }
 
 // WriteToWithOptions 按压缩策略写出OFD，签名文档不额外改写资源内容
@@ -140,22 +159,9 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 			return nil, err
 		}
 		defer reader.Close()
-		images, err := reader.Images(ctx)
+		snapshot.output.images, snapshot.output.sizes, err = reader.compressionImagePlan(ctx, options.Compression)
 		if err != nil {
 			return nil, err
-		}
-		masks, geometry, err := reader.compressionImageSafety(ctx, images)
-		if err != nil {
-			return nil, err
-		}
-		for name := range masks {
-			snapshot.output.images[name] = false
-		}
-		if geometry {
-			snapshot.output.sizes, err = reader.compressionImageSizes(ctx, images, options.Compression.ImageDPI())
-			if err != nil {
-				return nil, err
-			}
 		}
 	}
 	return &snapshot, nil
@@ -166,16 +172,37 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 // 返回: map[string]bool 只能无损处理的资源路径, bool 是否可分析尺寸, error 读取或取消错误
 func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo) (map[string]bool, bool, error) {
 	names := make(map[string]bool)
-	for name := range r.fileIndex {
-		names[name] = true
-	}
-	for name := range r.files {
-		names[name] = true
+	safe := true
+	if len(r.OFD.DocBody) != 0 {
+		dependencies, err := r.documentFiles(ctx, r.DocumentIndex())
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, false, ctx.Err()
+			}
+			safe = false
+		}
+		for key := range dependencies {
+			name, exists := r.fileNamesFold[key]
+			if !exists {
+				safe = false
+				break
+			}
+			names[name] = true
+		}
+	} else {
+		for name := range r.fileIndex {
+			names[name] = true
+		}
+		for name := range r.files {
+			names[name] = true
+		}
 	}
 	masks := make(map[string]bool)
-	safe := true
-	geometry := len(r.OFD.DocBody) == 1
+	geometry := true
 	for _, name := range slices.Sorted(maps.Keys(names)) {
+		if !safe {
+			break
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, false, err
 		}
@@ -201,6 +228,10 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 					break
 				}
 				if element, ok := token.(xml.StartElement); ok {
+					if element.Name.Space != "" && element.Name.Space != ofdNamespace && element.Name.Space != "http://www.ofdspec.org" {
+						safe = false
+						break
+					}
 					if element.Name.Local == "Pattern" {
 						geometry = false
 					}
@@ -210,10 +241,10 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 							geometry = false
 						}
 						if attr.Name.Local == "ResourceID" {
-							resource = strings.TrimSpace(attr.Value)
+							resource = editorResourceID(attr.Value)
 						}
 						if attr.Name.Local == "ImageMask" {
-							masks[strings.TrimSpace(attr.Value)] = true
+							masks[editorResourceID(attr.Value)] = true
 							masked = true
 						}
 					}
@@ -230,7 +261,7 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 	}
 	paths := make(map[string]bool)
 	for _, img := range images {
-		if !safe || masks[img.ID] {
+		if !safe || masks[editorResourceID(img.ID)] {
 			paths[strings.ToLower(cleanPackagePath(img.Location))] = true
 		}
 	}
@@ -261,14 +292,17 @@ func (r *Reader) hasOutputSignatures() (bool, error) {
 	return false, nil
 }
 
-// writeOutputEntry 逐项优化图片与ZIP编码，保留资源名称及其他文件的原始字节
+// writeOutputEntry 优化ZIP编码，保留资源名称及条目的未压缩字节
 // 入参: archive 归档写入器, header 条目属性, data 原始数据
 // 返回: error 优化或写入错误
 func (e *Editor) writeOutputEntry(archive *zip.Writer, header zip.FileHeader, data []byte) error {
-	if e.output == nil || e.output.options.Mode == CompressionUnchanged || len(data) > 64<<20 {
+	if e.output == nil || e.output.options.Mode == CompressionUnchanged || len(data) > outputOptimizationBufferLimit {
 		entry, err := archive.CreateHeader(&header)
 		if err != nil {
 			return err
+		}
+		if e.output != nil {
+			return e.writeOutputBytes(entry, data)
 		}
 		_, err = entry.Write(data)
 		return err
@@ -276,57 +310,182 @@ func (e *Editor) writeOutputEntry(archive *zip.Writer, header zip.FileHeader, da
 	if err := editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0); err != nil {
 		return err
 	}
-	if lossy, ok := e.output.images[strings.ToLower(cleanPackagePath(header.Name))]; ok && !e.output.optimized[strings.ToLower(cleanPackagePath(header.Name))] {
-		options := e.output.options
-		if !lossy {
-			options.Mode = CompressionLossless
-		}
-		candidate, err := pdfgo.OptimizeImageSize(e.output.ctx, data, options, e.output.sizes[strings.ToLower(cleanPackagePath(header.Name))])
-		if err != nil {
-			if e.output.ctx.Err() != nil {
-				return e.output.ctx.Err()
-			}
-		} else {
-			data = candidate
-		}
-	}
-	var compressed bytes.Buffer
-	deflater := e.output.deflater
-	if deflater == nil {
-		deflater, _ = flate.NewWriter(&compressed, flate.BestCompression)
-		e.output.deflater = deflater
-	} else {
-		deflater.Reset(&compressed)
-	}
-	for offset := 0; offset < len(data); {
-		if err := e.output.ctx.Err(); err != nil {
-			deflater.Close()
-			return err
-		}
-		end := min(offset+64<<10, len(data))
-		if _, err := deflater.Write(data[offset:end]); err != nil {
-			return err
-		}
-		offset = end
-	}
-	if err := deflater.Close(); err != nil {
+	compressed, err := e.compressOutputBytes(data, len(data))
+	if err != nil {
 		return err
 	}
 	payload := data
 	header.Method = zip.Store
-	if compressed.Len() < len(data) {
-		payload = compressed.Bytes()
+	if compressed != nil {
+		payload = compressed
 		header.Method = zip.Deflate
 	}
-	header.CRC32 = crc32.ChecksumIEEE(data)
-	header.UncompressedSize64 = uint64(len(data))
-	header.CompressedSize64 = uint64(len(payload))
-	header.Flags &^= 8
+	prepareOutputHeader(&header, header.Method, uint64(len(data)), uint64(len(payload)), crc32.ChecksumIEEE(data))
 	entry, err := archive.CreateRaw(&header)
 	if err != nil {
 		return err
 	}
-	if _, err = entry.Write(payload); err != nil {
+	if err = e.writeOutputBytes(entry, payload); err != nil {
+		return err
+	}
+	e.output.completed++
+	return editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0)
+}
+
+// writeOutputBytes 分块写出已编码数据，不额外分配复制缓冲
+// 入参: writer 输出流, data 已编码字节
+// 返回: error 写入或取消错误
+func (e *Editor) writeOutputBytes(writer io.Writer, data []byte) error {
+	for offset := 0; offset < len(data); {
+		if err := e.output.ctx.Err(); err != nil {
+			return err
+		}
+		end := min(offset+64<<10, len(data))
+		n, err := writer.Write(data[offset:end])
+		if err != nil {
+			return err
+		}
+		if n != end-offset {
+			return io.ErrShortWrite
+		}
+		offset = end
+	}
+	return e.output.ctx.Err()
+}
+
+// compressOutputBytes 复用压缩器并限制候选体积，无收益时返回空值
+// 入参: data 未压缩数据, limit 候选体积上限
+// 返回: []byte 更小的DEFLATE编码, error 取消或编码错误
+func (e *Editor) compressOutputBytes(data []byte, limit int) ([]byte, error) {
+	var compressed bytes.Buffer
+	output := outputCompressionBuffer{buffer: &compressed, limit: min(limit, outputOptimizationBufferLimit)}
+	deflater := e.output.deflater
+	if deflater == nil {
+		deflater, _ = flate.NewWriter(output, flate.BestCompression)
+		e.output.deflater = deflater
+	} else {
+		deflater.Reset(output)
+	}
+	defer deflater.Close()
+	for offset := 0; offset < len(data); {
+		if err := e.output.ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := min(offset+64<<10, len(data))
+		if _, err := deflater.Write(data[offset:end]); err != nil {
+			if err == io.ErrShortBuffer {
+				return nil, e.output.ctx.Err()
+			}
+			return nil, err
+		}
+		offset = end
+	}
+	if err := deflater.Close(); err != nil {
+		if err == io.ErrShortBuffer {
+			return nil, e.output.ctx.Err()
+		}
+		return nil, err
+	}
+	if compressed.Len() >= limit {
+		return nil, e.output.ctx.Err()
+	}
+	return compressed.Bytes(), e.output.ctx.Err()
+}
+
+// prepareOutputHeader 更新原始ZIP编码属性，保留名称、备注和字符集标记
+// 入参: header 条目属性, method 编码方法, size 原始尺寸, packed 编码尺寸, checksum 校验值
+func prepareOutputHeader(header *zip.FileHeader, method uint16, size, packed uint64, checksum uint32) {
+	header.Method, header.ReaderVersion = method, 20
+	header.CreatorVersion = header.CreatorVersion&0xff00 | 20
+	header.CRC32, header.UncompressedSize64, header.CompressedSize64 = checksum, size, packed
+	header.Flags &^= 8
+	header.Extra = outputZIPExtra(header.Extra)
+	if header.NonUTF8 {
+		header.Flags &^= 0x800
+	} else if utf8.ValidString(header.Name) && utf8.ValidString(header.Comment) {
+		for _, value := range header.Name + header.Comment {
+			if value < 0x20 || value > 0x7d || value == 0x5c {
+				header.Flags |= 0x800
+				break
+			}
+		}
+	}
+}
+
+// outputZIPExtra 保留扩展属性，移除由新归档重新生成的ZIP64尺寸及偏移
+// 入参: extra 原始扩展属性
+// 返回: []byte 输出扩展属性，不修改原始缓冲
+func outputZIPExtra(extra []byte) []byte {
+	var output []byte
+	start := 0
+	for offset := 0; offset+4 <= len(extra); {
+		size := 4 + int(binary.LittleEndian.Uint16(extra[offset+2:]))
+		if size > len(extra)-offset {
+			break
+		}
+		if binary.LittleEndian.Uint16(extra[offset:]) == 1 {
+			if output == nil {
+				output = make([]byte, 0, len(extra))
+			}
+			output = append(output, extra[start:offset]...)
+			start = offset + size
+		}
+		offset += size
+	}
+	if output == nil {
+		return extra
+	}
+	return append(output, extra[start:]...)
+}
+
+// writeOutputFile 重压缩未修改条目，只采用优于原ZIP编码的结果
+// 入参: archive 输出归档, file 原始条目, buffer 流式复制缓冲
+// 返回: error 读取、写入或取消错误
+func (e *Editor) writeOutputFile(archive *zip.Writer, file *zip.File, buffer []byte) error {
+	if err := editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0); err != nil {
+		return err
+	}
+	header := file.FileHeader
+	header.Extra = outputZIPExtra(header.Extra)
+	var payload io.Reader
+	if file.UncompressedSize64 <= outputOptimizationBufferLimit {
+		input, err := file.Open()
+		if err != nil {
+			return err
+		}
+		data, err := io.ReadAll(io.LimitReader(imageInput{ReadCloser: input, context: e.output.ctx}, outputOptimizationBufferLimit+1))
+		input.Close()
+		if err != nil {
+			return err
+		}
+		if uint64(len(data)) != file.UncompressedSize64 {
+			return io.ErrUnexpectedEOF
+		}
+		limit := min(file.CompressedSize64, uint64(len(data)))
+		compressed, err := e.compressOutputBytes(data, int(min(limit, outputOptimizationBufferLimit)))
+		if err != nil {
+			return err
+		}
+		if compressed != nil {
+			prepareOutputHeader(&header, zip.Deflate, uint64(len(data)), uint64(len(compressed)), file.CRC32)
+			payload = bytes.NewReader(compressed)
+		} else if uint64(len(data)) < file.CompressedSize64 {
+			prepareOutputHeader(&header, zip.Store, uint64(len(data)), uint64(len(data)), file.CRC32)
+			payload = bytes.NewReader(data)
+		}
+	}
+	if payload == nil {
+		var err error
+		payload, err = file.OpenRaw()
+		if err != nil {
+			return err
+		}
+	}
+	entry, err := archive.CreateRaw(&header)
+	if err != nil {
+		return err
+	}
+	if _, err := io.CopyBuffer(entry, imageInput{ReadCloser: io.NopCloser(payload), context: e.output.ctx}, buffer); err != nil {
 		return err
 	}
 	e.output.completed++

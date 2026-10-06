@@ -32,6 +32,53 @@ func intersectConvexCanvasPaths(left, right *canvas.Path) (*canvas.Path, bool) {
 	if !ok {
 		return nil, false
 	}
+	return intersectCanvasPolygons(a, b)
+}
+
+// intersectCanvasContours 按凸窗口裁剪闭合轮廓，保留绕向、孔洞和重叠透明度
+// 入参: path 绘制路径, clip 单个凸裁剪路径
+// 返回: *canvas.Path 交集路径, bool 是否适用分段裁剪
+func intersectCanvasContours(path, clip *canvas.Path) (*canvas.Path, bool) {
+	if path == nil {
+		return nil, false
+	}
+	b, ok := convexCanvasPolygon(clip)
+	if !ok {
+		return nil, false
+	}
+	parts := path.Split()
+	polygons := make([][]canvas.Point, 0, len(parts))
+	for _, part := range parts {
+		part = part.Flatten(canvas.Tolerance)
+		if !part.Closed() {
+			return nil, false
+		}
+		a := part.Coords()
+		if len(a) < 4 || a[0] != a[len(a)-1] {
+			continue
+		}
+		for _, point := range a {
+			if !finite(point.X) || !finite(point.Y) {
+				return nil, false
+			}
+		}
+		polygons = append(polygons, a[:len(a)-1])
+	}
+	result := &canvas.Path{}
+	for _, polygon := range polygons {
+		part, ok := intersectCanvasPolygons(polygon, b)
+		if !ok {
+			return nil, false
+		}
+		result = result.Append(part)
+	}
+	return result, true
+}
+
+// intersectCanvasPolygons 按凸窗口逐边裁剪多边形，保留原顶点绕向
+// 入参: a 绘制顶点, b 裁剪顶点
+// 返回: *canvas.Path 交集路径, bool 是否满足数值精度
+func intersectCanvasPolygons(a, b []canvas.Point) (*canvas.Path, bool) {
 	for i, start := range b {
 		end := b[(i+1)%len(b)]
 		dx, dy := end.X-start.X, end.Y-start.Y
@@ -71,6 +118,12 @@ func intersectConvexCanvasPaths(left, right *canvas.Path) (*canvas.Path, bool) {
 				scale := math.Max(math.Abs(d), math.Abs(previousDistance))
 				fraction := (previousDistance / scale) / (previousDistance/scale - d/scale)
 				intersection := geometryLerp(Point{previous.X, previous.Y}, Point{p.X, p.Y}, fraction)
+				if dx == 0 {
+					intersection.X = start.X
+				}
+				if dy == 0 {
+					intersection.Y = start.Y
+				}
 				appendPoint(canvas.Point{X: intersection.X, Y: intersection.Y})
 			}
 			if d >= 0 {

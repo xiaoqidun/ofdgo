@@ -53,6 +53,23 @@ func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) []ColorStop 
 // 返回: color.Color 颜色对象
 func (r *Renderer) parseColorWithAlpha(value string, index *int, space string, alpha *int) color.Color {
 	kind, values := r.colorComponents(value, index, space)
+	profile, err := r.Reader.colorProfile(r.colorDefinition(space))
+	if err != nil {
+		r.renderError = err
+		return color.RGBA{}
+	}
+	if profile != nil {
+		rgb, err := profile.rgb(values)
+		if err != nil {
+			r.renderError = err
+			return color.RGBA{}
+		}
+		a := 1.0
+		if alpha != nil {
+			a = float64(clampColor(*alpha)) / 255
+		}
+		return profileColor(rgb, a)
+	}
 	var components [4]uint8
 	for i, value := range values {
 		components[i] = uint8(math.Round(value * 255))
@@ -75,13 +92,10 @@ func (r *Renderer) parseColorWithAlpha(value string, index *int, space string, a
 // 入参: value 颜色值, index 调色板索引, space 颜色空间标识
 // 返回: string 颜色模型, [4]float64 单位分量
 func (r *Renderer) colorComponents(value string, index *int, space string) (string, [4]float64) {
-	if space == "" && r.Reader.doc != nil {
-		space = strconv.Itoa(r.Reader.doc.CommonData.DefaultCS)
-	}
-	cs := r.Reader.colorSpaceCache[space]
+	cs := r.colorDefinition(space)
 	kind, bits, count := "RGB", 8, 3
 	if cs != nil {
-		kind = cs.Type
+		kind = strings.ToUpper(cs.Type)
 		switch cs.BitsPerComponent {
 		case 1, 2, 4, 8, 16:
 			bits = cs.BitsPerComponent
