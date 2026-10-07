@@ -30,13 +30,42 @@ type u3dVertex struct {
 // 入参: instance 场景实例, node 模型节点, mesh 网格, pass 绘制轮次, passIndex 轮次索引
 // 返回: error 几何、资源或取消错误
 func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh, pass U3DViewPass, passIndex int) error {
-	count := uint64(len(mesh.Positions)) + uint64(len(mesh.Normals))
+	if r.mode >= U3DRenderBoundingBox && r.mode <= U3DRenderBoundingBoxOutline {
+		return r.drawBounds(instance, node, mesh, pass, passIndex)
+	}
+	if r.opacity == 0 && len(r.sections) == 0 && r.mode == U3DRenderSolid {
+		return r.ctx.Err()
+	}
+	shaded := r.mode.shaded() && !r.depthOnly
+	var outline *u3dOutline
+	if r.mode.silhouette() {
+		if err := r.reserve(1, 1024); err != nil {
+			return err
+		}
+		outline = &u3dOutline{index: make(map[[2]u3dVector]int)}
+		defer func() { r.remaining += 1024 + uint64(len(outline.edges))*1024 }()
+	}
+	if r.mode == U3DRenderShadedWireframe || r.mode == U3DRenderShadedVertices {
+		if err := r.reserve(1, 1024); err != nil {
+			return err
+		}
+		r.primitives = make(map[u3dPrimitiveKey]struct{})
+		defer func() {
+			r.remaining += 1024 + uint64(len(r.primitives))*512
+			r.primitives = nil
+		}()
+	}
+	normalCount := 0
+	if shaded {
+		normalCount = len(mesh.Normals)
+	}
+	count := uint64(len(mesh.Positions)) + uint64(normalCount)
 	if err := r.reserve(count, 24); err != nil {
 		return err
 	}
 	defer func() { r.remaining += count * 24 }()
 	positions := make([]u3dVector, len(mesh.Positions))
-	normals := make([]u3dVector, len(mesh.Normals))
+	normals := make([]u3dVector, normalCount)
 	inverse, invertible := instance.world.inverse()
 	for i, p := range mesh.Positions {
 		if i%1024 == 0 {
@@ -51,7 +80,7 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 			}
 		}
 	}
-	for i, n := range mesh.Normals {
+	for i, n := range mesh.Normals[:normalCount] {
 		if i%1024 == 0 {
 			if err := r.ctx.Err(); err != nil {
 				return err
@@ -65,6 +94,9 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 		if invertible {
 			normals[i] = inverse.normal(u3dVector{float64(n[0]), float64(n[1]), float64(n[2])})
 		}
+	}
+	if err := r.drawLines(instance, node, mesh, positions, normals, pass, passIndex); err != nil {
+		return err
 	}
 	for index, face := range mesh.Faces {
 		if index%128 == 0 {
@@ -82,7 +114,7 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 		var world [3]u3dVector
 		var vertices [3]u3dVertex
 		for i, corner := range face.Corners {
-			if uint64(corner.Position) >= uint64(len(positions)) || !mesh.ExcludeNormals && uint64(corner.Normal) >= uint64(len(normals)) || shading.Attributes&1 != 0 && uint64(corner.Diffuse) >= uint64(len(mesh.Diffuse)) || shading.Attributes&2 != 0 && uint64(corner.Specular) >= uint64(len(mesh.Specular)) {
+			if uint64(corner.Position) >= uint64(len(positions)) || shaded && (!mesh.ExcludeNormals && uint64(corner.Normal) >= uint64(len(normals)) || shading.Attributes&1 != 0 && uint64(corner.Diffuse) >= uint64(len(mesh.Diffuse)) || shading.Attributes&2 != 0 && uint64(corner.Specular) >= uint64(len(mesh.Specular))) {
 				return fmt.Errorf("invalid U3D render corner index")
 			}
 			world[i] = positions[corner.Position]
@@ -94,7 +126,7 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 			}
 		}
 		var faceNormal u3dVector
-		if mesh.ExcludeNormals || !invertible {
+		if shaded && (mesh.ExcludeNormals || !invertible) {
 			faceNormal = u3dTriangleNormal(world)
 		}
 		p0, p1, p2 := vertices[0].point, vertices[1].point, vertices[2].point
@@ -107,12 +139,21 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 		}
 		front := facing < 0
 		visibility := instance.modelVisibility(node)
-		if facing == 0 || front && visibility&1 == 0 || !front && visibility&2 == 0 {
+		surfaceVisible := facing != 0 && (front && visibility&1 != 0 || !front && visibility&2 != 0)
+		if r.mode == U3DRenderHiddenWireframe && !front || (r.mode == U3DRenderSolid || r.mode == U3DRenderSolidWireframe || r.depthOnly) && (facing == 0 || front && visibility&1 == 0 || !front && visibility&2 == 0) {
 			continue
 		}
 		shaderNames := []string{""}
 		if uint64(face.Shading) < uint64(len(node.Shaders)) {
 			shaderNames = node.Shaders[face.Shading]
+		}
+		if outline != nil {
+			if err := r.outlineFace(outline, world, vertices, front, surfaceVisible, shaderNames, passIndex); err != nil {
+				return err
+			}
+			if !surfaceVisible {
+				continue
+			}
 		}
 		for shaderIndex, name := range shaderNames {
 			if shaderIndex%128 == 0 {
@@ -120,17 +161,37 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 					return err
 				}
 			}
-			style, err := r.style(name)
-			if err != nil {
-				return err
+			style := u3dRenderStyle{shader: U3DShader{Blend: 0x606, RenderPass: math.MaxUint32}}
+			var err error
+			if shaded {
+				style, err = r.style(name)
+				if err != nil {
+					return err
+				}
+			} else if index, ok := r.shaders[name]; ok {
+				style.shader.RenderPass = r.model.Shaders[index].RenderPass
 			}
 			if style.shader.RenderPass&(1<<passIndex) == 0 {
 				continue
 			}
-			if instance.opacity >= 0 {
+			if instance.opacity >= 0 || r.opacity >= 0 {
 				style.shader.Blend = 0x606
 			}
 			for i, corner := range face.Corners {
+				if !shaded {
+					vertices[i].color = [4]float64{r.auxiliaryColor[0], r.auxiliaryColor[1], r.auxiliaryColor[2], 1}
+					if r.mode == U3DRenderIllustration {
+						alpha := 1.0
+						if instance.opacity >= 0 {
+							alpha = instance.opacity
+						}
+						if r.opacity >= 0 {
+							alpha *= r.opacity
+						}
+						vertices[i].color = [4]float64{r.faceColor[0], r.faceColor[1], r.faceColor[2], alpha}
+					}
+					continue
+				}
 				normal := faceNormal
 				if !mesh.ExcludeNormals && invertible {
 					normal = normals[corner.Normal]
@@ -154,12 +215,18 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 				if instance.opacity >= 0 {
 					vertices[i].color[3] = instance.opacity
 				}
+				if r.opacity >= 0 {
+					vertices[i].color[3] *= r.opacity
+				}
 			}
 			r.order++
-			if err := r.sectionTriangle(vertices, style.shader, pass); err != nil {
+			if err := r.modeTriangle(vertices, style.shader, pass); err != nil {
 				return err
 			}
 		}
+	}
+	if outline != nil {
+		return r.drawOutline(outline, pass)
 	}
 	return nil
 }
@@ -168,6 +235,9 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 // 入参: triangle 三角面, shader 着色器, pass 绘制轮次
 // 返回: error 数值、资源或取消错误
 func (r *u3dRender) clipTriangle(triangle [3]u3dVertex, shader U3DShader, pass U3DViewPass) error {
+	if shader.Blend == 0x606 && triangle[0].color[3] == 0 && triangle[1].color[3] == 0 && triangle[2].color[3] == 0 {
+		return r.ctx.Err()
+	}
 	var storage [2][12]u3dVertex
 	copy(storage[0][:], triangle[:])
 	size, current := 3, 0
@@ -306,39 +376,28 @@ func (r *u3dRender) rasterTriangle(triangle [3]u3dVertex, shader U3DShader, pass
 			if depth > r.frame[pixel].depth {
 				continue
 			}
+			if r.depthOnly {
+				r.frame[pixel].depth = depth
+				continue
+			}
 			var color [4]float64
 			for c := range color {
 				color[c] = triangle[0].color[c] + w1*(triangle[1].color[c]-triangle[0].color[c]) + w2*(triangle[2].color[c]-triangle[0].color[c])
-				if !finite(color[c]) {
-					return fmt.Errorf("invalid U3D interpolated color")
-				}
 			}
-			color[3] = min(1, max(0, color[3]))
-			if shader.Attributes&2 != 0 && !u3dAlphaTest(shader.AlphaFunction, color[3], float64(shader.AlphaReference)) {
-				continue
-			}
+			position := u3dVector{}
 			if pass.Attributes&1 != 0 {
-				position := u3dVector{(px - r.viewport[0] - r.viewport[2]/2 - r.camera.ShiftX) / r.camera.ScaleX, (r.viewport[1] + r.viewport[3]/2 + r.camera.ShiftY - py) / r.camera.ScaleY, depth}
+				position = u3dVector{(px - r.viewport[0] - r.viewport[2]/2 - r.camera.ShiftX) / r.camera.ScaleX, (r.viewport[1] + r.viewport[3]/2 + r.camera.ShiftY - py) / r.camera.ScaleY, depth}
 				if r.camera.Perspective {
 					position[0] *= depth
 					position[1] *= depth
 				}
-				distance := math.Hypot(math.Hypot(position[0], position[1]), position[2])
-				factor := (float64(pass.FogFar) - distance) / (float64(pass.FogFar) - float64(pass.FogNear))
-				if pass.FogMode != 0 {
-					amount := distance * math.Log(100) / float64(pass.FogFar)
-					if pass.FogMode == 2 {
-						amount *= amount
-					}
-					factor = math.Exp(-amount)
-				}
-				factor = min(1, max(0, factor))
-				for c := range 3 {
-					color[c] = color[c]*factor + float64(pass.FogColor[c])*(1-factor)
-				}
 			}
-			for c := range 3 {
-				color[c] = min(1, max(0, color[c]))
+			visible, err := u3dFragmentColor(&color, position, &shader, &pass)
+			if err != nil {
+				return err
+			}
+			if !visible {
+				continue
 			}
 			if err := r.fragment(pixel, depth, color, shader.Blend); err != nil {
 				return err

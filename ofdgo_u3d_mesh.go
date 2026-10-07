@@ -19,7 +19,7 @@ import (
 	"io"
 )
 
-// U3DMesh 保存完整基础网格的独立数组，索引对应原始作者网格
+// U3DMesh 保存静态三角面和线段的共享属性数组，索引对应原始作者几何
 type U3DMesh struct {
 	Name                                        string
 	ExcludeNormals                              bool
@@ -27,12 +27,13 @@ type U3DMesh struct {
 	Diffuse, Specular, TextureCoordinates       [][4]float32
 	Shadings                                    []U3DShading
 	Faces                                       []U3DFace
+	Lines                                       []U3DLine
 	Quality                                     [3]uint32
 	InverseQuantization                         [5]float32
 	NormalCrease, NormalUpdate, NormalTolerance float32
 }
 
-// U3DShading 描述各面使用的颜色及纹理坐标，纹理维数依层排列
+// U3DShading 描述图元使用的颜色及纹理坐标，纹理维数依层排列
 type U3DShading struct {
 	Attributes        uint32
 	TextureDimensions []uint32
@@ -45,17 +46,35 @@ type U3DFace struct {
 	Corners [3]U3DCorner
 }
 
+// U3DLine 保存着色描述及线段两端的独立属性索引
+type U3DLine struct {
+	Shading uint32
+	Corners [2]U3DCorner
+}
+
 // U3DCorner 保存各属性索引，未启用的属性不可用于访问数组
 type U3DCorner struct {
 	Position, Normal, Diffuse, Specular uint32
 	Texture                             [8]uint32
 }
 
-// u3dMeshDeclaration 保存基础网格声明及续块接收状态
+// u3dMeshDeclaration 保存基础网格或线集声明及续块接收状态
 type u3dMeshDeclaration struct {
 	mesh    U3DMesh
 	counts  [7]uint32
 	decoded bool
+	line    *u3dLineState
+}
+
+// primitive 访问三角面或线段的着色编号和角点，不复制属性数组
+// 入参: index 图元下标，三角面在前，线段在后
+// 返回: uint32 着色编号, []U3DCorner 只读角点
+func (m *U3DMesh) primitive(index int) (uint32, []U3DCorner) {
+	if index < len(m.Faces) {
+		return m.Faces[index].Shading, m.Faces[index].Corners[:]
+	}
+	line := &m.Lines[index-len(m.Faces)]
+	return line.Shading, line.Corners[:]
 }
 
 // meshDeclaration 读取完整基础网格声明，不将渐进网格当作完整模型
@@ -72,6 +91,46 @@ func (d *u3dDecoder) meshDeclaration(r *u3dValues, name string) error {
 	decl := &u3dMeshDeclaration{mesh: U3DMesh{Name: name, ExcludeNormals: attributes == 1}}
 	for index := range decl.counts {
 		decl.counts[index] = r.u32()
+	}
+	if err := d.meshShadings(r, decl); err != nil {
+		return err
+	}
+	minimum, maximum := r.u32(), r.u32()
+	for index := range decl.mesh.Quality {
+		decl.mesh.Quality[index] = r.u32()
+	}
+	for index := range decl.mesh.InverseQuantization {
+		decl.mesh.InverseQuantization[index] = r.f32()
+	}
+	decl.mesh.NormalCrease, decl.mesh.NormalUpdate, decl.mesh.NormalTolerance = r.f32(), r.f32(), r.f32()
+	bones := r.u32()
+	if r.err != nil {
+		return r.err
+	}
+	if minimum > maximum || maximum != decl.counts[1] {
+		return fmt.Errorf("invalid U3D mesh resolution")
+	}
+	if minimum != maximum || bones != 0 {
+		return fmt.Errorf("unsupported U3D progressive or skeletal mesh")
+	}
+	if minimum == 0 {
+		for _, count := range decl.counts[:6] {
+			if count != 0 {
+				return fmt.Errorf("invalid U3D empty mesh")
+			}
+		}
+	}
+	d.meshes[name] = decl
+	d.meshOrder = append(d.meshOrder, name)
+	return nil
+}
+
+// meshShadings 读取三角面与线集共用的着色描述
+// 入参: r 字段读取器, decl 资源声明
+// 返回: error 结构或预算错误
+func (d *u3dDecoder) meshShadings(r *u3dValues, decl *u3dMeshDeclaration) error {
+	if r.err != nil {
+		return r.err
 	}
 	count := decl.counts[6]
 	if uint64(count) > uint64(len(r.data)-r.pos)/12 {
@@ -104,34 +163,7 @@ func (d *u3dDecoder) meshDeclaration(r *u3dValues, name string) error {
 		}
 		shading.OriginalID = r.u32()
 	}
-	minimum, maximum := r.u32(), r.u32()
-	for index := range decl.mesh.Quality {
-		decl.mesh.Quality[index] = r.u32()
-	}
-	for index := range decl.mesh.InverseQuantization {
-		decl.mesh.InverseQuantization[index] = r.f32()
-	}
-	decl.mesh.NormalCrease, decl.mesh.NormalUpdate, decl.mesh.NormalTolerance = r.f32(), r.f32(), r.f32()
-	bones := r.u32()
-	if r.err != nil {
-		return r.err
-	}
-	if minimum > maximum || maximum != decl.counts[1] {
-		return fmt.Errorf("invalid U3D mesh resolution")
-	}
-	if minimum != maximum || bones != 0 {
-		return fmt.Errorf("unsupported U3D progressive or skeletal mesh")
-	}
-	if minimum == 0 {
-		for _, count := range decl.counts[:6] {
-			if count != 0 {
-				return fmt.Errorf("invalid U3D empty mesh")
-			}
-		}
-	}
-	d.meshes[name] = decl
-	d.meshOrder = append(d.meshOrder, name)
-	return nil
+	return r.err
 }
 
 // baseMesh 读取基础顶点与压缩面索引，保留各角点的独立属性
@@ -139,7 +171,7 @@ func (d *u3dDecoder) meshDeclaration(r *u3dValues, name string) error {
 // 返回: error 结构、能力、预算或取消错误
 func (d *u3dDecoder) baseMesh(r *u3dValues, name string) error {
 	decl := d.meshes[name]
-	if decl == nil || decl.decoded || decl.counts[1] == 0 || r.u32() != 0 {
+	if decl == nil || decl.line != nil || decl.decoded || decl.counts[1] == 0 || r.u32() != 0 {
 		return fmt.Errorf("invalid U3D base mesh reference")
 	}
 	var counts [6]uint32

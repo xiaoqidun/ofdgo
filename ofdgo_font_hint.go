@@ -25,6 +25,12 @@ import (
 // errTTStackUnderflow 表示字形程序缺少必需的栈参数
 var errTTStackUnderflow = errors.New("TrueType instruction stack underflow")
 
+// errTTInvalidReference 表示字形指令引用不存在的点或函数
+var errTTInvalidReference = errors.New("invalid TrueType instruction reference")
+
+// errTTInvalidControlFlow 表示条件分支未闭合或跳转超出字节码范围
+var errTTInvalidControlFlow = errors.New("invalid TrueType control flow")
+
 // ttPoint 保存TrueType当前坐标、原始坐标及点状态，坐标使用26.6定点数
 type ttPoint struct {
 	x, y, ox, oy int32
@@ -139,7 +145,7 @@ func (v *ttInterpreter) push(values ...int32) {
 // 返回: *ttPoint 点
 func (v *ttInterpreter) point(zone, index int32) *ttPoint {
 	if zone < 0 || zone > 1 || index < 0 || int64(index) >= int64(len(v.zones[zone])) {
-		v.err = fmt.Errorf("invalid TrueType point %d in zone %d", index, zone)
+		v.err = fmt.Errorf("%w: point %d in zone %d", errTTInvalidReference, index, zone)
 		return &ttPoint{}
 	}
 	return &v.zones[zone][index]
@@ -247,6 +253,7 @@ func ttInstructionEnd(code []byte, position int) (int, error) {
 // 入参: code 字节码, position 起始位置, alternate 是否停在ELSE
 // 返回: int 后续指令位置, error 分支错误
 func skipTTConditional(code []byte, position int, alternate bool) (int, error) {
+	start := position
 	depth := 0
 	for position < len(code) {
 		op := code[position]
@@ -268,7 +275,7 @@ func skipTTConditional(code []byte, position int, alternate bool) (int, error) {
 			return 0, err
 		}
 	}
-	return 0, fmt.Errorf("unterminated TrueType conditional")
+	return 0, fmt.Errorf("%w: unterminated conditional at %d in %d bytes", errTTInvalidControlFlow, start, len(code))
 }
 
 // run 执行字体、预处理或字形程序
@@ -443,9 +450,12 @@ func (v *ttInterpreter) execute(code []byte, depth int) error {
 				if op == 0x2a {
 					count = v.pop()
 				}
-				body, ok := v.functions[id]
-				if !ok || count < 0 || count > 1000000 {
+				if count < 0 || count > 1000000 {
 					return fmt.Errorf("invalid TrueType function call %d", id)
+				}
+				body, ok := v.functions[id]
+				if !ok {
+					return fmt.Errorf("%w: function %d", errTTInvalidReference, id)
 				}
 				for n := int32(0); n < count; n++ {
 					if err = v.execute(body, depth+1); err != nil {
@@ -749,7 +759,7 @@ func (v *ttInterpreter) execute(code []byte, depth int) error {
 			return fmt.Errorf("TrueType instruction 0x%02x at %d: %w", op, start, v.err)
 		}
 		if pc < 0 || pc > len(code) {
-			return fmt.Errorf("invalid TrueType jump target")
+			return fmt.Errorf("%w: jump target %d at %d in %d bytes", errTTInvalidControlFlow, pc, start, len(code))
 		}
 	}
 	return nil

@@ -35,6 +35,9 @@ type U3DCamera struct {
 // U3DRenderOptions 控制静态绘制，指定Camera时使用整个输出视口
 // Camera为空时使用View指定的节点或首个视图节点，Instance指定其父路径实例
 // Lighting为空时沿用模型灯光，非空时替换全部模型灯光
+// Opacity为空时沿用着色器混合，非空时叠加面片、着色边点及包围盒轮廓的透明度
+// Mode控制绘制方式，AuxiliaryColor用于固定颜色的边点，FaceColor用于包围盒面及插图面，空值分别使用黑色和背景色
+// CreaseAngle为轮廓夹角，单位为度，空值使用45；着色插图以漫反射色的1/4补充自发光
 // Nodes按名称覆盖节点，重复名称使用最后一项，每次绘制均从原场景开始
 // Background为空时使用白色；缓存与实例上限为0时分别使用256MiB和65536，不含输入及运行时开销
 type U3DRenderOptions struct {
@@ -44,6 +47,11 @@ type U3DRenderOptions struct {
 	Camera         *U3DCamera
 	Background     *[3]float64
 	Lighting       *U3DLighting
+	Opacity        *float64
+	Mode           U3DRenderMode
+	AuxiliaryColor *[3]float64
+	FaceColor      *[3]float64
+	CreaseAngle    *float64
 	Nodes          []U3DNodeState
 	Sections       []U3DCrossSection
 	MaxMemoryBytes int64
@@ -83,6 +91,12 @@ type u3dRender struct {
 	meshes, shaders, materials, lightIndex map[string]int
 	lights                                 []u3dRenderLight
 	lighting                               *U3DLighting
+	opacity                                float64
+	mode                                   U3DRenderMode
+	creaseAngle                            float64
+	auxiliaryColor, faceColor              [3]float64
+	depthOnly                              bool
+	primitives                             map[u3dPrimitiveKey]struct{}
 	states                                 map[string]U3DNodeState
 	sections                               []u3dSection
 	sectionScratch                         [2][]u3dVertex
@@ -92,7 +106,7 @@ type u3dRender struct {
 	order                                  uint64
 }
 
-// RenderU3D 绘制静态无纹理三角面，返回不透明图像，不执行脚本或动画
+// RenderU3D 绘制静态无纹理网格、线集及其顶点或包围盒，返回不透明图像，不执行脚本或动画
 // 采用逐顶点光照及逐像素深度混合，缺失资源回退为空网格、灰色材质或无光源
 // 入参: ctx 取消上下文, model 场景, options 视图、输出与资源限制
 // 返回: *image.RGBA 图像, error 参数、能力、预算或取消错误
@@ -119,7 +133,23 @@ func newU3DRender(ctx context.Context, model *U3DModel, options U3DRenderOptions
 	if limit == 0 {
 		limit = u3dDefaultBytes
 	}
-	r := &u3dRender{ctx: ctx, model: model, remaining: uint64(limit)}
+	r := &u3dRender{ctx: ctx, model: model, remaining: uint64(limit), opacity: -1, mode: options.Mode, creaseAngle: 45}
+	if options.Mode > U3DRenderShadedIllustration {
+		return nil, fmt.Errorf("unsupported U3D render mode")
+	}
+	if options.CreaseAngle != nil {
+		if !finite(*options.CreaseAngle) {
+			return nil, fmt.Errorf("invalid U3D crease angle")
+		}
+		r.creaseAngle = *options.CreaseAngle
+	}
+	if options.Opacity != nil {
+		value := *options.Opacity
+		if !finite(value) || value < 0 || value > 1 {
+			return nil, fmt.Errorf("invalid U3D render opacity")
+		}
+		r.opacity = value
+	}
 	if uint64(options.Width) > uint64(^uint(0)>>1)/uint64(options.Height) {
 		return nil, fmt.Errorf("invalid U3D render dimensions")
 	}
@@ -168,6 +198,20 @@ func (r *u3dRender) render(options U3DRenderOptions, passes []U3DViewPass) (*ima
 			return nil, fmt.Errorf("invalid U3D background")
 		}
 		background[i] = min(1, max(0, v))
+	}
+	r.faceColor = background
+	for _, item := range []struct {
+		source *[3]float64
+		target *[3]float64
+	}{{options.AuxiliaryColor, &r.auxiliaryColor}, {options.FaceColor, &r.faceColor}} {
+		if item.source != nil {
+			for i, value := range *item.source {
+				if !finite(value) || value < 0 || value > 1 {
+					return nil, fmt.Errorf("invalid U3D mode color")
+				}
+				item.target[i] = value
+			}
+		}
 	}
 	r.frame = make([]u3dPixel, options.Width*options.Height)
 	r.output = image.NewRGBA(image.Rect(0, 0, options.Width, options.Height))
@@ -412,9 +456,33 @@ func (r *u3dRender) renderPass(pass U3DViewPass, passIndex int, last bool) error
 		r.frame[i].head = -1
 	}
 	r.fragments = 0
-	if err := r.collectLights(); err != nil {
+	if r.mode.shaded() {
+		if err := r.collectLights(); err != nil {
+			return err
+		}
+	}
+	if r.mode == U3DRenderHiddenWireframe {
+		r.depthOnly = true
+		if err := r.drawScene(pass, passIndex); err != nil {
+			return err
+		}
+		r.depthOnly = false
+	}
+	if err := r.drawScene(pass, passIndex); err != nil {
 		return err
 	}
+	if last {
+		if err := r.drawSectionPlanes(); err != nil {
+			return err
+		}
+	}
+	return r.resolveFragments()
+}
+
+// drawScene 绘制当前轮次中的可见模型，不重置深度及片元缓存
+// 入参: pass 绘制轮次, passIndex 轮次索引
+// 返回: error 场景、资源或取消错误
+func (r *u3dRender) drawScene(pass U3DViewPass, passIndex int) error {
 	for i, instance := range r.scene {
 		if err := r.ctx.Err(); err != nil {
 			return err
@@ -434,10 +502,5 @@ func (r *u3dRender) renderPass(pass U3DViewPass, passIndex int, last bool) error
 			return err
 		}
 	}
-	if last {
-		if err := r.drawSectionPlanes(); err != nil {
-			return err
-		}
-	}
-	return r.resolveFragments()
+	return nil
 }

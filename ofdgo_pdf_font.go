@@ -36,6 +36,12 @@ type pdfImportedFont struct {
 	repairLimit uint16
 }
 
+// pdfFontRepair 保存字体封装修复范围，不混用字形度量与位置索引
+type pdfFontRepair struct {
+	metricsLimit uint16
+	locations    bool
+}
+
 // embeddedTextFont 匹配同名内嵌字体，仅复用唯一且覆盖全部字符的字形程序
 // 入参: source 外部字体, glyphs 当前文字字形
 // 返回: *pdfImportedFont 可复用字体，无可靠匹配时为空
@@ -102,9 +108,12 @@ func (p *pdfImporter) importedFont(source *pdfgo.Font) (*pdfImportedFont, error)
 		type1 = &parsed
 		result.type1Glyphs = parsed.glyphIDs()
 	}
-	program, limit, err := pdfFontProgram(source, type1)
+	program, repair, err := pdfFontProgram(source, type1)
 	if err != nil {
 		return nil, fmt.Errorf("PDF font %s program: %w", source.Name, err)
+	}
+	if repair.locations && p.warning == nil {
+		return nil, fmt.Errorf("PDF font %s program: %w", source.Name, errTTInvalidLocations)
 	}
 	if p.editor.backends.FontResources == nil {
 		return nil, fmt.Errorf("PDF font %s resource: font resources: %w", source.Name, ErrBackendUnavailable)
@@ -123,7 +132,10 @@ func (p *pdfImporter) importedFont(source *pdfgo.Font) (*pdfImportedFont, error)
 	if _, ok := result.metrics.(FontOutlines); !ok {
 		return nil, fmt.Errorf("PDF font backend does not provide glyph outlines")
 	}
-	result.checksum, result.repairLimit = sha256.Sum256(result.resource.Data), limit
+	result.checksum, result.repairLimit = sha256.Sum256(result.resource.Data), repair.metricsLimit
+	if repair.locations {
+		p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF font %s has invalid glyph locations; index rebuilt with original glyph IDs", source.Name)})
+	}
 	if p.fonts == nil {
 		p.fonts = make(map[*pdfgo.Font]*pdfImportedFont)
 	}
@@ -132,23 +144,24 @@ func (p *pdfImporter) importedFont(source *pdfgo.Font) (*pdfImportedFont, error)
 }
 
 // pdfFontProgram 为PDF子集字体补齐封装表，保留字形轮廓和编号
-// 复合字体的重复映射区段按PDF字符映射重建，不改变CID对应的字形
+// 无效字符表按PDF已解码字形重建，不改变字符对应的字形编号
 // 入参: source PDF字体, type1 已解析的Type1程序，nil时按需解析
-// 返回: []byte 封装后的字体数据, uint16 缺失度量前的完整字形数, error 错误信息
-func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, error) {
+// 返回: []byte 封装后的字体数据, pdfFontRepair 字体修复范围, error 错误信息
+func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, pdfFontRepair, error) {
+	var repair pdfFontRepair
 	program := source.Program
 	if source.ProgramType == "FontFile" {
 		if type1 == nil {
 			parsed, err := parseType1Program(program)
 			if err != nil {
-				return nil, 0, err
+				return nil, repair, err
 			}
 			type1 = &parsed
 		}
 		var err error
 		program, err = type1.toCFF(pdfFontIdentity(source))
 		if err != nil {
-			return nil, 0, err
+			return nil, repair, err
 		}
 	}
 	bareCFF := len(program) >= 4 && program[0] == 1 && program[1] == 0 && program[2] >= 4 && program[3] >= 1 && program[3] <= 4
@@ -156,21 +169,25 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, er
 		var err error
 		program, _, err = wrapCFFToOTF(program)
 		if err != nil {
-			return nil, 0, err
+			return nil, repair, err
 		}
 	}
 	tables, err := fontFileTables(program, 0)
 	if err != nil {
-		return nil, 0, err
+		return nil, repair, err
 	}
 	if len(tables["head"]) < 54 || len(tables["maxp"]) < 6 || len(tables["hhea"]) < 36 || len(tables["hmtx"]) == 0 {
-		return nil, 0, fmt.Errorf("embedded PDF font lacks required metrics")
+		return nil, repair, fmt.Errorf("embedded PDF font lacks required metrics")
 	}
 	count := binary.BigEndian.Uint16(tables["maxp"][4:6])
 	if count == 0 {
-		return nil, 0, fmt.Errorf("embedded PDF font has no glyphs")
+		return nil, repair, fmt.Errorf("embedded PDF font has no glyphs")
 	}
-	changed := false
+	repair.locations, err = normalizeTrueTypeLocations(tables)
+	if err != nil {
+		return nil, repair, err
+	}
+	changed := repair.locations
 	if head := tables["head"]; len(head) == 56 && binary.BigEndian.Uint32(head[:4]) == 0x00010000 && head[54] == 0 && head[55] == 0 {
 		tables["head"] = head[:54]
 		changed = true
@@ -178,34 +195,33 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, er
 	if cff := tables["CFF "]; len(cff) != 0 {
 		sanitized, err := sanitizeCFF(cff)
 		if err != nil {
-			return nil, 0, err
+			return nil, repair, err
 		}
 		normalized, err := normalizeCFFCharstringsAt(sanitized, binary.BigEndian.Uint16(tables["head"][18:20]))
 		if err != nil {
-			return nil, 0, err
+			return nil, repair, err
 		}
 		if !bytes.Equal(normalized, cff) {
 			tables["CFF "] = normalized
 			changed = true
 		}
 	}
-	var repairedLimit uint16
 	metrics := int(binary.BigEndian.Uint16(tables["hhea"][34:36]))
 	if metrics == 0 || metrics > int(count) {
-		return nil, 0, fmt.Errorf("invalid embedded PDF font metric count")
+		return nil, repair, fmt.Errorf("invalid embedded PDF font metric count")
 	}
 	metricLength := 4*metrics + 2*(int(count)-metrics)
 	if len(tables["hmtx"]) < metricLength {
 		if len(tables["hmtx"]) < 4*metrics || len(tables["hmtx"])%2 != 0 {
-			return nil, 0, fmt.Errorf("incomplete embedded PDF font metrics: have %d, need %d", len(tables["hmtx"]), metricLength)
+			return nil, repair, fmt.Errorf("incomplete embedded PDF font metrics: have %d, need %d", len(tables["hmtx"]), metricLength)
 		}
 		limit := metrics + (len(tables["hmtx"])-4*metrics)/2
 		missing, err := pdfMissingLeftBearings(tables, limit, int(count))
 		if err != nil {
-			return nil, 0, err
+			return nil, repair, err
 		}
 		tables["hmtx"] = append(bytes.Clone(tables["hmtx"]), missing...)
-		repairedLimit = uint16(limit)
+		repair.metricsLimit = uint16(limit)
 		changed = true
 	}
 	if len(tables["hmtx"]) > metricLength {
@@ -226,19 +242,28 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, er
 			changed = true
 		}
 	}
-	if len(tables["cmap"]) == 0 || source.Subtype == "Type0" && (invalidCmap || pdfCmapOverlaps(tables["cmap"])) {
+	if len(tables["cmap"]) == 0 || source.Subtype == "Type0" && invalidCmap || (source.Subtype == "Type0" || source.Subtype == "TrueType") && pdfCmapNeedsRebuild(tables["cmap"]) {
 		mapping := map[rune]uint16{}
-		for _, code := range slices.Sorted(maps.Keys(source.Unicode)) {
+		var codes []string
+		if source.Subtype == "TrueType" {
+			codes = make([]string, 256)
+			for code := range codes {
+				codes[code] = string([]byte{byte(code)})
+			}
+		} else {
+			codes = slices.Sorted(maps.Keys(source.Unicode))
+		}
+		for _, code := range codes {
 			glyphs, err := source.Decode([]byte(code))
 			if err != nil {
-				return nil, 0, err
+				return nil, repair, err
 			}
 			if len(glyphs) != 1 || !glyphs[0].HasID {
-				return nil, 0, &pdfgo.UnsupportedError{Feature: "font without explicit glyph mapping"}
+				return nil, repair, &pdfgo.UnsupportedError{Feature: "font without explicit glyph mapping"}
 			}
 			glyph := glyphs[0]
 			if glyph.ID >= count {
-				return nil, 0, fmt.Errorf("PDF font glyph %d exceeds glyph count %d", glyph.ID, count)
+				return nil, repair, fmt.Errorf("PDF font glyph %d exceeds glyph count %d", glyph.ID, count)
 			}
 			if utf8.RuneCountInString(glyph.Text) == 1 {
 				char, _ := utf8.DecodeRuneInString(glyph.Text)
@@ -255,7 +280,7 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, er
 		fontName := pdfFontIdentity(source)
 		name := utf16.Encode([]rune(fontName))
 		if len(name) > 32767 {
-			return nil, 0, fmt.Errorf("PDF font name exceeds name table capacity")
+			return nil, repair, fmt.Errorf("PDF font name exceeds name table capacity")
 		}
 		data := make([]byte, 42+len(name)*2)
 		binary.BigEndian.PutUint16(data[2:], 3)
@@ -290,10 +315,10 @@ func pdfFontProgram(source *pdfgo.Font, type1 *type1Program) ([]byte, uint16, er
 		}
 	}
 	if !changed && !pdfSFNTMissingPadding(program) {
-		return program, repairedLimit, nil
+		return program, repair, nil
 	}
 	result, err := serializeOTF(tables)
-	return result, repairedLimit, err
+	return result, repair, err
 }
 
 // pdfFontIdentity 返回字体名称或由原始程序生成的稳定封装标识
@@ -307,35 +332,58 @@ func pdfFontIdentity(source *pdfgo.Font) string {
 	return fmt.Sprintf("PDF-%x", checksum[:28])
 }
 
-// pdfCmapOverlaps 检查格式4字符映射是否包含交叠区段
+// pdfCmapNeedsRebuild 检查字体封装字符表是否存在结构错误或交叠区段
 // 入参: data cmap表数据
-// 返回: bool 是否存在交叠
-func pdfCmapOverlaps(data []byte) bool {
-	if len(data) < 4 {
-		return false
+// 返回: bool 是否需要按PDF显式字形编号重建
+func pdfCmapNeedsRebuild(data []byte) bool {
+	if len(data) < 4 || binary.BigEndian.Uint16(data) != 0 {
+		return true
 	}
 	count := int(binary.BigEndian.Uint16(data[2:]))
-	if count > (len(data)-4)/8 {
-		return false
+	if count == 0 || count > (len(data)-4)/8 {
+		return true
 	}
 	for index := range count {
 		offset := uint64(binary.BigEndian.Uint32(data[8+8*index:]))
-		if offset > uint64(len(data)) || uint64(len(data))-offset < 16 {
-			continue
+		if offset < uint64(4+8*count) || offset > uint64(len(data)) || uint64(len(data))-offset < 2 {
+			return true
 		}
 		sub := data[int(offset):]
+		if binary.BigEndian.Uint16(sub) == 6 {
+			if len(sub) < 10 {
+				return true
+			}
+			length := int(binary.BigEndian.Uint16(sub[2:]))
+			first, glyphs := int(binary.BigEndian.Uint16(sub[6:])), int(binary.BigEndian.Uint16(sub[8:]))
+			if length%2 != 0 || length > len(sub) || 10+2*glyphs > length || first+glyphs > 65536 {
+				return true
+			}
+			continue
+		}
 		if binary.BigEndian.Uint16(sub) != 4 {
 			continue
 		}
-		length := int(binary.BigEndian.Uint16(sub[2:]))
-		segments := int(binary.BigEndian.Uint16(sub[6:])) / 2
-		if length > len(sub) || 16+8*segments > length {
-			continue
+		if len(sub) < 16 {
+			return true
 		}
-		for i := 1; i < segments; i++ {
-			previous := binary.BigEndian.Uint16(sub[14+2*(i-1):])
-			start := binary.BigEndian.Uint16(sub[16+2*segments+2*i:])
-			if start <= previous {
+		length := int(binary.BigEndian.Uint16(sub[2:]))
+		segmentBytes := int(binary.BigEndian.Uint16(sub[6:]))
+		segments := segmentBytes / 2
+		if segmentBytes == 0 || segmentBytes%2 != 0 || length%2 != 0 || length > len(sub) || 16+8*segments > length {
+			return true
+		}
+		glyphStart := 16 + 8*segments
+		previous := -1
+		for i := 0; i < segments; i++ {
+			end := int(binary.BigEndian.Uint16(sub[14+2*i:]))
+			start := int(binary.BigEndian.Uint16(sub[16+2*segments+2*i:]))
+			if end < start || start <= previous || i == segments-1 && (start != 65535 || end != 65535) {
+				return true
+			}
+			previous = end
+			position := 16 + 6*segments + 2*i
+			offset := int(binary.BigEndian.Uint16(sub[position:]))
+			if offset != 0 && (offset%2 != 0 || position+offset < glyphStart || position+offset+2*(end-start+1) > length) {
 				return true
 			}
 		}

@@ -230,12 +230,17 @@ func (r *u3dRender) shade(position, normal u3dVector, style u3dRenderStyle, diff
 	if style.shader.Attributes&1 == 0 {
 		return color, nil
 	}
+	copy(color[:3], style.emissive[:])
+	if r.mode == U3DRenderShadedIllustration {
+		for c := range 3 {
+			color[c] += max(0, style.diffuse[c]) / 4
+		}
+	}
 	if r.lighting != nil {
 		for c := range 3 {
 			style.diffuse[c] += r.lighting.DiffuseOffset[c]
 		}
 	}
-	copy(color[:3], style.emissive[:])
 	eye := (u3dVector{r.camera.ToWorld[12], r.camera.ToWorld[13], r.camera.ToWorld[14]}).sub(position).unit()
 	if !r.camera.Perspective {
 		eye = (u3dVector{-r.camera.ToWorld[8], -r.camera.ToWorld[9], -r.camera.ToWorld[10]}).unit()
@@ -298,6 +303,40 @@ func (r *u3dRender) shade(position, normal u3dVector, style u3dRenderStyle, diff
 		}
 	}
 	return color, nil
+}
+
+// u3dFragmentColor 对点、线、面的插值颜色应用透明度测试和相机空间雾效
+// 入参: color 待更新的未预乘颜色, position 相机位置, shader 着色器, pass 绘制轮次
+// 返回: bool 是否绘制, error 非有限颜色错误
+func u3dFragmentColor(color *[4]float64, position u3dVector, shader *U3DShader, pass *U3DViewPass) (bool, error) {
+	for _, value := range color {
+		if !finite(value) {
+			return false, fmt.Errorf("invalid U3D fragment color")
+		}
+	}
+	color[3] = min(1, max(0, color[3]))
+	if shader.Attributes&2 != 0 && !u3dAlphaTest(shader.AlphaFunction, color[3], float64(shader.AlphaReference)) {
+		return false, nil
+	}
+	if pass.Attributes&1 != 0 {
+		distance := math.Hypot(math.Hypot(position[0], position[1]), position[2])
+		factor := (float64(pass.FogFar) - distance) / (float64(pass.FogFar) - float64(pass.FogNear))
+		if pass.FogMode != 0 {
+			amount := distance * math.Log(100) / float64(pass.FogFar)
+			if pass.FogMode == 2 {
+				amount *= amount
+			}
+			factor = math.Exp(-amount)
+		}
+		factor = min(1, max(0, factor))
+		for c := range 3 {
+			color[c] = color[c]*factor + float64(pass.FogColor[c])*(1-factor)
+		}
+	}
+	for c := range 3 {
+		color[c] = min(1, max(0, color[c]))
+	}
+	return true, nil
 }
 
 // u3dAlphaTest 按ECMA-363枚举比较透明度，不套用图形接口的枚举顺序

@@ -117,7 +117,7 @@ func (f canvasFontMetrics) GlyphBounds(glyph uint16, size float64) (Box, error) 
 	return value, nil
 }
 
-// GlyphWarning 返回字形指令栈下溢后保留设计轮廓的提示，原始字体不变
+// GlyphWarning 返回无效字形指令后保留设计轮廓的提示，原始字体不变
 // 入参: glyph 字形编号
 // 返回: error 恢复原因，无恢复时为空
 func (f canvasFontMetrics) GlyphWarning(glyph uint16) error {

@@ -36,6 +36,7 @@ type u3dBits struct {
 	pos             uint64
 	low, high, code uint32
 	err             error
+	reserve         func(uint64, uint64) error
 }
 
 // u3dHistogram 保存一个动态压缩上下文的频次及前缀和
@@ -224,7 +225,23 @@ func (r *u3dBits) index(count uint32) uint32 {
 // 入参: h 频次上下文
 // 返回: uint32 原始整数
 func (r *u3dBits) dynamic(h *u3dHistogram) uint32 {
+	return r.dynamicValue(h, false)
+}
+
+// dynamicValue 按字段位宽处理动态上下文的逃逸字面量，分配前检查可选预算
+// 入参: h 频次上下文, small 是否为8位字段
+// 返回: uint32 解码值
+func (r *u3dBits) dynamicValue(h *u3dHistogram, small bool) uint32 {
+	if r.err != nil {
+		return 0
+	}
 	if h.total == 0 {
+		if r.reserve != nil {
+			if err := r.reserve(1, 32); err != nil {
+				r.err = err
+				return 0
+			}
+		}
 		h.counts = make([]uint32, 1)
 		h.tree = make([]uint32, 2)
 		h.add(0)
@@ -235,15 +252,42 @@ func (r *u3dBits) dynamic(h *u3dHistogram) uint32 {
 		return 0
 	}
 	r.advance(start, h.counts[symbol], h.total)
-	h.add(symbol)
+	r.histogramAdd(h, symbol)
+	if r.err != nil {
+		return 0
+	}
 	if symbol != 0 {
+		if small && symbol > 256 {
+			r.err = fmt.Errorf("invalid U3D compressed byte")
+		}
 		return symbol - 1
 	}
-	value := r.u32()
+	var value uint32
+	if small {
+		value = uint32(r.byteValue())
+	} else {
+		value = r.u32()
+	}
 	if value < 0xffff && r.err == nil {
-		h.add(value + 1)
+		r.histogramAdd(h, value+1)
 	}
 	return value
+}
+
+// histogramAdd 在频次数组扩展前计入解码预算
+// 入参: h 频次上下文, symbol 待更新符号
+func (r *u3dBits) histogramAdd(h *u3dHistogram, symbol uint32) {
+	if r.err != nil {
+		return
+	}
+	if r.reserve != nil && symbol <= 0xffff && int(symbol) >= len(h.counts) {
+		length := min(65536, max(int(symbol)+1, len(h.counts)*2))
+		if err := r.reserve(uint64(length-len(h.counts)), 32); err != nil {
+			r.err = err
+			return
+		}
+	}
+	h.add(symbol)
 }
 
 // find 以树状前缀和定位符号，避免按符号数量线性扫描

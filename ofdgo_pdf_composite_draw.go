@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"context"
 	"fmt"
+	"image"
 	"math"
 
 	"github.com/xiaoqidun/pdfgo"
@@ -51,8 +52,12 @@ func (c *pdfCompositor) draw(nodes []pdfCompositeNode, pixels []pdfCompositePixe
 // 返回: error 几何或颜色错误
 func (c *pdfCompositor) drawMark(node pdfCompositeNode, pixels []pdfCompositePixel, space *pdfgo.ColorSpace) error {
 	box, err := c.markBounds(node)
-	if err != nil || c.pixelBounds(box).Empty() {
+	if err != nil {
 		return err
+	}
+	region := c.pixelBounds(box)
+	if region.Empty() {
+		return nil
 	}
 	style, fill, stroke := node.style()
 	mask, err := c.mask(style.SoftMask, space)
@@ -96,7 +101,7 @@ func (c *pdfCompositor) drawMark(node pdfCompositeNode, pixels []pdfCompositePix
 		}
 	}
 	if grouped {
-		return pdfCompositeGroup(c.importer.ctx, pixels, initial, result, space, space, style.Fill.Alpha, mask, style.BlendMode, style.RenderingIntent, style.ColorConversion)
+		return pdfCompositeGroupRegion(c.importer.ctx, pixels, initial, result, c.width, region, space, space, style.Fill.Alpha, mask, style.BlendMode, style.RenderingIntent, style.ColorConversion)
 	}
 	return nil
 }
@@ -333,6 +338,7 @@ func (c *pdfCompositor) drawGroup(node pdfCompositeNode, pixels []pdfCompositePi
 	if b.W <= 0 || b.H <= 0 || b.X >= c.box.X+c.box.W || b.Y >= c.box.Y+c.box.H || b.X+b.W <= c.box.X || b.Y+b.H <= c.box.Y {
 		return nil
 	}
+	region := c.pixelBounds(b)
 	blocked := c.transferBlocked
 	c.transferBlocked = blocked || g.Alpha != 1 || g.SoftMask != nil || !pdfNormalBlend(g.BlendMode)
 	defer func() { c.transferBlocked = blocked }()
@@ -362,12 +368,13 @@ func (c *pdfCompositor) drawGroup(node pdfCompositeNode, pixels []pdfCompositePi
 	} else {
 		sameSpace := space.Equal(parent)
 		components := parent.Components()
-		for i, pixel := range pixels {
+		for i := range pixels {
 			if i%pdfCompositeTileSize == 0 {
 				if err := c.importer.ctx.Err(); err != nil {
 					return err
 				}
 			}
+			pixel := &pixels[i]
 			values := pixel.values
 			if !sameSpace {
 				var err error
@@ -408,7 +415,7 @@ func (c *pdfCompositor) drawGroup(node pdfCompositeNode, pixels []pdfCompositePi
 			}
 		}
 	}
-	return pdfCompositeGroup(c.importer.ctx, pixels, initial, result, space, parent, g.Alpha, mask, g.BlendMode, g.RenderingIntent, g.ColorConversion)
+	return pdfCompositeGroupRegion(c.importer.ctx, pixels, initial, result, c.width, region, space, parent, g.Alpha, mask, g.BlendMode, g.RenderingIntent, g.ColorConversion)
 }
 
 // drawKnockout 将每个对象与组初始背景合成，再按对象形状替换先前对象
@@ -477,37 +484,56 @@ func pdfCompositeKnockout(target *pdfCompositePixel, initial, source pdfComposit
 // 入参: ctx 取消上下文, pixels 父组输出, initial 初始背景, result 组结果, space 组空间, parent 父空间, opacity 组不透明度, mask 蒙版, mode 混合模式, intent 渲染意图, conversion 设备转换函数
 // 返回: error 颜色或混合错误
 func pdfCompositeGroup(ctx context.Context, pixels, initial, result []pdfCompositePixel, space, parent *pdfgo.ColorSpace, opacity float64, mask []float64, mode, intent pdfgo.Name, conversion pdfgo.ColorConversion) error {
+	return pdfCompositeGroupRegion(ctx, pixels, initial, result, max(1, len(pixels)), image.Rect(0, 0, len(pixels), 1), space, parent, opacity, mask, mode, intent, conversion)
+}
+
+// pdfCompositeGroupRegion 在组覆盖区域合成像素，保留原栅格及形状贡献
+// 入参: ctx 取消上下文, pixels 父组输出, initial 初始背景, result 组结果, stride 行跨度, region 覆盖区域, space 组空间, parent 父空间, opacity 组不透明度, mask 蒙版, mode 混合模式, intent 渲染意图, conversion 设备转换函数
+// 返回: error 缓冲、区域、颜色或混合错误
+func pdfCompositeGroupRegion(ctx context.Context, pixels, initial, result []pdfCompositePixel, stride int, region image.Rectangle, space, parent *pdfgo.ColorSpace, opacity float64, mask []float64, mode, intent pdfgo.Name, conversion pdfgo.ColorConversion) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if len(pixels) != len(initial) || len(pixels) != len(result) || mask != nil && len(mask) != len(pixels) {
 		return fmt.Errorf("invalid PDF transparency group buffers")
 	}
+	if stride <= 0 || region.Min.X < 0 || region.Min.Y < 0 || region.Max.X > stride || !region.Empty() && region.Max.Y > len(pixels)/stride {
+		return fmt.Errorf("invalid PDF transparency group region")
+	}
 	group, destination := pdfgo.ColorantGroup{Space: space}, pdfgo.ColorantGroup{Space: parent}
 	compositor, err := destination.PrepareGroup(&group, mode, intent, conversion)
 	if err != nil {
 		return err
 	}
+	if region.Empty() {
+		return nil
+	}
 	components, parentComponents := space.Components(), parent.Components()
-	for i, pixel := range result {
-		if i%pdfCompositeTileSize == 0 {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-		}
-		alpha := opacity
-		if mask != nil {
-			alpha *= mask[i]
-		}
-		target := pdfgo.ColorantPixel{Values: pixels[i].values[:parentComponents], Alpha: pixels[i].alpha, Shape: pixels[i].shape, Effect: pixels[i].effect}
-		if err := compositor.Composite(&target,
-			pdfgo.ColorantPixel{Values: initial[i].values[:components], Alpha: initial[i].alpha, Shape: initial[i].shape, Effect: initial[i].effect},
-			pdfgo.ColorantPixel{Values: pixel.values[:components], Alpha: pixel.alpha, Shape: pixel.shape, Effect: pixel.effect},
-			alpha,
-		); err != nil {
+	for y := region.Min.Y; y < region.Max.Y; y++ {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		pixels[i].alpha, pixels[i].effect, pixels[i].shape = target.Alpha, target.Effect, target.Shape
+		for i, end := y*stride+region.Min.X, y*stride+region.Max.X; i < end; i++ {
+			if i%pdfCompositeTileSize == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
+			alpha := opacity
+			if mask != nil {
+				alpha *= mask[i]
+			}
+			pixel := &result[i]
+			target := pdfgo.ColorantPixel{Values: pixels[i].values[:parentComponents], Alpha: pixels[i].alpha, Shape: pixels[i].shape, Effect: pixels[i].effect}
+			if err := compositor.Composite(&target,
+				pdfgo.ColorantPixel{Values: initial[i].values[:components], Alpha: initial[i].alpha, Shape: initial[i].shape, Effect: initial[i].effect},
+				pdfgo.ColorantPixel{Values: pixel.values[:components], Alpha: pixel.alpha, Shape: pixel.shape, Effect: pixel.effect},
+				alpha,
+			); err != nil {
+				return err
+			}
+			pixels[i].alpha, pixels[i].effect, pixels[i].shape = target.Alpha, target.Effect, target.Shape
+		}
 	}
 	return nil
 }

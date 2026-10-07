@@ -58,6 +58,7 @@ type U3DNode struct {
 	Parents              []U3DParent
 	Visibility           uint32
 	Shaders              [][]string
+	LineShaders          [][]string
 	View                 *U3DView
 }
 
@@ -110,7 +111,7 @@ type u3dDecoder struct {
 	palettes  map[uint32]map[string]bool
 }
 
-// DecodeU3D 按ECMA-363解码静态基础网格、组、材质、着色器和光源
+// DecodeU3D 按ECMA-363解码静态基础网格、线集、组、材质、着色器和光源
 // 暂不支持渐进网格、纹理和动画，遇到未支持内容返回错误而非部分场景
 // 入参: ctx 取消上下文, data U3D数据, options 解码限制
 // 返回: *U3DModel 独立场景数据, error 格式、能力、预算或取消错误
@@ -174,7 +175,7 @@ func DecodeU3D(ctx context.Context, data []byte, options U3DOptions) (*U3DModel,
 		if err != nil {
 			return nil, fmt.Errorf("U3D block at %d: %w", offset, err)
 		}
-		continuation := block.kind == 0xffffff15 || block.kind == 0xffffff3b || block.kind == 0xffffff3c
+		continuation := block.kind == 0xffffff15 || block.kind == 0xffffff3b || block.kind == 0xffffff3c || block.kind == 0xffffff3f
 		if uint64(offset) < declarationEnd && (uint64(end) > declarationEnd || continuation) || uint64(offset) >= declarationEnd && !continuation {
 			return nil, fmt.Errorf("invalid U3D declaration boundary at %d", offset)
 		}
@@ -381,6 +382,16 @@ func (d *u3dDecoder) block(block u3dBlock, owner string, chain int, index uint32
 			return name, fmt.Errorf("invalid U3D mesh continuation location")
 		}
 		err = d.baseMesh(&r, name)
+	case 0xffffff37:
+		if chain >= 0 && (chain != 1 || index != 0) {
+			return name, fmt.Errorf("invalid U3D line set chain")
+		}
+		err = d.lineDeclaration(&r, name)
+	case 0xffffff3f:
+		if chain >= 0 {
+			return name, fmt.Errorf("invalid U3D line continuation location")
+		}
+		err = d.lineContinuation(&r, name)
 	case 0xffffff45:
 		if chain != 0 || index == 0 || owner != name || r.u32() != index {
 			return name, fmt.Errorf("invalid U3D shading modifier chain")
@@ -450,7 +461,7 @@ func (d *u3dDecoder) node(r *u3dValues, kind uint32, name string) error {
 	return r.err
 }
 
-// shading 读取网格着色列表，保留列表内各着色器的先后次序
+// shading 分别读取网格和线集着色列表，保留列表内各着色器的先后次序
 // 入参: r 字段读取器, name 目标节点名
 // 返回: error 结构、能力或预算错误
 func (d *u3dDecoder) shading(r *u3dValues, name string) error {
@@ -458,8 +469,9 @@ func (d *u3dDecoder) shading(r *u3dValues, name string) error {
 	if !exists || d.model.Nodes[index].Kind != "Model" {
 		return fmt.Errorf("missing U3D shading target")
 	}
-	if r.u32() != 1 {
-		return fmt.Errorf("unsupported U3D non-mesh shading modifier")
+	flags := r.u32()
+	if flags & ^uint32(3) != 0 {
+		return fmt.Errorf("unsupported U3D shading modifier target")
 	}
 	count := r.u32()
 	if uint64(count) > uint64(len(r.data)-r.pos)/4 {
@@ -487,7 +499,12 @@ func (d *u3dDecoder) shading(r *u3dValues, name string) error {
 			lists[index][j] = r.text()
 		}
 	}
-	d.model.Nodes[index].Shaders = lists
+	if flags&1 != 0 {
+		d.model.Nodes[index].Shaders = lists
+	}
+	if flags&2 != 0 {
+		d.model.Nodes[index].LineShaders = lists
+	}
 	return r.err
 }
 

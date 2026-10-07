@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"maps"
@@ -36,8 +37,12 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 // 入参: ctx 取消上下文, page PDF页面, annotation PDF注解, paint 绘制回调，空值使用原外观, actions 外观区域的动作
 // 返回: error 外观或转换错误
 func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation, paint func(*pdfImporter) error, actions ...Action) error {
-	for _, key := range []pdfgo.Name{"AA", "OC", "A"} {
-		if annotation.Subtype == "Widget" && (key == "A" || key == "AA") {
+	clicks, opened, err := p.annotationTriggerActions(ctx, annotation)
+	if err != nil {
+		return err
+	}
+	for _, key := range []pdfgo.Name{"OC", "A"} {
+		if annotation.Subtype == "Widget" && key == "A" {
 			continue
 		}
 		if key == "A" && (annotation.Subtype == "Link" || annotation.Subtype == "Movie") {
@@ -63,6 +68,9 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 	if err != nil {
 		return err
 	}
+	if flags&64 != 0 && annotation.Subtype != "Widget" {
+		actions, clicks = nil, nil
+	}
 	invisible := flags&1 != 0 && !annotation.IsStandard()
 	if flags&256 != 0 {
 		return &pdfgo.UnsupportedError{Feature: "annotation ToggleNoView flag"}
@@ -73,6 +81,16 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 		p.matrix.Apply(pdfgo.Point{X: annotation.Rect.XMax, Y: annotation.Rect.YMax}),
 		p.matrix.Apply(pdfgo.Point{X: annotation.Rect.XMin, Y: annotation.Rect.YMax}),
 	})
+	if len(clicks) != 0 && annotation.Subtype == "Link" {
+		region, err := p.linkRegion(annotation, box)
+		if err != nil {
+			return err
+		}
+		for i := range clicks {
+			clicks[i].Region = region
+		}
+	}
+	actions = append(actions, clicks...)
 	stamp := *p
 	stamp.matrix = (pdfgo.Matrix{1, 0, 0, 1, -box.X, -box.Y}).Mul(p.matrix)
 	stamp.objects = nil
@@ -120,6 +138,21 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 		return err
 	}
 	converted := Annotation{Type: pdfAnnotationType(annotation.Subtype), Subtype: string(annotation.Subtype), Remark: remark, Appearance: Appearance{Boundary: pdfBoundary(box), Objects: objects}}
+	if annotation.Subtype == "Projection" {
+		projection, err := p.reader.ReadProjectionAnnotation(annotation)
+		if err != nil {
+			return err
+		}
+		converted.Parameters = &AnnotationParameters{Parameter: []AnnotationParameter{{Name: "PDF.Projection.Runtime", Value: "unavailable"}}}
+		if projection.Measurement != nil {
+			data, err := json.Marshal(projection.Measurement)
+			if err != nil {
+				return err
+			}
+			converted.Parameters.Parameter = append(converted.Parameters.Parameter, AnnotationParameter{Name: "PDF.Projection.Measurement", Value: string(data)})
+		}
+		p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF projection annotation metadata and static appearance retained; runtime rendering not transferred"})
+	}
 	if annotation.Subtype == "Redact" {
 		converted.Parameters = &AnnotationParameters{Parameter: []AnnotationParameter{{Name: "PDF.Redact.Pending", Value: "true"}}}
 	}
@@ -187,13 +220,16 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 		return fmt.Errorf("PDF annotation: %w", err)
 	}
 	p.annotationData = append(p.annotationData, bytes.TrimPrefix(data, []byte(xml.Header))...)
+	if len(opened) != 0 {
+		p.editor.pages[p.page].Actions = append(p.editor.pages[p.page].Actions, opened...)
+	}
+	if len(actions) != 0 && annotation.Subtype == "Link" || len(clicks) != 0 {
+		p.report.Links++
+	}
 	p.report.TextObjects += stamp.report.TextObjects
 	p.report.PathObjects += stamp.report.PathObjects
 	p.report.ImageObjects += stamp.report.ImageObjects
 	p.report.Warnings = append(p.report.Warnings, stamp.report.Warnings...)
-	if flags&64 != 0 {
-		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF annotation read-only flag not transferred"})
-	}
 	return nil
 }
 
@@ -208,7 +244,7 @@ func pdfAnnotationType(subtype pdfgo.Name) string {
 		return "Watermark"
 	case "Highlight", "Underline", "Squiggly", "StrikeOut":
 		return "Highlight"
-	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Popup", "Widget", "PrinterMark", "TrapNet", "3D", "RichMedia", "Redact":
+	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Popup", "Widget", "PrinterMark", "TrapNet", "3D", "RichMedia", "Redact", "Projection":
 		return "Path"
 	}
 	if !(pdfgo.Annotation{Subtype: subtype}).IsStandard() {

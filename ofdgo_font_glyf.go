@@ -125,11 +125,12 @@ func (f *sfntOutliner) glyph(id uint16, active map[uint16]bool) (ttGlyph, error)
 		return result, fmt.Errorf("truncated TrueType glyph %d", id)
 	}
 	n := int(int16(binary.BigEndian.Uint16(data)))
+	phantoms := f.phantomPoints(id, data)
 	var program []byte
 	if n >= 0 {
 		result, program, err = readTTSimple(data, n)
 	} else {
-		result, program, err = f.composite(data, active)
+		result, program, err = f.composite(id, data, phantoms, active)
 	}
 	if err != nil {
 		return result, err
@@ -137,12 +138,10 @@ func (f *sfntOutliner) glyph(id uint16, active map[uint16]bool) (ttGlyph, error)
 	if result.warning != nil {
 		f.recordGlyphWarning(id, result.warning)
 	}
-	left := int32(int16(binary.BigEndian.Uint16(data[2:]))) - int32(f.font.Hmtx.LeftSideBearing(id))
-	top := int32(int16(binary.BigEndian.Uint16(data[8:])))
 	if result.metrics != nil {
 		result.points = append(result.points, result.metrics[:]...)
 	} else {
-		result.points = append(result.points, ttPoint{x: left * 64, ox: left * 64}, ttPoint{x: (left + int32(f.font.GlyphAdvance(id))) * 64, ox: (left + int32(f.font.GlyphAdvance(id))) * 64}, ttPoint{y: top * 64, oy: top * 64}, ttPoint{y: (top - int32(f.font.GlyphVerticalAdvance(id))) * 64, oy: (top - int32(f.font.GlyphVerticalAdvance(id))) * 64})
+		result.points = append(result.points, phantoms[:]...)
 	}
 	if len(program) == 0 {
 		return result, nil
@@ -156,6 +155,11 @@ func (f *sfntOutliner) glyph(id uint16, active map[uint16]bool) (ttGlyph, error)
 	}
 	f.once.Do(func() { f.program, f.err = newTTInterpreter(f.font.Tables, f.font.UnitsPerEm()) })
 	if f.err != nil {
+		if ttRecoverableHint(f.err) {
+			result.warning = f.err
+			f.recordGlyphWarning(id, f.err)
+			return result, nil
+		}
 		return result, f.err
 	}
 	if f.program.graphics.inhibit {
@@ -164,7 +168,7 @@ func (f *sfntOutliner) glyph(id uint16, active map[uint16]bool) (ttGlyph, error)
 	vm := f.program.clone()
 	vm.zones[1], vm.ends = append([]ttPoint(nil), result.points...), result.ends
 	if err := vm.run(program); err != nil {
-		if errors.Is(err, errTTStackUnderflow) {
+		if ttRecoverableHint(err) {
 			result.warning = err
 			f.recordGlyphWarning(id, err)
 			return result, nil
@@ -173,6 +177,25 @@ func (f *sfntOutliner) glyph(id uint16, active map[uint16]bool) (ttGlyph, error)
 	}
 	result.points = vm.zones[1]
 	return result, nil
+}
+
+// phantomPoints 按水平和垂直度量生成字形末尾的四个虚拟点
+// 入参: id 字形编号, data 完整字形头
+// 返回: [4]ttPoint 左右边距与上下原点
+func (f *sfntOutliner) phantomPoints(id uint16, data []byte) [4]ttPoint {
+	left := int32(int16(binary.BigEndian.Uint16(data[2:]))) - int32(f.font.Hmtx.LeftSideBearing(id))
+	top := int32(int16(binary.BigEndian.Uint16(data[8:])))
+	if f.font.Vmtx != nil {
+		top += int32(f.font.Vmtx.TopSideBearing(id))
+	}
+	return [4]ttPoint{{x: left * 64, ox: left * 64}, {x: (left + int32(f.font.GlyphAdvance(id))) * 64, ox: (left + int32(f.font.GlyphAdvance(id))) * 64}, {y: top * 64, oy: top * 64}, {y: (top - int32(f.font.GlyphVerticalAdvance(id))) * 64, oy: (top - int32(f.font.GlyphVerticalAdvance(id))) * 64}}
+}
+
+// ttRecoverableHint 判断栈参数、指令引用或控制流错误是否允许保留执行前轮廓
+// 入参: err 指令错误
+// 返回: bool 是否可恢复
+func ttRecoverableHint(err error) bool {
+	return errors.Is(err, errTTStackUnderflow) || errors.Is(err, errTTInvalidReference) || errors.Is(err, errTTInvalidControlFlow)
 }
 
 // trueTypeGlyphData 按loca索引读取字形，拒绝倒序或越界的数据范围
@@ -231,6 +254,9 @@ func (f *sfntOutliner) glyphWarning(id uint16) error {
 // 返回: ttGlyph 字形轮廓, []byte 字节码, error 数据错误
 func readTTSimple(data []byte, count int) (ttGlyph, []byte, error) {
 	var result ttGlyph
+	if count == 0 && len(data) == 10 {
+		return result, nil, nil
+	}
 	if len(data) < 12+2*count {
 		return result, nil, fmt.Errorf("truncated TrueType contour endpoints")
 	}
@@ -311,17 +337,23 @@ func readTTSimple(data []byte, count int) (ttGlyph, []byte, error) {
 }
 
 // composite 合成分量变换和点匹配，保留分量顺序及父级字节码
-// 入参: data 复合字形数据, active 递归访问集合
+// 入参: glyph 父字形编号, data 复合字形数据, phantoms 父字形虚拟点, active 递归访问集合
 // 返回: ttGlyph 字形轮廓, []byte 字节码, error 数据错误
-func (f *sfntOutliner) composite(data []byte, active map[uint16]bool) (ttGlyph, []byte, error) {
+func (f *sfntOutliner) composite(glyph uint16, data []byte, phantoms [4]ttPoint, active map[uint16]bool) (ttGlyph, []byte, error) {
 	var result ttGlyph
 	pos := 10
+	total := -1
+	first := true
 	hasInstructions := false
 	for {
 		if len(data)-pos < 6 {
 			return result, nil, fmt.Errorf("truncated TrueType component")
 		}
 		flags, id := binary.BigEndian.Uint16(data[pos:]), binary.BigEndian.Uint16(data[pos+2:])
+		if first && flags&2 == 0 {
+			return result, nil, fmt.Errorf("first TrueType component requires coordinate offsets")
+		}
+		first = false
 		pos += 4
 		a, b := int32(data[pos]), int32(data[pos+1])
 		pos += 2
@@ -371,11 +403,13 @@ func (f *sfntOutliner) composite(data []byte, active map[uint16]bool) (ttGlyph, 
 			result.warning = fmt.Errorf("TrueType component %d: %w", id, part.warning)
 		}
 		if flags&0x200 != 0 {
-			result.metrics = new([4]ttPoint)
+			if result.metrics == nil {
+				result.metrics = new([4]ttPoint)
+			}
 			copy(result.metrics[:], part.points[len(part.points)-4:])
 		}
-		part.points = part.points[:len(part.points)-4]
-		for i := range part.points {
+		pointCount := len(part.points) - 4
+		for i := range pointCount {
 			p := &part.points[i]
 			x, y := float64(p.x), float64(p.y)
 			p.x = int32(math.Round(matrix[0]*x + matrix[2]*y))
@@ -383,17 +417,44 @@ func (f *sfntOutliner) composite(data []byte, active map[uint16]bool) (ttGlyph, 
 		}
 		dx, dy := a*64, b*64
 		if flags&2 == 0 {
-			if a < 0 || b < 0 || int64(a) >= int64(len(result.points)) || int64(b) >= int64(len(part.points)) {
+			if b < 0 || int64(b) >= int64(len(part.points)) {
 				return result, nil, fmt.Errorf("invalid TrueType component point matching")
 			}
-			dx, dy = result.points[a].x-part.points[b].x, result.points[a].y-part.points[b].y
+			child := part.points[b]
+			if int64(b) >= int64(pointCount) {
+				x, y := float64(child.x), float64(child.y)
+				child.x = int32(math.Round(matrix[0]*x + matrix[2]*y))
+				child.y = int32(math.Round(matrix[1]*x + matrix[3]*y))
+			}
+			var parent ttPoint
+			if a >= 0 && int64(a) < int64(len(result.points)) {
+				parent = result.points[a]
+			} else {
+				if total < 0 {
+					var err error
+					total, err = trueTypePointCount(f.font.Tables, glyph, map[uint16]int{}, map[uint16]bool{})
+					if err != nil {
+						return result, nil, err
+					}
+				}
+				if a < int32(total) || a >= int32(total)+4 {
+					return result, nil, fmt.Errorf("invalid TrueType component point matching")
+				}
+				metrics := &phantoms
+				if result.metrics != nil {
+					metrics = result.metrics
+				}
+				parent = metrics[a-int32(total)]
+			}
+			dx, dy = parent.x-child.x, parent.y-child.y
 		} else if flags&0x1800 == 0x800 {
 			x, y := float64(dx), float64(dy)
 			dx, dy = int32(math.Round(matrix[0]*x+matrix[2]*y)), int32(math.Round(matrix[1]*x+matrix[3]*y))
 		}
-		if flags&4 != 0 {
+		if flags&6 == 6 {
 			dx, dy = int32(math.Round(float64(dx)/64))*64, int32(math.Round(float64(dy)/64))*64
 		}
+		part.points = part.points[:pointCount]
 		if len(result.points)+len(part.points) > 65536 {
 			return result, nil, fmt.Errorf("excessive TrueType component points")
 		}

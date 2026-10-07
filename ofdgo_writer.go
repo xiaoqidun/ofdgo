@@ -448,6 +448,7 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 	promoted := make(map[string]bool)
 	files := make(map[string]bool)
 	if e.source != nil {
+		collectActionReferences(e.source.document.Actions, used)
 		for _, name := range e.annotationFiles() {
 			data, changed := e.source.reader.files[name]
 			if !changed {

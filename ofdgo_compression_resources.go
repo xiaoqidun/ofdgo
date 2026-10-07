@@ -67,7 +67,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		if data, ok := parts[name]; ok {
 			return data, nil
 		}
-		return reader.readFile(name)
+		return reader.readFileView(name)
 	}
 	refs := editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
 	var resources []string
@@ -169,7 +169,32 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 	formats := make(map[string]string)
 	seen := make(map[string]map[[32]byte]string)
 	imageResults := make(map[outputImageKey][]byte)
-	for _, key := range slices.Sorted(maps.Keys(actual)) {
+	ordered := slices.Sorted(maps.Keys(actual))
+	var imageKeys []string
+	for _, key := range ordered {
+		if !refs.files[key] && files[resourceFile{key, "MediaFile"}] && !files[resourceFile{key, "FontFile"}] {
+			imageKeys = append(imageKeys, key)
+		}
+	}
+	load := func(key string) ([]byte, error) {
+		if data, ok := parts[actual[key]]; ok && len(data) > outputOptimizationBufferLimit {
+			return nil, nil
+		}
+		if reader != nil && parts[actual[key]] == nil {
+			if file, ok := reader.packageFile(actual[key]); ok && file.UncompressedSize64 > outputOptimizationBufferLimit {
+				return nil, nil
+			}
+		}
+		data, err := read(actual[key])
+		if len(data) > outputOptimizationBufferLimit {
+			return nil, nil
+		}
+		return data, err
+	}
+	if err := e.prepareOutputImages(imageKeys, load, imageResults); err != nil {
+		return err
+	}
+	for _, key := range ordered {
 		if refs.files[key] || files[resourceFile{key, "FontFile"}] && files[resourceFile{key, "MediaFile"}] {
 			continue
 		}
@@ -196,15 +221,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 				continue
 			}
 			if role == "MediaFile" {
-				options := e.output.options
-				if !e.output.images[key] {
-					options.Mode = CompressionLossless
-				}
-				demand := e.output.sizes[key]
-				if options.Mode != CompressionLossy {
-					options = CompressionOptions{Mode: options.Mode}
-					demand = image.Point{}
-				}
+				options, demand := e.outputImageOptions(key)
 				cacheKey := outputImageKey{hash: sha256.Sum256(data), options: options, size: demand}
 				candidate, cached := imageResults[cacheKey]
 				var err error

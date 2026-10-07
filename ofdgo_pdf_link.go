@@ -31,6 +31,11 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 	if err != nil {
 		return err
 	}
+	markups, err := p.reader.ReadThreeDMarkups(ctx, annotations)
+	if err != nil {
+		return err
+	}
+	var markupState pdfThreeDMarkupState
 	parents := make(map[pdfgo.Reference]int)
 	for i, annotation := range annotations {
 		if err := ctx.Err(); err != nil {
@@ -76,6 +81,12 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		}
 		if attached[i] {
 			continue
+		}
+		if len(markups) != 0 {
+			annotation, err = p.threeDMarkupAnnotation(ctx, annotation, markups[i], &markupState, strict)
+			if err != nil {
+				return err
+			}
 		}
 		dict := annotation.Dictionary
 		optional, err := p.reader.Resolve(dict["OC"])
@@ -223,6 +234,9 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF pending redaction appearance imported; content removal not applied; overlay data not transferred"})
 			continue
 		}
+		if annotation.Subtype == "Projection" && strict {
+			return &pdfgo.UnsupportedError{Feature: "projection annotation runtime conversion"}
+		}
 		if annotation.Subtype != "Link" && pdfAnnotationType(annotation.Subtype) != "" {
 			if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
 				return err
@@ -232,12 +246,15 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		if annotation.Subtype != "Link" {
 			return &pdfgo.UnsupportedError{Feature: "annotation " + string(annotation.Subtype)}
 		}
-		additional, err := p.reader.Resolve(dict["AA"])
+		flags, err := p.reader.ReadAnnotationFlags(annotation)
 		if err != nil {
 			return err
 		}
-		if additional != nil {
-			return &pdfgo.UnsupportedError{Feature: "link annotation field \"AA\""}
+		if flags&64 != 0 {
+			if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
+				return err
+			}
+			continue
 		}
 		primary, err := p.reader.Resolve(dict["A"])
 		if err != nil {
@@ -280,9 +297,6 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		}
 		if err := p.appearanceAnnotation(ctx, page, annotation, actions...); err != nil {
 			return err
-		}
-		if len(actions) != 0 {
-			p.report.Links++
 		}
 	}
 	return nil
@@ -446,73 +460,34 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 			return nil, fmt.Errorf("PDF destination page missing")
 		}
 		matrix, _, _ := pdfPageMatrix(targetPage)
-		dest := &Dest{Type: string(destination.Mode), PageID: p.pageIDs[destination.Page]}
-		if destination.Mode == "XYZ" {
-			values := [3]float64{}
-			retained := [3]bool{}
-			for n, v := range destination.Parameters {
-				switch v := v.(type) {
-				case pdfgo.Integer:
-					values[n] = float64(v)
-				case pdfgo.Real:
-					values[n] = float64(v)
-				case nil:
-					retained[n] = true
-				}
-			}
-			point := matrix.Apply(pdfgo.Point{X: values[0], Y: values[1]})
-			dest.Left, dest.Top, dest.Zoom = point.X, point.Y, values[2]
-			dest.OmitLeft, dest.OmitTop = retained[0], retained[1]
-			if targetPage.Rotation == 90 || targetPage.Rotation == 270 {
-				dest.OmitLeft, dest.OmitTop = retained[1], retained[0]
-			}
-			dest.OmitZoom = retained[2] || values[2] == 0
-		} else if destination.Mode == "FitH" || destination.Mode == "FitV" {
-			var coordinate float64
-			switch value := destination.Parameters[0].(type) {
-			case pdfgo.Integer:
-				coordinate = float64(value)
-			case pdfgo.Real:
-				coordinate = float64(value)
-			}
-			point := pdfgo.Point{X: coordinate}
-			if destination.Mode == "FitH" {
-				point = pdfgo.Point{Y: coordinate}
-			}
-			point = matrix.Apply(point)
-			if targetPage.Rotation == 90 || targetPage.Rotation == 270 {
-				if dest.Type == "FitH" {
-					dest.Type = "FitV"
-				} else {
-					dest.Type = "FitH"
-				}
-			}
-			if dest.Type == "FitH" {
-				dest.Top, dest.OmitTop = point.Y, destination.Parameters[0] == nil
-			} else {
-				dest.Left, dest.OmitLeft = point.X, destination.Parameters[0] == nil
-			}
-		} else if destination.Mode == "FitR" {
-			values := [4]float64{}
-			for n, v := range destination.Parameters {
-				switch v := v.(type) {
-				case pdfgo.Integer:
-					values[n] = float64(v)
-				case pdfgo.Real:
-					values[n] = float64(v)
-				default:
-					return nil, fmt.Errorf("invalid PDF FitR destination coordinate")
-				}
-			}
-			bounds := pdfBounds([]pdfgo.Point{
-				matrix.Apply(pdfgo.Point{X: values[0], Y: values[1]}),
-				matrix.Apply(pdfgo.Point{X: values[2], Y: values[3]}),
-			})
-			dest.Left, dest.Top = bounds.X, bounds.Y
-			dest.Right, dest.Bottom = bounds.X+bounds.W, bounds.Y+bounds.H
-		} else if destination.Mode != "Fit" {
+		if destination.Mode == "FitBH" || destination.Mode == "FitBV" {
 			return nil, &pdfgo.UnsupportedError{Feature: "destination mode " + string(destination.Mode)}
 		}
+		target, err := destination.Transform(matrix)
+		if err != nil {
+			return nil, err
+		}
+		if destination.Mode == "FitB" {
+			box, err := p.destinationBounds(targetPage)
+			if err != nil {
+				if canceled := p.ctx.Err(); canceled != nil {
+					return nil, canceled
+				}
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return nil, err
+				}
+				if strict {
+					return nil, err
+				}
+				p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("PDF FitB destination bounds unavailable: %v; link omitted", err)})
+				return nil, nil
+			}
+			target.Mode = "FitR"
+			target.Left, target.Top = box.X, box.Y
+			target.Right, target.Bottom = box.X+box.W, box.Y+box.H
+			target.KeepLeft, target.KeepTop = false, false
+		}
+		dest := &Dest{Type: string(target.Mode), PageID: p.pageIDs[destination.Page], Left: target.Left, Top: target.Top, Right: target.Right, Bottom: target.Bottom, Zoom: target.Zoom, OmitLeft: target.KeepLeft, OmitTop: target.KeepTop, OmitZoom: target.KeepZoom}
 		action.Goto = &Goto{Dest: dest}
 		*currentPage = p.pageIndexes[destination.Page]
 	}

@@ -435,7 +435,7 @@ func addPackedGlyphMapping(mapping map[rune]uint16, numGlyphs uint16) {
 	}
 }
 
-// buildCmapTable 构建cmap表 (Format 4)
+// buildCmapTable 构建格式4或12字符映射，省略缺字映射
 // 入参: numGlyphs 字形数量, mapping 字符映射
 // 返回: []byte cmap表数据
 func buildCmapTable(numGlyphs uint16, mapping map[rune]uint16) []byte {
@@ -444,15 +444,13 @@ func buildCmapTable(numGlyphs uint16, mapping map[rune]uint16) []byte {
 	}
 	var segs []cmapSegment
 	if mapping == nil {
-		end := uint16(0xFFFF)
 		if numGlyphs > 0 {
-			end = numGlyphs - 1
+			segs = append(segs, cmapSegment{start: 0, end: numGlyphs - 1, delta: 0, offset: 0})
 		}
-		segs = append(segs, cmapSegment{start: 0, end: end, delta: 0, offset: 0})
 	} else {
 		var codes []int
-		for r := range mapping {
-			if r <= 0xFFFF {
+		for r, gid := range mapping {
+			if r >= 0 && r <= 0xFFFF && gid != 0 {
 				codes = append(codes, int(r))
 			}
 		}
@@ -494,13 +492,13 @@ func buildCmapTable(numGlyphs uint16, mapping map[rune]uint16) []byte {
 	for _, s := range segs {
 		endCounts = append(endCounts, s.end)
 		startCounts = append(startCounts, s.start)
-		if mapping == nil {
-			idDeltas = append(idDeltas, 0)
+		if s.start == 0xFFFF {
+			idDeltas = append(idDeltas, 1)
 			idRangeOffsets = append(idRangeOffsets, 0)
 			continue
 		}
-		if s.start == 0xFFFF {
-			idDeltas = append(idDeltas, 1)
+		if mapping == nil {
+			idDeltas = append(idDeltas, 0)
 			idRangeOffsets = append(idRangeOffsets, 0)
 			continue
 		}
@@ -549,7 +547,10 @@ func shouldBuildCmapFormat12(mapping map[rune]uint16) bool {
 		return false
 	}
 	var codes []int
-	for r := range mapping {
+	for r, gid := range mapping {
+		if r < 0 || gid == 0 {
+			continue
+		}
 		if r >= 0xFFFF {
 			return true
 		}
@@ -588,8 +589,8 @@ func buildCmapTableFormat12(numGlyphs uint16, mapping map[rune]uint16) []byte {
 			codes = append(codes, i)
 		}
 	} else {
-		for r := range mapping {
-			if r >= 0 {
+		for r, gid := range mapping {
+			if r >= 0 && gid != 0 {
 				codes = append(codes, int(r))
 			}
 		}
@@ -617,7 +618,7 @@ func buildCmapTableFormat12(numGlyphs uint16, mapping map[rune]uint16) []byte {
 			if mapping != nil {
 				nextGID = mapping[nextRune]
 			}
-			if nextRune != prevRune+1 || nextGID != prevGID+1 {
+			if nextRune != prevRune+1 || uint32(nextGID) != uint32(prevGID)+1 {
 				break
 			}
 			group.endChar = uint32(nextRune)
@@ -627,26 +628,22 @@ func buildCmapTableFormat12(numGlyphs uint16, mapping map[rune]uint16) []byte {
 		}
 		groups = append(groups, group)
 	}
-	sub := new(bytes.Buffer)
-	binary.Write(sub, binary.BigEndian, uint16(12))
-	binary.Write(sub, binary.BigEndian, uint16(0))
-	binary.Write(sub, binary.BigEndian, uint32(16+12*len(groups)))
-	binary.Write(sub, binary.BigEndian, uint32(0))
-	binary.Write(sub, binary.BigEndian, uint32(len(groups)))
-	for _, group := range groups {
-		binary.Write(sub, binary.BigEndian, group.startChar)
-		binary.Write(sub, binary.BigEndian, group.endChar)
-		binary.Write(sub, binary.BigEndian, group.startGID)
+	data := make([]byte, 36+12*len(groups))
+	binary.BigEndian.PutUint16(data[2:], 2)
+	binary.BigEndian.PutUint16(data[6:], 4)
+	binary.BigEndian.PutUint32(data[8:], 20)
+	binary.BigEndian.PutUint16(data[12:], 3)
+	binary.BigEndian.PutUint16(data[14:], 10)
+	binary.BigEndian.PutUint32(data[16:], 20)
+	sub := data[20:]
+	binary.BigEndian.PutUint16(sub, 12)
+	binary.BigEndian.PutUint32(sub[4:], uint32(len(sub)))
+	binary.BigEndian.PutUint32(sub[12:], uint32(len(groups)))
+	for index, group := range groups {
+		position := 16 + 12*index
+		binary.BigEndian.PutUint32(sub[position:], group.startChar)
+		binary.BigEndian.PutUint32(sub[position+4:], group.endChar)
+		binary.BigEndian.PutUint32(sub[position+8:], group.startGID)
 	}
-	mainBuf := new(bytes.Buffer)
-	binary.Write(mainBuf, binary.BigEndian, uint16(0))
-	binary.Write(mainBuf, binary.BigEndian, uint16(2))
-	binary.Write(mainBuf, binary.BigEndian, uint16(0))
-	binary.Write(mainBuf, binary.BigEndian, uint16(4))
-	binary.Write(mainBuf, binary.BigEndian, uint32(20))
-	binary.Write(mainBuf, binary.BigEndian, uint16(3))
-	binary.Write(mainBuf, binary.BigEndian, uint16(10))
-	binary.Write(mainBuf, binary.BigEndian, uint32(20))
-	mainBuf.Write(sub.Bytes())
-	return mainBuf.Bytes()
+	return data
 }

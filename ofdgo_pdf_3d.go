@@ -40,7 +40,7 @@ type PDFThreeDRenderOptions struct {
 // 入参: ctx 取消上下文, page PDF页面, annotation 三维注解
 // 返回: error 外观、资源或取消错误
 func (p *pdfImporter) threeDAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation) error {
-	source, err := p.reader.ReadThreeD(annotation)
+	source, err := p.reader.ReadThreeDContext(ctx, annotation)
 	if err != nil {
 		return p.interactiveAppearanceFallback(ctx, page, annotation, "metadata", err)
 	}
@@ -78,7 +78,7 @@ func (p *pdfImporter) threeDAnnotation(ctx context.Context, page *pdfgo.Page, an
 				return err
 			}
 		}
-		paint, err = p.threeDPainter(ctx, source, annotation, data)
+		paint, err = p.threeDPainter(ctx, page, source, annotation, data)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -101,9 +101,9 @@ func (p *pdfImporter) threeDAnnotation(ctx context.Context, page *pdfgo.Page, an
 }
 
 // threeDPainter 准备三维静态图像，复用库层压缩，失败时不提交注解对象
-// 入参: ctx 取消上下文, source 三维参数, annotation 注解, data 原始模型
+// 入参: ctx 取消上下文, page PDF页面, source 三维参数, annotation 注解, data 原始模型
 // 返回: func(*pdfImporter) error 绘制回调, error 模型、绘制或资源错误
-func (p *pdfImporter) threeDPainter(ctx context.Context, source pdfgo.ThreeD, annotation pdfgo.Annotation, data []byte) (func(*pdfImporter) error, error) {
+func (p *pdfImporter) threeDPainter(ctx context.Context, page *pdfgo.Page, source pdfgo.ThreeD, annotation pdfgo.Annotation, data []byte) (func(*pdfImporter) error, error) {
 	box := source.ViewBox
 	width, height := box.XMax-box.XMin, box.YMax-box.YMin
 	x, y := annotation.Rect.XMin/2+annotation.Rect.XMax/2, annotation.Rect.YMin/2+annotation.Rect.YMax/2
@@ -123,6 +123,17 @@ func (p *pdfImporter) threeDPainter(ctx context.Context, source pdfgo.ThreeD, an
 		nodes = append(nodes, pdfCompositeNode{path: &pdfgo.PathMark{Path: path, Fill: true, Style: pdfgo.Style{Fill: pdfgo.Paint{RGB: *source.Background.RGB, Alpha: 1}}}})
 	}
 	if width > 0 && height > 0 {
+		var overlay []pdfCompositeNode
+		if source.Presentation.Overlay != nil {
+			var err error
+			overlay, err = p.collectCompositeNodes(func(visitor pdfgo.Visitor) error {
+				return p.reader.WalkThreeDOverlay(ctx, page, source, visitor)
+			})
+			if err != nil {
+				return nil, err
+			}
+			source.Presentation.Overlay = nil
+		}
 		if source.Format != "U3D" {
 			return nil, &pdfgo.UnsupportedError{Feature: "3D model format " + string(source.Format)}
 		}
@@ -145,6 +156,7 @@ func (p *pdfImporter) threeDPainter(ctx context.Context, source pdfgo.ThreeD, an
 			return nil, err
 		}
 		nodes = append(nodes, pdfCompositeNode{image: &pdfgo.ImageMark{Image: resource, Matrix: pdfgo.Matrix{width, 0, 0, height, x + box.XMin, y + box.YMin}, Style: pdfgo.Style{Fill: pdfgo.Paint{Alpha: 1}}}})
+		nodes = append(nodes, overlay...)
 	}
 	return func(stamp *pdfImporter) error {
 		if err := ctx.Err(); err != nil {
@@ -169,9 +181,12 @@ func RenderPDFThreeD(ctx context.Context, model *U3DModel, source pdfgo.ThreeD, 
 	if source.Format != "U3D" {
 		return nil, &pdfgo.UnsupportedError{Feature: "3D model format " + string(source.Format)}
 	}
+	if len(source.Measurements) != 0 {
+		return nil, &pdfgo.UnsupportedError{Feature: "3D view measurement rendering"}
+	}
 	presentation := source.Presentation
-	if presentation.RenderMode != "" && presentation.RenderMode != "Solid" || presentation.Overlay != nil {
-		return nil, &pdfgo.UnsupportedError{Feature: "3D view render mode or overlay"}
+	if presentation.Overlay != nil {
+		return nil, &pdfgo.UnsupportedError{Feature: "3D view overlay"}
 	}
 	if source.Background.RGB == nil {
 		return nil, &pdfgo.UnsupportedError{Feature: "3D background color space"}
@@ -186,6 +201,9 @@ func RenderPDFThreeD(ctx context.Context, model *U3DModel, source pdfgo.ThreeD, 
 		projection = *source.Projection
 	}
 	render := U3DRenderOptions{Width: options.Width, Height: options.Height, MaxMemoryBytes: options.MaxMemoryBytes, MaxInstances: options.MaxInstances, Background: source.Background.RGB}
+	if err := pdfThreeDRenderMode(source, &render); err != nil {
+		return nil, err
+	}
 	if err := pdfThreeDNodeStates(ctx, presentation.Nodes, &render); err != nil {
 		return nil, err
 	}
@@ -210,35 +228,11 @@ func RenderPDFThreeD(ctx context.Context, model *U3DModel, source pdfgo.ThreeD, 
 	if err := r.prepareSections(render.Sections); err != nil {
 		return nil, err
 	}
-	scale := 0.0
-	switch projection.Subtype {
-	case "P":
-		if !finite(projection.FieldOfView) || projection.FieldOfView <= 0 || projection.FieldOfView >= 180 {
-			return nil, &pdfgo.UnsupportedError{Feature: "degenerate 3D perspective field of view"}
-		}
-		diameter := projection.PerspectiveDiameter
-		if projection.PerspectiveBinding != "" {
-			diameter, err = pdfThreeDBinding(projection.PerspectiveBinding, width, height)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if !finite(diameter) || diameter <= 0 {
-			return nil, fmt.Errorf("invalid PDF 3D perspective diameter")
-		}
-		scale = diameter / (2 * math.Tan(projection.FieldOfView*math.Pi/360))
-		camera.Perspective = true
-	case "O":
-		width := source.AnnotationBox.XMax - source.AnnotationBox.XMin
-		height := source.AnnotationBox.YMax - source.AnnotationBox.YMin
-		binding, err := pdfThreeDBinding(projection.OrthographicBinding, width, height)
-		if err != nil {
-			return nil, err
-		}
-		scale = projection.OrthographicScale * binding
-	default:
-		return nil, fmt.Errorf("invalid PDF 3D projection subtype")
+	scale, err := projection.ScaleFactor(source.ViewBox, source.AnnotationBox)
+	if err != nil {
+		return nil, err
 	}
+	camera.Perspective = projection.Subtype == "P"
 	camera.ScaleX = scale * float64(options.Width) / width
 	camera.ScaleY = scale * float64(options.Height) / height
 	switch projection.Clipping {
@@ -308,29 +302,6 @@ func RenderPDFThreeD(ctx context.Context, model *U3DModel, source pdfgo.ThreeD, 
 		}
 	}
 	return r.render(render, passes)
-}
-
-// pdfThreeDBinding 计算目标区域的标准绑定倍率，不按模型包围盒重新适配
-// 入参: binding 绑定方式, width 区域宽度, height 区域高度
-// 返回: float64 倍率, error 方式或尺寸错误
-func pdfThreeDBinding(binding pdfgo.Name, width, height float64) (float64, error) {
-	if binding == "Absolute" {
-		return 1, nil
-	}
-	if !finite(width) || !finite(height) || width <= 0 || height <= 0 {
-		return 0, fmt.Errorf("invalid PDF 3D binding dimensions")
-	}
-	switch binding {
-	case "W":
-		return width, nil
-	case "H":
-		return height, nil
-	case "Min":
-		return min(width, height), nil
-	case "Max":
-		return max(width, height), nil
-	}
-	return 0, fmt.Errorf("invalid PDF 3D binding")
 }
 
 // pdfCamera 解析PDF相机来源并保留模型视图的绘制轮次
@@ -414,7 +385,7 @@ func (r *u3dRender) pdfCamera(source pdfgo.ThreeDCamera) (U3DCamera, string, err
 	return camera, view, nil
 }
 
-// depthRange 计算可见模型面的相机深度范围，不为自动裁剪复制顶点
+// depthRange 计算可见模型几何的相机深度范围，不为自动裁剪复制顶点
 // 返回: float64 最近深度, float64 最远深度, bool 是否含几何, error 几何或取消错误
 func (r *u3dRender) depthRange() (float64, float64, bool, error) {
 	minimum, maximum := math.Inf(1), math.Inf(-1)
@@ -431,13 +402,14 @@ func (r *u3dRender) depthRange() (float64, float64, bool, error) {
 		}
 		mesh := &r.model.Meshes[index]
 		matrix := r.toCamera.multiply(instance.world)
-		for j, face := range mesh.Faces {
+		for j := range len(mesh.Faces) + len(mesh.Lines) {
+			_, corners := mesh.primitive(j)
 			if j%256 == 0 {
 				if err := r.ctx.Err(); err != nil {
 					return 0, 0, false, err
 				}
 			}
-			for _, corner := range face.Corners {
+			for _, corner := range corners {
 				if uint64(corner.Position) >= uint64(len(mesh.Positions)) {
 					return 0, 0, false, fmt.Errorf("invalid U3D position index")
 				}

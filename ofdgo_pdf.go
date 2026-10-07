@@ -78,6 +78,7 @@ type pdfImporter struct {
 	report           PDFImportReport
 	matrix           pdfgo.Matrix
 	page             int
+	pageActionPage   int
 	fontIDs          map[*pdfgo.Font]string
 	fonts            map[*pdfgo.Font]*pdfImportedFont
 	fontWarnings     map[string]bool
@@ -91,6 +92,7 @@ type pdfImporter struct {
 	pages            map[pdfgo.Reference]*pdfgo.Page
 	pageIDs          map[pdfgo.Reference]string
 	pageIndexes      map[pdfgo.Reference]int
+	destinationBoxes map[pdfgo.Reference]Box
 	imageIDs         map[pdfImageKey][]pdfImageResource
 	imageContents    *renderCache[pdfImageContentKey, pdfImageContent]
 	attachmentIDs    map[pdfAttachmentKey]string
@@ -209,6 +211,13 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	if err != nil {
 		return nil, PDFImportReport{}, err
 	}
+	if len(editor.pages) != 0 {
+		importer.page = -1
+		if err := importer.documentOpenActions(ctx); err != nil {
+			return nil, PDFImportReport{}, fmt.Errorf("import PDF document actions: %w", err)
+		}
+		importer.page = 0
+	}
 	if options.OnProgress != nil {
 		if err := options.OnProgress("convert", 0, len(editor.pages)); err != nil {
 			return nil, PDFImportReport{}, err
@@ -230,6 +239,9 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 		importer.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
 		importer.clipPaths = nil
 		importer.annotationData = nil
+		if err := importer.pageOpenActions(ctx, page); err != nil {
+			return fmt.Errorf("import PDF page %d actions: %w", index+1, err)
+		}
 		if err := importer.compositePage(nil, func(visitor pdfgo.Visitor) error { return reader.WalkPage(ctx, page, visitor) }); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
@@ -478,24 +490,31 @@ func (p *pdfImporter) pathDataContext(ctx context.Context, path pdfgo.Path, orig
 	return string(data), nil
 }
 
-// clips 复用只读裁剪几何，以区域CTM保留对象位移及路径交集
+// clips 省略覆盖对象边界的矩形裁剪，复用其余几何并保留位移及路径交集
 // 入参: paths 裁剪路径, origin 对象边界
 // 返回: *Clips OFD裁剪区域，无裁剪时为空, error 未解析的裁剪字形
 func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
-	flag := false
-	clips := &Clips{TransFlag: &flag, Clip: make([]Clip, len(paths))}
-	areas := make([]ClipArea, len(paths))
+	var clips *Clips
+	var areas []ClipArea
 	translation := ""
-	if origin.X != 0 || origin.Y != 0 {
-		translation = pdfNumbers(1, 0, 0, 1, -origin.X, -origin.Y)
-	}
-	for index, path := range paths {
+	for _, path := range paths {
 		if err := p.ctx.Err(); err != nil {
 			return nil, err
 		}
+		if pdfClipContainsBoundary(path, p.matrix, origin) {
+			continue
+		}
+		if clips == nil {
+			clips = &Clips{TransFlag: new(false), Clip: make([]Clip, 0, len(paths))}
+			areas = make([]ClipArea, len(paths))
+			if origin.X != 0 || origin.Y != 0 {
+				translation = pdfNumbers(1, 0, 0, 1, -origin.X, -origin.Y)
+			}
+		}
+		index := len(clips.Clip)
 		area := &areas[index]
 		area.CTM = translation
 		if len(path.Segments) != 0 {
@@ -530,7 +549,7 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 			fill, stroke := true, false
 			area.Path = []PathObject{{Boundary: "0 0 1 1", AbbreviatedData: "M 0 0 C", Fill: &fill, Stroke: &stroke}}
 		}
-		clips.Clip[index].Area = areas[index : index+1 : index+1]
+		clips.Clip = append(clips.Clip, Clip{Area: areas[index : index+1 : index+1]})
 	}
 	return clips, nil
 }

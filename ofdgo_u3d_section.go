@@ -145,13 +145,14 @@ func (r *u3dRender) sceneDiagonal() (float64, error) {
 			continue
 		}
 		mesh := &r.model.Meshes[index]
-		for i, face := range mesh.Faces {
+		for i := range len(mesh.Faces) + len(mesh.Lines) {
+			_, corners := mesh.primitive(i)
 			if i%256 == 0 {
 				if err := r.ctx.Err(); err != nil {
 					return 0, err
 				}
 			}
-			for _, corner := range face.Corners {
+			for _, corner := range corners {
 				if uint64(corner.Position) >= uint64(len(mesh.Positions)) {
 					return 0, fmt.Errorf("invalid U3D position index")
 				}
@@ -234,6 +235,9 @@ func (r *u3dRender) sectionTriangle(triangle [3]u3dVertex, shader U3DShader, pas
 		if err := r.clipTriangle([3]u3dVertex{r.sectionScratch[current][0], r.sectionScratch[current][i], r.sectionScratch[current][i+1]}, shader, pass); err != nil {
 			return err
 		}
+	}
+	if r.depthOnly {
+		return nil
 	}
 	for i, section := range r.sections {
 		if section.intersection != nil {

@@ -270,7 +270,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 	return parts, nil
 }
 
-// sourcePageXML 仅改写已修改的对象、页面尺寸和新增图层，保留原页块层级
+// sourcePageXML 仅改写已修改的对象、页面尺寸、动作和新增图层，保留原页块层级
 // 入参: index 页面索引, source 原页面
 // 返回: []byte 页面XML, error 错误信息
 func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, error) {
@@ -416,12 +416,27 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 			value := []byte("<ofd:Content xmlns:ofd=\"" + ofdNamespace + "\">")
 			value = append(value, added...)
 			value = append(value, []byte("</ofd:Content>")...)
-			patches = append(patches, editorXMLPatch{source.root.close, source.root.close, value})
+			position := source.root.close
+			if actions := source.root.child("Actions"); actions != nil {
+				position = actions.start
+			}
+			patches = append(patches, editorXMLPatch{position, position, value})
 		} else if content.open == content.end {
 			patches = append(patches, editorXMLContent(data, content, added))
 		} else {
 			patches = append(patches, editorXMLPatch{content.close, content.close, added})
 		}
+	}
+	if !reflect.DeepEqual(page.Actions, source.original.Actions) {
+		encoded, err := editorActionsXML(page.Actions)
+		if err != nil {
+			return nil, err
+		}
+		patch := editorXMLPatch{source.root.close, source.root.close, encoded}
+		if node := source.root.child("Actions"); node != nil {
+			patch.start, patch.end = node.start, node.end
+		}
+		patches = append(patches, patch)
 	}
 	return editorPatchXML(data, patches), nil
 }
