@@ -80,6 +80,7 @@ func (c *pdfCompositor) shadingPattern(pattern *pdfgo.ShadingPattern, node pdfCo
 		c.releasePixels(result)
 		return nil, err
 	}
+	defer c.releaseCoverage(coverage)
 	step := 25.4 / c.importer.rasterDPI
 	for i := range result {
 		if i%pdfCompositeTileSize == 0 {
@@ -90,7 +91,7 @@ func (c *pdfCompositor) shadingPattern(pattern *pdfgo.ShadingPattern, node pdfCo
 		}
 		shape := 0.0
 		if coverage != nil {
-			_, _, _, a := coverage.At(i%c.width, i/c.width).RGBA()
+			a := imageAlphaAt(coverage, i%c.width, i/c.width)
 			shape = float64(a) / 65535
 		}
 		if nodes[0].image != nil && shape != 0 {

@@ -84,6 +84,7 @@ type editorResource struct {
 	vectorKey    [32]byte
 	vectorStates map[string]editorCompositeState
 	references   []string
+	usage        *editorVectorUsage
 	subset       *editorFontSubset
 	states       map[string]editorCompositeState
 	draw         *DrawParam

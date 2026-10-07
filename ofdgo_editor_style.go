@@ -91,7 +91,11 @@ func (e *Editor) ApplyAppearance(page int, ids []string, appearance ObjectAppear
 // 返回: *DrawParam 绘制参数, error 错误信息
 func (e *Editor) DrawParam(id string, resolved bool) (*DrawParam, error) {
 	if resolved {
-		return e.editorDrawParam(id, make(map[string]bool))
+		draw, err := e.editorDrawParam(id, make(map[string]bool))
+		if err != nil {
+			return nil, err
+		}
+		return cloneEditorData(draw), nil
 	}
 	for _, resource := range e.resources {
 		if resource.draw != nil && resource.draw.ID == id {

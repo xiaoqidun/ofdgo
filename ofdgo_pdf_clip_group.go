@@ -51,7 +51,7 @@ func (p *pdfImporter) sharedClipObjects(objects []GraphicObject) ([]GraphicObjec
 		for index := range members {
 			*editorObjectClips(&members[index]) = nil
 		}
-		id, err := p.editor.addOwnedVector(p.ctx, members, p.pageWidth, p.pageHeight)
+		id, err := p.objectValidation().addOwnedVector(p.ctx, members, p.pageWidth, p.pageHeight)
 		if err != nil {
 			return nil, err
 		}

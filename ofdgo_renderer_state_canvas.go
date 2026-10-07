@@ -33,6 +33,15 @@ type canvasClipCacheKey struct{}
 // canvasPathCacheKey 区分不依赖文档资源的共享局部路径缓存
 type canvasPathCacheKey struct{}
 
+// canvasFillCacheKey 区分按填充规则规范化的共享路径缓存
+type canvasFillCacheKey struct{}
+
+// canvasFillKey 保存完整几何摘要及填充规则
+type canvasFillKey struct {
+	digest [32]byte
+	rule   canvas.FillRule
+}
+
 // canvasPathKey 按完整路径文本与几何容差区分解析结果
 type canvasPathKey struct {
 	data    string
@@ -74,6 +83,21 @@ func (r *Renderer) canvasParsedPaths() *renderCache[canvasPathKey, *canvas.Path]
 		r.sharedBackendStates = make(map[any]any)
 	}
 	cache := &renderCache[canvasPathKey, *canvas.Path]{limit: 16 << 20}
+	r.sharedBackendStates[key] = cache
+	return cache
+}
+
+// canvasSettledPaths 获取共享填充轮廓缓存，限制结果保留量
+// 返回: *renderCache[canvasFillKey, *canvas.Path] 填充轮廓缓存
+func (r *Renderer) canvasSettledPaths() *renderCache[canvasFillKey, *canvas.Path] {
+	key := canvasFillCacheKey{}
+	if state, ok := r.sharedBackendStates[key]; ok {
+		return state.(*renderCache[canvasFillKey, *canvas.Path])
+	}
+	if r.sharedBackendStates == nil {
+		r.sharedBackendStates = make(map[any]any)
+	}
+	cache := &renderCache[canvasFillKey, *canvas.Path]{limit: 16 << 20}
 	r.sharedBackendStates[key] = cache
 	return cache
 }

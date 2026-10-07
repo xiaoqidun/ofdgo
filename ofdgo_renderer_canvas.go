@@ -55,6 +55,30 @@ func (b CanvasBackend) Render(page *RasterPage) (image.Image, error) {
 		return nil, err
 	}
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	return b.renderImage(page, img)
+}
+
+// RenderInto 在调用方独占的紧密RGBA缓冲中重新绘制，不修改页面或保留缓冲
+// 入参: page 只读页面, target 原点为零且尺寸匹配的目标，不与输入图像共享数据
+// 返回: error 参数或绘制错误，绘制失败时目标可能包含部分结果
+func (b CanvasBackend) RenderInto(page *RasterPage, target *image.RGBA) error {
+	w, h, err := page.PixelSize()
+	if err != nil {
+		return err
+	}
+	if target == nil || target.Rect != image.Rect(0, 0, w, h) || target.Stride != 4*w || len(target.Pix) < 4*w*h {
+		return fmt.Errorf("invalid canvas target buffer")
+	}
+	clear(target.Pix[:4*w*h])
+	_, err = b.renderImage(page, target)
+	return err
+}
+
+// renderImage 将页面绘制到已清空且尺寸匹配的目标
+// 入参: page 只读页面, img 独占目标
+// 返回: image.Image 目标图像, error 绘制错误
+func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Image, error) {
+	h := img.Rect.Dy()
 	space := b.ColorSpace
 	if space == nil {
 		space = canvas.DefaultColorSpace

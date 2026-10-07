@@ -14,6 +14,8 @@
 
 package ofdgo
 
+import "image"
+
 // pdfCompositeTileSize 限定单次合成块的像素边长
 const pdfCompositeTileSize = 256
 
@@ -22,8 +24,51 @@ type pdfCompositeBuffers[T any] [8][]T
 
 // pdfCompositeScratch 复用像素及蒙版缓冲，不跨页持有活动内容
 type pdfCompositeScratch struct {
-	pixels pdfCompositeBuffers[pdfCompositePixel]
-	masks  pdfCompositeBuffers[float64]
+	pixels  pdfCompositeBuffers[pdfCompositePixel]
+	masks   pdfCompositeBuffers[float64]
+	rasters [8]*image.RGBA
+}
+
+// acquireCoverage 借用当前块的独占画布，保留活动画布供嵌套合成读取
+// 返回: *image.RGBA 未清空画布，不支持缓冲绘制的后端返回nil, error 无效绘制区域
+func (c *pdfCompositor) acquireCoverage() (*image.RGBA, error) {
+	if _, ok := c.importer.editor.Backends().Raster.(RasterBufferBackend); !ok {
+		return nil, nil
+	}
+	page := RasterPage{Width: c.box.W, Height: c.box.H, DPI: c.importer.rasterDPI}
+	w, h, err := page.PixelSize()
+	if err != nil {
+		return nil, err
+	}
+	if c.scratch == nil {
+		c.scratch = &pdfCompositeScratch{}
+	}
+	rect := image.Rect(0, 0, w, h)
+	for i, stored := range c.scratch.rasters {
+		if stored != nil && stored.Rect == rect {
+			c.scratch.rasters[i] = nil
+			return stored, nil
+		}
+	}
+	return image.NewRGBA(rect), nil
+}
+
+// releaseCoverage 归还当前调用不再读取的画布，限制单次合成保留的内存
+// 入参: coverage 当前调用的覆盖图像
+func (c *pdfCompositor) releaseCoverage(coverage image.Image) {
+	if _, ok := c.importer.editor.Backends().Raster.(RasterBufferBackend); !ok || c.scratch == nil {
+		return
+	}
+	buffer, ok := coverage.(*image.RGBA)
+	if !ok || buffer == nil || cap(buffer.Pix) > 4*pdfCompositeTileSize*pdfCompositeTileSize {
+		return
+	}
+	for i, stored := range c.scratch.rasters {
+		if stored == nil {
+			c.scratch.rasters[i] = buffer
+			return
+		}
+	}
 }
 
 // acquire 借用尚未初始化的独立缓冲，嵌套调用不复用活动缓冲

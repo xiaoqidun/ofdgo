@@ -50,6 +50,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 	if e.output == nil || e.output.options.Mode == CompressionUnchanged || e.output.protected {
 		return nil
 	}
+	generated = e.generatedVectorReferences(parts, generated)
 	names := make(map[string]bool)
 	if reader != nil {
 		for name := range reader.fileIndex {

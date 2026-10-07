@@ -431,6 +431,17 @@ func imageNRGBAAt(img image.Image, x, y int) color.NRGBA {
 	return color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
 }
 
+// imageAlphaAt 读取十六位透明度，原生图像避免颜色装箱
+// 入参: img 图像, x 横坐标, y 纵坐标
+// 返回: uint32 十六位透明度
+func imageAlphaAt(img image.Image, x, y int) uint32 {
+	if source, ok := img.(image.RGBA64Image); ok {
+		return uint32(source.RGBA64At(x, y).A)
+	}
+	_, _, _, alpha := img.At(x, y).RGBA()
+	return alpha
+}
+
 // imageNRGBA64At 读取十六位非预乘像素，原生图像避免颜色装箱
 // 入参: img 图片对象, x X坐标, y Y坐标
 // 返回: color.NRGBA64 NRGBA64像素

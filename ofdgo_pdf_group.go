@@ -435,6 +435,13 @@ func (p *pdfImporter) groupSceneBounds(scene *RasterPage) (*RasterPage, Box, err
 // 入参: source 原始场景, box 页面裁取区域
 // 返回: image.Image 透明图像, error 后端渲染错误
 func (p *pdfImporter) renderGroupScene(source *RasterPage, box Box) (image.Image, error) {
+	return p.renderGroupSceneInto(source, box, nil)
+}
+
+// renderGroupSceneInto 在指定区域绘制场景，按所选后端能力复用独占目标
+// 入参: source 原始场景, box 页面裁取区域, target 可选目标缓冲
+// 返回: image.Image 透明图像, error 后端渲染错误
+func (p *pdfImporter) renderGroupSceneInto(source *RasterPage, box Box, target *image.RGBA) (image.Image, error) {
 	scene := *source
 	scene.DPI = p.rasterDPI
 	scene.Commands = append([]RasterCommand(nil), source.Commands...)
@@ -456,6 +463,14 @@ func (p *pdfImporter) renderGroupScene(source *RasterPage, box Box) (image.Image
 	backend := p.editor.Backends().Raster
 	if backend == nil {
 		return nil, fmt.Errorf("PDF local compositing: %w", ErrBackendUnavailable)
+	}
+	if target != nil {
+		if buffered, ok := backend.(RasterBufferBackend); ok {
+			if err := buffered.RenderInto(&scene, target); err != nil {
+				return nil, err
+			}
+			return target, nil
+		}
 	}
 	return backend.Render(&scene)
 }

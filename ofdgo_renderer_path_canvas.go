@@ -253,13 +253,16 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		}
 		fp := paths.Merge()
 		fillRule := canvas.NonZero
+		if fillClip != nil && !fp.Bounds().Overlaps(fillClip.Bounds()) {
+			fp = &canvas.Path{}
+		}
 		if obj.Rule == "Even-Odd" {
 			fillRule = canvas.EvenOdd
 			if bounds, ok := rectangularPath(fillClip); ok && bounds.Contains(fp.Bounds()) {
 				fillClip = nil
 			}
 			if fillClip != nil || style.fillPattern != nil {
-				fp = fp.Settle(fillRule)
+				fp = r.settleCanvasPath(fp, fillRule)
 			}
 		}
 		if fillClip != nil {

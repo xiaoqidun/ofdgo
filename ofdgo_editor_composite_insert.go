@@ -249,7 +249,7 @@ func (e *Editor) addEditorDrawParam(draw DrawParam) (string, error) {
 		return "", err
 	}
 	draw.ID = e.nextID()
-	data, err := encodeOFDXML(func(x *ofdXML) {
+	data, err := e.encodeXML(func(x *ofdXML) {
 		x.root("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "."}})
 		x.start("DrawParams", nil)
 		attrs := ofdAttrs{}

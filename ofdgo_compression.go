@@ -164,6 +164,9 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 			return nil, err
 		}
 	}
+	if err := snapshot.compressPatternPaints(); err != nil {
+		return nil, err
+	}
 	return &snapshot, nil
 }
 

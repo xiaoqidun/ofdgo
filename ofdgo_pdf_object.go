@@ -252,10 +252,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		if err := p.flushPath(); err != nil {
 			return err
 		}
-		visitor := pdfgo.Visitor{Path: p.path, Image: p.image, Warning: p.warning, Reference: p.referencePage}
-		visitor.Group = func(group pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
-			return p.group(group, walk, visitor)
-		}
+		visitor := p.visitor()
 		for index := range mark.Glyphs {
 			if err := p.reader.WalkType3Glyph(p.ctx, mark, index, visitor); err != nil {
 				return err

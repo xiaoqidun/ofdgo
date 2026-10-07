@@ -29,6 +29,13 @@ import (
 // 入参: ctx 取消上下文, page PDF页面, annotation PDF注解, actions 外观区域的动作
 // 返回: error 外观或转换错误
 func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation, actions ...Action) error {
+	return p.paintedAnnotation(ctx, page, annotation, nil, actions...)
+}
+
+// paintedAnnotation 复用注解坐标、标志与元数据处理，允许替换静态绘制内容
+// 入参: ctx 取消上下文, page PDF页面, annotation PDF注解, paint 绘制回调，空值使用原外观, actions 外观区域的动作
+// 返回: error 外观或转换错误
+func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation, paint func(*pdfImporter) error, actions ...Action) error {
 	for _, key := range []pdfgo.Name{"AA", "OC", "A"} {
 		if annotation.Subtype == "Widget" && (key == "A" || key == "AA") {
 			continue
@@ -74,29 +81,35 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 	stamp.compositeCache = nil
 	stamp.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
 	stamp.pageWidth, stamp.pageHeight = box.W, box.H
-	nodes, err := p.collectCompositeNodes(func(visitor pdfgo.Visitor) error {
-		if annotation.Subtype == "Widget" {
-			visitor.MarkedContent = func(mark pdfgo.MarkedContentMark) error {
-				if mark.Tag == "Tx" && len(mark.Properties) == 0 {
-					return nil
-				}
-				if mark.Operator == "EMC" {
-					return nil
-				}
-				if p.warning == nil {
-					return &pdfgo.UnsupportedError{Feature: "widget marked content " + string(mark.Tag)}
-				}
-				p.warning(pdfgo.Diagnostic{Message: "PDF widget marked content " + string(mark.Tag) + " not preserved"})
-				return nil
-			}
+	if paint != nil {
+		if err := paint(&stamp); err != nil {
+			return err
 		}
-		return p.reader.WalkAnnotationAppearance(ctx, page, annotation, visitor)
-	})
-	if err != nil {
-		return err
-	}
-	if err := stamp.compositeObjects(nodes); err != nil {
-		return err
+	} else {
+		nodes, err := p.collectCompositeNodes(func(visitor pdfgo.Visitor) error {
+			if annotation.Subtype == "Widget" {
+				visitor.MarkedContent = func(mark pdfgo.MarkedContentMark) error {
+					if mark.Tag == "Tx" && len(mark.Properties) == 0 {
+						return nil
+					}
+					if mark.Operator == "EMC" {
+						return nil
+					}
+					if p.warning == nil {
+						return &pdfgo.UnsupportedError{Feature: "widget marked content " + string(mark.Tag)}
+					}
+					p.warning(pdfgo.Diagnostic{Message: "PDF widget marked content " + string(mark.Tag) + " not preserved"})
+					return nil
+				}
+			}
+			return p.reader.WalkAnnotationAppearance(ctx, page, annotation, visitor)
+		})
+		if err != nil {
+			return err
+		}
+		if err := stamp.compositeObjects(nodes); err != nil {
+			return err
+		}
 	}
 	if flags&(2|32) == 0 && !invisible {
 		p.compositeNodes = stamp.compositeNodes

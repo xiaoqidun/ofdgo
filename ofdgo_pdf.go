@@ -32,7 +32,7 @@ var ErrPDFPassword = pdfgo.ErrPassword
 // Password默认使用PDF安全处理器编码，PasswordUTF8启用UTF-8输入及标准密码准备，空值尝试空密码
 // Strict禁止恢复缺失资源或丢失内容语义，默认在报告中记录警告
 // RendererOptions复用渲染器字体来源和后端配置，Backends优先于其中的后端设置
-// RasterDPI指定局部透明效果合成精度，0沿用渲染器DPI，默认300dpi，Strict禁用局部合成
+// RasterDPI指定局部合成与三维绘制精度，0沿用渲染器DPI，默认300dpi，Strict禁用局部合成
 // OnProgress按open、pages、convert及write.*阶段报告进度，total为0表示总量未知
 // ResolveFile读取PDF引用的外部媒体、附件和页面，默认不访问网络或本地路径
 // ResolveReference可提供已解密的引用页面，目标阅读器由调用方维护
@@ -86,12 +86,15 @@ type pdfImporter struct {
 	cmykSpace        string
 	iccSpaces        map[pdfICCKey]string
 	objects          *pdfObjectBuffer
+	formResources    *pdfFormCache
+	validation       *editorValidation
 	pages            map[pdfgo.Reference]*pdfgo.Page
 	pageIDs          map[pdfgo.Reference]string
 	pageIndexes      map[pdfgo.Reference]int
 	imageIDs         map[pdfImageKey][]pdfImageResource
 	imageContents    *renderCache[pdfImageContentKey, pdfImageContent]
 	attachmentIDs    map[pdfAttachmentKey]string
+	modelAttachments map[*pdfgo.Stream]string
 	maskClips        map[*pdfgo.SoftMask]pdfgo.Path
 	pageBox          pdfgo.Rectangle
 	pageWidth        float64
@@ -308,7 +311,7 @@ func (p *pdfImporter) commitObjects() error {
 	if err != nil {
 		return err
 	}
-	if err := p.editor.appendOwnedObjects(p.ctx, p.page, objects); err != nil {
+	if err := p.objectValidation().appendOwnedObjects(p.ctx, p.page, objects); err != nil {
 		return err
 	}
 	p.objects = nil
@@ -778,11 +781,7 @@ func (p *pdfImporter) buildTilingPattern(source *pdfgo.TilingPattern, base pdfgo
 		return nil, fmt.Errorf("invalid PDF tiling pattern raster scale")
 	}
 	cell.objects, cell.pendingPath = nil, nil
-	visitor := pdfgo.Visitor{Path: cell.path, Text: cell.text, Image: cell.image, Reference: p.referencePage}
-	visitor.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
-		return cell.group(mark, walk, visitor)
-	}
-	if err := source.Walk(p.ctx, base, visitor); err != nil {
+	if err := source.Walk(p.ctx, base, cell.visitor()); err != nil {
 		return nil, err
 	}
 	if err := cell.flushPath(); err != nil {

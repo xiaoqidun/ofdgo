@@ -39,7 +39,7 @@ type editorValidation struct {
 	*Editor
 	patterns   map[*Pattern]bool
 	composites map[string]bool
-	vectors    map[string]*editorCompositeNode
+	vectors    map[string]bool
 	paths      map[string]bool
 }
 
@@ -142,7 +142,7 @@ func (e *Editor) StylePatterns(page int, ids []string, stroke bool, style Patter
 			return err
 		}
 	}
-	objects, _, err := e.selectedObjects(page, ids)
+	objects, indexes, err := e.selectedObjects(page, ids)
 	if err != nil {
 		return err
 	}
@@ -150,16 +150,50 @@ func (e *Editor) StylePatterns(page int, ids []string, stroke bool, style Patter
 		objects[i] = cloneEditorData(objects[i])
 		object := &objects[i]
 		var fill *FillColor
+		var draw string
 		switch object.Type {
 		case "TextObject":
+			draw = object.TextObject.DrawParam
 			fill = object.TextObject.FillColor
 			if stroke {
 				fill = (*FillColor)(object.TextObject.StrokeColor)
 			}
 		case "PathObject", "Path":
+			draw = object.PathObject.DrawParam
 			fill = object.PathObject.FillColor
 			if stroke {
 				fill = (*FillColor)(object.PathObject.StrokeColor)
+			}
+		default:
+			return fmt.Errorf("object %q does not use a pattern", ids[i])
+		}
+		if fill == nil {
+			base, err := e.editorDrawParam(e.pages[page].Content.Layer[indexes[i].layer].DrawParam, make(map[string]bool))
+			if err != nil {
+				return err
+			}
+			param, err := e.editorDrawParam(draw, make(map[string]bool))
+			if err != nil {
+				return err
+			}
+			paint := mergeDrawParam(*base, param)
+			fill = paint.FillColor
+			if stroke {
+				fill = (*FillColor)(paint.StrokeColor)
+			}
+			fill = cloneEditorData(fill)
+			if object.Type == "TextObject" {
+				if stroke {
+					object.TextObject.StrokeColor = (*StrokeColor)(fill)
+				} else {
+					object.TextObject.FillColor = fill
+				}
+			} else if object.Type == "PathObject" || object.Type == "Path" {
+				if stroke {
+					object.PathObject.StrokeColor = (*StrokeColor)(fill)
+				} else {
+					object.PathObject.FillColor = fill
+				}
 			}
 		}
 		if fill == nil || fill.Pattern == nil {

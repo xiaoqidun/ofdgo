@@ -17,25 +17,41 @@ package ofdgo
 import (
 	"context"
 	"encoding/xml"
+	"fmt"
+	"maps"
+	"slices"
 )
 
 // addOwnedVector 将本库生成的独立对象注册为标准矢量资源，不保留内联复合内容
 // 入参: ctx 取消上下文, objects 无原文和标识的对象, width 资源宽度, height 资源高度
 // 返回: string 资源编号, error 校验、编码或取消错误
 func (e *Editor) addOwnedVector(ctx context.Context, objects []GraphicObject, width, height float64) (string, error) {
-	validation := &editorValidation{Editor: e}
+	return (&editorValidation{Editor: e}).addOwnedVector(ctx, objects, width, height)
+}
+
+// addOwnedVector 在资源不变的构建会话内登记矢量资源，复用资源校验结果
+// 入参: ctx 取消上下文, objects 无原文和标识的对象, width 资源宽度, height 资源高度
+// 返回: string 资源编号, error 校验、编码或取消错误
+func (v *editorValidation) addOwnedVector(ctx context.Context, objects []GraphicObject, width, height float64) (string, error) {
+	e := v.Editor
+	if !finite(width) || !finite(height) || width < 0 || height < 0 {
+		return "", fmt.Errorf("invalid vector dimensions")
+	}
 	for index, object := range objects {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		prepared, err := validation.prepareObject(e.nextID(), object)
+		prepared, err := v.prepareObject(e.nextID(), object)
 		if err != nil {
 			return "", err
 		}
 		objects[index] = prepared
 	}
 	id := e.nextID()
+	name := e.packageName("Res/Composites/Composite_" + id + ".xml")
+	scan := &editorReferenceScan{refs: &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}, objects: make(map[string]bool), name: name, safe: true}
 	data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) {
+		x.references = scan
 		x.root("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "."}})
 		x.start("CompositeGraphicUnits", nil)
 		x.start("CompositeGraphicUnit", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: id},
@@ -56,10 +72,20 @@ func (e *Editor) addOwnedVector(ctx context.Context, objects []GraphicObject, wi
 	if err != nil {
 		return "", err
 	}
-	resource, err := e.compositeResource(id, data)
-	if err != nil {
-		return "", err
+	resource := editorResource{name: name, data: data, composite: id}
+	if scan.safe && scan.seen && len(scan.stack) == 0 {
+		resource.references = slices.Sorted(maps.Keys(scan.objects))
+		resource.usage = scan.vectorUsage(data)
+	} else {
+		resource, err = e.compositeResource(id, data)
+		if err != nil {
+			return "", err
+		}
 	}
 	e.resources = append(e.resources, resource)
+	if v.vectors == nil {
+		v.vectors = make(map[string]bool)
+	}
+	v.vectors[id] = true
 	return id, ctx.Err()
 }

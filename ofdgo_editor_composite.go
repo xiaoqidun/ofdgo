@@ -1097,20 +1097,17 @@ func (v *editorValidation) validateVector(id string) error {
 	if v.composites[id] {
 		return fmt.Errorf("cyclic composite resource %q", id)
 	}
+	if v.vectors[id] {
+		return nil
+	}
 	if v.composites == nil {
 		v.composites = make(map[string]bool)
-		v.vectors = make(map[string]*editorCompositeNode)
 	}
 	v.composites[id] = true
 	defer delete(v.composites, id)
-	node := v.vectors[id]
-	if node == nil {
-		var err error
-		node, err = v.compositeDefinition(id)
-		if err != nil {
-			return err
-		}
-		v.vectors[id] = node
+	node, err := v.compositeDefinition(id)
+	if err != nil {
+		return err
 	}
 	unit := node.object.CompositeGraphicUnit
 	if node.node.attr("Width") == "" || node.node.attr("Height") == "" || !finite(unit.Width) || !finite(unit.Height) || unit.Width < 0 || unit.Height < 0 {
@@ -1131,5 +1128,9 @@ func (v *editorValidation) validateVector(id string) error {
 			return err
 		}
 	}
+	if v.vectors == nil {
+		v.vectors = make(map[string]bool)
+	}
+	v.vectors[id] = true
 	return nil
 }

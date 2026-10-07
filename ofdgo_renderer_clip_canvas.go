@@ -15,10 +15,7 @@
 package ofdgo
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
 	"image"
-	"math"
 	"slices"
 
 	"github.com/tdewolff/canvas"
@@ -195,27 +192,7 @@ func (r *Renderer) intersectCachedClipPath(parent, current *canvas.Path) *canvas
 	if parent == nil || current == nil || len(parent.Data())+len(current.Data()) < 256 {
 		return intersectClipPath(parent, current)
 	}
-	hash := sha256.New()
-	var data [512]byte
-	binary.LittleEndian.PutUint64(data[:8], math.Float64bits(canvas.Tolerance))
-	binary.LittleEndian.PutUint64(data[8:16], math.Float64bits(canvas.Epsilon))
-	binary.LittleEndian.PutUint64(data[16:24], math.Float64bits(canvas.BentleyOttmannEpsilon))
-	hash.Write(data[:24])
-	for _, path := range []*canvas.Path{parent, current} {
-		values := path.Data()
-		binary.LittleEndian.PutUint64(data[:8], uint64(len(values)))
-		hash.Write(data[:8])
-		for len(values) > 0 {
-			count := min(len(values), len(data)/8)
-			for i, value := range values[:count] {
-				binary.LittleEndian.PutUint64(data[i*8:], math.Float64bits(value))
-			}
-			hash.Write(data[:count*8])
-			values = values[count:]
-		}
-	}
-	var key [32]byte
-	hash.Sum(key[:0])
+	key := canvasGeometryDigest(parent, current)
 	cache := r.canvasClipIntersections()
 	if path, ok := cache.get(key); ok {
 		return path.Copy()
@@ -310,6 +287,8 @@ func applyClipPath(path, clip *canvas.Path) *canvas.Path {
 	if path == nil || clip == nil {
 		return path
 	}
+	path = reduceRepeatedNonZeroPath(path)
+	clip = reduceRepeatedNonZeroPath(clip)
 	if slices.Equal(path.Data(), clip.Data()) {
 		return path
 	}
@@ -338,6 +317,36 @@ func applyClipPath(path, clip *canvas.Path) *canvas.Path {
 		return result.Settle(canvas.NonZero)
 	}
 	return path.And(clip)
+}
+
+// reduceRepeatedNonZeroPath 将完全相同的闭合轮廓约为一份，保持非零填充区域
+// 入参: path 非零填充路径
+// 返回: *canvas.Path 等价填充路径
+func reduceRepeatedNonZeroPath(path *canvas.Path) *canvas.Path {
+	if path == nil {
+		return path
+	}
+	data := path.Data()
+	if len(data) < 8 || data[0] != canvas.MoveToCmd {
+		return path
+	}
+	end := 0
+	scanner := path.Scanner()
+	for scanner.Scan() {
+		if scanner.Cmd() == canvas.MoveToCmd && end != 0 {
+			break
+		}
+		end += len(scanner.Values()) + 2
+	}
+	if end == len(data) || data[end-1] != canvas.CloseCmd || len(data)%end != 0 {
+		return path
+	}
+	for i := end; i < len(data); i += end {
+		if !slices.Equal(data[:end], data[i:i+end]) {
+			return path
+		}
+	}
+	return canvas.NewPathFromData(slices.Clone(data[:end]))
 }
 
 // applyFillClipPath 为多段描边直接填充裁剪，不将相消轮廓用于几何测量

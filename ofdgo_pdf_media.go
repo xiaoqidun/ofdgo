@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
@@ -134,33 +135,19 @@ func (p *pdfImporter) movieAnnotation(ctx context.Context, page *pdfgo.Page, ann
 // 入参: ctx 取消上下文, page PDF页面, annotation 交互注解, strict 严格检查开关
 // 返回: error 外观、资源或不可等价转换错误
 func (p *pdfImporter) interactiveAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation, strict bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if strict {
 		return &pdfgo.UnsupportedError{Feature: "interactive " + string(annotation.Subtype) + " conversion"}
 	}
 	var actions []Action
 	if annotation.Subtype == "3D" {
-		model, err := p.reader.ReadThreeD(annotation)
-		if err != nil {
-			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF 3D metadata unavailable; static appearance retained: " + err.Error()})
-			return p.appearanceAnnotation(ctx, page, annotation)
-		}
-		data, err := model.Stream.Decode()
-		if err != nil {
-			return err
-		}
-		id, err := p.editor.AddAttachment(fmt.Sprintf("Model_%d.%s", p.page+1, strings.ToLower(string(model.Format))), data)
-		if err != nil {
-			return err
-		}
-		actions = append(actions, Action{Event: "CLICK", GotoA: &GotoA{AttachID: id}})
+		return p.threeDAnnotation(ctx, page, annotation)
 	} else {
 		media, err := p.reader.ReadRichMedia(ctx, annotation)
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF rich media metadata unavailable; static appearance retained: " + err.Error()})
-			return p.appearanceAnnotation(ctx, page, annotation)
+			return p.interactiveAppearanceFallback(ctx, page, annotation, "metadata", err)
 		}
 		config := media.Configurations[media.ActiveConfiguration]
 		var playing *pdfgo.FileSpecification
@@ -242,6 +229,23 @@ func (p *pdfImporter) interactiveAnnotation(ctx context.Context, page *pdfgo.Pag
 		return err
 	}
 	p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF " + string(annotation.Subtype) + " appearance and available primary assets retained; advanced interaction not transferred to OFD"})
+	return nil
+}
+
+// interactiveAppearanceFallback 保留交互注解的有效正常外观，取消时不继续转换
+// 入参: ctx 取消上下文, page PDF页面, annotation 交互注解, kind 失败资源类型, cause 原始错误
+// 返回: error 取消或外观转换错误
+func (p *pdfImporter) interactiveAppearanceFallback(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation, kind string, cause error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		return cause
+	}
+	if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
+		return err
+	}
+	p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("PDF %s %s unavailable; normal appearance retained: %v", annotation.Subtype, kind, cause)})
 	return nil
 }
 

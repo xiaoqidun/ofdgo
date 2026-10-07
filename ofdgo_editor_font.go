@@ -202,12 +202,15 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 				if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
 					composite = true
 					origin := e.objectOrigin(editorObjectID(object))
+					var data []byte
+					var err error
 					if origin == nil {
-						return nil, nil
-					}
-					data, err := editorXMLObject(origin.data, origin.node, origin.object, object)
-					if err == nil {
-						data, err = editorXMLStandalone(data, origin.node)
+						data, err = e.encodeXML(func(x *ofdXML) { x.object(object, true) })
+					} else {
+						data, err = editorXMLObject(origin.data, origin.node, origin.object, object)
+						if err == nil {
+							data, err = editorXMLStandalone(data, origin.node)
+						}
 					}
 					if err != nil {
 						return nil, err
@@ -252,17 +255,29 @@ func (e *Editor) subsetFonts(progress editorProgress) (map[string][]byte, error)
 			if err := progress.report("fonts", len(e.pages)+i, total); err != nil {
 				return nil, err
 			}
-			if _, safe := refs.scan(bytes.NewReader(resource.data), resource.name); !safe {
+			if resource.usage.matches(resource.name, resource.data) {
+				refs.merge(resource.usage.refs)
+			} else if _, safe := refs.scan(bytes.NewReader(resource.data), resource.name); !safe {
 				return nil, nil
 			}
 		}
 		for id, usage := range refs.fonts {
 			glyphs := used[id]
-			if usage.unsafe || len(usage.glyphs) != 0 {
+			if usage.unsafe {
 				delete(used, id)
 			} else if glyphs != nil {
 				for char := range usage.chars {
 					glyphs[e.fonts[id].GlyphIndex(char)] = true
+				}
+				if len(usage.glyphs) != 0 {
+					mapped[id] = true
+					for glyph := range usage.glyphs {
+						if glyph >= e.fonts[id].NumGlyphs() {
+							delete(used, id)
+							break
+						}
+						glyphs[glyph] = true
+					}
 				}
 			}
 		}

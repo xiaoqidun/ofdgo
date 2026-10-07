@@ -25,6 +25,15 @@ type pdfObjectBuffer struct {
 	size  int
 }
 
+// objectValidation 在单次导入中共享不可变资源的校验结果，隔离局部编辑器
+// 返回: *editorValidation 当前编辑器的构建校验会话
+func (p *pdfImporter) objectValidation() *editorValidation {
+	if p.validation == nil || p.validation.Editor != p.editor {
+		p.validation = &editorValidation{Editor: p.editor}
+	}
+	return p.validation
+}
+
 // appendObject 追加本次导入对象，按需建立独立暂存缓冲
 // 入参: object 独立导入对象
 func (p *pdfImporter) appendObject(object GraphicObject) {

@@ -43,6 +43,14 @@ type RasterBackend interface {
 	Render(*RasterPage) (image.Image, error)
 }
 
+// RasterBufferBackend 可选的目标缓冲绘制能力，不改变后端和采样精度
+// 目标须为原点为零、尺寸与页面一致的紧密RGBA缓冲，不得与输入图像共享数据
+// 绘制前清空目标像素，不保留目标引用；失败时目标可能包含部分结果
+type RasterBufferBackend interface {
+	RasterBackend
+	RenderInto(*RasterPage, *image.RGBA) error
+}
+
 // PageCompiler 统一页面编译、文字提取和对象度量，不得修改源数据
 // 三项能力需采用相同的字体和几何语义，避免绘制、搜索与选区不一致
 // renderer提供文档、字体配置和文字回调，实现中不得递归调用对应的Renderer方法

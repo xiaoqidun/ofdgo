@@ -16,13 +16,17 @@ package ofdgo
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/xml"
 	"maps"
 	"strings"
 	"unicode/utf8"
 )
 
-// editorGeneratedReferences 保存本次编码页面及其引用，不跨写出复用
+// editorVectorUsageLimit 限制单个矢量引用快照的记录数，不限制资源内容
+const editorVectorUsageLimit = 4096
+
+// editorGeneratedReferences 保存本次输出条目及其引用，不跨写出复用
 type editorGeneratedReferences struct {
 	data   []byte
 	refs   *editorResourceRefs
@@ -39,9 +43,49 @@ func (r editorGeneratedReferences) matches(data []byte) bool {
 	return bytes.Equal(data, r.data)
 }
 
+// editorVectorUsage 保存自产矢量资源的引用快照，内容和路径变化时失效
+type editorVectorUsage struct {
+	name   string
+	digest [32]byte
+	refs   *editorResourceRefs
+}
+
+// matches 核对资源路径和完整内容摘要，不以切片地址判断内容
+// 入参: name 当前资源路径, data 当前资源内容
+// 返回: bool 是否仍可使用编码时的引用
+func (u *editorVectorUsage) matches(name string, data []byte) bool {
+	return u != nil && u.name == name && u.digest == sha256.Sum256(data)
+}
+
+// generatedVectorReferences 合并未改变的自产矢量引用，不修改调用方集合
+// 入参: parts 输出条目, generated 本次已知引用
+// 返回: map[string]editorGeneratedReferences 本次可复用引用
+func (e *Editor) generatedVectorReferences(parts map[string][]byte, generated map[string]editorGeneratedReferences) map[string]editorGeneratedReferences {
+	copied := false
+	for _, resource := range e.resources {
+		if e.output != nil && e.output.ctx.Err() != nil {
+			return generated
+		}
+		data, ok := parts[resource.name]
+		if !ok || !resource.usage.matches(resource.name, data) {
+			continue
+		}
+		if !copied {
+			generated = maps.Clone(generated)
+			if generated == nil {
+				generated = make(map[string]editorGeneratedReferences)
+			}
+			copied = true
+		}
+		generated[resource.name] = editorGeneratedReferences{data: data, refs: resource.usage.refs}
+	}
+	return generated
+}
+
 // editorReferenceScan 按XML事件收集资源和字体用字，未知内容保持完整扫描
 type editorReferenceScan struct {
 	refs     *editorResourceRefs
+	objects  map[string]bool
 	name     string
 	base     string
 	stack    []string
@@ -51,6 +95,26 @@ type editorReferenceScan struct {
 	capture  bool
 	safe     bool
 	seen     bool
+}
+
+// vectorUsage 保留完整且限额内的自产矢量引用，超限时保存流程重新扫描
+// 入参: data 本次编码内容
+// 返回: *editorVectorUsage 引用快照，无法复用时为空
+func (s *editorReferenceScan) vectorUsage(data []byte) *editorVectorUsage {
+	if !s.safe || !s.seen || len(s.stack) != 0 {
+		return nil
+	}
+	count := len(s.refs.ids) + len(s.refs.files) + len(s.refs.fonts)
+	for _, usage := range s.refs.fonts {
+		count += len(usage.chars) + len(usage.glyphs)
+		if count > editorVectorUsageLimit {
+			return nil
+		}
+	}
+	if count > editorVectorUsageLimit {
+		return nil
+	}
+	return &editorVectorUsage{name: s.name, digest: sha256.Sum256(data), refs: s.refs}
 }
 
 // accept 共用读取和自产页面的引用判断，不将对象自身标识视为引用
@@ -99,6 +163,9 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			if attr.Name.Local != "ID" {
 				s.refs.reference(s.name, s.base, attr.Name.Local, attr.Value, s.resource)
 			}
+			if s.objects != nil && editorObjectReference(attr.Name.Local) {
+				s.objects[attr.Value] = true
+			}
 			if attr.Name.Local == "Font" {
 				usage = s.refs.fontUsage(attr.Value)
 				if token.Name.Local != "TextObject" && token.Name.Local != "Text" {
@@ -122,6 +189,11 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			return false
 		}
 		s.refs.reference(s.name, s.base, token.Name.Local, s.text.String(), s.resource)
+		if s.objects != nil && (token.Name.Local == "Thumbnail" || token.Name.Local == "Substitution") {
+			if id := editorResourceID(s.text.String()); id != "" {
+				s.objects[id] = true
+			}
+		}
 		if (token.Name.Local == "Substitution" || token.Name.Local == "Font") && strings.TrimSpace(s.text.String()) != "" {
 			s.refs.fontUsage(s.text.String()).unsafe = true
 		}

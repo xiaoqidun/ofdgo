@@ -170,6 +170,14 @@ func (e *Editor) CopyObjectsContext(ctx context.Context, page int, objects []Gra
 // 入参: ctx 取消上下文, page 目标页, objects 无原文和标识且调用方不再修改的对象
 // 返回: error 校验或取消错误，失败时不提交页面内容
 func (e *Editor) appendOwnedObjects(ctx context.Context, page int, objects []GraphicObject) error {
+	return (&editorValidation{Editor: e}).appendOwnedObjects(ctx, page, objects)
+}
+
+// appendOwnedObjects 在资源不变的构建会话内复用校验结果，接收对象所有权
+// 入参: ctx 取消上下文, page 目标页, objects 无原文和标识的独立对象
+// 返回: error 校验或取消错误
+func (v *editorValidation) appendOwnedObjects(ctx context.Context, page int, objects []GraphicObject) error {
+	e := v.Editor
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -182,7 +190,6 @@ func (e *Editor) appendOwnedObjects(ctx context.Context, page int, objects []Gra
 	if err := e.prepareSourceIDs(); err != nil {
 		return err
 	}
-	validation := &editorValidation{Editor: e}
 	for i, object := range objects {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -190,7 +197,7 @@ func (e *Editor) appendOwnedObjects(ctx context.Context, page int, objects []Gra
 		if object.origin != nil || editorObjectID(object) != "" {
 			return fmt.Errorf("owned objects must not have identifiers or original content")
 		}
-		prepared, err := validation.prepareObject("", object)
+		prepared, err := v.prepareObject("", object)
 		if err != nil {
 			return err
 		}

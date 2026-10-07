@@ -60,6 +60,7 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 	if len(parts) == 0 && e.revision == 0 && (e.output == nil || e.output.options.Mode == CompressionUnchanged) {
 		return nil, nil
 	}
+	generated = e.generatedVectorReferences(parts, generated)
 	reader := e.source.reader
 	names := make(map[string]bool)
 	for name := range reader.fileIndex {

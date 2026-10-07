@@ -400,6 +400,25 @@ func geometryFromCanvasPath(path *canvas.Path) *GeometryPath {
 	return &result
 }
 
+// clipLinearFillGeometry 裁剪直线填充轮廓，保留原填充规则，不用于区域布尔运算
+// 入参: path 闭合绘制轮廓, clip 凸裁剪窗口
+// 返回: GeometryPath 填充轮廓, bool 是否适用, error 路径错误
+func clipLinearFillGeometry(path, clip GeometryPath) (GeometryPath, bool, error) {
+	a, err := geometryToCanvasPath(&path)
+	if err != nil {
+		return nil, false, err
+	}
+	b, err := geometryToCanvasPath(&clip)
+	if err != nil {
+		return nil, false, err
+	}
+	result, ok := intersectLinearCanvasContours(a, b)
+	if !ok {
+		return nil, false, nil
+	}
+	return *geometryFromCanvasPath(result), true, nil
+}
+
 // actionCanvasMatrix 转换页面坐标矩阵，不翻转Y轴
 // 入参: matrix 页面变换
 // 返回: canvas.Matrix 路径变换

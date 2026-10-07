@@ -109,6 +109,7 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 	if err != nil || coverage == nil {
 		return err
 	}
+	defer c.releaseCoverage(coverage)
 	style, _, _ := node.style()
 	var transfer *pdfgo.TransferFunction
 	imageShape := false
@@ -198,7 +199,7 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 			return err
 		}
 		for x := region.Min.X; x < region.Max.X; x++ {
-			_, _, _, a := coverage.At(x, y).RGBA()
+			a := imageAlphaAt(coverage, x, y)
 			if a == 0 {
 				continue
 			}

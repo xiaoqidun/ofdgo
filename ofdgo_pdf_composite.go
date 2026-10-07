@@ -33,6 +33,7 @@ type pdfCompositeNode struct {
 	children   []pdfCompositeNode
 	textObject *pdfgo.TextObject
 	glyph      *pdfgo.TextMark
+	formCount  int
 }
 
 // pdfCompositePixel 保存非预乘源空间分量及累计透明度
@@ -160,7 +161,15 @@ func (c *pdfCompositor) coverage(node pdfCompositeNode, stroke bool) (image.Imag
 	if geometry.scene == nil || b.X >= c.box.X+c.box.W || b.Y >= c.box.Y+c.box.H || b.X+b.W <= c.box.X || b.Y+b.H <= c.box.Y {
 		return nil, nil
 	}
-	return c.importer.renderGroupScene(geometry.scene, c.box)
+	target, err := c.acquireCoverage()
+	if err != nil {
+		return nil, err
+	}
+	coverage, err := c.importer.renderGroupSceneInto(geometry.scene, c.box, target)
+	if err != nil {
+		c.releaseCoverage(target)
+	}
+	return coverage, err
 }
 
 // geometry 缓存图元或组的实际覆盖场景与像素对齐边界
@@ -431,6 +440,17 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 			nodes = append(nodes, pdfCompositeNode{group: &mark, children: children})
 			return nil
 		}
+		v.Form = func(_ pdfgo.FormMark, walk func(pdfgo.Visitor) error) error {
+			children, err := collect(walk)
+			if err != nil {
+				return err
+			}
+			if len(children) != 0 {
+				children[0].formCount = len(children)
+				nodes = append(nodes, children...)
+			}
+			return nil
+		}
 		err := walk(v)
 		return nodes, err
 	}
@@ -503,7 +523,19 @@ func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Vis
 // 返回: error 转换或合成错误
 func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
 	space := p.compositeSpace
-	for i, node := range nodes {
+	for i := 0; i < len(nodes); i++ {
+		node := nodes[i]
+		if count := node.formCount; count >= 16 && count <= len(nodes)-i && !p.transferBackdrop {
+			packed, err := p.compositeForm(nodes[i : i+count])
+			if err != nil {
+				return fmt.Errorf("convert form at graphic %d: %w", i+1, err)
+			}
+			if packed {
+				p.compositeNodes = append(p.compositeNodes, nodes[i:i+count]...)
+				i += count - 1
+				continue
+			}
+		}
 		direct, err := p.directCompositeNode(node, space)
 		if err != nil {
 			return fmt.Errorf("inspect graphic %d: %w", i+1, err)

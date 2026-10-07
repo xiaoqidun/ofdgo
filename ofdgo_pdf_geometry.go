@@ -158,9 +158,22 @@ func (p *pdfImporter) compileCoverage(node pdfCompositeNode, stroke bool) (*Rast
 			}
 			evenOdd = false
 		}
-		path, err = clipGeometry(geometry, path, &clip)
-		if err != nil {
-			return nil, Box{}, err
+		var clipped GeometryPath
+		var linear bool
+		var clipErr error
+		if rectangle {
+			clipped, linear, clipErr = clipLinearFillGeometry(path, clip)
+		}
+		if clipErr != nil {
+			return nil, Box{}, clipErr
+		}
+		if linear {
+			path = clipped
+		} else {
+			path, err = clipGeometry(geometry, path, &clip)
+			if err != nil {
+				return nil, Box{}, err
+			}
 		}
 	}
 	if err := compiler.command(path, Paint{Color: color.RGBA{255, 255, 255, 255}}, evenOdd, nil, IdentityMatrix, nil); err != nil {
