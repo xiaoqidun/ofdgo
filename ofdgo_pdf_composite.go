@@ -613,37 +613,38 @@ func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
 
 // opaque 检查图元是否无需与页面背景混合
 // 入参: space 当前混合空间
-// 返回: bool 是否可直接保留
-func (n pdfCompositeNode) opaque(space *pdfgo.ColorSpace) bool {
+// 返回: bool 是否可直接保留, error 遮罩解析错误
+func (n pdfCompositeNode) opaque(space *pdfgo.ColorSpace) (bool, error) {
 	if n.group != nil {
 		g := n.group
 		if g.Knockout && n.textObject == nil || g.Alpha != 1 || g.SoftMask != nil || !pdfNormalBlend(g.BlendMode) || g.ColorSpace != nil && !g.ColorSpace.Equal(space) {
-			return false
+			return false, nil
 		}
 		for _, child := range n.children {
-			if !child.opaque(space) {
-				return false
+			if opaque, err := child.opaque(space); err != nil || !opaque {
+				return false, err
 			}
 		}
-		return true
+		return true, nil
 	}
 	style, fill, stroke := n.style()
 	if n.image != nil && style.FillOverprint {
-		return false
+		return false, nil
 	}
 	if style.SoftMask != nil || !pdfNormalBlend(style.BlendMode) || fill && style.Fill.Alpha != 1 || stroke && style.Stroke.Alpha != 1 {
-		return false
+		return false, nil
 	}
 	if fill && style.FillOverprint && pdfOverprintNeedsSeparation(style.Fill) || stroke && style.StrokeOverprint && pdfOverprintNeedsSeparation(style.Stroke) {
-		return false
+		return false, nil
 	}
 	if fill && pdfGradientError(style.Fill) != nil || stroke && pdfGradientError(style.Stroke) != nil {
-		return false
+		return false, nil
 	}
-	if n.image != nil && (n.image.Image.Mask != nil || n.image.Image.SoftMask != nil) {
-		return false
+	if n.image != nil {
+		masked, err := n.image.Image.HasMask()
+		return !masked, err
 	}
-	return true
+	return true, nil
 }
 
 // direct 检查sRGB图元能否使用标准OFD透明度而无需背景合成

@@ -228,7 +228,7 @@ func (p *pdfImporter) compositePattern(paint pdfgo.Paint) (*pdfCompositePattern,
 
 // directCompositeNode 检查图元、透明组和图案单元能否独立保留，逐层核对背景混合
 // 入参: node 图元, space 混合空间
-// 返回: bool 是否可直接转换, error 图案解析错误
+// 返回: bool 是否可直接转换, error 图案或遮罩解析错误
 func (p *pdfImporter) directCompositeNode(node pdfCompositeNode, space *pdfgo.ColorSpace) (bool, error) {
 	if node.group == nil && space.Device() {
 		style, fill, stroke := node.style()
@@ -290,7 +290,11 @@ func (p *pdfImporter) directCompositeNode(node pdfCompositeNode, space *pdfgo.Co
 	if group := node.group; group != nil && !group.Knockout && group.Alpha == 1 && group.SoftMask == nil && pdfNormalBlend(group.BlendMode) && (group.ColorSpace == nil || group.ColorSpace.SRGBEquivalent()) {
 		directGroup = true
 	}
-	if !node.opaque(space) && !(space.SRGBEquivalent() && (directGroup || node.direct())) {
+	opaque, err := node.opaque(space)
+	if err != nil {
+		return false, err
+	}
+	if !opaque && !(space.SRGBEquivalent() && (directGroup || node.direct())) {
 		if node.textObject != nil && space.SRGBEquivalent() {
 			for _, child := range node.children {
 				if direct, err := p.directCompositeNode(child, space); err != nil || !direct {

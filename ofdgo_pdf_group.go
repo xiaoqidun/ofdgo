@@ -101,7 +101,11 @@ func pdfOpaqueVisitor(visitor pdfgo.Visitor) pdfgo.Visitor {
 			return check(m.Style, m.Mode%4 == 0 || m.Mode%4 == 2, m.Mode%4 == 1 || m.Mode%4 == 2)
 		},
 		Image: func(m pdfgo.ImageMark) error {
-			if m.Image.ImageMask || m.Image.Mask != nil || m.Image.SoftMask != nil || m.Image.Stream.Dictionary["SMaskInData"] != nil {
+			masked, err := m.Image.HasMask()
+			if err != nil {
+				return err
+			}
+			if masked {
 				return &pdfgo.UnsupportedError{Feature: "non-sRGB masked group image"}
 			}
 			return check(m.Style, true, false)
