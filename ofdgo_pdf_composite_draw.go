@@ -789,8 +789,12 @@ func (c *pdfCompositor) imageColor(mark *pdfgo.ImageMark, point pdfgo.Point, spa
 	if point.X < 0 || point.X > 1 || point.Y < 0 || point.Y > 1 {
 		return [4]float64{}, 0, nil
 	}
+	process, err := c.cache.imageProcess(c.importer, mark.Image, space, c.softMask)
+	if err != nil {
+		return [4]float64{}, 0, err
+	}
 	source := c.cache.images[mark.Image]
-	if source == nil {
+	if process == nil && source == nil {
 		var err error
 		source, err = mark.Image.DecodeComponentsViewContext(c.importer.ctx)
 		if err != nil {
@@ -798,22 +802,13 @@ func (c *pdfCompositor) imageColor(mark *pdfgo.ImageMark, point pdfgo.Point, spa
 		}
 		c.cache.images[mark.Image] = source
 	}
-	x, y := point.X*float64(source.Rect.Dx())-.5, (1-point.Y)*float64(source.Rect.Dy())-.5
-	key := pdfImageProcessKey{image: mark.Image, space: space, softMask: c.softMask}
-	process, prepared := c.cache.imageProcesses[key]
-	if !prepared {
-		var err error
-		process, err = source.PrepareProcess(&pdfgo.ColorantDevice{Space: space}, space, c.softMask)
-		if err != nil {
-			return [4]float64{}, 0, err
-		}
-		if c.cache.imageProcesses == nil {
-			c.cache.imageProcesses = make(map[pdfImageProcessKey]*pdfgo.ImageProcess)
-		}
-		c.cache.imageProcesses[key] = process
+	bounds := process.Bounds()
+	if process == nil {
+		bounds = source.Rect
 	}
+	x, y := point.X*float64(bounds.Dx())-.5, (1-point.Y)*float64(bounds.Dy())-.5
 	sample := func(x, y int) ([4]float64, float64) {
-		x, y = source.Rect.Min.X+max(0, min(source.Rect.Dx()-1, x)), source.Rect.Min.Y+max(0, min(source.Rect.Dy()-1, y))
+		x, y = bounds.Min.X+max(0, min(bounds.Dx()-1, x)), bounds.Min.Y+max(0, min(bounds.Dy()-1, y))
 		if process != nil {
 			return process.ValuesAt(x, y)
 		}
@@ -862,7 +857,7 @@ func (c *pdfCompositor) imageColor(mark *pdfgo.ImageMark, point pdfgo.Point, spa
 	if process != nil || space.Equal(source.Space) {
 		return values, alpha, nil
 	}
-	values, err := space.ConvertWith(values[:source.Space.Components()], source.Space, mark.Style.RenderingIntent, mark.Style.ColorConversion)
+	values, err = space.ConvertWith(values[:source.Space.Components()], source.Space, mark.Style.RenderingIntent, mark.Style.ColorConversion)
 	return values, alpha, err
 }
 

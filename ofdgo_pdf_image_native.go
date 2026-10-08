@@ -53,17 +53,8 @@ func (p *pdfImporter) imageProcessModel(source *pdfgo.Image) (pdfgo.Name, error)
 // 返回: image.Image 只读图像, error 解码或分量映射错误
 func (p *pdfImporter) imageProcess(source *pdfgo.Image, model pdfgo.Name) (image.Image, error) {
 	cache := p.compositingCache()
-	components := cache.images[source]
-	if components == nil {
-		var err error
-		components, err = source.DecodeComponentsViewContext(p.ctx)
-		if err != nil {
-			return nil, err
-		}
-		cache.images[source] = components
-	}
 	space := &pdfgo.ColorSpace{Model: model}
-	process, err := components.PrepareProcess(&pdfgo.ColorantDevice{Space: space}, space, false)
+	process, err := cache.imageProcess(p, source, space, false)
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +62,32 @@ func (p *pdfImporter) imageProcess(source *pdfgo.Image, model pdfgo.Name) (image
 		return nil, fmt.Errorf("invalid native PDF image process space %s", model)
 	}
 	return &pdfNativeImage{source: process, space: space}, nil
+}
+
+// imageProcess 复用同组原生采样，仅在需要备用颜色时保留完整分量
+// 入参: importer 导入器, source 源图像, space 组混合空间, softMask 是否用于软蒙版
+// 返回: *pdfgo.ImageProcess 原生采样，需要备用色时为nil, error 解码或布局错误
+func (c *pdfCompositeCache) imageProcess(importer *pdfImporter, source *pdfgo.Image, space *pdfgo.ColorSpace, softMask bool) (*pdfgo.ImageProcess, error) {
+	key := pdfImageProcessKey{image: source, space: space, softMask: softMask}
+	if process, found := c.imageProcesses[key]; found {
+		return process, nil
+	}
+	device := &pdfgo.ColorantDevice{Space: space}
+	var process *pdfgo.ImageProcess
+	var err error
+	if components := c.images[source]; components != nil {
+		process, err = components.PrepareProcess(device, space, softMask)
+	} else {
+		process, err = source.DecodeProcessContext(importer.ctx, device, space, softMask)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if c.imageProcesses == nil {
+		c.imageProcesses = make(map[pdfImageProcessKey]*pdfgo.ImageProcess)
+	}
+	c.imageProcesses[key] = process
+	return process, nil
 }
 
 // ColorModel 保留16位原生分量与源透明度

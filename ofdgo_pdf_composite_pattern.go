@@ -246,17 +246,22 @@ func (p *pdfImporter) directCompositeNode(node pdfCompositeNode, space *pdfgo.Co
 		}
 		if space.Model == "DeviceCMYK" && style.ColorConversion != (pdfgo.ColorConversion{}) {
 			if node.image != nil && !node.image.Image.ImageMask {
-				source := p.compositingCache().images[node.image.Image]
-				if source == nil {
-					var err error
-					source, err = node.image.Image.DecodeComponentsViewContext(p.ctx)
-					if err != nil {
-						return false, err
-					}
-					p.compositingCache().images[node.image.Image] = source
+				_, native, err := pdfImageProcessColorants(node.image.Image)
+				if err != nil {
+					return false, err
 				}
-				if source.Space.Model == "DeviceRGB" && source.Space.Device() {
-					return false, nil
+				if !native {
+					source := p.compositingCache().images[node.image.Image]
+					if source == nil {
+						source, err = node.image.Image.DecodeComponentsViewContext(p.ctx)
+						if err != nil {
+							return false, err
+						}
+						p.compositingCache().images[node.image.Image] = source
+					}
+					if source.Space.Model == "DeviceRGB" && source.Space.Device() {
+						return false, nil
+					}
 				}
 			} else {
 				for i, paint := range [2]pdfgo.Paint{style.Fill, style.Stroke} {
