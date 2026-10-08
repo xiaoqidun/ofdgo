@@ -311,7 +311,7 @@ func geometryToCanvasPath(path *GeometryPath) (*canvas.Path, error) {
 	if err := path.validate(); err != nil {
 		return nil, err
 	}
-	p := &canvas.Path{}
+	p := canvas.NewPathFromData(make([]float64, 0, canvasPathCapacity(*path)))
 	for _, s := range *path {
 		switch s.Verb {
 		case GeometryMove:
@@ -337,7 +337,7 @@ func geometryToCanvasPath(path *GeometryPath) (*canvas.Path, error) {
 // 入参: path 独立路径
 // 返回: *canvas.Path 适配路径, error 不支持的指令
 func canvasObjectPath(path GeometryPath) (*canvas.Path, error) {
-	var data []float64
+	data := make([]float64, 0, canvasPathCapacity(path))
 	for _, s := range path {
 		end := s.End
 		switch s.Verb {
@@ -362,6 +362,24 @@ func canvasObjectPath(path GeometryPath) (*canvas.Path, error) {
 		}
 	}
 	return canvas.NewPathFromData(data), nil
+}
+
+// canvasPathCapacity 按指令估算路径容量，避免长路径逐段扩容
+// 入参: path 独立几何路径
+// 返回: int 坐标存储容量
+func canvasPathCapacity(path GeometryPath) int {
+	count := 0
+	for _, segment := range path {
+		switch segment.Verb {
+		case GeometryMove, GeometryLine, GeometryClose:
+			count += 4
+		case GeometryQuad:
+			count += 6
+		default:
+			count += 8
+		}
+	}
+	return count
 }
 
 // geometryFromCanvasPath 将默认引擎路径转换为独立的页面坐标路径，保留曲线和椭圆弧

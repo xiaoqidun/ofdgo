@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"image"
@@ -188,10 +189,31 @@ func WithRasterBackend(backend RasterBackend) RendererOption {
 // 入参: page 页面内容
 // 返回: *RasterPage 只读绘制页面, error 编译错误
 func (r *Renderer) CompilePage(page *PageContent) (*RasterPage, error) {
+	return r.CompilePageContext(r.pageContext, page)
+}
+
+// CompilePageContext 编译页面并在对象遍历间响应取消，不返回未完成场景
+// 单次后端操作完成后检查取消，nil使用后台上下文
+// 入参: ctx 取消上下文, page 页面内容
+// 返回: *RasterPage 只读绘制页面, error 编译或取消错误
+func (r *Renderer) CompilePageContext(ctx context.Context, page *PageContent) (*RasterPage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if r.backends.Compiler == nil {
 		return nil, fmt.Errorf("page compiler: %w", ErrBackendUnavailable)
 	}
-	return r.backends.Compiler.CompilePage(r, page)
+	previous := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = previous }()
+	result, err := r.backends.Compiler.CompilePage(r, page)
+	if canceled := ctx.Err(); canceled != nil {
+		return nil, canceled
+	}
+	return result, err
 }
 
 // backendName 获取已配置的后端标识

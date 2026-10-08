@@ -231,6 +231,38 @@ func (c *pdfCompositor) geometryBounds(node pdfCompositeNode, stroke bool) (Box,
 	return geometry.box, err
 }
 
+// coverageBounds 合并实际覆盖边界并复用图元编译缓存，不采用字体估算范围
+// 入参: node 图元或透明组
+// 返回: Box 覆盖范围, error 编译或取消错误
+func (c *pdfCompositor) coverageBounds(node pdfCompositeNode) (Box, error) {
+	if err := c.importer.ctx.Err(); err != nil {
+		return Box{}, err
+	}
+	var box Box
+	if node.group != nil {
+		for _, child := range node.children {
+			bounds, err := c.coverageBounds(child)
+			if err != nil {
+				return Box{}, err
+			}
+			box = unionTextBox(box, bounds)
+		}
+		return box, nil
+	}
+	_, fill, stroke := node.style()
+	for _, outline := range []bool{false, true} {
+		if outline && !stroke || !outline && !fill {
+			continue
+		}
+		bounds, err := c.geometryBounds(node, outline)
+		if err != nil {
+			return Box{}, err
+		}
+		box = unionTextBox(box, bounds)
+	}
+	return box, nil
+}
+
 // groupBounds 缓存组内实际覆盖范围，外部字体沿用描述符保守边界
 // 入参: node 透明组
 // 返回: Box 组覆盖范围, error 几何编译错误
@@ -749,12 +781,24 @@ func (n pdfCompositeNode) coverage(p *pdfImporter, stroke bool) error {
 	return p.path(pdfgo.PathMark{Path: path, Style: style, Fill: true})
 }
 
-// compositeRegion 按原始背景计算局部效果，不将组外文字和图形栅格化
-// 入参: backdrop 前序图元, node 当前效果, space 页面混合空间, flatten 是否合并页面背景
-// 返回: error 合成或保存错误
-func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompositeNode, space *pdfgo.ColorSpace, flatten bool) error {
+// compositeRegionBounds 复用内置后端的图元覆盖，自定义后端保留整组度量
+// 入参: node 当前效果
+// 返回: Box 覆盖范围, error 编译或取消错误
+func (p *pdfImporter) compositeRegionBounds(node pdfCompositeNode) (Box, error) {
 	if err := p.ctx.Err(); err != nil {
-		return err
+		return Box{}, err
+	}
+	switch p.editor.Backends().Compiler.(type) {
+	case CanvasBackend, *CanvasBackend, OFDCompiler, *OFDCompiler:
+		geometry, err := p.renderer.Geometry()
+		if err != nil {
+			return Box{}, err
+		}
+		switch geometry.(type) {
+		case CanvasBackend, *CanvasBackend:
+			c := pdfCompositor{importer: p, cache: p.compositingCache()}
+			return c.coverageBounds(node)
+		}
 	}
 	scene, box, err := p.compileGroup(func(local *pdfImporter) error {
 		if node.group != nil {
@@ -772,6 +816,17 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 		return nil
 	})
 	if err != nil || scene == nil {
+		return Box{}, err
+	}
+	return box, nil
+}
+
+// compositeRegion 按原始背景计算局部效果，不将组外文字和图形栅格化
+// 入参: backdrop 前序图元, node 当前效果, space 页面混合空间, flatten 是否合并页面背景
+// 返回: error 合成或保存错误
+func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompositeNode, space *pdfgo.ColorSpace, flatten bool) error {
+	box, err := p.compositeRegionBounds(node)
+	if err != nil || box.W <= 0 || box.H <= 0 {
 		return err
 	}
 	inverse, ok := p.matrix.Inverse()

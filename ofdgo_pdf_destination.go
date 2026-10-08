@@ -92,7 +92,7 @@ func (p *pdfImporter) destinationBounds(page *pdfgo.Page) (Box, error) {
 	if renderer.backends.Fonts != nil {
 		renderer.backends.Fonts = pdfDestinationFontBackend{renderer.backends.Fonts}
 	}
-	scene, err := renderer.CompilePage(&editor.pages[0])
+	scene, err := renderer.CompilePageContext(p.ctx, &editor.pages[0])
 	if err != nil {
 		return Box{}, err
 	}

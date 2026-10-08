@@ -393,7 +393,7 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 	page := &editor.pages[0]
 	renderer := p.renderer.childRenderer(reader)
 	renderer.TransparentBackground = true
-	scene, err := renderer.CompilePage(page)
+	scene, err := renderer.CompilePageContext(p.ctx, page)
 	if canceled := p.ctx.Err(); canceled != nil {
 		return nil, box, canceled
 	}

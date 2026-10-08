@@ -47,6 +47,11 @@ type PageGroups interface {
 // 入参: page 页面内容, visitor 页面访问器
 // 返回: error 遍历或访问器错误
 func (r *Renderer) WalkPage(page *PageContent, visitor PageVisitor) error {
+	if r.pageContext != nil {
+		if err := r.pageContext.Err(); err != nil {
+			return err
+		}
+	}
 	for order := range 3 {
 		if r.Reader.doc != nil {
 			for _, ref := range page.Template {
@@ -83,6 +88,11 @@ func (r *Renderer) WalkPage(page *PageContent, visitor PageVisitor) error {
 		}
 	}
 	for _, stamp := range r.Reader.Stamps[page.ID] {
+		if r.pageContext != nil {
+			if err := r.pageContext.Err(); err != nil {
+				return err
+			}
+		}
 		if err := visitor.DrawStamp(stamp); err != nil {
 			return err
 		}
@@ -160,6 +170,11 @@ func (r *Renderer) walkLayers(layers []Layer, order int, visitor PageVisitor) er
 // 入参: object 源对象, state 继承状态, visitor 页面访问器, references 当前资源引用链
 // 返回: error 遍历或访问器错误
 func (r *Renderer) walkObject(object *GraphicObject, state RenderState, visitor PageVisitor, references map[string]bool) error {
+	if r.pageContext != nil {
+		if err := r.pageContext.Err(); err != nil {
+			return err
+		}
+	}
 	if groups, ok := visitor.(PageGroups); ok && groups.BeginObject(object) {
 		defer groups.EndObject()
 	}

@@ -43,6 +43,7 @@ type Renderer struct {
 	fontFS                []fs.FS
 	decodeImages          bool
 	pageText              *PageText
+	pageContext           context.Context
 	textOnly              bool
 	backends              RenderBackends
 	backendStates         map[any]any
@@ -107,6 +108,7 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 	renderer.fontMetrics = r.fontMetrics
 	renderer.fontSourcesCache = r.fontSourcesCache.child()
 	renderer.decodeImages = r.decodeImages
+	renderer.pageContext = r.pageContext
 	renderer.TransparentBackground = r.TransparentBackground
 	return renderer
 }

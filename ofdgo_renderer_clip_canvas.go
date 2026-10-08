@@ -217,6 +217,8 @@ func intersectClipPath(parent, current *canvas.Path) *canvas.Path {
 	if slices.Equal(parent.Data(), current.Data()) {
 		return parent
 	}
+	parent = pruneCanvasContours(parent, current)
+	current = pruneCanvasContours(current, parent)
 	parentRect, parentOK := rectangularPath(parent)
 	currentRect, currentOK := rectangularPath(current)
 	if parentOK && currentOK {
@@ -295,6 +297,8 @@ func applyClipPath(path, clip *canvas.Path) *canvas.Path {
 	if path.Empty() || clip.Empty() {
 		return &canvas.Path{}
 	}
+	path = pruneCanvasContours(path, clip)
+	clip = pruneCanvasContours(clip, path)
 	if rect, ok := rectangularPath(clip); ok {
 		bounds := path.Bounds()
 		if rect.Contains(bounds) {
@@ -317,6 +321,37 @@ func applyClipPath(path, clip *canvas.Path) *canvas.Path {
 		return result.Settle(canvas.NonZero)
 	}
 	return path.And(clip)
+}
+
+// pruneCanvasContours 排除与裁剪边界分离的完整轮廓，保留相交轮廓的曲线和绕向
+// 入参: path 填充路径, clip 裁剪路径
+// 返回: *canvas.Path 待求交路径
+func pruneCanvasContours(path, clip *canvas.Path) *canvas.Path {
+	if path == nil || clip == nil || len(path.Data()) < 256 || !path.HasSubpaths() {
+		return path
+	}
+	bounds := clip.Bounds()
+	parts := path.Split()
+	count := 0
+	for _, part := range parts {
+		if !part.Closed() {
+			return path
+		}
+		box := part.Bounds()
+		if box.X1 < bounds.X0 || bounds.X1 < box.X0 || box.Y1 < bounds.Y0 || bounds.Y1 < box.Y0 {
+			continue
+		}
+		parts[count] = part
+		count++
+	}
+	if count == len(parts) {
+		return path
+	}
+	result := &canvas.Path{}
+	for _, part := range parts[:count] {
+		result = result.Append(part)
+	}
+	return result
 }
 
 // reduceRepeatedNonZeroPath 将完全相同的闭合轮廓约为一份，保持非零填充区域
