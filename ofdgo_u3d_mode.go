@@ -236,11 +236,14 @@ func (r *u3dRender) drawBounds(instance u3dInstance, node *U3DNode, mesh *U3DMes
 	minimum := u3dVector{math.Inf(1), math.Inf(1), math.Inf(1)}
 	maximum := u3dVector{math.Inf(-1), math.Inf(-1), math.Inf(-1)}
 	visible := false
-	for i := range len(mesh.Faces) + len(mesh.Lines) {
+	for i := range len(mesh.Faces) + len(mesh.Lines) + len(mesh.Points) {
 		shading, corners := mesh.primitive(i)
 		shaders := node.Shaders
 		if i >= len(mesh.Faces) {
 			shaders = node.LineShaders
+		}
+		if i >= len(mesh.Faces)+len(mesh.Lines) {
+			shaders = node.PointShaders
 		}
 		if i%256 == 0 {
 			if err := r.ctx.Err(); err != nil {

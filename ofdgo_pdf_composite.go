@@ -56,8 +56,11 @@ type pdfCompositor struct {
 	meshes          map[pdfMeshKey][]pdfShadingPixel
 	gradients       map[pdfGradientKey][]pdfShadingPixel
 	transfers       []*pdfgo.TransferFunction
+	channels        []uint8
+	transferModel   pdfgo.Name
 	transferBlocked bool
 	shadingSource   bool
+	softMask        bool
 }
 
 // pdfCompositeKey 区分图元的填充与描边几何
@@ -89,8 +92,16 @@ type pdfCompositeColorSampler struct {
 	values     map[float64][4]float64
 	position   pdfgo.GradientPosition
 	converter  pdfgo.ColorConverter
+	colorants  *pdfShadingColorants
 	prepared   bool
 	converted  bool
+}
+
+// pdfImageProcessKey 隔离图像的组空间及软蒙版采样，不复用错误的原生映射
+type pdfImageProcessKey struct {
+	image    *pdfgo.Image
+	space    *pdfgo.ColorSpace
+	softMask bool
 }
 
 // pdfCompositeCache 在单页内复用几何、图像分量及蒙版内容
@@ -100,6 +111,7 @@ type pdfCompositeCache struct {
 	bounds          map[pdfCompositeKey]Box
 	images          map[*pdfgo.Image]*pdfgo.ImageComponents
 	imageMatrix     map[*pdfgo.ImageMark]pdfgo.Matrix
+	imageProcesses  map[pdfImageProcessKey]*pdfgo.ImageProcess
 	masks           map[*pdfgo.SoftMask][]pdfCompositeNode
 	meshes          map[*pdfgo.MeshGradient][]pdfMeshTriangle
 	patterns        map[pdfgo.Paint]*pdfCompositePattern
@@ -346,9 +358,6 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 			if err := p.halftone(mark.Style); err != nil {
 				return err
 			}
-			if err := p.resolveTransfer(&mark.Style); err != nil {
-				return err
-			}
 			nodes = append(nodes, pdfCompositeNode{path: &mark})
 			return nil
 		}
@@ -386,9 +395,6 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 				if err := p.halftone(mark.Style); err != nil {
 					return err
 				}
-				if err := p.resolveTransfer(&mark.Style); err != nil {
-					return err
-				}
 				if len(mark.Glyphs) > 1 && (mark.Object != nil && !mark.Object.Knockout || mark.Style.AlphaIsShape || mark.Style.Fill.Alpha != 1 || mark.Style.Stroke.Alpha != 1 || mark.Style.SoftMask != nil || !pdfNormalBlend(mark.Style.BlendMode) || mark.Mode%4 == 1 || mark.Mode%4 == 2) {
 					for i := range mark.Glyphs {
 						glyph := mark
@@ -424,9 +430,6 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 		}
 		v.Image = func(mark pdfgo.ImageMark) error {
 			if err := p.halftone(mark.Style); err != nil {
-				return err
-			}
-			if err := p.resolveTransfer(&mark.Style); err != nil {
 				return err
 			}
 			nodes = append(nodes, pdfCompositeNode{image: &mark})
@@ -499,14 +502,18 @@ func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Vis
 	p.compositeNodes = nil
 	p.transferBackdrop = false
 	p.compositeSpace = space
-	if pdfCompositeHasTransfer(nodes) {
+	device, err := p.transferDevice(space, nodes)
+	if err != nil {
+		return err
+	}
+	p.transferModel = device
+	hasTransfer, err := p.compositeHasTransfer(nodes, device)
+	if err != nil {
+		return err
+	}
+	if hasTransfer {
 		if p.warning == nil {
 			return &pdfgo.UnsupportedError{Feature: "device transfer function rasterization"}
-		}
-		if overprint, err := p.processOverprint(nodes); err != nil {
-			return err
-		} else if overprint {
-			return &pdfgo.UnsupportedError{Feature: "per-colorant transfer function overprinting"}
 		}
 		if err := p.compositeRegion(nil, pdfCompositeNode{group: &pdfgo.GroupMark{Alpha: 1, ColorSpace: space}, children: nodes}, space, true); err != nil {
 			return err
@@ -540,16 +547,16 @@ func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
 		if err != nil {
 			return fmt.Errorf("inspect graphic %d: %w", i+1, err)
 		}
-		transfer := pdfCompositeHasTransfer([]pdfCompositeNode{node})
+		device := p.transferModel
+		if device == "" {
+			device = "DeviceRGB"
+		}
+		transfer, err := p.compositeHasTransfer([]pdfCompositeNode{node}, device)
+		if err != nil {
+			return err
+		}
 		if p.transferBackdrop || transfer {
 			direct = false
-			for _, source := range [][]pdfCompositeNode{p.compositeNodes, {node}} {
-				if overprint, err := p.processOverprint(source); err != nil {
-					return err
-				} else if overprint {
-					return &pdfgo.UnsupportedError{Feature: "per-colorant transfer function overprinting"}
-				}
-			}
 		}
 		if direct {
 			if err := node.emit(p.visitor()); err != nil {
@@ -785,7 +792,19 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 	scratch := &pdfCompositeScratch{}
 	var transfers []*pdfgo.TransferFunction
 	var previousTransfers []*pdfgo.TransferFunction
-	if pdfCompositeHasTransfer(backdrop) || pdfCompositeHasTransfer([]pdfCompositeNode{node}) {
+	device := p.transferModel
+	if device == "" {
+		device = "DeviceRGB"
+	}
+	hasTransfer := false
+	for _, nodes := range [][]pdfCompositeNode{backdrop, {node}} {
+		found, err := p.compositeHasTransfer(nodes, device)
+		if err != nil {
+			return err
+		}
+		hasTransfer = hasTransfer || found
+	}
+	if hasTransfer {
 		transfers = make([]*pdfgo.TransferFunction, len(buffer))
 		previousTransfers = make([]*pdfgo.TransferFunction, len(buffer))
 	}
@@ -799,6 +818,7 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 			c := pdfCompositor{importer: p, box: Box{X: box.X + float64(x)*step, Y: box.Y + float64(y)*step, W: float64(width) * step, H: float64(height) * step}, width: width, height: height, inverse: inverse, cache: cache, scratch: scratch, masks: map[*pdfgo.SoftMask][]float64{}}
 			if transfers != nil {
 				c.transfers = transfers[:width*height]
+				c.transferModel = device
 				clear(c.transfers)
 			}
 			pixels := buffer[:width*height]
@@ -824,7 +844,18 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 				}
 				var rgb [3]float64
 				var err error
-				if c.transfers != nil {
+				if c.transfers != nil && device == "DeviceCMYK" {
+					values := pixel.values
+					if flatten {
+						for j := range values {
+							values[j] *= pixel.alpha
+						}
+					}
+					values, err = c.transfers[i].Apply(values[:], device, "")
+					if err == nil {
+						rgb, err = pdfCompositeOutputColor(space, values)
+					}
+				} else if c.transfers != nil {
 					rgb, err = space.RGB(pixel.values[:space.Components()], "RelativeColorimetric")
 				} else {
 					rgb, err = pdfCompositeOutputColor(space, pixel.values)
@@ -834,12 +865,14 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 				}
 				alpha := pixel.alpha
 				if flatten {
-					for j := range rgb {
-						rgb[j] = pixel.alpha*rgb[j] + 1 - pixel.alpha
+					if c.transfers == nil || device != "DeviceCMYK" {
+						for j := range rgb {
+							rgb[j] = pixel.alpha*rgb[j] + 1 - pixel.alpha
+						}
 					}
 					alpha = 1
 				}
-				if c.transfers != nil && c.transfers[i] != nil {
+				if c.transfers != nil && device != "DeviceCMYK" && c.transfers[i] != nil {
 					values, err := c.transfers[i].Apply(rgb[:], "DeviceRGB", "")
 					if err != nil {
 						return err

@@ -169,6 +169,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 	formats := make(map[string]string)
 	seen := make(map[string]map[[32]byte]string)
 	imageResults := make(map[outputImageKey][]byte)
+	imageSources := make(map[string]outputImageSource)
 	ordered := slices.Sorted(maps.Keys(actual))
 	var imageKeys []string
 	for _, key := range ordered {
@@ -191,7 +192,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		}
 		return data, err
 	}
-	if err := e.prepareOutputImages(imageKeys, load, imageResults); err != nil {
+	if err := e.prepareOutputImages(imageKeys, load, imageResults, imageSources); err != nil {
 		return err
 	}
 	for _, key := range ordered {
@@ -205,24 +206,22 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 			if err := editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0); err != nil {
 				return err
 			}
-			if data, ok := parts[actual[key]]; ok && len(data) > outputOptimizationBufferLimit {
-				continue
-			}
-			if reader != nil && parts[actual[key]] == nil {
-				if file, ok := reader.packageFile(actual[key]); ok && file.UncompressedSize64 > outputOptimizationBufferLimit {
+			source, prefetched := imageSources[key]
+			var data []byte
+			if !prefetched {
+				var err error
+				data, err = load(key)
+				if err != nil {
+					return err
+				}
+				if data == nil {
 					continue
 				}
-			}
-			data, err := read(actual[key])
-			if err != nil {
-				return err
-			}
-			if len(data) > outputOptimizationBufferLimit {
-				continue
+				source.key.hash = sha256.Sum256(data)
 			}
 			if role == "MediaFile" {
 				options, demand := e.outputImageOptions(key)
-				cacheKey := outputImageKey{hash: sha256.Sum256(data), options: options, size: demand}
+				cacheKey := outputImageKey{hash: source.key.hash, options: options, size: demand}
 				candidate, cached := imageResults[cacheKey]
 				var err error
 				if !cached {
@@ -231,6 +230,8 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 						imageResults[cacheKey] = nil
 						if len(candidate) < len(data) {
 							imageResults[cacheKey] = candidate
+						} else {
+							candidate = nil
 						}
 					}
 				}
@@ -238,14 +239,24 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 					if e.output.ctx.Err() != nil {
 						return e.output.ctx.Err()
 					}
-				} else if candidate != nil && len(candidate) < len(data) {
+				} else if candidate != nil {
 					data = candidate
 					parts[actual[key]] = data
+					source.key.hash = sha256.Sum256(data)
 				}
-				if bytes.HasPrefix(data, []byte{255, 216}) {
+				if data != nil {
+					source.jpeg = bytes.HasPrefix(data, []byte{255, 216})
+				}
+				if source.jpeg {
 					formats[key] = "JPEG"
 					ext := path.Ext(actual[key])
 					if !strings.EqualFold(ext, ".jpg") && !strings.EqualFold(ext, ".jpeg") {
+						if data == nil {
+							data, err = read(actual[key])
+							if err != nil {
+								return err
+							}
+						}
 						stem := strings.TrimSuffix(actual[key], ext)
 						name := stem + ".jpg"
 						for n := 1; reserved[strings.ToLower(name)]; n++ {
@@ -262,7 +273,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 			if seen[role] == nil {
 				seen[role] = make(map[[32]byte]string)
 			}
-			hash := sha256.Sum256(data)
+			hash := source.key.hash
 			if first, ok := seen[role][hash]; ok {
 				aliases[key] = first
 				removed[key] = true

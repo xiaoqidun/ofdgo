@@ -118,6 +118,7 @@ type pdfImporter struct {
 	halftoneWarnings map[*pdfgo.Halftone]bool
 	halftones        map[string]*pdfgo.Halftone
 	transferBackdrop bool
+	transferModel    pdfgo.Name
 	compression      CompressionOptions
 }
 

@@ -145,7 +145,7 @@ func (r *u3dRender) sceneDiagonal() (float64, error) {
 			continue
 		}
 		mesh := &r.model.Meshes[index]
-		for i := range len(mesh.Faces) + len(mesh.Lines) {
+		for i := range len(mesh.Faces) + len(mesh.Lines) + len(mesh.Points) {
 			_, corners := mesh.primitive(i)
 			if i%256 == 0 {
 				if err := r.ctx.Err(); err != nil {

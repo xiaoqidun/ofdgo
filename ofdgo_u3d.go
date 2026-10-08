@@ -59,6 +59,7 @@ type U3DNode struct {
 	Visibility           uint32
 	Shaders              [][]string
 	LineShaders          [][]string
+	PointShaders         [][]string
 	View                 *U3DView
 }
 
@@ -111,8 +112,9 @@ type u3dDecoder struct {
 	palettes  map[uint32]map[string]bool
 }
 
-// DecodeU3D 按ECMA-363解码静态基础网格、线集、组、材质、着色器和光源
+// DecodeU3D 按ECMA-363解码静态基础网格、线集、点集、组、材质、着色器和光源
 // 暂不支持渐进网格、纹理和动画，遇到未支持内容返回错误而非部分场景
+// 点集球面预测暂限不超过两个非对跖方向，不推测多方向合并次序
 // 入参: ctx 取消上下文, data U3D数据, options 解码限制
 // 返回: *U3DModel 独立场景数据, error 格式、能力、预算或取消错误
 func DecodeU3D(ctx context.Context, data []byte, options U3DOptions) (*U3DModel, error) {
@@ -175,7 +177,7 @@ func DecodeU3D(ctx context.Context, data []byte, options U3DOptions) (*U3DModel,
 		if err != nil {
 			return nil, fmt.Errorf("U3D block at %d: %w", offset, err)
 		}
-		continuation := block.kind == 0xffffff15 || block.kind == 0xffffff3b || block.kind == 0xffffff3c || block.kind == 0xffffff3f
+		continuation := block.kind == 0xffffff15 || block.kind == 0xffffff3b || block.kind == 0xffffff3c || block.kind == 0xffffff3e || block.kind == 0xffffff3f
 		if uint64(offset) < declarationEnd && (uint64(end) > declarationEnd || continuation) || uint64(offset) >= declarationEnd && !continuation {
 			return nil, fmt.Errorf("invalid U3D declaration boundary at %d", offset)
 		}
@@ -382,16 +384,16 @@ func (d *u3dDecoder) block(block u3dBlock, owner string, chain int, index uint32
 			return name, fmt.Errorf("invalid U3D mesh continuation location")
 		}
 		err = d.baseMesh(&r, name)
-	case 0xffffff37:
+	case 0xffffff36, 0xffffff37:
 		if chain >= 0 && (chain != 1 || index != 0) {
-			return name, fmt.Errorf("invalid U3D line set chain")
+			return name, fmt.Errorf("invalid U3D primitive chain")
 		}
-		err = d.lineDeclaration(&r, name)
-	case 0xffffff3f:
+		err = d.primitiveDeclaration(&r, name, block.kind == 0xffffff36)
+	case 0xffffff3e, 0xffffff3f:
 		if chain >= 0 {
-			return name, fmt.Errorf("invalid U3D line continuation location")
+			return name, fmt.Errorf("invalid U3D primitive continuation location")
 		}
-		err = d.lineContinuation(&r, name)
+		err = d.primitiveContinuation(&r, name, block.kind == 0xffffff3e)
 	case 0xffffff45:
 		if chain != 0 || index == 0 || owner != name || r.u32() != index {
 			return name, fmt.Errorf("invalid U3D shading modifier chain")
@@ -461,7 +463,7 @@ func (d *u3dDecoder) node(r *u3dValues, kind uint32, name string) error {
 	return r.err
 }
 
-// shading 分别读取网格和线集着色列表，保留列表内各着色器的先后次序
+// shading 分别读取网格、线集和点集着色列表，保留列表内各着色器的先后次序
 // 入参: r 字段读取器, name 目标节点名
 // 返回: error 结构、能力或预算错误
 func (d *u3dDecoder) shading(r *u3dValues, name string) error {
@@ -470,7 +472,7 @@ func (d *u3dDecoder) shading(r *u3dValues, name string) error {
 		return fmt.Errorf("missing U3D shading target")
 	}
 	flags := r.u32()
-	if flags & ^uint32(3) != 0 {
+	if flags & ^uint32(7) != 0 {
 		return fmt.Errorf("unsupported U3D shading modifier target")
 	}
 	count := r.u32()
@@ -504,6 +506,9 @@ func (d *u3dDecoder) shading(r *u3dValues, name string) error {
 	}
 	if flags&2 != 0 {
 		d.model.Nodes[index].LineShaders = lists
+	}
+	if flags&4 != 0 {
+		d.model.Nodes[index].PointShaders = lists
 	}
 	return r.err
 }

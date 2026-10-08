@@ -24,13 +24,14 @@ import (
 // pdfPatternCellLimit 限制单页图案矢量快照的估算字节数
 const pdfPatternCellLimit = 8 << 20
 
-// pdfPatternCellKey 隔离图案来源、基色、坐标、精度与目标文档资源
+// pdfPatternCellKey 隔离图案来源、基色、坐标、精度、混合空间与目标文档资源
 type pdfPatternCellKey struct {
 	source *pdfgo.TilingPattern
 	base   pdfgo.Paint
 	matrix pdfgo.Matrix
 	dpi    float64
 	editor *Editor
+	space  *pdfgo.ColorSpace
 }
 
 // pdfPatternInstanceRange 收缩已知路径及图片的实例范围，未知边界保留完整范围
@@ -63,7 +64,7 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 	if p.patternCells == nil {
 		p.patternCells = &renderCache[pdfPatternCellKey, *Pattern]{limit: pdfPatternCellLimit}
 	}
-	key := pdfPatternCellKey{source: source, matrix: p.matrix, dpi: p.rasterDPI, editor: p.editor}
+	key := pdfPatternCellKey{source: source, matrix: p.matrix, dpi: p.rasterDPI, editor: p.editor, space: p.compositeSpace}
 	if source.PaintType == 2 {
 		base.Tiling, base.Axial, base.Radial, base.Mesh, base.Function, base.Shading = nil, nil, nil, nil, nil, nil
 		base.Alpha = 1

@@ -49,11 +49,13 @@ const (
 	u3dLineContextCount
 )
 
-// u3dLineState 按顶点累计线段端点属性，预测开销不随顶点度数增长
+// u3dLineState 按顶点缓存点集及线集属性预测
 type u3dLineState struct {
-	offsets [11]int
-	stride  int
-	stats   []float64
+	offsets        [11]int
+	stride         int
+	stats          []float64
+	pointOffsets   []uint32
+	pointPredicted []bool
 }
 
 // u3dLineReader 保存当前续块的独立压缩上下文
@@ -63,17 +65,17 @@ type u3dLineReader struct {
 	hist   [u3dLineContextCount]u3dHistogram
 }
 
-// lineDeclaration 读取ECMA-363第9.6.3节的线集声明
-// 入参: r 字段读取器, name 资源名
+// primitiveDeclaration 读取ECMA-363第9.6.2和9.6.3节的点集及线集声明
+// 入参: r 字段读取器, name 资源名, points 是否为点集
 // 返回: error 结构、能力或预算错误
-func (d *u3dDecoder) lineDeclaration(r *u3dValues, name string) error {
+func (d *u3dDecoder) primitiveDeclaration(r *u3dValues, name string, points bool) error {
 	if _, exists := d.meshes[name]; exists {
 		return fmt.Errorf("duplicate U3D model resource %q", name)
 	}
 	if r.u32() != 0 || r.u32() != 0 {
-		return fmt.Errorf("invalid U3D line declaration")
+		return fmt.Errorf("invalid U3D primitive declaration")
 	}
-	decl := &u3dMeshDeclaration{mesh: U3DMesh{Name: name}, line: new(u3dLineState)}
+	decl := &u3dMeshDeclaration{mesh: U3DMesh{Name: name}, line: new(u3dLineState), points: points}
 	for i := range decl.counts {
 		decl.counts[i] = r.u32()
 	}
@@ -88,11 +90,11 @@ func (d *u3dDecoder) lineDeclaration(r *u3dValues, name string) error {
 	}
 	for range 3 {
 		if r.u32() != 0 {
-			return fmt.Errorf("invalid U3D reserved line parameter")
+			return fmt.Errorf("invalid U3D reserved primitive parameter")
 		}
 	}
 	if r.u32() != 0 {
-		return fmt.Errorf("unsupported U3D skeletal line set")
+		return fmt.Errorf("unsupported U3D skeletal primitive set")
 	}
 	if err := r.done(); err != nil {
 		return err
@@ -100,7 +102,7 @@ func (d *u3dDecoder) lineDeclaration(r *u3dValues, name string) error {
 	if decl.counts[1] == 0 {
 		for _, count := range decl.counts[:6] {
 			if count != 0 {
-				return fmt.Errorf("invalid U3D empty line set")
+				return fmt.Errorf("invalid U3D empty primitive set")
 			}
 		}
 		decl.decoded = true
@@ -123,7 +125,11 @@ func (d *u3dDecoder) lineDeclaration(r *u3dValues, name string) error {
 		}
 	}
 	c := decl.counts
-	bytes := uint64(c[0])*100 + (uint64(c[1])+uint64(c[2]))*12 + (uint64(c[3])+uint64(c[4])+uint64(c[5]))*16
+	primitiveBytes := uint64(100)
+	if points {
+		primitiveBytes = 52
+	}
+	bytes := uint64(c[0])*primitiveBytes + (uint64(c[1])+uint64(c[2]))*12 + (uint64(c[3])+uint64(c[4])+uint64(c[5]))*16
 	if err := d.reserve(bytes, 1); err != nil {
 		return err
 	}
@@ -131,16 +137,27 @@ func (d *u3dDecoder) lineDeclaration(r *u3dValues, name string) error {
 		return err
 	}
 	m := &decl.mesh
-	m.Lines = make([]U3DLine, 0, int(c[0]))
+	if points {
+		m.Points = make([]U3DPoint, 0, int(c[0]))
+	} else {
+		m.Lines = make([]U3DLine, 0, int(c[0]))
+	}
 	m.Positions, m.Normals = make([][3]float32, 0, int(c[1])), make([][3]float32, 0, int(c[2]))
 	m.Diffuse, m.Specular, m.TextureCoordinates = make([][4]float32, 0, int(c[3])), make([][4]float32, 0, int(c[4])), make([][4]float32, 0, int(c[5]))
 	state.stats = make([]float64, int(c[1])*state.stride)
+	if points {
+		if err := d.reserve(uint64(c[1])*5+4, 1); err != nil {
+			return err
+		}
+		state.pointOffsets = make([]uint32, 1, int(c[1])+1)
+		state.pointPredicted = make([]bool, int(c[1]))
+	}
 	d.meshes[name] = decl
 	d.meshOrder = append(d.meshOrder, name)
 	return nil
 }
 
-// average 取得指定顶点各属性的端点算术平均
+// average 取得指定顶点各属性预测，点集法线使用缓存的球面均值
 // 入参: position 顶点索引
 // 返回: [11][4]float64 法线、漫反射、镜面及八层纹理预测
 func (s *u3dLineState) average(position uint32) (values [11][4]float64) {
@@ -162,8 +179,14 @@ func (s *u3dLineState) average(position uint32) (values [11][4]float64) {
 // accumulate 累计线段端点的独立属性，重复使用的属性按端点分别计数
 // 入参: mesh 共享属性数组, line 已完成的线段
 func (s *u3dLineState) accumulate(mesh *U3DMesh, line U3DLine) {
-	shading := mesh.Shadings[line.Shading]
-	for _, corner := range line.Corners {
+	s.accumulateCorners(mesh, line.Shading, line.Corners[:])
+}
+
+// accumulateCorners 累计点或线端的属性，用于后续位置预测
+// 入参: mesh 属性数组, shadingIndex 着色索引, corners 新增角点
+func (s *u3dLineState) accumulateCorners(mesh *U3DMesh, shadingIndex uint32, corners []U3DCorner) {
+	shading := mesh.Shadings[shadingIndex]
+	for _, corner := range corners {
 		var values [11][4]float32
 		var used [11]bool
 		normal := mesh.Normals[corner.Normal]
@@ -191,7 +214,7 @@ func (s *u3dLineState) accumulate(mesh *U3DMesh, line U3DLine) {
 	}
 }
 
-// value 按指定上下文和位宽读取线集字段
+// value 按指定上下文和位宽读取点集或线集字段
 // 入参: context 压缩上下文, small 是否为8位字段
 // 返回: uint32 字段值
 func (r *u3dLineReader) value(context int, small bool) uint32 {
@@ -209,7 +232,7 @@ func (r *u3dLineReader) value(context int, small bool) uint32 {
 // 返回: uint32 索引, error 读取或范围错误
 func (r *u3dLineReader) index(count uint32) (uint32, error) {
 	if count == 0 {
-		return 0, fmt.Errorf("invalid U3D line position range")
+		return 0, fmt.Errorf("invalid U3D primitive position range")
 	}
 	var value uint32
 	if r.bits != nil {
@@ -221,7 +244,7 @@ func (r *u3dLineReader) index(count uint32) (uint32, error) {
 		return 0, err
 	}
 	if value >= count {
-		return 0, fmt.Errorf("invalid U3D line position index")
+		return 0, fmt.Errorf("invalid U3D primitive position index")
 	}
 	return value, nil
 }
@@ -241,7 +264,7 @@ func (r *u3dLineReader) err() error {
 func (r *u3dLineReader) reconstruct(prediction [4]float64, scale float32, signContext, componentContext, dimensions int) (values [4]float32, err error) {
 	signs := r.value(signContext, true)
 	if signs >= 1<<dimensions {
-		return values, fmt.Errorf("invalid U3D line difference signs")
+		return values, fmt.Errorf("invalid U3D primitive difference signs")
 	}
 	for i := range dimensions {
 		difference := float64(r.value(componentContext+i, false)) * float64(scale)
@@ -250,7 +273,7 @@ func (r *u3dLineReader) reconstruct(prediction [4]float64, scale float32, signCo
 		}
 		values[i] = float32(prediction[i] + difference)
 		if !finite(float64(values[i])) {
-			return values, fmt.Errorf("invalid U3D reconstructed line attribute")
+			return values, fmt.Errorf("invalid U3D reconstructed primitive attribute")
 		}
 	}
 	return values, r.err()
@@ -268,7 +291,7 @@ func (r *u3dLineReader) attribute(pool *[][4]float32, limit uint32, prediction [
 		return uint32(len(*pool) - 1), nil
 	}
 	if flag != 0 || uint64(len(*pool)) >= uint64(limit) {
-		return 0, fmt.Errorf("invalid U3D line attribute pool")
+		return 0, fmt.Errorf("invalid U3D primitive attribute pool")
 	}
 	value, err := r.reconstruct(prediction, scale, sign, component, 4)
 	if err != nil {
@@ -279,13 +302,13 @@ func (r *u3dLineReader) attribute(pool *[][4]float32, limit uint32, prediction [
 	return index, nil
 }
 
-// lineContinuation 按位置分段恢复线集，预测状态跨续块保存
-// 入参: r 字段读取器, name 资源名
+// primitiveContinuation 按位置分段恢复点集及线集，预测状态跨续块保存
+// 入参: r 字段读取器, name 资源名, points 是否为点集
 // 返回: error 结构、数值、预算或取消错误
-func (d *u3dDecoder) lineContinuation(r *u3dValues, name string) error {
+func (d *u3dDecoder) primitiveContinuation(r *u3dValues, name string, points bool) error {
 	decl := d.meshes[name]
-	if decl == nil || decl.line == nil || decl.decoded || r.u32() != 0 {
-		return fmt.Errorf("invalid U3D line continuation reference")
+	if decl == nil || decl.line == nil || decl.points != points || decl.decoded || r.u32() != 0 {
+		return fmt.Errorf("invalid U3D primitive continuation reference")
 	}
 	start, end := r.u32(), r.u32()
 	mesh := &decl.mesh
@@ -293,7 +316,7 @@ func (d *u3dDecoder) lineContinuation(r *u3dValues, name string) error {
 		return r.err
 	}
 	if uint64(start) != uint64(len(mesh.Positions)) || end <= start || end > decl.counts[1] {
-		return fmt.Errorf("invalid U3D line resolution range")
+		return fmt.Errorf("invalid U3D primitive resolution range")
 	}
 	reader := &u3dLineReader{values: r}
 	var charged uint64
@@ -322,7 +345,6 @@ func (d *u3dDecoder) lineContinuation(r *u3dValues, name string) error {
 				prediction[i] = float64(value)
 			}
 		}
-		attributes := decl.line.average(split)
 		value, err := reader.reconstruct(prediction, mesh.InverseQuantization[0], u3dLinePositionSign, u3dLinePositionX, 3)
 		if err != nil {
 			return err
@@ -331,8 +353,21 @@ func (d *u3dDecoder) lineContinuation(r *u3dValues, name string) error {
 		normalStart := uint32(len(mesh.Normals))
 		normals := reader.value(u3dLineNormalCount, false)
 		if normals > decl.counts[2]-normalStart {
-			return fmt.Errorf("invalid U3D line normal count")
+			return fmt.Errorf("invalid U3D primitive normal count")
 		}
+		if points && position > 0 && normals > 0 && !decl.line.pointPredicted[split] {
+			first, last := decl.line.pointOffsets[split], decl.line.pointOffsets[split+1]
+			prediction, err := d.pointNormalPrediction(mesh, mesh.Points[first:last])
+			if err != nil {
+				return err
+			}
+			base := int(split)*decl.line.stride + decl.line.offsets[0]
+			for i, value := range prediction {
+				decl.line.stats[base+i] = value * float64(last-first)
+			}
+			decl.line.pointPredicted[split] = true
+		}
+		attributes := decl.line.average(split)
 		for i := uint32(0); i < normals; i++ {
 			if i%256 == 0 {
 				if err := d.ctx.Err(); err != nil {
@@ -346,8 +381,8 @@ func (d *u3dDecoder) lineContinuation(r *u3dValues, name string) error {
 			mesh.Normals = append(mesh.Normals, [3]float32{value[0], value[1], value[2]})
 		}
 		lines := reader.value(u3dLineCount, false)
-		if lines > decl.counts[0]-uint32(len(mesh.Lines)) {
-			return fmt.Errorf("invalid U3D line count")
+		if lines > decl.counts[0]-uint32(len(mesh.Lines)+len(mesh.Points)) {
+			return fmt.Errorf("invalid U3D primitive count")
 		}
 		for i := uint32(0); i < lines; i++ {
 			if i%256 == 0 {
@@ -357,19 +392,24 @@ func (d *u3dDecoder) lineContinuation(r *u3dValues, name string) error {
 			}
 			line := U3DLine{Shading: reader.value(u3dLineShading, false)}
 			if uint64(line.Shading) >= uint64(len(mesh.Shadings)) {
-				return fmt.Errorf("invalid U3D line shading index")
+				return fmt.Errorf("invalid U3D primitive shading index")
 			}
-			first, err := reader.index(position)
-			if err != nil {
-				return err
+			corners := line.Corners[:1]
+			corners[0].Position = position
+			if !points {
+				first, err := reader.index(position)
+				if err != nil {
+					return err
+				}
+				line.Corners[0].Position, line.Corners[1].Position = first, position
+				corners = line.Corners[:]
 			}
-			line.Corners[0].Position, line.Corners[1].Position = first, position
 			shading := mesh.Shadings[line.Shading]
-			for j := range line.Corners {
-				corner := &line.Corners[j]
+			for j := range corners {
+				corner := &corners[j]
 				normal := reader.value(u3dLineNormalIndex, false)
 				if normal >= normals {
-					return fmt.Errorf("invalid U3D line local normal index")
+					return fmt.Errorf("invalid U3D primitive local normal index")
 				}
 				corner.Normal = normalStart + normal
 				if shading.Attributes&1 != 0 {
@@ -394,8 +434,15 @@ func (d *u3dDecoder) lineContinuation(r *u3dValues, name string) error {
 			if err := reader.err(); err != nil {
 				return err
 			}
-			mesh.Lines = append(mesh.Lines, line)
-			decl.line.accumulate(mesh, line)
+			if points {
+				mesh.Points = append(mesh.Points, U3DPoint{Shading: line.Shading, Corners: [1]U3DCorner{corners[0]}})
+			} else {
+				mesh.Lines = append(mesh.Lines, line)
+			}
+			decl.line.accumulateCorners(mesh, line.Shading, corners)
+		}
+		if points {
+			decl.line.pointOffsets = append(decl.line.pointOffsets, uint32(len(mesh.Points)))
 		}
 		if err := reader.err(); err != nil {
 			return err
@@ -406,13 +453,13 @@ func (d *u3dDecoder) lineContinuation(r *u3dValues, name string) error {
 			return io.ErrUnexpectedEOF
 		}
 		if b.u32() != 0 {
-			return fmt.Errorf("invalid U3D line compression flush")
+			return fmt.Errorf("invalid U3D primitive compression flush")
 		}
 		if b.err != nil {
 			return b.err
 		}
 		if (b.pos-16+7)/8 != uint64(len(b.data)) {
-			return fmt.Errorf("unexpected U3D line compressed data")
+			return fmt.Errorf("unexpected U3D primitive compressed data")
 		}
 		r.pos = len(r.data)
 	}
@@ -420,14 +467,18 @@ func (d *u3dDecoder) lineContinuation(r *u3dValues, name string) error {
 		return err
 	}
 	if end == decl.counts[1] {
-		for i, count := range []int{len(mesh.Lines), len(mesh.Positions), len(mesh.Normals), len(mesh.Diffuse), len(mesh.Specular), len(mesh.TextureCoordinates)} {
+		for i, count := range []int{len(mesh.Lines) + len(mesh.Points), len(mesh.Positions), len(mesh.Normals), len(mesh.Diffuse), len(mesh.Specular), len(mesh.TextureCoordinates)} {
 			if uint64(count) != uint64(decl.counts[i]) {
-				return fmt.Errorf("U3D line set does not match declaration")
+				return fmt.Errorf("U3D primitive set does not match declaration")
 			}
 		}
 		decl.decoded = true
 		d.remaining += uint64(len(decl.line.stats)) * 8
 		decl.line.stats = nil
+		if points {
+			d.remaining += uint64(cap(decl.line.pointOffsets))*4 + uint64(len(decl.line.pointPredicted))
+			decl.line.pointOffsets, decl.line.pointPredicted = nil, nil
+		}
 	}
 	return nil
 }

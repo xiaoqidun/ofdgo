@@ -31,9 +31,9 @@ type pdfCompositePattern struct {
 }
 
 // tiling 将图案作为非隔离组绘制，保留背景贡献及单元间隙
-// 入参: paint 图案画刷, backdrop 初始背景, space 混合空间
+// 入参: paint 图案画刷, backdrop 初始背景, space 混合空间, channels 可选源通道输出
 // 返回: []pdfCompositePixel 去除背景贡献的图案像素, error 解析或绘制错误
-func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, space *pdfgo.ColorSpace) ([]pdfCompositePixel, error) {
+func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, space *pdfgo.ColorSpace, channels []uint8) ([]pdfCompositePixel, error) {
 	source := paint.Tiling
 	matrix := c.importer.matrix.Mul(source.Matrix)
 	inverse, ok := matrix.Inverse()
@@ -74,6 +74,11 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 	}
 	candidate := c.acquirePixels(len(backdrop))
 	defer c.releasePixels(candidate)
+	var candidateChannels []uint8
+	if channels != nil {
+		candidateChannels = c.acquireChannels(len(backdrop))
+		defer c.releaseChannels(candidateChannels)
+	}
 	disjoint := source.BBox.XMax-source.BBox.XMin <= xstep && source.BBox.YMax-source.BBox.YMin <= ystep
 	pixelStep := 25.4 / c.importer.rasterDPI
 	localInverse, _ := pattern.local.matrix.Inverse()
@@ -93,6 +98,10 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 				continue
 			}
 			pixels := candidate[:width*height]
+			var cellChannels []uint8
+			if channels != nil {
+				cellChannels = candidateChannels[:width*height]
+			}
 			for y := range height {
 				if err := c.importer.ctx.Err(); err != nil {
 					return nil, err
@@ -104,10 +113,16 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 						initial = backdrop[index]
 					}
 					pixels[y*width+x] = pdfCompositePixel{values: initial.values, alpha: initial.alpha}
+					if cellChannels != nil {
+						cellChannels[y*width+x] = 0
+						if !disjoint {
+							cellChannels[y*width+x] = channels[index]
+						}
+					}
 				}
 			}
 			cell := pdfCompositor{importer: &pattern.local, box: Box{X: c.box.X + float64(left)*pixelStep - dx, Y: c.box.Y + float64(top)*pixelStep - dy, W: float64(width) * pixelStep, H: float64(height) * pixelStep},
-				width: width, height: height, inverse: localInverse, cache: pattern.local.compositingCache(), scratch: c.scratch, masks: map[*pdfgo.SoftMask][]float64{}}
+				width: width, height: height, inverse: localInverse, cache: pattern.local.compositingCache(), scratch: c.scratch, masks: map[*pdfgo.SoftMask][]float64{}, softMask: c.softMask, channels: cellChannels}
 			err := cell.draw(pattern.nodes, pixels, space)
 			cell.releaseMasks()
 			if err != nil {
@@ -120,6 +135,13 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 				for x := range width {
 					index := (top+y)*c.width + left + x
 					pdfCompositePatternCell(&result[index], backdrop[index], pixels[y*width+x], disjoint)
+					if channels != nil && pixels[y*width+x].shape != 0 {
+						if disjoint {
+							channels[index] |= cellChannels[y*width+x]
+						} else {
+							channels[index] = cellChannels[y*width+x]
+						}
+					}
 				}
 			}
 		}
@@ -208,9 +230,21 @@ func (p *pdfImporter) compositePattern(paint pdfgo.Paint) (*pdfCompositePattern,
 // 入参: node 图元, space 混合空间
 // 返回: bool 是否可直接转换, error 图案解析错误
 func (p *pdfImporter) directCompositeNode(node pdfCompositeNode, space *pdfgo.ColorSpace) (bool, error) {
-	if node.group == nil && space.Model == "DeviceCMYK" && !space.Calibrated() {
+	if node.group == nil && space.Device() {
 		style, fill, stroke := node.style()
-		if style.ColorConversion != (pdfgo.ColorConversion{}) {
+		if node.image == nil || node.image.Image.ImageMask {
+			for i, paint := range [2]pdfgo.Paint{style.Fill, style.Stroke} {
+				if i == 0 && !fill || i == 1 && !stroke {
+					continue
+				}
+				if native := pdfPrepareShadingColorants(paint, space, false); native != nil {
+					if !native.process.AlternateEquivalent() || i == 0 && style.FillOverprint || i == 1 && style.StrokeOverprint {
+						return false, nil
+					}
+				}
+			}
+		}
+		if space.Model == "DeviceCMYK" && style.ColorConversion != (pdfgo.ColorConversion{}) {
 			if node.image != nil && !node.image.Image.ImageMask {
 				source := p.compositingCache().images[node.image.Image]
 				if source == nil {
@@ -314,7 +348,27 @@ func (p *pdfImporter) processOverprint(nodes []pdfCompositeNode) (bool, error) {
 		if fill && style.FillOverprint && pdfOverprintNeedsSeparation(style.Fill) || stroke && style.StrokeOverprint && pdfOverprintNeedsSeparation(style.Stroke) {
 			return true, nil
 		}
+		if style.Transfer != nil || style.Halftone != nil {
+			if fill && style.FillOverprint && style.Fill.CMYK != nil || stroke && style.StrokeOverprint && style.Stroke.CMYK != nil {
+				transfer, err := p.resolveTransfer(style, "DeviceCMYK")
+				if err != nil || transfer != nil {
+					return transfer != nil, err
+				}
+			}
+		}
 		for i, paint := range []pdfgo.Paint{style.Fill, style.Stroke} {
+			if i == 0 && fill && style.FillOverprint || i == 1 && stroke && style.StrokeOverprint {
+				if native := pdfPrepareShadingColorants(paint, &pdfgo.ColorSpace{Model: "DeviceCMYK"}, false); native != nil {
+					return true, nil
+				}
+				native, _, err := pdfCompositeNativePaint(paint, &pdfgo.ColorSpace{Model: "DeviceCMYK"}, style.RenderingIntent)
+				if err != nil {
+					return false, err
+				}
+				if native != nil && (!pdfOpaqueBlack(*native) || !pdfOpaqueBlack(paint)) {
+					return true, nil
+				}
+			}
 			if paint.Shading != nil && (i == 0 && fill || i == 1 && stroke) {
 				nodes, err := p.compositeShadingPattern(paint.Shading)
 				if err != nil {

@@ -402,7 +402,7 @@ func (r *u3dRender) depthRange() (float64, float64, bool, error) {
 		}
 		mesh := &r.model.Meshes[index]
 		matrix := r.toCamera.multiply(instance.world)
-		for j := range len(mesh.Faces) + len(mesh.Lines) {
+		for j := range len(mesh.Faces) + len(mesh.Lines) + len(mesh.Points) {
 			_, corners := mesh.primitive(j)
 			if j%256 == 0 {
 				if err := r.ctx.Err(); err != nil {

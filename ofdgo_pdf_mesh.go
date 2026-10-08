@@ -40,6 +40,7 @@ type pdfMeshKey struct {
 	mesh       *pdfgo.MeshGradient
 	space      *pdfgo.ColorSpace
 	conversion pdfgo.ColorConversion
+	softMask   bool
 }
 
 // pdfMeshSample 保存采样点参数，patch为一基编号，零表示未覆盖
@@ -187,7 +188,7 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, 
 	if err := c.importer.ctx.Err(); err != nil {
 		return nil, err
 	}
-	key := pdfMeshKey{mesh, space, conversion}
+	key := pdfMeshKey{mesh, space, conversion, c.softMask}
 	if pixels, ok := c.meshes[key]; ok {
 		return pixels, nil
 	}
@@ -272,7 +273,11 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, 
 	}
 	sampleRows := func(start, end int) error {
 		colors := make(map[[4]float64][4]float64)
-		sampler := mesh.NewSampler()
+		colorants := pdfPrepareShadingColorants(pdfgo.Paint{Mesh: mesh}, space, c.softMask)
+		var sampler *pdfgo.MeshSampler
+		if colorants == nil {
+			sampler = mesh.NewSampler()
+		}
 		for y := start * samples; y < end*samples; y++ {
 			if err := c.importer.ctx.Err(); err != nil {
 				return err
@@ -291,13 +296,17 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, 
 				values := background
 				if sample.patch != 0 {
 					var err error
-					values, err = sampler.ValuesAt(sample.patch-1, sample.u, sample.v)
+					if colorants != nil {
+						values, err = colorants.meshAt(sample.patch-1, sample.u, sample.v)
+					} else {
+						values, err = sampler.ValuesAt(sample.patch-1, sample.u, sample.v)
+					}
 					if err != nil {
 						return err
 					}
 					if cached, ok := colors[values]; ok {
 						values = cached
-					} else {
+					} else if colorants == nil {
 						source := values
 						values, err = converter.Convert(values[:mesh.Space.Components()])
 						if err != nil {

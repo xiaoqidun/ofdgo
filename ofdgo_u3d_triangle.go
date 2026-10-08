@@ -95,7 +95,7 @@ func (r *u3dRender) drawMesh(instance u3dInstance, node *U3DNode, mesh *U3DMesh,
 			normals[i] = inverse.normal(u3dVector{float64(n[0]), float64(n[1]), float64(n[2])})
 		}
 	}
-	if err := r.drawLines(instance, node, mesh, positions, normals, pass, passIndex); err != nil {
+	if err := r.drawPrimitives(instance, node, mesh, positions, normals, pass, passIndex); err != nil {
 		return err
 	}
 	for index, face := range mesh.Faces {

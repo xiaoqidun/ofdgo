@@ -36,6 +36,7 @@ type pdfGradientKey struct {
 	space      *pdfgo.ColorSpace
 	geometry   pdfCompositeKey
 	conversion pdfgo.ColorConversion
+	softMask   bool
 }
 
 // pdfICCKey 区分原始ICC空间及输出渲染意图
@@ -252,7 +253,7 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 	if paint.Axial != nil && paint.Axial.Background == nil && paint.Axial.Bounds == nil || paint.Radial != nil && paint.Radial.Background == nil && paint.Radial.Bounds == nil {
 		return nil, nil
 	}
-	key := pdfGradientKey{axial: paint.Axial, radial: paint.Radial, function: paint.Function, space: space}
+	key := pdfGradientKey{axial: paint.Axial, radial: paint.Radial, function: paint.Function, space: space, softMask: c.softMask}
 	var conversion pdfgo.ColorConversion
 	if node != nil {
 		key.geometry = pdfCompositeKey{path: node.path, text: node.text, image: node.image, stroke: outline}
@@ -360,6 +361,7 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 	if err != nil {
 		return nil, err
 	}
+	colorants := pdfPrepareShadingColorants(paint, space, c.softMask)
 	step := 25.4 / c.importer.rasterDPI
 	pixels := make([]pdfShadingPixel, c.width*c.height)
 	for y := range c.height {
@@ -399,21 +401,27 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 						local = functionInverse.Apply(point)
 						visible = domainClipped || local.X >= g.Domain.XMin && local.X <= g.Domain.XMax && local.Y >= g.Domain.YMin && local.Y <= g.Domain.YMax
 						if visible {
-							values, err = g.ValuesAt(local)
-							if err == nil {
-								values, err = converter.Convert(values[:source.Components()])
+							if colorants != nil {
+								values, err = colorants.pointAt(local)
+							} else {
+								values, err = g.ValuesAt(local)
+								if err == nil {
+									values, err = converter.Convert(values[:source.Components()])
+								}
 							}
 						}
 					} else {
 						var parameter float64
 						parameter, visible = position.PositionAt(point)
 						if visible {
-							if paint.Axial != nil {
+							if colorants != nil {
+								values, err = colorants.at(parameter)
+							} else if paint.Axial != nil {
 								values, err = paint.Axial.ValuesAt(parameter)
 							} else {
 								values, err = paint.Radial.ValuesAt(parameter)
 							}
-							if err == nil {
+							if err == nil && colorants == nil {
 								values, err = converter.Convert(values[:source.Components()])
 							}
 						}

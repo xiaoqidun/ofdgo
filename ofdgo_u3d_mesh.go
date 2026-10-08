@@ -19,7 +19,7 @@ import (
 	"io"
 )
 
-// U3DMesh 保存静态三角面和线段的共享属性数组，索引对应原始作者几何
+// U3DMesh 保存静态三角面、线段和点的共享属性数组，索引对应原始作者几何
 type U3DMesh struct {
 	Name                                        string
 	ExcludeNormals                              bool
@@ -28,6 +28,7 @@ type U3DMesh struct {
 	Shadings                                    []U3DShading
 	Faces                                       []U3DFace
 	Lines                                       []U3DLine
+	Points                                      []U3DPoint
 	Quality                                     [3]uint32
 	InverseQuantization                         [5]float32
 	NormalCrease, NormalUpdate, NormalTolerance float32
@@ -52,29 +53,41 @@ type U3DLine struct {
 	Corners [2]U3DCorner
 }
 
+// U3DPoint 保存点集着色描述及独立属性索引
+type U3DPoint struct {
+	Shading uint32
+	Corners [1]U3DCorner
+}
+
 // U3DCorner 保存各属性索引，未启用的属性不可用于访问数组
 type U3DCorner struct {
 	Position, Normal, Diffuse, Specular uint32
 	Texture                             [8]uint32
 }
 
-// u3dMeshDeclaration 保存基础网格或线集声明及续块接收状态
+// u3dMeshDeclaration 保存几何声明及续块接收状态
 type u3dMeshDeclaration struct {
 	mesh    U3DMesh
 	counts  [7]uint32
 	decoded bool
 	line    *u3dLineState
+	points  bool
 }
 
-// primitive 访问三角面或线段的着色编号和角点，不复制属性数组
-// 入参: index 图元下标，三角面在前，线段在后
+// primitive 访问三角面、线段或点的着色编号和角点，不复制属性数组
+// 入参: index 图元下标，依次为三角面、线段和点
 // 返回: uint32 着色编号, []U3DCorner 只读角点
 func (m *U3DMesh) primitive(index int) (uint32, []U3DCorner) {
 	if index < len(m.Faces) {
 		return m.Faces[index].Shading, m.Faces[index].Corners[:]
 	}
-	line := &m.Lines[index-len(m.Faces)]
-	return line.Shading, line.Corners[:]
+	index -= len(m.Faces)
+	if index < len(m.Lines) {
+		line := &m.Lines[index]
+		return line.Shading, line.Corners[:]
+	}
+	point := &m.Points[index-len(m.Lines)]
+	return point.Shading, point.Corners[:]
 }
 
 // meshDeclaration 读取完整基础网格声明，不将渐进网格当作完整模型

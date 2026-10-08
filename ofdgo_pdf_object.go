@@ -28,12 +28,13 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// pdfImageKey 区分同一图像流的渲染意图及模板填充色
+// pdfImageKey 区分图像流、渲染意图、原生输出空间、模板填充色及采样尺寸
 type pdfImageKey struct {
-	stream *pdfgo.Stream
-	intent pdfgo.Name
-	tint   color.NRGBA64
-	size   image.Point
+	stream  *pdfgo.Stream
+	intent  pdfgo.Name
+	process pdfgo.Name
+	tint    color.NRGBA64
+	size    image.Point
 }
 
 // pdfImageResource 保存图像的有效颜色空间及对应资源，避免跨资源重映射复用
@@ -116,6 +117,10 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	}
 	source := mark.Image
 	key := pdfImageKey{stream: source.Stream, intent: source.Intent}
+	key.process, err = p.imageProcessModel(source)
+	if err != nil {
+		return err
+	}
 	if !source.ImageMask && p.compression.Mode == CompressionLossy {
 		m := p.matrix.Mul(mark.Matrix)
 		key.size = compressionImageSize(math.Hypot(m[0], m[1]), math.Hypot(m[2], m[3]), p.compression.ImageDPI())
@@ -164,19 +169,33 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		}
 	}
 	if id == "" {
-		jbig2Original, err := source.JBIG2FileContext(p.ctx)
-		if err != nil {
-			return err
-		}
-		jpegOriginal, err := source.JPEGFileContext(p.ctx)
-		if err != nil {
-			return err
-		}
+		var jbig2Original, jpegOriginal []byte
 		var decoded image.Image
-		if len(jbig2Original) == 0 && len(jpegOriginal) == 0 && (source.ImageMask || key.size != (image.Point{})) {
-			decoded, err = source.DecodeImageSizeContext(p.ctx, key.size)
+		if key.process != "" {
+			decoded, err = p.imageProcess(source, key.process)
 			if err != nil {
 				return err
+			}
+			if key.size != (image.Point{}) {
+				decoded, err = pdfgo.ResizeImage(p.ctx, decoded, key.size)
+				if err != nil {
+					return err
+				}
+			}
+		} else {
+			jbig2Original, err = source.JBIG2FileContext(p.ctx)
+			if err != nil {
+				return err
+			}
+			jpegOriginal, err = source.JPEGFileContext(p.ctx)
+			if err != nil {
+				return err
+			}
+			if len(jbig2Original) == 0 && len(jpegOriginal) == 0 && (source.ImageMask || key.size != (image.Point{})) {
+				decoded, err = source.DecodeImageSizeContext(p.ctx, key.size)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		if source.ImageMask {

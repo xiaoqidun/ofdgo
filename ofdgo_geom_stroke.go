@@ -78,11 +78,10 @@ func (p GeometryPath) Stroke(options StrokeOptions) (GeometryPath, error) {
 			}
 		}
 		for _, part := range parts {
-			outline, err := part.stroke(options)
+			result, err = part.stroke(result, options)
 			if err != nil {
 				return nil, err
 			}
-			result = append(result, outline...)
 			if len(result) > 1<<20 {
 				return nil, fmt.Errorf("stroke outline limit exceeded")
 			}
@@ -282,11 +281,10 @@ func (line geometryPolyline) dash(pattern []float64, total, offset float64) ([]g
 	return result, nil
 }
 
-// stroke 用同向矩形、连接楔形及圆盘组成非零填充区域
-// 入参: options 描边样式
+// stroke 追加同向矩形、连接楔形及圆盘组成的非零填充区域
+// 入参: result 已有轮廓, options 描边样式
 // 返回: GeometryPath 填充轮廓, error 不支持的退化方形线帽
-func (line geometryPolyline) stroke(options StrokeOptions) (GeometryPath, error) {
-	var result GeometryPath
+func (line geometryPolyline) stroke(result GeometryPath, options StrokeOptions) (GeometryPath, error) {
 	half := options.Width / 2
 	polygon := func(points ...Point) {
 		scale := 0.0

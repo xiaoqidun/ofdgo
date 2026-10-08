@@ -74,8 +74,8 @@ func (c *pdfFormCache) reset() {
 // 入参: nodes 普通表单连续图元
 // 返回: bool 是否已保存为复合对象, error 检查或转换错误
 func (p *pdfImporter) compositeForm(nodes []pdfCompositeNode) (bool, error) {
-	if pdfCompositeHasTransfer(nodes) {
-		return false, nil
+	if found, err := p.compositeHasTransfer(nodes, p.transferModel); err != nil || found {
+		return false, err
 	}
 	for _, node := range nodes {
 		if err := p.ctx.Err(); err != nil {

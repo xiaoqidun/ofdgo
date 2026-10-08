@@ -56,19 +56,27 @@ func (p *pdfImporter) compositeShadingPattern(pattern *pdfgo.ShadingPattern) ([]
 }
 
 // shadingPattern 统一对象和图案的几何覆盖，按相交面积合成背景及内部着色
-// 入参: pattern 着色图案, node 使用图元, outline 是否描边, backdrop 初始背景, space 父级混合空间
+// 入参: pattern 着色图案, node 使用图元, outline 是否描边, backdrop 初始背景, space 父级混合空间, channels 可选源通道输出
 // 返回: []pdfCompositePixel 源颜色、形状及不透明度, error 状态或合成错误
-func (c *pdfCompositor) shadingPattern(pattern *pdfgo.ShadingPattern, node pdfCompositeNode, outline bool, backdrop []pdfCompositePixel, space *pdfgo.ColorSpace) ([]pdfCompositePixel, error) {
+func (c *pdfCompositor) shadingPattern(pattern *pdfgo.ShadingPattern, node pdfCompositeNode, outline bool, backdrop []pdfCompositePixel, space *pdfgo.ColorSpace, channels []uint8) ([]pdfCompositePixel, error) {
 	nodes, err := c.importer.shadingSources(pattern, node, outline)
 	if err != nil {
 		return nil, err
 	}
 	local := *c
 	local.transfers, local.shadingSource = nil, true
+	local.channels = channels
 	result, err := local.shadingSourcePixels(nodes[len(nodes)-1], backdrop, space)
 	if err != nil || len(nodes) == 1 {
 		return result, err
 	}
+	var backgroundChannels []uint8
+	if channels != nil {
+		backgroundChannels = c.acquireChannels(len(channels))
+		defer c.releaseChannels(backgroundChannels)
+		clear(backgroundChannels)
+	}
+	local.channels = backgroundChannels
 	background, err := local.shadingSourcePixels(nodes[0], backdrop, space)
 	if err != nil {
 		c.releasePixels(result)
@@ -115,6 +123,9 @@ func (c *pdfCompositor) shadingPattern(pattern *pdfgo.ShadingPattern, node pdfCo
 		}
 		result[i].alpha, result[i].effect = alpha, alpha
 		result[i].shape += background[i].shape * remaining
+		if channels != nil && background[i].shape*remaining > 0 {
+			channels[i] |= backgroundChannels[i]
+		}
 	}
 	return result, nil
 }

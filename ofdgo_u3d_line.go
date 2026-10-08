@@ -19,44 +19,50 @@ import (
 	"math"
 )
 
-// drawLines 绘制作者线集，端点独立着色且不参与面的背向剔除
+// drawPrimitives 绘制作者点集及线集，独立着色且不参与面的背向剔除
 // 入参: instance 场景实例, node 模型节点, mesh 属性数组, positions 世界位置, normals 世界法线, pass 绘制轮次, passIndex 轮次索引
 // 返回: error 几何、资源或取消错误
-func (r *u3dRender) drawLines(instance u3dInstance, node *U3DNode, mesh *U3DMesh, positions, normals []u3dVector, pass U3DViewPass, passIndex int) error {
+func (r *u3dRender) drawPrimitives(instance u3dInstance, node *U3DNode, mesh *U3DMesh, positions, normals []u3dVector, pass U3DViewPass, passIndex int) error {
 	if r.depthOnly {
 		return nil
 	}
 	shaded := r.mode.shaded()
-	for index, line := range mesh.Lines {
+	for index := range len(mesh.Lines) + len(mesh.Points) {
+		shadingIndex, corners := mesh.primitive(len(mesh.Faces) + index)
+		point := index >= len(mesh.Lines)
 		if index%128 == 0 {
 			if err := r.ctx.Err(); err != nil {
 				return err
 			}
 		}
-		if uint64(line.Shading) >= uint64(len(mesh.Shadings)) {
-			return fmt.Errorf("invalid U3D render line shading index")
+		if uint64(shadingIndex) >= uint64(len(mesh.Shadings)) {
+			return fmt.Errorf("invalid U3D render primitive shading index")
 		}
-		shading := mesh.Shadings[line.Shading]
+		shading := mesh.Shadings[shadingIndex]
 		if shading.Attributes > 3 || len(shading.TextureDimensions) > 8 {
-			return fmt.Errorf("invalid U3D render line shading")
+			return fmt.Errorf("invalid U3D render primitive shading")
 		}
 		var world [2]u3dVector
 		var vertices [2]u3dVertex
-		for i, corner := range line.Corners {
+		for i, corner := range corners {
 			if uint64(corner.Position) >= uint64(len(positions)) || shaded && (!mesh.ExcludeNormals && uint64(corner.Normal) >= uint64(len(normals)) || shading.Attributes&1 != 0 && uint64(corner.Diffuse) >= uint64(len(mesh.Diffuse)) || shading.Attributes&2 != 0 && uint64(corner.Specular) >= uint64(len(mesh.Specular))) {
-				return fmt.Errorf("invalid U3D render line corner index")
+				return fmt.Errorf("invalid U3D render primitive corner index")
 			}
 			world[i] = positions[corner.Position]
 			vertices[i].point = r.toCamera.point(world[i])
 			for _, value := range vertices[i].point {
 				if !finite(value) {
-					return fmt.Errorf("invalid U3D line camera position")
+					return fmt.Errorf("invalid U3D primitive camera position")
 				}
 			}
 		}
 		shaderNames := []string{""}
-		if uint64(line.Shading) < uint64(len(node.LineShaders)) {
-			shaderNames = node.LineShaders[line.Shading]
+		shaders := node.LineShaders
+		if point {
+			shaders = node.PointShaders
+		}
+		if uint64(shadingIndex) < uint64(len(shaders)) {
+			shaderNames = shaders[shadingIndex]
 		}
 		for _, name := range shaderNames {
 			if err := r.ctx.Err(); err != nil {
@@ -78,7 +84,7 @@ func (r *u3dRender) drawLines(instance u3dInstance, node *U3DNode, mesh *U3DMesh
 			if instance.opacity >= 0 || r.opacity >= 0 {
 				style.shader.Blend = 0x606
 			}
-			for i, corner := range line.Corners {
+			for i, corner := range corners {
 				vertices[i].color = [4]float64{r.auxiliaryColor[0], r.auxiliaryColor[1], r.auxiliaryColor[2], 1}
 				if !shaded {
 					continue
@@ -104,6 +110,12 @@ func (r *u3dRender) drawLines(instance u3dInstance, node *U3DNode, mesh *U3DMesh
 				if r.opacity >= 0 {
 					vertices[i].color[3] *= r.opacity
 				}
+			}
+			if point {
+				if err := r.modePoint(vertices[0], style.shader, pass); err != nil {
+					return err
+				}
+				continue
 			}
 			if r.mode == U3DRenderVertices || r.mode == U3DRenderShadedVertices {
 				for _, vertex := range vertices {

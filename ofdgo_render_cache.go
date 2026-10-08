@@ -69,18 +69,18 @@ func (c *renderCache[K, V]) put(key K, value V, cost int) {
 	c.used += cost
 }
 
-// rasterCommandCost 估算指令快照及后端路径的缓存成本，不含借用图片
+// rasterCommandCost 按保留容量估算中立指令成本，不含临时后端路径及借用图片
 // 入参: command 绘制指令
 // 返回: int 字节成本
 func rasterCommandCost(command RasterCommand) int {
-	cost := 512 + (len(command.Path)+len(command.Clip))*208
+	cost := 512 + (cap(command.Path)+cap(command.Clip))*56
 	if command.Stroke != nil {
-		cost += 128 + len(command.Stroke.Dashes)*16
+		cost += 128 + cap(command.Stroke.Dashes)*8
 	}
 	if command.Paint.Gradient != nil {
-		cost += 256 + len(command.Paint.Gradient.Stops)*64
+		cost += 256 + cap(command.Paint.Gradient.Stops)*64
 		if mesh := command.Paint.Gradient.Mesh; mesh != nil {
-			cost += 32 + len(mesh.Triangles)*240
+			cost += 32 + cap(mesh.Triangles)*240
 		}
 	}
 	return cost

@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"image"
 	"runtime"
@@ -34,6 +35,12 @@ type outputImageJob struct {
 	err       error
 }
 
+// outputImageSource 保存已读取资源的摘要和格式，不保留原始编码
+type outputImageSource struct {
+	key  outputImageKey
+	jpeg bool
+}
+
 // outputImageOptions 统一资源压缩及像素需求，受保护图片只进行无损编码
 // 入参: key 资源路径
 // 返回: CompressionOptions 实际策略, image.Point 像素需求
@@ -51,9 +58,9 @@ func (e *Editor) outputImageOptions(key string) (CompressionOptions, image.Point
 }
 
 // prepareOutputImages 有界并行优化独立图片，读取、缓存及进度仍在调用线程处理
-// 入参: keys 资源路径, load 串行读取方法，空值表示跳过, results 本次写出的候选缓存
+// 入参: keys 资源路径, load 串行读取方法，空值表示跳过, results 候选缓存, sources 原始资源摘要，可为空
 // 返回: error 读取、进度或取消错误
-func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, error), results map[outputImageKey][]byte) error {
+func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, error), results map[outputImageKey][]byte, sources map[string]outputImageSource) error {
 	workers := min(2, runtime.GOMAXPROCS(0))
 	if workers < 2 || len(keys) < 2 {
 		return nil
@@ -84,6 +91,9 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 		}
 		options, demand := e.outputImageOptions(key)
 		cacheKey := outputImageKey{hash: sha256.Sum256(data), options: options, size: demand}
+		if sources != nil {
+			sources[key] = outputImageSource{key: cacheKey, jpeg: bytes.HasPrefix(data, []byte{255, 216})}
+		}
 		if _, cached := results[cacheKey]; cached {
 			continue
 		}

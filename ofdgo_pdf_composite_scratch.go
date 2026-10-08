@@ -24,9 +24,10 @@ type pdfCompositeBuffers[T any] [8][]T
 
 // pdfCompositeScratch 复用像素及蒙版缓冲，不跨页持有活动内容
 type pdfCompositeScratch struct {
-	pixels  pdfCompositeBuffers[pdfCompositePixel]
-	masks   pdfCompositeBuffers[float64]
-	rasters [8]*image.RGBA
+	pixels   pdfCompositeBuffers[pdfCompositePixel]
+	masks    pdfCompositeBuffers[float64]
+	channels pdfCompositeBuffers[uint8]
+	rasters  [8]*image.RGBA
 }
 
 // acquireCoverage 借用当前块的独占画布，保留活动画布供嵌套合成读取
@@ -118,6 +119,24 @@ func (c *pdfCompositor) acquirePixels(count int) []pdfCompositePixel {
 func (c *pdfCompositor) releasePixels(pixels []pdfCompositePixel) {
 	if c.scratch != nil {
 		c.scratch.pixels.release(pixels)
+	}
+}
+
+// acquireChannels 借用图案通道标记，仅在设备函数需要时分配
+// 入参: count 当前块像素数
+// 返回: []uint8 尚未初始化的独占通道缓冲
+func (c *pdfCompositor) acquireChannels(count int) []uint8 {
+	if c.scratch == nil {
+		c.scratch = &pdfCompositeScratch{}
+	}
+	return c.scratch.channels.acquire(count)
+}
+
+// releaseChannels 归还不再参与嵌套合成的通道标记
+// 入参: channels 当前调用借用的通道缓冲
+func (c *pdfCompositor) releaseChannels(channels []uint8) {
+	if c.scratch != nil {
+		c.scratch.channels.release(channels)
 	}
 }
 

@@ -24,12 +24,13 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// pdfImageContentKey 区分编码内容、渲染意图、模板填充色及有损采样尺寸
+// pdfImageContentKey 区分编码内容、渲染意图、原生输出空间、模板填充色及有损采样尺寸
 type pdfImageContentKey struct {
-	data   [32]byte
-	intent pdfgo.Name
-	tint   color.NRGBA64
-	size   image.Point
+	data    [32]byte
+	intent  pdfgo.Name
+	process pdfgo.Name
+	tint    color.NRGBA64
+	size    image.Point
 }
 
 // pdfImageContent 保存不依赖间接资源的图像描述及已注册编号
@@ -67,7 +68,7 @@ func (p *pdfImporter) imageContentKey(source *pdfgo.Image, key pdfImageKey) (pdf
 		hash.Write(data[:n])
 		data = data[n:]
 	}
-	result := pdfImageContentKey{intent: key.intent, tint: key.tint, size: key.size}
+	result := pdfImageContentKey{intent: key.intent, process: key.process, tint: key.tint, size: key.size}
 	hash.Sum(result.data[:0])
 	return result, true, p.ctx.Err()
 }
