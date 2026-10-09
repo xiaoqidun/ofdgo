@@ -444,22 +444,3 @@ func resolveActionURI(action URI) string {
 	}
 	return base.ResolveReference(target).String()
 }
-
-// outlineDest 获取大纲跳转目标
-// 入参: outline 大纲节点, bookmarks 书签
-// 返回: *Dest 跳转目标
-func outlineDest(outline OutlineElem, bookmarks map[string]Dest) *Dest {
-	for _, action := range outline.Actions {
-		if action.Goto != nil {
-			if dest := gotoDest(action.Goto, bookmarks); dest != nil {
-				return dest
-			}
-		}
-	}
-	for _, child := range outline.OutlineElem {
-		if dest := outlineDest(child, bookmarks); dest != nil {
-			return dest
-		}
-	}
-	return nil
-}

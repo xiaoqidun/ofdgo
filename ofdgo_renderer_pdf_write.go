@@ -19,34 +19,48 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"io"
 
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// preserveImages 一次恢复图像精度和链接区域，二值透明采用标准Matte预混合
-// 入参: ctx 取消上下文, data 后端PDF数据
-// 返回: []byte 保留图像及导航信息的PDF数据, error 资源或写入错误
-func (r *pdfRenderer) preserveImages(ctx context.Context, data []byte) ([]byte, error) {
+// writePDF 合并图像、导航修正及压缩，直接写出最终PDF
+// 入参: ctx 取消上下文, data 后端PDF数据, writer 输出流, optimization 优化配置
+// 返回: error 资源、压缩或写入错误
+func (r *pdfRenderer) writePDF(ctx context.Context, data []byte, writer io.Writer, optimization pdfgo.OptimizeOptions) error {
 	if r.imageError != nil {
-		return nil, r.imageError
+		return r.imageError
 	}
 	exactLinks := r.navigation != nil && r.navigation.exactLinks
-	if !r.exactImages && !exactLinks {
-		return data, nil
+	if !r.exactImages && !exactLinks && optimization.Compression.Mode == CompressionUnchanged {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, err := writer.Write(data)
+		if err == nil && n != len(data) {
+			err = io.ErrShortWrite
+		}
+		return err
 	}
 	reader, err := pdfgo.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer reader.Close()
+	if !r.exactImages && !exactLinks {
+		_, err := reader.OptimizeTo(ctx, writer, optimization)
+		return err
+	}
 	images := make(map[pdfgo.Reference]image.Image)
 	links := make(map[pdfgo.AnnotationLocation]pdfgo.LinkRegion)
+	references := make([]pdfgo.Reference, len(r.images))
 	pages := 0
 	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
 		if index >= len(r.images) {
 			return fmt.Errorf("unexpected PDF output page")
 		}
 		pages++
+		references[index] = page.Reference
 		if exactLinks {
 			annotations, err := page.AnnotationsContext(ctx)
 			if err != nil {
@@ -119,27 +133,30 @@ func (r *pdfRenderer) preserveImages(ctx context.Context, data []byte) ([]byte, 
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if pages != len(r.images) {
-		return nil, fmt.Errorf("PDF output page missing")
+		return fmt.Errorf("PDF output page missing")
+	}
+	options := pdfgo.RewriteOptions{Images: images, ImageOptions: pdfgo.ImageWriteOptions{PreblendBinary: true}, LinkRegions: links, Optimization: optimization}
+	if exactLinks {
+		if err := r.navigation.destinations(ctx, reader, references, &options); err != nil {
+			return err
+		}
 	}
 	for ref, original := range images {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 		pixels, err := imagePixelData(original)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if pixels == nil || pixels.Bounds() != original.Bounds() {
-			return nil, fmt.Errorf("PDF output image pixel bounds differ")
+			return fmt.Errorf("PDF output image pixel bounds differ")
 		}
 		images[ref] = pixels
 	}
-	var result bytes.Buffer
-	if _, err := reader.RewriteTo(ctx, &result, pdfgo.RewriteOptions{Images: images, ImageOptions: pdfgo.ImageWriteOptions{PreblendBinary: true}, LinkRegions: links}); err != nil {
-		return nil, err
-	}
-	return result.Bytes(), nil
+	_, err = reader.RewriteTo(ctx, writer, options)
+	return err
 }

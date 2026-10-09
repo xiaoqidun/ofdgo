@@ -15,9 +15,11 @@
 package ofdgo
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"image/color"
+	"strconv"
 
 	"github.com/tdewolff/canvas"
 	cimage "github.com/tdewolff/canvas/image"
@@ -37,17 +39,9 @@ type pdfRenderer struct {
 
 // pdfNavigation PDF导航信息
 type pdfNavigation struct {
-	Anchor     map[int][]pdfAnchor
 	Link       map[int][]pdfLink
-	Outline    map[int][]pdfOutline
-	nextID     int
+	Outline    []pdfOutline
 	exactLinks bool
-}
-
-// pdfAnchor PDF跳转目标
-type pdfAnchor struct {
-	Name string
-	Rect canvas.Rect
 }
 
 // pdfLink PDF链接
@@ -55,13 +49,26 @@ type pdfLink struct {
 	URI    string
 	Rect   canvas.Rect
 	Region *pdfgo.LinkRegion
+	Target *pdfTarget
+}
+
+// pdfTarget 保存输出页索引及默认用户空间中的跳转参数
+type pdfTarget struct {
+	Page        int
+	Destination pdfgo.Destination
 }
 
 // pdfOutline PDF大纲
 type pdfOutline struct {
-	Name  string
-	Level int
-	Y     float64
+	Name    string
+	Level   int
+	Actions []pdfOutlineAction
+}
+
+// pdfOutlineAction 保存目录的导航动作，输出时关联实际页面引用
+type pdfOutlineAction struct {
+	URI    string
+	Target *pdfTarget
 }
 
 // RenderImage 校验惰性图片并同步不透明画笔，保留解码错误及后端透明度状态
@@ -126,12 +133,10 @@ func (r *pdfRenderer) glyphPath(path *canvas.Path, matrix canvas.Matrix) *canvas
 
 // newPDFNavigation 创建PDF导航信息
 // 入参: renderer 渲染器, doc 文档结构, pages 页面数据
-// 返回: *pdfNavigation PDF导航信息, error 几何错误
+// 返回: *pdfNavigation PDF导航信息, error 区域或目标错误
 func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentPage) (*pdfNavigation, error) {
 	navigation := &pdfNavigation{
-		Anchor:  make(map[int][]pdfAnchor),
-		Link:    make(map[int][]pdfLink),
-		Outline: make(map[int][]pdfOutline),
+		Link: make(map[int][]pdfLink),
 	}
 	pageIndex := make(map[string]int, len(pages))
 	for i, page := range pages {
@@ -162,7 +167,9 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentP
 				}
 				rect := pdfSourceRect(box, page.Box.H)
 				count := len(navigation.Link[i])
-				navigation.addAction(i, rect, action, bookmarks, pageIndex, pages)
+				if err := navigation.addAction(i, rect, action, bookmarks, pageIndex, pages); err != nil {
+					return nil, err
+				}
 				if len(navigation.Link[i]) == count || outline == "" {
 					continue
 				}
@@ -182,69 +189,152 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentP
 		}
 	}
 	if doc != nil {
-		navigation.addOutlines(doc.Outlines.OutlineElem, 0, bookmarks, pageIndex, pages)
+		if err := navigation.addOutlines(doc.Outlines.OutlineElem, 0, bookmarks, pageIndex, pages); err != nil {
+			return nil, err
+		}
 	}
 	return navigation, nil
 }
 
 // addAction 添加PDF动作
 // 入参: page 页面索引, rect 动作区域, action 动作, bookmarks 书签, pageIndex 页面索引表, pages 页面数据
-func (n *pdfNavigation) addAction(page int, rect canvas.Rect, action Action, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) {
+// 返回: error 目标参数错误
+func (n *pdfNavigation) addAction(page int, rect canvas.Rect, action Action, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) error {
 	if action.Goto != nil {
 		dest := gotoDest(action.Goto, bookmarks)
 		if dest == nil {
-			return
+			return nil
 		}
 		target, ok := pageIndex[dest.PageID]
 		if !ok {
-			return
+			return nil
 		}
-		targetRect, ok := pdfDestRect(*dest, pages[target].Box.H)
-		if !ok {
-			return
+		destination, err := pdfDestination(*dest, pages[target].Box.H)
+		if err != nil {
+			return err
 		}
-		name := fmt.Sprintf("ofdgo-dest-%d", n.nextID)
-		n.nextID++
-		n.Anchor[target] = append(n.Anchor[target], pdfAnchor{Name: name, Rect: targetRect})
-		n.Link[page] = append(n.Link[page], pdfLink{URI: "#" + name, Rect: rect})
-		return
+		n.Link[page] = append(n.Link[page], pdfLink{Rect: rect, Target: &pdfTarget{Page: target, Destination: destination}})
+		n.exactLinks = true
+		return nil
 	}
 	if action.URI != nil && action.URI.URI != "" {
 		n.Link[page] = append(n.Link[page], pdfLink{URI: resolveActionURI(*action.URI), Rect: rect})
 	}
+	return nil
 }
 
-// addOutlines 添加PDF大纲
+// addOutlines 保留目录层级及节点自身的导航动作，选页时移除无保留子项的失效跳转节点
 // 入参: outlines 大纲节点, level 节点层级, bookmarks 书签, pageIndex 页面索引表, pages 页面数据
-func (n *pdfNavigation) addOutlines(outlines []OutlineElem, level int, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) {
+// 返回: error 目标参数错误
+func (n *pdfNavigation) addOutlines(outlines []OutlineElem, level int, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) error {
 	for _, outline := range outlines {
-		nextLevel := level
-		if dest := outlineDest(outline, bookmarks); dest != nil {
-			if page, ok := pageIndex[dest.PageID]; ok {
-				n.Outline[page] = append(n.Outline[page], pdfOutline{
-					Name:  outline.Title,
-					Level: level,
-					Y:     pdfDestY(*dest, pages[page].Box.H),
-				})
-				nextLevel++
+		entry := pdfOutline{Name: outline.Title, Level: level}
+		onlyMissingTargets := len(outline.Actions) != 0
+		for _, action := range outline.Actions {
+			if action.Goto != nil {
+				dest := gotoDest(action.Goto, bookmarks)
+				if dest == nil {
+					continue
+				}
+				page, ok := pageIndex[dest.PageID]
+				if !ok {
+					continue
+				}
+				destination, err := pdfDestination(*dest, pages[page].Box.H)
+				if err != nil {
+					return err
+				}
+				entry.Actions = append(entry.Actions, pdfOutlineAction{Target: &pdfTarget{Page: page, Destination: destination}})
+			} else {
+				onlyMissingTargets = false
+				if action.URI != nil && action.URI.URI != "" {
+					entry.Actions = append(entry.Actions, pdfOutlineAction{URI: resolveActionURI(*action.URI)})
+				}
 			}
 		}
-		n.addOutlines(outline.OutlineElem, nextLevel, bookmarks, pageIndex, pages)
+		index := len(n.Outline)
+		n.Outline = append(n.Outline, entry)
+		if err := n.addOutlines(outline.OutlineElem, level+1, bookmarks, pageIndex, pages); err != nil {
+			return err
+		}
+		if onlyMissingTargets && len(entry.Actions) == 0 && len(n.Outline) == index+1 {
+			n.Outline = n.Outline[:index]
+		}
 	}
+	n.exactLinks = n.exactLinks || len(n.Outline) != 0
+	return nil
 }
 
-// apply 应用PDF导航信息
+// apply 生成链接及大纲结构，内部目标在原生写入时关联
 // 入参: renderer PDF渲染器, page 页面索引
 func (n *pdfNavigation) apply(renderer *pdf.PDF, page int) {
-	for _, anchor := range n.Anchor[page] {
-		renderer.AddAnchor(anchor.Name, anchor.Rect)
-	}
 	for _, link := range n.Link[page] {
 		renderer.AddLink(link.URI, link.Rect)
 	}
-	for _, outline := range n.Outline[page] {
-		renderer.AddOutline(outline.Name, outline.Level, outline.Y)
+	if page == 0 {
+		for index, outline := range n.Outline {
+			renderer.AddOutline(strconv.Itoa(index), outline.Level, 0)
+		}
 	}
+}
+
+// destinations 将输出页引用关联到原有链接和先序大纲，不按目标页重新排序
+// 入参: ctx 取消上下文, reader 输出PDF, pages 输出页引用, options 替换配置
+// 返回: error 目录结构或取消错误
+func (n *pdfNavigation) destinations(ctx context.Context, reader *pdfgo.Reader, pages []pdfgo.Reference, options *pdfgo.RewriteOptions) error {
+	options.LinkDestinations = make(map[pdfgo.AnnotationLocation]pdfgo.Destination)
+	for page, links := range n.Link {
+		for index, link := range links {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if link.Target != nil {
+				dest := link.Target.Destination
+				dest.Page = pages[link.Target.Page]
+				options.LinkDestinations[pdfgo.AnnotationLocation{Page: pages[page], Index: index}] = dest
+			}
+		}
+	}
+	if len(n.Outline) == 0 {
+		return nil
+	}
+	options.OutlineDestinations = make(map[pdfgo.Reference]pdfgo.Destination, len(n.Outline))
+	options.OutlineTitles = make(map[pdfgo.Reference]string, len(n.Outline))
+	options.OutlineActions = make(map[pdfgo.Reference][]pdfgo.NavigationAction)
+	count := 0
+	if err := reader.WalkOutlines(ctx, func(level int, item pdfgo.OutlineItem) error {
+		if count >= len(n.Outline) || n.Outline[count].Level != level || strconv.Itoa(count) != item.Title {
+			return fmt.Errorf("PDF output outline differs")
+		}
+		actions := n.Outline[count].Actions
+		if len(actions) == 1 && actions[0].Target != nil {
+			target := actions[0].Target
+			dest := target.Destination
+			dest.Page = pages[target.Page]
+			options.OutlineDestinations[item.Reference] = dest
+		} else {
+			converted := make([]pdfgo.NavigationAction, 0, len(actions))
+			for _, action := range actions {
+				value := pdfgo.NavigationAction{URI: action.URI}
+				if action.Target != nil {
+					dest := action.Target.Destination
+					dest.Page = pages[action.Target.Page]
+					value.Destination = &dest
+				}
+				converted = append(converted, value)
+			}
+			options.OutlineActions[item.Reference] = converted
+		}
+		options.OutlineTitles[item.Reference] = n.Outline[count].Name
+		count++
+		return nil
+	}); err != nil {
+		return err
+	}
+	if count != len(n.Outline) {
+		return fmt.Errorf("PDF output outline missing")
+	}
+	return nil
 }
 
 // pdfSourceRect 转换PDF动作区域
@@ -254,32 +344,25 @@ func pdfSourceRect(box Box, pageH float64) canvas.Rect {
 	return canvas.RectFromSize(box.X, pageH-box.Y-box.H, box.W, box.H)
 }
 
-// pdfDestRect 转换PDF跳转目标
+// pdfDestination 按OFD目标语义转换PDF坐标、显示模式及缩放比例
 // 入参: dest OFD跳转目标, pageH 页面高度
-// 返回: canvas.Rect PDF目标区域, bool 是否支持
-func pdfDestRect(dest Dest, pageH float64) (canvas.Rect, bool) {
+// 返回: pdfgo.Destination 待关联输出页的目标, error 目标参数错误
+func pdfDestination(dest Dest, pageH float64) (pdfgo.Destination, error) {
+	dest = dest.effective()
+	if _, err := dest.attributes(); err != nil {
+		return pdfgo.Destination{}, err
+	}
+	const scale = 72.0 / 25.4
+	result := pdfgo.Destination{Mode: pdfgo.Name(dest.Type)}
 	switch dest.Type {
 	case "XYZ":
-		return canvas.Rect{X0: dest.Left, Y0: pageH - dest.Top, X1: dest.Left, Y1: pageH - dest.Top}, true
-	case "Fit":
-		return canvas.Rect{}, true
+		result.Parameters = pdfgo.Array{pdfgo.Real(dest.Left * scale), pdfgo.Real((pageH - dest.Top) * scale), pdfgo.Real(dest.Zoom)}
 	case "FitH":
-		return canvas.Rect{Y0: pageH - dest.Top, Y1: pageH - dest.Top}, true
+		result.Parameters = pdfgo.Array{pdfgo.Real((pageH - dest.Top) * scale)}
 	case "FitV":
-		return canvas.Rect{X0: dest.Left, X1: dest.Left}, true
+		result.Parameters = pdfgo.Array{pdfgo.Real(dest.Left * scale)}
 	case "FitR":
-		return canvas.Rect{X0: dest.Left, Y0: pageH - dest.Bottom, X1: dest.Right, Y1: pageH - dest.Top}, true
+		result.Parameters = pdfgo.Array{pdfgo.Real(dest.Left * scale), pdfgo.Real((pageH - dest.Bottom) * scale), pdfgo.Real(dest.Right * scale), pdfgo.Real((pageH - dest.Top) * scale)}
 	}
-	return canvas.Rect{}, false
-}
-
-// pdfDestY 获取PDF大纲目标位置
-// 入参: dest OFD跳转目标, pageH 页面高度
-// 返回: float64 PDF纵坐标
-func pdfDestY(dest Dest, pageH float64) float64 {
-	switch dest.Type {
-	case "XYZ", "FitH", "FitR":
-		return pageH - dest.Top
-	}
-	return 0
+	return result, nil
 }

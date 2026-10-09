@@ -165,38 +165,30 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		return err
 	}
 	data := replacePDFProducer(buf.Bytes()[start:])
-	data, err = renderer.preserveImages(r.outputContext(), data)
-	if err != nil {
-		buf.Truncate(start)
-		return err
+	options := pdfgo.OptimizeOptions{Compression: r.Compression}
+	if r.Compression.Mode != CompressionUnchanged && progress != nil {
+		options.OnProgress = func(_ string, _, _ int) error {
+			return progress(len(pages), len(pages))
+		}
 	}
-	if direct && (renderer.exactImages || navigation.exactLinks) {
+	if direct {
+		if !renderer.exactImages && !navigation.exactLinks {
+			if err := r.outputContext().Err(); err != nil {
+				buf.Truncate(start)
+				return err
+			}
+			return nil
+		}
+		var result bytes.Buffer
+		err := renderer.writePDF(r.outputContext(), data, &result, options)
 		buf.Truncate(start)
-		_, err = buf.Write(data)
-		return err
-	}
-	if r.Compression.Mode != CompressionUnchanged {
-		reader, err := pdfgo.NewReader(bytes.NewReader(data), int64(len(data)))
 		if err != nil {
 			return err
 		}
-		defer reader.Close()
-		_, err = reader.OptimizeTo(r.outputContext(), writer, pdfgo.OptimizeOptions{Compression: r.Compression, OnProgress: func(_ string, _, _ int) error {
-			if progress != nil {
-				return progress(len(pages), len(pages))
-			}
-			return nil
-		}})
+		_, err = buf.Write(result.Bytes())
 		return err
 	}
-	if direct {
-		return nil
-	}
-	n, err := writer.Write(data)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	return err
+	return renderer.writePDF(r.outputContext(), data, writer, options)
 }
 
 // replacePDFProducer 替换PDF的Producer属性
