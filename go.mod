@@ -8,9 +8,9 @@ require (
 	github.com/go-text/typesetting v0.3.5
 	github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c
 	github.com/tdewolff/font v0.0.0-20260913163313-54f98bb59ee6
-	github.com/xiaoqidun/j2kgo v0.0.0-20261009050019-d6d8c42b70bd
+	github.com/xiaoqidun/j2kgo v0.0.0-20261009063910-4865a21ef893
 	github.com/xiaoqidun/jbig2 v1.1.3
-	github.com/xiaoqidun/pdfgo v0.0.0-20261009054335-bd8a5e721992
+	github.com/xiaoqidun/pdfgo v0.0.0-20261009064143-9a945dbdcbb6
 	golang.org/x/crypto v0.57.0
 	golang.org/x/image v0.46.0
 	golang.org/x/text v0.42.0

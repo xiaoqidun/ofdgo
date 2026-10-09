@@ -143,6 +143,120 @@ func (p *pdfImporter) importedFont(source *pdfgo.Font) (*pdfImportedFont, error)
 	return result, nil
 }
 
+// symbolFont 将标准符号字体的旧式字符表转换为Unicode映射，保留原字形编号
+// 入参: source 未嵌入的PDF字体
+// 返回: *pdfImportedFont 可用的符号字体，无匹配时为空, error 字体或取消错误
+func (p *pdfImporter) symbolFont(source *pdfgo.Font) (*pdfImportedFont, error) {
+	name := pdfEmbeddedFontName(source.Name)
+	if source.Subtype != "Type1" || name != "Symbol" && name != "ZapfDingbats" {
+		return nil, nil
+	}
+	if imported, ok := p.symbolFonts[source]; ok {
+		return imported, nil
+	}
+	if p.symbolFonts == nil {
+		p.symbolFonts = make(map[*pdfgo.Font]*pdfImportedFont)
+	}
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
+	definition := &Font{ID: name, FontName: name, FamilyName: name}
+	reader := &Reader{doc: &Document{}, fontResourcesRead: true, fontCache: map[string]*Font{name: definition}}
+	resolved, err := p.editor.newRenderer(reader).ResolveFont(name, true)
+	if err != nil || len(resolved.Data) == 0 || p.editor.backends.FontResources == nil {
+		p.symbolFonts[source] = nil
+		return nil, nil
+	}
+	tables, err := fontFileTables(resolved.Data, 0)
+	if err != nil || !pdfSymbolCmap(tables["cmap"]) {
+		p.symbolFonts[source] = nil
+		return nil, nil
+	}
+	standard, err := p.reader.ReadFontContext(p.ctx, pdfgo.Dictionary{"Type": pdfgo.Name("Font"), "Subtype": pdfgo.Name("Type1"), "BaseFont": pdfgo.Name(name)})
+	if err != nil {
+		return nil, err
+	}
+	codes := make([]byte, 256)
+	for index := range codes {
+		codes[index] = byte(index)
+	}
+	glyphs, err := standard.DecodeContext(p.ctx, codes)
+	if err != nil {
+		return nil, err
+	}
+	original := parseCmapMappings(tables["cmap"])
+	mapping := make(map[rune]uint16)
+	names := make(map[string]uint16)
+	for _, glyph := range glyphs {
+		if glyph.Name == ".notdef" || glyph.Name == "" {
+			continue
+		}
+		id := original[rune(glyph.Code)]
+		for _, base := range [...]rune{0xf000, 0xf100, 0xf200} {
+			if candidate := original[base+rune(glyph.Code)]; candidate != 0 {
+				if id != 0 && id != candidate {
+					return nil, fmt.Errorf("ambiguous PDF symbol font mapping")
+				}
+				id = candidate
+			}
+		}
+		if id == 0 {
+			continue
+		}
+		names[glyph.Name] = id
+		if char, size := utf8.DecodeRuneInString(glyph.Text); size != 0 && size == len(glyph.Text) {
+			mapping[char] = id
+		}
+	}
+	if len(mapping) == 0 {
+		p.symbolFonts[source] = nil
+		return nil, nil
+	}
+	tables["cmap"] = buildCmapTable(0, mapping)
+	program, err := serializeOTF(tables)
+	if err != nil {
+		return nil, err
+	}
+	resource, err := p.editor.backends.FontResources.OpenFontResource(FontFile{Name: name + ".ttf", Data: program}, 0)
+	if err != nil {
+		return nil, err
+	}
+	metrics, err := p.editor.backends.Fonts.OpenFont(resource.Data)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := metrics.(FontOutlines); !ok {
+		p.symbolFonts[source] = nil
+		return nil, nil
+	}
+	result := &pdfImportedFont{resource: resource, checksum: sha256.Sum256(resource.Data), metrics: metrics, type1Glyphs: names}
+	p.symbolFonts[source] = result
+	return result, nil
+}
+
+// pdfSymbolCmap 识别不含Unicode字符表的Windows符号字体
+// 入参: data 字符映射表
+// 返回: bool 是否为旧式符号字体
+func pdfSymbolCmap(data []byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	count := int(binary.BigEndian.Uint16(data[2:]))
+	if count > (len(data)-4)/8 {
+		return false
+	}
+	symbol := false
+	for i := range count {
+		pos := 4 + i*8
+		platform, encoding := binary.BigEndian.Uint16(data[pos:]), binary.BigEndian.Uint16(data[pos+2:])
+		if platform == 0 || platform == 3 && (encoding == 1 || encoding == 10) {
+			return false
+		}
+		symbol = symbol || platform == 3 && encoding == 0
+	}
+	return symbol
+}
+
 // pdfFontProgram 为PDF子集字体补齐封装表，保留字形轮廓和编号
 // 无效字符表按PDF已解码字形重建，不改变字符对应的字形编号
 // 入参: source PDF字体, type1 已解析的Type1程序，nil时按需解析

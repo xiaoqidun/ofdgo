@@ -326,13 +326,29 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		if err != nil {
 			return err
 		}
-	} else if imported = p.embeddedTextFont(font, mark.Glyphs); imported != nil {
-		reused, embedded = true, true
-		mark.Glyphs = slices.Clone(mark.Glyphs)
-		for index := range mark.Glyphs {
-			char, _ := utf8.DecodeRuneInString(mark.Glyphs[index].Text)
-			mark.Glyphs[index].ID = imported.metrics.GlyphIndex(char)
-			mark.Glyphs[index].HasID = true
+	} else {
+		imported = p.embeddedTextFont(font, mark.Glyphs)
+		symbol := false
+		if imported == nil {
+			imported, err = p.symbolFont(font)
+			if err != nil {
+				return err
+			}
+			symbol = imported != nil
+		}
+		if imported != nil {
+			reused, embedded = true, true
+			mark.Glyphs = slices.Clone(mark.Glyphs)
+			for index := range mark.Glyphs {
+				glyph := &mark.Glyphs[index]
+				if symbol {
+					glyph.ID = imported.type1Glyphs[glyph.Name]
+				} else {
+					char, _ := utf8.DecodeRuneInString(glyph.Text)
+					glyph.ID = imported.metrics.GlyphIndex(char)
+				}
+				glyph.HasID = true
+			}
 		}
 	}
 	id := p.fontIDs[font]
