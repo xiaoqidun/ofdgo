@@ -214,7 +214,7 @@ func (obj TextObject) ResizeTextFrame(offset, width float64) (TextObject, error)
 }
 
 // transformObject 对原有复杂对象仅更新变换，不重建其文字、画刷或其他局部属性
-// 入参: object 对象, dx、dy 页面位移, scale 缩放比例
+// 入参: object 对象, dx 页面横向位移, dy 页面纵向位移, scale 缩放比例
 // 返回: GraphicObject 新对象, error 错误信息
 func (e *Editor) transformObject(object GraphicObject, dx, dy, scale float64) (GraphicObject, error) {
 	if object.Type == "ImageObject" && object.ImageObject.Border != nil && scale != 1 {

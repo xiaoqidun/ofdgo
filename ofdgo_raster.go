@@ -21,6 +21,7 @@ import (
 	"math"
 )
 
+// 光栅后端接收的路径指令
 const (
 	RasterMove RasterVerb = iota
 	RasterLine
@@ -29,6 +30,7 @@ const (
 	RasterClose
 )
 
+// 光栅渐变类型：轴向、径向和网格
 const (
 	RasterLinear RasterGradientKind = iota
 	RasterRadial
@@ -195,7 +197,7 @@ func (g *RasterGradient) At(x, y float64) color.RGBA {
 func rasterPositive(v float64) bool { return v > 0 && !math.IsInf(v, 0) && !math.IsNaN(v) }
 
 // rasterRadialDomain 求延伸区间内半径非负的最后一个双圆参数
-// 入参: a、b、c 方程系数, radius 起始半径, delta 半径变化, extend 延伸标志
+// 入参: a 二次项系数, b 一次项系数, c 常数项, radius 起始半径, delta 半径变化, extend 延伸标志
 // 返回: float64 参数, bool 是否覆盖采样点
 func rasterRadialDomain(a, b, c, radius, delta float64, extend int) (float64, bool) {
 	x, y := math.NaN(), math.NaN()

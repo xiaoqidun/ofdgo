@@ -19,6 +19,7 @@ import (
 	"io"
 )
 
+// U3D线集增量编码的算术编码上下文
 const (
 	u3dLinePositionSign = iota
 	u3dLinePositionX
@@ -174,12 +175,6 @@ func (s *u3dLineState) average(position uint32) (values [11][4]float64) {
 		}
 	}
 	return values
-}
-
-// accumulate 累计线段端点的独立属性，重复使用的属性按端点分别计数
-// 入参: mesh 共享属性数组, line 已完成的线段
-func (s *u3dLineState) accumulate(mesh *U3DMesh, line U3DLine) {
-	s.accumulateCorners(mesh, line.Shading, line.Corners[:])
 }
 
 // accumulateCorners 累计点或线端的属性，用于后续位置预测

@@ -71,14 +71,14 @@ func (e *Editor) Objects(page int, ids []string) ([]GraphicObject, error) {
 
 // CopyObjects 将对象快照按输入顺序复制到目标页并平移，分配新ID，提交一次撤销记录
 // 对象引用当前Editor已注册的资源，保留段落信息，不修改输入快照
-// 入参: page 目标页面索引, objects 对象快照, dx、dy 毫米位移
+// 入参: page 目标页面索引, objects 对象快照, dx 横向位移，单位为毫米, dy 纵向位移，单位为毫米
 // 返回: []string 按绘制顺序排列的新对象标识, error 错误信息
 func (e *Editor) CopyObjects(page int, objects []GraphicObject, dx, dy float64) ([]string, error) {
 	return e.CopyObjectsContext(context.Background(), page, objects, dx, dy)
 }
 
 // CopyObjectsContext 复制对象快照，准备期间取消不提交对象或撤销记录
-// 入参: ctx 取消上下文, page 目标页, objects 对象快照, dx、dy 毫米位移
+// 入参: ctx 取消上下文, page 目标页, objects 对象快照, dx 横向位移，单位为毫米, dy 纵向位移，单位为毫米
 // 返回: []string 新对象标识, error 校验或取消错误
 func (e *Editor) CopyObjectsContext(ctx context.Context, page int, objects []GraphicObject, dx, dy float64) ([]string, error) {
 	if err := ctx.Err(); err != nil {
@@ -392,7 +392,7 @@ func (e *Editor) UpdateObjects(page int, objects []GraphicObject) error {
 }
 
 // TransformObjects 同页对象以页面原点等比缩放后统一平移，保持相对位置，一次撤销恢复全部
-// 入参: page 页面索引, ids 对象标识, dx、dy 位移, scale 正缩放比例
+// 入参: page 页面索引, ids 对象标识, dx 横向位移, dy 纵向位移, scale 正缩放比例
 // 返回: error 错误信息
 func (e *Editor) TransformObjects(page int, ids []string, dx, dy, scale float64) error {
 	if !finite(dx) || !finite(dy) || !finite(scale) || scale <= 0 {
@@ -477,7 +477,7 @@ func (e *Editor) DeleteObjects(page int, ids []string) error {
 }
 
 // compareEditorPosition 比较对象在页面结构中的先后顺序
-// 入参: a、b 对象位置
+// 入参: a 第一个对象的位置, b 第二个对象的位置
 // 返回: int 比较结果
 func compareEditorPosition(a, b editorObjectPosition) int {
 	if value := cmp.Compare(a.layer, b.layer); value != 0 {

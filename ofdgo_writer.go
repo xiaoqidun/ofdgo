@@ -31,6 +31,7 @@ import (
 	"time"
 )
 
+// ofdNamespace 为OFD文档的XML命名空间
 const ofdNamespace = "http://www.ofdspec.org/2016"
 
 // editorProgress 保存准备阶段的进度检查点，内存预览使用nil
@@ -1066,7 +1067,7 @@ func (x *ofdXML) meshShading(name string, extend, columns int, points []ShdPoint
 }
 
 // shadingAttrs 编码轴向和径向渐变的共同属性
-// 入参: mapType 映射方式, mapUnit 映射周期, extend 延伸方式, start、end 渐变端点
+// 入参: mapType 映射方式, mapUnit 映射周期, extend 延伸方式, start 渐变起点, end 渐变终点
 // 返回: ofdAttrs 属性集合
 func shadingAttrs(mapType string, mapUnit float64, extend, start, end string) ofdAttrs {
 	var attrs ofdAttrs

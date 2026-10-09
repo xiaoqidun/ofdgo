@@ -29,6 +29,7 @@ import (
 	"github.com/tdewolff/font"
 )
 
+// 字体来源：文件、文件系统和系统字体
 const (
 	fontSourceFile fontSourceKind = iota
 	fontSourceFS

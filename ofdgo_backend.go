@@ -23,6 +23,7 @@ import (
 	"reflect"
 )
 
+// SVG输出模式，控制资源内嵌和对象结构
 const (
 	SVGEmbedded SVGMode = iota
 	SVGExternalFonts

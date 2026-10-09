@@ -41,6 +41,7 @@ import (
 	"github.com/emmansun/gmsm/smx509"
 )
 
+// signatureMethodReplacer 移除签名算法名称中的分隔符
 var signatureMethodReplacer = strings.NewReplacer("-", "", "_", "", " ", "")
 
 // SignatureVerifyReport 签名验证报告

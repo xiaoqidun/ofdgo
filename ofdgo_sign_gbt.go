@@ -21,6 +21,7 @@ import (
 	"math/big"
 )
 
+// GB/T35275内容类型及消息摘要属性的对象标识
 const (
 	signContentData       = "1.2.156.10197.6.1.4.2.1"
 	signContentSignedData = "1.2.156.10197.6.1.4.2.2"

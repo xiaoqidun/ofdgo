@@ -164,7 +164,7 @@ func (m Matrix) YScale() float64 {
 }
 
 // geometryEqual 比较毫米坐标，使用固定绝对误差，不受绘图库全局精度影响
-// 入参: a、b 待比较的坐标
+// 入参: a 第一个坐标, b 第二个坐标
 // 返回: bool 是否在容差内相等
 func geometryEqual(a, b float64) bool {
 	return math.Abs(a-b) <= 1e-10
@@ -178,7 +178,7 @@ func axisAlignedMatrix(m Matrix) bool {
 }
 
 // matrixVector 变换位移，不包含平移分量
-// 入参: m 仿射变换矩阵, x、y 原始位移
+// 入参: m 仿射变换矩阵, x 原始横向位移, y 原始纵向位移
 // 返回: float64 变换后的X位移, float64 变换后的Y位移
 func matrixVector(m Matrix, x, y float64) (float64, float64) {
 	return m.a*x + m.c*y, m.b*x + m.d*y

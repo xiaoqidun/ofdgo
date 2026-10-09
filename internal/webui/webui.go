@@ -379,6 +379,8 @@ func (s *Session) PageText(index int) (*ofdgo.PageText, error) {
 }
 
 // cachedPageText 获取缓存索引并更新最近访问顺序
+// 入参: index 页面索引
+// 返回: *ofdgo.PageText 文字索引，未缓存时为nil
 func (s *Session) cachedPageText(index int) *ofdgo.PageText {
 	text := s.textCache[index]
 	if text != nil {
@@ -388,6 +390,7 @@ func (s *Session) cachedPageText(index int) *ofdgo.PageText {
 }
 
 // cachePageText 保留最近访问的文字索引，避免全文搜索持续占用内存
+// 入参: index 页面索引, text 文字索引
 func (s *Session) cachePageText(index int, text *ofdgo.PageText) {
 	if position := slices.Index(s.textOrder, index); position >= 0 {
 		s.textOrder = slices.Delete(s.textOrder, position, position+1)

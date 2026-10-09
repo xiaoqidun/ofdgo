@@ -1724,7 +1724,7 @@ func captureEditorSelection(page int, ids []string) (*editorClipboard, error) {
 }
 
 // pasteEditorSelection 原子粘贴正文和注解，共享字体与图片数据
-// 入参: page 目标页, clipboard 快照, dx、dy 位移
+// 入参: page 目标页, clipboard 快照, dx 横向位移, dy 纵向位移
 // 返回: []string 新画布标识, error 错误信息
 func pasteEditorSelection(page int, clipboard *editorClipboard, dx, dy float64) ([]string, error) {
 	ids, annotations, err := currentEditor.PasteSelection(page, clipboard.selection, dx, dy)
@@ -2747,7 +2747,7 @@ func pasteObjects(args []js.Value) (any, error) {
 }
 
 // copyEditorObjects 复制快照并更新预览，返回新对象标识
-// 入参: page 目标页, objects 对象快照, dx、dy 毫米位移
+// 入参: page 目标页, objects 对象快照, dx 横向位移，单位为毫米, dy 纵向位移，单位为毫米
 // 返回: any 文档信息及新选区, error 错误信息
 func copyEditorObjects(page int, objects []ofdgo.GraphicObject, dx, dy float64) (any, error) {
 	ids, err := currentEditor.CopyObjects(page, objects, dx, dy)

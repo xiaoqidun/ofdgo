@@ -19,6 +19,7 @@ import (
 	"math"
 )
 
+// 路径填充区域的交集、并集、差集和异或运算
 const (
 	GeometryIntersect GeometryOperation = iota
 	GeometryUnion

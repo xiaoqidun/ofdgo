@@ -157,7 +157,7 @@ func (e *Editor) addImagePage(data []byte, options ImagePageOptions) (int, error
 }
 
 // imagePageOrientation 将EXIF方向映射为单位图像到页面局部坐标的变换
-// 入参: orientation EXIF方向值, w、h 图片在页面上的宽高，单位为毫米
+// 入参: orientation EXIF方向值, w 页面上的图片宽度，单位为毫米, h 页面上的图片高度，单位为毫米
 // 返回: Matrix 图像坐标变换
 func imagePageOrientation(orientation int, w, h float64) Matrix {
 	switch orientation {

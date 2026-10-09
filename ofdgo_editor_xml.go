@@ -467,7 +467,7 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 }
 
 // editorXMLMergeContent 按字段合并子节点，保留未修改字段、扩展节点和注释
-// 入参: data、node 原文节点, oldXML、oldNode 修改前编码, newXML、newNode 修改后编码
+// 入参: data 原文数据, node 原文节点, oldXML 修改前数据, oldNode 修改前节点, newXML 修改后数据, newNode 修改后节点
 // 返回: []byte 子节点内容, error 错误信息
 func editorXMLMergeContent(data []byte, node *editorXML, oldXML []byte, oldNode *editorXML, newXML []byte, newNode *editorXML) ([]byte, error) {
 	if len(oldNode.children) == 0 && len(newNode.children) == 0 {

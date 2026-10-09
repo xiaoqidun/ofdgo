@@ -36,7 +36,7 @@ func (e *Editor) AddCompositeObject(page int, path ObjectPath, object GraphicObj
 
 // CopyObjectsToComposite 将页面坐标快照复制到内部范围，隔离目标继承样式并分配新标识
 // 保真快照保留原文，全部对象成功后提交一次撤销记录
-// 入参: page 页面索引, path 父路径, objects 当前文档快照或基本对象, dx、dy 页面位移
+// 入参: page 页面索引, path 父路径, objects 当前文档快照或基本对象, dx 页面横向位移, dy 页面纵向位移
 // 返回: []int 新成员序号, error 错误信息
 func (e *Editor) CopyObjectsToComposite(page int, path ObjectPath, objects []GraphicObject, dx, dy float64) ([]int, error) {
 	if !finite(dx) || !finite(dy) {

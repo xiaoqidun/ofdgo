@@ -20,6 +20,7 @@ import (
 	"strings"
 )
 
+// 几何路径指令，包括直线、曲线、椭圆弧和闭合
 const (
 	GeometryMove GeometryVerb = iota
 	GeometryLine

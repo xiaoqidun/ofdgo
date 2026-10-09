@@ -20,6 +20,7 @@ import (
 	"slices"
 )
 
+// 底纹去重的最小编码长度、候选数量及引用数量上限
 const (
 	compressionPatternMinimum = 4096
 	compressionPatternLimit   = 4096

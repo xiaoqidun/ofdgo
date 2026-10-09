@@ -35,7 +35,7 @@ type CompositeSelection struct {
 }
 
 // PasteCompositeSelection 将内部对象快照粘贴到页面顶层，保持嵌套结构、源继承外观和裁剪
-// 入参: page 目标页, selection 当前编辑器内捕获的快照, dx、dy 页面位移
+// 入参: page 目标页, selection 当前编辑器内捕获的快照, dx 页面横向位移, dy 页面纵向位移
 // 返回: []string 新对象标识, error 错误信息
 func (e *Editor) PasteCompositeSelection(page int, selection *CompositeSelection, dx, dy float64) ([]string, error) {
 	if !finite(dx) || !finite(dy) {
@@ -108,7 +108,7 @@ func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []in
 // PasteCompositeObjects 将快照粘贴至内部范围末尾，不依赖源成员当前的序号或存在性
 // 同范围沿用原容器和当前继承样式，跨范围固定对象的源外观，位移使用页面毫米
 // 目标范围的父透明度及裁剪仍作用于新成员，全部成员提交一次撤销记录
-// 入参: page 页面索引, path 父复合路径, selection 捕获的快照, dx、dy 页面位移
+// 入参: page 页面索引, path 父复合路径, selection 捕获的快照, dx 页面横向位移, dy 页面纵向位移
 // 返回: []int 新成员序号, error 错误信息
 func (e *Editor) PasteCompositeObjects(page int, path ObjectPath, selection *CompositeSelection, dx, dy float64) ([]int, error) {
 	if selection == nil || selection.editor != e {

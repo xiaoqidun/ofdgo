@@ -25,17 +25,15 @@ import (
 	"time"
 )
 
-var _ fs.FS = (*FontFS)(nil)
-
-var _ fs.ReadDirFS = (*FontFS)(nil)
-
-var _ fs.GlobFS = (*FontFS)(nil)
-
-var _ fs.File = (*fontMemFile)(nil)
-
-var _ fs.ReadDirFile = (*fontDir)(nil)
-
-var _ fs.DirEntry = (*fontDirEntry)(nil)
+// 字体文件系统及目录条目的接口检查
+var (
+	_ fs.FS          = (*FontFS)(nil)
+	_ fs.ReadDirFS   = (*FontFS)(nil)
+	_ fs.GlobFS      = (*FontFS)(nil)
+	_ fs.File        = (*fontMemFile)(nil)
+	_ fs.ReadDirFile = (*fontDir)(nil)
+	_ fs.DirEntry    = (*fontDirEntry)(nil)
+)
 
 // FontFile 内存字体文件
 type FontFile struct {

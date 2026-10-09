@@ -23,6 +23,7 @@ import (
 	_ "image/gif"
 	"math"
 
+	_ "github.com/xiaoqidun/j2kgo"
 	_ "github.com/xiaoqidun/jbig2"
 	_ "golang.org/x/image/bmp"
 	"golang.org/x/image/draw"

@@ -20,6 +20,7 @@ import (
 	"strings"
 )
 
+// 字体匹配按精确、部分和模糊匹配排列，零值表示未匹配
 const (
 	fontMatchNone = iota
 	fontMatchExact
@@ -27,6 +28,7 @@ const (
 	fontMatchFuzzy
 )
 
+// fontMatchRules 保存常用字体的名称、文件名及系统字体匹配规则
 var fontMatchRules = normalizeFontMatchRules([]fontMatchRule{
 	{
 		Keys:            []string{"小标宋", "方正小标宋", "xiaobiaosong", "fzxiaobiaosong", "fzxbs"},
@@ -103,6 +105,7 @@ var fontMatchRules = normalizeFontMatchRules([]fontMatchRule{
 	},
 })
 
+// fontNameReplacer 移除字体名称匹配时忽略的分隔符
 var fontNameReplacer = strings.NewReplacer(" ", "", "-", "", "_", "", "(", "", ")", "", "（", "", "）", "")
 
 // fontMatchRule 字体匹配规则

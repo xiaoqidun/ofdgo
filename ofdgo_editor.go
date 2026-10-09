@@ -471,6 +471,8 @@ func (e *Editor) AddImage(data []byte) (string, error) {
 }
 
 // addImage 注册图片资源，复用调用方已完成解码的像素数据
+// 入参: data 图片编码数据, config 图片配置, format 图片格式, decoded 已解码图像，可为nil
+// 返回: string 资源标识, error 格式或资源错误
 func (e *Editor) addImage(data []byte, config image.Config, format string, decoded image.Image) (string, error) {
 	if (format != "png" && format != "jpeg" && format != "jbig2") || config.Width <= 0 || config.Height <= 0 {
 		return "", fmt.Errorf("only PNG, JPEG and JBIG2 images are supported")

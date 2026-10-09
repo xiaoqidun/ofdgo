@@ -21,6 +21,7 @@ import (
 	"strings"
 )
 
+// 基本图形标识，用于创建直线、箭头、矩形和椭圆
 const (
 	ShapeLine        ShapeKind = "line"
 	ShapeArrow       ShapeKind = "arrow"
@@ -243,7 +244,7 @@ func (p PathObject) ReshapeLine(kind ShapeKind, box Box) (PathObject, error) {
 }
 
 // sameShapePath 比较基本路径的命令与数值，忽略数值格式差异
-// 入参: a、b 路径词元
+// 入参: a 第一个路径词元, b 第二个路径词元
 // 返回: bool 是否相同
 func sameShapePath(a, b []string) bool {
 	if len(a) != len(b) {

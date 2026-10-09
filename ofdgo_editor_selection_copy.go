@@ -43,7 +43,7 @@ func (e *Editor) CaptureSelection(page int, objects, annotations []string) (*Obj
 }
 
 // PasteSelection 原子粘贴正文与注解并平移，失败回滚，一次撤销恢复全部
-// 入参: page 目标页面索引, selection 当前编辑器快照, dx、dy 页面毫米位移
+// 入参: page 目标页面索引, selection 当前编辑器快照, dx 横向位移，单位为毫米, dy 纵向位移，单位为毫米
 // 返回: []string 新正文标识, []string 新注解标识, error 标识、资源或编辑错误
 func (e *Editor) PasteSelection(page int, selection *ObjectSelection, dx, dy float64) ([]string, []string, error) {
 	if selection == nil || selection.editor != e || !finite(dx) || !finite(dy) {
@@ -65,7 +65,7 @@ func (e *Editor) PasteSelection(page int, selection *ObjectSelection, dx, dy flo
 }
 
 // PasteSelectionToComposite 将正文快照粘贴至内部容器，保留源外观，拒绝嵌套注解
-// 入参: page 目标页面索引, path 父复合路径, selection 当前编辑器快照, dx、dy 页面毫米位移
+// 入参: page 目标页面索引, path 父复合路径, selection 当前编辑器快照, dx 横向位移，单位为毫米, dy 纵向位移，单位为毫米
 // 返回: []int 新成员序号, error 选区、资源或编辑错误
 func (e *Editor) PasteSelectionToComposite(page int, path ObjectPath, selection *ObjectSelection, dx, dy float64) ([]int, error) {
 	if selection == nil || selection.editor != e {

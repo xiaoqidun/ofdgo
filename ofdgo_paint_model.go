@@ -16,6 +16,7 @@ package ofdgo
 
 import "image/color"
 
+// 画刷类型，区分纯色、渐变和图案填充
 const (
 	PaintNone PaintKind = iota
 	PaintSolid

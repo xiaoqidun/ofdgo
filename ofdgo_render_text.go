@@ -275,25 +275,6 @@ func (r *Renderer) preparedMetrics(prepared *PreparedFont) (FontMetrics, error) 
 	return metrics, nil
 }
 
-// preparedOutline 按字形和字号复用只读轮廓
-// 入参: prepared 字体, metrics 度量, glyph 字形编号, size 毫米字号
-// 返回: GeometryPath 字形路径, error 能力或解析错误
-func (r *Renderer) preparedOutline(prepared *PreparedFont, metrics FontMetrics, glyph uint16, size float64) (GeometryPath, error) {
-	key := glyphOutlineKey{prepared, glyph, size}
-	if path, ok := r.glyphOutlines.get(key); ok {
-		return path, nil
-	}
-	provider, ok := metrics.(FontOutlines)
-	if !ok {
-		return nil, fmt.Errorf("font outlines: %w", ErrBackendUnavailable)
-	}
-	path, err := provider.GlyphOutline(glyph, size)
-	if err == nil {
-		r.glyphOutlines.put(key, path, len(path)*96+128)
-	}
-	return path, err
-}
-
 // preparedOutlines 批量提取缓存未命中的字形，保留原始编号顺序，不触发塑形
 // 入参: prepared 字体, metrics 度量, glyphs 字形编号, size 毫米字号
 // 返回: []GeometryPath 同序只读轮廓, error 能力或解析错误

@@ -112,7 +112,7 @@ func NewInk(points []InkPoint, width float64, pressure bool) (PathObject, error)
 }
 
 // inkCircle 使用两个半圆弧构造笔迹圆点，不扁平化圆形轮廓
-// 入参: x、y 圆心, radius 半径
+// 入参: x 圆心横坐标, y 圆心纵坐标, radius 半径
 // 返回: GeometryPath 圆形路径
 func inkCircle(x, y, radius float64) GeometryPath {
 	start := Point{X: x + radius, Y: y}

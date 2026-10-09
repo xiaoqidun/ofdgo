@@ -149,7 +149,7 @@ func (e *Editor) CompositeObjectsAt(page int, path ObjectPath, indexes []int) ([
 }
 
 // TransformCompositeObjects 在页面坐标中等比缩放并平移内部选区，只隔离被修改实例的资源
-// 入参: page 页面索引, path 父复合对象路径, indexes 成员序号, dx、dy 位移, scale 正缩放比例
+// 入参: page 页面索引, path 父复合对象路径, indexes 成员序号, dx 横向位移, dy 纵向位移, scale 正缩放比例
 // 返回: error 错误信息
 func (e *Editor) TransformCompositeObjects(page int, path ObjectPath, indexes []int, dx, dy, scale float64) error {
 	if !finite(dx) || !finite(dy) || !finite(scale) || scale <= 0 {

@@ -179,14 +179,6 @@ func readType2Private(data []byte, values []float64, font *type2Font) (cffDict, 
 	return private, nil
 }
 
-// normalizeType2Programs 展开组合字形和求值指令，普通字形保留原程序及提示
-// 无法规范化的字形保留原程序，由实际使用时的轮廓解析校验
-// 入参: data CFF字体数据
-// 返回: [][]byte 字形程序, bool 是否变更, error 错误信息
-func normalizeType2Programs(data []byte) ([][]byte, bool, error) {
-	return normalizeType2ProgramsMatrix(data, nil)
-}
-
 // normalizeType2ProgramsMatrix 规范化字形指令并按需变换轮廓与字宽
 // 入参: data CFF字体数据, matrix 设计坐标变换，nil时保留原坐标
 // 返回: [][]byte 字形程序, bool 是否变更, error 错误信息

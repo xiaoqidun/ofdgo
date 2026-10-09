@@ -26,6 +26,7 @@ import (
 	"github.com/emmansun/gmsm/sm3"
 )
 
+// SES摘要及签名算法的对象标识和ASN.1序列标签
 const (
 	signDigestSM3      = "1.2.156.10197.1.401"
 	signDigestSM3NoKey = "1.2.156.10197.1.401.1"

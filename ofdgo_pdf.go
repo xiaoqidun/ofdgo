@@ -453,14 +453,6 @@ func (p *pdfImporter) color(paint pdfgo.Paint) *FillColor {
 	return &FillColor{Value: pdfNumbers(math.Round(paint.RGB[0]*255), math.Round(paint.RGB[1]*255), math.Round(paint.RGB[2]*255)), Alpha: &alpha}
 }
 
-// pathData 将PDF路径转换为相对对象边界的OFD路径
-// 入参: path PDF路径, origin 对象边界
-// 返回: string OFD路径数据
-func (p *pdfImporter) pathData(path pdfgo.Path, origin Box) string {
-	data, _ := p.pathDataContext(context.Background(), path, origin)
-	return data
-}
-
 // pathDataContext 转换路径并在分段处理时检查取消
 // 入参: ctx 取消上下文, path PDF路径, origin 对象边界
 // 返回: string OFD路径数据, error 取消错误

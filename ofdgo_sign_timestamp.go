@@ -24,6 +24,7 @@ import (
 	"github.com/emmansun/gmsm/smx509"
 )
 
+// CMS时间戳内容、签名属性及签署证书属性的对象标识
 const (
 	signTimestampContent = "1.2.840.113549.1.9.16.1.4"
 	signTimestampAttr    = "1.2.840.113549.1.9.16.2.14"

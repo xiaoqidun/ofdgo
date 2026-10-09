@@ -33,6 +33,7 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// 与PDFGo共用输出压缩模式和有损压缩等级
 const (
 	CompressionUnchanged = pdfgo.CompressionUnchanged
 	CompressionLossless  = pdfgo.CompressionLossless
@@ -42,6 +43,7 @@ const (
 	CompressionStrong    = pdfgo.CompressionStrong
 )
 
+// outputOptimizationBufferLimit 限制压缩时的单个输出缓冲，单位为字节
 const outputOptimizationBufferLimit = 64 << 20
 
 // CompressionMode 选择默认、无损或有损输出策略

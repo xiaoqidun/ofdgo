@@ -21,6 +21,7 @@ import (
 	"github.com/tdewolff/font"
 )
 
+// ptPerMM 为毫米转换为排版点的比例
 const ptPerMM = 72.0 / 25.4
 
 // renderText 渲染文本

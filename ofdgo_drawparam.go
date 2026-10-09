@@ -14,7 +14,10 @@
 
 package ofdgo
 
+// defaultPathLineWidth 为默认描边宽度，单位为毫米
 const defaultPathLineWidth = 0.353
+
+// defaultMiterLimit 为默认尖角限制
 const defaultMiterLimit = 3.528
 
 // mergeGraphicObjectAlpha 合并图形对象透明度

@@ -634,13 +634,6 @@ func pdfCompositeKnockout(target *pdfCompositePixel, initial, source pdfComposit
 	return nil
 }
 
-// pdfCompositeGroup 移除组初始背景贡献后，将组结果合成到父空间
-// 入参: ctx 取消上下文, pixels 父组输出, initial 初始背景, result 组结果, space 组空间, parent 父空间, opacity 组不透明度, mask 蒙版, mode 混合模式, intent 渲染意图, conversion 设备转换函数
-// 返回: error 颜色或混合错误
-func pdfCompositeGroup(ctx context.Context, pixels, initial, result []pdfCompositePixel, space, parent *pdfgo.ColorSpace, opacity float64, mask []float64, mode, intent pdfgo.Name, conversion pdfgo.ColorConversion) error {
-	return pdfCompositeGroupRegion(ctx, pixels, initial, result, max(1, len(pixels)), image.Rect(0, 0, len(pixels), 1), space, parent, opacity, mask, mode, intent, conversion)
-}
-
 // pdfCompositeGroupRegion 在组覆盖区域合成像素，保留原栅格及形状贡献
 // 入参: ctx 取消上下文, pixels 父组输出, initial 初始背景, result 组结果, stride 行跨度, region 覆盖区域, space 组空间, parent 父空间, opacity 组不透明度, mask 蒙版, mode 混合模式, intent 渲染意图, conversion 设备转换函数
 // 返回: error 缓冲、区域、颜色或混合错误

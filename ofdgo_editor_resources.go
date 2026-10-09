@@ -27,6 +27,7 @@ import (
 	"strings"
 )
 
+// 资源引用类型，区分无引用、标识引用和文件引用
 const (
 	editorReferenceNone = iota
 	editorReferenceID
@@ -40,17 +41,9 @@ type editorResourceRefs struct {
 	fonts map[string]*editorFontUsage
 }
 
-// compactSourceResources 在保存副本中清理无引用字体、图片和已删除附件，并裁剪可完整确认用字的原有字体
-// 按GB/T33190-2016附录A检查标识和路径引用，包括模板、注释、底纹、裁剪、版本和其他文档
-// 全包检查保留孤立XML中的引用；未知命名空间、扩展数据或无法解析的XML使本次清理跳过
-// 多文档包保留原资源，避免独立文档的同号资源和共享文件被误删或裁剪
-// 入参: parts 已修改和新增的包内条目, progress 保存进度回调
-// 返回: map[string]bool 可移除的二进制条目, error 读取错误
-func (e *Editor) compactSourceResources(parts map[string][]byte, progress editorProgress) (map[string]bool, error) {
-	return e.compactSourceReferences(parts, progress, nil)
-}
-
 // compactSourceReferences 合并自产页面的已知引用，其他条目仍完整扫描
+// 按GB/T33190-2016附录A检查标识和路径引用，保留孤立XML中的引用
+// 多文档、未知扩展或无法解析的XML不清理资源，避免误删共享或无法确认用途的条目
 // 入参: parts 输出条目, progress 保存进度回调, generated 自产页面及引用
 // 返回: map[string]bool 可移除条目, error 读取或取消错误
 func (e *Editor) compactSourceReferences(parts map[string][]byte, progress editorProgress, generated map[string]editorGeneratedReferences) (map[string]bool, error) {

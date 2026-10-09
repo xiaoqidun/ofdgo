@@ -14,6 +14,7 @@
 
 package ofdgo
 
+// 场景遍历的绘制、分组及跳过指令
 const (
 	sceneObject sceneCommandKind = iota
 	sceneStamp

@@ -34,7 +34,7 @@ func (e *Editor) DeleteCompositeObjects(page int, path ObjectPath, indexes []int
 }
 
 // CopyCompositeObjects 在原容器末尾复制选区并按页面毫米平移，保留原文并重映射副本内部标识
-// 入参: page 页面索引, path 父复合路径, indexes 同一容器的成员序号, dx、dy 页面位移
+// 入参: page 页面索引, path 父复合路径, indexes 同一容器的成员序号, dx 页面横向位移, dy 页面纵向位移
 // 返回: []int 按绘制顺序排列的副本序号, error 错误信息
 func (e *Editor) CopyCompositeObjects(page int, path ObjectPath, indexes []int, dx, dy float64) ([]int, error) {
 	if !finite(dx) || !finite(dy) {
@@ -224,7 +224,7 @@ func (n *editorCompositeNode) siblings() []*editorCompositeNode {
 }
 
 // copyCompositeNodes 复制成员原文并统一重映射标识，保持副本之间的引用
-// 入参: renderer 渲染器, nodes 快照, dx、dy 页面位移
+// 入参: renderer 渲染器, nodes 快照, dx 页面横向位移, dy 页面纵向位移
 // 返回: []byte 副本XML, map[string]editorCompositeState 会话信息, error 错误信息
 func (e *Editor) copyCompositeNodes(renderer *Renderer, nodes []*editorCompositeNode, dx, dy float64) ([]byte, map[string]editorCompositeState, error) {
 	ids := make(map[string]string)

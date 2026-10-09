@@ -70,7 +70,7 @@ func (e *Editor) CaptureAnnotations(page int, ids []string) (*AnnotationSelectio
 
 // PasteAnnotations 将注解快照粘贴到指定页并平移，保留动作目标和原有外观
 // 全部标识重新分配，页级资源提升为文档资源，一次操作计入一条撤销记录
-// 入参: page 目标页面索引, selection 当前编辑器快照, dx、dy 页面毫米位移
+// 入参: page 目标页面索引, selection 当前编辑器快照, dx 横向位移，单位为毫米, dy 纵向位移，单位为毫米
 // 返回: []string 新注解标识, error 错误信息
 func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, dy float64) ([]string, error) {
 	if selection == nil || selection.editor != e || !finite(dx) || !finite(dy) {

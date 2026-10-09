@@ -323,11 +323,15 @@ func type1HexEncoded(data []byte) bool {
 }
 
 // type1HexDigit 判断字节是否为十六进制数字
+// 入参: value 待检查的字节
+// 返回: bool 是否为十六进制数字
 func type1HexDigit(value byte) bool {
 	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
 }
 
 // type1Space 判断PostScript空白字节
+// 入参: value 待检查的字节
+// 返回: bool 是否为空白字节
 func type1Space(value byte) bool {
 	return value == ' ' || value == '\t' || value == '\r' || value == '\n' || value == '\f' || value == 0
 }
@@ -413,6 +417,8 @@ func (s *type1Scanner) binary(length int) ([]byte, error) {
 }
 
 // type1BinaryStart 判断Type1二进制数据起始操作符
+// 入参: token PostScript词项
+// 返回: bool 是否为二进制数据起始操作符
 func type1BinaryStart(token string) bool {
 	return token == "RD" || token == "-|"
 }
