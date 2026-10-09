@@ -46,10 +46,9 @@ type pdfNavigation struct {
 
 // pdfLink PDF链接
 type pdfLink struct {
-	URI    string
-	Rect   canvas.Rect
-	Region *pdfgo.LinkRegion
-	Target *pdfTarget
+	Rect    canvas.Rect
+	Region  *pdfgo.LinkRegion
+	Actions []pdfNavigationAction
 }
 
 // pdfTarget 保存输出页索引及默认用户空间中的跳转参数
@@ -62,11 +61,11 @@ type pdfTarget struct {
 type pdfOutline struct {
 	Name    string
 	Level   int
-	Actions []pdfOutlineAction
+	Actions []pdfNavigationAction
 }
 
-// pdfOutlineAction 保存目录的导航动作，输出时关联实际页面引用
-type pdfOutlineAction struct {
+// pdfNavigationAction 保存链接或目录的导航动作，输出时关联实际页面引用
+type pdfNavigationAction struct {
 	URI    string
 	Target *pdfTarget
 }
@@ -154,37 +153,8 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentP
 			sources = append(sources, renderer.annotationActionSources(renderer.Reader.Annots[page.Content.ID])...)
 		}
 		for _, source := range sources {
-			for _, action := range source.Actions {
-				if action.Event != "CLICK" {
-					continue
-				}
-				box, outline, err := renderer.actionLinkRegion(source, action)
-				if err != nil {
-					return nil, err
-				}
-				if box.W <= 0 || box.H <= 0 {
-					continue
-				}
-				rect := pdfSourceRect(box, page.Box.H)
-				count := len(navigation.Link[i])
-				if err := navigation.addAction(i, rect, action, bookmarks, pageIndex, pages); err != nil {
-					return nil, err
-				}
-				if len(navigation.Link[i]) == count || outline == "" {
-					continue
-				}
-				region, err := pdfActionRegion(renderer.outputContext(), outline, page.Box.H)
-				if err != nil {
-					return nil, err
-				}
-				if region != nil && len(region.Quads) == 0 {
-					navigation.Link[i] = navigation.Link[i][:count]
-					continue
-				}
-				if region != nil {
-					navigation.Link[i][count].Region = region
-					navigation.exactLinks = true
-				}
+			if err := navigation.addActions(renderer, i, source, bookmarks, pageIndex, pages); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -196,31 +166,29 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentP
 	return navigation, nil
 }
 
-// addAction 添加PDF动作
-// 入参: page 页面索引, rect 动作区域, action 动作, bookmarks 书签, pageIndex 页面索引表, pages 页面数据
-// 返回: error 目标参数错误
-func (n *pdfNavigation) addAction(page int, rect canvas.Rect, action Action, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) error {
+// pdfNavigationTarget 转换导航动作，选页未包含的目标不写入
+// 入参: action 动作, bookmarks 书签, pageIndex 页面索引表, pages 页面数据
+// 返回: *pdfNavigationAction 导航动作，nil表示无输出动作, error 目标参数错误
+func pdfNavigationTarget(action Action, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) (*pdfNavigationAction, error) {
 	if action.Goto != nil {
 		dest := gotoDest(action.Goto, bookmarks)
 		if dest == nil {
-			return nil
+			return nil, nil
 		}
 		target, ok := pageIndex[dest.PageID]
 		if !ok {
-			return nil
+			return nil, nil
 		}
 		destination, err := pdfDestination(*dest, pages[target].Box.H)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		n.Link[page] = append(n.Link[page], pdfLink{Rect: rect, Target: &pdfTarget{Page: target, Destination: destination}})
-		n.exactLinks = true
-		return nil
+		return &pdfNavigationAction{Target: &pdfTarget{Page: target, Destination: destination}}, nil
 	}
 	if action.URI != nil && action.URI.URI != "" {
-		n.Link[page] = append(n.Link[page], pdfLink{URI: resolveActionURI(*action.URI), Rect: rect})
+		return &pdfNavigationAction{URI: resolveActionURI(*action.URI)}, nil
 	}
-	return nil
+	return nil, nil
 }
 
 // addOutlines 保留目录层级及节点自身的导航动作，选页时移除无保留子项的失效跳转节点
@@ -231,25 +199,15 @@ func (n *pdfNavigation) addOutlines(outlines []OutlineElem, level int, bookmarks
 		entry := pdfOutline{Name: outline.Title, Level: level}
 		onlyMissingTargets := len(outline.Actions) != 0
 		for _, action := range outline.Actions {
-			if action.Goto != nil {
-				dest := gotoDest(action.Goto, bookmarks)
-				if dest == nil {
-					continue
-				}
-				page, ok := pageIndex[dest.PageID]
-				if !ok {
-					continue
-				}
-				destination, err := pdfDestination(*dest, pages[page].Box.H)
-				if err != nil {
-					return err
-				}
-				entry.Actions = append(entry.Actions, pdfOutlineAction{Target: &pdfTarget{Page: page, Destination: destination}})
-			} else {
+			if action.Goto == nil {
 				onlyMissingTargets = false
-				if action.URI != nil && action.URI.URI != "" {
-					entry.Actions = append(entry.Actions, pdfOutlineAction{URI: resolveActionURI(*action.URI)})
-				}
+			}
+			value, err := pdfNavigationTarget(action, bookmarks, pageIndex, pages)
+			if err != nil {
+				return err
+			}
+			if value != nil {
+				entry.Actions = append(entry.Actions, *value)
 			}
 		}
 		index := len(n.Outline)
@@ -269,7 +227,7 @@ func (n *pdfNavigation) addOutlines(outlines []OutlineElem, level int, bookmarks
 // 入参: renderer PDF渲染器, page 页面索引
 func (n *pdfNavigation) apply(renderer *pdf.PDF, page int) {
 	for _, link := range n.Link[page] {
-		renderer.AddLink(link.URI, link.Rect)
+		renderer.AddLink("", link.Rect)
 	}
 	if page == 0 {
 		for index, outline := range n.Outline {
@@ -283,15 +241,19 @@ func (n *pdfNavigation) apply(renderer *pdf.PDF, page int) {
 // 返回: error 目录结构或取消错误
 func (n *pdfNavigation) destinations(ctx context.Context, reader *pdfgo.Reader, pages []pdfgo.Reference, options *pdfgo.RewriteOptions) error {
 	options.LinkDestinations = make(map[pdfgo.AnnotationLocation]pdfgo.Destination)
+	options.LinkActions = make(map[pdfgo.AnnotationLocation][]pdfgo.NavigationAction)
 	for page, links := range n.Link {
 		for index, link := range links {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if link.Target != nil {
-				dest := link.Target.Destination
-				dest.Page = pages[link.Target.Page]
+			if len(link.Actions) == 1 && link.Actions[0].Target != nil {
+				target := link.Actions[0].Target
+				dest := target.Destination
+				dest.Page = pages[target.Page]
 				options.LinkDestinations[pdfgo.AnnotationLocation{Page: pages[page], Index: index}] = dest
+			} else {
+				options.LinkActions[pdfgo.AnnotationLocation{Page: pages[page], Index: index}] = pdfNavigationValues(link.Actions, pages)
 			}
 		}
 	}
@@ -313,17 +275,7 @@ func (n *pdfNavigation) destinations(ctx context.Context, reader *pdfgo.Reader, 
 			dest.Page = pages[target.Page]
 			options.OutlineDestinations[item.Reference] = dest
 		} else {
-			converted := make([]pdfgo.NavigationAction, 0, len(actions))
-			for _, action := range actions {
-				value := pdfgo.NavigationAction{URI: action.URI}
-				if action.Target != nil {
-					dest := action.Target.Destination
-					dest.Page = pages[action.Target.Page]
-					value.Destination = &dest
-				}
-				converted = append(converted, value)
-			}
-			options.OutlineActions[item.Reference] = converted
+			options.OutlineActions[item.Reference] = pdfNavigationValues(actions, pages)
 		}
 		options.OutlineTitles[item.Reference] = n.Outline[count].Name
 		count++
