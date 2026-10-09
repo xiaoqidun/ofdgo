@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -93,7 +94,7 @@ func (c *fontSourceCache) child() *fontSourceCache {
 	return cache
 }
 
-// readFontSource 读取并拆出独立字体，保留集合中的名称和样式选择
+// readFontSource 读取独立字体并规范符号映射，保留集合中的名称和样式选择
 // 入参: source 字体来源, definition 字体定义
 // 返回: []byte 字体数据, error 读取或集合错误
 func (r *Renderer) readFontSource(source fontSource, definition *Font) ([]byte, error) {
@@ -126,6 +127,9 @@ func (r *Renderer) readFontSource(source fontSource, definition *Font) ([]byte, 
 	}
 	if err == nil && bytes.HasPrefix(data, []byte("ttcf")) {
 		data, err = extractCollectionFont(data, key.face)
+	}
+	if err == nil {
+		data, _, err = symbolFontProgram(context.Background(), data, "")
 	}
 	r.fontSourcesCache.data[key] = fontSourceData{data, err}
 	return data, err
