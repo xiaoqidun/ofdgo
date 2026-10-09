@@ -849,6 +849,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.add("CTM", obj.CTM)
 		attrs.add("ResourceID", obj.ResourceID)
 		attrs.add("ImageMask", obj.ImageMask)
+		attrs.add("Substitution", obj.Substitution)
 		attrs.flag("Visible", obj.Visible)
 		attrs.alpha(obj.Alpha)
 		actions = obj.Actions

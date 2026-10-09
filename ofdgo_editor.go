@@ -847,6 +847,11 @@ func (v *editorValidation) prepareObject(id string, object GraphicObject) (Graph
 		if _, err := e.editorImage(obj.ResourceID); err != nil {
 			return GraphicObject{}, err
 		}
+		if obj.Substitution != "" {
+			if _, err := e.editorImage(obj.Substitution); err != nil {
+				return GraphicObject{}, err
+			}
+		}
 		if obj.ImageMask != "" {
 			if _, err := e.editorImage(obj.ImageMask); err != nil {
 				return GraphicObject{}, err

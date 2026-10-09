@@ -462,6 +462,7 @@ func collectObjectReferences(object GraphicObject, used map[string]bool) {
 		actions = object.PathObject.Actions
 	case "ImageObject":
 		used[object.ImageObject.ResourceID], used[object.ImageObject.ImageMask] = true, true
+		used[object.ImageObject.Substitution] = true
 		if object.ImageObject.Border != nil {
 			collectPaintReferences((*FillColor)(object.ImageObject.Border.BorderColor), used)
 		}

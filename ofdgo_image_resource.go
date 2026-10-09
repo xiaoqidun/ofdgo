@@ -94,6 +94,38 @@ func (r *Renderer) ImageResource(id string) (image.Image, error) {
 	return r.cachedImageResource(path)
 }
 
+// imageObjectResource 读取主图，无法读取或解码时使用对象声明的替换图
+// 入参: object 图像对象
+// 返回: image.Image 图片资源, error 读取或解码错误
+func (r *Renderer) imageObjectResource(object ImageObject) (image.Image, error) {
+	read := func(id string) (image.Image, error) {
+		img, err := r.ImageResource(id)
+		if err == nil && (r.decodeImages || object.Substitution != "") {
+			pixels, decodeErr := imagePixelData(img)
+			err = decodeErr
+			if r.decodeImages {
+				img = pixels
+			}
+		}
+		return img, err
+	}
+	img, err := read(object.ResourceID)
+	if err == nil || object.Substitution == "" || object.Substitution == object.ResourceID {
+		return img, err
+	}
+	if r.pageContext != nil && r.pageContext.Err() != nil {
+		return nil, r.pageContext.Err()
+	}
+	if r.OutputContext != nil && r.OutputContext.Err() != nil {
+		return nil, r.OutputContext.Err()
+	}
+	img, substituteErr := read(object.Substitution)
+	if substituteErr != nil {
+		return nil, fmt.Errorf("image resource %q: %w; substitution %q: %w", object.ResourceID, err, object.Substitution, substituteErr)
+	}
+	return img, nil
+}
+
 // newEncodedImage 接管编码数据并读取头信息
 // 入参: data 原始编码
 // 返回: *EncodedImage 惰性图片, error 头信息或格式错误

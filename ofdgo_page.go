@@ -240,16 +240,17 @@ type ShdColor struct {
 
 // ImageObject 图片对象
 type ImageObject struct {
-	ID         string       `xml:"ID,attr"`
-	Boundary   string       `xml:"Boundary,attr"`
-	ResourceID string       `xml:"ResourceID,attr"`
-	ImageMask  string       `xml:"ImageMask,attr"`
-	CTM        string       `xml:"CTM,attr"`
-	Alpha      *int         `xml:"Alpha,attr"`
-	Visible    *bool        `xml:"Visible,attr"`
-	Border     *ImageBorder `xml:"Border"`
-	Clips      *Clips       `xml:"Clips"`
-	Actions    []Action     `xml:"Actions>Action"`
+	ID           string       `xml:"ID,attr"`
+	Boundary     string       `xml:"Boundary,attr"`
+	ResourceID   string       `xml:"ResourceID,attr"`
+	Substitution string       `xml:"Substitution,attr"`
+	ImageMask    string       `xml:"ImageMask,attr"`
+	CTM          string       `xml:"CTM,attr"`
+	Alpha        *int         `xml:"Alpha,attr"`
+	Visible      *bool        `xml:"Visible,attr"`
+	Border       *ImageBorder `xml:"Border"`
+	Clips        *Clips       `xml:"Clips"`
+	Actions      []Action     `xml:"Actions>Action"`
 }
 
 // ImageBorder 图像边框

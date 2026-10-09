@@ -59,7 +59,7 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 			return err
 		}
 	} else {
-		img, err := c.renderer.ImageResource(object.ResourceID)
+		img, err := c.renderer.imageObjectResource(object)
 		if err != nil {
 			return err
 		}

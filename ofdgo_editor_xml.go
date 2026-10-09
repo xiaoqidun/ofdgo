@@ -307,7 +307,7 @@ func editorXMLSupported(node *editorXML) bool {
 			children += " Clips"
 		}
 	case "ImageObject":
-		allowed, children = "ID Boundary CTM ResourceID ImageMask Visible Alpha", "Clips"
+		allowed, children = "ID Boundary CTM ResourceID Substitution ImageMask Visible Alpha", "Clips"
 	case "TextCode":
 		allowed = "X Y DeltaX DeltaY"
 	case "FillColor", "StrokeColor":
@@ -344,7 +344,7 @@ func editorXMLTransformable(node *editorXML) bool {
 	case "PathObject":
 		attrs = "ID Boundary CTM DrawParam LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha"
 	case "ImageObject":
-		attrs = "ID Boundary CTM ResourceID ImageMask Visible Alpha"
+		attrs = "ID Boundary CTM ResourceID Substitution ImageMask Visible Alpha"
 	case "CompositeObject", "CompositeGraphicUnit":
 		attrs = "ID Boundary CTM ResourceID DrawParam Visible Alpha"
 	default:
