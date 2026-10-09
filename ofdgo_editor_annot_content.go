@@ -176,7 +176,7 @@ func (e *Editor) annotationXML(index int, id string) ([]byte, error) {
 	}
 	var result []byte
 	for _, ref := range root.children {
-		if !packageOFDNode(ref, "Page") || ref.attr("PageID") != e.pages[index].ID || ref.child("FileLoc") == nil {
+		if !ref.matchesOFD("Page") || ref.attr("PageID") != e.pages[index].ID || ref.child("FileLoc") == nil {
 			continue
 		}
 		file, err := editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, ref.child("FileLoc"))))
@@ -192,7 +192,7 @@ func (e *Editor) annotationXML(index int, id string) ([]byte, error) {
 			return nil, err
 		}
 		for _, node := range page.children {
-			if !packageOFDNode(node, "Annot") || node.attr("ID") != id {
+			if !node.matchesOFD("Annot") || node.attr("ID") != id {
 				continue
 			}
 			if result != nil {
@@ -248,7 +248,7 @@ func (e *Editor) appendAnnotations(index int, annotations []byte, generated bool
 		return err
 	}
 	for _, item := range root.children {
-		if packageOFDNode(item, "Page") && item.attr("PageID") == e.pages[index].ID {
+		if item.matchesOFD("Page") && item.attr("PageID") == e.pages[index].ID {
 			ref = item
 			loc := item.child("FileLoc")
 			if loc == nil {
@@ -285,7 +285,7 @@ func (e *Editor) appendAnnotations(index int, annotations []byte, generated bool
 	file := existing
 	if file != "" {
 		for _, other := range root.children {
-			if other == ref || !packageOFDNode(other, "Page") || other.child("FileLoc") == nil {
+			if other == ref || !other.matchesOFD("Page") || other.child("FileLoc") == nil {
 				continue
 			}
 			shared, err := editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, other.child("FileLoc"))))

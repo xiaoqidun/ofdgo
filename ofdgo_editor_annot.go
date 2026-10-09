@@ -181,7 +181,7 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 	found := make(map[string]bool, len(ids))
 	remaining := 0
 	for _, ref := range root.children {
-		if !packageOFDNode(ref, "Page") {
+		if !ref.matchesOFD("Page") {
 			continue
 		}
 		remaining++
@@ -207,7 +207,7 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 		var changes []editorXMLPatch
 		count := 0
 		for _, node := range page.children {
-			if !packageOFDNode(node, "Annot") {
+			if !node.matchesOFD("Annot") {
 				continue
 			}
 			count++
@@ -235,7 +235,7 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 		}
 		sharedFile := false
 		for _, other := range root.children {
-			if other == ref || !packageOFDNode(other, "Page") || other.child("FileLoc") == nil {
+			if other == ref || !other.matchesOFD("Page") || other.child("FileLoc") == nil {
 				continue
 			}
 			shared, err := editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, other.child("FileLoc"))))

@@ -217,7 +217,7 @@ func (e *Editor) editAttachment(id string, change func([]byte, *editorXML, map[s
 	var found *editorXML
 	if root != nil {
 		for _, child := range root.children {
-			if packageOFDNode(child, "Attachment") && child.attr("ID") == id {
+			if child.matchesOFD("Attachment") && child.attr("ID") == id {
 				if found != nil {
 					return fmt.Errorf("duplicate attachment ID: %s", id)
 				}

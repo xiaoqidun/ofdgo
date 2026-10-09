@@ -92,7 +92,7 @@ func (n *editorXML) child(name string) *editorXML {
 // 返回: *editorXML 节点，不存在时为nil
 func (n *editorXML) childAt(name string, index int) *editorXML {
 	for _, child := range n.children {
-		if child.name.Local == name && (child.name.Space == n.name.Space || child.name.Space == ofdNamespace2016 || child.name.Space == "") {
+		if child.matchesOFD(name) {
 			if index == 0 {
 				return child
 			}
@@ -512,7 +512,7 @@ func editorXMLMergeNamespace(data []byte, node *editorXML, oldXML, newXML []byte
 		matching := len(node.children) > 0 && len(node.children) == len(oldNode.children) && len(node.children) == len(newNode.children)
 		if matching {
 			for i, child := range node.children {
-				if !packageOFDNode(child, oldNode.children[i].name.Local) || child.name.Local != newNode.children[i].name.Local {
+				if !child.matchesOFD(oldNode.children[i].name.Local) || child.name.Local != newNode.children[i].name.Local {
 					matching = false
 					break
 				}
@@ -567,7 +567,7 @@ func editorXMLMergeContent(data []byte, node *editorXML, oldXML []byte, oldNode 
 	groups := func(root *editorXML, encoded bool) map[string][]*editorXML {
 		result := make(map[string][]*editorXML)
 		for _, child := range root.children {
-			if encoded || packageOFDNode(child, child.name.Local) {
+			if encoded || child.matchesOFD(child.name.Local) {
 				result[child.name.Local] = append(result[child.name.Local], child)
 			}
 		}

@@ -347,7 +347,7 @@ func (n *editorCompositeNode) preserveActionRegions(matrix Matrix) (bool, error)
 	}
 	var targets []*editorXML
 	for _, action := range actions.children {
-		if action.name.Local != "Action" || action.name.Space != "" && action.name.Space != actions.name.Space && action.name.Space != ofdNamespace2016 {
+		if !action.matchesOFD("Action") {
 			continue
 		}
 		if action.attr("Event") == "CLICK" && action.child("Region") == nil {

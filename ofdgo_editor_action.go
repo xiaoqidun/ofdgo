@@ -68,7 +68,7 @@ func (e *Editor) SetDocumentActions(actions []Action) error {
 		context = node
 	} else {
 		for _, child := range root.children {
-			if packageOFDNode(child, child.name.Local) && slices.Contains([]string{"VPreferences", "Bookmarks", "Annotations", "CustomTags", "Attachments", "Extensions"}, child.name.Local) {
+			if child.matchesOFD(child.name.Local) && slices.Contains([]string{"VPreferences", "Bookmarks", "Annotations", "CustomTags", "Attachments", "Extensions"}, child.name.Local) {
 				patch.start, patch.end = child.start, child.start
 				break
 			}

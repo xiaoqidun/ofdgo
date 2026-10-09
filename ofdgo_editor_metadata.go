@@ -123,7 +123,7 @@ func editorCustomDatas(data []byte, info *editorXML, values *CustomDatas) ([]byt
 	var nodes []*editorXML
 	if container != nil {
 		for _, node := range container.children {
-			if node.name.Local == "CustomData" && (node.name.Space == ofdNamespace2016 || node.name.Space == container.name.Space) {
+			if node.matchesOFD("CustomData") {
 				nodes = append(nodes, node)
 				byName[node.attr("Name")] = append(byName[node.attr("Name")], node)
 			}

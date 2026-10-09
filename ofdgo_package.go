@@ -38,13 +38,6 @@ func packagePagePath(directory, id string) string {
 	return path.Join(directory, "Pages", "Page_"+id, "Content.xml")
 }
 
-// packageOFDNode 识别包索引中的OFD节点，兼容与父节点同命名空间的已知字段
-// 入参: node XML节点, name 节点名称
-// 返回: bool 是否为OFD节点
-func packageOFDNode(node *editorXML, name string) bool {
-	return node.name.Local == name && (classifyOFDNamespace(node.name.Space) != ofdXMLUnknown || node.parent != nil && node.name.Space == node.parent.name.Space)
-}
-
 // packageName 为新增条目分配文档内路径，不覆盖原文件或本次资源
 // 入参: relative 文档相对路径
 // 返回: string 未占用路径
@@ -125,7 +118,7 @@ func mergePackageResources(reader *Reader, parts map[string][]byte, doc *Documen
 		var content []byte
 		for _, node := range group.children {
 			if target != nil && slices.ContainsFunc(target.children, func(old *editorXML) bool {
-				return packageOFDNode(old, node.name.Local) && old.attr("ID") == node.attr("ID")
+				return old.matchesOFD(node.name.Local) && old.attr("ID") == node.attr("ID")
 			}) {
 				continue
 			}
@@ -153,7 +146,7 @@ func mergePackageResources(reader *Reader, parts map[string][]byte, doc *Documen
 		}
 		position := root.close
 		for _, child := range root.children {
-			if packageOFDNode(child, child.name.Local) && slices.Index(order, child.name.Local) > slices.Index(order, group.name.Local) {
+			if child.matchesOFD(child.name.Local) && slices.Index(order, child.name.Local) > slices.Index(order, group.name.Local) {
 				position = child.start
 				break
 			}

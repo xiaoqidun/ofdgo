@@ -20,6 +20,13 @@ import (
 	"strconv"
 )
 
+// matchesOFD 匹配OFD节点，兼容与父节点一致的未知命名空间
+// 入参: name 节点名称
+// 返回: bool 是否匹配
+func (n *editorXML) matchesOFD(name string) bool {
+	return n.name.Local == name && (classifyOFDNamespace(n.name.Space) != ofdXMLUnknown || n.parent != nil && n.name.Space == n.parent.name.Space)
+}
+
 // textXML 按所在节点的命名空间编码文本节点
 // 入参: name 节点名称, value 文本
 // 返回: []byte XML片段

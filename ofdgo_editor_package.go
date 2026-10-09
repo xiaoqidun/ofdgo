@@ -178,7 +178,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 			}
 			originals := make(map[string]*editorXML, len(pages.children))
 			for _, child := range pages.children {
-				if packageOFDNode(child, "Page") {
+				if child.matchesOFD("Page") {
 					id := child.attr("ID")
 					if originals[id] == nil {
 						originals[id] = child
@@ -200,7 +200,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 			}
 			position := 0
 			for _, child := range pages.children {
-				if !packageOFDNode(child, "Page") {
+				if !child.matchesOFD("Page") {
 					continue
 				}
 				var entry []byte

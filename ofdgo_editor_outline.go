@@ -119,10 +119,10 @@ func (e *Editor) UpdateOutline(path []int, title string, page int) error {
 		if actions != nil {
 			var removals []editorXMLPatch
 			for _, action := range actions.children {
-				if action.name.Space != actions.name.Space && action.name.Space != ofdNamespace2016 && action.name.Space != "" {
+				if !action.matchesOFD("Action") {
 					continue
 				}
-				if action.name.Local == "Action" && action.child("Goto") != nil {
+				if action.child("Goto") != nil {
 					removals = append(removals, editorXMLPatch{action.start - actions.open, action.end - actions.open, nil})
 				}
 			}
@@ -315,7 +315,7 @@ func (e *Editor) outlineAction(page int) []byte {
 func editorOutlineChildren(node *editorXML) []*editorXML {
 	var children []*editorXML
 	for _, child := range node.children {
-		if child.name.Local == "OutlineElem" && (child.name.Space == node.name.Space || child.name.Space == ofdNamespace2016 || child.name.Space == "") {
+		if child.matchesOFD("OutlineElem") {
 			children = append(children, child)
 		}
 	}
@@ -425,7 +425,7 @@ func (e *Editor) withOutlines(data []byte) ([]byte, error) {
 	walk = func(node *editorXML) {
 		if actions := node.child("Actions"); actions != nil {
 			for _, action := range actions.children {
-				if action.name.Local != "Action" || action.name.Space != actions.name.Space && action.name.Space != ofdNamespace2016 && action.name.Space != "" {
+				if !action.matchesOFD("Action") {
 					continue
 				}
 				if target := action.child("Goto"); target != nil {

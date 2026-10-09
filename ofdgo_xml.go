@@ -28,7 +28,7 @@ const (
 	ofdXML2016
 )
 
-// ofdXMLNamespace 标识XML节点采用的OFD命名空间
+// ofdXMLNamespace 标识XML命名空间，不代表文档版本或功能支持范围
 type ofdXMLNamespace uint8
 
 // classifyOFDNamespace 识别OFD命名空间，未声明与未知版本分别处理
