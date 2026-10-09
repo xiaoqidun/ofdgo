@@ -224,7 +224,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			spans = textGlyphSpans(runes, glyphTransforms, codePos)
 		}
 		positioner := NewTextPositioner(tc, obj.ReadDirection)
-		dxs, dys, xs, ys := positioner.dxs, positioner.dys, positioner.xs, positioner.ys
+		xs, ys := positioner.xs, positioner.ys
 		drawAsPath := embeddedFont || face.FauxBold > 0 || textCodePositioned(tc, xs, ys) || fillClip != nil || shadedFill || fillPattern != nil || shouldStroke
 		for i, glyph := range glyphs {
 			str := glyph.Text
@@ -260,19 +260,12 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				canvasX, canvasY = tx+bx, pageH-(ty+by)
 			}
 			textWidth := glyphWidth * hScale
-			advanceLimit := 0.0
-			if obj.CharDirection == 0 {
-				advanceLimit = textGlyphAdvanceLimit(dxs, dys, xs, i, len(glyphs), cx)
-			}
 			if textRun != nil {
 				if i < len(spans) {
 					if glyphPath == nil {
 						glyphPath, _ = r.cachedTextGlyphPath(face, glyph)
 					}
 					scaleX := hScale
-					if drawAsGlyphPath && advanceLimit > 0 && glyphWidth*scaleX > advanceLimit {
-						scaleX = advanceLimit / glyphWidth
-					}
 					m := canvas.Identity.Translate(canvasX, canvasY)
 					if useTextMatrix {
 						m = m.Mul(glyphMatrix)
@@ -294,9 +287,6 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			}
 			if shouldStroke {
 				scaleX := hScale
-				if advanceLimit > 0 && glyphWidth*scaleX > advanceLimit {
-					scaleX = advanceLimit / glyphWidth
-				}
 				transform := canvas.Identity.Translate(canvasX, canvasY)
 				if useTextMatrix {
 					transform = transform.Mul(glyphMatrix)
@@ -359,9 +349,6 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				}
 				if glyphClip != nil || shadedFill || fillPattern != nil {
 					scaleX := hScale
-					if advanceLimit > 0 && glyphWidth*scaleX > advanceLimit {
-						scaleX = advanceLimit / glyphWidth
-					}
 					textWidth = glyphWidth * scaleX
 					textTransform := canvas.Identity.Translate(canvasX, canvasY)
 					if useTextMatrix {
@@ -394,9 +381,6 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				drawGlyph := func(x, y float64) {
 					if drawAsGlyphPath {
 						scaleX := hScale
-						if advanceLimit > 0 && glyphWidth*scaleX > advanceLimit {
-							scaleX = advanceLimit / glyphWidth
-						}
 						textWidth = glyphWidth * scaleX
 						if face.FauxBold != 0 {
 							if renderer, ok := ctx.Renderer.(*pdfRenderer); ok {

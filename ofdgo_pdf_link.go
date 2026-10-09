@@ -488,6 +488,20 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 			target.KeepLeft, target.KeepTop = false, false
 		}
 		dest := &Dest{Type: string(target.Mode), PageID: p.pageIDs[destination.Page], Left: target.Left, Top: target.Top, Right: target.Right, Bottom: target.Bottom, Zoom: target.Zoom, OmitLeft: target.KeepLeft, OmitTop: target.KeepTop, OmitZoom: target.KeepZoom}
+		if target.KeepLeft || target.KeepTop {
+			if strict {
+				return nil, &pdfgo.UnsupportedError{Feature: "destination retained coordinates cannot be represented in OFD"}
+			}
+			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF destination retained coordinates use OFD default zero"})
+		}
+		if dest.Type == "XYZ" && !dest.OmitZoom && dest.Zoom != 0 && (dest.Zoom < 0.1 || dest.Zoom > 64) {
+			if strict {
+				return nil, &pdfgo.UnsupportedError{Feature: "destination zoom outside OFD range"}
+			}
+			dest.OmitZoom = true
+			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF destination zoom outside OFD range; current zoom retained"})
+		}
+		*dest = dest.effective()
 		action.Goto = &Goto{Dest: dest}
 		*currentPage = p.pageIndexes[destination.Page]
 	}

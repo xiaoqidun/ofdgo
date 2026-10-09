@@ -391,26 +391,10 @@ func annotationLinkXML(target AnnotationLink) ([]byte, error) {
 		data, err = editorXMLContainer("URI", attrs, nil)
 	} else {
 		dest := target.Dest
-		if !slices.Contains([]string{"XYZ", "Fit", "FitH", "FitV", "FitR"}, dest.Type) {
-			return nil, fmt.Errorf("invalid destination type %q", dest.Type)
-		}
-		attrs := ofdAttrs{{Name: xml.Name{Local: "Type"}, Value: dest.Type}, {Name: xml.Name{Local: "PageID"}, Value: dest.PageID}}
-		for _, value := range []struct {
-			name  string
-			value float64
-		}{{"Left", dest.Left}, {"Top", dest.Top}, {"Right", dest.Right}, {"Bottom", dest.Bottom}, {"Zoom", dest.Zoom}} {
-			if !finite(value.value) {
-				return nil, fmt.Errorf("destination coordinates must be finite")
-			}
-			omit := dest.Type == "XYZ" && (value.name == "Left" && dest.OmitLeft || value.name == "Top" && dest.OmitTop || value.name == "Zoom" && dest.OmitZoom)
-			omit = omit || dest.Type == "FitH" && value.name == "Top" && dest.OmitTop
-			omit = omit || dest.Type == "FitV" && value.name == "Left" && dest.OmitLeft
-			if omit {
-				continue
-			}
-			if dest.Type == "XYZ" && slices.Contains([]string{"Left", "Top", "Zoom"}, value.name) || dest.Type == "FitH" && value.name == "Top" || dest.Type == "FitV" && value.name == "Left" || dest.Type == "FitR" && value.name != "Zoom" {
-				attrs.add(value.name, ofdNumber(value.value))
-			}
+		var attrs ofdAttrs
+		attrs, err = dest.attributes()
+		if err != nil {
+			return nil, err
 		}
 		data, err = editorXMLContainer("Dest", attrs, nil)
 		if err == nil {

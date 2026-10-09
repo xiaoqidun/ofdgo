@@ -265,24 +265,6 @@ func (r *Renderer) textIndexRune(fontID string, glyphID int) rune {
 	return rune(glyphID)
 }
 
-// textGlyphAdvanceLimit 获取显式字形推进宽度
-// 入参: dxs X方向偏移, dys Y方向偏移, xs X坐标列表, index 字形索引, count 字形数量, currentX 当前X坐标
-// 返回: float64 推进宽度
-func textGlyphAdvanceLimit(dxs, dys, xs []float64, index int, count int, currentX float64) float64 {
-	if index+1 >= count || len(dys) > 0 {
-		return 0
-	}
-	if index+1 < len(xs) {
-		if advance := xs[index+1] - currentX; advance > 0 {
-			return advance
-		}
-	}
-	if advance, ok := textDelta(dxs, index); ok && advance > 0 {
-		return advance
-	}
-	return 0
-}
-
 // textCodePositioned 判断文本编码是否带显式定位
 // 入参: textCode 文本编码, xs X坐标列表, ys Y坐标列表
 // 返回: bool 是否带显式定位

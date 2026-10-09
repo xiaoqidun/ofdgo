@@ -181,12 +181,6 @@ func (r *Renderer) PositionText(object TextObject, state RenderState) (*Position
 			}
 			origin := positioner.Next(advance)
 			scaleX := horizontal
-			if object.CharDirection == 0 {
-				limit := textGlyphAdvanceLimit(positioner.dxs, positioner.dys, positioner.xs, i, len(glyphs), origin.X)
-				if limit > 0 && width*scaleX > limit {
-					scaleX = limit / width
-				}
-			}
 			if bold && len(path) > 0 {
 				outline, err := geometry.Stroke(path, StrokeOptions{Width: size * 0.04, Join: "Round", Cap: "Round"})
 				if err != nil {

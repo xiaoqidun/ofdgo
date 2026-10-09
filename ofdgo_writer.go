@@ -1193,34 +1193,7 @@ func (x *ofdXML) actions(actions []Action) {
 		if action.Goto != nil {
 			x.start("Goto", nil)
 			if dest := action.Goto.Dest; dest != nil {
-				attrs := ofdAttrs{{Name: xml.Name{Local: "Type"}, Value: dest.Type}, {Name: xml.Name{Local: "PageID"}, Value: dest.PageID}}
-				switch dest.Type {
-				case "XYZ":
-					if !dest.OmitLeft {
-						attrs.add("Left", ofdNumber(dest.Left))
-					}
-					if !dest.OmitTop {
-						attrs.add("Top", ofdNumber(dest.Top))
-					}
-					if !dest.OmitZoom {
-						attrs.add("Zoom", ofdNumber(dest.Zoom))
-					}
-				case "FitH":
-					if !dest.OmitTop {
-						attrs.add("Top", ofdNumber(dest.Top))
-					}
-				case "FitV":
-					if !dest.OmitLeft {
-						attrs.add("Left", ofdNumber(dest.Left))
-					}
-				case "FitR":
-					attrs.add("Left", ofdNumber(dest.Left))
-					attrs.add("Right", ofdNumber(dest.Right))
-					attrs.add("Top", ofdNumber(dest.Top))
-					attrs.add("Bottom", ofdNumber(dest.Bottom))
-				}
-				x.start("Dest", attrs)
-				x.end("Dest")
+				x.element("Dest", dest)
 			}
 			if action.Goto.Bookmark != nil {
 				x.element("Bookmark", action.Goto.Bookmark)

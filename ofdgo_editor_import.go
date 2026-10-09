@@ -1019,10 +1019,7 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 					continue
 				}
 				dest := bookmark.Dest
-				encoded, err := xml.Marshal(struct {
-					XMLName xml.Name `xml:"Dest"`
-					Dest
-				}{Dest: dest})
+				encoded, err := xml.Marshal(dest)
 				if err != nil {
 					return nil, err
 				}

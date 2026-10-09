@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"encoding/xml"
+	"fmt"
 	"net/url"
 	"strconv"
 )
@@ -37,7 +38,8 @@ type Goto struct {
 	Bookmark *GotoBookmark `xml:"Bookmark"`
 }
 
-// Dest 文档内跳转目标
+// Dest 文档内跳转目标，坐标单位为毫米
+// Omit字段保留属性省略状态；Left和Top省略时取0，Zoom省略或为0时保持当前缩放
 type Dest struct {
 	Type     string  `xml:"Type,attr"`
 	PageID   string  `xml:"PageID,attr"`
@@ -144,24 +146,35 @@ func (dest *Dest) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 		Bottom *float64 `xml:"Bottom"`
 		Zoom   *float64 `xml:"Zoom"`
 	}
-	dest.Type = attrValue(start, "Type")
-	dest.PageID = attrValue(start, "PageID")
-	dest.OmitLeft, dest.OmitTop, dest.OmitZoom = true, true, true
+	*dest = Dest{Type: attrValue(start, "Type"), PageID: attrValue(start, "PageID"), OmitLeft: true, OmitTop: true, OmitZoom: true}
 	for _, attr := range start.Attr {
+		if attr.Name.Space != "" {
+			continue
+		}
+		var target *float64
 		switch attr.Name.Local {
 		case "Left":
 			dest.OmitLeft = false
+			target = &dest.Left
 		case "Top":
 			dest.OmitTop = false
+			target = &dest.Top
 		case "Zoom":
 			dest.OmitZoom = false
+			target = &dest.Zoom
+		case "Right":
+			target = &dest.Right
+		case "Bottom":
+			target = &dest.Bottom
+		}
+		if target != nil {
+			v, err := strconv.ParseFloat(attr.Value, 64)
+			if err != nil || !finite(v) {
+				return fmt.Errorf("invalid destination %s", attr.Name.Local)
+			}
+			*target = v
 		}
 	}
-	dest.Left = actionFloatAttr(start, "Left")
-	dest.Right = actionFloatAttr(start, "Right")
-	dest.Top = actionFloatAttr(start, "Top")
-	dest.Bottom = actionFloatAttr(start, "Bottom")
-	dest.Zoom = actionFloatAttr(start, "Zoom")
 	if err := d.DecodeElement(&value, &start); err != nil {
 		return err
 	}
@@ -182,6 +195,11 @@ func (dest *Dest) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	if value.Zoom != nil {
 		dest.Zoom = *value.Zoom
 		dest.OmitZoom = false
+	}
+	for _, number := range []float64{dest.Left, dest.Right, dest.Top, dest.Bottom, dest.Zoom} {
+		if !finite(number) {
+			return fmt.Errorf("invalid destination coordinate")
+		}
 	}
 	return nil
 }
@@ -239,22 +257,16 @@ func (a *RegionArea) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 // 返回: *Dest 跳转目标
 func gotoDest(action *Goto, bookmarks map[string]Dest) *Dest {
 	if action.Dest != nil {
-		return action.Dest
+		dest := action.Dest.effective()
+		return &dest
 	}
 	if action.Bookmark != nil {
 		if dest, ok := bookmarks[action.Bookmark.Name]; ok {
+			dest = dest.effective()
 			return &dest
 		}
 	}
 	return nil
-}
-
-// actionFloatAttr 获取动作浮点属性
-// 入参: start 起始节点, name 属性名
-// 返回: float64 属性值
-func actionFloatAttr(start xml.StartElement, name string) float64 {
-	value, _ := strconv.ParseFloat(attrValue(start, name), 64)
-	return value
 }
 
 // pageActionSources 获取页面动作来源

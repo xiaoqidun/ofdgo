@@ -6209,13 +6209,6 @@ function destinationPoint(page, x, y) {
 	return { x, y };
 }
 
-function sourcePoint(page, x, y) {
-	if (state.rotation === 90) return { x: y, y: page.height - x };
-	if (state.rotation === 180) return { x: page.width - x, y: page.height - y };
-	if (state.rotation === 270) return { x: page.width - y, y: x };
-	return { x, y };
-}
-
 async function navigateDestination(dest) {
 	if (document.body.hasAttribute("aria-busy")) return;
 	const index = pageIndexByID(state.doc.pages, dest.pageID);
@@ -6228,22 +6221,12 @@ async function navigateDestination(dest) {
 		return;
 	}
 	const seq = state.openSeq, scale = state.scale;
-	let retained = null;
-	if (dest.omitLeft || dest.omitTop) {
-		const current = state.doc.pages[state.pageIndex], node = pageShell(state.pageIndex);
-		if (current && node) {
-			const shell = node.getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
-			retained = sourcePoint(current,
-				(viewer.left + (el.viewerPanel.clientLeft || 0) - shell.left - (node.clientLeft || 0)) / (MM_TO_PX * scale),
-				(viewer.top + (el.viewerPanel.clientTop || 0) - shell.top - (node.clientTop || 0)) / (MM_TO_PX * scale));
-		}
-	}
 	await renderPage(index, { fit: false, scroll: false });
 	if (seq !== state.openSeq || state.pageIndex !== index) return;
 	const page = state.doc.pages[index], size = pageViewSize(page), space = pageSpace();
 	const width = el.viewerPanel.clientWidth - space * 2, height = el.viewerPanel.clientHeight - space * 2;
-	let left = dest.omitLeft && retained ? retained.x : dest.left;
-	let top = dest.omitTop && retained ? retained.y : dest.top;
+	let left = dest.omitLeft ? 0 : (dest.left ?? 0);
+	let top = dest.omitTop ? 0 : (dest.top ?? 0);
 	if (dest.type === "Fit") {
 		fitHeight(false);
 		scrollToPage(index);
@@ -6255,8 +6238,8 @@ async function navigateDestination(dest) {
 		setScale(height / (size.height * MM_TO_PX), false);
 		top = 0;
 	} else if (dest.type === "FitR") {
-		const a = destinationPoint(page, dest.left, dest.top), b = destinationPoint(page, dest.right, dest.bottom);
-		if (dest.right <= dest.left || dest.bottom <= dest.top) return;
+		const a = destinationPoint(page, left, top), b = destinationPoint(page, dest.right, dest.bottom);
+		if (dest.right <= left || dest.bottom <= top) return;
 		setScale(Math.min(width / Math.abs(b.x - a.x), height / Math.abs(b.y - a.y)) / MM_TO_PX, false);
 	} else {
 		setScale(!dest.omitZoom && dest.zoom > 0 ? dest.zoom : scale, false);
