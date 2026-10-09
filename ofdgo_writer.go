@@ -870,17 +870,22 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 	x.start(object.Type, attrs)
 	x.actions(actions)
 	if object.Type == "ImageObject" {
-		x.clips(object.ImageObject.Clips)
+		ctm := object.ImageObject.CTM
+		if ctm == "" && object.ImageObject.Clips.usesObjectMatrix() {
+			box, _ := ParseBox(object.ImageObject.Boundary)
+			ctm = (Matrix{a: box.W, d: box.H}).String()
+		}
+		x.clips(object.ImageObject.Clips, ctm)
 		x.border(object.ImageObject.Border)
 	} else if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
-		x.clips(object.CompositeGraphicUnit.Clips)
+		x.clips(object.CompositeGraphicUnit.Clips, object.CompositeGraphicUnit.CTM)
 	} else if object.Type == "PathObject" || object.Type == "Path" {
-		x.clips(object.PathObject.Clips)
+		x.clips(object.PathObject.Clips, object.PathObject.CTM)
 		x.color("StrokeColor", stroke)
 		x.color("FillColor", fill)
 		x.text("AbbreviatedData", object.PathObject.AbbreviatedData)
 	} else if object.Type == "TextObject" || object.Type == "Text" {
-		x.clips(object.TextObject.Clips)
+		x.clips(object.TextObject.Clips, object.TextObject.CTM)
 		x.color("FillColor", fill)
 		x.color("StrokeColor", stroke)
 		offset, index := 0, 0
@@ -917,15 +922,17 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 	x.end(object.Type)
 }
 
-// clips 写出对象裁剪，保留区域内的路径与文字
-// 入参: clips 裁剪集合，nil不输出节点
-func (x *ofdXML) clips(clips *Clips) {
+// clips 写出标准裁剪，将旧式随动裁剪折算为区域变换
+// 入参: clips 裁剪集合，nil不输出节点, ctm 对象变换矩阵
+func (x *ofdXML) clips(clips *Clips, ctm string) {
 	if clips == nil || !x.checkContext() {
 		return
 	}
-	var attrs ofdAttrs
-	attrs.flag("TransFlag", clips.TransFlag)
-	x.start("Clips", attrs)
+	matrix := IdentityMatrix
+	if clips.usesObjectMatrix() {
+		matrix = NewMatrix(ctm)
+	}
+	x.start("Clips", nil)
 	for _, clip := range clips.Clip {
 		if x.err != nil {
 			return
@@ -936,6 +943,9 @@ func (x *ofdXML) clips(clips *Clips) {
 				return
 			}
 			var attrs ofdAttrs
+			if clips.usesObjectMatrix() {
+				area.CTM = matrix.Multiply(NewMatrix(area.CTM)).String()
+			}
 			attrs.add("CTM", area.CTM)
 			attrs.add("DrawParam", area.DrawParam)
 			for _, path := range area.Path {

@@ -470,10 +470,8 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 		boundary := n.parent.Multiply(TranslationMatrix(box.X, box.Y))
 		matrix := boundary.Multiply(NewMatrix(c.CTM))
 		clips, clipMatrix := c.Clips, matrix
-		if clips != nil && clips.TransFlag != nil && !*clips.TransFlag {
-			copy := *clips
-			copy.TransFlag = nil
-			clips, clipMatrix = &copy, boundary
+		if !clips.usesObjectMatrix() {
+			clipMatrix = boundary
 		}
 		clip := n.clip
 		var err error
@@ -658,7 +656,7 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		}
 		if transform && node.object.Type == "ImageObject" && bounds.Bounds.W > 0 && bounds.Bounds.H > 0 {
 			clips := node.object.ImageObject.Clips
-			_, capability.CropImage = node.matrix(clips == nil || clips.TransFlag == nil || *clips.TransFlag).Invert()
+			_, capability.CropImage = node.matrix(clips.usesObjectMatrix()).Invert()
 			capability.FitImage = capability.CropImage && axisAlignedMatrix(NewMatrix(node.object.ImageObject.CTM))
 			capability.ResetCrop = node.states[editorObjectID(node.object)].crop != nil
 		}
@@ -903,7 +901,7 @@ func transformCompositeOffsets(data []byte, matrix Matrix) ([]byte, error) {
 				}
 				object := cloneEditorData(n.object)
 				object = compositeBoundary(object, Matrix{a: matrix.a, b: matrix.b, c: matrix.c, d: matrix.d}, false)
-				if clips := editorObjectClips(&object); *clips != nil && (*clips).TransFlag != nil && !*(*clips).TransFlag {
+				if clips := editorObjectClips(&object); *clips != nil && !(*clips).usesObjectMatrix() {
 					*clips = transformObjectClips(*clips, TranslationMatrix(matrix.e, matrix.f))
 				}
 				fragment, err = editorXMLObject(n.data, n.node, n.object, object)
@@ -943,7 +941,7 @@ func compositeBoundary(object GraphicObject, parent Matrix, inward bool) Graphic
 	case "ImageObject":
 		object.ImageObject.Boundary = editorBoxString(box)
 	}
-	if clips := editorObjectClips(&object); *clips != nil && (*clips).TransFlag != nil && !*(*clips).TransFlag {
+	if clips := editorObjectClips(&object); *clips != nil && !(*clips).usesObjectMatrix() {
 		*clips = transformObjectClips(*clips, clipMatrix)
 	}
 	return object

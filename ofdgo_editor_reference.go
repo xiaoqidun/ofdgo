@@ -261,6 +261,11 @@ func (x *ofdXML) referenceElement(name string, value any) {
 	}
 	var attrs ofdAttrs
 	switch value := value.(type) {
+	case *Dest:
+		if value == nil {
+			return
+		}
+		attrs.add("PageID", value.PageID)
 	case ShdColor:
 		attrs.add("ColorSpace", value.ColorSpace)
 	case *ShdColor:

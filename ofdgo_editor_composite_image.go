@@ -43,7 +43,7 @@ func (e *Editor) CropCompositeImage(page int, path ObjectPath, index int, box Bo
 			return fmt.Errorf("crop does not intersect the image")
 		}
 		clips := node.object.ImageObject.Clips
-		inverse, _ := node.matrix(clips == nil || clips.TransFlag == nil || *clips.TransFlag).Invert()
+		inverse, _ := node.matrix(clips.usesObjectMatrix()).Invert()
 		shape, err := NewShape(ShapeRectangle, box)
 		if err != nil {
 			return err
@@ -143,7 +143,7 @@ func (e *Editor) FitCompositeImage(page int, path ObjectPath, index int, mode st
 			frame = TranslationMatrix(box.X, box.Y).Multiply(node.parent)
 		}
 		clips := object.ImageObject.Clips
-		inverse, _ := node.matrix(clips == nil || clips.TransFlag == nil || *clips.TransFlag).Invert()
+		inverse, _ := node.matrix(clips.usesObjectMatrix()).Invert()
 		return appendCompositeClip(node, shape, inverse.Multiply(frame), true)
 	})
 }
@@ -192,7 +192,7 @@ func appendCompositeClip(node *editorCompositeNode, shape PathObject, matrix Mat
 		state.crop = &crop
 	}
 	data, err := encodeOFDXML(func(x *ofdXML) {
-		x.clips(&Clips{Clip: []Clip{clip}})
+		x.clips(&Clips{Clip: []Clip{clip}}, "")
 	})
 	if err != nil {
 		return err
@@ -209,8 +209,12 @@ func appendCompositeClip(node *editorCompositeNode, shape PathObject, matrix Mat
 		patch = editorXMLContent(node.data, original, content)
 	} else {
 		data = editorXMLEncodedFragment(data, root)
-		content := append(data, node.data[node.node.open:node.node.close]...)
-		patch = editorXMLContent(node.data, node.node, content)
+		if actions := node.node.child("Actions"); actions != nil {
+			patch = editorXMLPatch{actions.end, actions.end, data}
+		} else {
+			content := append(data, node.data[node.node.open:node.node.close]...)
+			patch = editorXMLContent(node.data, node.node, content)
+		}
 	}
 	updated, err := newEditorCompositeNode(editorPatchXML(node.data, []editorXMLPatch{patch}))
 	if err != nil {

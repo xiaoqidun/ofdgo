@@ -299,7 +299,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 				return err
 			}
 			clips := *editorObjectClips(&copy.object)
-			matrix, ok := copy.matrix(clips == nil || clips.TransFlag == nil || *clips.TransFlag).Invert()
+			matrix, ok := copy.matrix(clips.usesObjectMatrix()).Invert()
 			if !ok {
 				return fmt.Errorf("composite clip transform is not invertible")
 			}

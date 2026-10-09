@@ -456,7 +456,7 @@ func transformEditorMatrix(object GraphicObject, matrix Matrix) GraphicObject {
 	local := TranslationMatrix(-after.X, -after.Y).Multiply(matrix).Multiply(TranslationMatrix(before.X, before.Y))
 	*ctm = local.Multiply(NewMatrix(*ctm)).String()
 	*boundary = editorBoxString(after)
-	if clips := editorObjectClips(&object); *clips != nil && (*clips).TransFlag != nil && !*(*clips).TransFlag {
+	if clips := editorObjectClips(&object); *clips != nil && !(*clips).usesObjectMatrix() {
 		*clips = transformObjectClips(*clips, local)
 	}
 	if !axisAlignedMatrix(matrix) && before.W > 0 && before.H > 0 {
@@ -469,13 +469,12 @@ func transformEditorMatrix(object GraphicObject, matrix Matrix) GraphicObject {
 			*clips = &copy
 		}
 		clipMatrix := local
-		if (*clips).TransFlag == nil || *(*clips).TransFlag {
+		if (*clips).usesObjectMatrix() {
 			if inverse, ok := NewMatrix(*ctm).Invert(); ok {
 				clipMatrix = inverse.Multiply(local)
 			} else {
 				*clips = transformObjectClips(*clips, NewMatrix(*ctm))
-				flag := false
-				(*clips).TransFlag = &flag
+				(*clips).TransFlag = nil
 			}
 		}
 		fill, stroke := true, false
@@ -526,17 +525,13 @@ func cropImageObject(image *ImageObject, box Box) error {
 	image.Boundary = editorBoxString(box)
 	image.Clips = nil
 	if box != full {
-		inverse, ok := NewMatrix(image.CTM).Invert()
-		if !ok {
-			return fmt.Errorf("image transform is not invertible")
-		}
 		path, err := NewShape(ShapeRectangle, Box{W: box.W, H: box.H})
 		if err != nil {
 			return err
 		}
 		fill, stroke := true, false
 		path.Fill, path.Stroke = &fill, &stroke
-		image.Clips = &Clips{Clip: []Clip{{Area: []ClipArea{{CTM: inverse.String(), Path: []PathObject{path}}}}}}
+		image.Clips = &Clips{Clip: []Clip{{Area: []ClipArea{{Path: []PathObject{path}}}}}}
 	}
 	return nil
 }

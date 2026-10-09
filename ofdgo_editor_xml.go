@@ -373,6 +373,19 @@ func editorXMLObject(data []byte, node *editorXML, before, after GraphicObject) 
 // 入参: data 原文, node 原节点, oldXML 修改前编码, newXML 修改后编码
 // 返回: []byte 更新节点, error 错误信息
 func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte, error) {
+	legacyClip := node.name.Local == "Clips" && node.hasAttr("TransFlag")
+	if legacyClip {
+		var clips Clips
+		if err := xml.Unmarshal(data[node.start:node.end], &clips); err != nil {
+			return nil, err
+		}
+		clips.TransFlag = nil
+		var err error
+		oldXML, err = encodeOFDXML(func(x *ofdXML) { x.clips(&clips, "") })
+		if err != nil {
+			return nil, err
+		}
+	}
 	oldNode, err := parseEditorXML(oldXML)
 	if err != nil {
 		return nil, err
@@ -382,6 +395,9 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 		return nil, err
 	}
 	changes := make(map[string]string)
+	if legacyClip {
+		changes["TransFlag"] = ""
+	}
 	for _, attr := range append(oldNode.attrs, newNode.attrs...) {
 		if attr.Name.Space == "" && (oldNode.attr(attr.Name.Local) != newNode.attr(attr.Name.Local) || oldNode.hasAttr(attr.Name.Local) != newNode.hasAttr(attr.Name.Local)) {
 			changes[attr.Name.Local] = newNode.attr(attr.Name.Local)

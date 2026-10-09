@@ -373,10 +373,7 @@ func (r *Renderer) objectGeometryClip(clips *Clips, boundary string, local Matri
 		return clip, nil
 	}
 	matrix, _ := renderObjectMatrix(boundary, local, state)
-	if clips.TransFlag != nil && !*clips.TransFlag {
-		copy := *clips
-		copy.TransFlag = nil
-		clips = &copy
+	if !clips.usesObjectMatrix() {
 		box, _ := ParseBox(boundary)
 		matrix = TranslationMatrix(box.X, box.Y)
 		if state.BoundaryInCTM && state.Parent != nil {

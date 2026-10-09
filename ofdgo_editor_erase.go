@@ -133,7 +133,7 @@ func (e *Editor) eraseCompositeObjects(page int, path ObjectPath, indexes []int,
 				return fmt.Errorf("composite member cannot be erased")
 			}
 			clips := *editorObjectClips(&node.object)
-			inverse, ok := node.matrix(clips == nil || clips.TransFlag == nil || *clips.TransFlag).Invert()
+			inverse, ok := node.matrix(clips.usesObjectMatrix()).Invert()
 			if !ok {
 				return fmt.Errorf("composite clip transform is not invertible")
 			}
@@ -212,7 +212,7 @@ func (e *Editor) eraseObjects(page int, ids []string, box Box, points []Point, r
 			*clips = &Clips{}
 		}
 		matrix := IdentityMatrix
-		if (*clips).TransFlag == nil || *(*clips).TransFlag {
+		if (*clips).usesObjectMatrix() {
 			if object.Type == "ImageObject" && ctm == "" {
 				ctm = Matrix{a: frame.W, d: frame.H}.String()
 			}

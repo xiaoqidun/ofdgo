@@ -47,6 +47,12 @@ func (o GraphicObject) Actions() []Action {
 	return nil
 }
 
+// usesObjectMatrix 判断旧式扩展是否要求裁剪跟随对象变换，标准裁剪以外接矩形为基准
+// 返回: bool 是否叠加对象CTM
+func (clips *Clips) usesObjectMatrix() bool {
+	return clips != nil && clips.TransFlag != nil && *clips.TransFlag
+}
+
 // UnmarshalXML 解析路径并区分省略样式、显式实线与零线宽
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息

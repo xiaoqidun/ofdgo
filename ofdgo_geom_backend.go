@@ -47,7 +47,7 @@ type StrokeOptions struct {
 }
 
 // GeometryBackend 操作库自有路径，坐标以页面左上角为原点，不修改任何输入
-// Clip返回nil表示不裁剪，空路径指针表示完全裁去，矩阵映射到页面坐标
+// Clip返回nil表示不裁剪，空路径指针表示完全裁去，矩阵将裁剪坐标映射到页面坐标
 type GeometryBackend interface {
 	Backend
 	Path(object PathObject) (GeometryPath, error)

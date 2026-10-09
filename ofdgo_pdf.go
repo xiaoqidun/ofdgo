@@ -502,7 +502,7 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 			continue
 		}
 		if clips == nil {
-			clips = &Clips{TransFlag: new(false), Clip: make([]Clip, 0, len(paths))}
+			clips = &Clips{Clip: make([]Clip, 0, len(paths))}
 			areas = make([]ClipArea, len(paths))
 			if origin.X != 0 || origin.Y != 0 {
 				translation = pdfNumbers(1, 0, 0, 1, -origin.X, -origin.Y)

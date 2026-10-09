@@ -74,7 +74,7 @@ func pdfPageClip(object GraphicObject) *Clips {
 		return nil
 	}
 	clips := *editorObjectClips(&object)
-	if clips == nil || clips.TransFlag == nil || *clips.TransFlag || len(clips.Clip) == 0 {
+	if clips == nil || clips.usesObjectMatrix() || len(clips.Clip) == 0 {
 		return nil
 	}
 	boundary, _ := editorGeometry(object)
@@ -87,7 +87,7 @@ func pdfPageClip(object GraphicObject) *Clips {
 		translation = pdfNumbers(1, 0, 0, 1, -box.X, -box.Y)
 	}
 	bytes := 0
-	result := &Clips{TransFlag: clips.TransFlag, Clip: make([]Clip, len(clips.Clip))}
+	result := &Clips{Clip: make([]Clip, len(clips.Clip))}
 	for index, clip := range clips.Clip {
 		if len(clip.Area) != 1 || clip.Area[0].CTM != translation {
 			return nil
@@ -113,7 +113,7 @@ func pdfMatchesPageClip(object GraphicObject, pageClip *Clips) bool {
 		return false
 	}
 	clips := *editorObjectClips(&object)
-	if clips == nil || clips.TransFlag == nil || *clips.TransFlag || len(clips.Clip) != len(pageClip.Clip) {
+	if clips == nil || clips.usesObjectMatrix() || len(clips.Clip) != len(pageClip.Clip) {
 		return false
 	}
 	boundary, _ := editorGeometry(object)

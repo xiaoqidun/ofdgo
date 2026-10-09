@@ -86,9 +86,9 @@ func (r *Renderer) buildObjectClipPath(clips *Clips, pageH float64, boundary str
 }
 
 // buildClipPath 构建裁剪路径
-// 入参: clips 裁剪对象, pageH 页面高度, bx 边界X坐标, by 边界Y坐标, objectCTM 对象CTM
+// 入参: clips 裁剪对象, pageH 页面高度, bx 边界X坐标, by 边界Y坐标, matrix 裁剪坐标到页面的变换
 // 返回: *canvas.Path 路径对象
-func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, objectCTM Matrix) *canvas.Path {
+func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, matrix Matrix) *canvas.Path {
 	if clips == nil {
 		return nil
 	}
@@ -96,10 +96,7 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ob
 	for _, clip := range clips.Clip {
 		renderer := &clipRenderer{}
 		for _, area := range clip.Area {
-			areaCTM := NewMatrix(area.CTM)
-			if clips.TransFlag == nil || *clips.TransFlag {
-				areaCTM = objectCTM.Multiply(areaCTM)
-			}
+			areaCTM := matrix.Multiply(NewMatrix(area.CTM))
 			for _, pathObj := range area.Path {
 				renderer.add(r.buildClipAreaPath(pathObj, area.DrawParam, areaCTM, pageH, bx, by))
 				if r.renderError != nil {

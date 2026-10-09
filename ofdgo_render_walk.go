@@ -225,10 +225,8 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 		return err
 	}
 	clips, clipMatrix := object.Clips, matrix
-	if clips != nil && clips.TransFlag != nil && !*clips.TransFlag {
-		copy := *clips
-		copy.TransFlag = nil
-		clips, clipMatrix = &copy, boundary
+	if !clips.usesObjectMatrix() {
+		clipMatrix = boundary
 	}
 	if clips != nil {
 		geometry, err := r.Geometry()

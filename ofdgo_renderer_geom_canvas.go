@@ -181,7 +181,7 @@ func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (result Ge
 }
 
 // Clip 解析对象裁剪并与父裁剪相交，保留未裁剪与完全裁去的区别
-// 入参: r 渲染器, clips OFD裁剪, matrix 页面变换, parent 父裁剪
+// 入参: r 渲染器, clips OFD裁剪, matrix 裁剪坐标到页面的变换, parent 父裁剪
 // 返回: *GeometryPath 页面裁剪, error 无效父路径错误
 func (CanvasBackend) Clip(r *Renderer, clips *Clips, matrix Matrix, parent *GeometryPath) (*GeometryPath, error) {
 	p, err := geometryToCanvasPath(parent)

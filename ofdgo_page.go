@@ -62,7 +62,8 @@ type GraphicObject struct {
 	state                editorCompositeState
 }
 
-// Clips 裁剪区域集合
+// Clips 相对于对象外接矩形的裁剪集合
+// TransFlag仅兼容旧式扩展，写入时折算为Area的CTM
 type Clips struct {
 	TransFlag *bool  `xml:"TransFlag,attr"`
 	Clip      []Clip `xml:"Clip"`

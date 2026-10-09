@@ -1035,7 +1035,7 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 	default:
 		return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
 	}
-	if clips := editorObjectClips(&object); scale != 1 && *clips != nil && (object.Type == "TextObject" || (*clips).TransFlag != nil && !*(*clips).TransFlag) {
+	if clips := editorObjectClips(&object); scale != 1 && *clips != nil && (object.Type == "TextObject" || !(*clips).usesObjectMatrix()) {
 		*clips = transformObjectClips(*clips, Matrix{a: scale, d: scale})
 	}
 	box, err := ParseBox(*boundary)
