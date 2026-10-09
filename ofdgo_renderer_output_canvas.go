@@ -127,7 +127,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	}
 	start := buf.Len()
 	p := pdf.New(buf, pages[0].Box.W, pages[0].Box.H, nil)
-	renderer := &pdfRenderer{PDF: p, glyphPaths: make(map[*canvas.Path]*canvas.Path), images: make([][]image.Image, 1)}
+	renderer := &pdfRenderer{PDF: p, glyphPaths: make(map[*canvas.Path]*canvas.Path), images: make([][]image.Image, 1), navigation: navigation}
 	defer func() {
 		if renderer.imageError != nil {
 			r.canvasState().images = renderCache[*EncodedImage, image.Image]{limit: imageCacheLimit}
@@ -170,7 +170,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		buf.Truncate(start)
 		return err
 	}
-	if direct && renderer.exactImages {
+	if direct && (renderer.exactImages || navigation.exactLinks) {
 		buf.Truncate(start)
 		_, err = buf.Write(data)
 		return err

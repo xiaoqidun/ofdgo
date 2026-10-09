@@ -23,14 +23,15 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// preserveImages 按绘制顺序恢复颜色及透明度精度，二值透明采用标准Matte预混合
+// preserveImages 一次恢复图像精度和链接区域，二值透明采用标准Matte预混合
 // 入参: ctx 取消上下文, data 后端PDF数据
-// 返回: []byte 保留图像精度的PDF数据, error 资源或写入错误
+// 返回: []byte 保留图像及导航信息的PDF数据, error 资源或写入错误
 func (r *pdfRenderer) preserveImages(ctx context.Context, data []byte) ([]byte, error) {
 	if r.imageError != nil {
 		return nil, r.imageError
 	}
-	if !r.exactImages {
+	exactLinks := r.navigation != nil && r.navigation.exactLinks
+	if !r.exactImages && !exactLinks {
 		return data, nil
 	}
 	reader, err := pdfgo.NewReader(bytes.NewReader(data), int64(len(data)))
@@ -39,12 +40,34 @@ func (r *pdfRenderer) preserveImages(ctx context.Context, data []byte) ([]byte, 
 	}
 	defer reader.Close()
 	images := make(map[pdfgo.Reference]image.Image)
+	links := make(map[pdfgo.AnnotationLocation]pdfgo.LinkRegion)
 	pages := 0
 	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
 		if index >= len(r.images) {
 			return fmt.Errorf("unexpected PDF output page")
 		}
 		pages++
+		if exactLinks {
+			annotations, err := page.AnnotationsContext(ctx)
+			if err != nil {
+				return err
+			}
+			expected := r.navigation.Link[index]
+			if len(annotations) != len(expected) {
+				return fmt.Errorf("PDF output link count differs")
+			}
+			for i, link := range expected {
+				if annotations[i].Subtype != pdfgo.Name("Link") {
+					return fmt.Errorf("unexpected PDF output annotation")
+				}
+				if link.Region != nil {
+					links[pdfgo.AnnotationLocation{Page: page.Reference, Index: i}] = *link.Region
+				}
+			}
+		}
+		if !r.exactImages {
+			return nil
+		}
 		value, err := reader.Resolve(page.Resources["XObject"])
 		if err != nil {
 			return err
@@ -115,7 +138,7 @@ func (r *pdfRenderer) preserveImages(ctx context.Context, data []byte) ([]byte, 
 		images[ref] = pixels
 	}
 	var result bytes.Buffer
-	if _, err := reader.ReplaceImagesTo(ctx, &result, images, pdfgo.ImageWriteOptions{PreblendBinary: true}); err != nil {
+	if _, err := reader.RewriteTo(ctx, &result, pdfgo.RewriteOptions{Images: images, ImageOptions: pdfgo.ImageWriteOptions{PreblendBinary: true}, LinkRegions: links}); err != nil {
 		return nil, err
 	}
 	return result.Bytes(), nil

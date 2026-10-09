@@ -22,6 +22,7 @@ import (
 	"github.com/tdewolff/canvas"
 	cimage "github.com/tdewolff/canvas/image"
 	"github.com/tdewolff/canvas/renderers/pdf"
+	"github.com/xiaoqidun/pdfgo"
 )
 
 // pdfRenderer PDF渲染器
@@ -31,14 +32,16 @@ type pdfRenderer struct {
 	images      [][]image.Image
 	exactImages bool
 	imageError  error
+	navigation  *pdfNavigation
 }
 
 // pdfNavigation PDF导航信息
 type pdfNavigation struct {
-	Anchor  map[int][]pdfAnchor
-	Link    map[int][]pdfLink
-	Outline map[int][]pdfOutline
-	nextID  int
+	Anchor     map[int][]pdfAnchor
+	Link       map[int][]pdfLink
+	Outline    map[int][]pdfOutline
+	nextID     int
+	exactLinks bool
 }
 
 // pdfAnchor PDF跳转目标
@@ -49,8 +52,9 @@ type pdfAnchor struct {
 
 // pdfLink PDF链接
 type pdfLink struct {
-	URI  string
-	Rect canvas.Rect
+	URI    string
+	Rect   canvas.Rect
+	Region *pdfgo.LinkRegion
 }
 
 // pdfOutline PDF大纲
@@ -149,7 +153,7 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentP
 				if action.Event != "CLICK" {
 					continue
 				}
-				box, _, err := renderer.actionLinkRegion(source, action)
+				box, outline, err := renderer.actionLinkRegion(source, action)
 				if err != nil {
 					return nil, err
 				}
@@ -157,7 +161,23 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentP
 					continue
 				}
 				rect := pdfSourceRect(box, page.Box.H)
+				count := len(navigation.Link[i])
 				navigation.addAction(i, rect, action, bookmarks, pageIndex, pages)
+				if len(navigation.Link[i]) == count || outline == "" {
+					continue
+				}
+				region, err := pdfActionRegion(renderer.outputContext(), outline, page.Box.H)
+				if err != nil {
+					return nil, err
+				}
+				if region != nil && len(region.Quads) == 0 {
+					navigation.Link[i] = navigation.Link[i][:count]
+					continue
+				}
+				if region != nil {
+					navigation.Link[i][count].Region = region
+					navigation.exactLinks = true
+				}
 			}
 		}
 	}

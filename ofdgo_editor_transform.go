@@ -47,7 +47,7 @@ func (e *Editor) RotateObject(page int, id string, degrees int) error {
 
 // RotateObjects 绕同页选区的可见范围中心旋转
 // 保留相对位置及资源，一次撤销恢复全部
-// 带边框图片转为保留原内容的复合对象，标识不变
+// 必要时将图片转为复合对象，保留原内容及标识
 // 入参: page 页面索引, ids 对象标识, degrees 顺时针角度，仅支持90度的整数倍
 // 返回: error 错误信息
 func (e *Editor) RotateObjects(page int, ids []string, degrees int) error {
@@ -217,7 +217,7 @@ func (obj TextObject) ResizeTextFrame(offset, width float64) (TextObject, error)
 // 入参: object 对象, dx 页面横向位移, dy 页面纵向位移, scale 缩放比例
 // 返回: GraphicObject 新对象, error 错误信息
 func (e *Editor) transformObject(object GraphicObject, dx, dy, scale float64) (GraphicObject, error) {
-	if object.Type == "ImageObject" && object.ImageObject.Border != nil && scale != 1 {
+	if object.Type == "ImageObject" && scale != 1 && imageTransformNeedsContainer(object.ImageObject, Matrix{a: scale, d: scale}) {
 		return e.transformMatrix(object, Matrix{a: scale, d: scale, e: dx, f: dy})
 	}
 	if origin := e.objectOrigin(editorObjectID(object)); origin != nil && (!editorXMLSupported(origin.node) || origin.reason != nil) {
@@ -309,19 +309,23 @@ func (e *Editor) transformObjects(page int, objects []GraphicObject, transform f
 // 入参: object 对象, matrix 页面变换
 // 返回: GraphicObject 变换后的对象, error 错误信息
 func (e *Editor) transformMatrix(object GraphicObject, matrix Matrix) (GraphicObject, error) {
-	if object.Type != "ImageObject" || object.ImageObject.Border == nil {
+	if object.Type != "ImageObject" || !imageTransformNeedsContainer(object.ImageObject, matrix) {
 		return transformEditorMatrix(object, matrix), nil
 	}
 	origin := e.objectOrigin(object.ImageObject.ID)
-	if origin == nil {
-		return GraphicObject{}, fmt.Errorf("image source is unavailable")
-	}
 	reader, err := e.Reader()
 	if err != nil {
 		return GraphicObject{}, err
 	}
 	defer reader.Close()
-	return e.transformBorderedImage(object, matrix, origin, e.newRenderer(reader))
+	return e.transformImageResource(object, matrix, origin, e.newRenderer(reader))
+}
+
+// imageTransformNeedsContainer 判断图片变换是否需保留边框或隐式坐标中的动作
+// 入参: object 图片对象, matrix 所在坐标系中的变换
+// 返回: bool 是否需要复合资源
+func imageTransformNeedsContainer(object ImageObject, matrix Matrix) bool {
+	return object.Border != nil || object.CTM == "" && len(object.Actions) != 0 && (matrix.a != 1 || matrix.b != 0 || matrix.c != 0 || matrix.d != 1)
 }
 
 // objectStretchable 允许图片及纯图片资源独立调整宽高，内联组合仍保持比例
@@ -339,7 +343,7 @@ func (e *Editor) objectStretchable(object GraphicObject, visiting map[string]boo
 // 返回: bool 是否只包含图片
 func (e *Editor) objectImagesOnly(object GraphicObject, visiting map[string]bool) bool {
 	if object.Type == "ImageObject" {
-		return object.ImageObject.Border == nil || len(object.ImageObject.Actions) == 0
+		return true
 	}
 	if object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
 		return false
@@ -366,10 +370,10 @@ func (e *Editor) objectImagesOnly(object GraphicObject, visiting map[string]bool
 	return found
 }
 
-// transformBorderedImage 将原文图片封装为复合资源，保留边框和裁剪
-// 入参: object 图片对象, matrix 变换, origin 原文, renderer 资源度量器
+// transformImageResource 将图片封装为复合资源，保留边框、裁剪及动作
+// 入参: object 图片对象, matrix 变换, origin 原文来源，可为空, renderer 资源度量器
 // 返回: GraphicObject 变换结果, error 错误信息
-func (e *Editor) transformBorderedImage(object GraphicObject, matrix Matrix, origin *editorObjectOrigin, renderer *Renderer) (GraphicObject, error) {
+func (e *Editor) transformImageResource(object GraphicObject, matrix Matrix, origin *editorObjectOrigin, renderer *Renderer) (GraphicObject, error) {
 	if err := e.prepareSourceIDs(); err != nil {
 		return GraphicObject{}, err
 	}
@@ -385,11 +389,15 @@ func (e *Editor) transformBorderedImage(object GraphicObject, matrix Matrix, ori
 	child := cloneEditorData(object)
 	child.ImageObject.ID = e.nextID()
 	child.ImageObject.Boundary = editorBoxString(Box{X: box.X - extent.X, Y: box.Y - extent.Y, W: box.W, H: box.H})
-	data, err := editorXMLObject(origin.data, origin.node, origin.object, child)
-	if err != nil {
-		return GraphicObject{}, err
+	var data []byte
+	if origin == nil {
+		data, err = editorObjectXML(child)
+	} else {
+		data, err = editorXMLObject(origin.data, origin.node, origin.object, child)
+		if err == nil {
+			data, err = editorXMLStandalone(data, origin.node)
+		}
 	}
-	data, err = editorXMLStandalone(data, origin.node)
 	if err != nil {
 		return GraphicObject{}, err
 	}
@@ -437,10 +445,14 @@ func transformEditorMatrix(object GraphicObject, matrix Matrix) GraphicObject {
 		boundary, ctm = &object.CompositeGraphicUnit.Boundary, &object.CompositeGraphicUnit.CTM
 	}
 	before, _ := ParseBox(*boundary)
+	after := matrix.TransformBox(before)
 	if object.Type == "ImageObject" && *ctm == "" {
+		if matrix.a == 1 && matrix.b == 0 && matrix.c == 0 && matrix.d == 1 {
+			*boundary = editorBoxString(after)
+			return object
+		}
 		*ctm = Matrix{a: before.W, d: before.H}.String()
 	}
-	after := matrix.TransformBox(before)
 	local := TranslationMatrix(-after.X, -after.Y).Multiply(matrix).Multiply(TranslationMatrix(before.X, before.Y))
 	*ctm = local.Multiply(NewMatrix(*ctm)).String()
 	*boundary = editorBoxString(after)

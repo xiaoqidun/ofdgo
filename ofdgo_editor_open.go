@@ -574,10 +574,6 @@ func (e *Editor) objectCapabilities(object GraphicObject, orderable map[*editorX
 	all.ReplaceImage = all.Update && object.Type == "ImageObject"
 	all.CropImage = all.ReplaceImage
 	all.FitImage = all.ReplaceImage && axisAlignedMatrix(NewMatrix(object.ImageObject.CTM))
-	if object.Type == "ImageObject" && object.ImageObject.Border != nil && len(object.ImageObject.Actions) != 0 {
-		all.Transform, all.Arrange = false, false
-		all.Reason, all.ReasonCode = "image actions cannot be transformed together with the border", EditUnsupportedObject
-	}
 	if object.Type == "TextObject" {
 		all.TextContent = all.Update && object.TextObject.ReadDirection == 0 && object.TextObject.CharDirection == 0 && (all.LayoutKnown || len(object.TextObject.CGTransform) == 0)
 		all.Reflow = all.Reflow && (all.LayoutKnown || len(object.TextObject.CGTransform) == 0)

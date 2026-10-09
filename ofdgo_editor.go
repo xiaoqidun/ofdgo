@@ -31,8 +31,6 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-
-	"github.com/xiaoqidun/jbig2"
 )
 
 // editorPathValidationLimit 限制同次对象校验保留的路径数量
@@ -463,11 +461,18 @@ func (e *Editor) ResizePages(indexes []int, width, height float64) error {
 // 入参: data 图片数据
 // 返回: string 图片资源标识, error 错误信息
 func (e *Editor) AddImage(data []byte) (string, error) {
+	return e.addDecodedImage(data, nil)
+}
+
+// addDecodedImage 注册图片并复用与编码数据一致的像素
+// 入参: data 图片数据, decoded 已解码像素，为nil时按需解码
+// 返回: string 资源标识, error 注册错误
+func (e *Editor) addDecodedImage(data []byte, decoded image.Image) (string, error) {
 	config, format, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
 		return "", err
 	}
-	return e.addImage(data, config, format, nil)
+	return e.addImage(data, config, format, decoded)
 }
 
 // addImage 注册图片资源，复用调用方已完成解码的像素数据
@@ -757,24 +762,6 @@ func (e *Editor) reorderPages(order []int) {
 func (e *Editor) nextID() string {
 	e.maxID++
 	return strconv.Itoa(e.maxID)
-}
-
-// editorBinaryImage 尝试纯黑白无损编码，不二值化，不改变透明度，无体积收益时保留原图
-// 入参: data PNG图片数据, img 已解码像素，为nil时读取原图
-// 返回: []byte 更小的JBIG2数据，不适用时为nil
-func editorBinaryImage(data []byte, img image.Image) []byte {
-	if img == nil {
-		var err error
-		img, _, err = image.Decode(bytes.NewReader(data))
-		if err != nil {
-			return nil
-		}
-	}
-	var output bytes.Buffer
-	if err := jbig2.Encode(&output, img, &jbig2.Options{MaxPageBytes: uint64(len(data))}); err != nil || output.Len() >= len(data) {
-		return nil
-	}
-	return output.Bytes()
 }
 
 // findObject 查找页面各图层中的对象

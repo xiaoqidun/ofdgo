@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"maps"
@@ -272,6 +273,19 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 				return err
 			}
 		}
+		preserved, err := copy.preserveActionRegions(source.parent)
+		if err != nil {
+			return err
+		}
+		if !preserved {
+			wrapped, err := e.vectorInstance(renderer, []*editorCompositeNode{copy})
+			if err != nil {
+				return err
+			}
+			wrapped.setStates(copy.states)
+			wrapped.defaults, wrapped.drawParams = copy.defaults, copy.drawParams
+			copy = wrapped
+		}
 		copy.parent, copy.boundaryInCTM = IdentityMatrix, true
 		if err := e.transformCompositeMember(renderer, copy, source.parent); err != nil {
 			return err
@@ -314,6 +328,83 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 		objects = append(objects, object)
 	}
 	return paste(objects)
+}
+
+// preserveActionRegions 将默认点击范围固定到对象坐标，保留动作原文及显式区域
+// 入参: matrix 即将合入对象的父级变换
+// 返回: bool 是否可直接表示，否则需保留容器, error 错误信息
+func (n *editorCompositeNode) preserveActionRegions(matrix Matrix) (bool, error) {
+	actions := n.node.child("Actions")
+	if actions == nil {
+		return true, nil
+	}
+	boundary, ctm := editorGeometry(n.object)
+	if n.object.Type == "ImageObject" && ctm == "" && (matrix.a != 1 || matrix.b != 0 || matrix.c != 0 || matrix.d != 1) {
+		return false, nil
+	}
+	if axisAlignedMatrix(matrix) {
+		return true, nil
+	}
+	var targets []*editorXML
+	for _, action := range actions.children {
+		if action.name.Local != "Action" || action.name.Space != "" && action.name.Space != actions.name.Space && action.name.Space != ofdNamespace {
+			continue
+		}
+		if action.attr("Event") == "CLICK" && action.child("Region") == nil {
+			targets = append(targets, action)
+		}
+	}
+	if len(targets) == 0 {
+		return true, nil
+	}
+	box, err := creationBox(boundary)
+	if err != nil {
+		return false, err
+	}
+	inverse, ok := NewMatrix(ctm).Invert()
+	if !ok {
+		return false, nil
+	}
+	points := [4]Point{{}, {X: box.W}, {X: box.W, Y: box.H}, {Y: box.H}}
+	var values [4]string
+	for i, point := range points {
+		x, y := inverse.Transform(point.X, point.Y)
+		if !finite(x) || !finite(y) {
+			return false, nil
+		}
+		values[i] = ofdNumber(x) + " " + ofdNumber(y)
+	}
+	region, err := encodeOFDXML(func(x *ofdXML) {
+		x.root("Region", nil)
+		x.start("Area", ofdAttrs{{Name: xml.Name{Local: "Start"}, Value: values[0]}})
+		for _, point := range values[1:] {
+			x.start("Line", ofdAttrs{{Name: xml.Name{Local: "Point1"}, Value: point}})
+			x.end("Line")
+		}
+		x.start("Close", nil)
+		x.end("Close")
+		x.end("Area")
+		x.end("Region")
+	})
+	if err != nil {
+		return false, err
+	}
+	region = bytes.TrimPrefix(region, []byte(xml.Header))
+	patches := make([]editorXMLPatch, 0, len(targets))
+	for _, target := range targets {
+		patch := editorXMLPatch{target.open, target.open, region}
+		if target.open == target.end {
+			patch = editorXMLContent(n.data, target, region)
+		}
+		patches = append(patches, patch)
+	}
+	data := editorPatchXML(n.data, patches)
+	next, err := newEditorCompositeNode(data)
+	if err != nil {
+		return false, err
+	}
+	n.data, n.node, n.object, n.changed = data, next.node, next.object, true
+	return true, nil
 }
 
 // convertCoordinates 转换内联基本成员的边界约定，引用资源保持标准局部坐标

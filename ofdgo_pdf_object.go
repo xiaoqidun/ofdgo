@@ -222,8 +222,9 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 			if err != nil {
 				return err
 			}
+			decoded = nil
 		}
-		id, err = p.editor.AddImage(data)
+		id, err = p.editor.addDecodedImage(data, decoded)
 		if err != nil {
 			return err
 		}

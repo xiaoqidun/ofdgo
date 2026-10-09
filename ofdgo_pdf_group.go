@@ -493,7 +493,7 @@ func (p *pdfImporter) appendRasterGroup(img image.Image, box Box, opacity float6
 	if err := p.ctx.Err(); err != nil {
 		return err
 	}
-	id, err := p.editor.AddImage(data.Bytes())
+	id, err := p.editor.addDecodedImage(data.Bytes(), img)
 	if err != nil {
 		return err
 	}

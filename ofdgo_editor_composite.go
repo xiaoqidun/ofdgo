@@ -676,8 +676,7 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 // 返回: bool 是否支持
 func (n *editorCompositeNode) transformable() bool {
 	_, invertible := n.parent.Invert()
-	borderActions := n.object.Type == "ImageObject" && n.object.ImageObject.Border != nil && len(n.object.ImageObject.Actions) != 0
-	return invertible && editorXMLTransformable(n.node) && validateEditorGeometry(n.object) == nil && !borderActions
+	return invertible && editorXMLTransformable(n.node) && validateEditorGeometry(n.object) == nil
 }
 
 // compositeMemberStyle 解析成员的继承样式，缺失或循环参数不开放改色
@@ -842,10 +841,10 @@ func (e *Editor) transformCompositeMember(renderer *Renderer, n *editorComposite
 		object = compositeBoundary(object, n.parent, true)
 	}
 	local := inverse.Multiply(matrix).Multiply(n.parent)
-	if object.Type == "ImageObject" && object.ImageObject.Border != nil {
+	if object.Type == "ImageObject" && imageTransformNeedsContainer(object.ImageObject, local) {
 		object.state = n.states[editorObjectID(object)]
 		origin := &editorObjectOrigin{data: n.data, node: n.node, object: n.object}
-		object, err = e.transformBorderedImage(object, local, origin, renderer)
+		object, err = e.transformImageResource(object, local, origin, renderer)
 		if err != nil {
 			return err
 		}
