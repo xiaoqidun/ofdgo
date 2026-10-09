@@ -406,8 +406,14 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 			case pdfgo.Name("LastPage"):
 				index = len(p.editor.pages) - 1
 			case pdfgo.Name("NextPage"):
+				if index < 0 {
+					return nil, &pdfgo.UnsupportedError{Feature: "relative page action without a fixed current page"}
+				}
 				index = min(index+1, len(p.editor.pages)-1)
 			case pdfgo.Name("PrevPage"):
+				if index < 0 {
+					return nil, &pdfgo.UnsupportedError{Feature: "relative page action without a fixed current page"}
+				}
 				index = max(index-1, 0)
 			default:
 				return nil, nil

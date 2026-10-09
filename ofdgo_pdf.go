@@ -215,6 +215,9 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	}
 	if len(editor.pages) != 0 {
 		importer.page = -1
+		if err := importer.outlines(ctx); err != nil {
+			return nil, PDFImportReport{}, fmt.Errorf("import PDF outlines: %w", err)
+		}
 		if err := importer.documentOpenActions(ctx); err != nil {
 			return nil, PDFImportReport{}, fmt.Errorf("import PDF document actions: %w", err)
 		}
