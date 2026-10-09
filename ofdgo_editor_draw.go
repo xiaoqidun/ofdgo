@@ -43,7 +43,7 @@ func (e *Editor) drawParamXML(id string) ([]byte, error) {
 	}
 	if params := root.child("DrawParams"); params != nil {
 		for _, node := range params.children {
-			if node.name.Local == "DrawParam" && node.attr("ID") == id && (node.name.Space == "" || node.name.Space == ofdNamespace || node.name.Space == "http://www.ofdspec.org") {
+			if node.name.Local == "DrawParam" && node.attr("ID") == id && classifyOFDNamespace(node.name.Space) != ofdXMLUnknown {
 				return editorXMLStandalone(data[node.start:node.end], node)
 			}
 		}

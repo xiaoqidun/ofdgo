@@ -257,7 +257,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
 		if len(importer.annotationData) != 0 {
-			if err := editor.appendAnnotations(index, importer.annotationData); err != nil {
+			if err := editor.appendAnnotations(index, importer.annotationData, true); err != nil {
 				return fmt.Errorf("import PDF page %d: %w", index+1, err)
 			}
 			importer.annotationData = nil

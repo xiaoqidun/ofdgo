@@ -69,9 +69,9 @@ func (e *Editor) UpdateAnnotation(index int, id, remark, creator string) error {
 			if child := root.child("Remark"); child != nil {
 				data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, child, escaped.Bytes())})
 			} else if root.open == root.end {
-				data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, root, editorXMLText("Remark", remark))})
+				data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, root, root.textXML("Remark", remark))})
 			} else {
-				data = editorPatchXML(data, []editorXMLPatch{{root.open, root.open, editorXMLText("Remark", remark)}})
+				data = editorPatchXML(data, []editorXMLPatch{{root.open, root.open, root.textXML("Remark", remark)}})
 			}
 		}
 		root, err = parseEditorXML(data)
@@ -280,7 +280,10 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 			if err != nil {
 				return err
 			}
-			parts[docName] = editorXMLSetText(docData, doc, [][2]string{{"Annotations", ""}})
+			parts[docName], err = editorXMLSetText(docData, doc, [][2]string{{"Annotations", ""}})
+			if err != nil {
+				return err
+			}
 		}
 	}
 	if len(parts) == 0 {

@@ -272,7 +272,7 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 func decodeEncryptionEntries(data, key, iv []byte, provider CryptoProvider) (encryptionEntries, error) {
 	var entries encryptionEntries
 	valid := func() bool {
-		return entries.XMLName.Space == ofdNamespace && (entries.XMLName.Local == "EncryptEntries" || entries.XMLName.Local == "EncryptedEntries")
+		return entries.XMLName.Space == ofdNamespace2016 && (entries.XMLName.Local == "EncryptEntries" || entries.XMLName.Local == "EncryptedEntries")
 	}
 	if err := xml.Unmarshal(data, &entries); err == nil && valid() {
 		return entries, nil
@@ -468,7 +468,7 @@ func encryptPackageParts(parts map[string][]byte, options EncryptionOptions, pro
 			seed.Users = append(seed.Users, encryptionUser{Name: recipient.UserName, Role: recipient.UserType, Certificate: base64.StdEncoding.EncodeToString(certificate), Key: base64.StdEncoding.EncodeToString(wrapped), IV: base64.StdEncoding.EncodeToString(iv)})
 		}
 	}
-	entries := encryptionEntries{XMLName: xml.Name{Space: ofdNamespace, Local: "EncryptEntries"}, ID: id}
+	entries := encryptionEntries{XMLName: xml.Name{Space: ofdNamespace2016, Local: "EncryptEntries"}, ID: id}
 	cipherParts := make(map[string][]byte, len(parts)+3)
 	for i, name := range slices.Sorted(maps.Keys(parts)) {
 		if err := progress.report("encrypt", i, len(parts)); err != nil {

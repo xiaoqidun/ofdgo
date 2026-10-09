@@ -24,6 +24,19 @@ type textObjectTokens struct {
 	transforms  []int
 }
 
+// UnmarshalXML 解析字形变换，省略的字符数和字形数均取1
+// 入参: decoder XML解码器, start 变换起始节点
+// 返回: error 解码错误
+func (transform *CGTransform) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
+	type plain CGTransform
+	value := plain{CodeCount: 1, GlyphCount: 1}
+	if err := decoder.DecodeElement(&value, &start); err != nil {
+		return err
+	}
+	*transform = CGTransform(value)
+	return nil
+}
+
 // Token 转发XML令牌并记录直接子节点顺序
 // 返回: xml.Token XML令牌, error 解码错误
 func (s *textObjectTokens) Token() (xml.Token, error) {

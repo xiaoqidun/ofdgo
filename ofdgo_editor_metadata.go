@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"reflect"
 )
 
@@ -51,7 +50,10 @@ func editorUpdateInfoXML(data []byte, docID string, index int, before, after Doc
 			values = append(values, [2]string{field[0], field[2]})
 		}
 	}
-	data = editorXMLSetText(data, info, values)
+	data, err = editorXMLSetText(data, info, values)
+	if err != nil {
+		return nil, err
+	}
 	if !reflect.DeepEqual(before.CustomDatas, after.CustomDatas) {
 		root, err := parseEditorXML(data)
 		if err != nil {
@@ -70,7 +72,7 @@ func editorCreatorXML(data []byte, docID string, index int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return editorXMLSetText(data, info, [][2]string{{"Creator", ofdCreator}, {"CreatorVersion", ""}}), nil
+	return editorXMLSetText(data, info, [][2]string{{"Creator", ofdCreator}, {"CreatorVersion", ""}})
 }
 
 // editorDocInfoXML 获取文档描述，修改缺少描述的源文件时补建标准容器及标识
@@ -88,11 +90,15 @@ func editorDocInfoXML(data []byte, docID string, index int) ([]byte, *editorXML,
 	if info := body.child("DocInfo"); info != nil {
 		return data, info, nil
 	}
-	info, err := editorXMLContainer("DocInfo", nil, editorXMLText("DocID", docID))
+	info, err := body.containerXML("DocInfo", nil, body.textXML("DocID", docID))
 	if err != nil {
 		return nil, nil, err
 	}
-	data = editorPatchXML(data, []editorXMLPatch{{body.open, body.open, info}})
+	if body.open == body.end {
+		data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, body, info)})
+	} else {
+		data = editorPatchXML(data, []editorXMLPatch{{body.open, body.open, info}})
+	}
 	root, err = parseEditorXML(data)
 	if err != nil {
 		return nil, nil, err
@@ -105,6 +111,10 @@ func editorDocInfoXML(data []byte, docID string, index int) ([]byte, *editorXML,
 // 返回: []byte 修改后的XML, error 编码错误
 func editorCustomDatas(data []byte, info *editorXML, values *CustomDatas) ([]byte, error) {
 	container := info.child("CustomDatas")
+	context := info
+	if container != nil {
+		context = container
+	}
 	var items []CustomData
 	if values != nil {
 		items = values.CustomData
@@ -113,7 +123,7 @@ func editorCustomDatas(data []byte, info *editorXML, values *CustomDatas) ([]byt
 	var nodes []*editorXML
 	if container != nil {
 		for _, node := range container.children {
-			if node.name.Local == "CustomData" && (node.name.Space == ofdNamespace || node.name.Space == container.name.Space) {
+			if node.name.Local == "CustomData" && (node.name.Space == ofdNamespace2016 || node.name.Space == container.name.Space) {
 				nodes = append(nodes, node)
 				byName[node.attr("Name")] = append(byName[node.attr("Name")], node)
 			}
@@ -140,10 +150,9 @@ func editorCustomDatas(data []byte, info *editorXML, values *CustomDatas) ([]byt
 			}
 		}
 		if node == nil {
-			entry, err := xml.Marshal(struct {
-				XMLName xml.Name
-				CustomData
-			}{xml.Name{Space: ofdNamespace, Local: "CustomData"}, item})
+			var value bytes.Buffer
+			_ = xml.EscapeText(&value, []byte(item.Value))
+			entry, err := context.containerXML("CustomData", ofdAttrs{{Name: xml.Name{Local: "Name"}, Value: item.Name}}, value.Bytes())
 			if err != nil {
 				return nil, err
 			}
@@ -163,14 +172,14 @@ func editorCustomDatas(data []byte, info *editorXML, values *CustomDatas) ([]byt
 			if err != nil {
 				return nil, err
 			}
-			updated, err := editorCustomDataValue(entry, renamed, original.Value, item.Value)
+			updated, err := editorXMLTextValue(entry, renamed, original.Value, item.Value)
 			if err != nil {
 				return nil, err
 			}
 			encoded = append(encoded, updated)
 			continue
 		}
-		entry, err := editorCustomDataValue(data, node, original.Value, item.Value)
+		entry, err := editorXMLTextValue(data, node, original.Value, item.Value)
 		if err != nil {
 			return nil, err
 		}
@@ -180,9 +189,10 @@ func editorCustomDatas(data []byte, info *editorXML, values *CustomDatas) ([]byt
 		if len(encoded) == 0 {
 			return data, nil
 		}
-		content := []byte("<ofd:CustomDatas xmlns:ofd=\"" + ofdNamespace + "\">")
-		content = append(content, bytes.Join(encoded, nil)...)
-		content = append(content, []byte("</ofd:CustomDatas>")...)
+		content, err := info.containerXML("CustomDatas", nil, bytes.Join(encoded, nil))
+		if err != nil {
+			return nil, err
+		}
 		if info.open == info.end {
 			return editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, info, content)}), nil
 		}
@@ -205,45 +215,4 @@ func editorCustomDatas(data []byte, info *editorXML, values *CustomDatas) ([]byt
 		}
 	}
 	return editorPatchXML(data, patches), nil
-}
-
-// editorCustomDataValue 修改字段文本，保留扩展子节点和注释
-// 入参: data 原XML, node 字段节点, before 原值, after 新值
-// 返回: []byte 字段XML, error 编码错误
-func editorCustomDataValue(data []byte, node *editorXML, before, after string) ([]byte, error) {
-	if before == after {
-		return data[node.start:node.end], nil
-	}
-	var content bytes.Buffer
-	if err := xml.EscapeText(&content, []byte(after)); err != nil {
-		return nil, err
-	}
-	if node.open < node.close {
-		inner := data[node.open:node.close]
-		decoder := xml.NewDecoder(bytes.NewReader(inner))
-		depth := 0
-		for {
-			start := decoder.InputOffset()
-			token, err := decoder.RawToken()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return nil, err
-			}
-			_, text := token.(xml.CharData)
-			if !text || depth != 0 {
-				content.Write(inner[start:decoder.InputOffset()])
-			}
-			switch token.(type) {
-			case xml.StartElement:
-				depth++
-			case xml.EndElement:
-				depth--
-			}
-		}
-	}
-	patch := editorXMLContent(data, node, content.Bytes())
-	entry := append(bytes.Clone(data[node.start:patch.start]), patch.data...)
-	return append(entry, data[patch.end:node.end]...), nil
 }

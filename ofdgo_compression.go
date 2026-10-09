@@ -233,7 +233,7 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 					break
 				}
 				if element, ok := token.(xml.StartElement); ok {
-					if element.Name.Space != "" && element.Name.Space != ofdNamespace && element.Name.Space != "http://www.ofdspec.org" {
+					if classifyOFDNamespace(element.Name.Space) == ofdXMLUnknown {
 						safe = false
 						break
 					}

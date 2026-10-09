@@ -199,7 +199,10 @@ func (e *Editor) UpdateAnnotationLink(page int, id string, target AnnotationLink
 		}
 		if len(targets) == 1 {
 			n := targets[0]
-			updated := link
+			updated, err := editorXMLGenerated(link, n.name.Space)
+			if err != nil {
+				return nil, err
+			}
 			if n.name.Local == "URI" && target.URI != nil {
 				var old URI
 				if err := xml.Unmarshal(data[n.start:n.end], &old); err != nil {
@@ -261,9 +264,17 @@ func (e *Editor) UpdateAnnotationLink(page int, id string, target AnnotationLink
 			}
 			action = bytes.TrimPrefix(action, []byte(xml.Header))
 			if actions := objects[0].child("Actions"); actions != nil {
+				action, err = editorXMLGenerated(action, actions.name.Space)
+				if err != nil {
+					return nil, err
+				}
 				data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, actions, append(bytes.Clone(data[actions.open:actions.close]), action...))})
 			} else {
 				actions, err := editorXMLContainer("Actions", nil, action)
+				if err != nil {
+					return nil, err
+				}
+				actions, err = editorXMLGenerated(actions, objects[0].name.Space)
 				if err != nil {
 					return nil, err
 				}

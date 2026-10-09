@@ -199,7 +199,7 @@ func (e *Editor) Page(index int) (*PageContent, error) {
 		return nil, err
 	}
 	result := cloneEditorData(*page)
-	result.XMLName = xml.Name{Space: ofdNamespace, Local: "Page"}
+	result.XMLName = xml.Name{Space: ofdNamespace2016, Local: "Page"}
 	for i := range result.Content.Layer {
 		layer := &result.Content.Layer[i]
 		layer.TextObject, layer.PathObject, layer.ImageObject, layer.CompositeGraphicUnit = nil, nil, nil, nil

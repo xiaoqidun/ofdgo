@@ -644,6 +644,10 @@ func (e *Editor) appendImportedOutlines(imported []byte) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		value, err = editorXMLGenerated(value, root.name.Space)
+		if err != nil {
+			return nil, err
+		}
 		content = append(content, value...)
 	}
 	preview := *e
@@ -882,11 +886,11 @@ func editorImportText(data []byte, node *editorXML) string {
 	return value.Text
 }
 
-// encode 编码标准OFD节点，保留文字数据和几何值，仅改写资源、标识及路径
+// encode 编码标准OFD节点，重映射引用并将旧式裁剪换算到标准坐标
 // 入参: entry 来源上下文, node 当前节点
 // 返回: []byte 独立XML片段, error 错误信息
 func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]byte, error) {
-	if node.name.Space != "" && node.name.Space != ofdNamespace && node.name.Space != "http://www.ofdspec.org" {
+	if classifyOFDNamespace(node.name.Space) == ofdXMLUnknown {
 		return nil, fmt.Errorf("cannot remap extension namespace %q", node.name.Space)
 	}
 	name := node.name.Local
@@ -931,6 +935,9 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			continue
 		}
 		key, value := attr.Name.Local, attr.Value
+		if name == "Clips" && key == "TransFlag" {
+			continue
+		}
 		var err error
 		switch key {
 		case "ID":
@@ -973,6 +980,22 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			return nil, err
 		}
 		attrs = append(attrs, xml.Attr{Name: xml.Name{Local: key}, Value: value})
+	}
+	if name == "Area" && node.parent != nil && node.parent.name.Local == "Clip" && node.parent.parent != nil && node.parent.parent.name.Local == "Clips" {
+		clips := node.parent.parent
+		transformed := classifyOFDNamespace(clips.name.Space) == ofdXMLLegacy
+		if clips.hasAttr("TransFlag") {
+			var err error
+			transformed, err = strconv.ParseBool(clips.attr("TransFlag"))
+			if err != nil {
+				return nil, err
+			}
+		}
+		if transformed && clips.parent != nil {
+			matrix := NewMatrix(clips.parent.attr("CTM")).Multiply(NewMatrix(node.attr("CTM")))
+			attrs = slices.DeleteFunc(attrs, func(attr xml.Attr) bool { return attr.Name.Space == "" && attr.Name.Local == "CTM" })
+			attrs.add("CTM", matrix.String())
+		}
 	}
 	if m.defaultCS != "" && (name == "FillColor" || name == "StrokeColor" || name == "Color") && node.attr("ColorSpace") == "" {
 		attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "ColorSpace"}, Value: m.defaultCS})
@@ -1251,14 +1274,18 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 			return nil, err
 		}
 		if added {
-			content = editorXMLText("DocumentRes", "/"+strings.TrimPrefix(name, "/"))
+			content = common.textXML("DocumentRes", "/"+strings.TrimPrefix(name, "/"))
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(m.templateParts)) {
-		content = append(content, m.templateParts[id]...)
+		entry, err := editorXMLGenerated(m.templateParts[id], common.name.Space)
+		if err != nil {
+			return nil, err
+		}
+		content = append(content, entry...)
 	}
 	patches := []editorXMLPatch{{position, position, content}}
-	patch := editorXMLPatch{common.open, common.open, editorXMLText("MaxUnitID", strconv.Itoa(m.maximum))}
+	patch := editorXMLPatch{common.open, common.open, common.textXML("MaxUnitID", strconv.Itoa(m.maximum))}
 	if maximum := common.child("MaxUnitID"); maximum != nil {
 		patch = editorXMLContent(data, maximum, []byte(strconv.Itoa(m.maximum)))
 	}
@@ -1268,10 +1295,14 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 		return nil, fmt.Errorf("document has no Pages")
 	}
 	if len(m.pageParts) != 0 {
+		entries, err := editorXMLGenerated(m.pageParts, pages.name.Space)
+		if err != nil {
+			return nil, err
+		}
 		if pages.open == pages.end {
-			patches = append(patches, editorXMLContent(data, pages, m.pageParts))
+			patches = append(patches, editorXMLContent(data, pages, entries))
 		} else {
-			patches = append(patches, editorXMLPatch{pages.close, pages.close, m.pageParts})
+			patches = append(patches, editorXMLPatch{pages.close, pages.close, entries})
 		}
 	}
 	data = editorPatchXML(data, patches)
@@ -1282,7 +1313,10 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 		}
 		if base.document.Annotations == "" {
 			root, _ = parseEditorXML(data)
-			data = editorXMLSetText(data, root, [][2]string{{"Annotations", loc}})
+			data, err = editorXMLSetText(data, root, [][2]string{{"Annotations", loc}})
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	if len(m.attachments) != 0 {
@@ -1293,6 +1327,10 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 		root, _ = parseEditorXML(data)
 		node := root.child("Attachments")
 		if node != nil && len(node.children) != 0 {
+			entries, err = editorXMLGenerated(entries, node.name.Space)
+			if err != nil {
+				return nil, err
+			}
 			content := append(bytes.Clone(data[node.open:node.close]), entries...)
 			data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, content)})
 		} else {
@@ -1301,7 +1339,10 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 				return nil, err
 			}
 			if base.document.Attachments.Path == "" {
-				data = editorXMLSetText(data, root, [][2]string{{"Attachments", loc}})
+				data, err = editorXMLSetText(data, root, [][2]string{{"Attachments", loc}})
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -1324,7 +1365,10 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 			if file, ok := base.reader.packageFile(name); ok {
 				name = cleanPackagePath(file.Name)
 			}
-			files[name] = editorXMLSetText(ofd, root.childAt("DocBody", base.reader.documentIndex), [][2]string{{"Signatures", loc}})
+			files[name], err = editorXMLSetText(ofd, root.childAt("DocBody", base.reader.documentIndex), [][2]string{{"Signatures", loc}})
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	reader := &Reader{Zip: base.reader.Zip, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex}
@@ -1377,6 +1421,10 @@ func mergeImportIndex(reader *Reader, files map[string][]byte, loc, fallback, ro
 		if parseErr != nil {
 			return "", parseErr
 		}
+		entries, err = editorXMLGenerated(entries, root.name.Space)
+		if err != nil {
+			return "", err
+		}
 		if root.open == root.end {
 			data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, root, entries)})
 		} else {
@@ -1400,7 +1448,7 @@ func mergeImportIndex(reader *Reader, files map[string][]byte, loc, fallback, ro
 			id, _ := strconv.Atoi(value)
 			maximum = max(maximum, id)
 		}
-		value := editorXMLText("MaxSignId", strconv.Itoa(maximum))
+		value := root.textXML("MaxSignId", strconv.Itoa(maximum))
 		patch := editorXMLPatch{root.open, root.open, value}
 		if node := root.child("MaxSignId"); node != nil {
 			patch = editorXMLPatch{node.start, node.end, value}

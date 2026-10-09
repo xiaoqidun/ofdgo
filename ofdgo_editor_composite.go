@@ -543,7 +543,7 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 		var collect func(*editorXML) error
 		collect = func(container *editorXML) error {
 			for _, child := range container.children {
-				if child.name.Space != "" && child.name.Space != ofdNamespace && child.name.Space != "http://www.ofdspec.org" {
+				if classifyOFDNamespace(child.name.Space) == ofdXMLUnknown {
 					continue
 				}
 				switch child.name.Local {
@@ -1055,7 +1055,7 @@ func editorResourceReferences(data []byte) ([]string, error) {
 	refs := make(map[string]bool)
 	var collect func(*editorXML)
 	collect = func(node *editorXML) {
-		if node.name.Space == "" || node.name.Space == ofdNamespace || node.name.Space == "http://www.ofdspec.org" {
+		if classifyOFDNamespace(node.name.Space) != ofdXMLUnknown {
 			if node.name.Local == "Thumbnail" || node.name.Local == "Substitution" {
 				if id := editorResourceID(editorImportText(data, node)); id != "" {
 					refs[id] = true

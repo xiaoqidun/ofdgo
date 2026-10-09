@@ -126,7 +126,7 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 	}
 	switch token := token.(type) {
 	case xml.StartElement:
-		if token.Name.Space != "" && token.Name.Space != ofdNamespace {
+		if token.Name.Space != "" && token.Name.Space != ofdNamespace2016 {
 			s.safe = false
 			return false
 		}
@@ -233,7 +233,7 @@ func (x *ofdXML) referenceToken(token xml.Token) {
 	s := x.references
 	switch value := token.(type) {
 	case xml.StartElement:
-		value.Name = xml.Name{Space: ofdNamespace, Local: strings.TrimPrefix(value.Name.Local, "ofd:")}
+		value.Name = xml.Name{Space: ofdNamespace2016, Local: strings.TrimPrefix(value.Name.Local, "ofd:")}
 		for _, attr := range value.Attr {
 			if editorResourceReferenceKind(attr.Name.Local, s.resource) != editorReferenceNone && !editorReferenceTextSafe(attr.Value) {
 				s.safe = false
@@ -241,7 +241,7 @@ func (x *ofdXML) referenceToken(token xml.Token) {
 		}
 		token = value
 	case xml.EndElement:
-		value.Name = xml.Name{Space: ofdNamespace, Local: strings.TrimPrefix(value.Name.Local, "ofd:")}
+		value.Name = xml.Name{Space: ofdNamespace2016, Local: strings.TrimPrefix(value.Name.Local, "ofd:")}
 		token = value
 	case xml.CharData:
 		if s.capture && !editorReferenceTextSafe(string(value)) {

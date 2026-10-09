@@ -38,7 +38,7 @@ func (e *Editor) AddAnnotation(index int, annotation Annotation) (string, error)
 		if err != nil {
 			return err
 		}
-		return next.appendAnnotations(index, data)
+		return next.appendAnnotations(index, data, true)
 	})
 	if err != nil {
 		return "", err
@@ -211,9 +211,9 @@ func (e *Editor) annotationXML(index int, id string) ([]byte, error) {
 }
 
 // appendAnnotations 在独立页面注解文件末尾追加原文，保留原索引及未知内容
-// 入参: index 页面索引, annotations 标准注解XML片段
+// 入参: index 页面索引, annotations 注解XML片段, generated 是否为自产内容
 // 返回: error 错误信息
-func (e *Editor) appendAnnotations(index int, annotations []byte) error {
+func (e *Editor) appendAnnotations(index int, annotations []byte, generated bool) error {
 	base := e.source
 	var err error
 	if base == nil {
@@ -271,6 +271,12 @@ func (e *Editor) appendAnnotations(index int, annotations []byte) error {
 		return err
 	}
 	added := bytes.TrimPrefix(annotations, []byte(xml.Header))
+	if generated {
+		added, err = editorXMLGenerated(added, page.name.Space)
+		if err != nil {
+			return err
+		}
+	}
 	if page.open == page.end {
 		content = editorPatchXML(content, []editorXMLPatch{editorXMLContent(content, page, added)})
 	} else {
@@ -300,7 +306,7 @@ func (e *Editor) appendAnnotations(index int, annotations []byte) error {
 			data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, loc, value.Bytes())})
 		}
 	} else {
-		entry, err := editorXMLContainer("Page", ofdAttrs{{Name: xml.Name{Local: "PageID"}, Value: e.pages[index].ID}}, editorXMLText("FileLoc", "/"+file))
+		entry, err := root.containerXML("Page", ofdAttrs{{Name: xml.Name{Local: "PageID"}, Value: e.pages[index].ID}}, root.textXML("FileLoc", "/"+file))
 		if err != nil {
 			return err
 		}
@@ -329,7 +335,7 @@ func (e *Editor) appendAnnotations(index int, annotations []byte) error {
 				break
 			}
 		}
-		patch := editorXMLPatch{position, position, editorXMLText("Annotations", "/"+name)}
+		patch := editorXMLPatch{position, position, doc.textXML("Annotations", "/"+name)}
 		if node := doc.child("Annotations"); node != nil {
 			var value bytes.Buffer
 			_ = xml.EscapeText(&value, []byte("/"+name))

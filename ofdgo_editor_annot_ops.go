@@ -134,7 +134,7 @@ func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, 
 			content = append(content, bytes.TrimPrefix(data, []byte(xml.Header))...)
 			result = append(result, id)
 		}
-		if err := edit.appendAnnotations(page, content); err != nil {
+		if err := edit.appendAnnotations(page, content, false); err != nil {
 			return err
 		}
 		edit.source.annotationStates = states
@@ -160,7 +160,7 @@ func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, 
 			var added []byte
 			for _, name := range selection.resources {
 				if !registered[name] {
-					added = append(added, editorXMLText("DocumentRes", "/"+name)...)
+					added = append(added, common.textXML("DocumentRes", "/"+name)...)
 					registered[name] = true
 				}
 			}

@@ -135,7 +135,7 @@ func editorXMLRemapIDs(data []byte, root *editorXML, ids map[string]string) ([]b
 	var patches []editorXMLPatch
 	var visit func(*editorXML) error
 	visit = func(node *editorXML) error {
-		if node.name.Space == "" || node.name.Space == ofdNamespace || node.name.Space == "http://www.ofdspec.org" {
+		if classifyOFDNamespace(node.name.Space) != ofdXMLUnknown {
 			decoder := xml.NewDecoder(bytes.NewReader(data[node.start:node.open]))
 			token, err := decoder.RawToken()
 			if err != nil {

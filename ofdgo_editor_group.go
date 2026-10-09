@@ -202,7 +202,7 @@ func editorUngroupable(node *editorXML) bool {
 			return false
 		}
 		for _, member := range content.children {
-			if member.name.Space != "" && member.name.Space != ofdNamespace && member.name.Space != "http://www.ofdspec.org" {
+			if classifyOFDNamespace(member.name.Space) == ofdXMLUnknown {
 				return false
 			}
 			if member.name.Local == "PageBlock" {

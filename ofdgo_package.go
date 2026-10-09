@@ -38,11 +38,11 @@ func packagePagePath(directory, id string) string {
 	return path.Join(directory, "Pages", "Page_"+id, "Content.xml")
 }
 
-// packageOFDNode 判断包索引中的标准节点，兼容旧版及省略命名空间的文档
+// packageOFDNode 识别包索引中的OFD节点，兼容与父节点同命名空间的已知字段
 // 入参: node XML节点, name 节点名称
-// 返回: bool 是否为标准节点
+// 返回: bool 是否为OFD节点
 func packageOFDNode(node *editorXML, name string) bool {
-	return node.name.Local == name && (node.name.Space == "" || node.name.Space == ofdNamespace || node.name.Space == "http://www.ofdspec.org")
+	return node.name.Local == name && (classifyOFDNamespace(node.name.Space) != ofdXMLUnknown || node.parent != nil && node.name.Space == node.parent.name.Space)
 }
 
 // packageName 为新增条目分配文档内路径，不覆盖原文件或本次资源
@@ -118,6 +118,10 @@ func mergePackageResources(reader *Reader, parts map[string][]byte, doc *Documen
 			return "", false, err
 		}
 		target := root.child(group.name.Local)
+		context := root
+		if target != nil {
+			context = target
+		}
 		var content []byte
 		for _, node := range group.children {
 			if target != nil && slices.ContainsFunc(target.children, func(old *editorXML) bool {
@@ -126,6 +130,10 @@ func mergePackageResources(reader *Reader, parts map[string][]byte, doc *Documen
 				continue
 			}
 			entry, err := editorXMLStandalone(added[node.start:node.end], node)
+			if err != nil {
+				return "", false, err
+			}
+			entry, err = editorXMLGenerated(entry, context.name.Space)
 			if err != nil {
 				return "", false, err
 			}
@@ -139,7 +147,7 @@ func mergePackageResources(reader *Reader, parts map[string][]byte, doc *Documen
 			data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, target, content)})
 			continue
 		}
-		content, err = editorXMLContainer(group.name.Local, nil, content)
+		content, err = root.containerXML(group.name.Local, nil, content)
 		if err != nil {
 			return "", false, err
 		}

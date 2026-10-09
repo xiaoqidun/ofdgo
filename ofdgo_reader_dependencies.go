@@ -109,11 +109,11 @@ func (r *Reader) documentFiles(ctx context.Context, index int) (map[string]bool,
 			}
 			switch node := token.(type) {
 			case xml.StartElement:
-				if depth == 0 && node.Name.Space != "" && node.Name.Space != ofdNamespace && node.Name.Space != "http://www.ofdspec.org" {
+				if depth == 0 && classifyOFDNamespace(node.Name.Space) == ofdXMLUnknown {
 					input.Close()
 					goto nextFile
 				}
-				if node.Name.Space != "" && node.Name.Space != ofdNamespace && node.Name.Space != "http://www.ofdspec.org" {
+				if classifyOFDNamespace(node.Name.Space) == ofdXMLUnknown {
 					input.Close()
 					return nil, fmt.Errorf("cannot determine document dependencies in %s", actual)
 				}

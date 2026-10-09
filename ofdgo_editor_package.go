@@ -149,8 +149,9 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 		}
 		var patches []editorXMLPatch
 		if e.maxID != source.document.CommonData.MaxUnitID {
-			value := editorXMLText("MaxUnitID", strconv.Itoa(e.maxID))
+			value := common.textXML("MaxUnitID", strconv.Itoa(e.maxID))
 			if maxID := common.child("MaxUnitID"); maxID != nil {
+				value = maxID.textXML("MaxUnitID", strconv.Itoa(e.maxID))
 				patches = append(patches, editorXMLPatch{maxID.start, maxID.end, value})
 			} else {
 				patches = append(patches, editorXMLPatch{common.open, common.open, value})
@@ -166,7 +167,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 			}
 			var references []byte
 			for _, name := range resourceFiles {
-				references = append(references, editorXMLText("DocumentRes", "/"+name)...)
+				references = append(references, common.textXML("DocumentRes", "/"+name)...)
 			}
 			patches = append(patches, editorXMLPatch{position, position, references})
 		}
@@ -190,10 +191,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 				if original != nil {
 					entries = append(entries, data[original.start:original.end])
 				} else {
-					item, err := e.encodeXML(func(x *ofdXML) {
-						x.root("Page", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: page.ID}, {Name: xml.Name{Local: "BaseLoc"}, Value: page.BaseLoc}})
-						x.end("Page")
-					})
+					item, err := pages.containerXML("Page", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: page.ID}, {Name: xml.Name{Local: "BaseLoc"}, Value: page.BaseLoc}}, nil)
 					if err != nil {
 						return nil, err
 					}
@@ -308,17 +306,24 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 	if page.Area.PhysicalBox != source.original.Area.PhysicalBox {
 		area := source.root.child("Area")
 		if area != nil {
-			areaData := data[area.start:area.end]
+			areaData, err := editorXMLStandalone(data[area.start:area.end], area)
+			if err != nil {
+				return nil, err
+			}
 			areaRoot, err := parseEditorXML(areaData)
 			if err != nil {
 				return nil, err
 			}
-			updated := editorXMLSetText(areaData, areaRoot, [][2]string{{"PhysicalBox", page.Area.PhysicalBox}})
+			updated, err := editorXMLSetText(areaData, areaRoot, [][2]string{{"PhysicalBox", page.Area.PhysicalBox}})
+			if err != nil {
+				return nil, err
+			}
 			patches = append(patches, editorXMLPatch{area.start, area.end, updated})
 		} else {
-			value := []byte("<ofd:Area xmlns:ofd=\"" + ofdNamespace + "\">")
-			value = append(value, editorXMLText("PhysicalBox", page.Area.PhysicalBox)...)
-			value = append(value, []byte("</ofd:Area>")...)
+			value, err := source.root.containerXML("Area", nil, source.root.textXML("PhysicalBox", page.Area.PhysicalBox))
+			if err != nil {
+				return nil, err
+			}
 			patches = append(patches, editorXMLPatch{source.root.open, source.root.open, value})
 		}
 	}
@@ -400,11 +405,15 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 		}
 	}
 	var added []byte
+	context := source.root.child("Content")
+	if context == nil {
+		context = source.root
+	}
 	for _, layer := range page.Content.Layer[len(source.original.Content.Layer):] {
 		if len(layer.Objects) == 0 {
 			continue
 		}
-		encoded, err := e.sourceLayerXML(layer)
+		encoded, err := e.sourceLayerXML(layer, context.name.Space)
 		if err != nil {
 			return nil, err
 		}
@@ -413,9 +422,10 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 	if len(added) != 0 {
 		content := source.root.child("Content")
 		if content == nil {
-			value := []byte("<ofd:Content xmlns:ofd=\"" + ofdNamespace + "\">")
-			value = append(value, added...)
-			value = append(value, []byte("</ofd:Content>")...)
+			value, err := context.containerXML("Content", nil, added)
+			if err != nil {
+				return nil, err
+			}
 			position := source.root.close
 			if actions := source.root.child("Actions"); actions != nil {
 				position = actions.start
@@ -433,8 +443,14 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 			return nil, err
 		}
 		patch := editorXMLPatch{source.root.close, source.root.close, encoded}
+		context := source.root
 		if node := source.root.child("Actions"); node != nil {
 			patch.start, patch.end = node.start, node.end
+			context = node
+		}
+		patch.data, err = editorXMLGenerated(encoded, context.name.Space)
+		if err != nil {
+			return nil, err
 		}
 		patches = append(patches, patch)
 	}
@@ -442,9 +458,9 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 }
 
 // sourceLayerXML 写出新增图层，对复制对象保留原始定位和显式默认值
-// 入参: layer 图层
+// 入参: layer 图层, namespace 所在容器的命名空间
 // 返回: []byte 图层XML, error 错误信息
-func (e *Editor) sourceLayerXML(layer Layer) ([]byte, error) {
+func (e *Editor) sourceLayerXML(layer Layer, namespace string) ([]byte, error) {
 	if !slices.ContainsFunc(layer.Objects, func(object GraphicObject) bool { return e.objectOrigin(editorObjectID(object)) != nil }) {
 		data, err := e.encodeXML(func(x *ofdXML) {
 			attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: layer.ID}, {Name: xml.Name{Local: "Type"}, Value: layer.Type}}
@@ -458,7 +474,10 @@ func (e *Editor) sourceLayerXML(layer Layer) ([]byte, error) {
 			}
 			x.end("Layer")
 		})
-		return bytes.TrimPrefix(data, []byte(xml.Header)), err
+		if err != nil {
+			return nil, err
+		}
+		return editorXMLGenerated(bytes.TrimPrefix(data, []byte(xml.Header)), namespace)
 	}
 	var content []byte
 	for _, object := range layer.Objects {
@@ -471,6 +490,9 @@ func (e *Editor) sourceLayerXML(layer Layer) ([]byte, error) {
 			}
 		} else {
 			data, err = editorObjectXML(object)
+			if err == nil {
+				data, err = editorXMLGenerated(data, namespace)
+			}
 		}
 		if err != nil {
 			return nil, err
@@ -479,7 +501,7 @@ func (e *Editor) sourceLayerXML(layer Layer) ([]byte, error) {
 	}
 	attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: layer.ID}, {Name: xml.Name{Local: "Type"}, Value: layer.Type}}
 	attrs.add("DrawParam", layer.DrawParam)
-	return editorXMLContainer("Layer", attrs, content)
+	return (&editorXML{name: xml.Name{Space: namespace}}).containerXML("Layer", attrs, content)
 }
 
 // sourceNewPageXML 编码新增页面，同时保留复制对象的原文语义
@@ -510,7 +532,7 @@ func (e *Editor) sourcePageData(page PageContent, references *editorReferenceSca
 	}
 	var layers []byte
 	for _, layer := range page.Content.Layer {
-		data, err := e.sourceLayerXML(layer)
+		data, err := e.sourceLayerXML(layer, ofdNamespace2016)
 		if err != nil {
 			return nil, err
 		}

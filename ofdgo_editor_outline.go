@@ -68,6 +68,10 @@ func (e *Editor) AddOutline(parent []int, title string, page int) ([]int, error)
 	if err != nil {
 		return nil, err
 	}
+	item, err = editorXMLGenerated(item, node.name.Space)
+	if err != nil {
+		return nil, err
+	}
 	var content []byte
 	if node.open != node.end {
 		content = bytes.Clone(data[node.open:node.close])
@@ -115,7 +119,7 @@ func (e *Editor) UpdateOutline(path []int, title string, page int) error {
 		if actions != nil {
 			var removals []editorXMLPatch
 			for _, action := range actions.children {
-				if action.name.Space != actions.name.Space && action.name.Space != ofdNamespace && action.name.Space != "" {
+				if action.name.Space != actions.name.Space && action.name.Space != ofdNamespace2016 && action.name.Space != "" {
 					continue
 				}
 				if action.name.Local == "Action" && action.child("Goto") != nil {
@@ -126,7 +130,10 @@ func (e *Editor) UpdateOutline(path []int, title string, page int) error {
 			if actions.open != actions.end {
 				content = editorPatchXML(data[actions.open:actions.close], removals)
 			}
-			added := e.outlineAction(page)
+			added, err := editorXMLGenerated(e.outlineAction(page), actions.name.Space)
+			if err != nil {
+				return err
+			}
 			if len(added) > 0 {
 				addRoot, err := parseEditorXML(added)
 				if err != nil {
@@ -141,8 +148,10 @@ func (e *Editor) UpdateOutline(path []int, title string, page int) error {
 			}
 			patches = append(patches, editorXMLContent(data, actions, content))
 		} else if page >= 0 {
-			var content []byte
-			content = append(content, e.outlineAction(page)...)
+			content, err := editorXMLGenerated(e.outlineAction(page), node.name.Space)
+			if err != nil {
+				return err
+			}
 			if node.open != node.end {
 				content = append(content, data[node.open:node.close]...)
 			}
@@ -275,6 +284,7 @@ func (e *Editor) outlineXML() ([]byte, error) {
 		if node := root.child("Outlines"); node != nil {
 			return editorXMLStandalone(data[node.start:node.end], node)
 		}
+		return root.containerXML("Outlines", nil, nil)
 	}
 	return editorXMLContainer("Outlines", nil, nil)
 }
@@ -305,7 +315,7 @@ func (e *Editor) outlineAction(page int) []byte {
 func editorOutlineChildren(node *editorXML) []*editorXML {
 	var children []*editorXML
 	for _, child := range node.children {
-		if child.name.Local == "OutlineElem" && (child.name.Space == node.name.Space || child.name.Space == ofdNamespace || child.name.Space == "") {
+		if child.name.Local == "OutlineElem" && (child.name.Space == node.name.Space || child.name.Space == ofdNamespace2016 || child.name.Space == "") {
 			children = append(children, child)
 		}
 	}
@@ -415,7 +425,7 @@ func (e *Editor) withOutlines(data []byte) ([]byte, error) {
 	walk = func(node *editorXML) {
 		if actions := node.child("Actions"); actions != nil {
 			for _, action := range actions.children {
-				if action.name.Local != "Action" || action.name.Space != actions.name.Space && action.name.Space != ofdNamespace && action.name.Space != "" {
+				if action.name.Local != "Action" || action.name.Space != actions.name.Space && action.name.Space != ofdNamespace2016 && action.name.Space != "" {
 					continue
 				}
 				if target := action.child("Goto"); target != nil {

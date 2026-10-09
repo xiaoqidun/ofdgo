@@ -53,6 +53,23 @@ func (clips *Clips) usesObjectMatrix() bool {
 	return clips != nil && clips.TransFlag != nil && *clips.TransFlag
 }
 
+// UnmarshalXML 兼容旧命名空间的对象变换裁剪，显式TransFlag优先
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解码错误
+func (clips *Clips) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type plain Clips
+	var value plain
+	if classifyOFDNamespace(start.Name.Space) == ofdXMLLegacy {
+		transform := true
+		value.TransFlag = &transform
+	}
+	if err := d.DecodeElement(&value, &start); err != nil {
+		return err
+	}
+	*clips = Clips(value)
+	return nil
+}
+
 // UnmarshalXML 解析路径并区分省略样式、显式实线与零线宽
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息

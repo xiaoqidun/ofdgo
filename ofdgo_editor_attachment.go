@@ -86,12 +86,20 @@ func (e *Editor) AddAttachment(name string, data []byte) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		entry, err = editorXMLGenerated(entry, root.name.Space)
+		if err != nil {
+			return "", err
+		}
 		if root.open == root.end {
 			parts[name] = editorPatchXML(existing, []editorXMLPatch{editorXMLContent(existing, root, entry)})
 		} else {
 			parts[name] = editorPatchXML(existing, []editorXMLPatch{{root.close, root.close, entry}})
 		}
 	} else if node != nil {
+		entry, err = editorXMLGenerated(entry, node.name.Space)
+		if err != nil {
+			return "", err
+		}
 		if node.open == node.end {
 			parts[docName] = editorPatchXML(docData, []editorXMLPatch{editorXMLContent(docData, node, entry)})
 		} else {
@@ -108,7 +116,7 @@ func (e *Editor) AddAttachment(name string, data []byte) (string, error) {
 		if next := doc.child("Extensions"); next != nil {
 			position = next.start
 		}
-		parts[docName] = editorPatchXML(docData, []editorXMLPatch{{position, position, editorXMLText("Attachments", "/"+name)}})
+		parts[docName] = editorPatchXML(docData, []editorXMLPatch{{position, position, doc.textXML("Attachments", "/"+name)}})
 	}
 	if err := e.commitAnnotationParts(base, parts); err != nil {
 		return "", err
@@ -151,9 +159,9 @@ func (e *Editor) ReplaceAttachment(id string, data []byte) error {
 		if child := node.child("FileLoc"); child != nil {
 			fragment = editorPatchXML(fragment, []editorXMLPatch{editorXMLContent(fragment, child, location.Bytes())})
 		} else if node.open == node.end {
-			fragment = editorPatchXML(fragment, []editorXMLPatch{editorXMLContent(fragment, node, editorXMLText("FileLoc", "/"+file))})
+			fragment = editorPatchXML(fragment, []editorXMLPatch{editorXMLContent(fragment, node, node.textXML("FileLoc", "/"+file))})
 		} else {
-			fragment = editorPatchXML(fragment, []editorXMLPatch{{node.open, node.open, editorXMLText("FileLoc", "/"+file)}})
+			fragment = editorPatchXML(fragment, []editorXMLPatch{{node.open, node.open, node.textXML("FileLoc", "/"+file)}})
 		}
 		root, err := parseEditorXML(fragment)
 		if err != nil {

@@ -312,6 +312,10 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 		}
 	}
 	oldCount := len(list.List)
+	previousList, err := signatureWriteXML("Signatures", list)
+	if err != nil {
+		return nil, err
+	}
 	verifyOptions := append([]SignatureVerifyOption(nil), options.ExistingVerifyOptions...)
 	verifyOptions = append(verifyOptions, WithSignatureCert(identity.cert.Raw))
 	if options.Mode == SignatureAppend && oldCount > 0 {
@@ -342,7 +346,10 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 		if body == nil {
 			return nil, fmt.Errorf("missing document body")
 		}
-		parts["OFD.xml"] = editorXMLSetText(parts["OFD.xml"], body, [][2]string{{"Signatures", "/" + listPath}})
+		parts["OFD.xml"], err = editorXMLSetText(parts["OFD.xml"], body, [][2]string{{"Signatures", "/" + listPath}})
+		if err != nil {
+			return nil, err
+		}
 	}
 	if options.Mode == SignatureReplace {
 		list.List = nil
@@ -373,10 +380,22 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 		parts[sealPath] = bytes.Clone(options.Seal)
 	}
 	list.List = append(list.List, Signature{ID: id, Type: kind, BaseLoc: "/" + sigPath})
-	parts[listPath], err = signatureWriteXML("Signatures", list)
+	updatedList, err := signatureWriteXML("Signatures", list)
 	if err != nil {
 		return nil, err
 	}
+	if original := parts[listPath]; len(original) != 0 {
+		root, err := parseEditorXML(original)
+		if err != nil {
+			return nil, err
+		}
+		updated, err := editorXMLMerge(original, root, previousList, updatedList)
+		if err != nil {
+			return nil, err
+		}
+		updatedList = editorPatchXML(original, []editorXMLPatch{{root.start, root.end, updated}})
+	}
+	parts[listPath] = updatedList
 	refs := SignatureReferences{CheckMethod: identity.digest}
 	names := make([]string, 0, len(parts))
 	for name := range parts {
@@ -518,7 +537,7 @@ func signatureWriteIDs(list *Signatures, listPath string, parts map[string][]byt
 func signatureWriteXML(name string, value any) ([]byte, error) {
 	var out bytes.Buffer
 	out.WriteString(xml.Header)
-	err := xml.NewEncoder(&out).EncodeElement(value, xml.StartElement{Name: xml.Name{Space: ofdNamespace, Local: name}})
+	err := xml.NewEncoder(&out).EncodeElement(value, xml.StartElement{Name: xml.Name{Space: ofdNamespace2016, Local: name}})
 	return out.Bytes(), err
 }
 

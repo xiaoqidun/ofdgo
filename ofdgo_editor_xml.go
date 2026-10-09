@@ -92,7 +92,7 @@ func (n *editorXML) child(name string) *editorXML {
 // 返回: *editorXML 节点，不存在时为nil
 func (n *editorXML) childAt(name string, index int) *editorXML {
 	for _, child := range n.children {
-		if child.name.Local == name && (child.name.Space == n.name.Space || child.name.Space == ofdNamespace || child.name.Space == "") {
+		if child.name.Local == name && (child.name.Space == n.name.Space || child.name.Space == ofdNamespace2016 || child.name.Space == "") {
 			if index == 0 {
 				return child
 			}
@@ -162,15 +162,13 @@ func editorXMLContent(data []byte, node *editorXML, content []byte) editorXMLPat
 // 入参: name 节点名称, value 文本
 // 返回: []byte XML片段
 func editorXMLText(name, value string) []byte {
-	var escaped bytes.Buffer
-	_ = xml.EscapeText(&escaped, []byte(value))
-	return []byte("<ofd:" + name + " xmlns:ofd=\"" + ofdNamespace + "\">" + escaped.String() + "</ofd:" + name + ">")
+	return (&editorXML{name: xml.Name{Space: ofdNamespace2016}}).textXML(name, value)
 }
 
 // editorXMLSetText 更新或追加直接子节点，保留其他节点
 // 入参: data 原文, node 父节点, values 需要修改的字段
-// 返回: []byte 修改后的XML
-func editorXMLSetText(data []byte, node *editorXML, values [][2]string) []byte {
+// 返回: []byte 修改后的XML, error 文本编码错误
+func editorXMLSetText(data []byte, node *editorXML, values [][2]string) ([]byte, error) {
 	var patches []editorXMLPatch
 	var added []byte
 	order := []string{"PhysicalBox", "ApplicationBox", "ContentBox", "BleedBox"}
@@ -181,10 +179,18 @@ func editorXMLSetText(data []byte, node *editorXML, values [][2]string) []byte {
 		child := node.child(value[0])
 		var encoded []byte
 		if value[1] != "" {
-			encoded = editorXMLText(value[0], value[1])
+			encoded = node.textXML(value[0], value[1])
 		}
 		if child != nil {
-			patches = append(patches, editorXMLPatch{child.start, child.end, encoded})
+			if value[1] == "" {
+				patches = append(patches, editorXMLPatch{child.start, child.end, nil})
+			} else {
+				encoded, err := editorXMLTextValue(data, child, editorImportText(data, child), value[1])
+				if err != nil {
+					return nil, err
+				}
+				patches = append(patches, editorXMLPatch{child.start, child.end, encoded})
+			}
 		} else if node.open == node.end {
 			added = append(added, encoded...)
 		} else if len(encoded) != 0 {
@@ -201,7 +207,48 @@ func editorXMLSetText(data []byte, node *editorXML, values [][2]string) []byte {
 	if len(added) != 0 {
 		patches = append(patches, editorXMLContent(data, node, added))
 	}
-	return editorPatchXML(data, patches)
+	return editorPatchXML(data, patches), nil
+}
+
+// editorXMLTextValue 修改字段文本，保留命名空间、属性、扩展子节点和注释
+// 入参: data 原XML, node 字段节点, before 原值, after 新值
+// 返回: []byte 字段XML, error 编码错误
+func editorXMLTextValue(data []byte, node *editorXML, before, after string) ([]byte, error) {
+	if before == after {
+		return data[node.start:node.end], nil
+	}
+	var content bytes.Buffer
+	if err := xml.EscapeText(&content, []byte(after)); err != nil {
+		return nil, err
+	}
+	if node.open < node.close {
+		inner := data[node.open:node.close]
+		decoder := xml.NewDecoder(bytes.NewReader(inner))
+		depth := 0
+		for {
+			start := decoder.InputOffset()
+			token, err := decoder.RawToken()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, err
+			}
+			_, text := token.(xml.CharData)
+			if !text || depth != 0 {
+				content.Write(inner[start:decoder.InputOffset()])
+			}
+			switch token.(type) {
+			case xml.StartElement:
+				depth++
+			case xml.EndElement:
+				depth--
+			}
+		}
+	}
+	patch := editorXMLContent(data, node, content.Bytes())
+	entry := append(bytes.Clone(data[node.start:patch.start]), patch.data...)
+	return append(entry, data[patch.end:node.end]...), nil
 }
 
 // editorXMLObjects 递归登记图层和页块内的对象位置，保留原容器层级
@@ -228,7 +275,7 @@ func editorXMLObjects(container *editorXML, nodes map[string]*editorXML) error {
 // 入参: node 节点, allowed 允许的属性名称
 // 返回: bool 是否支持
 func editorXMLAttributes(node *editorXML, allowed string) bool {
-	if node.name.Space != "" && node.name.Space != ofdNamespace && node.name.Space != "http://www.ofdspec.org" {
+	if classifyOFDNamespace(node.name.Space) == ofdXMLUnknown {
 		return false
 	}
 	for _, attr := range node.attrs {
@@ -326,7 +373,7 @@ func editorXMLContainersSupported(node *editorXML) bool {
 // 入参: node 原始对象节点
 // 返回: bool 是否支持保真复制
 func editorXMLCopyable(node *editorXML) bool {
-	if node.attr("ID") != "" && (editorResourceID(node.attr("ID")) == "" || node.name.Space != "" && node.name.Space != ofdNamespace && node.name.Space != "http://www.ofdspec.org") {
+	if node.attr("ID") != "" && (editorResourceID(node.attr("ID")) == "" || classifyOFDNamespace(node.name.Space) == ofdXMLUnknown) {
 		return false
 	}
 	for _, child := range node.children {
@@ -343,7 +390,11 @@ func editorXMLCopyable(node *editorXML) bool {
 // 返回: []byte 对象XML, error 错误信息
 func editorXMLObject(data []byte, node *editorXML, before, after GraphicObject) ([]byte, error) {
 	if before.Type != after.Type {
-		return editorObjectXML(after)
+		encoded, err := editorObjectXML(after)
+		if err != nil {
+			return nil, err
+		}
+		return editorXMLGenerated(encoded, node.name.Space)
 	}
 	if node.attr("DrawParam") != "" && (before.Type == "TextObject" && before.TextObject.DrawParam == "" || before.Type == "PathObject" && before.PathObject.DrawParam == "") {
 		before = GraphicObject{Type: before.Type}
@@ -373,8 +424,16 @@ func editorXMLObject(data []byte, node *editorXML, before, after GraphicObject) 
 // 入参: data 原文, node 原节点, oldXML 修改前编码, newXML 修改后编码
 // 返回: []byte 更新节点, error 错误信息
 func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte, error) {
-	legacyClip := node.name.Local == "Clips" && node.hasAttr("TransFlag")
+	return editorXMLMergeNamespace(data, node, oldXML, newXML, node.name.Space)
+}
+
+// editorXMLMergeNamespace 合并节点差异，并向已换算的裁剪子树传递目标命名空间
+// 入参: data 原文, node 原节点, oldXML 修改前编码, newXML 修改后编码, namespace 目标命名空间
+// 返回: []byte 更新节点, error 解析错误
+func editorXMLMergeNamespace(data []byte, node *editorXML, oldXML, newXML []byte, namespace string) ([]byte, error) {
+	legacyClip := node.name.Local == "Clips" && (node.hasAttr("TransFlag") || classifyOFDNamespace(node.name.Space) == ofdXMLLegacy)
 	if legacyClip {
+		namespace = ofdNamespace2016
 		var clips Clips
 		if err := xml.Unmarshal(data[node.start:node.end], &clips); err != nil {
 			return nil, err
@@ -404,7 +463,7 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 		}
 	}
 	contentChanged := !bytes.Equal(oldXML[oldNode.open:oldNode.close], newXML[newNode.open:newNode.close])
-	if len(changes) == 0 && !contentChanged {
+	if len(changes) == 0 && !contentChanged && namespace == node.name.Space {
 		return bytes.Clone(data[node.start:node.end]), nil
 	}
 	d := xml.NewDecoder(bytes.NewReader(data[node.start:node.open]))
@@ -413,6 +472,10 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 		return nil, err
 	}
 	start := token.(xml.StartElement)
+	if legacyClip || namespace != node.name.Space {
+		start.Name.Space = editorXMLNamespacePrefix(node)
+		start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Space: "xmlns", Local: start.Name.Space}, Value: namespace})
+	}
 	var result bytes.Buffer
 	name := start.Name.Local
 	if start.Name.Space != "" {
@@ -445,11 +508,11 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 		}
 	}
 	result.WriteByte('>')
-	if contentChanged {
+	if contentChanged || namespace != node.name.Space {
 		matching := len(node.children) > 0 && len(node.children) == len(oldNode.children) && len(node.children) == len(newNode.children)
 		if matching {
 			for i, child := range node.children {
-				if child.name.Space != "" && child.name.Space != ofdNamespace && child.name.Space != "http://www.ofdspec.org" || child.name.Local != oldNode.children[i].name.Local || child.name.Local != newNode.children[i].name.Local {
+				if !packageOFDNode(child, oldNode.children[i].name.Local) || child.name.Local != newNode.children[i].name.Local {
 					matching = false
 					break
 				}
@@ -459,7 +522,11 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 			position := node.open
 			for i, child := range node.children {
 				before, after := oldNode.children[i], newNode.children[i]
-				updated, err := editorXMLMerge(data, child, oldXML[before.start:before.end], newXML[after.start:after.end])
+				childNamespace := child.name.Space
+				if childNamespace == node.name.Space {
+					childNamespace = namespace
+				}
+				updated, err := editorXMLMergeNamespace(data, child, oldXML[before.start:before.end], newXML[after.start:after.end], childNamespace)
 				if err != nil {
 					return nil, err
 				}
@@ -469,7 +536,7 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 			}
 			result.Write(data[position:node.close])
 		} else {
-			content, err := editorXMLMergeContent(data, node, oldXML, oldNode, newXML, newNode)
+			content, err := editorXMLMergeContent(data, node, oldXML, oldNode, newXML, newNode, namespace)
 			if err != nil {
 				return nil, err
 			}
@@ -483,16 +550,24 @@ func editorXMLMerge(data []byte, node *editorXML, oldXML, newXML []byte) ([]byte
 }
 
 // editorXMLMergeContent 按字段合并子节点，保留未修改字段、扩展节点和注释
-// 入参: data 原文数据, node 原文节点, oldXML 修改前数据, oldNode 修改前节点, newXML 修改后数据, newNode 修改后节点
+// 入参: data 原文数据, node 原文节点, oldXML 修改前数据, oldNode 修改前节点, newXML 修改后数据, newNode 修改后节点, namespace 目标命名空间
 // 返回: []byte 子节点内容, error 错误信息
-func editorXMLMergeContent(data []byte, node *editorXML, oldXML []byte, oldNode *editorXML, newXML []byte, newNode *editorXML) ([]byte, error) {
+func editorXMLMergeContent(data []byte, node *editorXML, oldXML []byte, oldNode *editorXML, newXML []byte, newNode *editorXML, namespace string) ([]byte, error) {
 	if len(oldNode.children) == 0 && len(newNode.children) == 0 {
-		return newXML[newNode.open:newNode.close], nil
+		updated, err := editorXMLTextValue(data, node, editorImportText(oldXML, oldNode), editorImportText(newXML, newNode))
+		if err != nil {
+			return nil, err
+		}
+		root, err := parseEditorXML(updated)
+		if err != nil {
+			return nil, err
+		}
+		return updated[root.open:root.close], nil
 	}
 	groups := func(root *editorXML, encoded bool) map[string][]*editorXML {
 		result := make(map[string][]*editorXML)
 		for _, child := range root.children {
-			if encoded || child.name.Space == "" || child.name.Space == ofdNamespace || child.name.Space == "http://www.ofdspec.org" {
+			if encoded || packageOFDNode(child, child.name.Local) {
 				result[child.name.Local] = append(result[child.name.Local], child)
 			}
 		}
@@ -515,7 +590,7 @@ func editorXMLMergeContent(data []byte, node *editorXML, oldXML []byte, oldNode 
 		for _, child := range next {
 			newData = append(newData, newXML[child.start:child.end]...)
 		}
-		if bytes.Equal(oldData, newData) {
+		if bytes.Equal(oldData, newData) && namespace == node.name.Space {
 			continue
 		}
 		if len(source) > 0 && len(source) == len(old) {
@@ -523,7 +598,11 @@ func editorXMLMergeContent(data []byte, node *editorXML, oldXML []byte, oldNode 
 				var encoded []byte
 				if i < len(next) {
 					var err error
-					encoded, err = editorXMLMerge(data, child, oldXML[old[i].start:old[i].end], newXML[next[i].start:next[i].end])
+					childNamespace := child.name.Space
+					if childNamespace == node.name.Space {
+						childNamespace = namespace
+					}
+					encoded, err = editorXMLMergeNamespace(data, child, oldXML[old[i].start:old[i].end], newXML[next[i].start:next[i].end], childNamespace)
 					if err != nil {
 						return nil, err
 					}
@@ -533,7 +612,11 @@ func editorXMLMergeContent(data []byte, node *editorXML, oldXML []byte, oldNode 
 			if len(next) > len(source) {
 				var added []byte
 				for _, child := range next[len(source):] {
-					added = append(added, editorXMLEncodedFragment(newXML, child)...)
+					fragment, err := editorXMLEncodedFragment(newXML, child, namespace)
+					if err != nil {
+						return nil, err
+					}
+					added = append(added, fragment...)
 				}
 				position := source[len(source)-1].end - node.open
 				patches = append(patches, editorXMLPatch{position, position, added})
@@ -542,7 +625,11 @@ func editorXMLMergeContent(data []byte, node *editorXML, oldXML []byte, oldNode 
 		}
 		newData = nil
 		for _, child := range next {
-			newData = append(newData, editorXMLEncodedFragment(newXML, child)...)
+			fragment, err := editorXMLEncodedFragment(newXML, child, namespace)
+			if err != nil {
+				return nil, err
+			}
+			newData = append(newData, fragment...)
 		}
 		if len(source) > 0 {
 			for i, child := range source {
@@ -566,13 +653,26 @@ func editorXMLMergeContent(data []byte, node *editorXML, oldXML []byte, oldNode 
 	return editorPatchXML(data[node.open:node.close], patches), nil
 }
 
-// editorXMLEncodedFragment 为新增的标准编码节点局部声明前缀，不覆盖原文命名空间
-// 入参: data 标准编码内容, node 待插入的子节点
-// 返回: []byte 独立片段
-func editorXMLEncodedFragment(data []byte, node *editorXML) []byte {
-	position := node.open - node.start - 1
-	fragment := data[node.start:node.end]
-	return editorPatchXML(fragment, []editorXMLPatch{{position, position, []byte(" xmlns:ofd=\"" + ofdNamespace + "\"")}})
+// editorXMLEncodedFragment 补齐自产片段的继承声明，再按目标命名空间编码
+// 入参: data 标准编码内容, node 待插入节点, namespace 目标命名空间
+// 返回: []byte 独立片段, error 解析错误
+func editorXMLEncodedFragment(data []byte, node *editorXML, namespace string) ([]byte, error) {
+	fragment, err := editorXMLStandalone(data[node.start:node.end], node)
+	if err != nil {
+		return nil, err
+	}
+	if node.name.Space == "ofd" {
+		root, err := parseEditorXML(fragment)
+		if err != nil {
+			return nil, err
+		}
+		position := root.open - 1
+		if fragment[position-1] == '/' {
+			position--
+		}
+		fragment = editorPatchXML(fragment, []editorXMLPatch{{position, position, []byte(" xmlns:ofd=\"" + ofdNamespace2016 + "\"")}})
+	}
+	return editorXMLGenerated(fragment, namespace)
 }
 
 // editorXMLAttribute 修改单个标准属性，保留节点其余原文
@@ -594,13 +694,7 @@ func editorXMLAttribute(data []byte, node *editorXML, name, value string) ([]byt
 // 入参: name 节点名称, attrs 属性, content 子节点XML
 // 返回: []byte XML片段, error 错误信息
 func editorXMLContainer(name string, attrs ofdAttrs, content []byte) ([]byte, error) {
-	var output bytes.Buffer
-	attrs.add("xmlns:ofd", ofdNamespace)
-	value := struct {
-		Content []byte `xml:",innerxml"`
-	}{content}
-	err := xml.NewEncoder(&output).EncodeElement(value, xml.StartElement{Name: xml.Name{Local: "ofd:" + name}, Attr: attrs})
-	return output.Bytes(), err
+	return (&editorXML{name: xml.Name{Space: ofdNamespace2016}}).containerXML(name, attrs, content)
 }
 
 // editorXMLStandalone 补齐原对象继承的命名空间，使跨页复制不依赖原父节点
@@ -627,6 +721,9 @@ func editorXMLStandalone(data []byte, source *editorXML) ([]byte, error) {
 				}
 			}
 		}
+	}
+	if _, exists := namespaces["xmlns"]; !exists {
+		namespaces["xmlns"] = ""
 	}
 	for _, attr := range root.attrs {
 		if attr.Name.Space == "xmlns" {

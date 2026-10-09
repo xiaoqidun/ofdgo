@@ -97,7 +97,7 @@ func (e *Editor) prunePageReferences(parts map[string][]byte, generated map[stri
 					return err
 				}
 			}
-			if node.name.Space != "" && node.name.Space != ofdNamespace && node.name.Space != "http://www.ofdspec.org" {
+			if classifyOFDNamespace(node.name.Space) == ofdXMLUnknown {
 				return nil
 			}
 			remove := false
@@ -192,7 +192,7 @@ func pruneCreatedPageReferences(data []byte, removed map[string]bool) ([]byte, e
 	var patches []editorXMLPatch
 	var walk func(*editorXML)
 	walk = func(node *editorXML) {
-		if node.name.Space != ofdNamespace {
+		if node.name.Space != ofdNamespace2016 {
 			return
 		}
 		if node.name.Local == "Action" {

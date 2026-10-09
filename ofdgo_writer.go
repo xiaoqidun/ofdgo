@@ -31,9 +31,6 @@ import (
 	"time"
 )
 
-// ofdNamespace 为OFD文档的XML命名空间
-const ofdNamespace = "http://www.ofdspec.org/2016"
-
 // editorProgress 保存准备阶段的进度检查点，内存预览使用nil
 type editorProgress func(stage string, completed, total int) error
 
@@ -675,7 +672,7 @@ func (x *ofdXML) checkContext() bool {
 // root 写入声明命名空间的根节点
 // 入参: name 节点名, attrs 属性
 func (x *ofdXML) root(name string, attrs ofdAttrs) {
-	attrs.add("xmlns:ofd", ofdNamespace)
+	attrs.add("xmlns:ofd", ofdNamespace2016)
 	x.start(name, attrs)
 }
 
@@ -785,7 +782,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 	var fill, stroke *FillColor
 	var actions []Action
 	if root {
-		attrs.add("xmlns:ofd", ofdNamespace)
+		attrs.add("xmlns:ofd", ofdNamespace2016)
 	}
 	switch object.Type {
 	case "TextObject", "Text":
@@ -1112,7 +1109,7 @@ func (x *ofdXML) shading(name string, attrs ofdAttrs, segments []ShdSegment) {
 // 入参: name 元素名称, value 元素内容
 func (x *ofdXML) element(name string, value any) {
 	if x.checkContext() {
-		x.err = x.encoder.EncodeElement(value, xml.StartElement{Name: xml.Name{Space: ofdNamespace, Local: name}})
+		x.err = x.encoder.EncodeElement(value, xml.StartElement{Name: xml.Name{Space: ofdNamespace2016, Local: name}})
 		x.referenceElement(name, value)
 	}
 }

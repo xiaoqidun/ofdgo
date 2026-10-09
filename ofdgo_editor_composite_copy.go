@@ -347,7 +347,7 @@ func (n *editorCompositeNode) preserveActionRegions(matrix Matrix) (bool, error)
 	}
 	var targets []*editorXML
 	for _, action := range actions.children {
-		if action.name.Local != "Action" || action.name.Space != "" && action.name.Space != actions.name.Space && action.name.Space != ofdNamespace {
+		if action.name.Local != "Action" || action.name.Space != "" && action.name.Space != actions.name.Space && action.name.Space != ofdNamespace2016 {
 			continue
 		}
 		if action.attr("Event") == "CLICK" && action.child("Region") == nil {
@@ -425,7 +425,7 @@ func (n *editorCompositeNode) convertCoordinates(parent Matrix, inward bool) err
 			}
 		}
 		for _, child := range node.children {
-			if child.name.Space != "" && child.name.Space != ofdNamespace && child.name.Space != "http://www.ofdspec.org" {
+			if classifyOFDNamespace(child.name.Space) == ofdXMLUnknown {
 				continue
 			}
 			switch child.name.Local {
@@ -487,7 +487,7 @@ func (n *editorCompositeNode) loadedScope(path []int) *editorCompositeNode {
 func compositeContainers(node *editorXML) []*editorXML {
 	var result []*editorXML
 	for _, child := range node.children {
-		if (child.name.Local == "Content" || child.name.Local == "PageBlock") && (child.name.Space == "" || child.name.Space == ofdNamespace || child.name.Space == "http://www.ofdspec.org") {
+		if (child.name.Local == "Content" || child.name.Local == "PageBlock") && classifyOFDNamespace(child.name.Space) != ofdXMLUnknown {
 			result = append(result, child)
 		}
 	}
