@@ -22,6 +22,12 @@ type ObjectContour struct {
 	EvenOdd bool   `json:"evenOdd,omitempty"`
 }
 
+// annotationMeasurement 按注解绘制顺序收集对象范围和轮廓
+type annotationMeasurement struct {
+	renderer *Renderer
+	result   ObjectMeasurement
+}
+
 // ObjectBounds 获取文字、路径、图片或复合对象在页面坐标中的轴对齐范围，不修改对象
 // 文字采用字形范围，路径包含描边与裁剪，图片采用裁剪后的几何范围，不解码像素或排除透明像素
 // 底纹按填充或描边轮廓度量，不展开图案单元
@@ -38,11 +44,11 @@ func (r *Renderer) ObjectBounds(object GraphicObject, drawParam string) (Box, er
 // 入参: annotation 注解
 // 返回: Box 页面范围, []ObjectContour 命中轮廓, error 错误信息
 func (r *Renderer) AnnotationGeometry(annotation Annotation) (Box, []ObjectContour, error) {
-	object := GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: CompositeGraphicUnit{Boundary: annotation.Appearance.Boundary, Objects: annotation.Appearance.Objects}}
-	box, contours, err := r.ObjectGeometry(object, "")
-	if err != nil {
-		return box, contours, err
+	measurement := &annotationMeasurement{renderer: r}
+	if err := r.walkAnnotation(annotation, measurement); err != nil {
+		return Box{}, nil, err
 	}
+	box, contours := measurement.result.Bounds, measurement.result.Contours
 	for _, source := range r.annotationActionSources([]Annotation{annotation}) {
 		for _, action := range source.Actions {
 			if action.Event != "CLICK" {
@@ -63,6 +69,26 @@ func (r *Renderer) AnnotationGeometry(annotation Annotation) (Box, []ObjectConto
 		}
 	}
 	return box, contours, nil
+}
+
+// DrawObject 使用对象实际继承状态度量注解内容，不附加容器裁剪
+// 入参: object 图形对象, state 绘制状态
+// 返回: error 度量错误
+func (m *annotationMeasurement) DrawObject(object *GraphicObject, state RenderState) error {
+	result, err := m.renderer.MeasureObject(*object, MeasureOptions{Defaults: state.Defaults, Parent: state.Parent, BoundaryInCTM: state.BoundaryInCTM, Clip: state.Clip, Contours: true})
+	if err != nil {
+		return err
+	}
+	m.result.Bounds = unionTextBox(m.result.Bounds, result.Bounds)
+	m.result.Contours = append(m.result.Contours, result.Contours...)
+	return nil
+}
+
+// DrawStamp 满足页面访问接口，注解外观遍历不包含数字签章
+// 入参: stamp 数字签章
+// 返回: error 始终为空
+func (m *annotationMeasurement) DrawStamp(stamp Stamp) error {
+	return nil
 }
 
 // ObjectContours 获取路径、图片或复合对象的实际绘制区域，包含描边、虚线、变换及对象裁剪

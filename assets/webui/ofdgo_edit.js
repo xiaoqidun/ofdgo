@@ -1391,7 +1391,7 @@ export class CanvasEditor {
 				right = Math.max(right, x + advance * source.scale);
 				bottom = Math.max(bottom, y + size - baseline);
 				naturalX += advance;
-				x += run.dx?.length ? run.dx[Math.min(index, run.dx.length - 1)] * PX_PER_MM : run.dy?.length ? 0 : advance * source.scale;
+				x += run.dx?.length ? run.dx[Math.min(index, run.dx.length - 1)] * PX_PER_MM : 0;
 				y += run.dy?.length ? run.dy[Math.min(index, run.dy.length - 1)] * PX_PER_MM : 0;
 				index++;
 			}

@@ -19,9 +19,7 @@ import "slices"
 // TextPositioner 按OFD坐标及增量定位连续字形，不依赖字体或绘图库
 type TextPositioner struct {
 	xs, ys, dxs, dys []float64
-	direction        Point
 	current          Point
-	previous         float64
 	index            int
 }
 
@@ -54,34 +52,22 @@ func textCodeOrigins(codes []TextCode, ascent float64) []TextCode {
 	return codes
 }
 
-// NewTextPositioner 创建单个TextCode的定位器，方向采用OFD角度
-// 入参: code 文本定位数据, direction 阅读方向
+// NewTextPositioner 创建单个TextCode的定位器，缺省位移不改变字形原点
+// 入参: code 文本定位数据
 // 返回: TextPositioner 字形定位器
-func NewTextPositioner(code TextCode, direction int) TextPositioner {
-	result := TextPositioner{xs: parseFloats(code.X), ys: parseFloats(code.Y), dxs: parseFloats(code.DeltaX), dys: parseFloats(code.DeltaY), direction: Point{X: 1}}
-	switch direction {
-	case 90:
-		result.direction = Point{Y: 1}
-	case 180:
-		result.direction = Point{X: -1}
-	case 270:
-		result.direction = Point{Y: -1}
-	}
-	return result
+func NewTextPositioner(code TextCode) TextPositioner {
+	return TextPositioner{xs: parseFloats(code.X), ys: parseFloats(code.Y), dxs: parseFloats(code.DeltaX), dys: parseFloats(code.DeltaY)}
 }
 
-// Next 返回下一个字形位置并保存其推进长度，显式坐标和增量优先
-// 入参: advance 当前字形推进长度，单位为毫米
+// Next 根据坐标与位移返回下一个字形原点
 // 返回: Point 字形原点
-func (p *TextPositioner) Next(advance float64) Point {
+func (p *TextPositioner) Next() Point {
 	i := p.index
 	if i < len(p.xs) {
 		p.current.X = p.xs[i]
 	} else if i > 0 {
 		if dx, ok := textDelta(p.dxs, i-1); ok {
 			p.current.X += dx
-		} else if len(p.dys) == 0 {
-			p.current.X += p.previous * p.direction.X
 		}
 	}
 	if i < len(p.ys) {
@@ -89,11 +75,8 @@ func (p *TextPositioner) Next(advance float64) Point {
 	} else if i > 0 {
 		if dy, ok := textDelta(p.dys, i-1); ok {
 			p.current.Y += dy
-		} else if len(p.dxs) == 0 {
-			p.current.Y += p.previous * p.direction.Y
 		}
 	}
-	p.previous = advance
 	p.index++
 	return p.current
 }

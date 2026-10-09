@@ -203,7 +203,6 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	glyphTransforms := r.textObjectGlyphTransforms(fontID, obj)
 	hasUnderline := strings.Contains(obj.Decoration, "Underline")
 	_, shadedFill := fillPaint.(canvas.Gradient)
-	verticalAdvance := (obj.ReadDirection-obj.CharDirection)%180 != 0
 	codePos := 0
 	textPos := 0
 	for index, tc := range obj.TextCode {
@@ -223,7 +222,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		if textRun != nil && tc.Index == "" {
 			spans = textGlyphSpans(runes, glyphTransforms, codePos)
 		}
-		positioner := NewTextPositioner(tc, obj.ReadDirection)
+		positioner := NewTextPositioner(tc)
 		xs, ys := positioner.xs, positioner.ys
 		drawAsPath := embeddedFont || face.FauxBold > 0 || textCodePositioned(tc, xs, ys) || fillClip != nil || shadedFill || fillPattern != nil || shouldStroke
 		for i, glyph := range glyphs {
@@ -244,11 +243,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			} else {
 				glyphWidth = textGlyphWidth(face, glyph)
 			}
-			advance := glyphWidth * hScale
-			if verticalAdvance {
-				advance = sizeMM
-			}
-			position := positioner.Next(advance)
+			position := positioner.Next()
 			cx, cy := position.X, position.Y
 			var canvasX, canvasY float64
 			if boundaryInCTM && parentCTM != nil {

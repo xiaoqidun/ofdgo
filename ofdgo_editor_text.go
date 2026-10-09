@@ -229,7 +229,7 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 					unit *= obj.HScale
 				}
 				advance := func(char rune) float64 { return float64(sfnt.GlyphAdvance(sfnt.GlyphIndex(char))) * unit }
-				if codes[i].DeltaX != "" || codes[i].DeltaY == "" {
+				if codes[i].DeltaX != "" {
 					codes[i].DeltaX = rewriteTextDeltas(codes[i].DeltaX, runes, replacement, from, to, advance)
 				}
 				if codes[i].DeltaY != "" {

@@ -171,15 +171,11 @@ func (r *Renderer) PositionText(object TextObject, state RenderState) (*Position
 		if err != nil {
 			return nil, err
 		}
-		positioner := NewTextPositioner(code, object.ReadDirection)
+		positioner := NewTextPositioner(code)
 		for i, gid := range ids {
 			path := paths[i]
 			width := float64(metrics.GlyphAdvance(gid)) * unit
-			advance := width * horizontal
-			if (object.ReadDirection-object.CharDirection)%180 != 0 {
-				advance = size
-			}
-			origin := positioner.Next(advance)
+			origin := positioner.Next()
 			scaleX := horizontal
 			if bold && len(path) > 0 {
 				outline, err := geometry.Stroke(path, StrokeOptions{Width: size * 0.04, Join: "Round", Cap: "Round"})
