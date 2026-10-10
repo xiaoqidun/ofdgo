@@ -725,7 +725,7 @@ func parseCFFReal(data []byte) (string, int) {
 	return sb.String(), i
 }
 
-// encodeCFFDict 编码CFF字典 (仅使用float64操作数)
+// encodeCFFDict 编码CFF字典，将字体类型标识置于首项
 // 入参: dict CFF字典映射
 // 返回: []byte 编码后的字典数据
 func encodeCFFDict(dict cffDict) []byte {
@@ -735,6 +735,13 @@ func encodeCFFDict(dict cffDict) []byte {
 		keys = append(keys, k)
 	}
 	sort.Ints(keys)
+	for index, op := range keys {
+		if op == 1220 || op == 1230 {
+			copy(keys[1:index+1], keys[:index])
+			keys[0] = op
+			break
+		}
+	}
 	for _, op := range keys {
 		vals := dict[op]
 		if len(vals) == 0 && (op >= 6 && op <= 9 || op == 1212 || op == 1213) {

@@ -27,6 +27,9 @@ func (s *type2State) calculate(op int) error {
 	count := 0
 	switch op {
 	case 1223:
+		if s.dependencies != nil {
+			return fmt.Errorf("random Type2 program cannot be subset safely")
+		}
 		s.seed = uint64(uint32(s.seed*1664525 + 1013904223))
 		return s.push(float64(s.seed+1) / 4294967296)
 	case 1205, 1209, 1214, 1218, 1221, 1226, 1227, 1229:

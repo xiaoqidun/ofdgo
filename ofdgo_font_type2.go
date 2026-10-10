@@ -54,6 +54,7 @@ type type2State struct {
 	output           *bytes.Buffer
 	seed             uint64
 	steps            *int
+	dependencies     map[uint16]bool
 }
 
 // readType2Index 读取并校验CFF索引的全部偏移，不复制程序字节
@@ -499,7 +500,10 @@ func (s *type2State) appendComponent(code, x, y float64) error {
 	if !ok {
 		return fmt.Errorf("missing Type2 component %s", name)
 	}
-	child := type2State{font: s.font, matrix: s.matrix, width: s.font.def, component: true, output: s.output, originX: x, originY: y, outX: s.outX, outY: s.outY, seed: s.font.seed + uint64(gid), steps: s.steps, stripHints: s.stripHints}
+	if s.dependencies != nil {
+		s.dependencies[uint16(gid)] = true
+	}
+	child := type2State{font: s.font, matrix: s.matrix, width: s.font.def, component: true, output: s.output, originX: x, originY: y, outX: s.outX, outY: s.outY, seed: s.font.seed + uint64(gid), steps: s.steps, stripHints: s.stripHints, dependencies: s.dependencies}
 	_, err := child.run(s.font.chars[gid], 0)
 	if err != nil {
 		return fmt.Errorf("invalid Type2 component %s: %w", name, err)
