@@ -123,7 +123,7 @@ func (e *Editor) ImportObjects(source *Editor, sourcePage int, ids []string, pag
 	if err != nil {
 		return nil, err
 	}
-	migration.ids[ref.ID], migration.strictLinks = target.ID, true
+	migration.ids[editorImportKey(ref.ID)], migration.strictLinks = target.ID, true
 	pageName := reader.ResPath(ref.BaseLoc)
 	content, err := reader.PageContentByIndex(sourcePage)
 	if err != nil {
@@ -274,7 +274,7 @@ func (e *Editor) importPages(source *Reader, indexes []int, at int, copyPage boo
 		if index < 0 || index >= len(doc.Pages.Page) {
 			return nil, fmt.Errorf("source page index %d out of range", index)
 		}
-		id := doc.Pages.Page[index].ID
+		id := editorImportKey(doc.Pages.Page[index].ID)
 		if selected[id] {
 			return nil, fmt.Errorf("duplicate source page %q", id)
 		}
@@ -444,9 +444,12 @@ func (e *Editor) prepareImport(source *Reader, doc *Document, selected map[strin
 		}
 	}
 	m := &editorPageImport{reader: source, doc: doc, directory: e.packageDirectory(), target: base.reader, maximum: maximum, copyPage: copyPage, progress: progress,
-		paths: make(map[string]string), evidence: make(map[string]string), ids: make(map[string]string), pages: selected,
+		paths: make(map[string]string), evidence: make(map[string]string), ids: make(map[string]string), pages: make(map[string]bool, len(selected)),
 		files: make(map[string][]byte), resources: make(map[string]editorImportEntry), used: make(map[string][]byte),
 		templates: make(map[string]TemplatePage), templateParts: make(map[string][]byte), attachments: make(map[string][]byte)}
+	for id, value := range selected {
+		m.pages[editorImportKey(id)] = value
+	}
 	for _, resource := range e.resources {
 		m.files[resource.name] = nil
 	}
@@ -460,8 +463,8 @@ func (e *Editor) prepareImport(source *Reader, doc *Document, selected map[strin
 	}
 	if copyPage {
 		for _, page := range doc.Pages.Page {
-			if !selected[page.ID] {
-				m.ids[page.ID] = page.ID
+			if !m.pages[editorImportKey(page.ID)] {
+				m.ids[editorImportKey(page.ID)] = page.ID
 			}
 		}
 	}
@@ -471,7 +474,7 @@ func (e *Editor) prepareImport(source *Reader, doc *Document, selected map[strin
 		}
 	}
 	for _, template := range doc.CommonData.TemplatePage {
-		m.templates[template.ID] = template
+		m.templates[editorImportKey(template.ID)] = template
 	}
 	if doc.CommonData.DefaultCS != 0 {
 		m.defaultCS, err = m.reference(strconv.Itoa(doc.CommonData.DefaultCS))
@@ -560,7 +563,7 @@ func (m *editorPageImport) outlines() ([]byte, error) {
 			}
 			for _, action := range value.Action {
 				if action.Goto != nil {
-					if dest := gotoDest(action.Goto, bookmarks); dest != nil && m.pages[dest.PageID] {
+					if dest := gotoDest(action.Goto, bookmarks); dest != nil && m.pages[editorImportKey(dest.PageID)] {
 						selected = true
 					}
 				}
@@ -692,16 +695,28 @@ func (e *Editor) importBase() (*editorSource, error) {
 	return editor.source, nil
 }
 
-// id 为来源标识分配稳定且不与目标冲突的新标识
+// editorImportKey 统一数值标识的映射键，保留导入过程中使用的内部名称
+// 入参: value 标识或内部名称
+// 返回: string 映射键
+func editorImportKey(value string) string {
+	if id := editorResourceID(value); id != "" {
+		return id
+	}
+	return value
+}
+
+// id 为数值相等的来源标识分配同一新标识，保留原写法供编辑状态迁移
 // 入参: value 来源标识
 // 返回: string 新标识
 func (m *editorPageImport) id(value string) string {
-	if id := m.ids[value]; id != "" {
+	key := editorImportKey(value)
+	if id := m.ids[key]; id != "" {
+		m.ids[value] = id
 		return id
 	}
 	m.maximum++
 	id := strconv.Itoa(m.maximum)
-	m.ids[value] = id
+	m.ids[key], m.ids[value] = id, id
 	return id
 }
 
@@ -722,7 +737,7 @@ func (m *editorPageImport) resourceIndex(name string) error {
 	}
 	for _, group := range root.children {
 		for _, node := range group.children {
-			m.resources[node.attr("ID")] = editorImportEntry{name: name, base: root.attr("BaseLoc"), group: group.name.Local, data: data, node: node}
+			m.resources[editorImportKey(node.attr("ID"))] = editorImportEntry{name: name, base: root.attr("BaseLoc"), group: group.name.Local, data: data, node: node}
 		}
 	}
 	return nil
@@ -732,27 +747,28 @@ func (m *editorPageImport) resourceIndex(name string) error {
 // 入参: value 来源资源标识
 // 返回: string 新标识, error 错误信息
 func (m *editorPageImport) reference(value string) (string, error) {
+	key := editorImportKey(value)
 	if m.copyPage {
-		if _, ok := m.resources[value]; ok {
-			return value, nil
+		if entry, ok := m.resources[key]; ok {
+			return entry.node.attr("ID"), nil
 		}
-		if _, ok := m.templates[value]; ok {
-			return value, nil
+		if template, ok := m.templates[key]; ok {
+			return template.ID, nil
 		}
 	}
-	if entry, ok := m.resources[value]; ok {
-		if _, seen := m.used[value]; !seen {
-			m.used[value] = nil
+	if entry, ok := m.resources[key]; ok {
+		if _, seen := m.used[key]; !seen {
+			m.used[key] = nil
 			data, err := m.encode(entry, entry.node)
 			if err != nil {
 				return "", err
 			}
-			m.used[value] = data
+			m.used[key] = data
 		}
 	}
-	if template, ok := m.templates[value]; ok {
-		if _, seen := m.templateParts[value]; !seen {
-			m.templateParts[value] = nil
+	if template, ok := m.templates[key]; ok {
+		if _, seen := m.templateParts[key]; !seen {
+			m.templateParts[key] = nil
 			name, err := m.copyXML(m.reader.ResPath(template.BaseLoc), path.Join(m.directory, "Templates", "Template_"+m.id(value), "Content.xml"))
 			if err != nil {
 				return "", err
@@ -761,7 +777,7 @@ func (m *editorPageImport) reference(value string) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			m.templateParts[value] = bytes.TrimPrefix(data, []byte(xml.Header))
+			m.templateParts[key] = bytes.TrimPrefix(data, []byte(xml.Header))
 		}
 	}
 	return m.id(value), nil
@@ -773,7 +789,7 @@ func (m *editorPageImport) reference(value string) (string, error) {
 func (m *editorPageImport) documentReference(group, kind, source, id, loc string) ([]byte, error) {
 	if parent := m.documentRoot.child(group); parent != nil {
 		for _, node := range parent.children {
-			if node.name.Local != kind || node.attr("ID") != source {
+			if node.name.Local != kind || editorImportKey(node.attr("ID")) != editorImportKey(source) {
 				continue
 			}
 			data, err := editorXMLStandalone(m.documentXML[node.start:node.end], node)
@@ -904,7 +920,7 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 		}
 		return nil, nil
 	}
-	if name == "StampAnnot" && !m.pages[node.attr("PageRef")] {
+	if name == "StampAnnot" && !m.pages[editorImportKey(node.attr("PageRef"))] {
 		return nil, nil
 	}
 	if name == "Action" {
@@ -917,7 +933,7 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			for _, bookmark := range m.doc.Bookmarks.Bookmark {
 				bookmarks[bookmark.Name] = bookmark.Dest
 			}
-			if dest := gotoDest(&action, bookmarks); !m.copyPage && (dest == nil || !m.pages[dest.PageID]) {
+			if dest := gotoDest(&action, bookmarks); !m.copyPage && (dest == nil || !m.pages[editorImportKey(dest.PageID)]) {
 				if m.strictLinks {
 					return nil, fmt.Errorf("object link targets a page outside the imported selection")
 				}
@@ -946,8 +962,10 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			}
 			value = m.id(value)
 		case "PageID":
-			if !m.copyPage || m.pages[value] {
+			if !m.copyPage || m.pages[editorImportKey(value)] {
 				value, err = m.reference(value)
+			} else if id := m.ids[editorImportKey(value)]; id != "" {
+				value = id
 			}
 		case "Font", "ResourceID", "Substitution", "ImageMask", "Relative", "DrawParam", "ColorSpace", "Thumbnail", "TemplateID", "PageRef", "RefId":
 			value, err = m.reference(value)
@@ -1139,7 +1157,7 @@ func (m *editorPageImport) annotations() ([]byte, error) {
 	}
 	var entries []byte
 	for _, node := range root.children {
-		if !m.pages[node.attr("PageID")] {
+		if !m.pages[editorImportKey(node.attr("PageID"))] {
 			continue
 		}
 		encoded, err := m.encode(editorImportEntry{name: name, data: data}, node)
@@ -1155,10 +1173,24 @@ func (m *editorPageImport) annotations() ([]byte, error) {
 // 入参: id 来源附件标识
 // 返回: string 新标识, error 错误信息
 func (m *editorPageImport) attachment(id string) (string, error) {
+	key := editorImportKey(id)
 	if m.copyPage {
+		if mapped := m.ids[key]; mapped != "" {
+			return mapped, nil
+		}
+		attachments, err := m.reader.Attachments()
+		if err != nil {
+			return "", err
+		}
+		for _, attachment := range attachments {
+			if editorImportKey(attachment.ID) == key {
+				m.ids[key] = attachment.ID
+				return attachment.ID, nil
+			}
+		}
 		return id, nil
 	}
-	if _, exists := m.attachments[id]; exists {
+	if _, exists := m.attachments[key]; exists {
 		return m.id(id), nil
 	}
 	name := m.reader.ResPath(m.reader.OFD.DocBody[m.reader.documentIndex].DocRoot)
@@ -1178,8 +1210,8 @@ func (m *editorPageImport) attachment(id string) (string, error) {
 	}
 	if root != nil {
 		for _, node := range root.children {
-			if node.name.Local == "Attachment" && node.attr("ID") == id {
-				m.attachments[id], err = m.encode(editorImportEntry{name: name, data: data}, node)
+			if node.name.Local == "Attachment" && editorImportKey(node.attr("ID")) == key {
+				m.attachments[key], err = m.encode(editorImportEntry{name: name, data: data}, node)
 				return m.id(id), err
 			}
 		}
@@ -1221,7 +1253,7 @@ func (m *editorPageImport) signatures() ([]byte, error) {
 		}
 		matched := false
 		for _, stamp := range signature.SignedInfo.StampAnnot {
-			matched = matched || m.pages[stamp.PageRef]
+			matched = matched || m.pages[editorImportKey(stamp.PageRef)]
 		}
 		if !matched {
 			continue
