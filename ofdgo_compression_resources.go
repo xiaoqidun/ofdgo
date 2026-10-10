@@ -51,6 +51,10 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		return nil
 	}
 	generated = e.generatedVectorReferences(parts, generated)
+	scope, err := reader.versionResourceFiles(e.output.ctx, parts)
+	if err != nil {
+		return err
+	}
 	names := make(map[string]bool)
 	if reader != nil {
 		for name := range reader.fileIndex {
@@ -84,6 +88,9 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 			return nil
 		}
 		actual[key] = name
+		if scope != nil && !scope[key] {
+			continue
+		}
 		data, replaced := parts[name]
 		if known, ok := generated[name]; ok && replaced && known.refs != nil && known.matches(data) {
 			refs.merge(known.refs)

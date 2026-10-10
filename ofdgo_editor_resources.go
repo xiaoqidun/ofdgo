@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -42,8 +43,8 @@ type editorResourceRefs struct {
 	versions map[string]bool
 }
 
-// compactSourceReferences 合并自产页面的已知引用，其他条目仍完整扫描
-// 按GB/T33190-2016附录A检查标识和路径引用，保留孤立XML中的引用
+// compactSourceReferences 合并自产页面引用，版本文档按当前版本范围扫描
+// 按GB/T33190-2016附录A检查标识和路径引用，保留扫描范围内孤立XML中的引用
 // 多文档、未知扩展或无法解析的XML不清理资源，避免误删共享或无法确认用途的条目
 // 入参: parts 输出条目, progress 保存进度回调, generated 自产页面及引用
 // 返回: map[string]bool 可移除条目, error 读取或取消错误
@@ -56,6 +57,14 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 	}
 	generated = e.generatedVectorReferences(parts, generated)
 	reader := e.source.reader
+	ctx := context.Background()
+	if e.output != nil {
+		ctx = e.output.ctx
+	}
+	scope, err := reader.versionResourceFiles(ctx, parts)
+	if err != nil {
+		return nil, err
+	}
 	names := make(map[string]bool)
 	for name := range reader.fileIndex {
 		names[name] = true
@@ -65,6 +74,13 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 	}
 	for name := range parts {
 		names[name] = true
+	}
+	if scope != nil {
+		for name := range names {
+			if !scope[cleanPackagePath(name)] {
+				delete(names, name)
+			}
+		}
 	}
 	refs := editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
 	var resources []string

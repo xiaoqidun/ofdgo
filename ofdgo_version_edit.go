@@ -181,10 +181,50 @@ func (r *Reader) versionSharedFiles(ctx context.Context) (map[string]bool, error
 	return shared, nil
 }
 
+// versionResourceFiles 限定当前版本的资源扫描范围，合并其他文档依赖以保护跨文档引用
+// 入参: ctx 取消上下文, parts 待写入条目
+// 返回: map[string]bool 扫描路径，非版本文档返回nil, error 读取或结构错误
+func (r *Reader) versionResourceFiles(ctx context.Context, parts map[string][]byte) (map[string]bool, error) {
+	if r == nil || !r.OFD.DocBody[r.documentIndex].versioned {
+		return nil, nil
+	}
+	entry, err := r.DocumentRoot()
+	if err != nil {
+		return nil, err
+	}
+	graph, err := r.versionEditGraph(ctx, entry, parts)
+	if err != nil {
+		return nil, err
+	}
+	if r.versionInfo != nil {
+		for _, file := range r.versionInfo.Files {
+			graph.used[file.Location] = true
+		}
+	}
+	for index := range r.DocumentCount() {
+		if index == r.documentIndex {
+			continue
+		}
+		files, err := r.documentFiles(ctx, index)
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(graph.used, files)
+	}
+	return graph.used, nil
+}
+
 // versionChanges 隔离当前入口修改涉及的共享文件，同步版本清单，不修改输入包或修改集
 // 入参: ctx 取消上下文, changes 待写入条目
 // 返回: map[string][]byte 隔离后的修改集, error 读取、引用或结构错误
 func (r *Reader) versionChanges(ctx context.Context, changes map[string][]byte) (map[string][]byte, error) {
+	return r.versionOutputChanges(ctx, changes, nil)
+}
+
+// versionOutputChanges 隔离版本改动并同步删除清单，保留其他入口仍需使用的文件
+// 入参: ctx 取消上下文, changes 待写入条目, removed 待删除条目，返回前移除受保护路径
+// 返回: map[string][]byte 隔离后的修改集, error 读取、引用或结构错误
+func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]byte, removed map[string]bool) (map[string][]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -192,16 +232,19 @@ func (r *Reader) versionChanges(ctx context.Context, changes map[string][]byte) 
 	if err != nil {
 		return nil, err
 	}
-	if !r.OFD.DocBody[r.documentIndex].versioned || len(changes) == 0 {
+	if !r.OFD.DocBody[r.documentIndex].versioned || len(changes) == 0 && len(removed) == 0 {
 		return changes, ctx.Err()
 	}
 	parts := maps.Clone(changes)
+	if parts == nil {
+		parts = make(map[string][]byte)
+	}
 	for name, data := range parts {
 		if original, err := r.readFileView(name); err == nil && bytes.Equal(original, data) {
 			delete(parts, name)
 		}
 	}
-	if len(parts) == 0 {
+	if len(parts) == 0 && len(removed) == 0 {
 		return parts, ctx.Err()
 	}
 	shared, err := r.versionSharedFiles(ctx)
@@ -211,6 +254,13 @@ func (r *Reader) versionChanges(ctx context.Context, changes map[string][]byte) 
 	graph, err := r.versionEditGraph(ctx, entry, parts)
 	if err != nil {
 		return nil, err
+	}
+	for name := range removed {
+		if graph.used[name] {
+			delete(removed, name)
+		} else {
+			delete(parts, name)
+		}
 	}
 	owned := maps.Clone(graph.used)
 	if r.versionInfo != nil {
@@ -266,7 +316,7 @@ func (r *Reader) versionChanges(ctx context.Context, changes map[string][]byte) 
 		delete(parts, source)
 	}
 	if r.versionInfo != nil {
-		if err := r.versionManifest(parts, paths, graph.used, shared); err != nil {
+		if err := r.versionManifest(parts, paths, graph.used, shared, removed); err != nil {
 			return nil, err
 		}
 	} else if target := paths[entry]; target != "" {
@@ -283,6 +333,11 @@ func (r *Reader) versionChanges(ctx context.Context, changes map[string][]byte) 
 		}
 		node := root.childAt("DocBody", r.documentIndex).child("DocRoot")
 		parts["OFD.xml"] = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, editorFontXMLText("/"+target))})
+	}
+	for name := range removed {
+		if shared[name] {
+			delete(removed, name)
+		}
 	}
 	return parts, ctx.Err()
 }
@@ -329,9 +384,9 @@ func (file *versionEditFile) rewrite(paths map[string]string) ([]byte, error) {
 }
 
 // versionManifest 更新所选版本的入口与文件清单，保留已有文件标识及扩展字段
-// 入参: parts 输出条目, paths 隔离路径, used 当前内容依赖, shared 其他入口依赖
+// 入参: parts 输出条目, paths 隔离路径, used 当前内容依赖, shared 其他入口依赖, removed 当前版本移除的文件
 // 返回: error 描述读取或XML编码错误
-func (r *Reader) versionManifest(parts map[string][]byte, paths map[string]string, used, shared map[string]bool) error {
+func (r *Reader) versionManifest(parts map[string][]byte, paths map[string]string, used, shared, removed map[string]bool) error {
 	version := r.versionInfo
 	data, err := r.readFile(version.Location)
 	if err != nil {
@@ -353,6 +408,10 @@ func (r *Reader) versionManifest(parts map[string][]byte, paths map[string]strin
 		name, err := versionFileLocation(version.Location, editorImportText(data, node))
 		if err != nil {
 			return err
+		}
+		if removed[name] {
+			patches = append(patches, editorXMLPatch{start: node.start, end: node.end})
+			continue
 		}
 		if target := paths[name]; target != "" {
 			name = target

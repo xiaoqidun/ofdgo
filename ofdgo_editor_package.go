@@ -596,7 +596,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 	if e.output != nil {
 		ctx = e.output.ctx
 	}
-	parts, err = reader.versionChanges(ctx, parts)
+	parts, err = reader.versionOutputChanges(ctx, parts, removed)
 	if err != nil {
 		return 0, err
 	}
