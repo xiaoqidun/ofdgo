@@ -56,6 +56,7 @@ type editorPageImport struct {
 	defaultCS     string
 	attachments   map[string][]byte
 	attachmentIDs map[string]bool
+	signatureIDs  *signatureIDSequence
 	copyPage      bool
 	strictLinks   bool
 	progress      editorProgress
@@ -961,8 +962,7 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			if name == "Attachment" {
 				value, err = m.attachmentID(value)
 			} else if name == "Signature" || name == "StampAnnot" {
-				value = name + ":" + value
-				value = m.id(value)
+				value, err = m.signatureID(entry.name, name, value)
 			} else {
 				value = m.id(value)
 			}
@@ -984,7 +984,11 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			} else {
 				directory := "Res"
 				if name == "Signature" {
-					directory = path.Join("Signs", "Sign_"+m.id("Signature:"+node.attr("ID")))
+					id, idErr := m.signatureID(entry.name, name, node.attr("ID"))
+					if idErr != nil {
+						return nil, idErr
+					}
+					directory = path.Join("Signs", "Sign_"+id)
 				}
 				value, err = m.copyXML(loc, path.Join(m.directory, directory, path.Base(loc)))
 			}
@@ -1236,6 +1240,59 @@ func (m *editorPageImport) attachmentID(id string) (string, error) {
 	return mapped, nil
 }
 
+// signatureID 分配导入签章的文本标识，同名签章注释按来源文件区分
+// 入参: source 来源文件, kind 节点类型, id 来源标识
+// 返回: string 目标标识, error 签章索引或编号错误
+func (m *editorPageImport) signatureID(source, kind, id string) (string, error) {
+	key := kind + ":" + id
+	if kind == "StampAnnot" {
+		key = kind + ":" + source + ":" + id
+	}
+	if mapped := m.ids[key]; mapped != "" {
+		return mapped, nil
+	}
+	if m.signatureIDs == nil {
+		var sequence signatureIDSequence
+		doc, err := m.target.Doc()
+		if err != nil {
+			return "", err
+		}
+		if doc.Signatures != "" {
+			name := m.target.ResPath(doc.Signatures)
+			data, err := m.target.readFile(name)
+			if err != nil {
+				return "", err
+			}
+			var list Signatures
+			if err := xml.Unmarshal(data, &list); err != nil {
+				return "", err
+			}
+			sequence.observe(list.MaxSignID)
+			for _, ref := range list.List {
+				sequence.observe(ref.ID)
+				data, err := m.target.readFile(signatureRefPath(name, ref.BaseLoc))
+				if err != nil {
+					return "", err
+				}
+				file, err := parseSignatureFile(data)
+				if err != nil {
+					return "", err
+				}
+				for _, stamp := range file.SignedInfo.StampAnnot {
+					sequence.observe(stamp.ID)
+				}
+			}
+		}
+		m.signatureIDs = &sequence
+	}
+	mapped, err := m.signatureIDs.next()
+	if err != nil {
+		return "", err
+	}
+	m.ids[key] = mapped
+	return mapped, nil
+}
+
 // signatures 复制所选页面的签章及原始验证凭据，过滤其他页面的签章位置
 // 返回: []byte 签名索引条目, error 错误信息
 func (m *editorPageImport) signatures() ([]byte, error) {
@@ -1401,6 +1458,19 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 		if err != nil {
 			return nil, err
 		}
+		indexName := cleanPackagePath(loc)
+		indexData := files[indexName]
+		indexRoot, err := parseEditorXML(indexData)
+		if err != nil {
+			return nil, err
+		}
+		maximum := "s" + strconv.FormatUint(uint64(*m.signatureIDs), 10)
+		value := indexRoot.textXML("MaxSignId", maximum)
+		patch := editorXMLPatch{indexRoot.open, indexRoot.open, value}
+		if node := indexRoot.child("MaxSignId"); node != nil {
+			patch = editorXMLPatch{node.start, node.end, value}
+		}
+		files[indexName] = editorPatchXML(indexData, []editorXMLPatch{patch})
 		if base.document.Signatures == "" {
 			ofd, err := base.reader.readFile("OFD.xml")
 			if err != nil {
@@ -1482,27 +1552,6 @@ func mergeImportIndex(reader *Reader, files map[string][]byte, loc, fallback, ro
 	}
 	if err != nil {
 		return "", err
-	}
-	if rootName == "Signatures" {
-		root, err := parseEditorXML(data)
-		if err != nil {
-			return "", err
-		}
-		maximum := 0
-		for _, node := range root.children {
-			value := node.attr("ID")
-			if node.name.Local == "MaxSignId" {
-				value = editorImportText(data, node)
-			}
-			id, _ := strconv.Atoi(value)
-			maximum = max(maximum, id)
-		}
-		value := root.textXML("MaxSignId", strconv.Itoa(maximum))
-		patch := editorXMLPatch{root.open, root.open, value}
-		if node := root.child("MaxSignId"); node != nil {
-			patch = editorXMLPatch{node.start, node.end, value}
-		}
-		data = editorPatchXML(data, []editorXMLPatch{patch})
 	}
 	files[name] = data
 	return "/" + name, nil

@@ -471,20 +471,14 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 // 返回: string 签名标识, []SignatureStamp 外观, error 错误信息
 func signatureWriteIDs(list *Signatures, listPath string, parts map[string][]byte, stamps []SignatureStamp) (string, []SignatureStamp, error) {
 	used := make(map[string]bool)
-	var maximum uint64
-	track := func(id string) {
-		n, err := strconv.ParseUint(strings.TrimPrefix(id, "s"), 10, 64)
-		if err == nil && n > maximum {
-			maximum = n
-		}
-	}
-	track(list.MaxSignID)
+	var sequence signatureIDSequence
+	sequence.observe(list.MaxSignID)
 	add := func(id string) error {
 		if !signatureWriteIDValid(id) || used[id] {
 			return fmt.Errorf("invalid or duplicate signature ID: %s", id)
 		}
 		used[id] = true
-		track(id)
+		sequence.observe(id)
 		return nil
 	}
 	for _, ref := range list.List {
@@ -508,26 +502,19 @@ func signatureWriteIDs(list *Signatures, listPath string, parts map[string][]byt
 			}
 		}
 	}
-	next := func() (string, error) {
-		if maximum == ^uint64(0) {
-			return "", fmt.Errorf("signature ID exhausted")
-		}
-		maximum++
-		return "s" + strconv.FormatUint(maximum, 10), nil
-	}
-	id, err := next()
+	id, err := sequence.next()
 	if err != nil {
 		return "", nil, err
 	}
 	for i := range stamps {
 		if stamps[i].ID == "" {
-			stamps[i].ID, err = next()
+			stamps[i].ID, err = sequence.next()
 			if err != nil {
 				return "", nil, err
 			}
 		}
 	}
-	list.MaxSignID = "s" + strconv.FormatUint(maximum, 10)
+	list.MaxSignID = "s" + strconv.FormatUint(uint64(sequence), 10)
 	return id, stamps, nil
 }
 
