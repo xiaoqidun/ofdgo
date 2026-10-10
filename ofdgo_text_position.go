@@ -14,13 +14,27 @@
 
 package ofdgo
 
-import "slices"
+import (
+	"slices"
+	"strconv"
+	"strings"
+	"unicode"
+)
 
 // TextPositioner 按OFD坐标及增量定位连续字形，不依赖字体或绘图库
 type TextPositioner struct {
-	xs, ys, dxs, dys []float64
+	xs, ys, dxs, dys textPositionValues
 	current          Point
-	index            int
+	started          bool
+}
+
+// textPositionValues 按需读取定位数值及重复位移，不展开重复数组
+type textPositionValues struct {
+	data       string
+	value      float64
+	repeat     int
+	compressed bool
+	present    bool
 }
 
 // textCodeOrigins 按标准继承文本段原点，首段缺失坐标时以零横坐标和字体上升高度容错恢复
@@ -56,27 +70,108 @@ func textCodeOrigins(codes []TextCode, ascent float64) []TextCode {
 // 入参: code 文本定位数据
 // 返回: TextPositioner 字形定位器
 func NewTextPositioner(code TextCode) TextPositioner {
-	return TextPositioner{xs: parseFloats(code.X), ys: parseFloats(code.Y), dxs: parseFloats(code.DeltaX), dys: parseFloats(code.DeltaY)}
+	return TextPositioner{
+		xs:  textPositionValues{data: code.X, compressed: strings.Contains(code.X, "g")},
+		ys:  textPositionValues{data: code.Y, compressed: strings.Contains(code.Y, "g")},
+		dxs: textPositionValues{data: code.DeltaX, compressed: strings.Contains(code.DeltaX, "g")},
+		dys: textPositionValues{data: code.DeltaY, compressed: strings.Contains(code.DeltaY, "g")},
+	}
 }
 
 // Next 根据坐标与位移返回下一个字形原点
 // 返回: Point 字形原点
 func (p *TextPositioner) Next() Point {
-	i := p.index
-	if i < len(p.xs) {
-		p.current.X = p.xs[i]
-	} else if i > 0 {
-		if dx, ok := textDelta(p.dxs, i-1); ok {
-			p.current.X += dx
+	if p.started {
+		if p.dxs.repeat > 0 || p.dxs.data != "" {
+			p.dxs.next()
+		}
+		if p.dys.repeat > 0 || p.dys.data != "" {
+			p.dys.next()
+		}
+		if p.dxs.present {
+			p.current.X += p.dxs.value
+		}
+		if p.dys.present {
+			p.current.Y += p.dys.value
 		}
 	}
-	if i < len(p.ys) {
-		p.current.Y = p.ys[i]
-	} else if i > 0 {
-		if dy, ok := textDelta(p.dys, i-1); ok {
-			p.current.Y += dy
+	if p.xs.repeat > 0 || p.xs.data != "" {
+		if x, ok := p.xs.next(); ok {
+			p.current.X = x
 		}
 	}
-	p.index++
+	if p.ys.repeat > 0 || p.ys.data != "" {
+		if y, ok := p.ys.next(); ok {
+			p.current.Y = y
+		}
+	}
+	p.started = true
 	return p.current
+}
+
+// next 读取下一个定位数值
+// 返回: float64 数值, bool 是否存在
+func (v *textPositionValues) next() (float64, bool) {
+	if v.repeat > 0 {
+		v.repeat--
+		return v.value, true
+	}
+	if v.data == "" {
+		return v.value, false
+	}
+	return v.read()
+}
+
+// read 解析剩余定位字段并保存重复计数
+// 返回: float64 数值, bool 是否存在
+func (v *textPositionValues) read() (float64, bool) {
+	count, pending := 0, false
+	for field := v.field(); field != ""; field = v.field() {
+		if v.compressed && field == "g" {
+			pending = true
+			continue
+		}
+		if pending {
+			var err error
+			count, err = strconv.Atoi(field)
+			if err != nil {
+				count = 0
+			}
+			pending = false
+			continue
+		}
+		value, err := strconv.ParseFloat(field, 64)
+		if count > 0 {
+			v.value, v.repeat, v.present = value, count-1, true
+			return value, true
+		}
+		if err == nil {
+			v.value, v.present = value, true
+			return value, true
+		}
+	}
+	return v.value, false
+}
+
+// field 读取定位数组中的下一个字段
+// 返回: string 数值或重复标记，无剩余字段时为空
+func (v *textPositionValues) field() string {
+	start := -1
+	for end, r := range v.data {
+		if unicode.IsSpace(r) || !v.compressed && r == ',' {
+			if start >= 0 {
+				field := v.data[start:end]
+				v.data = v.data[end:]
+				return field
+			}
+		} else if start < 0 {
+			start = end
+		}
+	}
+	var field string
+	if start >= 0 {
+		field = v.data[start:]
+	}
+	v.data = ""
+	return field
 }

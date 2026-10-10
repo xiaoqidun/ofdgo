@@ -238,8 +238,8 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			spans = textGlyphSpans(runes, glyphTransforms, codePos)
 		}
 		positioner := NewTextPositioner(tc)
-		xs, ys := positioner.xs, positioner.ys
-		drawAsPath := embeddedFont || face.FauxBold > 0 || textCodePositioned(tc, xs, ys) || fillClip != nil || shadedFill || fillPattern != nil || shouldStroke
+		positioned := textCodePositioned(tc, positioner.xs, positioner.ys)
+		drawAsPath := embeddedFont || face.FauxBold > 0 || positioned || fillClip != nil || shadedFill || fillPattern != nil || shouldStroke
 		for i, glyph := range glyphs {
 			str := glyph.Text
 			drawAsGlyphPath := drawAsPath || glyph.GlyphID >= 0
@@ -343,7 +343,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				if pdfText {
 					glyphClip = nil
 				}
-				if !pdfText && fillClip != nil && !embeddedFont && face.FauxBold == 0 && !textCodePositioned(tc, xs, ys) && !shadedFill && fillPattern == nil && glyph.GlyphID < 0 && !hasUnderline {
+				if !pdfText && fillClip != nil && !embeddedFont && face.FauxBold == 0 && !positioned && !shadedFill && fillPattern == nil && glyph.GlyphID < 0 && !hasUnderline {
 					if rect, ok := rectangularPath(fillClip); ok {
 						transform := canvas.Identity.Translate(canvasX, canvasY)
 						if useTextMatrix {

@@ -107,7 +107,8 @@ func (obj TextObject) textCodeLineBreak(index int) bool {
 		return false
 	}
 	right := left + obj.Size
-	for _, dx := range previous.GetDeltaX() {
+	deltas := textPositionValues{data: previous.DeltaX, compressed: strings.Contains(previous.DeltaX, "g")}
+	for dx, ok := deltas.next(); ok; dx, ok = deltas.next() {
 		right += dx
 	}
 	return x <= right
@@ -266,13 +267,17 @@ func (r *Renderer) textIndexRune(fontID string, glyphID int) rune {
 }
 
 // textCodePositioned 判断文本编码是否带显式定位
-// 入参: textCode 文本编码, xs X坐标列表, ys Y坐标列表
+// 入参: textCode 文本编码, xs 横坐标读取器, ys 纵坐标读取器
 // 返回: bool 是否带显式定位
-func textCodePositioned(textCode TextCode, xs, ys []float64) bool {
-	return strings.TrimSpace(textCode.DeltaX) != "" ||
-		strings.TrimSpace(textCode.DeltaY) != "" ||
-		len(xs) > 1 ||
-		len(ys) > 1
+func textCodePositioned(textCode TextCode, xs, ys textPositionValues) bool {
+	if strings.TrimSpace(textCode.DeltaX) != "" || strings.TrimSpace(textCode.DeltaY) != "" {
+		return true
+	}
+	xs.next()
+	ys.next()
+	_, multipleX := xs.next()
+	_, multipleY := ys.next()
+	return multipleX || multipleY
 }
 
 // textDelta 获取文本偏移量
