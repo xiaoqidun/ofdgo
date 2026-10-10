@@ -27,6 +27,15 @@ import (
 	"strings"
 )
 
+// editorDocumentIdentity 标记编辑状态所属的文档，不持有页面或资源数据
+type editorDocumentIdentity struct {
+	root    string
+	id      string
+	fresh   bool
+	single  bool
+	fromNew bool
+}
+
 // DocumentCount 获取编辑包内的文档数量，新建编辑器包含一个当前文档
 // 返回: int 文档数量
 func (e *Editor) DocumentCount() int {
@@ -329,15 +338,31 @@ func (e *Editor) documentRoot() string {
 // 入参: other 编辑快照
 // 返回: bool 是否为同一文档
 func (e *Editor) sameDocument(other *Editor) bool {
-	if e.source == nil || other.source == nil {
-		if e.source == nil && other.source == nil {
+	return e.documentIdentity().matches(other.documentIdentity())
+}
+
+// documentIdentity 获取当前文档的入口与原始标识，文档排序不改变身份
+// 返回: editorDocumentIdentity 文档身份
+func (e *Editor) documentIdentity() editorDocumentIdentity {
+	if e.source == nil {
+		return editorDocumentIdentity{id: e.Info.DocID, fresh: true}
+	}
+	return editorDocumentIdentity{root: e.documentRoot(), id: e.source.info.DocID, single: e.DocumentCount() == 1, fromNew: e.source.fromNew}
+}
+
+// matches 判断两个编辑状态是否属于同一文档，允许新文档首次建立包结构
+// 入参: other 另一编辑状态的文档身份
+// 返回: bool 是否为同一文档
+func (identity editorDocumentIdentity) matches(other editorDocumentIdentity) bool {
+	if identity.fresh || other.fresh {
+		if identity.fresh && other.fresh {
 			return true
 		}
-		fresh, packaged := e, other
-		if fresh.source != nil {
-			fresh, packaged = other, e
+		fresh, packaged := identity, other
+		if !fresh.fresh {
+			fresh, packaged = other, identity
 		}
-		return len(packaged.source.reader.OFD.DocBody) == 1 && (packaged.source.fromNew || fresh.Info.DocID != "" && fresh.Info.DocID == packaged.source.info.DocID)
+		return packaged.single && (packaged.fromNew || fresh.id != "" && fresh.id == packaged.id)
 	}
-	return e.documentRoot() == other.documentRoot() && e.source.info.DocID == other.source.info.DocID
+	return identity.root == other.root && identity.id == other.id
 }

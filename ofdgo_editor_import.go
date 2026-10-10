@@ -216,7 +216,7 @@ func (e *Editor) ImportObjects(source *Editor, sourcePage int, ids []string, pag
 			imported[i].TextObject.layout = objects[i].TextObject.layout
 			imported[i].state = objects[i].state
 			imported[i].CompositeGraphicUnit.states = remapCompositeStates(objects[i].CompositeGraphicUnit.states, migration.ids)
-			imported[i].origin = &editorObjectOrigin{editor: editor, data: data, node: root.child("Layer").children[0], object: object}
+			imported[i].origin = &editorObjectOrigin{editor: editor, document: editor.documentIdentity(), data: data, node: root.child("Layer").children[0], object: object}
 		}
 		copied, err = editor.CopyObjects(page, imported, options.DX, options.DY)
 		return err

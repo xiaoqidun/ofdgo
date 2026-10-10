@@ -25,6 +25,7 @@ import (
 // 来源修改或删除不影响快照，不用于跨文档传输
 type AnnotationSelection struct {
 	editor    *Editor
+	document  editorDocumentIdentity
 	data      [][]byte
 	resources []string
 	states    map[string]map[string]editorCompositeState
@@ -38,7 +39,7 @@ func (e *Editor) CaptureAnnotations(page int, ids []string) (*AnnotationSelectio
 	if err != nil {
 		return nil, err
 	}
-	selection := &AnnotationSelection{editor: e, states: make(map[string]map[string]editorCompositeState)}
+	selection := &AnnotationSelection{editor: e, document: e.documentIdentity(), states: make(map[string]map[string]editorCompositeState)}
 	seen := make(map[string]bool)
 	for _, id := range ids {
 		if seen[id] {
@@ -73,7 +74,7 @@ func (e *Editor) CaptureAnnotations(page int, ids []string) (*AnnotationSelectio
 // 入参: page 目标页面索引, selection 当前编辑器快照, dx 横向位移，单位为毫米, dy 纵向位移，单位为毫米
 // 返回: []string 新注解标识, error 错误信息
 func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, dy float64) ([]string, error) {
-	if selection == nil || selection.editor != e || !finite(dx) || !finite(dy) {
+	if selection == nil || selection.editor != e || !e.documentIdentity().matches(selection.document) || !finite(dx) || !finite(dy) {
 		return nil, fmt.Errorf("invalid annotation selection or offset")
 	}
 	var result []string

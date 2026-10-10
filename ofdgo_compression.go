@@ -46,13 +46,13 @@ const (
 // outputOptimizationBufferLimit 限制压缩时的单个输出缓冲，单位为字节
 const outputOptimizationBufferLimit = 64 << 20
 
-// CompressionMode 选择默认、无损或有损输出策略
+// CompressionMode 选择原始、无损或有损输出策略
 type CompressionMode = pdfgo.CompressionMode
 
 // CompressionLevel 选择轻压、均衡或强压，仅用于有损模式
 type CompressionLevel = pdfgo.CompressionLevel
 
-// CompressionOptions 配置输出压缩，默认模式沿用现有输出策略，不额外优化
+// CompressionOptions 配置输出压缩，原始模式沿用现有输出策略，不额外优化
 // Quality和MaxDPI为零时按Level使用预设，不改变页面尺寸或整页导出精度
 // 无损表示不引入额外损失，不保证跨格式转换可逆；有损不栅格化文字和矢量
 type CompressionOptions = pdfgo.CompressionOptions

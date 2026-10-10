@@ -57,7 +57,7 @@
 					<option value="300" selected>300 dpi</option>
 					<option value="600">600 dpi</option>
 				</select><span id="dpiValue" aria-hidden="true">300</span></label>
-				<label class="toolbar-select"><select id="outputCompression" class="format-select" title="压缩模式" aria-label="压缩模式" disabled><option value="0">默认</option><option value="1">无损</option><option value="2">轻压</option><option value="3">均衡</option><option value="4">强压</option></select><span id="compressionValue" data-short="默" aria-hidden="true">默认</span></label>
+				<label class="toolbar-select"><select id="outputCompression" class="format-select" title="压缩模式" aria-label="压缩模式" disabled><option value="0">原始</option><option value="1">无损</option><option value="2">轻压</option><option value="3">均衡</option><option value="4">强压</option></select><span id="compressionValue" data-short="原" aria-hidden="true">原始</span></label>
 				<button id="exportPageButton" class="button" type="button" data-short="单" title="导出单页" aria-label="导出单页" disabled>单页</button>
 				<button id="exportButton" class="button" type="button" data-short="多" title="导出文档" aria-label="导出文档" aria-haspopup="dialog" aria-controls="exportPanel" disabled>文档</button>
 			</div>
@@ -184,7 +184,7 @@
 					<button id="convertAdd" class="button" type="button">添加</button><button id="convertClear" class="button" type="button">清空</button>
 					<div class="convert-options">
 						<div class="form-row"><label for="convertFormat">格式</label><select id="convertFormat" required></select></div>
-						<div class="form-row"><label for="convertCompression">压缩</label><select id="convertCompression"><option value="0">默认</option><option value="1">无损</option><option value="2">轻压</option><option value="3">均衡</option><option value="4">强压</option></select></div>
+						<div class="form-row"><label for="convertCompression">压缩</label><select id="convertCompression"><option value="0">原始</option><option value="1">无损</option><option value="2">轻压</option><option value="3">均衡</option><option value="4">强压</option></select></div>
 						<div id="convertFontRow" class="form-row" hidden><label for="convertFontMode">字体</label><select id="convertFontMode"><option value="0">保持</option><option value="1">内嵌</option><option value="2">外部</option></select></div>
 						<div id="convertDPIRow" class="form-row" hidden><label for="convertDPI">精度</label><select id="convertDPI"><option value="96">96 dpi</option><option value="150">150 dpi</option><option value="300" selected>300 dpi</option><option value="600">600 dpi</option></select></div>
 						<div class="form-row"><label for="convertDestination">保存</label><select id="convertDestination"><option value="directory">目录</option><option value="archive">打包</option></select></div>

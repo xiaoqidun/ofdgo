@@ -201,7 +201,7 @@ func (e *Editor) ungroupCompositeNode(renderer *Renderer, node *editorCompositeN
 			return fmt.Errorf("group member cannot be expanded")
 		}
 	}
-	return e.pasteCompositeSelection(&CompositeSelection{editor: e, nodes: members}, func(objects []GraphicObject) error {
+	return e.pasteCompositeSelection(&CompositeSelection{editor: e, document: e.documentIdentity(), nodes: members}, func(objects []GraphicObject) error {
 		ids := make(map[string]string)
 		if copy.ref != nil {
 			for _, object := range objects {
@@ -244,7 +244,7 @@ func (e *Editor) ungroupCompositeNode(renderer *Renderer, node *editorCompositeN
 			member.object.state = states[editorObjectID(member.object)]
 			member.object.TextObject.layout = member.object.state.layout
 			member.object.CompositeGraphicUnit.states = states
-			member.object.origin = &editorObjectOrigin{editor: e, data: member.data, node: member.node, object: member.object}
+			member.object.origin = &editorObjectOrigin{editor: e, document: e.documentIdentity(), data: member.data, node: member.node, object: member.object}
 			objects[i] = member.object
 		}
 		return replace(objects)

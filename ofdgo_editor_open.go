@@ -47,12 +47,13 @@ type editorSource struct {
 
 // editorObjectOrigin 保留原对象的XML语义，供复制和局部更新复用
 type editorObjectOrigin struct {
-	editor *Editor
-	page   *editorSourcePage
-	data   []byte
-	node   *editorXML
-	object GraphicObject
-	reason error
+	editor   *Editor
+	document editorDocumentIdentity
+	page     *editorSourcePage
+	data     []byte
+	node     *editorXML
+	object   GraphicObject
+	reason   error
 }
 
 // editorSourcePage 保存页面原文、解析快照及图层和页块内的对象位置
@@ -613,6 +614,7 @@ func (e *Editor) setObjectOrigin(id string, origin *editorObjectOrigin) {
 	if origin != nil && origin.page == nil && origin.editor == nil {
 		copy := *origin
 		copy.editor = e
+		copy.document = e.documentIdentity()
 		origin = &copy
 	}
 	e.origins[id] = origin

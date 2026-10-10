@@ -37,7 +37,7 @@ func (e *Editor) copiedObjectStyle(object GraphicObject, layer string) (GraphicO
 // 返回: *editorObjectOrigin 原文来源
 func (e *Editor) snapshotOrigin(object GraphicObject) *editorObjectOrigin {
 	if object.origin != nil {
-		if object.origin.editor == e || object.origin.page != nil && e.source != nil && e.source.pages[object.origin.page.ref.ID] == object.origin.page {
+		if object.origin.editor == e && e.documentIdentity().matches(object.origin.document) || object.origin.page != nil && e.source != nil && e.source.pages[object.origin.page.ref.ID] == object.origin.page {
 			return object.origin
 		}
 		return nil

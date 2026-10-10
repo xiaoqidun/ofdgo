@@ -27,6 +27,7 @@ import (
 // 父路径的祖先成员增删或排序后需重新捕获，避免使用已失效的序号路径
 type CompositeSelection struct {
 	editor     *Editor
+	document   editorDocumentIdentity
 	page       string
 	path       ObjectPath
 	references int
@@ -70,7 +71,7 @@ func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []in
 	slices.Sort(indexes)
 	var owner *editorCompositeNode
 	var container *editorXML
-	selection := &CompositeSelection{editor: e, page: e.pages[page].ID, path: ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: slices.Clone(path.Children)}}
+	selection := &CompositeSelection{editor: e, document: e.documentIdentity(), page: e.pages[page].ID, path: ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: slices.Clone(path.Children)}}
 	if path.Annotation == "" {
 		selection.source = e.objectOrigin(path.ID).page
 	} else if e.source != nil {
@@ -112,8 +113,8 @@ func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []in
 // 入参: page 页面索引, path 父复合路径, selection 捕获的快照, dx 页面横向位移, dy 页面纵向位移
 // 返回: []int 新成员序号, error 错误信息
 func (e *Editor) PasteCompositeObjects(page int, path ObjectPath, selection *CompositeSelection, dx, dy float64) ([]int, error) {
-	if selection == nil || selection.editor != e {
-		return nil, fmt.Errorf("composite selection belongs to another editor")
+	if selection == nil || selection.editor != e || !e.documentIdentity().matches(selection.document) {
+		return nil, fmt.Errorf("composite selection belongs to another document or editor")
 	}
 	if !finite(dx) || !finite(dy) {
 		return nil, fmt.Errorf("paste requires finite offsets")
@@ -198,8 +199,8 @@ func (e *Editor) PasteCompositeObjects(page int, path ObjectPath, selection *Com
 // 入参: selection 独立内部快照, paste 目标范围粘贴操作
 // 返回: error 错误信息
 func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste func([]GraphicObject) error) (err error) {
-	if selection == nil || selection.editor != e {
-		return fmt.Errorf("composite selection belongs to another editor")
+	if selection == nil || selection.editor != e || !e.documentIdentity().matches(selection.document) {
+		return fmt.Errorf("composite selection belongs to another document or editor")
 	}
 	count, maximum := len(e.resources), e.maxID
 	ready := e.source != nil && e.source.idsReady
@@ -324,7 +325,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 			object.CompositeGraphicUnit.states = maps.Clone(copy.states)
 			copy.object.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
 		}
-		object.origin = &editorObjectOrigin{editor: e, page: selection.source, data: copy.data, node: copy.node, object: copy.object}
+		object.origin = &editorObjectOrigin{editor: e, document: e.documentIdentity(), page: selection.source, data: copy.data, node: copy.node, object: copy.object}
 		objects = append(objects, object)
 	}
 	return paste(objects)

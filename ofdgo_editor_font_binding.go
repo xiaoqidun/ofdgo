@@ -91,6 +91,11 @@ func (e *Editor) changeFont(ctx context.Context, id string, mode FontMode, file 
 	if err != nil || !changed {
 		return err
 	}
+	if mode == FontExternal {
+		if err := pruneExternalFontFiles(ctx, reader, scan.fonts[editorResourceID(id)].location); err != nil {
+			return err
+		}
+	}
 	return e.commitFontSnapshot(ctx, reader)
 }
 
@@ -133,6 +138,7 @@ func (e *Editor) ProcessFontsWithOptions(ctx context.Context, options FontProces
 		return nil, err
 	}
 	var report []FontChange
+	var externalFiles []string
 	changed := false
 	for document := range reader.DocumentCount() {
 		if err := progress("scan", document, reader.DocumentCount()); err != nil {
@@ -172,6 +178,9 @@ func (e *Editor) ProcessFontsWithOptions(ctx context.Context, options FontProces
 			}
 			if item.Changed {
 				changed = true
+				if mode == FontExternal {
+					externalFiles = append(externalFiles, declaration.location)
+				}
 				scan, err = scanEditorFonts(ctx, reader, document)
 				if err != nil {
 					return nil, err
@@ -184,6 +193,9 @@ func (e *Editor) ProcessFontsWithOptions(ctx context.Context, options FontProces
 	}
 	if changed {
 		if err := progress("commit", 0, 1); err != nil {
+			return nil, err
+		}
+		if err := pruneExternalFontFiles(ctx, reader, externalFiles...); err != nil {
 			return nil, err
 		}
 		err = e.commitFontSnapshot(ctx, reader)
@@ -343,11 +355,6 @@ func (e *Editor) changeFontSnapshot(ctx context.Context, scan *editorFontDocumen
 	if err := working.initRoot(); err != nil {
 		return false, err
 	}
-	if mode == FontExternal {
-		if err := pruneExternalFontFiles(ctx, &working, declaration.location); err != nil {
-			return false, err
-		}
-	}
 	*scan.reader = working
 	return true, nil
 }
@@ -502,6 +509,9 @@ func (e *Editor) commitFontSnapshot(ctx context.Context, reader *Reader) error {
 	if err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	before := e.transactionSnapshot()
 	e.restoreFontSnapshot(*next)
 	if change := e.recordChange(); change != nil {
@@ -525,11 +535,22 @@ func (e *Editor) restoreFontSnapshot(state Editor) {
 	*e = state
 }
 
-// pruneExternalFontFiles 保留全包仍引用的字体，未确认的扩展引用使清理保持保守
-// 入参: ctx 取消上下文, reader 包快照, candidate 原字体路径
+// pruneExternalFontFiles 清理全包不再引用的字体文件，遇到无法识别的扩展时保留资源
+// 入参: ctx 取消上下文, reader 包快照, candidates 待清理的字体路径
 // 返回: error 取消或读取错误
-func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidate string) error {
-	used := make(map[string]bool)
+func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	removed := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		if key := strings.ToLower(cleanPackagePath(candidate)); key != "" {
+			removed[key] = true
+		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
 	for i := range reader.DocumentCount() {
 		files, err := reader.documentFiles(ctx, i)
 		if err != nil {
@@ -538,12 +559,12 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidate strin
 			}
 			return nil
 		}
-		maps.Copy(used, files)
-	}
-	removed := make(map[string]bool)
-	key := strings.ToLower(cleanPackagePath(candidate))
-	if used[key] {
-		return nil
+		for name := range files {
+			delete(removed, name)
+		}
+		if len(removed) == 0 {
+			return nil
+		}
 	}
 	for _, name := range reader.fileNamesFold {
 		if err := ctx.Err(); err != nil {
@@ -574,20 +595,21 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidate strin
 					return true
 				}
 			}
-			if node.matchesOFD("FontFile") && strings.EqualFold(resolveResourcePath(name, base, strings.TrimSpace(editorImportText(data, node))), candidate) {
-				return true
+			if node.matchesOFD("FontFile") {
+				location := resolveResourcePath(name, base, strings.TrimSpace(editorImportText(data, node)))
+				delete(removed, strings.ToLower(cleanPackagePath(location)))
 			}
 			return slices.ContainsFunc(node.children, retains)
 		}
-		if retains(root) {
+		if retains(root) || len(removed) == 0 {
 			return nil
 		}
 	}
-	if !used[key] {
-		removed[key] = true
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	for name := range reader.files {
-		if removed[strings.ToLower(name)] {
+		if removed[strings.ToLower(cleanPackagePath(name))] {
 			delete(reader.files, name)
 		}
 	}

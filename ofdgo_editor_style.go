@@ -207,7 +207,7 @@ func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
 		if err != nil {
 			return err
 		}
-		updated := &editorObjectOrigin{editor: e, data: data, node: root, object: next}
+		updated := &editorObjectOrigin{editor: e, document: e.documentIdentity(), data: data, node: root, object: next}
 		if origin != nil {
 			updated.page, root.parent = origin.page, origin.node.parent
 		} else {

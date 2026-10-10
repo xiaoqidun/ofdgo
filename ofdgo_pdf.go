@@ -37,7 +37,7 @@ var ErrPDFPassword = pdfgo.ErrPassword
 // ResolveFile读取PDF引用的外部媒体、附件和页面，默认不访问网络或本地路径
 // ResolveReference可提供已解密的引用页面，目标阅读器由调用方维护
 // Halftones提供只读设备命名网屏，所属阅读器由调用方维护，连续色调输出不网屏化
-// Compression配置转换输出，有损模式按图片实际尺寸降采样，默认及无损保持完整采样
+// Compression配置转换输出，有损模式按图片实际尺寸降采样，原始及无损模式保持完整采样
 type PDFImportOptions struct {
 	Password         []byte
 	PasswordUTF8     bool
