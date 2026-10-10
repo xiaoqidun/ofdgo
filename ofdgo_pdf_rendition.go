@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"mime"
@@ -34,77 +35,110 @@ func (p *pdfImporter) screenAnnotation(ctx context.Context, page *pdfgo.Page, an
 	appearance := annotation
 	appearance.Dictionary = maps.Clone(annotation.Dictionary)
 	delete(appearance.Dictionary, "A")
+	additional, err := p.reader.Resolve(annotation.Dictionary["AA"])
+	if err != nil {
+		return err
+	}
+	if dict, ok := additional.(pdfgo.Dictionary); ok {
+		dict = maps.Clone(dict)
+		delete(dict, "U")
+		appearance.Dictionary["AA"] = dict
+	}
 	if appearance.Dictionary["AP"] == nil {
 		appearance.Dictionary["AP"] = pdfgo.Dictionary{"N": &pdfgo.Stream{Dictionary: pdfgo.Dictionary{
 			"Type": pdfgo.Name("XObject"), "Subtype": pdfgo.Name("Form"), "BBox": pdfgo.Array{pdfgo.Integer(0), pdfgo.Integer(0), pdfgo.Integer(1), pdfgo.Integer(1)},
 		}}}
 	}
-	fallback := func(reason string) error {
-		if strict {
-			return &pdfgo.UnsupportedError{Feature: reason}
-		}
-		p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF screen appearance retained; " + reason})
-		delete(appearance.Dictionary, "AA")
+	flags, err := p.reader.ReadAnnotationFlags(annotation)
+	if err != nil {
+		return err
+	}
+	if flags&64 != 0 {
 		return p.appearanceAnnotation(ctx, page, appearance)
 	}
-	value, err := p.reader.Resolve(annotation.Dictionary["A"])
-	if err != nil {
+	var actions []Action
+	currentPage := p.page
+	if err := p.reader.WalkActions(ctx, annotation.Dictionary["A"], func(info pdfgo.ActionInfo) error {
+		current := annotation
+		current.Dictionary = pdfgo.Dictionary{"A": info.Dictionary}
+		converted, err := p.linkActions(current, strict, &currentPage)
+		actions = append(actions, converted...)
+		return err
+	}); err != nil {
 		return err
 	}
-	action, ok := value.(pdfgo.Dictionary)
-	if !ok {
-		return fmt.Errorf("invalid screen action")
-	}
-	subtype, err := p.reader.Resolve(action["S"])
+	return p.appearanceAnnotation(ctx, page, appearance, actions...)
+}
+
+// renditionLinkActions 按屏幕关联转换播放及控制，切换视频时先停止其他候选
+// 入参: object PDF媒体动作, source 触发注解，零值表示非图元动作, strict 是否禁止语义损失, currentPage 动作链当前页
+// 返回: []Action 有序OFD动作，无法转换时为空, error 参数、资源或严格模式错误
+func (p *pdfImporter) renditionLinkActions(object pdfgo.Object, source pdfgo.Annotation, strict bool, currentPage int) ([]Action, error) {
+	playback, err := p.reader.ReadRenditionPlayback(p.ctx, object)
 	if err != nil {
-		return err
-	}
-	operation, err := p.reader.Resolve(action["OP"])
-	if err != nil {
-		return err
-	}
-	if subtype != pdfgo.Name("Rendition") || operation != pdfgo.Integer(0) || action["Next"] != nil || annotation.Dictionary["AA"] != nil {
-		return fallback("screen action cannot be represented in OFD")
-	}
-	if target, ok := action["AN"].(pdfgo.Reference); !ok || target != annotation.Reference || annotation.Dictionary["P"] != page.Reference {
-		return fallback("screen action target is unavailable")
-	}
-	rendition, err := p.reader.ReadRendition(ctx, action["R"])
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if !strict && errors.Is(err, pdfgo.ErrInvalidAction) {
+			p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("invalid PDF rendition action ignored: %v", err)})
+			return nil, nil
 		}
-		return fallback("media rendition unavailable: " + err.Error())
+		return nil, err
 	}
-	selected, err := rendition.Select(ctx, func(candidate *pdfgo.Rendition) (bool, error) {
+	if playback.Operation == nil || *playback.Operation < 0 || *playback.Operation >= 4 {
+		return nil, p.renditionActionLoss("conditional rendition playback or script", strict)
+	}
+	if _, ok := p.pages[playback.Page]; !ok {
+		return nil, p.renditionActionLoss("screen page is outside the document", strict)
+	}
+	if *playback.Operation != 0 {
+		return p.renditionControls(playback.Annotation.Reference, *playback.Operation, "", strict)
+	}
+	selected, err := playback.Rendition.Select(p.ctx, func(candidate *pdfgo.Rendition) (bool, error) {
 		_, _, viable, err := p.nativeRendition(candidate)
 		return viable, err
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if selected == nil {
-		return fallback("no equivalent media rendition")
+		return nil, p.renditionActionLoss("no equivalent media rendition", strict)
 	}
 	converted, kind, _, err := p.nativeRendition(selected)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	data, available, err := p.mediaData(ctx, *selected.Clip.File)
-	if err != nil {
-		return err
+	if kind == "Video" {
+		parameters, _, err := p.renditionParameters(selected.Screen, map[pdfgo.Name]func(pdfgo.Object) bool{
+			"W": func(value pdfgo.Object) bool { return value == pdfgo.Integer(0) || value == pdfgo.Integer(3) },
+		})
+		if err != nil {
+			return nil, err
+		}
+		window := pdfgo.Integer(3)
+		if value, ok := parameters["W"].(pdfgo.Integer); ok {
+			window = value
+		}
+		matches := window == 0 && source.Subtype == ""
+		if window == 3 && source.Subtype != "" {
+			index := p.pageIndexes[playback.Page]
+			matches = currentPage == index && p.page == index
+			if matches {
+				if err := p.moviePlaybackBounds(converted.Movie, source, playback.Annotation, currentPage, strict); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if !matches {
+			if err := p.renditionActionLoss("media playback window differs in OFD", strict); err != nil {
+				return nil, err
+			}
+		}
 	}
-	if !available {
-		return p.appearanceAnnotation(ctx, page, appearance)
+	id, err := p.renditionResource(selected, kind, playback)
+	if err != nil || id == "" {
+		return nil, err
 	}
-	format := pdfMediaFormat(*selected.Clip.File)
-	if format == "" {
-		mediaType, _, _ := mime.ParseMediaType(selected.Clip.ContentType)
-		format = strings.TrimPrefix(strings.SplitN(mediaType, "/", 2)[1], "x-")
-	}
-	id, err := p.editor.AddMedia(kind, format, data)
-	if err != nil {
-		return err
+	controls, err := p.renditionControls(playback.Annotation.Reference, 1, id, strict)
+	if err != nil || controls == nil {
+		return nil, err
 	}
 	if kind == "Audio" {
 		converted.Sound.ResourceID = id
@@ -114,7 +148,34 @@ func (p *pdfImporter) screenAnnotation(ctx context.Context, page *pdfgo.Page, an
 	if len(selected.Play) != 0 || len(selected.Screen) != 0 || len(selected.Clip.BestEffort) != 0 {
 		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF media rendition converted; best-effort presentation preferences may differ in OFD"})
 	}
-	return p.appearanceAnnotation(ctx, page, appearance, converted)
+	return append(controls, converted), nil
+}
+
+// renditionResource 注册所选媒体，按屏幕区分播放实例并共用原始文件
+// 入参: selected 已选择的原生呈现, kind 媒体类型, playback 播放目标
+// 返回: string 资源标识，不可用时为空, error 文件或资源错误
+func (p *pdfImporter) renditionResource(selected *pdfgo.Rendition, kind string, playback pdfgo.RenditionPlayback) (string, error) {
+	format := pdfMediaFormat(*selected.Clip.File)
+	if format == "" {
+		mediaType, _, _ := mime.ParseMediaType(selected.Clip.ContentType)
+		format = strings.TrimPrefix(strings.SplitN(mediaType, "/", 2)[1], "x-")
+	}
+	id, err := p.mediaResource(p.ctx, *selected.Clip.File, kind, format, false)
+	if err != nil || id == "" {
+		return "", err
+	}
+	return p.mediaInstance(id, playback.Annotation, p.pageIndexes[playback.Page])
+}
+
+// renditionActionLoss 按导入策略报告媒体控制或呈现差异，不执行脚本
+// 入参: reason 无法等价转换的原因, strict 是否禁止语义损失
+// 返回: error 严格模式错误
+func (p *pdfImporter) renditionActionLoss(reason string, strict bool) error {
+	if strict {
+		return &pdfgo.UnsupportedError{Feature: reason}
+	}
+	p.warning(pdfgo.Diagnostic{Message: "PDF rendition action: " + reason})
+	return nil
 }
 
 // nativeRendition 检查可等价转换的媒体分支，视频不接受无法表达的音量及循环
@@ -170,11 +231,17 @@ func (p *pdfImporter) nativeRendition(rendition *pdfgo.Rendition) (Action, strin
 	if err != nil || !viable {
 		return result, "", false, err
 	}
-	_, viable, err = p.renditionParameters(rendition.Screen, map[pdfgo.Name]func(pdfgo.Object) bool{
-		"W": func(value pdfgo.Object) bool { return value == pdfgo.Integer(3) },
+	screen, viable, err := p.renditionParameters(rendition.Screen, map[pdfgo.Name]func(pdfgo.Object) bool{
+		"W": func(value pdfgo.Object) bool { return !audio && value == pdfgo.Integer(0) || value == pdfgo.Integer(3) },
 	})
 	if err != nil || !viable {
 		return result, "", false, err
+	}
+	if screen["W"] == pdfgo.Integer(0) {
+		valid, err := p.renditionFloatingWindow(rendition.Screen)
+		if err != nil || !valid {
+			return result, "", false, err
+		}
 	}
 	volume := 100
 	if value := play["V"]; value != nil {
@@ -190,6 +257,44 @@ func (p *pdfImporter) nativeRendition(rendition *pdfgo.Rendition) (Action, strin
 	}
 	result.Movie = &Movie{Operator: "Play"}
 	return result, "Video", true, nil
+}
+
+// renditionFloatingWindow 校验浮窗必需的像素尺寸，呈现偏好不写成视频固有尺寸
+// 入参: screen 媒体屏幕参数
+// 返回: bool 是否具备合法尺寸, error 引用错误
+func (p *pdfImporter) renditionFloatingWindow(screen pdfgo.Dictionary) (bool, error) {
+	value, err := p.reader.Resolve(screen["BE"])
+	if err != nil {
+		return false, err
+	}
+	preferences, _ := value.(pdfgo.Dictionary)
+	value, err = p.reader.Resolve(preferences["F"])
+	if err != nil {
+		return false, err
+	}
+	window, ok := value.(pdfgo.Dictionary)
+	if !ok {
+		return false, nil
+	}
+	value, err = p.reader.Resolve(window["D"])
+	if err != nil {
+		return false, err
+	}
+	size, ok := value.(pdfgo.Array)
+	if !ok || len(size) != 2 {
+		return false, nil
+	}
+	for _, part := range size {
+		value, err = p.reader.Resolve(part)
+		if err != nil {
+			return false, err
+		}
+		number, ok := value.(pdfgo.Integer)
+		if !ok || number < 0 {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // renditionCriteria 检查媒体环境条件，未知尽力处理字段不影响候选可用性

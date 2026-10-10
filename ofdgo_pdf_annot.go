@@ -21,6 +21,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"maps"
+	"math"
 	"strconv"
 
 	"github.com/xiaoqidun/pdfgo"
@@ -37,7 +38,7 @@ func (p *pdfImporter) appearanceAnnotation(ctx context.Context, page *pdfgo.Page
 // 入参: ctx 取消上下文, page PDF页面, annotation PDF注解, paint 绘制回调，空值使用原外观, actions 外观区域的动作
 // 返回: error 外观或转换错误
 func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation, paint func(*pdfImporter) error, actions ...Action) error {
-	clicks, opened, err := p.annotationTriggerActions(ctx, annotation)
+	clicks, err := p.annotationTriggerActions(ctx, annotation, "CLICK")
 	if err != nil {
 		return err
 	}
@@ -56,7 +57,7 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 			return &pdfgo.UnsupportedError{Feature: fmt.Sprintf("annotation field %q", key)}
 		}
 	}
-	remark, err := p.reader.ReadAnnotationText(annotation, "Contents", p.warning)
+	remark, err := p.reader.ReadAnnotationTextContext(ctx, annotation, "Contents", p.warning)
 	if err != nil {
 		return err
 	}
@@ -91,6 +92,15 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 		}
 	}
 	actions = append(actions, clicks...)
+	playback, err := p.annotationMovieBounds(actions, box, int64(flags))
+	if err != nil {
+		return err
+	}
+	source := box
+	if playback != source {
+		x, y := math.Min(source.X, playback.X), math.Min(source.Y, playback.Y)
+		box = Box{X: x, Y: y, W: math.Max(source.X+source.W, playback.X+playback.W) - x, H: math.Max(source.Y+source.H, playback.Y+playback.H) - y}
+	}
 	stamp := *p
 	stamp.matrix = (pdfgo.Matrix{1, 0, 0, 1, -box.X, -box.Y}).Mul(p.matrix)
 	stamp.objects = nil
@@ -105,23 +115,8 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 		}
 	} else {
 		nodes, err := p.collectCompositeNodes(func(visitor pdfgo.Visitor) error {
-			if annotation.Subtype == "Widget" {
-				visitor.MarkedContent = func(mark pdfgo.MarkedContentMark) error {
-					if mark.Tag == "Tx" && len(mark.Properties) == 0 {
-						return nil
-					}
-					if mark.Operator == "EMC" {
-						return nil
-					}
-					if p.warning == nil {
-						return &pdfgo.UnsupportedError{Feature: "widget marked content " + string(mark.Tag)}
-					}
-					p.warning(pdfgo.Diagnostic{Message: "PDF widget marked content " + string(mark.Tag) + " not preserved"})
-					return nil
-				}
-			}
 			return p.reader.WalkAnnotationAppearance(ctx, page, annotation, visitor)
-		})
+		}, annotation.Subtype == "Widget")
 		if err != nil {
 			return err
 		}
@@ -184,11 +179,23 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 		}...)
 	}
 	if len(actions) != 0 {
-		region, err := NewShape(ShapeRectangle, Box{W: box.W, H: box.H})
+		region, err := NewShape(ShapeRectangle, Box{X: playback.X - box.X, Y: playback.Y - box.Y, W: playback.W, H: playback.H})
 		if err != nil {
 			return err
 		}
 		no := false
+		if playback != source {
+			region.CTM = pdfNumbers(1, 0, 0, 1, source.X-playback.X, source.Y-playback.Y)
+			for i := range actions {
+				if actions[i].Region == nil {
+					actions[i].Region = &Region{Area: []RegionArea{{Start: "0 0", Command: []RegionCommand{
+						{Type: "Line", Point1: pdfNumbers(source.W, 0)},
+						{Type: "Line", Point1: pdfNumbers(source.W, source.H)},
+						{Type: "Line", Point1: pdfNumbers(0, source.H)}, {Type: "Close"},
+					}}}}
+				}
+			}
+		}
 		region.Fill, region.Stroke, region.Actions = &no, &no, actions
 		converted.Appearance.Objects = append(converted.Appearance.Objects, GraphicObject{Type: "PathObject", PathObject: region})
 	}
@@ -198,11 +205,11 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 	}
 	converted.NoZoom = flags&8 != 0 || annotation.Subtype == "Text"
 	converted.NoRotate = flags&16 != 0 || annotation.Subtype == "Text"
-	converted.Creator, err = p.reader.ReadAnnotationText(annotation, "T", p.warning)
+	converted.Creator, err = p.reader.ReadAnnotationTextContext(ctx, annotation, "T", p.warning)
 	if err != nil {
 		return err
 	}
-	modified, err := p.reader.ReadAnnotationText(annotation, "M", p.warning)
+	modified, err := p.reader.ReadAnnotationTextContext(ctx, annotation, "M", p.warning)
 	if err != nil {
 		return err
 	}
@@ -220,9 +227,6 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 		return fmt.Errorf("PDF annotation: %w", err)
 	}
 	p.annotationData = append(p.annotationData, bytes.TrimPrefix(data, []byte(xml.Header))...)
-	if len(opened) != 0 {
-		p.editor.pages[p.page].Actions = append(p.editor.pages[p.page].Actions, opened...)
-	}
 	if len(actions) != 0 && annotation.Subtype == "Link" || len(clicks) != 0 {
 		p.report.Links++
 	}
@@ -260,15 +264,11 @@ func (p *pdfImporter) formWidget(ctx context.Context, page *pdfgo.Page, annotati
 	if strict {
 		return &pdfgo.UnsupportedError{Feature: "interactive PDF form conversion"}
 	}
-	value, err := p.reader.Resolve(annotation.Dictionary["F"])
+	flags, err := p.reader.ReadAnnotationFlags(annotation)
 	if err != nil {
 		return err
 	}
-	flags, ok := value.(pdfgo.Integer)
-	if value != nil && !ok {
-		return fmt.Errorf("invalid PDF widget flags")
-	}
-	if flags&(1|2|32) != 0 {
+	if flags&(2|32) != 0 {
 		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "hidden PDF form field not transferred"})
 		return nil
 	}
@@ -289,20 +289,11 @@ func (p *pdfImporter) signatureWidget(ctx context.Context, page *pdfgo.Page, ann
 	if annotation.Dictionary["FT"] != pdfgo.Name("Sig") || annotation.Dictionary["V"] == nil {
 		return &pdfgo.UnsupportedError{Feature: "non-signature widget"}
 	}
-	flags := int64(0)
-	if value := annotation.Dictionary["F"]; value != nil {
-		resolved, err := p.reader.Resolve(value)
-		if err != nil {
-			return err
-		}
-		number, ok := resolved.(pdfgo.Integer)
-		if !ok {
-			return fmt.Errorf("invalid PDF annotation flags")
-		}
-		flags = int64(number)
+	flags, err := p.reader.ReadAnnotationFlags(annotation)
+	if err != nil {
+		return err
 	}
-	const invisibleFlags = 1 | 2 | 32
-	if flags&invisibleFlags != 0 {
+	if flags&(2|32) != 0 {
 		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "hidden PDF signature not transferred"})
 		return nil
 	}

@@ -174,6 +174,52 @@ func (e *Editor) UpdateOutline(path []int, title string, page int) error {
 	return e.setOutlineXML(editorPatchXML(updated, []editorXMLPatch{{node.start, node.end, value}}))
 }
 
+// SetOutlineActions 替换目录节点的动作序列，空列表清除动作，不改变子目录
+// 入参: path 从0开始的层级索引, actions 按激活顺序执行的动作
+// 返回: error 路径、动作或提交错误
+func (e *Editor) SetOutlineActions(path []int, actions []Action) error {
+	if len(path) == 0 {
+		return fmt.Errorf("outline path must not be empty")
+	}
+	if err := validateActions(actions); err != nil {
+		return err
+	}
+	data, err := e.outlineXML()
+	if err != nil {
+		return err
+	}
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return err
+	}
+	node, err := editorOutlineNode(root, path)
+	if err != nil {
+		return err
+	}
+	encoded, err := editorActionsXML(actions)
+	if err != nil {
+		return err
+	}
+	context := node
+	if existing := node.child("Actions"); existing != nil {
+		context = existing
+	}
+	encoded, err = editorXMLGenerated(encoded, context.name.Space)
+	if err != nil {
+		return err
+	}
+	var patch editorXMLPatch
+	if context != node {
+		patch = editorXMLPatch{context.start, context.end, encoded}
+	} else {
+		if node.open != node.end {
+			encoded = append(encoded, data[node.open:node.close]...)
+		}
+		patch = editorXMLContent(data, node, encoded)
+	}
+	return e.setOutlineXML(editorPatchXML(data, []editorXMLPatch{patch}))
+}
+
 // DeleteOutline 删除目录节点及其子节点
 // 入参: path 从0开始的层级索引
 // 返回: error 错误信息

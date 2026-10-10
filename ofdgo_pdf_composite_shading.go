@@ -44,7 +44,7 @@ func (p *pdfImporter) compositeShadingPattern(pattern *pdfgo.ShadingPattern) ([]
 	})
 	nodes, err := p.collectCompositeNodes(func(visitor pdfgo.Visitor) error {
 		return pattern.Walk(p.ctx, pdfgo.Rectangle{XMin: box.X, YMin: box.Y, XMax: box.X + box.W, YMax: box.Y + box.H}, visitor)
-	})
+	}, false)
 	if err != nil {
 		return nil, err
 	}

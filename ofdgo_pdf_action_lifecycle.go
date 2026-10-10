@@ -42,7 +42,7 @@ func (p *pdfImporter) documentOpenActions(ctx context.Context) error {
 		object = pdfgo.Dictionary{"S": pdfgo.Name("GoTo"), "D": array}
 	}
 	currentPage := 0
-	actions, err := p.eventActions(ctx, object, "DO", &currentPage)
+	actions, err := p.eventActions(ctx, object, "DO", pdfgo.Annotation{}, &currentPage)
 	if err != nil {
 		return err
 	}
@@ -80,7 +80,7 @@ func (p *pdfImporter) pageOpenActions(ctx context.Context, page *pdfgo.Page) err
 			}
 			continue
 		}
-		actions, err := p.eventActions(ctx, trigger.Action, "PO", &p.pageActionPage)
+		actions, err := p.eventActions(ctx, trigger.Action, "PO", pdfgo.Annotation{}, &p.pageActionPage)
 		if err != nil {
 			return err
 		}
@@ -92,14 +92,18 @@ func (p *pdfImporter) pageOpenActions(ctx context.Context, page *pdfgo.Page) err
 }
 
 // eventActions 按原顺序转换动作链，保留事件类型与链内跳转页状态
-// 入参: ctx 取消上下文, object 动作对象, event OFD事件, currentPage 当前页面
+// 入参: ctx 取消上下文, object 动作对象, event OFD事件, source 触发注解，零值表示非图元动作, currentPage 当前页面
 // 返回: []Action 转换动作, error 动作或取消错误
-func (p *pdfImporter) eventActions(ctx context.Context, object pdfgo.Object, event string, currentPage *int) ([]Action, error) {
+func (p *pdfImporter) eventActions(ctx context.Context, object pdfgo.Object, event string, source pdfgo.Annotation, currentPage *int) ([]Action, error) {
 	var actions []Action
 	err := p.reader.WalkActions(ctx, object, func(info pdfgo.ActionInfo) error {
-		annotation := pdfgo.Annotation{Dictionary: pdfgo.Dictionary{"A": info.Dictionary}}
-		action, err := p.linkAction(annotation, p.warning == nil, currentPage)
+		annotation := source
+		annotation.Dictionary = pdfgo.Dictionary{"A": info.Dictionary}
+		converted, err := p.linkActions(annotation, p.warning == nil, currentPage)
 		if err != nil {
+			if errors.Is(err, errPDFMediaRead) {
+				return err
+			}
 			var unsupported *pdfgo.UnsupportedError
 			if event != "CLICK" && p.warning != nil && errors.Is(err, pdfgo.ErrInvalidAction) {
 				p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("invalid PDF %s action ignored: %v", event, err)})
@@ -115,9 +119,9 @@ func (p *pdfImporter) eventActions(ctx context.Context, object pdfgo.Object, eve
 			}
 			return err
 		}
-		if action != nil {
+		for _, action := range converted {
 			action.Event = event
-			actions = append(actions, *action)
+			actions = append(actions, action)
 		}
 		return nil
 	})

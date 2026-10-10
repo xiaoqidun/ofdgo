@@ -36,7 +36,7 @@ func (p *pdfImporter) outlines(ctx context.Context) error {
 		err := p.reader.WalkOutlines(ctx, func(level int, item pdfgo.OutlineItem) error {
 			actions, err := p.outlineActions(ctx, item)
 			if err != nil {
-				if p.warning == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				if p.warning == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errPDFMediaRead) {
 					return err
 				}
 				p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF outline %q actions not transferred to OFD: %v", item.Title, err)})
@@ -68,7 +68,7 @@ func (p *pdfImporter) outlines(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if p.warning == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if p.warning == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errPDFMediaRead) {
 			return err
 		}
 		p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF outlines not transferred to OFD: %v", err)})
@@ -101,8 +101,11 @@ func (p *pdfImporter) outlineActions(ctx context.Context, item pdfgo.OutlineItem
 	currentPage := -1
 	var actions []Action
 	err = p.reader.WalkActions(ctx, object, func(info pdfgo.ActionInfo) error {
-		action, err := p.linkAction(pdfgo.Annotation{Dictionary: pdfgo.Dictionary{"A": info.Dictionary}}, p.warning == nil, &currentPage)
+		converted, err := p.linkActions(pdfgo.Annotation{Dictionary: pdfgo.Dictionary{"A": info.Dictionary}}, p.warning == nil, &currentPage)
 		if err != nil {
+			if errors.Is(err, errPDFMediaRead) {
+				return err
+			}
 			var unsupported *pdfgo.UnsupportedError
 			if p.warning != nil && (errors.As(err, &unsupported) || errors.Is(err, pdfgo.ErrInvalidDestination) || errors.Is(err, pdfgo.ErrInvalidAction)) {
 				p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF outline action not transferred to OFD: %v", err)})
@@ -111,8 +114,8 @@ func (p *pdfImporter) outlineActions(ctx context.Context, item pdfgo.OutlineItem
 			}
 			return err
 		}
-		if action != nil {
-			actions = append(actions, *action)
+		if converted != nil {
+			actions = append(actions, converted...)
 		} else {
 			currentPage = -1
 		}

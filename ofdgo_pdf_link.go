@@ -27,6 +27,7 @@ import (
 // 入参: ctx 取消上下文, page PDF页面, strict 严格检查开关
 // 返回: error 错误信息
 func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict bool) error {
+	p.movieBounds = nil
 	annotations, err := page.AnnotationsContext(ctx)
 	if err != nil {
 		return err
@@ -40,6 +41,13 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 	for i, annotation := range annotations {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		opened, err := p.annotationTriggerActions(ctx, annotation, "PO")
+		if err != nil {
+			return err
+		}
+		if len(opened) != 0 {
+			p.editor.pages[p.page].Actions = append(p.editor.pages[p.page].Actions, opened...)
 		}
 		if annotation.Reference != (pdfgo.Reference{}) && annotation.Subtype != "Popup" {
 			parents[annotation.Reference] = i
@@ -167,7 +175,7 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			continue
 		}
 		if annotation.Subtype == "Movie" {
-			if err := p.movieAnnotation(ctx, page, annotation); err != nil {
+			if err := p.movieAnnotation(ctx, page, annotation, strict); err != nil {
 				return err
 			}
 			continue
@@ -265,13 +273,11 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		appendAction := func(dict pdfgo.Dictionary) error {
 			current := annotation
 			current.Dictionary = dict
-			action, err := p.linkAction(current, strict, &currentPage)
+			converted, err := p.linkActions(current, strict, &currentPage)
 			if err != nil {
 				return err
 			}
-			if action != nil {
-				actions = append(actions, *action)
-			}
+			actions = append(actions, converted...)
 			return nil
 		}
 		if primary == nil {
@@ -348,7 +354,31 @@ func (p *pdfImporter) linkRegion(annotation pdfgo.Annotation, box Box) (*Region,
 	return region, nil
 }
 
-// linkAction 将单个链接动作转换为OFD动作，失效目标按导入策略报告
+// linkActions 将单个PDF动作转换为有序OFD动作，保留动态媒体控制的目标范围
+// 入参: annotation 触发注解, strict 严格检查开关, currentPage 动作链当前页
+// 返回: []Action 动作序列，空切片表示无操作，nil表示未转换, error 转换错误
+func (p *pdfImporter) linkActions(annotation pdfgo.Annotation, strict bool, currentPage *int) ([]Action, error) {
+	value, err := p.reader.Resolve(annotation.Dictionary["A"])
+	if err != nil {
+		return nil, err
+	}
+	if dict, ok := value.(pdfgo.Dictionary); ok {
+		kind, err := p.reader.Resolve(dict["S"])
+		if err != nil {
+			return nil, err
+		}
+		if kind == pdfgo.Name("Rendition") {
+			return p.renditionLinkActions(dict, annotation, strict, *currentPage)
+		}
+	}
+	action, err := p.linkAction(annotation, strict, currentPage)
+	if err != nil || action == nil {
+		return nil, err
+	}
+	return []Action{*action}, nil
+}
+
+// linkAction 将单个非呈现动作转换为OFD动作，失效目标按导入策略报告
 // 入参: annotation 链接注解, strict 严格检查开关, currentPage 动作链当前页
 // 返回: *Action 动作，失效目标为空, error 转换错误
 func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, currentPage *int) (*Action, error) {
@@ -383,7 +413,9 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 			return p.launchLinkAction(a, strict)
 		case pdfgo.Name("Sound"):
 			return p.soundLinkAction(a, strict)
-		case pdfgo.Name("JavaScript"), pdfgo.Name("ResetForm"), pdfgo.Name("ImportData"), pdfgo.Name("Hide"), pdfgo.Name("Movie"):
+		case pdfgo.Name("Movie"):
+			return p.movieLinkAction(a, annotation, strict, *currentPage)
+		case pdfgo.Name("JavaScript"), pdfgo.Name("ResetForm"), pdfgo.Name("ImportData"), pdfgo.Name("Hide"):
 			return p.staticLinkAction(a, kind.(pdfgo.Name), strict)
 		case pdfgo.Name("GoToE"):
 			converted, local, err := p.embeddedLinkAction(a, strict)
@@ -528,8 +560,6 @@ func (p *pdfImporter) staticLinkAction(object pdfgo.Object, kind pdfgo.Name, str
 		_, err = p.reader.ReadImportDataAction(p.ctx, object)
 	case "Hide":
 		_, err = p.reader.ReadHideAction(p.ctx, object)
-	case "Movie":
-		_, err = p.reader.ReadMovieAction(p.ctx, object)
 	}
 	if err != nil {
 		return nil, err

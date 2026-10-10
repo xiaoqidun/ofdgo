@@ -24,15 +24,15 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// writePDF 合并图像、导航修正及压缩，直接写出最终PDF
+// writePDF 合并图像、文字、导航修正及压缩，直接写出最终PDF
 // 入参: ctx 取消上下文, data 后端PDF数据, writer 输出流, optimization 优化配置
 // 返回: error 资源、压缩或写入错误
 func (r *pdfRenderer) writePDF(ctx context.Context, data []byte, writer io.Writer, optimization pdfgo.OptimizeOptions) error {
 	if r.imageError != nil {
 		return r.imageError
 	}
-	exactLinks := r.navigation != nil && r.navigation.exactLinks
-	if !r.exactImages && !exactLinks && optimization.Compression.Mode == CompressionUnchanged {
+	nativeWrite := r.navigation != nil && r.navigation.nativeWrite
+	if !r.exactImages && !r.exactText && !nativeWrite && optimization.Compression.Mode == CompressionUnchanged {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -47,12 +47,13 @@ func (r *pdfRenderer) writePDF(ctx context.Context, data []byte, writer io.Write
 		return err
 	}
 	defer reader.Close()
-	if !r.exactImages && !exactLinks {
+	if !r.exactImages && !r.exactText && !nativeWrite {
 		_, err := reader.OptimizeTo(ctx, writer, optimization)
 		return err
 	}
 	images := make(map[pdfgo.Reference]image.Image)
 	links := make(map[pdfgo.AnnotationLocation]pdfgo.LinkRegion)
+	texts := make(map[pdfgo.Reference][]pdfgo.TextReplacement)
 	references := make([]pdfgo.Reference, len(r.images))
 	pages := 0
 	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
@@ -61,7 +62,7 @@ func (r *pdfRenderer) writePDF(ctx context.Context, data []byte, writer io.Write
 		}
 		pages++
 		references[index] = page.Reference
-		if exactLinks {
+		if nativeWrite {
 			annotations, err := page.AnnotationsContext(ctx)
 			if err != nil {
 				return err
@@ -79,7 +80,7 @@ func (r *pdfRenderer) writePDF(ctx context.Context, data []byte, writer io.Write
 				}
 			}
 		}
-		if !r.exactImages {
+		if !r.exactImages && !r.exactText {
 			return nil
 		}
 		value, err := reader.Resolve(page.Resources["XObject"])
@@ -92,7 +93,14 @@ func (r *pdfRenderer) writePDF(ctx context.Context, data []byte, writer io.Write
 			return err
 		}
 		position := 0
+		textCount := 0
 		if err := pdfgo.WalkOperations(ctx, content.Bytes(), func(operation pdfgo.Operation) error {
+			if operation.Operator == "BT" {
+				textCount++
+			}
+			if !r.exactImages {
+				return nil
+			}
 			if operation.Operator != "Do" {
 				return nil
 			}
@@ -127,8 +135,16 @@ func (r *pdfRenderer) writePDF(ctx context.Context, data []byte, writer io.Write
 		}); err != nil {
 			return err
 		}
-		if position != len(r.images[index]) {
+		if r.exactImages && position != len(r.images[index]) {
 			return fmt.Errorf("PDF output image missing")
+		}
+		if r.exactText {
+			if index >= len(r.text) || textCount != r.text[index].count {
+				return fmt.Errorf("PDF output text count differs")
+			}
+			if len(r.text[index].replacements) != 0 {
+				texts[page.Reference] = r.text[index].replacements
+			}
 		}
 		return nil
 	})
@@ -138,9 +154,9 @@ func (r *pdfRenderer) writePDF(ctx context.Context, data []byte, writer io.Write
 	if pages != len(r.images) {
 		return fmt.Errorf("PDF output page missing")
 	}
-	options := pdfgo.RewriteOptions{Images: images, ImageOptions: pdfgo.ImageWriteOptions{PreblendBinary: true}, LinkRegions: links, Optimization: optimization}
-	if exactLinks {
-		if err := r.navigation.destinations(ctx, reader, references, &options); err != nil {
+	options := pdfgo.RewriteOptions{Images: images, ImageOptions: pdfgo.ImageWriteOptions{PreblendBinary: true}, LinkRegions: links, TextReplacements: texts, Optimization: optimization}
+	if nativeWrite {
+		if err := r.navigation.prepareRewrite(ctx, reader, references, &options); err != nil {
 			return err
 		}
 	}

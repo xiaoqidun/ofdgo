@@ -21,55 +21,64 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// annotationTriggerActions 将释放点击和页面打开事件转换为OFD，不改变其他事件的触发条件
-// 入参: ctx 取消上下文, annotation PDF注解
-// 返回: []Action 点击动作, []Action 页面打开动作, error 事件、动作或取消错误
-func (p *pdfImporter) annotationTriggerActions(ctx context.Context, annotation pdfgo.Annotation) ([]Action, []Action, error) {
-	if annotation.Subtype == "Widget" {
-		return nil, nil, nil
+// annotationTriggerActions 按事件转换注解动作，页面打开动作独立于注解外观
+// 入参: ctx 取消上下文, annotation PDF注解, event OFD事件
+// 返回: []Action 动作序列, error 事件、动作或取消错误
+func (p *pdfImporter) annotationTriggerActions(ctx context.Context, annotation pdfgo.Annotation, event string) ([]Action, error) {
+	if annotation.Subtype == "Widget" && event == "CLICK" {
+		return nil, ctx.Err()
 	}
 	triggers, err := p.reader.ReadAnnotationTriggers(ctx, annotation)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if len(triggers) == 0 {
-		return nil, nil, nil
+		return nil, ctx.Err()
 	}
 	flags, err := p.reader.ReadAnnotationFlags(annotation)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	var clicks, opened []Action
+	var converted []Action
 	for _, trigger := range triggers {
+		if trigger.Event == "PC" || trigger.Event == "PV" || trigger.Event == "PI" {
+			if event == "PO" {
+				if err := p.unmappedTrigger(ctx, "annotation", trigger); err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+		if (trigger.Event == "PO") != (event == "PO") {
+			continue
+		}
 		if flags&64 != 0 && (trigger.Event == "E" || trigger.Event == "X" || trigger.Event == "D" || trigger.Event == "U") {
 			continue
 		}
-		event := ""
 		switch trigger.Event {
-		case "U":
-			event = "CLICK"
-		case "PO":
-			event = "PO"
+		case "U", "PO":
 		default:
-			return nil, nil, &pdfgo.UnsupportedError{Feature: "annotation trigger " + string(trigger.Event)}
+			return nil, &pdfgo.UnsupportedError{Feature: "annotation trigger " + string(trigger.Event)}
 		}
 		currentPage := p.page
 		if event == "PO" {
 			currentPage = p.pageActionPage
 		}
-		actions, err := p.eventActions(ctx, trigger.Action, event, &currentPage)
-		if err != nil {
-			return nil, nil, err
-		}
+		var source pdfgo.Annotation
 		if event == "CLICK" {
-			clicks = append(clicks, actions...)
-		} else {
+			source = annotation
+		}
+		actions, err := p.eventActions(ctx, trigger.Action, event, source, &currentPage)
+		if err != nil {
+			return nil, err
+		}
+		converted = append(converted, actions...)
+		if event == "PO" {
 			p.pageActionPage = currentPage
-			opened = append(opened, actions...)
 		}
 	}
-	if len(opened) != 0 && (p.page < 0 || p.page >= len(p.editor.pages)) {
-		return nil, nil, fmt.Errorf("invalid annotation trigger page")
+	if event == "PO" && len(converted) != 0 && (p.page < 0 || p.page >= len(p.editor.pages)) {
+		return nil, fmt.Errorf("invalid annotation trigger page")
 	}
-	return clicks, opened, ctx.Err()
+	return converted, ctx.Err()
 }

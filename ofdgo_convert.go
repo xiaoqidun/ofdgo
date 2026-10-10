@@ -15,7 +15,6 @@
 package ofdgo
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -159,19 +158,15 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 	if err = progress("open", 0, 0); err != nil {
 		return report, err
 	}
+	if source == nil || size <= 0 {
+		return report, fmt.Errorf("empty document source")
+	}
 	source = convertReader{context: ctx, source: source}
 	report.Input = strings.ToLower(strings.TrimSpace(options.Input))
 	if report.Input == "" {
-		var header [1024]byte
-		n, readErr := source.ReadAt(header[:], 0)
-		if readErr != nil && readErr != io.EOF {
-			return report, readErr
-		}
-		switch {
-		case bytes.HasPrefix(header[:n], []byte("PK\x03\x04")):
-			report.Input = "ofd"
-		case bytes.Contains(header[:n], []byte("%PDF-")):
-			report.Input = "pdf"
+		report.Input, err = DetectFormat(source, size)
+		if err != nil {
+			return report, err
 		}
 	}
 	var reader *Reader

@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 
@@ -488,15 +489,17 @@ func actionRegionPath(region *Region, matrix Matrix) *canvas.Path {
 				angle, err := strconv.ParseFloat(command.RotationAngle, 64)
 				large, largeErr := strconv.ParseBool(command.LargeArc)
 				sweep, sweepErr := strconv.ParseBool(command.SweepDirection)
-				if len(end) == 2 && err == nil && largeErr == nil && sweepErr == nil {
+				if len(end) == 2 && finite(end[0]) && finite(end[1]) && err == nil && finite(angle) && largeErr == nil && sweepErr == nil {
 					rx, ry := 0.0, 0.0
 					if len(size) > 0 {
-						rx, ry = size[0], size[0]
+						rx, ry = math.Abs(size[0]), math.Abs(size[0])
 					}
 					if len(size) > 1 {
-						ry = size[1]
+						rx, ry = rx/2, math.Abs(size[1])/2
 					}
-					part.ArcTo(rx, ry, angle, large, sweep, end[0], end[1])
+					if finite(rx) && finite(ry) {
+						part.ArcTo(rx, ry, math.Mod(angle, 360), large, sweep, end[0], end[1])
+					}
 				}
 			case "Close":
 				part.Close()

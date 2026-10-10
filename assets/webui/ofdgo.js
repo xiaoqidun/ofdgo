@@ -68,6 +68,12 @@ const state = {
 	pageMultiSelect: false,
 	pageTouchPointer: null,
 	outlineSelection: null,
+	outlineSeq: 0,
+	openActionEnabled: false,
+	openActionDocument: false,
+	openActionPage: null,
+	openActionTask: null,
+	openActionFrame: 0,
 	outlineAction: "add",
 	styleOriginal: null,
 	objectClipboard: null,
@@ -2099,7 +2105,7 @@ async function switchDocument(index) {
 		updateTextFonts(null, true);
 		state.ofdBytes = null;
 		setEditorInfo(doc);
-		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true, clearSelection: true, fitMode: state.fitMode, scale: state.scale });
+		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true, clearSelection: true, fitMode: state.fitMode, scale: state.scale, activateActions: true });
 	} catch (error) {
 		if (openSeq === state.openSeq) {
 			el.documentSelect.value = String(previous);
@@ -3339,12 +3345,13 @@ function resizeViewer() {
 }
 
 async function boot() {
+	const openSeq = state.openSeq;
 	setBusy(true, "正在准备引擎", 8, STATUS.engine);
 	try {
 		if (!await prepareOffline()) {
 			return;
 		}
-		setProgress("正在准备引擎", 8, STATUS.engine);
+		if (openSeq === state.openSeq) setProgress("正在准备引擎", 8, STATUS.engine);
 		await ensureWASM();
 		let fontsRestored = true;
 		try {
@@ -3352,16 +3359,18 @@ async function boot() {
 		} catch {
 			fontsRestored = false;
 		}
-		setProgress("引擎准备完成", 70);
+		if (openSeq === state.openSeq) setProgress("引擎准备完成", 70);
 		await loadExportFormats();
-		setEmpty("选择 OFD 文件");
+		if (openSeq === state.openSeq) setEmpty("选择 OFD 文件");
 		updateFontSummary();
 		renderFontList();
 		updateControls();
 		updateLocalFontButton();
 		await fontManager.refreshPermission();
-		setStatus(fontsRestored ? STATUS.ready : "字体读取失败");
-		setBusy(false);
+		if (openSeq === state.openSeq) {
+			setStatus(fontsRestored ? STATUS.ready : "字体读取失败");
+			setBusy(false);
+		}
 		if ("launchQueue" in window) {
 			let opening = Promise.resolve();
 			window.launchQueue.setConsumer(({ files }) => {
@@ -3375,14 +3384,16 @@ async function boot() {
 		}
 		try {
 			const remote = remoteDocumentOptions(window.location.hash);
-			if (remote) await openOFD({ name: remote.name }, remote);
+			if (remote && openSeq === state.openSeq) await openOFD({ name: remote.name }, remote);
 		} catch (err) {
-			showError(err, !state.doc);
+			if (openSeq === state.openSeq) showError(err, !state.doc);
 		}
 	} catch (err) {
-		setStatus("引擎加载失败");
-		setEmpty(String(err.message || err));
-		setBusy(false);
+		if (openSeq === state.openSeq) {
+			setStatus("引擎加载失败");
+			setEmpty(String(err.message || err));
+			setBusy(false);
+		}
 		return;
 	}
 }
@@ -3754,19 +3765,14 @@ async function downloadRemoteDocument(options) {
 			}
 		} finally { reader.releaseLock(); }
 		controller.signal.throwIfAborted();
-		const bytes = new Uint8Array(received);
-		let offset = 0;
-		for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-		const pdf = new TextDecoder("latin1").decode(bytes.subarray(0, 1024)).includes("%PDF-");
-		if (!pdf && !(bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 3 && bytes[3] === 4)) throw new Error("下载内容不是 OFD 或 PDF 文档");
 		const disposition = response.headers.get("Content-Disposition") || "";
 		let supplied = /(?:^|;)\s*filename\*=UTF-8'[^']*'([^;]+)/i.exec(disposition)?.[1];
 		if (supplied) { try { supplied = decodeURIComponent(supplied.trim()); } catch { supplied = ""; } }
 		if (!supplied) supplied = /(?:^|;)\s*filename\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^;]*))/i.exec(disposition)?.slice(1).find(value => value !== undefined)?.replace(/\\(.)/g, "$1");
 		let pathName = new URL(response.url || options.url).pathname.split("/").pop();
 		try { pathName = decodeURIComponent(pathName); } catch { pathName = ""; }
-		const name = remoteDocumentName(options.name) || remoteDocumentName(supplied) || remoteDocumentName(pathName) || `ofdgo.${pdf ? "pdf" : "ofd"}`;
-		return { bytes, pdf, name };
+		const name = remoteDocumentName(options.name) || remoteDocumentName(supplied) || remoteDocumentName(pathName);
+		return { file: new Blob(chunks), name };
 	} catch (err) {
 		if (err instanceof TypeError) throw new Error("下载失败，请检查网络、链接及跨域配置");
 		throw err;
@@ -3797,14 +3803,20 @@ async function openOFD(file, remote = null) {
 	setBusy(true, "正在读取文档", 10, STATUS.opening);
 	try {
 		const downloaded = remote ? await downloadRemoteDocument(remote) : null;
-		let bytes = downloaded ? downloaded.bytes : new Uint8Array(await file.arrayBuffer());
-		const name = downloaded ? downloaded.name : file.name;
+		if (openSeq !== state.openSeq) return;
+		await ensureWASM();
+		if (openSeq !== state.openSeq) return;
+		const source = downloaded ? downloaded.file : file;
+		const format = await callWASM("ofdgoDetectFormat", source);
+		if (openSeq !== state.openSeq) return;
+		let bytes = new Uint8Array(await source.arrayBuffer());
+		const name = (downloaded ? downloaded.name : file.name) || `ofdgo.${format}`;
 		let warnings = [];
 		let convertedDoc;
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		if (downloaded ? downloaded.pdf : /\.pdf$/i.test(file.name || "")) {
+		if (format === "pdf") {
 			setProgress("正在转换文档", 25);
 			await ensureWASM();
 			if (openSeq !== state.openSeq) return;
@@ -3864,7 +3876,7 @@ async function openOFD(file, remote = null) {
 		el.objectBoundsPanel.close();
 		el.outlinePanel.close();
 		updateControls();
-		await openDocument({ doc, pageIndex: remote?.pageIndex || 0, resetScroll: true, openSeq });
+		await openDocument({ doc, pageIndex: remote?.pageIndex || 0, resetScroll: true, openSeq, activateActions: true });
 	} catch (err) {
 		if (openSeq === state.openSeq) {
 			if (err.name === "AbortError") setStatus("打开已取消");
@@ -4445,6 +4457,7 @@ async function openDocument(options = {}) {
 				openSeq,
 				reuseSession: true,
 				fontsChanged: true,
+				activateActions: options.activateActions,
 			});
 			return;
 		}
@@ -4515,6 +4528,13 @@ async function openDocument(options = {}) {
 		}
 		queueNearbyPages(pageIndex, openSeq);
 		loadDocumentDetails(openSeq);
+		if (page && options.activateActions) {
+			state.openActionEnabled = true;
+			state.openActionDocument = !state.editing;
+			state.openActionPage = state.editing ? state.doc.pages[state.pageIndex]?.id : null;
+			state.openActionTask = null;
+			scheduleOpenActions();
+		}
 	} catch (err) {
 		if (openSeq !== state.openSeq) {
 			return;
@@ -4618,6 +4638,7 @@ async function renderPage(index, options = {}) {
 	} finally {
 		if (!options.keepBusy && !state.exporting && openSeq === state.openSeq && pageSeq === state.pageSeq) {
 			setBusy(false);
+			if (!options.openAction) scheduleOpenActions();
 		}
 	}
 }
@@ -6022,20 +6043,93 @@ function mountPageSVG(index, page, openSeq = state.openSeq) {
 
 function releaseMediaPlayers(surface) {
 	for (const [id, entry] of state.mediaPlayers || []) {
-		if (surface && entry.surface !== surface) continue;
-		for (const [requestID, request] of wasmRequests) {
-			if (request.mediaID === id) wasmWorker?.postMessage({type: "cancel", id: requestID});
-		}
-		entry.finish?.();
-		if (entry.element) {
-			entry.element.pause();
-			entry.element.removeAttribute("src");
-			entry.element.load();
-			entry.element.remove();
-		}
-		if (entry.url) URL.revokeObjectURL(entry.url);
-		state.mediaPlayers.delete(id);
+		if (surface && (entry.surface !== surface || entry.floating)) continue;
+		releaseMediaPlayer(id, entry);
 	}
+}
+
+function releaseMediaPlayer(id, entry) {
+	if (state.mediaPlayers?.get(id) !== entry) return;
+	state.mediaPlayers.delete(id);
+	for (const [requestID, request] of wasmRequests) {
+		if (request.mediaID === id) wasmWorker?.postMessage({type: "cancel", id: requestID});
+	}
+	entry.finish?.();
+	closeMediaWindow(entry);
+	if (entry.element) {
+		entry.element.pause();
+		entry.element.removeAttribute("src");
+		entry.element.load();
+		entry.element.remove();
+	}
+	if (entry.url) URL.revokeObjectURL(entry.url);
+}
+
+function closeMediaWindow(entry) {
+	const dialog = entry.dialog;
+	if (!dialog) return;
+	const restoreFocus = dialog.contains(document.activeElement);
+	entry.dialog = null;
+	dialog.close();
+	dialog.remove();
+	if (restoreFocus && entry.opener?.isConnected) entry.opener.focus({ preventScroll: true });
+	entry.opener = null;
+}
+
+function placeMediaPlayer(id, entry) {
+	const box = entry.placement;
+	if (!box) return;
+	const element = entry.element;
+	entry.finish?.();
+	if (box.floating) {
+		element.removeAttribute("style");
+		if (!entry.dialog) {
+			const dialog = document.createElement("dialog");
+			dialog.className = "form-dialog media-dialog";
+			const label = entry.kind === "Video" ? "视频" : "音频";
+			dialog.setAttribute("aria-label", `${label}播放`);
+			const header = document.createElement("div");
+			header.className = "form-title";
+			const title = document.createElement("span");
+			title.textContent = `${label}播放`;
+			const close = document.createElement("button");
+			close.type = "button";
+			close.className = "small-button";
+			close.textContent = "关闭";
+			close.title = `关闭${label}`;
+			close.setAttribute("aria-label", `关闭${label}`);
+			close.addEventListener("click", () => releaseMediaPlayer(id, entry));
+			dialog.addEventListener("keydown", event => {
+				if (event.key !== "Escape") return;
+				event.preventDefault();
+				event.stopPropagation();
+				releaseMediaPlayer(id, entry);
+			});
+			dialog.addEventListener("close", () => {
+				if (entry.dialog === dialog) releaseMediaPlayer(id, entry);
+			});
+			header.append(title, close);
+			dialog.append(header, element);
+			entry.opener = document.activeElement;
+			entry.dialog = dialog;
+			document.body.append(dialog);
+			dialog.show();
+		}
+	} else {
+		entry.surface.append(element);
+		closeMediaWindow(entry);
+		element.style.left = `${box.x / box.pageWidth * 100}%`;
+		element.style.width = `${box.width / box.pageWidth * 100}%`;
+		if (entry.kind === "Video") {
+			element.style.width = `calc(${box.width / box.pageWidth * 100}% * var(--surface-scale, 1))`;
+			element.style.top = `${box.y / box.pageHeight * 100}%`;
+			element.style.height = `calc(${box.height / box.pageHeight * 100}% * var(--surface-scale, 1))`;
+		} else {
+			element.style.bottom = `${Math.max(0, 100 - (box.y + box.height) / box.pageHeight * 100)}%`;
+		}
+	}
+	entry.placement = null;
+	element.currentTime = 0;
 }
 
 async function playMediaAction(link, page, surface) {
@@ -6048,23 +6142,26 @@ async function playMediaAction(link, page, surface) {
 	let entry = players.get(id);
 	if (operator === "Stop" || operator === "Pause") {
 		if (entry) entry.operation = (entry.operation || 0) + 1;
-		if (entry?.element) {
-			entry.element.pause();
-			if (operator === "Stop") {
-				entry.element.currentTime = 0;
-				entry.finish?.();
-			}
+		if (operator === "Stop") {
+			if (entry) releaseMediaPlayer(id, entry);
+		} else if (entry) {
+			entry.paused = true;
+			entry.element?.pause();
 		}
 		return;
 	}
-	if (operator === "Resume" && !entry) return;
+	if (operator === "Resume" && (!entry || entry.element?.ended || !entry.paused && !entry.element?.paused)) return;
 	const seq = state.openSeq;
 	try {
 		if (!entry) {
 			entry = { surface };
 			players.set(id, entry);
 			entry.pending = callWASM("ofdgoExportMedia", id, null).then(data => {
-				if (seq !== state.openSeq || players.get(id) !== entry || !entry.surface.isConnected) return;
+				if (seq !== state.openSeq || players.get(id) !== entry) return;
+				if (!entry.floating && !entry.surface.isConnected) {
+					releaseMediaPlayer(id, entry);
+					return;
+				}
 				const element = document.createElement(data.kind === "Video" ? "video" : "audio");
 				entry.kind = data.kind;
 				entry.element = element;
@@ -6074,12 +6171,18 @@ async function playMediaAction(link, page, surface) {
 				element.className = "page-media";
 				element.addEventListener("error", () => {
 					entry.finish?.();
-					if (seq === state.openSeq) setStatus("媒体无法播放");
+					if (seq === state.openSeq && players.get(id) === entry) setStatus("媒体无法播放");
 				});
-				entry.surface.append(element);
+				placeMediaPlayer(id, entry);
 			});
 		}
-		if (operator === "Play") entry.surface = surface;
+		if (operator === "Play") {
+			entry.surface = surface;
+			const box = link.movie && link.playbackBox ? link.playbackBox : link;
+			entry.floating = !!link.movie && !link.playbackBox || !!link.sound && !(link.width > 0 && link.height > 0);
+			entry.placement = { x: box.x, y: box.y, width: box.width, height: box.height, pageWidth: page.width, pageHeight: page.height, floating: entry.floating };
+		}
+		entry.paused = false;
 		const operation = entry.operation = (entry.operation || 0) + 1;
 		await entry.pending;
 		if (seq !== state.openSeq || players.get(id) !== entry || operation !== entry.operation || !entry.element?.isConnected) return false;
@@ -6088,19 +6191,7 @@ async function playMediaAction(link, page, surface) {
 			element.volume = Math.max(0, Math.min(100, action.volume ?? 100)) / 100;
 			element.loop = !!action.repeat;
 		}
-		if (operator === "Play") {
-			entry.finish?.();
-			element.style.left = `${link.x / page.width * 100}%`;
-			element.style.width = `${link.width / page.width * 100}%`;
-			if (entry.kind === "Video") {
-				element.style.top = `${link.y / page.height * 100}%`;
-				element.style.height = `${link.height / page.height * 100}%`;
-			} else {
-				element.style.bottom = `${Math.max(0, 100 - (link.y + link.height) / page.height * 100)}%`;
-			}
-			surface.append(element);
-			element.currentTime = 0;
-		}
+		placeMediaPlayer(id, entry);
 		let ended;
 		if (link.sound && action.synchronous && !action.repeat) {
 			ended = new Promise(resolve => {
@@ -6123,13 +6214,13 @@ async function playMediaAction(link, page, surface) {
 	}
 }
 
-function pageLinkTarget(link, page, surface) {
+function pageLinkTarget(link, page, surface, openAction) {
 	if (link.sound || link.movie) {
 		return { href: "#", title: link.sound ? "音频播放" : "视频播放", activate: () => playMediaAction(link, page, surface) };
 	}
 	if (link.dest) {
 		const target = pageIndexByID(state.doc.pages, link.dest.pageID);
-		return { href: target < 0 ? "#" : `#page-${target + 1}`, title: target < 0 ? "文档链接" : `第${target + 1}页`, activate: () => navigateDestination(link.dest) };
+		return { href: target < 0 ? "#" : `#page-${target + 1}`, title: target < 0 ? "文档链接" : `第${target + 1}页`, activate: () => navigateDestination(link.dest, openAction) };
 	}
 	if (link.attachment) {
 		return { href: "#", title: link.fileName ? `下载附件：${link.fileName}` : "下载附件", activate: () => {
@@ -6167,6 +6258,7 @@ function mountPageLinks(page, surface) {
 			anchor.addEventListener("click", async event => {
 				event.preventDefault();
 				if (document.body.hasAttribute("aria-busy")) return;
+				state.openActionTask = null;
 				const openSeq = state.openSeq;
 				let actions = targets;
 				if (event.detail && link.group) {
@@ -6209,8 +6301,9 @@ function destinationPoint(page, x, y) {
 	return { x, y };
 }
 
-async function navigateDestination(dest) {
+async function navigateDestination(dest, openAction) {
 	if (document.body.hasAttribute("aria-busy")) return;
+	if (openAction && state.openActionTask !== openAction) return false;
 	const index = pageIndexByID(state.doc.pages, dest.pageID);
 	if (index < 0) {
 		setStatus("目标页面不存在");
@@ -6221,7 +6314,8 @@ async function navigateDestination(dest) {
 		return;
 	}
 	const seq = state.openSeq, scale = state.scale;
-	await renderPage(index, { fit: false, scroll: false });
+	await renderPage(index, { fit: false, scroll: false, openAction });
+	if (openAction && state.openActionTask !== openAction) return false;
 	if (seq !== state.openSeq || state.pageIndex !== index) return;
 	const page = state.doc.pages[index], size = pageViewSize(page), space = pageSpace();
 	const width = el.viewerPanel.clientWidth - space * 2, height = el.viewerPanel.clientHeight - space * 2;
@@ -6581,6 +6675,7 @@ function schedulePageSync() {
 }
 
 function syncCurrentPageFromScroll() {
+	if (state.openActionTask?.navigating) return;
 	syncPageWindow(state.pageWindow);
 	const shell = pageShellFromView();
 	if (!shell) {
@@ -6590,6 +6685,7 @@ function syncCurrentPageFromScroll() {
 	if (Number.isFinite(nextIndex) && nextIndex !== state.pageIndex) {
 		setCurrentPage(nextIndex);
 		queueNearbyPages(nextIndex);
+		scheduleOpenActions();
 	}
 	prunePageRenderQueue();
 }
@@ -6626,8 +6722,10 @@ function pageShellAtPoint(x, y) {
 }
 
 function setCurrentPage(index) {
+	if (index !== state.pageIndex && !state.openActionTask?.navigating) state.openActionTask = null;
 	if (state.composite && state.composite.index !== index) resetCompositeScope();
 	state.pageIndex = index;
+	if (state.editing) state.openActionPage = state.doc?.pages[index]?.id;
 	if (state.fitMode === "width") {
 		state.scale = fitWidthScale(currentPageInfo());
 		el.zoomLabel.textContent = `${Math.round(state.scale * 100)}%`;
@@ -7011,6 +7109,82 @@ function renderSearchHighlights(index) {
 	}
 }
 
+function scheduleOpenActions() {
+	if (!state.openActionEnabled || state.openActionFrame) return;
+	state.openActionFrame = requestAnimationFrame(() => {
+		state.openActionFrame = 0;
+		activateOpenActions();
+	});
+}
+
+async function activateOpenActions() {
+	if (!state.openActionEnabled || !state.doc || state.editing || state.exporting || document.body.hasAttribute("aria-busy")) return;
+	const pageID = state.doc.pages[state.pageIndex]?.id;
+	if (!pageID || !state.openActionDocument && state.openActionPage === pageID) return;
+	const task = { sequence: state.openSeq, seen: new Set(), navigating: false };
+	state.openActionTask = task;
+	const current = () => task === state.openActionTask && task.sequence === state.openSeq && !state.editing;
+	let documentOpened = state.openActionDocument;
+	state.openActionDocument = false;
+	state.openActionPage = pageID;
+	try {
+		while (current()) {
+			const index = state.pageIndex;
+			const id = state.doc.pages[index]?.id;
+			if (!id || !documentOpened && task.seen.has(id)) break;
+			if (!documentOpened) {
+				task.seen.add(id);
+				state.openActionPage = id;
+			}
+			const page = await renderFlowPage(index, { openSeq: task.sequence, priority: 0, throwError: true });
+			if (!page || !current()) break;
+			const links = documentOpened ? await callWASM("ofdgoOpenLinks") : await callWASM("ofdgoOpenLinks", index);
+			if (!current()) break;
+			for (const link of links) {
+				if (!current()) break;
+				const info = state.doc.pages[state.pageIndex];
+				const surface = pageShell(state.pageIndex)?.querySelector(".page-surface");
+				const target = pageLinkTarget(link, info, surface, task);
+				if (!target) continue;
+				if ((target.external || link.attachment) && !window.confirm(link.attachment
+					? `文档请求下载附件，是否继续？\n${link.fileName || ""}` : `文档请求打开链接，是否继续？\n${target.href}`)) return;
+				task.navigating = !!link.dest;
+				if (await target.activate() === false) return;
+				if (task.navigating) await nextFrame();
+				task.navigating = false;
+			}
+			if (documentOpened) documentOpened = false;
+			else if (state.doc.pages[state.pageIndex]?.id === id) break;
+		}
+	} catch (err) {
+		if (current()) setStatus(err.message || "动作无法执行");
+	} finally {
+		if (task === state.openActionTask) {
+			state.openActionPage = state.doc?.pages[state.pageIndex]?.id;
+			state.openActionTask = null;
+		}
+	}
+}
+
+async function activateOutline(path) {
+	if (document.body.hasAttribute("aria-busy") || state.editing) return;
+	state.openActionTask = null;
+	const sequence = state.openSeq;
+	const request = ++state.outlineSeq;
+	try {
+		const links = await callWASM("ofdgoOutlineLinks", path);
+		for (const link of links) {
+			if (sequence !== state.openSeq || request !== state.outlineSeq || state.editing) break;
+			const page = state.doc?.pages[state.pageIndex];
+			const surface = pageShell(state.pageIndex)?.querySelector(".page-surface");
+			const target = pageLinkTarget(link, page, surface);
+			if (target && await target.activate() === false) break;
+		}
+	} catch (err) {
+		if (sequence === state.openSeq && request === state.outlineSeq && !state.editing) setStatus(err.message || "目录无法打开");
+	}
+}
+
 function createOutlineList(outlines, path = []) {
 	const list = document.createElement("ul");
 	list.className = "outline-list";
@@ -7022,7 +7196,7 @@ function createOutlineList(outlines, path = []) {
 		if (!hasChildren) {
 			row.className = "outline-leaf";
 		}
-		const link = document.createElement(outline.page || state.editing ? "button" : "span");
+		const link = document.createElement(outline.actionCount || outline.page || state.editing ? "button" : "span");
 		link.className = "outline-link";
 		link.classList.toggle("selected", state.editing && JSON.stringify(current) === JSON.stringify(state.outlineSelection));
 		const title = document.createElement("span");
@@ -7036,7 +7210,7 @@ function createOutlineList(outlines, path = []) {
 			page.setAttribute("aria-label", `第 ${outline.page} 页`);
 			link.append(page);
 		}
-		if (outline.page || state.editing) {
+		if (outline.actionCount || outline.page || state.editing) {
 			link.type = "button";
 			link.addEventListener("keydown", async event => {
 				if (!state.editing || event.defaultPrevented || event.isComposing || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
@@ -7056,8 +7230,10 @@ function createOutlineList(outlines, path = []) {
 					state.outlineSelection = current;
 					for (const node of el.outlineList.querySelectorAll(".outline-link")) node.classList.toggle("selected", node === link);
 					for (const button of el.outlineList.querySelectorAll("[data-outline-action]")) button.disabled = false;
+					if (outline.page) renderPage(outline.page - 1);
+					return;
 				}
-				if (outline.page) renderPage(outline.page - 1);
+				activateOutline(current);
 			});
 		}
 		row.append(link);

@@ -23,6 +23,7 @@ import (
 
 // AddMedia 注册音频或视频资源，保持原始编码，资源被动作引用后写入文档
 // 本方法不转码或验证媒体编解码器，播放能力由调用方提供
+// 相同类型、格式及内容复用标识；需要独立控制时可通过CopyMedia复制资源
 // 入参: kind 为Audio或Video, format 媒体格式，可为空, data 完整媒体文件
 // 返回: string 资源标识, error 无效类型或数据
 func (e *Editor) AddMedia(kind, format string, data []byte) (string, error) {
@@ -45,4 +46,37 @@ func (e *Editor) AddMedia(kind, format string, data []byte) (string, error) {
 	e.resources = append(e.resources, editorResource{name: name, data: bytes.Clone(data), image: &MultiMedia{ID: id, Type: kind, Format: format, MediaFile: "/" + name}})
 	e.resourceID[key] = id
 	return id, nil
+}
+
+// CopyMedia 复制音视频资源定义，共用原始文件，以新标识区分播放控制
+// 原页面资源须先通过Page读取；未被动作引用的副本不写入文档
+// 入参: id 音视频资源标识
+// 返回: string 新资源标识, error 资源缺失、类型或包结构错误
+func (e *Editor) CopyMedia(id string) (string, error) {
+	var copy editorResource
+	for _, resource := range e.resources {
+		if resource.image != nil && resource.image.ID == id {
+			copy = resource
+			break
+		}
+	}
+	if copy.image == nil && e.source != nil {
+		media, err := e.source.reader.Media(id)
+		if err != nil {
+			return "", err
+		}
+		media.MediaFile = "/" + cleanPackagePath(e.source.reader.ResPath(media.MediaFile))
+		copy.image = &media
+	}
+	if copy.image == nil || copy.image.Type != "Audio" && copy.image.Type != "Video" {
+		return "", fmt.Errorf("audio or video resource %q is unavailable", id)
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return "", err
+	}
+	media := *copy.image
+	media.ID = e.nextID()
+	copy.image = &media
+	e.resources = append(e.resources, copy)
+	return media.ID, nil
 }

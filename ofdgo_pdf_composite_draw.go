@@ -701,7 +701,7 @@ func (c *pdfCompositor) mask(mask *pdfgo.SoftMask, inherited *pdfgo.ColorSpace) 
 	nodes, ok := c.cache.masks[mask]
 	var err error
 	if !ok {
-		nodes, err = c.importer.collectCompositeNodes(func(v pdfgo.Visitor) error { return mask.WalkContext(c.importer.ctx, v) })
+		nodes, err = c.importer.collectCompositeNodes(func(v pdfgo.Visitor) error { return mask.WalkContext(c.importer.ctx, v) }, false)
 		if err != nil {
 			return nil, err
 		}

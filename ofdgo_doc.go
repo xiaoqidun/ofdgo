@@ -167,10 +167,11 @@ type OutlineElem struct {
 
 // OutlineInfo 目录节点信息，Page从1开始，0表示没有有效的文档内目标页
 type OutlineInfo struct {
-	Title    string        `json:"title"`
-	Expanded bool          `json:"expanded"`
-	Page     int           `json:"page,omitempty"`
-	Children []OutlineInfo `json:"children,omitempty"`
+	Title       string        `json:"title"`
+	Expanded    bool          `json:"expanded"`
+	Page        int           `json:"page,omitempty"`
+	ActionCount int           `json:"actionCount,omitempty"`
+	Children    []OutlineInfo `json:"children,omitempty"`
 }
 
 // Permissions 权限声明
@@ -337,7 +338,7 @@ func (p *Permissions) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error
 func outlineInfos(outlines []OutlineElem, bookmarks map[string]Dest, pages map[string]int) []OutlineInfo {
 	infos := make([]OutlineInfo, 0, len(outlines))
 	for _, outline := range outlines {
-		info := OutlineInfo{Title: outline.Title, Expanded: outline.Expanded}
+		info := OutlineInfo{Title: outline.Title, Expanded: outline.Expanded, ActionCount: len(outline.Actions)}
 		for _, action := range outline.Actions {
 			if action.Goto != nil {
 				if dest := gotoDest(action.Goto, bookmarks); dest != nil {

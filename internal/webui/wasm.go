@@ -183,6 +183,7 @@ func (r *browserReaderAt) ReadAt(data []byte, offset int64) (int, error) {
 
 // RunWASM 注册浏览器WASM接口并阻塞运行
 func RunWASM() {
+	registerAsyncCallback("ofdgoDetectFormat", detectDocumentFormat)
 	registerCallback("ofdgoOpen", openDocument)
 	registerCallback("ofdgoSelectDocument", selectDocument)
 	registerCallback("ofdgoChangeDocument", changePackageDocument)
@@ -195,6 +196,8 @@ func RunWASM() {
 	registerCallback("ofdgoDocumentInfo", documentInfo)
 	registerCallback("ofdgoVerifySignatures", verifySignatures)
 	registerCallback("ofdgoRenderPage", renderPage)
+	registerCallback("ofdgoOutlineLinks", outlineLinks)
+	registerCallback("ofdgoOpenLinks", openLinks)
 	registerCallback("ofdgoRenderBackends", renderBackends)
 	registerCallback("ofdgoSVGFontData", svgFontData)
 	registerCallback("ofdgoSearchPage", searchPage)
@@ -373,6 +376,17 @@ func safeCall(fn func([]js.Value) (any, error), args []js.Value) (data any, err 
 		}
 	}()
 	return fn(args)
+}
+
+// detectDocumentFormat 通过库按需识别输入，不加载或替换文档会话
+// 入参: args 随机读取回调、文件大小及检查点
+// 返回: any 格式标识, error 读取或识别错误
+func detectDocumentFormat(args []js.Value) (any, error) {
+	if len(args) != 3 {
+		return nil, fmt.Errorf("missing detection arguments")
+	}
+	source := &browserReaderAt{read: args[0], size: int64(args[1].Float()), checkpoint: args[2]}
+	return ofdgo.DetectFormat(source, source.size)
 }
 
 // convertPDFDocument 通过库转换PDF，不替换当前文档会话
@@ -819,52 +833,9 @@ func renderPage(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	links := make([]any, len(page.Links))
-	attachmentNames := make(map[string]string)
-	for _, link := range page.Links {
-		if link.Attachment == "" {
-			continue
-		}
-		attachments, err := currentSession.Reader.Attachments()
-		if err != nil {
-			return nil, err
-		}
-		for _, attachment := range attachments {
-			attachmentNames[attachment.ID] = attachment.FileName()
-		}
-		break
-	}
-	for i, link := range page.Links {
-		item := map[string]any{
-			"uri":    link.URI,
-			"target": link.Target,
-			"path":   link.Path,
-			"group":  link.Group,
-			"x":      link.Box.X,
-			"y":      link.Box.Y,
-			"width":  link.Box.W,
-			"height": link.Box.H,
-		}
-		if link.Attachment != "" {
-			item["attachment"] = link.Attachment
-			item["fileName"] = attachmentNames[link.Attachment]
-		}
-		if sound := link.Sound; sound != nil {
-			volume := 100
-			if sound.Volume != nil {
-				volume = *sound.Volume
-			}
-			item["sound"] = map[string]any{"resourceID": sound.ResourceID, "volume": volume, "repeat": sound.Repeat, "synchronous": sound.Synchronous}
-		}
-		if movie := link.Movie; movie != nil {
-			item["movie"] = map[string]any{"resourceID": movie.ResourceID, "operator": movie.Operator}
-		}
-		if dest := link.Dest; dest != nil {
-			item["dest"] = map[string]any{"type": dest.Type, "pageID": dest.PageID, "left": dest.Left, "top": dest.Top,
-				"right": dest.Right, "bottom": dest.Bottom, "zoom": dest.Zoom,
-				"omitLeft": dest.OmitLeft, "omitTop": dest.OmitTop, "omitZoom": dest.OmitZoom}
-		}
-		links[i] = item
+	links, err := linkResults(page.Links)
+	if err != nil {
+		return nil, err
 	}
 	fonts := make([]any, len(page.Fonts))
 	for i, font := range page.Fonts {
@@ -888,6 +859,106 @@ func renderPage(args []js.Value) (any, error) {
 		"text":        string(textData),
 		"objects":     objects,
 	}), nil
+}
+
+// openLinks 获取文档或页面打开动作，不执行动作
+// 入参: args 可选页面索引，省略时读取文档打开动作
+// 返回: any 动作目标, error 文档或页码错误
+func openLinks(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	var links []ofdgo.PageLink
+	var err error
+	if len(args) == 0 {
+		links, err = currentSession.Renderer.DocumentOpenLinks()
+	} else if len(args) == 1 {
+		page, readErr := currentSession.Reader.PageContentByIndex(args[0].Int())
+		if readErr != nil {
+			return nil, readErr
+		}
+		links, err = currentSession.Renderer.PageOpenLinks(page)
+	} else {
+		return nil, fmt.Errorf("unexpected open action arguments")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return linkResults(links)
+}
+
+// outlineLinks 获取目录节点的有序动作目标
+// 入参: args 各级目录索引
+// 返回: any 动作目标, error 目录或文档错误
+func outlineLinks(args []js.Value) (any, error) {
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	if len(args) != 1 {
+		return nil, fmt.Errorf("missing outline path")
+	}
+	links, err := currentSession.Renderer.OutlineLinks(indexesFromJS(args[0]))
+	if err != nil {
+		return nil, err
+	}
+	return linkResults(links)
+}
+
+// linkResults 将库层动作目标转换为浏览器数据
+// 入参: source 动作目标
+// 返回: []any 浏览器动作数据, error 附件读取错误
+func linkResults(source []ofdgo.PageLink) ([]any, error) {
+	links := make([]any, len(source))
+	attachmentNames := make(map[string]string)
+	for _, link := range source {
+		if link.Attachment == "" {
+			continue
+		}
+		attachments, err := currentSession.Reader.Attachments()
+		if err != nil {
+			return nil, err
+		}
+		for _, attachment := range attachments {
+			attachmentNames[attachment.ID] = attachment.FileName()
+		}
+		break
+	}
+	for i, link := range source {
+		item := map[string]any{
+			"uri":    link.URI,
+			"target": link.Target,
+			"path":   link.Path,
+			"group":  link.Group,
+			"x":      link.Box.X,
+			"y":      link.Box.Y,
+			"width":  link.Box.W,
+			"height": link.Box.H,
+		}
+		if link.Attachment != "" {
+			item["attachment"] = link.Attachment
+			item["fileName"] = attachmentNames[link.Attachment]
+		}
+		if sound := link.Sound; sound != nil {
+			volume := 100
+			if sound.Volume != nil {
+				volume = *sound.Volume
+			}
+			item["sound"] = map[string]any{"resourceID": sound.ResourceID, "volume": volume, "repeat": sound.Repeat, "synchronous": sound.Synchronous}
+		}
+		if movie := link.Movie; movie != nil {
+			item["movie"] = map[string]any{"resourceID": movie.ResourceID, "operator": movie.Operator}
+			if box := link.PlaybackBox; box != nil {
+				item["playbackBox"] = map[string]any{"x": box.X, "y": box.Y, "width": box.W, "height": box.H}
+			}
+		}
+		if dest := link.Dest; dest != nil {
+			item["dest"] = map[string]any{"type": dest.Type, "pageID": dest.PageID, "left": dest.Left, "top": dest.Top,
+				"right": dest.Right, "bottom": dest.Bottom, "zoom": dest.Zoom,
+				"omitLeft": dest.OmitLeft, "omitTop": dest.OmitTop, "omitZoom": dest.OmitZoom}
+		}
+		links[i] = item
+	}
+	return links, nil
 }
 
 // pageTextString 提取OFD页面原文

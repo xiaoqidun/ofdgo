@@ -173,6 +173,14 @@ async function handleMessage({ id, name, args }) {
 	const password = converting ? args[2] : name === "ofdgoSetEncryption" ? args[0]?.password : name === "ofdgoOpen" ? args[3]?.password : name === "ofdgoLoadImport" ? args[1]?.password : null;
 	try {
 		signal?.throwIfAborted();
+		if (name === "ofdgoDetectFormat") {
+			const file = args[0], reader = new FileReaderSync();
+			channel = new MessageChannel();
+			args = [(offset, size) => new Uint8Array(reader.readAsArrayBuffer(file.slice(offset, offset + size))), file.size, done => {
+				channel.port1.onmessage = () => done("", false);
+				channel.port2.postMessage(null);
+			}];
+		}
 		if (name === "ofdgoChangeAttachment" && (args[0] === "add" || args[0] === "replace")) {
 			const files = args[3], reader = new FileReaderSync();
 			args[3] = index => {

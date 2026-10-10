@@ -14,6 +14,8 @@
 
 package ofdgo
 
+import "fmt"
+
 // RenderPage 编译页面为与绘图库无关的只读绘制数据
 // 入参: page 页面内容
 // 返回: *RasterPage 绘制页面, error 错误信息
@@ -42,34 +44,80 @@ func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
 	return ParseBox(boxStr)
 }
 
-// PageLinks 获取页面、模板和可见注释的点击动作，保留复杂区域和组合图元
+// PageLinks 获取页面、模板和可见注释中图元的点击动作，保留复杂区域和组合图元
 // 入参: page 页面内容
 // 返回: []PageLink 页面链接, error 错误信息
 func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
-	box, err := r.GetPageBox(page)
-	if err != nil {
-		return nil, err
-	}
-	sources := r.pageActionSources(page, box)
+	sources := r.pageActionSources(page)
 	if r.RenderAnnotations {
 		sources = append(sources, r.annotationActionSources(r.Reader.Annots[page.ID])...)
 	}
+	return r.sourceLinks(sources, "CLICK")
+}
+
+// DocumentOpenLinks 获取文档打开动作的有序目标，不执行动作
+// 返回: []PageLink 动作目标, error 文档解析错误
+func (r *Renderer) DocumentOpenLinks() ([]PageLink, error) {
+	doc, err := r.Reader.Doc()
+	if err != nil {
+		return nil, err
+	}
+	return r.sourceLinks([]actionSource{{Actions: doc.Actions}}, "DO")
+}
+
+// PageOpenLinks 获取页面及模板打开动作的有序目标，不遍历图元或执行动作
+// 入参: page 页面内容
+// 返回: []PageLink 动作目标, error 目标解析错误
+func (r *Renderer) PageOpenLinks(page *PageContent) ([]PageLink, error) {
+	return r.sourceLinks(r.pageOpenActionSources(page), "PO")
+}
+
+// OutlineLinks 获取目录节点的有序动作目标，不执行动作
+// 入参: path 从根节点开始的各级索引
+// 返回: []PageLink 动作目标，不包含页面点击区域, error 目录路径或解析错误
+func (r *Renderer) OutlineLinks(path []int) ([]PageLink, error) {
+	doc, err := r.Reader.Doc()
+	if err != nil {
+		return nil, err
+	}
+	if len(path) == 0 {
+		return nil, fmt.Errorf("empty outline path")
+	}
+	nodes := doc.Outlines.OutlineElem
+	var node OutlineElem
+	for _, index := range path {
+		if index < 0 || index >= len(nodes) {
+			return nil, fmt.Errorf("invalid outline index: %d", index)
+		}
+		node = nodes[index]
+		nodes = node.OutlineElem
+	}
+	return r.sourceLinks([]actionSource{{Actions: node.Actions}}, "")
+}
+
+// sourceLinks 解析动作目标，保留动作顺序及独立目标数据
+// 入参: sources 动作来源, event 事件类型，空值表示目录激活动作
+// 返回: []PageLink 动作目标, error 区域或文档解析错误
+func (r *Renderer) sourceLinks(sources []actionSource, event string) ([]PageLink, error) {
 	var links []PageLink
 	var bookmarks map[string]Dest
 	for sourceIndex, source := range sources {
 		start := len(links)
 		for _, action := range source.Actions {
-			if action.Event != "CLICK" {
+			if event != "" && action.Event != event {
 				continue
 			}
-			box, path, err := r.actionLinkRegion(source, action)
-			if err != nil {
-				return nil, err
+			var link PageLink
+			if event == "CLICK" {
+				box, path, err := r.actionLinkRegion(source, action)
+				if err != nil {
+					return nil, err
+				}
+				if box.W <= 0 || box.H <= 0 {
+					continue
+				}
+				link.Box, link.Path = box, path
 			}
-			if box.W <= 0 || box.H <= 0 {
-				continue
-			}
-			link := PageLink{Box: box, Path: path}
 			if action.Goto != nil {
 				if bookmarks == nil {
 					doc, err := r.Reader.Doc()
@@ -111,6 +159,10 @@ func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
 					value.Operator = "Play"
 				}
 				link.Movie = &value
+				if source.Graphic {
+					playback := source.Box
+					link.PlaybackBox = &playback
+				}
 				links = append(links, link)
 			}
 		}

@@ -419,14 +419,16 @@ func (e *Editor) writePartsWithPages(write func(string, []byte, bool) error, pro
 			return err
 		}
 	}
+	written := make(map[string]bool)
 	for _, resources := range [][]editorResource{fonts, images} {
 		for _, resource := range resources {
-			if resource.name == "" {
+			if resource.name == "" || written[resource.name] {
 				continue
 			}
 			if err := write(resource.name, resource.data, resource.image != nil); err != nil {
 				return err
 			}
+			written[resource.name] = true
 		}
 	}
 	for _, resource := range e.resources {
@@ -445,6 +447,13 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 	used := make(map[string]bool)
 	promoted := make(map[string]bool)
 	files := make(map[string]bool)
+	retainAll := false
+	if len(e.outlines) != 0 {
+		refs := editorResourceRefs{ids: used, files: make(map[string]bool)}
+		if _, safe := refs.scan(bytes.NewReader(e.outlines), e.packageName("Document.xml")); !safe {
+			retainAll = true
+		}
+	}
 	if e.source != nil {
 		collectActionReferences(e.source.document.Actions, used)
 		for _, name := range e.annotationFiles() {
@@ -454,20 +463,25 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 			}
 			refs := editorResourceRefs{ids: used, files: make(map[string]bool)}
 			if _, safe := refs.scan(bytes.NewReader(data), name); !safe {
-				for _, resource := range e.resources {
-					if resource.font != nil {
-						used[resource.font.ID] = true
-					}
-					if resource.image != nil {
-						used[resource.image.ID] = true
-					}
-					if resource.space != nil {
-						used[resource.space.ID] = true
-					}
-					used[resource.definition()] = true
-				}
+				retainAll = true
 			}
 		}
+	}
+	if retainAll {
+		for _, resource := range e.resources {
+			if resource.font != nil {
+				used[resource.font.ID] = true
+			}
+			if resource.image != nil {
+				used[resource.image.ID] = true
+			}
+			if resource.space != nil {
+				used[resource.space.ID] = true
+			}
+			used[resource.definition()] = true
+		}
+	}
+	if e.source != nil {
 		maps.Copy(promoted, used)
 	}
 	for _, page := range e.pages {
@@ -1188,6 +1202,9 @@ func (x *ofdXML) actions(actions []Action) {
 						return
 					}
 					var attrs ofdAttrs
+					if command.Type == "Arc" && command.EllipseSize == "" {
+						attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "EllipseSize"}})
+					}
 					for _, pair := range [][2]string{{"Point1", command.Point1}, {"Point2", command.Point2}, {"Point3", command.Point3}, {"EllipseSize", command.EllipseSize}, {"RotationAngle", command.RotationAngle}, {"LargeArc", command.LargeArc}, {"SweepDirection", command.SweepDirection}, {"EndPoint", command.EndPoint}} {
 						attrs.add(pair[0], pair[1])
 					}

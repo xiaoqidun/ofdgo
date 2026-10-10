@@ -31,17 +31,33 @@ import (
 type pdfRenderer struct {
 	*pdf.PDF
 	glyphPaths  map[*canvas.Path]*canvas.Path
+	fonts       map[*canvas.Font]*canvas.Font
 	images      [][]image.Image
 	exactImages bool
 	imageError  error
 	navigation  *pdfNavigation
+	text        []pdfPageText
+	exactText   bool
+}
+
+// pdfPageText 记录后端文字对象数量及OFD原文所属区段
+type pdfPageText struct {
+	count        int
+	replacements []pdfgo.TextReplacement
 }
 
 // pdfNavigation PDF导航信息
 type pdfNavigation struct {
-	Link       map[int][]pdfLink
-	Outline    []pdfOutline
-	exactLinks bool
+	Link        map[int][]pdfLink
+	Outline     []pdfOutline
+	Open        []pdfNavigationAction
+	PageOpen    map[int][]pdfNavigationAction
+	attachments map[string]Attachment
+	audio       map[string]*pdfgo.FileSpecification
+	video       map[string]*pdfVideoResource
+	mediaFiles  map[string]*pdfgo.FileSpecification
+	source      *Reader
+	nativeWrite bool
 }
 
 // pdfLink PDF链接
@@ -64,10 +80,13 @@ type pdfOutline struct {
 	Actions []pdfNavigationAction
 }
 
-// pdfNavigationAction 保存链接或目录的导航动作，输出时关联实际页面引用
+// pdfNavigationAction 保存待写出的导航动作，输出时关联实际页面引用
 type pdfNavigationAction struct {
-	URI    string
-	Target *pdfTarget
+	URI        string
+	Target     *pdfTarget
+	Attachment *pdfgo.AttachmentAction
+	Sound      *pdfgo.SoundAction
+	Movie      *pdfMovieAction
 }
 
 // RenderImage 校验惰性图片并同步不透明画笔，保留解码错误及后端透明度状态
@@ -135,7 +154,39 @@ func (r *pdfRenderer) glyphPath(path *canvas.Path, matrix canvas.Matrix) *canvas
 // 返回: *pdfNavigation PDF导航信息, error 区域或目标错误
 func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentPage) (*pdfNavigation, error) {
 	navigation := &pdfNavigation{
-		Link: make(map[int][]pdfLink),
+		Link:     make(map[int][]pdfLink),
+		PageOpen: make(map[int][]pdfNavigationAction),
+		source:   renderer.Reader,
+	}
+	if doc != nil && (doc.Attachments.Path != "" || len(doc.Attachments.Attachment) != 0) {
+		attachments, err := renderer.Reader.Attachments()
+		if err != nil {
+			return nil, err
+		}
+		navigation.attachments = make(map[string]Attachment, len(attachments))
+		for _, attachment := range attachments {
+			if attachment.ID == "" {
+				continue
+			}
+			if _, exists := navigation.attachments[attachment.ID]; exists {
+				return nil, fmt.Errorf("duplicate attachment identifier: %s", attachment.ID)
+			}
+			navigation.attachments[attachment.ID] = attachment
+		}
+		for i, attachment := range attachments {
+			if attachment.ID != "" {
+				continue
+			}
+			key := fmt.Sprintf("attachment-%d", i+1)
+			for {
+				if _, exists := navigation.attachments[key]; !exists {
+					break
+				}
+				key += "-"
+			}
+			navigation.attachments[key] = attachment
+		}
+		navigation.nativeWrite = len(attachments) != 0
 	}
 	pageIndex := make(map[string]int, len(pages))
 	for i, page := range pages {
@@ -146,9 +197,17 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentP
 		for _, bookmark := range doc.Bookmarks.Bookmark {
 			bookmarks[bookmark.Name] = bookmark.Dest
 		}
+		if err := navigation.addLifecycleActions(renderer.outputContext(), actionSource{Actions: doc.Actions}, -1, bookmarks, pageIndex, pages); err != nil {
+			return nil, err
+		}
 	}
 	for i, page := range pages {
-		sources := renderer.pageActionSources(page.Content, page.Box)
+		for _, source := range renderer.pageOpenActionSources(page.Content) {
+			if err := navigation.addLifecycleActions(renderer.outputContext(), source, i, bookmarks, pageIndex, pages); err != nil {
+				return nil, err
+			}
+		}
+		sources := renderer.pageActionSources(page.Content)
 		if renderer.RenderAnnotations {
 			sources = append(sources, renderer.annotationActionSources(renderer.Reader.Annots[page.Content.ID])...)
 		}
@@ -166,10 +225,10 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentP
 	return navigation, nil
 }
 
-// pdfNavigationTarget 转换导航动作，选页未包含的目标不写入
-// 入参: action 动作, bookmarks 书签, pageIndex 页面索引表, pages 页面数据
+// actionTarget 转换动作及资源引用，选页未包含的目标不写入
+// 入参: action 动作, page 来源页索引，负值表示文档, source 动作来源, bookmarks 书签, pageIndex 页面索引表, pages 页面数据
 // 返回: *pdfNavigationAction 导航动作，nil表示无输出动作, error 目标参数错误
-func pdfNavigationTarget(action Action, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) (*pdfNavigationAction, error) {
+func (n *pdfNavigation) actionTarget(action Action, page int, source actionSource, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) (*pdfNavigationAction, error) {
 	if action.Goto != nil {
 		dest := gotoDest(action.Goto, bookmarks)
 		if dest == nil {
@@ -188,6 +247,22 @@ func pdfNavigationTarget(action Action, bookmarks map[string]Dest, pageIndex map
 	if action.URI != nil && action.URI.URI != "" {
 		return &pdfNavigationAction{URI: resolveActionURI(*action.URI)}, nil
 	}
+	if action.GotoA != nil {
+		if attachment, exists := n.attachments[action.GotoA.AttachID]; !exists || attachment.ID != action.GotoA.AttachID {
+			return nil, fmt.Errorf("attachment not found: %s", action.GotoA.AttachID)
+		}
+		window := true
+		if action.GotoA.NewWindow != nil {
+			window = *action.GotoA.NewWindow
+		}
+		return &pdfNavigationAction{Attachment: &pdfgo.AttachmentAction{Key: action.GotoA.AttachID, NewWindow: &window}}, nil
+	}
+	if action.Sound != nil {
+		return n.soundAction(*action.Sound)
+	}
+	if action.Movie != nil {
+		return n.movieAction(*action.Movie, page, source, pages)
+	}
 	return nil, nil
 }
 
@@ -202,7 +277,7 @@ func (n *pdfNavigation) addOutlines(outlines []OutlineElem, level int, bookmarks
 			if action.Goto == nil {
 				onlyMissingTargets = false
 			}
-			value, err := pdfNavigationTarget(action, bookmarks, pageIndex, pages)
+			value, err := n.actionTarget(action, -1, actionSource{}, bookmarks, pageIndex, pages)
 			if err != nil {
 				return err
 			}
@@ -219,7 +294,7 @@ func (n *pdfNavigation) addOutlines(outlines []OutlineElem, level int, bookmarks
 			n.Outline = n.Outline[:index]
 		}
 	}
-	n.exactLinks = n.exactLinks || len(n.Outline) != 0
+	n.nativeWrite = n.nativeWrite || len(n.Outline) != 0
 	return nil
 }
 
@@ -236,10 +311,28 @@ func (n *pdfNavigation) apply(renderer *pdf.PDF, page int) {
 	}
 }
 
-// destinations 将输出页引用关联到原有链接和先序大纲，不按目标页重新排序
+// prepareRewrite 关联输出页引用并准备附件、事件、链接及先序大纲的替换
 // 入参: ctx 取消上下文, reader 输出PDF, pages 输出页引用, options 替换配置
-// 返回: error 目录结构或取消错误
-func (n *pdfNavigation) destinations(ctx context.Context, reader *pdfgo.Reader, pages []pdfgo.Reference, options *pdfgo.RewriteOptions) error {
+// 返回: error 资源、目录结构或取消错误
+func (n *pdfNavigation) prepareRewrite(ctx context.Context, reader *pdfgo.Reader, pages []pdfgo.Reference, options *pdfgo.RewriteOptions) error {
+	if err := n.writeAttachments(ctx, options); err != nil {
+		return err
+	}
+	if err := n.loadAudio(ctx); err != nil {
+		return err
+	}
+	if err := n.writeVideo(ctx, pages, options); err != nil {
+		return err
+	}
+	if len(n.Open) != 0 {
+		options.OpenActions = pdfNavigationValues(n.Open, pages)
+	}
+	if len(n.PageOpen) != 0 {
+		options.PageOpenActions = make(map[pdfgo.Reference][]pdfgo.NavigationAction, len(n.PageOpen))
+		for page, actions := range n.PageOpen {
+			options.PageOpenActions[pages[page]] = pdfNavigationValues(actions, pages)
+		}
+	}
 	options.LinkDestinations = make(map[pdfgo.AnnotationLocation]pdfgo.Destination)
 	options.LinkActions = make(map[pdfgo.AnnotationLocation][]pdfgo.NavigationAction)
 	for page, links := range n.Link {

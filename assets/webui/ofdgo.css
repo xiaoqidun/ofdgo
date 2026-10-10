@@ -2496,6 +2496,40 @@ audio.page-media {
 	height: 32px;
 }
 
+.page-surface video.page-media {
+	transform: scale(calc(1 / var(--surface-scale, 1)));
+	transform-origin: 0 0;
+}
+
+.media-dialog {
+	position: fixed;
+	z-index: 100;
+	width: 640px;
+}
+
+.media-dialog .form-title {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin: 0;
+}
+
+.media-dialog .page-media {
+	position: static;
+	display: block;
+	width: 100%;
+	height: auto;
+	max-height: calc(100dvh - 100px);
+	aspect-ratio: 16 / 9;
+	background: #000;
+}
+
+.media-dialog audio.page-media {
+	height: 54px;
+	aspect-ratio: auto;
+}
+
 .editing .page-media {
 	display: none;
 }

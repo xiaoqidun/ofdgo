@@ -902,7 +902,7 @@ func (v *editorValidation) prepareObject(id string, object GraphicObject) (Graph
 			stroke = (*FillColor)(defaults.StrokeColor)
 		}
 	}
-	if err := validateObjectActions(actions); err != nil {
+	if err := validateActionEvents(actions, "CLICK"); err != nil {
 		return GraphicObject{}, err
 	}
 	if err := v.validateObjectClips(clips); err != nil {

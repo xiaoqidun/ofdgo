@@ -203,6 +203,21 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	glyphTransforms := r.textObjectGlyphTransforms(fontID, obj)
 	hasUnderline := strings.Contains(obj.Decoration, "Underline")
 	_, shadedFill := fillPaint.(canvas.Gradient)
+	pdfOutput, _ := ctx.Renderer.(*pdfRenderer)
+	pdfText := pdfOutput != nil && !r.textOnly && shouldFill && !shouldStroke && fillPattern == nil && !shadedFill && face.FauxBold == 0 && face.FauxItalic == 0 && !(hasUnderline && fillClip != nil)
+	if pdfText {
+		view := canvas.Identity
+		if useTextMatrix {
+			view = glyphMatrix
+		}
+		pdfText = r.pdfTextSupported(obj, fontID, face, glyphTransforms, fillClip, pageH, objectCTM, view)
+	}
+	if pdfText {
+		if len(pdfOutput.text) == 0 {
+			pdfOutput.text = append(pdfOutput.text, pdfPageText{})
+		}
+		defer pdfOutput.preserveText(pdfOutput.text[len(pdfOutput.text)-1].count, obj.Text())
+	}
 	codePos := 0
 	textPos := 0
 	for index, tc := range obj.TextCode {
@@ -238,7 +253,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			}
 			var glyphPath *canvas.Path
 			var glyphWidth float64
-			if drawAsGlyphPath {
+			if drawAsGlyphPath && !pdfText {
 				glyphPath, glyphWidth = r.cachedTextGlyphPath(face, glyph)
 			} else {
 				glyphWidth = textGlyphWidth(face, glyph)
@@ -325,7 +340,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				ctx.SetFill(fillPaint)
 				ctx.SetStrokeColor(canvas.Transparent)
 				glyphClip := fillClip
-				if fillClip != nil && !embeddedFont && face.FauxBold == 0 && !textCodePositioned(tc, xs, ys) && !shadedFill && fillPattern == nil && glyph.GlyphID < 0 && !hasUnderline {
+				if pdfText {
+					glyphClip = nil
+				}
+				if !pdfText && fillClip != nil && !embeddedFont && face.FauxBold == 0 && !textCodePositioned(tc, xs, ys) && !shadedFill && fillPattern == nil && glyph.GlyphID < 0 && !hasUnderline {
 					if rect, ok := rectangularPath(fillClip); ok {
 						transform := canvas.Identity.Translate(canvasX, canvasY)
 						if useTextMatrix {
@@ -374,7 +392,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					continue
 				}
 				drawGlyph := func(x, y float64) {
-					if drawAsGlyphPath {
+					if drawAsGlyphPath && !pdfText {
 						scaleX := hScale
 						textWidth = glyphWidth * scaleX
 						if face.FauxBold != 0 {
@@ -399,7 +417,20 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 							ctx.Scale(hScale, 1)
 							x, y = 0, 0
 						}
-						text := canvas.NewTextLine(face, str, canvas.Left)
+						var text *canvas.Text
+						if pdfOutput != nil {
+							var err error
+							text, err = pdfOutput.glyphText(face, glyph)
+							if err != nil {
+								r.renderError = err
+								if scaled {
+									ctx.Pop()
+								}
+								return
+							}
+						} else {
+							text = canvas.NewTextLine(face, str, canvas.Left)
+						}
 						ctx.DrawText(x, y, text)
 						if scaled {
 							ctx.Pop()

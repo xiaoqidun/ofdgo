@@ -42,18 +42,18 @@ func (n *pdfNavigation) addActions(renderer *Renderer, page int, source actionSo
 		if action.Event != "CLICK" {
 			continue
 		}
-		value, err := pdfNavigationTarget(action, bookmarks, pageIndex, pages)
-		if err != nil {
-			return err
-		}
-		if value == nil {
-			continue
-		}
 		box, outline, err := renderer.actionLinkRegion(source, action)
 		if err != nil {
 			return err
 		}
 		if box.W <= 0 || box.H <= 0 {
+			continue
+		}
+		value, err := n.actionTarget(action, page, source, bookmarks, pageIndex, pages)
+		if err != nil {
+			return err
+		}
+		if value == nil {
 			continue
 		}
 		path := geometryRectangle(box)
@@ -99,7 +99,7 @@ func (n *pdfNavigation) addActions(renderer *Renderer, page int, source actionSo
 			continue
 		}
 		n.Link[page] = append(n.Link[page], pdfLink{Rect: pdfSourceRect(box, pages[page].Box.H), Region: region, Actions: area.Actions})
-		n.exactLinks = true
+		n.nativeWrite = true
 	}
 	return nil
 }
@@ -203,7 +203,11 @@ func combinePDFActionRegion(ctx context.Context, geometry GeometryBackend, left,
 func pdfNavigationValues(actions []pdfNavigationAction, pages []pdfgo.Reference) []pdfgo.NavigationAction {
 	values := make([]pdfgo.NavigationAction, 0, len(actions))
 	for _, action := range actions {
-		value := pdfgo.NavigationAction{URI: action.URI}
+		if action.Movie != nil {
+			values = append(values, action.Movie.values()...)
+			continue
+		}
+		value := pdfgo.NavigationAction{URI: action.URI, Attachment: action.Attachment, Sound: action.Sound}
 		if action.Target != nil {
 			dest := action.Target.Destination
 			dest.Page = pages[action.Target.Page]

@@ -200,7 +200,7 @@ func (p *pdfImporter) compositePattern(paint pdfgo.Paint) (*pdfCompositePattern,
 		return pattern, nil
 	}
 	source := paint.Tiling
-	nodes, err := p.collectCompositeNodes(func(v pdfgo.Visitor) error { return source.Walk(p.ctx, paint, v) })
+	nodes, err := p.collectCompositeNodes(func(v pdfgo.Visitor) error { return source.Walk(p.ctx, paint, v) }, false)
 	if err != nil {
 		return nil, err
 	}

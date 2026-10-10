@@ -91,6 +91,7 @@ type pdfImporter struct {
 	formResources    *pdfFormCache
 	validation       *editorValidation
 	pages            map[pdfgo.Reference]*pdfgo.Page
+	pageOrder        []*pdfgo.Page
 	pageIDs          map[pdfgo.Reference]string
 	pageIndexes      map[pdfgo.Reference]int
 	destinationBoxes map[pdfgo.Reference]Box
@@ -98,6 +99,10 @@ type pdfImporter struct {
 	imageContents    *renderCache[pdfImageContentKey, pdfImageContent]
 	attachmentIDs    map[pdfAttachmentKey]string
 	modelAttachments map[*pdfgo.Stream]string
+	mediaResources   map[pdfMediaFileKey]pdfMediaResource
+	mediaInstances   map[pdfMediaInstanceKey]pdfMediaResource
+	movieBounds      map[*Movie]Box
+	renditions       *pdfRenditionImport
 	maskClips        map[*pdfgo.SoftMask]pdfgo.Path
 	pageBox          pdfgo.Rectangle
 	pageWidth        float64
@@ -203,6 +208,7 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 			return err
 		}
 		importer.pages[page.Reference] = page
+		importer.pageOrder = append(importer.pageOrder, page)
 		importer.pageIDs[page.Reference] = editor.pages[index].ID
 		importer.pageIndexes[page.Reference] = index
 		if options.OnProgress != nil {
@@ -215,6 +221,9 @@ func ImportPDF(ctx context.Context, source io.ReaderAt, size int64, options PDFI
 	}
 	if len(editor.pages) != 0 {
 		importer.page = -1
+		if err := importer.documentAttachments(ctx); err != nil {
+			return nil, PDFImportReport{}, fmt.Errorf("import PDF attachments: %w", err)
+		}
 		if err := importer.outlines(ctx); err != nil {
 			return nil, PDFImportReport{}, fmt.Errorf("import PDF outlines: %w", err)
 		}

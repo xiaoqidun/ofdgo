@@ -9,11 +9,11 @@ require (
 	github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c
 	github.com/tdewolff/font v0.0.0-20260913163313-54f98bb59ee6
 	github.com/xiaoqidun/j2kgo v0.0.0-20261009063910-4865a21ef893
-	github.com/xiaoqidun/jbig2 v1.1.3
-	github.com/xiaoqidun/pdfgo v0.0.0-20261009130638-37c73506b373
-	golang.org/x/crypto v0.57.0
-	golang.org/x/image v0.46.0
-	golang.org/x/text v0.42.0
+	github.com/xiaoqidun/jbig2 v1.1.4
+	github.com/xiaoqidun/pdfgo v0.0.0-20261010014421-57af90cea2c6
+	golang.org/x/crypto v0.58.0
+	golang.org/x/image v0.47.0
+	golang.org/x/text v0.43.0
 )
 
 require (
@@ -32,8 +32,8 @@ require (
 	github.com/tdewolff/minify/v2 v2.24.17 // indirect
 	github.com/tdewolff/parse/v2 v2.8.16 // indirect
 	github.com/yuin/goldmark v1.8.5 // indirect
-	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 	modernc.org/knuth v0.6.0 // indirect
 	modernc.org/token v1.1.0 // indirect
 	star-tex.org/x/tex v0.7.1 // indirect

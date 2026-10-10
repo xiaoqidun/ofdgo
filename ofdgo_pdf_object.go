@@ -522,6 +522,9 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			}
 		}
 	}
+	if mark.Replacement != nil {
+		pdfApplyReplacement(&object, mark.Replacement.Text, mark.Positions)
+	}
 	box := extent.box()
 	if stroke && !outlineStroke {
 		strokeMatrix := mark.StrokeMatrix

@@ -100,7 +100,7 @@ func collectActionReferences(actions []Action, used map[string]bool) {
 // 入参: page 页面索引, ids 对象标识, actions 动作及已注册的资源引用
 // 返回: error 错误信息
 func (e *Editor) SetObjectActions(page int, ids []string, actions []Action) error {
-	if err := validateObjectActions(actions); err != nil {
+	if err := validateActionEvents(actions, "CLICK"); err != nil {
 		return err
 	}
 	objects, _, err := e.selectedObjects(page, ids)
@@ -284,76 +284,6 @@ func (e *Editor) UpdateAnnotationLink(page int, id string, target AnnotationLink
 		}
 		return editorAnnotationDate(data)
 	})
-}
-
-// validateObjectActions 校验新建对象的动作结构，目标不必可达
-// 入参: actions 动作列表
-// 返回: error 错误信息
-func validateObjectActions(actions []Action) error {
-	for _, action := range actions {
-		if !slices.Contains([]string{"CLICK", "DO", "PO"}, action.Event) {
-			return fmt.Errorf("unsupported action event %q", action.Event)
-		}
-		count := 0
-		for _, present := range []bool{action.URI != nil, action.Goto != nil, action.GotoA != nil, action.Sound != nil, action.Movie != nil} {
-			if present {
-				count++
-			}
-		}
-		if count != 1 {
-			return fmt.Errorf("specify one action target")
-		}
-		if action.GotoA != nil && action.GotoA.AttachID == "" {
-			return fmt.Errorf("attachment action requires an attachment ID")
-		}
-		if sound := action.Sound; sound != nil {
-			if sound.ResourceID == "" || sound.Volume != nil && (*sound.Volume < 0 || *sound.Volume > 100) {
-				return fmt.Errorf("invalid sound action resource or volume")
-			}
-		}
-		if movie := action.Movie; movie != nil {
-			if movie.ResourceID == "" || !slices.Contains([]string{"", "Play", "Stop", "Pause", "Resume"}, movie.Operator) {
-				return fmt.Errorf("invalid movie action resource or operator")
-			}
-		}
-		if action.Goto != nil {
-			if (action.Goto.Dest == nil) == (action.Goto.Bookmark == nil) {
-				return fmt.Errorf("specify one destination or bookmark")
-			}
-			if action.Goto.Dest != nil {
-				if _, err := annotationLinkXML(AnnotationLink{Dest: action.Goto.Dest}); err != nil {
-					return err
-				}
-			}
-		}
-		if action.Region != nil {
-			for _, area := range action.Region.Area {
-				if _, err := creationNumbers(area.Start, 2); err != nil {
-					return err
-				}
-				for _, command := range area.Command {
-					var points []string
-					switch command.Type {
-					case "Line":
-						points = []string{command.Point1}
-					case "QuadraticBezier":
-						points = []string{command.Point1, command.Point2}
-					case "CubicBezier":
-						points = []string{command.Point1, command.Point2, command.Point3}
-					case "Close":
-					default:
-						return fmt.Errorf("unsupported new action region command %q", command.Type)
-					}
-					for _, point := range points {
-						if _, err := creationNumbers(point, 2); err != nil {
-							return err
-						}
-					}
-				}
-			}
-		}
-	}
-	return nil
 }
 
 // annotationLinkNodes 获取外观内的点击跳转和基本对象，不进入私有扩展

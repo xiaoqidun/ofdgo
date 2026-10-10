@@ -66,21 +66,24 @@ type URI struct {
 	Target string `xml:"Target,attr,omitempty"`
 }
 
-// PageLink 页面点击动作，包含外链、跳转、附件和音视频播放
+// PageLink 动作目标，包含外链、跳转、附件和音视频播放
 // Box使用页面毫米坐标，Path为可选的页面坐标SVG路径，存在时作为精确点击区域
+// 目录和打开动作的Box和Path为空，不限定启动区域
+// PlaybackBox为图元视频的播放区域，使用页面毫米坐标；非图元动作为空
 // 同一来源的多个动作共享非零Group，组内按返回顺序执行
 // NewWindow用于附件动作，为空时采用OFD默认的新窗口
 type PageLink struct {
-	URI        string
-	Target     string
-	Box        Box
-	Dest       *Dest
-	Attachment string
-	NewWindow  *bool
-	Path       string
-	Group      int
-	Sound      *Sound
-	Movie      *Movie
+	URI         string
+	Target      string
+	Box         Box
+	PlaybackBox *Box
+	Dest        *Dest
+	Attachment  string
+	NewWindow   *bool
+	Path        string
+	Group       int
+	Sound       *Sound
+	Movie       *Movie
 }
 
 // GotoA 附件动作
@@ -133,6 +136,7 @@ type actionSource struct {
 	Actions []Action
 	Matrix  Matrix
 	Path    string
+	Graphic bool
 }
 
 // UnmarshalXML 解析跳转目标
@@ -269,18 +273,39 @@ func gotoDest(action *Goto, bookmarks map[string]Dest) *Dest {
 	return nil
 }
 
-// pageActionSources 获取页面动作来源
-// 入参: page 页面内容, box 页面区域
+// pageOpenActionSources 获取页面及模板的打开动作，保留模板层次和引用顺序
+// 入参: page 页面内容
 // 返回: []actionSource 动作来源
-func (r *Renderer) pageActionSources(page *PageContent, box Box) []actionSource {
-	sources := make([]actionSource, 0)
+func (r *Renderer) pageOpenActionSources(page *PageContent) []actionSource {
+	var sources []actionSource
 	if len(page.Actions) > 0 {
-		sources = append(sources, actionSource{
-			Box:     Box{W: box.W, H: box.H},
-			Actions: page.Actions,
-			Matrix:  IdentityMatrix,
-		})
+		sources = append(sources, actionSource{Actions: page.Actions})
 	}
+	if r.Reader.doc == nil {
+		return sources
+	}
+	for order := range 3 {
+		for _, ref := range page.Template {
+			kind := ref.ZOrder
+			if kind == "" {
+				kind = "Background"
+			}
+			if layerOrder(kind) != order {
+				continue
+			}
+			if template := r.loadTemplate(ref.TemplateID); template != nil && len(template.Actions) > 0 {
+				sources = append(sources, actionSource{Actions: template.Actions})
+			}
+		}
+	}
+	return sources
+}
+
+// pageActionSources 获取页面及模板内的图元动作来源
+// 入参: page 页面内容
+// 返回: []actionSource 动作来源
+func (r *Renderer) pageActionSources(page *PageContent) []actionSource {
+	sources := make([]actionSource, 0)
 	for order := range 3 {
 		if r.Reader.doc != nil {
 			for _, ref := range page.Template {
@@ -292,7 +317,6 @@ func (r *Renderer) pageActionSources(page *PageContent, box Box) []actionSource 
 					continue
 				}
 				if template := r.loadTemplate(ref.TemplateID); template != nil {
-					sources = append(sources, actionSource{Box: Box{W: box.W, H: box.H}, Actions: template.Actions, Matrix: IdentityMatrix})
 					for templateOrder := range 3 {
 						sources = r.appendLayerActionSources(sources, template.Content.Layer, templateOrder)
 					}
@@ -375,7 +399,7 @@ func (r *Renderer) appendGraphicActionSources(sources []actionSource, object Gra
 	}
 	matrix := placement.Multiply(NewMatrix(ctm))
 	if len(actions) > 0 {
-		source := actionSource{Box: placement.TransformBox(Box{W: box.W, H: box.H}), Actions: actions, Matrix: matrix}
+		source := actionSource{Box: placement.TransformBox(Box{W: box.W, H: box.H}), Actions: actions, Matrix: matrix, Graphic: true}
 		if placement.a == 1 && placement.b == 0 && placement.c == 0 && placement.d == 1 {
 			source.Box.W, source.Box.H = box.W, box.H
 		}

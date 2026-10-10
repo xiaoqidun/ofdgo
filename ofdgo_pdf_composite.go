@@ -367,14 +367,15 @@ func (p *pdfImporter) compositeTextBounds(mark pdfgo.TextMark, stroke bool) Box 
 }
 
 // collectCompositeNodes 收集原始绘制顺序并展开Type3字形，保留透明组层级
-// 入参: walk 内容访问函数
+// 入参: walk 内容访问函数, widget 是否为表单外观
 // 返回: []pdfCompositeNode 原始图元, error 解析错误
-func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]pdfCompositeNode, error) {
+func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widget bool) ([]pdfCompositeNode, error) {
 	active := make(map[*pdfgo.Font]map[string]bool)
 	var seenFonts map[*pdfgo.Font]bool
 	var externalNames map[string]bool
 	var embeddedFonts map[*pdfgo.Font]bool
 	var textMarks []pdfgo.TextMark
+	replacements := pdfTextReplacements{importer: p, widget: widget}
 	storeText := func(mark pdfgo.TextMark) *pdfgo.TextMark {
 		if len(textMarks) == cap(textMarks) {
 			textMarks = make([]pdfgo.TextMark, 0, min(64, max(8, cap(textMarks)*2)))
@@ -382,11 +383,28 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 		textMarks = append(textMarks, mark)
 		return &textMarks[len(textMarks)-1]
 	}
-	var collect func(func(pdfgo.Visitor) error) ([]pdfCompositeNode, error)
-	collect = func(walk func(pdfgo.Visitor) error) ([]pdfCompositeNode, error) {
+	var collect func(func(pdfgo.Visitor) error, *pdfgo.ReplacementText) ([]pdfCompositeNode, error)
+	collect = func(walk func(pdfgo.Visitor) error, replacement *pdfgo.ReplacementText) ([]pdfCompositeNode, error) {
 		var nodes []pdfCompositeNode
 		v := pdfgo.Visitor{Warning: p.warning, Reference: p.referencePage, Halftones: p.halftones}
+		v.MarkedContent = func(mark pdfgo.MarkedContentMark) error {
+			if mark.Replacement != nil {
+				if mark.Operator == "EMC" {
+					replacement = mark.Replacement.Parent
+				} else {
+					replacement = mark.Replacement
+					if !mark.Hidden {
+						span := replacements.span(replacement)
+						if replacement.Parent == nil {
+							span.offset = mark.Offset
+						}
+					}
+				}
+			}
+			return replacements.markedContent(mark)
+		}
 		v.Path = func(mark pdfgo.PathMark) error {
+			replacements.block(replacement)
 			if err := p.halftone(mark.Style); err != nil {
 				return err
 			}
@@ -394,6 +412,7 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 			return nil
 		}
 		v.Text = func(mark pdfgo.TextMark) error {
+			replacements.span(mark.Replacement)
 			if mark.Font.Subtype != "Type3" && !seenFonts[mark.Font] {
 				if seenFonts == nil {
 					seenFonts = make(map[*pdfgo.Font]bool)
@@ -448,7 +467,8 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 					}
 					glyphs[glyph.Name] = true
 					source := mark
-					children, err := collect(func(visitor pdfgo.Visitor) error { return p.reader.WalkType3Glyph(p.ctx, source, index, visitor) })
+					replacements.block(mark.Replacement)
+					children, err := collect(func(visitor pdfgo.Visitor) error { return p.reader.WalkType3Glyph(p.ctx, source, index, visitor) }, replacement)
 					delete(glyphs, glyph.Name)
 					if err != nil {
 						return err
@@ -461,6 +481,7 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 			return nil
 		}
 		v.Image = func(mark pdfgo.ImageMark) error {
+			replacements.block(replacement)
 			if err := p.halftone(mark.Style); err != nil {
 				return err
 			}
@@ -468,7 +489,7 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 			return nil
 		}
 		v.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error {
-			children, err := collect(walk)
+			children, err := collect(walk, replacement)
 			if err != nil {
 				return err
 			}
@@ -476,7 +497,7 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 			return nil
 		}
 		v.Form = func(_ pdfgo.FormMark, walk func(pdfgo.Visitor) error) error {
-			children, err := collect(walk)
+			children, err := collect(walk, replacement)
 			if err != nil {
 				return err
 			}
@@ -489,7 +510,11 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 		err := walk(v)
 		return nodes, err
 	}
-	nodes, err := collect(walk)
+	nodes, err := collect(walk, nil)
+	if err != nil {
+		return nil, err
+	}
+	nodes, err = replacements.apply(nodes)
 	if err != nil {
 		return nil, err
 	}
@@ -511,7 +536,7 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error) ([]p
 // 入参: space 页面混合空间, walk 页面内容
 // 返回: error 转换错误
 func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Visitor) error) error {
-	nodes, err := p.collectCompositeNodes(walk)
+	nodes, err := p.collectCompositeNodes(walk, false)
 	if err != nil {
 		return err
 	}

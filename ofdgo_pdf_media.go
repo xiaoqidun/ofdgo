@@ -23,10 +23,100 @@ import (
 	"math"
 	"net/url"
 	"path"
+	"reflect"
 	"strings"
 
 	"github.com/xiaoqidun/pdfgo"
 )
+
+// errPDFMediaRead 标识媒体读取失败，避免作为可恢复的导航问题忽略
+var errPDFMediaRead = errors.New("PDF media read failed")
+
+// pdfMediaFileKey 区分媒体文件及注册用途，避免重复解码或调用文件解析器
+type pdfMediaFileKey struct {
+	Stream        *pdfgo.Stream
+	Name          string
+	System        pdfgo.Name
+	Specification uintptr
+	Attachment    bool
+	Kind          string
+	Format        string
+}
+
+// pdfMediaResource 保留资源标识和外部文件说明，避免缓存期间字典地址被复用
+type pdfMediaResource struct {
+	ID         string
+	Dictionary pdfgo.Dictionary
+}
+
+// pdfMediaInstanceKey 区分播放目标与资源文件，避免不同注解共用控制状态
+type pdfMediaInstanceKey struct {
+	Page       int
+	Reference  pdfgo.Reference
+	Dictionary uintptr
+	Resource   string
+}
+
+// mediaInstance 为播放目标分配独立标识，同一目标的动作继续共用控制状态
+// 入参: id 已注册的媒体资源, target 目标注解, page 所属页面索引
+// 返回: string 独立资源标识, error 资源复制或取消错误
+func (p *pdfImporter) mediaInstance(id string, target pdfgo.Annotation, page int) (string, error) {
+	if err := p.ctx.Err(); err != nil {
+		return "", err
+	}
+	key := pdfMediaInstanceKey{Page: page, Reference: target.Reference, Resource: id}
+	if key.Reference == (pdfgo.Reference{}) {
+		key.Dictionary = reflect.ValueOf(target.Dictionary).Pointer()
+	}
+	if resource, exists := p.mediaInstances[key]; exists {
+		return resource.ID, nil
+	}
+	copy, err := p.editor.CopyMedia(id)
+	if err != nil {
+		return "", err
+	}
+	if p.mediaInstances == nil {
+		p.mediaInstances = make(map[pdfMediaInstanceKey]pdfMediaResource)
+	}
+	p.mediaInstances[key] = pdfMediaResource{ID: copy, Dictionary: target.Dictionary}
+	return copy, nil
+}
+
+// mediaResource 复用媒体文件的注册结果，区分格式、类别及附件用途
+// 入参: ctx 取消上下文, file 文件说明, kind 媒体类别, format 文件格式, attachment 是否作为附件保存
+// 返回: string 资源标识，外部资源不可用时为空, error 读取、注册或取消错误
+func (p *pdfImporter) mediaResource(ctx context.Context, file pdfgo.FileSpecification, kind, format string, attachment bool) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	key := pdfMediaFileKey{Stream: file.Embedded, Name: file.Name, System: file.FileSystem, Attachment: attachment, Kind: kind, Format: format}
+	if file.Embedded == nil && file.Dictionary != nil {
+		key.Specification = reflect.ValueOf(file.Dictionary).Pointer()
+	}
+	if resource, exists := p.mediaResources[key]; exists {
+		return resource.ID, nil
+	}
+	data, available, err := p.mediaData(ctx, file)
+	if err != nil {
+		return "", err
+	}
+	var id string
+	if available {
+		if attachment {
+			id, err = p.attachmentFile(file.Name, data)
+		} else {
+			id, err = p.editor.AddMedia(kind, format, data)
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	if p.mediaResources == nil {
+		p.mediaResources = make(map[pdfMediaFileKey]pdfMediaResource)
+	}
+	p.mediaResources[key] = pdfMediaResource{ID: id, Dictionary: file.Dictionary}
+	return id, ctx.Err()
+}
 
 // soundResource 注册采样音频或调用方提供的外部音频，不自动访问文件
 // 入参: ctx 取消上下文, sound 音频对象
@@ -46,7 +136,7 @@ func (p *pdfImporter) soundResource(ctx context.Context, sound pdfgo.Sound) (str
 		}
 		format = pdfMediaFormat(*sound.File)
 	} else {
-		data, err = pdfSoundWAV(sound)
+		data, err = pdfSoundWAV(ctx, sound)
 	}
 	if err != nil {
 		return "", err
@@ -88,47 +178,6 @@ func (p *pdfImporter) soundLinkAction(object pdfgo.Object, strict bool) (*Action
 		return nil, err
 	}
 	return &Action{Event: "CLICK", Sound: &Sound{ResourceID: id, Volume: &volume, Repeat: source.Repeat, Synchronous: source.Synchronous}}, nil
-}
-
-// movieAnnotation 转换内嵌视频及其点击播放动作，保留独立海报外观
-// 入参: ctx 取消上下文, page PDF页面, annotation 视频注解
-// 返回: error 媒体资源或播放参数无法表示时返回错误
-func (p *pdfImporter) movieAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation) error {
-	movie, err := p.reader.ReadMovie(annotation.Dictionary["Movie"])
-	if err != nil {
-		return err
-	}
-	activation, err := p.reader.Resolve(annotation.Dictionary["A"])
-	if err != nil {
-		return err
-	}
-	if activation == pdfgo.Boolean(false) {
-		return p.appearanceAnnotation(ctx, page, annotation)
-	}
-	if activation != nil && activation != pdfgo.Boolean(true) {
-		parameters, err := p.reader.ReadMovieActivation(ctx, activation)
-		if err != nil {
-			return err
-		}
-		if parameters.Start != nil && parameters.Start.Value != 0 || parameters.Duration != nil || parameters.Rate != 1 || parameters.Volume != 1 || parameters.ShowControls || parameters.Synchronous || parameters.Mode != "Once" || parameters.FloatingScale != nil {
-			return &pdfgo.UnsupportedError{Feature: "movie activation playback parameters conversion"}
-		}
-	}
-	if movie.Rotate != 0 {
-		return &pdfgo.UnsupportedError{Feature: "rotated movie playback"}
-	}
-	data, available, err := p.mediaData(ctx, movie.File)
-	if err != nil {
-		return err
-	}
-	if !available {
-		return p.appearanceAnnotation(ctx, page, annotation)
-	}
-	id, err := p.editor.AddMedia("Video", pdfMediaFormat(movie.File), data)
-	if err != nil {
-		return err
-	}
-	return p.appearanceAnnotation(ctx, page, annotation, Action{Event: "CLICK", Movie: &Movie{ResourceID: id, Operator: "Play"}})
 }
 
 // interactiveAnnotation 保留3D或富媒体的静态外观和原始资源，不执行脚本
@@ -261,7 +310,10 @@ func (p *pdfImporter) mediaData(ctx context.Context, file pdfgo.FileSpecificatio
 		return nil, false, nil
 	}
 	data, err := p.reader.ReadFileData(ctx, file, p.resolveFile)
-	return data, err == nil, err
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %w", errPDFMediaRead, err)
+	}
+	return data, true, nil
 }
 
 // pdfMediaFormat 获取媒体文件扩展名，URL参数和片段不参与格式判断
@@ -278,11 +330,17 @@ func pdfMediaFormat(file pdfgo.FileSpecification) string {
 }
 
 // pdfSoundWAV 封装PDF采样音频，保持采样率、声道及数值，超过RIFF容量时使用RF64
-// 入参: sound 音频流及参数
+// 入参: ctx 取消上下文, sound 音频流及参数
 // 返回: []byte WAVE文件, error 不可表示的参数或损坏的采样数据
-func pdfSoundWAV(sound pdfgo.Sound) ([]byte, error) {
+func pdfSoundWAV(ctx context.Context, sound pdfgo.Sound) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if sound.File != nil || sound.Compression != "" {
 		return nil, &pdfgo.UnsupportedError{Feature: "external or compressed sound samples"}
+	}
+	if sound.Stream == nil || sound.Channels <= 0 || math.IsNaN(sound.Rate) || math.IsInf(sound.Rate, 0) || sound.Rate <= 0 {
+		return nil, fmt.Errorf("invalid sound sample parameters")
 	}
 	if sound.Rate != math.Trunc(sound.Rate) || sound.Rate > math.MaxUint32 || sound.Channels > math.MaxUint16 || sound.Bits != 8 && sound.Bits != 16 && sound.Bits != 24 && sound.Bits != 32 {
 		return nil, &pdfgo.UnsupportedError{Feature: "sound parameters in WAVE"}
@@ -302,16 +360,20 @@ func pdfSoundWAV(sound pdfgo.Sound) ([]byte, error) {
 	if align > math.MaxUint16 || rate*align > math.MaxUint32 {
 		return nil, &pdfgo.UnsupportedError{Feature: "sound block alignment in WAVE"}
 	}
-	data, err := sound.Stream.Decode()
+	data, err := sound.Stream.DecodeContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if uint64(len(data))%align != 0 {
 		return nil, fmt.Errorf("incomplete sound sample frame")
 	}
-	data = bytes.Clone(data)
 	if format == 1 {
 		for offset := 0; offset < len(data); offset += width {
+			if offset%(1<<16) == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			if sound.Encoding == "Raw" && width > 1 || sound.Encoding == "Signed" && width == 1 {
 				data[offset] ^= 0x80
 			}
@@ -385,5 +447,5 @@ func pdfSoundWAV(sound pdfgo.Sound) ([]byte, error) {
 	if len(data)%2 != 0 {
 		out.WriteByte(0)
 	}
-	return out.Bytes(), nil
+	return out.Bytes(), ctx.Err()
 }

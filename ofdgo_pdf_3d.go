@@ -128,7 +128,7 @@ func (p *pdfImporter) threeDPainter(ctx context.Context, page *pdfgo.Page, sourc
 			var err error
 			overlay, err = p.collectCompositeNodes(func(visitor pdfgo.Visitor) error {
 				return p.reader.WalkThreeDOverlay(ctx, page, source, visitor)
-			})
+			}, false)
 			if err != nil {
 				return nil, err
 			}

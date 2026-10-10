@@ -127,7 +127,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	}
 	start := buf.Len()
 	p := pdf.New(buf, pages[0].Box.W, pages[0].Box.H, nil)
-	renderer := &pdfRenderer{PDF: p, glyphPaths: make(map[*canvas.Path]*canvas.Path), images: make([][]image.Image, 1), navigation: navigation}
+	renderer := &pdfRenderer{PDF: p, glyphPaths: make(map[*canvas.Path]*canvas.Path), images: make([][]image.Image, 1), text: make([]pdfPageText, 1), navigation: navigation}
 	defer func() {
 		if renderer.imageError != nil {
 			r.canvasState().images = renderCache[*EncodedImage, image.Image]{limit: imageCacheLimit}
@@ -142,6 +142,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		if i > 0 {
 			p.NewPage(page.Box.W, page.Box.H)
 			renderer.images = append(renderer.images, nil)
+			renderer.text = append(renderer.text, pdfPageText{})
 		}
 		navigation.apply(p, i)
 		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), page.Content, !r.TransparentBackground); err != nil {
@@ -172,7 +173,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		}
 	}
 	if direct {
-		if !renderer.exactImages && !navigation.exactLinks {
+		if !renderer.exactImages && !renderer.exactText && !navigation.nativeWrite {
 			if err := r.outputContext().Err(); err != nil {
 				buf.Truncate(start)
 				return err
