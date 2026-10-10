@@ -175,8 +175,9 @@ func (e *Editor) annotationXML(index int, id string) ([]byte, error) {
 		return nil, err
 	}
 	var result []byte
+	pageID := editorResourceID(e.pages[index].ID)
 	for _, ref := range root.children {
-		if !ref.matchesOFD("Page") || ref.attr("PageID") != e.pages[index].ID || ref.child("FileLoc") == nil {
+		if !ref.matchesOFD("Page") || pageID == "" || editorResourceID(ref.attr("PageID")) != pageID || ref.child("FileLoc") == nil {
 			continue
 		}
 		file, err := editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, ref.child("FileLoc"))))
@@ -247,8 +248,9 @@ func (e *Editor) appendAnnotations(index int, annotations []byte, generated bool
 	if err != nil {
 		return err
 	}
+	pageID := editorResourceID(e.pages[index].ID)
 	for _, item := range root.children {
-		if item.matchesOFD("Page") && item.attr("PageID") == e.pages[index].ID {
+		if item.matchesOFD("Page") && pageID != "" && editorResourceID(item.attr("PageID")) == pageID {
 			ref = item
 			loc := item.child("FileLoc")
 			if loc == nil {
@@ -363,18 +365,19 @@ func (e *Editor) annotationFiles() []string {
 	}
 	removed := make(map[string]bool)
 	for id := range e.source.pages {
-		removed[id] = true
+		removed[editorResourceID(id)] = true
 	}
 	for id := range e.source.annotationPages {
-		removed[id] = true
+		removed[editorResourceID(id)] = true
 	}
 	for _, page := range e.pages {
-		delete(removed, page.ID)
+		delete(removed, editorResourceID(page.ID))
 	}
+	delete(removed, "")
 	var files []string
 	for name, pages := range e.source.reader.annotationFiles {
 		for _, page := range pages {
-			if !removed[page] {
+			if !removed[editorResourceID(page)] {
 				files = append(files, name)
 				break
 			}

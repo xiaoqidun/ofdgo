@@ -180,12 +180,13 @@ func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *edi
 	var patches []editorXMLPatch
 	found := make(map[string]bool, len(ids))
 	remaining := 0
+	pageID := editorResourceID(e.pages[index].ID)
 	for _, ref := range root.children {
 		if !ref.matchesOFD("Page") {
 			continue
 		}
 		remaining++
-		if ref.attr("PageID") != e.pages[index].ID {
+		if pageID == "" || editorResourceID(ref.attr("PageID")) != pageID {
 			continue
 		}
 		loc := ref.child("FileLoc")

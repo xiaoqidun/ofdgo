@@ -180,7 +180,7 @@ func (r *Reader) parseAnnotations(doc *Document) error {
 	return nil
 }
 
-// annotationIndex 读取注解文件索引，不解析页面外观
+// annotationIndex 读取注解索引，将页引用对应到文档声明的标识，不解析页面外观
 // 入参: doc 文档结构
 // 返回: Annotations 注解索引, error 错误信息
 func (r *Reader) annotationIndex(doc *Document) (Annotations, error) {
@@ -197,8 +197,18 @@ func (r *Reader) annotationIndex(doc *Document) (Annotations, error) {
 	if err := xml.NewDecoder(f).Decode(&annotations); err != nil {
 		return Annotations{}, err
 	}
+	pageIDs := make(map[string]string, len(doc.Pages.Page))
+	for _, page := range doc.Pages.Page {
+		if id := editorResourceID(page.ID); id != "" {
+			pageIDs[id] = page.ID
+		}
+	}
 	r.annotationFiles = make(map[string][]string)
-	for _, page := range annotations.Page {
+	for i := range annotations.Page {
+		page := &annotations.Page[i]
+		if id := pageIDs[editorResourceID(page.PageID)]; id != "" {
+			page.PageID = id
+		}
 		annotPath := resolveResourcePath(annPath, "", page.FileLoc)
 		if file, ok := r.packageFile(annotPath); ok {
 			annotPath = cleanPackagePath(file.Name)
