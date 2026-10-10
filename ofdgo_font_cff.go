@@ -602,13 +602,20 @@ func parseCFFDict(data []byte) cffDict {
 // 入参: data 字典数据
 // 返回: cffDict 字典映射, error 编码或操作数错误
 func readCFFDict(data []byte) (cffDict, error) {
+	return readCFFDictionary(data, false)
+}
+
+// readCFFDictionary 读取字体字典，CFF2顶层字典允许变化存储偏移操作符
+// 入参: data 字典数据, cff2 是否为CFF2顶层字典
+// 返回: cffDict 字典映射, error 编码或操作数错误
+func readCFFDictionary(data []byte, cff2 bool) (cffDict, error) {
 	dict := make(cffDict)
 	var operands []float64
 	i := 0
 	for i < len(data) {
 		b := data[i]
 		i++
-		if b <= 21 {
+		if b <= 21 || cff2 && b == 24 {
 			op := int(b)
 			if b == 12 {
 				if i >= len(data) {

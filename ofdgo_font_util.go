@@ -292,7 +292,7 @@ func serializeOTF(tables map[string][]byte) ([]byte, error) {
 	searchRange := 1 << (entrySelector + 4)
 	rangeShift := int(numTables)*16 - searchRange
 	buf := new(bytes.Buffer)
-	if _, ok := tables["CFF "]; ok {
+	if tables["CFF "] != nil || tables["CFF2"] != nil {
 		buf.WriteString("OTTO")
 	} else {
 		binary.Write(buf, binary.BigEndian, uint32(0x00010000))

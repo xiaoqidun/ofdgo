@@ -35,10 +35,15 @@ type sfntResourceMetrics struct{ *font.SFNT }
 func (SFNTBackend) Name() string { return "sfnt" }
 
 // OpenFontResource 提取独立字体并读取名称、样式和裁剪能力
+// CFF2使用默认实例的静态轮廓，不改变原字体文件
 // 入参: file 字体文件, index 集合索引
 // 返回: *FontResource 字体资源, error 解析错误
 func (SFNTBackend) OpenFontResource(file FontFile, index int) (*FontResource, error) {
 	data, err := file.Face(index)
+	if err != nil {
+		return nil, err
+	}
+	data, err = defaultCFF2Font(data)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +96,13 @@ func (f sfntResourceMetrics) Write() []byte { return fontSFNTData(f.SFNT) }
 // 入参: sfnt 已解析字体
 // 返回: bool 是否支持裁剪
 func sfntSubsettable(sfnt *font.SFNT) bool {
-	return sfnt.IsTrueType && fontEmbeddingFlags(sfnt)&0x0100 == 0 && !slices.ContainsFunc([]string{"fvar", "COLR", "CBDT", "sbix", "SVG "}, func(tag string) bool { return sfnt.Tables[tag] != nil })
+	if fontEmbeddingFlags(sfnt)&0x0100 != 0 || slices.ContainsFunc([]string{"COLR", "CBDT", "sbix", "SVG "}, func(tag string) bool { return sfnt.Tables[tag] != nil }) {
+		return false
+	}
+	if sfnt.IsCFF {
+		return sfnt.Tables["fvar"] == nil && staticCFFPrograms(sfnt) != nil
+	}
+	return sfnt.IsTrueType && (sfnt.Tables["fvar"] == nil || variableSFNTSubsettable(sfnt))
 }
 
 // fontEmbeddingFlags 读取OpenType的嵌入标志，未提供OS/2表时返回零
@@ -133,16 +144,26 @@ func sfntFontName(sfnt *font.SFNT, names ...font.NameID) string {
 	return ""
 }
 
-// subsetSFNTFont 裁剪TrueType字形及复合依赖，保留字符映射、名称、度量和提示指令
+// subsetSFNTFont 按实际用字裁剪字体，保留字符映射、名称及度量
 // 入参: data 字体数据, glyphs 已排序的字形编号，包含0, mapped 是否保留显式字形编号
 // 返回: []byte 字体子集, error 错误信息
 func subsetSFNTFont(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
+	data, err := defaultCFF2Font(data)
+	if err != nil {
+		return nil, err
+	}
 	sfnt, err := font.ParseSFNT(bytes.Clone(data), 0)
 	if err != nil {
 		return nil, err
 	}
 	if fontEmbeddingFlags(sfnt)&0x0100 != 0 {
 		return bytes.Clone(data), nil
+	}
+	if sfnt.IsCFF {
+		return subsetStaticCFFFont(sfnt, glyphs)
+	}
+	if sfnt.Tables["fvar"] != nil {
+		return subsetVariableSFNTFont(sfnt, glyphs)
 	}
 	if mapped {
 		usage := newEditorFontUsage()

@@ -56,6 +56,10 @@ func (b CanvasBackend) ResolveFont(r *Renderer, id string, exact bool) (Resolved
 // 入参: data 字体数据
 // 返回: FontMetrics 字体度量, error 解析错误
 func (CanvasBackend) OpenFont(data []byte) (FontMetrics, error) {
+	data, err := defaultCFF2Font(data)
+	if err != nil {
+		return nil, err
+	}
 	sfnt, err := font.ParseSFNT(data, 0)
 	if err != nil {
 		return nil, err

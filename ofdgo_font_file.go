@@ -101,6 +101,10 @@ func (f FontFile) MissingGlyphs(index int, text string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	data, err = defaultCFF2Font(data)
+	if err != nil {
+		return "", err
+	}
 	sfnt, err := font.ParseSFNT(data, 0)
 	if err != nil {
 		return "", err

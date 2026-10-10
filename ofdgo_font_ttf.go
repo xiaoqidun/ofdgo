@@ -23,6 +23,11 @@ import (
 // 入参: data 原始字体数据, fixCmap 是否修复cmap, fixName 是否修复name
 // 返回: bool 是否修复, []byte 修复后数据, map[rune]uint16 字符映射, bool 是否缺失cmap, error 错误信息
 func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uint16, bool, error) {
+	original := data
+	data, err := defaultCFF2Font(data)
+	if err != nil {
+		return false, original, nil, false, err
+	}
 	if len(data) < 12 {
 		return false, data, nil, false, nil
 	}
@@ -30,7 +35,7 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 	isCFFSfnt := sfntTag == "OTTO"
 	numTables := binary.BigEndian.Uint16(data[4:6])
 	existingTables := make(map[string][]byte)
-	malformedDirectory := false
+	malformedDirectory := !bytes.Equal(original, data)
 	pos := 12
 	for i := 0; i < int(numTables); i++ {
 		if len(data) < pos+16 {
