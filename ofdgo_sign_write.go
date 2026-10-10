@@ -224,7 +224,7 @@ func signatureWriteParts(r *Reader) (map[string][]byte, error) {
 }
 
 // signatureWritePackage 完成输出优化后计算签名，不改写已有签名保护的资源
-// 签名目录采用Sign_N兼容OFDRW容器，标识使用独立的sN签章域
+// 签名目录采用Sign_N，标识使用独立的sN序列
 // 入参: parts 独立包文件, options 签署选项, index 文档索引
 // 返回: []byte 完整包, error 错误信息
 func signatureWritePackage(parts map[string][]byte, options SignatureWriteOptions, index int) ([]byte, error) {
@@ -242,30 +242,19 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 	if err != nil {
 		return nil, err
 	}
-	protected := make(map[string][]byte)
-	for other := range r.OFD.DocBody {
-		if other == index {
-			continue
-		}
-		view, err := r.Document(other)
-		if err != nil {
-			return nil, err
-		}
-		if view.doc.Signatures == "" {
-			continue
-		}
-		reports, err := r.VerifyDocumentSignatures(other)
-		if err != nil {
-			return nil, err
-		}
-		for _, report := range reports {
-			if report.Error != "" {
-				return nil, fmt.Errorf("cannot preserve document %d signature: %s", other, report.Error)
-			}
-			for _, ref := range report.References {
-				protected[ref.Path] = bytes.Clone(parts[ref.Path])
-			}
-		}
+	if options.Time.IsZero() {
+		options.Time = time.Now()
+	}
+	options.Time = options.Time.UTC().Truncate(time.Second)
+	identity, err := signatureWriteIdentity(options)
+	if err != nil {
+		return nil, err
+	}
+	verifyOptions := append([]SignatureVerifyOption(nil), options.ExistingVerifyOptions...)
+	verifyOptions = append(verifyOptions, WithSignatureCert(identity.cert.Raw))
+	protected, err := signatureWriteProtected(r, parts, verifyOptions)
+	if err != nil {
+		return nil, err
 	}
 	if options.Compression.Mode != CompressionUnchanged && doc.Signatures == "" && len(protected) == 0 {
 		images, sizes, err := r.compressionImagePlan(context.Background(), options.Compression)
@@ -294,14 +283,6 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 			return nil, err
 		}
 	}
-	if options.Time.IsZero() {
-		options.Time = time.Now()
-	}
-	options.Time = options.Time.UTC().Truncate(time.Second)
-	identity, err := signatureWriteIdentity(options)
-	if err != nil {
-		return nil, err
-	}
 	stamps, err := signatureWriteStamps(r, options.Stamps, len(options.Seal) != 0)
 	if err != nil {
 		return nil, err
@@ -322,8 +303,6 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 	if err != nil {
 		return nil, err
 	}
-	verifyOptions := append([]SignatureVerifyOption(nil), options.ExistingVerifyOptions...)
-	verifyOptions = append(verifyOptions, WithSignatureCert(identity.cert.Raw))
 	if options.Mode == SignatureAppend && oldCount > 0 {
 		reports, err := r.VerifyDocumentSignatures(index, verifyOptions...)
 		if err != nil {
@@ -402,6 +381,11 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 		updatedList = editorPatchXML(original, []editorXMLPatch{{root.start, root.end, updated}})
 	}
 	parts[listPath] = updatedList
+	for name, before := range protected {
+		if data, ok := parts[name]; !ok || !bytes.Equal(before, data) {
+			return nil, fmt.Errorf("another document signature protects %s", name)
+		}
+	}
 	refs := SignatureReferences{CheckMethod: identity.digest}
 	names := make([]string, 0, len(parts))
 	for name := range parts {
@@ -444,11 +428,6 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 	if err != nil {
 		return nil, err
 	}
-	for name, before := range protected {
-		if !bytes.Equal(before, parts[name]) {
-			return nil, fmt.Errorf("another document signature protects %s", name)
-		}
-	}
 	output, err := signatureWriteZIP(parts, options.Compression)
 	if err != nil {
 		return nil, err
@@ -470,6 +449,75 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 		}
 	}
 	return output, nil
+}
+
+// signatureWriteProtected 收集其他文档的签名文件及保护内容，不受默认版本选择影响
+// 入参: r 包阅读器, parts 原始包文件, options 既有签名的验证选项
+// 返回: map[string][]byte 不可改写的文件, error 读取或验签错误
+func signatureWriteProtected(r *Reader, parts map[string][]byte, options []SignatureVerifyOption) (map[string][]byte, error) {
+	protected := make(map[string][]byte)
+	retain := func(name string) error {
+		if _, ok := protected[name]; ok {
+			return nil
+		}
+		data, ok := parts[name]
+		if !ok {
+			return fmt.Errorf("signature file not found: %s", name)
+		}
+		protected[name] = bytes.Clone(data)
+		return nil
+	}
+	for index := range r.OFD.DocBody {
+		if index == r.documentIndex {
+			continue
+		}
+		view := &Reader{files: parts, documentIndex: index, selectedVersion: new(string)}
+		if err := view.initRoot(); err != nil {
+			return nil, err
+		}
+		doc, err := view.docStructure()
+		if err != nil {
+			return nil, err
+		}
+		if doc.Signatures == "" {
+			continue
+		}
+		reports, err := view.VerifyDocumentSignatures(index, options...)
+		if err != nil {
+			return nil, err
+		}
+		listPath := view.ResPath(doc.Signatures)
+		if err := retain(listPath); err != nil {
+			return nil, err
+		}
+		for _, report := range reports {
+			if !report.Valid {
+				reason := report.Error
+				if reason == "" {
+					reason = "signature verification failed"
+				}
+				return nil, fmt.Errorf("cannot preserve document %d signature %s: %s", index, report.ID, reason)
+			}
+			sigPath := signatureRefPath(listPath, report.BaseLoc)
+			file, err := parseSignatureFile(parts[sigPath])
+			if err != nil {
+				return nil, err
+			}
+			names := []string{sigPath, signatureRefPath(sigPath, file.SignedValue)}
+			if file.SignedInfo.Seal.BaseLoc != "" {
+				names = append(names, signatureRefPath(sigPath, file.SignedInfo.Seal.BaseLoc))
+			}
+			for _, ref := range report.References {
+				names = append(names, ref.Path)
+			}
+			for _, name := range names {
+				if err := retain(name); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	return protected, nil
 }
 
 // signatureWriteIDs 为签名和全部外观分配同一签章域的标识，不修改文档图元编号
