@@ -36,9 +36,10 @@ const (
 
 // editorResourceRefs 保存全包资源标识和直接文件引用，不以页面是否加载判断资源存活
 type editorResourceRefs struct {
-	ids   map[string]bool
-	files map[string]bool
-	fonts map[string]*editorFontUsage
+	ids      map[string]bool
+	files    map[string]bool
+	fonts    map[string]*editorFontUsage
+	versions map[string]bool
 }
 
 // compactSourceReferences 合并自产页面的已知引用，其他条目仍完整扫描
@@ -135,6 +136,7 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 		if err != nil {
 			return nil, nil
 		}
+		preserved := refs.versions[cleanPackagePath(name)]
 		var patches []editorXMLPatch
 		for _, group := range root.children {
 			var members []editorXMLPatch
@@ -149,18 +151,18 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 					continue
 				}
 				id := editorResourceID(node.attr("ID"))
-				keep := id == "" || refs.ids[id] || field == "MediaFile" && node.attr("Type") != "Image"
+				keep := preserved || id == "" || refs.ids[id] || field == "MediaFile" && node.attr("Type") != "Image"
 				if file := node.child(field); file != nil {
 					var value string
 					if err := xml.Unmarshal(data[file.start:file.end], &value); err != nil {
 						return nil, nil
 					}
 					if location := editorResourceLocation(name, root.attr("BaseLoc"), value); location != "" {
-						alternate := strings.ToLower(cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value)))
+						alternate := cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))
 						if field == "FontFile" {
 							usage := refs.fonts[id]
 							charset := node.attr("Charset")
-							unsafe := id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != alternate
+							unsafe := preserved || id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != alternate
 							for _, file := range []string{location, alternate} {
 								if fontFiles[file] == nil {
 									fontFiles[file] = newEditorFontUsage()
@@ -200,7 +202,7 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 		if err := progress.report("fonts", i, len(ordered)); err != nil {
 			return nil, err
 		}
-		key := strings.ToLower(cleanPackagePath(name))
+		key := cleanPackagePath(name)
 		usage := fontFiles[key]
 		if e.backends.FontResources == nil || usage == nil || usage.unsafe || refs.files[key] || removed[key] || parts[name] != nil {
 			continue
@@ -222,7 +224,7 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 	}
 	maps.Copy(parts, updates)
 	for name := range parts {
-		if removed[strings.ToLower(cleanPackagePath(name))] {
+		if removed[cleanPackagePath(name)] {
 			delete(parts, name)
 		}
 	}
@@ -279,7 +281,7 @@ func (r *editorResourceRefs) reference(name, base, key, value string, resource b
 		return
 	}
 	r.files[editorResourceLocation(name, base, value)] = true
-	r.files[strings.ToLower(cleanPackagePath(resolveResourcePath(name, base, value)))] = true
+	r.files[cleanPackagePath(resolveResourcePath(name, base, value))] = true
 }
 
 // editorResourceReferenceKind 区分标准标识和文件引用，其他文本不参与资源扫描
@@ -340,7 +342,7 @@ func editorResourceNode(root *editorXML, group, kind, id string) *editorXML {
 	return node
 }
 
-// editorResourceLocation 按ST_Loc与Res.BaseLoc解析路径，大小写折叠用于保守保留共享文件
+// editorResourceLocation 按ST_Loc与Res.BaseLoc解析路径，保留路径大小写
 // 入参: name 所在XML, base 资源目录, value 路径值
 // 返回: string 包内路径
 func editorResourceLocation(name, base, value string) string {
@@ -349,7 +351,7 @@ func editorResourceLocation(name, base, value string) string {
 		return ""
 	}
 	if strings.HasPrefix(value, "/") {
-		return strings.ToLower(cleanPackagePath(value))
+		return cleanPackagePath(value)
 	}
 	base = strings.ReplaceAll(base, "\\", "/")
 	dir := path.Dir(name)
@@ -358,5 +360,5 @@ func editorResourceLocation(name, base, value string) string {
 	} else {
 		dir = path.Join(dir, base)
 	}
-	return strings.ToLower(cleanPackagePath(path.Join(dir, value)))
+	return cleanPackagePath(path.Join(dir, value))
 }

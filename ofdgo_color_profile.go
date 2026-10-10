@@ -68,7 +68,7 @@ func (r *Reader) colorProfile(space *ColorSpace) (*colorProfile, error) {
 	}
 	name := r.ResPath(space.Profile)
 	for _, other := range r.colorSpaceCache {
-		if other != nil && other.profile != nil && strings.EqualFold(other.Type, space.Type) && strings.EqualFold(r.ResPath(other.Profile), name) {
+		if other != nil && other.profile != nil && strings.EqualFold(other.Type, space.Type) && r.ResPath(other.Profile) == name {
 			space.profile = other.profile
 			return space.profile, space.profile.err
 		}

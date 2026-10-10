@@ -26,7 +26,7 @@ import (
 
 // documentFiles 按标准路径遍历独立文档依赖，签名摘要引用不作为内容依赖
 // 入参: ctx 取消上下文, index 文档索引
-// 返回: map[string]bool 大小写折叠的文件路径, error 读取或取消错误
+// 返回: map[string]bool 包内文件路径, error 读取或取消错误
 func (r *Reader) documentFiles(ctx context.Context, index int) (map[string]bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -67,15 +67,13 @@ func (r *Reader) documentFiles(ctx context.Context, index int) (map[string]bool,
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		name := queue[0]
+		actual := queue[0]
 		queue = queue[1:]
-		key := strings.ToLower(name)
-		if seen[key] {
+		if seen[actual] {
 			continue
 		}
-		seen[key] = true
-		actual, exists := r.fileNamesFold[key]
-		if !exists {
+		seen[actual] = true
+		if !r.fileNames[actual] {
 			continue
 		}
 		input, err := r.openFile(actual)

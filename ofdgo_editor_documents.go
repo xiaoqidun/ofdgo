@@ -93,7 +93,7 @@ func (e *Editor) SetDocumentInfo(index int, info DocInfo) error {
 		if err != nil {
 			return 0, err
 		}
-		reader.files[reader.fileNamesFold["ofd.xml"]] = updated
+		reader.files["OFD.xml"] = updated
 		return reader.DocumentIndex(), nil
 	})
 }
@@ -116,8 +116,8 @@ func (e *Editor) AddDocument(title string, width, height float64, at int) (int, 
 		for number := 0; ; number++ {
 			candidate := fmt.Sprintf("Doc_%d", number)
 			occupied := false
-			for name := range reader.fileNamesFold {
-				if name == strings.ToLower(candidate) || strings.HasPrefix(name, strings.ToLower(candidate)+"/") {
+			for name := range reader.fileNames {
+				if name == candidate || strings.HasPrefix(name, candidate+"/") {
 					occupied = true
 					break
 				}
@@ -156,7 +156,7 @@ func (e *Editor) AddDocument(title string, width, height float64, at int) (int, 
 		if existing := root.childAt("DocBody", at); existing != nil {
 			position = existing.start
 		}
-		reader.files[reader.fileNamesFold["ofd.xml"]] = editorPatchXML(data, []editorXMLPatch{{position, position, bytes.TrimPrefix(body, []byte(xml.Header))}})
+		reader.files["OFD.xml"] = editorPatchXML(data, []editorXMLPatch{{position, position, bytes.TrimPrefix(body, []byte(xml.Header))}})
 		return at, nil
 	})
 	if err != nil {
@@ -199,7 +199,7 @@ func (e *Editor) MoveDocument(from, to int) error {
 			body := root.childAt("DocBody", index)
 			patches = append(patches, editorXMLPatch{body.start, body.end, content})
 		}
-		reader.files[reader.fileNamesFold["ofd.xml"]] = editorPatchXML(data, patches)
+		reader.files["OFD.xml"] = editorPatchXML(data, patches)
 		selected := reader.DocumentIndex()
 		if selected == from {
 			selected = to
@@ -232,10 +232,10 @@ func (e *Editor) DeleteDocument(index int) error {
 		directory := path.Dir(cleanPackagePath(reader.OFD.DocBody[index].DocRoot))
 		if directory != "." && !slices.ContainsFunc(reader.OFD.DocBody, func(body DocBody) bool {
 			name := cleanPackagePath(body.DocRoot)
-			return name != cleanPackagePath(reader.OFD.DocBody[index].DocRoot) && strings.HasPrefix(strings.ToLower(name), strings.ToLower(directory)+"/")
+			return name != cleanPackagePath(reader.OFD.DocBody[index].DocRoot) && strings.HasPrefix(name, directory+"/")
 		}) {
-			for name := range reader.fileNamesFold {
-				if strings.HasPrefix(name, strings.ToLower(directory)+"/") {
+			for name := range reader.fileNames {
+				if strings.HasPrefix(name, directory+"/") {
 					removed[name] = true
 				}
 			}
@@ -252,19 +252,19 @@ func (e *Editor) DeleteDocument(index int) error {
 				delete(removed, name)
 			}
 		}
-		delete(removed, "ofd.xml")
+		delete(removed, "OFD.xml")
 		for name := range reader.files {
-			if removed[strings.ToLower(name)] {
+			if removed[name] {
 				delete(reader.files, name)
 			}
 		}
 		if reader.Zip != nil {
 			reader.Zip = &zip.Reader{Comment: reader.Zip.Comment, File: slices.DeleteFunc(slices.Clone(reader.Zip.File), func(file *zip.File) bool {
-				return removed[strings.ToLower(cleanPackagePath(file.Name))]
+				return removed[cleanPackagePath(file.Name)]
 			})}
 		}
 		body := root.childAt("DocBody", index)
-		reader.files[reader.fileNamesFold["ofd.xml"]] = editorPatchXML(data, []editorXMLPatch{{start: body.start, end: body.end}})
+		reader.files["OFD.xml"] = editorPatchXML(data, []editorXMLPatch{{start: body.start, end: body.end}})
 		selected := reader.DocumentIndex()
 		if selected > index {
 			selected--
@@ -292,6 +292,7 @@ func (e *Editor) editDocuments(edit func(*Reader, []byte, *editorXML) (int, erro
 		return err
 	}
 	reader.files = maps.Clone(reader.files)
+	previous := reader.OFD.DocBody[reader.documentIndex]
 	index, err := edit(reader, data, root)
 	if err != nil {
 		return err
@@ -301,10 +302,14 @@ func (e *Editor) editDocuments(edit func(*Reader, []byte, *editorXML) (int, erro
 	if err := reader.initRoot(); err != nil {
 		return err
 	}
+	current := reader.OFD.DocBody[index]
+	if previous.DocRoot != current.DocRoot || previous.DocInfo.DocID != current.DocInfo.DocID {
+		reader.selectedVersion = nil
+	}
 	if _, err := reader.Doc(); err != nil {
 		return err
 	}
-	if e.source != nil && e.documentRoot() == reader.OFD.DocBody[index].DocRoot && e.Info.DocID == reader.OFD.DocBody[index].DocInfo.DocID {
+	if e.source != nil && e.documentRoot() == reader.documentRoot && e.Info.DocID == reader.OFD.DocBody[index].DocInfo.DocID {
 		source := *e.source
 		source.reader = reader
 		e.source = &source
@@ -331,7 +336,7 @@ func (e *Editor) documentRoot() string {
 	if e.source == nil {
 		return ""
 	}
-	return e.source.reader.OFD.DocBody[e.DocumentIndex()].DocRoot
+	return e.source.reader.documentRoot
 }
 
 // sameDocument 判断快照是否属于同一文档，区别删除后复用目录的新文档

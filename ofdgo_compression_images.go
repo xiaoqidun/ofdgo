@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"image"
 	"math"
-	"strings"
 )
 
 // compressionImages 记录图片各处使用的最大像素需求
@@ -71,7 +70,7 @@ func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOp
 			return nil, nil, err
 		}
 		for _, img := range catalog {
-			name := strings.ToLower(cleanPackagePath(img.Location))
+			name := cleanPackagePath(img.Location)
 			if old, ok := images[name]; !ok || old {
 				images[name] = !masks[name]
 			}
@@ -150,7 +149,7 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 	}
 	result := make(map[string]image.Point)
 	for _, img := range images {
-		name := strings.ToLower(cleanPackagePath(img.Location))
+		name := cleanPackagePath(img.Location)
 		size := visitor.sizes[editorResourceID(img.ID)]
 		old := result[name]
 		result[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))

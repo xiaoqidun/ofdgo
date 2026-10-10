@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-	"unicode/utf8"
 )
 
 // SignaturePageStamps 生成所选页面相同毫米坐标的印章位置并检查页内范围
@@ -110,7 +109,7 @@ func signatureWriteStamps(r *Reader, stamps []SignatureStamp, seal bool) ([]Sign
 		if stamp.ID == "" {
 			continue
 		}
-		if !signatureWriteIDValid(stamp.ID) || ids[stamp.ID] {
+		if !ofdXMLIDValid(stamp.ID) || ids[stamp.ID] {
 			return nil, fmt.Errorf("invalid or duplicate stamp ID: %s", stamp.ID)
 		}
 		ids[stamp.ID] = true
@@ -140,31 +139,6 @@ func signatureWriteStamps(r *Reader, stamps []SignatureStamp, seal bool) ([]Sign
 		}
 	}
 	return result, nil
-}
-
-// signatureWriteIDValid 按XML 1.0的NCName规则校验签章标识
-// 入参: id 标识
-// 返回: bool 是否有效
-func signatureWriteIDValid(id string) bool {
-	if id == "" || !utf8.ValidString(id) {
-		return false
-	}
-	for i, c := range id {
-		if c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' ||
-			c >= 0xC0 && c <= 0xD6 || c >= 0xD8 && c <= 0xF6 ||
-			c >= 0xF8 && c <= 0x2FF || c >= 0x370 && c <= 0x37D ||
-			c >= 0x37F && c <= 0x1FFF || c >= 0x200C && c <= 0x200D ||
-			c >= 0x2070 && c <= 0x218F || c >= 0x2C00 && c <= 0x2FEF ||
-			c >= 0x3001 && c <= 0xD7FF || c >= 0xF900 && c <= 0xFDCF ||
-			c >= 0xFDF0 && c <= 0xFFFD || c >= 0x10000 && c <= 0xEFFFF {
-			continue
-		}
-		if i == 0 || !(c == '-' || c == '.' || c >= '0' && c <= '9' ||
-			c == 0xB7 || c >= 0x300 && c <= 0x36F || c >= 0x203F && c <= 0x2040) {
-			return false
-		}
-	}
-	return true
 }
 
 // signatureWriteBoxValid 判断印章区域是否有限且尺寸为正

@@ -76,7 +76,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		if err := e.output.ctx.Err(); err != nil {
 			return err
 		}
-		key := strings.ToLower(cleanPackagePath(name))
+		key := cleanPackagePath(name)
 		if removed[key] || strings.HasSuffix(name, "/") {
 			continue
 		}
@@ -126,6 +126,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		if err != nil {
 			return err
 		}
+		preserved := refs.versions[cleanPackagePath(name)]
 		for _, group := range root.children {
 			for _, node := range group.children {
 				field := ""
@@ -147,11 +148,11 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 					return err
 				}
 				key := editorResourceLocation(name, root.attr("BaseLoc"), value)
-				if field == "MediaFile" && node.attr("Type") != "Image" {
+				if preserved || field == "MediaFile" && node.attr("Type") != "Image" {
 					refs.files[key] = true
 					continue
 				}
-				if key != strings.ToLower(cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))) {
+				if key != cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value)) {
 					return nil
 				}
 				if actual[key] != "" && !refs.files[key] {
@@ -259,10 +260,10 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 						}
 						stem := strings.TrimSuffix(actual[key], ext)
 						name := stem + ".jpg"
-						for n := 1; reserved[strings.ToLower(name)]; n++ {
+						for n := 1; reserved[name]; n++ {
 							name = fmt.Sprintf("%s-%d.jpg", stem, n)
 						}
-						reserved[strings.ToLower(name)] = true
+						reserved[name] = true
 						locations[key] = name
 						parts[name] = data
 						delete(parts, actual[key])
@@ -286,6 +287,9 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		}
 	}
 	for _, name := range resources {
+		if refs.versions[cleanPackagePath(name)] {
+			continue
+		}
 		data, err := read(name)
 		if err != nil {
 			return err

@@ -78,6 +78,7 @@ type signatureWriteInfo struct {
 }
 
 // SignPackage 签署最终OFD包，失败时返回nil且不修改输入
+// 含版本列表的文档需先通过ExtractVersion提取后签署
 // 入参: data 最终包字节, options 签署选项
 // 返回: []byte 签署后的完整包, error 错误信息
 func SignPackage(data []byte, options SignatureWriteOptions) ([]byte, error) {
@@ -89,6 +90,7 @@ func SignPackage(data []byte, options SignatureWriteOptions) ([]byte, error) {
 }
 
 // SignEditorTo 将编辑器序列化为最终文件后签署，保留或显式覆盖加密策略
+// 含版本列表的文档需先通过ExtractVersion提取后签署
 // 不修改编辑器状态；OnWriteProgress可在准备、签署和加密阶段取消，准备失败不写入目标
 // 输出目标不得覆盖源文件；目标自身写入失败时调用方应丢弃部分输出
 // 入参: writer 输出目标, editor 编辑器, options 签署选项
@@ -121,6 +123,7 @@ func SignEditorTo(writer io.Writer, editor *Editor, options SignatureWriteOption
 }
 
 // SignTo 从阅读器包内容创建独立快照，完成签署和回验后写出
+// 含版本列表的文档需先通过ExtractVersion提取后签署
 // 不采用可变的Doc/OFD模型；调用方应先将Editor写出为最终包
 // 准备失败不写入writer；writer自身失败可能已写入部分输出，不保证目标原子替换
 // 入参: writer 独立的输出目标，不得覆盖源文件, options 签署选项
@@ -146,6 +149,9 @@ func (r *Reader) SignTo(writer io.Writer, options SignatureWriteOptions) (int64,
 func signatureWriteOutput(r *Reader, options SignatureWriteOptions) ([]byte, error) {
 	if r == nil {
 		return nil, fmt.Errorf("nil signature reader")
+	}
+	if r.documentIndex >= 0 && r.documentIndex < r.DocumentCount() && r.OFD.DocBody[r.documentIndex].versioned {
+		return nil, fmt.Errorf("in-package version signing is not supported; extract the version before signing")
 	}
 	encryption := options.Encryption
 	if encryption == nil && r.encryption != nil {
@@ -275,7 +281,7 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 			return nil, err
 		}
 		for name := range parts {
-			if removed[strings.ToLower(cleanPackagePath(name))] {
+			if removed[cleanPackagePath(name)] {
 				delete(parts, name)
 			}
 		}
@@ -364,7 +370,7 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 		directory = path.Join(path.Dir(listPath), "Sign_"+strconv.Itoa(n))
 		occupied := false
 		for name := range parts {
-			if strings.EqualFold(name, directory) || strings.HasPrefix(strings.ToLower(name), strings.ToLower(directory)+"/") {
+			if name == directory || strings.HasPrefix(name, directory+"/") {
 				occupied = true
 				break
 			}
@@ -474,7 +480,7 @@ func signatureWriteIDs(list *Signatures, listPath string, parts map[string][]byt
 	var sequence signatureIDSequence
 	sequence.observe(list.MaxSignID)
 	add := func(id string) error {
-		if !signatureWriteIDValid(id) || used[id] {
+		if !ofdXMLIDValid(id) || used[id] {
 			return fmt.Errorf("invalid or duplicate signature ID: %s", id)
 		}
 		used[id] = true
@@ -534,14 +540,7 @@ func signatureWriteXML(name string, value any) ([]byte, error) {
 func signatureWriteAvailable(parts map[string][]byte, name string) string {
 	original := name
 	for i := 1; ; i++ {
-		found := false
-		for existing := range parts {
-			if strings.EqualFold(existing, name) {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if _, found := parts[name]; !found {
 			return name
 		}
 		name = path.Join(path.Dir(original), strconv.Itoa(i)+"_"+path.Base(original))

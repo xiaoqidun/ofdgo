@@ -113,6 +113,7 @@ type PageCapabilities struct {
 // Editor 打开当前文档进行保真编辑，不修改输入包，不以权限声明或签名限制编辑
 // 原权限和签名数据保留，修改受保护内容会使原签名失效，不重新签名
 // 页面按需解析，未修改条目直接保留；编辑器及其Reader快照使用期间不得关闭输入Reader
+// 版本共享文件在提交修改时隔离，保留其他版本及其文件清单
 // 返回: *Editor 编辑器, error 错误信息
 func (r *Reader) Editor() (*Editor, error) {
 	_, err := r.Doc()
@@ -419,7 +420,7 @@ func (e *Editor) repairSourceObjectIDs(data []byte, root *editorXML) ([]byte, bo
 // 返回: error 引用歧义或读取错误
 func (e *Editor) checkDuplicateObjectReferences(duplicates map[string]bool) error {
 	reader := e.source.reader
-	for _, name := range reader.fileNamesFold {
+	for name := range reader.fileNames {
 		if !strings.EqualFold(path.Ext(name), ".xml") {
 			continue
 		}

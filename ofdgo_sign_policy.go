@@ -219,7 +219,7 @@ func (r *Reader) applySignatureCoverage(report *SignatureVerifyReport, listPath 
 	covered := make(map[string]bool)
 	for _, ref := range report.References {
 		if ref.Checked && ref.OK {
-			covered[r.signatureCoveragePath(ref.Path)] = true
+			covered[cleanPackagePath(ref.Path)] = true
 		}
 	}
 	for name := range covered {
@@ -232,12 +232,12 @@ func (r *Reader) applySignatureCoverage(report *SignatureVerifyReport, listPath 
 	report.CoverageChecked, report.CoverageOK = true, true
 	required := make(map[string]bool)
 	for _, name := range o.Policy.RequiredFiles {
-		required[r.signatureCoveragePath(name)] = true
+		required[cleanPackagePath(name)] = true
 	}
 	if o.Policy.RequireDocumentCoverage {
-		required[r.signatureCoveragePath("OFD.xml")] = true
-		excluded := map[string]bool{r.signatureCoveragePath(listPath): true}
-		name := r.signatureCoveragePath(signatureRefPath(listPath, report.BaseLoc))
+		required["OFD.xml"] = true
+		excluded := map[string]bool{cleanPackagePath(listPath): true}
+		name := cleanPackagePath(signatureRefPath(listPath, report.BaseLoc))
 		data, err := r.readFile(name)
 		if err != nil {
 			report.CoverageOK = false
@@ -252,9 +252,9 @@ func (r *Reader) applySignatureCoverage(report *SignatureVerifyReport, listPath 
 		}
 		excluded[name] = true
 		if file.SignedValue != "" {
-			excluded[r.signatureCoveragePath(signatureRefPath(name, file.SignedValue))] = true
+			excluded[cleanPackagePath(signatureRefPath(name, file.SignedValue))] = true
 		}
-		root := path.Dir(r.signatureCoveragePath(o.DocRoot))
+		root := path.Dir(cleanPackagePath(o.DocRoot))
 		include := func(name string) {
 			if (root == "." || strings.HasPrefix(name, root+"/")) && !excluded[name] && !strings.HasSuffix(name, "/") {
 				required[name] = true
@@ -281,22 +281,11 @@ func (r *Reader) applySignatureCoverage(report *SignatureVerifyReport, listPath 
 	report.CoverageOK = report.CoverageOK && len(report.UncoveredFiles) == 0
 }
 
-// signatureCoveragePath 复用阅读器大小写索引获取同一文件身份
-// 入参: name 包内路径
-// 返回: string 实际包内路径
-func (r *Reader) signatureCoveragePath(name string) string {
-	name = cleanPackagePath(name)
-	if actual, ok := r.fileNamesFold[strings.ToLower(name)]; ok {
-		return actual
-	}
-	return name
-}
-
 // signatureCoverageReferences 收集标准OFD引用的传递闭包且包含跨文档资源
 // 入参: root 文档入口, required 待补充的必需文件集合
 // 返回: error 引用文件无法读取或解析时的错误
 func (r *Reader) signatureCoverageReferences(root string, required map[string]bool) error {
-	queue := []string{r.signatureCoveragePath(root)}
+	queue := []string{cleanPackagePath(root)}
 	seen := make(map[string]bool)
 	for len(queue) != 0 {
 		name := queue[0]
@@ -332,7 +321,7 @@ func (r *Reader) signatureCoverageReferences(root string, required map[string]bo
 			if resource {
 				resBase = base
 			}
-			resolved := r.signatureCoveragePath(resolveResourcePath(name, resBase, loc))
+			resolved := cleanPackagePath(resolveResourcePath(name, resBase, loc))
 			required[resolved] = true
 			if !seen[resolved] {
 				queue = append(queue, resolved)

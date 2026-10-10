@@ -190,7 +190,7 @@ func (e *Editor) writePlaintext(writer io.Writer) (int64, error) {
 			return 0, err
 		}
 		for _, name := range slices.Sorted(maps.Keys(parts)) {
-			if removed[strings.ToLower(cleanPackagePath(name))] {
+			if removed[cleanPackagePath(name)] {
 				continue
 			}
 			if err := e.writeOutputEntry(archive, zip.FileHeader{Name: name, Method: zip.Deflate}, parts[name]); err != nil {

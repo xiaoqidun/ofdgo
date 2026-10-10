@@ -164,7 +164,11 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 				s.refs.reference(s.name, s.base, attr.Name.Local, attr.Value, s.resource)
 			}
 			if s.objects != nil && editorObjectReference(attr.Name.Local) {
-				s.objects[attr.Value] = true
+				id := attr.Value
+				if key := editorResourceID(id); key != "" {
+					id = key
+				}
+				s.objects[id] = true
 			}
 			if attr.Name.Local == "Font" {
 				usage = s.refs.fontUsage(attr.Value)
@@ -189,6 +193,14 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			return false
 		}
 		s.refs.reference(s.name, s.base, token.Name.Local, s.text.String(), s.resource)
+		if len(s.stack) == 3 && s.stack[0] == "DocVersion" && s.stack[1] == "FileList" && token.Name.Local == "File" {
+			if name := editorResourceLocation(s.name, "", s.text.String()); name != "" {
+				if s.refs.versions == nil {
+					s.refs.versions = make(map[string]bool)
+				}
+				s.refs.versions[name] = true
+			}
+		}
 		if s.objects != nil && (token.Name.Local == "Thumbnail" || token.Name.Local == "Substitution") {
 			if id := editorResourceID(s.text.String()); id != "" {
 				s.objects[id] = true
@@ -219,6 +231,12 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 func (r *editorResourceRefs) merge(other *editorResourceRefs) {
 	maps.Copy(r.ids, other.ids)
 	maps.Copy(r.files, other.files)
+	if len(other.versions) != 0 {
+		if r.versions == nil {
+			r.versions = make(map[string]bool)
+		}
+		maps.Copy(r.versions, other.versions)
+	}
 	for id, usage := range other.fonts {
 		r.fontUsage(id).merge(usage, false)
 	}

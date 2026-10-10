@@ -48,13 +48,15 @@ type Reader struct {
 	doc                       *Document
 	relatedPending            bool
 	documentIndex             int
+	documentRoot              string
+	selectedVersion           *string
+	versionInfo               *DocumentVersionInfo
 	Stamps                    map[string][]Stamp
 	Annots                    map[string][]Annotation
 	annotationFiles           map[string][]string
 	fileIndex                 map[string]*zip.File
-	fileIndexFold             map[string]*zip.File
 	files                     map[string][]byte
-	fileNamesFold             map[string]string
+	fileNames                 map[string]bool
 	encryption                *encryptionState
 }
 
@@ -94,7 +96,11 @@ func (r *Reader) DocumentPageCount(index int) (int, error) {
 	if index == r.documentIndex && r.doc != nil {
 		return len(r.doc.Pages.Page), nil
 	}
-	data, err := r.readFile(r.OFD.DocBody[index].DocRoot)
+	root, err := r.documentEntry(index)
+	if err != nil {
+		return 0, err
+	}
+	data, err := r.readFile(root)
 	if err != nil {
 		return 0, err
 	}
@@ -151,7 +157,10 @@ func (r *Reader) docStructure() (*Document, error) {
 		return nil, fmt.Errorf("no docbody found")
 	}
 	docAttr := r.OFD.DocBody[r.documentIndex]
-	docRootPath := docAttr.DocRoot
+	docRootPath, err := r.DocumentRoot()
+	if err != nil {
+		return nil, err
+	}
 	r.RootDir = path.Dir(docRootPath)
 	data, err := r.readFile(docRootPath)
 	if err != nil {
@@ -162,7 +171,7 @@ func (r *Reader) docStructure() (*Document, error) {
 		return nil, fmt.Errorf("failed to unmarshal document.xml: %w", err)
 	}
 	if doc.Signatures == "" {
-		doc.Signatures = docAttr.Signatures
+		doc.Signatures = r.versionSignatures(docAttr.Signatures)
 	}
 	for _, res := range doc.CommonData.DocumentRes {
 		r.loadRes(res)
@@ -459,6 +468,11 @@ func (r *Reader) initRoot() error {
 		return fmt.Errorf("failed to unmarshal ofd.xml: %w", err)
 	}
 	r.OFD = &ofd
+	r.doc, r.versionInfo = nil, nil
+	r.documentRoot, r.RootDir = "", ""
+	r.relatedPending, r.fontResourcesRead = false, false
+	r.imageCatalog = nil
+	r.Stamps, r.Annots, r.annotationFiles = nil, nil, nil
 	r.ResMap = make(map[string]string)
 	r.resourcesRead = make(map[string]bool)
 	r.mediaCache = make(map[string]MultiMedia)
@@ -472,7 +486,7 @@ func (r *Reader) initRoot() error {
 	return nil
 }
 
-// indexPackage 建立包路径索引，拒绝会使显示与验签产生歧义的同名条目
+// indexPackage 按大小写敏感路径建立包索引，拒绝规范化后重复的ZIP条目
 // 返回: error 错误信息
 func (r *Reader) indexPackage() error {
 	count := 0
@@ -480,8 +494,7 @@ func (r *Reader) indexPackage() error {
 		count = len(r.Zip.File)
 	}
 	r.fileIndex = make(map[string]*zip.File, count)
-	r.fileIndexFold = make(map[string]*zip.File, count)
-	r.fileNamesFold = make(map[string]string, count+len(r.files))
+	r.fileNames = make(map[string]bool, count+len(r.files))
 	if r.Zip != nil {
 		for _, f := range r.Zip.File {
 			if f.FileInfo().IsDir() {
@@ -491,24 +504,18 @@ func (r *Reader) indexPackage() error {
 			if !validPackagePath(name) {
 				return fmt.Errorf("invalid package path: %q", f.Name)
 			}
-			fold := strings.ToLower(name)
-			if previous, ok := r.fileIndexFold[fold]; ok {
+			if previous, ok := r.fileIndex[name]; ok {
 				return fmt.Errorf("ambiguous package paths: %q and %q", previous.Name, f.Name)
 			}
 			r.fileIndex[name] = f
-			r.fileIndexFold[fold] = f
-			r.fileNamesFold[fold] = name
+			r.fileNames[name] = true
 		}
 	}
 	for name := range r.files {
 		if name != cleanPackagePath(name) || !validPackagePath(name) {
 			return fmt.Errorf("invalid package path: %q", name)
 		}
-		fold := strings.ToLower(name)
-		if previous, ok := r.fileNamesFold[fold]; ok && previous != name {
-			return fmt.Errorf("ambiguous package paths: %q and %q", previous, name)
-		}
-		r.fileNamesFold[fold] = name
+		r.fileNames[name] = true
 	}
 	return nil
 }
@@ -544,16 +551,10 @@ func (r *Reader) readFileView(name string) ([]byte, error) {
 // 返回: []byte 文件内容, bool 是否借用缓存, error 错误信息
 func (r *Reader) readFileData(name string) ([]byte, bool, error) {
 	name = cleanPackagePath(name)
-	if actual, ok := r.fileNamesFold[strings.ToLower(name)]; ok {
-		name = actual
-	}
 	if data, ok := r.files[name]; ok {
 		return data, true, nil
 	}
 	if f, ok := r.packageFile(name); ok {
-		if data, ok := r.files[cleanPackagePath(f.Name)]; ok {
-			return data, true, nil
-		}
 		data, err := readZipFile(f)
 		return data, false, err
 	}
@@ -565,16 +566,10 @@ func (r *Reader) readFileData(name string) ([]byte, bool, error) {
 // 返回: io.ReadCloser 文件流, error 错误信息
 func (r *Reader) openFile(name string) (io.ReadCloser, error) {
 	name = cleanPackagePath(name)
-	if actual, ok := r.fileNamesFold[strings.ToLower(name)]; ok {
-		name = actual
-	}
 	if data, ok := r.files[name]; ok {
 		return io.NopCloser(bytes.NewReader(data)), nil
 	}
 	if f, ok := r.packageFile(name); ok {
-		if data, ok := r.files[cleanPackagePath(f.Name)]; ok {
-			return io.NopCloser(bytes.NewReader(data)), nil
-		}
 		return f.Open()
 	}
 	return nil, fmt.Errorf("file not found: %s", name)
@@ -593,13 +588,8 @@ func cleanPackagePath(name string) string {
 // 入参: name 文件路径
 // 返回: *zip.File 压缩包文件, bool 是否存在
 func (r *Reader) packageFile(name string) (*zip.File, bool) {
-	if f, ok := r.fileIndex[name]; ok {
-		return f, true
-	}
-	if f, ok := r.fileIndexFold[strings.ToLower(name)]; ok {
-		return f, true
-	}
-	return nil, false
+	f, ok := r.fileIndex[cleanPackagePath(name)]
+	return f, ok
 }
 
 // readZipFile 读取zip文件内容

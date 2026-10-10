@@ -136,7 +136,7 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 	}
 	for _, resource := range e.resources {
 		if resource.image != nil {
-			snapshot.output.images[strings.ToLower(cleanPackagePath(resource.name))] = true
+			snapshot.output.images[cleanPackagePath(resource.name)] = true
 		}
 	}
 	if e.source != nil {
@@ -154,7 +154,7 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 			return nil, err
 		}
 		for _, img := range images {
-			snapshot.output.images[strings.ToLower(cleanPackagePath(img.Location))] = true
+			snapshot.output.images[cleanPackagePath(img.Location)] = true
 		}
 	}
 	if options.Compression.Mode == CompressionLossy {
@@ -188,9 +188,8 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 			}
 			safe = false
 		}
-		for key := range dependencies {
-			name, exists := r.fileNamesFold[key]
-			if !exists {
+		for name := range dependencies {
+			if !r.fileNames[name] {
 				safe = false
 				break
 			}
@@ -269,7 +268,7 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 	paths := make(map[string]bool)
 	for _, img := range images {
 		if !safe || masks[editorResourceID(img.ID)] {
-			paths[strings.ToLower(cleanPackagePath(img.Location))] = true
+			paths[cleanPackagePath(img.Location)] = true
 		}
 	}
 	return paths, safe && geometry, ctx.Err()

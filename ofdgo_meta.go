@@ -34,6 +34,24 @@ type DocBody struct {
 	DocInfo    DocInfo `xml:"DocInfo"`
 	DocRoot    string  `xml:"DocRoot"`
 	Signatures string  `xml:"Signatures"`
+	versioned  bool
+}
+
+// UnmarshalXML 读取文档入口并记录版本列表是否存在，版本描述在选择时读取
+// 入参: decoder XML解码器, start 起始节点
+// 返回: error 解析错误
+func (body *DocBody) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
+	type docBody DocBody
+	var value struct {
+		docBody
+		Versions *struct{} `xml:"Versions"`
+	}
+	if err := decoder.DecodeElement(&value, &start); err != nil {
+		return err
+	}
+	*body = DocBody(value.docBody)
+	body.versioned = value.Versions != nil
+	return nil
 }
 
 // DocInfo 文档元数据

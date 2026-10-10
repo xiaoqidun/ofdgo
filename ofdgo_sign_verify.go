@@ -299,11 +299,22 @@ func (r *Reader) VerifyDocumentSignatures(index int, opts ...SignatureVerifyOpti
 		}
 	}
 	body := r.OFD.DocBody[index]
-	options.DocIndex, options.DocRoot = index, r.signatureCoveragePath(body.DocRoot)
 	if index == r.documentIndex && r.doc != nil && r.doc.Signatures == "" {
 		return nil, nil
 	}
-	data, err := r.readFile(body.DocRoot)
+	view := &Reader{Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: index}
+	if index == r.documentIndex {
+		view.selectedVersion = r.selectedVersion
+	}
+	if err := view.initRoot(); err != nil {
+		return nil, err
+	}
+	docRoot, err := view.DocumentRoot()
+	if err != nil {
+		return nil, err
+	}
+	options.DocIndex, options.DocRoot = index, docRoot
+	data, err := view.readFile(docRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -312,16 +323,12 @@ func (r *Reader) VerifyDocumentSignatures(index int, opts ...SignatureVerifyOpti
 		return nil, err
 	}
 	if doc.Signatures == "" {
-		doc.Signatures = body.Signatures
+		doc.Signatures = view.versionSignatures(body.Signatures)
 	}
 	if doc.Signatures == "" {
 		return nil, nil
 	}
-	view := &Reader{Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: index}
-	if err := view.initRoot(); err != nil {
-		return nil, err
-	}
-	view.doc, view.RootDir = &doc, path.Dir(body.DocRoot)
+	view.doc, view.RootDir = &doc, path.Dir(docRoot)
 	sigListPath := view.ResPath(doc.Signatures)
 	data, err = view.readFile(sigListPath)
 	if err != nil {

@@ -141,7 +141,7 @@ func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, 
 		edit.source.annotationStates = states
 		if len(selection.resources) != 0 {
 			reader := edit.source.reader
-			name := cleanPackagePath(reader.OFD.DocBody[reader.documentIndex].DocRoot)
+			name := reader.documentRoot
 			data, err := reader.readFile(name)
 			if err != nil {
 				return err

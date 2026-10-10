@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -31,7 +32,11 @@ import (
 // 入参: progress 保存进度回调，预览时为nil
 // 返回: map[string][]byte 替换及新增条目, error 错误信息
 func (e *Editor) sourceParts(progress editorProgress) (map[string][]byte, error) {
-	return e.sourcePartsReferences(progress, nil)
+	parts, err := e.sourcePartsReferences(progress, nil)
+	if err != nil {
+		return nil, err
+	}
+	return e.source.reader.versionChanges(context.Background(), parts)
 }
 
 // sourcePartsReferences 生成保存快照，同步收集完全自产页面的实际编码引用
@@ -49,6 +54,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 	var stager editorPageStager
 	source := e.source
 	reader := source.reader
+	stage = stage && !reader.OFD.DocBody[reader.documentIndex].versioned
 	pageRefs := make([]Page, len(e.pages))
 	originalCount := 0
 	for i, page := range e.pages {
@@ -111,7 +117,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 	commonData := source.document.CommonData
 	for _, name := range append(slices.Clone(commonData.DocumentRes), commonData.PublicRes...) {
 		resourceFiles = slices.DeleteFunc(resourceFiles, func(file string) bool {
-			return strings.EqualFold(file, reader.ResPath(name))
+			return file == reader.ResPath(name)
 		})
 	}
 	if len(fonts)+len(images)+len(spaces) != 0 {
@@ -134,7 +140,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 	}
 	pagesChanged := !slices.Equal(pageRefs, source.document.Pages.Page)
 	if pagesChanged || len(resourceFiles) != 0 || len(parts) != 0 && e.maxID != source.document.CommonData.MaxUnitID {
-		name := reader.ResPath(reader.OFD.DocBody[reader.documentIndex].DocRoot)
+		name := reader.documentRoot
 		data, err := reader.readFile(name)
 		if err != nil {
 			return nil, err
@@ -232,7 +238,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 		parts["OFD.xml"] = data
 	}
 	if e.outlines != nil {
-		name := reader.ResPath(reader.OFD.DocBody[reader.documentIndex].DocRoot)
+		name := reader.documentRoot
 		data, ok := parts[name]
 		if !ok {
 			var err error
@@ -586,6 +592,14 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 	if err := e.compressResourceReferences(parts, reader, removed, generated); err != nil {
 		return 0, err
 	}
+	ctx := context.Background()
+	if e.output != nil {
+		ctx = e.output.ctx
+	}
+	parts, err = reader.versionChanges(ctx, parts)
+	if err != nil {
+		return 0, err
+	}
 	if len(parts) != 0 || len(removed) != 0 || e.output != nil && e.output.options.Mode != CompressionUnchanged && !e.output.protected {
 		name := "OFD.xml"
 		if file, ok := reader.packageFile(name); ok {
@@ -610,7 +624,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 	}
 	maps.Copy(remaining, parts)
 	for name := range remaining {
-		if removed[strings.ToLower(cleanPackagePath(name))] {
+		if removed[cleanPackagePath(name)] {
 			delete(remaining, name)
 		}
 	}
@@ -631,7 +645,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 				continue
 			}
 			name := cleanPackagePath(file.Name)
-			if removed[strings.ToLower(name)] {
+			if removed[name] {
 				continue
 			}
 			if data, ok := remaining[name]; ok {
@@ -710,8 +724,7 @@ func (e *Editor) sourceReader(progress editorProgress) (*Reader, error) {
 		maps.Copy(reader.files, parts)
 		reader.encryption = e.encryption
 		for name := range reader.pageHeaderCache {
-			actual := reader.fileNamesFold[strings.ToLower(name)]
-			if _, changed := parts[actual]; changed {
+			if _, changed := parts[name]; changed {
 				delete(reader.pageHeaderCache, name)
 			}
 		}
@@ -725,7 +738,7 @@ func (e *Editor) sourceReader(progress editorProgress) (*Reader, error) {
 		files = make(map[string][]byte)
 	}
 	maps.Copy(files, parts)
-	reader := &Reader{Zip: e.source.reader.Zip, files: files, encryption: e.encryption, documentIndex: e.source.reader.documentIndex}
+	reader := &Reader{Zip: e.source.reader.Zip, files: files, encryption: e.encryption, documentIndex: e.source.reader.documentIndex, selectedVersion: e.source.reader.selectedVersion}
 	if err := reader.initRoot(); err != nil {
 		return nil, err
 	}
@@ -733,8 +746,7 @@ func (e *Editor) sourceReader(progress editorProgress) (*Reader, error) {
 		return nil, err
 	}
 	for name, header := range e.source.reader.pageHeaderCache {
-		actual := e.source.reader.fileNamesFold[strings.ToLower(name)]
-		if _, changed := parts[actual]; !changed {
+		if _, changed := parts[name]; !changed {
 			reader.pageHeaderCache[name] = header
 		}
 	}

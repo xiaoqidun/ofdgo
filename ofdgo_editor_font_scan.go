@@ -62,16 +62,17 @@ type editorFontDeclaration struct {
 // 返回: *editorFontDocument 字体引用, error 读取或结构错误
 func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFontDocument, error) {
 	scan := &editorFontDocument{reader: reader, index: index, files: make(map[string]*editorFontXML), fonts: make(map[string]*editorFontDeclaration)}
-	queue := []string{cleanPackagePath(reader.OFD.DocBody[index].DocRoot)}
+	entry, err := reader.documentEntry(index)
+	if err != nil {
+		return nil, err
+	}
+	queue := []string{entry}
 	for len(queue) != 0 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		name := queue[0]
 		queue = queue[1:]
-		if actual := reader.fileNamesFold[strings.ToLower(name)]; actual != "" {
-			name = actual
-		}
 		if scan.files[name] != nil {
 			continue
 		}
@@ -148,9 +149,6 @@ func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFon
 			}
 			if value != "" {
 				target := resolveResourcePath(name, base, value)
-				if actual := reader.fileNamesFold[strings.ToLower(target)]; actual != "" {
-					target = actual
-				}
 				file.links = append(file.links, editorFontLink{node: node, attribute: attribute, target: target})
 				queue = append(queue, target)
 			}
@@ -172,6 +170,29 @@ func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFon
 // 入参: ctx 取消上下文, changes 按原文件路径保存的修改
 // 返回: error 引用扫描或XML修改错误
 func (s *editorFontDocument) apply(ctx context.Context, changes map[string][]byte) error {
+	if s.reader.OFD.DocBody[s.index].versioned {
+		view := *s.reader
+		if s.index != view.documentIndex {
+			view.selectedVersion = nil
+		}
+		view.documentIndex = s.index
+		view.documentRoot, view.versionInfo = "", nil
+		parts, err := view.versionChanges(ctx, changes)
+		if err != nil {
+			return err
+		}
+		next := *s.reader
+		next.files = maps.Clone(next.files)
+		if next.files == nil {
+			next.files = make(map[string][]byte)
+		}
+		maps.Copy(next.files, parts)
+		if err := next.initRoot(); err != nil {
+			return err
+		}
+		*s.reader = next
+		return nil
+	}
 	shared := make(map[string]bool)
 	if s.reader.DocumentCount() > 1 {
 		for index := range s.reader.DocumentCount() {
@@ -187,14 +208,14 @@ func (s *editorFontDocument) apply(ctx context.Context, changes map[string][]byt
 	}
 	paths := make(map[string]string)
 	for name := range changes {
-		if shared[strings.ToLower(name)] {
+		if shared[name] {
 			paths[name] = packageAvailableName(s.reader, changes, name+".font.xml")
 		}
 	}
 	for changed := true; changed; {
 		changed = false
 		for name, file := range s.files {
-			if paths[name] != "" || !shared[strings.ToLower(name)] {
+			if paths[name] != "" || !shared[name] {
 				continue
 			}
 			for _, link := range file.links {
@@ -236,7 +257,11 @@ func (s *editorFontDocument) apply(ctx context.Context, changes map[string][]byt
 					if err != nil {
 						return err
 					}
-					patches = append(patches, editorXMLPatch{node.start, node.open, fragment[:header.open]})
+					if node.open == node.end {
+						patches = append(patches, editorXMLPatch{node.start, node.end, fragment})
+					} else {
+						patches = append(patches, editorXMLPatch{node.start, node.open, fragment[:header.open]})
+					}
 					break
 				}
 				if link.attribute == "" && editorImportText(data, node) == editorImportText(file.data, link.node) {
@@ -261,9 +286,9 @@ func (s *editorFontDocument) apply(ctx context.Context, changes map[string][]byt
 			changes[name] = data
 		}
 	}
-	rootName := cleanPackagePath(s.reader.OFD.DocBody[s.index].DocRoot)
-	if actual := s.reader.fileNamesFold[strings.ToLower(rootName)]; actual != "" {
-		rootName = actual
+	rootName, err := s.reader.documentEntry(s.index)
+	if err != nil {
+		return err
 	}
 	if target := paths[rootName]; target != "" {
 		data, err := s.reader.readFile("OFD.xml")
@@ -275,7 +300,7 @@ func (s *editorFontDocument) apply(ctx context.Context, changes map[string][]byt
 			return err
 		}
 		node := root.childAt("DocBody", s.index).child("DocRoot")
-		changes[s.reader.fileNamesFold["ofd.xml"]] = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, editorFontXMLText("/"+target))})
+		changes["OFD.xml"] = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, editorFontXMLText("/"+target))})
 	}
 	for name, data := range changes {
 		if target := paths[name]; target != "" {

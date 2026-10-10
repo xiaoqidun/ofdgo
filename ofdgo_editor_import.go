@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -229,6 +230,7 @@ func (e *Editor) ImportObjects(source *Editor, sourcePage int, ids []string, pag
 // ImportPages 将来源当前文档中的指定页面插入目标位置，保持输入顺序并作为一次撤销操作
 // 页面索引从0开始，at可等于当前页数；复制关联模板、注释、签章外观和实际引用的资源
 // 不导入来源元数据和目录，指向未选页面的跳转被移除；签名数据仅保留原始凭据，不代表合并后文档有效
+// 目标文档含版本列表时暂不支持导入带签章页面，返回错误且不修改目标
 // 返回后可关闭来源Reader，目标原Reader的生命周期要求不变
 // 入参: source 来源阅读器, indexes 来源页面索引，不可重复, at 目标插入位置
 // 返回: []string 新页面标识, error 错误信息
@@ -455,7 +457,7 @@ func (e *Editor) prepareImport(source *Reader, doc *Document, selected map[strin
 	for _, resource := range e.resources {
 		m.files[resource.name] = nil
 	}
-	m.documentXML, err = m.readFile(source.ResPath(source.OFD.DocBody[source.documentIndex].DocRoot))
+	m.documentXML, err = m.readFile(source.documentRoot)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -535,7 +537,7 @@ func (m *editorPageImport) readFile(name string) ([]byte, error) {
 // outlines 筛选指向导入页面的目录树并复用标准动作迁移
 // 返回: []byte 目录片段, error 错误信息
 func (m *editorPageImport) outlines() ([]byte, error) {
-	name := m.reader.ResPath(m.reader.OFD.DocBody[m.reader.documentIndex].DocRoot)
+	name := m.reader.documentRoot
 	data, err := m.readFile(name)
 	if err != nil {
 		return nil, err
@@ -838,7 +840,7 @@ func (m *editorPageImport) copyData(name, relative string, evidence bool) (strin
 		paths = m.evidence
 		relative = path.Join("Signs", "Signed", path.Base(name))
 	}
-	key := strings.ToLower(cleanPackagePath(name))
+	key := cleanPackagePath(name)
 	if target := paths[key]; target != "" {
 		return "/" + target, nil
 	}
@@ -858,7 +860,7 @@ func (m *editorPageImport) copyData(name, relative string, evidence bool) (strin
 // 入参: name 来源路径, candidate 目标候选路径
 // 返回: string 新路径, error 错误信息
 func (m *editorPageImport) copyXML(name, candidate string) (string, error) {
-	key := strings.ToLower(cleanPackagePath(name))
+	key := cleanPackagePath(name)
 	if target := m.paths[key]; target != "" {
 		return "/" + target, nil
 	}
@@ -1188,7 +1190,7 @@ func (m *editorPageImport) attachment(id string) (string, error) {
 	if _, exists := m.attachments[id]; exists {
 		return m.attachmentID(id)
 	}
-	name := m.reader.ResPath(m.reader.OFD.DocBody[m.reader.documentIndex].DocRoot)
+	name := m.reader.documentRoot
 	if m.doc.Attachments.Path != "" {
 		name = m.reader.ResPath(m.doc.Attachments.Path)
 	}
@@ -1350,7 +1352,7 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 		files = make(map[string][]byte)
 	}
 	maps.Copy(files, m.files)
-	name := base.reader.ResPath(base.reader.OFD.DocBody[base.reader.documentIndex].DocRoot)
+	name := base.reader.documentRoot
 	if file, ok := base.reader.packageFile(name); ok {
 		name = cleanPackagePath(file.Name)
 	}
@@ -1454,6 +1456,9 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 	}
 	files[name] = data
 	if len(signatures) != 0 {
+		if base.reader.OFD.DocBody[base.reader.documentIndex].versioned {
+			return nil, fmt.Errorf("signature import into a versioned document is not supported")
+		}
 		loc, err := mergeImportIndex(base.reader, files, base.document.Signatures, path.Join(m.directory, "Signs", "Signatures.xml"), "Signatures", signatures)
 		if err != nil {
 			return nil, err
@@ -1490,7 +1495,16 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 			}
 		}
 	}
-	reader := &Reader{Zip: base.reader.Zip, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex}
+	parts, err := base.reader.versionChanges(context.Background(), files)
+	if err != nil {
+		return nil, err
+	}
+	files = maps.Clone(base.reader.files)
+	if files == nil {
+		files = make(map[string][]byte)
+	}
+	maps.Copy(files, parts)
+	reader := &Reader{Zip: base.reader.Zip, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex, selectedVersion: base.reader.selectedVersion}
 	if err := reader.initRoot(); err != nil {
 		return nil, err
 	}

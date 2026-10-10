@@ -23,6 +23,7 @@ import (
 
 // prunePageReferences 在输出快照中删除已移除页面的标准引用，不修改历史快照或其他文档
 // 沿当前文档、页面、模板、资源、注释和签名索引检查，不进入附件、私有扩展和签名原始凭据
+// 版本包保留原签名及其页面引用，避免改写其他版本共用的签名数据
 // 入参: parts 输出覆盖条目, generated 本次自产页面及引用，可为nil
 // 返回: error 读取或解析错误
 func (e *Editor) prunePageReferences(parts map[string][]byte, generated map[string]editorGeneratedReferences) error {
@@ -50,8 +51,8 @@ func (e *Editor) prunePageReferences(parts map[string][]byte, generated map[stri
 			bookmarks[bookmark.Name] = true
 		}
 	}
-	queue := []string{reader.ResPath(reader.OFD.DocBody[reader.documentIndex].DocRoot)}
-	if name := e.source.document.Signatures; name != "" {
+	queue := []string{reader.documentRoot}
+	if name := e.source.document.Signatures; name != "" && !reader.OFD.DocBody[reader.documentIndex].versioned {
 		queue = append(queue, reader.ResPath(name))
 	}
 	seen := make(map[string]bool)
@@ -63,10 +64,10 @@ func (e *Editor) prunePageReferences(parts map[string][]byte, generated map[stri
 		}
 		name := queue[0]
 		queue = queue[1:]
-		if seen[strings.ToLower(name)] {
+		if seen[name] {
 			continue
 		}
-		seen[strings.ToLower(name)] = true
+		seen[name] = true
 		data, ok := parts[name]
 		if !ok {
 			var err error

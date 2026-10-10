@@ -407,6 +407,9 @@ func sameBindingFont(source, target []byte) bool {
 // 返回: FontFile 独立字体, error 匹配或解析错误
 func (e *Editor) resolveBindingFont(scan *editorFontDocument, declaration *editorFontDeclaration) (FontFile, error) {
 	reader := &Reader{Zip: scan.reader.Zip, files: maps.Clone(scan.reader.files), documentIndex: scan.index}
+	if scan.index == scan.reader.documentIndex {
+		reader.selectedVersion = scan.reader.selectedVersion
+	}
 	if err := reader.initRoot(); err != nil {
 		return FontFile{}, err
 	}
@@ -501,7 +504,7 @@ func (e *Editor) commitFontSnapshot(ctx context.Context, reader *Reader) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	clean := &Reader{Zip: reader.Zip, files: maps.Clone(reader.files), documentIndex: reader.DocumentIndex(), encryption: e.encryption}
+	clean := &Reader{Zip: reader.Zip, files: maps.Clone(reader.files), documentIndex: reader.DocumentIndex(), encryption: e.encryption, selectedVersion: reader.selectedVersion}
 	if err := clean.initRoot(); err != nil {
 		return err
 	}
@@ -544,7 +547,7 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 	}
 	removed := make(map[string]bool, len(candidates))
 	for _, candidate := range candidates {
-		if key := strings.ToLower(cleanPackagePath(candidate)); key != "" {
+		if key := cleanPackagePath(candidate); key != "" {
 			removed[key] = true
 		}
 	}
@@ -566,7 +569,7 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 			return nil
 		}
 	}
-	for _, name := range reader.fileNamesFold {
+	for name := range reader.fileNames {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -597,7 +600,7 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 			}
 			if node.matchesOFD("FontFile") {
 				location := resolveResourcePath(name, base, strings.TrimSpace(editorImportText(data, node)))
-				delete(removed, strings.ToLower(cleanPackagePath(location)))
+				delete(removed, cleanPackagePath(location))
 			}
 			return slices.ContainsFunc(node.children, retains)
 		}
@@ -609,12 +612,12 @@ func pruneExternalFontFiles(ctx context.Context, reader *Reader, candidates ...s
 		return err
 	}
 	for name := range reader.files {
-		if removed[strings.ToLower(cleanPackagePath(name))] {
+		if removed[cleanPackagePath(name)] {
 			delete(reader.files, name)
 		}
 	}
 	if reader.Zip != nil {
-		reader.Zip = &zip.Reader{Comment: reader.Zip.Comment, File: slices.DeleteFunc(slices.Clone(reader.Zip.File), func(file *zip.File) bool { return removed[strings.ToLower(cleanPackagePath(file.Name))] })}
+		reader.Zip = &zip.Reader{Comment: reader.Zip.Comment, File: slices.DeleteFunc(slices.Clone(reader.Zip.File), func(file *zip.File) bool { return removed[cleanPackagePath(file.Name)] })}
 	}
 	return reader.initRoot()
 }

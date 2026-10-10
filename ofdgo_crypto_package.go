@@ -124,7 +124,7 @@ func (r *Reader) open(options []ReaderOption) error {
 	if err := r.indexPackage(); err != nil {
 		return err
 	}
-	if _, ok := r.fileNamesFold["encryptions.xml"]; ok {
+	if r.fileNames["Encryptions.xml"] {
 		if err := r.decryptPackage(settings); err != nil {
 			return err
 		}
@@ -135,8 +135,8 @@ func (r *Reader) open(options []ReaderOption) error {
 // packageData 获取包内所有条目的实际字节，保留未识别文件
 // 返回: map[string][]byte 包内条目, error 错误信息
 func (r *Reader) packageData() (map[string][]byte, error) {
-	parts := make(map[string][]byte, len(r.fileNamesFold))
-	for _, name := range r.fileNamesFold {
+	parts := make(map[string][]byte, len(r.fileNames))
+	for name := range r.fileNames {
 		data, err := r.readFile(name)
 		if err != nil {
 			return nil, err
@@ -198,8 +198,7 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 		extraSeeds := make(map[string]bool)
 		for _, entry := range entries.Entries {
 			name := cleanPackagePath(entry.Path)
-			fold := strings.ToLower(name)
-			if !validPackagePath(name) || used[fold] {
+			if !validPackagePath(name) || used[name] {
 				clear(key)
 				return fmt.Errorf("ambiguous encrypted package path: %q", entry.Path)
 			}
@@ -231,7 +230,7 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 				return ErrInvalidCredentials
 			}
 			delete(parts, actual)
-			used[fold] = true
+			used[name] = true
 		}
 		clear(key)
 		delete(parts, seedName)
@@ -239,16 +238,7 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 		for name := range extraSeeds {
 			delete(parts, name)
 		}
-		remaining := make(map[string]string, len(parts))
-		for name := range parts {
-			remaining[strings.ToLower(name)] = name
-		}
-		for name, plain := range decrypted {
-			if existing, ok := remaining[strings.ToLower(name)]; ok {
-				delete(parts, existing)
-			}
-			parts[name] = plain
-		}
+		maps.Copy(parts, decrypted)
 		state.info.Method = seed.Method
 		for _, user := range seed.Users {
 			state.info.Users = append(state.info.Users, user.Name)
@@ -257,11 +247,7 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 			state.options = inheritedEncryptionOptions(seed, credential, settings.provider)
 		}
 	}
-	for name := range parts {
-		if strings.ToLower(name) == "encryptions.xml" {
-			delete(parts, name)
-		}
-	}
+	delete(parts, "Encryptions.xml")
 	r.Zip, r.files, r.encryption = nil, parts, state
 	return nil
 }
@@ -289,7 +275,7 @@ func decodeEncryptionEntries(data, key, iv []byte, provider CryptoProvider) (enc
 	return entries, nil
 }
 
-// encryptionPart 按统一大小写规则读取加密元数据引用
+// encryptionPart 按大小写敏感路径读取加密元数据引用
 // 入参: parts 包内条目, name 引用路径
 // 返回: []byte 条目内容, string 实际路径, error 错误信息
 func encryptionPart(parts map[string][]byte, name string) ([]byte, string, error) {
@@ -299,11 +285,6 @@ func encryptionPart(parts map[string][]byte, name string) ([]byte, string, error
 	}
 	if data, ok := parts[name]; ok {
 		return data, name, nil
-	}
-	for actual, data := range parts {
-		if strings.ToLower(actual) == strings.ToLower(name) {
-			return data, actual, nil
-		}
 	}
 	return nil, "", fmt.Errorf("missing encrypted entry: %s", name)
 }

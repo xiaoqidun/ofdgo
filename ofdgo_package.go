@@ -53,7 +53,7 @@ func (e *Editor) packageName(relative string) string {
 	return packageAvailableName(reader, files, path.Join(e.packageDirectory(), relative))
 }
 
-// packageAvailableName 仅在包内同名条目冲突时添加序号，忽略大小写差异
+// packageAvailableName 仅在包内同名条目冲突时添加序号，路径区分大小写
 // 入参: reader 原包，可为nil, files 待写入条目, name 期望路径
 // 返回: string 未占用路径
 func packageAvailableName(reader *Reader, files map[string][]byte, name string) string {
@@ -66,13 +66,11 @@ func packageAvailableName(reader *Reader, files map[string][]byte, name string) 
 		occupied := false
 		if reader != nil {
 			_, occupied = reader.packageFile(candidate)
-			for file := range reader.files {
-				occupied = occupied || strings.EqualFold(cleanPackagePath(file), candidate)
-			}
+			_, cached := reader.files[candidate]
+			occupied = occupied || cached
 		}
-		for file := range files {
-			occupied = occupied || strings.EqualFold(cleanPackagePath(file), candidate)
-		}
+		_, pending := files[candidate]
+		occupied = occupied || pending
 		if !occupied {
 			return candidate
 		}

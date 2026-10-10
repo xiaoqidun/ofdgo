@@ -49,7 +49,7 @@ func (e *Editor) SetDocumentActions(actions []Action) error {
 			return err
 		}
 	}
-	name := cleanPackagePath(base.reader.OFD.DocBody[base.reader.documentIndex].DocRoot)
+	name := base.reader.documentRoot
 	data, err := base.reader.readFile(name)
 	if err != nil {
 		return err

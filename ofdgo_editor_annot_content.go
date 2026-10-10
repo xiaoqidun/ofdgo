@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"maps"
@@ -379,7 +380,7 @@ func (e *Editor) appendAnnotations(index int, annotations []byte, generated bool
 	}
 	parts := map[string][]byte{name: data, file: content}
 	if base.document.Annotations == "" {
-		docName := cleanPackagePath(reader.OFD.DocBody[reader.documentIndex].DocRoot)
+		docName := reader.documentRoot
 		docData, err := reader.readFile(docName)
 		if err != nil {
 			return err
@@ -448,6 +449,10 @@ func (e *Editor) annotationFiles() []string {
 // 入参: base 原包, parts 修改的文件
 // 返回: error 错误信息
 func (e *Editor) commitAnnotationParts(base *editorSource, parts map[string][]byte) error {
+	parts, err := base.reader.versionChanges(context.Background(), parts)
+	if err != nil {
+		return err
+	}
 	files := maps.Clone(base.reader.files)
 	if files == nil {
 		files = make(map[string][]byte)
@@ -458,7 +463,7 @@ func (e *Editor) commitAnnotationParts(base *editorSource, parts map[string][]by
 		}
 		files[name] = data
 	}
-	reader := &Reader{Zip: base.reader.Zip, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex}
+	reader := &Reader{Zip: base.reader.Zip, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex, selectedVersion: base.reader.selectedVersion}
 	if err := reader.initRoot(); err != nil {
 		return err
 	}

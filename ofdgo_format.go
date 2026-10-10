@@ -49,7 +49,7 @@ func DetectFormat(source io.ReaderAt, size int64) (string, error) {
 		if err := reader.indexPackage(); err != nil {
 			return "", err
 		}
-		if reader.fileIndexFold["ofd.xml"] != nil || reader.fileIndexFold["encryptions.xml"] != nil {
+		if reader.fileNames["OFD.xml"] || reader.fileNames["Encryptions.xml"] {
 			return "ofd", nil
 		}
 	} else {
