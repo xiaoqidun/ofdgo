@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // textGlyph 绘制字形
@@ -63,7 +64,7 @@ func (tc *TextCode) GetDeltaY() []float64 {
 	return parseFloats(tc.DeltaY)
 }
 
-// textCodeLineBreak 判断横向文字的行首回退，或有足够行距且水平范围重叠的对齐段落
+// textCodeLineBreak 根据行首、行距和字形位置推断横向文本换行
 // 入参: index 文本编码索引
 // 返回: bool 是否换行
 func (obj TextObject) textCodeLineBreak(index int) bool {
@@ -106,12 +107,88 @@ func (obj TextObject) textCodeLineBreak(index int) bool {
 	if err != nil || obj.Size <= 0 || y-prev < obj.Size/2 || previous.DeltaY != "" || code.DeltaY != "" {
 		return false
 	}
+	count := obj.textCodeGlyphCount(index - 1)
+	if count == 0 {
+		return false
+	}
 	right := left + obj.Size
-	deltas := textPositionValues{data: previous.DeltaX, compressed: strings.Contains(previous.DeltaX, "g")}
-	for dx, ok := deltas.next(); ok; dx, ok = deltas.next() {
-		right += dx
+	positioner := NewTextPositioner(previous)
+	for range count {
+		right = math.Max(right, positioner.Next().X+obj.Size)
 	}
 	return x <= right
+}
+
+// textCodeGlyphCount 统计文本段实际绘制的字形数量，计入字符到字形的变换
+// 入参: index 文本段索引
+// 返回: int 字形数量
+func (obj TextObject) textCodeGlyphCount(index int) int {
+	code := obj.TextCode[index]
+	if code.Index != "" {
+		count := 0
+		for _, field := range strings.Fields(code.Index) {
+			first, last, interval := strings.Cut(field, "-")
+			start, err := strconv.ParseUint(first, 10, 16)
+			if err != nil {
+				continue
+			}
+			if !interval {
+				count++
+				continue
+			}
+			end, err := strconv.ParseUint(last, 10, 16)
+			if err == nil && end >= start {
+				count += int(end-start) + 1
+			}
+		}
+		return count
+	}
+	count := textCodeRuneCount(code.Value)
+	if len(obj.CGTransform) == 0 || count == 0 {
+		return count
+	}
+	offset := 0
+	for _, previous := range obj.TextCode[:index] {
+		offset += textCodeRuneCount(previous.Value)
+	}
+	transforms := make(map[int][2]int)
+	for _, transform := range obj.CGTransform {
+		start, codes := transform.CodePosition-offset, max(1, transform.CodeCount)
+		if start < 0 || start >= count {
+			continue
+		}
+		glyphs := len(parseInts(transform.Glyphs))
+		if transform.GlyphCount > 0 {
+			glyphs = min(glyphs, transform.GlyphCount)
+		}
+		if glyphs > 0 {
+			transforms[start] = [2]int{codes, glyphs}
+		}
+	}
+	glyphs := 0
+	for i := 0; i < count; {
+		if transform, ok := transforms[i]; ok && transform[0] <= count-i {
+			i += transform[0]
+			glyphs += transform[1]
+		} else {
+			i++
+			glyphs++
+		}
+	}
+	return glyphs
+}
+
+// textCodeRuneCount 统计文本编码中的字符数，识别转义及XML排版空白
+// 入参: value 文本编码内容
+// 返回: int 字符数量
+func textCodeRuneCount(value string) int {
+	if strings.Contains(value, "\\") {
+		return len(textCodeRunes(value))
+	}
+	if strings.ContainsAny(value, "\r\n") {
+		value = strings.TrimSpace(value)
+	}
+	return utf8.RuneCountInString(value)
 }
 
 // textObjectFontID 获取文本对象字体ID
