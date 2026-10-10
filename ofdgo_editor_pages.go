@@ -31,21 +31,22 @@ func (e *Editor) prunePageReferences(parts map[string][]byte, generated map[stri
 		removed = make(map[string]bool)
 	}
 	for id := range e.source.pages {
-		removed[id] = true
+		removed[editorResourceID(id)] = true
 	}
 	for id := range e.source.annotationPages {
-		removed[id] = true
+		removed[editorResourceID(id)] = true
 	}
 	for _, page := range e.pages {
-		delete(removed, page.ID)
+		delete(removed, editorResourceID(page.ID))
 	}
+	delete(removed, "")
 	if len(removed) == 0 {
 		return nil
 	}
 	reader := e.source.reader
 	bookmarks := make(map[string]bool)
 	for _, bookmark := range e.source.document.Bookmarks.Bookmark {
-		if removed[bookmark.Dest.PageID] {
+		if removed[editorResourceID(bookmark.Dest.PageID)] {
 			bookmarks[bookmark.Name] = true
 		}
 	}
@@ -105,7 +106,7 @@ func (e *Editor) prunePageReferences(parts map[string][]byte, generated map[stri
 			case "Action":
 				if target := node.child("Goto"); target != nil {
 					if dest := target.child("Dest"); dest != nil {
-						remove = removed[dest.attr("PageID")]
+						remove = removed[editorResourceID(dest.attr("PageID"))]
 					} else if bookmark := target.child("Bookmark"); bookmark != nil {
 						remove = bookmarks[bookmark.attr("Name")]
 					}
@@ -116,14 +117,14 @@ func (e *Editor) prunePageReferences(parts map[string][]byte, generated map[stri
 				}
 			case "Page":
 				if root.name.Local == "Annotations" {
-					remove = removed[node.attr("PageID")]
+					remove = removed[editorResourceID(node.attr("PageID"))]
 				}
 			case "Dest":
-				remove = removed[node.attr("PageID")]
+				remove = removed[editorResourceID(node.attr("PageID"))]
 			case "StampAnnot":
-				remove = removed[node.attr("PageRef")]
+				remove = removed[editorResourceID(node.attr("PageRef"))]
 			case "Extension":
-				remove = removed[node.attr("RefId")]
+				remove = removed[editorResourceID(node.attr("RefId"))]
 			}
 			if remove {
 				patches = append(patches, editorXMLPatch{start: node.start, end: node.end})
@@ -197,7 +198,7 @@ func pruneCreatedPageReferences(data []byte, removed map[string]bool) ([]byte, e
 		}
 		if node.name.Local == "Action" {
 			if target := node.child("Goto"); target != nil {
-				if dest := target.child("Dest"); dest != nil && removed[dest.attr("PageID")] {
+				if dest := target.child("Dest"); dest != nil && removed[editorResourceID(dest.attr("PageID"))] {
 					patches = append(patches, editorXMLPatch{start: node.start, end: node.end})
 					return
 				}

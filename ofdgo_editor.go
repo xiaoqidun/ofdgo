@@ -306,7 +306,7 @@ func (e *Editor) DeletePages(indexes []int) error {
 			e.removedPages = make(map[string]bool)
 		}
 		for _, page := range saved {
-			e.removedPages[page.ID] = true
+			e.removedPages[editorResourceID(page.ID)] = true
 		}
 		kept, next := e.pages[:0], 0
 		for index, page := range e.pages {
