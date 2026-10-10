@@ -187,6 +187,7 @@ func RunWASM() {
 	registerCallback("ofdgoOpen", openDocument)
 	registerCallback("ofdgoSelectDocument", selectDocument)
 	registerCallback("ofdgoDocumentVersions", documentVersions)
+	registerCallback("ofdgoSelectVersion", selectDocumentVersion)
 	registerCallback("ofdgoChangeVersion", changeDocumentVersion)
 	registerCallback("ofdgoChangeDocument", changePackageDocument)
 	registerCallback("ofdgoPackageDocuments", packageDocuments)
@@ -3445,14 +3446,20 @@ func packageDocuments(args []js.Value) (any, error) {
 	return entries, nil
 }
 
-// documentVersions 读取当前编辑文档的版本列表，不切换版本或解析页面
+// documentVersions 读取当前文档的版本列表，包含尚未保存的编辑内容
 // 入参: args 保留参数
 // 返回: any 版本列表, error 读取错误
 func documentVersions(args []js.Value) (any, error) {
-	if currentEditor == nil {
-		return nil, fmt.Errorf("no document is being edited")
+	if currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	versions, err := currentEditor.DocumentVersions()
+	var versions []ofdgo.DocumentVersionInfo
+	var err error
+	if currentEditor != nil {
+		versions, err = currentEditor.DocumentVersions()
+	} else {
+		versions, err = currentSession.Reader.DocumentVersions()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -3465,6 +3472,28 @@ func documentVersions(args []js.Value) (any, error) {
 		}
 	}
 	return entries, nil
+}
+
+// selectDocumentVersion 切换阅读版本，已有编辑器时保留修改及历史，否则直接创建阅读视图
+// 入参: args 版本标识
+// 返回: any 文档信息, error 切换错误
+func selectDocumentVersion(args []js.Value) (any, error) {
+	if currentSession == nil || len(args) != 1 || args[0].Type() != js.TypeString {
+		return nil, fmt.Errorf("invalid version selection")
+	}
+	id := args[0].String()
+	if currentEditor != nil {
+		return changeAtomicObjects(func() error { return currentEditor.SelectVersion(id) })
+	}
+	session, err := currentSession.DocumentVersion(id)
+	if err != nil {
+		return nil, err
+	}
+	_ = currentSession.Close()
+	currentSession = session
+	clearImport()
+	copiedObjects, copiedStyle = nil, nil
+	return session.Summary(), nil
 }
 
 // changeDocumentVersion 调用库层版本操作，沿用编辑历史和预览更新流程

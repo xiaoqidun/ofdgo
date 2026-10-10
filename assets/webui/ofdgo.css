@@ -1562,6 +1562,10 @@ body[data-hide-meta] .meta-panel {
 	padding-inline: 6px;
 }
 
+.document-actions.version-readonly {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .document-list {
 	max-height: 45dvh;
 	min-height: 80px;
@@ -2015,6 +2019,7 @@ button.outline-link:hover {
 .form-row[hidden],
 .form-pair[hidden],
 .form-actions > [hidden],
+.document-actions > [hidden],
 .annotation-detail[hidden],
 .tool-group[hidden],
 .page-list[hidden],

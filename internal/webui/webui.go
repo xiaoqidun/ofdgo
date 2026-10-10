@@ -74,6 +74,7 @@ type pageBoxInfo struct {
 type DocumentInfo struct {
 	DocumentIndex   int                `json:"documentIndex"`
 	DocumentVersion string             `json:"documentVersion"`
+	VersionCount    int                `json:"versionCount"`
 	Documents       []DocumentEntry    `json:"documents,omitempty"`
 	Encryption      EncryptionInfo     `json:"encryption"`
 	Version         string             `json:"version"`
@@ -349,6 +350,34 @@ func (s *Session) Document(index int) (*Session, error) {
 	return next, nil
 }
 
+// DocumentVersion 创建版本阅读会话，保留未保存内容和字体配置，不修改默认版本
+// 入参: id 版本标识，空字符串选择主入口
+// 返回: *Session 阅读会话, error 版本读取错误
+func (s *Session) DocumentVersion(id string) (*Session, error) {
+	reader := s.Reader
+	if s.editor != nil {
+		var err error
+		reader, err = s.editor.Reader()
+		if err != nil {
+			return nil, err
+		}
+	}
+	reader, err := reader.DocumentVersion(id)
+	if err != nil {
+		return nil, err
+	}
+	next, err := newSession(reader, OpenOptions{RenderAnnotations: s.Renderer.RenderAnnotations})
+	if err != nil {
+		return nil, err
+	}
+	ofdgo.WithRenderBackends(s.Renderer.Backends())(next.Renderer)
+	next.fontFS = s.fontFS
+	if next.fontFS != nil {
+		next.Renderer.SetFontFS(next.fontFS)
+	}
+	return next, nil
+}
+
 // SetFonts 更新字体配置并保留文档、页面和验签结果
 // 入参: fonts 字体文件列表
 // 返回: error 错误信息
@@ -451,6 +480,7 @@ func (s *Session) Summary() DocumentInfo {
 		DetailsPending: true,
 	}
 	info.DocumentVersion, _ = s.Reader.DocumentVersionID()
+	info.VersionCount, _ = s.Reader.DocumentVersionCount()
 	for index, body := range s.Reader.OFD.DocBody {
 		info.Documents = append(info.Documents, DocumentEntry{Index: index, Title: body.DocInfo.Title, Root: body.DocRoot, ID: body.DocInfo.DocID})
 	}

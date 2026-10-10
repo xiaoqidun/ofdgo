@@ -259,6 +259,9 @@ const el = {
 	documentUpButton: document.querySelector("#documentUpButton"),
 	documentDownButton: document.querySelector("#documentDownButton"),
 	versionManageButton: document.querySelector("#versionManageButton"),
+	versionTitle: document.querySelector("#versionTitle"),
+	versionNameRow: document.querySelector("#versionNameRow"),
+	versionActions: document.querySelector("#versionActions"),
 	versionPanel: document.querySelector("#versionPanel"),
 	versionForm: document.querySelector("#versionForm"),
 	versionNotice: document.querySelector("#versionNotice"),
@@ -2078,7 +2081,7 @@ function setEditorInfo(doc) {
 }
 
 async function openVersionManagement() {
-	if (!state.editing || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
+	if (!state.doc || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
 	state.versionManagement = { id: state.doc.documentVersion || "", entries: null, loading: false, failed: false };
 	el.versionList.replaceChildren();
 	el.versionName.value = "";
@@ -2148,9 +2151,16 @@ function selectManagedVersion(id, focus = false) {
 
 async function changeVersion(action) {
 	const manager = state.versionManagement;
-	if (!state.editing || !manager?.entries || manager.loading || manager.failed || document.body.hasAttribute("aria-busy")) return;
+	if (!state.ready || state.exporting || !state.editing && action !== "select" || !manager?.entries || manager.loading || manager.failed || document.body.hasAttribute("aria-busy")) return;
 	const entry = manager.entries.find(entry => entry.id === manager.id);
 	if (!entry) return;
+	if (!state.editing) {
+		if (await switchReadingVersion(entry.id) && state.versionManagement === manager && el.versionPanel.open) {
+			manager.id = state.doc.documentVersion || "";
+			await refreshVersionManagement(true);
+		}
+		return;
+	}
 	if (action === "delete" && (!entry.id || !window.confirm(`删除版本“${entry.name || entry.index}”？`))) return;
 	el.versionStatus.textContent = "正在处理版本";
 	if (await changeDocument("ofdgoChangeVersion", null, action, entry.id, el.versionName.value.trim())) {
@@ -2160,20 +2170,63 @@ async function changeVersion(action) {
 	}
 }
 
+async function switchReadingVersion(id) {
+	if (!state.doc || state.editing || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
+	if (id === (state.doc.documentVersion || "")) return true;
+	const dirty = state.dirty;
+	const before = state.editorInfo ? editorLocation() : null, revision = state.editorInfo?.revision;
+	const openSeq = ++state.openSeq;
+	setBusy(true, "正在切换版本");
+	try {
+		const doc = await callWASM("ofdgoSelectVersion", id);
+		if (openSeq !== state.openSeq) return;
+		state.objectClipboard = state.styleClipboard = null;
+		resetCompositeScope();
+		canvasEditor.clear();
+		canvasEditor.setTool("");
+		delete state.textDefaults.fontChoice;
+		updateTextFonts(null, true);
+		if (state.editorInfo) {
+			if (!dirty) state.savedRevision = doc.revision;
+			setEditorInfo(doc);
+		}
+		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true, clearSelection: true,
+			fitMode: state.fitMode, scale: state.scale, activateActions: true });
+		if (openSeq !== state.openSeq) return;
+		if (before) {
+			rememberEditorView(before, revision);
+			const view = state.editorViews.get(doc.revision);
+			if (view) view.reading = true;
+		}
+		return true;
+	} catch (error) {
+		if (openSeq === state.openSeq) el.versionStatus.textContent = error.message;
+	} finally {
+		if (openSeq === state.openSeq) setBusy(false);
+	}
+}
+
 function updateVersionControls() {
 	const manager = state.versionManagement, busy = document.body.hasAttribute("aria-busy");
-	const disabled = !state.editing || !state.ready || state.exporting || busy;
-	el.versionManageButton.hidden = !state.editing;
+	const disabled = !state.doc || !state.ready || state.exporting || busy;
+	const title = state.editing ? "版本管理" : "版本浏览";
+	el.versionManageButton.hidden = !state.editing && !(state.doc?.versionCount > 0);
+	el.versionManageButton.title = title;
+	el.versionManageButton.setAttribute("aria-label", title);
+	el.versionTitle.textContent = title;
 	el.versionManageButton.disabled = disabled;
-	el.versionNotice.textContent = state.editorInfo?.editWarnings?.join("；") || "";
+	el.versionNotice.textContent = state.editing ? state.editorInfo?.editWarnings?.join("；") || "" : "";
 	el.versionNotice.hidden = !el.versionNotice.textContent;
+	el.versionNameRow.hidden = !state.editing;
+	el.versionActions.classList.toggle("version-readonly", !state.editing);
+	for (const button of [el.versionAdd, el.versionRename, el.versionDelete, el.versionDefault]) button.hidden = !state.editing;
 	const entry = manager?.entries?.find(entry => entry.id === manager.id);
 	const unavailable = disabled || !entry || Boolean(manager?.loading || manager?.failed);
 	el.versionList.inert = busy || Boolean(manager?.loading);
-	el.versionName.disabled = el.versionAdd.disabled = unavailable;
-	el.versionRename.disabled = unavailable || !entry?.id || el.versionName.value.trim() === entry.name;
-	el.versionDelete.disabled = unavailable || !entry?.id;
-	el.versionDefault.disabled = unavailable || Boolean(entry?.default);
+	el.versionName.disabled = el.versionAdd.disabled = unavailable || !state.editing;
+	el.versionRename.disabled = unavailable || !state.editing || !entry?.id || el.versionName.value.trim() === entry.name;
+	el.versionDelete.disabled = unavailable || !state.editing || !entry?.id;
+	el.versionDefault.disabled = unavailable || !state.editing || Boolean(entry?.default);
 	el.versionSelect.disabled = unavailable || entry?.id === (state.doc?.documentVersion || "");
 }
 
@@ -3235,6 +3288,8 @@ async function changeDocument(name, item, ...args) {
 		if (doc.revision === state.editorInfo?.revision) {
 			return true;
 		}
+		const restoredView = name === "ofdgoUndo" ? state.editorViews.get(revision) : name === "ofdgoRedo" ? state.editorViews.get(doc.revision) : null;
+		if (restoredView?.reading && state.savedRevision === revision) state.savedRevision = doc.revision;
 		refreshManagement = el.documentPanel.open && (name === "ofdgoChangeDocument" || name === "ofdgoUpdateInfo" || restoring);
 		const previousDocument = state.doc.documents?.[state.doc.documentIndex || 0];
 		const nextDocument = doc.documents?.[doc.documentIndex || 0];
@@ -3272,7 +3327,7 @@ async function changeDocument(name, item, ...args) {
 			}
 			return;
 		}
-		const view = name === "ofdgoUndo" ? state.editorViews.get(revision) : name === "ofdgoRedo" ? state.editorViews.get(doc.revision) : null;
+		const view = restoredView;
 		const reindex = !!scope && (scoped && ["ofdgoDeleteObject", "ofdgoDeleteObjects", "ofdgoCopyObjects", "ofdgoOrderObjects", "ofdgoEraseObjects", "ofdgoEraseObjectsPath", "ofdgoGroupObjects"].includes(name)
 			|| inserting || name === "ofdgoPasteObjects" && !!args[4]);
 		const reindexed = restoring ? view?.reindex && view.before : reindex && before;
@@ -3953,6 +4008,7 @@ async function recoverWASM() {
 	try {
 		await openDocument({
 			pageIndex: state.pageIndex,
+			versionID: state.doc?.documentVersion,
 			fitMode: state.fitMode || "width",
 			scale: state.scale,
 			skipAutoFonts: true,
@@ -4676,11 +4732,15 @@ async function openDocument(options = {}) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const doc = options.doc || (options.reuseSession
+		let doc = options.doc || (options.reuseSession
 			? await callWASM("ofdgoConfigure", fonts, state.renderAnnotations)
 			: await openWithCredentials(fonts, openSeq));
 		if (openSeq !== state.openSeq) {
 			return;
+		}
+		if (options.versionID !== undefined && options.versionID !== (doc.documentVersion || "")) {
+			doc = await callWASM("ofdgoSelectVersion", options.versionID);
+			if (openSeq !== state.openSeq) return;
 		}
 		const pageCount = doc.pageCount || 0;
 		const pageIndex = Math.min(Math.max(options.pageIndex || 0, 0), Math.max(pageCount - 1, 0));

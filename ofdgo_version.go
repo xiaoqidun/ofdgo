@@ -40,6 +40,16 @@ type VersionFile struct {
 	Location string
 }
 
+// DocumentVersionCount 获取当前文档的版本数量，不读取版本描述文件
+// 返回: int 版本数量, error 入口读取或结构错误
+func (r *Reader) DocumentVersionCount() (int, error) {
+	if r.documentIndex >= 0 && r.documentIndex < r.DocumentCount() && !r.OFD.DocBody[r.documentIndex].versioned {
+		return 0, nil
+	}
+	entries, err := r.documentVersionEntries()
+	return len(entries), err
+}
+
 // DocumentVersions 按入口顺序读取当前文档的版本信息，不切换文档或读取文件清单中的内容
 // 返回独立副本；没有版本列表时返回nil，不以版本号推测默认版本
 // 返回: []DocumentVersionInfo 版本信息, error 读取或描述错误
