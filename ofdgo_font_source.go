@@ -158,12 +158,12 @@ func (r *Renderer) fontSourceMatch(backend FontBackend, fontID string, definitio
 // 入参: backend 字体后端, id 字体ID, exact 是否禁止无关回退
 // 返回: ResolvedFont 字体及来源, error 解析错误
 func (r *Renderer) resolveFontSource(backend FontBackend, id string, exact bool) (ResolvedFont, error) {
-	definition := r.Reader.fontCache[id]
+	definition := r.Reader.fontDefinition(id)
 	if definition == nil && !r.Reader.fontResourcesRead && r.Reader.OFD != nil {
 		if _, err := r.Reader.Fonts(); err != nil {
 			return ResolvedFont{}, err
 		}
-		definition = r.Reader.fontCache[id]
+		definition = r.Reader.fontDefinition(id)
 	}
 	if definition == nil {
 		definition = &Font{ID: id}

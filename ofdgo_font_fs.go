@@ -262,7 +262,7 @@ func (r *Reader) MatchFontFiles(files []string, ids ...string) ([]string, error)
 		return nil, err
 	}
 	for _, id := range ids {
-		if r.fontCache[id] == nil {
+		if r.fontDefinition(id) == nil {
 			fonts = append(fonts, Font{ID: id})
 		}
 	}

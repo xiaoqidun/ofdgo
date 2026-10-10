@@ -1080,6 +1080,9 @@ func scaleTextNumbers(value string, scale float64) string {
 // 入参: obj 文字对象
 // 返回: error 错误信息
 func (e *Editor) prepareText(obj *TextObject) error {
+	if id := editorResourceID(obj.Font); id != "" {
+		obj.Font = id
+	}
 	var sfnt FontMetrics
 	external := false
 	for _, resource := range e.resources {

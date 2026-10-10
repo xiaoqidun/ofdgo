@@ -118,7 +118,7 @@ func (r *Renderer) PositionText(object TextObject, state RenderState) (*Position
 		italic = italic || defaults.Italic
 	}
 	bold := weight >= 700
-	if definition := r.Reader.fontCache[id]; definition != nil {
+	if definition := r.Reader.fontDefinition(id); definition != nil {
 		bold = bold && !definition.Bold
 		if definition.FontFile == "" && fontNoSyntheticBold(definition.FontName, definition.FamilyName) {
 			bold = false

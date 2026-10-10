@@ -146,12 +146,18 @@ func (r *Renderer) ResolveFont(id string, exact bool) (ResolvedFont, error) {
 	if r.backends.Fonts == nil {
 		return ResolvedFont{}, fmt.Errorf("fonts: %w", ErrBackendUnavailable)
 	}
-	key := resolvedFontKey{id: id, exact: exact, definition: r.Reader.fontCache[id]}
+	key := resolvedFontKey{id: id, exact: exact, definition: r.Reader.fontDefinition(id)}
+	if key.definition != nil && key.definition.ID != "" {
+		key.id = key.definition.ID
+	}
 	if cached, ok := r.resolvedFonts[key]; ok {
 		return cached.font, cached.err
 	}
-	resolved, err := r.backends.Fonts.ResolveFont(r, id, exact)
-	key.definition = r.Reader.fontCache[id]
+	resolved, err := r.backends.Fonts.ResolveFont(r, key.id, exact)
+	key.definition = r.Reader.fontDefinition(id)
+	if key.definition != nil && key.definition.ID != "" {
+		key.id = key.definition.ID
+	}
 	r.resolvedFonts[key] = resolvedFontResult{font: resolved, err: err}
 	return resolved, err
 }
@@ -161,6 +167,9 @@ func (r *Renderer) ResolveFont(id string, exact bool) (ResolvedFont, error) {
 // 入参: id 字体资源标识
 // 返回: *PreparedFont 绘制字体, error 字体解析错误
 func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
+	if definition := r.Reader.fontDefinition(id); definition != nil && definition.ID != "" {
+		id = definition.ID
+	}
 	if cached := r.preparedFonts[id]; cached != nil {
 		return cached, nil
 	}
@@ -168,8 +177,11 @@ func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
 	if err != nil {
 		return nil, err
 	}
+	definition := r.Reader.fontDefinition(id)
+	if definition != nil && definition.ID != "" {
+		id = definition.ID
+	}
 	prepared := &PreparedFont{ResolvedFont: resolved}
-	definition := r.Reader.fontCache[id]
 	if definition != nil && definition.FontFile != "" {
 		key := r.fontDigest(resolved.Data)
 		if content, ok := r.fontPreparations.get(key); ok {

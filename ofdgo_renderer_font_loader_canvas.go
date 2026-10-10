@@ -32,7 +32,7 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 		r.renderError = err
 		return nil
 	}
-	of := r.Reader.fontCache[fontID]
+	of := r.Reader.fontDefinition(fontID)
 	if len(resolved.Data) == 0 {
 		return nil
 	}

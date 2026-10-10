@@ -179,13 +179,16 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 // 入参: id 字体资源标识
 // 返回: []byte 独立字体数据, error 错误信息
 func (e *Editor) FontData(id string) ([]byte, error) {
+	if key := editorResourceID(id); key != "" {
+		id = key
+	}
 	for _, resource := range e.resources {
 		if resource.font != nil && resource.font.ID == id && len(resource.data) != 0 {
 			return bytes.Clone(resource.data), nil
 		}
 	}
 	if e.source != nil {
-		if definition := e.source.reader.fontCache[id]; definition != nil && definition.FontFile != "" {
+		if definition := e.source.reader.fontDefinition(id); definition != nil && definition.FontFile != "" {
 			return e.source.reader.FontData(id)
 		}
 	}
@@ -799,6 +802,9 @@ func editorGeometry(object GraphicObject) (string, string) {
 // 入参: id 字体资源标识
 // 返回: FontMetrics 字体度量, error 错误信息
 func (e *Editor) editorFont(id string) (FontMetrics, error) {
+	if key := editorResourceID(id); key != "" {
+		id = key
+	}
 	if metrics := e.fontMetrics[id]; metrics != nil {
 		return metrics, nil
 	}

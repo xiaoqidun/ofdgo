@@ -111,12 +111,12 @@ func (r *Reader) FontData(id string) ([]byte, error) {
 // 入参: id 字体资源标识, readonly 是否允许借用只读资源
 // 返回: []byte 字体数据, error 资源或集合错误
 func (r *Reader) fontData(id string, readonly bool) ([]byte, error) {
-	if r.fontCache[id] == nil {
+	if r.fontDefinition(id) == nil {
 		if _, err := r.Fonts(); err != nil {
 			return nil, err
 		}
 	}
-	f := r.fontCache[id]
+	f := r.fontDefinition(id)
 	if f == nil || f.FontFile == "" {
 		return nil, fmt.Errorf("embedded font %q not found", id)
 	}
@@ -133,6 +133,14 @@ func (r *Reader) fontData(id string, readonly bool) ([]byte, error) {
 		return extractCollectionFont(data, index)
 	}
 	return data, nil
+}
+
+// fontDefinition 按资源标识查找已加载的字体，数值等价的引用共用同一定义
+// 入参: id 字体资源标识
+// 返回: *Font 字体定义，未找到或别名冲突时为nil
+func (r *Reader) fontDefinition(id string) *Font {
+	font, _ := resourceValue(r.fontCache, id)
+	return font
 }
 
 // FontInfos 获取OFD字体诊断信息
@@ -293,6 +301,14 @@ func (r *Renderer) fontInfos(usage map[string]int) ([]FontInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	counts := make(map[string]int, len(usage))
+	for id, used := range usage {
+		if font := r.Reader.fontDefinition(id); font != nil {
+			id = font.ID
+		}
+		counts[id] += used
+	}
+	usage = counts
 	infos := make([]FontInfo, 0, len(fonts)+len(usage))
 	seen := make(map[string]bool)
 	for _, font := range fonts {
