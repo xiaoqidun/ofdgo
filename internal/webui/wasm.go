@@ -2346,8 +2346,15 @@ func previewText(args []js.Value) (any, error) {
 			offset++
 		}
 		content := (ofdgo.TextObject{TextCode: []ofdgo.TextCode{code}}).Text()
-		runs = append(runs, map[string]any{"text": content, "x": x, "y": y, "dx": code.GetDeltaX(), "dy": code.GetDeltaY(), "line": line})
-		offset += len([]rune(content))
+		code.X, code.Y = fmt.Sprint(x), fmt.Sprint(y)
+		positioner := ofdgo.NewTextPositioner(code)
+		positions := make([][2]float64, len([]rune(content)))
+		for i := range positions {
+			point := positioner.Next()
+			positions[i] = [2]float64{point.X, point.Y}
+		}
+		runs = append(runs, map[string]any{"text": content, "x": x, "y": y, "positions": positions, "line": line})
+		offset += len(positions)
 	}
 	scale := text.HScale
 	if scale == 0 {

@@ -1379,6 +1379,8 @@ export class CanvasEditor {
 				bottom = Math.max(bottom, y + size - baseline);
 			}
 			for (const char of run.text) {
+				x = run.positions[index][0] * PX_PER_MM;
+				y = run.positions[index][1] * PX_PER_MM;
 				const span = document.createElement("span"), node = document.createTextNode(char);
 				span.append(node);
 				Object.assign(span.style, { display: "inline-block", opacity: String((item.alpha ?? 255) / 255), transformOrigin: "left top", transform: `translate(${x - naturalX}px,${y - baseline - lineIndex * size}px) scaleX(${source.scale})` });
@@ -1391,8 +1393,6 @@ export class CanvasEditor {
 				right = Math.max(right, x + advance * source.scale);
 				bottom = Math.max(bottom, y + size - baseline);
 				naturalX += advance;
-				x += run.dx?.length ? run.dx[Math.min(index, run.dx.length - 1)] * PX_PER_MM : 0;
-				y += run.dy?.length ? run.dy[Math.min(index, run.dy.length - 1)] * PX_PER_MM : 0;
 				index++;
 			}
 			if (!line.hasChildNodes()) {
