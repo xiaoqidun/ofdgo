@@ -91,7 +91,7 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 					known.refs = scan.refs
 				}
 				generated[name] = known
-				if reader.OFD.DocBody[reader.documentIndex].versioned && !known.stagedLeaf(nil) {
+				if (reader.DocumentCount() > 1 || reader.OFD.DocBody[reader.documentIndex].versioned) && !known.stagedLeaf(nil) {
 					input := data.open()
 					if e.output != nil {
 						input = imageInput{ReadCloser: input, context: e.output.ctx}
@@ -592,24 +592,33 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		return 0, err
 	}
 	maps.Copy(parts, fonts)
+	reader := e.source.reader
+	ctx := context.Background()
+	if e.output != nil {
+		ctx = e.output.ctx
+	}
+	versioned := reader.OFD.DocBody[reader.documentIndex].versioned
+	if !versioned && reader.DocumentCount() > 1 {
+		parts, err = reader.versionOutputChanges(ctx, parts, nil, generated)
+		if err != nil {
+			return 0, err
+		}
+	}
 	removed, err := e.compactSourceReferences(parts, progress, generated)
 	if err != nil {
 		return 0, err
 	}
-	reader := e.source.reader
 	if removed == nil {
 		removed = make(map[string]bool)
 	}
 	if err := e.compressResourceReferences(parts, reader, removed, generated); err != nil {
 		return 0, err
 	}
-	ctx := context.Background()
-	if e.output != nil {
-		ctx = e.output.ctx
-	}
-	parts, err = reader.versionOutputChanges(ctx, parts, removed, generated)
-	if err != nil {
-		return 0, err
+	if versioned {
+		parts, err = reader.versionOutputChanges(ctx, parts, removed, generated)
+		if err != nil {
+			return 0, err
+		}
 	}
 	if len(parts) != 0 || len(removed) != 0 || e.output != nil && e.output.options.Mode != CompressionUnchanged && !e.output.protected {
 		name := "OFD.xml"

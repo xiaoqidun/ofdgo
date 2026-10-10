@@ -255,14 +255,14 @@ func (r *Reader) versionResourceFiles(ctx context.Context, parts map[string][]by
 	return files, nil
 }
 
-// versionChanges 隔离当前入口修改涉及的共享文件，同步版本清单，不修改输入包或修改集
+// versionChanges 隔离当前文档或版本修改涉及的共享文件，同步版本清单，不修改输入包或修改集
 // 入参: ctx 取消上下文, changes 待写入条目
 // 返回: map[string][]byte 隔离后的修改集, error 读取、引用或结构错误
 func (r *Reader) versionChanges(ctx context.Context, changes map[string][]byte) (map[string][]byte, error) {
 	return r.versionOutputChanges(ctx, changes, nil, nil)
 }
 
-// versionOutputChanges 隔离版本改动并同步删除清单，保留其他入口仍需使用的文件
+// versionOutputChanges 隔离文档或版本改动并同步删除清单，保留其他入口仍需使用的文件
 // 入参: ctx 取消上下文, changes 待写入条目, removed 待删除条目，返回前移除受保护路径, generated 本次自产页面及引用，随隔离路径更新
 // 返回: map[string][]byte 隔离后的修改集, error 读取、引用或结构错误
 func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) (map[string][]byte, error) {
@@ -273,7 +273,7 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	if err != nil {
 		return nil, err
 	}
-	if !r.OFD.DocBody[r.documentIndex].versioned || len(changes) == 0 && len(removed) == 0 {
+	if r.DocumentCount() == 1 && !r.OFD.DocBody[r.documentIndex].versioned || len(changes) == 0 && len(removed) == 0 {
 		return changes, ctx.Err()
 	}
 	parts := maps.Clone(changes)
@@ -294,6 +294,18 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	shared, err := r.versionSharedFiles(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if r.versionInfo == nil && len(removed) == 0 {
+		changed := false
+		for name := range parts {
+			if name != "OFD.xml" && shared[name] {
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			return parts, ctx.Err()
+		}
 	}
 	graph, err := r.versionEditGraph(ctx, entry, parts, generated)
 	if err != nil {
