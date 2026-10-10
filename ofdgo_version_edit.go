@@ -83,34 +83,34 @@ func (r *Reader) versionEditGraph(ctx context.Context, entry string, parts map[s
 			if node != root && !node.matchesOFD(node.name.Local) {
 				return
 			}
-			add := func(attribute, value string, structure bool) {
+			parent := ""
+			if node.parent != nil {
+				parent = node.parent.name.Local
+			}
+			if parent == "Extension" && node.name.Local == "Data" {
+				return
+			}
+			add := func(attribute, value string, kind int) {
 				if strings.TrimSpace(value) == "" {
 					return
 				}
 				target := resolveResourcePath(name, base, value)
 				file.links = append(file.links, versionEditLink{node: node, attribute: attribute, target: target})
 				graph.used[target] = true
-				if structure {
+				if kind == packageReferenceXML {
 					queue = append(queue, target)
 				}
 			}
-			switch node.name.Local {
-			case "PublicRes", "DocumentRes", "PageRes", "Annotations", "Attachments", "Signatures", "CustomTags", "Extensions":
-				if len(node.children) == 0 {
-					add("", editorImportText(data, node), true)
+			if kind := packageReference(root.name.Local, parent, node.name.Local, ""); kind != packageReferenceNone {
+				add("", editorImportText(data, node), kind)
+			}
+			for _, attr := range node.attrs {
+				if attr.Name.Space != "" {
+					continue
 				}
-			case "Page", "TemplatePage", "CompositeGraphicUnit", "Signature":
-				add("BaseLoc", node.attr("BaseLoc"), true)
-			case "PageAnnot":
-				add("FileLoc", node.attr("FileLoc"), true)
-			case "DrawParam":
-				add("Link", node.attr("Link"), true)
-			case "ColorSpace":
-				add("Profile", node.attr("Profile"), false)
-			case "FontFile", "MediaFile", "Profile", "SignedValue", "SchemaLoc", "ExtendData":
-				add("", editorImportText(data, node), false)
-			case "FileLoc":
-				add("", editorImportText(data, node), root.name.Local == "Annotations")
+				if kind := packageReference(root.name.Local, parent, node.name.Local, attr.Name.Local); kind != packageReferenceNone {
+					add(attr.Name.Local, attr.Value, kind)
+				}
 			}
 			for _, child := range node.children {
 				visit(child)

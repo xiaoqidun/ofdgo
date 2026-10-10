@@ -180,8 +180,9 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo) (map[string]bool, bool, error) {
 	names := make(map[string]bool)
 	safe := true
-	if len(r.OFD.DocBody) != 0 {
-		dependencies, err := r.documentFiles(ctx, r.DocumentIndex())
+	structured := len(r.OFD.DocBody) != 0
+	if structured {
+		dependencies, structures, err := r.documentDependencies(ctx, r.DocumentIndex())
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, false, ctx.Err()
@@ -193,8 +194,8 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 				safe = false
 				break
 			}
-			names[name] = true
 		}
+		names = structures
 	} else {
 		for name := range r.fileIndex {
 			names[name] = true
@@ -222,8 +223,9 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 		buffer := bufio.NewReader(imageInput{ReadCloser: input, context: ctx})
 		header, _ := buffer.Peek(512)
 		header = bytes.TrimSpace(bytes.TrimPrefix(header, []byte{0xef, 0xbb, 0xbf}))
-		if len(header) > 0 && header[0] == '<' {
+		if structured || len(header) > 0 && header[0] == '<' {
 			decoder := xml.NewDecoder(buffer)
+			var stack []xml.Name
 			for {
 				token, err := decoder.Token()
 				if err == io.EOF {
@@ -233,16 +235,27 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 					safe = false
 					break
 				}
-				if element, ok := token.(xml.StartElement); ok {
-					if classifyOFDNamespace(element.Name.Space) == ofdXMLUnknown {
+				switch element := token.(type) {
+				case xml.StartElement:
+					if len(stack) != 0 && classifyOFDNamespace(element.Name.Space) == ofdXMLUnknown && element.Name.Space != stack[len(stack)-1].Space {
 						safe = false
 						break
 					}
+					if len(stack) != 0 && stack[len(stack)-1].Local == "Extension" && element.Name.Local == "Data" {
+						if err := decoder.Skip(); err != nil {
+							safe = false
+						}
+						break
+					}
+					stack = append(stack, element.Name)
 					if element.Name.Local == "Pattern" {
 						geometry = false
 					}
 					resource, masked := "", false
 					for _, attr := range element.Attr {
+						if attr.Name.Space != "" {
+							continue
+						}
 						if attr.Name.Local == "Visible" && (attr.Value == "false" || attr.Value == "0") {
 							geometry = false
 						}
@@ -257,6 +270,11 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 					if masked {
 						masks[resource] = true
 					}
+				case xml.EndElement:
+					stack = stack[:len(stack)-1]
+				}
+				if !safe {
+					break
 				}
 			}
 		}
