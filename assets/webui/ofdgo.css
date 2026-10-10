@@ -731,8 +731,12 @@ button:not(:disabled):hover {
 	margin: 0 auto;
 }
 
-.convert-options:has(#convertDPIRow[hidden]) {
+.convert-options:has(#convertDPIRow[hidden]):has(#convertFontRow[hidden]) {
 	grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.convert-options:has(#convertDPIRow:not([hidden])):has(#convertFontRow:not([hidden])) {
+	grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .convert-options .form-row {
@@ -974,8 +978,14 @@ button:not(:disabled):hover {
 		width: 100%;
 		margin: 0;
 	}
-	.convert-options:has(#convertDPIRow[hidden]) {
+	.convert-options:has(#convertDPIRow[hidden]):has(#convertFontRow[hidden]) {
 		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+	.convert-options:has(#convertDPIRow:not([hidden])):has(#convertFontRow:not([hidden])) {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+	.convert-options:has(#convertDPIRow:not([hidden])):has(#convertFontRow:not([hidden])) .form-row:last-child {
+		grid-column: 1 / -1;
 	}
 	.convert-options .form-row {
 		grid-template-columns: minmax(0, 1fr);
@@ -2816,6 +2826,39 @@ audio.page-media {
 	overflow-wrap: anywhere;
 }
 
+.doc-font-head:has(.font-binding-action) {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto auto;
+	align-items: center;
+	gap: 6px;
+}
+
+.doc-font-head:has(.font-binding-action) .doc-font-name {
+	grid-column: 1;
+	grid-row: 1;
+}
+
+.doc-font-head:has(.font-binding-action) .doc-font-badges {
+	grid-column: 2;
+	grid-row: 1;
+	margin: 0;
+}
+
+.font-binding-action {
+	grid-column: 3;
+	grid-row: 1;
+	white-space: nowrap;
+}
+
+#fontBindingName {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+#fontBindingHint {
+	margin-bottom: 12px;
+}
+
 .info-name-button {
 	display: inline;
 	padding: 0;
@@ -2880,6 +2923,16 @@ audio.page-media {
 	font-size: 12px;
 	line-height: 1.35;
 	white-space: nowrap;
+}
+
+.doc-font-head .font-badge,
+.font-binding-action {
+	width: 36px;
+	height: 24px;
+	padding: 0;
+	font-size: 12px;
+	font-weight: 400;
+	line-height: 1.35;
 }
 
 .font-badge.embedded,

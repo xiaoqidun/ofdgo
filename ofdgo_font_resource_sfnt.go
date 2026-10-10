@@ -91,7 +91,32 @@ func (f sfntResourceMetrics) Write() []byte { return fontSFNTData(f.SFNT) }
 // 入参: sfnt 已解析字体
 // 返回: bool 是否支持裁剪
 func sfntSubsettable(sfnt *font.SFNT) bool {
-	return sfnt.IsTrueType && !slices.ContainsFunc([]string{"fvar", "COLR", "CBDT", "sbix", "SVG "}, func(tag string) bool { return sfnt.Tables[tag] != nil })
+	return sfnt.IsTrueType && fontEmbeddingFlags(sfnt)&0x0100 == 0 && !slices.ContainsFunc([]string{"fvar", "COLR", "CBDT", "sbix", "SVG "}, func(tag string) bool { return sfnt.Tables[tag] != nil })
+}
+
+// fontEmbeddingFlags 读取OpenType的嵌入标志，未提供OS/2表时返回零
+// 入参: sfnt 已解析字体
+// 返回: uint16 嵌入标志
+func fontEmbeddingFlags(sfnt *font.SFNT) uint16 {
+	if table := sfnt.Tables["OS/2"]; len(table) >= 10 {
+		return binary.BigEndian.Uint16(table[8:10])
+	}
+	return 0
+}
+
+// validateFontEmbedding 校验字体是否允许作为可编辑轮廓字体嵌入
+// 入参: data 独立OpenType字体
+// 返回: error 字体解析或嵌入限制
+func validateFontEmbedding(data []byte) error {
+	sfnt, err := font.ParseSFNT(data, 0)
+	if err != nil {
+		return err
+	}
+	flags := fontEmbeddingFlags(sfnt)
+	if flags&0x0200 != 0 || flags&0x000e != 0 && flags&0x0008 == 0 {
+		return fmt.Errorf("font does not permit editable embedding")
+	}
+	return nil
 }
 
 // sfntFontName 获取字体中的名称
@@ -115,6 +140,9 @@ func subsetSFNTFont(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 	sfnt, err := font.ParseSFNT(bytes.Clone(data), 0)
 	if err != nil {
 		return nil, err
+	}
+	if fontEmbeddingFlags(sfnt)&0x0100 != 0 {
+		return bytes.Clone(data), nil
 	}
 	if mapped {
 		usage := newEditorFontUsage()
@@ -159,7 +187,7 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 		return nil
 	}
 	sfnt, err := font.ParseSFNT(data, 0)
-	if err != nil || !sfnt.IsTrueType {
+	if err != nil || !sfnt.IsTrueType || fontEmbeddingFlags(sfnt)&0x0100 != 0 {
 		return nil
 	}
 	for tag := range sfnt.Tables {

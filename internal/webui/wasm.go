@@ -211,6 +211,7 @@ func RunWASM() {
 	registerCallback("ofdgoImages", documentImages)
 	registerAsyncCallback("ofdgoExportImages", exportImages)
 	registerCallback("ofdgoMatchFontFiles", matchFontFiles)
+	registerCallback("ofdgoChangeFontBinding", changeFontBinding)
 	registerCallback("ofdgoFontFaces", fontFaces)
 	registerCallback("ofdgoFontFace", fontFace)
 	registerCallback("ofdgoCreateDocument", createDocument)
@@ -466,6 +467,13 @@ func convertFile(args []js.Value) (any, error) {
 		OnProgress: func(progress ofdgo.ConvertProgress) error {
 			return awaitExport(args[4], progress.Stage, progress.Completed, progress.Total)
 		},
+	}
+	if value := settings.Get("fontMode"); value.Type() == js.TypeNumber {
+		mode := value.Int()
+		if mode < 0 || mode > int(ofdgo.FontExternal) {
+			return nil, fmt.Errorf("invalid font mode")
+		}
+		options.Fonts = ofdgo.FontMode(mode)
 	}
 	if value := settings.Get("compression"); !value.IsNull() && !value.IsUndefined() {
 		if err := compressionFromJS(value, &options.Compression); err != nil {
@@ -3469,6 +3477,33 @@ func changeAttachment(args []js.Value) (any, error) {
 		default:
 			return fmt.Errorf("unsupported attachment action %q", action)
 		}
+	})
+}
+
+// changeFontBinding 调用库层字体资源操作，统一更新预览与撤销状态
+// 入参: args 字体标识、保存方式及可选字体数据
+// 返回: any 编辑状态, error 字体处理错误
+func changeFontBinding(args []js.Value) (any, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("请选择字体")
+	}
+	return changeAtomicObjects(func() error {
+		id, mode := args[0].String(), args[1].Int()
+		if mode == int(ofdgo.FontExternal) {
+			return currentEditor.ExternalizeFont(context.Background(), id)
+		}
+		if mode != int(ofdgo.FontEmbed) {
+			return fmt.Errorf("字体方式无效")
+		}
+		var file ofdgo.FontFile
+		if len(args) > 2 && !args[2].IsNull() && !args[2].IsUndefined() {
+			data, err := bytesFromJS(args[2])
+			if err != nil {
+				return err
+			}
+			file.Data = data
+		}
+		return currentEditor.EmbedFont(context.Background(), id, file, 0)
 	})
 }
 

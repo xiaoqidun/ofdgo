@@ -185,6 +185,7 @@
 					<div class="convert-options">
 						<div class="form-row"><label for="convertFormat">格式</label><select id="convertFormat" required></select></div>
 						<div class="form-row"><label for="convertCompression">压缩</label><select id="convertCompression"><option value="0">默认</option><option value="1">无损</option><option value="2">轻压</option><option value="3">均衡</option><option value="4">强压</option></select></div>
+						<div id="convertFontRow" class="form-row" hidden><label for="convertFontMode">字体</label><select id="convertFontMode"><option value="0">保持</option><option value="1">内嵌</option><option value="2">外部</option></select></div>
 						<div id="convertDPIRow" class="form-row" hidden><label for="convertDPI">精度</label><select id="convertDPI"><option value="96">96 dpi</option><option value="150">150 dpi</option><option value="300" selected>300 dpi</option><option value="600">600 dpi</option></select></div>
 						<div class="form-row"><label for="convertDestination">保存</label><select id="convertDestination"><option value="directory">目录</option><option value="archive">打包</option></select></div>
 					</div>
@@ -432,6 +433,16 @@
 					<button id="pageCancel" class="button" type="button">取消</button>
 					<button class="button" type="submit">确定</button>
 				</div>
+			</form>
+		</dialog>
+		<dialog id="fontBindingPanel" class="form-dialog" aria-labelledby="fontBindingTitle">
+			<form id="fontBindingForm">
+				<h2 id="fontBindingTitle" class="form-title">嵌入字体</h2>
+				<div class="form-row"><span>字体</span><output id="fontBindingName"></output></div>
+				<div id="fontBindingSourceRow" class="form-row"><label for="fontBindingSource">来源</label><select id="fontBindingSource" required></select></div>
+				<input id="fontBindingFile" type="file" accept=".ttf,.otf,.ttc,.otc" hidden>
+				<div id="fontBindingHint" class="form-status">外置后，其他设备需具备此字体</div>
+				<div class="form-actions"><div id="fontBindingStatus" class="form-status" role="status"></div><button id="fontBindingCancel" class="button" type="button">取消</button><button id="fontBindingSubmit" class="button" type="submit">嵌入</button></div>
 			</form>
 		</dialog>
 		<dialog id="insertPanel" class="form-dialog" aria-label="添加图片">

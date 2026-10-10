@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/xiaoqidun/pdfgo"
@@ -33,7 +34,7 @@ type OutputFormat struct {
 	Raster    bool   `json:"raster,omitempty"`
 }
 
-// ConvertProgress 回报open、pages、convert、prepare、write、write.*及export阶段，Total为0表示总量未知
+// ConvertProgress 回报open、pages、convert、fonts、prepare、write、write.*及export阶段，Total为0表示总量未知
 type ConvertProgress struct {
 	Stage     string `json:"stage"`
 	Completed int    `json:"completed"`
@@ -48,6 +49,7 @@ type ConvertProgress struct {
 // RendererOptions同时用于PDF局部合成和输出，在PDF.RendererOptions之后应用
 // Backends统一配置转换与输出，优先于PDF和RendererOptions中的后端设置
 // Compression统一配置输出及PDF图片导入，优先于PDF.Compression，文本输出不优化图片
+// Fonts仅用于OFD输出，按字体处理全包引用，未处理原因通过报告返回
 // PageOutput仅用于逐页格式，同步调用export写出一页并自行处理提交或回滚；此时output可为nil
 // 未提供PageOutput时，逐页格式打包ZIP；所有回调返回错误均会停止转换
 type ConvertOptions struct {
@@ -57,6 +59,7 @@ type ConvertOptions struct {
 	PageRange       string
 	SkipUnchanged   bool
 	Compression     CompressionOptions
+	Fonts           FontMode
 	Backends        *RenderBackends
 	ReaderOptions   []ReaderOption
 	RendererOptions []RendererOption
@@ -74,6 +77,7 @@ type ConvertReport struct {
 	Bytes     int64           `json:"bytes"`
 	Unchanged bool            `json:"unchanged,omitempty"`
 	PDF       PDFImportReport `json:"pdf"`
+	Fonts     []FontChange    `json:"fonts,omitempty"`
 }
 
 // convertReader 将取消上下文传递到随机读取
@@ -129,6 +133,9 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 	if report.Format.Value == "" {
 		return report, fmt.Errorf("unsupported output format %s", options.Format)
 	}
+	if options.Fonts > FontExternal || options.Fonts != FontKeep && format != "ofd" {
+		return report, fmt.Errorf("font processing requires OFD output and a valid mode")
+	}
 	if options.PageOutput != nil && !report.Format.Paged {
 		return report, fmt.Errorf("page output requires a paged format")
 	}
@@ -175,7 +182,7 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 	if report.Input != "pdf" && report.Input != "ofd" {
 		return report, fmt.Errorf("unsupported input format")
 	}
-	if options.SkipUnchanged && options.Compression.Mode == CompressionUnchanged && report.Input == format && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
+	if options.SkipUnchanged && options.Fonts == FontKeep && options.Compression.Mode == CompressionUnchanged && report.Input == format && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
 		report.Unchanged = true
 		return report, nil
 	}
@@ -246,7 +253,7 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 	report.Pages = len(indices)
 	writer := convertWriter{context: ctx, writer: output, count: &report.Bytes}
 	if format == "ofd" {
-		if options.Pages == nil && editor == nil && options.Compression.Mode == CompressionUnchanged {
+		if options.Pages == nil && editor == nil && options.Fonts == FontKeep && options.Compression.Mode == CompressionUnchanged {
 			if err = progress("write", 0, 0); err != nil {
 				return report, err
 			}
@@ -261,6 +268,30 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 			}
 		}
 		editor.OnWriteProgress = writeProgress
+		if options.Fonts != FontKeep {
+			if err = progress("fonts", 0, 0); err != nil {
+				return report, err
+			}
+			configuration := NewRenderer(&Reader{}, options.RendererOptions...)
+			if options.Backends != nil {
+				WithRenderBackends(*options.Backends)(configuration)
+			}
+			editor.SetRenderBackends(configuration.Backends())
+			editor.SetFontDirs(configuration.fontDirs...)
+			editor.SetFontFS(configuration.fontFS...)
+			report.Fonts, err = editor.ProcessFonts(ctx, options.Fonts)
+			if err != nil {
+				return report, err
+			}
+			if report.Input == "ofd" && options.Pages == nil && options.Compression.Mode == CompressionUnchanged && !slices.ContainsFunc(report.Fonts, func(change FontChange) bool { return change.Changed }) {
+				if err = progress("write", 0, 0); err != nil {
+					return report, err
+				}
+				_, err = io.Copy(writer, io.NewSectionReader(source, 0, size))
+				report.Unchanged = err == nil
+				return report, err
+			}
+		}
 		if options.Pages == nil {
 			_, err = editor.WriteToWithOptions(ctx, writer, WriteOptions{Compression: options.Compression})
 		} else {
