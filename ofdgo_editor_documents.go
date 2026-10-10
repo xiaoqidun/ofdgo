@@ -27,10 +27,11 @@ import (
 	"strings"
 )
 
-// editorDocumentIdentity 标记编辑状态所属的文档，不持有页面或资源数据
+// editorDocumentIdentity 标记编辑状态所属的文档和版本，不持有页面或资源数据
 type editorDocumentIdentity struct {
 	root    string
 	id      string
+	version string
 	fresh   bool
 	single  bool
 	fromNew bool
@@ -309,7 +310,26 @@ func (e *Editor) editDocuments(edit func(*Reader, []byte, *editorXML) (int, erro
 	if _, err := reader.Doc(); err != nil {
 		return err
 	}
-	if e.source != nil && e.documentRoot() == reader.documentRoot && e.Info.DocID == reader.OFD.DocBody[index].DocInfo.DocID {
+	if err := e.adoptDocumentReader(reader); err != nil {
+		return err
+	}
+	e.recordTransaction(before)
+	return nil
+}
+
+// adoptDocumentReader 接入已加载的编辑入口，跨文档或版本时重建页面与资源状态
+// 入参: reader 不拥有输入文件的独立阅读器
+// 返回: error 编辑器初始化错误
+func (e *Editor) adoptDocumentReader(reader *Reader) error {
+	version, err := reader.DocumentVersionID()
+	if err != nil {
+		return err
+	}
+	current, err := e.DocumentVersionID()
+	if err != nil {
+		return err
+	}
+	if e.source != nil && e.documentRoot() == reader.documentRoot && current == version && e.Info.DocID == reader.OFD.DocBody[reader.documentIndex].DocInfo.DocID {
 		source := *e.source
 		source.reader = reader
 		e.source = &source
@@ -326,7 +346,6 @@ func (e *Editor) editDocuments(edit func(*Reader, []byte, *editorXML) (int, erro
 		next.validatedPaths = e.validatedPaths
 		*e = *next
 	}
-	e.recordTransaction(before)
 	return nil
 }
 
@@ -339,23 +358,24 @@ func (e *Editor) documentRoot() string {
 	return e.source.reader.documentRoot
 }
 
-// sameDocument 判断快照是否属于同一文档，区别删除后复用目录的新文档
+// sameDocument 判断快照是否属于同一文档版本，区别删除后复用目录的新文档
 // 入参: other 编辑快照
 // 返回: bool 是否为同一文档
 func (e *Editor) sameDocument(other *Editor) bool {
 	return e.documentIdentity().matches(other.documentIdentity())
 }
 
-// documentIdentity 获取当前文档的入口与原始标识，文档排序不改变身份
+// documentIdentity 获取当前文档的入口、原始标识及版本，文档排序不改变身份
 // 返回: editorDocumentIdentity 文档身份
 func (e *Editor) documentIdentity() editorDocumentIdentity {
 	if e.source == nil {
 		return editorDocumentIdentity{id: e.Info.DocID, fresh: true}
 	}
-	return editorDocumentIdentity{root: e.documentRoot(), id: e.source.info.DocID, single: e.DocumentCount() == 1, fromNew: e.source.fromNew}
+	version, _ := e.DocumentVersionID()
+	return editorDocumentIdentity{root: e.documentRoot(), id: e.source.info.DocID, version: version, single: e.DocumentCount() == 1, fromNew: e.source.fromNew}
 }
 
-// matches 判断两个编辑状态是否属于同一文档，允许新文档首次建立包结构
+// matches 判断两个编辑状态是否属于同一文档版本，允许新文档首次建立包结构
 // 入参: other 另一编辑状态的文档身份
 // 返回: bool 是否为同一文档
 func (identity editorDocumentIdentity) matches(other editorDocumentIdentity) bool {
@@ -367,7 +387,7 @@ func (identity editorDocumentIdentity) matches(other editorDocumentIdentity) boo
 		if !fresh.fresh {
 			fresh, packaged = other, identity
 		}
-		return packaged.single && (packaged.fromNew || fresh.id != "" && fresh.id == packaged.id)
+		return packaged.version == "" && packaged.single && (packaged.fromNew || fresh.id != "" && fresh.id == packaged.id)
 	}
-	return identity.root == other.root && identity.id == other.id
+	return identity.root == other.root && identity.id == other.id && identity.version == other.version
 }
