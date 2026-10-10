@@ -361,7 +361,11 @@ func (e *Editor) styleTextObjects(objects []GraphicObject, style TextStyle) ([]G
 			return nil, &EditError{Code: EditUnsupportedObject, Err: fmt.Errorf("object %q requires explicit paragraph layout before changing size", id)}
 		}
 		if fontChanged {
-			text.Font = style.Font
+			if known {
+				text.Font = style.Font
+			} else if err := e.replaceTextFont(text, style.Font); err != nil {
+				return nil, err
+			}
 		}
 		if sizeChanged {
 			text.Size = style.Size
@@ -388,6 +392,49 @@ func (e *Editor) styleTextObjects(objects []GraphicObject, style TextStyle) ([]G
 		}
 	}
 	return updates, nil
+}
+
+// replaceTextFont 更换字体并重建字形索引，保留原文字定位
+// 入参: text 文字对象, id 目标字体标识
+// 返回: error 错误信息
+func (e *Editor) replaceTextFont(text *TextObject, id string) error {
+	if text.Font == id {
+		return nil
+	}
+	if len(text.CGTransform) == 0 {
+		text.Font = id
+		return nil
+	}
+	if err := validateTextGlyphs(*text, 1<<16); err != nil {
+		return err
+	}
+	font, err := e.editorFont(id)
+	if err != nil {
+		return err
+	}
+	var chars []rune
+	for _, code := range text.TextCode {
+		chars = append(chars, textCodeRunes(code.Value)...)
+	}
+	transforms := append([]CGTransform(nil), text.CGTransform...)
+	var missing []rune
+	for i := range transforms {
+		transform := &transforms[i]
+		if transform.CodeCount != 1 || transform.GlyphCount != 1 {
+			return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing the font of combined glyphs requires explicit layout")}
+		}
+		char := chars[transform.CodePosition]
+		glyph := font.GlyphIndex(char)
+		if glyph == 0 {
+			missing = append(missing, char)
+		}
+		transform.Glyphs = strconv.Itoa(int(glyph))
+	}
+	if err := missingGlyphError(id, missing); err != nil {
+		return err
+	}
+	text.Font, text.CGTransform = id, transforms
+	return nil
 }
 
 // breakTextLines 优先使用Unicode断行机会，过长词仅在字素边界折行，不丢弃空白

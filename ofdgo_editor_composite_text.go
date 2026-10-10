@@ -29,7 +29,7 @@ func (e *Editor) UpdateCompositeText(page int, path ObjectPath, index int, value
 }
 
 // StyleCompositeText 批量修改内部文字字体、字号或颜色，换字体保留原文字定位
-// 字体缺字或复杂字形映射使整批操作失败，不使用回退字体代替原文
+// 更换字体时同步字形索引，无法逐字映射时需显式重排，缺字使整批操作失败
 // 入参: page 页面索引, path 父复合路径, indexes 成员序号, style 文字样式增量
 // 返回: error 错误信息
 func (e *Editor) StyleCompositeText(page int, path ObjectPath, indexes []int, style TextStyle) error {
@@ -78,7 +78,13 @@ func (e *Editor) updateCompositeText(node *editorCompositeNode, member Composite
 	content, layout := text.TextLayout()
 	original := content
 	if style.Font != "" {
-		text.Font = style.Font
+		if state.layout == nil && options == nil && (style.Size == 0 || style.Size == text.Size) {
+			if err := e.replaceTextFont(&text, style.Font); err != nil {
+				return err
+			}
+		} else {
+			text.Font = style.Font
+		}
 	}
 	if value != nil {
 		content = *value
@@ -105,6 +111,7 @@ func (e *Editor) updateCompositeText(node *editorCompositeNode, member Composite
 			return err
 		}
 		object.TextObject.TextCode = text.TextCode
+		object.TextObject.CGTransform = text.CGTransform
 	} else if options != nil || content != original || style.Size != 0 && style.Size != text.Size || state.layout != nil && state.layout.options.Shape && style.Font != "" && style.Font != object.TextObject.Font {
 		if style.Size != 0 {
 			text.Size = style.Size
@@ -131,6 +138,7 @@ func (e *Editor) updateCompositeText(node *editorCompositeNode, member Composite
 			return err
 		}
 		object.TextObject.Font = style.Font
+		object.TextObject.CGTransform = text.CGTransform
 	}
 	if style.Color != "" {
 		if err := creationColor(&FillColor{Value: style.Color}); err != nil {
