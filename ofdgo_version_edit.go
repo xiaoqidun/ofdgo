@@ -20,7 +20,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"maps"
-	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -272,8 +271,7 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	reserved := maps.Clone(parts)
 	var pending []string
 	allocate := func(name string) {
-		extension := path.Ext(name)
-		target := packageAvailableName(r, reserved, strings.TrimSuffix(name, extension)+".edit"+extension)
+		target := packageAvailableName(r, reserved, name)
 		paths[name], reserved[target] = target, nil
 		pending = append(pending, name)
 	}
@@ -452,8 +450,7 @@ func (r *Reader) versionManifest(parts map[string][]byte, paths map[string]strin
 	}
 	name := version.Location
 	if shared[name] {
-		extension := path.Ext(name)
-		name = packageAvailableName(r, parts, strings.TrimSuffix(name, extension)+".edit"+extension)
+		name = packageAvailableName(r, parts, name)
 		entry, ok := parts["OFD.xml"]
 		if !ok {
 			entry, err = r.readFile("OFD.xml")

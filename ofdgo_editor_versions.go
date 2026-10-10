@@ -24,7 +24,6 @@ import (
 	"path"
 	"slices"
 	"strconv"
-	"strings"
 )
 
 // DocumentVersions 获取当前编辑文档的版本信息，包含尚未写出的修改
@@ -117,7 +116,7 @@ func (e *Editor) AddVersion(name string) (string, error) {
 			return 0, err
 		}
 		body := root.childAt("DocBody", reader.documentIndex)
-		location := packageAvailableName(reader, nil, path.Join(path.Dir(entry), "Versions", id+".xml"))
+		location := packageAvailableName(reader, nil, path.Join(path.Dir(entry), "Versions", "Version_"+strconv.FormatInt(int64(index), 10)+".xml"))
 		attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: id}}
 		format := reader.Version()
 		if reader.versionInfo != nil && reader.versionInfo.Version != "" {
@@ -250,8 +249,7 @@ func (e *Editor) RenameVersion(id, name string) error {
 		if err != nil {
 			return 0, err
 		}
-		extension := path.Ext(version.Location)
-		location := packageAvailableName(reader, nil, strings.TrimSuffix(version.Location, extension)+".edit"+extension)
+		location := packageAvailableName(reader, nil, version.Location)
 		body := root.childAt("DocBody", reader.documentIndex)
 		for _, node := range body.child("Versions").children {
 			if node.matchesOFD("Version") && node.attr("ID") == id {
