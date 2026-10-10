@@ -37,10 +37,11 @@ const (
 
 // editorResourceRefs 保存全包资源标识和直接文件引用，不以页面是否加载判断资源存活
 type editorResourceRefs struct {
-	ids      map[string]bool
-	files    map[string]bool
-	fonts    map[string]*editorFontUsage
-	versions map[string]bool
+	ids       map[string]bool
+	files     map[string]bool
+	fonts     map[string]*editorFontUsage
+	versions  map[string]bool
+	documents map[string]bool
 }
 
 // compactSourceReferences 合并自产页面引用，版本文档按当前版本范围扫描

@@ -143,6 +143,12 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 		}
 		if len(s.stack) == 0 {
 			s.seen = true
+			if token.Name.Local == "Document" {
+				if s.refs.documents == nil {
+					s.refs.documents = make(map[string]bool)
+				}
+				s.refs.documents[s.name] = true
+			}
 			s.resource = token.Name.Local == "Res"
 			if s.resource {
 				for _, attr := range token.Attr {
@@ -238,6 +244,12 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 func (r *editorResourceRefs) merge(other *editorResourceRefs) {
 	maps.Copy(r.ids, other.ids)
 	maps.Copy(r.files, other.files)
+	if len(other.documents) != 0 {
+		if r.documents == nil {
+			r.documents = make(map[string]bool)
+		}
+		maps.Copy(r.documents, other.documents)
+	}
 	if len(other.versions) != 0 {
 		if r.versions == nil {
 			r.versions = make(map[string]bool)

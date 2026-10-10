@@ -74,6 +74,10 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		return reader.readFileView(name)
 	}
 	refs := editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
+	var fontReferences map[string]*editorResourceRefs
+	if reader != nil && reader.DocumentCount() > 1 && e.backends.FontResources != nil {
+		fontReferences = make(map[string]*editorResourceRefs)
+	}
 	var resources []string
 	actual := make(map[string]string)
 	for _, name := range slices.Sorted(maps.Keys(names)) {
@@ -94,6 +98,9 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		data, replaced := parts[name]
 		if known, ok := generated[name]; ok && replaced && known.refs != nil && known.matches(data) {
 			refs.merge(known.refs)
+			if fontReferences != nil && len(known.refs.fonts) != 0 {
+				fontReferences[name] = known.refs
+			}
 			continue
 		}
 		var input io.ReadCloser
@@ -110,13 +117,23 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 				return err
 			}
 		}
-		resource, safe := refs.scan(imageInput{ReadCloser: input, context: e.output.ctx}, name)
+		scanned := &refs
+		if fontReferences != nil {
+			scanned = &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
+		}
+		resource, safe := scanned.scan(imageInput{ReadCloser: input, context: e.output.ctx}, name)
 		input.Close()
 		if err := e.output.ctx.Err(); err != nil {
 			return err
 		}
 		if !safe {
 			return nil
+		}
+		if fontReferences != nil {
+			if resource || len(scanned.fonts) != 0 {
+				fontReferences[name] = scanned
+			}
+			refs.merge(scanned)
 		}
 		if resource {
 			resources = append(resources, name)
@@ -166,6 +183,13 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 					files[resourceFile{key, field}] = true
 				}
 			}
+		}
+	}
+	var fontUsage map[string]*editorFontUsage
+	if fontReferences != nil {
+		fontUsage, err = reader.compressionFontUsage(e.output.ctx, parts, generated, refs.documents, resources, fontReferences, read)
+		if err != nil {
+			return err
 		}
 	}
 	aliases := make(map[string]string)
@@ -226,6 +250,17 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 					continue
 				}
 				source.key.hash = sha256.Sum256(data)
+			}
+			if usage := fontUsage[key]; role == "FontFile" && usage != nil && !usage.unsafe {
+				candidate, err := e.backends.FontResources.SubsetSourceFont(data, FontUsage{Characters: slices.Sorted(maps.Keys(usage.chars)), Glyphs: slices.Sorted(maps.Keys(usage.glyphs))})
+				if err != nil {
+					return fmt.Errorf("subset font %s: %w", key, err)
+				}
+				if len(candidate) != 0 && len(candidate) < len(data) {
+					data = candidate
+					parts[actual[key]] = data
+					source.key.hash = sha256.Sum256(data)
+				}
 			}
 			if role == "MediaFile" {
 				options, demand := e.outputImageOptions(key)
