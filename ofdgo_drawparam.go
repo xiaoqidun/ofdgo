@@ -102,26 +102,23 @@ func mergeDrawParam(base DrawParam, dp *DrawParam) *DrawParam {
 	return &base
 }
 
-// getDrawParam 获取绘制参数逻辑
-// 入参: id 参数ID, visited 访问记录
+// getDrawParam 解析绘制参数继承链，按实际资源识别循环引用
+// 入参: id 参数标识, visited 已访问资源
 // 返回: *DrawParam 绘制参数
-func (r *Renderer) getDrawParam(id string, visited map[string]bool) *DrawParam {
-	if visited == nil {
-		visited = make(map[string]bool)
-	}
-	if visited[id] {
+func (r *Renderer) getDrawParam(id string, visited map[*DrawParam]bool) *DrawParam {
+	dp, _ := resourceValue(r.DrawParams, id)
+	if dp == nil || visited[dp] {
 		return nil
 	}
-	visited[id] = true
-	if dp, ok := r.DrawParams[id]; ok {
-		if dp.Relative != "" {
-			base := r.getDrawParam(dp.Relative, visited)
-			if base == nil {
-				return dp
-			}
+	if visited == nil {
+		visited = make(map[*DrawParam]bool)
+	}
+	visited[dp] = true
+	if dp.Relative != "" {
+		base := r.getDrawParam(dp.Relative, visited)
+		if base != nil {
 			return mergeDrawParam(*base, dp)
 		}
-		return dp
 	}
-	return nil
+	return dp
 }

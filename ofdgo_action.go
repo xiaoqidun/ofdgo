@@ -366,7 +366,7 @@ func (r *Renderer) annotationActionSources(annotations []Annotation) []actionSou
 // appendGraphicActionSources 添加图形对象动作来源
 // 入参: sources 动作来源, object 图形对象, parent 父级变换, boundaryInCTM 边界是否参与父级变换, seen 当前资源引用链
 // 返回: []actionSource 动作来源
-func (r *Renderer) appendGraphicActionSources(sources []actionSource, object GraphicObject, parent Matrix, boundaryInCTM bool, seen map[string]bool) []actionSource {
+func (r *Renderer) appendGraphicActionSources(sources []actionSource, object GraphicObject, parent Matrix, boundaryInCTM bool, seen map[*CompositeGraphicUnit]bool) []actionSource {
 	var boundary, ctm, resource string
 	var actions []Action
 	var children []GraphicObject
@@ -412,14 +412,14 @@ func (r *Renderer) appendGraphicActionSources(sources []actionSource, object Gra
 		}
 		sources = append(sources, source)
 	}
-	if resource != "" && !seen[resource] {
-		if unit := r.CompositeGraphicUnits[resource]; unit != nil {
+	if resource != "" {
+		if unit, _ := resourceValue(r.CompositeGraphicUnits, resource); unit != nil && !seen[unit] {
 			if seen == nil {
-				seen = make(map[string]bool)
+				seen = make(map[*CompositeGraphicUnit]bool)
 			}
-			seen[resource] = true
+			seen[unit] = true
 			sources = r.appendGraphicActionSources(sources, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: *unit}, matrix, true, seen)
-			delete(seen, resource)
+			delete(seen, unit)
 		}
 	}
 	for _, child := range children {

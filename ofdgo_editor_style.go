@@ -98,12 +98,12 @@ func (e *Editor) DrawParam(id string, resolved bool) (*DrawParam, error) {
 		return cloneEditorData(draw), nil
 	}
 	for _, resource := range e.resources {
-		if resource.draw != nil && resource.draw.ID == id {
+		if resource.draw != nil && sameResourceID(resource.draw.ID, id) {
 			return cloneEditorData(resource.draw), nil
 		}
 	}
 	if e.source != nil {
-		if value := e.source.reader.drawParamCache[id]; value != nil {
+		if value, _ := resourceValue(e.source.reader.drawParamCache, id); value != nil {
 			return cloneEditorData(value), nil
 		}
 	}
@@ -425,13 +425,16 @@ func (e *Editor) editorDrawParam(id string, visited map[string]bool) (*DrawParam
 	}
 	var dp *DrawParam
 	for _, resource := range e.resources {
-		if resource.draw != nil && resource.draw.ID == id {
+		if resource.draw != nil && sameResourceID(resource.draw.ID, id) {
 			dp = resource.draw
 			break
 		}
 	}
 	if dp == nil && e.source != nil {
-		dp = e.source.reader.drawParamCache[id]
+		dp, _ = resourceValue(e.source.reader.drawParamCache, id)
+	}
+	if key := editorResourceID(id); key != "" {
+		id = key
 	}
 	if dp == nil || visited[id] {
 		return nil, &EditError{Code: EditUnsupportedStyle, Err: fmt.Errorf("invalid draw parameter reference %q", id)}

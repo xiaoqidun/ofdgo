@@ -68,7 +68,7 @@ type fontUsagePage struct {
 
 // fontUsageReferences 保存字体统计中的当前引用路径，不合并共享内容的用量
 type fontUsageReferences struct {
-	composites map[string]bool
+	composites map[*CompositeGraphicUnit]bool
 	patterns   map[*Pattern]bool
 }
 
@@ -577,20 +577,20 @@ func (r *Renderer) countCompositeFonts(cgu CompositeGraphicUnit, usage map[strin
 	r.countClipFonts(cgu.Clips, usage)
 	defaults = r.drawParamDefaults(cgu.DrawParam, defaults)
 	if cgu.ResourceID != "" {
-		if visited == nil {
-			visited = &fontUsageReferences{}
-		}
-		if visited.composites[cgu.ResourceID] {
-			return
-		}
-		if visited.composites == nil {
-			visited.composites = make(map[string]bool)
-		}
-		visited.composites[cgu.ResourceID] = true
-		if ref := r.CompositeGraphicUnits[cgu.ResourceID]; ref != nil {
+		if ref, _ := resourceValue(r.CompositeGraphicUnits, cgu.ResourceID); ref != nil {
+			if visited == nil {
+				visited = &fontUsageReferences{}
+			}
+			if visited.composites[ref] {
+				return
+			}
+			if visited.composites == nil {
+				visited.composites = make(map[*CompositeGraphicUnit]bool)
+			}
+			visited.composites[ref] = true
 			r.countCompositeFonts(*ref, usage, defaults, visited)
+			defer delete(visited.composites, ref)
 		}
-		defer delete(visited.composites, cgu.ResourceID)
 	}
 	for object := range cgu.objects() {
 		r.countObjectFonts(object, usage, defaults, visited)

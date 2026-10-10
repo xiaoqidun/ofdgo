@@ -269,6 +269,9 @@ func (e *Editor) ReplaceAnnotationText(page int, id, old, value string, style Te
 						count++
 					} else if member.Object.Type == "CompositeObject" || member.Object.Type == "CompositeGraphicUnit" {
 						resource := member.Object.CompositeGraphicUnit.ResourceID
+						if id := editorResourceID(resource); id != "" {
+							resource = id
+						}
 						if resource != "" && visiting[resource] {
 							return fmt.Errorf("cyclic composite resource %q", resource)
 						}

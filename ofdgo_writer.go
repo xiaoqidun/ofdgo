@@ -512,6 +512,8 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 			}
 		}
 	}
+	normalizeResourceReferences(used)
+	normalizeResourceReferences(promoted)
 	for i := len(e.resources) - 1; i >= 0; i-- {
 		resource := e.resources[i]
 		if resource.definition() != "" && used[resource.definition()] {
@@ -541,7 +543,7 @@ func (e *Editor) usedResources() (fonts, images []editorResource, spaces []Color
 		}
 	}
 	for id := range promoted {
-		if name := e.source.reader.resourceFiles[id]; name != "" {
+		if name, _ := resourceValue(e.source.reader.resourceFiles, id); name != "" {
 			files[name] = true
 		}
 	}

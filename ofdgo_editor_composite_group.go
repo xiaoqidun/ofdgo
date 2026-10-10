@@ -264,10 +264,14 @@ func (e *Editor) compositeUngroupable(node *editorXML) bool {
 		if id == "" {
 			return true
 		}
-		if seen[id] {
+		key := id
+		if value := editorResourceID(id); value != "" {
+			key = value
+		}
+		if seen[key] {
 			return false
 		}
-		seen[id] = true
+		seen[key] = true
 		resource, err := e.compositeDefinition(id)
 		if err != nil {
 			return false
@@ -282,14 +286,15 @@ func (e *Editor) compositeUngroupable(node *editorXML) bool {
 func (e *Editor) compositeDefinition(id string) (*editorCompositeNode, error) {
 	var data []byte
 	for _, resource := range e.resources {
-		if resource.composite == id {
+		if sameResourceID(resource.composite, id) {
 			data = resource.data
 			break
 		}
 	}
 	if data == nil && e.source != nil {
 		var err error
-		data, err = e.source.reader.readFile(e.source.reader.resourceFiles[id])
+		name, _ := resourceValue(e.source.reader.resourceFiles, id)
+		data, err = e.source.reader.readFile(name)
 		if err != nil {
 			return nil, err
 		}
@@ -298,16 +303,12 @@ func (e *Editor) compositeDefinition(id string) (*editorCompositeNode, error) {
 	if err != nil {
 		return nil, err
 	}
-	if units := root.child("CompositeGraphicUnits"); units != nil {
-		for _, unit := range units.children {
-			if unit.name.Local == "CompositeGraphicUnit" && unit.attr("ID") == id {
-				fragment, err := editorXMLStandalone(data[unit.start:unit.end], unit)
-				if err != nil {
-					return nil, err
-				}
-				return newEditorCompositeNode(fragment)
-			}
+	if unit := editorResourceNode(root, "CompositeGraphicUnits", "CompositeGraphicUnit", id); unit != nil {
+		fragment, err := editorXMLStandalone(data[unit.start:unit.end], unit)
+		if err != nil {
+			return nil, err
 		}
+		return newEditorCompositeNode(fragment)
 	}
 	return nil, fmt.Errorf("composite resource %q not found", id)
 }

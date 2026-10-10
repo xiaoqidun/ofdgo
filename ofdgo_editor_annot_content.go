@@ -154,6 +154,64 @@ func (e *Editor) Annotation(index int, id string) (Annotation, error) {
 	return annotation, err
 }
 
+// AnnotationTexts 按绘制顺序读取注解外观中的文字，展开复合资源并去重，不依赖字体或渲染后端
+// 入参: index 页面索引, id 注解标识
+// 返回: []string 文字列表, error 注解读取或资源引用错误
+func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
+	annotation, err := e.Annotation(index, id)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := e.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	if _, err := reader.PageContentByIndex(index); err != nil {
+		return nil, err
+	}
+	texts := make([]string, 0)
+	seen := make(map[string]bool)
+	visiting := make(map[*CompositeGraphicUnit]bool)
+	collected := make(map[*CompositeGraphicUnit]bool)
+	var collect func(CompositeGraphicUnit) error
+	collect = func(unit CompositeGraphicUnit) error {
+		if unit.ResourceID != "" {
+			ref, _ := resourceValue(reader.compositeGraphicUnitCache, unit.ResourceID)
+			if ref == nil || visiting[ref] {
+				return fmt.Errorf("invalid composite resource %q", unit.ResourceID)
+			}
+			if !collected[ref] {
+				visiting[ref] = true
+				if err := collect(*ref); err != nil {
+					return err
+				}
+				delete(visiting, ref)
+				collected[ref] = true
+			}
+		}
+		for object := range unit.objects() {
+			switch object.Type {
+			case "TextObject":
+				value := object.TextObject.Text()
+				if !seen[value] {
+					seen[value] = true
+					texts = append(texts, value)
+				}
+			case "CompositeObject", "CompositeGraphicUnit":
+				if err := collect(object.CompositeGraphicUnit); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := collect(CompositeGraphicUnit{Objects: annotation.Appearance.Objects}); err != nil {
+		return nil, err
+	}
+	return texts, nil
+}
+
 // annotationXML 读取唯一注解的独立原文，不以类型、大小或可见性筛选
 // 入参: index 页面索引, id 注解标识
 // 返回: []byte 注解XML, error 错误信息

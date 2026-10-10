@@ -500,7 +500,8 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 		visible := n.visible && (c.Visible == nil || *c.Visible)
 		alpha := mergeAlpha(n.alpha, c.Alpha)
 		if c.ResourceID != "" {
-			data, err := reader.readFile(reader.resourceFiles[c.ResourceID])
+			name, _ := resourceValue(reader.resourceFiles, c.ResourceID)
+			data, err := reader.readFile(name)
 			if err != nil {
 				return nil, err
 			}
@@ -508,15 +509,7 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 			if err != nil {
 				return nil, err
 			}
-			var resource *editorXML
-			if units := root.child("CompositeGraphicUnits"); units != nil {
-				for _, child := range units.children {
-					if child.name.Local == "CompositeGraphicUnit" && child.attr("ID") == c.ResourceID {
-						resource = child
-						break
-					}
-				}
-			}
+			resource := editorResourceNode(root, "CompositeGraphicUnits", "CompositeGraphicUnit", c.ResourceID)
 			if resource == nil {
 				return nil, fmt.Errorf("composite resource %q not found", c.ResourceID)
 			}
@@ -530,7 +523,7 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 			}
 			var states map[string]editorCompositeState
 			for _, resource := range e.resources {
-				if resource.composite == c.ResourceID {
+				if sameResourceID(resource.composite, c.ResourceID) {
 					states = resource.states
 					break
 				}
@@ -578,6 +571,9 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 	var result []*editorCompositeNode
 	if n.ref != nil {
 		id := n.object.CompositeGraphicUnit.ResourceID
+		if key := editorResourceID(id); key != "" {
+			id = key
+		}
 		if visiting[id] {
 			return nil, fmt.Errorf("cyclic composite resource %q", id)
 		}
@@ -1072,6 +1068,7 @@ func editorResourceReferences(data []byte) ([]string, error) {
 		}
 	}
 	collect(root)
+	normalizeResourceReferences(refs)
 	return slices.Sorted(maps.Keys(refs)), nil
 }
 
@@ -1091,6 +1088,9 @@ func collectCompositeReferences(composite CompositeGraphicUnit, used map[string]
 // 入参: id 矢量资源标识
 // 返回: error 尺寸、内容或引用错误
 func (v *editorValidation) validateVector(id string) error {
+	if key := editorResourceID(id); key != "" {
+		id = key
+	}
 	if v.composites[id] {
 		return fmt.Errorf("cyclic composite resource %q", id)
 	}

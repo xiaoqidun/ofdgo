@@ -132,6 +132,17 @@ type CompositeGraphicUnit struct {
 	extentSet            bool
 }
 
+// sameResourceID 判断资源标识是否相同，数字标识按数值比较
+// 入参: first 第一个标识, second 第二个标识
+// 返回: bool 是否相同
+func sameResourceID(first, second string) bool {
+	if first == second {
+		return true
+	}
+	id := editorResourceID(first)
+	return id != "" && id == editorResourceID(second)
+}
+
 // resourceValue 优先查找原标识与标准十进制标识，回退别名有冲突时不猜测
 // 入参: values 已加载资源, id 标识文本
 // 返回: T 资源值, bool 是否存在唯一结果

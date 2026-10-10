@@ -1501,29 +1501,10 @@ func readAnnotation(args []js.Value) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	texts := make([]string, 0)
-	visiting := make(map[string]bool)
-	var collect func([]ofdgo.GraphicObject)
-	collect = func(objects []ofdgo.GraphicObject) {
-		for _, object := range objects {
-			switch object.Type {
-			case "TextObject":
-				value := object.TextObject.Text()
-				if !slices.Contains(texts, value) {
-					texts = append(texts, value)
-				}
-			case "CompositeObject", "CompositeGraphicUnit":
-				collect(object.CompositeGraphicUnit.Objects)
-				id := object.CompositeGraphicUnit.ResourceID
-				if unit := currentSession.Renderer.CompositeGraphicUnits[id]; unit != nil && !visiting[id] {
-					visiting[id] = true
-					collect(unit.Objects)
-					delete(visiting, id)
-				}
-			}
-		}
+	texts, err := currentEditor.AnnotationTexts(args[0].Int(), annotation.ID)
+	if err != nil {
+		return nil, err
 	}
-	collect(annotation.Appearance.Objects)
 	info := map[string]any{"texts": texts, "remark": annotation.Remark, "creator": annotation.Creator}
 	if annotation.Type == "Link" {
 		info["linkKind"] = "keep"

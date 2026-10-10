@@ -169,7 +169,7 @@ func (r *Renderer) walkLayers(layers []Layer, order int, visitor PageVisitor) er
 // walkObject 访问对象并传递当前资源引用链
 // 入参: object 源对象, state 继承状态, visitor 页面访问器, references 当前资源引用链
 // 返回: error 遍历或访问器错误
-func (r *Renderer) walkObject(object *GraphicObject, state RenderState, visitor PageVisitor, references map[string]bool) error {
+func (r *Renderer) walkObject(object *GraphicObject, state RenderState, visitor PageVisitor, references map[*CompositeGraphicUnit]bool) error {
 	if r.pageContext != nil {
 		if err := r.pageContext.Err(); err != nil {
 			return err
@@ -191,16 +191,16 @@ func (r *Renderer) walkObject(object *GraphicObject, state RenderState, visitor 
 // walkComposite 展开复合图元的资源、成员与透明度，不修改共享资源
 // 入参: object 复合图元, state 继承状态, visitor 页面访问器, references 当前资源引用链
 // 返回: error 几何或访问器错误
-func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState, visitor PageVisitor, references map[string]bool) error {
+func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState, visitor PageVisitor, references map[*CompositeGraphicUnit]bool) error {
 	if object.Visible != nil && !*object.Visible {
 		if groups, ok := visitor.(PageGroups); ok {
-			count, ref, seen := len(object.Objects), object.ResourceID, make(map[string]bool)
-			for ref != "" && !seen[ref] {
-				seen[ref] = true
-				unit := r.CompositeGraphicUnits[ref]
-				if unit == nil {
+			count, ref, seen := len(object.Objects), object.ResourceID, make(map[*CompositeGraphicUnit]bool)
+			for ref != "" {
+				unit, _ := resourceValue(r.CompositeGraphicUnits, ref)
+				if unit == nil || seen[unit] {
 					break
 				}
+				seen[unit] = true
 				count, ref = count+len(unit.Objects), unit.ResourceID
 			}
 			groups.SkipObjects(count)
@@ -241,20 +241,20 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 	state.Defaults = r.drawParamDefaults(object.DrawParam, state.Defaults)
 	state.Parent = &matrix
 	if object.ResourceID != "" {
-		if references[object.ResourceID] {
-			return fmt.Errorf("cyclic composite resource %q", object.ResourceID)
-		}
-		if ref, ok := r.CompositeGraphicUnits[object.ResourceID]; ok {
-			if references == nil {
-				references = make(map[string]bool)
+		if ref, _ := resourceValue(r.CompositeGraphicUnits, object.ResourceID); ref != nil {
+			if references[ref] {
+				return fmt.Errorf("cyclic composite resource %q", object.ResourceID)
 			}
-			references[object.ResourceID] = true
+			if references == nil {
+				references = make(map[*CompositeGraphicUnit]bool)
+			}
+			references[ref] = true
 			copy := *ref
 			copy.Alpha = mergeAlpha(copy.Alpha, object.Alpha)
 			referenceState := state
 			referenceState.BoundaryInCTM = true
 			err := r.walkComposite(copy, referenceState, visitor, references)
-			delete(references, object.ResourceID)
+			delete(references, ref)
 			if err != nil {
 				return err
 			}

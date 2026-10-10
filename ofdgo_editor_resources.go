@@ -313,6 +313,33 @@ func editorResourceID(value string) string {
 	return strconv.FormatUint(id, 10)
 }
 
+// normalizeResourceReferences 合并数值等价的资源引用，保留内部非数字标识
+// 入参: references 待规范化的引用集合
+func normalizeResourceReferences(references map[string]bool) {
+	for id, used := range references {
+		if key := editorResourceID(id); key != "" && key != id {
+			references[key] = references[key] || used
+			delete(references, id)
+		}
+	}
+}
+
+// editorResourceNode 按资源标识查找标准资源节点，等价别名冲突时不猜测
+// 入参: root 资源文件根节点, group 资源集合名称, kind 资源类型, id 资源标识
+// 返回: *editorXML 资源节点，未找到时为nil
+func editorResourceNode(root *editorXML, group, kind, id string) *editorXML {
+	nodes := make(map[string]*editorXML)
+	if collection := root.child(group); collection != nil {
+		for _, node := range collection.children {
+			if node.matchesOFD(kind) {
+				nodes[node.attr("ID")] = node
+			}
+		}
+	}
+	node, _ := resourceValue(nodes, id)
+	return node
+}
+
 // editorResourceLocation 按ST_Loc与Res.BaseLoc解析路径，大小写折叠用于保守保留共享文件
 // 入参: name 所在XML, base 资源目录, value 路径值
 // 返回: string 包内路径

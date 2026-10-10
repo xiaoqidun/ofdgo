@@ -25,14 +25,15 @@ import (
 func (e *Editor) drawParamXML(id string) ([]byte, error) {
 	var data []byte
 	for _, resource := range e.resources {
-		if resource.draw != nil && resource.draw.ID == id {
+		if resource.draw != nil && sameResourceID(resource.draw.ID, id) {
 			data = resource.data
 			break
 		}
 	}
 	if data == nil && e.source != nil {
 		var err error
-		data, err = e.source.reader.readFile(e.source.reader.resourceFiles[id])
+		name, _ := resourceValue(e.source.reader.resourceFiles, id)
+		data, err = e.source.reader.readFile(name)
 		if err != nil {
 			return nil, err
 		}
@@ -41,12 +42,8 @@ func (e *Editor) drawParamXML(id string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if params := root.child("DrawParams"); params != nil {
-		for _, node := range params.children {
-			if node.name.Local == "DrawParam" && node.attr("ID") == id && classifyOFDNamespace(node.name.Space) != ofdXMLUnknown {
-				return editorXMLStandalone(data[node.start:node.end], node)
-			}
-		}
+	if node := editorResourceNode(root, "DrawParams", "DrawParam", id); node != nil {
+		return editorXMLStandalone(data[node.start:node.end], node)
 	}
 	return nil, fmt.Errorf("draw parameter %q not found", id)
 }
@@ -55,13 +52,17 @@ func (e *Editor) drawParamXML(id string) ([]byte, error) {
 // 入参: id 源参数标识, base 独立基准标识, visited 当前继承链
 // 返回: string 新继承链末端标识, error 错误信息
 func (e *Editor) copyDrawParam(id, base string, visited map[string]bool) (string, error) {
-	if id == "" || id == base {
+	if id == "" || sameResourceID(id, base) {
 		return base, nil
 	}
-	if visited[id] {
+	key := id
+	if value := editorResourceID(id); value != "" {
+		key = value
+	}
+	if visited[key] {
 		return "", fmt.Errorf("cyclic draw parameter %q", id)
 	}
-	visited[id] = true
+	visited[key] = true
 	data, err := e.drawParamXML(id)
 	if err != nil {
 		return "", err
@@ -70,7 +71,7 @@ func (e *Editor) copyDrawParam(id, base string, visited map[string]bool) (string
 	if err != nil {
 		return "", err
 	}
-	if root.attr("Relative") == base {
+	if sameResourceID(root.attr("Relative"), base) {
 		return id, nil
 	}
 	base, err = e.copyDrawParam(root.attr("Relative"), base, visited)
@@ -78,7 +79,7 @@ func (e *Editor) copyDrawParam(id, base string, visited map[string]bool) (string
 		return "", err
 	}
 	for _, resource := range e.resources {
-		if resource.drawSource == id && resource.draw.Relative == base {
+		if sameResourceID(resource.drawSource, id) && sameResourceID(resource.draw.Relative, base) {
 			return resource.draw.ID, nil
 		}
 	}
