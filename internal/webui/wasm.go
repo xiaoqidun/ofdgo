@@ -186,6 +186,8 @@ func RunWASM() {
 	registerAsyncCallback("ofdgoDetectFormat", detectDocumentFormat)
 	registerCallback("ofdgoOpen", openDocument)
 	registerCallback("ofdgoSelectDocument", selectDocument)
+	registerCallback("ofdgoDocumentVersions", documentVersions)
+	registerCallback("ofdgoChangeVersion", changeDocumentVersion)
 	registerCallback("ofdgoChangeDocument", changePackageDocument)
 	registerCallback("ofdgoPackageDocuments", packageDocuments)
 	registerAsyncCallback("ofdgoConvertPDF", convertPDFDocument)
@@ -3443,6 +3445,60 @@ func packageDocuments(args []js.Value) (any, error) {
 	return entries, nil
 }
 
+// documentVersions 读取当前编辑文档的版本列表，不切换版本或解析页面
+// 入参: args 保留参数
+// 返回: any 版本列表, error 读取错误
+func documentVersions(args []js.Value) (any, error) {
+	if currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	versions, err := currentEditor.DocumentVersions()
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]VersionEntry, 1, len(versions)+1)
+	entries[0].Default = true
+	for _, version := range versions {
+		entries = append(entries, VersionEntry{ID: version.ID, Index: version.Index, Name: version.Name, Default: version.Current})
+		if version.Current {
+			entries[0].Default = false
+		}
+	}
+	return entries, nil
+}
+
+// changeDocumentVersion 调用库层版本操作，沿用编辑历史和预览更新流程
+// 入参: args 操作、版本标识及可选名称
+// 返回: any 文档信息, error 操作错误
+func changeDocumentVersion(args []js.Value) (any, error) {
+	if len(args) != 3 {
+		return nil, fmt.Errorf("invalid version arguments")
+	}
+	return changeAtomicObjects(func() error {
+		id, name := args[1].String(), args[2].String()
+		switch args[0].String() {
+		case "add":
+			return currentEditor.Transaction(func(editor *ofdgo.Editor) error {
+				if err := editor.SelectVersion(id); err != nil {
+					return err
+				}
+				_, err := editor.AddVersion(name)
+				return err
+			})
+		case "rename":
+			return currentEditor.RenameVersion(id, name)
+		case "delete":
+			return currentEditor.DeleteVersion(id)
+		case "default":
+			return currentEditor.SetDefaultVersion(id)
+		case "select":
+			return currentEditor.SelectVersion(id)
+		default:
+			return fmt.Errorf("invalid version operation")
+		}
+	})
+}
+
 // changeAttachment 编辑附件，逐个读取文件并复用库层事务和历史
 // 入参: args 操作、附件标识、名称列表、文件读取回调
 // 返回: any 编辑状态, error 错误信息
@@ -3649,7 +3705,9 @@ func previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
 	if currentSession != nil {
 		previous := currentSession.Reader
 		oldBody, newBody := previous.OFD.DocBody[previous.DocumentIndex()], reader.OFD.DocBody[reader.DocumentIndex()]
-		if oldBody.DocRoot != newBody.DocRoot || oldBody.DocInfo.DocID != newBody.DocInfo.DocID {
+		oldVersion, _ := previous.DocumentVersionID()
+		newVersion, _ := reader.DocumentVersionID()
+		if oldBody.DocRoot != newBody.DocRoot || oldBody.DocInfo.DocID != newBody.DocInfo.DocID || oldVersion != newVersion {
 			copiedObjects, copiedStyle = nil, nil
 			clearImport()
 		}

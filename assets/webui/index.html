@@ -348,6 +348,23 @@
 				<div id="documentStatus" class="form-status" role="status"></div>
 			</form>
 		</dialog>
+		<dialog id="versionPanel" class="form-dialog document-dialog" aria-labelledby="versionTitle">
+			<form id="versionForm">
+				<h2 id="versionTitle" class="form-title">版本管理</h2>
+				<div id="versionNotice" class="font-permission-hint" role="status" hidden></div>
+				<div id="versionList" class="document-list" role="listbox" aria-label="版本列表"></div>
+				<label class="form-row"><span>名称</span><input id="versionName" type="text" autocomplete="off" aria-label="版本名称"></label>
+				<div class="document-actions" role="group" aria-label="版本操作">
+					<button id="versionAdd" class="button" type="button" title="新增版本" aria-label="新增版本">新增</button>
+					<button id="versionRename" class="button" type="button" title="修改名称" aria-label="修改名称">改名</button>
+					<button id="versionDefault" class="button" type="button" title="默认版本" aria-label="默认版本">默认</button>
+					<button id="versionDelete" class="button" type="button" title="删除版本" aria-label="删除版本">删除</button>
+					<button id="versionSelect" class="button" type="button" title="切换版本" aria-label="切换版本">切换</button>
+					<button id="versionClose" class="button" type="button">关闭</button>
+				</div>
+				<div id="versionStatus" class="form-status" role="status"></div>
+			</form>
+		</dialog>
 		<dialog id="infoPanel" class="form-dialog" aria-label="文档信息">
 			<form id="infoForm">
 				<label class="form-row"><span>标题</span><input id="infoTitle" type="text" autofocus></label>
@@ -620,7 +637,10 @@
 				</section>
 				<div class="panel-row">
 					<div class="panel-title compact">文档</div>
-					<button id="documentManageButton" class="small-button" type="button" title="文档管理" aria-label="文档管理" aria-haspopup="dialog" aria-controls="documentPanel" hidden>管理</button>
+					<div class="panel-actions">
+						<button id="versionManageButton" class="small-button" type="button" title="版本管理" aria-label="版本管理" aria-haspopup="dialog" aria-controls="versionPanel" hidden>版本</button>
+						<button id="documentManageButton" class="small-button" type="button" title="文档管理" aria-label="文档管理" aria-haspopup="dialog" aria-controls="documentPanel" hidden>管理</button>
+					</div>
 				</div>
 				<div id="editNotice" class="font-permission-hint" role="status" hidden></div>
 				<div id="documentRow" class="document-row" hidden>

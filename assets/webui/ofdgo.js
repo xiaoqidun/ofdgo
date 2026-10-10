@@ -64,6 +64,7 @@ const state = {
 	createPackage: false,
 	createDocumentAt: null,
 	documentManagement: null,
+	versionManagement: null,
 	infoDocumentIndex: null,
 	pageSelection: new Set(),
 	pageSelectionAnchor: null,
@@ -257,6 +258,19 @@ const el = {
 	documentDeleteButton: document.querySelector("#documentDeleteButton"),
 	documentUpButton: document.querySelector("#documentUpButton"),
 	documentDownButton: document.querySelector("#documentDownButton"),
+	versionManageButton: document.querySelector("#versionManageButton"),
+	versionPanel: document.querySelector("#versionPanel"),
+	versionForm: document.querySelector("#versionForm"),
+	versionNotice: document.querySelector("#versionNotice"),
+	versionList: document.querySelector("#versionList"),
+	versionName: document.querySelector("#versionName"),
+	versionStatus: document.querySelector("#versionStatus"),
+	versionAdd: document.querySelector("#versionAdd"),
+	versionRename: document.querySelector("#versionRename"),
+	versionDefault: document.querySelector("#versionDefault"),
+	versionDelete: document.querySelector("#versionDelete"),
+	versionSelect: document.querySelector("#versionSelect"),
+	versionClose: document.querySelector("#versionClose"),
 	infoPanel: document.querySelector("#infoPanel"),
 	infoForm: document.querySelector("#infoForm"),
 	infoTitle: document.querySelector("#infoTitle"),
@@ -696,6 +710,33 @@ editorClick(el.paragraphButton, () => {
 el.paragraphCancel.addEventListener("click", () => el.paragraphPanel.close());
 editorClick(el.documentAddButton, () => openCreatePanel(false, true));
 editorClick(el.documentManageButton, openDocumentManagement);
+editorClick(el.versionManageButton, openVersionManagement);
+el.versionClose.addEventListener("click", () => el.versionPanel.close());
+el.versionPanel.addEventListener("cancel", event => { if (el.versionForm.inert) event.preventDefault(); });
+el.versionPanel.addEventListener("close", () => {
+	if (!el.versionPanel.open) {
+		state.versionManagement = null;
+		el.versionList.replaceChildren();
+		el.versionName.value = el.versionStatus.textContent = "";
+	}
+});
+el.versionForm.addEventListener("submit", event => event.preventDefault());
+el.versionName.addEventListener("input", updateVersionControls);
+for (const [button, action] of [[el.versionAdd, "add"], [el.versionRename, "rename"], [el.versionDefault, "default"], [el.versionDelete, "delete"], [el.versionSelect, "select"]]) {
+	button.addEventListener("click", () => changeVersion(action));
+}
+el.versionList.addEventListener("keydown", event => {
+	const manager = state.versionManagement;
+	if (!manager?.entries || manager.loading || document.body.hasAttribute("aria-busy")) return;
+	let index = manager.entries.findIndex(entry => entry.id === manager.id);
+	if (event.key === "ArrowUp") index--;
+	else if (event.key === "ArrowDown") index++;
+	else if (event.key === "Home") index = 0;
+	else if (event.key === "End") index = manager.entries.length - 1;
+	else return;
+	event.preventDefault();
+	selectManagedVersion(manager.entries[Math.max(0, Math.min(index, manager.entries.length - 1))].id, true);
+});
 el.documentClose.addEventListener("click", () => el.documentPanel.close());
 el.documentPanel.addEventListener("cancel", event => { if (el.documentForm.inert) event.preventDefault(); });
 el.documentPanel.addEventListener("close", () => {
@@ -1610,7 +1651,7 @@ function handleKeyDown(event) {
 
 function formDialogOpen() {
 	return Boolean(sealPreview) || fontBindingElements.Panel.open || el.signPanel.open || el.verifyPanel.open || el.credentialsPanel.open || el.encryptionPanel.open || batchElements.Panel.open || el.exportPanel.open || el.createPanel.open || el.insertPanel.open || el.pagePanel.open || el.paragraphPanel.open || el.importPanel.open || el.infoPanel.open || el.documentPanel.open
-		|| el.batchPagesPanel.open || el.objectStylePanel.open || el.sourceTextPanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
+		|| el.versionPanel.open || el.batchPagesPanel.open || el.objectStylePanel.open || el.sourceTextPanel.open || el.outlinePanel.open || el.objectBoundsPanel.open || el.annotationNote.open || el.annotationCreate.open || el.objectPicker.open;
 }
 
 function setObjectDimension(input, value) {
@@ -2034,6 +2075,106 @@ function setEditorInfo(doc) {
 	state.editorInfo = { revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 		pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || [] };
 	setDirty(state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision);
+}
+
+async function openVersionManagement() {
+	if (!state.editing || !state.ready || state.exporting || document.body.hasAttribute("aria-busy")) return;
+	state.versionManagement = { id: state.doc.documentVersion || "", entries: null, loading: false, failed: false };
+	el.versionList.replaceChildren();
+	el.versionName.value = "";
+	el.versionPanel.showModal();
+	await refreshVersionManagement(true);
+}
+
+async function refreshVersionManagement(focus = false) {
+	const manager = state.versionManagement, openSeq = state.openSeq;
+	if (!manager || !el.versionPanel.open) return;
+	manager.loading = true;
+	manager.failed = false;
+	el.versionStatus.textContent = "正在读取版本";
+	updateVersionControls();
+	try {
+		const entries = await callWASM("ofdgoDocumentVersions");
+		if (state.versionManagement !== manager || !el.versionPanel.open) return;
+		if (openSeq !== state.openSeq) return refreshVersionManagement(focus);
+		manager.entries = entries;
+		if (!entries.some(entry => entry.id === manager.id)) manager.id = state.doc.documentVersion || "";
+		el.versionList.replaceChildren(...entries.map(entry => {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.className = "document-entry";
+			button.setAttribute("role", "option");
+			button.setAttribute("aria-current", String(entry.id === (state.doc.documentVersion || "")));
+			const name = document.createElement("span"), marker = document.createElement("span");
+			name.className = "document-name";
+			name.textContent = entry.id ? entry.name || `版本 ${entry.index}` : "主文档";
+			marker.className = "document-pages";
+			marker.textContent = entry.default ? "默认" : "";
+			button.title = name.textContent;
+			button.append(name, marker);
+			button.addEventListener("click", () => selectManagedVersion(entry.id));
+			return button;
+		}));
+		manager.loading = false;
+		el.versionStatus.textContent = "";
+		selectManagedVersion(manager.id, focus);
+	} catch (err) {
+		if (state.versionManagement !== manager || !el.versionPanel.open) return;
+		if (openSeq !== state.openSeq) return refreshVersionManagement(focus);
+		manager.failed = true;
+		el.versionStatus.textContent = err.message;
+	} finally {
+		if (state.versionManagement === manager && openSeq === state.openSeq) {
+			manager.loading = false;
+			updateVersionControls();
+		}
+	}
+}
+
+function selectManagedVersion(id, focus = false) {
+	const manager = state.versionManagement;
+	if (!manager || manager.loading || document.body.hasAttribute("aria-busy")) return;
+	const index = manager.entries?.findIndex(entry => entry.id === id) ?? -1;
+	if (index < 0) return;
+	manager.id = id;
+	el.versionName.value = manager.entries[index].name;
+	Array.from(el.versionList.children).forEach((button, position) => {
+		button.setAttribute("aria-selected", String(position === index));
+		button.tabIndex = position === index ? 0 : -1;
+	});
+	updateVersionControls();
+	if (focus) el.versionList.children[index]?.focus();
+}
+
+async function changeVersion(action) {
+	const manager = state.versionManagement;
+	if (!state.editing || !manager?.entries || manager.loading || manager.failed || document.body.hasAttribute("aria-busy")) return;
+	const entry = manager.entries.find(entry => entry.id === manager.id);
+	if (!entry) return;
+	if (action === "delete" && (!entry.id || !window.confirm(`删除版本“${entry.name || entry.index}”？`))) return;
+	el.versionStatus.textContent = "正在处理版本";
+	if (await changeDocument("ofdgoChangeVersion", null, action, entry.id, el.versionName.value.trim())) {
+		if (state.versionManagement !== manager || !el.versionPanel.open) return;
+		if (action === "add" || action === "select") manager.id = state.doc.documentVersion || "";
+		await refreshVersionManagement(true);
+	}
+}
+
+function updateVersionControls() {
+	const manager = state.versionManagement, busy = document.body.hasAttribute("aria-busy");
+	const disabled = !state.editing || !state.ready || state.exporting || busy;
+	el.versionManageButton.hidden = !state.editing;
+	el.versionManageButton.disabled = disabled;
+	el.versionNotice.textContent = state.editorInfo?.editWarnings?.join("；") || "";
+	el.versionNotice.hidden = !el.versionNotice.textContent;
+	const entry = manager?.entries?.find(entry => entry.id === manager.id);
+	const unavailable = disabled || !entry || Boolean(manager?.loading || manager?.failed);
+	el.versionList.inert = busy || Boolean(manager?.loading);
+	el.versionName.disabled = el.versionAdd.disabled = unavailable;
+	el.versionRename.disabled = unavailable || !entry?.id || el.versionName.value.trim() === entry.name;
+	el.versionDelete.disabled = unavailable || !entry?.id;
+	el.versionDefault.disabled = unavailable || Boolean(entry?.default);
+	el.versionSelect.disabled = unavailable || entry?.id === (state.doc?.documentVersion || "");
 }
 
 function managedDocumentIndex() {
@@ -3098,7 +3239,8 @@ async function changeDocument(name, item, ...args) {
 		const previousDocument = state.doc.documents?.[state.doc.documentIndex || 0];
 		const nextDocument = doc.documents?.[doc.documentIndex || 0];
 		const sameDocument = previousDocument?.id && previousDocument.id === nextDocument?.id && state.doc.documentIndex === doc.documentIndex;
-		const documentChanged = previousDocument?.id !== nextDocument?.id || previousDocument?.root !== nextDocument?.root
+		const documentChanged = (state.doc.documentVersion || "") !== (doc.documentVersion || "")
+			|| previousDocument?.id !== nextDocument?.id || previousDocument?.root !== nextDocument?.root
 			&& !(sameDocument && (name === "ofdgoChangeFontBinding" || restoring));
 		const packageChanged = documentChanged || name === "ofdgoChangeDocument" || restoring
 			&& JSON.stringify(doc.documents?.map(entry => [entry.root, entry.id])) !== JSON.stringify(state.doc.documents?.map(entry => [entry.root, entry.id]));
@@ -3227,6 +3369,8 @@ async function changeDocument(name, item, ...args) {
 				el.createStatus.textContent = err.message;
 			} else if (el.importPanel.open) {
 				el.importStatus.textContent = err.message;
+			} else if (el.versionPanel.open) {
+				el.versionStatus.textContent = err.message;
 			} else if (el.documentPanel.open) {
 				el.documentStatus.textContent = err.message;
 			} else {
@@ -3971,6 +4115,8 @@ async function openOFD(file, remote = null) {
 		el.infoPanel.close();
 		el.documentPanel.close();
 		state.documentManagement = null;
+		el.versionPanel.close();
+		state.versionManagement = null;
 		state.infoDocumentIndex = null;
 		el.annotationNote.close();
 		el.annotationCreate.close();
@@ -8785,6 +8931,7 @@ function updateDocumentControls() {
 	el.documentDeleteButton.disabled = actionsDisabled || count <= 1;
 	el.documentUpButton.disabled = actionsDisabled || index === 0;
 	el.documentDownButton.disabled = actionsDisabled || index >= count - 1;
+	updateVersionControls();
 }
 
 function updateControls() {
@@ -9006,6 +9153,7 @@ function setBusy(busy, text = "", percent = 0, status = "") {
 	el.paragraphForm.inert = busy;
 	el.infoForm.inert = busy;
 	el.documentForm.inert = busy;
+	el.versionForm.inert = busy;
 	el.attachmentForm.inert = busy;
 	el.attachmentPanel.inert = busy;
 	el.annotationForm.inert = busy;

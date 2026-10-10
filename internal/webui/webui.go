@@ -73,6 +73,7 @@ type pageBoxInfo struct {
 // DocumentInfo 文档信息
 type DocumentInfo struct {
 	DocumentIndex   int                `json:"documentIndex"`
+	DocumentVersion string             `json:"documentVersion"`
 	Documents       []DocumentEntry    `json:"documents,omitempty"`
 	Encryption      EncryptionInfo     `json:"encryption"`
 	Version         string             `json:"version"`
@@ -96,6 +97,14 @@ type DocumentInfo struct {
 	Pages           []PageInfo         `json:"pages"`
 	Outlines        []OutlineInfo      `json:"outlines,omitempty"`
 	DetailsPending  bool               `json:"detailsPending,omitempty"`
+}
+
+// VersionEntry 版本管理列表中的入口，空ID表示主文档
+type VersionEntry struct {
+	ID      string `json:"id"`
+	Index   int32  `json:"index"`
+	Name    string `json:"name"`
+	Default bool   `json:"default"`
 }
 
 // DocumentEntry 包内文档入口，管理列表按需补充元数据和页数
@@ -441,6 +450,7 @@ func (s *Session) Summary() DocumentInfo {
 		Outlines:       s.doc.OutlineInfos(),
 		DetailsPending: true,
 	}
+	info.DocumentVersion, _ = s.Reader.DocumentVersionID()
 	for index, body := range s.Reader.OFD.DocBody {
 		info.Documents = append(info.Documents, DocumentEntry{Index: index, Title: body.DocInfo.Title, Root: body.DocRoot, ID: body.DocInfo.DocID})
 	}
