@@ -200,7 +200,7 @@ func (r *Reader) documentDependencies(ctx context.Context, index int) (map[strin
 		if !r.fileNames[actual] {
 			continue
 		}
-		if err := r.documentFileReferences(ctx, actual, add); err != nil {
+		if err := r.documentFileReferences(ctx, actual, true, add); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -208,9 +208,9 @@ func (r *Reader) documentDependencies(ctx context.Context, index int) (map[strin
 }
 
 // documentFileReferences 流式扫描结构文件，支持同一作用域内的未知命名空间
-// 入参: ctx 取消上下文, name 文件路径, add 接收引用路径及类别
+// 入参: ctx 取消上下文, name 文件路径, rejectUnknown 是否拒绝无法识别的扩展节点, add 接收引用路径及类别
 // 返回: error 读取或结构错误
-func (r *Reader) documentFileReferences(ctx context.Context, name string, add func(string, int)) error {
+func (r *Reader) documentFileReferences(ctx context.Context, name string, rejectUnknown bool, add func(string, int)) error {
 	input, err := r.openFile(name)
 	if err != nil {
 		return err
@@ -246,7 +246,13 @@ func (r *Reader) documentFileReferences(ctx context.Context, name string, add fu
 				owner := stack[len(stack)-1]
 				parent = owner.Local
 				if classifyOFDNamespace(node.Name.Space) == ofdXMLUnknown && node.Name.Space != owner.Space {
-					return fmt.Errorf("cannot determine document dependencies in %s", name)
+					if rejectUnknown {
+						return fmt.Errorf("cannot determine document dependencies in %s", name)
+					}
+					if err := decoder.Skip(); err != nil {
+						return err
+					}
+					continue
 				}
 			}
 			if parent == "Extension" && node.Name.Local == "Data" {

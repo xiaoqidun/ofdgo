@@ -44,6 +44,41 @@ type versionEditGraph struct {
 	used  map[string]bool
 }
 
+// versionFileDependencies 流式汇总版本入口的标准文件引用，不保留页面节点或读取二进制资源
+// 入参: ctx 取消上下文, entry 文档入口, parts 待修改条目
+// 返回: map[string]bool 引用路径, error 读取、结构或取消错误
+func (r *Reader) versionFileDependencies(ctx context.Context, entry string, parts map[string][]byte) (map[string]bool, error) {
+	view := *r
+	if len(parts) != 0 {
+		view.files = maps.Clone(r.files)
+		if view.files == nil {
+			view.files = make(map[string][]byte, len(parts))
+		}
+		maps.Copy(view.files, parts)
+	}
+	used := map[string]bool{entry: true}
+	queued := map[string]bool{entry: true}
+	queue := []string{entry}
+	add := func(name string, kind int) {
+		used[name] = true
+		if kind == packageReferenceXML && !queued[name] {
+			queued[name] = true
+			queue = append(queue, name)
+		}
+	}
+	for len(queue) != 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		name := queue[0]
+		queue = queue[1:]
+		if err := view.documentFileReferences(ctx, name, false, add); err != nil {
+			return nil, err
+		}
+	}
+	return used, ctx.Err()
+}
+
 // versionEditGraph 沿标准文件引用建立版本依赖图，二进制资源只记录路径
 // 入参: ctx 取消上下文, entry 文档入口, parts 待修改条目
 // 返回: *versionEditGraph 依赖图, error 读取或结构错误
@@ -171,11 +206,11 @@ func (r *Reader) versionSharedFiles(ctx context.Context) (map[string]bool, error
 		if err != nil {
 			return nil, err
 		}
-		graph, err := r.versionEditGraph(ctx, entry, nil)
+		files, err := r.versionFileDependencies(ctx, entry, nil)
 		if err != nil {
 			return nil, err
 		}
-		maps.Copy(shared, graph.used)
+		maps.Copy(shared, files)
 	}
 	return shared, nil
 }
@@ -191,26 +226,26 @@ func (r *Reader) versionResourceFiles(ctx context.Context, parts map[string][]by
 	if err != nil {
 		return nil, err
 	}
-	graph, err := r.versionEditGraph(ctx, entry, parts)
+	files, err := r.versionFileDependencies(ctx, entry, parts)
 	if err != nil {
 		return nil, err
 	}
 	if r.versionInfo != nil {
 		for _, file := range r.versionInfo.Files {
-			graph.used[file.Location] = true
+			files[file.Location] = true
 		}
 	}
 	for index := range r.DocumentCount() {
 		if index == r.documentIndex {
 			continue
 		}
-		files, err := r.documentFiles(ctx, index)
+		other, err := r.documentFiles(ctx, index)
 		if err != nil {
 			return nil, err
 		}
-		maps.Copy(graph.used, files)
+		maps.Copy(files, other)
 	}
-	return graph.used, nil
+	return files, nil
 }
 
 // versionChanges 隔离当前入口修改涉及的共享文件，同步版本清单，不修改输入包或修改集

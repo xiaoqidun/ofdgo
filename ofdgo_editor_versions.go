@@ -345,13 +345,13 @@ func (r *Reader) versionSnapshotFiles(ctx context.Context) (map[string]bool, err
 	if err != nil {
 		return nil, err
 	}
-	graph, err := r.versionEditGraph(ctx, entry, nil)
+	files, err := r.versionFileDependencies(ctx, entry, nil)
 	if err != nil {
 		return nil, err
 	}
 	if r.versionInfo != nil {
 		for _, file := range r.versionInfo.Files {
-			graph.used[file.Location] = true
+			files[file.Location] = true
 		}
 	}
 	body := r.OFD.DocBody[r.documentIndex]
@@ -369,22 +369,22 @@ func (r *Reader) versionSnapshotFiles(ctx context.Context) (map[string]bool, err
 			if err != nil {
 				return nil, err
 			}
-			graph.used[name] = true
+			files[name] = true
 		}
 	}
 	if signature := r.versionSignatures(body.Signatures); signature != "" {
-		files, err := r.versionEditGraph(ctx, cleanPackagePath(signature), nil)
+		signed, err := r.versionFileDependencies(ctx, cleanPackagePath(signature), nil)
 		if err != nil {
 			return nil, err
 		}
-		maps.Copy(graph.used, files.used)
+		maps.Copy(files, signed)
 	}
-	for name := range graph.used {
+	for name := range files {
 		if !r.fileNames[name] {
 			return nil, fmt.Errorf("version file not found: %s", name)
 		}
 	}
-	return graph.used, ctx.Err()
+	return files, ctx.Err()
 }
 
 // retireVersionFiles 清理修改入口后不再被任何文档或版本引用的候选文件
