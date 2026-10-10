@@ -17,14 +17,12 @@ package ofdgo
 import (
 	"encoding/binary"
 	"fmt"
-
-	"github.com/tdewolff/font"
 )
 
 // variableSFNTSubsettable 核对TrueType可变轴与字形变化表的基本结构
 // 入参: sfnt 已解析字体
 // 返回: bool 是否具备可裁剪的变化数据
-func variableSFNTSubsettable(sfnt *font.SFNT) bool {
+func variableSFNTSubsettable(sfnt *sfntFont) bool {
 	fvar, gvar := sfnt.Tables["fvar"], sfnt.Tables["gvar"]
 	if len(fvar) < 16 || len(gvar) < 20 || binary.BigEndian.Uint32(fvar) != 0x10000 || binary.BigEndian.Uint32(gvar) != 0x10000 {
 		return false
@@ -38,7 +36,7 @@ func variableSFNTSubsettable(sfnt *font.SFNT) bool {
 // subsetVariableSFNTFont 保留字形编号及可变轴，仅裁剪未使用的轮廓和字形变化数据
 // 入参: sfnt 已解析字体, glyphs 使用的字形
 // 返回: []byte 字体子集, error 字形或变化表错误
-func subsetVariableSFNTFont(sfnt *font.SFNT, glyphs []uint16) ([]byte, error) {
+func subsetVariableSFNTFont(sfnt *sfntFont, glyphs []uint16) ([]byte, error) {
 	if !variableSFNTSubsettable(sfnt) {
 		return nil, fmt.Errorf("invalid TrueType variation tables")
 	}
@@ -49,12 +47,12 @@ func subsetVariableSFNTFont(sfnt *font.SFNT, glyphs []uint16) ([]byte, error) {
 			return nil, fmt.Errorf("variable font glyph index out of range")
 		}
 		usage.glyphs[gid] = true
-		for _, char := range sfnt.Cmap.ToUnicode(gid) {
+		for _, char := range sfnt.glyphCharacters(gid) {
 			usage.chars[char] = true
 		}
 	}
 	for gid := range usage.glyphs {
-		dependencies, err := sfnt.Glyf.Dependencies(gid)
+		dependencies, err := sfnt.glyphDependencies(gid)
 		if err != nil {
 			return nil, err
 		}

@@ -21,12 +21,16 @@ import (
 	"math"
 	"sync"
 
-	"github.com/tdewolff/font"
+	"github.com/go-text/typesetting/font/cff"
+	"github.com/go-text/typesetting/font/opentype"
 )
 
 // sfntOutliner 缓存字体程序并提取独立字形轮廓
 type sfntOutliner struct {
-	font     *font.SFNT
+	font     *sfntFont
+	cffOnce  sync.Once
+	cff      *cff.CFF
+	cffErr   error
 	once     sync.Once
 	program  *ttInterpreter
 	err      error
@@ -42,12 +46,51 @@ type ttGlyph struct {
 	warning error
 }
 
-// path 按TrueType指令和隐含点规则生成闭合轮廓，CFF保留原有解析
+// path 按字体设计坐标提取闭合轮廓，TrueType保留字形指令处理
 // 入参: path 路径接收器, glyph 字形编号, scale 字体单位缩放
 // 返回: error 字形解析错误
-func (f *sfntOutliner) path(path font.Pather, glyph uint16, scale float64) error {
+func (f *sfntOutliner) path(path glyphPather, glyph uint16, scale float64) error {
 	if !f.font.IsTrueType {
-		return f.font.GlyphPath(path, glyph, 0, 0, 0, scale, font.NoHinting)
+		f.cffOnce.Do(func() {
+			data, err := sanitizeCFF(f.font.Tables["CFF "])
+			if err == nil {
+				data, err = normalizeCFFCharstringsAt(data, f.font.UnitsPerEm())
+			}
+			if err != nil {
+				f.cffErr = err
+				return
+			}
+			f.cff, f.cffErr = cff.Parse(data)
+		})
+		if f.cffErr != nil {
+			return f.cffErr
+		}
+		segments, _, err := f.cff.LoadGlyph(glyph)
+		if err != nil {
+			return err
+		}
+		open := false
+		for _, segment := range segments {
+			p := segment.Args
+			switch segment.Op {
+			case opentype.SegmentOpMoveTo:
+				if open {
+					path.Close()
+				}
+				path.MoveTo(float64(p[0].X)*scale, float64(p[0].Y)*scale)
+				open = true
+			case opentype.SegmentOpLineTo:
+				path.LineTo(float64(p[0].X)*scale, float64(p[0].Y)*scale)
+			case opentype.SegmentOpCubeTo:
+				path.CubeTo(float64(p[0].X)*scale, float64(p[0].Y)*scale, float64(p[1].X)*scale, float64(p[1].Y)*scale, float64(p[2].X)*scale, float64(p[2].Y)*scale)
+			default:
+				return fmt.Errorf("invalid CFF curve")
+			}
+		}
+		if open {
+			path.Close()
+		}
+		return nil
 	}
 	contour, err := f.glyph(glyph, make(map[uint16]bool))
 	if err != nil {
@@ -183,10 +226,10 @@ func (f *sfntOutliner) glyph(id uint16, active map[uint16]bool) (ttGlyph, error)
 // 入参: id 字形编号, data 完整字形头
 // 返回: [4]ttPoint 左右边距与上下原点
 func (f *sfntOutliner) phantomPoints(id uint16, data []byte) [4]ttPoint {
-	left := int32(int16(binary.BigEndian.Uint16(data[2:]))) - int32(f.font.Hmtx.LeftSideBearing(id))
+	left := int32(int16(binary.BigEndian.Uint16(data[2:]))) - int32(f.font.sideBearing(id, false))
 	top := int32(int16(binary.BigEndian.Uint16(data[8:])))
-	if f.font.Vmtx != nil {
-		top += int32(f.font.Vmtx.TopSideBearing(id))
+	if f.font.vertical != 0 {
+		top += int32(f.font.sideBearing(id, true))
 	}
 	return [4]ttPoint{{x: left * 64, ox: left * 64}, {x: (left + int32(f.font.GlyphAdvance(id))) * 64, ox: (left + int32(f.font.GlyphAdvance(id))) * 64}, {y: top * 64, oy: top * 64}, {y: (top - int32(f.font.GlyphVerticalAdvance(id))) * 64, oy: (top - int32(f.font.GlyphVerticalAdvance(id))) * 64}}
 }

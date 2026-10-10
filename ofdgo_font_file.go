@@ -20,8 +20,6 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/tdewolff/font"
 )
 
 // FontFace 字体文件中的字体名称与零起始索引，不依赖文件名
@@ -37,7 +35,7 @@ type FontFace struct {
 // Faces 读取字体名称表，集合文件按原顺序列出各项，不解析字形轮廓
 // 返回: []FontFace 字体列表, error 格式或名称表错误
 func (f FontFile) Faces() ([]FontFace, error) {
-	data, err := font.ToSFNT(f.Data)
+	data, err := decodeFontContainer(f.Data)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +62,7 @@ func (f FontFile) Faces() ([]FontFace, error) {
 // 入参: index 零起始字体索引，非集合文件只能为0
 // 返回: []byte 独立字体数据, error 格式或索引错误
 func (f FontFile) Face(index int) ([]byte, error) {
-	data, err := font.ToSFNT(f.Data)
+	data, err := decodeFontContainer(f.Data)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +103,7 @@ func (f FontFile) MissingGlyphs(index int, text string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sfnt, err := font.ParseSFNT(data, 0)
+	sfnt, err := parseSFNTFont(data)
 	if err != nil {
 		return "", err
 	}

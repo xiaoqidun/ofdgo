@@ -1,0 +1,189 @@
+// Copyright 2025-2026 肖其顿 (XIAO QI DUN)
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ofdgo
+
+import (
+	"fmt"
+	"sync"
+)
+
+// sfntGlyphBoundsLimit 限制单个字体保留的字形与字号边界数量
+const sfntGlyphBoundsLimit = 4096
+
+// sfntFontMetrics 保留默认字体度量，写出时不更新原始时间
+type sfntFontMetrics struct {
+	*sfntFont
+	*fontShaper
+	outlines *sfntOutliner
+	bounds   *sfntFontBounds
+}
+
+// sfntFontBounds 缓存已成功提取的字形边界，不保留轮廓或失败结果
+type sfntFontBounds struct {
+	mu     sync.Mutex
+	values map[sfntGlyphSize]Box
+}
+
+// sfntGlyphSize 区分字形编号及精确毫米字号
+type sfntGlyphSize struct {
+	glyph uint16
+	size  float64
+}
+
+// glyphPather 接收字体设计坐标中的轮廓指令
+type glyphPather interface {
+	MoveTo(float64, float64)
+	LineTo(float64, float64)
+	QuadTo(float64, float64, float64, float64)
+	CubeTo(float64, float64, float64, float64, float64, float64)
+	Close()
+}
+
+// glyphGeometry 将字体轮廓转换为纵轴向下的几何路径
+type glyphGeometry struct{ path GeometryPath }
+
+// MoveTo 开始子路径
+// 入参: x 横坐标, y 纵坐标
+func (p *glyphGeometry) MoveTo(x, y float64) {
+	p.path = append(p.path, GeometrySegment{Verb: GeometryMove, End: Point{x, -y}})
+}
+
+// LineTo 添加直线
+// 入参: x 横坐标, y 纵坐标
+func (p *glyphGeometry) LineTo(x, y float64) {
+	p.path = append(p.path, GeometrySegment{Verb: GeometryLine, End: Point{x, -y}})
+}
+
+// QuadTo 添加二次贝塞尔曲线
+// 入参: cx 控制点横坐标, cy 控制点纵坐标, x 终点横坐标, y 终点纵坐标
+func (p *glyphGeometry) QuadTo(cx, cy, x, y float64) {
+	p.path = append(p.path, GeometrySegment{Verb: GeometryQuad, Control1: Point{cx, -cy}, End: Point{x, -y}})
+}
+
+// CubeTo 添加三次贝塞尔曲线
+// 入参: ax 第一控制点横坐标, ay 第一控制点纵坐标, bx 第二控制点横坐标, by 第二控制点纵坐标, x 终点横坐标, y 终点纵坐标
+func (p *glyphGeometry) CubeTo(ax, ay, bx, by, x, y float64) {
+	p.path = append(p.path, GeometrySegment{Verb: GeometryCubic, Control1: Point{ax, -ay}, Control2: Point{bx, -by}, End: Point{x, -y}})
+}
+
+// Close 闭合当前子路径
+func (p *glyphGeometry) Close() { p.path = append(p.path, GeometrySegment{Verb: GeometryClose}) }
+
+// ResolveFont 按需加载字体资源，保留内嵌数据及外部字体的名称、样式和集合索引匹配
+// 入参: r 渲染器, id 字体标识, exact 是否禁止无关回退
+// 返回: ResolvedFont 字体与来源, error 字体不可用错误
+func (b SFNTBackend) ResolveFont(r *Renderer, id string, exact bool) (ResolvedFont, error) {
+	return r.resolveFontSource(b, id, exact)
+}
+
+// OpenFont 解析独立SFNT数据，度量与原有编辑排版保持一致
+// 入参: data 字体数据
+// 返回: FontMetrics 字体度量, error 解析错误
+func (SFNTBackend) OpenFont(data []byte) (FontMetrics, error) {
+	data, err := defaultCFF2Font(data)
+	if err != nil {
+		return nil, err
+	}
+	sfnt, err := parseSFNTFont(data)
+	if err != nil {
+		return nil, err
+	}
+	metrics := &sfntFontMetrics{sfntFont: sfnt, outlines: &sfntOutliner{font: sfnt}, bounds: &sfntFontBounds{}}
+	metrics.fontShaper = &fontShaper{metrics: metrics}
+	return metrics, nil
+}
+
+// Write 返回字体数据，不修改字体元信息
+// 返回: []byte 独立SFNT数据
+func (f sfntFontMetrics) Write() []byte {
+	return f.sfntFont.Write()
+}
+
+// GlyphOutline 返回基线原点、纵轴向下的字形轮廓
+// 入参: glyph 字形编号, size 字号，单位为毫米
+// 返回: GeometryPath 字形路径, error 字形解析错误
+func (f sfntFontMetrics) GlyphOutline(glyph uint16, size float64) (GeometryPath, error) {
+	if !rasterPositive(size) || glyph >= f.NumGlyphs() {
+		return nil, fmt.Errorf("invalid glyph or size")
+	}
+	path := &glyphGeometry{}
+	if err := f.outlines.path(path, glyph, size/float64(f.UnitsPerEm())); err != nil {
+		return nil, err
+	}
+	return path.path, nil
+}
+
+// GlyphBounds 返回字形轮廓的精确边界，重复编号及字号复用有限缓存
+// 入参: glyph 字形编号, size 字号，单位为毫米
+// 返回: Box 字形边界, error 字形解析错误
+func (f sfntFontMetrics) GlyphBounds(glyph uint16, size float64) (Box, error) {
+	key := sfntGlyphSize{glyph: glyph, size: size}
+	if f.bounds != nil {
+		f.bounds.mu.Lock()
+		value, ok := f.bounds.values[key]
+		f.bounds.mu.Unlock()
+		if ok {
+			return value, nil
+		}
+	}
+	outline, err := f.GlyphOutline(glyph, size)
+	if err != nil {
+		return Box{}, err
+	}
+	value, err := outline.Bounds()
+	if err != nil {
+		return Box{}, err
+	}
+	if f.bounds != nil {
+		f.bounds.mu.Lock()
+		if f.bounds.values == nil || len(f.bounds.values) >= sfntGlyphBoundsLimit {
+			f.bounds.values = make(map[sfntGlyphSize]Box)
+		}
+		f.bounds.values[key] = value
+		f.bounds.mu.Unlock()
+	}
+	return value, nil
+}
+
+// GlyphWarning 返回无效字形指令后保留设计轮廓的提示，原始字体不变
+// 入参: glyph 字形编号
+// 返回: error 恢复原因，无恢复时为空
+func (f sfntFontMetrics) GlyphWarning(glyph uint16) error {
+	return f.outlines.glyphWarning(glyph)
+}
+
+// GlyphOutlines 批量提取字形轮廓，重复编号只解析一次
+// 入参: glyphs 字形编号, size 毫米字号
+// 返回: []GeometryPath 同序只读轮廓, error 轮廓错误
+func (f sfntFontMetrics) GlyphOutlines(glyphs []uint16, size float64) ([]GeometryPath, error) {
+	if !rasterPositive(size) {
+		return nil, fmt.Errorf("invalid glyph size")
+	}
+	result := make([]GeometryPath, len(glyphs))
+	paths := make(map[uint16]GeometryPath, len(glyphs))
+	for i, glyph := range glyphs {
+		path, ok := paths[glyph]
+		if !ok {
+			var err error
+			path, err = f.GlyphOutline(glyph, size)
+			if err != nil {
+				return nil, err
+			}
+			paths[glyph] = path
+		}
+		result[i] = path
+	}
+	return result, nil
+}

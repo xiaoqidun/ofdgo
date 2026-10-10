@@ -26,8 +26,6 @@ import (
 	"runtime"
 	"sort"
 	"sync"
-
-	"github.com/tdewolff/font"
 )
 
 // 字体来源：文件、文件系统和系统字体
@@ -37,11 +35,8 @@ const (
 	fontSourceSystem
 )
 
-// systemFontIndex 串行初始化系统字体索引，不注册绘图后端
-var systemFontIndex struct {
-	sync.Mutex
-	fonts *font.SystemFonts
-}
+// systemFontIndex 按需建立只读系统字体索引
+var systemFontIndex = sync.OnceValue(indexSystemFonts)
 
 // fontSourceKind 字体来源类型
 type fontSourceKind uint8
@@ -100,20 +95,11 @@ func (c *fontSourceCache) child() *fontSourceCache {
 func (r *Renderer) readFontSource(source fontSource, definition *Font) ([]byte, error) {
 	key := fontSourceKey{kind: source.kind, index: source.index, face: source.face, name: source.name}
 	if source.kind == fontSourceSystem {
-		systemFontIndex.Lock()
-		if systemFontIndex.fonts == nil {
-			systemFontIndex.fonts, _ = font.FindSystemFonts(font.DefaultFontDirs())
-		}
-		weight := 400
-		if definition.Bold {
-			weight = 700
-		}
-		match, ok := systemFontIndex.fonts.Match(source.name, font.ParseStyleCSS(weight, definition.Italic))
-		systemFontIndex.Unlock()
-		if !ok {
+		matches := fontFileMatches(systemFontIndex(), []string{source.name}, definition.Bold, definition.Italic)
+		if len(matches) == 0 {
 			return nil, fmt.Errorf("font %q not found", source.name)
 		}
-		key = fontSourceKey{kind: fontSourceFile, name: match.Filename}
+		key = fontSourceKey{kind: fontSourceFile, name: matches[0].name, face: matches[0].face}
 	}
 	if cached, ok := r.fontSourcesCache.data[key]; ok {
 		return cached.data, cached.err
@@ -349,15 +335,59 @@ func (r *Renderer) matchFontFS(index int, names []string, bold, italic bool) []f
 // systemFontDirs 获取系统字体目录
 // 返回: []string 字体目录列表
 func systemFontDirs() []string {
+	home, _ := os.UserHomeDir()
 	switch runtime.GOOS {
 	case "android":
 		return []string{"/product/fonts", "/system/fonts"}
 	case "darwin":
-		return []string{`/Library/Fonts`}
+		return []string{"/System/Library/Fonts", "/Library/Fonts", filepath.Join(home, "Library", "Fonts")}
 	case "linux":
-		return []string{`/usr/share/fonts`}
+		dirs := []string{"/usr/share/fonts", "/usr/local/share/fonts", filepath.Join(home, ".fonts")}
+		data := os.Getenv("XDG_DATA_HOME")
+		if data == "" {
+			data = filepath.Join(home, ".local", "share")
+		}
+		dirs = append(dirs, filepath.Join(data, "fonts"))
+		for _, dir := range filepath.SplitList(os.Getenv("XDG_DATA_DIRS")) {
+			dirs = append(dirs, filepath.Join(dir, "fonts"))
+		}
+		return dirs
 	case "windows":
-		return []string{`C:\Windows\Fonts`}
+		windows := os.Getenv("WINDIR")
+		if windows == "" {
+			windows = `C:\Windows`
+		}
+		dirs := []string{filepath.Join(windows, "Fonts")}
+		if local := os.Getenv("LOCALAPPDATA"); local != "" {
+			dirs = append(dirs, filepath.Join(local, "Microsoft", "Windows", "Fonts"))
+		}
+		return dirs
 	}
 	return nil
+}
+
+// indexSystemFonts 递归读取系统字体名称，保留集合索引
+// 返回: []fontFileCandidate 字体候选
+func indexSystemFonts() []fontFileCandidate {
+	var files []string
+	seen := make(map[string]bool)
+	for _, dir := range systemFontDirs() {
+		_ = filepath.WalkDir(dir, func(name string, entry fs.DirEntry, err error) error {
+			if err == nil && !entry.IsDir() && isFontFileName(name) && !seen[name] {
+				seen[name] = true
+				files = append(files, name)
+			}
+			return nil
+		})
+	}
+	candidates := fontFileCandidates(files, filepath.Base)
+	for i, candidate := range candidates {
+		file, err := os.Open(candidate.name)
+		if err != nil {
+			continue
+		}
+		candidates = appendFontFileNames(candidates, i, fontFileNames(file))
+		file.Close()
+	}
+	return candidates
 }

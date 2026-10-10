@@ -23,7 +23,7 @@ import (
 
 	"github.com/go-text/typesetting/font/cff"
 	"github.com/go-text/typesetting/font/opentype"
-	"github.com/tdewolff/font"
+	"github.com/go-text/typesetting/font/opentype/tables"
 )
 
 // defaultCFF2Font 将CFF2默认实例转换为静态OpenType字体，保留字形编号和三次轮廓
@@ -90,7 +90,7 @@ func defaultCFF2Font(data []byte) (result []byte, err error) {
 	}
 	chars := make([][]byte, count)
 	for gid := range chars {
-		segments, _, err := program.LoadGlyph(uint16(gid), nil)
+		segments, _, err := program.LoadGlyph(tables.GlyphID(gid), nil)
 		if err != nil {
 			return nil, fmt.Errorf("CFF2 glyph %d: %w", gid, err)
 		}
@@ -207,7 +207,7 @@ func staticCIDFont(table map[string][]byte, chars [][]byte) ([]byte, error) {
 // staticCFFPrograms 读取无子程序和私有字典的CID字形，其他CFF保留原有保存策略
 // 入参: sfnt 已解析字体
 // 返回: [][]byte 独立字形程序，不符合条件时为空
-func staticCFFPrograms(sfnt *font.SFNT) [][]byte {
+func staticCFFPrograms(sfnt *sfntFont) [][]byte {
 	data := sfnt.Tables["CFF "]
 	if len(data) < 4 {
 		return nil
@@ -262,7 +262,7 @@ func staticCFFPrograms(sfnt *font.SFNT) [][]byte {
 // subsetStaticCFFFont 裁剪静态CID字形并保留原编号、字符映射和度量
 // 入参: sfnt 已解析字体, glyphs 使用的字形
 // 返回: []byte 字体子集, error 裁剪错误
-func subsetStaticCFFFont(sfnt *font.SFNT, glyphs []uint16) ([]byte, error) {
+func subsetStaticCFFFont(sfnt *sfntFont, glyphs []uint16) ([]byte, error) {
 	chars := staticCFFPrograms(sfnt)
 	if chars == nil {
 		return nil, fmt.Errorf("CFF font cannot be subset safely")
@@ -299,7 +299,7 @@ func subsetStaticCFFFont(sfnt *font.SFNT, glyphs []uint16) ([]byte, error) {
 	}
 	mapping := make(map[rune]uint16)
 	for gid := range keep {
-		for _, char := range sfnt.Cmap.ToUnicode(gid) {
+		for _, char := range sfnt.glyphCharacters(gid) {
 			mapping[char] = gid
 		}
 	}

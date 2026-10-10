@@ -2957,8 +2957,7 @@ function refreshEditorFonts() {
 
 async function readTextFont(font) {
 	if (font.embedded) return (await callWASM("ofdgoEditorFont", font.id.slice(9))).bytes;
-	if (font.file) return (await callWASM("ofdgoFontFace", await fontManager.read(font.file), font.index)).bytes;
-	return fontManager.read(font);
+	return (await callWASM("ofdgoFontFace", await fontManager.read(font.file || font), font.index || 0)).bytes;
 }
 
 function updateTextFonts(item, refresh = false) {

@@ -19,135 +19,41 @@ import (
 	"sync"
 
 	"github.com/tdewolff/canvas"
-	"github.com/tdewolff/font"
 )
 
-// canvasGlyphBoundsLimit 限制单个字体保留的字形与字号边界数量
-const canvasGlyphBoundsLimit = 4096
+// canvasFontLoadMu 保护绘图后端加载无名称字体时使用的共享状态
+var canvasFontLoadMu sync.Mutex
 
-// canvasFontMetrics 保留默认字体度量，写出时不更新原始时间
-type canvasFontMetrics struct {
-	*font.SFNT
-	*fontShaper
-	outlines *sfntOutliner
-	bounds   *canvasFontBounds
+// loadCanvasFont 串行加载绘图字体，不改动原始字体数据
+// 入参: data 字体数据, index 集合索引, style 字体样式
+// 返回: *canvas.Font 绘图字体, error 加载错误
+func loadCanvasFont(data []byte, index int, style canvas.FontStyle) (*canvas.Font, error) {
+	canvasFontLoadMu.Lock()
+	defer canvasFontLoadMu.Unlock()
+	return canvas.LoadFont(data, index, style)
 }
 
-// canvasFontBounds 缓存已成功提取的字形边界，不保留轮廓或失败结果
-type canvasFontBounds struct {
-	mu     sync.Mutex
-	values map[canvasGlyphSize]Box
-}
-
-// canvasGlyphSize 区分字形编号及精确毫米字号
-type canvasGlyphSize struct {
-	glyph uint16
-	size  float64
-}
-
-// ResolveFont 按需加载字体资源，保留内嵌数据及外部字体的名称、样式和集合索引匹配
-// 入参: r 渲染器, id 字体标识, exact 是否禁止无关回退
-// 返回: ResolvedFont 字体与来源, error 字体不可用错误
-func (b CanvasBackend) ResolveFont(r *Renderer, id string, exact bool) (ResolvedFont, error) {
-	return r.resolveFontSource(b, id, exact)
-}
-
-// OpenFont 解析独立SFNT数据，度量与原有编辑排版保持一致
-// 入参: data 字体数据
-// 返回: FontMetrics 字体度量, error 解析错误
-func (CanvasBackend) OpenFont(data []byte) (FontMetrics, error) {
-	data, err := defaultCFF2Font(data)
+// decodeFontContainer 展开字体封装，保留原始OpenType表及CFF2轮廓
+// 入参: data 字体文件
+// 返回: []byte OpenType数据, error 格式错误
+func decodeFontContainer(data []byte) ([]byte, error) {
+	if len(data) < 12 {
+		return nil, fmt.Errorf("invalid font header")
+	}
+	switch string(data[:4]) {
+	case "\x00\x01\x00\x00", "OTTO", "true", "ttcf":
+		return data, nil
+	case "wOFF":
+		return decodeWOFF(data)
+	case "wOF2":
+		decoded, handled, err := decodeWOFF2(data)
+		if handled {
+			return decoded, err
+		}
+	}
+	loaded, err := loadCanvasFont(data, 0, canvas.FontRegular)
 	if err != nil {
 		return nil, err
 	}
-	sfnt, err := font.ParseSFNT(data, 0)
-	if err != nil {
-		return nil, err
-	}
-	metrics := &canvasFontMetrics{SFNT: sfnt, outlines: &sfntOutliner{font: sfnt}, bounds: &canvasFontBounds{}}
-	metrics.fontShaper = &fontShaper{metrics: metrics}
-	return metrics, nil
-}
-
-// Write 返回字体数据，不修改字体元信息
-// 返回: []byte 独立SFNT数据
-func (f canvasFontMetrics) Write() []byte {
-	return fontSFNTData(f.SFNT)
-}
-
-// GlyphOutline 返回基线原点、纵轴向下的字形轮廓
-// 入参: glyph 字形编号, size 字号，单位为毫米
-// 返回: GeometryPath 字形路径, error 字形解析错误
-func (f canvasFontMetrics) GlyphOutline(glyph uint16, size float64) (GeometryPath, error) {
-	if !rasterPositive(size) || glyph >= f.NumGlyphs() {
-		return nil, fmt.Errorf("invalid glyph or size")
-	}
-	path := &canvas.Path{}
-	if err := f.outlines.path(path, glyph, size/float64(f.UnitsPerEm())); err != nil {
-		return nil, err
-	}
-	return *geometryFromCanvasPath(path), nil
-}
-
-// GlyphBounds 返回字形轮廓的精确边界，重复编号及字号复用有限缓存
-// 入参: glyph 字形编号, size 字号，单位为毫米
-// 返回: Box 字形边界, error 字形解析错误
-func (f canvasFontMetrics) GlyphBounds(glyph uint16, size float64) (Box, error) {
-	key := canvasGlyphSize{glyph: glyph, size: size}
-	if f.bounds != nil {
-		f.bounds.mu.Lock()
-		value, ok := f.bounds.values[key]
-		f.bounds.mu.Unlock()
-		if ok {
-			return value, nil
-		}
-	}
-	outline, err := f.GlyphOutline(glyph, size)
-	if err != nil {
-		return Box{}, err
-	}
-	value, err := outline.Bounds()
-	if err != nil {
-		return Box{}, err
-	}
-	if f.bounds != nil {
-		f.bounds.mu.Lock()
-		if f.bounds.values == nil || len(f.bounds.values) >= canvasGlyphBoundsLimit {
-			f.bounds.values = make(map[canvasGlyphSize]Box)
-		}
-		f.bounds.values[key] = value
-		f.bounds.mu.Unlock()
-	}
-	return value, nil
-}
-
-// GlyphWarning 返回无效字形指令后保留设计轮廓的提示，原始字体不变
-// 入参: glyph 字形编号
-// 返回: error 恢复原因，无恢复时为空
-func (f canvasFontMetrics) GlyphWarning(glyph uint16) error {
-	return f.outlines.glyphWarning(glyph)
-}
-
-// GlyphOutlines 批量提取字形轮廓，重复编号只解析一次
-// 入参: glyphs 字形编号, size 毫米字号
-// 返回: []GeometryPath 同序只读轮廓, error 轮廓错误
-func (f canvasFontMetrics) GlyphOutlines(glyphs []uint16, size float64) ([]GeometryPath, error) {
-	if !rasterPositive(size) {
-		return nil, fmt.Errorf("invalid glyph size")
-	}
-	result := make([]GeometryPath, len(glyphs))
-	paths := make(map[uint16]GeometryPath, len(glyphs))
-	for i, glyph := range glyphs {
-		path, ok := paths[glyph]
-		if !ok {
-			var err error
-			path, err = f.GlyphOutline(glyph, size)
-			if err != nil {
-				return nil, err
-			}
-			paths[glyph] = path
-		}
-		result[i] = path
-	}
-	return result, nil
+	return serializeOTF(loaded.Tables)
 }

@@ -20,15 +20,13 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-
-	"github.com/tdewolff/font"
 )
 
-// SFNTBackend 提供默认字体资源处理，不依赖Canvas绘图库
+// SFNTBackend 提供独立的OpenType字体度量、轮廓和资源处理
 type SFNTBackend struct{}
 
 // sfntResourceMetrics 隔离资源解析器的度量实现
-type sfntResourceMetrics struct{ *font.SFNT }
+type sfntResourceMetrics struct{ *sfntFont }
 
 // Name 返回资源后端标识
 // 返回: string 后端标识
@@ -47,11 +45,11 @@ func (SFNTBackend) OpenFontResource(file FontFile, index int) (*FontResource, er
 	if err != nil {
 		return nil, err
 	}
-	sfnt, err := font.ParseSFNT(data, 0)
+	sfnt, err := parseSFNTFont(data)
 	if err != nil {
 		return nil, err
 	}
-	name := sfntFontName(sfnt, font.NamePostScript, font.NameFull, font.NameFontFamily)
+	name := sfntFontName(sfnt, 6, 4, 1)
 	if name == "" {
 		return nil, fmt.Errorf("font has no name")
 	}
@@ -61,7 +59,7 @@ func (SFNTBackend) OpenFontResource(file FontFile, index int) (*FontResource, er
 	}
 	return &FontResource{
 		FontMetrics: sfntResourceMetrics{sfnt}, Data: data, Extension: extension,
-		Font:      Font{FontName: name, FamilyName: sfntFontName(sfnt, font.NamePreferredFamily, font.NameFontFamily), Charset: "unicode", Bold: sfnt.Head.MacStyle[0], Italic: sfnt.Head.MacStyle[1], FixedWidth: sfnt.Post.IsFixedPitch != 0},
+		Font:      Font{FontName: name, FamilyName: sfntFontName(sfnt, 16, 1), Charset: "unicode", Bold: binary.BigEndian.Uint16(sfnt.Tables["head"][44:])&1 != 0, Italic: binary.BigEndian.Uint16(sfnt.Tables["head"][44:])&2 != 0, FixedWidth: len(sfnt.Tables["post"]) >= 16 && binary.BigEndian.Uint32(sfnt.Tables["post"][12:]) != 0},
 		CanSubset: sfntSubsettable(sfnt),
 	}, nil
 }
@@ -90,12 +88,12 @@ func (SFNTBackend) SubsetSourceFont(data []byte, usage FontUsage) ([]byte, error
 
 // Write 返回未改动元信息的字体数据
 // 返回: []byte 字体数据
-func (f sfntResourceMetrics) Write() []byte { return fontSFNTData(f.SFNT) }
+func (f sfntResourceMetrics) Write() []byte { return f.sfntFont.Write() }
 
 // sfntSubsettable 判断默认资源后端能否无损裁剪该字体
 // 入参: sfnt 已解析字体
 // 返回: bool 是否支持裁剪
-func sfntSubsettable(sfnt *font.SFNT) bool {
+func sfntSubsettable(sfnt *sfntFont) bool {
 	if fontEmbeddingFlags(sfnt)&0x0100 != 0 || slices.ContainsFunc([]string{"COLR", "CBDT", "sbix", "SVG "}, func(tag string) bool { return sfnt.Tables[tag] != nil }) {
 		return false
 	}
@@ -108,7 +106,7 @@ func sfntSubsettable(sfnt *font.SFNT) bool {
 // fontEmbeddingFlags 读取OpenType的嵌入标志，未提供OS/2表时返回零
 // 入参: sfnt 已解析字体
 // 返回: uint16 嵌入标志
-func fontEmbeddingFlags(sfnt *font.SFNT) uint16 {
+func fontEmbeddingFlags(sfnt *sfntFont) uint16 {
 	if table := sfnt.Tables["OS/2"]; len(table) >= 10 {
 		return binary.BigEndian.Uint16(table[8:10])
 	}
@@ -119,7 +117,7 @@ func fontEmbeddingFlags(sfnt *font.SFNT) uint16 {
 // 入参: data 独立OpenType字体
 // 返回: error 字体解析或嵌入限制
 func validateFontEmbedding(data []byte) error {
-	sfnt, err := font.ParseSFNT(data, 0)
+	sfnt, err := parseSFNTFont(data)
 	if err != nil {
 		return err
 	}
@@ -133,10 +131,14 @@ func validateFontEmbedding(data []byte) error {
 // sfntFontName 获取字体中的名称
 // 入参: sfnt 字体, names 名称类型，按顺序查找
 // 返回: string 字体名称
-func sfntFontName(sfnt *font.SFNT, names ...font.NameID) string {
+func sfntFontName(sfnt *sfntFont, names ...uint16) string {
+	records, values := fontNameValues(sfnt.Tables["name"])
 	for _, name := range names {
-		for _, record := range sfnt.Name.Get(name) {
-			if value := record.String(); value != "" {
+		for _, record := range records {
+			if record.Name != name {
+				continue
+			}
+			if value := values[[4]uint16{record.Platform, record.Encoding, record.Language, name}]; value != "" {
 				return value
 			}
 		}
@@ -152,7 +154,7 @@ func subsetSFNTFont(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	sfnt, err := font.ParseSFNT(bytes.Clone(data), 0)
+	sfnt, err := parseSFNTFont(data)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +171,7 @@ func subsetSFNTFont(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 		usage := newEditorFontUsage()
 		for _, id := range glyphs {
 			usage.glyphs[id] = true
-			for _, char := range sfnt.Cmap.ToUnicode(id) {
+			for _, char := range sfnt.glyphCharacters(id) {
 				usage.chars[char] = true
 			}
 		}
@@ -188,15 +190,7 @@ func subsetSFNTFont(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 		}
 		return fixed, nil
 	}
-	subset, err := sfnt.Subset(glyphs, font.SubsetOptions{Tables: []string{
-		"cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "glyf", "loca", "cvt ", "fpgm", "prep", "gasp",
-	}})
-	if err != nil {
-		return nil, err
-	}
-	subset.Tables["name"] = sfnt.Tables["name"]
-	clear(subset.Tables["head"][8:12])
-	return serializeOTF(subset.Tables)
+	return subsetCompactSFNTFont(sfnt, glyphs)
 }
 
 // subsetSourceSFNTFont 裁剪静态TrueType原有字体，保留字形编号、复合依赖、度量及提示指令
@@ -207,7 +201,7 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 	if usage.unsafe || len(usage.chars)+len(usage.glyphs) == 0 || bytes.HasPrefix(data, []byte("ttcf")) {
 		return nil
 	}
-	sfnt, err := font.ParseSFNT(data, 0)
+	sfnt, err := parseSFNTFont(data)
 	if err != nil || !sfnt.IsTrueType || fontEmbeddingFlags(sfnt)&0x0100 != 0 {
 		return nil
 	}
@@ -218,20 +212,13 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 			return nil
 		}
 	}
-	var unicodeTables []uint16
-	subtables := make(map[uint32]uint16)
-	for i, record := range sfnt.Cmap.EncodingRecords {
-		if record.Format == 14 {
+	var unicodeTables []sfntCmap
+	for _, record := range sfnt.cmaps {
+		if record.format == 14 {
 			return nil
 		}
-		offset := binary.BigEndian.Uint32(sfnt.Tables["cmap"][8+8*i:])
-		index, ok := subtables[offset]
-		if !ok {
-			index = uint16(len(subtables))
-			subtables[offset] = index
-		}
-		if record.PlatformID == 0 || record.PlatformID == 3 && (record.EncodingID == 1 || record.EncodingID == 10) {
-			unicodeTables = append(unicodeTables, index)
+		if record.platform == 0 || record.platform == 3 && (record.encoding == 1 || record.encoding == 10) {
+			unicodeTables = append(unicodeTables, record)
 		}
 	}
 	if len(unicodeTables) == 0 {
@@ -242,8 +229,8 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 	mapping := make(map[rune]uint16, len(usage.chars))
 	for char := range usage.chars {
 		id := sfnt.GlyphIndex(char)
-		for _, index := range unicodeTables {
-			if alternate, ok := sfnt.Cmap.Subtables[index].Get(char); ok && alternate != id {
+		for _, cmap := range unicodeTables {
+			if alternate, ok := cmap.mapping[char]; ok && alternate != id {
 				return nil
 			}
 		}
@@ -261,7 +248,7 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 		if id >= sfnt.NumGlyphs() {
 			return nil
 		}
-		dependencies, err := sfnt.Glyf.Dependencies(id)
+		dependencies, err := sfnt.glyphDependencies(id)
 		if err != nil {
 			return nil
 		}
@@ -271,13 +258,14 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 	}
 	var glyf, loca []byte
 	for id := 0; id <= int(sfnt.NumGlyphs()); id++ {
-		if sfnt.Head.IndexToLocFormat == 0 {
+		if binary.BigEndian.Uint16(sfnt.Tables["head"][50:]) == 0 {
 			loca = binary.BigEndian.AppendUint16(loca, uint16(len(glyf)/2))
 		} else {
 			loca = binary.BigEndian.AppendUint32(loca, uint32(len(glyf)))
 		}
 		if id < int(sfnt.NumGlyphs()) && glyphs[uint16(id)] {
-			glyf = append(glyf, sfnt.Glyf.Get(uint16(id))...)
+			data, _ := trueTypeGlyphData(sfnt.Tables, uint16(id))
+			glyf = append(glyf, data...)
 			if len(glyf)%2 != 0 {
 				glyf = append(glyf, 0)
 			}
@@ -294,4 +282,99 @@ func subsetSourceSFNTFont(data []byte, usage *editorFontUsage) []byte {
 		return nil
 	}
 	return result
+}
+
+// subsetCompactSFNTFont 重排新建静态字体的字形，同步复合引用、字符映射和度量
+// 入参: sfnt 字体, glyphs 使用字形
+// 返回: []byte 紧凑字体子集, error 字形数据错误
+func subsetCompactSFNTFont(sfnt *sfntFont, glyphs []uint16) ([]byte, error) {
+	ids := []uint16{0}
+	remap := map[uint16]uint16{0: 0}
+	for _, id := range glyphs {
+		if id >= sfnt.NumGlyphs() {
+			return nil, fmt.Errorf("font glyph index out of range")
+		}
+		if _, ok := remap[id]; !ok {
+			remap[id] = uint16(len(ids))
+			ids = append(ids, id)
+		}
+	}
+	for index := 0; index < len(ids); index++ {
+		dependencies, err := sfnt.glyphDependencies(ids[index])
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range dependencies {
+			if _, ok := remap[id]; !ok {
+				remap[id] = uint16(len(ids))
+				ids = append(ids, id)
+			}
+		}
+	}
+	table := make(map[string][]byte)
+	for _, tag := range []string{"head", "hhea", "maxp", "OS/2", "post", "name", "cvt ", "fpgm", "prep", "gasp", "vhea"} {
+		if data := sfnt.Tables[tag]; data != nil {
+			table[tag] = bytes.Clone(data)
+		}
+	}
+	var glyf, loca, hmtx, vmtx []byte
+	mapping := make(map[rune]uint16)
+	for _, id := range ids {
+		loca = binary.BigEndian.AppendUint32(loca, uint32(len(glyf)))
+		data, err := trueTypeGlyphData(sfnt.Tables, id)
+		if err != nil {
+			return nil, err
+		}
+		data = bytes.Clone(data)
+		if len(data) >= 10 && int16(binary.BigEndian.Uint16(data)) < 0 {
+			for pos := 10; ; {
+				flags := binary.BigEndian.Uint16(data[pos:])
+				child := binary.BigEndian.Uint16(data[pos+2:])
+				binary.BigEndian.PutUint16(data[pos+2:], remap[child])
+				pos += 6
+				if flags&1 != 0 {
+					pos += 2
+				}
+				switch flags & 0xc8 {
+				case 8:
+					pos += 2
+				case 0x40:
+					pos += 4
+				case 0x80:
+					pos += 8
+				}
+				if flags&0x20 == 0 {
+					break
+				}
+			}
+		}
+		glyf = append(glyf, data...)
+		for len(glyf)%4 != 0 {
+			glyf = append(glyf, 0)
+		}
+		hmtx = binary.BigEndian.AppendUint16(hmtx, sfnt.GlyphAdvance(id))
+		hmtx = binary.BigEndian.AppendUint16(hmtx, uint16(sfnt.sideBearing(id, false)))
+		if sfnt.vertical != 0 {
+			vmtx = binary.BigEndian.AppendUint16(vmtx, sfnt.GlyphVerticalAdvance(id))
+			vmtx = binary.BigEndian.AppendUint16(vmtx, uint16(sfnt.sideBearing(id, true)))
+		}
+		for _, char := range sfnt.glyphCharacters(id) {
+			mapping[char] = remap[id]
+		}
+	}
+	loca = binary.BigEndian.AppendUint32(loca, uint32(len(glyf)))
+	table["glyf"], table["loca"], table["hmtx"] = glyf, loca, hmtx
+	table["cmap"] = buildCmapTable(uint16(len(ids)), mapping)
+	binary.BigEndian.PutUint16(table["head"][50:], 1)
+	binary.BigEndian.PutUint16(table["hhea"][34:], uint16(len(ids)))
+	binary.BigEndian.PutUint16(table["maxp"][4:], uint16(len(ids)))
+	if len(table["post"]) >= 32 {
+		table["post"] = table["post"][:32]
+		binary.BigEndian.PutUint32(table["post"], 0x30000)
+	}
+	if sfnt.vertical != 0 {
+		table["vmtx"] = vmtx
+		binary.BigEndian.PutUint16(table["vhea"][34:], uint16(len(ids)))
+	}
+	return serializeOTF(table)
 }

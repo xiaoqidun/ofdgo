@@ -51,7 +51,10 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 		return ff
 	}
 	ff := canvas.NewFontFamily(fmt.Sprintf("ofdgo-%x-%d", resolved.digest, fontStyle))
-	if err := ff.LoadFont(fontData, 0, fontStyle); err != nil {
+	canvasFontLoadMu.Lock()
+	err = ff.LoadFont(fontData, 0, fontStyle)
+	canvasFontLoadMu.Unlock()
+	if err != nil {
 		r.renderError = err
 		return nil
 	}

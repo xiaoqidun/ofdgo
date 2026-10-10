@@ -18,7 +18,6 @@ import (
 	"strings"
 
 	"github.com/tdewolff/canvas"
-	"github.com/tdewolff/font"
 )
 
 // ptPerMM 为毫米转换为排版点的比例
@@ -183,7 +182,8 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		ctx.Pop()
 		return
 	}
-	face := ff.Face(sizePt, fillPaint, fontStyle, canvas.FontNormal, font.NoHinting)
+	face := ff.Face(sizePt, fillPaint, fontStyle, canvas.FontNormal)
+	face.Hinting = 0
 	recoverBaseline := len(obj.TextCode) > 0 && obj.TextCode[0].Y == ""
 	var metrics canvas.FontMetrics
 	if textRun != nil || recoverBaseline {

@@ -258,5 +258,19 @@ func init() {
 // 返回: RenderBackends 默认后端组合
 func defaultRenderBackends() RenderBackends {
 	backend := CanvasBackend{}
-	return RenderBackends{FontResources: SFNTBackend{}, Fonts: backend, Geometry: backend, Compiler: backend, Raster: backend, SVG: backend, PDF: backend, EPS: backend}
+	return RenderBackends{FontResources: SFNTBackend{}, Fonts: SFNTBackend{}, Geometry: backend, Compiler: backend, Raster: backend, SVG: backend, PDF: backend, EPS: backend}
+}
+
+// OpenFont 使用独立字体后端读取字体度量
+// 入参: data 字体数据
+// 返回: FontMetrics 字体度量, error 解析错误
+func (CanvasBackend) OpenFont(data []byte) (FontMetrics, error) {
+	return (SFNTBackend{}).OpenFont(data)
+}
+
+// ResolveFont 使用独立字体后端解析字体来源
+// 入参: r 渲染器, id 字体标识, exact 是否禁止无关回退
+// 返回: ResolvedFont 字体与来源, error 解析错误
+func (CanvasBackend) ResolveFont(r *Renderer, id string, exact bool) (ResolvedFont, error) {
+	return (SFNTBackend{}).ResolveFont(r, id, exact)
 }

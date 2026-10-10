@@ -20,8 +20,8 @@ github.com/ByteArena/poly2tri-go v0.0.0-20170716161910-d102ad91854f h1:l7moT9o/v
 github.com/ByteArena/poly2tri-go v0.0.0-20170716161910-d102ad91854f/go.mod h1:vIOkSdX3NDCPwgu8FIuTat2zDF0FPXXQ0RYFRy+oQic=
 github.com/ajstarks/svgo v0.0.0-20211024235047-1546f124cd8b h1:slYM766cy2nI3BwyRiyQj/Ud48djTMtMebDqepE95rw=
 github.com/ajstarks/svgo v0.0.0-20211024235047-1546f124cd8b/go.mod h1:1KcenG0jGWcpt8ov532z81sp/kMMUG485J2InIOyADM=
-github.com/andybalholm/brotli v1.2.2 h1:HzTuoo2ErYQqf5qvcJInB8uvqSVxRttzkFexPWtnceM=
-github.com/andybalholm/brotli v1.2.2/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
+github.com/andybalholm/brotli v1.2.6 h1:ftYnfj6usCp+UGV5kSJ3+chpMQgU+gJf/AxsUQ52REI=
+github.com/andybalholm/brotli v1.2.6/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/benoitkugler/pstokenizer v1.0.0/go.mod h1:l1G2Voirz0q/jj0TQfabNxVsa8HZXh/VMxFSRALWTiE=
 github.com/benoitkugler/textlayout v0.3.2 h1:Y/LTkwpQ9G0Fia9yhPmZA9IR5AnE8Cq30j3C+Gx5/IE=
 github.com/benoitkugler/textlayout v0.3.2/go.mod h1:o+1hFV+JSHBC9qNLIuwVoLedERU7sBPgEFcuSgfvi/w=
@@ -50,8 +50,8 @@ github.com/srwiley/scanx v0.0.0-20190309010443-e94503791388 h1:ZdkidVdpLW13BQ9a+
 github.com/srwiley/scanx v0.0.0-20190309010443-e94503791388/go.mod h1:C/WY5lmWfMtPFYYBTd3Lzdn4FTLr+RxlIeiBNye+/os=
 github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c h1:eXJXpQAo8l0AdVnsjJctG38GlBnHnwHfhLOTLYxZYNE=
 github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c/go.mod h1:K9Ux3cwFtyAFRITZ46g7v+ORXgI3ENtQa5rL9yjNz5Y=
-github.com/tdewolff/font v0.0.0-20260913163313-54f98bb59ee6 h1:phNTWRYLLTlPpUgxkd6FDmWLlrOzpEpQAqq1ryLXYS8=
-github.com/tdewolff/font v0.0.0-20260913163313-54f98bb59ee6/go.mod h1:ipESUihcEdgRBhIwTRHmBTOMamccMQrp4iCxfa1aFws=
+github.com/tdewolff/font v0.0.0-20260822205238-d0d2f004b117 h1:5vSJjsbV9AH0U+Ex0uej8ROrpOBlOVBrw0mGlVef7oo=
+github.com/tdewolff/font v0.0.0-20260822205238-d0d2f004b117/go.mod h1:ipESUihcEdgRBhIwTRHmBTOMamccMQrp4iCxfa1aFws=
 github.com/tdewolff/minify/v2 v2.24.17 h1:6AbitfVyq0M7aW6i+XL7+49DeTQZwloOMs9O574arBg=
 github.com/tdewolff/minify/v2 v2.24.17/go.mod h1:kVqn9vxXUKtlHexSNrWbYePqioOT5mc4ou/KVSMpfCM=
 github.com/tdewolff/parse/v2 v2.8.16 h1:bLk5svUOQRkW/Y2SJ+DeENSIkZBcTIkq+Atyv5D8feI=

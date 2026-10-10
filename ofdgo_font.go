@@ -16,8 +16,6 @@ package ofdgo
 
 import (
 	"encoding/binary"
-
-	"github.com/tdewolff/font"
 )
 
 // FixFontDataAggressive 激进修复字体数据
@@ -52,10 +50,10 @@ func FixFontDataAggressive(data []byte, fixCmap, fixName bool) (bool, []byte, ma
 }
 
 // fontSFNTData 保留字体原始表数据和时间，重新计算目录与校验和
-// 入参: sfnt 已解析的字体
+// 入参: tables 原始字体表
 // 返回: []byte 独立SFNT数据
-func fontSFNTData(sfnt *font.SFNT) []byte {
-	data, _ := serializeOTF(sfnt.Tables)
+func fontSFNTData(tables map[string][]byte) []byte {
+	data, _ := serializeOTF(tables)
 	return data
 }
 

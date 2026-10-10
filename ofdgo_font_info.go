@@ -22,8 +22,6 @@ import (
 	"path"
 	"slices"
 	"sort"
-
-	"github.com/tdewolff/font"
 )
 
 const (
@@ -246,7 +244,7 @@ func (r *Reader) embeddedFontFace(of Font) (*FontFace, error) {
 		if err != nil {
 			return nil, err
 		}
-		if data, err = font.ToSFNT(data); err == nil {
+		if data, err = decodeFontContainer(data); err == nil {
 			if count, err := fontFileCount(data); err == nil {
 				faces = make([]*FontFace, count)
 				for index := range faces {
