@@ -45,9 +45,9 @@ type versionEditGraph struct {
 }
 
 // versionFileDependencies 流式汇总版本入口的标准文件引用，不保留页面节点或读取二进制资源
-// 入参: ctx 取消上下文, entry 文档入口, parts 待修改条目
+// 入参: ctx 取消上下文, entry 文档入口, parts 待修改条目, generated 本次自产页面及引用
 // 返回: map[string]bool 引用路径, error 读取、结构或取消错误
-func (r *Reader) versionFileDependencies(ctx context.Context, entry string, parts map[string][]byte) (map[string]bool, error) {
+func (r *Reader) versionFileDependencies(ctx context.Context, entry string, parts map[string][]byte, generated map[string]editorGeneratedReferences) (map[string]bool, error) {
 	view := *r
 	if len(parts) != 0 {
 		view.files = maps.Clone(r.files)
@@ -72,6 +72,9 @@ func (r *Reader) versionFileDependencies(ctx context.Context, entry string, part
 		}
 		name := queue[0]
 		queue = queue[1:]
+		if data, ok := parts[name]; ok && generated[name].stagedLeaf(data) {
+			continue
+		}
 		if err := view.documentFileReferences(ctx, name, false, add); err != nil {
 			return nil, err
 		}
@@ -80,9 +83,9 @@ func (r *Reader) versionFileDependencies(ctx context.Context, entry string, part
 }
 
 // versionEditGraph 沿标准文件引用建立版本依赖图，二进制资源只记录路径
-// 入参: ctx 取消上下文, entry 文档入口, parts 待修改条目
+// 入参: ctx 取消上下文, entry 文档入口, parts 待修改条目, generated 本次自产页面及引用
 // 返回: *versionEditGraph 依赖图, error 读取或结构错误
-func (r *Reader) versionEditGraph(ctx context.Context, entry string, parts map[string][]byte) (*versionEditGraph, error) {
+func (r *Reader) versionEditGraph(ctx context.Context, entry string, parts map[string][]byte, generated map[string]editorGeneratedReferences) (*versionEditGraph, error) {
 	graph := &versionEditGraph{files: make(map[string]*versionEditFile), used: make(map[string]bool)}
 	queue := []string{entry}
 	for len(queue) != 0 {
@@ -95,6 +98,10 @@ func (r *Reader) versionEditGraph(ctx context.Context, entry string, parts map[s
 			continue
 		}
 		data, ok := parts[name]
+		if ok && generated[name].stagedLeaf(data) {
+			graph.files[name], graph.used[name] = &versionEditFile{}, true
+			continue
+		}
 		if !ok {
 			var err error
 			data, err = r.readFile(name)
@@ -206,7 +213,7 @@ func (r *Reader) versionSharedFiles(ctx context.Context) (map[string]bool, error
 		if err != nil {
 			return nil, err
 		}
-		files, err := r.versionFileDependencies(ctx, entry, nil)
+		files, err := r.versionFileDependencies(ctx, entry, nil, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -216,9 +223,9 @@ func (r *Reader) versionSharedFiles(ctx context.Context) (map[string]bool, error
 }
 
 // versionResourceFiles 限定当前版本的资源扫描范围，合并其他文档依赖以保护跨文档引用
-// 入参: ctx 取消上下文, parts 待写入条目
+// 入参: ctx 取消上下文, parts 待写入条目, generated 本次自产页面及引用
 // 返回: map[string]bool 扫描路径，非版本文档返回nil, error 读取或结构错误
-func (r *Reader) versionResourceFiles(ctx context.Context, parts map[string][]byte) (map[string]bool, error) {
+func (r *Reader) versionResourceFiles(ctx context.Context, parts map[string][]byte, generated map[string]editorGeneratedReferences) (map[string]bool, error) {
 	if r == nil || !r.OFD.DocBody[r.documentIndex].versioned {
 		return nil, nil
 	}
@@ -226,7 +233,7 @@ func (r *Reader) versionResourceFiles(ctx context.Context, parts map[string][]by
 	if err != nil {
 		return nil, err
 	}
-	files, err := r.versionFileDependencies(ctx, entry, parts)
+	files, err := r.versionFileDependencies(ctx, entry, parts, generated)
 	if err != nil {
 		return nil, err
 	}
@@ -252,13 +259,13 @@ func (r *Reader) versionResourceFiles(ctx context.Context, parts map[string][]by
 // 入参: ctx 取消上下文, changes 待写入条目
 // 返回: map[string][]byte 隔离后的修改集, error 读取、引用或结构错误
 func (r *Reader) versionChanges(ctx context.Context, changes map[string][]byte) (map[string][]byte, error) {
-	return r.versionOutputChanges(ctx, changes, nil)
+	return r.versionOutputChanges(ctx, changes, nil, nil)
 }
 
 // versionOutputChanges 隔离版本改动并同步删除清单，保留其他入口仍需使用的文件
-// 入参: ctx 取消上下文, changes 待写入条目, removed 待删除条目，返回前移除受保护路径
+// 入参: ctx 取消上下文, changes 待写入条目, removed 待删除条目，返回前移除受保护路径, generated 本次自产页面及引用，随隔离路径更新
 // 返回: map[string][]byte 隔离后的修改集, error 读取、引用或结构错误
-func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]byte, removed map[string]bool) (map[string][]byte, error) {
+func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) (map[string][]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -274,6 +281,9 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 		parts = make(map[string][]byte)
 	}
 	for name, data := range parts {
+		if generated[name].stagedLeaf(data) {
+			continue
+		}
 		if original, err := r.readFileView(name); err == nil && bytes.Equal(original, data) {
 			delete(parts, name)
 		}
@@ -285,7 +295,7 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	if err != nil {
 		return nil, err
 	}
-	graph, err := r.versionEditGraph(ctx, entry, parts)
+	graph, err := r.versionEditGraph(ctx, entry, parts, generated)
 	if err != nil {
 		return nil, err
 	}
@@ -372,7 +382,16 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 			delete(removed, name)
 		}
 	}
-	return parts, ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	for source, target := range paths {
+		if known := generated[source]; known.stagedLeaf(parts[target]) {
+			generated[target] = known
+			delete(generated, source)
+		}
+	}
+	return parts, nil
 }
 
 // rewrite 更新已隔离文件的引用，保留其余XML及相对路径基准

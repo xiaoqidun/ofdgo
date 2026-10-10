@@ -345,7 +345,7 @@ func (r *Reader) versionSnapshotFiles(ctx context.Context) (map[string]bool, err
 	if err != nil {
 		return nil, err
 	}
-	files, err := r.versionFileDependencies(ctx, entry, nil)
+	files, err := r.versionFileDependencies(ctx, entry, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +373,7 @@ func (r *Reader) versionSnapshotFiles(ctx context.Context) (map[string]bool, err
 		}
 	}
 	if signature := r.versionSignatures(body.Signatures); signature != "" {
-		signed, err := r.versionFileDependencies(ctx, cleanPackagePath(signature), nil)
+		signed, err := r.versionFileDependencies(ctx, cleanPackagePath(signature), nil, nil)
 		if err != nil {
 			return nil, err
 		}

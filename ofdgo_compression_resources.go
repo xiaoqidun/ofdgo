@@ -51,7 +51,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		return nil
 	}
 	generated = e.generatedVectorReferences(parts, generated)
-	scope, err := reader.versionResourceFiles(e.output.ctx, parts)
+	scope, err := reader.versionResourceFiles(e.output.ctx, parts, generated)
 	if err != nil {
 		return err
 	}

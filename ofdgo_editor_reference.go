@@ -43,6 +43,13 @@ func (r editorGeneratedReferences) matches(data []byte) bool {
 	return bytes.Equal(data, r.data)
 }
 
+// stagedLeaf 判断暂存页面是否无需改写文件路径，资源标识仍由资源索引解析
+// 入参: data 当前条目数据
+// 返回: bool 是否为引用完整且不含文件路径的暂存页面
+func (r editorGeneratedReferences) stagedLeaf(data []byte) bool {
+	return r.staged != nil && data == nil && r.refs != nil && len(r.refs.files) == 0
+}
+
 // editorVectorUsage 保存自产矢量资源的引用快照，内容和路径变化时失效
 type editorVectorUsage struct {
 	name   string

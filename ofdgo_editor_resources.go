@@ -61,7 +61,7 @@ func (e *Editor) compactSourceReferences(parts map[string][]byte, progress edito
 	if e.output != nil {
 		ctx = e.output.ctx
 	}
-	scope, err := reader.versionResourceFiles(ctx, parts)
+	scope, err := reader.versionResourceFiles(ctx, parts, generated)
 	if err != nil {
 		return nil, err
 	}

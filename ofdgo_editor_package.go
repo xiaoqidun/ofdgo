@@ -54,7 +54,6 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 	var stager editorPageStager
 	source := e.source
 	reader := source.reader
-	stage = stage && !reader.OFD.DocBody[reader.documentIndex].versioned
 	pageRefs := make([]Page, len(e.pages))
 	originalCount := 0
 	for i, page := range e.pages {
@@ -92,6 +91,18 @@ func (e *Editor) sourcePartsPrepared(progress editorProgress, generated map[stri
 					known.refs = scan.refs
 				}
 				generated[name] = known
+				if reader.OFD.DocBody[reader.documentIndex].versioned && !known.stagedLeaf(nil) {
+					input := data.open()
+					if e.output != nil {
+						input = imageInput{ReadCloser: input, context: e.output.ctx}
+					}
+					parts[name], err = io.ReadAll(input)
+					input.Close()
+					if err != nil {
+						return nil, err
+					}
+					generated[name] = editorGeneratedReferences{data: parts[name], refs: known.refs}
+				}
 			} else {
 				data, err := e.sourcePageData(page, scan)
 				if err != nil {
@@ -596,7 +607,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 	if e.output != nil {
 		ctx = e.output.ctx
 	}
-	parts, err = reader.versionOutputChanges(ctx, parts, removed)
+	parts, err = reader.versionOutputChanges(ctx, parts, removed, generated)
 	if err != nil {
 		return 0, err
 	}
