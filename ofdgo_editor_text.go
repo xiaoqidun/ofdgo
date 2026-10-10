@@ -305,22 +305,23 @@ func missingGlyphError(id string, characters []rune) error {
 	return &MissingGlyphError{FontID: id, Characters: value.String()}
 }
 
-// rewriteTextDeltas 局部替换字符步进，保留未修改字符及末尾附加位移
+// rewriteTextDeltas 按需读取并局部替换字符步进，保留末尾附加位移及其重复编码
 // 入参: value 原位移, old 原字符, replacement 替换字符, start 起点, end 终点, advance 字体步进
 // 返回: string 更新后的位移数组
 func rewriteTextDeltas(value string, old, replacement []rune, start, end int, advance func(rune) float64) string {
-	deltas := parseFloatsWithG(value)
+	deltas := textPositionValues{data: value, compressed: true}
 	steps := make([]float64, len(old))
+	complete := len(old) == 0
 	for i, char := range old {
 		steps[i] = advance(char)
-		if i < len(old)-1 || len(deltas) >= len(old) {
-			if delta, ok := textDelta(deltas, i); ok {
-				steps[i] = delta
-			}
+		delta, ok := deltas.next()
+		if ok || i < len(old)-1 && deltas.present {
+			steps[i] = delta
 		}
+		complete = ok
 	}
 	tracking := 0.0
-	if len(old) > 0 && (len(old) > 1 || len(deltas) != 0) {
+	if len(old) > 0 && (len(old) > 1 || deltas.present) {
 		index := min(start, max(0, len(old)-2))
 		tracking = steps[index] - advance(old[index])
 	}
@@ -329,16 +330,30 @@ func rewriteTextDeltas(value string, old, replacement []rune, start, end int, ad
 		result = append(result, advance(char)+tracking)
 	}
 	result = append(result, steps[end:]...)
-	if len(deltas) < len(old) {
+	if !complete {
 		result = result[:len(result)-1]
-	} else {
-		result = append(result, deltas[len(old):]...)
 	}
-	numbers := make([]string, len(result))
-	for i, delta := range result {
-		numbers[i] = ofdNumber(delta)
+	var output strings.Builder
+	write := func(field string) {
+		if output.Len() != 0 {
+			output.WriteByte(' ')
+		}
+		output.WriteString(field)
 	}
-	return strings.Join(numbers, " ")
+	for _, delta := range result {
+		write(ofdNumber(delta))
+	}
+	if deltas.repeat > 0 {
+		if deltas.repeat > 1 {
+			write("g")
+			write(strconv.Itoa(deltas.repeat))
+		}
+		write(ofdNumber(deltas.value))
+	}
+	if tail := strings.TrimSpace(deltas.data); tail != "" {
+		write(tail)
+	}
+	return output.String()
 }
 
 // styleTextObjects 生成文字样式副本，不提交文档或历史
