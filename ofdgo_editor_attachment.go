@@ -52,7 +52,15 @@ func (e *Editor) AddAttachment(name string, data []byte) (string, error) {
 			return "", err
 		}
 	}
-	id := strconv.Itoa(maximum + 1)
+	attachments, err := base.reader.Attachments()
+	if err != nil {
+		return "", err
+	}
+	used := make(map[string]bool, len(attachments))
+	for _, attachment := range attachments {
+		used[attachment.ID] = true
+	}
+	id, maximum := nextAttachmentID(used, maximum)
 	file := e.packageName("Attachments/Attachment_" + id)
 	attrs := ofdAttrs{}
 	attrs.add("ID", id)
@@ -121,8 +129,22 @@ func (e *Editor) AddAttachment(name string, data []byte) (string, error) {
 	if err := e.commitAnnotationParts(base, parts); err != nil {
 		return "", err
 	}
-	e.maxID, e.source.idsReady = maximum+1, true
+	e.maxID, e.source.idsReady = maximum, true
 	return id, nil
+}
+
+// nextAttachmentID 分配以字母开头且不与已有附件重复的标识
+// 入参: used 已用附件标识, maximum 当前编号上限
+// 返回: string 附件标识, int 更新后的编号上限
+func nextAttachmentID(used map[string]bool, maximum int) (string, int) {
+	for {
+		maximum++
+		id := "a" + strconv.Itoa(maximum)
+		if !used[id] {
+			used[id] = true
+			return id, maximum
+		}
+	}
 }
 
 // RenameAttachment 修改附件显示名称，保留格式、内容及扩展字段，相同名称不产生撤销记录

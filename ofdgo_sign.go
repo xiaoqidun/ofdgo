@@ -126,7 +126,7 @@ func (r *Reader) SignatureStampPositions(stamps []SignatureStamp) ([]SignatureSt
 	pages := signaturePageNumbers(doc)
 	positions := make([]SignatureStampPosition, 0, len(stamps))
 	for _, stamp := range stamps {
-		page, ok := pages[stamp.PageRef]
+		page, ok := resourceValue(pages, stamp.PageRef)
 		if !ok {
 			return nil, fmt.Errorf("signature stamp page not found: %s", stamp.PageRef)
 		}
@@ -183,6 +183,7 @@ func (r *Reader) parseSignatures(doc *Document) error {
 	if err := xml.NewDecoder(f).Decode(&signatures); err != nil {
 		return err
 	}
+	pages := signaturePageNumbers(doc)
 	for _, sigRef := range signatures.List {
 		func(sigRef Signature) {
 			sigPath := resolveResourcePath(sigListPath, "", sigRef.BaseLoc)
@@ -217,7 +218,11 @@ func (r *Reader) parseSignatures(doc *Document) error {
 				return
 			}
 			for _, annot := range sigFile.SignedInfo.StampAnnot {
-				pageID := annot.PageRef
+				page, ok := resourceValue(pages, annot.PageRef)
+				if !ok {
+					continue
+				}
+				pageID := doc.Pages.Page[page-1].ID
 				bbox, err := parseSignatureStampBox(annot.Boundary)
 				if err != nil {
 					continue

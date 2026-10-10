@@ -55,6 +55,7 @@ type editorPageImport struct {
 	templateParts map[string][]byte
 	defaultCS     string
 	attachments   map[string][]byte
+	attachmentIDs map[string]bool
 	copyPage      bool
 	strictLinks   bool
 	progress      editorProgress
@@ -957,10 +958,14 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 		var err error
 		switch key {
 		case "ID":
-			if name == "Signature" || name == "StampAnnot" {
+			if name == "Attachment" {
+				value, err = m.attachmentID(value)
+			} else if name == "Signature" || name == "StampAnnot" {
 				value = name + ":" + value
+				value = m.id(value)
+			} else {
+				value = m.id(value)
 			}
-			value = m.id(value)
 		case "PageID":
 			if !m.copyPage || m.pages[editorImportKey(value)] {
 				value, err = m.reference(value)
@@ -1173,25 +1178,11 @@ func (m *editorPageImport) annotations() ([]byte, error) {
 // 入参: id 来源附件标识
 // 返回: string 新标识, error 错误信息
 func (m *editorPageImport) attachment(id string) (string, error) {
-	key := editorImportKey(id)
 	if m.copyPage {
-		if mapped := m.ids[key]; mapped != "" {
-			return mapped, nil
-		}
-		attachments, err := m.reader.Attachments()
-		if err != nil {
-			return "", err
-		}
-		for _, attachment := range attachments {
-			if editorImportKey(attachment.ID) == key {
-				m.ids[key] = attachment.ID
-				return attachment.ID, nil
-			}
-		}
 		return id, nil
 	}
-	if _, exists := m.attachments[key]; exists {
-		return m.id(id), nil
+	if _, exists := m.attachments[id]; exists {
+		return m.attachmentID(id)
 	}
 	name := m.reader.ResPath(m.reader.OFD.DocBody[m.reader.documentIndex].DocRoot)
 	if m.doc.Attachments.Path != "" {
@@ -1210,13 +1201,39 @@ func (m *editorPageImport) attachment(id string) (string, error) {
 	}
 	if root != nil {
 		for _, node := range root.children {
-			if node.name.Local == "Attachment" && editorImportKey(node.attr("ID")) == key {
-				m.attachments[key], err = m.encode(editorImportEntry{name: name, data: data}, node)
-				return m.id(id), err
+			if node.name.Local == "Attachment" && node.attr("ID") == id {
+				m.attachments[id], err = m.encode(editorImportEntry{name: name, data: data}, node)
+				if err != nil {
+					return "", err
+				}
+				return m.attachmentID(id)
 			}
 		}
 	}
 	return "", fmt.Errorf("attachment %q not found", id)
+}
+
+// attachmentID 为来源附件分配独立的文本标识，避免与数值型资源标识混淆
+// 入参: id 来源附件标识
+// 返回: string 目标附件标识, error 附件索引错误
+func (m *editorPageImport) attachmentID(id string) (string, error) {
+	key := "Attachment:" + id
+	if mapped := m.ids[key]; mapped != "" {
+		return mapped, nil
+	}
+	if m.attachmentIDs == nil {
+		attachments, err := m.target.Attachments()
+		if err != nil {
+			return "", err
+		}
+		m.attachmentIDs = make(map[string]bool, len(attachments))
+		for _, attachment := range attachments {
+			m.attachmentIDs[attachment.ID] = true
+		}
+	}
+	mapped, maximum := nextAttachmentID(m.attachmentIDs, m.maximum)
+	m.maximum, m.ids[key] = maximum, mapped
+	return mapped, nil
 }
 
 // signatures 复制所选页面的签章及原始验证凭据，过滤其他页面的签章位置

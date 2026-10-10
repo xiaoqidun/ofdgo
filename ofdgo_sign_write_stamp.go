@@ -98,10 +98,11 @@ func signatureWriteStamps(r *Reader, stamps []SignatureStamp, seal bool) ([]Sign
 	if len(result) != 0 {
 		pages := make(map[string]bool)
 		for _, page := range doc.Pages.Page {
-			if page.ID == "" || pages[page.ID] {
+			id := editorResourceID(page.ID)
+			if id == "" || pages[id] {
 				return nil, fmt.Errorf("ambiguous stamp page ID: %s", page.ID)
 			}
-			pages[page.ID] = true
+			pages[id] = true
 		}
 	}
 	ids := make(map[string]bool)
