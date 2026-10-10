@@ -73,15 +73,17 @@ type outputOptimization struct {
 
 // outputCompressionBuffer 限制候选ZIP编码，不能缩小时终止本次压缩
 type outputCompressionBuffer struct {
-	buffer *bytes.Buffer
-	limit  int
+	buffer   *bytes.Buffer
+	limit    int
+	exceeded bool
 }
 
 // Write 写入有界候选编码，超过体积上限时返回短缓冲错误
 // 入参: data 编码数据
 // 返回: int 写入字节数, error 容量错误
-func (b outputCompressionBuffer) Write(data []byte) (int, error) {
+func (b *outputCompressionBuffer) Write(data []byte) (int, error) {
 	if len(data) > b.limit-b.buffer.Len() {
+		b.exceeded = true
 		return 0, io.ErrShortBuffer
 	}
 	return b.buffer.Write(data)
@@ -363,7 +365,7 @@ func (e *Editor) writeOutputBytes(writer io.Writer, data []byte) error {
 // 返回: []byte 更小的DEFLATE编码, error 取消或编码错误
 func (e *Editor) compressOutputBytes(data []byte, limit int) ([]byte, error) {
 	var compressed bytes.Buffer
-	output := outputCompressionBuffer{buffer: &compressed, limit: min(limit, outputOptimizationBufferLimit)}
+	output := &outputCompressionBuffer{buffer: &compressed, limit: min(limit, outputOptimizationBufferLimit)}
 	deflater := e.output.deflater
 	if deflater == nil {
 		deflater, _ = flate.NewWriter(output, flate.BestCompression)
@@ -395,6 +397,49 @@ func (e *Editor) compressOutputBytes(data []byte, limit int) ([]byte, error) {
 		return nil, e.output.ctx.Err()
 	}
 	return compressed.Bytes(), e.output.ctx.Err()
+}
+
+// compressOutputFile 分块重压缩ZIP条目，无收益时仍读完原数据并校验长度及校验和
+// 入参: file 原始条目, buffer 读取缓冲, limit 候选体积上限
+// 返回: []byte 更小的DEFLATE编码, error 读取、编码或取消错误
+func (e *Editor) compressOutputFile(file *zip.File, buffer []byte, limit int) ([]byte, error) {
+	input, err := file.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer input.Close()
+	var compressed bytes.Buffer
+	output := &outputCompressionBuffer{buffer: &compressed, limit: min(limit, outputOptimizationBufferLimit)}
+	deflater := e.output.deflater
+	if deflater == nil {
+		deflater, _ = flate.NewWriter(output, flate.BestCompression)
+		e.output.deflater = deflater
+	} else {
+		deflater.Reset(output)
+	}
+	defer deflater.Close()
+	source := imageInput{ReadCloser: input, context: e.output.ctx}
+	_, err = io.CopyBuffer(deflater, source, buffer)
+	if output.exceeded {
+		_, err = io.CopyBuffer(io.Discard, source, buffer)
+	}
+	closeErr := deflater.Close()
+	if e.output.ctx.Err() != nil {
+		return nil, e.output.ctx.Err()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if output.exceeded {
+		return nil, nil
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if compressed.Len() >= limit {
+		return nil, nil
+	}
+	return compressed.Bytes(), nil
 }
 
 // prepareOutputHeader 更新原始ZIP编码属性，保留名称、备注和字符集标记
@@ -454,29 +499,22 @@ func (e *Editor) writeOutputFile(archive *zip.Writer, file *zip.File, buffer []b
 	header.Extra = outputZIPExtra(header.Extra)
 	var payload io.Reader
 	if file.UncompressedSize64 <= outputOptimizationBufferLimit {
-		input, err := file.Open()
-		if err != nil {
-			return err
-		}
-		data, err := io.ReadAll(io.LimitReader(imageInput{ReadCloser: input, context: e.output.ctx}, outputOptimizationBufferLimit+1))
-		input.Close()
-		if err != nil {
-			return err
-		}
-		if uint64(len(data)) != file.UncompressedSize64 {
-			return io.ErrUnexpectedEOF
-		}
-		limit := min(file.CompressedSize64, uint64(len(data)))
-		compressed, err := e.compressOutputBytes(data, int(min(limit, outputOptimizationBufferLimit)))
+		limit := min(file.CompressedSize64, file.UncompressedSize64)
+		compressed, err := e.compressOutputFile(file, buffer, int(limit))
 		if err != nil {
 			return err
 		}
 		if compressed != nil {
-			prepareOutputHeader(&header, zip.Deflate, uint64(len(data)), uint64(len(compressed)), file.CRC32)
+			prepareOutputHeader(&header, zip.Deflate, file.UncompressedSize64, uint64(len(compressed)), file.CRC32)
 			payload = bytes.NewReader(compressed)
-		} else if uint64(len(data)) < file.CompressedSize64 {
-			prepareOutputHeader(&header, zip.Store, uint64(len(data)), uint64(len(data)), file.CRC32)
-			payload = bytes.NewReader(data)
+		} else if file.UncompressedSize64 < file.CompressedSize64 {
+			input, err := file.Open()
+			if err != nil {
+				return err
+			}
+			defer input.Close()
+			prepareOutputHeader(&header, zip.Store, file.UncompressedSize64, file.UncompressedSize64, file.CRC32)
+			payload = input
 		}
 	}
 	if payload == nil {
