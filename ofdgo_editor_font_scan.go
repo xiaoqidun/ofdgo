@@ -33,20 +33,12 @@ type editorFontDocument struct {
 	unsafe bool
 }
 
-// editorFontXML 保存内容XML及其直接文件引用
+// editorFontXML 保存字体声明及文字引用所在的XML
 type editorFontXML struct {
 	name  string
 	data  []byte
 	root  *editorXML
-	links []editorFontLink
 	texts []*editorXML
-}
-
-// editorFontLink 记录需要随共享资源隔离而更新的路径
-type editorFontLink struct {
-	node      *editorXML
-	attribute string
-	target    string
 }
 
 // editorFontDeclaration 关联字体声明、所属资源文件及嵌入数据路径
@@ -132,25 +124,23 @@ func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFon
 					scan.unsafe = true
 				}
 			}
-			attribute, value := "", ""
+			value := ""
 			switch node.name.Local {
 			case "PublicRes", "DocumentRes", "PageRes", "Annotations":
 				value = strings.TrimSpace(editorImportText(data, node))
 			case "Page", "TemplatePage", "CompositeGraphicUnit":
-				attribute, value = "BaseLoc", node.attr("BaseLoc")
+				value = node.attr("BaseLoc")
 			case "PageAnnot":
-				attribute, value = "FileLoc", node.attr("FileLoc")
+				value = node.attr("FileLoc")
 			case "DrawParam":
-				attribute, value = "Link", node.attr("Link")
+				value = node.attr("Link")
 			case "FileLoc":
 				if node.parent != nil && node.parent.matchesOFD("Page") && root.matchesOFD("Annotations") {
 					value = strings.TrimSpace(editorImportText(data, node))
 				}
 			}
 			if value != "" {
-				target := resolveResourcePath(name, base, value)
-				file.links = append(file.links, editorFontLink{node: node, attribute: attribute, target: target})
-				queue = append(queue, target)
+				queue = append(queue, resolveResourcePath(name, base, value))
 			}
 			for _, child := range node.children {
 				if err := visit(child); err != nil {
@@ -166,148 +156,33 @@ func scanEditorFonts(ctx context.Context, reader *Reader, index int) (*editorFon
 	return scan, nil
 }
 
-// apply 隔离其他文档共享的内容XML，再提交字体修改及上层路径引用
+// apply 隔离其他文档及版本的共享文件，提交字体修改和路径引用
 // 入参: ctx 取消上下文, changes 按原文件路径保存的修改
 // 返回: error 引用扫描或XML修改错误
 func (s *editorFontDocument) apply(ctx context.Context, changes map[string][]byte) error {
-	if s.reader.OFD.DocBody[s.index].versioned {
-		view := *s.reader
-		if s.index != view.documentIndex {
-			view.selectedVersion = nil
-		}
-		view.documentIndex = s.index
-		view.documentRoot, view.versionInfo = "", nil
-		parts, err := view.versionChanges(ctx, changes)
-		if err != nil {
-			return err
-		}
-		next := *s.reader
-		next.files = maps.Clone(next.files)
-		if next.files == nil {
-			next.files = make(map[string][]byte)
-		}
-		maps.Copy(next.files, parts)
-		if err := next.initRoot(); err != nil {
-			return err
-		}
-		*s.reader = next
-		return nil
+	view := *s.reader
+	if s.index != view.documentIndex {
+		view.selectedVersion = nil
 	}
-	shared := make(map[string]bool)
-	if s.reader.DocumentCount() > 1 {
-		for index := range s.reader.DocumentCount() {
-			if index == s.index {
-				continue
-			}
-			files, err := s.reader.documentFiles(ctx, index)
-			if err != nil {
-				return err
-			}
-			maps.Copy(shared, files)
-		}
-	}
-	paths := make(map[string]string)
-	for name := range changes {
-		if shared[name] {
-			paths[name] = packageAvailableName(s.reader, changes, name+".font.xml")
-		}
-	}
-	for changed := true; changed; {
-		changed = false
-		for name, file := range s.files {
-			if paths[name] != "" || !shared[name] {
-				continue
-			}
-			for _, link := range file.links {
-				if paths[link.target] != "" {
-					paths[name] = packageAvailableName(s.reader, changes, name+".font.xml")
-					changed = true
-					break
-				}
-			}
-		}
-	}
-	for _, name := range slices.Sorted(maps.Keys(s.files)) {
-		file := s.files[name]
-		if !slices.ContainsFunc(file.links, func(link editorFontLink) bool { return paths[link.target] != "" }) {
-			continue
-		}
-		data, modified := changes[name]
-		if !modified {
-			data = file.data
-		}
-		root, err := parseEditorXML(data)
-		if err != nil {
-			return err
-		}
-		var patches []editorXMLPatch
-		var patch func(*editorXML) error
-		patch = func(node *editorXML) error {
-			for _, link := range file.links {
-				target := paths[link.target]
-				if target == "" || node.name != link.node.name {
-					continue
-				}
-				if link.attribute != "" && node.attr(link.attribute) == link.node.attr(link.attribute) {
-					fragment, err := editorXMLAttribute(data, node, link.attribute, "/"+target)
-					if err != nil {
-						return err
-					}
-					header, err := parseEditorXML(fragment)
-					if err != nil {
-						return err
-					}
-					if node.open == node.end {
-						patches = append(patches, editorXMLPatch{node.start, node.end, fragment})
-					} else {
-						patches = append(patches, editorXMLPatch{node.start, node.open, fragment[:header.open]})
-					}
-					break
-				}
-				if link.attribute == "" && editorImportText(data, node) == editorImportText(file.data, link.node) {
-					patches = append(patches, editorXMLContent(data, node, editorFontXMLText("/"+target)))
-					break
-				}
-			}
-			for _, child := range node.children {
-				if err := patch(child); err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-		if err := patch(root); err != nil {
-			return err
-		}
-		if len(patches) != 0 {
-			data, modified = editorPatchXML(data, patches), true
-		}
-		if modified {
-			changes[name] = data
-		}
-	}
-	rootName, err := s.reader.documentEntry(s.index)
+	view.documentIndex = s.index
+	view.documentRoot, view.versionInfo = "", nil
+	parts, err := view.versionChanges(ctx, changes)
 	if err != nil {
 		return err
 	}
-	if target := paths[rootName]; target != "" {
-		data, err := s.reader.readFile("OFD.xml")
-		if err != nil {
-			return err
-		}
-		root, err := parseEditorXML(data)
-		if err != nil {
-			return err
-		}
-		node := root.childAt("DocBody", s.index).child("DocRoot")
-		changes["OFD.xml"] = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, editorFontXMLText("/"+target))})
+	next := *s.reader
+	next.files = maps.Clone(next.files)
+	if next.files == nil {
+		next.files = make(map[string][]byte)
 	}
-	for name, data := range changes {
-		if target := paths[name]; target != "" {
-			name = target
-		}
-		s.reader.files[name] = data
+	maps.Copy(next.files, parts)
+	if err := next.initRoot(); err != nil {
+		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	*s.reader = next
 	return nil
 }
 

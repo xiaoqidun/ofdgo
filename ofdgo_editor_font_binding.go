@@ -345,17 +345,9 @@ func (e *Editor) changeFontSnapshot(ctx context.Context, scan *editorFontDocumen
 		}
 	}
 	changes[declaration.file.name] = data
-	working := *scan.reader
-	working.files = maps.Clone(scan.reader.files)
-	next := *scan
-	next.reader = &working
-	if err := next.apply(ctx, changes); err != nil {
+	if err := scan.apply(ctx, changes); err != nil {
 		return false, err
 	}
-	if err := working.initRoot(); err != nil {
-		return false, err
-	}
-	*scan.reader = working
 	return true, nil
 }
 
