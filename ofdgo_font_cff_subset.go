@@ -51,7 +51,7 @@ func subsetNamedCFFFont(sfnt *sfntFont, glyphs []uint16) ([]byte, error) {
 	return serializeOTF(tables)
 }
 
-// subsetCFFCharstrings 清空未引用的Type2轮廓，保留原字宽、提示和子程序
+// subsetCFFCharstrings 清空未引用的Type2轮廓及子程序，保留原字宽、提示和编号
 // 入参: data 非CID的CFF数据, keep 保留的字形，调用后包含组合组件
 // 返回: []byte 重建的CFF数据, error 结构或依赖错误
 func subsetCFFCharstrings(data []byte, keep map[uint16]bool) ([]byte, error) {
@@ -60,12 +60,15 @@ func subsetCFFCharstrings(data []byte, keep map[uint16]bool) ([]byte, error) {
 		return nil, err
 	}
 	keep[0] = true
+	locals := make([]bool, len(font.locals))
+	globals := make([]bool, len(font.globals))
+	var stack [48]float64
 	for gid := range keep {
 		if int(gid) >= len(font.chars) {
 			return nil, fmt.Errorf("CFF glyph index out of range")
 		}
 		steps := 0
-		state := type2State{font: font, width: font.def, seed: font.seed + uint64(gid), steps: &steps, dependencies: keep}
+		state := type2State{font: font, args: stack[:0], width: font.def, seed: font.seed + uint64(gid), steps: &steps, dependencies: keep, localUsage: locals, globalUsage: globals}
 		if _, err := state.run(font.chars[gid], 0); err != nil {
 			return nil, err
 		}
@@ -78,7 +81,7 @@ func subsetCFFCharstrings(data []byte, keep map[uint16]bool) ([]byte, error) {
 			continue
 		}
 		steps := 0
-		state := type2State{font: font, width: font.def, widthOnly: true, seed: font.seed + uint64(gid), steps: &steps, dependencies: keep}
+		state := type2State{font: font, args: stack[:0], width: font.def, widthOnly: true, seed: font.seed + uint64(gid), steps: &steps, dependencies: keep}
 		if _, err := state.run(program, 0); err != nil {
 			return nil, err
 		}
@@ -100,7 +103,25 @@ func subsetCFFCharstrings(data []byte, keep map[uint16]bool) ([]byte, error) {
 		chars[gid] = encoded.Bytes()
 		empty[state.width] = chars[gid]
 	}
+	font.locals = subsetCFFSubroutines(font.locals, locals)
+	font.globals = subsetCFFSubroutines(font.globals, globals)
 	return rebuildNamedCFF(data, font, chars)
+}
+
+// subsetCFFSubroutines 将未引用的子程序替换为空返回，保持调用编号及偏移基数
+// 入参: programs 子程序索引, used 引用标记
+// 返回: [][]byte 裁剪后的子程序索引
+func subsetCFFSubroutines(programs [][]byte, used []bool) [][]byte {
+	result := make([][]byte, len(programs))
+	empty := []byte{11}
+	for index, program := range programs {
+		if used[index] {
+			result[index] = program
+		} else {
+			result[index] = empty
+		}
+	}
+	return result
 }
 
 // rebuildNamedCFF 重建非CID的CFF偏移，保留字符集、编码和私有提示参数
@@ -142,7 +163,7 @@ func rebuildNamedCFF(data []byte, font *type2Font, chars [][]byte) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
-	private, err := readType2Private(data, dict[18], font)
+	private, err := readType2Private(data, dict[18], &type2Font{})
 	if err != nil {
 		return nil, err
 	}
