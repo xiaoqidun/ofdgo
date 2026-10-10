@@ -110,7 +110,7 @@ func (r *Renderer) imageObjectResource(object ImageObject) (image.Image, error) 
 		return img, err
 	}
 	img, err := read(object.ResourceID)
-	if err == nil || object.Substitution == "" || object.Substitution == object.ResourceID {
+	if err == nil || object.Substitution == "" || sameResourceID(object.Substitution, object.ResourceID) {
 		return img, err
 	}
 	if r.pageContext != nil && r.pageContext.Err() != nil {

@@ -960,13 +960,25 @@ func linkResults(source []ofdgo.PageLink) ([]any, error) {
 			}
 		}
 		if dest := link.Dest; dest != nil {
-			item["dest"] = map[string]any{"type": dest.Type, "pageID": dest.PageID, "left": dest.Left, "top": dest.Top,
+			item["dest"] = map[string]any{"type": dest.Type, "pageID": resolvedPageID(dest.PageID), "left": dest.Left, "top": dest.Top,
 				"right": dest.Right, "bottom": dest.Bottom, "zoom": dest.Zoom,
 				"omitLeft": dest.OmitLeft, "omitTop": dest.OmitTop, "omitZoom": dest.OmitZoom}
 		}
 		links[i] = item
 	}
 	return links, nil
+}
+
+// resolvedPageID 将跳转目标转换为界面页面列表中的标识，未找到时保留原值
+// 入参: id 目标页面标识
+// 返回: string 页面列表标识或原值
+func resolvedPageID(id string) string {
+	if currentSession != nil {
+		if index := currentSession.doc.PageIndex(id); index >= 0 {
+			return currentSession.doc.Pages.Page[index].ID
+		}
+	}
+	return id
 }
 
 // pageTextString 提取OFD页面原文
@@ -1513,11 +1525,8 @@ func readAnnotation(args []js.Value) (any, error) {
 			info["linkKind"], info["linkURI"], info["linkBase"] = "uri", link.URI.URI, link.URI.Base
 			info["linkTarget"] = link.URI.Target
 		} else if err == nil && link.Goto != nil && link.Goto.Dest != nil {
-			for i, page := range currentSession.doc.Pages.Page {
-				if page.ID == link.Goto.Dest.PageID {
-					info["linkKind"], info["linkPage"] = "page", i+1
-					break
-				}
+			if index := currentSession.doc.PageIndex(link.Goto.Dest.PageID); index >= 0 {
+				info["linkKind"], info["linkPage"] = "page", index+1
 			}
 		}
 	}
@@ -1815,6 +1824,11 @@ func editorAppearance(item map[string]any, object ofdgo.GraphicObject, paint boo
 	for _, action := range object.Actions() {
 		if action.Event == "CLICK" && (action.URI != nil || action.Goto != nil) {
 			links++
+			if action.Goto != nil && action.Goto.Dest != nil {
+				gotoAction, dest := *action.Goto, *action.Goto.Dest
+				dest.PageID = resolvedPageID(dest.PageID)
+				gotoAction.Dest, action.Goto = &dest, &gotoAction
+			}
 			if data, err := json.Marshal(action); err == nil {
 				item["link"] = string(data)
 			}

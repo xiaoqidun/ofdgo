@@ -462,9 +462,9 @@ func (e *Editor) withOutlines(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	valid := make(map[string]bool, len(e.pages))
-	for _, page := range e.pages {
-		valid[page.ID] = true
+	valid := make(map[string]int, len(e.pages))
+	for i, page := range e.pages {
+		valid[page.ID] = i
 	}
 	var removals []editorXMLPatch
 	var walk func(*editorXML)
@@ -475,8 +475,10 @@ func (e *Editor) withOutlines(data []byte) ([]byte, error) {
 					continue
 				}
 				if target := action.child("Goto"); target != nil {
-					if dest := target.child("Dest"); dest != nil && !valid[dest.attr("PageID")] {
-						removals = append(removals, editorXMLPatch{action.start, action.end, nil})
+					if dest := target.child("Dest"); dest != nil {
+						if _, ok := resourceValue(valid, dest.attr("PageID")); !ok {
+							removals = append(removals, editorXMLPatch{action.start, action.end, nil})
+						}
 					}
 				}
 			}

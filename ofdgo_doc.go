@@ -201,6 +201,36 @@ type print struct {
 	Copies    *int  `xml:"Copies,attr"`
 }
 
+// PageIndex 按标识查找页面，优先匹配原文和标准十进制写法，等价编号有歧义时不匹配
+// 入参: id 页面标识
+// 返回: int 从0开始的页面索引，未找到时为-1
+func (doc *Document) PageIndex(id string) int {
+	if doc == nil {
+		return -1
+	}
+	index, key := -1, editorResourceID(id)
+	for i, page := range doc.Pages.Page {
+		if page.ID == id {
+			return i
+		}
+		if key != "" && page.ID == key {
+			index = i
+		}
+	}
+	if index >= 0 || key == "" {
+		return index
+	}
+	for i, page := range doc.Pages.Page {
+		if editorResourceID(page.ID) == key {
+			if index >= 0 {
+				return -1
+			}
+			index = i
+		}
+	}
+	return index
+}
+
 // OutlineInfos 获取目录层级和目标页码
 // 返回: []OutlineInfo 目录节点信息
 func (doc *Document) OutlineInfos() []OutlineInfo {
@@ -342,7 +372,7 @@ func outlineInfos(outlines []OutlineElem, bookmarks map[string]Dest, pages map[s
 		for _, action := range outline.Actions {
 			if action.Goto != nil {
 				if dest := gotoDest(action.Goto, bookmarks); dest != nil {
-					info.Page = pages[dest.PageID]
+					info.Page, _ = resourceValue(pages, dest.PageID)
 					if info.Page != 0 {
 						break
 					}

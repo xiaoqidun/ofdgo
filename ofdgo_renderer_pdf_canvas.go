@@ -234,7 +234,7 @@ func (n *pdfNavigation) actionTarget(action Action, page int, source actionSourc
 		if dest == nil {
 			return nil, nil
 		}
-		target, ok := pageIndex[dest.PageID]
+		target, ok := resourceValue(pageIndex, dest.PageID)
 		if !ok {
 			return nil, nil
 		}
