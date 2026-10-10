@@ -349,7 +349,7 @@ func (e *Editor) sourceRGB() bool {
 	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
 		return true
 	}
-	space := e.source.reader.colorSpaceCache[strconv.Itoa(e.source.document.CommonData.DefaultCS)]
+	space, _ := resourceValue(e.source.reader.colorSpaceCache, strconv.Itoa(e.source.document.CommonData.DefaultCS))
 	return space != nil && space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0
 }
 

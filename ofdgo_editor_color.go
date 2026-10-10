@@ -233,7 +233,7 @@ func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
 			found, _ = resourceValue(e.source.reader.colorSpaceCache, id)
 		}
 		for _, resource := range e.resources {
-			if resource.space != nil && resource.space.ID == id {
+			if resource.space != nil && sameResourceID(resource.space.ID, id) {
 				found = resource.space
 				break
 			}

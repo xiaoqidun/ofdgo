@@ -55,7 +55,7 @@ func (e *Editor) AddMedia(kind, format string, data []byte) (string, error) {
 func (e *Editor) CopyMedia(id string) (string, error) {
 	var copy editorResource
 	for _, resource := range e.resources {
-		if resource.image != nil && resource.image.ID == id {
+		if resource.image != nil && sameResourceID(resource.image.ID, id) {
 			copy = resource
 			break
 		}
