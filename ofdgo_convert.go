@@ -34,7 +34,7 @@ type OutputFormat struct {
 	Raster    bool   `json:"raster,omitempty"`
 }
 
-// ConvertProgress 回报open、pages、convert、fonts、prepare、write、write.*及export阶段，Total为0表示总量未知
+// ConvertProgress 回报open、pages、convert、fonts、fonts.*、prepare、write、write.*及export阶段，Total为0表示总量未知
 type ConvertProgress struct {
 	Stage     string `json:"stage"`
 	Completed int    `json:"completed"`
@@ -279,7 +279,12 @@ func Convert(ctx context.Context, source io.ReaderAt, size int64, output io.Writ
 			editor.SetRenderBackends(configuration.Backends())
 			editor.SetFontDirs(configuration.fontDirs...)
 			editor.SetFontFS(configuration.fontFS...)
-			report.Fonts, err = editor.ProcessFonts(ctx, options.Fonts)
+			report.Fonts, err = editor.ProcessFontsWithOptions(ctx, FontProcessOptions{Mode: options.Fonts, OnProgress: func(stage string, completed, total int) error {
+				if stage == "fonts" {
+					return progress(stage, completed, total)
+				}
+				return progress("fonts."+stage, completed, total)
+			}})
 			if err != nil {
 				return report, err
 			}

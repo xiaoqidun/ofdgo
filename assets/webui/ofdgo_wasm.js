@@ -291,11 +291,11 @@ function exitWASM(err) {
 
 async function loadWASM() {
 	const go = new Go();
-	self.postMessage({ type: "progress", text: "正在下载引擎", percent: 16 });
+	self.postMessage({ type: "progress", phase: "download", text: "正在下载引擎", percent: 16 });
 	const response = await fetch("./ofdgo.wasm");
-	self.postMessage({ type: "progress", text: "正在编译引擎", percent: 35 });
+	self.postMessage({ type: "progress", phase: "compile", text: "正在编译引擎", percent: 35 });
 	const { instance } = await WebAssembly.instantiateStreaming(response, go.importObject);
-	self.postMessage({ type: "progress", text: "正在启动引擎", percent: 58 });
+	self.postMessage({ type: "progress", phase: "start", text: "正在启动引擎", percent: 58 });
 	go.run(instance).then(exitWASM, exitWASM);
 	if (!go.exited) {
 		const backends = JSON.parse(globalThis.ofdgoRenderBackends());

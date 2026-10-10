@@ -282,7 +282,9 @@ func sanitizeCFF(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if kind == 1 || fdMatrix != [6]float64{1, 0, 0, 1, 0, 0} {
+	_, topHasMatrix := topDict[1207]
+	_, fdHasMatrix := fontDict[1207]
+	if kind == 1 || fdMatrix != [6]float64{1, 0, 0, 1, 0, 0} || !topHasMatrix && fdHasMatrix {
 		return sanitizeMultiFDCFF(data, hdrSize, nameIndexData, topDict, stringIndexData, globalSubrIndexData, fdArrOff, fdCount)
 	}
 	charStringsOff, err := cffDictOffset(data, topDict, 17)
@@ -407,6 +409,7 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 		return nil, err
 	}
 	units := cffUnitsPerEm(topMatrix)
+	_, topHasMatrix := topDict[1207]
 	for i := range topMatrix {
 		topMatrix[i] *= float64(units)
 	}
@@ -420,7 +423,11 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 		if matrixErr != nil {
 			return nil, fmt.Errorf("CFF font dictionary %d: %w", fd, matrixErr)
 		}
-		matrices[fd], err = readCFFMatrix(cffDict{1207: multiplyAffine(topMatrix[:], fdMatrix[:])}, [6]float64{})
+		baseMatrix := topMatrix
+		if _, fdHasMatrix := fontDict[1207]; !topHasMatrix && fdHasMatrix {
+			baseMatrix = [6]float64{float64(units), 0, 0, float64(units), 0, 0}
+		}
+		matrices[fd], err = readCFFMatrix(cffDict{1207: multiplyAffine(baseMatrix[:], fdMatrix[:])}, [6]float64{})
 		if err != nil {
 			return nil, fmt.Errorf("CFF font dictionary %d: %w", fd, err)
 		}

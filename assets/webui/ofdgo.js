@@ -19,7 +19,7 @@ const STATUS = {
 };
 const wasmRequests = new Map();
 const metaContents = new WeakMap();
-const batch = { items: [], formats: [], running: false, canceled: false, worker: null, requests: new Map(), sequence: 0, activeID: 0, progressTime: 0 };
+const batch = { items: [], formats: [], running: false, canceled: false, worker: null, requests: new Map(), sequence: 0, activeID: 0, progressTime: 0, progress: null };
 const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "FontRow", "FontMode", "Destination", "DPIRow", "DPI", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
 const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
@@ -5374,16 +5374,30 @@ function batchStatus(item, status, text) {
 }
 
 function batchProgress(item, position, count, progress) {
+	if (batch.canceled) return;
 	const now = performance.now();
-	if (now - batch.progressTime < 80 && progress.completed !== progress.total) return;
+	const previous = batch.progress;
+	const sameStage = previous?.item === item && previous?.progress.phase === progress.phase;
+	if (sameStage && now - batch.progressTime < 80 && progress.completed !== progress.total) return;
 	batch.progressTime = now;
+	batch.progress = { item, position, count, progress, started: sameStage ? previous.started : now };
+	updateBatchProgress();
+}
+
+function updateBatchProgress() {
+	if (!batch.progress) return;
+	const { item, position, count, progress, started } = batch.progress;
 	const compressing = progress.phase === "compress" || progress.phase === "write.compress";
-	const stage = compressing ? "压缩" : progress.phase?.startsWith("write.") ? "写入" : { open: "读取", pages: "解析", convert: "转换", prepare: "准备", fonts: "字体", resources: "资源", references: "检查", write: "写入", export: "导出", pack: "打包", commit: "保存" }[progress.phase] || "处理";
-	const detail = progress.total > 0 ? `${progress.completed}/${progress.total}` : compressing && progress.completed ? `已处理 ${progress.completed} 项` : "";
+	const fontMode = (item?.format || batchElements.Format.value) === "ofd" ? batchElements.FontMode.value : "0";
+	const stage = compressing ? "压缩" : progress.phase?.startsWith("write.") ? "写入" : { open: "读取", pages: "解析", convert: "转换", prepare: "准备", fonts: { 1: "嵌入", 2: "外置" }[fontMode] || "整理", "fonts.prepare": "准备", "fonts.scan": "检查", "fonts.commit": "整理", resources: "资源", references: "检查", write: "写入", export: "导出", pack: "打包", commit: "保存" }[progress.phase] || "处理";
+	const detail = progress.total > 0 ? `${progress.completed}/${progress.total}` : (compressing || progress.phase === "fonts") ? `已处理 ${progress.completed || 0} 项` : "";
+	const seconds = Math.floor((performance.now() - started) / 1000);
 	if (item) batchStatus(item, "running", stage);
-	batchElements.Status.textContent = progress.phase === "pack" ? `打包 ${detail}` : `文件 ${position + 1}/${count} · ${stage}${detail ? ` ${detail}` : ""}`;
-	batchElements.Progress.max = count;
-	batchElements.Progress.value = progress.phase === "pack" && progress.total > 0 ? progress.completed / progress.total : position;
+	batchElements.Status.textContent = `${progress.phase === "pack" ? "" : `文件 ${position + 1}/${count} · `}正在${stage}${detail ? ` · ${detail}` : ""}${seconds ? ` · ${seconds}秒` : ""}`;
+	batchElements.Progress.setAttribute("aria-label", "阶段进度");
+	batchElements.Progress.max = progress.total || 1;
+	if (progress.total > 0) batchElements.Progress.value = Math.min(progress.completed, progress.total);
+	else batchElements.Progress.removeAttribute("value");
 }
 
 function batchCall(name, args, onProgress) {
@@ -5421,7 +5435,10 @@ function startBatchWorker() {
 		worker.onmessage = async ({ data }) => {
 			if (data.type === "ready") { resolve(); return; }
 			if (data.type === "exit") { fail(new Error(data.error)); return; }
-			if (data.type === "progress") { batchElements.Status.textContent = data.text; return; }
+			if (data.type === "progress") {
+				if (!batch.canceled) batchElements.Status.textContent = { download: "正在下载", compile: "正在编译", start: "正在启动" }[data.phase] || "正在准备";
+				return;
+			}
 			const request = batch.requests.get(data.id);
 			if (!request) return;
 			if (data.type === "font") {
@@ -5449,7 +5466,8 @@ function startBatchWorker() {
 function cancelBatch() {
 	batch.canceled = true;
 	batchElements.Cancel.disabled = true;
-	batchElements.Status.textContent = "正在取消操作";
+	batch.progress = null;
+	batchElements.Status.textContent = "正在取消";
 	if (batch.activeID) batch.worker.postMessage({ type: "cancel", id: batch.activeID });
 }
 
@@ -5485,6 +5503,8 @@ async function runBatch() {
 	}
 	batch.running = true;
 	batch.canceled = false;
+	batch.progress = null;
+	const progressTimer = window.setInterval(updateBatchProgress, 1000);
 	renderBatchList();
 	window.addEventListener("beforeunload", warnBatch);
 	let destination = null;
@@ -5510,7 +5530,7 @@ async function runBatch() {
 		if (batch.canceled) return;
 		batch.localFonts = fontManager.localEntries();
 		batch.fontData = new Map();
-		batchElements.Status.textContent = "正在准备引擎";
+		batchElements.Status.textContent = "正在准备";
 		await startBatchWorker();
 		const fonts = await fontManager.files(fontManager.records());
 		const names = new Set();
@@ -5554,11 +5574,13 @@ async function runBatch() {
 				item.details = [err.message];
 				if (batch.workerError) throw err;
 			} finally {
+				batch.progress = null;
 				options.credentials?.password?.fill(0);
 				options.credentials?.key?.fill(0);
 				options.credentials?.keyPassword?.fill(0);
 			}
 			batchElements.Progress.max = jobs.length;
+			batchElements.Progress.setAttribute("aria-label", "转换进度");
 			batchElements.Progress.value = position + 1;
 		}
 		if (archive && entries.length && !batch.canceled) {
@@ -5570,10 +5592,13 @@ async function runBatch() {
 		const done = jobs.filter(item => item.status === "done").length;
 		const failed = jobs.filter(item => item.status === "failed").length;
 		const unchanged = batch.items.filter(item => item.status === "unchanged").length;
-		batchElements.Status.textContent = `${batch.canceled ? "已取消 · " : ""}完成 ${done}${failed ? ` · 失败 ${failed}` : ""}${unchanged ? ` · 原样 ${unchanged}` : ""}`;
+		batchElements.Status.textContent = `${batch.canceled ? "取消 · " : ""}完成 ${done}${failed ? ` · 失败 ${failed}` : ""}${unchanged ? ` · 原样 ${unchanged}` : ""}`;
 	} catch (err) {
-		batchElements.Status.textContent = err.name === "AbortError" ? "转换已取消" : err.message;
+		batchElements.Status.textContent = err.name === "AbortError" ? "转换取消" : err.message;
 	} finally {
+		window.clearInterval(progressTimer);
+		batch.progress = null;
+		if (!batchElements.Progress.hasAttribute("value")) batchElements.Progress.value = 0;
 		if (archive && !packed) for (const item of jobs) if (item.status === "ready") { item.status = "pending"; item.text = "待转"; }
 		batch.worker?.terminate();
 		batch.worker = null;

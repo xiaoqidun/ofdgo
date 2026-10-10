@@ -48,6 +48,14 @@ type FontChange struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
+// FontProcessOptions 设置全包字体处理方式及进度回调
+// OnProgress按prepare、scan、fonts、commit阶段同步回报进度，total为0表示总量未知
+// 回调返回错误时不提交修改，不可在回调中修改编辑器
+type FontProcessOptions struct {
+	Mode       FontMode
+	OnProgress func(stage string, completed, total int) error
+}
+
 // EmbedFont 嵌入当前文档指定字体，保留资源标识及全部使用位置，成功后可撤销
 // file为空时从编辑器字体来源精确匹配；显式文件表示调用方确认替换，仍校验字符和字形
 // 入参: ctx 取消上下文, id 字体标识, file 字体文件, index 集合索引
@@ -91,6 +99,14 @@ func (e *Editor) changeFont(ctx context.Context, id string, mode FontMode, file 
 // 入参: ctx 取消上下文, mode 保存方式
 // 返回: []FontChange 字体处理结果, error 取消或结构错误
 func (e *Editor) ProcessFonts(ctx context.Context, mode FontMode) ([]FontChange, error) {
+	return e.ProcessFontsWithOptions(ctx, FontProcessOptions{Mode: mode})
+}
+
+// ProcessFontsWithOptions 处理包内字体并回报已处理数量，失败或取消时不提交修改
+// 入参: ctx 取消上下文, options 字体处理选项
+// 返回: []FontChange 字体处理结果, error 取消、回调或结构错误
+func (e *Editor) ProcessFontsWithOptions(ctx context.Context, options FontProcessOptions) ([]FontChange, error) {
+	mode := options.Mode
 	if mode > FontExternal {
 		return nil, fmt.Errorf("invalid font mode")
 	}
@@ -100,6 +116,18 @@ func (e *Editor) ProcessFonts(ctx context.Context, mode FontMode) ([]FontChange,
 	if mode == FontKeep {
 		return nil, nil
 	}
+	progress := func(stage string, completed, total int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := editorProgress(options.OnProgress).report(stage, completed, total); err != nil {
+			return err
+		}
+		return ctx.Err()
+	}
+	if err := progress("prepare", 0, 0); err != nil {
+		return nil, err
+	}
 	reader, err := e.Reader()
 	if err != nil {
 		return nil, err
@@ -107,18 +135,28 @@ func (e *Editor) ProcessFonts(ctx context.Context, mode FontMode) ([]FontChange,
 	var report []FontChange
 	changed := false
 	for document := range reader.DocumentCount() {
+		if err := progress("scan", document, reader.DocumentCount()); err != nil {
+			return nil, err
+		}
 		scan, err := scanEditorFonts(ctx, reader, document)
 		if err != nil {
 			return nil, err
 		}
 		ids := slices.Sorted(maps.Keys(scan.fonts))
+		ids = slices.DeleteFunc(ids, func(id string) bool {
+			return (mode == FontEmbed) == (scan.fonts[id].location != "")
+		})
+		total := 0
+		if document == reader.DocumentCount()-1 {
+			total = len(report) + len(ids)
+		}
 		for _, id := range ids {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
 			declaration := scan.fonts[id]
-			if (mode == FontEmbed) == (declaration.location != "") {
-				continue
+			if err := progress("fonts", len(report), total); err != nil {
+				return nil, err
 			}
 			item := FontChange{Document: document, ID: id, Name: declaration.font.FontName}
 			item.Changed, err = e.changeFontSnapshot(ctx, scan, id, mode, FontFile{}, 0)
@@ -129,6 +167,9 @@ func (e *Editor) ProcessFonts(ctx context.Context, mode FontMode) ([]FontChange,
 				item.Reason = err.Error()
 			}
 			report = append(report, item)
+			if err := progress("fonts", len(report), total); err != nil {
+				return nil, err
+			}
 			if item.Changed {
 				changed = true
 				scan, err = scanEditorFonts(ctx, reader, document)
@@ -138,7 +179,13 @@ func (e *Editor) ProcessFonts(ctx context.Context, mode FontMode) ([]FontChange,
 			}
 		}
 	}
+	if err := progress("fonts", len(report), len(report)); err != nil {
+		return nil, err
+	}
 	if changed {
+		if err := progress("commit", 0, 1); err != nil {
+			return nil, err
+		}
 		err = e.commitFontSnapshot(ctx, reader)
 	}
 	return report, err
