@@ -44,6 +44,7 @@ let confirmationTask = Promise.resolve();
 let cancelPageTouch = null;
 
 const workspace = { tabs: [], active: null, sequence: 0, nextID: 0, switching: false, closing: false, objectClipboard: null, textClipboard: null };
+const busyControls = new Set();
 
 function createResourceManager() {
 	return { kind: "Font", scope: "", views: new Map(), items: [], filteredItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
@@ -2992,6 +2993,7 @@ function detachDocumentView() {
 }
 
 function attachDocumentTab(tab) {
+	clearBusyControls();
 	copyApplicationPreferences(tab.state);
 	workspace.active = tab;
 	tab.touched = Date.now();
@@ -13406,6 +13408,11 @@ function showError(err, empty = !state.doc) {
 	}
 }
 
+function clearBusyControls() {
+	for (const control of busyControls) control.removeAttribute("data-busy-disabled");
+	busyControls.clear();
+}
+
 function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab()) {
 	const operation = operationRequest(tab);
 	if (!busy && operation) tab.preparationBusy = true;
@@ -13416,6 +13423,9 @@ function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab())
 	if (text) tab.progress = {text, percent};
 	if (status) tab.status = status;
 	if (!isForegroundDocument(tab)) return;
+	const editing = busy && tab.editTask && !operation && !text;
+	if (!editing) clearBusyControls();
+	const controls = editing ? document.querySelectorAll("button:enabled, input:enabled, textarea:enabled, select:enabled") : [];
 	document.body.toggleAttribute("data-busy", busy);
 	el.newButton.disabled = false;
 	el.documentNewTab.disabled = workspace.closing;
@@ -13452,6 +13462,11 @@ function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab())
 	el.editorTools.inert = busy || Boolean(sealPreview || resourceManager.pick);
 	el.fontList.inert = busy;
 	el.docFontList.inert = busy;
+	for (const control of controls) {
+		if (!control.disabled) continue;
+		control.setAttribute("data-busy-disabled", "");
+		busyControls.add(control);
+	}
 	if (!busy) {
 		if (resumeSearch) queueMicrotask(() => {
 			if (isForegroundDocument(tab) && !tab.busy && !tab.refreshPending && tab.state.searchPaused) searchDocument();

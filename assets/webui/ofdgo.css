@@ -431,12 +431,12 @@ select:disabled {
 	opacity: 0.48;
 }
 
-body[data-busy] :is(button, input, textarea, select):disabled,
-body[data-busy] .editor-number:has(input:disabled),
-body[data-busy] :is(.toolbar-select, .form-select):has(select:disabled) > span,
-body[data-busy] :is(.toolbar-select, .form-select):has(select:disabled)::after,
-body[data-busy] .form-options input:disabled + span {
-	transition: opacity 0.16s ease 0.16s;
+body[data-busy] [data-busy-disabled]:disabled,
+body[data-busy] .editor-number:has(input[data-busy-disabled]:disabled),
+body[data-busy] :is(.toolbar-select, .form-select):has(select[data-busy-disabled]:disabled) > span,
+body[data-busy] :is(.toolbar-select, .form-select):has(select[data-busy-disabled]:disabled)::after,
+body[data-busy] .form-options input[data-busy-disabled]:disabled + span {
+	opacity: 1;
 }
 
 button:focus-visible,
