@@ -5704,11 +5704,17 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 	const search = refreshSearchPages([index], openSeq);
 	state.documentSelection = null;
 	pageView.resetPageLoading();
+	let details;
 	try {
-		const page = await pageView.loadPageData(index, { openSeq, priority: 0, refresh: true });
+		const [page, prepared] = await Promise.all([
+			pageView.loadPageData(index, { openSeq, priority: 0, refresh: true }),
+			callWASM("ofdgoDocumentInfo").catch(err => ({ detailsError: err.message })),
+		]);
 		if (openSeq !== state.openSeq) {
 			return;
 		}
+		details = prepared.detailsError ? null : prepared;
+		Object.assign(doc, { detailsPending: false, detailsError: "" }, prepared);
 		if (clearSelection) {
 			const pending = canvasEditor.pendingSelection;
 			canvasEditor.clear();
@@ -5737,7 +5743,7 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 			pageView.releasePageResources();
 			renderMeta(true);
 			updateControls();
-			loadDocumentDetails(openSeq);
+			loadDocumentDetails(openSeq, details);
 			await search;
 			for (const shell of el.svgHost.children) pageView.observeFlowPage(shell);
 			for (const button of el.pageList.children) pageView.observeThumbnail(button, Number(button.dataset.pageIndex), openSeq);
@@ -7317,13 +7323,13 @@ function completePDF(tab) {
 	return task.promise;
 }
 
-async function loadDocumentDetails(openSeq) {
+async function loadDocumentDetails(openSeq, details) {
 	const tab = documentTab(), state = tab.state;
 	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
 	if (openSeq !== state.openSeq || !state.doc) return;
 	if (state.sourcePDF && !state.pdfComplete && !state.editorInfo) { completePDF(tab); return; }
 	try {
-		const details = await callWASM("ofdgoDocumentInfo");
+		details ||= await callWASM("ofdgoDocumentInfo");
 		if (openSeq !== state.openSeq) return;
 		Object.assign(state.doc, details, { detailsPending: false, detailsError: "" });
 		renderMeta();
