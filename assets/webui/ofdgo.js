@@ -13463,7 +13463,6 @@ function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab())
 	el.fontList.inert = busy;
 	el.docFontList.inert = busy;
 	for (const control of controls) {
-		if (!control.disabled) continue;
 		control.setAttribute("data-busy-disabled", "");
 		busyControls.add(control);
 	}
