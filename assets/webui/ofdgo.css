@@ -300,7 +300,7 @@
 	min-width: 100px;
 	max-width: min(240px, 100%);
 	gap: 8px;
-	padding: 0 calc(var(--tab-action-gap) - 1px) 0 12px;
+	padding: 0 var(--tab-action-gap) 0 12px;
 	border: 0;
 	border-right: 1px solid var(--line);
 	background: transparent;
