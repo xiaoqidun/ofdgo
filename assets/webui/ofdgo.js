@@ -4927,7 +4927,8 @@ function updateTextFonts(item, refresh = false, preserve = false) {
 					embedded: !rich.imports.has(font) }), richKey: font });
 			}
 			fontPicker.setFonts(state.textFonts, id === undefined ? null : state.textFonts.find(font => font.richKey === id), preserve);
-			el.textFont.placeholder = id === undefined ? "混合" : "";
+			const placeholder = id === undefined ? "混合" : "";
+			if (el.textFont.placeholder !== placeholder) el.textFont.placeholder = placeholder;
 		}
 		return;
 	}
@@ -4944,7 +4945,8 @@ function updateTextFonts(item, refresh = false, preserve = false) {
 		}
 		const mixed = (item?.items || item?.richText) && !id;
 		fontPicker.setFonts(state.textFonts, mixed ? null : selected || (state.textDefaults.fontChoice === null ? null : state.textFonts[0]), preserve);
-		el.textFont.placeholder = mixed ? "混合" : "";
+		const placeholder = mixed ? "混合" : "";
+		if (el.textFont.placeholder !== placeholder) el.textFont.placeholder = placeholder;
 		if (!id && !item?.items && !item?.richText) state.textDefaults.fontChoice = state.textFonts[Number(fontPicker.value)] || (state.textDefaults.fontChoice === null ? null : undefined);
 	}
 }

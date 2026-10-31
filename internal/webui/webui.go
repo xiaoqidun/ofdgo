@@ -758,13 +758,7 @@ func (s *Session) Details() DocumentDetails {
 	}
 	info.SignatureCount = len(info.Signatures)
 	if fonts, err := s.Renderer.DeclaredFontInfos(); err == nil {
-		for index := range fonts {
-			if fonts[index].Embedded {
-				if face, err := s.Reader.FontFace(fonts[index].ID, 3, 0x0804); err == nil {
-					fonts[index].MatchedFace = face
-				}
-			}
-		}
+		s.localizeFontInfos(fonts)
 		info.Fonts = fonts
 		info.FontCount = len(fonts)
 	}
@@ -1017,9 +1011,22 @@ func (s *Session) scanFontInfo() bool {
 		return false
 	}
 	s.fontInfos, _ = s.fontScan.Infos()
+	s.localizeFontInfos(s.fontInfos)
 	s.fontsRead = true
 	s.fontScan = nil
 	return true
+}
+
+// localizeFontInfos 统一内嵌字体在概要和完整统计中的中文名称
+// 入参: fonts 当前文档的字体诊断信息
+func (s *Session) localizeFontInfos(fonts []FontInfo) {
+	for index := range fonts {
+		if fonts[index].Embedded {
+			if face, err := s.Reader.FontFace(fonts[index].ID, 3, 0x0804); err == nil {
+				fonts[index].MatchedFace = face
+			}
+		}
+	}
 }
 
 // scanFontInfoBatch 为大文档批量统计字体，限制每次处理的页数与耗时

@@ -57,8 +57,9 @@ export class FontPicker {
 	}
 
 	setDisabled(disabled) {
-		this.input.disabled = this.toggle.disabled = disabled;
-		if (disabled) this.close();
+		if (this.input.disabled !== disabled) this.input.disabled = disabled;
+		if (this.toggle.disabled !== disabled) this.toggle.disabled = disabled;
+		if (disabled && this.open) this.close();
 	}
 
 	restore() {
@@ -68,8 +69,9 @@ export class FontPicker {
 			this.input.value = value;
 			if (document.activeElement === this.input) this.input.select();
 		}
-		this.input.scrollLeft = 0;
-		this.input.title = font ? [this.input.value, this.sourceLabel(font)].filter(Boolean).join(" · ") : "";
+		if (this.input.scrollLeft) this.input.scrollLeft = 0;
+		const title = font ? [this.input.value, this.sourceLabel(font)].filter(Boolean).join(" · ") : "";
+		if (this.input.title !== title) this.input.title = title;
 	}
 
 	sourceLabel(font) {
@@ -307,11 +309,12 @@ export class FontManager {
 	async queryLocal() {
 		try {
 			const available = this.host ? await this.host.fonts() : await window.queryLocalFonts();
-			this.catalog = available;
+			this.catalog = this.host ? available : available.map(font => ({ family: font.family, fullName: font.fullName,
+				postscriptName: font.postscriptName, style: font.style, blob: () => font.blob() }));
 			this.catalogLoaded = true;
 			this.permission = "granted";
 			this.onPermissionChange();
-			return available;
+			return this.catalog;
 		} catch (err) {
 			if (err && err.name === "NotAllowedError") {
 				this.permission = "denied";
