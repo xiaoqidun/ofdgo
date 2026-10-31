@@ -7140,6 +7140,7 @@ async function openDocument(options = {}) {
 		renderFontList();
 	}
 	options.keepPreview ? setBusy(true) : setBusy(true, "正在打开文档", 20, STATUS.opening);
+	let details;
 	try {
 		if (!options.keepPreview) {
 			setProgress("正在解析文档", 52);
@@ -7206,6 +7207,12 @@ async function openDocument(options = {}) {
 		if (options.keepPreview) {
 			pageView.resetPageLoading();
 			state.pageCache.clear();
+			if (state.editing) {
+				const prepared = await callWASM("ofdgoDocumentInfo").catch(err => ({ detailsError: err.message }));
+				if (openSeq !== state.openSeq) return;
+				details = prepared.detailsError ? null : prepared;
+				Object.assign(doc, { detailsPending: false, detailsError: "" }, prepared);
+			}
 			if (thumbnailPreviews) {
 				for (const page of doc.pages) {
 					const preview = thumbnailPreviews.get(page.id);
@@ -7266,7 +7273,7 @@ async function openDocument(options = {}) {
 			canvasEditor.focus();
 		}
 		pageView.queueNearbyPages(pageIndex, openSeq);
-		loadDocumentDetails(openSeq);
+		loadDocumentDetails(openSeq, details);
 		if (page && options.activateActions) {
 			state.openActionEnabled = true;
 			state.openActionDocument = !state.editing;
