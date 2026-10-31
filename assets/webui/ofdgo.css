@@ -3844,7 +3844,7 @@ button.outline-link:hover {
 	content: "";
 	position: absolute;
 	left: 7px;
-	top: 7px;
+	top: 9px;
 	width: 3px;
 	height: 3px;
 	background: currentColor;
