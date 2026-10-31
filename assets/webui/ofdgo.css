@@ -3331,7 +3331,7 @@ button.outline-link:hover {
 	gap: 6px;
 	width: 100%;
 	height: auto;
-	padding: 8px;
+	padding: 8px 8px 4px;
 	font-variant-numeric: tabular-nums;
 	text-align: left;
 	transition: border-color 0.16s ease, background-color 0.16s ease;
@@ -3832,7 +3832,7 @@ button.outline-link:hover {
 .thumb-grip {
 	position: absolute;
 	right: 8px;
-	bottom: 8px;
+	bottom: 4px;
 	width: 24px;
 	height: 28px;
 	cursor: grab;

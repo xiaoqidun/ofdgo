@@ -1079,13 +1079,13 @@ export function createPageView(context) {
 				if (context.state.pageLayout === 1) {
 					const size = pageView.pageViewSize(context.state.doc.pages[start]);
 					const ratio = size.width > 0 && size.height > 0 ? size.height / size.width : 1 / 0.707;
-					view.heights[start] = Math.max(1, width - 20) * ratio + 70;
+					view.heights[start] = Math.max(1, width - 20) * ratio + 66;
 					offsets[start] = top;
 					top += view.heights[start] + gap;
 					continue;
 				}
 				const group = pageView.pageGroupSize(start), scale = Math.max(1, view.itemWidth - 20) / Math.max(...group.widths);
-				const height = group.height * scale + 70;
+				const height = group.height * scale + 66;
 				for (let column = 0; column < 2; column++) {
 					const index = start + column;
 					if (index >= context.state.doc.pages.length) break;
