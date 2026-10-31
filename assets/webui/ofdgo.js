@@ -13507,7 +13507,7 @@ function formatSize(value) {
 	if (!Number.isFinite(value) || value <= 0) {
 		return "-";
 	}
-	return value.toFixed(1);
+	return value.toFixed(1).replace(/\.0$/, "");
 }
 
 function downloadBytes(bytes, mime, name) {
