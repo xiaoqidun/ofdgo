@@ -431,6 +431,14 @@ select:disabled {
 	opacity: 0.48;
 }
 
+body[data-busy] :is(button, input, textarea, select):disabled,
+body[data-busy] .editor-number:has(input:disabled),
+body[data-busy] :is(.toolbar-select, .form-select):has(select:disabled) > span,
+body[data-busy] :is(.toolbar-select, .form-select):has(select:disabled)::after,
+body[data-busy] .form-options input:disabled + span {
+	transition: opacity 0.16s ease 0.16s;
+}
+
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
