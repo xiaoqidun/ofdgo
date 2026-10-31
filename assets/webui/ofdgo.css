@@ -5092,6 +5092,8 @@ audio.page-media {
 	border-radius: 0;
 }
 
+.document-new-tab:not(:disabled):hover,
+.document-tab-close:not(:disabled):hover,
 .app-appearance:not(:disabled):hover,
 .app-update:not(:disabled):hover {
 	background: var(--titlebar-hover);
