@@ -944,7 +944,7 @@ export class CanvasEditor {
 		}
 		this.pages.set(surface, { index, width: page.width, height: page.height, hitIndex: new ObjectIndex(items) });
 		surface.append(layer);
-		if (pending || selected.size) this.setSelection(selection);
+		if (pending || selected.size) this.setSelection(selection, true);
 		if (pending) this.pendingSelection = null;
 		if (crop && selection.length === 1 && selection[0].id === crop.item.id
 			&& ["x", "y", "width", "height"].every(key => selection[0][key] === crop.item[key])) {
@@ -1049,7 +1049,7 @@ export class CanvasEditor {
 		return this.selected?.items || (this.selected ? [this.selected] : []);
 	}
 
-	setSelection(items) {
+	setSelection(items, restoring = false) {
 		items = items.filter(item => !items.some(parent => parent !== item && item.id.startsWith(parent.id + "/")));
 		this.cancelNudge();
 		const previous = this.selected;
@@ -1100,7 +1100,7 @@ export class CanvasEditor {
 		for (const item of items) {
 			if (item.parent) this.pageItems(item.index).find(parent => parent.id === item.parent)?.node.classList.add("edit-parent");
 		}
-		this.options.onSelect(this.selected, previous);
+		this.options.onSelect(this.selected, previous, restoring);
 	}
 
 	select(item, add = false) {

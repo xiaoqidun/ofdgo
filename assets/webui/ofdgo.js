@@ -743,8 +743,8 @@ const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	onPage: (index) => {
 		if (index !== state.pageIndex) pageView.setCurrentPage(index);
 	},
-	onSelect: (item, previous) => {
-		if (item && item.index !== state.pageIndex) pageView.setCurrentPage(item.index);
+	onSelect: (item, previous, restoring) => {
+		if (!restoring && item && item.index !== state.pageIndex) pageView.setCurrentPage(item.index);
 		updateObjectControls(item);
 		const reason = objectEditReason(item), previousReason = objectEditReason(previous);
 		if (state.editing && state.doc && !document.body.hasAttribute("data-busy")
@@ -1858,7 +1858,7 @@ document.querySelector("#objectActionsButton").addEventListener("click", async (
 	settingsElements.Tabs.hidden = true;
 });
 el.outlinesTab.addEventListener("click", () => showNavigation(el.outlinesTab));
-el.searchTab.addEventListener("click", focusSearch);
+el.searchTab.addEventListener("click", () => focusSearch());
 el.navigationTabs.addEventListener("keydown", (event) => {
 	if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
 		return;
