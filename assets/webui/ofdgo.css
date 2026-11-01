@@ -2217,6 +2217,7 @@ body[data-hide-meta] .meta-panel {
 .dropdown-list,
 .navigation-content,
 .viewer-panel,
+.annotation-summary-list,
 .search-results,
 .editor-toolbar,
 .document-list,
@@ -2225,7 +2226,7 @@ body[data-hide-meta] .meta-panel {
 	scrollbar-color: var(--line-strong) transparent;
 }
 
-:is(.form-dialog, .form-dialog *, .font-listbox, .dropdown-list, .navigation-content, .viewer-panel, .search-results, .editor-toolbar, .document-list, .meta-panel):hover {
+:is(.form-dialog, .form-dialog *, .font-listbox, .dropdown-list, .navigation-content, .viewer-panel, .annotation-summary-list, .search-results, .editor-toolbar, .document-list, .meta-panel):hover {
 	scrollbar-color: var(--text-muted) transparent;
 }
 
