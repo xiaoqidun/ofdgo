@@ -135,6 +135,7 @@ function createDocumentState() {
 		searchPaused: false,
 		searchTruncated: false,
 		navigationScroll: new Map(),
+		annotationFilter: {scope: null, query: "", kind: ""},
 		fontSyncPending: false,
 		fontCatalogLoading: false,
 		fontFacesLoading: false,
@@ -1836,8 +1837,8 @@ el.togglePagesButton.addEventListener("click", () => toggleSidebar("pages"));
 el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
 el.pagesTab.addEventListener("click", () => showNavigation(el.pagesTab));
 el.annotationsTab.addEventListener("click", () => showNavigation(el.annotationsTab));
-el.annotationsFilter.addEventListener("input", renderAnnotationSummary);
-el.annotationsKind.addEventListener("change", renderAnnotationSummary);
+el.annotationsFilter.addEventListener("input", () => { state.annotationFilter.query = el.annotationsFilter.value; renderAnnotationSummary(); });
+el.annotationsKind.addEventListener("change", () => { state.annotationFilter.kind = el.annotationsKind.value; renderAnnotationSummary(); });
 el.versionExport.addEventListener("click", exportManagedVersion);
 editorClick(settingsElements.Button, () => openDocumentSettings());
 editorClick(el.invoiceButton, () => openDocumentSettings(true));
@@ -3018,6 +3019,8 @@ function attachDocumentTab(tab) {
 	el.outlineList.replaceChildren();
 	el.annotationsList.replaceChildren();
 	el.annotationsStatus.textContent = "";
+	el.annotationsFilter.value = state.annotationFilter.query;
+	el.annotationsKind.replaceChildren(new Option("全部", ""));
 	el.searchInput.value = tab.view?.search || "";
 	el.searchStatus.textContent = tab.view?.searchStatus || "";
 	el.searchResults.replaceChildren();
@@ -11478,6 +11481,12 @@ function cancelAnnotationSummary(tab) {
 async function loadAnnotationSummary() {
 	const tab = documentTab(), state = tab.state;
 	if (!state.doc || !state.ready) return;
+	const scope = documentContentKey(state);
+	if (state.annotationFilter.scope !== scope) {
+		state.annotationFilter = {scope, query: "", kind: ""};
+		el.annotationsKind.replaceChildren(new Option("全部", ""));
+	}
+	el.annotationsFilter.value = state.annotationFilter.query;
 	const seq = state.openSeq;
 	if (state.annotationSummary?.seq === seq) { renderAnnotationSummary(true); return; }
 	cancelAnnotationSummary(tab);
@@ -11508,12 +11517,12 @@ function renderAnnotationSummary(reset = false) {
 	if (!summary || summary.loading || summary.seq !== state.openSeq) return;
 	const labels = {Path: "批注", Highlight: "高亮", Stamp: "印章", Watermark: "水印", Link: "链接"};
 	if (reset) {
-		const previousKind = el.annotationsKind.value;
 		el.annotationsKind.replaceChildren(new Option("全部", ""), ...[...new Set(summary.items.map(annotationKind))].map(type => new Option(labels[type] || type, type)));
-		el.annotationsKind.value = [...el.annotationsKind.options].some(option => option.value === previousKind) ? previousKind : "";
+		if (![...el.annotationsKind.options].some(option => option.value === state.annotationFilter.kind)) state.annotationFilter.kind = "";
+		el.annotationsKind.value = state.annotationFilter.kind;
 	}
-	const query = el.annotationsFilter.value.trim().toLocaleLowerCase();
-	const kind = el.annotationsKind.value;
+	const query = state.annotationFilter.query.trim().toLocaleLowerCase();
+	const kind = state.annotationFilter.kind;
 	const items = summary.items.filter(item => (!kind || annotationKind(item) === kind) && `${item.remark || ""}\n${item.creator || ""}\n${item.id}`.toLocaleLowerCase().includes(query));
 	el.annotationsStatus.textContent = summary.items.length ? `${items.length} / ${summary.items.length}` : "";
 	el.annotationsList.replaceChildren(...items.map(item => {
