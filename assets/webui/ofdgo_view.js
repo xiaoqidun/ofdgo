@@ -1420,7 +1420,7 @@ export function createPageView(context) {
 				scale = Math.min(4, Math.max(1, availableWidth - space * 2 - gap) / layoutWidth);
 				if (mode === "height") scale = Math.min(scale, Math.max(1, availableHeight - space * 2) / height);
 				const blockSpace = context.state.continuous ? 0 : Math.max(space, (availableHeight - height * scale) / 2);
-				const rowGap = context.state.continuous ? 0 : Math.max(gap, blockSpace > space ? blockSpace + 1 : blockSpace);
+				const rowGap = context.state.continuous ? 0 : Math.max(gap, blockSpace + 2);
 				const nextVertical = contentHeight * scale + rowGap * (rows - 1) + blockSpace * 2 > availableHeight + 0.5;
 				const nextHorizontal = contentWidth * scale + gap + space * 2 > availableWidth + 0.5;
 				if ((!nextVertical || vertical) && (!nextHorizontal || horizontal)) break;
@@ -1557,7 +1557,7 @@ export function createPageView(context) {
 			const base = pageView.pageSpace();
 			context.el.viewerPanel.classList.toggle("single-page-fits-height", context.state.doc.pageCount === 1 && height <= context.el.viewerPanel.clientHeight - base * 2);
 			const space = context.state.continuous ? 0 : Math.max(base, (context.el.viewerPanel.clientHeight - height) / 2);
-			const gap = space > base ? space + 1 : space;
+			const gap = context.state.continuous ? 0 : space + 2;
 			context.el.pageFrame.style.setProperty("--fit-space", `${space}px`);
 			context.el.pageFrame.style.setProperty("--fit-gap", `${gap}px`);
 		},
