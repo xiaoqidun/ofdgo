@@ -1036,6 +1036,7 @@ export class CanvasEditor {
 		if (item.contour) {
 			const { svg, path } = item.contour;
 			const width = Math.abs(box.width), height = Math.abs(box.height);
+			path.removeAttribute("transform");
 			svg.setAttribute("viewBox", `0 0 ${width || 1} ${height || 1}`);
 			const values = lineShape(item.shape) && item.shape !== "line" ? { d: arrowPath(item.shape, { x: box.x - x, y: box.y - y, width: box.width, height: box.height }) }
 				: item.shape === "line" ? { x1: box.x - x, y1: box.y - y, x2: box.x + box.width - x, y2: box.y + box.height - y }
@@ -1223,11 +1224,6 @@ export class CanvasEditor {
 			targets.push({ x: 0, y: 0, ...item.page });
 			this.drag.alignment = new AlignmentIndex(targets);
 		}
-		if (lineShape(item.shape) && this.drag.corner) {
-			Object.assign(this.drag, this.createPreview(item.surface, item.page, item.shape, {
-				fill: false, stroke: true, strokeColor: "var(--accent)", lineWidth: item.lineWidth,
-			}));
-		}
 		this.viewer.setPointerCapture(event.pointerId);
 	}
 
@@ -1358,8 +1354,25 @@ export class CanvasEditor {
 		}
 		if (drag.item.shape && drag.corner) {
 			drag.box = reshapeBox(drag.item, to.x - from.x, to.y - from.y, drag.corner, event.shiftKey);
-			this.placeShape(drag.item, drag.box || drag.item.geometry);
-			if (drag.node) paintShape(drag.node, drag.item.shape, drag.box || drag.item.geometry);
+			const original = drag.item.geometry, box = drag.box || original;
+			this.placeShape(drag.item, box);
+			let a, b = 0, c = 0, d;
+			if (lineShape(drag.item.shape)) {
+				const length = original.width ** 2 + original.height ** 2;
+				a = d = (box.width * original.width + box.height * original.height) / length;
+				b = (box.height * original.width - box.width * original.height) / length;
+				c = -b;
+			} else {
+				a = box.width / original.width;
+				d = box.height / original.height;
+			}
+			const x = box.x - a * original.x - c * original.y, y = box.y - b * original.x - d * original.y;
+			drag.item.artwork?.setAttribute("transform", `matrix(${a} ${b} ${c} ${d} ${x} ${y})`);
+			if (lineShape(drag.item.shape) && drag.item.shape !== "line") {
+				const path = drag.item.contour.path;
+				path.setAttribute("d", arrowPath(drag.item.shape, original));
+				path.setAttribute("transform", `matrix(${a} ${b} ${c} ${d} ${x - Math.min(box.x, box.x + box.width)} ${y - Math.min(box.y, box.y + box.height)})`);
+			}
 			return;
 		}
 		const transform = drag.item.type === "TextObject" ? textTransform : objectTransform;
