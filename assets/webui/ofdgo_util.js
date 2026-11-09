@@ -1,3 +1,115 @@
+export class VirtualList {
+	constructor(container, render) {
+		this.container = container;
+		this.render = render;
+		this.rows = new Map();
+		this.content = document.createElement("div");
+		this.content.style.position = "relative";
+		this.observer = new ResizeObserver(() => this.measure());
+		this.observer.observe(container);
+		container.addEventListener("scroll", () => {
+			if (!this.view) return;
+			this.view.top = container.scrollTop;
+			this.update();
+		});
+		container.addEventListener("keydown", event => {
+			if (event.key !== "Tab" || event.ctrlKey || event.altKey || event.metaKey || !this.view) return;
+			const row = event.target.closest("[data-list-index]");
+			if (!row) return;
+			const buttons = [...row.querySelectorAll("button:not(:disabled)")];
+			if (event.target !== buttons[event.shiftKey ? 0 : buttons.length - 1]) return;
+			const index = Number(row.dataset.listIndex) + (event.shiftKey ? -1 : 1);
+			if (index < 0 || index >= this.view.items.length) return;
+			event.preventDefault();
+			this.update(index);
+			const next = this.rows.get(index).querySelectorAll("button:not(:disabled)");
+			next[event.shiftKey ? next.length - 1 : 0]?.focus();
+		});
+	}
+
+	set(view) {
+		if (view && view === this.view) { this.measure(); return; }
+		if (this.view) this.view.top = this.container.scrollTop;
+		for (const row of this.rows.values()) this.observer.unobserve(row);
+		this.rows.clear();
+		this.content.replaceChildren();
+		this.view = view;
+		if (!view) { this.container.replaceChildren(); return; }
+		this.container.replaceChildren(this.content);
+		view.heights ||= new Map();
+		this.layout();
+		this.container.scrollTop = view.top || 0;
+		this.update();
+	}
+
+	layout() {
+		const view = this.view;
+		this.offsets = [0];
+		for (const item of view.items) this.offsets.push(this.offsets.at(-1) + (view.heights.get(item) || 100));
+		this.content.style.height = `${this.offsets.at(-1)}px`;
+		for (const [index, row] of this.rows) row.style.top = `${this.offsets[index]}px`;
+	}
+
+	index(top) {
+		let low = 0, high = this.view.items.length;
+		while (low < high) {
+			const middle = (low + high) >>> 1;
+			if (this.offsets[middle + 1] <= top) low = middle + 1;
+			else high = middle;
+		}
+		return low;
+	}
+
+	measure() {
+		const view = this.view, width = this.container.clientWidth;
+		if (!view || !width || !this.container.clientHeight) return;
+		const anchor = this.index(this.container.scrollTop), offset = this.container.scrollTop - this.offsets[anchor];
+		let changed = view.width !== width;
+		if (changed) { view.width = width; view.heights.clear(); }
+		for (const [index, row] of this.rows) {
+			const height = parseFloat(getComputedStyle(row).height), item = view.items[index];
+			if (view.heights.get(item) !== height) { view.heights.set(item, height); changed = true; }
+		}
+		if (changed) {
+			this.layout();
+			this.container.scrollTop = this.offsets[anchor] + offset;
+			view.top = this.container.scrollTop;
+		}
+		this.update();
+	}
+
+	update(extra) {
+		const view = this.view;
+		if (!view || !this.container.clientHeight) return;
+		const top = this.container.scrollTop, height = this.container.clientHeight;
+		const first = this.index(Math.max(0, top - height)), last = Math.min(view.items.length, this.index(top + height * 2) + 1);
+		const indices = new Set();
+		for (let index = first; index < last; index++) indices.add(index);
+		const active = document.activeElement;
+		for (const [index, row] of this.rows) if (row.contains(active)) indices.add(index);
+		if (extra !== undefined) indices.add(extra);
+		for (const [index, row] of this.rows) if (!indices.has(index)) {
+			this.observer.unobserve(row);
+			row.remove();
+			this.rows.delete(index);
+		}
+		let position = 0;
+		for (const index of [...indices].sort((a, b) => a - b)) {
+			let row = this.rows.get(index);
+			if (!row) {
+				row = this.render(view.items[index]);
+				row.dataset.listIndex = index;
+				Object.assign(row.style, {position: "absolute", top: `${this.offsets[index]}px`, left: "0", right: "0"});
+				this.rows.set(index, row);
+				this.observer.observe(row);
+			}
+			if (this.content.children[position] !== row) this.content.insertBefore(row, this.content.children[position] || null);
+			position++;
+		}
+		if (active?.isConnected && this.content.contains(active) && document.activeElement !== active) active.focus({preventScroll: true});
+	}
+}
+
 export function setInputFiles(input, files) {
 	const view = input.ownerDocument.defaultView, transfer = new view.DataTransfer();
 	const native = files.some(file => !(file instanceof view.File));

@@ -2,7 +2,7 @@ import { SVG_NAMESPACE, CanvasEditor, canEditObject, editTextValue, richTextMode
 import { FontManager, FontPicker } from "./ofdgo_font.js";
 import { nativeHost, createEngineWorker, engineLimits, documentBytes, saveFilePicker, directoryPicker } from "./ofdgo_host.js";
 import { PrintDialog } from "./ofdgo_print.js";
-import { DocumentDialogs, SelectPicker } from "./ofdgo_util.js";
+import { DocumentDialogs, SelectPicker, VirtualList } from "./ofdgo_util.js";
 import { MM_TO_PX, SCROLL_SEGMENT_SIZE, createPageView } from "./ofdgo_view.js";
 
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
@@ -1837,8 +1837,12 @@ el.togglePagesButton.addEventListener("click", () => toggleSidebar("pages"));
 el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
 el.pagesTab.addEventListener("click", () => showNavigation(el.pagesTab));
 el.annotationsTab.addEventListener("click", () => showNavigation(el.annotationsTab));
-el.annotationsFilter.addEventListener("input", () => { state.annotationFilter.query = el.annotationsFilter.value; renderAnnotationSummary(); });
-el.annotationsKind.addEventListener("change", () => { state.annotationFilter.kind = el.annotationsKind.value; renderAnnotationSummary(); });
+const annotationList = new VirtualList(el.annotationsList, createAnnotationRow);
+el.annotationsList.addEventListener("scroll", () => {
+	if (!el.annotationsPanel.hidden && annotationList.view === state.annotationSummary?.view) state.annotationFilter.top = el.annotationsList.scrollTop;
+});
+el.annotationsFilter.addEventListener("input", () => { state.annotationFilter.query = el.annotationsFilter.value; state.annotationFilter.top = 0; renderAnnotationSummary(); });
+el.annotationsKind.addEventListener("change", () => { state.annotationFilter.kind = el.annotationsKind.value; state.annotationFilter.top = 0; renderAnnotationSummary(); });
 el.versionExport.addEventListener("click", exportManagedVersion);
 editorClick(settingsElements.Button, () => openDocumentSettings());
 editorClick(el.invoiceButton, () => openDocumentSettings(true));
@@ -3017,7 +3021,7 @@ function attachDocumentTab(tab) {
 	el.svgHost.replaceChildren();
 	el.pageList.replaceChildren();
 	el.outlineList.replaceChildren();
-	el.annotationsList.replaceChildren();
+	annotationList.set(null);
 	el.annotationsStatus.textContent = "";
 	el.annotationsFilter.value = state.annotationFilter.query;
 	el.annotationsKind.replaceChildren(new Option("全部", ""));
@@ -3984,42 +3988,57 @@ function renderCreateImages() {
 	const tab = documentTab(), queue = state.createImageQueue;
 	queue.observer?.disconnect();
 	const top = el.createImageList.scrollTop;
-	const focused = el.createImageList.contains(document.activeElement);
-	el.createImageList.replaceChildren();
+	const focused = el.createImageList.contains(document.activeElement) ? document.activeElement : null;
+	const rows = new Map([...el.createImageList.children].map(row => [row.imageEntry, row]));
 	for (const input of el.createImageOrder.querySelectorAll("input")) input.checked = input.value === queue.order;
 	if (!queue.entries.some(entry => entry.id === queue.selected)) queue.selected = queue.entries[0]?.id ?? null;
 	queue.observer = new IntersectionObserver(items => {
 		for (const item of items) if (item.isIntersecting && isForegroundDocument(tab)) {
 			queue.observer.unobserve(item.target);
 			const entry = queue.entries.find(entry => entry.id === Number(item.target.dataset.imageId));
-			queue.task = queue.task.then(() => loadCreateImagePreview(tab, queue, entry));
+			if (entry && !entry.queued) {
+				entry.queued = true;
+				queue.task = queue.task.then(() => loadCreateImagePreview(tab, queue, entry)).finally(() => { entry.queued = false; });
+			}
 		}
 	}, { root: el.createImageList, rootMargin: "64px" });
 	for (const [index, entry] of queue.entries.entries()) {
-		const row = document.createElement("div"), select = document.createElement("button"), remove = document.createElement("button"), number = document.createElement("span"), preview = document.createElement("span"), details = document.createElement("span");
-		row.className = "create-image-entry";
-		row.dataset.imageId = entry.id;
-		select.type = remove.type = "button";
-		select.className = "create-image-select";
-		select.title = entry.file.name;
-		remove.className = "icon-button remove-button";
-		remove.title = "移除";
-		number.textContent = String(index + 1);
-		preview.className = "create-image-preview";
-		preview.textContent = entry.file.name.split(".").at(-1).toUpperCase();
-		details.className = "create-image-details";
-		const name = document.createElement("span");
-		name.textContent = entry.file.name;
-		details.append(name);
-		select.append(number, preview, details);
-		row.append(select, remove);
-		el.createImageList.append(row);
-		if (entry.url) showCreateImagePreview(entry, row);
-		else if (!entry.previewed) queue.observer.observe(row);
+		let row = rows.get(entry);
+		if (!row) row = createImageRow(entry);
+		rows.delete(entry);
+		row.querySelector(".create-image-select > span").textContent = String(index + 1);
+		if (el.createImageList.children[index] !== row) el.createImageList.insertBefore(row, el.createImageList.children[index] || null);
+		if (!entry.previewed) queue.observer.observe(row);
 	}
+	for (const row of rows.values()) row.remove();
 	el.createImageList.scrollTop = top;
 	updateCreateImageSelection();
-	if (focused) focusCreateImage();
+	if (focused) {
+		if (focused.isConnected) focused.focus({ preventScroll: true });
+		else focusCreateImage();
+	}
+}
+
+function createImageRow(entry) {
+	const row = document.createElement("div"), select = document.createElement("button"), remove = document.createElement("button"), number = document.createElement("span"), preview = document.createElement("span"), details = document.createElement("span");
+	row.className = "create-image-entry";
+	row.dataset.imageId = entry.id;
+	row.imageEntry = entry;
+	select.type = remove.type = "button";
+	select.className = "create-image-select";
+	select.title = entry.file.name;
+	remove.className = "icon-button remove-button";
+	remove.title = "移除";
+	preview.className = "create-image-preview";
+	preview.textContent = entry.file.name.split(".").at(-1).toUpperCase();
+	details.className = "create-image-details";
+	const name = document.createElement("span");
+	name.textContent = entry.file.name;
+	details.append(name);
+	select.append(number, preview, details);
+	row.append(select, remove);
+	if (entry.url) showCreateImagePreview(entry, row);
+	return row;
 }
 
 function showCreateImagePreview(entry, row) {
@@ -4063,11 +4082,16 @@ async function loadCreateImagePreview(tab, queue, entry) {
 	entry.previewed = true;
 	let bitmap;
 	try {
-		const source = entry.file instanceof Blob ? entry.file : new Blob([await entry.file.arrayBuffer()]);
+		let source = entry.file;
+		if (!(source instanceof Blob)) {
+			const response = await fetch(source.url);
+			if (!response.ok) throw new Error("读取文件失败");
+			source = await response.blob();
+		}
 		if (tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
 		bitmap = await createImageBitmap(source, { resizeWidth: 64 });
 		if (tab.closed || tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
-		const size = await callTabWASM(tab, "ofdgoImagePageSize", new Uint8Array(await source.arrayBuffer()));
+		const size = await callTabWASM(tab, "ofdgoImagePageSize", entry.file);
 		if (tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
 		entry.width = size.width;
 		entry.height = size.height;
@@ -11497,12 +11521,13 @@ async function loadAnnotationSummary() {
 	cancelAnnotationSummary(tab);
 	const summary = {seq, items: [], loading: true};
 	state.annotationSummary = summary;
-	el.annotationsList.replaceChildren();
+	annotationList.set(null);
 	el.annotationsStatus.textContent = "正在读取注解";
 	try {
 		const items = await callTabWASM(tab, "ofdgoAnnotationInfos");
 		if (tab.closed || seq !== state.openSeq || state.annotationSummary !== summary) return;
 		summary.items = items || [];
+		summary.search = summary.items.map(item => ({item, kind: annotationKind(item), text: `${item.remark || ""}\n${item.creator || ""}\n${item.id}`.toLocaleLowerCase()}));
 		summary.loading = false;
 		if (isForegroundDocument(tab)) renderAnnotationSummary(true);
 	} catch (error) {
@@ -11528,35 +11553,44 @@ function renderAnnotationSummary(reset = false) {
 	}
 	const query = state.annotationFilter.query.trim().toLocaleLowerCase();
 	const kind = state.annotationFilter.kind;
-	const items = summary.items.filter(item => (!kind || annotationKind(item) === kind) && `${item.remark || ""}\n${item.creator || ""}\n${item.id}`.toLocaleLowerCase().includes(query));
+	const previous = summary.view;
+	if (previous?.query !== query || previous?.kind !== kind || previous?.editing !== state.editing) {
+		const items = summary.search.filter(entry => (!kind || entry.kind === kind) && entry.text.includes(query)).map(entry => entry.item);
+		summary.view = {items, query, kind, editing: state.editing, top: state.annotationFilter.top || 0};
+	}
+	const items = summary.view.items;
 	el.annotationsStatus.textContent = summary.items.length ? `${items.length} / ${summary.items.length}` : "";
-	el.annotationsList.replaceChildren(...items.map(item => {
-		const row = document.createElement("div");
-		row.className = "annotation-summary";
-		const target = document.createElement("button");
-		target.type = "button";
-		target.className = "annotation-summary-target";
-		const heading = document.createElement("span"), content = document.createElement("span");
-		heading.textContent = `第${item.page}页 · ${labels[annotationKind(item)] || item.type}${item.visible ? "" : " · 隐藏"}`;
-		content.textContent = item.remark || item.id;
-		target.append(heading, content);
-		target.addEventListener("click", () => focusPageRegion(item, "注解", "center"));
-		row.append(target);
-		appendInfoLine(row, "作者", item.creator);
-		appendInfoLine(row, "时间", formatDocumentTime(item.lastModDate));
-		if (state.editing) {
-			const edit = document.createElement("button");
-			edit.type = "button";
-			edit.className = "small-button";
-			edit.textContent = "修改";
-			edit.addEventListener("click", () => {
-				if (!state.editing || document.body.hasAttribute("data-busy") || summary.seq !== state.openSeq) return;
-				editAnnotationDetails({...item, id: `annotation:${item.id}`, index: item.page - 1, type: "Annotation", fromSummary: true});
-			});
-			row.append(edit);
-		}
-		return row;
-	}));
+	annotationList.set(summary.view);
+}
+
+function createAnnotationRow(item) {
+	const tab = documentTab(), summary = state.annotationSummary;
+	const labels = {Path: "批注", Highlight: "高亮", Stamp: "印章", Watermark: "水印", Link: "链接"};
+	const row = document.createElement("div");
+	row.className = "annotation-summary";
+	const target = document.createElement("button");
+	target.type = "button";
+	target.className = "annotation-summary-target";
+	const heading = document.createElement("span"), content = document.createElement("span");
+	heading.textContent = `第${item.page}页 · ${labels[annotationKind(item)] || item.type}${item.visible ? "" : " · 隐藏"}`;
+	content.textContent = item.remark || item.id;
+	target.append(heading, content);
+	target.addEventListener("click", () => { if (isForegroundDocument(tab)) focusPageRegion(item, "注解", "center"); });
+	row.append(target);
+	appendInfoLine(row, "作者", item.creator);
+	appendInfoLine(row, "时间", formatDocumentTime(item.lastModDate));
+	if (state.editing) {
+		const edit = document.createElement("button");
+		edit.type = "button";
+		edit.className = "small-button";
+		edit.textContent = "修改";
+		edit.addEventListener("click", () => {
+			if (!isForegroundDocument(tab) || !state.editing || document.body.hasAttribute("data-busy") || summary !== state.annotationSummary) return;
+			editAnnotationDetails({...item, id: `annotation:${item.id}`, index: item.page - 1, type: "Annotation", fromSummary: true});
+		});
+		row.append(edit);
+	}
+	return row;
 }
 
 function renderOutlines(reset = true) {
@@ -11962,9 +11996,12 @@ function createOutlineList(outlines, path = []) {
 			const key = JSON.stringify(current);
 			details.open = state.outlineExpanded.get(key) ?? outline.expanded;
 			details.addEventListener("toggle", () => {
-				if (details.isConnected) state.outlineExpanded.set(key, details.open);
+				if (!details.isConnected) return;
+				state.outlineExpanded.set(key, details.open);
+				if (details.open && details.childElementCount === 1) details.append(createOutlineList(outline.children, current));
 			});
-			details.append(row, createOutlineList(outline.children, current));
+			details.append(row);
+			if (details.open) details.append(createOutlineList(outline.children, current));
 			item.append(details);
 		} else {
 			item.append(row);

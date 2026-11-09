@@ -3050,6 +3050,7 @@ body[data-hide-meta] .meta-panel {
 .annotation-summary-list {
 	min-height: 0;
 	overflow: auto;
+	overflow-anchor: none;
 }
 
 .annotation-summary {
