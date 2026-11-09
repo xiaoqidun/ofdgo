@@ -51,6 +51,7 @@ type Renderer struct {
 	compactStrokes        bool
 	printContents         string
 	textContentOnly       bool
+	knownSVGResources     map[string]bool
 	backends              RenderBackends
 	backendStates         map[any]any
 	sharedBackendStates   map[any]any

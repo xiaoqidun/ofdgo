@@ -1694,9 +1694,9 @@ func (e *businessEngine) checkDocument(name string) error {
 		return nil
 	}
 	switch name {
-	case "ofdgoFontFaces", "ofdgoFontMenu", "ofdgoFontPreferenceOrder", "ofdgoFontFace", "ofdgoCheckTextFont", "ofdgoImagePageSize":
+	case "ofdgoFontFaces", "ofdgoFontMenu", "ofdgoFontPreferenceOrder", "ofdgoFontFace", "ofdgoCheckTextFont", "ofdgoImagePageSize", "ofdgoImagePreview":
 		return nil
-	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoPageTextString", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
+	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
 		return nil
 	default:
 		return ofdgo.ErrIncompleteDocument
@@ -1725,7 +1725,7 @@ func (e *businessEngine) preparePDF(name string, args []platformValue) error {
 		return nil
 	}
 	switch name {
-	case "ofdgoLoadPDF", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoPageTextString", "ofdgoOpenLinks":
+	case "ofdgoLoadPDF", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoOpenLinks":
 	default:
 		return nil
 	}
@@ -1754,26 +1754,32 @@ func (e *businessEngine) preparePDF(name string, args []platformValue) error {
 			return nil
 		}
 		fallthrough
-	case "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoPageTextString":
+	case "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString":
 		if len(args) == 0 {
 			return fmt.Errorf("missing page index")
 		}
-		index := args[0].Int()
-		if e.pdf.page == index {
-			return nil
-		}
-		reader, err := e.pdf.importer.Reader(e.pdf.operation, index)
-		if err != nil {
-			return e.pdfError(err)
-		}
-		if err := e.replacePDFReader(reader); err != nil {
-			return err
-		}
-		e.pdf.page = index
-		return nil
+		return e.preparePDFPage(args[0].Int())
 	default:
 		return nil
 	}
+}
+
+// preparePDFPage 准备渐进文档的指定页面，批量读取与单页请求共用快照切换
+// 入参: index 零基页面索引
+// 返回: error 转换或会话替换错误
+func (e *businessEngine) preparePDFPage(index int) error {
+	if e.pdf.page == index {
+		return nil
+	}
+	reader, err := e.pdf.importer.Reader(e.pdf.operation, index)
+	if err != nil {
+		return e.pdfError(err)
+	}
+	if err := e.replacePDFReader(reader); err != nil {
+		return err
+	}
+	e.pdf.page = index
+	return nil
 }
 
 // convertFile 使用库转换独立文件，不读取或修改当前阅读和编辑会话
@@ -3115,6 +3121,42 @@ func (e *businessEngine) searchPage(args []platformValue) (any, error) {
 		limit = max(1, min(limit, args[2].Int()))
 	}
 	return e.currentSession.SearchPageContext(e.operationContext(), args[0].Int(), args[1].String(), limit)
+}
+
+// pageSearchMatch 保存批量搜索匹配及其零基页面索引
+type pageSearchMatch struct {
+	ofdgo.TextMatch
+	Page int `json:"page"`
+}
+
+// searchPages 有界读取连续页面并复用会话文字缓存，取消时丢弃本批结果
+// 入参: args 起始页、页数、查询和匹配上限
+// 返回: any 带页码的匹配, error 读取或取消错误
+func (e *businessEngine) searchPages(args []platformValue) (any, error) {
+	if e.currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	ctx := e.operationContext()
+	limit := max(1, min(10001, args[3].Int()))
+	var results []pageSearchMatch
+	for page := args[0].Int(); page < args[0].Int()+args[1].Int(); page++ {
+		if e.pdf != nil {
+			if err := e.preparePDFPage(page); err != nil {
+				return nil, err
+			}
+		}
+		matches, err := e.currentSession.SearchPageContext(ctx, page, args[2].String(), limit-len(results))
+		if err != nil {
+			return nil, err
+		}
+		for _, match := range matches {
+			results = append(results, pageSearchMatch{TextMatch: match, Page: page})
+		}
+		if len(results) >= limit {
+			break
+		}
+	}
+	return results, ctx.Err()
 }
 
 // exportFormats 获取导出格式
@@ -6374,6 +6416,22 @@ func (e *businessEngine) imagePageSize(args []platformValue) (any, error) {
 	return successResult(map[string]any{"width": width, "height": height}), nil
 }
 
+// imagePreview 读取图片一次并生成统一方向和密度的建页预览
+// 入参: args 图片数据或授权文件
+// 返回: any PNG预览及毫米尺寸, error 读取、解码或取消错误
+func (e *businessEngine) imagePreview(args []platformValue) (any, error) {
+	data, err := e.bytesFromJS(args[0])
+	if err != nil {
+		return nil, err
+	}
+	var output bytes.Buffer
+	info, err := ofdgo.RenderImagePreview(e.operationContext(), data, &output, 64)
+	if err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"width": info.Width, "height": info.Height, "bytes": bytesToJS(output.Bytes())}), nil
+}
+
 // createDocument 新建单页文档
 // 入参: args 标题、纸张宽高和注解设置
 // 返回: any 文档信息, error 错误信息
@@ -6843,13 +6901,24 @@ func (e *businessEngine) changeActions(args []platformValue) (any, error) {
 }
 
 // annotationInfos 读取当前文档及版本的注释摘要，不解析页面图元
-// 入参: args 保留参数
+// 入参: args 可选起始页面和页数
 // 返回: any 注释摘要, error 读取错误
 func (e *businessEngine) annotationInfos(args []platformValue) (any, error) {
 	if e.currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	return e.currentSession.Reader.AnnotationInfos()
+	var indexes []int
+	if len(args) != 0 {
+		for index := args[0].Int(); index < args[0].Int()+args[1].Int(); index++ {
+			indexes = append(indexes, index)
+		}
+	}
+	var infos []ofdgo.AnnotationInfo
+	err := e.currentSession.Reader.WalkAnnotationInfos(e.operationContext(), func(info ofdgo.AnnotationInfo) error {
+		infos = append(infos, info)
+		return nil
+	}, indexes...)
+	return infos, err
 }
 
 // exportVersion 提取指定历史版本并另存，不切换当前视图或修改编辑历史
@@ -7986,9 +8055,9 @@ func (e *businessEngine) saveSigned(args []platformValue) (any, error) {
 	if e.currentEditor != nil {
 		e.currentEditor.OnWriteProgress = progress
 		defer func() { e.currentEditor.OnWriteProgress = nil }()
-		_, err = ofdgo.SignEditorTo(&output, e.currentEditor, options)
+		_, err = ofdgo.SignEditorToContext(e.operationContext(), &output, e.currentEditor, options)
 	} else {
-		_, err = e.currentSession.Reader.SignTo(&output, options)
+		_, err = e.currentSession.Reader.SignToContext(e.operationContext(), &output, options)
 	}
 	if err != nil {
 		return nil, err
@@ -8218,6 +8287,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoRenderBackends":         e.renderBackends,
 		"ofdgoSVGFontData":            e.svgFontData,
 		"ofdgoSearchPage":             e.searchPage,
+		"ofdgoSearchPages":            e.searchPages,
 		"ofdgoPageTextString":         e.pageTextString,
 		"ofdgoExportFormats":          e.exportFormats,
 		"ofdgoParsePageRange":         e.parsePageRange,
@@ -8242,6 +8312,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoCreateDocument":         e.createDocument,
 		"ofdgoImportImages":           e.importImages,
 		"ofdgoImagePageSize":          e.imagePageSize,
+		"ofdgoImagePreview":           e.imagePreview,
 		"ofdgoEditDocument":           e.editDocument,
 		"ofdgoUpdateInfo":             e.updateInfo,
 		"ofdgoChangeAttachment":       e.changeAttachment,

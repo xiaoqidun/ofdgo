@@ -35,11 +35,17 @@ import (
 )
 
 const (
+	// platformTypeUndefined 表示未定义值
 	platformTypeUndefined = iota
+	// platformTypeNumber 表示数值
 	platformTypeNumber
+	// platformTypeString 表示字符串
 	platformTypeString
+	// platformTypeBoolean 表示布尔值
 	platformTypeBoolean
+	// platformTypeObject 表示对象
 	platformTypeObject
+	// platformTypeFunction 表示函数
 	platformTypeFunction
 )
 
@@ -363,10 +369,10 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 // 返回: bool 是否保留空闲渲染会话
 func nativeReadOnly(name string) bool {
 	switch name {
-	case "ofdgoCheckDocument", "ofdgoDocumentInfo", "ofdgoEditorInfo", "ofdgoDocumentNavigation", "ofdgoDocumentVersions", "ofdgoPackageDocuments",
+	case "ofdgoImagePreview", "ofdgoImagePageSize", "ofdgoCheckDocument", "ofdgoDocumentInfo", "ofdgoEditorInfo", "ofdgoDocumentNavigation", "ofdgoDocumentVersions", "ofdgoPackageDocuments",
 		"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoActionList", "ofdgoPageSettings", "ofdgoStyleResource",
 		"ofdgoOutlineLinks", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoOpenLinks", "ofdgoRenderBackends",
-		"ofdgoSVGFontData", "ofdgoSearchPage", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences",
+		"ofdgoSVGFontData", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences",
 		"ofdgoResourceTargets", "ofdgoResourceLocations", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange":
 		return true
 	}

@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/md5"
@@ -271,6 +272,16 @@ func (r *Reader) VerifySignatures(opts ...SignatureVerifyOption) ([]SignatureVer
 // 入参: index 从0开始的文档索引, opts 签名验证选项
 // 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
 func (r *Reader) VerifyDocumentSignatures(index int, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	return r.VerifyDocumentSignaturesContext(context.Background(), index, opts...)
+}
+
+// VerifyDocumentSignaturesContext 验证指定文档签名并在读取和摘要阶段响应取消
+// 入参: ctx 取消上下文, index 文档索引, opts 验证选项
+// 返回: []SignatureVerifyReport 验证报告, error 验证或取消错误
+func (r *Reader) VerifyDocumentSignaturesContext(ctx context.Context, index int, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if r.OFD == nil || index < 0 || index >= len(r.OFD.DocBody) {
 		return nil, fmt.Errorf("document index out of range: %d", index)
 	}
@@ -288,7 +299,7 @@ func (r *Reader) VerifyDocumentSignatures(index int, opts ...SignatureVerifyOpti
 	if index == r.documentIndex {
 		view.selectedVersion = r.selectedVersion
 	}
-	if err := view.initRoot(); err != nil {
+	if err := view.initRootContext(ctx); err != nil {
 		return nil, err
 	}
 	docRoot, err := view.DocumentRoot()
@@ -296,7 +307,7 @@ func (r *Reader) VerifyDocumentSignatures(index int, opts ...SignatureVerifyOpti
 		return nil, err
 	}
 	options.DocIndex, options.DocRoot = index, docRoot
-	data, err := view.readFile(docRoot)
+	data, err := view.readFileViewContext(ctx, docRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +321,7 @@ func (r *Reader) VerifyDocumentSignatures(index int, opts ...SignatureVerifyOpti
 	}
 	view.doc, view.RootDir = &doc, path.Dir(docRoot)
 	sigListPath := view.ResPath(doc.Signatures)
-	data, err = view.readFile(sigListPath)
+	data, err = view.readFileViewContext(ctx, sigListPath)
 	if err != nil {
 		return nil, err
 	}
@@ -320,9 +331,12 @@ func (r *Reader) VerifyDocumentSignatures(index int, opts ...SignatureVerifyOpti
 	}
 	reports := make([]SignatureVerifyReport, 0, len(signatures.List))
 	for _, sigRef := range signatures.List {
-		reports = append(reports, view.verifySignature(sigListPath, sigRef, &options))
+		if err := ctx.Err(); err != nil {
+			return reports, err
+		}
+		reports = append(reports, view.verifySignature(ctx, sigListPath, sigRef, &options))
 	}
-	return reports, nil
+	return reports, ctx.Err()
 }
 
 // appendSignatureCerts 追加签名证书
@@ -336,9 +350,9 @@ func appendSignatureCerts(dst [][]byte, certs ...[]byte) [][]byte {
 }
 
 // verifySignature 验证单个签名
-// 入参: sigListPath 签名列表路径, sigRef 签名引用, options 验证选项
+// 入参: ctx 取消上下文, sigListPath 签名列表路径, sigRef 签名引用, options 验证选项
 // 返回: SignatureVerifyReport 签名验证报告
-func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *signatureVerifyOptions) SignatureVerifyReport {
+func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef Signature, options *signatureVerifyOptions) SignatureVerifyReport {
 	sigPath := signatureRefPath(sigListPath, sigRef.BaseLoc)
 	report := SignatureVerifyReport{
 		DocIndex:    options.DocIndex,
@@ -351,7 +365,7 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 	if report.Type == "" {
 		report.Type = SignTypeSeal
 	}
-	sigData, err := r.readFile(sigPath)
+	sigData, err := r.readFileViewContext(ctx, sigPath)
 	if err != nil {
 		report.Error = err.Error()
 		return report
@@ -368,7 +382,7 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 	if report.DigestMethod == "" {
 		report.DigestMethod = "MD5"
 	}
-	report.References = r.verifySignatureReferences(sigPath, sigFile.SignedInfo.References)
+	report.References = r.verifySignatureReferences(ctx, sigPath, sigFile.SignedInfo.References)
 	report.Stamps = append(report.Stamps, sigFile.SignedInfo.StampAnnot...)
 	report.StampPositions, err = r.SignatureStampPositions(report.Stamps)
 	if err != nil {
@@ -378,7 +392,7 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 	r.applySignatureCoverage(&report, sigListPath, options)
 	report.applySignaturePolicy(options, r.OFD.Version, 0, report.SignatureMethod, report.DigestMethod)
 	signedValuePath := signatureRefPath(sigPath, sigFile.SignedValue)
-	signedValue, err := r.readFile(signedValuePath)
+	signedValue, err := r.readFileViewContext(ctx, signedValuePath)
 	if err != nil {
 		report.Error = err.Error()
 		return report
@@ -445,7 +459,7 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 	report.applySignatureEvidence(options, signedValue, sesResult.Timestamps, [][]byte{sesResult.SignCertRaw, sesResult.SealCertRaw}, sesResult.Certs)
 	if sigFile.SignedInfo.Seal.BaseLoc != "" {
 		sealPath := signatureRefPath(sigPath, sigFile.SignedInfo.Seal.BaseLoc)
-		sealData, err := r.readFile(sealPath)
+		sealData, err := r.readFileViewContext(ctx, sealPath)
 		if err != nil {
 			report.Error = err.Error()
 			return report
@@ -458,20 +472,23 @@ func (r *Reader) verifySignature(sigListPath string, sigRef Signature, options *
 }
 
 // verifySignatureReferences 验证签名保护文件列表
-// 入参: sigPath 签名文件路径, refs 签名保护文件列表
+// 入参: ctx 取消上下文, sigPath 签名文件路径, refs 签名保护文件列表
 // 返回: []SignatureReferenceVerify 保护文件验证结果
-func (r *Reader) verifySignatureReferences(sigPath string, refs SignatureReferences) []SignatureReferenceVerify {
+func (r *Reader) verifySignatureReferences(ctx context.Context, sigPath string, refs SignatureReferences) []SignatureReferenceVerify {
 	results := make([]SignatureReferenceVerify, 0, len(refs.Reference))
 	for _, ref := range refs.Reference {
-		results = append(results, r.verifySignatureReference(sigPath, refs.CheckMethod, ref))
+		if ctx.Err() != nil {
+			break
+		}
+		results = append(results, r.verifySignatureReference(ctx, sigPath, refs.CheckMethod, ref))
 	}
 	return results
 }
 
 // verifySignatureReference 验证签名保护文件
-// 入参: sigPath 签名文件路径, method 摘要算法, ref 保护文件引用
+// 入参: ctx 取消上下文, sigPath 签名文件路径, method 摘要算法, ref 保护文件引用
 // 返回: SignatureReferenceVerify 保护文件验证结果
-func (r *Reader) verifySignatureReference(sigPath, method string, ref SignatureReference) SignatureReferenceVerify {
+func (r *Reader) verifySignatureReference(ctx context.Context, sigPath, method string, ref SignatureReference) SignatureReferenceVerify {
 	refPath := signatureRefPath(sigPath, ref.FileRef)
 	result := SignatureReferenceVerify{
 		FileRef: ref.FileRef,
@@ -501,7 +518,7 @@ func (r *Reader) verifySignatureReference(sigPath, method string, ref SignatureR
 		result.Error = err.Error()
 		return result
 	}
-	_, err = io.Copy(digest, input)
+	_, err = io.Copy(digest, imageInput{ReadCloser: input, ctx: ctx})
 	closeErr := input.Close()
 	if err != nil {
 		result.Error = err.Error()

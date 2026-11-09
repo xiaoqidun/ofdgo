@@ -19,9 +19,11 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"image"
+	"io"
 	"math"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
+	"github.com/xiaoqidun/pdfgo"
 )
 
 // ImagePageSource 图片页面来源，按列表顺序逐张读取，每张图片处理完成后不再引用返回数据
@@ -47,6 +49,74 @@ type editorImagePageInfo struct {
 	size     image.Point
 	format   string
 	metadata baseimage.PageInfo
+}
+
+// ImagePreviewInfo 保存图片按方向和密度换算后的毫米尺寸
+type ImagePreviewInfo struct {
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+// RenderImagePreview 输出最长边不超过size像素的PNG预览，并返回建页物理尺寸
+// 使用原图方向和密度，缺少密度时使用96DPI，不修改源图片
+// 入参: ctx 取消上下文, data 图片数据, writer 预览输出流, size 最长边像素数
+// 返回: ImagePreviewInfo 物理尺寸, error 解码、取消或输出错误
+func RenderImagePreview(ctx context.Context, data []byte, writer io.Writer, size int) (ImagePreviewInfo, error) {
+	if size <= 0 {
+		return ImagePreviewInfo{}, fmt.Errorf("invalid preview size")
+	}
+	config, format, err := baseimage.DecodeConfigDataContext(ctx, data)
+	if err != nil {
+		return ImagePreviewInfo{}, err
+	}
+	metadata, err := baseimage.PageMetadataContext(ctx, data, format, 96)
+	if err != nil {
+		return ImagePreviewInfo{}, err
+	}
+	info := ImagePreviewInfo{Width: float64(config.Width) * 25.4 / metadata.XDPI, Height: float64(config.Height) * 25.4 / metadata.YDPI}
+	pixels, _, err := baseimage.DecodePixelsContext(ctx, data)
+	if err != nil {
+		return ImagePreviewInfo{}, err
+	}
+	scale := min(1, float64(size)/float64(max(config.Width, config.Height)))
+	pixels, err = pdfgo.ResizeImage(ctx, pixels, image.Pt(max(1, int(float64(config.Width)*scale)), max(1, int(float64(config.Height)*scale))))
+	if err != nil {
+		return ImagePreviewInfo{}, err
+	}
+	bounds := pixels.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	width, height := w, h
+	if metadata.Orientation >= 5 {
+		width, height = h, w
+		info.Width, info.Height = info.Height, info.Width
+	}
+	preview := image.NewNRGBA(image.Rect(0, 0, width, height))
+	for y := range h {
+		if err := ctx.Err(); err != nil {
+			return ImagePreviewInfo{}, err
+		}
+		for x := range w {
+			dx, dy := x, y
+			switch metadata.Orientation {
+			case 2:
+				dx = w - 1 - x
+			case 3:
+				dx, dy = w-1-x, h-1-y
+			case 4:
+				dy = h - 1 - y
+			case 5:
+				dx, dy = y, x
+			case 6:
+				dx, dy = h-1-y, x
+			case 7:
+				dx, dy = h-1-y, w-1-x
+			case 8:
+				dx, dy = y, w-1-x
+			}
+			preview.Set(dx, dy, pixels.At(bounds.Min.X+x, bounds.Min.Y+y))
+		}
+	}
+	return info, pdfgo.EncodePNG(ctx, writer, preview)
 }
 
 // ImportImages 将PNG、JPEG、BMP、单页TIFF或JBIG2逐张建页并插入指定位置，一次操作计入一条撤销记录

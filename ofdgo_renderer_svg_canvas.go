@@ -26,6 +26,7 @@ import (
 	"image"
 	"io"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/tdewolff/canvas"
@@ -52,6 +53,65 @@ type svgResourceRenderer struct {
 	objects       map[*GraphicObject]string
 	objectStack   []svgObjectGroup
 	embeddedFonts bool
+	pathData      []byte
+}
+
+// RenderPath 直接序列化纯色填充轮廓，其余画笔保留后端处理
+// 入参: path 几何路径, style 绘制样式, m 页面变换
+func (s *svgResourceRenderer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix) {
+	if !style.HasFill() || !style.Fill.IsColor() || style.HasStroke() {
+		s.SVG.RenderPath(path, style, m)
+		return
+	}
+	for data := path.Data(); len(data) != 0; {
+		switch data[0] {
+		case canvas.MoveToCmd, canvas.LineToCmd, canvas.CloseCmd:
+			data = data[4:]
+		case canvas.QuadToCmd:
+			data = data[6:]
+		case canvas.CubeToCmd:
+			data = data[8:]
+		default:
+			s.SVG.RenderPath(path, style, m)
+			return
+		}
+	}
+	_, height := s.Size()
+	data := path.Copy().Transform(canvas.Identity.ReflectYAbout(height / 2).Mul(m)).Data()
+	output := append(s.pathData[:0], `<path d="`...)
+	for len(data) != 0 {
+		command, count := byte('M'), 4
+		switch data[0] {
+		case canvas.LineToCmd:
+			command = 'L'
+		case canvas.CloseCmd:
+			command = 'Z'
+		case canvas.QuadToCmd:
+			command, count = 'Q', 6
+		case canvas.CubeToCmd:
+			command, count = 'C', 8
+		}
+		output = append(output, command)
+		if command != 'Z' {
+			for _, value := range data[1 : count-1] {
+				output = strconv.AppendFloat(output, value, 'g', canvas.Precision, 64)
+				output = append(output, ' ')
+			}
+		}
+		data = data[count:]
+	}
+	output = append(output, '"')
+	if style.Fill.Color != canvas.Black {
+		output = fmt.Appendf(output, ` fill="%s"`, canvas.CSSColor(style.Fill.Color))
+	}
+	if style.FillRule == canvas.EvenOdd {
+		output = append(output, ` fill-rule="evenodd"`...)
+	}
+	output = append(output, '/', '>')
+	if s.err == nil {
+		_, s.err = s.writer.Write(output)
+	}
+	s.pathData = output
 }
 
 // svgImageKey 按原图及输出精度复用图片编码，避免不同显示尺寸共用低清结果
@@ -157,8 +217,7 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 			return
 		}
 		if s.imageNames != nil {
-			name = fmt.Sprintf("ofdgo-image-%x", sha256.Sum256(resource.Data))
-			resource.Name = name
+			name = resource.Name
 			s.imageNames[key] = name
 			if !s.seen[name] {
 				s.seen[name] = true
@@ -213,11 +272,19 @@ func (s *svgResourceRenderer) imageResource(ctx context.Context, img image.Image
 				result, err := s.encodeImageResource(ctx, img, target)
 				return result, cap(result.Data) + 256, err
 			})
-			result.Data = bytes.Clone(result.Data)
+			if s.imageNames != nil && s.renderer.knownSVGResources[result.Name] {
+				result.Data = nil
+			} else {
+				result.Data = bytes.Clone(result.Data)
+			}
 			return result, err
 		}
 	}
-	return s.encodeImageResource(ctx, img, target)
+	result, err := s.encodeImageResource(ctx, img, target)
+	if s.imageNames != nil && s.renderer != nil && s.renderer.knownSVGResources[result.Name] {
+		result.Data = nil
+	}
+	return result, err
 }
 
 // encodeImageResource 保留原编码或压缩已解码像素，先降采样再编码并响应取消
@@ -273,6 +340,7 @@ func (s *svgResourceRenderer) encodeImageResource(ctx context.Context, img image
 	if err := ctx.Err(); err != nil {
 		return SVGImage{}, err
 	}
+	resource.Name = fmt.Sprintf("ofdgo-image-%x", sha256.Sum256(resource.Data))
 	return resource, nil
 }
 

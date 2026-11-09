@@ -146,6 +146,7 @@ type PrintDocument struct {
 	renderer *Renderer
 	layout   PrintLayout
 	options  PrintOptions
+	pages    *renderCache[int, []byte]
 	closed   bool
 }
 
@@ -588,7 +589,7 @@ func (r *Renderer) PreparePrint(ctx context.Context, options PrintOptions) (*Pri
 	view.printing = true
 	view.printContents = o.Contents
 	view.RenderAnnotations = true
-	return &PrintDocument{renderer: view, layout: layout, options: o}, nil
+	return &PrintDocument{renderer: view, layout: layout, options: o, pages: resourceCache[int, []byte](view.Reader.resources, 32<<20)}, nil
 }
 
 // PreparePrint 从独立编辑快照创建打印任务，不修改源编辑器或撤销记录
@@ -648,6 +649,7 @@ func (p *PrintDocument) Close() error {
 		return nil
 	}
 	p.closed = true
+	p.pages.clear()
 	p.renderer.ClearCache()
 	err := p.renderer.Reader.Close()
 	p.renderer = nil

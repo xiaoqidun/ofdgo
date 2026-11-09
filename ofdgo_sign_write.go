@@ -341,11 +341,25 @@ type signatureIDSequence uint64
 // 入参: data 最终包字节, options 签署选项
 // 返回: []byte 签署后的完整包, error 错误信息
 func SignPackage(data []byte, options SignatureWriteOptions) ([]byte, error) {
+	return SignPackageContext(context.Background(), data, options)
+}
+
+// SignPackageContext 签署独立包并响应取消，不修改输入
+// 入参: ctx 取消上下文, data 包字节, options 签署选项
+// 返回: []byte 签署后的完整包, error 签署或取消错误
+func SignPackageContext(ctx context.Context, data []byte, options SignatureWriteOptions) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	r, err := NewReader(&Input{reader: bytes.NewReader(data), size: int64(len(data))}, options.ReaderOptions...)
 	if err != nil {
 		return nil, err
 	}
-	return signatureWriteOutput(r, options)
+	var output bytes.Buffer
+	if _, err := r.SignToContext(ctx, &output, options); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
 }
 
 // SignEditorTo 将编辑器序列化为最终文件后签署，保留或显式覆盖加密策略
@@ -355,18 +369,37 @@ func SignPackage(data []byte, options SignatureWriteOptions) ([]byte, error) {
 // 入参: writer 输出目标, editor 编辑器, options 签署选项
 // 返回: int64 写出字节数, error 错误信息
 func SignEditorTo(writer io.Writer, editor *Editor, options SignatureWriteOptions) (int64, error) {
+	return SignEditorToContext(context.Background(), writer, editor, options)
+}
+
+// SignEditorToContext 序列化独立输出后签署，取消时保留编辑状态和历史
+// 入参: ctx 取消上下文, writer 输出目标, editor 编辑器, options 签署选项
+// 返回: int64 写出字节数, error 签署或取消错误
+func SignEditorToContext(ctx context.Context, writer io.Writer, editor *Editor, options SignatureWriteOptions) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if writer == nil || editor == nil {
 		return 0, fmt.Errorf("nil signature editor or writer")
 	}
 	if options.Encryption == nil && editor.encryption != nil && editor.encryption.options == nil {
 		return 0, ErrEncryptionPolicyRequired
 	}
-	var plain bytes.Buffer
-	defer func() { clear(plain.Bytes()) }()
-	if _, err := editor.writePlaintext(&plain); err != nil {
+	snapshot, err := editor.outputSnapshot(ctx, WriteOptions{})
+	if err != nil {
 		return 0, err
 	}
-	r, err := NewReader(&Input{reader: bytes.NewReader(plain.Bytes()), size: int64(plain.Len())})
+	defer snapshot.output.release()
+	var plain editorSnapshotBuffer
+	defer func() {
+		for _, chunk := range plain.chunks {
+			clear(chunk)
+		}
+	}()
+	if _, err := snapshot.writePlaintext(&plain); err != nil {
+		return 0, err
+	}
+	r, err := NewReader(&Input{reader: &plain, size: plain.size})
 	if err != nil {
 		return 0, err
 	}
@@ -378,7 +411,7 @@ func SignEditorTo(writer io.Writer, editor *Editor, options SignatureWriteOption
 	}
 	r.encryption = editor.encryption
 	options.progress = editorProgress(editor.OnWriteProgress)
-	return r.SignTo(writer, options)
+	return r.SignToContext(ctx, writer, options)
 }
 
 // SignTo 从阅读器包内容创建独立快照，完成签署和回验后写出
@@ -388,45 +421,48 @@ func SignEditorTo(writer io.Writer, editor *Editor, options SignatureWriteOption
 // 入参: writer 独立的输出目标，不得覆盖源文件, options 签署选项
 // 返回: int64 写出字节数, error 错误信息
 func (r *Reader) SignTo(writer io.Writer, options SignatureWriteOptions) (int64, error) {
+	return r.SignToContext(context.Background(), writer, options)
+}
+
+// SignToContext 签署并回验独立包快照后写出，支持准备和输出阶段取消
+// 入参: ctx 取消上下文, writer 独立输出目标, options 签署选项
+// 返回: int64 写出字节数, error 签署、输出或取消错误
+func (r *Reader) SignToContext(ctx context.Context, writer io.Writer, options SignatureWriteOptions) (int64, error) {
 	if writer == nil {
 		return 0, fmt.Errorf("nil signature writer")
 	}
-	data, err := signatureWriteOutput(r, options)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	n, err := writer.Write(data)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	return int64(n), err
+	options.progress = options.progress.withContext(ctx)
+	return signatureWriteOutput(ctx, r, writer, options)
 }
 
-// signatureWriteOutput 签署后恢复加密策略，禁止加密来源静默输出明文
-// 入参: r 阅读器, options 签署选项
-// 返回: []byte 输出包, error 错误信息
-func signatureWriteOutput(r *Reader, options SignatureWriteOptions) ([]byte, error) {
+// signatureWriteOutput 签署后恢复加密策略，避免重复封装和解包
+// 入参: ctx 取消上下文, r 阅读器, writer 输出目标, options 签署选项
+// 返回: int64 写出字节数, error 签署、输出或取消错误
+func signatureWriteOutput(ctx context.Context, r *Reader, writer io.Writer, options SignatureWriteOptions) (int64, error) {
 	if r == nil {
-		return nil, fmt.Errorf("nil signature reader")
+		return 0, fmt.Errorf("nil signature reader")
 	}
 	if r.documentIndex >= 0 && r.documentIndex < r.DocumentCount() && r.OFD.DocBody[r.documentIndex].versioned {
-		return nil, fmt.Errorf("in-package version signing is not supported; extract the version before signing")
+		return 0, fmt.Errorf("in-package version signing is not supported; extract the version before signing")
 	}
 	encryption := options.Encryption
 	if encryption == nil && r.encryption != nil {
 		encryption = r.encryption.options
 		if encryption == nil {
-			return nil, ErrEncryptionPolicyRequired
+			return 0, ErrEncryptionPolicyRequired
 		}
 	}
 	if encryption != nil {
 		if err := validateEncryptionOptions(*encryption); err != nil {
-			return nil, err
+			return 0, err
 		}
 	}
-	parts, err := signatureWriteParts(r)
+	parts, err := signatureWritePartsContext(ctx, r)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	if encryption != nil {
 		defer func() {
@@ -436,70 +472,68 @@ func signatureWriteOutput(r *Reader, options SignatureWriteOptions) ([]byte, err
 		}()
 	}
 	if err := options.progress.report("sign", 0, 1); err != nil {
-		return nil, err
+		return 0, err
 	}
-	data, err := signatureWritePackage(parts, options, r.DocumentIndex())
-	if err != nil {
-		return nil, err
+	if err := signatureWritePackage(ctx, parts, options, r.DocumentIndex()); err != nil {
+		return 0, err
 	}
 	if err := options.progress.report("sign", 1, 1); err != nil {
-		clear(data)
-		return nil, err
+		return 0, err
 	}
+	var count int64
+	output := convertWriter{ctx: ctx, writer: writer, count: &count}
 	if encryption != nil {
-		defer clear(data)
-		if options.progress != nil {
-			signed, err := NewReader(&Input{reader: bytes.NewReader(data), size: int64(len(data))})
-			if err != nil {
-				return nil, err
-			}
-			files, err := signatureWriteParts(signed)
-			if err != nil {
-				return nil, err
-			}
-			defer func() {
-				for _, data := range files {
-					clear(data)
-				}
-			}()
-			return encryptPackageParts(files, *encryption, options.progress)
+		data, err := encryptPackageParts(parts, *encryption, options.progress)
+		if err != nil {
+			return 0, err
 		}
-		return EncryptPackage(data, *encryption)
+		defer clear(data)
+		_, err = output.Write(data)
+		return count, err
 	}
-	return data, nil
+	err = signatureWriteZIPTo(ctx, output, parts, options.Compression)
+	return count, err
 }
 
-// signatureWriteParts 使用阅读器统一路径规则读取独立包快照
-// 入参: r 阅读器
-// 返回: map[string][]byte 包文件, error 错误信息
-func signatureWriteParts(r *Reader) (map[string][]byte, error) {
+// signatureWritePartsContext 逐条读取可取消的独立包快照
+// 入参: ctx 取消上下文, r 阅读器
+// 返回: map[string][]byte 包文件, error 读取或取消错误
+func signatureWritePartsContext(ctx context.Context, r *Reader) (map[string][]byte, error) {
 	if r == nil {
 		return nil, fmt.Errorf("nil signature reader")
 	}
 	if err := r.indexPackage(); err != nil {
 		return nil, err
 	}
-	return r.packageData()
+	parts := make(map[string][]byte, len(r.fileNames))
+	for name := range r.fileNames {
+		data, err := r.readFileViewContext(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		parts[name] = bytes.Clone(data)
+	}
+	return parts, ctx.Err()
 }
 
 // signatureWritePackage 完成输出优化后计算签名，不改写已有签名保护的资源
 // 签名目录采用Sign_N，标识使用独立的sN序列
-// 入参: parts 独立包文件, options 签署选项, index 文档索引
-// 返回: []byte 完整包, error 错误信息
-func signatureWritePackage(parts map[string][]byte, options SignatureWriteOptions, index int) ([]byte, error) {
+// 入参: ctx 取消上下文, parts 独立包文件, options 签署选项, index 文档索引
+// 返回: error 签署或取消错误
+func signatureWritePackage(ctx context.Context, parts map[string][]byte, options SignatureWriteOptions, index int) error {
 	if err := options.Compression.Validate(); err != nil {
-		return nil, err
+		return err
 	}
 	if options.Mode != SignatureAppend && options.Mode != SignatureReplace {
-		return nil, fmt.Errorf("unsupported signature write mode")
+		return fmt.Errorf("unsupported signature write mode")
 	}
 	r := &Reader{files: parts, documentIndex: index}
 	if err := r.initRoot(); err != nil {
-		return nil, err
+		return err
 	}
 	doc, err := r.Doc()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if options.Time.IsZero() {
 		options.Time = time.Now()
@@ -507,26 +541,26 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 	options.Time = options.Time.UTC().Truncate(time.Second)
 	identity, err := signatureWriteIdentity(options)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	verifyOptions := append([]SignatureVerifyOption(nil), options.ExistingVerifyOptions...)
 	verifyOptions = append(verifyOptions, WithSignatureCert(identity.cert.Raw))
-	protected, err := signatureWriteProtected(r, parts, verifyOptions)
+	protected, err := signatureWriteProtected(ctx, r, parts, verifyOptions)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if options.Compression.Mode != CompressionUnchanged && doc.Signatures == "" && len(protected) == 0 {
-		images, sizes, err := r.compressionImagePlan(context.Background(), options.Compression)
+		images, sizes, err := r.compressionImagePlan(ctx, options.Compression)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		optimizer := &Editor{output: &outputOptimization{ctx: context.Background(), options: options.Compression, sizes: sizes, images: images}}
+		optimizer := &Editor{output: &outputOptimization{ctx: ctx, options: options.Compression, sizes: sizes, images: images}}
 		optimizer.OnWriteProgress = func(stage string, completed, total int) error {
 			return options.progress.report(stage, completed, total)
 		}
 		removed := make(map[string]bool)
 		if err := optimizer.compressResourceParts(parts, nil, removed); err != nil {
-			return nil, err
+			return err
 		}
 		for name := range parts {
 			if removed[cleanPackagePath(name)] {
@@ -535,47 +569,47 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 		}
 		r = &Reader{files: parts, documentIndex: index}
 		if err := r.initRoot(); err != nil {
-			return nil, err
+			return err
 		}
 		doc, err = r.Doc()
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 	stamps, err := signatureWriteStamps(r, options.Stamps, len(options.Seal) != 0)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	var list Signatures
 	listPath := r.ResPath(doc.Signatures)
 	if doc.Signatures != "" {
 		data, ok := parts[listPath]
 		if !ok {
-			return nil, fmt.Errorf("signature list not found: %s", listPath)
+			return fmt.Errorf("signature list not found: %s", listPath)
 		}
 		if err := xml.Unmarshal(data, &list); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	oldCount := len(list.List)
 	previousList, err := signatureWriteXML("Signatures", list)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if options.Mode == SignatureAppend && oldCount > 0 {
-		reports, err := r.VerifyDocumentSignatures(index, verifyOptions...)
+		reports, err := r.VerifyDocumentSignaturesContext(ctx, index, verifyOptions...)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		ids := make(map[string]bool)
 		for _, report := range reports {
 			if !report.Valid || report.StampPositionError != "" || ids[report.ID] || report.ID == "" {
-				return nil, fmt.Errorf("existing signature %s is invalid: %s", report.ID, report.Error)
+				return fmt.Errorf("existing signature %s is invalid: %s", report.ID, report.Error)
 			}
 			ids[report.ID] = true
 			for _, ref := range report.References {
 				if ref.Path == listPath {
-					return nil, fmt.Errorf("signature %s protects the signature list", report.ID)
+					return fmt.Errorf("signature %s protects the signature list", report.ID)
 				}
 			}
 		}
@@ -584,15 +618,15 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 		listPath = signatureWriteAvailable(parts, path.Join(r.RootDir, "Signs", "Signatures.xml"))
 		root, err := parseEditorXML(parts["OFD.xml"])
 		if err != nil {
-			return nil, err
+			return err
 		}
 		body := root.childAt("DocBody", index)
 		if body == nil {
-			return nil, fmt.Errorf("missing document body")
+			return fmt.Errorf("missing document body")
 		}
 		parts["OFD.xml"], err = editorXMLSetText(parts["OFD.xml"], body, [][2]string{{"Signatures", "/" + listPath}})
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if options.Mode == SignatureReplace {
@@ -601,7 +635,7 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 	}
 	id, stamps, err := signatureWriteIDs(&list, listPath, parts, stamps)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	directory := ""
 	for n := 1; ; n++ {
@@ -626,23 +660,23 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 	list.List = append(list.List, Signature{ID: id, Type: kind, BaseLoc: "/" + sigPath})
 	updatedList, err := signatureWriteXML("Signatures", list)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if original := parts[listPath]; len(original) != 0 {
 		root, err := parseEditorXML(original)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		updated, err := editorXMLMerge(original, root, previousList, updatedList)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		updatedList = editorPatchXML(original, []editorXMLPatch{{root.start, root.end, updated}})
 	}
 	parts[listPath] = updatedList
 	for name, before := range protected {
 		if data, ok := parts[name]; !ok || !bytes.Equal(before, data) {
-			return nil, fmt.Errorf("another document signature protects %s", name)
+			return fmt.Errorf("another document signature protects %s", name)
 		}
 	}
 	refs := SignatureReferences{CheckMethod: identity.digest}
@@ -653,19 +687,19 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 	slices.Sort(names)
 	for index, name := range names {
 		if err := options.progress.report("signature-references", index, len(names)); err != nil {
-			return nil, err
+			return err
 		}
 		if name == listPath && !options.Lock {
 			continue
 		}
 		digest, err := signatureDigest(identity.digest, parts[name])
 		if err != nil {
-			return nil, err
+			return err
 		}
 		refs.Reference = append(refs.Reference, SignatureReference{FileRef: "/" + name, CheckValue: base64.StdEncoding.EncodeToString(digest)})
 	}
 	if err := options.progress.report("signature-references", len(names), len(names)); err != nil {
-		return nil, err
+		return err
 	}
 	provider := options.Provider
 	if provider.ProviderName == "" {
@@ -681,39 +715,35 @@ func signatureWritePackage(parts map[string][]byte, options SignatureWriteOption
 	}{info, "/" + valuePath}
 	parts[sigPath], err = signatureWriteXML("Signature", file)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	parts[valuePath], err = identity.sign(parts[sigPath], "/"+sigPath, options)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	output, err := signatureWriteZIP(parts, options.Compression)
-	if err != nil {
-		return nil, err
+	check := &Reader{files: parts}
+	if err := check.initRootContext(ctx); err != nil {
+		return err
 	}
-	check, err := NewReader(&Input{reader: bytes.NewReader(output), size: int64(len(output))})
+	reports, err := check.VerifyDocumentSignaturesContext(ctx, index, verifyOptions...)
 	if err != nil {
-		return nil, err
-	}
-	reports, err := check.VerifyDocumentSignatures(index, verifyOptions...)
-	if err != nil {
-		return nil, err
+		return err
 	}
 	if len(reports) != oldCount+1 {
-		return nil, fmt.Errorf("signature verification count mismatch")
+		return fmt.Errorf("signature verification count mismatch")
 	}
 	for _, report := range reports {
 		if !report.Valid || report.StampPositionError != "" {
-			return nil, fmt.Errorf("written signature %s failed verification: %s", report.ID, report.Error)
+			return fmt.Errorf("written signature %s failed verification: %s", report.ID, report.Error)
 		}
 	}
-	return output, nil
+	return ctx.Err()
 }
 
 // signatureWriteProtected 收集其他文档的签名文件及保护内容，不受默认版本选择影响
-// 入参: r 包阅读器, parts 原始包文件, options 既有签名的验证选项
+// 入参: ctx 取消上下文, r 包阅读器, parts 原始包文件, options 既有签名的验证选项
 // 返回: map[string][]byte 不可改写的文件, error 读取或验签错误
-func signatureWriteProtected(r *Reader, parts map[string][]byte, options []SignatureVerifyOption) (map[string][]byte, error) {
+func signatureWriteProtected(ctx context.Context, r *Reader, parts map[string][]byte, options []SignatureVerifyOption) (map[string][]byte, error) {
 	protected := make(map[string][]byte)
 	retain := func(name string) error {
 		if _, ok := protected[name]; ok {
@@ -741,7 +771,7 @@ func signatureWriteProtected(r *Reader, parts map[string][]byte, options []Signa
 		if doc.Signatures == "" {
 			continue
 		}
-		reports, err := view.VerifyDocumentSignatures(index, options...)
+		reports, err := view.VerifyDocumentSignaturesContext(ctx, index, options...)
 		if err != nil {
 			return nil, err
 		}
@@ -854,31 +884,28 @@ func signatureWriteAvailable(parts map[string][]byte, name string) string {
 	}
 }
 
-// signatureWriteZIP 写出完整包，不重新编码受保护文件
-// 入参: parts 文件集合, compression 封装压缩配置
-// 返回: []byte 包字节, error 错误信息
-func signatureWriteZIP(parts map[string][]byte, compression CompressionOptions) ([]byte, error) {
-	var out bytes.Buffer
-	w := zip.NewWriter(&out)
+// signatureWriteZIPTo 逐条封装已回验的文件，输出阶段响应取消
+// 入参: ctx 取消上下文, writer 输出目标, parts 包文件, compression 压缩配置
+// 返回: error 输出或取消错误
+func signatureWriteZIPTo(ctx context.Context, writer io.Writer, parts map[string][]byte, compression CompressionOptions) error {
+	w := zip.NewWriter(writer)
 	configureArchive(w, compression)
-	names := make([]string, 0, len(parts))
-	for name := range parts {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	for _, name := range names {
+	for _, name := range slices.Sorted(maps.Keys(parts)) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		f, err := w.Create(name)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if _, err := f.Write(parts[name]); err != nil {
-			return nil, err
+		if _, err := io.Copy(f, imageInput{ReadCloser: io.NopCloser(bytes.NewReader(parts[name])), ctx: ctx}); err != nil {
+			return err
 		}
 	}
 	if err := w.Close(); err != nil {
-		return nil, err
+		return err
 	}
-	return out.Bytes(), nil
+	return ctx.Err()
 }
 
 // observe 记录已有签章标识的编号上限，其他命名形式保持不变

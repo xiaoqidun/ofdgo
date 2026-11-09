@@ -123,7 +123,7 @@ func (w canvasEPSWriter) Write(data []byte) (int, error) {
 	return w.Writer.Write(data)
 }
 
-// RenderPDF 使用canvas输出PDF，保留导航与文字并复用输出缓冲
+// RenderPDF 使用canvas输出PDF，保留导航与文字并分块保存中间输出
 // 入参: r 渲染器, pages 页面列表, writer 输出流, progress 页面处理进度
 // 返回: error 错误信息
 func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer io.Writer, progress func(int, int) error) error {
@@ -147,15 +147,10 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 			return err
 		}
 	}
-	buf, direct := writer.(*bytes.Buffer)
-	if r.Compression.Mode != CompressionUnchanged {
-		direct = false
-	}
-	if !direct {
-		buf = &bytes.Buffer{}
-	}
-	start := buf.Len()
-	p := pdf.New(buf, pages[0].Box.W, pages[0].Box.H, nil)
+	var buf editorSnapshotBuffer
+	settings := pdf.DefaultOptions
+	settings.Compress = r.Compression.Mode == CompressionUnchanged
+	p := pdf.New(&buf, pages[0].Box.W, pages[0].Box.H, &settings)
 	renderer := &pdfRenderer{PDF: p, glyphPaths: *resourceCache[*canvas.Path, *canvas.Path](r.Reader.resources, 16<<20), images: make([][]image.Image, 1), text: make([]codecpdf.TextPage, 1), navigation: navigation}
 	defer func() {
 		if renderer.imageError != nil {
@@ -176,7 +171,6 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		}
 		encoded, err := pdfgo.EncodeTextString(field.value)
 		if err != nil {
-			buf.Truncate(start)
 			return err
 		}
 		renderer.information[field.key] = encoded
@@ -184,12 +178,10 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	for i, page := range pages {
 		content, err := page.ReadContent(ctx, r.Reader)
 		if err != nil {
-			buf.Truncate(start)
 			return fmt.Errorf("failed to read page %d: %w", i+1, err)
 		}
 		if !r.printing {
 			if err := navigation.addPage(r, i, content, pages); err != nil {
-				buf.Truncate(start)
 				return fmt.Errorf("failed to read page %d navigation: %w", i+1, err)
 			}
 		}
@@ -202,32 +194,26 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 			navigation.apply(p, i)
 		}
 		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), content, !r.TransparentBackground); err != nil {
-			buf.Truncate(start)
 			return fmt.Errorf("failed to render page %d: %w", i+1, err)
 		}
 		if renderer.imageError != nil {
-			buf.Truncate(start)
 			return fmt.Errorf("failed to render page %d: %w", i+1, renderer.imageError)
 		}
 		pages[i].Content = nil
 		if err := ctx.Err(); err != nil {
-			buf.Truncate(start)
 			return err
 		}
 		if progress != nil {
 			if err := progress(i+1, len(pages)); err != nil {
-				buf.Truncate(start)
 				return err
 			}
 		}
 		if err := ctx.Err(); err != nil {
-			buf.Truncate(start)
 			return err
 		}
 	}
 	if doc != nil && !r.printing {
 		if err := navigation.addOutlines(doc.Outlines.OutlineElem, 0, navigation.bookmarks, navigation.pageIndex, pages); err != nil {
-			buf.Truncate(start)
 			return err
 		}
 	}
@@ -235,27 +221,15 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		p.AddOutline(strconv.Itoa(index), outline.Level, 0)
 	}
 	if err := p.Close(); err != nil {
-		buf.Truncate(start)
 		return err
 	}
-	data := buf.Bytes()[start:]
 	options := pdfgo.OptimizeOptions{Compression: r.Compression}
 	if r.Compression.Mode != CompressionUnchanged && progress != nil {
 		options.OnProgress = func(_ string, _, _ int) error {
 			return progress(len(pages), len(pages))
 		}
 	}
-	if direct {
-		var result bytes.Buffer
-		err := renderer.writePDF(r.outputContext(), data, &result, options)
-		buf.Truncate(start)
-		if err != nil {
-			return err
-		}
-		_, err = buf.Write(result.Bytes())
-		return err
-	}
-	return renderer.writePDF(r.outputContext(), data, writer, options)
+	return renderer.writePDF(r.outputContext(), &buf, buf.size, writer, options)
 }
 
 // RenderImage 写出Flate或更小的JPEG图片，保留显示尺寸与变换

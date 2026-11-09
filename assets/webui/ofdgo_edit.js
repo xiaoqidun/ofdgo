@@ -773,17 +773,39 @@ export function selectedText(item) {
 }
 
 export class ObjectIndex {
-	constructor(items) {
-		const build = items => {
-			if (!items.length) return null;
-			const bounds = selectionBounds(items);
-			if (items.length <= 16) return { ...bounds, items };
-			const axis = bounds.width >= bounds.height ? "x" : "y";
-			items.sort((a, b) => a[axis] - b[axis]);
-			const middle = items.length >> 1;
-			return { ...bounds, left: build(items.slice(0, middle)), right: build(items.slice(middle)) };
+	constructor(source) {
+		const items = [...source];
+		const build = (start, end) => {
+			if (start === end) return null;
+			let x = Infinity, y = Infinity, right = -Infinity, bottom = -Infinity;
+			for (let i = start; i < end; i++) {
+				const item = items[i];
+				x = Math.min(x, item.x); y = Math.min(y, item.y);
+				right = Math.max(right, item.x + item.width); bottom = Math.max(bottom, item.y + item.height);
+			}
+			const bounds = {x, y, width: right - x, height: bottom - y};
+			if (end - start <= 16) return {...bounds, items: items.slice(start, end)};
+			const axis = bounds.width >= bounds.height ? "x" : "y", middle = (start + end) >> 1;
+			let low = start, high = end - 1;
+			while (low < high) {
+				const pivot = items[(low + high) >> 1][axis];
+				let i = low, j = high;
+				while (i <= j) {
+					while (items[i][axis] < pivot) i++;
+					while (items[j][axis] > pivot) j--;
+					if (i <= j) {
+						const item = items[i];
+						items[i++] = items[j];
+						items[j--] = item;
+					}
+				}
+				if (middle <= j) high = j;
+				else if (middle >= i) low = i;
+				else break;
+			}
+			return {...bounds, left: build(start, middle), right: build(middle, end)};
 		};
-		this.root = build([...items]);
+		this.root = build(0, items.length);
 	}
 
 	queryBox(box) {

@@ -4078,35 +4078,19 @@ function layoutCreateImagePreview(entry, row) {
 }
 
 async function loadCreateImagePreview(tab, queue, entry) {
-	if (!entry || entry.previewed || tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
-	entry.previewed = true;
-	let bitmap;
+	if (!entry || entry.previewed || tab.closed || tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
 	try {
-		let source = entry.file;
-		if (!(source instanceof Blob)) {
-			const response = await fetch(source.url);
-			if (!response.ok) throw new Error("读取文件失败");
-			source = await response.blob();
-		}
-		if (tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
-		bitmap = await createImageBitmap(source, { resizeWidth: 64 });
+		const preview = await callTabWASM(tab, "ofdgoImagePreview", entry.file);
 		if (tab.closed || tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
-		const size = await callTabWASM(tab, "ofdgoImagePageSize", entry.file);
-		if (tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
-		entry.width = size.width;
-		entry.height = size.height;
-		const canvas = document.createElement("canvas"), scale = Math.min(64 / bitmap.width, 64 / bitmap.height, 1);
-		canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-		canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-		canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-		const blob = await new Promise(resolve => canvas.toBlob(resolve));
-		if (tab.state.createImageQueue !== queue || !queue.entries.includes(entry)) return;
-		entry.url = URL.createObjectURL(blob);
+		entry.width = preview.width;
+		entry.height = preview.height;
+		entry.url = URL.createObjectURL(new Blob([preview.bytes], {type:"image/png"}));
+		entry.previewed = true;
 		if (isForegroundDocument(tab)) {
 			const current = el.createImageList.querySelector(`[data-image-id="${entry.id}"]`);
 			if (current) showCreateImagePreview(entry, current);
 		}
-	} catch {} finally { bitmap?.close(); }
+	} catch {}
 }
 
 function imagePageRequest() {
@@ -11519,15 +11503,20 @@ async function loadAnnotationSummary() {
 	const seq = state.openSeq;
 	if (state.annotationSummary?.seq === seq) { renderAnnotationSummary(true); return; }
 	cancelAnnotationSummary(tab);
-	const summary = {seq, items: [], loading: true};
+	const summary = {seq, items: [], search: [], loading: true};
 	state.annotationSummary = summary;
 	annotationList.set(null);
 	el.annotationsStatus.textContent = "正在读取注解";
 	try {
-		const items = await callTabWASM(tab, "ofdgoAnnotationInfos");
-		if (tab.closed || seq !== state.openSeq || state.annotationSummary !== summary) return;
-		summary.items = items || [];
-		summary.search = summary.items.map(item => ({item, kind: annotationKind(item), text: `${item.remark || ""}\n${item.creator || ""}\n${item.id}`.toLocaleLowerCase()}));
+		for (let page = 0; page < state.doc.pageCount; page += 32) {
+			const items = await callTabWASM(tab, "ofdgoAnnotationInfos", page, Math.min(32, state.doc.pageCount - page));
+			if (tab.closed || seq !== state.openSeq || state.annotationSummary !== summary) return;
+			for (const item of items || []) {
+				summary.items.push(item);
+				summary.search.push({item, kind: annotationKind(item), text: `${item.remark || ""}\n${item.creator || ""}\n${item.id}`.toLocaleLowerCase()});
+			}
+			if (isForegroundDocument(tab)) renderAnnotationSummary();
+		}
 		summary.loading = false;
 		if (isForegroundDocument(tab)) renderAnnotationSummary(true);
 	} catch (error) {
@@ -11544,9 +11533,9 @@ function annotationKind(annotation) {
 
 function renderAnnotationSummary(reset = false) {
 	const summary = state.annotationSummary;
-	if (!summary || summary.loading || summary.seq !== state.openSeq) return;
+	if (!summary || summary.seq !== state.openSeq) return;
 	const labels = {Path: "批注", Highlight: "高亮", Stamp: "印章", Watermark: "水印", Link: "链接"};
-	if (reset) {
+	if (reset && !summary.loading) {
 		el.annotationsKind.replaceChildren(new Option("全部", ""), ...[...new Set(summary.items.map(annotationKind))].map(type => new Option(labels[type] || type, type)));
 		if (![...el.annotationsKind.options].some(option => option.value === state.annotationFilter.kind)) state.annotationFilter.kind = "";
 		el.annotationsKind.value = state.annotationFilter.kind;
@@ -11554,12 +11543,12 @@ function renderAnnotationSummary(reset = false) {
 	const query = state.annotationFilter.query.trim().toLocaleLowerCase();
 	const kind = state.annotationFilter.kind;
 	const previous = summary.view;
-	if (previous?.query !== query || previous?.kind !== kind || previous?.editing !== state.editing) {
+	if (previous?.query !== query || previous?.kind !== kind || previous?.editing !== state.editing || previous?.count !== summary.items.length) {
 		const items = summary.search.filter(entry => (!kind || entry.kind === kind) && entry.text.includes(query)).map(entry => entry.item);
-		summary.view = {items, query, kind, editing: state.editing, top: state.annotationFilter.top || 0};
+		summary.view = {items, query, kind, count: summary.items.length, editing: state.editing, top: state.annotationFilter.top || 0};
 	}
 	const items = summary.view.items;
-	el.annotationsStatus.textContent = summary.items.length ? `${items.length} / ${summary.items.length}` : "";
+	el.annotationsStatus.textContent = summary.items.length ? `${items.length} / ${summary.items.length}` : summary.loading ? "正在读取注解" : "";
 	annotationList.set(summary.view);
 }
 
@@ -11631,7 +11620,7 @@ function renderOutlines(reset = true) {
 const SEARCH_MATCH_LIMIT = 10000;
 
 function resetSearch(clearInput = true) {
-	for (const [id, request] of wasmRequests) if (request.tab === documentTab() && request.name === "ofdgoSearchPage") cancelOperation(id);
+	for (const [id, request] of wasmRequests) if (request.tab === documentTab() && ["ofdgoSearchPage", "ofdgoSearchPages"].includes(request.name)) cancelOperation(id);
 	state.searchTruncated = false;
 	state.searchRunning = false;
 	state.searchNext = 0;
@@ -11716,19 +11705,20 @@ async function searchDocument() {
 	target.searchRunning = true;
 	target.searchPaused = false;
 	try {
-		for (let page = target.searchNext; page < pageCount; page += 1) {
-			const matches = await callWASM("ofdgoSearchPage", page, query, SEARCH_MATCH_LIMIT - target.searchMatches.length + 1);
+		for (let page = target.searchNext; page < pageCount; page += 4) {
+			const count = Math.min(4, pageCount - page);
+			const matches = await callWASM("ofdgoSearchPages", page, count, query, SEARCH_MATCH_LIMIT - target.searchMatches.length + 1);
 			if (target !== state || seq !== target.searchSeq || openSeq !== target.openSeq) {
 				return;
 			}
-			el.searchStatus.textContent = `正在搜索文字 · ${page + 1} / ${pageCount} 页`;
-			target.searchNext = page + 1;
+			el.searchStatus.textContent = `正在搜索文字 · ${page + count} / ${pageCount} 页`;
+			target.searchNext = page + count;
 			if (!matches?.length) {
 				continue;
 			}
 			for (const match of matches) {
 				if (target.searchMatches.length === SEARCH_MATCH_LIMIT) { target.searchTruncated = true; break; }
-				state.searchMatches.push({ ...match, page });
+				state.searchMatches.push(match);
 			}
 			renderSearchResults();
 			if (target.searchTruncated) break;

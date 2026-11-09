@@ -14,7 +14,10 @@ self.addEventListener("fetch", (event) => {
 	if (event.request.method !== "GET" || !url.startsWith(self.registration.scope) || (navigation && url !== self.registration.scope)) {
 		return;
 	}
-	event.respondWith(navigator.locks.request(CACHE_PREFIX, { mode: event.resultingClientId ? "exclusive" : "shared" }, () => readResource(event, navigation)));
+	event.respondWith((async () => {
+		if (navigation) await currentBundle(await caches.open(META_CACHE));
+		return navigator.locks.request(CACHE_PREFIX, { mode: event.resultingClientId ? "exclusive" : "shared" }, () => readResource(event, navigation));
+	})());
 });
 
 self.addEventListener("message", (event) => {
@@ -25,9 +28,9 @@ self.addEventListener("message", (event) => {
 	}
 	event.waitUntil((async () => {
 		try {
-			const result = await navigator.locks.request(CACHE_PREFIX, async () => {
+			const result = await navigator.locks.request(`${CACHE_PREFIX}update`, async () => {
 				const meta = await caches.open(META_CACHE);
-				await cleanBundles(meta);
+				await navigator.locks.request(CACHE_PREFIX, () => cleanBundles(meta));
 				if (type === "refresh") {
 					await updateBundle(meta);
 					return { reload: true };
@@ -38,7 +41,7 @@ self.addEventListener("message", (event) => {
 					const response = await cache.match(self.registration.scope);
 					return { reload: false, checksum: response.headers.get("X-OFDGo-Checksum") };
 				}
-				await currentBundle(meta);
+				if (!await isBundleComplete(await readBundle(meta, self.registration.scope))) await updateBundle(meta);
 				return { reload: true };
 			});
 			if (type === "refresh") {
@@ -80,14 +83,18 @@ async function isBundleComplete(bundle) {
 
 async function currentBundle(meta) {
 	const bundle = await readBundle(meta, self.registration.scope);
-	return await isBundleComplete(bundle) ? bundle : updateBundle(meta);
+	if (await isBundleComplete(bundle)) return bundle;
+	return navigator.locks.request(`${CACHE_PREFIX}update`, async () => {
+		const current = await readBundle(meta, self.registration.scope);
+		return await isBundleComplete(current) ? current : updateBundle(meta);
+	});
 }
 
 async function readResource(event, navigation) {
 	const meta = await caches.open(META_CACHE);
 	let bundle;
 	if (navigation) {
-		bundle = await currentBundle(meta);
+		bundle = await readBundle(meta, self.registration.scope);
 	} else {
 		bundle = await readBundle(meta, CLIENT_PREFIX + event.clientId);
 	}
@@ -125,7 +132,10 @@ async function updateBundle(meta) {
 		for (const { url, response } of resources) {
 			await cache.put(url, response);
 		}
-		await meta.put(self.registration.scope, Response.json(bundle));
+		await navigator.locks.request(CACHE_PREFIX, async () => {
+			await cleanBundles(meta, bundle.name);
+			await meta.put(self.registration.scope, Response.json(bundle));
+		});
 	} catch (err) {
 		await caches.delete(bundle.name);
 		throw err;
@@ -133,9 +143,9 @@ async function updateBundle(meta) {
 	return bundle;
 }
 
-async function cleanBundles(meta) {
+async function cleanBundles(meta, pending) {
 	const current = await readBundle(meta, self.registration.scope);
-	const keep = new Set([META_CACHE, current?.name]);
+	const keep = new Set([META_CACHE, current?.name, pending]);
 	for (const key of await meta.keys()) {
 		if (!key.url.startsWith(CLIENT_PREFIX)) {
 			continue;

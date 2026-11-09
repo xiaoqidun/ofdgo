@@ -198,15 +198,46 @@ func (p *AnnotationParameter) UnmarshalXML(d *xml.Decoder, start xml.StartElemen
 // AnnotationInfos 按页面顺序获取注释信息，包含不可见注释
 // 返回: []AnnotationInfo 注释信息, error 错误信息
 func (r *Reader) AnnotationInfos() ([]AnnotationInfo, error) {
-	doc, err := r.Doc()
-	if err != nil {
-		return nil, err
-	}
 	var infos []AnnotationInfo
-	for index, page := range doc.Pages.Page {
-		infos = append(infos, r.annotationInfos(index, page.ID)...)
+	err := r.WalkAnnotationInfos(context.Background(), func(info AnnotationInfo) error {
+		infos = append(infos, info)
+		return nil
+	})
+	return infos, err
+}
+
+// WalkAnnotationInfos 按指定页面顺序访问注释摘要，不解析页面图元，空索引表示全部页面
+// 入参: ctx 取消上下文, visit 摘要回调，返回错误即停止, indexes 零基页面索引
+// 返回: error 读取、回调或取消错误
+func (r *Reader) WalkAnnotationInfos(ctx context.Context, visit func(AnnotationInfo) error, indexes ...int) error {
+	doc, err := r.DocContext(ctx)
+	if err != nil {
+		return err
 	}
-	return infos, nil
+	if len(indexes) == 0 {
+		indexes = make([]int, len(doc.Pages.Page))
+		for index := range indexes {
+			indexes[index] = index
+		}
+	}
+	for _, index := range indexes {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if index < 0 || index >= len(doc.Pages.Page) {
+			return fmt.Errorf("page index out of range: %d", index)
+		}
+		pageID := doc.Pages.Page[index].ID
+		for _, annotation := range r.Annots[pageID] {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := visit(annotationInfo(index, pageID, annotation)); err != nil {
+				return err
+			}
+		}
+	}
+	return ctx.Err()
 }
 
 // AnnotationInfosByIndex 获取指定页面的注释信息，包含不可见注释，不解析页面图元
@@ -229,26 +260,33 @@ func (r *Reader) AnnotationInfosByIndex(index int) ([]AnnotationInfo, error) {
 func (r *Reader) annotationInfos(index int, pageID string) []AnnotationInfo {
 	var infos []AnnotationInfo
 	for _, annotation := range r.Annots[pageID] {
-		box, _ := ParseBox(annotation.Appearance.Boundary)
-		infos = append(infos, AnnotationInfo{
-			ID:          annotation.ID,
-			Page:        index + 1,
-			PageID:      pageID,
-			Type:        annotation.Type,
-			Subtype:     annotation.Subtype,
-			Creator:     annotation.Creator,
-			LastModDate: annotation.LastModDate,
-			Remark:      annotation.Remark,
-			Visible:     annotation.Visible == nil || *annotation.Visible,
-			NoZoom:      annotation.NoZoom,
-			NoRotate:    annotation.NoRotate,
-			X:           box.X,
-			Y:           box.Y,
-			Width:       box.W,
-			Height:      box.H,
-		})
+		infos = append(infos, annotationInfo(index, pageID, annotation))
 	}
 	return infos
+}
+
+// annotationInfo 提取单条注释摘要，不保留外观图元引用
+// 入参: index 页面索引, pageID 页面标识, annotation 注释
+// 返回: AnnotationInfo 注释摘要
+func annotationInfo(index int, pageID string, annotation Annotation) AnnotationInfo {
+	box, _ := ParseBox(annotation.Appearance.Boundary)
+	return AnnotationInfo{
+		ID:          annotation.ID,
+		Page:        index + 1,
+		PageID:      pageID,
+		Type:        annotation.Type,
+		Subtype:     annotation.Subtype,
+		Creator:     annotation.Creator,
+		LastModDate: annotation.LastModDate,
+		Remark:      annotation.Remark,
+		Visible:     annotation.Visible == nil || *annotation.Visible,
+		NoZoom:      annotation.NoZoom,
+		NoRotate:    annotation.NoRotate,
+		X:           box.X,
+		Y:           box.Y,
+		Width:       box.W,
+		Height:      box.H,
+	}
 }
 
 // parseAnnotations 解析注释文件

@@ -541,7 +541,7 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 			if resource == nil {
 				return nil, fmt.Errorf("composite resource %q not found", c.ResourceID)
 			}
-			fragment, err := editorXMLStandalone(data[resource.start:resource.end], resource)
+			fragment, err := editorXMLFragment(data, resource)
 			if err != nil {
 				return nil, err
 			}
@@ -573,7 +573,7 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 						return err
 					}
 				case "TextObject", "PathObject", "ImageObject", "CompositeObject", "CompositeGraphicUnit":
-					data, err := editorXMLStandalone(n.data[child.start:child.end], child)
+					data, err := editorXMLFragment(n.data, child)
 					if err != nil {
 						return err
 					}

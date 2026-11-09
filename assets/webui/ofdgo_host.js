@@ -476,9 +476,9 @@ class BrowserEngine {
 		}
 		if (!data.type && data.name !== "ofdgoRenderPage" && ![
 			"ofdgoLoadPDF", "ofdgoDocumentInfo", "ofdgoDocumentVersions", "ofdgoDocumentNavigation", "ofdgoOpenLinks", "ofdgoOutlineLinks", "ofdgoRenderBackends", "ofdgoSVGFontData",
-			"ofdgoSearchPage", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences", "ofdgoResourceTargets",
+			"ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences", "ofdgoResourceTargets",
 			"ofdgoResourceLocations", "ofdgoFontPreview", "ofdgoFontFaces", "ofdgoFontFace", "ofdgoMatchFontFiles",
-			"ofdgoImages", "ofdgoImagePageSize", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoPackageDocuments", "ofdgoVerifySignatures",
+			"ofdgoImages", "ofdgoImagePageSize", "ofdgoImagePreview", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoPackageDocuments", "ofdgoVerifySignatures",
 			"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoExportInvoice", "ofdgoValidateInvoice",
 			"ofdgoActionList", "ofdgoPageSettings", "ofdgoReadAnnotation", "ofdgoPreviewSignatureSeal",
 			"ofdgoExportFormats", "ofdgoOutputFormats", "ofdgoParsePageRange", "ofdgoExportPage", "ofdgoExportDocument",
@@ -629,17 +629,36 @@ class NativeHost {
 	}
 
 	async readResource(file, signal) {
-		if (this.reading >= this.parallelism) await new Promise(resolve => this.readQueue.push(resolve));
-		else this.reading++;
+		let acquired = false;
 		try {
+			signal?.throwIfAborted();
+			if (this.reading >= this.parallelism) await new Promise((resolve, reject) => {
+				const next = () => {
+					signal?.removeEventListener("abort", cancel);
+					acquired = true;
+					resolve();
+				};
+				const cancel = () => {
+					this.readQueue.splice(this.readQueue.indexOf(next), 1);
+					reject(signal.reason);
+				};
+				this.readQueue.push(next);
+				signal?.addEventListener("abort", cancel, {once:true});
+			});
+			else {
+				this.reading++;
+				acquired = true;
+			}
 			signal?.throwIfAborted();
 			return await file.arrayBuffer(signal);
 		} finally {
 			try { await this.call("release", {file:file.nativeFile}); }
 			finally {
-				const next = this.readQueue.shift();
-				if (next) next();
-				else this.reading--;
+				if (acquired) {
+					const next = this.readQueue.shift();
+					if (next) next();
+					else this.reading--;
+				}
 			}
 		}
 	}

@@ -921,6 +921,22 @@ func editorXMLStandaloneContext(ctx context.Context, data []byte, source *editor
 	if err != nil {
 		return nil, err
 	}
+	return editorXMLStandaloneRoot(ctx, data, source, root)
+}
+
+// editorXMLFragment 从已解析原文提取独立片段，复用根属性和开标签位置
+// 入参: data 完整原文, source 原文节点
+// 返回: []byte 独立片段, error 命名空间补齐错误
+func editorXMLFragment(data []byte, source *editorXML) ([]byte, error) {
+	root := *source
+	root.open -= source.start
+	return editorXMLStandaloneRoot(nil, data[source.start:source.end], source, &root)
+}
+
+// editorXMLStandaloneRoot 为已解析片段补齐祖先命名空间，不重复解析子节点
+// 入参: ctx 取消上下文，可为nil, data 片段原文, source 原节点, root 片段根节点
+// 返回: []byte 独立片段, error 取消错误
+func editorXMLStandaloneRoot(ctx context.Context, data []byte, source, root *editorXML) ([]byte, error) {
 	namespaces := make(map[string]string)
 	for node := source.parent; node != nil; node = node.parent {
 		if ctx != nil {

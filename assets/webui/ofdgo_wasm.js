@@ -271,7 +271,7 @@ async function handleMessage(engine, { id, name, args }) {
 		if (name === "ofdgoChangeResource" && (args[0] === "add" || args[0] === "replace")) {
 			args[4] = new Uint8Array(new FileReaderSync().readAsArrayBuffer(args[4]));
 		}
-		if (name === "ofdgoImagePageSize" && args[0] instanceof Blob) args[0] = new Uint8Array(new FileReaderSync().readAsArrayBuffer(args[0]));
+		if (["ofdgoImagePageSize", "ofdgoImagePreview"].includes(name) && args[0] instanceof Blob) args[0] = new Uint8Array(new FileReaderSync().readAsArrayBuffer(args[0]));
 		if (name === "ofdgoImportImages") {
 			const files = args[0], reader = new FileReaderSync();
 			args[0] = files.map(file => file.name);

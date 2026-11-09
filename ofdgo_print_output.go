@@ -98,14 +98,24 @@ func (p *PrintDocument) renderPrintSVG(ctx context.Context, index int, writer io
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			page, err := p.renderer.Reader.PageContentByIndex(placement.Page)
+			data, err := p.pages.load(ctx, placement.Page, func() ([]byte, int, error) {
+				page, err := p.renderer.Reader.PageContentByIndexContext(ctx, placement.Page)
+				if err != nil {
+					return nil, 0, err
+				}
+				var output bytes.Buffer
+				if err := p.renderer.RenderToSVG(page, &output); err != nil {
+					return nil, 0, err
+				}
+				return output.Bytes(), output.Cap(), nil
+			})
 			if err != nil {
 				return err
 			}
 			c, m := placement.Clip, placement.Transform
 			fmt.Fprintf(out, `<defs><clipPath id="print%d"><rect x="%g" y="%g" width="%g" height="%g"/></clipPath></defs><g clip-path="url(#print%d)"><image width="%g" height="%g" transform="matrix(%g %g %g %g %g %g)" xlink:href="data:image/svg+xml;base64,`, i, c.X, c.Y, c.W, c.H, i, placement.Width, placement.Height, m[0], m[1], m[2], m[3], m[4], m[5])
 			encoder := base64.NewEncoder(base64.StdEncoding, out)
-			if err := p.renderer.RenderToSVG(page, encoder); err != nil {
+			if _, err := encoder.Write(data); err != nil {
 				return err
 			}
 			if err := encoder.Close(); err != nil {
@@ -158,7 +168,7 @@ func (p *PrintDocument) renderPrintImage(ctx context.Context, index int, dpi flo
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		page, err := p.renderer.Reader.PageContentByIndex(placement.Page)
+		page, err := p.renderer.Reader.PageContentByIndexContext(ctx, placement.Page)
 		if err != nil {
 			return nil, err
 		}

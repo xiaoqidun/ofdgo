@@ -146,8 +146,12 @@ export class FontPicker {
 
 	activate(index) {
 		this.active = index;
-		[...this.list.children].forEach((option, i) => option.setAttribute("data-selected", String(i === index)));
 		const option = this.list.children[index];
+		if (this.selectedOption !== option) {
+			this.selectedOption?.setAttribute("data-selected", "false");
+			option?.setAttribute("data-selected", "true");
+			this.selectedOption = option;
+		}
 		if (option) {
 			option.scrollIntoView({ block: "nearest" });
 		}
