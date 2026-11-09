@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"image"
 	"math"
 
@@ -45,6 +46,16 @@ type canvasFillCacheKey struct{}
 
 // canvasDrawClipCacheKey 区分绘制轮廓的共享裁剪缓存
 type canvasDrawClipCacheKey struct{}
+
+// canvasStrokeCacheKey 区分原生描边与裁剪结果的共享缓存
+type canvasStrokeCacheKey struct{}
+
+// canvasStrokeKey 按完整路径、裁剪区域和描边选项区分绘制轮廓
+type canvasStrokeKey struct {
+	digest  [32]byte
+	options string
+	fill    bool
+}
 
 // canvasOutlineCacheKey 区分子渲染器共享的字体轮廓解析缓存
 type canvasOutlineCacheKey struct{}
@@ -153,6 +164,69 @@ func (r *Renderer) canvasDrawClips() *renderCache[[32]byte, *canvas.Path] {
 	cache := resourceCache[[32]byte, *canvas.Path](r.Reader.resources, 16<<20)
 	r.sharedBackendStates[key] = cache
 	return cache
+}
+
+// canvasStrokeClips 获取原生描边与裁剪结果缓存，按资源策略限制保留量
+// 返回: *renderCache[canvasStrokeKey, *canvas.Path] 描边缓存
+func (r *Renderer) canvasStrokeClips() *renderCache[canvasStrokeKey, *canvas.Path] {
+	key := canvasStrokeCacheKey{}
+	if state, ok := r.sharedBackendStates[key]; ok {
+		return state.(*renderCache[canvasStrokeKey, *canvas.Path])
+	}
+	cache := resourceCache[canvasStrokeKey, *canvas.Path](r.Reader.resources, 16<<20)
+	r.sharedBackendStates[key] = cache
+	return cache
+}
+
+// strokeClippedCanvasPath 复用原生描边与裁剪结果，自定义几何后端沿用逐次调用
+// 入参: path 绘制路径, clip 裁剪路径, options 描边样式, fill 是否允许重叠填充轮廓
+// 返回: *canvas.Path 可独立变换的描边轮廓
+func (r *Renderer) strokeClippedCanvasPath(path, clip *canvas.Path, options StrokeOptions, fill bool) *canvas.Path {
+	geometry, err := r.Geometry()
+	if err != nil {
+		r.renderError = err
+		return &canvas.Path{}
+	}
+	render := func() (*canvas.Path, int, error) {
+		stroke := canvasStrokePath
+		if fill {
+			stroke = canvasStrokeFillPath
+		}
+		result, err := stroke(geometry, path, options)
+		if err != nil {
+			return nil, 0, err
+		}
+		if fill {
+			result = applyFillClipPath(result, clip)
+		} else {
+			result = applyClipPath(result, clip)
+		}
+		return result, len(result.Data())*8 + 256, nil
+	}
+	var result *canvas.Path
+	if canvasNativeStroke(geometry) {
+		encoded, encodeErr := json.Marshal(options)
+		if encodeErr != nil {
+			r.renderError = encodeErr
+			return &canvas.Path{}
+		}
+		paths := []*canvas.Path{path}
+		if clip != nil {
+			paths = append(paths, clip)
+		}
+		key := canvasStrokeKey{digest: canvasGeometryDigest(paths...), options: string(encoded), fill: fill}
+		result, err = r.canvasStrokeClips().load(r.pageContext, key, render)
+		if err == nil {
+			return result.Copy()
+		}
+	} else {
+		result, _, err = render()
+	}
+	if err != nil {
+		r.renderError = err
+		return &canvas.Path{}
+	}
+	return result
 }
 
 // applyCachedClipPath 复用绘制轮廓的裁剪结果，返回可独立变换的副本

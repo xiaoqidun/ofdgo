@@ -3,7 +3,7 @@ module github.com/xiaoqidun/ofdgo
 go 1.26.0
 
 require (
-	github.com/andybalholm/brotli v1.2.7
+	github.com/andybalholm/brotli v1.2.8
 	github.com/emmansun/gmsm v0.45.2
 	github.com/go-text/typesetting v0.3.5
 	github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c

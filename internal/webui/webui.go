@@ -57,24 +57,28 @@ type FontInfo = ofdgo.FontInfo
 
 // Session WebUI文档会话
 type Session struct {
-	Reader          *ofdgo.Reader
-	Renderer        *ofdgo.Renderer
-	input           *ofdgo.Input
-	fontFS          *ofdgo.FontFS
-	doc             *ofdgo.Document
-	pageCache       map[int]*ofdgo.PageContent
-	boxCache        []pageBoxInfo
-	textCache       *ofdgo.PageTextCache
-	svgFonts        map[string][]byte
-	fontScan        *ofdgo.FontInfoScanner
-	fontInfos       []FontInfo
-	fontsRead       bool
-	fontAnnotations bool
-	signatures      []SignatureInfo
-	signatureError  error
-	signaturesRead  bool
-	editing         bool
-	editor          *ofdgo.Editor
+	Reader           *ofdgo.Reader
+	Renderer         *ofdgo.Renderer
+	input            *ofdgo.Input
+	fontFS           *ofdgo.FontFS
+	doc              *ofdgo.Document
+	pageCache        map[int]*ofdgo.PageContent
+	boxCache         []pageBoxInfo
+	textCache        *ofdgo.PageTextCache
+	svgFonts         map[string][]byte
+	fontScan         *ofdgo.FontInfoScanner
+	fontInfos        []FontInfo
+	fontsRead        bool
+	fontAnnotations  bool
+	signatures       []SignatureInfo
+	signatureError   error
+	signaturesRead   bool
+	editing          bool
+	editor           *ofdgo.Editor
+	summaryChanges   *ofdgo.EditorChanges
+	detailsUnchanged bool
+	revision         uint64
+	baseRevision     uint64
 }
 
 // pageBoxInfo 按页索引缓存真实区域，valid区分未读取与零值区域
@@ -371,6 +375,9 @@ type editorInfo struct {
 	PageCapabilities []uint              `json:"pageCapabilities"`
 	EditWarnings     []string            `json:"editWarnings,omitempty"`
 	Changes          ofdgo.EditorChanges `json:"changes"`
+	Incremental      bool                `json:"incremental,omitempty"`
+	DetailsUnchanged bool                `json:"detailsUnchanged,omitempty"`
+	BaseRevision     uint64              `json:"baseRevision,omitempty"`
 }
 
 // editorPageInfo 页面操作结果与目标页面
@@ -691,13 +698,20 @@ func (s *Session) SearchPageContext(ctx context.Context, index int, query string
 // Summary 获取首屏所需信息，不解析页面图元或执行验签
 // 返回: DocumentInfo 文档信息
 func (s *Session) Summary() DocumentInfo {
+	return s.summary(nil)
+}
+
+// summary 获取完整摘要或指定页面的增量摘要
+// 入参: indexes 增量页码，nil表示全部页面
+// 返回: DocumentInfo 文档摘要
+func (s *Session) summary(indexes []int) DocumentInfo {
 	info := DocumentInfo{
 		DocumentIndex:  s.Reader.DocumentIndex(),
 		Encryption:     s.encryptionInfo(),
 		Version:        s.Reader.Version(),
 		DocType:        s.Reader.DocType(),
 		PageCount:      len(s.doc.Pages.Page),
-		Pages:          s.pageInfos(),
+		Pages:          s.pageInfosAt(indexes),
 		Outlines:       s.doc.OutlineInfos(),
 		DetailsPending: true,
 	}
@@ -1013,7 +1027,9 @@ func (s *Session) scanFontInfo() bool {
 	s.fontInfos, _ = s.fontScan.Infos()
 	s.localizeFontInfos(s.fontInfos)
 	s.fontsRead = true
-	s.fontScan = nil
+	if !s.editing {
+		s.fontScan = nil
+	}
 	return true
 }
 
@@ -1061,8 +1077,24 @@ func (s *Session) readPageText(ctx context.Context, index int) (*ofdgo.PageText,
 // pageInfos 获取全部真实页面尺寸，首屏、配置及详情共用区域缓存
 // 返回: []PageInfo 独立页面信息列表
 func (s *Session) pageInfos() []PageInfo {
-	pages := make([]PageInfo, len(s.doc.Pages.Page))
-	for index, page := range s.doc.Pages.Page {
+	return s.pageInfosAt(nil)
+}
+
+// pageInfosAt 获取指定页面的真实尺寸，nil表示完整列表
+// 入参: indexes 页面索引
+// 返回: []PageInfo 独立页面信息列表
+func (s *Session) pageInfosAt(indexes []int) []PageInfo {
+	count := len(s.doc.Pages.Page)
+	if indexes != nil {
+		count = len(indexes)
+	}
+	pages := make([]PageInfo, count)
+	for position := range pages {
+		index := position
+		if indexes != nil {
+			index = indexes[position]
+		}
+		page := s.doc.Pages.Page[index]
 		cached := s.boxCache[index]
 		box := cached.box
 		if !cached.valid {
@@ -1070,7 +1102,7 @@ func (s *Session) pageInfos() []PageInfo {
 				box, _ = s.pageBox(index, &ofdgo.PageContent{Area: area})
 			}
 		}
-		pages[index] = PageInfo{Index: index, ID: page.ID, Width: box.W, Height: box.H}
+		pages[position] = PageInfo{Index: index, ID: page.ID, Width: box.W, Height: box.H}
 	}
 	return pages
 }
@@ -3283,16 +3315,34 @@ func (e *businessEngine) encodeResult(result apiResult) string {
 // editorSummary 获取当前编辑文档状态
 // 返回: editorInfo 文档信息
 func (e *businessEngine) editorSummary() editorInfo {
-	info := editorInfo{DocumentInfo: e.currentSession.Summary(), Revision: e.currentEditor.Revision(), CanUndo: e.currentEditor.CanUndo(), CanRedo: e.currentEditor.CanRedo(), Changes: e.currentEditor.Changes()}
+	e.currentSession.revision = e.currentEditor.Revision()
+	return e.editorSummaryPages(nil)
+}
+
+// editorState 获取编辑器完整状态，供增量摘要基准失配后重新同步
+// 入参: args 浏览器参数
+// 返回: any 完整文档与编辑状态, error 未进入编辑状态
+func (e *businessEngine) editorState(args []platformValue) (any, error) {
+	if e.currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	return e.editorSummary(), nil
+}
+
+// editorSummaryPages 获取完整编辑状态或指定页面的增量状态
+// 入参: indexes 增量页码，nil表示完整状态
+// 返回: editorInfo 文档与编辑状态
+func (e *businessEngine) editorSummaryPages(indexes []int) editorInfo {
+	info := editorInfo{DocumentInfo: e.currentSession.summary(indexes), Revision: e.currentEditor.Revision(), CanUndo: e.currentEditor.CanUndo(), CanRedo: e.currentEditor.CanRedo(), Changes: e.currentEditor.Changes(), Incremental: indexes != nil, DetailsUnchanged: indexes != nil && e.currentSession.detailsUnchanged, BaseRevision: e.currentSession.baseRevision}
 	if !e.currentSession.doc.Permissions.Edit {
 		info.EditWarnings = append(info.EditWarnings, "原文件声明不允许编辑")
 	}
 	if slices.ContainsFunc(e.currentSession.Reader.OFD.DocBody, func(body ofdgo.DocBody) bool { return body.Signatures != "" }) {
 		info.EditWarnings = append(info.EditWarnings, "修改文档可能使原签名失效")
 	}
-	info.PageCapabilities = make([]uint, e.currentEditor.PageCount())
+	info.PageCapabilities = make([]uint, len(info.Pages))
 	for i := range info.PageCapabilities {
-		capability, _ := e.currentEditor.PageCapabilities(i)
+		capability, _ := e.currentEditor.PageCapabilities(info.Pages[i].Index)
 		info.PageCapabilities[i] = e.pageCapabilityMask(capability)
 	}
 	return info
@@ -7088,7 +7138,8 @@ func (e *businessEngine) previewEditor(editor *ofdgo.Editor, annotations bool) (
 		oldBody, newBody := previous.OFD.DocBody[previous.DocumentIndex()], reader.OFD.DocBody[reader.DocumentIndex()]
 		oldVersion, _ := previous.DocumentVersionID()
 		newVersion, _ := reader.DocumentVersionID()
-		if oldBody.DocRoot != newBody.DocRoot || oldBody.DocInfo.DocID != newBody.DocInfo.DocID || oldVersion != newVersion {
+		sameDocument := oldBody.DocRoot == newBody.DocRoot && oldBody.DocInfo.DocID == newBody.DocInfo.DocID && oldVersion == newVersion
+		if !sameDocument {
 			e.copiedObjects, e.copiedStyle = nil, nil
 			e.clearImport()
 		}
@@ -7099,7 +7150,17 @@ func (e *businessEngine) previewEditor(editor *ofdgo.Editor, annotations bool) (
 			editor.SetFontFS(session.fontFS)
 		}
 		changes := editor.Changes()
-		if editor == e.currentEditor && !changes.All && len(session.boxCache) == len(e.currentSession.boxCache) {
+		if editor == e.currentEditor && sameDocument && !changes.All && len(session.boxCache) == len(e.currentSession.boxCache) {
+			session.summaryChanges = &changes
+			session.baseRevision = e.currentSession.revision
+			oldFonts, oldError := previous.Fonts()
+			newFonts, newError := reader.Fonts()
+			sameFonts := oldError == nil && newError == nil && reflect.DeepEqual(oldFonts, newFonts)
+			session.detailsUnchanged = sameFonts && session.doc.CustomTags.Path == "" && len(session.doc.CustomTags.CustomTag) == 0 && !slices.ContainsFunc(reader.OFD.DocBody, func(body ofdgo.DocBody) bool { return body.Signatures != "" })
+			if sameFonts && e.currentSession.fontScan != nil {
+				session.fontScan, _ = e.currentSession.fontScan.Refresh(session.Renderer, changes.Pages)
+				session.fontAnnotations = session.Renderer.RenderAnnotations
+			}
 			changed := changes.Pages
 			for index, page := range e.currentSession.pageCache {
 				if !slices.Contains(changed, index) {
@@ -7127,11 +7188,15 @@ func (e *businessEngine) previewEditor(editor *ofdgo.Editor, annotations bool) (
 	e.currentSession = session
 	session.editor = editor
 	session.editing = true
+	session.revision = editor.Revision()
 	if e.currentEditor != editor {
 		e.copiedObjects = nil
 		e.copiedStyle = nil
 	}
 	e.currentEditor = editor
+	if session.summaryChanges != nil {
+		return e.editorSummaryPages(append([]int{}, session.summaryChanges.Pages...)), nil
+	}
 	return e.editorSummary(), nil
 }
 
@@ -8110,6 +8175,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoOutputFormats":          func([]platformValue) (any, error) { return ofdgo.OutputFormats(), nil },
 		"ofdgoConfigure":              e.configureDocument,
 		"ofdgoDocumentInfo":           e.documentInfo,
+		"ofdgoEditorInfo":             e.editorState,
 		"ofdgoVerifySignatures":       e.verifySignatures,
 		"ofdgoRenderPage":             e.renderPage,
 		"ofdgoOutlineLinks":           e.outlineLinks,

@@ -76,6 +76,7 @@ type Editor struct {
 	output             *outputOptimization
 	saveTarget         Output
 	snapshotArchive    *editorSnapshotArchive
+	previewPages       map[string][]byte
 	validatedPaths     *renderCache[string, bool]
 	changes            EditorChanges
 	transactionChanges *EditorChanges

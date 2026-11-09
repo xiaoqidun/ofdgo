@@ -19,7 +19,9 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"maps"
 	"path"
+	"reflect"
 	"slices"
 	"sort"
 
@@ -58,6 +60,8 @@ type FontInfoScanner struct {
 	doc      *Document
 	index    int
 	usage    map[string]int
+	pages    []map[string]int
+	pending  []int
 }
 
 // fontUsagePage 逐图元统计字体的页面解码器
@@ -202,7 +206,31 @@ func (r *Renderer) ScanFontInfos() (*FontInfoScanner, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &FontInfoScanner{renderer: r, doc: doc, usage: make(map[string]int)}, nil
+	return &FontInfoScanner{renderer: r, doc: doc, usage: make(map[string]int), pages: make([]map[string]int, len(doc.Pages.Page))}, nil
+}
+
+// Refresh 为同一文档的局部编辑建立增量扫描，接续未完成扫描并重算已扫描的变化页
+// 调用方须保证页序、模板和共享资源语义不变，并提供全部变化页码
+// 入参: renderer 新快照的渲染器, pages 变化页码
+// 返回: *FontInfoScanner 独立增量扫描器, error 页面不匹配
+func (s *FontInfoScanner) Refresh(renderer *Renderer, pages []int) (*FontInfoScanner, error) {
+	doc, err := renderer.fontInfoDocument()
+	if err != nil {
+		return nil, err
+	}
+	if !reflect.DeepEqual(s.doc.Pages, doc.Pages) || !reflect.DeepEqual(s.doc.CommonData.TemplatePage, doc.CommonData.TemplatePage) || s.renderer.RenderAnnotations != renderer.RenderAnnotations {
+		return nil, fmt.Errorf("font info pages changed")
+	}
+	pending := slices.Clone(s.pending)
+	for _, index := range pages {
+		if index < 0 || index >= len(s.pages) {
+			return nil, fmt.Errorf("font info page out of range: %d", index)
+		}
+		if index < s.index && !slices.Contains(pending, index) {
+			pending = append(pending, index)
+		}
+	}
+	return &FontInfoScanner{renderer: renderer, doc: doc, index: s.index, usage: maps.Clone(s.usage), pages: slices.Clone(s.pages), pending: pending}, nil
 }
 
 // DeclaredFontInfos 获取已声明字体的匹配结果，不扫描页面用量
@@ -217,9 +245,28 @@ func (r *Renderer) DeclaredFontInfos() ([]FontInfo, error) {
 // Next 统计下一页或模板的字体用量
 // 返回: bool 是否处理了页面，false表示扫描结束
 func (s *FontInfoScanner) Next() bool {
+	if len(s.pending) != 0 {
+		index := s.pending[0]
+		s.pending = s.pending[1:]
+		for id, count := range s.pages[index] {
+			s.usage[id] -= count
+			if s.usage[id] == 0 {
+				delete(s.usage, id)
+			}
+		}
+		s.pages[index] = nil
+		if counts, err := s.renderer.readPageFontUsage(s.doc.Pages.Page[index]); err == nil {
+			s.pages[index] = counts
+			for id, count := range counts {
+				s.usage[id] += count
+			}
+		}
+		return true
+	}
 	pages := len(s.doc.Pages.Page)
 	if s.index < pages {
 		if counts, err := s.renderer.readPageFontUsage(s.doc.Pages.Page[s.index]); err == nil {
+			s.pages[s.index] = counts
 			for id, count := range counts {
 				s.usage[id] += count
 			}
@@ -238,7 +285,7 @@ func (s *FontInfoScanner) Next() bool {
 // Infos 获取扫描结束后的字体诊断，不返回未完成的用量统计
 // 返回: []FontInfo 字体诊断列表, error 错误信息
 func (s *FontInfoScanner) Infos() ([]FontInfo, error) {
-	if s.index < len(s.doc.Pages.Page)+len(s.doc.CommonData.TemplatePage) {
+	if s.index < len(s.doc.Pages.Page)+len(s.doc.CommonData.TemplatePage) || len(s.pending) != 0 {
 		return nil, fmt.Errorf("font info scan is not complete")
 	}
 	return s.renderer.fontInfos(s.usage)

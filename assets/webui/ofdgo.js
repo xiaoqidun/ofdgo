@@ -5705,7 +5705,12 @@ async function refreshFontBinding(doc, openSeq) {
 }
 
 async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
+	if (doc.resynchronized) {
+		await openDocument({doc, openSeq, skipAutoFonts:true, pageIndex:state.pageIndex, fitMode:state.fitMode, scale:state.scale, keepPreview:true, clearSelection});
+		return;
+	}
 	state.doc = doc;
+	const retained = doc.detailsUnchanged && !doc.detailsPending && !doc.detailsError;
 	const search = refreshSearchPages([index], openSeq);
 	state.documentSelection = null;
 	pageView.resetPageLoading();
@@ -5713,7 +5718,7 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 	try {
 		const [page, prepared] = await Promise.all([
 			pageView.loadPageData(index, { openSeq, priority: 0, refresh: true }),
-			callWASM("ofdgoDocumentInfo").catch(err => ({ detailsError: err.message })),
+			retained ? doc : callWASM("ofdgoDocumentInfo").catch(err => ({ detailsError: err.message })),
 		]);
 		if (openSeq !== state.openSeq) {
 			return;
@@ -13368,6 +13373,7 @@ async function prepareOperation(id, request) {
 
 async function callTabWASM(tab, name, ...args) {
 	const state = tab.state;
+	const doc = state.doc, editor = state.editorInfo;
 	const visible = isForegroundDocument(tab);
 	if (tab.closed) throw new Error("文档已关闭");
 	if (state.wasmExited) {
@@ -13388,7 +13394,7 @@ async function callTabWASM(tab, name, ...args) {
 		}
 		if (name === "ofdgoResources" && workspace.active === tab && resourceElements.Panel.open) resourceManager.requestID = id;
 		const request = {name, openSeq:state.openSeq, tab, id, cancellable:name === "ofdgoEditDocument",
-			resolve:value => { finishOperation(request); resolve(value); }, reject:err => { finishOperation(request); reject(err); }};
+			resolve:value => { finishOperation(request); resolve(mergeEditorSummary(tab, value, doc, editor)); }, reject:err => { finishOperation(request); reject(err); }};
 		wasmRequests.set(id, request);
 		if (request.cancellable && visible) { el.cancelExportButton.hidden = false; el.cancelExportButton.disabled = false; }
 		if (name === "ofdgoExportMedia") wasmRequests.get(id).mediaID = args[0];
@@ -13422,6 +13428,21 @@ async function callTabWASM(tab, name, ...args) {
 			request.reject(err);
 		}
 	});
+}
+
+async function mergeEditorSummary(tab, value, document, editor) {
+	if (!value?.incremental) return value;
+	if ((value.baseRevision || 0) !== editor?.revision) return {...value, ...await callTabWASM(tab, "ofdgoEditorInfo"), incremental:false, detailsUnchanged:false, resynchronized:true, changes:{all:true}};
+	const pages = document.pages.slice(), capabilities = editor.pageCapabilities.slice();
+	for (const [position, page] of value.pages.entries()) {
+		pages[page.index] = page;
+		capabilities[page.index] = value.pageCapabilities[position];
+	}
+	const result = {...value, pages, pageCapabilities:capabilities};
+	if (value.detailsUnchanged && !document.detailsPending && !document.detailsError) {
+		for (const key of ["structures", "structureError", "fontCount", "signatureCount", "signatureError", "attachmentError", "attachments", "fonts", "signatures", "detailsPending", "detailsError"]) result[key] = document[key];
+	}
+	return result;
 }
 
 function showError(err, empty = !state.doc) {

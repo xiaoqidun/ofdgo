@@ -149,6 +149,7 @@ func (e *Editor) Undo() bool {
 	change := e.history[e.historyIndex]
 	change.undo(e)
 	e.changes, e.objectIndex = change.changes, nil
+	e.invalidatePreviewPages(change.changes)
 	e.revision = change.before
 	return true
 }
@@ -162,6 +163,7 @@ func (e *Editor) Redo() bool {
 	change := e.history[e.historyIndex]
 	change.redo(e)
 	e.changes, e.objectIndex = change.changes, nil
+	e.invalidatePreviewPages(change.changes)
 	e.historyIndex++
 	e.revision = change.after
 	return true
@@ -283,6 +285,7 @@ func (e *Editor) recordChange(pages ...int) *editorChange {
 // 入参: scope 变更范围
 // 返回: *editorChange 可补充回放操作的记录
 func (e *Editor) recordChangeScope(scope EditorChanges) *editorChange {
+	e.invalidatePreviewPages(scope)
 	e.objectIndex = nil
 	e.changes = scope
 	if e.transactionChanges != nil {

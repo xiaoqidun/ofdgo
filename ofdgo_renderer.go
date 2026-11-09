@@ -97,6 +97,7 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	next.sharedBackendStates[canvasClipCacheKey{}] = r.canvasClipIntersections()
 	next.sharedBackendStates[canvasFillCacheKey{}] = r.canvasSettledPaths()
 	next.sharedBackendStates[canvasDrawClipCacheKey{}] = r.canvasDrawClips()
+	next.sharedBackendStates[canvasStrokeCacheKey{}] = r.canvasStrokeClips()
 	next.sharedBackendStates[svgResourceCacheKey{}] = r.svgImageResources()
 	return next, nil
 }

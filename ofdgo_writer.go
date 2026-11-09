@@ -559,10 +559,14 @@ func (e *Editor) readerContext(ctx context.Context, progress editorProgress) (*R
 		return e.sourceReader(ctx, progress)
 	}
 	r := &Reader{files: make(map[string][]byte), encryption: e.encryption, resources: e.runtimeResources}
-	if err := e.writeParts(ctx, func(name string, data []byte, _ bool) error {
+	pages := maps.Clone(e.previewPages)
+	if pages == nil && len(e.origins) == 0 {
+		pages = make(map[string][]byte)
+	}
+	if err := e.writePartsWithPages(ctx, func(name string, data []byte, _ bool) error {
 		r.files[name] = data
 		return nil
-	}, progress); err != nil {
+	}, progress, true, pages); err != nil {
 		return nil, err
 	}
 	if err := r.initRootContext(ctx); err != nil {
@@ -574,7 +578,24 @@ func (e *Editor) readerContext(ctx context.Context, progress editorProgress) (*R
 	for i, page := range r.doc.Pages.Page {
 		r.pageHeaderCache[r.ResPath(page.BaseLoc)] = PageContent{Area: e.pages[i].Area, Template: slices.Clone(e.pages[i].Template), PageRes: slices.Clone(e.pages[i].PageRes)}
 	}
+	e.previewPages = pages
 	return r, nil
+}
+
+// invalidatePreviewPages 失效受影响页面的预览编码，保留事务和历史快照的独立缓存
+// 入参: changes 页面或文档变化范围
+func (e *Editor) invalidatePreviewPages(changes EditorChanges) {
+	if changes.All {
+		e.previewPages = nil
+		return
+	}
+	if len(e.previewPages) == 0 {
+		return
+	}
+	e.previewPages = maps.Clone(e.previewPages)
+	for _, index := range changes.Pages {
+		delete(e.previewPages, e.pages[index].ID)
+	}
 }
 
 // resourceReader 为临时图元编译准备资源索引，不序列化页面或作为公共快照
@@ -594,7 +615,7 @@ func (e *Editor) resourceReader() (*Reader, error) {
 	if err := e.writePartsWithPages(ctx, func(name string, data []byte, _ bool) error {
 		r.files[name] = data
 		return nil
-	}, nil, false); err != nil {
+	}, nil, false, nil); err != nil {
 		return nil, err
 	}
 	if err := r.initRoot(); err != nil {
@@ -634,13 +655,13 @@ func (e *Editor) validate() error {
 // 入参: ctx 取消上下文, write 条目写入方法, progress 保存进度回调，预览时为nil
 // 返回: error 错误信息
 func (e *Editor) writeParts(ctx context.Context, write func(string, []byte, bool) error, progress editorProgress) error {
-	return e.writePartsWithPages(ctx, write, progress, true)
+	return e.writePartsWithPages(ctx, write, progress, true, nil)
 }
 
 // writePartsWithPages 统一生成包条目，临时编译可省去页面XML
-// 入参: ctx 取消上下文, write 条目写入方法, progress 保存进度回调, includePages 是否写出页面
+// 入参: ctx 取消上下文, write 条目写入方法, progress 保存进度回调, includePages 是否写出页面, previews 预览页面编码缓存
 // 返回: error 写入错误
-func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []byte, bool) error, progress editorProgress, includePages bool) error {
+func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []byte, bool) error, progress editorProgress, includePages bool, previews map[string][]byte) error {
 	progress = progress.withContext(ctx)
 	if len(e.removedPages) != 0 {
 		output := write
@@ -752,7 +773,17 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 			}
 			name := packagePagePath(e.packageDirectory(), page.ID)
 			if len(e.origins) == 0 {
-				if err := writeXML(name, func(x *ofdXML) { x.page(page) }); err != nil {
+				data := previews[page.ID]
+				if data == nil {
+					data, err = encodeOFDXMLContext(ctx, func(x *ofdXML) { x.page(page) })
+					if err != nil {
+						return err
+					}
+					if previews != nil {
+						previews[page.ID] = data
+					}
+				}
+				if err := write(name, data, false); err != nil {
 					return err
 				}
 			} else {

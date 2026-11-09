@@ -334,13 +334,19 @@ func intersectCanvasContours(path, clip *canvas.Path) (*canvas.Path, bool) {
 		}
 		polygons = append(polygons, a[:len(a)-1])
 	}
-	result := &canvas.Path{}
+	result := canvas.NewPathFromData(make([]float64, 0, len(path.Data())))
 	for _, polygon := range polygons {
-		part, ok := intersectCanvasPolygons(polygon, b)
+		points, ok := basegeom.ClipPolygon(polygon, b)
 		if !ok {
 			return nil, false
 		}
-		result = result.Append(part)
+		if len(points) >= 3 {
+			result.MoveTo(points[0].X, points[0].Y)
+			for _, point := range points[1:] {
+				result.LineTo(point.X, point.Y)
+			}
+			result.Close()
+		}
 	}
 	return result, true
 }

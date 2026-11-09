@@ -273,7 +273,9 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 	if err := e.waitRenders(ctx); err != nil {
 		return nativeFailure(err)
 	}
-	e.renderIdle = nil
+	if e.pdf != nil || !nativeReadOnly(name) {
+		e.renderIdle = nil
+	}
 	if name == "ofdgoSaveSnapshot" {
 		snapshot := e.saveSnapshot
 		e.saveSnapshot = nil
@@ -354,6 +356,21 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 		return nativeFailure(err)
 	}
 	return result
+}
+
+// nativeReadOnly 判断不会改变文档、字体来源或渲染配置的查询
+// 入参: name 操作名称
+// 返回: bool 是否保留空闲渲染会话
+func nativeReadOnly(name string) bool {
+	switch name {
+	case "ofdgoCheckDocument", "ofdgoDocumentInfo", "ofdgoEditorInfo", "ofdgoDocumentNavigation", "ofdgoDocumentVersions", "ofdgoPackageDocuments",
+		"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoActionList", "ofdgoPageSettings", "ofdgoStyleResource",
+		"ofdgoOutlineLinks", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoOpenLinks", "ofdgoRenderBackends",
+		"ofdgoSVGFontData", "ofdgoSearchPage", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences",
+		"ofdgoResourceTargets", "ofdgoResourceLocations", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange":
+		return true
+	}
+	return false
 }
 
 // Close 释放会话，不关闭宿主持有的ReaderAt资源

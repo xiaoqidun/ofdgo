@@ -320,18 +320,12 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		}
 		_, repeat := strokePaint.(*repeatAxialGradient)
 		if strokeClip != nil || strokeView != canvas.Identity || repeat || style.strokePattern != nil || !canvasNativeStroke(r.backends.Geometry) || zeroDash {
-			sp = sp.Copy()
 			fill := style.strokePattern == nil && canvasFillClip(strokeClip)
+			options := canvasStrokeOptions(style.lineWidth, style.lineCap, style.lineJoin, canvas.Tolerance)
 			if zeroDash {
-				sp = r.strokeDashedCanvasPath(sp, style.lineWidth, style.lineCap, style.lineJoin, style.dashOffset, style.dashPattern, fill)
-			} else {
-				sp = r.strokeDashedCanvasPath(sp, style.lineWidth, style.lineCap, style.lineJoin, 0, nil, fill)
+				options.DashOffset, options.Dashes = style.dashOffset, style.dashPattern
 			}
-			if fill {
-				sp = applyFillClipPath(sp, strokeClip)
-			} else {
-				sp = applyClipPath(sp, strokeClip)
-			}
+			sp = r.strokeClippedCanvasPath(sp, strokeClip, options, fill)
 			if style.strokePattern != nil {
 				r.renderPattern(ctx, style.strokePattern, pageH, sp, objectCTM)
 			} else {
