@@ -37,6 +37,7 @@ import (
 
 	"github.com/xiaoqidun/ofdgo"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
+	"github.com/xiaoqidun/pdfgo"
 )
 
 // sessionTextCacheBytes 限制会话文字索引的内存预算
@@ -1696,7 +1697,7 @@ func (e *businessEngine) checkDocument(name string) error {
 	switch name {
 	case "ofdgoFontFaces", "ofdgoFontMenu", "ofdgoFontPreferenceOrder", "ofdgoFontFace", "ofdgoCheckTextFont", "ofdgoImagePageSize", "ofdgoImagePreview":
 		return nil
-	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
+	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDestinationView", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
 		return nil
 	default:
 		return ofdgo.ErrIncompleteDocument
@@ -2938,6 +2939,49 @@ func (e *businessEngine) openLinks(args []platformValue) (any, error) {
 		return nil, err
 	}
 	return e.linkResults(links)
+}
+
+// destinationView 统一计算PDF目标视图，并应用目标页显示边界
+// 入参: args 目标、页面变换及当前视口的JSON
+// 返回: any PDF定位坐标和缩放率，普通OFD返回nil, error 参数或计算错误
+func (e *businessEngine) destinationView(args []platformValue) (any, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("invalid destination view arguments")
+	}
+	if e.currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	var request struct {
+		Dest     ofdgo.Dest
+		Matrix   pdfgo.Matrix
+		Viewport pdfgo.DestinationViewport
+	}
+	if err := json.Unmarshal([]byte(args[0].String()), &request); err != nil {
+		return nil, err
+	}
+	target, ok := e.currentSession.Reader.PDFDestination(request.Dest)
+	if !ok {
+		return nil, nil
+	}
+	target, err := target.Transform(request.Matrix)
+	if err != nil {
+		return nil, err
+	}
+	view, err := target.View(request.Viewport)
+	if err != nil {
+		return nil, err
+	}
+	zoom := math.Max(0.2, math.Min(4, view.Zoom))
+	if target.Mode == "Fit" || target.Mode == "FitR" {
+		view.Left += request.Viewport.Width * (1/view.Zoom - 1/zoom) / 2
+		view.Top += request.Viewport.Height * (1/view.Zoom - 1/zoom) / 2
+	}
+	view.Zoom = zoom
+	view, err = view.Constrain(request.Viewport)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"left": view.Left, "top": view.Top, "zoom": view.Zoom}, nil
 }
 
 // outlineLinks 获取目录节点的有序动作目标
@@ -8284,6 +8328,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoStructureObjects":       e.structureObjects,
 		"ofdgoChangeStructure":        e.changeStructure,
 		"ofdgoOpenLinks":              e.openLinks,
+		"ofdgoDestinationView":        e.destinationView,
 		"ofdgoRenderBackends":         e.renderBackends,
 		"ofdgoSVGFontData":            e.svgFontData,
 		"ofdgoSearchPage":             e.searchPage,

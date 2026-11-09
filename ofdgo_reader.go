@@ -42,6 +42,7 @@ type Reader struct {
 	RootDir                   string
 	ResMap                    map[string]string
 	resources                 *Resources
+	pdfDestinations           *pdfDestinations
 	resourcesRead             map[string]bool
 	resourceFiles             map[string]string
 	imageCatalog              []ImageInfo
@@ -216,7 +217,7 @@ func (r *Reader) DocumentContext(ctx context.Context, index int) (*Reader, error
 	if index < 0 || index >= r.DocumentCount() {
 		return nil, fmt.Errorf("document index %d out of range", index)
 	}
-	next := &Reader{Path: r.Path, Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: index, resources: r.resources, pageReady: r.pageReady}
+	next := &Reader{Path: r.Path, Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: index, resources: r.resources, pageReady: r.pageReady, pdfDestinations: r.pdfDestinations.clone()}
 	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}

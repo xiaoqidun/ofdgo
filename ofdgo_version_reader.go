@@ -113,7 +113,7 @@ func (r *Reader) DocumentVersion(id string) (*Reader, error) {
 // 入参: ctx 取消上下文, id 版本标识，空值选择主入口
 // 返回: *Reader 版本阅读器, error 读取或取消错误
 func (r *Reader) DocumentVersionContext(ctx context.Context, id string) (*Reader, error) {
-	next := &Reader{Path: r.Path, Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: r.documentIndex, selectedVersion: &id, pageReady: r.pageReady}
+	next := &Reader{Path: r.Path, Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: r.documentIndex, selectedVersion: &id, pageReady: r.pageReady, pdfDestinations: r.pdfDestinations.clone()}
 	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}

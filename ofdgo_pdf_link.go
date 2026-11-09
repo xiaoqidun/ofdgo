@@ -502,6 +502,7 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 				return nil, nil
 			}
 			action.Goto = &Goto{Dest: &Dest{Type: "XYZ", PageID: p.editor.pages[index].ID, OmitLeft: true, OmitTop: true, OmitZoom: true}}
+			p.editor.setPDFDestination(*action.Goto.Dest, pdfgo.DestinationTarget{Mode: "XYZ", KeepLeft: true, KeepTop: true, KeepZoom: true})
 			*currentPage = index
 		case pdfgo.Name("URI"):
 			value, err := p.reader.Resolve(a["URI"])
@@ -598,6 +599,7 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF destination zoom outside OFD range; current zoom retained"})
 		}
 		*dest = dest.effective()
+		p.editor.setPDFDestination(*dest, target)
 		action.Goto = &Goto{Dest: dest}
 		*currentPage = p.pageIndexes[destination.Page]
 	}
@@ -806,4 +808,64 @@ func (p *pdfImporter) embeddedLinkAction(object pdfgo.Object, strict bool) (*Act
 	}
 	p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF embedded link target retained as attachment; destination inside attached PDF not transferred to OFD"})
 	return &Action{Event: "CLICK", GotoA: &GotoA{AttachID: id, NewWindow: action.NewWindow}}, nil, nil
+}
+
+// pdfDestinations 保存PDF导入文档的运行时目标语义，不写入OFD包
+type pdfDestinations struct {
+	root    string
+	targets map[Dest]pdfgo.DestinationTarget
+}
+
+// clone 复制定位信息，避免增量导入及编辑影响已交付的阅读快照
+// 返回: *pdfDestinations 独立定位信息
+func (d *pdfDestinations) clone() *pdfDestinations {
+	if d == nil {
+		return nil
+	}
+	return &pdfDestinations{root: d.root, targets: maps.Clone(d.targets)}
+}
+
+// PDFDestination 获取当前文档的PDF运行时定位语义，坐标单位为毫米
+// 返回值独立于阅读器；普通OFD及保存为OFD再打开的文档不返回PDF目标
+// 入参: dest 当前文档动作中的目标
+// 返回: pdfgo.DestinationTarget 页面左上原点的定位目标, bool 是否来自PDF导入快照
+func (r *Reader) PDFDestination(dest Dest) (pdfgo.DestinationTarget, bool) {
+	if d := r.pdfDestinations; d != nil && d.root == r.documentRoot {
+		target, ok := d.targets[pdfDestinationKey(dest)]
+		return target, ok
+	}
+	return pdfgo.DestinationTarget{}, false
+}
+
+// setPDFDestination 保存PDF目标到导入文档的运行时索引
+// 入参: dest OFD动作目标, target 保留空坐标的PDF定位语义
+func (e *Editor) setPDFDestination(dest Dest, target pdfgo.DestinationTarget) {
+	target.Zoom, target.KeepZoom = dest.effective().Zoom, dest.OmitZoom || dest.Zoom == 0
+	if e.pdfDestinations == nil {
+		e.pdfDestinations = &pdfDestinations{root: "Doc_0/Document.xml", targets: make(map[Dest]pdfgo.DestinationTarget)}
+	}
+	e.pdfDestinations.targets[pdfDestinationKey(dest)] = target
+}
+
+// pdfDestinationKey 按OFD模式实际编码的属性生成运行时目标索引
+// 入参: dest OFD目标
+// 返回: Dest 与序列化后目标一致的键
+func pdfDestinationKey(dest Dest) Dest {
+	dest = dest.effective()
+	switch dest.Type {
+	case "Fit":
+		dest.Left, dest.Top, dest.Right, dest.Bottom, dest.Zoom = 0, 0, 0, 0, 0
+		dest.OmitLeft, dest.OmitTop, dest.OmitZoom = true, true, true
+	case "FitH":
+		dest.Left, dest.Right, dest.Bottom, dest.Zoom = 0, 0, 0, 0
+		dest.OmitLeft, dest.OmitZoom = true, true
+	case "FitV":
+		dest.Top, dest.Right, dest.Bottom, dest.Zoom = 0, 0, 0, 0
+		dest.OmitTop, dest.OmitZoom = true, true
+	case "FitR":
+		dest.Zoom, dest.OmitZoom = 0, true
+	case "XYZ":
+		dest.Right, dest.Bottom = 0, 0
+	}
+	return dest
 }

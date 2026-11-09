@@ -121,7 +121,7 @@ func (e *Editor) Snapshot(ctx context.Context) (*Editor, error) {
 		return nil, err
 	}
 	defer reader.Close()
-	next := &Reader{files: make(map[string][]byte, len(reader.files)), encryption: reader.encryption, documentIndex: reader.documentIndex, selectedVersion: cloneEditorData(reader.selectedVersion), resources: e.runtimeResources}
+	next := &Reader{files: make(map[string][]byte, len(reader.files)), encryption: reader.encryption, documentIndex: reader.documentIndex, selectedVersion: cloneEditorData(reader.selectedVersion), resources: e.runtimeResources, pdfDestinations: reader.pdfDestinations.clone()}
 	if reader.encryption != nil {
 		next.encryption = &encryptionState{info: cloneEditorData(reader.encryption.info), options: cloneEncryptionOptions(reader.encryption.options)}
 	}
@@ -547,7 +547,12 @@ func (e *Editor) reader(progress editorProgress) (*Reader, error) {
 // readerContext 准备可取消的内存快照，版本隔离沿用调用方上下文
 // 入参: ctx 取消上下文, progress 准备进度回调
 // 返回: *Reader 独立快照, error 准备或取消错误
-func (e *Editor) readerContext(ctx context.Context, progress editorProgress) (*Reader, error) {
+func (e *Editor) readerContext(ctx context.Context, progress editorProgress) (result *Reader, err error) {
+	defer func() {
+		if result != nil {
+			result.pdfDestinations = e.pdfDestinations.clone()
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

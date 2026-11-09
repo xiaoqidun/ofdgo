@@ -11152,46 +11152,69 @@ async function navigateDestination(dest, openAction) {
 		setStatus("暂不支持此跳转方式");
 		return;
 	}
-	const seq = state.openSeq, scale = state.scale;
+	const navigationState = state, seq = state.openSeq, scale = state.scale, space = pageView.pageSpace();
+	const previousNode = pageView.pageShell(state.pageIndex), previous = previousNode?.getBoundingClientRect(), viewport = el.viewerPanel.getBoundingClientRect();
+	const current = {
+		left: previous ? (viewport.left + el.viewerPanel.clientLeft + space - previous.left - previousNode.clientLeft) / (MM_TO_PX * scale) : 0,
+		top: previous ? (viewport.top + el.viewerPanel.clientTop + space - previous.top - previousNode.clientTop) / (MM_TO_PX * scale) : 0,
+		zoom: scale,
+	};
 	const navigation = state.pageNavigation = { openSeq: seq, index };
 	try {
 		await pageView.renderPage(index, { fit: false, scroll: false, openAction, navigation });
 		if (openAction && state.openActionTask !== openAction) return false;
 		if (seq !== state.openSeq || state.pageIndex !== index || state.pageNavigation !== navigation) return;
-		const page = state.doc.pages[index], size = pageView.pageViewSize(page), space = pageView.pageSpace();
-		const width = el.viewerPanel.clientWidth - space * 2, height = el.viewerPanel.clientHeight - space * 2;
-		let left = dest.omitLeft ? 0 : (dest.left ?? 0);
-		let top = dest.omitTop ? 0 : (dest.top ?? 0);
-		if (dest.type === "Fit") {
-			pageView.fitHeight(false);
-			pageView.scrollToPage(index);
-			return;
-		} else if (dest.type === "FitH") {
-			pageView.setScale(pageView.fitWidthScale(page), false);
-			left = 0;
-		} else if (dest.type === "FitV") {
-			pageView.setScale(height / (size.height * MM_TO_PX), false);
-			top = 0;
-		} else if (dest.type === "FitR") {
-			const a = destinationPoint(page, left, top), b = destinationPoint(page, dest.right, dest.bottom);
-			if (dest.right <= left || dest.bottom <= top) return;
-			pageView.setScale(Math.min(width / Math.abs(b.x - a.x), height / Math.abs(b.y - a.y)) / MM_TO_PX, false);
+		const page = state.doc.pages[index], size = pageView.pageViewSize(page);
+		const origin = destinationPoint(page, 0, 0), x = destinationPoint(page, 1, 0), y = destinationPoint(page, 0, 1);
+		const view = await callWASM("ofdgoDestinationView", JSON.stringify({
+			dest,
+			matrix: [x.x - origin.x, x.y - origin.y, y.x - origin.x, y.y - origin.y, origin.x, origin.y],
+			viewport: {
+				width: Math.max(1, el.viewerPanel.clientWidth - space * 2) / MM_TO_PX,
+				height: Math.max(1, el.viewerPanel.clientHeight - space * 2) / MM_TO_PX,
+				current,
+				pageBounds: { xMin: 0, yMin: 0, xMax: size.width, yMax: size.height },
+			},
+		}));
+		if (openAction && state.openActionTask !== openAction) return false;
+		if (seq !== state.openSeq || state.pageIndex !== index || state.pageNavigation !== navigation) return;
+		let point, margin = 0;
+		if (view) {
+			pageView.setScale(view.zoom, false);
+			point = { x: view.left, y: view.top };
+			margin = space;
 		} else {
-			pageView.setScale(!dest.omitZoom && dest.zoom > 0 ? dest.zoom : scale, false);
-		}
-		const point = destinationPoint(page, left, top);
-		if (dest.type === "FitR") {
-			const bottom = destinationPoint(page, dest.right, dest.bottom);
-			point.x = Math.min(point.x, bottom.x);
-			point.y = Math.min(point.y, bottom.y);
+			const width = el.viewerPanel.clientWidth - space * 2, height = el.viewerPanel.clientHeight - space * 2;
+			const left = dest.omitLeft ? 0 : (dest.left ?? 0), top = dest.omitTop ? 0 : (dest.top ?? 0);
+			if (dest.type === "Fit") {
+				pageView.fitHeight(false);
+				pageView.scrollToPage(index);
+				return;
+			} else if (dest.type === "FitH") {
+				pageView.setScale(pageView.fitWidthScale(page), false);
+			} else if (dest.type === "FitV") {
+				pageView.setScale(height / (size.height * MM_TO_PX), false);
+			} else if (dest.type === "FitR") {
+				const a = destinationPoint(page, left, top), b = destinationPoint(page, dest.right, dest.bottom);
+				if (dest.right <= left || dest.bottom <= top) return;
+				pageView.setScale(Math.min(width / Math.abs(b.x - a.x), height / Math.abs(b.y - a.y)) / MM_TO_PX, false);
+			} else {
+				pageView.setScale(!dest.omitZoom && dest.zoom > 0 ? dest.zoom : scale, false);
+			}
+			point = destinationPoint(page, dest.type === "FitH" ? 0 : left, dest.type === "FitV" ? 0 : top);
+			if (dest.type === "FitR") {
+				const bottom = destinationPoint(page, dest.right, dest.bottom);
+				point.x = Math.min(point.x, bottom.x);
+				point.y = Math.min(point.y, bottom.y);
+			}
 		}
 		if (state.pageWindow) pageView.syncPageWindow(state.pageWindow, state.pageWindow.offsets[index]);
 		const node = pageView.pageShell(index), shell = node.getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
-		el.viewerPanel.scrollLeft += shell.left + (node.clientLeft || 0) - viewer.left - (el.viewerPanel.clientLeft || 0) + point.x * MM_TO_PX * state.scale;
-		pageView.scrollViewerBy(shell.top + (node.clientTop || 0) - viewer.top - (el.viewerPanel.clientTop || 0) + point.y * MM_TO_PX * state.scale);
+		el.viewerPanel.scrollLeft += shell.left + node.clientLeft - viewer.left - el.viewerPanel.clientLeft + point.x * MM_TO_PX * state.scale - margin;
+		pageView.scrollViewerBy(shell.top + node.clientTop - viewer.top - el.viewerPanel.clientTop + point.y * MM_TO_PX * state.scale - margin);
 	} finally {
-		if (state.pageNavigation === navigation) {
-			if (seq !== state.openSeq || index !== state.pageIndex) state.pageNavigation = null;
+		if (navigationState.pageNavigation === navigation) {
+			if (state !== navigationState || seq !== state.openSeq || index !== state.pageIndex) navigationState.pageNavigation = null;
 			else Object.assign(navigation, { top: state.pageWindow ? pageView.pageWindowTop(state.pageWindow) : el.viewerPanel.scrollTop, left: el.viewerPanel.scrollLeft });
 		}
 	}

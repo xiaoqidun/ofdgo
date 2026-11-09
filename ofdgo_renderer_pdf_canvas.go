@@ -320,6 +320,24 @@ func (n *pdfNavigation) actionTarget(action Action, page int, source actionSourc
 		if err != nil {
 			return nil, err
 		}
+		view, _ := n.source.PDFDestination(*dest)
+		switch destination.Mode {
+		case "XYZ":
+			if view.KeepLeft {
+				destination.Parameters[0] = nil
+			}
+			if view.KeepTop {
+				destination.Parameters[1] = nil
+			}
+		case "FitH":
+			if view.KeepTop {
+				destination.Parameters[0] = nil
+			}
+		case "FitV":
+			if view.KeepLeft {
+				destination.Parameters[0] = nil
+			}
+		}
 		return &pdfNavigationAction{Target: &pdfTarget{Page: target, Destination: destination}}, nil
 	}
 	if action.URI != nil && action.URI.URI != "" {

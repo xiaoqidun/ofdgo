@@ -475,7 +475,7 @@ class BrowserEngine {
 			return;
 		}
 		if (!data.type && data.name !== "ofdgoRenderPage" && ![
-			"ofdgoLoadPDF", "ofdgoDocumentInfo", "ofdgoDocumentVersions", "ofdgoDocumentNavigation", "ofdgoOpenLinks", "ofdgoOutlineLinks", "ofdgoRenderBackends", "ofdgoSVGFontData",
+			"ofdgoLoadPDF", "ofdgoDocumentInfo", "ofdgoDocumentVersions", "ofdgoDocumentNavigation", "ofdgoOpenLinks", "ofdgoDestinationView", "ofdgoOutlineLinks", "ofdgoRenderBackends", "ofdgoSVGFontData",
 			"ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences", "ofdgoResourceTargets",
 			"ofdgoResourceLocations", "ofdgoFontPreview", "ofdgoFontFaces", "ofdgoFontFace", "ofdgoMatchFontFiles",
 			"ofdgoImages", "ofdgoImagePageSize", "ofdgoImagePreview", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoPackageDocuments", "ofdgoVerifySignatures",

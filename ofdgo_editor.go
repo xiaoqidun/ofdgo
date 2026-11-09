@@ -51,6 +51,7 @@ type Editor struct {
 	pages              []PageContent
 	resources          []editorResource
 	runtimeResources   *Resources
+	pdfDestinations    *pdfDestinations
 	fonts              map[string]*FontResource
 	fontRegistration   editorFontRegistration
 	fontDirs           []string

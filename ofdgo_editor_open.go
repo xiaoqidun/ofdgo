@@ -155,6 +155,7 @@ func (r *Reader) EditorContext(ctx context.Context) (*Editor, error) {
 	}
 	e := NewEditor()
 	e.runtimeResources = r.resources
+	e.pdfDestinations = r.pdfDestinations.clone()
 	e.encryption = r.encryption
 	directory := cleanPackagePath(reader.RootDir)
 	e.source = &editorSource{reader: reader, document: doc, info: cloneEditorData(*info), fallbackDocID: e.Info.DocID, directory: directory, pages: make(map[string]*editorSourcePage, len(doc.Pages.Page)), origins: make(map[string]*editorObjectOrigin)}
