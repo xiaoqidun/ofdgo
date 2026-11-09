@@ -8,7 +8,7 @@ require (
 	github.com/go-text/typesetting v0.3.5
 	github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c
 	github.com/tdewolff/font v0.0.0-20261010204837-88a7f6b56918
-	github.com/xiaoqidun/guigo v0.0.0-20261109025900-660d0d907a7d
+	github.com/xiaoqidun/guigo v0.0.0-20261109073034-9bb219409e3d
 	github.com/xiaoqidun/j2kgo v1.0.2
 	github.com/xiaoqidun/jbig2 v1.1.8
 	github.com/xiaoqidun/pdfgo v0.0.0-20261109060943-6e427d502a6d
