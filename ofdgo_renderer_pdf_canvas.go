@@ -39,6 +39,8 @@ type pdfRenderer struct {
 	fonts       map[*canvas.Font]*canvas.Font
 	cffFonts    map[*canvas.Font][]*pdfFontSubset
 	images      [][]image.Image
+	imageClips  [][]string
+	imageClip   *canvas.Path
 	exactImages bool
 	imageError  error
 	navigation  *pdfNavigation
@@ -128,6 +130,18 @@ func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 		r.exactImages = r.exactImages || original != nil
 		last := len(r.images) - 1
 		r.images[last] = append(r.images[last], original)
+		if r.imageClip != nil {
+			view := matrix.Scale(float64(img.Bounds().Dx()), float64(img.Bounds().Dy()))
+			if view.Det() != 0 {
+				for len(r.imageClips) <= last {
+					r.imageClips = append(r.imageClips, nil)
+				}
+				for len(r.imageClips[last]) < len(r.images[last]) {
+					r.imageClips[last] = append(r.imageClips[last], "")
+				}
+				r.imageClips[last][len(r.images[last])-1] = r.imageClip.Copy().Transform(view.Inv()).ToPDF()
+			}
+		}
 	}
 	style := canvas.DefaultStyle
 	style.Fill = canvas.Paint{Color: canvas.White}
@@ -171,6 +185,7 @@ func (r *pdfRenderer) writePDF(ctx context.Context, data []byte, writer io.Write
 	options := codecpdf.WriteOptions{
 		Information:  information,
 		Images:       r.images,
+		ImageClips:   r.imageClips,
 		Text:         r.text,
 		ExactImages:  r.exactImages,
 		ExactText:    r.exactText,

@@ -55,6 +55,7 @@ type canvasStrokeKey struct {
 	digest  [32]byte
 	options string
 	fill    bool
+	compact bool
 }
 
 // canvasOutlineCacheKey 区分子渲染器共享的字体轮廓解析缓存
@@ -189,7 +190,7 @@ func (r *Renderer) strokeClippedCanvasPath(path, clip *canvas.Path, options Stro
 	}
 	render := func() (*canvas.Path, int, error) {
 		stroke := canvasStrokePath
-		if fill {
+		if fill && !r.compactStrokes {
 			stroke = canvasStrokeFillPath
 		}
 		result, err := stroke(geometry, path, options)
@@ -214,7 +215,7 @@ func (r *Renderer) strokeClippedCanvasPath(path, clip *canvas.Path, options Stro
 		if clip != nil {
 			paths = append(paths, clip)
 		}
-		key := canvasStrokeKey{digest: canvasGeometryDigest(paths...), options: string(encoded), fill: fill}
+		key := canvasStrokeKey{digest: canvasGeometryDigest(paths...), options: string(encoded), fill: fill, compact: r.compactStrokes}
 		result, err = r.canvasStrokeClips().load(r.pageContext, key, render)
 		if err == nil {
 			return result.Copy()

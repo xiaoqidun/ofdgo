@@ -94,16 +94,20 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	}
 }
 
-// drawClippedImage 共用图像及签章的几何裁剪，编译输出保留原图和独立裁剪路径
+// drawClippedImage 共用图像及签章的几何裁剪，编译和PDF输出保留原图及独立裁剪
 // 入参: ctx 画布上下文, img 原图, clipPath 页面裁剪，可为空, m 像素到画布的变换
 func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPath *canvas.Path, m canvas.Matrix) {
 	imgW, imgH := float64(img.Bounds().Dx()), float64(img.Bounds().Dy())
 	imageClip := clipPath
 	compiler, compiled := ctx.Renderer.(*canvasPageCompiler)
-	if compiled && imageClip != nil && imageClipContains(img, imageClip, m) {
+	pdfOutput, pdf := ctx.Renderer.(*pdfRenderer)
+	if pdf && imageClip != nil && imageClip.Empty() {
+		return
+	}
+	if (compiled || pdf) && imageClip != nil && imageClipContains(img, imageClip, m) {
 		imageClip = nil
 	}
-	if !compiled {
+	if !compiled && !pdf {
 		img = r.imageWithClip(img, clipPath, m, 96)
 	}
 	if r.renderError != nil {
@@ -123,6 +127,12 @@ func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPa
 			m[0][2] -= m[0][0]*p + m[0][1]*p
 			m[1][2] -= m[1][0]*p + m[1][1]*p
 		}
+	}
+	if pdf {
+		if imageClip != nil {
+			pdfOutput.imageClip = imageClip.Copy().Transform(ctx.CoordSystemView().Mul(ctx.View()))
+		}
+		defer func() { pdfOutput.imageClip = nil }()
 	}
 	ctx.RenderImage(r.canvasEncodedImage(img), ctx.CoordSystemView().Mul(ctx.View()).Mul(m))
 	if compiled && imageClip != nil && compiler.err == nil {

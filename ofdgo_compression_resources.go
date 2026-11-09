@@ -109,7 +109,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		}
 	}
 	collect := reader != nil && reader.DocumentCount() > 1 && e.backends.FontResources != nil
-	refs, resources, references, safe, err := scanEditorResources(e.output.ctx, reader, parts, generated, names, nil, collect)
+	refs, resources, references, safe, err := e.scanOutputResources(e.output.ctx, reader, parts, generated, names, nil, collect)
 	if err != nil || !safe {
 		return err
 	}

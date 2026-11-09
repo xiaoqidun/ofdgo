@@ -133,6 +133,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	}
 	view := *r
 	view.pageContext = ctx
+	view.compactStrokes = true
 	r = &view
 	if len(pages) == 0 {
 		return fmt.Errorf("no pages found")

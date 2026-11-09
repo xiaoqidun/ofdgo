@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -30,7 +31,29 @@ import (
 // PageTextCache 按内存预算保留最近访问的页面文字索引
 // 缓存后不得修改PageText，页面或字体变化时须删除对应条目
 type PageTextCache struct {
-	cache *renderCache[int, *PageText]
+	cache *renderCache[int, *pageTextEntry]
+}
+
+// pageTextEntry 将页面原文和派生搜索索引放在同一预算与失效范围内
+type pageTextEntry struct {
+	text   *PageText
+	search *TextSearchIndex
+}
+
+// TextSearchIndex 保存不可变的文字搜索快照，可并行搜索，不随源文字修改
+// 页面或字体变化后需由调用方重新构建
+type TextSearchIndex struct {
+	runs   []TextRun
+	groups []textSearchGroup
+}
+
+// textSearchGroup 保存同行连续文字及Unicode字符映射
+type textSearchGroup struct {
+	first   int
+	last    int
+	offsets []int
+	runes   []rune
+	folded  string
 }
 
 // textPageTokens 保留文字及其复合图元和裁剪，跳过独立路径与图片
@@ -87,7 +110,7 @@ type TextMatchPart struct {
 // 入参: bytes 内存预算，非正数禁用缓存
 // 返回: *PageTextCache 独立缓存
 func NewPageTextCache(bytes int) *PageTextCache {
-	return &PageTextCache{cache: resourceCache[int, *PageText](nil, max(0, bytes))}
+	return &PageTextCache{cache: resourceCache[int, *pageTextEntry](nil, max(0, bytes))}
 }
 
 // MemorySize 估算文字索引占用，包含切片容量和字符串内容
@@ -105,8 +128,11 @@ func (p *PageText) MemorySize() int64 {
 // 入参: index 页面索引
 // 返回: *PageText 文字索引，未命中时为nil
 func (c *PageTextCache) Get(index int) *PageText {
-	text, _ := c.cache.get(index)
-	return text
+	entry, _ := c.cache.get(index)
+	if entry == nil {
+		return nil
+	}
+	return entry.text
 }
 
 // Put 缓存完整文字索引，超出预算的单页不驱逐其他页面
@@ -121,7 +147,7 @@ func (c *PageTextCache) Put(index int, text *PageText) {
 		c.Delete(index)
 		return
 	}
-	c.cache.put(index, text, int(size))
+	c.cache.put(index, &pageTextEntry{text: text}, int(size))
 }
 
 // Delete 删除页面索引并释放预算
@@ -153,8 +179,8 @@ func (c *PageTextCache) Range(visit func(int, *PageText) bool) {
 	c.cache.mu.Lock()
 	defer c.cache.mu.Unlock()
 	for entry := c.cache.order.Back(); entry != nil; entry = entry.Prev() {
-		value := entry.Value.(renderCacheEntry[int, *PageText])
-		if !visit(value.key, value.value) {
+		value := entry.Value.(renderCacheEntry[int, *pageTextEntry])
+		if !visit(value.key, value.value.text) {
 			return
 		}
 	}
@@ -362,15 +388,41 @@ func (p *PageText) searchEach(ctx context.Context, query string, visit func(Text
 	if query == "" {
 		return ctx.Err()
 	}
-	length := utf8.RuneCountInString(query)
+	index, err := p.searchIndex(ctx)
+	if err != nil {
+		return err
+	}
+	return index.searchEach(ctx, query, visit)
+}
+
+// NewTextSearchIndex 创建独立搜索快照，复制字符区域，保留Unicode折叠和跨对象匹配
+// 入参: ctx 取消上下文, text 页面原文
+// 返回: *TextSearchIndex 不可变索引, error 取消错误
+func NewTextSearchIndex(ctx context.Context, text *PageText) (*TextSearchIndex, error) {
+	copy := PageText{Runs: slices.Clone(text.Runs)}
+	for i := range copy.Runs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		copy.Runs[i].Boxes = slices.Clone(copy.Runs[i].Boxes)
+		copy.Runs[i].Spans = nil
+	}
+	return copy.searchIndex(ctx)
+}
+
+// searchIndex 为只读文字构建同行分组、字符偏移和大小写折叠
+// 入参: ctx 取消上下文
+// 返回: *TextSearchIndex 搜索索引, error 取消错误
+func (p *PageText) searchIndex(ctx context.Context) (*TextSearchIndex, error) {
+	result := &TextSearchIndex{runs: p.Runs}
 	for first := 0; first < len(p.Runs); {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
 		last := first + 1
 		for last < len(p.Runs) && adjacentTextRuns(p.Runs[last-1], p.Runs[last]) {
 			if err := ctx.Err(); err != nil {
-				return err
+				return nil, err
 			}
 			last++
 		}
@@ -378,7 +430,7 @@ func (p *PageText) searchEach(ctx context.Context, query string, visit func(Text
 		offsets := make([]int, last-first+1)
 		for index := first; index < last; index++ {
 			if err := ctx.Err(); err != nil {
-				return err
+				return nil, err
 			}
 			source.WriteString(p.Runs[index].Text)
 			offsets[index-first+1] = offsets[index-first] + utf8.RuneCountInString(p.Runs[index].Text)
@@ -389,14 +441,35 @@ func (p *PageText) searchEach(ctx context.Context, query string, visit func(Text
 		for _, char := range source.String() {
 			if polled%256 == 0 {
 				if err := ctx.Err(); err != nil {
-					return err
+					return nil, err
 				}
 			}
 			polled++
 			folded.WriteRune(foldRune(char))
 		}
-		text := folded.String()
-		var runes []rune
+		result.groups = append(result.groups, textSearchGroup{first: first, last: last, offsets: offsets, runes: []rune(source.String()), folded: folded.String()})
+		first = last
+	}
+	return result, ctx.Err()
+}
+
+// SearchEach 在不可变索引中逐项搜索，回调返回错误时立即停止
+// 入参: ctx 取消上下文, query 搜索文字, visit 匹配访问函数
+// 返回: error 取消或访问错误
+func (p *TextSearchIndex) SearchEach(ctx context.Context, query string, visit func(TextMatch) error) error {
+	return p.searchEach(ctx, foldText(query), visit)
+}
+
+// searchEach 使用已折叠查询访问预处理分组
+// 入参: ctx 取消上下文, query 已折叠查询, visit 匹配访问函数
+// 返回: error 取消或访问错误
+func (p *TextSearchIndex) searchEach(ctx context.Context, query string, visit func(TextMatch) error) error {
+	if query == "" {
+		return ctx.Err()
+	}
+	length := utf8.RuneCountInString(query)
+	for _, group := range p.groups {
+		first, last, offsets, runes, text := group.first, group.last, group.offsets, group.runes, group.folded
 		codeOffset := 0
 		for offset := 0; offset < len(text); {
 			if err := ctx.Err(); err != nil {
@@ -406,17 +479,14 @@ func (p *PageText) searchEach(ctx context.Context, query string, visit func(Text
 			if found < 0 {
 				break
 			}
-			if runes == nil {
-				runes = []rune(source.String())
-			}
 			start := codeOffset + utf8.RuneCountInString(text[offset:offset+found])
 			offset += found
 			end := start + length
 			begin := sort.Search(len(offsets)-1, func(i int) bool { return offsets[i+1] > start })
-			match := TextMatch{ID: p.Runs[first+begin].ID, Run: first + begin, Start: start - offsets[begin], End: min(end, offsets[begin+1]) - offsets[begin],
+			match := TextMatch{ID: p.runs[first+begin].ID, Run: first + begin, Start: start - offsets[begin], End: min(end, offsets[begin+1]) - offsets[begin],
 				Before: string(runes[max(0, start-16):start]), Text: string(runes[start:end]), After: string(runes[end:min(len(runes), end+16)])}
 			for index := begin; index < last-first && offsets[index] < end; index++ {
-				run := p.Runs[first+index]
+				run := p.runs[first+index]
 				from, to := max(start, offsets[index])-offsets[index], min(end, offsets[index+1])-offsets[index]
 				if end > offsets[begin+1] {
 					match.Parts = append(match.Parts, TextMatchPart{ID: run.ID, Run: first + index, Start: from, End: to})
@@ -433,9 +503,49 @@ func (p *PageText) searchEach(ctx context.Context, query string, visit func(Text
 			offset += len(query)
 			codeOffset = end
 		}
-		first = last
 	}
 	return ctx.Err()
+}
+
+// searchSize 估算派生分组占用，不重复计费共享的页面文字
+// 返回: int64 派生索引字节数
+func (p *TextSearchIndex) searchSize() int64 {
+	size := int64(unsafe.Sizeof(*p)) + int64(cap(p.groups))*int64(unsafe.Sizeof(textSearchGroup{}))
+	for _, group := range p.groups {
+		size += int64(cap(group.offsets))*int64(unsafe.Sizeof(int(0))) + int64(cap(group.runes))*4 + int64(len(group.folded))
+	}
+	return size
+}
+
+// MemorySize 估算独立搜索快照的总内存占用
+// 返回: int64 估算字节数
+func (p *TextSearchIndex) MemorySize() int64 {
+	return (&PageText{Runs: p.runs}).MemorySize() + p.searchSize()
+}
+
+// SearchEach 在已缓存页面上搜索，派生索引与原文共用预算及失效范围
+// 入参: ctx 取消上下文, index 页面索引, query 搜索文字, visit 匹配访问函数
+// 返回: bool 是否命中页面缓存, error 取消或访问错误
+func (c *PageTextCache) SearchEach(ctx context.Context, index int, query string, visit func(TextMatch) error) (bool, error) {
+	entry, ok := c.cache.get(index)
+	if !ok {
+		return false, ctx.Err()
+	}
+	search := entry.search
+	if search == nil {
+		var err error
+		search, err = entry.text.searchIndex(ctx)
+		if err != nil {
+			return true, err
+		}
+		cost := entry.text.MemorySize() + search.searchSize() + 128
+		c.cache.mu.Lock()
+		if current := c.cache.entries[index]; current != nil && current.Value.(renderCacheEntry[int, *pageTextEntry]).value == entry && cost <= int64(c.cache.limit) {
+			c.cache.putLocked(index, &pageTextEntry{text: entry.text, search: search}, int(cost))
+		}
+		c.cache.mu.Unlock()
+	}
+	return true, search.SearchEach(ctx, query, visit)
 }
 
 // foldText 统一Unicode大小写等价字符，保留字符数量

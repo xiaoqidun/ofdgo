@@ -179,9 +179,16 @@ func (e *Editor) Revision() uint64 {
 // transactionSnapshot 复制顶层容器，共享按替换方式更新的页面图层、图元和二进制资源
 // 返回: Editor 独立事务状态
 func (e *Editor) transactionSnapshot() Editor {
+	next := e.transactionState()
+	next.pages = slices.Clone(e.pages)
+	return next
+}
+
+// transactionState 复制事务的文档和资源容器，页面表由调用方按作用范围保存
+// 返回: Editor 独立文档状态
+func (e *Editor) transactionState() Editor {
 	next := *e
 	next.Info = cloneEditorData(e.Info)
-	next.pages = slices.Clone(e.pages)
 	next.resources = slices.Clone(e.resources)
 	next.fonts, next.images, next.resourceID = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID)
 	next.origins = maps.Clone(e.origins)
@@ -200,6 +207,12 @@ func (e *Editor) transactionSnapshot() Editor {
 // 入参: state 文档状态
 func (e *Editor) restoreTransaction(state Editor) {
 	state = state.transactionSnapshot()
+	e.restoreTransactionState(state)
+}
+
+// restoreTransactionState 应用已隔离的文档状态，保留当前编辑器配置和资源
+// 入参: state 已准备的事务状态
+func (e *Editor) restoreTransactionState(state Editor) {
 	state.retainDocumentResources(e)
 	if !e.sameResourceView(&state) {
 		state.fontRenderer, state.fontMetrics = nil, make(map[string]FontMetrics)
@@ -261,6 +274,23 @@ func (e *Editor) recordTransaction(before Editor, changes ...EditorChanges) {
 		scope = changes[0]
 	}
 	if change := e.recordChangeScope(scope); change != nil {
+		if !scope.All && len(scope.Pages) != 0 && len(before.pages) == len(e.pages) && e.sameDocument(&before) {
+			beforePages, afterPages := make([]PageContent, len(scope.Pages)), make([]PageContent, len(scope.Pages))
+			for i, index := range scope.Pages {
+				beforePages[i], afterPages[i] = before.pages[index], e.pages[index]
+			}
+			after := e.transactionState()
+			before.pages, after.pages, before.history, after.history = nil, nil, nil, nil
+			change.undo = func(e *Editor) {
+				after.retainDocumentResources(e)
+				e.restorePageTransaction(before, scope.Pages, beforePages)
+			}
+			change.redo = func(e *Editor) {
+				before.retainDocumentResources(e)
+				e.restorePageTransaction(after, scope.Pages, afterPages)
+			}
+			return
+		}
 		after := e.transactionSnapshot()
 		before.history, after.history = nil, nil
 		change.undo = func(e *Editor) {
@@ -272,6 +302,17 @@ func (e *Editor) recordTransaction(before Editor, changes ...EditorChanges) {
 			e.restoreTransaction(after)
 		}
 	}
+}
+
+// restorePageTransaction 仅替换事务涉及的页面，复用当前独占页面表
+// 入参: state 文档状态, indexes 受影响页码, pages 对应页面快照
+func (e *Editor) restorePageTransaction(state Editor, indexes []int, pages []PageContent) {
+	state = state.transactionState()
+	state.pages = e.pages
+	for i, index := range indexes {
+		state.pages[index] = pages[i]
+	}
+	e.restoreTransactionState(state)
 }
 
 // recordChange 分配修订标识并为已完成的有效修改预留记录

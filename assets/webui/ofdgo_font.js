@@ -4,7 +4,7 @@ const DATABASE = "ofdgo";
 
 export class FontPicker {
 	constructor(input, toggle, list, onChange, onOpen, groupFonts) {
-		Object.assign(this, { input, toggle, list, onChange, onOpen, groupFonts, fonts: [], groups: [], value: "", active: -1, open: false });
+		Object.assign(this, { input, toggle, list, onChange, onOpen, groupFonts, fonts: [], groups: [], records: [], options: new Map(), value: "", active: -1, open: false });
 		input.addEventListener("input", () => this.show(input.value));
 		input.addEventListener("focus", () => input.select());
 		input.addEventListener("pointerdown", event => { if (event.button === 0 && !this.open) event.preventDefault(); });
@@ -24,6 +24,8 @@ export class FontPicker {
 		const open = preserve && this.open;
 		if (!open) this.close();
 		this.fonts = fonts;
+		this.records = null;
+		this.options.clear();
 		this.groups = fonts.map((_, index) => [index]);
 		this.names = new Map();
 		for (const font of fonts) {
@@ -41,6 +43,8 @@ export class FontPicker {
 		if (this.groupFonts) this.grouping = this.groupFonts(fonts).then(groups => {
 			if (this.fonts !== fonts) return;
 			this.groups = groups;
+			this.records = null;
+			this.options.clear();
 			this.names.clear();
 			for (const group of groups) {
 				const font = fonts[group[0]], name = (font.menuFamily || font.fullName || font.name).normalize("NFKC").toLocaleLowerCase();
@@ -85,36 +89,42 @@ export class FontPicker {
 		this.query = query;
 		const normalize = value => value.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ").trim();
 		const terms = normalize(query).split(" ").filter(Boolean);
-		this.matches = this.groups.map(group => {
+		if (!this.records) this.records = this.groups.map(group => ({ group, text: normalize(group.flatMap(index => {
+			const font = this.fonts[index];
+			return [font.menuFamily, font.menuStyle, font.fullName, font.name, font.family, font.style, font.postscriptName, ...(font.names || [])];
+		}).filter(Boolean).join(" ")) }));
+		this.matches = this.records.filter(({ text }) => terms.every(term => text.includes(term))).map(({ group }) => {
 			const index = group.find(index => !this.fonts[index].bold && !this.fonts[index].italic && !this.fonts[index].disabled) ?? group[0];
 			return { font: this.fonts[index], index, group };
-		}).filter(({ group }) => {
-			const name = normalize(group.flatMap(index => {
-				const font = this.fonts[index];
-				return [font.menuFamily, font.menuStyle, font.fullName, font.name, font.family, font.style, font.postscriptName, ...(font.names || [])];
-			}).filter(Boolean).join(" "));
-			return terms.every(term => name.includes(term));
 		});
-		this.list.replaceChildren();
-		for (const { font, index } of this.matches) {
-			const option = document.createElement("div");
-			option.className = "font-option";
-			option.id = `${this.list.id}-${index}`;
-			option.dataset.index = String(index);
-			option.setAttribute("data-disabled", String(Boolean(font.disabled)));
-			const name = document.createElement("span");
-			name.textContent = font.menuFamily || font.fullName || font.name;
-			option.append(name);
-			const source = this.sourceLabel(font);
-			if (source) {
-				const label = document.createElement("span");
-				label.className = "font-option-source";
-				label.textContent = source;
-				option.append(label);
+		const nodes = this.matches.map(({ font, index }) => {
+			let option = this.options.get(index);
+			if (!option) {
+				option = document.createElement("div");
+				option.className = "font-option";
+				option.id = `${this.list.id}-${index}`;
+				option.dataset.index = String(index);
+				const name = document.createElement("span");
+				name.textContent = font.menuFamily || font.fullName || font.name;
+				option.append(name);
+				const source = this.sourceLabel(font);
+				if (source) {
+					const label = document.createElement("span");
+					label.className = "font-option-source";
+					label.textContent = source;
+					option.append(label);
+				}
+				option.title = [...new Set([font.fullName, font.name].filter(Boolean))].join(" · ");
+				this.options.set(index, option);
 			}
-			option.title = [...new Set([font.fullName, font.name].filter(Boolean))].join(" · ");
-			this.list.append(option);
-		}
+			option.setAttribute("data-disabled", String(Boolean(font.disabled)));
+			return option;
+		});
+		const retained = new Set(nodes);
+		for (const child of [...this.list.children]) if (!retained.has(child)) child.remove();
+		nodes.forEach((node, index) => {
+			if (this.list.children[index] !== node) this.list.insertBefore(node, this.list.children[index] || null);
+		});
 		if (!this.matches.length) {
 			const empty = document.createElement("div");
 			empty.className = "font-search-empty";

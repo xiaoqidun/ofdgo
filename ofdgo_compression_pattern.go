@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"crypto/sha256"
+	"maps"
 	"reflect"
 	"slices"
 )
@@ -44,8 +45,19 @@ type compressionPatternUse struct {
 // compressPatternPaints 将新文档中重复的大底纹颜色提取为绘制参数，仅修改输出快照
 // 返回: error 编码或取消错误
 func (e *Editor) compressPatternPaints() error {
-	if e.output == nil || e.output.options.Mode == CompressionUnchanged || e.output.protected || e.source != nil {
+	if e.output == nil || e.output.options.Mode == CompressionUnchanged || e.output.protected || e.source != nil && !e.source.fromNew {
 		return nil
+	}
+	if e.source != nil {
+		source := *e.source
+		source.pages, source.origins = maps.Clone(source.pages), maps.Clone(source.origins)
+		e.source = &source
+		e.pages = slices.Clone(e.pages)
+		for index := range e.pages {
+			if err := e.loadSourcePageContext(e.output.ctx, index); err != nil {
+				return err
+			}
+		}
 	}
 	paints := make(map[[32]byte]*compressionPatternPaint)
 	var uses []compressionPatternUse

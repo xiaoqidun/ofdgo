@@ -47,6 +47,9 @@ const (
 // outputOptimizationBufferLimit 限制压缩时的单个输出缓冲，单位为字节
 const outputOptimizationBufferLimit = 64 << 20
 
+// outputDeflaters 有界复用已完成输出的压缩器，不保留输出流引用
+var outputDeflaters = make(chan *flate.Writer, 2)
+
 // CompressionMode 选择原始、无损或有损输出策略
 type CompressionMode = pdfgo.CompressionMode
 
@@ -63,14 +66,15 @@ type WriteOptions struct{ Compression CompressionOptions }
 
 // outputOptimization 保存单次写出的配置、图片路径及压缩进度，复用压缩器
 type outputOptimization struct {
-	ctx       context.Context
-	options   CompressionOptions
-	images    map[string]bool
-	sizes     map[string]image.Point
-	protected bool
-	completed int
-	deflater  *flate.Writer
-	resources *editorResourceSelection
+	ctx        context.Context
+	options    CompressionOptions
+	images     map[string]bool
+	sizes      map[string]image.Point
+	protected  bool
+	completed  int
+	deflater   *flate.Writer
+	resources  *editorResourceSelection
+	references *renderCache[editorScanKey, editorScanValue]
 }
 
 // outputCompressionBuffer 限制候选ZIP编码，不能缩小时终止本次压缩
@@ -99,6 +103,7 @@ func (e *Editor) WriteToWithOptions(ctx context.Context, writer io.Writer, optio
 	if err != nil {
 		return 0, err
 	}
+	defer snapshot.output.release()
 	var count int64
 	return snapshot.WriteTo(convertWriter{ctx: ctx, writer: writer, count: &count})
 }
@@ -119,6 +124,7 @@ func (e *Editor) WritePagesTo(ctx context.Context, writer io.Writer, indexes []i
 	snapshot := *e
 	snapshot.OnWriteProgress = editorProgress(e.OnWriteProgress).withContext(ctx)
 	snapshot.output = &outputOptimization{ctx: ctx, options: options.Compression}
+	defer snapshot.output.release()
 	var count int64
 	return snapshot.writePagesTo(convertWriter{ctx: ctx, writer: writer, count: &count}, indexes)
 }
@@ -385,13 +391,7 @@ func (e *Editor) writeOutputBytes(writer io.Writer, data []byte) error {
 func (e *Editor) compressOutputBytes(data []byte, limit int) ([]byte, error) {
 	var compressed bytes.Buffer
 	output := &outputCompressionBuffer{buffer: &compressed, limit: min(limit, outputOptimizationBufferLimit)}
-	deflater := e.output.deflater
-	if deflater == nil {
-		deflater, _ = flate.NewWriter(output, flate.BestCompression)
-		e.output.deflater = deflater
-	} else {
-		deflater.Reset(output)
-	}
+	deflater := e.output.compressor(output)
 	defer deflater.Close()
 	for offset := 0; offset < len(data); {
 		if err := e.output.ctx.Err(); err != nil {
@@ -429,13 +429,7 @@ func (e *Editor) compressOutputFile(file *zip.File, buffer []byte, limit int) ([
 	defer input.Close()
 	var compressed bytes.Buffer
 	output := &outputCompressionBuffer{buffer: &compressed, limit: min(limit, outputOptimizationBufferLimit)}
-	deflater := e.output.deflater
-	if deflater == nil {
-		deflater, _ = flate.NewWriter(output, flate.BestCompression)
-		e.output.deflater = deflater
-	} else {
-		deflater.Reset(output)
-	}
+	deflater := e.output.compressor(output)
 	defer deflater.Close()
 	source := imageInput{ReadCloser: input, ctx: e.output.ctx}
 	_, err = io.CopyBuffer(deflater, source, buffer)
@@ -583,4 +577,33 @@ func (r *Renderer) outputContext() context.Context {
 		return r.OutputContext
 	}
 	return context.Background()
+}
+
+// compressor 获取当前输出独占的压缩器，重置后不复用上一次编码状态
+// 入参: writer 编码目标
+// 返回: *flate.Writer 压缩器
+func (o *outputOptimization) compressor(writer io.Writer) *flate.Writer {
+	if o.deflater == nil {
+		select {
+		case o.deflater = <-outputDeflaters:
+		default:
+			o.deflater, _ = flate.NewWriter(writer, flate.BestCompression)
+			return o.deflater
+		}
+	}
+	o.deflater.Reset(writer)
+	return o.deflater
+}
+
+// release 释放输出目标并归还压缩器，池满时由运行时回收
+func (o *outputOptimization) release() {
+	if o.deflater == nil {
+		return
+	}
+	o.deflater.Reset(io.Discard)
+	select {
+	case outputDeflaters <- o.deflater:
+	default:
+	}
+	o.deflater = nil
 }

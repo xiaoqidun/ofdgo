@@ -262,6 +262,12 @@ func (c *renderCache[K, V]) get(key K) (V, bool) {
 func (c *renderCache[K, V]) put(key K, value V, cost int) {
 	c.mutex().Lock()
 	defer c.mutex().Unlock()
+	c.putLocked(key, value, cost)
+}
+
+// putLocked 在持有缓存锁时替换条目并按预算淘汰
+// 入参: key 缓存键, value 缓存值, cost 字节成本
+func (c *renderCache[K, V]) putLocked(key K, value V, cost int) {
 	if item := c.entries[key]; item != nil {
 		c.remove(item)
 	}

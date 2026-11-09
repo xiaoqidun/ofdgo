@@ -12930,18 +12930,27 @@ function mountAnnotationNotes(index, surface, annotations) {
 
 function renderDocumentFonts() {
 	const fonts = state.doc?.fonts || [];
-	el.docFontList.replaceChildren();
+	const previous = new Map([...el.docFontList.children].filter(row => row.font).map(row => [row.font.id, row]));
 	el.docFontSummary.textContent = fontSummary(fonts);
 	if (!fonts.length) {
 		const empty = document.createElement("div");
 		empty.className = "font-empty";
 		empty.textContent = "暂无字体";
-		el.docFontList.append(empty);
+		el.docFontList.replaceChildren(empty);
 		return;
 	}
-	const fragment = document.createDocumentFragment();
+	const rows = [];
 	for (const font of fonts) {
+		const signature = JSON.stringify([font.status, font.embedded, font.fontName, font.familyName, font.id, fontResult(font), fontMeta(font), state.editing]);
+		const cached = previous.get(font.id);
+		if (cached?.fontSignature === signature) {
+			cached.font = font;
+			rows.push(cached);
+			continue;
+		}
 		const row = document.createElement("div");
+		row.font = font;
+		row.fontSignature = signature;
 		row.className = `doc-font-row ${font.status || "missing"}`;
 
 		const head = document.createElement("div");
@@ -12966,15 +12975,19 @@ function renderDocumentFonts() {
 			action.type = "button";
 			action.className = "small-button font-binding-action";
 			action.textContent = font.embedded ? "外置" : "嵌入";
-			action.addEventListener("click", () => openFontBinding(font));
+			action.addEventListener("click", () => openFontBinding(row.font));
 			head.append(action);
 		}
 		row.append(head);
 		appendFontDetail(row, metaText);
 		appendFontDetail(row, resultText);
-		fragment.append(row);
+		rows.push(row);
 	}
-	el.docFontList.append(fragment);
+	const retained = new Set(rows);
+	for (const row of [...el.docFontList.children]) if (!retained.has(row)) row.remove();
+	rows.forEach((row, index) => {
+		if (el.docFontList.children[index] !== row) el.docFontList.insertBefore(row, el.docFontList.children[index] || null);
+	});
 }
 
 async function openFontBinding(font) {

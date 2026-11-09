@@ -105,7 +105,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 			}
 		}
 	}
-	refs, resources, references, safe, err := scanEditorResources(ctx, reader, parts, generated, names, progress, multiple || prune)
+	refs, resources, references, safe, err := e.scanOutputResources(ctx, reader, parts, generated, names, progress, multiple || prune)
 	if err != nil {
 		return nil, err
 	}

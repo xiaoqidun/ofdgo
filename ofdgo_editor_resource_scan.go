@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/xml"
 	"io"
 	"maps"
@@ -31,10 +32,64 @@ type editorResourceScope struct {
 	refs   *editorResourceRefs
 }
 
+// editorScanKey 按来源、文件路径及本次覆盖内容区分引用扫描结果
+type editorScanKey struct {
+	reader   *Reader
+	name     string
+	digest   [32]byte
+	staged   *editorStagedPage
+	replaced bool
+}
+
+// editorScanValue 保存只读文件引用及资源索引标识
+type editorScanValue struct {
+	refs     *editorResourceRefs
+	resource bool
+}
+
+// scanOutputResources 在一次输出中复用未变化文件的引用，聚合与版本归属仍逐次计算
+// 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 扫描范围, progress 进度, collect 是否保留文件引用
+// 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可优化, error 读取或取消错误
+func (e *Editor) scanOutputResources(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names map[string]bool, progress editorProgress, collect bool) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
+	var cache *renderCache[editorScanKey, editorScanValue]
+	if e.output != nil {
+		if e.output.references == nil {
+			e.output.references = resourceCache[editorScanKey, editorScanValue](nil, 8<<20)
+		}
+		cache = e.output.references
+	}
+	return scanEditorResourceFiles(ctx, reader, parts, generated, names, progress, collect, cache)
+}
+
+// memorySize 估算文件引用的键与字体用字集合，不保留XML原文
+// 返回: int 内存成本
+func (v editorScanValue) memorySize() int {
+	cost := 256
+	for _, values := range []map[string]bool{v.refs.ids, v.refs.files, v.refs.versions, v.refs.documents} {
+		for key := range values {
+			cost += 64 + len(key)
+		}
+	}
+	for key := range v.refs.roles {
+		cost += 64 + len(key)
+	}
+	for key, font := range v.refs.fonts {
+		cost += 256 + len(key) + 32*(len(font.chars)+len(font.glyphs))
+	}
+	return cost
+}
+
 // scanEditorResources 优先扫描结构依赖，原始数据不按XML解析，孤立文件仍保留引用检查
 // 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 扫描范围, progress 扫描进度, collect 是否保留各文件的资源引用
 // 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可安全优化, error 读取或取消错误
 func scanEditorResources(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names map[string]bool, progress editorProgress, collect bool) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
+	return scanEditorResourceFiles(ctx, reader, parts, generated, names, progress, collect, nil)
+}
+
+// scanEditorResourceFiles 扫描文件依赖，可复用同次输出的独立文件结果
+// 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 范围, progress 进度, collect 是否保留文件引用, cache 本次扫描缓存
+// 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可优化, error 读取或取消错误
+func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names map[string]bool, progress editorProgress, collect bool, cache *renderCache[editorScanKey, editorScanValue]) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
 	refs := &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage), roles: make(map[string]int), documents: make(map[string]bool), versions: make(map[string]bool)}
 	var resources []string
 	var references map[string]*editorResourceRefs
@@ -95,29 +150,46 @@ func scanEditorResources(ctx context.Context, reader *Reader, parts map[string][
 		local := known.refs
 		resource, safe, shared := false, true, false
 		if !replaced || local == nil || !known.matches(data) {
-			shared = included && !collect
-			if shared {
-				sharedRefs.roles = nil
-				local = &sharedRefs
-			} else {
-				local = &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
+			key := editorScanKey{reader: reader, name: name, replaced: replaced, staged: known.staged}
+			var cached editorScanValue
+			var found bool
+			if cache != nil {
+				if replaced {
+					key.digest = sha256.Sum256(data)
+				}
+				cached, found = cache.get(key)
 			}
-			var input io.ReadCloser
-			if replaced {
-				if data == nil && known.staged != nil {
-					input = known.staged.open()
+			if found {
+				local, resource = cached.refs, cached.resource
+			} else {
+				shared = cache == nil && included && !collect
+				if shared {
+					sharedRefs.roles = nil
+					local = &sharedRefs
 				} else {
-					input = io.NopCloser(bytes.NewReader(data))
+					local = &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
 				}
-			} else {
-				var err error
-				input, err = reader.openFile(name)
-				if err != nil {
-					return nil, nil, nil, false, err
+				var input io.ReadCloser
+				if replaced {
+					if data == nil && known.staged != nil {
+						input = known.staged.open()
+					} else {
+						input = io.NopCloser(bytes.NewReader(data))
+					}
+				} else {
+					var err error
+					input, err = reader.openFile(name)
+					if err != nil {
+						return nil, nil, nil, false, err
+					}
+				}
+				resource, safe = local.scanContext(ctx, input, name)
+				input.Close()
+				if cache != nil && safe && ctx.Err() == nil {
+					value := editorScanValue{refs: local, resource: resource}
+					cache.put(key, value, value.memorySize()+len(name))
 				}
 			}
-			resource, safe = local.scanContext(ctx, input, name)
-			input.Close()
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, false, err

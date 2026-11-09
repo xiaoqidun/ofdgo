@@ -48,6 +48,7 @@ type Renderer struct {
 	pageContext           context.Context
 	textOnly              bool
 	printing              bool
+	compactStrokes        bool
 	printContents         string
 	textContentOnly       bool
 	backends              RenderBackends

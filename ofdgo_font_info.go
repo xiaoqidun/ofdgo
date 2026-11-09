@@ -519,6 +519,43 @@ func (r *Renderer) readPageFontUsage(page Page) (map[string]int, error) {
 	return content.usage, nil
 }
 
+// fontUsageObject 仅读取图元的字体、画刷及裁剪依赖，不构造坐标和路径数据
+type fontUsageObject struct {
+	Font        string       `xml:"Font,attr"`
+	DrawParam   string       `xml:"DrawParam,attr"`
+	Fill        *bool        `xml:"Fill,attr"`
+	Stroke      *bool        `xml:"Stroke,attr"`
+	FillColor   *FillColor   `xml:"FillColor"`
+	StrokeColor *StrokeColor `xml:"StrokeColor"`
+	Clips       *Clips       `xml:"Clips"`
+	Border      *ImageBorder `xml:"Border"`
+}
+
+// UnmarshalXML 读取标准命名空间内的字体依赖，跳过无关图元内容
+// 入参: d XML解码器, start 图元起始节点
+// 返回: error 解析错误
+func (o *fontUsageObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type plain fontUsageObject
+	var value plain
+	if err := decodeGraphicAttributes(start, &value); err != nil {
+		return err
+	}
+	*o = fontUsageObject(value)
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "FillColor":
+			return d.DecodeElement(&o.FillColor, &node)
+		case "StrokeColor":
+			return d.DecodeElement(&o.StrokeColor, &node)
+		case "Clips":
+			return d.DecodeElement(&o.Clips, &node)
+		case "Border":
+			return d.DecodeElement(&o.Border, &node)
+		}
+		return d.Skip()
+	})
+}
+
 // decodeObjects 逐个读取图元并复用字体统计规则
 // 入参: d XML解码器, start 容器起始节点, defaults 默认绘制参数
 // 返回: error 错误信息
@@ -527,29 +564,21 @@ func (p *fontUsagePage) decodeObjects(d *xml.Decoder, start xml.StartElement, de
 		switch node.Name.Local {
 		case "PageBlock":
 			return p.decodeObjects(d, node, defaults)
-		case "TextObject":
-			var obj TextObject
+		case "TextObject", "PathObject", "ImageObject":
+			var obj fontUsageObject
 			if err := d.DecodeElement(&obj, &node); err != nil {
 				return err
 			}
-			p.renderer.countObjectFonts(GraphicObject{Type: "TextObject", TextObject: obj}, p.usage, defaults, nil)
-			return nil
-		case "PathObject":
-			var obj struct {
-				PathObject
-				AbbreviatedData struct{} `xml:"AbbreviatedData"`
+			graphic := GraphicObject{Type: node.Name.Local}
+			switch node.Name.Local {
+			case "TextObject":
+				graphic.TextObject = TextObject{Font: obj.Font, DrawParam: obj.DrawParam, Fill: obj.Fill, Stroke: obj.Stroke, FillColor: obj.FillColor, StrokeColor: obj.StrokeColor, Clips: obj.Clips}
+			case "PathObject":
+				graphic.PathObject = PathObject{DrawParam: obj.DrawParam, Fill: obj.Fill, Stroke: obj.Stroke, FillColor: obj.FillColor, StrokeColor: obj.StrokeColor, Clips: obj.Clips}
+			case "ImageObject":
+				graphic.ImageObject = ImageObject{Border: obj.Border, Clips: obj.Clips}
 			}
-			if err := d.DecodeElement(&obj, &node); err != nil {
-				return err
-			}
-			p.renderer.countObjectFonts(GraphicObject{Type: "PathObject", PathObject: obj.PathObject}, p.usage, defaults, nil)
-			return nil
-		case "ImageObject":
-			var obj ImageObject
-			if err := d.DecodeElement(&obj, &node); err != nil {
-				return err
-			}
-			p.renderer.countObjectFonts(GraphicObject{Type: "ImageObject", ImageObject: obj}, p.usage, defaults, nil)
+			p.renderer.countObjectFonts(graphic, p.usage, defaults, nil)
 			return nil
 		}
 		var layer Layer

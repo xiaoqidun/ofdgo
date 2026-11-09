@@ -60,6 +60,7 @@ type Session struct {
 	Reader           *ofdgo.Reader
 	Renderer         *ofdgo.Renderer
 	input            *ofdgo.Input
+	pdfSource        *ofdgo.Input
 	fontFS           *ofdgo.FontFS
 	doc              *ofdgo.Document
 	pageCache        map[int]*ofdgo.PageContent
@@ -682,13 +683,17 @@ func (s *Session) SearchPageContext(ctx context.Context, index int, query string
 		s.cachePageText(index, text)
 	}
 	var matches []ofdgo.TextMatch
-	err := text.SearchEach(ctx, query, func(match ofdgo.TextMatch) error {
+	visit := func(match ofdgo.TextMatch) error {
 		matches = append(matches, match)
 		if limit > 0 && len(matches) >= limit {
 			return io.EOF
 		}
 		return nil
-	})
+	}
+	cached, err := s.textCache.SearchEach(ctx, index, query, visit)
+	if !cached && err == nil {
+		err = text.SearchEach(ctx, query, visit)
+	}
 	if err != nil && err != io.EOF {
 		return nil, err
 	}
@@ -960,6 +965,28 @@ func (s *Session) ExportDocument(value string, dpi float64, writer io.Writer, in
 func (s *Session) ExportPDF(writer io.Writer, indices ...int) error {
 	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
 		return fmt.Errorf("ofd document is not opened")
+	}
+	if s.pdfSource != nil && s.editor == nil && len(indices) == 0 && s.Renderer.RenderAnnotations {
+		ctx := s.Renderer.OutputContext
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if s.Renderer.OnExportProgress != nil {
+			if err := s.Renderer.OnExportProgress(0, len(s.doc.Pages.Page)); err != nil {
+				return err
+			}
+		}
+		_, err := ofdgo.Convert(ctx, s.pdfSource, writer, ofdgo.ConvertOptions{Input: "pdf", Format: "pdf", Compression: s.Renderer.Compression})
+		if err == nil && s.Renderer.OnExportProgress != nil {
+			err = s.Renderer.OnExportProgress(len(s.doc.Pages.Page), len(s.doc.Pages.Page))
+		}
+		if err == nil {
+			err = ctx.Err()
+		}
+		return err
 	}
 	return s.Renderer.RenderToMultiPagePDF(writer, indices...)
 }
@@ -1620,7 +1647,12 @@ func (e *businessEngine) finishPDF() ([]byte, error) {
 		return nil, err
 	}
 	warnings, err := json.Marshal(report.Warnings)
-	e.clearPDF()
+	e.currentSession.input = e.pdf.input
+	if !e.currentSession.Reader.Encryption().Encrypted {
+		e.currentSession.pdfSource = e.pdf.input
+	}
+	e.pdf.importer.Close()
+	e.pdf = nil
 	e.pdfWarnings = warnings
 	return warnings, err
 }

@@ -53,7 +53,7 @@ type ConvertProgress struct {
 // SkipUnchanged仅在未压缩、源格式与目标相同且未选页时不写出数据
 // Pool可由多个独立转换共享，nil时不限制文件间并发
 // Resources提供共享计算与缓存策略，显式Pool优先控制计算调度
-// 整份PDF同格式压缩直接重写PDF对象，其余PDF先转换为OFD对象再输出
+// 整份PDF同格式输出直接重写PDF对象，其余PDF先转换为OFD对象再输出
 // RendererOptions同时用于PDF局部合成和输出，在PDF.RendererOptions之后应用
 // Backends统一配置转换与输出，优先于PDF和RendererOptions中的后端设置
 // Compression统一配置输出及PDF图片导入，优先于PDF.Compression，文本输出不优化图片
@@ -237,7 +237,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 	if output == nil && options.PageOutput == nil {
 		return report, fmt.Errorf("missing output writer")
 	}
-	if report.Input == "pdf" && format == "pdf" && options.Compression.Mode != CompressionUnchanged && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
+	if report.Input == "pdf" && format == "pdf" && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
 		pdfReader, openErr := pdfgo.NewReaderWithOptions(operationInput, size, pdfgo.ReaderOptions{Password: options.PDF.Password, PasswordUTF8: options.PDF.PasswordUTF8})
 		if openErr != nil {
 			return report, openErr

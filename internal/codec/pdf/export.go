@@ -33,10 +33,12 @@ type TextPage struct {
 
 // WriteOptions 保存PDF最终写出所需的元数据、像素、文字和导航修正
 // Images逐页记录绘制图像，nil图像表示不替换；Links保留全部链接位置，包括矩形区域的nil项
+// ImageClips按页和图像绘制顺序提供单位方形坐标中的裁剪路径，空字符串表示不裁剪
 // PrepareRewrite在页面引用确定后填充导航动作，不得提前写出PDF
 type WriteOptions struct {
 	Information    pdfgo.Dictionary
 	Images         [][]image.Image
+	ImageClips     [][]string
 	Text           []TextPage
 	Links          map[int][]*pdfgo.LinkRegion
 	ExactImages    bool
@@ -50,7 +52,7 @@ type WriteOptions struct {
 // 返回: error 资源、压缩或写入错误
 func Write(ctx context.Context, data []byte, writer io.Writer, settings WriteOptions) error {
 	nativeWrite := settings.PrepareRewrite != nil
-	if !settings.ExactImages && !settings.ExactText && !nativeWrite && len(settings.Information) == 0 && settings.Optimization.Compression.Mode == pdfgo.CompressionUnchanged {
+	if !settings.ExactImages && !settings.ExactText && len(settings.ImageClips) == 0 && !nativeWrite && len(settings.Information) == 0 && settings.Optimization.Compression.Mode == pdfgo.CompressionUnchanged {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -65,7 +67,7 @@ func Write(ctx context.Context, data []byte, writer io.Writer, settings WriteOpt
 		return err
 	}
 	defer reader.Close()
-	if !settings.ExactImages && !settings.ExactText && !nativeWrite {
+	if !settings.ExactImages && !settings.ExactText && len(settings.ImageClips) == 0 && !nativeWrite {
 		if len(settings.Information) != 0 {
 			_, err := reader.RewriteTo(ctx, writer, pdfgo.RewriteOptions{Information: settings.Information, Optimization: settings.Optimization})
 			return err
@@ -177,6 +179,29 @@ func Write(ctx context.Context, data []byte, writer io.Writer, settings WriteOpt
 		return fmt.Errorf("PDF output page missing")
 	}
 	options := pdfgo.RewriteOptions{Information: settings.Information, Images: images, ImageOptions: pdfgo.ImageWriteOptions{PreblendBinary: true}, LinkRegions: links, TextReplacements: texts, Optimization: settings.Optimization}
+	pageClips := make(map[pdfgo.Reference][]string, len(references))
+	for i, ref := range references {
+		if i < len(settings.ImageClips) {
+			pageClips[ref] = settings.ImageClips[i]
+		}
+	}
+	options.TransformContent = func(ctx context.Context, page *pdfgo.Page, data []byte) ([]byte, error) {
+		clipped, err := clipPageImages(ctx, data, pageClips[page.Reference])
+		if err != nil {
+			return nil, err
+		}
+		if clipped != nil {
+			data = clipped
+		}
+		compact, err := pdfgo.CompactText(ctx, data)
+		if err != nil {
+			return nil, err
+		}
+		if compact != nil {
+			return compact, nil
+		}
+		return clipped, nil
+	}
 	if nativeWrite {
 		if err := settings.PrepareRewrite(ctx, reader, references, &options); err != nil {
 			return err
@@ -197,4 +222,40 @@ func Write(ctx context.Context, data []byte, writer io.Writer, settings WriteOpt
 	}
 	_, err = reader.RewriteTo(ctx, writer, options)
 	return err
+}
+
+// clipPageImages 在图像局部坐标中应用独立裁剪，不解码或重新采样图像
+// 入参: ctx 取消上下文, data 页面指令, clips 各次图像绘制的局部裁剪路径
+// 返回: []byte 更新指令，未变化时为nil, error 解析或取消错误
+func clipPageImages(ctx context.Context, data []byte, clips []string) ([]byte, error) {
+	if len(clips) == 0 {
+		return nil, ctx.Err()
+	}
+	var output bytes.Buffer
+	position, previous, index := 0, 0, 0
+	err := pdfgo.WalkOperations(ctx, data, func(op pdfgo.Operation) error {
+		end := int(op.Offset) + len(op.Operator)
+		if op.Operator == "Do" {
+			if index < len(clips) && clips[index] != "" {
+				output.Write(data[position:previous])
+				output.WriteString(" q ")
+				output.WriteString(clips[index])
+				output.WriteString(" W n ")
+				output.Write(data[previous:end])
+				output.WriteString(" Q ")
+				position = end
+			}
+			index++
+		}
+		previous = end
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if position == 0 {
+		return nil, ctx.Err()
+	}
+	output.Write(data[position:])
+	return output.Bytes(), ctx.Err()
 }
