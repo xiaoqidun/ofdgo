@@ -3320,6 +3320,7 @@ button.outline-link:hover {
 
 .page-list.virtual-pages .thumb-paper {
 	aspect-ratio: auto;
+	align-self: stretch;
 }
 
 .page-list.grouped-pages .thumb-paper {
