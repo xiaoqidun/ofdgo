@@ -3,19 +3,19 @@ module github.com/xiaoqidun/ofdgo
 go 1.26.0
 
 require (
-	github.com/andybalholm/brotli v1.2.8
+	github.com/andybalholm/brotli v1.3.0
 	github.com/emmansun/gmsm v0.45.2
 	github.com/go-text/typesetting v0.3.5
 	github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c
 	github.com/tdewolff/font v0.0.0-20261010204837-88a7f6b56918
-	github.com/xiaoqidun/guigo v0.0.0-20261109073034-9bb219409e3d
+	github.com/xiaoqidun/guigo v0.0.0-20261110054647-31d2a81b8610
 	github.com/xiaoqidun/j2kgo v1.0.2
-	github.com/xiaoqidun/jbig2 v1.1.8
-	github.com/xiaoqidun/pdfgo v0.0.0-20261109154824-e17d16530d3f
+	github.com/xiaoqidun/jbig2 v1.1.9
+	github.com/xiaoqidun/pdfgo v0.0.0-20261110055331-115316fc9b10
 	golang.org/x/crypto v0.58.0
-	golang.org/x/image v0.47.0
-	golang.org/x/sys v0.49.0
-	golang.org/x/text v0.43.0
+	golang.org/x/image v0.48.0
+	golang.org/x/sys v0.50.0
+	golang.org/x/text v0.44.0
 )
 
 require (
