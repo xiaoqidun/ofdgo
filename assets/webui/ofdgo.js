@@ -3018,6 +3018,7 @@ function attachDocumentTab(tab) {
 	advanceDocumentSequence();
 	if (state.annotationCreate) state.annotationCreate.openSeq = state.openSeq;
 	el.attachmentDialog.attachmentEdit = tab.attachmentEdit ? {...tab.attachmentEdit, openSeq: state.openSeq} : null;
+	el.pageFrame.style.visibility = "";
 	el.svgHost.replaceChildren();
 	el.pageList.replaceChildren();
 	el.outlineList.replaceChildren();
@@ -7134,6 +7135,7 @@ async function openDocument(options = {}) {
 		return;
 	}
 	const openSeq = options.openSeq || advanceDocumentSequence();
+	const initialActions = options.activateActions && state.sourcePDF && !state.editing;
 	const previewPosition = options.previewScroll && state.pageWindow ? pageView.pageWindowAnchor(state.pageWindow) : null;
 	const viewport = options.keepPreview ? el.viewerPanel.getBoundingClientRect() : null;
 	const previewIDs = viewport ? [...state.visiblePages].filter((index) => {
@@ -7252,6 +7254,7 @@ async function openDocument(options = {}) {
 		}
 		renderMeta(options.keepPreview);
 		pageView.renderPageFlow();
+		el.pageFrame.style.visibility = initialActions ? "hidden" : "";
 		if (options.keepPreview) {
 			for (const [index, page] of state.pageCache) {
 				if (!page.previewOnly) pageView.mountPageSVG(index, page, openSeq);
@@ -7288,15 +7291,17 @@ async function openDocument(options = {}) {
 		if (page && options.resetScroll) {
 			canvasEditor.focus();
 		}
-		pageView.queueNearbyPages(pageIndex, openSeq);
-		loadDocumentDetails(openSeq, details);
 		if (page && options.activateActions) {
 			state.openActionEnabled = true;
 			state.openActionDocument = !state.editing;
 			state.openActionPage = state.editing ? state.doc.pages[state.pageIndex]?.id : null;
 			state.openActionTask = null;
-			scheduleOpenActions();
+			if (initialActions) await activateOpenActions(true);
+			else scheduleOpenActions();
 		}
+		if (openSeq !== state.openSeq || !isForegroundDocument(tab)) return;
+		pageView.queueNearbyPages(state.pageIndex, openSeq);
+		loadDocumentDetails(openSeq, details);
 	} catch (err) {
 		if (openSeq !== state.openSeq) {
 			return;
@@ -7310,6 +7315,7 @@ async function openDocument(options = {}) {
 		}
 		showError(err, true);
 	} finally {
+		if (initialActions && openSeq === state.openSeq && isForegroundDocument(tab)) el.pageFrame.style.visibility = "";
 		if (openSeq === state.openSeq || !isForegroundDocument(tab)) setBusy(false, "", 0, "", tab);
 	}
 }
@@ -11141,7 +11147,7 @@ function destinationPoint(page, x, y) {
 }
 
 async function navigateDestination(dest, openAction) {
-	if (document.body.hasAttribute("data-busy")) return;
+	if (document.body.hasAttribute("data-busy") && !openAction?.initial) return;
 	if (openAction && state.openActionTask !== openAction) return false;
 	const index = pageIndexByID(state.doc.pages, dest.pageID);
 	if (index < 0) {
@@ -11161,7 +11167,7 @@ async function navigateDestination(dest, openAction) {
 	};
 	const navigation = state.pageNavigation = { openSeq: seq, index };
 	try {
-		await pageView.renderPage(index, { fit: false, scroll: false, openAction, navigation });
+		await pageView.renderPage(index, { fit: false, scroll: false, keepBusy: !!openAction?.initial, openAction, navigation });
 		if (openAction && state.openActionTask !== openAction) return false;
 		if (seq !== state.openSeq || state.pageIndex !== index || state.pageNavigation !== navigation) return;
 		const page = state.doc.pages[index], size = pageView.pageViewSize(page);
@@ -11885,11 +11891,11 @@ function scheduleOpenActions() {
 	});
 }
 
-async function activateOpenActions() {
-	if (!state.openActionEnabled || !state.doc || state.editing || state.exporting || document.body.hasAttribute("data-busy")) return;
+async function activateOpenActions(initial = false) {
+	if (!state.openActionEnabled || !state.doc || state.editing || state.exporting || !initial && document.body.hasAttribute("data-busy")) return;
 	const pageID = state.doc.pages[state.pageIndex]?.id;
 	if (!pageID || !state.openActionDocument && state.openActionPage === pageID) return;
-	const task = { sequence: state.openSeq, seen: new Set(), navigating: false };
+	const task = { sequence: state.openSeq, seen: new Set(), navigating: false, initial };
 	state.openActionTask = task;
 	const current = () => task === state.openActionTask && task.sequence === state.openSeq && !state.editing;
 	let documentOpened = state.openActionDocument;
@@ -11914,6 +11920,7 @@ async function activateOpenActions() {
 				const surface = pageView.pageShell(state.pageIndex)?.querySelector(".page-surface");
 				const target = pageLinkTarget(link, info, surface, task);
 				if (!target) continue;
+				if (initial && (target.external || link.attachment || link.sound || link.movie)) el.pageFrame.style.visibility = "";
 				if ((target.external || link.attachment) && !await requestConfirmation(link.attachment
 					? `文档请求下载附件，是否继续？\n${link.fileName || ""}` : `文档请求打开链接，是否继续？\n${target.href}`)) return;
 				task.navigating = !!link.dest;
