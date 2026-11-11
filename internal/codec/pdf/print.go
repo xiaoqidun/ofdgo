@@ -15,6 +15,7 @@
 package pdf
 
 import (
+	"bufio"
 	"bytes"
 	"compress/zlib"
 	"context"
@@ -53,6 +54,51 @@ type printPDFObjects struct {
 	objects []pdfgo.Object
 	copied  map[pdfgo.Reference]pdfgo.Reference
 	source  *pdfgo.Reader
+}
+
+// printPDFWriter 记录输出偏移及首次错误，支持对象编码的连续写入
+type printPDFWriter struct {
+	writer io.Writer
+	size   int64
+	err    error
+}
+
+// Write 写入数据并记录短写或底层错误
+// 入参: data 输出数据
+// 返回: int 已写字节数, error 写入错误
+func (w *printPDFWriter) Write(data []byte) (int, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
+	total := 0
+	for len(data) != 0 {
+		chunk := data[:min(len(data), 32<<10)]
+		n, err := w.writer.Write(chunk)
+		total += n
+		w.size += int64(n)
+		if err == nil && n != len(chunk) {
+			err = io.ErrShortWrite
+		}
+		w.err = err
+		if err != nil {
+			return total, err
+		}
+		data = data[n:]
+	}
+	return total, nil
+}
+
+// WriteString 写入PDF语法文本
+// 入参: value 输出文本
+// 返回: int 已写字节数, error 写入错误
+func (w *printPDFWriter) WriteString(value string) (int, error) { return w.Write([]byte(value)) }
+
+// WriteByte 写入PDF语法字符
+// 入参: value 输出字符
+// 返回: error 写入错误
+func (w *printPDFWriter) WriteByte(value byte) error {
+	_, err := w.Write([]byte{value})
+	return err
 }
 
 // printPDFNumbers 编码内容流数值，不使用PDF语法不接受的科学记数法
@@ -132,14 +178,14 @@ func (p *printPDFObjects) copy(object pdfgo.Object, depth int) (pdfgo.Object, er
 	}
 }
 
-// WritePrintPDF 将源页面作为独立表单放置，保持矢量、文字、资源及透明组
-// 入参: ctx 输出上下文, writer 输出流, source 源PDF数据, sheets 有序纸面
+// WritePrintPDF 从随机读取源组装打印纸面，保持矢量、文字、资源及透明组
+// 入参: ctx 输出上下文, writer 输出流, source 源PDF, size 源数据长度, sheets 有序纸面
 // 返回: error 资源、编码、写入或取消错误
-func WritePrintPDF(ctx context.Context, writer io.Writer, source []byte, sheets []PrintSheet) error {
+func WritePrintPDF(ctx context.Context, writer io.Writer, source io.ReaderAt, size int64, sheets []PrintSheet) error {
 	var reader *pdfgo.Reader
-	if len(source) > 0 {
+	if size > 0 {
 		var err error
-		reader, err = pdfgo.NewReader(bytes.NewReader(source), int64(len(source)))
+		reader, err = pdfgo.NewReader(source, size)
 		if err != nil {
 			return err
 		}
@@ -216,7 +262,7 @@ func WritePrintPDF(ctx context.Context, writer io.Writer, source []byte, sheets 
 			content.WriteString("q 0 g BT /Label 7.94 Tf 1 0 0 1 ")
 			printPDFNumbers(&content, sheet.LabelX*pt, (sheet.Height-sheet.LabelY)*pt)
 			content.WriteString("Tm ")
-			if err := printPDFObject(&content, pdfgo.String(sheet.Label), 0); err != nil {
+			if err := printPDFObject(&printPDFWriter{writer: &content}, pdfgo.String(sheet.Label), 0); err != nil {
 				return err
 			}
 			content.WriteString(" Tj ET Q\n")
@@ -280,33 +326,38 @@ func WritePrintImages(ctx context.Context, writer io.Writer, sheets []PrintSheet
 func (p *printPDFObjects) write(writer io.Writer, children pdfgo.Array) error {
 	p.objects[0] = pdfgo.Dictionary{"Type": pdfgo.Name("Catalog"), "Pages": pdfgo.Reference{Number: 2}}
 	p.objects[1] = pdfgo.Dictionary{"Type": pdfgo.Name("Pages"), "Count": pdfgo.Integer(len(children)), "Kids": children}
-	var out bytes.Buffer
+	buffer := bufio.NewWriter(outputWriter{ctx: p.ctx, writer: writer})
+	out := &printPDFWriter{writer: buffer}
 	out.WriteString("%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
-	offsets := make([]int, len(p.objects))
+	offsets := make([]int64, len(p.objects))
 	for i, object := range p.objects {
 		if err := p.ctx.Err(); err != nil {
 			return err
 		}
-		offsets[i] = out.Len()
-		fmt.Fprintf(&out, "%d 0 obj\n", i+1)
-		if err := printPDFObject(&out, object, 0); err != nil {
+		offsets[i] = out.size
+		fmt.Fprintf(out, "%d 0 obj\n", i+1)
+		if err := printPDFObject(out, object, 0); err != nil {
 			return err
 		}
 		out.WriteString("\nendobj\n")
+		p.objects[i] = nil
 	}
-	xref := out.Len()
-	fmt.Fprintf(&out, "xref\n0 %d\n0000000000 65535 f \n", len(offsets)+1)
+	xref := out.size
+	fmt.Fprintf(out, "xref\n0 %d\n0000000000 65535 f \n", len(offsets)+1)
 	for _, offset := range offsets {
-		fmt.Fprintf(&out, "%010d 00000 n \n", offset)
+		fmt.Fprintf(out, "%010d 00000 n \n", offset)
 	}
-	fmt.Fprintf(&out, "trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n", len(offsets)+1, xref)
-	return Write(p.ctx, out.Bytes(), writer, WriteOptions{})
+	fmt.Fprintf(out, "trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n", len(offsets)+1, xref)
+	if out.err != nil {
+		return out.err
+	}
+	return buffer.Flush()
 }
 
 // printPDFObject 编码已复制的标准PDF对象，名称和字符串按字节转义
-// 入参: out 对象缓冲区, object 待编码对象, depth 当前递归深度
-// 返回: error 类型或嵌套错误
-func printPDFObject(out *bytes.Buffer, object pdfgo.Object, depth int) error {
+// 入参: out 对象输出, object 待编码对象, depth 当前递归深度
+// 返回: error 类型、嵌套或写入错误
+func printPDFObject(out *printPDFWriter, object pdfgo.Object, depth int) error {
 	if depth > 256 {
 		return fmt.Errorf("print PDF object nesting too deep")
 	}
@@ -371,5 +422,5 @@ func printPDFObject(out *bytes.Buffer, object pdfgo.Object, depth int) error {
 	default:
 		return fmt.Errorf("unsupported print PDF object %T", object)
 	}
-	return nil
+	return out.err
 }

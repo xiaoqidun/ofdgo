@@ -360,9 +360,9 @@ func (p *PrintDocument) WritePDF(ctx context.Context, writer io.Writer) error {
 	slices.Sort(indices)
 	indices = slices.Compact(indices)
 	if len(indices) == 0 {
-		return codecpdf.WritePrintPDF(ctx, writer, nil, sheets)
+		return codecpdf.WritePrintPDF(ctx, writer, nil, 0, sheets)
 	}
-	var source bytes.Buffer
+	var source editorSnapshotBuffer
 	if err := p.renderer.RenderToMultiPagePDF(&source, indices...); err != nil {
 		return err
 	}
@@ -371,5 +371,5 @@ func (p *PrintDocument) WritePDF(ctx context.Context, writer io.Writer) error {
 			sheets[i].Placements[j].Page, _ = slices.BinarySearch(indices, sheets[i].Placements[j].Page)
 		}
 	}
-	return codecpdf.WritePrintPDF(ctx, writer, source.Bytes(), sheets)
+	return codecpdf.WritePrintPDF(ctx, writer, &source, source.size, sheets)
 }

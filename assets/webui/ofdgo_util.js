@@ -5,7 +5,10 @@ export class VirtualList {
 		this.rows = new Map();
 		this.content = document.createElement("div");
 		this.content.style.position = "relative";
-		this.observer = new ResizeObserver(() => this.measure());
+		this.observer = new ResizeObserver(() => {
+			if (this.frame) return;
+			this.frame = requestAnimationFrame(() => { this.frame = 0; this.measure(); });
+		});
 		this.observer.observe(container);
 		container.addEventListener("scroll", () => {
 			if (!this.view) return;
@@ -28,7 +31,11 @@ export class VirtualList {
 	}
 
 	set(view) {
-		if (view && view === this.view) { this.measure(); return; }
+		if (view && view === this.view) {
+			if (this.offsets.length !== view.items.length + 1) this.layout(this.offsets.length <= view.items.length ? this.offsets.length - 1 : 0);
+			this.measure();
+			return;
+		}
 		if (this.view) this.view.top = this.container.scrollTop;
 		for (const row of this.rows.values()) this.observer.unobserve(row);
 		this.rows.clear();
@@ -42,10 +49,10 @@ export class VirtualList {
 		this.update();
 	}
 
-	layout() {
+	layout(start = 0) {
 		const view = this.view;
-		this.offsets = [0];
-		for (const item of view.items) this.offsets.push(this.offsets.at(-1) + (view.heights.get(item) || 100));
+		if (!start) this.offsets = [0];
+		for (let index = start; index < view.items.length; index++) this.offsets.push(this.offsets.at(-1) + (view.heights.get(view.items[index]) || 100));
 		this.content.style.height = `${this.offsets.at(-1)}px`;
 		for (const [index, row] of this.rows) row.style.top = `${this.offsets[index]}px`;
 	}

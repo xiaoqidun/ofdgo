@@ -11572,10 +11572,15 @@ function renderAnnotationSummary(reset = false) {
 	const query = state.annotationFilter.query.trim().toLocaleLowerCase();
 	const kind = state.annotationFilter.kind;
 	const previous = summary.view;
-	if (previous?.query !== query || previous?.kind !== kind || previous?.editing !== state.editing || previous?.count !== summary.items.length) {
-		const items = summary.search.filter(entry => (!kind || entry.kind === kind) && entry.text.includes(query)).map(entry => entry.item);
-		summary.view = {items, query, kind, count: summary.items.length, editing: state.editing, top: state.annotationFilter.top || 0};
+	if (previous?.query !== query || previous?.kind !== kind || previous?.editing !== state.editing) {
+		summary.view = {items: [], query, kind, count: 0, editing: state.editing, top: state.annotationFilter.top || 0};
 	}
+	const view = summary.view;
+	for (let index = view.count; index < summary.search.length; index++) {
+		const entry = summary.search[index];
+		if ((!kind || entry.kind === kind) && entry.text.includes(query)) view.items.push(entry.item);
+	}
+	view.count = summary.search.length;
 	const items = summary.view.items;
 	el.annotationsStatus.textContent = summary.items.length ? `${items.length} / ${summary.items.length}` : summary.loading ? "正在读取注解" : "";
 	annotationList.set(summary.view);
