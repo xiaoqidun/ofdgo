@@ -41,6 +41,37 @@ type pngColor struct {
 	linearSRGB bool
 }
 
+// TransformRGBA 按八位预乘颜色变换同范围像素，源和目标可为同一图像
+// 入参: target 目标缓冲, source 同范围源图像, transform 单像素颜色变换
+func TransformRGBA(target *image.RGBA, source image.Image, transform func(color.RGBA) color.RGBA) {
+	for y := target.Rect.Min.Y; y < target.Rect.Max.Y; y++ {
+		row := target.Pix[target.PixOffset(target.Rect.Min.X, y):][:target.Rect.Dx()*4]
+		for x := target.Rect.Min.X; x < target.Rect.Max.X; x++ {
+			var pixel color.RGBA
+			switch source := source.(type) {
+			case *image.RGBA:
+				i := source.PixOffset(x, y)
+				pixel = color.RGBA{R: source.Pix[i], G: source.Pix[i+1], B: source.Pix[i+2], A: source.Pix[i+3]}
+			case *image.NRGBA:
+				i := source.PixOffset(x, y)
+				a := uint32(source.Pix[i+3])
+				pixel = color.RGBA{R: uint8(uint32(source.Pix[i]) * 257 * a / 255 >> 8), G: uint8(uint32(source.Pix[i+1]) * 257 * a / 255 >> 8), B: uint8(uint32(source.Pix[i+2]) * 257 * a / 255 >> 8), A: uint8(a)}
+			case *image.Gray:
+				v := source.Pix[source.PixOffset(x, y)]
+				pixel = color.RGBA{R: v, G: v, B: v, A: 255}
+			case image.RGBA64Image:
+				v := source.RGBA64At(x, y)
+				pixel = color.RGBA{R: uint8(v.R >> 8), G: uint8(v.G >> 8), B: uint8(v.B >> 8), A: uint8(v.A >> 8)}
+			default:
+				pixel = color.RGBAModel.Convert(source.At(x, y)).(color.RGBA)
+			}
+			pixel = transform(pixel)
+			i := (x - target.Rect.Min.X) * 4
+			row[i], row[i+1], row[i+2], row[i+3] = pixel.R, pixel.G, pixel.B, pixel.A
+		}
+	}
+}
+
 // pngColorProfile 读取PNG颜色元数据，ICC优先于sRGB及独立校准参数
 // 入参: ctx 取消上下文, data 原始编码
 // 返回: []byte ICC编码, *pngColor 校准参数, error 格式或配置错误

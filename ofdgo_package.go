@@ -159,11 +159,16 @@ func mergePackageResources(ctx context.Context, reader *Reader, parts map[string
 		return "", false, err
 	}
 	order := []string{"ColorSpaces", "DrawParams", "Fonts", "MultiMedias", "CompositeGraphicUnits"}
+	root, err := parseEditorXMLContext(ctx, data)
+	if err != nil {
+		return "", false, err
+	}
+	slices.SortStableFunc(addition.children, func(a, b *editorXML) int {
+		return slices.Index(order, a.name.Local) - slices.Index(order, b.name.Local)
+	})
+	var patches []editorXMLPatch
+	var addedContent []byte
 	for _, group := range addition.children {
-		root, err := parseEditorXMLContext(ctx, data)
-		if err != nil {
-			return "", false, err
-		}
 		target := root.child(group.name.Local)
 		scope := root
 		used := make(map[[2]string]bool)
@@ -203,7 +208,7 @@ func mergePackageResources(ctx context.Context, reader *Reader, parts map[string
 		}
 		if target != nil {
 			content = append(bytes.Clone(data[target.open:target.close]), content...)
-			data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, target, content)})
+			patches = append(patches, editorXMLContent(data, target, content))
 			continue
 		}
 		content, err = root.containerXML(group.name.Local, nil, content)
@@ -218,13 +223,19 @@ func mergePackageResources(ctx context.Context, reader *Reader, parts map[string
 			}
 		}
 		if root.open == root.end {
-			data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, root, content)})
+			addedContent = append(addedContent, content...)
 		} else {
-			data = editorPatchXML(data, []editorXMLPatch{{position, position, content}})
+			patches = append(patches, editorXMLPatch{position, position, content})
 		}
+	}
+	if len(addedContent) != 0 {
+		patches = append(patches, editorXMLContent(data, root, addedContent))
 	}
 	if err := ctx.Err(); err != nil {
 		return "", false, err
+	}
+	if len(patches) != 0 {
+		data = editorPatchXML(data, patches)
 	}
 	parts[name] = data
 	return name, false, nil

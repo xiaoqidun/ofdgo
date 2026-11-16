@@ -447,7 +447,7 @@ func (p *pdfImporter) temporaryReader() (*Reader, error) {
 	if p.editor.source != nil || len(p.editor.origins) != 0 {
 		return p.editor.readerContext(p.ctx, nil)
 	}
-	return p.editor.resourceReader()
+	return p.editor.resourceReader(p.ctx)
 }
 
 // groupSceneBounds 计算已编译场景在页面内的像素对齐区域

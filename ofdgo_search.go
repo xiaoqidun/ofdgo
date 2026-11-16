@@ -397,8 +397,11 @@ func (p *PageText) searchEach(ctx context.Context, query string, visit func(Text
 
 // NewTextSearchIndex 创建独立搜索快照，复制字符区域，保留Unicode折叠和跨对象匹配
 // 入参: ctx 取消上下文, text 页面原文
-// 返回: *TextSearchIndex 不可变索引, error 取消错误
+// 返回: *TextSearchIndex 不可变索引, error 参数或取消错误
 func NewTextSearchIndex(ctx context.Context, text *PageText) (*TextSearchIndex, error) {
+	if text == nil {
+		return nil, fmt.Errorf("missing page text")
+	}
 	copy := PageText{Runs: slices.Clone(text.Runs)}
 	for i := range copy.Runs {
 		if err := ctx.Err(); err != nil {

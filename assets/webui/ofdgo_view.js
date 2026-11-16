@@ -9,6 +9,7 @@ export const SCROLL_SEGMENT_SIZE = 1000000;
 let textMeasure = null;
 
 export function createPageView(context) {
+	let scrollbarMeasurement = null;
 	const pageView = {
 		async renderPage(index, options = {}) {
 			const tab = context.documentTab(), state = tab.state;
@@ -1527,18 +1528,22 @@ export function createPageView(context) {
 		},
 
 		scrollbarWidth() {
+			const style = getComputedStyle(context.el.viewerPanel).scrollbarWidth;
+			const key = `${style}:${window.devicePixelRatio || 1}:${window.innerWidth}:${window.innerHeight}:${window.visualViewport?.scale || 1}`;
+			if (scrollbarMeasurement?.key === key) return scrollbarMeasurement.width;
 			const probe = document.createElement("div");
 			const content = document.createElement("div");
 			probe.style.position = "absolute";
 			probe.style.width = "100px";
 			probe.style.height = "100px";
 			probe.style.overflow = "scroll";
-			probe.style.scrollbarWidth = getComputedStyle(context.el.viewerPanel).scrollbarWidth;
+			probe.style.scrollbarWidth = style;
 			probe.style.left = "-9999px";
 			probe.append(content);
 			document.body.append(probe);
 			const width = 100 - Number.parseFloat(getComputedStyle(content).width);
 			probe.remove();
+			scrollbarMeasurement = { key, width };
 			return width;
 		},
 

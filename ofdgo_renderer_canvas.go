@@ -21,6 +21,7 @@ import (
 	"image/draw"
 	"math"
 	"slices"
+	"sync"
 
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers/rasterizer"
@@ -31,6 +32,42 @@ import (
 // CanvasBackend canvas页面编译与绘制适配器，ColorSpace仅影响光栅输出
 type CanvasBackend struct {
 	ColorSpace canvas.ColorSpace
+}
+
+// canvasSRGBTables 复用八位预乘sRGB的双向传递表，透明度参与索引以保留原运算精度
+var canvasSRGBTables = sync.OnceValue(func() [2]*[256][256]uint8 {
+	var result [2]*[256][256]uint8
+	space := canvas.SRGBColorSpace{}
+	for direction, transform := range []func(color.Color) color.RGBA{space.ToLinear, space.FromLinear} {
+		table := new([256][256]uint8)
+		for alpha := range 256 {
+			for value := range 256 {
+				table[alpha][value] = transform(color.RGBA{R: uint8(value), A: uint8(alpha)}).R
+			}
+		}
+		result[direction] = table
+	}
+	return result
+})
+
+// canvasColorTransfer 准备八位预乘颜色变换，任意自定义空间保留其原始计算
+// 入参: space 颜色空间, linear 是否转入线性空间
+// 返回: func(color.RGBA) color.RGBA 单像素变换
+func canvasColorTransfer(space canvas.ColorSpace, linear bool) func(color.RGBA) color.RGBA {
+	if _, ok := space.(canvas.SRGBColorSpace); ok {
+		direction := 1
+		if linear {
+			direction = 0
+		}
+		table := canvasSRGBTables()[direction]
+		return func(value color.RGBA) color.RGBA {
+			return color.RGBA{R: table[value.A][value.R], G: table[value.A][value.G], B: table[value.A][value.B], A: value.A}
+		}
+	}
+	if linear {
+		return func(value color.RGBA) color.RGBA { return space.ToLinear(value) }
+	}
+	return func(value color.RGBA) color.RGBA { return space.FromLinear(value) }
 }
 
 // rasterStrokeGradientCanvas 保留页面坐标描边的局部渐变定位
@@ -109,11 +146,7 @@ func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Ima
 			}
 			if _, linear := space.(canvas.LinearColorSpace); !linear {
 				converted := image.NewRGBA(source.Bounds())
-				for y := source.Bounds().Min.Y; y < source.Bounds().Max.Y; y++ {
-					for x := source.Bounds().Min.X; x < source.Bounds().Max.X; x++ {
-						converted.SetRGBA(x, y, space.ToLinear(color.RGBAModel.Convert(source.At(x, y)).(color.RGBA)))
-					}
-				}
+				baseimage.TransformRGBA(converted, source, canvasColorTransfer(space, true))
 				source = converted
 			}
 			if err := drawRasterImageCommand(b, page, img, source, cmd, &masks); err != nil {
@@ -225,7 +258,9 @@ func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Ima
 		local.RenderPath(p, style, matrix)
 		draw.DrawMask(img, mask.Rect, part, image.Point{}, mask, mask.Rect.Min, draw.Over)
 	}
-	r.Close()
+	if _, linear := space.(canvas.LinearColorSpace); !linear {
+		baseimage.TransformRGBA(img, img, canvasColorTransfer(space, false))
+	}
 	return img, nil
 }
 

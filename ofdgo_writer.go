@@ -604,12 +604,9 @@ func (e *Editor) invalidatePreviewPages(changes EditorChanges) {
 }
 
 // resourceReader 为临时图元编译准备资源索引，不序列化页面或作为公共快照
+// 入参: ctx 取消上下文
 // 返回: *Reader 资源阅读器, error 资源错误
-func (e *Editor) resourceReader() (*Reader, error) {
-	ctx := context.Background()
-	if e.output != nil {
-		ctx = e.output.ctx
-	}
+func (e *Editor) resourceReader(ctx context.Context) (*Reader, error) {
 	if e.source != nil || len(e.origins) != 0 {
 		return nil, fmt.Errorf("resource reader requires created objects")
 	}
@@ -623,10 +620,10 @@ func (e *Editor) resourceReader() (*Reader, error) {
 	}, nil, false, nil); err != nil {
 		return nil, err
 	}
-	if err := r.initRoot(); err != nil {
+	if err := r.initRootContext(ctx); err != nil {
 		return nil, err
 	}
-	if _, err := r.Doc(); err != nil {
+	if _, err := r.DocContext(ctx); err != nil {
 		return nil, err
 	}
 	return r, nil

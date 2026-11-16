@@ -1636,7 +1636,7 @@ func (e *businessEngine) pdfError(err error) error {
 	return err
 }
 
-// replacePDFReader 切换独立阅读快照，保留当前字体和注解设置
+// replacePDFReader 切换独立阅读快照，保留字体、文字和页面尺寸缓存及注解设置
 // 入参: reader 已生成的阅读器
 // 返回: error 会话创建错误
 func (e *businessEngine) replacePDFReader(reader *ofdgo.Reader) error {
@@ -1652,6 +1652,8 @@ func (e *businessEngine) replacePDFReader(reader *ofdgo.Reader) error {
 	next.Renderer.OutputContext = e.pdf.operation
 	next.fontFS = previous.fontFS
 	next.svgFonts = previous.svgFonts
+	next.textCache = previous.textCache
+	next.boxCache = previous.boxCache
 	e.currentSession = next
 	return previous.Close()
 }
@@ -1764,24 +1766,26 @@ func (e *businessEngine) preparePDF(name string, args []platformValue) error {
 		if err := e.pdf.importer.Reset(e.pdf.operation); err != nil {
 			return err
 		}
-		e.pdf.page, e.pdf.next, e.pdf.retry = -1, 0, false
 		reader, err := e.pdf.importer.Reader(e.pdf.operation, -1)
 		if err != nil {
 			return err
 		}
+		e.currentSession.textCache.Clear()
+		clear(e.currentSession.svgFonts)
 		if err := e.replacePDFReader(reader); err != nil {
 			return err
 		}
+		e.pdf.page, e.pdf.next, e.pdf.retry = -1, 0, false
 	}
 	switch name {
-	case "ofdgoLoadPDF", "ofdgoDestinationView":
+	case "ofdgoLoadPDF", "ofdgoDestinationView", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString":
 		return nil
 	case "ofdgoOpenLinks":
 		if len(args) == 0 {
 			return nil
 		}
 		fallthrough
-	case "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString":
+	case "ofdgoRenderPage":
 		if len(args) == 0 {
 			return fmt.Errorf("missing page index")
 		}
@@ -1791,7 +1795,7 @@ func (e *businessEngine) preparePDF(name string, args []platformValue) error {
 	}
 }
 
-// preparePDFPage 准备渐进文档的指定页面，批量读取与单页请求共用快照切换
+// preparePDFPage 准备渐进文档的指定页面，保留其他页面的文字和尺寸缓存
 // 入参: index 零基页面索引
 // 返回: error 转换或会话替换错误
 func (e *businessEngine) preparePDFPage(index int) error {
@@ -1806,6 +1810,23 @@ func (e *businessEngine) preparePDFPage(index int) error {
 		return err
 	}
 	e.pdf.page = index
+	return nil
+}
+
+// preparePDFText 按页提取渐进文档文字，保留当前阅读快照和有界搜索缓存
+// 入参: index 零基页面索引
+// 返回: error 转换、提取或取消错误
+func (e *businessEngine) preparePDFText(index int) error {
+	if e.pdf == nil || e.currentSession.cachedPageText(index) != nil {
+		return nil
+	}
+	renderer := e.currentSession.Renderer
+	dirs, sources := renderer.FontSources()
+	text, err := e.pdf.importer.PageText(e.pdf.operation, index, ofdgo.WithRenderBackends(renderer.Backends()), ofdgo.WithFontDirs(dirs...), func(target *ofdgo.Renderer) { target.SetFontFS(sources...) })
+	if err != nil {
+		return e.pdfError(err)
+	}
+	e.currentSession.cachePageText(index, text)
 	return nil
 }
 
@@ -3184,6 +3205,9 @@ func (e *businessEngine) pageTextString(args []platformValue) (any, error) {
 	if e.currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
+	if err := e.preparePDFText(args[0].Int()); err != nil {
+		return nil, err
+	}
 	return e.currentSession.PageTextString(args[0].Int())
 }
 
@@ -3193,6 +3217,9 @@ func (e *businessEngine) pageTextString(args []platformValue) (any, error) {
 func (e *businessEngine) searchPage(args []platformValue) (any, error) {
 	if e.currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	if err := e.preparePDFText(args[0].Int()); err != nil {
+		return nil, err
 	}
 	limit := 10001
 	if len(args) > 2 {
@@ -3218,10 +3245,8 @@ func (e *businessEngine) searchPages(args []platformValue) (any, error) {
 	limit := max(1, min(10001, args[3].Int()))
 	var results []pageSearchMatch
 	for page := args[0].Int(); page < args[0].Int()+args[1].Int(); page++ {
-		if e.pdf != nil {
-			if err := e.preparePDFPage(page); err != nil {
-				return nil, err
-			}
+		if err := e.preparePDFText(page); err != nil {
+			return nil, err
 		}
 		matches, err := e.currentSession.SearchPageContext(ctx, page, args[2].String(), limit-len(results))
 		if err != nil {

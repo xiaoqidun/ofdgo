@@ -79,6 +79,7 @@ type PDFImport struct {
 	options  PDFImportOptions
 	pages    []PageContent
 	ready    []bool
+	previews *renderCache[string, []byte]
 	err      error
 	finished bool
 }
@@ -513,6 +514,25 @@ func (p *PDFImport) Reader(ctx context.Context, index int) (*Reader, error) {
 	}
 	snapshot := *p.importer.editor
 	snapshot.pages = slices.Clone(p.pages)
+	if p.previews == nil {
+		p.previews = resourceCache[string, []byte](p.options.Resources, 16<<20)
+	}
+	snapshot.previewPages = make(map[string][]byte, len(p.pages))
+	for i, page := range p.pages {
+		if i == index {
+			continue
+		}
+		data, ok := p.previews.get(page.ID)
+		if !ok {
+			var err error
+			data, err = encodeOFDXMLContext(ctx, func(x *ofdXML) { x.page(page) })
+			if err != nil {
+				return nil, err
+			}
+			p.previews.put(page.ID, data, len(data)+128)
+		}
+		snapshot.previewPages[page.ID] = data
+	}
 	if index >= 0 {
 		snapshot.pages[index] = p.importer.editor.pages[index]
 	}
@@ -525,6 +545,27 @@ func (p *PDFImport) Reader(ctx context.Context, index int) (*Reader, error) {
 		reader.pageReady[reader.doc.Pages.Page[index].ID] = true
 	}
 	return reader, nil
+}
+
+// PageText 直接读取已转换页面的文字，不创建整本文档的阅读快照，不包含注解外观
+// 返回结果独立于转换会话，转换及提取失败时不返回部分文字
+// 入参: ctx 取消上下文, index 零基页面索引, options 本次提取的渲染配置，默认沿用导入配置
+// 返回: *PageText 页面文字, error 转换、提取或关闭错误
+func (p *PDFImport) PageText(ctx context.Context, index int, options ...RendererOption) (*PageText, error) {
+	if err := p.ConvertPage(ctx, index); err != nil {
+		return nil, err
+	}
+	snapshot := *p.importer.editor
+	snapshot.source = nil
+	snapshot.pages = []PageContent{snapshot.pages[index]}
+	reader, err := snapshot.resourceReader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	renderer := p.importer.renderer.childRenderer(reader, options...)
+	renderer.OutputContext = ctx
+	return renderer.PageTextContext(ctx, &snapshot.pages[0])
 }
 
 // PDFDestination 准备链接来源页并查询实时PDF定位语义，不修改已交付的阅读快照
@@ -604,6 +645,8 @@ func (p *PDFImport) Close() error {
 	err := p.importer.reader.Close()
 	p.importer = nil
 	p.pages, p.ready = nil, nil
+	p.previews.clear()
+	p.previews = nil
 	clear(p.options.Password)
 	p.options = PDFImportOptions{}
 	p.input = nil
