@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -66,6 +67,7 @@ type fontSourceCache struct {
 	candidates   map[string][]fontSource
 	directories  map[string][]basefont.FileCandidate
 	filesystems  map[int][]basefont.FileCandidate
+	names        map[int][]string
 	data         map[fontSourceKey]fontSourceData
 	collections  *renderCache[fontSourceKey, []byte]
 	fallback     ResolvedFont
@@ -82,7 +84,7 @@ type fontSourceData struct {
 // 入参: resources 共享资源策略
 // 返回: *fontSourceCache 字体来源缓存
 func newFontSourceCache(resources *Resources) *fontSourceCache {
-	return &fontSourceCache{candidates: make(map[string][]fontSource), directories: make(map[string][]basefont.FileCandidate), filesystems: make(map[int][]basefont.FileCandidate), data: make(map[fontSourceKey]fontSourceData), collections: resourceCache[fontSourceKey, []byte](resources, 32<<20)}
+	return &fontSourceCache{candidates: make(map[string][]fontSource), directories: make(map[string][]basefont.FileCandidate), filesystems: make(map[int][]basefont.FileCandidate), names: make(map[int][]string), data: make(map[fontSourceKey]fontSourceData), collections: resourceCache[fontSourceKey, []byte](resources, 32<<20)}
 }
 
 // child 复用相同来源的文件索引与数据，匹配和回退状态保持独立
@@ -90,6 +92,7 @@ func newFontSourceCache(resources *Resources) *fontSourceCache {
 func (c *fontSourceCache) child() *fontSourceCache {
 	cache := newFontSourceCache(nil)
 	cache.directories, cache.filesystems, cache.data = c.directories, c.filesystems, c.data
+	cache.names = c.names
 	cache.collections = c.collections
 	return cache
 }
@@ -129,7 +132,9 @@ func (r *Renderer) readFontSource(source fontSource, definition *Font) ([]byte, 
 	if err == nil {
 		data, _, err = basefont.SymbolProgram(context.Background(), data, "")
 	}
-	r.fontSourcesCache.data[key] = fontSourceData{data, err}
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		r.fontSourcesCache.data[key] = fontSourceData{data, err}
+	}
 	return data, err
 }
 
@@ -260,8 +265,8 @@ func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
 			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: match.Name, face: match.Face})
 		}
 	}
-	for index, fsys := range r.fontFS {
-		names, _ := fs.Glob(fsys, "*")
+	for index := range r.fontFS {
+		names, _ := r.fontFSNames(index)
 		for _, name := range names {
 			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: name})
 		}
@@ -324,11 +329,17 @@ func (r *Renderer) matchFontFS(index int, names []string, bold, italic bool) []b
 	}
 	candidates, ok := r.fontSourcesCache.filesystems[index]
 	if !ok {
-		files, _ := fs.Glob(fsys, "*")
+		files, err := r.fontFSNames(index)
+		if err != nil {
+			return nil
+		}
 		candidates = basefont.FileCandidates(files, path.Base)
 		for i, candidate := range candidates {
 			file, err := fsys.Open(candidate.Name)
 			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return nil
+				}
 				continue
 			}
 			reader, ok := file.(io.ReaderAt)
@@ -342,6 +353,30 @@ func (r *Renderer) matchFontFS(index int, names []string, bold, italic bool) []b
 		r.fontSourcesCache.filesystems[index] = candidates
 	}
 	return basefont.FileMatches(candidates, names, bold, italic)
+}
+
+// fontFSNames 复用当前字体来源的目录条目，保留无扩展名文件的回退，失败结果不缓存
+// 入参: index 字体文件系统索引
+// 返回: []string 只读文件名列表, error 目录读取错误
+func (r *Renderer) fontFSNames(index int) ([]string, error) {
+	if names, ok := r.fontSourcesCache.names[index]; ok {
+		return names, nil
+	}
+	var names []string
+	var err error
+	if glob, ok := r.fontFS[index].(fs.GlobFS); ok {
+		names, err = glob.Glob("*")
+	} else {
+		var entries []fs.DirEntry
+		entries, err = fs.ReadDir(r.fontFS[index], ".")
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+	}
+	if err == nil {
+		r.fontSourcesCache.names[index] = names
+	}
+	return names, err
 }
 
 // systemFontDirs 获取系统字体目录

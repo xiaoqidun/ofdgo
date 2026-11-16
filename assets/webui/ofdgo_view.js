@@ -1668,7 +1668,7 @@ export function createPageView(context) {
 			const measure = textMeasure ||= document.createElement("canvas").getContext("2d");
 			measure.font = "100px sans-serif";
 			const widths = new Map();
-			let count = 0;
+			let count = 0, started = performance.now();
 			for (const run of text.runs || []) {
 				const line = document.createElement("span");
 				line.className = "text-run";
@@ -1690,7 +1690,10 @@ export function createPageView(context) {
 					span.style.transform = `matrix(${a * MM_TO_PX / width}, ${b * MM_TO_PX / width}, ${c * MM_TO_PX / 100}, ${d * MM_TO_PX / 100}, ${e * MM_TO_PX}, ${f * MM_TO_PX})`;
 					line.append(span);
 					end = item.end;
-					if (++count % 128 === 0) yield;
+					if (++count % 16 === 0 && performance.now() - started >= 4) {
+						yield;
+						started = performance.now();
+					}
 				}
 				const breaks = chars.slice(end).filter((char) => char === "\n").join("");
 				if (breaks) {

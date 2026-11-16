@@ -549,9 +549,10 @@ func (p *PDFImport) Reader(ctx context.Context, index int) (*Reader, error) {
 
 // PageText 直接读取已转换页面的文字，不创建整本文档的阅读快照，不包含注解外观
 // 返回结果独立于转换会话，转换及提取失败时不返回部分文字
-// 入参: ctx 取消上下文, index 零基页面索引, options 本次提取的渲染配置，默认沿用导入配置
+// renderer的Reader不参与提取，提供的渲染器须与本次提取串行使用
+// 入参: ctx 取消上下文, index 零基页面索引, renderer 提取配置及字体来源缓存，nil沿用导入配置
 // 返回: *PageText 页面文字, error 转换、提取或关闭错误
-func (p *PDFImport) PageText(ctx context.Context, index int, options ...RendererOption) (*PageText, error) {
+func (p *PDFImport) PageText(ctx context.Context, index int, renderer *Renderer) (*PageText, error) {
 	if err := p.ConvertPage(ctx, index); err != nil {
 		return nil, err
 	}
@@ -563,7 +564,10 @@ func (p *PDFImport) PageText(ctx context.Context, index int, options ...Renderer
 		return nil, err
 	}
 	defer reader.Close()
-	renderer := p.importer.renderer.childRenderer(reader, options...)
+	if renderer == nil {
+		renderer = p.importer.renderer
+	}
+	renderer = renderer.childRenderer(reader)
 	renderer.OutputContext = ctx
 	return renderer.PageTextContext(ctx, &snapshot.pages[0])
 }

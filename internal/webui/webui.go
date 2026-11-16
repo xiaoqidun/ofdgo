@@ -1820,9 +1820,7 @@ func (e *businessEngine) preparePDFText(index int) error {
 	if e.pdf == nil || e.currentSession.cachedPageText(index) != nil {
 		return nil
 	}
-	renderer := e.currentSession.Renderer
-	dirs, sources := renderer.FontSources()
-	text, err := e.pdf.importer.PageText(e.pdf.operation, index, ofdgo.WithRenderBackends(renderer.Backends()), ofdgo.WithFontDirs(dirs...), func(target *ofdgo.Renderer) { target.SetFontFS(sources...) })
+	text, err := e.pdf.importer.PageText(e.pdf.operation, index, e.currentSession.Renderer)
 	if err != nil {
 		return e.pdfError(err)
 	}

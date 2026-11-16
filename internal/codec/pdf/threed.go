@@ -219,7 +219,7 @@ func threeDCamera(ctx context.Context, model *basethreed.U3DModel, renderer *bas
 			return camera, "", fmt.Errorf("missing PDF 3D camera node")
 		}
 		var err error
-		camera.ToWorld, err = renderer.ViewCamera(selected, source.Path, source.Source == "U3D")
+		camera.ToWorld, err = renderer.ViewCamera(selected, source.Path, source.Source == "U3D" && source.PathFromRoot)
 		if errors.Is(err, basethreed.ErrAmbiguousCamera) {
 			return camera, "", &pdfgo.UnsupportedError{Feature: "ambiguous 3D camera instance"}
 		}

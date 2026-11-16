@@ -142,9 +142,9 @@ func (r *Renderer) FontSources() ([]string, []fs.FS) {
 }
 
 // childRenderer 继承配置并复用字体文件索引与数据，文档匹配结果保持独立
-// 入参: reader 子阅读器, options 子渲染配置，指定时不共享字体来源索引
+// 入参: reader 子阅读器
 // 返回: *Renderer 子渲染器
-func (r *Renderer) childRenderer(reader *Reader, options ...RendererOption) *Renderer {
+func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 	opts := []RendererOption{
 		WithDPI(r.DPI),
 		WithAnnotations(r.RenderAnnotations),
@@ -156,17 +156,13 @@ func (r *Renderer) childRenderer(reader *Reader, options ...RendererOption) *Ren
 	if len(r.fontFS) > 0 {
 		opts = append(opts, WithFontFS(r.fontFS...))
 	}
-	renderer := NewRenderer(reader, append(opts, options...)...)
+	renderer := NewRenderer(reader, opts...)
 	renderer.printing = r.printing
+	renderer.sharedBackendStates = r.sharedBackendStates
 	renderer.fontPreparations = r.fontPreparations
 	renderer.fontDigests = r.fontDigests
-	if sameBackend(r.backends.Fonts, renderer.backends.Fonts) {
-		renderer.sharedBackendStates = r.sharedBackendStates
-		renderer.fontMetrics = r.fontMetrics
-	}
-	if len(options) == 0 {
-		renderer.fontSourcesCache = r.fontSourcesCache.child()
-	}
+	renderer.fontMetrics = r.fontMetrics
+	renderer.fontSourcesCache = r.fontSourcesCache.child()
 	renderer.decodeImages = r.decodeImages
 	renderer.pageContext = r.pageContext
 	renderer.TransparentBackground = r.TransparentBackground
