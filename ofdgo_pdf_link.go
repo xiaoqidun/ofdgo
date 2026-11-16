@@ -315,7 +315,6 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 				return err
 			}
 		}
-
 		b := annotation.Rect
 		box := pdfBounds([]pdfgo.Point{p.matrix.Apply(pdfgo.Point{X: b.XMin, Y: b.YMin}), p.matrix.Apply(pdfgo.Point{X: b.XMax, Y: b.YMax})})
 		region, err := p.linkRegion(annotation, box)

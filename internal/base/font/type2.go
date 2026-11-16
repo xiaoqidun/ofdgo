@@ -274,7 +274,7 @@ func (s *type2State) takeWidth(explicit bool) error {
 			return fmt.Errorf("invalid Type2 width")
 		}
 		if s.output != nil && !s.component && s.widthTarget == nil {
-			if err := encodeType2Number(s.output, s.args[0]); err != nil {
+			if err := encodeType2Width(s.output, s.args[0]); err != nil {
 				return err
 			}
 		}
@@ -286,7 +286,7 @@ func (s *type2State) takeWidth(explicit bool) error {
 		if s.matrix != nil {
 			width *= s.matrix[0]
 		}
-		return encodeType2Number(s.output, width-s.widthTarget.nominal)
+		return encodeType2Width(s.output, width-s.widthTarget.nominal)
 	}
 	return nil
 }

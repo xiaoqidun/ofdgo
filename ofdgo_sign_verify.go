@@ -295,7 +295,7 @@ func (r *Reader) VerifyDocumentSignaturesContext(ctx context.Context, index int,
 	if index == r.documentIndex && r.doc != nil && r.doc.Signatures == "" {
 		return nil, nil
 	}
-	view := &Reader{Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: index}
+	view := &Reader{Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: index, resources: r.resources}
 	if index == r.documentIndex {
 		view.selectedVersion = r.selectedVersion
 	}

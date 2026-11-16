@@ -114,17 +114,8 @@ func DefaultCFF2Font(data []byte) (result []byte, err error) {
 // 返回: []byte 字形程序, error 坐标超出编码范围
 func cffOutlineProgram(segments []opentype.Segment, width uint16) ([]byte, error) {
 	var output bytes.Buffer
-	if width < 32768 {
-		if err := encodeType2Number(&output, float64(width)); err != nil {
-			return nil, err
-		}
-	} else {
-		for range 2 {
-			if err := encodeType2Number(&output, float64(width)/2); err != nil {
-				return nil, err
-			}
-		}
-		output.Write([]byte{12, 10})
+	if err := encodeType2Width(&output, float64(width)); err != nil {
+		return nil, err
 	}
 	var x, y float64
 	for _, segment := range segments {

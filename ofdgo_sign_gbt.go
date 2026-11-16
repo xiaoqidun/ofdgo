@@ -299,7 +299,7 @@ func gbtContentType(data []byte) (string, bool) {
 // 入参: data BER编码数据
 // 返回: []byte 定长编码数据, error 错误信息
 func berToDefinite(data []byte) ([]byte, error) {
-	out, n, err := berValueToDefinite(data)
+	out, n, err := berValueToDefinite(data, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -310,9 +310,12 @@ func berToDefinite(data []byte) ([]byte, error) {
 }
 
 // berValueToDefinite 转换单个BER编码值
-// 入参: data BER编码数据
+// 入参: data BER编码数据, depth 当前嵌套深度
 // 返回: []byte 定长编码数据, int 已读取长度, error 错误信息
-func berValueToDefinite(data []byte) ([]byte, int, error) {
+func berValueToDefinite(data []byte, depth int) ([]byte, int, error) {
+	if depth > 128 {
+		return nil, 0, fmt.Errorf("BER nesting exceeds parsing budget")
+	}
 	if len(data) < 2 {
 		return nil, 0, fmt.Errorf("invalid BER value")
 	}
@@ -342,7 +345,7 @@ func berValueToDefinite(data []byte) ([]byte, int, error) {
 				pos += 2
 				break
 			}
-			child, n, err := berValueToDefinite(data[pos:])
+			child, n, err := berValueToDefinite(data[pos:], depth+1)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -367,11 +370,11 @@ func berValueToDefinite(data []byte) ([]byte, int, error) {
 		return nil, 0, fmt.Errorf("invalid BER truncated value")
 	}
 	end := pos + int(length)
-	content := append([]byte(nil), data[pos:end]...)
+	content := data[pos:end]
 	if tag[0]&0x20 != 0 {
-		content = content[:0]
+		content = nil
 		for pos < end {
-			child, n, err := berValueToDefinite(data[pos:end])
+			child, n, err := berValueToDefinite(data[pos:end], depth+1)
 			if err != nil {
 				return nil, 0, err
 			}

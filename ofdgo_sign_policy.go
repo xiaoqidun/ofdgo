@@ -313,7 +313,7 @@ func (r *Reader) signatureCoverageReferences(root string, required map[string]bo
 				}
 			}
 		}
-		add := func(loc string, resource bool) {
+		add := func(loc string, resource, structure bool) {
 			if strings.TrimSpace(loc) == "" {
 				return
 			}
@@ -323,32 +323,41 @@ func (r *Reader) signatureCoverageReferences(root string, required map[string]bo
 			}
 			resolved := cleanPackagePath(resolveResourcePath(name, resBase, loc))
 			required[resolved] = true
-			if !seen[resolved] {
+			if structure && !seen[resolved] {
 				queue = append(queue, resolved)
 			}
 		}
-		var walk func(signatureCoverageNode)
-		walk = func(current signatureCoverageNode) {
+		var walk func(signatureCoverageNode, string)
+		walk = func(current signatureCoverageNode, parent string) {
 			kind := current.XMLName.Local
-			if kind == "Signatures" || kind == "Signature" {
+			if current.XMLName.Space != node.XMLName.Space || classifyOFDNamespace(current.XMLName.Space) == ofdXMLUnknown || kind == "Signatures" || kind == "Signature" || kind == "Data" && parent == "Extension" {
 				return
 			}
 			for _, attr := range current.Attrs {
-				if attr.Name.Local == "BaseLoc" && kind != "Res" || attr.Name.Local == "Link" && kind == "DrawParam" || attr.Name.Local == "Profile" && kind == "ColorSpace" {
-					add(attr.Value, node.XMLName.Local == "Res")
+				if attr.Name.Space != "" {
+					continue
+				}
+				if attr.Name.Local == "BaseLoc" && kind != "Res" || attr.Name.Local == "Link" && kind == "DrawParam" {
+					add(attr.Value, node.XMLName.Local == "Res", true)
+				} else if attr.Name.Local == "Profile" && kind == "ColorSpace" {
+					add(attr.Value, true, false)
 				}
 			}
 			switch kind {
-			case "PublicRes", "DocumentRes", "PageRes", "Annotations", "Attachments", "CustomTags", "Extensions", "FileLoc", "SchemaLoc":
-				add(current.Text, false)
+			case "PublicRes", "DocumentRes", "PageRes", "Annotations", "Attachments", "CustomTags", "Extensions":
+				add(current.Text, false, true)
+			case "FileLoc":
+				add(current.Text, false, parent == "Page" && node.XMLName.Local == "Annotations")
+			case "SchemaLoc", "ExtendData":
+				add(current.Text, false, false)
 			case "FontFile", "MediaFile", "Profile":
-				add(current.Text, true)
+				add(current.Text, true, false)
 			}
 			for _, child := range current.Children {
-				walk(child)
+				walk(child, kind)
 			}
 		}
-		walk(node)
+		walk(node, "")
 	}
 	return nil
 }

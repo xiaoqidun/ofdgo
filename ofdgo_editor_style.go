@@ -337,7 +337,10 @@ func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err er
 		}
 		for i := range objects {
 			text := objects[i].TextObject
-			style := copyEditorPathStyle(text.pathStyle(), source.TextObject.pathStyle(), editorStrokeScale(source.TextObject.CTM)/editorStrokeScale(text.CTM))
+			style, err := copyEditorPathStyle(text.pathStyle(), source.TextObject.pathStyle(), editorStrokeScale(source.TextObject.CTM)/editorStrokeScale(text.CTM))
+			if err != nil {
+				return err
+			}
 			objects[i].TextObject = text.withPathStyle(style)
 		}
 		return e.UpdateObjects(page, objects)
@@ -346,7 +349,10 @@ func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err er
 		object = cloneEditorData(object)
 		switch source.Type {
 		case "PathObject":
-			object.PathObject = copyEditorPathStyle(object.PathObject, source.PathObject, editorStrokeScale(source.PathObject.CTM)/editorStrokeScale(object.PathObject.CTM))
+			object.PathObject, err = copyEditorPathStyle(object.PathObject, source.PathObject, editorStrokeScale(source.PathObject.CTM)/editorStrokeScale(object.PathObject.CTM))
+			if err != nil {
+				return err
+			}
 		case "ImageObject":
 			object.ImageObject.Alpha = source.ImageObject.Alpha
 		}
@@ -715,8 +721,8 @@ func (e *Editor) validateCopyStyle(source GraphicObject) error {
 
 // copyEditorPathStyle 按页面描边倍率复制路径外观，保留目标几何和行为
 // 入参: to 目标路径, from 来源路径, scale 来源与目标的描边倍率比
-// 返回: PathObject 独立路径副本
-func copyEditorPathStyle(to, from PathObject, scale float64) PathObject {
+// 返回: PathObject 独立路径副本, error 缩放编码错误
+func copyEditorPathStyle(to, from PathObject, scale float64) (PathObject, error) {
 	from = cloneEditorData(from)
 	to.Fill, to.Stroke, to.Alpha = from.Fill, from.Stroke, from.Alpha
 	to.FillColor, to.StrokeColor = from.FillColor, from.StrokeColor
@@ -742,11 +748,15 @@ func copyEditorPathStyle(to, from PathObject, scale float64) PathObject {
 	}
 	if scale != 1 {
 		to.LineWidth *= scale
-		to.DashPattern = scaleTextNumbers(to.DashPattern, scale)
+		var err error
+		to.DashPattern, err = scaleTextNumbers(to.DashPattern, scale)
+		if err != nil {
+			return PathObject{}, err
+		}
 		value := *to.DashOffset * scale
 		to.DashOffset = &value
 	}
-	return to
+	return to, nil
 }
 
 // editorStrokeScale 获取路径在页面坐标中的描边倍率，与渲染器保持一致

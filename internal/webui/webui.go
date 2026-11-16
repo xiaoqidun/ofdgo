@@ -26,6 +26,7 @@ import (
 	"image/color"
 	"io"
 	"io/fs"
+	"maps"
 	"math"
 	"reflect"
 	"slices"
@@ -42,6 +43,9 @@ import (
 
 // sessionTextCacheBytes 限制会话文字索引的内存预算
 const sessionTextCacheBytes = 32 << 20
+
+// sessionSVGFontCacheBytes 限制已渲染页面字体的保留预算
+const sessionSVGFontCacheBytes = 32 << 20
 
 // OpenOptions 打开OFD文档选项
 type OpenOptions struct {
@@ -899,7 +903,29 @@ func (s *Session) SetRenderBackend(name string) error {
 	return nil
 }
 
-// SVGFontData 获取最近渲染页面引用的字体数据
+// retainSVGFonts 合并页面字体，在预算内保留其他页面的数据，当前页面字体不被淘汰
+// 入参: fonts 当前页面字体
+func (s *Session) retainSVGFonts(fonts map[string][]byte) {
+	if s.svgFonts == nil {
+		s.svgFonts = make(map[string][]byte)
+	}
+	maps.Copy(s.svgFonts, fonts)
+	var size int64
+	for _, data := range s.svgFonts {
+		size += int64(len(data))
+	}
+	for name, data := range s.svgFonts {
+		if size <= sessionSVGFontCacheBytes {
+			break
+		}
+		if _, current := fonts[name]; !current {
+			delete(s.svgFonts, name)
+			size -= int64(len(data))
+		}
+	}
+}
+
+// SVGFontData 获取缓存页面引用的字体数据
 // 入参: name 字体资源标识
 // 返回: []byte 字体数据, error 错误信息
 func (s *Session) SVGFontData(name string) ([]byte, error) {
@@ -1718,7 +1744,7 @@ func (e *businessEngine) bindPDFOperation(pending *pendingPDF) {
 	}
 }
 
-// preparePDF 只为页面读取和后台加载绑定转换上下文，不补全其他命令
+// preparePDF 为页面读取、定位和后台加载绑定转换上下文，不隐式补全文档
 // 入参: name 命令名称, args 命令参数
 // 返回: error 转换或取消错误
 func (e *businessEngine) preparePDF(name string, args []platformValue) error {
@@ -1726,7 +1752,7 @@ func (e *businessEngine) preparePDF(name string, args []platformValue) error {
 		return nil
 	}
 	switch name {
-	case "ofdgoLoadPDF", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoOpenLinks":
+	case "ofdgoLoadPDF", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoOpenLinks", "ofdgoDestinationView":
 	default:
 		return nil
 	}
@@ -1748,7 +1774,7 @@ func (e *businessEngine) preparePDF(name string, args []platformValue) error {
 		}
 	}
 	switch name {
-	case "ofdgoLoadPDF":
+	case "ofdgoLoadPDF", "ofdgoDestinationView":
 		return nil
 	case "ofdgoOpenLinks":
 		if len(args) == 0 {
@@ -2952,14 +2978,22 @@ func (e *businessEngine) destinationView(args []platformValue) (any, error) {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
 	var request struct {
-		Dest     ofdgo.Dest
-		Matrix   pdfgo.Matrix
-		Viewport pdfgo.DestinationViewport
+		SourcePage int
+		Dest       ofdgo.Dest
+		Matrix     pdfgo.Matrix
+		Viewport   pdfgo.DestinationViewport
 	}
 	if err := json.Unmarshal([]byte(args[0].String()), &request); err != nil {
 		return nil, err
 	}
 	target, ok := e.currentSession.Reader.PDFDestination(request.Dest)
+	if !ok && e.pdf != nil {
+		var err error
+		target, ok, err = e.pdf.importer.PDFDestination(e.pdf.operation, request.SourcePage, request.Dest)
+		if err != nil {
+			return nil, e.pdfError(err)
+		}
+	}
 	if !ok {
 		return nil, nil
 	}

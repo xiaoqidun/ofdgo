@@ -1072,7 +1072,7 @@ func (h *Host) readFonts() {
 		if err != nil {
 			continue
 		}
-		file, err := h.files.file(handle["nativeHandle"].(string))
+		file, err := h.files.reference(handle["nativeHandle"].(string))
 		if err != nil {
 			continue
 		}

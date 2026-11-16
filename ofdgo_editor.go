@@ -1142,7 +1142,11 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 				obj.LineWidth = defaultPathLineWidth
 			}
 			obj.LineWidth *= scale
-			obj.DashPattern = scaleTextNumbers(obj.DashPattern, scale)
+			var err error
+			obj.DashPattern, err = scaleTextNumbers(obj.DashPattern, scale)
+			if err != nil {
+				return GraphicObject{}, err
+			}
 			if obj.DashOffset != nil {
 				offset := *obj.DashOffset * scale
 				obj.DashOffset = &offset
@@ -1150,7 +1154,10 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 			for i := range obj.TextCode {
 				code := &obj.TextCode[i]
 				for _, value := range []*string{&code.X, &code.Y, &code.DeltaX, &code.DeltaY} {
-					*value = scaleTextNumbers(*value, scale)
+					*value, err = scaleTextNumbers(*value, scale)
+					if err != nil {
+						return GraphicObject{}, err
+					}
 				}
 			}
 		}
@@ -1182,19 +1189,29 @@ func transformEditorObject(object GraphicObject, dx, dy, scale float64) (Graphic
 	return object, nil
 }
 
-// scaleTextNumbers 缩放已校验的文字定位数值，保留g重复编码
+// scaleTextNumbers 校验并缩放文字定位数值，保留g重复编码
 // 入参: value 定位数值, scale 缩放比例
-// 返回: string 缩放后的数值
-func scaleTextNumbers(value string, scale float64) string {
+// 返回: string 缩放后的数值, error 定位编码或结果错误
+func scaleTextNumbers(value string, scale float64) (string, error) {
 	fields := strings.Fields(value)
 	for i := 0; i < len(fields); i++ {
 		if fields[i] == "g" {
+			if i+2 >= len(fields) {
+				return "", fmt.Errorf("incomplete delta repetition")
+			}
+			repeat, err := strconv.Atoi(fields[i+1])
+			if err != nil || repeat <= 0 {
+				return "", fmt.Errorf("invalid delta repetition")
+			}
 			i += 2
 		}
-		number, _ := strconv.ParseFloat(fields[i], 64)
+		number, err := strconv.ParseFloat(fields[i], 64)
+		if err != nil || !finite(number*scale) {
+			return "", fmt.Errorf("invalid scaled text position")
+		}
 		fields[i] = ofdNumber(number * scale)
 	}
-	return strings.Join(fields, " ")
+	return strings.Join(fields, " "), nil
 }
 
 // prepareText 校验并补全标准文字定位，避免依赖阅读器的缺省字距补偿

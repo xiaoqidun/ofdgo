@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"context"
 	"fmt"
 	"image/color"
 	"math"
@@ -106,7 +107,7 @@ func newShdPaint(gradient canvas.Gradient, extend, mapType string, mapUnit float
 	}
 	period := 1.0
 	if mapUnit > 0 && length > 0 {
-		period = mapUnit / length
+		period = math.Max(math.SmallestNonzeroFloat64, mapUnit/length)
 	}
 	return &shdPaint{gradient: gradient, view: canvas.Identity, extend: flags, mapType: mapType, period: period}
 }
@@ -139,10 +140,7 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 		if s.sample != nil {
 			return s.sampledRaster(), clip, s.view
 		}
-		if s.mapType == "Repeat" {
-			return &repeatAxialGradient{LinearGradient: g, period: s.period}, clip, s.view
-		}
-		if s.mapType != "Reflect" {
+		if s.mapType != "Reflect" && s.mapType != "Repeat" {
 			return g, clip, s.view
 		}
 		d := g.End.Sub(g.Start)
@@ -151,6 +149,12 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 		lo, hi := s.rangeLimits(area.X0, area.X1)
 		if hi <= lo {
 			return g, &canvas.Path{}, s.view
+		}
+		if !shdExpansionFits(lo, hi, s.period, len(g.Grad)+2) {
+			return s.sampledRaster(), clip, s.view
+		}
+		if s.mapType == "Repeat" {
+			return &repeatAxialGradient{LinearGradient: g, period: s.period}, clip, s.view
 		}
 		gradient := reflectShdGrad(g.Grad, s.period, lo, hi)
 		return gradient.ToLinear(g.Start.Add(d.Mul(lo)), g.Start.Add(d.Mul(hi))), clip, s.view
@@ -188,10 +192,21 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 		if hi <= lo {
 			return g, &canvas.Path{}, s.view
 		}
+		if !shdExpansionFits(lo, hi, s.period, len(g.Grad)+2) {
+			return s.sampledRaster(), clip, s.view
+		}
 		gradient := reflectShdGrad(g.Grad, s.period, lo, hi)
 		return gradient.ToRadial(g.C0.Add(d.Mul(lo)), math.Max(0, g.R0+dr*lo), g.C0.Add(d.Mul(hi)), math.Max(0, g.R0+dr*hi)), clip, s.view
 	}
 	return s.gradient, nil, s.view
+}
+
+// shdExpansionFits 判断周期展开是否适合矢量输出，超预算的渐变交由采样器表达
+// 入参: lo 起点, hi 终点, period 周期, stops 每周期颜色分段数
+// 返回: bool 是否可在展开预算内完成
+func shdExpansionFits(lo, hi, period float64, stops int) bool {
+	first, last := math.Floor(lo/period), math.Ceil(hi/period)
+	return finite(first) && finite(last) && first+1 > first && last-first <= 4096/float64(max(1, stops))
 }
 
 // sampledRaster 保留原双圆或轴向几何与周期，不把ICC采样器降为端点渐变
@@ -233,6 +248,10 @@ func transformShdPaint(paint any, parentCTM *Matrix, bx, by, pageH float64, boun
 // drawShdPath 绘制渐变路径并保持图形轮廓不变
 // 入参: ctx 画布上下文, path 填充路径, view 渐变变换
 func (r *Renderer) drawShdPath(ctx *canvas.Context, path *canvas.Path, view canvas.Matrix) {
+	if err := r.outputContext().Err(); err != nil {
+		r.renderError = err
+		return
+	}
 	if gradient, ok := ctx.Style.Fill.Gradient.(rasterGradientCanvas); ok {
 		if _, compiling := ctx.Renderer.(*canvasPageCompiler); !compiling {
 			if _, measuring := ctx.Renderer.(*boundsRenderer); !measuring {
@@ -242,7 +261,9 @@ func (r *Renderer) drawShdPath(ctx *canvas.Context, path *canvas.Path, view canv
 		}
 	}
 	if gradient, ok := ctx.Style.Fill.Gradient.(*repeatAxialGradient); ok {
-		drawRepeatAxialPath(ctx, path, gradient, view)
+		if err := drawRepeatAxialPath(ctx, path, gradient, view, r.outputContext()); err != nil {
+			r.renderError = err
+		}
 		return
 	}
 	if view == canvas.Identity {
@@ -255,8 +276,9 @@ func (r *Renderer) drawShdPath(ctx *canvas.Context, path *canvas.Path, view canv
 }
 
 // drawRepeatAxialPath 按周期裁剪并绘制轴向重复渐变
-// 入参: ctx 画布上下文, path 填充路径, gradient 重复渐变, view 渐变变换
-func drawRepeatAxialPath(ctx *canvas.Context, path *canvas.Path, gradient *repeatAxialGradient, view canvas.Matrix) {
+// 入参: ctx 画布上下文, path 填充路径, gradient 重复渐变, view 渐变变换, operation 取消上下文
+// 返回: error 取消错误
+func drawRepeatAxialPath(ctx *canvas.Context, path *canvas.Path, gradient *repeatAxialGradient, view canvas.Matrix, operation context.Context) error {
 	p := path.Copy()
 	if ctx.FillRule == canvas.EvenOdd {
 		p = settleCanvasPath(p, canvas.EvenOdd)
@@ -278,6 +300,9 @@ func drawRepeatAxialPath(ctx *canvas.Context, path *canvas.Path, gradient *repea
 		stops = append(append(canvas.Grad(nil), stops...), canvas.Stop{Offset: 1, Color: last.Color})
 	}
 	for i, end := math.Floor(area.X0), math.Ceil(area.X1); i < end; i++ {
+		if err := operation.Err(); err != nil {
+			return err
+		}
 		clip := (canvas.Rect{X0: i, Y0: area.Y0, X1: i + 1, Y1: area.Y1}).ToPath().Transform(axis)
 		part := applyClipPath(p, clip)
 		if part.Empty() {
@@ -287,6 +312,7 @@ func drawRepeatAxialPath(ctx *canvas.Context, path *canvas.Path, gradient *repea
 		style.Fill = canvas.Paint{Gradient: stops.ToLinear(start, start.Add(d))}
 		ctx.RenderPath(part, style, m)
 	}
+	return nil
 }
 
 // rangeLimits 限制渐变延伸区间

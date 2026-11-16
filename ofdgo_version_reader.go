@@ -113,7 +113,7 @@ func (r *Reader) DocumentVersion(id string) (*Reader, error) {
 // 入参: ctx 取消上下文, id 版本标识，空值选择主入口
 // 返回: *Reader 版本阅读器, error 读取或取消错误
 func (r *Reader) DocumentVersionContext(ctx context.Context, id string) (*Reader, error) {
-	next := &Reader{Path: r.Path, Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: r.documentIndex, selectedVersion: &id, pageReady: r.pageReady, pdfDestinations: r.pdfDestinations.clone()}
+	next := &Reader{Path: r.Path, Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: r.documentIndex, selectedVersion: &id, pageReady: r.pageReady, pdfDestinations: r.pdfDestinations.clone(), resources: r.resources}
 	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}
@@ -210,7 +210,7 @@ func (r *Reader) ExtractVersionContext(ctx context.Context, id string) (*Reader,
 	if err != nil {
 		return nil, err
 	}
-	next := &Reader{Path: r.Path, files: map[string][]byte{"OFD.xml": root}, encryption: r.encryption}
+	next := &Reader{Path: r.Path, files: map[string][]byte{"OFD.xml": root}, encryption: r.encryption, resources: r.resources}
 	for name := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err

@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"math"
 	"reflect"
 	"runtime"
@@ -231,7 +230,7 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 			worker.Renderer.OutputContext = context.Background()
 			e.renderMu.Lock()
 			if result != nil && result["ok"] == true && ctx.Err() == nil {
-				e.currentSession.svgFonts = maps.Clone(worker.svgFonts)
+				e.currentSession.retainSVGFonts(worker.svgFonts)
 				clear(worker.pageCache)
 				worker.textCache.Clear()
 				clear(worker.svgFonts)

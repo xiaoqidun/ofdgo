@@ -527,6 +527,31 @@ func (p *PDFImport) Reader(ctx context.Context, index int) (*Reader, error) {
 	return reader, nil
 }
 
+// PDFDestination 准备链接来源页并查询实时PDF定位语义，不修改已交付的阅读快照
+// 入参: ctx 取消上下文, index 链接来源页，-1仅查询文档动作, dest OFD动作目标
+// 返回: pdfgo.DestinationTarget 定位目标, bool 是否存在, error 页面转换或关闭错误
+func (p *PDFImport) PDFDestination(ctx context.Context, index int, dest Dest) (pdfgo.DestinationTarget, bool, error) {
+	if p.importer == nil {
+		return pdfgo.DestinationTarget{}, false, fmt.Errorf("PDF import is closed")
+	}
+	if p.err != nil {
+		return pdfgo.DestinationTarget{}, false, p.err
+	}
+	if err := ctx.Err(); err != nil {
+		return pdfgo.DestinationTarget{}, false, err
+	}
+	if index != -1 {
+		if err := p.ConvertPage(ctx, index); err != nil {
+			return pdfgo.DestinationTarget{}, false, err
+		}
+	}
+	if targets := p.importer.editor.pdfDestinations; targets != nil {
+		target, ok := targets.targets[pdfDestinationKey(dest)]
+		return target, ok, nil
+	}
+	return pdfgo.DestinationTarget{}, false, nil
+}
+
 // Finish 转换尚未就绪的页面并补全文档结构，返回独立编辑文档
 // 入参: ctx 取消上下文
 // 返回: *Editor 编辑文档, PDFImportReport 转换统计, error 转换错误

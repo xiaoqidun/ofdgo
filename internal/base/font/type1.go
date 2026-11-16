@@ -494,7 +494,7 @@ func (p *Type1Program) outline(glyph type1Glyph) ([]byte, error) {
 		return nil, fmt.Errorf("Type1 glyph %s has no complete outline", glyph.name)
 	}
 	var result bytes.Buffer
-	if err := encodeType2Number(&result, state.width); err != nil {
+	if err := encodeType2Width(&result, state.width); err != nil {
 		return nil, err
 	}
 	result.Write(state.path.Bytes())
@@ -898,6 +898,27 @@ func encodeType2Number(target *bytes.Buffer, value float64) error {
 	return nil
 }
 
+// encodeType2Width 编码字宽，超出单个操作数范围时以倍增指令保持数值
+// 入参: target 目标字节流, width 字宽
+// 返回: error 非有限数值或编码错误
+func encodeType2Width(target *bytes.Buffer, width float64) error {
+	if !finite(width) {
+		return fmt.Errorf("invalid Type2 width")
+	}
+	steps := 0
+	for width < -32768 || width >= 32768 {
+		width /= 2
+		steps++
+	}
+	if err := encodeType2Number(target, width); err != nil {
+		return err
+	}
+	for range steps {
+		target.Write([]byte{12, 27, 12, 10})
+	}
+	return nil
+}
+
 // ToCFF 将Type1字形转换为保持三次轮廓的CFF字体
 // 入参: name 字体名称
 // 返回: []byte CFF数据, error 错误信息
@@ -945,6 +966,7 @@ func (p *Type1Program) ToCFF(name string) ([]byte, error) {
 	charIndex := encodeCFFIndex(chars)
 	topDict := make([]byte, 12)
 	topDict[0], topDict[5], topDict[6], topDict[11] = 29, 15, 29, 17
+	topDict = append(topDict, encodeCFFDict(cffDict{18: {0, 0}})...)
 	if p.matrix != nil {
 		topDict = append(topDict, encodeCFFDict(cffDict{1207: p.matrix})...)
 	}

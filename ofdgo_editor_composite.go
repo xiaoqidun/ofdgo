@@ -261,7 +261,10 @@ func (e *Editor) StyleCompositeObjects(page int, path ObjectPath, indexes []int,
 					local.LineWidth = &width
 				}
 				if style.DashPattern != nil {
-					dash := scaleTextNumbers(*style.DashPattern, 1/members[i].StrokeScale)
+					dash, err := scaleTextNumbers(*style.DashPattern, 1/members[i].StrokeScale)
+					if err != nil {
+						return err
+					}
 					local.DashPattern = &dash
 				}
 				if style.DashOffset != nil {

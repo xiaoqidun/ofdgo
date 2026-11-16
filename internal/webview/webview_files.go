@@ -246,6 +246,23 @@ func (s *fileStore) file(id string) (map[string]any, error) {
 	return map[string]any{"nativeFile": id, "name": entry.name, "size": size, "lastModified": modified, "url": "/__native/data/" + id, "handle": handle}, nil
 }
 
+// reference 返回按需读取的文件描述，不创建或持有文件快照
+// 入参: id 授权标识
+// 返回: map[string]any 文件描述, error 授权或状态错误
+func (s *fileStore) reference(id string) (map[string]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry := s.entries[id]
+	if entry == nil || entry.directory {
+		return nil, fmt.Errorf("文件授权无效")
+	}
+	info, err := os.Stat(entry.path)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"nativeFile": id, "name": entry.name, "size": info.Size(), "lastModified": info.ModTime().UnixMilli(), "url": "/__native/data/" + id, "handle": s.descriptor(id)}, nil
+}
+
 // resolve 按授权标识读取文件并保持随机读取句柄
 // 入参: id 授权标识
 // 返回: io.ReaderAt 随机读取器, int64 文件大小, error 读取错误

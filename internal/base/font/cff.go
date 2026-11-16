@@ -142,7 +142,9 @@ func NormalizeCFFCharstringsAt(data []byte, unitsPerEm uint16) ([]byte, error) {
 	if transform != nil {
 		scale := 1 / float64(unitsPerEm)
 		dict[1207] = []float64{scale, 0, 0, scale, 0, 0}
-		delete(dict, 18)
+		if _, cid := dict[1230]; !cid {
+			dict[18] = []float64{0, 0}
+		}
 		if err := transformCFFBounds(dict, matrix); err != nil {
 			return nil, err
 		}

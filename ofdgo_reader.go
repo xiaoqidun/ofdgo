@@ -123,6 +123,8 @@ func (r *Reader) Fork(ctx context.Context) (*Reader, error) {
 		r.pageContents = resourceCache[pageContentKey, PageContent](r.resources, 16<<20)
 	}
 	next := *r
+	doc := *r.doc
+	next.doc = &doc
 	next.Closer = nil
 	next.resourcesRead = maps.Clone(r.resourcesRead)
 	next.resourceFiles = maps.Clone(r.resourceFiles)

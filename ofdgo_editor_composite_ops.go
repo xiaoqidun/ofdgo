@@ -429,7 +429,10 @@ func (e *Editor) CopyCompositeStyle(page int, path ObjectPath, indexes []int, so
 				if err != nil {
 					return err
 				}
-				style := copyEditorPathStyle(object.TextObject.pathStyle(), source.TextObject.pathStyle(), editorStrokeScale(source.TextObject.CTM)/member.StrokeScale)
+				style, err := copyEditorPathStyle(object.TextObject.pathStyle(), source.TextObject.pathStyle(), editorStrokeScale(source.TextObject.CTM)/member.StrokeScale)
+				if err != nil {
+					return err
+				}
 				if err := validateEditorStroke(style); err != nil {
 					return err
 				}
@@ -439,11 +442,14 @@ func (e *Editor) CopyCompositeStyle(page int, path ObjectPath, indexes []int, so
 					return err
 				}
 			case "PathObject":
-				object.PathObject = copyEditorPathStyle(object.PathObject, source.PathObject, editorStrokeScale(source.PathObject.CTM)/member.StrokeScale)
+				var err error
+				object.PathObject, err = copyEditorPathStyle(object.PathObject, source.PathObject, editorStrokeScale(source.PathObject.CTM)/member.StrokeScale)
+				if err != nil {
+					return err
+				}
 				if err := validateEditorStroke(object.PathObject); err != nil {
 					return err
 				}
-				var err error
 				object.PathObject.DrawParam, err = e.neutralDrawParam()
 				if err != nil {
 					return err

@@ -7136,6 +7136,7 @@ async function openDocument(options = {}) {
 	}
 	const openSeq = options.openSeq || advanceDocumentSequence();
 	const initialActions = options.activateActions && state.sourcePDF && !state.editing;
+	if (openSeq === state.openSeq && isForegroundDocument(tab)) el.pageFrame.style.visibility = "";
 	const previewPosition = options.previewScroll && state.pageWindow ? pageView.pageWindowAnchor(state.pageWindow) : null;
 	const viewport = options.keepPreview ? el.viewerPanel.getBoundingClientRect() : null;
 	const previewIDs = viewport ? [...state.visiblePages].filter((index) => {
@@ -7315,7 +7316,7 @@ async function openDocument(options = {}) {
 		}
 		showError(err, true);
 	} finally {
-		if (initialActions && openSeq === state.openSeq && isForegroundDocument(tab)) el.pageFrame.style.visibility = "";
+		if (openSeq === state.openSeq && isForegroundDocument(tab)) el.pageFrame.style.visibility = "";
 		if (openSeq === state.openSeq || !isForegroundDocument(tab)) setBusy(false, "", 0, "", tab);
 	}
 }
@@ -11067,7 +11068,7 @@ function pageLinkTarget(link, page, surface, openAction) {
 	}
 	if (link.dest) {
 		const target = pageIndexByID(state.doc.pages, link.dest.pageID);
-		return { href: target < 0 ? "#" : `#page-${target + 1}`, title: target < 0 ? "文档链接" : `第${target + 1}页`, activate: () => navigateDestination(link.dest, openAction) };
+		return { href: target < 0 ? "#" : `#page-${target + 1}`, title: target < 0 ? "文档链接" : `第${target + 1}页`, activate: () => navigateDestination(link.dest, openAction, page?.index ?? state.pageIndex) };
 	}
 	if (link.attachment) {
 		return { href: "#", title: link.fileName ? `下载附件：${link.fileName}` : "下载附件", activate: () => {
@@ -11146,7 +11147,7 @@ function destinationPoint(page, x, y) {
 	return { x, y };
 }
 
-async function navigateDestination(dest, openAction) {
+async function navigateDestination(dest, openAction, sourcePage = state.pageIndex) {
 	if (document.body.hasAttribute("data-busy") && !openAction?.initial) return;
 	if (openAction && state.openActionTask !== openAction) return false;
 	const index = pageIndexByID(state.doc.pages, dest.pageID);
@@ -11173,6 +11174,7 @@ async function navigateDestination(dest, openAction) {
 		const page = state.doc.pages[index], size = pageView.pageViewSize(page);
 		const origin = destinationPoint(page, 0, 0), x = destinationPoint(page, 1, 0), y = destinationPoint(page, 0, 1);
 		const view = await callWASM("ofdgoDestinationView", JSON.stringify({
+			sourcePage,
 			dest,
 			matrix: [x.x - origin.x, x.y - origin.y, y.x - origin.x, y.y - origin.y, origin.x, origin.y],
 			viewport: {

@@ -376,7 +376,7 @@ func (e *Editor) changeInvoiceSource(ctx context.Context, source InvoiceSource, 
 	for key, value := range isolated {
 		files[key] = value
 	}
-	view := &Reader{Zip: base.reader.Zip, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex, selectedVersion: base.reader.selectedVersion}
+	view := &Reader{Zip: base.reader.Zip, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex, selectedVersion: base.reader.selectedVersion, resources: base.reader.resources}
 	if err := view.initRootContext(ctx); err != nil {
 		return InvoiceSource{}, err
 	}

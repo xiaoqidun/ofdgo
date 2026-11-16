@@ -232,9 +232,13 @@ func (g *RasterGradient) At(x, y float64) color.RGBA {
 		}
 		switch spread.MapType {
 		case "Repeat":
-			t = t/period - math.Floor(t/period)
+			t = math.Mod(t, period)
+			if t < 0 {
+				t += period
+			}
+			t /= period
 		case "Reflect":
-			t = reflectShdPosition(t / period)
+			t = reflectShdPosition(math.Mod(t, 2*period) / period)
 		}
 	}
 	return g.colorAt(t)
