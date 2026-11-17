@@ -148,6 +148,7 @@ func (r *Reader) packageData() (map[string][]byte, error) {
 }
 
 // decryptPackage 在独立内存包内解密，不修改输入文件
+// 同层全部映射解密成功后清理密文，允许多项引用同一密件
 // 入参: settings 会话凭据和密码实现
 // 返回: error 错误信息
 func (r *Reader) decryptPackage(settings readerOptions) error {
@@ -219,7 +220,7 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 				}
 				extraSeeds[extraSeed] = true
 			}
-			ciphertext, actual, err := encryptionPart(parts, entry.EncryptedPath)
+			ciphertext, _, err := encryptionPart(parts, entry.EncryptedPath)
 			if err == nil {
 				decrypted[name], err = settings.provider.DecryptSM4(entryKey, entryIV, ciphertext)
 			}
@@ -230,10 +231,12 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 				clear(key)
 				return ErrInvalidCredentials
 			}
-			delete(parts, actual)
 			used[name] = true
 		}
 		clear(key)
+		for _, entry := range entries.Entries {
+			delete(parts, cleanPackagePath(entry.EncryptedPath))
+		}
 		delete(parts, seedName)
 		delete(parts, mapName)
 		for name := range extraSeeds {
