@@ -28,6 +28,7 @@ import (
 	"io/fs"
 	"maps"
 	"math"
+	"net/url"
 	"reflect"
 	"slices"
 	"strconv"
@@ -3751,6 +3752,18 @@ func (e *businessEngine) editorObjects(index int, text *ofdgo.PageText) ([]any, 
 		}
 		objects = append(objects, item)
 	}
+	for _, stamp := range e.currentSession.Reader.Stamps[page.ID] {
+		box := stamp.Bounds()
+		if stamp.ID == "" || stamp.SignatureID == "" || box.W <= 0 || box.H <= 0 {
+			continue
+		}
+		capability, err := e.currentEditor.SignatureStampCapabilities(index, ofdgo.ObjectPath{ID: stamp.ID, Signature: stamp.SignatureID})
+		if err != nil {
+			return nil, err
+		}
+		objects = append(objects, map[string]any{"id": stamp.ObjectID(), "type": "Signature", "x": box.X, "y": box.Y, "width": box.W, "height": box.H,
+			"capabilities": e.editorCapabilities(capability, "Signature")})
+	}
 	return objects, nil
 }
 
@@ -4221,6 +4234,21 @@ func (e *businessEngine) editorAppearance(item map[string]any, object ofdgo.Grap
 // 入参: value 顶层标识与逐层序号
 // 返回: ofdgo.ObjectPath 库层路径, error 错误信息
 func (e *businessEngine) compositePath(value string) (ofdgo.ObjectPath, error) {
+	if value, ok := strings.CutPrefix(value, "signature:"); ok {
+		parts := strings.Split(value, ":")
+		if len(parts) != 2 {
+			return ofdgo.ObjectPath{}, fmt.Errorf("invalid signature appearance path")
+		}
+		signature, err := url.QueryUnescape(parts[0])
+		if err != nil {
+			return ofdgo.ObjectPath{}, err
+		}
+		id, err := url.QueryUnescape(parts[1])
+		if err != nil || signature == "" || id == "" {
+			return ofdgo.ObjectPath{}, fmt.Errorf("invalid signature appearance path")
+		}
+		return ofdgo.ObjectPath{ID: id, Signature: signature}, nil
+	}
 	parts := strings.Split(value, "/")
 	path := ofdgo.ObjectPath{ID: parts[0]}
 	if id, ok := strings.CutPrefix(path.ID, "annotation:"); ok {

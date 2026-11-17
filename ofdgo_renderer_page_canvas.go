@@ -111,6 +111,12 @@ func (v *canvasPageVisitor) DrawObject(object *GraphicObject, state RenderState)
 // 入参: stamp 签章
 // 返回: error 绘制错误
 func (v *canvasPageVisitor) DrawStamp(stamp Stamp) error {
+	if groups, ok := v.ctx.Renderer.(interface {
+		beginStamp(Stamp) bool
+		endObject()
+	}); ok && groups.beginStamp(stamp) {
+		defer groups.endObject()
+	}
 	v.renderer.renderStamp(v.ctx, stamp, v.height)
 	return v.renderer.renderError
 }

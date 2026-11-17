@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"encoding/xml"
 	"fmt"
+	"net/url"
 	"strings"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
@@ -111,11 +112,30 @@ type SignatureReference struct {
 }
 
 // Stamp 印章信息结构
+// SignatureID与ID共同定位签名外观，Type与Data保留原始印章媒体
 type Stamp struct {
-	Box  Box
-	Clip *Box
-	Type string
-	Data []byte
+	ID          string
+	SignatureID string
+	Box         Box
+	Clip        *Box
+	Type        string
+	Data        []byte
+}
+
+// ObjectID 返回签名和外观共同确定的画布标识，避免不同签名中的外观标识冲突
+// 返回: string 可用于SVG分组及编辑命中的标识
+func (s Stamp) ObjectID() string {
+	return "signature:" + url.QueryEscape(s.SignatureID) + ":" + url.QueryEscape(s.ID)
+}
+
+// Bounds 返回签章裁剪后的页面可见范围，Clip使用印章局部坐标
+// 返回: Box 页面毫米范围
+func (s Stamp) Bounds() Box {
+	if s.Clip == nil {
+		return s.Box
+	}
+	x, y := max(0, s.Clip.X), max(0, s.Clip.Y)
+	return Box{X: s.Box.X + x, Y: s.Box.Y + y, W: max(0, min(s.Box.W, s.Clip.X+s.Clip.W)-x), H: max(0, min(s.Box.H, s.Clip.Y+s.Clip.H)-y)}
 }
 
 // SignatureStampPositions 获取签名外观位置信息
@@ -249,6 +269,8 @@ func (r *Reader) parseSignatures(ctx context.Context, doc *Document) error {
 					clipBox = &clip
 				}
 				r.addStamp(pageID, bbox, clipBox, sealType, sealData)
+				stamp := &r.Stamps[pageID][len(r.Stamps[pageID])-1]
+				stamp.ID, stamp.SignatureID = annot.ID, sigRef.ID
 			}
 		}(sigRef)
 	}

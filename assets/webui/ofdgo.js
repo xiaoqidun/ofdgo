@@ -4206,7 +4206,7 @@ function editAnnotationDetails(item) {
 function openObjectPicker(items = canvasEditor.pageItems(state.pageIndex)) {
 	el.objectPickerTitle.textContent = "选择对象";
 	el.objectPickerList.replaceChildren();
-	const labels = { TextObject: "文字", PathObject: "图形", ImageObject: "图片", CompositeObject: "组合", CompositeGraphicUnit: "组合", Annotation: "注解" };
+	const labels = { TextObject: "文字", PathObject: "图形", ImageObject: "图片", CompositeObject: "组合", CompositeGraphicUnit: "组合", Annotation: "注解", Signature: "签章" };
 	const kinds = { Path: "批注", Stamp: "印章", Watermark: "水印", Link: "链接", Highlight: "高亮" };
 	for (const item of [...items].reverse()) {
 		const button = document.createElement("button");
@@ -5460,7 +5460,7 @@ async function changeDocument(name, item, ...args) {
 		const members = item?.items ? [...item.items].sort((a, b) => a.order - b.order) : item ? [item] : [];
 		const scoped = members.some(member => member.scoped);
 		const ids = item ? Array.isArray(item.id) && !item.items ? item.id : members.map(member => member.id) : [];
-		const annotated = !scoped && ids.some(id => id.startsWith("annotation:"));
+		const annotated = !scoped && ids.some(id => id.startsWith("annotation:") || id.startsWith("signature:"));
 		const inserting = ["ofdgoInsertShape", "ofdgoInsertText", "ofdgoInsertImage", "ofdgoInsertInk"].includes(name) || name === "ofdgoSaveRichText" && !item;
 		const editingAnnotation = name === "ofdgoWriteAnnotation" && Boolean(state.annotationCreate?.item);
 		const scopedRichText = scoped && name === "ofdgoSaveRichText";
@@ -13266,7 +13266,7 @@ function updateObjectControls(item, reset = false) {
 	const disabled = !item || Boolean(item.draft) || !state.ready || state.exporting;
 	el.deleteObjectButton.disabled = disabled || !canEditObject(item, "delete");
 	el.copyObjectButton.disabled = disabled || !canEditObject(item, "copy");
-	el.objectStyleButton.disabled = disabled || !canEditObject(item, "transform");
+	el.objectStyleButton.disabled = disabled || !canEditObject(item, "transform") || members.some(member => member.type === "Signature");
 	const cropping = Boolean(canvasEditor.crop);
 	el.objectBoundsButton.disabled = disabled || cropping || !canEditObject(item, "transform");
 	el.objectAlign.disabled = disabled || cropping || !canEditObject(item, "arrange");

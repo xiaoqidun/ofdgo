@@ -28,10 +28,12 @@ import (
 
 // ObjectPath 定位页面顶层对象或注解外观内的成员，Children为从0开始的逐层绘制序号
 // Annotation非空时定位该注解的Appearance，ID留空
+// Signature非空时ID定位该签名的StampAnnot，不包含内部成员
 // 路径不依赖资源标识，几何变换、资源隔离及撤销重做不改变路径；成员增删或排序后需重新枚举
 type ObjectPath struct {
 	ID         string `json:"id"`
 	Annotation string `json:"annotation,omitempty"`
+	Signature  string `json:"signature,omitempty"`
 	Children   []int  `json:"children,omitempty"`
 }
 
@@ -398,6 +400,9 @@ func compositeOrientation(box Box, matrix Matrix) Matrix {
 // 入参: page 页面索引, path 复合对象路径
 // 返回: *Reader 预览读取器, *Renderer 度量器, *editorCompositeNode 顶层节点, []*editorCompositeNode 成员, error 错误信息
 func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, *editorCompositeNode, []*editorCompositeNode, error) {
+	if path.Signature != "" {
+		return nil, nil, nil, nil, fmt.Errorf("signature appearances have no editable children")
+	}
 	if path.Annotation != "" {
 		return e.annotationScope(page, path)
 	}

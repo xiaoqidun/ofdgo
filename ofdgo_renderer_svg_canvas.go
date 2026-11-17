@@ -468,6 +468,19 @@ func (s *svgResourceRenderer) beginAnnotation(id string) bool {
 	return true
 }
 
+// beginStamp 为完整签章外观建立编辑分组，不将嵌套OFD中的对象当作页面成员
+// 入参: stamp 签章外观
+// 返回: bool 是否写入分组
+func (s *svgResourceRenderer) beginStamp(stamp Stamp) bool {
+	if s.objects == nil || stamp.ID == "" || stamp.SignatureID == "" {
+		return false
+	}
+	id := stamp.ObjectID()
+	s.objectStack = append(s.objectStack, svgObjectGroup{path: id})
+	fmt.Fprintf(s.writer, `<g data-ofd-object="%s">`, html.EscapeString(id))
+	return true
+}
+
 // skipObjects 为不可见资源保留内部成员序号
 // 入参: count 直接成员数量
 func (s *svgResourceRenderer) skipObjects(count int) {

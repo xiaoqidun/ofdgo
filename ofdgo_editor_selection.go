@@ -475,7 +475,7 @@ func editorTargetGroups(paths []ObjectPath) ([]string, []string, []editorTargetG
 	var objects, annotations []string
 	var groups []editorTargetGroup
 	for i, path := range paths {
-		if (path.ID == "") == (path.Annotation == "") || slices.ContainsFunc(path.Children, func(index int) bool { return index < 0 }) {
+		if path.Signature != "" || (path.ID == "") == (path.Annotation == "") || slices.ContainsFunc(path.Children, func(index int) bool { return index < 0 }) {
 			return nil, nil, nil, fmt.Errorf("invalid object path")
 		}
 		for _, other := range paths[:i] {
@@ -513,6 +513,28 @@ func editorTargetGroups(paths []ObjectPath) ([]string, []string, []editorTargetG
 		return -slices.Compare(a.path.Children, b.path.Children)
 	})
 	return objects, annotations, groups, nil
+}
+
+// splitSignatureTargets 校验并分离签章外观，普通对象沿用既有路径校验
+// 入参: paths 完整对象路径
+// 返回: []ObjectPath 普通路径, []ObjectPath 签章路径, error 重复或无效路径
+func splitSignatureTargets(paths []ObjectPath) ([]ObjectPath, []ObjectPath, error) {
+	if !slices.ContainsFunc(paths, func(path ObjectPath) bool { return path.Signature != "" }) {
+		return paths, nil, nil
+	}
+	var regular, signatures []ObjectPath
+	for _, path := range paths {
+		if path.Signature == "" {
+			regular = append(regular, path)
+			continue
+		}
+		if path.ID == "" || path.Annotation != "" || len(path.Children) != 0 || slices.ContainsFunc(signatures, func(other ObjectPath) bool { return other.Signature == path.Signature && other.ID == path.ID }) {
+			return nil, nil, fmt.Errorf("invalid or duplicate signature appearance path")
+		}
+		signatures = append(signatures, path)
+	}
+	_, _, _, err := editorTargetGroups(regular)
+	return regular, signatures, err
 }
 
 // editTargets 原子处理跨容器选区，结构变化从后向前避免路径位移
@@ -596,11 +618,24 @@ func (e *Editor) CaptureTargets(page int, paths []ObjectPath) (*ObjectSelection,
 }
 
 // TransformTargets 按页面坐标原子变换跨容器选区，保留组合结构
+// 签章外观仅支持平移与正向缩放，不改变签名媒体
 // 入参: page 页面索引, paths 完整对象路径, matrix 有限可逆变换
 // 返回: error 路径、变换或编辑错误
 func (e *Editor) TransformTargets(page int, paths []ObjectPath, matrix Matrix) error {
 	if _, ok := matrix.Invert(); !ok {
 		return fmt.Errorf("selection transform must be finite and invertible")
+	}
+	regular, signatures, err := splitSignatureTargets(paths)
+	if err != nil {
+		return err
+	}
+	if len(signatures) != 0 {
+		return e.Transaction(func(edit *Editor) error {
+			if err := edit.TransformTargets(page, regular, matrix); err != nil {
+				return err
+			}
+			return edit.changeSignatureStamps(page, signatures, &matrix)
+		})
 	}
 	return e.editTargets(paths, func(objects, annotations []string) error {
 		return e.TransformSelection(page, objects, annotations, matrix)
@@ -610,9 +645,22 @@ func (e *Editor) TransformTargets(page int, paths []ObjectPath, matrix Matrix) e
 }
 
 // DeleteTargets 原子删除跨容器选区，一次撤销恢复全部
+// 签章路径仅移除选中的StampAnnot，原签名值及其他外观保留
 // 入参: page 页面索引, paths 完整对象路径
 // 返回: error 路径或编辑错误
 func (e *Editor) DeleteTargets(page int, paths []ObjectPath) error {
+	regular, signatures, err := splitSignatureTargets(paths)
+	if err != nil {
+		return err
+	}
+	if len(signatures) != 0 {
+		return e.Transaction(func(edit *Editor) error {
+			if err := edit.DeleteTargets(page, regular); err != nil {
+				return err
+			}
+			return edit.changeSignatureStamps(page, signatures, nil)
+		})
+	}
 	return e.editTargets(paths, func(objects, annotations []string) error {
 		return e.DeleteSelection(page, objects, annotations)
 	}, func(path ObjectPath, indexes []int) error {
@@ -673,7 +721,11 @@ func (e *Editor) CopyTargetsStyle(page int, paths []ObjectPath, source GraphicOb
 // 入参: page 页面索引, paths 完整对象路径
 // 返回: []Box 对象范围, bool 可独立缩放宽高, Box 页面范围, error 度量错误
 func (e *Editor) targetGeometry(page int, paths []ObjectPath) ([]Box, bool, Box, error) {
-	if _, _, _, err := editorTargetGroups(paths); err != nil {
+	regular, _, err := splitSignatureTargets(paths)
+	if err != nil {
+		return nil, false, Box{}, err
+	}
+	if _, _, _, err := editorTargetGroups(regular); err != nil {
 		return nil, false, Box{}, err
 	}
 	_, _, paper, err := e.selectionGeometry(page, nil, nil)
@@ -683,7 +735,13 @@ func (e *Editor) targetGeometry(page int, paths []ObjectPath) ([]Box, bool, Box,
 	boxes := make([]Box, len(paths))
 	stretch := true
 	for i, path := range paths {
-		if len(path.Children) != 0 {
+		if path.Signature != "" {
+			stamp, err := e.signatureStamp(page, path)
+			if err != nil {
+				return nil, false, Box{}, err
+			}
+			boxes[i] = stamp.Bounds()
+		} else if len(path.Children) != 0 {
 			index := path.Children[len(path.Children)-1]
 			path.Children = path.Children[:len(path.Children)-1]
 			member, err := e.CompositeObject(page, path, index)
@@ -717,11 +775,15 @@ func (e *Editor) targetGeometry(page int, paths []ObjectPath) ([]Box, bool, Box,
 // 入参: page 页面索引, paths 完整对象路径
 // 返回: Box 页面毫米范围, error 路径或度量错误
 func (e *Editor) TargetsBounds(page int, paths []ObjectPath) (Box, error) {
-	objects, annotations, groups, err := editorTargetGroups(paths)
+	regular, signatures, err := splitSignatureTargets(paths)
 	if err != nil {
 		return Box{}, err
 	}
-	if len(groups) == 0 {
+	objects, annotations, groups, err := editorTargetGroups(regular)
+	if err != nil {
+		return Box{}, err
+	}
+	if len(groups) == 0 && len(signatures) == 0 {
 		return e.SelectionBounds(page, objects, annotations)
 	}
 	boxes, _, _, err := e.targetGeometry(page, paths)
@@ -776,11 +838,15 @@ func (e *Editor) FlipTargets(page int, paths []ObjectPath, axis string) error {
 // 入参: page 页面索引, paths 完整对象路径, box 页面毫米目标范围
 // 返回: error 路径、范围或编辑错误
 func (e *Editor) ResizeTargets(page int, paths []ObjectPath, box Box) error {
-	objects, annotations, groups, err := editorTargetGroups(paths)
+	regular, signatures, err := splitSignatureTargets(paths)
 	if err != nil {
 		return err
 	}
-	if len(groups) == 0 {
+	objects, annotations, groups, err := editorTargetGroups(regular)
+	if err != nil {
+		return err
+	}
+	if len(groups) == 0 && len(signatures) == 0 {
 		return e.ResizeSelection(page, objects, annotations, box)
 	}
 	if err := validateCreationBox(box); err != nil {
