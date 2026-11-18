@@ -21,7 +21,6 @@ import (
 	"image/color"
 	"maps"
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -231,7 +230,7 @@ func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
 	}
 	id := value.ColorSpace
 	if id == "" && e.source != nil && e.source.document.CommonData.DefaultCS != 0 {
-		id = strconv.Itoa(e.source.document.CommonData.DefaultCS)
+		id = formatUnitID(uint64(e.source.document.CommonData.DefaultCS))
 	}
 	if id != "" {
 		var found *ColorSpace

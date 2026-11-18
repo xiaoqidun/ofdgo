@@ -571,6 +571,26 @@ func invoiceXMLField(inv *Invoice, kind, name string) *string {
 			return &inv.Seller.Name
 		case "SellerIdNum":
 			return &inv.Seller.TaxID
+		case "SellerAddr":
+			return &inv.Seller.Address
+		case "SellerTelNum":
+			return &inv.Seller.Phone
+		case "SellerBankName":
+			return &inv.Seller.Bank
+		case "SellerBankAccNum":
+			return &inv.Seller.Account
+		case "BuyerName":
+			return &inv.Buyer.Name
+		case "BuyerIdNum":
+			return &inv.Buyer.TaxID
+		case "BuyerAddr":
+			return &inv.Buyer.Address
+		case "BuyerTelNum":
+			return &inv.Buyer.Phone
+		case "BuyerBankName":
+			return &inv.Buyer.Bank
+		case "BuyerBankAccNum":
+			return &inv.Buyer.Account
 		case "TotalAmWithoutTax":
 			return &inv.Amount
 		case "TotalTaxAm":
@@ -579,6 +599,8 @@ func invoiceXMLField(inv *Invoice, kind, name string) *string {
 			return &inv.TotalAmount
 		case "RequestTime":
 			return &inv.Date
+		case "Remark":
+			return &inv.Remarks
 		}
 		return nil
 	}
@@ -1218,6 +1240,14 @@ func invoicePlainField(inv *Invoice, item *InvoiceItem, path string) (*string, b
 		return &inv.Buyer.Name, false
 	case "/EInvoice/EInvoiceData/BuyerInformation/BuyerIdNum":
 		return &inv.Buyer.TaxID, false
+	case "/EInvoice/EInvoiceData/BuyerInformation/BuyerAddr":
+		return &inv.Buyer.Address, false
+	case "/EInvoice/EInvoiceData/BuyerInformation/BuyerTelNum":
+		return &inv.Buyer.Phone, false
+	case "/EInvoice/EInvoiceData/BuyerInformation/BuyerBankName":
+		return &inv.Buyer.Bank, false
+	case "/EInvoice/EInvoiceData/BuyerInformation/BuyerBankAccNum":
+		return &inv.Buyer.Account, false
 	case "/EInvoice/EInvoiceData/BasicInformation/TotalAmWithoutTax":
 		return &inv.Amount, true
 	case "/EInvoice/EInvoiceData/BasicInformation/TotalTaxAm":

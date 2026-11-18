@@ -26,7 +26,6 @@ import (
 	"maps"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -182,7 +181,7 @@ func (e *Editor) sourcePartsPrepared(ctx context.Context, progress editorProgres
 		}
 	}
 	pagesChanged := !slices.Equal(pageRefs, source.document.Pages.Page)
-	if pagesChanged || len(resourceFiles) != 0 || len(parts) != 0 && e.maxID != source.document.CommonData.MaxUnitID {
+	if pagesChanged || len(resourceFiles) != 0 || e.maxID != uint64(source.document.CommonData.MaxUnitID) {
 		name := reader.documentRoot
 		data, err := reader.readFileViewContext(ctx, name)
 		if err != nil {
@@ -197,10 +196,10 @@ func (e *Editor) sourcePartsPrepared(ctx context.Context, progress editorProgres
 			return nil, fmt.Errorf("document has no CommonData")
 		}
 		var patches []editorXMLPatch
-		if e.maxID != source.document.CommonData.MaxUnitID {
-			value := common.textXML("MaxUnitID", strconv.Itoa(e.maxID))
+		if e.maxID != uint64(source.document.CommonData.MaxUnitID) {
+			value := common.textXML("MaxUnitID", formatUnitID(e.maxID))
 			if maxID := common.child("MaxUnitID"); maxID != nil {
-				value = maxID.textXML("MaxUnitID", strconv.Itoa(e.maxID))
+				value = maxID.textXML("MaxUnitID", formatUnitID(e.maxID))
 				patches = append(patches, editorXMLPatch{maxID.start, maxID.end, value})
 			} else {
 				patches = append(patches, editorXMLPatch{common.open, common.open, value})

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // LayerInfo 描述普通页面图层，Order为同类型零基顺序，ObjectCount包含页块中的图元
@@ -528,12 +529,17 @@ func (e *Editor) commitLayerTemplateParts(reader *Reader, parts map[string][]byt
 			definitions = append(definitions, common.textXML("DocumentRes", "/"+name)...)
 		}
 	}
+	if e.maxID > maxUnitID {
+		return fmt.Errorf("MaxUnitID %d exceeds uint32 range", e.maxID)
+	}
 	var patches []editorXMLPatch
 	if maximum := common.child("MaxUnitID"); maximum != nil {
-		value, _ := strconv.Atoi(editorImportText(data, maximum))
+		value, _ := strconv.ParseUint(strings.TrimSpace(editorImportText(data, maximum)), 10, 32)
 		if e.maxID > value {
-			patches = append(patches, editorXMLPatch{maximum.start, maximum.end, maximum.textXML("MaxUnitID", strconv.Itoa(e.maxID))})
+			patches = append(patches, editorXMLPatch{maximum.start, maximum.end, maximum.textXML("MaxUnitID", formatUnitID(e.maxID))})
 		}
+	} else {
+		patches = append(patches, editorXMLPatch{common.open, common.open, common.textXML("MaxUnitID", formatUnitID(e.maxID))})
 	}
 	if len(definitions) > 0 {
 		at := common.close

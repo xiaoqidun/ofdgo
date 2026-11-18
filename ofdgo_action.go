@@ -367,11 +367,7 @@ func (r *Renderer) pageOpenActionSources(page *PageContent) []actionSource {
 	}
 	for order := range 3 {
 		for _, ref := range page.Template {
-			kind := ref.ZOrder
-			if kind == "" {
-				kind = "Background"
-			}
-			if layerOrder(kind) != order {
+			if r.templateOrder(ref) != order {
 				continue
 			}
 			if template := r.loadTemplate(ref.TemplateID); template != nil && len(template.Actions) > 0 {
@@ -390,11 +386,7 @@ func (r *Renderer) pageActionSources(page *PageContent) []actionSource {
 	for order := range 3 {
 		if r.Reader.doc != nil {
 			for _, ref := range page.Template {
-				kind := ref.ZOrder
-				if kind == "" {
-					kind = "Background"
-				}
-				if layerOrder(kind) != order {
+				if r.templateOrder(ref) != order {
 					continue
 				}
 				if template := r.loadTemplate(ref.TemplateID); template != nil {

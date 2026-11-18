@@ -132,9 +132,19 @@ func (r *Reader) Fork(ctx context.Context) (*Reader, error) {
 	next.mediaCache = maps.Clone(r.mediaCache)
 	next.fontCache = maps.Clone(r.fontCache)
 	next.fontFaces = maps.Clone(r.fontFaces)
-	next.colorSpaceCache = maps.Clone(r.colorSpaceCache)
-	next.drawParamCache = maps.Clone(r.drawParamCache)
-	next.compositeGraphicUnitCache = maps.Clone(r.compositeGraphicUnitCache)
+	next.colorSpaceCache = make(map[string]*ColorSpace, len(r.colorSpaceCache))
+	for id, space := range r.colorSpaceCache {
+		if space != nil {
+			cloned := *space
+			cloned.Palette = slices.Clone(space.Palette)
+			space = &cloned
+		}
+		next.colorSpaceCache[id] = space
+	}
+	next.drawParamCache = make(map[string]*DrawParam, len(r.drawParamCache))
+	maps.Copy(next.drawParamCache, r.drawParamCache)
+	next.compositeGraphicUnitCache = make(map[string]*CompositeGraphicUnit, len(r.compositeGraphicUnitCache))
+	maps.Copy(next.compositeGraphicUnitCache, r.compositeGraphicUnitCache)
 	next.pageHeaderCache = maps.Clone(r.pageHeaderCache)
 	next.Annots = maps.Clone(r.Annots)
 	next.Stamps = maps.Clone(r.Stamps)
@@ -338,12 +348,12 @@ func (r *Reader) docStructureContext(ctx context.Context) (*Document, error) {
 	view.colorSpaceCache = maps.Clone(r.colorSpaceCache)
 	view.drawParamCache = maps.Clone(r.drawParamCache)
 	view.compositeGraphicUnitCache = maps.Clone(r.compositeGraphicUnitCache)
-	for _, res := range doc.CommonData.DocumentRes {
+	for _, res := range doc.CommonData.PublicRes {
 		if err := view.loadResContext(ctx, res); err != nil {
 			return nil, err
 		}
 	}
-	for _, res := range doc.CommonData.PublicRes {
+	for _, res := range doc.CommonData.DocumentRes {
 		if err := view.loadResContext(ctx, res); err != nil {
 			return nil, err
 		}
@@ -919,6 +929,38 @@ func (r *Reader) readFileViewContext(ctx context.Context, name string) ([]byte, 
 	return data, nil
 }
 
+// limitedEntryReader 限制包内单条目解压字节数，超限时返回明确错误而非静默截断
+type limitedEntryReader struct {
+	io.ReadCloser
+	name      string
+	remaining int64
+	limit     int64
+}
+
+// Read 读取数据并累计单条目解压字节数
+// 入参: data 目标缓冲
+// 返回: int 读取字节数, error 读取或超限错误
+func (l *limitedEntryReader) Read(data []byte) (int, error) {
+	if int64(len(data)) > l.remaining+1 {
+		data = data[:l.remaining+1]
+	}
+	n, err := l.ReadCloser.Read(data)
+	l.remaining -= int64(n)
+	if l.remaining < 0 {
+		return n, fmt.Errorf("package entry %s exceeds size limit (%d bytes)", l.name, l.limit)
+	}
+	return n, err
+}
+
+// entryLimit 返回单条目最大解压字节数，0或负值表示不限制
+// 返回: int64 字节上限
+func (r *Reader) entryLimit() int64 {
+	if r.resources != nil {
+		return r.resources.options.MaxEntryBytes
+	}
+	return defaultMaxEntryBytes
+}
+
 // readFileData 统一解析包内路径并区分缓存借用与独立读取
 // 入参: name 文件名
 // 返回: []byte 文件内容, bool 是否借用缓存, error 错误信息
@@ -927,8 +969,13 @@ func (r *Reader) readFileData(name string) ([]byte, bool, error) {
 	if data, ok := r.files[name]; ok {
 		return data, true, nil
 	}
-	if f, ok := r.packageFile(name); ok {
-		data, err := readZipFile(f)
+	if _, ok := r.packageFile(name); ok {
+		input, err := r.openFile(name)
+		if err != nil {
+			return nil, false, err
+		}
+		defer input.Close()
+		data, err := io.ReadAll(input)
 		return data, false, err
 	}
 	return nil, false, fmt.Errorf("file not found: %s", name)
@@ -943,7 +990,14 @@ func (r *Reader) openFile(name string) (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(data)), nil
 	}
 	if f, ok := r.packageFile(name); ok {
-		return f.Open()
+		rc, err := f.Open()
+		if err != nil {
+			return nil, err
+		}
+		if limit := r.entryLimit(); limit > 0 {
+			return &limitedEntryReader{ReadCloser: rc, name: name, remaining: limit, limit: limit}, nil
+		}
+		return rc, nil
 	}
 	return nil, fmt.Errorf("file not found: %s", name)
 }
@@ -953,7 +1007,7 @@ func (r *Reader) openFile(name string) (io.ReadCloser, error) {
 // 返回: string 清理后的文件路径
 func cleanPackagePath(name string) string {
 	name = strings.ReplaceAll(name, "\\", "/")
-	name = strings.TrimPrefix(name, "/")
+	name = strings.TrimLeft(name, "/")
 	return path.Clean(name)
 }
 
@@ -963,18 +1017,6 @@ func cleanPackagePath(name string) string {
 func (r *Reader) packageFile(name string) (*zip.File, bool) {
 	f, ok := r.fileIndex[cleanPackagePath(name)]
 	return f, ok
-}
-
-// readZipFile 读取zip文件内容
-// 入参: f zip文件对象
-// 返回: []byte 文件内容, error 错误信息
-func readZipFile(f *zip.File) ([]byte, error) {
-	rc, err := f.Open()
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
-	return io.ReadAll(rc)
 }
 
 // loadRes 加载资源文件

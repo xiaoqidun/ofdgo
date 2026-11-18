@@ -140,10 +140,7 @@ func (r *Reader) EditorContext(ctx context.Context) (*Editor, error) {
 	}
 	reader := cloneEditorReader(r)
 	doc := reader.doc
-	maximum := doc.CommonData.MaxUnitID
-	if maximum < 0 {
-		return nil, fmt.Errorf("invalid MaxUnitID")
-	}
+	maximum := uint64(doc.CommonData.MaxUnitID)
 	info, err := reader.DocInfo()
 	if err != nil {
 		return nil, err
@@ -306,8 +303,8 @@ func (e *Editor) prepareSourceIDsContext(ctx context.Context) error {
 
 // sourceMaxID 核对最大标识，不修改文档或缓存，允许导入准备阶段取消
 // 入参: progress 进度回调
-// 返回: int 最大标识, error 错误信息
-func (e *Editor) sourceMaxID(progress editorProgress) (int, error) {
+// 返回: uint64 最大标识, error 错误信息
+func (e *Editor) sourceMaxID(progress editorProgress) (uint64, error) {
 	if e.source == nil || e.source.idsReady {
 		return e.maxID, nil
 	}
@@ -340,14 +337,14 @@ func (e *Editor) sourceMaxID(progress editorProgress) (int, error) {
 
 // editorXMLMaxID 按内容识别OFD结构并读取最大标识，跳过二进制及非OFD内容
 // 入参: input 包内文件流
-// 返回: int 最大标识, error 错误信息
-func editorXMLMaxID(input io.Reader) (int, error) {
+// 返回: uint64 最大标识, error 错误信息
+func editorXMLMaxID(input io.Reader) (uint64, error) {
 	buffer := bufio.NewReader(input)
 	if found, err := editorXMLPrefix(buffer); err != nil || !found {
 		return 0, err
 	}
 	decoder := xml.NewDecoder(buffer)
-	maximum, started := 0, false
+	maximum, started := uint64(0), false
 	for {
 		token, err := decoder.Token()
 		var syntax *xml.SyntaxError
@@ -371,7 +368,7 @@ func editorXMLMaxID(input io.Reader) (int, error) {
 		}
 		for _, attr := range node.Attr {
 			if attr.Name.Space == "" && attr.Name.Local == "ID" {
-				id, err := strconv.Atoi(editorResourceID(attr.Value))
+				id, err := strconv.ParseUint(strings.Trim(attr.Value, " \t\r\n"), 10, 32)
 				if err == nil {
 					maximum = max(maximum, id)
 				}
@@ -393,7 +390,7 @@ func (e *Editor) sourceRGB() bool {
 	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
 		return true
 	}
-	space, _ := resourceValue(e.source.reader.colorSpaceCache, strconv.Itoa(e.source.document.CommonData.DefaultCS))
+	space, _ := resourceValue(e.source.reader.colorSpaceCache, formatUnitID(uint64(e.source.document.CommonData.DefaultCS)))
 	return space != nil && space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0
 }
 
@@ -457,7 +454,10 @@ func (e *Editor) repairSourceObjectIDs(ctx context.Context, data []byte, root *e
 			return nil, false, err
 		}
 		maximum++
-		encoded, err := editorXMLAttribute(data, node, "ID", strconv.Itoa(maximum))
+		if maximum > maxUnitID {
+			return nil, false, fmt.Errorf("MaxUnitID %d exceeds uint32 range", maximum)
+		}
+		encoded, err := editorXMLAttribute(data, node, "ID", formatUnitID(maximum))
 		if err != nil {
 			return nil, false, err
 		}

@@ -214,6 +214,9 @@ func (r *Reader) parseSignatures(ctx context.Context, doc *Document) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if strings.EqualFold(strings.TrimSpace(string(sigRef.Type)), string(SignTypeSign)) {
+			continue
+		}
 		func(sigRef Signature) {
 			sigPath := resolveResourcePath(sigListPath, "", sigRef.BaseLoc)
 			sf, err := r.openFile(sigPath)

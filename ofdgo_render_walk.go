@@ -82,11 +82,7 @@ func (r *Renderer) WalkPage(page *PageContent, visitor PageVisitor) error {
 		}
 		if r.Reader.doc != nil {
 			for _, ref := range page.Template {
-				kind := ref.ZOrder
-				if kind == "" {
-					kind = "Background"
-				}
-				if layerOrder(kind) != order {
+				if r.templateOrder(ref) != order {
 					continue
 				}
 				template := r.loadTemplate(ref.TemplateID)

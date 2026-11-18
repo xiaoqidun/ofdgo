@@ -159,6 +159,9 @@ func parseFloats(s string) []float64 {
 	return result
 }
 
+// maxCompressedFloats 限制单个带g数组展开后的最大元素数量
+const maxCompressedFloats = 1 << 20
+
 // parseFloatsWithG 解析带g的压缩浮点数数组
 // 入参: s 字符串
 // 返回: []float64 浮点数数组
@@ -167,6 +170,9 @@ func parseFloatsWithG(s string) []float64 {
 	gFlag := false
 	gCount := 0
 	for p := range strings.FieldsSeq(s) {
+		if len(result) >= maxCompressedFloats {
+			break
+		}
 		if p == "g" {
 			gFlag = true
 			continue
@@ -174,17 +180,19 @@ func parseFloatsWithG(s string) []float64 {
 		if gFlag {
 			var err error
 			gCount, err = strconv.Atoi(p)
-			if err != nil {
+			if err != nil || gCount < 0 {
 				gCount = 0
 			}
 			gFlag = false
 			continue
 		}
 		if gCount > 0 {
-			v, _ := strconv.ParseFloat(p, 64)
-			result = slices.Grow(result, gCount)
-			for j := 0; j < gCount; j++ {
-				result = append(result, v)
+			if v, err := strconv.ParseFloat(p, 64); err == nil {
+				count := min(gCount, maxCompressedFloats-len(result))
+				result = slices.Grow(result, count)
+				for j := 0; j < count; j++ {
+					result = append(result, v)
+				}
 			}
 			gCount = 0
 		} else {

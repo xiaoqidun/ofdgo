@@ -44,6 +44,7 @@ type fileEntry struct {
 	directory  bool
 	owned      bool
 	temporary  bool
+	releasable bool
 	saveTarget ofdgo.Output
 	readers    int
 	retired    bool
@@ -250,6 +251,20 @@ func (s *fileStore) file(id string) (map[string]any, error) {
 // 入参: id 授权标识
 // 返回: map[string]any 文件描述, error 授权或状态错误
 func (s *fileStore) reference(id string) (map[string]any, error) {
+	return s.lazy(id, false)
+}
+
+// lazyFile 返回可释放的按需读取文件描述，枚举目录时不预先打开句柄
+// 入参: id 授权标识
+// 返回: map[string]any 文件描述, error 授权或状态错误
+func (s *fileStore) lazyFile(id string) (map[string]any, error) {
+	return s.lazy(id, true)
+}
+
+// lazy 生成按需读取的文件描述并隔离授权句柄
+// 入参: id 授权标识, releasable 是否允许前端释放读取条目
+// 返回: map[string]any 文件描述, error 授权或状态错误
+func (s *fileStore) lazy(id string, releasable bool) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry := s.entries[id]
@@ -260,7 +275,13 @@ func (s *fileStore) reference(id string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"nativeFile": id, "name": entry.name, "size": info.Size(), "lastModified": info.ModTime().UnixMilli(), "url": "/__native/data/" + id, "handle": s.descriptor(id)}, nil
+	handle := s.descriptor(id)
+	if !releasable {
+		return map[string]any{"nativeFile": id, "name": entry.name, "size": info.Size(), "lastModified": info.ModTime().UnixMilli(), "url": "/__native/data/" + id, "handle": handle}, nil
+	}
+	refID := rand.Text()
+	s.entries[refID] = &fileEntry{path: entry.path, name: entry.name, releasable: true}
+	return map[string]any{"nativeFile": refID, "name": entry.name, "size": info.Size(), "lastModified": info.ModTime().UnixMilli(), "url": "/__native/data/" + refID, "handle": handle}, nil
 }
 
 // resolve 按授权标识读取文件并保持随机读取句柄
@@ -357,7 +378,7 @@ func (s *fileStore) resource(id string) (io.ReaderAt, int64, func() error, error
 func (s *fileStore) release(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if entry := s.entries[id]; entry != nil && (entry.data != nil || entry.temporary || entry.file != nil) {
+	if entry := s.entries[id]; entry != nil && (entry.data != nil || entry.temporary || entry.file != nil || entry.releasable) {
 		delete(s.entries, id)
 		entry.retired = true
 		if entry.stop != nil {

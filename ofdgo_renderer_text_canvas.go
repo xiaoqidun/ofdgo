@@ -241,8 +241,8 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		if textRun != nil && tc.Index == "" {
 			spans = textGlyphSpans(runes, glyphTransforms, codePos)
 		}
-		positioner := NewTextPositioner(tc)
-		positioned := textCodePositioned(tc, positioner.xs, positioner.ys)
+		positioner := NewTextPositioner(tc, obj.ReadDirection)
+		positioned := textCodePositioned(tc, positioner.xs, positioner.ys) || obj.ReadDirection != 0
 		drawAsPath := embeddedFont || face.FauxBold > 0 || positioned || fillClip != nil || shadedFill || fillPattern != nil || shouldStroke
 		for i, glyph := range glyphs {
 			if i%64 == 0 && r.pageContext != nil {

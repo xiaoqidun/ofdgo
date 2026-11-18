@@ -140,7 +140,7 @@ func (r *Renderer) colorComponents(value string, index *int, space string) (stri
 	defaultSpace := r.Reader != nil && r.Reader.doc != nil && r.Reader.doc.CommonData.DefaultCS != 0
 	if cs == nil && (defaultSpace || space != "" && (index != nil || len(strings.Fields(value)) != 3)) {
 		if space == "" {
-			space = strconv.Itoa(r.Reader.doc.CommonData.DefaultCS)
+			space = formatUnitID(uint64(r.Reader.doc.CommonData.DefaultCS))
 		}
 		return "", [4]float64{}, fmt.Errorf("color space %q not found", space)
 	}
@@ -558,7 +558,7 @@ func (r *Renderer) ResolvePaint(fill *FillColor) (Paint, error) {
 			return paint, nil
 		}
 	}
-	if node := fill.RadialShd; node != nil && node.EndRadius > 0 {
+	if node := fill.RadialShd; node != nil && node.StartRadius >= 0 && node.EndRadius >= 0 && (node.StartRadius > 0 || node.EndRadius > 0) {
 		start, end := parseFloats(node.StartPoint), parseFloats(node.EndPoint)
 		stops := r.renderGradientStops(node.Segment, fill.Alpha)
 		if r.renderError != nil {

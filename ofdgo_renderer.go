@@ -81,10 +81,10 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	if err != nil {
 		return nil, err
 	}
+	maps.Copy(reader.drawParamCache, r.DrawParams)
+	maps.Copy(reader.compositeGraphicUnitCache, r.CompositeGraphicUnits)
 	next := NewRenderer(reader, WithDPI(r.DPI), WithAnnotations(r.RenderAnnotations), WithRenderBackends(r.backends), WithFontDirs(r.fontDirs...), WithFontFS(r.fontFS...))
 	next.Compression = r.Compression
-	next.DrawParams = maps.Clone(r.DrawParams)
-	next.CompositeGraphicUnits = maps.Clone(r.CompositeGraphicUnits)
 	next.OutputContext = ctx
 	next.TransparentBackground = r.TransparentBackground
 	next.decodeImages = r.decodeImages
@@ -198,6 +198,25 @@ func (r *Renderer) loadTemplate(templateID string) *PageContent {
 		return page
 	}
 	return nil
+}
+
+// templateOrder 获取页面模板引用的绘制顺序，省略时继承文档模板页声明并回退背景层
+// 入参: ref 页面模板引用
+// 返回: int 绘制顺序
+func (r *Renderer) templateOrder(ref Template) int {
+	kind := ref.ZOrder
+	if kind == "" && r.Reader.doc != nil {
+		for _, tpl := range r.Reader.doc.CommonData.TemplatePage {
+			if sameResourceID(tpl.ID, ref.TemplateID) {
+				kind = tpl.ZOrder
+				break
+			}
+		}
+	}
+	if kind == "" {
+		kind = "Background"
+	}
+	return layerOrder(kind)
 }
 
 // layerOrder 获取图层类型的绘制顺序

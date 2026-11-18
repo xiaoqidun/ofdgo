@@ -21,7 +21,6 @@ import (
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"reflect"
 	"slices"
-	"strconv"
 )
 
 // editorObjectPosition 对象所属图层及层内索引
@@ -180,13 +179,13 @@ func (e *Editor) copyObjectsContext(ctx context.Context, page int, objects []Gra
 	prepared := make([]GraphicObject, len(objects))
 	origins := make([]*editorObjectOrigin, len(objects))
 	result := make([]string, len(objects))
-	maximum := e.maxID + len(objects)
+	maximum := e.maxID + uint64(len(objects))
 	validation := &editorValidation{Editor: e}
 	for i, object := range objects {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		result[i] = strconv.Itoa(e.maxID + i + 1)
+		result[i] = formatUnitID(e.maxID + uint64(i) + 1)
 		object, err := validation.prepareCopiedObject(result[i], object)
 		if err != nil {
 			return nil, err
@@ -207,6 +206,9 @@ func (e *Editor) copyObjectsContext(ctx context.Context, page int, objects []Gra
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if maximum > maxUnitID {
+		return nil, fmt.Errorf("MaxUnitID %d exceeds uint32 range", maximum)
 	}
 	e.maxID = maximum
 	for i, origin := range origins {
@@ -283,8 +285,11 @@ func (v *editorValidation) appendOwnedObjects(ctx context.Context, page int, obj
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if e.maxID+uint64(len(objects))+1 > maxUnitID {
+		return fmt.Errorf("MaxUnitID %d exceeds uint32 range", e.maxID+uint64(len(objects)))
+	}
 	for i := range objects {
-		id := strconv.Itoa(e.maxID + i + 1)
+		id := formatUnitID(e.maxID + uint64(i) + 1)
 		switch objects[i].Type {
 		case "TextObject":
 			objects[i].TextObject.ID = id
@@ -304,7 +309,7 @@ func (v *editorValidation) appendOwnedObjects(ctx context.Context, page int, obj
 	if target < len(layers) {
 		target = len(layers) - 1
 	}
-	e.maxID += len(objects)
+	e.maxID += uint64(len(objects))
 	if target == len(layers) || layers[target].DrawParam != "" {
 		layers = append(layers, Layer{ID: e.nextID(), Type: "Body"})
 		target = len(layers) - 1

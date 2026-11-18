@@ -43,8 +43,11 @@ import (
 	"github.com/xiaoqidun/ofdgo/internal/webui"
 )
 
-const applicationVersionURL = "https://ofdgo.aite.me/"
-const applicationDownloadURL = "https://ofdgo.aite.me/releases/"
+// 应用版本检查与发布下载根地址
+const (
+	applicationVersionURL  = "https://ofdgo.aite.me/"
+	applicationDownloadURL = "https://ofdgo.aite.me/releases/"
+)
 
 // Host 连接桌面系统能力和共用文档业务
 type Host struct {
@@ -612,6 +615,17 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 				var directory string
 				directory, err = window.OpenDirectory(options)
 				if err == nil {
+					allowed := make(map[string]bool)
+					for _, filter := range options.Filters {
+						if filter.Pattern == "*.*" {
+							continue
+						}
+						for _, item := range strings.Split(filter.Pattern, ";") {
+							if ext := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(item)), "*"); strings.HasPrefix(ext, ".") {
+								allowed[ext] = true
+							}
+						}
+					}
 					err = filepath.WalkDir(directory, func(path string, entry fs.DirEntry, walkErr error) error {
 						if walkErr != nil {
 							return walkErr
@@ -620,6 +634,12 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 							return err
 						}
 						if entry.Type().IsRegular() {
+							if len(allowed) != 0 && !allowed[strings.ToLower(filepath.Ext(entry.Name()))] {
+								return nil
+							}
+							if len(names) >= 10000 {
+								return fmt.Errorf("目录文件数量超出单次选择上限")
+							}
 							names = append(names, path)
 						}
 						return nil
@@ -638,12 +658,18 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 				return nil, dialogError(err)
 			}
 			result := make([]any, 0, len(names))
+			lazy := flag("directory")
 			for _, file := range names {
 				handle, err := h.files.add(file, false)
 				if err != nil {
 					return nil, err
 				}
-				value, err := h.files.file(handle["nativeHandle"].(string))
+				var value map[string]any
+				if lazy {
+					value, err = h.files.lazyFile(handle["nativeHandle"].(string))
+				} else {
+					value, err = h.files.file(handle["nativeHandle"].(string))
+				}
 				if err != nil {
 					return nil, err
 				}

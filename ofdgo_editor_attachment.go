@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"maps"
 	"path"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -85,6 +84,9 @@ func (e *Editor) AddAttachmentContext(ctx context.Context, name string, data []b
 		used[attachment.ID] = true
 	}
 	id, maximum := nextAttachmentID(used, maximum)
+	if maximum > maxUnitID {
+		return "", fmt.Errorf("MaxUnitID %d exceeds uint32 range", maximum)
+	}
 	file := e.packageName("Attachments/Attachment_" + id)
 	attrs := ofdAttrs{}
 	attrs.add("ID", id)
@@ -159,11 +161,11 @@ func (e *Editor) AddAttachmentContext(ctx context.Context, name string, data []b
 
 // nextAttachmentID 分配以字母开头且不与已有附件重复的标识
 // 入参: used 已用附件标识, maximum 当前编号上限
-// 返回: string 附件标识, int 更新后的编号上限
-func nextAttachmentID(used map[string]bool, maximum int) (string, int) {
+// 返回: string 附件标识, uint64 更新后的编号上限
+func nextAttachmentID(used map[string]bool, maximum uint64) (string, uint64) {
 	for {
 		maximum++
-		id := "a" + strconv.Itoa(maximum)
+		id := "a" + formatUnitID(maximum)
 		if !used[id] {
 			used[id] = true
 			return id, maximum
@@ -209,7 +211,7 @@ func (e *Editor) ReplaceAttachment(id string, data []byte) error {
 // 入参: ctx 取消上下文, id 附件标识, data 新文件数据
 // 返回: error 读取、取消或提交错误
 func (e *Editor) ReplaceAttachmentContext(ctx context.Context, id string, data []byte) error {
-	var maximum int
+	var maximum uint64
 	changed := false
 	err := e.editAttachment(ctx, id, func(fragment []byte, node *editorXML, parts map[string][]byte) ([]byte, error) {
 		if child := node.child("FileLoc"); child != nil {
@@ -230,7 +232,10 @@ func (e *Editor) ReplaceAttachmentContext(ctx context.Context, id string, data [
 		if err != nil {
 			return nil, err
 		}
-		file := e.packageName("Attachments/Attachment_" + strconv.Itoa(maximum+1))
+		if maximum+1 > maxUnitID {
+			return nil, fmt.Errorf("MaxUnitID %d exceeds uint32 range", maximum+1)
+		}
+		file := e.packageName("Attachments/Attachment_" + formatUnitID(maximum+1))
 		var location bytes.Buffer
 		if err := xml.EscapeText(&location, []byte("/"+file)); err != nil {
 			return nil, err

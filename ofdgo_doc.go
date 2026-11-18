@@ -108,12 +108,12 @@ type CustomTag struct {
 
 // CommonData 文档公共数据
 type CommonData struct {
-	MaxUnitID    int            `xml:"MaxUnitID"`
+	MaxUnitID    uint32         `xml:"MaxUnitID"`
 	PageArea     PageArea       `xml:"PageArea"`
 	PublicRes    []string       `xml:"PublicRes"`
 	DocumentRes  []string       `xml:"DocumentRes"`
 	TemplatePage []TemplatePage `xml:"TemplatePage"`
-	DefaultCS    int            `xml:"DefaultCS"`
+	DefaultCS    uint32         `xml:"DefaultCS"`
 }
 
 // PageArea 页面区域定义

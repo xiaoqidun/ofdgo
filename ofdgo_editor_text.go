@@ -254,7 +254,8 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 	}
 	old, next := []rune(obj.Text()), []rune(value)
 	vertical := (obj.ReadDirection == 90 || obj.ReadDirection == 270) && obj.CharDirection == 0 && len(obj.TextCode) == 1 && obj.TextCode[0].DeltaY != ""
-	complex := obj.ReadDirection != 0 && !vertical || obj.CharDirection != 0 || len(obj.CGTransform) != 0 || obj.VScale != 0 || obj.Decoration != ""
+	reverseHorizontal := obj.ReadDirection == 180 && obj.CharDirection == 0 && len(obj.TextCode) == 1 && obj.TextCode[0].DeltaX != ""
+	complex := obj.ReadDirection != 0 && !vertical && !reverseHorizontal || obj.CharDirection != 0 || len(obj.CGTransform) != 0 || obj.VScale != 0 || obj.Decoration != ""
 	if complex && len(old) != len(next) {
 		return &EditError{Code: EditLayoutRequired, Err: fmt.Errorf("changing positioned text length requires explicit layout")}
 	}
@@ -333,7 +334,13 @@ func (e *Editor) RewriteText(obj *TextObject, value string) error {
 					codes[i].DeltaX = rewriteTextDeltas(codes[i].DeltaX, runes, replacement, from, to, advance)
 				}
 				if codes[i].DeltaY != "" {
-					codes[i].DeltaY = rewriteTextDeltas(codes[i].DeltaY, runes, replacement, from, to, func(rune) float64 { return 0 })
+					verticalAdvance := func(rune) float64 {
+						if vertical {
+							return obj.Size
+						}
+						return 0
+					}
+					codes[i].DeltaY = rewriteTextDeltas(codes[i].DeltaY, runes, replacement, from, to, verticalAdvance)
 				}
 				codes[i].Value = escapeOFDText(string(content))
 				changed = true

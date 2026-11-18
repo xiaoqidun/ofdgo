@@ -53,7 +53,7 @@ type editorPageImport struct {
 	documentXML   []byte
 	documentRoot  *editorXML
 	docRefs       map[string]map[string]*editorXML
-	maximum       int
+	maximum       uint64
 	ids           map[string]string
 	pages         map[string]bool
 	files         map[string][]byte
@@ -607,7 +607,7 @@ func (e *Editor) prepareImport(ctx context.Context, source *Reader, doc *Documen
 		m.templates[editorImportKey(template.ID)] = template
 	}
 	if doc.CommonData.DefaultCS != 0 {
-		m.defaultCS, err = m.resource(strconv.Itoa(doc.CommonData.DefaultCS), "ColorSpace")
+		m.defaultCS, err = m.resource(formatUnitID(uint64(doc.CommonData.DefaultCS)), "ColorSpace")
 		if err != nil {
 			return nil, nil, err
 		}
@@ -863,7 +863,7 @@ func (m *editorPageImport) id(value string) string {
 		return id
 	}
 	m.maximum++
-	id := strconv.Itoa(m.maximum)
+	id := formatUnitID(m.maximum)
 	m.ids[key], m.ids[value] = id, id
 	return id
 }
@@ -1130,7 +1130,7 @@ func (m *editorPageImport) templateObjectIDs(node *editorXML, ids map[string]str
 		key := editorImportKey(value)
 		if ids[key] == "" {
 			m.maximum++
-			ids[key] = strconv.Itoa(m.maximum)
+			ids[key] = formatUnitID(m.maximum)
 		}
 	}
 	for _, child := range node.children {
@@ -1733,10 +1733,13 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 		}
 		content = append(content, entry...)
 	}
+	if m.maximum > maxUnitID {
+		return nil, fmt.Errorf("MaxUnitID %d exceeds uint32 range", m.maximum)
+	}
 	patches := []editorXMLPatch{{position, position, content}}
-	patch := editorXMLPatch{common.open, common.open, common.textXML("MaxUnitID", strconv.Itoa(m.maximum))}
+	patch := editorXMLPatch{common.open, common.open, common.textXML("MaxUnitID", formatUnitID(m.maximum))}
 	if maximum := common.child("MaxUnitID"); maximum != nil {
-		patch = editorXMLContent(data, maximum, []byte(strconv.Itoa(m.maximum)))
+		patch = editorXMLContent(data, maximum, []byte(formatUnitID(m.maximum)))
 	}
 	patches = append(patches, patch)
 	pages := root.child("Pages")

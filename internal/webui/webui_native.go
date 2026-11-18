@@ -144,6 +144,8 @@ type nativeField struct {
 }
 
 // NewNativeEngine 创建独立业务会话，resolver不接收未经授权的文件路径
+// 入参: resolve 宿主资源解析回调
+// 返回: *NativeEngine 独立原生业务引擎
 func NewNativeEngine(resolve NativeResolver) *NativeEngine { return &NativeEngine{Resolve: resolve} }
 
 // Call 执行worker输入协议，返回ok/data/error，字节保持[]byte，emit不含请求id
@@ -379,6 +381,7 @@ func nativeReadOnly(name string) bool {
 }
 
 // Close 释放会话，不关闭宿主持有的ReaderAt资源
+// 返回: error 关闭错误
 func (e *NativeEngine) Close() error {
 	e.once.Do(func() {
 		e.gate = make(chan struct{}, 1)
@@ -486,6 +489,8 @@ func (e *NativeEngine) renderObjects(operation *businessEngine, index int) ([]an
 }
 
 // input 读取授权源并以宿主报告的大小为准
+// 入参: ctx 调用上下文, value 输入字节或授权描述
+// 返回: io.ReaderAt 随机读取器, int64 数据大小, error 授权或读取错误
 func (e *NativeEngine) input(ctx context.Context, value any) (io.ReaderAt, int64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
@@ -515,6 +520,8 @@ func (e *NativeEngine) input(ctx context.Context, value any) (io.ReaderAt, int64
 }
 
 // ReadAt 分块传递取消检查，宿主ReadAt自身阻塞时由宿主控制超时
+// 入参: data 目标切片, offset 读取偏移
+// 返回: int 读取字节数, error 读取或取消错误
 func (r nativeReader) ReadAt(data []byte, offset int64) (int, error) {
 	total := 0
 	for len(data) > 0 {
@@ -565,6 +572,8 @@ func (e *NativeEngine) readBytes(ctx context.Context, value any) ([]byte, error)
 }
 
 // nativePlain 保留字节并转换JSON结构
+// 入参: value 待转换值
+// 返回: any 标准原生结构
 func nativePlain(value any) any {
 	switch v := value.(type) {
 	case platformValue:
@@ -732,6 +741,8 @@ func nativePlainType(value reflect.Type, visiting map[reflect.Type]bool) bool {
 }
 
 // nativeFailure 转换结构化业务错误
+// 入参: err 业务错误
+// 返回: map[string]any 错误描述映射
 func nativeFailure(err error) map[string]any {
 	result := nativePlain(failureResult(err)).(map[string]any)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -741,6 +752,7 @@ func nativeFailure(err error) map[string]any {
 }
 
 // event 发送标准worker进度
+// 入参: value 进度事件内容
 func (c *nativeCall) event(value map[string]any) {
 	if c.emit != nil {
 		c.emit(value)
@@ -748,9 +760,13 @@ func (c *nativeCall) event(value map[string]any) {
 }
 
 // checkpoint 检查操作取消
+// 入参: _ 忽略的回调参数
+// 返回: any 空结果, error 取消错误
 func (c *nativeCall) checkpoint(...any) (any, error) { return nil, c.ctx.Err() }
 
 // progress 创建标准进度回调
+// 入参: kind 事件类型, stage 阶段名, phased 是否包含子阶段
+// 返回: nativeCallback 进度回调函数
 func (c *nativeCall) progress(kind, stage string, phased bool) nativeCallback {
 	return func(args ...any) (any, error) {
 		if err := c.ctx.Err(); err != nil {
@@ -771,6 +787,8 @@ func (c *nativeCall) progress(kind, stage string, phased bool) nativeCallback {
 }
 
 // readCallback 创建有界随机读取回调
+// 入参: value 输入源参数
+// 返回: nativeCallback 读取回调, int64 数据大小, error 授权或读取错误
 func (c *nativeCall) readCallback(value any) (nativeCallback, int64, error) {
 	input, size, err := c.engine.input(c.ctx, value)
 	if err != nil {
@@ -797,6 +815,8 @@ func (c *nativeCall) readCallback(value any) (nativeCallback, int64, error) {
 }
 
 // write 写出数据块
+// 入参: args 输出字节参数
+// 返回: any 空结果, error 写入或取消错误
 func (c *nativeCall) write(args ...any) (any, error) {
 	if err := c.ctx.Err(); err != nil {
 		return nil, err
@@ -819,6 +839,8 @@ func (c *nativeCall) write(args ...any) (any, error) {
 }
 
 // open 创建宿主输出，目标只交给授权hook解释
+// 入参: name 输出条目名
+// 返回: error 打开错误
 func (c *nativeCall) open(name string) error {
 	c.currentName = name
 	c.buffer.Reset()
@@ -837,6 +859,8 @@ func (c *nativeCall) open(name string) error {
 }
 
 // boundary 处理批量输出文件边界
+// 入参: args 动作与文件名参数
+// 返回: any 空结果, error 边界处理错误
 func (c *nativeCall) boundary(args ...any) (any, error) {
 	if err := c.ctx.Err(); err != nil {
 		return nil, err
@@ -865,6 +889,8 @@ func (c *nativeCall) boundary(args ...any) (any, error) {
 }
 
 // font 按需请求授权字体
+// 入参: args 字体名称参数
+// 返回: any 字体字节数据, error 读取错误
 func (c *nativeCall) font(args ...any) (any, error) {
 	if err := c.ctx.Err(); err != nil {
 		return nil, err
@@ -876,6 +902,8 @@ func (c *nativeCall) font(args ...any) (any, error) {
 }
 
 // fileCallback 逐个读取图片或附件
+// 入参: files 文件描述数组
+// 返回: nativeCallback 文件读取回调
 func (c *nativeCall) fileCallback(files platformValue) nativeCallback {
 	return func(args ...any) (any, error) {
 		data, err := c.engine.readBytes(c.ctx, files.Index(platformValueOf(args[0]).Int()).value)
@@ -887,6 +915,8 @@ func (c *nativeCall) fileCallback(files platformValue) nativeCallback {
 }
 
 // prepare 将worker输入转换为共用业务参数
+// 入参: name 操作名, args 原始调用参数
+// 返回: []any 转换后的业务参数, error 参数校验或准备错误
 func (c *nativeCall) prepare(name string, args []any) ([]any, error) {
 	checkpoint := nativeCallback(c.checkpoint)
 	write := nativeCallback(c.write)
@@ -1039,6 +1069,8 @@ func (c *nativeCall) prepare(name string, args []any) ([]any, error) {
 }
 
 // finish 完成输出并保留原生字节
+// 入参: name 操作名, result 操作响应映射
+// 返回: error 提交或关闭错误
 func (c *nativeCall) finish(name string, result map[string]any) error {
 	if !c.exporting && !c.batch {
 		return nil
@@ -1073,6 +1105,7 @@ func (c *nativeCall) finish(name string, result map[string]any) error {
 }
 
 // abort 失败时释放尚未提交的宿主输出，支持可选Abort回滚
+// 返回: error 回滚或清理错误
 func (c *nativeCall) abort() error {
 	var err error
 	if c.output != nil {
@@ -1090,6 +1123,8 @@ func (c *nativeCall) abort() error {
 }
 
 // nativeOutputBase 清理worker输出文件名，冲突后缀由宿主排他创建决定
+// 入参: value 文件名参数
+// 返回: string 清理后的基础文件名
 func nativeOutputBase(value platformValue) string {
 	base := "document"
 	if value.Type() == platformTypeString {
@@ -1109,6 +1144,8 @@ func nativeOutputBase(value platformValue) string {
 }
 
 // inputFromValue 读取宿主授权的随机读取源
+// 入参: value 输入源参数
+// 返回: *ofdgo.Input 文档输入源, error 读取错误
 func (e *businessEngine) inputFromValue(value platformValue) (*ofdgo.Input, error) {
 	reader, size, err := e.resolveInput(e.operationContext(), value.value)
 	if err != nil {
@@ -1118,6 +1155,8 @@ func (e *businessEngine) inputFromValue(value platformValue) (*ofdgo.Input, erro
 }
 
 // platformValueOf 包装参数
+// 入参: v Go值
+// 返回: platformValue 包装后的参数值
 func platformValueOf(v any) platformValue {
 	if p, ok := v.(platformValue); ok {
 		return p
@@ -1126,9 +1165,11 @@ func platformValueOf(v any) platformValue {
 }
 
 // platformNull 返回空参数
+// 返回: platformValue 空参数值
 func platformNull() platformValue { return platformValue{} }
 
 // Type 返回协议参数类型
+// 返回: int 参数类型标识
 func (v platformValue) Type() int {
 	switch v.value.(type) {
 	case nil:
@@ -1147,12 +1188,15 @@ func (v platformValue) Type() int {
 }
 
 // IsNull 检查空参数
+// 返回: bool 是否为空
 func (v platformValue) IsNull() bool { return v.value == nil }
 
 // IsUndefined 检查缺省参数
+// 返回: bool 是否未定义
 func (v platformValue) IsUndefined() bool { return v.value == nil }
 
 // String 读取字符串
+// 返回: string 字符串文本
 func (v platformValue) String() string {
 	if v.value == nil {
 		return "<undefined>"
@@ -1161,6 +1205,7 @@ func (v platformValue) String() string {
 }
 
 // Bool 读取布尔参数
+// 返回: bool 布尔值
 func (v platformValue) Bool() bool {
 	b, ok := v.value.(bool)
 	if !ok {
@@ -1170,6 +1215,7 @@ func (v platformValue) Bool() bool {
 }
 
 // Float 读取数值参数
+// 返回: float64 浮点数值
 func (v platformValue) Float() float64 {
 	switch n := v.value.(type) {
 	case float64:
@@ -1194,9 +1240,12 @@ func (v platformValue) Float() float64 {
 }
 
 // Int 读取整数参数
+// 返回: int 整数值
 func (v platformValue) Int() int { return int(v.Float()) }
 
 // Get 读取对象字段
+// 入参: key 字段名
+// 返回: platformValue 字段值
 func (v platformValue) Get(key string) platformValue {
 	if m, ok := v.value.(map[string]any); ok {
 		return platformValueOf(m[key])
@@ -1208,6 +1257,7 @@ func (v platformValue) Get(key string) platformValue {
 }
 
 // Length 读取数组长度
+// 返回: int 元素数量
 func (v platformValue) Length() int {
 	if v.value == nil {
 		return 0
@@ -1216,11 +1266,15 @@ func (v platformValue) Length() int {
 }
 
 // Index 读取数组元素
+// 入参: i 元素索引
+// 返回: platformValue 数组元素值
 func (v platformValue) Index(i int) platformValue {
 	return platformValueOf(reflect.ValueOf(v.value).Index(i).Interface())
 }
 
 // Invoke 调用宿主函数
+// 入参: args 调用参数
+// 返回: platformValue 回调返回值
 func (v platformValue) Invoke(args ...any) platformValue {
 	result, err := v.value.(nativeCallback)(args...)
 	if err != nil {
@@ -1230,11 +1284,15 @@ func (v platformValue) Invoke(args ...any) platformValue {
 }
 
 // platformCopyBytes 复制读取块
+// 入参: dst 目标切片, src 原生字节参数
+// 返回: int 复制字节数
 func platformCopyBytes(dst []byte, src platformValue) int {
 	return copy(dst, src.value.([]byte))
 }
 
 // platformJSON 编码小参数
+// 入参: v 参数值
+// 返回: string JSON字符串
 func platformJSON(v platformValue) string {
 	data, err := json.Marshal(v.value)
 	if err != nil {
@@ -1244,6 +1302,8 @@ func platformJSON(v platformValue) string {
 }
 
 // platformParseJSON 解析小参数
+// 入参: data JSON字节
+// 返回: map[string]any 解析后的键值结构
 func platformParseJSON(data []byte) map[string]any {
 	var v map[string]any
 	if err := json.Unmarshal(data, &v); err != nil {
@@ -1253,9 +1313,13 @@ func platformParseJSON(data []byte) map[string]any {
 }
 
 // bytesToJS 保留原生二进制数据
+// 入参: data 二进制切片
+// 返回: platformValue 包装后的参数值
 func bytesToJS(data []byte) platformValue { return platformValueOf(data) }
 
 // bytesFromJS 读取字节或授权资源
+// 入参: v 二进制或资源描述参数
+// 返回: []byte 字节数据, error 读取错误
 func (e *businessEngine) bytesFromJS(v platformValue) ([]byte, error) {
 	if data, ok := v.value.([]byte); ok {
 		return append([]byte(nil), data...), nil
@@ -1269,17 +1333,23 @@ func (e *businessEngine) bytesFromJS(v platformValue) ([]byte, error) {
 }
 
 // successResult 保留二进制返回结构
+// 入参: data 业务返回数据
+// 返回: platformValue 成功响应结构
 func successResult(data any) platformValue {
 	return platformValueOf(map[string]any{"ok": true, "data": data})
 }
 
 // awaitExport 执行可取消宿主回调
+// 入参: fn 宿主回调函数, args 回调参数
+// 返回: error 回调执行错误
 func awaitExport(fn platformValue, args ...any) error {
 	_, err := fn.value.(nativeCallback)(args...)
 	return err
 }
 
 // loadConversionFont 读取宿主授权字体
+// 入参: fn 字体加载回调, name 字体名称
+// 返回: []byte 字体字节数据, error 读取错误
 func (e *businessEngine) loadConversionFont(fn platformValue, name string) ([]byte, error) {
 	result, err := fn.value.(nativeCallback)(name)
 	if err != nil {

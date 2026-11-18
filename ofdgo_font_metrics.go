@@ -244,9 +244,22 @@ func (SFNTBackend) OpenFontResource(file FontFile, index int) (*FontResource, er
 	}
 	return &FontResource{
 		FontMetrics: sfntResourceMetrics{sfnt}, Data: data, Extension: extension,
-		Font:      Font{FontName: name, FamilyName: basefont.SFNTName(sfnt, 16, 1), Charset: "unicode", Bold: binary.BigEndian.Uint16(sfnt.Tables["head"][44:])&1 != 0, Italic: binary.BigEndian.Uint16(sfnt.Tables["head"][44:])&2 != 0, FixedWidth: len(sfnt.Tables["post"]) >= 16 && binary.BigEndian.Uint32(sfnt.Tables["post"][12:]) != 0},
+		Font:      Font{FontName: name, FamilyName: basefont.SFNTName(sfnt, 16, 1), Charset: "unicode", Bold: binary.BigEndian.Uint16(sfnt.Tables["head"][44:])&1 != 0, Italic: binary.BigEndian.Uint16(sfnt.Tables["head"][44:])&2 != 0, Serif: sfntSerif(sfnt.Tables["OS/2"]), FixedWidth: len(sfnt.Tables["post"]) >= 16 && binary.BigEndian.Uint32(sfnt.Tables["post"][12:]) != 0},
 		CanSubset: basefont.Subsettable(sfnt),
 	}, nil
+}
+
+// sfntSerif 从OpenType OS/2表家族分类与PANOSE参数识别衬线字体
+// 入参: os2 OS/2表字节
+// 返回: bool 是否为衬线字体
+func sfntSerif(os2 []byte) bool {
+	if len(os2) >= 32 {
+		switch os2[30] {
+		case 1, 2, 3, 4, 5, 7:
+			return true
+		}
+	}
+	return len(os2) >= 42 && os2[32] == 2 && os2[33] >= 2 && os2[33] <= 10
 }
 
 // SubsetFont 裁剪新建字体并按要求保留显式字形编号

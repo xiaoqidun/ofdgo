@@ -4723,7 +4723,7 @@ func (e *businessEngine) previewText(args []platformValue) (any, error) {
 		}
 		content := (ofdgo.TextObject{TextCode: []ofdgo.TextCode{code}}).Text()
 		code.X, code.Y = fmt.Sprint(x), fmt.Sprint(y)
-		positioner := ofdgo.NewTextPositioner(code)
+		positioner := ofdgo.NewTextPositioner(code, text.ReadDirection)
 		positions := make([][2]float64, len([]rune(content)))
 		var point ofdgo.Point
 		remaining := 0
@@ -8359,6 +8359,7 @@ func (c *outputContext) Err() error {
 }
 
 // businessCommands 共用业务命令表
+// 返回: map[string]func([]platformValue) (any, error) 命令映射表
 func (e *businessEngine) businessCommands() map[string]func([]platformValue) (any, error) {
 	return map[string]func([]platformValue) (any, error){
 		"ofdgoCheckDocument": func(args []platformValue) (any, error) {
@@ -8528,6 +8529,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 }
 
 // operationContext 返回当前操作上下文
+// 返回: context.Context 操作上下文
 func (e *businessEngine) operationContext() context.Context {
 	if e.ctx != nil {
 		return e.ctx
@@ -8536,6 +8538,8 @@ func (e *businessEngine) operationContext() context.Context {
 }
 
 // failureResult 统一原生及浏览器业务错误协议
+// 入参: err 业务错误
+// 返回: apiResult 错误响应结构
 func failureResult(err error) apiResult {
 	result := apiResult{Error: err.Error()}
 	switch {

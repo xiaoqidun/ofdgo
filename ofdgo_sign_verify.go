@@ -162,8 +162,9 @@ type SignatureVerifyOption func(*signatureVerifyOptions)
 // IntegrityValid 判断签名完整性是否有效
 // 返回: bool 是否有效
 func (report SignatureVerifyReport) IntegrityValid() bool {
-	sealOK := report.Type == SignTypeSign || report.SealChecked && report.SealOK
+	sealOK := report.Type == SignTypeSign && !report.SealChecked || report.SealChecked && report.SealOK
 	return report.Error == "" && report.DigestOK && referencesOK(report.References) &&
+		(!report.CoverageChecked || report.CoverageOK) &&
 		report.DataHashChecked && report.DataHashOK && report.SignedValueChecked && report.SignedValueOK &&
 		sealOK && report.SealMatchOK && report.CertChecked && report.CertOK
 }
@@ -171,7 +172,15 @@ func (report SignatureVerifyReport) IntegrityValid() bool {
 // TrustedValid 判断签名是否可信有效
 // 返回: bool 签名完整性、时间语义、证书信任及证书有效期是否均验证通过
 func (report SignatureVerifyReport) TrustedValid() bool {
-	return report.IntegrityValid() && report.certificatePolicyOK() && report.CertTrustChecked && report.CertTimeChecked
+	if !report.IntegrityValid() || !report.certificatePolicyOK() || !report.CertTrustChecked || !report.CertTrustOK || !report.CertTimeChecked || !report.CertTimeOK {
+		return false
+	}
+	for _, ts := range report.Timestamps {
+		if !ts.Valid || !ts.CertTrustChecked || !ts.CertTrustOK {
+			return false
+		}
+	}
+	return true
 }
 
 // HasFailure 判断已完成的签名检查是否存在失败
@@ -399,6 +408,12 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef
 	}
 	switch report.Type {
 	case SignTypeSign:
+		if strings.TrimSpace(sigFile.SignedInfo.Seal.BaseLoc) != "" || len(sigFile.SignedInfo.StampAnnot) != 0 {
+			report.SealChecked = true
+			report.SealOK = false
+			report.Error = "digital signature cannot contain seal or stamp appearance"
+			return report
+		}
 		result, err := verifyDigitalSignature(report.SignatureMethod, report.DigestMethod, signedValue, sigData, options)
 		if result != nil {
 			report.DataHashChecked = result.DataHashChecked
@@ -855,6 +870,9 @@ func (report SignatureVerifyReport) certificatePolicyOK() bool {
 		return false
 	}
 	if report.SignatureTimeChecked && !report.SignatureTimeOK {
+		return false
+	}
+	if report.SealCertTimeChecked && !report.SealCertTimeOK {
 		return false
 	}
 	if report.SealTimeChecked && !report.SealTimeOK {

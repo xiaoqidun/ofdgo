@@ -221,24 +221,36 @@ func (r *Renderer) fontGlyphRune(fontID string, glyphID int) (rune, bool) {
 	return 0, false
 }
 
+// maxIndexRunes 限制单段索引字形展开后的最大字形数量
+const maxIndexRunes = 1 << 20
+
 // parseIndexRunes 解析索引字形
 // 入参: indexStr 索引字符串, fontID 字体ID
 // 返回: []rune 字形列表
 func (r *Renderer) parseIndexRunes(indexStr string, fontID string) []rune {
 	parts := strings.Fields(indexStr)
-	result := make([]rune, 0, len(parts))
+	result := make([]rune, 0, min(len(parts), maxIndexRunes))
 	for _, p := range parts {
+		if len(result) >= maxIndexRunes {
+			break
+		}
 		if startText, endText, ok := strings.Cut(p, "-"); ok {
 			if !strings.Contains(endText, "-") {
-				start, _ := strconv.Atoi(startText)
-				end, _ := strconv.Atoi(endText)
-				for k := start; k <= end; k++ {
-					result = append(result, r.textIndexRune(fontID, k))
+				start, err1 := strconv.ParseUint(startText, 10, 16)
+				end, err2 := strconv.ParseUint(endText, 10, 16)
+				if err1 != nil || err2 != nil || start > end {
+					continue
+				}
+				for k := start; k <= end && len(result) < maxIndexRunes; k++ {
+					result = append(result, r.textIndexRune(fontID, int(k)))
 				}
 			}
 		} else {
-			val, _ := strconv.Atoi(p)
-			result = append(result, r.textIndexRune(fontID, val))
+			val, err := strconv.ParseUint(p, 10, 16)
+			if err != nil {
+				continue
+			}
+			result = append(result, r.textIndexRune(fontID, int(val)))
 		}
 	}
 	return result

@@ -23,6 +23,7 @@ import (
 	"path"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // resourceStyleReference 保存资源依赖及可选的类型要求，不持有XML节点
@@ -280,7 +281,10 @@ func (e *Editor) resourceStyleReader(ctx context.Context) (*Reader, error) {
 // applyResourceStyleParts 合并资源声明及独立索引，统一更新最大标识并隔离其他文档和历史版本
 // 入参: ctx 取消上下文, reader 独立快照, maximumID 最大注册标识, data 合并声明, parts 附属文件, indexes 独立索引路径
 // 返回: error 结构、读取或隔离错误
-func applyResourceStyleParts(ctx context.Context, reader *Reader, maximumID int, data []byte, parts map[string][]byte, indexes []string) error {
+func applyResourceStyleParts(ctx context.Context, reader *Reader, maximumID uint64, data []byte, parts map[string][]byte, indexes []string) error {
+	if maximumID > maxUnitID {
+		return fmt.Errorf("MaxUnitID %d exceeds uint32 range", maximumID)
+	}
 	doc, err := reader.DocContext(ctx)
 	if err != nil {
 		return err
@@ -304,15 +308,18 @@ func applyResourceStyleParts(ctx context.Context, reader *Reader, maximumID int,
 		return err
 	}
 	common := root.child("CommonData")
-	if common == nil || common.child("MaxUnitID") == nil {
-		return fmt.Errorf("missing CommonData or MaxUnitID")
+	if common == nil {
+		return fmt.Errorf("missing CommonData")
 	}
-	maximum := common.child("MaxUnitID")
-	current, err := strconv.Atoi(editorImportText(content, maximum))
-	if err != nil {
-		return err
+	patch := editorXMLPatch{common.open, common.open, common.textXML("MaxUnitID", formatUnitID(maximumID))}
+	if maximum := common.child("MaxUnitID"); maximum != nil {
+		current, err := strconv.ParseUint(strings.TrimSpace(editorImportText(content, maximum)), 10, 32)
+		if err != nil {
+			return err
+		}
+		patch = editorXMLPatch{maximum.start, maximum.end, maximum.textXML("MaxUnitID", formatUnitID(max(current, maximumID)))}
 	}
-	patches := []editorXMLPatch{{maximum.start, maximum.end, maximum.textXML("MaxUnitID", strconv.Itoa(max(current, maximumID)))}}
+	patches := []editorXMLPatch{patch}
 	if len(indexes) != 0 {
 		position := common.close
 		for _, child := range common.children {
@@ -484,7 +491,7 @@ func validateResourceColors(ctx context.Context, catalog *resourceCatalog, space
 			}
 			id := node.attr("ColorSpace")
 			if id == "" {
-				id = strconv.Itoa(doc.CommonData.DefaultCS)
+				id = formatUnitID(uint64(doc.CommonData.DefaultCS))
 			}
 			if resourceColorNode(node) && sameResourceID(id, space.ID) {
 				var paint FillColor

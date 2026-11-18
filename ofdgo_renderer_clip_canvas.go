@@ -167,8 +167,9 @@ func (r *Renderer) buildClipAreaPath(obj PathObject, drawParam string, parent Ma
 	obj.Boundary = ""
 	p := r.buildPath(obj, 0, IdentityMatrix, false)
 	var result *canvas.Path
-	stroke := obj.Stroke == nil || *obj.Stroke
-	if !stroke || obj.Fill != nil && *obj.Fill {
+	stroke := obj.Stroke != nil && *obj.Stroke
+	fill := obj.Fill != nil && *obj.Fill || !stroke && obj.Fill == nil
+	if fill {
 		paths := canvas.Paths(p.Copy().Split())
 		for _, path := range paths {
 			path.Close()

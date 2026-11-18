@@ -104,11 +104,19 @@ func WithSignatureTimestamp(options SignatureTimestampOptions) SignatureVerifyOp
 // 入参: token DER编码TimeStampToken, data 被时间戳保护的原始字节, options 验证选项
 // 返回: SignatureTimestampReport 验证报告
 func VerifySignatureTimestamp(token, data []byte, options SignatureTimestampOptions) (report SignatureTimestampReport) {
-	err := verifySignatureTimestamp(token, data, options, &report)
+	return verifyTimestampToken(token, data, options, false)
+}
+
+// verifyTimestampToken 验证时间戳令牌并按场景控制未配置信任根时的策略
+// 入参: token DER编码令牌, data 被保护字节, options 验证选项, allowUntrusted 是否允许未提供信任根时仅校验完整性
+// 返回: SignatureTimestampReport 验证报告
+func verifyTimestampToken(token, data []byte, options SignatureTimestampOptions, allowUntrusted bool) (report SignatureTimestampReport) {
+	err := verifySignatureTimestamp(token, data, options, allowUntrusted, &report)
 	if err != nil {
 		report.Error = err.Error()
 	}
-	report.Valid = err == nil && report.BindingChecked && report.BindingOK && report.SignedValueChecked && report.SignedValueOK && report.CertTrustChecked && report.CertTrustOK && report.CertTimeChecked && report.CertTimeOK
+	trustOK := report.CertTrustChecked && report.CertTrustOK || allowUntrusted && !report.CertTrustChecked
+	report.Valid = err == nil && report.BindingChecked && report.BindingOK && report.SignedValueChecked && report.SignedValueOK && trustOK && report.CertTimeChecked && report.CertTimeOK
 	return report
 }
 
@@ -124,9 +132,9 @@ func cloneSignatureEvidence(values [][]byte) [][]byte {
 }
 
 // verifySignatureTimestamp 检查令牌绑定、签名与TSA信任
-// 入参: token 令牌DER, data 原始字节, o 验证选项, report 结果
+// 入参: token 令牌DER, data 原始字节, o 验证选项, allowUntrusted 未提供信任根时是否跳过信任链强制要求, report 结果
 // 返回: error 验证错误
-func verifySignatureTimestamp(token, data []byte, o SignatureTimestampOptions, report *SignatureTimestampReport) error {
+func verifySignatureTimestamp(token, data []byte, o SignatureTimestampOptions, allowUntrusted bool, report *SignatureTimestampReport) error {
 	oid, content, present, err := parseGBTContentInfoBytes(token)
 	if err != nil || !present || oid != signContentCMS {
 		return fmt.Errorf("invalid RFC3161 CMS token")
@@ -255,6 +263,9 @@ func verifySignatureTimestamp(token, data []byte, o SignatureTimestampOptions, r
 	}
 	trusts := appendSignatureCerts(nil, o.TrustCerts...)
 	if len(trusts) == 0 {
+		if allowUntrusted {
+			return nil
+		}
 		return fmt.Errorf("timestamp trust certificates not provided")
 	}
 	report.CertTrustChecked = true
@@ -541,9 +552,13 @@ func (report *SignatureVerifyReport) applySignatureEvidence(o *signatureVerifyOp
 	if o.Timestamp != nil {
 		options = *o.Timestamp
 	}
+	if len(options.TrustCerts) == 0 && len(o.TrustCerts) != 0 {
+		options.TrustCerts = appendSignatureCerts(nil, o.TrustCerts...)
+	}
 	if o.Policy != nil {
 		options.Required = options.Required || o.Policy.RequireTimestamp
 	}
+	allowUntrusted := len(options.TrustCerts) == 0 && !options.Required && o.Timestamp == nil
 	evidence := append([]signatureTimestampEvidence(nil), embedded...)
 	for _, token := range options.Tokens {
 		evidence = append(evidence, signatureTimestampEvidence{Token: token, Data: signedValue})
@@ -558,12 +573,25 @@ func (report *SignatureVerifyReport) applySignatureEvidence(o *signatureVerifyOp
 		}
 	}
 	for _, item := range evidence {
-		report.Timestamps = append(report.Timestamps, VerifySignatureTimestamp(item.Token, item.Data, options))
+		report.Timestamps = append(report.Timestamps, verifyTimestampToken(item.Token, item.Data, options, allowUntrusted))
 	}
 	if len(report.Timestamps) != 0 {
 		report.TimestampChecked, report.TimestampOK = true, true
+		checkRange := func(checked, ok *bool, at, start, end time.Time) {
+			if !start.IsZero() && !end.IsZero() {
+				if !*checked {
+					*checked, *ok = true, true
+				}
+				*ok = *ok && timeInRange(at, start, end)
+			}
+		}
 		for _, result := range report.Timestamps {
 			report.TimestampOK = report.TimestampOK && result.Valid
+			if result.Valid && !result.Time.IsZero() {
+				checkRange(&report.SignatureTimeChecked, &report.SignatureTimeOK, result.Time, report.SignCert.NotBefore, report.SignCert.NotAfter)
+				checkRange(&report.SealCertTimeChecked, &report.SealCertTimeOK, result.Time, report.SealCert.NotBefore, report.SealCert.NotAfter)
+				checkRange(&report.SealTimeChecked, &report.SealTimeOK, result.Time, report.SealInfo.ValidStart, report.SealInfo.ValidEnd)
+			}
 		}
 	}
 	if options.Required && !report.TimestampChecked {

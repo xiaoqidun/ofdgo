@@ -30,15 +30,20 @@ import (
 // defaultResourceCacheBytes 定义默认缓存总预算及类别扩展基准
 const defaultResourceCacheBytes = 256 << 20
 
+// defaultMaxEntryBytes 定义包内单条目默认最大解压字节数
+const defaultMaxEntryBytes = 512 << 20
+
 // ResourceOptions 设置共享计算、派生缓存与快照预算，字节预算不限制进程实际分配
 // Parallelism为0时使用GOMAXPROCS，MemoryLimit为0时不指定计算预算
 // CacheBytes为0时使用256MiB，SnapshotBytes为0时使用缓存预算的一半，负值禁用相应缓存
+// MaxEntryBytes为0时单条目解压上限取512MiB，负值不限制单条目解压大小
 // AvailableMemory返回可用于新增任务的字节数，同时作为缓存动态上限，需支持并发且不可重入Resources
 type ResourceOptions struct {
 	Parallelism     int
 	MemoryLimit     int64
 	CacheBytes      int64
 	SnapshotBytes   int64
+	MaxEntryBytes   int64
 	AvailableMemory func() int64
 }
 
@@ -101,6 +106,9 @@ func NewResources(options ResourceOptions) (*Resources, error) {
 		options.SnapshotBytes = options.CacheBytes / 2
 	}
 	options.SnapshotBytes = max(0, min(options.SnapshotBytes, options.CacheBytes))
+	if options.MaxEntryBytes == 0 {
+		options.MaxEntryBytes = defaultMaxEntryBytes
+	}
 	return &Resources{options: options, pool: pool, limit: options.CacheBytes}, nil
 }
 

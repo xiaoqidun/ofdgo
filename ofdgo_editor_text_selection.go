@@ -418,7 +418,7 @@ func (e *Editor) selectionTextPoints(t TextObject) ([]Point, error) {
 		if code.Index != "" {
 			return nil, fmt.Errorf("glyph-index text has no character mapping")
 		}
-		position := NewTextPositioner(code)
+		position := NewTextPositioner(code, t.ReadDirection)
 		chars := textCodeRunes(code.Value)
 		for i := 0; i < len(chars); {
 			mapping, ok := mappings[offset+i]

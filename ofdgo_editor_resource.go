@@ -22,7 +22,6 @@ import (
 	"image"
 	"path"
 	"slices"
-	"strconv"
 	"strings"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
@@ -148,11 +147,17 @@ func (e *Editor) ImportMedia(ctx context.Context, kind, format string, data []by
 		return "", err
 	}
 	common := root.child("CommonData")
-	if common == nil || common.child("MaxUnitID") == nil {
-		return "", fmt.Errorf("missing CommonData or MaxUnitID")
+	if common == nil {
+		return "", fmt.Errorf("missing CommonData")
 	}
-	maximum := common.child("MaxUnitID")
-	patches := []editorXMLPatch{{maximum.start, maximum.end, maximum.textXML("MaxUnitID", strconv.Itoa(working.maxID))}}
+	if working.maxID > maxUnitID {
+		return "", fmt.Errorf("MaxUnitID %d exceeds uint32 range", working.maxID)
+	}
+	patch := editorXMLPatch{common.open, common.open, common.textXML("MaxUnitID", formatUnitID(working.maxID))}
+	if maximum := common.child("MaxUnitID"); maximum != nil {
+		patch = editorXMLPatch{maximum.start, maximum.end, maximum.textXML("MaxUnitID", formatUnitID(working.maxID))}
+	}
+	patches := []editorXMLPatch{patch}
 	if added {
 		position := common.close
 		for _, child := range common.children {
@@ -405,7 +410,7 @@ func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, c
 	if err != nil {
 		return err
 	}
-	defaultCS := strconv.Itoa(doc.CommonData.DefaultCS)
+	defaultCS := formatUnitID(uint64(doc.CommonData.DefaultCS))
 	references := make(map[string][]*editorResourcePreview)
 	for name, file := range scan.files {
 		data, exists := changes[name]

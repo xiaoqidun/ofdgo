@@ -192,7 +192,7 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 		if err != nil {
 			return nil, err
 		}
-		positioner := NewTextPositioner(code)
+		positioner := NewTextPositioner(code, object.ReadDirection)
 		for i, gid := range ids {
 			if i%64 == 0 && r.pageContext != nil {
 				if err := r.pageContext.Err(); err != nil {

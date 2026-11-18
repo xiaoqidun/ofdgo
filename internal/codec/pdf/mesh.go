@@ -102,10 +102,14 @@ func MeshTriangles(ctx context.Context, mesh *pdfgo.MeshGradient, matrix pdfgo.M
 			}
 		}
 		steps := math.Max(1, math.Ceil(math.Sqrt(8*(duu+dvv+2*duv)*dpi/25.4)))
-		if !finite(steps) || steps >= math.Sqrt(float64(int(^uint(0)>>1)/2)) {
+		if !finite(steps) {
 			return nil, fmt.Errorf("mesh subdivision exceeds platform integer range")
 		}
+		steps = math.Min(steps, 2048)
 		n := int(steps)
+		if len(triangles)+2*n*n > 1<<22 {
+			return nil, fmt.Errorf("mesh triangle count exceeds limit")
+		}
 		row := make([]meshVertex, n+1)
 		for i := range row {
 			if i%CompositeTileSize == 0 {
@@ -123,6 +127,11 @@ func MeshTriangles(ctx context.Context, mesh *pdfgo.MeshGradient, matrix pdfgo.M
 			v := float64(j) / steps
 			left := meshVertex{patch.PointAt(0, v), 0, v}
 			for i := 1; i <= n; i++ {
+				if i%CompositeTileSize == 0 {
+					if err := ctx.Err(); err != nil {
+						return nil, err
+					}
+				}
 				u := float64(i) / steps
 				right := meshVertex{patch.PointAt(u, v), u, v}
 				a, b := row[i-1], row[i]

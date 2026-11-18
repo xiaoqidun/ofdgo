@@ -370,10 +370,19 @@ func (p *pdfImporter) linkRegion(annotation pdfgo.Annotation, box Box) (*Region,
 			}
 			points[index] = p.matrix.Apply(pdfgo.Point{X: x, Y: y})
 		}
+		cross := func(a, b, c pdfgo.Point) float64 {
+			return (b.X-a.X)*(c.Y-a.Y) - (b.Y-a.Y)*(c.X-a.X)
+		}
+		d1, d2 := cross(points[1], points[2], points[3]), cross(points[1], points[2], points[0])
+		d3, d4 := cross(points[3], points[0], points[1]), cross(points[3], points[0], points[2])
+		if (d1 > 0 && d2 < 0 || d1 < 0 && d2 > 0) && (d3 > 0 && d4 < 0 || d3 < 0 && d4 > 0) {
+			points[2], points[3] = points[3], points[2]
+		}
 		area := RegionArea{Start: pdfNumbers(points[0].X-box.X, points[0].Y-box.Y)}
 		for _, point := range points[1:] {
 			area.Command = append(area.Command, RegionCommand{Type: "Line", Point1: pdfNumbers(point.X-box.X, point.Y-box.Y)})
 		}
+		area.Command = append(area.Command, RegionCommand{Type: "Close"})
 		region.Area = append(region.Area, area)
 	}
 	return region, nil

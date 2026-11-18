@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strconv"
 )
 
 // GroupCompositeObjects 组合内部同一容器的连续成员，保留绘制顺序及共享资源
@@ -129,7 +128,7 @@ func (e *Editor) vectorInstance(renderer *Renderer, nodes []*editorCompositeNode
 		}
 	}
 	if resource == "" {
-		data, err := editorXMLContainer("CompositeGraphicUnit", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: strconv.Itoa(e.maxID + 1)}, {Name: xml.Name{Local: "Width"}, Value: ofdNumber(extent.W)}, {Name: xml.Name{Local: "Height"}, Value: ofdNumber(extent.H)}}, bytes.TrimPrefix(content, []byte(xml.Header)))
+		data, err := editorXMLContainer("CompositeGraphicUnit", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: formatUnitID(e.maxID + 1)}, {Name: xml.Name{Local: "Width"}, Value: ofdNumber(extent.W)}, {Name: xml.Name{Local: "Height"}, Value: ofdNumber(extent.H)}}, bytes.TrimPrefix(content, []byte(xml.Header)))
 		if err != nil {
 			return nil, err
 		}

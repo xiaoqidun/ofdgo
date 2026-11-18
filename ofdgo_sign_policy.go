@@ -254,6 +254,35 @@ func (r *Reader) applySignatureCoverage(report *SignatureVerifyReport, listPath 
 		if file.SignedValue != "" {
 			excluded[cleanPackagePath(signatureRefPath(name, file.SignedValue))] = true
 		}
+		if file.SignedInfo.Seal.BaseLoc != "" {
+			excluded[cleanPackagePath(signatureRefPath(name, file.SignedInfo.Seal.BaseLoc))] = true
+		}
+		if listData, err := r.readFile(cleanPackagePath(listPath)); err == nil {
+			var list Signatures
+			if xml.Unmarshal(listData, &list) == nil {
+				after := false
+				for _, entry := range list.List {
+					entryPath := cleanPackagePath(signatureRefPath(listPath, entry.BaseLoc))
+					if !after {
+						if entryPath == name && (report.ID == "" || entry.ID == report.ID) {
+							after = true
+						}
+						continue
+					}
+					excluded[entryPath] = true
+					if entryData, err := r.readFile(entryPath); err == nil {
+						if entryFile, err := parseSignatureFile(entryData); err == nil {
+							if entryFile.SignedValue != "" {
+								excluded[cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedValue))] = true
+							}
+							if entryFile.SignedInfo.Seal.BaseLoc != "" {
+								excluded[cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedInfo.Seal.BaseLoc))] = true
+							}
+						}
+					}
+				}
+			}
+		}
 		root := path.Dir(cleanPackagePath(o.DocRoot))
 		include := func(name string) {
 			if (root == "." || strings.HasPrefix(name, root+"/")) && !excluded[name] && !strings.HasSuffix(name, "/") {
@@ -330,7 +359,7 @@ func (r *Reader) signatureCoverageReferences(root string, required map[string]bo
 		var walk func(signatureCoverageNode, string)
 		walk = func(current signatureCoverageNode, parent string) {
 			kind := current.XMLName.Local
-			if current.XMLName.Space != node.XMLName.Space || classifyOFDNamespace(current.XMLName.Space) == ofdXMLUnknown || kind == "Signatures" || kind == "Signature" || kind == "Data" && parent == "Extension" {
+			if !ofdXMLChild(node.XMLName, current.XMLName) || classifyOFDNamespace(current.XMLName.Space) == ofdXMLUnknown || kind == "Signatures" || kind == "Signature" || kind == "Data" && parent == "Extension" {
 				return
 			}
 			for _, attr := range current.Attrs {

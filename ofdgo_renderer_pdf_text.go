@@ -191,7 +191,7 @@ func (r *Renderer) pdfTextSupported(object TextObject, fontID string, face *canv
 			runes = r.parseIndexRunes(code.Index, fontID)
 			glyphs = textRuneGlyphs(runes)
 		}
-		positioner := NewTextPositioner(code)
+		positioner := NewTextPositioner(code, object.ReadDirection)
 		for _, glyph := range glyphs {
 			if glyph.GlyphID == 0 || glyph.GlyphID >= int(face.Font.NumGlyphs()) {
 				return false

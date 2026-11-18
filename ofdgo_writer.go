@@ -650,6 +650,9 @@ func (e *Editor) validate() error {
 			}
 		}
 	}
+	if e.maxID > maxUnitID {
+		return fmt.Errorf("MaxUnitID %d exceeds uint32 range", e.maxID)
+	}
 	return nil
 }
 
@@ -741,7 +744,7 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 	if err := writeXML("Doc_0/Document.xml", func(x *ofdXML) {
 		x.root("Document", nil)
 		x.start("CommonData", nil)
-		x.text("MaxUnitID", strconv.Itoa(e.maxID))
+		x.text("MaxUnitID", formatUnitID(e.maxID))
 		x.pageArea("PageArea", e.pages[0].Area)
 		if len(fonts)+len(images)+len(spaces) != 0 {
 			x.text("DocumentRes", "DocumentRes.xml")
@@ -1099,6 +1102,9 @@ func (x *ofdXML) resources(fonts, images []editorResource, spaces []ColorSpace) 
 			}
 			if font.Italic {
 				attrs.add("Italic", "true")
+			}
+			if font.Serif {
+				attrs.add("Serif", "true")
 			}
 			if font.FixedWidth {
 				attrs.add("FixedWidth", "true")
@@ -1582,7 +1588,7 @@ func (x *ofdXML) meshShading(name string, extend, columns int, points []ShdPoint
 		x.end("Point")
 	}
 	if back != nil {
-		x.element("BackColor", back)
+		x.element("BackColor", *back)
 	}
 	x.end(name)
 }
@@ -1619,13 +1625,57 @@ func (x *ofdXML) shading(name string, attrs ofdAttrs, segments []ShdSegment) {
 	x.end(name)
 }
 
-// element 写出具有标准XML标签的子树，显式声明OFD命名空间
+// element 写出具有标准ofd前缀的叶子节点并同步记录资源引用
 // 入参: name 元素名称, value 元素内容
 func (x *ofdXML) element(name string, value any) {
-	if x.checkContext() {
-		x.err = x.encoder.EncodeElement(value, xml.StartElement{Name: xml.Name{Space: ofdNamespace2016, Local: name}})
-		x.referenceElement(name, value)
+	if !x.checkContext() {
+		return
 	}
+	var attrs ofdAttrs
+	switch value := value.(type) {
+	case ShdColor:
+		attrs.add("Value", value.Value)
+		attrs.add("ColorSpace", value.ColorSpace)
+		if value.Index != nil {
+			attrs.add("Index", strconv.Itoa(*value.Index))
+		}
+		attrs.alpha(value.Alpha)
+	case *Dest:
+		var err error
+		attrs, err = value.attributes()
+		if err != nil {
+			x.err = err
+			return
+		}
+	case *GotoBookmark:
+		attrs = ofdAttrs{{Name: xml.Name{Local: "Name"}, Value: value.Name}}
+	case *URI:
+		attrs = ofdAttrs{{Name: xml.Name{Local: "URI"}, Value: value.URI}}
+		attrs.add("Base", value.Base)
+		attrs.add("Target", value.Target)
+	case *GotoA:
+		attrs = ofdAttrs{{Name: xml.Name{Local: "AttachID"}, Value: value.AttachID}}
+		attrs.flag("NewWindow", value.NewWindow)
+	case *Sound:
+		attrs = ofdAttrs{{Name: xml.Name{Local: "ResourceID"}, Value: value.ResourceID}}
+		if value.Volume != nil {
+			attrs.add("Volume", strconv.Itoa(*value.Volume))
+		}
+		if value.Repeat {
+			attrs.add("Repeat", "true")
+		}
+		if value.Synchronous {
+			attrs.add("Synchronous", "true")
+		}
+	case *Movie:
+		attrs = ofdAttrs{{Name: xml.Name{Local: "ResourceID"}, Value: value.ResourceID}}
+		attrs.add("Operator", value.Operator)
+	default:
+		x.err = fmt.Errorf("unsupported OFD XML element %s (%T)", name, value)
+		return
+	}
+	x.start(name, attrs)
+	x.end(name)
 }
 
 // border 写出图片边框及其绘制颜色

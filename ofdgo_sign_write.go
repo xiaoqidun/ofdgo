@@ -680,8 +680,46 @@ func signatureWritePackage(ctx context.Context, parts map[string][]byte, options
 		}
 	}
 	refs := SignatureReferences{CheckMethod: identity.digest}
+	var allowed map[string]bool
+	if len(r.OFD.DocBody) > 1 && !options.Lock {
+		allowed = map[string]bool{"OFD.xml": true}
+		docRoot := cleanPackagePath(r.documentRoot)
+		docDir := path.Dir(docRoot)
+		for name := range parts {
+			if docDir == "." || strings.HasPrefix(name, docDir+"/") {
+				allowed[name] = true
+			}
+		}
+		scoped := &Reader{files: parts, documentIndex: index}
+		if err := scoped.initRoot(); err != nil {
+			return err
+		}
+		if err := scoped.signatureCoverageReferences(docRoot, allowed); err != nil {
+			return err
+		}
+		for i := 0; i < oldCount; i++ {
+			entryPath := cleanPackagePath(signatureRefPath(listPath, list.List[i].BaseLoc))
+			allowed[entryPath] = true
+			if entryData, ok := parts[entryPath]; ok {
+				if entryFile, err := parseSignatureFile(entryData); err == nil {
+					if entryFile.SignedValue != "" {
+						allowed[cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedValue))] = true
+					}
+					if entryFile.SignedInfo.Seal.BaseLoc != "" {
+						allowed[cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedInfo.Seal.BaseLoc))] = true
+					}
+				}
+			}
+		}
+		if kind == SignTypeSeal {
+			allowed[sealPath] = true
+		}
+	}
 	names := make([]string, 0, len(parts))
 	for name := range parts {
+		if allowed != nil && !allowed[name] {
+			continue
+		}
 		names = append(names, name)
 	}
 	slices.Sort(names)

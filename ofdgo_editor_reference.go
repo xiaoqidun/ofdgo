@@ -392,46 +392,6 @@ func (x *ofdXML) referenceToken(token xml.Token) {
 	}
 }
 
-// referenceElement 收集已知叶节点的引用，其他结构仍完整扫描
-// 入参: name 元素名称, value 已编码的子树内容
-func (x *ofdXML) referenceElement(name string, value any) {
-	if x.references == nil || x.err != nil {
-		return
-	}
-	var attrs ofdAttrs
-	switch value := value.(type) {
-	case *Dest:
-		if value == nil {
-			return
-		}
-		attrs.add("PageID", value.PageID)
-	case ShdColor:
-		attrs.add("ColorSpace", value.ColorSpace)
-	case *ShdColor:
-		if value == nil {
-			return
-		}
-		attrs.add("ColorSpace", value.ColorSpace)
-	case *Sound:
-		if value == nil {
-			return
-		}
-		attrs.add("ResourceID", value.ResourceID)
-	case *Movie:
-		if value == nil {
-			return
-		}
-		attrs.add("ResourceID", value.ResourceID)
-	case *GotoBookmark, *URI, *GotoA:
-	default:
-		x.references.safe = false
-		x.references = nil
-		return
-	}
-	x.referenceToken(xml.StartElement{Name: xml.Name{Local: "ofd:" + name}, Attr: attrs})
-	x.referenceToken(xml.EndElement{Name: xml.Name{Local: "ofd:" + name}})
-}
-
 // editorReferenceTextSafe 判断XML编码是否保持引用文本的Unicode值
 // 入参: value 原始引用或字体用字
 // 返回: bool 是否无需字符替换

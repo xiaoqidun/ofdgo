@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
-	"strconv"
 	"sync"
 )
 
@@ -54,7 +53,7 @@ func (e *Editor) snapshotOrigin(object GraphicObject) *editorObjectOrigin {
 // copyObjectOrigin 复制原XML并重映射内部标识和引用，不修改共享资源与原对象
 // 入参: before 输入快照, after 副本快照, maximum 本批次最大标识
 // 返回: GraphicObject 副本, *editorObjectOrigin 副本原文, error 错误信息
-func (e *Editor) copyObjectOrigin(before, after GraphicObject, maximum *int) (GraphicObject, *editorObjectOrigin, error) {
+func (e *Editor) copyObjectOrigin(before, after GraphicObject, maximum *uint64) (GraphicObject, *editorObjectOrigin, error) {
 	origin := e.snapshotOrigin(before)
 	if origin == nil {
 		return after, nil, nil
@@ -78,7 +77,7 @@ func (e *Editor) copyObjectOrigin(before, after GraphicObject, maximum *int) (Gr
 					return fmt.Errorf("duplicate object ID %q", id)
 				}
 				*maximum += 1
-				ids[id] = strconv.Itoa(*maximum)
+				ids[id] = formatUnitID(*maximum)
 			}
 			if err := collect(child); err != nil {
 				return err

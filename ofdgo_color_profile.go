@@ -19,7 +19,6 @@ import (
 	"image/color"
 	"math"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/xiaoqidun/pdfgo"
@@ -91,7 +90,7 @@ func (r *Renderer) colorDefinition(id string) *ColorSpace {
 		return nil
 	}
 	if id == "" && r.Reader.doc != nil {
-		id = strconv.Itoa(r.Reader.doc.CommonData.DefaultCS)
+		id = formatUnitID(uint64(r.Reader.doc.CommonData.DefaultCS))
 	}
 	space, _ := resourceValue(r.Reader.colorSpaceCache, id)
 	return space

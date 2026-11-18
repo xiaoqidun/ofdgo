@@ -62,7 +62,7 @@ type Editor struct {
 	backends           RenderBackends
 	images             map[string]image.Point
 	resourceID         map[editorResourceKey]string
-	maxID              int
+	maxID              uint64
 	history            []editorChange
 	historyIndex       int
 	historyLimit       int
@@ -877,11 +877,21 @@ func (e *Editor) reorderPages(order []int) {
 	}
 }
 
+// maxUnitID 表示OFD标准ST_ID允许的最大无符号32位标识
+const maxUnitID uint64 = 1<<32 - 1
+
+// formatUnitID 格式化文档对象与资源标识
+// 入参: id 无符号标识数值
+// 返回: string 十进制标识文本
+func formatUnitID(id uint64) string {
+	return strconv.FormatUint(id, 10)
+}
+
 // nextID 分配文档内唯一标识
 // 返回: string 对象标识
 func (e *Editor) nextID() string {
 	e.maxID++
-	return strconv.Itoa(e.maxID)
+	return formatUnitID(e.maxID)
 }
 
 // findObject 查找页面各图层中的对象

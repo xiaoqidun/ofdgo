@@ -425,7 +425,7 @@ func invoiceWriteHeader(value Invoice) []string {
 	case "inv":
 		return strings.Fields("CodeOfInvoice NumberOfInvoice DateOfIssue NameOfPurchaser TaxpayerIdentificationNumberUnifiedSocialCreditCodeOfPurchaser TotalAmountExcludingTax TotalTaxAmount TaxIncludedAmountInFigures NameOfSeller TaxpayerIdentificationNumberUnifiedSocialCreditCodeOfSeller Remarks")
 	case "einv":
-		return strings.Fields("InvoiceNumber SellerName SellerIdNum TotalAmWithoutTax RequestTime TotalTaxAm TotalTax-includedAmount")
+		return strings.Fields("InvoiceNumber SellerName SellerIdNum SellerAddr SellerTelNum SellerBankName SellerBankAccNum BuyerName BuyerIdNum BuyerAddr BuyerTelNum BuyerBankName BuyerBankAccNum TotalAmWithoutTax RequestTime TotalTaxAm TotalTax-includedAmount Remark")
 	case "atr":
 		return strings.Fields("ElectronicInvoiceAirTransportReceiptNumber IssuingStatus VatTaxAmount TotalAmount IssueDate NameOfPurchaser UnifiedSocialCreditCodeOfPurchaser NameOfSeller")
 	case "rai":
@@ -826,7 +826,7 @@ func invoiceWriteFact(b *strings.Builder, value Invoice, fact InvoiceFact, optio
 // invoicePlainGroups 返回官方公共字段分组
 // 返回: 组名与字段顺序
 func invoicePlainGroups() []invoiceWriteField {
-	return []invoiceWriteField{{"SellerInformation", "SellerIdNum SellerName SellerAddr SellerTelNum SellerBankName SellerBankAccNum"}, {"BuyerInformation", "BuyerIdNum BuyerName"}, {"BasicInformation", "TotalAmWithoutTax TotalTaxAm TotalTax-includedAmount"}, {"AdditionalInformation", "Remark"}}
+	return []invoiceWriteField{{"SellerInformation", "SellerIdNum SellerName SellerAddr SellerTelNum SellerBankName SellerBankAccNum"}, {"BuyerInformation", "BuyerIdNum BuyerName BuyerAddr BuyerTelNum BuyerBankName BuyerBankAccNum"}, {"BasicInformation", "TotalAmWithoutTax TotalTaxAm TotalTax-includedAmount"}, {"AdditionalInformation", "Remark"}}
 }
 
 // invoiceEncodePlain 构造0.3版电子发票业务XML
@@ -888,7 +888,13 @@ func invoiceWriteSpans(ctx context.Context, data []byte) (*invoiceXMLNode, map[s
 		}
 	}
 	walk(root)
-	d := xml.NewDecoder(bytes.NewReader(data))
+	bom := 0
+	trimmed := data
+	if bytes.HasPrefix(data, []byte{0xef, 0xbb, 0xbf}) {
+		bom = 3
+		trimmed = data[3:]
+	}
+	d := xml.NewDecoder(bytes.NewReader(trimmed))
 	spans := map[string]invoiceXMLSpan{}
 	var stack []invoiceXMLSpan
 	index := 0
@@ -896,7 +902,7 @@ func invoiceWriteSpans(ctx context.Context, data []byte) (*invoiceXMLNode, map[s
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
-		before := int(d.InputOffset())
+		before := bom + int(d.InputOffset())
 		token, err := d.Token()
 		if err == io.EOF {
 			break
@@ -904,7 +910,7 @@ func invoiceWriteSpans(ctx context.Context, data []byte) (*invoiceXMLNode, map[s
 		if err != nil {
 			return nil, nil, err
 		}
-		after := int(d.InputOffset())
+		after := bom + int(d.InputOffset())
 		switch token.(type) {
 		case xml.StartElement:
 			n := nodes[index]
@@ -2214,6 +2220,8 @@ func invoiceWriteKnownFact(kind, name string) bool {
 	switch kind {
 	case "inv":
 		extras = "TypeOfInvoice UniqueCodeOfInvoice LocationOfInvoice IdentifyingCode NumberOfInvoiceMachine SecurityCode SpecialInvoiceType InvoiceIssuingSign TaxIncludedAmountInWords Payee Reviewer Issuer AddressPhoneNumberOfPurchaser DepositBankAndAccountNumberOfPurchaser AddressPhoneNumberOfSeller DepositBankAndAccountNumberOfSeller"
+	case "einv":
+		extras = "IssueTime TotalTax-includedAmountInChinese DrawerChecker Payee Drawer RedNotificationNo OriginalInvoiceNo BlueInvoiceNo InvoiceType SpecificBusinessType DeductionAm AmountOfTransferredOutInputVat RecordedAmount"
 	case "atr":
 		extras = "PassengerName ValidIdNumber Endorsement NumberOfGpOrder Fare FuelSurcharge VatRate CivilAviationDevelopmentFund OtherTaxes ETicketNumber VerificationCode PromptInformation Insurance AgentCode IssueParty MarkingOfDomesticOrInternational"
 	case "rai":

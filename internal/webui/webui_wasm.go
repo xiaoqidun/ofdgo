@@ -26,6 +26,7 @@ import (
 	"github.com/xiaoqidun/ofdgo"
 )
 
+// 浏览器JS参数类型常量
 const (
 	platformTypeNumber   = js.TypeNumber
 	platformTypeString   = js.TypeString
@@ -260,20 +261,29 @@ func (e *businessEngine) bytesFromJS(value js.Value) ([]byte, error) {
 }
 
 // platformValueOf 转换浏览器参数
+// 入参: v Go值
+// 返回: platformValue 浏览器参数值
 func platformValueOf(v any) platformValue { return js.ValueOf(v) }
 
 // platformNull 返回空参数
+// 返回: platformValue 空参数值
 func platformNull() platformValue { return js.Null() }
 
 // platformCopyBytes 复制浏览器字节
+// 入参: dst 目标切片, src 浏览器字节对象
+// 返回: int 复制字节数
 func platformCopyBytes(dst []byte, src platformValue) int { return js.CopyBytesToGo(dst, src) }
 
 // platformJSON 编码小参数
+// 入参: v 浏览器参数值
+// 返回: string JSON字符串
 func platformJSON(v platformValue) string {
 	return js.Global().Get("JSON").Call("stringify", v).String()
 }
 
 // platformParseJSON 解析结构参数
+// 入参: data JSON字节
+// 返回: map[string]any 解析后的键值结构
 func platformParseJSON(data []byte) map[string]any {
 	var result map[string]any
 	if err := json.Unmarshal(data, &result); err != nil {
@@ -283,6 +293,8 @@ func platformParseJSON(data []byte) map[string]any {
 }
 
 // inputFromValue 读取浏览器随机输入或二进制数据
+// 入参: value 浏览器输入参数
+// 返回: *ofdgo.Input 文档输入源, error 读取错误
 func (e *businessEngine) inputFromValue(value platformValue) (*ofdgo.Input, error) {
 	if value.Type() == platformTypeObject && !value.IsNull() && value.Get("read").Type() == platformTypeFunction {
 		return ofdgo.NewInput(&browserReaderAt{read: value.Get("read"), size: int64(value.Get("size").Float())}, int64(value.Get("size").Float()))

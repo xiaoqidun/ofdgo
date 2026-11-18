@@ -14,4 +14,5 @@
 
 package build
 
+// Version 构建时注入的应用版本号
 var Version string

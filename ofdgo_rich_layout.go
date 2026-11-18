@@ -67,6 +67,8 @@ type richContextShaper struct {
 // 注册不产生修订或撤销记录；失败时不保留新增资源和资源编号
 // 提交对象后应创建新的Reader；已有Reader是独立快照，不包含新注册的资源
 // 返回值的资源编号属于当前资源视图，切换文档、版本或替换资源快照后须重新排版
+// 入参: value 富文本内容, width 段落排版宽度
+// 返回: []GraphicObject 生成的标准图元, Box 局部边界, error 排版或资源错误
 func (e *Editor) LayoutRichText(value RichText, width float64) ([]GraphicObject, Box, error) {
 	result, err := e.layoutRichText(value, width)
 	if err != nil {
@@ -87,6 +89,8 @@ func (e *Editor) LayoutRichText(value RichText, width float64) ([]GraphicObject,
 }
 
 // layoutRichText 统一计算段落换行、视觉顺序和基线，颜色资源由调用方绑定
+// 入参: value 富文本内容, width 段落排版宽度
+// 返回: richLayout 排版结果, error 校验或塑形错误
 func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, error) {
 	if err := value.Validate(); err != nil {
 		return richLayout{}, err
@@ -373,6 +377,8 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 }
 
 // richParagraphOptions 以整段原文检测双向排版，与普通文字的自动模式一致
+// 入参: chars 段落字符, options 排版选项
+// 返回: TextLayout 生效的段落排版选项
 func richParagraphOptions(chars []rune, options TextLayout) TextLayout {
 	if options.AutoBidi && !options.Shaping.Bidi {
 		for _, char := range chars {
@@ -387,6 +393,8 @@ func richParagraphOptions(chars []rune, options TextLayout) TextLayout {
 }
 
 // richShapeLine 按方向、脚本和格式塑形整行，跨同格式片段合并，保留区间外的塑形上下文
+// 入参: chars 行字符, owners 字符所属运行段索引, value 富文本, metrics 字体度量, options 排版选项, face 分段字体
+// 返回: []richSpan 塑形片段, []float64 字符步进, error 塑形或缺字错误
 func richShapeLine(chars []rune, owners []int, value RichText, metrics []richMetrics, options TextLayout, face *typefont.Face) ([]richSpan, []float64, error) {
 	advances := make([]float64, len(chars))
 	if len(chars) == 0 {
@@ -476,6 +484,8 @@ func richShapeLine(chars []rune, owners []int, value RichText, metrics []richMet
 }
 
 // ShapeText 返回区间相对簇索引，同时保留完整行提供的上下文
+// 入参: _ 忽略的局部字符串, size 字号
+// 返回: []ShapedGlyph 塑形字形列表, error 塑形错误
 func (s richContextShaper) ShapeText(_ string, size float64) ([]ShapedGlyph, error) {
 	glyphs, err := s.ShapeTextRun(s.text, s.start, s.end, size, s.options)
 	if err != nil {
@@ -488,6 +498,8 @@ func (s richContextShaper) ShapeText(_ string, size float64) ([]ShapedGlyph, err
 }
 
 // richPositionSpans 按核心排版相同的方向分组规则排列片段，按视觉簇分配字距及两端对齐
+// 入参: spans 塑形片段, steps 字符步进, options 排版选项, x 行起始横坐标
+// 返回: error 坐标溢出错误
 func richPositionSpans(spans []richSpan, steps []float64, options TextLayout, x float64) error {
 	order := make([]int, len(spans))
 	for i := range order {
@@ -536,6 +548,8 @@ func richPositionSpans(spans []richSpan, steps []float64, options TextLayout, x 
 }
 
 // richSpanText 将逻辑原文和绝对视觉位置写为标准字符字形映射
+// 入参: chars 行字符, span 塑形片段, format 文字格式, baseline 基线纵坐标
+// 返回: TextObject 标准文字对象
 func richSpanText(chars []rune, span richSpan, format TextFormat, baseline float64) TextObject {
 	text := richTextObject(format)
 	code := TextCode{Value: escapeOFDText(string(chars[span.start:span.end]))}
@@ -570,6 +584,8 @@ func richSpanText(chars []rune, span richSpan, format TextFormat, baseline float
 }
 
 // richSpanOutline 使用现有字体及几何后端生成与文字合成样式一致的墨迹
+// 入参: span 塑形片段, format 文字格式, metrics 字体度量, geometry 几何后端, baseline 基线纵坐标
+// 返回: GeometryPath 合成轮廓路径, error 轮廓计算错误
 func richSpanOutline(span richSpan, format TextFormat, metrics richMetrics, geometry GeometryBackend, baseline float64) (GeometryPath, error) {
 	font, ok := metrics.font.(FontOutlines)
 	if !ok {
@@ -613,6 +629,8 @@ func richSpanOutline(span richSpan, format TextFormat, metrics richMetrics, geom
 }
 
 // richSynthetic 与标准绘制一样避免对已加粗或倾斜的字体重复合成
+// 入参: format 文字格式
+// 返回: bool 是否合成加粗, bool 是否合成斜体
 func (e *Editor) richSynthetic(format TextFormat) (bool, bool) {
 	bold, italic := format.Bold, format.Italic
 	var definition *Font
@@ -636,6 +654,8 @@ func (e *Editor) richSynthetic(format TextFormat) (bool, bool) {
 }
 
 // richTextObject 构造具有显式填充和标准字重的文字对象
+// 入参: format 文字格式
+// 返回: TextObject 文字对象
 func richTextObject(format TextFormat) TextObject {
 	fill, stroke := true, false
 	weight := 400
@@ -646,6 +666,8 @@ func richTextObject(format TextFormat) TextObject {
 }
 
 // richColor 将空前景色转换为标准黑色
+// 入参: value 颜色文本
+// 返回: string 标准RGB颜色值
 func richColor(value string) string {
 	if value == "" {
 		return "0 0 0"
@@ -654,12 +676,16 @@ func richColor(value string) string {
 }
 
 // richUnion 合并排版范围和墨迹范围，保留负坐标及零宽空行
+// 入参: a 矩形范围, b 矩形范围
+// 返回: Box 合并后的外接矩形
 func richUnion(a, b Box) Box {
 	x, y := math.Min(a.X, b.X), math.Min(a.Y, b.Y)
 	return Box{X: x, Y: y, W: math.Max(a.X+a.W, b.X+b.W) - x, H: math.Max(a.Y+a.H, b.Y+b.H) - y}
 }
 
 // richRectangle 使用标准填充路径绘制背景或文字装饰
+// 入参: box 局部矩形范围, color 填充色值
+// 返回: GraphicObject 路径图元
 func richRectangle(box Box, color string) GraphicObject {
 	fill, stroke := true, false
 	return GraphicObject{Type: "PathObject", PathObject: PathObject{Boundary: editorBoxString(box), Fill: &fill, Stroke: &stroke, FillColor: &FillColor{Value: color}, AbbreviatedData: fmt.Sprintf("M 0 0 L %s 0 L %s %s L 0 %s C", ofdNumber(box.W), ofdNumber(box.W), ofdNumber(box.H), ofdNumber(box.H))}}
