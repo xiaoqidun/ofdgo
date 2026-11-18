@@ -392,6 +392,12 @@ func (report *SignatureVerifyReport) applySignatureCertificatePolicy(options *si
 		verifyTime = &now
 	}
 	sealTime := report.SealInfo.CreateTime
+	if len(sealCert) != 0 && !sealTime.IsZero() && !signatureCertsValidAt([][]byte{sealCert}, sealTime) && !report.SignatureTime.IsZero() && signatureCertsValidAt([][]byte{sealCert}, report.SignatureTime) {
+		sealTime = report.SignatureTime
+	}
+	if sealTime.IsZero() && !report.SignatureTime.IsZero() {
+		sealTime = report.SignatureTime
+	}
 	if sealTime.IsZero() && verifyTime != nil {
 		sealTime = *verifyTime
 	}
@@ -440,13 +446,11 @@ func (report *SignatureVerifyReport) applySignatureTimePolicy() {
 			report.SignatureTimeOK = timeInRange(report.SignatureTime, report.SignCert.NotBefore, report.SignCert.NotAfter)
 		}
 	}
-	sealCertTime := report.SealInfo.CreateTime
-	if sealCertTime.IsZero() {
-		sealCertTime = report.SignatureTime
-	}
-	if !sealCertTime.IsZero() && !report.SealCert.NotBefore.IsZero() && !report.SealCert.NotAfter.IsZero() {
+	if !report.SealCert.NotBefore.IsZero() && !report.SealCert.NotAfter.IsZero() && (!report.SealInfo.CreateTime.IsZero() || !report.SignatureTime.IsZero()) {
 		report.SealCertTimeChecked = true
-		report.SealCertTimeOK = timeInRange(sealCertTime, report.SealCert.NotBefore, report.SealCert.NotAfter)
+		validAtCreate := !report.SealInfo.CreateTime.IsZero() && timeInRange(report.SealInfo.CreateTime, report.SealCert.NotBefore, report.SealCert.NotAfter)
+		validAtSign := !report.SignatureTime.IsZero() && timeInRange(report.SignatureTime, report.SealCert.NotBefore, report.SealCert.NotAfter)
+		report.SealCertTimeOK = validAtCreate || validAtSign
 	}
 	if !report.SignatureTime.IsZero() && (!report.SealInfo.ValidStart.IsZero() || !report.SealInfo.ValidEnd.IsZero()) {
 		report.SealTimeChecked = true
@@ -536,10 +540,10 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef
 	}
 	switch report.Type {
 	case SignTypeSign:
-		if strings.TrimSpace(sigFile.SignedInfo.Seal.BaseLoc) != "" || len(sigFile.SignedInfo.StampAnnot) != 0 {
+		if strings.TrimSpace(sigFile.SignedInfo.Seal.BaseLoc) != "" {
 			report.SealChecked = true
 			report.SealOK = false
-			report.Error = "digital signature cannot contain seal or stamp appearance"
+			report.Error = "digital signature cannot contain seal"
 			return report
 		}
 		result, err := verifyDigitalSignature(report.SignatureMethod, report.DigestMethod, signedValue, sigData, options)

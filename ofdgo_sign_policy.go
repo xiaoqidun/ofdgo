@@ -254,91 +254,172 @@ func (r *Reader) applySignatureCoverage(report *SignatureVerifyReport, listPath 
 // 入参: root 文档或版本入口, required 待补充的必需文件集合
 // 返回: error 引用文件无法读取或解析时的错误
 func (r *Reader) signatureCoverageReferences(root string, required map[string]bool) error {
+	type pendingResFile struct {
+		id        string
+		resolved  string
+		structure bool
+	}
 	queue := []string{cleanPackagePath(root)}
 	seen := make(map[string]bool)
-	for len(queue) != 0 {
-		name := queue[0]
-		queue = queue[1:]
-		if seen[name] {
-			continue
+	usedIDs := make(map[string]bool)
+	resDeps := make(map[string][]string)
+	var pending []pendingResFile
+	hasExactFile := func(target string) bool {
+		if r.files != nil {
+			if _, ok := r.files[target]; ok {
+				return true
+			}
 		}
-		seen[name], required[name] = true, true
-		data, err := r.readFile(name)
-		if err != nil {
-			return err
+		if r.fileIndex != nil {
+			if _, ok := r.fileIndex[target]; ok {
+				return true
+			}
 		}
-		trimmed := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
-		if !bytes.HasPrefix(bytes.TrimSpace(trimmed), []byte("<")) {
-			continue
+		return false
+	}
+	recordID := func(ownerID, raw string) {
+		id := editorResourceID(raw)
+		if id == "" {
+			return
 		}
-		var node signatureCoverageNode
-		if err := xml.Unmarshal(trimmed, &node); err != nil {
-			return fmt.Errorf("coverage XML %s: %w", name, err)
+		if ownerID == "" {
+			usedIDs[id] = true
+		} else {
+			resDeps[ownerID] = append(resDeps[ownerID], id)
 		}
-		base := ""
-		if node.XMLName.Local == "Res" {
-			for _, attr := range node.Attrs {
-				if attr.Name.Local == "BaseLoc" {
-					base = attr.Value
+	}
+	for {
+		for len(queue) != 0 {
+			name := queue[0]
+			queue = queue[1:]
+			if seen[name] {
+				continue
+			}
+			seen[name], required[name] = true, true
+			data, err := r.readFile(name)
+			if err != nil {
+				return err
+			}
+			trimmed := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+			if !bytes.HasPrefix(bytes.TrimSpace(trimmed), []byte("<")) {
+				continue
+			}
+			var node signatureCoverageNode
+			if err := xml.Unmarshal(trimmed, &node); err != nil {
+				return fmt.Errorf("coverage XML %s: %w", name, err)
+			}
+			isRes := node.XMLName.Local == "Res"
+			base := ""
+			if isRes {
+				for _, attr := range node.Attrs {
+					if attr.Name.Local == "BaseLoc" {
+						base = attr.Value
+					}
+				}
+			}
+			add := func(loc, resItemID string, resource, structure bool) {
+				if strings.TrimSpace(loc) == "" {
+					return
+				}
+				resBase := ""
+				if resource {
+					resBase = base
+				}
+				resolved := cleanPackagePath(resolveResourcePath(name, resBase, loc))
+				if !validPackagePath(resolved) {
+					return
+				}
+				if resource && resItemID != "" && !hasExactFile(resolved) {
+					pending = append(pending, pendingResFile{id: resItemID, resolved: resolved, structure: structure})
+					return
+				}
+				required[resolved] = true
+				if structure && !seen[resolved] {
+					queue = append(queue, resolved)
+				}
+			}
+			var walk func(signatureCoverageNode, string, string, int)
+			walk = func(current signatureCoverageNode, parent, resItemID string, depth int) {
+				kind := current.XMLName.Local
+				if !ofdXMLChild(node.XMLName, current.XMLName) || classifyOFDNamespace(current.XMLName.Space) == ofdXMLUnknown && current.XMLName.Space != node.XMLName.Space || kind == "Signatures" || kind == "Signature" || kind == "Data" && parent == "Extension" {
+					return
+				}
+				if isRes && depth == 2 && editorResourceElement(parent) == kind {
+					for _, attr := range current.Attrs {
+						if attr.Name.Space == "" && attr.Name.Local == "ID" {
+							resItemID = editorResourceID(attr.Value)
+						}
+					}
+				}
+				for _, attr := range current.Attrs {
+					if attr.Name.Space != "" {
+						continue
+					}
+					if attr.Name.Local != "ID" && editorResourceReferenceKind(attr.Name.Local, isRes) == editorReferenceID {
+						recordID(resItemID, attr.Value)
+					}
+					if attr.Name.Local == "BaseLoc" && kind != "Res" || attr.Name.Local == "Link" && kind == "DrawParam" {
+						add(attr.Value, resItemID, isRes, true)
+					} else if attr.Name.Local == "Profile" && kind == "ColorSpace" {
+						add(attr.Value, resItemID, true, false)
+					}
+				}
+				if editorResourceReferenceKind(kind, isRes) == editorReferenceID {
+					recordID(resItemID, current.Text)
+				}
+				switch kind {
+				case "PublicRes", "DocumentRes", "PageRes", "Annotations", "Attachments", "CustomTags", "Extensions":
+					add(current.Text, "", false, true)
+				case "DocRoot":
+					if node.XMLName.Local == "DocVersion" {
+						add(current.Text, "", false, true)
+					}
+				case "File":
+					if parent == "FileList" && node.XMLName.Local == "DocVersion" {
+						add(current.Text, "", false, false)
+					}
+				case "FileLoc":
+					add(current.Text, "", false, parent == "Page" && node.XMLName.Local == "Annotations")
+				case "SchemaLoc", "ExtendData":
+					add(current.Text, "", false, false)
+				case "FontFile", "MediaFile", "Profile":
+					add(current.Text, resItemID, true, false)
+				}
+				for _, child := range current.Children {
+					walk(child, kind, resItemID, depth+1)
+				}
+			}
+			walk(node, "", "", 0)
+		}
+		expanded := true
+		for expanded {
+			expanded = false
+			for id := range usedIDs {
+				for _, dep := range resDeps[id] {
+					if !usedIDs[dep] {
+						usedIDs[dep] = true
+						expanded = true
+					}
 				}
 			}
 		}
-		add := func(loc string, resource, structure bool) {
-			if strings.TrimSpace(loc) == "" {
-				return
-			}
-			resBase := ""
-			if resource {
-				resBase = base
-			}
-			resolved := cleanPackagePath(resolveResourcePath(name, resBase, loc))
-			if !validPackagePath(resolved) {
-				return
-			}
-			required[resolved] = true
-			if structure && !seen[resolved] {
-				queue = append(queue, resolved)
+		var remaining []pendingResFile
+		progressed := false
+		for _, item := range pending {
+			if usedIDs[item.id] {
+				required[item.resolved] = true
+				if item.structure && !seen[item.resolved] {
+					queue = append(queue, item.resolved)
+					progressed = true
+				}
+			} else {
+				remaining = append(remaining, item)
 			}
 		}
-		var walk func(signatureCoverageNode, string)
-		walk = func(current signatureCoverageNode, parent string) {
-			kind := current.XMLName.Local
-			if !ofdXMLChild(node.XMLName, current.XMLName) || classifyOFDNamespace(current.XMLName.Space) == ofdXMLUnknown && current.XMLName.Space != node.XMLName.Space || kind == "Signatures" || kind == "Signature" || kind == "Data" && parent == "Extension" {
-				return
-			}
-			for _, attr := range current.Attrs {
-				if attr.Name.Space != "" {
-					continue
-				}
-				if attr.Name.Local == "BaseLoc" && kind != "Res" || attr.Name.Local == "Link" && kind == "DrawParam" {
-					add(attr.Value, node.XMLName.Local == "Res", true)
-				} else if attr.Name.Local == "Profile" && kind == "ColorSpace" {
-					add(attr.Value, true, false)
-				}
-			}
-			switch kind {
-			case "PublicRes", "DocumentRes", "PageRes", "Annotations", "Attachments", "CustomTags", "Extensions":
-				add(current.Text, false, true)
-			case "DocRoot":
-				if node.XMLName.Local == "DocVersion" {
-					add(current.Text, false, true)
-				}
-			case "File":
-				if parent == "FileList" && node.XMLName.Local == "DocVersion" {
-					add(current.Text, false, false)
-				}
-			case "FileLoc":
-				add(current.Text, false, parent == "Page" && node.XMLName.Local == "Annotations")
-			case "SchemaLoc", "ExtendData":
-				add(current.Text, false, false)
-			case "FontFile", "MediaFile", "Profile":
-				add(current.Text, true, false)
-			}
-			for _, child := range current.Children {
-				walk(child, kind)
-			}
+		pending = remaining
+		if !progressed {
+			break
 		}
-		walk(node, "")
 	}
 	return nil
 }
