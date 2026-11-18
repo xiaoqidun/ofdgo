@@ -323,11 +323,6 @@ func (r *Renderer) RenderToMultiPagePDF(writer io.Writer, indices ...int) error 
 		if err != nil {
 			return fmt.Errorf("failed to read page %d: %w", index+1, err)
 		}
-		for _, res := range page.PageRes {
-			if err := r.Reader.loadResContext(ctx, "/"+resolveResourcePath(r.Reader.ResPath(ref.BaseLoc), "", res)); err != nil {
-				return fmt.Errorf("failed to read page %d resources: %w", index+1, err)
-			}
-		}
 		box, err := r.GetPageBox(&page)
 		if err != nil {
 			return fmt.Errorf("failed to read page %d area: %w", index+1, err)

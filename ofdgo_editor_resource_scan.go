@@ -23,6 +23,7 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -34,11 +35,13 @@ type editorResourceScope struct {
 
 // editorScanKey 按来源、文件路径及本次覆盖内容区分引用扫描结果
 type editorScanKey struct {
-	reader   *Reader
-	name     string
-	digest   [32]byte
-	staged   *editorStagedPage
-	replaced bool
+	reader          *Reader
+	name            string
+	digest          [32]byte
+	customTagDigest [32]byte
+	staged          *editorStagedPage
+	replaced        bool
+	customTag       bool
 }
 
 // editorScanValue 保存只读文件引用及资源索引标识
@@ -59,6 +62,9 @@ func (v editorScanValue) memorySize() int {
 	for key := range v.refs.roles {
 		cost += 64 + len(key)
 	}
+	for key, tags := range v.refs.customTagFiles {
+		cost += 64 + len(key) + 64*len(tags)
+	}
 	for key, font := range v.refs.fonts {
 		cost += 256 + len(key) + 32*(len(font.chars)+len(font.glyphs))
 	}
@@ -69,6 +75,13 @@ func (v editorScanValue) memorySize() int {
 // 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 扫描范围, progress 进度, collect 是否保留文件引用
 // 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可优化, error 读取或取消错误
 func (e *Editor) scanOutputResources(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names map[string]bool, progress editorProgress, collect bool) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
+	return e.scanOutputResourcesWithRetired(ctx, reader, parts, generated, names, nil, progress, collect)
+}
+
+// scanOutputResourcesWithRetired 扫描文件引用，对已标记淘汰且无人引用的孤立文件跳过解析
+// 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 扫描范围, retired 待淘汰路径, progress 进度, collect 是否保留文件引用
+// 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可优化, error 读取或取消错误
+func (e *Editor) scanOutputResourcesWithRetired(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names, retired map[string]bool, progress editorProgress, collect bool) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
 	var cache *renderCache[editorScanKey, editorScanValue]
 	if e.output != nil {
 		if e.output.references == nil {
@@ -76,20 +89,20 @@ func (e *Editor) scanOutputResources(ctx context.Context, reader *Reader, parts 
 		}
 		cache = e.output.references
 	}
-	return scanEditorResourceFiles(ctx, reader, parts, generated, names, progress, collect, cache)
+	return scanEditorResourceFiles(ctx, reader, parts, generated, names, retired, progress, collect, cache)
 }
 
 // scanEditorResources 优先扫描结构依赖，原始数据不按XML解析，孤立文件仍保留引用检查
 // 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 扫描范围, progress 扫描进度, collect 是否保留各文件的资源引用
 // 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可安全优化, error 读取或取消错误
 func scanEditorResources(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names map[string]bool, progress editorProgress, collect bool) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
-	return scanEditorResourceFiles(ctx, reader, parts, generated, names, progress, collect, nil)
+	return scanEditorResourceFiles(ctx, reader, parts, generated, names, nil, progress, collect, nil)
 }
 
 // scanEditorResourceFiles 扫描文件依赖，可复用同次输出的独立文件结果
-// 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 范围, progress 进度, collect 是否保留文件引用, cache 本次扫描缓存
+// 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 范围, retired 待淘汰路径, progress 进度, collect 是否保留文件引用, cache 本次扫描缓存
 // 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可优化, error 读取或取消错误
-func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names map[string]bool, progress editorProgress, collect bool, cache *renderCache[editorScanKey, editorScanValue]) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
+func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names, retired map[string]bool, progress editorProgress, collect bool, cache *renderCache[editorScanKey, editorScanValue]) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
 	refs := &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage), roles: make(map[string]int), documents: make(map[string]bool), versions: make(map[string]bool)}
 	var resources []string
 	var references map[string]*editorResourceRefs
@@ -114,9 +127,11 @@ func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[stri
 		queue = append(queue, entry)
 	}
 	seen := make(map[string]bool)
+	scannedCustomTags := make(map[string][]CustomTag)
+	var deferredRetired []string
 	sharedRefs := *refs
 	position, pending, completed := 0, 0, 0
-	for pending < len(queue) || position < len(ordered) {
+	for pending < len(queue) || position < len(ordered) || len(deferredRetired) > 0 {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, false, err
 		}
@@ -124,9 +139,21 @@ func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[stri
 		if pending < len(queue) {
 			key = cleanPackagePath(queue[pending])
 			pending++
-		} else {
+		} else if position < len(ordered) {
 			key = cleanPackagePath(ordered[position])
 			position++
+			if !seen[key] && retired[key] {
+				if _, hasPart := parts[actual[key]]; !hasPart && !refs.files[key] && refs.roles[key] == 0 && len(refs.customTagFiles[key]) == 0 {
+					deferredRetired = append(deferredRetired, key)
+					continue
+				}
+			}
+		} else {
+			key = deferredRetired[0]
+			deferredRetired = deferredRetired[1:]
+			if !refs.files[key] && refs.roles[key] == 0 && len(refs.customTagFiles[key]) == 0 {
+				continue
+			}
 		}
 		name, included := actual[key]
 		if !included {
@@ -135,7 +162,7 @@ func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[stri
 			}
 			name = key
 		}
-		if seen[key] || strings.HasSuffix(name, "/") || refs.roles[key] == packageReferenceData {
+		if seen[key] || strings.HasSuffix(name, "/") || refs.roles[key] == packageReferenceData && len(refs.customTagFiles[key]) == 0 {
 			continue
 		}
 		seen[key] = true
@@ -148,16 +175,24 @@ func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[stri
 		data, replaced := parts[name]
 		known := generated[name]
 		local := known.refs
+		customTagMeta := slices.Clone(refs.customTagFiles[key])
+		isCustomTag := len(customTagMeta) != 0
+		if isCustomTag {
+			scannedCustomTags[key] = customTagMeta
+		}
 		resource, safe, shared := false, true, false
-		if !replaced || local == nil || !known.matches(data) {
-			key := editorScanKey{reader: reader, name: name, replaced: replaced, staged: known.staged}
+		if isCustomTag || !replaced || local == nil || !known.matches(data) {
+			scanKey := editorScanKey{reader: reader, name: name, replaced: replaced, staged: known.staged, customTag: isCustomTag}
+			if isCustomTag {
+				scanKey.customTagDigest = customTagsScanDigest(customTagMeta)
+			}
 			var cached editorScanValue
 			var found bool
 			if cache != nil {
 				if replaced {
-					key.digest = sha256.Sum256(data)
+					scanKey.digest = sha256.Sum256(data)
 				}
-				cached, found = cache.get(key)
+				cached, found = cache.get(scanKey)
 			}
 			if found {
 				local, resource = cached.refs, cached.resource
@@ -165,6 +200,8 @@ func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[stri
 				shared = cache == nil && included && !collect
 				if shared {
 					sharedRefs.roles = nil
+					sharedRefs.customTagFiles = nil
+					sharedRefs.fontUnsafe = false
 					local = &sharedRefs
 				} else {
 					local = &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
@@ -183,11 +220,15 @@ func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[stri
 						return nil, nil, nil, false, err
 					}
 				}
-				resource, safe = local.scanContext(ctx, input, name)
+				if isCustomTag {
+					safe = local.scanCustomTagEntries(ctx, input, name, customTagMeta)
+				} else {
+					resource, safe = local.scanContext(ctx, input, name)
+				}
 				input.Close()
 				if cache != nil && safe && ctx.Err() == nil {
 					value := editorScanValue{refs: local, resource: resource}
-					cache.put(key, value, value.memorySize()+len(name))
+					cache.put(scanKey, value, value.memorySize()+len(name))
 				}
 			}
 		}
@@ -204,11 +245,19 @@ func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[stri
 				queue = append(queue, target)
 			}
 		}
+		for _, target := range slices.Sorted(maps.Keys(local.customTagFiles)) {
+			for _, tag := range local.customTagFiles[target] {
+				refs.addCustomTagFile(target, tag)
+			}
+			queue = append(queue, target)
+		}
 		if !included {
 			continue
 		}
 		if !shared {
 			refs.merge(local)
+		} else if local.fontUnsafe {
+			refs.fontUnsafe = true
 		}
 		if resource {
 			resources = append(resources, name)
@@ -217,9 +266,25 @@ func scanEditorResourceFiles(ctx context.Context, reader *Reader, parts map[stri
 			references[name] = local
 		}
 	}
+	for target, tags := range refs.customTagFiles {
+		if seen[target] && !slices.Equal(scannedCustomTags[target], tags) {
+			return nil, nil, nil, false, nil
+		}
+	}
 	for name, role := range refs.roles {
 		if role&packageReferenceData != 0 && seen[name] && actual[name] != "" {
 			return nil, nil, nil, false, nil
+		}
+	}
+	if refs.fontUnsafe {
+		for _, usage := range refs.fonts {
+			usage.unsafe = true
+		}
+		for _, item := range references {
+			item.fontUnsafe = true
+			for _, usage := range item.fonts {
+				usage.unsafe = true
+			}
 		}
 	}
 	if err := progress.report("references", len(ordered), len(ordered)); err != nil {
@@ -355,6 +420,12 @@ func resourceReferenceScopes(ctx context.Context, documents map[string]bool, res
 					queue = append(queue, target)
 				}
 			}
+			for target := range source.customTagFiles {
+				if references[target] != nil && !scope[target] {
+					scope[target] = true
+					queue = append(queue, target)
+				}
+			}
 		}
 		if selected != "" && selected != entry {
 			continue
@@ -421,4 +492,19 @@ func resourceReferenceScopes(ctx context.Context, documents map[string]bool, res
 		result[name] = refs
 	}
 	return result, ctx.Err()
+}
+
+// customTagsScanDigest 计算标引入口元数据的无歧义摘要，防止缓存跨不同标引声明混用
+// 入参: tags 关联的标引入口列表
+// 返回: [32]byte 元数据摘要
+func customTagsScanDigest(tags []CustomTag) [32]byte {
+	hash := sha256.New()
+	for _, tag := range tags {
+		for _, field := range []string{tag.TypeID, tag.NameSpace, tag.SchemaLoc} {
+			hash.Write([]byte(strconv.Itoa(len(field)) + ":" + field + ";"))
+		}
+	}
+	var sum [32]byte
+	copy(sum[:], hash.Sum(nil))
+	return sum
 }

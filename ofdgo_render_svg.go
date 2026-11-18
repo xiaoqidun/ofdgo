@@ -135,7 +135,7 @@ func (r *Renderer) RenderFontPreview(ctx context.Context, id string, writer io.W
 		return err
 	}
 	font := &PreparedFont{ResolvedFont: resolved}
-	if definition := view.Reader.fontDefinition(id); definition != nil && definition.FontFile != "" {
+	if definition := view.fontDefinition(id); definition != nil && definition.FontFile != "" {
 		font, err = view.PrepareFont(id)
 		if err != nil {
 			return err

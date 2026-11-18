@@ -18,7 +18,7 @@ package ofdgo
 const defaultPathLineWidth = 0.353
 
 // defaultMiterLimit 为默认尖角截断值
-const defaultMiterLimit = 3.528
+const defaultMiterLimit = 4.234
 
 // mergeGraphicObjectAlpha 合并图形对象透明度
 // 入参: obj 图形对象, alpha 父级透明度
@@ -94,13 +94,38 @@ func mergeDrawParam(base DrawParam, dp *DrawParam) *DrawParam {
 	if dp.Size > 0 {
 		base.Size = dp.Size
 	}
-	if dp.Weight > 0 {
+	if dp.Weight > 0 || dp.WeightSet {
 		base.Weight = dp.Weight
+		base.WeightSet = dp.WeightSet
 	}
-	if dp.Italic {
+	if dp.Italic || dp.ItalicSet {
 		base.Italic = dp.Italic
+		base.ItalicSet = dp.ItalicSet
 	}
 	return &base
+}
+
+// compositeGraphicUnitDefaults 合并复合图元直接声明的描边属性与继承样式
+// 入参: unit 复合图元, defaults 父级默认绘制参数
+// 返回: *DrawParam 合并后的绘制参数
+func (r *Renderer) compositeGraphicUnitDefaults(unit CompositeGraphicUnit, defaults *DrawParam) *DrawParam {
+	merged := r.drawParamDefaults(unit.DrawParam, defaults)
+	hasDirect := unit.LineWidth > 0 || unit.LineWidthSet || unit.Join != "" || unit.Cap != "" ||
+		unit.DashPattern != "" || unit.dashPatternSet || unit.DashOffset != nil || unit.MiterLimit > 0 || unit.MiterLimitSet
+	if !hasDirect {
+		return merged
+	}
+	var base DrawParam
+	if merged != nil {
+		base = *merged
+	}
+	override := &DrawParam{
+		LineWidth: unit.LineWidth, LineWidthSet: unit.LineWidthSet,
+		Join: unit.Join, Cap: unit.Cap,
+		DashPattern: unit.DashPattern, dashPatternSet: unit.dashPatternSet, DashOffset: unit.DashOffset,
+		MiterLimit: unit.MiterLimit, MiterLimitSet: unit.MiterLimitSet,
+	}
+	return mergeDrawParam(base, override)
 }
 
 // getDrawParam 解析绘制参数继承链，按实际资源识别循环引用

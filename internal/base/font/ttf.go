@@ -65,7 +65,7 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 	sfntTag := string(data[0:4])
 	isCFFSfnt := sfntTag == "OTTO"
 	numTables := binary.BigEndian.Uint16(data[4:6])
-	existingTables := make(map[string][]byte)
+	existingTables := make(map[string][]byte, numTables)
 	malformedDirectory := !bytes.Equal(original, data)
 	pos := 12
 	for i := 0; i < int(numTables); i++ {
@@ -77,7 +77,8 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 		offset := binary.BigEndian.Uint32(data[pos+8 : pos+12])
 		length := binary.BigEndian.Uint32(data[pos+12 : pos+16])
 		if uint64(offset)+uint64(length) <= uint64(len(data)) {
-			existingTables[tag] = data[int(offset) : int(offset)+int(length)]
+			end := int(offset) + int(length)
+			existingTables[tag] = data[int(offset):end:end]
 			padding := (4 - (length & 3)) & 3
 			if offset%4 != 0 || len(data)-int(offset)-int(length) < int(padding) {
 				malformedDirectory = true
@@ -189,7 +190,7 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 		!missingOS2 && !missingCmap && !missingName && !missingPost && !malformedDirectory {
 		return false, data, nil, false, nil
 	}
-	newTables := make(map[string][]byte)
+	newTables := make(map[string][]byte, len(existingTables))
 	for k, v := range existingTables {
 		newTables[k] = v
 	}
@@ -238,11 +239,11 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 		if len(mapping) == 0 && isCFFSfnt {
 			mapping = getCmapFromCFF(newTables["CFF "], int(numGlyphs))
 		}
-		if len(mapping) == 0 {
-			mapping = make(map[rune]uint16)
+		if mapping == nil {
+			mapping = make(map[rune]uint16, numGlyphs)
 		}
+		newTables["cmap"] = buildPackedCmapTable(numGlyphs, mapping)
 		AddPackedGlyphMapping(mapping, numGlyphs)
-		newTables["cmap"] = BuildCmapTable(numGlyphs, mapping)
 	}
 	if missingName && fixName {
 		newTables["name"] = buildNameTable()

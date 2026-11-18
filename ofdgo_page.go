@@ -21,13 +21,14 @@ import (
 
 // PageContent 页面内容
 type PageContent struct {
-	XMLName  xml.Name   `xml:"Page"`
-	ID       string     `xml:"-"`
-	Area     PageArea   `xml:"Area"`
-	Template []Template `xml:"Template"`
-	PageRes  []string   `xml:"PageRes"`
-	Content  Content    `xml:"Content"`
-	Actions  []Action   `xml:"Actions>Action"`
+	XMLName       xml.Name     `xml:"Page"`
+	ID            string       `xml:"-"`
+	Area          PageArea     `xml:"Area"`
+	Template      []Template   `xml:"Template"`
+	PageRes       []string     `xml:"PageRes"`
+	Content       Content      `xml:"Content"`
+	Actions       []Action     `xml:"Actions>Action"`
+	pageResources []*parsedRes `xml:"-"`
 }
 
 // Template 页面模板引用
@@ -102,9 +103,7 @@ type TextObject struct {
 	Size           float64       `xml:"Size,attr"`
 	Weight         int           `xml:"Weight,attr"`
 	Italic         bool          `xml:"Italic,attr"`
-	Decoration     string        `xml:"Decoration,attr"`
 	HScale         float64       `xml:"HScale,attr"`
-	VScale         float64       `xml:"VScale,attr"`
 	ReadDirection  int           `xml:"ReadDirection,attr"`
 	CharDirection  int           `xml:"CharDirection,attr"`
 	CTM            string        `xml:"CTM,attr"`
@@ -120,6 +119,8 @@ type TextObject struct {
 	Actions        []Action      `xml:"Actions>Action"`
 	LineWidthSet   bool          `xml:"-"`
 	MiterLimitSet  bool          `xml:"-"`
+	WeightSet      bool          `xml:"-"`
+	ItalicSet      bool          `xml:"-"`
 	dashPatternSet bool
 	layout         *textLayout
 }

@@ -81,6 +81,21 @@ func (w *wasmEngines) call(args []js.Value) (any, error) {
 		return nil, fmt.Errorf("unknown engine: %s", args[0].String())
 	}
 	name := args[1].String()
+	if name == "ofdgoSaveSnapshot" {
+		snapshot := e.saveSnapshot
+		e.saveSnapshot = nil
+		if snapshot == nil {
+			return nil, fmt.Errorf("save snapshot is not prepared")
+		}
+		output := &businessEngine{resources: e.resources, ctx: context.Background()}
+		if args[2].Type() == js.TypeFunction {
+			output.ctx = output.newOutputContext(args[2])
+		}
+		if err := output.ctx.Err(); err != nil {
+			return nil, err
+		}
+		return output.saveEditor(snapshot, args[3:])
+	}
 	fn := e.businessCommands()[name]
 	if fn == nil {
 		return nil, fmt.Errorf("unknown operation: %s", name)
@@ -93,14 +108,14 @@ func (w *wasmEngines) call(args []js.Value) (any, error) {
 		e.ctx = e.newOutputContext(args[2])
 	}
 	ctx := e.ctx
-	if name != "ofdgoSaveSnapshot" && e.currentSession != nil {
+	if e.currentSession != nil {
 		e.currentSession.Renderer.OutputContext = ctx
 	}
 	defer func() {
 		if e.ctx == ctx {
 			e.ctx = nil
 		}
-		if name != "ofdgoSaveSnapshot" && e.currentSession != nil {
+		if e.currentSession != nil {
 			e.currentSession.Renderer.OutputContext = context.Background()
 		}
 	}()

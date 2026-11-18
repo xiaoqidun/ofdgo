@@ -146,7 +146,7 @@ func DecodeConfigDataContext(ctx context.Context, data []byte) (config image.Con
 				return image.Config{}, "tiff", err
 			}
 		}
-		if profile != nil || layout.Transparency != nil {
+		if layout.Transparency != nil || profile != nil && !(isEightBitRGBModel(cfg.ColorModel) && isEquivalentSRGBSpace(profile, false)) {
 			cfg.ColorModel = color.NRGBA64Model
 		}
 		if layout.Transparency != nil {
@@ -302,6 +302,22 @@ func PixelDataContext(ctx context.Context, img image.Image) (image.Image, error)
 		return nil, cancelErr
 	}
 	return pixels, err
+}
+
+// DecodeTransientContext 获取单次临时解码像素，惰性编码图片未缓存时不长期驻留像素缓冲
+// 入参: ctx 取消上下文，nil使用后台上下文, img 图片对象
+// 返回: image.Image 解码像素, error 解码或取消错误
+func DecodeTransientContext(ctx context.Context, img image.Image) (image.Image, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if encoded, ok := img.(*EncodedImage); ok {
+		return encoded.decodeTransient(ctx)
+	}
+	return PixelDataContext(ctx, img)
 }
 
 // GrayAt 获取图片灰度像素
@@ -532,12 +548,12 @@ func WithTransparentEdge(ctx context.Context, img image.Image) (image.Image, int
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
-	if img == nil {
+	if img == nil || isOpaqueImage(img) {
 		return img, 0, nil
 	}
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
-	if w == 0 || h == 0 {
+	if w <= 0 || h <= 0 {
 		return img, 0, nil
 	}
 	if src, ok := img.(*EncodedImage); ok && src.MIME() == "image/jpeg" {
@@ -554,78 +570,14 @@ func WithTransparentEdge(ctx context.Context, img image.Image) (image.Image, int
 	if encoded, ok := img.(*EncodedImage); ok && (encoded.profile != nil || encoded.pngColor != nil) {
 		img = source
 	}
-	switch source.(type) {
-	case *image.Gray, *image.Gray16, *image.YCbCr, *image.CMYK:
+	if isOpaqueImage(source) {
 		return img, 0, nil
 	}
-	hasZero, hasVisible := false, false
-	var pixels []byte
-	var stride, step int
-	wideAlpha := false
-	switch src := source.(type) {
-	case *image.NRGBA:
-		pixels, stride, step = src.Pix, src.Stride, 4
-	case *image.RGBA:
-		pixels, stride, step = src.Pix, src.Stride, 4
-	case *image.Alpha:
-		pixels, stride, step = src.Pix, src.Stride, 1
-	case *image.NRGBA64:
-		pixels, stride, step, wideAlpha = src.Pix, src.Stride, 8, true
-	case *image.RGBA64:
-		pixels, stride, step, wideAlpha = src.Pix, src.Stride, 8, true
-	case *image.Alpha16:
-		pixels, stride, step, wideAlpha = src.Pix, src.Stride, 2, true
-	case *colorImage:
-		pixels, stride, step, wideAlpha = src.Pix, src.Stride, 8, true
-	}
-	if pixels != nil {
-		hasZero = pixels[step-1] == 0 && (!wideAlpha || pixels[step-2] == 0)
-		hasVisible = !hasZero
-	scan:
-		for y := 0; y < h; y++ {
-			if err := ctx.Err(); err != nil {
-				return nil, 0, err
-			}
-			offset := y*stride + step - 1
-			for x := 0; x < w; x++ {
-				if x&255 == 0 {
-					if err := ctx.Err(); err != nil {
-						return nil, 0, err
-					}
-				}
-				if (pixels[offset] == 0 && (!wideAlpha || pixels[offset-1] == 0)) != hasZero {
-					hasZero, hasVisible = true, true
-					break scan
-				}
-				offset += step
-			}
-		}
-	} else {
-		for y := bounds.Min.Y; y < bounds.Max.Y && !(hasZero && hasVisible); y++ {
-			if err := ctx.Err(); err != nil {
-				return nil, 0, err
-			}
-			for x := bounds.Min.X; x < bounds.Max.X; x++ {
-				if (x-bounds.Min.X)&255 == 0 {
-					if err := ctx.Err(); err != nil {
-						return nil, 0, err
-					}
-				}
-				if AlphaAt(source, x, y) == 0 {
-					hasZero = true
-				} else {
-					hasVisible = true
-				}
-				if hasZero && hasVisible {
-					break
-				}
-			}
-		}
-	}
-	if err := ctx.Err(); err != nil {
+	mixed, err := hasMixedZeroAlpha(ctx, source)
+	if err != nil {
 		return nil, 0, err
 	}
-	if !hasZero || !hasVisible {
+	if !mixed {
 		return img, 0, nil
 	}
 	if HighPrecision(source) {
@@ -760,13 +712,6 @@ func decodeBMPConfig(data []byte) (image.Config, error) {
 	return image.Config{ColorModel: color.NRGBAModel, Width: width, Height: height}, nil
 }
 
-// decodeBMPImage 解码BMP图片
-// 入参: data 图片数据
-// 返回: image.Image 图片对象, error 错误信息
-func decodeBMPImage(data []byte) (image.Image, error) {
-	return DecodeBMPContext(context.Background(), data)
-}
-
 // transparentEdgeColor 获取透明像素相邻的可见颜色
 // 入参: source 图片对象, x X坐标, y Y坐标
 // 返回: color.NRGBA 颜色, bool 是否存在
@@ -824,4 +769,229 @@ scan:
 func transparentPaddingColor(c color.NRGBA) color.NRGBA {
 	c.A = 1
 	return c
+}
+
+// isOpaqueImage 判断图像类型是否天然不含透明通道
+// 入参: img 图像对象
+// 返回: bool 是否天然完全不透明
+func isOpaqueImage(img image.Image) bool {
+	for img != nil {
+		switch src := img.(type) {
+		case *image.Gray, *image.Gray16, *image.CMYK, *image.YCbCr:
+			return true
+		case *colorImage:
+			img = src.source
+		case *orientedTIFFImage:
+			img = src.source
+		case *planarTIFFImage:
+			return src.alpha == 0 && len(src.palette) == 0
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// hasMixedZeroAlpha 扫描底层像素缓冲判断图像是否同时包含全透明与可见像素
+// 入参: ctx 取消上下文, source 已解码图像
+// 返回: bool 是否同时存在零Alpha与非零Alpha像素, error 取消错误
+func hasMixedZeroAlpha(ctx context.Context, source image.Image) (bool, error) {
+	bounds := source.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w <= 0 || h <= 0 {
+		return false, ctx.Err()
+	}
+	switch src := source.(type) {
+	case *image.RGBA:
+		return scanPixAlpha4(ctx, src.Pix, src.Stride, w, h)
+	case *image.NRGBA:
+		return scanPixAlpha4(ctx, src.Pix, src.Stride, w, h)
+	case *image.RGBA64:
+		return scanPixAlpha8(ctx, src.Pix, src.Stride, w, h)
+	case *image.NRGBA64:
+		return scanPixAlpha8(ctx, src.Pix, src.Stride, w, h)
+	case *colorImage:
+		return scanPixAlpha8(ctx, src.Pix, src.Stride, w, h)
+	case *image.Alpha:
+		return scanPixAlpha1(ctx, src.Pix, src.Stride, w, h)
+	case *image.Alpha16:
+		return scanPixAlpha2(ctx, src.Pix, src.Stride, w, h)
+	case *image.Paletted:
+		return scanPalettedZeroAlpha(ctx, src, w, h)
+	}
+	hasZero, hasVisible := false, false
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			if (x-bounds.Min.X)&255 == 0 {
+				if err := ctx.Err(); err != nil {
+					return false, err
+				}
+			}
+			if AlphaAt(source, x, y) == 0 {
+				hasZero = true
+			} else {
+				hasVisible = true
+			}
+			if hasZero && hasVisible {
+				return true, ctx.Err()
+			}
+		}
+	}
+	return false, ctx.Err()
+}
+
+// scanPixAlpha4 直接扫描四字节RGBA或NRGBA切片的第四字节判断混合透明
+// 入参: ctx 取消上下文, pix 像素缓冲, stride 行步长, w 宽度, h 高度
+// 返回: bool 是否同时存在零Alpha与非零Alpha, error 取消错误
+func scanPixAlpha4(ctx context.Context, pix []byte, stride, w, h int) (bool, error) {
+	rowBytes := w * 4
+	firstZero := pix[3] == 0
+	for y := 0; y < h; y++ {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		row := pix[y*stride : y*stride+rowBytes]
+		if !firstZero {
+			for i := 3; i < rowBytes; i += 4 {
+				if i&1023 == 3 && i > 3 {
+					if err := ctx.Err(); err != nil {
+						return false, err
+					}
+				}
+				if row[i] == 0 {
+					return true, ctx.Err()
+				}
+			}
+		} else {
+			for i := 3; i < rowBytes; i += 4 {
+				if i&1023 == 3 && i > 3 {
+					if err := ctx.Err(); err != nil {
+						return false, err
+					}
+				}
+				if row[i] != 0 {
+					return true, ctx.Err()
+				}
+			}
+		}
+	}
+	return false, ctx.Err()
+}
+
+// scanPixAlpha8 直接扫描八字节十六位RGBA64或NRGBA64切片判断混合透明
+// 入参: ctx 取消上下文, pix 像素缓冲, stride 行步长, w 宽度, h 高度
+// 返回: bool 是否同时存在零Alpha与非零Alpha, error 取消错误
+func scanPixAlpha8(ctx context.Context, pix []byte, stride, w, h int) (bool, error) {
+	rowBytes := w * 8
+	firstZero := pix[6] == 0 && pix[7] == 0
+	for y := 0; y < h; y++ {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		row := pix[y*stride : y*stride+rowBytes]
+		for i := 6; i < rowBytes; i += 8 {
+			if i&2047 == 6 && i > 6 {
+				if err := ctx.Err(); err != nil {
+					return false, err
+				}
+			}
+			if (row[i] == 0 && row[i+1] == 0) != firstZero {
+				return true, ctx.Err()
+			}
+		}
+	}
+	return false, ctx.Err()
+}
+
+// scanPixAlpha1 直接扫描单通道Alpha切片判断混合透明
+// 入参: ctx 取消上下文, pix 像素缓冲, stride 行步长, w 宽度, h 高度
+// 返回: bool 是否同时存在零Alpha与非零Alpha, error 取消错误
+func scanPixAlpha1(ctx context.Context, pix []byte, stride, w, h int) (bool, error) {
+	firstZero := pix[0] == 0
+	for y := 0; y < h; y++ {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		row := pix[y*stride : y*stride+w]
+		for x := 0; x < w; x++ {
+			if x&255 == 0 && x > 0 {
+				if err := ctx.Err(); err != nil {
+					return false, err
+				}
+			}
+			if (row[x] == 0) != firstZero {
+				return true, ctx.Err()
+			}
+		}
+	}
+	return false, ctx.Err()
+}
+
+// scanPixAlpha2 直接扫描十六位单通道Alpha16切片判断混合透明
+// 入参: ctx 取消上下文, pix 像素缓冲, stride 行步长, w 宽度, h 高度
+// 返回: bool 是否同时存在零Alpha与非零Alpha, error 取消错误
+func scanPixAlpha2(ctx context.Context, pix []byte, stride, w, h int) (bool, error) {
+	rowBytes := w * 2
+	firstZero := pix[0] == 0 && pix[1] == 0
+	for y := 0; y < h; y++ {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		row := pix[y*stride : y*stride+rowBytes]
+		for i := 0; i < rowBytes; i += 2 {
+			if i&511 == 0 && i > 0 {
+				if err := ctx.Err(); err != nil {
+					return false, err
+				}
+			}
+			if (row[i] == 0 && row[i+1] == 0) != firstZero {
+				return true, ctx.Err()
+			}
+		}
+	}
+	return false, ctx.Err()
+}
+
+// scanPalettedZeroAlpha 先检查调色板再扫描索引字节判断混合透明
+// 入参: ctx 取消上下文, src 调色板图像, w 宽度, h 高度
+// 返回: bool 是否同时存在零Alpha与非零Alpha, error 取消错误
+func scanPalettedZeroAlpha(ctx context.Context, src *image.Paletted, w, h int) (bool, error) {
+	if len(src.Palette) == 0 {
+		return false, ctx.Err()
+	}
+	var zeroIdx [256]bool
+	paletteZero, paletteVisible := false, false
+	for i, c := range src.Palette {
+		_, _, _, a := c.RGBA()
+		if a == 0 {
+			zeroIdx[i] = true
+			paletteZero = true
+		} else {
+			paletteVisible = true
+		}
+	}
+	if !paletteZero || !paletteVisible {
+		return false, ctx.Err()
+	}
+	firstZero := zeroIdx[src.Pix[0]]
+	for y := 0; y < h; y++ {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		row := src.Pix[y*src.Stride : y*src.Stride+w]
+		for x := 0; x < w; x++ {
+			if x&255 == 0 && x > 0 {
+				if err := ctx.Err(); err != nil {
+					return false, err
+				}
+			}
+			if zeroIdx[row[x]] != firstZero {
+				return true, ctx.Err()
+			}
+		}
+	}
+	return false, ctx.Err()
 }

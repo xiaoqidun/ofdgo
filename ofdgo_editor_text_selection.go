@@ -291,7 +291,7 @@ func (e *Editor) analyzeTextSelection(page int, selection TextSelection) (TextSe
 		if math.Abs(m.a-m.d) > 1e-9*math.Max(m.a, m.d) {
 			result.Reflow = false
 		}
-		if t.ReadDirection != 0 || t.CharDirection != 0 || t.VScale != 0 || t.Decoration != "" || math.Abs(m.b) > 1e-9 || math.Abs(m.c) > 1e-9 || m.a <= 0 || m.d <= 0 {
+		if t.ReadDirection != 0 || t.CharDirection != 0 || math.Abs(m.b) > 1e-9 || math.Abs(m.c) > 1e-9 || m.a <= 0 || m.d <= 0 {
 			return result, fmt.Errorf("text selection requires unambiguous horizontal character mapping")
 		}
 		if err := validateTextGlyphs(t, 1<<16); err != nil {

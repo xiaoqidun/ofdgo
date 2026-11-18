@@ -36,7 +36,7 @@ type ImageInfo struct {
 }
 
 // Images 列出文档、页面和模板声明的图片资源，不解码图片像素
-// 包含未使用及重复引用的资源声明，同一资源标识只返回一次，不加载注解或签名
+// 包含未使用及重复引用的资源声明，同一资源标识与路径组合只返回一次，不加载注解或签名
 // 入参: ctx 取消上下文
 // 返回: []ImageInfo 图片资源, error 读取或取消错误
 func (r *Reader) Images(ctx context.Context) ([]ImageInfo, error) {
@@ -52,7 +52,7 @@ func (r *Reader) Images(ctx context.Context) ([]ImageInfo, error) {
 	}
 	resources := make([]string, 0)
 	for _, name := range append(slices.Clone(doc.CommonData.DocumentRes), doc.CommonData.PublicRes...) {
-		resources = append(resources, r.ResPath(name))
+		resources = append(resources, cleanPackagePath(r.ResPath(name)))
 	}
 	pages := slices.Clone(doc.Pages.Page)
 	for _, template := range doc.CommonData.TemplatePage {
@@ -67,11 +67,12 @@ func (r *Reader) Images(ctx context.Context) ([]ImageInfo, error) {
 			return nil, err
 		}
 		for _, name := range header.PageRes {
-			resources = append(resources, resolveResourcePath(r.ResPath(page.BaseLoc), "", name))
+			resources = append(resources, cleanPackagePath(resolveResourcePath(r.ResPath(page.BaseLoc), "", name)))
 		}
 	}
 	seen := make(map[string]bool)
 	ids := make(map[string]ImageInfo)
+	emitted := make(map[imageDedupKey]bool)
 	items := make([]ImageInfo, 0)
 	for _, name := range resources {
 		if err := ctx.Err(); err != nil {
@@ -90,6 +91,7 @@ func (r *Reader) Images(ctx context.Context) ([]ImageInfo, error) {
 		if err := decoder.Decode(&res); err != nil {
 			return nil, err
 		}
+		isDocLevel := r.isDocLevelResPath(name)
 		for _, media := range res.MultiMedias.MultiMedia {
 			if err := ctx.Err(); err != nil {
 				return nil, err
@@ -97,19 +99,33 @@ func (r *Reader) Images(ctx context.Context) ([]ImageInfo, error) {
 			if media.Type != "Image" {
 				continue
 			}
-			location := resolveResourcePath(name, res.BaseLoc, media.MediaFile)
-			if media.ID == "" || location == "" {
+			location := cleanPackagePath(resolveResourcePath(name, res.BaseLoc, media.MediaFile))
+			if media.ID == "" || location == "" || location == "." {
 				return nil, fmt.Errorf("invalid image resource")
 			}
 			item := ImageInfo{ID: media.ID, Name: path.Base(location), Format: media.Format, Location: location}
 			key := imageResourceKey(item.ID)
-			if previous, ok := ids[key]; ok {
-				if previous.Name != item.Name || previous.Format != item.Format || previous.Location != item.Location {
+			scopedKey := name + ":" + key
+			if prevScoped, exists := ids[scopedKey]; exists {
+				if prevScoped.Name != item.Name || prevScoped.Format != item.Format || prevScoped.Location != item.Location {
 					return nil, fmt.Errorf("conflicting image resource %q", item.ID)
 				}
 				continue
 			}
-			ids[key] = item
+			ids[scopedKey] = item
+			if isDocLevel {
+				if prevDoc, exists := ids["doc:"+key]; exists {
+					if prevDoc.Name != item.Name || prevDoc.Format != item.Format || prevDoc.Location != item.Location {
+						return nil, fmt.Errorf("conflicting image resource %q", item.ID)
+					}
+				}
+				ids["doc:"+key] = item
+			}
+			dedup := imageDedupKey{id: key, location: item.Location}
+			if emitted[dedup] {
+				continue
+			}
+			emitted[dedup] = true
 			items = append(items, item)
 		}
 	}
@@ -130,7 +146,11 @@ func (r *Reader) Image(ctx context.Context, id string) (ImageInfo, error) {
 	name, _ := resourceValue(r.resourceFiles, id)
 	if name != "" {
 		if r.resourcesRead[name] {
-			if media, ok := resourceValue(r.mediaCache, id); ok && media.Type == "Image" && media.MediaFile != "" {
+			media, ok := r.docMedias.get(id)
+			if !ok {
+				media, ok = resourceValue(r.mediaCache, id)
+			}
+			if ok && media.Type == "Image" && media.MediaFile != "" {
 				location := r.ResPath(media.MediaFile)
 				if err := ctx.Err(); err != nil {
 					return ImageInfo{}, err
@@ -252,6 +272,12 @@ func (r *Reader) WriteImages(ctx context.Context, writer io.Writer, ids ...strin
 	return archive.Close()
 }
 
+// imageDedupKey 按规范化资源标识与包内文件路径对图片清单去重
+type imageDedupKey struct {
+	id       string
+	location string
+}
+
 // imageOutput 在分块写出图片时检查调用方取消状态
 type imageOutput struct {
 	ctx    context.Context
@@ -282,6 +308,27 @@ func (r imageInput) Read(data []byte) (int, error) {
 		return 0, err
 	}
 	return r.ReadCloser.Read(data)
+}
+
+// isDocLevelResPath 判断规范化路径是否为文档级公共资源文件
+// 入参: name 规范化包内路径
+// 返回: bool 是否为文档级资源
+func (r *Reader) isDocLevelResPath(name string) bool {
+	if r == nil || r.doc == nil {
+		return false
+	}
+	clean := cleanPackagePath(name)
+	for _, loc := range r.doc.CommonData.PublicRes {
+		if cleanPackagePath(r.ResPath(loc)) == clean {
+			return true
+		}
+	}
+	for _, loc := range r.doc.CommonData.DocumentRes {
+		if cleanPackagePath(r.ResPath(loc)) == clean {
+			return true
+		}
+	}
+	return false
 }
 
 // imageResourceKey 合并有效十进制标识，非标准标识保留原值，不相互混淆

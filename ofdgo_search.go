@@ -309,7 +309,7 @@ func (r *Renderer) PageTextByIndexContext(ctx context.Context, index int) (*Page
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	doc, err := r.Reader.DocContext(ctx)
+	doc, err := r.Reader.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -333,7 +333,7 @@ func (r *Renderer) SearchText(ctx context.Context, query string, visit func(int,
 	if query == "" {
 		return nil
 	}
-	doc, err := r.Reader.DocContext(ctx)
+	doc, err := r.Reader.docStructureContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -342,13 +342,17 @@ func (r *Renderer) SearchText(ctx context.Context, query string, visit func(int,
 		return err
 	}
 	query = foldText(query)
+	compactQuery := compactSearchText(query)
 	for _, index := range indices {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		text, err := r.PageTextByIndexContext(ctx, index)
+		text, matched, err := r.searchPageTextByIndexContext(ctx, doc.Pages.Page[index], query, compactQuery)
 		if err != nil {
 			return fmt.Errorf("failed to search page %d: %w", index+1, err)
+		}
+		if !matched || text == nil {
+			continue
 		}
 		if err := text.searchEach(ctx, query, func(match TextMatch) error { return visit(index, match) }); err != nil {
 			return err
@@ -551,6 +555,191 @@ func (p *TextSearchIndex) searchSize() int64 {
 	return size
 }
 
+// addRun 收集原始文本，字形索引不替代Unicode原文
+// 入参: obj 文本对象
+// 返回: *TextRun 文本及待填充的字符区域
+func (p *PageText) addRun(obj TextObject) *TextRun {
+	text := obj.Text()
+	p.Runs = append(p.Runs, TextRun{ID: obj.ID, Text: text, Boxes: make([]Box, utf8.RuneCountInString(text))})
+	return &p.Runs[len(p.Runs)-1]
+}
+
+// searchPageTextByIndexContext 先通过零字体纯文本预筛未命中页，仅对候选页计算几何包围盒
+// 入参: ctx 取消上下文, pageRef 页面引用, query 已折叠搜索词, compactQuery 去空白搜索词
+// 返回: *PageText 页面文本, bool 是否可能命中, error 读取或计算错误
+func (r *Renderer) searchPageTextByIndexContext(ctx context.Context, pageRef Page, query, compactQuery string) (*PageText, bool, error) {
+	page, err := r.Reader.readPageContent(ctx, pageRef, true, false)
+	if err != nil {
+		return nil, false, err
+	}
+	if compactQuery != "" {
+		if plain, complete := r.extractFastPlainPageText(ctx, page); complete {
+			folded := compactSearchText(foldText(plain))
+			if !strings.Contains(folded, compactQuery) {
+				return nil, false, ctx.Err()
+			}
+		}
+	}
+	text, err := r.PageTextContext(ctx, page)
+	if err != nil {
+		return nil, false, err
+	}
+	return text, true, nil
+}
+
+// extractFastPlainPageText 在不含字形重映射时按实际绘制顺序快速拼接页面全部可读文本
+// 入参: ctx 取消上下文, page 页面内容
+// 返回: string 原始文本拼接结果, bool 是否不含字形重映射可安全预筛
+func (r *Renderer) extractFastPlainPageText(ctx context.Context, page *PageContent) (string, bool) {
+	if page == nil || r == nil || r.Reader == nil {
+		return "", false
+	}
+	if r.Reader.doc == nil && r.Reader.OFD != nil {
+		if _, err := r.Reader.docStructureContext(ctx); err != nil {
+			return "", false
+		}
+	}
+	view := *r
+	view.pageContext = ctx
+	defer view.bindPageResources(page)()
+	var sb strings.Builder
+	visitedUnits := make(map[*CompositeGraphicUnit]bool)
+	var collectObj func(GraphicObject) bool
+	collectObj = func(obj GraphicObject) bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		switch obj.Type {
+		case "TextObject", "Text":
+			t := obj.TextObject
+			if t.Visible != nil && !*t.Visible {
+				return true
+			}
+			shouldFill := t.Fill == nil || *t.Fill
+			shouldStroke := t.Stroke != nil && *t.Stroke
+			if !shouldFill && !shouldStroke {
+				return true
+			}
+			if len(t.CGTransform) != 0 {
+				return false
+			}
+			for _, tc := range t.TextCode {
+				if tc.Index != "" {
+					return false
+				}
+				sb.WriteString(string(textCodeRunes(tc.Value)))
+			}
+		case "CompositeGraphicUnit", "CompositeObject":
+			c := obj.CompositeGraphicUnit
+			if c.Visible != nil && !*c.Visible {
+				return true
+			}
+			if c.ResourceID != "" {
+				unit := view.compositeDefinition(c.ResourceID)
+				if unit != nil {
+					if visitedUnits[unit] {
+						return false
+					}
+					visitedUnits[unit] = true
+					if !collectObj(GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: *unit}) {
+						delete(visitedUnits, unit)
+						return false
+					}
+					delete(visitedUnits, unit)
+				}
+			}
+			for child := range c.objects() {
+				if !collectObj(child) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	collectLayers := func(layers []Layer, order int) bool {
+		for _, layer := range layers {
+			if layerOrder(layer.Type) != order {
+				continue
+			}
+			for obj := range (PatternContent{Objects: layer.Objects, TextObject: layer.TextObject, PathObject: layer.PathObject, ImageObject: layer.ImageObject, CompositeGraphicUnit: layer.CompositeGraphicUnit}).objects() {
+				if !collectObj(obj) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	for order := range 3 {
+		if view.printing && (view.printContents == "annotations" || view.printContents == "forms") {
+			break
+		}
+		if view.Reader.doc != nil {
+			for _, ref := range page.Template {
+				if view.templateOrder(ref) != order {
+					continue
+				}
+				tplPage := view.loadTemplate(ref.TemplateID)
+				if tplPage == nil {
+					if ctx.Err() != nil {
+						return "", false
+					}
+					continue
+				}
+				restoreTpl := func() {}
+				if len(tplPage.pageResources) > 0 {
+					merged := make([]*parsedRes, 0, len(view.pageResources)+len(tplPage.pageResources))
+					merged = append(merged, view.pageResources...)
+					merged = append(merged, tplPage.pageResources...)
+					restoreTpl = view.bindParsedResources(merged)
+				}
+				for tplOrder := range 3 {
+					if !collectLayers(tplPage.Content.Layer, tplOrder) {
+						restoreTpl()
+						return "", false
+					}
+				}
+				restoreTpl()
+			}
+		}
+		if !collectLayers(page.Content.Layer, order) {
+			return "", false
+		}
+	}
+	if view.RenderAnnotations {
+		annots, err := view.Reader.pageAnnotationsContext(ctx, page.ID)
+		if err != nil {
+			return "", false
+		}
+		for i := range annots {
+			annot := annots[i]
+			if view.printing && annot.Print != nil && !*annot.Print {
+				continue
+			}
+			if view.printing && (view.printContents == "document" && annot.Subtype != "Widget" || view.printContents == "forms" && annot.Subtype != "Widget" || view.printContents == "annotations" && annot.Subtype == "Widget") {
+				continue
+			}
+			if view.printing && annot.Print == nil && annot.Parameters != nil {
+				for _, parameter := range annot.Parameters.Parameter {
+					if parameter.Name == "PDF.Printable" && (parameter.Value == "true" || parameter.Value == "false") {
+						visible := parameter.Value == "true"
+						annot.Visible = &visible
+						break
+					}
+				}
+			}
+			if annot.Visible != nil && !*annot.Visible {
+				continue
+			}
+			for obj := range annot.Appearance.objects() {
+				if !collectObj(*obj) {
+					return "", false
+				}
+			}
+		}
+	}
+	return sb.String(), true
+}
+
 // foldText 统一Unicode大小写等价字符，保留字符数量
 // 入参: text 原文
 // 返回: string 匹配用文字
@@ -591,15 +780,6 @@ func adjacentTextRuns(before, after TextRun) bool {
 	return math.Abs(a.Y+a.H/2-b.Y-b.H/2) <= size*.25 && gap >= -size*.15 && gap <= size*.35 && b.X > a.X
 }
 
-// addRun 收集原始文本，字形索引不替代Unicode原文
-// 入参: obj 文本对象
-// 返回: *TextRun 文本及待填充的字符区域
-func (p *PageText) addRun(obj TextObject) *TextRun {
-	text := obj.Text()
-	p.Runs = append(p.Runs, TextRun{ID: obj.ID, Text: text, Boxes: make([]Box, utf8.RuneCountInString(text))})
-	return &p.Runs[len(p.Runs)-1]
-}
-
 // textGlyphSpans 将绘制字形映射到原文字符区间
 // 入参: runes 原文字符, transforms 字形变换, offset 文本编码偏移
 // 返回: [][2]int 每个字形对应的字符起止位置
@@ -631,4 +811,19 @@ func unionTextBox(a, b Box) Box {
 	}
 	x, y := math.Min(a.X, b.X), math.Min(a.Y, b.Y)
 	return Box{X: x, Y: y, W: math.Max(a.X+a.W, b.X+b.W) - x, H: math.Max(a.Y+a.H, b.Y+b.H) - y}
+}
+
+// compactSearchText 移除搜索折叠文本中的所有Unicode空白以支持跨分段预筛
+// 入参: s 已折叠的搜索文本
+// 返回: string 去空白文本
+func compactSearchText(s string) string {
+	if strings.IndexFunc(s, unicode.IsSpace) < 0 {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
 }

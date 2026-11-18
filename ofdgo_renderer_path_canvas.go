@@ -168,21 +168,6 @@ func (r *Renderer) newPathStyle(dp *DrawParam, bx, by, pageH float64, alpha *int
 	return style
 }
 
-// pathLineCap 转换端点样式
-// 入参: cap 端点样式名称, fallback 默认端点样式
-// 返回: canvas.Capper 端点样式
-func pathLineCap(cap string, fallback canvas.Capper) canvas.Capper {
-	switch cap {
-	case "Butt":
-		return canvas.ButtCap
-	case "Round":
-		return canvas.RoundCap
-	case "Square":
-		return canvas.SquareCap
-	}
-	return fallback
-}
-
 // renderPath 渲染路径
 // 入参: ctx 画布上下文, obj 路径对象, pageH 页面高度, defaults 默认绘制参数, parentCTM 父级CTM, boundaryInCTM 边界是否参与CTM变换, parentClip 父级裁剪路径
 func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64, defaults *DrawParam, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
@@ -229,9 +214,13 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	style.applyPathObject(r, obj, bx, by, pageH)
 	style.scale(ctm)
 	style.lineWidth = r.deviceLineWidth(style.lineWidth)
-	objectCTM := TranslationMatrix(bx, by).Multiply(ctm)
-	if boundaryInCTM && parentCTM != nil {
-		objectCTM = parentCTM.Multiply(TranslationMatrix(bx, by)).Multiply(localCTM)
+	patternOrigin := TranslationMatrix(bx, by)
+	if parentCTM != nil {
+		if boundaryInCTM {
+			patternOrigin = parentCTM.Multiply(patternOrigin)
+		} else {
+			patternOrigin = patternOrigin.Multiply(*parentCTM)
+		}
 	}
 	transformShdPaint(style.fillPaint, parentCTM, bx, by, pageH, boundaryInCTM)
 	transformShdPaint(style.strokePaint, parentCTM, bx, by, pageH, boundaryInCTM)
@@ -279,7 +268,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			fp = applyClipPath(fp, fillClip)
 		}
 		if style.fillPattern != nil {
-			r.renderPattern(ctx, style.fillPattern, pageH, fp, objectCTM)
+			r.renderPattern(ctx, style.fillPattern, pageH, fp, patternOrigin)
 		} else if style.fillPaint != nil {
 			ctx.SetFillRule(fillRule)
 			ctx.SetFill(fillPaint)
@@ -327,7 +316,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			}
 			sp = r.strokeClippedCanvasPath(sp, strokeClip, options, fill)
 			if style.strokePattern != nil {
-				r.renderPattern(ctx, style.strokePattern, pageH, sp, objectCTM)
+				r.renderPattern(ctx, style.strokePattern, pageH, sp, patternOrigin)
 			} else {
 				ctx.SetFill(strokePaint)
 				ctx.SetStrokeColor(canvas.Transparent)
@@ -340,9 +329,9 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	ctx.Pop()
 }
 
-// renderPattern 渲染图案填充
-// 入参: ctx 画布上下文, pattern 底纹画刷, pageH 页面高度, clip 绘制区域, objectCTM 对象变换矩阵
-func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pageH float64, clip *canvas.Path, objectCTM Matrix) {
+// renderPattern 渲染图案填充并施加底纹单元宽高边界裁剪，不以外层颜色覆盖单元默认样式
+// 入参: ctx 画布上下文, pattern 底纹画刷, pageH 页面高度, clip 绘制区域, patternOrigin 对象空间原点矩阵
+func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pageH float64, clip *canvas.Path, patternOrigin Matrix) {
 	if bounds, ok := ctx.Renderer.(*boundsRenderer); ok {
 		if pattern.Alpha == nil || *pattern.Alpha > 0 {
 			bounds.add(clip)
@@ -354,7 +343,7 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 		r.pageText = nil
 		defer func() { r.pageText = text }()
 	}
-	if clip == nil || clip.Empty() || pattern.CellContent.empty() {
+	if clip == nil || clip.Empty() || pattern.Width <= 0 || pattern.Height <= 0 || pattern.CellContent.empty() {
 		return
 	}
 	if r.patternReferences[pattern.Pattern] {
@@ -382,7 +371,7 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 	}
 	patternCTM := NewMatrix(pattern.CTM)
 	if pattern.RelativeTo != "Page" {
-		patternCTM = objectCTM.Multiply(patternCTM)
+		patternCTM = patternOrigin.Multiply(patternCTM)
 	} else if parentPage != nil {
 		patternCTM = parentPage.Multiply(patternCTM)
 	}
@@ -415,7 +404,6 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 	endX := int(math.Ceil(maxX/xStep)) + 1
 	startY := int(math.Floor(minY/yStep)) - 1
 	endY := int(math.Ceil(maxY/yStep)) + 1
-	defaults := &DrawParam{FillColor: &pattern.Color, StrokeColor: (*StrokeColor)(&pattern.Color)}
 	for ix := startX; ix <= endX; ix++ {
 		for iy := startY; iy <= endY; iy++ {
 			tileCTM := patternCTM.Multiply(TranslationMatrix(float64(ix)*xStep, float64(iy)*yStep))
@@ -425,10 +413,15 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 			if iy%2 != 0 && (pattern.ReflectMethod == "Row" || pattern.ReflectMethod == "RowAndColumn") {
 				tileCTM = tileCTM.Multiply(Matrix{a: 1, d: -1, f: pattern.Height})
 			}
+			cellClip := canvas.Rectangle(pattern.Width, pattern.Height).Transform(canvas.Matrix{{tileCTM.a, tileCTM.c, tileCTM.e}, {-tileCTM.b, -tileCTM.d, pageH - tileCTM.f}})
+			tileClip := r.intersectCachedClipPath(clip, cellClip)
+			if tileClip != nil && tileClip.Empty() {
+				continue
+			}
 			r.patternPage = &tileCTM
 			for obj := range pattern.CellContent.objects() {
 				obj = mergeGraphicObjectAlpha(obj, pattern.Alpha)
-				r.renderObject(ctx, &obj, pageH, defaults, &tileCTM, true, clip)
+				r.renderObject(ctx, &obj, pageH, nil, &tileCTM, true, tileClip)
 				if r.renderError != nil {
 					return
 				}
@@ -480,4 +473,19 @@ func (r *Renderer) parseCanvasPath(data string) (*canvas.Path, error) {
 		cache.put(key, path.Copy(), cost)
 	}
 	return path, nil
+}
+
+// pathLineCap 转换端点样式
+// 入参: cap 端点样式名称, fallback 默认端点样式
+// 返回: canvas.Capper 端点样式
+func pathLineCap(cap string, fallback canvas.Capper) canvas.Capper {
+	switch cap {
+	case "Butt":
+		return canvas.ButtCap
+	case "Round":
+		return canvas.RoundCap
+	case "Square":
+		return canvas.SquareCap
+	}
+	return fallback
 }

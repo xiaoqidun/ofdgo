@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -137,7 +138,7 @@ func (s *FontInfoScanner) Infos() ([]FontInfo, error) {
 	return s.renderer.fontInfos(s.usage)
 }
 
-// Fonts 获取OFD声明的字体列表，不加载注解或签名
+// Fonts 获取OFD声明的文档及页面局部字体列表，按标识去重且不加载注解或签名
 // 返回: []Font 字体列表, error 错误信息
 func (r *Reader) Fonts() ([]Font, error) {
 	doc, err := r.docStructure()
@@ -146,17 +147,38 @@ func (r *Reader) Fonts() ([]Font, error) {
 	}
 	if !r.fontResourcesRead {
 		for _, page := range doc.Pages.Page {
-			r.loadPageResources(page)
+			header, err := r.readPageHeaderContext(context.Background(), page)
+			if err == nil {
+				_, _ = r.collectPageResourcesContext(context.Background(), r.ResPath(page.BaseLoc), &header)
+			}
 		}
 		for _, template := range doc.CommonData.TemplatePage {
-			r.loadPageResources(Page{BaseLoc: template.BaseLoc})
+			ref := Page{BaseLoc: template.BaseLoc}
+			header, err := r.readPageHeaderContext(context.Background(), ref)
+			if err == nil {
+				_, _ = r.collectPageResourcesContext(context.Background(), r.ResPath(ref.BaseLoc), &header)
+			}
 		}
 		r.fontResourcesRead = true
 	}
+	seen := make(map[string]bool, len(r.fontCache))
 	fonts := make([]Font, 0, len(r.fontCache))
 	for _, font := range r.fontCache {
-		if font != nil {
+		if font != nil && !seen[font.ID] {
+			seen[font.ID] = true
 			fonts = append(fonts, *font)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(r.resFileCache)) {
+		parsed := r.resFileCache[name]
+		if parsed == nil {
+			continue
+		}
+		for _, font := range parsed.fonts.exact {
+			if font != nil && !seen[font.ID] {
+				seen[font.ID] = true
+				fonts = append(fonts, *font)
+			}
 		}
 	}
 	sort.SliceStable(fonts, func(i, j int) bool {
@@ -372,6 +394,16 @@ func (r *Reader) fontData(id string, readonly bool) ([]byte, error) {
 	if f == nil || f.FontFile == "" {
 		return nil, fmt.Errorf("embedded font %q not found", id)
 	}
+	return r.readFontData(f, readonly)
+}
+
+// readFontData 按指定字体定义与调用方所有权读取内嵌字体，集合字体独立提取
+// 入参: f 字体定义, readonly 是否允许借用只读资源
+// 返回: []byte 字体数据, error 资源或集合错误
+func (r *Reader) readFontData(f *Font, readonly bool) ([]byte, error) {
+	if f == nil || f.FontFile == "" {
+		return nil, fmt.Errorf("embedded font not found")
+	}
 	read := r.readFile
 	if readonly {
 		read = r.readFileView
@@ -387,12 +419,27 @@ func (r *Reader) fontData(id string, readonly bool) ([]byte, error) {
 	return data, nil
 }
 
-// fontDefinition 按资源标识查找已加载的字体，数值等价的引用共用同一定义
+// fontDefinition 按文档级优先查找已加载的字体，未命中时兼容已解析局部资源
 // 入参: id 字体资源标识
 // 返回: *Font 字体定义，未找到或别名冲突时为nil
 func (r *Reader) fontDefinition(id string) *Font {
-	font, _ := resourceValue(r.fontCache, id)
-	return font
+	if r == nil || id == "" {
+		return nil
+	}
+	if font, ok := r.docFonts.get(id); ok && font != nil {
+		return font
+	}
+	if font, ok := resourceValue(r.fontCache, id); ok && font != nil {
+		return font
+	}
+	for _, name := range slices.Sorted(maps.Keys(r.resFileCache)) {
+		if parsed := r.resFileCache[name]; parsed != nil {
+			if font, ok := parsed.fonts.get(id); ok && font != nil {
+				return font
+			}
+		}
+	}
+	return nil
 }
 
 // embeddedFontFace 按资源缓存内嵌字体名称并返回独立副本，不解析字形轮廓
@@ -463,7 +510,7 @@ func (r *Renderer) fontInfos(usage map[string]int) ([]FontInfo, error) {
 	}
 	counts := make(map[string]int, len(usage))
 	for id, used := range usage {
-		if font := r.Reader.fontDefinition(id); font != nil {
+		if font := r.fontDefinition(id); font != nil {
 			id = font.ID
 		}
 		counts[id] += used
@@ -571,11 +618,16 @@ func (r *Renderer) fontUsage(doc *Document, pages []*PageContent) map[string]int
 	return usage
 }
 
-// readPageFontUsage 读取页面字体用量，不保留页面图元
+// readPageFontUsage 读取页面字体用量并绑定局部资源作用域，不保留页面图元
 // 入参: page 页面引用
 // 返回: map[string]int 字体使用次数, error 错误信息
 func (r *Renderer) readPageFontUsage(page Page) (map[string]int, error) {
-	r.Reader.loadPageResources(page)
+	header, err := r.Reader.readPageHeader(page)
+	var pageRes []*parsedRes
+	if err == nil {
+		pageRes, _ = r.Reader.collectPageResourcesContext(context.Background(), r.Reader.ResPath(page.BaseLoc), &header)
+	}
+	defer r.bindParsedResources(pageRes)()
 	f, err := r.Reader.openFile(r.Reader.ResPath(page.BaseLoc))
 	if err != nil {
 		return nil, err
@@ -595,6 +647,7 @@ func (r *Renderer) readPageFontUsage(page Page) (map[string]int, error) {
 // countPageFonts 统计页面字体使用次数
 // 入参: page 页面内容, usage 字体使用次数
 func (r *Renderer) countPageFonts(page *PageContent, usage map[string]int) {
+	defer r.bindPageResources(page)()
 	for _, layer := range page.Content.Layer {
 		r.countLayerFonts(layer, usage)
 	}
@@ -604,8 +657,12 @@ func (r *Renderer) countPageFonts(page *PageContent, usage map[string]int) {
 // countAnnotationFonts 统计页面注释中的字体使用次数
 // 入参: pageID 页面标识, usage 字体使用次数
 func (r *Renderer) countAnnotationFonts(pageID string, usage map[string]int) {
-	if r.RenderAnnotations {
-		for _, annot := range r.Reader.Annots[pageID] {
+	if r.RenderAnnotations && r.Reader != nil {
+		annots, _ := r.Reader.pageAnnotationsContext(r.outputContext(), pageID)
+		for _, annot := range annots {
+			if r.printing && annot.Print != nil && !*annot.Print {
+				continue
+			}
 			if annot.Visible != nil && !*annot.Visible {
 				continue
 			}
@@ -649,8 +706,11 @@ func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int, def
 	switch obj.Type {
 	case "TextObject":
 		text := obj.TextObject
-		r.countTextFont(text, usage)
 		defaults = r.drawParamDefaults(text.DrawParam, defaults)
+		if text.Font == "" && defaults != nil && defaults.Font != "" {
+			text.Font = defaults.Font
+		}
+		r.countTextFont(text, usage)
 		fill, stroke = text.FillColor, text.StrokeColor
 		shouldFill = text.Fill == nil || *text.Fill
 		shouldStroke = text.Stroke != nil && *text.Stroke
@@ -691,9 +751,9 @@ func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int, def
 // 入参: cgu 复合图元, usage 字体使用次数, defaults 默认绘制参数, visited 当前引用路径
 func (r *Renderer) countCompositeFonts(cgu CompositeGraphicUnit, usage map[string]int, defaults *DrawParam, visited *fontUsageReferences) {
 	r.countClipFonts(cgu.Clips, usage)
-	defaults = r.drawParamDefaults(cgu.DrawParam, defaults)
+	defaults = r.compositeGraphicUnitDefaults(cgu, defaults)
 	if cgu.ResourceID != "" {
-		if ref, _ := resourceValue(r.CompositeGraphicUnits, cgu.ResourceID); ref != nil {
+		if ref := r.compositeDefinition(cgu.ResourceID); ref != nil {
 			if visited == nil {
 				visited = &fontUsageReferences{}
 			}

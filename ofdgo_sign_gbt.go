@@ -173,7 +173,7 @@ func verifyRawPublicKeySignature(method, digestMethod string, signedValue, signe
 	return result, nil
 }
 
-// verifyGBT35275SignedData 验证GB/T35275 SignedData签名值
+// verifyGBT35275SignedData 验证GB/T35275 SignedData签名值，逐一校验全部SignerInfo签名与证书
 // 入参: signedValue 签名值, signedData 被签名原文, options 验证选项
 // 返回: *digitalVerifyResult 验证结果, error 错误信息
 func verifyGBT35275SignedData(signedValue, signedData []byte, options *signatureVerifyOptions) (*digitalVerifyResult, error) {
@@ -232,8 +232,14 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 		result.DataHashChecked = index == len(sd.Signers)-1
 		cert := sd.findCert(signer.Issuer, signer.Serial)
 		if cert == nil {
+			result.CertChecked = true
 			result.CertOK = false
 			return result, nil
+		}
+		if _, err := parseSignatureCertificate(cert.Raw); err != nil {
+			result.CertChecked = true
+			result.CertOK = false
+			return result, err
 		}
 		result.SignerCerts = append(result.SignerCerts, cert.Raw)
 		tokens, err := signatureTimestampAttributes(signer.UnauthAttrs)
@@ -243,16 +249,24 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 		for _, token := range tokens {
 			result.Timestamps = append(result.Timestamps, signatureTimestampEvidence{Token: token, Data: signer.Signature})
 		}
-		result.CertInfo = signatureCertInfo(cert.Raw)
+		certInfo := signatureCertInfo(cert.Raw)
+		if index == 0 {
+			result.CertInfo = certInfo
+		}
 		if isSM2SignatureMethod(signer.SignatureAlg) {
 			pub, err := parseSM2PublicKeyFromCert(cert.Raw)
 			if err != nil {
+				result.CertInfo = certInfo
+				result.CertChecked = true
 				result.CertOK = false
 				return result, err
 			}
 			if !verifySM2Signature(pub, nil, plain, signer.Signature) {
+				result.CertInfo = certInfo
+				result.DataHashChecked = true
 				result.SignedChecked = true
-				result.CertChecked = index == len(sd.Signers)-1
+				result.SignedOK = false
+				result.CertChecked = true
 				result.CertOK = true
 				return result, nil
 			}
@@ -263,12 +277,17 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 		}
 		ok, err := verifyPublicKeySignature(signer.SignatureAlg, signer.DigestAlg, cert.Raw, plain, signer.Signature)
 		if err != nil {
+			result.CertInfo = certInfo
+			result.CertChecked = true
 			result.CertOK = false
 			return result, err
 		}
 		if !ok {
+			result.CertInfo = certInfo
+			result.DataHashChecked = true
 			result.SignedChecked = true
-			result.CertChecked = index == len(sd.Signers)-1
+			result.SignedOK = false
+			result.CertChecked = true
 			result.CertOK = true
 			return result, nil
 		}

@@ -256,6 +256,41 @@ func (r *Reader) versionPreservedFiles(ctx context.Context) (map[string]bool, er
 			shared[name] = true
 		}
 	}
+	if r.versionInfo != nil {
+		if sigNode := body.child("Signatures"); sigNode != nil {
+			sigList, err := versionFileLocation("OFD.xml", editorImportText(data, sigNode))
+			if err == nil && sigList != "" {
+				shared[sigList] = true
+				listData, readErr := r.readFileViewContext(ctx, sigList)
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				var list Signatures
+				if readErr == nil && xml.Unmarshal(listData, &list) == nil {
+					for _, item := range list.List {
+						if err := ctx.Err(); err != nil {
+							return nil, err
+						}
+						sigPath := cleanPackagePath(resolveResourcePath(sigList, "", item.BaseLoc))
+						if sigPath == "" {
+							continue
+						}
+						shared[sigPath] = true
+						owned, protected, sigErr := r.signatureRemovalFiles(ctx, sigPath)
+						if err := ctx.Err(); err != nil {
+							return nil, err
+						}
+						if sigErr == nil {
+							maps.Copy(shared, owned)
+							maps.Copy(shared, protected)
+							delete(shared, "")
+							delete(shared, ".")
+						}
+					}
+				}
+			}
+		}
+	}
 	versions, err := r.DocumentVersionsContext(ctx)
 	if err != nil {
 		return nil, err

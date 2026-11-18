@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/cipher"
 	"crypto/ecdsa"
@@ -247,6 +248,42 @@ func (s *encryptionState) summary() EncryptionInfo {
 	return info
 }
 
+// writeEncrypted 在全部准备及加密成功后写出结果，取消不产生输出
+// 输出流自身写入失败时调用方仍需丢弃本次输出
+// 入参: writer 输出流
+// 返回: int64 写入字节数, error 错误信息
+func (e *Editor) writeEncrypted(writer io.Writer) (int64, error) {
+	if e.encryption.options == nil {
+		return 0, ErrEncryptionPolicyRequired
+	}
+	if err := validateEncryptionOptions(*e.encryption.options); err != nil {
+		return 0, err
+	}
+	var plain editorSnapshotBuffer
+	defer func() { _ = plain.Close() }()
+	if _, err := e.writePlaintext(&plain); err != nil {
+		return 0, err
+	}
+	r, err := NewReader(&Input{reader: &plain, size: plain.size})
+	if err != nil {
+		return 0, err
+	}
+	defer r.Close()
+	ctx := context.Background()
+	if e.output != nil && e.output.ctx != nil {
+		ctx = e.output.ctx
+	}
+	var out editorSnapshotBuffer
+	defer func() { _ = out.Close() }()
+	if _, err := encryptPackageToWriter(ctx, &out, r, *e.encryption.options, editorProgress(e.OnWriteProgress)); err != nil {
+		return 0, err
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return io.Copy(writer, io.NewSectionReader(&out, 0, out.size))
+}
+
 // cloneEncryptionOptions 复制可继承的加密策略，密码提供者保持共享
 // 入参: options 加密策略
 // 返回: *EncryptionOptions 独立策略副本
@@ -261,40 +298,6 @@ func cloneEncryptionOptions(options *EncryptionOptions) *EncryptionOptions {
 		copy.Recipients[i].Certificate = bytes.Clone(copy.Recipients[i].Certificate)
 	}
 	return &copy
-}
-
-// writeEncrypted 在全部准备及加密成功后写出结果，取消不产生输出
-// 输出流自身写入失败时调用方仍需丢弃本次输出
-// 入参: writer 输出流
-// 返回: int64 写入字节数, error 错误信息
-func (e *Editor) writeEncrypted(writer io.Writer) (int64, error) {
-	if e.encryption.options == nil {
-		return 0, ErrEncryptionPolicyRequired
-	}
-	var plaintext bytes.Buffer
-	if _, err := e.writePlaintext(&plaintext); err != nil {
-		return 0, err
-	}
-	defer clear(plaintext.Bytes())
-	r, err := NewReader(&Input{reader: bytes.NewReader(plaintext.Bytes()), size: int64(plaintext.Len())})
-	if err != nil {
-		return 0, err
-	}
-	defer r.Close()
-	parts, err := r.packageData()
-	if err != nil {
-		return 0, err
-	}
-	defer func() {
-		for _, data := range parts {
-			clear(data)
-		}
-	}()
-	data, err := encryptPackageParts(parts, *e.encryption.options, editorProgress(e.OnWriteProgress))
-	if err != nil {
-		return 0, err
-	}
-	return io.Copy(writer, bytes.NewReader(data))
 }
 
 // parseEncryptionCertificate 解析并检查加密证书

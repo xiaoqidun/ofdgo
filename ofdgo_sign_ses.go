@@ -80,14 +80,15 @@ func ParseSignatureSeal(data []byte) (*ParsedSignatureSeal, error) {
 
 // sesSignature SES签章值
 type sesSignature struct {
-	Timestamp []byte
-	ToSign    []byte
-	Cert      []byte
-	SignAlg   string
-	Signature []byte
-	DataHash  []byte
-	Time      time.Time
-	Seal      *sesSeal
+	Timestamp      []byte
+	TimestampInTBS bool
+	ToSign         []byte
+	Cert           []byte
+	SignAlg        string
+	Signature      []byte
+	DataHash       []byte
+	Time           time.Time
+	Seal           *sesSeal
 }
 
 // sesSeal SES电子印章
@@ -187,7 +188,7 @@ func parseSESSignature(data []byte) (*sesSignature, error) {
 	}
 	signatureTime, err := asn1Time(tbsItems[2])
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid ses signature time: %w", err)
 	}
 	dataHash, err := asn1BitOrOctetBytes(tbsItems[3])
 	if err != nil {
@@ -239,7 +240,10 @@ func parseSESSignatureV1(items []asn1.RawValue) (*sesSignature, error) {
 	if err != nil || version != seal.Info.Version || version != 1 {
 		return nil, fmt.Errorf("invalid ses version")
 	}
-	signatureTime := parseSESSignatureTimeV1(tbsItems[2])
+	signatureTime, timestamp, err := parseSESSignatureTimeV1(tbsItems[2])
+	if err != nil {
+		return nil, err
+	}
 	dataHash, err := asn1BitOrOctetBytes(tbsItems[3])
 	if err != nil {
 		return nil, err
@@ -253,34 +257,82 @@ func parseSESSignatureV1(items []asn1.RawValue) (*sesSignature, error) {
 		return nil, err
 	}
 	return &sesSignature{
-		ToSign:    append([]byte(nil), items[0].FullBytes...),
-		Cert:      cert,
-		SignAlg:   alg,
-		Signature: signature,
-		DataHash:  dataHash,
-		Time:      signatureTime,
-		Seal:      seal,
+		Timestamp:      timestamp,
+		TimestampInTBS: len(timestamp) != 0,
+		ToSign:         append([]byte(nil), items[0].FullBytes...),
+		Cert:           cert,
+		SignAlg:        alg,
+		Signature:      signature,
+		DataHash:       dataHash,
+		Time:           signatureTime,
+		Seal:           seal,
 	}, nil
 }
 
-// parseSESSignatureTimeV1 解析SES V1签名时间
+// parseSESSignatureTimeV1 解析SES V1签名时间或内嵌时间戳令牌，拒绝损坏的非空签名时间编码
 // 入参: raw 签名时间或时间戳数据
-// 返回: time.Time 签名时间
-func parseSESSignatureTimeV1(raw asn1.RawValue) time.Time {
+// 返回: time.Time 签名时间, []byte 时间戳令牌DER, error 错误信息
+func parseSESSignatureTimeV1(raw asn1.RawValue) (time.Time, []byte, error) {
+	if raw.Class == asn1.ClassUniversal && (raw.Tag == asn1.TagUTCTime || raw.Tag == asn1.TagGeneralizedTime) {
+		t, err := asn1Time(raw)
+		if err != nil || t.IsZero() {
+			return time.Time{}, nil, fmt.Errorf("invalid ses v1 signature time")
+		}
+		return t, nil, nil
+	}
 	data, err := asn1BitOrOctetBytes(raw)
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, nil, fmt.Errorf("invalid ses v1 signature time: %w", err)
 	}
-	if t := parseSignatureDateTime(string(data)); !t.IsZero() {
-		return t
+	if len(bytes.TrimSpace(data)) == 0 {
+		return time.Time{}, nil, fmt.Errorf("empty ses v1 signature time")
 	}
+	if t, err := parseSignatureDateTime(string(data)); err == nil && !t.IsZero() {
+		return t, nil, nil
+	}
+	der := data
 	var value asn1.RawValue
-	rest, err := asn1.Unmarshal(data, &value)
+	rest, err := asn1.Unmarshal(der, &value)
 	if err != nil || len(rest) != 0 {
-		return time.Time{}
+		if normalized, berErr := berToDefinite(data); berErr == nil {
+			rest, err = asn1.Unmarshal(normalized, &value)
+			if err == nil && len(rest) == 0 {
+				der = normalized
+			}
+		}
 	}
-	t, _ := asn1Time(value)
-	return t
+	if err != nil || len(rest) != 0 {
+		return time.Time{}, nil, fmt.Errorf("invalid ses v1 signature time")
+	}
+	if t, err := asn1Time(value); err == nil && !t.IsZero() {
+		return t, nil, nil
+	}
+	if value.Class == asn1.ClassUniversal && !value.IsCompound {
+		if t, err := parseSignatureDateTime(asn1String(value)); err == nil && !t.IsZero() {
+			return t, nil, nil
+		}
+	}
+	if token, ok := extractSESTimestampTokenV1(value, der); ok {
+		return time.Time{}, token, nil
+	}
+	return time.Time{}, nil, fmt.Errorf("invalid ses v1 signature time")
+}
+
+// extractSESTimestampTokenV1 识别SES V1内嵌CMS时间戳令牌或TimeStampResp结构
+// 入参: value 已解析ASN.1根节点, der 定长DER字节
+// 返回: []byte 时间戳令牌DER, bool 是否为合法时间戳结构
+func extractSESTimestampTokenV1(value asn1.RawValue, der []byte) ([]byte, bool) {
+	if oid, _, present, err := parseGBTContentInfo(value); err == nil && present && (oid == signContentCMS || oid == signContentSignedData) {
+		return bytes.Clone(der), true
+	}
+	if value.Class == asn1.ClassUniversal && value.Tag == asn1.TagSequence && value.IsCompound {
+		if children, ok := asn1Children(value.Bytes); ok && len(children) == 2 && children[0].Tag == asn1.TagSequence {
+			if oid, _, present, err := parseGBTContentInfo(children[1]); err == nil && present && (oid == signContentCMS || oid == signContentSignedData) {
+				return bytes.Clone(children[1].FullBytes), true
+			}
+		}
+	}
+	return nil, false
 }
 
 // verifySESSignature 验证SES签章值
@@ -302,7 +354,11 @@ func verifySESSignature(data, signedData []byte, options *signatureVerifyOptions
 	result := &sesVerifyResult{}
 	result.SignatureMethod = sig.SignAlg
 	if len(sig.Timestamp) != 0 {
-		result.Timestamps = append(result.Timestamps, signatureTimestampEvidence{Token: sig.Timestamp, Data: sig.Signature})
+		if sig.TimestampInTBS {
+			result.Timestamps = append(result.Timestamps, signatureTimestampEvidence{Token: sig.Timestamp, Data: signedData, AltData: [][]byte{sig.DataHash}})
+		} else {
+			result.Timestamps = append(result.Timestamps, signatureTimestampEvidence{Token: sig.Timestamp, Data: sig.Signature})
+		}
 	}
 	result.SignCert = signatureCertInfo(sig.Cert)
 	result.SealCert = signatureCertInfo(sig.Seal.Cert)

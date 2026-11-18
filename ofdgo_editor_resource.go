@@ -375,7 +375,7 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 	if err != nil {
 		return err
 	}
-	if !item.Complete {
+	if replace == nil && !item.Complete {
 		return fmt.Errorf("resource references contain unsupported content")
 	}
 	if replace == nil && len(item.References) != 0 {

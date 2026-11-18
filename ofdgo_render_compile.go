@@ -34,6 +34,7 @@ func (OFDCompiler) Name() string { return "ofd" }
 // 入参: r 渲染器, page 页面
 // 返回: *RasterPage 绘制页面, error 编译错误
 func (OFDCompiler) CompilePage(r *Renderer, page *PageContent) (*RasterPage, error) {
+	defer r.bindPageResources(page)()
 	box, err := r.GetPageBox(page)
 	if err != nil {
 		return nil, err
@@ -45,6 +46,10 @@ func (OFDCompiler) CompilePage(r *Renderer, page *PageContent) (*RasterPage, err
 	c.page = &RasterPage{Width: box.W, Height: box.H, DPI: r.DPI}
 	if _, _, err := c.page.PixelSize(); err != nil {
 		return nil, err
+	}
+	if box.X != 0 || box.Y != 0 {
+		shift := TranslationMatrix(-box.X, -box.Y)
+		c.patternPage = &shift
 	}
 	if !r.TransparentBackground {
 		if err := c.fill(GeometryPath(basegeom.Rectangle(Box{W: box.W, H: box.H})), Paint{Kind: PaintSolid, Color: color.RGBA{255, 255, 255, 255}}, false, nil, IdentityMatrix, IdentityMatrix); err != nil {
@@ -64,6 +69,7 @@ func (OFDCompiler) CompilePage(r *Renderer, page *PageContent) (*RasterPage, err
 // 入参: r 渲染器, page 页面
 // 返回: *PageText 页面文字, error 定位错误
 func (OFDCompiler) PageText(r *Renderer, page *PageContent) (*PageText, error) {
+	defer r.bindPageResources(page)()
 	if _, err := r.GetPageBox(page); err != nil {
 		return nil, err
 	}
@@ -82,6 +88,9 @@ func (OFDCompiler) PageText(r *Renderer, page *PageContent) (*PageText, error) {
 // 入参: r 渲染器, object 对象, options 度量上下文
 // 返回: ObjectMeasurement 对象范围与轮廓, error 度量错误
 func (OFDCompiler) MeasureObject(r *Renderer, object GraphicObject, options MeasureOptions) (ObjectMeasurement, error) {
+	if len(r.pageResources) > 0 {
+		defer r.bindParsedResources(r.pageResources)()
+	}
 	c, err := newSemanticCompiler(r)
 	if err != nil {
 		return ObjectMeasurement{}, err
@@ -99,6 +108,12 @@ func (OFDCompiler) MeasureObject(r *Renderer, object GraphicObject, options Meas
 	c.contours = options.Contours
 	err = r.WalkObject(&object, RenderState{Defaults: options.Defaults, Parent: options.Parent, BoundaryInCTM: options.BoundaryInCTM, Clip: options.Clip}, c)
 	return c.measurement, err
+}
+
+// semanticStyle 保存已继承的路径颜色和描边参数
+type semanticStyle struct {
+	fill, stroke *FillColor
+	options      StrokeOptions
 }
 
 // semanticCompiler 将公共页面语义编译为路径和原始图片，绘制、搜索和度量共享定位
@@ -424,7 +439,7 @@ func (c *semanticCompiler) pathObject(object PathObject, state RenderState) erro
 		if err != nil {
 			return err
 		}
-		if err := c.fill(path, paint, object.Rule == "Even-Odd", clip, matrix, shading); err != nil {
+		if err := c.fill(path, paint, object.Rule == "Even-Odd", clip, shading, shading); err != nil {
 			return err
 		}
 	}
@@ -433,7 +448,7 @@ func (c *semanticCompiler) pathObject(object PathObject, state RenderState) erro
 		if err != nil {
 			return err
 		}
-		return c.stroke(path, paint, style.options, clip, matrix, shading)
+		return c.stroke(path, paint, style.options, clip, shading, shading)
 	}
 	return nil
 }
@@ -480,24 +495,21 @@ func (c *semanticCompiler) textObject(object TextObject, state RenderState) erro
 	}
 	for _, glyph := range positioned.Glyphs {
 		if object.Fill == nil || *object.Fill {
-			if err := c.fill(glyph.Path, fill, false, positioned.Clip, positioned.Matrix, shading); err != nil {
+			if err := c.fill(glyph.Path, fill, false, positioned.Clip, shading, shading); err != nil {
 				return err
 			}
 		}
 		if object.Stroke != nil && *object.Stroke && len(glyph.Path) > 0 {
-			if err := c.stroke(glyph.Path, stroke, style.options, positioned.Clip, positioned.Matrix, shading); err != nil {
+			if err := c.stroke(glyph.Path, stroke, style.options, positioned.Clip, shading, shading); err != nil {
 				return err
 			}
-		}
-		if err := c.fill(glyph.Underline, fill, false, positioned.Clip, positioned.Matrix, shading); err != nil {
-			return err
 		}
 	}
 	return nil
 }
 
 // fillPattern 在对象裁剪区域内展开底纹，保留单元反射和继承样式
-// 入参: clip 绘制区域, pattern 底纹, object 对象矩阵
+// 入参: clip 绘制区域, pattern 底纹, object 对象原点矩阵
 // 返回: error 编译错误
 func (c *semanticCompiler) fillPattern(clip GeometryPath, pattern *PatternPaint, object Matrix) error {
 	xstep, ystep := math.Max(pattern.XStep, pattern.Width), math.Max(pattern.YStep, pattern.Height)
@@ -514,7 +526,7 @@ func (c *semanticCompiler) fillPattern(clip GeometryPath, pattern *PatternPaint,
 	if !ok {
 		return fmt.Errorf("invalid pattern transform")
 	}
-	if pattern.CellContent.empty() {
+	if pattern.Width <= 0 || pattern.Height <= 0 || pattern.CellContent.empty() {
 		return nil
 	}
 	box, err := c.geometry.Bounds(clip)
@@ -615,12 +627,6 @@ func (c *semanticCompiler) shadingClip(path GeometryPath, paint Paint, matrix Ma
 		}
 	}
 	return c.geometry.Transform(local, view)
-}
-
-// semanticStyle 保存已继承的路径颜色和描边参数
-type semanticStyle struct {
-	fill, stroke *FillColor
-	options      StrokeOptions
 }
 
 // semanticGradient 保留渐变周期、延伸与椭圆坐标

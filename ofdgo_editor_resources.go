@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
@@ -37,13 +38,29 @@ const (
 
 // editorResourceRefs 记录资源标识、文件引用及声明依赖，不以页面是否加载判断资源存活
 type editorResourceRefs struct {
-	ids         map[string]bool
-	files       map[string]bool
-	fonts       map[string]*editorFontUsage
-	versions    map[string]bool
-	documents   map[string]bool
-	roles       map[string]int
-	definitions map[string]*editorResourceRefs
+	ids            map[string]bool
+	files          map[string]bool
+	fonts          map[string]*editorFontUsage
+	versions       map[string]bool
+	documents      map[string]bool
+	roles          map[string]int
+	definitions    map[string]*editorResourceRefs
+	customTagFiles map[string][]CustomTag
+	fontUnsafe     bool
+}
+
+// addCustomTagFile 按路径去重追加标引入口描述
+// 入参: target 包内路径, tag 标引入口描述
+func (r *editorResourceRefs) addCustomTagFile(target string, tag CustomTag) {
+	if target == "" {
+		return
+	}
+	if r.customTagFiles == nil {
+		r.customTagFiles = make(map[string][]CustomTag)
+	}
+	if !slices.Contains(r.customTagFiles[target], tag) {
+		r.customTagFiles[target] = append(r.customTagFiles[target], tag)
+	}
 }
 
 // scan 流式读取包内XML引用，二进制条目只探测文件头，不展开页面对象或图片像素
@@ -90,6 +107,60 @@ func (r *editorResourceRefs) scanContext(ctx context.Context, input io.Reader, n
 	}
 }
 
+// scanCustomTagEntries 逐一校验同一标引文件关联的全部入口元数据与根节点语义
+// 入参: ctx 取消上下文, input 文件流, name 包内路径, tags 关联的标引入口列表
+// 返回: bool 是否全部入口均满足安全引用条件
+func (r *editorResourceRefs) scanCustomTagEntries(ctx context.Context, input io.Reader, name string, tags []CustomTag) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil || len(tags) == 0 {
+		return false
+	}
+	data, err := io.ReadAll(imageInput{ReadCloser: io.NopCloser(input), ctx: ctx})
+	if err != nil {
+		return false
+	}
+	scannedInternal := false
+	for _, tag := range tags {
+		if ctx.Err() != nil {
+			return false
+		}
+		isText := tag.TypeID == textTagType && tag.NameSpace == textNamespace
+		isRich := tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace
+		if isText || isRich {
+			if tag.SchemaLoc != "" {
+				return false
+			}
+			root, err := parseStructure(ctx, data, tag)
+			if err != nil || root == nil {
+				return false
+			}
+			if isText && (root.Name != "Text" || root.Namespace != textNamespace) {
+				return false
+			}
+			if isRich && (root.Name != "RichText" || root.Namespace != richTextNamespace) {
+				return false
+			}
+			if !scannedInternal {
+				local := &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}
+				if _, safe := local.scanContext(ctx, bytes.NewReader(data), name); !safe {
+					return false
+				}
+				r.merge(local)
+				scannedInternal = true
+			}
+			continue
+		}
+		root, err := parseStructure(ctx, data, tag)
+		if err != nil || !knownResourceSafeCustomTag(tag, root) {
+			return false
+		}
+		r.fontUnsafe = true
+	}
+	return ctx.Err() == nil
+}
+
 // reference 记录标准资源标识和路径引用，不将普通数字或资源自身ID视为引用
 // 入参: name 当前文件, base 资源目录, key 字段, value 值, resource 是否资源索引
 func (r *editorResourceRefs) reference(name, base, key, value string, resource bool) {
@@ -111,15 +182,6 @@ func (r *editorResourceRefs) reference(name, base, key, value string, resource b
 	r.files[cleanPackagePath(resolveResourcePath(name, base, value))] = true
 }
 
-// compactSourceReferences 合并自产页面引用，版本文档按当前版本范围扫描
-// 按GB/T33190-2016附录A检查标识和路径引用，保留扫描范围内孤立XML中的引用
-// 多文档按文档归集引用，未知扩展或无法解析的XML不清理资源
-// 入参: parts 输出条目, progress 保存进度回调, generated 自产页面及引用
-// 返回: map[string]bool 可移除条目, error 读取或取消错误
-func (e *Editor) compactSourceReferences(parts map[string][]byte, progress editorProgress, generated map[string]editorGeneratedReferences) (map[string]bool, error) {
-	return e.compactResourceReferences(parts, e.source.reader, progress, generated, e.source.retiredAttachments)
-}
-
 // compactResourceReferences 按文档引用清理输出副本，兼顾新建文档与已有包
 // 入参: parts 输出条目, reader 原包，可为空, progress 保存进度回调, generated 自产引用, retired 待移除附件
 // 返回: map[string]bool 可移除条目, error 读取或取消错误
@@ -129,7 +191,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 	if e.output != nil && e.output.protected {
 		return nil, nil
 	}
-	if !multiple && len(parts) == 0 && e.revision == 0 && (e.output == nil || e.output.options.Mode == CompressionUnchanged) {
+	if !multiple && len(parts) == 0 && len(retired) == 0 && e.revision == 0 && (e.output == nil || e.output.options.Mode == CompressionUnchanged) {
 		return nil, nil
 	}
 	generated = e.generatedVectorReferences(parts, generated)
@@ -170,7 +232,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 			}
 		}
 	}
-	refs, resources, references, safe, err := e.scanOutputResources(ctx, reader, parts, generated, names, progress, multiple || prune)
+	refs, resources, references, safe, err := e.scanOutputResourcesWithRetired(ctx, reader, parts, generated, names, retired, progress, multiple || prune)
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +361,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 							usage = usageRefs.fonts[id]
 						}
 						charset := node.attr("Charset")
-						unsafe := preserved || id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != alternate
+						unsafe := preserved || refs.fontUnsafe || id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != alternate
 						for _, file := range []string{location, alternate} {
 							if fontFiles[file] == nil {
 								fontFiles[file] = newEditorFontUsage()
@@ -349,7 +411,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 		}
 		key := cleanPackagePath(name)
 		usage := fontFiles[key]
-		if e.backends.FontResources == nil || usage == nil || usage.unsafe || refs.files[key] || removed[key] || parts[name] != nil {
+		if e.backends.FontResources == nil || refs.fontUnsafe || usage == nil || usage.unsafe || refs.files[key] || removed[key] || parts[name] != nil {
 			continue
 		}
 		data, err := reader.readFile(name)
@@ -392,7 +454,7 @@ func editorResourceReferenceKind(key string, resource bool) int {
 	switch key {
 	case "Font", "ResourceID", "Substitution", "ImageMask", "Relative", "DrawParam", "ColorSpace", "DefaultCS", "Thumbnail", "TemplateID", "PageID", "PageRef", "RefId":
 		return editorReferenceID
-	case "DocRoot", "Signatures", "Cover", "PublicRes", "DocumentRes", "PageRes", "Annotations", "Attachments", "FileLoc", "FileRef", "Profile", "SignedValue", "SchemaLoc", "ExtendData", "File":
+	case "DocRoot", "Signatures", "Cover", "PublicRes", "DocumentRes", "PageRes", "Annotations", "CustomTags", "Attachments", "FileLoc", "FileRef", "Profile", "SignedValue", "SchemaLoc", "ExtendData", "File":
 		return editorReferenceFile
 	case "BaseLoc":
 	case "FontFile", "MediaFile":
@@ -476,4 +538,53 @@ func editorResourceLocation(name, base, value string) string {
 		dir = path.Join(dir, base)
 	}
 	return cleanPackagePath(path.Join(dir, value))
+}
+
+// isKnownResourceSafeTagMeta 判断标引入口是否属于明确定义引用规则的已知命名空间白名单
+// 入参: tag 标引入口描述
+// 返回: bool 是否属于已知白名单
+func isKnownResourceSafeTagMeta(tag CustomTag) bool {
+	if tag.TypeID == structureTypeOfficial {
+		return strings.TrimSpace(tag.NameSpace) != ""
+	}
+	switch tag.NameSpace {
+	case textNamespace:
+		return tag.TypeID == textTagType
+	case richTextNamespace:
+		return tag.TypeID == richTextTagType
+	case invoiceNamespace:
+		return tag.TypeID == invoiceTagType
+	case pdfStructureNamespace:
+		return tag.TypeID == pdfStructureTagType || tag.TypeID == pdfAuxiliaryTagType
+	case pdfInformationNamespace:
+		return tag.TypeID == pdfInformationTagType
+	case structureNamespaceEGov2013, ofdNamespace2016:
+		return true
+	case pdfMetadataRDF, pdfMetadataXML:
+		return tag.TypeID == pdfMetadataTagType
+	default:
+		return false
+	}
+}
+
+// knownResourceSafeCustomTag 核验已解析标引的根节点命名空间符合已知白名单语义，拒绝对未知命名空间臆测引用规则
+// 入参: tag 标引入口描述, root 已解析标引根节点
+// 返回: bool 是否确认不含隐式直接资源标识引用
+func knownResourceSafeCustomTag(tag CustomTag, root *StructureNode) bool {
+	if root == nil || !isKnownResourceSafeTagMeta(tag) || strings.TrimSpace(root.Namespace) == "" || root.Namespace != tag.NameSpace {
+		return false
+	}
+	if structureOfficial(tag, root.Namespace) || structureInvoiceReferences(root) {
+		return true
+	}
+	if tag.TypeID == pdfAuxiliaryTagType && tag.NameSpace == pdfStructureNamespace && root.Namespace == pdfStructureNamespace {
+		return true
+	}
+	if tag.TypeID == pdfInformationTagType && tag.NameSpace == pdfInformationNamespace && root.Namespace == pdfInformationNamespace {
+		return true
+	}
+	if tag.TypeID == pdfMetadataTagType && (root.Namespace == pdfMetadataRDF || root.Namespace == pdfMetadataXML) {
+		return true
+	}
+	return false
 }

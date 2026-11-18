@@ -1006,8 +1006,7 @@ func invoiceItemField(item *InvoiceItem, kind, name string) *string {
 }
 
 // invoiceAmountCheck 精确检查明确的价税合计关系，不推算航空费用
-// 入参: inv 发票，report 诊断目标，source 来源
-// 返回: 无
+// 入参: inv 发票, report 诊断目标, source 来源
 func invoiceAmountCheck(inv *Invoice, report *InvoiceReport, source InvoiceSource) {
 	if inv.Kind != "inv" && inv.Kind != "einv" {
 		return

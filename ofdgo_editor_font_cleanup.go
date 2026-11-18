@@ -212,7 +212,7 @@ func (e *Editor) subsetPackageFonts(ctx context.Context, view *Reader, removed m
 	}
 	progress := editorProgress(e.OnWriteProgress)
 	refs, resources, references, safe, err := scanEditorResources(ctx, view, view.files, generated, names, progress, true)
-	if err != nil || !safe {
+	if err != nil || !safe || refs.fontUnsafe {
 		return err
 	}
 	scoped, err := resourceReferenceScopes(ctx, refs.documents, resources, references, "")

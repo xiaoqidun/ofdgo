@@ -76,12 +76,15 @@ func (e *Editor) AddAttachmentContext(ctx context.Context, name string, data []b
 	if err != nil {
 		return "", err
 	}
-	used := make(map[string]bool, len(attachments))
+	used := make(map[string]bool, len(attachments)+len(base.removedAttachments))
 	for _, attachment := range attachments {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
 		used[attachment.ID] = true
+	}
+	for removedID := range base.removedAttachments {
+		used[removedID] = true
 	}
 	id, maximum := nextAttachmentID(used, maximum)
 	if maximum > maxUnitID {
@@ -154,6 +157,11 @@ func (e *Editor) AddAttachmentContext(ctx context.Context, name string, data []b
 	}
 	if err := e.commitAnnotationPartsContext(ctx, base, parts); err != nil {
 		return "", err
+	}
+	if e.source != nil && e.source.removedAttachments[id] {
+		removed := maps.Clone(e.source.removedAttachments)
+		delete(removed, id)
+		e.source.removedAttachments = removed
 	}
 	e.maxID, e.source.idsReady = maximum, true
 	return id, nil

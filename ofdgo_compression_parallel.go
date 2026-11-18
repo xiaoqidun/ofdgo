@@ -182,14 +182,6 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 	return e.output.ctx.Err()
 }
 
-// outputImageWorkingSet 按原图尺寸估算解码和重采样缓冲，不以降采样目标代替原图
-// 通常预留两份16位RGBA缓冲，TIFF另计分量、瓦片及蒙版存储；格式或尺寸不明时单独处理
-// 入参: ctx 取消上下文, data 原始图像编码
-// 返回: int 编码及像素缓冲的估算字节数，上限为outputImageWorkingSetLimit
-func outputImageWorkingSet(ctx context.Context, data []byte) int {
-	return imageWorkingSet(ctx, data, outputImageWorkingSetLimit)
-}
-
 // imageWorkingSet 按当前预算估算图像解码工作量
 // 入参: ctx 取消上下文, data 图像编码, limit 估算上限
 // 返回: int 工作量字节数

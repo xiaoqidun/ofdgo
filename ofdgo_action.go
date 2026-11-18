@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
@@ -331,42 +332,9 @@ type actionSource struct {
 	Box     Box
 	Actions []Action
 	Matrix  Matrix
+	Geo     GeometryPath
 	Path    string
 	Graphic bool
-}
-
-// decodeOFDActions 读取标准动作列表，不将外部同名节点作为交互动作
-// 入参: d XML解码器, start 列表起始节点, actions 动作接收列表
-// 返回: error 解析错误
-func decodeOFDActions(d *xml.Decoder, start xml.StartElement, actions *[]Action) error {
-	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
-		if node.Name.Local != "Action" {
-			return d.Skip()
-		}
-		var action Action
-		if err := d.DecodeElement(&action, &node); err != nil {
-			return err
-		}
-		*actions = append(*actions, action)
-		return nil
-	})
-}
-
-// gotoDest 获取文档内跳转目标
-// 入参: action 跳转动作, bookmarks 书签
-// 返回: *Dest 跳转目标
-func gotoDest(action *Goto, bookmarks map[string]Dest) *Dest {
-	if action.Dest != nil {
-		dest := action.Dest.effective()
-		return &dest
-	}
-	if action.Bookmark != nil {
-		if dest, ok := bookmarks[action.Bookmark.Name]; ok {
-			dest = dest.effective()
-			return &dest
-		}
-	}
-	return nil
 }
 
 // pageOpenActionSources 获取页面及模板的打开动作，保留模板层次和引用顺序
@@ -406,58 +374,62 @@ func (r *Renderer) pageActionSources(page *PageContent) []actionSource {
 				}
 				if template := r.loadTemplate(ref.TemplateID); template != nil {
 					for templateOrder := range 3 {
-						sources = r.appendLayerActionSources(sources, template.Content.Layer, templateOrder)
+						sources = r.appendLayerActionSources(sources, template, template.Content.Layer, templateOrder)
 					}
 				}
 			}
 		}
-		sources = r.appendLayerActionSources(sources, page.Content.Layer, order)
+		sources = r.appendLayerActionSources(sources, page, page.Content.Layer, order)
 	}
 	return sources
 }
 
 // appendLayerActionSources 按绘制顺序添加图层动作来源
-// 入参: sources 动作来源, layers 页面图层, order 图层顺序
+// 入参: sources 动作来源, page 所属页面内容, layers 页面图层, order 图层顺序
 // 返回: []actionSource 动作来源
-func (r *Renderer) appendLayerActionSources(sources []actionSource, layers []Layer, order int) []actionSource {
+func (r *Renderer) appendLayerActionSources(sources []actionSource, page *PageContent, layers []Layer, order int) []actionSource {
 	for _, layer := range layers {
 		if layerOrder(layer.Type) != order {
 			continue
 		}
-		for _, object := range layer.Objects {
-			sources = r.appendGraphicActionSources(sources, object, IdentityMatrix, false, nil)
+		for object := range (PatternContent{Objects: layer.Objects, TextObject: layer.TextObject, PathObject: layer.PathObject, ImageObject: layer.ImageObject, CompositeGraphicUnit: layer.CompositeGraphicUnit}).objects() {
+			sources = r.appendGraphicActionSources(sources, page, object, IdentityMatrix, false, nil)
 		}
 	}
 	return sources
 }
 
 // annotationActionSources 获取注释动作来源
-// 入参: annotations 页面注释
+// 入参: page 所属页面内容, annotations 页面注释
 // 返回: []actionSource 动作来源
-func (r *Renderer) annotationActionSources(annotations []Annotation) []actionSource {
+func (r *Renderer) annotationActionSources(page *PageContent, annotations []Annotation) []actionSource {
 	sources := make([]actionSource, 0)
-	for _, annotation := range annotations {
+	for i := range annotations {
+		annotation := &annotations[i]
 		if annotation.Visible != nil && !*annotation.Visible {
 			continue
 		}
-		box, err := ParseBox(annotation.Appearance.Boundary)
-		if err != nil {
-			continue
+		var box Box
+		if strings.TrimSpace(annotation.Appearance.Boundary) != "" {
+			var err error
+			box, err = ParseBox(annotation.Appearance.Boundary)
+			if err != nil {
+				continue
+			}
 		}
-		for _, object := range annotation.Appearance.Objects {
-			sources = r.appendGraphicActionSources(sources, object, TranslationMatrix(box.X, box.Y), false, nil)
+		for object := range annotation.Appearance.objects() {
+			sources = r.appendGraphicActionSources(sources, page, *object, TranslationMatrix(box.X, box.Y), false, nil)
 		}
 	}
 	return sources
 }
 
 // appendGraphicActionSources 添加图形对象动作来源
-// 入参: sources 动作来源, object 图形对象, parent 父级变换, boundaryInCTM 边界是否参与父级变换, seen 当前资源引用链
+// 入参: sources 动作来源, page 所属页面内容, object 图形对象, parent 父级变换, boundaryInCTM 边界是否参与父级变换, seen 当前资源引用链
 // 返回: []actionSource 动作来源
-func (r *Renderer) appendGraphicActionSources(sources []actionSource, object GraphicObject, parent Matrix, boundaryInCTM bool, seen map[*CompositeGraphicUnit]bool) []actionSource {
+func (r *Renderer) appendGraphicActionSources(sources []actionSource, page *PageContent, object GraphicObject, parent Matrix, boundaryInCTM bool, seen map[*CompositeGraphicUnit]bool) []actionSource {
 	var boundary, ctm, resource string
 	var actions []Action
-	var children []GraphicObject
 	composite := false
 	switch object.Type {
 	case "TextObject":
@@ -477,7 +449,6 @@ func (r *Renderer) appendGraphicActionSources(sources []actionSource, object Gra
 		ctm = object.CompositeGraphicUnit.CTM
 		resource = object.CompositeGraphicUnit.ResourceID
 		actions = object.CompositeGraphicUnit.Actions
-		children = object.CompositeGraphicUnit.Objects
 		composite = true
 	}
 	box, _ := ParseBox(boundary)
@@ -496,22 +467,47 @@ func (r *Renderer) appendGraphicActionSources(sources []actionSource, object Gra
 			for i := range path {
 				path[i].End.X, path[i].End.Y = placement.Transform(path[i].End.X, path[i].End.Y)
 			}
+			source.Geo = path
 			source.Path, _ = path.SVG()
 		}
 		sources = append(sources, source)
 	}
 	if resource != "" {
-		if unit, _ := resourceValue(r.CompositeGraphicUnits, resource); unit != nil && !seen[unit] {
+		var unit *CompositeGraphicUnit
+		if r.Reader != nil {
+			if candidate, ok := resourceValue(r.CompositeGraphicUnits, resource); ok && candidate != nil {
+				docUnit, _ := r.Reader.docComposites.get(resource)
+				if docUnit == nil {
+					docUnit, _ = resourceValue(r.Reader.compositeGraphicUnitCache, resource)
+				}
+				if candidate != docUnit {
+					unit = candidate
+				}
+			}
+			if unit == nil {
+				local := r.pageResources
+				if page != nil && len(page.pageResources) > 0 {
+					local = page.pageResources
+				}
+				unit, _ = r.Reader.resolveCompositeScoped(local, resource)
+			}
+		}
+		if unit == nil {
+			unit, _ = resourceValue(r.CompositeGraphicUnits, resource)
+		}
+		if unit != nil && !seen[unit] {
 			if seen == nil {
 				seen = make(map[*CompositeGraphicUnit]bool)
 			}
 			seen[unit] = true
-			sources = r.appendGraphicActionSources(sources, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: *unit}, matrix, true, seen)
+			sources = r.appendGraphicActionSources(sources, page, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: *unit}, matrix, true, seen)
 			delete(seen, unit)
 		}
 	}
-	for _, child := range children {
-		sources = r.appendGraphicActionSources(sources, child, matrix, boundaryInCTM, seen)
+	if composite {
+		for child := range object.CompositeGraphicUnit.objects() {
+			sources = r.appendGraphicActionSources(sources, page, child, matrix, boundaryInCTM, seen)
+		}
 	}
 	return sources
 }
@@ -537,24 +533,6 @@ func (r *Renderer) actionLinkRegion(source actionSource, action Action) (Box, st
 	}
 	outline, err := path.SVG()
 	return box, outline, err
-}
-
-// resolveActionURI 解析URI动作地址
-// 入参: action URI动作
-// 返回: string URI地址
-func resolveActionURI(action URI) string {
-	if action.Base == "" {
-		return action.URI
-	}
-	base, err := url.Parse(action.Base)
-	if err != nil {
-		return action.URI
-	}
-	target, err := url.Parse(action.URI)
-	if err != nil {
-		return action.URI
-	}
-	return base.ResolveReference(target).String()
 }
 
 // effective 应用省略属性的默认值，不改变原始声明
@@ -629,4 +607,56 @@ func (dest Dest) attributes() (ofdAttrs, error) {
 		return nil, fmt.Errorf("invalid destination type %q", dest.Type)
 	}
 	return attrs, nil
+}
+
+// decodeOFDActions 读取标准动作列表，不将外部同名节点作为交互动作
+// 入参: d XML解码器, start 列表起始节点, actions 动作接收列表
+// 返回: error 解析错误
+func decodeOFDActions(d *xml.Decoder, start xml.StartElement, actions *[]Action) error {
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "Action" {
+			return d.Skip()
+		}
+		var action Action
+		if err := d.DecodeElement(&action, &node); err != nil {
+			return err
+		}
+		*actions = append(*actions, action)
+		return nil
+	})
+}
+
+// gotoDest 获取文档内跳转目标
+// 入参: action 跳转动作, bookmarks 书签
+// 返回: *Dest 跳转目标
+func gotoDest(action *Goto, bookmarks map[string]Dest) *Dest {
+	if action.Dest != nil {
+		dest := action.Dest.effective()
+		return &dest
+	}
+	if action.Bookmark != nil {
+		if dest, ok := bookmarks[action.Bookmark.Name]; ok {
+			dest = dest.effective()
+			return &dest
+		}
+	}
+	return nil
+}
+
+// resolveActionURI 解析URI动作地址
+// 入参: action URI动作
+// 返回: string URI地址
+func resolveActionURI(action URI) string {
+	if action.Base == "" {
+		return action.URI
+	}
+	base, err := url.Parse(action.Base)
+	if err != nil {
+		return action.URI
+	}
+	target, err := url.Parse(action.URI)
+	if err != nil {
+		return action.URI
+	}
+	return base.ResolveReference(target).String()
 }

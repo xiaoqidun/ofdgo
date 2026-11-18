@@ -93,9 +93,7 @@ func decodeOFDChildren(d *xml.Decoder, start xml.StartElement, decode func(*xml.
 				}
 				continue
 			}
-			if node.Name.Local != "TextObject" && node.Name.Local != "Text" {
-				node = ofdXMLStart(node)
-			}
+			node = ofdXMLStart(node)
 			if err := decode(d, node); err != nil {
 				return err
 			}

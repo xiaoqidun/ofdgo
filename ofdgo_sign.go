@@ -21,7 +21,9 @@ import (
 	"encoding/binary"
 	"encoding/xml"
 	"fmt"
+	"maps"
 	"net/url"
+	"slices"
 	"strings"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
@@ -120,6 +122,7 @@ type Stamp struct {
 	Clip        *Box
 	Type        string
 	Data        []byte
+	sealSource  stampSealSource
 }
 
 // ObjectID 返回签名和外观共同确定的画布标识，避免不同签名中的外观标识冲突
@@ -142,7 +145,7 @@ func (s Stamp) Bounds() Box {
 // 入参: stamps 签名外观列表
 // 返回: []SignatureStampPosition 签名外观位置信息, error 错误信息
 func (r *Reader) SignatureStampPositions(stamps []SignatureStamp) ([]SignatureStampPosition, error) {
-	doc, err := r.Doc()
+	doc, err := r.docStructure()
 	if err != nil {
 		return nil, err
 	}
@@ -178,18 +181,260 @@ func (r *Reader) SignatureStampPositions(stamps []SignatureStamp) ([]SignatureSt
 	return positions, nil
 }
 
-// parseSignatureStampBox 解析签名外观区域
-// 入参: s 区域字符串
-// 返回: Box 矩形对象, error 错误信息
-func parseSignatureStampBox(s string) (Box, error) {
-	box, err := ParseBox(s)
-	if err != nil {
-		return Box{}, fmt.Errorf("invalid signature stamp box: %s", s)
-	}
-	return box, nil
+// PageStamps 按页面标识获取页面印章列表，按需惰性读取印章媒体数据
+// 入参: pageID 页面标识
+// 返回: []Stamp 页面印章列表, error 错误信息
+func (r *Reader) PageStamps(pageID string) ([]Stamp, error) {
+	return r.PageStampsContext(context.Background(), pageID)
 }
 
-// parseSignatures 解析签名文件
+// PageStampsContext 按页面标识获取页面印章列表并响应取消
+// 入参: ctx 取消上下文, pageID 页面标识
+// 返回: []Stamp 页面印章列表, error 读取或取消错误
+func (r *Reader) PageStampsContext(ctx context.Context, pageID string) ([]Stamp, error) {
+	if _, err := r.docStructureContext(ctx); err != nil {
+		return nil, err
+	}
+	if err := r.ensurePageStampsContext(ctx, pageID); err != nil {
+		return nil, err
+	}
+	return cloneEditorData(r.Stamps[r.resolveStampPageID(pageID)]), nil
+}
+
+// stampSealSource 保存印章二进制数据的惰性包内路径
+type stampSealSource struct {
+	sealPath        string
+	signedValuePath string
+}
+
+// load 按需读取并解析外置印章或签章值中的嵌入印章媒体
+// 入参: ctx 取消上下文, r 阅读器
+// 返回: string 媒体类型, []byte 媒体字节副本, error 取消错误
+func (src stampSealSource) load(ctx context.Context, r *Reader) (string, []byte, error) {
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
+	var sealType string
+	var sealData []byte
+	if src.sealPath != "" {
+		data, err := r.readFileViewContext(ctx, src.sealPath)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", nil, ctxErr
+			}
+		} else {
+			sealType, sealData = extractSeal(data)
+		}
+	}
+	if len(sealData) == 0 && src.signedValuePath != "" {
+		data, err := r.readFileViewContext(ctx, src.signedValuePath)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", nil, ctxErr
+			}
+		} else if sig, parseErr := parseSESSignature(data); parseErr == nil {
+			sealType, sealData = sig.Seal.PicType, sig.Seal.PicData
+		} else {
+			sealType, sealData = extractSeal(data)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
+	if len(sealData) == 0 {
+		return "", nil, nil
+	}
+	return sealType, bytes.Clone(sealData), nil
+}
+
+// loadedStampMedia 缓存单次按需加载内的同源印章媒体
+type loadedStampMedia struct {
+	sealType string
+	sealData []byte
+}
+
+// parsedStampEntry 暂存已校验几何范围的单条签章注释
+type parsedStampEntry struct {
+	id     string
+	pageID string
+	box    Box
+	clip   *Box
+}
+
+// ensureSignatureIndexContext 按需读取签名描述索引，不加载印章二进制数据
+// 入参: ctx 取消上下文
+// 返回: error 结构读取或取消错误
+func (r *Reader) ensureSignatureIndexContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if r == nil || (r.doc == nil && r.OFD == nil) {
+		return nil
+	}
+	doc, err := r.docStructureContext(ctx)
+	if err != nil {
+		return err
+	}
+	if r.sigIndexLoaded {
+		return nil
+	}
+	_ = r.parseSignatures(ctx, doc)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.sigIndexLoaded = true
+	return nil
+}
+
+// resolveStampPageID 按原文与规范资源标识匹配印章页面键
+// 入参: pageID 页面标识
+// 返回: string 匹配的页面键
+func (r *Reader) resolveStampPageID(pageID string) string {
+	if _, ok := r.Stamps[pageID]; ok {
+		return pageID
+	}
+	if _, ok := r.pendingStamps[pageID]; ok {
+		return pageID
+	}
+	if key := editorResourceID(pageID); key != "" {
+		for _, candidate := range slices.Sorted(maps.Keys(r.Stamps)) {
+			if editorResourceID(candidate) == key {
+				return candidate
+			}
+		}
+		for _, candidate := range slices.Sorted(maps.Keys(r.pendingStamps)) {
+			if editorResourceID(candidate) == key {
+				return candidate
+			}
+		}
+		if r.doc != nil {
+			for _, page := range r.doc.Pages.Page {
+				if editorResourceID(page.ID) == key {
+					return page.ID
+				}
+			}
+		}
+	}
+	return pageID
+}
+
+// ensurePageStampsContext 按页面标识惰性加载并填充单页印章二进制数据
+// 入参: ctx 取消上下文, pageID 页面标识
+// 返回: error 结构读取或取消错误
+func (r *Reader) ensurePageStampsContext(ctx context.Context, pageID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if r == nil {
+		return nil
+	}
+	if err := r.ensureSignatureIndexContext(ctx); err != nil {
+		return err
+	}
+	resolvedID := r.resolveStampPageID(pageID)
+	if r.pageStampsLoaded != nil && (r.pageStampsLoaded[resolvedID] || r.pageStampsLoaded[pageID]) {
+		r.pageStampsLoaded[resolvedID] = true
+		r.pageStampsLoaded[pageID] = true
+		return nil
+	}
+	var pendingKeys []string
+	var pending []Stamp
+	if list, ok := r.pendingStamps[resolvedID]; ok {
+		pendingKeys = append(pendingKeys, resolvedID)
+		pending = append(pending, list...)
+	}
+	if key := editorResourceID(resolvedID); key != "" {
+		for _, candidate := range slices.Sorted(maps.Keys(r.pendingStamps)) {
+			if candidate != resolvedID && editorResourceID(candidate) == key {
+				pendingKeys = append(pendingKeys, candidate)
+				pending = append(pending, r.pendingStamps[candidate]...)
+			}
+		}
+	}
+	existing, hasExisting := r.Stamps[resolvedID]
+	if len(pending) == 0 {
+		if r.pageStampsLoaded == nil {
+			r.pageStampsLoaded = make(map[string]bool)
+		}
+		r.pageStampsLoaded[resolvedID] = true
+		r.pageStampsLoaded[pageID] = true
+		return nil
+	}
+	cache := make(map[stampSealSource]loadedStampMedia)
+	loaded := make([]Stamp, 0, len(existing)+len(pending))
+	for _, stamp := range existing {
+		if len(stamp.Data) > 0 {
+			stamp.sealSource = stampSealSource{}
+			loaded = append(loaded, stamp)
+		}
+	}
+	for _, stamp := range pending {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(stamp.Data) > 0 {
+			stamp.sealSource = stampSealSource{}
+			loaded = append(loaded, stamp)
+			continue
+		}
+		if stamp.sealSource == (stampSealSource{}) {
+			continue
+		}
+		media, ok := cache[stamp.sealSource]
+		if !ok {
+			sealType, sealData, err := stamp.sealSource.load(ctx, r)
+			if err != nil {
+				return err
+			}
+			media = loadedStampMedia{sealType: sealType, sealData: sealData}
+			cache[stamp.sealSource] = media
+		}
+		if len(media.sealData) == 0 {
+			continue
+		}
+		stamp.Type = media.sealType
+		stamp.Data = bytes.Clone(media.sealData)
+		stamp.sealSource = stampSealSource{}
+		loaded = append(loaded, stamp)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(loaded) > 0 {
+		if r.Stamps == nil {
+			r.Stamps = make(map[string][]Stamp)
+		}
+		r.Stamps[resolvedID] = loaded
+	} else if hasExisting {
+		delete(r.Stamps, resolvedID)
+	}
+	for _, k := range pendingKeys {
+		delete(r.pendingStamps, k)
+	}
+	if r.pageStampsLoaded == nil {
+		r.pageStampsLoaded = make(map[string]bool)
+	}
+	r.pageStampsLoaded[resolvedID] = true
+	r.pageStampsLoaded[pageID] = true
+	return nil
+}
+
+// ensureAllStampsContext 补齐当前文档全部尚未加载的页面印章二进制数据
+// 入参: ctx 取消上下文
+// 返回: error 结构读取或取消错误
+func (r *Reader) ensureAllStampsContext(ctx context.Context) error {
+	if err := r.ensureSignatureIndexContext(ctx); err != nil {
+		return err
+	}
+	for _, pageID := range slices.Sorted(maps.Keys(r.pendingStamps)) {
+		if err := r.ensurePageStampsContext(ctx, pageID); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+// parseSignatures 解析签名描述索引，待加载印章存入私有缓冲且绝不污染公开Stamps字段
 // 入参: ctx 取消上下文, doc 文档结构
 // 返回: error 错误信息
 func (r *Reader) parseSignatures(ctx context.Context, doc *Document) error {
@@ -210,11 +455,13 @@ func (r *Reader) parseSignatures(ctx context.Context, doc *Document) error {
 		return err
 	}
 	pages := signaturePageNumbers(doc)
+	var pending map[string][]Stamp
 	for _, sigRef := range signatures.List {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if strings.EqualFold(strings.TrimSpace(string(sigRef.Type)), string(SignTypeSign)) {
+		sigType := strings.TrimSpace(string(sigRef.Type))
+		if sigType != "" && !strings.EqualFold(sigType, string(SignTypeSeal)) {
 			continue
 		}
 		func(sigRef Signature) {
@@ -228,28 +475,20 @@ func (r *Reader) parseSignatures(ctx context.Context, doc *Document) error {
 			if err := xml.NewDecoder(imageInput{ReadCloser: sf, ctx: ctx}).Decode(&sigFile); err != nil {
 				return
 			}
-			var sealType string
-			var sealData []byte
-			if sigFile.SignedInfo.Seal.BaseLoc != "" {
-				sealPath := resolveResourcePath(sigPath, "", sigFile.SignedInfo.Seal.BaseLoc)
-				if data, err := r.readFileViewContext(ctx, sealPath); err == nil {
-					sealType, sealData = extractSeal(data)
-				}
-			}
-			if len(sealData) == 0 && sigFile.SignedValue != "" {
-				signedValuePath := resolveResourcePath(sigPath, "", sigFile.SignedValue)
-				if data, err := r.readFileViewContext(ctx, signedValuePath); err == nil {
-					if sig, err := parseSESSignature(data); err == nil {
-						sealType, sealData = sig.Seal.PicType, sig.Seal.PicData
-					} else {
-						sealType, sealData = extractSeal(data)
-					}
-				}
-			}
-			if len(sealData) == 0 {
+			if len(sigFile.SignedInfo.StampAnnot) == 0 {
 				return
 			}
-			sealData = bytes.Clone(sealData)
+			var src stampSealSource
+			if sigFile.SignedInfo.Seal.BaseLoc != "" {
+				src.sealPath = resolveResourcePath(sigPath, "", sigFile.SignedInfo.Seal.BaseLoc)
+			}
+			if sigFile.SignedValue != "" {
+				src.signedValuePath = resolveResourcePath(sigPath, "", sigFile.SignedValue)
+			}
+			if src == (stampSealSource{}) {
+				return
+			}
+			var entries []parsedStampEntry
 			for _, annot := range sigFile.SignedInfo.StampAnnot {
 				if ctx.Err() != nil {
 					return
@@ -258,7 +497,6 @@ func (r *Reader) parseSignatures(ctx context.Context, doc *Document) error {
 				if !ok {
 					continue
 				}
-				pageID := doc.Pages.Page[page-1].ID
 				bbox, err := parseSignatureStampBox(annot.Boundary)
 				if err != nil {
 					continue
@@ -271,13 +509,46 @@ func (r *Reader) parseSignatures(ctx context.Context, doc *Document) error {
 					}
 					clipBox = &clip
 				}
-				r.addStamp(pageID, bbox, clipBox, sealType, sealData)
-				stamp := &r.Stamps[pageID][len(r.Stamps[pageID])-1]
-				stamp.ID, stamp.SignatureID = annot.ID, sigRef.ID
+				entries = append(entries, parsedStampEntry{
+					id:     annot.ID,
+					pageID: doc.Pages.Page[page-1].ID,
+					box:    bbox,
+					clip:   clipBox,
+				})
+			}
+			if len(entries) == 0 {
+				return
+			}
+			if pending == nil {
+				pending = make(map[string][]Stamp)
+			}
+			for _, entry := range entries {
+				pending[entry.pageID] = append(pending[entry.pageID], Stamp{
+					ID:          entry.id,
+					SignatureID: sigRef.ID,
+					Box:         entry.box,
+					Clip:        entry.clip,
+					sealSource:  src,
+				})
 			}
 		}(sigRef)
 	}
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.pendingStamps = pending
+	return nil
+}
+
+// parseSignatureStampBox 解析签名外观区域
+// 入参: s 区域字符串
+// 返回: Box 矩形对象, error 错误信息
+func parseSignatureStampBox(s string) (Box, error) {
+	box, err := ParseBox(s)
+	if err != nil {
+		return Box{}, fmt.Errorf("invalid signature stamp box: %s", s)
+	}
+	return box, nil
 }
 
 // signaturePageNumbers 获取签名页面编号索引
@@ -454,18 +725,4 @@ func probeImageMedia(data []byte) (string, []byte) {
 		return "", nil
 	}
 	return baseimage.NormalizeFormat(format), data
-}
-
-// addStamp 添加印章到页面
-// 入参: pageID 页面ID, box 印章区域, clip 裁剪区域, sType 印章类型, data 印章数据
-func (r *Reader) addStamp(pageID string, box Box, clip *Box, sType string, data []byte) {
-	if r.Stamps == nil {
-		r.Stamps = make(map[string][]Stamp)
-	}
-	r.Stamps[pageID] = append(r.Stamps[pageID], Stamp{
-		Box:  box,
-		Clip: clip,
-		Type: sType,
-		Data: data,
-	})
 }

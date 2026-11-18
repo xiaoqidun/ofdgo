@@ -15,20 +15,18 @@
 package ofdgo
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"image"
 	"math"
 
 	"github.com/tdewolff/canvas"
-	canvasimage "github.com/tdewolff/canvas/image"
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"golang.org/x/image/draw"
 )
 
-// renderImage 渲染图片
+// renderImage 渲染图片，图像像素受Boundary裁剪而边框豁免Boundary裁剪
 // 入参: ctx 画布上下文, obj 图片对象, pageH 页面高度, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM, parentClip 父级裁剪路径
 func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float64, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
 	if r.textOnly {
@@ -90,7 +88,7 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		return
 	}
 	if obj.Border != nil {
-		r.renderImageBorder(ctx, obj, box, pageH, parentCTM, boundaryInCTM, clipPath)
+		r.renderImageBorder(ctx, obj, box, pageH, localCTM, parentCTM, boundaryInCTM, parentClip)
 	}
 }
 
@@ -134,7 +132,7 @@ func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPa
 		}
 		defer func() { pdfOutput.imageClip = nil }()
 	}
-	ctx.RenderImage(r.canvasEncodedImage(img), ctx.CoordSystemView().Mul(ctx.View()).Mul(m))
+	ctx.RenderImage(img, ctx.CoordSystemView().Mul(ctx.View()).Mul(m))
 	if compiled && imageClip != nil && compiler.err == nil {
 		view := (canvas.Matrix{{1, 0, 0}, {0, -1, compiler.page.Height}}).Mul(ctx.CoordSystemView()).Mul(ctx.View())
 		segments, err := canvasRasterPath(imageClip.Copy().Transform(view))
@@ -146,52 +144,33 @@ func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPa
 	}
 }
 
-// canvasEncodedImage 在Canvas输出边界保留原始编码，不重新压缩图片
-// 入参: img 库图片
-// 返回: image.Image Canvas可直接嵌入的图片
-func (r *Renderer) canvasEncodedImage(img image.Image) image.Image {
-	source, ok := img.(*EncodedImage)
-	if !ok {
-		return img
-	}
-	state := r.canvasState()
-	if encoded, ok := state.images.get(source); ok {
-		return encoded
-	}
-	var encoded *canvasimage.Image
-	if source.MIME() == "image/jpeg" {
-		encoded, _ = canvasimage.NewJPEGImage(bytes.NewReader(source.Bytes()))
-	} else {
-		encoded, _ = canvasimage.NewPNGImage(bytes.NewReader(source.Bytes()))
-	}
-	encoded.Bytes = source.Bytes()
-	state.images.put(source, encoded, 2*baseimage.StorageCost(source, state.images.limit/2))
-	return encoded
-}
-
-// renderImageBorder 渲染图像边框
-// 入参: ctx 画布上下文, obj 图片对象, box 图像边界, pageH 页面高度, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM, clipPath 裁剪路径
-func (r *Renderer) renderImageBorder(ctx *canvas.Context, obj ImageObject, box Box, pageH float64, parentCTM *Matrix, boundaryInCTM bool, clipPath *canvas.Path) {
+// renderImageBorder 渲染图像边框，仅受父级裁剪与显式Clips限制而不裁切外侧半边线宽
+// 入参: ctx 画布上下文, obj 图片对象, box 图像边界, pageH 页面高度, localCTM 图像局部CTM, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM, parentClip 父级裁剪路径
+func (r *Renderer) renderImageBorder(ctx *canvas.Context, obj ImageObject, box Box, pageH float64, localCTM Matrix, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
 	border := imageBorderObject(obj, box)
 	if border.LineWidth == 0 {
 		return
 	}
-	r.renderPath(ctx, border, pageH, nil, parentCTM, boundaryInCTM, clipPath)
-}
-
-// imageClipContains 判断裁剪是否完整包含变换后的图像，避免重复削弱边缘覆盖率
-// 入参: img 图片, clipPath 裁剪路径, m 图片到页面变换
-// 返回: bool 是否完整包含
-func imageClipContains(img image.Image, clipPath *canvas.Path, m canvas.Matrix) bool {
-	b := img.Bounds()
-	outline := canvas.Rectangle(float64(b.Dx()), float64(b.Dy())).Transform(m)
-	if rect, ok := rectangularPath(clipPath); ok {
-		return rect.Contains(outline.FastBounds())
+	borderClip := parentClip
+	if obj.Clips != nil {
+		path, err := r.imageBorderClip(obj.Clips, obj.Boundary, localCTM, RenderState{Parent: parentCTM, BoundaryInCTM: boundaryInCTM})
+		if err != nil {
+			r.renderError = err
+			return
+		}
+		canvasClip, err := geometryToCanvasPath(path)
+		if err != nil {
+			r.renderError = err
+			return
+		}
+		if canvasClip != nil {
+			canvasClip = canvasClip.Translate(0, pageH)
+		}
+		borderClip = r.intersectCachedClipPath(parentClip, canvasClip)
 	}
-	if basegeom.ConvexContains(basegeom.Path(*geometryFromCanvasPath(clipPath)), basegeom.Path(*geometryFromCanvasPath(outline))) {
-		return true
-	}
-	return clipPath.Contains(outline)
+	origin, _ := renderObjectMatrix(obj.Boundary, IdentityMatrix, RenderState{Parent: parentCTM, BoundaryInCTM: boundaryInCTM})
+	border.Boundary = ""
+	r.renderPath(ctx, border, pageH, nil, &origin, true, borderClip)
 }
 
 // imageWithClip 应用图片裁剪区域，保留原图采样精度
@@ -419,4 +398,19 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		return img
 	}
 	return out
+}
+
+// imageClipContains 判断裁剪是否完整包含变换后的图像，避免重复削弱边缘覆盖率
+// 入参: img 图片, clipPath 裁剪路径, m 图片到页面变换
+// 返回: bool 是否完整包含
+func imageClipContains(img image.Image, clipPath *canvas.Path, m canvas.Matrix) bool {
+	b := img.Bounds()
+	outline := canvas.Rectangle(float64(b.Dx()), float64(b.Dy())).Transform(m)
+	if rect, ok := rectangularPath(clipPath); ok {
+		return rect.Contains(outline.FastBounds())
+	}
+	if basegeom.ConvexContains(basegeom.Path(*geometryFromCanvasPath(clipPath)), basegeom.Path(*geometryFromCanvasPath(outline))) {
+		return true
+	}
+	return clipPath.Contains(outline)
 }

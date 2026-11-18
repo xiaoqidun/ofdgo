@@ -29,6 +29,7 @@ import (
 
 // pdfVideoResource 共享视频内容及各播放区域，控制动作按资源关联
 type pdfVideoResource struct {
+	Path    string
 	Clip    *pdfgo.MediaClip
 	Screens []*pdfVideoScreen
 }
@@ -67,11 +68,26 @@ func (a *pdfMovieAction) values() []pdfgo.NavigationAction {
 	return values
 }
 
+// resolveMedia 按当前页面局部资源优先解析音视频资源定义
+// 入参: id 资源标识
+// 返回: MultiMedia 音视频资源定义, error 资源缺失或类型错误
+func (n *pdfNavigation) resolveMedia(id string) (MultiMedia, error) {
+	if n.source == nil {
+		return MultiMedia{}, fmt.Errorf("audio or video resource %q is unavailable", id)
+	}
+	if len(n.pageResources) > 0 {
+		if media, ok := n.source.resolveMediaScoped(n.pageResources, id); ok && (media.Type == "Audio" || media.Type == "Video") {
+			return media, nil
+		}
+	}
+	return n.source.Media(id)
+}
+
 // mediaFile 复用同一包内文件的输出说明，不合并播放资源及窗口
 // 入参: media 音视频资源
 // 返回: *pdfgo.FileSpecification 待读取的共享文件
 func (n *pdfNavigation) mediaFile(media MultiMedia) *pdfgo.FileSpecification {
-	name := n.source.ResPath(media.MediaFile)
+	name := cleanPackagePath(n.source.ResPath(media.MediaFile))
 	if file := n.mediaFiles[name]; file != nil {
 		return file
 	}
@@ -83,18 +99,18 @@ func (n *pdfNavigation) mediaFile(media MultiMedia) *pdfgo.FileSpecification {
 	return file
 }
 
-// loadMediaFiles 按需读取原始媒体，独立播放资源共用的文件只读取一次
-// 入参: ctx 取消上下文, files 媒体资源及输出文件
+// loadMediaFiles 按规范化包内路径读取原始媒体，独立播放资源共用的文件只读取一次
+// 入参: ctx 取消上下文, files 包内文件路径与输出说明映射
 // 返回: error 资源读取或取消错误
 func (n *pdfNavigation) loadMediaFiles(ctx context.Context, files map[string]*pdfgo.FileSpecification) error {
-	for _, id := range slices.Sorted(maps.Keys(files)) {
+	for _, name := range slices.Sorted(maps.Keys(files)) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if files[id].Embedded != nil {
+		if files[name].Embedded != nil {
 			continue
 		}
-		input, err := n.source.OpenMedia(id)
+		input, err := n.source.openFile(name)
 		if err != nil {
 			return err
 		}
@@ -106,7 +122,7 @@ func (n *pdfNavigation) loadMediaFiles(ctx context.Context, files map[string]*pd
 		if closeErr != nil {
 			return closeErr
 		}
-		files[id].Embedded = &pdfgo.Stream{Data: data}
+		files[name].Embedded = &pdfgo.Stream{Data: data}
 	}
 	return ctx.Err()
 }
@@ -122,20 +138,21 @@ func (n *pdfNavigation) soundAction(action Sound) (*pdfNavigationAction, error) 
 	if volume < 0 || volume > 100 {
 		return nil, fmt.Errorf("invalid sound volume")
 	}
-	file := n.audio[action.ResourceID]
+	media, err := n.resolveMedia(action.ResourceID)
+	if err != nil {
+		return nil, err
+	}
+	if media.Type != "Audio" {
+		return nil, fmt.Errorf("sound resource is not audio: %s", action.ResourceID)
+	}
+	name := cleanPackagePath(n.source.ResPath(media.MediaFile))
+	file := n.audio[name]
 	if file == nil {
-		media, err := n.source.Media(action.ResourceID)
-		if err != nil {
-			return nil, err
-		}
-		if media.Type != "Audio" {
-			return nil, fmt.Errorf("sound resource is not audio: %s", action.ResourceID)
-		}
 		if n.audio == nil {
 			n.audio = make(map[string]*pdfgo.FileSpecification)
 		}
 		file = n.mediaFile(media)
-		n.audio[action.ResourceID] = file
+		n.audio[name] = file
 	}
 	return &pdfNavigationAction{Sound: &pdfgo.SoundAction{
 		Sound: pdfgo.Sound{File: file}, Volume: float64(volume) / 100,
@@ -166,23 +183,25 @@ func (n *pdfNavigation) movieAction(action Movie, page int, source actionSource,
 	default:
 		return nil, fmt.Errorf("invalid movie operator: %s", action.Operator)
 	}
-	resource := n.video[action.ResourceID]
+	media, err := n.resolveMedia(action.ResourceID)
+	if err != nil {
+		return nil, err
+	}
+	if media.Type != "Video" {
+		return nil, fmt.Errorf("movie resource is not video: %s", action.ResourceID)
+	}
+	name := cleanPackagePath(n.source.ResPath(media.MediaFile))
+	videoKey := imageResourceKey(media.ID) + ":" + name
+	resource := n.video[videoKey]
 	if resource == nil {
-		media, err := n.source.Media(action.ResourceID)
-		if err != nil {
-			return nil, err
-		}
-		if media.Type != "Video" {
-			return nil, fmt.Errorf("movie resource is not video: %s", action.ResourceID)
-		}
-		resource = &pdfVideoResource{Clip: &pdfgo.MediaClip{
+		resource = &pdfVideoResource{Path: name, Clip: &pdfgo.MediaClip{
 			Subtype: "MCD", ContentType: pdfVideoContentType(media),
 			File: n.mediaFile(media),
 		}}
 		if n.video == nil {
 			n.video = make(map[string]*pdfVideoResource)
 		}
-		n.video[action.ResourceID] = resource
+		n.video[videoKey] = resource
 	}
 	value := &pdfMovieAction{Resource: resource, Operation: operation}
 	if operation != 0 {
@@ -222,6 +241,7 @@ func (n *pdfNavigation) movieAction(action Movie, page int, source actionSource,
 // 返回: error 资源读取或取消错误
 func (n *pdfNavigation) writeVideo(ctx context.Context, pages []pdfgo.Reference, options *pdfgo.RewriteOptions) error {
 	files := make(map[string]*pdfgo.FileSpecification)
+	clips := make(map[string][]*pdfgo.MediaClip)
 	for _, id := range slices.Sorted(maps.Keys(n.video)) {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -236,20 +256,22 @@ func (n *pdfNavigation) writeVideo(ctx context.Context, pages []pdfgo.Reference,
 			}
 			ref := pages[screen.Page]
 			options.ScreenAnnotations[ref] = append(options.ScreenAnnotations[ref], screen.Screen)
-			files[id] = resource.Clip.File
+			files[resource.Path] = resource.Clip.File
+			clips[resource.Path] = append(clips[resource.Path], resource.Clip)
 		}
 	}
 	if err := n.loadMediaFiles(ctx, files); err != nil {
 		return err
 	}
-	for _, id := range slices.Sorted(maps.Keys(files)) {
-		clip := n.video[id].Clip
-		if clip.ContentType == "" {
-			kind := http.DetectContentType(clip.File.Embedded.Data)
-			if !strings.HasPrefix(kind, "video/") && kind != "application/ogg" {
-				return fmt.Errorf("cannot identify video content type: %s", id)
+	for _, name := range slices.Sorted(maps.Keys(clips)) {
+		for _, clip := range clips[name] {
+			if clip.ContentType == "" {
+				kind := http.DetectContentType(clip.File.Embedded.Data)
+				if !strings.HasPrefix(kind, "video/") && kind != "application/ogg" {
+					return fmt.Errorf("cannot identify video content type: %s", name)
+				}
+				clip.ContentType = kind
 			}
-			clip.ContentType = kind
 		}
 	}
 	return ctx.Err()

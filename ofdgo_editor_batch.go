@@ -385,8 +385,10 @@ func (e *Editor) objectPositions(page *PageContent) map[string]editorObjectPosit
 	if len(layers) == 0 {
 		return nil
 	}
-	if cached := e.objectIndex; cached != nil && len(cached.layers) == len(layers) && &cached.layers[0] == &layers[0] {
-		return cached.positions
+	if e.objectIndices != nil {
+		if cached := e.objectIndices[page.ID]; cached != nil && len(cached.layers) == len(layers) && &cached.layers[0] == &layers[0] {
+			return cached.positions
+		}
 	}
 	positions := make(map[string]editorObjectPosition)
 	for i, layer := range layers {
@@ -397,7 +399,10 @@ func (e *Editor) objectPositions(page *PageContent) map[string]editorObjectPosit
 			}
 		}
 	}
-	e.objectIndex = &editorObjectIndex{layers: layers, positions: positions}
+	if e.objectIndices == nil {
+		e.objectIndices = make(map[string]*editorObjectIndex)
+	}
+	e.objectIndices[page.ID] = &editorObjectIndex{layers: layers, positions: positions}
 	return positions
 }
 
@@ -596,16 +601,6 @@ func (e *Editor) deleteObjects(page int, ids []string) error {
 	return nil
 }
 
-// compareEditorPosition 比较对象在页面结构中的先后顺序
-// 入参: a 第一个对象的位置, b 第二个对象的位置
-// 返回: int 比较结果
-func compareEditorPosition(a, b editorObjectPosition) int {
-	if value := cmp.Compare(a.layer, b.layer); value != 0 {
-		return value
-	}
-	return cmp.Compare(a.index, b.index)
-}
-
 // objectOrderIndexes 获取同一直接容器的对象索引，不跨越图层或页块
 // 入参: page 页面索引, layer 图层, id 对象标识
 // 返回: *editorXML 原始容器, []int 对象索引
@@ -646,92 +641,6 @@ func (e *Editor) objectOrderParent(nodes map[string]*editorXML, id string) *edit
 		}
 	}
 	return nil
-}
-
-// orderEditorObjects 调整选区层级，保持选中及未选中对象各自的相对顺序
-// 入参: objects 同容器对象, selected 选中状态, order 排序方向
-func orderEditorObjects[T any](objects []T, selected []bool, order string) {
-	switch order {
-	case "up":
-		for i := len(objects) - 2; i >= 0; i-- {
-			if selected[i] && !selected[i+1] {
-				objects[i], objects[i+1] = objects[i+1], objects[i]
-				selected[i], selected[i+1] = false, true
-			}
-		}
-	case "down":
-		for i := 1; i < len(objects); i++ {
-			if selected[i] && !selected[i-1] {
-				objects[i], objects[i-1] = objects[i-1], objects[i]
-				selected[i], selected[i-1] = false, true
-			}
-		}
-	default:
-		ordered := make([]T, 0, len(objects))
-		for _, takeSelected := range []bool{order == "bottom", order != "bottom"} {
-			for i, object := range objects {
-				if selected[i] == takeSelected {
-					ordered = append(ordered, object)
-				}
-			}
-		}
-		copy(objects, ordered)
-	}
-}
-
-// editorDistribution 计算等间距平移，位置相同时按原绘制顺序排序
-// 入参: boxes 可见范围, indexes 绘制位置, axis 分布方向
-// 返回: []Matrix 页面平移, error 错误信息
-func editorDistribution(boxes []Box, indexes []editorObjectPosition, axis string) ([]Matrix, error) {
-	matrices := make([]Matrix, len(boxes))
-	for i := range matrices {
-		matrices[i] = IdentityMatrix
-	}
-	if len(boxes) < 3 {
-		return matrices, nil
-	}
-	positions, sizes := make([]float64, len(boxes)), make([]float64, len(boxes))
-	order := make([]int, len(boxes))
-	total := 0.0
-	for i, box := range boxes {
-		positions[i], sizes[i] = box.X, box.W
-		if axis == "vertical" {
-			positions[i], sizes[i] = box.Y, box.H
-		}
-		order[i] = i
-		total += sizes[i]
-	}
-	slices.SortFunc(order, func(i, j int) int {
-		if c := cmp.Compare(positions[i], positions[j]); c != 0 {
-			return c
-		}
-		return compareEditorPosition(indexes[i], indexes[j])
-	})
-	first, last := order[0], order[len(order)-1]
-	gap := (positions[last] + sizes[last] - positions[first] - total) / float64(len(order)-1)
-	for i, index := range order[:len(order)-1] {
-		step := sizes[index] + gap
-		if basegeom.Equal(step, 0) {
-			step = 0
-		}
-		if step < 0 || step == 0 && compareEditorPosition(indexes[index], indexes[order[i+1]]) > 0 {
-			return nil, fmt.Errorf("overlap prevents ordered equal-gap distribution")
-		}
-	}
-	next := positions[first] + sizes[first] + gap
-	for _, index := range order[1 : len(order)-1] {
-		position := next
-		next += sizes[index] + gap
-		if basegeom.Equal(position, positions[index]) {
-			continue
-		}
-		dx, dy := position-positions[index], 0.0
-		if axis == "vertical" {
-			dx, dy = 0, dx
-		}
-		matrices[index] = TranslationMatrix(dx, dy)
-	}
-	return matrices, nil
 }
 
 // replaceLayers 替换图层容器，隔离历史快照与后续的增删、排序操作
@@ -901,34 +810,6 @@ func (e *Editor) updateObjectOrigins(page int, objects []GraphicObject, preserve
 	return nil
 }
 
-// editorAlignment 计算对象范围到目标边缘或中心的平移
-// 入参: box 对象范围, target 目标范围, alignment 对齐方式
-// 返回: Matrix 页面平移
-func editorAlignment(box, target Box, alignment string) Matrix {
-	matrix := IdentityMatrix
-	switch alignment {
-	case "left":
-		matrix.e = target.X - box.X
-	case "center":
-		matrix.e = target.X + (target.W-box.W)/2 - box.X
-	case "right":
-		matrix.e = target.X + target.W - box.W - box.X
-	case "top":
-		matrix.f = target.Y - box.Y
-	case "middle":
-		matrix.f = target.Y + (target.H-box.H)/2 - box.Y
-	case "bottom":
-		matrix.f = target.Y + target.H - box.H - box.Y
-	}
-	if basegeom.Equal(matrix.e, 0) {
-		matrix.e = 0
-	}
-	if basegeom.Equal(matrix.f, 0) {
-		matrix.f = 0
-	}
-	return matrix
-}
-
 // selectedObjects 校验同页选择，返回内部只读对象与对应索引
 // 入参: page 页面索引, ids 对象标识，不得重复
 // 返回: []GraphicObject 所选对象, []editorObjectPosition 图层和对象索引, error 错误信息
@@ -959,23 +840,6 @@ func (e *Editor) selectedObjects(page int, ids []string) ([]GraphicObject, []edi
 	return objects, indexes, nil
 }
 
-// editorObjectID 获取可创作对象的标准标识
-// 入参: object 图形对象
-// 返回: string 对象标识，不支持的类型返回空字符串
-func editorObjectID(object GraphicObject) string {
-	switch object.Type {
-	case "TextObject":
-		return object.TextObject.ID
-	case "PathObject":
-		return object.PathObject.ID
-	case "ImageObject":
-		return object.ImageObject.ID
-	case "CompositeObject", "CompositeGraphicUnit":
-		return object.CompositeGraphicUnit.ID
-	}
-	return ""
-}
-
 // objectBounds 批量获取对齐范围，复用同一渲染器的资源和字形缓存
 // 入参: page 页面索引, objects 待度量的对象
 // 返回: []Box 对象范围, error 错误信息
@@ -992,10 +856,12 @@ func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) 
 		return nil, err
 	}
 	defer reader.Close()
-	if _, err := reader.PageContentByIndex(page); err != nil {
+	content, err := reader.PageContentByIndex(page)
+	if err != nil {
 		return nil, err
 	}
 	renderer := e.newRenderer(reader)
+	defer renderer.bindPageResources(content)()
 	objectLayers := make(map[string]int, len(objects))
 	for _, object := range objects {
 		objectLayers[editorObjectID(object)] = -1
@@ -1023,4 +889,145 @@ func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) 
 		}
 	}
 	return boxes, nil
+}
+
+// compareEditorPosition 比较对象在页面结构中的先后顺序
+// 入参: a 第一个对象的位置, b 第二个对象的位置
+// 返回: int 比较结果
+func compareEditorPosition(a, b editorObjectPosition) int {
+	if value := cmp.Compare(a.layer, b.layer); value != 0 {
+		return value
+	}
+	return cmp.Compare(a.index, b.index)
+}
+
+// orderEditorObjects 调整选区层级，保持选中及未选中对象各自的相对顺序
+// 入参: objects 同容器对象, selected 选中状态, order 排序方向
+func orderEditorObjects[T any](objects []T, selected []bool, order string) {
+	switch order {
+	case "up":
+		for i := len(objects) - 2; i >= 0; i-- {
+			if selected[i] && !selected[i+1] {
+				objects[i], objects[i+1] = objects[i+1], objects[i]
+				selected[i], selected[i+1] = false, true
+			}
+		}
+	case "down":
+		for i := 1; i < len(objects); i++ {
+			if selected[i] && !selected[i-1] {
+				objects[i], objects[i-1] = objects[i-1], objects[i]
+				selected[i], selected[i-1] = false, true
+			}
+		}
+	default:
+		ordered := make([]T, 0, len(objects))
+		for _, takeSelected := range []bool{order == "bottom", order != "bottom"} {
+			for i, object := range objects {
+				if selected[i] == takeSelected {
+					ordered = append(ordered, object)
+				}
+			}
+		}
+		copy(objects, ordered)
+	}
+}
+
+// editorDistribution 计算等间距平移，位置相同时按原绘制顺序排序
+// 入参: boxes 可见范围, indexes 绘制位置, axis 分布方向
+// 返回: []Matrix 页面平移, error 错误信息
+func editorDistribution(boxes []Box, indexes []editorObjectPosition, axis string) ([]Matrix, error) {
+	matrices := make([]Matrix, len(boxes))
+	for i := range matrices {
+		matrices[i] = IdentityMatrix
+	}
+	if len(boxes) < 3 {
+		return matrices, nil
+	}
+	positions, sizes := make([]float64, len(boxes)), make([]float64, len(boxes))
+	order := make([]int, len(boxes))
+	total := 0.0
+	for i, box := range boxes {
+		positions[i], sizes[i] = box.X, box.W
+		if axis == "vertical" {
+			positions[i], sizes[i] = box.Y, box.H
+		}
+		order[i] = i
+		total += sizes[i]
+	}
+	slices.SortFunc(order, func(i, j int) int {
+		if c := cmp.Compare(positions[i], positions[j]); c != 0 {
+			return c
+		}
+		return compareEditorPosition(indexes[i], indexes[j])
+	})
+	first, last := order[0], order[len(order)-1]
+	gap := (positions[last] + sizes[last] - positions[first] - total) / float64(len(order)-1)
+	for i, index := range order[:len(order)-1] {
+		step := sizes[index] + gap
+		if basegeom.Equal(step, 0) {
+			step = 0
+		}
+		if step < 0 || step == 0 && compareEditorPosition(indexes[index], indexes[order[i+1]]) > 0 {
+			return nil, fmt.Errorf("overlap prevents ordered equal-gap distribution")
+		}
+	}
+	next := positions[first] + sizes[first] + gap
+	for _, index := range order[1 : len(order)-1] {
+		position := next
+		next += sizes[index] + gap
+		if basegeom.Equal(position, positions[index]) {
+			continue
+		}
+		dx, dy := position-positions[index], 0.0
+		if axis == "vertical" {
+			dx, dy = 0, dx
+		}
+		matrices[index] = TranslationMatrix(dx, dy)
+	}
+	return matrices, nil
+}
+
+// editorAlignment 计算对象范围到目标边缘或中心的平移
+// 入参: box 对象范围, target 目标范围, alignment 对齐方式
+// 返回: Matrix 页面平移
+func editorAlignment(box, target Box, alignment string) Matrix {
+	matrix := IdentityMatrix
+	switch alignment {
+	case "left":
+		matrix.e = target.X - box.X
+	case "center":
+		matrix.e = target.X + (target.W-box.W)/2 - box.X
+	case "right":
+		matrix.e = target.X + target.W - box.W - box.X
+	case "top":
+		matrix.f = target.Y - box.Y
+	case "middle":
+		matrix.f = target.Y + (target.H-box.H)/2 - box.Y
+	case "bottom":
+		matrix.f = target.Y + target.H - box.H - box.Y
+	}
+	if basegeom.Equal(matrix.e, 0) {
+		matrix.e = 0
+	}
+	if basegeom.Equal(matrix.f, 0) {
+		matrix.f = 0
+	}
+	return matrix
+}
+
+// editorObjectID 获取可创作对象的标准标识
+// 入参: object 图形对象
+// 返回: string 对象标识，不支持的类型返回空字符串
+func editorObjectID(object GraphicObject) string {
+	switch object.Type {
+	case "TextObject":
+		return object.TextObject.ID
+	case "PathObject":
+		return object.PathObject.ID
+	case "ImageObject":
+		return object.ImageObject.ID
+	case "CompositeObject", "CompositeGraphicUnit":
+		return object.CompositeGraphicUnit.ID
+	}
+	return ""
 }

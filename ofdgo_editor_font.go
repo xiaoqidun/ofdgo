@@ -264,30 +264,6 @@ func (r *editorResourceRefs) fontUsage(id string) *editorFontUsage {
 	return r.fonts[id]
 }
 
-// editorObjectFontScan 判断对象是否需要扫描嵌套文字或复合资源
-// 入参: object 图形对象
-// 返回: bool 是否需要完整引用扫描
-func editorObjectFontScan(object GraphicObject) bool {
-	var clips *Clips
-	var fill, stroke *FillColor
-	switch object.Type {
-	case "CompositeObject", "CompositeGraphicUnit":
-		return true
-	case "TextObject", "Text":
-		clips = object.TextObject.Clips
-		fill, stroke = object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor)
-	case "PathObject", "Path":
-		clips = object.PathObject.Clips
-		fill, stroke = object.PathObject.FillColor, (*FillColor)(object.PathObject.StrokeColor)
-	case "ImageObject":
-		clips = object.ImageObject.Clips
-		if object.ImageObject.Border != nil {
-			stroke = (*FillColor)(object.ImageObject.Border.BorderColor)
-		}
-	}
-	return clips != nil || fill != nil && fill.Pattern != nil || stroke != nil && stroke.Pattern != nil
-}
-
 // subsetFonts 仅解析实际引用的新增字体，合并用字后裁剪保存结果，保留完整编辑字体
 // 入参: progress 保存进度回调
 // 返回: map[string][]byte 包内字体子集, error 错误信息
@@ -511,17 +487,21 @@ func (e *Editor) subsetNewFonts(progress editorProgress) (map[string][]byte, err
 					return nil, err
 				}
 				if editorObjectFontScan(object) {
-					nested = true
 					origin := e.objectOrigin(editorObjectID(object))
-					var data []byte
-					var err error
 					if origin == nil {
-						data, err = e.encodeXML(func(x *ofdXML) { x.object(object, true) })
-					} else {
-						data, err = editorXMLObject(origin.data, origin.node, origin.object, object)
-						if err == nil {
-							data, err = editorXMLStandalone(data, origin.node)
+						hasResourceRef, collectErr := e.collectMemoryObjectFontUsage(ctx, object, used, mapped)
+						if collectErr != nil {
+							return nil, collectErr
 						}
+						if hasResourceRef {
+							nested = true
+						}
+						continue
+					}
+					nested = true
+					data, err := editorXMLObject(origin.data, origin.node, origin.object, object)
+					if err == nil {
+						data, err = editorXMLStandalone(data, origin.node)
 					}
 					if err != nil {
 						return nil, err
@@ -534,33 +514,8 @@ func (e *Editor) subsetNewFonts(progress editorProgress) (map[string][]byte, err
 				if object.Type != "TextObject" {
 					continue
 				}
-				obj := object.TextObject
-				usage := used[obj.Font]
-				if usage == nil {
-					continue
-				}
-				for _, code := range obj.TextCode {
-					if err := usage.text(ctx, "TextCode", code.Value); err != nil {
-						return nil, err
-					}
-				}
-				for _, transform := range obj.CGTransform {
-					mapped[obj.Font] = true
-					count := 0
-					for value := range strings.FieldsSeq(transform.Glyphs) {
-						if count&4095 == 0 {
-							if err := ctx.Err(); err != nil {
-								return nil, err
-							}
-						}
-						id, err := strconv.ParseUint(value, 10, 16)
-						if err != nil || id >= uint64(e.fonts[obj.Font].NumGlyphs()) {
-							delete(used, obj.Font)
-							break
-						}
-						usage.glyphs[uint16(id)] = true
-						count++
-					}
+				if err := e.collectTextFontUsage(ctx, object.TextObject, used, mapped); err != nil {
+					return nil, err
 				}
 			}
 		}
@@ -648,4 +603,190 @@ func (e *Editor) subsetNewFonts(progress editorProgress) (map[string][]byte, err
 		return nil, err
 	}
 	return result, nil
+}
+
+// collectMemoryObjectFontUsage 直接递归遍历无外部原文的自产图元树收集字体用字，消除逐图元XML序列化与解析
+// 入参: ctx 取消上下文, object 图形对象, used 新增字体用字表, mapped 显式字形映射标记
+// 返回: bool 是否包含外部复合资源引用, error 取消错误
+func (e *Editor) collectMemoryObjectFontUsage(ctx context.Context, object GraphicObject, used map[string]*editorFontUsage, mapped map[string]bool) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	hasResourceRef := false
+	var collectText func(TextObject) error
+	var collectClips func(*Clips) error
+	var collectColor func(*FillColor) error
+	collectText = func(obj TextObject) error {
+		if err := collectClips(obj.Clips); err != nil {
+			return err
+		}
+		if err := collectColor(obj.FillColor); err != nil {
+			return err
+		}
+		if err := collectColor((*FillColor)(obj.StrokeColor)); err != nil {
+			return err
+		}
+		return e.collectTextFontUsage(ctx, obj, used, mapped)
+	}
+	collectClips = func(clips *Clips) error {
+		if clips == nil {
+			return nil
+		}
+		for _, clip := range clips.Clip {
+			for _, area := range clip.Area {
+				if area.DrawParam != "" {
+					hasResourceRef = true
+				}
+				for _, path := range area.Path {
+					if path.DrawParam != "" {
+						hasResourceRef = true
+					}
+					if err := collectColor(path.FillColor); err != nil {
+						return err
+					}
+					if err := collectColor((*FillColor)(path.StrokeColor)); err != nil {
+						return err
+					}
+				}
+				for _, text := range area.Text {
+					if text.DrawParam != "" {
+						hasResourceRef = true
+					}
+					if err := collectText(text); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		return nil
+	}
+	collectColor = func(c *FillColor) error {
+		if c == nil || c.Pattern == nil {
+			return nil
+		}
+		for sub := range c.Pattern.CellContent.objects() {
+			ref, err := e.collectMemoryObjectFontUsage(ctx, sub, used, mapped)
+			if err != nil {
+				return err
+			}
+			if ref {
+				hasResourceRef = true
+			}
+		}
+		return nil
+	}
+	switch object.Type {
+	case "TextObject", "Text":
+		if object.TextObject.DrawParam != "" {
+			hasResourceRef = true
+		}
+		if err := collectText(object.TextObject); err != nil {
+			return false, err
+		}
+	case "PathObject", "Path":
+		if object.PathObject.DrawParam != "" {
+			hasResourceRef = true
+		}
+		if err := collectClips(object.PathObject.Clips); err != nil {
+			return false, err
+		}
+		if err := collectColor(object.PathObject.FillColor); err != nil {
+			return false, err
+		}
+		if err := collectColor((*FillColor)(object.PathObject.StrokeColor)); err != nil {
+			return false, err
+		}
+	case "ImageObject":
+		if err := collectClips(object.ImageObject.Clips); err != nil {
+			return false, err
+		}
+		if object.ImageObject.Border != nil {
+			if err := collectColor((*FillColor)(object.ImageObject.Border.BorderColor)); err != nil {
+				return false, err
+			}
+		}
+	case "CompositeObject", "CompositeGraphicUnit":
+		if object.CompositeGraphicUnit.ResourceID != "" || object.CompositeGraphicUnit.DrawParam != "" {
+			hasResourceRef = true
+		}
+		if err := collectClips(object.CompositeGraphicUnit.Clips); err != nil {
+			return false, err
+		}
+		for child := range object.CompositeGraphicUnit.objects() {
+			ref, err := e.collectMemoryObjectFontUsage(ctx, child, used, mapped)
+			if err != nil {
+				return false, err
+			}
+			if ref {
+				hasResourceRef = true
+			}
+		}
+	}
+	return hasResourceRef, nil
+}
+
+// collectTextFontUsage 收集文字图元的字符与显式字形编号，遇到索引编码或越界字形时放弃该字体裁剪
+// 入参: ctx 取消上下文, obj 文字对象, used 新增字体用字表, mapped 显式字形映射标记
+// 返回: error 取消错误
+func (e *Editor) collectTextFontUsage(ctx context.Context, obj TextObject, used map[string]*editorFontUsage, mapped map[string]bool) error {
+	fontID := editorResourceID(obj.Font)
+	if fontID == "" {
+		fontID = obj.Font
+	}
+	usage := used[fontID]
+	if usage == nil {
+		return nil
+	}
+	for _, code := range obj.TextCode {
+		if code.Index != "" {
+			delete(used, fontID)
+			return nil
+		}
+		if err := usage.text(ctx, "TextCode", code.Value); err != nil {
+			return err
+		}
+	}
+	for _, transform := range obj.CGTransform {
+		mapped[fontID] = true
+		count := 0
+		for value := range strings.FieldsSeq(transform.Glyphs) {
+			if count&4095 == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
+			id, err := strconv.ParseUint(value, 10, 16)
+			if err != nil || id >= uint64(e.fonts[fontID].NumGlyphs()) {
+				delete(used, fontID)
+				return nil
+			}
+			usage.glyphs[uint16(id)] = true
+			count++
+		}
+	}
+	return nil
+}
+
+// editorObjectFontScan 判断对象是否需要扫描嵌套文字或复合资源
+// 入参: object 图形对象
+// 返回: bool 是否需要完整引用扫描
+func editorObjectFontScan(object GraphicObject) bool {
+	var clips *Clips
+	var fill, stroke *FillColor
+	switch object.Type {
+	case "CompositeObject", "CompositeGraphicUnit":
+		return true
+	case "TextObject", "Text":
+		clips = object.TextObject.Clips
+		fill, stroke = object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor)
+	case "PathObject", "Path":
+		clips = object.PathObject.Clips
+		fill, stroke = object.PathObject.FillColor, (*FillColor)(object.PathObject.StrokeColor)
+	case "ImageObject":
+		clips = object.ImageObject.Clips
+		if object.ImageObject.Border != nil {
+			stroke = (*FillColor)(object.ImageObject.Border.BorderColor)
+		}
+	}
+	return clips != nil || fill != nil && fill.Pattern != nil || stroke != nil && stroke.Pattern != nil
 }

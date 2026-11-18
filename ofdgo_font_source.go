@@ -82,9 +82,24 @@ type fontSourceKey struct {
 	name  string
 }
 
+// fontCandidateKey 按字体标识、名称与固有样式区分候选列表，避免页面局部同ID串台
+type fontCandidateKey struct {
+	id         string
+	fontName   string
+	familyName string
+	bold       bool
+	italic     bool
+}
+
+// fontSourceData 保存读取结果，避免重复打开同一字体文件
+type fontSourceData struct {
+	data []byte
+	err  error
+}
+
 // fontSourceCache 保存字体候选及独立字体数据，原始集合按字节预算淘汰，不包含绘图库对象
 type fontSourceCache struct {
-	candidates   map[string][]fontSource
+	candidates   map[fontCandidateKey][]fontSource
 	directories  map[string][]basefont.FileCandidate
 	filesystems  map[int][]basefont.FileCandidate
 	names        map[int][]string
@@ -98,7 +113,7 @@ type fontSourceCache struct {
 // 入参: resources 共享资源策略
 // 返回: *fontSourceCache 字体来源缓存
 func newFontSourceCache(resources *Resources) *fontSourceCache {
-	return &fontSourceCache{candidates: make(map[string][]fontSource), directories: make(map[string][]basefont.FileCandidate), filesystems: make(map[int][]basefont.FileCandidate), names: make(map[int][]string), data: make(map[fontSourceKey]fontSourceData), collections: resourceCache[fontSourceKey, []byte](resources, 32<<20)}
+	return &fontSourceCache{candidates: make(map[fontCandidateKey][]fontSource), directories: make(map[string][]basefont.FileCandidate), filesystems: make(map[int][]basefont.FileCandidate), names: make(map[int][]string), data: make(map[fontSourceKey]fontSourceData), collections: resourceCache[fontSourceKey, []byte](resources, 64<<20)}
 }
 
 // child 复用相同来源的文件索引与数据，匹配和回退状态保持独立
@@ -109,12 +124,6 @@ func (c *fontSourceCache) child() *fontSourceCache {
 	cache.names = c.names
 	cache.collections = c.collections
 	return cache
-}
-
-// fontSourceData 保存读取结果，避免重复打开同一字体文件
-type fontSourceData struct {
-	data []byte
-	err  error
 }
 
 // readFontSource 读取独立字体并规范符号映射，保留集合中的名称和样式选择
@@ -134,19 +143,27 @@ func (r *Renderer) readFontSource(source fontSource, definition *Font) ([]byte, 
 	}
 	fileKey := key
 	fileKey.face = 0
-	data, cached := r.fontSourcesCache.collections.get(fileKey)
-	var err error
-	if !cached {
-		if key.kind == fontSourceFS {
-			data, err = fs.ReadFile(r.fontFS[key.index], key.name)
-		} else {
-			data, err = os.ReadFile(key.name)
-		}
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
 	}
-	if err == nil && bytes.HasPrefix(data, []byte("ttcf")) {
-		if !cached {
-			r.fontSourcesCache.collections.put(fileKey, data, min(cap(data), r.fontSourcesCache.collections.limit)+256)
+	data, err := r.fontSourcesCache.collections.load(ctx, fileKey, func() ([]byte, int, error) {
+		var raw []byte
+		var readErr error
+		if key.kind == fontSourceFS {
+			raw, readErr = fs.ReadFile(r.fontFS[key.index], key.name)
+		} else {
+			raw, readErr = os.ReadFile(key.name)
 		}
+		if readErr != nil {
+			return nil, 0, readErr
+		}
+		if bytes.HasPrefix(raw, []byte("ttcf")) {
+			return raw, len(raw) + 256, nil
+		}
+		return raw, 0, nil
+	})
+	if err == nil && bytes.HasPrefix(data, []byte("ttcf")) {
 		data, err = basefont.ExtractCollectionFont(data, key.face)
 	}
 	if err == nil {
@@ -181,18 +198,18 @@ func (r *Renderer) fontSourceMatch(backend FontBackend, fontID string, definitio
 // 入参: backend 字体后端, id 字体ID, exact 是否禁止无关回退
 // 返回: ResolvedFont 字体及来源, error 解析错误
 func (r *Renderer) resolveFontSource(backend FontBackend, id string, exact bool) (ResolvedFont, error) {
-	definition := r.Reader.fontDefinition(id)
-	if definition == nil && !r.Reader.fontResourcesRead && r.Reader.OFD != nil {
+	definition := r.fontDefinition(id)
+	if definition == nil && r.Reader != nil && !r.Reader.fontResourcesRead && r.Reader.OFD != nil {
 		if _, err := r.Reader.Fonts(); err != nil {
 			return ResolvedFont{}, err
 		}
-		definition = r.Reader.fontDefinition(id)
+		definition = r.fontDefinition(id)
 	}
 	if definition == nil {
 		definition = &Font{ID: id}
 	}
 	if definition.FontFile != "" {
-		data, err := r.Reader.fontData(id, true)
+		data, err := r.Reader.readFontData(definition, true)
 		if err != nil {
 			return ResolvedFont{}, err
 		}
@@ -238,7 +255,8 @@ func (r *Renderer) resolveFontSource(backend FontBackend, id string, exact bool)
 // 入参: fontID 字体ID, font OFD字体定义
 // 返回: []fontSource 字体来源列表
 func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
-	if sources, ok := r.fontSourcesCache.candidates[fontID]; ok {
+	cacheKey := fontCandidateKey{id: fontID, fontName: font.FontName, familyName: font.FamilyName, bold: font.Bold, italic: font.Italic}
+	if sources, ok := r.fontSourcesCache.candidates[cacheKey]; ok {
 		return sources
 	}
 	bold, italic := font.Bold, font.Italic
@@ -291,31 +309,8 @@ func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
 			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: name})
 		}
 	}
-	r.fontSourcesCache.candidates[fontID] = sources
+	r.fontSourcesCache.candidates[cacheKey] = sources
 	return sources
-}
-
-// sortFontSources 将完整名称匹配排在回退候选之前
-// 入参: sources 字体来源列表
-func sortFontSources(sources []fontSource) {
-	sort.SliceStable(sources, func(i, j int) bool {
-		return sources[i].priority < sources[j].priority
-	})
-}
-
-// appendFontSource 追加字体来源
-// 入参: sources 字体来源列表, seen 去重映射, source 字体来源
-// 返回: []fontSource 字体来源列表
-func appendFontSource(sources []fontSource, seen map[fontSourceKey]bool, source fontSource) []fontSource {
-	if source.name == "" {
-		return sources
-	}
-	key := fontSourceKey{kind: source.kind, index: source.index, name: source.name, face: source.face}
-	if seen[key] {
-		return sources
-	}
-	seen[key] = true
-	return append(sources, source)
 }
 
 // matchFontFiles 查找字体文件
@@ -397,6 +392,29 @@ func (r *Renderer) fontFSNames(index int) ([]string, error) {
 		r.fontSourcesCache.names[index] = names
 	}
 	return names, err
+}
+
+// sortFontSources 将完整名称匹配排在回退候选之前
+// 入参: sources 字体来源列表
+func sortFontSources(sources []fontSource) {
+	sort.SliceStable(sources, func(i, j int) bool {
+		return sources[i].priority < sources[j].priority
+	})
+}
+
+// appendFontSource 追加字体来源
+// 入参: sources 字体来源列表, seen 去重映射, source 字体来源
+// 返回: []fontSource 字体来源列表
+func appendFontSource(sources []fontSource, seen map[fontSourceKey]bool, source fontSource) []fontSource {
+	if source.name == "" {
+		return sources
+	}
+	key := fontSourceKey{kind: source.kind, index: source.index, name: source.name, face: source.face}
+	if seen[key] {
+		return sources
+	}
+	seen[key] = true
+	return append(sources, source)
 }
 
 // systemFontDirs 获取系统字体目录

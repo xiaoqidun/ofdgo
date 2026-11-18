@@ -60,16 +60,21 @@ func WrapCFFToOTF(cffData []byte) ([]byte, map[rune]uint16, error) {
 		return nil, nil, err
 	}
 	unitsPerEm := cffUnitsPerEm(matrix)
-	tables := make(map[string][]byte)
+	if mapping == nil {
+		mapping = make(map[rune]uint16)
+	}
+	maxGlyphs := uint16(min(numGlyphs, 0xFFFF))
+	tables := make(map[string][]byte, 9)
 	tables["CFF "] = cffData
 	tables["head"] = buildHeadTable(unitsPerEm)
-	tables["hhea"] = buildHheaTable(uint16(numGlyphs))
-	tables["maxp"] = buildCFFMaxpTable(uint16(numGlyphs))
+	tables["hhea"] = buildHheaTable(maxGlyphs)
+	tables["maxp"] = buildCFFMaxpTable(maxGlyphs)
 	tables["OS/2"] = buildOS2Table()
 	tables["name"] = buildNameTable()
 	tables["post"] = BuildPostTable()
 	tables["hmtx"] = buildHmtxTable(widths)
-	tables["cmap"] = BuildCmapTable(uint16(numGlyphs), mapping)
+	tables["cmap"] = buildPackedCmapTable(maxGlyphs, mapping)
+	AddPackedGlyphMapping(mapping, maxGlyphs)
 	data, err := SerializeOTF(tables)
 	return data, mapping, err
 }
@@ -317,27 +322,24 @@ func GetCFFCIDRuneMap(data []byte) map[uint16]rune {
 		return nil
 	}
 	mapping := cffCharsetMapping(cffData, sids, registry, ordering, stringIndexOff)
-	if len(mapping) == 0 {
-		return nil
-	}
-	gidRunes := make(map[uint16]rune)
-	for run, gid := range mapping {
-		if run != PackedGlyphRune(gid) {
-			gidRunes[gid] = run
+	var gidRunes map[uint16]rune
+	if len(mapping) != 0 {
+		gidRunes = make(map[uint16]rune, len(mapping))
+		for run, gid := range mapping {
+			if run != PackedGlyphRune(gid) {
+				gidRunes[gid] = run
+			}
 		}
 	}
-	for run, gid := range mapping {
-		if _, ok := gidRunes[gid]; !ok {
-			gidRunes[gid] = run
-		}
-	}
-	result := make(map[uint16]rune)
+	result := make(map[uint16]rune, max(0, len(sids)-1))
 	for gid, cid := range sids {
 		if gid == 0 || cid < 0 || cid > 0xFFFF {
 			continue
 		}
 		if run, ok := gidRunes[uint16(gid)]; ok {
 			result[uint16(cid)] = run
+		} else {
+			result[uint16(cid)] = PackedGlyphRune(uint16(gid))
 		}
 	}
 	if len(result) == 0 {
@@ -357,8 +359,7 @@ func normalizeCFFCharstrings(data []byte) ([]byte, error) {
 }
 
 // replaceCFFCharstrings 替换字形索引并调整后续数据及顶层字典的偏移
-// 入参: data 原始字体, dict 输出字典, topStart 顶层索引起点, topSize 顶层索引大小
-// 入参: charStart 字形索引起点, charSize 字形索引大小, chars 字形程序, explicitCharset 追加字符集
+// 入参: data 原始字体, dict 输出字典, topStart 顶层索引起点, topSize 顶层索引大小, charStart 字形索引起点, charSize 字形索引大小, chars 字形程序, explicitCharset 追加字符集
 // 返回: []byte 重建后的字体数据
 func replaceCFFCharstrings(data []byte, dict cffDict, topStart, topSize, charStart, charSize int, chars [][]byte, explicitCharset []byte) []byte {
 	encodedChars := encodeCFFIndex(chars)
@@ -432,8 +433,7 @@ func normalizeCFFPrivate(dict cffDict) error {
 }
 
 // sanitizeMultiFDCFF 清洗多FD的CID CFF数据
-// 入参: data 原始CFF数据, hdrSize 头部大小, nameIndexData 名称索引, topDict 顶层字典
-// 入参: stringIndexData 字符串索引, globalSubrIndexData 全局子程序索引, fdArrOff FDArray偏移, fdCount FD数量
+// 入参: data 原始CFF数据, hdrSize 头部大小, nameIndexData 名称索引, topDict 顶层字典, stringIndexData 字符串索引, globalSubrIndexData 全局子程序索引, fdArrOff FDArray偏移, fdCount FD数量
 // 返回: []byte 清洗后的CFF数据, error 错误信息
 func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict cffDict, stringIndexData []byte, globalSubrIndexData []byte, fdArrOff int, fdCount int) ([]byte, error) {
 	kind, err := cffCharstringType(topDict)
@@ -581,8 +581,7 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 }
 
 // encodeSanitizedCFF 按字典编码长度收敛偏移并组装规范化字体
-// 入参: header 头部, names 名称索引, dict 顶层字典, strings 字符串索引, globals 全局子程序索引
-// 入参: chars 字形索引, private 私有字典, locals 局部子程序索引
+// 入参: header 头部, names 名称索引, dict 顶层字典, strings 字符串索引, globals 全局子程序索引, chars 字形索引, private 私有字典, locals 局部子程序索引
 // 返回: []byte CFF字体数据
 func encodeSanitizedCFF(header, names []byte, dict cffDict, strings, globals, chars, private, locals []byte) []byte {
 	dict[17] = []float64{0}
@@ -1146,36 +1145,33 @@ func getCmapFromCFF(data []byte, numGlyphs int) map[rune]uint16 {
 	return cffCharsetMapping(data, sids, registry, ordering, stringIndexOff)
 }
 
-// cffCharsetMapping 根据已解析的CFF字符集恢复Unicode映射
+// cffCharsetMapping 根据已解析的CFF字符集恢复Unicode及字形私有映射
 // 入参: data CFF数据, sids 字符标识, registry 注册机构, ordering 字符集, stringIndexOff 字符串索引偏移
 // 返回: map[rune]uint16 恢复的映射表
 func cffCharsetMapping(data []byte, sids []int, registry, ordering string, stringIndexOff int) map[rune]uint16 {
-	capacity := max(0, len(sids)-1)
-	if registry == "" || registry == "Adobe" && ordering == "GB1" {
-		capacity *= 2
-	}
-	mapping := make(map[rune]uint16, capacity)
+	numGlyphs := uint16(min(len(sids), 0xFFFF))
 	if registry == "Adobe" && ordering == "GB1" {
+		mapping := make(map[rune]uint16, len(sids))
 		for gid, cid := range sids {
 			if gid == 0 {
 				continue
 			}
-			mapping[PackedGlyphRune(uint16(gid))] = uint16(gid)
-			if r, ok := adobeGB1CIDToUnicode(cid); ok {
+			if r, ok := adobeGB1CIDToUnicode(cid); ok && r != 0 {
 				mapping[r] = uint16(gid)
 			}
 		}
+		AddPackedGlyphMapping(mapping, numGlyphs)
 		return mapping
 	}
 	if registry != "" {
-		for gid := range sids {
-			if gid == 0 {
-				continue
-			}
-			mapping[PackedGlyphRune(uint16(gid))] = uint16(gid)
+		if numGlyphs == 0 {
+			return nil
 		}
+		mapping := make(map[rune]uint16, numGlyphs)
+		AddPackedGlyphMapping(mapping, numGlyphs)
 		return mapping
 	}
+	mapping := make(map[rune]uint16, len(sids))
 	for gid, sid := range sids {
 		if gid == 0 {
 			continue
@@ -1189,16 +1185,13 @@ func cffCharsetMapping(data []byte, sids []int, registry, ordering string, strin
 			idx := sid - 391
 			name = string(readStringIndexItem(data, stringIndexOff, idx))
 		}
-		r := rune(0)
 		if name != "" {
-			r = getUnicodeFromName(name)
+			if r := getUnicodeFromName(name); r != 0 {
+				mapping[r] = uint16(gid)
+			}
 		}
-		if r == 0 {
-			r = PackedGlyphRune(uint16(gid))
-		}
-		mapping[PackedGlyphRune(uint16(gid))] = uint16(gid)
-		mapping[r] = uint16(gid)
 	}
+	AddPackedGlyphMapping(mapping, numGlyphs)
 	return mapping
 }
 

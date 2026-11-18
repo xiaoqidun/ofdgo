@@ -25,6 +25,21 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// srgbLinearTable 预计算八位sRGB分量到线性光强度的查找表
+var srgbLinearTable [256]float64
+
+// init 初始化八位sRGB到线性光强度的查找表
+func init() {
+	for i := range srgbLinearTable {
+		v := float64(i) / 255
+		if v <= 0.04045 {
+			srgbLinearTable[i] = v / 12.92
+		} else {
+			srgbLinearTable[i] = math.Pow((v+0.055)/1.055, 2.4)
+		}
+	}
+}
+
 // parseTIFFColorProfile 校验ICC源模型，保留原有模型错误并复用浮点颜色变换
 // 入参: kind 源颜色模型, data ICC编码
 // 返回: *pdfgo.ColorSpace 颜色变换, error 模型或配置错误
@@ -91,6 +106,9 @@ func applyImageColorProfile(ctx context.Context, source image.Image, profile *pd
 	bounds := source.Bounds()
 	if bounds.Dx() <= 0 || bounds.Dy() <= 0 || bounds.Dx() > math.MaxInt/8/bounds.Dy() {
 		return nil, fmt.Errorf("TIFF profile image dimensions exceed capacity")
+	}
+	if isEightBitRGBImage(source) && isEquivalentSRGBSpace(profile, linearSRGB) {
+		return source, nil
 	}
 	cmyk, _ := source.(*planarTIFFImage)
 	if cmyk != nil && !cmyk.cmyk {
@@ -163,11 +181,7 @@ func applyImageColorProfile(ctx context.Context, source image.Image, profile *pd
 			previous = values
 			if linearSRGB {
 				for i := range 3 {
-					if values[i] <= 0.04045 {
-						values[i] /= 12.92
-					} else {
-						values[i] = math.Pow((values[i]+0.055)/1.055, 2.4)
-					}
+					values[i] = srgbToLinear(values[i])
 				}
 			}
 			rgb, err := profile.SRGB(values[:components], intent)
@@ -189,6 +203,104 @@ func applyImageColorProfile(ctx context.Context, source image.Image, profile *pd
 		return nil, err
 	}
 	return &colorImage{NRGBA64: result, source: source}, nil
+}
+
+// srgbToLinear 将归一化sRGB分量转为线性光，八位量化输入直接查表
+// 入参: value 归一化sRGB分量
+// 返回: float64 线性光分量
+func srgbToLinear(value float64) float64 {
+	index := int(math.Round(value * 255))
+	if index >= 0 && index <= 255 && math.Abs(value-float64(index)/255) <= 1e-12 {
+		return srgbLinearTable[index]
+	}
+	if value <= 0.04045 {
+		return value / 12.92
+	}
+	return math.Pow((value+0.055)/1.055, 2.4)
+}
+
+// isEightBitRGBModel 判断颜色模型是否为八位RGB或八位调色板模型
+// 入参: model 颜色模型
+// 返回: bool 是否为八位RGB模型
+func isEightBitRGBModel(model color.Model) bool {
+	if palette, ok := model.(color.Palette); ok {
+		for _, value := range palette {
+			switch value.(type) {
+			case color.RGBA, color.NRGBA, color.Gray, color.Alpha, color.CMYK, color.YCbCr, color.NYCbCrA:
+			default:
+				pixel := color.NRGBA64Model.Convert(value).(color.NRGBA64)
+				if pixel.R%257 != 0 || pixel.G%257 != 0 || pixel.B%257 != 0 || pixel.A%257 != 0 {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	return model == color.RGBAModel || model == color.NRGBAModel || model == color.YCbCrModel || model == color.NYCbCrAModel
+}
+
+// isEightBitRGBImage 判断解码像素是否为可直接短路的八位RGB图像
+// 入参: source 解码图像
+// 返回: bool 是否为八位RGB图像
+func isEightBitRGBImage(source image.Image) bool {
+	switch src := source.(type) {
+	case *image.RGBA, *image.NRGBA, *image.YCbCr, *image.NYCbCrA:
+		return true
+	case *image.Paletted:
+		return !HighPrecision(src)
+	case *planarTIFFImage:
+		return !src.gray && !src.cmyk && src.depth <= 8
+	default:
+		return false
+	}
+}
+
+// isEquivalentSRGBSpace 判断三通道颜色空间在八位量化容差内是否等价于标准sRGB
+// 入参: profile 颜色空间, linearSRGB 是否先解码sRGB传递函数
+// 返回: bool 是否与标准sRGB等价
+func isEquivalentSRGBSpace(profile *pdfgo.ColorSpace, linearSRGB bool) bool {
+	if profile == nil || profile.Components() != 3 {
+		return false
+	}
+	intent := profile.DefaultIntent()
+	if intent != "" && intent != "RelativeColorimetric" {
+		return false
+	}
+	if !linearSRGB && !profile.SRGBEquivalent() {
+		return false
+	}
+	const tolerance = 0.49 / 255
+	check := func(r, g, b uint8) bool {
+		in := [3]float64{float64(r) / 255, float64(g) / 255, float64(b) / 255}
+		if linearSRGB {
+			in = [3]float64{srgbLinearTable[r], srgbLinearTable[g], srgbLinearTable[b]}
+		}
+		out, err := profile.SRGB(in[:], intent)
+		if err != nil {
+			return false
+		}
+		return math.Abs(out[0]-float64(r)/255) <= tolerance && math.Abs(out[1]-float64(g)/255) <= tolerance && math.Abs(out[2]-float64(b)/255) <= tolerance
+	}
+	for channel := range 3 {
+		for i := range 256 {
+			var c [3]uint8
+			c[channel] = uint8(i)
+			if !check(c[0], c[1], c[2]) {
+				return false
+			}
+		}
+	}
+	steps := [5]uint8{0, 64, 128, 191, 255}
+	for _, r := range steps {
+		for _, g := range steps {
+			for _, b := range steps {
+				if !check(r, g, b) {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 // newTIFFProfileTable 为离散颜色分配查找表，预乘颜色及小图保持逐像素变换

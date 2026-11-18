@@ -19,7 +19,9 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"image/color"
 	"io"
+	"sync"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"github.com/xiaoqidun/pdfgo"
@@ -185,6 +187,8 @@ func WriteSource(ctx context.Context, source io.ReaderAt, size int64, writer io.
 	if pages != len(settings.Images) {
 		return fmt.Errorf("PDF output page missing")
 	}
+	decoder := &exportImageDecoder{ctx: ctx}
+	defer decoder.clear()
 	options := pdfgo.RewriteOptions{Information: settings.Information, Images: images, ImageOptions: pdfgo.ImageWriteOptions{PreblendBinary: true}, LinkRegions: links, TextReplacements: texts, Optimization: settings.Optimization}
 	pageClips := make(map[pdfgo.Reference][]string, len(references))
 	for i, ref := range references {
@@ -193,6 +197,7 @@ func WriteSource(ctx context.Context, source io.ReaderAt, size int64, writer io.
 		}
 	}
 	options.TransformContent = func(ctx context.Context, page *pdfgo.Page, data []byte) ([]byte, error) {
+		decoder.clear()
 		clipped, err := clipPageImages(ctx, data, pageClips[page.Reference])
 		if err != nil {
 			return nil, err
@@ -214,20 +219,20 @@ func WriteSource(ctx context.Context, source io.ReaderAt, size int64, writer io.
 			return err
 		}
 	}
-	for ref, original := range images {
+	for ref, original := range options.Images {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		pixels, err := baseimage.PixelDataContext(ctx, original)
-		if err != nil {
-			return err
-		}
-		if pixels == nil || pixels.Bounds() != original.Bounds() {
+		if original == nil {
 			return fmt.Errorf("PDF output image pixel bounds differ")
 		}
-		images[ref] = pixels
+		options.Images[ref] = &lazyExportImage{decoder: decoder, source: original}
 	}
 	_, err = reader.RewriteTo(ctx, writer, options)
+	decoder.clear()
+	if decodeErr := decoder.failure(); decodeErr != nil {
+		return decodeErr
+	}
 	return err
 }
 
@@ -249,6 +254,142 @@ func (w outputWriter) Write(data []byte) (int, error) {
 		err = w.ctx.Err()
 	}
 	return n, err
+}
+
+// exportImageDecoder 控制PDF写出期间的单槽懒解码，确保同时最多驻留单张图像像素
+type exportImageDecoder struct {
+	mu      sync.Mutex
+	ctx     context.Context
+	current *lazyExportImage
+	pixels  image.Image
+	rgba64  image.RGBA64Image
+	nrgba   *image.NRGBA
+	nrgba64 interface{ NRGBA64At(int, int) color.NRGBA64 }
+	err     error
+}
+
+// load 按需解码目标图像并立即丢弃上一张图像的未压缩像素缓冲
+// 入参: target 待访问的懒加载图像代理
+// 返回: image.Image 已解码图像, image.RGBA64Image 预乘快路径, *image.NRGBA 八位快路径, interface{ NRGBA64At(int, int) color.NRGBA64 } 十六位快路径
+func (d *exportImageDecoder) load(target *lazyExportImage) (image.Image, image.RGBA64Image, *image.NRGBA, interface{ NRGBA64At(int, int) color.NRGBA64 }) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.err != nil {
+		return nil, nil, nil, nil
+	}
+	if d.current == target && d.pixels != nil {
+		return d.pixels, d.rgba64, d.nrgba, d.nrgba64
+	}
+	d.reset()
+	pixels, err := decodeExportImage(d.ctx, target.source)
+	if err != nil {
+		d.err = err
+		return nil, nil, nil, nil
+	}
+	d.current = target
+	d.pixels = pixels
+	d.rgba64, _ = pixels.(image.RGBA64Image)
+	d.nrgba, _ = pixels.(*image.NRGBA)
+	d.nrgba64, _ = pixels.(interface{ NRGBA64At(int, int) color.NRGBA64 })
+	return d.pixels, d.rgba64, d.nrgba, d.nrgba64
+}
+
+// clear 释放当前槽位驻留的未压缩图像像素引用
+func (d *exportImageDecoder) clear() {
+	d.mu.Lock()
+	d.reset()
+	d.mu.Unlock()
+}
+
+// reset 清空当前槽位状态，调用方需持有互斥锁
+func (d *exportImageDecoder) reset() {
+	d.current = nil
+	d.pixels = nil
+	d.rgba64 = nil
+	d.nrgba = nil
+	d.nrgba64 = nil
+}
+
+// failure 读取解码阶段记录的首个错误
+// 返回: error 解码错误
+func (d *exportImageDecoder) failure() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.err
+}
+
+// lazyExportImage 延迟解码待替换PDF图像，编码完成后随槽位切换自动释放
+type lazyExportImage struct {
+	decoder *exportImageDecoder
+	source  image.Image
+}
+
+// Bounds 触发单张按需解码并返回像素范围，解码失败时返回空范围以中断编码
+// 返回: image.Rectangle 图像像素范围
+func (l *lazyExportImage) Bounds() image.Rectangle {
+	pixels, _, _, _ := l.decoder.load(l)
+	if pixels == nil {
+		return image.Rectangle{}
+	}
+	return pixels.Bounds()
+}
+
+// ColorModel 返回当前已解码图像的颜色模型
+// 返回: color.Model 颜色模型
+func (l *lazyExportImage) ColorModel() color.Model {
+	pixels, _, _, _ := l.decoder.load(l)
+	if pixels == nil {
+		return color.NRGBAModel
+	}
+	return pixels.ColorModel()
+}
+
+// At 返回指定坐标处的原始颜色样本
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.Color 像素颜色
+func (l *lazyExportImage) At(x, y int) color.Color {
+	pixels, _, _, _ := l.decoder.load(l)
+	if pixels == nil {
+		return color.Transparent
+	}
+	return pixels.At(x, y)
+}
+
+// RGBA64At 返回指定坐标处的十六位预乘颜色样本
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.RGBA64 十六位预乘颜色
+func (l *lazyExportImage) RGBA64At(x, y int) color.RGBA64 {
+	pixels, rgba64, _, _ := l.decoder.load(l)
+	if pixels == nil {
+		return color.RGBA64{}
+	}
+	if rgba64 != nil {
+		return rgba64.RGBA64At(x, y)
+	}
+	r, g, b, a := pixels.At(x, y).RGBA()
+	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
+}
+
+// NRGBA64At 返回指定坐标处的十六位非预乘颜色样本，常见像素切片走无装箱快路径
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.NRGBA64 十六位非预乘颜色
+func (l *lazyExportImage) NRGBA64At(x, y int) color.NRGBA64 {
+	pixels, _, nrgba, nrgba64 := l.decoder.load(l)
+	if pixels == nil {
+		return color.NRGBA64{}
+	}
+	if nrgba != nil {
+		if !(image.Point{X: x, Y: y}).In(nrgba.Rect) {
+			return color.NRGBA64{}
+		}
+		i := nrgba.PixOffset(x, y)
+		s := nrgba.Pix[i : i+4 : i+4]
+		return color.NRGBA64{R: uint16(s[0]) * 257, G: uint16(s[1]) * 257, B: uint16(s[2]) * 257, A: uint16(s[3]) * 257}
+	}
+	if nrgba64 != nil {
+		return nrgba64.NRGBA64At(x, y)
+	}
+	return baseimage.NRGBA64At(pixels, x, y)
 }
 
 // clipPageImages 在图像局部坐标中应用独立裁剪，不解码或重新采样图像
@@ -285,4 +426,21 @@ func clipPageImages(ctx context.Context, data []byte, clips []string) ([]byte, e
 	}
 	output.Write(data[position:])
 	return output.Bytes(), ctx.Err()
+}
+
+// decodeExportImage 单次临时解码单张待导出图像并校验范围，不在源惰性对象上保留像素缓存
+// 入参: ctx 取消上下文, original 源图像或惰性图像
+// 返回: image.Image 解码像素, error 解码、范围或取消错误
+func decodeExportImage(ctx context.Context, original image.Image) (image.Image, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	pixels, err := baseimage.DecodeTransientContext(ctx, original)
+	if err != nil {
+		return nil, err
+	}
+	if pixels == nil || pixels.Bounds() != original.Bounds() {
+		return nil, fmt.Errorf("PDF output image pixel bounds differ")
+	}
+	return pixels, nil
 }

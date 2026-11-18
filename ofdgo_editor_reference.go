@@ -68,20 +68,22 @@ func (u *editorVectorUsage) matches(name string, data []byte) bool {
 
 // editorReferenceScan 按XML事件收集资源、字体用字和图元编号，未知内容保持完整扫描
 type editorReferenceScan struct {
-	ctx        context.Context
-	refs       *editorResourceRefs
-	objects    map[string]bool
-	graphicIDs map[string]bool
-	name       string
-	base       string
-	stack      []string
-	fonts      []*editorFontUsage
-	text       strings.Builder
-	richText   strings.Builder
-	resource   bool
-	capture    bool
-	safe       bool
-	seen       bool
+	ctx              context.Context
+	refs             *editorResourceRefs
+	objects          map[string]bool
+	graphicIDs       map[string]bool
+	name             string
+	base             string
+	stack            []string
+	fonts            []*editorFontUsage
+	text             strings.Builder
+	richText         strings.Builder
+	currentCustomTag CustomTag
+	resource         bool
+	capture          bool
+	externalCustomTag bool
+	safe             bool
+	seen             bool
 }
 
 // vectorUsage 保留完整且限额内的自产矢量引用，超限时保存流程重新扫描
@@ -104,6 +106,18 @@ func (s *editorReferenceScan) vectorUsage(data []byte) *editorVectorUsage {
 	return &editorVectorUsage{name: s.name, digest: sha256.Sum256(data), refs: s.refs}
 }
 
+// customTagsDepth 返回栈内合法CustomTags容器的深度索引，不存在时返回-1
+// 返回: int 栈内CustomTags索引
+func (s *editorReferenceScan) customTagsDepth() int {
+	if len(s.stack) > 0 && s.stack[0] == "CustomTags" {
+		return 0
+	}
+	if len(s.stack) > 1 && s.stack[0] == "Document" && s.stack[1] == "CustomTags" {
+		return 1
+	}
+	return -1
+}
+
 // accept 共用读取和自产页面的引用判断，不将对象自身标识视为引用
 // 入参: token 已解析或已编码的XML事件
 // 返回: bool 是否仍可完整判断引用
@@ -116,15 +130,24 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 	}
 	switch token := token.(type) {
 	case xml.StartElement:
+		plain := token.Name.Space == textNamespace
 		rich := token.Name.Space == richTextNamespace
 		known := classifyOFDNamespace(token.Name.Space) != ofdXMLUnknown
-		if rich {
+		if plain {
+			known = len(s.stack) == 0 && token.Name.Local == "Text" || len(s.stack) == 1 && s.stack[0] == "Text" && token.Name.Local == "ObjectRef"
+		} else if rich {
 			known = len(s.stack) == 0 && token.Name.Local == "RichText" || len(s.stack) == 1 && s.stack[0] == "RichText" && token.Name.Local == "ObjectRef"
-		} else if len(s.stack) > 0 && s.stack[0] == "RichText" {
+		} else if len(s.stack) > 0 && (s.stack[0] == "RichText" || s.stack[0] == "Text") {
 			known = false
 		}
-		if len(s.stack) > 0 && s.stack[0] == "CustomTags" {
-			known = known && (len(s.stack) == 1 && token.Name.Local == "CustomTag" || len(s.stack) == 2 && s.stack[1] == "CustomTag" && (token.Name.Local == "FileLoc" || token.Name.Local == "SchemaLoc"))
+		if token.Name.Local == "CustomTags" {
+			known = known && (len(s.stack) == 0 || len(s.stack) == 1 && s.stack[0] == "Document")
+		}
+		ctDepth := s.customTagsDepth()
+		if ctDepth >= 0 {
+			known = known && (len(s.stack) == ctDepth+1 && token.Name.Local == "CustomTag" || len(s.stack) == ctDepth+2 && s.stack[ctDepth+1] == "CustomTag" && (token.Name.Local == "FileLoc" || token.Name.Local == "SchemaLoc"))
+		} else if token.Name.Local == "CustomTag" {
+			known = false
 		}
 		if !known {
 			s.safe = false
@@ -144,9 +167,16 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 					namespace = attr.Value
 				}
 			}
-			if kind != richTextTagType || namespace != richTextNamespace {
+			tag := CustomTag{TypeID: kind, NameSpace: namespace}
+			internalFontSafe := kind == textTagType && namespace == textNamespace || kind == richTextTagType && namespace == richTextNamespace
+			if !internalFontSafe && !isKnownResourceSafeTagMeta(tag) {
 				s.safe = false
 				return false
+			}
+			s.currentCustomTag = tag
+			s.externalCustomTag = !internalFontSafe
+			if s.externalCustomTag {
+				s.refs.fontUnsafe = true
 			}
 		}
 		if len(s.stack) == 0 {
@@ -182,11 +212,11 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			}
 		}
 		for _, attr := range token.Attr {
-			if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" || attr.Name.Local == "xmlns:ofd" || attr.Name.Space == XMLNamespace || textMetadataAttribute(token.Name, attr) {
+			if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" || attr.Name.Local == "xmlns:ofd" || attr.Name.Space == XMLNamespace {
 				continue
 			}
-			custom := len(s.stack) == 0 && token.Name.Local == "CustomTags" || len(s.stack) > 0 && s.stack[0] == "CustomTags"
-			if attr.Name.Space != "" || rich && (token.Name.Local != "ObjectRef" || attr.Name.Local != "PageRef") || custom && (token.Name.Local != "CustomTag" || attr.Name.Local != "TypeID" && attr.Name.Local != "NameSpace") {
+			custom := token.Name.Local == "CustomTags" || ctDepth >= 0
+			if attr.Name.Space != "" || (rich || plain) && (token.Name.Local != "ObjectRef" || attr.Name.Local != "PageRef") || custom && (token.Name.Local != "CustomTag" || attr.Name.Local != "TypeID" && attr.Name.Local != "NameSpace") {
 				s.safe = false
 				return false
 			}
@@ -227,7 +257,7 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			s.capture = true
 		}
 	case xml.CharData:
-		if len(s.stack) == 1 && s.stack[0] == "RichText" {
+		if len(s.stack) == 1 && (s.stack[0] == "RichText" || s.stack[0] == "Text") {
 			s.richText.Write(token)
 		}
 		if len(s.stack) == 0 && len(bytes.Trim(token, " \t\r\n")) != 0 {
@@ -238,11 +268,31 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			s.text.Write(token)
 		}
 	case xml.EndElement:
-		if len(s.stack) == 3 && s.stack[0] == "CustomTags" && token.Name.Local == "SchemaLoc" && strings.TrimSpace(s.text.String()) != "" {
+		ctDepth := s.customTagsDepth()
+		if ctDepth >= 0 && len(s.stack) == ctDepth+3 && s.stack[ctDepth+1] == "CustomTag" && token.Name.Local == "SchemaLoc" {
+			schema := strings.TrimSpace(s.text.String())
+			if schema != "" {
+				if !s.externalCustomTag {
+					s.safe = false
+					return false
+				}
+				s.currentCustomTag.SchemaLoc = schema
+			}
+		}
+		if ctDepth >= 0 && len(s.stack) == ctDepth+3 && s.stack[ctDepth+1] == "CustomTag" && token.Name.Local == "FileLoc" {
+			if target := cleanPackagePath(resolveResourcePath(s.name, s.base, s.text.String())); target != "" {
+				s.refs.addCustomTagFile(target, s.currentCustomTag)
+			}
+		}
+		if ctDepth >= 0 && len(s.stack) == ctDepth+2 && token.Name.Local == "CustomTag" {
+			s.currentCustomTag = CustomTag{}
+			s.externalCustomTag = false
+		}
+		if len(s.stack) == 1 && s.stack[0] == "RichText" && !richTextMetadataFontSafe(s.richText.String()) {
 			s.safe = false
 			return false
 		}
-		if len(s.stack) == 1 && s.stack[0] == "RichText" && !richTextMetadataFontSafe(s.richText.String()) {
+		if len(s.stack) == 1 && s.stack[0] == "Text" && !textMetadataFontSafe(s.richText.String()) {
 			s.safe = false
 			return false
 		}
@@ -252,7 +302,11 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 		}
 		s.refs.reference(s.name, s.base, token.Name.Local, s.text.String(), s.resource)
 		if len(s.stack) >= 2 {
-			s.fileReference(s.stack[0], s.stack[len(s.stack)-2], token.Name.Local, "", s.text.String())
+			root := s.stack[0]
+			if ctDepth >= 0 && len(s.stack) == ctDepth+3 {
+				root = "CustomTags"
+			}
+			s.fileReference(root, s.stack[len(s.stack)-2], token.Name.Local, "", s.text.String())
 		}
 		if len(s.stack) == 3 && s.stack[0] == "DocVersion" && s.stack[1] == "FileList" && token.Name.Local == "File" {
 			if name := editorResourceLocation(s.name, "", s.text.String()); name != "" {
@@ -293,7 +347,7 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 // fileReference 按节点位置记录结构文件与原始数据，版本清单不改变文件用途
 // 入参: root 根节点, parent 父节点, name 节点名称, attribute 属性名称, value 引用路径
 func (s *editorReferenceScan) fileReference(root, parent, name, attribute, value string) {
-	if root == "DocVersion" && parent == "FileList" && name == "File" || strings.TrimSpace(value) == "" {
+	if root == "DocVersion" && parent == "FileList" && name == "File" || root == "CustomTags" && parent == "CustomTag" && name == "FileLoc" || strings.TrimSpace(value) == "" {
 		return
 	}
 	kind := packageReference(root, parent, name, attribute)
@@ -359,6 +413,12 @@ func (r *editorResourceRefs) merge(other *editorResourceRefs) {
 	for id, usage := range other.fonts {
 		r.fontUsage(id).merge(usage, false)
 	}
+	for target, tags := range other.customTagFiles {
+		for _, tag := range tags {
+			r.addCustomTagFile(target, tag)
+		}
+	}
+	r.fontUnsafe = r.fontUnsafe || other.fontUnsafe
 }
 
 // referenceToken 记录自产OFD事件，编码会替换的字符使本页回到完整扫描

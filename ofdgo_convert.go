@@ -117,6 +117,11 @@ type ConversionPool struct {
 // 入参: ctx 取消上下文, input 输入源, output 输出流, options 转换选项
 // 返回: ConvertReport 转换报告, error 错误信息
 func Convert(ctx context.Context, input *Input, output io.Writer, options ConvertOptions) (report ConvertReport, err error) {
+	if input != nil {
+		if err = sameOutputFile(input.info, output); err != nil {
+			return report, err
+		}
+	}
 	if options.Resources != nil {
 		if options.Pool == nil {
 			options.Pool = options.Resources.pool
@@ -368,6 +373,39 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 		}
 		err = progress("export", len(indices), len(indices))
 	}
+	return report, err
+}
+
+// ConvertToOutput 通过输出事务将输入文档原子转换写出至目标，失败或取消时自动回滚事务
+// 入参: ctx 取消上下文, input 输入源, target 输出事务目标, options 转换选项
+// 返回: ConvertReport 转换报告, error 转换或提交错误
+func ConvertToOutput(ctx context.Context, input *Input, target Output, options ConvertOptions) (report ConvertReport, err error) {
+	if options.PageOutput != nil {
+		return Convert(ctx, input, io.Discard, options)
+	}
+	if target == nil {
+		return report, ErrSaveTarget
+	}
+	if err = ctx.Err(); err != nil {
+		return report, err
+	}
+	tx, err := target.Begin(ctx)
+	if err != nil {
+		return report, err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, tx.Abort())
+		}
+	}()
+	report, err = Convert(ctx, input, tx, options)
+	if err != nil {
+		return report, err
+	}
+	if err = ctx.Err(); err != nil {
+		return report, err
+	}
+	err = tx.Commit()
 	return report, err
 }
 

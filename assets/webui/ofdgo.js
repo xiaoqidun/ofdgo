@@ -7,6 +7,7 @@ import { MM_TO_PX, SCROLL_SEGMENT_SIZE, createPageView } from "./ofdgo_view.js";
 
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const DEFAULT_IMAGE_DPI = 300;
+const SEARCH_MATCH_LIMIT = 10000;
 const OBJECT_CLIPBOARD_TYPE = "application/x-ofdgo-objects";
 const RESOURCE_KINDS = [["Font", "字体"], ["Image", "图片"], ["Audio", "音频"], ["Video", "视频"], ["Attachment", "附件"], ["ColorSpace", "色彩"], ["DrawParam", "样式"]];
 const SETTINGS_KINDS = [["bookmarks", "书签"], ["actions", "动作"], ["templates", "模板"], ["layers", "图层"], ["extensions", "扩展"]];
@@ -22,6 +23,7 @@ const STATUS = {
 };
 const wasmRequests = new Map();
 const metaContents = new WeakMap();
+const pageIndexes = new WeakMap();
 const batch = { items: [], formats: [], running: false, canceled: false, workers: new Set(), requests: new Map(), sequence: 0, progress: null, jobs: [], credentials: Promise.resolve() };
 const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "FontRow", "FontMode", "Destination", "DPIRow", "DPI", "DPIValue", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
 const fontBinding = { font: null, choices: [], sequence: 0 };
@@ -3683,29 +3685,30 @@ async function switchDocument(index) {
 	if (!isForegroundDocument(tab) || document.body.hasAttribute("data-busy")) return;
 	let openSeq = state.openSeq;
 	const originalDocument = state.doc;
+	const source = state.ofdBytes;
+	let adopted = false;
 	tab.editTask = true;
 	setBusy(true, "正在切换文档", null, "", tab);
 	try {
 		const doc = await callTabWASM(tab, "ofdgoSelectDocument", index);
 		if (tab.closed || tab.state !== state || state.doc !== originalDocument) return;
 		openSeq = state.openSeq = workspace.sequence = Math.max(workspace.sequence, state.openSeq) + 1;
-		const source = state.ofdBytes;
-		state.packageDirty ||= state.dirty;
-		state.savedRevision = doc.revision;
 		state.editorViews.clear();
 		state.objectClipboardToken = state.styleClipboard = null;
 		delete state.textDefaults.fontChoice;
+		adopted = true;
+		state.packageDirty ||= state.dirty;
+		state.savedRevision = doc.revision;
 		state.ofdBytes = null;
 		state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 			pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
-		state.dirty = state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision;
+		state.dirty = state.packageDirty || state.encryptionDirty;
 		state.doc = doc;
 		if (!isForegroundDocument(tab)) {
 			state.pageCache.clear();
 			state.pageIndex = 0;
 			tab.view = null;
 			await refreshDocumentTab(tab);
-			if (nativeHost) await nativeHost.release(source);
 			return;
 		}
 		canvasEditor.clear();
@@ -3713,7 +3716,6 @@ async function switchDocument(index) {
 		updateTextFonts(null, true);
 		setEditorInfo(doc);
 		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true, clearSelection: true, fitMode: state.fitMode, scale: state.scale, activateActions: true });
-		if (nativeHost) await nativeHost.release(source);
 	} catch (error) {
 		if (!tab.closed && tab.state === state && state.doc === originalDocument) {
 			tab.status = error.message;
@@ -3724,6 +3726,7 @@ async function switchDocument(index) {
 			showError(error, false);
 		}
 	} finally {
+		if (nativeHost && adopted) await nativeHost.release(source);
 		tab.editTask = false;
 		setBusy(false, "", 0, "", tab);
 	}
@@ -11651,8 +11654,6 @@ function renderOutlines(reset = true) {
 	showNavigation(selected && !selected.hidden ? selected : el.pagesTab);
 }
 
-const SEARCH_MATCH_LIMIT = 10000;
-
 function resetSearch(clearInput = true) {
 	for (const [id, request] of wasmRequests) if (request.tab === documentTab() && ["ofdgoSearchPage", "ofdgoSearchPages"].includes(request.name)) cancelOperation(id);
 	state.searchTruncated = false;
@@ -12036,8 +12037,6 @@ function createOutlineList(outlines, path = []) {
 	return list;
 }
 
-const pageIndexes = new WeakMap();
-
 function pageIndexByID(pages, id) {
 	let indexes = pageIndexes.get(pages);
 	if (!indexes) {
@@ -12372,7 +12371,7 @@ function openStructureDialog() {
 	el.structureEntry.replaceChildren();
 	for (const [index, structure] of (state.doc.structures || []).entries()) {
 		if (structure.internal) continue;
-		el.structureEntry.add(new Option(`${index + 1} · ${structure.root?.name || structure.typeId}`, index));
+		el.structureEntry.add(new Option(`${index + 1} · ${structure.root?.name || structure.typeId || structure.namespace}`, index));
 	}
 	el.structureEntry.add(new Option("新建标引", -1));
 	el.structureEntry.value = String((state.doc.structures || []).findIndex(structure => !structure.internal));
@@ -12426,6 +12425,7 @@ function refreshStructureFields() {
 	}
 	for (const control of el.structureFields.querySelectorAll("input,textarea,button")) control.disabled = el.structureFields.hidden;
 	el.structureType.disabled = !creating;
+	el.structureNamespace.required = creating && !el.structureFields.hidden;
 	el.structureStatus.textContent = structure?.error || (action === "delete" ? "删除此节点及子节点" : "");
 	el.structureSubmit.textContent = ({ create: "新增", add: "新增", update: "修改", bind: "绑定", delete: "删除" })[action];
 }

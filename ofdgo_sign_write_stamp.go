@@ -232,7 +232,11 @@ func (e *Editor) signatureStamp(page int, path ObjectPath) (Stamp, error) {
 	if page < 0 || page >= len(doc.Pages.Page) {
 		return Stamp{}, fmt.Errorf("page index %d out of range", page)
 	}
-	for _, stamp := range reader.Stamps[doc.Pages.Page[page].ID] {
+	stamps, err := reader.PageStamps(doc.Pages.Page[page].ID)
+	if err != nil {
+		return Stamp{}, err
+	}
+	for _, stamp := range stamps {
 		if stamp.ID == path.ID && stamp.SignatureID == path.Signature {
 			return stamp, nil
 		}

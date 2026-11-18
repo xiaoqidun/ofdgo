@@ -16,7 +16,6 @@ package ofdgo
 
 import (
 	"context"
-	"encoding/json"
 	"encoding/xml"
 	"math"
 	"strconv"
@@ -73,11 +72,22 @@ func (obj *TextObject) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement
 			if err := d.DecodeElement(&code, &node); err != nil {
 				return err
 			}
+			segmentLen := len(textCodeRunes(code.Value))
+			valid := value.CGTransform[:pending]
 			for i := pending; i < len(value.CGTransform); i++ {
-				value.CGTransform[i].CodePosition += offset
+				item := value.CGTransform[i]
+				if item.CodePosition < 0 || item.CodePosition >= segmentLen {
+					continue
+				}
+				if item.CodeCount > segmentLen-item.CodePosition {
+					item.CodeCount = segmentLen - item.CodePosition
+				}
+				item.CodePosition += offset
+				valid = append(valid, item)
 			}
+			value.CGTransform = valid
 			pending = len(value.CGTransform)
-			offset += len(textCodeRunes(code.Value))
+			offset += segmentLen
 			value.TextCode = append(value.TextCode, code)
 			return nil
 		}
@@ -85,24 +95,26 @@ func (obj *TextObject) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement
 	}); err != nil {
 		return err
 	}
-	*obj = TextObject(value)
-	for _, attr := range start.Attr {
-		if attr.Name.Space == textNamespace && attr.Name.Local == "Text" {
-			var meta textMetadata
-			if json.Unmarshal([]byte(attr.Value), &meta) == nil && validateRichLayout(meta.Layout) == nil && structureXMLText(meta.Text) && meta.Digest == obj.textDigest() {
-				obj.layout = &textLayout{value: meta.Text, options: meta.Layout, autoWidth: meta.AutoWidth}
-			}
-		}
+	if pending < len(value.CGTransform) {
+		value.CGTransform = value.CGTransform[:pending]
 	}
+	*obj = TextObject(value)
 	for _, attr := range ofdXMLStart(start).Attr {
-		if attr.Name.Local == "LineWidth" {
+		switch attr.Name.Local {
+		case "LineWidth":
 			obj.LineWidthSet = obj.LineWidth == 0
-		}
-		if attr.Name.Local == "MiterLimit" {
+		case "MiterLimit":
 			obj.MiterLimitSet = obj.MiterLimit == 0
-		}
-		if attr.Name.Local == "DashPattern" {
+		case "DashPattern":
 			obj.dashPatternSet = obj.DashPattern == ""
+		case "Weight":
+			if strings.TrimSpace(attr.Value) != "" {
+				obj.WeightSet = true
+			}
+		case "Italic":
+			if strings.TrimSpace(attr.Value) != "" {
+				obj.ItalicSet = true
+			}
 		}
 	}
 	return nil

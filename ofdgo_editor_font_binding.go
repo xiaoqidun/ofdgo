@@ -36,6 +36,7 @@ import (
 // FontMode 指定字体资源的保存方式，不改变文字位置或压缩选项
 type FontMode uint8
 
+// 字体保存方式枚举常量
 const (
 	// FontKeep 保留原有嵌入方式
 	FontKeep FontMode = iota
@@ -474,83 +475,6 @@ func (e *Editor) prepareFontBinding(ctx context.Context, scan *editorFontDocumen
 	return change, nil
 }
 
-// originalBindingFont 提取包内原字体供字形映射核对，不使用外部同名字体代替
-// 入参: ctx 取消上下文, scan 文档引用, declaration 字体声明
-// 返回: FontFile 独立字体, error 读取、解析或取消错误
-func originalBindingFont(ctx context.Context, scan *editorFontDocument, declaration *editorFontDeclaration) (FontFile, error) {
-	data, err := scan.fontCache.read(ctx, scan.reader, declaration.location)
-	if err != nil {
-		return FontFile{}, err
-	}
-	index := 0
-	if bytes.HasPrefix(data, []byte("ttcf")) {
-		index = basefont.CollectionIndex(data, []string{declaration.font.FontName, declaration.font.FamilyName}, declaration.font.Bold, declaration.font.Italic)
-	}
-	data, err = (FontFile{Data: data}).Face(index)
-	if cancelErr := ctx.Err(); cancelErr != nil {
-		return FontFile{}, cancelErr
-	}
-	return FontFile{Data: data}, err
-}
-
-// fontBindingFile 查找未占用的字体路径，同名内容一致时复用已有文件或本次待写资源
-// 入参: ctx 取消上下文, reader 包快照, pending 待写资源, name 期望路径, data 字体内容
-// 返回: string 包内路径, bool 是否复用, error 取消错误
-func fontBindingFile(ctx context.Context, reader *Reader, pending map[string][]byte, name string, data []byte) (string, bool, error) {
-	base, extension := strings.TrimSuffix(name, path.Ext(name)), path.Ext(name)
-	for i := 0; ; i++ {
-		if err := ctx.Err(); err != nil {
-			return "", false, err
-		}
-		candidate := name
-		if i != 0 {
-			candidate = base + "_" + strconv.Itoa(i) + extension
-		}
-		existing, occupied := pending[candidate]
-		if !occupied {
-			existing, occupied = reader.files[candidate]
-			if !occupied {
-				_, occupied = reader.packageFile(candidate)
-				if occupied {
-					var err error
-					existing, err = reader.readFileViewContext(ctx, candidate)
-					if err != nil {
-						continue
-					}
-				}
-			}
-		}
-		if !occupied || bytes.Equal(existing, data) {
-			return candidate, occupied, ctx.Err()
-		}
-	}
-}
-
-// sameBindingFont 比较独立字体的全部数据表，忽略重新封装产生的校验和差异
-// 入参: source 原字体, target 待嵌入字体
-// 返回: bool 是否保留原字体内容及字形编号
-func sameBindingFont(source, target []byte) bool {
-	a, err := basefont.FileTables(source, 0)
-	if err != nil {
-		return false
-	}
-	b, err := basefont.FileTables(target, 0)
-	if err != nil || len(a) != len(b) {
-		return false
-	}
-	for tag, data := range a {
-		other := b[tag]
-		if tag == "head" && len(data) >= 12 && len(other) >= 12 {
-			if !bytes.Equal(data[:8], other[:8]) || !bytes.Equal(data[12:], other[12:]) {
-				return false
-			}
-		} else if !bytes.Equal(data, other) {
-			return false
-		}
-	}
-	return true
-}
-
 // resolveBindingFont 精确匹配当前字体并提取独立字体数据，集合索引不传递到提取结果
 // 同一文档复用入口和资源定义，字体解析结果不跨调用保留
 // 入参: ctx 取消上下文, scan 文档引用, declaration 字体声明
@@ -597,103 +521,6 @@ func (e *Editor) resolveBindingFont(ctx context.Context, scan *editorFontDocumen
 	return FontFile{Data: data}, err
 }
 
-// checkFontBinding 核对字符覆盖及字形编号，外置仅允许等价的一对一字符映射
-// 入参: ctx 取消上下文, object 文字对象, font 目标字体, mode 保存方式
-// 返回: error 字符、字形或取消错误
-func checkFontBinding(ctx context.Context, object TextObject, font *FontResource, mode FontMode) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	var chars []rune
-	for _, code := range object.TextCode {
-		if code.Index != "" {
-			return fmt.Errorf("font uses index-encoded text")
-		}
-		values, err := textCodeRunesContext(ctx, code.Value)
-		if err != nil {
-			return err
-		}
-		if len(chars) == 0 {
-			chars = values
-		} else {
-			chars = append(chars, values...)
-		}
-	}
-	transforms := slices.Clone(object.CGTransform)
-	slices.SortFunc(transforms, func(a, b CGTransform) int { return cmp.Compare(a.CodePosition, b.CodePosition) })
-	end := 0
-	for _, transform := range transforms {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if transform.CodePosition < 0 || transform.CodeCount < 1 || transform.GlyphCount < 1 || transform.CodePosition > len(chars)-transform.CodeCount {
-			return fmt.Errorf("invalid font glyph mapping")
-		}
-		if transform.CodePosition < end {
-			return fmt.Errorf("overlapping font glyph mapping")
-		}
-		end = transform.CodePosition + transform.CodeCount
-		if mode == FontExternal && transform.CodeCount != transform.GlyphCount {
-			return fmt.Errorf("font uses non-character glyph mapping")
-		}
-		count := 0
-		for value := range strings.FieldsSeq(transform.Glyphs) {
-			if count&4095 == 0 {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-			}
-			if count >= transform.GlyphCount {
-				return fmt.Errorf("invalid font glyph mapping")
-			}
-			glyph, err := strconv.ParseUint(value, 10, 16)
-			if err != nil || glyph == 0 || glyph >= uint64(font.NumGlyphs()) {
-				return fmt.Errorf("font glyph is unavailable")
-			}
-			if mode == FontExternal && uint16(glyph) != font.GlyphIndex(chars[transform.CodePosition+count]) {
-				return fmt.Errorf("font uses non-character glyph mapping")
-			}
-			count++
-		}
-		if count != transform.GlyphCount {
-			return fmt.Errorf("invalid font glyph mapping")
-		}
-	}
-	covered := 0
-	for i, char := range chars {
-		if i&4095 == 0 {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-		}
-		if mode == FontExternal && (char >= 0xe000 && char <= 0xf8ff || char >= 0xf0000 && char <= 0x10fffd) {
-			return fmt.Errorf("font uses private character mapping")
-		}
-		for covered < len(transforms) && i >= transforms[covered].CodePosition+transforms[covered].CodeCount {
-			covered++
-		}
-		if (covered == len(transforms) || i < transforms[covered].CodePosition) && font.GlyphIndex(char) == 0 {
-			return fmt.Errorf("font has no glyph for U+%04X", char)
-		}
-	}
-	return ctx.Err()
-}
-
-// externalFontName 去除PDF字体子集前缀
-// 入参: name 字体名称
-// 返回: string 外部匹配名称
-func externalFontName(name string) string {
-	if len(name) > 7 && name[6] == '+' {
-		for _, char := range name[:6] {
-			if char < 'A' || char > 'Z' {
-				return name
-			}
-		}
-		return name[7:]
-	}
-	return name
-}
-
 // commitResourceSnapshot 重建资源缓存并记录包快照，避免旧缓存跨撤销或重做复用
 // 入参: ctx 取消上下文, reader 修改后的独立快照
 // 返回: error 重建错误
@@ -701,7 +528,11 @@ func (e *Editor) commitResourceSnapshot(ctx context.Context, reader *Reader) err
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	clean := &Reader{Zip: reader.Zip, files: maps.Clone(reader.files), documentIndex: reader.DocumentIndex(), encryption: e.encryption, selectedVersion: reader.selectedVersion}
+	sourceFile := reader.sourceFile
+	if sourceFile == nil {
+		sourceFile = e.sourceFile
+	}
+	clean := &Reader{Zip: reader.Zip, sourceFile: sourceFile, files: maps.Clone(reader.files), documentIndex: reader.DocumentIndex(), encryption: e.encryption, selectedVersion: reader.selectedVersion}
 	if err := clean.initRootContext(ctx); err != nil {
 		return err
 	}
@@ -710,6 +541,9 @@ func (e *Editor) commitResourceSnapshot(ctx context.Context, reader *Reader) err
 		return err
 	}
 	if err := next.retainPendingResources(ctx, e); err != nil {
+		return err
+	}
+	if err := next.retainLoadedStates(ctx, e); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -824,6 +658,67 @@ func (e *Editor) retainPendingResources(ctx context.Context, source *Editor) err
 	return ctx.Err()
 }
 
+// retainLoadedStates 在重建资源快照后保留已加载页面及注解的内存会话状态
+// 入参: ctx 取消上下文, source 修改前的编辑状态
+// 返回: error 页面读取或取消错误
+func (e *Editor) retainLoadedStates(ctx context.Context, source *Editor) error {
+	if source.source != nil && len(source.source.annotationStates) != 0 && e.source != nil {
+		cloned := make(map[string]map[string]editorCompositeState, len(source.source.annotationStates))
+		for key, states := range source.source.annotationStates {
+			cloned[key] = maps.Clone(states)
+		}
+		e.source.annotationStates = cloned
+	}
+	pageMap := make(map[string]int, len(e.pages))
+	for i, page := range e.pages {
+		pageMap[page.ID] = i
+	}
+	for _, oldPage := range source.pages {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(oldPage.Content.Layer) == 0 {
+			continue
+		}
+		nextIndex, ok := pageMap[oldPage.ID]
+		if !ok {
+			continue
+		}
+		saved := make(map[string]GraphicObject)
+		for _, layer := range oldPage.Content.Layer {
+			for _, obj := range layer.Objects {
+				if obj.state != (editorCompositeState{}) || obj.TextObject.layout != nil || len(obj.CompositeGraphicUnit.states) != 0 {
+					saved[editorObjectID(obj)] = obj
+				}
+			}
+		}
+		if len(saved) == 0 {
+			continue
+		}
+		page, err := e.pageContext(ctx, nextIndex)
+		if err != nil {
+			return err
+		}
+		for i := range page.Content.Layer {
+			for j := range page.Content.Layer[i].Objects {
+				target := &page.Content.Layer[i].Objects[j]
+				prev, found := saved[editorObjectID(*target)]
+				if !found {
+					continue
+				}
+				target.state = prev.state
+				if target.Type == "TextObject" && prev.TextObject.layout != nil && target.TextObject.textDigest() == prev.TextObject.textDigest() {
+					target.TextObject.layout = prev.TextObject.layout
+				}
+				if len(prev.CompositeGraphicUnit.states) != 0 {
+					target.CompositeGraphicUnit.states = maps.Clone(prev.CompositeGraphicUnit.states)
+				}
+			}
+		}
+	}
+	return ctx.Err()
+}
+
 // registeredResource 获取已加载的资源定义及文件路径，不扫描页面或其他文档
 // 入参: id 资源标识
 // 返回: editorResource 资源定义，未找到时为空
@@ -909,10 +804,184 @@ func (e *Editor) restoreResourceSnapshot(state Editor) {
 	state.backends, state.fontDirs, state.fontFS = e.backends, e.fontDirs, e.fontFS
 	state.SetResources(e.runtimeResources)
 	state.encryption, state.output, state.OnWriteProgress = e.encryption, e.output, e.OnWriteProgress
-	state.saveTarget = e.saveTarget
+	state.saveTarget, state.sourceFile = e.saveTarget, e.sourceFile
 	state.fontRenderer, state.fontSourcesCache = nil, nil
 	state.fontMetrics = make(map[string]FontMetrics)
 	*e = state
+}
+
+// originalBindingFont 提取包内原字体供字形映射核对，不使用外部同名字体代替
+// 入参: ctx 取消上下文, scan 文档引用, declaration 字体声明
+// 返回: FontFile 独立字体, error 读取、解析或取消错误
+func originalBindingFont(ctx context.Context, scan *editorFontDocument, declaration *editorFontDeclaration) (FontFile, error) {
+	data, err := scan.fontCache.read(ctx, scan.reader, declaration.location)
+	if err != nil {
+		return FontFile{}, err
+	}
+	index := 0
+	if bytes.HasPrefix(data, []byte("ttcf")) {
+		index = basefont.CollectionIndex(data, []string{declaration.font.FontName, declaration.font.FamilyName}, declaration.font.Bold, declaration.font.Italic)
+	}
+	data, err = (FontFile{Data: data}).Face(index)
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return FontFile{}, cancelErr
+	}
+	return FontFile{Data: data}, err
+}
+
+// fontBindingFile 查找未占用的字体路径，同名内容一致时复用已有文件或本次待写资源
+// 入参: ctx 取消上下文, reader 包快照, pending 待写资源, name 期望路径, data 字体内容
+// 返回: string 包内路径, bool 是否复用, error 取消错误
+func fontBindingFile(ctx context.Context, reader *Reader, pending map[string][]byte, name string, data []byte) (string, bool, error) {
+	base, extension := strings.TrimSuffix(name, path.Ext(name)), path.Ext(name)
+	for i := 0; ; i++ {
+		if err := ctx.Err(); err != nil {
+			return "", false, err
+		}
+		candidate := name
+		if i != 0 {
+			candidate = base + "_" + strconv.Itoa(i) + extension
+		}
+		existing, occupied := pending[candidate]
+		if !occupied {
+			existing, occupied = reader.files[candidate]
+			if !occupied {
+				_, occupied = reader.packageFile(candidate)
+				if occupied {
+					var err error
+					existing, err = reader.readFileViewContext(ctx, candidate)
+					if err != nil {
+						continue
+					}
+				}
+			}
+		}
+		if !occupied || bytes.Equal(existing, data) {
+			return candidate, occupied, ctx.Err()
+		}
+	}
+}
+
+// sameBindingFont 比较独立字体的全部数据表，忽略重新封装产生的校验和差异
+// 入参: source 原字体, target 待嵌入字体
+// 返回: bool 是否保留原字体内容及字形编号
+func sameBindingFont(source, target []byte) bool {
+	a, err := basefont.FileTables(source, 0)
+	if err != nil {
+		return false
+	}
+	b, err := basefont.FileTables(target, 0)
+	if err != nil || len(a) != len(b) {
+		return false
+	}
+	for tag, data := range a {
+		other := b[tag]
+		if tag == "head" && len(data) >= 12 && len(other) >= 12 {
+			if !bytes.Equal(data[:8], other[:8]) || !bytes.Equal(data[12:], other[12:]) {
+				return false
+			}
+		} else if !bytes.Equal(data, other) {
+			return false
+		}
+	}
+	return true
+}
+
+// checkFontBinding 核对字符覆盖及字形编号，外置仅允许等价的一对一字符映射
+// 入参: ctx 取消上下文, object 文字对象, font 目标字体, mode 保存方式
+// 返回: error 字符、字形或取消错误
+func checkFontBinding(ctx context.Context, object TextObject, font *FontResource, mode FontMode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var chars []rune
+	for _, code := range object.TextCode {
+		if code.Index != "" {
+			return fmt.Errorf("font uses index-encoded text")
+		}
+		values, err := textCodeRunesContext(ctx, code.Value)
+		if err != nil {
+			return err
+		}
+		if len(chars) == 0 {
+			chars = values
+		} else {
+			chars = append(chars, values...)
+		}
+	}
+	transforms := slices.Clone(object.CGTransform)
+	slices.SortFunc(transforms, func(a, b CGTransform) int { return cmp.Compare(a.CodePosition, b.CodePosition) })
+	end := 0
+	for _, transform := range transforms {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if transform.CodePosition < 0 || transform.CodeCount < 1 || transform.GlyphCount < 1 || transform.CodePosition > len(chars)-transform.CodeCount {
+			return fmt.Errorf("invalid font glyph mapping")
+		}
+		if transform.CodePosition < end {
+			return fmt.Errorf("overlapping font glyph mapping")
+		}
+		end = transform.CodePosition + transform.CodeCount
+		if mode == FontExternal && transform.CodeCount != transform.GlyphCount {
+			return fmt.Errorf("font uses non-character glyph mapping")
+		}
+		count := 0
+		for value := range strings.FieldsSeq(transform.Glyphs) {
+			if count&4095 == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
+			if count >= transform.GlyphCount {
+				return fmt.Errorf("invalid font glyph mapping")
+			}
+			glyph, err := strconv.ParseUint(value, 10, 16)
+			if err != nil || glyph == 0 || glyph >= uint64(font.NumGlyphs()) {
+				return fmt.Errorf("font glyph is unavailable")
+			}
+			if mode == FontExternal && uint16(glyph) != font.GlyphIndex(chars[transform.CodePosition+count]) {
+				return fmt.Errorf("font uses non-character glyph mapping")
+			}
+			count++
+		}
+		if count != transform.GlyphCount {
+			return fmt.Errorf("invalid font glyph mapping")
+		}
+	}
+	covered := 0
+	for i, char := range chars {
+		if i&4095 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		if mode == FontExternal && (char >= 0xe000 && char <= 0xf8ff || char >= 0xf0000 && char <= 0x10fffd) {
+			return fmt.Errorf("font uses private character mapping")
+		}
+		for covered < len(transforms) && i >= transforms[covered].CodePosition+transforms[covered].CodeCount {
+			covered++
+		}
+		if (covered == len(transforms) || i < transforms[covered].CodePosition) && font.GlyphIndex(char) == 0 {
+			return fmt.Errorf("font has no glyph for U+%04X", char)
+		}
+	}
+	return ctx.Err()
+}
+
+// externalFontName 去除PDF字体子集前缀
+// 入参: name 字体名称
+// 返回: string 外部匹配名称
+func externalFontName(name string) string {
+	if len(name) > 7 && name[6] == '+' {
+		for _, char := range name[:6] {
+			if char < 'A' || char > 'Z' {
+				return name
+			}
+		}
+		return name[7:]
+	}
+	return name
 }
 
 // pruneUnreferencedFiles 流式核对全包文件引用并同步版本清单，保留附件及无法确认的扩展引用
@@ -968,7 +1037,7 @@ func pruneUnreferencedFiles(ctx context.Context, reader *Reader, candidates ...s
 				return fmt.Errorf("unknown file dependencies in %s", name)
 			}
 			for _, attr := range node.Attr {
-				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace && !textMetadataAttribute(node.Name, attr) {
+				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace {
 					uncertain = true
 					return fmt.Errorf("unknown file dependencies in %s", name)
 				}
@@ -991,7 +1060,7 @@ func pruneUnreferencedFiles(ctx context.Context, reader *Reader, candidates ...s
 			}
 		}
 		err := reader.scanDocumentFileReferences(ctx, name, true, add, record, inspect)
-		if uncertain && (root == "CustomTags" || root == "RichText") {
+		if uncertain && (root == "CustomTags" || root == "RichText" || root == "Text") {
 			data, readErr := reader.readFileViewContext(ctx, name)
 			if readErr != nil {
 				return readErr

@@ -560,9 +560,13 @@ func (e *Editor) commitLayerTemplateParts(reader *Reader, parts map[string][]byt
 	if err := e.commitResourceSnapshot(ctx, reader); err != nil {
 		return err
 	}
+	prevMap := make(map[string]int, len(previous.pages))
+	for idx, p := range previous.pages {
+		prevMap[p.ID] = idx
+	}
 	for i := range e.pages {
-		oldIndex := slices.IndexFunc(previous.pages, func(p PageContent) bool { return p.ID == e.pages[i].ID })
-		if oldIndex < 0 || len(previous.pages[oldIndex].Content.Layer) == 0 {
+		oldIndex, exists := prevMap[e.pages[i].ID]
+		if !exists || len(previous.pages[oldIndex].Content.Layer) == 0 {
 			continue
 		}
 		states := make(map[string]GraphicObject)

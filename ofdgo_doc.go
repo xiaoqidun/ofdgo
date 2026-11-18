@@ -25,18 +25,19 @@ import (
 // Document 文档结构
 // Signatures由阅读器按主入口和所选版本解析，不属于文档根节点的XML内容
 type Document struct {
-	XMLName     xml.Name    `xml:"Document"`
-	CommonData  CommonData  `xml:"CommonData"`
-	Pages       Pages       `xml:"Pages"`
-	Outlines    Outlines    `xml:"Outlines"`
-	Permissions Permissions `xml:"Permissions"`
-	Actions     []Action    `xml:"Actions>Action"`
-	Bookmarks   Bookmarks   `xml:"Bookmarks"`
-	Annotations string      `xml:"Annotations"`
-	Signatures  string      `xml:"-"`
-	Attachments Attachments `xml:"Attachments"`
-	CustomTags  CustomTags  `xml:"CustomTags"`
-	Extensions  Extensions  `xml:"Extensions"`
+	XMLName      xml.Name      `xml:"Document"`
+	CommonData   CommonData    `xml:"CommonData"`
+	Pages        Pages         `xml:"Pages"`
+	Outlines     Outlines      `xml:"Outlines"`
+	Permissions  Permissions   `xml:"Permissions"`
+	Actions      []Action      `xml:"Actions>Action"`
+	VPreferences *VPreferences `xml:"VPreferences,omitempty"`
+	Bookmarks    Bookmarks     `xml:"Bookmarks"`
+	Annotations  string        `xml:"Annotations"`
+	Signatures   string        `xml:"-"`
+	Attachments  Attachments   `xml:"Attachments"`
+	CustomTags   CustomTags    `xml:"CustomTags"`
+	Extensions   Extensions    `xml:"Extensions"`
 }
 
 // Extensions 扩展集合
@@ -177,6 +178,18 @@ type OutlineInfo struct {
 	Children    []OutlineInfo `json:"children,omitempty"`
 }
 
+// VPreferences 文档视图首选项
+type VPreferences struct {
+	PageMode     string   `xml:"PageMode,omitempty"`
+	PageLayout   string   `xml:"PageLayout,omitempty"`
+	TabDisplay   string   `xml:"TabDisplay,omitempty"`
+	HideToolbar  *bool    `xml:"HideToolbar,omitempty"`
+	HideMenubar  *bool    `xml:"HideMenubar,omitempty"`
+	HideWindowUI *bool    `xml:"HideWindowUI,omitempty"`
+	ZoomMode     string   `xml:"ZoomMode,omitempty"`
+	Zoom         *float64 `xml:"Zoom,omitempty"`
+}
+
 // Permissions 权限声明
 type Permissions struct {
 	Edit          bool         `xml:"Edit"`
@@ -219,6 +232,9 @@ func (doc *Document) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 			target = &doc.Permissions
 		case "Actions":
 			return decodeOFDActions(d, node, &doc.Actions)
+		case "VPreferences":
+			doc.VPreferences = &VPreferences{}
+			target = doc.VPreferences
 		case "Bookmarks":
 			target = &doc.Bookmarks
 		case "Annotations":
@@ -590,60 +606,87 @@ func (o *OutlineElem) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error
 	})
 }
 
+// UnmarshalXML 解析视图首选项并忽略外部命名空间的同名节点
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (v *VPreferences) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*v = VPreferences{}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "PageMode":
+			return d.DecodeElement(&v.PageMode, &node)
+		case "PageLayout":
+			return d.DecodeElement(&v.PageLayout, &node)
+		case "TabDisplay":
+			return d.DecodeElement(&v.TabDisplay, &node)
+		case "HideToolbar":
+			v.HideToolbar = new(bool)
+			return d.DecodeElement(v.HideToolbar, &node)
+		case "HideMenubar":
+			v.HideMenubar = new(bool)
+			return d.DecodeElement(v.HideMenubar, &node)
+		case "HideWindowUI":
+			v.HideWindowUI = new(bool)
+			return d.DecodeElement(v.HideWindowUI, &node)
+		case "ZoomMode":
+			return d.DecodeElement(&v.ZoomMode, &node)
+		case "Zoom":
+			v.Zoom = new(float64)
+			return d.DecodeElement(v.Zoom, &node)
+		default:
+			return d.Skip()
+		}
+	})
+}
+
 // UnmarshalXML 解析文档权限并应用默认值
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
 func (p *Permissions) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	var value struct {
-		Edit          *bool        `xml:"Edit"`
-		Annot         *bool        `xml:"Annot"`
-		Export        *bool        `xml:"Export"`
-		Signature     *bool        `xml:"Signature"`
-		Watermark     *bool        `xml:"Watermark"`
-		PrintScreen   *bool        `xml:"PrintScreen"`
-		Copy          *bool        `xml:"CopyText"`
-		ContentRegist *bool        `xml:"ContentRegist"`
-		Print         *print       `xml:"Print"`
-		ValidPeriod   *ValidPeriod `xml:"ValidPeriod"`
-	}
-	if err := d.DecodeElement(&value, &start); err != nil {
-		return err
-	}
 	*p = defaultPermissions()
-	if value.Edit != nil {
-		p.Edit = *value.Edit
-	}
-	if value.Annot != nil {
-		p.Annot = *value.Annot
-	}
-	if value.Export != nil {
-		p.Export = *value.Export
-	}
-	if value.Signature != nil {
-		p.Signature = *value.Signature
-	}
-	if value.Watermark != nil {
-		p.Watermark = *value.Watermark
-	}
-	if value.PrintScreen != nil {
-		p.PrintScreen = *value.PrintScreen
-	}
-	if value.Copy != nil {
-		p.Copy = *value.Copy
-	}
-	if value.ContentRegist != nil {
-		p.ContentRegist = *value.ContentRegist
-	}
-	if value.Print != nil {
-		if value.Print.Printable != nil {
-			p.Print = *value.Print.Printable
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "Edit":
+			return d.DecodeElement(&p.Edit, &node)
+		case "Annot":
+			return d.DecodeElement(&p.Annot, &node)
+		case "Export":
+			return d.DecodeElement(&p.Export, &node)
+		case "Signature":
+			return d.DecodeElement(&p.Signature, &node)
+		case "Watermark":
+			return d.DecodeElement(&p.Watermark, &node)
+		case "PrintScreen":
+			return d.DecodeElement(&p.PrintScreen, &node)
+		case "CopyText":
+			return d.DecodeElement(&p.Copy, &node)
+		case "ContentRegist":
+			return d.DecodeElement(&p.ContentRegist, &node)
+		case "Print":
+			var pr print
+			node = ofdXMLStart(node)
+			if err := d.DecodeElement(&pr, &node); err != nil {
+				return err
+			}
+			if pr.Printable != nil {
+				p.Print = *pr.Printable
+			}
+			if pr.Copies != nil {
+				p.Copies = *pr.Copies
+			}
+			return nil
+		case "ValidPeriod":
+			var vp ValidPeriod
+			node = ofdXMLStart(node)
+			if err := d.DecodeElement(&vp, &node); err != nil {
+				return err
+			}
+			p.ValidPeriod = &vp
+			return nil
+		default:
+			return d.Skip()
 		}
-		if value.Print.Copies != nil {
-			p.Copies = *value.Print.Copies
-		}
-	}
-	p.ValidPeriod = value.ValidPeriod
-	return nil
+	})
 }
 
 // print 打印权限节点

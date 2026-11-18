@@ -192,15 +192,25 @@ func (r *Reader) readInvoiceXML(ctx context.Context, data []byte, source Invoice
 						return err
 					}
 					texts := make(map[string][]string)
+					visitedUnits := make(map[*CompositeGraphicUnit]bool)
 					var collect func(GraphicObject)
 					collect = func(object GraphicObject) {
 						if object.Type == "TextObject" {
 							id := editorResourceID(object.TextObject.ID)
 							texts[id] = append(texts[id], object.TextObject.Text())
 						}
-						if object.Type == "CompositeGraphicUnit" {
+						if object.Type == "CompositeGraphicUnit" || object.Type == "CompositeObject" {
 							for child := range object.CompositeGraphicUnit.objects() {
 								collect(child)
+							}
+							if resID := object.CompositeGraphicUnit.ResourceID; resID != "" {
+								if unit, _ := r.resolveCompositeScoped(content.pageResources, resID); unit != nil && !visitedUnits[unit] {
+									visitedUnits[unit] = true
+									for child := range unit.objects() {
+										collect(child)
+									}
+									delete(visitedUnits, unit)
+								}
 							}
 						}
 					}

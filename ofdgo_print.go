@@ -223,7 +223,7 @@ func (r *Renderer) PreparePrint(ctx context.Context, options PrintOptions) (*Pri
 	if err != nil {
 		return nil, err
 	}
-	doc, err := view.Reader.DocContext(ctx)
+	doc, err := view.Reader.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -233,8 +233,16 @@ func (r *Renderer) PreparePrint(ctx context.Context, options PrintOptions) (*Pri
 	if doc.Permissions.Copies > 0 && o.Copies > doc.Permissions.Copies {
 		return nil, ErrPrintDenied
 	}
+	needed, err := selectedPrintPageSet(len(doc.Pages.Page), o)
+	if err != nil {
+		return nil, err
+	}
 	boxes := make([]Box, len(doc.Pages.Page))
 	for i, page := range doc.Pages.Page {
+		if !needed[i] {
+			boxes[i] = Box{W: 1, H: 1}
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -654,4 +662,40 @@ func printPlacement(index int, source, cell Box, o PrintOptions) PrintPlacement 
 	}
 	clipped := w*scale > cell.W+1e-6 || h*scale > cell.H+1e-6
 	return PrintPlacement{Page: index, Width: source.W, Height: source.H, Transform: m, Clip: cell, Clipped: clipped}
+}
+
+// selectedPrintPageSet 预先确定本次打印实际选中的零基页码集合，避免读取未打印页
+// 入参: pageCount 文档总页数, o 规范排版选项
+// 返回: map[int]bool 选中页码集合, error 页码越界或为空错误
+func selectedPrintPageSet(pageCount int, o PrintOptions) (map[int]bool, error) {
+	if pageCount == 0 {
+		return nil, fmt.Errorf("no pages to print")
+	}
+	indices := o.Pages
+	if o.PageRange != "" {
+		var err error
+		indices, err = ParsePageRange(o.PageRange, pageCount)
+		if err != nil {
+			return nil, err
+		}
+	} else if o.Pages == nil {
+		indices = make([]int, pageCount)
+		for i := range indices {
+			indices[i] = i
+		}
+	}
+	needed := make(map[int]bool, len(indices))
+	for _, index := range indices {
+		if index < 0 || index >= pageCount {
+			return nil, fmt.Errorf("print page index %d outside document", index)
+		}
+		if o.Parity == "odd" && index%2 != 0 || o.Parity == "even" && index%2 == 0 {
+			continue
+		}
+		needed[index] = true
+	}
+	if len(needed) == 0 {
+		return nil, fmt.Errorf("no pages selected for printing")
+	}
+	return needed, nil
 }

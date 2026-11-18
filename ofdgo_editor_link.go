@@ -265,8 +265,13 @@ func (e *Editor) UpdateAnnotationLink(page int, id string, target AnnotationLink
 				if err != nil {
 					return nil, err
 				}
-				position := objects[0].open
-				data = editorPatchXML(data, []editorXMLPatch{{position, position, bytes.TrimPrefix(actions, []byte(xml.Header))}})
+				actions = bytes.TrimPrefix(actions, []byte(xml.Header))
+				if objects[0].open == objects[0].end {
+					data = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, objects[0], actions)})
+				} else {
+					position := objects[0].open
+					data = editorPatchXML(data, []editorXMLPatch{{position, position, actions}})
+				}
 			}
 		}
 		return editorAnnotationDate(data)

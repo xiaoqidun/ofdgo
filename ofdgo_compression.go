@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/xml"
+	"errors"
 	"hash/crc32"
 	"image"
 	"io"
@@ -72,6 +73,9 @@ type WriteOptions struct{ Compression CompressionOptions }
 // 入参: ctx 取消上下文, writer 输出流, options 输出配置
 // 返回: int64 已写入字节数, error 错误信息
 func (e *Editor) WriteToWithOptions(ctx context.Context, writer io.Writer, options WriteOptions) (int64, error) {
+	if err := sameOutputFile(e.sourceFile, writer); err != nil {
+		return 0, err
+	}
 	snapshot, err := e.outputSnapshot(ctx, options)
 	if err != nil {
 		return 0, err
@@ -87,6 +91,9 @@ func (e *Editor) WriteToWithOptions(ctx context.Context, writer io.Writer, optio
 // 入参: ctx 取消上下文, writer 输出流, indexes 零基页码, options 输出配置
 // 返回: int64 已写入字节数, error 错误信息
 func (e *Editor) WritePagesTo(ctx context.Context, writer io.Writer, indexes []int, options WriteOptions) (int64, error) {
+	if err := sameOutputFile(e.sourceFile, writer); err != nil {
+		return 0, err
+	}
 	ctx = e.runtimeResources.context(ctx)
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -100,6 +107,35 @@ func (e *Editor) WritePagesTo(ctx context.Context, writer io.Writer, indexes []i
 	defer snapshot.output.release()
 	var count int64
 	return snapshot.writePagesTo(convertWriter{ctx: ctx, writer: writer, count: &count}, indexes)
+}
+
+// WritePagesToOutput 通过输出事务原子另存指定页面，取消或失败时自动回滚事务
+// 入参: ctx 取消上下文, target 保存目标, indexes 零基页码, options 输出配置
+// 返回: int64 已写入字节数, error 错误信息
+func (e *Editor) WritePagesToOutput(ctx context.Context, target Output, indexes []int, options WriteOptions) (n int64, err error) {
+	if target == nil {
+		return 0, ErrSaveTarget
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	tx, err := target.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, tx.Abort())
+		}
+	}()
+	n, err = e.WritePagesTo(ctx, tx, indexes, options)
+	if err != nil {
+		return n, err
+	}
+	if err = ctx.Err(); err != nil {
+		return n, err
+	}
+	return n, tx.Commit()
 }
 
 // WithCompression 设置导出策略，不修改文档资源和渲染缓存

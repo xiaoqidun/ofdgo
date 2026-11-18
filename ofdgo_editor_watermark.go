@@ -101,13 +101,16 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 	if err != nil {
 		return nil, err
 	}
-	reader, err := preview.reader(nil)
+	reader, err := preview.readerContext(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer reader.Close()
-	page, err := reader.PageContentByIndex(indexes[0])
+	doc, err := reader.docStructureContext(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := reader.PageContentByIndexContext(ctx, indexes[0]); err != nil {
 		return nil, err
 	}
 	renderer := e.newRenderer(reader)
@@ -126,17 +129,27 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 	}
 	var ids []string
 	err = e.Transaction(func(edit *Editor) error {
+		items := make([][]byte, 0, len(indexes))
+		ids = make([]string, 0, len(indexes))
 		for _, index := range indexes {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if index != indexes[0] {
-				page, err = reader.PageContentByIndex(index)
-				if err != nil {
-					return err
-				}
+			area, err := reader.PageAreaContext(ctx, doc.Pages.Page[index])
+			if err != nil {
+				return err
 			}
-			pageBox, err := renderer.GetPageBox(page)
+			boxStr := area.PhysicalBox
+			if boxStr == "" {
+				boxStr = area.ApplicationBox
+			}
+			if boxStr == "" {
+				boxStr = area.ContentBox
+			}
+			if boxStr == "" {
+				boxStr = "0 0 210 297"
+			}
+			pageBox, err := ParseBox(boxStr)
 			if err != nil {
 				return err
 			}
@@ -144,13 +157,14 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 			if err != nil {
 				return err
 			}
-			id, err := edit.AddAnnotation(index, annotation)
+			id, data, err := edit.prepareAnnotation(index, annotation)
 			if err != nil {
 				return err
 			}
 			ids = append(ids, id)
+			items = append(items, data)
 		}
-		return ctx.Err()
+		return edit.appendPageAnnotations(ctx, indexes, items, true)
 	})
 	if err != nil {
 		return nil, err

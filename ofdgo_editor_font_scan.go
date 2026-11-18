@@ -101,8 +101,7 @@ func scanEditorFontFiles(ctx context.Context, reader *Reader, index int, inspect
 }
 
 // scanEditorFontFilesMode 按需保留文字节点及原文，只读访问在扫描后释放非资源文件原文
-// 入参: ctx 取消上下文, reader 包快照, index 文档索引, inspect 可选的文件节点访问器, retain 是否保留编辑数据
-// stream 为可选的只读访问器，依次返回是否已处理、是否不安全、依赖路径及错误
+// 入参: ctx 取消上下文, reader 包快照, index 文档索引, inspect 可选的文件节点访问器, retain 是否保留编辑数据, stream 可选的只读访问器
 // 返回: *editorFontDocument 扫描结果, error 读取、结构或访问错误
 func scanEditorFontFilesMode(ctx context.Context, reader *Reader, index int, inspect func(*editorFontXML, *editorXML) error, retain bool, stream func(*editorFontXML) (bool, bool, []string, error)) (*editorFontDocument, error) {
 	scan := &editorFontDocument{reader: reader, index: index, files: make(map[string]*editorFontXML), fonts: make(map[string]*editorFontDeclaration), texts: make(map[string][]editorFontText)}
@@ -161,7 +160,12 @@ func scanEditorFontFilesMode(ctx context.Context, reader *Reader, index int, ins
 			}
 			if slices.Contains([]string{"CustomTags", "Extensions", "ExtendData", "Data"}, node.name.Local) {
 				if node.matchesOFD("CustomTags") {
-					safe, err := richTextTagsFontSafe(ctx, reader, index)
+					var safe bool
+					if stream == nil {
+						safe, err = richTextTagsFontSafe(ctx, reader, index)
+					} else {
+						safe, err = customTagsResourceSafe(ctx, reader, index)
+					}
 					if err != nil {
 						return err
 					}
@@ -173,7 +177,7 @@ func scanEditorFontFilesMode(ctx context.Context, reader *Reader, index int, ins
 				return nil
 			}
 			for _, attr := range node.attrs {
-				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace && !textMetadataAttribute(node.name, attr) {
+				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace {
 					scan.unsafe = true
 				}
 			}
@@ -254,4 +258,42 @@ func editorFontXMLText(value string) []byte {
 	var data bytes.Buffer
 	_ = xml.EscapeText(&data, []byte(value))
 	return data.Bytes()
+}
+
+// customTagsResourceSafe 按已知命名空间白名单核验自定义标引，未知行业命名空间不推定其资源引用语义
+// 入参: ctx 取消上下文, reader 包阅读器, index 文档索引
+// 返回: bool 是否满足已知命名空间资源引用完整性, error 读取或取消错误
+func customTagsResourceSafe(ctx context.Context, reader *Reader, index int) (bool, error) {
+	view, err := reader.DocumentContext(ctx, index)
+	if err != nil {
+		return false, err
+	}
+	defer view.Close()
+	tags, err := view.CustomTagsContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, tag := range tags {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if strings.TrimSpace(tag.FileLoc) == "" || !isKnownResourceSafeTagMeta(tag) {
+			return false, nil
+		}
+		if tag.SchemaLoc != "" {
+			schemaFile, err := view.openFile(view.ResPath(tag.SchemaLoc))
+			if err != nil {
+				return false, nil
+			}
+			_ = schemaFile.Close()
+		}
+		structure, err := view.readStructureContext(ctx, tag)
+		if err != nil {
+			return false, ctx.Err()
+		}
+		if !knownResourceSafeCustomTag(tag, structure.Root) {
+			return false, nil
+		}
+	}
+	return true, ctx.Err()
 }

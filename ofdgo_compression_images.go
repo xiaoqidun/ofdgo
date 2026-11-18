@@ -333,19 +333,6 @@ func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOp
 	return images, sizes, ctx.Err()
 }
 
-// compressionImageSize 将毫米显示尺寸换算为像素，非法尺寸不降采样
-// 整像素边界消除单位换算产生的单ULP上溢，不降低实际像素需求
-// 入参: width 显示宽度, height 显示高度, dpi 分辨率上限
-// 返回: image.Point 像素需求
-func compressionImageSize(width, height float64, dpi int) image.Point {
-	w := math.Ceil(math.Nextafter(width*float64(dpi)/25.4, math.Inf(-1)))
-	h := math.Ceil(math.Nextafter(height*float64(dpi)/25.4, math.Inf(-1)))
-	if w <= 0 || h <= 0 || math.IsNaN(w) || math.IsNaN(h) || math.IsInf(w, 0) || math.IsInf(h, 0) || w > 1<<30 || h > 1<<30 {
-		return image.Point{}
-	}
-	return image.Pt(int(w), int(h))
-}
-
 // compressionImageSizes 按正文、模板、注解及底纹的实际变换汇总图片尺寸，包括隐藏内容
 // 模板使用独立页面坐标，统一分析一次，避免随引用页数重复展开
 // 入参: ctx 取消上下文, images 图片资源, dpi 分辨率上限
@@ -389,11 +376,14 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 		if template == nil {
 			return nil, ctx.Err()
 		}
+		unbind := renderer.bindPageResources(template)
 		for order := range 3 {
-			if err := renderer.walkLayers(template.Content.Layer, order, visitor); err != nil {
+			if err := renderer.walkLayers(template.Content.Layer, order, nil, visitor); err != nil {
+				unbind()
 				return nil, ctx.Err()
 			}
 		}
+		unbind()
 	}
 	result := make(map[string]image.Point)
 	for _, img := range images {
@@ -403,6 +393,19 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 		result[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
 	}
 	return result, ctx.Err()
+}
+
+// compressionImageSize 将毫米显示尺寸换算为像素，非法尺寸不降采样
+// 整像素边界消除单位换算产生的单ULP上溢，不降低实际像素需求
+// 入参: width 显示宽度, height 显示高度, dpi 分辨率上限
+// 返回: image.Point 像素需求
+func compressionImageSize(width, height float64, dpi int) image.Point {
+	w := math.Ceil(math.Nextafter(width*float64(dpi)/25.4, math.Inf(-1)))
+	h := math.Ceil(math.Nextafter(height*float64(dpi)/25.4, math.Inf(-1)))
+	if w <= 0 || h <= 0 || math.IsNaN(w) || math.IsNaN(h) || math.IsInf(w, 0) || math.IsInf(h, 0) || w > 1<<30 || h > 1<<30 {
+		return image.Point{}
+	}
+	return image.Pt(int(w), int(h))
 }
 
 // outputImageFormat 识别可由资源压缩生成的图片格式

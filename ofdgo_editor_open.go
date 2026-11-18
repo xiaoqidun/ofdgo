@@ -112,6 +112,7 @@ func (r *Reader) EditorContext(ctx context.Context) (*Editor, error) {
 	}
 	e := NewEditor()
 	e.runtimeResources = r.resources
+	e.sourceFile = r.sourceFile
 	e.pdfDestinations = r.pdfDestinations.clone()
 	e.encryption = r.encryption
 	directory := cleanPackagePath(reader.RootDir)
@@ -215,12 +216,14 @@ type editorObjectOrigin struct {
 
 // editorSourcePage 保存页面原文、解析快照及图层和页块内的对象位置
 type editorSourcePage struct {
-	ref      Page
-	data     []byte
-	root     *editorXML
-	original *PageContent
-	nodes    map[string]*editorXML
-	repaired bool
+	ref            Page
+	data           []byte
+	root           *editorXML
+	original       *PageContent
+	initialLayers  []Layer
+	initialActions []Action
+	nodes          map[string]*editorXML
+	repaired       bool
 }
 
 // editError 将操作受限原因转为错误，保留可供调用方识别的缺字诊断
@@ -231,47 +234,6 @@ func (c ObjectCapabilities) editError() error {
 		err = c.MissingGlyphs
 	}
 	return &EditError{Code: c.ReasonCode, Err: err}
-}
-
-// cloneEditorReader 复用已验证的只读包索引，独立保存可变文档与读取缓存
-// 入参: reader 已加载当前文档的阅读器
-// 返回: *Reader 不拥有输入文件的独立阅读器
-func cloneEditorReader(reader *Reader) *Reader {
-	next := *reader
-	next.Closer = nil
-	next.OFD = cloneEditorData(reader.OFD)
-	doc := *reader.doc
-	pages := doc.Pages.Page
-	doc.Pages.Page = nil
-	doc = cloneEditorData(doc)
-	doc.Pages.Page = slices.Clone(pages)
-	next.doc = &doc
-	next.files = maps.Clone(reader.files)
-	next.ResMap = maps.Clone(reader.ResMap)
-	next.mediaCache = maps.Clone(reader.mediaCache)
-	next.resourcesRead = maps.Clone(reader.resourcesRead)
-	next.resourceFiles = maps.Clone(reader.resourceFiles)
-	next.fontCache = cloneEditorMap(reader.fontCache)
-	next.fontFaces = maps.Clone(reader.fontFaces)
-	next.colorSpaceCache = cloneEditorMap(reader.colorSpaceCache)
-	next.drawParamCache = cloneEditorMap(reader.drawParamCache)
-	next.compositeGraphicUnitCache = cloneEditorMap(reader.compositeGraphicUnitCache)
-	next.pageHeaderCache = maps.Clone(reader.pageHeaderCache)
-	next.Stamps = cloneEditorMap(reader.Stamps)
-	next.Annots = cloneEditorMap(reader.Annots)
-	next.annotationFiles = cloneEditorMap(reader.annotationFiles)
-	return &next
-}
-
-// cloneEditorMap 复制对外可变缓存值，避免快照之间共享嵌套切片或指针
-// 入参: values 原缓存
-// 返回: map[string]T 独立缓存
-func cloneEditorMap[T any](values map[string]T) map[string]T {
-	result := maps.Clone(values)
-	for key, value := range result {
-		result[key] = cloneEditorData(value)
-	}
-	return result
 }
 
 // prepareSourceIDs 首次新增内容前流式核对原包标识，不依赖可能缺失或过期的MaxUnitID
@@ -333,48 +295,6 @@ func (e *Editor) sourceMaxID(progress editorProgress) (uint64, error) {
 		maximum = max(maximum, id)
 	}
 	return maximum, nil
-}
-
-// editorXMLMaxID 按内容识别OFD结构并读取最大标识，跳过二进制及非OFD内容
-// 入参: input 包内文件流
-// 返回: uint64 最大标识, error 错误信息
-func editorXMLMaxID(input io.Reader) (uint64, error) {
-	buffer := bufio.NewReader(input)
-	if found, err := editorXMLPrefix(buffer); err != nil || !found {
-		return 0, err
-	}
-	decoder := xml.NewDecoder(buffer)
-	maximum, started := uint64(0), false
-	for {
-		token, err := decoder.Token()
-		var syntax *xml.SyntaxError
-		if err == io.EOF || !started && errors.As(err, &syntax) {
-			return maximum, nil
-		}
-		if err != nil {
-			return 0, err
-		}
-		node, ok := token.(xml.StartElement)
-		if !ok {
-			continue
-		}
-		if !started {
-			switch node.Name.Local {
-			case "OFD", "Document", "Page", "Res", "PageAnnot", "Annotations", "Attachments", "CustomTags":
-			default:
-				return 0, nil
-			}
-			started = true
-		}
-		for _, attr := range node.Attr {
-			if attr.Name.Space == "" && attr.Name.Local == "ID" {
-				id, err := strconv.ParseUint(strings.Trim(attr.Value, " \t\r\n"), 10, 32)
-				if err == nil {
-					maximum = max(maximum, id)
-				}
-			}
-		}
-	}
 }
 
 // originalPage 判断索引是否指向原文档页面
@@ -555,6 +475,7 @@ func (e *Editor) loadSourcePageContext(ctx context.Context, index int) error {
 		}
 		page.Content = updated.Content
 	}
+	e.restorePageTextLayouts(page)
 	nodes := make(map[string]*editorXML)
 	if content := root.child("Content"); content != nil {
 		for _, layer := range content.children {
@@ -594,9 +515,12 @@ func (e *Editor) loadSourcePageContext(ctx context.Context, index int) error {
 		return err
 	}
 	maps.Copy(e.source.origins, origins)
+	copied := copyEditorPage(*page)
+	source.initialLayers = copied.Content.Layer
+	source.initialActions = copied.Actions
 	source.original = page
 	e.source.pages[source.ref.ID] = source
-	e.pages[index] = copyEditorPage(*page)
+	e.pages[index] = copied
 	return nil
 }
 
@@ -703,58 +627,6 @@ func (e *Editor) setObjectOrigin(id string, origin *editorObjectOrigin) {
 	e.origins[id] = origin
 }
 
-// editorPreservedObject 判断对象是否仅改变标识、几何和可独立写回的外观字段
-// 入参: before 原始快照, after 新快照
-// 返回: bool 是否保留原内容
-func editorPreservedObject(before, after GraphicObject) bool {
-	if before.Type != after.Type {
-		return false
-	}
-	before = cloneEditorData(before)
-	before.state = after.state
-	before.richText = after.richText
-	switch before.Type {
-	case "TextObject":
-		a, b := &before.TextObject, after.TextObject
-		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
-		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
-		a.LineWidthSet = b.LineWidthSet
-		a.MiterLimit, a.MiterLimitSet = b.MiterLimit, b.MiterLimitSet
-		a.DashOffset, a.DashPattern, a.Cap, a.Join = b.DashOffset, b.DashPattern, b.Cap, b.Join
-		a.dashPatternSet = b.dashPatternSet
-	case "PathObject":
-		a, b := &before.PathObject, after.PathObject
-		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
-		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
-		a.LineWidthSet = b.LineWidthSet
-		a.MiterLimit, a.MiterLimitSet = b.MiterLimit, b.MiterLimitSet
-		a.DashOffset, a.DashPattern, a.Cap, a.Join = b.DashOffset, b.DashPattern, b.Cap, b.Join
-		a.dashPatternSet = b.dashPatternSet
-	case "ImageObject":
-		a, b := &before.ImageObject, after.ImageObject
-		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
-	case "CompositeObject", "CompositeGraphicUnit":
-		a, b := &before.CompositeGraphicUnit, after.CompositeGraphicUnit
-		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
-	default:
-		return false
-	}
-	a, b := *editorObjectClips(&before), *editorObjectClips(&after)
-	if a == nil {
-		*editorObjectClips(&before) = b
-	} else if b != nil && len(a.Clip) <= len(b.Clip) {
-		a.Clip = append(a.Clip, b.Clip[len(a.Clip):]...)
-		for i := range a.Clip {
-			if len(a.Clip[i].Area) == len(b.Clip[i].Area) {
-				for j := range a.Clip[i].Area {
-					a.Clip[i].Area[j].CTM = b.Clip[i].Area[j].CTM
-				}
-			}
-		}
-	}
-	return reflect.DeepEqual(before, after)
-}
-
 // prepareCopiedObject 保真复制原对象，不重新生成字形或丢弃未修改字段
 // 入参: id 新标识, object 对象快照
 // 返回: GraphicObject 独立副本, error 错误信息
@@ -852,35 +724,6 @@ func (e *Editor) validatePreservedAppearance(before, after GraphicObject) error 
 		return validateEditorStroke(after.PathObject)
 	}
 	return nil
-}
-
-// editorContainerOrderable 判断容器的直接对象能否在保留页块的前提下排序
-// 入参: container 图层或页块
-// 返回: bool 是否可排序
-func editorContainerOrderable(container *editorXML) bool {
-	for _, child := range container.children {
-		if !editorXMLTransformable(child) {
-			return false
-		}
-	}
-	return true
-}
-
-// editorGeometry 获取基本对象的边界与变换
-// 入参: object 对象
-// 返回: string 边界, string 变换矩阵
-func editorGeometry(object GraphicObject) (string, string) {
-	switch object.Type {
-	case "TextObject":
-		return object.TextObject.Boundary, object.TextObject.CTM
-	case "PathObject":
-		return object.PathObject.Boundary, object.PathObject.CTM
-	case "ImageObject":
-		return object.ImageObject.Boundary, object.ImageObject.CTM
-	case "CompositeObject", "CompositeGraphicUnit":
-		return object.CompositeGraphicUnit.Boundary, object.CompositeGraphicUnit.CTM
-	}
-	return "", ""
 }
 
 // editorFont 按需解析内嵌字体或名称匹配的外部字体，不使用无关回退字体
@@ -1040,6 +883,176 @@ func (e *Editor) validateImageMask(id string, size image.Point) error {
 		return err
 	}
 	return validateImageMask(context.Background(), mask, size)
+}
+
+// cloneEditorReader 复用已验证的只读包索引，独立保存可变文档与读取缓存
+// 入参: reader 已加载当前文档的阅读器
+// 返回: *Reader 不拥有输入文件的独立阅读器
+func cloneEditorReader(reader *Reader) *Reader {
+	next := *reader
+	reader.cloneMutableState(&next)
+	next.Closer = nil
+	next.OFD = cloneEditorData(reader.OFD)
+	doc := *reader.doc
+	pages := doc.Pages.Page
+	doc.Pages.Page = nil
+	doc = cloneEditorData(doc)
+	doc.Pages.Page = slices.Clone(pages)
+	next.doc = &doc
+	next.files = maps.Clone(reader.files)
+	next.pageReady = maps.Clone(reader.pageReady)
+	next.fileNames = maps.Clone(reader.fileNames)
+	return &next
+}
+
+// cloneEditorMap 复制对外可变缓存值，避免快照之间共享嵌套切片或指针
+// 入参: values 原缓存
+// 返回: map[string]T 独立缓存
+func cloneEditorMap[T any](values map[string]T) map[string]T {
+	result := maps.Clone(values)
+	for key, value := range result {
+		result[key] = cloneEditorData(value)
+	}
+	return result
+}
+
+// editorXMLMaxID 按内容识别OFD结构并读取最大标识，跳过二进制及非OFD内容
+// 入参: input 包内文件流
+// 返回: uint64 最大标识, error 错误信息
+func editorXMLMaxID(input io.Reader) (uint64, error) {
+	buffer := bufio.NewReader(input)
+	if found, err := editorXMLPrefix(buffer); err != nil || !found {
+		return 0, err
+	}
+	decoder := xml.NewDecoder(buffer)
+	maximum, started := uint64(0), false
+	for {
+		token, err := decoder.Token()
+		var syntax *xml.SyntaxError
+		if err == io.EOF || !started && errors.As(err, &syntax) {
+			return maximum, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		node, ok := token.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		if !started {
+			switch node.Name.Local {
+			case "OFD", "Document", "Page", "Res", "PageAnnot", "Annotations", "Attachments", "CustomTags":
+			default:
+				return 0, nil
+			}
+			started = true
+		}
+		for _, attr := range node.Attr {
+			if attr.Name.Space == "" && attr.Name.Local == "ID" {
+				id, err := strconv.ParseUint(strings.Trim(attr.Value, " \t\r\n"), 10, 32)
+				if err == nil {
+					maximum = max(maximum, id)
+				}
+			}
+		}
+	}
+}
+
+// sourcePageUntouched 按写时复制切片头快速判断已加载页面是否保持初始未改状态
+// 入参: page 当前页面内容, source 原始页面记录
+// 返回: bool 是否完全未改动
+func sourcePageUntouched(page PageContent, source *editorSourcePage) bool {
+	if source == nil || source.original == nil || page.Area != source.original.Area {
+		return false
+	}
+	if len(page.Actions) != len(source.initialActions) || len(page.Actions) > 0 && &page.Actions[0] != &source.initialActions[0] {
+		return false
+	}
+	if len(page.Content.Layer) != len(source.initialLayers) || len(page.Content.Layer) > 0 && &page.Content.Layer[0] != &source.initialLayers[0] {
+		return false
+	}
+	return true
+}
+
+// editorPreservedObject 判断对象是否仅改变标识、几何和可独立写回的外观字段
+// 入参: before 原始快照, after 新快照
+// 返回: bool 是否保留原内容
+func editorPreservedObject(before, after GraphicObject) bool {
+	if before.Type != after.Type {
+		return false
+	}
+	before = cloneEditorData(before)
+	before.state = after.state
+	before.richText = after.richText
+	switch before.Type {
+	case "TextObject":
+		a, b := &before.TextObject, after.TextObject
+		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
+		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
+		a.LineWidthSet = b.LineWidthSet
+		a.MiterLimit, a.MiterLimitSet = b.MiterLimit, b.MiterLimitSet
+		a.DashOffset, a.DashPattern, a.Cap, a.Join = b.DashOffset, b.DashPattern, b.Cap, b.Join
+		a.dashPatternSet = b.dashPatternSet
+	case "PathObject":
+		a, b := &before.PathObject, after.PathObject
+		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
+		a.Fill, a.Stroke, a.FillColor, a.StrokeColor, a.LineWidth = b.Fill, b.Stroke, b.FillColor, b.StrokeColor, b.LineWidth
+		a.LineWidthSet = b.LineWidthSet
+		a.MiterLimit, a.MiterLimitSet = b.MiterLimit, b.MiterLimitSet
+		a.DashOffset, a.DashPattern, a.Cap, a.Join = b.DashOffset, b.DashPattern, b.Cap, b.Join
+		a.dashPatternSet = b.dashPatternSet
+	case "ImageObject":
+		a, b := &before.ImageObject, after.ImageObject
+		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
+	case "CompositeObject", "CompositeGraphicUnit":
+		a, b := &before.CompositeGraphicUnit, after.CompositeGraphicUnit
+		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
+	default:
+		return false
+	}
+	a, b := *editorObjectClips(&before), *editorObjectClips(&after)
+	if a == nil {
+		*editorObjectClips(&before) = b
+	} else if b != nil && len(a.Clip) <= len(b.Clip) {
+		a.Clip = append(a.Clip, b.Clip[len(a.Clip):]...)
+		for i := range a.Clip {
+			if len(a.Clip[i].Area) == len(b.Clip[i].Area) {
+				for j := range a.Clip[i].Area {
+					a.Clip[i].Area[j].CTM = b.Clip[i].Area[j].CTM
+				}
+			}
+		}
+	}
+	return reflect.DeepEqual(before, after)
+}
+
+// editorContainerOrderable 判断容器的直接对象能否在保留页块的前提下排序
+// 入参: container 图层或页块
+// 返回: bool 是否可排序
+func editorContainerOrderable(container *editorXML) bool {
+	for _, child := range container.children {
+		if !editorXMLTransformable(child) {
+			return false
+		}
+	}
+	return true
+}
+
+// editorGeometry 获取基本对象的边界与变换
+// 入参: object 对象
+// 返回: string 边界, string 变换矩阵
+func editorGeometry(object GraphicObject) (string, string) {
+	switch object.Type {
+	case "TextObject":
+		return object.TextObject.Boundary, object.TextObject.CTM
+	case "PathObject":
+		return object.PathObject.Boundary, object.PathObject.CTM
+	case "ImageObject":
+		return object.ImageObject.Boundary, object.ImageObject.CTM
+	case "CompositeObject", "CompositeGraphicUnit":
+		return object.CompositeGraphicUnit.Boundary, object.CompositeGraphicUnit.CTM
+	}
+	return "", ""
 }
 
 // editorObjectXML 编码可编辑对象，包含独立命名空间声明

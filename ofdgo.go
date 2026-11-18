@@ -31,6 +31,9 @@ import (
 	basefile "github.com/xiaoqidun/ofdgo/internal/base/file"
 )
 
+// ErrSameFile 表示输出流指向当前正在读取的输入文件
+var ErrSameFile = errors.New("output refers to the active input file")
+
 // Input 统一文件、内存及顺序流的随机读取，可并发读取和关闭，不可复制
 // 调用方应在阅读、编辑及转换结束后调用Close，借入的数据需在此期间保持不变
 // 借入的随机读取器应支持并发ReadAt，Close不会关闭调用方传入的读取器
@@ -40,6 +43,7 @@ type Input struct {
 	size   int64
 	path   string
 	file   *os.File
+	info   os.FileInfo
 	temp   bool
 }
 
@@ -74,12 +78,12 @@ func OpenFile(ctx context.Context, path string, options InputOptions) (*Input, e
 		f.Close()
 		return nil, fmt.Errorf("input is not a regular file")
 	}
-	input, err := NewInput(f, info.Size())
-	if err != nil {
+	size := info.Size()
+	if size < 0 {
 		f.Close()
-		return nil, err
+		return nil, fmt.Errorf("invalid input")
 	}
-	input.file, input.path = f, path
+	input := &Input{reader: f, size: size, path: path, file: f, info: info}
 	if err := input.checkOptions(ctx, options); err != nil {
 		input.Close()
 		return nil, err
@@ -94,7 +98,13 @@ func NewInput(reader io.ReaderAt, size int64) (*Input, error) {
 	if reader == nil || size < 0 {
 		return nil, fmt.Errorf("invalid input")
 	}
-	return &Input{reader: reader, size: size}, nil
+	var fileInfo os.FileInfo
+	if stated, ok := reader.(interface{ Stat() (os.FileInfo, error) }); ok {
+		if info, err := stated.Stat(); err == nil && info.Mode().IsRegular() {
+			fileInfo = info
+		}
+	}
+	return &Input{reader: reader, size: size, info: fileInfo}, nil
 }
 
 // ReadInput 从当前位置接收顺序输入，超过内存阈值后转入临时文件
@@ -112,6 +122,7 @@ func ReadInput(ctx context.Context, reader io.Reader, options InputOptions) (*In
 	if random, ok := reader.(io.ReaderAt); ok {
 		if seeker, ok := reader.(io.Seeker); ok {
 			var size int64 = -1
+			var fileInfo os.FileInfo
 			if sized, ok := reader.(interface{ Size() int64 }); ok {
 				size = sized.Size()
 			} else if stated, ok := reader.(interface{ Stat() (os.FileInfo, error) }); ok {
@@ -121,6 +132,7 @@ func ReadInput(ctx context.Context, reader io.Reader, options InputOptions) (*In
 				}
 				if info.Mode().IsRegular() {
 					size = info.Size()
+					fileInfo = info
 				}
 			}
 			if size >= 0 {
@@ -131,10 +143,12 @@ func ReadInput(ctx context.Context, reader io.Reader, options InputOptions) (*In
 				if offset < 0 || offset > size {
 					return nil, fmt.Errorf("invalid input offset")
 				}
-				input, err := NewInput(io.NewSectionReader(random, offset, size-offset), size-offset)
-				if err != nil {
-					return nil, err
+				source := random
+				if offset != 0 {
+					source = io.NewSectionReader(random, offset, size-offset)
+					fileInfo = nil
 				}
+				input := &Input{reader: source, size: size - offset, info: fileInfo}
 				if err := input.checkOptions(ctx, options); err != nil {
 					return nil, err
 				}
@@ -233,7 +247,7 @@ func (s *Input) ReadAt(data []byte, offset int64) (int, error) {
 	if s.reader == nil {
 		return 0, os.ErrClosed
 	}
-	return io.NewSectionReader(s.reader, 0, s.size).ReadAt(data, offset)
+	return readBoundedAt(s.reader, s.size, data, offset)
 }
 
 // Close 释放自有文件和缓存，等待正在进行的读取结束，可重复调用
@@ -267,8 +281,9 @@ func NewReader(input *Input, options ...ReaderOption) (*Reader, error) {
 		return nil, err
 	}
 	reader := &Reader{
-		Path: input.path,
-		Zip:  zr,
+		Path:       input.path,
+		Zip:        zr,
+		sourceFile: input.info,
 	}
 	if err := reader.open(options); err != nil {
 		return nil, err
@@ -345,4 +360,43 @@ func (s *Input) checkOptions(ctx context.Context, options InputOptions) error {
 		return fmt.Errorf("input exceeds size limit")
 	}
 	return ctx.Err()
+}
+
+// readBoundedAt 在固定长度区间内执行随机读取，避免构造临时SectionReader
+// 入参: reader 底层随机读取器, limit 数据长度上限, data 目标缓冲区, offset 字节偏移
+// 返回: int 读取字节数, error 读取或越界错误
+func readBoundedAt(reader io.ReaderAt, limit int64, data []byte, offset int64) (int, error) {
+	if offset < 0 || offset >= limit {
+		return 0, io.EOF
+	}
+	maxLen := limit - offset
+	if int64(len(data)) > maxLen {
+		n, err := reader.ReadAt(data[:maxLen], offset)
+		if err == nil {
+			err = io.EOF
+		}
+		return n, err
+	}
+	return reader.ReadAt(data, offset)
+}
+
+// sameOutputFile 检查输出流是否与活动输入指向同一底层文件
+// 入参: source 源文件信息, writer 输出流
+// 返回: error 指向同一文件时返回ErrSameFile
+func sameOutputFile(source os.FileInfo, writer io.Writer) error {
+	if source == nil || writer == nil {
+		return nil
+	}
+	stated, ok := writer.(interface{ Stat() (os.FileInfo, error) })
+	if !ok {
+		return nil
+	}
+	target, err := stated.Stat()
+	if err != nil || target == nil || !target.Mode().IsRegular() {
+		return nil
+	}
+	if os.SameFile(source, target) {
+		return ErrSameFile
+	}
+	return nil
 }

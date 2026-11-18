@@ -30,7 +30,6 @@ import (
 	"strings"
 
 	"github.com/tdewolff/canvas"
-	canvasimage "github.com/tdewolff/canvas/image"
 	"github.com/tdewolff/canvas/renderers/svg"
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	"github.com/xiaoqidun/pdfgo"
@@ -194,15 +193,27 @@ func (s *svgResourceRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
 	font := text.MostCommonFontFace().Font
 	resource, ok := s.renderer.canvasState().svgFontCache[font]
 	if !ok {
-		data := basefont.SFNTData(font.Tables)
-		resource = SVGFont{
-			Name:   fmt.Sprintf("ofdgo-%x-%d", sha256.Sum256(data), font.Style()),
-			Weight: font.Style().CSS(),
-			Style:  "normal",
-			Data:   data,
+		ctx := context.Background()
+		if s.renderer != nil {
+			ctx = s.renderer.outputContext()
 		}
-		if font.Style().Italic() {
-			resource.Style = "italic"
+		var err error
+		resource, err = s.renderer.svgFontResources().load(ctx, font, func() (SVGFont, int, error) {
+			data := basefont.SFNTData(font.Tables)
+			built := SVGFont{
+				Name:   fmt.Sprintf("ofdgo-%x-%d", sha256.Sum256(data), font.Style()),
+				Weight: font.Style().CSS(),
+				Style:  "normal",
+				Data:   data,
+			}
+			if font.Style().Italic() {
+				built.Style = "italic"
+			}
+			return built, len(data) + 256, nil
+		})
+		if err != nil {
+			s.err = err
+			return
 		}
 		s.renderer.canvasState().svgFontCache[font] = resource
 	}
@@ -256,8 +267,8 @@ func (s *svgResourceRenderer) encodeImageResource(ctx context.Context, img image
 		options = s.renderer.Compression
 	}
 	resource := SVGImage{MIME: "image/png"}
-	if encoded, ok := img.(*canvasimage.Image); ok {
-		resource.MIME, resource.Data = encoded.Mimetype, encoded.Bytes
+	if encoded, ok := img.(*EncodedImage); ok {
+		resource.MIME, resource.Data = encoded.MIME(), encoded.Bytes()
 		if options.Mode != CompressionUnchanged {
 			data, err := pdfgo.OptimizeImageResource(ctx, resource.Data, options, target)
 			if ctx.Err() != nil {
@@ -371,6 +382,9 @@ type svgImageKey struct {
 // svgResourceCacheKey 区分共享的图片编码缓存
 type svgResourceCacheKey struct{}
 
+// svgFontCacheKey 区分共享的SVG序列化字体缓存
+type svgFontCacheKey struct{}
+
 // svgImageResourceKey 按像素、压缩策略及目标尺寸区分编码结果
 type svgImageResourceKey struct {
 	digest  [32]byte
@@ -393,6 +407,18 @@ func (r *Renderer) svgImageResources() *renderCache[svgImageResourceKey, SVGImag
 		return state.(*renderCache[svgImageResourceKey, SVGImage])
 	}
 	cache := resourceCache[svgImageResourceKey, SVGImage](r.Reader.resources, 4<<20)
+	r.sharedBackendStates[key] = cache
+	return cache
+}
+
+// svgFontResources 获取派生渲染器共享的SVG字体数据缓存
+// 返回: *renderCache 字体数据缓存
+func (r *Renderer) svgFontResources() *renderCache[*canvas.Font, SVGFont] {
+	key := svgFontCacheKey{}
+	if state, ok := r.sharedBackendStates[key]; ok {
+		return state.(*renderCache[*canvas.Font, SVGFont])
+	}
+	cache := resourceCache[*canvas.Font, SVGFont](r.Reader.resources, 32<<20)
 	r.sharedBackendStates[key] = cache
 	return cache
 }

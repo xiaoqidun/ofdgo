@@ -39,6 +39,7 @@ type Renderer struct {
 	OnExportProgress      func(completed, total int) error
 	DrawParams            map[string]*DrawParam
 	CompositeGraphicUnits map[string]*CompositeGraphicUnit
+	pageResources         []*parsedRes
 	templatePageCache     map[string]*PageContent
 	imageCache            *renderCache[string, image.Image]
 	fontDirs              []string
@@ -95,12 +96,20 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	next.fontPreparations = r.fontPreparations
 	next.fontMetrics = r.fontMetrics
 	next.glyphOutlines = r.glyphOutlines
-	next.sharedBackendStates[canvasPathCacheKey{}] = r.canvasParsedPaths()
-	next.sharedBackendStates[canvasClipCacheKey{}] = r.canvasClipIntersections()
-	next.sharedBackendStates[canvasFillCacheKey{}] = r.canvasSettledPaths()
-	next.sharedBackendStates[canvasDrawClipCacheKey{}] = r.canvasDrawClips()
-	next.sharedBackendStates[canvasStrokeCacheKey{}] = r.canvasStrokeClips()
-	next.sharedBackendStates[svgResourceCacheKey{}] = r.svgImageResources()
+	if r.fontSourcesCache != nil && next.fontSourcesCache != nil {
+		next.fontSourcesCache.collections = r.fontSourcesCache.collections
+	}
+	maps.Copy(next.sharedBackendStates, r.sharedBackendStates)
+	seenForkers := make(map[any]bool)
+	for _, candidate := range []any{r.backends.Compiler, r.backends.Raster, r.backends.Fonts, r.backends.Geometry, r.backends.SVG, r.backends.PDF, r.backends.EPS} {
+		if candidate == nil || seenForkers[candidate] {
+			continue
+		}
+		seenForkers[candidate] = true
+		if forker, ok := candidate.(sharedStateForker); ok {
+			forker.forkSharedState(r, next)
+		}
+	}
 	return next, nil
 }
 
@@ -125,6 +134,182 @@ func (r *Renderer) SetFontFS(fsys ...fs.FS) {
 // 返回: []string 字体目录, []fs.FS 字体文件系统
 func (r *Renderer) FontSources() ([]string, []fs.FS) {
 	return append([]string(nil), r.fontDirs...), append([]fs.FS(nil), r.fontFS...)
+}
+
+// BindPageResources 解析并绑定指定页面的局部资源作用域，返回恢复闭包
+// 入参: page 页面内容
+// 返回: func() 恢复之前的作用域状态
+func (r *Renderer) BindPageResources(page *PageContent) func() {
+	return r.bindPageResources(page)
+}
+
+// sharedStateForker 为多后端提供并发Fork时的线程安全共享缓存继承钩子
+type sharedStateForker interface {
+	forkSharedState(src, dst *Renderer)
+}
+
+// bindPageResources 解析并绑定当前页面的局部资源作用域，返回恢复闭包
+// 入参: page 页面内容
+// 返回: func() 恢复之前的作用域状态
+func (r *Renderer) bindPageResources(page *PageContent) func() {
+	if r == nil {
+		return func() {}
+	}
+	if page == nil {
+		return r.bindParsedResources(nil)
+	}
+	res := page.pageResources
+	if res == nil && (len(page.PageRes) > 0 || len(page.Template) > 0) && r.Reader != nil {
+		ctx := r.pageContext
+		if ctx == nil {
+			ctx = r.outputContext()
+		}
+		if r.Reader.doc == nil {
+			_, _ = r.Reader.docStructureContext(ctx)
+		}
+		basePath := ""
+		if r.Reader.doc != nil && page.ID != "" {
+			for _, ref := range r.Reader.doc.Pages.Page {
+				if sameResourceID(ref.ID, page.ID) {
+					basePath = r.Reader.ResPath(ref.BaseLoc)
+					break
+				}
+			}
+		}
+		if basePath == "" {
+			basePath = r.Reader.ResPath("Document.xml")
+		}
+		if collected, err := r.Reader.collectPageResourcesContext(ctx, basePath, page); err == nil {
+			res = collected
+			page.pageResources = collected
+		}
+	}
+	return r.bindParsedResources(res)
+}
+
+// bindParsedResources 绑定指定的局部资源列表并同步局部绘制参数与复合图元作用域
+// 入参: res 局部资源表列表
+// 返回: func() 恢复之前的作用域状态
+func (r *Renderer) bindParsedResources(res []*parsedRes) func() {
+	if r == nil {
+		return func() {}
+	}
+	prevRes := r.pageResources
+	prevDrawParams := r.DrawParams
+	prevComposites := r.CompositeGraphicUnits
+	r.pageResources = res
+	hasDrawParams := false
+	hasComposites := false
+	for _, item := range res {
+		if item != nil {
+			if len(item.drawParams.exact) > 0 {
+				hasDrawParams = true
+			}
+			if len(item.composites.exact) > 0 {
+				hasComposites = true
+			}
+		}
+	}
+	if hasDrawParams {
+		scoped := maps.Clone(prevDrawParams)
+		if scoped == nil {
+			scoped = make(map[string]*DrawParam)
+		}
+		for _, item := range res {
+			if item == nil {
+				continue
+			}
+			for id, dp := range item.drawParams.exact {
+				overridden := false
+				if existing, ok := prevDrawParams[id]; ok {
+					var docVal *DrawParam
+					if r.Reader != nil {
+						docVal, _ = r.Reader.docDrawParams.get(id)
+						if docVal == nil {
+							docVal = r.Reader.drawParamCache[id]
+						}
+					}
+					overridden = existing != docVal
+				}
+				if !overridden {
+					scoped[id] = dp
+				}
+			}
+		}
+		r.DrawParams = scoped
+	}
+	if hasComposites {
+		scoped := maps.Clone(prevComposites)
+		if scoped == nil {
+			scoped = make(map[string]*CompositeGraphicUnit)
+		}
+		for _, item := range res {
+			if item == nil {
+				continue
+			}
+			for id, unit := range item.composites.exact {
+				overridden := false
+				if existing, ok := prevComposites[id]; ok {
+					var docVal *CompositeGraphicUnit
+					if r.Reader != nil {
+						docVal, _ = r.Reader.docComposites.get(id)
+						if docVal == nil {
+							docVal = r.Reader.compositeGraphicUnitCache[id]
+						}
+					}
+					overridden = existing != docVal
+				}
+				if !overridden {
+					scoped[id] = unit
+				}
+			}
+		}
+		r.CompositeGraphicUnits = scoped
+	}
+	return func() {
+		r.pageResources = prevRes
+		r.DrawParams = prevDrawParams
+		r.CompositeGraphicUnits = prevComposites
+	}
+}
+
+// fontDefinition 按页面局部资源优先查找字体定义
+// 入参: id 字体资源标识
+// 返回: *Font 字体定义
+func (r *Renderer) fontDefinition(id string) *Font {
+	if r == nil || r.Reader == nil {
+		return nil
+	}
+	if font, ok := r.Reader.resolveFontScoped(r.pageResources, id); ok {
+		return font
+	}
+	return r.Reader.fontDefinition(id)
+}
+
+// compositeDefinition 按外部覆盖与页面局部资源优先查找复合图元定义
+// 入参: id 复合图元资源标识
+// 返回: *CompositeGraphicUnit 复合图元定义
+func (r *Renderer) compositeDefinition(id string) *CompositeGraphicUnit {
+	if r == nil {
+		return nil
+	}
+	unit, ok := resourceValue(r.CompositeGraphicUnits, id)
+	if r.Reader == nil {
+		return unit
+	}
+	if ok && unit != nil {
+		docUnit, _ := r.Reader.docComposites.get(id)
+		if docUnit == nil {
+			docUnit, _ = resourceValue(r.Reader.compositeGraphicUnitCache, id)
+		}
+		if unit != docUnit {
+			return unit
+		}
+	}
+	if scoped, found := r.Reader.resolveCompositeScoped(r.pageResources, id); found {
+		return scoped
+	}
+	return unit
 }
 
 // deviceLineWidth 按设备分辨率计算描边宽度，零线宽为一像素，正线宽至少为两像素
@@ -162,6 +347,7 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 	renderer.fontPreparations = r.fontPreparations
 	renderer.fontDigests = r.fontDigests
 	renderer.fontMetrics = r.fontMetrics
+	renderer.glyphOutlines = r.glyphOutlines
 	renderer.fontSourcesCache = r.fontSourcesCache.child()
 	renderer.decodeImages = r.decodeImages
 	renderer.pageContext = r.pageContext

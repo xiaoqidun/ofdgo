@@ -121,15 +121,11 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		}
 	}
 	var buf editorSnapshotBuffer
+	defer func() { _ = buf.Close() }()
 	settings := pdf.DefaultOptions
 	settings.Compress = r.Compression.Mode == CompressionUnchanged
 	p := pdf.New(&buf, pages[0].Box.W, pages[0].Box.H, &settings)
 	renderer := &pdfRenderer{PDF: p, glyphPaths: *resourceCache[*canvas.Path, *canvas.Path](r.Reader.resources, 16<<20), images: make([][]image.Image, 1), text: make([]codecpdf.TextPage, 1), navigation: navigation}
-	defer func() {
-		if renderer.imageError != nil {
-			r.canvasState().images.clear()
-		}
-	}()
 	var info DocInfo
 	if docInfo, err := r.Reader.DocInfo(); err == nil {
 		info = *docInfo

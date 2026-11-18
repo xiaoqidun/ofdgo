@@ -11,7 +11,6 @@ require (
 	github.com/xiaoqidun/j2kgo v1.0.2
 	github.com/xiaoqidun/jbig2 v1.1.9
 	github.com/xiaoqidun/pdfgo v0.0.0-20261116130616-d9c8a1b813d7
-	golang.org/x/crypto v0.59.0
 	golang.org/x/image v0.48.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/text v0.44.0
@@ -35,6 +34,7 @@ require (
 	github.com/tdewolff/minify/v2 v2.24.17 // indirect
 	github.com/tdewolff/parse/v2 v2.8.16 // indirect
 	github.com/yuin/goldmark v1.8.5 // indirect
+	golang.org/x/crypto v0.59.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
 	modernc.org/knuth v0.6.0 // indirect
 	modernc.org/token v1.1.0 // indirect

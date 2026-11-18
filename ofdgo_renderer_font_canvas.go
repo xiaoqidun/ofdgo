@@ -46,6 +46,113 @@ type textGlyphPathCacheValue struct {
 	width float64
 }
 
+// loadFont 加载字体，绘图别名按局部字体定义、数据和样式隔离，不改动原始字体名称
+// 入参: fontID 字体ID
+// 返回: *canvas.FontFamily 字体族
+func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
+	resolved, err := r.PrepareFont(fontID)
+	if err != nil {
+		r.renderError = err
+		return nil
+	}
+	keyID := fontID
+	if resolved.definition != nil && resolved.definition.ID != "" {
+		keyID = resolved.definition.ID
+	}
+	mapKey := canvasFontMapKey{id: keyID, definition: resolved.definition}
+	if ff, ok := r.canvasState().fontMap[mapKey]; ok {
+		return ff
+	}
+	if len(resolved.Data) == 0 {
+		return nil
+	}
+	of := resolved.definition
+	if of == nil {
+		of = &Font{ID: fontID, FontName: "OFDGoFallback"}
+	}
+	fontData := resolved.Data
+	fontStyle := canvasFontStyle(of)
+	if resolved.digest == ([32]byte{}) {
+		resolved.digest = r.fontDigest(fontData)
+	}
+	key := canvasFontKey{digest: resolved.digest, name: of.FontName, style: fontStyle}
+	cache := r.canvasFontFamilies()
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	ff, err := cache.load(ctx, key, func() (*canvas.FontFamily, int, error) {
+		family := canvas.NewFontFamily(fmt.Sprintf("ofdgo-%x-%d", resolved.digest, fontStyle))
+		canvasFontLoadMu.Lock()
+		loadErr := family.LoadFont(fontData, 0, fontStyle)
+		canvasFontLoadMu.Unlock()
+		if loadErr != nil {
+			return nil, 0, loadErr
+		}
+		return family, len(fontData) + 4096, nil
+	})
+	if err != nil {
+		r.renderError = err
+		return nil
+	}
+	r.canvasState().fontMap[mapKey] = ff
+	return ff
+}
+
+// cachedTextGlyphPath 获取缓存的字形路径
+// 入参: face 字体, glyph 绘制字形
+// 返回: *canvas.Path 字形路径, float64 字形宽度
+func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (*canvas.Path, float64) {
+	key := textGlyphPathCacheKey{
+		font:       face.Font,
+		size:       face.Size,
+		fauxBold:   face.FauxBold,
+		fauxItalic: face.FauxItalic,
+		xOffset:    face.XOffset,
+		yOffset:    face.YOffset,
+		language:   face.Language,
+		script:     face.Script,
+		direction:  face.Direction,
+		glyph:      glyph,
+	}
+	if cached, ok := r.canvasState().textGlyphPathCache.get(key); ok {
+		return cached.path, cached.width
+	}
+	outlines := r.canvasState().fontOutlines[face.Font]
+	if outlines == nil {
+		cache := r.canvasFontOutlines()
+		ctx := r.pageContext
+		if ctx == nil {
+			ctx = r.outputContext()
+		}
+		var err error
+		outlines, err = cache.load(ctx, face.Font, func() (*basefont.Outliner, int, error) {
+			metrics, parseErr := basefont.ParseSFNTTables(face.Font.Tables)
+			if parseErr != nil {
+				return nil, 0, parseErr
+			}
+			cost := uint64(512)
+			for _, data := range metrics.Tables {
+				cost += uint64(len(data))
+			}
+			cost += metrics.CmapEntries() * 16
+			return &basefont.Outliner{Font: metrics}, int(min(cost, uint64(cache.limit))), nil
+		})
+		if err != nil {
+			r.renderError = err
+			return &canvas.Path{}, 0
+		}
+		r.canvasState().fontOutlines[face.Font] = outlines
+	}
+	path, width, err := textGlyphPath(face, glyph, outlines)
+	if err != nil {
+		r.renderError = err
+		return &canvas.Path{}, 0
+	}
+	r.canvasState().textGlyphPathCache.put(key, textGlyphPathCacheValue{path: path, width: width}, 256+len(path.Data())*8+len(glyph.Text)+len(face.Language))
+	return path, width
+}
+
 // loadCanvasFont 串行加载绘图字体，不改动原始字体数据
 // 入参: data 字体数据, index 集合索引, style 字体样式
 // 返回: *canvas.Font 绘图字体, error 加载错误
@@ -78,49 +185,6 @@ func decodeFontContainer(data []byte) ([]byte, error) {
 		return nil, err
 	}
 	return basefont.SerializeOTF(loaded.Tables)
-}
-
-// loadFont 加载字体，绘图别名按数据和样式隔离，不改动原始字体名称
-// 入参: fontID 字体ID
-// 返回: *canvas.FontFamily 字体族
-func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
-	if ff, ok := r.canvasState().fontMap[fontID]; ok {
-		return ff
-	}
-	resolved, err := r.PrepareFont(fontID)
-	if err != nil {
-		r.renderError = err
-		return nil
-	}
-	of := r.Reader.fontDefinition(fontID)
-	if len(resolved.Data) == 0 {
-		return nil
-	}
-	if of == nil {
-		of = &Font{ID: fontID, FontName: "OFDGoFallback"}
-	}
-	fontData := resolved.Data
-	fontStyle := canvasFontStyle(of)
-	if resolved.digest == ([32]byte{}) {
-		resolved.digest = r.fontDigest(fontData)
-	}
-	key := canvasFontKey{digest: resolved.digest, name: of.FontName, style: fontStyle}
-	cache := r.canvasFontFamilies()
-	if ff, ok := cache.get(key); ok {
-		r.canvasState().fontMap[fontID] = ff
-		return ff
-	}
-	ff := canvas.NewFontFamily(fmt.Sprintf("ofdgo-%x-%d", resolved.digest, fontStyle))
-	canvasFontLoadMu.Lock()
-	err = ff.LoadFont(fontData, 0, fontStyle)
-	canvasFontLoadMu.Unlock()
-	if err != nil {
-		r.renderError = err
-		return nil
-	}
-	r.canvasState().fontMap[fontID] = ff
-	cache.put(key, ff, min(len(fontData), cache.limit)*8+256)
-	return ff
 }
 
 // canvasFontStyle 获取Canvas字体样式
@@ -178,54 +242,6 @@ func textGlyphPath(face *canvas.FontFace, glyph textGlyph, outlines *basefont.Ou
 		p = p.Transform(canvas.Identity.Shear(face.FauxItalic, 0))
 	}
 	return p, width, nil
-}
-
-// cachedTextGlyphPath 获取缓存的字形路径
-// 入参: face 字体, glyph 绘制字形
-// 返回: *canvas.Path 字形路径, float64 字形宽度
-func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (*canvas.Path, float64) {
-	key := textGlyphPathCacheKey{
-		font:       face.Font,
-		size:       face.Size,
-		fauxBold:   face.FauxBold,
-		fauxItalic: face.FauxItalic,
-		xOffset:    face.XOffset,
-		yOffset:    face.YOffset,
-		language:   face.Language,
-		script:     face.Script,
-		direction:  face.Direction,
-		glyph:      glyph,
-	}
-	if cached, ok := r.canvasState().textGlyphPathCache.get(key); ok {
-		return cached.path, cached.width
-	}
-	outlines := r.canvasState().fontOutlines[face.Font]
-	if outlines == nil {
-		cache := r.canvasFontOutlines()
-		outlines, _ = cache.get(face.Font)
-		if outlines == nil {
-			metrics, err := basefont.ParseSFNTTables(face.Font.Tables)
-			if err != nil {
-				r.renderError = err
-				return &canvas.Path{}, 0
-			}
-			outlines = &basefont.Outliner{Font: metrics}
-			cost := uint64(512)
-			for _, data := range metrics.Tables {
-				cost += uint64(len(data)) * 8
-			}
-			cost += metrics.CmapEntries() * 48
-			cache.put(face.Font, outlines, int(min(cost, uint64(cache.limit)+1)))
-		}
-		r.canvasState().fontOutlines[face.Font] = outlines
-	}
-	path, width, err := textGlyphPath(face, glyph, outlines)
-	if err != nil {
-		r.renderError = err
-		return &canvas.Path{}, 0
-	}
-	r.canvasState().textGlyphPathCache.put(key, textGlyphPathCacheValue{path: path, width: width}, 256+len(path.Data())*8+len(glyph.Text)+len(face.Language))
-	return path, width
 }
 
 // textMatrix 获取文本字形变换矩阵

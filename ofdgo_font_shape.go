@@ -32,7 +32,6 @@ import (
 	"github.com/go-text/typesetting/language"
 	"github.com/go-text/typesetting/shaping"
 	"golang.org/x/image/math/fixed"
-	xlanguage "golang.org/x/text/language"
 )
 
 // fontShapingBufferLimit 限制字体实例长期保留的字形缓冲容量
@@ -105,11 +104,11 @@ func (f *fontShaper) shapeTextRun(runes []rune, start, end int, size float64, op
 		props.Script, _ = language.ParseScript(options.Script)
 	}
 	if options.Language != "" {
-		tag, err := xlanguage.Parse(options.Language)
+		tag, err := canonicalLanguageTag(options.Language)
 		if err != nil {
 			return nil, fmt.Errorf("shaping language: %w", err)
 		}
-		props.Language = language.NewLanguage(tag.String())
+		props.Language = language.NewLanguage(tag)
 	}
 	var features []harfbuzz.Feature
 	if options.Features != "" {
@@ -279,3 +278,58 @@ type shapingFace struct{ face *typefont.Face }
 // 入参: char 字符
 // 返回: *typefont.Face 字体
 func (f shapingFace) ResolveFace(char rune) *typefont.Face { return f.face }
+
+// canonicalLanguageTag 按BCP47语法校验并规范化语言标签，不引入外部语言包
+// 入参: raw 原始语言标签
+// 返回: string 规范化语言标签, error 语法错误
+func canonicalLanguageTag(raw string) (string, error) {
+	normalized := strings.ReplaceAll(raw, "_", "-")
+	if normalized == "" || strings.HasPrefix(normalized, "-") || strings.HasSuffix(normalized, "-") {
+		return "", fmt.Errorf("invalid language tag %q", raw)
+	}
+	parts := strings.Split(normalized, "-")
+	for i, part := range parts {
+		if len(part) == 0 || len(part) > 8 {
+			return "", fmt.Errorf("invalid language tag %q", raw)
+		}
+		alphaOnly := true
+		for j := 0; j < len(part); j++ {
+			c := part[j]
+			isAlpha := c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
+			isDigit := c >= '0' && c <= '9'
+			if !isAlpha && !isDigit {
+				return "", fmt.Errorf("invalid language tag %q", raw)
+			}
+			if !isAlpha {
+				alphaOnly = false
+			}
+		}
+		if i == 0 {
+			if part == "x" || part == "X" {
+				if len(parts) < 2 {
+					return "", fmt.Errorf("invalid language tag %q", raw)
+				}
+				parts[i] = "x"
+				continue
+			}
+			if !alphaOnly || len(part) == 1 || len(part) == 4 {
+				return "", fmt.Errorf("invalid language tag %q", raw)
+			}
+			parts[i] = strings.ToLower(part)
+			continue
+		}
+		if len(part) == 1 {
+			if i == len(parts)-1 {
+				return "", fmt.Errorf("invalid language tag %q", raw)
+			}
+			parts[i] = strings.ToLower(part)
+		} else if len(part) == 4 && alphaOnly && len(parts[i-1]) > 1 {
+			parts[i] = strings.ToUpper(part[:1]) + strings.ToLower(part[1:])
+		} else if (len(part) == 2 && alphaOnly || len(part) == 3 && !alphaOnly) && len(parts[i-1]) > 1 {
+			parts[i] = strings.ToUpper(part)
+		} else {
+			parts[i] = strings.ToLower(part)
+		}
+	}
+	return strings.Join(parts, "-"), nil
+}

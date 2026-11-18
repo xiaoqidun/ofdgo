@@ -43,6 +43,9 @@ func (CanvasBackend) MeasureObject(r *Renderer, object GraphicObject, options Me
 	}
 	bounds := &boundsRenderer{collect: options.Contours}
 	renderer := *r
+	if len(renderer.pageResources) > 0 {
+		defer renderer.bindParsedResources(renderer.pageResources)()
+	}
 	renderer.renderError = nil
 	renderer.pageText = nil
 	renderer.textOnly = false
@@ -90,6 +93,7 @@ func (CanvasBackend) MeasureObject(r *Renderer, object GraphicObject, options Me
 // 入参: r 渲染器, page 页面内容
 // 返回: *PageText 页面文字, error 错误信息
 func (CanvasBackend) PageText(r *Renderer, page *PageContent) (*PageText, error) {
+	defer r.bindPageResources(page)()
 	box, err := r.GetPageBox(page)
 	if err != nil {
 		return nil, err
@@ -190,29 +194,8 @@ func (r *Renderer) measureImage(ctx *canvas.Context, obj ImageObject, pageH floa
 		border := *obj.Border
 		border.BorderColor = (*StrokeColor)(boundsColor((*FillColor)(border.BorderColor)))
 		obj.Border = &border
-		r.renderImageBorder(ctx, obj, box, pageH, parentCTM, boundaryInCTM, clip)
+		r.renderImageBorder(ctx, obj, box, pageH, ctm, parentCTM, boundaryInCTM, parentClip)
 	}
-}
-
-// boundsColor 以底纹的基础颜色和透明度度量轮廓，不修改原画刷
-// 入参: color 填充或描边颜色
-// 返回: *FillColor 用于度量的颜色
-func boundsColor(color *FillColor) *FillColor {
-	if color == nil || color.Pattern == nil {
-		return color
-	}
-	return &FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}
-}
-
-// textPathBox 将字形轮廓转换为页面区域
-// 入参: path 字形轮廓, pageH 页面高度
-// 返回: Box 字符区域
-func textPathBox(path *canvas.Path, pageH float64) Box {
-	if path.Empty() {
-		return Box{}
-	}
-	bounds := path.Bounds()
-	return Box{X: bounds.X0, Y: pageH - bounds.Y1, W: bounds.X1 - bounds.X0, H: bounds.Y1 - bounds.Y0}
 }
 
 // addSpan 收集字形选择区域，同一原文区间的多个字形合并为一项
@@ -250,4 +233,25 @@ func (run *TextRun) addSpan(start, end int, bounds canvas.Rect, m canvas.Matrix,
 	}
 	span.Matrix = [6]float64{m[0][0], m[1][0], m[0][1], m[1][1], m[0][2], m[1][2]}
 	run.Spans = append(run.Spans, span)
+}
+
+// boundsColor 以底纹的基础颜色和透明度度量轮廓，不修改原画刷
+// 入参: color 填充或描边颜色
+// 返回: *FillColor 用于度量的颜色
+func boundsColor(color *FillColor) *FillColor {
+	if color == nil || color.Pattern == nil {
+		return color
+	}
+	return &FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}
+}
+
+// textPathBox 将字形轮廓转换为页面区域
+// 入参: path 字形轮廓, pageH 页面高度
+// 返回: Box 字符区域
+func textPathBox(path *canvas.Path, pageH float64) Box {
+	if path.Empty() {
+		return Box{}
+	}
+	bounds := path.Bounds()
+	return Box{X: bounds.X0, Y: pageH - bounds.Y1, W: bounds.X1 - bounds.X0, H: bounds.Y1 - bounds.Y0}
 }

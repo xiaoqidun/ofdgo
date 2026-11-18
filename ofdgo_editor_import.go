@@ -167,10 +167,11 @@ type editorPageImport struct {
 	templates     map[string]TemplatePage
 	templateParts map[string][]byte
 	defaultCS     string
-	attachments   map[string][]byte
-	attachmentMap map[string]editorImportEntry
-	attachmentIDs map[string]bool
-	bookmarks     map[string]Dest
+	attachments        map[string][]byte
+	attachmentMap      map[string]editorImportEntry
+	attachmentIDs      map[string]bool
+	removedAttachments map[string]bool
+	bookmarks          map[string]Dest
 	signatureIDs  *signatureIDSequence
 	copyPage      bool
 	strictLinks   bool
@@ -989,6 +990,9 @@ func (m *editorPageImport) attachmentID(id string) (string, error) {
 			}
 			used[attachment.ID] = true
 		}
+		for removedID := range m.removedAttachments {
+			used[removedID] = true
+		}
 		m.attachmentIDs = used
 	}
 	mapped, maximum := nextAttachmentID(m.attachmentIDs, m.maximum)
@@ -1517,7 +1521,8 @@ func (e *Editor) importSelection(ctx context.Context, source *Editor, sourcePage
 			object := layer.Objects[0]
 			object.TextObject.layout = objects[i].TextObject.layout
 			object.state = objects[i].state
-			object.CompositeGraphicUnit.states = remapCompositeStates(objects[i].CompositeGraphicUnit.states, migration.ids)
+			srcStates := source.collectCompositeStates(objects[i].CompositeGraphicUnit)
+			object.CompositeGraphicUnit.states = remapCompositeStates(srcStates, migration.ids)
 			imported[i], err = editor.copiedObjectStyle(object, layer.DrawParam)
 			if err != nil {
 				return err
@@ -1743,7 +1748,7 @@ func (e *Editor) prepareImport(ctx context.Context, source *Reader, doc *Documen
 	m := &editorPageImport{ctx: ctx, reader: source, doc: doc, directory: e.packageDirectory(), target: base.reader, maximum: maximum, copyPage: copyPage, progress: progress,
 		xmlPaths: make(map[string]string), dataPaths: make(map[string]string), evidence: make(map[string]string), ids: make(map[string]string), pages: make(map[string]bool, len(selected)),
 		files: make(map[string][]byte), resources: make(map[string]editorImportEntry), used: make(map[string][]byte),
-		templates: make(map[string]TemplatePage), templateParts: make(map[string][]byte), attachments: make(map[string][]byte), bookmarks: make(map[string]Dest, len(doc.Bookmarks.Bookmark))}
+		templates: make(map[string]TemplatePage), templateParts: make(map[string][]byte), attachments: make(map[string][]byte), removedAttachments: base.removedAttachments, bookmarks: make(map[string]Dest, len(doc.Bookmarks.Bookmark))}
 	for _, bookmark := range doc.Bookmarks.Bookmark {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err

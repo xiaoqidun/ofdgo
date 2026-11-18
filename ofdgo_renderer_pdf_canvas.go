@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"image"
@@ -25,8 +26,9 @@ import (
 	"time"
 
 	"github.com/tdewolff/canvas"
-	cimage "github.com/tdewolff/canvas/image"
+	canvasimage "github.com/tdewolff/canvas/image"
 	"github.com/tdewolff/canvas/renderers/pdf"
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -54,13 +56,16 @@ func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 	if r.imageError != nil {
 		return
 	}
-	if source, ok := img.(interface{ Image() (image.Image, error) }); ok {
-		pixels, err := source.Image()
+	encoded, isEncoded := img.(*EncodedImage)
+	var transient image.Image
+	if isEncoded {
+		var err error
+		transient, err = baseimage.DecodeTransientContext(context.Background(), encoded)
 		if err != nil {
 			r.imageError = err
 			return
 		}
-		if pixels == nil || pixels.Bounds() != img.Bounds() {
+		if transient == nil || transient.Bounds() != img.Bounds() {
 			r.imageError = fmt.Errorf("PDF output image pixel bounds differ")
 			return
 		}
@@ -68,7 +73,11 @@ func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 	if len(r.images) != 0 {
 		var original image.Image
 		opaque := false
-		if source, ok := img.(interface{ Opaque() bool }); ok {
+		check := img
+		if transient != nil {
+			check = transient
+		}
+		if source, ok := check.(interface{ Opaque() bool }); ok {
 			opaque = source.Opaque()
 		}
 		switch img.ColorModel() {
@@ -78,7 +87,7 @@ func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 				original = img
 			}
 		default:
-			if source, ok := img.(*cimage.Image); !ok || source.Mimetype != "image/jpeg" || source.Mask != nil {
+			if !isEncoded || encoded.MIME() != "image/jpeg" {
 				original = img
 			}
 		}
@@ -98,11 +107,24 @@ func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 			}
 		}
 	}
+	target := img
+	if isEncoded {
+		if encoded.MIME() == "image/jpeg" {
+			if jpegImage, err := canvasimage.NewJPEGImage(bytes.NewReader(encoded.Bytes())); err == nil {
+				jpegImage.Bytes = encoded.Bytes()
+				target = jpegImage
+			} else if transient != nil {
+				target = transient
+			}
+		} else if transient != nil {
+			target = transient
+		}
+	}
 	style := canvas.DefaultStyle
 	style.Fill = canvas.Paint{Color: canvas.White}
 	style.Stroke = canvas.Paint{Color: canvas.Black}
 	r.PDF.RenderPath(&canvas.Path{}, style, canvas.Identity)
-	r.PDF.RenderImage(img, matrix)
+	r.PDF.RenderImage(target, matrix)
 }
 
 // glyphPath 在缓存预算内复用相似变换下的PDF字形圆弧转换
@@ -162,18 +184,19 @@ func (r *pdfRenderer) writePDF(ctx context.Context, data io.ReaderAt, size int64
 
 // pdfNavigation PDF导航信息
 type pdfNavigation struct {
-	Link        map[int][]pdfLink
-	Outline     []pdfOutline
-	Open        []pdfNavigationAction
-	PageOpen    map[int][]pdfNavigationAction
-	pageIndex   map[string]int
-	bookmarks   map[string]Dest
-	attachments map[string]Attachment
-	audio       map[string]*pdfgo.FileSpecification
-	video       map[string]*pdfVideoResource
-	mediaFiles  map[string]*pdfgo.FileSpecification
-	source      *Reader
-	nativeWrite bool
+	Link          map[int][]pdfLink
+	Outline       []pdfOutline
+	Open          []pdfNavigationAction
+	PageOpen      map[int][]pdfNavigationAction
+	pageIndex     map[string]int
+	bookmarks     map[string]Dest
+	attachments   map[string]Attachment
+	audio         map[string]*pdfgo.FileSpecification
+	video         map[string]*pdfVideoResource
+	mediaFiles    map[string]*pdfgo.FileSpecification
+	pageResources []*parsedRes
+	source        *Reader
+	nativeWrite   bool
 }
 
 // newPDFNavigation 建立文档导航与输出页索引，不读取页面图元
@@ -192,7 +215,7 @@ func newPDFNavigation(renderer *Renderer, doc *Document, pages []RenderDocumentP
 		source:    renderer.Reader,
 	}
 	if doc != nil && (doc.Attachments.Path != "" || len(doc.Attachments.Attachment) != 0) {
-		attachments, err := renderer.Reader.Attachments()
+		attachments, err := renderer.Reader.AttachmentsContext(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -252,20 +275,39 @@ func (n *pdfNavigation) addPage(renderer *Renderer, index int, page *PageContent
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if renderer.RenderAnnotations && renderer.Reader.relatedPending {
-		if _, err := renderer.Reader.DocContext(ctx); err != nil {
+	if renderer.Reader != nil && renderer.Reader.doc == nil && renderer.Reader.OFD != nil {
+		if _, err := renderer.Reader.docStructureContext(ctx); err != nil {
 			return err
 		}
 	}
+	defer renderer.bindPageResources(page)()
+	prevResources := n.pageResources
+	n.pageResources = renderer.pageResources
+	defer func() { n.pageResources = prevResources }()
 	for _, source := range renderer.pageOpenActionSources(page) {
 		if err := n.addLifecycleActions(ctx, source, index, n.bookmarks, n.pageIndex, pages); err != nil {
 			return err
 		}
 	}
 	sources := renderer.pageActionSources(page)
-	if renderer.RenderAnnotations {
-		sources = append(sources, renderer.annotationActionSources(renderer.Reader.Annots[page.ID])...)
+	if renderer.RenderAnnotations && renderer.Reader != nil {
+		annotations, err := renderer.Reader.pageAnnotationsContext(ctx, page.ID)
+		if err != nil {
+			return err
+		}
+		if renderer.printing {
+			filtered := make([]Annotation, 0, len(annotations))
+			for _, annot := range annotations {
+				if annot.Print != nil && !*annot.Print {
+					continue
+				}
+				filtered = append(filtered, annot)
+			}
+			annotations = filtered
+		}
+		sources = append(sources, renderer.annotationActionSources(page, annotations)...)
 	}
+	sources = renderer.translateActionSources(page, sources)
 	for _, source := range sources {
 		if err := n.addActions(renderer, index, source, n.bookmarks, n.pageIndex, pages); err != nil {
 			return err
@@ -287,7 +329,7 @@ func (n *pdfNavigation) actionTarget(action Action, page int, source actionSourc
 		if !ok {
 			return nil, nil
 		}
-		destination, err := pdfDestination(*dest, pages[target].Box.H)
+		destination, err := pdfDestination(*dest, pages[target].Box)
 		if err != nil {
 			return nil, err
 		}
@@ -480,25 +522,35 @@ func pdfSourceRect(box Box, pageH float64) canvas.Rect {
 	return canvas.RectFromSize(box.X, pageH-box.Y-box.H, box.W, box.H)
 }
 
-// pdfDestination 按OFD目标语义转换PDF坐标、显示模式及缩放比例
-// 入参: dest OFD跳转目标, pageH 页面高度
+// pdfDestination 按OFD目标语义及目标页物理区域转换PDF坐标、显示模式与缩放比例
+// 入参: dest OFD跳转目标, box 目标页面物理区域
 // 返回: pdfgo.Destination 待关联输出页的目标, error 目标参数错误
-func pdfDestination(dest Dest, pageH float64) (pdfgo.Destination, error) {
+func pdfDestination(dest Dest, box Box) (pdfgo.Destination, error) {
 	dest = dest.effective()
 	if _, err := dest.attributes(); err != nil {
 		return pdfgo.Destination{}, err
 	}
+	left := dest.Left
+	if !dest.OmitLeft {
+		left -= box.X
+	}
+	top := dest.Top
+	if !dest.OmitTop {
+		top -= box.Y
+	}
+	right := dest.Right - box.X
+	bottom := dest.Bottom - box.Y
 	const scale = 72.0 / 25.4
 	result := pdfgo.Destination{Mode: pdfgo.Name(dest.Type)}
 	switch dest.Type {
 	case "XYZ":
-		result.Parameters = pdfgo.Array{pdfgo.Real(dest.Left * scale), pdfgo.Real((pageH - dest.Top) * scale), pdfgo.Real(dest.Zoom)}
+		result.Parameters = pdfgo.Array{pdfgo.Real(left * scale), pdfgo.Real((box.H - top) * scale), pdfgo.Real(dest.Zoom)}
 	case "FitH":
-		result.Parameters = pdfgo.Array{pdfgo.Real((pageH - dest.Top) * scale)}
+		result.Parameters = pdfgo.Array{pdfgo.Real((box.H - top) * scale)}
 	case "FitV":
-		result.Parameters = pdfgo.Array{pdfgo.Real(dest.Left * scale)}
+		result.Parameters = pdfgo.Array{pdfgo.Real(left * scale)}
 	case "FitR":
-		result.Parameters = pdfgo.Array{pdfgo.Real(dest.Left * scale), pdfgo.Real((pageH - dest.Bottom) * scale), pdfgo.Real(dest.Right * scale), pdfgo.Real((pageH - dest.Top) * scale)}
+		result.Parameters = pdfgo.Array{pdfgo.Real(left * scale), pdfgo.Real((box.H - bottom) * scale), pdfgo.Real(right * scale), pdfgo.Real((box.H - top) * scale)}
 	}
 	return result, nil
 }

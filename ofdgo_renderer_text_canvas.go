@@ -15,8 +15,6 @@
 package ofdgo
 
 import (
-	"strings"
-
 	"github.com/tdewolff/canvas"
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
@@ -52,11 +50,16 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if boundaryInCTM && parentCTM != nil {
 		objectCTM = parentCTM.Multiply(TranslationMatrix(bx, by)).Multiply(localCTM)
 	}
-	clipPath := r.intersectCachedClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
-	var dp *DrawParam
-	if obj.DrawParam != "" {
-		dp = r.getDrawParam(obj.DrawParam, nil)
+	patternOrigin := TranslationMatrix(bx, by)
+	if parentCTM != nil {
+		if boundaryInCTM {
+			patternOrigin = parentCTM.Multiply(patternOrigin)
+		} else {
+			patternOrigin = patternOrigin.Multiply(*parentCTM)
+		}
 	}
+	clipPath := r.intersectCachedClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
+	dp := r.drawParamDefaults(obj.DrawParam, defaults)
 	sizeMM := obj.Size
 	if sizeMM == 0 && dp != nil && dp.Size > 0 {
 		sizeMM = dp.Size
@@ -64,9 +67,8 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if sizeMM == 0 {
 		sizeMM = 3.5
 	}
-	if obj.VScale != 0 {
-		sizeMM *= obj.VScale
-	}
+	effectiveObj := obj
+	effectiveObj.Size = sizeMM
 	hScale := obj.HScale
 	if hScale == 0 {
 		hScale = 1
@@ -124,20 +126,23 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	}
 	fontStyle := canvas.FontRegular
 	weight := obj.Weight
-	if weight == 0 && dp != nil && dp.Weight > 0 {
+	if weight == 0 && !obj.WeightSet && dp != nil && (dp.Weight > 0 || dp.WeightSet) {
 		weight = dp.Weight
 	}
 	syntheticBold := weight >= 700
 	italic := obj.Italic
-	if !italic && dp != nil && dp.Italic {
+	if !obj.ItalicSet && !italic && dp != nil && dp.Italic {
 		italic = true
 	}
 	if italic {
 		fontStyle |= canvas.FontItalic
 	}
 	fontID := r.textObjectFontID(obj)
+	if fontID == "" && dp != nil && dp.Font != "" {
+		fontID = dp.Font
+	}
 	embeddedFont := false
-	if of := r.Reader.fontDefinition(fontID); of != nil {
+	if of := r.fontDefinition(fontID); of != nil {
 		embeddedFont = of.FontFile != ""
 		if syntheticBold && !embeddedFont && basefont.NoSyntheticBold(of.FontName, of.FamilyName) {
 			syntheticBold = false
@@ -155,7 +160,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	ff := r.loadFont(fontID)
 	var textRun *TextRun
 	if r.pageText != nil {
-		textRun = r.pageText.addRun(obj)
+		textRun = r.pageText.addRun(effectiveObj)
 	}
 	if ff == nil {
 		if textRun != nil && !r.textContentOnly {
@@ -190,8 +195,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		ascent /= scale
 	}
 	obj.TextCode = textCodeOrigins(obj.TextCode, ascent)
+	effectiveObj.TextCode = obj.TextCode
 	if textRun != nil && recoverBaseline {
-		if text := obj.Text(); text != textRun.Text {
+		if text := effectiveObj.Text(); text != textRun.Text {
 			textRun.Text = text
 			textRun.Boxes = make([]Box, len([]rune(text)))
 		}
@@ -201,10 +207,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		return
 	}
 	glyphTransforms := r.textObjectGlyphTransforms(fontID, obj)
-	hasUnderline := strings.Contains(obj.Decoration, "Underline")
 	_, shadedFill := fillPaint.(canvas.Gradient)
 	pdfOutput, _ := ctx.Renderer.(*pdfRenderer)
-	pdfText := pdfOutput != nil && !r.textOnly && shouldFill && !shouldStroke && fillPattern == nil && !shadedFill && face.FauxBold == 0 && face.FauxItalic == 0 && !(hasUnderline && fillClip != nil)
+	pdfText := pdfOutput != nil && !r.textOnly && shouldFill && !shouldStroke && fillPattern == nil && !shadedFill && face.FauxBold == 0 && face.FauxItalic == 0
 	if pdfText {
 		view := canvas.Identity
 		if useTextMatrix {
@@ -216,13 +221,13 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		if len(pdfOutput.text) == 0 {
 			pdfOutput.text = append(pdfOutput.text, codecpdf.TextPage{})
 		}
-		defer pdfOutput.preserveText(pdfOutput.text[len(pdfOutput.text)-1].Count, obj.Text())
+		defer pdfOutput.preserveText(pdfOutput.text[len(pdfOutput.text)-1].Count, effectiveObj.Text())
 	}
 	codePos := 0
 	textPos := 0
 	var lines textLineScanner
 	if textRun != nil {
-		lines = newTextLineScanner(obj)
+		lines = newTextLineScanner(effectiveObj)
 	}
 	for _, tc := range obj.TextCode {
 		if textRun != nil && lines.next(tc) {
@@ -280,7 +285,6 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				tx, ty := ctm.Transform(cx, cy)
 				canvasX, canvasY = tx+bx, pageH-(ty+by)
 			}
-			textWidth := glyphWidth * hScale
 			if textRun != nil {
 				if i < len(spans) {
 					if glyphPath == nil {
@@ -314,7 +318,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				}
 				path := glyphPath.Copy().Transform(transform.Scale(scaleX, 1))
 				if shouldFill && fillPattern != nil {
-					r.renderPattern(ctx, fillPattern, pageH, applyClipPath(path.Copy(), fillClip), objectCTM)
+					r.renderPattern(ctx, fillPattern, pageH, applyClipPath(path.Copy(), fillClip), patternOrigin)
 				} else if shouldFill && fillPaint != nil {
 					ctx.SetFill(fillPaint)
 					ctx.SetStrokeColor(canvas.Transparent)
@@ -323,27 +327,11 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				path = r.strokeDashedCanvasPath(path, strokeStyle.lineWidth, strokeStyle.lineCap, strokeStyle.lineJoin, strokeStyle.dashOffset, strokeStyle.dashPattern, false)
 				path = r.applyCachedClipPath(path, strokeClip)
 				if strokeStyle.strokePattern != nil {
-					r.renderPattern(ctx, strokeStyle.strokePattern, pageH, path, objectCTM)
+					r.renderPattern(ctx, strokeStyle.strokePattern, pageH, path, patternOrigin)
 				} else {
 					ctx.SetFill(strokeStyle.strokePaint)
 					ctx.SetStrokeColor(canvas.Transparent)
 					r.drawShdPath(ctx, path, strokeView)
-				}
-				if hasUnderline {
-					underline := &canvas.Path{}
-					underline.MoveTo(0, -sizeMM*0.1)
-					underline.LineTo(glyphWidth*scaleX, -sizeMM*0.1)
-					underline = r.strokeCanvasPath(underline, sizeMM*0.05, canvas.ButtCap, canvas.MiterJoin)
-					if shouldFill && fillPattern != nil {
-						r.renderPattern(ctx, fillPattern, pageH, applyClipPath(underline.Transform(transform), clipPath), objectCTM)
-					} else if shouldFill {
-						ctx.SetFillColor(fillColor)
-						ctx.DrawPath(0, 0, applyClipPath(underline.Transform(transform), clipPath))
-					} else if strokeStyle.strokePattern != nil {
-						r.renderPattern(ctx, strokeStyle.strokePattern, pageH, applyClipPath(underline.Transform(transform), strokeClip), objectCTM)
-					} else {
-						r.drawShdPath(ctx, applyClipPath(underline.Transform(transform), strokeClip), strokeView)
-					}
 				}
 				continue
 			}
@@ -354,7 +342,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				if pdfText {
 					glyphClip = nil
 				}
-				if !pdfText && fillClip != nil && !embeddedFont && face.FauxBold == 0 && !positioned && !shadedFill && fillPattern == nil && glyph.GlyphID < 0 && !hasUnderline {
+				if !pdfText && fillClip != nil && !embeddedFont && face.FauxBold == 0 && !positioned && !shadedFill && fillPattern == nil && glyph.GlyphID < 0 {
 					if rect, ok := rectangularPath(fillClip); ok {
 						transform := canvas.Identity.Translate(canvasX, canvasY)
 						if useTextMatrix {
@@ -373,39 +361,21 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				}
 				if glyphClip != nil || shadedFill || fillPattern != nil {
 					scaleX := hScale
-					textWidth = glyphWidth * scaleX
 					textTransform := canvas.Identity.Translate(canvasX, canvasY)
 					if useTextMatrix {
 						textTransform = textTransform.Mul(glyphMatrix)
 					}
 					glyphPath = r.applyCachedClipPath(glyphPath.Copy().Transform(textTransform.Scale(scaleX, 1)), glyphClip)
 					if fillPattern != nil {
-						r.renderPattern(ctx, fillPattern, pageH, glyphPath, objectCTM)
+						r.renderPattern(ctx, fillPattern, pageH, glyphPath, patternOrigin)
 					} else {
 						r.drawShdPath(ctx, glyphPath, fillView)
-					}
-					if hasUnderline {
-						uw := sizeMM * 0.05
-						off := sizeMM * 0.1
-						underline := &canvas.Path{}
-						underline.MoveTo(0, -off)
-						underline.LineTo(textWidth, -off)
-						underline = r.strokeCanvasPath(underline, uw, canvas.ButtCap, canvas.MiterJoin)
-						underline = applyClipPath(underline.Transform(textTransform), clipPath)
-						if fillPattern != nil {
-							r.renderPattern(ctx, fillPattern, pageH, underline, objectCTM)
-						} else {
-							ctx.SetFillColor(fillColor)
-							ctx.SetStrokeColor(canvas.Transparent)
-							ctx.DrawPath(0, 0, underline)
-						}
 					}
 					continue
 				}
 				drawGlyph := func(x, y float64) {
 					if drawAsGlyphPath && !pdfText {
 						scaleX := hScale
-						textWidth = glyphWidth * scaleX
 						if face.FauxBold != 0 {
 							if renderer, ok := ctx.Renderer.(*pdfRenderer); ok {
 								glyphPath = renderer.glyphPath(glyphPath, ctx.View().Scale(scaleX, 1))
@@ -453,28 +423,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					ctx.Translate(canvasX, canvasY)
 					ctx.ComposeView(glyphMatrix)
 					drawGlyph(0, 0)
-					if hasUnderline {
-						uw := sizeMM * 0.05
-						ctx.SetStrokeWidth(uw)
-						ctx.SetStrokeColor(fillColor)
-						off := sizeMM * 0.1
-						ctx.MoveTo(0, -off)
-						ctx.LineTo(textWidth, -off)
-						ctx.Stroke()
-					}
 					ctx.Pop()
 					continue
 				}
 				drawGlyph(canvasX, canvasY)
-			}
-			if hasUnderline {
-				uw := sizeMM * 0.05
-				ctx.SetStrokeWidth(uw)
-				ctx.SetStrokeColor(fillColor)
-				off := sizeMM * 0.1
-				ctx.MoveTo(canvasX, canvasY-off)
-				ctx.LineTo(canvasX+textWidth, canvasY-off)
-				ctx.Stroke()
 			}
 		}
 		codePos += len(runes)

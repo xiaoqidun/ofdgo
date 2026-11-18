@@ -26,10 +26,10 @@ import (
 	"unicode/utf8"
 )
 
-// 公文标引类型标识
+// structureTypeOfficial 公文标引类型标识
 const structureTypeOfficial = "od"
 
-// 2013版电子公文标引命名空间
+// structureNamespaceEGov2013 2013版电子公文标引命名空间
 const structureNamespaceEGov2013 = "http://www.nits.org.cn/eGovDoc/2013"
 
 // Structure 保存自定义标引入口及结构树，单个文件解析失败时通过Error报告，不影响其他标引
@@ -235,7 +235,8 @@ func (r *Reader) readStructureContext(ctx context.Context, tag CustomTag) (Struc
 		return item, fmt.Errorf("read custom tag %s: %w", tag.FileLoc, err)
 	}
 	item.CanBind = structureOfficial(tag, item.Root.Namespace) || structureInvoiceReferences(item.Root)
-	item.Internal = tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace && item.Root.Namespace == richTextNamespace && item.Root.Name == "RichText"
+	item.Internal = tag.TypeID == textTagType && tag.NameSpace == textNamespace && item.Root.Namespace == textNamespace && item.Root.Name == "Text"
+	item.Internal = item.Internal || tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace && item.Root.Namespace == richTextNamespace && item.Root.Name == "RichText"
 	item.Internal = item.Internal || tag.TypeID == invoiceTagType && tag.NameSpace == invoiceNamespace && item.Root.Namespace == invoiceNamespace && item.Root.Name == "Invoice"
 	return item, nil
 }
@@ -421,6 +422,9 @@ func (r *Reader) structureReferenceTags(ctx context.Context, tags []CustomTag) (
 // 入参: tag 标引入口, namespace 内容根节点命名空间
 // 返回: bool 是否使用公文引用规则
 func structureOfficial(tag CustomTag, namespace string) bool {
+	if tag.TypeID == textTagType && tag.NameSpace == textNamespace && namespace == textNamespace {
+		return true
+	}
 	if tag.TypeID == invoiceTagType && tag.NameSpace == invoiceNamespace && namespace == invoiceNamespace {
 		return true
 	}
@@ -431,7 +435,7 @@ func structureOfficial(tag CustomTag, namespace string) bool {
 		return true
 	}
 	if tag.TypeID == structureTypeOfficial {
-		return true
+		return strings.TrimSpace(tag.NameSpace) == "" || tag.NameSpace == namespace
 	}
 	if tag.NameSpace != namespace {
 		return false

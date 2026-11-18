@@ -186,7 +186,7 @@ func (e *Editor) SyncInvoicePages(ctx context.Context, invoice Invoice, bindings
 				return fmt.Errorf("invoice binding %q is not text", binding.Field)
 			}
 			text := &object.TextObject
-			if text.CTM != "" || text.Clips != nil || text.Italic || text.Weight > 400 || text.VScale != 0 || text.Decoration != "" || text.DrawParam != "" || text.Stroke != nil && *text.Stroke || text.HScale != 0 && text.HScale != 1 {
+			if text.CTM != "" || text.Clips != nil || text.Italic || text.Weight > 400 || text.DrawParam != "" || text.Stroke != nil && *text.Stroke || text.HScale != 0 && text.HScale != 1 {
 				return fmt.Errorf("invoice binding %q requires plain untransformed text", binding.Field)
 			}
 			metrics, err := editor.editorFont(text.Font)
@@ -580,7 +580,7 @@ func (e *Editor) layoutInvoiceReferenceSlots(ctx context.Context, bindings []Inv
 			return fmt.Errorf("invoice slot requires one direct text object")
 		}
 		text := &object.TextObject
-		if text.CTM != "" || text.Clips != nil || text.ReadDirection != 0 || text.CharDirection != 0 || text.Italic || text.Weight > 400 || text.VScale != 0 || text.Decoration != "" || text.DrawParam != "" || text.Stroke != nil && *text.Stroke || !finite(text.HScale) || text.HScale < 0 || len(text.TextCode) == 0 {
+		if text.CTM != "" || text.Clips != nil || text.ReadDirection != 0 || text.CharDirection != 0 || text.Italic || text.Weight > 400 || text.DrawParam != "" || text.Stroke != nil && *text.Stroke || !finite(text.HScale) || text.HScale < 0 || len(text.TextCode) == 0 {
 			return fmt.Errorf("invoice slot requires plain horizontal text without transforms")
 		}
 		box, err := creationBox(text.Boundary)

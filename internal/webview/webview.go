@@ -481,7 +481,11 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		}
 		return window.Print(ctx, options)
 	case "engine.open":
-		engine := webui.NewNativeEngine(h.files.resolve)
+		id := rand.Text()
+		if err := h.files.openHolder(id); err != nil {
+			return nil, err
+		}
+		engine := webui.NewNativeEngine(func(token string) (io.ReaderAt, int64, error) { return h.files.resolveHolder(id, token) })
 		parallelism, cacheBytes := runtime.GOMAXPROCS(0), int64(128<<20)
 		if memory := conversionMemory; memory != nil {
 			available := memory()
@@ -494,7 +498,6 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		engine.ReserveOutput = h.reserveOutput
 		engine.CleanupOutput = h.cleanupOutput
 		engine.LoadFont = h.loadFont
-		id := rand.Text()
 		h.mu.Lock()
 		h.engines[id] = engine
 		if h.engineStops == nil {
@@ -553,12 +556,15 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		go func() {
 			defer cancel()
 			defer func() { h.mu.Lock(); delete(h.cancels, key); h.mu.Unlock() }()
+			finishCall := h.files.beginHolderCall(id, operationName, values)
+			defer finishCall(false)
 			result := engine.Call(operation, operationName, values, func(event any) {
 				if value, ok := event.(map[string]any); ok {
 					value["id"] = args["id"]
 					h.emit("ofdgo.engine."+id, value)
 				}
 			})
+			finishCall(result != nil && result["ok"] == true)
 			encoded := h.encode(page, result)
 			h.mu.Lock()
 			if page.Err() != nil || h.engines[id] != engine {
@@ -591,13 +597,17 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		if engine == nil {
 			return nil, fmt.Errorf("会话已关闭")
 		}
+		callName := text("name")
 		values, _ := args["args"].([]any)
-		result := engine.Call(operation, text("name"), values, func(event any) {
+		finishCall := h.files.beginHolderCall(id, callName, values)
+		defer finishCall(false)
+		result := engine.Call(operation, callName, values, func(event any) {
 			if value, ok := event.(map[string]any); ok {
 				value["id"] = args["id"]
 				h.emit("ofdgo.engine."+id, value)
 			}
 		})
+		finishCall(result != nil && result["ok"] == true)
 		encoded := h.encode(guigo.PageContext(ctx), result)
 		return guigo.Result{Value: encoded, Discard: func() { h.discard(encoded) }}, nil
 	case "open", "save", "directory":
@@ -731,10 +741,11 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		}
 		descriptor, _ := args["data"].(map[string]any)
 		key, _ := descriptor["nativeFile"].(string)
-		input, size, err := h.files.resolve(key)
+		input, size, release, err := h.files.acquire(key)
 		if err != nil {
 			return nil, err
 		}
+		defer release()
 		_, err = io.Copy(writer, io.NewSectionReader(input, 0, size))
 		return nil, err
 	case "fonts":
@@ -806,6 +817,235 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		return nil, h.flushLaunch()
 	}
 	return nil, fmt.Errorf("未知宿主操作")
+}
+
+// encode 将二进制输出登记为页面资源
+// 入参: ctx 页面上下文, value 原生调用结果
+// 返回: any 包含资源描述的调用结果
+func (h *Host) encode(ctx context.Context, value any) any {
+	switch v := value.(type) {
+	case []byte:
+		return h.files.bytes(ctx, v)
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			out[key] = h.encode(ctx, item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = h.encode(ctx, item)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+// discard 释放页面未接收的临时结果
+// 入参: value 包含资源描述的调用结果
+func (h *Host) discard(value any) {
+	switch v := value.(type) {
+	case map[string]any:
+		if id, ok := v["nativeFile"].(string); ok && v["temporary"] == true {
+			h.files.release(id)
+			return
+		}
+		for _, item := range v {
+			h.discard(item)
+		}
+	case []any:
+		for _, item := range v {
+			h.discard(item)
+		}
+	}
+}
+
+// openWriter 将授权目标转换为原生事务写入器
+// 入参: ctx 调用上下文, value 目标句柄, name 输出文件名
+// 返回: io.WriteCloser 事务写入器, error 创建错误
+func (h *Host) openWriter(ctx context.Context, value any, name string) (io.WriteCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	handle, _ := value.(map[string]any)
+	id, _ := handle["nativeHandle"].(string)
+	h.files.mu.Lock()
+	entry := h.files.entries[id]
+	directory := entry != nil && entry.directory
+	h.files.mu.Unlock()
+	if directory {
+		parts := strings.Split(strings.ReplaceAll(name, "\\", "/"), "/")
+		for i, part := range parts {
+			child, err := h.files.child(id, part, i < len(parts)-1, true)
+			if err != nil {
+				return nil, err
+			}
+			id = child["nativeHandle"].(string)
+		}
+		h.files.mu.Lock()
+		owned := h.files.entries[id].owned
+		h.files.mu.Unlock()
+		if !owned {
+			return nil, fmt.Errorf("输出文件已存在")
+		}
+	}
+	return h.files.begin(ctx, id)
+}
+
+// reserveOutput 为一次转换预留独立输出文件或目录
+// 入参: ctx 调用上下文, request 输出请求
+// 返回: webui.NativeOutputTarget 预留目标, error 创建错误
+func (h *Host) reserveOutput(ctx context.Context, request webui.NativeOutputRequest) (webui.NativeOutputTarget, error) {
+	if err := ctx.Err(); err != nil {
+		return webui.NativeOutputTarget{}, err
+	}
+	handle, _ := request.Destination.(map[string]any)
+	id, _ := handle["nativeHandle"].(string)
+	base, name, err := h.files.reserve(id, request.Base, request.Extension, request.Paged)
+	return webui.NativeOutputTarget{Destination: request.Destination, Base: base, Name: name}, err
+}
+
+// cleanupOutput 回滚本次转换创建的输出入口
+// 入参: ctx 调用上下文, target 预留目标
+// 返回: error 清理错误
+func (h *Host) cleanupOutput(ctx context.Context, target webui.NativeOutputTarget) error {
+	handle, _ := target.Destination.(map[string]any)
+	id, _ := handle["nativeHandle"].(string)
+	return h.files.remove(id, target.Name, true)
+}
+
+// readFonts 建立系统字体目录并登记按需读取资源
+func (h *Host) readFonts() {
+	platform, language := fontNameLanguage()
+	for _, name := range ofdgo.FontSystemFiles() {
+		data, err := os.ReadFile(name)
+		if err != nil {
+			continue
+		}
+		faces, err := (ofdgo.FontFile{Name: filepath.Base(name), Data: data}).LocalizedFaces(platform, language)
+		if err != nil {
+			continue
+		}
+		handle, err := h.files.add(name, false)
+		if err != nil {
+			continue
+		}
+		file, err := h.files.reference(handle["nativeHandle"].(string))
+		if err != nil {
+			continue
+		}
+		for _, face := range faces {
+			h.fonts = append(h.fonts, map[string]any{"index": face.Index, "postscriptName": face.PostScriptName, "fullName": face.FullName, "family": face.Family, "style": face.Style, "names": face.Names, "menuFamily": face.MenuFamily, "menuStyle": face.MenuStyle, "familyKey": face.FamilyKey, "bold": face.Bold, "italic": face.Italic, "file": file})
+			for _, alias := range append([]string{face.FullName, face.Family, face.PostScriptName, strings.TrimSpace(face.Family + " " + face.Style)}, face.Names...) {
+				if alias != "" && h.fontFiles[alias+".ttf"] == "" {
+					h.fontFiles[alias+".ttf"] = name + "\x00" + strconv.Itoa(face.Index)
+				}
+			}
+		}
+	}
+}
+
+// loadFont 按转换请求读取单个系统字体
+// 入参: ctx 调用上下文, name 字体别名对应的文件名
+// 返回: []byte 字体数据, error 读取错误
+func (h *Host) loadFont(ctx context.Context, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	h.fontOnce.Do(h.readFonts)
+	parts := strings.Split(h.fontFiles[name], "\x00")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("系统字体不可用")
+	}
+	data, err := os.ReadFile(parts[0])
+	if err != nil {
+		return nil, err
+	}
+	index, _ := strconv.Atoi(parts[1])
+	return (ofdgo.FontFile{Data: data}).Face(index)
+}
+
+// closeEngine 取消会话调用并释放文档及文件引用
+// 入参: id 会话标识
+// 返回: error 关闭错误
+func (h *Host) closeEngine(id string) error {
+	var results []any
+	h.mu.Lock()
+	if closing := h.closingEngines[id]; closing != nil {
+		h.mu.Unlock()
+		<-closing.done
+		return closing.err
+	}
+	engine := h.engines[id]
+	if engine == nil {
+		h.mu.Unlock()
+		return nil
+	}
+	closing := &engineClose{done: make(chan struct{})}
+	if h.closingEngines == nil {
+		h.closingEngines = make(map[string]*engineClose)
+	}
+	h.closingEngines[id] = closing
+	delete(h.engines, id)
+	if stop := h.engineStops[id]; stop != nil {
+		stop()
+		delete(h.engineStops, id)
+	}
+	for key, cancel := range h.cancels {
+		if strings.HasPrefix(key, id+"/") {
+			cancel()
+		}
+	}
+	for key, result := range h.batchResults {
+		if strings.HasPrefix(key, id+"/") {
+			results = append(results, result)
+			delete(h.batchResults, key)
+		}
+	}
+	h.mu.Unlock()
+	for _, result := range results {
+		h.discard(result)
+	}
+	err := errors.Join(engine.Close(), h.files.closeHolder(id))
+	h.mu.Lock()
+	closing.err = err
+	delete(h.closingEngines, id)
+	close(closing.done)
+	h.mu.Unlock()
+	return err
+}
+
+// close 取消任务并释放当前窗口持有的会话
+func (h *Host) close() {
+	h.launchMu.Lock()
+	h.launchClosed = true
+	h.launchMu.Unlock()
+	h.mu.Lock()
+	for _, cancel := range h.cancels {
+		cancel()
+	}
+	engines := make([]string, 0, len(h.engines)+len(h.closingEngines))
+	for id := range h.engines {
+		engines = append(engines, id)
+	}
+	for id := range h.closingEngines {
+		engines = append(engines, id)
+	}
+	results := h.batchResults
+	h.batchResults = nil
+	h.mu.Unlock()
+	for _, id := range engines {
+		_ = h.closeEngine(id)
+	}
+	for _, result := range results {
+		h.discard(result)
+	}
+	if h.resources != nil {
+		h.resources.Clear()
+	}
+	_ = h.files.close()
 }
 
 // associationOptions 提供Windows文件关联的固定应用配置
@@ -983,235 +1223,6 @@ func dialogError(err error) error {
 		return &guigo.BridgeError{Name: "AbortError", Message: "已取消"}
 	}
 	return err
-}
-
-// encode 将二进制输出登记为页面资源
-// 入参: ctx 页面上下文, value 原生调用结果
-// 返回: any 包含资源描述的调用结果
-func (h *Host) encode(ctx context.Context, value any) any {
-	switch v := value.(type) {
-	case []byte:
-		return h.files.bytes(ctx, v)
-	case map[string]any:
-		out := make(map[string]any, len(v))
-		for key, item := range v {
-			out[key] = h.encode(ctx, item)
-		}
-		return out
-	case []any:
-		out := make([]any, len(v))
-		for i, item := range v {
-			out[i] = h.encode(ctx, item)
-		}
-		return out
-	default:
-		return value
-	}
-}
-
-// discard 释放页面未接收的临时结果
-// 入参: value 包含资源描述的调用结果
-func (h *Host) discard(value any) {
-	switch v := value.(type) {
-	case map[string]any:
-		if id, ok := v["nativeFile"].(string); ok && v["temporary"] == true {
-			h.files.release(id)
-			return
-		}
-		for _, item := range v {
-			h.discard(item)
-		}
-	case []any:
-		for _, item := range v {
-			h.discard(item)
-		}
-	}
-}
-
-// openWriter 将授权目标转换为原生事务写入器
-// 入参: ctx 调用上下文, value 目标句柄, name 输出文件名
-// 返回: io.WriteCloser 事务写入器, error 创建错误
-func (h *Host) openWriter(ctx context.Context, value any, name string) (io.WriteCloser, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	handle, _ := value.(map[string]any)
-	id, _ := handle["nativeHandle"].(string)
-	h.files.mu.Lock()
-	entry := h.files.entries[id]
-	directory := entry != nil && entry.directory
-	h.files.mu.Unlock()
-	if directory {
-		parts := strings.Split(strings.ReplaceAll(name, "\\", "/"), "/")
-		for i, part := range parts {
-			child, err := h.files.child(id, part, i < len(parts)-1, true)
-			if err != nil {
-				return nil, err
-			}
-			id = child["nativeHandle"].(string)
-		}
-		h.files.mu.Lock()
-		owned := h.files.entries[id].owned
-		h.files.mu.Unlock()
-		if !owned {
-			return nil, fmt.Errorf("输出文件已存在")
-		}
-	}
-	return h.files.begin(ctx, id)
-}
-
-// reserveOutput 为一次转换预留独立输出文件或目录
-// 入参: ctx 调用上下文, request 输出请求
-// 返回: webui.NativeOutputTarget 预留目标, error 创建错误
-func (h *Host) reserveOutput(ctx context.Context, request webui.NativeOutputRequest) (webui.NativeOutputTarget, error) {
-	if err := ctx.Err(); err != nil {
-		return webui.NativeOutputTarget{}, err
-	}
-	handle, _ := request.Destination.(map[string]any)
-	id, _ := handle["nativeHandle"].(string)
-	base, name, err := h.files.reserve(id, request.Base, request.Extension, request.Paged)
-	return webui.NativeOutputTarget{Destination: request.Destination, Base: base, Name: name}, err
-}
-
-// cleanupOutput 回滚本次转换创建的输出入口
-// 入参: ctx 调用上下文, target 预留目标
-// 返回: error 清理错误
-func (h *Host) cleanupOutput(ctx context.Context, target webui.NativeOutputTarget) error {
-	handle, _ := target.Destination.(map[string]any)
-	id, _ := handle["nativeHandle"].(string)
-	return h.files.remove(id, target.Name, true)
-}
-
-// readFonts 建立系统字体目录并登记按需读取资源
-func (h *Host) readFonts() {
-	platform, language := fontNameLanguage()
-	for _, name := range ofdgo.FontSystemFiles() {
-		data, err := os.ReadFile(name)
-		if err != nil {
-			continue
-		}
-		faces, err := (ofdgo.FontFile{Name: filepath.Base(name), Data: data}).LocalizedFaces(platform, language)
-		if err != nil {
-			continue
-		}
-		handle, err := h.files.add(name, false)
-		if err != nil {
-			continue
-		}
-		file, err := h.files.reference(handle["nativeHandle"].(string))
-		if err != nil {
-			continue
-		}
-		for _, face := range faces {
-			h.fonts = append(h.fonts, map[string]any{"index": face.Index, "postscriptName": face.PostScriptName, "fullName": face.FullName, "family": face.Family, "style": face.Style, "names": face.Names, "menuFamily": face.MenuFamily, "menuStyle": face.MenuStyle, "familyKey": face.FamilyKey, "bold": face.Bold, "italic": face.Italic, "file": file})
-			for _, alias := range append([]string{face.FullName, face.Family, face.PostScriptName, strings.TrimSpace(face.Family + " " + face.Style)}, face.Names...) {
-				if alias != "" && h.fontFiles[alias+".ttf"] == "" {
-					h.fontFiles[alias+".ttf"] = name + "\x00" + strconv.Itoa(face.Index)
-				}
-			}
-		}
-	}
-}
-
-// loadFont 按转换请求读取单个系统字体
-// 入参: ctx 调用上下文, name 字体别名对应的文件名
-// 返回: []byte 字体数据, error 读取错误
-func (h *Host) loadFont(ctx context.Context, name string) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	h.fontOnce.Do(h.readFonts)
-	parts := strings.Split(h.fontFiles[name], "\x00")
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("系统字体不可用")
-	}
-	data, err := os.ReadFile(parts[0])
-	if err != nil {
-		return nil, err
-	}
-	index, _ := strconv.Atoi(parts[1])
-	return (ofdgo.FontFile{Data: data}).Face(index)
-}
-
-// closeEngine 取消会话调用并释放文档
-// 入参: id 会话标识
-// 返回: error 关闭错误
-func (h *Host) closeEngine(id string) error {
-	var results []any
-	h.mu.Lock()
-	if closing := h.closingEngines[id]; closing != nil {
-		h.mu.Unlock()
-		<-closing.done
-		return closing.err
-	}
-	engine := h.engines[id]
-	if engine == nil {
-		h.mu.Unlock()
-		return nil
-	}
-	closing := &engineClose{done: make(chan struct{})}
-	if h.closingEngines == nil {
-		h.closingEngines = make(map[string]*engineClose)
-	}
-	h.closingEngines[id] = closing
-	delete(h.engines, id)
-	if stop := h.engineStops[id]; stop != nil {
-		stop()
-		delete(h.engineStops, id)
-	}
-	for key, cancel := range h.cancels {
-		if strings.HasPrefix(key, id+"/") {
-			cancel()
-		}
-	}
-	for key, result := range h.batchResults {
-		if strings.HasPrefix(key, id+"/") {
-			results = append(results, result)
-			delete(h.batchResults, key)
-		}
-	}
-	h.mu.Unlock()
-	for _, result := range results {
-		h.discard(result)
-	}
-	err := engine.Close()
-	h.mu.Lock()
-	closing.err = err
-	delete(h.closingEngines, id)
-	close(closing.done)
-	h.mu.Unlock()
-	return err
-}
-
-// close 取消任务并释放当前窗口持有的会话
-func (h *Host) close() {
-	h.launchMu.Lock()
-	h.launchClosed = true
-	h.launchMu.Unlock()
-	h.mu.Lock()
-	for _, cancel := range h.cancels {
-		cancel()
-	}
-	engines := make([]string, 0, len(h.engines)+len(h.closingEngines))
-	for id := range h.engines {
-		engines = append(engines, id)
-	}
-	for id := range h.closingEngines {
-		engines = append(engines, id)
-	}
-	results := h.batchResults
-	h.batchResults = nil
-	h.mu.Unlock()
-	for _, id := range engines {
-		_ = h.closeEngine(id)
-	}
-	for _, result := range results {
-		h.discard(result)
-	}
-	if h.resources != nil {
-		h.resources.Clear()
-	}
-	_ = h.files.close()
 }
 
 // windowOptions 创建原生窗口配置

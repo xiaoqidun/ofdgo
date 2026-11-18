@@ -691,12 +691,6 @@ func (p *pdfImporter) objectValidation() *editorValidation {
 	return p.validation
 }
 
-// appendObject 追加本次导入对象，按需建立独立暂存缓冲
-// 入参: object 独立导入对象
-func (p *pdfImporter) appendObject(object GraphicObject) {
-	p.appendSequenceObject(object, nil)
-}
-
 // appendSequenceObject 追加对象并保留来源区段，供复合对象优化核对边界
 // 入参: object 独立导入对象, sequence 来源区段
 func (p *pdfImporter) appendSequenceObject(object GraphicObject, sequence *pdfgo.ContentSequence) {

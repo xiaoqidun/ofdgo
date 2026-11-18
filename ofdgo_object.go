@@ -195,6 +195,7 @@ func (p *DrawParam) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 					return err
 				}
 				p.Weight = weight
+				p.WeightSet = true
 			}
 		case "Italic":
 			if value := strings.TrimSpace(attr.Value); value != "" {
@@ -203,6 +204,7 @@ func (p *DrawParam) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 					return err
 				}
 				p.Italic = italic
+				p.ItalicSet = true
 			}
 		}
 		if value := strings.TrimSpace(attr.Value); target != nil && value != "" {
@@ -289,13 +291,12 @@ func (l *Layer) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
 func (c *CompositeGraphicUnit) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	*c = CompositeGraphicUnit{}
-	c.ID = attrValue(start, "ID")
-	c.BaseLoc = attrValue(start, "BaseLoc")
-	c.ResourceID = attrValue(start, "ResourceID")
-	c.Boundary = attrValue(start, "Boundary")
-	c.CTM = attrValue(start, "CTM")
-	c.DrawParam = attrValue(start, "DrawParam")
+	*c = CompositeGraphicUnit{
+		ID: attrValue(start, "ID"), Name: attrValue(start, "Name"), BaseLoc: attrValue(start, "BaseLoc"),
+		ResourceID: attrValue(start, "ResourceID"), Boundary: attrValue(start, "Boundary"), CTM: attrValue(start, "CTM"),
+		DrawParam: attrValue(start, "DrawParam"), Cap: attrValue(start, "Cap"), Join: attrValue(start, "Join"),
+		DashPattern: attrValue(start, "DashPattern"),
+	}
 	for _, dimension := range []struct {
 		name  string
 		value *float64
@@ -307,6 +308,41 @@ func (c *CompositeGraphicUnit) UnmarshalXML(d *xml.Decoder, start xml.StartEleme
 			if err != nil {
 				return fmt.Errorf("invalid vector %s: %w", dimension.name, err)
 			}
+		}
+	}
+	for _, attr := range start.Attr {
+		if attr.Name.Space != "" {
+			continue
+		}
+		switch attr.Name.Local {
+		case "LineWidth":
+			if value := strings.TrimSpace(attr.Value); value != "" {
+				v, err := strconv.ParseFloat(value, 64)
+				if err != nil {
+					return err
+				}
+				c.LineWidth = v
+				c.LineWidthSet = v == 0
+			}
+		case "MiterLimit":
+			if value := strings.TrimSpace(attr.Value); value != "" {
+				v, err := strconv.ParseFloat(value, 64)
+				if err != nil {
+					return err
+				}
+				c.MiterLimit = v
+				c.MiterLimitSet = v == 0
+			}
+		case "DashOffset":
+			if value := strings.TrimSpace(attr.Value); value != "" {
+				v, err := strconv.ParseFloat(value, 64)
+				if err != nil {
+					return err
+				}
+				c.DashOffset = &v
+			}
+		case "DashPattern":
+			c.dashPatternSet = c.DashPattern == ""
 		}
 	}
 	if value := attrValue(start, "Alpha"); value != "" {

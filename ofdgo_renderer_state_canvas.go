@@ -18,7 +18,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
-	"image"
 	"math"
 
 	"github.com/tdewolff/canvas"
@@ -30,6 +29,12 @@ type canvasFontKey struct {
 	digest [32]byte
 	name   string
 	style  canvas.FontStyle
+}
+
+// canvasFontMapKey 按字体标识与局部字体定义指针隔离当前渲染器的字体族缓存
+type canvasFontMapKey struct {
+	id         string
+	definition *Font
 }
 
 // canvasClipCacheKey 区分不依赖文档资源的共享裁剪缓存
@@ -73,23 +78,37 @@ type canvasPathKey struct {
 	epsilon float64
 }
 
-// canvasBackendState 保存Canvas字体、字形和编码图片适配缓存
+// canvasBackendState 保存Canvas字体与字形适配缓存
 type canvasBackendState struct {
 	resources          *Resources
-	images             renderCache[*EncodedImage, image.Image]
-	fontMap            map[string]*canvas.FontFamily
+	fontMap            map[canvasFontMapKey]*canvas.FontFamily
 	svgFontCache       map[*canvas.Font]SVGFont
 	textGlyphPathCache renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue]
 	fontOutlines       map[*canvas.Font]*basefont.Outliner
 }
 
-// resetFonts 清除Canvas字体及字形缓存，保留编码图片适配对象
+// resetFonts 清除Canvas字体及字形缓存
 func (s *canvasBackendState) resetFonts() {
 	s.textGlyphPathCache.clear()
-	s.fontMap = make(map[string]*canvas.FontFamily)
+	s.fontMap = make(map[canvasFontMapKey]*canvas.FontFamily)
 	s.svgFontCache = make(map[*canvas.Font]SVGFont)
 	s.textGlyphPathCache = *resourceCache[textGlyphPathCacheKey, textGlyphPathCacheValue](s.resources, 16<<20)
 	s.fontOutlines = make(map[*canvas.Font]*basefont.Outliner)
+}
+
+// forkSharedState 将Canvas后端的线程安全共享缓存传递给Fork子渲染器
+// 入参: src 源渲染器, dst 目标子渲染器
+func (CanvasBackend) forkSharedState(src, dst *Renderer) {
+	dst.sharedBackendStates[CanvasBackend{}] = src.canvasFontFamilies()
+	dst.sharedBackendStates[canvasOutlineCacheKey{}] = src.canvasFontOutlines()
+	dst.sharedBackendStates[canvasClipUnionKey{}] = src.canvasClipUnions()
+	dst.sharedBackendStates[canvasPathCacheKey{}] = src.canvasParsedPaths()
+	dst.sharedBackendStates[canvasClipCacheKey{}] = src.canvasClipIntersections()
+	dst.sharedBackendStates[canvasFillCacheKey{}] = src.canvasSettledPaths()
+	dst.sharedBackendStates[canvasDrawClipCacheKey{}] = src.canvasDrawClips()
+	dst.sharedBackendStates[canvasStrokeCacheKey{}] = src.canvasStrokeClips()
+	dst.sharedBackendStates[svgResourceCacheKey{}] = src.svgImageResources()
+	dst.sharedBackendStates[svgFontCacheKey{}] = src.svgFontResources()
 }
 
 // canvasClipIntersections 获取子渲染器共享的几何交集缓存，限制结果保留量
@@ -282,11 +301,29 @@ func (r *Renderer) canvasState() *canvasBackendState {
 	}
 	state := &canvasBackendState{
 		resources: r.Reader.resources,
-		images:    *resourceCache[*EncodedImage, image.Image](r.Reader.resources, imageCacheLimit),
 	}
 	state.resetFonts()
 	r.backendStates[key] = state
 	return state
+}
+
+// settleCanvasPath 复用复杂路径的填充规范化结果，返回独立副本
+// 入参: path 页面坐标路径, rule 填充规则
+// 返回: *canvas.Path 规范化填充轮廓
+func (r *Renderer) settleCanvasPath(path *canvas.Path, rule canvas.FillRule) *canvas.Path {
+	if len(path.Data()) < 256 {
+		return settleCanvasPath(path, rule)
+	}
+	key := canvasFillKey{digest: canvasGeometryDigest(path), rule: rule}
+	cache := r.canvasSettledPaths()
+	if result, ok := cache.get(key); ok {
+		return result.Copy()
+	}
+	result := settleCanvasPath(path, rule)
+	if cost := len(result.Data())*8 + 256; cost <= cache.limit {
+		cache.put(key, result.Copy(), cost)
+	}
+	return result
 }
 
 // canvasGeometryDigest 按完整坐标、路径顺序及几何容差计算摘要
@@ -315,23 +352,4 @@ func canvasGeometryDigest(paths ...*canvas.Path) [32]byte {
 	var key [32]byte
 	hash.Sum(key[:0])
 	return key
-}
-
-// settleCanvasPath 复用复杂路径的填充规范化结果，返回独立副本
-// 入参: path 页面坐标路径, rule 填充规则
-// 返回: *canvas.Path 规范化填充轮廓
-func (r *Renderer) settleCanvasPath(path *canvas.Path, rule canvas.FillRule) *canvas.Path {
-	if len(path.Data()) < 256 {
-		return settleCanvasPath(path, rule)
-	}
-	key := canvasFillKey{digest: canvasGeometryDigest(path), rule: rule}
-	cache := r.canvasSettledPaths()
-	if result, ok := cache.get(key); ok {
-		return result.Copy()
-	}
-	result := settleCanvasPath(path, rule)
-	if cost := len(result.Data())*8 + 256; cost <= cache.limit {
-		cache.put(key, result.Copy(), cost)
-	}
-	return result
 }

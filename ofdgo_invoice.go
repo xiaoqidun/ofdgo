@@ -215,7 +215,7 @@ func (r *Reader) InvoicesContext(ctx context.Context) (InvoiceReport, error) {
 		report.Issues = append(report.Issues, InvoiceIssue{Code: "read-error", Message: err.Error(), Source: InvoiceSource{Kind: "tag"}})
 	}
 	for i, tag := range tags {
-		if tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace || tag.TypeID == invoiceTagType && tag.NameSpace == invoiceNamespace {
+		if tag.TypeID == textTagType && tag.NameSpace == textNamespace || tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace || tag.TypeID == invoiceTagType && tag.NameSpace == invoiceNamespace {
 			continue
 		}
 		if err := read(InvoiceSource{Kind: "tag", ID: strconv.Itoa(i), FileLoc: tag.FileLoc}); err != nil {

@@ -44,6 +44,11 @@ func (e *Editor) pruneStructureReferences(ctx context.Context, parts map[string]
 	if err != nil {
 		return err
 	}
+	for i, tag := range tags {
+		if tag.TypeID == textTagType && tag.NameSpace == textNamespace {
+			knownTags[i] = false
+		}
+	}
 	if !slices.Contains(knownTags, true) {
 		return nil
 	}
@@ -121,10 +126,14 @@ func (e *Editor) pruneStructureReferences(ctx context.Context, parts map[string]
 			if _, err := snapshot.DocContext(ctx); err != nil {
 				return err
 			}
+			annots, err := snapshot.pageAnnotationsContext(ctx, page.ID)
+			if err != nil {
+				return err
+			}
 			visitor := &structureObjectVisitor{objects: maps.Clone(remaining)}
 			renderer := NewRenderer(snapshot)
 			renderer.pageContext = ctx
-			for _, annotation := range snapshot.Annots[page.ID] {
+			for _, annotation := range annots {
 				if err := renderer.walkAnnotation(annotation, visitor); err != nil {
 					return err
 				}
@@ -336,6 +345,123 @@ func (e *Editor) structureRemapStarts() map[string]int {
 	return starts
 }
 
+// annotationStructureSource 记录被修改注释原有的外观图元，供保存时清理失效标引
+// 入参: page 页面索引, wanted 待修改注释标识
+// 返回: *editorSource 保留已知图元的包快照, error 读取或遍历错误
+func (e *Editor) annotationStructureSource(page int, wanted map[string]bool) (*editorSource, error) {
+	base := e.source
+	if base.document.CustomTags.Path == "" && len(base.document.CustomTags.CustomTag) == 0 {
+		return base, nil
+	}
+	tags, err := base.reader.CustomTags()
+	if err != nil {
+		return nil, err
+	}
+	knownTags, err := base.reader.structureReferenceTags(context.Background(), tags)
+	if err != nil {
+		return nil, err
+	}
+	if !slices.Contains(knownTags, true) {
+		return base, nil
+	}
+	if _, err := base.reader.Doc(); err != nil {
+		return nil, err
+	}
+	if source := base.pages[e.pages[page].ID]; source != nil {
+		if _, err := base.reader.PageContent(source.ref); err != nil {
+			return nil, err
+		}
+	}
+	annots, err := base.reader.pageAnnotationsContext(context.Background(), e.pages[page].ID)
+	if err != nil {
+		return nil, err
+	}
+	visitor := &structureObjectVisitor{objects: make(map[string]bool)}
+	renderer := NewRenderer(base.reader)
+	for _, annotation := range annots {
+		if wanted[editorResourceID(annotation.ID)] {
+			if err := renderer.walkAnnotation(annotation, visitor); err != nil {
+				return nil, err
+			}
+		}
+	}
+	next := *base
+	next.structureObjects = maps.Clone(base.structureObjects)
+	if next.structureObjects == nil {
+		next.structureObjects = make(map[string]map[string]bool)
+	}
+	key := editorResourceID(e.pages[page].ID)
+	maps.Copy(visitor.objects, next.structureObjects[key])
+	next.structureObjects[key] = visitor.objects
+	return &next, nil
+}
+
+// structures 迁移所选页面的公文标引，按已迁移图元映射引用，不猜测其他行业的引用规则
+// 返回: []byte 标引索引条目, error 读取、解析或取消错误
+func (m *editorPageImport) structures() ([]byte, error) {
+	tags, err := m.reader.CustomTagsContext(m.ctx)
+	if err != nil {
+		return nil, err
+	}
+	knownTags, err := m.reader.structureReferenceTags(m.ctx, tags)
+	if err != nil {
+		return nil, err
+	}
+	var entries []byte
+	for i, tag := range tags {
+		if !knownTags[i] {
+			continue
+		}
+		data, err := m.readFile(m.reader.ResPath(tag.FileLoc))
+		if err != nil {
+			return nil, err
+		}
+		count := 0
+		updated, err := rewriteStructureReferences(m.ctx, data, tag, func(page string, ids []string) (string, []string, error) {
+			key := editorImportKey(page)
+			if !m.pages[key] {
+				if _, ok := m.templateParts[key]; !ok {
+					return page, nil, nil
+				}
+			}
+			var mapped []string
+			for _, id := range ids {
+				if value := m.ids[editorImportKey(id)]; value != "" {
+					mapped = append(mapped, value)
+				}
+			}
+			count += len(mapped)
+			return m.ids[key], mapped, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		if count == 0 {
+			continue
+		}
+		name := packageAvailableName(m.target, m.files, path.Join(m.directory, "Tags", fmt.Sprintf("Tag_%d.xml", i)))
+		m.files[name] = updated
+		var content []byte
+		if tag.SchemaLoc != "" {
+			schema, err := m.copyData(m.reader.ResPath(tag.SchemaLoc), path.Join(m.directory, "Tags", path.Base(tag.SchemaLoc)), false)
+			if err != nil {
+				return nil, err
+			}
+			content = append(content, editorXMLText("SchemaLoc", "/"+strings.TrimPrefix(schema, "/"))...)
+		}
+		content = append(content, editorXMLText("FileLoc", "/"+name)...)
+		var attrs ofdAttrs
+		attrs.add("TypeID", tag.TypeID)
+		attrs.add("NameSpace", tag.NameSpace)
+		entry, err := editorXMLContainer("CustomTag", attrs, content)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry...)
+	}
+	return entries, nil
+}
+
 // structureRemapLinks 合并按操作顺序记录的编号迁移，保留一对多关系并排除重复边
 // 入参: ctx 取消上下文, remaps 图元编号迁移记录
 // 返回: map[string][]string 原编号及其迁移目标, error 取消错误
@@ -411,53 +537,6 @@ func structurePageObjectIDs(ctx context.Context, reader *Reader, page Page) (map
 	return visitor.objects, nil
 }
 
-// annotationStructureSource 记录被修改注释原有的外观图元，供保存时清理失效标引
-// 入参: page 页面索引, wanted 待修改注释标识
-// 返回: *editorSource 保留已知图元的包快照, error 读取或遍历错误
-func (e *Editor) annotationStructureSource(page int, wanted map[string]bool) (*editorSource, error) {
-	base := e.source
-	if base.document.CustomTags.Path == "" && len(base.document.CustomTags.CustomTag) == 0 {
-		return base, nil
-	}
-	tags, err := base.reader.CustomTags()
-	if err != nil {
-		return nil, err
-	}
-	knownTags, err := base.reader.structureReferenceTags(context.Background(), tags)
-	if err != nil {
-		return nil, err
-	}
-	if !slices.Contains(knownTags, true) {
-		return base, nil
-	}
-	if _, err := base.reader.Doc(); err != nil {
-		return nil, err
-	}
-	if source := base.pages[e.pages[page].ID]; source != nil {
-		if _, err := base.reader.PageContent(source.ref); err != nil {
-			return nil, err
-		}
-	}
-	visitor := &structureObjectVisitor{objects: make(map[string]bool)}
-	renderer := NewRenderer(base.reader)
-	for _, annotation := range base.reader.Annots[e.pages[page].ID] {
-		if wanted[editorResourceID(annotation.ID)] {
-			if err := renderer.walkAnnotation(annotation, visitor); err != nil {
-				return nil, err
-			}
-		}
-	}
-	next := *base
-	next.structureObjects = maps.Clone(base.structureObjects)
-	if next.structureObjects == nil {
-		next.structureObjects = make(map[string]map[string]bool)
-	}
-	key := editorResourceID(e.pages[page].ID)
-	maps.Copy(visitor.objects, next.structureObjects[key])
-	next.structureObjects[key] = visitor.objects
-	return &next, nil
-}
-
 // rewriteStructureReferences 仅改写已识别公文命名空间的叶子引用，保留其他XML字节
 // 入参: ctx 取消上下文, data 原始标引, tag 标引入口, rewrite 引用映射，空标识列表表示删除引用
 // 返回: []byte 修改后的标引, error 解析或取消错误
@@ -529,68 +608,4 @@ func rewriteStructureReferences(ctx context.Context, data []byte, tag CustomTag,
 		return data, nil
 	}
 	return editorPatchXML(data, patches), nil
-}
-
-// structures 迁移所选页面的公文标引，按已迁移图元映射引用，不猜测其他行业的引用规则
-// 返回: []byte 标引索引条目, error 读取、解析或取消错误
-func (m *editorPageImport) structures() ([]byte, error) {
-	tags, err := m.reader.CustomTagsContext(m.ctx)
-	if err != nil {
-		return nil, err
-	}
-	knownTags, err := m.reader.structureReferenceTags(m.ctx, tags)
-	if err != nil {
-		return nil, err
-	}
-	var entries []byte
-	for i, tag := range tags {
-		if !knownTags[i] {
-			continue
-		}
-		data, err := m.readFile(m.reader.ResPath(tag.FileLoc))
-		if err != nil {
-			return nil, err
-		}
-		count := 0
-		updated, err := rewriteStructureReferences(m.ctx, data, tag, func(page string, ids []string) (string, []string, error) {
-			key := editorImportKey(page)
-			if !m.pages[key] {
-				return page, nil, nil
-			}
-			var mapped []string
-			for _, id := range ids {
-				if value := m.ids[editorImportKey(id)]; value != "" {
-					mapped = append(mapped, value)
-				}
-			}
-			count += len(mapped)
-			return m.ids[key], mapped, nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		if count == 0 {
-			continue
-		}
-		name := packageAvailableName(m.target, m.files, path.Join(m.directory, "Tags", fmt.Sprintf("Tag_%d.xml", i)))
-		m.files[name] = updated
-		var content []byte
-		if tag.SchemaLoc != "" {
-			schema, err := m.copyData(m.reader.ResPath(tag.SchemaLoc), path.Join(m.directory, "Tags", path.Base(tag.SchemaLoc)), false)
-			if err != nil {
-				return nil, err
-			}
-			content = append(content, editorXMLText("SchemaLoc", "/"+strings.TrimPrefix(schema, "/"))...)
-		}
-		content = append(content, editorXMLText("FileLoc", "/"+name)...)
-		var attrs ofdAttrs
-		attrs.add("TypeID", tag.TypeID)
-		attrs.add("NameSpace", tag.NameSpace)
-		entry, err := editorXMLContainer("CustomTag", attrs, content)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, entry...)
-	}
-	return entries, nil
 }

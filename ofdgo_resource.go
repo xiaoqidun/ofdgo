@@ -133,18 +133,37 @@ func (r *Reader) ResourceReferences(ctx context.Context, kind, id string, offset
 // 入参: ctx 取消上下文, kind 资源类型, id 资源标识
 // 返回: io.ReadCloser 文件流，由调用方关闭, error 资源或文件错误
 func (r *Reader) OpenResource(ctx context.Context, kind, id string) (io.ReadCloser, error) {
-	items, err := r.resourceList(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if kind == "Attachment" {
+		return r.OpenAttachmentContext(ctx, id)
+	}
+	if r.resourceInfoCache != nil {
+		item, err := findResource(r.resourceInfoCache, kind, id)
+		if err != nil {
+			return nil, err
+		}
+		if item.File == "" {
+			return nil, fmt.Errorf("resource has no embedded file")
+		}
+		stream, err := r.openFile(item.File)
+		if err != nil {
+			return nil, err
+		}
+		return imageInput{ReadCloser: stream, ctx: ctx}, nil
+	}
+	fileLoc, found, err := r.locateResourceFileContext(ctx, kind, id)
 	if err != nil {
 		return nil, err
 	}
-	item, err := findResource(items, kind, id)
-	if err != nil {
-		return nil, err
+	if !found {
+		return nil, fmt.Errorf("resource not found: %s/%s", kind, id)
 	}
-	if item.File == "" {
+	if fileLoc == "" {
 		return nil, fmt.Errorf("resource has no embedded file")
 	}
-	stream, err := r.openFile(item.File)
+	stream, err := r.openFile(r.ResPath(fileLoc))
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +178,24 @@ func (r *Reader) Media(id string) (MultiMedia, error) {
 	if _, err := r.docStructure(); err != nil {
 		return MultiMedia{}, err
 	}
-	media, ok := resourceValue(r.mediaCache, id)
+	media, ok := r.docMedias.get(id)
+	if !ok || (media.Type != "Audio" && media.Type != "Video") {
+		if candidate, found := resourceValue(r.mediaCache, id); found && (candidate.Type == "Audio" || candidate.Type == "Video") {
+			media, ok = candidate, true
+		} else {
+			ok = false
+		}
+	}
+	if !ok {
+		for _, name := range slices.Sorted(maps.Keys(r.resFileCache)) {
+			if parsed := r.resFileCache[name]; parsed != nil {
+				if candidate, found := parsed.medias.get(id); found && (candidate.Type == "Audio" || candidate.Type == "Video") {
+					media, ok = candidate, true
+					break
+				}
+			}
+		}
+	}
 	if !ok || media.Type != "Audio" && media.Type != "Video" {
 		return MultiMedia{}, fmt.Errorf("audio or video resource %q is unavailable", id)
 	}
@@ -194,7 +230,7 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 		return nil, fmt.Errorf("resource reference not found")
 	}
 	ref := item.References[reference]
-	doc, err := r.Reader.DocContext(ctx)
+	doc, err := r.Reader.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -317,28 +353,54 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 
 // resourceCatalog 保存当前资源声明和原文位置，供查询及隔离修改复用
 type resourceCatalog struct {
-	scan   *editorFontDocument
-	items  []ResourceInfo
-	nodes  map[string]editorFontText
-	images []editorFontText
+	scan    *editorFontDocument
+	docRes  map[string]bool
+	items   []ResourceInfo
+	nodes   map[string]editorFontText
+	images  []editorFontText
 }
 
-// add 加入资源声明，拒绝同一类型内的重复标识
+// add 加入资源声明，拒绝同一资源文件或文档级公共资源内的重复标识，允许不同页级资源声明局部同名标识
 // 入参: item 资源信息, node 声明位置
 // 返回: error 标识冲突
 func (c *resourceCatalog) add(item ResourceInfo, node editorFontText) error {
+	fileName := ""
+	if node.file != nil {
+		fileName = node.file.name
+	}
+	isPageScoped := fileName != "" && !c.docRes[fileName]
 	key := item.Kind + "/" + item.ID
-	if _, exists := c.nodes[key]; exists {
-		return fmt.Errorf("duplicate resource %s", key)
+	if prev, exists := c.nodes[key]; exists {
+		prevFile := ""
+		if prev.file != nil {
+			prevFile = prev.file.name
+		}
+		prevPageScoped := prevFile != "" && !c.docRes[prevFile]
+		if !isPageScoped || !prevPageScoped || prevFile == fileName {
+			return fmt.Errorf("duplicate resource %s", key)
+		}
+		c.nodes[fileName+":"+key] = node
+		c.items = append(c.items, item)
+		return nil
 	}
 	if item.Kind != "Attachment" {
 		for _, kind := range []string{"Font", "Image", "Audio", "Video", "ColorSpace", "DrawParam"} {
-			if _, exists := c.nodes[kind+"/"+item.ID]; exists {
-				return fmt.Errorf("conflicting resource ID %s", item.ID)
+			if prev, exists := c.nodes[kind+"/"+item.ID]; exists {
+				prevFile := ""
+				if prev.file != nil {
+					prevFile = prev.file.name
+				}
+				prevPageScoped := prevFile != "" && !c.docRes[prevFile]
+				if !isPageScoped || !prevPageScoped || prevFile == fileName {
+					return fmt.Errorf("conflicting resource ID %s", item.ID)
+				}
 			}
 		}
 	}
 	c.nodes[key] = node
+	if fileName != "" {
+		c.nodes[fileName+":"+key] = node
+	}
 	c.items = append(c.items, item)
 	return nil
 }
@@ -382,11 +444,17 @@ func (r *Reader) resourceCatalog(ctx context.Context) (*resourceCatalog, error) 
 // 入参: ctx 取消上下文, retain 是否保留编辑节点及原文
 // 返回: *resourceCatalog 资源索引, error 结构或读取错误
 func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourceCatalog, error) {
-	catalog := &resourceCatalog{nodes: make(map[string]editorFontText), items: []ResourceInfo{}}
+	catalog := &resourceCatalog{docRes: make(map[string]bool), nodes: make(map[string]editorFontText), items: []ResourceInfo{}}
 	pages := make(map[string]int)
-	doc, err := r.DocContext(ctx)
+	doc, err := r.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
+	}
+	for _, loc := range doc.CommonData.PublicRes {
+		catalog.docRes[cleanPackagePath(r.ResPath(loc))] = true
+	}
+	for _, loc := range doc.CommonData.DocumentRes {
+		catalog.docRes[cleanPackagePath(r.ResPath(loc))] = true
 	}
 	for i, page := range doc.Pages.Page {
 		name := cleanPackagePath(r.ResPath(page.BaseLoc))
@@ -532,6 +600,101 @@ func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourc
 	return catalog, ctx.Err()
 }
 
+// locateResourceFileContext 仅扫描资源索引文件定位单个资源路径，不解压页面正文
+// 入参: ctx 取消上下文, kind 资源类型, id 资源标识
+// 返回: string 资源文件路径, bool 是否找到声明, error 读取或取消错误
+func (r *Reader) locateResourceFileContext(ctx context.Context, kind, id string) (string, bool, error) {
+	doc, err := r.docStructureContext(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	matchIn := func(parsed *parsedRes) (string, bool) {
+		if parsed == nil {
+			return "", false
+		}
+		switch kind {
+		case "Font":
+			if f, ok := parsed.fonts.get(id); ok && f != nil {
+				return f.FontFile, true
+			}
+		case "Image", "Audio", "Video":
+			if m, ok := parsed.medias.get(id); ok && m.Type == kind {
+				return m.MediaFile, true
+			}
+		case "ColorSpace":
+			if cs, ok := parsed.colorSpaces.get(id); ok && cs != nil {
+				return cs.Profile, true
+			}
+		case "DrawParam":
+			if dp, ok := parsed.drawParams.get(id); ok && dp != nil {
+				return "", true
+			}
+		}
+		return "", false
+	}
+	for i := len(doc.CommonData.DocumentRes) - 1; i >= 0; i-- {
+		parsed, err := r.parseResFileContext(ctx, r.ResPath(doc.CommonData.DocumentRes[i]))
+		if err != nil {
+			return "", false, err
+		}
+		if loc, ok := matchIn(parsed); ok {
+			return loc, true, nil
+		}
+	}
+	for i := len(doc.CommonData.PublicRes) - 1; i >= 0; i-- {
+		parsed, err := r.parseResFileContext(ctx, r.ResPath(doc.CommonData.PublicRes[i]))
+		if err != nil {
+			return "", false, err
+		}
+		if loc, ok := matchIn(parsed); ok {
+			return loc, true, nil
+		}
+	}
+	seenRes := make(map[string]bool)
+	checkPageHeader := func(p Page) (string, bool, error) {
+		hdr, hdrErr := r.readPageHeaderContext(ctx, p)
+		if hdrErr != nil {
+			if ctx.Err() != nil {
+				return "", false, ctx.Err()
+			}
+			return "", false, nil
+		}
+		pageFullPath := r.ResPath(p.BaseLoc)
+		for _, res := range hdr.PageRes {
+			resFull := cleanPackagePath(resolveResourcePath(pageFullPath, "", res))
+			if seenRes[resFull] {
+				continue
+			}
+			seenRes[resFull] = true
+			parsed, parseErr := r.parseResFileContext(ctx, resFull)
+			if parseErr != nil {
+				return "", false, parseErr
+			}
+			if loc, ok := matchIn(parsed); ok {
+				return loc, true, nil
+			}
+		}
+		return "", false, nil
+	}
+	for _, p := range doc.Pages.Page {
+		if err := ctx.Err(); err != nil {
+			return "", false, err
+		}
+		if loc, ok, err := checkPageHeader(p); err != nil || ok {
+			return loc, ok, err
+		}
+	}
+	for _, tpl := range doc.CommonData.TemplatePage {
+		if err := ctx.Err(); err != nil {
+			return "", false, err
+		}
+		if loc, ok, err := checkPageHeader(Page{BaseLoc: tpl.BaseLoc}); err != nil || ok {
+			return loc, ok, err
+		}
+	}
+	return "", false, ctx.Err()
+}
+
 // scanResourcePage 流式收集常规页面引用，特殊结构回退到完整节点扫描
 // 入参: ctx 取消上下文, file 页面原文, pages 文件页码, refs 已收集引用
 // 返回: bool 是否已处理, bool 引用是否不安全, []string 依赖路径, error 解析或取消错误
@@ -587,7 +750,7 @@ func scanResourcePage(ctx context.Context, file *editorFontXML, pages map[string
 				return false, false, nil, nil
 			}
 			for _, attr := range token.Attr {
-				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace && !textMetadataAttribute(token.Name, attr) {
+				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace {
 					return false, false, nil, nil
 				}
 			}

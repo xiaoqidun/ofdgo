@@ -35,9 +35,16 @@ func (r *Renderer) RenderPage(page *PageContent) (*RasterPage, error) {
 // 入参: page 页面内容
 // 返回: Box 区域, error 错误信息
 func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
-	area, err := r.Reader.resolvePageAreaContext(r.outputContext(), page.Area, page.Template)
-	if err != nil {
-		return Box{}, err
+	area := page.Area
+	if r != nil && r.Reader != nil {
+		if r.Reader.doc == nil && r.Reader.OFD != nil {
+			_, _ = r.Reader.docStructureContext(r.outputContext())
+		}
+		var err error
+		area, err = r.Reader.resolvePageAreaContext(r.outputContext(), page.Area, page.Template)
+		if err != nil {
+			return Box{}, err
+		}
 	}
 	boxStr := area.PhysicalBox
 	if boxStr == "" {
@@ -56,22 +63,49 @@ func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
 // 入参: page 页面内容
 // 返回: []PageLink 页面链接, error 错误信息
 func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
-	if r.RenderAnnotations && r.Reader.relatedPending {
-		if _, err := r.Reader.DocContext(r.outputContext()); err != nil {
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r.Reader != nil && r.Reader.doc == nil && r.Reader.OFD != nil {
+		if _, err := r.Reader.docStructureContext(ctx); err != nil {
+			return nil, err
+		}
+	}
+	defer r.bindPageResources(page)()
+	var annotations []Annotation
+	if r.RenderAnnotations && r.Reader != nil {
+		var err error
+		annotations, err = r.Reader.pageAnnotationsContext(ctx, page.ID)
+		if err != nil {
 			return nil, err
 		}
 	}
 	sources := r.pageActionSources(page)
-	if r.RenderAnnotations {
-		sources = append(sources, r.annotationActionSources(r.Reader.Annots[page.ID])...)
+	if r.RenderAnnotations && len(annotations) > 0 {
+		if r.printing {
+			filtered := make([]Annotation, 0, len(annotations))
+			for _, annot := range annotations {
+				if annot.Print != nil && !*annot.Print {
+					continue
+				}
+				filtered = append(filtered, annot)
+			}
+			annotations = filtered
+		}
+		sources = append(sources, r.annotationActionSources(page, annotations)...)
 	}
+	sources = r.translateActionSources(page, sources)
 	return r.sourceLinks(sources, "CLICK")
 }
 
 // DocumentOpenLinks 获取文档打开动作的有序目标，不执行动作
 // 返回: []PageLink 动作目标, error 文档解析错误
 func (r *Renderer) DocumentOpenLinks() ([]PageLink, error) {
-	doc, err := r.Reader.Doc()
+	doc, err := r.Reader.docStructure()
 	if err != nil {
 		return nil, err
 	}
@@ -82,6 +116,12 @@ func (r *Renderer) DocumentOpenLinks() ([]PageLink, error) {
 // 入参: page 页面内容
 // 返回: []PageLink 动作目标, error 目标解析错误
 func (r *Renderer) PageOpenLinks(page *PageContent) ([]PageLink, error) {
+	if r.Reader != nil && r.Reader.doc == nil && r.Reader.OFD != nil {
+		if _, err := r.Reader.docStructureContext(r.outputContext()); err != nil {
+			return nil, err
+		}
+	}
+	defer r.bindPageResources(page)()
 	return r.sourceLinks(r.pageOpenActionSources(page), "PO")
 }
 
@@ -89,7 +129,7 @@ func (r *Renderer) PageOpenLinks(page *PageContent) ([]PageLink, error) {
 // 入参: path 从根节点开始的各级索引
 // 返回: []PageLink 动作目标，不包含页面点击区域, error 目录路径或解析错误
 func (r *Renderer) OutlineLinks(path []int) ([]PageLink, error) {
-	doc, err := r.Reader.Doc()
+	doc, err := r.Reader.docStructure()
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +180,7 @@ func (r *Renderer) AnnotationGeometry(annotation Annotation) (Box, []ObjectConto
 		return Box{}, nil, err
 	}
 	box, contours := measurement.result.Bounds, measurement.result.Contours
-	for _, source := range r.annotationActionSources([]Annotation{annotation}) {
+	for _, source := range r.annotationActionSources(nil, []Annotation{annotation}) {
 		for _, action := range source.Actions {
 			if action.Event != "CLICK" {
 				continue
@@ -198,7 +238,7 @@ type annotationMeasurement struct {
 	result   ObjectMeasurement
 }
 
-// DrawObject 使用对象实际继承状态度量注解内容，不附加容器裁剪
+// DrawObject 使用对象实际继承状态度量注解内容，保留外观边界裁剪
 // 入参: object 图形对象, state 绘制状态
 // 返回: error 度量错误
 func (m *annotationMeasurement) DrawObject(object *GraphicObject, state RenderState) error {
@@ -219,6 +259,36 @@ func (m *annotationMeasurement) DrawObject(object *GraphicObject, state RenderSt
 // 返回: error 始终为空
 func (m *annotationMeasurement) DrawStamp(stamp Stamp) error {
 	return nil
+}
+
+// translateActionSources 在页面物理区域原点非零时将动作区域平移至输出视口坐标
+// 入参: page 页面内容, sources 原始动作来源
+// 返回: []actionSource 平移后的动作来源
+func (r *Renderer) translateActionSources(page *PageContent, sources []actionSource) []actionSource {
+	if page == nil || len(sources) == 0 {
+		return sources
+	}
+	box, err := r.GetPageBox(page)
+	if err != nil || (box.X == 0 && box.Y == 0) {
+		return sources
+	}
+	shift := TranslationMatrix(-box.X, -box.Y)
+	result := make([]actionSource, len(sources))
+	copy(result, sources)
+	for i := range result {
+		result[i].Box.X -= box.X
+		result[i].Box.Y -= box.Y
+		result[i].Matrix = shift.Multiply(result[i].Matrix)
+		if len(result[i].Geo) > 0 {
+			if shifted, shiftErr := result[i].Geo.Transform(shift); shiftErr == nil {
+				result[i].Geo = shifted
+				if svg, svgErr := shifted.SVG(); svgErr == nil {
+					result[i].Path = svg
+				}
+			}
+		}
+	}
+	return result
 }
 
 // sourceLinks 解析动作目标，保留动作顺序及独立目标数据
@@ -246,7 +316,7 @@ func (r *Renderer) sourceLinks(sources []actionSource, event string) ([]PageLink
 			}
 			if action.Goto != nil {
 				if bookmarks == nil {
-					doc, err := r.Reader.Doc()
+					doc, err := r.Reader.docStructure()
 					if err != nil {
 						return nil, err
 					}

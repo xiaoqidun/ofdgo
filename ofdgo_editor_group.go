@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strconv"
 )
 
 // GroupObjects 将同一容器内连续的对象组合，保留标识、绘制顺序及原始内容
@@ -92,11 +91,10 @@ func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
 		state := object.state
 		if object.Type == "TextObject" && object.TextObject.layout != nil {
 			state.layout = object.TextObject.layout
-			state.origin[0], _, err = e.richPlainOffset(object.TextObject)
+			state.origin, err = e.textLayoutOrigin(object.TextObject)
 			if err != nil {
 				return "", err
 			}
-			state.origin[1], _ = strconv.ParseFloat(object.TextObject.TextCode[0].Y, 64)
 		}
 		states[editorObjectID(object)] = state
 	}
@@ -169,11 +167,14 @@ func (e *Editor) UngroupObject(page int, id string) ([]string, error) {
 	defer reader.Close()
 	var result []string
 	err = e.ungroupCompositeNode(renderer, root, func(objects []GraphicObject, remaps []map[string]string) error {
+		e.restoreUngroupedLayouts(e.pages[page].ID, objects, remaps)
 		origins := make(map[string]*editorObjectOrigin, len(objects))
 		for i := range objects {
 			object := &objects[i]
 			copy := *object.origin
 			copy.node.parent = origin.node.parent
+			copy.object.TextObject.layout = object.TextObject.layout
+			copy.object.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
 			object.origin = nil
 			id := editorObjectID(*object)
 			origins[id] = &copy
@@ -185,6 +186,30 @@ func (e *Editor) UngroupObject(page int, id string) ([]string, error) {
 		})
 	})
 	return result, err
+}
+
+// replaceGroup 原子替换同容器连续成员及原文来源，提交一次撤销记录
+// 入参: page 页面索引, indexes 原对象位置, objects 新成员, origins 新成员原文
+func (e *Editor) replaceGroup(page int, indexes []editorObjectPosition, objects []GraphicObject, origins map[string]*editorObjectOrigin) {
+	before := copyEditorPage(e.pages[page]).Content.Layer
+	after := copyEditorPage(e.pages[page]).Content.Layer
+	layer := &after[indexes[0].layer]
+	layer.Objects = slices.Replace(layer.Objects, indexes[0].index, indexes[len(indexes)-1].index+1, objects...)
+	previous := make(map[string]*editorObjectOrigin, len(origins))
+	for id := range origins {
+		previous[id] = e.objectOrigin(id)
+	}
+	apply := func(e *Editor, layers []Layer, origins map[string]*editorObjectOrigin) {
+		e.pages[page].Content.Layer = copyEditorPage(PageContent{Content: Content{Layer: layers}}).Content.Layer
+		for id, origin := range origins {
+			e.setObjectOrigin(id, origin)
+		}
+	}
+	apply(e, after, origins)
+	if change := e.recordChange(page); change != nil {
+		change.undo = func(e *Editor) { apply(e, before, previous) }
+		change.redo = func(e *Editor) { apply(e, after, origins) }
+	}
 }
 
 // editorUngroupable 判断移除容器是否会丢失对象行为或未知属性
@@ -235,28 +260,4 @@ func editorUngroupable(node *editorXML) bool {
 		}
 	}
 	return true
-}
-
-// replaceGroup 原子替换同容器连续成员及原文来源，提交一次撤销记录
-// 入参: page 页面索引, indexes 原对象位置, objects 新成员, origins 新成员原文
-func (e *Editor) replaceGroup(page int, indexes []editorObjectPosition, objects []GraphicObject, origins map[string]*editorObjectOrigin) {
-	before := copyEditorPage(e.pages[page]).Content.Layer
-	after := copyEditorPage(e.pages[page]).Content.Layer
-	layer := &after[indexes[0].layer]
-	layer.Objects = slices.Replace(layer.Objects, indexes[0].index, indexes[len(indexes)-1].index+1, objects...)
-	previous := make(map[string]*editorObjectOrigin, len(origins))
-	for id := range origins {
-		previous[id] = e.objectOrigin(id)
-	}
-	apply := func(e *Editor, layers []Layer, origins map[string]*editorObjectOrigin) {
-		e.pages[page].Content.Layer = copyEditorPage(PageContent{Content: Content{Layer: layers}}).Content.Layer
-		for id, origin := range origins {
-			e.setObjectOrigin(id, origin)
-		}
-	}
-	apply(e, after, origins)
-	if change := e.recordChange(page); change != nil {
-		change.undo = func(e *Editor) { apply(e, before, previous) }
-		change.redo = func(e *Editor) { apply(e, after, origins) }
-	}
 }

@@ -237,8 +237,8 @@ func (e *Editor) addStructureXML(ctx context.Context, tag CustomTag, data []byte
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if strings.TrimSpace(tag.TypeID) == "" || tag.FileLoc != "" {
-		return 0, fmt.Errorf("custom tag requires TypeID and an automatically assigned FileLoc")
+	if strings.TrimSpace(tag.NameSpace) == "" || tag.FileLoc != "" {
+		return 0, fmt.Errorf("custom tag requires NameSpace and an automatically assigned FileLoc")
 	}
 	if !structureXMLText(tag.TypeID) || !structureXMLText(tag.NameSpace) || !structureXMLText(tag.SchemaLoc) {
 		return 0, fmt.Errorf("invalid custom tag metadata")
@@ -303,73 +303,6 @@ func (e *Editor) addStructureXML(ctx context.Context, tag CustomTag, data []byte
 		}
 	}
 	return len(entries), e.commitStructurePartsContext(ctx, base, parts, objects, len(entries))
-}
-
-// editorStructureIndex 读取或准备当前文档的标引索引，保留内联入口和未知扩展
-// 入参: base 编辑包快照, parts 本次输出条目，可为nil
-// 返回: string 索引文件路径, []byte 原文, *editorXML 容器, []*editorXML 标引入口, error 读取错误
-func editorStructureIndex(base *editorSource, parts map[string][]byte) (string, []byte, *editorXML, []*editorXML, error) {
-	return editorStructureIndexContext(context.Background(), base, parts)
-}
-
-// editorStructureIndexContext 读取或准备标引索引，文件读取及解析期间响应取消
-// 入参: ctx 取消上下文, base 编辑包快照, parts 本次输出条目，可为nil
-// 返回: string 索引路径, []byte 原文, *editorXML 容器, []*editorXML 入口, error 读取或取消错误
-func editorStructureIndexContext(ctx context.Context, base *editorSource, parts map[string][]byte) (string, []byte, *editorXML, []*editorXML, error) {
-	if err := ctx.Err(); err != nil {
-		return "", nil, nil, nil, err
-	}
-	name := base.reader.documentRoot
-	if base.document.CustomTags.Path != "" {
-		name = base.reader.ResPath(base.document.CustomTags.Path)
-	}
-	data, ok := parts[name]
-	if !ok {
-		var err error
-		data, err = base.reader.readFileViewContext(ctx, name)
-		if err != nil {
-			return "", nil, nil, nil, err
-		}
-	}
-	root, err := parseEditorXMLContext(ctx, data)
-	if err != nil {
-		return "", nil, nil, nil, err
-	}
-	if base.document.CustomTags.Path == "" {
-		container := root.child("CustomTags")
-		if container == nil || len(container.children) == 0 {
-			name = packageAvailableName(base.reader, nil, path.Join(base.reader.RootDir, "CustomTags.xml"))
-			data, err = root.containerXML("CustomTags", nil, nil)
-			if err == nil {
-				root, err = parseEditorXMLContext(ctx, data)
-			}
-			if err != nil {
-				return "", nil, nil, nil, err
-			}
-		} else {
-			root = container
-		}
-	}
-	var entries []*editorXML
-	for _, child := range root.children {
-		if child.matchesOFD("CustomTag") {
-			entries = append(entries, child)
-		}
-	}
-	return name, data, root, entries, nil
-}
-
-// editorStructureNode 按完整XML子节点索引定位，与Reader.Structure的路径一致
-// 入参: root 根节点, path 从0开始的路径
-// 返回: *editorXML 节点, error 路径错误
-func editorStructureNode(root *editorXML, path []int) (*editorXML, error) {
-	for _, index := range path {
-		if index < 0 || index >= len(root.children) {
-			return nil, fmt.Errorf("custom tag node not found")
-		}
-		root = root.children[index]
-	}
-	return root, nil
 }
 
 // editStructure 验证完整标引后原子提交，隔离共享入口并保留未修改的XML
@@ -461,13 +394,6 @@ func (e *Editor) editStructureContext(ctx context.Context, index int, edit func(
 	return e.commitStructurePartsContext(ctx, e.source, parts, objects, index)
 }
 
-// commitStructureParts 提交标引并记录有效目标及已应用的编号迁移，供后续编辑维护引用
-// 入参: base 原包, parts 修改条目, objects 按页面编号记录的有效图元, index 标引入口序号
-// 返回: error 提交错误
-func (e *Editor) commitStructureParts(base *editorSource, parts map[string][]byte, objects map[string]map[string]bool, index int) error {
-	return e.commitStructurePartsContext(context.Background(), base, parts, objects, index)
-}
-
 // commitStructurePartsContext 准备标引引用记录并原子提交，取消时保留原编辑状态
 // 入参: ctx 取消上下文, base 原包, parts 修改条目, objects 有效图元, index 标引入口序号
 // 返回: error 提交或取消错误
@@ -494,13 +420,6 @@ func (e *Editor) commitStructurePartsContext(ctx context.Context, base *editorSo
 		next.structureObjects[page] = known
 	}
 	return e.commitAnnotationPartsContext(ctx, &next, parts)
-}
-
-// validateStructureReferences 检查标引目标是否位于当前文档和版本，不依赖字体或图像解码
-// 入参: root 待提交标引树, tag 标引入口, r 当前操作的编辑快照，为nil时按需创建
-// 返回: map[string]map[string]bool 已校验目标, error 页面或图元缺失错误
-func (e *Editor) validateStructureReferences(root *StructureNode, tag CustomTag, r *Reader) (map[string]map[string]bool, error) {
-	return e.validateStructureReferencesContext(context.Background(), root, tag, r)
 }
 
 // validateStructureReferencesContext 校验当前文档及版本的引用，遍历及快照读取期间响应取消
@@ -581,4 +500,71 @@ func (e *Editor) validateStructureReferencesContext(ctx context.Context, root *S
 		}
 	}
 	return result, nil
+}
+
+// editorStructureIndex 读取或准备当前文档的标引索引，保留内联入口和未知扩展
+// 入参: base 编辑包快照, parts 本次输出条目，可为nil
+// 返回: string 索引文件路径, []byte 原文, *editorXML 容器, []*editorXML 标引入口, error 读取错误
+func editorStructureIndex(base *editorSource, parts map[string][]byte) (string, []byte, *editorXML, []*editorXML, error) {
+	return editorStructureIndexContext(context.Background(), base, parts)
+}
+
+// editorStructureIndexContext 读取或准备标引索引，文件读取及解析期间响应取消
+// 入参: ctx 取消上下文, base 编辑包快照, parts 本次输出条目，可为nil
+// 返回: string 索引路径, []byte 原文, *editorXML 容器, []*editorXML 入口, error 读取或取消错误
+func editorStructureIndexContext(ctx context.Context, base *editorSource, parts map[string][]byte) (string, []byte, *editorXML, []*editorXML, error) {
+	if err := ctx.Err(); err != nil {
+		return "", nil, nil, nil, err
+	}
+	name := base.reader.documentRoot
+	if base.document.CustomTags.Path != "" {
+		name = base.reader.ResPath(base.document.CustomTags.Path)
+	}
+	data, ok := parts[name]
+	if !ok {
+		var err error
+		data, err = base.reader.readFileViewContext(ctx, name)
+		if err != nil {
+			return "", nil, nil, nil, err
+		}
+	}
+	root, err := parseEditorXMLContext(ctx, data)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	if base.document.CustomTags.Path == "" {
+		container := root.child("CustomTags")
+		if container == nil || len(container.children) == 0 {
+			name = packageAvailableName(base.reader, nil, path.Join(base.reader.RootDir, "CustomTags.xml"))
+			data, err = root.containerXML("CustomTags", nil, nil)
+			if err == nil {
+				root, err = parseEditorXMLContext(ctx, data)
+			}
+			if err != nil {
+				return "", nil, nil, nil, err
+			}
+		} else {
+			root = container
+		}
+	}
+	var entries []*editorXML
+	for _, child := range root.children {
+		if child.matchesOFD("CustomTag") {
+			entries = append(entries, child)
+		}
+	}
+	return name, data, root, entries, nil
+}
+
+// editorStructureNode 按完整XML子节点索引定位，与Reader.Structure的路径一致
+// 入参: root 根节点, path 从0开始的路径
+// 返回: *editorXML 节点, error 路径错误
+func editorStructureNode(root *editorXML, path []int) (*editorXML, error) {
+	for _, index := range path {
+		if index < 0 || index >= len(root.children) {
+			return nil, fmt.Errorf("custom tag node not found")
+		}
+		root = root.children[index]
+	}
+	return root, nil
 }

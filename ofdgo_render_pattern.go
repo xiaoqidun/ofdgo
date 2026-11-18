@@ -48,13 +48,11 @@ func (s *stampContentState) resetFonts() {
 // stampContentStateKey 隔离渲染器私有的共享签章数据
 type stampContentStateKey struct{}
 
-// patternCellKey 区分共享底纹、颜色、透明度和影响单元语义的页面变换
+// patternCellKey 区分共享底纹、透明度和影响单元语义的页面变换
 type patternCellKey struct {
-	pattern      *Pattern
-	color, space string
-	index, alpha int
-	colorAlpha   int
-	matrix       [6]float64
+	pattern *Pattern
+	alpha   int
+	matrix  [6]float64
 }
 
 // sharedStamp 复用相同签章的解码、嵌套文档编译及局部裁剪，不缓存放置位置
@@ -108,27 +106,24 @@ func (c *semanticCompiler) sharedStamp(stamp Stamp, compile func(*semanticCompil
 	return nil
 }
 
-// patternCell 复用同次编译中相同底纹单元，不缓存外部对象的裁剪
+// patternCell 复用同次编译中相同底纹单元并施加单元宽高边界裁剪，不污染单元内部默认颜色
 // 入参: pattern 底纹画刷, matrix 单元到页面矩阵
 // 返回: []RasterCommand 只读单元指令, error 编译错误
 func (c *semanticCompiler) patternCell(pattern *PatternPaint, matrix Matrix) ([]RasterCommand, error) {
 	if c.patternReferences[pattern.Pattern] {
 		return nil, fmt.Errorf("cyclic pattern paint")
 	}
+	if pattern.Width <= 0 || pattern.Height <= 0 {
+		return nil, nil
+	}
 	x, y := 0.0, 0.0
 	if patternCellTranslatable(pattern) {
 		x, y = matrix.e, matrix.f
 		matrix.e, matrix.f = 0, 0
 	}
-	key := patternCellKey{pattern: pattern.Pattern, color: pattern.Color.Value, space: pattern.Color.ColorSpace, index: -1, alpha: 255, colorAlpha: 255, matrix: matrix.Values()}
-	if pattern.Color.Index != nil {
-		key.index = *pattern.Color.Index
-	}
+	key := patternCellKey{pattern: pattern.Pattern, alpha: 255, matrix: matrix.Values()}
 	if pattern.Alpha != nil {
 		key.alpha = *pattern.Alpha
-	}
-	if pattern.Color.Alpha != nil {
-		key.colorAlpha = *pattern.Color.Alpha
 	}
 	if commands, ok := c.patterns.get(key); ok {
 		return translatePatternCommands(commands, x, y), nil
@@ -138,11 +133,14 @@ func (c *semanticCompiler) patternCell(pattern *PatternPaint, matrix Matrix) ([]
 	}
 	c.patternReferences[pattern.Pattern] = true
 	defer delete(c.patternReferences, pattern.Pattern)
+	cellClip, err := c.renderer.geometryExtentClip(pattern.Width, pattern.Height, matrix, nil)
+	if err != nil {
+		return nil, err
+	}
 	child := &semanticCompiler{renderer: c.renderer, geometry: c.geometry, page: &RasterPage{Width: c.page.Width, Height: c.page.Height, DPI: c.page.DPI}, pattern: true, patterns: c.patterns, patternReferences: c.patternReferences, patternPage: &matrix}
-	defaults := &DrawParam{FillColor: &pattern.Color, StrokeColor: (*StrokeColor)(&pattern.Color)}
 	for object := range pattern.CellContent.objects() {
 		object = mergeGraphicObjectAlpha(object, pattern.Alpha)
-		if err := c.renderer.WalkObject(&object, RenderState{Defaults: defaults, Parent: &matrix, BoundaryInCTM: true}, child); err != nil {
+		if err := c.renderer.WalkObject(&object, RenderState{Defaults: nil, Parent: &matrix, BoundaryInCTM: true, Clip: cellClip}, child); err != nil {
 			return nil, err
 		}
 	}
@@ -151,13 +149,33 @@ func (c *semanticCompiler) patternCell(pattern *PatternPaint, matrix Matrix) ([]
 	return translatePatternCommands(child.page.Commands, x, y), nil
 }
 
+// appendClippedCommands 合并页面裁剪后追加指令，不修改原始指令
+// 入参: commands 绘制指令, clip 页面裁剪, segments 已转换裁剪
+// 返回: error 裁剪合并错误
+func (c *semanticCompiler) appendClippedCommands(commands []RasterCommand, clip GeometryPath, segments []RasterSegment) error {
+	for _, command := range commands {
+		commandClip := segments
+		if command.Clip != nil {
+			path := geometryFromRaster(command.Clip)
+			combined, err := c.geometry.Combine(path, clip, GeometryIntersect)
+			if err != nil {
+				return err
+			}
+			commandClip, err = c.segments(combined)
+			if err != nil {
+				return err
+			}
+		}
+		command.Clip = commandClip
+		c.page.Commands = append(c.page.Commands, command)
+	}
+	return nil
+}
+
 // patternCellTranslatable 检查无需按页面位置重新解释的叶子单元
 // 入参: pattern 底纹画刷
 // 返回: bool 是否可仅平移编译结果
 func patternCellTranslatable(pattern *PatternPaint) bool {
-	if pattern.Color.Pattern != nil {
-		return false
-	}
 	for object := range pattern.CellContent.objects() {
 		var fill, stroke *FillColor
 		switch object.Type {
@@ -209,29 +227,6 @@ func translatePatternCommands(commands []RasterCommand, x, y float64) []RasterCo
 		}
 	}
 	return result
-}
-
-// appendClippedCommands 合并页面裁剪后追加指令，不修改原始指令
-// 入参: commands 绘制指令, clip 页面裁剪, segments 已转换裁剪
-// 返回: error 裁剪合并错误
-func (c *semanticCompiler) appendClippedCommands(commands []RasterCommand, clip GeometryPath, segments []RasterSegment) error {
-	for _, command := range commands {
-		commandClip := segments
-		if command.Clip != nil {
-			path := geometryFromRaster(command.Clip)
-			combined, err := c.geometry.Combine(path, clip, GeometryIntersect)
-			if err != nil {
-				return err
-			}
-			commandClip, err = c.segments(combined)
-			if err != nil {
-				return err
-			}
-		}
-		command.Clip = commandClip
-		c.page.Commands = append(c.page.Commands, command)
-	}
-	return nil
 }
 
 // geometryFromRaster 将只含贝塞尔曲线的光栅路径还原为库路径

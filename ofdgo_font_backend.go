@@ -49,18 +49,18 @@ type FontOutlineBatch interface {
 	GlyphOutlines(glyphs []uint16, size float64) ([]GeometryPath, error)
 }
 
-// FontGlyphBounds 提供与字形轮廓一致的边界，字号及边界单位为毫米
-// 不使用字体全局边界替代单个字形，空轮廓返回零边界
-type FontGlyphBounds interface {
-	FontOutlines
-	GlyphBounds(glyph uint16, size float64) (Box, error)
-}
-
 // FontGlyphDiagnostics 提供已提取字形的恢复提示，不将提示作为轮廓解析失败
 // 字形不存在或不支持的指令仍由GlyphOutline返回错误
 type FontGlyphDiagnostics interface {
 	FontMetrics
 	GlyphWarning(glyph uint16) error
+}
+
+// FontGlyphBounds 提供与字形轮廓一致的边界，字号及边界单位为毫米
+// 不使用字体全局边界替代单个字形，空轮廓返回零边界
+type FontGlyphBounds interface {
+	FontOutlines
+	GlyphBounds(glyph uint16, size float64) (Box, error)
 }
 
 // FontShaper 提供可选的横向文字塑形，仅用于显式新建或重排
@@ -120,9 +120,10 @@ type ResolvedFont struct {
 // Data可与源编码不同，原始资源仍由ResolveFont和Reader保留
 type PreparedFont struct {
 	ResolvedFont
-	Glyphs map[uint16]rune
-	CIDs   map[uint16]rune
-	digest [32]byte
+	Glyphs     map[uint16]rune
+	CIDs       map[uint16]rune
+	digest     [32]byte
+	definition *Font
 }
 
 // FontBackend 统一字体来源与度量，exact禁止使用无关回退字体
@@ -146,7 +147,7 @@ func (r *Renderer) ResolveFont(id string, exact bool) (ResolvedFont, error) {
 	if r.backends.Fonts == nil {
 		return ResolvedFont{}, fmt.Errorf("fonts: %w", ErrBackendUnavailable)
 	}
-	key := resolvedFontKey{id: id, exact: exact, definition: r.Reader.fontDefinition(id)}
+	key := resolvedFontKey{id: id, exact: exact, definition: r.fontDefinition(id)}
 	if key.definition != nil && key.definition.ID != "" {
 		key.id = key.definition.ID
 	}
@@ -162,7 +163,7 @@ func (r *Renderer) ResolveFont(id string, exact bool) (ResolvedFont, error) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return ResolvedFont{}, err
 	}
-	key.definition = r.Reader.fontDefinition(id)
+	key.definition = r.fontDefinition(id)
 	if key.definition != nil && key.definition.ID != "" {
 		key.id = key.definition.ID
 	}
@@ -170,8 +171,8 @@ func (r *Renderer) ResolveFont(id string, exact bool) (ResolvedFont, error) {
 	return resolved, err
 }
 
-// PrepareFont 统一处理内嵌字体包装和索引映射，供各编译器复用
-// 子渲染器按原始内容复用只读包装结果，各文档保留独立的来源信息
+// PrepareFont 统一处理内嵌字体包装和索引映射，供各编译器复用并合并并发修复请求
+// 子渲染器按原始内容复用只读包装结果，各文档及页面作用域保留独立的来源信息
 // 入参: id 字体资源标识
 // 返回: *PreparedFont 绘制字体, error 字体解析错误
 func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
@@ -180,55 +181,63 @@ func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
 			return nil, err
 		}
 	}
-	if definition := r.Reader.fontDefinition(id); definition != nil && definition.ID != "" {
+	origID := id
+	definition := r.fontDefinition(id)
+	if definition != nil && definition.ID != "" {
 		id = definition.ID
 	}
-	if cached := r.preparedFonts[id]; cached != nil {
+	if cached := r.preparedFonts[id]; cached != nil && cached.definition == definition {
+		if origID != id {
+			r.preparedFonts[origID] = cached
+		}
 		return cached, nil
 	}
 	resolved, err := r.ResolveFont(id, false)
 	if err != nil {
 		return nil, err
 	}
-	definition := r.Reader.fontDefinition(id)
+	definition = r.fontDefinition(id)
 	if definition != nil && definition.ID != "" {
 		id = definition.ID
 	}
-	prepared := &PreparedFont{ResolvedFont: resolved}
-	if definition != nil && definition.FontFile != "" {
+	prepared := &PreparedFont{ResolvedFont: resolved, definition: definition}
+	if definition != nil && definition.FontFile != "" && len(resolved.Data) > 0 {
 		key := r.fontDigest(resolved.Data)
-		if content, ok := r.fontPreparations.get(key); ok {
-			prepared.Data, prepared.Glyphs, prepared.CIDs, prepared.digest = content.Data, content.Glyphs, content.CIDs, content.digest
-			r.preparedFonts[id] = prepared
-			return prepared, nil
+		ctx := r.pageContext
+		if ctx == nil {
+			ctx = r.outputContext()
 		}
-		prepared.CIDs = basefont.GetCFFCIDRuneMap(resolved.Data)
-		if _, data, mapping, _, err := FixFontDataAggressive(resolved.Data, true, true); err == nil {
-			prepared.Data = data
-			if mapping != nil {
-				prepared.Glyphs = make(map[uint16]rune)
-				for character, glyph := range mapping {
-					if character == basefont.PackedGlyphRune(glyph) {
-						prepared.Glyphs[glyph] = character
+		content, err := r.fontPreparations.load(ctx, key, func() (PreparedFont, int, error) {
+			out := PreparedFont{ResolvedFont: ResolvedFont{Data: resolved.Data}, CIDs: basefont.GetCFFCIDRuneMap(resolved.Data)}
+			if _, data, mapping, _, fixErr := FixFontDataAggressive(resolved.Data, true, true); fixErr == nil {
+				out.Data = data
+				if mapping != nil {
+					out.Glyphs = make(map[uint16]rune)
+					for character, glyph := range mapping {
+						if character == basefont.PackedGlyphRune(glyph) {
+							out.Glyphs[glyph] = character
+						}
 					}
-				}
-				for character, glyph := range mapping {
-					if _, ok := prepared.Glyphs[glyph]; !ok {
-						prepared.Glyphs[glyph] = character
+					for character, glyph := range mapping {
+						if _, ok := out.Glyphs[glyph]; !ok {
+							out.Glyphs[glyph] = character
+						}
 					}
 				}
 			}
+			out.digest = r.fontDigest(out.Data)
+			cost := len(out.Data) + (len(out.Glyphs)+len(out.CIDs))*16 + 512
+			return out, cost, nil
+		})
+		if err != nil {
+			return nil, err
 		}
-		prepared.digest = r.fontDigest(prepared.Data)
-		if r.pageContext != nil {
-			if err := r.pageContext.Err(); err != nil {
-				return nil, err
-			}
-		}
-		cost := min(len(prepared.Data), r.fontPreparations.limit)*2 + (len(prepared.Glyphs)+len(prepared.CIDs))*48 + 256
-		r.fontPreparations.put(key, PreparedFont{ResolvedFont: ResolvedFont{Data: prepared.Data}, Glyphs: prepared.Glyphs, CIDs: prepared.CIDs, digest: prepared.digest}, cost)
+		prepared.Data, prepared.Glyphs, prepared.CIDs, prepared.digest = content.Data, content.Glyphs, content.CIDs, content.digest
 	}
 	r.preparedFonts[id] = prepared
+	if origID != id {
+		r.preparedFonts[origID] = prepared
+	}
 	return prepared, nil
 }
 
@@ -263,7 +272,7 @@ func (r *Renderer) fontDigest(data []byte) [32]byte {
 		return digest
 	}
 	digest := sha256.Sum256(data)
-	r.fontDigests.put(key, digest, min(cap(data), r.fontDigests.limit)+256)
+	r.fontDigests.put(key, digest, len(data)+256)
 	return digest
 }
 
@@ -289,14 +298,14 @@ func (r *Renderer) resetFontBackendCache() {
 	}
 	r.sharedBackendStates = make(map[any]any)
 	r.preparedFonts = make(map[string]*PreparedFont)
-	r.fontDigests = resourceCache[fontDataKey, [32]byte](r.Reader.resources, 4<<20)
-	r.fontPreparations = resourceCache[[32]byte, PreparedFont](r.Reader.resources, 16<<20)
+	r.fontDigests = resourceCache[fontDataKey, [32]byte](r.Reader.resources, 64<<20)
+	r.fontPreparations = resourceCache[[32]byte, PreparedFont](r.Reader.resources, 64<<20)
 	r.resolvedFonts = make(map[resolvedFontKey]resolvedFontResult)
 	if r.fontSourcesCache != nil {
 		r.fontSourcesCache.fallback = ResolvedFont{}
 		r.fontSourcesCache.fallbackRead = false
 	}
-	r.fontMetrics = resourceCache[[32]byte, FontMetrics](r.Reader.resources, 32<<20)
+	r.fontMetrics = resourceCache[[32]byte, FontMetrics](r.Reader.resources, 64<<20)
 	r.glyphOutlines = resourceCache[glyphOutlineKey, GeometryPath](r.Reader.resources, 16<<20)
 	for _, state := range r.backendStates {
 		if fonts, ok := state.(interface{ resetFonts() }); ok {

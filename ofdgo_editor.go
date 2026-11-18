@@ -26,6 +26,7 @@ import (
 	"io/fs"
 	"maps"
 	"math"
+	"os"
 	"reflect"
 	"slices"
 	"strconv"
@@ -72,6 +73,7 @@ type Editor struct {
 	revision           uint64
 	serial             uint64
 	source             *editorSource
+	sourceFile         os.FileInfo
 	origins            map[string]*editorObjectOrigin
 	removedPages       map[string]bool
 	structureRemaps    map[string][]map[string]string
@@ -84,7 +86,7 @@ type Editor struct {
 	validatedPaths     *renderCache[string, bool]
 	changes            EditorChanges
 	transactionChanges *EditorChanges
-	objectIndex        *editorObjectIndex
+	objectIndices      map[string]*editorObjectIndex
 	richIndex          *richTextIndex
 }
 
@@ -1129,7 +1131,7 @@ func cloneEditorObject(object GraphicObject) (GraphicObject, error) {
 // 入参: object 对象副本, dx 横向位移, dy 纵向位移, scale 正缩放比例
 // 返回: GraphicObject 变换后的对象, error 错误信息
 func transformEditorObject(object GraphicObject, dx, dy, scale float64) (GraphicObject, error) {
-	if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" || object.Type == "TextObject" && (len(object.TextObject.CGTransform) != 0 || object.TextObject.VScale != 0 || object.TextObject.Decoration != "") {
+	if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" || object.Type == "TextObject" && len(object.TextObject.CGTransform) != 0 {
 		return transformEditorMatrix(object, Matrix{a: scale, d: scale, e: dx, f: dy}), nil
 	}
 	var boundary, ctm *string
@@ -1254,9 +1256,6 @@ func (e *Editor) prepareText(obj *TextObject) error {
 	}
 	if len(obj.TextCode) == 0 {
 		return fmt.Errorf("text codes are empty")
-	}
-	if obj.VScale != 0 || obj.Decoration != "" {
-		return &EditError{Code: EditUnsupportedObject, Err: fmt.Errorf("text extensions are not supported for creation")}
 	}
 	glyphCount := 1 << 16
 	if !external {

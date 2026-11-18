@@ -1539,8 +1539,7 @@ func invoiceWriteNewIssues(before, after []InvoiceIssue) error {
 }
 
 // invoiceEDRMPaths 列出2019版摘要与明细的映射路径
-// 入参: 无
-// 返回: 2019版可映射字段路径
+// 返回: []string 2019版可映射字段路径
 func invoiceEDRMPaths() []string {
 	return strings.Fields("/eInvoice/InvoiceCode /eInvoice/InvoiceNo /eInvoice/IssueDate /eInvoice/Buyer/BuyerName /eInvoice/Buyer/BuyerTaxID /eInvoice/Seller/SellerName /eInvoice/Seller/SellerTaxID /eInvoice/TaxInclusiveTotalAmount /eInvoice/Note /eInvoice/TaxTotalAmount /eInvoice/TaxExclusiveTotalAmount /eInvoice/GoodsInfos/GoodsInfo/Item /eInvoice/GoodsInfos/GoodsInfo/Specification /eInvoice/GoodsInfos/GoodsInfo/MeasurementDimension /eInvoice/GoodsInfos/GoodsInfo/Quantity /eInvoice/GoodsInfos/GoodsInfo/Price /eInvoice/GoodsInfos/GoodsInfo/Amount /eInvoice/GoodsInfos/GoodsInfo/TaxScheme /eInvoice/GoodsInfos/GoodsInfo/TaxAmount")
 }

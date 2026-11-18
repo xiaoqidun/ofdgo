@@ -17,11 +17,14 @@ package ofdgo
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"slices"
 	"strings"
@@ -38,11 +41,11 @@ func EncryptPackage(data []byte, options EncryptionOptions) ([]byte, error) {
 		return nil, err
 	}
 	defer r.Close()
-	parts, err := r.packageData()
-	if err != nil {
+	var output bytes.Buffer
+	if _, err := encryptPackageToWriter(context.Background(), &output, r, options, nil); err != nil {
 		return nil, err
 	}
-	return encryptPackageParts(parts, options, nil)
+	return output.Bytes(), nil
 }
 
 // encryptionList 对应GM/T0099的加密入口
@@ -125,12 +128,19 @@ func (r *Reader) open(options []ReaderOption) error {
 	if err := r.indexPackage(); err != nil {
 		return err
 	}
-	if r.fileNames["Encryptions.xml"] {
+	encrypted := r.fileNames["Encryptions.xml"]
+	if encrypted {
 		if err := r.decryptPackage(settings); err != nil {
 			return err
 		}
 	}
-	return r.initRoot()
+	if err := r.initRoot(); err != nil {
+		if encrypted && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			return ErrInvalidCredentials
+		}
+		return err
+	}
+	return nil
 }
 
 // packageData 获取包内所有条目的实际字节，保留未识别文件
@@ -148,7 +158,7 @@ func (r *Reader) packageData() (map[string][]byte, error) {
 }
 
 // decryptPackage 在独立内存包内解密，不修改输入文件
-// 同层全部映射解密成功后清理密文，允许多项引用同一密件
+// 同层全部映射解密成功后清理密文，全包加密层清理外层未映射明文残留
 // 入参: settings 会话凭据和密码实现
 // 返回: error 错误信息
 func (r *Reader) decryptPackage(settings readerOptions) error {
@@ -167,11 +177,18 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 	if err != nil {
 		return err
 	}
+	passwordKeys := make([][]byte, len(settings.credentials))
+	defer func() {
+		for _, k := range passwordKeys {
+			clear(k)
+		}
+	}()
 	state := &encryptionState{info: EncryptionInfo{Encrypted: true, Layers: len(list.Records)}}
 	list.Records, err = orderEncryptionRecords(list.Records)
 	if err != nil {
 		return err
 	}
+	outerDecrypted := make(map[string][]byte)
 	for i := len(list.Records) - 1; i >= 0; i-- {
 		record := list.Records[i]
 		seedData, seedName, err := encryptionPart(parts, record.Seed)
@@ -182,7 +199,7 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 		if err := xml.Unmarshal(seedData, &seed); err != nil || seed.ID != record.ID || len(seed.Users) == 0 {
 			return fmt.Errorf("%w: invalid encryption seed", ErrUnsupportedEncryption)
 		}
-		key, iv, credential, err := unwrapEncryptionKey(seed, settings)
+		key, iv, credIndex, err := unwrapEncryptionKey(seed, settings, passwordKeys)
 		if err != nil {
 			return err
 		}
@@ -196,8 +213,9 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 			return ErrInvalidCredentials
 		}
 		decrypted := make(map[string][]byte, len(entries.Entries))
-		used := make(map[string]bool)
+		used := make(map[string]bool, len(entries.Entries))
 		extraSeeds := make(map[string]bool)
+		canInherit := true
 		for _, entry := range entries.Entries {
 			name := cleanPackagePath(entry.Path)
 			if !validPackagePath(name) || used[name] {
@@ -206,17 +224,21 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 			}
 			entryKey, entryIV := key, iv
 			if entry.Seed != "" && cleanPackagePath(entry.Seed) != seedName {
-				seedData, extraSeed, seedErr := encryptionPart(parts, entry.Seed)
+				entrySeedData, extraSeed, seedErr := encryptionPart(parts, entry.Seed)
 				var entrySeed encryptionSeed
 				if seedErr == nil {
-					seedErr = xml.Unmarshal(seedData, &entrySeed)
+					seedErr = xml.Unmarshal(entrySeedData, &entrySeed)
 				}
+				var entryCredIndex int
 				if seedErr == nil {
-					entryKey, entryIV, _, seedErr = unwrapEncryptionKey(entrySeed, settings)
+					entryKey, entryIV, entryCredIndex, seedErr = unwrapEncryptionKey(entrySeed, settings, passwordKeys)
 				}
 				if seedErr != nil {
 					clear(key)
 					return seedErr
+				}
+				if entryCredIndex != credIndex || !sameEncryptionSeedPolicy(seed, entrySeed) {
+					canInherit = false
 				}
 				extraSeeds[extraSeed] = true
 			}
@@ -235,25 +257,56 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 		}
 		clear(key)
 		for _, entry := range entries.Entries {
-			delete(parts, cleanPackagePath(entry.EncryptedPath))
+			encPath := cleanPackagePath(entry.EncryptedPath)
+			delete(parts, encPath)
+			delete(outerDecrypted, encPath)
 		}
 		delete(parts, seedName)
 		delete(parts, mapName)
+		delete(outerDecrypted, seedName)
+		delete(outerDecrypted, mapName)
 		for name := range extraSeeds {
 			delete(parts, name)
+			delete(outerDecrypted, name)
 		}
-		maps.Copy(parts, decrypted)
+		if strings.EqualFold(strings.TrimSpace(record.Scope), "All") {
+			nextParts := make(map[string][]byte, len(decrypted)+len(outerDecrypted))
+			for j := 0; j < i; j++ {
+				preserveInnerEncryptionRecord(nextParts, parts, decrypted, list.Records[j])
+			}
+			maps.Copy(nextParts, outerDecrypted)
+			maps.Copy(nextParts, decrypted)
+			parts = nextParts
+		} else {
+			maps.Copy(parts, decrypted)
+		}
+		maps.Copy(outerDecrypted, decrypted)
 		state.info.Method = seed.Method
 		for _, user := range seed.Users {
 			state.info.Users = append(state.info.Users, user.Name)
 		}
-		if len(list.Records) == 1 && len(extraSeeds) == 0 {
-			state.options = inheritedEncryptionOptions(seed, credential, settings.provider)
+		if len(list.Records) == 1 && canInherit {
+			state.options = inheritedEncryptionOptions(seed, settings.credentials[credIndex], settings.provider)
 		}
 	}
 	delete(parts, "Encryptions.xml")
 	r.Zip, r.files, r.encryption = nil, parts, state
 	return nil
+}
+
+// sameEncryptionSeedPolicy 判断条目级密钥描述是否与主密钥描述共享一致接收者策略
+// 入参: base 主密钥描述, item 条目密钥描述
+// 返回: bool 是否一致
+func sameEncryptionSeedPolicy(base, item encryptionSeed) bool {
+	if base.Method != item.Method || strings.TrimSpace(item.Params.Raw) != "" || len(base.Users) != len(item.Users) {
+		return false
+	}
+	for i := range base.Users {
+		if base.Users[i].Name != item.Users[i].Name || base.Users[i].Role != item.Users[i].Role || base.Users[i].Certificate != item.Users[i].Certificate {
+			return false
+		}
+	}
+	return true
 }
 
 // decodeEncryptionEntries 读取标准允许的明文或密文明密文映射表
@@ -331,41 +384,45 @@ func orderEncryptionRecords(records []encryptionRecord) ([]encryptionRecord, err
 	return ordered, nil
 }
 
-// unwrapEncryptionKey 按方案尝试会话凭据，不向错误信息写入口令
-// 入参: seed 密钥描述, settings 会话凭据
-// 返回: []byte 文件密钥, []byte 初始向量, Credentials 命中凭据, error 错误信息
-func unwrapEncryptionKey(seed encryptionSeed, settings readerOptions) ([]byte, []byte, Credentials, error) {
+// unwrapEncryptionKey 按方案尝试会话凭据并复用口令派生密钥，不向错误信息写入口令
+// 入参: seed 密钥描述, settings 会话凭据, passwordKeys 会话口令密钥缓存
+// 返回: []byte 文件密钥, []byte 初始向量, int 命中凭据索引, error 错误信息
+func unwrapEncryptionKey(seed encryptionSeed, settings readerOptions, passwordKeys [][]byte) ([]byte, []byte, int, error) {
 	if seed.Method != "1.1.1" && seed.Method != "1.1.2" {
-		return nil, nil, Credentials{}, ErrUnsupportedEncryption
+		return nil, nil, -1, ErrUnsupportedEncryption
 	}
-	for _, credential := range settings.credentials {
+	for credIndex, credential := range settings.credentials {
 		for _, user := range seed.Users {
 			if credential.UserName != "" && credential.UserName != user.Name {
 				continue
 			}
 			wrapped, err := base64.StdEncoding.DecodeString(user.Key)
 			if err != nil {
-				return nil, nil, Credentials{}, ErrInvalidCredentials
+				return nil, nil, -1, ErrInvalidCredentials
 			}
 			iv, err := base64.StdEncoding.DecodeString(user.IV)
 			if user.IV == "" {
 				iv = make([]byte, 16)
 			}
 			if err != nil || len(iv) != 16 {
-				return nil, nil, Credentials{}, ErrInvalidCredentials
+				return nil, nil, -1, ErrInvalidCredentials
 			}
 			var key []byte
 			if seed.Method == "1.1.1" && len(credential.Password) != 0 {
-				kek, keyErr := settings.provider.PasswordKey(credential.Password)
-				if keyErr != nil {
-					return nil, nil, Credentials{}, keyErr
+				kek := passwordKeys[credIndex]
+				if kek == nil {
+					var keyErr error
+					kek, keyErr = settings.provider.PasswordKey(credential.Password)
+					if keyErr != nil {
+						return nil, nil, -1, keyErr
+					}
+					passwordKeys[credIndex] = kek
 				}
 				key, err = settings.provider.DecryptSM4(kek, iv, wrapped)
-				clear(kek)
 			} else if seed.Method == "1.1.2" && credential.Decrypter != nil {
 				certificate, decodeErr := base64.StdEncoding.DecodeString(user.Certificate)
 				if decodeErr != nil || len(certificate) == 0 {
-					return nil, nil, Credentials{}, ErrInvalidCredentials
+					return nil, nil, -1, ErrInvalidCredentials
 				}
 				if len(credential.Certificate) != 0 && !bytes.Equal(credential.Certificate, certificate) {
 					continue
@@ -375,12 +432,12 @@ func unwrapEncryptionKey(seed encryptionSeed, settings readerOptions) ([]byte, [
 				continue
 			}
 			if err == nil && len(key) == 16 {
-				return key, iv, credential, nil
+				return key, iv, credIndex, nil
 			}
 			clear(key)
 		}
 	}
-	return nil, nil, Credentials{}, ErrInvalidCredentials
+	return nil, nil, -1, ErrInvalidCredentials
 }
 
 // inheritedEncryptionOptions 保留能够完整恢复的原接收者策略
@@ -408,12 +465,24 @@ func inheritedEncryptionOptions(seed encryptionSeed, credential Credentials, pro
 	return options
 }
 
-// encryptPackageParts 加密所有原条目，再生成标准入口、密钥描述与映射
-// 入参: parts 明文条目, options 加密策略, progress 取消与进度检查
-// 返回: []byte 加密包, error 错误信息
-func encryptPackageParts(parts map[string][]byte, options EncryptionOptions, progress editorProgress) ([]byte, error) {
+// encryptPackageToWriter 流式逐条加密阅读器中的包条目并直接写出ZIP归档
+// 口令模式下为每个文件生成独立初始向量与条目种子，证书模式下保持单种子避免硬件设备多次私钥解密
+// 入参: ctx 取消上下文, writer 输出流, r 明文包阅读器, options 加密策略, progress 取消与进度检查
+// 返回: int64 写出字节数, error 错误信息
+func encryptPackageToWriter(ctx context.Context, writer io.Writer, r *Reader, options EncryptionOptions, progress editorProgress) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if r == nil {
+		return 0, fmt.Errorf("nil encryption reader")
+	}
 	if err := validateEncryptionOptions(options); err != nil {
-		return nil, err
+		return 0, err
+	}
+	if len(r.fileNames) == 0 {
+		if err := r.indexPackageContext(ctx); err != nil {
+			return 0, err
+		}
 	}
 	provider := options.Provider
 	if provider == nil {
@@ -422,21 +491,24 @@ func encryptPackageParts(parts map[string][]byte, options EncryptionOptions, pro
 	key, iv, identifier := make([]byte, 16), make([]byte, 16), make([]byte, 16)
 	for _, buffer := range [][]byte{key, iv, identifier} {
 		if _, err := rand.Read(buffer); err != nil {
-			return nil, err
+			return 0, err
 		}
 	}
 	defer clear(key)
 	id := "E" + hex.EncodeToString(identifier)
 	seed := encryptionSeed{ID: id, Method: "1.1.1"}
-	if len(options.Password) != 0 {
-		kek, err := provider.PasswordKey(options.Password)
+	var kek []byte
+	passwordMode := len(options.Password) != 0
+	if passwordMode {
+		var err error
+		kek, err = provider.PasswordKey(options.Password)
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
+		defer clear(kek)
 		wrapped, err := provider.EncryptSM4(kek, iv, key)
-		clear(kek)
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
 		seed.Users = []encryptionUser{{Name: options.UserName, Role: options.UserType, Key: base64.StdEncoding.EncodeToString(wrapped), IV: base64.StdEncoding.EncodeToString(iv)}}
 	} else {
@@ -444,67 +516,133 @@ func encryptPackageParts(parts map[string][]byte, options EncryptionOptions, pro
 		for _, recipient := range options.Recipients {
 			certificate, err := ParseEncryptionCertificate(recipient.Certificate)
 			if err != nil {
-				return nil, err
+				return 0, err
 			}
 			wrapped, err := provider.EncryptKey(certificate, key)
 			if err != nil {
-				return nil, err
+				return 0, err
 			}
 			seed.Users = append(seed.Users, encryptionUser{Name: recipient.UserName, Role: recipient.UserType, Certificate: base64.StdEncoding.EncodeToString(certificate), Key: base64.StdEncoding.EncodeToString(wrapped), IV: base64.StdEncoding.EncodeToString(iv)})
 		}
 	}
-	entries := encryptionEntries{XMLName: xml.Name{Space: ofdNamespace2016, Local: "EncryptEntries"}, ID: id}
-	cipherParts := make(map[string][]byte, len(parts)+3)
-	for i, name := range slices.Sorted(maps.Keys(parts)) {
-		if err := progress.report("encrypt", i, len(parts)); err != nil {
-			return nil, err
-		}
+	names := slices.Sorted(maps.Keys(r.fileNames))
+	entries := encryptionEntries{XMLName: xml.Name{Space: ofdNamespace2016, Local: "EncryptEntries"}, ID: id, Entries: make([]encryptionEntry, 0, len(names))}
+	var entryIVs [][]byte
+	if passwordMode {
+		entryIVs = make([][]byte, len(names))
+	}
+	for i, name := range names {
 		encryptedName := fmt.Sprintf("Encrypt/Files/%d.dat", i)
-		data, err := provider.EncryptSM4(key, iv, parts[name])
-		if err != nil {
-			return nil, err
+		entry := encryptionEntry{Path: "/" + name, EncryptedPath: "/" + encryptedName}
+		if passwordMode {
+			entryIV := make([]byte, 16)
+			if _, err := rand.Read(entryIV); err != nil {
+				return 0, err
+			}
+			entryIVs[i] = entryIV
+			entry.Seed = fmt.Sprintf("/Encrypt/Seeds/%d.dat", i)
 		}
-		cipherParts[encryptedName] = data
-		entries.Entries = append(entries.Entries, encryptionEntry{Path: "/" + name, EncryptedPath: "/" + encryptedName})
+		entries.Entries = append(entries.Entries, entry)
 	}
-	mapData, err := xml.Marshal(entries)
+	plainMap, err := xml.Marshal(entries)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	mapData, err = provider.EncryptSM4(key, iv, mapData)
+	mapData, err := provider.EncryptSM4(key, iv, plainMap)
+	clear(plainMap)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	cipherParts["Encrypt/Entries.dat"] = mapData
 	seedData, err := xml.Marshal(seed)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	cipherParts["Encrypt/DecryptSeed.dat"] = seedData
 	list := encryptionList{Records: []encryptionRecord{{ID: id, Provider: encryptionProvider{Name: "OFDGo", Version: "1.0"}, Scope: "All", Date: time.Now().Format(time.RFC3339), Seed: "/Encrypt/DecryptSeed.dat", Entries: "/Encrypt/Entries.dat"}}}
 	listData, err := xml.Marshal(list)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	cipherParts["Encryptions.xml"] = listData
-	var output bytes.Buffer
-	archive := zip.NewWriter(&output)
-	for _, name := range slices.Sorted(maps.Keys(cipherParts)) {
-		entry, err := archive.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store})
-		if err != nil {
-			return nil, err
+	if err := progress.report("encrypt", 0, len(names)); err != nil {
+		return 0, err
+	}
+	var count int64
+	counting := convertWriter{ctx: ctx, writer: writer, count: &count}
+	archive := zip.NewWriter(counting)
+	writeStoreEntry := func(entryName string, payload []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		if _, err := entry.Write(cipherParts[name]); err != nil {
-			return nil, err
+		dst, createErr := archive.CreateHeader(&zip.FileHeader{Name: entryName, Method: zip.Store})
+		if createErr != nil {
+			return createErr
 		}
+		_, writeErr := dst.Write(payload)
+		return writeErr
+	}
+	if err := writeStoreEntry("Encrypt/DecryptSeed.dat", seedData); err != nil {
+		return count, err
+	}
+	if err := writeStoreEntry("Encrypt/Entries.dat", mapData); err != nil {
+		return count, err
+	}
+	for i, name := range names {
+		if i > 0 {
+			if err := progress.report("encrypt", i, len(names)); err != nil {
+				return count, err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return count, err
+		}
+		plain, borrowed, readErr := r.readFileData(name)
+		if readErr != nil {
+			return count, readErr
+		}
+		entryIV := iv
+		if passwordMode {
+			entryIV = entryIVs[i]
+		}
+		cipherData, encErr := provider.EncryptSM4(key, entryIV, plain)
+		if !borrowed {
+			clear(plain)
+		}
+		if encErr != nil {
+			return count, encErr
+		}
+		if err := writeStoreEntry(fmt.Sprintf("Encrypt/Files/%d.dat", i), cipherData); err != nil {
+			return count, err
+		}
+	}
+	if passwordMode {
+		for i, entryIV := range entryIVs {
+			wrapped, encErr := provider.EncryptSM4(kek, entryIV, key)
+			if encErr != nil {
+				return count, encErr
+			}
+			entrySeed := encryptionSeed{
+				ID:     id,
+				Method: "1.1.1",
+				Users:  []encryptionUser{{Name: options.UserName, Role: options.UserType, Key: base64.StdEncoding.EncodeToString(wrapped), IV: base64.StdEncoding.EncodeToString(entryIV)}},
+			}
+			entrySeedData, marshalErr := xml.Marshal(entrySeed)
+			if marshalErr != nil {
+				return count, marshalErr
+			}
+			if err := writeStoreEntry(fmt.Sprintf("Encrypt/Seeds/%d.dat", i), entrySeedData); err != nil {
+				return count, err
+			}
+		}
+	}
+	if err := writeStoreEntry("Encryptions.xml", listData); err != nil {
+		return count, err
 	}
 	if err := archive.Close(); err != nil {
-		return nil, err
+		return count, err
 	}
-	if err := progress.report("encrypt", len(parts), len(parts)); err != nil {
-		return nil, err
+	if err := progress.report("encrypt", len(names), len(names)); err != nil {
+		return count, err
 	}
-	return output.Bytes(), nil
+	return count, ctx.Err()
 }
 
 // validateEncryptionOptions 校验输出方案，禁止空口令或混用口令与证书方案
@@ -528,4 +666,45 @@ func validateEncryptionOptions(options EncryptionOptions) error {
 		seen[recipient.UserName] = true
 	}
 	return nil
+}
+
+// preserveInnerEncryptionRecord 保留全包解密层尚未处理的更内层加密元数据及明文映射引用的密文和条目种子
+// 入参: dst 下一轮包条目, parts 当前包条目, decrypted 本层解密结果, record 更内层加密记录
+func preserveInnerEncryptionRecord(dst, parts, decrypted map[string][]byte, record encryptionRecord) {
+	for _, meta := range []string{record.Seed, record.Entries} {
+		metaName := cleanPackagePath(meta)
+		if validPackagePath(metaName) {
+			if metaData, ok := parts[metaName]; ok {
+				dst[metaName] = metaData
+			}
+		}
+	}
+	entriesName := cleanPackagePath(record.Entries)
+	if !validPackagePath(entriesName) {
+		return
+	}
+	entriesData, ok := decrypted[entriesName]
+	if !ok {
+		entriesData, ok = parts[entriesName]
+	}
+	if !ok {
+		return
+	}
+	var innerEntries encryptionEntries
+	if xml.Unmarshal(entriesData, &innerEntries) != nil || innerEntries.XMLName.Space != ofdNamespace2016 || (innerEntries.XMLName.Local != "EncryptEntries" && innerEntries.XMLName.Local != "EncryptedEntries") {
+		return
+	}
+	for _, entry := range innerEntries.Entries {
+		for _, ref := range []string{entry.EncryptedPath, entry.Seed} {
+			if strings.TrimSpace(ref) == "" {
+				continue
+			}
+			refName := cleanPackagePath(ref)
+			if validPackagePath(refName) {
+				if refData, exists := parts[refName]; exists {
+					dst[refName] = refData
+				}
+			}
+		}
+	}
 }

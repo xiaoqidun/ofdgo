@@ -656,8 +656,8 @@ class NativeHost {
 
 	async release(value) {
 		if (value instanceof Blob || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return;
-		if (value?.nativeFile && value.temporary) {
-			await this.call("release", {file:value.nativeFile}).catch(() => {});
+		if (value?.nativeFile) {
+			if (value.temporary) await this.call("release", {file:value.nativeFile}).catch(() => {});
 			return;
 		}
 		if (value && typeof value === "object") {

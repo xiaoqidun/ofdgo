@@ -129,6 +129,7 @@ func (r *Renderer) renderCanvasContext(ctx *canvas.Context, page *PageContent) e
 // 入参: ctx 画布上下文, page 页面内容, drawBackground 是否绘制页面背景
 // 返回: error 错误信息
 func (r *Renderer) renderCanvasPageToContext(ctx *canvas.Context, page *PageContent, drawBackground bool) error {
+	defer r.bindPageResources(page)()
 	r.renderError = nil
 	box, err := r.GetPageBox(page)
 	if err != nil {

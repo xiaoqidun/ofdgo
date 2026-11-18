@@ -121,7 +121,7 @@ func (e *Editor) Undo() bool {
 	e.historyIndex--
 	change := e.history[e.historyIndex]
 	change.undo(e)
-	e.changes, e.objectIndex = change.changes, nil
+	e.changes, e.objectIndices = change.changes, nil
 	e.invalidatePreviewPages(change.changes)
 	e.revision = change.before
 	return true
@@ -135,7 +135,7 @@ func (e *Editor) Redo() bool {
 	}
 	change := e.history[e.historyIndex]
 	change.redo(e)
-	e.changes, e.objectIndex = change.changes, nil
+	e.changes, e.objectIndices = change.changes, nil
 	e.invalidatePreviewPages(change.changes)
 	e.historyIndex++
 	e.revision = change.after
@@ -195,6 +195,7 @@ func (e *Editor) transactionState() Editor {
 	next.removedPages = maps.Clone(e.removedPages)
 	next.structureRemaps = maps.Clone(e.structureRemaps)
 	next.fontMetrics = maps.Clone(e.fontMetrics)
+	next.objectIndices = nil
 	if e.source != nil {
 		source := *e.source
 		source.pages, source.origins = maps.Clone(source.pages), maps.Clone(source.origins)
@@ -227,7 +228,7 @@ func (e *Editor) restoreTransactionState(state Editor) {
 	state.fontSourcesCache = e.fontSourcesCache
 	state.validatedPaths = e.validatedPaths
 	state.encryption, state.output, state.OnWriteProgress = e.encryption, e.output, e.OnWriteProgress
-	state.saveTarget = e.saveTarget
+	state.saveTarget, state.sourceFile = e.saveTarget, e.sourceFile
 	*e = state
 }
 
@@ -327,7 +328,7 @@ func (e *Editor) recordChange(pages ...int) *editorChange {
 // 返回: *editorChange 可补充回放操作的记录
 func (e *Editor) recordChangeScope(scope EditorChanges) *editorChange {
 	e.invalidatePreviewPages(scope)
-	e.objectIndex = nil
+	e.objectIndices = nil
 	e.changes = scope
 	if e.transactionChanges != nil {
 		e.transactionChanges.merge(scope)

@@ -25,6 +25,8 @@ import (
 	"image/color"
 	"io"
 	"math"
+	"runtime"
+	"sync"
 
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -32,32 +34,34 @@ import (
 // TransformRGBA 按八位预乘颜色变换同范围像素，源和目标可为同一图像
 // 入参: target 目标缓冲, source 同范围源图像, transform 单像素颜色变换
 func TransformRGBA(target *image.RGBA, source image.Image, transform func(color.RGBA) color.RGBA) {
-	for y := target.Rect.Min.Y; y < target.Rect.Max.Y; y++ {
-		row := target.Pix[target.PixOffset(target.Rect.Min.X, y):][:target.Rect.Dx()*4]
-		for x := target.Rect.Min.X; x < target.Rect.Max.X; x++ {
-			var pixel color.RGBA
-			switch source := source.(type) {
-			case *image.RGBA:
-				i := source.PixOffset(x, y)
-				pixel = color.RGBA{R: source.Pix[i], G: source.Pix[i+1], B: source.Pix[i+2], A: source.Pix[i+3]}
-			case *image.NRGBA:
-				i := source.PixOffset(x, y)
-				a := uint32(source.Pix[i+3])
-				pixel = color.RGBA{R: uint8(uint32(source.Pix[i]) * 257 * a / 255 >> 8), G: uint8(uint32(source.Pix[i+1]) * 257 * a / 255 >> 8), B: uint8(uint32(source.Pix[i+2]) * 257 * a / 255 >> 8), A: uint8(a)}
-			case *image.Gray:
-				v := source.Pix[source.PixOffset(x, y)]
-				pixel = color.RGBA{R: v, G: v, B: v, A: 255}
-			case image.RGBA64Image:
-				v := source.RGBA64At(x, y)
-				pixel = color.RGBA{R: uint8(v.R >> 8), G: uint8(v.G >> 8), B: uint8(v.B >> 8), A: uint8(v.A >> 8)}
-			default:
-				pixel = color.RGBAModel.Convert(source.At(x, y)).(color.RGBA)
+	if target == nil || source == nil || transform == nil {
+		return
+	}
+	rect := target.Rect
+	width, height := rect.Dx(), rect.Dy()
+	if width <= 0 || height <= 0 {
+		return
+	}
+	if colored, ok := source.(*colorImage); ok {
+		source = colored.NRGBA64
+	}
+	if width*height >= 262144 {
+		if workers := min(runtime.GOMAXPROCS(0), 4, height); workers > 1 {
+			var wg sync.WaitGroup
+			wg.Add(workers)
+			for worker := range workers {
+				startY := rect.Min.Y + worker*height/workers
+				endY := rect.Min.Y + (worker+1)*height/workers
+				go func(y0, y1 int) {
+					defer wg.Done()
+					transformRGBARows(target, source, transform, y0, y1)
+				}(startY, endY)
 			}
-			pixel = transform(pixel)
-			i := (x - target.Rect.Min.X) * 4
-			row[i], row[i+1], row[i+2], row[i+3] = pixel.R, pixel.G, pixel.B, pixel.A
+			wg.Wait()
+			return
 		}
 	}
+	transformRGBARows(target, source, transform, rect.Min.Y, rect.Max.Y)
 }
 
 // colorImage 保留源采样及独立的十六位显示像素
@@ -70,6 +74,153 @@ type colorImage struct {
 type pngColor struct {
 	space      *pdfgo.ColorSpace
 	linearSRGB bool
+}
+
+// cmykGrayAt 从原始四色采样计算蒙版灰度，不应用显示配置
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.Gray 蒙版灰度
+func (p *planarTIFFImage) cmykGrayAt(x, y int) color.Gray {
+	if !image.Pt(x, y).In(p.bounds) {
+		return color.Gray{}
+	}
+	ink := p.inksAt(x, y)
+	maximum := uint32(65535)
+	if p.alpha == 1 {
+		maximum = uint32(ink[4])
+		if maximum == 0 {
+			return color.Gray{}
+		}
+	}
+	black := maximum - min(uint32(ink[3]), maximum)
+	var rgb [3]uint32
+	for i := range rgb {
+		rgb[i] = (maximum - min(uint32(ink[i]), maximum)) * black / maximum
+		if p.alpha != 1 {
+			rgb[i] = rgb[i] * uint32(ink[4]) / 65535
+		}
+	}
+	return color.Gray{Y: uint8((19595*rgb[0] + 38470*rgb[1] + 7471*rgb[2] + 1<<15) >> 24)}
+}
+
+// transformRGBARows 按具体像素切片紧凑转换指定行区间，避免逐像素类型分发
+// 入参: target 目标缓冲, source 源图像, transform 单像素颜色变换, startY 起始行, endY 结束行
+func transformRGBARows(target *image.RGBA, source image.Image, transform func(color.RGBA) color.RGBA, startY, endY int) {
+	rect := target.Rect
+	width := rect.Dx()
+	rowBytes := width * 4
+	switch src := source.(type) {
+	case *image.RGBA:
+		if rect.In(src.Rect) {
+			for y := startY; y < endY; y++ {
+				dstRow := target.Pix[target.PixOffset(rect.Min.X, y):][:rowBytes]
+				srcRow := src.Pix[src.PixOffset(rect.Min.X, y):][:rowBytes]
+				for i := 0; i < rowBytes; i += 4 {
+					p := transform(color.RGBA{R: srcRow[i], G: srcRow[i+1], B: srcRow[i+2], A: srcRow[i+3]})
+					dstRow[i], dstRow[i+1], dstRow[i+2], dstRow[i+3] = p.R, p.G, p.B, p.A
+				}
+			}
+			return
+		}
+	case *image.NRGBA:
+		if rect.In(src.Rect) {
+			for y := startY; y < endY; y++ {
+				dstRow := target.Pix[target.PixOffset(rect.Min.X, y):][:rowBytes]
+				srcRow := src.Pix[src.PixOffset(rect.Min.X, y):][:rowBytes]
+				for i := 0; i < rowBytes; i += 4 {
+					a := uint32(srcRow[i+3])
+					var pixel color.RGBA
+					if a == 255 {
+						pixel = color.RGBA{R: srcRow[i], G: srcRow[i+1], B: srcRow[i+2], A: 255}
+					} else if a != 0 {
+						pixel = color.RGBA{
+							R: uint8(uint32(srcRow[i]) * 257 * a / 255 >> 8),
+							G: uint8(uint32(srcRow[i+1]) * 257 * a / 255 >> 8),
+							B: uint8(uint32(srcRow[i+2]) * 257 * a / 255 >> 8),
+							A: uint8(a),
+						}
+					}
+					p := transform(pixel)
+					dstRow[i], dstRow[i+1], dstRow[i+2], dstRow[i+3] = p.R, p.G, p.B, p.A
+				}
+			}
+			return
+		}
+	case *image.RGBA64:
+		if rect.In(src.Rect) {
+			srcBytes := width * 8
+			for y := startY; y < endY; y++ {
+				dstRow := target.Pix[target.PixOffset(rect.Min.X, y):][:rowBytes]
+				srcRow := src.Pix[src.PixOffset(rect.Min.X, y):][:srcBytes]
+				for i, j := 0, 0; i < rowBytes; i, j = i+4, j+8 {
+					p := transform(color.RGBA{R: srcRow[j], G: srcRow[j+2], B: srcRow[j+4], A: srcRow[j+6]})
+					dstRow[i], dstRow[i+1], dstRow[i+2], dstRow[i+3] = p.R, p.G, p.B, p.A
+				}
+			}
+			return
+		}
+	case *image.NRGBA64:
+		if rect.In(src.Rect) {
+			srcBytes := width * 8
+			for y := startY; y < endY; y++ {
+				dstRow := target.Pix[target.PixOffset(rect.Min.X, y):][:rowBytes]
+				srcRow := src.Pix[src.PixOffset(rect.Min.X, y):][:srcBytes]
+				for i, j := 0, 0; i < rowBytes; i, j = i+4, j+8 {
+					a := uint32(srcRow[j+6])<<8 | uint32(srcRow[j+7])
+					var pixel color.RGBA
+					if a == 0xffff {
+						pixel = color.RGBA{R: srcRow[j], G: srcRow[j+2], B: srcRow[j+4], A: 255}
+					} else if a != 0 {
+						r := uint32(srcRow[j])<<8 | uint32(srcRow[j+1])
+						g := uint32(srcRow[j+2])<<8 | uint32(srcRow[j+3])
+						b := uint32(srcRow[j+4])<<8 | uint32(srcRow[j+5])
+						pixel = color.RGBA{
+							R: uint8((r * a / 0xffff) >> 8),
+							G: uint8((g * a / 0xffff) >> 8),
+							B: uint8((b * a / 0xffff) >> 8),
+							A: uint8(a >> 8),
+						}
+					}
+					p := transform(pixel)
+					dstRow[i], dstRow[i+1], dstRow[i+2], dstRow[i+3] = p.R, p.G, p.B, p.A
+				}
+			}
+			return
+		}
+	case *image.Gray:
+		if rect.In(src.Rect) {
+			for y := startY; y < endY; y++ {
+				dstRow := target.Pix[target.PixOffset(rect.Min.X, y):][:rowBytes]
+				srcRow := src.Pix[src.PixOffset(rect.Min.X, y):][:width]
+				for x := 0; x < width; x++ {
+					v := srcRow[x]
+					p := transform(color.RGBA{R: v, G: v, B: v, A: 255})
+					i := x * 4
+					dstRow[i], dstRow[i+1], dstRow[i+2], dstRow[i+3] = p.R, p.G, p.B, p.A
+				}
+			}
+			return
+		}
+	}
+	if src64, ok := source.(image.RGBA64Image); ok {
+		for y := startY; y < endY; y++ {
+			dstRow := target.Pix[target.PixOffset(rect.Min.X, y):][:rowBytes]
+			for x := rect.Min.X; x < rect.Max.X; x++ {
+				v := src64.RGBA64At(x, y)
+				p := transform(color.RGBA{R: uint8(v.R >> 8), G: uint8(v.G >> 8), B: uint8(v.B >> 8), A: uint8(v.A >> 8)})
+				i := (x - rect.Min.X) * 4
+				dstRow[i], dstRow[i+1], dstRow[i+2], dstRow[i+3] = p.R, p.G, p.B, p.A
+			}
+		}
+		return
+	}
+	for y := startY; y < endY; y++ {
+		dstRow := target.Pix[target.PixOffset(rect.Min.X, y):][:rowBytes]
+		for x := rect.Min.X; x < rect.Max.X; x++ {
+			p := transform(color.RGBAModel.Convert(source.At(x, y)).(color.RGBA))
+			i := (x - rect.Min.X) * 4
+			dstRow[i], dstRow[i+1], dstRow[i+2], dstRow[i+3] = p.R, p.G, p.B, p.A
+		}
+	}
 }
 
 // pngColorProfile 读取PNG颜色元数据，ICC优先于sRGB及独立校准参数
@@ -159,14 +310,30 @@ func pngColorProfile(ctx context.Context, data []byte) ([]byte, *pngColor, error
 	if len(chunks) == 0 {
 		return nil, nil, nil
 	}
+	var rawChrm [8]uint32
+	hasChrm := false
 	coordinates := [8]float64{0.3127, 0.3290, 0.6400, 0.3300, 0.3000, 0.6000, 0.1500, 0.0600}
 	if chunk, ok := chunks["cHRM"]; ok {
 		if len(chunk) != 32 {
 			return nil, nil, fmt.Errorf("invalid PNG chromaticities")
 		}
+		hasChrm = true
 		for i := range coordinates {
-			coordinates[i] = float64(binary.BigEndian.Uint32(chunk[i*4:])) / 100000
+			rawChrm[i] = binary.BigEndian.Uint32(chunk[i*4:])
+			coordinates[i] = float64(rawChrm[i]) / 100000
 		}
+	}
+	var rawGamma uint32
+	hasGamma := false
+	if chunk, ok := chunks["gAMA"]; ok {
+		if len(chunk) != 4 || binary.BigEndian.Uint32(chunk) == 0 {
+			return nil, nil, fmt.Errorf("invalid PNG gamma")
+		}
+		hasGamma = true
+		rawGamma = binary.BigEndian.Uint32(chunk)
+	}
+	if hasChrm && rawChrm == [8]uint32{31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000} && (!hasGamma || rawGamma == 45455) {
+		return nil, nil, nil
 	}
 	var xyz [4][3]float64
 	for i := range xyz {
@@ -193,11 +360,8 @@ func pngColorProfile(ctx context.Context, data []byte) ([]byte, *pngColor, error
 	}
 	gamma := [3]float64{1, 1, 1}
 	linear := true
-	if chunk, ok := chunks["gAMA"]; ok {
-		if len(chunk) != 4 || binary.BigEndian.Uint32(chunk) == 0 {
-			return nil, nil, fmt.Errorf("invalid PNG gamma")
-		}
-		g := 100000 / float64(binary.BigEndian.Uint32(chunk))
+	if hasGamma {
+		g := 100000 / float64(rawGamma)
 		gamma = [3]float64{g, g, g}
 		linear = false
 	}
@@ -342,30 +506,4 @@ func jpegDisplayImage(ctx context.Context, source image.Image, profile *pdfgo.Co
 // 返回: uint16 十六位分量
 func colorWord(value float64) uint16 {
 	return uint16(math.Round(max(0, min(1, value)) * 65535))
-}
-
-// cmykGrayAt 从原始四色采样计算蒙版灰度，不应用显示配置
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.Gray 蒙版灰度
-func (p *planarTIFFImage) cmykGrayAt(x, y int) color.Gray {
-	if !image.Pt(x, y).In(p.bounds) {
-		return color.Gray{}
-	}
-	ink := p.inksAt(x, y)
-	maximum := uint32(65535)
-	if p.alpha == 1 {
-		maximum = uint32(ink[4])
-		if maximum == 0 {
-			return color.Gray{}
-		}
-	}
-	black := maximum - min(uint32(ink[3]), maximum)
-	var rgb [3]uint32
-	for i := range rgb {
-		rgb[i] = (maximum - min(uint32(ink[i]), maximum)) * black / maximum
-		if p.alpha != 1 {
-			rgb[i] = rgb[i] * uint32(ink[4]) / 65535
-		}
-	}
-	return color.Gray{Y: uint8((19595*rgb[0] + 38470*rgb[1] + 7471*rgb[2] + 1<<15) >> 24)}
 }

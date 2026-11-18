@@ -397,9 +397,6 @@ func editorXMLAttributes(node *editorXML, allowed string) bool {
 		if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" && attr.Name.Space == "" {
 			continue
 		}
-		if textMetadataAttribute(node.name, attr) {
-			continue
-		}
 		if attr.Name.Space != "" || !slices.Contains(strings.Fields(allowed), attr.Name.Local) {
 			return false
 		}
@@ -414,7 +411,11 @@ func editorXMLSupported(node *editorXML) bool {
 	var allowed, children string
 	switch node.name.Local {
 	case "TextObject", "Text":
-		allowed, children = "ID Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Cap DashPattern DashOffset Italic Visible Stroke Fill Alpha", "Clips FillColor StrokeColor CGTransform TextCode"
+		allowed, children = "Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Cap DashPattern DashOffset Italic Visible Stroke Fill Alpha", "FillColor StrokeColor CGTransform TextCode"
+		if node.name.Local == "TextObject" {
+			allowed += " ID"
+			children += " Clips"
+		}
 	case "CGTransform":
 		allowed, children = "CodePosition CodeCount GlyphCount", "Glyphs"
 	case "Glyphs":
@@ -458,13 +459,13 @@ func editorXMLTransformable(node *editorXML) bool {
 	var attrs string
 	switch node.name.Local {
 	case "TextObject":
-		attrs = "ID Boundary CTM DrawParam Font Size HScale VScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Cap DashPattern DashOffset Italic Decoration Visible Stroke Fill Alpha"
+		attrs = "ID Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Cap DashPattern DashOffset Italic Visible Stroke Fill Alpha"
 	case "PathObject":
 		attrs = "ID Boundary CTM DrawParam LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha"
 	case "ImageObject":
 		attrs = "ID Boundary CTM ResourceID Substitution ImageMask Visible Alpha"
 	case "CompositeObject", "CompositeGraphicUnit":
-		attrs = "ID Boundary CTM ResourceID DrawParam Visible Alpha"
+		attrs = "ID Name Boundary CTM ResourceID DrawParam LineWidth Cap Join MiterLimit DashOffset DashPattern Visible Alpha"
 	default:
 		return false
 	}
@@ -572,15 +573,6 @@ func editorXMLMergeNamespace(data []byte, node *editorXML, oldXML, newXML []byte
 		return nil, err
 	}
 	changes := make(map[string]string)
-	textValue := func(n *editorXML) string {
-		for _, attr := range n.attrs {
-			if attr.Name.Space == textNamespace && attr.Name.Local == "Text" {
-				return attr.Value
-			}
-		}
-		return ""
-	}
-	textChanged := textValue(oldNode) != textValue(newNode)
 	if legacyClip {
 		changes["TransFlag"] = ""
 	}
@@ -590,7 +582,7 @@ func editorXMLMergeNamespace(data []byte, node *editorXML, oldXML, newXML []byte
 		}
 	}
 	contentChanged := !bytes.Equal(oldXML[oldNode.open:oldNode.close], newXML[newNode.open:newNode.close])
-	if len(changes) == 0 && !textChanged && !contentChanged && namespace == node.name.Space {
+	if len(changes) == 0 && !contentChanged && namespace == node.name.Space {
 		return bytes.Clone(data[node.start:node.end]), nil
 	}
 	d := xml.NewDecoder(bytes.NewReader(data[node.start:node.open]))
@@ -599,27 +591,6 @@ func editorXMLMergeNamespace(data []byte, node *editorXML, oldXML, newXML []byte
 		return nil, err
 	}
 	start := token.(xml.StartElement)
-	if textChanged {
-		value, found := textValue(newNode), false
-		attrs := start.Attr[:0]
-		for i, attr := range start.Attr {
-			resolved := node.attrs[i]
-			if resolved.Name.Space == textNamespace && resolved.Name.Local == "Text" {
-				found = true
-				if value != "" {
-					attr.Value = value
-					attrs = append(attrs, attr)
-				}
-				continue
-			}
-			attrs = append(attrs, attr)
-		}
-		start.Attr = attrs
-		if !found && value != "" {
-			prefix := editorXMLNamespacePrefix(node, "ofdgo")
-			start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Space: "xmlns", Local: prefix}, Value: textNamespace}, xml.Attr{Name: xml.Name{Space: prefix, Local: "Text"}, Value: value})
-		}
-	}
 	if legacyClip || namespace != node.name.Space {
 		start.Name.Space = editorXMLNamespacePrefix(node, "ofd")
 		start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Space: "xmlns", Local: start.Name.Space}, Value: namespace})

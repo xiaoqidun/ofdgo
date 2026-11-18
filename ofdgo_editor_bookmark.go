@@ -39,7 +39,18 @@ func (e *Editor) Bookmarks() ([]Bookmark, error) {
 	if err != nil {
 		return nil, err
 	}
-	return editorBookmarks(data, root)
+	list, err := editorBookmarks(data, root)
+	if err != nil {
+		return nil, err
+	}
+	pages := e.validBookmarkPages()
+	var result []Bookmark
+	for _, item := range list {
+		if pages[editorResourceID(item.Dest.PageID)] {
+			result = append(result, item)
+		}
+	}
+	return result, nil
 }
 
 // AddBookmark 在当前文档版本末尾添加名称唯一的书签，保留扩展内容并记录一次撤销
@@ -183,7 +194,7 @@ func (e *Editor) editBookmark(name string, next *Bookmark, add bool) error {
 			if e.output != nil {
 				ctx = e.output.ctx
 			}
-			pending, err := e.sourcePartsReferences(ctx, nil, nil)
+			pending, _, err := e.sourceParts(ctx, nil, nil, false, false)
 			if err != nil {
 				return err
 			}
@@ -222,7 +233,7 @@ func (e *Editor) editBookmark(name string, next *Bookmark, add bool) error {
 				return err
 			}
 		}
-		updated, err := editorBookmarkDefinition(data, name, next, add)
+		updated, err := editorBookmarkDefinition(data, name, next, add, e.validBookmarkPages())
 		if err != nil {
 			return err
 		}
@@ -386,15 +397,38 @@ func editorBookmarkIsolate(reader *Reader, changes map[string][]byte) (map[strin
 	return parts, nil
 }
 
+// validBookmarkPages 返回当前有效页面标识集合，排除已删除页面
+// 返回: map[string]bool 有效页面标识集合
+func (e *Editor) validBookmarkPages() map[string]bool {
+	pages := make(map[string]bool, len(e.pages))
+	for _, page := range e.pages {
+		id := editorResourceID(page.ID)
+		if id != "" && !e.removedPages[id] {
+			pages[id] = true
+		}
+	}
+	return pages
+}
+
 // editorBookmarkDefinition 修改指定书签的标准字段，保留其扩展属性、扩展节点及其他定义原文
-// 入参: data 文档原文；name 原名称；next 新定义，nil表示删除；add 是否新增
+// 入参: data 文档原文；name 原名称；next 新定义，nil表示删除；add 是否新增；pages 当前有效页面集合
 // 返回: []byte 修改后的文档；error 结构或编码错误
-func editorBookmarkDefinition(data []byte, name string, next *Bookmark, add bool) ([]byte, error) {
+func editorBookmarkDefinition(data []byte, name string, next *Bookmark, add bool, pages map[string]bool) ([]byte, error) {
 	root, err := parseEditorXML(data)
 	if err != nil {
 		return nil, err
 	}
 	container := root.child("Bookmarks")
+	staleNode := func(node *editorXML) bool {
+		if !node.matchesOFD("Bookmark") {
+			return false
+		}
+		dest := node.child("Dest")
+		if dest == nil {
+			return false
+		}
+		return !pages[editorResourceID(dest.attr("PageID"))]
+	}
 	if add {
 		ctx := container
 		if ctx == nil {
@@ -416,7 +450,14 @@ func editorBookmarkDefinition(data []byte, name string, next *Bookmark, add bool
 			if container.open == container.end {
 				return editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, container, item)}), nil
 			}
-			return editorPatchXML(data, []editorXMLPatch{{container.close, container.close, item}}), nil
+			var patches []editorXMLPatch
+			for _, node := range container.children {
+				if staleNode(node) && node.attr("Name") == next.Name {
+					patches = append(patches, editorXMLPatch{node.start, node.end, nil})
+				}
+			}
+			patches = append(patches, editorXMLPatch{container.close, container.close, item})
+			return editorPatchXML(data, patches), nil
 		}
 		item, err = root.containerXML("Bookmarks", nil, item)
 		if err != nil {
@@ -435,7 +476,7 @@ func editorBookmarkDefinition(data []byte, name string, next *Bookmark, add bool
 		return nil, fmt.Errorf("bookmark %q not found", name)
 	}
 	for _, node := range container.children {
-		if !node.matchesOFD("Bookmark") || node.attr("Name") != name {
+		if !node.matchesOFD("Bookmark") || node.attr("Name") != name || staleNode(node) {
 			continue
 		}
 		if next == nil {
@@ -455,6 +496,11 @@ func editorBookmarkDefinition(data []byte, name string, next *Bookmark, add bool
 		}
 		var patches []editorXMLPatch
 		if name != next.Name {
+			for _, other := range container.children {
+				if other != node && staleNode(other) && other.attr("Name") == next.Name {
+					patches = append(patches, editorXMLPatch{other.start, other.end, nil})
+				}
+			}
 			patch, err := editorXMLAttributePatch(data, node, "Name", next.Name)
 			if err != nil {
 				return nil, err

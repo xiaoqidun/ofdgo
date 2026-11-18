@@ -18,7 +18,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"sort"
+	"slices"
 	"unicode/utf16"
 	"unicode/utf8"
 )
@@ -68,9 +68,11 @@ func NormalizeCmap(data []byte) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-			table := BuildCmapTable(0, mapping)
+			var table []byte
 			if language > 65535 {
 				table = buildCmapTableFormat12(0, mapping)
+			} else {
+				table = BuildCmapTable(0, mapping)
 			}
 			subtable := table[binary.BigEndian.Uint32(table[8:]):]
 			if binary.BigEndian.Uint16(subtable) == 12 {
@@ -164,112 +166,27 @@ func AddPackedGlyphMapping(mapping map[rune]uint16, numGlyphs uint16) {
 // 入参: numGlyphs 字形数量, mapping 字符映射
 // 返回: []byte cmap表数据
 func BuildCmapTable(numGlyphs uint16, mapping map[rune]uint16) []byte {
-	if shouldBuildCmapFormat12(mapping) {
-		return buildCmapTableFormat12(numGlyphs, mapping)
-	}
-	var segs []cmapSegment
 	if mapping == nil {
-		if numGlyphs > 0 {
-			segs = append(segs, cmapSegment{start: 0, end: numGlyphs - 1, delta: 0, offset: 0})
-		}
-	} else {
-		var codes []int
-		for r, gid := range mapping {
-			if r >= 0 && r <= 0xFFFF && gid != 0 {
-				codes = append(codes, int(r))
-			}
-		}
-		sort.Ints(codes)
-		if len(codes) > 0 {
-			start := codes[0]
-			prev := start
-			for i := 1; i < len(codes); i++ {
-				curr := codes[i]
-				if curr != prev+1 {
-					segs = append(segs, cmapSegment{start: uint16(start), end: uint16(prev), delta: 0, offset: 0})
-					start = curr
-				}
-				prev = curr
-			}
-			segs = append(segs, cmapSegment{start: uint16(start), end: uint16(prev), delta: 0, offset: 0})
-		}
+		return buildCmapFormat4Sorted(numGlyphs, nil, nil)
 	}
-	segs = append(segs, cmapSegment{start: 0xFFFF, end: 0xFFFF, delta: 1, offset: 0})
-	segCount := uint16(len(segs))
-	searchRange := uint16(1)
-	entrySelector := uint16(0)
-	for searchRange*2 <= segCount {
-		searchRange *= 2
-		entrySelector++
+	codes, needFormat12 := sortedCmapCodes(mapping)
+	if needFormat12 {
+		return encodeCmapFormat12(mapping, codes, 0)
 	}
-	searchRange *= 2
-	rangeShift := segCount*2 - searchRange
-	buf := new(bytes.Buffer)
-	binary.Write(buf, binary.BigEndian, uint16(4))
-	binary.Write(buf, binary.BigEndian, uint16(0))
-	binary.Write(buf, binary.BigEndian, uint16(0))
-	binary.Write(buf, binary.BigEndian, uint16(segCount*2))
-	binary.Write(buf, binary.BigEndian, searchRange)
-	binary.Write(buf, binary.BigEndian, entrySelector)
-	binary.Write(buf, binary.BigEndian, rangeShift)
-	var endCounts, startCounts, idDeltas, idRangeOffsets []uint16
-	var glyphIds []uint16
-	for _, s := range segs {
-		endCounts = append(endCounts, s.end)
-		startCounts = append(startCounts, s.start)
-		if s.start == 0xFFFF {
-			idDeltas = append(idDeltas, 1)
-			idRangeOffsets = append(idRangeOffsets, 0)
-			continue
-		}
-		if mapping == nil {
-			idDeltas = append(idDeltas, 0)
-			idRangeOffsets = append(idRangeOffsets, 0)
-			continue
-		}
-		idDeltas = append(idDeltas, 0)
-		currentGlyphIdx := len(glyphIds)
-		for c := int(s.start); c <= int(s.end); c++ {
-			gid := mapping[rune(c)]
-			glyphIds = append(glyphIds, gid)
-		}
-		offset := (int(segCount)-int(len(idRangeOffsets))-1)*2 + 2 + currentGlyphIdx*2
-		idRangeOffsets = append(idRangeOffsets, uint16(offset))
-	}
-	for _, v := range endCounts {
-		binary.Write(buf, binary.BigEndian, v)
-	}
-	binary.Write(buf, binary.BigEndian, uint16(0))
-	for _, v := range startCounts {
-		binary.Write(buf, binary.BigEndian, v)
-	}
-	for _, v := range idDeltas {
-		binary.Write(buf, binary.BigEndian, v)
-	}
-	for _, v := range idRangeOffsets {
-		binary.Write(buf, binary.BigEndian, v)
-	}
-	for _, v := range glyphIds {
-		binary.Write(buf, binary.BigEndian, v)
-	}
-	data := buf.Bytes()
-	binary.BigEndian.PutUint16(data[2:4], uint16(len(data)))
-	mainBuf := new(bytes.Buffer)
-	binary.Write(mainBuf, binary.BigEndian, uint16(0))
-	binary.Write(mainBuf, binary.BigEndian, uint16(1))
-	binary.Write(mainBuf, binary.BigEndian, uint16(3))
-	binary.Write(mainBuf, binary.BigEndian, uint16(1))
-	binary.Write(mainBuf, binary.BigEndian, uint32(12))
-	mainBuf.Write(data)
-	return mainBuf.Bytes()
+	return buildCmapFormat4Sorted(numGlyphs, mapping, codes)
 }
 
 // cmapSegment cmap表段结构
-// 字段: start 开始字符, end 结束字符, delta 增量, offset 偏移
+// 字段: start 开始字符, end 结束字符
 type cmapSegment struct {
 	start, end uint16
-	delta      int16
-	offset     uint16
+}
+
+// cmapGroup 格式12连续字符映射区间组
+type cmapGroup struct {
+	startChar uint32
+	endChar   uint32
+	startGID  uint32
 }
 
 // parseCmapExtended 读取混合字符、扩展数组及常量分组，限制到有效Unicode范围
@@ -539,95 +456,228 @@ func parseCmapFormat12(data []byte, result map[rune]uint16) {
 	}
 }
 
-// shouldBuildCmapFormat12 判断终止码、补充平面字符或format 4长度溢出时是否需要format 12
+// sortedCmapCodes 单次提取有效码点并排序，同时判断是否需要格式12子表
 // 入参: mapping 字符到字形的映射
-// 返回: bool 是否需要构建format 12子表
-func shouldBuildCmapFormat12(mapping map[rune]uint16) bool {
-	if mapping == nil {
-		return false
+// 返回: []rune 升序码点切片, bool 是否需要构建format 12子表
+func sortedCmapCodes(mapping map[rune]uint16) ([]rune, bool) {
+	if len(mapping) == 0 {
+		return nil, false
 	}
-	var codes []int
+	codes := make([]rune, 0, len(mapping))
+	needFormat12 := false
 	for r, gid := range mapping {
-		if r < 0 || gid == 0 {
+		if r < 0 || r > utf8.MaxRune || gid == 0 {
 			continue
 		}
 		if r >= 0xFFFF {
-			return true
+			needFormat12 = true
 		}
-		codes = append(codes, int(r))
+		codes = append(codes, r)
 	}
-	if len(codes) == 0 {
-		return false
+	slices.Sort(codes)
+	if !needFormat12 && len(codes) > 0 {
+		segCount := 2
+		for i := 1; i < len(codes); i++ {
+			if codes[i] != codes[i-1]+1 {
+				segCount++
+			}
+		}
+		if 16+segCount*8+len(codes)*2 > 0xFFFF {
+			needFormat12 = true
+		}
 	}
-	sort.Ints(codes)
-	segCount := 1
-	glyphIDCount := 1
-	prev := codes[0]
-	for i := 1; i < len(codes); i++ {
-		curr := codes[i]
-		if curr == prev {
+	return codes, needFormat12
+}
+
+// buildCmapFormat4Sorted 基于已排序码点一次分配构建格式4字符映射表
+// 入参: numGlyphs 字形数量, mapping 字符映射, codes 已排序BMP码点
+// 返回: []byte cmap表数据
+func buildCmapFormat4Sorted(numGlyphs uint16, mapping map[rune]uint16, codes []rune) []byte {
+	var segs []cmapSegment
+	glyphCount := 0
+	if mapping == nil {
+		if numGlyphs > 0 {
+			segs = append(segs, cmapSegment{start: 0, end: numGlyphs - 1})
+		}
+	} else if len(codes) > 0 {
+		glyphCount = len(codes)
+		start := uint16(codes[0])
+		prev := start
+		for i := 1; i < len(codes); i++ {
+			curr := uint16(codes[i])
+			if curr != prev+1 {
+				segs = append(segs, cmapSegment{start: start, end: prev})
+				start = curr
+			}
+			prev = curr
+		}
+		segs = append(segs, cmapSegment{start: start, end: prev})
+	}
+	segs = append(segs, cmapSegment{start: 0xFFFF, end: 0xFFFF})
+	segCount := len(segs)
+	searchRange := uint16(1)
+	entrySelector := uint16(0)
+	for searchRange*2 <= uint16(segCount) {
+		searchRange *= 2
+		entrySelector++
+	}
+	searchRange *= 2
+	rangeShift := uint16(segCount)*2 - searchRange
+	subLen := 16 + segCount*8 + glyphCount*2
+	out := make([]byte, 12+subLen)
+	binary.BigEndian.PutUint16(out[2:], 1)
+	binary.BigEndian.PutUint16(out[4:], 3)
+	binary.BigEndian.PutUint16(out[6:], 1)
+	binary.BigEndian.PutUint32(out[8:], 12)
+	sub := out[12:]
+	binary.BigEndian.PutUint16(sub, 4)
+	binary.BigEndian.PutUint16(sub[2:], uint16(subLen))
+	binary.BigEndian.PutUint16(sub[6:], uint16(segCount*2))
+	binary.BigEndian.PutUint16(sub[8:], searchRange)
+	binary.BigEndian.PutUint16(sub[10:], entrySelector)
+	binary.BigEndian.PutUint16(sub[12:], rangeShift)
+	endPos := 14
+	startPos := 16 + segCount*2
+	deltaPos := 16 + segCount*4
+	rangePos := 16 + segCount*6
+	glyphPos := 16 + segCount*8
+	glyphIdx := 0
+	for idx, s := range segs {
+		binary.BigEndian.PutUint16(sub[endPos+idx*2:], s.end)
+		binary.BigEndian.PutUint16(sub[startPos+idx*2:], s.start)
+		if s.start == 0xFFFF {
+			binary.BigEndian.PutUint16(sub[deltaPos+idx*2:], 1)
 			continue
 		}
-		if curr != prev+1 {
-			segCount++
+		if mapping == nil {
+			continue
 		}
-		glyphIDCount++
-		prev = curr
+		offset := (segCount-idx)*2 + glyphIdx*2
+		binary.BigEndian.PutUint16(sub[rangePos+idx*2:], uint16(offset))
+		for c := int(s.start); c <= int(s.end); c++ {
+			binary.BigEndian.PutUint16(sub[glyphPos+glyphIdx*2:], mapping[rune(c)])
+			glyphIdx++
+		}
 	}
-	segCount++
-	length := 16 + segCount*8 + glyphIDCount*2
-	return length > 0xFFFF
+	return out
 }
 
 // buildCmapTableFormat12 构建cmap表 (Format 12)
 // 入参: numGlyphs 字形数量, mapping 字符映射
 // 返回: []byte cmap表数据
 func buildCmapTableFormat12(numGlyphs uint16, mapping map[rune]uint16) []byte {
-	var codes []int
 	if mapping == nil {
-		for i := 0; i < int(numGlyphs); i++ {
-			codes = append(codes, i)
+		var groups []cmapGroup
+		if numGlyphs > 0 {
+			groups = []cmapGroup{{startChar: 0, endChar: uint32(numGlyphs - 1), startGID: 0}}
 		}
-	} else {
-		for r, gid := range mapping {
-			if r >= 0 && gid != 0 {
-				codes = append(codes, int(r))
-			}
+		return serializeCmapFormat12(groups)
+	}
+	codes := make([]rune, 0, len(mapping))
+	for r, gid := range mapping {
+		if r >= 0 && r <= utf8.MaxRune && gid != 0 {
+			codes = append(codes, r)
 		}
 	}
-	sort.Ints(codes)
-	type cmapGroup struct {
-		startChar uint32
-		endChar   uint32
-		startGID  uint32
+	slices.Sort(codes)
+	return encodeCmapFormat12(mapping, codes, 0)
+}
+
+// buildPackedCmapTable 将显式字符映射与字形私有区区间合并编码为cmap表
+// 入参: numGlyphs 字形数量, mapping 显式字符映射
+// 返回: []byte cmap表数据
+func buildPackedCmapTable(numGlyphs uint16, mapping map[rune]uint16) []byte {
+	if numGlyphs <= 1 {
+		if numGlyphs == 1 && mapping[0xF0000] != 0 {
+			cloned := make(map[rune]uint16, len(mapping))
+			for r, gid := range mapping {
+				if r != 0xF0000 {
+					cloned[r] = gid
+				}
+			}
+			return BuildCmapTable(numGlyphs, cloned)
+		}
+		return BuildCmapTable(numGlyphs, mapping)
+	}
+	packEnd := rune(0xF0000) + rune(numGlyphs-1)
+	codes := make([]rune, 0, len(mapping))
+	for r, gid := range mapping {
+		if r >= 0 && r <= utf8.MaxRune && gid != 0 && (r < 0xF0000 || r > packEnd) {
+			codes = append(codes, r)
+		}
+	}
+	slices.Sort(codes)
+	return encodeCmapFormat12(mapping, codes, numGlyphs-1)
+}
+
+// encodeCmapFormat12 合并已排序显式映射与私有区连续映射区间组并编码为Format 12
+// 入参: mapping 显式字符映射, codes 升序显式码点, maxPackedGID 最大私有映射字形ID
+// 返回: []byte cmap表数据
+func encodeCmapFormat12(mapping map[rune]uint16, codes []rune, maxPackedGID uint16) []byte {
+	packCur := uint32(0xF0001)
+	packEnd := uint32(0xF0000) + uint32(maxPackedGID)
+	if maxPackedGID == 0 {
+		packCur = 1
+		packEnd = 0
 	}
 	var groups []cmapGroup
 	for i := 0; i < len(codes); {
-		r := rune(codes[i])
-		gid := uint16(codes[i])
-		if mapping != nil {
-			gid = mapping[r]
+		startChar := uint32(codes[i])
+		if maxPackedGID > 0 && startChar == 0xF0000 {
+			i++
+			continue
 		}
-		group := cmapGroup{startChar: uint32(r), endChar: uint32(r), startGID: uint32(gid)}
-		prevRune := r
-		prevGID := gid
+		if packCur <= packEnd && startChar >= packCur {
+			groups = appendCmapGroup(groups, packCur, packEnd, packCur-0xF0000)
+			packCur = packEnd + 1
+		}
+		if maxPackedGID > 0 && startChar >= 0xF0001 && startChar <= packEnd {
+			i++
+			continue
+		}
+		startGID := uint32(mapping[codes[i]])
+		endChar := startChar
+		prevGID := startGID
 		i++
 		for i < len(codes) {
-			nextRune := rune(codes[i])
-			nextGID := uint16(codes[i])
-			if mapping != nil {
-				nextGID = mapping[nextRune]
-			}
-			if nextRune != prevRune+1 || uint32(nextGID) != uint32(prevGID)+1 {
+			nextChar := uint32(codes[i])
+			if maxPackedGID > 0 && nextChar >= 0xF0000 && nextChar <= packEnd {
 				break
 			}
-			group.endChar = uint32(nextRune)
-			prevRune = nextRune
+			nextGID := uint32(mapping[codes[i]])
+			if nextChar != endChar+1 || nextGID != prevGID+1 {
+				break
+			}
+			endChar = nextChar
 			prevGID = nextGID
 			i++
 		}
-		groups = append(groups, group)
+		groups = appendCmapGroup(groups, startChar, endChar, startGID)
 	}
+	if packCur <= packEnd {
+		groups = appendCmapGroup(groups, packCur, packEnd, packCur-0xF0000)
+	}
+	return serializeCmapFormat12(groups)
+}
+
+// appendCmapGroup 追加或合并连续递增的Format 12映射区间组
+// 入参: groups 已有区间组, startChar 起始码点, endChar 结束码点, startGID 起始字形ID
+// 返回: []cmapGroup 更新后的区间组
+func appendCmapGroup(groups []cmapGroup, startChar, endChar, startGID uint32) []cmapGroup {
+	if n := len(groups); n > 0 {
+		last := &groups[n-1]
+		if last.endChar+1 == startChar && last.startGID+(last.endChar-last.startChar)+1 == startGID {
+			last.endChar = endChar
+			return groups
+		}
+	}
+	return append(groups, cmapGroup{startChar: startChar, endChar: endChar, startGID: startGID})
+}
+
+// serializeCmapFormat12 将区间组编码为完整的Format 12字符映射表
+// 入参: groups 有序区间组
+// 返回: []byte cmap表数据
+func serializeCmapFormat12(groups []cmapGroup) []byte {
 	data := make([]byte, 36+12*len(groups))
 	binary.BigEndian.PutUint16(data[2:], 2)
 	binary.BigEndian.PutUint16(data[6:], 4)

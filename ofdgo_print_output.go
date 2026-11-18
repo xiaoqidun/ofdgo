@@ -26,8 +26,10 @@ import (
 	"image/draw"
 	"image/png"
 	"io"
+	"maps"
 	"math"
 	"slices"
+	"strings"
 
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	xdraw "golang.org/x/image/draw"
@@ -68,7 +70,7 @@ func (p *PrintDocument) WriteHTML(ctx context.Context, writer io.Writer, title s
 		return fmt.Errorf("missing print writer")
 	}
 	out := convertWriter{ctx: ctx, writer: writer, count: new(int64)}
-	if _, err := fmt.Fprintf(out, "<!doctype html><html><head><meta charset=\"utf-8\"><title>%s</title><style>html,body{margin:0;padding:0;background:white}*{box-sizing:border-box}section{break-after:page;overflow:hidden;print-color-adjust:exact;-webkit-print-color-adjust:exact}section:last-child{break-after:auto}img{display:block;width:100%%;height:100%%}@media screen{section{margin:12px auto;box-shadow:0 0 4px #888}}</style><style>", html.EscapeString(title)); err != nil {
+	if _, err := fmt.Fprintf(out, "<!doctype html><html><head><meta charset=\"utf-8\"><title>%s</title><style>html,body{margin:0;padding:0;background:white}*{box-sizing:border-box}section{break-after:page;overflow:hidden;print-color-adjust:exact;-webkit-print-color-adjust:exact}section:last-child{break-after:auto}svg.sheet{display:block;width:100%%;height:100%%}@media screen{section{margin:12px auto;box-shadow:0 0 4px #888}}</style><style>", html.EscapeString(title)); err != nil {
 		return err
 	}
 	for i, side := range p.layout.Sides {
@@ -76,20 +78,27 @@ func (p *PrintDocument) WriteHTML(ctx context.Context, writer io.Writer, title s
 			return err
 		}
 	}
-	if _, err := io.WriteString(out, "</style></head><body>"); err != nil {
+	if p.options.Raster || p.options.Grayscale {
+		if _, err := io.WriteString(out, "</style></head><body>"); err != nil {
+			return err
+		}
+		for i := range p.layout.Sides {
+			if _, err := fmt.Fprintf(out, `<section class="s%d">`, i); err != nil {
+				return err
+			}
+			var svg bytes.Buffer
+			if err := p.renderPrintSVG(ctx, i, &svg); err != nil {
+				return err
+			}
+			body := strings.Replace(svg.String(), "<svg ", `<svg class="sheet" `, 1)
+			if _, err := io.WriteString(out, body+"</section>"); err != nil {
+				return err
+			}
+		}
+		_, err := io.WriteString(out, "</body></html>")
 		return err
 	}
-	for i := range p.layout.Sides {
-		var svg bytes.Buffer
-		if err := p.renderPrintSVG(ctx, i, &svg); err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintf(out, `<section class="s%d"><img src="data:image/svg+xml;base64,%s"></section>`, i, base64.StdEncoding.EncodeToString(svg.Bytes())); err != nil {
-			return err
-		}
-	}
-	_, err := io.WriteString(out, "</body></html>")
-	return err
+	return p.writeVectorPrintHTML(ctx, out)
 }
 
 // WritePDF 将相同打印布局写成矢量PDF；显式图像或灰度模式按任务DPI输出
@@ -132,6 +141,7 @@ func (p *PrintDocument) WritePDF(ctx context.Context, writer io.Writer) error {
 		return codecpdf.WritePrintPDF(ctx, writer, nil, 0, sheets)
 	}
 	var source editorSnapshotBuffer
+	defer func() { _ = source.Close() }()
 	if err := p.renderer.RenderToMultiPagePDF(&source, indices...); err != nil {
 		return err
 	}
@@ -372,4 +382,287 @@ func (p *PrintDocument) printLines(side PrintSide) [][4]float64 {
 		}
 	}
 	return result
+}
+
+// writeVectorPrintHTML 以跨页共享单份字体和内联SVG输出矢量打印文档，避免多层Base64膨胀
+// 入参: ctx 输出上下文, out 输出流
+// 返回: error 渲染或写入错误
+func (p *PrintDocument) writeVectorPrintHTML(ctx context.Context, out io.Writer) error {
+	emitted := make(map[string]bool)
+	pageFragments := make(map[int]string)
+	pageBoxes := make(map[int]Box)
+	imageURLs := make(map[string]string)
+	for _, side := range p.layout.Sides {
+		for _, placement := range side.Placements {
+			if _, exists := pageFragments[placement.Page]; exists {
+				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			page, err := p.renderer.Reader.PageContentByIndexContext(ctx, placement.Page)
+			if err != nil {
+				return err
+			}
+			box, err := p.renderer.GetPageBox(page)
+			if err != nil {
+				return err
+			}
+			var buf bytes.Buffer
+			res, err := p.renderer.RenderPreview(page, &buf, PreviewOptions{KnownResources: maps.Clone(emitted)})
+			if err != nil {
+				return err
+			}
+			for _, f := range res.Fonts {
+				if !emitted[f.Name] {
+					emitted[f.Name] = true
+					if _, err := fmt.Fprintf(out, "@font-face{font-family:'%s';font-style:%s;font-weight:%d;src:url(data:font/sfnt;base64,%s)}.%s{font-family:'%s'!important}", f.Name, f.Style, f.Weight, base64.StdEncoding.EncodeToString(f.Data), f.Name, f.Name); err != nil {
+						return err
+					}
+				}
+			}
+			for _, img := range res.Images {
+				if !emitted[img.Name] {
+					emitted[img.Name] = true
+					imageURLs[img.Name] = "data:" + img.MIME + ";base64," + base64.StdEncoding.EncodeToString(img.Data)
+				}
+			}
+			pageBoxes[placement.Page] = box
+			pageFragments[placement.Page] = stripSVGOuterTag(buf.String())
+		}
+	}
+	if _, err := io.WriteString(out, "</style></head><body>"); err != nil {
+		return err
+	}
+	for sIdx, side := range p.layout.Sides {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(out, `<section class="s%d"><svg class="sheet" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="%gmm" height="%gmm" viewBox="0 0 %g %g"><rect width="100%%" height="100%%" fill="white"/>`, sIdx, side.Width, side.Height, side.Width, side.Height); err != nil {
+			return err
+		}
+		for pIdx, placement := range side.Placements {
+			c, m := placement.Clip, placement.Transform
+			box := pageBoxes[placement.Page]
+			prefix := fmt.Sprintf("s%dp%d_", sIdx, pIdx)
+			fragment := namespaceSVGFragment(pageFragments[placement.Page], prefix, imageURLs)
+			clipID := fmt.Sprintf("pclip_%d_%d", sIdx, pIdx)
+			if _, err := fmt.Fprintf(out, `<defs><clipPath id="%s"><rect x="%g" y="%g" width="%g" height="%g"/></clipPath></defs><g clip-path="url(#%s)"><g transform="matrix(%g %g %g %g %g %g)"><svg width="%g" height="%g" viewBox="0 0 %g %g" overflow="hidden">%s</svg></g></g>`, clipID, c.X, c.Y, c.W, c.H, clipID, m[0], m[1], m[2], m[3], m[4], m[5], placement.Width, placement.Height, box.W, box.H, fragment); err != nil {
+				return err
+			}
+		}
+		for _, line := range p.printLines(side) {
+			if _, err := fmt.Fprintf(out, `<path d="M %g %g L %g %g" fill="none" stroke="black" stroke-width="0.15"/>`, line[0], line[1], line[2], line[3]); err != nil {
+				return err
+			}
+		}
+		if side.Label != "" {
+			if _, err := fmt.Fprintf(out, `<text x="%g" y="%g" font-family="sans-serif" font-size="2.8" fill="black">%s</text>`, side.LabelX, side.LabelY, html.EscapeString(side.Label)); err != nil {
+				return err
+			}
+		}
+		if _, err := io.WriteString(out, "</svg></section>"); err != nil {
+			return err
+		}
+	}
+	_, err := io.WriteString(out, "</body></html>")
+	return err
+}
+
+// stripSVGOuterTag 剥离单页SVG的根标签外壳与制作软件元数据，保留内部图元与局部样式定义
+// 入参: raw 完整单页SVG文本
+// 返回: string 内部SVG片段
+func stripSVGOuterTag(raw string) string {
+	start := strings.Index(raw, "<svg")
+	if start >= 0 {
+		if endOpen := strings.IndexByte(raw[start:], '>'); endOpen >= 0 {
+			raw = raw[start+endOpen+1:]
+		}
+	}
+	if closeIdx := strings.LastIndex(raw, "</svg>"); closeIdx >= 0 {
+		raw = raw[:closeIdx]
+	}
+	return strings.TrimPrefix(raw, svgCreatorMetadata)
+}
+
+// namespaceSVGFragment 仅在SVG标签属性内部重写局部标识与共享图片引用，绝不篡改标签外正文文本
+// 入参: fragment SVG内部片段, prefix 唯一前缀, imageURLs 共享图片DataURL映射
+// 返回: string 重写后的SVG片段
+func namespaceSVGFragment(fragment, prefix string, imageURLs map[string]string) string {
+	var b strings.Builder
+	b.Grow(len(fragment) + len(fragment)/8)
+	pos := 0
+	for pos < len(fragment) {
+		rel := strings.IndexByte(fragment[pos:], '<')
+		if rel < 0 {
+			b.WriteString(fragment[pos:])
+			break
+		}
+		tagStart := pos + rel
+		b.WriteString(fragment[pos:tagStart])
+		rest := fragment[tagStart:]
+		if strings.HasPrefix(rest, "<!--") {
+			end := strings.Index(rest[4:], "-->")
+			if end < 0 {
+				b.WriteString(rest)
+				break
+			}
+			b.WriteString(rest[:4+end+3])
+			pos = tagStart + 4 + end + 3
+			continue
+		}
+		if strings.HasPrefix(rest, "<![CDATA[") {
+			end := strings.Index(rest[9:], "]]>")
+			if end < 0 {
+				b.WriteString(rest)
+				break
+			}
+			b.WriteString(rest[:9+end+3])
+			pos = tagStart + 9 + end + 3
+			continue
+		}
+		if len(rest) < 2 || rest[1] == '/' || rest[1] == '!' || rest[1] == '?' {
+			end := strings.IndexByte(rest, '>')
+			if end < 0 {
+				b.WriteString(rest)
+				break
+			}
+			b.WriteString(rest[:end+1])
+			pos = tagStart + end + 1
+			continue
+		}
+		tagEnd := findSVGTagEnd(rest)
+		if tagEnd < 0 {
+			b.WriteString(rest)
+			break
+		}
+		rewriteSVGTag(&b, rest[:tagEnd+1], prefix, imageURLs)
+		pos = tagStart + tagEnd + 1
+	}
+	return b.String()
+}
+
+// findSVGTagEnd 定位XML开始或自闭合标签的结束尖括号，跳过引号内的尖括号
+// 入参: s 从左尖括号开始的切片
+// 返回: int 结束尖括号索引，未闭合时为-1
+func findSVGTagEnd(s string) int {
+	var quote byte
+	for i := 1; i < len(s); i++ {
+		ch := s[i]
+		if quote != 0 {
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			quote = ch
+		} else if ch == '>' {
+			return i
+		}
+	}
+	return -1
+}
+
+// rewriteSVGTag 扫描单个XML元素标签并重写id、href、xlink:href与url(#...)属性引用
+// 入参: out 输出缓冲, tag 单个完整XML元素标签, prefix 唯一前缀, imageURLs 共享图片DataURL映射
+func rewriteSVGTag(out *strings.Builder, tag, prefix string, imageURLs map[string]string) {
+	i := 1
+	for i < len(tag) && !isSVGAttrSpace(tag[i]) && tag[i] != '/' && tag[i] != '>' {
+		i++
+	}
+	out.WriteString(tag[:i])
+	for i < len(tag) {
+		wsStart := i
+		for i < len(tag) && isSVGAttrSpace(tag[i]) {
+			i++
+		}
+		out.WriteString(tag[wsStart:i])
+		if i >= len(tag) || tag[i] == '>' || tag[i] == '/' {
+			out.WriteString(tag[i:])
+			return
+		}
+		nameStart := i
+		for i < len(tag) && !isSVGAttrSpace(tag[i]) && tag[i] != '=' && tag[i] != '/' && tag[i] != '>' && tag[i] != '"' && tag[i] != '\'' {
+			i++
+		}
+		if i == nameStart {
+			out.WriteByte(tag[i])
+			i++
+			continue
+		}
+		name := tag[nameStart:i]
+		out.WriteString(name)
+		wsEq := i
+		for i < len(tag) && isSVGAttrSpace(tag[i]) {
+			i++
+		}
+		out.WriteString(tag[wsEq:i])
+		if i >= len(tag) || tag[i] != '=' {
+			continue
+		}
+		out.WriteByte('=')
+		i++
+		wsVal := i
+		for i < len(tag) && isSVGAttrSpace(tag[i]) {
+			i++
+		}
+		out.WriteString(tag[wsVal:i])
+		if i >= len(tag) {
+			return
+		}
+		if tag[i] == '"' || tag[i] == '\'' {
+			quote := tag[i]
+			valStart := i + 1
+			relEnd := strings.IndexByte(tag[valStart:], quote)
+			if relEnd < 0 {
+				out.WriteString(tag[i:])
+				return
+			}
+			val := tag[valStart : valStart+relEnd]
+			val = rewriteSVGAttrValue(name, val, prefix, imageURLs)
+			out.WriteByte(quote)
+			out.WriteString(val)
+			out.WriteByte(quote)
+			i = valStart + relEnd + 1
+			continue
+		}
+		rawStart := i
+		for i < len(tag) && !isSVGAttrSpace(tag[i]) && tag[i] != '/' && tag[i] != '>' {
+			i++
+		}
+		out.WriteString(tag[rawStart:i])
+	}
+}
+
+// rewriteSVGAttrValue 重写单个SVG属性值中的局部标识定义、井号引用与图片资源链接
+// 入参: name 属性名称, val 属性原值, prefix 唯一前缀, imageURLs 共享图片DataURL映射
+// 返回: string 重写后的属性值
+func rewriteSVGAttrValue(name, val, prefix string, imageURLs map[string]string) string {
+	if name == "id" {
+		if val != "" {
+			return prefix + val
+		}
+		return val
+	}
+	if name == "href" || name == "xlink:href" {
+		if strings.HasPrefix(val, "#") && len(val) > 1 {
+			return "#" + prefix + val[1:]
+		}
+		if dataURL, ok := imageURLs[val]; ok {
+			return dataURL
+		}
+		return val
+	}
+	if strings.Contains(val, "url(#") {
+		return strings.ReplaceAll(val, "url(#", "url(#"+prefix)
+	}
+	return val
+}
+
+// isSVGAttrSpace 判断字节是否为XML标签内的空白字符
+// 入参: ch 待判断字节
+// 返回: bool 是否为空白字符
+func isSVGAttrSpace(ch byte) bool {
+	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
 }
