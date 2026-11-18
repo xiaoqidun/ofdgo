@@ -6,8 +6,7 @@ require (
 	github.com/andybalholm/brotli v1.3.0
 	github.com/emmansun/gmsm v0.45.3
 	github.com/go-text/typesetting v0.3.5
-	github.com/tdewolff/canvas v0.0.0-20260923214215-09804640d00c
-	github.com/tdewolff/font v0.0.0-20261010204837-88a7f6b56918
+	github.com/tdewolff/canvas v0.0.0-20261116172151-988951479a61
 	github.com/xiaoqidun/guigo v0.0.0-20261110054647-31d2a81b8610
 	github.com/xiaoqidun/j2kgo v1.0.2
 	github.com/xiaoqidun/jbig2 v1.1.9
@@ -32,6 +31,7 @@ require (
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/srwiley/scanx v0.0.0-20190309010443-e94503791388 // indirect
+	github.com/tdewolff/font v0.0.0-20260822205238-d0d2f004b117 // indirect
 	github.com/tdewolff/minify/v2 v2.24.17 // indirect
 	github.com/tdewolff/parse/v2 v2.8.16 // indirect
 	github.com/yuin/goldmark v1.8.5 // indirect
