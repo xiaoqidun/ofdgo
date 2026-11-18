@@ -1,18 +1,9 @@
 import { setInputFiles } from "./ofdgo_util.js";
 
+const engineRuntimes = new Map();
 let engineModule = null;
 let engineScheduler = null;
 let engineSequence = 0;
-const engineRuntimes = new Map();
-
-function requestKey(worker, data) {
-	return worker.shared ? JSON.stringify([data.engineID, data.id]) : data.id;
-}
-
-export function engineLimits() {
-	engineScheduler ||= new BrowserScheduler();
-	return {parallelism: engineScheduler.capacity, memoryBytes: engineScheduler.budget};
-}
 
 class BrowserScheduler {
 	constructor() {
@@ -280,19 +271,6 @@ class BrowserSession {
 	}
 }
 
-export function createEngineWorker(options = {}) {
-	if (nativeHost) return nativeHost.worker();
-	if (options.page || options.batch) return new BrowserWorker(options);
-	if (options.primary) return new BrowserSession(options);
-	return new BrowserEngine(options);
-}
-
-export async function documentBytes(file) {
-	if (file?.nativeFile) return file;
-	if (file instanceof Blob) return new Response(file.stream()).blob();
-	return new Uint8Array(await file.arrayBuffer());
-}
-
 class BrowserEngine {
 	constructor(options) {
 		this.primary = createEngineWorker({primary:true, url:options.url});
@@ -542,14 +520,6 @@ class BrowserEngine {
 		this.primary.terminate();
 		this.requests.clear();
 	}
-}
-
-export function saveFilePicker(options) {
-	return nativeHost ? nativeHost.savePicker(options) : window.showSaveFilePicker ? window.showSaveFilePicker(options) : null;
-}
-
-export function directoryPicker() {
-	return nativeHost ? nativeHost.directoryPicker() : window.showDirectoryPicker({mode:"readwrite"});
 }
 
 class NativeFile {
@@ -863,3 +833,33 @@ class NativeHost {
 }
 
 export const nativeHost = globalThis.guigo ? new NativeHost(globalThis.guigo) : null;
+
+export function engineLimits() {
+	engineScheduler ||= new BrowserScheduler();
+	return {parallelism: engineScheduler.capacity, memoryBytes: engineScheduler.budget};
+}
+
+export function createEngineWorker(options = {}) {
+	if (nativeHost) return nativeHost.worker();
+	if (options.page || options.batch) return new BrowserWorker(options);
+	if (options.primary) return new BrowserSession(options);
+	return new BrowserEngine(options);
+}
+
+export async function documentBytes(file) {
+	if (file?.nativeFile) return file;
+	if (file instanceof Blob) return new Response(file.stream()).blob();
+	return new Uint8Array(await file.arrayBuffer());
+}
+
+export function saveFilePicker(options) {
+	return nativeHost ? nativeHost.savePicker(options) : window.showSaveFilePicker ? window.showSaveFilePicker(options) : null;
+}
+
+export function directoryPicker() {
+	return nativeHost ? nativeHost.directoryPicker() : window.showDirectoryPicker({mode:"readwrite"});
+}
+
+function requestKey(worker, data) {
+	return worker.shared ? JSON.stringify([data.engineID, data.id]) : data.id;
+}

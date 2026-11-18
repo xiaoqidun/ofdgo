@@ -67,46 +67,18 @@ type WriteTransaction interface {
 	Abort() error
 }
 
-// fileOutput 使用本地文件事务保存文档
-type fileOutput struct {
-	target *basefile.Target
+// NewFileOutput 创建本地保存目标并记录当前文件状态，不创建或修改文件
+// 同一目标应复用返回值，以便后续保存检测外部修改
+// 替换前比较文件标识、大小和修改时间，不提供跨进程排他锁
+// 入参: name 文件路径
+// 返回: Output 保存目标, error 路径或文件状态错误
+func NewFileOutput(name string) (Output, error) {
+	target, err := basefile.NewTarget(name)
+	if err != nil {
+		return nil, err
+	}
+	return &fileOutput{target: target}, nil
 }
-
-// editorSnapshotArchive 复用独立压缩包，超预算时仅在已有快照存活期间共享
-type editorSnapshotArchive struct {
-	files    []*zip.File
-	archive  weak.Pointer[zip.Reader]
-	retained *renderCache[int, *zip.Reader]
-}
-
-// editorSnapshotBuffer 分块保存压缩数据，写入完成后支持并发随机读取
-type editorSnapshotBuffer struct {
-	chunks [][]byte
-	size   int64
-}
-
-// editorProgress 编辑与保存阶段的进度回调，nil表示不回报进度
-type editorProgress func(stage string, completed, total int) error
-
-// ofdCountingWriter 记录实际输出字节数
-type ofdCountingWriter struct {
-	writer io.Writer
-	count  int64
-}
-
-// ofdXML 使用标准ofd命名空间写出XML
-type ofdXML struct {
-	encoder    *xml.Encoder
-	references *editorReferenceScan
-	ctx        context.Context
-	attrs      ofdAttrs
-	escaped    bytes.Buffer
-	spaces     bytes.Buffer
-	err        error
-}
-
-// ofdAttrs OFD节点属性
-type ofdAttrs []xml.Attr
 
 // Snapshot 创建独立编辑快照，完成后可与原编辑器并行使用
 // 创建过程需与原实例串行，保留修订、附件清理状态及保存目标，不复制撤销记录和进度回调
@@ -166,6 +138,939 @@ func (e *Editor) Snapshot(ctx context.Context) (*Editor, error) {
 	return snapshot, nil
 }
 
+// SetOutput 绑定保存目标，不读取或修改编辑内容，nil解除绑定
+// 调用需与编辑操作串行，目标生命周期由调用方管理
+// 入参: output 保存目标
+func (e *Editor) SetOutput(output Output) {
+	e.saveTarget = output
+}
+
+// Output 返回当前保存目标，未绑定时返回nil
+// 返回: Output 保存目标
+func (e *Editor) Output() Output {
+	return e.saveTarget
+}
+
+// Save 将当前完整文档写回已绑定目标，不改变编辑状态及撤销记录
+// 调用需与编辑操作串行；后台保存应先创建Snapshot，成功后可继续编辑和保存
+// 入参: ctx 取消上下文, options 输出配置
+// 返回: int64 输出字节数, error 保存错误
+func (e *Editor) Save(ctx context.Context, options WriteOptions) (int64, error) {
+	return e.saveOutput(ctx, e.saveTarget, options)
+}
+
+// SaveAs 将完整文档另存，成功后切换保存目标，不改变撤销记录
+// 调用需与编辑操作串行，取消或失败时保持原目标
+// 入参: ctx 取消上下文, output 保存目标, options 输出配置
+// 返回: int64 输出字节数, error 保存错误
+func (e *Editor) SaveAs(ctx context.Context, output Output, options WriteOptions) (int64, error) {
+	n, err := e.saveOutput(ctx, output, options)
+	if err == nil {
+		e.saveTarget = output
+	}
+	return n, err
+}
+
+// WriteTo 逐个条目写出OFD，不关闭调用方输出流，出错时应丢弃本次输出
+// 新增资源仅写入实际引用的部分，静态TrueType轮廓字体按实际文字生成子集
+// 原有字体在全包引用可确定时保留字形编号裁剪；编辑资源、复杂字体及无法确定的引用保持原样
+// 制作软件统一为xiaoqidun/ofdgo，未修改的文档保留原制作软件及版本
+// 重开子集文档后输入未包含的文字，需要通过AddFont注册完整字体并替换原字体引用
+// 入参: writer 输出流
+// 返回: int64 已写入字节数, error 错误信息
+func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
+	if e.encryption != nil {
+		return e.writeEncrypted(writer)
+	}
+	return e.writePlaintext(writer)
+}
+
+// Reader 获取当前文档的独立内存快照，不进行ZIP压缩，后续修改不影响已有快照
+// 返回的Reader可用于现有渲染、搜索和导出接口，新增资源仅包含实际引用的部分，二进制数据内部共享只读
+// 失败时不返回部分结果，不改变当前编辑状态或撤销记录
+// 入参: ctx 取消上下文
+// 返回: *Reader 阅读器, error 准备或取消错误
+func (e *Editor) Reader(ctx context.Context) (*Reader, error) {
+	return e.readerContext(ctx, nil)
+}
+
+// fileOutput 使用本地文件事务保存文档
+type fileOutput struct {
+	target *basefile.Target
+}
+
+// Begin 创建本地文件写入事务
+// 入参: ctx 取消上下文
+// 返回: WriteTransaction 写入事务, error 文件状态错误
+func (o *fileOutput) Begin(ctx context.Context) (WriteTransaction, error) {
+	return o.target.Begin(ctx)
+}
+
+// editorSnapshotArchive 复用独立压缩包，超预算时仅在已有快照存活期间共享
+type editorSnapshotArchive struct {
+	files    []*zip.File
+	archive  weak.Pointer[zip.Reader]
+	retained *renderCache[int, *zip.Reader]
+}
+
+// editorSnapshotBuffer 分块保存压缩数据，写入完成后支持并发随机读取
+type editorSnapshotBuffer struct {
+	chunks [][]byte
+	size   int64
+}
+
+// Write 追加快照数据，不扩容或复制已有块
+// 入参: data 压缩数据
+// 返回: int 写入字节数, error 写入错误
+func (b *editorSnapshotBuffer) Write(data []byte) (int, error) {
+	size := len(data)
+	for len(data) > 0 {
+		offset := int(b.size % editorSnapshotChunkSize)
+		if offset == 0 {
+			b.chunks = append(b.chunks, make([]byte, editorSnapshotChunkSize))
+		}
+		n := copy(b.chunks[len(b.chunks)-1][offset:], data)
+		b.size += int64(n)
+		data = data[n:]
+	}
+	return size, nil
+}
+
+// ReadAt 跨块读取快照，不复制或合并底层存储
+// 入参: data 目标缓冲, offset 数据偏移
+// 返回: int 读取字节数, error 偏移或结束错误
+func (b *editorSnapshotBuffer) ReadAt(data []byte, offset int64) (int, error) {
+	if offset < 0 {
+		return 0, fmt.Errorf("negative snapshot offset")
+	}
+	read := 0
+	for len(data) > 0 {
+		if offset >= b.size {
+			return read, io.EOF
+		}
+		block := b.chunks[offset/editorSnapshotChunkSize]
+		start := int(offset % editorSnapshotChunkSize)
+		size := min(int64(len(block)-start), b.size-offset, int64(len(data)))
+		n := copy(data, block[start:start+int(size)])
+		read += n
+		offset += int64(n)
+		data = data[n:]
+	}
+	return read, nil
+}
+
+// editorProgress 编辑与保存阶段的进度回调，nil表示不回报进度
+type editorProgress func(stage string, completed, total int) error
+
+// report 回报进度并原样传递调用方停止原因
+// 入参: stage 阶段, completed 已处理项, total 总项数
+// 返回: error 调用方停止原因
+func (progress editorProgress) report(stage string, completed, total int) error {
+	if progress != nil {
+		return progress(stage, completed, total)
+	}
+	return nil
+}
+
+// withContext 在进度回调前后检查取消，保留回调的原始错误
+// 入参: ctx 取消上下文
+// 返回: editorProgress 可取消的进度回调
+func (progress editorProgress) withContext(ctx context.Context) editorProgress {
+	return func(stage string, completed, total int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := progress.report(stage, completed, total); err != nil {
+			return err
+		}
+		return ctx.Err()
+	}
+}
+
+// ofdCountingWriter 记录实际输出字节数
+type ofdCountingWriter struct {
+	writer io.Writer
+	count  int64
+}
+
+// Write 写入并累计字节数
+// 入参: data 数据
+// 返回: int 字节数, error 错误信息
+func (w *ofdCountingWriter) Write(data []byte) (int, error) {
+	n, err := w.writer.Write(data)
+	w.count += int64(n)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	return n, err
+}
+
+// ofdXML 使用标准ofd命名空间写出XML
+type ofdXML struct {
+	encoder    *xml.Encoder
+	references *editorReferenceScan
+	ctx        context.Context
+	attrs      ofdAttrs
+	escaped    bytes.Buffer
+	spaces     bytes.Buffer
+	err        error
+}
+
+// newOFDXML 创建XML编码器
+// 入参: writer 输出流
+// 返回: *ofdXML 编码器
+func newOFDXML(writer io.Writer) *ofdXML {
+	_, err := io.WriteString(writer, xml.Header)
+	return &ofdXML{encoder: xml.NewEncoder(writer), err: err}
+}
+
+// page 按标准顺序写出页面定义、图层、对象及动作
+// 入参: page 页面内容
+func (x *ofdXML) page(page PageContent) {
+	x.root("Page", nil)
+	x.pageHeader(page)
+	x.start("Content", nil)
+	for _, layer := range page.Content.Layer {
+		if x.err != nil {
+			return
+		}
+		x.layer(layer)
+	}
+	x.end("Content")
+	x.actions(page.Actions)
+	x.end("Page")
+}
+
+// pageHeader 写出模板、页资源及页面区域
+// 入参: page 页面内容
+func (x *ofdXML) pageHeader(page PageContent) {
+	for _, template := range page.Template {
+		attrs := ofdAttrs{{Name: xml.Name{Local: "TemplateID"}, Value: template.TemplateID}}
+		attrs.add("ZOrder", template.ZOrder)
+		x.start("Template", attrs)
+		x.end("Template")
+	}
+	for _, resource := range page.PageRes {
+		x.text("PageRes", resource)
+	}
+	x.pageArea("Area", page.Area)
+}
+
+// pageArea 写出物理、显示、版心及出血区域，省略未定义的可选区域
+// 入参: name 区域容器名称, area 页面区域
+func (x *ofdXML) pageArea(name string, area PageArea) {
+	x.start(name, nil)
+	x.text("PhysicalBox", area.PhysicalBox)
+	for _, field := range [][2]string{{"ApplicationBox", area.ApplicationBox}, {"ContentBox", area.ContentBox}, {"BleedBox", area.BleedBox}} {
+		if field[1] != "" {
+			x.text(field[0], field[1])
+		}
+	}
+	x.end(name)
+}
+
+// layer 写出新建图层及其对象
+// 入参: layer 图层
+func (x *ofdXML) layer(layer Layer) {
+	var attrs ofdAttrs
+	attrs.add("ID", layer.ID)
+	attrs.add("Type", layer.Type)
+	attrs.add("DrawParam", layer.DrawParam)
+	x.start("Layer", attrs)
+	for _, object := range layer.Objects {
+		if x.err != nil {
+			return
+		}
+		x.object(object, false)
+	}
+	x.end("Layer")
+}
+
+// resources 写出文档资源索引
+// 入参: fonts 字体资源, images 图片资源, spaces 颜色空间
+func (x *ofdXML) resources(fonts, images []editorResource, spaces []ColorSpace) {
+	x.root("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "Res"}})
+	if len(spaces) != 0 {
+		x.start("ColorSpaces", nil)
+		for _, space := range spaces {
+			if x.err != nil {
+				return
+			}
+			attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: space.ID}, {Name: xml.Name{Local: "Type"}, Value: space.Type}, {Name: xml.Name{Local: "BitsPerComponent"}, Value: strconv.Itoa(space.BitsPerComponent)}}
+			attrs.add("Profile", space.Profile)
+			x.start("ColorSpace", attrs)
+			if len(space.Palette) != 0 {
+				x.start("Palette", nil)
+				for _, entry := range space.Palette {
+					x.text("CV", entry)
+				}
+				x.end("Palette")
+			}
+			x.end("ColorSpace")
+		}
+		x.end("ColorSpaces")
+	}
+	if len(fonts) != 0 {
+		x.start("Fonts", nil)
+		for _, resource := range fonts {
+			if x.err != nil {
+				return
+			}
+			font := resource.font
+			var attrs ofdAttrs
+			attrs.add("ID", font.ID)
+			attrs.add("FontName", font.FontName)
+			attrs.add("FamilyName", font.FamilyName)
+			attrs.add("Charset", font.Charset)
+			if font.Bold {
+				attrs.add("Bold", "true")
+			}
+			if font.Italic {
+				attrs.add("Italic", "true")
+			}
+			if font.Serif {
+				attrs.add("Serif", "true")
+			}
+			if font.FixedWidth {
+				attrs.add("FixedWidth", "true")
+			}
+			x.start("Font", attrs)
+			if font.FontFile != "" {
+				x.text("FontFile", font.FontFile)
+			}
+			x.end("Font")
+		}
+		x.end("Fonts")
+	}
+	if len(images) != 0 {
+		x.start("MultiMedias", nil)
+		for _, resource := range images {
+			if x.err != nil {
+				return
+			}
+			image := resource.image
+			var attrs ofdAttrs
+			attrs.add("ID", image.ID)
+			attrs.add("Type", image.Type)
+			attrs.add("Format", image.Format)
+			x.start("MultiMedia", attrs)
+			x.text("MediaFile", image.MediaFile)
+			x.end("MultiMedia")
+		}
+		x.end("MultiMedias")
+	}
+	x.end("Res")
+}
+
+// token 写入XML标记并保留首个错误
+// 入参: token XML标记
+func (x *ofdXML) token(token xml.Token) {
+	if x.checkContext() {
+		x.err = x.encoder.EncodeToken(token)
+		x.referenceToken(token)
+	}
+}
+
+// checkContext 保留首个编码或取消错误
+// 返回: bool 是否可以继续编码
+func (x *ofdXML) checkContext() bool {
+	if x.err == nil && x.ctx != nil {
+		x.err = x.ctx.Err()
+	}
+	return x.err == nil
+}
+
+// root 写入声明命名空间的根节点
+// 入参: name 节点名, attrs 属性
+func (x *ofdXML) root(name string, attrs ofdAttrs) {
+	attrs.add("xmlns:ofd", ofdNamespace2016)
+	x.start(name, attrs)
+}
+
+// start 写入节点起始标记
+// 入参: name 节点名, attrs 属性
+func (x *ofdXML) start(name string, attrs ofdAttrs) {
+	x.token(xml.StartElement{Name: xml.Name{Local: "ofd:" + name}, Attr: attrs})
+}
+
+// end 写入节点结束标记
+// 入参: name 节点名
+func (x *ofdXML) end(name string) {
+	x.token(xml.EndElement{Name: xml.Name{Local: "ofd:" + name}})
+}
+
+// text 写入文本节点
+// 入参: name 节点名, value 文本
+func (x *ofdXML) text(name, value string) {
+	x.start(name, nil)
+	x.token(xml.CharData(value))
+	x.end(name)
+}
+
+// finish 完成XML输出
+// 返回: error 错误信息
+func (x *ofdXML) finish() error {
+	if !x.checkContext() {
+		return x.err
+	}
+	return x.encoder.Close()
+}
+
+// object 按OFD规定顺序写出基本对象
+// 入参: object 图形对象, root 是否为根节点
+func (x *ofdXML) object(object GraphicObject, root bool) {
+	if !x.checkContext() {
+		return
+	}
+	attrs := x.attrs[:0]
+	var fill, stroke *FillColor
+	var actions []Action
+	if root {
+		attrs.add("xmlns:ofd", ofdNamespace2016)
+	}
+	switch object.Type {
+	case "TextObject", "Text":
+		obj := object.TextObject
+		metadata, err := obj.textMetadata()
+		if err != nil {
+			x.err = err
+			return
+		}
+		if metadata != "" {
+			attrs.add("xmlns:ofdgo", textNamespace)
+			attrs.add("ofdgo:Text", metadata)
+		}
+		attrs.add("ID", obj.ID)
+		attrs.add("DrawParam", obj.DrawParam)
+		attrs.add("Boundary", obj.Boundary)
+		attrs.add("CTM", obj.CTM)
+		attrs.add("Font", obj.Font)
+		attrs.number("Size", obj.Size)
+		attrs.number("HScale", obj.HScale)
+		attrs.number("VScale", obj.VScale)
+		attrs.add("Decoration", obj.Decoration)
+		attrs.number("Weight", float64(obj.Weight))
+		attrs.number("ReadDirection", float64(obj.ReadDirection))
+		attrs.number("CharDirection", float64(obj.CharDirection))
+		attrs.number("LineWidth", obj.LineWidth)
+		if obj.LineWidthSet && obj.LineWidth == 0 {
+			attrs.add("LineWidth", "0")
+		}
+		attrs.number("MiterLimit", obj.MiterLimit)
+		if obj.MiterLimitSet && obj.MiterLimit == 0 {
+			attrs.add("MiterLimit", "0")
+		}
+		attrs.add("Join", obj.Join)
+		attrs.add("Cap", obj.Cap)
+		if obj.dashPatternSet {
+			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
+		} else {
+			attrs.add("DashPattern", obj.DashPattern)
+		}
+		if obj.DashOffset != nil {
+			attrs.add("DashOffset", ofdNumber(*obj.DashOffset))
+		}
+		if obj.Italic {
+			attrs.add("Italic", "true")
+		}
+		attrs.flag("Visible", obj.Visible)
+		attrs.flag("Stroke", obj.Stroke)
+		attrs.flag("Fill", obj.Fill)
+		attrs.alpha(obj.Alpha)
+		fill, stroke = obj.FillColor, (*FillColor)(obj.StrokeColor)
+		actions = obj.Actions
+	case "PathObject", "Path":
+		obj := object.PathObject
+		attrs.add("ID", obj.ID)
+		attrs.add("DrawParam", obj.DrawParam)
+		attrs.add("Boundary", obj.Boundary)
+		attrs.add("CTM", obj.CTM)
+		attrs.number("LineWidth", obj.LineWidth)
+		if obj.LineWidthSet && obj.LineWidth == 0 {
+			attrs.add("LineWidth", "0")
+		}
+		attrs.number("MiterLimit", obj.MiterLimit)
+		if obj.MiterLimitSet && obj.MiterLimit == 0 {
+			attrs.add("MiterLimit", "0")
+		}
+		attrs.add("Join", obj.Join)
+		attrs.add("Cap", obj.Cap)
+		attrs.add("Rule", obj.Rule)
+		if obj.dashPatternSet {
+			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
+		} else {
+			attrs.add("DashPattern", obj.DashPattern)
+		}
+		if obj.DashOffset != nil {
+			attrs.add("DashOffset", ofdNumber(*obj.DashOffset))
+		}
+		attrs.flag("Visible", obj.Visible)
+		attrs.flag("Stroke", obj.Stroke)
+		attrs.flag("Fill", obj.Fill)
+		attrs.alpha(obj.Alpha)
+		fill, stroke = obj.FillColor, (*FillColor)(obj.StrokeColor)
+		actions = obj.Actions
+	case "ImageObject":
+		obj := object.ImageObject
+		attrs.add("ID", obj.ID)
+		attrs.add("Boundary", obj.Boundary)
+		attrs.add("CTM", obj.CTM)
+		attrs.add("ResourceID", obj.ResourceID)
+		attrs.add("ImageMask", obj.ImageMask)
+		attrs.add("Substitution", obj.Substitution)
+		attrs.flag("Visible", obj.Visible)
+		attrs.alpha(obj.Alpha)
+		actions = obj.Actions
+	case "CompositeObject", "CompositeGraphicUnit":
+		obj := object.CompositeGraphicUnit
+		attrs.add("ID", obj.ID)
+		attrs.add("Boundary", obj.Boundary)
+		attrs.add("CTM", obj.CTM)
+		attrs.add("ResourceID", obj.ResourceID)
+		attrs.add("DrawParam", obj.DrawParam)
+		attrs.flag("Visible", obj.Visible)
+		attrs.alpha(obj.Alpha)
+		actions = obj.Actions
+	}
+	x.attrs = attrs
+	x.start(object.Type, attrs)
+	x.actions(actions)
+	if object.Type == "ImageObject" {
+		ctm := object.ImageObject.CTM
+		if ctm == "" && object.ImageObject.Clips.usesObjectMatrix() {
+			box, _ := ParseBox(object.ImageObject.Boundary)
+			ctm = (Matrix{a: box.W, d: box.H}).String()
+		}
+		x.clips(object.ImageObject.Clips, ctm)
+		x.border(object.ImageObject.Border)
+	} else if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
+		x.clips(object.CompositeGraphicUnit.Clips, object.CompositeGraphicUnit.CTM)
+	} else if object.Type == "PathObject" || object.Type == "Path" {
+		x.clips(object.PathObject.Clips, object.PathObject.CTM)
+		x.color("StrokeColor", stroke)
+		x.color("FillColor", fill)
+		x.text("AbbreviatedData", object.PathObject.AbbreviatedData)
+	} else if object.Type == "TextObject" || object.Type == "Text" {
+		x.clips(object.TextObject.Clips, object.TextObject.CTM)
+		x.color("FillColor", fill)
+		x.color("StrokeColor", stroke)
+		offset, index := 0, 0
+		for _, code := range object.TextObject.TextCode {
+			if x.err != nil {
+				return
+			}
+			end := offset + len(textCodeRunes(code.Value))
+			for index < len(object.TextObject.CGTransform) && object.TextObject.CGTransform[index].CodePosition < end {
+				if x.err != nil {
+					return
+				}
+				transform := object.TextObject.CGTransform[index]
+				attrs := x.attrs[:0]
+				attrs.add("CodePosition", strconv.Itoa(transform.CodePosition-offset))
+				attrs.add("CodeCount", strconv.Itoa(transform.CodeCount))
+				attrs.add("GlyphCount", strconv.Itoa(transform.GlyphCount))
+				x.attrs = attrs
+				x.start("CGTransform", attrs)
+				x.text("Glyphs", transform.Glyphs)
+				x.end("CGTransform")
+				index++
+			}
+			attrs := x.attrs[:0]
+			attrs.add("X", code.X)
+			attrs.add("Y", code.Y)
+			attrs.add("DeltaX", code.DeltaX)
+			attrs.add("DeltaY", code.DeltaY)
+			x.attrs = attrs
+			x.textCode(code.Value, attrs)
+			offset = end
+		}
+	}
+	x.end(object.Type)
+}
+
+// clips 写出标准裁剪，将旧式随动裁剪折算为区域变换
+// 入参: clips 裁剪集合，nil不输出节点, ctm 对象变换矩阵
+func (x *ofdXML) clips(clips *Clips, ctm string) {
+	if clips == nil || !x.checkContext() {
+		return
+	}
+	matrix := IdentityMatrix
+	if clips.usesObjectMatrix() {
+		matrix = NewMatrix(ctm)
+	}
+	x.start("Clips", nil)
+	for _, clip := range clips.Clip {
+		if x.err != nil {
+			return
+		}
+		x.start("Clip", nil)
+		for _, area := range clip.Area {
+			if x.err != nil {
+				return
+			}
+			var attrs ofdAttrs
+			if clips.usesObjectMatrix() {
+				area.CTM = matrix.Multiply(NewMatrix(area.CTM)).String()
+			}
+			attrs.add("CTM", area.CTM)
+			attrs.add("DrawParam", area.DrawParam)
+			for _, path := range area.Path {
+				if x.err != nil {
+					return
+				}
+				x.start("Area", attrs)
+				x.object(GraphicObject{Type: "Path", PathObject: path}, false)
+				x.end("Area")
+			}
+			for _, text := range area.Text {
+				if x.err != nil {
+					return
+				}
+				x.start("Area", attrs)
+				x.object(GraphicObject{Type: "Text", TextObject: text}, false)
+				x.end("Area")
+			}
+		}
+		x.end("Clip")
+	}
+	x.end("Clips")
+}
+
+// textCode 使用XML字符引用转义空格，避免依赖阅读器保留原始空白
+// 入参: value OFD文字内容, attrs 文字定位属性
+func (x *ofdXML) textCode(value string, attrs ofdAttrs) {
+	if !x.checkContext() {
+		return
+	}
+	value = textCodeXMLValue(value)
+	x.escaped.Reset()
+	if x.err = xml.EscapeText(&x.escaped, []byte(value)); x.err != nil {
+		return
+	}
+	data := x.escaped.Bytes()
+	if next := bytes.IndexByte(data, ' '); next >= 0 {
+		x.spaces.Reset()
+		for replaced := 0; next >= 0; replaced++ {
+			if replaced&255 == 0 && !x.checkContext() {
+				return
+			}
+			x.spaces.Write(data[:next])
+			x.spaces.WriteString("&#x20;")
+			data = data[next+1:]
+			next = bytes.IndexByte(data, ' ')
+		}
+		x.spaces.Write(data)
+		data = x.spaces.Bytes()
+	}
+	content := struct {
+		Text []byte `xml:",innerxml"`
+	}{Text: data}
+	x.err = x.encoder.EncodeElement(content, xml.StartElement{Name: xml.Name{Local: "ofd:TextCode"}, Attr: attrs})
+	x.referenceToken(xml.StartElement{Name: xml.Name{Local: "ofd:TextCode"}, Attr: attrs})
+	x.referenceToken(xml.CharData(value))
+	x.referenceToken(xml.EndElement{Name: xml.Name{Local: "ofd:TextCode"}})
+}
+
+// color 写出纯色、渐变和图案，保留颜色空间与透明度
+// 入参: name 节点名, color 颜色
+func (x *ofdXML) color(name string, color *FillColor) {
+	if color == nil || !x.checkContext() {
+		return
+	}
+	var attrs ofdAttrs
+	attrs.add("Value", color.Value)
+	attrs.add("ColorSpace", color.ColorSpace)
+	if color.Index != nil {
+		attrs.add("Index", strconv.Itoa(*color.Index))
+	}
+	attrs.alpha(color.Alpha)
+	x.start(name, attrs)
+	if color.AxialShd != nil {
+		shading := color.AxialShd
+		x.shading("AxialShd", shadingAttrs(shading.MapType, shading.MapUnit, shading.Extend, shading.StartPoint, shading.EndPoint), shading.Segment)
+	}
+	if color.RadialShd != nil {
+		shading := color.RadialShd
+		attrs := shadingAttrs(shading.MapType, shading.MapUnit, shading.Extend, shading.StartPoint, shading.EndPoint)
+		attrs.add("StartRadius", ofdNumber(shading.StartRadius))
+		attrs.add("EndRadius", ofdNumber(shading.EndRadius))
+		attrs.number("Eccentricity", shading.Eccentricity)
+		attrs.number("Angle", shading.Angle)
+		x.shading("RadialShd", attrs, shading.Segment)
+	}
+	if color.Pattern != nil {
+		x.pattern(color.Pattern)
+	}
+	if color.GouraudShd != nil {
+		node := color.GouraudShd
+		x.meshShading("GouraudShd", node.Extend, 0, node.Point, node.BackColor)
+	}
+	if color.LaGouraudShd != nil {
+		node := color.LaGouraudShd
+		x.meshShading("LaGouraudShd", node.Extend, node.VerticesPerRow, node.Point, node.BackColor)
+	}
+	x.end(name)
+}
+
+// meshShading 写出网格控制点，仅非格构渐变保存共享边标志
+// 入参: name 元素名称, extend 延伸标志, columns 格构列数, points 控制点, back 背景颜色
+func (x *ofdXML) meshShading(name string, extend, columns int, points []ShdPoint, back *ShdColor) {
+	var attrs ofdAttrs
+	if extend != 0 {
+		attrs.add("Extend", strconv.Itoa(extend))
+	}
+	if columns != 0 {
+		attrs.add("VerticesPerRow", strconv.Itoa(columns))
+	}
+	x.start(name, attrs)
+	for _, point := range points {
+		if x.err != nil {
+			return
+		}
+		var attrs ofdAttrs
+		attrs.add("X", ofdNumber(point.X))
+		attrs.add("Y", ofdNumber(point.Y))
+		if columns == 0 && point.EdgeFlag != 0 {
+			attrs.add("EdgeFlag", strconv.Itoa(point.EdgeFlag))
+		}
+		x.start("Point", attrs)
+		x.element("Color", point.Color)
+		x.end("Point")
+	}
+	if back != nil {
+		x.element("BackColor", *back)
+	}
+	x.end(name)
+}
+
+// shading 写出渐变分段，保留未显式设置的位置
+// 入参: name 渐变类型, attrs 属性, segments 色标
+func (x *ofdXML) shading(name string, attrs ofdAttrs, segments []ShdSegment) {
+	x.start(name, attrs)
+	for _, segment := range segments {
+		if x.err != nil {
+			return
+		}
+		var attrs ofdAttrs
+		if !segment.positionMissing {
+			attrs.add("Position", ofdNumber(segment.Position))
+		}
+		x.start("Segment", attrs)
+		x.element("Color", segment.Color)
+		x.end("Segment")
+	}
+	x.end(name)
+}
+
+// element 写出具有标准ofd前缀的叶子节点并同步记录资源引用
+// 入参: name 元素名称, value 元素内容
+func (x *ofdXML) element(name string, value any) {
+	if !x.checkContext() {
+		return
+	}
+	var attrs ofdAttrs
+	switch value := value.(type) {
+	case ShdColor:
+		attrs.add("Value", value.Value)
+		attrs.add("ColorSpace", value.ColorSpace)
+		if value.Index != nil {
+			attrs.add("Index", strconv.Itoa(*value.Index))
+		}
+		attrs.alpha(value.Alpha)
+	case *Dest:
+		var err error
+		attrs, err = value.attributes()
+		if err != nil {
+			x.err = err
+			return
+		}
+	case *GotoBookmark:
+		attrs = ofdAttrs{{Name: xml.Name{Local: "Name"}, Value: value.Name}}
+	case *URI:
+		attrs = ofdAttrs{{Name: xml.Name{Local: "URI"}, Value: value.URI}}
+		attrs.add("Base", value.Base)
+		attrs.add("Target", value.Target)
+	case *GotoA:
+		attrs = ofdAttrs{{Name: xml.Name{Local: "AttachID"}, Value: value.AttachID}}
+		attrs.flag("NewWindow", value.NewWindow)
+	case *Sound:
+		attrs = ofdAttrs{{Name: xml.Name{Local: "ResourceID"}, Value: value.ResourceID}}
+		if value.Volume != nil {
+			attrs.add("Volume", strconv.Itoa(*value.Volume))
+		}
+		if value.Repeat {
+			attrs.add("Repeat", "true")
+		}
+		if value.Synchronous {
+			attrs.add("Synchronous", "true")
+		}
+	case *Movie:
+		attrs = ofdAttrs{{Name: xml.Name{Local: "ResourceID"}, Value: value.ResourceID}}
+		attrs.add("Operator", value.Operator)
+	default:
+		x.err = fmt.Errorf("unsupported OFD XML element %s (%T)", name, value)
+		return
+	}
+	x.start(name, attrs)
+	x.end(name)
+}
+
+// border 写出图片边框及其绘制颜色
+// 入参: border 边框，nil不输出节点
+func (x *ofdXML) border(border *ImageBorder) {
+	if border == nil || !x.checkContext() {
+		return
+	}
+	var attrs ofdAttrs
+	if border.LineWidth != nil {
+		attrs.add("LineWidth", ofdNumber(*border.LineWidth))
+	}
+	attrs.number("HorizonalCornerRadius", border.HorizonalCornerRadius)
+	attrs.number("VerticalCornerRadius", border.VerticalCornerRadius)
+	attrs.number("DashOffset", border.DashOffset)
+	attrs.add("DashPattern", border.DashPattern)
+	x.start("Border", attrs)
+	x.color("BorderColor", (*FillColor)(border.BorderColor))
+	x.end("Border")
+}
+
+// pattern 写出图案单元，保留对象绘制顺序
+// 入参: pattern 图案
+func (x *ofdXML) pattern(pattern *Pattern) {
+	if !x.checkContext() {
+		return
+	}
+	var attrs ofdAttrs
+	attrs.number("Width", pattern.Width)
+	attrs.number("Height", pattern.Height)
+	attrs.number("XStep", pattern.XStep)
+	attrs.number("YStep", pattern.YStep)
+	attrs.add("ReflectMethod", pattern.ReflectMethod)
+	attrs.add("RelativeTo", pattern.RelativeTo)
+	attrs.add("CTM", pattern.CTM)
+	x.start("Pattern", attrs)
+	var content ofdAttrs
+	content.add("Thumbnail", pattern.CellContent.Thumbnail)
+	x.start("CellContent", content)
+	for object := range pattern.CellContent.objects() {
+		if x.err != nil {
+			return
+		}
+		x.object(object, false)
+	}
+	x.end("CellContent")
+	x.end("Pattern")
+}
+
+// actions 写出对象动作及精确点击区域，不检查链接可达性
+// 入参: actions 动作列表
+func (x *ofdXML) actions(actions []Action) {
+	if len(actions) == 0 || !x.checkContext() {
+		return
+	}
+	x.start("Actions", nil)
+	for _, action := range actions {
+		if x.err != nil {
+			return
+		}
+		var attrs ofdAttrs
+		attrs.add("Event", action.Event)
+		x.start("Action", attrs)
+		if action.Region != nil {
+			x.start("Region", nil)
+			for _, area := range action.Region.Area {
+				if x.err != nil {
+					return
+				}
+				x.start("Area", ofdAttrs{{Name: xml.Name{Local: "Start"}, Value: area.Start}})
+				for _, command := range area.Command {
+					if x.err != nil {
+						return
+					}
+					var attrs ofdAttrs
+					if command.Type == "Arc" && command.EllipseSize == "" {
+						attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "EllipseSize"}})
+					}
+					for _, pair := range [][2]string{{"Point1", command.Point1}, {"Point2", command.Point2}, {"Point3", command.Point3}, {"EllipseSize", command.EllipseSize}, {"RotationAngle", command.RotationAngle}, {"LargeArc", command.LargeArc}, {"SweepDirection", command.SweepDirection}, {"EndPoint", command.EndPoint}} {
+						attrs.add(pair[0], pair[1])
+					}
+					x.start(command.Type, attrs)
+					x.end(command.Type)
+				}
+				x.end("Area")
+			}
+			x.end("Region")
+		}
+		if action.Goto != nil {
+			x.start("Goto", nil)
+			if dest := action.Goto.Dest; dest != nil {
+				x.element("Dest", dest)
+			}
+			if action.Goto.Bookmark != nil {
+				x.element("Bookmark", action.Goto.Bookmark)
+			}
+			x.end("Goto")
+		}
+		if action.URI != nil {
+			x.element("URI", action.URI)
+		}
+		if action.GotoA != nil {
+			x.element("GotoA", action.GotoA)
+		}
+		if action.Sound != nil {
+			x.element("Sound", action.Sound)
+		}
+		if action.Movie != nil {
+			x.element("Movie", action.Movie)
+		}
+		x.end("Action")
+	}
+	x.end("Actions")
+}
+
+// ofdAttrs OFD节点属性
+type ofdAttrs []xml.Attr
+
+// add 添加非空属性
+// 入参: name 属性名, value 属性值
+func (a *ofdAttrs) add(name, value string) {
+	if value != "" {
+		*a = append(*a, xml.Attr{Name: xml.Name{Local: name}, Value: value})
+	}
+}
+
+// number 添加非零数值属性
+// 入参: name 属性名, value 数值
+func (a *ofdAttrs) number(name string, value float64) {
+	if value != 0 {
+		a.add(name, ofdNumber(value))
+	}
+}
+
+// flag 添加显式布尔属性
+// 入参: name 属性名, value 布尔值
+func (a *ofdAttrs) flag(name string, value *bool) {
+	if value != nil {
+		a.add(name, strconv.FormatBool(*value))
+	}
+}
+
+// alpha 添加显式透明度
+// 入参: value 透明度
+func (a *ofdAttrs) alpha(value *int) {
+	if value != nil {
+		a.add("Alpha", strconv.Itoa(*value))
+	}
+}
+
+// editorResourceSelection 保存单次输出中同一编辑快照的资源筛选结果
+type editorResourceSelection struct {
+	owner         *Editor
+	fonts, images []editorResource
+	spaces        []ColorSpace
+	files         map[string]bool
+}
+
 // copySnapshotArchive 复用条目未变的独立压缩包，取消或失败不发布缓存
 // 入参: ctx 取消上下文, source 原压缩包
 // 返回: *zip.Reader 独立压缩包, error 复制错误
@@ -218,99 +1123,6 @@ func (e *Editor) copySnapshotArchive(ctx context.Context, source *zip.Reader) (*
 	return reader, nil
 }
 
-// Write 追加快照数据，不扩容或复制已有块
-// 入参: data 压缩数据
-// 返回: int 写入字节数, error 写入错误
-func (b *editorSnapshotBuffer) Write(data []byte) (int, error) {
-	size := len(data)
-	for len(data) > 0 {
-		offset := int(b.size % editorSnapshotChunkSize)
-		if offset == 0 {
-			b.chunks = append(b.chunks, make([]byte, editorSnapshotChunkSize))
-		}
-		n := copy(b.chunks[len(b.chunks)-1][offset:], data)
-		b.size += int64(n)
-		data = data[n:]
-	}
-	return size, nil
-}
-
-// ReadAt 跨块读取快照，不复制或合并底层存储
-// 入参: data 目标缓冲, offset 数据偏移
-// 返回: int 读取字节数, error 偏移或结束错误
-func (b *editorSnapshotBuffer) ReadAt(data []byte, offset int64) (int, error) {
-	if offset < 0 {
-		return 0, fmt.Errorf("negative snapshot offset")
-	}
-	read := 0
-	for len(data) > 0 {
-		if offset >= b.size {
-			return read, io.EOF
-		}
-		block := b.chunks[offset/editorSnapshotChunkSize]
-		start := int(offset % editorSnapshotChunkSize)
-		size := min(int64(len(block)-start), b.size-offset, int64(len(data)))
-		n := copy(data, block[start:start+int(size)])
-		read += n
-		offset += int64(n)
-		data = data[n:]
-	}
-	return read, nil
-}
-
-// NewFileOutput 创建本地保存目标并记录当前文件状态，不创建或修改文件
-// 同一目标应复用返回值，以便后续保存检测外部修改
-// 替换前比较文件标识、大小和修改时间，不提供跨进程排他锁
-// 入参: name 文件路径
-// 返回: Output 保存目标, error 路径或文件状态错误
-func NewFileOutput(name string) (Output, error) {
-	target, err := basefile.NewTarget(name)
-	if err != nil {
-		return nil, err
-	}
-	return &fileOutput{target: target}, nil
-}
-
-// Begin 创建本地文件写入事务
-// 入参: ctx 取消上下文
-// 返回: WriteTransaction 写入事务, error 文件状态错误
-func (o *fileOutput) Begin(ctx context.Context) (WriteTransaction, error) {
-	return o.target.Begin(ctx)
-}
-
-// SetOutput 绑定保存目标，不读取或修改编辑内容，nil解除绑定
-// 调用需与编辑操作串行，目标生命周期由调用方管理
-// 入参: output 保存目标
-func (e *Editor) SetOutput(output Output) {
-	e.saveTarget = output
-}
-
-// Output 返回当前保存目标，未绑定时返回nil
-// 返回: Output 保存目标
-func (e *Editor) Output() Output {
-	return e.saveTarget
-}
-
-// Save 将当前完整文档写回已绑定目标，不改变编辑状态及撤销记录
-// 调用需与编辑操作串行；后台保存应先创建Snapshot，成功后可继续编辑和保存
-// 入参: ctx 取消上下文, options 输出配置
-// 返回: int64 输出字节数, error 保存错误
-func (e *Editor) Save(ctx context.Context, options WriteOptions) (int64, error) {
-	return e.saveOutput(ctx, e.saveTarget, options)
-}
-
-// SaveAs 将完整文档另存，成功后切换保存目标，不改变撤销记录
-// 调用需与编辑操作串行，取消或失败时保持原目标
-// 入参: ctx 取消上下文, output 保存目标, options 输出配置
-// 返回: int64 输出字节数, error 保存错误
-func (e *Editor) SaveAs(ctx context.Context, output Output, options WriteOptions) (int64, error) {
-	n, err := e.saveOutput(ctx, output, options)
-	if err == nil {
-		e.saveTarget = output
-	}
-	return n, err
-}
-
 // saveOutput 使用输出事务提交文档并释放失败事务
 // 入参: ctx 取消上下文, target 保存目标, options 输出配置
 // 返回: int64 输出字节数, error 保存错误
@@ -338,20 +1150,6 @@ func (e *Editor) saveOutput(ctx context.Context, target Output, options WriteOpt
 		return n, err
 	}
 	return n, writer.Commit()
-}
-
-// WriteTo 逐个条目写出OFD，不关闭调用方输出流，出错时应丢弃本次输出
-// 新增资源仅写入实际引用的部分，静态TrueType轮廓字体按实际文字生成子集
-// 原有字体在全包引用可确定时保留字形编号裁剪；编辑资源、复杂字体及无法确定的引用保持原样
-// 制作软件统一为xiaoqidun/ofdgo，未修改的文档保留原制作软件及版本
-// 重开子集文档后输入未包含的文字，需要通过AddFont注册完整字体并替换原字体引用
-// 入参: writer 输出流
-// 返回: int64 已写入字节数, error 错误信息
-func (e *Editor) WriteTo(writer io.Writer) (int64, error) {
-	if e.encryption != nil {
-		return e.writeEncrypted(writer)
-	}
-	return e.writePlaintext(writer)
 }
 
 // writePagesTo 按指定顺序将页面另存为独立OFD，不修改当前文档或撤销记录
@@ -418,52 +1216,6 @@ func (e *Editor) writePagesTo(writer io.Writer, indexes []int) (int64, error) {
 		return selected.WriteToWithOptions(e.output.ctx, writer, WriteOptions{Compression: e.output.options})
 	}
 	return selected.WriteTo(writer)
-}
-
-// Reader 获取当前文档的独立内存快照，不进行ZIP压缩，后续修改不影响已有快照
-// 返回的Reader可用于现有渲染、搜索和导出接口，新增资源仅包含实际引用的部分，二进制数据内部共享只读
-// 失败时不返回部分结果，不改变当前编辑状态或撤销记录
-// 入参: ctx 取消上下文
-// 返回: *Reader 阅读器, error 准备或取消错误
-func (e *Editor) Reader(ctx context.Context) (*Reader, error) {
-	return e.readerContext(ctx, nil)
-}
-
-// Write 写入并累计字节数
-// 入参: data 数据
-// 返回: int 字节数, error 错误信息
-func (w *ofdCountingWriter) Write(data []byte) (int, error) {
-	n, err := w.writer.Write(data)
-	w.count += int64(n)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	return n, err
-}
-
-// report 回报进度并原样传递调用方停止原因
-// 入参: stage 阶段, completed 已处理项, total 总项数
-// 返回: error 调用方停止原因
-func (progress editorProgress) report(stage string, completed, total int) error {
-	if progress != nil {
-		return progress(stage, completed, total)
-	}
-	return nil
-}
-
-// withContext 在进度回调前后检查取消，保留回调的原始错误
-// 入参: ctx 取消上下文
-// 返回: editorProgress 可取消的进度回调
-func (progress editorProgress) withContext(ctx context.Context) editorProgress {
-	return func(stage string, completed, total int) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := progress.report(stage, completed, total); err != nil {
-			return err
-		}
-		return ctx.Err()
-	}
 }
 
 // writePlaintext 写出未加密包，供显式明文输出与加密封装共用
@@ -827,14 +1579,6 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 	return nil
 }
 
-// editorResourceSelection 保存单次输出中同一编辑快照的资源筛选结果
-type editorResourceSelection struct {
-	owner         *Editor
-	fonts, images []editorResource
-	spaces        []ColorSpace
-	files         map[string]bool
-}
-
 // usedResources 沿图层、对象及资源依赖筛选新增资源和共享文件，不修改资源池
 // 入参: ctx 取消上下文
 // 返回: []editorResource 新增字体, []editorResource 新增图片, []ColorSpace 新增颜色空间, map[string]bool 独立资源文件集合, error 取消错误
@@ -999,238 +1743,6 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 	return fonts, images, spaces, files, nil
 }
 
-// page 按标准顺序写出页面定义、图层、对象及动作
-// 入参: page 页面内容
-func (x *ofdXML) page(page PageContent) {
-	x.root("Page", nil)
-	x.pageHeader(page)
-	x.start("Content", nil)
-	for _, layer := range page.Content.Layer {
-		if x.err != nil {
-			return
-		}
-		x.layer(layer)
-	}
-	x.end("Content")
-	x.actions(page.Actions)
-	x.end("Page")
-}
-
-// pageHeader 写出模板、页资源及页面区域
-// 入参: page 页面内容
-func (x *ofdXML) pageHeader(page PageContent) {
-	for _, template := range page.Template {
-		attrs := ofdAttrs{{Name: xml.Name{Local: "TemplateID"}, Value: template.TemplateID}}
-		attrs.add("ZOrder", template.ZOrder)
-		x.start("Template", attrs)
-		x.end("Template")
-	}
-	for _, resource := range page.PageRes {
-		x.text("PageRes", resource)
-	}
-	x.pageArea("Area", page.Area)
-}
-
-// pageArea 写出物理、显示、版心及出血区域，省略未定义的可选区域
-// 入参: name 区域容器名称, area 页面区域
-func (x *ofdXML) pageArea(name string, area PageArea) {
-	x.start(name, nil)
-	x.text("PhysicalBox", area.PhysicalBox)
-	for _, field := range [][2]string{{"ApplicationBox", area.ApplicationBox}, {"ContentBox", area.ContentBox}, {"BleedBox", area.BleedBox}} {
-		if field[1] != "" {
-			x.text(field[0], field[1])
-		}
-	}
-	x.end(name)
-}
-
-// layer 写出新建图层及其对象
-// 入参: layer 图层
-func (x *ofdXML) layer(layer Layer) {
-	var attrs ofdAttrs
-	attrs.add("ID", layer.ID)
-	attrs.add("Type", layer.Type)
-	attrs.add("DrawParam", layer.DrawParam)
-	x.start("Layer", attrs)
-	for _, object := range layer.Objects {
-		if x.err != nil {
-			return
-		}
-		x.object(object, false)
-	}
-	x.end("Layer")
-}
-
-// resources 写出文档资源索引
-// 入参: fonts 字体资源, images 图片资源, spaces 颜色空间
-func (x *ofdXML) resources(fonts, images []editorResource, spaces []ColorSpace) {
-	x.root("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "Res"}})
-	if len(spaces) != 0 {
-		x.start("ColorSpaces", nil)
-		for _, space := range spaces {
-			if x.err != nil {
-				return
-			}
-			attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: space.ID}, {Name: xml.Name{Local: "Type"}, Value: space.Type}, {Name: xml.Name{Local: "BitsPerComponent"}, Value: strconv.Itoa(space.BitsPerComponent)}}
-			attrs.add("Profile", space.Profile)
-			x.start("ColorSpace", attrs)
-			if len(space.Palette) != 0 {
-				x.start("Palette", nil)
-				for _, entry := range space.Palette {
-					x.text("CV", entry)
-				}
-				x.end("Palette")
-			}
-			x.end("ColorSpace")
-		}
-		x.end("ColorSpaces")
-	}
-	if len(fonts) != 0 {
-		x.start("Fonts", nil)
-		for _, resource := range fonts {
-			if x.err != nil {
-				return
-			}
-			font := resource.font
-			var attrs ofdAttrs
-			attrs.add("ID", font.ID)
-			attrs.add("FontName", font.FontName)
-			attrs.add("FamilyName", font.FamilyName)
-			attrs.add("Charset", font.Charset)
-			if font.Bold {
-				attrs.add("Bold", "true")
-			}
-			if font.Italic {
-				attrs.add("Italic", "true")
-			}
-			if font.Serif {
-				attrs.add("Serif", "true")
-			}
-			if font.FixedWidth {
-				attrs.add("FixedWidth", "true")
-			}
-			x.start("Font", attrs)
-			if font.FontFile != "" {
-				x.text("FontFile", font.FontFile)
-			}
-			x.end("Font")
-		}
-		x.end("Fonts")
-	}
-	if len(images) != 0 {
-		x.start("MultiMedias", nil)
-		for _, resource := range images {
-			if x.err != nil {
-				return
-			}
-			image := resource.image
-			var attrs ofdAttrs
-			attrs.add("ID", image.ID)
-			attrs.add("Type", image.Type)
-			attrs.add("Format", image.Format)
-			x.start("MultiMedia", attrs)
-			x.text("MediaFile", image.MediaFile)
-			x.end("MultiMedia")
-		}
-		x.end("MultiMedias")
-	}
-	x.end("Res")
-}
-
-// newOFDXML 创建XML编码器
-// 入参: writer 输出流
-// 返回: *ofdXML 编码器
-func newOFDXML(writer io.Writer) *ofdXML {
-	_, err := io.WriteString(writer, xml.Header)
-	return &ofdXML{encoder: xml.NewEncoder(writer), err: err}
-}
-
-// token 写入XML标记并保留首个错误
-// 入参: token XML标记
-func (x *ofdXML) token(token xml.Token) {
-	if x.checkContext() {
-		x.err = x.encoder.EncodeToken(token)
-		x.referenceToken(token)
-	}
-}
-
-// checkContext 保留首个编码或取消错误
-// 返回: bool 是否可以继续编码
-func (x *ofdXML) checkContext() bool {
-	if x.err == nil && x.ctx != nil {
-		x.err = x.ctx.Err()
-	}
-	return x.err == nil
-}
-
-// root 写入声明命名空间的根节点
-// 入参: name 节点名, attrs 属性
-func (x *ofdXML) root(name string, attrs ofdAttrs) {
-	attrs.add("xmlns:ofd", ofdNamespace2016)
-	x.start(name, attrs)
-}
-
-// start 写入节点起始标记
-// 入参: name 节点名, attrs 属性
-func (x *ofdXML) start(name string, attrs ofdAttrs) {
-	x.token(xml.StartElement{Name: xml.Name{Local: "ofd:" + name}, Attr: attrs})
-}
-
-// end 写入节点结束标记
-// 入参: name 节点名
-func (x *ofdXML) end(name string) {
-	x.token(xml.EndElement{Name: xml.Name{Local: "ofd:" + name}})
-}
-
-// text 写入文本节点
-// 入参: name 节点名, value 文本
-func (x *ofdXML) text(name, value string) {
-	x.start(name, nil)
-	x.token(xml.CharData(value))
-	x.end(name)
-}
-
-// finish 完成XML输出
-// 返回: error 错误信息
-func (x *ofdXML) finish() error {
-	if !x.checkContext() {
-		return x.err
-	}
-	return x.encoder.Close()
-}
-
-// add 添加非空属性
-// 入参: name 属性名, value 属性值
-func (a *ofdAttrs) add(name, value string) {
-	if value != "" {
-		*a = append(*a, xml.Attr{Name: xml.Name{Local: name}, Value: value})
-	}
-}
-
-// number 添加非零数值属性
-// 入参: name 属性名, value 数值
-func (a *ofdAttrs) number(name string, value float64) {
-	if value != 0 {
-		a.add(name, ofdNumber(value))
-	}
-}
-
-// flag 添加显式布尔属性
-// 入参: name 属性名, value 布尔值
-func (a *ofdAttrs) flag(name string, value *bool) {
-	if value != nil {
-		a.add(name, strconv.FormatBool(*value))
-	}
-}
-
-// alpha 添加显式透明度
-// 入参: value 透明度
-func (a *ofdAttrs) alpha(value *int) {
-	if value != nil {
-		a.add("Alpha", strconv.Itoa(*value))
-	}
-}
-
 // encodeOFDXML 编码文档节点，用于保存和独立副本
 // 入参: encode 节点写入方法
 // 返回: []byte XML数据, error 错误信息
@@ -1266,333 +1778,6 @@ func encodeOFDXMLContext(ctx context.Context, encode func(*ofdXML)) ([]byte, err
 	return data.Bytes(), nil
 }
 
-// object 按OFD规定顺序写出基本对象
-// 入参: object 图形对象, root 是否为根节点
-func (x *ofdXML) object(object GraphicObject, root bool) {
-	if !x.checkContext() {
-		return
-	}
-	attrs := x.attrs[:0]
-	var fill, stroke *FillColor
-	var actions []Action
-	if root {
-		attrs.add("xmlns:ofd", ofdNamespace2016)
-	}
-	switch object.Type {
-	case "TextObject", "Text":
-		obj := object.TextObject
-		metadata, err := obj.textMetadata()
-		if err != nil {
-			x.err = err
-			return
-		}
-		if metadata != "" {
-			attrs.add("xmlns:ofdgo", textNamespace)
-			attrs.add("ofdgo:Text", metadata)
-		}
-		attrs.add("ID", obj.ID)
-		attrs.add("DrawParam", obj.DrawParam)
-		attrs.add("Boundary", obj.Boundary)
-		attrs.add("CTM", obj.CTM)
-		attrs.add("Font", obj.Font)
-		attrs.number("Size", obj.Size)
-		attrs.number("HScale", obj.HScale)
-		attrs.number("VScale", obj.VScale)
-		attrs.add("Decoration", obj.Decoration)
-		attrs.number("Weight", float64(obj.Weight))
-		attrs.number("ReadDirection", float64(obj.ReadDirection))
-		attrs.number("CharDirection", float64(obj.CharDirection))
-		attrs.number("LineWidth", obj.LineWidth)
-		if obj.LineWidthSet && obj.LineWidth == 0 {
-			attrs.add("LineWidth", "0")
-		}
-		attrs.number("MiterLimit", obj.MiterLimit)
-		if obj.MiterLimitSet && obj.MiterLimit == 0 {
-			attrs.add("MiterLimit", "0")
-		}
-		attrs.add("Join", obj.Join)
-		attrs.add("Cap", obj.Cap)
-		if obj.dashPatternSet {
-			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
-		} else {
-			attrs.add("DashPattern", obj.DashPattern)
-		}
-		if obj.DashOffset != nil {
-			attrs.add("DashOffset", ofdNumber(*obj.DashOffset))
-		}
-		if obj.Italic {
-			attrs.add("Italic", "true")
-		}
-		attrs.flag("Visible", obj.Visible)
-		attrs.flag("Stroke", obj.Stroke)
-		attrs.flag("Fill", obj.Fill)
-		attrs.alpha(obj.Alpha)
-		fill, stroke = obj.FillColor, (*FillColor)(obj.StrokeColor)
-		actions = obj.Actions
-	case "PathObject", "Path":
-		obj := object.PathObject
-		attrs.add("ID", obj.ID)
-		attrs.add("DrawParam", obj.DrawParam)
-		attrs.add("Boundary", obj.Boundary)
-		attrs.add("CTM", obj.CTM)
-		attrs.number("LineWidth", obj.LineWidth)
-		if obj.LineWidthSet && obj.LineWidth == 0 {
-			attrs.add("LineWidth", "0")
-		}
-		attrs.number("MiterLimit", obj.MiterLimit)
-		if obj.MiterLimitSet && obj.MiterLimit == 0 {
-			attrs.add("MiterLimit", "0")
-		}
-		attrs.add("Join", obj.Join)
-		attrs.add("Cap", obj.Cap)
-		attrs.add("Rule", obj.Rule)
-		if obj.dashPatternSet {
-			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
-		} else {
-			attrs.add("DashPattern", obj.DashPattern)
-		}
-		if obj.DashOffset != nil {
-			attrs.add("DashOffset", ofdNumber(*obj.DashOffset))
-		}
-		attrs.flag("Visible", obj.Visible)
-		attrs.flag("Stroke", obj.Stroke)
-		attrs.flag("Fill", obj.Fill)
-		attrs.alpha(obj.Alpha)
-		fill, stroke = obj.FillColor, (*FillColor)(obj.StrokeColor)
-		actions = obj.Actions
-	case "ImageObject":
-		obj := object.ImageObject
-		attrs.add("ID", obj.ID)
-		attrs.add("Boundary", obj.Boundary)
-		attrs.add("CTM", obj.CTM)
-		attrs.add("ResourceID", obj.ResourceID)
-		attrs.add("ImageMask", obj.ImageMask)
-		attrs.add("Substitution", obj.Substitution)
-		attrs.flag("Visible", obj.Visible)
-		attrs.alpha(obj.Alpha)
-		actions = obj.Actions
-	case "CompositeObject", "CompositeGraphicUnit":
-		obj := object.CompositeGraphicUnit
-		attrs.add("ID", obj.ID)
-		attrs.add("Boundary", obj.Boundary)
-		attrs.add("CTM", obj.CTM)
-		attrs.add("ResourceID", obj.ResourceID)
-		attrs.add("DrawParam", obj.DrawParam)
-		attrs.flag("Visible", obj.Visible)
-		attrs.alpha(obj.Alpha)
-		actions = obj.Actions
-	}
-	x.attrs = attrs
-	x.start(object.Type, attrs)
-	x.actions(actions)
-	if object.Type == "ImageObject" {
-		ctm := object.ImageObject.CTM
-		if ctm == "" && object.ImageObject.Clips.usesObjectMatrix() {
-			box, _ := ParseBox(object.ImageObject.Boundary)
-			ctm = (Matrix{a: box.W, d: box.H}).String()
-		}
-		x.clips(object.ImageObject.Clips, ctm)
-		x.border(object.ImageObject.Border)
-	} else if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
-		x.clips(object.CompositeGraphicUnit.Clips, object.CompositeGraphicUnit.CTM)
-	} else if object.Type == "PathObject" || object.Type == "Path" {
-		x.clips(object.PathObject.Clips, object.PathObject.CTM)
-		x.color("StrokeColor", stroke)
-		x.color("FillColor", fill)
-		x.text("AbbreviatedData", object.PathObject.AbbreviatedData)
-	} else if object.Type == "TextObject" || object.Type == "Text" {
-		x.clips(object.TextObject.Clips, object.TextObject.CTM)
-		x.color("FillColor", fill)
-		x.color("StrokeColor", stroke)
-		offset, index := 0, 0
-		for _, code := range object.TextObject.TextCode {
-			if x.err != nil {
-				return
-			}
-			end := offset + len(textCodeRunes(code.Value))
-			for index < len(object.TextObject.CGTransform) && object.TextObject.CGTransform[index].CodePosition < end {
-				if x.err != nil {
-					return
-				}
-				transform := object.TextObject.CGTransform[index]
-				attrs := x.attrs[:0]
-				attrs.add("CodePosition", strconv.Itoa(transform.CodePosition-offset))
-				attrs.add("CodeCount", strconv.Itoa(transform.CodeCount))
-				attrs.add("GlyphCount", strconv.Itoa(transform.GlyphCount))
-				x.attrs = attrs
-				x.start("CGTransform", attrs)
-				x.text("Glyphs", transform.Glyphs)
-				x.end("CGTransform")
-				index++
-			}
-			attrs := x.attrs[:0]
-			attrs.add("X", code.X)
-			attrs.add("Y", code.Y)
-			attrs.add("DeltaX", code.DeltaX)
-			attrs.add("DeltaY", code.DeltaY)
-			x.attrs = attrs
-			x.textCode(code.Value, attrs)
-			offset = end
-		}
-	}
-	x.end(object.Type)
-}
-
-// clips 写出标准裁剪，将旧式随动裁剪折算为区域变换
-// 入参: clips 裁剪集合，nil不输出节点, ctm 对象变换矩阵
-func (x *ofdXML) clips(clips *Clips, ctm string) {
-	if clips == nil || !x.checkContext() {
-		return
-	}
-	matrix := IdentityMatrix
-	if clips.usesObjectMatrix() {
-		matrix = NewMatrix(ctm)
-	}
-	x.start("Clips", nil)
-	for _, clip := range clips.Clip {
-		if x.err != nil {
-			return
-		}
-		x.start("Clip", nil)
-		for _, area := range clip.Area {
-			if x.err != nil {
-				return
-			}
-			var attrs ofdAttrs
-			if clips.usesObjectMatrix() {
-				area.CTM = matrix.Multiply(NewMatrix(area.CTM)).String()
-			}
-			attrs.add("CTM", area.CTM)
-			attrs.add("DrawParam", area.DrawParam)
-			for _, path := range area.Path {
-				if x.err != nil {
-					return
-				}
-				x.start("Area", attrs)
-				x.object(GraphicObject{Type: "Path", PathObject: path}, false)
-				x.end("Area")
-			}
-			for _, text := range area.Text {
-				if x.err != nil {
-					return
-				}
-				x.start("Area", attrs)
-				x.object(GraphicObject{Type: "Text", TextObject: text}, false)
-				x.end("Area")
-			}
-		}
-		x.end("Clip")
-	}
-	x.end("Clips")
-}
-
-// textCode 使用XML字符引用转义空格，避免依赖阅读器保留原始空白
-// 入参: value OFD文字内容, attrs 文字定位属性
-func (x *ofdXML) textCode(value string, attrs ofdAttrs) {
-	if !x.checkContext() {
-		return
-	}
-	value = textCodeXMLValue(value)
-	x.escaped.Reset()
-	if x.err = xml.EscapeText(&x.escaped, []byte(value)); x.err != nil {
-		return
-	}
-	data := x.escaped.Bytes()
-	if next := bytes.IndexByte(data, ' '); next >= 0 {
-		x.spaces.Reset()
-		for replaced := 0; next >= 0; replaced++ {
-			if replaced&255 == 0 && !x.checkContext() {
-				return
-			}
-			x.spaces.Write(data[:next])
-			x.spaces.WriteString("&#x20;")
-			data = data[next+1:]
-			next = bytes.IndexByte(data, ' ')
-		}
-		x.spaces.Write(data)
-		data = x.spaces.Bytes()
-	}
-	content := struct {
-		Text []byte `xml:",innerxml"`
-	}{Text: data}
-	x.err = x.encoder.EncodeElement(content, xml.StartElement{Name: xml.Name{Local: "ofd:TextCode"}, Attr: attrs})
-	x.referenceToken(xml.StartElement{Name: xml.Name{Local: "ofd:TextCode"}, Attr: attrs})
-	x.referenceToken(xml.CharData(value))
-	x.referenceToken(xml.EndElement{Name: xml.Name{Local: "ofd:TextCode"}})
-}
-
-// color 写出纯色、渐变和图案，保留颜色空间与透明度
-// 入参: name 节点名, color 颜色
-func (x *ofdXML) color(name string, color *FillColor) {
-	if color == nil || !x.checkContext() {
-		return
-	}
-	var attrs ofdAttrs
-	attrs.add("Value", color.Value)
-	attrs.add("ColorSpace", color.ColorSpace)
-	if color.Index != nil {
-		attrs.add("Index", strconv.Itoa(*color.Index))
-	}
-	attrs.alpha(color.Alpha)
-	x.start(name, attrs)
-	if color.AxialShd != nil {
-		shading := color.AxialShd
-		x.shading("AxialShd", shadingAttrs(shading.MapType, shading.MapUnit, shading.Extend, shading.StartPoint, shading.EndPoint), shading.Segment)
-	}
-	if color.RadialShd != nil {
-		shading := color.RadialShd
-		attrs := shadingAttrs(shading.MapType, shading.MapUnit, shading.Extend, shading.StartPoint, shading.EndPoint)
-		attrs.add("StartRadius", ofdNumber(shading.StartRadius))
-		attrs.add("EndRadius", ofdNumber(shading.EndRadius))
-		attrs.number("Eccentricity", shading.Eccentricity)
-		attrs.number("Angle", shading.Angle)
-		x.shading("RadialShd", attrs, shading.Segment)
-	}
-	if color.Pattern != nil {
-		x.pattern(color.Pattern)
-	}
-	if color.GouraudShd != nil {
-		node := color.GouraudShd
-		x.meshShading("GouraudShd", node.Extend, 0, node.Point, node.BackColor)
-	}
-	if color.LaGouraudShd != nil {
-		node := color.LaGouraudShd
-		x.meshShading("LaGouraudShd", node.Extend, node.VerticesPerRow, node.Point, node.BackColor)
-	}
-	x.end(name)
-}
-
-// meshShading 写出网格控制点，仅非格构渐变保存共享边标志
-// 入参: name 元素名称, extend 延伸标志, columns 格构列数, points 控制点, back 背景颜色
-func (x *ofdXML) meshShading(name string, extend, columns int, points []ShdPoint, back *ShdColor) {
-	var attrs ofdAttrs
-	if extend != 0 {
-		attrs.add("Extend", strconv.Itoa(extend))
-	}
-	if columns != 0 {
-		attrs.add("VerticesPerRow", strconv.Itoa(columns))
-	}
-	x.start(name, attrs)
-	for _, point := range points {
-		if x.err != nil {
-			return
-		}
-		var attrs ofdAttrs
-		attrs.add("X", ofdNumber(point.X))
-		attrs.add("Y", ofdNumber(point.Y))
-		if columns == 0 && point.EdgeFlag != 0 {
-			attrs.add("EdgeFlag", strconv.Itoa(point.EdgeFlag))
-		}
-		x.start("Point", attrs)
-		x.element("Color", point.Color)
-		x.end("Point")
-	}
-	if back != nil {
-		x.element("BackColor", *back)
-	}
-	x.end(name)
-}
-
 // shadingAttrs 编码轴向和径向渐变的共同属性
 // 入参: mapType 映射方式, mapUnit 映射周期, extend 延伸方式, start 渐变起点, end 渐变终点
 // 返回: ofdAttrs 属性集合
@@ -1604,189 +1789,4 @@ func shadingAttrs(mapType string, mapUnit float64, extend, start, end string) of
 	attrs.add("StartPoint", start)
 	attrs.add("EndPoint", end)
 	return attrs
-}
-
-// shading 写出渐变分段，保留未显式设置的位置
-// 入参: name 渐变类型, attrs 属性, segments 色标
-func (x *ofdXML) shading(name string, attrs ofdAttrs, segments []ShdSegment) {
-	x.start(name, attrs)
-	for _, segment := range segments {
-		if x.err != nil {
-			return
-		}
-		var attrs ofdAttrs
-		if !segment.positionMissing {
-			attrs.add("Position", ofdNumber(segment.Position))
-		}
-		x.start("Segment", attrs)
-		x.element("Color", segment.Color)
-		x.end("Segment")
-	}
-	x.end(name)
-}
-
-// element 写出具有标准ofd前缀的叶子节点并同步记录资源引用
-// 入参: name 元素名称, value 元素内容
-func (x *ofdXML) element(name string, value any) {
-	if !x.checkContext() {
-		return
-	}
-	var attrs ofdAttrs
-	switch value := value.(type) {
-	case ShdColor:
-		attrs.add("Value", value.Value)
-		attrs.add("ColorSpace", value.ColorSpace)
-		if value.Index != nil {
-			attrs.add("Index", strconv.Itoa(*value.Index))
-		}
-		attrs.alpha(value.Alpha)
-	case *Dest:
-		var err error
-		attrs, err = value.attributes()
-		if err != nil {
-			x.err = err
-			return
-		}
-	case *GotoBookmark:
-		attrs = ofdAttrs{{Name: xml.Name{Local: "Name"}, Value: value.Name}}
-	case *URI:
-		attrs = ofdAttrs{{Name: xml.Name{Local: "URI"}, Value: value.URI}}
-		attrs.add("Base", value.Base)
-		attrs.add("Target", value.Target)
-	case *GotoA:
-		attrs = ofdAttrs{{Name: xml.Name{Local: "AttachID"}, Value: value.AttachID}}
-		attrs.flag("NewWindow", value.NewWindow)
-	case *Sound:
-		attrs = ofdAttrs{{Name: xml.Name{Local: "ResourceID"}, Value: value.ResourceID}}
-		if value.Volume != nil {
-			attrs.add("Volume", strconv.Itoa(*value.Volume))
-		}
-		if value.Repeat {
-			attrs.add("Repeat", "true")
-		}
-		if value.Synchronous {
-			attrs.add("Synchronous", "true")
-		}
-	case *Movie:
-		attrs = ofdAttrs{{Name: xml.Name{Local: "ResourceID"}, Value: value.ResourceID}}
-		attrs.add("Operator", value.Operator)
-	default:
-		x.err = fmt.Errorf("unsupported OFD XML element %s (%T)", name, value)
-		return
-	}
-	x.start(name, attrs)
-	x.end(name)
-}
-
-// border 写出图片边框及其绘制颜色
-// 入参: border 边框，nil不输出节点
-func (x *ofdXML) border(border *ImageBorder) {
-	if border == nil || !x.checkContext() {
-		return
-	}
-	var attrs ofdAttrs
-	if border.LineWidth != nil {
-		attrs.add("LineWidth", ofdNumber(*border.LineWidth))
-	}
-	attrs.number("HorizonalCornerRadius", border.HorizonalCornerRadius)
-	attrs.number("VerticalCornerRadius", border.VerticalCornerRadius)
-	attrs.number("DashOffset", border.DashOffset)
-	attrs.add("DashPattern", border.DashPattern)
-	x.start("Border", attrs)
-	x.color("BorderColor", (*FillColor)(border.BorderColor))
-	x.end("Border")
-}
-
-// pattern 写出图案单元，保留对象绘制顺序
-// 入参: pattern 图案
-func (x *ofdXML) pattern(pattern *Pattern) {
-	if !x.checkContext() {
-		return
-	}
-	var attrs ofdAttrs
-	attrs.number("Width", pattern.Width)
-	attrs.number("Height", pattern.Height)
-	attrs.number("XStep", pattern.XStep)
-	attrs.number("YStep", pattern.YStep)
-	attrs.add("ReflectMethod", pattern.ReflectMethod)
-	attrs.add("RelativeTo", pattern.RelativeTo)
-	attrs.add("CTM", pattern.CTM)
-	x.start("Pattern", attrs)
-	var content ofdAttrs
-	content.add("Thumbnail", pattern.CellContent.Thumbnail)
-	x.start("CellContent", content)
-	for object := range pattern.CellContent.objects() {
-		if x.err != nil {
-			return
-		}
-		x.object(object, false)
-	}
-	x.end("CellContent")
-	x.end("Pattern")
-}
-
-// actions 写出对象动作及精确点击区域，不检查链接可达性
-// 入参: actions 动作列表
-func (x *ofdXML) actions(actions []Action) {
-	if len(actions) == 0 || !x.checkContext() {
-		return
-	}
-	x.start("Actions", nil)
-	for _, action := range actions {
-		if x.err != nil {
-			return
-		}
-		var attrs ofdAttrs
-		attrs.add("Event", action.Event)
-		x.start("Action", attrs)
-		if action.Region != nil {
-			x.start("Region", nil)
-			for _, area := range action.Region.Area {
-				if x.err != nil {
-					return
-				}
-				x.start("Area", ofdAttrs{{Name: xml.Name{Local: "Start"}, Value: area.Start}})
-				for _, command := range area.Command {
-					if x.err != nil {
-						return
-					}
-					var attrs ofdAttrs
-					if command.Type == "Arc" && command.EllipseSize == "" {
-						attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "EllipseSize"}})
-					}
-					for _, pair := range [][2]string{{"Point1", command.Point1}, {"Point2", command.Point2}, {"Point3", command.Point3}, {"EllipseSize", command.EllipseSize}, {"RotationAngle", command.RotationAngle}, {"LargeArc", command.LargeArc}, {"SweepDirection", command.SweepDirection}, {"EndPoint", command.EndPoint}} {
-						attrs.add(pair[0], pair[1])
-					}
-					x.start(command.Type, attrs)
-					x.end(command.Type)
-				}
-				x.end("Area")
-			}
-			x.end("Region")
-		}
-		if action.Goto != nil {
-			x.start("Goto", nil)
-			if dest := action.Goto.Dest; dest != nil {
-				x.element("Dest", dest)
-			}
-			if action.Goto.Bookmark != nil {
-				x.element("Bookmark", action.Goto.Bookmark)
-			}
-			x.end("Goto")
-		}
-		if action.URI != nil {
-			x.element("URI", action.URI)
-		}
-		if action.GotoA != nil {
-			x.element("GotoA", action.GotoA)
-		}
-		if action.Sound != nil {
-			x.element("Sound", action.Sound)
-		}
-		if action.Movie != nil {
-			x.element("Movie", action.Movie)
-		}
-		x.end("Action")
-	}
-	x.end("Actions")
 }

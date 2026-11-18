@@ -133,25 +133,6 @@ type FontBackend interface {
 	OpenFont(data []byte) (FontMetrics, error)
 }
 
-// resolvedFontKey 区分只读资源的字体标识与精确匹配要求
-type resolvedFontKey struct {
-	id         string
-	exact      bool
-	definition *Font
-}
-
-// resolvedFontResult 缓存字体解析结果及不可用原因
-type resolvedFontResult struct {
-	font ResolvedFont
-	err  error
-}
-
-// fontDataKey 区分只读字体的起点和长度，指针保留源数据直到预算淘汰
-type fontDataKey struct {
-	data *byte
-	size int
-}
-
 // ResolveFont 使用配置的字体后端解析资源，保留精确匹配与回退的区别
 // 页面取消及后端取消、超时结果不缓存，后续调用可重试
 // 入参: id 字体资源标识, exact 是否要求精确匹配
@@ -249,6 +230,25 @@ func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
 	}
 	r.preparedFonts[id] = prepared
 	return prepared, nil
+}
+
+// resolvedFontKey 区分只读资源的字体标识与精确匹配要求
+type resolvedFontKey struct {
+	id         string
+	exact      bool
+	definition *Font
+}
+
+// resolvedFontResult 缓存字体解析结果及不可用原因
+type resolvedFontResult struct {
+	font ResolvedFont
+	err  error
+}
+
+// fontDataKey 区分只读字体的起点和长度，指针保留源数据直到预算淘汰
+type fontDataKey struct {
+	data *byte
+	size int
 }
 
 // fontDigest 在预算内复用只读字体摘要，内容副本仍按摘要复用解析结果

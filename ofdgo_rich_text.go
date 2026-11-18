@@ -48,26 +48,6 @@ type RichTextParagraph struct {
 	FirstLineIndent *float64 `json:"firstLineIndent,omitempty"`
 }
 
-// ParagraphLayout 返回指定段落覆盖后的排版选项
-// 入参: index 段落序号
-// 返回: TextLayout 有效段落选项
-func (v RichText) ParagraphLayout(index int) TextLayout {
-	options := v.Layout
-	if index < 0 || index >= len(v.Paragraphs) {
-		return options
-	}
-	p := v.Paragraphs[index]
-	if p.Align != "" {
-		options.Align = p.Align
-	}
-	for _, pair := range []struct{ source, target *float64 }{{p.LineHeight, &options.LineHeight}, {p.LetterSpacing, &options.LetterSpacing}, {p.LeftIndent, &options.LeftIndent}, {p.RightIndent, &options.RightIndent}, {p.FirstLineIndent, &options.FirstLineIndent}} {
-		if pair.source != nil {
-			*pair.target = *pair.source
-		}
-	}
-	return options
-}
-
 // RichTextRun 保存文字及完整格式，换行使用LF，长度单位为毫米
 type RichTextRun struct {
 	Text   string     `json:"text"`
@@ -100,57 +80,24 @@ type TextFormatPatch struct {
 	Background *string  `json:"background,omitempty"`
 }
 
-// RichTextFonts 提取富文本实际引用的独立字体数据，供跨文档保存和复制使用
-// 入参: value 富文本内容
-// 返回: map[string][]byte 字体标识及数据, error 字体读取错误
-func (e *Editor) RichTextFonts(value RichText) (map[string][]byte, error) {
-	fonts := make(map[string][]byte)
-	for _, run := range value.Runs {
-		if run.Text == "" || fonts[run.Format.Font] != nil {
-			continue
-		}
-		data, err := e.FontData(run.Format.Font)
-		if err != nil {
-			return nil, err
-		}
-		fonts[run.Format.Font] = data
+// ParagraphLayout 返回指定段落覆盖后的排版选项
+// 入参: index 段落序号
+// 返回: TextLayout 有效段落选项
+func (v RichText) ParagraphLayout(index int) TextLayout {
+	options := v.Layout
+	if index < 0 || index >= len(v.Paragraphs) {
+		return options
 	}
-	return fonts, nil
-}
-
-// ImportRichText 注册富文本引用的外来字体并返回独立内容，失败时不保留新增资源
-// 未提供数据的字体标识保留为当前文档引用，调用方可在外层事务中同时创建或更新对象
-// 入参: value 富文本内容, fonts 外来字体标识及数据
-// 返回: RichText 已映射字体标识的内容, error 字体注册错误
-func (e *Editor) ImportRichText(value RichText, fonts map[string][]byte) (RichText, error) {
-	value = cloneEditorData(value)
-	used := make(map[string]bool)
-	for _, run := range value.Runs {
-		used[run.Format.Font] = true
+	p := v.Paragraphs[index]
+	if p.Align != "" {
+		options.Align = p.Align
 	}
-	err := e.Transaction(func(editor *Editor) error {
-		registered := make(map[string]string)
-		for _, key := range slices.Sorted(maps.Keys(fonts)) {
-			if !used[key] {
-				continue
-			}
-			id, err := editor.AddFont(FontFile{Data: fonts[key]}, 0)
-			if err != nil {
-				return err
-			}
-			registered[key] = id
+	for _, pair := range []struct{ source, target *float64 }{{p.LineHeight, &options.LineHeight}, {p.LetterSpacing, &options.LetterSpacing}, {p.LeftIndent, &options.LeftIndent}, {p.RightIndent, &options.RightIndent}, {p.FirstLineIndent, &options.FirstLineIndent}} {
+		if pair.source != nil {
+			*pair.target = *pair.source
 		}
-		for i := range value.Runs {
-			if id := registered[value.Runs[i].Format.Font]; id != "" {
-				value.Runs[i].Format.Font = id
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return RichText{}, err
 	}
-	return value, nil
+	return options
 }
 
 // Text 返回包含显式换行的原文，不包含排版产生的软换行
@@ -201,72 +148,6 @@ func (v RichText) Validate() error {
 	return nil
 }
 
-// validate 校验完整文字格式，不解析文档资源
-// 返回: error 格式错误
-func (f TextFormat) validate() error {
-	if strings.TrimSpace(f.Font) == "" || !finite(f.Size) || f.Size <= 0 {
-		return fmt.Errorf("rich text requires a font and positive finite size")
-	}
-	for _, color := range []string{f.Color, f.Background} {
-		if color != "" {
-			values, err := creationNumbers(color, 3)
-			if err != nil {
-				return fmt.Errorf("rich text color requires three RGB components: %w", err)
-			}
-			for _, value := range values {
-				if value < 0 || value > 255 {
-					return fmt.Errorf("rich text RGB components must be between 0 and 255")
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// validateRichLayout 校验富文本段落的有限数值及枚举
-// 入参: v 段落选项
-// 返回: error 无效选项
-func validateRichLayout(v TextLayout) error {
-	if !finite(v.LineHeight) || v.LineHeight < 0 || !finite(v.LetterSpacing) || !finite(v.LeftIndent) || !finite(v.RightIndent) || !finite(v.FirstLineIndent) {
-		return fmt.Errorf("invalid rich text layout dimensions")
-	}
-	switch v.Align {
-	case "", "left", "center", "right", "justify", "distributed":
-	default:
-		return fmt.Errorf("invalid rich text alignment")
-	}
-	return nil
-}
-
-// richTextBoundaries 返回包含首尾位置的扩展字素边界
-// 入参: value 原文
-// 返回: map[int]bool 有效码点边界
-func richTextBoundaries(value string) map[int]bool {
-	runes := []rune(value)
-	result := map[int]bool{0: true, len(runes): true}
-	var seg segmenter.Segmenter
-	seg.Init(runes)
-	for it := seg.GraphemeIterator(); it.Next(); {
-		g := it.Grapheme()
-		result[g.Offset] = true
-	}
-	return result
-}
-
-// checkRange 检查半开范围及其字素边界
-// 入参: start 起点, end 终点
-// 返回: error 无效范围
-func (v RichText) checkRange(start, end int) error {
-	if err := v.Validate(); err != nil {
-		return err
-	}
-	bounds := richTextBoundaries(v.Text())
-	if start < 0 || end < start || end > v.Len() || !bounds[start] || !bounds[end] {
-		return fmt.Errorf("rich text range must end at grapheme boundaries")
-	}
-	return nil
-}
-
 // Slice 返回半开范围的独立片段，空范围保留插入位置的格式
 // 入参: start 起点, end 终点
 // 返回: RichText 独立片段, error 无效范围
@@ -294,23 +175,6 @@ func (v RichText) Slice(start, end int) (RichText, error) {
 		result.Runs = []RichTextRun{{Format: format}}
 	}
 	return result, nil
-}
-
-// sliceRuns 提取已校验范围，不保留空片段
-// 入参: start 起点, end 终点
-// 返回: []RichTextRun 独立片段
-func (v RichText) sliceRuns(start, end int) []RichTextRun {
-	var result []RichTextRun
-	position := 0
-	for _, run := range v.Runs {
-		chars := []rune(run.Text)
-		a, b := max(0, start-position), min(len(chars), end-position)
-		if a < b {
-			result = append(result, RichTextRun{Text: string(chars[a:b]), Format: run.Format})
-		}
-		position += len(chars)
-	}
-	return result
 }
 
 // Replace 原子替换半开范围，空片段列表表示删除，相邻相同格式自动合并
@@ -439,6 +303,142 @@ func (v *RichText) FormatParagraphs(start, end int, patch RichTextParagraph) err
 	}
 	v.Paragraphs = paragraphs
 	return nil
+}
+
+// RichTextFonts 提取富文本实际引用的独立字体数据，供跨文档保存和复制使用
+// 入参: value 富文本内容
+// 返回: map[string][]byte 字体标识及数据, error 字体读取错误
+func (e *Editor) RichTextFonts(value RichText) (map[string][]byte, error) {
+	fonts := make(map[string][]byte)
+	for _, run := range value.Runs {
+		if run.Text == "" || fonts[run.Format.Font] != nil {
+			continue
+		}
+		data, err := e.FontData(run.Format.Font)
+		if err != nil {
+			return nil, err
+		}
+		fonts[run.Format.Font] = data
+	}
+	return fonts, nil
+}
+
+// ImportRichText 注册富文本引用的外来字体并返回独立内容，失败时不保留新增资源
+// 未提供数据的字体标识保留为当前文档引用，调用方可在外层事务中同时创建或更新对象
+// 入参: value 富文本内容, fonts 外来字体标识及数据
+// 返回: RichText 已映射字体标识的内容, error 字体注册错误
+func (e *Editor) ImportRichText(value RichText, fonts map[string][]byte) (RichText, error) {
+	value = cloneEditorData(value)
+	used := make(map[string]bool)
+	for _, run := range value.Runs {
+		used[run.Format.Font] = true
+	}
+	err := e.Transaction(func(editor *Editor) error {
+		registered := make(map[string]string)
+		for _, key := range slices.Sorted(maps.Keys(fonts)) {
+			if !used[key] {
+				continue
+			}
+			id, err := editor.AddFont(FontFile{Data: fonts[key]}, 0)
+			if err != nil {
+				return err
+			}
+			registered[key] = id
+		}
+		for i := range value.Runs {
+			if id := registered[value.Runs[i].Format.Font]; id != "" {
+				value.Runs[i].Format.Font = id
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return RichText{}, err
+	}
+	return value, nil
+}
+
+// validate 校验完整文字格式，不解析文档资源
+// 返回: error 格式错误
+func (f TextFormat) validate() error {
+	if strings.TrimSpace(f.Font) == "" || !finite(f.Size) || f.Size <= 0 {
+		return fmt.Errorf("rich text requires a font and positive finite size")
+	}
+	for _, color := range []string{f.Color, f.Background} {
+		if color != "" {
+			values, err := creationNumbers(color, 3)
+			if err != nil {
+				return fmt.Errorf("rich text color requires three RGB components: %w", err)
+			}
+			for _, value := range values {
+				if value < 0 || value > 255 {
+					return fmt.Errorf("rich text RGB components must be between 0 and 255")
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateRichLayout 校验富文本段落的有限数值及枚举
+// 入参: v 段落选项
+// 返回: error 无效选项
+func validateRichLayout(v TextLayout) error {
+	if !finite(v.LineHeight) || v.LineHeight < 0 || !finite(v.LetterSpacing) || !finite(v.LeftIndent) || !finite(v.RightIndent) || !finite(v.FirstLineIndent) {
+		return fmt.Errorf("invalid rich text layout dimensions")
+	}
+	switch v.Align {
+	case "", "left", "center", "right", "justify", "distributed":
+	default:
+		return fmt.Errorf("invalid rich text alignment")
+	}
+	return nil
+}
+
+// richTextBoundaries 返回包含首尾位置的扩展字素边界
+// 入参: value 原文
+// 返回: map[int]bool 有效码点边界
+func richTextBoundaries(value string) map[int]bool {
+	runes := []rune(value)
+	result := map[int]bool{0: true, len(runes): true}
+	var seg segmenter.Segmenter
+	seg.Init(runes)
+	for it := seg.GraphemeIterator(); it.Next(); {
+		g := it.Grapheme()
+		result[g.Offset] = true
+	}
+	return result
+}
+
+// checkRange 检查半开范围及其字素边界
+// 入参: start 起点, end 终点
+// 返回: error 无效范围
+func (v RichText) checkRange(start, end int) error {
+	if err := v.Validate(); err != nil {
+		return err
+	}
+	bounds := richTextBoundaries(v.Text())
+	if start < 0 || end < start || end > v.Len() || !bounds[start] || !bounds[end] {
+		return fmt.Errorf("rich text range must end at grapheme boundaries")
+	}
+	return nil
+}
+
+// sliceRuns 提取已校验范围，不保留空片段
+// 入参: start 起点, end 终点
+// 返回: []RichTextRun 独立片段
+func (v RichText) sliceRuns(start, end int) []RichTextRun {
+	var result []RichTextRun
+	position := 0
+	for _, run := range v.Runs {
+		chars := []rune(run.Text)
+		a, b := max(0, start-position), min(len(chars), end-position)
+		if a < b {
+			result = append(result, RichTextRun{Text: string(chars[a:b]), Format: run.Format})
+		}
+		position += len(chars)
+	}
+	return result
 }
 
 // apply 应用显式给出的格式字段

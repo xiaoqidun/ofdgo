@@ -34,6 +34,25 @@ type tiffFaxImage struct {
 	across int
 }
 
+// Bounds 返回主图显示区域，不包含边缘瓦片的填充像素
+// 返回: image.Rectangle 图像区域
+func (s *tiffFaxImage) Bounds() image.Rectangle { return s.bounds }
+
+// ColorModel 返回二值图像使用的灰度颜色模型
+// 返回: color.Model 灰度模型
+func (s *tiffFaxImage) ColorModel() color.Model { return color.GrayModel }
+
+// At 读取所属条带或瓦片中的像素，区域外返回黑色
+// 入参: x 横向像素坐标, y 纵向像素坐标
+// 返回: color.Color 像素颜色
+func (s *tiffFaxImage) At(x, y int) color.Color {
+	if !image.Pt(x, y).In(s.bounds) {
+		return color.Gray{}
+	}
+	block := s.blocks[(y/s.height)*s.across+x/s.width]
+	return block.At(x%s.width, y%s.height)
+}
+
 // decodeTIFFFax 按TIFF传真选项解码各图像块，复用PDFGo的T.4与T.6解码器
 // 入参: ctx 取消上下文，可为nil, data TIFF编码, layout 已校验的主图布局
 // 返回: image.Image 图像, error 字段、解码或取消错误
@@ -163,23 +182,4 @@ func decodeTIFFFax(ctx context.Context, data []byte, layout TIFFLayout) (image.I
 		return nil, err
 	}
 	return result, nil
-}
-
-// Bounds 返回主图显示区域，不包含边缘瓦片的填充像素
-// 返回: image.Rectangle 图像区域
-func (s *tiffFaxImage) Bounds() image.Rectangle { return s.bounds }
-
-// ColorModel 返回二值图像使用的灰度颜色模型
-// 返回: color.Model 灰度模型
-func (s *tiffFaxImage) ColorModel() color.Model { return color.GrayModel }
-
-// At 读取所属条带或瓦片中的像素，区域外返回黑色
-// 入参: x 横向像素坐标, y 纵向像素坐标
-// 返回: color.Color 像素颜色
-func (s *tiffFaxImage) At(x, y int) color.Color {
-	if !image.Pt(x, y).In(s.bounds) {
-		return color.Gray{}
-	}
-	block := s.blocks[(y/s.height)*s.across+x/s.width]
-	return block.At(x%s.width, y%s.height)
 }

@@ -33,13 +33,6 @@ type CompositePixel struct {
 	Shape  float64
 }
 
-// transferKey 区分图形状态、网屏覆盖函数及输出设备
-type transferKey struct {
-	transfer *pdfgo.TransferFunction
-	halftone *pdfgo.Halftone
-	model    pdfgo.Name
-}
-
 // TransferCache 在页面内复用设备传递函数，零值可用
 // 缓存与所属阅读器同生命周期，不用于并发解析
 type TransferCache struct {
@@ -354,4 +347,11 @@ func OpaqueBlack(paint pdfgo.Paint) bool {
 func OverprintNeedsSeparation(paint pdfgo.Paint) bool {
 	_, process := paint.Process.CMYKMask()
 	return (paint.CMYK != nil || process) && !OpaqueBlack(paint)
+}
+
+// transferKey 区分图形状态、网屏覆盖函数及输出设备
+type transferKey struct {
+	transfer *pdfgo.TransferFunction
+	halftone *pdfgo.Halftone
+	model    pdfgo.Name
 }

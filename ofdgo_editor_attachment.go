@@ -159,20 +159,6 @@ func (e *Editor) AddAttachmentContext(ctx context.Context, name string, data []b
 	return id, nil
 }
 
-// nextAttachmentID 分配以字母开头且不与已有附件重复的标识
-// 入参: used 已用附件标识, maximum 当前编号上限
-// 返回: string 附件标识, uint64 更新后的编号上限
-func nextAttachmentID(used map[string]bool, maximum uint64) (string, uint64) {
-	for {
-		maximum++
-		id := "a" + formatUnitID(maximum)
-		if !used[id] {
-			used[id] = true
-			return id, maximum
-		}
-	}
-}
-
 // RenameAttachment 修改附件显示名称，保留格式、内容及扩展字段，相同名称不产生撤销记录
 // 入参: id 附件标识, name 显示名称
 // 返回: error 名称或附件结构错误
@@ -282,6 +268,20 @@ func (e *Editor) DeleteAttachmentContext(ctx context.Context, id string) error {
 	return e.editAttachment(ctx, id, func([]byte, *editorXML, map[string][]byte) ([]byte, error) {
 		return nil, nil
 	})
+}
+
+// nextAttachmentID 分配以字母开头且不与已有附件重复的标识
+// 入参: used 已用附件标识, maximum 当前编号上限
+// 返回: string 附件标识, uint64 更新后的编号上限
+func nextAttachmentID(used map[string]bool, maximum uint64) (string, uint64) {
+	for {
+		maximum++
+		id := "a" + formatUnitID(maximum)
+		if !used[id] {
+			used[id] = true
+			return id, maximum
+		}
+	}
 }
 
 // editAttachment 对单个附件片段执行原子编辑，兼容独立附件文件及内联声明

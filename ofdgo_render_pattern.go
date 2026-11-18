@@ -39,6 +39,12 @@ type stampContentState struct {
 	cache     renderCache[stampContentKey, []RasterCommand]
 }
 
+// resetFonts 使包含文字的签章编译结果随字体配置失效
+func (s *stampContentState) resetFonts() {
+	s.cache.clear()
+	s.cache = *resourceCache[stampContentKey, []RasterCommand](s.resources, 16<<20)
+}
+
 // stampContentStateKey 隔离渲染器私有的共享签章数据
 type stampContentStateKey struct{}
 
@@ -49,12 +55,6 @@ type patternCellKey struct {
 	index, alpha int
 	colorAlpha   int
 	matrix       [6]float64
-}
-
-// resetFonts 使包含文字的签章编译结果随字体配置失效
-func (s *stampContentState) resetFonts() {
-	s.cache.clear()
-	s.cache = *resourceCache[stampContentKey, []RasterCommand](s.resources, 16<<20)
 }
 
 // sharedStamp 复用相同签章的解码、嵌套文档编译及局部裁剪，不缓存放置位置

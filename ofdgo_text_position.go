@@ -30,67 +30,6 @@ type TextPositioner struct {
 	started          bool
 }
 
-// textPositionValues 按需读取定位数值及重复位移，不展开重复数组
-type textPositionValues struct {
-	data       string
-	value      float64
-	repeat     int
-	compressed bool
-	present    bool
-}
-
-// textLineScanner 顺序判断文本段换行，复用继承坐标和字符到字形的变换
-type textLineScanner struct {
-	size       float64
-	enabled    bool
-	started    bool
-	firstX     string
-	previous   TextCode
-	offset     int
-	pending    []CGTransform
-	transforms map[int][2]int
-}
-
-// textCodeOrigins 按标准继承文本段原点，首段缺失坐标时以零横坐标和字体上升高度容错恢复
-// 入参: codes 文本段, ascent 对象坐标系下的字体上升高度
-// 返回: []TextCode 定位文本段，不修改原始数据
-func textCodeOrigins(codes []TextCode, ascent float64) []TextCode {
-	for i, code := range codes {
-		if code.X != "" && code.Y != "" {
-			continue
-		}
-		result := slices.Clone(codes)
-		var x, y string
-		if i > 0 {
-			x, y = firstPositionCoord(codes[i-1].X), firstPositionCoord(codes[i-1].Y)
-		} else {
-			x, y = "0", ofdNumber(ascent)
-		}
-		for j := i; j < len(result); j++ {
-			if result[j].X == "" {
-				result[j].X = x
-			}
-			if result[j].Y == "" {
-				result[j].Y = y
-			}
-			x, y = firstPositionCoord(result[j].X), firstPositionCoord(result[j].Y)
-		}
-		return result
-	}
-	return codes
-}
-
-// firstPositionCoord 提取坐标序列的首个原点分量
-// 入参: value 坐标属性文本
-// 返回: string 首个坐标值
-func firstPositionCoord(value string) string {
-	values := textPositionValues{data: value, compressed: strings.Contains(value, "g")}
-	if number, ok := values.next(); ok {
-		return ofdNumber(number)
-	}
-	return value
-}
-
 // NewTextPositioner 创建单个TextCode的定位器，按阅读方向应用增量位移
 // 入参: code 文本定位数据, direction 阅读方向角度
 // 返回: TextPositioner 字形定位器
@@ -140,6 +79,15 @@ func (p *TextPositioner) Next() Point {
 	}
 	p.started = true
 	return p.current
+}
+
+// textPositionValues 按需读取定位数值及重复位移，不展开重复数组
+type textPositionValues struct {
+	data       string
+	value      float64
+	repeat     int
+	compressed bool
+	present    bool
 }
 
 // next 读取下一个定位数值
@@ -207,6 +155,18 @@ func (v *textPositionValues) field() string {
 	}
 	v.data = ""
 	return field
+}
+
+// textLineScanner 顺序判断文本段换行，复用继承坐标和字符到字形的变换
+type textLineScanner struct {
+	size       float64
+	enabled    bool
+	started    bool
+	firstX     string
+	previous   TextCode
+	offset     int
+	pending    []CGTransform
+	transforms map[int][2]int
 }
 
 // newTextLineScanner 创建独立的换行扫描器，不修改文字对象
@@ -285,6 +245,46 @@ func (s *textLineScanner) next(code TextCode) bool {
 		right = math.Max(right, positioner.Next().X+s.size)
 	}
 	return x <= right
+}
+
+// textCodeOrigins 按标准继承文本段原点，首段缺失坐标时以零横坐标和字体上升高度容错恢复
+// 入参: codes 文本段, ascent 对象坐标系下的字体上升高度
+// 返回: []TextCode 定位文本段，不修改原始数据
+func textCodeOrigins(codes []TextCode, ascent float64) []TextCode {
+	for i, code := range codes {
+		if code.X != "" && code.Y != "" {
+			continue
+		}
+		result := slices.Clone(codes)
+		var x, y string
+		if i > 0 {
+			x, y = firstPositionCoord(codes[i-1].X), firstPositionCoord(codes[i-1].Y)
+		} else {
+			x, y = "0", ofdNumber(ascent)
+		}
+		for j := i; j < len(result); j++ {
+			if result[j].X == "" {
+				result[j].X = x
+			}
+			if result[j].Y == "" {
+				result[j].Y = y
+			}
+			x, y = firstPositionCoord(result[j].X), firstPositionCoord(result[j].Y)
+		}
+		return result
+	}
+	return codes
+}
+
+// firstPositionCoord 提取坐标序列的首个原点分量
+// 入参: value 坐标属性文本
+// 返回: string 首个坐标值
+func firstPositionCoord(value string) string {
+	values := textPositionValues{data: value, compressed: strings.Contains(value, "g")}
+	if number, ok := values.next(); ok {
+		return ofdNumber(number)
+	}
+	return value
 }
 
 // textCodeGlyphCount 按文本段的字符起点统计实际字形数量

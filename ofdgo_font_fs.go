@@ -51,30 +51,6 @@ type FontFS struct {
 	candidates []basefont.FileCandidate
 }
 
-// fontMemFile 内存字体文件
-type fontMemFile struct {
-	*bytes.Reader
-	info fontFileInfo
-}
-
-// fontDir 字体目录
-type fontDir struct {
-	offset  int
-	entries []fs.DirEntry
-}
-
-// fontDirEntry 字体目录条目
-type fontDirEntry struct {
-	info fontFileInfo
-}
-
-// fontFileInfo 字体文件信息
-type fontFileInfo struct {
-	name string
-	size int64
-	mode fs.FileMode
-}
-
 // NewFontFS 创建内存字体文件系统
 // 入参: fonts 字体文件列表
 // 返回: *FontFS 内存字体文件系统
@@ -246,6 +222,12 @@ func (r *Reader) MatchFontFiles(files []string, ids ...string) ([]string, error)
 	return names, nil
 }
 
+// fontMemFile 内存字体文件
+type fontMemFile struct {
+	*bytes.Reader
+	info fontFileInfo
+}
+
 // Stat 获取字体文件信息
 // 返回: fs.FileInfo 文件信息, error 错误信息
 func (f *fontMemFile) Stat() (fs.FileInfo, error) {
@@ -256,6 +238,12 @@ func (f *fontMemFile) Stat() (fs.FileInfo, error) {
 // 返回: error 错误信息
 func (f *fontMemFile) Close() error {
 	return nil
+}
+
+// fontDir 字体目录
+type fontDir struct {
+	offset  int
+	entries []fs.DirEntry
 }
 
 // Stat 获取字体目录信息
@@ -295,6 +283,11 @@ func (d *fontDir) ReadDir(count int) ([]fs.DirEntry, error) {
 	return entries, nil
 }
 
+// fontDirEntry 字体目录条目
+type fontDirEntry struct {
+	info fontFileInfo
+}
+
 // Name 获取目录条目名称
 // 返回: string 目录条目名称
 func (e fontDirEntry) Name() string {
@@ -317,6 +310,13 @@ func (e fontDirEntry) Type() fs.FileMode {
 // 返回: fs.FileInfo 文件信息, error 错误信息
 func (e fontDirEntry) Info() (fs.FileInfo, error) {
 	return e.info, nil
+}
+
+// fontFileInfo 字体文件信息
+type fontFileInfo struct {
+	name string
+	size int64
+	mode fs.FileMode
 }
 
 // Name 获取文件名

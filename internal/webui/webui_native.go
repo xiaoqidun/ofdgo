@@ -103,46 +103,6 @@ type NativeEngine struct {
 	renderIdle    []*Session
 }
 
-// nativeReader 在会话当前操作上下文中分块读取，不捕获已结束请求的上下文
-type nativeReader struct {
-	engine *NativeEngine
-	input  io.ReaderAt
-}
-
-// nativeCall 保存单次worker适配状态
-type nativeCall struct {
-	engine      *NativeEngine
-	ctx         context.Context
-	emit        func(any)
-	output      io.WriteCloser
-	buffer      bytes.Buffer
-	destination any
-	files       []any
-	currentName string
-	mime        string
-	size        int64
-	exporting   bool
-	batch       bool
-	base        string
-	extension   string
-	paged       bool
-	reserved    *NativeOutputTarget
-	committed   bool
-}
-
-// platformValue 仅承载JSON参数、字节与宿主回调，不执行脚本
-type platformValue struct{ value any }
-
-// nativeCallback 同步宿主回调
-type nativeCallback func(...any) (any, error)
-
-// nativeField 保存字段名称、位置及空值省略规则
-type nativeField struct {
-	name      string
-	index     int
-	omitEmpty bool
-}
-
 // NewNativeEngine 创建独立业务会话，resolver不接收未经授权的文件路径
 // 入参: resolve 宿主资源解析回调
 // 返回: *NativeEngine 独立原生业务引擎
@@ -365,21 +325,6 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 	return result
 }
 
-// nativeReadOnly 判断不会改变文档、字体来源或渲染配置的查询
-// 入参: name 操作名称
-// 返回: bool 是否保留空闲渲染会话
-func nativeReadOnly(name string) bool {
-	switch name {
-	case "ofdgoImagePreview", "ofdgoImagePageSize", "ofdgoCheckDocument", "ofdgoDocumentInfo", "ofdgoEditorInfo", "ofdgoDocumentNavigation", "ofdgoDocumentVersions", "ofdgoPackageDocuments",
-		"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoActionList", "ofdgoPageSettings", "ofdgoStyleResource",
-		"ofdgoOutlineLinks", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoOpenLinks", "ofdgoRenderBackends",
-		"ofdgoSVGFontData", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences",
-		"ofdgoResourceTargets", "ofdgoResourceLocations", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange":
-		return true
-	}
-	return false
-}
-
 // Close 释放会话，不关闭宿主持有的ReaderAt资源
 // 返回: error 关闭错误
 func (e *NativeEngine) Close() error {
@@ -408,115 +353,10 @@ func (e *NativeEngine) Close() error {
 	return err
 }
 
-// waitRenders 等待已开始的页面任务，取消等待不修改当前会话
-// 入参: ctx 等待上下文
-// 返回: error 取消错误
-func (e *NativeEngine) waitRenders(ctx context.Context) error {
-	e.renderMu.Lock()
-	done, count := e.renderDone, e.renderCount
-	e.renderMu.Unlock()
-	if count == 0 {
-		return ctx.Err()
-	}
-	select {
-	case <-done:
-		return ctx.Err()
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// renderParallelism 返回首次调用时采用的页面并行数
-// 返回: int 同时运行的页面任务数
-func (e *NativeEngine) renderParallelism() int {
-	if e.RenderParallelism > 0 {
-		return e.RenderParallelism
-	}
-	return runtime.GOMAXPROCS(0)
-}
-
-// renderSession 复用独立只读会话，调用时已持有引擎门控
-// 入参: ctx 渲染上下文
-// 返回: *Session 渲染会话, error 准备错误
-func (e *NativeEngine) renderSession(ctx context.Context) (*Session, error) {
-	e.renderMu.Lock()
-	defer e.renderMu.Unlock()
-	if count := len(e.renderIdle); count > 0 {
-		worker := e.renderIdle[count-1]
-		e.renderIdle[count-1] = nil
-		e.renderIdle = e.renderIdle[:count-1]
-		worker.Renderer.OutputContext = ctx
-		return worker, nil
-	}
-	source := e.currentSession
-	renderer, err := source.Renderer.Fork(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &Session{Reader: renderer.Reader, Renderer: renderer, doc: source.doc, fontFS: source.fontFS,
-		pageCache: make(map[int]*ofdgo.PageContent), boxCache: append([]pageBoxInfo(nil), source.boxCache...),
-		textCache: ofdgo.NewPageTextCache(sessionTextCacheBytes), svgFonts: make(map[string][]byte), editing: source.editing}, nil
-}
-
-// prepareRender 同步当前编辑页面的图元标识，避免并行访问编辑器缓存
-// 入参: operation 只读任务, index 页面索引
-// 返回: error 页面或取消错误
-func (e *NativeEngine) prepareRender(operation *businessEngine, index int) error {
-	e.renderMu.Lock()
-	defer e.renderMu.Unlock()
-	page, err := operation.currentEditor.Page(index)
-	if err != nil {
-		return err
-	}
-	return operation.syncEditorPageIDs(index, page)
-}
-
-// renderObjects 读取编辑图元信息，渲染状态由当前任务独立持有
-// 入参: operation 只读任务, index 页面索引
-// 返回: []any 图元信息, error 提取错误
-func (e *NativeEngine) renderObjects(operation *businessEngine, index int) ([]any, error) {
-	e.renderMu.Lock()
-	defer e.renderMu.Unlock()
-	operation.currentEditor = e.currentEditor
-	if !reflect.DeepEqual(e.currentEditor.Backends(), operation.currentSession.Renderer.Backends()) {
-		e.currentEditor.SetRenderBackends(operation.currentSession.Renderer.Backends())
-	}
-	text, err := operation.currentSession.PageText(index)
-	if err != nil {
-		return nil, err
-	}
-	return operation.editorObjects(index, text)
-}
-
-// input 读取授权源并以宿主报告的大小为准
-// 入参: ctx 调用上下文, value 输入字节或授权描述
-// 返回: io.ReaderAt 随机读取器, int64 数据大小, error 授权或读取错误
-func (e *NativeEngine) input(ctx context.Context, value any) (io.ReaderAt, int64, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, 0, err
-	}
-	if p, ok := value.(platformValue); ok {
-		value = p.value
-	}
-	if data, ok := value.([]byte); ok {
-		return nativeReader{engine: e, input: bytes.NewReader(data)}, int64(len(data)), nil
-	}
-	descriptor, ok := value.(map[string]any)
-	if !ok {
-		return nil, 0, fmt.Errorf("expected bytes or nativeFile descriptor")
-	}
-	token, ok := descriptor["nativeFile"].(string)
-	if !ok || token == "" || e.Resolve == nil {
-		return nil, 0, fmt.Errorf("unauthorized native file")
-	}
-	input, size, err := e.Resolve(token)
-	if err != nil {
-		return nil, 0, err
-	}
-	if input == nil || size < 0 {
-		return nil, 0, fmt.Errorf("invalid native file input")
-	}
-	return nativeReader{engine: e, input: input}, size, nil
+// nativeReader 在会话当前操作上下文中分块读取，不捕获已结束请求的上下文
+type nativeReader struct {
+	engine *NativeEngine
+	input  io.ReaderAt
 }
 
 // ReadAt 分块传递取消检查，宿主ReadAt自身阻塞时由宿主控制超时
@@ -542,213 +382,25 @@ func (r nativeReader) ReadAt(data []byte, offset int64) (int, error) {
 	return total, nil
 }
 
-// readBytes 分块读取完整资源并检查取消状态
-// 入参: ctx 调用上下文, value 资源参数
-// 返回: []byte 资源数据, error 读取错误
-func (e *NativeEngine) readBytes(ctx context.Context, value any) ([]byte, error) {
-	input, size, err := e.input(ctx, value)
-	if err != nil {
-		return nil, err
-	}
-	if size > int64(int(^uint(0)>>1)) {
-		return nil, fmt.Errorf("resource exceeds address space")
-	}
-	output := make([]byte, int(size))
-	for offset := int64(0); offset < size; {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		n := int(min(int64(256<<10), size-offset))
-		got, err := input.ReadAt(output[int(offset):int(offset)+n], offset)
-		if got != n {
-			return nil, io.ErrUnexpectedEOF
-		}
-		if err != nil && err != io.EOF {
-			return nil, err
-		}
-		offset += int64(got)
-	}
-	return output, nil
-}
-
-// nativePlain 保留字节并转换JSON结构
-// 入参: value 待转换值
-// 返回: any 标准原生结构
-func nativePlain(value any) any {
-	switch v := value.(type) {
-	case platformValue:
-		return nativePlain(v.value)
-	case []byte:
-		return v
-	case map[string]any:
-		result := make(map[string]any, len(v))
-		for k, item := range v {
-			result[k] = nativePlain(item)
-		}
-		return result
-	case nil:
-		return nil
-	}
-	v := reflect.ValueOf(value)
-	if v.Kind() == reflect.Slice || v.Kind() == reflect.Array {
-		result := make([]any, v.Len())
-		for i := range result {
-			result[i] = nativePlain(v.Index(i).Interface())
-		}
-		return result
-	}
-	if v.Kind() == reflect.Pointer {
-		if v.IsNil() {
-			return nil
-		}
-		return nativePlain(v.Elem().Interface())
-	}
-	if v.Kind() == reflect.Struct {
-		if fields := nativeStructFields(v.Type()); fields != nil {
-			result := make(map[string]any, len(fields))
-			for _, field := range fields {
-				item := v.Field(field.index)
-				if field.omitEmpty {
-					switch item.Kind() {
-					case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
-						if item.Len() == 0 {
-							continue
-						}
-					default:
-						if item.Kind() != reflect.Struct && item.IsZero() {
-							continue
-						}
-					}
-				}
-				result[field.name] = nativePlain(item.Interface())
-			}
-			return result
-		}
-		data, err := json.Marshal(value)
-		if err != nil {
-			panic(err)
-		}
-		var result any
-		if err := json.Unmarshal(data, &result); err != nil {
-			panic(err)
-		}
-		if fields, ok := result.(map[string]any); ok {
-			for i := 0; i < v.NumField(); i++ {
-				field := v.Type().Field(i)
-				if !field.IsExported() {
-					continue
-				}
-				name := strings.Split(field.Tag.Get("json"), ",")[0]
-				if name == "-" {
-					continue
-				}
-				if field.Anonymous && name == "" {
-					if embedded, ok := nativePlain(v.Field(i).Interface()).(map[string]any); ok {
-						for key, value := range embedded {
-							if _, exists := fields[key]; exists {
-								fields[key] = value
-							}
-						}
-					}
-					continue
-				}
-				if name == "" {
-					name = field.Name
-				}
-				if _, exists := fields[name]; exists {
-					fields[name] = nativePlain(v.Field(i).Interface())
-				}
-			}
-		}
-		return result
-	}
-	if v.Kind() == reflect.Float32 || v.Kind() == reflect.Float64 {
-		if number := v.Float(); math.IsNaN(number) || math.IsInf(number, 0) {
-			_, err := json.Marshal(value)
-			panic(err)
-		}
-	}
-	return value
-}
-
-// nativeStructFields 按类型复用普通结构体字段，自定义编码和嵌入字段交给JSON处理
-// 入参: value 结构体类型
-// 返回: []nativeField 字段列表，nil表示使用标准编码
-func nativeStructFields(value reflect.Type) []nativeField {
-	if fields, ok := nativeFields.Load(value); ok {
-		return fields.([]nativeField)
-	}
-	var fields []nativeField
-	if nativePlainType(value, make(map[reflect.Type]bool)) {
-		fields = make([]nativeField, 0, value.NumField())
-		for i := 0; i < value.NumField(); i++ {
-			field := value.Field(i)
-			if !field.IsExported() || field.Tag.Get("json") == "-" {
-				continue
-			}
-			name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
-			if name == "" {
-				name = field.Name
-			}
-			fields = append(fields, nativeField{name: name, index: i, omitEmpty: options == "omitempty"})
-		}
-	}
-	stored, _ := nativeFields.LoadOrStore(value, fields)
-	return stored.([]nativeField)
-}
-
-// nativePlainType 检查类型是否可直接展开，递归引用及复杂字段沿用标准编码
-// 入参: value 字段类型, visiting 当前类型路径
-// 返回: bool 是否可直接展开
-func nativePlainType(value reflect.Type, visiting map[reflect.Type]bool) bool {
-	if visiting[value] || value.Implements(reflect.TypeFor[json.Marshaler]()) || value.Implements(reflect.TypeFor[encoding.TextMarshaler]()) || reflect.PointerTo(value).Implements(reflect.TypeFor[json.Marshaler]()) || reflect.PointerTo(value).Implements(reflect.TypeFor[encoding.TextMarshaler]()) || value == reflect.TypeFor[json.Number]() {
-		return false
-	}
-	visiting[value] = true
-	defer delete(visiting, value)
-	switch value.Kind() {
-	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr, reflect.Float32, reflect.Float64, reflect.String:
-		return true
-	case reflect.Pointer, reflect.Slice, reflect.Array:
-		return nativePlainType(value.Elem(), visiting)
-	case reflect.Struct:
-		names := make(map[string]bool)
-		for i := 0; i < value.NumField(); i++ {
-			field := value.Field(i)
-			if field.Anonymous {
-				return false
-			}
-			if !field.IsExported() || field.Tag.Get("json") == "-" {
-				continue
-			}
-			name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
-			if name == "" {
-				name = field.Name
-			}
-			if name == "-" || names[name] || options != "" && options != "omitempty" || !nativePlainType(field.Type, visiting) {
-				return false
-			}
-			for _, char := range name {
-				if char != '_' && char != '-' && (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') {
-					return false
-				}
-			}
-			names[name] = true
-		}
-		return true
-	}
-	return false
-}
-
-// nativeFailure 转换结构化业务错误
-// 入参: err 业务错误
-// 返回: map[string]any 错误描述映射
-func nativeFailure(err error) map[string]any {
-	result := nativePlain(failureResult(err)).(map[string]any)
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		result["canceled"] = true
-	}
-	return result
+// nativeCall 保存单次worker适配状态
+type nativeCall struct {
+	engine      *NativeEngine
+	ctx         context.Context
+	emit        func(any)
+	output      io.WriteCloser
+	buffer      bytes.Buffer
+	destination any
+	files       []any
+	currentName string
+	mime        string
+	size        int64
+	exporting   bool
+	batch       bool
+	base        string
+	extension   string
+	paged       bool
+	reserved    *NativeOutputTarget
+	committed   bool
 }
 
 // event 发送标准worker进度
@@ -1122,51 +774,8 @@ func (c *nativeCall) abort() error {
 	return err
 }
 
-// nativeOutputBase 清理worker输出文件名，冲突后缀由宿主排他创建决定
-// 入参: value 文件名参数
-// 返回: string 清理后的基础文件名
-func nativeOutputBase(value platformValue) string {
-	base := "document"
-	if value.Type() == platformTypeString {
-		base = value.String()
-	}
-	base = strings.Map(func(r rune) rune {
-		if r < 32 || strings.ContainsRune("<>:\"/\\|?*", r) {
-			return '_'
-		}
-		return r
-	}, base)
-	base = strings.TrimRight(base, ". ")
-	if base == "" {
-		return "document"
-	}
-	return base
-}
-
-// inputFromValue 读取宿主授权的随机读取源
-// 入参: value 输入源参数
-// 返回: *ofdgo.Input 文档输入源, error 读取错误
-func (e *businessEngine) inputFromValue(value platformValue) (*ofdgo.Input, error) {
-	reader, size, err := e.resolveInput(e.operationContext(), value.value)
-	if err != nil {
-		return nil, err
-	}
-	return ofdgo.NewInput(reader, size)
-}
-
-// platformValueOf 包装参数
-// 入参: v Go值
-// 返回: platformValue 包装后的参数值
-func platformValueOf(v any) platformValue {
-	if p, ok := v.(platformValue); ok {
-		return p
-	}
-	return platformValue{v}
-}
-
-// platformNull 返回空参数
-// 返回: platformValue 空参数值
-func platformNull() platformValue { return platformValue{} }
+// platformValue 仅承载JSON参数、字节与宿主回调，不执行脚本
+type platformValue struct{ value any }
 
 // Type 返回协议参数类型
 // 返回: int 参数类型标识
@@ -1282,6 +891,397 @@ func (v platformValue) Invoke(args ...any) platformValue {
 	}
 	return platformValueOf(result)
 }
+
+// nativeCallback 同步宿主回调
+type nativeCallback func(...any) (any, error)
+
+// nativeField 保存字段名称、位置及空值省略规则
+type nativeField struct {
+	name      string
+	index     int
+	omitEmpty bool
+}
+
+// nativeReadOnly 判断不会改变文档、字体来源或渲染配置的查询
+// 入参: name 操作名称
+// 返回: bool 是否保留空闲渲染会话
+func nativeReadOnly(name string) bool {
+	switch name {
+	case "ofdgoImagePreview", "ofdgoImagePageSize", "ofdgoCheckDocument", "ofdgoDocumentInfo", "ofdgoEditorInfo", "ofdgoDocumentNavigation", "ofdgoDocumentVersions", "ofdgoPackageDocuments",
+		"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoActionList", "ofdgoPageSettings", "ofdgoStyleResource",
+		"ofdgoOutlineLinks", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoOpenLinks", "ofdgoRenderBackends",
+		"ofdgoSVGFontData", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences",
+		"ofdgoResourceTargets", "ofdgoResourceLocations", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange":
+		return true
+	}
+	return false
+}
+
+// waitRenders 等待已开始的页面任务，取消等待不修改当前会话
+// 入参: ctx 等待上下文
+// 返回: error 取消错误
+func (e *NativeEngine) waitRenders(ctx context.Context) error {
+	e.renderMu.Lock()
+	done, count := e.renderDone, e.renderCount
+	e.renderMu.Unlock()
+	if count == 0 {
+		return ctx.Err()
+	}
+	select {
+	case <-done:
+		return ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// renderParallelism 返回首次调用时采用的页面并行数
+// 返回: int 同时运行的页面任务数
+func (e *NativeEngine) renderParallelism() int {
+	if e.RenderParallelism > 0 {
+		return e.RenderParallelism
+	}
+	return runtime.GOMAXPROCS(0)
+}
+
+// renderSession 复用独立只读会话，调用时已持有引擎门控
+// 入参: ctx 渲染上下文
+// 返回: *Session 渲染会话, error 准备错误
+func (e *NativeEngine) renderSession(ctx context.Context) (*Session, error) {
+	e.renderMu.Lock()
+	defer e.renderMu.Unlock()
+	if count := len(e.renderIdle); count > 0 {
+		worker := e.renderIdle[count-1]
+		e.renderIdle[count-1] = nil
+		e.renderIdle = e.renderIdle[:count-1]
+		worker.Renderer.OutputContext = ctx
+		return worker, nil
+	}
+	source := e.currentSession
+	renderer, err := source.Renderer.Fork(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &Session{Reader: renderer.Reader, Renderer: renderer, doc: source.doc, fontFS: source.fontFS,
+		pageCache: make(map[int]*ofdgo.PageContent), boxCache: append([]pageBoxInfo(nil), source.boxCache...),
+		textCache: ofdgo.NewPageTextCache(sessionTextCacheBytes), svgFonts: make(map[string][]byte), editing: source.editing}, nil
+}
+
+// prepareRender 同步当前编辑页面的图元标识，避免并行访问编辑器缓存
+// 入参: operation 只读任务, index 页面索引
+// 返回: error 页面或取消错误
+func (e *NativeEngine) prepareRender(operation *businessEngine, index int) error {
+	e.renderMu.Lock()
+	defer e.renderMu.Unlock()
+	page, err := operation.currentEditor.Page(index)
+	if err != nil {
+		return err
+	}
+	return operation.syncEditorPageIDs(index, page)
+}
+
+// renderObjects 读取编辑图元信息，渲染状态由当前任务独立持有
+// 入参: operation 只读任务, index 页面索引
+// 返回: []any 图元信息, error 提取错误
+func (e *NativeEngine) renderObjects(operation *businessEngine, index int) ([]any, error) {
+	e.renderMu.Lock()
+	defer e.renderMu.Unlock()
+	operation.currentEditor = e.currentEditor
+	if !reflect.DeepEqual(e.currentEditor.Backends(), operation.currentSession.Renderer.Backends()) {
+		e.currentEditor.SetRenderBackends(operation.currentSession.Renderer.Backends())
+	}
+	text, err := operation.currentSession.PageText(index)
+	if err != nil {
+		return nil, err
+	}
+	return operation.editorObjects(index, text)
+}
+
+// input 读取授权源并以宿主报告的大小为准
+// 入参: ctx 调用上下文, value 输入字节或授权描述
+// 返回: io.ReaderAt 随机读取器, int64 数据大小, error 授权或读取错误
+func (e *NativeEngine) input(ctx context.Context, value any) (io.ReaderAt, int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	if p, ok := value.(platformValue); ok {
+		value = p.value
+	}
+	if data, ok := value.([]byte); ok {
+		return nativeReader{engine: e, input: bytes.NewReader(data)}, int64(len(data)), nil
+	}
+	descriptor, ok := value.(map[string]any)
+	if !ok {
+		return nil, 0, fmt.Errorf("expected bytes or nativeFile descriptor")
+	}
+	token, ok := descriptor["nativeFile"].(string)
+	if !ok || token == "" || e.Resolve == nil {
+		return nil, 0, fmt.Errorf("unauthorized native file")
+	}
+	input, size, err := e.Resolve(token)
+	if err != nil {
+		return nil, 0, err
+	}
+	if input == nil || size < 0 {
+		return nil, 0, fmt.Errorf("invalid native file input")
+	}
+	return nativeReader{engine: e, input: input}, size, nil
+}
+
+// readBytes 分块读取完整资源并检查取消状态
+// 入参: ctx 调用上下文, value 资源参数
+// 返回: []byte 资源数据, error 读取错误
+func (e *NativeEngine) readBytes(ctx context.Context, value any) ([]byte, error) {
+	input, size, err := e.input(ctx, value)
+	if err != nil {
+		return nil, err
+	}
+	if size > int64(int(^uint(0)>>1)) {
+		return nil, fmt.Errorf("resource exceeds address space")
+	}
+	output := make([]byte, int(size))
+	for offset := int64(0); offset < size; {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		n := int(min(int64(256<<10), size-offset))
+		got, err := input.ReadAt(output[int(offset):int(offset)+n], offset)
+		if got != n {
+			return nil, io.ErrUnexpectedEOF
+		}
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		offset += int64(got)
+	}
+	return output, nil
+}
+
+// nativePlain 保留字节并转换JSON结构
+// 入参: value 待转换值
+// 返回: any 标准原生结构
+func nativePlain(value any) any {
+	switch v := value.(type) {
+	case platformValue:
+		return nativePlain(v.value)
+	case []byte:
+		return v
+	case map[string]any:
+		result := make(map[string]any, len(v))
+		for k, item := range v {
+			result[k] = nativePlain(item)
+		}
+		return result
+	case nil:
+		return nil
+	}
+	v := reflect.ValueOf(value)
+	if v.Kind() == reflect.Slice || v.Kind() == reflect.Array {
+		result := make([]any, v.Len())
+		for i := range result {
+			result[i] = nativePlain(v.Index(i).Interface())
+		}
+		return result
+	}
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil
+		}
+		return nativePlain(v.Elem().Interface())
+	}
+	if v.Kind() == reflect.Struct {
+		if fields := nativeStructFields(v.Type()); fields != nil {
+			result := make(map[string]any, len(fields))
+			for _, field := range fields {
+				item := v.Field(field.index)
+				if field.omitEmpty {
+					switch item.Kind() {
+					case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
+						if item.Len() == 0 {
+							continue
+						}
+					default:
+						if item.Kind() != reflect.Struct && item.IsZero() {
+							continue
+						}
+					}
+				}
+				result[field.name] = nativePlain(item.Interface())
+			}
+			return result
+		}
+		data, err := json.Marshal(value)
+		if err != nil {
+			panic(err)
+		}
+		var result any
+		if err := json.Unmarshal(data, &result); err != nil {
+			panic(err)
+		}
+		if fields, ok := result.(map[string]any); ok {
+			for i := 0; i < v.NumField(); i++ {
+				field := v.Type().Field(i)
+				if !field.IsExported() {
+					continue
+				}
+				name := strings.Split(field.Tag.Get("json"), ",")[0]
+				if name == "-" {
+					continue
+				}
+				if field.Anonymous && name == "" {
+					if embedded, ok := nativePlain(v.Field(i).Interface()).(map[string]any); ok {
+						for key, value := range embedded {
+							if _, exists := fields[key]; exists {
+								fields[key] = value
+							}
+						}
+					}
+					continue
+				}
+				if name == "" {
+					name = field.Name
+				}
+				if _, exists := fields[name]; exists {
+					fields[name] = nativePlain(v.Field(i).Interface())
+				}
+			}
+		}
+		return result
+	}
+	if v.Kind() == reflect.Float32 || v.Kind() == reflect.Float64 {
+		if number := v.Float(); math.IsNaN(number) || math.IsInf(number, 0) {
+			_, err := json.Marshal(value)
+			panic(err)
+		}
+	}
+	return value
+}
+
+// nativeStructFields 按类型复用普通结构体字段，自定义编码和嵌入字段交给JSON处理
+// 入参: value 结构体类型
+// 返回: []nativeField 字段列表，nil表示使用标准编码
+func nativeStructFields(value reflect.Type) []nativeField {
+	if fields, ok := nativeFields.Load(value); ok {
+		return fields.([]nativeField)
+	}
+	var fields []nativeField
+	if nativePlainType(value, make(map[reflect.Type]bool)) {
+		fields = make([]nativeField, 0, value.NumField())
+		for i := 0; i < value.NumField(); i++ {
+			field := value.Field(i)
+			if !field.IsExported() || field.Tag.Get("json") == "-" {
+				continue
+			}
+			name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
+			if name == "" {
+				name = field.Name
+			}
+			fields = append(fields, nativeField{name: name, index: i, omitEmpty: options == "omitempty"})
+		}
+	}
+	stored, _ := nativeFields.LoadOrStore(value, fields)
+	return stored.([]nativeField)
+}
+
+// nativePlainType 检查类型是否可直接展开，递归引用及复杂字段沿用标准编码
+// 入参: value 字段类型, visiting 当前类型路径
+// 返回: bool 是否可直接展开
+func nativePlainType(value reflect.Type, visiting map[reflect.Type]bool) bool {
+	if visiting[value] || value.Implements(reflect.TypeFor[json.Marshaler]()) || value.Implements(reflect.TypeFor[encoding.TextMarshaler]()) || reflect.PointerTo(value).Implements(reflect.TypeFor[json.Marshaler]()) || reflect.PointerTo(value).Implements(reflect.TypeFor[encoding.TextMarshaler]()) || value == reflect.TypeFor[json.Number]() {
+		return false
+	}
+	visiting[value] = true
+	defer delete(visiting, value)
+	switch value.Kind() {
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr, reflect.Float32, reflect.Float64, reflect.String:
+		return true
+	case reflect.Pointer, reflect.Slice, reflect.Array:
+		return nativePlainType(value.Elem(), visiting)
+	case reflect.Struct:
+		names := make(map[string]bool)
+		for i := 0; i < value.NumField(); i++ {
+			field := value.Field(i)
+			if field.Anonymous {
+				return false
+			}
+			if !field.IsExported() || field.Tag.Get("json") == "-" {
+				continue
+			}
+			name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
+			if name == "" {
+				name = field.Name
+			}
+			if name == "-" || names[name] || options != "" && options != "omitempty" || !nativePlainType(field.Type, visiting) {
+				return false
+			}
+			for _, char := range name {
+				if char != '_' && char != '-' && (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') {
+					return false
+				}
+			}
+			names[name] = true
+		}
+		return true
+	}
+	return false
+}
+
+// nativeFailure 转换结构化业务错误
+// 入参: err 业务错误
+// 返回: map[string]any 错误描述映射
+func nativeFailure(err error) map[string]any {
+	result := nativePlain(failureResult(err)).(map[string]any)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		result["canceled"] = true
+	}
+	return result
+}
+
+// nativeOutputBase 清理worker输出文件名，冲突后缀由宿主排他创建决定
+// 入参: value 文件名参数
+// 返回: string 清理后的基础文件名
+func nativeOutputBase(value platformValue) string {
+	base := "document"
+	if value.Type() == platformTypeString {
+		base = value.String()
+	}
+	base = strings.Map(func(r rune) rune {
+		if r < 32 || strings.ContainsRune("<>:\"/\\|?*", r) {
+			return '_'
+		}
+		return r
+	}, base)
+	base = strings.TrimRight(base, ". ")
+	if base == "" {
+		return "document"
+	}
+	return base
+}
+
+// inputFromValue 读取宿主授权的随机读取源
+// 入参: value 输入源参数
+// 返回: *ofdgo.Input 文档输入源, error 读取错误
+func (e *businessEngine) inputFromValue(value platformValue) (*ofdgo.Input, error) {
+	reader, size, err := e.resolveInput(e.operationContext(), value.value)
+	if err != nil {
+		return nil, err
+	}
+	return ofdgo.NewInput(reader, size)
+}
+
+// platformValueOf 包装参数
+// 入参: v Go值
+// 返回: platformValue 包装后的参数值
+func platformValueOf(v any) platformValue {
+	if p, ok := v.(platformValue); ok {
+		return p
+	}
+	return platformValue{v}
+}
+
+// platformNull 返回空参数
+// 返回: platformValue 空参数值
+func platformNull() platformValue { return platformValue{} }
 
 // platformCopyBytes 复制读取块
 // 入参: dst 目标切片, src 原生字节参数

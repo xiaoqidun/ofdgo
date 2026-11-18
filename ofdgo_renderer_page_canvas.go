@@ -25,63 +25,6 @@ type canvasPageVisitor struct {
 	height   float64
 }
 
-// renderCanvasPage 渲染特定页面内容
-// 入参: page 页面内容
-// 返回: *canvas.Canvas 画布实例, error 错误信息
-func (r *Renderer) renderCanvasPage(page *PageContent) (*canvas.Canvas, error) {
-	box, err := r.GetPageBox(page)
-	if err != nil {
-		return nil, err
-	}
-	width, height := box.W, box.H
-	c := canvas.New(width, height)
-	ctx := canvas.NewContext(c)
-	if err := r.renderCanvasPageToContext(ctx, page, !r.TransparentBackground); err != nil {
-		return nil, err
-	}
-	return c, nil
-}
-
-// renderCanvasContext 渲染页面到默认解释器上下文
-// 入参: ctx 画布上下文, page 页面内容
-// 返回: error 错误信息
-func (r *Renderer) renderCanvasContext(ctx *canvas.Context, page *PageContent) error {
-	renderer := *r
-	renderer.decodeImages = true
-	return renderer.renderCanvasPageToContext(ctx, page, !r.TransparentBackground)
-}
-
-// renderCanvasPageToContext 渲染页面到指定上下文
-// 入参: ctx 画布上下文, page 页面内容, drawBackground 是否绘制页面背景
-// 返回: error 错误信息
-func (r *Renderer) renderCanvasPageToContext(ctx *canvas.Context, page *PageContent, drawBackground bool) error {
-	r.renderError = nil
-	box, err := r.GetPageBox(page)
-	if err != nil {
-		return err
-	}
-	if r.OnPageText != nil {
-		renderer := *r
-		renderer.pageText = &PageText{}
-		r = &renderer
-	}
-	pageH := box.H
-	if drawBackground {
-		ctx.SetFillColor(canvas.White)
-		ctx.DrawPath(0, 0, canvas.Rectangle(box.W, box.H))
-	}
-	if err := r.WalkPage(page, &canvasPageVisitor{r, ctx, pageH}); err != nil {
-		return err
-	}
-	if r.renderError != nil {
-		return r.renderError
-	}
-	if r.OnPageText != nil {
-		r.OnPageText(page, r.pageText)
-	}
-	return nil
-}
-
 // DrawObject 绘制叶子对象，转换页面坐标裁剪
 // 入参: object 源对象, state 继承状态
 // 返回: error 绘制错误
@@ -154,6 +97,63 @@ func (v *canvasPageVisitor) SkipObjects(count int) {
 	if groups, ok := v.ctx.Renderer.(interface{ skipObjects(int) }); ok {
 		groups.skipObjects(count)
 	}
+}
+
+// renderCanvasPage 渲染特定页面内容
+// 入参: page 页面内容
+// 返回: *canvas.Canvas 画布实例, error 错误信息
+func (r *Renderer) renderCanvasPage(page *PageContent) (*canvas.Canvas, error) {
+	box, err := r.GetPageBox(page)
+	if err != nil {
+		return nil, err
+	}
+	width, height := box.W, box.H
+	c := canvas.New(width, height)
+	ctx := canvas.NewContext(c)
+	if err := r.renderCanvasPageToContext(ctx, page, !r.TransparentBackground); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// renderCanvasContext 渲染页面到默认解释器上下文
+// 入参: ctx 画布上下文, page 页面内容
+// 返回: error 错误信息
+func (r *Renderer) renderCanvasContext(ctx *canvas.Context, page *PageContent) error {
+	renderer := *r
+	renderer.decodeImages = true
+	return renderer.renderCanvasPageToContext(ctx, page, !r.TransparentBackground)
+}
+
+// renderCanvasPageToContext 渲染页面到指定上下文
+// 入参: ctx 画布上下文, page 页面内容, drawBackground 是否绘制页面背景
+// 返回: error 错误信息
+func (r *Renderer) renderCanvasPageToContext(ctx *canvas.Context, page *PageContent, drawBackground bool) error {
+	r.renderError = nil
+	box, err := r.GetPageBox(page)
+	if err != nil {
+		return err
+	}
+	if r.OnPageText != nil {
+		renderer := *r
+		renderer.pageText = &PageText{}
+		r = &renderer
+	}
+	pageH := box.H
+	if drawBackground {
+		ctx.SetFillColor(canvas.White)
+		ctx.DrawPath(0, 0, canvas.Rectangle(box.W, box.H))
+	}
+	if err := r.WalkPage(page, &canvasPageVisitor{r, ctx, pageH}); err != nil {
+		return err
+	}
+	if r.renderError != nil {
+		return r.renderError
+	}
+	if r.OnPageText != nil {
+		r.OnPageText(page, r.pageText)
+	}
+	return nil
 }
 
 // canvasRenderState 将Canvas裁剪转换为公共页面状态

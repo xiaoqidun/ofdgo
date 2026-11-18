@@ -30,6 +30,13 @@ type colorProfile struct {
 	err   error
 }
 
+// srgb 转换归一化源分量，不在ICC变换前量化为8位
+// 入参: values 源分量
+// 返回: [3]float64 sRGB分量, error 变换错误
+func (p *colorProfile) srgb(values [4]float64) ([3]float64, error) {
+	return p.space.SRGB(values[:p.space.Components()], p.space.DefaultIntent())
+}
+
 // colorProfileUsed 判断新增ICC文件是否被颜色空间引用，不作为资源XML登记
 // 入参: spaces 当前使用的新增颜色空间
 // 返回: bool 是否保留文件
@@ -94,13 +101,6 @@ func (r *Renderer) colorDefinition(id string) *ColorSpace {
 	}
 	space, _ := resourceValue(r.Reader.colorSpaceCache, id)
 	return space
-}
-
-// srgb 转换归一化源分量，不在ICC变换前量化为8位
-// 入参: values 源分量
-// 返回: [3]float64 sRGB分量, error 变换错误
-func (p *colorProfile) srgb(values [4]float64) ([3]float64, error) {
-	return p.space.SRGB(values[:p.space.Components()], p.space.DefaultIntent())
 }
 
 // displayColor 按源模型及配置转换显示颜色，保持源分量精度

@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 

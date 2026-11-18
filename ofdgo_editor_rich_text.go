@@ -35,39 +35,6 @@ const richTextTagType = "OFDGo.RichText"
 // richTextNamespace 标识富文本编辑语义的命名空间，版本仅随不兼容的语义变更升级
 const richTextNamespace = "https://ofdgo.aite.me/ns/rich-text/1"
 
-// richTextMetadata 不保存字体编号，以标准主文字对象序号恢复当前文档字体
-type richTextMetadata struct {
-	Version int        `json:"version"`
-	Value   RichText   `json:"value"`
-	Frame   Box        `json:"frame"`
-	Extent  Box        `json:"extent"`
-	Offset  [2]float64 `json:"offset"`
-	Anchors []int      `json:"anchors"`
-	Digest  string     `json:"digest"`
-}
-
-// richTextSnapshot 保存对象及嵌套成员的不可变编辑语义，成员按绘制顺序定位
-type richTextSnapshot struct {
-	metadata *richTextMetadata
-	children map[int]*richTextSnapshot
-}
-
-// richTextEntry 保存标引入口及延迟报告的损坏诊断
-type richTextEntry struct {
-	index    int
-	metadata richTextMetadata
-	err      error
-}
-
-// richTextIndex 缓存当前文档修订的标引，不创建页面预览快照
-type richTextIndex struct {
-	source   *editorSource
-	revision uint64
-	remaps   map[string]int
-	entries  map[string]richTextEntry
-	err      error
-}
-
 // AddRichText 原子添加标准组合及持久化编辑标引，成功时只产生一条历史
 // 按给定宽度排版，高度随内容自适应
 // 入参: page 页面索引, box 页面编辑框, value 富文本内容
@@ -137,65 +104,6 @@ func (e *Editor) ResizeRichTextFrame(page int, id string, offset, width float64)
 	return e.updateRichTextFrame(page, id, value, offset, width, false)
 }
 
-// updateRichTextFrame 统一提交正文或编辑框变化，width为零时沿用原宽度模式
-// 入参: page 页面索引, id 对象标识, value 新内容, offset 局部偏移, width 可选宽度, reflow 是否显式重排原文
-// 返回: error 校验或提交错误
-func (e *Editor) updateRichTextFrame(page int, id string, value RichText, offset, width float64, reflow bool) error {
-	return e.Transaction(func(e *Editor) error {
-		old, err := e.Object(page, id)
-		if err != nil {
-			return err
-		}
-		current, frame, matrix, err := e.PrepareRichText(page, ObjectPath{ID: id}, reflow)
-		if err != nil {
-			return err
-		}
-		if err := value.Validate(); err != nil {
-			return err
-		}
-		if width > 0 {
-			value.AutoWidth = false
-		}
-		if old.Type == "CompositeObject" && offset == 0 && (width == 0 || width == frame.W) && reflect.DeepEqual(normalizeRichText(current), normalizeRichText(value)) {
-			return nil
-		}
-		if width > 0 {
-			frame.W = width
-			matrix = matrix.Multiply(TranslationMatrix(offset, 0))
-		}
-		object, meta, err := e.prepareRichText(Box{W: frame.W, H: frame.H}, value)
-		if err != nil {
-			return err
-		}
-		object.CompositeGraphicUnit.ID = id
-		placement := richTextPlacement(meta, matrix)
-		object.CompositeGraphicUnit.Boundary = placement.Boundary
-		object.CompositeGraphicUnit.CTM = placement.CTM
-		if old.Type == "CompositeObject" {
-			unit := old.CompositeGraphicUnit
-			if unit.Clips != nil {
-				return fmt.Errorf("clipped rich text requires explicit clip removal before reflow")
-			}
-			unit.ResourceID = object.CompositeGraphicUnit.ResourceID
-			unit.Boundary = placement.Boundary
-			unit.CTM = placement.CTM
-			object.CompositeGraphicUnit = unit
-		}
-		index := -1
-		if old.Type == "CompositeObject" {
-			entry, err := e.richTextEntry(page, id)
-			if err != nil {
-				return err
-			}
-			index = entry.index
-		}
-		if err := e.updateObjects(page, []GraphicObject{object}, true); err != nil {
-			return err
-		}
-		return e.putRichTextMetadata(page, id, meta, index)
-	})
-}
-
 // DeleteRichText 原子删除富文本及其标引，不删除其他实例引用的共享资源
 // 入参: page 页面索引, id 对象标识
 // 返回: error 识别或删除错误
@@ -231,44 +139,6 @@ func (e *Editor) RichText(page int, id string) (RichText, error) {
 		return RichText{}, err
 	}
 	return e.richTextObject(page, object)
-}
-
-// richTextObject 读取对象的编辑标引并校验标准内容
-// 入参: page 页面索引, object 当前对象
-// 返回: RichText 编辑内容, error 识别或持久化错误
-func (e *Editor) richTextObject(page int, object GraphicObject) (RichText, error) {
-	if object.Type == "TextObject" {
-		return e.promoteRichText(page, object)
-	}
-	if object.Type != "CompositeObject" {
-		return RichText{}, ErrNotRichText
-	}
-	entry, err := e.richTextEntry(page, editorObjectID(object))
-	if err != nil {
-		return RichText{}, err
-	}
-	unit, err := e.compositeDefinition(object.CompositeGraphicUnit.ResourceID)
-	if err != nil {
-		return RichText{}, fmt.Errorf("rich text resource: %w", err)
-	}
-	objects := unit.object.CompositeGraphicUnit.Objects
-	if richTextDigest(objects) != entry.metadata.Digest {
-		return RichText{}, fmt.Errorf("rich text content no longer matches its editing metadata")
-	}
-	value := cloneEditorData(entry.metadata.Value)
-	if len(entry.metadata.Anchors) != len(value.Runs) {
-		return RichText{}, fmt.Errorf("invalid rich text font anchors")
-	}
-	for i, anchor := range entry.metadata.Anchors {
-		if anchor < 0 || anchor >= len(objects) || objects[anchor].Type != "TextObject" {
-			return RichText{}, fmt.Errorf("invalid rich text font anchor %d", i)
-		}
-		value.Runs[i].Format.Font = objects[anchor].TextObject.Font
-	}
-	if err := value.Validate(); err != nil {
-		return RichText{}, fmt.Errorf("invalid rich text metadata: %w", err)
-	}
-	return value, nil
 }
 
 // RichTextFrame 返回原始局部编辑框及局部到页面的完整变换，不按组合缩放重新解释宽度
@@ -349,6 +219,263 @@ func (e *Editor) CompositeRichText(page int, member CompositeMember) (RichText, 
 // 返回: error 校验或提交错误
 func (e *Editor) UpdateCompositeRichText(page int, path ObjectPath, index int, value RichText, offset, width float64) error {
 	return e.updateCompositeRichText(page, path, index, value, offset, width, false)
+}
+
+// TargetRichText 读取完整路径文字的富文本模型，普通文字仅在可验证布局时提升
+// 入参: page 页面索引, path 完整对象路径
+// 返回: RichText 独立模型, error 路径或不安全提升错误
+func (e *Editor) TargetRichText(page int, path ObjectPath) (RichText, error) {
+	value, _, _, err := e.PrepareRichText(page, path, false)
+	return value, err
+}
+
+// PrepareRichText 读取独立富文本模型和局部编辑框，定位文字采用自然宽度，已知段落保留宽度
+// 显式重排保留原首行起点及页面变换，不从原始Boundary推断段落宽度
+// 入参: page 页面索引, path 完整对象路径, reflow 是否允许重排普通文字
+// 返回: RichText 内容, Box 局部编辑框, Matrix 页面变换, error 路径、外观或排版错误
+func (e *Editor) PrepareRichText(page int, path ObjectPath, reflow bool) (RichText, Box, Matrix, error) {
+	var text TextObject
+	var matrix Matrix
+	if len(path.Children) == 0 {
+		if path.Annotation != "" {
+			return RichText{}, Box{}, Matrix{}, ErrNotRichText
+		}
+		object, err := e.Object(page, path.ID)
+		if err != nil {
+			return RichText{}, Box{}, Matrix{}, err
+		}
+		if object.Type != "TextObject" {
+			value, err := e.RichText(page, path.ID)
+			if err != nil {
+				return RichText{}, Box{}, Matrix{}, err
+			}
+			frame, matrix, err := e.RichTextFrame(page, path.ID)
+			return value, frame, matrix, err
+		}
+		if origin := e.objectOrigin(path.ID); origin != nil && !editorXMLSupported(origin.node) {
+			return RichText{}, Box{}, Matrix{}, ErrNotRichText
+		}
+		layer, _, err := e.findObject(page, path.ID)
+		if err != nil {
+			return RichText{}, Box{}, Matrix{}, err
+		}
+		object, err = e.resolveEditorStyle(object, layer.DrawParam)
+		if err != nil {
+			return RichText{}, Box{}, Matrix{}, err
+		}
+		text = object.TextObject
+		box, err := creationBox(text.Boundary)
+		if err != nil {
+			return RichText{}, Box{}, Matrix{}, err
+		}
+		matrix = TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(text.CTM))
+	} else {
+		index := path.Children[len(path.Children)-1]
+		path.Children = path.Children[:len(path.Children)-1]
+		member, err := e.CompositeObject(page, path, index)
+		if err != nil {
+			return RichText{}, Box{}, Matrix{}, err
+		}
+		if member.Object.Type != "TextObject" {
+			return e.CompositeRichText(page, member)
+		}
+		text, matrix = member.Object.TextObject, member.Matrix
+	}
+	frame, err := text.TextFrame()
+	if err != nil {
+		return RichText{}, Box{}, Matrix{}, err
+	}
+	dx, dy, err := e.richPlainOffset(text)
+	if err != nil {
+		return RichText{}, Box{}, Matrix{}, err
+	}
+	autoWidth := text.layout == nil || text.layout.autoWidth
+	if reflow {
+		value, layout := text.TextLayout()
+		layout.AutoBidi = true
+		if err := e.LayoutText(&text, value, layout); err != nil {
+			return RichText{}, Box{}, Matrix{}, err
+		}
+	}
+	value, err := e.promoteTextValue(text)
+	if err != nil {
+		return RichText{}, Box{}, Matrix{}, err
+	}
+	value.AutoWidth = autoWidth
+	if autoWidth {
+		result, err := e.layoutRichText(value, frame.W)
+		if err != nil {
+			return RichText{}, Box{}, Matrix{}, err
+		}
+		frame.W, frame.H = result.width, result.bounds.Y+result.bounds.H
+	}
+	return value, Box{W: frame.W, H: frame.H}, matrix.Multiply(TranslationMatrix(dx, dy)), nil
+}
+
+// ReflowRichText 原子重排完整路径文字，保留局部宽度、页面变换及共享实例隔离
+// 入参: page 页面索引, path 完整对象路径, value 新的富文本内容
+// 返回: error 路径、排版或提交错误
+func (e *Editor) ReflowRichText(page int, path ObjectPath, value RichText) error {
+	if len(path.Children) == 0 {
+		if path.Annotation != "" {
+			return ErrNotRichText
+		}
+		return e.updateRichTextFrame(page, path.ID, value, 0, 0, true)
+	}
+	index := path.Children[len(path.Children)-1]
+	path.Children = path.Children[:len(path.Children)-1]
+	return e.updateCompositeRichText(page, path, index, value, 0, 0, true)
+}
+
+// LayoutTextFrame 统一调整普通文字及富文本的段落选项和局部宽度，保留原首行起点与页面变换
+// 对齐应用于所有段落；定位文字沿用自然宽度，显式改宽后采用固定宽度，提交一条撤销记录
+// 入参: page 页面索引, path 完整对象路径, options 段落选项, offset 左边界局部偏移, width 新宽度，零值保留宽度模式
+// 返回: error 路径、尺寸或排版错误
+func (e *Editor) LayoutTextFrame(page int, path ObjectPath, options TextLayout, offset, width float64) error {
+	if !finite(offset) || !finite(width) || width < 0 || width == 0 && offset != 0 {
+		return fmt.Errorf("invalid text frame")
+	}
+	value, _, _, err := e.PrepareRichText(page, path, true)
+	if err != nil {
+		return err
+	}
+	value.Layout, value.Paragraphs = options, nil
+	if len(path.Children) == 0 {
+		return e.updateRichTextFrame(page, path.ID, value, offset, width, true)
+	}
+	index := path.Children[len(path.Children)-1]
+	path.Children = path.Children[:len(path.Children)-1]
+	return e.updateCompositeRichText(page, path, index, value, offset, width, true)
+}
+
+// richTextMetadata 不保存字体编号，以标准主文字对象序号恢复当前文档字体
+type richTextMetadata struct {
+	Version int        `json:"version"`
+	Value   RichText   `json:"value"`
+	Frame   Box        `json:"frame"`
+	Extent  Box        `json:"extent"`
+	Offset  [2]float64 `json:"offset"`
+	Anchors []int      `json:"anchors"`
+	Digest  string     `json:"digest"`
+}
+
+// richTextSnapshot 保存对象及嵌套成员的不可变编辑语义，成员按绘制顺序定位
+type richTextSnapshot struct {
+	metadata *richTextMetadata
+	children map[int]*richTextSnapshot
+}
+
+// richTextEntry 保存标引入口及延迟报告的损坏诊断
+type richTextEntry struct {
+	index    int
+	metadata richTextMetadata
+	err      error
+}
+
+// richTextIndex 缓存当前文档修订的标引，不创建页面预览快照
+type richTextIndex struct {
+	source   *editorSource
+	revision uint64
+	remaps   map[string]int
+	entries  map[string]richTextEntry
+	err      error
+}
+
+// updateRichTextFrame 统一提交正文或编辑框变化，width为零时沿用原宽度模式
+// 入参: page 页面索引, id 对象标识, value 新内容, offset 局部偏移, width 可选宽度, reflow 是否显式重排原文
+// 返回: error 校验或提交错误
+func (e *Editor) updateRichTextFrame(page int, id string, value RichText, offset, width float64, reflow bool) error {
+	return e.Transaction(func(e *Editor) error {
+		old, err := e.Object(page, id)
+		if err != nil {
+			return err
+		}
+		current, frame, matrix, err := e.PrepareRichText(page, ObjectPath{ID: id}, reflow)
+		if err != nil {
+			return err
+		}
+		if err := value.Validate(); err != nil {
+			return err
+		}
+		if width > 0 {
+			value.AutoWidth = false
+		}
+		if old.Type == "CompositeObject" && offset == 0 && (width == 0 || width == frame.W) && reflect.DeepEqual(normalizeRichText(current), normalizeRichText(value)) {
+			return nil
+		}
+		if width > 0 {
+			frame.W = width
+			matrix = matrix.Multiply(TranslationMatrix(offset, 0))
+		}
+		object, meta, err := e.prepareRichText(Box{W: frame.W, H: frame.H}, value)
+		if err != nil {
+			return err
+		}
+		object.CompositeGraphicUnit.ID = id
+		placement := richTextPlacement(meta, matrix)
+		object.CompositeGraphicUnit.Boundary = placement.Boundary
+		object.CompositeGraphicUnit.CTM = placement.CTM
+		if old.Type == "CompositeObject" {
+			unit := old.CompositeGraphicUnit
+			if unit.Clips != nil {
+				return fmt.Errorf("clipped rich text requires explicit clip removal before reflow")
+			}
+			unit.ResourceID = object.CompositeGraphicUnit.ResourceID
+			unit.Boundary = placement.Boundary
+			unit.CTM = placement.CTM
+			object.CompositeGraphicUnit = unit
+		}
+		index := -1
+		if old.Type == "CompositeObject" {
+			entry, err := e.richTextEntry(page, id)
+			if err != nil {
+				return err
+			}
+			index = entry.index
+		}
+		if err := e.updateObjects(page, []GraphicObject{object}, true); err != nil {
+			return err
+		}
+		return e.putRichTextMetadata(page, id, meta, index)
+	})
+}
+
+// richTextObject 读取对象的编辑标引并校验标准内容
+// 入参: page 页面索引, object 当前对象
+// 返回: RichText 编辑内容, error 识别或持久化错误
+func (e *Editor) richTextObject(page int, object GraphicObject) (RichText, error) {
+	if object.Type == "TextObject" {
+		return e.promoteRichText(page, object)
+	}
+	if object.Type != "CompositeObject" {
+		return RichText{}, ErrNotRichText
+	}
+	entry, err := e.richTextEntry(page, editorObjectID(object))
+	if err != nil {
+		return RichText{}, err
+	}
+	unit, err := e.compositeDefinition(object.CompositeGraphicUnit.ResourceID)
+	if err != nil {
+		return RichText{}, fmt.Errorf("rich text resource: %w", err)
+	}
+	objects := unit.object.CompositeGraphicUnit.Objects
+	if richTextDigest(objects) != entry.metadata.Digest {
+		return RichText{}, fmt.Errorf("rich text content no longer matches its editing metadata")
+	}
+	value := cloneEditorData(entry.metadata.Value)
+	if len(entry.metadata.Anchors) != len(value.Runs) {
+		return RichText{}, fmt.Errorf("invalid rich text font anchors")
+	}
+	for i, anchor := range entry.metadata.Anchors {
+		if anchor < 0 || anchor >= len(objects) || objects[anchor].Type != "TextObject" {
+			return RichText{}, fmt.Errorf("invalid rich text font anchor %d", i)
+		}
+		value.Runs[i].Format.Font = objects[anchor].TextObject.Font
+	}
+	if err := value.Validate(); err != nil {
+		return RichText{}, fmt.Errorf("invalid rich text metadata: %w", err)
+	}
+	return value, nil
 }
 
 // updateCompositeRichText 统一处理内部文字的安全提升与显式重排
@@ -1140,131 +1267,4 @@ func (e *Editor) updateCompositePlainRichText(page int, path ObjectPath, index i
 		return err
 	}
 	return e.putCompositeRichTextMetadata(page, member.Object, metadata, -1)
-}
-
-// TargetRichText 读取完整路径文字的富文本模型，普通文字仅在可验证布局时提升
-// 入参: page 页面索引, path 完整对象路径
-// 返回: RichText 独立模型, error 路径或不安全提升错误
-func (e *Editor) TargetRichText(page int, path ObjectPath) (RichText, error) {
-	value, _, _, err := e.PrepareRichText(page, path, false)
-	return value, err
-}
-
-// PrepareRichText 读取独立富文本模型和局部编辑框，定位文字采用自然宽度，已知段落保留宽度
-// 显式重排保留原首行起点及页面变换，不从原始Boundary推断段落宽度
-// 入参: page 页面索引, path 完整对象路径, reflow 是否允许重排普通文字
-// 返回: RichText 内容, Box 局部编辑框, Matrix 页面变换, error 路径、外观或排版错误
-func (e *Editor) PrepareRichText(page int, path ObjectPath, reflow bool) (RichText, Box, Matrix, error) {
-	var text TextObject
-	var matrix Matrix
-	if len(path.Children) == 0 {
-		if path.Annotation != "" {
-			return RichText{}, Box{}, Matrix{}, ErrNotRichText
-		}
-		object, err := e.Object(page, path.ID)
-		if err != nil {
-			return RichText{}, Box{}, Matrix{}, err
-		}
-		if object.Type != "TextObject" {
-			value, err := e.RichText(page, path.ID)
-			if err != nil {
-				return RichText{}, Box{}, Matrix{}, err
-			}
-			frame, matrix, err := e.RichTextFrame(page, path.ID)
-			return value, frame, matrix, err
-		}
-		if origin := e.objectOrigin(path.ID); origin != nil && !editorXMLSupported(origin.node) {
-			return RichText{}, Box{}, Matrix{}, ErrNotRichText
-		}
-		layer, _, err := e.findObject(page, path.ID)
-		if err != nil {
-			return RichText{}, Box{}, Matrix{}, err
-		}
-		object, err = e.resolveEditorStyle(object, layer.DrawParam)
-		if err != nil {
-			return RichText{}, Box{}, Matrix{}, err
-		}
-		text = object.TextObject
-		box, err := creationBox(text.Boundary)
-		if err != nil {
-			return RichText{}, Box{}, Matrix{}, err
-		}
-		matrix = TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(text.CTM))
-	} else {
-		index := path.Children[len(path.Children)-1]
-		path.Children = path.Children[:len(path.Children)-1]
-		member, err := e.CompositeObject(page, path, index)
-		if err != nil {
-			return RichText{}, Box{}, Matrix{}, err
-		}
-		if member.Object.Type != "TextObject" {
-			return e.CompositeRichText(page, member)
-		}
-		text, matrix = member.Object.TextObject, member.Matrix
-	}
-	frame, err := text.TextFrame()
-	if err != nil {
-		return RichText{}, Box{}, Matrix{}, err
-	}
-	dx, dy, err := e.richPlainOffset(text)
-	if err != nil {
-		return RichText{}, Box{}, Matrix{}, err
-	}
-	autoWidth := text.layout == nil || text.layout.autoWidth
-	if reflow {
-		value, layout := text.TextLayout()
-		layout.AutoBidi = true
-		if err := e.LayoutText(&text, value, layout); err != nil {
-			return RichText{}, Box{}, Matrix{}, err
-		}
-	}
-	value, err := e.promoteTextValue(text)
-	if err != nil {
-		return RichText{}, Box{}, Matrix{}, err
-	}
-	value.AutoWidth = autoWidth
-	if autoWidth {
-		result, err := e.layoutRichText(value, frame.W)
-		if err != nil {
-			return RichText{}, Box{}, Matrix{}, err
-		}
-		frame.W, frame.H = result.width, result.bounds.Y+result.bounds.H
-	}
-	return value, Box{W: frame.W, H: frame.H}, matrix.Multiply(TranslationMatrix(dx, dy)), nil
-}
-
-// ReflowRichText 原子重排完整路径文字，保留局部宽度、页面变换及共享实例隔离
-// 入参: page 页面索引, path 完整对象路径, value 新的富文本内容
-// 返回: error 路径、排版或提交错误
-func (e *Editor) ReflowRichText(page int, path ObjectPath, value RichText) error {
-	if len(path.Children) == 0 {
-		if path.Annotation != "" {
-			return ErrNotRichText
-		}
-		return e.updateRichTextFrame(page, path.ID, value, 0, 0, true)
-	}
-	index := path.Children[len(path.Children)-1]
-	path.Children = path.Children[:len(path.Children)-1]
-	return e.updateCompositeRichText(page, path, index, value, 0, 0, true)
-}
-
-// LayoutTextFrame 统一调整普通文字及富文本的段落选项和局部宽度，保留原首行起点与页面变换
-// 对齐应用于所有段落；定位文字沿用自然宽度，显式改宽后采用固定宽度，提交一条撤销记录
-// 入参: page 页面索引, path 完整对象路径, options 段落选项, offset 左边界局部偏移, width 新宽度，零值保留宽度模式
-// 返回: error 路径、尺寸或排版错误
-func (e *Editor) LayoutTextFrame(page int, path ObjectPath, options TextLayout, offset, width float64) error {
-	if !finite(offset) || !finite(width) || width < 0 || width == 0 && offset != 0 {
-		return fmt.Errorf("invalid text frame")
-	}
-	value, _, _, err := e.PrepareRichText(page, path, true)
-	if err != nil {
-		return err
-	}
-	value.Layout, value.Paragraphs = options, nil
-	if len(path.Children) == 0 {
-		return e.updateRichTextFrame(page, path.ID, value, offset, width, true)
-	}
-	index := path.Children[len(path.Children)-1]
-	path.Children = path.Children[:len(path.Children)-1]
-	return e.updateCompositeRichText(page, path, index, value, offset, width, true)
 }

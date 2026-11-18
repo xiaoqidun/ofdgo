@@ -50,6 +50,29 @@ type gbtSignedData struct {
 	Signers       []gbtSignerInfo
 }
 
+// findCert 查找签名者证书
+// 入参: issuer 颁发者DN, serial 证书序列号
+// 返回: *gbtCertificate 证书信息
+func (sd *gbtSignedData) findCert(issuer []byte, serial *big.Int) *gbtCertificate {
+	for i := range sd.Certs {
+		cert := &sd.Certs[i]
+		if bytes.Equal(cert.Issuer, issuer) && cert.Serial.Cmp(serial) == 0 {
+			return cert
+		}
+	}
+	return nil
+}
+
+// rawCerts 获取SignedData证书原文
+// 返回: [][]byte 证书列表
+func (sd *gbtSignedData) rawCerts() [][]byte {
+	certs := make([][]byte, 0, len(sd.Certs))
+	for _, cert := range sd.Certs {
+		certs = append(certs, cert.Raw)
+	}
+	return certs
+}
+
 // gbtCertificate SignedData证书索引信息
 type gbtCertificate struct {
 	Raw    []byte
@@ -668,29 +691,6 @@ func parseGBTMessageDigestAttr(raw asn1.RawValue) ([]byte, error) {
 		return digest, nil
 	}
 	return nil, fmt.Errorf("message digest attribute not found")
-}
-
-// findCert 查找签名者证书
-// 入参: issuer 颁发者DN, serial 证书序列号
-// 返回: *gbtCertificate 证书信息
-func (sd *gbtSignedData) findCert(issuer []byte, serial *big.Int) *gbtCertificate {
-	for i := range sd.Certs {
-		cert := &sd.Certs[i]
-		if bytes.Equal(cert.Issuer, issuer) && cert.Serial.Cmp(serial) == 0 {
-			return cert
-		}
-	}
-	return nil
-}
-
-// rawCerts 获取SignedData证书原文
-// 返回: [][]byte 证书列表
-func (sd *gbtSignedData) rawCerts() [][]byte {
-	certs := make([][]byte, 0, len(sd.Certs))
-	for _, cert := range sd.Certs {
-		certs = append(certs, cert.Raw)
-	}
-	return certs
 }
 
 // asn1Explicit 解析显式标签内容

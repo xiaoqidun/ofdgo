@@ -44,13 +44,6 @@ type ImagePageOptions struct {
 	OnProgress    func(stage string, completed, total int) error
 }
 
-// editorImagePageInfo 保存同批次已校验图片的建页信息，不持有编码、像素或颜色模型
-type editorImagePageInfo struct {
-	size     image.Point
-	format   string
-	metadata baseimage.PageInfo
-}
-
 // ImagePreviewInfo 保存图片按方向和密度换算后的毫米尺寸
 type ImagePreviewInfo struct {
 	Width  float64 `json:"width"`
@@ -185,6 +178,13 @@ func (e *Editor) ImportImages(ctx context.Context, sources []ImagePageSource, at
 		}
 		return check("commit", len(sources))
 	})
+}
+
+// editorImagePageInfo 保存同批次已校验图片的建页信息，不持有编码、像素或颜色模型
+type editorImagePageInfo struct {
+	size     image.Point
+	format   string
+	metadata baseimage.PageInfo
 }
 
 // addImagePage 保留原图并按方向、物理尺寸与纸张选项建页

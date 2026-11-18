@@ -110,36 +110,6 @@ type ConversionPool struct {
 	memory  int64
 }
 
-// convertReader 将取消上下文传递到随机读取
-type convertReader struct {
-	ctx   context.Context
-	input io.ReaderAt
-}
-
-// convertWriter 将取消上下文传递到写入并统计实际字节数
-type convertWriter struct {
-	ctx    context.Context
-	writer io.Writer
-	count  *int64
-}
-
-// conversionPoolKey 标识单次转换使用的共享预算
-type conversionPoolKey struct{}
-
-// OutputFormats 返回独立的输出格式列表，不依赖WebUI或具体渲染后端
-// 返回: []OutputFormat 输出格式列表
-func OutputFormats() []OutputFormat {
-	return []OutputFormat{
-		{Value: "ofd", Label: "OFD", Extension: "ofd", MIME: "application/ofd"},
-		{Value: "pdf", Label: "PDF", Extension: "pdf", MIME: "application/pdf"},
-		{Value: "svg", Label: "SVG", Extension: "svg", MIME: "image/svg+xml", Paged: true},
-		{Value: "eps", Label: "EPS", Extension: "eps", MIME: "application/postscript", Paged: true},
-		{Value: "png", Label: "PNG", Extension: "png", MIME: "image/png", Paged: true, Raster: true},
-		{Value: "jpg", Label: "JPG", Extension: "jpg", MIME: "image/jpeg", Paged: true, Raster: true},
-		{Value: "txt", Label: "TXT", Extension: "txt", MIME: "text/plain"},
-	}
-}
-
 // Convert 将PDF或OFD转换为指定格式，不关闭调用方的输入和输出
 // 原始模式完整OFD另存保持源字节；选页和跨格式输出重新生成文档，压缩仅作用于输出副本
 // 输入按需随机读取，输出分块写出；解析对象及后端可能缓存资源，不保证恒定内存
@@ -401,54 +371,35 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 	return report, err
 }
 
-// ReadAt 读取前后响应取消，保留读取字节数和源错误
-// 入参: data 目标缓冲, offset 源偏移
-// 返回: int 读取字节数, error 读取错误
-func (r convertReader) ReadAt(data []byte, offset int64) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
+// NewConversionPool 创建共享转换调度器，不启动后台任务
+// 入参: options 并行及内存选项
+// 返回: *ConversionPool 调度器, error 配置错误
+func NewConversionPool(options ConversionPoolOptions) (*ConversionPool, error) {
+	if options.Parallelism < 0 || options.MemoryLimit < 0 {
+		return nil, fmt.Errorf("invalid conversion pool options")
 	}
-	n, err := r.input.ReadAt(data, offset)
-	if err == nil {
-		err = r.ctx.Err()
+	if options.Parallelism == 0 {
+		options.Parallelism = runtime.GOMAXPROCS(0)
 	}
-	return n, err
+	return &ConversionPool{options: options, changed: make(chan struct{})}, nil
 }
 
-// Write 写入前后响应取消，保留写入及短写错误
-// 入参: data 待写数据
-// 返回: int 写入字节数, error 写入错误
-func (w convertWriter) Write(data []byte) (int, error) {
-	if err := w.ctx.Err(); err != nil {
-		return 0, err
-	}
-	n, err := w.writer.Write(data)
-	*w.count += int64(n)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	if err == nil {
-		err = w.ctx.Err()
-	}
-	return n, err
-}
+// Parallelism 返回同时运行的转换数量上限
+// 返回: int 并行上限
+func (p *ConversionPool) Parallelism() int { return p.options.Parallelism }
 
-// WriteString 写入字符串并保留底层原生写入能力，前后响应取消
-// 入参: data 待写文本
-// 返回: int 写入字节数, error 写入、短写或取消错误
-func (w convertWriter) WriteString(data string) (int, error) {
-	if err := w.ctx.Err(); err != nil {
-		return 0, err
+// OutputFormats 返回独立的输出格式列表，不依赖WebUI或具体渲染后端
+// 返回: []OutputFormat 输出格式列表
+func OutputFormats() []OutputFormat {
+	return []OutputFormat{
+		{Value: "ofd", Label: "OFD", Extension: "ofd", MIME: "application/ofd"},
+		{Value: "pdf", Label: "PDF", Extension: "pdf", MIME: "application/pdf"},
+		{Value: "svg", Label: "SVG", Extension: "svg", MIME: "image/svg+xml", Paged: true},
+		{Value: "eps", Label: "EPS", Extension: "eps", MIME: "application/postscript", Paged: true},
+		{Value: "png", Label: "PNG", Extension: "png", MIME: "image/png", Paged: true, Raster: true},
+		{Value: "jpg", Label: "JPG", Extension: "jpg", MIME: "image/jpeg", Paged: true, Raster: true},
+		{Value: "txt", Label: "TXT", Extension: "txt", MIME: "text/plain"},
 	}
-	n, err := io.WriteString(w.writer, data)
-	*w.count += int64(n)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	if err == nil {
-		err = w.ctx.Err()
-	}
-	return n, err
 }
 
 // DetectFormat 按文件内容识别PDF或OFD，不读取压缩内容或关闭输入
@@ -492,22 +443,71 @@ func DetectFormat(input *Input) (string, error) {
 	return "", fmt.Errorf("unsupported input format")
 }
 
-// NewConversionPool 创建共享转换调度器，不启动后台任务
-// 入参: options 并行及内存选项
-// 返回: *ConversionPool 调度器, error 配置错误
-func NewConversionPool(options ConversionPoolOptions) (*ConversionPool, error) {
-	if options.Parallelism < 0 || options.MemoryLimit < 0 {
-		return nil, fmt.Errorf("invalid conversion pool options")
-	}
-	if options.Parallelism == 0 {
-		options.Parallelism = runtime.GOMAXPROCS(0)
-	}
-	return &ConversionPool{options: options, changed: make(chan struct{})}, nil
+// convertReader 将取消上下文传递到随机读取
+type convertReader struct {
+	ctx   context.Context
+	input io.ReaderAt
 }
 
-// Parallelism 返回同时运行的转换数量上限
-// 返回: int 并行上限
-func (p *ConversionPool) Parallelism() int { return p.options.Parallelism }
+// ReadAt 读取前后响应取消，保留读取字节数和源错误
+// 入参: data 目标缓冲, offset 源偏移
+// 返回: int 读取字节数, error 读取错误
+func (r convertReader) ReadAt(data []byte, offset int64) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.input.ReadAt(data, offset)
+	if err == nil {
+		err = r.ctx.Err()
+	}
+	return n, err
+}
+
+// convertWriter 将取消上下文传递到写入并统计实际字节数
+type convertWriter struct {
+	ctx    context.Context
+	writer io.Writer
+	count  *int64
+}
+
+// Write 写入前后响应取消，保留写入及短写错误
+// 入参: data 待写数据
+// 返回: int 写入字节数, error 写入错误
+func (w convertWriter) Write(data []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := w.writer.Write(data)
+	*w.count += int64(n)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err == nil {
+		err = w.ctx.Err()
+	}
+	return n, err
+}
+
+// WriteString 写入字符串并保留底层原生写入能力，前后响应取消
+// 入参: data 待写文本
+// 返回: int 写入字节数, error 写入、短写或取消错误
+func (w convertWriter) WriteString(data string) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := io.WriteString(w.writer, data)
+	*w.count += int64(n)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err == nil {
+		err = w.ctx.Err()
+	}
+	return n, err
+}
+
+// conversionPoolKey 标识单次转换使用的共享预算
+type conversionPoolKey struct{}
 
 // memoryLimit 读取当前可分配的图像工作量预算
 // 返回: int64 可用字节数，负值表示未设置预算

@@ -61,30 +61,6 @@ type InvoiceCapabilities struct {
 	Reasons  map[string]string `json:"reasons"`
 }
 
-// invoiceBindingRecord 保存当前文档内的来源选择器，资源路径变化时仍以入口和摘要核对载荷
-type invoiceBindingRecord struct {
-	Kind     string             `json:"kind"`
-	ID       string             `json:"id"`
-	NodePath string             `json:"nodePath,omitempty"`
-	Digest   string             `json:"digest"`
-	Invoice  int                `json:"invoice"`
-	Layout   *InvoiceLayout     `json:"layout,omitempty"`
-	Pages    []invoiceOwnedPage `json:"pages,omitempty"`
-}
-
-// invoiceOwnedPage 记录自动生成票面的标识和内容摘要，不覆盖后续人工修改
-type invoiceOwnedPage struct {
-	ID     string `json:"id"`
-	Digest string `json:"digest"`
-}
-
-// invoiceBindingEntry 保存标引索引及当前页序中的图元关联
-type invoiceBindingEntry struct {
-	index    int
-	record   invoiceBindingRecord
-	bindings []InvoiceBinding
-}
-
 // InvoiceCapabilities 获取当前文档版本的发票操作能力
 // 入参: ctx 取消上下文, source 精确来源, index 来源内从0开始的发票索引
 // 返回: InvoiceCapabilities 操作能力, error 来源、索引或读取错误
@@ -197,6 +173,92 @@ func (r *Reader) InvoiceCapabilities(ctx context.Context, source InvoiceSource, 
 		result.Reasons["sync"] = "当前发票没有可同步的票面关联"
 	}
 	return result, ctx.Err()
+}
+
+// InvoiceBindings 读取当前来源指定发票的持久化票面关联，页码按当前页序解析
+// 入参: ctx 取消上下文, source 来源, index 来源内从0开始的发票索引
+// 返回: []InvoiceBinding 图元关联, error 来源、摘要或引用错误
+func (r *Reader) InvoiceBindings(ctx context.Context, source InvoiceSource, index int) ([]InvoiceBinding, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	data, err := r.ExportInvoice(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	report, err := r.readInvoiceXML(ctx, data, source)
+	if err != nil {
+		return nil, err
+	}
+	if index < 0 || index >= len(report.Invoices) {
+		return nil, fmt.Errorf("invoice index out of range")
+	}
+	if report.Invoices[index].Standard == ofdNamespace2016 {
+		return r.invoiceReferenceBindings(ctx, report.Invoices[index])
+	}
+	entries, err := r.invoiceBindings(ctx, source, InvoiceDigest(data), true)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.record.Invoice == index {
+			return entry.bindings, nil
+		}
+	}
+	return nil, nil
+}
+
+// CheckInvoiceAppearance 核对显式绑定的可见字符，忽略换行差异，不推断未绑定字段或判断签名有效性
+// 入参: ctx 取消上下文, source 来源, index 来源内发票索引
+// 返回: []InvoiceIssue 未绑定、缺失图元或文字差异, error 来源或结构错误
+func (r *Reader) CheckInvoiceAppearance(ctx context.Context, source InvoiceSource, index int) ([]InvoiceIssue, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	data, err := r.ExportInvoice(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	report, err := r.readInvoiceXML(ctx, data, source)
+	if err != nil {
+		return nil, err
+	}
+	if index < 0 || index >= len(report.Invoices) {
+		return nil, fmt.Errorf("invoice index out of range")
+	}
+	if report.Invoices[index].Standard == ofdNamespace2016 {
+		return slices.Clone(report.Issues), ctx.Err()
+	}
+	bindings, err := r.InvoiceBindings(ctx, source, index)
+	if err != nil {
+		return nil, err
+	}
+	if len(bindings) == 0 {
+		return []InvoiceIssue{{Code: "appearance-unbound", Message: "invoice has no appearance bindings", Source: source}}, nil
+	}
+	editor, err := r.EditorContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var issues []InvoiceIssue
+	for _, binding := range bindings {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		value, err := invoiceBindingValue(report.Invoices[index], binding)
+		if err != nil {
+			return nil, err
+		}
+		object, err := editor.Object(binding.Page, binding.ObjectID)
+		if err != nil || object.Type != "TextObject" {
+			issues = append(issues, InvoiceIssue{Code: "appearance-missing", Message: "bound text object is missing", Source: source, Field: binding.Field})
+			continue
+		}
+		if !invoiceAppearanceMatches(object.TextObject, value) {
+			issues = append(issues, InvoiceIssue{Code: "appearance-mismatch", Message: "bound text differs from invoice data", Source: source, Field: binding.Field})
+		}
+	}
+	return issues, nil
 }
 
 // GenerateInvoicePages 为已有发票生成信息页并保存字段关联，失败时整体回滚
@@ -660,168 +722,6 @@ func (e *Editor) DeleteInvoice(ctx context.Context, source InvoiceSource, digest
 	})
 }
 
-// reindexInvoiceBindings 在删除入口后维护其他发票的标引序号及内联子树序号
-// 入参: ctx 取消上下文, structures 删除前标引, removed 删除的标引索引, source 删除来源
-// 返回: error 元数据或提交错误
-func (e *Editor) reindexInvoiceBindings(ctx context.Context, structures []Structure, removed []int, source InvoiceSource) error {
-	for i, structure := range structures {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if slices.Contains(removed, i) || structure.TypeID != invoiceTagType || structure.Namespace != invoiceNamespace {
-			continue
-		}
-		if structure.Root == nil || structure.Error != "" {
-			return fmt.Errorf("invalid invoice appearance metadata")
-		}
-		root := *structure.Root
-		var record invoiceBindingRecord
-		if err := json.Unmarshal([]byte(root.Text), &record); err != nil {
-			return err
-		}
-		changed := false
-		if record.Kind == "tag" {
-			old, err := strconv.Atoi(record.ID)
-			if err != nil {
-				return err
-			}
-			index := old
-			for _, deleted := range removed {
-				if deleted < old {
-					index--
-				}
-			}
-			if index != old {
-				record.ID, changed = strconv.Itoa(index), true
-			}
-		}
-		if source.Kind == "extension" && source.NodePath != "" && record.Kind == source.Kind && record.ID == source.ID {
-			position := strings.LastIndex(source.NodePath, "*")
-			if position < 0 {
-				return fmt.Errorf("invalid inline invoice source")
-			}
-			prefix := source.NodePath[:position]
-			if strings.HasPrefix(record.NodePath, prefix+"*[") {
-				deleted, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(source.NodePath, prefix+"*["), "]"))
-				if err != nil {
-					return err
-				}
-				index, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(record.NodePath, prefix+"*["), "]"))
-				if err != nil {
-					return err
-				}
-				if index > deleted {
-					record.NodePath, changed = fmt.Sprintf("%s*[%d]", prefix, index-1), true
-				}
-			}
-		}
-		if !changed {
-			continue
-		}
-		encoded, err := json.Marshal(record)
-		if err != nil {
-			return err
-		}
-		root.Text, root.Children, root.References = string(encoded), nil, nil
-		index := i
-		for _, deleted := range removed {
-			if deleted < i {
-				index--
-			}
-		}
-		if err := e.UpdateStructureNode(index, nil, root); err != nil {
-			return err
-		}
-	}
-	return ctx.Err()
-}
-
-// InvoiceBindings 读取当前来源指定发票的持久化票面关联，页码按当前页序解析
-// 入参: ctx 取消上下文, source 来源, index 来源内从0开始的发票索引
-// 返回: []InvoiceBinding 图元关联, error 来源、摘要或引用错误
-func (r *Reader) InvoiceBindings(ctx context.Context, source InvoiceSource, index int) ([]InvoiceBinding, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	data, err := r.ExportInvoice(ctx, source)
-	if err != nil {
-		return nil, err
-	}
-	report, err := r.readInvoiceXML(ctx, data, source)
-	if err != nil {
-		return nil, err
-	}
-	if index < 0 || index >= len(report.Invoices) {
-		return nil, fmt.Errorf("invoice index out of range")
-	}
-	if report.Invoices[index].Standard == ofdNamespace2016 {
-		return r.invoiceReferenceBindings(ctx, report.Invoices[index])
-	}
-	entries, err := r.invoiceBindings(ctx, source, InvoiceDigest(data), true)
-	if err != nil {
-		return nil, err
-	}
-	for _, entry := range entries {
-		if entry.record.Invoice == index {
-			return entry.bindings, nil
-		}
-	}
-	return nil, nil
-}
-
-// CheckInvoiceAppearance 核对显式绑定的可见字符，忽略换行差异，不推断未绑定字段或判断签名有效性
-// 入参: ctx 取消上下文, source 来源, index 来源内发票索引
-// 返回: []InvoiceIssue 未绑定、缺失图元或文字差异, error 来源或结构错误
-func (r *Reader) CheckInvoiceAppearance(ctx context.Context, source InvoiceSource, index int) ([]InvoiceIssue, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	data, err := r.ExportInvoice(ctx, source)
-	if err != nil {
-		return nil, err
-	}
-	report, err := r.readInvoiceXML(ctx, data, source)
-	if err != nil {
-		return nil, err
-	}
-	if index < 0 || index >= len(report.Invoices) {
-		return nil, fmt.Errorf("invoice index out of range")
-	}
-	if report.Invoices[index].Standard == ofdNamespace2016 {
-		return slices.Clone(report.Issues), ctx.Err()
-	}
-	bindings, err := r.InvoiceBindings(ctx, source, index)
-	if err != nil {
-		return nil, err
-	}
-	if len(bindings) == 0 {
-		return []InvoiceIssue{{Code: "appearance-unbound", Message: "invoice has no appearance bindings", Source: source}}, nil
-	}
-	editor, err := r.EditorContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var issues []InvoiceIssue
-	for _, binding := range bindings {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		value, err := invoiceBindingValue(report.Invoices[index], binding)
-		if err != nil {
-			return nil, err
-		}
-		object, err := editor.Object(binding.Page, binding.ObjectID)
-		if err != nil || object.Type != "TextObject" {
-			issues = append(issues, InvoiceIssue{Code: "appearance-missing", Message: "bound text object is missing", Source: source, Field: binding.Field})
-			continue
-		}
-		if !invoiceAppearanceMatches(object.TextObject, value) {
-			issues = append(issues, InvoiceIssue{Code: "appearance-mismatch", Message: "bound text differs from invoice data", Source: source, Field: binding.Field})
-		}
-	}
-	return issues, nil
-}
-
 // SetInvoiceBindings 设置指定发票的显式票面关联，空列表清除关联，不自动识别相同文字
 // 入参: ctx 取消上下文, source 来源, index 发票索引, bindings 字段与图元关联
 // 返回: error 来源、字段、引用或提交错误
@@ -948,6 +848,106 @@ func (e *Editor) SetInvoiceBindings(ctx context.Context, source InvoiceSource, i
 		}
 		return ctx.Err()
 	})
+}
+
+// invoiceBindingRecord 保存当前文档内的来源选择器，资源路径变化时仍以入口和摘要核对载荷
+type invoiceBindingRecord struct {
+	Kind     string             `json:"kind"`
+	ID       string             `json:"id"`
+	NodePath string             `json:"nodePath,omitempty"`
+	Digest   string             `json:"digest"`
+	Invoice  int                `json:"invoice"`
+	Layout   *InvoiceLayout     `json:"layout,omitempty"`
+	Pages    []invoiceOwnedPage `json:"pages,omitempty"`
+}
+
+// invoiceOwnedPage 记录自动生成票面的标识和内容摘要，不覆盖后续人工修改
+type invoiceOwnedPage struct {
+	ID     string `json:"id"`
+	Digest string `json:"digest"`
+}
+
+// invoiceBindingEntry 保存标引索引及当前页序中的图元关联
+type invoiceBindingEntry struct {
+	index    int
+	record   invoiceBindingRecord
+	bindings []InvoiceBinding
+}
+
+// reindexInvoiceBindings 在删除入口后维护其他发票的标引序号及内联子树序号
+// 入参: ctx 取消上下文, structures 删除前标引, removed 删除的标引索引, source 删除来源
+// 返回: error 元数据或提交错误
+func (e *Editor) reindexInvoiceBindings(ctx context.Context, structures []Structure, removed []int, source InvoiceSource) error {
+	for i, structure := range structures {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if slices.Contains(removed, i) || structure.TypeID != invoiceTagType || structure.Namespace != invoiceNamespace {
+			continue
+		}
+		if structure.Root == nil || structure.Error != "" {
+			return fmt.Errorf("invalid invoice appearance metadata")
+		}
+		root := *structure.Root
+		var record invoiceBindingRecord
+		if err := json.Unmarshal([]byte(root.Text), &record); err != nil {
+			return err
+		}
+		changed := false
+		if record.Kind == "tag" {
+			old, err := strconv.Atoi(record.ID)
+			if err != nil {
+				return err
+			}
+			index := old
+			for _, deleted := range removed {
+				if deleted < old {
+					index--
+				}
+			}
+			if index != old {
+				record.ID, changed = strconv.Itoa(index), true
+			}
+		}
+		if source.Kind == "extension" && source.NodePath != "" && record.Kind == source.Kind && record.ID == source.ID {
+			position := strings.LastIndex(source.NodePath, "*")
+			if position < 0 {
+				return fmt.Errorf("invalid inline invoice source")
+			}
+			prefix := source.NodePath[:position]
+			if strings.HasPrefix(record.NodePath, prefix+"*[") {
+				deleted, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(source.NodePath, prefix+"*["), "]"))
+				if err != nil {
+					return err
+				}
+				index, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(record.NodePath, prefix+"*["), "]"))
+				if err != nil {
+					return err
+				}
+				if index > deleted {
+					record.NodePath, changed = fmt.Sprintf("%s*[%d]", prefix, index-1), true
+				}
+			}
+		}
+		if !changed {
+			continue
+		}
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			return err
+		}
+		root.Text, root.Children, root.References = string(encoded), nil, nil
+		index := i
+		for _, deleted := range removed {
+			if deleted < i {
+				index--
+			}
+		}
+		if err := e.UpdateStructureNode(index, nil, root); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
 }
 
 // invoiceBindings 读取入口和摘要匹配的关联，拒绝重复记录及损坏引用

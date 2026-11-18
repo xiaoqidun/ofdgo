@@ -144,172 +144,6 @@ func (e *Editor) DeleteAnnotations(index int, ids []string) error {
 	return e.editAnnotations(index, ids, func([]byte, *editorXML) ([]byte, error) { return nil, nil })
 }
 
-// editorAnnotationDate 更新注解修改日期，采用标准xs:date格式
-// 入参: data 注解XML片段
-// 返回: []byte 新片段, error 错误信息
-func editorAnnotationDate(data []byte) ([]byte, error) {
-	root, err := parseEditorXML(data)
-	if err != nil {
-		return nil, err
-	}
-	return editorXMLAttribute(data, root, "LastModDate", time.Now().Format("2006-01-02"))
-}
-
-// editAnnotations 原子修改页面注解原文，按需分离共用文件并保留输入包与历史快照
-// 入参: index 页面索引, ids 注解标识, edit 单个注解修改函数
-// 返回: error 错误信息
-func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *editorXML) ([]byte, error)) error {
-	if index < 0 || index >= len(e.pages) {
-		return fmt.Errorf("page index %d out of range", index)
-	}
-	wanted := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		key := editorResourceID(id)
-		if key == "" || wanted[key] {
-			return fmt.Errorf("missing or duplicate annotation ID %q", id)
-		}
-		wanted[key] = true
-	}
-	if len(wanted) == 0 {
-		return nil
-	}
-	if e.source == nil || e.source.document.Annotations == "" {
-		return fmt.Errorf("page has no annotations")
-	}
-	reader := e.source.reader
-	name, err := editorPageLocation(reader, nil, "", "/"+reader.ResPath(e.source.document.Annotations))
-	if err != nil {
-		return err
-	}
-	data, err := reader.readFile(name)
-	if err != nil {
-		return err
-	}
-	root, err := parseEditorXML(data)
-	if err != nil {
-		return err
-	}
-	parts := make(map[string][]byte)
-	var patches []editorXMLPatch
-	found := make(map[string]bool, len(ids))
-	remaining := 0
-	pageID := editorResourceID(e.pages[index].ID)
-	for _, ref := range root.children {
-		if !ref.matchesOFD("Page") {
-			continue
-		}
-		remaining++
-		if pageID == "" || editorResourceID(ref.attr("PageID")) != pageID {
-			continue
-		}
-		loc := ref.child("FileLoc")
-		if loc == nil {
-			return fmt.Errorf("annotation page has no FileLoc")
-		}
-		file, err := editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, loc)))
-		if err != nil {
-			return err
-		}
-		content, err := reader.readFile(file)
-		if err != nil {
-			return err
-		}
-		page, err := parseEditorXML(content)
-		if err != nil {
-			return err
-		}
-		var changes []editorXMLPatch
-		count := 0
-		for _, node := range page.children {
-			if !node.matchesOFD("Annot") {
-				continue
-			}
-			count++
-			id := editorResourceID(node.attr("ID"))
-			if !wanted[id] {
-				continue
-			}
-			if found[id] {
-				return fmt.Errorf("ambiguous annotation ID %q", id)
-			}
-			found[id] = true
-			value, err := edit(content, node)
-			if err != nil {
-				return err
-			}
-			if value == nil {
-				count--
-			}
-			if !bytes.Equal(value, content[node.start:node.end]) {
-				changes = append(changes, editorXMLPatch{node.start, node.end, value})
-			}
-		}
-		if len(changes) == 0 {
-			continue
-		}
-		sharedFile := false
-		for _, other := range root.children {
-			if other == ref || !other.matchesOFD("Page") || other.child("FileLoc") == nil {
-				continue
-			}
-			shared, err := editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, other.child("FileLoc"))))
-			if err == nil && shared == file {
-				sharedFile = true
-				break
-			}
-		}
-		if count == 0 {
-			patches = append(patches, editorXMLPatch{ref.start, ref.end, nil})
-			remaining--
-			if !sharedFile {
-				parts[file] = editorPatchXML(content, changes)
-			}
-			continue
-		}
-		if sharedFile {
-			file = packageAvailableName(reader, parts, e.packageName(path.Join("Annotations", "Page_"+e.pages[index].ID+".xml")))
-			var escaped bytes.Buffer
-			_ = xml.EscapeText(&escaped, []byte("/"+file))
-			patches = append(patches, editorXMLContent(data, loc, escaped.Bytes()))
-		}
-		parts[file] = editorPatchXML(content, changes)
-	}
-	for _, id := range ids {
-		if !found[editorResourceID(id)] {
-			return fmt.Errorf("annotation %q not found", id)
-		}
-	}
-	if len(patches) != 0 {
-		parts[name] = editorPatchXML(data, patches)
-		if remaining == 0 {
-			docName, err := editorPageLocation(reader, nil, "", "/"+reader.documentRoot)
-			if err != nil {
-				return err
-			}
-			docData, err := reader.readFile(docName)
-			if err != nil {
-				return err
-			}
-			doc, err := parseEditorXML(docData)
-			if err != nil {
-				return err
-			}
-			parts[docName], err = editorXMLSetText(docData, doc, [][2]string{{"Annotations", ""}})
-			if err != nil {
-				return err
-			}
-		}
-	}
-	if len(parts) == 0 {
-		return nil
-	}
-	base, err := e.annotationStructureSource(index, wanted)
-	if err != nil {
-		return err
-	}
-	return e.commitAnnotationParts(base, parts)
-}
-
 // CaptureAnnotations 捕获注解选区，保留未知字段、外观及动作
 // 入参: page 页面索引, ids 不重复的注解标识
 // 返回: *AnnotationSelection 独立快照, error 错误信息
@@ -602,4 +436,170 @@ func (e *Editor) ReplaceAnnotationText(page int, id, old, value string, style Te
 		return 0, err
 	}
 	return count, nil
+}
+
+// editorAnnotationDate 更新注解修改日期，采用标准xs:date格式
+// 入参: data 注解XML片段
+// 返回: []byte 新片段, error 错误信息
+func editorAnnotationDate(data []byte) ([]byte, error) {
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	return editorXMLAttribute(data, root, "LastModDate", time.Now().Format("2006-01-02"))
+}
+
+// editAnnotations 原子修改页面注解原文，按需分离共用文件并保留输入包与历史快照
+// 入参: index 页面索引, ids 注解标识, edit 单个注解修改函数
+// 返回: error 错误信息
+func (e *Editor) editAnnotations(index int, ids []string, edit func([]byte, *editorXML) ([]byte, error)) error {
+	if index < 0 || index >= len(e.pages) {
+		return fmt.Errorf("page index %d out of range", index)
+	}
+	wanted := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		key := editorResourceID(id)
+		if key == "" || wanted[key] {
+			return fmt.Errorf("missing or duplicate annotation ID %q", id)
+		}
+		wanted[key] = true
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	if e.source == nil || e.source.document.Annotations == "" {
+		return fmt.Errorf("page has no annotations")
+	}
+	reader := e.source.reader
+	name, err := editorPageLocation(reader, nil, "", "/"+reader.ResPath(e.source.document.Annotations))
+	if err != nil {
+		return err
+	}
+	data, err := reader.readFile(name)
+	if err != nil {
+		return err
+	}
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return err
+	}
+	parts := make(map[string][]byte)
+	var patches []editorXMLPatch
+	found := make(map[string]bool, len(ids))
+	remaining := 0
+	pageID := editorResourceID(e.pages[index].ID)
+	for _, ref := range root.children {
+		if !ref.matchesOFD("Page") {
+			continue
+		}
+		remaining++
+		if pageID == "" || editorResourceID(ref.attr("PageID")) != pageID {
+			continue
+		}
+		loc := ref.child("FileLoc")
+		if loc == nil {
+			return fmt.Errorf("annotation page has no FileLoc")
+		}
+		file, err := editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, loc)))
+		if err != nil {
+			return err
+		}
+		content, err := reader.readFile(file)
+		if err != nil {
+			return err
+		}
+		page, err := parseEditorXML(content)
+		if err != nil {
+			return err
+		}
+		var changes []editorXMLPatch
+		count := 0
+		for _, node := range page.children {
+			if !node.matchesOFD("Annot") {
+				continue
+			}
+			count++
+			id := editorResourceID(node.attr("ID"))
+			if !wanted[id] {
+				continue
+			}
+			if found[id] {
+				return fmt.Errorf("ambiguous annotation ID %q", id)
+			}
+			found[id] = true
+			value, err := edit(content, node)
+			if err != nil {
+				return err
+			}
+			if value == nil {
+				count--
+			}
+			if !bytes.Equal(value, content[node.start:node.end]) {
+				changes = append(changes, editorXMLPatch{node.start, node.end, value})
+			}
+		}
+		if len(changes) == 0 {
+			continue
+		}
+		sharedFile := false
+		for _, other := range root.children {
+			if other == ref || !other.matchesOFD("Page") || other.child("FileLoc") == nil {
+				continue
+			}
+			shared, err := editorPageLocation(reader, nil, name, strings.TrimSpace(editorImportText(data, other.child("FileLoc"))))
+			if err == nil && shared == file {
+				sharedFile = true
+				break
+			}
+		}
+		if count == 0 {
+			patches = append(patches, editorXMLPatch{ref.start, ref.end, nil})
+			remaining--
+			if !sharedFile {
+				parts[file] = editorPatchXML(content, changes)
+			}
+			continue
+		}
+		if sharedFile {
+			file = packageAvailableName(reader, parts, e.packageName(path.Join("Annotations", "Page_"+e.pages[index].ID+".xml")))
+			var escaped bytes.Buffer
+			_ = xml.EscapeText(&escaped, []byte("/"+file))
+			patches = append(patches, editorXMLContent(data, loc, escaped.Bytes()))
+		}
+		parts[file] = editorPatchXML(content, changes)
+	}
+	for _, id := range ids {
+		if !found[editorResourceID(id)] {
+			return fmt.Errorf("annotation %q not found", id)
+		}
+	}
+	if len(patches) != 0 {
+		parts[name] = editorPatchXML(data, patches)
+		if remaining == 0 {
+			docName, err := editorPageLocation(reader, nil, "", "/"+reader.documentRoot)
+			if err != nil {
+				return err
+			}
+			docData, err := reader.readFile(docName)
+			if err != nil {
+				return err
+			}
+			doc, err := parseEditorXML(docData)
+			if err != nil {
+				return err
+			}
+			parts[docName], err = editorXMLSetText(docData, doc, [][2]string{{"Annotations", ""}})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	base, err := e.annotationStructureSource(index, wanted)
+	if err != nil {
+		return err
+	}
+	return e.commitAnnotationParts(base, parts)
 }

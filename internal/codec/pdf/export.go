@@ -47,26 +47,6 @@ type WriteOptions struct {
 	PrepareRewrite func(context.Context, *pdfgo.Reader, []pdfgo.Reference, *pdfgo.RewriteOptions) error
 }
 
-// outputWriter 在分块输出前后检查取消，不改变底层写入错误
-type outputWriter struct {
-	ctx    context.Context
-	writer io.Writer
-}
-
-// Write 写入当前数据块并回报取消或写入错误
-// 入参: data 输出数据
-// 返回: int 写入字节数, error 取消或写入错误
-func (w outputWriter) Write(data []byte) (int, error) {
-	if err := w.ctx.Err(); err != nil {
-		return 0, err
-	}
-	n, err := w.writer.Write(data)
-	if err == nil {
-		err = w.ctx.Err()
-	}
-	return n, err
-}
-
 // Write 合并图像、文字、导航修正及压缩，直接写出最终PDF
 // 入参: ctx 取消上下文, data 后端PDF数据, writer 输出流, settings 写出配置
 // 返回: error 资源、压缩或写入错误
@@ -249,6 +229,26 @@ func WriteSource(ctx context.Context, source io.ReaderAt, size int64, writer io.
 	}
 	_, err = reader.RewriteTo(ctx, writer, options)
 	return err
+}
+
+// outputWriter 在分块输出前后检查取消，不改变底层写入错误
+type outputWriter struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+// Write 写入当前数据块并回报取消或写入错误
+// 入参: data 输出数据
+// 返回: int 写入字节数, error 取消或写入错误
+func (w outputWriter) Write(data []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := w.writer.Write(data)
+	if err == nil {
+		err = w.ctx.Err()
+	}
+	return n, err
 }
 
 // clipPageImages 在图像局部坐标中应用独立裁剪，不解码或重新采样图像

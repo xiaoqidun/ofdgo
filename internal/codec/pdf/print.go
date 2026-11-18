@@ -48,136 +48,6 @@ type PrintSheet struct {
 	LabelX, LabelY float64
 }
 
-// printPDFObjects 写出自有打印对象，原PDF资源仅复制实际引用的部分
-type printPDFObjects struct {
-	ctx     context.Context
-	objects []pdfgo.Object
-	copied  map[pdfgo.Reference]pdfgo.Reference
-	source  *pdfgo.Reader
-}
-
-// printPDFWriter 记录输出偏移及首次错误，支持对象编码的连续写入
-type printPDFWriter struct {
-	writer io.Writer
-	size   int64
-	err    error
-}
-
-// Write 写入数据并记录短写或底层错误
-// 入参: data 输出数据
-// 返回: int 已写字节数, error 写入错误
-func (w *printPDFWriter) Write(data []byte) (int, error) {
-	if w.err != nil {
-		return 0, w.err
-	}
-	total := 0
-	for len(data) != 0 {
-		chunk := data[:min(len(data), 32<<10)]
-		n, err := w.writer.Write(chunk)
-		total += n
-		w.size += int64(n)
-		if err == nil && n != len(chunk) {
-			err = io.ErrShortWrite
-		}
-		w.err = err
-		if err != nil {
-			return total, err
-		}
-		data = data[n:]
-	}
-	return total, nil
-}
-
-// WriteString 写入PDF语法文本
-// 入参: value 输出文本
-// 返回: int 已写字节数, error 写入错误
-func (w *printPDFWriter) WriteString(value string) (int, error) { return w.Write([]byte(value)) }
-
-// WriteByte 写入PDF语法字符
-// 入参: value 输出字符
-// 返回: error 写入错误
-func (w *printPDFWriter) WriteByte(value byte) error {
-	_, err := w.Write([]byte{value})
-	return err
-}
-
-// printPDFNumbers 编码内容流数值，不使用PDF语法不接受的科学记数法
-// 入参: out 内容流缓冲区, values 待编码数值
-func printPDFNumbers(out *bytes.Buffer, values ...float64) {
-	for _, value := range values {
-		out.WriteString(strconv.FormatFloat(value, 'f', -1, 64))
-		out.WriteByte(' ')
-	}
-}
-
-// add 登记一个独立输出对象
-// 入参: object 待登记对象
-// 返回: pdfgo.Reference 输出对象引用
-func (p *printPDFObjects) add(object pdfgo.Object) pdfgo.Reference {
-	p.objects = append(p.objects, object)
-	return pdfgo.Reference{Number: int64(len(p.objects))}
-}
-
-// copy 递归复制资源并改写引用，保留流编码及资源共享
-// 入参: object 待复制对象, depth 当前递归深度
-// 返回: pdfgo.Object 改写引用后的对象, error 资源、嵌套或取消错误
-func (p *printPDFObjects) copy(object pdfgo.Object, depth int) (pdfgo.Object, error) {
-	if err := p.ctx.Err(); err != nil {
-		return nil, err
-	}
-	if depth > 256 {
-		return nil, fmt.Errorf("print PDF resource nesting too deep")
-	}
-	switch value := object.(type) {
-	case pdfgo.Reference:
-		if next, ok := p.copied[value]; ok {
-			return next, nil
-		}
-		next := p.add(nil)
-		p.copied[value] = next
-		resolved, err := p.source.Object(value)
-		if err != nil {
-			return nil, err
-		}
-		copied, err := p.copy(resolved, depth+1)
-		if err != nil {
-			return nil, err
-		}
-		p.objects[next.Number-1] = copied
-		return next, nil
-	case pdfgo.Dictionary:
-		result := make(pdfgo.Dictionary, len(value))
-		for key, item := range value {
-			copied, err := p.copy(item, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			result[key] = copied
-		}
-		return result, nil
-	case pdfgo.Array:
-		result := make(pdfgo.Array, len(value))
-		for i, item := range value {
-			copied, err := p.copy(item, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			result[i] = copied
-		}
-		return result, nil
-	case *pdfgo.Stream:
-		dict := maps.Clone(value.Dictionary)
-		delete(dict, "Length")
-		copied, err := p.copy(dict, depth+1)
-		if err != nil {
-			return nil, err
-		}
-		return &pdfgo.Stream{Dictionary: copied.(pdfgo.Dictionary), Data: value.Data}, nil
-	default:
-		return object, nil
-	}
-}
-
 // WritePrintPDF 从随机读取源组装打印纸面，保持矢量、文字、资源及透明组
 // 入参: ctx 输出上下文, writer 输出流, source 源PDF, size 源数据长度, sheets 有序纸面
 // 返回: error 资源、编码、写入或取消错误
@@ -320,6 +190,82 @@ func WritePrintImages(ctx context.Context, writer io.Writer, sheets []PrintSheet
 	return p.write(writer, children)
 }
 
+// printPDFObjects 写出自有打印对象，原PDF资源仅复制实际引用的部分
+type printPDFObjects struct {
+	ctx     context.Context
+	objects []pdfgo.Object
+	copied  map[pdfgo.Reference]pdfgo.Reference
+	source  *pdfgo.Reader
+}
+
+// add 登记一个独立输出对象
+// 入参: object 待登记对象
+// 返回: pdfgo.Reference 输出对象引用
+func (p *printPDFObjects) add(object pdfgo.Object) pdfgo.Reference {
+	p.objects = append(p.objects, object)
+	return pdfgo.Reference{Number: int64(len(p.objects))}
+}
+
+// copy 递归复制资源并改写引用，保留流编码及资源共享
+// 入参: object 待复制对象, depth 当前递归深度
+// 返回: pdfgo.Object 改写引用后的对象, error 资源、嵌套或取消错误
+func (p *printPDFObjects) copy(object pdfgo.Object, depth int) (pdfgo.Object, error) {
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if depth > 256 {
+		return nil, fmt.Errorf("print PDF resource nesting too deep")
+	}
+	switch value := object.(type) {
+	case pdfgo.Reference:
+		if next, ok := p.copied[value]; ok {
+			return next, nil
+		}
+		next := p.add(nil)
+		p.copied[value] = next
+		resolved, err := p.source.Object(value)
+		if err != nil {
+			return nil, err
+		}
+		copied, err := p.copy(resolved, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		p.objects[next.Number-1] = copied
+		return next, nil
+	case pdfgo.Dictionary:
+		result := make(pdfgo.Dictionary, len(value))
+		for key, item := range value {
+			copied, err := p.copy(item, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			result[key] = copied
+		}
+		return result, nil
+	case pdfgo.Array:
+		result := make(pdfgo.Array, len(value))
+		for i, item := range value {
+			copied, err := p.copy(item, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			result[i] = copied
+		}
+		return result, nil
+	case *pdfgo.Stream:
+		dict := maps.Clone(value.Dictionary)
+		delete(dict, "Length")
+		copied, err := p.copy(dict, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		return &pdfgo.Stream{Dictionary: copied.(pdfgo.Dictionary), Data: value.Data}, nil
+	default:
+		return object, nil
+	}
+}
+
 // write 写出完整对象表和交叉引用，失败时由调用方丢弃输出
 // 入参: writer 输出流, children 页面对象引用
 // 返回: error 编码、写入或取消错误
@@ -352,6 +298,60 @@ func (p *printPDFObjects) write(writer io.Writer, children pdfgo.Array) error {
 		return out.err
 	}
 	return buffer.Flush()
+}
+
+// printPDFWriter 记录输出偏移及首次错误，支持对象编码的连续写入
+type printPDFWriter struct {
+	writer io.Writer
+	size   int64
+	err    error
+}
+
+// Write 写入数据并记录短写或底层错误
+// 入参: data 输出数据
+// 返回: int 已写字节数, error 写入错误
+func (w *printPDFWriter) Write(data []byte) (int, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
+	total := 0
+	for len(data) != 0 {
+		chunk := data[:min(len(data), 32<<10)]
+		n, err := w.writer.Write(chunk)
+		total += n
+		w.size += int64(n)
+		if err == nil && n != len(chunk) {
+			err = io.ErrShortWrite
+		}
+		w.err = err
+		if err != nil {
+			return total, err
+		}
+		data = data[n:]
+	}
+	return total, nil
+}
+
+// WriteString 写入PDF语法文本
+// 入参: value 输出文本
+// 返回: int 已写字节数, error 写入错误
+func (w *printPDFWriter) WriteString(value string) (int, error) { return w.Write([]byte(value)) }
+
+// WriteByte 写入PDF语法字符
+// 入参: value 输出字符
+// 返回: error 写入错误
+func (w *printPDFWriter) WriteByte(value byte) error {
+	_, err := w.Write([]byte{value})
+	return err
+}
+
+// printPDFNumbers 编码内容流数值，不使用PDF语法不接受的科学记数法
+// 入参: out 内容流缓冲区, values 待编码数值
+func printPDFNumbers(out *bytes.Buffer, values ...float64) {
+	for _, value := range values {
+		out.WriteString(strconv.FormatFloat(value, 'f', -1, 64))
+		out.WriteByte(' ')
+	}
 }
 
 // printPDFObject 编码已复制的标准PDF对象，名称和字符串按字节转义

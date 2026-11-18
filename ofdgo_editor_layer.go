@@ -46,35 +46,6 @@ func (e *Editor) Layers(page int) ([]LayerInfo, error) {
 	return editorLayerInfos(p), nil
 }
 
-// Layers 直接读取普通页面图层，不创建编辑器或分配新标识，返回值不持有页面可变数据
-// 入参: page 零基页面索引
-// 返回: []LayerInfo 按文件顺序排列的图层, error 页面读取错误
-func (r *Reader) Layers(page int) ([]LayerInfo, error) {
-	p, err := r.PageContentByIndex(page)
-	if err != nil {
-		return nil, err
-	}
-	return editorLayerInfos(p), nil
-}
-
-// editorLayerInfos 将页面图层投影为不共享可变容器的管理清单
-// 入参: p 已读取的页面
-// 返回: []LayerInfo 图层清单
-func editorLayerInfos(p *PageContent) []LayerInfo {
-	result := make([]LayerInfo, 0, len(p.Content.Layer))
-	orders := make(map[string]int)
-	for _, layer := range p.Content.Layer {
-		kind := editorLayerType(layer.Type)
-		ids := make([]string, len(layer.Objects))
-		for i, object := range layer.Objects {
-			ids[i] = editorObjectID(object)
-		}
-		result = append(result, LayerInfo{ID: layer.ID, Type: kind, DrawParam: layer.DrawParam, Order: orders[kind], ObjectCount: len(ids), ObjectIDs: ids})
-		orders[kind]++
-	}
-	return result
-}
-
 // AddLayer 追加空图层并返回新标识，空类型采用Body，空DrawParam表示不设置继承参数
 // 入参: page 页面索引, layerType 图层类型, drawParam 绘制参数标识
 // 返回: string 新图层标识, error 类型、资源或结构错误
@@ -294,6 +265,35 @@ func (e *Editor) MoveObjectsToLayer(page int, ids []string, layerID string) erro
 		}
 		return editorPatchXML(data, patches), nil
 	})
+}
+
+// Layers 直接读取普通页面图层，不创建编辑器或分配新标识，返回值不持有页面可变数据
+// 入参: page 零基页面索引
+// 返回: []LayerInfo 按文件顺序排列的图层, error 页面读取错误
+func (r *Reader) Layers(page int) ([]LayerInfo, error) {
+	p, err := r.PageContentByIndex(page)
+	if err != nil {
+		return nil, err
+	}
+	return editorLayerInfos(p), nil
+}
+
+// editorLayerInfos 将页面图层投影为不共享可变容器的管理清单
+// 入参: p 已读取的页面
+// 返回: []LayerInfo 图层清单
+func editorLayerInfos(p *PageContent) []LayerInfo {
+	result := make([]LayerInfo, 0, len(p.Content.Layer))
+	orders := make(map[string]int)
+	for _, layer := range p.Content.Layer {
+		kind := editorLayerType(layer.Type)
+		ids := make([]string, len(layer.Objects))
+		for i, object := range layer.Objects {
+			ids[i] = editorObjectID(object)
+		}
+		result = append(result, LayerInfo{ID: layer.ID, Type: kind, DrawParam: layer.DrawParam, Order: orders[kind], ObjectCount: len(ids), ObjectIDs: ids})
+		orders[kind]++
+	}
+	return result
 }
 
 // editorLayerType 将标准省略类型规范化，不改变已明确指定的类型

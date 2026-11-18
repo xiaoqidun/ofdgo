@@ -22,20 +22,41 @@ import (
 // u3dVector 保存计算过程中的三维双精度坐标
 type u3dVector [3]float64
 
-// u3dMatrix 保存按列排列的仿射矩阵
-type u3dMatrix [16]float64
-
-// u3dInstance 保存一个父路径产生的世界实例，parent为负值时连接默认根
-type u3dInstance struct {
-	node, parent int
-	world        u3dMatrix
-	opacity      float64
-	visibility   int8
+// unit 归一化向量，零向量保持为零
+// 返回: u3dVector 单位向量
+func (v u3dVector) unit() u3dVector {
+	scale := max(math.Abs(v[0]), math.Abs(v[1]), math.Abs(v[2]))
+	if scale == 0 || !finite(scale) {
+		return u3dVector{}
+	}
+	for i := range v {
+		v[i] /= scale
+	}
+	length := math.Sqrt(v.dot(v))
+	return u3dVector{v[0] / length, v[1] / length, v[2] / length}
 }
 
-// u3dIdentity 创建单位矩阵
-// 返回: u3dMatrix 单位矩阵
-func u3dIdentity() u3dMatrix { return u3dMatrix{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1} }
+// sub 求向量差
+// 入参: other 被减向量
+// 返回: u3dVector 差向量
+func (v u3dVector) sub(other u3dVector) u3dVector {
+	return u3dVector{v[0] - other[0], v[1] - other[1], v[2] - other[2]}
+}
+
+// dot 求向量内积
+// 入参: other 另一向量
+// 返回: float64 内积
+func (v u3dVector) dot(other u3dVector) float64 { return v[0]*other[0] + v[1]*other[1] + v[2]*other[2] }
+
+// cross 求向量叉积
+// 入参: other 另一向量
+// 返回: u3dVector 叉积
+func (v u3dVector) cross(other u3dVector) u3dVector {
+	return u3dVector{v[1]*other[2] - v[2]*other[1], v[2]*other[0] - v[0]*other[2], v[0]*other[1] - v[1]*other[0]}
+}
+
+// u3dMatrix 保存按列排列的仿射矩阵
+type u3dMatrix [16]float64
 
 // multiply 连接子节点到父节点的变换
 // 入参: other 子变换
@@ -124,38 +145,17 @@ func (m u3dMatrix) normal(n u3dVector) u3dVector {
 	return (u3dVector{m[0]*n[0] + m[1]*n[1] + m[2]*n[2], m[4]*n[0] + m[5]*n[1] + m[6]*n[2], m[8]*n[0] + m[9]*n[1] + m[10]*n[2]}).unit()
 }
 
-// unit 归一化向量，零向量保持为零
-// 返回: u3dVector 单位向量
-func (v u3dVector) unit() u3dVector {
-	scale := max(math.Abs(v[0]), math.Abs(v[1]), math.Abs(v[2]))
-	if scale == 0 || !finite(scale) {
-		return u3dVector{}
-	}
-	for i := range v {
-		v[i] /= scale
-	}
-	length := math.Sqrt(v.dot(v))
-	return u3dVector{v[0] / length, v[1] / length, v[2] / length}
+// u3dInstance 保存一个父路径产生的世界实例，parent为负值时连接默认根
+type u3dInstance struct {
+	node, parent int
+	world        u3dMatrix
+	opacity      float64
+	visibility   int8
 }
 
-// sub 求向量差
-// 入参: other 被减向量
-// 返回: u3dVector 差向量
-func (v u3dVector) sub(other u3dVector) u3dVector {
-	return u3dVector{v[0] - other[0], v[1] - other[1], v[2] - other[2]}
-}
-
-// dot 求向量内积
-// 入参: other 另一向量
-// 返回: float64 内积
-func (v u3dVector) dot(other u3dVector) float64 { return v[0]*other[0] + v[1]*other[1] + v[2]*other[2] }
-
-// cross 求向量叉积
-// 入参: other 另一向量
-// 返回: u3dVector 叉积
-func (v u3dVector) cross(other u3dVector) u3dVector {
-	return u3dVector{v[1]*other[2] - v[2]*other[1], v[2]*other[0] - v[0]*other[2], v[0]*other[1] - v[1]*other[0]}
-}
+// u3dIdentity 创建单位矩阵
+// 返回: u3dMatrix 单位矩阵
+func u3dIdentity() u3dMatrix { return u3dMatrix{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1} }
 
 // u3dTriangleNormal 选取夹角更稳定的顶点计算法线，避免长瘦三角面的相消
 // 入参: points 按绕序排列的顶点

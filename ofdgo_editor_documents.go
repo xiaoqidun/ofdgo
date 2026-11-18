@@ -27,16 +27,6 @@ import (
 	"strings"
 )
 
-// editorDocumentIdentity 标记编辑状态所属的文档和版本，不持有页面或资源数据
-type editorDocumentIdentity struct {
-	root    string
-	id      string
-	version string
-	fresh   bool
-	single  bool
-	fromNew bool
-}
-
 // DocumentCount 获取编辑包内的文档数量，新建编辑器包含一个当前文档
 // 返回: int 文档数量
 func (e *Editor) DocumentCount() int {
@@ -359,6 +349,33 @@ func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
 	})
 }
 
+// editorDocumentIdentity 标记编辑状态所属的文档和版本，不持有页面或资源数据
+type editorDocumentIdentity struct {
+	root    string
+	id      string
+	version string
+	fresh   bool
+	single  bool
+	fromNew bool
+}
+
+// matches 判断两个编辑状态是否属于同一文档版本，允许新文档首次建立包结构
+// 入参: other 另一编辑状态的文档身份
+// 返回: bool 是否为同一文档
+func (identity editorDocumentIdentity) matches(other editorDocumentIdentity) bool {
+	if identity.fresh || other.fresh {
+		if identity.fresh && other.fresh {
+			return true
+		}
+		fresh, packaged := identity, other
+		if !fresh.fresh {
+			fresh, packaged = other, identity
+		}
+		return packaged.version == "" && packaged.single && (packaged.fromNew || fresh.id != "" && fresh.id == packaged.id)
+	}
+	return identity.root == other.root && identity.id == other.id && identity.version == other.version
+}
+
 // editDocumentsContext 在独立快照中修改文档入口，确认未取消后提交完整状态
 // 入参: ctx 取消上下文, edit 修改包快照并返回新的当前文档索引
 // 返回: error 修改或取消错误
@@ -491,21 +508,4 @@ func (e *Editor) documentIdentity() editorDocumentIdentity {
 	}
 	version, _ := e.DocumentVersionID()
 	return editorDocumentIdentity{root: e.documentRoot(), id: e.source.info.DocID, version: version, single: e.DocumentCount() == 1, fromNew: e.source.fromNew}
-}
-
-// matches 判断两个编辑状态是否属于同一文档版本，允许新文档首次建立包结构
-// 入参: other 另一编辑状态的文档身份
-// 返回: bool 是否为同一文档
-func (identity editorDocumentIdentity) matches(other editorDocumentIdentity) bool {
-	if identity.fresh || other.fresh {
-		if identity.fresh && other.fresh {
-			return true
-		}
-		fresh, packaged := identity, other
-		if !fresh.fresh {
-			fresh, packaged = other, identity
-		}
-		return packaged.version == "" && packaged.single && (packaged.fromNew || fresh.id != "" && fresh.id == packaged.id)
-	}
-	return identity.root == other.root && identity.id == other.id && identity.version == other.version
 }

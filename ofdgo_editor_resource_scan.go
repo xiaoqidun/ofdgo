@@ -47,20 +47,6 @@ type editorScanValue struct {
 	resource bool
 }
 
-// scanOutputResources 在一次输出中复用未变化文件的引用，聚合与版本归属仍逐次计算
-// 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 扫描范围, progress 进度, collect 是否保留文件引用
-// 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可优化, error 读取或取消错误
-func (e *Editor) scanOutputResources(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names map[string]bool, progress editorProgress, collect bool) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
-	var cache *renderCache[editorScanKey, editorScanValue]
-	if e.output != nil {
-		if e.output.references == nil {
-			e.output.references = resourceCache[editorScanKey, editorScanValue](nil, 8<<20)
-		}
-		cache = e.output.references
-	}
-	return scanEditorResourceFiles(ctx, reader, parts, generated, names, progress, collect, cache)
-}
-
 // memorySize 估算文件引用的键与字体用字集合，不保留XML原文
 // 返回: int 内存成本
 func (v editorScanValue) memorySize() int {
@@ -77,6 +63,20 @@ func (v editorScanValue) memorySize() int {
 		cost += 256 + len(key) + 32*(len(font.chars)+len(font.glyphs))
 	}
 	return cost
+}
+
+// scanOutputResources 在一次输出中复用未变化文件的引用，聚合与版本归属仍逐次计算
+// 入参: ctx 取消上下文, reader 原包, parts 输出改动, generated 自产引用, names 扫描范围, progress 进度, collect 是否保留文件引用
+// 返回: *editorResourceRefs 全部引用, []string 资源索引, map[string]*editorResourceRefs 文件引用, bool 是否可优化, error 读取或取消错误
+func (e *Editor) scanOutputResources(ctx context.Context, reader *Reader, parts map[string][]byte, generated map[string]editorGeneratedReferences, names map[string]bool, progress editorProgress, collect bool) (*editorResourceRefs, []string, map[string]*editorResourceRefs, bool, error) {
+	var cache *renderCache[editorScanKey, editorScanValue]
+	if e.output != nil {
+		if e.output.references == nil {
+			e.output.references = resourceCache[editorScanKey, editorScanValue](nil, 8<<20)
+		}
+		cache = e.output.references
+	}
+	return scanEditorResourceFiles(ctx, reader, parts, generated, names, progress, collect, cache)
 }
 
 // scanEditorResources 优先扫描结构依赖，原始数据不按XML解析，孤立文件仍保留引用检查

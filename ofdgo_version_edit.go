@@ -33,6 +33,77 @@ type versionEditFile struct {
 	links  []versionEditLink
 }
 
+// rewrite 按需读取并更新已隔离文件的引用，保留其余XML及相对路径基准
+// 入参: ctx 取消上下文, paths 原路径到新路径的映射
+// 返回: []byte 更新后的XML，未改动时返回已加载原文或nil, error 读取或属性编码错误
+func (file *versionEditFile) rewrite(ctx context.Context, paths map[string]string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	needed := false
+	for _, link := range file.links {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if paths[link.target] != "" {
+			needed = true
+			break
+		}
+	}
+	if !needed {
+		return file.data, nil
+	}
+	source := file.data
+	if source == nil {
+		var err error
+		source, err = file.reader.readFileViewContext(ctx, file.name)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var patches []editorXMLPatch
+	headers := make(map[*editorXML][]versionEditLink)
+	for _, link := range file.links {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if paths[link.target] == "" {
+			continue
+		}
+		if link.attribute == "" {
+			patches = append(patches, editorXMLContent(source, link.node, editorFontXMLText("/"+paths[link.target])))
+		} else {
+			headers[link.node] = append(headers[link.node], link)
+		}
+	}
+	for node, links := range headers {
+		data := source[node.start:node.end]
+		for _, link := range links {
+			root, err := parseEditorXMLContext(ctx, data)
+			if err != nil {
+				return nil, err
+			}
+			data, err = editorXMLAttribute(data, root, link.attribute, "/"+paths[link.target])
+			if err != nil {
+				return nil, err
+			}
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return nil, err
+		}
+		if node.open == node.end {
+			patches = append(patches, editorXMLPatch{node.start, node.end, data})
+		} else {
+			patches = append(patches, editorXMLPatch{node.start, node.open, data[:root.open]})
+		}
+	}
+	if len(patches) == 0 {
+		return file.data, nil
+	}
+	return editorPatchXML(source, patches), ctx.Err()
+}
+
 // versionEditLink 记录文件引用的位置与包内目标
 type versionEditLink struct {
 	node      *editorXML
@@ -471,77 +542,6 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 		}
 	}
 	return parts, nil
-}
-
-// rewrite 按需读取并更新已隔离文件的引用，保留其余XML及相对路径基准
-// 入参: ctx 取消上下文, paths 原路径到新路径的映射
-// 返回: []byte 更新后的XML，未改动时返回已加载原文或nil, error 读取或属性编码错误
-func (file *versionEditFile) rewrite(ctx context.Context, paths map[string]string) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	needed := false
-	for _, link := range file.links {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if paths[link.target] != "" {
-			needed = true
-			break
-		}
-	}
-	if !needed {
-		return file.data, nil
-	}
-	source := file.data
-	if source == nil {
-		var err error
-		source, err = file.reader.readFileViewContext(ctx, file.name)
-		if err != nil {
-			return nil, err
-		}
-	}
-	var patches []editorXMLPatch
-	headers := make(map[*editorXML][]versionEditLink)
-	for _, link := range file.links {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if paths[link.target] == "" {
-			continue
-		}
-		if link.attribute == "" {
-			patches = append(patches, editorXMLContent(source, link.node, editorFontXMLText("/"+paths[link.target])))
-		} else {
-			headers[link.node] = append(headers[link.node], link)
-		}
-	}
-	for node, links := range headers {
-		data := source[node.start:node.end]
-		for _, link := range links {
-			root, err := parseEditorXMLContext(ctx, data)
-			if err != nil {
-				return nil, err
-			}
-			data, err = editorXMLAttribute(data, root, link.attribute, "/"+paths[link.target])
-			if err != nil {
-				return nil, err
-			}
-		}
-		root, err := parseEditorXMLContext(ctx, data)
-		if err != nil {
-			return nil, err
-		}
-		if node.open == node.end {
-			patches = append(patches, editorXMLPatch{node.start, node.end, data})
-		} else {
-			patches = append(patches, editorXMLPatch{node.start, node.open, data[:root.open]})
-		}
-	}
-	if len(patches) == 0 {
-		return file.data, nil
-	}
-	return editorPatchXML(source, patches), ctx.Err()
 }
 
 // versionManifest 更新所选版本的入口与文件清单，保留已有文件标识及扩展字段

@@ -16,11 +16,12 @@ package ofdgo
 
 import (
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"math"
 	"reflect"
 	"slices"
 	"strings"
+
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
 // EraseObjects 擦除同页对象与矩形区域重叠的可见部分，一次撤销恢复全部

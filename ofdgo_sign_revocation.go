@@ -67,20 +67,6 @@ type SignatureRevocationReport struct {
 	Error       string
 }
 
-// WithSignatureRevocation 设置离线吊销证据检查
-// 入参: options 吊销选项
-// 返回: SignatureVerifyOption 验签选项
-func WithSignatureRevocation(options SignatureRevocationOptions) SignatureVerifyOption {
-	options.CRLs = cloneSignatureEvidence(options.CRLs)
-	options.OCSPResponses = cloneSignatureEvidence(options.OCSPResponses)
-	options.Certificates = appendSignatureCerts(nil, options.Certificates...)
-	if options.VerifyTime != nil {
-		t := *options.VerifyTime
-		options.VerifyTime = &t
-	}
-	return func(o *signatureVerifyOptions) { o.Revocation = &options }
-}
-
 // VerifySignatureRevocation 验证单张证书的离线吊销证据
 // 入参: cert 证书DER, issuer 直接颁发者DER, options 吊销选项
 // 返回: SignatureRevocationReport 验证结果
@@ -154,6 +140,20 @@ func VerifySignatureRevocation(cert, issuer []byte, options SignatureRevocationO
 		result.Error = "usable revocation evidence not found"
 	}
 	return result
+}
+
+// WithSignatureRevocation 设置离线吊销证据检查
+// 入参: options 吊销选项
+// 返回: SignatureVerifyOption 验签选项
+func WithSignatureRevocation(options SignatureRevocationOptions) SignatureVerifyOption {
+	options.CRLs = cloneSignatureEvidence(options.CRLs)
+	options.OCSPResponses = cloneSignatureEvidence(options.OCSPResponses)
+	options.Certificates = appendSignatureCerts(nil, options.Certificates...)
+	if options.VerifyTime != nil {
+		t := *options.VerifyTime
+		options.VerifyTime = &t
+	}
+	return func(o *signatureVerifyOptions) { o.Revocation = &options }
 }
 
 // signatureEvidenceFresh 检查证据时间窗口及最大年龄

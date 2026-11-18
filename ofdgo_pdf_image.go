@@ -58,6 +58,13 @@ type pdfImageContent struct {
 	id     string
 }
 
+// matches 核对完整编码与有效图像属性，不以摘要相同代替内容相同
+// 入参: source 待复用图像
+// 返回: bool 是否可使用同一图像资源
+func (c pdfImageContent) matches(source *pdfgo.Image) bool {
+	return codecpdf.SameImage(c.source, source)
+}
+
 // image 转换图像样本，不将整页或其他对象栅格化
 // 有损编码复用已解码像素，候选容量超限时沿用原编码路径
 // 入参: mark PDF图像绘制信息
@@ -261,13 +268,6 @@ func (p *pdfImporter) imageContentKey(source *pdfgo.Image, key pdfImageKey) (pdf
 		return pdfImageContentKey{}, reusable, err
 	}
 	return pdfImageContentKey{data: digest, intent: key.intent, process: key.process, tint: key.tint, size: key.size}, true, err
-}
-
-// matches 核对完整编码与有效图像属性，不以摘要相同代替内容相同
-// 入参: source 待复用图像
-// 返回: bool 是否可使用同一图像资源
-func (c pdfImageContent) matches(source *pdfgo.Image) bool {
-	return codecpdf.SameImage(c.source, source)
 }
 
 // imageProcessModel 选择与页面原生过程色一致的图像输出，已等价的备用色沿用现有编码路径

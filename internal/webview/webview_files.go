@@ -60,13 +60,6 @@ type fileStore struct {
 	closed    bool
 }
 
-// fileWriter 在同目录临时文件中保存输出
-type fileWriter struct {
-	id     string
-	store  *fileStore
-	output ofdgo.WriteTransaction
-}
-
 // newFileStore 创建独立文件授权表
 // 返回: *fileStore 文件授权表, error 创建错误
 func newFileStore() (*fileStore, error) {
@@ -75,43 +68,6 @@ func newFileStore() (*fileStore, error) {
 		return nil, err
 	}
 	return &fileStore{entries: make(map[string]*fileEntry), writers: make(map[string]*fileWriter), temporary: dir}, nil
-}
-
-// temporaryDirectory 创建独立临时目录
-// 返回: string 目录路径, error 创建错误
-func temporaryDirectory() (string, error) {
-	for i := 0; i < 100; i++ {
-		n, err := rand.Int(rand.Reader, big.NewInt(10000000))
-		if err != nil {
-			return "", err
-		}
-		path := filepath.Join(os.TempDir(), fmt.Sprintf("ofdgo-%07d", n.Int64()))
-		err = os.Mkdir(path, 0700)
-		if os.IsExist(err) {
-			continue
-		}
-		return path, err
-	}
-	return "", os.ErrExist
-}
-
-// temporaryFile 创建临时文件
-// 入参: dir 所在目录, prefix 文件名前缀
-// 返回: *os.File 临时文件, error 创建错误
-func temporaryFile(dir, prefix string) (*os.File, error) {
-	for i := 0; i < 100; i++ {
-		n, err := rand.Int(rand.Reader, big.NewInt(10000000))
-		if err != nil {
-			return nil, err
-		}
-		path := filepath.Join(dir, fmt.Sprintf("%s%07d.tmp", prefix, n.Int64()))
-		file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
-		if os.IsExist(err) {
-			continue
-		}
-		return file, err
-	}
-	return nil, os.ErrExist
 }
 
 // add 登记已有授权文件
@@ -574,37 +530,6 @@ func (s *fileStore) remove(id, name string, recursive bool) error {
 	return root.Remove(name)
 }
 
-// Write 追加输出数据
-// 入参: data 输出数据
-// 返回: int 写入字节数, error 写入错误
-func (w *fileWriter) Write(data []byte) (int, error) {
-	return w.output.Write(data)
-}
-
-// Close 同步并替换目标文件
-// 返回: error 提交错误
-func (w *fileWriter) Close() error {
-	defer w.release()
-	if err := w.output.Commit(); err != nil {
-		return errors.Join(err, w.output.Abort())
-	}
-	return nil
-}
-
-// Abort 删除未提交的临时输出
-// 返回: error 清理错误
-func (w *fileWriter) Abort() error {
-	defer w.release()
-	return w.output.Abort()
-}
-
-// release 移除已结束的写入事务
-func (w *fileWriter) release() {
-	w.store.mu.Lock()
-	defer w.store.mu.Unlock()
-	delete(w.store.writers, w.id)
-}
-
 // serve 提供窗口内资源，不建立网络监听器
 // 入参: w 响应写入器, r 资源请求
 func (s *fileStore) serve(w http.ResponseWriter, r *http.Request) {
@@ -659,4 +584,79 @@ func (s *fileStore) close() error {
 		s.mu.Unlock()
 	}
 	return errors.Join(err, os.RemoveAll(s.temporary))
+}
+
+// fileWriter 在同目录临时文件中保存输出
+type fileWriter struct {
+	id     string
+	store  *fileStore
+	output ofdgo.WriteTransaction
+}
+
+// Write 追加输出数据
+// 入参: data 输出数据
+// 返回: int 写入字节数, error 写入错误
+func (w *fileWriter) Write(data []byte) (int, error) {
+	return w.output.Write(data)
+}
+
+// Close 同步并替换目标文件
+// 返回: error 提交错误
+func (w *fileWriter) Close() error {
+	defer w.release()
+	if err := w.output.Commit(); err != nil {
+		return errors.Join(err, w.output.Abort())
+	}
+	return nil
+}
+
+// Abort 删除未提交的临时输出
+// 返回: error 清理错误
+func (w *fileWriter) Abort() error {
+	defer w.release()
+	return w.output.Abort()
+}
+
+// release 移除已结束的写入事务
+func (w *fileWriter) release() {
+	w.store.mu.Lock()
+	defer w.store.mu.Unlock()
+	delete(w.store.writers, w.id)
+}
+
+// temporaryDirectory 创建独立临时目录
+// 返回: string 目录路径, error 创建错误
+func temporaryDirectory() (string, error) {
+	for i := 0; i < 100; i++ {
+		n, err := rand.Int(rand.Reader, big.NewInt(10000000))
+		if err != nil {
+			return "", err
+		}
+		path := filepath.Join(os.TempDir(), fmt.Sprintf("ofdgo-%07d", n.Int64()))
+		err = os.Mkdir(path, 0700)
+		if os.IsExist(err) {
+			continue
+		}
+		return path, err
+	}
+	return "", os.ErrExist
+}
+
+// temporaryFile 创建临时文件
+// 入参: dir 所在目录, prefix 文件名前缀
+// 返回: *os.File 临时文件, error 创建错误
+func temporaryFile(dir, prefix string) (*os.File, error) {
+	for i := 0; i < 100; i++ {
+		n, err := rand.Int(rand.Reader, big.NewInt(10000000))
+		if err != nil {
+			return nil, err
+		}
+		path := filepath.Join(dir, fmt.Sprintf("%s%07d.tmp", prefix, n.Int64()))
+		file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if os.IsExist(err) {
+			continue
+		}
+		return file, err
+	}
+	return nil, os.ErrExist
 }

@@ -47,6 +47,26 @@ type pdfMovieAction struct {
 	Operation int
 }
 
+// values 将资源控制关联到全部播放区域，重新播放前停止同一资源的其他实例
+// 返回: []pdfgo.NavigationAction 有序呈现动作
+func (a *pdfMovieAction) values() []pdfgo.NavigationAction {
+	values := make([]pdfgo.NavigationAction, 0, len(a.Resource.Screens))
+	for _, screen := range a.Resource.Screens {
+		if screen == a.Target {
+			continue
+		}
+		operation := a.Operation
+		if operation == 0 {
+			operation = 1
+		}
+		values = append(values, pdfgo.NavigationAction{Rendition: &pdfgo.RenditionAction{Target: screen.Screen, Operation: operation}})
+	}
+	if a.Target != nil {
+		values = append(values, pdfgo.NavigationAction{Rendition: &pdfgo.RenditionAction{Target: a.Target.Screen, Rendition: a.Target.Rendition}})
+	}
+	return values
+}
+
 // mediaFile 复用同一包内文件的输出说明，不合并播放资源及窗口
 // 入参: media 音视频资源
 // 返回: *pdfgo.FileSpecification 待读取的共享文件
@@ -195,26 +215,6 @@ func (n *pdfNavigation) movieAction(action Movie, page int, source actionSource,
 	resource.Screens = append(resource.Screens, screen)
 	value.Target = screen
 	return &pdfNavigationAction{Movie: value}, nil
-}
-
-// values 将资源控制关联到全部播放区域，重新播放前停止同一资源的其他实例
-// 返回: []pdfgo.NavigationAction 有序呈现动作
-func (a *pdfMovieAction) values() []pdfgo.NavigationAction {
-	values := make([]pdfgo.NavigationAction, 0, len(a.Resource.Screens))
-	for _, screen := range a.Resource.Screens {
-		if screen == a.Target {
-			continue
-		}
-		operation := a.Operation
-		if operation == 0 {
-			operation = 1
-		}
-		values = append(values, pdfgo.NavigationAction{Rendition: &pdfgo.RenditionAction{Target: screen.Screen, Operation: operation}})
-	}
-	if a.Target != nil {
-		values = append(values, pdfgo.NavigationAction{Rendition: &pdfgo.RenditionAction{Target: a.Target.Screen, Rendition: a.Target.Rendition}})
-	}
-	return values
 }
 
 // writeVideo 在绘制后读取被播放的视频，原样嵌入并关联输出页面

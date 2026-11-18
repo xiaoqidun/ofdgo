@@ -32,6 +32,25 @@ type pdfCompositePattern struct {
 	transferOpaque  bool
 }
 
+// opaqueTransfer 复用图案不透明性检查，图案内部函数不提前作用于源颜色
+// 返回: bool 是否允许使用外层设备函数, error 单元解析错误
+func (p *pdfCompositePattern) opaqueTransfer() (bool, error) {
+	if !p.transferChecked {
+		for _, child := range p.nodes {
+			opaque, err := p.local.transferOpaque(child)
+			if err != nil {
+				return false, err
+			}
+			if !opaque {
+				p.transferChecked = true
+				return false, nil
+			}
+		}
+		p.transferChecked, p.transferOpaque = true, true
+	}
+	return p.transferOpaque, nil
+}
+
 // pdfShadingSourceKey 区分图案的使用几何及填充或描边
 type pdfShadingSourceKey struct {
 	pattern  *pdfgo.ShadingPattern
@@ -493,25 +512,6 @@ func (c *pdfCompositor) selectTransfer(node pdfCompositeNode, outline bool) (*pd
 		}
 	}
 	return transfer, nil
-}
-
-// opaqueTransfer 复用图案不透明性检查，图案内部函数不提前作用于源颜色
-// 返回: bool 是否允许使用外层设备函数, error 单元解析错误
-func (p *pdfCompositePattern) opaqueTransfer() (bool, error) {
-	if !p.transferChecked {
-		for _, child := range p.nodes {
-			opaque, err := p.local.transferOpaque(child)
-			if err != nil {
-				return false, err
-			}
-			if !opaque {
-				p.transferChecked = true
-				return false, nil
-			}
-		}
-		p.transferChecked, p.transferOpaque = true, true
-	}
-	return p.transferOpaque, nil
 }
 
 // transferOpaque 检查全部图案内容的不透明条件，不限制混合颜色空间

@@ -43,21 +43,6 @@ type SignaturePolicy struct {
 	RequireRevocation       bool
 }
 
-// signaturePolicyRejection 区分策略拒绝与解析失败
-type signaturePolicyRejection struct{ message string }
-
-// signatureCoverageNode 收集OFD结构中的包内路径引用
-type signatureCoverageNode struct {
-	XMLName  xml.Name
-	Attrs    []xml.Attr              `xml:",any,attr"`
-	Text     string                  `xml:",chardata"`
-	Children []signatureCoverageNode `xml:",any"`
-}
-
-// Error 返回策略拒绝原因
-// 返回: string 错误信息
-func (e signaturePolicyRejection) Error() string { return e.message }
-
 // WithSignaturePolicy 设置签名策略
 // 入参: policy 签名策略
 // 返回: SignatureVerifyOption 验签选项
@@ -69,6 +54,21 @@ func WithSignaturePolicy(policy SignaturePolicy) SignatureVerifyOption {
 	policy.SignatureMethods = append([]string(nil), policy.SignatureMethods...)
 	policy.RequiredFiles = append([]string(nil), policy.RequiredFiles...)
 	return func(o *signatureVerifyOptions) { o.Policy = &policy }
+}
+
+// signaturePolicyRejection 区分策略拒绝与解析失败
+type signaturePolicyRejection struct{ message string }
+
+// Error 返回策略拒绝原因
+// 返回: string 错误信息
+func (e signaturePolicyRejection) Error() string { return e.message }
+
+// signatureCoverageNode 收集OFD结构中的包内路径引用
+type signatureCoverageNode struct {
+	XMLName  xml.Name
+	Attrs    []xml.Attr              `xml:",any,attr"`
+	Text     string                  `xml:",chardata"`
+	Children []signatureCoverageNode `xml:",any"`
 }
 
 // rejectSignaturePolicy 构造可识别的策略拒绝错误

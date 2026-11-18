@@ -132,32 +132,6 @@ type RegionCommand struct {
 	EndPoint       string
 }
 
-// actionSource 动作来源
-type actionSource struct {
-	Box     Box
-	Actions []Action
-	Matrix  Matrix
-	Path    string
-	Graphic bool
-}
-
-// decodeOFDActions 读取标准动作列表，不将外部同名节点作为交互动作
-// 入参: d XML解码器, start 列表起始节点, actions 动作接收列表
-// 返回: error 解析错误
-func decodeOFDActions(d *xml.Decoder, start xml.StartElement, actions *[]Action) error {
-	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
-		if node.Name.Local != "Action" {
-			return d.Skip()
-		}
-		var action Action
-		if err := d.DecodeElement(&action, &node); err != nil {
-			return err
-		}
-		*actions = append(*actions, action)
-		return nil
-	})
-}
-
 // UnmarshalXML 读取事件、区域和动作内容，忽略外部同名节点
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解析错误
@@ -288,6 +262,21 @@ func (dest *Dest) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	return nil
 }
 
+// MarshalXML 按标准属性写入目标，书签和动作采用相同格式
+// 入参: encoder XML编码器, start 起始节点
+// 返回: error 参数或编码错误
+func (dest Dest) MarshalXML(encoder *xml.Encoder, start xml.StartElement) error {
+	attrs, err := dest.attributes()
+	if err != nil {
+		return err
+	}
+	start.Attr = attrs
+	if err := encoder.EncodeToken(start); err != nil {
+		return err
+	}
+	return encoder.EncodeToken(start.End())
+}
+
 // UnmarshalXML 解析视频动作并应用默认值
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
@@ -334,6 +323,32 @@ func (a *RegionArea) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 		}
 		a.Command = append(a.Command, command)
 		return d.Skip()
+	})
+}
+
+// actionSource 动作来源
+type actionSource struct {
+	Box     Box
+	Actions []Action
+	Matrix  Matrix
+	Path    string
+	Graphic bool
+}
+
+// decodeOFDActions 读取标准动作列表，不将外部同名节点作为交互动作
+// 入参: d XML解码器, start 列表起始节点, actions 动作接收列表
+// 返回: error 解析错误
+func decodeOFDActions(d *xml.Decoder, start xml.StartElement, actions *[]Action) error {
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "Action" {
+			return d.Skip()
+		}
+		var action Action
+		if err := d.DecodeElement(&action, &node); err != nil {
+			return err
+		}
+		*actions = append(*actions, action)
+		return nil
 	})
 }
 
@@ -540,21 +555,6 @@ func resolveActionURI(action URI) string {
 		return action.URI
 	}
 	return base.ResolveReference(target).String()
-}
-
-// MarshalXML 按标准属性写入目标，书签和动作采用相同格式
-// 入参: encoder XML编码器, start 起始节点
-// 返回: error 参数或编码错误
-func (dest Dest) MarshalXML(encoder *xml.Encoder, start xml.StartElement) error {
-	attrs, err := dest.attributes()
-	if err != nil {
-		return err
-	}
-	start.Attr = attrs
-	if err := encoder.EncodeToken(start); err != nil {
-		return err
-	}
-	return encoder.EncodeToken(start.End())
 }
 
 // effective 应用省略属性的默认值，不改变原始声明

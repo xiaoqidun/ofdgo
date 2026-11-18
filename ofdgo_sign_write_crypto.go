@@ -38,13 +38,6 @@ import (
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
-// signatureWriteKey 已验证签署身份
-type signatureWriteKey struct {
-	cert   *smx509.Certificate
-	method string
-	digest string
-}
-
 // ParseSignatureIdentity 解析签署私钥和证书，并检查公私钥对应关系
 // 支持普通PKCS8、SEC1、PKCS1以及加密PKCS8，不支持传统加密PEM
 // 不加载系统信任或暗中信任该证书，返回的SM2/RSA私钥同时实现crypto.Decrypter
@@ -103,6 +96,63 @@ func ParseSignatureIdentity(certificate, privateKey []byte, password ...[]byte) 
 		return nil, nil, err
 	}
 	return signer, bytes.Clone(cert.Raw), nil
+}
+
+// signatureWriteKey 已验证签署身份
+type signatureWriteKey struct {
+	cert   *smx509.Certificate
+	method string
+	digest string
+}
+
+// sign 编码数字签名或SES v4签章
+// 入参: data 最终Signature.xml原文, property 包内绝对路径, options 签署选项
+// 返回: []byte 签名值, error 错误信息
+func (key *signatureWriteKey) sign(data []byte, property string, options SignatureWriteOptions) ([]byte, error) {
+	if len(options.Seal) == 0 {
+		if key.method != signMethodSM2SM3 {
+			return key.signMessage(data, options.Signer)
+		}
+		digest := sm3.Sum(data)
+		signature, err := key.signMessage(digest[:], options.Signer)
+		if err != nil {
+			return nil, err
+		}
+		return signatureWriteSignedData(key.cert, digest[:], signature)
+	}
+	digest := sm3.Sum(data)
+	tbs, err := asn1.Marshal(struct {
+		Version  int
+		Seal     asn1.RawValue
+		Time     time.Time `asn1:"generalized"`
+		Hash     asn1.BitString
+		Property string `asn1:"ia5"`
+	}{4, asn1.RawValue{FullBytes: options.Seal}, options.Time, asn1.BitString{Bytes: digest[:], BitLength: 256}, property})
+	if err != nil {
+		return nil, err
+	}
+	signature, err := key.signMessage(tbs, options.Signer)
+	if err != nil {
+		return nil, err
+	}
+	return asn1.Marshal(struct {
+		TBS         asn1.RawValue
+		Certificate []byte
+		Algorithm   asn1.ObjectIdentifier
+		Signature   asn1.BitString
+	}{asn1.RawValue{FullBytes: tbs}, key.cert.Raw, asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 501}, asn1.BitString{Bytes: signature, BitLength: len(signature) * 8}})
+}
+
+// signMessage 通过crypto.Signer调用成熟实现或硬件签署器
+// SM2签署器必须接受gmsm的SM2SignerOption，接收原文并计算默认用户标识的ZA
+// 入参: data 原文, signer 签署器
+// 返回: []byte 签名值, error 错误信息
+func (key *signatureWriteKey) signMessage(data []byte, signer crypto.Signer) ([]byte, error) {
+	if key.method == signMethodSM2SM3 {
+		return signer.Sign(rand.Reader, data, sm2.NewSM2SignerOption(true, nil))
+	}
+	digest := sha256.Sum256(data)
+	return signer.Sign(rand.Reader, digest[:], crypto.SHA256)
 }
 
 // signatureWriteIdentity 检查签署身份、证书信任与印章授权
@@ -243,56 +293,6 @@ func signatureWriteTrust(cert *smx509.Certificate, at time.Time, options Signatu
 		return fmt.Errorf("explicit signature trust roots are required")
 	}
 	return verifySignatureCertificateChain(cert, options.Intermediates, options.TrustRoots, at, smx509.ExtKeyUsageAny)
-}
-
-// sign 编码数字签名或SES v4签章
-// 入参: data 最终Signature.xml原文, property 包内绝对路径, options 签署选项
-// 返回: []byte 签名值, error 错误信息
-func (key *signatureWriteKey) sign(data []byte, property string, options SignatureWriteOptions) ([]byte, error) {
-	if len(options.Seal) == 0 {
-		if key.method != signMethodSM2SM3 {
-			return key.signMessage(data, options.Signer)
-		}
-		digest := sm3.Sum(data)
-		signature, err := key.signMessage(digest[:], options.Signer)
-		if err != nil {
-			return nil, err
-		}
-		return signatureWriteSignedData(key.cert, digest[:], signature)
-	}
-	digest := sm3.Sum(data)
-	tbs, err := asn1.Marshal(struct {
-		Version  int
-		Seal     asn1.RawValue
-		Time     time.Time `asn1:"generalized"`
-		Hash     asn1.BitString
-		Property string `asn1:"ia5"`
-	}{4, asn1.RawValue{FullBytes: options.Seal}, options.Time, asn1.BitString{Bytes: digest[:], BitLength: 256}, property})
-	if err != nil {
-		return nil, err
-	}
-	signature, err := key.signMessage(tbs, options.Signer)
-	if err != nil {
-		return nil, err
-	}
-	return asn1.Marshal(struct {
-		TBS         asn1.RawValue
-		Certificate []byte
-		Algorithm   asn1.ObjectIdentifier
-		Signature   asn1.BitString
-	}{asn1.RawValue{FullBytes: tbs}, key.cert.Raw, asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 501}, asn1.BitString{Bytes: signature, BitLength: len(signature) * 8}})
-}
-
-// signMessage 通过crypto.Signer调用成熟实现或硬件签署器
-// SM2签署器必须接受gmsm的SM2SignerOption，接收原文并计算默认用户标识的ZA
-// 入参: data 原文, signer 签署器
-// 返回: []byte 签名值, error 错误信息
-func (key *signatureWriteKey) signMessage(data []byte, signer crypto.Signer) ([]byte, error) {
-	if key.method == signMethodSM2SM3 {
-		return signer.Sign(rand.Reader, data, sm2.NewSM2SignerOption(true, nil))
-	}
-	digest := sha256.Sum256(data)
-	return signer.Sign(rand.Reader, digest[:], crypto.SHA256)
 }
 
 // signatureWriteSignedData 编码带签署证书的SM2数字签名消息

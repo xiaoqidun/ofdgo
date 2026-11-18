@@ -43,6 +43,13 @@ func MatrixFromValues(values [6]float64) Matrix {
 	return Matrix{a: values[0], b: values[1], c: values[2], d: values[3], e: values[4], f: values[5]}
 }
 
+// TranslationMatrix 构造平移矩阵
+// 入参: x X轴偏移, y Y轴偏移
+// 返回: Matrix 平移矩阵
+func TranslationMatrix(x, y float64) Matrix {
+	return Matrix{a: 1, d: 1, e: x, f: y}
+}
+
 // Values 返回a、b、c、d、e、f的独立副本，保留原始浮点精度
 // 返回: [6]float64 矩阵分量
 func (m Matrix) Values() [6]float64 {
@@ -125,6 +132,33 @@ func (m Matrix) Invert() (Matrix, bool) {
 	return n, true
 }
 
+// YScale 获取Y轴缩放比例
+// 返回: float64 缩放比例
+func (m Matrix) YScale() float64 {
+	return math.Hypot(m.c, m.d)
+}
+
+// Equal 比较毫米坐标，使用固定绝对误差，不受绘图库全局精度影响
+// 入参: a 第一个坐标, b 第二个坐标
+// 返回: bool 是否在容差内相等
+func Equal(a, b float64) bool {
+	return math.Abs(a-b) <= 1e-10
+}
+
+// AxisAligned 判断变换是否保持坐标轴平行，含直角旋转与镜像
+// 入参: m 仿射变换矩阵
+// 返回: bool 是否为非退化的轴对齐变换
+func AxisAligned(m Matrix) bool {
+	return m.b == 0 && m.c == 0 && m.a != 0 && m.d != 0 || m.a == 0 && m.d == 0 && m.b != 0 && m.c != 0
+}
+
+// Vector 变换位移，不包含平移分量
+// 入参: m 仿射变换矩阵, x 原始横向位移, y 原始纵向位移
+// 返回: float64 变换后的X位移, float64 变换后的Y位移
+func Vector(m Matrix, x, y float64) (float64, float64) {
+	return m.a*x + m.c*y, m.b*x + m.d*y
+}
+
 // matrixProductDifference 补偿乘积相减的舍入残差，检查溢出、下溢及严重相消
 // 入参: a 第一个乘数, b 第二个乘数, c 第三个乘数, d 第四个乘数
 // 返回: float64 乘积之差, bool 是否可直接用于求逆
@@ -160,38 +194,4 @@ func matrixProductSum(a, b, c, d float64) (float64, int) {
 	value += math.Ldexp(math.FMA(a, b, -x), xe-power) + math.Ldexp(math.FMA(c, d, -y), ye-power)
 	value, shift := math.Frexp(value)
 	return value, power + shift
-}
-
-// TranslationMatrix 构造平移矩阵
-// 入参: x X轴偏移, y Y轴偏移
-// 返回: Matrix 平移矩阵
-func TranslationMatrix(x, y float64) Matrix {
-	return Matrix{a: 1, d: 1, e: x, f: y}
-}
-
-// YScale 获取Y轴缩放比例
-// 返回: float64 缩放比例
-func (m Matrix) YScale() float64 {
-	return math.Hypot(m.c, m.d)
-}
-
-// Equal 比较毫米坐标，使用固定绝对误差，不受绘图库全局精度影响
-// 入参: a 第一个坐标, b 第二个坐标
-// 返回: bool 是否在容差内相等
-func Equal(a, b float64) bool {
-	return math.Abs(a-b) <= 1e-10
-}
-
-// AxisAligned 判断变换是否保持坐标轴平行，含直角旋转与镜像
-// 入参: m 仿射变换矩阵
-// 返回: bool 是否为非退化的轴对齐变换
-func AxisAligned(m Matrix) bool {
-	return m.b == 0 && m.c == 0 && m.a != 0 && m.d != 0 || m.a == 0 && m.d == 0 && m.b != 0 && m.c != 0
-}
-
-// Vector 变换位移，不包含平移分量
-// 入参: m 仿射变换矩阵, x 原始横向位移, y 原始纵向位移
-// 返回: float64 变换后的X位移, float64 变换后的Y位移
-func Vector(m Matrix, x, y float64) (float64, float64) {
-	return m.a*x + m.c*y, m.b*x + m.d*y
 }

@@ -37,6 +37,112 @@ import (
 	"golang.org/x/image/math/fixed"
 )
 
+// RenderSVG 输出一个完整纸面的独立SVG，字体和图片内嵌，不依赖界面资源
+// 入参: ctx 输出上下文, side 零基纸面索引, writer 输出流
+// 返回: error 读取、后端、写入或取消错误；失败时调用方丢弃部分输出
+func (p *PrintDocument) RenderSVG(ctx context.Context, side int, writer io.Writer) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.renderPrintSVG(ctx, side, writer)
+}
+
+// RenderImage 按指定DPI输出一个纸面的独立白底图像，dpi为0时采用任务配置
+// 入参: ctx 输出上下文, side 零基纸面索引, dpi 输出分辨率
+// 返回: image.Image 纸面图像, error 配置、读取、后端或取消错误
+func (p *PrintDocument) RenderImage(ctx context.Context, side int, dpi float64) (image.Image, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.renderPrintImage(ctx, side, dpi)
+}
+
+// WriteHTML 输出不含应用脚本的独立打印文档，每个纸面按毫米尺寸分页
+// 入参: ctx 输出上下文, writer 输出流, title 文档标题
+// 返回: error 输出或取消错误；调用方在字体和图片加载后触发打印
+func (p *PrintDocument) WriteHTML(ctx context.Context, writer io.Writer, title string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, err := p.printSide(ctx, 0); err != nil {
+		return err
+	}
+	if writer == nil {
+		return fmt.Errorf("missing print writer")
+	}
+	out := convertWriter{ctx: ctx, writer: writer, count: new(int64)}
+	if _, err := fmt.Fprintf(out, "<!doctype html><html><head><meta charset=\"utf-8\"><title>%s</title><style>html,body{margin:0;padding:0;background:white}*{box-sizing:border-box}section{break-after:page;overflow:hidden;print-color-adjust:exact;-webkit-print-color-adjust:exact}section:last-child{break-after:auto}img{display:block;width:100%%;height:100%%}@media screen{section{margin:12px auto;box-shadow:0 0 4px #888}}</style><style>", html.EscapeString(title)); err != nil {
+		return err
+	}
+	for i, side := range p.layout.Sides {
+		if _, err := fmt.Fprintf(out, "@page s%d{size:%gmm %gmm;margin:0}.s%d{page:s%d;width:%gmm;height:%gmm}", i, side.Width, side.Height, i, i, side.Width, side.Height); err != nil {
+			return err
+		}
+	}
+	if _, err := io.WriteString(out, "</style></head><body>"); err != nil {
+		return err
+	}
+	for i := range p.layout.Sides {
+		var svg bytes.Buffer
+		if err := p.renderPrintSVG(ctx, i, &svg); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(out, `<section class="s%d"><img src="data:image/svg+xml;base64,%s"></section>`, i, base64.StdEncoding.EncodeToString(svg.Bytes())); err != nil {
+			return err
+		}
+	}
+	_, err := io.WriteString(out, "</body></html>")
+	return err
+}
+
+// WritePDF 将相同打印布局写成矢量PDF；显式图像或灰度模式按任务DPI输出
+// 入参: ctx 输出上下文, writer 输出流
+// 返回: error 后端、读取、写入或取消错误；失败时调用方丢弃部分输出
+func (p *PrintDocument) WritePDF(ctx context.Context, writer io.Writer) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, err := p.printSide(ctx, 0); err != nil {
+		return err
+	}
+	if writer == nil {
+		return fmt.Errorf("missing print writer")
+	}
+	sheets := make([]codecpdf.PrintSheet, len(p.layout.Sides))
+	raster := p.options.Raster || p.options.Grayscale
+	for i, side := range p.layout.Sides {
+		sheets[i] = codecpdf.PrintSheet{Width: side.Width, Height: side.Height}
+		if raster {
+			continue
+		}
+		sheets[i].Lines = p.printLines(side)
+		sheets[i].Label, sheets[i].LabelX, sheets[i].LabelY = side.Label, side.LabelX, side.LabelY
+		for _, placement := range side.Placements {
+			sheets[i].Placements = append(sheets[i].Placements, codecpdf.PrintPlacement{Page: placement.Page, Matrix: placement.Transform, Clip: [4]float64{placement.Clip.X, placement.Clip.Y, placement.Clip.W, placement.Clip.H}})
+		}
+	}
+	if raster {
+		return codecpdf.WritePrintImages(ctx, writer, sheets, func(i int) (image.Image, error) { return p.renderPrintImage(ctx, i, p.options.DPI) })
+	}
+	var indices []int
+	for _, side := range p.layout.Sides {
+		for _, placement := range side.Placements {
+			indices = append(indices, placement.Page)
+		}
+	}
+	slices.Sort(indices)
+	indices = slices.Compact(indices)
+	if len(indices) == 0 {
+		return codecpdf.WritePrintPDF(ctx, writer, nil, 0, sheets)
+	}
+	var source editorSnapshotBuffer
+	if err := p.renderer.RenderToMultiPagePDF(&source, indices...); err != nil {
+		return err
+	}
+	for i := range sheets {
+		for j := range sheets[i].Placements {
+			sheets[i].Placements[j].Page, _ = slices.BinarySearch(indices, sheets[i].Placements[j].Page)
+		}
+	}
+	return codecpdf.WritePrintPDF(ctx, writer, &source, source.size, sheets)
+}
+
 // printSide 校验任务及纸面索引，并设置当前输出上下文
 // 入参: ctx 输出上下文, index 零基纸面索引
 // 返回: PrintSide 当前纸面, error 状态、索引或取消错误
@@ -55,15 +161,6 @@ func (p *PrintDocument) printSide(ctx context.Context, index int) (PrintSide, er
 	}
 	p.renderer.OutputContext, p.renderer.pageContext = ctx, ctx
 	return p.layout.Sides[index], nil
-}
-
-// RenderSVG 输出一个完整纸面的独立SVG，字体和图片内嵌，不依赖界面资源
-// 入参: ctx 输出上下文, side 零基纸面索引, writer 输出流
-// 返回: error 读取、后端、写入或取消错误；失败时调用方丢弃部分输出
-func (p *PrintDocument) RenderSVG(ctx context.Context, side int, writer io.Writer) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.renderPrintSVG(ctx, side, writer)
 }
 
 // renderPrintSVG 按统一布局输出矢量或显式光栅纸面
@@ -132,15 +229,6 @@ func (p *PrintDocument) renderPrintSVG(ctx context.Context, index int, writer io
 	}
 	out.WriteString(`</svg>`)
 	return out.Flush()
-}
-
-// RenderImage 按指定DPI输出一个纸面的独立白底图像，dpi为0时采用任务配置
-// 入参: ctx 输出上下文, side 零基纸面索引, dpi 输出分辨率
-// 返回: image.Image 纸面图像, error 配置、读取、后端或取消错误
-func (p *PrintDocument) RenderImage(ctx context.Context, side int, dpi float64) (image.Image, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.renderPrintImage(ctx, side, dpi)
 }
 
 // renderPrintImage 仅保留当前纸面及单个源页图像，不积累整份文档像素
@@ -284,92 +372,4 @@ func (p *PrintDocument) printLines(side PrintSide) [][4]float64 {
 		}
 	}
 	return result
-}
-
-// WriteHTML 输出不含应用脚本的独立打印文档，每个纸面按毫米尺寸分页
-// 入参: ctx 输出上下文, writer 输出流, title 文档标题
-// 返回: error 输出或取消错误；调用方在字体和图片加载后触发打印
-func (p *PrintDocument) WriteHTML(ctx context.Context, writer io.Writer, title string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if _, err := p.printSide(ctx, 0); err != nil {
-		return err
-	}
-	if writer == nil {
-		return fmt.Errorf("missing print writer")
-	}
-	out := convertWriter{ctx: ctx, writer: writer, count: new(int64)}
-	if _, err := fmt.Fprintf(out, "<!doctype html><html><head><meta charset=\"utf-8\"><title>%s</title><style>html,body{margin:0;padding:0;background:white}*{box-sizing:border-box}section{break-after:page;overflow:hidden;print-color-adjust:exact;-webkit-print-color-adjust:exact}section:last-child{break-after:auto}img{display:block;width:100%%;height:100%%}@media screen{section{margin:12px auto;box-shadow:0 0 4px #888}}</style><style>", html.EscapeString(title)); err != nil {
-		return err
-	}
-	for i, side := range p.layout.Sides {
-		if _, err := fmt.Fprintf(out, "@page s%d{size:%gmm %gmm;margin:0}.s%d{page:s%d;width:%gmm;height:%gmm}", i, side.Width, side.Height, i, i, side.Width, side.Height); err != nil {
-			return err
-		}
-	}
-	if _, err := io.WriteString(out, "</style></head><body>"); err != nil {
-		return err
-	}
-	for i := range p.layout.Sides {
-		var svg bytes.Buffer
-		if err := p.renderPrintSVG(ctx, i, &svg); err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintf(out, `<section class="s%d"><img src="data:image/svg+xml;base64,%s"></section>`, i, base64.StdEncoding.EncodeToString(svg.Bytes())); err != nil {
-			return err
-		}
-	}
-	_, err := io.WriteString(out, "</body></html>")
-	return err
-}
-
-// WritePDF 将相同打印布局写成矢量PDF；显式图像或灰度模式按任务DPI输出
-// 入参: ctx 输出上下文, writer 输出流
-// 返回: error 后端、读取、写入或取消错误；失败时调用方丢弃部分输出
-func (p *PrintDocument) WritePDF(ctx context.Context, writer io.Writer) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if _, err := p.printSide(ctx, 0); err != nil {
-		return err
-	}
-	if writer == nil {
-		return fmt.Errorf("missing print writer")
-	}
-	sheets := make([]codecpdf.PrintSheet, len(p.layout.Sides))
-	raster := p.options.Raster || p.options.Grayscale
-	for i, side := range p.layout.Sides {
-		sheets[i] = codecpdf.PrintSheet{Width: side.Width, Height: side.Height}
-		if raster {
-			continue
-		}
-		sheets[i].Lines = p.printLines(side)
-		sheets[i].Label, sheets[i].LabelX, sheets[i].LabelY = side.Label, side.LabelX, side.LabelY
-		for _, placement := range side.Placements {
-			sheets[i].Placements = append(sheets[i].Placements, codecpdf.PrintPlacement{Page: placement.Page, Matrix: placement.Transform, Clip: [4]float64{placement.Clip.X, placement.Clip.Y, placement.Clip.W, placement.Clip.H}})
-		}
-	}
-	if raster {
-		return codecpdf.WritePrintImages(ctx, writer, sheets, func(i int) (image.Image, error) { return p.renderPrintImage(ctx, i, p.options.DPI) })
-	}
-	var indices []int
-	for _, side := range p.layout.Sides {
-		for _, placement := range side.Placements {
-			indices = append(indices, placement.Page)
-		}
-	}
-	slices.Sort(indices)
-	indices = slices.Compact(indices)
-	if len(indices) == 0 {
-		return codecpdf.WritePrintPDF(ctx, writer, nil, 0, sheets)
-	}
-	var source editorSnapshotBuffer
-	if err := p.renderer.RenderToMultiPagePDF(&source, indices...); err != nil {
-		return err
-	}
-	for i := range sheets {
-		for j := range sheets[i].Placements {
-			sheets[i].Placements[j].Page, _ = slices.BinarySearch(indices, sheets[i].Placements[j].Page)
-		}
-	}
-	return codecpdf.WritePrintPDF(ctx, writer, &source, source.size, sheets)
 }

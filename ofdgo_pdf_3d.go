@@ -44,6 +44,19 @@ type PDFThreeDRenderOptions struct {
 	Time           float64
 }
 
+// RenderPDFThreeD 按PDF相机、投影、背景与灯光绘制指定时刻的3DB区域，不执行脚本
+// 返回图像不含3DB以外的注解背景，未支持的视图效果返回明确错误
+// 每次从传入场景建立独立节点状态，不继承此前绘制的运行时状态
+// 入参: ctx 取消上下文, model 解码后的U3D模型, source PDF三维参数, options 输出与资源限制
+// 返回: *image.RGBA 不透明图像, error 参数、能力、预算或取消错误
+func RenderPDFThreeD(ctx context.Context, model *U3DModel, source pdfgo.ThreeD, options PDFThreeDRenderOptions) (*image.RGBA, error) {
+	return codecpdf.RenderThreeD(ctx, model, source, codecpdf.ThreeDRenderOptions{
+		Width: options.Width, Height: options.Height,
+		MaxMemoryBytes: options.MaxMemoryBytes, MaxInstances: options.MaxInstances,
+		ResolveTexture: options.ResolveTexture, Nodes: options.Nodes, Time: options.Time,
+	})
+}
+
 // pdfThreeDMarkupState 复用同页批注的宿主解析及模型校验，不保留模型解码缓冲
 type pdfThreeDMarkupState struct {
 	sources map[pdfgo.Reference]pdfgo.ThreeD
@@ -184,19 +197,6 @@ func (p *pdfImporter) threeDPainter(ctx context.Context, page *pdfgo.Page, sourc
 		}
 		return stamp.compositeObjects(nodes)
 	}, nil
-}
-
-// RenderPDFThreeD 按PDF相机、投影、背景与灯光绘制指定时刻的3DB区域，不执行脚本
-// 返回图像不含3DB以外的注解背景，未支持的视图效果返回明确错误
-// 每次从传入场景建立独立节点状态，不继承此前绘制的运行时状态
-// 入参: ctx 取消上下文, model 解码后的U3D模型, source PDF三维参数, options 输出与资源限制
-// 返回: *image.RGBA 不透明图像, error 参数、能力、预算或取消错误
-func RenderPDFThreeD(ctx context.Context, model *U3DModel, source pdfgo.ThreeD, options PDFThreeDRenderOptions) (*image.RGBA, error) {
-	return codecpdf.RenderThreeD(ctx, model, source, codecpdf.ThreeDRenderOptions{
-		Width: options.Width, Height: options.Height,
-		MaxMemoryBytes: options.MaxMemoryBytes, MaxInstances: options.MaxInstances,
-		ResolveTexture: options.ResolveTexture, Nodes: options.Nodes, Time: options.Time,
-	})
 }
 
 // threeDMarkupAnnotation 应用默认三维视图的批注可见性，其他视图批注保留为隐藏注解

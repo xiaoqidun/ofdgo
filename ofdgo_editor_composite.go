@@ -52,43 +52,6 @@ type CompositeMember struct {
 	Cropped      bool
 }
 
-// editorCompositeNode 保留原始XML及实例上下文，不修改共享资源
-type editorCompositeNode struct {
-	data          []byte
-	node          *editorXML
-	object        GraphicObject
-	parent        Matrix
-	boundaryInCTM bool
-	defaults      *DrawParam
-	drawParams    []string
-	clip          *GeometryPath
-	visible       bool
-	alpha         *int
-	ref           *editorCompositeNode
-	children      []*editorCompositeNode
-	expanded      bool
-	changed       bool
-	span          *editorXML
-	owner         *editorCompositeNode
-	patches       []editorXMLPatch
-	index         int
-	states        map[string]editorCompositeState
-	remaps        []map[string]string
-}
-
-// editorCompositeState 保存内部对象的会话排版及可还原裁剪，不写入OFD
-type editorCompositeState struct {
-	layout *textLayout
-	crop   *editorCompositeCrop
-	origin [2]float64
-}
-
-// editorCompositeCrop 记录本次编辑新增的裁剪序号及原节点存在性
-type editorCompositeCrop struct {
-	indexes []int
-	exists  bool
-}
-
 // CompositeObjects 枚举复合对象的直接可绘制成员，资源引用层不占用路径层级
 // 入参: page 页面索引, path 复合对象路径
 // 返回: []CompositeMember 按绘制顺序排列的成员, error 错误信息
@@ -122,41 +85,6 @@ func (e *Editor) CompositeObjectsAt(page int, path ObjectPath, indexes []int) ([
 	}
 	defer reader.Close()
 	return e.measureCompositeSelection(renderer, nodes, indexes)
-}
-
-// measureCompositeSelection 复用已解析范围，按输入索引度量成员并保留容器位置
-// 入参: renderer 资源渲染器, nodes 范围内全部成员, indexes 不重复的成员序号
-// 返回: []CompositeMember 独立成员快照, error 索引或度量错误
-func (e *Editor) measureCompositeSelection(renderer *Renderer, nodes []*editorCompositeNode, indexes []int) ([]CompositeMember, error) {
-	selected := make([]*editorCompositeNode, len(indexes))
-	seen := make(map[int]bool, len(indexes))
-	for i, index := range indexes {
-		if index < 0 || index >= len(nodes) || seen[index] {
-			return nil, fmt.Errorf("invalid composite member index %d", index)
-		}
-		seen[index] = true
-		selected[i] = nodes[index]
-	}
-	positions := make([]ObjectPosition, len(nodes))
-	containers := make(map[*editorXML]ObjectPosition)
-	for i, node := range nodes {
-		position := containers[node.span.parent]
-		if position.Count == 0 {
-			position.Container = fmt.Sprint(i)
-		}
-		positions[i] = ObjectPosition{Container: position.Container, Index: position.Count}
-		position.Count++
-		containers[node.span.parent] = position
-	}
-	members, err := e.measureCompositeMembers(renderer, selected)
-	if err != nil {
-		return nil, err
-	}
-	for i, index := range indexes {
-		members[i].Position = positions[index]
-		members[i].Position.Count = containers[nodes[index].span.parent].Count
-	}
-	return members, nil
 }
 
 // TransformCompositeObjects 在页面坐标中等比缩放并平移内部选区，只隔离被修改实例的资源
@@ -325,6 +253,58 @@ func (e *Editor) DistributeCompositeObjects(page int, path ObjectPath, indexes [
 	})
 }
 
+// editorCompositeNode 保留原始XML及实例上下文，不修改共享资源
+type editorCompositeNode struct {
+	data          []byte
+	node          *editorXML
+	object        GraphicObject
+	parent        Matrix
+	boundaryInCTM bool
+	defaults      *DrawParam
+	drawParams    []string
+	clip          *GeometryPath
+	visible       bool
+	alpha         *int
+	ref           *editorCompositeNode
+	children      []*editorCompositeNode
+	expanded      bool
+	changed       bool
+	span          *editorXML
+	owner         *editorCompositeNode
+	patches       []editorXMLPatch
+	index         int
+	states        map[string]editorCompositeState
+	remaps        []map[string]string
+}
+
+// newEditorCompositeNode 解析独立图形片段，保留全部原始属性
+// 入参: data XML片段
+// 返回: *editorCompositeNode 节点, error 错误信息
+func newEditorCompositeNode(data []byte) (*editorCompositeNode, error) {
+	node, err := parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	var object GraphicObject
+	object.Type = node.name.Local
+	switch object.Type {
+	case "Appearance":
+		object.Type = "CompositeObject"
+		err = xml.Unmarshal(data, &object.CompositeGraphicUnit)
+	case "TextObject":
+		err = xml.Unmarshal(data, &object.TextObject)
+	case "PathObject":
+		err = xml.Unmarshal(data, &object.PathObject)
+	case "ImageObject":
+		err = xml.Unmarshal(data, &object.ImageObject)
+	case "CompositeObject", "CompositeGraphicUnit":
+		err = xml.Unmarshal(data, &object.CompositeGraphicUnit)
+	default:
+		err = fmt.Errorf("unsupported composite member %q", object.Type)
+	}
+	return &editorCompositeNode{data: data, node: node, object: object}, err
+}
+
 // setStates 独立保存当前XML子树的会话信息，共享不可变记录
 // 入参: states 来源记录
 func (n *editorCompositeNode) setStates(states map[string]editorCompositeState) {
@@ -361,6 +341,61 @@ func (n *editorCompositeNode) setState(state editorCompositeState) {
 	}
 	n.object.TextObject.layout = state.layout
 	n.changed = true
+}
+
+// transformable 校验内部对象能否保留原文进行几何操作，不执行绘制测量
+// 返回: bool 是否支持
+func (n *editorCompositeNode) transformable() bool {
+	_, invertible := n.parent.Invert()
+	return invertible && editorXMLTransformable(n.node) && validateEditorGeometry(n.object) == nil
+}
+
+// editorCompositeState 保存内部对象的会话排版及可还原裁剪，不写入OFD
+type editorCompositeState struct {
+	layout *textLayout
+	crop   *editorCompositeCrop
+	origin [2]float64
+}
+
+// editorCompositeCrop 记录本次编辑新增的裁剪序号及原节点存在性
+type editorCompositeCrop struct {
+	indexes []int
+	exists  bool
+}
+
+// measureCompositeSelection 复用已解析范围，按输入索引度量成员并保留容器位置
+// 入参: renderer 资源渲染器, nodes 范围内全部成员, indexes 不重复的成员序号
+// 返回: []CompositeMember 独立成员快照, error 索引或度量错误
+func (e *Editor) measureCompositeSelection(renderer *Renderer, nodes []*editorCompositeNode, indexes []int) ([]CompositeMember, error) {
+	selected := make([]*editorCompositeNode, len(indexes))
+	seen := make(map[int]bool, len(indexes))
+	for i, index := range indexes {
+		if index < 0 || index >= len(nodes) || seen[index] {
+			return nil, fmt.Errorf("invalid composite member index %d", index)
+		}
+		seen[index] = true
+		selected[i] = nodes[index]
+	}
+	positions := make([]ObjectPosition, len(nodes))
+	containers := make(map[*editorXML]ObjectPosition)
+	for i, node := range nodes {
+		position := containers[node.span.parent]
+		if position.Count == 0 {
+			position.Container = fmt.Sprint(i)
+		}
+		positions[i] = ObjectPosition{Container: position.Container, Index: position.Count}
+		position.Count++
+		containers[node.span.parent] = position
+	}
+	members, err := e.measureCompositeMembers(renderer, selected)
+	if err != nil {
+		return nil, err
+	}
+	for i, index := range indexes {
+		members[i].Position = positions[index]
+		members[i].Position.Count = containers[nodes[index].span.parent].Count
+	}
+	return members, nil
 }
 
 // remapCompositeStates 随XML标识重映射会话记录，仅保留当前子树的对象
@@ -463,34 +498,6 @@ func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, 
 	}
 	reader.Close()
 	return nil, nil, nil, nil, err
-}
-
-// newEditorCompositeNode 解析独立图形片段，保留全部原始属性
-// 入参: data XML片段
-// 返回: *editorCompositeNode 节点, error 错误信息
-func newEditorCompositeNode(data []byte) (*editorCompositeNode, error) {
-	node, err := parseEditorXML(data)
-	if err != nil {
-		return nil, err
-	}
-	var object GraphicObject
-	object.Type = node.name.Local
-	switch object.Type {
-	case "Appearance":
-		object.Type = "CompositeObject"
-		err = xml.Unmarshal(data, &object.CompositeGraphicUnit)
-	case "TextObject":
-		err = xml.Unmarshal(data, &object.TextObject)
-	case "PathObject":
-		err = xml.Unmarshal(data, &object.PathObject)
-	case "ImageObject":
-		err = xml.Unmarshal(data, &object.ImageObject)
-	case "CompositeObject", "CompositeGraphicUnit":
-		err = xml.Unmarshal(data, &object.CompositeGraphicUnit)
-	default:
-		err = fmt.Errorf("unsupported composite member %q", object.Type)
-	}
-	return &editorCompositeNode{data: data, node: node, object: object}, err
 }
 
 // compositeMembers 展开当前复合实例的资源引用与直接绘制成员
@@ -708,13 +715,6 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		positions[node.span.parent] = position
 	}
 	return result, nil
-}
-
-// transformable 校验内部对象能否保留原文进行几何操作，不执行绘制测量
-// 返回: bool 是否支持
-func (n *editorCompositeNode) transformable() bool {
-	_, invertible := n.parent.Invert()
-	return invertible && editorXMLTransformable(n.node) && validateEditorGeometry(n.object) == nil
 }
 
 // compositeMemberStyle 解析成员的继承样式，缺失或循环参数不开放改色

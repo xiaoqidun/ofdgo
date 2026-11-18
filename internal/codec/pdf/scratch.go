@@ -25,18 +25,6 @@ type CompositeBuffers[T any] [8][]T
 // RasterBuffers 保存按像素尺寸复用的独占覆盖画布
 type RasterBuffers [8]*image.RGBA
 
-// CoverageRow 读取完整范围内的原生覆盖行，其他类型沿用逐点采样
-// 入参: coverage 覆盖图像, y 行坐标, left 起始列, right 结束列
-// 返回: []byte RGBA像素或空值
-func CoverageRow(coverage image.Image, y, left, right int) []byte {
-	buffer, ok := coverage.(*image.RGBA)
-	if !ok || y < buffer.Rect.Min.Y || y >= buffer.Rect.Max.Y || left < buffer.Rect.Min.X || right > buffer.Rect.Max.X || left >= right {
-		return nil
-	}
-	start := buffer.PixOffset(left, y)
-	return buffer.Pix[start : start+4*(right-left)]
-}
-
 // Acquire 借用尚未初始化的独立缓冲，嵌套调用不复用活动缓冲
 // 入参: count 所需元素数量
 // 返回: []T 可由当前调用独占的缓冲
@@ -94,4 +82,16 @@ func (s *RasterBuffers) Release(buffer *image.RGBA) {
 			return
 		}
 	}
+}
+
+// CoverageRow 读取完整范围内的原生覆盖行，其他类型沿用逐点采样
+// 入参: coverage 覆盖图像, y 行坐标, left 起始列, right 结束列
+// 返回: []byte RGBA像素或空值
+func CoverageRow(coverage image.Image, y, left, right int) []byte {
+	buffer, ok := coverage.(*image.RGBA)
+	if !ok || y < buffer.Rect.Min.Y || y >= buffer.Rect.Max.Y || left < buffer.Rect.Min.X || right > buffer.Rect.Max.X || left >= right {
+		return nil
+	}
+	start := buffer.PixOffset(left, y)
+	return buffer.Pix[start : start+4*(right-left)]
 }

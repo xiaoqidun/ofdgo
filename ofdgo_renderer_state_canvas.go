@@ -83,6 +83,15 @@ type canvasBackendState struct {
 	fontOutlines       map[*canvas.Font]*basefont.Outliner
 }
 
+// resetFonts 清除Canvas字体及字形缓存，保留编码图片适配对象
+func (s *canvasBackendState) resetFonts() {
+	s.textGlyphPathCache.clear()
+	s.fontMap = make(map[string]*canvas.FontFamily)
+	s.svgFontCache = make(map[*canvas.Font]SVGFont)
+	s.textGlyphPathCache = *resourceCache[textGlyphPathCacheKey, textGlyphPathCacheValue](s.resources, 16<<20)
+	s.fontOutlines = make(map[*canvas.Font]*basefont.Outliner)
+}
+
 // canvasClipIntersections 获取子渲染器共享的几何交集缓存，限制结果保留量
 // 返回: *renderCache[[32]byte, *canvas.Path] 裁剪缓存
 func (r *Renderer) canvasClipIntersections() *renderCache[[32]byte, *canvas.Path] {
@@ -278,15 +287,6 @@ func (r *Renderer) canvasState() *canvasBackendState {
 	state.resetFonts()
 	r.backendStates[key] = state
 	return state
-}
-
-// resetFonts 清除Canvas字体及字形缓存，保留编码图片适配对象
-func (s *canvasBackendState) resetFonts() {
-	s.textGlyphPathCache.clear()
-	s.fontMap = make(map[string]*canvas.FontFamily)
-	s.svgFontCache = make(map[*canvas.Font]SVGFont)
-	s.textGlyphPathCache = *resourceCache[textGlyphPathCacheKey, textGlyphPathCacheValue](s.resources, 16<<20)
-	s.fontOutlines = make(map[*canvas.Font]*basefont.Outliner)
 }
 
 // canvasGeometryDigest 按完整坐标、路径顺序及几何容差计算摘要

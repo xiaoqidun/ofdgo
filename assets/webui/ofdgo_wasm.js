@@ -3,10 +3,10 @@ importScripts("./wasm_exec.js");
 const engines = new Map();
 let resolveRuntime;
 let rejectRuntime;
-const runtimeReady = new Promise((resolve, reject) => { resolveRuntime = resolve; rejectRuntime = reject; });
-runtimeReady.catch(() => {});
 let fontSequence = 0;
 let engineMemory = null;
+const runtimeReady = new Promise((resolve, reject) => { resolveRuntime = resolve; rejectRuntime = reject; });
+runtimeReady.catch(() => {});
 
 function requestFont(engine, id, signal, name, done) {
 	const fontRequests = engine.fontRequests;

@@ -28,6 +28,9 @@ import (
 	"github.com/go-text/typesetting/segmenter"
 )
 
+// textNamespace 标识普通文字编辑语义的命名空间，版本仅随不兼容的语义变更升级
+const textNamespace = "https://ofdgo.aite.me/ns/text/1"
+
 // MissingGlyphError 字体缺字错误，FontID为OFD字体资源标识，Characters按首次出现顺序保留不重复的缺失字符
 // 可通过errors.As从编辑错误中取得，不表示字体缺失或文件损坏
 type MissingGlyphError struct {
@@ -64,52 +67,6 @@ type TextStyle struct {
 	Size   float64
 	Color  string
 	Reflow bool
-}
-
-// textLayout 保存可恢复的原文与排版选项，不参与阅读渲染
-type textLayout struct {
-	value     string
-	options   TextLayout
-	autoWidth bool
-}
-
-// textNamespace 标识普通文字编辑语义的命名空间，版本仅随不兼容的语义变更升级
-const textNamespace = "https://ofdgo.aite.me/ns/text/1"
-
-// textMetadataAttribute 判断无资源引用的普通文字编辑元数据属性
-// 入参: node 所属节点, attr 属性
-// 返回: bool 是否为本库普通文字元数据
-func textMetadataAttribute(node xml.Name, attr xml.Attr) bool {
-	return classifyOFDNamespace(node.Space) != ofdXMLUnknown && (node.Local == "TextObject" || node.Local == "Text") && attr.Name.Space == textNamespace && attr.Name.Local == "Text"
-}
-
-// textMetadata 保存原文、选项与标准定位摘要
-type textMetadata struct {
-	Text      string     `json:"text"`
-	Layout    TextLayout `json:"layout"`
-	AutoWidth bool       `json:"autoWidth"`
-	Digest    string     `json:"digest"`
-}
-
-// textDigest 计算与字体编号无关的文字定位摘要
-// 返回: string 摘要
-func (obj TextObject) textDigest() string {
-	codes := append([]TextCode(nil), obj.TextCode...)
-	for i := range codes {
-		codes[i].Value = string(textCodeRunes(codes[i].Value))
-	}
-	data, _ := json.Marshal(codes)
-	return fmt.Sprintf("%x", sha256.Sum256(data))
-}
-
-// textMetadata 编码普通文字的排版语义，与标准定位一起保存
-// 返回: string 元数据, error 编码错误
-func (obj TextObject) textMetadata() (string, error) {
-	if obj.layout == nil {
-		return "", nil
-	}
-	data, err := json.Marshal(textMetadata{Text: obj.layout.value, Layout: obj.layout.options, AutoWidth: obj.layout.autoWidth, Digest: obj.textDigest()})
-	return string(data), err
 }
 
 // Error 返回缺失字符的Unicode码点
@@ -440,6 +397,49 @@ func (obj TextObject) TextLayout() (string, TextLayout) {
 		return obj.layout.value, obj.layout.options
 	}
 	return obj.Text(), TextLayout{}
+}
+
+// textLayout 保存可恢复的原文与排版选项，不参与阅读渲染
+type textLayout struct {
+	value     string
+	options   TextLayout
+	autoWidth bool
+}
+
+// textMetadata 保存原文、选项与标准定位摘要
+type textMetadata struct {
+	Text      string     `json:"text"`
+	Layout    TextLayout `json:"layout"`
+	AutoWidth bool       `json:"autoWidth"`
+	Digest    string     `json:"digest"`
+}
+
+// textMetadataAttribute 判断无资源引用的普通文字编辑元数据属性
+// 入参: node 所属节点, attr 属性
+// 返回: bool 是否为本库普通文字元数据
+func textMetadataAttribute(node xml.Name, attr xml.Attr) bool {
+	return classifyOFDNamespace(node.Space) != ofdXMLUnknown && (node.Local == "TextObject" || node.Local == "Text") && attr.Name.Space == textNamespace && attr.Name.Local == "Text"
+}
+
+// textDigest 计算与字体编号无关的文字定位摘要
+// 返回: string 摘要
+func (obj TextObject) textDigest() string {
+	codes := append([]TextCode(nil), obj.TextCode...)
+	for i := range codes {
+		codes[i].Value = string(textCodeRunes(codes[i].Value))
+	}
+	data, _ := json.Marshal(codes)
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+// textMetadata 编码普通文字的排版语义，与标准定位一起保存
+// 返回: string 元数据, error 编码错误
+func (obj TextObject) textMetadata() (string, error) {
+	if obj.layout == nil {
+		return "", nil
+	}
+	data, err := json.Marshal(textMetadata{Text: obj.layout.value, Layout: obj.layout.options, AutoWidth: obj.layout.autoWidth, Digest: obj.textDigest()})
+	return string(data), err
 }
 
 // missingGlyphError 汇总缺失字符，无缺字时返回nil

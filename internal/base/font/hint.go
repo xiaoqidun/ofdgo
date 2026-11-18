@@ -93,12 +93,6 @@ func newTTInterpreter(tables map[string][]byte, units uint16) (*ttInterpreter, e
 	return v, nil
 }
 
-// defaultTTGraphics 返回规范规定的初始图形状态
-// 返回: ttGraphics 图形状态
-func defaultTTGraphics() ttGraphics {
-	return ttGraphics{projection: [2]float64{1, 0}, freedom: [2]float64{1, 0}, dual: [2]float64{1, 0}, zone: [3]int32{1, 1, 1}, loop: 1, minimum: 64, cutIn: 68, deltaBase: 9, deltaShift: 3, period: 64, threshold: 32, autoFlip: true}
-}
-
 // clone 为单个字形创建独立存储，避免字形顺序和并发改变输出
 // 返回: *ttInterpreter 独立执行器
 func (v *ttInterpreter) clone() *ttInterpreter {
@@ -172,13 +166,6 @@ func (v *ttInterpreter) write(values []int32, index, value int32) {
 	values[index] = value
 }
 
-// ttProject 将定点坐标投影到单位向量
-// 入参: x 横坐标, y 纵坐标, vector 单位向量
-// 返回: int32 投影值
-func ttProject(x, y int32, vector [2]float64) int32 {
-	return int32(math.Round(float64(x)*vector[0] + float64(y)*vector[1]))
-}
-
 // move 沿自由向量移动点，使其投影改变指定距离
 // 入参: point 点, distance 投影距离, touch 是否标记触及状态
 func (v *ttInterpreter) move(point *ttPoint, distance int32, touch bool) {
@@ -216,66 +203,6 @@ func (v *ttInterpreter) round(value int32) int32 {
 		result = g.phase
 	}
 	return sign * result
-}
-
-// ttInstructionEnd 跳过一条指令及其立即数
-// 入参: code 字节码, position 指令位置
-// 返回: int 结束位置, error 字节码错误
-func ttInstructionEnd(code []byte, position int) (int, error) {
-	if position < 0 || position >= len(code) {
-		return 0, fmt.Errorf("invalid TrueType instruction offset")
-	}
-	op := code[position]
-	position++
-	n := 0
-	if op == 0x40 || op == 0x41 {
-		if position >= len(code) {
-			return 0, fmt.Errorf("truncated TrueType push instruction")
-		}
-		n = int(code[position])
-		position++
-		if op == 0x41 {
-			n *= 2
-		}
-	} else if op >= 0xb0 && op <= 0xbf {
-		n = int(op&7) + 1
-		if op >= 0xb8 {
-			n *= 2
-		}
-	}
-	if n > len(code)-position {
-		return 0, fmt.Errorf("truncated TrueType push instruction")
-	}
-	return position + n, nil
-}
-
-// skipTTConditional 定位当前条件分支的替代分支或结束位置
-// 入参: code 字节码, position 起始位置, alternate 是否停在ELSE
-// 返回: int 后续指令位置, error 分支错误
-func skipTTConditional(code []byte, position int, alternate bool) (int, error) {
-	start := position
-	depth := 0
-	for position < len(code) {
-		op := code[position]
-		if op == 0x58 {
-			depth++
-		}
-		if op == 0x59 {
-			if depth == 0 {
-				return position + 1, nil
-			}
-			depth--
-		}
-		if op == 0x1b && depth == 0 && alternate {
-			return position + 1, nil
-		}
-		var err error
-		position, err = ttInstructionEnd(code, position)
-		if err != nil {
-			return 0, err
-		}
-	}
-	return 0, fmt.Errorf("%w: unterminated conditional at %d in %d bytes", errTTInvalidControlFlow, start, len(code))
 }
 
 // run 执行字体、预处理或字形程序
@@ -766,26 +693,6 @@ func (v *ttInterpreter) execute(code []byte, depth int) error {
 	return nil
 }
 
-// ttAbs 返回定点数绝对值
-// 入参: value 定点数
-// 返回: int32 绝对值
-func ttAbs(value int32) int32 {
-	if value < 0 {
-		return -value
-	}
-	return value
-}
-
-// ttBool 将逻辑值转换为TrueType栈值
-// 入参: value 逻辑值
-// 返回: int32 栈值
-func ttBool(value bool) int32 {
-	if value {
-		return 1
-	}
-	return 0
-}
-
 // relativeMove 执行直接或控制值驱动的相对移动
 // 入参: op 移动指令
 func (v *ttInterpreter) relativeMove(op byte) {
@@ -1017,4 +924,97 @@ func (v *ttInterpreter) intersect() {
 		p.y = a0.y + int32(math.Round(t*ay))
 	}
 	p.tx, p.ty = true, true
+}
+
+// defaultTTGraphics 返回规范规定的初始图形状态
+// 返回: ttGraphics 图形状态
+func defaultTTGraphics() ttGraphics {
+	return ttGraphics{projection: [2]float64{1, 0}, freedom: [2]float64{1, 0}, dual: [2]float64{1, 0}, zone: [3]int32{1, 1, 1}, loop: 1, minimum: 64, cutIn: 68, deltaBase: 9, deltaShift: 3, period: 64, threshold: 32, autoFlip: true}
+}
+
+// ttProject 将定点坐标投影到单位向量
+// 入参: x 横坐标, y 纵坐标, vector 单位向量
+// 返回: int32 投影值
+func ttProject(x, y int32, vector [2]float64) int32 {
+	return int32(math.Round(float64(x)*vector[0] + float64(y)*vector[1]))
+}
+
+// ttInstructionEnd 跳过一条指令及其立即数
+// 入参: code 字节码, position 指令位置
+// 返回: int 结束位置, error 字节码错误
+func ttInstructionEnd(code []byte, position int) (int, error) {
+	if position < 0 || position >= len(code) {
+		return 0, fmt.Errorf("invalid TrueType instruction offset")
+	}
+	op := code[position]
+	position++
+	n := 0
+	if op == 0x40 || op == 0x41 {
+		if position >= len(code) {
+			return 0, fmt.Errorf("truncated TrueType push instruction")
+		}
+		n = int(code[position])
+		position++
+		if op == 0x41 {
+			n *= 2
+		}
+	} else if op >= 0xb0 && op <= 0xbf {
+		n = int(op&7) + 1
+		if op >= 0xb8 {
+			n *= 2
+		}
+	}
+	if n > len(code)-position {
+		return 0, fmt.Errorf("truncated TrueType push instruction")
+	}
+	return position + n, nil
+}
+
+// skipTTConditional 定位当前条件分支的替代分支或结束位置
+// 入参: code 字节码, position 起始位置, alternate 是否停在ELSE
+// 返回: int 后续指令位置, error 分支错误
+func skipTTConditional(code []byte, position int, alternate bool) (int, error) {
+	start := position
+	depth := 0
+	for position < len(code) {
+		op := code[position]
+		if op == 0x58 {
+			depth++
+		}
+		if op == 0x59 {
+			if depth == 0 {
+				return position + 1, nil
+			}
+			depth--
+		}
+		if op == 0x1b && depth == 0 && alternate {
+			return position + 1, nil
+		}
+		var err error
+		position, err = ttInstructionEnd(code, position)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return 0, fmt.Errorf("%w: unterminated conditional at %d in %d bytes", errTTInvalidControlFlow, start, len(code))
+}
+
+// ttAbs 返回定点数绝对值
+// 入参: value 定点数
+// 返回: int32 绝对值
+func ttAbs(value int32) int32 {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+// ttBool 将逻辑值转换为TrueType栈值
+// 入参: value 逻辑值
+// 返回: int32 栈值
+func ttBool(value bool) int32 {
+	if value {
+		return 1
+	}
+	return 0
 }

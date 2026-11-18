@@ -90,19 +90,6 @@ type EncryptionInfo struct {
 	PolicyRequired bool
 }
 
-// readerOptions 保存打开文档时的会话参数
-type readerOptions struct {
-	resources   *Resources
-	credentials []Credentials
-	provider    CryptoProvider
-}
-
-// encryptionState 保存解密来源与可继承的输出策略
-type encryptionState struct {
-	info    EncryptionInfo
-	options *EncryptionOptions
-}
-
 // GMCryptoProvider 使用纯Go国密实现，可在原生环境和WASM使用
 type GMCryptoProvider struct{}
 
@@ -125,106 +112,6 @@ func WithCredentials(credentials Credentials) ReaderOption {
 // 返回: ReaderOption 阅读选项
 func WithCryptoProvider(provider CryptoProvider) ReaderOption {
 	return func(options *readerOptions) { options.provider = provider }
-}
-
-// Encryption 获取文档加密状态，不暴露口令或私钥
-// 返回: EncryptionInfo 加密状态
-func (r *Reader) Encryption() EncryptionInfo {
-	return r.encryption.summary()
-}
-
-// summary 复制不含凭据的加密状态
-// 返回: EncryptionInfo 加密状态
-func (s *encryptionState) summary() EncryptionInfo {
-	if s == nil {
-		return EncryptionInfo{}
-	}
-	info := s.info
-	info.PolicyRequired = s.options == nil
-	info.Users = append([]string(nil), info.Users...)
-	return info
-}
-
-// cloneEncryptionOptions 复制可继承的加密策略，密码提供者保持共享
-// 入参: options 加密策略
-// 返回: *EncryptionOptions 独立策略副本
-func cloneEncryptionOptions(options *EncryptionOptions) *EncryptionOptions {
-	if options == nil {
-		return nil
-	}
-	copy := *options
-	copy.Password = bytes.Clone(options.Password)
-	copy.Recipients = append([]EncryptionRecipient(nil), options.Recipients...)
-	for i := range copy.Recipients {
-		copy.Recipients[i].Certificate = bytes.Clone(copy.Recipients[i].Certificate)
-	}
-	return &copy
-}
-
-// Encryption 获取当前保存策略，不暴露口令或私钥
-// 返回: EncryptionInfo 加密状态
-func (e *Editor) Encryption() EncryptionInfo {
-	return e.encryption.summary()
-}
-
-// SetEncryption 设置后续保存的加密策略，nil显式选择明文保存
-// 打开单用户口令或证书加密文档时默认继承原策略；多人口令和多层加密需显式选择输出策略
-// 新的加密密钥与初始向量在每次保存时独立生成，设置不改变文档内容或撤销历史
-// 入参: options 加密策略
-// 返回: error 错误信息
-func (e *Editor) SetEncryption(options *EncryptionOptions) error {
-	if options == nil {
-		e.encryption = nil
-		return nil
-	}
-	if err := validateEncryptionOptions(*options); err != nil {
-		return err
-	}
-	info := EncryptionInfo{Encrypted: true, Method: "1.1.1", Layers: 1}
-	if len(options.Password) != 0 {
-		info.Users = []string{options.UserName}
-	} else {
-		info.Method = "1.1.2"
-		for _, recipient := range options.Recipients {
-			info.Users = append(info.Users, recipient.UserName)
-		}
-	}
-	e.encryption = &encryptionState{info: info, options: cloneEncryptionOptions(options)}
-	return nil
-}
-
-// writeEncrypted 在全部准备及加密成功后写出结果，取消不产生输出
-// 输出流自身写入失败时调用方仍需丢弃本次输出
-// 入参: writer 输出流
-// 返回: int64 写入字节数, error 错误信息
-func (e *Editor) writeEncrypted(writer io.Writer) (int64, error) {
-	if e.encryption.options == nil {
-		return 0, ErrEncryptionPolicyRequired
-	}
-	var plaintext bytes.Buffer
-	if _, err := e.writePlaintext(&plaintext); err != nil {
-		return 0, err
-	}
-	defer clear(plaintext.Bytes())
-	r, err := NewReader(&Input{reader: bytes.NewReader(plaintext.Bytes()), size: int64(plaintext.Len())})
-	if err != nil {
-		return 0, err
-	}
-	defer r.Close()
-	parts, err := r.packageData()
-	if err != nil {
-		return 0, err
-	}
-	defer func() {
-		for _, data := range parts {
-			clear(data)
-		}
-	}()
-	data, err := encryptPackageParts(parts, *e.encryption.options, editorProgress(e.OnWriteProgress))
-	if err != nil {
-		return 0, err
-	}
-	return io.Copy(writer, bytes.NewReader(data))
 }
 
 // EncryptSM4 使用SM4-CBC及PKCS#7填充加密
@@ -285,6 +172,44 @@ func (GMCryptoProvider) EncryptKey(certificate, key []byte) ([]byte, error) {
 	return sm2.EncryptASN1(rand.Reader, cert.PublicKey.(*ecdsa.PublicKey), key)
 }
 
+// Encryption 获取文档加密状态，不暴露口令或私钥
+// 返回: EncryptionInfo 加密状态
+func (r *Reader) Encryption() EncryptionInfo {
+	return r.encryption.summary()
+}
+
+// Encryption 获取当前保存策略，不暴露口令或私钥
+// 返回: EncryptionInfo 加密状态
+func (e *Editor) Encryption() EncryptionInfo {
+	return e.encryption.summary()
+}
+
+// SetEncryption 设置后续保存的加密策略，nil显式选择明文保存
+// 打开单用户口令或证书加密文档时默认继承原策略；多人口令和多层加密需显式选择输出策略
+// 新的加密密钥与初始向量在每次保存时独立生成，设置不改变文档内容或撤销历史
+// 入参: options 加密策略
+// 返回: error 错误信息
+func (e *Editor) SetEncryption(options *EncryptionOptions) error {
+	if options == nil {
+		e.encryption = nil
+		return nil
+	}
+	if err := validateEncryptionOptions(*options); err != nil {
+		return err
+	}
+	info := EncryptionInfo{Encrypted: true, Method: "1.1.1", Layers: 1}
+	if len(options.Password) != 0 {
+		info.Users = []string{options.UserName}
+	} else {
+		info.Method = "1.1.2"
+		for _, recipient := range options.Recipients {
+			info.Users = append(info.Users, recipient.UserName)
+		}
+	}
+	e.encryption = &encryptionState{info: info, options: cloneEncryptionOptions(options)}
+	return nil
+}
+
 // ParseEncryptionCertificate 解析单张SM2加密证书并返回DER副本
 // 仅检查格式、算法和密钥用途，接收者身份及信任应由调用方确认
 // 入参: certificate PEM或DER证书
@@ -295,6 +220,81 @@ func ParseEncryptionCertificate(certificate []byte) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.Clone(cert.Raw), nil
+}
+
+// readerOptions 保存打开文档时的会话参数
+type readerOptions struct {
+	resources   *Resources
+	credentials []Credentials
+	provider    CryptoProvider
+}
+
+// encryptionState 保存解密来源与可继承的输出策略
+type encryptionState struct {
+	info    EncryptionInfo
+	options *EncryptionOptions
+}
+
+// summary 复制不含凭据的加密状态
+// 返回: EncryptionInfo 加密状态
+func (s *encryptionState) summary() EncryptionInfo {
+	if s == nil {
+		return EncryptionInfo{}
+	}
+	info := s.info
+	info.PolicyRequired = s.options == nil
+	info.Users = append([]string(nil), info.Users...)
+	return info
+}
+
+// cloneEncryptionOptions 复制可继承的加密策略，密码提供者保持共享
+// 入参: options 加密策略
+// 返回: *EncryptionOptions 独立策略副本
+func cloneEncryptionOptions(options *EncryptionOptions) *EncryptionOptions {
+	if options == nil {
+		return nil
+	}
+	copy := *options
+	copy.Password = bytes.Clone(options.Password)
+	copy.Recipients = append([]EncryptionRecipient(nil), options.Recipients...)
+	for i := range copy.Recipients {
+		copy.Recipients[i].Certificate = bytes.Clone(copy.Recipients[i].Certificate)
+	}
+	return &copy
+}
+
+// writeEncrypted 在全部准备及加密成功后写出结果，取消不产生输出
+// 输出流自身写入失败时调用方仍需丢弃本次输出
+// 入参: writer 输出流
+// 返回: int64 写入字节数, error 错误信息
+func (e *Editor) writeEncrypted(writer io.Writer) (int64, error) {
+	if e.encryption.options == nil {
+		return 0, ErrEncryptionPolicyRequired
+	}
+	var plaintext bytes.Buffer
+	if _, err := e.writePlaintext(&plaintext); err != nil {
+		return 0, err
+	}
+	defer clear(plaintext.Bytes())
+	r, err := NewReader(&Input{reader: bytes.NewReader(plaintext.Bytes()), size: int64(plaintext.Len())})
+	if err != nil {
+		return 0, err
+	}
+	defer r.Close()
+	parts, err := r.packageData()
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		for _, data := range parts {
+			clear(data)
+		}
+	}()
+	data, err := encryptPackageParts(parts, *e.encryption.options, editorProgress(e.OnWriteProgress))
+	if err != nil {
+		return 0, err
+	}
+	return io.Copy(writer, bytes.NewReader(data))
 }
 
 // parseEncryptionCertificate 解析并检查加密证书

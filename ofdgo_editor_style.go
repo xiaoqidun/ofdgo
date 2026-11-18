@@ -234,43 +234,6 @@ func (e *Editor) AddDrawParam(draw DrawParam) (string, error) {
 	return e.addDrawParam(ctx, draw)
 }
 
-// addDrawParam 校验并注册绘制参数，资源操作可传递取消上下文
-// 入参: ctx 取消上下文, draw 绘制参数
-// 返回: string 资源标识, error 校验、编码或取消错误
-func (e *Editor) addDrawParam(ctx context.Context, draw DrawParam) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	if draw.ResourceID != "" || draw.BaseLoc != "" || draw.Link != "" {
-		return "", fmt.Errorf("external draw parameter references cannot be registered directly")
-	}
-	base, err := e.editorDrawParam(draw.Relative, make(map[string]bool))
-	if err != nil {
-		return "", err
-	}
-	effective := mergeDrawParam(*base, &draw)
-	if err := validateEditorStroke(PathObject{LineWidth: draw.LineWidth, Cap: draw.Cap, Join: draw.Join, MiterLimit: draw.MiterLimit, DashPattern: draw.DashPattern, DashOffset: draw.DashOffset}); err != nil {
-		return "", err
-	}
-	if !finite(draw.Size) || draw.Size < 0 || draw.Weight < 0 || draw.Weight > 900 || draw.Weight%100 != 0 {
-		return "", fmt.Errorf("invalid draw parameter font size or weight")
-	}
-	if effective.Font != "" {
-		if _, err := e.editorFont(effective.Font); err != nil {
-			return "", err
-		}
-	}
-	for _, paint := range []*FillColor{draw.FillColor, (*FillColor)(draw.StrokeColor)} {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		if err := e.editorColor(paint); err != nil {
-			return "", err
-		}
-	}
-	return e.addEditorDrawParamContext(ctx, cloneEditorData(draw))
-}
-
 // StyleObjects 原子更新对象透明度及文字、路径的填充和描边样式
 // 入参: page 页面索引, ids 对象标识, style 待修改属性
 // 返回: error 错误信息
@@ -361,44 +324,6 @@ func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err er
 	return e.updateObjects(page, objects, true)
 }
 
-// explicitDefaultPaint 将样式快照的缺省颜色写为显式颜色，避免继承目标容器颜色
-// 入参: object 已解析继承样式的文字或路径，其他类型保持不变
-// 返回: GraphicObject 颜色完整的样式快照, error 颜色资源错误
-func (e *Editor) explicitDefaultPaint(object GraphicObject) (GraphicObject, error) {
-	var fill **FillColor
-	var stroke **StrokeColor
-	text := object.Type == "TextObject"
-	if text {
-		fill, stroke = &object.TextObject.FillColor, &object.TextObject.StrokeColor
-	} else if object.Type == "PathObject" {
-		fill, stroke = &object.PathObject.FillColor, &object.PathObject.StrokeColor
-	} else {
-		return object, nil
-	}
-	if *fill != nil && *stroke != nil {
-		return object, nil
-	}
-	black, err := e.RGBColor(color.NRGBA{A: 255})
-	if err != nil {
-		return GraphicObject{}, err
-	}
-	transparent, zero := *black, 0
-	transparent.Alpha = &zero
-	if *fill == nil {
-		*fill = &transparent
-		if text {
-			*fill = black
-		}
-	}
-	if *stroke == nil {
-		*stroke = (*StrokeColor)(black)
-		if text {
-			*stroke = (*StrokeColor)(&transparent)
-		}
-	}
-	return object, nil
-}
-
 // StyleImageBorders 原子修改图片边框，保留未修改的颜色、线型及原文扩展
 // 入参: page 页面索引, ids 图片标识, style 边框增量
 // 返回: error 错误信息
@@ -467,6 +392,81 @@ func (e *Editor) SetImageBorders(page int, ids []string, border *ImageBorder) er
 		objects[i].ImageObject.Border = cloneEditorData(border)
 	}
 	return e.updateObjects(page, objects, true)
+}
+
+// addDrawParam 校验并注册绘制参数，资源操作可传递取消上下文
+// 入参: ctx 取消上下文, draw 绘制参数
+// 返回: string 资源标识, error 校验、编码或取消错误
+func (e *Editor) addDrawParam(ctx context.Context, draw DrawParam) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if draw.ResourceID != "" || draw.BaseLoc != "" || draw.Link != "" {
+		return "", fmt.Errorf("external draw parameter references cannot be registered directly")
+	}
+	base, err := e.editorDrawParam(draw.Relative, make(map[string]bool))
+	if err != nil {
+		return "", err
+	}
+	effective := mergeDrawParam(*base, &draw)
+	if err := validateEditorStroke(PathObject{LineWidth: draw.LineWidth, Cap: draw.Cap, Join: draw.Join, MiterLimit: draw.MiterLimit, DashPattern: draw.DashPattern, DashOffset: draw.DashOffset}); err != nil {
+		return "", err
+	}
+	if !finite(draw.Size) || draw.Size < 0 || draw.Weight < 0 || draw.Weight > 900 || draw.Weight%100 != 0 {
+		return "", fmt.Errorf("invalid draw parameter font size or weight")
+	}
+	if effective.Font != "" {
+		if _, err := e.editorFont(effective.Font); err != nil {
+			return "", err
+		}
+	}
+	for _, paint := range []*FillColor{draw.FillColor, (*FillColor)(draw.StrokeColor)} {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if err := e.editorColor(paint); err != nil {
+			return "", err
+		}
+	}
+	return e.addEditorDrawParamContext(ctx, cloneEditorData(draw))
+}
+
+// explicitDefaultPaint 将样式快照的缺省颜色写为显式颜色，避免继承目标容器颜色
+// 入参: object 已解析继承样式的文字或路径，其他类型保持不变
+// 返回: GraphicObject 颜色完整的样式快照, error 颜色资源错误
+func (e *Editor) explicitDefaultPaint(object GraphicObject) (GraphicObject, error) {
+	var fill **FillColor
+	var stroke **StrokeColor
+	text := object.Type == "TextObject"
+	if text {
+		fill, stroke = &object.TextObject.FillColor, &object.TextObject.StrokeColor
+	} else if object.Type == "PathObject" {
+		fill, stroke = &object.PathObject.FillColor, &object.PathObject.StrokeColor
+	} else {
+		return object, nil
+	}
+	if *fill != nil && *stroke != nil {
+		return object, nil
+	}
+	black, err := e.RGBColor(color.NRGBA{A: 255})
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	transparent, zero := *black, 0
+	transparent.Alpha = &zero
+	if *fill == nil {
+		*fill = &transparent
+		if text {
+			*fill = black
+		}
+	}
+	if *stroke == nil {
+		*stroke = (*StrokeColor)(black)
+		if text {
+			*stroke = (*StrokeColor)(&transparent)
+		}
+	}
+	return object, nil
 }
 
 // editorDrawParam 解析原文档的绘制参数继承链，缺失或循环引用不进入编辑快照

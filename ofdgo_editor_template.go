@@ -16,7 +16,6 @@ package ofdgo
 
 import (
 	"bytes"
-
 	"encoding/xml"
 	"fmt"
 	"path"
@@ -37,20 +36,6 @@ func (e *Editor) Templates() ([]TemplatePage, error) {
 		return []TemplatePage{}, nil
 	}
 	result := append([]TemplatePage{}, e.source.document.CommonData.TemplatePage...)
-	for i := range result {
-		result[i].ZOrder = editorTemplateOrder(result[i].ZOrder)
-	}
-	return result, nil
-}
-
-// Templates 直接返回当前文档及版本的模板清单，不创建编辑器，省略的ZOrder返回Background
-// 返回: []TemplatePage 独立模板定义副本, error 文档读取错误
-func (r *Reader) Templates() ([]TemplatePage, error) {
-	doc, err := r.Doc()
-	if err != nil {
-		return nil, err
-	}
-	result := append([]TemplatePage{}, doc.CommonData.TemplatePage...)
 	for i := range result {
 		result[i].ZOrder = editorTemplateOrder(result[i].ZOrder)
 	}
@@ -80,27 +65,6 @@ func (e *Editor) TemplateReferences() ([]TemplateReference, error) {
 		}
 		for _, ref := range refs {
 			result = append(result, TemplateReference{PageIndex: i, PageID: e.pages[i].ID, Template: ref})
-		}
-	}
-	return result, nil
-}
-
-// TemplateReferences 只读枚举当前文档及所选版本全部普通页面的模板引用，不创建编辑器或遍历其他文档、版本
-// 返回独立副本，按页面索引及页内引用文件顺序排列；无引用时返回空切片，读取失败时不返回部分结果
-// 返回: []TemplateReference 引用定位及绑定层次清单, error 文档或页面读取错误
-func (r *Reader) TemplateReferences() ([]TemplateReference, error) {
-	doc, err := r.Doc()
-	if err != nil {
-		return nil, err
-	}
-	result := []TemplateReference{}
-	for i, item := range doc.Pages.Page {
-		page, err := r.PageContentByIndex(i)
-		if err != nil {
-			return nil, err
-		}
-		for _, ref := range page.Template {
-			result = append(result, TemplateReference{PageIndex: i, PageID: item.ID, Template: ref})
 		}
 	}
 	return result, nil
@@ -405,6 +369,41 @@ func (e *Editor) DeleteTemplate(id string) error {
 		}
 		return editorPatchXML(data, []editorXMLPatch{{node.start, node.end, nil}}), nil
 	})
+}
+
+// Templates 直接返回当前文档及版本的模板清单，不创建编辑器，省略的ZOrder返回Background
+// 返回: []TemplatePage 独立模板定义副本, error 文档读取错误
+func (r *Reader) Templates() ([]TemplatePage, error) {
+	doc, err := r.Doc()
+	if err != nil {
+		return nil, err
+	}
+	result := append([]TemplatePage{}, doc.CommonData.TemplatePage...)
+	for i := range result {
+		result[i].ZOrder = editorTemplateOrder(result[i].ZOrder)
+	}
+	return result, nil
+}
+
+// TemplateReferences 只读枚举当前文档及所选版本全部普通页面的模板引用，不创建编辑器或遍历其他文档、版本
+// 返回独立副本，按页面索引及页内引用文件顺序排列；无引用时返回空切片，读取失败时不返回部分结果
+// 返回: []TemplateReference 引用定位及绑定层次清单, error 文档或页面读取错误
+func (r *Reader) TemplateReferences() ([]TemplateReference, error) {
+	doc, err := r.Doc()
+	if err != nil {
+		return nil, err
+	}
+	result := []TemplateReference{}
+	for i, item := range doc.Pages.Page {
+		page, err := r.PageContentByIndex(i)
+		if err != nil {
+			return nil, err
+		}
+		for _, ref := range page.Template {
+			result = append(result, TemplateReference{PageIndex: i, PageID: item.ID, Template: ref})
+		}
+	}
+	return result, nil
 }
 
 // editorTemplateOrder 将省略的模板默认层次规范化为Background

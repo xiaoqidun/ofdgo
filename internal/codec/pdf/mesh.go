@@ -24,22 +24,10 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// meshVertex 保存局部毫米坐标及原曲面参数
-type meshVertex struct {
-	point pdfgo.Point
-	u, v  float64
-}
-
 // MeshTriangle 保存按输出精度细分的曲面网格
 type MeshTriangle struct {
 	vertices [3]meshVertex
 	patch    int
-}
-
-// meshSample 保存采样点参数，patch为一基编号，零表示未覆盖
-type meshSample struct {
-	u, v  float64
-	patch int
 }
 
 // MeshRasterOptions 保存网格采样的坐标、精度及并行配置
@@ -312,4 +300,16 @@ func MeshPixels(ctx context.Context, mesh *pdfgo.MeshGradient, triangles []MeshT
 		pixel.Shape /= samples * samples
 	}
 	return pixels, nil
+}
+
+// meshVertex 保存局部毫米坐标及原曲面参数
+type meshVertex struct {
+	point pdfgo.Point
+	u, v  float64
+}
+
+// meshSample 保存采样点参数，patch为一基编号，零表示未覆盖
+type meshSample struct {
+	u, v  float64
+	patch int
 }

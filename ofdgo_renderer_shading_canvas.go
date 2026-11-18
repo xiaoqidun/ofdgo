@@ -34,6 +34,57 @@ type shdPaint struct {
 	sample   func(float64) color.RGBA
 }
 
+// newShdPaint 创建渐变画刷
+// 入参: gradient 渐变对象, extend 延伸方向, mapType 绘制方式, mapUnit 渐变区间长度
+// 返回: *shdPaint 渐变画刷
+func newShdPaint(gradient canvas.Gradient, extend, mapType string, mapUnit float64) *shdPaint {
+	flags, _ := strconv.Atoi(extend)
+	length := 0.0
+	switch g := gradient.(type) {
+	case *canvas.LinearGradient:
+		length = g.End.Sub(g.Start).Length()
+	case *canvas.RadialGradient:
+		length = g.C1.Sub(g.C0).Length()
+	}
+	period := 1.0
+	if mapUnit > 0 && length > 0 {
+		period = math.Max(math.SmallestNonzeroFloat64, mapUnit/length)
+	}
+	return &shdPaint{gradient: gradient, view: canvas.Identity, extend: flags, mapType: mapType, period: period}
+}
+
+// sampledRaster 保留原双圆或轴向几何与周期，不把ICC采样器降为端点渐变
+// 返回: rasterGradientCanvas 局部坐标采样器
+func (s *shdPaint) sampledRaster() rasterGradientCanvas {
+	gradient := &RasterGradient{Sample: s.sample, Spread: &RasterSpread{Extend: s.extend, MapType: s.mapType, Period: s.period}}
+	var stops canvas.Grad
+	switch g := s.gradient.(type) {
+	case *canvas.LinearGradient:
+		gradient.Start, gradient.End, stops = rasterPoint(g.Start), rasterPoint(g.End), g.Grad
+	case *canvas.RadialGradient:
+		gradient.Kind = RasterRadial
+		gradient.Start, gradient.End, gradient.R0, gradient.R1, stops = rasterPoint(g.C0), rasterPoint(g.C1), g.R0, g.R1, g.Grad
+	}
+	gradient.Stops = make([]ColorStop, len(stops))
+	for i, stop := range stops {
+		gradient.Stops[i] = ColorStop{Offset: stop.Offset, Color: stop.Color}
+	}
+	return rasterGradientCanvas{gradient: gradient}
+}
+
+// rangeLimits 限制渐变延伸区间
+// 入参: lo 区间起点, hi 区间终点
+// 返回: float64 起点, float64 终点
+func (s *shdPaint) rangeLimits(lo, hi float64) (float64, float64) {
+	if s.extend&1 == 0 {
+		lo = math.Max(lo, 0)
+	}
+	if s.extend&2 == 0 {
+		hi = math.Min(hi, 1)
+	}
+	return lo, hi
+}
+
 // repeatAxialGradient 轴向重复渐变
 type repeatAxialGradient struct {
 	*canvas.LinearGradient
@@ -91,25 +142,6 @@ func (r *Renderer) drawSampledShading(ctx *canvas.Context, path *canvas.Path, vi
 		return
 	}
 	ctx.DrawImage(bounds.X0, bounds.Y0, img, canvas.DPMM(scale))
-}
-
-// newShdPaint 创建渐变画刷
-// 入参: gradient 渐变对象, extend 延伸方向, mapType 绘制方式, mapUnit 渐变区间长度
-// 返回: *shdPaint 渐变画刷
-func newShdPaint(gradient canvas.Gradient, extend, mapType string, mapUnit float64) *shdPaint {
-	flags, _ := strconv.Atoi(extend)
-	length := 0.0
-	switch g := gradient.(type) {
-	case *canvas.LinearGradient:
-		length = g.End.Sub(g.Start).Length()
-	case *canvas.RadialGradient:
-		length = g.C1.Sub(g.C0).Length()
-	}
-	period := 1.0
-	if mapUnit > 0 && length > 0 {
-		period = math.Max(math.SmallestNonzeroFloat64, mapUnit/length)
-	}
-	return &shdPaint{gradient: gradient, view: canvas.Identity, extend: flags, mapType: mapType, period: period}
 }
 
 // resolveShdPaint 解析渐变画刷和裁剪区域
@@ -209,25 +241,6 @@ func shdExpansionFits(lo, hi, period float64, stops int) bool {
 	return finite(first) && finite(last) && first+1 > first && last-first <= 4096/float64(max(1, stops))
 }
 
-// sampledRaster 保留原双圆或轴向几何与周期，不把ICC采样器降为端点渐变
-// 返回: rasterGradientCanvas 局部坐标采样器
-func (s *shdPaint) sampledRaster() rasterGradientCanvas {
-	gradient := &RasterGradient{Sample: s.sample, Spread: &RasterSpread{Extend: s.extend, MapType: s.mapType, Period: s.period}}
-	var stops canvas.Grad
-	switch g := s.gradient.(type) {
-	case *canvas.LinearGradient:
-		gradient.Start, gradient.End, stops = rasterPoint(g.Start), rasterPoint(g.End), g.Grad
-	case *canvas.RadialGradient:
-		gradient.Kind = RasterRadial
-		gradient.Start, gradient.End, gradient.R0, gradient.R1, stops = rasterPoint(g.C0), rasterPoint(g.C1), g.R0, g.R1, g.Grad
-	}
-	gradient.Stops = make([]ColorStop, len(stops))
-	for i, stop := range stops {
-		gradient.Stops[i] = ColorStop{Offset: stop.Offset, Color: stop.Color}
-	}
-	return rasterGradientCanvas{gradient: gradient}
-}
-
 // transformShdPaint 应用渐变的父级坐标变换
 // 入参: paint 画刷, parentCTM 父级变换矩阵, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, boundaryInCTM 边界是否参与父级变换
 func transformShdPaint(paint any, parentCTM *Matrix, bx, by, pageH float64, boundaryInCTM bool) {
@@ -313,19 +326,6 @@ func drawRepeatAxialPath(ctx *canvas.Context, path *canvas.Path, gradient *repea
 		ctx.RenderPath(part, style, m)
 	}
 	return nil
-}
-
-// rangeLimits 限制渐变延伸区间
-// 入参: lo 区间起点, hi 区间终点
-// 返回: float64 起点, float64 终点
-func (s *shdPaint) rangeLimits(lo, hi float64) (float64, float64) {
-	if s.extend&1 == 0 {
-		lo = math.Max(lo, 0)
-	}
-	if s.extend&2 == 0 {
-		hi = math.Min(hi, 1)
-	}
-	return lo, hi
 }
 
 // shdCanvasBounds 获取渐变坐标系下的画布边界

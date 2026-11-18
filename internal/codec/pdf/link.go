@@ -25,24 +25,14 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// PDF链接区域细分上限与曲线逼近误差，误差单位为毫米
+// PDF链接区域的边数与四边形细分上限
 const (
 	LinkEdgeLimit = 4096
 	LinkQuadLimit = 65536
-	linkTolerance = 0.01
 )
 
-// linkEdge 保存按纵坐标排序的边及原始绕行方向
-type linkEdge struct {
-	a, b    pdfgo.Point
-	winding int
-}
-
-// linkCross 保存水平扫描线与区域边的交点
-type linkCross struct {
-	x    float64
-	edge int
-}
+// linkTolerance 链接区域曲线逼近误差，单位为毫米
+const linkTolerance = 0.01
 
 // ActionRegion 将非零绕行区域分解为PDF链接四边形，保留空洞和相交轮廓
 // 入参: ctx 取消上下文, outline 页面SVG路径, pageH 页面高度
@@ -186,57 +176,6 @@ func ActionRegion(ctx context.Context, outline string, pageH float64) (*pdfgo.Li
 	return linkRegionBounds(region.Quads), nil
 }
 
-// convexLink 直接保留单个凸四边形，三角形只分成三个四边形
-// 入参: path 已展开路径, pageH 页面高度
-// 返回: [][4]pdfgo.Point 逆时针四边形，不适用时为空
-func convexLink(path *canvas.Path, pageH float64) [][4]pdfgo.Point {
-	if path.HasSubpaths() || path.Len() > 6 {
-		return nil
-	}
-	points := path.Coords()
-	if len(points) > 1 && points[0] == points[len(points)-1] {
-		points = points[:len(points)-1]
-	}
-	if len(points) < 3 || len(points) > 4 {
-		return nil
-	}
-	var storage [4]pdfgo.Point
-	vertices := storage[:len(points)]
-	for i, p := range points {
-		vertices[i] = pdfgo.Point{X: p.X * 72 / 25.4, Y: (pageH - p.Y) * 72 / 25.4}
-	}
-	direction := 0.0
-	for i, a := range vertices {
-		b, c := vertices[(i+1)%len(vertices)], vertices[(i+2)%len(vertices)]
-		cross := linkTurn(a, b, c)
-		if !finite(cross) || cross == 0 || direction != 0 && (direction < 0) != (cross < 0) {
-			return nil
-		}
-		direction = cross
-	}
-	if direction < 0 {
-		slices.Reverse(vertices)
-	}
-	if len(vertices) == 4 {
-		return [][4]pdfgo.Point{storage}
-	}
-	return appendLinkTriangle(nil, [3]pdfgo.Point{vertices[0], vertices[1], vertices[2]})
-}
-
-// linkRegionBounds 计算四边形共同的注解矩形，保证全部顶点落在矩形内
-// 入参: quads 链接四边形
-// 返回: *pdfgo.LinkRegion 链接区域
-func linkRegionBounds(quads [][4]pdfgo.Point) *pdfgo.LinkRegion {
-	region := &pdfgo.LinkRegion{Quads: quads, Rect: pdfgo.Rectangle{XMin: math.Inf(1), YMin: math.Inf(1), XMax: math.Inf(-1), YMax: math.Inf(-1)}}
-	for _, quad := range quads {
-		for _, p := range quad {
-			region.Rect.XMin, region.Rect.YMin = min(region.Rect.XMin, p.X), min(region.Rect.YMin, p.Y)
-			region.Rect.XMax, region.Rect.YMax = max(region.Rect.XMax, p.X), max(region.Rect.YMax, p.Y)
-		}
-	}
-	return region
-}
-
 // FlattenLink 在取消和数量限制内展开动作曲线，复用标准椭圆弧转换
 // 入参: ctx 取消上下文, path 页面SVG路径
 // 返回: *canvas.Path 闭合折线路径, error 精度或复杂度错误
@@ -331,12 +270,75 @@ func FlattenLink(ctx context.Context, path *canvas.Path) (*canvas.Path, error) {
 	return result, nil
 }
 
+// linkEdge 保存按纵坐标排序的边及原始绕行方向
+type linkEdge struct {
+	a, b    pdfgo.Point
+	winding int
+}
+
 // x 计算非水平边在指定纵坐标处的横坐标
 // 入参: y 扫描线纵坐标
 // 返回: float64 交点横坐标
 func (e linkEdge) x(y float64) float64 {
 	t := (y - e.a.Y) / (e.b.Y - e.a.Y)
 	return e.a.X*(1-t) + e.b.X*t
+}
+
+// linkCross 保存水平扫描线与区域边的交点
+type linkCross struct {
+	x    float64
+	edge int
+}
+
+// convexLink 直接保留单个凸四边形，三角形只分成三个四边形
+// 入参: path 已展开路径, pageH 页面高度
+// 返回: [][4]pdfgo.Point 逆时针四边形，不适用时为空
+func convexLink(path *canvas.Path, pageH float64) [][4]pdfgo.Point {
+	if path.HasSubpaths() || path.Len() > 6 {
+		return nil
+	}
+	points := path.Coords()
+	if len(points) > 1 && points[0] == points[len(points)-1] {
+		points = points[:len(points)-1]
+	}
+	if len(points) < 3 || len(points) > 4 {
+		return nil
+	}
+	var storage [4]pdfgo.Point
+	vertices := storage[:len(points)]
+	for i, p := range points {
+		vertices[i] = pdfgo.Point{X: p.X * 72 / 25.4, Y: (pageH - p.Y) * 72 / 25.4}
+	}
+	direction := 0.0
+	for i, a := range vertices {
+		b, c := vertices[(i+1)%len(vertices)], vertices[(i+2)%len(vertices)]
+		cross := linkTurn(a, b, c)
+		if !finite(cross) || cross == 0 || direction != 0 && (direction < 0) != (cross < 0) {
+			return nil
+		}
+		direction = cross
+	}
+	if direction < 0 {
+		slices.Reverse(vertices)
+	}
+	if len(vertices) == 4 {
+		return [][4]pdfgo.Point{storage}
+	}
+	return appendLinkTriangle(nil, [3]pdfgo.Point{vertices[0], vertices[1], vertices[2]})
+}
+
+// linkRegionBounds 计算四边形共同的注解矩形，保证全部顶点落在矩形内
+// 入参: quads 链接四边形
+// 返回: *pdfgo.LinkRegion 链接区域
+func linkRegionBounds(quads [][4]pdfgo.Point) *pdfgo.LinkRegion {
+	region := &pdfgo.LinkRegion{Quads: quads, Rect: pdfgo.Rectangle{XMin: math.Inf(1), YMin: math.Inf(1), XMax: math.Inf(-1), YMax: math.Inf(-1)}}
+	for _, quad := range quads {
+		for _, p := range quad {
+			region.Rect.XMin, region.Rect.YMin = min(region.Rect.XMin, p.X), min(region.Rect.YMin, p.Y)
+			region.Rect.XMax, region.Rect.YMax = max(region.Rect.XMax, p.X), max(region.Rect.YMax, p.Y)
+		}
+	}
+	return region
 }
 
 // appendLinkQuad 收集梯形，尖端退化为三角形时细分为三个非退化四边形

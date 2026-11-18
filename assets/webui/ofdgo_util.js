@@ -117,15 +117,6 @@ export class VirtualList {
 	}
 }
 
-export function setInputFiles(input, files) {
-	const view = input.ownerDocument.defaultView, transfer = new view.DataTransfer();
-	const native = files.some(file => !(file instanceof view.File));
-	for (const file of files) transfer.items.add(file instanceof view.File ? file : new view.File([], file.name, {type: file.type}));
-	delete input.files;
-	input.files = transfer.files;
-	if (native) Object.defineProperty(input, "files", {configurable: true, get: () => input.value ? files : []});
-}
-
 export class DocumentDialogs {
 	constructor({ document: root = document, targets = [], titlebar = null } = {}) {
 		Object.assign(this, { document: root, targets, titlebar, owner: null, records: new Map(), tabs: new Map(), released: new WeakSet(), inert: new Map(), styles: new Map() });
@@ -449,33 +440,6 @@ export class DocumentDialogs {
 	}
 }
 
-export function positionDropdown(list, anchor, fit = false) {
-	const rect = anchor.getBoundingClientRect(), viewport = window.visualViewport;
-	const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0;
-	const width = viewport?.width || window.innerWidth, height = viewport?.height || window.innerHeight;
-	if (rect.right <= left || rect.left >= left + width || rect.bottom <= top || rect.top >= top + height) return false;
-	const below = top + height - rect.bottom - 12, above = rect.top - top - 12;
-	const limit = Math.min(280, Math.max(below, above));
-	if (limit < 20) return false;
-	const minimum = Math.min(rect.width, width - 16);
-	Object.assign(list.style, { width: fit ? "max-content" : `${minimum}px`, minWidth: `${minimum}px`, maxWidth: `${width - 16}px`, maxHeight: `${limit}px` });
-	const size = list.getBoundingClientRect();
-	Object.assign(list.style, { left: `${Math.max(left + 8, Math.min(rect.left, left + width - size.width - 8))}px`,
-		top: `${below >= size.height || below >= above ? rect.bottom + 4 : rect.top - size.height - 4}px` });
-	return true;
-}
-
-export function bindDropdownPointer(list, choose) {
-	list.addEventListener("pointerdown", event => {
-		if (event.pointerType !== "touch" && event.target.closest("[data-index]")) event.preventDefault();
-	});
-	list.addEventListener("mousedown", event => { if (event.target.closest("[data-index]")) event.preventDefault(); });
-	list.addEventListener("click", event => {
-		const option = event.target.closest("[data-index]");
-		if (option) choose(Number(option.dataset.index));
-	});
-}
-
 export class SelectPicker {
 	constructor(onOpen) {
 		Object.assign(this, { onOpen, select: null, options: [], active: -1, selected: -1, query: "", queryTime: 0, frame: 0, touchClick: false });
@@ -673,4 +637,40 @@ export class SelectPicker {
 		event.preventDefault();
 		event.stopImmediatePropagation();
 	}
+}
+
+export function setInputFiles(input, files) {
+	const view = input.ownerDocument.defaultView, transfer = new view.DataTransfer();
+	const native = files.some(file => !(file instanceof view.File));
+	for (const file of files) transfer.items.add(file instanceof view.File ? file : new view.File([], file.name, {type: file.type}));
+	delete input.files;
+	input.files = transfer.files;
+	if (native) Object.defineProperty(input, "files", {configurable: true, get: () => input.value ? files : []});
+}
+
+export function positionDropdown(list, anchor, fit = false) {
+	const rect = anchor.getBoundingClientRect(), viewport = window.visualViewport;
+	const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0;
+	const width = viewport?.width || window.innerWidth, height = viewport?.height || window.innerHeight;
+	if (rect.right <= left || rect.left >= left + width || rect.bottom <= top || rect.top >= top + height) return false;
+	const below = top + height - rect.bottom - 12, above = rect.top - top - 12;
+	const limit = Math.min(280, Math.max(below, above));
+	if (limit < 20) return false;
+	const minimum = Math.min(rect.width, width - 16);
+	Object.assign(list.style, { width: fit ? "max-content" : `${minimum}px`, minWidth: `${minimum}px`, maxWidth: `${width - 16}px`, maxHeight: `${limit}px` });
+	const size = list.getBoundingClientRect();
+	Object.assign(list.style, { left: `${Math.max(left + 8, Math.min(rect.left, left + width - size.width - 8))}px`,
+		top: `${below >= size.height || below >= above ? rect.bottom + 4 : rect.top - size.height - 4}px` });
+	return true;
+}
+
+export function bindDropdownPointer(list, choose) {
+	list.addEventListener("pointerdown", event => {
+		if (event.pointerType !== "touch" && event.target.closest("[data-index]")) event.preventDefault();
+	});
+	list.addEventListener("mousedown", event => { if (event.target.closest("[data-index]")) event.preventDefault(); });
+	list.addEventListener("click", event => {
+		const option = event.target.closest("[data-index]");
+		if (option) choose(Number(option.dataset.index));
+	});
 }

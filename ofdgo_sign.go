@@ -27,15 +27,15 @@ import (
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
+// SignType 签名类型
+type SignType string
+
 const (
 	// SignTypeSeal 印章签名
 	SignTypeSeal SignType = "Seal"
 	// SignTypeSign 数字签名
 	SignTypeSign SignType = "Sign"
 )
-
-// SignType 签名类型
-type SignType string
 
 // Signatures 签名列表
 type Signatures struct {

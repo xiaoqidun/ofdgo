@@ -77,24 +77,6 @@ type Host struct {
 	closeAllowed   bool
 }
 
-// associationState 保存单个范围的登记状态和查询错误
-type associationState struct {
-	guigo.AssociationStatus
-	Error string `json:"error,omitempty"`
-}
-
-// engineClose 保存并发关闭共享的完成通知及结果
-type engineClose struct {
-	done chan struct{}
-	err  error
-}
-
-// resourceReader 保存资源读取位置及关闭操作
-type resourceReader struct {
-	*io.SectionReader
-	close func() error
-}
-
 // Run 启动共用WebUI的原生入口
 // 入参: ctx 运行上下文, paths 初始文件路径, dataDir 浏览器数据目录
 // 返回: error 启动或运行错误
@@ -217,6 +199,24 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 		h.emit("ofdgo.error", err.Error())
 	}
 	return guigo.Run(ctx, options)
+}
+
+// associationState 保存单个范围的登记状态和查询错误
+type associationState struct {
+	guigo.AssociationStatus
+	Error string `json:"error,omitempty"`
+}
+
+// engineClose 保存并发关闭共享的完成通知及结果
+type engineClose struct {
+	done chan struct{}
+	err  error
+}
+
+// resourceReader 保存资源读取位置及关闭操作
+type resourceReader struct {
+	*io.SectionReader
+	close func() error
 }
 
 // Close 结束本次资源读取

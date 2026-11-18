@@ -27,88 +27,6 @@ import (
 	"unicode"
 )
 
-// editorFontUsage 汇总原文档字体的字符、显式字形及无法确定的引用
-type editorFontUsage struct {
-	chars  map[rune]bool
-	glyphs map[uint16]bool
-	unsafe bool
-}
-
-// editorFontSubset 保存单个新增字体及其快照最近一次裁剪结果，不保留历史字形集合
-type editorFontSubset struct {
-	source [32]byte
-	glyphs []uint16
-	data   []byte
-	mapped bool
-}
-
-// editorFontRegistration 记录最近一次成功注册的输入与标识，不保留原始文件
-type editorFontRegistration struct {
-	checksum [32]byte
-	name     string
-	index    int
-	id       string
-}
-
-// editorSourceFontKey 区分原字体内容及完整用字集合
-type editorSourceFontKey struct {
-	source [32]byte
-	usage  [32]byte
-}
-
-// editorSourceFontCache 在单次资源处理中复用裁剪结果，空值表示无体积收益
-type editorSourceFontCache map[editorSourceFontKey][]byte
-
-// clearFontResourceCache 清除字体后端生成的解析与裁剪缓存，保留原始资源
-func (e *Editor) clearFontResourceCache() {
-	e.fonts = make(map[string]*FontResource)
-	e.fontRegistration = editorFontRegistration{}
-	for i := range e.resources {
-		e.resources[i].subset = nil
-	}
-}
-
-// subset 按原字体和用字复用安全子集，不缓存错误、取消结果或原始字体
-// 入参: ctx 取消上下文, backend 字体资源后端, data 原字体, usage 用字记录
-// 返回: []byte 更小的字体子集，无收益时为nil, error 裁剪或取消错误
-func (c *editorSourceFontCache) subset(ctx context.Context, backend FontResourceBackend, data []byte, usage *editorFontUsage) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if usage == nil || usage.unsafe || backend == nil {
-		return nil, nil
-	}
-	characters, glyphs := slices.Sorted(maps.Keys(usage.chars)), slices.Sorted(maps.Keys(usage.glyphs))
-	encoded := make([]byte, 0, 8+4*len(characters)+2*len(glyphs))
-	encoded = binary.LittleEndian.AppendUint32(encoded, uint32(len(characters)))
-	for _, char := range characters {
-		encoded = binary.LittleEndian.AppendUint32(encoded, uint32(char))
-	}
-	encoded = binary.LittleEndian.AppendUint32(encoded, uint32(len(glyphs)))
-	for _, glyph := range glyphs {
-		encoded = binary.LittleEndian.AppendUint16(encoded, glyph)
-	}
-	key := editorSourceFontKey{source: sha256.Sum256(data), usage: sha256.Sum256(encoded)}
-	if result, ok := (*c)[key]; ok {
-		return result, ctx.Err()
-	}
-	result, err := backend.SubsetSourceFont(data, FontUsage{Characters: characters, Glyphs: glyphs})
-	if err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if len(result) == 0 || len(result) >= len(data) {
-		result = nil
-	}
-	if *c == nil {
-		*c = make(editorSourceFontCache)
-	}
-	(*c)[key] = result
-	return result, nil
-}
-
 // AddFont 注册OpenType字体，集合字体按索引提取，重复资源复用标识，引用后写入文档
 // 入参: file 字体文件, index 集合内字体索引，单字体为0
 // 返回: string 字体资源标识, error 错误信息
@@ -131,32 +49,6 @@ func (e *Editor) AddFont(file FontFile, index int) (string, error) {
 		e.fontRegistration = editorFontRegistration{checksum: checksum, name: file.Name, index: index, id: id}
 	}
 	return id, err
-}
-
-// addFontResource 注册已解析的只读字体，各文档独立分配标识和包内路径
-// 入参: parsed 字体资源, checksum 字体数据摘要
-// 返回: string 字体标识, error 标识准备错误
-func (e *Editor) addFontResource(parsed *FontResource, checksum [32]byte) (string, error) {
-	key := editorResourceKey{checksum: checksum}
-	if id, ok := e.resourceID[key]; ok {
-		return id, nil
-	}
-	if err := e.prepareSourceIDs(); err != nil {
-		return "", err
-	}
-	id := e.nextID()
-	definition := parsed.Font
-	definition.ID = id
-	resource := editorResource{
-		name: e.packageName("Res/Fonts/Font_" + id + parsed.Extension),
-		data: parsed.Data,
-		font: &definition,
-	}
-	resource.font.FontFile = "/" + resource.name
-	e.resources = append(e.resources, resource)
-	e.fonts[id] = parsed
-	e.resourceID[key] = id
-	return id, nil
 }
 
 // AddExternalFont 注册不含字体文件的名称引用，重复注册复用标识，由阅读环境匹配
@@ -187,24 +79,17 @@ func (e *Editor) AddExternalFont(name string) (string, error) {
 	return id, nil
 }
 
+// editorFontUsage 汇总原文档字体的字符、显式字形及无法确定的引用
+type editorFontUsage struct {
+	chars  map[rune]bool
+	glyphs map[uint16]bool
+	unsafe bool
+}
+
 // newEditorFontUsage 创建字体用字记录
 // 返回: *editorFontUsage 用字记录
 func newEditorFontUsage() *editorFontUsage {
 	return &editorFontUsage{chars: make(map[rune]bool), glyphs: make(map[uint16]bool)}
-}
-
-// fontUsage 获取规范化资源标识对应的字体用字记录
-// 入参: id 字体资源标识
-// 返回: *editorFontUsage 用字记录
-func (r *editorResourceRefs) fontUsage(id string) *editorFontUsage {
-	if r.fonts == nil {
-		r.fonts = make(map[string]*editorFontUsage)
-	}
-	id = editorResourceID(id)
-	if r.fonts[id] == nil {
-		r.fonts[id] = newEditorFontUsage()
-	}
-	return r.fonts[id]
 }
 
 // text 收集TextCode字符和CGTransform显式字形，异常编号使该字体保持原样
@@ -262,6 +147,121 @@ func (u *editorFontUsage) merge(other *editorFontUsage, unsafe bool) {
 		maps.Copy(u.chars, other.chars)
 		maps.Copy(u.glyphs, other.glyphs)
 	}
+}
+
+// editorFontSubset 保存单个新增字体及其快照最近一次裁剪结果，不保留历史字形集合
+type editorFontSubset struct {
+	source [32]byte
+	glyphs []uint16
+	data   []byte
+	mapped bool
+}
+
+// editorFontRegistration 记录最近一次成功注册的输入与标识，不保留原始文件
+type editorFontRegistration struct {
+	checksum [32]byte
+	name     string
+	index    int
+	id       string
+}
+
+// editorSourceFontKey 区分原字体内容及完整用字集合
+type editorSourceFontKey struct {
+	source [32]byte
+	usage  [32]byte
+}
+
+// editorSourceFontCache 在单次资源处理中复用裁剪结果，空值表示无体积收益
+type editorSourceFontCache map[editorSourceFontKey][]byte
+
+// subset 按原字体和用字复用安全子集，不缓存错误、取消结果或原始字体
+// 入参: ctx 取消上下文, backend 字体资源后端, data 原字体, usage 用字记录
+// 返回: []byte 更小的字体子集，无收益时为nil, error 裁剪或取消错误
+func (c *editorSourceFontCache) subset(ctx context.Context, backend FontResourceBackend, data []byte, usage *editorFontUsage) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if usage == nil || usage.unsafe || backend == nil {
+		return nil, nil
+	}
+	characters, glyphs := slices.Sorted(maps.Keys(usage.chars)), slices.Sorted(maps.Keys(usage.glyphs))
+	encoded := make([]byte, 0, 8+4*len(characters)+2*len(glyphs))
+	encoded = binary.LittleEndian.AppendUint32(encoded, uint32(len(characters)))
+	for _, char := range characters {
+		encoded = binary.LittleEndian.AppendUint32(encoded, uint32(char))
+	}
+	encoded = binary.LittleEndian.AppendUint32(encoded, uint32(len(glyphs)))
+	for _, glyph := range glyphs {
+		encoded = binary.LittleEndian.AppendUint16(encoded, glyph)
+	}
+	key := editorSourceFontKey{source: sha256.Sum256(data), usage: sha256.Sum256(encoded)}
+	if result, ok := (*c)[key]; ok {
+		return result, ctx.Err()
+	}
+	result, err := backend.SubsetSourceFont(data, FontUsage{Characters: characters, Glyphs: glyphs})
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(result) == 0 || len(result) >= len(data) {
+		result = nil
+	}
+	if *c == nil {
+		*c = make(editorSourceFontCache)
+	}
+	(*c)[key] = result
+	return result, nil
+}
+
+// clearFontResourceCache 清除字体后端生成的解析与裁剪缓存，保留原始资源
+func (e *Editor) clearFontResourceCache() {
+	e.fonts = make(map[string]*FontResource)
+	e.fontRegistration = editorFontRegistration{}
+	for i := range e.resources {
+		e.resources[i].subset = nil
+	}
+}
+
+// addFontResource 注册已解析的只读字体，各文档独立分配标识和包内路径
+// 入参: parsed 字体资源, checksum 字体数据摘要
+// 返回: string 字体标识, error 标识准备错误
+func (e *Editor) addFontResource(parsed *FontResource, checksum [32]byte) (string, error) {
+	key := editorResourceKey{checksum: checksum}
+	if id, ok := e.resourceID[key]; ok {
+		return id, nil
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return "", err
+	}
+	id := e.nextID()
+	definition := parsed.Font
+	definition.ID = id
+	resource := editorResource{
+		name: e.packageName("Res/Fonts/Font_" + id + parsed.Extension),
+		data: parsed.Data,
+		font: &definition,
+	}
+	resource.font.FontFile = "/" + resource.name
+	e.resources = append(e.resources, resource)
+	e.fonts[id] = parsed
+	e.resourceID[key] = id
+	return id, nil
+}
+
+// fontUsage 获取规范化资源标识对应的字体用字记录
+// 入参: id 字体资源标识
+// 返回: *editorFontUsage 用字记录
+func (r *editorResourceRefs) fontUsage(id string) *editorFontUsage {
+	if r.fonts == nil {
+		r.fonts = make(map[string]*editorFontUsage)
+	}
+	id = editorResourceID(id)
+	if r.fonts[id] == nil {
+		r.fonts[id] = newEditorFontUsage()
+	}
+	return r.fonts[id]
 }
 
 // editorObjectFontScan 判断对象是否需要扫描嵌套文字或复合资源

@@ -16,7 +16,6 @@ package ofdgo
 
 import (
 	"bytes"
-
 	"encoding/xml"
 	"fmt"
 	"maps"

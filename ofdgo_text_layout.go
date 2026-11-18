@@ -26,12 +26,6 @@ import (
 	"golang.org/x/text/unicode/bidi"
 )
 
-// configuredTextShaper 将会话选项传递给每次换行后的塑形
-type configuredTextShaper struct {
-	FontShaperOptions
-	options TextShapeOptions
-}
-
 // LayoutText 按自有字体度量重排横向文字，保留绘制属性，可显式启用字体塑形
 // 不修改文档，通过AddObject或UpdateObject提交；选项随标准文字定位保存，重新打开时恢复
 // 入参: obj 文字对象, value 原文, options 段落排版选项, metrics 字体度量
@@ -149,6 +143,12 @@ func LayoutText(obj *TextObject, value string, options TextLayout, metrics FontM
 	}
 	obj.layout = &textLayout{value: value, options: options, autoWidth: autoWidth}
 	return nil
+}
+
+// configuredTextShaper 将会话选项传递给每次换行后的塑形
+type configuredTextShaper struct {
+	FontShaperOptions
+	options TextShapeOptions
 }
 
 // ShapeText 使用固定选项塑形单行原文

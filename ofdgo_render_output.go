@@ -37,50 +37,6 @@ const xmpNamespace = "http://ns.adobe.com/xap/1.0/"
 // creatorXMP 记录独立导出文件的制作软件
 const creatorXMP = `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:xmp="` + xmpNamespace + `"><xmp:CreatorTool>` + ofdCreator + `</xmp:CreatorTool></rdf:Description></rdf:RDF>`
 
-// imageMetadataWriter 在图像固定头之后插入元数据，不缓存图像主体
-type imageMetadataWriter struct {
-	writer io.Writer
-	skip   int
-	data   []byte
-}
-
-// Write 交付图像数据并在头部边界写入元数据
-// 入参: data 编码后的图像片段
-// 返回: int 已处理字节数, error 写入错误
-func (w *imageMetadataWriter) Write(data []byte) (int, error) {
-	n := 0
-	if w.skip > 0 {
-		size := min(w.skip, len(data))
-		written, err := w.writer.Write(data[:size])
-		n, w.skip = written, w.skip-written
-		data = data[written:]
-		if err != nil {
-			return n, err
-		}
-		if written != size {
-			return n, io.ErrShortWrite
-		}
-	}
-	if w.skip == 0 && w.data != nil {
-		written, err := w.writer.Write(w.data)
-		if err != nil {
-			return n, err
-		}
-		if written != len(w.data) {
-			return n, io.ErrShortWrite
-		}
-		w.data = nil
-	}
-	if len(data) == 0 {
-		return n, nil
-	}
-	written, err := w.writer.Write(data)
-	if err == nil && written != len(data) {
-		err = io.ErrShortWrite
-	}
-	return n + written, err
-}
-
 // RenderTo 按格式渲染单页，JPEG使用95画质
 // 入参: page 页面内容, writer 输出流, format svg、pdf、eps、png、jpg、jpeg或txt
 // 返回: error 错误信息
@@ -407,6 +363,50 @@ func (r *Renderer) RenderPagesToPDF(contents []*PageContent, writer io.Writer) e
 		pages[i] = RenderDocumentPage{Content: page, Box: box}
 	}
 	return r.renderPDFPages(pages, writer, r.OnExportProgress)
+}
+
+// imageMetadataWriter 在图像固定头之后插入元数据，不缓存图像主体
+type imageMetadataWriter struct {
+	writer io.Writer
+	skip   int
+	data   []byte
+}
+
+// Write 交付图像数据并在头部边界写入元数据
+// 入参: data 编码后的图像片段
+// 返回: int 已处理字节数, error 写入错误
+func (w *imageMetadataWriter) Write(data []byte) (int, error) {
+	n := 0
+	if w.skip > 0 {
+		size := min(w.skip, len(data))
+		written, err := w.writer.Write(data[:size])
+		n, w.skip = written, w.skip-written
+		data = data[written:]
+		if err != nil {
+			return n, err
+		}
+		if written != size {
+			return n, io.ErrShortWrite
+		}
+	}
+	if w.skip == 0 && w.data != nil {
+		written, err := w.writer.Write(w.data)
+		if err != nil {
+			return n, err
+		}
+		if written != len(w.data) {
+			return n, io.ErrShortWrite
+		}
+		w.data = nil
+	}
+	if len(data) == 0 {
+		return n, nil
+	}
+	written, err := w.writer.Write(data)
+	if err == nil && written != len(data) {
+		err = io.ErrShortWrite
+	}
+	return n + written, err
 }
 
 // outputRenderer 获取格式扩展名和渲染方法

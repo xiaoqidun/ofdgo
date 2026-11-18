@@ -24,13 +24,6 @@ import (
 	"strconv"
 )
 
-// signatureStampEdit 保存同一签名描述中的外观修改，原签名值及扩展原样保留
-type signatureStampEdit struct {
-	data    []byte
-	root    *editorXML
-	patches []editorXMLPatch
-}
-
 // SignatureStampCapabilities 返回签章外观的编辑能力，不以签名有效性限制编辑
 // 共享历史签名无法独立改写时保留原入口，避免改变其他版本
 // 入参: page 页面索引, path 签名及外观标识
@@ -55,6 +48,71 @@ func (e *Editor) SignatureStampCapabilities(page int, path ObjectPath) (ObjectCa
 		return ObjectCapabilities{Reason: err.Error(), ReasonCode: EditUnsupportedObject}, nil
 	}
 	return ObjectCapabilities{Transform: true, Delete: true, Stretch: true}, nil
+}
+
+// SignaturePageStamps 生成所选页面相同毫米坐标的印章位置并检查页内范围
+// 入参: pages 从1开始且不重复的页码, box 完整印章区域
+// 返回: []SignatureStamp 可传入签署选项的位置, error 错误信息
+func (r *Reader) SignaturePageStamps(pages []int, box Box) ([]SignatureStamp, error) {
+	if r == nil || len(pages) == 0 || !signatureWriteBoxValid(box) {
+		return nil, fmt.Errorf("invalid page stamp parameters")
+	}
+	doc, err := r.Doc()
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int]bool)
+	stamps := make([]SignatureStamp, 0, len(pages))
+	for _, page := range pages {
+		if page < 1 || page > len(doc.Pages.Page) || seen[page] {
+			return nil, fmt.Errorf("invalid stamp page: %d", page)
+		}
+		seen[page] = true
+		stamps = append(stamps, SignatureStamp{PageRef: doc.Pages.Page[page-1].ID, Boundary: signatureWriteBox(box)})
+	}
+	return signatureWriteStamps(r, stamps, true)
+}
+
+// SignatureSeamStamps 生成页面右侧的等宽骑缝印章位置
+// 页码从1开始，按传入顺序分割同一印章；box.X为右侧内缩，Y为纵坐标，W/H为完整印章尺寸
+// 入参: pages 至少两页且不重复, box 印章参数，单位毫米
+// 返回: []SignatureStamp 可传入签署选项的位置, error 错误信息
+func (r *Reader) SignatureSeamStamps(pages []int, box Box) ([]SignatureStamp, error) {
+	if r == nil || len(pages) < 2 || !signatureWriteBoxValid(box) || box.X < 0 {
+		return nil, fmt.Errorf("invalid seam stamp parameters")
+	}
+	doc, err := r.Doc()
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int]bool)
+	stamps := make([]SignatureStamp, 0, len(pages))
+	width := box.W / float64(len(pages))
+	for i, page := range pages {
+		if page < 1 || page > len(doc.Pages.Page) || seen[page] {
+			return nil, fmt.Errorf("invalid seam stamp page: %d", page)
+		}
+		seen[page] = true
+		area, err := r.PageArea(doc.Pages.Page[page-1])
+		if err != nil {
+			return nil, err
+		}
+		physical, err := ParseBox(area.PhysicalBox)
+		if err != nil {
+			return nil, err
+		}
+		clip := Box{X: float64(i) * width, W: width, H: box.H}
+		boundary := Box{X: physical.X + physical.W - box.X - width - clip.X, Y: box.Y, W: box.W, H: box.H}
+		stamps = append(stamps, SignatureStamp{PageRef: doc.Pages.Page[page-1].ID, Boundary: signatureWriteBox(boundary), Clip: signatureWriteBox(clip)})
+	}
+	return signatureWriteStamps(r, stamps, true)
+}
+
+// signatureStampEdit 保存同一签名描述中的外观修改，原签名值及扩展原样保留
+type signatureStampEdit struct {
+	data    []byte
+	root    *editorXML
+	patches []editorXMLPatch
 }
 
 // signatureStampVersionDependency 判断文档级签名是否被其他历史入口共用，不改写版本语义
@@ -301,64 +359,6 @@ func (e *Editor) changeSignatureStamps(page int, paths []ObjectPath, matrix *Mat
 		return err
 	}
 	return e.commitResourceSnapshot(ctx, reader)
-}
-
-// SignaturePageStamps 生成所选页面相同毫米坐标的印章位置并检查页内范围
-// 入参: pages 从1开始且不重复的页码, box 完整印章区域
-// 返回: []SignatureStamp 可传入签署选项的位置, error 错误信息
-func (r *Reader) SignaturePageStamps(pages []int, box Box) ([]SignatureStamp, error) {
-	if r == nil || len(pages) == 0 || !signatureWriteBoxValid(box) {
-		return nil, fmt.Errorf("invalid page stamp parameters")
-	}
-	doc, err := r.Doc()
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[int]bool)
-	stamps := make([]SignatureStamp, 0, len(pages))
-	for _, page := range pages {
-		if page < 1 || page > len(doc.Pages.Page) || seen[page] {
-			return nil, fmt.Errorf("invalid stamp page: %d", page)
-		}
-		seen[page] = true
-		stamps = append(stamps, SignatureStamp{PageRef: doc.Pages.Page[page-1].ID, Boundary: signatureWriteBox(box)})
-	}
-	return signatureWriteStamps(r, stamps, true)
-}
-
-// SignatureSeamStamps 生成页面右侧的等宽骑缝印章位置
-// 页码从1开始，按传入顺序分割同一印章；box.X为右侧内缩，Y为纵坐标，W/H为完整印章尺寸
-// 入参: pages 至少两页且不重复, box 印章参数，单位毫米
-// 返回: []SignatureStamp 可传入签署选项的位置, error 错误信息
-func (r *Reader) SignatureSeamStamps(pages []int, box Box) ([]SignatureStamp, error) {
-	if r == nil || len(pages) < 2 || !signatureWriteBoxValid(box) || box.X < 0 {
-		return nil, fmt.Errorf("invalid seam stamp parameters")
-	}
-	doc, err := r.Doc()
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[int]bool)
-	stamps := make([]SignatureStamp, 0, len(pages))
-	width := box.W / float64(len(pages))
-	for i, page := range pages {
-		if page < 1 || page > len(doc.Pages.Page) || seen[page] {
-			return nil, fmt.Errorf("invalid seam stamp page: %d", page)
-		}
-		seen[page] = true
-		area, err := r.PageArea(doc.Pages.Page[page-1])
-		if err != nil {
-			return nil, err
-		}
-		physical, err := ParseBox(area.PhysicalBox)
-		if err != nil {
-			return nil, err
-		}
-		clip := Box{X: float64(i) * width, W: width, H: box.H}
-		boundary := Box{X: physical.X + physical.W - box.X - width - clip.X, Y: box.Y, W: box.W, H: box.H}
-		stamps = append(stamps, SignatureStamp{PageRef: doc.Pages.Page[page-1].ID, Boundary: signatureWriteBox(boundary), Clip: signatureWriteBox(clip)})
-	}
-	return signatureWriteStamps(r, stamps, true)
 }
 
 // signatureWriteStamps 复用Reader定位并检查外观几何参数

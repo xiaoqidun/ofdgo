@@ -35,20 +35,6 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// canvasEPSWriter 在EPS头部写入本库制作软件，不改动绘图内容
-type canvasEPSWriter struct {
-	io.Writer
-}
-
-// epsImageRenderer 在EPS输出端优化图片，不修改页面及渲染缓存
-type epsImageRenderer struct {
-	*ps.PS
-	writer  io.Writer
-	options CompressionOptions
-	ctx     context.Context
-	err     error
-}
-
 // RenderSVG 使用canvas输出SVG，按模式保留资源和对象分组
 // 入参: r 渲染器, page 页面内容, writer 输出流, mode 资源模式
 // 返回: SVGResources 外部资源, error 错误信息
@@ -108,19 +94,6 @@ func (CanvasBackend) RenderEPS(r *Renderer, page *PageContent, writer io.Writer)
 		return err
 	}
 	return buffer.Flush()
-}
-
-// Write 写入EPS片段并替换独立的制作软件声明
-// 入参: data EPS片段
-// 返回: int 已处理字节数, error 写入错误
-func (w canvasEPSWriter) Write(data []byte) (int, error) {
-	if bytes.Equal(data, []byte("%%Creator: tdewolff/canvas\n")) {
-		if _, err := io.WriteString(w.Writer, "%%Creator: "+ofdCreator+"\n"); err != nil {
-			return 0, err
-		}
-		return len(data), nil
-	}
-	return w.Writer.Write(data)
 }
 
 // RenderPDF 使用canvas输出PDF，保留导航与文字并分块保存中间输出
@@ -230,6 +203,33 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		}
 	}
 	return renderer.writePDF(r.outputContext(), &buf, buf.size, writer, options)
+}
+
+// canvasEPSWriter 在EPS头部写入本库制作软件，不改动绘图内容
+type canvasEPSWriter struct {
+	io.Writer
+}
+
+// Write 写入EPS片段并替换独立的制作软件声明
+// 入参: data EPS片段
+// 返回: int 已处理字节数, error 写入错误
+func (w canvasEPSWriter) Write(data []byte) (int, error) {
+	if bytes.Equal(data, []byte("%%Creator: tdewolff/canvas\n")) {
+		if _, err := io.WriteString(w.Writer, "%%Creator: "+ofdCreator+"\n"); err != nil {
+			return 0, err
+		}
+		return len(data), nil
+	}
+	return w.Writer.Write(data)
+}
+
+// epsImageRenderer 在EPS输出端优化图片，不修改页面及渲染缓存
+type epsImageRenderer struct {
+	*ps.PS
+	writer  io.Writer
+	options CompressionOptions
+	ctx     context.Context
+	err     error
 }
 
 // RenderImage 写出Flate或更小的JPEG图片，保留显示尺寸与变换

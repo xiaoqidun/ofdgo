@@ -26,12 +26,6 @@ import (
 	"strings"
 )
 
-// resourceStyleReference 保存资源依赖及可选的类型要求，不持有XML节点
-type resourceStyleReference struct {
-	key  string
-	kind string
-}
-
 // ColorSpace 获取当前文档及版本的颜色空间定义，不读取或解析ICC文件
 // 入参: ctx 取消上下文, id 资源标识
 // 返回: *ColorSpace 独立副本，Profile为包内绝对引用, error 查询或解析错误
@@ -98,25 +92,6 @@ func (r *Reader) DrawParam(ctx context.Context, id string, resolved bool) (*Draw
 	return result, ctx.Err()
 }
 
-// styleDefinition 从声明原文解码样式定义，补齐继承的XML命名空间
-// 入参: ctx 取消上下文, item 目录条目, target 解码目标
-// 返回: error 取消或XML解析错误
-func (c *resourceCatalog) styleDefinition(ctx context.Context, item ResourceInfo, target any) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	entry := c.nodes[item.Kind+"/"+item.ID]
-	data, err := editorXMLStandaloneContext(ctx, entry.file.data[entry.node.start:entry.node.end], entry.node)
-	if err != nil {
-		return err
-	}
-	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	return ctx.Err()
-}
-
 // ColorSpace 读取编辑器中的颜色空间，包括尚未绑定图元的新注册定义
 // 入参: id 颜色空间标识
 // 返回: *ColorSpace 独立副本，Profile由库管理, error 资源不存在
@@ -165,6 +140,103 @@ func (e *Editor) ImportDrawParam(ctx context.Context, draw DrawParam) (string, e
 		resource := working.resources[len(working.resources)-1]
 		return id, resource.data, make(map[string][]byte), nil
 	})
+}
+
+// ReplaceColorSpace 原子替换颜色空间，保留当前文档内的资源标识并隔离其他文档及历史版本
+// 入参: ctx 取消上下文, id 既有标识, space 新定义，ID和Profile由库管理, profile 完整ICC，nil移除配置
+// 返回: error 位深、调色板、ICC或既有颜色不兼容错误，失败不改变文档，成功支持撤销
+func (e *Editor) ReplaceColorSpace(ctx context.Context, id string, space ColorSpace, profile []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	working := NewEditor()
+	if _, err := working.AddColorSpace(space, profile); err != nil {
+		return err
+	}
+	space = *working.resources[0].space
+	return e.changeResourceStyle(ctx, "ColorSpace", id, func(catalog *resourceCatalog, item ResourceInfo, changes map[string][]byte) error {
+		space.ID = item.ID
+		if err := validateResourceColors(ctx, catalog, space); err != nil {
+			return err
+		}
+		space.Profile = ""
+		if len(profile) != 0 {
+			name := packageAvailableName(catalog.scan.reader, changes, path.Join(e.packageDirectory(), "Res", "ColorSpaces", "ColorSpace_"+item.ID+".icc"))
+			space.Profile = "/" + name
+			changes[name] = bytes.Clone(profile)
+		}
+		data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(nil, nil, []ColorSpace{space}) })
+		if err != nil {
+			return err
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return err
+		}
+		node := root.child("ColorSpaces").child("ColorSpace")
+		fragment, err := editorXMLStandaloneContext(ctx, data[node.start:node.end], node)
+		if err != nil {
+			return err
+		}
+		return replaceResourceStyle(ctx, catalog, item, fragment, changes)
+	})
+}
+
+// ReplaceDrawParam 原子替换共享绘制参数，保留全部既有绑定及图元的局部覆盖
+// 入参: ctx 取消上下文, id 既有标识, draw 新定义，ID由库管理，不接受外部定义引用
+// 返回: error 参数、依赖或循环错误，失败不改变文档，成功隔离其他文档及历史版本并支持撤销
+func (e *Editor) ReplaceDrawParam(ctx context.Context, id string, draw DrawParam) error {
+	return e.changeResourceStyle(ctx, "DrawParam", id, func(catalog *resourceCatalog, item ResourceInfo, changes map[string][]byte) error {
+		working, err := catalog.scan.reader.EditorContext(ctx)
+		if err != nil {
+			return err
+		}
+		if err := working.prepareSourceIDsContext(ctx); err != nil {
+			return err
+		}
+		added, err := working.addDrawParam(ctx, draw)
+		if err != nil {
+			return err
+		}
+		fragment, err := working.drawParamXMLContext(ctx, added)
+		if err != nil {
+			return err
+		}
+		root, err := parseEditorXMLContext(ctx, fragment)
+		if err != nil {
+			return err
+		}
+		fragment, err = editorXMLAttribute(fragment, root, "ID", item.ID)
+		if err != nil {
+			return err
+		}
+		return replaceResourceStyle(ctx, catalog, item, fragment, changes)
+	})
+}
+
+// resourceStyleReference 保存资源依赖及可选的类型要求，不持有XML节点
+type resourceStyleReference struct {
+	key  string
+	kind string
+}
+
+// styleDefinition 从声明原文解码样式定义，补齐继承的XML命名空间
+// 入参: ctx 取消上下文, item 目录条目, target 解码目标
+// 返回: error 取消或XML解析错误
+func (c *resourceCatalog) styleDefinition(ctx context.Context, item ResourceInfo, target any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	entry := c.nodes[item.Kind+"/"+item.ID]
+	data, err := editorXMLStandaloneContext(ctx, entry.file.data[entry.node.start:entry.node.end], entry.node)
+	if err != nil {
+		return err
+	}
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 // importResourceStyle 在独立快照中生成并合并样式声明，更新最大标识并隔离共享资源文件
@@ -337,78 +409,6 @@ func applyResourceStyleParts(ctx context.Context, reader *Reader, maximumID uint
 	parts[entry] = editorPatchXML(content, patches)
 	scan := &editorFontDocument{reader: reader, index: reader.DocumentIndex()}
 	return scan.apply(ctx, parts)
-}
-
-// ReplaceColorSpace 原子替换颜色空间，保留当前文档内的资源标识并隔离其他文档及历史版本
-// 入参: ctx 取消上下文, id 既有标识, space 新定义，ID和Profile由库管理, profile 完整ICC，nil移除配置
-// 返回: error 位深、调色板、ICC或既有颜色不兼容错误，失败不改变文档，成功支持撤销
-func (e *Editor) ReplaceColorSpace(ctx context.Context, id string, space ColorSpace, profile []byte) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	working := NewEditor()
-	if _, err := working.AddColorSpace(space, profile); err != nil {
-		return err
-	}
-	space = *working.resources[0].space
-	return e.changeResourceStyle(ctx, "ColorSpace", id, func(catalog *resourceCatalog, item ResourceInfo, changes map[string][]byte) error {
-		space.ID = item.ID
-		if err := validateResourceColors(ctx, catalog, space); err != nil {
-			return err
-		}
-		space.Profile = ""
-		if len(profile) != 0 {
-			name := packageAvailableName(catalog.scan.reader, changes, path.Join(e.packageDirectory(), "Res", "ColorSpaces", "ColorSpace_"+item.ID+".icc"))
-			space.Profile = "/" + name
-			changes[name] = bytes.Clone(profile)
-		}
-		data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(nil, nil, []ColorSpace{space}) })
-		if err != nil {
-			return err
-		}
-		root, err := parseEditorXMLContext(ctx, data)
-		if err != nil {
-			return err
-		}
-		node := root.child("ColorSpaces").child("ColorSpace")
-		fragment, err := editorXMLStandaloneContext(ctx, data[node.start:node.end], node)
-		if err != nil {
-			return err
-		}
-		return replaceResourceStyle(ctx, catalog, item, fragment, changes)
-	})
-}
-
-// ReplaceDrawParam 原子替换共享绘制参数，保留全部既有绑定及图元的局部覆盖
-// 入参: ctx 取消上下文, id 既有标识, draw 新定义，ID由库管理，不接受外部定义引用
-// 返回: error 参数、依赖或循环错误，失败不改变文档，成功隔离其他文档及历史版本并支持撤销
-func (e *Editor) ReplaceDrawParam(ctx context.Context, id string, draw DrawParam) error {
-	return e.changeResourceStyle(ctx, "DrawParam", id, func(catalog *resourceCatalog, item ResourceInfo, changes map[string][]byte) error {
-		working, err := catalog.scan.reader.EditorContext(ctx)
-		if err != nil {
-			return err
-		}
-		if err := working.prepareSourceIDsContext(ctx); err != nil {
-			return err
-		}
-		added, err := working.addDrawParam(ctx, draw)
-		if err != nil {
-			return err
-		}
-		fragment, err := working.drawParamXMLContext(ctx, added)
-		if err != nil {
-			return err
-		}
-		root, err := parseEditorXMLContext(ctx, fragment)
-		if err != nil {
-			return err
-		}
-		fragment, err = editorXMLAttribute(fragment, root, "ID", item.ID)
-		if err != nil {
-			return err
-		}
-		return replaceResourceStyle(ctx, catalog, item, fragment, changes)
-	})
 }
 
 // changeResourceStyle 在补齐待注册资源的快照中替换定义，依赖与目标仅在全部校验通过后一次提交

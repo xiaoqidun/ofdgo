@@ -29,14 +29,6 @@ type U3DCrossSection struct {
 	Intersection         *[3]float64
 }
 
-// u3dSection 保存相机空间裁剪方程、平面四角与交线颜色
-type u3dSection struct {
-	plane        [4]float64
-	corners      [4]u3dVertex
-	intersection *[3]float64
-	opacity      float64
-}
-
 // PrepareSections 准备剖切缓存，不复制网格或修改调用方参数
 // 入参: sections 世界坐标剖切面
 // 返回: error 参数、场景、预算或取消错误
@@ -128,6 +120,14 @@ func (r *Renderer) PrepareSections(sections []U3DCrossSection) error {
 		}
 	}
 	return nil
+}
+
+// u3dSection 保存相机空间裁剪方程、平面四角与交线颜色
+type u3dSection struct {
+	plane        [4]float64
+	corners      [4]u3dVertex
+	intersection *[3]float64
+	opacity      float64
 }
 
 // sceneDiagonal 计算静态场景世界包围盒的对角线，包含隐藏节点的几何

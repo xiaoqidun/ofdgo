@@ -72,33 +72,6 @@ type Reader struct {
 	encryption                *encryptionState
 }
 
-// pageContentKey 按页面原文及解析模式区分缓存，不包含文档资源和区域继承
-type pageContentKey struct {
-	digest   [32]byte
-	textOnly bool
-}
-
-// documentPageList 仅读取文档中的页面索引，统计页数时不构建其他结构
-type documentPageList struct {
-	Pages Pages
-}
-
-// UnmarshalXML 按文档命名空间读取页面列表，跳过其他文档结构和扩展
-// 入参: d XML解码器, start 起始节点
-// 返回: error 解析错误
-func (list *documentPageList) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	if start.Name.Local != "Document" {
-		return fmt.Errorf("expected Document root, got %s", start.Name.Local)
-	}
-	*list = documentPageList{}
-	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
-		if node.Name.Local == "Pages" {
-			return d.DecodeElement(&list.Pages, &node)
-		}
-		return d.Skip()
-	})
-}
-
 // Close 关闭阅读器持有的文件，重复调用不再关闭底层文件
 // 返回: error 错误信息
 func (r *Reader) Close() error {
@@ -304,83 +277,6 @@ func (r *Reader) DocContext(ctx context.Context) (*Document, error) {
 	return doc, nil
 }
 
-// docStructure 读取文档及资源索引，关联注解和签名由Doc按需解析
-// 返回: *Document 文档结构, error 错误信息
-func (r *Reader) docStructure() (*Document, error) {
-	return r.docStructureContext(context.Background())
-}
-
-// docStructureContext 读取文档及资源索引，取消或失败时保留原阅读状态
-// 入参: ctx 取消上下文
-// 返回: *Document 文档结构, error 读取、解析或取消错误
-func (r *Reader) docStructureContext(ctx context.Context) (*Document, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if r.doc != nil {
-		return r.doc, nil
-	}
-	if r.OFD == nil || r.documentIndex < 0 || r.documentIndex >= len(r.OFD.DocBody) {
-		return nil, fmt.Errorf("no docbody found")
-	}
-	docAttr := r.OFD.DocBody[r.documentIndex]
-	view := *r
-	docRootPath, err := view.DocumentRootContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	view.RootDir = path.Dir(docRootPath)
-	data, err := view.readFileViewContext(ctx, docRootPath)
-	if err != nil {
-		return nil, err
-	}
-	var doc Document
-	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
-	if err := decoder.Decode(&doc); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal document.xml: %w", err)
-	}
-	doc.Signatures = view.versionSignatures(docAttr.Signatures)
-	view.resourcesRead = maps.Clone(r.resourcesRead)
-	view.resourceFiles = maps.Clone(r.resourceFiles)
-	view.ResMap = maps.Clone(r.ResMap)
-	view.mediaCache = maps.Clone(r.mediaCache)
-	view.fontCache = maps.Clone(r.fontCache)
-	view.colorSpaceCache = maps.Clone(r.colorSpaceCache)
-	view.drawParamCache = maps.Clone(r.drawParamCache)
-	view.compositeGraphicUnitCache = maps.Clone(r.compositeGraphicUnitCache)
-	for _, res := range doc.CommonData.PublicRes {
-		if err := view.loadResContext(ctx, res); err != nil {
-			return nil, err
-		}
-	}
-	for _, res := range doc.CommonData.DocumentRes {
-		if err := view.loadResContext(ctx, res); err != nil {
-			return nil, err
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	view.doc, view.relatedPending = &doc, true
-	r.commitDocumentStructure(&view)
-	return r.doc, nil
-}
-
-// commitDocumentStructure 提交已完成的文档读取，保留渲染器共享的资源索引
-// 入参: view 已验证的独立读取状态
-func (r *Reader) commitDocumentStructure(view *Reader) {
-	maps.Copy(r.resourcesRead, view.resourcesRead)
-	maps.Copy(r.resourceFiles, view.resourceFiles)
-	maps.Copy(r.ResMap, view.ResMap)
-	maps.Copy(r.mediaCache, view.mediaCache)
-	maps.Copy(r.fontCache, view.fontCache)
-	maps.Copy(r.colorSpaceCache, view.colorSpaceCache)
-	maps.Copy(r.drawParamCache, view.drawParamCache)
-	maps.Copy(r.compositeGraphicUnitCache, view.compositeGraphicUnitCache)
-	r.documentRoot, r.versionInfo, r.RootDir = view.documentRoot, view.versionInfo, view.RootDir
-	r.doc, r.relatedPending = view.doc, view.relatedPending
-}
-
 // PageContent 获取页面内容
 // 每次返回独立的页面内容，修改后可传入Renderer重绘，不会写回原文件
 // 入参: page 页面对象
@@ -554,61 +450,6 @@ func (r *Reader) AttachmentsContext(ctx context.Context) ([]Attachment, error) {
 	return r.attachmentsContext(ctx, false)
 }
 
-// attachmentsContext 按调用方所有权读取附件清单，库内只读访问不复制完整清单
-// 入参: ctx 取消上下文, readonly 是否允许借用只读清单
-// 返回: []Attachment 附件列表, error 读取、解析或取消错误
-func (r *Reader) attachmentsContext(ctx context.Context, readonly bool) ([]Attachment, error) {
-	doc, err := r.docStructureContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	items := doc.Attachments.Attachment
-	pending := strings.TrimSpace(doc.Attachments.Path) != "" && items == nil
-	if pending {
-		var attachments Attachments
-		partPath, err := r.readDocumentPartContext(ctx, doc.Attachments.Path, &attachments)
-		if err != nil {
-			return nil, err
-		}
-		for i := range attachments.Attachment {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			attachment := &attachments.Attachment[i]
-			if fileLoc := resolveResourcePath(partPath, "", attachment.FileLoc); fileLoc != "" {
-				attachment.FileLoc = "/" + fileLoc
-			}
-		}
-		if attachments.Attachment == nil {
-			attachments.Attachment = []Attachment{}
-		}
-		items = attachments.Attachment
-	}
-	attachments := items
-	if !readonly {
-		if items != nil {
-			attachments = make([]Attachment, len(items))
-		}
-		for i := range items {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			attachments[i] = items[i]
-			if attachments[i].Size != nil {
-				size := *attachments[i].Size
-				attachments[i].Size = &size
-			}
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if pending {
-		doc.Attachments.Attachment = items
-	}
-	return attachments, nil
-}
-
 // OpenAttachment 打开附件文件流，调用方负责关闭，完整读取后校验ZIP数据
 // 入参: id 附件标识
 // 返回: io.ReadCloser 附件文件流, error 错误信息
@@ -771,6 +612,188 @@ func (r *Reader) ExtensionsContext(ctx context.Context) ([]Extension, error) {
 	return doc.Extensions.Extension, nil
 }
 
+// pageContentKey 按页面原文及解析模式区分缓存，不包含文档资源和区域继承
+type pageContentKey struct {
+	digest   [32]byte
+	textOnly bool
+}
+
+// documentPageList 仅读取文档中的页面索引，统计页数时不构建其他结构
+type documentPageList struct {
+	Pages Pages
+}
+
+// UnmarshalXML 按文档命名空间读取页面列表，跳过其他文档结构和扩展
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (list *documentPageList) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Local != "Document" {
+		return fmt.Errorf("expected Document root, got %s", start.Name.Local)
+	}
+	*list = documentPageList{}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local == "Pages" {
+			return d.DecodeElement(&list.Pages, &node)
+		}
+		return d.Skip()
+	})
+}
+
+// limitedEntryReader 限制包内单条目解压字节数，超限时返回明确错误而非静默截断
+type limitedEntryReader struct {
+	io.ReadCloser
+	name      string
+	remaining int64
+	limit     int64
+}
+
+// Read 读取数据并累计单条目解压字节数
+// 入参: data 目标缓冲
+// 返回: int 读取字节数, error 读取或超限错误
+func (l *limitedEntryReader) Read(data []byte) (int, error) {
+	if int64(len(data)) > l.remaining+1 {
+		data = data[:l.remaining+1]
+	}
+	n, err := l.ReadCloser.Read(data)
+	l.remaining -= int64(n)
+	if l.remaining < 0 {
+		return n, fmt.Errorf("package entry %s exceeds size limit (%d bytes)", l.name, l.limit)
+	}
+	return n, err
+}
+
+// docStructure 读取文档及资源索引，关联注解和签名由Doc按需解析
+// 返回: *Document 文档结构, error 错误信息
+func (r *Reader) docStructure() (*Document, error) {
+	return r.docStructureContext(context.Background())
+}
+
+// docStructureContext 读取文档及资源索引，取消或失败时保留原阅读状态
+// 入参: ctx 取消上下文
+// 返回: *Document 文档结构, error 读取、解析或取消错误
+func (r *Reader) docStructureContext(ctx context.Context) (*Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r.doc != nil {
+		return r.doc, nil
+	}
+	if r.OFD == nil || r.documentIndex < 0 || r.documentIndex >= len(r.OFD.DocBody) {
+		return nil, fmt.Errorf("no docbody found")
+	}
+	docAttr := r.OFD.DocBody[r.documentIndex]
+	view := *r
+	docRootPath, err := view.DocumentRootContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	view.RootDir = path.Dir(docRootPath)
+	data, err := view.readFileViewContext(ctx, docRootPath)
+	if err != nil {
+		return nil, err
+	}
+	var doc Document
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
+	if err := decoder.Decode(&doc); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal document.xml: %w", err)
+	}
+	doc.Signatures = view.versionSignatures(docAttr.Signatures)
+	view.resourcesRead = maps.Clone(r.resourcesRead)
+	view.resourceFiles = maps.Clone(r.resourceFiles)
+	view.ResMap = maps.Clone(r.ResMap)
+	view.mediaCache = maps.Clone(r.mediaCache)
+	view.fontCache = maps.Clone(r.fontCache)
+	view.colorSpaceCache = maps.Clone(r.colorSpaceCache)
+	view.drawParamCache = maps.Clone(r.drawParamCache)
+	view.compositeGraphicUnitCache = maps.Clone(r.compositeGraphicUnitCache)
+	for _, res := range doc.CommonData.PublicRes {
+		if err := view.loadResContext(ctx, res); err != nil {
+			return nil, err
+		}
+	}
+	for _, res := range doc.CommonData.DocumentRes {
+		if err := view.loadResContext(ctx, res); err != nil {
+			return nil, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	view.doc, view.relatedPending = &doc, true
+	r.commitDocumentStructure(&view)
+	return r.doc, nil
+}
+
+// commitDocumentStructure 提交已完成的文档读取，保留渲染器共享的资源索引
+// 入参: view 已验证的独立读取状态
+func (r *Reader) commitDocumentStructure(view *Reader) {
+	maps.Copy(r.resourcesRead, view.resourcesRead)
+	maps.Copy(r.resourceFiles, view.resourceFiles)
+	maps.Copy(r.ResMap, view.ResMap)
+	maps.Copy(r.mediaCache, view.mediaCache)
+	maps.Copy(r.fontCache, view.fontCache)
+	maps.Copy(r.colorSpaceCache, view.colorSpaceCache)
+	maps.Copy(r.drawParamCache, view.drawParamCache)
+	maps.Copy(r.compositeGraphicUnitCache, view.compositeGraphicUnitCache)
+	r.documentRoot, r.versionInfo, r.RootDir = view.documentRoot, view.versionInfo, view.RootDir
+	r.doc, r.relatedPending = view.doc, view.relatedPending
+}
+
+// attachmentsContext 按调用方所有权读取附件清单，库内只读访问不复制完整清单
+// 入参: ctx 取消上下文, readonly 是否允许借用只读清单
+// 返回: []Attachment 附件列表, error 读取、解析或取消错误
+func (r *Reader) attachmentsContext(ctx context.Context, readonly bool) ([]Attachment, error) {
+	doc, err := r.docStructureContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	items := doc.Attachments.Attachment
+	pending := strings.TrimSpace(doc.Attachments.Path) != "" && items == nil
+	if pending {
+		var attachments Attachments
+		partPath, err := r.readDocumentPartContext(ctx, doc.Attachments.Path, &attachments)
+		if err != nil {
+			return nil, err
+		}
+		for i := range attachments.Attachment {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			attachment := &attachments.Attachment[i]
+			if fileLoc := resolveResourcePath(partPath, "", attachment.FileLoc); fileLoc != "" {
+				attachment.FileLoc = "/" + fileLoc
+			}
+		}
+		if attachments.Attachment == nil {
+			attachments.Attachment = []Attachment{}
+		}
+		items = attachments.Attachment
+	}
+	attachments := items
+	if !readonly {
+		if items != nil {
+			attachments = make([]Attachment, len(items))
+		}
+		for i := range items {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			attachments[i] = items[i]
+			if attachments[i].Size != nil {
+				size := *attachments[i].Size
+				attachments[i].Size = &size
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if pending {
+		doc.Attachments.Attachment = items
+	}
+	return attachments, nil
+}
+
 // initRoot 读取根节点信息
 // 返回: error 错误信息
 func (r *Reader) initRoot() error {
@@ -927,29 +950,6 @@ func (r *Reader) readFileViewContext(ctx context.Context, name string) ([]byte, 
 		return nil, err
 	}
 	return data, nil
-}
-
-// limitedEntryReader 限制包内单条目解压字节数，超限时返回明确错误而非静默截断
-type limitedEntryReader struct {
-	io.ReadCloser
-	name      string
-	remaining int64
-	limit     int64
-}
-
-// Read 读取数据并累计单条目解压字节数
-// 入参: data 目标缓冲
-// 返回: int 读取字节数, error 读取或超限错误
-func (l *limitedEntryReader) Read(data []byte) (int, error) {
-	if int64(len(data)) > l.remaining+1 {
-		data = data[:l.remaining+1]
-	}
-	n, err := l.ReadCloser.Read(data)
-	l.remaining -= int64(n)
-	if l.remaining < 0 {
-		return n, fmt.Errorf("package entry %s exceeds size limit (%d bytes)", l.name, l.limit)
-	}
-	return n, err
 }
 
 // entryLimit 返回单条目最大解压字节数，0或负值表示不限制

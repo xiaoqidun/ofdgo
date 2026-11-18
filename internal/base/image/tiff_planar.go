@@ -27,37 +27,6 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// tiffPlaneInput 将单分量目录附加到只读视图，像素仍从原始编码读取
-type tiffPlaneInput struct {
-	source, directory []byte
-	position          int64
-	order             binary.ByteOrder
-	ctx               context.Context
-}
-
-// planarTIFFImage 组合颜色与Alpha分量，保留交错步长并按需映射调色板
-type planarTIFFImage struct {
-	planes         []image.Image
-	bounds         image.Rectangle
-	depth          uint32
-	packed         [5]uint32
-	offsets        [5]int
-	alpha          uint32
-	gray           bool
-	cmyk           bool
-	dotRange       [4][2]uint16
-	palette        []color.NRGBA64
-	stride         int
-	invert         bool
-	predictorWidth int
-}
-
-// needsSampleView 判断是否需通过分量视图处理存储布局，供尺寸读取和像素解码共用
-// 返回: bool 是否需要分量视图
-func (layout TIFFLayout) needsSampleView() bool {
-	return layout.mask || layout.auxiliary || layout.photometric == 5 || layout.Planar && layout.Samples > 1 || layout.Samples == 2 || layout.depth < 8 && (layout.Samples > 1 || layout.depth > 1 || layout.predictor == 2)
-}
-
 // DecodedPixelBytes 估算每像素解码缓冲，低位深分量按逐位展开后的字节数计量
 // 返回: uint64 每像素预算字节数
 func (layout TIFFLayout) DecodedPixelBytes() uint64 {
@@ -82,6 +51,251 @@ func (layout TIFFLayout) DecodedPixelBytes() uint64 {
 		bytes = 2
 	}
 	return max(uint64(8), samples*bytes) + profile
+}
+
+// tiffPlaneInput 将单分量目录附加到只读视图，像素仍从原始编码读取
+type tiffPlaneInput struct {
+	source, directory []byte
+	position          int64
+	order             binary.ByteOrder
+	ctx               context.Context
+}
+
+// Read 从组合视图顺序读取
+// 入参: data 接收缓冲
+// 返回: int 字节数, error 读取或取消错误
+func (r *tiffPlaneInput) Read(data []byte) (int, error) {
+	n, err := r.ReadAt(data, r.position)
+	r.position += int64(n)
+	return n, err
+}
+
+// ReadAt 从原始编码或附加目录读取并替换首目录指针
+// 入参: data 接收缓冲, offset 文件偏移
+// 返回: int 字节数, error 读取或取消错误
+func (r *tiffPlaneInput) ReadAt(data []byte, offset int64) (int, error) {
+	if r.ctx != nil {
+		if err := r.ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+	if offset < 0 {
+		return 0, fmt.Errorf("negative TIFF read offset")
+	}
+	start := int64(len(r.source))
+	directory := start + start%2
+	written := 0
+	if offset < start {
+		written = copy(data, r.source[offset:])
+	}
+	if offset+int64(written) == start && start != directory && written < len(data) {
+		data[written] = 0
+		written++
+	}
+	if at := offset + int64(written) - directory; at >= 0 && at < int64(len(r.directory)) {
+		written += copy(data[written:], r.directory[at:])
+	}
+	var pointer [4]byte
+	r.order.PutUint32(pointer[:], uint32(directory))
+	for i, value := range pointer {
+		if at := int64(4+i) - offset; at >= 0 && at < int64(written) {
+			data[at] = value
+		}
+	}
+	if written != len(data) {
+		return written, io.EOF
+	}
+	return written, nil
+}
+
+// planarTIFFImage 组合颜色与Alpha分量，保留交错步长并按需映射调色板
+type planarTIFFImage struct {
+	planes         []image.Image
+	bounds         image.Rectangle
+	depth          uint32
+	packed         [5]uint32
+	offsets        [5]int
+	alpha          uint32
+	gray           bool
+	cmyk           bool
+	dotRange       [4][2]uint16
+	palette        []color.NRGBA64
+	stride         int
+	invert         bool
+	predictorWidth int
+}
+
+// Bounds 返回存储坐标范围
+// 返回: image.Rectangle 图像范围
+func (p *planarTIFFImage) Bounds() image.Rectangle { return p.bounds }
+
+// ColorModel 按透明度类型和最高分量精度返回颜色模型
+// 返回: color.Model 颜色模型
+func (p *planarTIFFImage) ColorModel() color.Model {
+	if p.gray && p.alpha == 0 {
+		if p.depth > 8 {
+			return color.Gray16Model
+		}
+		return color.GrayModel
+	}
+	if p.alpha == 1 {
+		if p.depth > 8 || p.cmyk {
+			return color.RGBA64Model
+		}
+		return color.RGBAModel
+	}
+	if p.depth > 8 || p.cmyk {
+		return color.NRGBA64Model
+	}
+	return color.NRGBAModel
+}
+
+// At 返回组合后的颜色，关联透明度保留预乘语义
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.Color 像素颜色
+func (p *planarTIFFImage) At(x, y int) color.Color {
+	values := p.components(x, y)
+	if p.alpha == 1 {
+		return color.RGBA64{R: values[0], G: values[1], B: values[2], A: values[3]}
+	}
+	return color.NRGBA64{R: values[0], G: values[1], B: values[2], A: values[3]}
+}
+
+// NRGBA64At 读取独立透明度颜色，保留非预乘分量中的隐藏颜色
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.NRGBA64 像素颜色
+func (p *planarTIFFImage) NRGBA64At(x, y int) color.NRGBA64 {
+	values := p.components(x, y)
+	if p.alpha == 1 && values[3] != 65535 {
+		if values[3] == 0 {
+			return color.NRGBA64{}
+		}
+		for i := range 3 {
+			values[i] = uint16(uint32(values[i]) * 65535 / uint32(values[3]))
+		}
+	}
+	return color.NRGBA64{R: values[0], G: values[1], B: values[2], A: values[3]}
+}
+
+// RGBA64At 返回预乘十六位颜色，不分配临时颜色对象
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.RGBA64 像素颜色
+func (p *planarTIFFImage) RGBA64At(x, y int) color.RGBA64 {
+	values := p.components(x, y)
+	if p.alpha != 1 && values[3] != 65535 {
+		for i := range 3 {
+			values[i] = uint16(uint32(values[i]) * uint32(values[3]) / 65535)
+		}
+	}
+	return color.RGBA64{R: values[0], G: values[1], B: values[2], A: values[3]}
+}
+
+// components 直接读取灰度分量，保留原始透明度语义
+// 入参: x 横坐标, y 纵坐标
+// 返回: [4]uint16 红、绿、蓝和透明度分量
+func (p *planarTIFFImage) components(x, y int) [4]uint16 {
+	if !image.Pt(x, y).In(p.bounds) {
+		return [4]uint16{}
+	}
+	if p.cmyk {
+		ink := p.inksAt(x, y)
+		maximum := uint32(65535)
+		if p.alpha == 1 {
+			maximum = uint32(ink[4])
+			if maximum == 0 {
+				return [4]uint16{}
+			}
+		}
+		var components [4]float64
+		for i := range components {
+			components[i] = float64(min(uint32(ink[i]), maximum)) / float64(maximum)
+		}
+		rgb, _ := (&pdfgo.ColorSpace{Model: "DeviceCMYK"}).SRGB(components[:], "")
+		var values [4]uint16
+		for i := range 3 {
+			values[i] = uint16(math.Round(rgb[i] * float64(maximum)))
+		}
+		values[3] = ink[4]
+		return values
+	}
+	values := [4]uint16{0, 0, 0, 65535}
+	count := 3
+	if p.gray || len(p.palette) != 0 {
+		count = 1
+	}
+	if p.alpha != 0 {
+		count++
+	}
+	for i := range count {
+		value := p.sampleAt(i, x, y)
+		if i == 0 && p.invert {
+			value = 65535 - value
+		}
+		if len(p.palette) != 0 && i == 0 {
+			c := p.palette[uint32(value)*uint32(len(p.palette)-1)/65535]
+			values = [4]uint16{c.R, c.G, c.B, c.A}
+		} else if p.gray && i == 0 {
+			values[0], values[1], values[2] = value, value, value
+		} else if p.gray || len(p.palette) != 0 {
+			values[3] = value
+		} else {
+			values[i] = value
+		}
+	}
+	if p.alpha == 1 && values[3] == 0 {
+		return [4]uint16{}
+	}
+	return values
+}
+
+// sampleAt 读取一个分量并扩展为十六位，交错布局复用同一像素缓冲
+// 入参: i 分量序号, x 横坐标, y 纵坐标
+// 返回: uint16 归一化采样值
+func (p *planarTIFFImage) sampleAt(i, x, y int) uint16 {
+	plane, sx := p.planes[0], x
+	if p.stride > 1 {
+		sx = x*p.stride + i + p.offsets[i]
+	} else {
+		plane = p.planes[i]
+	}
+	switch plane := plane.(type) {
+	case *image.Gray:
+		if bits := p.packed[i]; bits != 0 {
+			var value uint16
+			for bit := range int(bits) {
+				value = value<<1 | uint16(plane.GrayAt(sx*int(bits)+bit, y).Y>>7)
+			}
+			return value * (65535 / uint16(1<<bits-1))
+		}
+		return uint16(plane.GrayAt(sx, y).Y) * 257
+	case *image.Gray16:
+		return plane.Gray16At(sx, y).Y
+	default:
+		v, _, _, _ := plane.At(sx, y).RGBA()
+		return uint16(v)
+	}
+}
+
+// inksAt 按网点范围读取CMYK覆盖量，范围外采样按端点截断，透明度独立归一化
+// 入参: x 横坐标, y 纵坐标
+// 返回: [5]uint16 青、品红、黄、黑及透明度
+func (p *planarTIFFImage) inksAt(x, y int) [5]uint16 {
+	values := [5]uint16{0, 0, 0, 0, 65535}
+	for i := range 4 {
+		value := int64(p.sampleAt(i, x, y))
+		low, high := int64(p.dotRange[i][0]), int64(p.dotRange[i][1])
+		values[i] = uint16(max(0, min(65535, (value-low)*65535/(high-low))))
+	}
+	if p.alpha != 0 {
+		values[4] = p.sampleAt(4, x, y)
+	}
+	return values
+}
+
+// needsSampleView 判断是否需通过分量视图处理存储布局，供尺寸读取和像素解码共用
+// 返回: bool 是否需要分量视图
+func (layout TIFFLayout) needsSampleView() bool {
+	return layout.mask || layout.auxiliary || layout.photometric == 5 || layout.Planar && layout.Samples > 1 || layout.Samples == 2 || layout.depth < 8 && (layout.Samples > 1 || layout.depth > 1 || layout.predictor == 2)
 }
 
 // decodeTIFFPixels 按存储方式解码指定目录并统一颜色和显示方向
@@ -590,218 +804,4 @@ func tiffPlaneArray(data []byte, order binary.ByteOrder, entry []byte, first, co
 	}
 	order.PutUint32(entry[4:], count)
 	return entry, nil
-}
-
-// Read 从组合视图顺序读取
-// 入参: data 接收缓冲
-// 返回: int 字节数, error 读取或取消错误
-func (r *tiffPlaneInput) Read(data []byte) (int, error) {
-	n, err := r.ReadAt(data, r.position)
-	r.position += int64(n)
-	return n, err
-}
-
-// ReadAt 从原始编码或附加目录读取并替换首目录指针
-// 入参: data 接收缓冲, offset 文件偏移
-// 返回: int 字节数, error 读取或取消错误
-func (r *tiffPlaneInput) ReadAt(data []byte, offset int64) (int, error) {
-	if r.ctx != nil {
-		if err := r.ctx.Err(); err != nil {
-			return 0, err
-		}
-	}
-	if offset < 0 {
-		return 0, fmt.Errorf("negative TIFF read offset")
-	}
-	start := int64(len(r.source))
-	directory := start + start%2
-	written := 0
-	if offset < start {
-		written = copy(data, r.source[offset:])
-	}
-	if offset+int64(written) == start && start != directory && written < len(data) {
-		data[written] = 0
-		written++
-	}
-	if at := offset + int64(written) - directory; at >= 0 && at < int64(len(r.directory)) {
-		written += copy(data[written:], r.directory[at:])
-	}
-	var pointer [4]byte
-	r.order.PutUint32(pointer[:], uint32(directory))
-	for i, value := range pointer {
-		if at := int64(4+i) - offset; at >= 0 && at < int64(written) {
-			data[at] = value
-		}
-	}
-	if written != len(data) {
-		return written, io.EOF
-	}
-	return written, nil
-}
-
-// Bounds 返回存储坐标范围
-// 返回: image.Rectangle 图像范围
-func (p *planarTIFFImage) Bounds() image.Rectangle { return p.bounds }
-
-// ColorModel 按透明度类型和最高分量精度返回颜色模型
-// 返回: color.Model 颜色模型
-func (p *planarTIFFImage) ColorModel() color.Model {
-	if p.gray && p.alpha == 0 {
-		if p.depth > 8 {
-			return color.Gray16Model
-		}
-		return color.GrayModel
-	}
-	if p.alpha == 1 {
-		if p.depth > 8 || p.cmyk {
-			return color.RGBA64Model
-		}
-		return color.RGBAModel
-	}
-	if p.depth > 8 || p.cmyk {
-		return color.NRGBA64Model
-	}
-	return color.NRGBAModel
-}
-
-// components 直接读取灰度分量，保留原始透明度语义
-// 入参: x 横坐标, y 纵坐标
-// 返回: [4]uint16 红、绿、蓝和透明度分量
-func (p *planarTIFFImage) components(x, y int) [4]uint16 {
-	if !image.Pt(x, y).In(p.bounds) {
-		return [4]uint16{}
-	}
-	if p.cmyk {
-		ink := p.inksAt(x, y)
-		maximum := uint32(65535)
-		if p.alpha == 1 {
-			maximum = uint32(ink[4])
-			if maximum == 0 {
-				return [4]uint16{}
-			}
-		}
-		var components [4]float64
-		for i := range components {
-			components[i] = float64(min(uint32(ink[i]), maximum)) / float64(maximum)
-		}
-		rgb, _ := (&pdfgo.ColorSpace{Model: "DeviceCMYK"}).SRGB(components[:], "")
-		var values [4]uint16
-		for i := range 3 {
-			values[i] = uint16(math.Round(rgb[i] * float64(maximum)))
-		}
-		values[3] = ink[4]
-		return values
-	}
-	values := [4]uint16{0, 0, 0, 65535}
-	count := 3
-	if p.gray || len(p.palette) != 0 {
-		count = 1
-	}
-	if p.alpha != 0 {
-		count++
-	}
-	for i := range count {
-		value := p.sampleAt(i, x, y)
-		if i == 0 && p.invert {
-			value = 65535 - value
-		}
-		if len(p.palette) != 0 && i == 0 {
-			c := p.palette[uint32(value)*uint32(len(p.palette)-1)/65535]
-			values = [4]uint16{c.R, c.G, c.B, c.A}
-		} else if p.gray && i == 0 {
-			values[0], values[1], values[2] = value, value, value
-		} else if p.gray || len(p.palette) != 0 {
-			values[3] = value
-		} else {
-			values[i] = value
-		}
-	}
-	if p.alpha == 1 && values[3] == 0 {
-		return [4]uint16{}
-	}
-	return values
-}
-
-// sampleAt 读取一个分量并扩展为十六位，交错布局复用同一像素缓冲
-// 入参: i 分量序号, x 横坐标, y 纵坐标
-// 返回: uint16 归一化采样值
-func (p *planarTIFFImage) sampleAt(i, x, y int) uint16 {
-	plane, sx := p.planes[0], x
-	if p.stride > 1 {
-		sx = x*p.stride + i + p.offsets[i]
-	} else {
-		plane = p.planes[i]
-	}
-	switch plane := plane.(type) {
-	case *image.Gray:
-		if bits := p.packed[i]; bits != 0 {
-			var value uint16
-			for bit := range int(bits) {
-				value = value<<1 | uint16(plane.GrayAt(sx*int(bits)+bit, y).Y>>7)
-			}
-			return value * (65535 / uint16(1<<bits-1))
-		}
-		return uint16(plane.GrayAt(sx, y).Y) * 257
-	case *image.Gray16:
-		return plane.Gray16At(sx, y).Y
-	default:
-		v, _, _, _ := plane.At(sx, y).RGBA()
-		return uint16(v)
-	}
-}
-
-// inksAt 按网点范围读取CMYK覆盖量，范围外采样按端点截断，透明度独立归一化
-// 入参: x 横坐标, y 纵坐标
-// 返回: [5]uint16 青、品红、黄、黑及透明度
-func (p *planarTIFFImage) inksAt(x, y int) [5]uint16 {
-	values := [5]uint16{0, 0, 0, 0, 65535}
-	for i := range 4 {
-		value := int64(p.sampleAt(i, x, y))
-		low, high := int64(p.dotRange[i][0]), int64(p.dotRange[i][1])
-		values[i] = uint16(max(0, min(65535, (value-low)*65535/(high-low))))
-	}
-	if p.alpha != 0 {
-		values[4] = p.sampleAt(4, x, y)
-	}
-	return values
-}
-
-// At 返回组合后的颜色，关联透明度保留预乘语义
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.Color 像素颜色
-func (p *planarTIFFImage) At(x, y int) color.Color {
-	values := p.components(x, y)
-	if p.alpha == 1 {
-		return color.RGBA64{R: values[0], G: values[1], B: values[2], A: values[3]}
-	}
-	return color.NRGBA64{R: values[0], G: values[1], B: values[2], A: values[3]}
-}
-
-// NRGBA64At 读取独立透明度颜色，保留非预乘分量中的隐藏颜色
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.NRGBA64 像素颜色
-func (p *planarTIFFImage) NRGBA64At(x, y int) color.NRGBA64 {
-	values := p.components(x, y)
-	if p.alpha == 1 && values[3] != 65535 {
-		if values[3] == 0 {
-			return color.NRGBA64{}
-		}
-		for i := range 3 {
-			values[i] = uint16(uint32(values[i]) * 65535 / uint32(values[3]))
-		}
-	}
-	return color.NRGBA64{R: values[0], G: values[1], B: values[2], A: values[3]}
-}
-
-// RGBA64At 返回预乘十六位颜色，不分配临时颜色对象
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.RGBA64 像素颜色
-func (p *planarTIFFImage) RGBA64At(x, y int) color.RGBA64 {
-	values := p.components(x, y)
-	if p.alpha != 1 && values[3] != 65535 {
-		for i := range 3 {
-			values[i] = uint16(uint32(values[i]) * uint32(values[3]) / 65535)
-		}
-	}
-	return color.RGBA64{R: values[0], G: values[1], B: values[2], A: values[3]}
 }

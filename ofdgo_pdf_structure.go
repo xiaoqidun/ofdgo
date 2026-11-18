@@ -67,6 +67,168 @@ type pdfStructureBindings struct {
 	objects   map[pdfStructureObject][]StructureReference
 }
 
+// objectReferences 汇总注解及XObject调用对应的已提交图元
+// 入参: ctx 取消上下文
+// 返回: map[pdfStructureObject][]StructureReference 对象引用索引, error 来源或取消错误
+func (b *pdfStructureBindings) objectReferences(ctx context.Context) (map[pdfStructureObject][]StructureReference, error) {
+	result := make(map[pdfStructureObject][]StructureReference)
+	sets := make(map[pdfStructureObject]*pdfStructureReferenceSet)
+	appendReferences := func(key pdfStructureObject, sources []StructureReference) error {
+		set := sets[key]
+		if set == nil {
+			set = &pdfStructureReferenceSet{}
+			sets[key] = set
+		}
+		if err := set.append(ctx, sources); err != nil {
+			return err
+		}
+		result[key] = set.references
+		return nil
+	}
+	for key, refs := range b.objects {
+		if err := appendReferences(key, refs); err != nil {
+			return nil, err
+		}
+	}
+	for _, sequence := range b.order {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if sequence.Object == (pdfgo.Reference{}) {
+			continue
+		}
+		if sequence.Reader == nil || sequence.Page == nil {
+			return nil, fmt.Errorf("missing PDF object source")
+		}
+		key := pdfStructureObject{reader: sequence.Reader, page: sequence.Page.Reference, object: sequence.Object}
+		if err := appendReferences(key, b.sequences[sequence]); err != nil {
+			return nil, err
+		}
+	}
+	return result, ctx.Err()
+}
+
+// observe 保存已读取的标记区段，不登记尚未提交的图元
+// 入参: sequence 来源区段
+func (b *pdfStructureBindings) observe(sequence *pdfgo.ContentSequence) {
+	if sequence != nil && sequence.Properties["MCID"] != nil {
+		b.contents = append(b.contents, sequence)
+	}
+}
+
+// contentProperties 保存区段标签及原始属性，重复调用须具有相同内容
+// 入参: values 类型化属性编码器
+// 返回: map[pdfStructureContent]StructureNode 属性索引, error 属性或取消错误
+func (b *pdfStructureBindings) contentProperties(values *pdfStructureValues) (map[pdfStructureContent]StructureNode, error) {
+	result := make(map[pdfStructureContent]StructureNode)
+	seen := make(map[*pdfgo.ContentSequence]bool)
+	for _, sequences := range [][]*pdfgo.ContentSequence{b.contents, b.order} {
+		for _, sequence := range sequences {
+			if err := values.ctx.Err(); err != nil {
+				return nil, err
+			}
+			if seen[sequence] || sequence.Reader != values.reader {
+				continue
+			}
+			seen[sequence] = true
+			key, ok, err := pdfStructureContentKey(sequence)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+			node := StructureNode{Name: "MarkedContent", Namespace: pdfStructureNamespace, Attributes: pdfStructureAttribute("Tag", string(sequence.Tag))}
+			properties := sequence.Properties
+			if _, ok := properties["MCID"].(pdfgo.Integer); ok {
+				properties = maps.Clone(properties)
+				delete(properties, "MCID")
+			}
+			if len(properties) != 0 {
+				property, err := values.encode(properties, 0)
+				if err != nil {
+					return nil, err
+				}
+				node.Children = append(node.Children, property)
+			}
+			if previous, ok := result[key]; ok {
+				equal, err := pdfStructurePropertiesEqual(values.ctx, previous, node)
+				if err != nil {
+					return nil, err
+				}
+				if !equal {
+					return nil, fmt.Errorf("conflicting PDF marked content properties")
+				}
+				continue
+			}
+			result[key] = node
+		}
+	}
+	return result, values.ctx.Err()
+}
+
+// contentReferences 按来源解释MCID并汇总重复调用的目标图元
+// 入参: ctx 取消上下文
+// 返回: pdfStructureReferences 内容引用索引, error 属性或取消错误
+func (b *pdfStructureBindings) contentReferences(ctx context.Context) (pdfStructureReferences, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	result := make(pdfStructureReferences)
+	sets := make(map[pdfStructureContent]*pdfStructureReferenceSet)
+	for _, sequence := range b.order {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		key, ok, err := pdfStructureContentKey(sequence)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		set := sets[key]
+		if set == nil {
+			set = &pdfStructureReferenceSet{}
+			sets[key] = set
+		}
+		if err := set.append(ctx, b.sequences[sequence]); err != nil {
+			return nil, err
+		}
+		result[key] = set.references
+	}
+	return result, ctx.Err()
+}
+
+// append 在页面提交成功后登记已分配的图元标识
+// 入参: pageID 页面标识, objects 已分配标识的对象, bindings 已准备的绑定位置
+func (b *pdfStructureBindings) append(pageID string, objects []GraphicObject, bindings []pdfStructureBinding) {
+	for _, binding := range bindings {
+		last := b.reference(pageID, binding.sequence)
+		for _, object := range objects[binding.start:binding.end] {
+			last.ObjectIDs = append(last.ObjectIDs, editorObjectID(object))
+		}
+	}
+}
+
+// reference 返回已提交来源区段在页面中的引用
+// 入参: pageID 页面标识, sequence 来源区段
+// 返回: *StructureReference 页面引用
+func (b *pdfStructureBindings) reference(pageID string, sequence *pdfgo.ContentSequence) *StructureReference {
+	if b.sequences == nil {
+		b.sequences = make(map[*pdfgo.ContentSequence][]StructureReference)
+	}
+	refs := b.sequences[sequence]
+	if len(refs) == 0 {
+		b.order = append(b.order, sequence)
+	}
+	if len(refs) == 0 || refs[len(refs)-1].PageID != pageID {
+		refs = append(refs, StructureReference{PageID: pageID})
+	}
+	b.sequences[sequence] = refs
+	return &refs[len(refs)-1]
+}
+
 // pdfStructureObject 隔离不同文件及页面的整对象引用
 type pdfStructureObject struct {
 	reader *pdfgo.Reader
@@ -92,11 +254,95 @@ type pdfStructureContent struct {
 // pdfStructureReferences 保存内容引用与已提交图元的索引
 type pdfStructureReferences map[pdfStructureContent][]StructureReference
 
+// targets 解析结构树中的内容流引用，不将未绘制内容绑定到其他同号区段
+// 入参: ctx 取消上下文, reader 来源阅读器, item 标记内容引用
+// 返回: []StructureReference 独立的目标引用, error 来源或取消错误
+func (refs pdfStructureReferences) targets(ctx context.Context, reader *pdfgo.Reader, item pdfgo.StructureItem) ([]StructureReference, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if item.Type != "MCR" || item.MCID < 0 || item.Page == (pdfgo.Reference{}) {
+		return nil, fmt.Errorf("invalid PDF marked content reference")
+	}
+	key := pdfStructureContent{reader: reader, page: item.Page, mcid: item.MCID}
+	if item.Stream != (pdfgo.Reference{}) {
+		value, err := reader.Resolve(item.Stream)
+		if err != nil {
+			return nil, err
+		}
+		var ok bool
+		key.stream, ok = value.(*pdfgo.Stream)
+		if !ok {
+			return nil, fmt.Errorf("invalid PDF marked content stream")
+		}
+	}
+	var result []StructureReference
+	for _, ref := range refs[key] {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		copy := StructureReference{PageID: ref.PageID}
+		for _, id := range ref.ObjectIDs {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			copy.ObjectIDs = append(copy.ObjectIDs, id)
+		}
+		result = append(result, copy)
+	}
+	return result, ctx.Err()
+}
+
 // pdfStructureReferenceSet 按首次出现顺序归并页内图元，单页时不建立页索引
 type pdfStructureReferenceSet struct {
 	references []StructureReference
 	pages      map[string]int
 	seen       map[[2]string]bool
+}
+
+// append 归并引用并去重，不持有输入切片
+// 入参: ctx 取消上下文, sources 来源引用
+// 返回: error 取消错误
+func (s *pdfStructureReferenceSet) append(ctx context.Context, sources []StructureReference) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, source := range sources {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		index := -1
+		if last := len(s.references) - 1; last >= 0 && s.references[last].PageID == source.PageID {
+			index = last
+		} else if page, ok := s.pages[source.PageID]; ok {
+			index = page
+		}
+		for _, id := range source.ObjectIDs {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			key := [2]string{source.PageID, id}
+			if s.seen[key] {
+				continue
+			}
+			if s.seen == nil {
+				s.seen = make(map[[2]string]bool)
+			}
+			s.seen[key] = true
+			if index < 0 {
+				index = len(s.references)
+				if index == 1 {
+					s.pages = map[string]int{s.references[0].PageID: 0}
+				}
+				if s.pages != nil {
+					s.pages[source.PageID] = index
+				}
+				s.references = append(s.references, StructureReference{PageID: source.PageID})
+			}
+			s.references[index].ObjectIDs = append(s.references[index].ObjectIDs, id)
+		}
+	}
+	return ctx.Err()
 }
 
 // pdfStructureBinding 保存一个来源区段对应的连续对象位置
@@ -114,6 +360,124 @@ type pdfStructureValues struct {
 	elements  map[pdfgo.Reference]bool
 	objects   []StructureNode
 	auxiliary bool
+}
+
+// extensions 保留未投影字段，字段名不作为XML元素名称
+// 入参: dictionary 来源字典, known 已投影字段
+// 返回: []StructureNode 扩展字段, error 读取或取消错误
+func (v *pdfStructureValues) extensions(dictionary pdfgo.Dictionary, known []pdfgo.Name) ([]StructureNode, error) {
+	var result []StructureNode
+	for _, key := range slices.Sorted(maps.Keys(dictionary)) {
+		if err := v.ctx.Err(); err != nil {
+			return nil, err
+		}
+		if slices.Contains(known, key) {
+			continue
+		}
+		value, err := v.encode(dictionary[key], 0)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, StructureNode{Name: "Extension", Namespace: pdfStructureNamespace, Attributes: pdfStructureAttribute("Key", string(key)), Children: []StructureNode{value}})
+	}
+	return result, v.ctx.Err()
+}
+
+// encode 按原始类型保存属性对象，间接对象仅展开一次，字符串保留原始字节
+// 入参: object 属性对象, depth 当前值层级
+// 返回: StructureNode 类型化属性值, error 读取、层级或取消错误
+func (v *pdfStructureValues) encode(object pdfgo.Object, depth int) (StructureNode, error) {
+	node := StructureNode{Namespace: pdfStructureNamespace}
+	if err := v.ctx.Err(); err != nil {
+		return node, err
+	}
+	if depth > 128 && !v.auxiliary {
+		return node, fmt.Errorf("PDF structure attribute limit exceeded")
+	}
+	switch value := object.(type) {
+	case nil:
+		node.Name = "Null"
+	case pdfgo.Boolean:
+		node.Name, node.Text = "Boolean", strconv.FormatBool(bool(value))
+	case pdfgo.Integer:
+		node.Name, node.Text = "Integer", strconv.FormatInt(int64(value), 10)
+	case pdfgo.Real:
+		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+			return node, fmt.Errorf("invalid PDF structure real")
+		}
+		node.Name, node.Text = "Real", strconv.FormatFloat(float64(value), 'g', -1, 64)
+	case pdfgo.Name:
+		node.Name = "Name"
+		node.Attributes = pdfStructureAttribute("Value", string(value))
+	case pdfgo.String:
+		node.Name, node.Text = "String", base64.StdEncoding.EncodeToString(value)
+		node.Attributes = []StructureAttribute{{Name: "Encoding", Value: "base64"}}
+	case pdfgo.Reference:
+		node.Name = "Reference"
+		node.Attributes = []StructureAttribute{{Name: "Number", Value: strconv.FormatInt(value.Number, 10)}, {Name: "Generation", Value: strconv.FormatInt(value.Generation, 10)}}
+		if v.elements[value] {
+			node.Name = "ElementReference"
+			return node, v.ctx.Err()
+		}
+		if !v.seen[value] {
+			v.seen[value] = true
+			resolved, err := v.reader.Resolve(value)
+			if err != nil {
+				if v.auxiliary && pdfAuxiliaryError(err) {
+					node.Attributes = append(node.Attributes, pdfStructureAttribute("Error", err.Error())...)
+					return node, nil
+				}
+				return node, err
+			}
+			if v.auxiliary {
+				if dict, ok := resolved.(pdfgo.Dictionary); ok && (dict["Type"] == pdfgo.Name("Page") || dict["Type"] == pdfgo.Name("Pages") || dict["Type"] == pdfgo.Name("Catalog")) {
+					return node, nil
+				}
+			}
+			child, err := v.encode(resolved, depth+1)
+			if err != nil {
+				return node, err
+			}
+			v.objects = append(v.objects, StructureNode{Name: "Indirect", Namespace: pdfStructureNamespace, Attributes: slices.Clone(node.Attributes), Children: []StructureNode{child}})
+		}
+	case pdfgo.Array:
+		node.Name = "Array"
+		for _, object := range value {
+			child, err := v.encode(object, depth+1)
+			if err != nil {
+				return node, err
+			}
+			node.Children = append(node.Children, child)
+		}
+	case pdfgo.Dictionary:
+		node.Name = "Dictionary"
+		for _, key := range slices.Sorted(maps.Keys(value)) {
+			child, err := v.encode(value[key], depth+1)
+			if err != nil {
+				return node, err
+			}
+			node.Children = append(node.Children, StructureNode{Name: "Entry", Namespace: pdfStructureNamespace, Attributes: pdfStructureAttribute("Key", string(key)), Children: []StructureNode{child}})
+		}
+	case *pdfgo.Stream:
+		node.Name = "Stream"
+		dictionary, err := v.encode(value.Dictionary, depth+1)
+		if err != nil {
+			return node, err
+		}
+		data := value.Data
+		dataName := "RawData"
+		if !v.auxiliary {
+			dataName = "DecodedData"
+			data, err = value.DecodeContext(v.ctx)
+		}
+		if err != nil {
+			return node, err
+		}
+		node.Children = []StructureNode{dictionary, {Name: dataName, Namespace: pdfStructureNamespace, Attributes: []StructureAttribute{{Name: "Encoding", Value: "base64"}}, Text: base64.StdEncoding.EncodeToString(data)}}
+	default:
+		return node, fmt.Errorf("invalid PDF structure attribute value")
+	}
+	return node, v.ctx.Err()
 }
 
 // pdfMetadataValue 保留字段是否声明及其来源，空文本不作为缺省值
@@ -513,124 +877,6 @@ func pdfStructureSource(ref pdfgo.Reference) []StructureAttribute {
 	return []StructureAttribute{{Name: "SourceNumber", Value: strconv.FormatInt(ref.Number, 10)}, {Name: "SourceGeneration", Value: strconv.FormatInt(ref.Generation, 10)}}
 }
 
-// extensions 保留未投影字段，字段名不作为XML元素名称
-// 入参: dictionary 来源字典, known 已投影字段
-// 返回: []StructureNode 扩展字段, error 读取或取消错误
-func (v *pdfStructureValues) extensions(dictionary pdfgo.Dictionary, known []pdfgo.Name) ([]StructureNode, error) {
-	var result []StructureNode
-	for _, key := range slices.Sorted(maps.Keys(dictionary)) {
-		if err := v.ctx.Err(); err != nil {
-			return nil, err
-		}
-		if slices.Contains(known, key) {
-			continue
-		}
-		value, err := v.encode(dictionary[key], 0)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, StructureNode{Name: "Extension", Namespace: pdfStructureNamespace, Attributes: pdfStructureAttribute("Key", string(key)), Children: []StructureNode{value}})
-	}
-	return result, v.ctx.Err()
-}
-
-// encode 按原始类型保存属性对象，间接对象仅展开一次，字符串保留原始字节
-// 入参: object 属性对象, depth 当前值层级
-// 返回: StructureNode 类型化属性值, error 读取、层级或取消错误
-func (v *pdfStructureValues) encode(object pdfgo.Object, depth int) (StructureNode, error) {
-	node := StructureNode{Namespace: pdfStructureNamespace}
-	if err := v.ctx.Err(); err != nil {
-		return node, err
-	}
-	if depth > 128 && !v.auxiliary {
-		return node, fmt.Errorf("PDF structure attribute limit exceeded")
-	}
-	switch value := object.(type) {
-	case nil:
-		node.Name = "Null"
-	case pdfgo.Boolean:
-		node.Name, node.Text = "Boolean", strconv.FormatBool(bool(value))
-	case pdfgo.Integer:
-		node.Name, node.Text = "Integer", strconv.FormatInt(int64(value), 10)
-	case pdfgo.Real:
-		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
-			return node, fmt.Errorf("invalid PDF structure real")
-		}
-		node.Name, node.Text = "Real", strconv.FormatFloat(float64(value), 'g', -1, 64)
-	case pdfgo.Name:
-		node.Name = "Name"
-		node.Attributes = pdfStructureAttribute("Value", string(value))
-	case pdfgo.String:
-		node.Name, node.Text = "String", base64.StdEncoding.EncodeToString(value)
-		node.Attributes = []StructureAttribute{{Name: "Encoding", Value: "base64"}}
-	case pdfgo.Reference:
-		node.Name = "Reference"
-		node.Attributes = []StructureAttribute{{Name: "Number", Value: strconv.FormatInt(value.Number, 10)}, {Name: "Generation", Value: strconv.FormatInt(value.Generation, 10)}}
-		if v.elements[value] {
-			node.Name = "ElementReference"
-			return node, v.ctx.Err()
-		}
-		if !v.seen[value] {
-			v.seen[value] = true
-			resolved, err := v.reader.Resolve(value)
-			if err != nil {
-				if v.auxiliary && pdfAuxiliaryError(err) {
-					node.Attributes = append(node.Attributes, pdfStructureAttribute("Error", err.Error())...)
-					return node, nil
-				}
-				return node, err
-			}
-			if v.auxiliary {
-				if dict, ok := resolved.(pdfgo.Dictionary); ok && (dict["Type"] == pdfgo.Name("Page") || dict["Type"] == pdfgo.Name("Pages") || dict["Type"] == pdfgo.Name("Catalog")) {
-					return node, nil
-				}
-			}
-			child, err := v.encode(resolved, depth+1)
-			if err != nil {
-				return node, err
-			}
-			v.objects = append(v.objects, StructureNode{Name: "Indirect", Namespace: pdfStructureNamespace, Attributes: slices.Clone(node.Attributes), Children: []StructureNode{child}})
-		}
-	case pdfgo.Array:
-		node.Name = "Array"
-		for _, object := range value {
-			child, err := v.encode(object, depth+1)
-			if err != nil {
-				return node, err
-			}
-			node.Children = append(node.Children, child)
-		}
-	case pdfgo.Dictionary:
-		node.Name = "Dictionary"
-		for _, key := range slices.Sorted(maps.Keys(value)) {
-			child, err := v.encode(value[key], depth+1)
-			if err != nil {
-				return node, err
-			}
-			node.Children = append(node.Children, StructureNode{Name: "Entry", Namespace: pdfStructureNamespace, Attributes: pdfStructureAttribute("Key", string(key)), Children: []StructureNode{child}})
-		}
-	case *pdfgo.Stream:
-		node.Name = "Stream"
-		dictionary, err := v.encode(value.Dictionary, depth+1)
-		if err != nil {
-			return node, err
-		}
-		data := value.Data
-		dataName := "RawData"
-		if !v.auxiliary {
-			dataName = "DecodedData"
-			data, err = value.DecodeContext(v.ctx)
-		}
-		if err != nil {
-			return node, err
-		}
-		node.Children = []StructureNode{dictionary, {Name: dataName, Namespace: pdfStructureNamespace, Attributes: []StructureAttribute{{Name: "Encoding", Value: "base64"}}, Text: base64.StdEncoding.EncodeToString(data)}}
-	default:
-		return node, fmt.Errorf("invalid PDF structure attribute value")
-	}
-	return node, v.ctx.Err()
-}
-
 // pdfCatalogObject 获取文档级原始字段，不预先解析字段值
 // 入参: name 目录字段名
 // 返回: pdfgo.Object 原始字段, error 目录读取错误
@@ -702,94 +948,6 @@ func pdfStructureAttribute(name, value string) []StructureAttribute {
 	return []StructureAttribute{{Name: name, Value: base64.StdEncoding.EncodeToString([]byte(value))}, {Name: name + "Encoding", Value: "base64"}}
 }
 
-// targets 解析结构树中的内容流引用，不将未绘制内容绑定到其他同号区段
-// 入参: ctx 取消上下文, reader 来源阅读器, item 标记内容引用
-// 返回: []StructureReference 独立的目标引用, error 来源或取消错误
-func (refs pdfStructureReferences) targets(ctx context.Context, reader *pdfgo.Reader, item pdfgo.StructureItem) ([]StructureReference, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if item.Type != "MCR" || item.MCID < 0 || item.Page == (pdfgo.Reference{}) {
-		return nil, fmt.Errorf("invalid PDF marked content reference")
-	}
-	key := pdfStructureContent{reader: reader, page: item.Page, mcid: item.MCID}
-	if item.Stream != (pdfgo.Reference{}) {
-		value, err := reader.Resolve(item.Stream)
-		if err != nil {
-			return nil, err
-		}
-		var ok bool
-		key.stream, ok = value.(*pdfgo.Stream)
-		if !ok {
-			return nil, fmt.Errorf("invalid PDF marked content stream")
-		}
-	}
-	var result []StructureReference
-	for _, ref := range refs[key] {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		copy := StructureReference{PageID: ref.PageID}
-		for _, id := range ref.ObjectIDs {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			copy.ObjectIDs = append(copy.ObjectIDs, id)
-		}
-		result = append(result, copy)
-	}
-	return result, ctx.Err()
-}
-
-// objectReferences 汇总注解及XObject调用对应的已提交图元
-// 入参: ctx 取消上下文
-// 返回: map[pdfStructureObject][]StructureReference 对象引用索引, error 来源或取消错误
-func (b *pdfStructureBindings) objectReferences(ctx context.Context) (map[pdfStructureObject][]StructureReference, error) {
-	result := make(map[pdfStructureObject][]StructureReference)
-	sets := make(map[pdfStructureObject]*pdfStructureReferenceSet)
-	appendReferences := func(key pdfStructureObject, sources []StructureReference) error {
-		set := sets[key]
-		if set == nil {
-			set = &pdfStructureReferenceSet{}
-			sets[key] = set
-		}
-		if err := set.append(ctx, sources); err != nil {
-			return err
-		}
-		result[key] = set.references
-		return nil
-	}
-	for key, refs := range b.objects {
-		if err := appendReferences(key, refs); err != nil {
-			return nil, err
-		}
-	}
-	for _, sequence := range b.order {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if sequence.Object == (pdfgo.Reference{}) {
-			continue
-		}
-		if sequence.Reader == nil || sequence.Page == nil {
-			return nil, fmt.Errorf("missing PDF object source")
-		}
-		key := pdfStructureObject{reader: sequence.Reader, page: sequence.Page.Reference, object: sequence.Object}
-		if err := appendReferences(key, b.sequences[sequence]); err != nil {
-			return nil, err
-		}
-	}
-	return result, ctx.Err()
-}
-
-// observe 保存已读取的标记区段，不登记尚未提交的图元
-// 入参: sequence 来源区段
-func (b *pdfStructureBindings) observe(sequence *pdfgo.ContentSequence) {
-	if sequence != nil && sequence.Properties["MCID"] != nil {
-		b.contents = append(b.contents, sequence)
-	}
-}
-
 // pdfStructureContentKey 解析来源区段中的MCID，空值表示非结构标记
 // 入参: sequence 来源区段
 // 返回: pdfStructureContent 来源键, bool 是否具有MCID, error 属性或来源错误
@@ -813,57 +971,6 @@ func pdfStructureContentKey(sequence *pdfgo.ContentSequence) (pdfStructureConten
 	return pdfStructureContent{reader: sequence.Reader, page: sequence.Page.Reference, stream: sequence.Stream, mcid: int64(mcid)}, true, nil
 }
 
-// contentProperties 保存区段标签及原始属性，重复调用须具有相同内容
-// 入参: values 类型化属性编码器
-// 返回: map[pdfStructureContent]StructureNode 属性索引, error 属性或取消错误
-func (b *pdfStructureBindings) contentProperties(values *pdfStructureValues) (map[pdfStructureContent]StructureNode, error) {
-	result := make(map[pdfStructureContent]StructureNode)
-	seen := make(map[*pdfgo.ContentSequence]bool)
-	for _, sequences := range [][]*pdfgo.ContentSequence{b.contents, b.order} {
-		for _, sequence := range sequences {
-			if err := values.ctx.Err(); err != nil {
-				return nil, err
-			}
-			if seen[sequence] || sequence.Reader != values.reader {
-				continue
-			}
-			seen[sequence] = true
-			key, ok, err := pdfStructureContentKey(sequence)
-			if err != nil {
-				return nil, err
-			}
-			if !ok {
-				continue
-			}
-			node := StructureNode{Name: "MarkedContent", Namespace: pdfStructureNamespace, Attributes: pdfStructureAttribute("Tag", string(sequence.Tag))}
-			properties := sequence.Properties
-			if _, ok := properties["MCID"].(pdfgo.Integer); ok {
-				properties = maps.Clone(properties)
-				delete(properties, "MCID")
-			}
-			if len(properties) != 0 {
-				property, err := values.encode(properties, 0)
-				if err != nil {
-					return nil, err
-				}
-				node.Children = append(node.Children, property)
-			}
-			if previous, ok := result[key]; ok {
-				equal, err := pdfStructurePropertiesEqual(values.ctx, previous, node)
-				if err != nil {
-					return nil, err
-				}
-				if !equal {
-					return nil, fmt.Errorf("conflicting PDF marked content properties")
-				}
-				continue
-			}
-			result[key] = node
-		}
-	}
-	return result, values.ctx.Err()
-}
-
 // pdfStructurePropertiesEqual 比较类型化属性树，不生成临时XML
 // 入参: ctx 取消上下文, left 原属性, right 待比较属性
 // 返回: bool 属性是否一致, error 取消错误
@@ -881,84 +988,6 @@ func pdfStructurePropertiesEqual(ctx context.Context, left, right StructureNode)
 		}
 	}
 	return true, nil
-}
-
-// contentReferences 按来源解释MCID并汇总重复调用的目标图元
-// 入参: ctx 取消上下文
-// 返回: pdfStructureReferences 内容引用索引, error 属性或取消错误
-func (b *pdfStructureBindings) contentReferences(ctx context.Context) (pdfStructureReferences, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	result := make(pdfStructureReferences)
-	sets := make(map[pdfStructureContent]*pdfStructureReferenceSet)
-	for _, sequence := range b.order {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		key, ok, err := pdfStructureContentKey(sequence)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			continue
-		}
-		set := sets[key]
-		if set == nil {
-			set = &pdfStructureReferenceSet{}
-			sets[key] = set
-		}
-		if err := set.append(ctx, b.sequences[sequence]); err != nil {
-			return nil, err
-		}
-		result[key] = set.references
-	}
-	return result, ctx.Err()
-}
-
-// append 归并引用并去重，不持有输入切片
-// 入参: ctx 取消上下文, sources 来源引用
-// 返回: error 取消错误
-func (s *pdfStructureReferenceSet) append(ctx context.Context, sources []StructureReference) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	for _, source := range sources {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		index := -1
-		if last := len(s.references) - 1; last >= 0 && s.references[last].PageID == source.PageID {
-			index = last
-		} else if page, ok := s.pages[source.PageID]; ok {
-			index = page
-		}
-		for _, id := range source.ObjectIDs {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			key := [2]string{source.PageID, id}
-			if s.seen[key] {
-				continue
-			}
-			if s.seen == nil {
-				s.seen = make(map[[2]string]bool)
-			}
-			s.seen[key] = true
-			if index < 0 {
-				index = len(s.references)
-				if index == 1 {
-					s.pages = map[string]int{s.references[0].PageID: 0}
-				}
-				if s.pages != nil {
-					s.pages[source.PageID] = index
-				}
-				s.references = append(s.references, StructureReference{PageID: source.PageID})
-			}
-			s.references[index].ObjectIDs = append(s.references[index].ObjectIDs, id)
-		}
-	}
-	return ctx.Err()
 }
 
 // structureBindings 在提交前收集直接来源及含MCID的外层区段
@@ -1009,35 +1038,6 @@ func (buffer *pdfObjectBuffer) structureBindings(ctx context.Context) ([]pdfStru
 		}
 	}
 	return result, ctx.Err()
-}
-
-// append 在页面提交成功后登记已分配的图元标识
-// 入参: pageID 页面标识, objects 已分配标识的对象, bindings 已准备的绑定位置
-func (b *pdfStructureBindings) append(pageID string, objects []GraphicObject, bindings []pdfStructureBinding) {
-	for _, binding := range bindings {
-		last := b.reference(pageID, binding.sequence)
-		for _, object := range objects[binding.start:binding.end] {
-			last.ObjectIDs = append(last.ObjectIDs, editorObjectID(object))
-		}
-	}
-}
-
-// reference 返回已提交来源区段在页面中的引用
-// 入参: pageID 页面标识, sequence 来源区段
-// 返回: *StructureReference 页面引用
-func (b *pdfStructureBindings) reference(pageID string, sequence *pdfgo.ContentSequence) *StructureReference {
-	if b.sequences == nil {
-		b.sequences = make(map[*pdfgo.ContentSequence][]StructureReference)
-	}
-	refs := b.sequences[sequence]
-	if len(refs) == 0 {
-		b.order = append(b.order, sequence)
-	}
-	if len(refs) == 0 || refs[len(refs)-1].PageID != pageID {
-		refs = append(refs, StructureReference{PageID: pageID})
-	}
-	b.sequences[sequence] = refs
-	return &refs[len(refs)-1]
 }
 
 // documentMetadata 保留PDF元数据原文并映射文档描述，来源软件与扩展字段保存在独立标引中

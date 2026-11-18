@@ -35,15 +35,6 @@ const (
 	platformTypeFunction = js.TypeFunction
 )
 
-// platformValue 浏览器参数值
-type platformValue = js.Value
-
-// wasmEngines 管理共享资源的独立浏览器业务会话
-type wasmEngines struct {
-	resources *ofdgo.Resources
-	engines   map[string]*businessEngine
-}
-
 // RunWASM 注册浏览器WASM接口并阻塞运行
 func RunWASM() {
 	resources, _ := ofdgo.NewResources(ofdgo.ResourceOptions{Parallelism: 1, MemoryLimit: 64 << 20, CacheBytes: 48 << 20, SnapshotBytes: 32 << 20})
@@ -52,6 +43,15 @@ func RunWASM() {
 	registerAsyncCallback("ofdgoEngineCall", engines.call)
 	registerCallback("ofdgoEngineClose", engines.close)
 	select {}
+}
+
+// platformValue 浏览器参数值
+type platformValue = js.Value
+
+// wasmEngines 管理共享资源的独立浏览器业务会话
+type wasmEngines struct {
+	resources *ofdgo.Resources
+	engines   map[string]*businessEngine
 }
 
 // open 创建具有稳定标识的独立业务会话

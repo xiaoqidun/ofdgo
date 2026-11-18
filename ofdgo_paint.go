@@ -25,27 +25,11 @@ import (
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
-// 画刷类型，区分纯色、渐变和图案填充
-const (
-	PaintNone PaintKind = iota
-	PaintSolid
-	PaintLinear
-	PaintRadial
-	PaintPattern
-	PaintMesh
-)
-
 // PatternPaint 底纹画刷
 type PatternPaint struct {
 	*Pattern
 	Color FillColor
 	Alpha *int
-}
-
-// profileGradient 保存独立色标和只读配置，延伸及重复由几何采样器处理
-type profileGradient struct {
-	positions []float64
-	colors    []MeshVertex
 }
 
 // ColorStop 保存渐变区间位置及预乘RGBA颜色节点
@@ -56,6 +40,16 @@ type ColorStop struct {
 
 // PaintKind 区分无画刷、纯色、轴向渐变、径向渐变、图案和网格渐变
 type PaintKind uint8
+
+// 画刷类型，区分纯色、渐变和图案填充
+const (
+	PaintNone PaintKind = iota
+	PaintSolid
+	PaintLinear
+	PaintRadial
+	PaintPattern
+	PaintMesh
+)
 
 // Paint 保存后端无关的颜色、渐变和图案，不修改源节点
 type Paint struct {
@@ -119,6 +113,113 @@ func (r *Renderer) GradientStops(segments []ShdSegment, alpha *int) ([]ColorStop
 		gradient = append(gradient, ColorStop{Offset: positions[i], Color: value})
 	}
 	return gradient, nil
+}
+
+// ResolvePaint 解析颜色、透明度、渐变分段和图案，不依赖绘图库
+// 入参: fill 填充或转换后的描边节点
+// 返回: Paint 只读画刷, error 无效渐变
+func (r *Renderer) ResolvePaint(fill *FillColor) (Paint, error) {
+	previous := r.renderError
+	r.renderError = nil
+	defer func() { r.renderError = previous }()
+	if fill == nil {
+		return Paint{}, nil
+	}
+	if fill.Pattern != nil {
+		return Paint{Kind: PaintPattern, Pattern: parsePatternPaint(fill)}, nil
+	}
+	if fill.GouraudShd != nil || fill.LaGouraudShd != nil {
+		mesh, err := r.resolveMesh(fill)
+		if err != nil {
+			return Paint{}, err
+		}
+		if r.renderError != nil {
+			return Paint{}, r.renderError
+		}
+		return Paint{Kind: PaintMesh, Mesh: mesh}, nil
+	}
+	base := r.parseFillColor(fill)
+	if r.renderError != nil {
+		return Paint{}, r.renderError
+	}
+	if base == nil {
+		return Paint{}, nil
+	}
+	paint := Paint{Kind: PaintSolid, Color: colorToRGBA(base)}
+	if node := fill.AxialShd; node != nil {
+		start, end := parseFloats(node.StartPoint), parseFloats(node.EndPoint)
+		stops := r.renderGradientStops(node.Segment, fill.Alpha)
+		if r.renderError != nil {
+			return Paint{}, r.renderError
+		}
+		sample, err := r.profileGradient(node.Segment, fill.Alpha)
+		if err != nil {
+			return Paint{}, err
+		}
+		if len(start) >= 2 && len(end) >= 2 && len(stops) != 0 && (!basegeom.Equal(start[0], end[0]) || !basegeom.Equal(start[1], end[1])) {
+			paint.Kind = PaintLinear
+			paint.Gradient = &Shading{Start: Point{X: start[0], Y: start[1]}, End: Point{X: end[0], Y: end[1]}, Stops: stops, Extend: node.Extend, MapType: node.MapType, MapUnit: node.MapUnit}
+			paint.Gradient.Sample = sample
+			return paint, nil
+		}
+	}
+	if node := fill.RadialShd; node != nil && node.StartRadius >= 0 && node.EndRadius >= 0 && (node.StartRadius > 0 || node.EndRadius > 0) {
+		start, end := parseFloats(node.StartPoint), parseFloats(node.EndPoint)
+		stops := r.renderGradientStops(node.Segment, fill.Alpha)
+		if r.renderError != nil {
+			return Paint{}, r.renderError
+		}
+		sample, err := r.profileGradient(node.Segment, fill.Alpha)
+		if err != nil {
+			return Paint{}, err
+		}
+		if len(start) >= 2 && len(end) >= 2 && len(stops) != 0 {
+			paint.Kind = PaintRadial
+			paint.Gradient = &Shading{Start: Point{X: start[0], Y: start[1]}, End: Point{X: end[0], Y: end[1]}, StartRadius: node.StartRadius, EndRadius: node.EndRadius, Stops: stops, Extend: node.Extend, MapType: node.MapType, MapUnit: node.MapUnit, Eccentricity: node.Eccentricity, Angle: node.Angle}
+			paint.Gradient.Sample = sample
+		}
+	}
+	return paint, nil
+}
+
+// profileGradient 保存独立色标和只读配置，延伸及重复由几何采样器处理
+type profileGradient struct {
+	positions []float64
+	colors    []MeshVertex
+}
+
+// At 在相同源空间内插值，不同空间先转换为sRGB，保留重复位置的右侧色标
+// 入参: t 单位区间位置
+// 返回: color.RGBA 预乘采样颜色
+func (g *profileGradient) At(t float64) color.RGBA {
+	if len(g.colors) == 0 || math.IsNaN(t) {
+		return color.RGBA{}
+	}
+	first := g.colors[0]
+	if t < g.positions[0] {
+		r, green, b := first.rgb(first.Values)
+		return profileColor([3]float64{r, green, b}, first.Alpha)
+	}
+	for i := 1; i < len(g.colors); i++ {
+		if t < g.positions[i] {
+			before, after := g.colors[i-1], g.colors[i]
+			x := (t - g.positions[i-1]) / (g.positions[i] - g.positions[i-1])
+			if before.sameSpace(after) {
+				var values [4]float64
+				for j := range values {
+					values[j] = before.Values[j]*(1-x) + after.Values[j]*x
+				}
+				r, green, b := before.rgb(values)
+				return profileColor([3]float64{r, green, b}, before.Alpha*(1-x)+after.Alpha*x)
+			}
+			r0, g0, b0 := before.rgb(before.Values)
+			r1, g1, b1 := after.rgb(after.Values)
+			return color.RGBA{meshByte(r0*before.Alpha*(1-x) + r1*after.Alpha*x), meshByte(g0*before.Alpha*(1-x) + g1*after.Alpha*x), meshByte(b0*before.Alpha*(1-x) + b1*after.Alpha*x), meshByte(before.Alpha*(1-x) + after.Alpha*x)}
+		}
+	}
+	last := g.colors[len(g.colors)-1]
+	r, green, b := last.rgb(last.Values)
+	return profileColor([3]float64{r, green, b}, last.Alpha)
 }
 
 // parseColorWithAlpha 解析带透明度的颜色
@@ -474,105 +575,4 @@ func (r *Renderer) profileGradient(segments []ShdSegment, alpha *int) (func(floa
 		gradient.colors[i] = MeshVertex{Space: kind, Values: values, Alpha: opacity, profile: profile}
 	}
 	return gradient.At, nil
-}
-
-// At 在相同源空间内插值，不同空间先转换为sRGB，保留重复位置的右侧色标
-// 入参: t 单位区间位置
-// 返回: color.RGBA 预乘采样颜色
-func (g *profileGradient) At(t float64) color.RGBA {
-	if len(g.colors) == 0 || math.IsNaN(t) {
-		return color.RGBA{}
-	}
-	first := g.colors[0]
-	if t < g.positions[0] {
-		r, green, b := first.rgb(first.Values)
-		return profileColor([3]float64{r, green, b}, first.Alpha)
-	}
-	for i := 1; i < len(g.colors); i++ {
-		if t < g.positions[i] {
-			before, after := g.colors[i-1], g.colors[i]
-			x := (t - g.positions[i-1]) / (g.positions[i] - g.positions[i-1])
-			if before.sameSpace(after) {
-				var values [4]float64
-				for j := range values {
-					values[j] = before.Values[j]*(1-x) + after.Values[j]*x
-				}
-				r, green, b := before.rgb(values)
-				return profileColor([3]float64{r, green, b}, before.Alpha*(1-x)+after.Alpha*x)
-			}
-			r0, g0, b0 := before.rgb(before.Values)
-			r1, g1, b1 := after.rgb(after.Values)
-			return color.RGBA{meshByte(r0*before.Alpha*(1-x) + r1*after.Alpha*x), meshByte(g0*before.Alpha*(1-x) + g1*after.Alpha*x), meshByte(b0*before.Alpha*(1-x) + b1*after.Alpha*x), meshByte(before.Alpha*(1-x) + after.Alpha*x)}
-		}
-	}
-	last := g.colors[len(g.colors)-1]
-	r, green, b := last.rgb(last.Values)
-	return profileColor([3]float64{r, green, b}, last.Alpha)
-}
-
-// ResolvePaint 解析颜色、透明度、渐变分段和图案，不依赖绘图库
-// 入参: fill 填充或转换后的描边节点
-// 返回: Paint 只读画刷, error 无效渐变
-func (r *Renderer) ResolvePaint(fill *FillColor) (Paint, error) {
-	previous := r.renderError
-	r.renderError = nil
-	defer func() { r.renderError = previous }()
-	if fill == nil {
-		return Paint{}, nil
-	}
-	if fill.Pattern != nil {
-		return Paint{Kind: PaintPattern, Pattern: parsePatternPaint(fill)}, nil
-	}
-	if fill.GouraudShd != nil || fill.LaGouraudShd != nil {
-		mesh, err := r.resolveMesh(fill)
-		if err != nil {
-			return Paint{}, err
-		}
-		if r.renderError != nil {
-			return Paint{}, r.renderError
-		}
-		return Paint{Kind: PaintMesh, Mesh: mesh}, nil
-	}
-	base := r.parseFillColor(fill)
-	if r.renderError != nil {
-		return Paint{}, r.renderError
-	}
-	if base == nil {
-		return Paint{}, nil
-	}
-	paint := Paint{Kind: PaintSolid, Color: colorToRGBA(base)}
-	if node := fill.AxialShd; node != nil {
-		start, end := parseFloats(node.StartPoint), parseFloats(node.EndPoint)
-		stops := r.renderGradientStops(node.Segment, fill.Alpha)
-		if r.renderError != nil {
-			return Paint{}, r.renderError
-		}
-		sample, err := r.profileGradient(node.Segment, fill.Alpha)
-		if err != nil {
-			return Paint{}, err
-		}
-		if len(start) >= 2 && len(end) >= 2 && len(stops) != 0 && (!basegeom.Equal(start[0], end[0]) || !basegeom.Equal(start[1], end[1])) {
-			paint.Kind = PaintLinear
-			paint.Gradient = &Shading{Start: Point{X: start[0], Y: start[1]}, End: Point{X: end[0], Y: end[1]}, Stops: stops, Extend: node.Extend, MapType: node.MapType, MapUnit: node.MapUnit}
-			paint.Gradient.Sample = sample
-			return paint, nil
-		}
-	}
-	if node := fill.RadialShd; node != nil && node.StartRadius >= 0 && node.EndRadius >= 0 && (node.StartRadius > 0 || node.EndRadius > 0) {
-		start, end := parseFloats(node.StartPoint), parseFloats(node.EndPoint)
-		stops := r.renderGradientStops(node.Segment, fill.Alpha)
-		if r.renderError != nil {
-			return Paint{}, r.renderError
-		}
-		sample, err := r.profileGradient(node.Segment, fill.Alpha)
-		if err != nil {
-			return Paint{}, err
-		}
-		if len(start) >= 2 && len(end) >= 2 && len(stops) != 0 {
-			paint.Kind = PaintRadial
-			paint.Gradient = &Shading{Start: Point{X: start[0], Y: start[1]}, End: Point{X: end[0], Y: end[1]}, StartRadius: node.StartRadius, EndRadius: node.EndRadius, Stops: stops, Extend: node.Extend, MapType: node.MapType, MapUnit: node.MapUnit, Eccentricity: node.Eccentricity, Angle: node.Angle}
-			paint.Gradient.Sample = sample
-		}
-	}
-	return paint, nil
 }

@@ -105,6 +105,103 @@ func (e *Editor) AnalyzeTextSelection(page int, selection TextSelection) (TextSe
 	return cloneEditorData(result), err
 }
 
+// PreviewTextSelection 在隔离快照生成与提交相同的结果，不分配文档资源或修改历史
+// 入参: page 页面索引, selection 文字选区, edit 编辑范围与样式
+// 返回: TextSelectionPreview 更新文字与来源映射, error 校验错误
+func (e *Editor) PreviewTextSelection(page int, selection TextSelection, edit TextSelectionEdit) (TextSelectionPreview, error) {
+	analysis, err := e.AnalyzeTextSelection(page, selection)
+	if err != nil {
+		return TextSelectionPreview{}, err
+	}
+	copy := e.transactionSnapshot()
+	if err := copy.prepareTextSelectionEdit(&edit); err != nil {
+		return TextSelectionPreview{}, err
+	}
+	result, err := copy.previewTextSelection(analysis, edit)
+	return cloneEditorData(result), err
+}
+
+// UpdateTextSelection 原子提交联合文字修改，失败不改变资源、ID或撤销重做
+// 入参: page 页面索引, selection 文字选区, edit 编辑范围与样式
+// 返回: error 校验或提交错误
+func (e *Editor) UpdateTextSelection(page int, selection TextSelection, edit TextSelectionEdit) error {
+	analysis, err := e.AnalyzeTextSelection(page, selection)
+	if err != nil {
+		return err
+	}
+	return e.Transaction(func(e *Editor) error {
+		if err := e.prepareTextSelectionEdit(&edit); err != nil {
+			return err
+		}
+		preview, err := e.previewTextSelection(analysis, edit)
+		if err != nil {
+			return err
+		}
+		if edit.Reflow != nil {
+			return e.reflowTextSelection(page, selection, edit, preview)
+		}
+		if selection.Root != nil {
+			parts := make(map[int]int, len(preview.Parts))
+			for i, part := range preview.Parts {
+				parts[part.Index] = i
+			}
+			return e.editCompositeObjects(page, *selection.Root, selection.Indexes, func(_ *Renderer, nodes []*editorCompositeNode, _ []CompositeMember) error {
+				for i, node := range nodes {
+					index, exists := parts[selection.Indexes[i]]
+					if !exists {
+						continue
+					}
+					part := &preview.Parts[index]
+					if part.Deleted {
+						node.owner.patches = append(node.owner.patches, editorXMLPatch{node.span.start, node.span.end, nil})
+						continue
+					}
+					object := cloneEditorData(node.object)
+					object.TextObject.TextCode, object.TextObject.CGTransform = part.TextObject.TextCode, part.TextObject.CGTransform
+					if edit.Font != "" {
+						object.TextObject.Font = part.TextObject.Font
+					}
+					if edit.Size != 0 {
+						object.TextObject.Size = part.TextObject.Size
+					}
+					if edit.Color != "" {
+						object.TextObject.FillColor = part.TextObject.FillColor
+					}
+					if reflect.DeepEqual(object, node.object) {
+						continue
+					}
+					if err := node.update(object); err != nil {
+						return err
+					}
+					node.setState(editorCompositeState{})
+				}
+				return nil
+			})
+		}
+		var updates []GraphicObject
+		var deleted []string
+		for _, part := range preview.Parts {
+			if part.Deleted {
+				deleted = append(deleted, part.ID)
+				continue
+			}
+			next := selectionUpdatedText(part, edit)
+			if !reflect.DeepEqual(next, part.raw) {
+				updates = append(updates, GraphicObject{Type: "TextObject", TextObject: next})
+			}
+		}
+		if len(updates) > 0 {
+			if err := e.updateObjects(page, updates, true); err != nil {
+				return err
+			}
+		}
+		if len(deleted) > 0 {
+			return e.DeleteObjects(page, deleted)
+		}
+		return nil
+	})
+}
+
 // analyzeTextSelection 在隔离资源视图中计算选区和逐字坐标
 // 入参: page 页面索引, selection 文字选区
 // 返回: TextSelectionAnalysis 分析快照, error 选择或布局错误
@@ -447,22 +544,6 @@ func (e *Editor) selectionTextPoints(t TextObject) ([]Point, error) {
 	return points, nil
 }
 
-// PreviewTextSelection 在隔离快照生成与提交相同的结果，不分配文档资源或修改历史
-// 入参: page 页面索引, selection 文字选区, edit 编辑范围与样式
-// 返回: TextSelectionPreview 更新文字与来源映射, error 校验错误
-func (e *Editor) PreviewTextSelection(page int, selection TextSelection, edit TextSelectionEdit) (TextSelectionPreview, error) {
-	analysis, err := e.AnalyzeTextSelection(page, selection)
-	if err != nil {
-		return TextSelectionPreview{}, err
-	}
-	copy := e.transactionSnapshot()
-	if err := copy.prepareTextSelectionEdit(&edit); err != nil {
-		return TextSelectionPreview{}, err
-	}
-	result, err := copy.previewTextSelection(analysis, edit)
-	return cloneEditorData(result), err
-}
-
 // previewTextSelection 统一生成定位更新或显式富文本布局
 // 入参: analysis 选区快照, edit 编辑参数
 // 返回: TextSelectionPreview 更新预览, error 编辑错误
@@ -675,87 +756,6 @@ func selectionAfterTextEdit(analysis TextSelectionAnalysis, parts []TextSelectio
 		result.Indexes = append(result.Indexes, part.Index-removed)
 	}
 	return result
-}
-
-// UpdateTextSelection 原子提交联合文字修改，失败不改变资源、ID或撤销重做
-// 入参: page 页面索引, selection 文字选区, edit 编辑范围与样式
-// 返回: error 校验或提交错误
-func (e *Editor) UpdateTextSelection(page int, selection TextSelection, edit TextSelectionEdit) error {
-	analysis, err := e.AnalyzeTextSelection(page, selection)
-	if err != nil {
-		return err
-	}
-	return e.Transaction(func(e *Editor) error {
-		if err := e.prepareTextSelectionEdit(&edit); err != nil {
-			return err
-		}
-		preview, err := e.previewTextSelection(analysis, edit)
-		if err != nil {
-			return err
-		}
-		if edit.Reflow != nil {
-			return e.reflowTextSelection(page, selection, edit, preview)
-		}
-		if selection.Root != nil {
-			parts := make(map[int]int, len(preview.Parts))
-			for i, part := range preview.Parts {
-				parts[part.Index] = i
-			}
-			return e.editCompositeObjects(page, *selection.Root, selection.Indexes, func(_ *Renderer, nodes []*editorCompositeNode, _ []CompositeMember) error {
-				for i, node := range nodes {
-					index, exists := parts[selection.Indexes[i]]
-					if !exists {
-						continue
-					}
-					part := &preview.Parts[index]
-					if part.Deleted {
-						node.owner.patches = append(node.owner.patches, editorXMLPatch{node.span.start, node.span.end, nil})
-						continue
-					}
-					object := cloneEditorData(node.object)
-					object.TextObject.TextCode, object.TextObject.CGTransform = part.TextObject.TextCode, part.TextObject.CGTransform
-					if edit.Font != "" {
-						object.TextObject.Font = part.TextObject.Font
-					}
-					if edit.Size != 0 {
-						object.TextObject.Size = part.TextObject.Size
-					}
-					if edit.Color != "" {
-						object.TextObject.FillColor = part.TextObject.FillColor
-					}
-					if reflect.DeepEqual(object, node.object) {
-						continue
-					}
-					if err := node.update(object); err != nil {
-						return err
-					}
-					node.setState(editorCompositeState{})
-				}
-				return nil
-			})
-		}
-		var updates []GraphicObject
-		var deleted []string
-		for _, part := range preview.Parts {
-			if part.Deleted {
-				deleted = append(deleted, part.ID)
-				continue
-			}
-			next := selectionUpdatedText(part, edit)
-			if !reflect.DeepEqual(next, part.raw) {
-				updates = append(updates, GraphicObject{Type: "TextObject", TextObject: next})
-			}
-		}
-		if len(updates) > 0 {
-			if err := e.updateObjects(page, updates, true); err != nil {
-				return err
-			}
-		}
-		if len(deleted) > 0 {
-			return e.DeleteObjects(page, deleted)
-		}
-		return nil
-	})
 }
 
 // selectionUpdatedText 仅更新请求字段，保留源对象继承样式与排版状态

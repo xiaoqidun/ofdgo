@@ -77,10 +77,11 @@ type SignatureTimestampReport struct {
 	Error              string
 }
 
-// signatureTimestampEvidence 保存时间戳令牌及其绑定数据
-type signatureTimestampEvidence struct {
-	Token []byte
-	Data  []byte
+// VerifySignatureTimestamp 验证RFC3161令牌与原始字节的绑定
+// 入参: token DER编码TimeStampToken, data 被时间戳保护的原始字节, options 验证选项
+// 返回: SignatureTimestampReport 验证报告
+func VerifySignatureTimestamp(token, data []byte, options SignatureTimestampOptions) (report SignatureTimestampReport) {
+	return verifyTimestampToken(token, data, options, false)
 }
 
 // WithSignatureTimestamp 设置离线时间戳验证
@@ -100,11 +101,10 @@ func WithSignatureTimestamp(options SignatureTimestampOptions) SignatureVerifyOp
 	return func(o *signatureVerifyOptions) { o.Timestamp = &options }
 }
 
-// VerifySignatureTimestamp 验证RFC3161令牌与原始字节的绑定
-// 入参: token DER编码TimeStampToken, data 被时间戳保护的原始字节, options 验证选项
-// 返回: SignatureTimestampReport 验证报告
-func VerifySignatureTimestamp(token, data []byte, options SignatureTimestampOptions) (report SignatureTimestampReport) {
-	return verifyTimestampToken(token, data, options, false)
+// signatureTimestampEvidence 保存时间戳令牌及其绑定数据
+type signatureTimestampEvidence struct {
+	Token []byte
+	Data  []byte
 }
 
 // verifyTimestampToken 验证时间戳令牌并按场景控制未配置信任根时的策略

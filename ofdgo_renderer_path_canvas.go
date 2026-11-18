@@ -41,22 +41,6 @@ type pathStyle struct {
 	dashPattern   []float64
 }
 
-// newPathStyle 创建路径样式
-// 入参: dp 默认绘制参数, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, alpha 对象透明度
-// 返回: pathStyle 路径样式
-func (r *Renderer) newPathStyle(dp *DrawParam, bx, by, pageH float64, alpha *int) pathStyle {
-	style := pathStyle{
-		lineWidth:  defaultPathLineWidth,
-		lineCap:    canvas.ButtCap,
-		lineJoin:   canvas.MiterJoiner{GapJoiner: canvas.BevelJoin, Limit: defaultMiterLimit},
-		miterLimit: defaultMiterLimit,
-	}
-	if dp != nil {
-		style.applyDrawParam(r, dp, bx, by, pageH, alpha)
-	}
-	return style
-}
-
 // applyFillColor 应用填充颜色
 // 入参: r 渲染器, fill 填充颜色, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, alpha 对象透明度
 func (s *pathStyle) applyFillColor(r *Renderer, fill *FillColor, bx, by, pageH float64, alpha *int) {
@@ -73,21 +57,6 @@ func (s *pathStyle) applyStrokeColor(r *Renderer, stroke *StrokeColor, bx, by, p
 	s.strokePattern = parsePatternPaint((*FillColor)(strokeColorNode))
 	s.strokeColor = r.parseStrokeColor(strokeColorNode)
 	s.strokePaint = r.parseStrokePaint(strokeColorNode, bx, by, pageH)
-}
-
-// pathLineCap 转换端点样式
-// 入参: cap 端点样式名称, fallback 默认端点样式
-// 返回: canvas.Capper 端点样式
-func pathLineCap(cap string, fallback canvas.Capper) canvas.Capper {
-	switch cap {
-	case "Butt":
-		return canvas.ButtCap
-	case "Round":
-		return canvas.RoundCap
-	case "Square":
-		return canvas.SquareCap
-	}
-	return fallback
 }
 
 // applyLineJoin 应用转角样式及尖角截断值
@@ -181,6 +150,37 @@ func (s *pathStyle) scale(ctm Matrix) {
 			s.dashPattern[i] *= scale
 		}
 	}
+}
+
+// newPathStyle 创建路径样式
+// 入参: dp 默认绘制参数, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, alpha 对象透明度
+// 返回: pathStyle 路径样式
+func (r *Renderer) newPathStyle(dp *DrawParam, bx, by, pageH float64, alpha *int) pathStyle {
+	style := pathStyle{
+		lineWidth:  defaultPathLineWidth,
+		lineCap:    canvas.ButtCap,
+		lineJoin:   canvas.MiterJoiner{GapJoiner: canvas.BevelJoin, Limit: defaultMiterLimit},
+		miterLimit: defaultMiterLimit,
+	}
+	if dp != nil {
+		style.applyDrawParam(r, dp, bx, by, pageH, alpha)
+	}
+	return style
+}
+
+// pathLineCap 转换端点样式
+// 入参: cap 端点样式名称, fallback 默认端点样式
+// 返回: canvas.Capper 端点样式
+func pathLineCap(cap string, fallback canvas.Capper) canvas.Capper {
+	switch cap {
+	case "Butt":
+		return canvas.ButtCap
+	case "Round":
+		return canvas.RoundCap
+	case "Square":
+		return canvas.SquareCap
+	}
+	return fallback
 }
 
 // renderPath 渲染路径

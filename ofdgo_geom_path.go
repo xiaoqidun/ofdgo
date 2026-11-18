@@ -22,6 +22,13 @@ import (
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
+// GeometryPath 保存独立于绘图库的几何路径，不扁平化曲线或舍入坐标
+// 坐标以左上角为原点，单位为毫米，子路径从Move开始，Close回到当前子路径起点
+type GeometryPath []GeometrySegment
+
+// GeometryVerb 表示几何路径指令
+type GeometryVerb = basegeom.Verb
+
 // 几何路径指令，包括直线、曲线、椭圆弧和闭合
 const (
 	GeometryMove  = basegeom.Move
@@ -31,13 +38,6 @@ const (
 	GeometryArc   = basegeom.Arc
 	GeometryClose = basegeom.ClosePath
 )
-
-// GeometryPath 保存独立于绘图库的几何路径，不扁平化曲线或舍入坐标
-// 坐标以左上角为原点，单位为毫米，子路径从Move开始，Close回到当前子路径起点
-type GeometryPath []GeometrySegment
-
-// GeometryVerb 表示几何路径指令
-type GeometryVerb = basegeom.Verb
 
 // GeometrySegment 保存路径端点、贝塞尔控制点或端点式椭圆弧参数
 // 弧线Rotation单位为度，Sweep为true表示顺时针，Large表示大弧
@@ -59,6 +59,57 @@ func ParseGeometryPath(data string) (GeometryPath, error) {
 		return nil, err
 	}
 	return result, nil
+}
+
+// SVG 将几何路径编码为SVG路径，不改变曲线或坐标精度
+// 返回: string SVG路径, error 不支持的路径指令
+func (p GeometryPath) SVG() (string, error) {
+	return p.encode(true)
+}
+
+// OFD 将几何路径编码为OFD紧缩路径
+// 返回: string 紧缩路径, error 不支持的路径指令
+func (p GeometryPath) OFD() (string, error) {
+	return p.encode(false)
+}
+
+// Bounds 通过解析极值计算直线、贝塞尔和椭圆弧的轴对齐边界
+// 不进行曲线展开且不使用Tolerance，结果受float64舍入误差影响，不保证向外舍入
+// 返回: Box 浮点路径范围, error 无效路径、弧线或数值溢出
+func (p GeometryPath) Bounds() (Box, error) {
+	return basegeom.Path(p).Bounds()
+}
+
+// Curves 按毫米误差上限将端点式椭圆弧转换为三次贝塞尔曲线，其他指令保持原样
+// 入参: tolerance 正有限误差上限
+// 返回: GeometryPath 独立路径, error 参数错误
+func (p GeometryPath) Curves(tolerance float64) (GeometryPath, error) {
+	result, err := basegeom.Path(p).Curves(tolerance)
+	return GeometryPath(result), err
+}
+
+// Stroke 按端点和转角样式将曲线、虚线转换为非零填充轮廓
+// 曲线按Tolerance展开，默认误差为0.001毫米，重叠轮廓保持同向绕数
+// 结果未做布尔整理，按非零规则填充，区域运算需能处理重叠子路径的后端
+// 入参: options 描边样式
+// 返回: GeometryPath 描边轮廓, error 无效参数或精度限制
+func (p GeometryPath) Stroke(options StrokeOptions) (GeometryPath, error) {
+	if options.MiterLimit == 0 && !options.MiterLimitSet {
+		options.MiterLimit = defaultMiterLimit
+	}
+	result, err := basegeom.Path(p).Stroke(options)
+	if unsupported, ok := err.(basegeom.UnsupportedError); ok {
+		err = fmt.Errorf("%s: %w", unsupported, ErrBackendUnavailable)
+	}
+	return GeometryPath(result), err
+}
+
+// Transform 精确变换控制点和椭圆轴，退化弧沿投影极值分段保留折返
+// 入参: matrix 仿射变换
+// 返回: GeometryPath 独立路径, error 无效路径或数值溢出
+func (p GeometryPath) Transform(matrix Matrix) (GeometryPath, error) {
+	result, err := basegeom.Path(p).Transform(basegeom.MatrixFromValues(matrix.Values()))
+	return GeometryPath(result), err
 }
 
 // walkGeometryPath 逐指令解析紧缩路径，纯校验时不分配路径或词元列表
@@ -150,18 +201,6 @@ func geometryPathSegment(command string, args []string) (GeometrySegment, error)
 	return segment, nil
 }
 
-// SVG 将几何路径编码为SVG路径，不改变曲线或坐标精度
-// 返回: string SVG路径, error 不支持的路径指令
-func (p GeometryPath) SVG() (string, error) {
-	return p.encode(true)
-}
-
-// OFD 将几何路径编码为OFD紧缩路径
-// 返回: string 紧缩路径, error 不支持的路径指令
-func (p GeometryPath) OFD() (string, error) {
-	return p.encode(false)
-}
-
 // objectGeometryPath 解析对象路径并由当前几何实现应用页面变换
 // 入参: geometry 几何后端, object 路径对象
 // 返回: GeometryPath 页面路径, error 参数或变换错误
@@ -239,45 +278,6 @@ func geometryClipPath(path GeometryPath) (PathObject, error) {
 	fill, stroke := true, false
 	box.W, box.H = max(box.W, 1e-6), max(box.H, 1e-6)
 	return PathObject{Boundary: editorBoxString(box), CTM: TranslationMatrix(-box.X, -box.Y).String(), Fill: &fill, Stroke: &stroke, AbbreviatedData: data}, nil
-}
-
-// Bounds 通过解析极值计算直线、贝塞尔和椭圆弧的轴对齐边界
-// 不进行曲线展开且不使用Tolerance，结果受float64舍入误差影响，不保证向外舍入
-// 返回: Box 浮点路径范围, error 无效路径、弧线或数值溢出
-func (p GeometryPath) Bounds() (Box, error) {
-	return basegeom.Path(p).Bounds()
-}
-
-// Curves 按毫米误差上限将端点式椭圆弧转换为三次贝塞尔曲线，其他指令保持原样
-// 入参: tolerance 正有限误差上限
-// 返回: GeometryPath 独立路径, error 参数错误
-func (p GeometryPath) Curves(tolerance float64) (GeometryPath, error) {
-	result, err := basegeom.Path(p).Curves(tolerance)
-	return GeometryPath(result), err
-}
-
-// Stroke 按端点和转角样式将曲线、虚线转换为非零填充轮廓
-// 曲线按Tolerance展开，默认误差为0.001毫米，重叠轮廓保持同向绕数
-// 结果未做布尔整理，按非零规则填充，区域运算需能处理重叠子路径的后端
-// 入参: options 描边样式
-// 返回: GeometryPath 描边轮廓, error 无效参数或精度限制
-func (p GeometryPath) Stroke(options StrokeOptions) (GeometryPath, error) {
-	if options.MiterLimit == 0 && !options.MiterLimitSet {
-		options.MiterLimit = defaultMiterLimit
-	}
-	result, err := basegeom.Path(p).Stroke(options)
-	if unsupported, ok := err.(basegeom.UnsupportedError); ok {
-		err = fmt.Errorf("%s: %w", unsupported, ErrBackendUnavailable)
-	}
-	return GeometryPath(result), err
-}
-
-// Transform 精确变换控制点和椭圆轴，退化弧沿投影极值分段保留折返
-// 入参: matrix 仿射变换
-// 返回: GeometryPath 独立路径, error 无效路径或数值溢出
-func (p GeometryPath) Transform(matrix Matrix) (GeometryPath, error) {
-	result, err := basegeom.Path(p).Transform(basegeom.MatrixFromValues(matrix.Values()))
-	return GeometryPath(result), err
 }
 
 // validate 校验公共路径指令、子路径起点和有限坐标

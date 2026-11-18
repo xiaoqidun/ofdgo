@@ -31,6 +31,17 @@ type pdfDestinationFontBackend struct {
 	FontBackend
 }
 
+// ResolveFont 沿用字体匹配，只在实际绘制缺少字体数据时中止度量
+// 入参: renderer 度量渲染器, id 字体标识, exact 是否禁止无关回退
+// 返回: ResolvedFont 字体资源, error 解析或缺失错误
+func (b pdfDestinationFontBackend) ResolveFont(renderer *Renderer, id string, exact bool) (ResolvedFont, error) {
+	font, err := b.FontBackend.ResolveFont(renderer, id, exact)
+	if err == nil && len(font.Data) == 0 {
+		err = fmt.Errorf("PDF destination font %q unavailable", id)
+	}
+	return font, err
+}
+
 // documentOpenActions 转换文档初始目标与打开动作，不执行脚本或打开资源
 // 入参: ctx 取消上下文
 // 返回: error 动作、编码或取消错误
@@ -257,17 +268,6 @@ func (p *pdfImporter) annotationTriggerActions(ctx context.Context, annotation p
 		return nil, fmt.Errorf("invalid annotation trigger page")
 	}
 	return converted, ctx.Err()
-}
-
-// ResolveFont 沿用字体匹配，只在实际绘制缺少字体数据时中止度量
-// 入参: renderer 度量渲染器, id 字体标识, exact 是否禁止无关回退
-// 返回: ResolvedFont 字体资源, error 解析或缺失错误
-func (b pdfDestinationFontBackend) ResolveFont(renderer *Renderer, id string, exact bool) (ResolvedFont, error) {
-	font, err := b.FontBackend.ResolveFont(renderer, id, exact)
-	if err == nil && len(font.Data) == 0 {
-		err = fmt.Errorf("PDF destination font %q unavailable", id)
-	}
-	return font, err
 }
 
 // destinationBounds 度量目标页内容并缓存页面内范围，不包含注解或像素取整

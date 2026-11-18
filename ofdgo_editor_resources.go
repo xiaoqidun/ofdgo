@@ -46,6 +46,71 @@ type editorResourceRefs struct {
 	definitions map[string]*editorResourceRefs
 }
 
+// scan 流式读取包内XML引用，二进制条目只探测文件头，不展开页面对象或图片像素
+// 入参: input 文件流, name 包内路径
+// 返回: bool 是否资源索引, bool 是否可完整判断引用
+func (r *editorResourceRefs) scan(input io.Reader, name string) (bool, bool) {
+	return r.scanContext(nil, input, name)
+}
+
+// scanContext 流式收集资源引用，在读取和字体用字处理期间检查取消
+// 入参: ctx 取消上下文，可为nil, input 文件流, name 包内路径
+// 返回: bool 是否资源索引, bool 是否完整收集引用，取消时为false
+func (r *editorResourceRefs) scanContext(ctx context.Context, input io.Reader, name string) (bool, bool) {
+	if ctx != nil {
+		if ctx.Err() != nil {
+			return false, false
+		}
+		input = imageInput{ReadCloser: io.NopCloser(input), ctx: ctx}
+	}
+	buffer := bufio.NewReader(input)
+	found, err := editorXMLPrefix(buffer)
+	if err != nil {
+		return false, false
+	}
+	if !found {
+		return false, !strings.EqualFold(path.Ext(name), ".xml")
+	}
+	decoder := xml.NewDecoder(buffer)
+	scan := editorReferenceScan{ctx: ctx, refs: r, name: name, safe: true}
+	for {
+		if ctx != nil && ctx.Err() != nil {
+			return false, false
+		}
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return scan.resource, scan.seen && len(scan.stack) == 0
+		}
+		if err != nil {
+			return false, false
+		}
+		if !scan.accept(token) {
+			return false, false
+		}
+	}
+}
+
+// reference 记录标准资源标识和路径引用，不将普通数字或资源自身ID视为引用
+// 入参: name 当前文件, base 资源目录, key 字段, value 值, resource 是否资源索引
+func (r *editorResourceRefs) reference(name, base, key, value string, resource bool) {
+	kind := editorResourceReferenceKind(key, resource)
+	if kind == editorReferenceNone {
+		return
+	}
+	if kind == editorReferenceID {
+		if id := editorResourceID(value); id != "" {
+			r.ids[id] = true
+		}
+		return
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	r.files[editorResourceLocation(name, base, value)] = true
+	r.files[cleanPackagePath(resolveResourcePath(name, base, value))] = true
+}
+
 // compactSourceReferences 合并自产页面引用，版本文档按当前版本范围扫描
 // 按GB/T33190-2016附录A检查标识和路径引用，保留扫描范围内孤立XML中的引用
 // 多文档按文档归集引用，未知扩展或无法解析的XML不清理资源
@@ -318,71 +383,6 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 		return nil, err
 	}
 	return removed, nil
-}
-
-// scan 流式读取包内XML引用，二进制条目只探测文件头，不展开页面对象或图片像素
-// 入参: input 文件流, name 包内路径
-// 返回: bool 是否资源索引, bool 是否可完整判断引用
-func (r *editorResourceRefs) scan(input io.Reader, name string) (bool, bool) {
-	return r.scanContext(nil, input, name)
-}
-
-// scanContext 流式收集资源引用，在读取和字体用字处理期间检查取消
-// 入参: ctx 取消上下文，可为nil, input 文件流, name 包内路径
-// 返回: bool 是否资源索引, bool 是否完整收集引用，取消时为false
-func (r *editorResourceRefs) scanContext(ctx context.Context, input io.Reader, name string) (bool, bool) {
-	if ctx != nil {
-		if ctx.Err() != nil {
-			return false, false
-		}
-		input = imageInput{ReadCloser: io.NopCloser(input), ctx: ctx}
-	}
-	buffer := bufio.NewReader(input)
-	found, err := editorXMLPrefix(buffer)
-	if err != nil {
-		return false, false
-	}
-	if !found {
-		return false, !strings.EqualFold(path.Ext(name), ".xml")
-	}
-	decoder := xml.NewDecoder(buffer)
-	scan := editorReferenceScan{ctx: ctx, refs: r, name: name, safe: true}
-	for {
-		if ctx != nil && ctx.Err() != nil {
-			return false, false
-		}
-		token, err := decoder.Token()
-		if err == io.EOF {
-			return scan.resource, scan.seen && len(scan.stack) == 0
-		}
-		if err != nil {
-			return false, false
-		}
-		if !scan.accept(token) {
-			return false, false
-		}
-	}
-}
-
-// reference 记录标准资源标识和路径引用，不将普通数字或资源自身ID视为引用
-// 入参: name 当前文件, base 资源目录, key 字段, value 值, resource 是否资源索引
-func (r *editorResourceRefs) reference(name, base, key, value string, resource bool) {
-	kind := editorResourceReferenceKind(key, resource)
-	if kind == editorReferenceNone {
-		return
-	}
-	if kind == editorReferenceID {
-		if id := editorResourceID(value); id != "" {
-			r.ids[id] = true
-		}
-		return
-	}
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return
-	}
-	r.files[editorResourceLocation(name, base, value)] = true
-	r.files[cleanPackagePath(resolveResourcePath(name, base, value))] = true
 }
 
 // editorResourceReferenceKind 区分标准标识和文件引用，其他文本不参与资源扫描

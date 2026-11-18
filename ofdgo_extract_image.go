@@ -35,48 +35,6 @@ type ImageInfo struct {
 	Location string `json:"-"`
 }
 
-// imageOutput 在分块写出图片时检查调用方取消状态
-type imageOutput struct {
-	ctx    context.Context
-	writer io.Writer
-}
-
-// imageInput 在读取资源数据时检查调用方取消状态
-type imageInput struct {
-	io.ReadCloser
-	ctx context.Context
-}
-
-// imageResourceKey 合并有效十进制标识，非标准标识保留原值，不相互混淆
-// 入参: id 图片标识
-// 返回: string 查找键
-func imageResourceKey(id string) string {
-	if key := editorResourceID(id); key != "" {
-		return key
-	}
-	return id
-}
-
-// Read 检查取消状态后读取原始数据
-// 入参: data 数据缓冲区
-// 返回: int 读取字节数, error 读取或取消错误
-func (r imageInput) Read(data []byte) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return r.ReadCloser.Read(data)
-}
-
-// Write 检查取消状态后写出原始数据
-// 入参: data 数据块
-// 返回: int 写入字节数, error 写入或取消错误
-func (w imageOutput) Write(data []byte) (int, error) {
-	if err := w.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return w.writer.Write(data)
-}
-
 // Images 列出文档、页面和模板声明的图片资源，不解码图片像素
 // 包含未使用及重复引用的资源声明，同一资源标识只返回一次，不加载注解或签名
 // 入参: ctx 取消上下文
@@ -292,4 +250,46 @@ func (r *Reader) WriteImages(ctx context.Context, writer io.Writer, ids ...strin
 		}
 	}
 	return archive.Close()
+}
+
+// imageOutput 在分块写出图片时检查调用方取消状态
+type imageOutput struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+// Write 检查取消状态后写出原始数据
+// 入参: data 数据块
+// 返回: int 写入字节数, error 写入或取消错误
+func (w imageOutput) Write(data []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return w.writer.Write(data)
+}
+
+// imageInput 在读取资源数据时检查调用方取消状态
+type imageInput struct {
+	io.ReadCloser
+	ctx context.Context
+}
+
+// Read 检查取消状态后读取原始数据
+// 入参: data 数据缓冲区
+// 返回: int 读取字节数, error 读取或取消错误
+func (r imageInput) Read(data []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.ReadCloser.Read(data)
+}
+
+// imageResourceKey 合并有效十进制标识，非标准标识保留原值，不相互混淆
+// 入参: id 图片标识
+// 返回: string 查找键
+func imageResourceKey(id string) string {
+	if key := editorResourceID(id); key != "" {
+		return key
+	}
+	return id
 }

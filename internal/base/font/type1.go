@@ -49,41 +49,6 @@ type Type1Program struct {
 	matrix []float64
 }
 
-// type1Glyph 保存字形名称及指令
-type type1Glyph struct {
-	name string
-	data []byte
-}
-
-// type1Scanner 按词项和显式长度读取Type1程序
-type type1Scanner struct {
-	data []byte
-	pos  int
-}
-
-// type1Outline 保存字形指令的操作数栈及轮廓位置
-type type1Outline struct {
-	program    *Type1Program
-	steps      *int
-	active     map[string]bool
-	args       []float64
-	postscript []float64
-	flexPoints [][2]float64
-	width      float64
-	sideX      float64
-	sideY      float64
-	originX    float64
-	originY    float64
-	x          float64
-	y          float64
-	pointX     float64
-	pointY     float64
-	open       bool
-	defined    bool
-	flex       bool
-	path       bytes.Buffer
-}
-
 // ParseType1Program 读取Type1字体的字形程序及子程序
 // 入参: data PFA或PFB字体数据
 // 返回: Type1Program 字形和子程序, error 错误信息
@@ -215,6 +180,88 @@ func ParseType1Program(data []byte) (Type1Program, error) {
 	return program, nil
 }
 
+// ToCFF 将Type1字形转换为保持三次轮廓的CFF字体
+// 入参: name 字体名称
+// 返回: []byte CFF数据, error 错误信息
+func (p *Type1Program) ToCFF(name string) ([]byte, error) {
+	if len(p.glyphs) > math.MaxUint16 || name == "" {
+		return nil, fmt.Errorf("invalid Type1 font identity")
+	}
+	ordered := make([]type1Glyph, 0, len(p.glyphs))
+	for _, glyph := range p.glyphs {
+		if glyph.name == ".notdef" {
+			ordered = append(ordered, glyph)
+			break
+		}
+	}
+	if len(ordered) == 0 {
+		return nil, fmt.Errorf("Type1 font lacks .notdef glyph")
+	}
+	for _, glyph := range p.glyphs {
+		if glyph.name != ".notdef" {
+			ordered = append(ordered, glyph)
+		}
+	}
+	chars := make([][]byte, len(ordered))
+	strings := make([][]byte, 0, len(ordered)-1)
+	charset := make([]byte, 1+2*(len(ordered)-1))
+	for index, glyph := range ordered {
+		charstring, err := p.outline(glyph)
+		if err != nil {
+			return nil, err
+		}
+		chars[index] = charstring
+		if index == 0 {
+			continue
+		}
+		strings = append(strings, []byte(glyph.name))
+		sid := 391 + index - 1
+		if sid > math.MaxUint16 {
+			return nil, fmt.Errorf("Type1 font has too many glyph names")
+		}
+		binary.BigEndian.PutUint16(charset[1+(index-1)*2:], uint16(sid))
+	}
+	nameIndex := encodeCFFIndex([][]byte{[]byte(name)})
+	stringIndex := encodeCFFIndex(strings)
+	globalSubrs := encodeCFFIndex(nil)
+	charIndex := encodeCFFIndex(chars)
+	topDict := make([]byte, 12)
+	topDict[0], topDict[5], topDict[6], topDict[11] = 29, 15, 29, 17
+	topDict = append(topDict, encodeCFFDict(cffDict{18: {0, 0}})...)
+	if p.matrix != nil {
+		topDict = append(topDict, encodeCFFDict(cffDict{1207: p.matrix})...)
+	}
+	topIndex := encodeCFFIndex([][]byte{topDict})
+	charsetOffset := 4 + len(nameIndex) + len(topIndex) + len(stringIndex) + len(globalSubrs)
+	charOffset := charsetOffset + len(charset)
+	binary.BigEndian.PutUint32(topDict[1:5], uint32(charsetOffset))
+	binary.BigEndian.PutUint32(topDict[7:11], uint32(charOffset))
+	topIndex = encodeCFFIndex([][]byte{topDict})
+	data := make([]byte, 0, charOffset+len(charIndex))
+	data = append(data, 1, 0, 4, 4)
+	data = append(data, nameIndex...)
+	data = append(data, topIndex...)
+	data = append(data, stringIndex...)
+	data = append(data, globalSubrs...)
+	data = append(data, charset...)
+	data = append(data, charIndex...)
+	return data, nil
+}
+
+// GlyphIDs 返回Type1名称到转换后字形编号的对应关系
+// 返回: map[string]uint16 字形编号
+func (p *Type1Program) GlyphIDs() map[string]uint16 {
+	ids := map[string]uint16{".notdef": 0}
+	next := uint16(1)
+	for _, glyph := range p.glyphs {
+		if glyph.name != ".notdef" {
+			ids[glyph.name] = next
+			next++
+		}
+	}
+	return ids
+}
+
 // NormalizePDFType1 修复完整加密分段之后的PFB明文尾部，不补齐加密或字形数据
 // 入参: data 原始PFB程序
 // 返回: []byte 原程序或独立修复容器, bool 是否修复, error 容器或程序错误
@@ -270,128 +317,16 @@ func NormalizePDFType1(data []byte) ([]byte, bool, error) {
 	return data, false, nil
 }
 
-// readType1Header 读取明文字体矩阵及加密数据起点
-// 入参: data Type1程序
-// 返回: []float64 字体矩阵, int 加密起点, error 头部错误
-func readType1Header(data []byte) ([]float64, int, error) {
-	scanner := type1Scanner{data: data}
-	var matrix []float64
-	for {
-		switch scanner.next() {
-		case "":
-			return nil, 0, fmt.Errorf("Type1 font lacks eexec data")
-		case "eexec":
-			return matrix, scanner.pos, nil
-		case "/FontMatrix":
-			closing := ""
-			switch scanner.next() {
-			case "[":
-				closing = "]"
-			case "{":
-				closing = "}"
-			default:
-				return nil, 0, fmt.Errorf("invalid Type1 FontMatrix array")
-			}
-			matrix = make([]float64, 6)
-			for index := range matrix {
-				value, err := strconv.ParseFloat(scanner.next(), 64)
-				if err != nil || !finite(value) {
-					return nil, 0, fmt.Errorf("invalid Type1 FontMatrix value")
-				}
-				matrix[index] = value
-			}
-			if scanner.next() != closing {
-				return nil, 0, fmt.Errorf("invalid Type1 FontMatrix length")
-			}
-			if _, err := readCFFMatrix(cffDict{1207: matrix}, [6]float64{}); err != nil {
-				return nil, 0, fmt.Errorf("invalid Type1 FontMatrix: %w", err)
-			}
-		}
-	}
+// type1Glyph 保存字形名称及指令
+type type1Glyph struct {
+	name string
+	data []byte
 }
 
-// flattenType1 将PFB分段容器转换为连续的Type1程序
-// 入参: data 字体数据
-// 返回: []byte 连续程序, error 错误信息
-func flattenType1(data []byte) ([]byte, error) {
-	if len(data) < 2 || data[0] != 0x80 {
-		return data, nil
-	}
-	var program []byte
-	for len(data) >= 2 && data[0] == 0x80 {
-		if data[1] == 3 {
-			return program, nil
-		}
-		if len(data) < 6 || data[1] != 1 && data[1] != 2 {
-			return nil, fmt.Errorf("invalid PFB segment")
-		}
-		length := binary.LittleEndian.Uint32(data[2:6])
-		if uint64(length) > uint64(len(data)-6) {
-			return nil, fmt.Errorf("truncated PFB segment")
-		}
-		program = append(program, data[6:6+length]...)
-		data = data[6+length:]
-	}
-	return nil, fmt.Errorf("missing PFB end marker")
-}
-
-// type1Decrypt 解密Type1的eexec或字形程序
-// 入参: data 密文, seed 初始密钥
-// 返回: []byte 明文
-func type1Decrypt(data []byte, seed uint16) []byte {
-	out := make([]byte, len(data))
-	for index, value := range data {
-		out[index] = value ^ byte(seed>>8)
-		seed = uint16((uint32(value)+uint32(seed))*52845 + 22719)
-	}
-	return out
-}
-
-// type1CharString 解密字形程序并移除lenIV随机前缀
-// 入参: data 字形密文, lenIV 前缀长度
-// 返回: []byte 指令数据, error 错误信息
-func type1CharString(data []byte, lenIV int) ([]byte, error) {
-	if lenIV < 0 {
-		return data, nil
-	}
-	if len(data) < lenIV {
-		return nil, fmt.Errorf("truncated Type1 charstring")
-	}
-	return type1Decrypt(data, 4330)[lenIV:], nil
-}
-
-// type1HexEncoded 区分eexec十六进制与二进制封装
-// 入参: data eexec数据
-// 返回: bool 是否为十六进制
-func type1HexEncoded(data []byte) bool {
-	count := 0
-	for _, value := range data {
-		if type1Space(value) {
-			continue
-		}
-		if !type1HexDigit(value) {
-			return false
-		}
-		count++
-		if count == 8 {
-			return true
-		}
-	}
-	return false
-}
-
-// type1HexDigit 判断字节是否为十六进制数字
-// 入参: value 待检查的字节
-// 返回: bool 是否为十六进制数字
-func type1HexDigit(value byte) bool {
-	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
-}
-
-// type1Space 判断PostScript空白字节
-// 入参: value 待检查的字节
-// 返回: bool 是否为空白字节
-func type1Space(value byte) bool {
-	return value == ' ' || value == '\t' || value == '\r' || value == '\n' || value == '\f' || value == 0
+// type1Scanner 按词项和显式长度读取Type1程序
+type type1Scanner struct {
+	data []byte
+	pos  int
 }
 
 // next 读取下一个PostScript词项，字形二进制块由binary处理
@@ -474,32 +409,27 @@ func (s *type1Scanner) binary(length int) ([]byte, error) {
 	return data, nil
 }
 
-// type1BinaryStart 判断Type1二进制数据起始操作符
-// 入参: token PostScript词项
-// 返回: bool 是否为二进制数据起始操作符
-func type1BinaryStart(token string) bool {
-	return token == "RD" || token == "-|"
-}
-
-// outline 将Type1字形指令转换为保留三次曲线的Type2程序
-// 入参: glyph 字形数据
-// 返回: []byte Type2字形程序, error 错误信息
-func (p *Type1Program) outline(glyph type1Glyph) ([]byte, error) {
-	state := type1Outline{program: p, active: map[string]bool{glyph.name: true}}
-	ended, err := state.run(glyph.data, 0)
-	if err != nil {
-		return nil, fmt.Errorf("Type1 glyph %s: %w", glyph.name, err)
-	}
-	if !ended || !state.defined {
-		return nil, fmt.Errorf("Type1 glyph %s has no complete outline", glyph.name)
-	}
-	var result bytes.Buffer
-	if err := encodeType2Width(&result, state.width); err != nil {
-		return nil, err
-	}
-	result.Write(state.path.Bytes())
-	result.WriteByte(14)
-	return result.Bytes(), nil
+// type1Outline 保存字形指令的操作数栈及轮廓位置
+type type1Outline struct {
+	program    *Type1Program
+	steps      *int
+	active     map[string]bool
+	args       []float64
+	postscript []float64
+	flexPoints [][2]float64
+	width      float64
+	sideX      float64
+	sideY      float64
+	originX    float64
+	originY    float64
+	x          float64
+	y          float64
+	pointX     float64
+	pointY     float64
+	open       bool
+	defined    bool
+	flex       bool
+	path       bytes.Buffer
 }
 
 // run 执行Type1字形或子程序，遇到endchar返回完成状态
@@ -863,6 +793,158 @@ func (s *type1Outline) curve(values [6]float64) error {
 	return nil
 }
 
+// readType1Header 读取明文字体矩阵及加密数据起点
+// 入参: data Type1程序
+// 返回: []float64 字体矩阵, int 加密起点, error 头部错误
+func readType1Header(data []byte) ([]float64, int, error) {
+	scanner := type1Scanner{data: data}
+	var matrix []float64
+	for {
+		switch scanner.next() {
+		case "":
+			return nil, 0, fmt.Errorf("Type1 font lacks eexec data")
+		case "eexec":
+			return matrix, scanner.pos, nil
+		case "/FontMatrix":
+			closing := ""
+			switch scanner.next() {
+			case "[":
+				closing = "]"
+			case "{":
+				closing = "}"
+			default:
+				return nil, 0, fmt.Errorf("invalid Type1 FontMatrix array")
+			}
+			matrix = make([]float64, 6)
+			for index := range matrix {
+				value, err := strconv.ParseFloat(scanner.next(), 64)
+				if err != nil || !finite(value) {
+					return nil, 0, fmt.Errorf("invalid Type1 FontMatrix value")
+				}
+				matrix[index] = value
+			}
+			if scanner.next() != closing {
+				return nil, 0, fmt.Errorf("invalid Type1 FontMatrix length")
+			}
+			if _, err := readCFFMatrix(cffDict{1207: matrix}, [6]float64{}); err != nil {
+				return nil, 0, fmt.Errorf("invalid Type1 FontMatrix: %w", err)
+			}
+		}
+	}
+}
+
+// flattenType1 将PFB分段容器转换为连续的Type1程序
+// 入参: data 字体数据
+// 返回: []byte 连续程序, error 错误信息
+func flattenType1(data []byte) ([]byte, error) {
+	if len(data) < 2 || data[0] != 0x80 {
+		return data, nil
+	}
+	var program []byte
+	for len(data) >= 2 && data[0] == 0x80 {
+		if data[1] == 3 {
+			return program, nil
+		}
+		if len(data) < 6 || data[1] != 1 && data[1] != 2 {
+			return nil, fmt.Errorf("invalid PFB segment")
+		}
+		length := binary.LittleEndian.Uint32(data[2:6])
+		if uint64(length) > uint64(len(data)-6) {
+			return nil, fmt.Errorf("truncated PFB segment")
+		}
+		program = append(program, data[6:6+length]...)
+		data = data[6+length:]
+	}
+	return nil, fmt.Errorf("missing PFB end marker")
+}
+
+// type1Decrypt 解密Type1的eexec或字形程序
+// 入参: data 密文, seed 初始密钥
+// 返回: []byte 明文
+func type1Decrypt(data []byte, seed uint16) []byte {
+	out := make([]byte, len(data))
+	for index, value := range data {
+		out[index] = value ^ byte(seed>>8)
+		seed = uint16((uint32(value)+uint32(seed))*52845 + 22719)
+	}
+	return out
+}
+
+// type1CharString 解密字形程序并移除lenIV随机前缀
+// 入参: data 字形密文, lenIV 前缀长度
+// 返回: []byte 指令数据, error 错误信息
+func type1CharString(data []byte, lenIV int) ([]byte, error) {
+	if lenIV < 0 {
+		return data, nil
+	}
+	if len(data) < lenIV {
+		return nil, fmt.Errorf("truncated Type1 charstring")
+	}
+	return type1Decrypt(data, 4330)[lenIV:], nil
+}
+
+// type1HexEncoded 区分eexec十六进制与二进制封装
+// 入参: data eexec数据
+// 返回: bool 是否为十六进制
+func type1HexEncoded(data []byte) bool {
+	count := 0
+	for _, value := range data {
+		if type1Space(value) {
+			continue
+		}
+		if !type1HexDigit(value) {
+			return false
+		}
+		count++
+		if count == 8 {
+			return true
+		}
+	}
+	return false
+}
+
+// type1HexDigit 判断字节是否为十六进制数字
+// 入参: value 待检查的字节
+// 返回: bool 是否为十六进制数字
+func type1HexDigit(value byte) bool {
+	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
+}
+
+// type1Space 判断PostScript空白字节
+// 入参: value 待检查的字节
+// 返回: bool 是否为空白字节
+func type1Space(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n' || value == '\f' || value == 0
+}
+
+// type1BinaryStart 判断Type1二进制数据起始操作符
+// 入参: token PostScript词项
+// 返回: bool 是否为二进制数据起始操作符
+func type1BinaryStart(token string) bool {
+	return token == "RD" || token == "-|"
+}
+
+// outline 将Type1字形指令转换为保留三次曲线的Type2程序
+// 入参: glyph 字形数据
+// 返回: []byte Type2字形程序, error 错误信息
+func (p *Type1Program) outline(glyph type1Glyph) ([]byte, error) {
+	state := type1Outline{program: p, active: map[string]bool{glyph.name: true}}
+	ended, err := state.run(glyph.data, 0)
+	if err != nil {
+		return nil, fmt.Errorf("Type1 glyph %s: %w", glyph.name, err)
+	}
+	if !ended || !state.defined {
+		return nil, fmt.Errorf("Type1 glyph %s has no complete outline", glyph.name)
+	}
+	var result bytes.Buffer
+	if err := encodeType2Width(&result, state.width); err != nil {
+		return nil, err
+	}
+	result.Write(state.path.Bytes())
+	result.WriteByte(14)
+	return result.Bytes(), nil
+}
+
 // encodeType2Number 编码Type2字形指令的有符号定点操作数
 // 入参: target 目标字节流, value 操作数
 // 返回: error 错误信息
@@ -917,86 +999,4 @@ func encodeType2Width(target *bytes.Buffer, width float64) error {
 		target.Write([]byte{12, 27, 12, 10})
 	}
 	return nil
-}
-
-// ToCFF 将Type1字形转换为保持三次轮廓的CFF字体
-// 入参: name 字体名称
-// 返回: []byte CFF数据, error 错误信息
-func (p *Type1Program) ToCFF(name string) ([]byte, error) {
-	if len(p.glyphs) > math.MaxUint16 || name == "" {
-		return nil, fmt.Errorf("invalid Type1 font identity")
-	}
-	ordered := make([]type1Glyph, 0, len(p.glyphs))
-	for _, glyph := range p.glyphs {
-		if glyph.name == ".notdef" {
-			ordered = append(ordered, glyph)
-			break
-		}
-	}
-	if len(ordered) == 0 {
-		return nil, fmt.Errorf("Type1 font lacks .notdef glyph")
-	}
-	for _, glyph := range p.glyphs {
-		if glyph.name != ".notdef" {
-			ordered = append(ordered, glyph)
-		}
-	}
-	chars := make([][]byte, len(ordered))
-	strings := make([][]byte, 0, len(ordered)-1)
-	charset := make([]byte, 1+2*(len(ordered)-1))
-	for index, glyph := range ordered {
-		charstring, err := p.outline(glyph)
-		if err != nil {
-			return nil, err
-		}
-		chars[index] = charstring
-		if index == 0 {
-			continue
-		}
-		strings = append(strings, []byte(glyph.name))
-		sid := 391 + index - 1
-		if sid > math.MaxUint16 {
-			return nil, fmt.Errorf("Type1 font has too many glyph names")
-		}
-		binary.BigEndian.PutUint16(charset[1+(index-1)*2:], uint16(sid))
-	}
-	nameIndex := encodeCFFIndex([][]byte{[]byte(name)})
-	stringIndex := encodeCFFIndex(strings)
-	globalSubrs := encodeCFFIndex(nil)
-	charIndex := encodeCFFIndex(chars)
-	topDict := make([]byte, 12)
-	topDict[0], topDict[5], topDict[6], topDict[11] = 29, 15, 29, 17
-	topDict = append(topDict, encodeCFFDict(cffDict{18: {0, 0}})...)
-	if p.matrix != nil {
-		topDict = append(topDict, encodeCFFDict(cffDict{1207: p.matrix})...)
-	}
-	topIndex := encodeCFFIndex([][]byte{topDict})
-	charsetOffset := 4 + len(nameIndex) + len(topIndex) + len(stringIndex) + len(globalSubrs)
-	charOffset := charsetOffset + len(charset)
-	binary.BigEndian.PutUint32(topDict[1:5], uint32(charsetOffset))
-	binary.BigEndian.PutUint32(topDict[7:11], uint32(charOffset))
-	topIndex = encodeCFFIndex([][]byte{topDict})
-	data := make([]byte, 0, charOffset+len(charIndex))
-	data = append(data, 1, 0, 4, 4)
-	data = append(data, nameIndex...)
-	data = append(data, topIndex...)
-	data = append(data, stringIndex...)
-	data = append(data, globalSubrs...)
-	data = append(data, charset...)
-	data = append(data, charIndex...)
-	return data, nil
-}
-
-// GlyphIDs 返回Type1名称到转换后字形编号的对应关系
-// 返回: map[string]uint16 字形编号
-func (p *Type1Program) GlyphIDs() map[string]uint16 {
-	ids := map[string]uint16{".notdef": 0}
-	next := uint16(1)
-	for _, glyph := range p.glyphs {
-		if glyph.name != ".notdef" {
-			ids[glyph.name] = next
-			next++
-		}
-	}
-	return ids
 }

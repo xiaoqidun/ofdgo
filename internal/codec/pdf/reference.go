@@ -32,14 +32,6 @@ type ReferenceCache struct {
 	pages   map[referencePageKey]*pdfgo.Page
 }
 
-// referencePageKey 区分目标文档、索引和文本标签，避免重复遍历页面树
-type referencePageKey struct {
-	reader  *pdfgo.Reader
-	index   int64
-	label   string
-	labeled bool
-}
-
 // Resolve 解析引用目标，目标不可用时按PDF标准保留代理内容
 // 入参: ctx 取消上下文, source 来源文档, reference 引用目标, fileResolver 外部文件读取, referenceResolver 调用方页面解析, warning 诊断回调
 // 返回: *pdfgo.Page 目标页面，不可用时为空, error 取消或调用方解析错误
@@ -96,6 +88,22 @@ func (c *ReferenceCache) Resolve(ctx context.Context, source *pdfgo.Reader, refe
 	return page, ctx.Err()
 }
 
+// Close 释放本次会话打开的引用文档并清空缓存，可重复调用，之后可重新解析
+func (c *ReferenceCache) Close() {
+	for _, reader := range c.readers {
+		reader.Close()
+	}
+	c.readers, c.streams, c.pages = nil, nil, nil
+}
+
+// referencePageKey 区分目标文档、索引和文本标签，避免重复遍历页面树
+type referencePageKey struct {
+	reader  *pdfgo.Reader
+	index   int64
+	label   string
+	labeled bool
+}
+
 // referenceProxy 记录目标不可用原因，不将合法的代理绘制视为转换失败
 // 入参: ctx 取消上下文, cause 目标不可用原因, warning 诊断回调
 // 返回: *pdfgo.Page 空目标, error 取消错误
@@ -110,12 +118,4 @@ func referenceProxy(ctx context.Context, cause error, warning func(pdfgo.Diagnos
 		warning(pdfgo.Diagnostic{Message: "reference XObject proxy retained: " + cause.Error()})
 	}
 	return nil, nil
-}
-
-// Close 释放本次会话打开的引用文档并清空缓存，可重复调用，之后可重新解析
-func (c *ReferenceCache) Close() {
-	for _, reader := range c.readers {
-		reader.Close()
-	}
-	c.readers, c.streams, c.pages = nil, nil, nil
 }

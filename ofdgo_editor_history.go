@@ -19,15 +19,6 @@ import (
 	"slices"
 )
 
-// editorChange 页面或对象操作及其修订标识
-type editorChange struct {
-	undo    func(*Editor)
-	redo    func(*Editor)
-	before  uint64
-	after   uint64
-	changes EditorChanges
-}
-
 // EditorChanges 描述最近一次修改或历史回放的刷新范围
 // All表示文档结构或共享资源变化；否则Pages为受影响的零基页码
 // 返回值只覆盖最近一次操作，调用方应在每次操作后读取
@@ -40,24 +31,6 @@ type EditorChanges struct {
 // 返回: EditorChanges 变化范围；未发生修改时为空
 func (e *Editor) Changes() EditorChanges {
 	return EditorChanges{All: e.changes.All, Pages: slices.Clone(e.changes.Pages)}
-}
-
-// merge 合并同一事务中的变化范围
-// 入参: change 待合并的变化
-func (c *EditorChanges) merge(change EditorChanges) {
-	if c.All {
-		return
-	}
-	if change.All {
-		c.All = true
-		c.Pages = nil
-		return
-	}
-	for _, page := range change.Pages {
-		if !slices.Contains(c.Pages, page) {
-			c.Pages = append(c.Pages, page)
-		}
-	}
 }
 
 // Transaction 将多项修改作为一次原子操作提交，失败时保留原文档及历史
@@ -174,6 +147,33 @@ func (e *Editor) Redo() bool {
 // 返回: uint64 修订标识
 func (e *Editor) Revision() uint64 {
 	return e.revision
+}
+
+// editorChange 页面或对象操作及其修订标识
+type editorChange struct {
+	undo    func(*Editor)
+	redo    func(*Editor)
+	before  uint64
+	after   uint64
+	changes EditorChanges
+}
+
+// merge 合并同一事务中的变化范围
+// 入参: change 待合并的变化
+func (c *EditorChanges) merge(change EditorChanges) {
+	if c.All {
+		return
+	}
+	if change.All {
+		c.All = true
+		c.Pages = nil
+		return
+	}
+	for _, page := range change.Pages {
+		if !slices.Contains(c.Pages, page) {
+			c.Pages = append(c.Pages, page)
+		}
+	}
 }
 
 // transactionSnapshot 复制顶层容器，共享按替换方式更新的页面图层、图元和二进制资源

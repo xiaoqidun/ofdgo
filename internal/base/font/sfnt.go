@@ -36,15 +36,6 @@ type SFNT struct {
 	reverse                            map[uint16][]rune
 }
 
-// sfntCmap 保存编码记录及字符映射，连续区间与共享子表不重复展开
-type sfntCmap struct {
-	platform, encoding, format uint16
-	mapping                    map[rune]uint16
-	groups                     []byte
-	entries                    uint64
-	duplicate                  bool
-}
-
 // ParseSFNT 校验独立字体的必需表、度量范围及字符映射
 // 入参: data 独立SFNT数据
 // 返回: *SFNT 字体, error 格式错误
@@ -101,6 +92,149 @@ func ParseSFNTTables(table map[string][]byte) (*SFNT, error) {
 		}
 	}
 	return f, nil
+}
+
+// UnitsPerEm 返回字体设计单位
+// 返回: uint16 每em单位数
+func (f *SFNT) UnitsPerEm() uint16 { return f.units }
+
+// NumGlyphs 返回字形总数
+// 返回: uint16 字形数
+func (f *SFNT) NumGlyphs() uint16 { return f.count }
+
+// CmapEntries 返回各编码记录的映射项总数，共享子表按记录分别计数
+// 返回: uint64 用于缓存预算的映射项数量
+func (f *SFNT) CmapEntries() uint64 {
+	var count uint64
+	for _, cmap := range f.cmaps {
+		count += uint64(len(cmap.mapping)) + cmap.entries
+	}
+	return count
+}
+
+// GlyphIndex 按编码表顺序查找字符，不替换缺失字形
+// 入参: char 字符
+// 返回: uint16 字形编号
+func (f *SFNT) GlyphIndex(char rune) uint16 {
+	for _, cmap := range f.cmaps {
+		if cmap.duplicate {
+			continue
+		}
+		if gid, ok := cmap.lookup(char); ok && gid != 0 {
+			return gid
+		}
+	}
+	return 0
+}
+
+// GlyphAdvance 返回水平字宽
+// 入参: gid 字形编号
+// 返回: uint16 字宽
+func (f *SFNT) GlyphAdvance(gid uint16) uint16 {
+	if gid >= f.count {
+		return 0
+	}
+	return binary.BigEndian.Uint16(f.Tables["hmtx"][int(min(gid, f.horizontal-1))*4:])
+}
+
+// GlyphVerticalAdvance 返回纵向字距，无垂直度量时使用em高度
+// 入参: gid 字形编号
+// 返回: uint16 纵向字距
+func (f *SFNT) GlyphVerticalAdvance(gid uint16) uint16 {
+	if f.vertical == 0 {
+		return f.units
+	}
+	if gid >= f.count {
+		return 0
+	}
+	return binary.BigEndian.Uint16(f.Tables["vmtx"][int(min(gid, f.vertical-1))*4:])
+}
+
+// VerticalMetrics 依据OS/2排版标志选择行度量，缺失时使用hhea
+// 返回: uint16 上升高度, uint16 下降高度, uint16 行间隙
+func (f *SFNT) VerticalMetrics() (uint16, uint16, uint16) {
+	hhea, os2 := f.Tables["hhea"], f.Tables["OS/2"]
+	a, d, gap := int(int16(binary.BigEndian.Uint16(hhea[4:]))), int(int16(binary.BigEndian.Uint16(hhea[6:]))), int(int16(binary.BigEndian.Uint16(hhea[8:])))
+	if len(os2) >= 78 {
+		if binary.BigEndian.Uint16(os2[62:])&0x80 != 0 {
+			ta, td := int(int16(binary.BigEndian.Uint16(os2[68:]))), int(int16(binary.BigEndian.Uint16(os2[70:])))
+			if ta > 0 && td < 0 {
+				a, d, gap = ta, td, int(int16(binary.BigEndian.Uint16(os2[72:])))
+			}
+		} else {
+			wa, wd := int(binary.BigEndian.Uint16(os2[74:])), int(binary.BigEndian.Uint16(os2[76:]))
+			if wa != 0 && wd != 0 {
+				gap, a, d = a-d+gap-wa-wd, wa, -wd
+			}
+		}
+	}
+	return uint16(max(0, a)), uint16(max(0, -d)), uint16(min(65535, max(0, gap)))
+}
+
+// Write 保留原始表数据并重新计算字体校验和
+// 返回: []byte 独立字体
+func (f *SFNT) Write() []byte { data, _ := SerializeOTF(f.Tables); return data }
+
+// sfntCmap 保存编码记录及字符映射，连续区间与共享子表不重复展开
+type sfntCmap struct {
+	platform, encoding, format uint16
+	mapping                    map[rune]uint16
+	groups                     []byte
+	entries                    uint64
+	duplicate                  bool
+}
+
+// pairs 按原映射返回字符与字形，连续编码段不展开存储
+// 返回: iter.Seq2[rune, uint16] 非零有效字符映射
+func (c sfntCmap) pairs() iter.Seq2[rune, uint16] {
+	return func(yield func(rune, uint16) bool) {
+		for char, glyph := range c.mapping {
+			if !yield(char, glyph) {
+				return
+			}
+		}
+		for offset := 0; offset+12 <= len(c.groups); offset += 12 {
+			group := c.groups[offset:]
+			first, last, glyph := binary.BigEndian.Uint32(group), binary.BigEndian.Uint32(group[4:]), binary.BigEndian.Uint32(group[8:])
+			if first > last || first > utf8.MaxRune || glyph > 65535 {
+				continue
+			}
+			end := min(uint64(last), uint64(first)+65535-uint64(glyph), uint64(utf8.MaxRune))
+			for char := uint64(first); char <= end; char++ {
+				id := uint16(uint64(glyph) + char - uint64(first))
+				if id != 0 && utf8.ValidRune(rune(char)) && !yield(rune(char), id) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// lookup 查找原字符映射，连续编码段使用有序区间查询
+// 入参: char 字符
+// 返回: uint16 字形编号, bool 是否存在映射
+func (c sfntCmap) lookup(char rune) (uint16, bool) {
+	if glyph, ok := c.mapping[char]; ok {
+		return glyph, true
+	}
+	if !utf8.ValidRune(char) {
+		return 0, false
+	}
+	low, high := 0, len(c.groups)/12
+	for low < high {
+		middle := low + (high-low)/2
+		group := c.groups[middle*12:]
+		first, last := binary.BigEndian.Uint32(group), binary.BigEndian.Uint32(group[4:])
+		if uint32(char) < first {
+			high = middle
+		} else if uint32(char) > last {
+			low = middle + 1
+		} else {
+			glyph := uint64(binary.BigEndian.Uint32(group[8:])) + uint64(uint32(char)-first)
+			return uint16(glyph), glyph > 0 && glyph <= 65535
+		}
+	}
+	return 0, false
 }
 
 // validSFNTMetrics 校验完整度量记录和末尾边距数组的范围
@@ -185,92 +319,6 @@ func readSFNTCmaps(data []byte) ([]sfntCmap, error) {
 	return result, nil
 }
 
-// pairs 按原映射返回字符与字形，连续编码段不展开存储
-// 返回: iter.Seq2[rune, uint16] 非零有效字符映射
-func (c sfntCmap) pairs() iter.Seq2[rune, uint16] {
-	return func(yield func(rune, uint16) bool) {
-		for char, glyph := range c.mapping {
-			if !yield(char, glyph) {
-				return
-			}
-		}
-		for offset := 0; offset+12 <= len(c.groups); offset += 12 {
-			group := c.groups[offset:]
-			first, last, glyph := binary.BigEndian.Uint32(group), binary.BigEndian.Uint32(group[4:]), binary.BigEndian.Uint32(group[8:])
-			if first > last || first > utf8.MaxRune || glyph > 65535 {
-				continue
-			}
-			end := min(uint64(last), uint64(first)+65535-uint64(glyph), uint64(utf8.MaxRune))
-			for char := uint64(first); char <= end; char++ {
-				id := uint16(uint64(glyph) + char - uint64(first))
-				if id != 0 && utf8.ValidRune(rune(char)) && !yield(rune(char), id) {
-					return
-				}
-			}
-		}
-	}
-}
-
-// lookup 查找原字符映射，连续编码段使用有序区间查询
-// 入参: char 字符
-// 返回: uint16 字形编号, bool 是否存在映射
-func (c sfntCmap) lookup(char rune) (uint16, bool) {
-	if glyph, ok := c.mapping[char]; ok {
-		return glyph, true
-	}
-	if !utf8.ValidRune(char) {
-		return 0, false
-	}
-	low, high := 0, len(c.groups)/12
-	for low < high {
-		middle := low + (high-low)/2
-		group := c.groups[middle*12:]
-		first, last := binary.BigEndian.Uint32(group), binary.BigEndian.Uint32(group[4:])
-		if uint32(char) < first {
-			high = middle
-		} else if uint32(char) > last {
-			low = middle + 1
-		} else {
-			glyph := uint64(binary.BigEndian.Uint32(group[8:])) + uint64(uint32(char)-first)
-			return uint16(glyph), glyph > 0 && glyph <= 65535
-		}
-	}
-	return 0, false
-}
-
-// UnitsPerEm 返回字体设计单位
-// 返回: uint16 每em单位数
-func (f *SFNT) UnitsPerEm() uint16 { return f.units }
-
-// NumGlyphs 返回字形总数
-// 返回: uint16 字形数
-func (f *SFNT) NumGlyphs() uint16 { return f.count }
-
-// CmapEntries 返回各编码记录的映射项总数，共享子表按记录分别计数
-// 返回: uint64 用于缓存预算的映射项数量
-func (f *SFNT) CmapEntries() uint64 {
-	var count uint64
-	for _, cmap := range f.cmaps {
-		count += uint64(len(cmap.mapping)) + cmap.entries
-	}
-	return count
-}
-
-// GlyphIndex 按编码表顺序查找字符，不替换缺失字形
-// 入参: char 字符
-// 返回: uint16 字形编号
-func (f *SFNT) GlyphIndex(char rune) uint16 {
-	for _, cmap := range f.cmaps {
-		if cmap.duplicate {
-			continue
-		}
-		if gid, ok := cmap.lookup(char); ok && gid != 0 {
-			return gid
-		}
-	}
-	return 0
-}
-
 // glyphCharacters 返回指向指定字形的全部字符，连续区间按需反查
 // 入参: gid 字形编号
 // 返回: []rune 排序后的字符
@@ -317,29 +365,6 @@ func (f *SFNT) glyphCharacters(gid uint16) []rune {
 	return slices.Compact(chars)
 }
 
-// GlyphAdvance 返回水平字宽
-// 入参: gid 字形编号
-// 返回: uint16 字宽
-func (f *SFNT) GlyphAdvance(gid uint16) uint16 {
-	if gid >= f.count {
-		return 0
-	}
-	return binary.BigEndian.Uint16(f.Tables["hmtx"][int(min(gid, f.horizontal-1))*4:])
-}
-
-// GlyphVerticalAdvance 返回纵向字距，无垂直度量时使用em高度
-// 入参: gid 字形编号
-// 返回: uint16 纵向字距
-func (f *SFNT) GlyphVerticalAdvance(gid uint16) uint16 {
-	if f.vertical == 0 {
-		return f.units
-	}
-	if gid >= f.count {
-		return 0
-	}
-	return binary.BigEndian.Uint16(f.Tables["vmtx"][int(min(gid, f.vertical-1))*4:])
-}
-
 // sideBearing 返回指定方向的字形边距
 // 入参: gid 字形编号, vertical 是否读取顶部边距
 // 返回: int16 边距
@@ -357,31 +382,6 @@ func (f *SFNT) sideBearing(gid uint16, vertical bool) int16 {
 	}
 	return int16(binary.BigEndian.Uint16(data[offset:]))
 }
-
-// VerticalMetrics 依据OS/2排版标志选择行度量，缺失时使用hhea
-// 返回: uint16 上升高度, uint16 下降高度, uint16 行间隙
-func (f *SFNT) VerticalMetrics() (uint16, uint16, uint16) {
-	hhea, os2 := f.Tables["hhea"], f.Tables["OS/2"]
-	a, d, gap := int(int16(binary.BigEndian.Uint16(hhea[4:]))), int(int16(binary.BigEndian.Uint16(hhea[6:]))), int(int16(binary.BigEndian.Uint16(hhea[8:])))
-	if len(os2) >= 78 {
-		if binary.BigEndian.Uint16(os2[62:])&0x80 != 0 {
-			ta, td := int(int16(binary.BigEndian.Uint16(os2[68:]))), int(int16(binary.BigEndian.Uint16(os2[70:])))
-			if ta > 0 && td < 0 {
-				a, d, gap = ta, td, int(int16(binary.BigEndian.Uint16(os2[72:])))
-			}
-		} else {
-			wa, wd := int(binary.BigEndian.Uint16(os2[74:])), int(binary.BigEndian.Uint16(os2[76:]))
-			if wa != 0 && wd != 0 {
-				gap, a, d = a-d+gap-wa-wd, wa, -wd
-			}
-		}
-	}
-	return uint16(max(0, a)), uint16(max(0, -d)), uint16(min(65535, max(0, gap)))
-}
-
-// Write 保留原始表数据并重新计算字体校验和
-// 返回: []byte 独立字体
-func (f *SFNT) Write() []byte { data, _ := SerializeOTF(f.Tables); return data }
 
 // glyphDependencies 批量收集复合字形依赖，校验引用、记录长度和嵌套深度
 // 入参: glyphs 字形编号

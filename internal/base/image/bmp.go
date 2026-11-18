@@ -23,13 +23,6 @@ import (
 	"math/bits"
 )
 
-// bmpColorMask 保存一个BMP颜色分量的位域位置和取值范围
-type bmpColorMask struct {
-	mask  uint32
-	shift uint
-	Max   uint32
-}
-
 // DecodeConfig 读取图片尺寸，BMP和TIFF只读取布局信息，不解码像素
 // 入参: input 图片输入流
 // 返回: image.Config 图片配置, string 图片格式, error 头部错误
@@ -62,16 +55,6 @@ func DecodeConfig(input io.Reader) (image.Config, string, error) {
 		}
 	}
 	return image.DecodeConfig(buffer)
-}
-
-// sample 将位域采样值映射到八位通道，缺省透明度为不透明
-// 入参: value 编码像素
-// 返回: uint8 通道值
-func (m bmpColorMask) sample(value uint32) uint8 {
-	if m.mask == 0 {
-		return 255
-	}
-	return uint8(uint64((value&m.mask)>>m.shift) * 255 / uint64(m.Max))
 }
 
 // BMPColorMasks 读取BMP真彩色通道布局，校验位域连续性、重叠及像素范围
@@ -122,4 +105,21 @@ func BMPColorMasks(data []byte, offset int, bpp uint16, compression uint32) ([4]
 		used |= mask
 	}
 	return result, nil
+}
+
+// bmpColorMask 保存一个BMP颜色分量的位域位置和取值范围
+type bmpColorMask struct {
+	mask  uint32
+	shift uint
+	Max   uint32
+}
+
+// sample 将位域采样值映射到八位通道，缺省透明度为不透明
+// 入参: value 编码像素
+// 返回: uint8 通道值
+func (m bmpColorMask) sample(value uint32) uint8 {
+	if m.mask == 0 {
+		return 255
+	}
+	return uint8(uint64((value&m.mask)>>m.shift) * 255 / uint64(m.Max))
 }

@@ -68,12 +68,6 @@ type MeshSampler struct {
 	nodes []meshSampleNode
 }
 
-// meshSampleNode 保存连续三角形组的包围盒及右子树位置
-type meshSampleNode struct {
-	minX, minY, maxX, maxY float64
-	right                  int
-}
-
 // UnmarshalXML 解析高洛德渐变的控制点和背景色
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
@@ -173,6 +167,39 @@ func (m *MeshShading) At(x, y float64) color.RGBA {
 		}
 	}
 	return m.Background
+}
+
+// NewSampler 创建网格快照，后续修改原网格不影响采样结果
+// 返回: *MeshSampler 只读采样器
+func (m *MeshShading) NewSampler() *MeshSampler {
+	s := &MeshSampler{}
+	if m != nil {
+		s.mesh = *m
+		s.mesh.Triangles = slices.Clone(m.Triangles)
+		if len(m.Triangles) > 8 {
+			s.build(0, len(m.Triangles))
+		}
+	}
+	return s
+}
+
+// At 采样快照中的预乘颜色，后绘制的三角形优先
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.RGBA 预乘颜色
+func (s *MeshSampler) At(x, y float64) color.RGBA {
+	if len(s.nodes) == 0 || !finite(x) || !finite(y) {
+		return s.mesh.At(x, y)
+	}
+	if value, ok := s.sample(0, 0, len(s.mesh.Triangles), x, y); ok {
+		return value
+	}
+	return s.mesh.Background
+}
+
+// meshSampleNode 保存连续三角形组的包围盒及右子树位置
+type meshSampleNode struct {
+	minX, minY, maxX, maxY float64
+	right                  int
 }
 
 // meshTriangleColor 按面积权重采样单个三角形，范围外不产生颜色
@@ -368,33 +395,6 @@ func meshRGB(space string, values [4]float64) (float64, float64, float64) {
 // 入参: value 分量
 // 返回: uint8 量化结果
 func meshByte(value float64) uint8 { return uint8(math.Round(math.Max(0, math.Min(1, value)) * 255)) }
-
-// NewSampler 创建网格快照，后续修改原网格不影响采样结果
-// 返回: *MeshSampler 只读采样器
-func (m *MeshShading) NewSampler() *MeshSampler {
-	s := &MeshSampler{}
-	if m != nil {
-		s.mesh = *m
-		s.mesh.Triangles = slices.Clone(m.Triangles)
-		if len(m.Triangles) > 8 {
-			s.build(0, len(m.Triangles))
-		}
-	}
-	return s
-}
-
-// At 采样快照中的预乘颜色，后绘制的三角形优先
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.RGBA 预乘颜色
-func (s *MeshSampler) At(x, y float64) color.RGBA {
-	if len(s.nodes) == 0 || !finite(x) || !finite(y) {
-		return s.mesh.At(x, y)
-	}
-	if value, ok := s.sample(0, 0, len(s.mesh.Triangles), x, y); ok {
-		return value
-	}
-	return s.mesh.Background
-}
 
 // build 按绘制顺序构建包围盒层级，不重排原三角形
 // 入参: first 起始三角形, end 结束位置

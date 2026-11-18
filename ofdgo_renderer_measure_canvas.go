@@ -21,13 +21,6 @@ import (
 	"github.com/tdewolff/canvas"
 )
 
-// boundsRenderer 收集绘制范围，不分配页面像素或合并独立图形轮廓
-type boundsRenderer struct {
-	box      Box
-	collect  bool
-	contours []ObjectContour
-}
-
 // MeasureObject 使用默认解释器度量对象，不分配页面像素
 // 入参: r 渲染器, object 图形对象, options 度量上下文
 // 返回: ObjectMeasurement 度量结果, error 错误信息
@@ -93,6 +86,31 @@ func (CanvasBackend) MeasureObject(r *Renderer, object GraphicObject, options Me
 	return ObjectMeasurement{Bounds: bounds.box, Contours: bounds.contours}, renderer.renderError
 }
 
+// PageText 使用默认解释器提取原文与字形位置
+// 入参: r 渲染器, page 页面内容
+// 返回: *PageText 页面文字, error 错误信息
+func (CanvasBackend) PageText(r *Renderer, page *PageContent) (*PageText, error) {
+	box, err := r.GetPageBox(page)
+	if err != nil {
+		return nil, err
+	}
+	renderer := *r
+	renderer.OnPageText = nil
+	renderer.pageText = &PageText{}
+	renderer.textOnly = true
+	if err := renderer.renderCanvasPageToContext(canvas.NewContext(canvas.New(box.W, box.H)), page, false); err != nil {
+		return nil, err
+	}
+	return renderer.pageText, nil
+}
+
+// boundsRenderer 收集绘制范围，不分配页面像素或合并独立图形轮廓
+type boundsRenderer struct {
+	box      Box
+	collect  bool
+	contours []ObjectContour
+}
+
 // Size 返回不限定边界的度量画布尺寸
 // 返回: float64 宽度, float64 高度
 func (r *boundsRenderer) Size() (float64, float64) {
@@ -121,22 +139,29 @@ func (r *boundsRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
 // 入参: img 图片, m 变换矩阵
 func (r *boundsRenderer) RenderImage(img image.Image, m canvas.Matrix) {}
 
-// PageText 使用默认解释器提取原文与字形位置
-// 入参: r 渲染器, page 页面内容
-// 返回: *PageText 页面文字, error 错误信息
-func (CanvasBackend) PageText(r *Renderer, page *PageContent) (*PageText, error) {
-	box, err := r.GetPageBox(page)
-	if err != nil {
-		return nil, err
+// add 合并路径的精确曲线范围并转换为向下的纵轴
+// 入参: path 绘制路径
+func (r *boundsRenderer) add(path *canvas.Path) {
+	r.addContour(path, false)
+}
+
+// addContour 合并范围并按需保留独立填充区域
+// 入参: path 绘制路径, evenOdd 是否使用奇偶规则
+func (r *boundsRenderer) addContour(path *canvas.Path, evenOdd bool) {
+	if path.Empty() {
+		return
 	}
-	renderer := *r
-	renderer.OnPageText = nil
-	renderer.pageText = &PageText{}
-	renderer.textOnly = true
-	if err := renderer.renderCanvasPageToContext(canvas.NewContext(canvas.New(box.W, box.H)), page, false); err != nil {
-		return nil, err
+	rect := path.Bounds()
+	r.box = unionTextBox(r.box, Box{X: rect.X0, Y: -rect.Y1, W: rect.W(), H: rect.H()})
+	if r.collect {
+		outline := &canvas.Path{}
+		for _, subpath := range path.Split() {
+			subpath = subpath.Copy()
+			subpath.Close()
+			outline = outline.Append(subpath)
+		}
+		r.contours = append(r.contours, ObjectContour{Path: outline.Transform(canvas.Matrix{{1, 0, 0}, {0, -1, 0}}).ToSVG(), EvenOdd: evenOdd})
 	}
-	return renderer.pageText, nil
 }
 
 // measureImage 复用图片变换与裁剪语义度量范围，不读取像素数据
@@ -177,31 +202,6 @@ func boundsColor(color *FillColor) *FillColor {
 		return color
 	}
 	return &FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}
-}
-
-// add 合并路径的精确曲线范围并转换为向下的纵轴
-// 入参: path 绘制路径
-func (r *boundsRenderer) add(path *canvas.Path) {
-	r.addContour(path, false)
-}
-
-// addContour 合并范围并按需保留独立填充区域
-// 入参: path 绘制路径, evenOdd 是否使用奇偶规则
-func (r *boundsRenderer) addContour(path *canvas.Path, evenOdd bool) {
-	if path.Empty() {
-		return
-	}
-	rect := path.Bounds()
-	r.box = unionTextBox(r.box, Box{X: rect.X0, Y: -rect.Y1, W: rect.W(), H: rect.H()})
-	if r.collect {
-		outline := &canvas.Path{}
-		for _, subpath := range path.Split() {
-			subpath = subpath.Copy()
-			subpath.Close()
-			outline = outline.Append(subpath)
-		}
-		r.contours = append(r.contours, ObjectContour{Path: outline.Transform(canvas.Matrix{{1, 0, 0}, {0, -1, 0}}).ToSVG(), EvenOdd: evenOdd})
-	}
 }
 
 // textPathBox 将字形轮廓转换为页面区域

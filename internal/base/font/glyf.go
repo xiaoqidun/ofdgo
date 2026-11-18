@@ -38,14 +38,6 @@ type Outliner struct {
 	warnings map[uint16]error
 }
 
-// ttGlyph 保存字形轮廓及四个度量虚拟点
-type ttGlyph struct {
-	points  []ttPoint
-	ends    []uint16
-	metrics *[4]ttPoint
-	warning error
-}
-
 // Path 按字体设计坐标提取闭合轮廓，TrueType保留字形指令处理
 // 入参: path 路径接收器, glyph 字形编号, scale 字体单位缩放
 // 返回: error 字形解析错误
@@ -146,6 +138,23 @@ func (f *Outliner) Path(path glyphPather, glyph uint16, scale float64) error {
 		first = last + 1
 	}
 	return nil
+}
+
+// GlyphWarning 返回字形恢复为执行前轮廓的原因
+// 入参: id 字形编号
+// 返回: error 恢复原因，无恢复时为空
+func (f *Outliner) GlyphWarning(id uint16) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.warnings[id]
+}
+
+// ttGlyph 保存字形轮廓及四个度量虚拟点
+type ttGlyph struct {
+	points  []ttPoint
+	ends    []uint16
+	metrics *[4]ttPoint
+	warning error
 }
 
 // glyph 解码简单或复合字形并执行对应字节码，不改写字体资源
@@ -282,15 +291,6 @@ func (f *Outliner) recordGlyphWarning(id uint16, warning error) {
 		f.warnings = make(map[uint16]error)
 	}
 	f.warnings[id] = warning
-}
-
-// GlyphWarning 返回字形恢复为执行前轮廓的原因
-// 入参: id 字形编号
-// 返回: error 恢复原因，无恢复时为空
-func (f *Outliner) GlyphWarning(id uint16) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.warnings[id]
 }
 
 // readTTSimple 读取简单字形的重复标志、差分坐标和字节码

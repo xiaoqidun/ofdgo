@@ -95,6 +95,13 @@ func (p Path) Bounds() (Box, error) {
 	return Box{left, top, right - left, bottom - top}, nil
 }
 
+// Lerp 线性插值坐标
+// 入参: a 起点, b 终点, t 插值比例
+// 返回: Point 插值坐标
+func Lerp(a, b Point, t float64) Point {
+	return Point{(1-t)*a.X + t*b.X, (1-t)*a.Y + t*b.Y}
+}
+
 // geometryRoots 稳定求解一元二次方程的实根
 // 入参: a 二次项系数, b 一次项系数, c 常数项
 // 返回: []float64 实根
@@ -119,11 +126,4 @@ func geometryRoots(a, b, c float64) []float64 {
 		return []float64{-b / (2 * a)}
 	}
 	return []float64{q / a, c / q}
-}
-
-// Lerp 线性插值坐标
-// 入参: a 起点, b 终点, t 插值比例
-// 返回: Point 插值坐标
-func Lerp(a, b Point, t float64) Point {
-	return Point{(1-t)*a.X + t*b.X, (1-t)*a.Y + t*b.Y}
 }

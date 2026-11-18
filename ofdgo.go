@@ -218,16 +218,6 @@ func ReadInput(ctx context.Context, reader io.Reader, options InputOptions) (*In
 	return input, nil
 }
 
-// checkOptions 检查取消状态及输入大小
-// 入参: ctx 取消上下文, options 输入选项
-// 返回: error 取消或大小错误
-func (s *Input) checkOptions(ctx context.Context, options InputOptions) error {
-	if options.MaxSize < 0 || options.MaxSize > 0 && s.size > options.MaxSize {
-		return fmt.Errorf("input exceeds size limit")
-	}
-	return ctx.Err()
-}
-
 // Size 返回输入字节数，关闭后仍可查询
 // 返回: int64 数据大小
 func (s *Input) Size() int64 {
@@ -345,4 +335,14 @@ func WithFontFS(fs ...fs.FS) RendererOption {
 	return func(r *Renderer) {
 		r.fontFS = append(r.fontFS, fs...)
 	}
+}
+
+// checkOptions 检查取消状态及输入大小
+// 入参: ctx 取消上下文, options 输入选项
+// 返回: error 取消或大小错误
+func (s *Input) checkOptions(ctx context.Context, options InputOptions) error {
+	if options.MaxSize < 0 || options.MaxSize > 0 && s.size > options.MaxSize {
+		return fmt.Errorf("input exceeds size limit")
+	}
+	return ctx.Err()
 }

@@ -29,18 +29,6 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// colorImage 保留源采样及独立的十六位显示像素
-type colorImage struct {
-	*image.NRGBA64
-	source image.Image
-}
-
-// pngColor 保存PNG校准空间及缺省sRGB传递函数
-type pngColor struct {
-	space      *pdfgo.ColorSpace
-	linearSRGB bool
-}
-
 // TransformRGBA 按八位预乘颜色变换同范围像素，源和目标可为同一图像
 // 入参: target 目标缓冲, source 同范围源图像, transform 单像素颜色变换
 func TransformRGBA(target *image.RGBA, source image.Image, transform func(color.RGBA) color.RGBA) {
@@ -70,6 +58,18 @@ func TransformRGBA(target *image.RGBA, source image.Image, transform func(color.
 			row[i], row[i+1], row[i+2], row[i+3] = pixel.R, pixel.G, pixel.B, pixel.A
 		}
 	}
+}
+
+// colorImage 保留源采样及独立的十六位显示像素
+type colorImage struct {
+	*image.NRGBA64
+	source image.Image
+}
+
+// pngColor 保存PNG校准空间及缺省sRGB传递函数
+type pngColor struct {
+	space      *pdfgo.ColorSpace
+	linearSRGB bool
 }
 
 // pngColorProfile 读取PNG颜色元数据，ICC优先于sRGB及独立校准参数

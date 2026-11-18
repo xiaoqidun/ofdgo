@@ -104,20 +104,6 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	return next, nil
 }
 
-// deviceLineWidth 按设备分辨率计算描边宽度，零线宽为一像素，正线宽至少为两像素
-// 入参: width 页面空间线宽，单位为毫米
-// 返回: float64 设备描边宽度，单位为毫米
-func (r *Renderer) deviceLineWidth(width float64) float64 {
-	pixel := 25.4 / r.DPI
-	if width == 0 {
-		return pixel
-	}
-	if width > 0 {
-		return max(width, 2*pixel)
-	}
-	return width
-}
-
 // ClearCache 释放派生字体、图片、模板与后端缓存，不改变文档和渲染配置
 func (r *Renderer) ClearCache() {
 	r.imageCache.clear()
@@ -139,6 +125,20 @@ func (r *Renderer) SetFontFS(fsys ...fs.FS) {
 // 返回: []string 字体目录, []fs.FS 字体文件系统
 func (r *Renderer) FontSources() ([]string, []fs.FS) {
 	return append([]string(nil), r.fontDirs...), append([]fs.FS(nil), r.fontFS...)
+}
+
+// deviceLineWidth 按设备分辨率计算描边宽度，零线宽为一像素，正线宽至少为两像素
+// 入参: width 页面空间线宽，单位为毫米
+// 返回: float64 设备描边宽度，单位为毫米
+func (r *Renderer) deviceLineWidth(width float64) float64 {
+	pixel := 25.4 / r.DPI
+	if width == 0 {
+		return pixel
+	}
+	if width > 0 {
+		return max(width, 2*pixel)
+	}
+	return width
 }
 
 // childRenderer 继承配置并复用字体文件索引与数据，文档匹配结果保持独立

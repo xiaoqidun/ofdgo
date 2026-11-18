@@ -47,49 +47,6 @@ func FaceInfo(data []byte, index int) Face {
 	return faceInfoLanguage(data, index, 0xffff, 0xffff)
 }
 
-// faceInfoLanguage 优先读取指定平台和语言的显示名称，保留标识及全部别名
-// 入参: data 名称表数据, index 字体索引, platform 平台标识, language 语言标识
-// 返回: Face 字体信息
-func faceInfoLanguage(data []byte, index int, platform, language uint16) Face {
-	records, values := fontNameValues(data)
-	name := func(ids ...uint16) string {
-		for _, id := range ids {
-			for _, record := range records {
-				if record.Name == id {
-					if value := strings.TrimSpace(values[[4]uint16{record.Platform, record.Encoding, record.Language, id}]); value != "" {
-						return value
-					}
-				}
-			}
-		}
-		return ""
-	}
-	localized := func(ids ...uint16) string {
-		for _, id := range ids {
-			for _, record := range records {
-				if record.Platform == platform && record.Language == language && record.Name == id {
-					if value := strings.TrimSpace(values[[4]uint16{record.Platform, record.Encoding, record.Language, id}]); value != "" {
-						return value
-					}
-				}
-			}
-		}
-		return name(ids...)
-	}
-	key := ""
-	if family, version := name(1), name(5); family != "" && version != "" {
-		key = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join([]string{family, version, name(8)}, "\x00"))))
-	}
-	family, style := localized(1), localized(2)
-	if family == "" {
-		family = localized(16, 4, 6)
-	}
-	if style == "" {
-		style = localized(17)
-	}
-	return Face{Index: index, FullName: localized(4, 6, 16, 1), Family: localized(16, 1), Style: localized(17, 2), PostScriptName: name(6), Names: fontNamesFromValues(records, values), MenuFamily: family, MenuStyle: style, FamilyKey: key}
-}
-
 // TableFaceInfo 读取名称及字体固有款式，名称键不随显示语言变化
 // 入参: tables 字体表, index 集合索引, platform 平台标识, language 语言标识
 // 返回: Face 字体信息
@@ -218,4 +175,47 @@ func MissingGlyphs(data []byte, text string) (string, error) {
 		}
 	}
 	return missing.String(), nil
+}
+
+// faceInfoLanguage 优先读取指定平台和语言的显示名称，保留标识及全部别名
+// 入参: data 名称表数据, index 字体索引, platform 平台标识, language 语言标识
+// 返回: Face 字体信息
+func faceInfoLanguage(data []byte, index int, platform, language uint16) Face {
+	records, values := fontNameValues(data)
+	name := func(ids ...uint16) string {
+		for _, id := range ids {
+			for _, record := range records {
+				if record.Name == id {
+					if value := strings.TrimSpace(values[[4]uint16{record.Platform, record.Encoding, record.Language, id}]); value != "" {
+						return value
+					}
+				}
+			}
+		}
+		return ""
+	}
+	localized := func(ids ...uint16) string {
+		for _, id := range ids {
+			for _, record := range records {
+				if record.Platform == platform && record.Language == language && record.Name == id {
+					if value := strings.TrimSpace(values[[4]uint16{record.Platform, record.Encoding, record.Language, id}]); value != "" {
+						return value
+					}
+				}
+			}
+		}
+		return name(ids...)
+	}
+	key := ""
+	if family, version := name(1), name(5); family != "" && version != "" {
+		key = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join([]string{family, version, name(8)}, "\x00"))))
+	}
+	family, style := localized(1), localized(2)
+	if family == "" {
+		family = localized(16, 4, 6)
+	}
+	if style == "" {
+		style = localized(17)
+	}
+	return Face{Index: index, FullName: localized(4, 6, 16, 1), Family: localized(16, 1), Style: localized(17, 2), PostScriptName: name(6), Names: fontNamesFromValues(records, values), MenuFamily: family, MenuStyle: style, FamilyKey: key}
 }

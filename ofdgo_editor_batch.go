@@ -18,46 +18,11 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"reflect"
 	"slices"
+
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
-
-// editorObjectPosition 对象所属图层及层内索引
-type editorObjectPosition struct {
-	layer int
-	index int
-}
-
-// editorObjectIndex 复用最近页面的只读对象位置，图层容器替换后重新建立
-type editorObjectIndex struct {
-	layers    []Layer
-	positions map[string]editorObjectPosition
-}
-
-// objectPositions 获取页面的对象位置索引，重复编号保留第一个匹配
-// 入参: page 内部只读页面
-// 返回: map[string]editorObjectPosition 只读索引
-func (e *Editor) objectPositions(page *PageContent) map[string]editorObjectPosition {
-	layers := page.Content.Layer
-	if len(layers) == 0 {
-		return nil
-	}
-	if cached := e.objectIndex; cached != nil && len(cached.layers) == len(layers) && &cached.layers[0] == &layers[0] {
-		return cached.positions
-	}
-	positions := make(map[string]editorObjectPosition)
-	for i, layer := range layers {
-		for j, object := range layer.Objects {
-			id := editorObjectID(object)
-			if _, exists := positions[id]; id != "" && !exists {
-				positions[id] = editorObjectPosition{i, j}
-			}
-		}
-	}
-	e.objectIndex = &editorObjectIndex{layers: layers, positions: positions}
-	return positions
-}
 
 // ObjectPosition 对象在图层或页块直接成员中的位置，Index从0开始，Count不含嵌套页块的对象
 type ObjectPosition struct {
@@ -151,176 +116,6 @@ func (e *Editor) CopyObjectsContext(ctx context.Context, page int, objects []Gra
 		return nil, err
 	}
 	return ids, nil
-}
-
-// copyObjectsContext 复制标准对象及资源来源，由上层按需同步富文本标引
-// 入参: ctx 取消上下文, page 目标页, objects 对象快照, dx 横向位移, dy 纵向位移
-// 返回: []string 新对象标识, error 校验或取消错误
-func (e *Editor) copyObjectsContext(ctx context.Context, page int, objects []GraphicObject, dx, dy float64) ([]string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if !finite(dx) || !finite(dy) {
-		return nil, fmt.Errorf("copy requires finite offsets")
-	}
-	_, err := e.page(page)
-	if err != nil {
-		return nil, err
-	}
-	if len(objects) == 0 {
-		return nil, nil
-	}
-	if err := e.prepareSourceIDs(); err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	prepared := make([]GraphicObject, len(objects))
-	origins := make([]*editorObjectOrigin, len(objects))
-	result := make([]string, len(objects))
-	maximum := e.maxID + uint64(len(objects))
-	validation := &editorValidation{Editor: e}
-	for i, object := range objects {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		result[i] = formatUnitID(e.maxID + uint64(i) + 1)
-		object, err := validation.prepareCopiedObject(result[i], object)
-		if err != nil {
-			return nil, err
-		}
-		if dx != 0 || dy != 0 {
-			object, err = transformEditorObject(object, dx, dy, 1)
-			if err != nil {
-				return nil, err
-			}
-			if err = validateEditorGeometry(object); err != nil {
-				return nil, err
-			}
-		}
-		prepared[i], origins[i], err = e.copyObjectOrigin(objects[i], object, &maximum)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if maximum > maxUnitID {
-		return nil, fmt.Errorf("MaxUnitID %d exceeds uint32 range", maximum)
-	}
-	e.maxID = maximum
-	for i, origin := range origins {
-		if origin != nil {
-			e.setObjectOrigin(result[i], origin)
-		}
-	}
-	layers := copyEditorPage(e.pages[page]).Content.Layer
-	target := 0
-	if e.originalPage(page) {
-		target = len(e.source.pages[e.pages[page].ID].original.Content.Layer)
-	}
-	if target < len(layers) {
-		target = len(layers) - 1
-	}
-	for i := 0; i < len(prepared); {
-		style := e.copiedLayerStyle(objects[i])
-		if target == len(layers) || layers[target].DrawParam != style {
-			layers = append(layers, Layer{ID: e.nextID(), Type: "Body", DrawParam: style})
-			target = len(layers) - 1
-		}
-		end := i + 1
-		for end < len(prepared) && e.copiedLayerStyle(objects[end]) == style {
-			end++
-		}
-		if len(layers[target].Objects) == 0 {
-			layers[target].Objects = prepared[i:end:end]
-		} else {
-			layers[target].Objects = append(layers[target].Objects, prepared[i:end]...)
-		}
-		i = end
-	}
-	e.replacePreparedLayers(page, layers)
-	return result, nil
-}
-
-// appendOwnedObjects 接收本库生成对象的所有权，全部校验后提交一次撤销记录
-// 入参: ctx 取消上下文, page 目标页, objects 无原文和标识且调用方不再修改的对象
-// 返回: error 校验或取消错误，失败时不提交页面内容
-func (e *Editor) appendOwnedObjects(ctx context.Context, page int, objects []GraphicObject) error {
-	return (&editorValidation{Editor: e}).appendOwnedObjects(ctx, page, objects)
-}
-
-// appendOwnedObjects 在资源不变的构建会话内复用校验结果，接收对象所有权
-// 入参: ctx 取消上下文, page 目标页, objects 无原文和标识的独立对象
-// 返回: error 校验或取消错误
-func (v *editorValidation) appendOwnedObjects(ctx context.Context, page int, objects []GraphicObject) error {
-	e := v.Editor
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if _, err := e.page(page); err != nil {
-		return err
-	}
-	if len(objects) == 0 {
-		return nil
-	}
-	if err := e.prepareSourceIDs(); err != nil {
-		return err
-	}
-	for i, object := range objects {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if object.origin != nil || editorObjectID(object) != "" {
-			return fmt.Errorf("owned objects must not have identifiers or original content")
-		}
-		prepared, err := v.prepareObject("", object)
-		if err != nil {
-			return err
-		}
-		objects[i] = prepared
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if e.maxID+uint64(len(objects))+1 > maxUnitID {
-		return fmt.Errorf("MaxUnitID %d exceeds uint32 range", e.maxID+uint64(len(objects)))
-	}
-	for i := range objects {
-		id := formatUnitID(e.maxID + uint64(i) + 1)
-		switch objects[i].Type {
-		case "TextObject":
-			objects[i].TextObject.ID = id
-		case "PathObject":
-			objects[i].PathObject.ID = id
-		case "ImageObject":
-			objects[i].ImageObject.ID = id
-		case "CompositeObject":
-			objects[i].CompositeGraphicUnit.ID = id
-		}
-	}
-	layers := copyEditorPage(e.pages[page]).Content.Layer
-	target := 0
-	if e.originalPage(page) {
-		target = len(e.source.pages[e.pages[page].ID].original.Content.Layer)
-	}
-	if target < len(layers) {
-		target = len(layers) - 1
-	}
-	e.maxID += uint64(len(objects))
-	if target == len(layers) || layers[target].DrawParam != "" {
-		layers = append(layers, Layer{ID: e.nextID(), Type: "Body"})
-		target = len(layers) - 1
-	}
-	if len(layers[target].Objects) == 0 {
-		layers[target].Objects = objects[:len(objects):len(objects)]
-	} else {
-		layers[target].Objects = append(layers[target].Objects, objects...)
-	}
-	e.replacePreparedLayers(page, layers)
-	return nil
 }
 
 // PageObjectInfo 批量获取页面对象能力与位置，不重复扫描同一容器
@@ -568,6 +363,212 @@ func (e *Editor) DeleteObjects(page int, ids []string) error {
 		}
 		return nil
 	})
+}
+
+// editorObjectPosition 对象所属图层及层内索引
+type editorObjectPosition struct {
+	layer int
+	index int
+}
+
+// editorObjectIndex 复用最近页面的只读对象位置，图层容器替换后重新建立
+type editorObjectIndex struct {
+	layers    []Layer
+	positions map[string]editorObjectPosition
+}
+
+// objectPositions 获取页面的对象位置索引，重复编号保留第一个匹配
+// 入参: page 内部只读页面
+// 返回: map[string]editorObjectPosition 只读索引
+func (e *Editor) objectPositions(page *PageContent) map[string]editorObjectPosition {
+	layers := page.Content.Layer
+	if len(layers) == 0 {
+		return nil
+	}
+	if cached := e.objectIndex; cached != nil && len(cached.layers) == len(layers) && &cached.layers[0] == &layers[0] {
+		return cached.positions
+	}
+	positions := make(map[string]editorObjectPosition)
+	for i, layer := range layers {
+		for j, object := range layer.Objects {
+			id := editorObjectID(object)
+			if _, exists := positions[id]; id != "" && !exists {
+				positions[id] = editorObjectPosition{i, j}
+			}
+		}
+	}
+	e.objectIndex = &editorObjectIndex{layers: layers, positions: positions}
+	return positions
+}
+
+// copyObjectsContext 复制标准对象及资源来源，由上层按需同步富文本标引
+// 入参: ctx 取消上下文, page 目标页, objects 对象快照, dx 横向位移, dy 纵向位移
+// 返回: []string 新对象标识, error 校验或取消错误
+func (e *Editor) copyObjectsContext(ctx context.Context, page int, objects []GraphicObject, dx, dy float64) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !finite(dx) || !finite(dy) {
+		return nil, fmt.Errorf("copy requires finite offsets")
+	}
+	_, err := e.page(page)
+	if err != nil {
+		return nil, err
+	}
+	if len(objects) == 0 {
+		return nil, nil
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	prepared := make([]GraphicObject, len(objects))
+	origins := make([]*editorObjectOrigin, len(objects))
+	result := make([]string, len(objects))
+	maximum := e.maxID + uint64(len(objects))
+	validation := &editorValidation{Editor: e}
+	for i, object := range objects {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		result[i] = formatUnitID(e.maxID + uint64(i) + 1)
+		object, err := validation.prepareCopiedObject(result[i], object)
+		if err != nil {
+			return nil, err
+		}
+		if dx != 0 || dy != 0 {
+			object, err = transformEditorObject(object, dx, dy, 1)
+			if err != nil {
+				return nil, err
+			}
+			if err = validateEditorGeometry(object); err != nil {
+				return nil, err
+			}
+		}
+		prepared[i], origins[i], err = e.copyObjectOrigin(objects[i], object, &maximum)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if maximum > maxUnitID {
+		return nil, fmt.Errorf("MaxUnitID %d exceeds uint32 range", maximum)
+	}
+	e.maxID = maximum
+	for i, origin := range origins {
+		if origin != nil {
+			e.setObjectOrigin(result[i], origin)
+		}
+	}
+	layers := copyEditorPage(e.pages[page]).Content.Layer
+	target := 0
+	if e.originalPage(page) {
+		target = len(e.source.pages[e.pages[page].ID].original.Content.Layer)
+	}
+	if target < len(layers) {
+		target = len(layers) - 1
+	}
+	for i := 0; i < len(prepared); {
+		style := e.copiedLayerStyle(objects[i])
+		if target == len(layers) || layers[target].DrawParam != style {
+			layers = append(layers, Layer{ID: e.nextID(), Type: "Body", DrawParam: style})
+			target = len(layers) - 1
+		}
+		end := i + 1
+		for end < len(prepared) && e.copiedLayerStyle(objects[end]) == style {
+			end++
+		}
+		if len(layers[target].Objects) == 0 {
+			layers[target].Objects = prepared[i:end:end]
+		} else {
+			layers[target].Objects = append(layers[target].Objects, prepared[i:end]...)
+		}
+		i = end
+	}
+	e.replacePreparedLayers(page, layers)
+	return result, nil
+}
+
+// appendOwnedObjects 接收本库生成对象的所有权，全部校验后提交一次撤销记录
+// 入参: ctx 取消上下文, page 目标页, objects 无原文和标识且调用方不再修改的对象
+// 返回: error 校验或取消错误，失败时不提交页面内容
+func (e *Editor) appendOwnedObjects(ctx context.Context, page int, objects []GraphicObject) error {
+	return (&editorValidation{Editor: e}).appendOwnedObjects(ctx, page, objects)
+}
+
+// appendOwnedObjects 在资源不变的构建会话内复用校验结果，接收对象所有权
+// 入参: ctx 取消上下文, page 目标页, objects 无原文和标识的独立对象
+// 返回: error 校验或取消错误
+func (v *editorValidation) appendOwnedObjects(ctx context.Context, page int, objects []GraphicObject) error {
+	e := v.Editor
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := e.page(page); err != nil {
+		return err
+	}
+	if len(objects) == 0 {
+		return nil
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return err
+	}
+	for i, object := range objects {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if object.origin != nil || editorObjectID(object) != "" {
+			return fmt.Errorf("owned objects must not have identifiers or original content")
+		}
+		prepared, err := v.prepareObject("", object)
+		if err != nil {
+			return err
+		}
+		objects[i] = prepared
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if e.maxID+uint64(len(objects))+1 > maxUnitID {
+		return fmt.Errorf("MaxUnitID %d exceeds uint32 range", e.maxID+uint64(len(objects)))
+	}
+	for i := range objects {
+		id := formatUnitID(e.maxID + uint64(i) + 1)
+		switch objects[i].Type {
+		case "TextObject":
+			objects[i].TextObject.ID = id
+		case "PathObject":
+			objects[i].PathObject.ID = id
+		case "ImageObject":
+			objects[i].ImageObject.ID = id
+		case "CompositeObject":
+			objects[i].CompositeGraphicUnit.ID = id
+		}
+	}
+	layers := copyEditorPage(e.pages[page]).Content.Layer
+	target := 0
+	if e.originalPage(page) {
+		target = len(e.source.pages[e.pages[page].ID].original.Content.Layer)
+	}
+	if target < len(layers) {
+		target = len(layers) - 1
+	}
+	e.maxID += uint64(len(objects))
+	if target == len(layers) || layers[target].DrawParam != "" {
+		layers = append(layers, Layer{ID: e.nextID(), Type: "Body"})
+		target = len(layers) - 1
+	}
+	if len(layers[target].Objects) == 0 {
+		layers[target].Objects = objects[:len(objects):len(objects)]
+	} else {
+		layers[target].Objects = append(layers[target].Objects, objects...)
+	}
+	e.replacePreparedLayers(page, layers)
+	return nil
 }
 
 // deleteObjects 删除已选择图元，由上层同步必要的富文本标引

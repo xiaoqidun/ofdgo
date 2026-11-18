@@ -18,12 +18,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"image"
 	"math"
 
 	"github.com/tdewolff/canvas"
 	canvasimage "github.com/tdewolff/canvas/image"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"golang.org/x/image/draw"
 )

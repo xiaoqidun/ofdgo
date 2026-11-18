@@ -34,16 +34,6 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// 与PDFGo共用输出压缩模式和有损压缩等级
-const (
-	CompressionUnchanged = pdfgo.CompressionUnchanged
-	CompressionLossless  = pdfgo.CompressionLossless
-	CompressionLossy     = pdfgo.CompressionLossy
-	CompressionLight     = pdfgo.CompressionLight
-	CompressionMedium    = pdfgo.CompressionMedium
-	CompressionStrong    = pdfgo.CompressionStrong
-)
-
 // outputOptimizationBufferLimit 限制压缩时的单个输出缓冲，单位为字节
 const outputOptimizationBufferLimit = 64 << 20
 
@@ -53,8 +43,22 @@ var outputDeflaters = make(chan *flate.Writer, 2)
 // CompressionMode 选择原始、无损或有损输出策略
 type CompressionMode = pdfgo.CompressionMode
 
+// 与PDFGo共用输出压缩模式
+const (
+	CompressionUnchanged = pdfgo.CompressionUnchanged
+	CompressionLossless  = pdfgo.CompressionLossless
+	CompressionLossy     = pdfgo.CompressionLossy
+)
+
 // CompressionLevel 选择轻压、均衡或强压，仅用于有损模式
 type CompressionLevel = pdfgo.CompressionLevel
+
+// 与PDFGo共用有损压缩等级
+const (
+	CompressionLight  = pdfgo.CompressionLight
+	CompressionMedium = pdfgo.CompressionMedium
+	CompressionStrong = pdfgo.CompressionStrong
+)
 
 // CompressionOptions 配置输出压缩，原始模式沿用现有输出策略，不额外优化
 // Quality和MaxDPI为零时按Level使用预设，不改变页面尺寸或整页导出精度
@@ -63,37 +67,6 @@ type CompressionOptions = pdfgo.CompressionOptions
 
 // WriteOptions 配置OFD输出副本，不修改编辑资源和撤销记录
 type WriteOptions struct{ Compression CompressionOptions }
-
-// outputOptimization 保存单次写出的配置、图片路径及压缩进度，复用压缩器
-type outputOptimization struct {
-	ctx        context.Context
-	options    CompressionOptions
-	images     map[string]bool
-	sizes      map[string]image.Point
-	protected  bool
-	completed  int
-	deflater   *flate.Writer
-	resources  *editorResourceSelection
-	references *renderCache[editorScanKey, editorScanValue]
-}
-
-// outputCompressionBuffer 限制候选ZIP编码，不能缩小时终止本次压缩
-type outputCompressionBuffer struct {
-	buffer   *bytes.Buffer
-	limit    int
-	exceeded bool
-}
-
-// Write 写入有界候选编码，超过体积上限时返回短缓冲错误
-// 入参: data 编码数据
-// 返回: int 写入字节数, error 容量错误
-func (b *outputCompressionBuffer) Write(data []byte) (int, error) {
-	if len(data) > b.limit-b.buffer.Len() {
-		b.exceeded = true
-		return 0, io.ErrShortBuffer
-	}
-	return b.buffer.Write(data)
-}
 
 // WriteToWithOptions 按压缩策略写出OFD，签名文档不额外改写资源内容
 // 入参: ctx 取消上下文, writer 输出流, options 输出配置
@@ -127,6 +100,73 @@ func (e *Editor) WritePagesTo(ctx context.Context, writer io.Writer, indexes []i
 	defer snapshot.output.release()
 	var count int64
 	return snapshot.writePagesTo(convertWriter{ctx: ctx, writer: writer, count: &count}, indexes)
+}
+
+// WithCompression 设置导出策略，不修改文档资源和渲染缓存
+// 入参: options 压缩配置，写出时校验
+// 返回: RendererOption 渲染器配置
+func WithCompression(options CompressionOptions) RendererOption {
+	return func(r *Renderer) { r.Compression = options }
+}
+
+// outputOptimization 保存单次写出的配置、图片路径及压缩进度，复用压缩器
+type outputOptimization struct {
+	ctx        context.Context
+	options    CompressionOptions
+	images     map[string]bool
+	sizes      map[string]image.Point
+	protected  bool
+	completed  int
+	deflater   *flate.Writer
+	resources  *editorResourceSelection
+	references *renderCache[editorScanKey, editorScanValue]
+}
+
+// compressor 获取当前输出独占的压缩器，重置后不复用上一次编码状态
+// 入参: writer 编码目标
+// 返回: *flate.Writer 压缩器
+func (o *outputOptimization) compressor(writer io.Writer) *flate.Writer {
+	if o.deflater == nil {
+		select {
+		case o.deflater = <-outputDeflaters:
+		default:
+			o.deflater, _ = flate.NewWriter(writer, flate.BestCompression)
+			return o.deflater
+		}
+	}
+	o.deflater.Reset(writer)
+	return o.deflater
+}
+
+// release 释放输出目标并归还压缩器，池满时由运行时回收
+func (o *outputOptimization) release() {
+	if o.deflater == nil {
+		return
+	}
+	o.deflater.Reset(io.Discard)
+	select {
+	case outputDeflaters <- o.deflater:
+	default:
+	}
+	o.deflater = nil
+}
+
+// outputCompressionBuffer 限制候选ZIP编码，不能缩小时终止本次压缩
+type outputCompressionBuffer struct {
+	buffer   *bytes.Buffer
+	limit    int
+	exceeded bool
+}
+
+// Write 写入有界候选编码，超过体积上限时返回短缓冲错误
+// 入参: data 编码数据
+// 返回: int 写入字节数, error 容量错误
+func (b *outputCompressionBuffer) Write(data []byte) (int, error) {
+	if len(data) > b.limit-b.buffer.Len() {
+		b.exceeded = true
+		return 0, io.ErrShortBuffer
+	}
+	return b.buffer.Write(data)
 }
 
 // outputSnapshot 创建只读输出配置，原签名存在时仅调整ZIP封装
@@ -548,13 +588,6 @@ func (e *Editor) writeOutputFile(archive *zip.Writer, file *zip.File, buffer []b
 	return editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0)
 }
 
-// WithCompression 设置导出策略，不修改文档资源和渲染缓存
-// 入参: options 压缩配置，写出时校验
-// 返回: RendererOption 渲染器配置
-func WithCompression(options CompressionOptions) RendererOption {
-	return func(r *Renderer) { r.Compression = options }
-}
-
 // writeCompressedImage 优化已经编码的图片，再交付调用方输出流
 // 入参: writer 输出流, data 图片数据
 // 返回: error 优化或写入错误
@@ -577,33 +610,4 @@ func (r *Renderer) outputContext() context.Context {
 		return r.OutputContext
 	}
 	return context.Background()
-}
-
-// compressor 获取当前输出独占的压缩器，重置后不复用上一次编码状态
-// 入参: writer 编码目标
-// 返回: *flate.Writer 压缩器
-func (o *outputOptimization) compressor(writer io.Writer) *flate.Writer {
-	if o.deflater == nil {
-		select {
-		case o.deflater = <-outputDeflaters:
-		default:
-			o.deflater, _ = flate.NewWriter(writer, flate.BestCompression)
-			return o.deflater
-		}
-	}
-	o.deflater.Reset(writer)
-	return o.deflater
-}
-
-// release 释放输出目标并归还压缩器，池满时由运行时回收
-func (o *outputOptimization) release() {
-	if o.deflater == nil {
-		return
-	}
-	o.deflater.Reset(io.Discard)
-	select {
-	case outputDeflaters <- o.deflater:
-	default:
-	}
-	o.deflater = nil
 }

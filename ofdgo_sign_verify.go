@@ -144,18 +144,6 @@ type SignatureReferenceVerify struct {
 	Error      string
 }
 
-// signatureVerifyOptions 签名验证选项
-type signatureVerifyOptions struct {
-	SignCerts  [][]byte
-	TrustCerts [][]byte
-	VerifyTime *time.Time
-	Policy     *SignaturePolicy
-	Timestamp  *SignatureTimestampOptions
-	Revocation *SignatureRevocationOptions
-	DocIndex   int
-	DocRoot    string
-}
-
 // SignatureVerifyOption 签名验证选项函数
 type SignatureVerifyOption func(*signatureVerifyOptions)
 
@@ -243,17 +231,6 @@ func WithSignatureVerifyTime(t time.Time) SignatureVerifyOption {
 	return func(o *signatureVerifyOptions) {
 		o.VerifyTime = &t
 	}
-}
-
-// VerifySignatures 验证输入源中的OFD签名，不接管输入源生命周期
-// 入参: input 输入源, opts 签名验证选项
-// 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
-func VerifySignatures(input *Input, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
-	reader, err := NewReader(input)
-	if err != nil {
-		return nil, err
-	}
-	return reader.VerifySignatures(opts...)
 }
 
 // VerifySignatures 验证文档签名
@@ -346,6 +323,29 @@ func (r *Reader) VerifyDocumentSignaturesContext(ctx context.Context, index int,
 		reports = append(reports, view.verifySignature(ctx, sigListPath, sigRef, &options))
 	}
 	return reports, ctx.Err()
+}
+
+// VerifySignatures 验证输入源中的OFD签名，不接管输入源生命周期
+// 入参: input 输入源, opts 签名验证选项
+// 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
+func VerifySignatures(input *Input, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	reader, err := NewReader(input)
+	if err != nil {
+		return nil, err
+	}
+	return reader.VerifySignatures(opts...)
+}
+
+// signatureVerifyOptions 签名验证选项
+type signatureVerifyOptions struct {
+	SignCerts  [][]byte
+	TrustCerts [][]byte
+	VerifyTime *time.Time
+	Policy     *SignaturePolicy
+	Timestamp  *SignatureTimestampOptions
+	Revocation *SignatureRevocationOptions
+	DocIndex   int
+	DocRoot    string
 }
 
 // appendSignatureCerts 追加签名证书

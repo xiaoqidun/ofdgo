@@ -33,15 +33,6 @@ type PatternStyle struct {
 	CTM    *string
 }
 
-// editorValidation 保存同次对象校验的引用路径及已验证几何，允许共享但拒绝循环
-type editorValidation struct {
-	*Editor
-	patterns   map[*Pattern]bool
-	composites map[string]bool
-	vectors    map[string]bool
-	paths      map[string]bool
-}
-
 // AddColorSpace 注册颜色空间和可选ICC快照，相同配置共用文件，ID与Profile由库生成
 // 入参: space 模型、位深和调色板, profile ICC文件，无配置时为nil
 // 返回: string 资源标识, error 定义或配置错误
@@ -376,6 +367,120 @@ func (e *Editor) PaintObjects(page int, ids []string, paint *FillColor, stroke b
 	return e.updateObjects(page, objects, true)
 }
 
+// editorValidation 保存同次对象校验的引用路径及已验证几何，允许共享但拒绝循环
+type editorValidation struct {
+	*Editor
+	patterns   map[*Pattern]bool
+	composites map[string]bool
+	vectors    map[string]bool
+	paths      map[string]bool
+}
+
+// editorColor 沿当前引用路径校验底纹单元及绘制颜色
+// 入参: value 颜色
+// 返回: error 错误信息
+func (v *editorValidation) editorColor(value *FillColor) error {
+	e := v.Editor
+	if value != nil && value.Pattern != nil {
+		pattern := value.Pattern
+		if v.patterns[pattern] {
+			return fmt.Errorf("cyclic pattern paint")
+		}
+		if v.patterns == nil {
+			v.patterns = make(map[*Pattern]bool)
+		}
+		v.patterns[pattern] = true
+		defer delete(v.patterns, pattern)
+	}
+	if value != nil && (value.GouraudShd != nil || value.LaGouraudShd != nil) {
+		return e.editorMeshColor(value)
+	}
+	if value != nil && value.Pattern != nil {
+		pattern := value.Pattern
+		if value.unsupported || value.AxialShd != nil || value.RadialShd != nil || !finite(pattern.Width) || !finite(pattern.Height) || pattern.Width <= 0 || pattern.Height <= 0 || !finite(pattern.XStep) || !finite(pattern.YStep) {
+			return fmt.Errorf("invalid pattern paint")
+		}
+		if !slices.Contains([]string{"", "Normal", "Row", "Column", "RowAndColumn"}, pattern.ReflectMethod) {
+			return fmt.Errorf("invalid pattern reflection")
+		}
+		if pattern.RelativeTo != "" && pattern.RelativeTo != "Page" && pattern.RelativeTo != "Object" {
+			return fmt.Errorf("invalid pattern reference")
+		}
+		if pattern.CTM != "" {
+			if _, err := creationNumbers(pattern.CTM, 6); err != nil {
+				return err
+			}
+		}
+		base := *value
+		base.Pattern = nil
+		if base.Value == "" && base.Index == nil {
+			if base.Alpha != nil && (*base.Alpha < 0 || *base.Alpha > 255) {
+				return fmt.Errorf("color alpha must be between 0 and 255")
+			}
+		} else if _, err := e.Color(&base); err != nil {
+			return err
+		}
+		if pattern.CellContent.Thumbnail != "" {
+			if _, err := e.editorImage(pattern.CellContent.Thumbnail); err != nil {
+				return err
+			}
+		}
+		for object := range pattern.CellContent.objects() {
+			if _, err := v.prepareObject("", object); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if value == nil || value.AxialShd == nil && value.RadialShd == nil {
+		_, err := e.Color(value)
+		return err
+	}
+	if value.unsupported || value.Pattern != nil || value.AxialShd != nil && value.RadialShd != nil || value.Value != "" || value.Index != nil {
+		return fmt.Errorf("specify one paint source")
+	}
+	if value.Alpha != nil && (*value.Alpha < 0 || *value.Alpha > 255) {
+		return fmt.Errorf("color alpha must be between 0 and 255")
+	}
+	var mapType, extend, start, end string
+	var unit float64
+	var segments []ShdSegment
+	if node := value.AxialShd; node != nil {
+		mapType, unit, extend, start, end, segments = node.MapType, node.MapUnit, node.Extend, node.StartPoint, node.EndPoint, node.Segment
+	} else {
+		node := value.RadialShd
+		mapType, unit, extend, start, end, segments = node.MapType, node.MapUnit, node.Extend, node.StartPoint, node.EndPoint, node.Segment
+		if !finite(node.StartRadius) || !finite(node.EndRadius) || node.StartRadius < 0 || node.EndRadius < 0 || !finite(node.Eccentricity) || node.Eccentricity < 0 || node.Eccentricity >= 1 || !finite(node.Angle) {
+			return fmt.Errorf("invalid radial gradient geometry")
+		}
+	}
+	if !slices.Contains([]string{"", "Direct", "Repeat", "Reflect"}, mapType) || !finite(unit) || unit < 0 || (mapType == "Repeat" || mapType == "Reflect") && unit == 0 || !slices.Contains([]string{"", "0", "1", "2", "3"}, extend) {
+		return fmt.Errorf("invalid gradient mapping")
+	}
+	for _, point := range []string{start, end} {
+		if _, err := creationNumbers(point, 2); err != nil {
+			return err
+		}
+	}
+	if len(segments) < 2 {
+		return fmt.Errorf("gradient requires at least two stops")
+	}
+	previous := -1.0
+	positions := gradientPositions(segments)
+	for index, segment := range segments {
+		position := positions[index]
+		if !finite(position) || position < previous || position < 0 || position > 1 {
+			return fmt.Errorf("gradient stops must be ordered within zero and one")
+		}
+		previous = position
+		color := segment.Color
+		if _, err := e.Color(&FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // editorPaintable 判断文字与路径颜色能否在保留其他字段的前提下修改
 // 入参: object 图形对象
 // 返回: bool 是否支持绘制颜色编辑
@@ -526,109 +631,4 @@ func (e *Editor) editorMeshColor(value *FillColor) error {
 // 返回: error 错误信息
 func (e *Editor) editorColor(value *FillColor) error {
 	return (&editorValidation{Editor: e}).editorColor(value)
-}
-
-// editorColor 沿当前引用路径校验底纹单元及绘制颜色
-// 入参: value 颜色
-// 返回: error 错误信息
-func (v *editorValidation) editorColor(value *FillColor) error {
-	e := v.Editor
-	if value != nil && value.Pattern != nil {
-		pattern := value.Pattern
-		if v.patterns[pattern] {
-			return fmt.Errorf("cyclic pattern paint")
-		}
-		if v.patterns == nil {
-			v.patterns = make(map[*Pattern]bool)
-		}
-		v.patterns[pattern] = true
-		defer delete(v.patterns, pattern)
-	}
-	if value != nil && (value.GouraudShd != nil || value.LaGouraudShd != nil) {
-		return e.editorMeshColor(value)
-	}
-	if value != nil && value.Pattern != nil {
-		pattern := value.Pattern
-		if value.unsupported || value.AxialShd != nil || value.RadialShd != nil || !finite(pattern.Width) || !finite(pattern.Height) || pattern.Width <= 0 || pattern.Height <= 0 || !finite(pattern.XStep) || !finite(pattern.YStep) {
-			return fmt.Errorf("invalid pattern paint")
-		}
-		if !slices.Contains([]string{"", "Normal", "Row", "Column", "RowAndColumn"}, pattern.ReflectMethod) {
-			return fmt.Errorf("invalid pattern reflection")
-		}
-		if pattern.RelativeTo != "" && pattern.RelativeTo != "Page" && pattern.RelativeTo != "Object" {
-			return fmt.Errorf("invalid pattern reference")
-		}
-		if pattern.CTM != "" {
-			if _, err := creationNumbers(pattern.CTM, 6); err != nil {
-				return err
-			}
-		}
-		base := *value
-		base.Pattern = nil
-		if base.Value == "" && base.Index == nil {
-			if base.Alpha != nil && (*base.Alpha < 0 || *base.Alpha > 255) {
-				return fmt.Errorf("color alpha must be between 0 and 255")
-			}
-		} else if _, err := e.Color(&base); err != nil {
-			return err
-		}
-		if pattern.CellContent.Thumbnail != "" {
-			if _, err := e.editorImage(pattern.CellContent.Thumbnail); err != nil {
-				return err
-			}
-		}
-		for object := range pattern.CellContent.objects() {
-			if _, err := v.prepareObject("", object); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if value == nil || value.AxialShd == nil && value.RadialShd == nil {
-		_, err := e.Color(value)
-		return err
-	}
-	if value.unsupported || value.Pattern != nil || value.AxialShd != nil && value.RadialShd != nil || value.Value != "" || value.Index != nil {
-		return fmt.Errorf("specify one paint source")
-	}
-	if value.Alpha != nil && (*value.Alpha < 0 || *value.Alpha > 255) {
-		return fmt.Errorf("color alpha must be between 0 and 255")
-	}
-	var mapType, extend, start, end string
-	var unit float64
-	var segments []ShdSegment
-	if node := value.AxialShd; node != nil {
-		mapType, unit, extend, start, end, segments = node.MapType, node.MapUnit, node.Extend, node.StartPoint, node.EndPoint, node.Segment
-	} else {
-		node := value.RadialShd
-		mapType, unit, extend, start, end, segments = node.MapType, node.MapUnit, node.Extend, node.StartPoint, node.EndPoint, node.Segment
-		if !finite(node.StartRadius) || !finite(node.EndRadius) || node.StartRadius < 0 || node.EndRadius < 0 || !finite(node.Eccentricity) || node.Eccentricity < 0 || node.Eccentricity >= 1 || !finite(node.Angle) {
-			return fmt.Errorf("invalid radial gradient geometry")
-		}
-	}
-	if !slices.Contains([]string{"", "Direct", "Repeat", "Reflect"}, mapType) || !finite(unit) || unit < 0 || (mapType == "Repeat" || mapType == "Reflect") && unit == 0 || !slices.Contains([]string{"", "0", "1", "2", "3"}, extend) {
-		return fmt.Errorf("invalid gradient mapping")
-	}
-	for _, point := range []string{start, end} {
-		if _, err := creationNumbers(point, 2); err != nil {
-			return err
-		}
-	}
-	if len(segments) < 2 {
-		return fmt.Errorf("gradient requires at least two stops")
-	}
-	previous := -1.0
-	positions := gradientPositions(segments)
-	for index, segment := range segments {
-		position := positions[index]
-		if !finite(position) || position < previous || position < 0 || position > 1 {
-			return fmt.Errorf("gradient stops must be ordered within zero and one")
-		}
-		previous = position
-		color := segment.Color
-		if _, err := e.Color(&FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}); err != nil {
-			return err
-		}
-	}
-	return nil
 }

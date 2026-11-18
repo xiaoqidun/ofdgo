@@ -25,11 +25,38 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// PDFDestination 获取当前文档的PDF运行时定位语义，坐标单位为毫米
+// 返回值独立于阅读器；普通OFD及保存为OFD再打开的文档不返回PDF目标
+// 入参: dest 当前文档动作中的目标
+// 返回: pdfgo.DestinationTarget 页面左上原点的定位目标, bool 是否来自PDF导入快照
+func (r *Reader) PDFDestination(dest Dest) (pdfgo.DestinationTarget, bool) {
+	if d := r.pdfDestinations; d != nil && d.root == r.documentRoot {
+		target, ok := d.targets[pdfDestinationKey(dest)]
+		return target, ok
+	}
+	return pdfgo.DestinationTarget{}, false
+}
+
 // pdfEmbeddedFile 保存目标路径的容器与原始文件，阅读器按需打开
 type pdfEmbeddedFile struct {
 	reader *pdfgo.Reader
 	file   *pdfgo.FileSpecification
 	data   []byte
+}
+
+// pdfDestinations 保存PDF导入文档的运行时目标语义，不写入OFD包
+type pdfDestinations struct {
+	root    string
+	targets map[Dest]pdfgo.DestinationTarget
+}
+
+// clone 复制定位信息，避免增量导入及编辑影响已交付的阅读快照
+// 返回: *pdfDestinations 独立定位信息
+func (d *pdfDestinations) clone() *pdfDestinations {
+	if d == nil {
+		return nil
+	}
+	return &pdfDestinations{root: d.root, targets: maps.Clone(d.targets)}
 }
 
 // annotations 将链接、静态注解和表单外观按页面顺序转换为OFD对象
@@ -816,33 +843,6 @@ func (p *pdfImporter) embeddedLinkAction(object pdfgo.Object, strict bool) (*Act
 	}
 	p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF embedded link target retained as attachment; destination inside attached PDF not transferred to OFD"})
 	return &Action{Event: "CLICK", GotoA: &GotoA{AttachID: id, NewWindow: action.NewWindow}}, nil, nil
-}
-
-// pdfDestinations 保存PDF导入文档的运行时目标语义，不写入OFD包
-type pdfDestinations struct {
-	root    string
-	targets map[Dest]pdfgo.DestinationTarget
-}
-
-// clone 复制定位信息，避免增量导入及编辑影响已交付的阅读快照
-// 返回: *pdfDestinations 独立定位信息
-func (d *pdfDestinations) clone() *pdfDestinations {
-	if d == nil {
-		return nil
-	}
-	return &pdfDestinations{root: d.root, targets: maps.Clone(d.targets)}
-}
-
-// PDFDestination 获取当前文档的PDF运行时定位语义，坐标单位为毫米
-// 返回值独立于阅读器；普通OFD及保存为OFD再打开的文档不返回PDF目标
-// 入参: dest 当前文档动作中的目标
-// 返回: pdfgo.DestinationTarget 页面左上原点的定位目标, bool 是否来自PDF导入快照
-func (r *Reader) PDFDestination(dest Dest) (pdfgo.DestinationTarget, bool) {
-	if d := r.pdfDestinations; d != nil && d.root == r.documentRoot {
-		target, ok := d.targets[pdfDestinationKey(dest)]
-		return target, ok
-	}
-	return pdfgo.DestinationTarget{}, false
 }
 
 // setPDFDestination 保存PDF目标到导入文档的运行时索引

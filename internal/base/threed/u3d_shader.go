@@ -45,69 +45,6 @@ type u3dTextureSet struct {
 	reflection, perspective bool
 }
 
-// shaderTextures 校验并缓存启用的纹理，未使用的着色器不会触发图像解码
-// 入参: shader 着色器
-// 返回: *u3dTextureSet 纹理组合，空值表示无纹理, error 参数、能力、预算或取消错误
-func (r *Renderer) shaderTextures(shader U3DShader) (*u3dTextureSet, error) {
-	if shader.Textures == ([8]*U3DTextureLayer{}) {
-		return nil, nil
-	}
-	if err := r.ctx.Err(); err != nil {
-		return nil, err
-	}
-	if cached := r.textureSets[shader.Textures]; cached != nil {
-		return cached, nil
-	}
-	if err := r.Reserve(1, 512); err != nil {
-		return nil, err
-	}
-	set := &u3dTextureSet{layers: shader.Textures}
-	for i, layer := range set.layers {
-		if layer == nil {
-			continue
-		}
-		if layer.Blend > 3 || layer.BlendSource > 1 || layer.Mode > 4 || layer.Repeat > 3 || !finite(float64(layer.Intensity)) || !finite(float64(layer.BlendConstant)) {
-			return nil, fmt.Errorf("invalid U3D texture layer")
-		}
-		for _, matrix := range [2][16]float32{layer.Transform, layer.WrapTransform} {
-			for _, value := range matrix {
-				if !finite(float64(value)) {
-					return nil, fmt.Errorf("invalid U3D texture transform")
-				}
-			}
-		}
-		if layer.Mode >= 1 && layer.Mode <= 3 {
-			if err := r.Reserve(1, 256); err != nil {
-				return nil, err
-			}
-			inverse, err := u3dTextureInverse(layer.WrapTransform)
-			if err != nil {
-				return nil, err
-			}
-			set.wrap[i] = &inverse
-		}
-		if layer.Mode == 4 && !set.reflection {
-			var ok bool
-			set.normal, ok = r.toCamera.inverse()
-			if !ok {
-				return nil, fmt.Errorf("invalid U3D reflection camera")
-			}
-			set.reflection, set.perspective = true, r.camera.Perspective
-		}
-		img, err := r.texture(layer.Texture)
-		if err != nil {
-			return nil, err
-		}
-		set.images[i] = img
-		set.mask |= 1 << i
-	}
-	if r.textureSets == nil {
-		r.textureSets = make(map[[8]*U3DTextureLayer]*u3dTextureSet)
-	}
-	r.textureSets[shader.Textures] = set
-	return set, nil
-}
-
 // coordinates 保存模型纹理坐标或程序化映射的插值输入，避免经线两侧直接插值
 // 入参: vertex 目标顶点, mesh 几何资源, shading 属性布局, corner 属性索引, normal 世界法线
 // 返回: error 坐标、索引或维度错误
@@ -172,26 +109,6 @@ func (s *u3dTextureSet) coordinates(vertex *u3dVertex, mesh *U3DMesh, shading U3
 	return nil
 }
 
-// textureColor 合成纹理后恢复节点指定的透明度，再叠加视图透明度
-// 入参: textures 纹理组合, color 顶点插值颜色, coordinates 纹理输入, position 相机空间位置, override 是否指定节点透明度
-// 返回: error 纹理映射或混合错误
-func (r *Renderer) textureColor(textures *u3dTextureSet, color *[4]float64, coordinates *[8][3]float64, position u3dVector, override bool) error {
-	if textures == nil {
-		return nil
-	}
-	opacity := color[3]
-	if err := textures.color(color, coordinates, position); err != nil {
-		return err
-	}
-	if override {
-		color[3] = opacity
-	}
-	if r.opacity >= 0 {
-		color[3] *= r.opacity
-	}
-	return nil
-}
-
 // color 按通道顺序合成纹理，在透明度覆盖、透明测试和雾效之前执行
 // 入参: color 未预乘底色, coordinates 插值后的纹理输入, position 相机空间位置
 // 返回: error 无效投影坐标或混合结果
@@ -239,6 +156,89 @@ func (s *u3dTextureSet) color(color *[4]float64, coordinates *[8][3]float64, pos
 			}
 			color[c] = min(1, max(0, color[c]))
 		}
+	}
+	return nil
+}
+
+// shaderTextures 校验并缓存启用的纹理，未使用的着色器不会触发图像解码
+// 入参: shader 着色器
+// 返回: *u3dTextureSet 纹理组合，空值表示无纹理, error 参数、能力、预算或取消错误
+func (r *Renderer) shaderTextures(shader U3DShader) (*u3dTextureSet, error) {
+	if shader.Textures == ([8]*U3DTextureLayer{}) {
+		return nil, nil
+	}
+	if err := r.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if cached := r.textureSets[shader.Textures]; cached != nil {
+		return cached, nil
+	}
+	if err := r.Reserve(1, 512); err != nil {
+		return nil, err
+	}
+	set := &u3dTextureSet{layers: shader.Textures}
+	for i, layer := range set.layers {
+		if layer == nil {
+			continue
+		}
+		if layer.Blend > 3 || layer.BlendSource > 1 || layer.Mode > 4 || layer.Repeat > 3 || !finite(float64(layer.Intensity)) || !finite(float64(layer.BlendConstant)) {
+			return nil, fmt.Errorf("invalid U3D texture layer")
+		}
+		for _, matrix := range [2][16]float32{layer.Transform, layer.WrapTransform} {
+			for _, value := range matrix {
+				if !finite(float64(value)) {
+					return nil, fmt.Errorf("invalid U3D texture transform")
+				}
+			}
+		}
+		if layer.Mode >= 1 && layer.Mode <= 3 {
+			if err := r.Reserve(1, 256); err != nil {
+				return nil, err
+			}
+			inverse, err := u3dTextureInverse(layer.WrapTransform)
+			if err != nil {
+				return nil, err
+			}
+			set.wrap[i] = &inverse
+		}
+		if layer.Mode == 4 && !set.reflection {
+			var ok bool
+			set.normal, ok = r.toCamera.inverse()
+			if !ok {
+				return nil, fmt.Errorf("invalid U3D reflection camera")
+			}
+			set.reflection, set.perspective = true, r.camera.Perspective
+		}
+		img, err := r.texture(layer.Texture)
+		if err != nil {
+			return nil, err
+		}
+		set.images[i] = img
+		set.mask |= 1 << i
+	}
+	if r.textureSets == nil {
+		r.textureSets = make(map[[8]*U3DTextureLayer]*u3dTextureSet)
+	}
+	r.textureSets[shader.Textures] = set
+	return set, nil
+}
+
+// textureColor 合成纹理后恢复节点指定的透明度，再叠加视图透明度
+// 入参: textures 纹理组合, color 顶点插值颜色, coordinates 纹理输入, position 相机空间位置, override 是否指定节点透明度
+// 返回: error 纹理映射或混合错误
+func (r *Renderer) textureColor(textures *u3dTextureSet, color *[4]float64, coordinates *[8][3]float64, position u3dVector, override bool) error {
+	if textures == nil {
+		return nil
+	}
+	opacity := color[3]
+	if err := textures.color(color, coordinates, position); err != nil {
+		return err
+	}
+	if override {
+		color[3] = opacity
+	}
+	if r.opacity >= 0 {
+		color[3] *= r.opacity
 	}
 	return nil
 }

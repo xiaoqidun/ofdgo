@@ -24,14 +24,6 @@ import (
 	"sync"
 )
 
-// SVG输出模式，控制资源内嵌和对象结构
-const (
-	SVGEmbedded SVGMode = iota
-	SVGExternalFonts
-	SVGExternalResources
-	SVGObjects
-)
-
 // ErrBackendUnavailable 表示未配置所需后端，不会自动切换其他实现
 var ErrBackendUnavailable = errors.New("render backend unavailable")
 
@@ -92,6 +84,14 @@ type ObjectMeasurement struct {
 // SVGMode 指定SVG资源封装方式，Objects模式还需保留稳定的对象分组
 type SVGMode uint8
 
+// SVG输出模式，控制资源内嵌和对象结构
+const (
+	SVGEmbedded SVGMode = iota
+	SVGExternalFonts
+	SVGExternalResources
+	SVGObjects
+)
+
 // SVGBackend 输出SVG及资源，不得修改源页面或省略不支持的内容
 // renderer提供文档和排版能力，输出时不得再次调用RenderToSVG系列方法
 type SVGBackend interface {
@@ -147,12 +147,6 @@ type BackendInfo struct {
 	EPS           string `json:"eps"`
 }
 
-// Info 返回配置中各能力的提供者，不依赖WebUI推断
-// 返回: BackendInfo 后端能力
-func (b RenderBackends) Info() BackendInfo {
-	return BackendInfo{FontResources: backendName(b.FontResources), Fonts: backendName(b.Fonts), Geometry: backendName(b.Geometry), Compiler: backendName(b.Compiler), Raster: backendName(b.Raster), SVG: backendName(b.SVG), PDF: backendName(b.PDF), EPS: backendName(b.EPS)}
-}
-
 // ReadContent 返回已有页面或按文档引用读取，不在描述对象中保留新解析的内容
 // 入参: ctx 取消上下文，nil使用后台上下文, reader 页面所属阅读器
 // 返回: *PageContent 只读页面内容, error 读取或取消错误
@@ -170,6 +164,25 @@ func (p RenderDocumentPage) ReadContent(ctx context.Context, reader *Reader) (*P
 		return nil, fmt.Errorf("missing document page source")
 	}
 	return reader.PageContentContext(ctx, p.Source)
+}
+
+// NewRenderBackends 创建已注册后端组合，各项能力通过Info报告实际提供者
+// 入参: name 已注册后端标识
+// 返回: RenderBackends 后端组合, error 未知后端错误
+func NewRenderBackends(name string) (RenderBackends, error) {
+	backendRegistry.RLock()
+	factory := backendRegistry.factories[name]
+	backendRegistry.RUnlock()
+	if factory == nil {
+		return RenderBackends{}, fmt.Errorf("unknown render backend %q", name)
+	}
+	return factory(), nil
+}
+
+// Info 返回配置中各能力的提供者，不依赖WebUI推断
+// 返回: BackendInfo 后端能力
+func (b RenderBackends) Info() BackendInfo {
+	return BackendInfo{FontResources: backendName(b.FontResources), Fonts: backendName(b.Fonts), Geometry: backendName(b.Geometry), Compiler: backendName(b.Compiler), Raster: backendName(b.Raster), SVG: backendName(b.SVG), PDF: backendName(b.PDF), EPS: backendName(b.EPS)}
 }
 
 // WithRenderBackends 替换完整后端组合，未配置的能力不会沿用默认实现
@@ -196,12 +209,6 @@ func WithRenderBackends(backends RenderBackends) RendererOption {
 	}
 }
 
-// Backends 返回当前后端配置副本，可修改后通过WithRenderBackends应用
-// 返回: RenderBackends 后端组合
-func (r *Renderer) Backends() RenderBackends {
-	return r.backends
-}
-
 // WithRasterBackend 选择当前渲染器的图像、PNG和JPEG后端，不改变SVG、PDF或OFD保存
 // 入参: backend 光栅后端，nil禁用图像输出
 // 返回: RendererOption 渲染选项
@@ -212,6 +219,12 @@ func WithRasterBackend(backend RasterBackend) RendererOption {
 		}
 		r.backends.Raster = backend
 	}
+}
+
+// Backends 返回当前后端配置副本，可修改后通过WithRenderBackends应用
+// 返回: RenderBackends 后端组合
+func (r *Renderer) Backends() RenderBackends {
+	return r.backends
 }
 
 // CompilePage 编译与后端无关的光栅页面，可交给任意RasterBackend绘制
@@ -244,6 +257,38 @@ func (r *Renderer) CompilePageContext(ctx context.Context, page *PageContent) (*
 		return nil, canceled
 	}
 	return result, err
+}
+
+// RegisterRenderBackend 注册后端组合，工厂应返回独立实例，重复标识不会覆盖已有实现
+// 入参: name 后端标识, factory 后端工厂
+// 返回: error 无效或重复注册错误
+func RegisterRenderBackend(name string, factory func() RenderBackends) error {
+	if name == "" || factory == nil {
+		return fmt.Errorf("backend name and factory are required")
+	}
+	backendRegistry.Lock()
+	defer backendRegistry.Unlock()
+	if _, exists := backendRegistry.factories[name]; exists {
+		return fmt.Errorf("render backend %q already registered", name)
+	}
+	backendRegistry.factories[name] = factory
+	return nil
+}
+
+// RenderBackendInfos 列出已注册组合及其实际能力，供原生程序和WASM共用
+// 返回: map[string]BackendInfo 后端能力
+func RenderBackendInfos() map[string]BackendInfo {
+	backendRegistry.RLock()
+	factories := make(map[string]func() RenderBackends, len(backendRegistry.factories))
+	for name, factory := range backendRegistry.factories {
+		factories[name] = factory
+	}
+	backendRegistry.RUnlock()
+	result := make(map[string]BackendInfo, len(factories))
+	for name, factory := range factories {
+		result[name] = factory().Info()
+	}
+	return result
 }
 
 // backendName 获取已配置的后端标识
@@ -290,49 +335,4 @@ func immutableBackendValue(value reflect.Value) bool {
 		}
 	}
 	return true
-}
-
-// RegisterRenderBackend 注册后端组合，工厂应返回独立实例，重复标识不会覆盖已有实现
-// 入参: name 后端标识, factory 后端工厂
-// 返回: error 无效或重复注册错误
-func RegisterRenderBackend(name string, factory func() RenderBackends) error {
-	if name == "" || factory == nil {
-		return fmt.Errorf("backend name and factory are required")
-	}
-	backendRegistry.Lock()
-	defer backendRegistry.Unlock()
-	if _, exists := backendRegistry.factories[name]; exists {
-		return fmt.Errorf("render backend %q already registered", name)
-	}
-	backendRegistry.factories[name] = factory
-	return nil
-}
-
-// NewRenderBackends 创建已注册后端组合，各项能力通过Info报告实际提供者
-// 入参: name 已注册后端标识
-// 返回: RenderBackends 后端组合, error 未知后端错误
-func NewRenderBackends(name string) (RenderBackends, error) {
-	backendRegistry.RLock()
-	factory := backendRegistry.factories[name]
-	backendRegistry.RUnlock()
-	if factory == nil {
-		return RenderBackends{}, fmt.Errorf("unknown render backend %q", name)
-	}
-	return factory(), nil
-}
-
-// RenderBackendInfos 列出已注册组合及其实际能力，供原生程序和WASM共用
-// 返回: map[string]BackendInfo 后端能力
-func RenderBackendInfos() map[string]BackendInfo {
-	backendRegistry.RLock()
-	factories := make(map[string]func() RenderBackends, len(backendRegistry.factories))
-	for name, factory := range backendRegistry.factories {
-		factories[name] = factory
-	}
-	backendRegistry.RUnlock()
-	result := make(map[string]BackendInfo, len(factories))
-	for name, factory := range factories {
-		result[name] = factory().Info()
-	}
-	return result
 }

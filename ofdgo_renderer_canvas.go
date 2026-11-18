@@ -29,11 +29,6 @@ import (
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
-// CanvasBackend canvas页面编译与绘制适配器，ColorSpace仅影响光栅输出
-type CanvasBackend struct {
-	ColorSpace canvas.ColorSpace
-}
-
 // canvasSRGBTables 复用八位预乘sRGB的双向传递表，透明度参与索引以保留原运算精度
 var canvasSRGBTables = sync.OnceValue(func() [2]*[256][256]uint8 {
 	var result [2]*[256][256]uint8
@@ -50,48 +45,16 @@ var canvasSRGBTables = sync.OnceValue(func() [2]*[256][256]uint8 {
 	return result
 })
 
-// canvasColorTransfer 准备八位预乘颜色变换，任意自定义空间保留其原始计算
-// 入参: space 颜色空间, linear 是否转入线性空间
-// 返回: func(color.RGBA) color.RGBA 单像素变换
-func canvasColorTransfer(space canvas.ColorSpace, linear bool) func(color.RGBA) color.RGBA {
-	if _, ok := space.(canvas.SRGBColorSpace); ok {
-		direction := 1
-		if linear {
-			direction = 0
-		}
-		table := canvasSRGBTables()[direction]
-		return func(value color.RGBA) color.RGBA {
-			return color.RGBA{R: table[value.A][value.R], G: table[value.A][value.G], B: table[value.A][value.B], A: value.A}
-		}
+// init 注册Canvas适配器和默认组合
+func init() {
+	if err := RegisterRenderBackend("canvas", defaultRenderBackends); err != nil {
+		panic(err)
 	}
-	if linear {
-		return func(value color.RGBA) color.RGBA { return space.ToLinear(value) }
-	}
-	return func(value color.RGBA) color.RGBA { return space.FromLinear(value) }
 }
 
-// rasterStrokeGradientCanvas 保留页面坐标描边的局部渐变定位
-type rasterStrokeGradientCanvas struct {
-	rasterGradientCanvas
-	inverse RasterMatrix
-}
-
-// rasterGradientCanvas 将公共渐变交给Canvas采样，不改变OFD周期语义
-type rasterGradientCanvas struct {
-	gradient *RasterGradient
-	space    canvas.ColorSpace
-	mesh     *MeshSampler
-}
-
-// newRasterGradientCanvas 准备渐变适配器及独立网格采样器
-// 入参: gradient 公共渐变
-// 返回: rasterGradientCanvas Canvas渐变
-func newRasterGradientCanvas(gradient *RasterGradient) rasterGradientCanvas {
-	result := rasterGradientCanvas{gradient: gradient}
-	if gradient.Kind == RasterMesh {
-		result.mesh = gradient.Mesh.NewSampler()
-	}
-	return result
+// CanvasBackend canvas页面编译与绘制适配器，ColorSpace仅影响光栅输出
+type CanvasBackend struct {
+	ColorSpace canvas.ColorSpace
 }
 
 // Name 返回后端标识
@@ -124,6 +87,112 @@ func (b CanvasBackend) RenderInto(page *RasterPage, target *image.RGBA) error {
 	clear(target.Pix[:4*w*h])
 	_, err = b.renderImage(page, target)
 	return err
+}
+
+// OpenFont 使用独立字体后端读取字体度量
+// 入参: data 字体数据
+// 返回: FontMetrics 字体度量, error 解析错误
+func (CanvasBackend) OpenFont(data []byte) (FontMetrics, error) {
+	return (SFNTBackend{}).OpenFont(data)
+}
+
+// ResolveFont 使用独立字体后端解析字体来源
+// 入参: r 渲染器, id 字体标识, exact 是否禁止无关回退
+// 返回: ResolvedFont 字体与来源, error 解析错误
+func (CanvasBackend) ResolveFont(r *Renderer, id string, exact bool) (ResolvedFont, error) {
+	return (SFNTBackend{}).ResolveFont(r, id, exact)
+}
+
+// rasterStrokeGradientCanvas 保留页面坐标描边的局部渐变定位
+type rasterStrokeGradientCanvas struct {
+	rasterGradientCanvas
+	inverse RasterMatrix
+}
+
+// At 返回原局部坐标的描边渐变颜色
+// 入参: x 页面横坐标, y 页面纵坐标
+// 返回: color.RGBA 预乘颜色
+func (g rasterStrokeGradientCanvas) At(x, y float64) color.RGBA {
+	p := g.inverse.Apply(RasterPoint{x, y})
+	return g.rasterGradientCanvas.At(p.X, p.Y)
+}
+
+// SetColorSpace 转换描边渐变颜色，不修改共享分段
+// 入参: space 颜色空间
+// 返回: canvas.Gradient 独立渐变
+func (g rasterStrokeGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
+	g.rasterGradientCanvas = g.rasterGradientCanvas.SetColorSpace(space).(rasterGradientCanvas)
+	return g
+}
+
+// rasterGradientCanvas 将公共渐变交给Canvas采样，不改变OFD周期语义
+type rasterGradientCanvas struct {
+	gradient *RasterGradient
+	space    canvas.ColorSpace
+	mesh     *MeshSampler
+}
+
+// newRasterGradientCanvas 准备渐变适配器及独立网格采样器
+// 入参: gradient 公共渐变
+// 返回: rasterGradientCanvas Canvas渐变
+func newRasterGradientCanvas(gradient *RasterGradient) rasterGradientCanvas {
+	result := rasterGradientCanvas{gradient: gradient}
+	if gradient.Kind == RasterMesh {
+		result.mesh = gradient.Mesh.NewSampler()
+	}
+	return result
+}
+
+// At 返回局部坐标的预乘颜色
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.RGBA 渐变颜色
+func (g rasterGradientCanvas) At(x, y float64) color.RGBA {
+	var value color.RGBA
+	if g.mesh != nil {
+		value = g.mesh.At(x, y)
+	} else {
+		value = g.gradient.At(x, y)
+	}
+	if g.space != nil {
+		return g.space.ToLinear(value)
+	}
+	return value
+}
+
+// SetColorSpace 返回转换颜色空间后的独立渐变
+// 入参: space 目标颜色空间
+// 返回: canvas.Gradient 采样器
+func (g rasterGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
+	if g.gradient.Mesh != nil || g.gradient.Sample != nil {
+		g.space = space
+		return g
+	}
+	copy := *g.gradient
+	copy.Stops = append([]ColorStop(nil), copy.Stops...)
+	for i := range copy.Stops {
+		copy.Stops[i].Color = space.ToLinear(copy.Stops[i].Color)
+	}
+	return rasterGradientCanvas{gradient: &copy}
+}
+
+// canvasColorTransfer 准备八位预乘颜色变换，任意自定义空间保留其原始计算
+// 入参: space 颜色空间, linear 是否转入线性空间
+// 返回: func(color.RGBA) color.RGBA 单像素变换
+func canvasColorTransfer(space canvas.ColorSpace, linear bool) func(color.RGBA) color.RGBA {
+	if _, ok := space.(canvas.SRGBColorSpace); ok {
+		direction := 1
+		if linear {
+			direction = 0
+		}
+		table := canvasSRGBTables()[direction]
+		return func(value color.RGBA) color.RGBA {
+			return color.RGBA{R: table[value.A][value.R], G: table[value.A][value.G], B: table[value.A][value.B], A: value.A}
+		}
+	}
+	if linear {
+		return func(value color.RGBA) color.RGBA { return space.ToLinear(value) }
+	}
+	return func(value color.RGBA) color.RGBA { return space.FromLinear(value) }
 }
 
 // renderImage 将页面绘制到已清空且尺寸匹配的目标
@@ -350,78 +419,9 @@ func rasterCanvasPath(path []RasterSegment, buffer []float64) (*canvas.Path, err
 	return p, nil
 }
 
-// At 返回原局部坐标的描边渐变颜色
-// 入参: x 页面横坐标, y 页面纵坐标
-// 返回: color.RGBA 预乘颜色
-func (g rasterStrokeGradientCanvas) At(x, y float64) color.RGBA {
-	p := g.inverse.Apply(RasterPoint{x, y})
-	return g.rasterGradientCanvas.At(p.X, p.Y)
-}
-
-// SetColorSpace 转换描边渐变颜色，不修改共享分段
-// 入参: space 颜色空间
-// 返回: canvas.Gradient 独立渐变
-func (g rasterStrokeGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
-	g.rasterGradientCanvas = g.rasterGradientCanvas.SetColorSpace(space).(rasterGradientCanvas)
-	return g
-}
-
-// At 返回局部坐标的预乘颜色
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.RGBA 渐变颜色
-func (g rasterGradientCanvas) At(x, y float64) color.RGBA {
-	var value color.RGBA
-	if g.mesh != nil {
-		value = g.mesh.At(x, y)
-	} else {
-		value = g.gradient.At(x, y)
-	}
-	if g.space != nil {
-		return g.space.ToLinear(value)
-	}
-	return value
-}
-
-// SetColorSpace 返回转换颜色空间后的独立渐变
-// 入参: space 目标颜色空间
-// 返回: canvas.Gradient 采样器
-func (g rasterGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
-	if g.gradient.Mesh != nil || g.gradient.Sample != nil {
-		g.space = space
-		return g
-	}
-	copy := *g.gradient
-	copy.Stops = append([]ColorStop(nil), copy.Stops...)
-	for i := range copy.Stops {
-		copy.Stops[i].Color = space.ToLinear(copy.Stops[i].Color)
-	}
-	return rasterGradientCanvas{gradient: &copy}
-}
-
-// init 注册Canvas适配器和默认组合
-func init() {
-	if err := RegisterRenderBackend("canvas", defaultRenderBackends); err != nil {
-		panic(err)
-	}
-}
-
 // defaultRenderBackends 创建默认组合，调用方可按职责替换任意后端
 // 返回: RenderBackends 默认后端组合
 func defaultRenderBackends() RenderBackends {
 	backend := CanvasBackend{}
 	return RenderBackends{FontResources: SFNTBackend{}, Fonts: SFNTBackend{}, Geometry: backend, Compiler: backend, Raster: backend, SVG: backend, PDF: backend, EPS: backend}
-}
-
-// OpenFont 使用独立字体后端读取字体度量
-// 入参: data 字体数据
-// 返回: FontMetrics 字体度量, error 解析错误
-func (CanvasBackend) OpenFont(data []byte) (FontMetrics, error) {
-	return (SFNTBackend{}).OpenFont(data)
-}
-
-// ResolveFont 使用独立字体后端解析字体来源
-// 入参: r 渲染器, id 字体标识, exact 是否禁止无关回退
-// 返回: ResolvedFont 字体与来源, error 解析错误
-func (CanvasBackend) ResolveFont(r *Renderer, id string, exact bool) (ResolvedFont, error) {
-	return (SFNTBackend{}).ResolveFont(r, id, exact)
 }

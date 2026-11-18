@@ -1,11 +1,12 @@
 import { nativeHost, engineLimits } from "./ofdgo_host.js";
 
 export const MM_TO_PX = 96 / 25.4;
+export const SCROLL_SEGMENT_SIZE = 1000000;
+
 const PAGE_CACHE_LIMIT = 16;
 const PAGE_CACHE_BYTES = 32 * 1024 * 1024;
-const svgFontBytes = new WeakMap();
 const PAGE_LAYOUT_GAP = 16;
-export const SCROLL_SEGMENT_SIZE = 1000000;
+const svgFontBytes = new WeakMap();
 let textMeasure = null;
 
 export function createPageView(context) {

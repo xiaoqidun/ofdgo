@@ -23,6 +23,9 @@ import (
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
+// maxCompressedFloats 限制单个带g数组展开后的最大元素数量
+const maxCompressedFloats = 1 << 20
+
 // IdentityMatrix 单位矩阵
 var IdentityMatrix = Matrix{1, 0, 0, 1, 0, 0}
 
@@ -67,12 +70,6 @@ func MatrixFromValues(values [6]float64) Matrix {
 	return Matrix{a: values[0], b: values[1], c: values[2], d: values[3], e: values[4], f: values[5]}
 }
 
-// Values 返回a、b、c、d、e、f的独立副本，保留原始浮点精度
-// 返回: [6]float64 矩阵分量
-func (m Matrix) Values() [6]float64 {
-	return [6]float64{m.a, m.b, m.c, m.d, m.e, m.f}
-}
-
 // NewMatrix 解析CTM字符串
 // 入参: s 字符串
 // 返回: Matrix 矩阵对象
@@ -86,6 +83,19 @@ func NewMatrix(s string) Matrix {
 		c: floats[2], d: floats[3],
 		e: floats[4], f: floats[5],
 	}
+}
+
+// TranslationMatrix 构造平移矩阵
+// 入参: x X轴偏移, y Y轴偏移
+// 返回: Matrix 平移矩阵
+func TranslationMatrix(x, y float64) Matrix {
+	return MatrixFromValues(basegeom.TranslationMatrix(x, y).Values())
+}
+
+// Values 返回a、b、c、d、e、f的独立副本，保留原始浮点精度
+// 返回: [6]float64 矩阵分量
+func (m Matrix) Values() [6]float64 {
+	return [6]float64{m.a, m.b, m.c, m.d, m.e, m.f}
 }
 
 // Multiply 矩阵乘法 (m * o)
@@ -125,13 +135,6 @@ func (m Matrix) Invert() (Matrix, bool) {
 	return MatrixFromValues(result.Values()), true
 }
 
-// TranslationMatrix 构造平移矩阵
-// 入参: x X轴偏移, y Y轴偏移
-// 返回: Matrix 平移矩阵
-func TranslationMatrix(x, y float64) Matrix {
-	return MatrixFromValues(basegeom.TranslationMatrix(x, y).Values())
-}
-
 // YScale 获取Y轴缩放比例
 // 返回: float64 缩放比例
 func (m Matrix) YScale() float64 {
@@ -158,9 +161,6 @@ func parseFloats(s string) []float64 {
 	}
 	return result
 }
-
-// maxCompressedFloats 限制单个带g数组展开后的最大元素数量
-const maxCompressedFloats = 1 << 20
 
 // parseFloatsWithG 解析带g的压缩浮点数数组
 // 入参: s 字符串

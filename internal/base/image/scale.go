@@ -27,6 +27,43 @@ import (
 // rasterScaleBufferLimit 限制整像素缩放器的浮点中间缓冲，超出时使用逐行采样
 const rasterScaleBufferLimit = 8 << 20
 
+// DrawPixels 对轴向缩放使用可分离采样，其余变换保留通用路径
+// 入参: dst 目标图像, src 源图像, m 按a、b、c、d、e、f排列的像素变换, op 合成操作
+func DrawPixels(dst draw.Image, src image.Image, m [6]float64, op draw.Op) {
+	b := src.Bounds()
+	if dr, ok := rasterScaleBounds(b, m); ok {
+		if dr.Intersect(dst.Bounds()).Empty() {
+			return
+		}
+		draw.CatmullRom.Scale(dst, dr, src, b, op, nil)
+		return
+	}
+	if drawRasterAxisImage(dst, src, m, op) {
+		return
+	}
+	src = rasterTransformSource(src, TransformBounds(b, m, dst.Bounds()))
+	draw.CatmullRom.Transform(dst, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, src, b, op, nil)
+}
+
+// TransformBounds 计算采样器可能写入的像素范围，并在整数转换前裁至目标边界
+// 入参: source 原始像素边界, m 像素变换, target 目标边界
+// 返回: image.Rectangle 受影响的目标像素区域
+func TransformBounds(source image.Rectangle, m [6]float64, target image.Rectangle) image.Rectangle {
+	minX, minY, maxX, maxY := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+	for _, p := range [4]image.Point{source.Min, {X: source.Max.X, Y: source.Min.Y}, {X: source.Min.X, Y: source.Max.Y}, source.Max} {
+		x := math.Floor(float64(m[0]*float64(p.X)) + float64(m[2]*float64(p.Y)) + m[4])
+		y := math.Floor(float64(m[1]*float64(p.X)) + float64(m[3]*float64(p.Y)) + m[5])
+		minX, minY = math.Min(minX, x), math.Min(minY, y)
+		maxX, maxY = math.Max(maxX, x+1), math.Max(maxY, y+1)
+	}
+	minX, minY = math.Max(minX, float64(target.Min.X)), math.Max(minY, float64(target.Min.Y))
+	maxX, maxY = math.Min(maxX, float64(target.Max.X)), math.Min(maxY, float64(target.Max.Y))
+	if minX >= maxX || minY >= maxY {
+		return image.Rectangle{}
+	}
+	return image.Rect(int(minX), int(minY), int(maxX), int(maxY))
+}
+
 // rasterAxisSample 保存目标像素及其归一化源采样权重
 type rasterAxisSample struct {
 	pixel   int
@@ -412,24 +449,6 @@ func rasterImageComponent(value, alpha float64) uint16 {
 	return uint16(value)
 }
 
-// DrawPixels 对轴向缩放使用可分离采样，其余变换保留通用路径
-// 入参: dst 目标图像, src 源图像, m 按a、b、c、d、e、f排列的像素变换, op 合成操作
-func DrawPixels(dst draw.Image, src image.Image, m [6]float64, op draw.Op) {
-	b := src.Bounds()
-	if dr, ok := rasterScaleBounds(b, m); ok {
-		if dr.Intersect(dst.Bounds()).Empty() {
-			return
-		}
-		draw.CatmullRom.Scale(dst, dr, src, b, op, nil)
-		return
-	}
-	if drawRasterAxisImage(dst, src, m, op) {
-		return
-	}
-	src = rasterTransformSource(src, TransformBounds(b, m, dst.Bounds()))
-	draw.CatmullRom.Transform(dst, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, src, b, op, nil)
-}
-
 // rasterTransformSource 为放大的通用图像缓存十六位预乘像素，限制临时缓冲大小
 // 入参: src 源图像, affected 目标采样区域
 // 返回: image.Image 等值采样图像
@@ -465,23 +484,4 @@ func rasterScaleBounds(b image.Rectangle, m [6]float64) (image.Rectangle, bool) 
 		return image.Rectangle{}, false
 	}
 	return image.Rect(int(x0), int(y0), int(x1), int(y1)), true
-}
-
-// TransformBounds 计算采样器可能写入的像素范围，并在整数转换前裁至目标边界
-// 入参: source 原始像素边界, m 像素变换, target 目标边界
-// 返回: image.Rectangle 受影响的目标像素区域
-func TransformBounds(source image.Rectangle, m [6]float64, target image.Rectangle) image.Rectangle {
-	minX, minY, maxX, maxY := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
-	for _, p := range [4]image.Point{source.Min, {X: source.Max.X, Y: source.Min.Y}, {X: source.Min.X, Y: source.Max.Y}, source.Max} {
-		x := math.Floor(float64(m[0]*float64(p.X)) + float64(m[2]*float64(p.Y)) + m[4])
-		y := math.Floor(float64(m[1]*float64(p.X)) + float64(m[3]*float64(p.Y)) + m[5])
-		minX, minY = math.Min(minX, x), math.Min(minY, y)
-		maxX, maxY = math.Max(maxX, x+1), math.Max(maxY, y+1)
-	}
-	minX, minY = math.Max(minX, float64(target.Min.X)), math.Max(minY, float64(target.Min.Y))
-	maxX, maxY = math.Min(maxX, float64(target.Max.X)), math.Min(maxY, float64(target.Max.Y))
-	if minX >= maxX || minY >= maxY {
-		return image.Rectangle{}
-	}
-	return image.Rect(int(minX), int(minY), int(maxX), int(maxY))
 }

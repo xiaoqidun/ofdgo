@@ -19,6 +19,13 @@ import (
 	"math"
 )
 
+// Path 保存独立于绘图库的几何路径，不扁平化曲线或舍入坐标
+// 坐标以左上角为原点，单位为毫米，子路径从Move开始，Close回到当前子路径起点
+type Path []Segment
+
+// Verb 表示几何路径指令
+type Verb uint8
+
 // 几何路径指令，包括直线、曲线、椭圆弧和闭合
 const (
 	Move Verb = iota
@@ -28,13 +35,6 @@ const (
 	Arc
 	ClosePath
 )
-
-// Path 保存独立于绘图库的几何路径，不扁平化曲线或舍入坐标
-// 坐标以左上角为原点，单位为毫米，子路径从Move开始，Close回到当前子路径起点
-type Path []Segment
-
-// Verb 表示几何路径指令
-type Verb uint8
 
 // Segment 保存路径端点、贝塞尔控制点或端点式椭圆弧参数
 // 弧线Rotation单位为度，Sweep为true表示顺时针，Large表示大弧
@@ -93,6 +93,19 @@ func Close(path Path) Path {
 	return result
 }
 
+// Rectangle 构建页面坐标矩形，保留输入精度
+// 入参: box 矩形范围
+// 返回: Path 闭合路径
+func Rectangle(box Box) Path {
+	return Path{
+		{Verb: Move, End: Point{X: box.X, Y: box.Y}},
+		{Verb: Line, End: Point{X: box.X + box.W, Y: box.Y}},
+		{Verb: Line, End: Point{X: box.X + box.W, Y: box.Y + box.H}},
+		{Verb: Line, End: Point{X: box.X, Y: box.Y + box.H}},
+		{Verb: ClosePath, End: Point{X: box.X, Y: box.Y}},
+	}
+}
+
 // ValidateStroke 校验各后端共用的描边参数
 // 入参: options 描边样式
 // 返回: error 无效样式
@@ -112,19 +125,6 @@ func ValidateStroke(options StrokeOptions) error {
 		}
 	}
 	return nil
-}
-
-// Rectangle 构建页面坐标矩形，保留输入精度
-// 入参: box 矩形范围
-// 返回: Path 闭合路径
-func Rectangle(box Box) Path {
-	return Path{
-		{Verb: Move, End: Point{X: box.X, Y: box.Y}},
-		{Verb: Line, End: Point{X: box.X + box.W, Y: box.Y}},
-		{Verb: Line, End: Point{X: box.X + box.W, Y: box.Y + box.H}},
-		{Verb: Line, End: Point{X: box.X, Y: box.Y + box.H}},
-		{Verb: ClosePath, End: Point{X: box.X, Y: box.Y}},
-	}
 }
 
 // RectangleBounds 识别单个轴对齐矩形，不用包围盒代替实际路径

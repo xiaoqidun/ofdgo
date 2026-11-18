@@ -30,11 +30,66 @@ const imageCacheLimit = 64 << 20
 // Bytes返回只读数据，Image返回共享只读像素，解码错误由Image返回
 type EncodedImage = baseimage.EncodedImage
 
+// NewEncodedImage 复制输入数据并读取PNG或JPEG头信息，不解码像素
+// 入参: data 原始编码
+// 返回: *EncodedImage 惰性图片, error 头信息或格式错误
+func NewEncodedImage(data []byte) (*EncodedImage, error) { return baseimage.NewEncodedImage(data) }
+
+// ImageResource 按资源标识读取只读图片，PNG和JPEG保留原始编码并惰性解码
+// 应先读取源页面以加载页面资源，返回EncodedImage时通过Image检查像素解码错误
+// 入参: id 图片资源标识
+// 返回: image.Image 图片资源, error 读取错误
+func (r *Renderer) ImageResource(id string) (image.Image, error) {
+	path, ok := resourceValue(r.Reader.ResMap, id)
+	if !ok {
+		return nil, fmt.Errorf("image resource %q not found", id)
+	}
+	return r.cachedImageResource(path)
+}
+
 // resampledImageMask 按替换图尺寸读取已校验的二值蒙版，不分配缩放像素
 type resampledImageMask struct {
 	source   image.Image
 	original image.Rectangle
 	bounds   image.Rectangle
+}
+
+// Bounds 返回替换图对应的蒙版范围
+// 返回: image.Rectangle 像素区域
+func (s *resampledImageMask) Bounds() image.Rectangle { return s.bounds }
+
+// ColorModel 返回二值蒙版的灰度颜色模型
+// 返回: color.Model 灰度模型
+func (s *resampledImageMask) ColorModel() color.Model { return color.GrayModel }
+
+// GrayAt 按像素中心读取原蒙版，区域外返回黑色
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.Gray 二值灰度
+func (s *resampledImageMask) GrayAt(x, y int) color.Gray {
+	if !image.Pt(x, y).In(s.bounds) {
+		return color.Gray{}
+	}
+	bounds, size := s.original, s.bounds.Size()
+	sx := bounds.Min.X + int((uint64(x-s.bounds.Min.X)*uint64(bounds.Dx())+uint64(bounds.Dx()/2))/uint64(size.X))
+	sy := bounds.Min.Y + int((uint64(y-s.bounds.Min.Y)*uint64(bounds.Dy())+uint64(bounds.Dy()/2))/uint64(size.Y))
+	return baseimage.GrayAt(s.source, sx, sy)
+}
+
+// At 返回采样后的二值灰度
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.Color 像素颜色
+func (s *resampledImageMask) At(x, y int) color.Color { return s.GrayAt(x, y) }
+
+// BackingImage 返回共享只读蒙版，供图像缓存计算底层存储
+// 返回: image.Image 共享只读蒙版
+func (s *resampledImageMask) BackingImage() image.Image { return s.source }
+
+// RGBA64At 返回不透明的十六位灰度颜色，供蒙版合成直接读取
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.RGBA64 像素颜色
+func (s *resampledImageMask) RGBA64At(x, y int) color.RGBA64 {
+	value := uint16(s.GrayAt(x, y).Y) * 257
+	return color.RGBA64{R: value, G: value, B: value, A: 65535}
 }
 
 // imageWithEffects 合并同尺寸二值蒙版和对象透明度，保留原图采样精度及只读像素
@@ -183,18 +238,6 @@ func validateImageMask(ctx context.Context, mask image.Image, size image.Point) 
 	return ctx.Err()
 }
 
-// ImageResource 按资源标识读取只读图片，PNG和JPEG保留原始编码并惰性解码
-// 应先读取源页面以加载页面资源，返回EncodedImage时通过Image检查像素解码错误
-// 入参: id 图片资源标识
-// 返回: image.Image 图片资源, error 读取错误
-func (r *Renderer) ImageResource(id string) (image.Image, error) {
-	path, ok := resourceValue(r.Reader.ResMap, id)
-	if !ok {
-		return nil, fmt.Errorf("image resource %q not found", id)
-	}
-	return r.cachedImageResource(path)
-}
-
 // imageObjectResource 读取主图，无法读取或解码时使用对象声明的替换图
 // 入参: object 图像对象
 // 返回: image.Image 图片资源, error 读取或解码错误
@@ -272,44 +315,6 @@ func (r *Renderer) imageObjectMask(object ImageObject, target image.Image) (imag
 	return &resampledImageMask{source: mask, original: mask.Bounds(), bounds: image.Rectangle{Max: size}}, ctx.Err()
 }
 
-// Bounds 返回替换图对应的蒙版范围
-// 返回: image.Rectangle 像素区域
-func (s *resampledImageMask) Bounds() image.Rectangle { return s.bounds }
-
-// ColorModel 返回二值蒙版的灰度颜色模型
-// 返回: color.Model 灰度模型
-func (s *resampledImageMask) ColorModel() color.Model { return color.GrayModel }
-
-// GrayAt 按像素中心读取原蒙版，区域外返回黑色
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.Gray 二值灰度
-func (s *resampledImageMask) GrayAt(x, y int) color.Gray {
-	if !image.Pt(x, y).In(s.bounds) {
-		return color.Gray{}
-	}
-	bounds, size := s.original, s.bounds.Size()
-	sx := bounds.Min.X + int((uint64(x-s.bounds.Min.X)*uint64(bounds.Dx())+uint64(bounds.Dx()/2))/uint64(size.X))
-	sy := bounds.Min.Y + int((uint64(y-s.bounds.Min.Y)*uint64(bounds.Dy())+uint64(bounds.Dy()/2))/uint64(size.Y))
-	return baseimage.GrayAt(s.source, sx, sy)
-}
-
-// At 返回采样后的二值灰度
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.Color 像素颜色
-func (s *resampledImageMask) At(x, y int) color.Color { return s.GrayAt(x, y) }
-
-// BackingImage 返回共享只读蒙版，供图像缓存计算底层存储
-// 返回: image.Image 共享只读蒙版
-func (s *resampledImageMask) BackingImage() image.Image { return s.source }
-
-// RGBA64At 返回不透明的十六位灰度颜色，供蒙版合成直接读取
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.RGBA64 像素颜色
-func (s *resampledImageMask) RGBA64At(x, y int) color.RGBA64 {
-	value := uint16(s.GrayAt(x, y).Y) * 257
-	return color.RGBA64{R: value, G: value, B: value, A: 65535}
-}
-
 // cachedImageResource 复用原始图片资源，不依赖输出后端
 // 入参: resPath 图片资源路径
 // 返回: image.Image 图片对象, error 读取错误
@@ -358,8 +363,3 @@ func (r *Renderer) readImageResource(resPath string) (image.Image, error) {
 	img, _, err := baseimage.DecodeContext(ctx, data)
 	return img, err
 }
-
-// NewEncodedImage 复制输入数据并读取PNG或JPEG头信息，不解码像素
-// 入参: data 原始编码
-// 返回: *EncodedImage 惰性图片, error 头信息或格式错误
-func NewEncodedImage(data []byte) (*EncodedImage, error) { return baseimage.NewEncodedImage(data) }

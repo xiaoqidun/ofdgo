@@ -35,20 +35,6 @@ type ResourceTarget struct {
 	Bound bool   `json:"bound"`
 }
 
-// editorResourcePreview 记录失效传播节点及修改片段，不保留原始XML解析树
-type editorResourcePreview struct {
-	parent   *editorResourcePreview
-	resource string
-	file     string
-	patches  []editorXMLPatch
-}
-
-// resourceImageMaskKey 区分包内共享图片文件及尚未提交的替换像素
-type resourceImageMaskKey struct {
-	file        string
-	replacement bool
-}
-
 // Resources 获取当前编辑快照的资源，覆盖正文、模板、注解、图案和复合图元
 // 入参: ctx 取消上下文
 // 返回: []ResourceInfo 资源及引用位置, error 快照或结构错误
@@ -237,6 +223,140 @@ func (e *Editor) ReplaceResource(ctx context.Context, kind, id, format string, d
 // 返回: error 仍有引用、结构或提交错误
 func (e *Editor) DeleteResource(ctx context.Context, kind, id string) error {
 	return e.changeResource(ctx, kind, id, nil, nil)
+}
+
+// BindMedia 追加或移除指定图元的音视频点击播放动作，保留停止、暂停等其他动作
+// 已有播放动作时保留其区域和参数，重复操作不产生修改
+// 入参: ctx 取消上下文, id 媒体标识, page 零基页码, object 图元标识, bind 为false时移除该媒体的点击播放动作
+// 返回: error 资源、对象或提交错误
+func (e *Editor) BindMedia(ctx context.Context, id string, page int, object string, bind bool) error {
+	kind := ""
+	for _, resource := range e.resources {
+		if media := resource.image; media != nil && sameResourceID(media.ID, id) && (media.Type == "Audio" || media.Type == "Video") {
+			kind, id = media.Type, media.ID
+			break
+		}
+	}
+	if kind == "" {
+		items, err := e.Resources(ctx)
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			if sameResourceID(item.ID, id) && (item.Kind == "Audio" || item.Kind == "Video") {
+				kind, id = item.Kind, item.ID
+				break
+			}
+		}
+	}
+	if kind == "" {
+		return fmt.Errorf("audio or video resource not found")
+	}
+	return e.bindResourceAction(ctx, kind, id, page, object, bind)
+}
+
+// BindAttachment 追加或移除指定图元的附件点击动作，附件标识须属于当前文档及所选版本
+// 保留其他动作及已有附件动作的区域和窗口设置，重复操作不产生修改
+// 入参: ctx 取消上下文, id 附件标识, page 零基页码, object 图元标识, bind 为false时移除该附件的点击动作
+// 返回: error 附件、对象或提交错误
+func (e *Editor) BindAttachment(ctx context.Context, id string, page int, object string, bind bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	attachments, err := e.AttachmentsContext(ctx)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, attachment := range attachments {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if attachment.ID == id {
+			if found {
+				return fmt.Errorf("duplicate attachment ID: %s", id)
+			}
+			found = true
+		}
+	}
+	if !found {
+		return fmt.Errorf("attachment not found: %s", id)
+	}
+	return e.bindResourceAction(ctx, "Attachment", id, page, object, bind)
+}
+
+// AddMedia 注册音频或视频资源，保持原始编码，资源被动作引用后写入文档
+// 本方法不转码或验证媒体编解码器，播放能力由调用方提供
+// 相同类型、格式及内容复用标识；需要独立控制时可通过CopyMedia复制资源
+// 入参: kind 为Audio或Video, format 媒体格式，可为空, data 完整媒体文件
+// 返回: string 资源标识, error 无效类型或数据
+func (e *Editor) AddMedia(kind, format string, data []byte) (string, error) {
+	if kind != "Audio" && kind != "Video" {
+		return "", fmt.Errorf("media type must be Audio or Video")
+	}
+	if len(data) == 0 {
+		return "", fmt.Errorf("empty media data")
+	}
+	format = strings.ToUpper(strings.TrimSpace(format))
+	key := editorResourceKey{checksum: sha256.Sum256(data), index: -1, kind: kind + "/" + format}
+	if id, ok := e.resourceID[key]; ok {
+		return id, nil
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return "", err
+	}
+	id := e.nextID()
+	name := e.packageName("Res/Media/Media_" + id)
+	e.resources = append(e.resources, editorResource{name: name, data: bytes.Clone(data), image: &MultiMedia{ID: id, Type: kind, Format: format, MediaFile: "/" + name}})
+	e.resourceID[key] = id
+	return id, nil
+}
+
+// CopyMedia 复制音视频资源定义，共用原始文件，以新标识区分播放控制
+// 原页面资源须先通过Page读取；未被动作引用的副本不写入文档
+// 入参: id 音视频资源标识
+// 返回: string 新资源标识, error 资源缺失、类型或包结构错误
+func (e *Editor) CopyMedia(id string) (string, error) {
+	var copy editorResource
+	for _, resource := range e.resources {
+		if resource.image != nil && sameResourceID(resource.image.ID, id) {
+			copy = resource
+			break
+		}
+	}
+	if copy.image == nil && e.source != nil {
+		media, err := e.source.reader.Media(id)
+		if err != nil {
+			return "", err
+		}
+		media.MediaFile = "/" + cleanPackagePath(e.source.reader.ResPath(media.MediaFile))
+		copy.image = &media
+	}
+	if copy.image == nil || copy.image.Type != "Audio" && copy.image.Type != "Video" {
+		return "", fmt.Errorf("audio or video resource %q is unavailable", id)
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return "", err
+	}
+	media := *copy.image
+	media.ID = e.nextID()
+	copy.image = &media
+	e.resources = append(e.resources, copy)
+	return media.ID, nil
+}
+
+// editorResourcePreview 记录失效传播节点及修改片段，不保留原始XML解析树
+type editorResourcePreview struct {
+	parent   *editorResourcePreview
+	resource string
+	file     string
+	patches  []editorXMLPatch
+}
+
+// resourceImageMaskKey 区分包内共享图片文件及尚未提交的替换像素
+type resourceImageMaskKey struct {
+	file        string
+	replacement bool
 }
 
 // changeResource 校验引用后在独立快照中修改声明，借用既有版本隔离和历史提交路径
@@ -530,66 +650,6 @@ func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, c
 	return ctx.Err()
 }
 
-// BindMedia 追加或移除指定图元的音视频点击播放动作，保留停止、暂停等其他动作
-// 已有播放动作时保留其区域和参数，重复操作不产生修改
-// 入参: ctx 取消上下文, id 媒体标识, page 零基页码, object 图元标识, bind 为false时移除该媒体的点击播放动作
-// 返回: error 资源、对象或提交错误
-func (e *Editor) BindMedia(ctx context.Context, id string, page int, object string, bind bool) error {
-	kind := ""
-	for _, resource := range e.resources {
-		if media := resource.image; media != nil && sameResourceID(media.ID, id) && (media.Type == "Audio" || media.Type == "Video") {
-			kind, id = media.Type, media.ID
-			break
-		}
-	}
-	if kind == "" {
-		items, err := e.Resources(ctx)
-		if err != nil {
-			return err
-		}
-		for _, item := range items {
-			if sameResourceID(item.ID, id) && (item.Kind == "Audio" || item.Kind == "Video") {
-				kind, id = item.Kind, item.ID
-				break
-			}
-		}
-	}
-	if kind == "" {
-		return fmt.Errorf("audio or video resource not found")
-	}
-	return e.bindResourceAction(ctx, kind, id, page, object, bind)
-}
-
-// BindAttachment 追加或移除指定图元的附件点击动作，附件标识须属于当前文档及所选版本
-// 保留其他动作及已有附件动作的区域和窗口设置，重复操作不产生修改
-// 入参: ctx 取消上下文, id 附件标识, page 零基页码, object 图元标识, bind 为false时移除该附件的点击动作
-// 返回: error 附件、对象或提交错误
-func (e *Editor) BindAttachment(ctx context.Context, id string, page int, object string, bind bool) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	attachments, err := e.AttachmentsContext(ctx)
-	if err != nil {
-		return err
-	}
-	found := false
-	for _, attachment := range attachments {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if attachment.ID == id {
-			if found {
-				return fmt.Errorf("duplicate attachment ID: %s", id)
-			}
-			found = true
-		}
-	}
-	if !found {
-		return fmt.Errorf("attachment not found: %s", id)
-	}
-	return e.bindResourceAction(ctx, "Attachment", id, page, object, bind)
-}
-
 // bindResourceAction 修改单个资源的点击动作，沿用图元编辑的版本隔离及撤销机制
 // 入参: ctx 取消上下文, kind 资源类型, id 资源标识, page 零基页码, object 图元标识, bind 是否绑定
 // 返回: error 对象或提交错误
@@ -667,64 +727,4 @@ func resourceActionMatches(action Action, kind, id string) bool {
 	default:
 		return false
 	}
-}
-
-// AddMedia 注册音频或视频资源，保持原始编码，资源被动作引用后写入文档
-// 本方法不转码或验证媒体编解码器，播放能力由调用方提供
-// 相同类型、格式及内容复用标识；需要独立控制时可通过CopyMedia复制资源
-// 入参: kind 为Audio或Video, format 媒体格式，可为空, data 完整媒体文件
-// 返回: string 资源标识, error 无效类型或数据
-func (e *Editor) AddMedia(kind, format string, data []byte) (string, error) {
-	if kind != "Audio" && kind != "Video" {
-		return "", fmt.Errorf("media type must be Audio or Video")
-	}
-	if len(data) == 0 {
-		return "", fmt.Errorf("empty media data")
-	}
-	format = strings.ToUpper(strings.TrimSpace(format))
-	key := editorResourceKey{checksum: sha256.Sum256(data), index: -1, kind: kind + "/" + format}
-	if id, ok := e.resourceID[key]; ok {
-		return id, nil
-	}
-	if err := e.prepareSourceIDs(); err != nil {
-		return "", err
-	}
-	id := e.nextID()
-	name := e.packageName("Res/Media/Media_" + id)
-	e.resources = append(e.resources, editorResource{name: name, data: bytes.Clone(data), image: &MultiMedia{ID: id, Type: kind, Format: format, MediaFile: "/" + name}})
-	e.resourceID[key] = id
-	return id, nil
-}
-
-// CopyMedia 复制音视频资源定义，共用原始文件，以新标识区分播放控制
-// 原页面资源须先通过Page读取；未被动作引用的副本不写入文档
-// 入参: id 音视频资源标识
-// 返回: string 新资源标识, error 资源缺失、类型或包结构错误
-func (e *Editor) CopyMedia(id string) (string, error) {
-	var copy editorResource
-	for _, resource := range e.resources {
-		if resource.image != nil && sameResourceID(resource.image.ID, id) {
-			copy = resource
-			break
-		}
-	}
-	if copy.image == nil && e.source != nil {
-		media, err := e.source.reader.Media(id)
-		if err != nil {
-			return "", err
-		}
-		media.MediaFile = "/" + cleanPackagePath(e.source.reader.ResPath(media.MediaFile))
-		copy.image = &media
-	}
-	if copy.image == nil || copy.image.Type != "Audio" && copy.image.Type != "Video" {
-		return "", fmt.Errorf("audio or video resource %q is unavailable", id)
-	}
-	if err := e.prepareSourceIDs(); err != nil {
-		return "", err
-	}
-	media := *copy.image
-	media.ID = e.nextID()
-	copy.image = &media
-	e.resources = append(e.resources, copy)
-	return media.ID, nil
 }

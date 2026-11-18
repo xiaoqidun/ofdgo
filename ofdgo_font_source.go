@@ -31,18 +31,38 @@ import (
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
+// systemFontIndex 按需建立只读系统字体索引
+var systemFontIndex = sync.OnceValue(indexSystemFonts)
+
+// FontSystemFiles 获取当前系统可访问的字体文件，不读取字体内容
+// 返回: []string 去重后的字体路径，浏览器WASM环境返回空列表
+func FontSystemFiles() []string {
+	if !canLoadSystemFonts() {
+		return nil
+	}
+	var files []string
+	seen := make(map[string]bool)
+	for _, dir := range systemFontDirs() {
+		_ = filepath.WalkDir(dir, func(name string, entry fs.DirEntry, err error) error {
+			if err == nil && !entry.IsDir() && basefont.IsFontFileName(name) && !seen[name] {
+				seen[name] = true
+				files = append(files, name)
+			}
+			return nil
+		})
+	}
+	return files
+}
+
+// fontSourceKind 字体来源类型
+type fontSourceKind uint8
+
 // 字体来源：文件、文件系统和系统字体
 const (
 	fontSourceFile fontSourceKind = iota
 	fontSourceFS
 	fontSourceSystem
 )
-
-// systemFontIndex 按需建立只读系统字体索引
-var systemFontIndex = sync.OnceValue(indexSystemFonts)
-
-// fontSourceKind 字体来源类型
-type fontSourceKind uint8
 
 // fontSource 字体来源
 type fontSource struct {
@@ -74,12 +94,6 @@ type fontSourceCache struct {
 	fallbackRead bool
 }
 
-// fontSourceData 保存读取结果，避免重复打开同一字体文件
-type fontSourceData struct {
-	data []byte
-	err  error
-}
-
 // newFontSourceCache 创建独立字体来源缓存
 // 入参: resources 共享资源策略
 // 返回: *fontSourceCache 字体来源缓存
@@ -95,6 +109,12 @@ func (c *fontSourceCache) child() *fontSourceCache {
 	cache.names = c.names
 	cache.collections = c.collections
 	return cache
+}
+
+// fontSourceData 保存读取结果，避免重复打开同一字体文件
+type fontSourceData struct {
+	data []byte
+	err  error
 }
 
 // readFontSource 读取独立字体并规范符号映射，保留集合中的名称和样式选择
@@ -411,26 +431,6 @@ func systemFontDirs() []string {
 		return dirs
 	}
 	return nil
-}
-
-// FontSystemFiles 获取当前系统可访问的字体文件，不读取字体内容
-// 返回: []string 去重后的字体路径，浏览器WASM环境返回空列表
-func FontSystemFiles() []string {
-	if !canLoadSystemFonts() {
-		return nil
-	}
-	var files []string
-	seen := make(map[string]bool)
-	for _, dir := range systemFontDirs() {
-		_ = filepath.WalkDir(dir, func(name string, entry fs.DirEntry, err error) error {
-			if err == nil && !entry.IsDir() && basefont.IsFontFileName(name) && !seen[name] {
-				seen[name] = true
-				files = append(files, name)
-			}
-			return nil
-		})
-	}
-	return files
 }
 
 // indexSystemFonts 递归读取系统字体名称，保留集合索引

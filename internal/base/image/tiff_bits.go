@@ -35,6 +35,30 @@ type tiffBitOrderInput struct {
 	position int64
 }
 
+// Read 顺序读取并校正像素字节的位序
+// 入参: data 接收缓冲
+// 返回: int 读取字节数, error 读取错误
+func (r *tiffBitOrderInput) Read(data []byte) (int, error) {
+	n, err := r.ReadAt(data, r.position)
+	r.position += int64(n)
+	return n, err
+}
+
+// ReadAt 按文件偏移读取，只反转实际读取到的像素字节
+// 入参: data 接收缓冲, offset 文件偏移
+// 返回: int 读取字节数, error 读取错误
+func (r *tiffBitOrderInput) ReadAt(data []byte, offset int64) (int, error) {
+	n, err := r.source.ReadAt(data, offset)
+	index := sort.Search(len(r.ranges), func(i int) bool { return r.ranges[i][1] > offset })
+	for ; index < len(r.ranges) && r.ranges[index][0] < offset+int64(n); index++ {
+		span := r.ranges[index]
+		for i := max(int64(0), span[0]-offset); i < min(int64(n), span[1]-offset); i++ {
+			data[i] = bits.Reverse8(data[i])
+		}
+	}
+	return n, err
+}
+
 // tiffBitOrderRanges 收集低位优先的未压缩一位图像块，压缩传真位序由解码器处理
 // 入参: ctx 取消上下文，可为nil, data TIFF编码, layout 已校验的主图布局
 // 返回: [][2]int64 按偏移排序且不重叠的字节区间, error 字段或布局错误
@@ -162,28 +186,4 @@ func decodeTIFFBitOrder(input interface {
 		return tiff.Decode(input)
 	}
 	return tiff.Decode(&tiffBitOrderInput{source: input, ranges: ranges})
-}
-
-// Read 顺序读取并校正像素字节的位序
-// 入参: data 接收缓冲
-// 返回: int 读取字节数, error 读取错误
-func (r *tiffBitOrderInput) Read(data []byte) (int, error) {
-	n, err := r.ReadAt(data, r.position)
-	r.position += int64(n)
-	return n, err
-}
-
-// ReadAt 按文件偏移读取，只反转实际读取到的像素字节
-// 入参: data 接收缓冲, offset 文件偏移
-// 返回: int 读取字节数, error 读取错误
-func (r *tiffBitOrderInput) ReadAt(data []byte, offset int64) (int, error) {
-	n, err := r.source.ReadAt(data, offset)
-	index := sort.Search(len(r.ranges), func(i int) bool { return r.ranges[i][1] > offset })
-	for ; index < len(r.ranges) && r.ranges[index][0] < offset+int64(n); index++ {
-		span := r.ranges[index]
-		for i := max(int64(0), span[0]-offset); i < min(int64(n), span[1]-offset); i++ {
-			data[i] = bits.Reverse8(data[i])
-		}
-	}
-	return n, err
 }

@@ -52,28 +52,6 @@ type Writer struct {
 	closed bool
 }
 
-// NewTemp 创建私有输入缓存文件，调用方负责关闭和删除
-// 入参: directory 缓存目录，空值使用系统临时目录
-// 返回: *os.File 缓存文件, error 创建错误
-func NewTemp(directory string) (*os.File, error) {
-	if directory == "" {
-		directory = os.TempDir()
-	}
-	for range 100 {
-		n, err := rand.Int(rand.Reader, big.NewInt(10000000))
-		if err != nil {
-			return nil, err
-		}
-		name := filepath.Join(directory, fmt.Sprintf("ofdgo-%07d.tmp", n.Int64()))
-		file, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
-		if errors.Is(err, os.ErrExist) {
-			continue
-		}
-		return file, err
-	}
-	return nil, os.ErrExist
-}
-
 // NewTarget 记录目标当前状态，允许目标尚不存在
 // 入参: name 目标路径
 // 返回: *Target 保存目标, error 路径或文件错误
@@ -93,28 +71,6 @@ func NewTarget(name string) (*Target, error) {
 		return nil, fmt.Errorf("save target is not a regular file")
 	}
 	return &Target{name: name, info: info}, nil
-}
-
-// check 检查目标是否保持最近确认的状态
-// 返回: error 文件状态错误
-func (t *Target) check() error {
-	info, err := os.Lstat(t.name)
-	if errors.Is(err, os.ErrNotExist) {
-		if t.info == nil {
-			return nil
-		}
-		return ErrChanged
-	}
-	if err != nil {
-		return err
-	}
-	if t.info == nil || !os.SameFile(t.info, info) || t.info.Size() != info.Size() || !t.info.ModTime().Equal(info.ModTime()) {
-		return ErrChanged
-	}
-	if info.Mode().Perm()&0222 == 0 {
-		return os.ErrPermission
-	}
-	return nil
 }
 
 // Begin 创建独占写入事务，调用方必须提交或终止
@@ -229,4 +185,48 @@ func (w *Writer) Abort() error {
 	w.closed = true
 	defer activeFiles.Delete(w.target.name)
 	return errors.Join(w.file.Close(), os.Remove(w.file.Name()))
+}
+
+// NewTemp 创建私有输入缓存文件，调用方负责关闭和删除
+// 入参: directory 缓存目录，空值使用系统临时目录
+// 返回: *os.File 缓存文件, error 创建错误
+func NewTemp(directory string) (*os.File, error) {
+	if directory == "" {
+		directory = os.TempDir()
+	}
+	for range 100 {
+		n, err := rand.Int(rand.Reader, big.NewInt(10000000))
+		if err != nil {
+			return nil, err
+		}
+		name := filepath.Join(directory, fmt.Sprintf("ofdgo-%07d.tmp", n.Int64()))
+		file, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return file, err
+	}
+	return nil, os.ErrExist
+}
+
+// check 检查目标是否保持最近确认的状态
+// 返回: error 文件状态错误
+func (t *Target) check() error {
+	info, err := os.Lstat(t.name)
+	if errors.Is(err, os.ErrNotExist) {
+		if t.info == nil {
+			return nil
+		}
+		return ErrChanged
+	}
+	if err != nil {
+		return err
+	}
+	if t.info == nil || !os.SameFile(t.info, info) || t.info.Size() != info.Size() || !t.info.ModTime().Equal(info.ModTime()) {
+		return ErrChanged
+	}
+	if info.Mode().Perm()&0222 == 0 {
+		return os.ErrPermission
+	}
+	return nil
 }

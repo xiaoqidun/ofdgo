@@ -135,28 +135,6 @@ func DecodeWOFF2(data []byte) ([]byte, bool, error) {
 	return decoded, true, err
 }
 
-// readWOFF2Base128 读取WOFF2无符号变长整数，拒绝溢出和前导零
-// 入参: data 编码数据, pos 当前读取位置
-// 返回: uint32 整数值, error 编码错误
-func readWOFF2Base128(data []byte, pos *int) (uint32, error) {
-	var value uint32
-	for i := range 5 {
-		if *pos >= len(data) {
-			return 0, fmt.Errorf("truncated WOFF2 integer")
-		}
-		b := data[*pos]
-		*pos++
-		if i == 0 && b == 0x80 || value > 0x1ffffff {
-			return 0, fmt.Errorf("invalid WOFF2 integer")
-		}
-		value = value<<7 | uint32(b&127)
-		if b&128 == 0 {
-			return value, nil
-		}
-	}
-	return 0, fmt.Errorf("invalid WOFF2 integer")
-}
-
 // DecodeWOFF 展开WOFF表数据，不解析或更改字体轮廓
 // 入参: data WOFF文件
 // 返回: []byte OpenType数据, error 封装错误
@@ -212,6 +190,28 @@ func DecodeWOFF(data []byte) ([]byte, error) {
 		return nil, err
 	}
 	return SerializeOTF(table)
+}
+
+// readWOFF2Base128 读取WOFF2无符号变长整数，拒绝溢出和前导零
+// 入参: data 编码数据, pos 当前读取位置
+// 返回: uint32 整数值, error 编码错误
+func readWOFF2Base128(data []byte, pos *int) (uint32, error) {
+	var value uint32
+	for i := range 5 {
+		if *pos >= len(data) {
+			return 0, fmt.Errorf("truncated WOFF2 integer")
+		}
+		b := data[*pos]
+		*pos++
+		if i == 0 && b == 0x80 || value > 0x1ffffff {
+			return 0, fmt.Errorf("invalid WOFF2 integer")
+		}
+		value = value<<7 | uint32(b&127)
+		if b&128 == 0 {
+			return value, nil
+		}
+	}
+	return 0, fmt.Errorf("invalid WOFF2 integer")
 }
 
 // validateWOFFBlocks 校验附加数据块的边界及对齐，字体元数据不写入输出

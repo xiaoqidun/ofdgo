@@ -29,6 +29,33 @@ import (
 	"golang.org/x/text/unicode/bidi"
 )
 
+// LayoutRichText 生成局部坐标的标准文字和路径，不修改页面或编辑历史
+// 边界包含内容的排版高度和溢出墨迹，不包含空余段落宽度，可能有负的X或Y
+// 非标准RGB文档按需复用或注册RGB颜色空间，返回对象可直接用于当前文档
+// 注册不产生修订或撤销记录；失败时不保留新增资源和资源编号
+// 提交对象后应创建新的Reader；已有Reader是独立快照，不包含新注册的资源
+// 返回值的资源编号属于当前资源视图，切换文档、版本或替换资源快照后须重新排版
+// 入参: value 富文本内容, width 段落排版宽度
+// 返回: []GraphicObject 生成的标准图元, Box 局部边界, error 排版或资源错误
+func (e *Editor) LayoutRichText(value RichText, width float64) ([]GraphicObject, Box, error) {
+	result, err := e.layoutRichText(value, width)
+	if err != nil {
+		return nil, Box{}, err
+	}
+	err = e.Transaction(func(editor *Editor) error {
+		for i := range result.objects {
+			if err := editor.richTextColors(&result.objects[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, Box{}, err
+	}
+	return result.objects, result.bounds, nil
+}
+
 // richLayout 保存局部标准对象、含墨迹的边界及各片段的字体锚点序号
 type richLayout struct {
 	width   float64
@@ -61,31 +88,18 @@ type richContextShaper struct {
 	options    TextShapeOptions
 }
 
-// LayoutRichText 生成局部坐标的标准文字和路径，不修改页面或编辑历史
-// 边界包含内容的排版高度和溢出墨迹，不包含空余段落宽度，可能有负的X或Y
-// 非标准RGB文档按需复用或注册RGB颜色空间，返回对象可直接用于当前文档
-// 注册不产生修订或撤销记录；失败时不保留新增资源和资源编号
-// 提交对象后应创建新的Reader；已有Reader是独立快照，不包含新注册的资源
-// 返回值的资源编号属于当前资源视图，切换文档、版本或替换资源快照后须重新排版
-// 入参: value 富文本内容, width 段落排版宽度
-// 返回: []GraphicObject 生成的标准图元, Box 局部边界, error 排版或资源错误
-func (e *Editor) LayoutRichText(value RichText, width float64) ([]GraphicObject, Box, error) {
-	result, err := e.layoutRichText(value, width)
+// ShapeText 返回区间相对簇索引，同时保留完整行提供的上下文
+// 入参: _ 忽略的局部字符串, size 字号
+// 返回: []ShapedGlyph 塑形字形列表, error 塑形错误
+func (s richContextShaper) ShapeText(_ string, size float64) ([]ShapedGlyph, error) {
+	glyphs, err := s.ShapeTextRun(s.text, s.start, s.end, size, s.options)
 	if err != nil {
-		return nil, Box{}, err
+		return nil, err
 	}
-	err = e.Transaction(func(editor *Editor) error {
-		for i := range result.objects {
-			if err := editor.richTextColors(&result.objects[i]); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, Box{}, err
+	for i := range glyphs {
+		glyphs[i].Cluster -= s.start
 	}
-	return result.objects, result.bounds, nil
+	return glyphs, nil
 }
 
 // layoutRichText 统一计算段落换行、视觉顺序和基线，颜色资源由调用方绑定
@@ -481,20 +495,6 @@ func richShapeLine(chars []rune, owners []int, value RichText, metrics []richMet
 		}
 	}
 	return spans, advances, nil
-}
-
-// ShapeText 返回区间相对簇索引，同时保留完整行提供的上下文
-// 入参: _ 忽略的局部字符串, size 字号
-// 返回: []ShapedGlyph 塑形字形列表, error 塑形错误
-func (s richContextShaper) ShapeText(_ string, size float64) ([]ShapedGlyph, error) {
-	glyphs, err := s.ShapeTextRun(s.text, s.start, s.end, size, s.options)
-	if err != nil {
-		return nil, err
-	}
-	for i := range glyphs {
-		glyphs[i].Cluster -= s.start
-	}
-	return glyphs, nil
 }
 
 // richPositionSpans 按核心排版相同的方向分组规则排列片段，按视觉簇分配字距及两端对齐

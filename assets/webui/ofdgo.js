@@ -27,13 +27,18 @@ const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "A
 const fontBinding = { font: null, choices: [], sequence: 0 };
 const fontBindingElements = Object.fromEntries(["Panel", "Form", "Title", "Name", "SourceRow", "Source", "File", "Hint", "Status", "Cancel", "Submit"].map(name => [name, document.querySelector(`#fontBinding${name}`)]));
 const resourceElements = Object.fromEntries(["ManageButton", "Panel", "Form", "Tabs", "List", "Empty", "Reference", "ReferenceGroup", "Actions", "Add", "Preview", "Export", "Rename", "Replace", "Delete", "Locate", "Close", "Binding", "BindingActions", "Page", "Object", "Pick", "Bind", "Unbind", "Viewer", "Status", "File"].map(name => [name, document.querySelector(`#resource${name}`)]));
-let resourceManager = createResourceManager();
 const settingsElements = Object.fromEntries(["Button", "Panel", "Form", "Title", "Tabs", "Context", "Content", "Actions", "Status"].map(name => [name, document.querySelector(`#settings${name}`)]));
-let settings = createSettings();
-let invoicePanel = createInvoicePanel();
 const invoiceDocuments = new WeakMap();
 const invoiceReferenceStandard = "http://www.ofdspec.org/2016";
+const createPaperSizes = { a4: [210, 297], a3: [297, 420], a5: [148, 210] };
+const sealPosition = Object.fromEntries(["Layer", "Stamp", "Image"].map(name => [name, document.querySelector(`#signPosition${name}`)]));
+const workspace = { tabs: [], active: null, sequence: 0, nextID: 0, switching: false, closing: false, objectClipboard: null, textClipboard: null };
+const busyControls = new Set();
 
+let resourceManager = createResourceManager();
+let settings = createSettings();
+let invoicePanel = createInvoicePanel();
+let state = createDocumentState();
 let remoteDownload = null;
 let wasmWorker = null;
 let wasmRequestID = 0;
@@ -42,160 +47,9 @@ let credentialRequest = null;
 let documentDialogs = null;
 let confirmationTask = Promise.resolve();
 let cancelPageTouch = null;
-
-const workspace = { tabs: [], active: null, sequence: 0, nextID: 0, switching: false, closing: false, objectClipboard: null, textClipboard: null };
-const busyControls = new Set();
-
-function createResourceManager() {
-	return { kind: "Font", scope: "", views: new Map(), items: [], filteredItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
-}
-
-function createSettings() {
-	return { kind: "bookmarks", locked: false, views: new Map(), sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false, invoice: false };
-}
-
-function createInvoicePanel() {
-	return { tab: "basic", views: new Map(), entries: [], formats: [], drafts: new Map(), key: "", result: null };
-}
-
-function createDocumentState() {
-	return {
-		conversionWarnings: [],
-		annotationEdit: null,
-		annotationCreate: null,
-		ready: false,
-		wasmExited: false,
-		wasmSeq: 0,
-		wasmRecovering: false,
-		wasmRecoveries: 0,
-		exporting: false,
-		saving: false,
-		saveRequestID: 0,
-		signing: false,
-		signCanceled: false,
-		exportRequestID: 0,
-		editing: false,
-		selectObjects: true,
-		dirty: false,
-		editorInfo: null,
-		editorViews: new Map(),
-		savedRevision: null,
-		saveHandle: null,
-		saveStamp: null,
-		packageDirty: false,
-		encryptionDirty: false,
-		insertObject: null,
-		importPageCount: 0,
-		importDocumentCount: 0,
-		importDocumentMode: false,
-		importEncrypted: false,
-		importing: false,
-		imageImporting: false,
-		createInsert: false,
-		createPackage: false,
-		createDocumentAt: null,
-		createImageQueue: null,
-		documentManagement: null,
-		versionManagement: null,
-		infoDocumentIndex: null,
-		pageSelection: new Set(),
-		pageSelectionAnchor: null,
-		pageMultiSelect: false,
-		pageTouchPointer: null,
-		outlineSelection: null,
-		outlineSeq: 0,
-		openActionEnabled: false,
-		openActionDocument: false,
-		openActionPage: null,
-		openActionTask: null,
-		openActionFrame: 0,
-		outlineAction: "add",
-		styleOriginal: null,
-		objectClipboardToken: null,
-		styleClipboard: null,
-		objectDistribution: null,
-		outlineExpanded: new Map(),
-		textFonts: [],
-		textFontID: null,
-		textFontInitialized: false,
-		textFontInitializing: null,
-		textDefaults: { type: "TextObject", size: 16 * 25.4 / 72, color: "#000000", wrap: true, align: "left", paragraphHeight: 0, letterSpacing: 0 },
-		ofdBytes: null,
-		sourcePDF: false,
-		pdfComplete: false,
-		fileName: "ofdgo.ofd",
-		openSeq: 0,
-		pageSeq: 0,
-		searchSeq: 0,
-		searchQuery: "",
-		searchMatches: [],
-		searchIndex: -1,
-		searchRunning: false,
-		searchNext: 0,
-		searchPaused: false,
-		searchTruncated: false,
-		navigationScroll: new Map(),
-		annotationFilter: {scope: null, query: "", kind: ""},
-		fontSyncPending: false,
-		fontCatalogLoading: false,
-		fontFacesLoading: false,
-		fontRenderPending: false,
-		fontSyncing: false,
-		doc: null,
-		pageIndex: 0,
-		pageNavigation: null,
-		scale: 1,
-		rotation: 0,
-		panMode: false,
-		pan: null,
-		fitMode: "width",
-		continuous: false,
-		pageLayoutPreference: 1,
-		get pageLayout() {
-			return this.doc?.pageCount > 1 ? this.pageLayoutPreference : 1;
-		},
-		renderAnnotations: true,
-		renderBackend: "canvas",
-		renderMode: "svg",
-		renderDPI: DEFAULT_IMAGE_DPI,
-		pageCache: new Map(),
-		mediaPlayers: new Map(),
-		svgFonts: new Map(),
-		svgFontLoads: new Map(),
-		svgImages: new Map(),
-		selectedPages: new Set(),
-		documentSelection: null,
-		pageInFlight: new Map(),
-		pageLoadSeq: 0,
-		pageRenderQueue: [],
-		pagePrefetchIndex: null,
-		pagePrefetchDirection: 1,
-		pageRenderRunning: false,
-		pageRenderWorkers: 0,
-		pagePresentQueue: new Map(),
-		pagePresentFrame: 0,
-		pageObserver: null,
-		visiblePages: new Set(),
-		scrollFrame: 0,
-		pageWindow: null,
-		thumbnailWindow: null,
-		thumbnailFrame: 0,
-		pageDragIndex: null,
-		pageListCurrent: null,
-		thumbnailObserver: null,
-		visibleThumbnails: new Set(),
-		exportFormats: [],
-		exportPages: null,
-		exportBackdrop: false,
-		encryptionChanged: false,
-		showPages: !COMPACT_LAYOUT.matches,
-		showMeta: !COMPACT_LAYOUT.matches,
-	};
-}
-
-let state = createDocumentState();
 let createImagePicker = null;
-const createPaperSizes = { a4: [210, 297], a3: [297, 420], a5: [148, 210] };
+let aboutBackdrop = false;
+let sealPreview = null;
 
 const el = {
 	appearanceButton: document.querySelector("#appearanceButton"),
@@ -686,35 +540,6 @@ const el = {
 	statusText: document.querySelector("#statusText"),
 };
 
-function createPrintDialog(tab) {
-	const panel = el.printPanel.cloneNode(true);
-	el.printPanel.remove();
-	documentDialogs.register(panel, {shared:false});
-	return new PrintDialog({
-		panel,
-		nativeHost,
-		show: panel => documentDialogs.openFor(tab, panel),
-		download: (bytes, mime, name) => nativeHost ? nativeHost.download(bytes, mime, name) : downloadBytes(bytes, mime, name),
-		cancel: tab => {
-			for (const [id, request] of wasmRequests) if (request.tab === tab && ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF"].includes(request.name)) cancelOperation(id);
-		},
-	});
-}
-
-async function openPrintPanel() {
-	const tab = documentTab(), content = documentContentKey(state);
-	if (!tab.state.doc || !tab.state.ready || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
-	const current = () => isForegroundDocument(tab) && content === documentContentKey(state);
-	if (!await canvasEditor.commitNudge() || !current() || !await canvasEditor.commitText() || !current()
-		|| !await canvasEditor.commitCrop() || !current() || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
-	tab.print ||= createPrintDialog(tab);
-	tab.print.open({tab, document:documentEntryKey(tab.state.doc.documents?.[tab.state.doc.documentIndex || 0]), call:(name, ...args) => callTabWASM(tab, name, ...args), page:tab.state.pageIndex,
-		selection:tab.state.pageSelection.size ? selectedPageIndexes() : [], annotations:tab.state.renderAnnotations,
-		name:tab.state.fileName || tab.state.doc.title || "OFDGo"});
-}
-
-el.printButton.addEventListener("click", openPrintPanel);
-
 const fontManager = new FontManager({
 	host: nativeHost,
 	onChange: scheduleFontSync,
@@ -726,7 +551,7 @@ const textFormatButtons = [...document.querySelectorAll("[data-text-format]")];
 const textBackground = document.querySelector("#textBackground");
 const editorInputs = new Map();
 const annotationFields = Object.fromEntries(["CreateForm", "CreateCancel", "Content", "Old", "Font", "Text", "TextRow", "Image", "ImageRow", "Author", "LinkKind", "Address", "AddressRow", "Target", "TargetRow", "X", "Y", "Width", "Height", "Angle", "Opacity", "Tile", "Placement", "PlacementLabel", "Pick", "Scope", "Pages"].map(key => [key, document.querySelector(`#annotation${key}`)]));
-el.editorTools.addEventListener("scroll", () => fontPicker.position());
+const annotationList = new VirtualList(el.annotationsList, createAnnotationRow);
 
 const canvasEditor = new CanvasEditor(el.viewerPanel, {
 	textControls: [el.appearanceButton, el.appearancePanel, el.textAlign, el.textFont, el.textFontToggle, el.textFontAdd, el.textFontList, el.textSize, el.textColor, el.textLineHeight, el.textSpacing, el.textWrap, el.paragraphButton, el.paragraphPanel, textBackground, ...textFormatButtons, el.undoButton, el.redoButton, el.saveButton, el.saveAsButton, el.fontInput, document.querySelector("#textReflow")],
@@ -844,6 +669,183 @@ const pageView = createPageView({
 	setBusy, setProgress, setStatus, showError, syncPageSelection,
 	updateControls, updateEditorTools, wasmRequests,
 });
+
+function createResourceManager() {
+	return { kind: "Font", scope: "", views: new Map(), items: [], filteredItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
+}
+
+function createSettings() {
+	return { kind: "bookmarks", locked: false, views: new Map(), sequence: 0, busy: false, page: 0, scope: "document", object: "", path: [], selected: -1, data: null, actions: [], drafts: new Map(), view: "", baseline: {}, suspended: false, invoice: false };
+}
+
+function createInvoicePanel() {
+	return { tab: "basic", views: new Map(), entries: [], formats: [], drafts: new Map(), key: "", result: null };
+}
+
+function createDocumentState() {
+	return {
+		conversionWarnings: [],
+		annotationEdit: null,
+		annotationCreate: null,
+		ready: false,
+		wasmExited: false,
+		wasmSeq: 0,
+		wasmRecovering: false,
+		wasmRecoveries: 0,
+		exporting: false,
+		saving: false,
+		saveRequestID: 0,
+		signing: false,
+		signCanceled: false,
+		exportRequestID: 0,
+		editing: false,
+		selectObjects: true,
+		dirty: false,
+		editorInfo: null,
+		editorViews: new Map(),
+		savedRevision: null,
+		saveHandle: null,
+		saveStamp: null,
+		packageDirty: false,
+		encryptionDirty: false,
+		insertObject: null,
+		importPageCount: 0,
+		importDocumentCount: 0,
+		importDocumentMode: false,
+		importEncrypted: false,
+		importing: false,
+		imageImporting: false,
+		createInsert: false,
+		createPackage: false,
+		createDocumentAt: null,
+		createImageQueue: null,
+		documentManagement: null,
+		versionManagement: null,
+		infoDocumentIndex: null,
+		pageSelection: new Set(),
+		pageSelectionAnchor: null,
+		pageMultiSelect: false,
+		pageTouchPointer: null,
+		outlineSelection: null,
+		outlineSeq: 0,
+		openActionEnabled: false,
+		openActionDocument: false,
+		openActionPage: null,
+		openActionTask: null,
+		openActionFrame: 0,
+		outlineAction: "add",
+		styleOriginal: null,
+		objectClipboardToken: null,
+		styleClipboard: null,
+		objectDistribution: null,
+		outlineExpanded: new Map(),
+		textFonts: [],
+		textFontID: null,
+		textFontInitialized: false,
+		textFontInitializing: null,
+		textDefaults: { type: "TextObject", size: 16 * 25.4 / 72, color: "#000000", wrap: true, align: "left", paragraphHeight: 0, letterSpacing: 0 },
+		ofdBytes: null,
+		sourcePDF: false,
+		pdfComplete: false,
+		fileName: "ofdgo.ofd",
+		openSeq: 0,
+		pageSeq: 0,
+		searchSeq: 0,
+		searchQuery: "",
+		searchMatches: [],
+		searchIndex: -1,
+		searchRunning: false,
+		searchNext: 0,
+		searchPaused: false,
+		searchTruncated: false,
+		navigationScroll: new Map(),
+		annotationFilter: {scope: null, query: "", kind: ""},
+		fontSyncPending: false,
+		fontCatalogLoading: false,
+		fontFacesLoading: false,
+		fontRenderPending: false,
+		fontSyncing: false,
+		doc: null,
+		pageIndex: 0,
+		pageNavigation: null,
+		scale: 1,
+		rotation: 0,
+		panMode: false,
+		pan: null,
+		fitMode: "width",
+		continuous: false,
+		pageLayoutPreference: 1,
+		get pageLayout() {
+			return this.doc?.pageCount > 1 ? this.pageLayoutPreference : 1;
+		},
+		renderAnnotations: true,
+		renderBackend: "canvas",
+		renderMode: "svg",
+		renderDPI: DEFAULT_IMAGE_DPI,
+		pageCache: new Map(),
+		mediaPlayers: new Map(),
+		svgFonts: new Map(),
+		svgFontLoads: new Map(),
+		svgImages: new Map(),
+		selectedPages: new Set(),
+		documentSelection: null,
+		pageInFlight: new Map(),
+		pageLoadSeq: 0,
+		pageRenderQueue: [],
+		pagePrefetchIndex: null,
+		pagePrefetchDirection: 1,
+		pageRenderRunning: false,
+		pageRenderWorkers: 0,
+		pagePresentQueue: new Map(),
+		pagePresentFrame: 0,
+		pageObserver: null,
+		visiblePages: new Set(),
+		scrollFrame: 0,
+		pageWindow: null,
+		thumbnailWindow: null,
+		thumbnailFrame: 0,
+		pageDragIndex: null,
+		pageListCurrent: null,
+		thumbnailObserver: null,
+		visibleThumbnails: new Set(),
+		exportFormats: [],
+		exportPages: null,
+		exportBackdrop: false,
+		encryptionChanged: false,
+		showPages: !COMPACT_LAYOUT.matches,
+		showMeta: !COMPACT_LAYOUT.matches,
+	};
+}
+
+function createPrintDialog(tab) {
+	const panel = el.printPanel.cloneNode(true);
+	el.printPanel.remove();
+	documentDialogs.register(panel, {shared:false});
+	return new PrintDialog({
+		panel,
+		nativeHost,
+		show: panel => documentDialogs.openFor(tab, panel),
+		download: (bytes, mime, name) => nativeHost ? nativeHost.download(bytes, mime, name) : downloadBytes(bytes, mime, name),
+		cancel: tab => {
+			for (const [id, request] of wasmRequests) if (request.tab === tab && ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF"].includes(request.name)) cancelOperation(id);
+		},
+	});
+}
+
+async function openPrintPanel() {
+	const tab = documentTab(), content = documentContentKey(state);
+	if (!tab.state.doc || !tab.state.ready || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
+	const current = () => isForegroundDocument(tab) && content === documentContentKey(state);
+	if (!await canvasEditor.commitNudge() || !current() || !await canvasEditor.commitText() || !current()
+		|| !await canvasEditor.commitCrop() || !current() || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
+	tab.print ||= createPrintDialog(tab);
+	tab.print.open({tab, document:documentEntryKey(tab.state.doc.documents?.[tab.state.doc.documentIndex || 0]), call:(name, ...args) => callTabWASM(tab, name, ...args), page:tab.state.pageIndex,
+		selection:tab.state.pageSelection.size ? selectedPageIndexes() : [], annotations:tab.state.renderAnnotations,
+		name:tab.state.fileName || tab.state.doc.title || "OFDGo"});
+}
+
+el.printButton.addEventListener("click", openPrintPanel);
+el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 function updatePendingChanges() {
 	setDirty(state.packageDirty || state.encryptionDirty || Boolean(state.editorInfo) && (state.editorInfo.revision !== state.savedRevision
@@ -1584,7 +1586,6 @@ el.pageForm.addEventListener("submit", async (event) => {
 });
 el.aboutButton.addEventListener("click", openAboutPanel);
 el.associationSection.addEventListener("click", changeFileAssociation);
-let aboutBackdrop = false;
 el.aboutPanel.addEventListener("pointerdown", event => { aboutBackdrop = event.target === el.aboutPanel; });
 el.aboutPanel.addEventListener("click", event => {
 	if (aboutBackdrop && event.target === el.aboutPanel) el.aboutPanel.close();
@@ -1782,8 +1783,6 @@ el.signPanel.addEventListener("cancel", event => {
 });
 el.signPanel.addEventListener("close", () => { if (!el.signPanel.open && !sealPreview) el.signForm.reset(); });
 el.signForm.addEventListener("submit", signDocument);
-const sealPosition = Object.fromEntries(["Layer", "Stamp", "Image"].map(name => [name, document.querySelector(`#signPosition${name}`)]));
-let sealPreview = null;
 document.querySelector("#signPick").addEventListener("click", openSealPosition);
 el.viewerPanel.addEventListener("pointerdown", beginSealDrag, true);
 el.viewerPanel.addEventListener("pointerdown", pickResourceObject, true);
@@ -1837,7 +1836,6 @@ el.togglePagesButton.addEventListener("click", () => toggleSidebar("pages"));
 el.toggleMetaButton.addEventListener("click", () => toggleSidebar("meta"));
 el.pagesTab.addEventListener("click", () => showNavigation(el.pagesTab));
 el.annotationsTab.addEventListener("click", () => showNavigation(el.annotationsTab));
-const annotationList = new VirtualList(el.annotationsList, createAnnotationRow);
 el.annotationsList.addEventListener("scroll", () => {
 	if (!el.annotationsPanel.hidden && annotationList.view === state.annotationSummary?.view) state.annotationFilter.top = el.annotationsList.scrollTop;
 });

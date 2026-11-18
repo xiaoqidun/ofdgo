@@ -35,11 +35,35 @@ type editorGeneratedReferences struct {
 	objects map[string]bool
 }
 
+// matches 判断条目仍为本次编码结果，空条目与暂存占位不混用
+// 入参: data 当前条目数据
+// 返回: bool 是否可以复用本次引用
+func (r editorGeneratedReferences) matches(data []byte) bool {
+	if r.staged != nil {
+		return data == nil
+	}
+	return bytes.Equal(data, r.data)
+}
+
+// stagedLeaf 判断暂存页面是否无需改写文件路径，资源标识仍由资源索引解析
+// 入参: data 当前条目数据
+// 返回: bool 是否为引用完整且不含文件路径的暂存页面
+func (r editorGeneratedReferences) stagedLeaf(data []byte) bool {
+	return r.staged != nil && data == nil && r.refs != nil && len(r.refs.files) == 0
+}
+
 // editorVectorUsage 保存自产矢量资源的引用快照，内容和路径变化时失效
 type editorVectorUsage struct {
 	name   string
 	digest [32]byte
 	refs   *editorResourceRefs
+}
+
+// matches 核对资源路径和完整内容摘要，不以切片地址判断内容
+// 入参: name 当前资源路径, data 当前资源内容
+// 返回: bool 是否仍可使用编码时的引用
+func (u *editorVectorUsage) matches(name string, data []byte) bool {
+	return u != nil && u.name == name && u.digest == sha256.Sum256(data)
 }
 
 // editorReferenceScan 按XML事件收集资源、字体用字和图元编号，未知内容保持完整扫描
@@ -58,55 +82,6 @@ type editorReferenceScan struct {
 	capture    bool
 	safe       bool
 	seen       bool
-}
-
-// matches 判断条目仍为本次编码结果，空条目与暂存占位不混用
-// 入参: data 当前条目数据
-// 返回: bool 是否可以复用本次引用
-func (r editorGeneratedReferences) matches(data []byte) bool {
-	if r.staged != nil {
-		return data == nil
-	}
-	return bytes.Equal(data, r.data)
-}
-
-// stagedLeaf 判断暂存页面是否无需改写文件路径，资源标识仍由资源索引解析
-// 入参: data 当前条目数据
-// 返回: bool 是否为引用完整且不含文件路径的暂存页面
-func (r editorGeneratedReferences) stagedLeaf(data []byte) bool {
-	return r.staged != nil && data == nil && r.refs != nil && len(r.refs.files) == 0
-}
-
-// matches 核对资源路径和完整内容摘要，不以切片地址判断内容
-// 入参: name 当前资源路径, data 当前资源内容
-// 返回: bool 是否仍可使用编码时的引用
-func (u *editorVectorUsage) matches(name string, data []byte) bool {
-	return u != nil && u.name == name && u.digest == sha256.Sum256(data)
-}
-
-// generatedVectorReferences 合并未改变的自产矢量引用，不修改调用方集合
-// 入参: parts 输出条目, generated 本次已知引用
-// 返回: map[string]editorGeneratedReferences 本次可复用引用
-func (e *Editor) generatedVectorReferences(parts map[string][]byte, generated map[string]editorGeneratedReferences) map[string]editorGeneratedReferences {
-	copied := false
-	for _, resource := range e.resources {
-		if e.output != nil && e.output.ctx.Err() != nil {
-			return generated
-		}
-		data, ok := parts[resource.name]
-		if !ok || !resource.usage.matches(resource.name, data) {
-			continue
-		}
-		if !copied {
-			generated = maps.Clone(generated)
-			if generated == nil {
-				generated = make(map[string]editorGeneratedReferences)
-			}
-			copied = true
-		}
-		generated[resource.name] = editorGeneratedReferences{data: data, refs: resource.usage.refs}
-	}
-	return generated
 }
 
 // vectorUsage 保留完整且限额内的自产矢量引用，超限时保存流程重新扫描
@@ -329,6 +304,31 @@ func (s *editorReferenceScan) fileReference(root, parent, name, attribute, value
 		s.refs.roles = make(map[string]int)
 	}
 	s.refs.roles[resolveResourcePath(s.name, s.base, value)] |= kind
+}
+
+// generatedVectorReferences 合并未改变的自产矢量引用，不修改调用方集合
+// 入参: parts 输出条目, generated 本次已知引用
+// 返回: map[string]editorGeneratedReferences 本次可复用引用
+func (e *Editor) generatedVectorReferences(parts map[string][]byte, generated map[string]editorGeneratedReferences) map[string]editorGeneratedReferences {
+	copied := false
+	for _, resource := range e.resources {
+		if e.output != nil && e.output.ctx.Err() != nil {
+			return generated
+		}
+		data, ok := parts[resource.name]
+		if !ok || !resource.usage.matches(resource.name, data) {
+			continue
+		}
+		if !copied {
+			generated = maps.Clone(generated)
+			if generated == nil {
+				generated = make(map[string]editorGeneratedReferences)
+			}
+			copied = true
+		}
+		generated[resource.name] = editorGeneratedReferences{data: data, refs: resource.usage.refs}
+	}
+	return generated
 }
 
 // merge 合并本次编码已确认的引用，不共享字体用字的可变集合

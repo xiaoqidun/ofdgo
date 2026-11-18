@@ -21,22 +21,6 @@ import (
 	basethreed "github.com/xiaoqidun/ofdgo/internal/base/threed"
 )
 
-const (
-	U3DRenderSolid              = basethreed.U3DRenderSolid              // 实体
-	U3DRenderSolidWireframe     = basethreed.U3DRenderSolidWireframe     // 实体线框
-	U3DRenderWireframe          = basethreed.U3DRenderWireframe          // 线框
-	U3DRenderShadedWireframe    = basethreed.U3DRenderShadedWireframe    // 着色线框
-	U3DRenderHiddenWireframe    = basethreed.U3DRenderHiddenWireframe    // 隐藏线框
-	U3DRenderVertices           = basethreed.U3DRenderVertices           // 顶点
-	U3DRenderShadedVertices     = basethreed.U3DRenderShadedVertices     // 着色顶点
-	U3DRenderBoundingBox        = basethreed.U3DRenderBoundingBox        // 包围盒线框
-	U3DRenderBoundingBoxFaces   = basethreed.U3DRenderBoundingBoxFaces   // 包围盒面
-	U3DRenderBoundingBoxOutline = basethreed.U3DRenderBoundingBoxOutline // 包围盒面及线框
-	U3DRenderIllustration       = basethreed.U3DRenderIllustration       // 插图
-	U3DRenderSolidOutline       = basethreed.U3DRenderSolidOutline       // 实体轮廓
-	U3DRenderShadedIllustration = basethreed.U3DRenderShadedIllustration // 着色插图
-)
-
 // U3DOptions 控制U3D解码规模，MaxDecodedBytes为0时采用256MiB上限
 type U3DOptions = basethreed.U3DOptions
 
@@ -97,6 +81,22 @@ type U3DCorner = basethreed.U3DCorner
 
 // U3DRenderMode 定义静态几何的呈现方式，边线和顶点使用单像素覆盖
 type U3DRenderMode = basethreed.U3DRenderMode
+
+const (
+	U3DRenderSolid              = basethreed.U3DRenderSolid              // 实体
+	U3DRenderSolidWireframe     = basethreed.U3DRenderSolidWireframe     // 实体线框
+	U3DRenderWireframe          = basethreed.U3DRenderWireframe          // 线框
+	U3DRenderShadedWireframe    = basethreed.U3DRenderShadedWireframe    // 着色线框
+	U3DRenderHiddenWireframe    = basethreed.U3DRenderHiddenWireframe    // 隐藏线框
+	U3DRenderVertices           = basethreed.U3DRenderVertices           // 顶点
+	U3DRenderShadedVertices     = basethreed.U3DRenderShadedVertices     // 着色顶点
+	U3DRenderBoundingBox        = basethreed.U3DRenderBoundingBox        // 包围盒线框
+	U3DRenderBoundingBoxFaces   = basethreed.U3DRenderBoundingBoxFaces   // 包围盒面
+	U3DRenderBoundingBoxOutline = basethreed.U3DRenderBoundingBoxOutline // 包围盒面及线框
+	U3DRenderIllustration       = basethreed.U3DRenderIllustration       // 插图
+	U3DRenderSolidOutline       = basethreed.U3DRenderSolidOutline       // 实体轮廓
+	U3DRenderShadedIllustration = basethreed.U3DRenderShadedIllustration // 着色插图
+)
 
 // U3DMotion 保存骨骼或节点动作轨道，解码不执行动画
 type U3DMotion = basethreed.U3DMotion

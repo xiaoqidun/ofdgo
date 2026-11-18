@@ -33,6 +33,62 @@ type cidSubsetFont struct {
 	charset []byte
 }
 
+// write 重建CID字体偏移，保留CID映射、字体矩阵及各字典的私有参数
+// 入参: chars 裁剪后的字形程序
+// 返回: []byte CFF数据, error 偏移或字典错误
+func (f *cidSubsetFont) write(chars [][]byte) ([]byte, error) {
+	suffix := append(encodeCFFIndex(f.strings), encodeCFFIndex(f.fonts[0].globals)...)
+	selects := encodeCFFSubsetFDSelect(f.selects)
+	programs := encodeCFFIndex(chars)
+	private := make([][]byte, len(f.fonts))
+	locals := make([][]byte, len(f.fonts))
+	fds := make([][]byte, len(f.fonts))
+	for index, font := range f.fonts {
+		var err error
+		private[index], err = encodeCFFSubsetPrivate(f.private[index])
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := f.private[index][19]; ok {
+			locals[index] = encodeCFFIndex(font.locals)
+		}
+		fds[index] = encodeCFFDict(f.dicts[index])
+	}
+	for range 16 {
+		top := encodeCFFIndex([][]byte{encodeCFFDict(f.top)})
+		array := encodeCFFIndex(fds)
+		offset := len(f.prefix) + len(top) + len(suffix)
+		f.top[15] = []float64{float64(offset)}
+		offset += len(f.charset)
+		f.top[1237] = []float64{float64(offset)}
+		offset += len(selects)
+		f.top[17] = []float64{float64(offset)}
+		offset += len(programs)
+		f.top[1236] = []float64{float64(offset)}
+		offset += len(array)
+		for index := range f.fonts {
+			f.dicts[index][18] = []float64{float64(len(private[index])), float64(offset)}
+			fds[index] = encodeCFFDict(f.dicts[index])
+			offset += len(private[index]) + len(locals[index])
+		}
+		updatedTop := encodeCFFIndex([][]byte{encodeCFFDict(f.top)})
+		updatedArray := encodeCFFIndex(fds)
+		if len(updatedTop) != len(top) || len(updatedArray) != len(array) {
+			continue
+		}
+		result := make([]byte, 0, offset)
+		for _, part := range [][]byte{f.prefix, updatedTop, suffix, f.charset, selects, programs, updatedArray} {
+			result = append(result, part...)
+		}
+		for index := range f.fonts {
+			result = append(result, private[index]...)
+			result = append(result, locals[index]...)
+		}
+		return result, nil
+	}
+	return nil, fmt.Errorf("CID CFF offsets did not converge")
+}
+
 // readCIDSubsetFont 读取CID字体的原始字典及逐字形归属，不合并字体字典
 // 入参: data CFF数据
 // 返回: *cidSubsetFont 裁剪资源, error 结构错误或不支持的字典
@@ -155,62 +211,6 @@ func readCIDSubsetFont(data []byte) (*cidSubsetFont, error) {
 		font.dicts[index], font.private[index], font.fonts[index] = dict, private, resource
 	}
 	return font, nil
-}
-
-// write 重建CID字体偏移，保留CID映射、字体矩阵及各字典的私有参数
-// 入参: chars 裁剪后的字形程序
-// 返回: []byte CFF数据, error 偏移或字典错误
-func (f *cidSubsetFont) write(chars [][]byte) ([]byte, error) {
-	suffix := append(encodeCFFIndex(f.strings), encodeCFFIndex(f.fonts[0].globals)...)
-	selects := encodeCFFSubsetFDSelect(f.selects)
-	programs := encodeCFFIndex(chars)
-	private := make([][]byte, len(f.fonts))
-	locals := make([][]byte, len(f.fonts))
-	fds := make([][]byte, len(f.fonts))
-	for index, font := range f.fonts {
-		var err error
-		private[index], err = encodeCFFSubsetPrivate(f.private[index])
-		if err != nil {
-			return nil, err
-		}
-		if _, ok := f.private[index][19]; ok {
-			locals[index] = encodeCFFIndex(font.locals)
-		}
-		fds[index] = encodeCFFDict(f.dicts[index])
-	}
-	for range 16 {
-		top := encodeCFFIndex([][]byte{encodeCFFDict(f.top)})
-		array := encodeCFFIndex(fds)
-		offset := len(f.prefix) + len(top) + len(suffix)
-		f.top[15] = []float64{float64(offset)}
-		offset += len(f.charset)
-		f.top[1237] = []float64{float64(offset)}
-		offset += len(selects)
-		f.top[17] = []float64{float64(offset)}
-		offset += len(programs)
-		f.top[1236] = []float64{float64(offset)}
-		offset += len(array)
-		for index := range f.fonts {
-			f.dicts[index][18] = []float64{float64(len(private[index])), float64(offset)}
-			fds[index] = encodeCFFDict(f.dicts[index])
-			offset += len(private[index]) + len(locals[index])
-		}
-		updatedTop := encodeCFFIndex([][]byte{encodeCFFDict(f.top)})
-		updatedArray := encodeCFFIndex(fds)
-		if len(updatedTop) != len(top) || len(updatedArray) != len(array) {
-			continue
-		}
-		result := make([]byte, 0, offset)
-		for _, part := range [][]byte{f.prefix, updatedTop, suffix, f.charset, selects, programs, updatedArray} {
-			result = append(result, part...)
-		}
-		for index := range f.fonts {
-			result = append(result, private[index]...)
-			result = append(result, locals[index]...)
-		}
-		return result, nil
-	}
-	return nil, fmt.Errorf("CID CFF offsets did not converge")
 }
 
 // encodeCFFSubsetFDSelect 选择较短的逐字形或分段格式保存字体字典归属

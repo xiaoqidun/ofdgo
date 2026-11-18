@@ -32,16 +32,6 @@ type DocumentImportOptions struct {
 	OnProgress     func(stage string, completed, total int) error
 }
 
-// editorDocumentImport 保存文档依赖及原始引用位置
-type editorDocumentImport struct {
-	ctx      context.Context
-	source   *Reader
-	files    map[string]*versionEditFile
-	kinds    map[string]int
-	queue    []string
-	progress editorProgress
-}
-
 // ImportDocuments 导入整文档及历史版本并选中首项
 // 入参: source 来源阅读器, indexes 从0开始的文档索引，nil表示全部，空切片不导入, at 从0开始的插入位置，可等于文档数
 // 返回: []int 新文档索引, error 导入错误
@@ -205,44 +195,14 @@ func (e *Editor) ImportDocumentsContext(ctx context.Context, source *Reader, ind
 	return result, nil
 }
 
-// documentImportVersion 合并OFD格式版本
-// 入参: target 目标版本, source 来源版本
-// 返回: string 合并版本, error 版本错误
-func documentImportVersion(target, source string) (string, error) {
-	if source == "" || source == target {
-		return target, nil
-	}
-	if target == "" {
-		return source, nil
-	}
-	if (source == "1.0" || source == "1.1") && (target == "1.0" || target == "1.1") {
-		return "1.1", nil
-	}
-	return "", fmt.Errorf("cannot merge OFD versions %q and %q", target, source)
-}
-
-// documentImportOccupied 保留目标全部文档及版本的已声明路径
-// 入参: ctx 取消上下文, reader 目标阅读器, data 根索引原文, root 根索引节点
-// 返回: map[string][]byte 占用路径, error 扫描错误
-func documentImportOccupied(ctx context.Context, reader *Reader, data []byte, root *editorXML) (map[string][]byte, error) {
-	migration := &editorDocumentImport{ctx: ctx, source: reader, files: make(map[string]*versionEditFile),
-		kinds: make(map[string]int), progress: editorProgress(nil).withContext(ctx)}
-	file := &versionEditFile{reader: reader, name: "OFD.xml", data: data}
-	for _, body := range root.children {
-		if body.matchesOFD("DocBody") {
-			if err := migration.collect(file, root, body, ""); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if err := migration.load(true); err != nil {
-		return nil, err
-	}
-	occupied := make(map[string][]byte, len(migration.kinds))
-	for name := range migration.kinds {
-		occupied[name] = nil
-	}
-	return occupied, nil
+// editorDocumentImport 保存文档依赖及原始引用位置
+type editorDocumentImport struct {
+	ctx      context.Context
+	source   *Reader
+	files    map[string]*versionEditFile
+	kinds    map[string]int
+	queue    []string
+	progress editorProgress
 }
 
 // reference 记录已解析的包内引用并调度结构文件
@@ -360,4 +320,44 @@ func (m *editorDocumentImport) load(structuresOnly bool) error {
 		}
 	}
 	return m.progress.report("resources", len(m.files), len(m.files))
+}
+
+// documentImportVersion 合并OFD格式版本
+// 入参: target 目标版本, source 来源版本
+// 返回: string 合并版本, error 版本错误
+func documentImportVersion(target, source string) (string, error) {
+	if source == "" || source == target {
+		return target, nil
+	}
+	if target == "" {
+		return source, nil
+	}
+	if (source == "1.0" || source == "1.1") && (target == "1.0" || target == "1.1") {
+		return "1.1", nil
+	}
+	return "", fmt.Errorf("cannot merge OFD versions %q and %q", target, source)
+}
+
+// documentImportOccupied 保留目标全部文档及版本的已声明路径
+// 入参: ctx 取消上下文, reader 目标阅读器, data 根索引原文, root 根索引节点
+// 返回: map[string][]byte 占用路径, error 扫描错误
+func documentImportOccupied(ctx context.Context, reader *Reader, data []byte, root *editorXML) (map[string][]byte, error) {
+	migration := &editorDocumentImport{ctx: ctx, source: reader, files: make(map[string]*versionEditFile),
+		kinds: make(map[string]int), progress: editorProgress(nil).withContext(ctx)}
+	file := &versionEditFile{reader: reader, name: "OFD.xml", data: data}
+	for _, body := range root.children {
+		if body.matchesOFD("DocBody") {
+			if err := migration.collect(file, root, body, ""); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := migration.load(true); err != nil {
+		return nil, err
+	}
+	occupied := make(map[string][]byte, len(migration.kinds))
+	for name := range migration.kinds {
+		occupied[name] = nil
+	}
+	return occupied, nil
 }

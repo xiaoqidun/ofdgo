@@ -16,53 +16,17 @@ package ofdgo
 
 import (
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"math"
 	"slices"
 	"strconv"
 	"sync"
 
 	"github.com/tdewolff/canvas"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
 // canvasGeometryMu 保护底层路径运算的共享扫描线对象池
 var canvasGeometryMu sync.Mutex
-
-// settleCanvasPath 在共享对象池保护下归整路径
-// 入参: path 路径, rule 填充规则
-// 返回: *canvas.Path 归整路径
-func settleCanvasPath(path *canvas.Path, rule canvas.FillRule) *canvas.Path {
-	canvasGeometryMu.Lock()
-	defer canvasGeometryMu.Unlock()
-	return path.Settle(rule)
-}
-
-// combineCanvasPaths 在共享对象池保护下计算路径布尔运算
-// 入参: left 左路径, right 右路径, operation 运算名称
-// 返回: *canvas.Path 运算结果
-func combineCanvasPaths(left, right *canvas.Path, operation string) *canvas.Path {
-	canvasGeometryMu.Lock()
-	defer canvasGeometryMu.Unlock()
-	switch operation {
-	case "or":
-		return left.Or(right)
-	case "not":
-		return left.Not(right)
-	case "xor":
-		return left.Xor(right)
-	default:
-		return left.And(right)
-	}
-}
-
-// strokeCanvasPath 在共享对象池保护下生成描边轮廓
-// 入参: path 路径, width 线宽, cap 端点, join 连接, tolerance 容差
-// 返回: *canvas.Path 描边轮廓
-func strokeCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner, tolerance float64) *canvas.Path {
-	canvasGeometryMu.Lock()
-	defer canvasGeometryMu.Unlock()
-	return path.Stroke(width, cap, join, tolerance)
-}
 
 // Curves 在输出边界转换椭圆弧，其他曲线保持原样
 // 入参: path 页面路径
@@ -230,6 +194,59 @@ func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (result Ge
 	return *geometryFromCanvasPath(p), nil
 }
 
+// Clip 解析对象裁剪并与父裁剪相交，保留未裁剪与完全裁去的区别
+// 入参: r 渲染器, clips OFD裁剪, matrix 裁剪坐标到页面的变换, parent 父裁剪
+// 返回: *GeometryPath 页面裁剪, error 无效父路径错误
+func (CanvasBackend) Clip(r *Renderer, clips *Clips, matrix Matrix, parent *GeometryPath) (*GeometryPath, error) {
+	p, err := geometryToCanvasPath(parent)
+	if err != nil {
+		return nil, err
+	}
+	renderer := *r
+	renderer.renderError = nil
+	clip := renderer.buildClipPath(clips, 0, 0, 0, matrix)
+	if renderer.renderError != nil {
+		return nil, renderer.renderError
+	}
+	return geometryFromCanvasPath(r.intersectCachedClipPath(p, clip)), nil
+}
+
+// settleCanvasPath 在共享对象池保护下归整路径
+// 入参: path 路径, rule 填充规则
+// 返回: *canvas.Path 归整路径
+func settleCanvasPath(path *canvas.Path, rule canvas.FillRule) *canvas.Path {
+	canvasGeometryMu.Lock()
+	defer canvasGeometryMu.Unlock()
+	return path.Settle(rule)
+}
+
+// combineCanvasPaths 在共享对象池保护下计算路径布尔运算
+// 入参: left 左路径, right 右路径, operation 运算名称
+// 返回: *canvas.Path 运算结果
+func combineCanvasPaths(left, right *canvas.Path, operation string) *canvas.Path {
+	canvasGeometryMu.Lock()
+	defer canvasGeometryMu.Unlock()
+	switch operation {
+	case "or":
+		return left.Or(right)
+	case "not":
+		return left.Not(right)
+	case "xor":
+		return left.Xor(right)
+	default:
+		return left.And(right)
+	}
+}
+
+// strokeCanvasPath 在共享对象池保护下生成描边轮廓
+// 入参: path 路径, width 线宽, cap 端点, join 连接, tolerance 容差
+// 返回: *canvas.Path 描边轮廓
+func strokeCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner, tolerance float64) *canvas.Path {
+	canvasGeometryMu.Lock()
+	defer canvasGeometryMu.Unlock()
+	return path.Stroke(width, cap, join, tolerance)
+}
+
 // canvasPointPath 保留普通闭合轮廓，将闭合单点改为同位置绘制段
 // 入参: path 原始几何路径
 // 返回: GeometryPath 只在需要时复制的路径, bool 是否含实际绘制的单点子路径
@@ -267,23 +284,6 @@ func canvasPointPath(path GeometryPath) (GeometryPath, bool) {
 		}
 	}
 	return result, found || point && drawn
-}
-
-// Clip 解析对象裁剪并与父裁剪相交，保留未裁剪与完全裁去的区别
-// 入参: r 渲染器, clips OFD裁剪, matrix 裁剪坐标到页面的变换, parent 父裁剪
-// 返回: *GeometryPath 页面裁剪, error 无效父路径错误
-func (CanvasBackend) Clip(r *Renderer, clips *Clips, matrix Matrix, parent *GeometryPath) (*GeometryPath, error) {
-	p, err := geometryToCanvasPath(parent)
-	if err != nil {
-		return nil, err
-	}
-	renderer := *r
-	renderer.renderError = nil
-	clip := renderer.buildClipPath(clips, 0, 0, 0, matrix)
-	if renderer.renderError != nil {
-		return nil, renderer.renderError
-	}
-	return geometryFromCanvasPath(r.intersectCachedClipPath(p, clip)), nil
 }
 
 // flattenCanvasPath 按子路径展开曲线，避免每次替换都复制后续独立轮廓

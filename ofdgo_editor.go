@@ -39,6 +39,9 @@ import (
 // editorPathValidationLimit 限制同次对象校验保留的路径数量
 const editorPathValidationLimit = 1024
 
+// maxUnitID 表示OFD标准ST_ID允许的最大无符号32位标识
+const maxUnitID uint64 = 1<<32 - 1
+
 // Editor 编辑OFD文档，长度单位为毫米，页面索引从0开始，实例需串行使用
 // Info可修改文档元数据，通过方法管理页面、对象和资源，WriteTo输出副本，Save和SaveAs通过输出事务保存
 // OnWriteProgress可选，按fonts、pages、references、resources、compress、write阶段同步回报进度，返回错误则停止保存
@@ -85,30 +88,27 @@ type Editor struct {
 	richIndex          *richTextIndex
 }
 
-// editorResource 文档内嵌资源
-type editorResource struct {
-	name         string
-	data         []byte
-	font         *Font
-	image        *MultiMedia
-	space        *ColorSpace
-	composite    string
-	vectorKey    [32]byte
-	vectorStates map[string]editorCompositeState
-	objectIDs    map[string]string
-	references   []string
-	usage        *editorVectorUsage
-	subset       *editorFontSubset
-	states       map[string]editorCompositeState
-	draw         *DrawParam
-	drawSource   string
-}
-
-// editorResourceKey 资源内容和字体集合索引
-type editorResourceKey struct {
-	checksum [32]byte
-	index    int
-	kind     string
+// NewEditor 创建空白文档，保存前至少添加一页
+// 返回: *Editor 文档编辑器
+func NewEditor() *Editor {
+	resources, _ := NewResources(ResourceOptions{})
+	var id [16]byte
+	rand.Read(id[:])
+	id[6] = id[6]&0x0f | 0x40
+	id[8] = id[8]&0x3f | 0x80
+	return &Editor{
+		runtimeResources: resources,
+		Info: DocInfo{
+			DocID:        hex.EncodeToString(id[:]),
+			CreationDate: time.Now().Format("2006-01-02"),
+			Creator:      ofdCreator,
+		},
+		fonts:       make(map[string]*FontResource),
+		images:      make(map[string]image.Point),
+		resourceID:  make(map[editorResourceKey]string),
+		fontMetrics: make(map[string]FontMetrics),
+		backends:    defaultRenderBackends(),
+	}
 }
 
 // SetFontDirs 设置编辑与几何度量使用的外部字体目录，不嵌入或替换文档字体
@@ -155,29 +155,6 @@ func (e *Editor) SetRenderBackends(backends RenderBackends) {
 // 返回: RenderBackends 后端组合
 func (e *Editor) Backends() RenderBackends {
 	return e.backends
-}
-
-// NewEditor 创建空白文档，保存前至少添加一页
-// 返回: *Editor 文档编辑器
-func NewEditor() *Editor {
-	resources, _ := NewResources(ResourceOptions{})
-	var id [16]byte
-	rand.Read(id[:])
-	id[6] = id[6]&0x0f | 0x40
-	id[8] = id[8]&0x3f | 0x80
-	return &Editor{
-		runtimeResources: resources,
-		Info: DocInfo{
-			DocID:        hex.EncodeToString(id[:]),
-			CreationDate: time.Now().Format("2006-01-02"),
-			Creator:      ofdCreator,
-		},
-		fonts:       make(map[string]*FontResource),
-		images:      make(map[string]image.Point),
-		resourceID:  make(map[editorResourceKey]string),
-		fontMetrics: make(map[string]FontMetrics),
-		backends:    defaultRenderBackends(),
-	}
 }
 
 // SetResources 替换后续操作的资源策略，需与编辑操作串行调用
@@ -533,81 +510,6 @@ func (e *Editor) ImageSize(id string) (image.Point, error) {
 	return e.editorImage(id)
 }
 
-// addDecodedImage 注册图片并复用与编码数据一致的像素
-// 入参: data 图片数据, decoded 已解码像素，为nil时按需解码
-// 返回: string 资源标识, error 注册错误
-func (e *Editor) addDecodedImage(data []byte, decoded image.Image) (string, error) {
-	return e.addDecodedImageContext(context.Background(), data, decoded)
-}
-
-// addDecodedImageContext 注册图片并复用原编码摘要及像素，重复资源不再解析
-// 入参: ctx 取消上下文, data 图片数据, decoded 已解码像素，为nil时按需解码
-// 返回: string 资源标识, error 注册或取消错误
-func (e *Editor) addDecodedImageContext(ctx context.Context, data []byte, decoded image.Image) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	checksum := sha256.Sum256(data)
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	if id := e.resourceID[editorResourceKey{checksum: checksum, index: -1}]; id != "" {
-		return id, nil
-	}
-	config, format, err := baseimage.DecodeConfigDataContext(ctx, data)
-	if err != nil {
-		return "", err
-	}
-	return e.addImage(ctx, data, image.Pt(config.Width, config.Height), format, decoded, checksum)
-}
-
-// addImage 注册图片资源，复用调用方已完成解码的像素数据
-// 入参: ctx 取消上下文, data 图片编码数据, size 像素尺寸, format 图片格式, decoded 已解码图像，可为nil, checksum 原编码摘要
-// 返回: string 资源标识, error 格式或资源错误
-func (e *Editor) addImage(ctx context.Context, data []byte, size image.Point, format string, decoded image.Image, checksum [32]byte) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	if (format != "png" && format != "jpeg" && format != "bmp" && format != "tiff" && format != "jbig2") || size.X <= 0 || size.Y <= 0 {
-		return "", fmt.Errorf("only PNG, JPEG, BMP, single-page TIFF and JBIG2 images are supported")
-	}
-	key := editorResourceKey{checksum: checksum, index: -1}
-	if id, ok := e.resourceID[key]; ok {
-		return id, nil
-	}
-	if err := e.prepareSourceIDsContext(ctx); err != nil {
-		return "", err
-	}
-	if format == "png" && uint64(size.X)*uint64(size.Y) <= 64<<20 {
-		compact, err := editorBinaryImage(ctx, data, decoded)
-		if err != nil {
-			return "", err
-		}
-		if compact != nil {
-			data, format = compact, "jbig2"
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	id := e.nextID()
-	extension := format
-	if extension == "jpeg" {
-		extension = "jpg"
-	} else if extension == "jbig2" {
-		extension = "jb2"
-	}
-	name := e.packageName("Res/Images/Image_" + id + "." + extension)
-	e.resources = append(e.resources, editorResource{
-		name:  name,
-		data:  bytes.Clone(data),
-		image: &MultiMedia{ID: id, Type: "Image", Format: strings.ToUpper(format), MediaFile: "/" + name},
-	})
-	e.images[id] = size
-	e.resourceID[key] = id
-	return id, nil
-}
-
 // AddObject 按添加顺序放入正文图层，支持文字、路径、图片和矢量资源实例，自动分配对象ID
 // 支持已注册资源、颜色、渐变、裁剪和动作；原对象复制保留原文结构
 // 入参: page 页面索引, object 对象内容，添加后不再引用调用方的可变数据
@@ -805,6 +707,116 @@ func (e *Editor) LayoutText(obj *TextObject, value string, options TextLayout) e
 	return LayoutText(obj, value, options, metrics)
 }
 
+// editorResource 文档内嵌资源
+type editorResource struct {
+	name         string
+	data         []byte
+	font         *Font
+	image        *MultiMedia
+	space        *ColorSpace
+	composite    string
+	vectorKey    [32]byte
+	vectorStates map[string]editorCompositeState
+	objectIDs    map[string]string
+	references   []string
+	usage        *editorVectorUsage
+	subset       *editorFontSubset
+	states       map[string]editorCompositeState
+	draw         *DrawParam
+	drawSource   string
+}
+
+// definition 获取独立定义资源的标识
+// 返回: string 复合资源或绘制参数标识
+func (r editorResource) definition() string {
+	if r.draw != nil {
+		return r.draw.ID
+	}
+	return r.composite
+}
+
+// editorResourceKey 资源内容和字体集合索引
+type editorResourceKey struct {
+	checksum [32]byte
+	index    int
+	kind     string
+}
+
+// addDecodedImage 注册图片并复用与编码数据一致的像素
+// 入参: data 图片数据, decoded 已解码像素，为nil时按需解码
+// 返回: string 资源标识, error 注册错误
+func (e *Editor) addDecodedImage(data []byte, decoded image.Image) (string, error) {
+	return e.addDecodedImageContext(context.Background(), data, decoded)
+}
+
+// addDecodedImageContext 注册图片并复用原编码摘要及像素，重复资源不再解析
+// 入参: ctx 取消上下文, data 图片数据, decoded 已解码像素，为nil时按需解码
+// 返回: string 资源标识, error 注册或取消错误
+func (e *Editor) addDecodedImageContext(ctx context.Context, data []byte, decoded image.Image) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	checksum := sha256.Sum256(data)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if id := e.resourceID[editorResourceKey{checksum: checksum, index: -1}]; id != "" {
+		return id, nil
+	}
+	config, format, err := baseimage.DecodeConfigDataContext(ctx, data)
+	if err != nil {
+		return "", err
+	}
+	return e.addImage(ctx, data, image.Pt(config.Width, config.Height), format, decoded, checksum)
+}
+
+// addImage 注册图片资源，复用调用方已完成解码的像素数据
+// 入参: ctx 取消上下文, data 图片编码数据, size 像素尺寸, format 图片格式, decoded 已解码图像，可为nil, checksum 原编码摘要
+// 返回: string 资源标识, error 格式或资源错误
+func (e *Editor) addImage(ctx context.Context, data []byte, size image.Point, format string, decoded image.Image, checksum [32]byte) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if (format != "png" && format != "jpeg" && format != "bmp" && format != "tiff" && format != "jbig2") || size.X <= 0 || size.Y <= 0 {
+		return "", fmt.Errorf("only PNG, JPEG, BMP, single-page TIFF and JBIG2 images are supported")
+	}
+	key := editorResourceKey{checksum: checksum, index: -1}
+	if id, ok := e.resourceID[key]; ok {
+		return id, nil
+	}
+	if err := e.prepareSourceIDsContext(ctx); err != nil {
+		return "", err
+	}
+	if format == "png" && uint64(size.X)*uint64(size.Y) <= 64<<20 {
+		compact, err := editorBinaryImage(ctx, data, decoded)
+		if err != nil {
+			return "", err
+		}
+		if compact != nil {
+			data, format = compact, "jbig2"
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	id := e.nextID()
+	extension := format
+	if extension == "jpeg" {
+		extension = "jpg"
+	} else if extension == "jbig2" {
+		extension = "jb2"
+	}
+	name := e.packageName("Res/Images/Image_" + id + "." + extension)
+	e.resources = append(e.resources, editorResource{
+		name:  name,
+		data:  bytes.Clone(data),
+		image: &MultiMedia{ID: id, Type: "Image", Format: strings.ToUpper(format), MediaFile: "/" + name},
+	})
+	e.images[id] = size
+	e.resourceID[key] = id
+	return id, nil
+}
+
 // newRenderer 使用编辑器字体来源和完整后端配置创建资源度量器
 // 入参: reader 当前文档快照
 // 返回: *Renderer 度量器
@@ -815,15 +827,6 @@ func (e *Editor) newRenderer(reader *Reader) *Renderer {
 	renderer := NewRenderer(reader, WithFontDirs(e.fontDirs...), WithFontFS(e.fontFS...), WithRenderBackends(e.backends))
 	renderer.fontSourcesCache = e.fontSourcesCache.child()
 	return renderer
-}
-
-// definition 获取独立定义资源的标识
-// 返回: string 复合资源或绘制参数标识
-func (r editorResource) definition() string {
-	if r.draw != nil {
-		return r.draw.ID
-	}
-	return r.composite
 }
 
 // page 按索引获取内部页面
@@ -876,9 +879,6 @@ func (e *Editor) reorderPages(order []int) {
 		e.pages[index] = pages[previous]
 	}
 }
-
-// maxUnitID 表示OFD标准ST_ID允许的最大无符号32位标识
-const maxUnitID uint64 = 1<<32 - 1
 
 // formatUnitID 格式化文档对象与资源标识
 // 入参: id 无符号标识数值

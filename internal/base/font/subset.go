@@ -45,16 +45,6 @@ func Subsettable(sfnt *SFNT) bool {
 	return sfnt.IsTrueType && (sfnt.Tables["fvar"] == nil || variableSFNTSubsettable(sfnt))
 }
 
-// fontEmbeddingFlags 读取OpenType的嵌入标志，未提供OS/2表时返回零
-// 入参: sfnt 已解析字体
-// 返回: uint16 嵌入标志
-func fontEmbeddingFlags(sfnt *SFNT) uint16 {
-	if table := sfnt.Tables["OS/2"]; len(table) >= 10 {
-		return binary.BigEndian.Uint16(table[8:10])
-	}
-	return 0
-}
-
 // ValidateEmbedding 校验字体是否允许作为可编辑轮廓字体嵌入
 // 入参: data 独立OpenType字体
 // 返回: error 字体解析或嵌入限制
@@ -167,6 +157,16 @@ func SubsetSourceSFNT(data []byte, usage *Usage) []byte {
 		return nil
 	}
 	return subsetSourceSFNT(sfnt, usage, len(data))
+}
+
+// fontEmbeddingFlags 读取OpenType的嵌入标志，未提供OS/2表时返回零
+// 入参: sfnt 已解析字体
+// 返回: uint16 嵌入标志
+func fontEmbeddingFlags(sfnt *SFNT) uint16 {
+	if table := sfnt.Tables["OS/2"]; len(table) >= 10 {
+		return binary.BigEndian.Uint16(table[8:10])
+	}
+	return 0
 }
 
 // subsetSourceSFNT 复用已校验的字体表裁剪字形，仅返回小于原编码的结果

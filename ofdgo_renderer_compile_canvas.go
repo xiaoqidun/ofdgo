@@ -23,19 +23,6 @@ import (
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
-// canvasPageCompiler 将已解释的页面绘制转换为自有数据，不保存第三方绘图对象
-type canvasPageCompiler struct {
-	page     *RasterPage
-	geometry GeometryBackend
-	err      error
-}
-
-// rasterPaddedImage 为旋转采样提供透明边距，共享原图而不复制整幅像素
-type rasterPaddedImage struct {
-	source image.Image
-	rect   image.Rectangle
-}
-
 // CompilePage 使用Canvas页面解释器和配置的字体、几何后端生成独立绘制数据
 // 入参: r 渲染器, page 页面内容
 // 返回: *RasterPage 绘制页面, error 编译错误
@@ -60,6 +47,13 @@ func (CanvasBackend) CompilePage(r *Renderer, page *PageContent) (*RasterPage, e
 		return nil, compiler.err
 	}
 	return result, nil
+}
+
+// canvasPageCompiler 将已解释的页面绘制转换为自有数据，不保存第三方绘图对象
+type canvasPageCompiler struct {
+	page     *RasterPage
+	geometry GeometryBackend
+	err      error
 }
 
 // Size 返回物理页面尺寸
@@ -124,44 +118,6 @@ func (c *canvasPageCompiler) RenderImage(img image.Image, m canvas.Matrix) {
 	c.page.Commands = append(c.page.Commands, RasterCommand{Image: img, Transform: t})
 }
 
-// Bounds 返回含四像素边距的图像边界
-// 返回: image.Rectangle 图像边界
-func (s *rasterPaddedImage) Bounds() image.Rectangle { return s.rect }
-
-// BackingImage 返回共享的原图，用于计算底层像素存储
-// 返回: image.Image 原图
-func (s *rasterPaddedImage) BackingImage() image.Image { return s.source }
-
-// ColorModel 按原图采样精度返回支持透明补边的预乘颜色模型
-// 返回: color.Model 颜色模型
-func (s *rasterPaddedImage) ColorModel() color.Model {
-	if baseimage.HighPrecision(s.source) {
-		return color.RGBA64Model
-	}
-	return color.RGBAModel
-}
-
-// At 读取补边图像的预乘像素，边距及图像外透明
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.Color 像素颜色
-func (s *rasterPaddedImage) At(x, y int) color.Color { return s.RGBA64At(x, y) }
-
-// RGBA64At 保留原始预乘精度，支持采样接口的图像不进行颜色装箱
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.RGBA64 像素颜色
-func (s *rasterPaddedImage) RGBA64At(x, y int) color.RGBA64 {
-	if !image.Pt(x, y).In(s.rect.Inset(4)) {
-		return color.RGBA64{}
-	}
-	bounds := s.source.Bounds()
-	x, y = x-4+bounds.Min.X, y-4+bounds.Min.Y
-	if source, ok := s.source.(image.RGBA64Image); ok {
-		return source.RGBA64At(x, y)
-	}
-	r, g, b, a := s.source.At(x, y).RGBA()
-	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
-}
-
 // fill 转换路径和画刷，未知类型返回错误而非丢弃内容
 // 入参: path 路径, paint 画刷, rule 填充规则, m 变换矩阵
 func (c *canvasPageCompiler) fill(path *canvas.Path, paint canvas.Paint, rule canvas.FillRule, m canvas.Matrix) {
@@ -205,6 +161,50 @@ func (c *canvasPageCompiler) fill(path *canvas.Path, paint canvas.Paint, rule ca
 		return
 	}
 	c.page.Commands = append(c.page.Commands, cmd)
+}
+
+// rasterPaddedImage 为旋转采样提供透明边距，共享原图而不复制整幅像素
+type rasterPaddedImage struct {
+	source image.Image
+	rect   image.Rectangle
+}
+
+// Bounds 返回含四像素边距的图像边界
+// 返回: image.Rectangle 图像边界
+func (s *rasterPaddedImage) Bounds() image.Rectangle { return s.rect }
+
+// BackingImage 返回共享的原图，用于计算底层像素存储
+// 返回: image.Image 原图
+func (s *rasterPaddedImage) BackingImage() image.Image { return s.source }
+
+// ColorModel 按原图采样精度返回支持透明补边的预乘颜色模型
+// 返回: color.Model 颜色模型
+func (s *rasterPaddedImage) ColorModel() color.Model {
+	if baseimage.HighPrecision(s.source) {
+		return color.RGBA64Model
+	}
+	return color.RGBAModel
+}
+
+// At 读取补边图像的预乘像素，边距及图像外透明
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.Color 像素颜色
+func (s *rasterPaddedImage) At(x, y int) color.Color { return s.RGBA64At(x, y) }
+
+// RGBA64At 保留原始预乘精度，支持采样接口的图像不进行颜色装箱
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.RGBA64 像素颜色
+func (s *rasterPaddedImage) RGBA64At(x, y int) color.RGBA64 {
+	if !image.Pt(x, y).In(s.rect.Inset(4)) {
+		return color.RGBA64{}
+	}
+	bounds := s.source.Bounds()
+	x, y = x-4+bounds.Min.X, y-4+bounds.Min.Y
+	if source, ok := s.source.(image.RGBA64Image); ok {
+		return source.RGBA64At(x, y)
+	}
+	r, g, b, a := s.source.At(x, y).RGBA()
+	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
 }
 
 // canvasRasterPath 转换曲线路径，保留各子路径和闭合标记

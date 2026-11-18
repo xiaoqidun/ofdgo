@@ -48,51 +48,6 @@ type pdfRenderer struct {
 	exactText   bool
 }
 
-// pdfNavigation PDF导航信息
-type pdfNavigation struct {
-	Link        map[int][]pdfLink
-	Outline     []pdfOutline
-	Open        []pdfNavigationAction
-	PageOpen    map[int][]pdfNavigationAction
-	pageIndex   map[string]int
-	bookmarks   map[string]Dest
-	attachments map[string]Attachment
-	audio       map[string]*pdfgo.FileSpecification
-	video       map[string]*pdfVideoResource
-	mediaFiles  map[string]*pdfgo.FileSpecification
-	source      *Reader
-	nativeWrite bool
-}
-
-// pdfLink PDF链接
-type pdfLink struct {
-	Rect    canvas.Rect
-	Region  *pdfgo.LinkRegion
-	Actions []pdfNavigationAction
-}
-
-// pdfTarget 保存输出页索引及默认用户空间中的跳转参数
-type pdfTarget struct {
-	Page        int
-	Destination pdfgo.Destination
-}
-
-// pdfOutline PDF大纲
-type pdfOutline struct {
-	Name    string
-	Level   int
-	Actions []pdfNavigationAction
-}
-
-// pdfNavigationAction 保存待写出的导航动作，输出时关联实际页面引用
-type pdfNavigationAction struct {
-	URI        string
-	Target     *pdfTarget
-	Attachment *pdfgo.AttachmentAction
-	Sound      *pdfgo.SoundAction
-	Movie      *pdfMovieAction
-}
-
 // RenderImage 校验惰性图片并同步不透明画笔，保留解码错误及后端透明度状态
 // 入参: img 图像, matrix 图像变换
 func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
@@ -203,6 +158,22 @@ func (r *pdfRenderer) writePDF(ctx context.Context, data io.ReaderAt, size int64
 		options.PrepareRewrite = r.navigation.prepareRewrite
 	}
 	return codecpdf.WriteSource(ctx, data, size, writer, options)
+}
+
+// pdfNavigation PDF导航信息
+type pdfNavigation struct {
+	Link        map[int][]pdfLink
+	Outline     []pdfOutline
+	Open        []pdfNavigationAction
+	PageOpen    map[int][]pdfNavigationAction
+	pageIndex   map[string]int
+	bookmarks   map[string]Dest
+	attachments map[string]Attachment
+	audio       map[string]*pdfgo.FileSpecification
+	video       map[string]*pdfVideoResource
+	mediaFiles  map[string]*pdfgo.FileSpecification
+	source      *Reader
+	nativeWrite bool
 }
 
 // newPDFNavigation 建立文档导航与输出页索引，不读取页面图元
@@ -471,6 +442,35 @@ func (n *pdfNavigation) prepareRewrite(ctx context.Context, reader *pdfgo.Reader
 		return fmt.Errorf("PDF output outline missing")
 	}
 	return nil
+}
+
+// pdfLink PDF链接
+type pdfLink struct {
+	Rect    canvas.Rect
+	Region  *pdfgo.LinkRegion
+	Actions []pdfNavigationAction
+}
+
+// pdfTarget 保存输出页索引及默认用户空间中的跳转参数
+type pdfTarget struct {
+	Page        int
+	Destination pdfgo.Destination
+}
+
+// pdfOutline PDF大纲
+type pdfOutline struct {
+	Name    string
+	Level   int
+	Actions []pdfNavigationAction
+}
+
+// pdfNavigationAction 保存待写出的导航动作，输出时关联实际页面引用
+type pdfNavigationAction struct {
+	URI        string
+	Target     *pdfTarget
+	Attachment *pdfgo.AttachmentAction
+	Sound      *pdfgo.SoundAction
+	Movie      *pdfMovieAction
 }
 
 // pdfSourceRect 转换PDF动作区域

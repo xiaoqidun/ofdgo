@@ -33,6 +33,9 @@ import (
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
+// FontMode 指定字体资源的保存方式，不改变文字位置或压缩选项
+type FontMode uint8
+
 const (
 	// FontKeep 保留原有嵌入方式
 	FontKeep FontMode = iota
@@ -41,9 +44,6 @@ const (
 	// FontExternal 移除可安全恢复字符映射的内嵌字体
 	FontExternal
 )
-
-// FontMode 指定字体资源的保存方式，不改变文字位置或压缩选项
-type FontMode uint8
 
 // FontChange 返回单个字体的处理结果，Document为零基文档索引，Reason非空表示保持原样
 type FontChange struct {
@@ -62,23 +62,6 @@ type FontProcessOptions struct {
 	OnProgress func(stage string, completed, total int) error
 }
 
-// editorFontChange 汇总同一文档的字体修改，XML偏移均基于修改前的文件
-type editorFontChange struct {
-	patches map[string][]editorXMLPatch
-	files   map[string][]byte
-	fonts   []string
-}
-
-// editorBindingFontCache 仅保留当前文档最近读取的字体文件及最近解析结果，操作结束后释放
-type editorBindingFontCache struct {
-	source   string
-	data     []byte
-	checksum [32]byte
-	name     string
-	index    int
-	font     *FontResource
-}
-
 // EmbedFont 嵌入当前文档指定字体，保留资源标识及全部使用位置，成功后可撤销
 // file为空时从编辑器字体来源精确匹配；显式文件表示调用方确认替换，仍校验字符和字形
 // 入参: ctx 取消上下文, id 字体标识, file 字体文件, index 集合索引
@@ -93,33 +76,6 @@ func (e *Editor) EmbedFont(ctx context.Context, id string, file FontFile, index 
 // 返回: error 字体、映射或包结构错误，失败时文档不变
 func (e *Editor) ExternalizeFont(ctx context.Context, id string) error {
 	return e.changeFont(ctx, id, FontExternal, FontFile{}, 0)
-}
-
-// changeFont 在独立包快照中修改单个字体，成功后一次提交
-// 入参: ctx 取消上下文, id 字体标识, mode 保存方式, file 字体数据, index 集合索引
-// 返回: error 检查或提交错误
-func (e *Editor) changeFont(ctx context.Context, id string, mode FontMode, file FontFile, index int) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	reader, err := e.Reader(ctx)
-	if err != nil {
-		return err
-	}
-	scan, err := scanEditorFonts(ctx, reader, reader.DocumentIndex())
-	if err != nil {
-		return err
-	}
-	changed, err := e.changeFontSnapshot(ctx, scan, id, mode, file, index)
-	if err != nil || !changed {
-		return err
-	}
-	if location := scan.fonts[editorResourceID(id)].location; location != "" {
-		if err := pruneUnreferencedFiles(ctx, reader, location); err != nil {
-			return err
-		}
-	}
-	return e.commitResourceSnapshot(ctx, reader)
 }
 
 // ProcessFonts 处理包内各文档的字体，逐字体保留不能转换的资源，取消或包结构错误时整体不提交
@@ -232,6 +188,119 @@ func (e *Editor) ProcessFontsWithOptions(ctx context.Context, options FontProces
 		err = e.commitResourceSnapshot(ctx, reader)
 	}
 	return report, err
+}
+
+// editorFontChange 汇总同一文档的字体修改，XML偏移均基于修改前的文件
+type editorFontChange struct {
+	patches map[string][]editorXMLPatch
+	files   map[string][]byte
+	fonts   []string
+}
+
+// apply 合并同一文档的XML修改，再统一隔离其他文档及版本使用的文件
+// 入参: ctx 取消上下文, scan 修改前的文档引用
+// 返回: error 取消、引用或结构错误
+func (c *editorFontChange) apply(ctx context.Context, scan *editorFontDocument) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(c.patches) == 0 && len(c.files) == 0 {
+		return nil
+	}
+	changes := maps.Clone(c.files)
+	for name, patches := range c.patches {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		changes[name] = editorPatchXML(scan.files[name].data, patches)
+	}
+	if err := invalidateResourcePreviews(ctx, scan, changes, c.fonts...); err != nil {
+		return err
+	}
+	return scan.apply(ctx, changes)
+}
+
+// editorBindingFontCache 仅保留当前文档最近读取的字体文件及最近解析结果，操作结束后释放
+type editorBindingFontCache struct {
+	source   string
+	data     []byte
+	checksum [32]byte
+	name     string
+	index    int
+	font     *FontResource
+}
+
+// read 复用当前文档最近读取的字体，避免共享引用重复解压，不缓存错误或取消结果
+// 入参: ctx 取消上下文, reader 包快照, name 字体路径
+// 返回: []byte 只读字体数据, error 读取或取消错误
+func (c *editorBindingFontCache) read(ctx context.Context, reader *Reader, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	name = cleanPackagePath(name)
+	if c.source == name && c.data != nil {
+		return c.data, nil
+	}
+	c.source, c.data = "", nil
+	data, err := reader.readFileViewContext(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.source, c.data = name, data
+	return data, nil
+}
+
+// open 按字体内容、名称及集合索引复用最近的解析结果，不缓存错误或取消结果
+// 入参: ctx 取消上下文, backend 字体资源后端, file 字体文件, index 集合索引
+// 返回: *FontResource 只读字体资源, error 解析或取消错误
+func (c *editorBindingFontCache) open(ctx context.Context, backend FontResourceBackend, file FontFile, index int) (*FontResource, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	checksum := sha256.Sum256(file.Data)
+	if c.font != nil && c.checksum == checksum && c.name == file.Name && c.index == index {
+		return c.font, ctx.Err()
+	}
+	c.font = nil
+	font, err := backend.OpenFontResource(file, index)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.checksum, c.name, c.index, c.font = checksum, file.Name, index, font
+	return font, nil
+}
+
+// changeFont 在独立包快照中修改单个字体，成功后一次提交
+// 入参: ctx 取消上下文, id 字体标识, mode 保存方式, file 字体数据, index 集合索引
+// 返回: error 检查或提交错误
+func (e *Editor) changeFont(ctx context.Context, id string, mode FontMode, file FontFile, index int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	reader, err := e.Reader(ctx)
+	if err != nil {
+		return err
+	}
+	scan, err := scanEditorFonts(ctx, reader, reader.DocumentIndex())
+	if err != nil {
+		return err
+	}
+	changed, err := e.changeFontSnapshot(ctx, scan, id, mode, file, index)
+	if err != nil || !changed {
+		return err
+	}
+	if location := scan.fonts[editorResourceID(id)].location; location != "" {
+		if err := pruneUnreferencedFiles(ctx, reader, location); err != nil {
+			return err
+		}
+	}
+	return e.commitResourceSnapshot(ctx, reader)
 }
 
 // changeFontSnapshot 校验字体全部文字引用并修改独立阅读器，不改写正文定位
@@ -422,75 +491,6 @@ func originalBindingFont(ctx context.Context, scan *editorFontDocument, declarat
 		return FontFile{}, cancelErr
 	}
 	return FontFile{Data: data}, err
-}
-
-// apply 合并同一文档的XML修改，再统一隔离其他文档及版本使用的文件
-// 入参: ctx 取消上下文, scan 修改前的文档引用
-// 返回: error 取消、引用或结构错误
-func (c *editorFontChange) apply(ctx context.Context, scan *editorFontDocument) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if len(c.patches) == 0 && len(c.files) == 0 {
-		return nil
-	}
-	changes := maps.Clone(c.files)
-	for name, patches := range c.patches {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		changes[name] = editorPatchXML(scan.files[name].data, patches)
-	}
-	if err := invalidateResourcePreviews(ctx, scan, changes, c.fonts...); err != nil {
-		return err
-	}
-	return scan.apply(ctx, changes)
-}
-
-// read 复用当前文档最近读取的字体，避免共享引用重复解压，不缓存错误或取消结果
-// 入参: ctx 取消上下文, reader 包快照, name 字体路径
-// 返回: []byte 只读字体数据, error 读取或取消错误
-func (c *editorBindingFontCache) read(ctx context.Context, reader *Reader, name string) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	name = cleanPackagePath(name)
-	if c.source == name && c.data != nil {
-		return c.data, nil
-	}
-	c.source, c.data = "", nil
-	data, err := reader.readFileViewContext(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	c.source, c.data = name, data
-	return data, nil
-}
-
-// open 按字体内容、名称及集合索引复用最近的解析结果，不缓存错误或取消结果
-// 入参: ctx 取消上下文, backend 字体资源后端, file 字体文件, index 集合索引
-// 返回: *FontResource 只读字体资源, error 解析或取消错误
-func (c *editorBindingFontCache) open(ctx context.Context, backend FontResourceBackend, file FontFile, index int) (*FontResource, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	checksum := sha256.Sum256(file.Data)
-	if c.font != nil && c.checksum == checksum && c.name == file.Name && c.index == index {
-		return c.font, ctx.Err()
-	}
-	c.font = nil
-	font, err := backend.OpenFontResource(file, index)
-	if err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	c.checksum, c.name, c.index, c.font = checksum, file.Name, index, font
-	return font, nil
 }
 
 // fontBindingFile 查找未占用的字体路径，同名内容一致时复用已有文件或本次待写资源

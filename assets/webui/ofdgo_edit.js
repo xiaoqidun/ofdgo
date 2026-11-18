@@ -1,186 +1,9 @@
-const PX_PER_MM = 96 / 25.4;
 export const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
+const PX_PER_MM = 96 / 25.4;
 const FORMAT_KEYS = ["font", "size", "color", "bold", "italic", "underline", "strikeout", "shadow", "background"];
 const RICH_CLIPBOARD = "application/x-ofdgo-rich-text";
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-
-function sourceTextScale(editing) {
-	if (!editing.source) return 1;
-	const [a, b, c, d] = editing.frame.matrix;
-	return Math.max(Math.hypot(a, b), Math.hypot(c, d)) || 1;
-}
-
-function textFrameBox(item) {
-	return { x: 0, y: 0, width: item.paragraphWidth ?? item.textFrame.width, height: item.textFrame.height };
-}
-
-export function fontFaceStyle(data) {
-	const style = { weight: "400", style: "normal" };
-	const bytes = ArrayBuffer.isView(data) ? new DataView(data.buffer, data.byteOffset, data.byteLength) : new DataView(data);
-	if (bytes.byteLength < 12) return style;
-	const count = bytes.getUint16(4);
-	for (let i = 0; i < count && 12 + (i + 1) * 16 <= bytes.byteLength; i++) {
-		const record = 12 + i * 16;
-		if (bytes.getUint32(record) !== 0x68656164) continue;
-		const offset = bytes.getUint32(record + 8), length = bytes.getUint32(record + 12);
-		if (length < 46 || offset + length > bytes.byteLength) return style;
-		const flags = bytes.getUint16(offset + 44);
-		return { weight: flags & 1 ? "700" : "400", style: flags & 2 ? "italic" : "normal" };
-	}
-	return style;
-}
-
-function graphemeRange(text, start, end) {
-	const boundaries = [0, ...Array.from(graphemes.segment(text), segment => segment.index + segment.segment.length)];
-	const from = boundaries.findLast(offset => offset <= start) ?? 0;
-	return start === end ? [from, from] : [from, boundaries.find(offset => offset >= end) ?? text.length];
-}
-
-export function richTextModel(item) {
-	return { runs: [{ text: item.text || "", format: { font: item.font || "", size: item.size, color: item.color || "#000000",
-		bold: Boolean(item.bold), italic: Boolean(item.italic), underline: Boolean(item.underline), strikeout: Boolean(item.strikeout),
-		shadow: Boolean(item.shadow), background: item.background || "" } }],
-		layout: { wrap: Boolean(item.wrap), align: item.align || "left", lineHeight: item.paragraphHeight || 0,
-			letterSpacing: item.letterSpacing || 0, leftIndent: item.leftIndent || 0, rightIndent: item.rightIndent || 0,
-			firstLineIndent: item.firstLineIndent || 0, autoBidi: true } };
-}
-
-function paragraphRange(text, start, end) {
-	const first = text.slice(0, start).split("\n").length - 1;
-	return [first, end > start ? text.slice(0, end - 1).split("\n").length - 1 : first];
-}
-
-export function richTextAlignment(model, start = 0, end = model.runs.reduce((n, run) => n + run.text.length, 0)) {
-	const text = model.runs.map(run => run.text).join("");
-	const [first, last] = paragraphRange(text, start, end);
-	const align = model.paragraphs?.[first]?.align || model.layout.align || "left";
-	for (let i = first + 1; i <= last; i++) if ((model.paragraphs?.[i]?.align || model.layout.align || "left") !== align) return "";
-	return align;
-}
-
-export function richTextLayout(model, start = 0, end = model.runs.reduce((n, run) => n + run.text.length, 0)) {
-	const [first, last] = paragraphRange(model.runs.map(run => run.text).join(""), start, end);
-	const value = { ...model.layout, ...model.paragraphs?.[first] };
-	for (const key of ["lineHeight", "letterSpacing", "leftIndent", "rightIndent", "firstLineIndent"]) {
-		value[key] ??= 0;
-		for (let i = first + 1; i <= last; i++) if ((model.paragraphs?.[i]?.[key] ?? model.layout[key] ?? 0) !== value[key]) value[key] = undefined;
-	}
-	value.align = richTextAlignment(model, start, end);
-	return value;
-}
-
-function replaceParagraphs(model, text, start, end, inserted, paragraphs) {
-	if (!model.paragraphs?.length && !paragraphs?.length) return;
-	const first = text.slice(0, start).split("\n").length - 1, last = text.slice(0, end).split("\n").length - 1;
-	const current = model.paragraphs?.length ? model.paragraphs : text.split("\n").map(() => ({ align: "" }));
-	model.paragraphs = [...current.slice(0, first),
-		...inserted.split("\n").map((_, i) => ({ ...(paragraphs?.[i] || current[first]) })), ...current.slice(last + 1)];
-}
-
-function distributeParagraph(input, paragraph) {
-	const probe = input.cloneNode(false), copy = paragraph.cloneNode(true);
-	Object.assign(probe.style, { position: "fixed", transform: "none", visibility: "hidden", pointerEvents: "none", width: `${input.offsetWidth}px` });
-	probe.contentEditable = "false";
-	probe.append(copy);
-	document.body.append(probe);
-	try {
-		const lines = [], range = document.createRange(), width = copy.clientWidth;
-		const spacing = parseFloat(getComputedStyle(copy).letterSpacing) || 0;
-		const indent = parseFloat(getComputedStyle(copy).textIndent) || 0;
-		for (const span of copy.children) {
-			const node = span.firstChild;
-			if (node?.nodeType !== 3) continue;
-			for (const part of graphemes.segment(node.textContent)) {
-				range.setStart(node, part.index); range.setEnd(node, part.index + part.segment.length);
-				const rect = range.getBoundingClientRect();
-				let line = lines.at(-1);
-				if (!line || rect.top >= line.bottom - 0.5 || rect.bottom <= line.top + 0.5) {
-					line = { top: rect.top, bottom: rect.bottom, parts: [] }; lines.push(line);
-				}
-				line.parts.push({ text: part.segment, width: rect.width, style: span.style.cssText });
-			}
-		}
-		if (!lines.length) return;
-		paragraph.replaceChildren();
-		for (const [index, line] of lines.entries()) {
-			if (index) { const wrap = document.createElement("br"); wrap.dataset.textWrap = "true"; paragraph.append(wrap); }
-			const row = document.createElement("span");
-			row.style.whiteSpace = "pre";
-			let end = line.parts.length;
-			while (end && line.parts[end - 1].text === " ") end--;
-			const length = line.parts.slice(0, end).reduce((sum, part) => sum + part.width, 0) - (end ? spacing : 0);
-			const extra = end > 1 ? Math.max(0, width - (index ? 0 : indent) - length) / (end - 1) : 0;
-			let previous;
-			for (const [i, part] of line.parts.entries()) {
-				const tracking = i < end - 1 ? spacing + extra : i === end - 1 ? 0 : spacing;
-				const key = `${part.style}:${tracking}`;
-				if (previous?.key === key) previous.node.firstChild.appendData(part.text);
-				else {
-					const span = document.createElement("span"); span.style.cssText = part.style;
-					span.style.letterSpacing = `${tracking}px`; span.textContent = part.text; row.append(span);
-					previous = {key, node:span};
-				}
-			}
-			paragraph.append(row);
-		}
-	} finally { probe.remove(); }
-}
-
-function normalizeRuns(runs) {
-	const result = [];
-	for (const run of runs) {
-		if (!run.text) continue;
-		const format = Object.fromEntries(FORMAT_KEYS.map(key => [key, run.format[key] ?? (["font", "color", "background"].includes(key) ? "" : key === "size" ? 0 : false)]));
-		const previous = result.at(-1);
-		if (previous && FORMAT_KEYS.every(key => previous.format[key] === format[key])) previous.text += run.text;
-		else result.push({ text: run.text, format });
-	}
-	const text = result.map(run => run.text).join(""), whole = [];
-	let index = 0, end = result[0]?.text.length || 0;
-	for (const part of graphemes.segment(text)) {
-		while (part.index >= end && index < result.length - 1) end += result[++index].text.length;
-		const format = result[index].format, previous = whole.at(-1);
-		if (previous && FORMAT_KEYS.every(key => previous.format[key] === format[key])) previous.text += part.segment;
-		else whole.push({ text: part.segment, format: { ...format } });
-	}
-	return whole;
-}
-
-function sliceRuns(runs, start, end) {
-	let offset = 0;
-	return runs.flatMap(run => {
-		const text = run.text.slice(Math.max(0, start - offset), Math.max(0, end - offset));
-		offset += run.text.length;
-		return text ? [{ text, format: { ...run.format } }] : [];
-	});
-}
-
-function textChange(before, after) {
-	const sameFormat = (a, b) => a && b && FORMAT_KEYS.every(key => a.format[key] === b.format[key]);
-	let first = 0, lastBefore = before.length - 1, lastAfter = after.length - 1, start = 0;
-	let endBefore = before.reduce((length, run) => length + run.text.length, 0);
-	let endAfter = after.reduce((length, run) => length + run.text.length, 0);
-	while (sameFormat(before[first], after[first]) && before[first].text === after[first].text) start += before[first++].text.length;
-	while (lastBefore >= first && lastAfter >= first && sameFormat(before[lastBefore], after[lastAfter]) && before[lastBefore].text === after[lastAfter].text) {
-		endBefore -= before[lastBefore--].text.length;
-		endAfter -= after[lastAfter--].text.length;
-	}
-	if (first <= lastBefore && first <= lastAfter && sameFormat(before[first], after[first])) {
-		const left = before[first].text, right = after[first].text;
-		let count = 0;
-		while (count < left.length && count < right.length && left[count] === right[count]) count++;
-		start += count;
-	}
-	if (first <= lastBefore && first <= lastAfter && sameFormat(before[lastBefore], after[lastAfter])) {
-		const left = before[lastBefore].text, right = after[lastAfter].text;
-		let count = 0;
-		while (count < Math.min(left.length, right.length, endBefore - start, endAfter - start) && left[left.length - count - 1] === right[right.length - count - 1]) count++;
-		endBefore -= count;
-		endAfter -= count;
-	}
-	return { start, before: sliceRuns(before, start, endBefore), after: sliceRuns(after, start, endAfter) };
-}
 
 export class RichTextSession {
 	constructor(editor, model, faces = new Map(), imports = [], resources = new Map()) {
@@ -499,113 +322,6 @@ export class RichTextSession {
 	}
 }
 
-export function editTextValue(input) {
-	let text = "", previous;
-	for (const node of input.childNodes) {
-		if (node.nodeName === "BR" && node.dataset.textWrap) continue;
-		const block = node.nodeName === "DIV" || node.nodeName === "P";
-		if (previous && (block || previous.nodeName === "DIV" || previous.nodeName === "P") && previous.nodeName !== "BR") text += "\n";
-		text += node.nodeType === 3 ? node.textContent : node.nodeName === "BR" ? (node.nextSibling ? "\n" : "") : editTextValue(node);
-		previous = node;
-	}
-	return text;
-}
-
-function editTextSelection(input, saved) {
-	const selection = document.getSelection();
-	const points = saved ? [[saved.startContainer, saved.startOffset], [saved.endContainer, saved.endOffset]]
-		: selection?.rangeCount ? [[selection.anchorNode, selection.anchorOffset], [selection.focusNode, selection.focusOffset]] : null;
-	if (!points || points.some(([node]) => !input.contains(node))) return null;
-	return points.map(([node, position]) => {
-		const range = document.createRange();
-		range.selectNodeContents(input);
-		range.setEnd(node, position);
-		return editTextValue(range.cloneContents()).length;
-	});
-}
-
-function restoreTextSelection(positions, caret, saved) {
-	if (!caret || !positions.length) return;
-	const endpoints = caret.map(point => {
-		const entry = positions.find(entry => entry.end >= point) || positions.at(-1);
-		return [entry.node, Math.max(0, Math.min(point - entry.start, entry.node.length))];
-	});
-	if (saved) {
-		saved.setStart(...endpoints[0]);
-		saved.setEnd(...endpoints[1]);
-	} else document.getSelection().setBaseAndExtent(...endpoints[0], ...endpoints[1]);
-}
-
-export function pagePoint(x, y, rect, page, rotation) {
-	const u = (x - rect.left) / rect.width;
-	const v = (y - rect.top) / rect.height;
-	const points = [[u, v], [v, 1 - u], [1 - u, 1 - v], [1 - v, u]];
-	const point = points[rotation / 90];
-	return { x: point[0] * page.width, y: point[1] * page.height };
-}
-
-export function objectTransform(box, dx, dy, corner = "") {
-	if (!corner) {
-		return { x: dx, y: dy, scale: 1 };
-	}
-	const left = corner.includes("w");
-	const top = corner.includes("n");
-	const x = left ? -dx : dx;
-	const y = top ? -dy : dy;
-	const minimum = Math.min(1, 1 / Math.min(box.width, box.height));
-	const scale = Math.max(minimum, 1 + (x * box.width + y * box.height) / (box.width ** 2 + box.height ** 2));
-	return { x: left ? box.width * (1 - scale) : 0, y: top ? box.height * (1 - scale) : 0, scale };
-}
-
-export function textTransform(box, dx, dy, corner) {
-	if (corner !== "n" && corner !== "s") return objectTransform(box, dx, dy, corner);
-	const top = corner === "n";
-	const scale = Math.max(Math.min(1, 1 / box.height), 1 + (top ? -dy : dy) / box.height);
-	return { x: box.width * (1 - scale) / 2,
-		y: top ? box.height * (1 - scale) : 0, scale };
-}
-
-export function lineShape(shape) {
-	return shape === "line" || shape === "arrow" || shape === "double-arrow";
-}
-
-function arrowPath(shape, box) {
-	const { x, y, width: w, height: h } = box, length = Math.hypot(w, h);
-	let path = `M${x} ${y}L${x + w} ${y + h}`;
-	if (!length) return path;
-	const head = Math.min(4, length / 3), ux = w / length, uy = h / length;
-	for (const reverse of shape === "double-arrow" ? [false, true] : [false]) {
-		const px = reverse ? x : x + w, py = reverse ? y : y + h, direction = reverse ? -1 : 1;
-		const bx = px - ux * head * direction, by = py - uy * head * direction;
-		path += `M${bx - uy * head * .45} ${by + ux * head * .45}L${px} ${py}L${bx + uy * head * .45} ${by - ux * head * .45}`;
-	}
-	return path;
-}
-
-export function selectionBounds(items) {
-	let x = Infinity, y = Infinity, right = -Infinity, bottom = -Infinity;
-	for (const item of items) {
-		x = Math.min(x, item.x); y = Math.min(y, item.y);
-		right = Math.max(right, item.x + item.width); bottom = Math.max(bottom, item.y + item.height);
-	}
-	return { x, y, width: right - x, height: bottom - y };
-}
-
-function resizeCorner(node, event) {
-	let corner = event.target.dataset.corner || "", distance = Infinity;
-	if (!corner) return corner;
-	for (const handle of node.children) {
-		if (!handle.dataset.corner) continue;
-		const rect = handle.getBoundingClientRect();
-		const next = (event.clientX - rect.left - rect.width / 2) ** 2 + (event.clientY - rect.top - rect.height / 2) ** 2;
-		if (next < distance || next === distance && handle.dataset.corner === event.target.dataset.corner) {
-			corner = handle.dataset.corner;
-			distance = next;
-		}
-	}
-	return corner;
-}
-
 export class AlignmentIndex {
 	constructor(targets) {
 		for (const [axis, size] of [["x", "width"], ["y", "height"]]) {
@@ -647,129 +363,6 @@ export class AlignmentIndex {
 		}
 		return { ...offset, path: lines.join("") };
 	}
-}
-
-function transformedBox(box, matrix) {
-	const [a, b, c, d, e, f] = matrix;
-	const points = [[box.x, box.y], [box.x + box.width, box.y], [box.x, box.y + box.height], [box.x + box.width, box.y + box.height]]
-		.map(([x, y]) => [a * x + c * y + e, b * x + d * y + f]);
-	const x = Math.min(...points.map(p => p[0])), y = Math.min(...points.map(p => p[1]));
-	return { x, y, width: Math.max(...points.map(p => p[0])) - x, height: Math.max(...points.map(p => p[1])) - y };
-}
-
-function cropBox(box, bounds, dx, dy, corner) {
-	if (!corner) return { ...box, x: Math.max(bounds.x, Math.min(box.x + dx, bounds.x + bounds.width - box.width)),
-		y: Math.max(bounds.y, Math.min(box.y + dy, bounds.y + bounds.height - box.height)) };
-	const next = reshapeBox({ geometry: box }, dx, dy, corner, false);
-	const x = Math.max(bounds.x, next.x), y = Math.max(bounds.y, next.y);
-	return { x, y, width: Math.min(bounds.x + bounds.width, next.x + next.width) - x,
-		height: Math.min(bounds.y + bounds.height, next.y + next.height) - y };
-}
-
-export function constrainedPoint(from, to, shape, shift) {
-	let dx = to.x - from.x, dy = to.y - from.y;
-	if (shift && lineShape(shape)) {
-		const directions = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
-		const [x, y] = directions[(Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) + 8) % 8];
-		const length = (dx * x + dy * y) / (x * x + y * y);
-		dx = x * length;
-		dy = y * length;
-	} else if (shift) {
-		const size = Math.max(Math.abs(dx), Math.abs(dy));
-		dx = (dx < 0 ? -1 : 1) * size;
-		dy = (dy < 0 ? -1 : 1) * size;
-	}
-	return { x: from.x + dx, y: from.y + dy };
-}
-
-export function reshapeBox(item, dx, dy, handle, shift) {
-	const box = item.geometry;
-	if (!dx && !dy && !shift) return { ...box };
-	if (lineShape(item.shape)) {
-		const start = { x: box.x, y: box.y }, end = { x: box.x + box.width, y: box.y + box.height };
-		const fixed = handle === "start" ? end : start, moving = handle === "start" ? start : end;
-		const point = constrainedPoint(fixed, { x: moving.x + dx, y: moving.y + dy }, "line", shift);
-		const from = handle === "start" ? point : fixed, to = handle === "start" ? fixed : point;
-		return from.x === to.x && from.y === to.y ? null
-			: { x: from.x, y: from.y, width: to.x - from.x, height: to.y - from.y };
-	}
-	if (shift && handle.length === 2) {
-		const change = objectTransform(box, dx, dy, handle);
-		return { x: box.x + change.x, y: box.y + change.y, width: box.width * change.scale, height: box.height * change.scale };
-	}
-	let x = box.x, y = box.y, right = x + box.width, bottom = y + box.height;
-	const minWidth = Math.min(1, box.width), minHeight = Math.min(1, box.height);
-	if (handle.includes("w")) x = Math.min(x + dx, right - minWidth);
-	if (handle.includes("e")) right = Math.max(right + dx, x + minWidth);
-	if (handle.includes("n")) y = Math.min(y + dy, bottom - minHeight);
-	if (handle.includes("s")) bottom = Math.max(bottom + dy, y + minHeight);
-	return { x, y, width: right - x, height: bottom - y };
-}
-
-export function reshapeFrame(frame, dx, dy, handle, shift) {
-	const [a, b, c, d] = frame.matrix, determinant = a * d - b * c;
-	return reshapeBox({ geometry: frame.box }, (d * dx - c * dy) / determinant, (a * dy - b * dx) / determinant, handle, shift);
-}
-
-function paintShape(node, shape, box) {
-	const { x, y, width, height } = box;
-	const attributes = lineShape(shape) && shape !== "line" ? { d: arrowPath(shape, box) }
-		: shape === "line" ? { x1: x, y1: y, x2: x + width, y2: y + height }
-		: shape === "ellipse" ? { cx: x + width / 2, cy: y + height / 2, rx: width / 2, ry: height / 2 }
-		: { x, y, width, height };
-	for (const [key, value] of Object.entries(attributes)) {
-		node.setAttribute(key, value);
-	}
-}
-
-export function canEditObject(item, capability) {
-	if (!item) return false;
-	const objects = item.selectionIDs ? [item] : item.items || [item];
-	return objects.every(object => Boolean(object.capabilities?.[capability] || capability === "move" && object.capabilities?.transform));
-}
-
-export function missingGlyphMessage(diagnostic, action = "请更换字体") {
-	if (!diagnostic) return "";
-	const characters = Array.from(diagnostic.characters);
-	const sample = characters.slice(0, 8).map(char => /[\p{C}\p{Z}\p{M}]/u.test(char)
-		? `U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}` : char).join("、");
-	return `字体缺字（${sample}${characters.length > 8 ? `等${characters.length}字` : ""}），${action}`;
-}
-
-export function objectEditReason(item) {
-	const labels = { fontUnavailable: "字体不可用", unsupportedColor: "暂不支持此颜色", unsupportedStyle: "暂不支持此样式",
-		unsupportedContainer: "暂不支持此对象结构", invalidObject: "对象数据异常" };
-	const reasons = (item?.items || (item ? [item] : [])).map(object => {
-		const reason = object.capabilities?.reason || "";
-		if (!reason) return "";
-		const message = labels[object.capabilities.reasonCode] || "暂不支持此对象特性";
-		const available = object.capabilities.transform ? object.capabilities.paint ? "仍可移动、改色" : "仍可移动"
-			: object.capabilities.replaceImage ? "仍可替换图片" : object.capabilities.copy && object.capabilities.delete ? "仍可复制、删除"
-			: object.capabilities.delete ? "仍可删除" : "暂不可编辑";
-		return object.capabilities.missingGlyphs ? missingGlyphMessage(object.capabilities.missingGlyphs, available) : `${message}，${available}`;
-	});
-	return [...new Set(reasons.filter(Boolean))].join(" · ");
-}
-
-export function selectedText(item) {
-	if (item?.selectionIDs) return item;
-	if (!item?.items) return item?.type === "TextObject" ? item : null;
-	if (!item.items.every(member => member.type === "TextObject")) return null;
-	const text = { ...item, type: "TextObject" };
-	const formats = item.items.flatMap(member => member.richText ? member.richText.runs.map(run => run.format) : [{ ...member, ...richTextModel(member).runs[0].format }]);
-	for (const key of ["font", "fontName", "size", "color", "bold", "italic", "underline", "strikeout", "shadow", "background"]) {
-		const value = formats[0][key];
-		text[key] = formats.every(format => format[key] === value) ? value : undefined;
-	}
-	const layouts = item.items.map(member => member.richText ? { ...richTextLayout(member.richText), wrap: Boolean(member.richText.layout.wrap) } : {
-		align: member.align || "left", wrap: Boolean(member.wrap), lineHeight: member.paragraphHeight || 0,
-		letterSpacing: member.letterSpacing || 0, leftIndent: member.leftIndent || 0, rightIndent: member.rightIndent || 0, firstLineIndent: member.firstLineIndent || 0,
-	});
-	for (const key of ["align", "wrap", "lineHeight", "letterSpacing", "leftIndent", "rightIndent", "firstLineIndent"]) {
-		const values = layouts.map(layout => layout[key]);
-		text[key === "lineHeight" ? "paragraphHeight" : key] = values.every(value => value === values[0]) ? values[0] : undefined;
-	}
-	return text;
 }
 
 export class ObjectIndex {
@@ -2489,5 +2082,412 @@ export class CanvasEditor {
 		if (!keepPreview) crop.pagePreview.urls.forEach(url => URL.revokeObjectURL(url));
 		crop.item.surface.classList.remove("cropping");
 		this.options.onCropChange();
+	}
+}
+
+export function fontFaceStyle(data) {
+	const style = { weight: "400", style: "normal" };
+	const bytes = ArrayBuffer.isView(data) ? new DataView(data.buffer, data.byteOffset, data.byteLength) : new DataView(data);
+	if (bytes.byteLength < 12) return style;
+	const count = bytes.getUint16(4);
+	for (let i = 0; i < count && 12 + (i + 1) * 16 <= bytes.byteLength; i++) {
+		const record = 12 + i * 16;
+		if (bytes.getUint32(record) !== 0x68656164) continue;
+		const offset = bytes.getUint32(record + 8), length = bytes.getUint32(record + 12);
+		if (length < 46 || offset + length > bytes.byteLength) return style;
+		const flags = bytes.getUint16(offset + 44);
+		return { weight: flags & 1 ? "700" : "400", style: flags & 2 ? "italic" : "normal" };
+	}
+	return style;
+}
+
+export function richTextModel(item) {
+	return { runs: [{ text: item.text || "", format: { font: item.font || "", size: item.size, color: item.color || "#000000",
+		bold: Boolean(item.bold), italic: Boolean(item.italic), underline: Boolean(item.underline), strikeout: Boolean(item.strikeout),
+		shadow: Boolean(item.shadow), background: item.background || "" } }],
+		layout: { wrap: Boolean(item.wrap), align: item.align || "left", lineHeight: item.paragraphHeight || 0,
+			letterSpacing: item.letterSpacing || 0, leftIndent: item.leftIndent || 0, rightIndent: item.rightIndent || 0,
+			firstLineIndent: item.firstLineIndent || 0, autoBidi: true } };
+}
+
+export function richTextAlignment(model, start = 0, end = model.runs.reduce((n, run) => n + run.text.length, 0)) {
+	const text = model.runs.map(run => run.text).join("");
+	const [first, last] = paragraphRange(text, start, end);
+	const align = model.paragraphs?.[first]?.align || model.layout.align || "left";
+	for (let i = first + 1; i <= last; i++) if ((model.paragraphs?.[i]?.align || model.layout.align || "left") !== align) return "";
+	return align;
+}
+
+export function richTextLayout(model, start = 0, end = model.runs.reduce((n, run) => n + run.text.length, 0)) {
+	const [first, last] = paragraphRange(model.runs.map(run => run.text).join(""), start, end);
+	const value = { ...model.layout, ...model.paragraphs?.[first] };
+	for (const key of ["lineHeight", "letterSpacing", "leftIndent", "rightIndent", "firstLineIndent"]) {
+		value[key] ??= 0;
+		for (let i = first + 1; i <= last; i++) if ((model.paragraphs?.[i]?.[key] ?? model.layout[key] ?? 0) !== value[key]) value[key] = undefined;
+	}
+	value.align = richTextAlignment(model, start, end);
+	return value;
+}
+
+export function editTextValue(input) {
+	let text = "", previous;
+	for (const node of input.childNodes) {
+		if (node.nodeName === "BR" && node.dataset.textWrap) continue;
+		const block = node.nodeName === "DIV" || node.nodeName === "P";
+		if (previous && (block || previous.nodeName === "DIV" || previous.nodeName === "P") && previous.nodeName !== "BR") text += "\n";
+		text += node.nodeType === 3 ? node.textContent : node.nodeName === "BR" ? (node.nextSibling ? "\n" : "") : editTextValue(node);
+		previous = node;
+	}
+	return text;
+}
+
+export function pagePoint(x, y, rect, page, rotation) {
+	const u = (x - rect.left) / rect.width;
+	const v = (y - rect.top) / rect.height;
+	const points = [[u, v], [v, 1 - u], [1 - u, 1 - v], [1 - v, u]];
+	const point = points[rotation / 90];
+	return { x: point[0] * page.width, y: point[1] * page.height };
+}
+
+export function objectTransform(box, dx, dy, corner = "") {
+	if (!corner) {
+		return { x: dx, y: dy, scale: 1 };
+	}
+	const left = corner.includes("w");
+	const top = corner.includes("n");
+	const x = left ? -dx : dx;
+	const y = top ? -dy : dy;
+	const minimum = Math.min(1, 1 / Math.min(box.width, box.height));
+	const scale = Math.max(minimum, 1 + (x * box.width + y * box.height) / (box.width ** 2 + box.height ** 2));
+	return { x: left ? box.width * (1 - scale) : 0, y: top ? box.height * (1 - scale) : 0, scale };
+}
+
+export function textTransform(box, dx, dy, corner) {
+	if (corner !== "n" && corner !== "s") return objectTransform(box, dx, dy, corner);
+	const top = corner === "n";
+	const scale = Math.max(Math.min(1, 1 / box.height), 1 + (top ? -dy : dy) / box.height);
+	return { x: box.width * (1 - scale) / 2,
+		y: top ? box.height * (1 - scale) : 0, scale };
+}
+
+export function lineShape(shape) {
+	return shape === "line" || shape === "arrow" || shape === "double-arrow";
+}
+
+export function selectionBounds(items) {
+	let x = Infinity, y = Infinity, right = -Infinity, bottom = -Infinity;
+	for (const item of items) {
+		x = Math.min(x, item.x); y = Math.min(y, item.y);
+		right = Math.max(right, item.x + item.width); bottom = Math.max(bottom, item.y + item.height);
+	}
+	return { x, y, width: right - x, height: bottom - y };
+}
+
+export function constrainedPoint(from, to, shape, shift) {
+	let dx = to.x - from.x, dy = to.y - from.y;
+	if (shift && lineShape(shape)) {
+		const directions = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
+		const [x, y] = directions[(Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) + 8) % 8];
+		const length = (dx * x + dy * y) / (x * x + y * y);
+		dx = x * length;
+		dy = y * length;
+	} else if (shift) {
+		const size = Math.max(Math.abs(dx), Math.abs(dy));
+		dx = (dx < 0 ? -1 : 1) * size;
+		dy = (dy < 0 ? -1 : 1) * size;
+	}
+	return { x: from.x + dx, y: from.y + dy };
+}
+
+export function reshapeBox(item, dx, dy, handle, shift) {
+	const box = item.geometry;
+	if (!dx && !dy && !shift) return { ...box };
+	if (lineShape(item.shape)) {
+		const start = { x: box.x, y: box.y }, end = { x: box.x + box.width, y: box.y + box.height };
+		const fixed = handle === "start" ? end : start, moving = handle === "start" ? start : end;
+		const point = constrainedPoint(fixed, { x: moving.x + dx, y: moving.y + dy }, "line", shift);
+		const from = handle === "start" ? point : fixed, to = handle === "start" ? fixed : point;
+		return from.x === to.x && from.y === to.y ? null
+			: { x: from.x, y: from.y, width: to.x - from.x, height: to.y - from.y };
+	}
+	if (shift && handle.length === 2) {
+		const change = objectTransform(box, dx, dy, handle);
+		return { x: box.x + change.x, y: box.y + change.y, width: box.width * change.scale, height: box.height * change.scale };
+	}
+	let x = box.x, y = box.y, right = x + box.width, bottom = y + box.height;
+	const minWidth = Math.min(1, box.width), minHeight = Math.min(1, box.height);
+	if (handle.includes("w")) x = Math.min(x + dx, right - minWidth);
+	if (handle.includes("e")) right = Math.max(right + dx, x + minWidth);
+	if (handle.includes("n")) y = Math.min(y + dy, bottom - minHeight);
+	if (handle.includes("s")) bottom = Math.max(bottom + dy, y + minHeight);
+	return { x, y, width: right - x, height: bottom - y };
+}
+
+export function reshapeFrame(frame, dx, dy, handle, shift) {
+	const [a, b, c, d] = frame.matrix, determinant = a * d - b * c;
+	return reshapeBox({ geometry: frame.box }, (d * dx - c * dy) / determinant, (a * dy - b * dx) / determinant, handle, shift);
+}
+
+export function canEditObject(item, capability) {
+	if (!item) return false;
+	const objects = item.selectionIDs ? [item] : item.items || [item];
+	return objects.every(object => Boolean(object.capabilities?.[capability] || capability === "move" && object.capabilities?.transform));
+}
+
+export function missingGlyphMessage(diagnostic, action = "请更换字体") {
+	if (!diagnostic) return "";
+	const characters = Array.from(diagnostic.characters);
+	const sample = characters.slice(0, 8).map(char => /[\p{C}\p{Z}\p{M}]/u.test(char)
+		? `U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}` : char).join("、");
+	return `字体缺字（${sample}${characters.length > 8 ? `等${characters.length}字` : ""}），${action}`;
+}
+
+export function objectEditReason(item) {
+	const labels = { fontUnavailable: "字体不可用", unsupportedColor: "暂不支持此颜色", unsupportedStyle: "暂不支持此样式",
+		unsupportedContainer: "暂不支持此对象结构", invalidObject: "对象数据异常" };
+	const reasons = (item?.items || (item ? [item] : [])).map(object => {
+		const reason = object.capabilities?.reason || "";
+		if (!reason) return "";
+		const message = labels[object.capabilities.reasonCode] || "暂不支持此对象特性";
+		const available = object.capabilities.transform ? object.capabilities.paint ? "仍可移动、改色" : "仍可移动"
+			: object.capabilities.replaceImage ? "仍可替换图片" : object.capabilities.copy && object.capabilities.delete ? "仍可复制、删除"
+			: object.capabilities.delete ? "仍可删除" : "暂不可编辑";
+		return object.capabilities.missingGlyphs ? missingGlyphMessage(object.capabilities.missingGlyphs, available) : `${message}，${available}`;
+	});
+	return [...new Set(reasons.filter(Boolean))].join(" · ");
+}
+
+export function selectedText(item) {
+	if (item?.selectionIDs) return item;
+	if (!item?.items) return item?.type === "TextObject" ? item : null;
+	if (!item.items.every(member => member.type === "TextObject")) return null;
+	const text = { ...item, type: "TextObject" };
+	const formats = item.items.flatMap(member => member.richText ? member.richText.runs.map(run => run.format) : [{ ...member, ...richTextModel(member).runs[0].format }]);
+	for (const key of ["font", "fontName", "size", "color", "bold", "italic", "underline", "strikeout", "shadow", "background"]) {
+		const value = formats[0][key];
+		text[key] = formats.every(format => format[key] === value) ? value : undefined;
+	}
+	const layouts = item.items.map(member => member.richText ? { ...richTextLayout(member.richText), wrap: Boolean(member.richText.layout.wrap) } : {
+		align: member.align || "left", wrap: Boolean(member.wrap), lineHeight: member.paragraphHeight || 0,
+		letterSpacing: member.letterSpacing || 0, leftIndent: member.leftIndent || 0, rightIndent: member.rightIndent || 0, firstLineIndent: member.firstLineIndent || 0,
+	});
+	for (const key of ["align", "wrap", "lineHeight", "letterSpacing", "leftIndent", "rightIndent", "firstLineIndent"]) {
+		const values = layouts.map(layout => layout[key]);
+		text[key === "lineHeight" ? "paragraphHeight" : key] = values.every(value => value === values[0]) ? values[0] : undefined;
+	}
+	return text;
+}
+
+function sourceTextScale(editing) {
+	if (!editing.source) return 1;
+	const [a, b, c, d] = editing.frame.matrix;
+	return Math.max(Math.hypot(a, b), Math.hypot(c, d)) || 1;
+}
+
+function textFrameBox(item) {
+	return { x: 0, y: 0, width: item.paragraphWidth ?? item.textFrame.width, height: item.textFrame.height };
+}
+
+function graphemeRange(text, start, end) {
+	const boundaries = [0, ...Array.from(graphemes.segment(text), segment => segment.index + segment.segment.length)];
+	const from = boundaries.findLast(offset => offset <= start) ?? 0;
+	return start === end ? [from, from] : [from, boundaries.find(offset => offset >= end) ?? text.length];
+}
+
+function paragraphRange(text, start, end) {
+	const first = text.slice(0, start).split("\n").length - 1;
+	return [first, end > start ? text.slice(0, end - 1).split("\n").length - 1 : first];
+}
+
+function replaceParagraphs(model, text, start, end, inserted, paragraphs) {
+	if (!model.paragraphs?.length && !paragraphs?.length) return;
+	const first = text.slice(0, start).split("\n").length - 1, last = text.slice(0, end).split("\n").length - 1;
+	const current = model.paragraphs?.length ? model.paragraphs : text.split("\n").map(() => ({ align: "" }));
+	model.paragraphs = [...current.slice(0, first),
+		...inserted.split("\n").map((_, i) => ({ ...(paragraphs?.[i] || current[first]) })), ...current.slice(last + 1)];
+}
+
+function distributeParagraph(input, paragraph) {
+	const probe = input.cloneNode(false), copy = paragraph.cloneNode(true);
+	Object.assign(probe.style, { position: "fixed", transform: "none", visibility: "hidden", pointerEvents: "none", width: `${input.offsetWidth}px` });
+	probe.contentEditable = "false";
+	probe.append(copy);
+	document.body.append(probe);
+	try {
+		const lines = [], range = document.createRange(), width = copy.clientWidth;
+		const spacing = parseFloat(getComputedStyle(copy).letterSpacing) || 0;
+		const indent = parseFloat(getComputedStyle(copy).textIndent) || 0;
+		for (const span of copy.children) {
+			const node = span.firstChild;
+			if (node?.nodeType !== 3) continue;
+			for (const part of graphemes.segment(node.textContent)) {
+				range.setStart(node, part.index); range.setEnd(node, part.index + part.segment.length);
+				const rect = range.getBoundingClientRect();
+				let line = lines.at(-1);
+				if (!line || rect.top >= line.bottom - 0.5 || rect.bottom <= line.top + 0.5) {
+					line = { top: rect.top, bottom: rect.bottom, parts: [] }; lines.push(line);
+				}
+				line.parts.push({ text: part.segment, width: rect.width, style: span.style.cssText });
+			}
+		}
+		if (!lines.length) return;
+		paragraph.replaceChildren();
+		for (const [index, line] of lines.entries()) {
+			if (index) { const wrap = document.createElement("br"); wrap.dataset.textWrap = "true"; paragraph.append(wrap); }
+			const row = document.createElement("span");
+			row.style.whiteSpace = "pre";
+			let end = line.parts.length;
+			while (end && line.parts[end - 1].text === " ") end--;
+			const length = line.parts.slice(0, end).reduce((sum, part) => sum + part.width, 0) - (end ? spacing : 0);
+			const extra = end > 1 ? Math.max(0, width - (index ? 0 : indent) - length) / (end - 1) : 0;
+			let previous;
+			for (const [i, part] of line.parts.entries()) {
+				const tracking = i < end - 1 ? spacing + extra : i === end - 1 ? 0 : spacing;
+				const key = `${part.style}:${tracking}`;
+				if (previous?.key === key) previous.node.firstChild.appendData(part.text);
+				else {
+					const span = document.createElement("span"); span.style.cssText = part.style;
+					span.style.letterSpacing = `${tracking}px`; span.textContent = part.text; row.append(span);
+					previous = {key, node:span};
+				}
+			}
+			paragraph.append(row);
+		}
+	} finally { probe.remove(); }
+}
+
+function normalizeRuns(runs) {
+	const result = [];
+	for (const run of runs) {
+		if (!run.text) continue;
+		const format = Object.fromEntries(FORMAT_KEYS.map(key => [key, run.format[key] ?? (["font", "color", "background"].includes(key) ? "" : key === "size" ? 0 : false)]));
+		const previous = result.at(-1);
+		if (previous && FORMAT_KEYS.every(key => previous.format[key] === format[key])) previous.text += run.text;
+		else result.push({ text: run.text, format });
+	}
+	const text = result.map(run => run.text).join(""), whole = [];
+	let index = 0, end = result[0]?.text.length || 0;
+	for (const part of graphemes.segment(text)) {
+		while (part.index >= end && index < result.length - 1) end += result[++index].text.length;
+		const format = result[index].format, previous = whole.at(-1);
+		if (previous && FORMAT_KEYS.every(key => previous.format[key] === format[key])) previous.text += part.segment;
+		else whole.push({ text: part.segment, format: { ...format } });
+	}
+	return whole;
+}
+
+function sliceRuns(runs, start, end) {
+	let offset = 0;
+	return runs.flatMap(run => {
+		const text = run.text.slice(Math.max(0, start - offset), Math.max(0, end - offset));
+		offset += run.text.length;
+		return text ? [{ text, format: { ...run.format } }] : [];
+	});
+}
+
+function textChange(before, after) {
+	const sameFormat = (a, b) => a && b && FORMAT_KEYS.every(key => a.format[key] === b.format[key]);
+	let first = 0, lastBefore = before.length - 1, lastAfter = after.length - 1, start = 0;
+	let endBefore = before.reduce((length, run) => length + run.text.length, 0);
+	let endAfter = after.reduce((length, run) => length + run.text.length, 0);
+	while (sameFormat(before[first], after[first]) && before[first].text === after[first].text) start += before[first++].text.length;
+	while (lastBefore >= first && lastAfter >= first && sameFormat(before[lastBefore], after[lastAfter]) && before[lastBefore].text === after[lastAfter].text) {
+		endBefore -= before[lastBefore--].text.length;
+		endAfter -= after[lastAfter--].text.length;
+	}
+	if (first <= lastBefore && first <= lastAfter && sameFormat(before[first], after[first])) {
+		const left = before[first].text, right = after[first].text;
+		let count = 0;
+		while (count < left.length && count < right.length && left[count] === right[count]) count++;
+		start += count;
+	}
+	if (first <= lastBefore && first <= lastAfter && sameFormat(before[lastBefore], after[lastAfter])) {
+		const left = before[lastBefore].text, right = after[lastAfter].text;
+		let count = 0;
+		while (count < Math.min(left.length, right.length, endBefore - start, endAfter - start) && left[left.length - count - 1] === right[right.length - count - 1]) count++;
+		endBefore -= count;
+		endAfter -= count;
+	}
+	return { start, before: sliceRuns(before, start, endBefore), after: sliceRuns(after, start, endAfter) };
+}
+
+function editTextSelection(input, saved) {
+	const selection = document.getSelection();
+	const points = saved ? [[saved.startContainer, saved.startOffset], [saved.endContainer, saved.endOffset]]
+		: selection?.rangeCount ? [[selection.anchorNode, selection.anchorOffset], [selection.focusNode, selection.focusOffset]] : null;
+	if (!points || points.some(([node]) => !input.contains(node))) return null;
+	return points.map(([node, position]) => {
+		const range = document.createRange();
+		range.selectNodeContents(input);
+		range.setEnd(node, position);
+		return editTextValue(range.cloneContents()).length;
+	});
+}
+
+function restoreTextSelection(positions, caret, saved) {
+	if (!caret || !positions.length) return;
+	const endpoints = caret.map(point => {
+		const entry = positions.find(entry => entry.end >= point) || positions.at(-1);
+		return [entry.node, Math.max(0, Math.min(point - entry.start, entry.node.length))];
+	});
+	if (saved) {
+		saved.setStart(...endpoints[0]);
+		saved.setEnd(...endpoints[1]);
+	} else document.getSelection().setBaseAndExtent(...endpoints[0], ...endpoints[1]);
+}
+
+function arrowPath(shape, box) {
+	const { x, y, width: w, height: h } = box, length = Math.hypot(w, h);
+	let path = `M${x} ${y}L${x + w} ${y + h}`;
+	if (!length) return path;
+	const head = Math.min(4, length / 3), ux = w / length, uy = h / length;
+	for (const reverse of shape === "double-arrow" ? [false, true] : [false]) {
+		const px = reverse ? x : x + w, py = reverse ? y : y + h, direction = reverse ? -1 : 1;
+		const bx = px - ux * head * direction, by = py - uy * head * direction;
+		path += `M${bx - uy * head * .45} ${by + ux * head * .45}L${px} ${py}L${bx + uy * head * .45} ${by - ux * head * .45}`;
+	}
+	return path;
+}
+
+function resizeCorner(node, event) {
+	let corner = event.target.dataset.corner || "", distance = Infinity;
+	if (!corner) return corner;
+	for (const handle of node.children) {
+		if (!handle.dataset.corner) continue;
+		const rect = handle.getBoundingClientRect();
+		const next = (event.clientX - rect.left - rect.width / 2) ** 2 + (event.clientY - rect.top - rect.height / 2) ** 2;
+		if (next < distance || next === distance && handle.dataset.corner === event.target.dataset.corner) {
+			corner = handle.dataset.corner;
+			distance = next;
+		}
+	}
+	return corner;
+}
+
+function transformedBox(box, matrix) {
+	const [a, b, c, d, e, f] = matrix;
+	const points = [[box.x, box.y], [box.x + box.width, box.y], [box.x, box.y + box.height], [box.x + box.width, box.y + box.height]]
+		.map(([x, y]) => [a * x + c * y + e, b * x + d * y + f]);
+	const x = Math.min(...points.map(p => p[0])), y = Math.min(...points.map(p => p[1]));
+	return { x, y, width: Math.max(...points.map(p => p[0])) - x, height: Math.max(...points.map(p => p[1])) - y };
+}
+
+function cropBox(box, bounds, dx, dy, corner) {
+	if (!corner) return { ...box, x: Math.max(bounds.x, Math.min(box.x + dx, bounds.x + bounds.width - box.width)),
+		y: Math.max(bounds.y, Math.min(box.y + dy, bounds.y + bounds.height - box.height)) };
+	const next = reshapeBox({ geometry: box }, dx, dy, corner, false);
+	const x = Math.max(bounds.x, next.x), y = Math.max(bounds.y, next.y);
+	return { x, y, width: Math.min(bounds.x + bounds.width, next.x + next.width) - x,
+		height: Math.min(bounds.y + bounds.height, next.y + next.height) - y };
+}
+
+function paintShape(node, shape, box) {
+	const { x, y, width, height } = box;
+	const attributes = lineShape(shape) && shape !== "line" ? { d: arrowPath(shape, box) }
+		: shape === "line" ? { x1: x, y1: y, x2: x + width, y2: y + height }
+		: shape === "ellipse" ? { cx: x + width / 2, cy: y + height / 2, rx: width / 2, ry: height / 2 }
+		: { x, y, width, height };
+	for (const [key, value] of Object.entries(attributes)) {
+		node.setAttribute(key, value);
 	}
 }

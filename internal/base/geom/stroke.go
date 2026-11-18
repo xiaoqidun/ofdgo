@@ -23,13 +23,6 @@ import (
 // UnsupportedError 表示当前几何实现无法展开的描边形态
 type UnsupportedError string
 
-// geometryPolyline 保存展开后的子路径，独立记录闭合状态
-type geometryPolyline struct {
-	points    []Point
-	closed    bool
-	direction Point
-}
-
 // Error 返回不支持的描边原因
 // 返回: string 错误信息
 func (err UnsupportedError) Error() string {
@@ -103,105 +96,11 @@ func (p Path) Stroke(options StrokeOptions) (Path, error) {
 	return result, nil
 }
 
-// strokePolylines 自适应展开贝塞尔，弦长亏损同时约束虚线累计长度误差
-// 入参: tolerance 展开误差
-// 返回: []geometryPolyline 子路径, error 展开限制
-func (p Path) strokePolylines(tolerance float64) ([]geometryPolyline, error) {
-	curves, err := p.Curves(tolerance / 2)
-	if err != nil {
-		return nil, err
-	}
-	var result []geometryPolyline
-	var line geometryPolyline
-	var current, start Point
-	drawn := false
-	flush := func() {
-		if drawn {
-			result = append(result, line)
-		}
-		line, drawn = geometryPolyline{}, false
-	}
-	count := 0
-	var flatten func([]Point, float64, int) error
-	flatten = func(points []Point, budget float64, depth int) error {
-		first, last := points[0], points[len(points)-1]
-		chord := math.Hypot(last.X-first.X, last.Y-first.Y)
-		length, distance := 0.0, 0.0
-		for i := 1; i < len(points); i++ {
-			length += math.Hypot(points[i].X-points[i-1].X, points[i].Y-points[i-1].Y)
-			if i == len(points)-1 {
-				continue
-			}
-			if chord == 0 {
-				distance = math.Max(distance, math.Hypot(points[i].X-first.X, points[i].Y-first.Y))
-			} else {
-				distance = math.Max(distance, math.Abs((points[i].X-first.X)*((last.Y-first.Y)/chord)-(points[i].Y-first.Y)*((last.X-first.X)/chord)))
-			}
-		}
-		if !finite(length) || !finite(distance) {
-			return fmt.Errorf("stroke curve overflow")
-		}
-		if distance <= tolerance && length-chord <= budget {
-			if last != line.points[len(line.points)-1] {
-				line.points = append(line.points, last)
-				count++
-			}
-			if count > 1<<18 {
-				return fmt.Errorf("stroke subdivision limit exceeded")
-			}
-			return nil
-		}
-		if depth == 24 {
-			return fmt.Errorf("stroke curve tolerance cannot be met")
-		}
-		var work, left, right [4]Point
-		copy(work[:], points)
-		for n := len(points); n > 0; n-- {
-			left[len(points)-n], right[n-1] = work[0], work[n-1]
-			for i := 0; i < n-1; i++ {
-				work[i] = Lerp(work[i], work[i+1], .5)
-			}
-		}
-		if err := flatten(left[:len(points)], budget/2, depth+1); err != nil {
-			return err
-		}
-		return flatten(right[:len(points)], budget/2, depth+1)
-	}
-	for _, s := range curves {
-		switch s.Verb {
-		case Move:
-			flush()
-			current, start = s.End, s.End
-			line.points = []Point{current}
-		case ClosePath:
-			if drawn {
-				if current != start {
-					line.points = append(line.points, start)
-				}
-				line.closed = true
-			}
-			flush()
-			current = start
-			line.points = []Point{current}
-		default:
-			drawn = true
-			var buffer [4]Point
-			points := append(buffer[:0], current)
-			if s.Verb == Quad || s.Verb == Cubic {
-				points = append(points, s.Control1)
-			}
-			if s.Verb == Cubic {
-				points = append(points, s.Control2)
-			}
-			points = append(points, s.End)
-			if err := flatten(points, tolerance/float64(len(curves)), 0); err != nil {
-				return nil, err
-			}
-			current = s.End
-		}
-	}
-	flush()
-	return result, nil
+// geometryPolyline 保存展开后的子路径，独立记录闭合状态
+type geometryPolyline struct {
+	points    []Point
+	closed    bool
+	direction Point
 }
 
 // dash 按子路径重置相位并合并跨闭合接缝的连续虚线
@@ -423,5 +322,106 @@ func (line geometryPolyline) stroke(result Path, options StrokeOptions) (Path, e
 			}
 		}
 	}
+	return result, nil
+}
+
+// strokePolylines 自适应展开贝塞尔，弦长亏损同时约束虚线累计长度误差
+// 入参: tolerance 展开误差
+// 返回: []geometryPolyline 子路径, error 展开限制
+func (p Path) strokePolylines(tolerance float64) ([]geometryPolyline, error) {
+	curves, err := p.Curves(tolerance / 2)
+	if err != nil {
+		return nil, err
+	}
+	var result []geometryPolyline
+	var line geometryPolyline
+	var current, start Point
+	drawn := false
+	flush := func() {
+		if drawn {
+			result = append(result, line)
+		}
+		line, drawn = geometryPolyline{}, false
+	}
+	count := 0
+	var flatten func([]Point, float64, int) error
+	flatten = func(points []Point, budget float64, depth int) error {
+		first, last := points[0], points[len(points)-1]
+		chord := math.Hypot(last.X-first.X, last.Y-first.Y)
+		length, distance := 0.0, 0.0
+		for i := 1; i < len(points); i++ {
+			length += math.Hypot(points[i].X-points[i-1].X, points[i].Y-points[i-1].Y)
+			if i == len(points)-1 {
+				continue
+			}
+			if chord == 0 {
+				distance = math.Max(distance, math.Hypot(points[i].X-first.X, points[i].Y-first.Y))
+			} else {
+				distance = math.Max(distance, math.Abs((points[i].X-first.X)*((last.Y-first.Y)/chord)-(points[i].Y-first.Y)*((last.X-first.X)/chord)))
+			}
+		}
+		if !finite(length) || !finite(distance) {
+			return fmt.Errorf("stroke curve overflow")
+		}
+		if distance <= tolerance && length-chord <= budget {
+			if last != line.points[len(line.points)-1] {
+				line.points = append(line.points, last)
+				count++
+			}
+			if count > 1<<18 {
+				return fmt.Errorf("stroke subdivision limit exceeded")
+			}
+			return nil
+		}
+		if depth == 24 {
+			return fmt.Errorf("stroke curve tolerance cannot be met")
+		}
+		var work, left, right [4]Point
+		copy(work[:], points)
+		for n := len(points); n > 0; n-- {
+			left[len(points)-n], right[n-1] = work[0], work[n-1]
+			for i := 0; i < n-1; i++ {
+				work[i] = Lerp(work[i], work[i+1], .5)
+			}
+		}
+		if err := flatten(left[:len(points)], budget/2, depth+1); err != nil {
+			return err
+		}
+		return flatten(right[:len(points)], budget/2, depth+1)
+	}
+	for _, s := range curves {
+		switch s.Verb {
+		case Move:
+			flush()
+			current, start = s.End, s.End
+			line.points = []Point{current}
+		case ClosePath:
+			if drawn {
+				if current != start {
+					line.points = append(line.points, start)
+				}
+				line.closed = true
+			}
+			flush()
+			current = start
+			line.points = []Point{current}
+		default:
+			drawn = true
+			var buffer [4]Point
+			points := append(buffer[:0], current)
+			if s.Verb == Quad || s.Verb == Cubic {
+				points = append(points, s.Control1)
+			}
+			if s.Verb == Cubic {
+				points = append(points, s.Control2)
+			}
+			points = append(points, s.End)
+			if err := flatten(points, tolerance/float64(len(curves)), 0); err != nil {
+				return nil, err
+			}
+			current = s.End
+		}
+	}
+	flush()
 	return result, nil
 }

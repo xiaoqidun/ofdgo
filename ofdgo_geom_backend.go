@@ -20,6 +20,9 @@ import (
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
+// GeometryOperation 指定路径填充区域的布尔运算
+type GeometryOperation uint8
+
 // 路径填充区域的交集、并集、差集和异或运算
 const (
 	GeometryIntersect GeometryOperation = iota
@@ -27,9 +30,6 @@ const (
 	GeometrySubtract
 	GeometryXor
 )
-
-// GeometryOperation 指定路径填充区域的布尔运算
-type GeometryOperation uint8
 
 // StrokeOptions 描述描边参数，长度单位为毫米
 // Width须为正有限数；Cap和Join使用OFD名称，空值分别采用Butt和Miter
@@ -66,15 +66,6 @@ func (r *Renderer) Geometry() (GeometryBackend, error) {
 	return r.backends.Geometry, nil
 }
 
-// Geometry 返回编辑器配置的几何后端
-// 返回: GeometryBackend 几何后端, error 未配置错误
-func (e *Editor) Geometry() (GeometryBackend, error) {
-	if e.backends.Geometry == nil {
-		return nil, fmt.Errorf("geometry: %w", ErrBackendUnavailable)
-	}
-	return e.backends.Geometry, nil
-}
-
 // PathOutline 使用配置的几何后端生成页面坐标中的SVG轮廓
 // 入参: object 路径对象
 // 返回: string SVG路径, error 几何或编码错误
@@ -88,6 +79,15 @@ func (r *Renderer) PathOutline(object PathObject) (string, error) {
 		return "", err
 	}
 	return path.SVG()
+}
+
+// Geometry 返回编辑器配置的几何后端
+// 返回: GeometryBackend 几何后端, error 未配置错误
+func (e *Editor) Geometry() (GeometryBackend, error) {
+	if e.backends.Geometry == nil {
+		return nil, fmt.Errorf("geometry: %w", ErrBackendUnavailable)
+	}
+	return e.backends.Geometry, nil
 }
 
 // clipGeometry 将非零填充路径与页面裁剪相交

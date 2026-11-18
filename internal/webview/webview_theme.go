@@ -36,6 +36,21 @@ type applicationTheme struct {
 	Material string `json:"material"`
 }
 
+// validate 检查应用主题及解析后的配色是否一致
+// 返回: error 偏好错误
+func (a applicationTheme) validate() error {
+	if a.Mode != "system" && a.Mode != "light" && a.Mode != "dark" {
+		return fmt.Errorf("主题无效")
+	}
+	if a.Mode == "light" && a.Dark || a.Mode == "dark" && !a.Dark {
+		return fmt.Errorf("主题配色无效")
+	}
+	if a.Material != "solid" && a.Material != "mica-alt" && a.Material != "acrylic" {
+		return fmt.Errorf("窗口材质无效")
+	}
+	return nil
+}
+
 // themeColors 返回应用对应外观的原生标题栏配色
 // 入参: dark 是否使用深色
 // 返回: guigo.TitleBarColors 标题栏配色
@@ -61,21 +76,6 @@ func (h *Host) loadTheme() error {
 		return err
 	}
 	return h.theme.validate()
-}
-
-// validate 检查应用主题及解析后的配色是否一致
-// 返回: error 偏好错误
-func (a applicationTheme) validate() error {
-	if a.Mode != "system" && a.Mode != "light" && a.Mode != "dark" {
-		return fmt.Errorf("主题无效")
-	}
-	if a.Mode == "light" && a.Dark || a.Mode == "dark" && !a.Dark {
-		return fmt.Errorf("主题配色无效")
-	}
-	if a.Material != "solid" && a.Material != "mica-alt" && a.Material != "acrylic" {
-		return fmt.Errorf("窗口材质无效")
-	}
-	return nil
 }
 
 // themeIndex 在页面首次绘制前提供当前主题偏好

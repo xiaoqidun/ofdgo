@@ -34,32 +34,11 @@ type PageTextCache struct {
 	cache *renderCache[int, *pageTextEntry]
 }
 
-// pageTextEntry 将页面原文和派生搜索索引放在同一预算与失效范围内
-type pageTextEntry struct {
-	text   *PageText
-	search *TextSearchIndex
-}
-
 // TextSearchIndex 保存不可变的文字搜索快照，可并行搜索，不随源文字修改
 // 页面或字体变化后需由调用方重新构建
 type TextSearchIndex struct {
 	runs   []TextRun
 	groups []textSearchGroup
-}
-
-// textSearchGroup 保存同行连续文字及Unicode字符映射
-type textSearchGroup struct {
-	first   int
-	last    int
-	offsets []int
-	runes   []rune
-	folded  string
-}
-
-// textPageTokens 保留文字及其复合图元和裁剪，跳过独立路径与图片
-type textPageTokens struct {
-	*xml.Decoder
-	parents []string
 }
 
 // PageText 页面文字，按绘制顺序保留文本对象，不包含图像和签名外观
@@ -111,17 +90,6 @@ type TextMatchPart struct {
 // 返回: *PageTextCache 独立缓存
 func NewPageTextCache(bytes int) *PageTextCache {
 	return &PageTextCache{cache: resourceCache[int, *pageTextEntry](nil, max(0, bytes))}
-}
-
-// MemorySize 估算文字索引占用，包含切片容量和字符串内容
-// 返回: int64 估算字节数，共享字符串按各次引用计费
-func (p *PageText) MemorySize() int64 {
-	size := int64(unsafe.Sizeof(*p)) + int64(cap(p.Runs))*int64(unsafe.Sizeof(TextRun{}))
-	for _, run := range p.Runs {
-		size += int64(len(run.ID)) + int64(len(run.Text))
-		size += int64(cap(run.Boxes))*int64(unsafe.Sizeof(Box{})) + int64(cap(run.Spans))*int64(unsafe.Sizeof(TextSpan{}))
-	}
-	return size
 }
 
 // Get 获取文字索引并更新最近访问顺序
@@ -186,31 +154,108 @@ func (c *PageTextCache) Range(visit func(int, *PageText) bool) {
 	}
 }
 
-// Token 读取文字页面所需的XML节点
-// 返回: xml.Token XML节点, error 错误信息
-func (d *textPageTokens) Token() (xml.Token, error) {
-	for {
-		token, err := d.Decoder.Token()
+// SearchEach 在已缓存页面上搜索，派生索引与原文共用预算及失效范围
+// 入参: ctx 取消上下文, index 页面索引, query 搜索文字, visit 匹配访问函数
+// 返回: bool 是否命中页面缓存, error 取消或访问错误
+func (c *PageTextCache) SearchEach(ctx context.Context, index int, query string, visit func(TextMatch) error) (bool, error) {
+	entry, ok := c.cache.get(index)
+	if !ok {
+		return false, ctx.Err()
+	}
+	search := entry.search
+	if search == nil {
+		var err error
+		search, err = entry.text.searchIndex(ctx)
 		if err != nil {
+			return true, err
+		}
+		cost := entry.text.MemorySize() + search.searchSize() + 128
+		c.cache.mu.Lock()
+		if current := c.cache.entries[index]; current != nil && current.Value.(renderCacheEntry[int, *pageTextEntry]).value == entry && cost <= int64(c.cache.limit) {
+			c.cache.putLocked(index, &pageTextEntry{text: entry.text, search: search}, int(cost))
+		}
+		c.cache.mu.Unlock()
+	}
+	return true, search.SearchEach(ctx, query, visit)
+}
+
+// NewTextSearchIndex 创建独立搜索快照，复制字符区域，保留Unicode折叠和跨对象匹配
+// 入参: ctx 取消上下文, text 页面原文
+// 返回: *TextSearchIndex 不可变索引, error 参数或取消错误
+func NewTextSearchIndex(ctx context.Context, text *PageText) (*TextSearchIndex, error) {
+	if text == nil {
+		return nil, fmt.Errorf("missing page text")
+	}
+	copy := PageText{Runs: slices.Clone(text.Runs)}
+	for i := range copy.Runs {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		switch node := token.(type) {
-		case xml.StartElement:
-			if len(d.parents) > 0 && (node.Name.Local == "PathObject" || node.Name.Local == "ImageObject") {
-				switch d.parents[len(d.parents)-1] {
-				case "Layer", "PageBlock", "CompositeGraphicUnit", "CompositeObject":
-					if err := d.Decoder.Skip(); err != nil {
-						return nil, err
-					}
-					continue
-				}
-			}
-			d.parents = append(d.parents, node.Name.Local)
-		case xml.EndElement:
-			d.parents = d.parents[:len(d.parents)-1]
-		}
-		return token, nil
+		copy.Runs[i].Boxes = slices.Clone(copy.Runs[i].Boxes)
+		copy.Runs[i].Spans = nil
 	}
+	return copy.searchIndex(ctx)
+}
+
+// SearchEach 在不可变索引中逐项搜索，回调返回错误时立即停止
+// 入参: ctx 取消上下文, query 搜索文字, visit 匹配访问函数
+// 返回: error 取消或访问错误
+func (p *TextSearchIndex) SearchEach(ctx context.Context, query string, visit func(TextMatch) error) error {
+	return p.searchEach(ctx, foldText(query), visit)
+}
+
+// MemorySize 估算独立搜索快照的总内存占用
+// 返回: int64 估算字节数
+func (p *TextSearchIndex) MemorySize() int64 {
+	return (&PageText{Runs: p.runs}).MemorySize() + p.searchSize()
+}
+
+// MemorySize 估算文字索引占用，包含切片容量和字符串内容
+// 返回: int64 估算字节数，共享字符串按各次引用计费
+func (p *PageText) MemorySize() int64 {
+	size := int64(unsafe.Sizeof(*p)) + int64(cap(p.Runs))*int64(unsafe.Sizeof(TextRun{}))
+	for _, run := range p.Runs {
+		size += int64(len(run.ID)) + int64(len(run.Text))
+		size += int64(cap(run.Boxes))*int64(unsafe.Sizeof(Box{})) + int64(cap(run.Spans))*int64(unsafe.Sizeof(TextSpan{}))
+	}
+	return size
+}
+
+// String 按文本对象顺序合并原文，以换行分隔非空对象
+// 返回: string 页面原文
+func (p *PageText) String() string {
+	var text strings.Builder
+	_, _ = p.WriteTo(&text)
+	return text.String()
+}
+
+// WriteTo 按文本对象顺序输出UTF-8原文，以换行分隔非空对象，不拼接整页字符串
+// 入参: writer 输出流
+// 返回: int64 已写字节数, error 写入错误，出错时可能已有部分输出
+func (p *PageText) WriteTo(writer io.Writer) (int64, error) {
+	return p.writeTo(writer, false)
+}
+
+// Search 按原文进行忽略大小写的字面匹配，拼接同一行紧邻的文本对象，不识别图像
+// 入参: query 搜索文字
+// 返回: []TextMatch 匹配结果及上下文
+func (p *PageText) Search(query string) []TextMatch {
+	var matches []TextMatch
+	_ = p.SearchEach(context.Background(), query, func(match TextMatch) error {
+		matches = append(matches, match)
+		return nil
+	})
+	return matches
+}
+
+// SearchEach 逐项返回忽略大小写的字面匹配，拼接同一行紧邻对象，在索引构建及匹配之间检查取消
+// 入参: ctx 取消上下文, query 搜索文字, visit 匹配访问函数，可返回错误停止
+// 返回: error 取消或访问错误
+func (p *PageText) SearchEach(ctx context.Context, query string, visit func(TextMatch) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return p.searchEach(ctx, foldText(query), visit)
 }
 
 // PageText 提取页面及启用注释的原文，复用当前编译器的字体和几何语义
@@ -278,43 +323,6 @@ func (r *Renderer) PageTextByIndexContext(ctx context.Context, index int) (*Page
 	return r.PageTextContext(ctx, page)
 }
 
-// String 按文本对象顺序合并原文，以换行分隔非空对象
-// 返回: string 页面原文
-func (p *PageText) String() string {
-	var text strings.Builder
-	_, _ = p.WriteTo(&text)
-	return text.String()
-}
-
-// WriteTo 按文本对象顺序输出UTF-8原文，以换行分隔非空对象，不拼接整页字符串
-// 入参: writer 输出流
-// 返回: int64 已写字节数, error 写入错误，出错时可能已有部分输出
-func (p *PageText) WriteTo(writer io.Writer) (int64, error) {
-	return p.writeTo(writer, false)
-}
-
-// Search 按原文进行忽略大小写的字面匹配，拼接同一行紧邻的文本对象，不识别图像
-// 入参: query 搜索文字
-// 返回: []TextMatch 匹配结果及上下文
-func (p *PageText) Search(query string) []TextMatch {
-	var matches []TextMatch
-	_ = p.SearchEach(context.Background(), query, func(match TextMatch) error {
-		matches = append(matches, match)
-		return nil
-	})
-	return matches
-}
-
-// SearchEach 逐项返回忽略大小写的字面匹配，拼接同一行紧邻对象，在索引构建及匹配之间检查取消
-// 入参: ctx 取消上下文, query 搜索文字, visit 匹配访问函数，可返回错误停止
-// 返回: error 取消或访问错误
-func (p *PageText) SearchEach(ctx context.Context, query string, visit func(TextMatch) error) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return p.searchEach(ctx, foldText(query), visit)
-}
-
 // SearchText 逐页搜索原文并立即返回匹配，不保留整本文字或识别图像
 // 入参: ctx 取消上下文，页面读取、文字提取及匹配时检查, query 搜索文字, visit 零基页码和匹配访问函数, indices 页码，省略则全部，按原页序去重
 // 返回: error 页面提取、取消或访问错误
@@ -347,6 +355,54 @@ func (r *Renderer) SearchText(ctx context.Context, query string, visit func(int,
 		}
 	}
 	return ctx.Err()
+}
+
+// pageTextEntry 将页面原文和派生搜索索引放在同一预算与失效范围内
+type pageTextEntry struct {
+	text   *PageText
+	search *TextSearchIndex
+}
+
+// textSearchGroup 保存同行连续文字及Unicode字符映射
+type textSearchGroup struct {
+	first   int
+	last    int
+	offsets []int
+	runes   []rune
+	folded  string
+}
+
+// textPageTokens 保留文字及其复合图元和裁剪，跳过独立路径与图片
+type textPageTokens struct {
+	*xml.Decoder
+	parents []string
+}
+
+// Token 读取文字页面所需的XML节点
+// 返回: xml.Token XML节点, error 错误信息
+func (d *textPageTokens) Token() (xml.Token, error) {
+	for {
+		token, err := d.Decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		switch node := token.(type) {
+		case xml.StartElement:
+			if len(d.parents) > 0 && (node.Name.Local == "PathObject" || node.Name.Local == "ImageObject") {
+				switch d.parents[len(d.parents)-1] {
+				case "Layer", "PageBlock", "CompositeGraphicUnit", "CompositeObject":
+					if err := d.Decoder.Skip(); err != nil {
+						return nil, err
+					}
+					continue
+				}
+			}
+			d.parents = append(d.parents, node.Name.Local)
+		case xml.EndElement:
+			d.parents = d.parents[:len(d.parents)-1]
+		}
+		return token, nil
+	}
 }
 
 // writeTo 输出非空文本对象，可在首个对象前分隔上一页
@@ -395,24 +451,6 @@ func (p *PageText) searchEach(ctx context.Context, query string, visit func(Text
 	return index.searchEach(ctx, query, visit)
 }
 
-// NewTextSearchIndex 创建独立搜索快照，复制字符区域，保留Unicode折叠和跨对象匹配
-// 入参: ctx 取消上下文, text 页面原文
-// 返回: *TextSearchIndex 不可变索引, error 参数或取消错误
-func NewTextSearchIndex(ctx context.Context, text *PageText) (*TextSearchIndex, error) {
-	if text == nil {
-		return nil, fmt.Errorf("missing page text")
-	}
-	copy := PageText{Runs: slices.Clone(text.Runs)}
-	for i := range copy.Runs {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		copy.Runs[i].Boxes = slices.Clone(copy.Runs[i].Boxes)
-		copy.Runs[i].Spans = nil
-	}
-	return copy.searchIndex(ctx)
-}
-
 // searchIndex 为只读文字构建同行分组、字符偏移和大小写折叠
 // 入参: ctx 取消上下文
 // 返回: *TextSearchIndex 搜索索引, error 取消错误
@@ -454,13 +492,6 @@ func (p *PageText) searchIndex(ctx context.Context) (*TextSearchIndex, error) {
 		first = last
 	}
 	return result, ctx.Err()
-}
-
-// SearchEach 在不可变索引中逐项搜索，回调返回错误时立即停止
-// 入参: ctx 取消上下文, query 搜索文字, visit 匹配访问函数
-// 返回: error 取消或访问错误
-func (p *TextSearchIndex) SearchEach(ctx context.Context, query string, visit func(TextMatch) error) error {
-	return p.searchEach(ctx, foldText(query), visit)
 }
 
 // searchEach 使用已折叠查询访问预处理分组
@@ -518,37 +549,6 @@ func (p *TextSearchIndex) searchSize() int64 {
 		size += int64(cap(group.offsets))*int64(unsafe.Sizeof(int(0))) + int64(cap(group.runes))*4 + int64(len(group.folded))
 	}
 	return size
-}
-
-// MemorySize 估算独立搜索快照的总内存占用
-// 返回: int64 估算字节数
-func (p *TextSearchIndex) MemorySize() int64 {
-	return (&PageText{Runs: p.runs}).MemorySize() + p.searchSize()
-}
-
-// SearchEach 在已缓存页面上搜索，派生索引与原文共用预算及失效范围
-// 入参: ctx 取消上下文, index 页面索引, query 搜索文字, visit 匹配访问函数
-// 返回: bool 是否命中页面缓存, error 取消或访问错误
-func (c *PageTextCache) SearchEach(ctx context.Context, index int, query string, visit func(TextMatch) error) (bool, error) {
-	entry, ok := c.cache.get(index)
-	if !ok {
-		return false, ctx.Err()
-	}
-	search := entry.search
-	if search == nil {
-		var err error
-		search, err = entry.text.searchIndex(ctx)
-		if err != nil {
-			return true, err
-		}
-		cost := entry.text.MemorySize() + search.searchSize() + 128
-		c.cache.mu.Lock()
-		if current := c.cache.entries[index]; current != nil && current.Value.(renderCacheEntry[int, *pageTextEntry]).value == entry && cost <= int64(c.cache.limit) {
-			c.cache.putLocked(index, &pageTextEntry{text: entry.text, search: search}, int(cost))
-		}
-		c.cache.mu.Unlock()
-	}
-	return true, search.SearchEach(ctx, query, visit)
 }
 
 // foldText 统一Unicode大小写等价字符，保留字符数量

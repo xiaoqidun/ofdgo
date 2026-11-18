@@ -58,11 +58,150 @@ type u3dLineState struct {
 	pointPredicted []bool
 }
 
+// average 取得指定顶点各属性预测，点集法线使用缓存的球面均值
+// 入参: position 顶点索引
+// 返回: [11][4]float64 法线、漫反射、镜面及八层纹理预测
+func (s *u3dLineState) average(position uint32) (values [11][4]float64) {
+	for slot, offset := range s.offsets {
+		if offset < 0 {
+			continue
+		}
+		base := int(position)*s.stride + offset
+		count := s.stats[base+4]
+		if count != 0 {
+			for i := range values[slot] {
+				values[slot][i] = s.stats[base+i] / count
+			}
+		}
+	}
+	return values
+}
+
+// accumulateCorners 累计点或线端的属性，用于后续位置预测
+// 入参: mesh 属性数组, shadingIndex 着色索引, corners 新增角点
+func (s *u3dLineState) accumulateCorners(mesh *U3DMesh, shadingIndex uint32, corners []U3DCorner) {
+	shading := mesh.Shadings[shadingIndex]
+	for _, corner := range corners {
+		var values [11][4]float32
+		var used [11]bool
+		normal := mesh.Normals[corner.Normal]
+		values[0] = [4]float32{normal[0], normal[1], normal[2], 0}
+		used[0] = true
+		if shading.Attributes&1 != 0 {
+			values[1], used[1] = mesh.Diffuse[corner.Diffuse], true
+		}
+		if shading.Attributes&2 != 0 {
+			values[2], used[2] = mesh.Specular[corner.Specular], true
+		}
+		for layer := range shading.TextureDimensions {
+			values[3+layer], used[3+layer] = mesh.TextureCoordinates[corner.Texture[layer]], true
+		}
+		for slot, present := range used {
+			if !present {
+				continue
+			}
+			base := int(corner.Position)*s.stride + s.offsets[slot]
+			for i, value := range values[slot] {
+				s.stats[base+i] += float64(value)
+			}
+			s.stats[base+4]++
+		}
+	}
+}
+
 // u3dLineReader 保存当前续块的独立压缩上下文
 type u3dLineReader struct {
 	values *u3dValues
 	bits   *u3dBits
 	hist   [u3dLineContextCount]u3dHistogram
+}
+
+// value 按指定上下文和位宽读取点集或线集字段
+// 入参: ctx 压缩上下文, small 是否为8位字段
+// 返回: uint32 字段值
+func (r *u3dLineReader) value(ctx int, small bool) uint32 {
+	if r.bits != nil {
+		return r.bits.dynamicValue(&r.hist[ctx], small)
+	}
+	if small {
+		return uint32(r.values.u8())
+	}
+	return r.values.u32()
+}
+
+// index 读取静态索引并校验声明范围
+// 入参: count 可用索引数量
+// 返回: uint32 索引, error 读取或范围错误
+func (r *u3dLineReader) index(count uint32) (uint32, error) {
+	if count == 0 {
+		return 0, fmt.Errorf("invalid U3D primitive position range")
+	}
+	var value uint32
+	if r.bits != nil {
+		value = r.bits.index(count)
+	} else {
+		value = r.values.u32()
+	}
+	if err := r.err(); err != nil {
+		return 0, err
+	}
+	if value >= count {
+		return 0, fmt.Errorf("invalid U3D primitive position index")
+	}
+	return value, nil
+}
+
+// err 返回当前字段或算术解码错误
+// 返回: error 读取错误
+func (r *u3dLineReader) err() error {
+	if r.bits != nil {
+		return r.bits.err
+	}
+	return r.values.err
+}
+
+// reconstruct 按符号位和独立分量上下文执行逆量化
+// 入参: prediction 预测值, scale 逆量化系数, signContext 符号上下文, componentContext 分量首上下文, dimensions 分量数
+// 返回: [4]float32 重建属性, error 数值或读取错误
+func (r *u3dLineReader) reconstruct(prediction [4]float64, scale float32, signContext, componentContext, dimensions int) (values [4]float32, err error) {
+	signs := r.value(signContext, true)
+	if signs >= 1<<dimensions {
+		return values, fmt.Errorf("invalid U3D primitive difference signs")
+	}
+	for i := range dimensions {
+		difference := float64(r.value(componentContext+i, false)) * float64(scale)
+		if signs&(1<<i) != 0 {
+			difference = -difference
+		}
+		values[i] = float32(prediction[i] + difference)
+		if !finite(float64(values[i])) {
+			return values, fmt.Errorf("invalid U3D reconstructed primitive attribute")
+		}
+	}
+	return values, r.err()
+}
+
+// attribute 读取颜色或纹理属性，重复标记引用所属属性池的末项
+// 入参: pool 属性池, limit 声明总数, prediction 预测值, scale 逆量化系数, duplicate 重复上下文, sign 符号上下文, component 分量首上下文
+// 返回: uint32 属性索引, error 读取或范围错误
+func (r *u3dLineReader) attribute(pool *[][4]float32, limit uint32, prediction [4]float64, scale float32, duplicate, sign, component int) (uint32, error) {
+	flag := r.value(duplicate, true)
+	if err := r.err(); err != nil {
+		return 0, err
+	}
+	if flag == 2 && len(*pool) > 0 {
+		return uint32(len(*pool) - 1), nil
+	}
+	if flag != 0 || uint64(len(*pool)) >= uint64(limit) {
+		return 0, fmt.Errorf("invalid U3D primitive attribute pool")
+	}
+	value, err := r.reconstruct(prediction, scale, sign, component, 4)
+	if err != nil {
+		return 0, err
+	}
+	index := uint32(len(*pool))
+	*pool = append(*pool, value)
+	return index, nil
 }
 
 // primitiveDeclaration 读取ECMA-363第9.6.2和9.6.3节的点集及线集声明
@@ -157,145 +296,6 @@ func (d *u3dDecoder) primitiveDeclaration(r *u3dValues, name string, points bool
 	d.meshes[name] = decl
 	d.meshOrder = append(d.meshOrder, name)
 	return nil
-}
-
-// average 取得指定顶点各属性预测，点集法线使用缓存的球面均值
-// 入参: position 顶点索引
-// 返回: [11][4]float64 法线、漫反射、镜面及八层纹理预测
-func (s *u3dLineState) average(position uint32) (values [11][4]float64) {
-	for slot, offset := range s.offsets {
-		if offset < 0 {
-			continue
-		}
-		base := int(position)*s.stride + offset
-		count := s.stats[base+4]
-		if count != 0 {
-			for i := range values[slot] {
-				values[slot][i] = s.stats[base+i] / count
-			}
-		}
-	}
-	return values
-}
-
-// accumulateCorners 累计点或线端的属性，用于后续位置预测
-// 入参: mesh 属性数组, shadingIndex 着色索引, corners 新增角点
-func (s *u3dLineState) accumulateCorners(mesh *U3DMesh, shadingIndex uint32, corners []U3DCorner) {
-	shading := mesh.Shadings[shadingIndex]
-	for _, corner := range corners {
-		var values [11][4]float32
-		var used [11]bool
-		normal := mesh.Normals[corner.Normal]
-		values[0] = [4]float32{normal[0], normal[1], normal[2], 0}
-		used[0] = true
-		if shading.Attributes&1 != 0 {
-			values[1], used[1] = mesh.Diffuse[corner.Diffuse], true
-		}
-		if shading.Attributes&2 != 0 {
-			values[2], used[2] = mesh.Specular[corner.Specular], true
-		}
-		for layer := range shading.TextureDimensions {
-			values[3+layer], used[3+layer] = mesh.TextureCoordinates[corner.Texture[layer]], true
-		}
-		for slot, present := range used {
-			if !present {
-				continue
-			}
-			base := int(corner.Position)*s.stride + s.offsets[slot]
-			for i, value := range values[slot] {
-				s.stats[base+i] += float64(value)
-			}
-			s.stats[base+4]++
-		}
-	}
-}
-
-// value 按指定上下文和位宽读取点集或线集字段
-// 入参: ctx 压缩上下文, small 是否为8位字段
-// 返回: uint32 字段值
-func (r *u3dLineReader) value(ctx int, small bool) uint32 {
-	if r.bits != nil {
-		return r.bits.dynamicValue(&r.hist[ctx], small)
-	}
-	if small {
-		return uint32(r.values.u8())
-	}
-	return r.values.u32()
-}
-
-// index 读取静态索引并校验声明范围
-// 入参: count 可用索引数量
-// 返回: uint32 索引, error 读取或范围错误
-func (r *u3dLineReader) index(count uint32) (uint32, error) {
-	if count == 0 {
-		return 0, fmt.Errorf("invalid U3D primitive position range")
-	}
-	var value uint32
-	if r.bits != nil {
-		value = r.bits.index(count)
-	} else {
-		value = r.values.u32()
-	}
-	if err := r.err(); err != nil {
-		return 0, err
-	}
-	if value >= count {
-		return 0, fmt.Errorf("invalid U3D primitive position index")
-	}
-	return value, nil
-}
-
-// err 返回当前字段或算术解码错误
-// 返回: error 读取错误
-func (r *u3dLineReader) err() error {
-	if r.bits != nil {
-		return r.bits.err
-	}
-	return r.values.err
-}
-
-// reconstruct 按符号位和独立分量上下文执行逆量化
-// 入参: prediction 预测值, scale 逆量化系数, signContext 符号上下文, componentContext 分量首上下文, dimensions 分量数
-// 返回: [4]float32 重建属性, error 数值或读取错误
-func (r *u3dLineReader) reconstruct(prediction [4]float64, scale float32, signContext, componentContext, dimensions int) (values [4]float32, err error) {
-	signs := r.value(signContext, true)
-	if signs >= 1<<dimensions {
-		return values, fmt.Errorf("invalid U3D primitive difference signs")
-	}
-	for i := range dimensions {
-		difference := float64(r.value(componentContext+i, false)) * float64(scale)
-		if signs&(1<<i) != 0 {
-			difference = -difference
-		}
-		values[i] = float32(prediction[i] + difference)
-		if !finite(float64(values[i])) {
-			return values, fmt.Errorf("invalid U3D reconstructed primitive attribute")
-		}
-	}
-	return values, r.err()
-}
-
-// attribute 读取颜色或纹理属性，重复标记引用所属属性池的末项
-// 入参: pool 属性池, limit 声明总数, prediction 预测值, scale 逆量化系数, duplicate 重复上下文, sign 符号上下文, component 分量首上下文
-// 返回: uint32 属性索引, error 读取或范围错误
-func (r *u3dLineReader) attribute(pool *[][4]float32, limit uint32, prediction [4]float64, scale float32, duplicate, sign, component int) (uint32, error) {
-	flag := r.value(duplicate, true)
-	if err := r.err(); err != nil {
-		return 0, err
-	}
-	if flag == 2 && len(*pool) > 0 {
-		return uint32(len(*pool) - 1), nil
-	}
-	if flag != 0 || uint64(len(*pool)) >= uint64(limit) {
-		return 0, fmt.Errorf("invalid U3D primitive attribute pool")
-	}
-	value, err := r.reconstruct(prediction, scale, sign, component, 4)
-	if err != nil {
-		return 0, err
-	}
-	index := uint32(len(*pool))
-	*pool = append(*pool, value)
-	return index, nil
 }
 
 // primitiveContinuation 按位置分段恢复点集及线集，预测状态跨续块保存

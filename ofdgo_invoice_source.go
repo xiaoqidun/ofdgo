@@ -29,14 +29,6 @@ import (
 	"unicode/utf8"
 )
 
-// InvoiceDigest 计算原始导出数据的SHA256摘要
-// 入参: data 导出数据
-// 返回: string 小写十六进制摘要
-func InvoiceDigest(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
 // ReadInvoice 读取当前文档及版本声明的发票，字段路径相对导出XML，标引按对象引用提取文本
 // 入参: ctx 取消上下文, source 精确来源
 // 返回: InvoiceReport 发票及诊断, error 来源或读取错误
@@ -57,6 +49,84 @@ func (r *Reader) ReadInvoice(ctx context.Context, source InvoiceSource) (Invoice
 		report.Version = r.versionInfo.ID
 	}
 	return report, err
+}
+
+// ExportInvoice 导出当前文档及版本声明的发票，内联内容补齐继承的命名空间
+// 相同选择器对应多个声明时拒绝操作，允许已识别的旧数据带解析诊断
+// 入参: ctx 取消上下文, source 提取结果中的精确来源
+// 返回: []byte 独立XML数据, error 来源或读取错误
+func (r *Reader) ExportInvoice(ctx context.Context, source InvoiceSource) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	report, err := r.InvoicesContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	found := false
+	for _, invoice := range report.Invoices {
+		for _, candidate := range invoice.Sources {
+			found = found || candidate == source
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("invoice source is not declared in current document")
+	}
+	_, data, node, _, err := r.invoiceSourceNode(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	if source.NodePath != "" {
+		return editorXMLStandaloneContext(ctx, data[node.start:node.end], node)
+	}
+	payload, err := r.invoiceData(ctx, source.FileLoc)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.Clone(payload), nil
+}
+
+// ExportInvoice 导出编辑器当前文档及版本声明的发票数据
+// 入参: ctx 取消上下文, source 提取结果中的精确来源
+// 返回: []byte 独立XML数据, error 来源或读取错误
+func (e *Editor) ExportInvoice(ctx context.Context, source InvoiceSource) ([]byte, error) {
+	if e == nil || e.source == nil {
+		return nil, fmt.Errorf("invoice source not found")
+	}
+	if len(e.pages) == 0 {
+		return e.source.reader.ExportInvoice(invoiceWriteContext(ctx), source)
+	}
+	r, err := e.Reader(invoiceWriteContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return r.ExportInvoice(ctx, source)
+}
+
+// ReplaceInvoiceData 仅替换选中声明，独立资源写时复制，旧数据允许诊断而新数据必须无诊断
+// 不删除原签名，修改签名覆盖的内容后需重新验签
+// 入参: ctx 取消上下文, source 精确来源, expectedDigest 必填原数据摘要, data 新发票XML
+// 返回: InvoiceSource 提交后的实际来源, error 校验、冲突或提交错误
+func (e *Editor) ReplaceInvoiceData(ctx context.Context, source InvoiceSource, expectedDigest string, data []byte) (InvoiceSource, error) {
+	return e.changeInvoiceSource(ctx, source, expectedDigest, data, false)
+}
+
+// DeleteInvoiceData 仅删除选中来源声明或内联发票子树，不删除资源及其他别名
+// 不删除原签名，修改签名覆盖的内容后需重新验签
+// 入参: ctx 取消上下文, source 精确来源, expectedDigest 必填原数据摘要
+// 返回: error 校验、冲突或提交错误
+func (e *Editor) DeleteInvoiceData(ctx context.Context, source InvoiceSource, expectedDigest string) error {
+	_, err := e.changeInvoiceSource(ctx, source, expectedDigest, nil, true)
+	return err
+}
+
+// InvoiceDigest 计算原始导出数据的SHA256摘要
+// 入参: data 导出数据
+// 返回: string 小写十六进制摘要
+func InvoiceDigest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // readInvoiceXML 在当前文档作用域解析业务载荷或对象引用标引
@@ -195,76 +265,6 @@ func (r *Reader) readInvoiceXML(ctx context.Context, data []byte, source Invoice
 	invoiceAmountCheck(&inv, &report, source)
 	report.Invoices = append(report.Invoices, inv)
 	return report, ctx.Err()
-}
-
-// ExportInvoice 导出当前文档及版本声明的发票，内联内容补齐继承的命名空间
-// 相同选择器对应多个声明时拒绝操作，允许已识别的旧数据带解析诊断
-// 入参: ctx 取消上下文, source 提取结果中的精确来源
-// 返回: []byte 独立XML数据, error 来源或读取错误
-func (r *Reader) ExportInvoice(ctx context.Context, source InvoiceSource) ([]byte, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	report, err := r.InvoicesContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	found := false
-	for _, invoice := range report.Invoices {
-		for _, candidate := range invoice.Sources {
-			found = found || candidate == source
-		}
-	}
-	if !found {
-		return nil, fmt.Errorf("invoice source is not declared in current document")
-	}
-	_, data, node, _, err := r.invoiceSourceNode(ctx, source)
-	if err != nil {
-		return nil, err
-	}
-	if source.NodePath != "" {
-		return editorXMLStandaloneContext(ctx, data[node.start:node.end], node)
-	}
-	payload, err := r.invoiceData(ctx, source.FileLoc)
-	if err != nil {
-		return nil, err
-	}
-	return bytes.Clone(payload), nil
-}
-
-// ExportInvoice 导出编辑器当前文档及版本声明的发票数据
-// 入参: ctx 取消上下文, source 提取结果中的精确来源
-// 返回: []byte 独立XML数据, error 来源或读取错误
-func (e *Editor) ExportInvoice(ctx context.Context, source InvoiceSource) ([]byte, error) {
-	if e == nil || e.source == nil {
-		return nil, fmt.Errorf("invoice source not found")
-	}
-	if len(e.pages) == 0 {
-		return e.source.reader.ExportInvoice(invoiceWriteContext(ctx), source)
-	}
-	r, err := e.Reader(invoiceWriteContext(ctx))
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-	return r.ExportInvoice(ctx, source)
-}
-
-// ReplaceInvoiceData 仅替换选中声明，独立资源写时复制，旧数据允许诊断而新数据必须无诊断
-// 不删除原签名，修改签名覆盖的内容后需重新验签
-// 入参: ctx 取消上下文, source 精确来源, expectedDigest 必填原数据摘要, data 新发票XML
-// 返回: InvoiceSource 提交后的实际来源, error 校验、冲突或提交错误
-func (e *Editor) ReplaceInvoiceData(ctx context.Context, source InvoiceSource, expectedDigest string, data []byte) (InvoiceSource, error) {
-	return e.changeInvoiceSource(ctx, source, expectedDigest, data, false)
-}
-
-// DeleteInvoiceData 仅删除选中来源声明或内联发票子树，不删除资源及其他别名
-// 不删除原签名，修改签名覆盖的内容后需重新验签
-// 入参: ctx 取消上下文, source 精确来源, expectedDigest 必填原数据摘要
-// 返回: error 校验、冲突或提交错误
-func (e *Editor) DeleteInvoiceData(ctx context.Context, source InvoiceSource, expectedDigest string) error {
-	_, err := e.changeInvoiceSource(ctx, source, expectedDigest, nil, true)
-	return err
 }
 
 // changeInvoiceSource 校验原始摘要并原子修改声明，预检隔离后的来源供绑定重定向

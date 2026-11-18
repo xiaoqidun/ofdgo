@@ -35,6 +35,26 @@ type pdfPointBounds struct {
 	found                  bool
 }
 
+// add 按原顺序累计一个控制点的最小和最大坐标
+// 入参: point 坐标点
+func (b *pdfPointBounds) add(point pdfgo.Point) {
+	if !b.found {
+		b.minX, b.minY, b.maxX, b.maxY = point.X, point.Y, point.X, point.Y
+		b.found = true
+	}
+	b.minX, b.minY = math.Min(b.minX, point.X), math.Min(b.minY, point.Y)
+	b.maxX, b.maxY = math.Max(b.maxX, point.X), math.Max(b.maxY, point.Y)
+}
+
+// box 取得原精度边界，空集合仍返回零值
+// 返回: Box 坐标范围
+func (b *pdfPointBounds) box() Box {
+	if !b.found {
+		return Box{}
+	}
+	return Box{X: b.minX, Y: b.minY, W: math.Max(b.maxX-b.minX, 1e-6), H: math.Max(b.maxY-b.minY, 1e-6)}
+}
+
 // pdfClipPath 保存导入器只读的裁剪几何，不缓存对象位移或文字裁剪
 type pdfClipPath struct {
 	box  Box
@@ -275,26 +295,6 @@ func pdfBounds(points []pdfgo.Point) Box {
 		bounds.add(point)
 	}
 	return bounds.box()
-}
-
-// add 按原顺序累计一个控制点的最小和最大坐标
-// 入参: point 坐标点
-func (b *pdfPointBounds) add(point pdfgo.Point) {
-	if !b.found {
-		b.minX, b.minY, b.maxX, b.maxY = point.X, point.Y, point.X, point.Y
-		b.found = true
-	}
-	b.minX, b.minY = math.Min(b.minX, point.X), math.Min(b.minY, point.Y)
-	b.maxX, b.maxY = math.Max(b.maxX, point.X), math.Max(b.maxY, point.Y)
-}
-
-// box 取得原精度边界，空集合仍返回零值
-// 返回: Box 坐标范围
-func (b *pdfPointBounds) box() Box {
-	if !b.found {
-		return Box{}
-	}
-	return Box{X: b.minX, Y: b.minY, W: math.Max(b.maxX-b.minX, 1e-6), H: math.Max(b.maxY-b.minY, 1e-6)}
 }
 
 // path 保留每次路径绘制操作，重叠描边不合并为单次绘制

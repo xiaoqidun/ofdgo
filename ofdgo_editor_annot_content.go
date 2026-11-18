@@ -47,6 +47,76 @@ func (e *Editor) AddAnnotation(index int, annotation Annotation) (string, error)
 	return id, nil
 }
 
+// Annotation 获取注解的独立内容快照，修改原注解应使用局部编辑方法以保留扩展字段
+// 入参: index 页面索引, id 注解标识
+// 返回: Annotation 注解内容, error 错误信息
+func (e *Editor) Annotation(index int, id string) (Annotation, error) {
+	data, err := e.annotationXML(index, id)
+	var annotation Annotation
+	if err == nil {
+		err = xml.Unmarshal(data, &annotation)
+	}
+	return annotation, err
+}
+
+// AnnotationTexts 按绘制顺序读取注解外观中的文字，展开复合资源并去重，不依赖字体或渲染后端
+// 入参: index 页面索引, id 注解标识
+// 返回: []string 文字列表, error 注解读取或资源引用错误
+func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
+	annotation, err := e.Annotation(index, id)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := e.reader(nil)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	if _, err := reader.PageContentByIndex(index); err != nil {
+		return nil, err
+	}
+	texts := make([]string, 0)
+	seen := make(map[string]bool)
+	visiting := make(map[*CompositeGraphicUnit]bool)
+	collected := make(map[*CompositeGraphicUnit]bool)
+	var collect func(CompositeGraphicUnit) error
+	collect = func(unit CompositeGraphicUnit) error {
+		if unit.ResourceID != "" {
+			ref, _ := resourceValue(reader.compositeGraphicUnitCache, unit.ResourceID)
+			if ref == nil || visiting[ref] {
+				return fmt.Errorf("invalid composite resource %q", unit.ResourceID)
+			}
+			if !collected[ref] {
+				visiting[ref] = true
+				if err := collect(*ref); err != nil {
+					return err
+				}
+				delete(visiting, ref)
+				collected[ref] = true
+			}
+		}
+		for object := range unit.objects() {
+			switch object.Type {
+			case "TextObject":
+				value := object.TextObject.Text()
+				if !seen[value] {
+					seen[value] = true
+					texts = append(texts, value)
+				}
+			case "CompositeObject", "CompositeGraphicUnit":
+				if err := collect(object.CompositeGraphicUnit); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := collect(CompositeGraphicUnit{Objects: annotation.Appearance.Objects}); err != nil {
+		return nil, err
+	}
+	return texts, nil
+}
+
 // prepareAnnotation 校验注解并分配外观标识，提交由调用方事务或独立导入文档负责
 // 入参: index 页面索引, annotation 注解内容
 // 返回: string 注解标识, []byte 标准XML, error 校验错误
@@ -141,76 +211,6 @@ func (e *Editor) prepareAnnotation(index int, annotation Annotation) (string, []
 	content = append(content, bytes.TrimPrefix(appearance, []byte(xml.Header))...)
 	data, err := editorXMLContainer("Annot", attrs, content)
 	return id, data, err
-}
-
-// Annotation 获取注解的独立内容快照，修改原注解应使用局部编辑方法以保留扩展字段
-// 入参: index 页面索引, id 注解标识
-// 返回: Annotation 注解内容, error 错误信息
-func (e *Editor) Annotation(index int, id string) (Annotation, error) {
-	data, err := e.annotationXML(index, id)
-	var annotation Annotation
-	if err == nil {
-		err = xml.Unmarshal(data, &annotation)
-	}
-	return annotation, err
-}
-
-// AnnotationTexts 按绘制顺序读取注解外观中的文字，展开复合资源并去重，不依赖字体或渲染后端
-// 入参: index 页面索引, id 注解标识
-// 返回: []string 文字列表, error 注解读取或资源引用错误
-func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
-	annotation, err := e.Annotation(index, id)
-	if err != nil {
-		return nil, err
-	}
-	reader, err := e.reader(nil)
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
-	if _, err := reader.PageContentByIndex(index); err != nil {
-		return nil, err
-	}
-	texts := make([]string, 0)
-	seen := make(map[string]bool)
-	visiting := make(map[*CompositeGraphicUnit]bool)
-	collected := make(map[*CompositeGraphicUnit]bool)
-	var collect func(CompositeGraphicUnit) error
-	collect = func(unit CompositeGraphicUnit) error {
-		if unit.ResourceID != "" {
-			ref, _ := resourceValue(reader.compositeGraphicUnitCache, unit.ResourceID)
-			if ref == nil || visiting[ref] {
-				return fmt.Errorf("invalid composite resource %q", unit.ResourceID)
-			}
-			if !collected[ref] {
-				visiting[ref] = true
-				if err := collect(*ref); err != nil {
-					return err
-				}
-				delete(visiting, ref)
-				collected[ref] = true
-			}
-		}
-		for object := range unit.objects() {
-			switch object.Type {
-			case "TextObject":
-				value := object.TextObject.Text()
-				if !seen[value] {
-					seen[value] = true
-					texts = append(texts, value)
-				}
-			case "CompositeObject", "CompositeGraphicUnit":
-				if err := collect(object.CompositeGraphicUnit); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
-	if err := collect(CompositeGraphicUnit{Objects: annotation.Appearance.Objects}); err != nil {
-		return nil, err
-	}
-	return texts, nil
 }
 
 // annotationXML 按ST_ID数值读取唯一注解的原文，不以类型、大小或可见性筛选

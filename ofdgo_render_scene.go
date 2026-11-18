@@ -14,54 +14,12 @@
 
 package ofdgo
 
-// 场景遍历的绘制、分组及跳过指令
-const (
-	sceneObject sceneCommandKind = iota
-	sceneStamp
-	sceneBeginObject
-	sceneBeginAnnotation
-	sceneEnd
-	sceneSkip
-)
-
 // PageScene 保存后端无关的页面语义与绘制顺序，不提前展开文字或重新编码图片
 // 场景借用源页面及资源的只读引用，编辑文档后应重新构建
 type PageScene struct {
 	Source   *PageContent
 	Box      Box
 	commands []sceneCommand
-}
-
-// sceneCommand 保存叶子对象、签章或嵌套分组事件
-type sceneCommand struct {
-	kind       sceneCommandKind
-	object     *GraphicObject
-	state      RenderState
-	stamp      Stamp
-	annotation string
-	count      int
-}
-
-// sceneCommandKind 区分场景中的绘制和分组事件
-type sceneCommandKind uint8
-
-// sceneRecorder 收集公共遍历事件，不解释绘制外观
-type sceneRecorder PageScene
-
-// CompileScene 展开页面结构，保留原文、字形索引、动作和对象标识
-// 不提前绘制文字或图片，裁剪轮廓按几何后端需求解析
-// 入参: page 源页面
-// 返回: *PageScene 只读语义场景, error 遍历或几何错误
-func (r *Renderer) CompileScene(page *PageContent) (*PageScene, error) {
-	box, err := r.GetPageBox(page)
-	if err != nil {
-		return nil, err
-	}
-	scene := &PageScene{Source: page, Box: box}
-	if err := r.WalkPage(page, (*sceneRecorder)(scene)); err != nil {
-		return nil, err
-	}
-	return scene, nil
 }
 
 // Walk 重放语义场景，访问器仍可自行处理文字和原始图片
@@ -105,6 +63,48 @@ func (s *PageScene) Walk(visitor PageVisitor) error {
 	}
 	return nil
 }
+
+// CompileScene 展开页面结构，保留原文、字形索引、动作和对象标识
+// 不提前绘制文字或图片，裁剪轮廓按几何后端需求解析
+// 入参: page 源页面
+// 返回: *PageScene 只读语义场景, error 遍历或几何错误
+func (r *Renderer) CompileScene(page *PageContent) (*PageScene, error) {
+	box, err := r.GetPageBox(page)
+	if err != nil {
+		return nil, err
+	}
+	scene := &PageScene{Source: page, Box: box}
+	if err := r.WalkPage(page, (*sceneRecorder)(scene)); err != nil {
+		return nil, err
+	}
+	return scene, nil
+}
+
+// sceneCommand 保存叶子对象、签章或嵌套分组事件
+type sceneCommand struct {
+	kind       sceneCommandKind
+	object     *GraphicObject
+	state      RenderState
+	stamp      Stamp
+	annotation string
+	count      int
+}
+
+// sceneCommandKind 区分场景中的绘制和分组事件
+type sceneCommandKind uint8
+
+// 场景遍历的绘制、分组及跳过指令
+const (
+	sceneObject sceneCommandKind = iota
+	sceneStamp
+	sceneBeginObject
+	sceneBeginAnnotation
+	sceneEnd
+	sceneSkip
+)
+
+// sceneRecorder 收集公共遍历事件，不解释绘制外观
+type sceneRecorder PageScene
 
 // DrawObject 保留源对象及继承状态
 // 入参: object 源对象, state 继承状态

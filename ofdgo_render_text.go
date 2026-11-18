@@ -16,10 +16,11 @@ package ofdgo
 
 import (
 	"fmt"
-	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"math"
 	"strings"
+
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
 // PositionedGlyph 保存页面坐标字形与对应原文区间
@@ -38,19 +39,19 @@ type PositionedText struct {
 	Matrix Matrix
 }
 
+// PositionText 定位文字、字形与搜索范围，不依赖页面输出后端
+// 入参: object 文字对象, state 继承状态
+// 返回: *PositionedText 定位结果, error 字体或几何错误
+func (r *Renderer) PositionText(object TextObject, state RenderState) (*PositionedText, error) {
+	return r.positionText(object, state, false)
+}
+
 // glyphOutlineKey 区分字体、字形与毫米字号
 type glyphOutlineKey struct {
 	digest [32]byte
 	font   *PreparedFont
 	glyph  uint16
 	size   float64
-}
-
-// PositionText 定位文字、字形与搜索范围，不依赖页面输出后端
-// 入参: object 文字对象, state 继承状态
-// 返回: *PositionedText 定位结果, error 字体或几何错误
-func (r *Renderer) PositionText(object TextObject, state RenderState) (*PositionedText, error) {
-	return r.positionText(object, state, false)
 }
 
 // positionText 提取原文，按需计算字形与搜索范围

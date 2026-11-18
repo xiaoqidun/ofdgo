@@ -25,6 +25,149 @@ import (
 	"unicode/utf8"
 )
 
+// maxIndexRunes 限制单段索引字形展开后的最大字形数量
+const maxIndexRunes = 1 << 20
+
+// Text 获取定位后的文字，横向换行以换行符分隔，字形索引以占位字符表示
+// 返回: string 原文
+func (obj TextObject) Text() string {
+	lines := newTextLineScanner(obj)
+	var text strings.Builder
+	for _, code := range obj.TextCode {
+		if lines.next(code) {
+			text.WriteByte('\n')
+		}
+		if code.Index == "" {
+			text.WriteString(string(textCodeRunes(code.Value)))
+		} else {
+			text.WriteRune('\uFFFC')
+		}
+	}
+	return text.String()
+}
+
+// UnmarshalXML 解析标准文字节点，将各TextCode前的局部字形位置统一为对象内索引
+// 入参: decoder XML解码器, start 对象起始节点
+// 返回: error 解码错误
+func (obj *TextObject) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
+	type plain TextObject
+	var value plain
+	if err := decodeGraphicAttributes(start, &value); err != nil {
+		return err
+	}
+	offset, pending := 0, 0
+	if err := decodeOFDChildren(decoder, start, func(d *xml.Decoder, node xml.StartElement) error {
+		switch node.Name.Local {
+		case "FillColor":
+			return d.DecodeElement(&value.FillColor, &node)
+		case "StrokeColor":
+			return d.DecodeElement(&value.StrokeColor, &node)
+		case "Clips":
+			return d.DecodeElement(&value.Clips, &node)
+		case "Actions":
+			return decodeOFDActions(d, node, &value.Actions)
+		case "CGTransform":
+			return d.DecodeElement(&value.CGTransform, &node)
+		case "TextCode":
+			var code TextCode
+			if err := d.DecodeElement(&code, &node); err != nil {
+				return err
+			}
+			for i := pending; i < len(value.CGTransform); i++ {
+				value.CGTransform[i].CodePosition += offset
+			}
+			pending = len(value.CGTransform)
+			offset += len(textCodeRunes(code.Value))
+			value.TextCode = append(value.TextCode, code)
+			return nil
+		}
+		return d.Skip()
+	}); err != nil {
+		return err
+	}
+	*obj = TextObject(value)
+	for _, attr := range start.Attr {
+		if attr.Name.Space == textNamespace && attr.Name.Local == "Text" {
+			var meta textMetadata
+			if json.Unmarshal([]byte(attr.Value), &meta) == nil && validateRichLayout(meta.Layout) == nil && structureXMLText(meta.Text) && meta.Digest == obj.textDigest() {
+				obj.layout = &textLayout{value: meta.Text, options: meta.Layout, autoWidth: meta.AutoWidth}
+			}
+		}
+	}
+	for _, attr := range ofdXMLStart(start).Attr {
+		if attr.Name.Local == "LineWidth" {
+			obj.LineWidthSet = obj.LineWidth == 0
+		}
+		if attr.Name.Local == "MiterLimit" {
+			obj.MiterLimitSet = obj.MiterLimit == 0
+		}
+		if attr.Name.Local == "DashPattern" {
+			obj.dashPatternSet = obj.DashPattern == ""
+		}
+	}
+	return nil
+}
+
+// GetDeltaX 获取X轴偏移量数组
+// 返回: []float64 偏移量数组
+func (tc *TextCode) GetDeltaX() []float64 {
+	return parseFloats(tc.DeltaX)
+}
+
+// GetDeltaY 获取Y轴偏移量数组
+// 返回: []float64 偏移量数组
+func (tc *TextCode) GetDeltaY() []float64 {
+	return parseFloats(tc.DeltaY)
+}
+
+// UnmarshalXML 解析文字定位及原文，不使用带外部命名空间的定位属性
+// 入参: decoder XML解码器, start 文字节点
+// 返回: error 解码错误
+func (code *TextCode) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
+	type plain TextCode
+	var value plain
+	start = ofdXMLStart(start)
+	if err := decoder.DecodeElement(&value, &start); err != nil {
+		return err
+	}
+	*code = TextCode(value)
+	return nil
+}
+
+// UnmarshalXML 解析字形变换，省略的字符数和字形数均取1
+// 入参: decoder XML解码器, start 变换起始节点
+// 返回: error 解码错误
+func (transform *CGTransform) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
+	*transform = CGTransform{CodeCount: 1, GlyphCount: 1}
+	for _, attr := range start.Attr {
+		if attr.Name.Space != "" {
+			continue
+		}
+		var target *int
+		switch attr.Name.Local {
+		case "CodePosition":
+			target = &transform.CodePosition
+		case "CodeCount":
+			target = &transform.CodeCount
+		case "GlyphCount":
+			target = &transform.GlyphCount
+		}
+		if target != nil {
+			value, err := strconv.Atoi(strings.TrimSpace(attr.Value))
+			if err != nil {
+				return err
+			}
+			*target = value
+		}
+	}
+	return decodeOFDChildren(decoder, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local == "Glyphs" {
+			return d.DecodeElement(&transform.Glyphs, &node)
+		}
+		return d.Skip()
+	})
+}
+
 // textGlyph 绘制字形
 type textGlyph struct {
 	Text    string
@@ -57,36 +200,6 @@ func (obj TextObject) withPathStyle(style PathObject) TextObject {
 	obj.MiterLimitSet = style.MiterLimitSet
 	obj.DashPattern, obj.dashPatternSet, obj.DashOffset = style.DashPattern, style.dashPatternSet, style.DashOffset
 	return obj
-}
-
-// Text 获取定位后的文字，横向换行以换行符分隔，字形索引以占位字符表示
-// 返回: string 原文
-func (obj TextObject) Text() string {
-	lines := newTextLineScanner(obj)
-	var text strings.Builder
-	for _, code := range obj.TextCode {
-		if lines.next(code) {
-			text.WriteByte('\n')
-		}
-		if code.Index == "" {
-			text.WriteString(string(textCodeRunes(code.Value)))
-		} else {
-			text.WriteRune('\uFFFC')
-		}
-	}
-	return text.String()
-}
-
-// GetDeltaX 获取X轴偏移量数组
-// 返回: []float64 偏移量数组
-func (tc *TextCode) GetDeltaX() []float64 {
-	return parseFloats(tc.DeltaX)
-}
-
-// GetDeltaY 获取Y轴偏移量数组
-// 返回: []float64 偏移量数组
-func (tc *TextCode) GetDeltaY() []float64 {
-	return parseFloats(tc.DeltaY)
 }
 
 // textCodeRuneCount 统计文本编码中的字符数，识别转义及XML排版空白
@@ -221,9 +334,6 @@ func (r *Renderer) fontGlyphRune(fontID string, glyphID int) (rune, bool) {
 	return 0, false
 }
 
-// maxIndexRunes 限制单段索引字形展开后的最大字形数量
-const maxIndexRunes = 1 << 20
-
 // parseIndexRunes 解析索引字形
 // 入参: indexStr 索引字符串, fontID 字体ID
 // 返回: []rune 字形列表
@@ -353,114 +463,4 @@ func textCodeRunesContext(ctx context.Context, value string) ([]rune, error) {
 		}
 	}
 	return runes[:written], nil
-}
-
-// UnmarshalXML 解析字形变换，省略的字符数和字形数均取1
-// 入参: decoder XML解码器, start 变换起始节点
-// 返回: error 解码错误
-func (transform *CGTransform) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
-	*transform = CGTransform{CodeCount: 1, GlyphCount: 1}
-	for _, attr := range start.Attr {
-		if attr.Name.Space != "" {
-			continue
-		}
-		var target *int
-		switch attr.Name.Local {
-		case "CodePosition":
-			target = &transform.CodePosition
-		case "CodeCount":
-			target = &transform.CodeCount
-		case "GlyphCount":
-			target = &transform.GlyphCount
-		}
-		if target != nil {
-			value, err := strconv.Atoi(strings.TrimSpace(attr.Value))
-			if err != nil {
-				return err
-			}
-			*target = value
-		}
-	}
-	return decodeOFDChildren(decoder, start, func(d *xml.Decoder, node xml.StartElement) error {
-		if node.Name.Local == "Glyphs" {
-			return d.DecodeElement(&transform.Glyphs, &node)
-		}
-		return d.Skip()
-	})
-}
-
-// UnmarshalXML 解析文字定位及原文，不使用带外部命名空间的定位属性
-// 入参: decoder XML解码器, start 文字节点
-// 返回: error 解码错误
-func (code *TextCode) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
-	type plain TextCode
-	var value plain
-	start = ofdXMLStart(start)
-	if err := decoder.DecodeElement(&value, &start); err != nil {
-		return err
-	}
-	*code = TextCode(value)
-	return nil
-}
-
-// UnmarshalXML 解析标准文字节点，将各TextCode前的局部字形位置统一为对象内索引
-// 入参: decoder XML解码器, start 对象起始节点
-// 返回: error 解码错误
-func (obj *TextObject) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
-	type plain TextObject
-	var value plain
-	if err := decodeGraphicAttributes(start, &value); err != nil {
-		return err
-	}
-	offset, pending := 0, 0
-	if err := decodeOFDChildren(decoder, start, func(d *xml.Decoder, node xml.StartElement) error {
-		switch node.Name.Local {
-		case "FillColor":
-			return d.DecodeElement(&value.FillColor, &node)
-		case "StrokeColor":
-			return d.DecodeElement(&value.StrokeColor, &node)
-		case "Clips":
-			return d.DecodeElement(&value.Clips, &node)
-		case "Actions":
-			return decodeOFDActions(d, node, &value.Actions)
-		case "CGTransform":
-			return d.DecodeElement(&value.CGTransform, &node)
-		case "TextCode":
-			var code TextCode
-			if err := d.DecodeElement(&code, &node); err != nil {
-				return err
-			}
-			for i := pending; i < len(value.CGTransform); i++ {
-				value.CGTransform[i].CodePosition += offset
-			}
-			pending = len(value.CGTransform)
-			offset += len(textCodeRunes(code.Value))
-			value.TextCode = append(value.TextCode, code)
-			return nil
-		}
-		return d.Skip()
-	}); err != nil {
-		return err
-	}
-	*obj = TextObject(value)
-	for _, attr := range start.Attr {
-		if attr.Name.Space == textNamespace && attr.Name.Local == "Text" {
-			var meta textMetadata
-			if json.Unmarshal([]byte(attr.Value), &meta) == nil && validateRichLayout(meta.Layout) == nil && structureXMLText(meta.Text) && meta.Digest == obj.textDigest() {
-				obj.layout = &textLayout{value: meta.Text, options: meta.Layout, autoWidth: meta.AutoWidth}
-			}
-		}
-	}
-	for _, attr := range ofdXMLStart(start).Attr {
-		if attr.Name.Local == "LineWidth" {
-			obj.LineWidthSet = obj.LineWidth == 0
-		}
-		if attr.Name.Local == "MiterLimit" {
-			obj.MiterLimitSet = obj.MiterLimit == 0
-		}
-		if attr.Name.Local == "DashPattern" {
-			obj.dashPatternSet = obj.DashPattern == ""
-		}
-	}
-	return nil
 }

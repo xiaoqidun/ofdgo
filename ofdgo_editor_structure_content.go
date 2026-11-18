@@ -66,81 +66,6 @@ func (e *Editor) AddStructureXMLContext(ctx context.Context, tag CustomTag, data
 	return e.addStructureXML(ctx, tag, bytes.Clone(data))
 }
 
-// addStructureXML 接管独立XML数据并提交标引，复用编码或解码结果而不再次复制
-// 入参: ctx 取消上下文, tag 标引入口, data 独立XML数据，提交后不再修改
-// 返回: int 标引索引, error 校验、提交或取消错误
-func (e *Editor) addStructureXML(ctx context.Context, tag CustomTag, data []byte) (int, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if strings.TrimSpace(tag.TypeID) == "" || tag.FileLoc != "" {
-		return 0, fmt.Errorf("custom tag requires TypeID and an automatically assigned FileLoc")
-	}
-	if !structureXMLText(tag.TypeID) || !structureXMLText(tag.NameSpace) || !structureXMLText(tag.SchemaLoc) {
-		return 0, fmt.Errorf("invalid custom tag metadata")
-	}
-	tree, err := parseStructure(ctx, data, tag)
-	if err != nil {
-		return 0, err
-	}
-	objects, err := e.validateStructureReferencesContext(ctx, tree, tag, nil)
-	if err != nil {
-		return 0, err
-	}
-	base := e.source
-	if base == nil {
-		base, err = e.importBaseContext(ctx)
-		if err != nil {
-			return 0, err
-		}
-	}
-	if tag.SchemaLoc != "" {
-		name := base.reader.ResPath(tag.SchemaLoc)
-		if _, err := base.reader.readFileViewContext(ctx, name); err != nil {
-			return 0, err
-		}
-		tag.SchemaLoc = "/" + name
-	}
-	name, index, container, entries, err := editorStructureIndexContext(ctx, base, nil)
-	if err != nil {
-		return 0, err
-	}
-	tag.FileLoc = "/" + e.packageName("Tags/Tag.xml")
-	var attrs ofdAttrs
-	attrs.add("TypeID", tag.TypeID)
-	attrs.add("NameSpace", tag.NameSpace)
-	var content []byte
-	if tag.SchemaLoc != "" {
-		content = append(content, container.textXML("SchemaLoc", tag.SchemaLoc)...)
-	}
-	content = append(content, container.textXML("FileLoc", tag.FileLoc)...)
-	entry, err := container.containerXML("CustomTag", attrs, content)
-	if err != nil {
-		return 0, err
-	}
-	parts := map[string][]byte{strings.TrimPrefix(tag.FileLoc, "/"): data}
-	if container.open != container.end {
-		entry = append(bytes.Clone(index[container.open:container.close]), entry...)
-	}
-	parts[name] = editorPatchXML(index, []editorXMLPatch{editorXMLContent(index, container, entry)})
-	if base.document.CustomTags.Path == "" && name != base.reader.documentRoot {
-		docName := base.reader.documentRoot
-		docData, err := base.reader.readFileViewContext(ctx, docName)
-		if err != nil {
-			return 0, err
-		}
-		doc, err := parseEditorXMLContext(ctx, docData)
-		if err != nil {
-			return 0, err
-		}
-		parts[docName], err = editorXMLSetText(docData, doc, [][2]string{{"CustomTags", "/" + name}})
-		if err != nil {
-			return 0, err
-		}
-	}
-	return len(entries), e.commitStructurePartsContext(ctx, base, parts, objects, len(entries))
-}
-
 // UpdateStructureXML 替换标引XML原文，保留入口属性并隔离共享内容文件
 // 入参: index 标引索引, data 完整XML，返回后不再引用输入数据
 // 返回: error 索引、解析、引用或提交错误
@@ -303,6 +228,81 @@ func (e *Editor) SetStructureReferences(index int, path []int, references []Stru
 		content = append(content, added...)
 		return editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, content)}), nil
 	})
+}
+
+// addStructureXML 接管独立XML数据并提交标引，复用编码或解码结果而不再次复制
+// 入参: ctx 取消上下文, tag 标引入口, data 独立XML数据，提交后不再修改
+// 返回: int 标引索引, error 校验、提交或取消错误
+func (e *Editor) addStructureXML(ctx context.Context, tag CustomTag, data []byte) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if strings.TrimSpace(tag.TypeID) == "" || tag.FileLoc != "" {
+		return 0, fmt.Errorf("custom tag requires TypeID and an automatically assigned FileLoc")
+	}
+	if !structureXMLText(tag.TypeID) || !structureXMLText(tag.NameSpace) || !structureXMLText(tag.SchemaLoc) {
+		return 0, fmt.Errorf("invalid custom tag metadata")
+	}
+	tree, err := parseStructure(ctx, data, tag)
+	if err != nil {
+		return 0, err
+	}
+	objects, err := e.validateStructureReferencesContext(ctx, tree, tag, nil)
+	if err != nil {
+		return 0, err
+	}
+	base := e.source
+	if base == nil {
+		base, err = e.importBaseContext(ctx)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if tag.SchemaLoc != "" {
+		name := base.reader.ResPath(tag.SchemaLoc)
+		if _, err := base.reader.readFileViewContext(ctx, name); err != nil {
+			return 0, err
+		}
+		tag.SchemaLoc = "/" + name
+	}
+	name, index, container, entries, err := editorStructureIndexContext(ctx, base, nil)
+	if err != nil {
+		return 0, err
+	}
+	tag.FileLoc = "/" + e.packageName("Tags/Tag.xml")
+	var attrs ofdAttrs
+	attrs.add("TypeID", tag.TypeID)
+	attrs.add("NameSpace", tag.NameSpace)
+	var content []byte
+	if tag.SchemaLoc != "" {
+		content = append(content, container.textXML("SchemaLoc", tag.SchemaLoc)...)
+	}
+	content = append(content, container.textXML("FileLoc", tag.FileLoc)...)
+	entry, err := container.containerXML("CustomTag", attrs, content)
+	if err != nil {
+		return 0, err
+	}
+	parts := map[string][]byte{strings.TrimPrefix(tag.FileLoc, "/"): data}
+	if container.open != container.end {
+		entry = append(bytes.Clone(index[container.open:container.close]), entry...)
+	}
+	parts[name] = editorPatchXML(index, []editorXMLPatch{editorXMLContent(index, container, entry)})
+	if base.document.CustomTags.Path == "" && name != base.reader.documentRoot {
+		docName := base.reader.documentRoot
+		docData, err := base.reader.readFileViewContext(ctx, docName)
+		if err != nil {
+			return 0, err
+		}
+		doc, err := parseEditorXMLContext(ctx, docData)
+		if err != nil {
+			return 0, err
+		}
+		parts[docName], err = editorXMLSetText(docData, doc, [][2]string{{"CustomTags", "/" + name}})
+		if err != nil {
+			return 0, err
+		}
+	}
+	return len(entries), e.commitStructurePartsContext(ctx, base, parts, objects, len(entries))
 }
 
 // editorStructureIndex 读取或准备当前文档的标引索引，保留内联入口和未知扩展

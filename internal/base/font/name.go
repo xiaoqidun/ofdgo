@@ -23,16 +23,6 @@ import (
 	"golang.org/x/text/encoding/charmap"
 )
 
-// fontNameRecord 字体名称表记录
-type fontNameRecord struct {
-	Platform uint16
-	Encoding uint16
-	Language uint16
-	Name     uint16
-	Length   uint16
-	Offset   uint16
-}
-
 // FileNames 按字体索引读取字体或集合中各项的名称
 // 入参: file 字体数据
 // 返回: [][]string 各字体名称及带样式的字体族名称
@@ -57,6 +47,24 @@ func FileNames(file io.ReaderAt) [][]string {
 		faces = append(faces, fontFaceNames(file, int64(binary.BigEndian.Uint32(entry[:]))))
 	}
 	return faces
+}
+
+// NamesFromTable 解析字体名称表
+// 入参: data 名称表数据
+// 返回: []string 字体名称列表
+func NamesFromTable(data []byte) []string {
+	records, values := fontNameValues(data)
+	return fontNamesFromValues(records, values)
+}
+
+// fontNameRecord 字体名称表记录
+type fontNameRecord struct {
+	Platform uint16
+	Encoding uint16
+	Language uint16
+	Name     uint16
+	Length   uint16
+	Offset   uint16
 }
 
 // fontFaceNames 读取指定字体表目录中的名称
@@ -89,14 +97,6 @@ func fontFaceNames(file io.ReaderAt, offset int64) []string {
 		return NamesFromTable(data)
 	}
 	return nil
-}
-
-// NamesFromTable 解析字体名称表
-// 入参: data 名称表数据
-// 返回: []string 字体名称列表
-func NamesFromTable(data []byte) []string {
-	records, values := fontNameValues(data)
-	return fontNamesFromValues(records, values)
 }
 
 // fontNamesFromValues 从已解码记录生成去重名称，保留原有顺序及样式匹配

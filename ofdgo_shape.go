@@ -16,11 +16,15 @@ package ofdgo
 
 import (
 	"fmt"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	"math"
 	"strconv"
 	"strings"
+
+	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
+
+// ShapeKind 基本图形类型
+type ShapeKind string
 
 // 基本图形标识，用于创建直线、箭头、矩形和椭圆
 const (
@@ -31,74 +35,11 @@ const (
 	ShapeEllipse     ShapeKind = "ellipse"
 )
 
-// ShapeKind 基本图形类型
-type ShapeKind string
-
 // Outline 使用默认几何后端获取SVG轮廓，自定义后端使用Renderer.PathOutline
 // 返回: string SVG路径数据, error 错误信息
 func (p PathObject) Outline() (string, error) {
 	r := &Renderer{backends: defaultRenderBackends()}
 	return r.PathOutline(p)
-}
-
-// NewShape 创建使用标准紧缩路径的图形，默认黑色描边、不填充
-// 可调整返回对象的颜色、线宽等属性后通过Editor.AddObject写入
-// 水平、垂直直线使用正尺寸边界，路径端点不变
-// 入参: kind 图形类型, box 图形范围；直线从(X,Y)到(X+W,Y+H)，W、H可为负或零
-// 返回: PathObject 路径对象, error 错误信息
-func NewShape(kind ShapeKind, box Box) (PathObject, error) {
-	if !finite(box.X) || !finite(box.Y) || !finite(box.W) || !finite(box.H) || !finite(box.X+box.W) || !finite(box.Y+box.H) {
-		return PathObject{}, fmt.Errorf("shape coordinates must be finite")
-	}
-	object := PathObject{LineWidth: defaultPathLineWidth}
-	switch kind {
-	case ShapeLine, ShapeArrow, ShapeDoubleArrow:
-		if box.W == 0 && box.H == 0 {
-			return PathObject{}, fmt.Errorf("line endpoints must differ")
-		}
-		points := []Point{{}, {X: box.W, Y: box.H}}
-		if kind != ShapeLine {
-			length := math.Hypot(box.W, box.H)
-			head := math.Min(4, length/3)
-			x, y := box.W/length*head, box.H/length*head
-			points = append(points, Point{X: box.W - x - y*0.45, Y: box.H - y + x*0.45}, Point{X: box.W, Y: box.H}, Point{X: box.W - x + y*0.45, Y: box.H - y - x*0.45})
-			if kind == ShapeDoubleArrow {
-				points = append(points, Point{X: x - y*0.45, Y: y + x*0.45}, Point{}, Point{X: x + y*0.45, Y: y - x*0.45})
-			}
-		}
-		left, top, right, bottom := 0.0, 0.0, 0.0, 0.0
-		for _, point := range points {
-			left, top, right, bottom = math.Min(left, point.X), math.Min(top, point.Y), math.Max(right, point.X), math.Max(bottom, point.Y)
-		}
-		left, top, right, bottom = left-defaultPathLineWidth/2, top-defaultPathLineWidth/2, right+defaultPathLineWidth/2, bottom+defaultPathLineWidth/2
-		var data strings.Builder
-		for i, point := range points {
-			command := "L"
-			if i == 0 || i == 2 || i == 5 {
-				command = "M"
-			}
-			if i > 0 {
-				data.WriteByte(' ')
-			}
-			fmt.Fprintf(&data, "%s %g %g", command, point.X-left, point.Y-top)
-		}
-		object.AbbreviatedData = data.String()
-		box = Box{X: box.X + left, Y: box.Y + top, W: right - left, H: bottom - top}
-	case ShapeRectangle, ShapeEllipse:
-		if box.W <= 0 || box.H <= 0 {
-			return PathObject{}, fmt.Errorf("shape dimensions must be positive")
-		}
-		if kind == ShapeRectangle {
-			object.AbbreviatedData = fmt.Sprintf("M 0 0 L %g 0 L %g %g L 0 %g C", box.W, box.W, box.H, box.H)
-		} else {
-			rx, ry := box.W/2, box.H/2
-			object.AbbreviatedData = fmt.Sprintf("M 0 %g A %g %g 0 0 1 %g %g A %g %g 0 0 1 0 %g C", ry, rx, ry, box.W, ry, rx, ry, ry)
-		}
-	default:
-		return PathObject{}, fmt.Errorf("unsupported shape %q", kind)
-	}
-	object.Boundary = fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H)
-	return object, nil
 }
 
 // Shape 识别NewShape生成的基本路径，直线支持可逆仿射变换，矩形和椭圆要求轴对齐
@@ -242,6 +183,66 @@ func (p PathObject) ReshapeLine(kind ShapeKind, box Box) (PathObject, error) {
 		return PathObject{}, fmt.Errorf("path is not a supported line")
 	}
 	return p.reshape(kind, box)
+}
+
+// NewShape 创建使用标准紧缩路径的图形，默认黑色描边、不填充
+// 可调整返回对象的颜色、线宽等属性后通过Editor.AddObject写入
+// 水平、垂直直线使用正尺寸边界，路径端点不变
+// 入参: kind 图形类型, box 图形范围；直线从(X,Y)到(X+W,Y+H)，W、H可为负或零
+// 返回: PathObject 路径对象, error 错误信息
+func NewShape(kind ShapeKind, box Box) (PathObject, error) {
+	if !finite(box.X) || !finite(box.Y) || !finite(box.W) || !finite(box.H) || !finite(box.X+box.W) || !finite(box.Y+box.H) {
+		return PathObject{}, fmt.Errorf("shape coordinates must be finite")
+	}
+	object := PathObject{LineWidth: defaultPathLineWidth}
+	switch kind {
+	case ShapeLine, ShapeArrow, ShapeDoubleArrow:
+		if box.W == 0 && box.H == 0 {
+			return PathObject{}, fmt.Errorf("line endpoints must differ")
+		}
+		points := []Point{{}, {X: box.W, Y: box.H}}
+		if kind != ShapeLine {
+			length := math.Hypot(box.W, box.H)
+			head := math.Min(4, length/3)
+			x, y := box.W/length*head, box.H/length*head
+			points = append(points, Point{X: box.W - x - y*0.45, Y: box.H - y + x*0.45}, Point{X: box.W, Y: box.H}, Point{X: box.W - x + y*0.45, Y: box.H - y - x*0.45})
+			if kind == ShapeDoubleArrow {
+				points = append(points, Point{X: x - y*0.45, Y: y + x*0.45}, Point{}, Point{X: x + y*0.45, Y: y - x*0.45})
+			}
+		}
+		left, top, right, bottom := 0.0, 0.0, 0.0, 0.0
+		for _, point := range points {
+			left, top, right, bottom = math.Min(left, point.X), math.Min(top, point.Y), math.Max(right, point.X), math.Max(bottom, point.Y)
+		}
+		left, top, right, bottom = left-defaultPathLineWidth/2, top-defaultPathLineWidth/2, right+defaultPathLineWidth/2, bottom+defaultPathLineWidth/2
+		var data strings.Builder
+		for i, point := range points {
+			command := "L"
+			if i == 0 || i == 2 || i == 5 {
+				command = "M"
+			}
+			if i > 0 {
+				data.WriteByte(' ')
+			}
+			fmt.Fprintf(&data, "%s %g %g", command, point.X-left, point.Y-top)
+		}
+		object.AbbreviatedData = data.String()
+		box = Box{X: box.X + left, Y: box.Y + top, W: right - left, H: bottom - top}
+	case ShapeRectangle, ShapeEllipse:
+		if box.W <= 0 || box.H <= 0 {
+			return PathObject{}, fmt.Errorf("shape dimensions must be positive")
+		}
+		if kind == ShapeRectangle {
+			object.AbbreviatedData = fmt.Sprintf("M 0 0 L %g 0 L %g %g L 0 %g C", box.W, box.W, box.H, box.H)
+		} else {
+			rx, ry := box.W/2, box.H/2
+			object.AbbreviatedData = fmt.Sprintf("M 0 %g A %g %g 0 0 1 %g %g A %g %g 0 0 1 0 %g C", ry, rx, ry, box.W, ry, rx, ry, ry)
+		}
+	default:
+		return PathObject{}, fmt.Errorf("unsupported shape %q", kind)
+	}
+	object.Boundary = fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H)
+	return object, nil
 }
 
 // sameShapePath 比较基本路径的命令与数值，忽略数值格式差异

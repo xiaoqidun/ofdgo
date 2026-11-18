@@ -34,6 +34,47 @@ type editorXML struct {
 	parent                  *editorXML
 }
 
+// child 查找OFD直接子节点
+// 入参: name 节点名称
+// 返回: *editorXML 节点，不存在时为nil
+func (n *editorXML) child(name string) *editorXML {
+	return n.childAt(name, 0)
+}
+
+// childAt 查找指定序号的OFD直接子节点
+// 入参: name 节点名称, index 从0开始的节点序号
+// 返回: *editorXML 节点，不存在时为nil
+func (n *editorXML) childAt(name string, index int) *editorXML {
+	for _, child := range n.children {
+		if child.matchesOFD(name) {
+			if index == 0 {
+				return child
+			}
+			index--
+		}
+	}
+	return nil
+}
+
+// attr 获取无命名空间的属性值
+// 入参: name 属性名称
+// 返回: string 属性值
+func (n *editorXML) attr(name string) string {
+	for _, attr := range n.attrs {
+		if attr.Name.Space == "" && attr.Name.Local == name {
+			return attr.Value
+		}
+	}
+	return ""
+}
+
+// hasAttr 判断属性是否存在，区分空值与省略
+// 入参: name 属性名称
+// 返回: bool 是否存在
+func (n *editorXML) hasAttr(name string) bool {
+	return slices.ContainsFunc(n.attrs, func(attr xml.Attr) bool { return attr.Name.Space == "" && attr.Name.Local == name })
+}
+
 // editorXMLPatch 替换原文中的连续区间
 type editorXMLPatch struct {
 	start, end int
@@ -167,47 +208,6 @@ func parseEditorXMLContext(ctx context.Context, data []byte) (*editorXML, error)
 		return nil, fmt.Errorf("empty XML document")
 	}
 	return root, nil
-}
-
-// child 查找OFD直接子节点
-// 入参: name 节点名称
-// 返回: *editorXML 节点，不存在时为nil
-func (n *editorXML) child(name string) *editorXML {
-	return n.childAt(name, 0)
-}
-
-// childAt 查找指定序号的OFD直接子节点
-// 入参: name 节点名称, index 从0开始的节点序号
-// 返回: *editorXML 节点，不存在时为nil
-func (n *editorXML) childAt(name string, index int) *editorXML {
-	for _, child := range n.children {
-		if child.matchesOFD(name) {
-			if index == 0 {
-				return child
-			}
-			index--
-		}
-	}
-	return nil
-}
-
-// attr 获取无命名空间的属性值
-// 入参: name 属性名称
-// 返回: string 属性值
-func (n *editorXML) attr(name string) string {
-	for _, attr := range n.attrs {
-		if attr.Name.Space == "" && attr.Name.Local == name {
-			return attr.Value
-		}
-	}
-	return ""
-}
-
-// hasAttr 判断属性是否存在，区分空值与省略
-// 入参: name 属性名称
-// 返回: bool 是否存在
-func (n *editorXML) hasAttr(name string) bool {
-	return slices.ContainsFunc(n.attrs, func(attr xml.Attr) bool { return attr.Name.Space == "" && attr.Name.Local == name })
 }
 
 // editorPatchXML 按位置应用互不重叠的替换

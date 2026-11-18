@@ -32,23 +32,6 @@ type ShadingColorants struct {
 	mesh    *pdfgo.MeshSampler
 }
 
-// ShadingColorantSpace 返回渐变的源色料定义，不使用备用颜色推断通道
-// 入参: paint 渐变画刷
-// 返回: *pdfgo.ColorantSpace 原始色料定义，普通渐变为nil
-func ShadingColorantSpace(paint pdfgo.Paint) *pdfgo.ColorantSpace {
-	switch {
-	case paint.Axial != nil:
-		return paint.Axial.ColorantSpace()
-	case paint.Radial != nil:
-		return paint.Radial.ColorantSpace()
-	case paint.Function != nil:
-		return paint.Function.ColorantSpace()
-	case paint.Mesh != nil:
-		return paint.Mesh.ColorantSpace()
-	}
-	return nil
-}
-
 // PrepareShadingColorants 为当前组建立原生过程采样，备用色保留原路径
 // 入参: paint 渐变画刷, space 组空间, softMask 是否用于软蒙版
 // 返回: *ShadingColorants 独立采样状态，不可原生映射时为nil
@@ -99,6 +82,23 @@ func (s *ShadingColorants) MeshAt(patch int, u, v float64) ([4]float64, error) {
 		return [4]float64{}, err
 	}
 	return s.Process.Convert(s.tints)
+}
+
+// ShadingColorantSpace 返回渐变的源色料定义，不使用备用颜色推断通道
+// 入参: paint 渐变画刷
+// 返回: *pdfgo.ColorantSpace 原始色料定义，普通渐变为nil
+func ShadingColorantSpace(paint pdfgo.Paint) *pdfgo.ColorantSpace {
+	switch {
+	case paint.Axial != nil:
+		return paint.Axial.ColorantSpace()
+	case paint.Radial != nil:
+		return paint.Radial.ColorantSpace()
+	case paint.Function != nil:
+		return paint.Function.ColorantSpace()
+	case paint.Mesh != nil:
+		return paint.Mesh.ColorantSpace()
+	}
+	return nil
 }
 
 // ShadingPosition 计算渐变参数，未延伸区域及不存在非负圆半径的位置不着色

@@ -43,12 +43,6 @@ type EncodedImage struct {
 	pending  chan struct{}
 }
 
-// encodedImageResult 保存已完成的像素解码结果，不保存取消或超时错误
-type encodedImageResult struct {
-	image image.Image
-	err   error
-}
-
 // NewEncodedImage 校验PNG或JPEG头信息后复制输入，不解码像素
 // 入参: data 原始编码
 // 返回: *EncodedImage 惰性图片, error 头信息或格式错误
@@ -129,6 +123,23 @@ func (img *EncodedImage) ImageContext(ctx context.Context) (image.Image, error) 
 	}
 }
 
+// At 返回像素颜色，解码失败时返回透明色，绘制前应通过Image检查错误
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.Color 像素颜色
+func (img *EncodedImage) At(x, y int) color.Color {
+	decoded, err := img.Image()
+	if err != nil {
+		return color.Transparent
+	}
+	return decoded.At(x, y)
+}
+
+// encodedImageResult 保存已完成的像素解码结果，不保存取消或超时错误
+type encodedImageResult struct {
+	image image.Image
+	err   error
+}
+
 // decodeContext 执行本次解码，退出时唤醒等待方，只缓存完整结果及稳定错误
 // 入参: ctx 取消上下文, pending 本次解码的完成通知
 // 返回: image.Image 只读像素, error 解码或取消错误
@@ -160,17 +171,6 @@ func (img *EncodedImage) decodeContext(ctx context.Context, pending chan struct{
 	}
 	img.result.Store(&encodedImageResult{image: pixels, err: err})
 	return pixels, err
-}
-
-// At 返回像素颜色，解码失败时返回透明色，绘制前应通过Image检查错误
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.Color 像素颜色
-func (img *EncodedImage) At(x, y int) color.Color {
-	decoded, err := img.Image()
-	if err != nil {
-		return color.Transparent
-	}
-	return decoded.At(x, y)
 }
 
 // newEncodedImage 接管编码数据并读取头信息

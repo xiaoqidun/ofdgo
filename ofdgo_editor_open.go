@@ -33,46 +33,6 @@ import (
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
-// editorSource 保留输入包及按需加载的原始页面
-type editorSource struct {
-	reader             *Reader
-	document           *Document
-	info               DocInfo
-	fallbackDocID      string
-	directory          string
-	fromNew            bool
-	pages              map[string]*editorSourcePage
-	origins            map[string]*editorObjectOrigin
-	idsReady           bool
-	annotationStates   map[string]map[string]editorCompositeState
-	annotationPages    map[string]bool
-	retiredAttachments map[string]bool
-	removedAttachments map[string]bool
-	structureObjects   map[string]map[string]bool
-	structureStarts    map[int]map[string]int
-}
-
-// editorObjectOrigin 保留原对象的XML语义，供复制和局部更新复用
-type editorObjectOrigin struct {
-	editor   *Editor
-	document editorDocumentIdentity
-	page     *editorSourcePage
-	data     []byte
-	node     *editorXML
-	object   GraphicObject
-	reason   error
-}
-
-// editorSourcePage 保存页面原文、解析快照及图层和页块内的对象位置
-type editorSourcePage struct {
-	ref      Page
-	data     []byte
-	root     *editorXML
-	original *PageContent
-	nodes    map[string]*editorXML
-	repaired bool
-}
-
 // ObjectCapabilities 已有对象可执行的操作，Reason说明受限原因
 // Update表示完整替换内容，ReplaceFont表示可显式替换文字字体，Transform表示保留文字定位的几何变换，Order仅限同一图层或末级页块
 // Arrange表示可准确度量对齐与旋转范围；Reflow表示可重排文字，LayoutKnown表示段落选项可恢复
@@ -221,6 +181,46 @@ func (e *Editor) FontData(id string) ([]byte, error) {
 		return nil, err
 	}
 	return sfnt.Write(), nil
+}
+
+// editorSource 保留输入包及按需加载的原始页面
+type editorSource struct {
+	reader             *Reader
+	document           *Document
+	info               DocInfo
+	fallbackDocID      string
+	directory          string
+	fromNew            bool
+	pages              map[string]*editorSourcePage
+	origins            map[string]*editorObjectOrigin
+	idsReady           bool
+	annotationStates   map[string]map[string]editorCompositeState
+	annotationPages    map[string]bool
+	retiredAttachments map[string]bool
+	removedAttachments map[string]bool
+	structureObjects   map[string]map[string]bool
+	structureStarts    map[int]map[string]int
+}
+
+// editorObjectOrigin 保留原对象的XML语义，供复制和局部更新复用
+type editorObjectOrigin struct {
+	editor   *Editor
+	document editorDocumentIdentity
+	page     *editorSourcePage
+	data     []byte
+	node     *editorXML
+	object   GraphicObject
+	reason   error
+}
+
+// editorSourcePage 保存页面原文、解析快照及图层和页块内的对象位置
+type editorSourcePage struct {
+	ref      Page
+	data     []byte
+	root     *editorXML
+	original *PageContent
+	nodes    map[string]*editorXML
+	repaired bool
 }
 
 // editError 将操作受限原因转为错误，保留可供调用方识别的缺字诊断

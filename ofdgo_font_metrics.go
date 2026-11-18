@@ -53,59 +53,6 @@ type FontResourceBackend interface {
 // SFNTBackend 提供独立的OpenType字体度量、轮廓和资源处理
 type SFNTBackend struct{}
 
-// sfntFontMetrics 保留默认字体度量，写出时不更新原始时间
-type sfntFontMetrics struct {
-	*basefont.SFNT
-	*fontShaper
-	outlines *basefont.Outliner
-	bounds   *sfntFontBounds
-}
-
-// sfntFontBounds 缓存已成功提取的字形边界，不保留轮廓或失败结果
-type sfntFontBounds struct {
-	mu     sync.Mutex
-	values map[sfntGlyphSize]Box
-}
-
-// sfntGlyphSize 区分字形编号及精确毫米字号
-type sfntGlyphSize struct {
-	glyph uint16
-	size  float64
-}
-
-// glyphGeometry 将字体轮廓转换为纵轴向下的几何路径
-type glyphGeometry struct{ path GeometryPath }
-
-// sfntResourceMetrics 隔离资源解析器的度量实现
-type sfntResourceMetrics struct{ *basefont.SFNT }
-
-// MoveTo 开始子路径
-// 入参: x 横坐标, y 纵坐标
-func (p *glyphGeometry) MoveTo(x, y float64) {
-	p.path = append(p.path, GeometrySegment{Verb: GeometryMove, End: Point{X: x, Y: -y}})
-}
-
-// LineTo 添加直线
-// 入参: x 横坐标, y 纵坐标
-func (p *glyphGeometry) LineTo(x, y float64) {
-	p.path = append(p.path, GeometrySegment{Verb: GeometryLine, End: Point{X: x, Y: -y}})
-}
-
-// QuadTo 添加二次贝塞尔曲线
-// 入参: cx 控制点横坐标, cy 控制点纵坐标, x 终点横坐标, y 终点纵坐标
-func (p *glyphGeometry) QuadTo(cx, cy, x, y float64) {
-	p.path = append(p.path, GeometrySegment{Verb: GeometryQuad, Control1: Point{X: cx, Y: -cy}, End: Point{X: x, Y: -y}})
-}
-
-// CubeTo 添加三次贝塞尔曲线
-// 入参: ax 第一控制点横坐标, ay 第一控制点纵坐标, bx 第二控制点横坐标, by 第二控制点纵坐标, x 终点横坐标, y 终点纵坐标
-func (p *glyphGeometry) CubeTo(ax, ay, bx, by, x, y float64) {
-	p.path = append(p.path, GeometrySegment{Verb: GeometryCubic, Control1: Point{X: ax, Y: -ay}, Control2: Point{X: bx, Y: -by}, End: Point{X: x, Y: -y}})
-}
-
-// Close 闭合当前子路径
-func (p *glyphGeometry) Close() { p.path = append(p.path, GeometrySegment{Verb: GeometryClose}) }
-
 // ResolveFont 按需加载字体资源，保留内嵌数据及外部字体的名称、样式和集合索引匹配
 // 入参: r 渲染器, id 字体标识, exact 是否禁止无关回退
 // 返回: ResolvedFont 字体与来源, error 字体不可用错误
@@ -128,6 +75,71 @@ func (SFNTBackend) OpenFont(data []byte) (FontMetrics, error) {
 	metrics := &sfntFontMetrics{SFNT: sfnt, outlines: &basefont.Outliner{Font: sfnt}, bounds: &sfntFontBounds{}}
 	metrics.fontShaper = &fontShaper{metrics: metrics}
 	return metrics, nil
+}
+
+// Name 返回资源后端标识
+// 返回: string 后端标识
+func (SFNTBackend) Name() string { return "sfnt" }
+
+// OpenFontResource 提取独立字体并读取名称、样式和裁剪能力
+// CFF2使用默认实例的静态轮廓，不改变原字体文件
+// 入参: file 字体文件, index 集合索引
+// 返回: *FontResource 字体资源, error 解析错误
+func (SFNTBackend) OpenFontResource(file FontFile, index int) (*FontResource, error) {
+	data, err := file.Face(index)
+	if err != nil {
+		return nil, err
+	}
+	data, err = basefont.DefaultCFF2Font(data)
+	if err != nil {
+		return nil, err
+	}
+	sfnt, err := basefont.ParseSFNT(data)
+	if err != nil {
+		return nil, err
+	}
+	name := basefont.SFNTName(sfnt, 6, 4, 1)
+	if name == "" {
+		return nil, fmt.Errorf("font has no name")
+	}
+	extension := ".ttf"
+	if sfnt.IsCFF {
+		extension = ".otf"
+	}
+	return &FontResource{
+		FontMetrics: sfntResourceMetrics{sfnt}, Data: data, Extension: extension,
+		Font:      Font{FontName: name, FamilyName: basefont.SFNTName(sfnt, 16, 1), Charset: "unicode", Bold: binary.BigEndian.Uint16(sfnt.Tables["head"][44:])&1 != 0, Italic: binary.BigEndian.Uint16(sfnt.Tables["head"][44:])&2 != 0, Serif: sfntSerif(sfnt.Tables["OS/2"]), FixedWidth: len(sfnt.Tables["post"]) >= 16 && binary.BigEndian.Uint32(sfnt.Tables["post"][12:]) != 0},
+		CanSubset: basefont.Subsettable(sfnt),
+	}, nil
+}
+
+// SubsetFont 裁剪新建字体并按要求保留显式字形编号
+// 入参: data 字体数据, glyphs 用字, preserve 是否保留编号
+// 返回: []byte 子集, error 裁剪错误
+func (SFNTBackend) SubsetFont(data []byte, glyphs []uint16, preserve bool) ([]byte, error) {
+	return basefont.SubsetSFNT(data, glyphs, preserve)
+}
+
+// SubsetSourceFont 按全包引用裁剪原字体，不确定时保留原资源
+// 入参: data 字体数据, usage 用字信息
+// 返回: []byte 子集, error 裁剪错误
+func (SFNTBackend) SubsetSourceFont(data []byte, usage FontUsage) ([]byte, error) {
+	u := &basefont.Usage{Characters: make(map[rune]bool), Glyphs: make(map[uint16]bool), Unsafe: usage.Unsafe}
+	for _, char := range usage.Characters {
+		u.Characters[char] = true
+	}
+	for _, glyph := range usage.Glyphs {
+		u.Glyphs[glyph] = true
+	}
+	return basefont.SubsetSourceSFNT(data, u), nil
+}
+
+// sfntFontMetrics 保留默认字体度量，写出时不更新原始时间
+type sfntFontMetrics struct {
+	*basefont.SFNT
+	*fontShaper
+	outlines *basefont.Outliner
+	bounds   *sfntFontBounds
 }
 
 // Write 返回字体数据，不修改字体元信息
@@ -213,41 +225,54 @@ func (f sfntFontMetrics) GlyphOutlines(glyphs []uint16, size float64) ([]Geometr
 	return result, nil
 }
 
-// Name 返回资源后端标识
-// 返回: string 后端标识
-func (SFNTBackend) Name() string { return "sfnt" }
-
-// OpenFontResource 提取独立字体并读取名称、样式和裁剪能力
-// CFF2使用默认实例的静态轮廓，不改变原字体文件
-// 入参: file 字体文件, index 集合索引
-// 返回: *FontResource 字体资源, error 解析错误
-func (SFNTBackend) OpenFontResource(file FontFile, index int) (*FontResource, error) {
-	data, err := file.Face(index)
-	if err != nil {
-		return nil, err
-	}
-	data, err = basefont.DefaultCFF2Font(data)
-	if err != nil {
-		return nil, err
-	}
-	sfnt, err := basefont.ParseSFNT(data)
-	if err != nil {
-		return nil, err
-	}
-	name := basefont.SFNTName(sfnt, 6, 4, 1)
-	if name == "" {
-		return nil, fmt.Errorf("font has no name")
-	}
-	extension := ".ttf"
-	if sfnt.IsCFF {
-		extension = ".otf"
-	}
-	return &FontResource{
-		FontMetrics: sfntResourceMetrics{sfnt}, Data: data, Extension: extension,
-		Font:      Font{FontName: name, FamilyName: basefont.SFNTName(sfnt, 16, 1), Charset: "unicode", Bold: binary.BigEndian.Uint16(sfnt.Tables["head"][44:])&1 != 0, Italic: binary.BigEndian.Uint16(sfnt.Tables["head"][44:])&2 != 0, Serif: sfntSerif(sfnt.Tables["OS/2"]), FixedWidth: len(sfnt.Tables["post"]) >= 16 && binary.BigEndian.Uint32(sfnt.Tables["post"][12:]) != 0},
-		CanSubset: basefont.Subsettable(sfnt),
-	}, nil
+// sfntFontBounds 缓存已成功提取的字形边界，不保留轮廓或失败结果
+type sfntFontBounds struct {
+	mu     sync.Mutex
+	values map[sfntGlyphSize]Box
 }
+
+// sfntGlyphSize 区分字形编号及精确毫米字号
+type sfntGlyphSize struct {
+	glyph uint16
+	size  float64
+}
+
+// glyphGeometry 将字体轮廓转换为纵轴向下的几何路径
+type glyphGeometry struct{ path GeometryPath }
+
+// MoveTo 开始子路径
+// 入参: x 横坐标, y 纵坐标
+func (p *glyphGeometry) MoveTo(x, y float64) {
+	p.path = append(p.path, GeometrySegment{Verb: GeometryMove, End: Point{X: x, Y: -y}})
+}
+
+// LineTo 添加直线
+// 入参: x 横坐标, y 纵坐标
+func (p *glyphGeometry) LineTo(x, y float64) {
+	p.path = append(p.path, GeometrySegment{Verb: GeometryLine, End: Point{X: x, Y: -y}})
+}
+
+// QuadTo 添加二次贝塞尔曲线
+// 入参: cx 控制点横坐标, cy 控制点纵坐标, x 终点横坐标, y 终点纵坐标
+func (p *glyphGeometry) QuadTo(cx, cy, x, y float64) {
+	p.path = append(p.path, GeometrySegment{Verb: GeometryQuad, Control1: Point{X: cx, Y: -cy}, End: Point{X: x, Y: -y}})
+}
+
+// CubeTo 添加三次贝塞尔曲线
+// 入参: ax 第一控制点横坐标, ay 第一控制点纵坐标, bx 第二控制点横坐标, by 第二控制点纵坐标, x 终点横坐标, y 终点纵坐标
+func (p *glyphGeometry) CubeTo(ax, ay, bx, by, x, y float64) {
+	p.path = append(p.path, GeometrySegment{Verb: GeometryCubic, Control1: Point{X: ax, Y: -ay}, Control2: Point{X: bx, Y: -by}, End: Point{X: x, Y: -y}})
+}
+
+// Close 闭合当前子路径
+func (p *glyphGeometry) Close() { p.path = append(p.path, GeometrySegment{Verb: GeometryClose}) }
+
+// sfntResourceMetrics 隔离资源解析器的度量实现
+type sfntResourceMetrics struct{ *basefont.SFNT }
+
+// Write 返回未改动元信息的字体数据
+// 返回: []byte 字体数据
+func (f sfntResourceMetrics) Write() []byte { return f.SFNT.Write() }
 
 // sfntSerif 从OpenType OS/2表家族分类与PANOSE参数识别衬线字体
 // 入参: os2 OS/2表字节
@@ -261,28 +286,3 @@ func sfntSerif(os2 []byte) bool {
 	}
 	return len(os2) >= 42 && os2[32] == 2 && os2[33] >= 2 && os2[33] <= 10
 }
-
-// SubsetFont 裁剪新建字体并按要求保留显式字形编号
-// 入参: data 字体数据, glyphs 用字, preserve 是否保留编号
-// 返回: []byte 子集, error 裁剪错误
-func (SFNTBackend) SubsetFont(data []byte, glyphs []uint16, preserve bool) ([]byte, error) {
-	return basefont.SubsetSFNT(data, glyphs, preserve)
-}
-
-// SubsetSourceFont 按全包引用裁剪原字体，不确定时保留原资源
-// 入参: data 字体数据, usage 用字信息
-// 返回: []byte 子集, error 裁剪错误
-func (SFNTBackend) SubsetSourceFont(data []byte, usage FontUsage) ([]byte, error) {
-	u := &basefont.Usage{Characters: make(map[rune]bool), Glyphs: make(map[uint16]bool), Unsafe: usage.Unsafe}
-	for _, char := range usage.Characters {
-		u.Characters[char] = true
-	}
-	for _, glyph := range usage.Glyphs {
-		u.Glyphs[glyph] = true
-	}
-	return basefont.SubsetSourceSFNT(data, u), nil
-}
-
-// Write 返回未改动元信息的字体数据
-// 返回: []byte 字体数据
-func (f sfntResourceMetrics) Write() []byte { return f.SFNT.Write() }

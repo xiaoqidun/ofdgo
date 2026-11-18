@@ -76,21 +76,6 @@ func (r *Renderer) RenderToSVGWithObjects(page *PageContent, writer io.Writer) (
 	return r.renderSVG(page, writer, SVGObjects)
 }
 
-// renderSVG 将SVG输出及对象分组交给指定后端
-// 入参: page 页面内容, writer 输出流, mode 资源封装方式
-// 返回: SVGResources 字体和图片资源, error 渲染、写入或取消错误
-func (r *Renderer) renderSVG(page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error) {
-	if err := r.Compression.Validate(); err != nil {
-		return SVGResources{}, err
-	}
-	if r.backends.SVG == nil {
-		return SVGResources{}, fmt.Errorf("svg: %w", ErrBackendUnavailable)
-	}
-	var written int64
-	writer = convertWriter{ctx: r.outputContext(), writer: writer, count: &written}
-	return r.backends.SVG.RenderSVG(r, page, writer, mode)
-}
-
 // RenderPreview 生成统一SVG容器及独立资源，原生程序与WebUI使用相同绘制入口
 // 入参: page 页面内容, writer 输出流, options 显示方式
 // 返回: SVGResources 需由调用方映射地址的资源, error 错误信息
@@ -200,4 +185,19 @@ func (r *Renderer) RenderFontPreview(ctx context.Context, id string, writer io.W
 	width, height := min(count, 8)*36, (count+7)/8*40
 	_, err = fmt.Fprintf(writer, `<svg xmlns="`+svgNamespace+`" width="%d" height="%d" viewBox="0 0 %d %d">%s</svg>`, width, height, width, height, paths.Bytes())
 	return err
+}
+
+// renderSVG 将SVG输出及对象分组交给指定后端
+// 入参: page 页面内容, writer 输出流, mode 资源封装方式
+// 返回: SVGResources 字体和图片资源, error 渲染、写入或取消错误
+func (r *Renderer) renderSVG(page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error) {
+	if err := r.Compression.Validate(); err != nil {
+		return SVGResources{}, err
+	}
+	if r.backends.SVG == nil {
+		return SVGResources{}, fmt.Errorf("svg: %w", ErrBackendUnavailable)
+	}
+	var written int64
+	writer = convertWriter{ctx: r.outputContext(), writer: writer, count: &written}
+	return r.backends.SVG.RenderSVG(r, page, writer, mode)
 }

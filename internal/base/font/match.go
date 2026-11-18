@@ -110,15 +110,6 @@ var matchRules = normalizeMatchRules([]matchRule{
 // fontNameReplacer 移除字体名称匹配时忽略的分隔符
 var fontNameReplacer = strings.NewReplacer(" ", "", "-", "", "_", "", "(", "", ")", "", "（", "", "）", "")
 
-// matchRule 字体匹配规则
-type matchRule struct {
-	Keys            []string
-	Names           []string
-	Files           []string
-	System          string
-	NoSyntheticBold bool
-}
-
 // FileCandidate 字体文件候选
 type FileCandidate struct {
 	Name       string
@@ -131,15 +122,6 @@ type FileCandidate struct {
 	fold       string
 }
 
-// patternMatcher 字体文件匹配器
-type patternMatcher struct {
-	pattern      string
-	lowerPattern string
-	stem         string
-	aliases      []string
-	priority     int
-}
-
 // FileMatch 字体文件匹配结果
 type FileMatch struct {
 	Name      string
@@ -148,12 +130,6 @@ type FileMatch struct {
 	Rank      int
 	styleRank int
 	sortName  string
-}
-
-// fileKey 字体文件与集合索引的去重键
-type fileKey struct {
-	Name string
-	Face int
 }
 
 // NormalizeName 规范化字体名称
@@ -197,24 +173,6 @@ func AppendFontName(names []string, seen map[string]bool, name string) []string 
 	return append(names, name)
 }
 
-// normalizeMatchRules 预处理固定字体规则的匹配名称，保留候选名称及顺序
-// 入参: rules 字体匹配规则
-// 返回: []matchRule 预处理后的规则
-func normalizeMatchRules(rules []matchRule) []matchRule {
-	for i := range rules {
-		rule := &rules[i]
-		keys := append(append(rule.Keys, rule.Names...), rule.System)
-		rule.Keys = nil
-		for _, key := range keys {
-			key = NormalizeName(key)
-			if key != "" && !slices.Contains(rule.Keys, key) {
-				rule.Keys = append(rule.Keys, key)
-			}
-		}
-	}
-	return rules
-}
-
 // CandidateNames 获取字体候选名称
 // 入参: names 字体名称列表
 // 返回: []string 字体候选名称
@@ -227,77 +185,6 @@ func CandidateNames(names ...string) []string {
 // 返回: []string 精确字体候选名称
 func ExactCandidateNames(names ...string) []string {
 	return candidateNamesByLevel(MatchExact, names...)
-}
-
-// qualifiedNames 获取保留名称后缀的字体候选
-// 入参: name 字体名称
-// 返回: []string 保留后缀的候选名称
-func qualifiedNames(name string) []string {
-	name = NormalizeName(name)
-	key := NormalizeName(name)
-	var names []string
-	seen := make(map[string]bool)
-	for _, rule := range matchRules {
-		if ruleMatchLevel(rule, key) != MatchPartial {
-			continue
-		}
-		prefix := ""
-		for _, alias := range rule.Keys {
-			if len(alias) > len(prefix) && strings.HasPrefix(name, alias) {
-				prefix = alias
-			}
-		}
-		suffix := strings.TrimPrefix(name, prefix)
-		for _, alias := range append([]string{rule.System}, rule.Names...) {
-			names = AppendFontName(names, seen, NormalizeName(alias)+suffix)
-		}
-	}
-	return names
-}
-
-// candidateNamesByLevel 获取指定等级内的字体候选名称
-// 入参: maxLevel 最大匹配等级, names 字体名称列表
-// 返回: []string 字体候选名称
-func candidateNamesByLevel(maxLevel int, names ...string) []string {
-	var result []string
-	seen := make(map[string]bool)
-	var bases []string
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		result = AppendFontName(result, seen, name)
-		bases = append(bases, name)
-	}
-	levels := matchLevels(bases)
-	for level := MatchExact; level <= maxLevel; level++ {
-		for i := range bases {
-			for j, rule := range matchRules {
-				if levels[i*len(matchRules)+j] == level {
-					result = AppendFontName(result, seen, rule.System)
-					for _, item := range rule.Names {
-						result = AppendFontName(result, seen, item)
-					}
-				}
-			}
-		}
-	}
-	return result
-}
-
-// patternStem 获取字体匹配模式主干
-// 入参: pattern 字体文件匹配模式
-// 返回: string 字体匹配模式主干
-func patternStem(pattern string) string {
-	stem := strings.TrimSuffix(pattern, "*")
-	if IsFontFileName(stem) {
-		stem = strings.TrimSuffix(stem, path.Ext(stem))
-	}
-	if index := strings.IndexAny(stem, "*?["); index >= 0 {
-		stem = stem[:index]
-	}
-	return NormalizeName(stem)
 }
 
 // FilePatterns 获取字体文件匹配模式
@@ -338,32 +225,6 @@ func SystemNames(names ...string) []string {
 	return result
 }
 
-// candidateNamesAtLevel 获取指定等级的字体候选名称
-// 入参: level 匹配等级, names 字体名称列表, levels 名称与规则的匹配等级
-// 返回: []string 字体候选名称
-func candidateNamesAtLevel(level int, names []string, levels []int) []string {
-	var result []string
-	seen := make(map[string]bool)
-	for i, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		if level == MatchExact {
-			result = AppendFontName(result, seen, name)
-		}
-		for j, rule := range matchRules {
-			if levels[i*len(matchRules)+j] == level {
-				result = AppendFontName(result, seen, rule.System)
-				for _, item := range rule.Names {
-					result = AppendFontName(result, seen, item)
-				}
-			}
-		}
-	}
-	return result
-}
-
 // DefaultSystemNames 获取默认系统字体名称
 // 返回: []string 默认系统字体名称
 func DefaultSystemNames() []string {
@@ -390,57 +251,6 @@ func NoSyntheticBold(names ...string) bool {
 		}
 	}
 	return false
-}
-
-// matchLevels 按名称和规则顺序计算匹配等级
-// 入参: names 字体名称列表
-// 返回: []int 名称与规则的匹配等级
-func matchLevels(names []string) []int {
-	levels := make([]int, len(names)*len(matchRules))
-	for i, name := range names {
-		name = NormalizeName(name)
-		for j, rule := range matchRules {
-			levels[i*len(matchRules)+j] = ruleMatchLevel(rule, name)
-		}
-	}
-	return levels
-}
-
-// ruleMatchLevel 获取字体规则匹配等级
-// 入参: rule 字体匹配规则, name 规范化后的字体名称
-// 返回: int 匹配等级
-func ruleMatchLevel(rule matchRule, name string) int {
-	if name == "" {
-		return MatchNone
-	}
-	level := MatchNone
-	for _, item := range rule.Keys {
-		if name == item {
-			return MatchExact
-		}
-		if strings.HasPrefix(name, item) {
-			level = MatchPartial
-		} else if level == MatchNone && strings.Contains(name, item) {
-			level = MatchFuzzy
-		}
-	}
-	return level
-}
-
-// appendPattern 追加字体文件匹配模式
-// 入参: patterns 匹配模式列表, seen 去重映射, pattern 匹配模式
-// 返回: []string 匹配模式列表
-func appendPattern(patterns []string, seen map[string]bool, pattern string) []string {
-	pattern = strings.TrimSpace(pattern)
-	if pattern == "" {
-		return patterns
-	}
-	key := strings.ToLower(pattern)
-	if seen[key] {
-		return patterns
-	}
-	seen[key] = true
-	return append(patterns, pattern)
 }
 
 // AppendFileNames 建立各字体的内部名称与文件别名匹配候选
@@ -557,6 +367,40 @@ func FileCandidates(names []string, base func(string) string) []FileCandidate {
 	return files
 }
 
+// FileMatchNames 获取字体文件匹配名称
+// 入参: matches 匹配结果
+// 返回: []string 字体文件列表
+func FileMatchNames(matches []FileMatch) []string {
+	names := make([]string, 0, len(matches))
+	seen := make(map[string]bool, len(matches))
+	for _, match := range matches {
+		key := strings.ToLower(match.Name)
+		if !seen[key] {
+			seen[key] = true
+			names = append(names, match.Name)
+		}
+	}
+	return names
+}
+
+// matchRule 字体匹配规则
+type matchRule struct {
+	Keys            []string
+	Names           []string
+	Files           []string
+	System          string
+	NoSyntheticBold bool
+}
+
+// patternMatcher 字体文件匹配器
+type patternMatcher struct {
+	pattern      string
+	lowerPattern string
+	stem         string
+	aliases      []string
+	priority     int
+}
+
 // newPatternMatcher 创建字体文件匹配器
 // 入参: pattern 匹配模式
 // 返回: patternMatcher 字体文件匹配器
@@ -575,19 +419,6 @@ func newPatternMatcher(pattern string) patternMatcher {
 		}
 	}
 	return matcher
-}
-
-// newPatternMatchers 创建字体文件匹配器列表
-// 入参: patterns 匹配模式列表
-// 返回: []patternMatcher 字体文件匹配器列表
-func newPatternMatchers(patterns []string) []patternMatcher {
-	matchers := make([]patternMatcher, 0, len(patterns))
-	for priority, pattern := range patterns {
-		matcher := newPatternMatcher(pattern)
-		matcher.priority = priority
-		matchers = append(matchers, matcher)
-	}
-	return matchers
 }
 
 // rankCandidate 获取字体文件候选匹配等级
@@ -671,6 +502,191 @@ func (m patternMatcher) styleSuffixNormalized(name string) string {
 	return ""
 }
 
+// fileKey 字体文件与集合索引的去重键
+type fileKey struct {
+	Name string
+	Face int
+}
+
+// normalizeMatchRules 预处理固定字体规则的匹配名称，保留候选名称及顺序
+// 入参: rules 字体匹配规则
+// 返回: []matchRule 预处理后的规则
+func normalizeMatchRules(rules []matchRule) []matchRule {
+	for i := range rules {
+		rule := &rules[i]
+		keys := append(append(rule.Keys, rule.Names...), rule.System)
+		rule.Keys = nil
+		for _, key := range keys {
+			key = NormalizeName(key)
+			if key != "" && !slices.Contains(rule.Keys, key) {
+				rule.Keys = append(rule.Keys, key)
+			}
+		}
+	}
+	return rules
+}
+
+// qualifiedNames 获取保留名称后缀的字体候选
+// 入参: name 字体名称
+// 返回: []string 保留后缀的候选名称
+func qualifiedNames(name string) []string {
+	name = NormalizeName(name)
+	key := NormalizeName(name)
+	var names []string
+	seen := make(map[string]bool)
+	for _, rule := range matchRules {
+		if ruleMatchLevel(rule, key) != MatchPartial {
+			continue
+		}
+		prefix := ""
+		for _, alias := range rule.Keys {
+			if len(alias) > len(prefix) && strings.HasPrefix(name, alias) {
+				prefix = alias
+			}
+		}
+		suffix := strings.TrimPrefix(name, prefix)
+		for _, alias := range append([]string{rule.System}, rule.Names...) {
+			names = AppendFontName(names, seen, NormalizeName(alias)+suffix)
+		}
+	}
+	return names
+}
+
+// candidateNamesByLevel 获取指定等级内的字体候选名称
+// 入参: maxLevel 最大匹配等级, names 字体名称列表
+// 返回: []string 字体候选名称
+func candidateNamesByLevel(maxLevel int, names ...string) []string {
+	var result []string
+	seen := make(map[string]bool)
+	var bases []string
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		result = AppendFontName(result, seen, name)
+		bases = append(bases, name)
+	}
+	levels := matchLevels(bases)
+	for level := MatchExact; level <= maxLevel; level++ {
+		for i := range bases {
+			for j, rule := range matchRules {
+				if levels[i*len(matchRules)+j] == level {
+					result = AppendFontName(result, seen, rule.System)
+					for _, item := range rule.Names {
+						result = AppendFontName(result, seen, item)
+					}
+				}
+			}
+		}
+	}
+	return result
+}
+
+// patternStem 获取字体匹配模式主干
+// 入参: pattern 字体文件匹配模式
+// 返回: string 字体匹配模式主干
+func patternStem(pattern string) string {
+	stem := strings.TrimSuffix(pattern, "*")
+	if IsFontFileName(stem) {
+		stem = strings.TrimSuffix(stem, path.Ext(stem))
+	}
+	if index := strings.IndexAny(stem, "*?["); index >= 0 {
+		stem = stem[:index]
+	}
+	return NormalizeName(stem)
+}
+
+// candidateNamesAtLevel 获取指定等级的字体候选名称
+// 入参: level 匹配等级, names 字体名称列表, levels 名称与规则的匹配等级
+// 返回: []string 字体候选名称
+func candidateNamesAtLevel(level int, names []string, levels []int) []string {
+	var result []string
+	seen := make(map[string]bool)
+	for i, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if level == MatchExact {
+			result = AppendFontName(result, seen, name)
+		}
+		for j, rule := range matchRules {
+			if levels[i*len(matchRules)+j] == level {
+				result = AppendFontName(result, seen, rule.System)
+				for _, item := range rule.Names {
+					result = AppendFontName(result, seen, item)
+				}
+			}
+		}
+	}
+	return result
+}
+
+// matchLevels 按名称和规则顺序计算匹配等级
+// 入参: names 字体名称列表
+// 返回: []int 名称与规则的匹配等级
+func matchLevels(names []string) []int {
+	levels := make([]int, len(names)*len(matchRules))
+	for i, name := range names {
+		name = NormalizeName(name)
+		for j, rule := range matchRules {
+			levels[i*len(matchRules)+j] = ruleMatchLevel(rule, name)
+		}
+	}
+	return levels
+}
+
+// ruleMatchLevel 获取字体规则匹配等级
+// 入参: rule 字体匹配规则, name 规范化后的字体名称
+// 返回: int 匹配等级
+func ruleMatchLevel(rule matchRule, name string) int {
+	if name == "" {
+		return MatchNone
+	}
+	level := MatchNone
+	for _, item := range rule.Keys {
+		if name == item {
+			return MatchExact
+		}
+		if strings.HasPrefix(name, item) {
+			level = MatchPartial
+		} else if level == MatchNone && strings.Contains(name, item) {
+			level = MatchFuzzy
+		}
+	}
+	return level
+}
+
+// appendPattern 追加字体文件匹配模式
+// 入参: patterns 匹配模式列表, seen 去重映射, pattern 匹配模式
+// 返回: []string 匹配模式列表
+func appendPattern(patterns []string, seen map[string]bool, pattern string) []string {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return patterns
+	}
+	key := strings.ToLower(pattern)
+	if seen[key] {
+		return patterns
+	}
+	seen[key] = true
+	return append(patterns, pattern)
+}
+
+// newPatternMatchers 创建字体文件匹配器列表
+// 入参: patterns 匹配模式列表
+// 返回: []patternMatcher 字体文件匹配器列表
+func newPatternMatchers(patterns []string) []patternMatcher {
+	matchers := make([]patternMatcher, 0, len(patterns))
+	for priority, pattern := range patterns {
+		matcher := newPatternMatcher(pattern)
+		matcher.priority = priority
+		matchers = append(matchers, matcher)
+	}
+	return matchers
+}
+
 // appendFileMatch 追加字体文件匹配结果
 // 入参: matches 匹配结果, seen 已匹配文件, matcher 匹配器, file 字体文件候选, rank 匹配等级, bold 是否粗体, italic 是否斜体
 func appendFileMatch(matches *[]FileMatch, seen map[fileKey]int, matcher patternMatcher, file FileCandidate, rank int, bold, italic bool) {
@@ -722,22 +738,6 @@ func fileMatchLess(left, right FileMatch) bool {
 		return left.styleRank < right.styleRank
 	}
 	return left.sortName < right.sortName
-}
-
-// FileMatchNames 获取字体文件匹配名称
-// 入参: matches 匹配结果
-// 返回: []string 字体文件列表
-func FileMatchNames(matches []FileMatch) []string {
-	names := make([]string, 0, len(matches))
-	seen := make(map[string]bool, len(matches))
-	for _, match := range matches {
-		key := strings.ToLower(match.Name)
-		if !seen[key] {
-			seen[key] = true
-			names = append(names, match.Name)
-		}
-	}
-	return names
 }
 
 // fileStyleRank 获取字体文件样式匹配等级

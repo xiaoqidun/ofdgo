@@ -36,6 +36,40 @@ type pngBinaryProbe struct {
 	remaining int
 }
 
+// Read 读取有限的IDAT数据，边界或长度无效时停止检查
+// 入参: output 读取缓冲区
+// 返回: int 读取字节数, error 读取错误
+func (p *pngBinaryProbe) Read(output []byte) (int, error) {
+	if len(output) == 0 {
+		return 0, nil
+	}
+	if err := p.ctx.Err(); err != nil {
+		return 0, err
+	}
+	for len(p.payload) == 0 {
+		if err := p.ctx.Err(); err != nil {
+			return 0, err
+		}
+		if len(p.data) < 12 || p.remaining < 12 || string(p.data[4:8]) != "IDAT" {
+			return 0, io.EOF
+		}
+		length := uint64(binary.BigEndian.Uint32(p.data))
+		if length > uint64(len(p.data)-12) {
+			return 0, io.ErrUnexpectedEOF
+		}
+		p.payload = p.data[8 : 8+int(length)]
+		p.data = p.data[12+int(length):]
+		p.remaining -= 12
+	}
+	if p.remaining == 0 {
+		return 0, io.EOF
+	}
+	count := copy(output[:min(len(output), p.remaining)], p.payload)
+	p.payload = p.payload[count:]
+	p.remaining -= count
+	return count, nil
+}
+
 // editorBinaryImage 尝试纯黑白无损编码，不改变透明度，带附加信息或无体积收益时保留原图
 // 入参: ctx 取消上下文, data PNG图片数据, img 已解码像素，为nil时读取原图
 // 返回: []byte 更小的JBIG2数据，不适用时为nil, error 取消错误
@@ -174,40 +208,6 @@ func pngNonBinaryImage(ctx context.Context, data []byte) bool {
 		copy(previous, row[1:])
 	}
 	return false
-}
-
-// Read 读取有限的IDAT数据，边界或长度无效时停止检查
-// 入参: output 读取缓冲区
-// 返回: int 读取字节数, error 读取错误
-func (p *pngBinaryProbe) Read(output []byte) (int, error) {
-	if len(output) == 0 {
-		return 0, nil
-	}
-	if err := p.ctx.Err(); err != nil {
-		return 0, err
-	}
-	for len(p.payload) == 0 {
-		if err := p.ctx.Err(); err != nil {
-			return 0, err
-		}
-		if len(p.data) < 12 || p.remaining < 12 || string(p.data[4:8]) != "IDAT" {
-			return 0, io.EOF
-		}
-		length := uint64(binary.BigEndian.Uint32(p.data))
-		if length > uint64(len(p.data)-12) {
-			return 0, io.ErrUnexpectedEOF
-		}
-		p.payload = p.data[8 : 8+int(length)]
-		p.data = p.data[12+int(length):]
-		p.remaining -= 12
-	}
-	if p.remaining == 0 {
-		return 0, io.EOF
-	}
-	count := copy(output[:min(len(output), p.remaining)], p.payload)
-	p.payload = p.payload[count:]
-	p.remaining -= count
-	return count, nil
 }
 
 // pngBinaryProbeFilter 还原黑白检查所需的扫描行

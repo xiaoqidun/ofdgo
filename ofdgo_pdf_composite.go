@@ -47,6 +47,141 @@ type pdfCompositeNode struct {
 	formCount  int
 }
 
+// direct 检查sRGB图元能否使用标准OFD透明度而无需背景合成
+// 返回: bool 是否可直接转换
+func (n pdfCompositeNode) direct() bool {
+	if g := n.group; g != nil {
+		single := n.textObject != nil && len(n.children) == 1 && (n.children[0].glyph != nil || n.children[0].text != nil && len(n.children[0].text.Glyphs) == 1)
+		if g.Knockout && !single || !codecpdf.NormalBlend(g.BlendMode) || g.ColorSpace != nil && !g.ColorSpace.SRGBEquivalent() {
+			return false
+		}
+		for _, child := range n.children {
+			if !child.direct() {
+				return false
+			}
+			if g.Alpha != 1 && child.group == nil {
+				style, _, _ := child.style()
+				if style.SoftMask != nil {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	s, fill, stroke := n.style()
+	if (n.image == nil || n.image.Image.ImageMask) && (fill && s.Fill.Shading != nil || stroke && s.Stroke.Shading != nil) {
+		return false
+	}
+	if fill && stroke && (s.Fill.Alpha != 1 || s.Stroke.Alpha != 1 || s.SoftMask != nil) {
+		return false
+	}
+	if n.image != nil && s.FillOverprint {
+		return false
+	}
+	return codecpdf.NormalBlend(s.BlendMode) && !(fill && s.FillOverprint && codecpdf.OverprintNeedsSeparation(s.Fill) || stroke && s.StrokeOverprint && codecpdf.OverprintNeedsSeparation(s.Stroke))
+}
+
+// style 获取图元实际使用的图形状态
+// 返回: pdfgo.Style 图形状态, bool 是否填充, bool 是否描边
+func (n pdfCompositeNode) style() (pdfgo.Style, bool, bool) {
+	if n.path != nil {
+		return n.path.Style, n.path.Fill, n.path.Stroke
+	}
+	if n.text != nil {
+		mode := n.text.Mode % 4
+		return n.text.Style, mode == 0 || mode == 2, mode == 1 || mode == 2
+	}
+	return n.image.Style, true, false
+}
+
+// emit 向现有转换器交付原始图元
+// 入参: visitor 图元访问器
+// 返回: error 转换错误
+func (n pdfCompositeNode) emit(visitor pdfgo.Visitor) error {
+	if n.path != nil {
+		return visitor.Path(*n.path)
+	}
+	if n.text != nil {
+		return visitor.Text(*n.text)
+	}
+	if n.image != nil {
+		return visitor.Image(*n.image)
+	}
+	if n.textObject != nil || n.glyph != nil {
+		for _, child := range n.children {
+			if err := child.emit(visitor); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return visitor.Group(*n.group, func(v pdfgo.Visitor) error {
+		for _, child := range n.children {
+			if err := child.emit(v); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// coverage 构建白色几何覆盖，颜色和透明度由合成器单独计算
+// 入参: p 局部导入器, stroke 是否只取描边
+// 返回: error 几何错误
+func (n pdfCompositeNode) coverage(p *pdfImporter, stroke bool) error {
+	if n.group != nil {
+		for _, child := range n.children {
+			if child.group != nil {
+				if err := child.coverage(p, false); err != nil {
+					return err
+				}
+				continue
+			}
+			_, fill, hasStroke := child.style()
+			if fill {
+				if err := child.coverage(p, false); err != nil {
+					return err
+				}
+			}
+			if hasStroke {
+				if err := child.coverage(p, true); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	style, _, _ := n.style()
+	style.Fill, style.Stroke = pdfgo.Paint{RGB: [3]float64{1, 1, 1}, Alpha: 1}, pdfgo.Paint{RGB: [3]float64{1, 1, 1}, Alpha: 1}
+	style.SoftMask, style.BlendMode = nil, "Normal"
+	style.Transfer = nil
+	style.FillOverprint, style.StrokeOverprint = false, false
+	if n.path != nil {
+		mark := *n.path
+		mark.Style = style
+		mark.Fill, mark.Stroke = !stroke, stroke
+		return p.path(mark)
+	}
+	if n.text != nil {
+		mark := *n.text
+		mark.Style = style
+		mark.Mode = 0
+		if stroke {
+			mark.Mode = 1
+		}
+		return p.text(mark)
+	}
+	mark := n.image
+	path := pdfgo.Path{Segments: []pdfgo.Segment{
+		{Operator: "M", Points: []pdfgo.Point{mark.Matrix.Apply(pdfgo.Point{})}},
+		{Operator: "L", Points: []pdfgo.Point{mark.Matrix.Apply(pdfgo.Point{X: 1})}},
+		{Operator: "L", Points: []pdfgo.Point{mark.Matrix.Apply(pdfgo.Point{X: 1, Y: 1})}},
+		{Operator: "L", Points: []pdfgo.Point{mark.Matrix.Apply(pdfgo.Point{Y: 1})}},
+		{Operator: "C"},
+	}}
+	return p.path(pdfgo.PathMark{Path: path, Style: style, Fill: true})
+}
+
 // pdfCompositePixel 复用内部PDF像素布局
 type pdfCompositePixel = codecpdf.CompositePixel
 
@@ -68,117 +203,6 @@ type pdfCompositor struct {
 	transferBlocked bool
 	shadingSource   bool
 	softMask        bool
-}
-
-// pdfCompositeKey 区分图元的填充与描边几何
-type pdfCompositeKey struct {
-	path   *pdfgo.PathMark
-	text   *pdfgo.TextMark
-	image  *pdfgo.ImageMark
-	stroke bool
-}
-
-// pdfCompositeSceneKey 隔离不同图案坐标系，在单页内共享场景缓存预算
-type pdfCompositeSceneKey struct {
-	owner *pdfCompositeCache
-	mark  pdfCompositeKey
-}
-
-// pdfCompositeGeometry 保存后端中立的绘制命令及其页面边界
-type pdfCompositeGeometry struct {
-	scene *RasterPage
-	box   Box
-}
-
-// pdfCompositeColorSampler 复用渐变几何和相同轴向参数的颜色，不近似函数
-type pdfCompositeColorSampler struct {
-	paint      pdfgo.Paint
-	space      *pdfgo.ColorSpace
-	intent     pdfgo.Name
-	conversion pdfgo.ColorConversion
-	values     map[float64][4]float64
-	position   pdfgo.GradientPosition
-	converter  pdfgo.ColorConverter
-	colorants  *codecpdf.ShadingColorants
-	prepared   bool
-	converted  bool
-}
-
-// pdfImageProcessKey 隔离图像的组空间及软蒙版采样，不复用错误的原生映射
-type pdfImageProcessKey struct {
-	image    *pdfgo.Image
-	space    *pdfgo.ColorSpace
-	softMask bool
-}
-
-// pdfCompositeImageColor 复用图像颜色变换及相邻相同分量的精确结果
-type pdfCompositeImageColor struct {
-	mark       *pdfgo.ImageMark
-	space      *pdfgo.ColorSpace
-	source     *pdfgo.ColorSpace
-	intent     pdfgo.Name
-	conversion pdfgo.ColorConversion
-	converter  pdfgo.ColorConverter
-	input      [4]float64
-	output     [4]float64
-	ready      bool
-}
-
-// pdfCompositeCache 在单页内复用几何、图像分量及蒙版内容
-type pdfCompositeCache struct {
-	resources       *Resources
-	geometry        *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry]
-	clips           *renderCache[[32]byte, GeometryPath]
-	bounds          map[pdfCompositeKey]Box
-	images          map[*pdfgo.Image]*pdfgo.ImageComponents
-	imageMatrix     map[*pdfgo.ImageMark]pdfgo.Matrix
-	imageProcesses  map[pdfImageProcessKey]*pdfgo.ImageProcess
-	imageColor      pdfCompositeImageColor
-	masks           map[*pdfgo.SoftMask][]pdfCompositeNode
-	meshes          map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle
-	linearMeshes    *renderCache[pdfLinearMeshKey, []pdfgo.MeshTriangle]
-	patterns        map[pdfgo.Paint]*pdfCompositePattern
-	shadingPatterns map[*pdfgo.ShadingPattern][]pdfCompositeNode
-	shadingSources  map[pdfShadingSourceKey][]pdfCompositeNode
-	shadings        map[pdfGradientKey]pdfCompositeGeometry
-	transfers       codecpdf.TransferCache
-	textDisjoint    map[*pdfgo.GroupMark]bool
-	groups          map[*pdfgo.GroupMark]Box
-}
-
-// pdfCompositeScratch 复用像素及蒙版缓冲，不跨页持有活动内容
-type pdfCompositeScratch struct {
-	pixels   codecpdf.CompositeBuffers[pdfCompositePixel]
-	masks    codecpdf.CompositeBuffers[float64]
-	channels codecpdf.CompositeBuffers[uint8]
-	rasters  codecpdf.RasterBuffers
-}
-
-// compositingCache 按需创建单页合成缓存，页面切换时由导入器释放
-// 返回: *pdfCompositeCache 当前页面缓存
-func (p *pdfImporter) compositingCache() *pdfCompositeCache {
-	if p.compositeCache == nil {
-		p.compositeCache = &pdfCompositeCache{resources: p.resources, images: map[*pdfgo.Image]*pdfgo.ImageComponents{}, masks: map[*pdfgo.SoftMask][]pdfCompositeNode{}, meshes: map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle{}}
-	}
-	return p.compositeCache
-}
-
-// geometryCache 限制完整覆盖场景的保留量，边界独立保存以便排除无交集图元
-// 返回: *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry] 单页场景缓存
-func (c *pdfCompositeCache) geometryCache() *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry] {
-	if c.geometry == nil {
-		c.geometry = resourceCache[pdfCompositeSceneKey, pdfCompositeGeometry](c.resources, 64<<20)
-	}
-	return c.geometry
-}
-
-// clipCache 限制页面及嵌套图案共享的只读裁剪轮廓
-// 返回: *renderCache[[32]byte, GeometryPath] 裁剪缓存
-func (c *pdfCompositeCache) clipCache() *renderCache[[32]byte, GeometryPath] {
-	if c.clips == nil {
-		c.clips = resourceCache[[32]byte, GeometryPath](c.resources, 8<<20)
-	}
-	return c.clips
 }
 
 // coverage 复用已编译的覆盖场景，跳过与当前区域无交集的图元
@@ -356,6 +380,191 @@ func (c *pdfCompositor) pixelBounds(box Box) image.Rectangle {
 	x1 := int(math.Max(0, math.Min(float64(c.width), math.Ceil((box.X+box.W-c.box.X)/step)+1)))
 	y1 := int(math.Max(0, math.Min(float64(c.height), math.Ceil((box.Y+box.H-c.box.Y)/step)+1)))
 	return image.Rect(x0, y0, x1, y1)
+}
+
+// acquireCoverage 借用当前块的独占画布，保留活动画布供嵌套合成读取
+// 返回: *image.RGBA 未清空画布，不支持缓冲绘制的后端返回nil, error 无效绘制区域
+func (c *pdfCompositor) acquireCoverage() (*image.RGBA, error) {
+	if _, ok := c.importer.editor.Backends().Raster.(RasterBufferBackend); !ok {
+		return nil, nil
+	}
+	page := RasterPage{Width: c.box.W, Height: c.box.H, DPI: c.importer.rasterDPI}
+	w, h, err := page.PixelSize()
+	if err != nil {
+		return nil, err
+	}
+	if c.scratch == nil {
+		c.scratch = &pdfCompositeScratch{}
+	}
+	return c.scratch.rasters.Acquire(image.Rect(0, 0, w, h)), nil
+}
+
+// releaseCoverage 归还当前调用不再读取的画布，限制单次合成保留的内存
+// 入参: coverage 当前调用的覆盖图像
+func (c *pdfCompositor) releaseCoverage(coverage image.Image) {
+	if _, ok := c.importer.editor.Backends().Raster.(RasterBufferBackend); !ok || c.scratch == nil {
+		return
+	}
+	if buffer, ok := coverage.(*image.RGBA); ok {
+		c.scratch.rasters.Release(buffer)
+	}
+}
+
+// acquirePixels 为当前合成器借用独立像素缓冲
+// 入参: count 所需像素数量
+// 返回: []pdfCompositePixel 尚未初始化的独占缓冲
+func (c *pdfCompositor) acquirePixels(count int) []pdfCompositePixel {
+	if c.scratch == nil {
+		c.scratch = &pdfCompositeScratch{}
+	}
+	return c.scratch.pixels.Acquire(count)
+}
+
+// releasePixels 归还当前调用已不再访问的像素缓冲
+// 入参: pixels 当前调用借用的缓冲
+func (c *pdfCompositor) releasePixels(pixels []pdfCompositePixel) {
+	if c.scratch != nil {
+		c.scratch.pixels.Release(pixels)
+	}
+}
+
+// acquireChannels 借用图案通道标记，仅在设备函数需要时分配
+// 入参: count 当前块像素数
+// 返回: []uint8 尚未初始化的独占通道缓冲
+func (c *pdfCompositor) acquireChannels(count int) []uint8 {
+	if c.scratch == nil {
+		c.scratch = &pdfCompositeScratch{}
+	}
+	return c.scratch.channels.Acquire(count)
+}
+
+// releaseChannels 归还不再参与嵌套合成的通道标记
+// 入参: channels 当前调用借用的通道缓冲
+func (c *pdfCompositor) releaseChannels(channels []uint8) {
+	if c.scratch != nil {
+		c.scratch.channels.Release(channels)
+	}
+}
+
+// releaseMasks 在当前块绘制结束后归还蒙版结果，不复用其他块的坐标缓存
+func (c *pdfCompositor) releaseMasks() {
+	if c.scratch != nil {
+		for _, mask := range c.masks {
+			c.scratch.masks.Release(mask)
+		}
+	}
+	clear(c.masks)
+}
+
+// pdfCompositeKey 区分图元的填充与描边几何
+type pdfCompositeKey struct {
+	path   *pdfgo.PathMark
+	text   *pdfgo.TextMark
+	image  *pdfgo.ImageMark
+	stroke bool
+}
+
+// pdfCompositeSceneKey 隔离不同图案坐标系，在单页内共享场景缓存预算
+type pdfCompositeSceneKey struct {
+	owner *pdfCompositeCache
+	mark  pdfCompositeKey
+}
+
+// pdfCompositeGeometry 保存后端中立的绘制命令及其页面边界
+type pdfCompositeGeometry struct {
+	scene *RasterPage
+	box   Box
+}
+
+// pdfCompositeColorSampler 复用渐变几何和相同轴向参数的颜色，不近似函数
+type pdfCompositeColorSampler struct {
+	paint      pdfgo.Paint
+	space      *pdfgo.ColorSpace
+	intent     pdfgo.Name
+	conversion pdfgo.ColorConversion
+	values     map[float64][4]float64
+	position   pdfgo.GradientPosition
+	converter  pdfgo.ColorConverter
+	colorants  *codecpdf.ShadingColorants
+	prepared   bool
+	converted  bool
+}
+
+// pdfImageProcessKey 隔离图像的组空间及软蒙版采样，不复用错误的原生映射
+type pdfImageProcessKey struct {
+	image    *pdfgo.Image
+	space    *pdfgo.ColorSpace
+	softMask bool
+}
+
+// pdfCompositeImageColor 复用图像颜色变换及相邻相同分量的精确结果
+type pdfCompositeImageColor struct {
+	mark       *pdfgo.ImageMark
+	space      *pdfgo.ColorSpace
+	source     *pdfgo.ColorSpace
+	intent     pdfgo.Name
+	conversion pdfgo.ColorConversion
+	converter  pdfgo.ColorConverter
+	input      [4]float64
+	output     [4]float64
+	ready      bool
+}
+
+// pdfCompositeCache 在单页内复用几何、图像分量及蒙版内容
+type pdfCompositeCache struct {
+	resources       *Resources
+	geometry        *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry]
+	clips           *renderCache[[32]byte, GeometryPath]
+	bounds          map[pdfCompositeKey]Box
+	images          map[*pdfgo.Image]*pdfgo.ImageComponents
+	imageMatrix     map[*pdfgo.ImageMark]pdfgo.Matrix
+	imageProcesses  map[pdfImageProcessKey]*pdfgo.ImageProcess
+	imageColor      pdfCompositeImageColor
+	masks           map[*pdfgo.SoftMask][]pdfCompositeNode
+	meshes          map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle
+	linearMeshes    *renderCache[pdfLinearMeshKey, []pdfgo.MeshTriangle]
+	patterns        map[pdfgo.Paint]*pdfCompositePattern
+	shadingPatterns map[*pdfgo.ShadingPattern][]pdfCompositeNode
+	shadingSources  map[pdfShadingSourceKey][]pdfCompositeNode
+	shadings        map[pdfGradientKey]pdfCompositeGeometry
+	transfers       codecpdf.TransferCache
+	textDisjoint    map[*pdfgo.GroupMark]bool
+	groups          map[*pdfgo.GroupMark]Box
+}
+
+// geometryCache 限制完整覆盖场景的保留量，边界独立保存以便排除无交集图元
+// 返回: *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry] 单页场景缓存
+func (c *pdfCompositeCache) geometryCache() *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry] {
+	if c.geometry == nil {
+		c.geometry = resourceCache[pdfCompositeSceneKey, pdfCompositeGeometry](c.resources, 64<<20)
+	}
+	return c.geometry
+}
+
+// clipCache 限制页面及嵌套图案共享的只读裁剪轮廓
+// 返回: *renderCache[[32]byte, GeometryPath] 裁剪缓存
+func (c *pdfCompositeCache) clipCache() *renderCache[[32]byte, GeometryPath] {
+	if c.clips == nil {
+		c.clips = resourceCache[[32]byte, GeometryPath](c.resources, 8<<20)
+	}
+	return c.clips
+}
+
+// pdfCompositeScratch 复用像素及蒙版缓冲，不跨页持有活动内容
+type pdfCompositeScratch struct {
+	pixels   codecpdf.CompositeBuffers[pdfCompositePixel]
+	masks    codecpdf.CompositeBuffers[float64]
+	channels codecpdf.CompositeBuffers[uint8]
+	rasters  codecpdf.RasterBuffers
+}
+
+// compositingCache 按需创建单页合成缓存，页面切换时由导入器释放
+// 返回: *pdfCompositeCache 当前页面缓存
+func (p *pdfImporter) compositingCache() *pdfCompositeCache {
+	if p.compositeCache == nil {
+		p.compositeCache = &pdfCompositeCache{resources: p.resources, images: map[*pdfgo.Image]*pdfgo.ImageComponents{}, masks: map[*pdfgo.SoftMask][]pdfCompositeNode{}, meshes: map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle{}}
+	}
+	return p.compositeCache
 }
 
 // compositeTextBounds 按字体描述符计算保守边界，仅用于排除不相交的外部字体
@@ -696,141 +905,6 @@ func (p *pdfImporter) opaque(n pdfCompositeNode, space *pdfgo.ColorSpace) (bool,
 	return true, nil
 }
 
-// direct 检查sRGB图元能否使用标准OFD透明度而无需背景合成
-// 返回: bool 是否可直接转换
-func (n pdfCompositeNode) direct() bool {
-	if g := n.group; g != nil {
-		single := n.textObject != nil && len(n.children) == 1 && (n.children[0].glyph != nil || n.children[0].text != nil && len(n.children[0].text.Glyphs) == 1)
-		if g.Knockout && !single || !codecpdf.NormalBlend(g.BlendMode) || g.ColorSpace != nil && !g.ColorSpace.SRGBEquivalent() {
-			return false
-		}
-		for _, child := range n.children {
-			if !child.direct() {
-				return false
-			}
-			if g.Alpha != 1 && child.group == nil {
-				style, _, _ := child.style()
-				if style.SoftMask != nil {
-					return false
-				}
-			}
-		}
-		return true
-	}
-	s, fill, stroke := n.style()
-	if (n.image == nil || n.image.Image.ImageMask) && (fill && s.Fill.Shading != nil || stroke && s.Stroke.Shading != nil) {
-		return false
-	}
-	if fill && stroke && (s.Fill.Alpha != 1 || s.Stroke.Alpha != 1 || s.SoftMask != nil) {
-		return false
-	}
-	if n.image != nil && s.FillOverprint {
-		return false
-	}
-	return codecpdf.NormalBlend(s.BlendMode) && !(fill && s.FillOverprint && codecpdf.OverprintNeedsSeparation(s.Fill) || stroke && s.StrokeOverprint && codecpdf.OverprintNeedsSeparation(s.Stroke))
-}
-
-// style 获取图元实际使用的图形状态
-// 返回: pdfgo.Style 图形状态, bool 是否填充, bool 是否描边
-func (n pdfCompositeNode) style() (pdfgo.Style, bool, bool) {
-	if n.path != nil {
-		return n.path.Style, n.path.Fill, n.path.Stroke
-	}
-	if n.text != nil {
-		mode := n.text.Mode % 4
-		return n.text.Style, mode == 0 || mode == 2, mode == 1 || mode == 2
-	}
-	return n.image.Style, true, false
-}
-
-// emit 向现有转换器交付原始图元
-// 入参: visitor 图元访问器
-// 返回: error 转换错误
-func (n pdfCompositeNode) emit(visitor pdfgo.Visitor) error {
-	if n.path != nil {
-		return visitor.Path(*n.path)
-	}
-	if n.text != nil {
-		return visitor.Text(*n.text)
-	}
-	if n.image != nil {
-		return visitor.Image(*n.image)
-	}
-	if n.textObject != nil || n.glyph != nil {
-		for _, child := range n.children {
-			if err := child.emit(visitor); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	return visitor.Group(*n.group, func(v pdfgo.Visitor) error {
-		for _, child := range n.children {
-			if err := child.emit(v); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-// coverage 构建白色几何覆盖，颜色和透明度由合成器单独计算
-// 入参: p 局部导入器, stroke 是否只取描边
-// 返回: error 几何错误
-func (n pdfCompositeNode) coverage(p *pdfImporter, stroke bool) error {
-	if n.group != nil {
-		for _, child := range n.children {
-			if child.group != nil {
-				if err := child.coverage(p, false); err != nil {
-					return err
-				}
-				continue
-			}
-			_, fill, hasStroke := child.style()
-			if fill {
-				if err := child.coverage(p, false); err != nil {
-					return err
-				}
-			}
-			if hasStroke {
-				if err := child.coverage(p, true); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
-	style, _, _ := n.style()
-	style.Fill, style.Stroke = pdfgo.Paint{RGB: [3]float64{1, 1, 1}, Alpha: 1}, pdfgo.Paint{RGB: [3]float64{1, 1, 1}, Alpha: 1}
-	style.SoftMask, style.BlendMode = nil, "Normal"
-	style.Transfer = nil
-	style.FillOverprint, style.StrokeOverprint = false, false
-	if n.path != nil {
-		mark := *n.path
-		mark.Style = style
-		mark.Fill, mark.Stroke = !stroke, stroke
-		return p.path(mark)
-	}
-	if n.text != nil {
-		mark := *n.text
-		mark.Style = style
-		mark.Mode = 0
-		if stroke {
-			mark.Mode = 1
-		}
-		return p.text(mark)
-	}
-	mark := n.image
-	path := pdfgo.Path{Segments: []pdfgo.Segment{
-		{Operator: "M", Points: []pdfgo.Point{mark.Matrix.Apply(pdfgo.Point{})}},
-		{Operator: "L", Points: []pdfgo.Point{mark.Matrix.Apply(pdfgo.Point{X: 1})}},
-		{Operator: "L", Points: []pdfgo.Point{mark.Matrix.Apply(pdfgo.Point{X: 1, Y: 1})}},
-		{Operator: "L", Points: []pdfgo.Point{mark.Matrix.Apply(pdfgo.Point{Y: 1})}},
-		{Operator: "C"},
-	}}
-	return p.path(pdfgo.PathMark{Path: path, Style: style, Fill: true})
-}
-
 // compositeRegionBounds 复用内置后端的图元覆盖，自定义后端保留整组度量
 // 入参: node 当前效果
 // 返回: Box 覆盖范围, error 编译或取消错误
@@ -1001,78 +1075,4 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 		}
 	}
 	return p.appendRasterGroup(output, box, 1, origins.origin)
-}
-
-// acquireCoverage 借用当前块的独占画布，保留活动画布供嵌套合成读取
-// 返回: *image.RGBA 未清空画布，不支持缓冲绘制的后端返回nil, error 无效绘制区域
-func (c *pdfCompositor) acquireCoverage() (*image.RGBA, error) {
-	if _, ok := c.importer.editor.Backends().Raster.(RasterBufferBackend); !ok {
-		return nil, nil
-	}
-	page := RasterPage{Width: c.box.W, Height: c.box.H, DPI: c.importer.rasterDPI}
-	w, h, err := page.PixelSize()
-	if err != nil {
-		return nil, err
-	}
-	if c.scratch == nil {
-		c.scratch = &pdfCompositeScratch{}
-	}
-	return c.scratch.rasters.Acquire(image.Rect(0, 0, w, h)), nil
-}
-
-// releaseCoverage 归还当前调用不再读取的画布，限制单次合成保留的内存
-// 入参: coverage 当前调用的覆盖图像
-func (c *pdfCompositor) releaseCoverage(coverage image.Image) {
-	if _, ok := c.importer.editor.Backends().Raster.(RasterBufferBackend); !ok || c.scratch == nil {
-		return
-	}
-	if buffer, ok := coverage.(*image.RGBA); ok {
-		c.scratch.rasters.Release(buffer)
-	}
-}
-
-// acquirePixels 为当前合成器借用独立像素缓冲
-// 入参: count 所需像素数量
-// 返回: []pdfCompositePixel 尚未初始化的独占缓冲
-func (c *pdfCompositor) acquirePixels(count int) []pdfCompositePixel {
-	if c.scratch == nil {
-		c.scratch = &pdfCompositeScratch{}
-	}
-	return c.scratch.pixels.Acquire(count)
-}
-
-// releasePixels 归还当前调用已不再访问的像素缓冲
-// 入参: pixels 当前调用借用的缓冲
-func (c *pdfCompositor) releasePixels(pixels []pdfCompositePixel) {
-	if c.scratch != nil {
-		c.scratch.pixels.Release(pixels)
-	}
-}
-
-// acquireChannels 借用图案通道标记，仅在设备函数需要时分配
-// 入参: count 当前块像素数
-// 返回: []uint8 尚未初始化的独占通道缓冲
-func (c *pdfCompositor) acquireChannels(count int) []uint8 {
-	if c.scratch == nil {
-		c.scratch = &pdfCompositeScratch{}
-	}
-	return c.scratch.channels.Acquire(count)
-}
-
-// releaseChannels 归还不再参与嵌套合成的通道标记
-// 入参: channels 当前调用借用的通道缓冲
-func (c *pdfCompositor) releaseChannels(channels []uint8) {
-	if c.scratch != nil {
-		c.scratch.channels.Release(channels)
-	}
-}
-
-// releaseMasks 在当前块绘制结束后归还蒙版结果，不复用其他块的坐标缓存
-func (c *pdfCompositor) releaseMasks() {
-	if c.scratch != nil {
-		for _, mask := range c.masks {
-			c.scratch.masks.Release(mask)
-		}
-	}
-	clear(c.masks)
 }

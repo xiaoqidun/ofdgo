@@ -132,6 +132,28 @@ func (track U3DMotionTrack) Sample(ctx context.Context, time float64, loop bool)
 	return result, nil
 }
 
+// Matrix 将关键帧位移、旋转和缩放组合成相对父项的列式仿射矩阵，不使用Time
+// 返回: [16]float64 先缩放、再旋转、后平移的变换, error 姿态数值错误
+func (frame U3DKeyFrame) Matrix() ([16]float64, error) {
+	q, err := frame.quaternion()
+	if err != nil {
+		return [16]float64{}, err
+	}
+	w, x, y, z := q[0], q[1], q[2], q[3]
+	matrix := [16]float64{
+		1 - 2*(y*y+z*z), 2 * (x*y + w*z), 2 * (x*z - w*y), 0,
+		2 * (x*y - w*z), 1 - 2*(x*x+z*z), 2 * (y*z + w*x), 0,
+		2 * (x*z + w*y), 2 * (y*z - w*x), 1 - 2*(x*x+y*y), 0,
+		float64(frame.Displacement[0]), float64(frame.Displacement[1]), float64(frame.Displacement[2]), 1,
+	}
+	for axis, scale := range frame.Scale {
+		for component := range 3 {
+			matrix[axis*4+component] *= float64(scale)
+		}
+	}
+	return matrix, nil
+}
+
 // quaternion 校验姿态分量并归一化W、X、Y、Z旋转四元数
 // 返回: [4]float64 单位四元数, error 非有限或零旋转错误
 func (frame U3DKeyFrame) quaternion() ([4]float64, error) {
@@ -156,28 +178,6 @@ func (frame U3DKeyFrame) quaternion() ([4]float64, error) {
 		rotation[i] /= length
 	}
 	return rotation, nil
-}
-
-// Matrix 将关键帧位移、旋转和缩放组合成相对父项的列式仿射矩阵，不使用Time
-// 返回: [16]float64 先缩放、再旋转、后平移的变换, error 姿态数值错误
-func (frame U3DKeyFrame) Matrix() ([16]float64, error) {
-	q, err := frame.quaternion()
-	if err != nil {
-		return [16]float64{}, err
-	}
-	w, x, y, z := q[0], q[1], q[2], q[3]
-	matrix := [16]float64{
-		1 - 2*(y*y+z*z), 2 * (x*y + w*z), 2 * (x*z - w*y), 0,
-		2 * (x*y - w*z), 1 - 2*(x*x+z*z), 2 * (y*z + w*x), 0,
-		2 * (x*z + w*y), 2 * (y*z - w*x), 1 - 2*(x*x+y*y), 0,
-		float64(frame.Displacement[0]), float64(frame.Displacement[1]), float64(frame.Displacement[2]), 1,
-	}
-	for axis, scale := range frame.Scale {
-		for component := range 3 {
-			matrix[axis*4+component] *= float64(scale)
-		}
-	}
-	return matrix, nil
 }
 
 // trackMatrix 按资源和轨道名称采样节点变换，不推测未命名轨道的绑定关系
