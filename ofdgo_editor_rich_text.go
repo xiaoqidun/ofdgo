@@ -48,6 +48,7 @@ func (e *Editor) AddRichText(page int, box Box, value RichText) (string, error) 
 		if _, err := e.page(page); err != nil {
 			return err
 		}
+		defer e.bindPageIndex(page)()
 		if _, err := creationBox(editorBoxString(box)); err != nil {
 			return err
 		}
@@ -112,6 +113,7 @@ func (e *Editor) ResizeRichTextFrame(page int, id string, offset, width float64)
 // 返回: error 识别或删除错误
 func (e *Editor) DeleteRichText(page int, id string) error {
 	return e.Transaction(func(e *Editor) error {
+		defer e.bindPageIndex(page)()
 		object, err := e.Object(page, id)
 		if err != nil {
 			return err
@@ -137,6 +139,7 @@ func (e *Editor) DeleteRichText(page int, id string) error {
 // 入参: page 页面索引, id 对象标识
 // 返回: RichText 编辑内容, error 识别或持久化错误
 func (e *Editor) RichText(page int, id string) (RichText, error) {
+	defer e.bindPageIndex(page)()
 	object, err := e.Object(page, id)
 	if err != nil {
 		return RichText{}, err
@@ -148,6 +151,7 @@ func (e *Editor) RichText(page int, id string) (RichText, error) {
 // 入参: page 页面索引, id 富文本或安全普通文字对象标识
 // 返回: Box 局部编辑框, Matrix 页面变换, error 识别或几何错误
 func (e *Editor) RichTextFrame(page int, id string) (Box, Matrix, error) {
+	defer e.bindPageIndex(page)()
 	object, err := e.Object(page, id)
 	if err != nil {
 		return Box{}, Matrix{}, err
@@ -176,6 +180,10 @@ func (e *Editor) RichTextFrame(page int, id string) (Box, Matrix, error) {
 func (e *Editor) AddCompositeRichText(page int, path ObjectPath, box Box, value RichText) (int, error) {
 	var index int
 	err := e.Transaction(func(e *Editor) error {
+		if _, err := e.page(page); err != nil {
+			return err
+		}
+		defer e.bindPageIndex(page)()
 		if _, err := creationBox(editorBoxString(box)); err != nil {
 			return err
 		}
@@ -203,6 +211,7 @@ func (e *Editor) CompositeRichText(page int, member CompositeMember) (RichText, 
 	if _, err := e.page(page); err != nil {
 		return RichText{}, Box{}, Matrix{}, err
 	}
+	defer e.bindPageIndex(page)()
 	if member.Object.Type != "CompositeObject" {
 		return RichText{}, Box{}, Matrix{}, ErrNotRichText
 	}
@@ -237,6 +246,7 @@ func (e *Editor) TargetRichText(page int, path ObjectPath) (RichText, error) {
 // 入参: page 页面索引, path 完整对象路径, reflow 是否允许重排普通文字
 // 返回: RichText 内容, Box 局部编辑框, Matrix 页面变换, error 路径、外观或排版错误
 func (e *Editor) PrepareRichText(page int, path ObjectPath, reflow bool) (RichText, Box, Matrix, error) {
+	defer e.bindPageIndex(page)()
 	var text TextObject
 	var matrix Matrix
 	if len(path.Children) == 0 {
@@ -404,6 +414,7 @@ type textLayoutGroup struct {
 // 返回: error 校验或提交错误
 func (e *Editor) updateRichTextFrame(page int, id string, value RichText, offset, width float64, reflow bool) error {
 	return e.Transaction(func(e *Editor) error {
+		defer e.bindPageIndex(page)()
 		old, err := e.Object(page, id)
 		if err != nil {
 			return err
@@ -507,6 +518,7 @@ func (e *Editor) updateCompositeRichText(page int, path ObjectPath, index int, v
 		value.AutoWidth = false
 	}
 	return e.Transaction(func(e *Editor) error {
+		defer e.bindPageIndex(page)()
 		member, err := e.CompositeObject(page, path, index)
 		if err != nil {
 			return err
@@ -645,6 +657,13 @@ func (e *Editor) prepareRichText(box Box, value RichText) (GraphicObject, richTe
 		}
 		if err := e.richTextColors(&result.objects[i]); err != nil {
 			return GraphicObject{}, richTextMetadata{}, err
+		}
+		if result.objects[i].Type == "TextObject" && e.source != nil && len(e.pageScope) > 0 {
+			mapped, _, err := e.promoteScopedResource(result.objects[i].TextObject.Font, "Font", e.pageScope, nil, true, make(map[string]bool))
+			if err != nil {
+				return GraphicObject{}, richTextMetadata{}, err
+			}
+			result.objects[i].TextObject.Font = mapped
 		}
 	}
 	resource, err := e.addOwnedVector(context.Background(), result.objects, extent.W, extent.H)

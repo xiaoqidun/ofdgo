@@ -89,7 +89,7 @@ func (d *u3dDecoder) boneWeights(values *u3dValues, name string, chain int, inde
 				return err
 			}
 		}
-		var total float32
+		var total float64
 		for i := 0; i+1 < len(list); i++ {
 			if i%256 == 0 {
 				if err := d.ctx.Err(); err != nil {
@@ -97,16 +97,16 @@ func (d *u3dDecoder) boneWeights(values *u3dValues, name string, chain int, inde
 				}
 			}
 			list[i].Weight = float32(float64(r.value(2, false)) * float64(weights.InverseQuantization))
-			total += list[i].Weight
+			total += float64(list[i].Weight)
 			if err := r.err(); err != nil {
 				return err
 			}
-			if !finite(float64(total)) || total > 1 {
+			if !finite(total) || total > 1+1e-6 {
 				return fmt.Errorf("invalid U3D bone weight sum")
 			}
 		}
 		if len(list) != 0 {
-			list[len(list)-1].Weight = 1 - total
+			list[len(list)-1].Weight = float32(max(0, 1-total))
 		}
 		weights.Offsets[position+1] = uint32(needed)
 	}

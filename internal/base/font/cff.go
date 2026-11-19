@@ -302,7 +302,8 @@ func SanitizeCFF(data []byte) ([]byte, error) {
 		}
 		finalPrivData = encodeCFFDict(pDict)
 	}
-	return encodeSanitizedCFF(data[:hdrSize], nameIndexData, topDict, stringIndexData, globalSubrIndexData, charStringsData, finalPrivData, localSubrData), nil
+	stringIndexData, charsetData := sanitizedCFFCharset(stringIndexData, len(chars))
+	return encodeSanitizedCFF(data[:hdrSize], nameIndexData, topDict, stringIndexData, globalSubrIndexData, charsetData, charStringsData, finalPrivData, localSubrData), nil
 }
 
 // GetCFFCIDRuneMap 获取CID到包装字体字符的映射
@@ -563,8 +564,8 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 		}
 	}
 	privateDict := make(cffDict)
-	if len(privateDicts) > 0 {
-		for k, v := range privateDicts[0] {
+	for _, pd := range privateDicts[:min(1, len(privateDicts))] {
+		for k, v := range pd {
 			privateDict[k] = v
 		}
 	}
@@ -577,30 +578,76 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 	}
 	finalPrivData := encodeCFFDict(privateDict)
 	charStringsData := encodeCFFIndex(inlined)
-	return encodeSanitizedCFF(data[:hdrSize], nameIndexData, topDict, stringIndexData, encodeCFFIndex(nil), charStringsData, finalPrivData, nil), nil
+	stringIndexData, charsetData := sanitizedCFFCharset(stringIndexData, len(inlined))
+	return encodeSanitizedCFF(data[:hdrSize], nameIndexData, topDict, stringIndexData, encodeCFFIndex(nil), charsetData, charStringsData, finalPrivData, nil), nil
+}
+
+// sanitizedCFFCharset 为转换后的非CID字体生成显式字符集并按需补充字符串索引
+// 入参: stringIndexData 原始字符串索引, numGlyphs 字形总数
+// 返回: []byte 字符串索引数据, []byte 字符集数据
+func sanitizedCFFCharset(stringIndexData []byte, numGlyphs int) ([]byte, []byte) {
+	if numGlyphs <= 1 {
+		return stringIndexData, nil
+	}
+	nLeft := numGlyphs - 2
+	singleRange := []byte{2, 0, 1, byte(nLeft >> 8), byte(nLeft)}
+	maxStd := len(cffStandardStrings) - 1
+	if numGlyphs-1 <= maxStd {
+		return stringIndexData, singleRange
+	}
+	origStrings, _, _ := readType2Index(stringIndexData, 0)
+	extendStrings := func(startSID, count int) []byte {
+		combined := make([][]byte, len(origStrings)+count)
+		copy(combined, origStrings)
+		for i := range count {
+			combined[len(origStrings)+i] = strconv.AppendInt([]byte{'g'}, int64(startSID+i), 10)
+		}
+		return encodeCFFIndex(combined)
+	}
+	if numGlyphs-1+len(origStrings) <= 64999 {
+		stringIndexData = extendStrings(maxStd+1, numGlyphs-1-maxStd)
+		if len(origStrings) == 0 {
+			return stringIndexData, singleRange
+		}
+		stdLeft := maxStd - 1
+		first2 := maxStd + 1 + len(origStrings)
+		nLeft2 := numGlyphs - 2 - maxStd
+		return stringIndexData, []byte{2, 0, 1, byte(stdLeft >> 8), byte(stdLeft), byte(first2 >> 8), byte(first2), byte(nLeft2 >> 8), byte(nLeft2)}
+	}
+	if need := numGlyphs - 1 - maxStd - len(origStrings); need > 0 {
+		stringIndexData = extendStrings(maxStd+1+len(origStrings), need)
+	}
+	return stringIndexData, singleRange
 }
 
 // encodeSanitizedCFF 按字典编码长度收敛偏移并组装规范化字体
-// 入参: header 头部, names 名称索引, dict 顶层字典, strings 字符串索引, globals 全局子程序索引, chars 字形索引, private 私有字典, locals 局部子程序索引
+// 入参: header 头部, names 名称索引, dict 顶层字典, strings 字符串索引, globals 全局子程序索引, charset 字符集, chars 字形索引, private 私有字典, locals 局部子程序索引
 // 返回: []byte CFF字体数据
-func encodeSanitizedCFF(header, names []byte, dict cffDict, strings, globals, chars, private, locals []byte) []byte {
+func encodeSanitizedCFF(header, names []byte, dict cffDict, strings, globals, charset, chars, private, locals []byte) []byte {
+	if len(charset) > 0 {
+		dict[15] = []float64{0}
+	}
 	dict[17] = []float64{0}
 	dict[18] = []float64{float64(len(private)), 0}
 	prefix := len(header) + len(names) + len(strings) + len(globals)
 	var top []byte
 	for {
 		top = encodeCFFIndex([][]byte{encodeCFFDict(dict)})
-		charOffset := prefix + len(top)
+		charsetOffset := prefix + len(top)
+		charOffset := charsetOffset + len(charset)
 		privateOffset := charOffset + len(chars)
-		if dict[17][0] == float64(charOffset) && dict[18][1] == float64(privateOffset) {
+		if (len(charset) == 0 || dict[15][0] == float64(charsetOffset)) && dict[17][0] == float64(charOffset) && dict[18][1] == float64(privateOffset) {
 			break
+		}
+		if len(charset) > 0 {
+			dict[15][0] = float64(charsetOffset)
 		}
 		dict[17][0] = float64(charOffset)
 		dict[18][1] = float64(privateOffset)
 	}
 	var out bytes.Buffer
-	out.Grow(prefix + len(top) + len(chars) + len(private) + len(locals))
-	for _, part := range [][]byte{header, names, top, strings, globals, chars, private, locals} {
+	out.Grow(prefix + len(top) + len(charset) + len(chars) + len(private) + len(locals))
+	for _, part := range [][]byte{header, names, top, strings, globals, charset, chars, private, locals} {
 		out.Write(part)
 	}
 	return out.Bytes()
@@ -896,7 +943,7 @@ func encodeNumberCFF(buf *bytes.Buffer, val float64) {
 // encodeCFFIndex 编码CFF索引结构
 // 入参: items 数据项列表
 // 返回: []byte 编码后的索引数据
-func encodeCFFIndex(items []([]byte)) []byte {
+func encodeCFFIndex(items [][]byte) []byte {
 	count := len(items)
 	if count == 0 {
 		return []byte{0, 0}

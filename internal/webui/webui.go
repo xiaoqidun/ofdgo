@@ -373,15 +373,23 @@ func (s *Session) Close() error {
 // 入参: index 文档索引，从0开始
 // 返回: *Session 文档会话, error 错误信息
 func (s *Session) Document(index int) (*Session, error) {
-	reader := s.Reader
-	if s.editor != nil {
-		var err error
-		reader, err = s.editor.Reader(context.Background())
-		if err != nil {
+	var reader *ofdgo.Reader
+	var err error
+	if s.editor != nil && s.editing {
+		if err = s.editor.SelectDocument(index); err != nil {
 			return nil, err
 		}
+		reader, err = s.editor.Reader(context.Background())
+	} else {
+		base := s.Reader
+		if s.editor != nil {
+			base, err = s.editor.Reader(context.Background())
+			if err != nil {
+				return nil, err
+			}
+		}
+		reader, err = base.Document(index)
 	}
-	reader, err := reader.Document(index)
 	if err != nil {
 		return nil, err
 	}
@@ -393,20 +401,15 @@ func (s *Session) Document(index int) (*Session, error) {
 	next.fontFS = s.fontFS
 	if next.fontFS != nil {
 		next.Renderer.SetFontFS(next.fontFS)
+		if s.editor != nil && s.editing {
+			s.editor.SetFontFS(next.fontFS)
+		}
 	}
-	if s.editor == nil {
-		return next, nil
+	if s.editor != nil && s.editing {
+		s.editor.SetRenderBackends(next.Renderer.Backends())
+		next.editing = true
 	}
-	next.editor, err = reader.Editor()
-	if err != nil {
-		return nil, err
-	}
-	next.editor.SetHistoryLimit(100)
-	if next.fontFS != nil {
-		next.editor.SetFontFS(next.fontFS)
-	}
-	next.editor.SetRenderBackends(next.Renderer.Backends())
-	next.editing = true
+	next.editor = s.editor
 	return next, nil
 }
 
@@ -833,6 +836,8 @@ type editorClipboard struct {
 	token     string
 	selection *ofdgo.ObjectSelection
 	packet    *ofdgo.Editor
+	originX   float64
+	originY   float64
 }
 
 // editorInfo 编辑文档信息与操作状态
@@ -3437,60 +3442,13 @@ func (e *businessEngine) writeAnnotation(args []platformValue) (any, error) {
 				}
 				object = ofdgo.GraphicObject{Type: "TextObject", TextObject: text}
 			}
-			if options.Area == nil || len(pages) == 0 {
-				added, err := e.currentEditor.AddWatermarks(e.operationContext(), pages, object, ofdgo.WatermarkOptions{Creator: options.Creator, Angle: options.Angle, Tile: options.Tile, Area: options.Area})
-				if err != nil {
-					return err
-				}
-				for i, index := range pages {
-					if index == page {
-						ids = append(ids, "annotation:"+added[i])
-					}
-				}
-				return nil
-			}
-			firstBox, err := e.editorPageBox(pages[0])
+			added, err := e.currentEditor.AddWatermarks(e.operationContext(), pages, object, ofdgo.WatermarkOptions{Creator: options.Creator, Angle: options.Angle, Tile: options.Tile, Area: options.Area})
 			if err != nil {
 				return err
 			}
-			sameOrigin := true
-			for _, index := range pages[1:] {
-				pBox, boxErr := e.editorPageBox(index)
-				if boxErr != nil {
-					return boxErr
-				}
-				if pBox.X != firstBox.X || pBox.Y != firstBox.Y {
-					sameOrigin = false
-					break
-				}
-			}
-			if sameOrigin {
-				area, boxErr := e.pageBoxFromViewport(pages[0], *options.Area)
-				if boxErr != nil {
-					return boxErr
-				}
-				added, err := e.currentEditor.AddWatermarks(e.operationContext(), pages, object, ofdgo.WatermarkOptions{Creator: options.Creator, Angle: options.Angle, Tile: options.Tile, Area: &area})
-				if err != nil {
-					return err
-				}
-				for i, index := range pages {
-					if index == page {
-						ids = append(ids, "annotation:"+added[i])
-					}
-				}
-				return nil
-			}
-			for _, index := range pages {
-				area, boxErr := e.pageBoxFromViewport(index, *options.Area)
-				if boxErr != nil {
-					return boxErr
-				}
-				added, err := e.currentEditor.AddWatermarks(e.operationContext(), []int{index}, object, ofdgo.WatermarkOptions{Creator: options.Creator, Angle: options.Angle, Tile: options.Tile, Area: &area})
-				if err != nil {
-					return err
-				}
+			for i, index := range pages {
 				if index == page {
-					ids = append(ids, "annotation:"+added[0])
+					ids = append(ids, "annotation:"+added[i])
 				}
 			}
 			return nil
@@ -3692,15 +3650,23 @@ func (e *businessEngine) captureEditorSelection(page int, ids []string) (*editor
 	if err != nil {
 		return nil, err
 	}
+	box, err := e.editorPageBox(page)
+	if err != nil {
+		return nil, err
+	}
 	selection, err := e.currentEditor.CaptureTargets(page, paths)
-	return &editorClipboard{selection: selection}, err
+	return &editorClipboard{selection: selection, originX: box.X, originY: box.Y}, err
 }
 
-// pasteEditorSelection 原子粘贴正文和注解，共享字体与图片数据
+// pasteEditorSelection 原子粘贴正文和注解，共享字体与图片数据并对齐跨页原点
 // 入参: page 目标页, clipboard 快照, dx 横向位移, dy 纵向位移
 // 返回: []string 新画布标识, error 错误信息
 func (e *businessEngine) pasteEditorSelection(page int, clipboard *editorClipboard, dx, dy float64) ([]string, error) {
-	ids, annotations, err := e.currentEditor.PasteSelection(page, clipboard.selection, dx, dy)
+	box, err := e.editorPageBox(page)
+	if err != nil {
+		return nil, err
+	}
+	ids, annotations, err := e.currentEditor.PasteSelection(page, clipboard.selection, dx+box.X-clipboard.originX, dy+box.Y-clipboard.originY)
 	for _, id := range annotations {
 		ids = append(ids, "annotation:"+id)
 	}
@@ -4677,16 +4643,23 @@ func (e *businessEngine) updateTextSelection(args []platformValue) (any, error) 
 // 入参: args 页面、对象路径和内容
 // 返回: any SVG预览, error 错误信息
 func (e *businessEngine) previewPositionedText(args []platformValue) (any, error) {
-	object, err := e.editorObjectAt(args[0].Int(), args[1].String())
+	pageIndex := args[0].Int()
+	object, err := e.editorObjectAt(pageIndex, args[1].String())
 	if err != nil {
 		return nil, err
 	}
 	if object.Type != "TextObject" {
 		return nil, fmt.Errorf("object is not text")
 	}
-	if err := e.currentEditor.RewriteText(&object.TextObject, args[2].String()); err != nil {
+	if err := e.currentEditor.RewritePageText(pageIndex, &object.TextObject, args[2].String()); err != nil {
 		return nil, err
 	}
+	sourcePage, err := e.currentSession.pageContent(pageIndex)
+	if err != nil {
+		return nil, err
+	}
+	restore := e.currentSession.Renderer.BindPageResources(sourcePage)
+	defer restore()
 	measured, err := e.currentSession.Renderer.MeasureObject(object, ofdgo.MeasureOptions{})
 	if err != nil {
 		return nil, err
@@ -4699,9 +4672,15 @@ func (e *businessEngine) previewPositionedText(args []platformValue) (any, error
 		return nil, err
 	}
 	object.TextObject.Boundary = fmt.Sprintf("%g %g %g %g", boundary.X-box.X, boundary.Y-box.Y, boundary.W, boundary.H)
-	page := &ofdgo.PageContent{Area: ofdgo.PageArea{PhysicalBox: fmt.Sprintf("0 0 %g %g", box.W, box.H)}, Content: ofdgo.Content{Layer: []ofdgo.Layer{{Objects: []ofdgo.GraphicObject{object}}}}}
+	page := *sourcePage
+	page.Template = nil
+	page.Area = ofdgo.PageArea{PhysicalBox: fmt.Sprintf("0 0 %g %g", box.W, box.H)}
+	page.Content = ofdgo.Content{Layer: []ofdgo.Layer{{Objects: []ofdgo.GraphicObject{object}}}}
+	prevAnnotations := e.currentSession.Renderer.RenderAnnotations
+	e.currentSession.Renderer.RenderAnnotations = false
+	defer func() { e.currentSession.Renderer.RenderAnnotations = prevAnnotations }()
 	var output bytes.Buffer
-	if err := e.currentSession.Renderer.RenderToSVG(page, &output); err != nil {
+	if err := e.currentSession.Renderer.RenderToSVG(&page, &output); err != nil {
 		return nil, err
 	}
 	return output.String(), nil
@@ -5571,7 +5550,19 @@ func (e *businessEngine) importObjects(args []platformValue) (any, error) {
 		return nil, err
 	}
 	defer reader.Close()
-	objects, annotations, err := e.currentEditor.ImportSelection(context.Background(), reader, args[0].Int(), ofdgo.ObjectImportOptions{DX: args[2].Float(), DY: args[3].Float(), AllowDecrypted: true})
+	targetPage := args[0].Int()
+	dstBox, err := e.editorPageBox(targetPage)
+	if err != nil {
+		return nil, err
+	}
+	dx, dy := args[2].Float(), args[3].Float()
+	if srcPage, srcErr := reader.PageContentByIndex(0); srcErr == nil {
+		if srcBox, boxErr := ofdgo.NewRenderer(reader).GetPageBox(srcPage); boxErr == nil {
+			dx += dstBox.X - srcBox.X
+			dy += dstBox.Y - srcBox.Y
+		}
+	}
+	objects, annotations, err := e.currentEditor.ImportSelection(context.Background(), reader, targetPage, ofdgo.ObjectImportOptions{DX: dx, DY: dy, AllowDecrypted: true})
 	if err != nil {
 		return nil, err
 	}
@@ -6781,21 +6772,18 @@ func (e *businessEngine) exportVersion(args []platformValue) (any, error) {
 	return e.saveEditor(editor, []platformValue{args[1], args[2], platformNull(), platformValueOf(map[string]any{"mode": 0}), args[3]})
 }
 
-// selectDocumentVersion 切换阅读版本，已有编辑器时保留修改及历史，否则直接创建阅读视图
+// selectDocumentVersion 切换阅读版本，保留未保存修改与编辑实例，不写入编辑撤销历史
 // 入参: args 版本标识
 // 返回: any 文档信息, error 切换错误
 func (e *businessEngine) selectDocumentVersion(args []platformValue) (any, error) {
 	if e.currentSession == nil || len(args) != 1 || args[0].Type() != platformTypeString {
 		return nil, fmt.Errorf("invalid version selection")
 	}
-	id := args[0].String()
-	if e.currentEditor != nil {
-		return e.changeAtomicObjects(func() error { return e.currentEditor.SelectVersion(id) })
-	}
-	session, err := e.currentSession.DocumentVersion(id)
+	session, err := e.currentSession.DocumentVersion(args[0].String())
 	if err != nil {
 		return nil, err
 	}
+	session.editor = e.currentEditor
 	session.input, e.currentSession.input = e.currentSession.input, nil
 	_ = e.currentSession.Close()
 	e.currentSession = session
@@ -6962,7 +6950,7 @@ func (e *businessEngine) changePackageDocument(args []platformValue) (any, error
 	})
 }
 
-// selectDocument 切换包内文档，保留编辑快照并清除跨文档剪贴板
+// selectDocument 切换包内文档，保留编辑快照与撤销历史并清除跨文档剪贴板
 // 入参: args 文档索引
 // 返回: any 文档信息, error 错误信息
 func (e *businessEngine) selectDocument(args []platformValue) (any, error) {
@@ -6976,29 +6964,64 @@ func (e *businessEngine) selectDocument(args []platformValue) (any, error) {
 	session.input, e.currentSession.input = e.currentSession.input, nil
 	_ = e.currentSession.Close()
 	e.currentSession, e.currentEditor = session, session.editor
-	if e.pendingImport != nil {
-		_ = e.pendingImport.Close()
-		e.pendingImport = nil
-	}
+	e.clearImport()
 	e.copiedObjects, e.copiedStyle = nil, nil
-	if e.currentEditor == nil {
+	if !e.currentSession.editing {
 		return e.currentSession.Summary(), nil
 	}
 	return e.editorSummary(), nil
 }
 
-// editDocument 将已打开文档接入编辑器，沿用页面、资源及字体配置
+// editDocument 将已打开文档接入编辑器，沿用页面、资源及字体配置并同步阅读态切换的文档与版本
 // 入参: args 当前页索引，省略时使用首页
 // 返回: any 编辑状态, error 错误信息
 func (e *businessEngine) editDocument(args []platformValue) (any, error) {
 	if e.currentSession == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
+	ctx := e.operationContext()
+	page := 0
+	if len(args) != 0 {
+		page = args[0].Int()
+	}
 	if e.currentEditor != nil {
+		docIndex := e.currentSession.Reader.DocumentIndex()
+		verID, err := e.currentSession.Reader.DocumentVersionID()
+		if err != nil {
+			return nil, err
+		}
+		switched := false
+		if e.currentEditor.DocumentIndex() != docIndex {
+			if err := e.currentEditor.SelectDocumentContext(ctx, docIndex); err != nil {
+				return nil, err
+			}
+			switched = true
+		}
+		editorVer, err := e.currentEditor.DocumentVersionID()
+		if err != nil {
+			return nil, err
+		}
+		if editorVer != verID {
+			if err := e.currentEditor.SelectVersionContext(ctx, verID); err != nil {
+				return nil, err
+			}
+			switched = true
+		}
+		if switched {
+			e.currentSession.editing = true
+			e.copiedObjects, e.copiedStyle = nil, nil
+			return e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+		}
+		content, err := e.currentEditor.PageContext(ctx, page)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.syncEditorPageIDs(page, content); err != nil {
+			return nil, err
+		}
 		e.currentSession.editing = true
 		return e.editorSummary(), nil
 	}
-	ctx := e.operationContext()
 	editor, err := e.currentSession.Reader.EditorContext(ctx)
 	if err != nil {
 		return nil, err
@@ -7008,10 +7031,6 @@ func (e *businessEngine) editDocument(args []platformValue) (any, error) {
 		editor.SetFontFS(e.currentSession.fontFS)
 	}
 	editor.SetRenderBackends(e.currentSession.Renderer.Backends())
-	page := 0
-	if len(args) != 0 {
-		page = args[0].Int()
-	}
 	content, err := editor.PageContext(ctx, page)
 	if err != nil {
 		return nil, err
@@ -8652,13 +8671,7 @@ func (s *Session) scanFontInfo() bool {
 // localizeFontInfos 统一内嵌字体在概要和完整统计中的中文名称
 // 入参: fonts 当前文档的字体诊断信息
 func (s *Session) localizeFontInfos(fonts []FontInfo) {
-	for index := range fonts {
-		if fonts[index].Embedded {
-			if face, err := s.Reader.FontFace(fonts[index].ID, 3, 0x0804); err == nil {
-				fonts[index].MatchedFace = face
-			}
-		}
-	}
+	s.Renderer.LocalizeFontInfos(fonts, 3, 0x0804)
 }
 
 // scanFontInfoBatch 为大文档批量统计字体，限制每次处理的页数与耗时

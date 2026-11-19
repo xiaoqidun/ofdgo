@@ -84,6 +84,7 @@ func (e *Editor) FlipObjects(page int, ids []string, axis string) error {
 // 入参: page 页面索引, ids 对象标识, box 页面毫米坐标中的目标范围
 // 返回: error 错误信息
 func (e *Editor) ResizeObjects(page int, ids []string, box Box) error {
+	defer e.bindPageIndex(page)()
 	if err := validateCreationBox(box); err != nil {
 		return err
 	}
@@ -120,6 +121,7 @@ func (e *Editor) ResizeObjects(page int, ids []string, box Box) error {
 // 入参: page 页面索引, id 图片对象标识, box 页面毫米坐标中的保留范围
 // 返回: error 错误信息
 func (e *Editor) CropImage(page int, id string, box Box) error {
+	defer e.bindPageIndex(page)()
 	object, err := e.Object(page, id)
 	if err != nil {
 		return err
@@ -140,6 +142,7 @@ func (e *Editor) CropImage(page int, id string, box Box) error {
 // 入参: page 页面索引, id 图片对象标识, mode 为contain（完整显示）或cover（填满裁剪）
 // 返回: error 错误信息
 func (e *Editor) FitImage(page int, id, mode string) error {
+	defer e.bindPageIndex(page)()
 	object, err := e.Object(page, id)
 	if err != nil {
 		return err
@@ -274,6 +277,7 @@ func editorFlip(axis string) (Matrix, error) {
 // 入参: page 页面索引, ids 对象标识, matrix 直角旋转或镜像矩阵
 // 返回: error 错误信息
 func (e *Editor) orientObjects(page int, ids []string, matrix Matrix) error {
+	defer e.bindPageIndex(page)()
 	objects, _, err := e.selectedObjects(page, ids)
 	if err != nil || len(objects) == 0 || matrix == IdentityMatrix {
 		return err
@@ -297,6 +301,7 @@ func (e *Editor) orientObjects(page int, ids []string, matrix Matrix) error {
 // 入参: page 页面索引, objects 选区快照, transform 单对象变换
 // 返回: error 错误信息
 func (e *Editor) transformObjects(page int, objects []GraphicObject, transform func(GraphicObject) (GraphicObject, error)) (err error) {
+	defer e.bindPageIndex(page)()
 	count, maximum := len(e.resources), e.maxID
 	idsReady := e.source != nil && e.source.idsReady
 	defer func() {
@@ -335,7 +340,9 @@ func (e *Editor) transformMatrix(object GraphicObject, matrix Matrix) (GraphicOb
 		return GraphicObject{}, err
 	}
 	defer reader.Close()
-	return e.transformImageResource(object, matrix, origin, e.newRenderer(reader))
+	renderer := e.newRenderer(reader)
+	defer renderer.bindParsedResources(e.pageScope)()
+	return e.transformImageResource(object, matrix, origin, renderer)
 }
 
 // imageTransformNeedsContainer 判断图片变换是否需保留边框或隐式坐标中的动作

@@ -708,8 +708,9 @@ function createDocumentState() {
 		savedRevision: null,
 		saveHandle: null,
 		saveStamp: null,
-		packageDirty: false,
 		encryptionDirty: false,
+		savedEncrypted: false,
+		editorSyncPending: false,
 		insertObject: null,
 		importPageCount: 0,
 		importDocumentCount: 0,
@@ -850,7 +851,7 @@ el.printButton.addEventListener("click", openPrintPanel);
 el.editorTools.addEventListener("scroll", () => fontPicker.position());
 
 function updatePendingChanges() {
-	setDirty(state.packageDirty || state.encryptionDirty || Boolean(state.editorInfo) && (state.editorInfo.revision !== state.savedRevision
+	setDirty(state.encryptionDirty || Boolean(state.editorInfo) && (state.editorInfo.revision !== state.savedRevision
 		|| canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged()));
 }
 
@@ -3342,7 +3343,7 @@ async function closeFile(tab = documentTab(), keepTab = false) {
 function setEditorInfo(doc) {
 	state.editorInfo = { revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 		pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || [] };
-	setDirty(state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision);
+	setDirty(state.encryptionDirty || doc.revision !== state.savedRevision);
 }
 
 async function openVersionManagement() {
@@ -3462,10 +3463,8 @@ async function switchReadingVersion(id) {
 	if (state.saving) return;
 	if (!state.doc || state.editing || !state.ready || state.exporting || document.body.hasAttribute("data-busy")) return;
 	if (id === (state.doc.documentVersion || "")) return true;
-	const dirty = state.dirty;
 	const originalDocument = state.doc;
 	const view = tab.view;
-	const before = state.editorInfo ? editorLocation() : null, revision = state.editorInfo?.revision;
 	let openSeq = state.openSeq;
 	tab.editTask = true;
 	setBusy(true, "正在切换版本", null, "", tab);
@@ -3475,12 +3474,7 @@ async function switchReadingVersion(id) {
 		openSeq = state.openSeq = workspace.sequence = Math.max(workspace.sequence, state.openSeq) + 1;
 		state.objectClipboardToken = state.styleClipboard = null;
 		delete state.textDefaults.fontChoice;
-		if (state.editorInfo) {
-			if (!dirty) state.savedRevision = doc.revision;
-			state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
-				pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
-			state.dirty = state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision;
-		}
+		if (state.editorInfo) state.editorSyncPending = true;
 		state.doc = doc;
 		if (!isForegroundDocument(tab)) {
 			state.pageCache.clear();
@@ -3492,18 +3486,8 @@ async function switchReadingVersion(id) {
 		canvasEditor.clear();
 		canvasEditor.setTool("");
 		updateTextFonts(null, true);
-		if (state.editorInfo) {
-			if (!dirty) state.savedRevision = doc.revision;
-			setEditorInfo(doc);
-		}
-		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true, clearSelection: true,
+		await openDocument({ doc, openSeq, keepLocalFonts: true, resetScroll: true, clearSelection: true,
 			fitMode: state.fitMode, scale: state.scale, activateActions: true });
-		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return true;
-		if (before) {
-			rememberEditorView(before, revision);
-			const view = state.editorViews.get(doc.revision);
-			if (view) view.reading = true;
-		}
 		return true;
 	} catch (error) {
 		if (!tab.closed && tab.state === state) {
@@ -3697,20 +3681,29 @@ async function switchDocument(index) {
 	tab.editTask = true;
 	setBusy(true, "正在切换文档", null, "", tab);
 	try {
+		const prevRevision = state.editorInfo?.revision;
 		const doc = await callTabWASM(tab, "ofdgoSelectDocument", index);
 		if (tab.closed || tab.state !== state || state.doc !== originalDocument) return;
 		openSeq = state.openSeq = workspace.sequence = Math.max(workspace.sequence, state.openSeq) + 1;
-		state.editorViews.clear();
+		if (!state.editing) state.editorViews.clear();
 		state.objectClipboardToken = state.styleClipboard = null;
 		delete state.textDefaults.fontChoice;
 		if (state.editorInfo) {
-			adopted = true;
-			state.packageDirty ||= state.dirty;
-			state.savedRevision = doc.revision;
-			state.ofdBytes = null;
-			state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
-				pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
-			state.dirty = state.packageDirty || state.encryptionDirty;
+			if (state.editing) {
+				adopted = true;
+				state.editorSyncPending = false;
+				state.ofdBytes = null;
+				if (prevRevision === state.savedRevision) {
+					state.savedRevision = doc.revision;
+					state.editorViews.set(doc.revision, { reading: true });
+				}
+				state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
+					pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
+				state.dirty = state.encryptionDirty || doc.revision !== state.savedRevision;
+				updateWorkspaceDirty();
+			} else {
+				state.editorSyncPending = true;
+			}
 		}
 		state.doc = doc;
 		if (!isForegroundDocument(tab)) {
@@ -3723,8 +3716,7 @@ async function switchDocument(index) {
 		canvasEditor.clear();
 		canvasEditor.setTool("");
 		updateTextFonts(null, true);
-		if (state.editorInfo) setEditorInfo(doc);
-		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true, clearSelection: true, fitMode: state.fitMode, scale: state.scale, activateActions: true });
+		await openDocument({ doc, openSeq, keepLocalFonts: true, resetScroll: true, clearSelection: true, fitMode: state.fitMode, scale: state.scale, activateActions: true });
 	} catch (error) {
 		if (!tab.closed && tab.state === state && state.doc === originalDocument) {
 			tab.status = error.message;
@@ -3764,7 +3756,7 @@ async function toggleEditor() {
 	const tab = documentTab(), state = tab.state;
 	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
 	if (!state.doc || !state.ready || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
-	if (state.editorInfo) {
+	if (state.editorInfo && (state.editing || !state.editorSyncPending)) {
 		const wasmSeq = state.wasmSeq;
 		const current = () => !tab.closed && tab.state === state && isForegroundDocument(tab) && wasmSeq === state.wasmSeq;
 		if (!await canvasEditor.commitText() || !current()) return;
@@ -3807,21 +3799,26 @@ async function toggleEditor() {
 	let adopted = false;
 	setBusy(true, "正在准备编辑", null, "正在准备编辑", tab);
 	try {
+		const prevRevision = state.editorInfo?.revision;
 		const doc = await callWASM("ofdgoEditDocument", pageIndex);
 		if (tab.closed || state.doc !== originalDocument) return;
 		adopted = true;
-		state.savedRevision = doc.revision;
-		state.editorViews.clear();
+		if (!state.editorInfo || prevRevision === state.savedRevision) state.savedRevision = doc.revision;
+		state.editorSyncPending = false;
+		if (!state.editorInfo) state.editorViews.clear();
+		else if (prevRevision !== undefined && prevRevision !== doc.revision && state.savedRevision === doc.revision) state.editorViews.set(doc.revision, { reading: true });
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) {
 			state.doc = doc;
 			state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 				pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
+			state.dirty = state.encryptionDirty || doc.revision !== state.savedRevision;
 			state.editing = true;
 			state.ofdBytes = null;
 			state.selectObjects = true;
 			state.conversionWarnings = [];
 			state.objectClipboardToken = state.styleClipboard = null;
 			state.pageCache.clear();
+			updateWorkspaceDirty();
 			await refreshDocumentTab(tab);
 			return;
 		}
@@ -5179,7 +5176,7 @@ async function insertObject(event) {
 			state.doc = doc;
 			state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 				pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
-			state.dirty = state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision;
+			state.dirty = state.encryptionDirty || doc.revision !== state.savedRevision;
 			state.pageCache.clear();
 			await refreshDocumentTab(tab);
 			return;
@@ -5493,7 +5490,7 @@ async function changeDocument(name, item, ...args) {
 				tab.state.doc = doc;
 				tab.state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 					pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
-				tab.state.dirty = state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision;
+				tab.state.dirty = state.encryptionDirty || doc.revision !== state.savedRevision;
 				tab.state.pageCache.clear();
 				await refreshDocumentTab(tab);
 			}
@@ -5542,7 +5539,7 @@ async function changeDocument(name, item, ...args) {
 			state.ofdBytes = null;
 			setEditorInfo(doc);
 			openSeq = advanceDocumentSequence();
-			await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: documentChanged, clearSelection: true,
+			await openDocument({ doc, openSeq, keepLocalFonts: documentChanged, skipAutoFonts: !documentChanged, resetScroll: documentChanged, clearSelection: true,
 				pageIndex: documentChanged ? 0 : state.pageIndex, fitMode: state.fitMode, scale: state.scale });
 			if (openSeq === state.openSeq) {
 				if (!restoring) rememberEditorView(before, revision);
@@ -5876,6 +5873,7 @@ function syncLayoutMode(event) {
 }
 
 function resizeViewer() {
+	pageView.scrollbarWidth();
 	if (state.doc) {
 		pageView.syncThumbnailWindow();
 		pageView.applyFit(false);
@@ -5886,6 +5884,7 @@ function resizeViewer() {
 }
 
 async function boot() {
+	pageView.scrollbarWidth();
 	window.ofdgoTheme.connect(nativeHost, error => showError(error, false));
 	el.appearanceButton.addEventListener("click", () => {
 		el.associationMessage.hidden = true;
@@ -6699,7 +6698,7 @@ async function requestLocalFontsBeforeOpen() {
 	}
 }
 
-async function autoLoadDocumentLocalFonts(openSeq, tab = documentTab()) {
+async function autoLoadDocumentLocalFonts(openSeq, tab = documentTab(), append = false) {
 	const state = tab.state;
 	if (!state.doc?.fonts?.some((font) => !font.embedded) || !fontManager.canReadLocal() || fontManager.permission === "denied") {
 		return false;
@@ -6710,7 +6709,7 @@ async function autoLoadDocumentLocalFonts(openSeq, tab = documentTab()) {
 		if (tab.closed || openSeq !== state.openSeq) {
 			return false;
 		}
-		return await loadDocumentLocalFonts(available, openSeq, tab);
+		return await loadDocumentLocalFonts(available, openSeq, tab, append);
 	} catch (err) {
 		tab.status = err?.name === "NotAllowedError" ? "系统字体未授权" : String(err.message || err);
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) setStatus(tab.status);
@@ -6718,12 +6717,13 @@ async function autoLoadDocumentLocalFonts(openSeq, tab = documentTab()) {
 	}
 }
 
-async function loadDocumentLocalFonts(available, openSeq, tab = documentTab()) {
+async function loadDocumentLocalFonts(available, openSeq, tab = documentTab(), append = false) {
 	const state = tab.state, wasmSeq = state.wasmSeq, doc = state.doc;
 	const current = () => !tab.closed && wasmSeq === state.wasmSeq && doc === state.doc && (openSeq === undefined || openSeq === state.openSeq);
 	if (!current()) return false;
 	const docFonts = state.doc?.fonts || [];
 	if (!docFonts.length || docFonts.every((font) => font.embedded)) {
+		if (append) return false;
 		tab.localFonts = [];
 		tab.status = docFonts.length ? "字体均已内嵌" : "暂无文档字体";
 		if (isForegroundDocument(tab)) {
@@ -6738,11 +6738,17 @@ async function loadDocumentLocalFonts(available, openSeq, tab = documentTab()) {
 	if (!current()) {
 		return false;
 	}
+	const baseFonts = append ? (isForegroundDocument(tab) ? fontManager.localFonts : tab.localFonts) : [];
+	const existing = new Set(baseFonts.map(font => font.name));
+	const pending = selected.filter(item => !existing.has(fontManager.localName(item)));
+	if (append && !pending.length) {
+		return false;
+	}
 	const emptyStatus = available.length === 0 ? "暂无系统字体" : "暂无匹配字体";
-	const fonts = [];
-	for (let i = 0; i < selected.length; i += 1) {
-		setProgress(`正在读取字体 · ${i + 1} / ${selected.length}`, 20 + Math.round(i / selected.length * 60), "", tab);
-		const item = selected[i];
+	const fonts = [...baseFonts];
+	for (let i = 0; i < pending.length; i += 1) {
+		setProgress(`正在读取字体 · ${i + 1} / ${pending.length}`, 20 + Math.round(i / pending.length * 60), "", tab);
+		const item = pending[i];
 		const data = await fontManager.read(item);
 		if (!current()) {
 			return false;
@@ -6757,7 +6763,7 @@ async function loadDocumentLocalFonts(available, openSeq, tab = documentTab()) {
 		updateFontSummary();
 		renderFontList();
 	} else tab.configurePending = true;
-	return fonts.length > 0;
+	return pending.length > 0;
 }
 
 async function selectLocalFonts(fonts, tab = documentTab()) {
@@ -6958,22 +6964,18 @@ function renderFontList() {
 		const row = document.createElement("div");
 		row.className = "font-row";
 		row.dataset.fontId = font.id;
-
 		const source = document.createElement("span");
 		source.className = "font-source";
 		source.textContent = fontSourceText(font.source);
-
 		const enabled = document.createElement("input");
 		enabled.type = "checkbox";
 		enabled.checked = font.enabled;
 		enabled.title = "启用字体";
-
 		const enabledText = document.createElement("span");
 		enabledText.textContent = font.enabled ? "启用" : "停用";
 		enabled.addEventListener("change", async () => {
 			await changeFont(font, { enabled: enabled.checked });
 		});
-
 		const name = document.createElement("input");
 		name.className = "font-name-input";
 		name.value = font.name;
@@ -6986,15 +6988,12 @@ function renderFontList() {
 			}
 			await changeFont(font, { name: next });
 		});
-
 		const main = document.createElement("div");
 		main.className = "font-main";
 		main.append(source, name);
-
 		const toggle = document.createElement("label");
 		toggle.className = "font-toggle";
 		toggle.append(enabled, enabledText);
-
 		const remove = document.createElement("button");
 		remove.className = "icon-button remove-button font-delete";
 		remove.type = "button";
@@ -7002,11 +7001,9 @@ function renderFontList() {
 		remove.addEventListener("click", async () => {
 			await changeFont(font);
 		});
-
 		const actions = document.createElement("div");
 		actions.className = "font-actions";
 		actions.append(toggle, remove);
-
 		row.append(main, actions);
 		fragment.append(row);
 	}
@@ -7109,10 +7106,16 @@ async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, import
 				if (pdf) {
 					state.pdfComplete = false;
 					tab.pdfTask = null;
-					return await callWASM("ofdgoOpenPDF", data, fonts, credentials?.password || null, state.renderAnnotations);
+					const result = await callWASM("ofdgoOpenPDF", data, fonts, credentials?.password || null, state.renderAnnotations);
+					state.savedEncrypted = Boolean(result.encryption?.encrypted);
+					state.editorSyncPending = false;
+					return result;
 				}
-				return importing ? await callWASM("ofdgoLoadImport", data?.nativeFile ? data : data.slice(), credentials)
-					: await callWASM("ofdgoOpen", data, fonts, state.renderAnnotations, credentials);
+				if (importing) return await callWASM("ofdgoLoadImport", data?.nativeFile ? data : data.slice(), credentials);
+				const result = await callWASM("ofdgoOpen", data, fonts, state.renderAnnotations, credentials);
+				state.savedEncrypted = Boolean(result.encryption?.encrypted);
+				state.editorSyncPending = false;
+				return result;
 			} catch (err) {
 				if (!current() || !(pdf ? err.code === "pdfPassword" : ["credentialsRequired", "invalidCredentials"].includes(err.code))) throw err;
 				const code = pdf ? credentials ? "invalidCredentials" : "credentialsRequired" : err.code;
@@ -7162,7 +7165,7 @@ async function openDocument(options = {}) {
 	if (openSeq !== state.openSeq) {
 		return;
 	}
-	const resetLocalFonts = !options.skipAutoFonts;
+	const resetLocalFonts = !options.skipAutoFonts && !options.keepLocalFonts;
 	if (!options.keepSearch) resetSearch();
 	if (resetLocalFonts) {
 		fontManager.localFonts = [];
@@ -7213,7 +7216,7 @@ async function openDocument(options = {}) {
 			pageView.setContinuous(window.matchMedia("(max-width: 640px)").matches);
 		}
 		state.fitMode = options.fitMode || (state.pageLayout > 1 || !state.continuous && pageCount === 1 ? "height" : "width");
-		if (!options.skipAutoFonts && await autoLoadDocumentLocalFonts(openSeq)) {
+		if (!options.skipAutoFonts && await autoLoadDocumentLocalFonts(openSeq, tab, Boolean(options.keepLocalFonts))) {
 			if (openSeq !== state.openSeq) {
 				return;
 			}
@@ -7390,10 +7393,10 @@ async function loadDocumentDetails(openSeq, details) {
 				const missingFonts = info.fonts?.some(font => font.used > 0 && font.status === "missing" && !knownFonts.has(font.id));
 				Object.assign(state.doc, info, { detailsPending: false, detailsError: "" });
 				renderMeta();
-				if (missingFonts && fontManager.permission === "granted" && !state.editorInfo && !document.body.hasAttribute("data-busy")) {
+				if (missingFonts && fontManager.permission === "granted" && !document.body.hasAttribute("data-busy")) {
 					setBusy(true);
 					try {
-						if (await autoLoadDocumentLocalFonts(openSeq, tab) && openSeq === state.openSeq) await applyFontChange(tab);
+						if (await autoLoadDocumentLocalFonts(openSeq, tab, true) && openSeq === state.openSeq) await applyFontChange(tab);
 					} finally {
 						setBusy(false, "", 0, "", tab);
 					}
@@ -9882,7 +9885,7 @@ async function applyEncryption(event) {
 		el.encryptionStatus.textContent = "请选择接收者证书";
 		return;
 	}
-	const status = mode === "none" ? "保存后将解密" : mode !== encryptionMode() ? "保存后将加密"
+	const status = mode === "none" ? state.savedEncrypted ? "保存后将解密" : "已取消加密" : mode !== encryptionMode() ? "保存后将加密"
 		: mode === "password" ? "保存后将改密" : "保存后将生效";
 	const options = mode === "none" ? null : { password: new TextEncoder().encode(el.encryptionPassword.value), userName: el.encryptionUser.value.trim() };
 	const certificates = Array.from(el.encryptionCertificates.files || []);
@@ -9894,10 +9897,10 @@ async function applyEncryption(event) {
 		const doc = await callTabWASM(tab, "ofdgoSetEncryption", options);
 		if (!valid()) return;
 		if (!state.editorInfo) state.savedRevision = doc.revision;
-		state.encryptionDirty = true;
+		state.encryptionDirty = state.savedEncrypted || Boolean(doc.encryption?.encrypted);
 		state.editorInfo = { revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 			pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || [] };
-		state.dirty = state.packageDirty || state.encryptionDirty || doc.revision !== state.savedRevision;
+		state.dirty = state.encryptionDirty || doc.revision !== state.savedRevision;
 		state.doc.encryption = doc.encryption;
 		state.ofdBytes = null;
 		tab.status = status;
@@ -10733,7 +10736,6 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 	let retrySaveAs = false;
 	let background = false;
 	let savedRevision = null;
-	let packageDirty = false;
 	let encryptionDirty = false;
 	let snapshotPrepared = false;
 	let finishSave;
@@ -10779,7 +10781,6 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 		if (saving && indices === null && !readingSave) {
 			snapshotPrepared = true;
 			savedRevision = state.editorInfo?.revision;
-			packageDirty = state.packageDirty;
 			encryptionDirty = state.encryptionDirty;
 			await callWASM("ofdgoPrepareSave");
 			if (tab.closed || wasmSeq !== state.wasmSeq) return;
@@ -10818,11 +10819,11 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 		}
 		if (saving && indices === null && state.editorInfo && file && savedRevision != null) {
 			state.savedRevision = snapshotPrepared ? savedRevision : state.editorInfo.revision;
-			if (!snapshotPrepared || state.editorInfo.revision === savedRevision) {
-				if (!snapshotPrepared || state.packageDirty === packageDirty) state.packageDirty = false;
-				if (!snapshotPrepared || state.encryptionDirty === encryptionDirty) state.encryptionDirty = false;
+			if ((!snapshotPrepared || state.editorInfo.revision === savedRevision) && (!snapshotPrepared || state.encryptionDirty === encryptionDirty)) {
+				state.encryptionDirty = false;
+				state.savedEncrypted = Boolean(state.doc?.encryption?.encrypted);
 			}
-			state.dirty = state.packageDirty || state.encryptionDirty || state.editorInfo.revision !== state.savedRevision;
+			state.dirty = state.encryptionDirty || state.editorInfo.revision !== state.savedRevision;
 			if (active()) updatePendingChanges();
 			updateWorkspaceDirty();
 		}
@@ -12625,16 +12626,12 @@ function renderSignatures() {
 	for (const signature of signatures) {
 		const row = document.createElement("div");
 		row.className = `signature-row ${signature.status}`;
-
 		const head = document.createElement("div");
 		head.className = "signature-head";
-
 		const name = signatureNameNode(signature);
-
 		const badges = document.createElement("div");
 		badges.className = "signature-badges";
 		badges.append(fontBadge(signature.trustedValid ? "可信" : signature.status === "valid" ? "完整" : signature.status === "invalid" ? "异常" : "未验", signature.status));
-
 		if (state.editing) {
 			const tab = documentTab(), key = documentContentKey(state);
 			const remove = document.createElement("button");
@@ -12821,15 +12818,12 @@ function appendInfoLine(row, label, value, status = "") {
 	}
 	const line = document.createElement("div");
 	line.className = status ? `info-line ${status}` : "info-line";
-
 	const key = document.createElement("span");
 	key.className = "info-label";
 	key.textContent = label;
-
 	const text = document.createElement("span");
 	text.className = "info-value";
 	text.textContent = String(value);
-
 	line.append(key, text);
 	row.append(line);
 }
@@ -12978,7 +12972,8 @@ function renderDocumentFonts() {
 	}
 	const rows = [];
 	for (const font of fonts) {
-		const signature = JSON.stringify([font.status, font.embedded, font.fontName, font.familyName, font.id, fontResult(font), fontMeta(font), state.editing]);
+		const resultText = fontResult(font), metaText = fontMeta(font);
+		const signature = JSON.stringify([font.status, font.embedded, font.fontName, font.familyName, font.id, resultText, metaText, state.editing]);
 		const cached = previous.get(font.id);
 		if (cached?.fontSignature === signature) {
 			cached.font = font;
@@ -12989,23 +12984,17 @@ function renderDocumentFonts() {
 		row.font = font;
 		row.fontSignature = signature;
 		row.className = `doc-font-row ${font.status || "missing"}`;
-
 		const head = document.createElement("div");
 		head.className = "doc-font-head";
-
 		const name = document.createElement("div");
 		name.className = "doc-font-name";
 		name.textContent = font.fontName || font.familyName || font.id || "-";
-
 		const badges = document.createElement("div");
 		badges.className = "doc-font-badges";
 		badges.append(fontBadge(statusText(font.status), font.status || "missing"));
 		if (font.embedded && font.status !== "embedded") {
 			badges.append(fontBadge("内嵌", "embedded"));
 		}
-		const resultText = fontResult(font);
-		const metaText = fontMeta(font);
-
 		head.append(badges, name);
 		if (state.editing) {
 			const action = document.createElement("button");

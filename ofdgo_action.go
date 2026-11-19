@@ -376,27 +376,27 @@ func (r *Renderer) pageActionSources(page *PageContent) []actionSource {
 				if template := r.loadTemplate(ref.TemplateID); template != nil {
 					restoreTpl := r.bindParsedResources(template.pageResources)
 					for templateOrder := range 3 {
-						sources = r.appendLayerActionSources(sources, template, template.Content.Layer, templateOrder)
+						sources = r.appendLayerActionSources(sources, template.Content.Layer, templateOrder)
 					}
 					restoreTpl()
 				}
 			}
 		}
-		sources = r.appendLayerActionSources(sources, page, page.Content.Layer, order)
+		sources = r.appendLayerActionSources(sources, page.Content.Layer, order)
 	}
 	return sources
 }
 
 // appendLayerActionSources 按绘制顺序添加图层动作来源
-// 入参: sources 动作来源, page 所属页面内容, layers 页面图层, order 图层顺序
+// 入参: sources 动作来源, layers 页面图层, order 图层顺序
 // 返回: []actionSource 动作来源
-func (r *Renderer) appendLayerActionSources(sources []actionSource, page *PageContent, layers []Layer, order int) []actionSource {
+func (r *Renderer) appendLayerActionSources(sources []actionSource, layers []Layer, order int) []actionSource {
 	for _, layer := range layers {
 		if layerOrder(layer.Type) != order {
 			continue
 		}
 		for object := range (PatternContent{Objects: layer.Objects, TextObject: layer.TextObject, PathObject: layer.PathObject, ImageObject: layer.ImageObject, CompositeGraphicUnit: layer.CompositeGraphicUnit}).objects() {
-			sources = r.appendGraphicActionSources(sources, page, object, IdentityMatrix, false, nil)
+			sources = r.appendGraphicActionSources(sources, object, IdentityMatrix, false, nil)
 		}
 	}
 	return sources
@@ -424,16 +424,16 @@ func (r *Renderer) annotationActionSources(page *PageContent, annotations []Anno
 			}
 		}
 		for object := range annotation.Appearance.objects() {
-			sources = r.appendGraphicActionSources(sources, page, *object, TranslationMatrix(box.X, box.Y), false, nil)
+			sources = r.appendGraphicActionSources(sources, *object, TranslationMatrix(box.X, box.Y), false, nil)
 		}
 	}
 	return sources
 }
 
 // appendGraphicActionSources 添加图形对象动作来源
-// 入参: sources 动作来源, page 所属页面内容, object 图形对象, parent 父级变换, boundaryInCTM 边界是否参与父级变换, seen 当前资源引用链
+// 入参: sources 动作来源, object 图形对象, parent 父级变换, boundaryInCTM 边界是否参与父级变换, seen 当前资源引用链
 // 返回: []actionSource 动作来源
-func (r *Renderer) appendGraphicActionSources(sources []actionSource, page *PageContent, object GraphicObject, parent Matrix, boundaryInCTM bool, seen map[*CompositeGraphicUnit]bool) []actionSource {
+func (r *Renderer) appendGraphicActionSources(sources []actionSource, object GraphicObject, parent Matrix, boundaryInCTM bool, seen map[*CompositeGraphicUnit]bool) []actionSource {
 	var boundary, ctm, resource string
 	var actions []Action
 	composite := false
@@ -485,13 +485,13 @@ func (r *Renderer) appendGraphicActionSources(sources []actionSource, page *Page
 				seen = make(map[*CompositeGraphicUnit]bool)
 			}
 			seen[unit] = true
-			sources = r.appendGraphicActionSources(sources, page, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: *unit}, matrix, true, seen)
+			sources = r.appendGraphicActionSources(sources, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: *unit}, matrix, true, seen)
 			delete(seen, unit)
 		}
 	}
 	if composite {
 		for child := range object.CompositeGraphicUnit.objects() {
-			sources = r.appendGraphicActionSources(sources, page, child, matrix, boundaryInCTM, seen)
+			sources = r.appendGraphicActionSources(sources, child, matrix, true, seen)
 		}
 	}
 	return sources

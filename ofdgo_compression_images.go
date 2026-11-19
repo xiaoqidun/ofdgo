@@ -23,7 +23,6 @@ import (
 	"image"
 	"io"
 	"math"
-	"slices"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"github.com/xiaoqidun/pdfgo"
@@ -367,18 +366,7 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 		if err != nil {
 			return nil, ctx.Err()
 		}
-		var tplResources []*parsedRes
-		for _, tplRef := range page.Template {
-			template := renderer.loadTemplate(tplRef.TemplateID)
-			if template == nil {
-				return nil, ctx.Err()
-			}
-			tplResources = append(tplResources, template.pageResources...)
-		}
 		content := *page
-		if len(tplResources) > 0 {
-			content.pageResources = slices.Concat(tplResources, page.pageResources)
-		}
 		content.Template = nil
 		if err := renderer.WalkPage(&content, visitor); err != nil {
 			return nil, ctx.Err()

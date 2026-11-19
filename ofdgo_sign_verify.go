@@ -50,7 +50,7 @@ var signatureCSTZone = time.FixedZone("CST", 8*3600)
 
 // SignatureVerifyReport 签名验证报告
 // Valid表示签名完整性、签名时间语义及调用方指定的全部策略均通过
-// Checked表示对应检查已得出结论, 未检查时不能将OK的零值视为失败
+// Checked表示对应检查已得出结论，未检查时不能将OK的零值视为失败
 // SealCertTimeOK按印章制章时间检查制章证书的有效期状态
 type SignatureVerifyReport struct {
 	signerCerts          [][]byte
@@ -176,7 +176,7 @@ func (report SignatureVerifyReport) TrustedValid() bool {
 }
 
 // HasFailure 判断已完成的签名检查是否存在失败
-// 返回: bool 是否存在失败, 未完成检查时仍需判断Valid和Error
+// 返回: bool 是否存在失败（未完成检查时仍需判断Valid和Error）
 func (report SignatureVerifyReport) HasFailure() bool {
 	for _, ref := range report.References {
 		if ref.Checked && !ref.OK {
@@ -624,16 +624,24 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef
 		report.Error = err.Error()
 		return report
 	}
-	var dateTimeErr error
-	if strings.TrimSpace(report.SignatureDateTime) != "" {
-		_, dateTimeErr = parseSignatureDateTime(report.SignatureDateTime)
-	}
 	if report.SignatureMethod != "" && !signatureAlgorithmEquivalent(report.SignatureMethod, sesResult.SignatureMethod, "SM3") {
 		report.Error = "signature method does not match SES"
 		return report
 	}
+	var dateTimeErr error
+	if strings.TrimSpace(report.SignatureDateTime) != "" {
+		var parsedTime time.Time
+		parsedTime, dateTimeErr = parseSignatureDateTime(report.SignatureDateTime)
+		if dateTimeErr == nil && report.SignatureTime.IsZero() {
+			report.SignatureTime = parsedTime
+		}
+	}
 	report.applySignaturePolicy(options, r.OFD.Version, sesResult.SealInfo.Version, sesResult.SignatureMethod, "SM3")
 	report.applySignatureTimePolicy()
+	if dateTimeErr != nil {
+		report.SignatureTimeChecked = true
+		report.SignatureTimeOK = false
+	}
 	trustedTime := report.applySignatureTimestamps(options, signedValue, sesResult.Timestamps)
 	report.applySignatureCertificatePolicy(options, [][]byte{sesResult.SignCertRaw}, sesResult.SealCertRaw, sesResult.Certs, trustedTime)
 	report.applySignatureRevocation(options, [][]byte{sesResult.SignCertRaw, sesResult.SealCertRaw}, sesResult.Certs)

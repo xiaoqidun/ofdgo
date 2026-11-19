@@ -63,6 +63,7 @@ func (e *Editor) Annotation(index int, id string) (Annotation, error) {
 // 入参: index 页面索引, id 注解标识
 // 返回: []string 文字列表, error 注解读取或资源引用错误
 func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
+	defer e.bindPageIndex(index)()
 	annotation, err := e.Annotation(index, id)
 	if err != nil {
 		return nil, err
@@ -125,6 +126,7 @@ func (e *Editor) prepareAnnotation(index int, annotation Annotation) (string, []
 	if index < 0 || index >= len(e.pages) {
 		return "", nil, fmt.Errorf("page index %d out of range", index)
 	}
+	defer e.bindPageIndex(index)()
 	if !slices.Contains([]string{"Link", "Path", "Highlight", "Stamp", "Watermark"}, annotation.Type) {
 		return "", nil, fmt.Errorf("invalid annotation type %q", annotation.Type)
 	}
@@ -573,6 +575,7 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 // 入参: page 页面索引, path 注解内部路径
 // 返回: *Reader 预览, *Renderer 度量器, *editorCompositeNode 根, []*editorCompositeNode 成员, error 错误信息
 func (e *Editor) annotationScope(page int, path ObjectPath) (*Reader, *Renderer, *editorCompositeNode, []*editorCompositeNode, error) {
+	defer e.bindPageIndex(page)()
 	data, err := e.annotationXML(page, path.Annotation)
 	if err != nil {
 		return nil, nil, nil, nil, err

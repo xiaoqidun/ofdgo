@@ -153,6 +153,12 @@ func (e *Editor) vectorInstance(renderer *Renderer, nodes []*editorCompositeNode
 	}
 	hash := sha256.New()
 	hash.Write([]byte(ofdNumber(extent.W) + " " + ofdNumber(extent.H)))
+	for _, parsed := range e.pageScope {
+		if parsed.path != "" {
+			hash.Write([]byte{0})
+			hash.Write([]byte(parsed.path))
+		}
+	}
 	hash.Write(content)
 	key := [32]byte(hash.Sum(nil))
 	var resource string
@@ -219,7 +225,15 @@ func (e *Editor) ungroupCompositeNode(renderer *Renderer, node *editorCompositeN
 			return fmt.Errorf("group member cannot be expanded")
 		}
 	}
-	return e.pasteCompositeSelection(&CompositeSelection{editor: e, document: e.documentIdentity(), nodes: members}, func(objects []GraphicObject, remaps []map[string]string) error {
+	var srcPage *editorSourcePage
+	if e.source != nil && node.pageID != "" {
+		srcPage = e.source.pages[node.pageID]
+	}
+	localScope := e.pageScope
+	if len(renderer.pageResources) > 0 {
+		localScope = renderer.pageResources
+	}
+	return e.pasteCompositeSelection(&CompositeSelection{editor: e, document: e.documentIdentity(), page: node.pageID, source: srcPage, pageScope: localScope, nodes: members}, func(objects []GraphicObject, remaps []map[string]string) error {
 		ids := make(map[string]string)
 		if copy.ref != nil {
 			for _, object := range objects {

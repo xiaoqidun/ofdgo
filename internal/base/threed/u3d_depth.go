@@ -29,12 +29,11 @@ func (r *Renderer) DepthRange() (float64, float64, bool, error) {
 				return 0, 0, false, err
 			}
 		}
-		node := r.model.Nodes[instance.node]
-		index, ok := r.meshes[node.Resource]
-		if node.Kind != "Model" || instance.modelVisibility(&node) == 0 || instance.opacity == 0 || !ok {
+		node := &r.model.Nodes[instance.node]
+		mesh := r.nodeMesh(node)
+		if node.Kind != "Model" || instance.modelVisibility(node) == 0 || instance.opacity == 0 || mesh == nil {
 			continue
 		}
-		mesh := &r.model.Meshes[index]
 		matrix := r.toCamera.multiply(instance.world)
 		for j := range len(mesh.Faces) + len(mesh.Lines) + len(mesh.Points) {
 			_, corners := mesh.primitive(j)

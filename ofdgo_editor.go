@@ -460,30 +460,48 @@ func (e *Editor) ResizePages(indexes []int, width, height float64) error {
 	if !finite(width) || !finite(height) || width <= 0 || height <= 0 {
 		return fmt.Errorf("page dimensions must be finite and positive")
 	}
-	after := fmt.Sprintf("0 0 %s %s", ofdNumber(width), ofdNumber(height))
-	before := make([]string, len(indexes))
+	before := make([]PageArea, len(indexes))
+	after := make([]PageArea, len(indexes))
 	changed := false
 	for i, index := range indexes {
-		page, err := e.page(index)
+		box, err := e.pageAreaBox(index)
 		if err != nil {
 			return err
 		}
-		before[i] = page.Area.PhysicalBox
-		changed = changed || before[i] != after
+		if err := validateCreationBox(Box{X: box.X, Y: box.Y, W: width, H: height}); err != nil {
+			return err
+		}
+		page := &e.pages[index]
+		before[i] = page.Area
+		next := page.Area
+		formatted := fmt.Sprintf("%s %s %s %s", ofdNumber(box.X), ofdNumber(box.Y), ofdNumber(width), ofdNumber(height))
+		next.PhysicalBox = formatted
+		if strings.TrimSpace(next.ApplicationBox) != "" {
+			if appBox, appErr := ParseBox(next.ApplicationBox); appErr == nil && appBox == box {
+				next.ApplicationBox = formatted
+			}
+		}
+		if strings.TrimSpace(next.ContentBox) != "" {
+			if contentBox, contentErr := ParseBox(next.ContentBox); contentErr == nil && contentBox == box {
+				next.ContentBox = formatted
+			}
+		}
+		after[i] = next
+		changed = changed || before[i] != after[i]
 	}
 	if !changed {
 		return nil
 	}
 	indexes = slices.Clone(indexes)
 	resize := func(e *Editor) {
-		for _, index := range indexes {
-			e.pages[index].Area.PhysicalBox = after
+		for i, index := range indexes {
+			e.pages[index].Area = after[i]
 		}
 	}
 	if change := e.recordChange(); change != nil {
 		change.undo = func(e *Editor) {
 			for i, index := range indexes {
-				e.pages[index].Area.PhysicalBox = before[i]
+				e.pages[index].Area = before[i]
 			}
 		}
 		change.redo = resize
@@ -662,24 +680,30 @@ func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) err
 // 入参: page 页面索引, id 图片对象标识, data AddImage支持的图片数据, fit 为contain、cover或空，空值保留原变换和裁剪
 // 返回: error 错误信息
 func (e *Editor) ReplaceImage(page int, id string, data []byte, fit string) error {
-	defer e.bindPageIndex(page)()
+	restore := e.bindPageIndex(page)
 	object, err := e.Object(page, id)
 	if err != nil {
+		restore()
 		return err
 	}
 	if object.Type != "ImageObject" {
+		restore()
 		return fmt.Errorf("object %q is not an image", id)
 	}
 	decoded, _, err := baseimage.DecodePixelsContext(context.Background(), data)
 	if err != nil {
+		restore()
 		return err
 	}
 	if object.ImageObject.ImageMask != "" {
 		if err := e.validateImageMask(object.ImageObject.ImageMask, decoded.Bounds().Size()); err != nil {
+			restore()
 			return err
 		}
 	}
+	restore()
 	return e.Transaction(func(e *Editor) error {
+		defer e.bindPageIndex(page)()
 		resource, err := e.addDecodedImage(data, decoded)
 		if err != nil {
 			return err

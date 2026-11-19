@@ -88,9 +88,8 @@ func (r *Renderer) WalkPage(page *PageContent, visitor PageVisitor) error {
 		shift := TranslationMatrix(offsetX, offsetY)
 		pageOrigin = &shift
 		if r.patternPage == nil {
-			prevPatternPage := r.patternPage
 			r.patternPage = &shift
-			defer func() { r.patternPage = prevPatternPage }()
+			defer func() { r.patternPage = nil }()
 		}
 	}
 	for order := range 3 {
@@ -355,6 +354,7 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 			return err
 		}
 	}
+	state.BoundaryInCTM = true
 	if object.ResourceID != "" {
 		if ref := r.compositeDefinition(object.ResourceID); ref != nil {
 			if references[ref] {
@@ -366,9 +366,7 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 			references[ref] = true
 			copy := *ref
 			copy.Alpha = mergeAlpha(copy.Alpha, object.Alpha)
-			referenceState := state
-			referenceState.BoundaryInCTM = true
-			err := r.walkComposite(copy, referenceState, visitor, references)
+			err := r.walkComposite(copy, state, visitor, references)
 			delete(references, ref)
 			if err != nil {
 				return err

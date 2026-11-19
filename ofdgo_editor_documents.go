@@ -45,6 +45,47 @@ func (e *Editor) DocumentIndex() int {
 	return e.source.reader.DocumentIndex()
 }
 
+// SelectDocument 切换当前编辑的文档，保留各文档未保存修改，可通过Undo撤销
+// 入参: index 文档索引，从0开始
+// 返回: error 切换错误
+func (e *Editor) SelectDocument(index int) error {
+	return e.SelectDocumentContext(context.Background(), index)
+}
+
+// SelectDocumentContext 切换当前编辑的文档并保留未保存修改，取消或失败时不改变编辑状态和历史
+// 入参: ctx 取消上下文, index 文档索引，从0开始
+// 返回: error 切换或取消错误
+func (e *Editor) SelectDocumentContext(ctx context.Context, index int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if index < 0 || index >= e.DocumentCount() {
+		return fmt.Errorf("document index %d out of range", index)
+	}
+	if index == e.DocumentIndex() {
+		return ctx.Err()
+	}
+	reader, retiredTags, err := e.snapshotReader(ctx, nil)
+	if err != nil {
+		return err
+	}
+	target, err := reader.DocumentContext(ctx, index)
+	if err != nil {
+		return err
+	}
+	before := e.transactionSnapshot()
+	next := *e
+	if err := next.adoptDocumentReader(ctx, target, retiredTags); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	*e = next
+	e.recordTransaction(before)
+	return nil
+}
+
 // DocumentInfo 获取指定文档信息的独立副本，不切换当前文档
 // 入参: index 文档索引，从0开始
 // 返回: DocInfo 文档信息, error 索引错误
@@ -380,17 +421,24 @@ func (identity editorDocumentIdentity) matches(other editorDocumentIdentity) boo
 // 入参: ctx 取消上下文, edit 修改包快照并返回新的当前文档索引
 // 返回: error 修改或取消错误
 func (e *Editor) editDocumentsContext(ctx context.Context, edit func(*Reader, []byte, *editorXML) (int, error)) error {
-	reader, err := e.readerContext(ctx, nil)
+	reader, retiredTags, err := e.snapshotReader(ctx, nil)
 	if err != nil {
 		return err
 	}
-	return e.editDocumentSnapshot(ctx, reader, edit)
+	return e.editDocumentSnapshotWithRetired(ctx, reader, retiredTags, edit)
 }
 
 // editDocumentSnapshot 修改已有独立快照的文档入口，成功后提交并记录撤销历史
 // 入参: ctx 取消上下文, reader 包含当前编辑内容的独立快照, edit 修改快照并返回当前文档索引
 // 返回: error 修改或取消错误
 func (e *Editor) editDocumentSnapshot(ctx context.Context, reader *Reader, edit func(*Reader, []byte, *editorXML) (int, error)) error {
+	return e.editDocumentSnapshotWithRetired(ctx, reader, nil, edit)
+}
+
+// editDocumentSnapshotWithRetired 修改已有独立快照的文档入口并记录淘汰标引路径
+// 入参: ctx 取消上下文, reader 包含当前编辑内容的独立快照, retiredTags 已淘汰的旧标引路径, edit 修改快照并返回当前文档索引
+// 返回: error 修改或取消错误
+func (e *Editor) editDocumentSnapshotWithRetired(ctx context.Context, reader *Reader, retiredTags map[string]bool, edit func(*Reader, []byte, *editorXML) (int, error)) error {
 	data, err := reader.readFileViewContext(ctx, "OFD.xml")
 	if err != nil {
 		return err
@@ -421,7 +469,7 @@ func (e *Editor) editDocumentSnapshot(ctx context.Context, reader *Reader, edit 
 		return err
 	}
 	next := *e
-	if err := next.adoptDocumentReader(ctx, reader); err != nil {
+	if err := next.adoptDocumentReader(ctx, reader, retiredTags); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -432,10 +480,10 @@ func (e *Editor) editDocumentSnapshot(ctx context.Context, reader *Reader, edit 
 	return nil
 }
 
-// adoptDocumentReader 接入已加载的编辑入口，同文档重建自定义字段来源，跨文档或版本时重建页面与资源状态
-// 入参: ctx 取消上下文, reader 不拥有输入文件的独立阅读器
+// adoptDocumentReader 接入已加载的编辑入口并合并淘汰文件记录
+// 入参: ctx 取消上下文, reader 不拥有输入文件的独立阅读器, retiredTags 已淘汰的旧标引路径
 // 返回: error 编辑器初始化错误
-func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader) error {
+func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader, retiredTags map[string]bool) error {
 	if reader.Zip != nil && reader.sourceFile == nil {
 		reader.sourceFile = e.sourceFile
 	}
@@ -447,43 +495,62 @@ func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader) error 
 	if err != nil {
 		return err
 	}
-	if e.source != nil && e.documentRoot() == reader.documentRoot && current == version && e.Info.DocID == reader.OFD.DocBody[reader.documentIndex].DocInfo.DocID {
-		source := *e.source
-		source.reader = reader
-		if len(e.structureRemaps) != 0 {
-			tags, err := reader.CustomTagsContext(ctx)
-			if err != nil {
-				return err
-			}
-			source.structureStarts = make(map[int]map[string]int, len(tags))
-			starts := e.structureRemapStarts()
-			for index := range tags {
-				source.structureStarts[index] = starts
-			}
+	sameDoc := e.source != nil && e.documentRoot() == reader.documentRoot && current == version && e.Info.DocID == reader.OFD.DocBody[reader.documentIndex].DocInfo.DocID
+	next, err := reader.EditorContext(ctx)
+	if err != nil {
+		return err
+	}
+	var retired map[string]bool
+	if e.source != nil && len(e.source.retiredAttachments) != 0 {
+		retired = maps.Clone(e.source.retiredAttachments)
+	}
+	if len(retiredTags) != 0 {
+		if retired == nil {
+			retired = make(map[string]bool, len(retiredTags))
 		}
-		source.info.CustomDatas = cloneEditorData(reader.OFD.DocBody[reader.documentIndex].DocInfo.CustomDatas)
-		if source.info.CustomDatas != nil {
-			for i := range source.info.CustomDatas.CustomData {
-				source.info.CustomDatas.CustomData[i].sourceIndex = i + 1
-			}
-		}
-		e.Info.CustomDatas = cloneEditorData(source.info.CustomDatas)
-		e.source = &source
-	} else {
-		next, err := reader.EditorContext(ctx)
-		if err != nil {
+		maps.Copy(retired, retiredTags)
+	}
+	next.source.retiredAttachments = retired
+	if e.source == nil && next.DocumentCount() == 1 {
+		next.source.fromNew = true
+	}
+	if sameDoc {
+		if err := next.retainPendingResources(ctx, e); err != nil {
 			return err
 		}
-		next.history, next.historyIndex, next.historyLimit = e.history, e.historyIndex, e.historyLimit
-		next.revision, next.serial = e.revision, e.serial
-		next.OnWriteProgress, next.output = e.OnWriteProgress, e.output
-		next.encryption = e.encryption
-		next.saveTarget, next.sourceFile = e.saveTarget, e.sourceFile
-		next.backends, next.fontDirs, next.fontFS = e.backends, e.fontDirs, e.fontFS
-		next.SetResources(e.runtimeResources)
-		next.validatedPaths = e.validatedPaths
-		*e = *next
+		for _, resource := range e.resources {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if resource.font == nil || resource.font.FontFile == "" || !next.source.reader.fileNames[resource.name] {
+				continue
+			}
+			if slices.ContainsFunc(next.resources, func(item editorResource) bool { return item.font != nil && item.font.ID == resource.font.ID }) {
+				continue
+			}
+			data, readErr := next.source.reader.readFileViewContext(ctx, resource.name)
+			if readErr != nil {
+				return readErr
+			}
+			next.resources = append(next.resources, editorResource{name: resource.name, data: data, font: cloneEditorData(resource.font)})
+		}
+		if err := next.retainLoadedStates(ctx, e); err != nil {
+			return err
+		}
+		next.source.fallbackDocID = e.source.fallbackDocID
+		next.source.fromNew = e.source.fromNew
+		next.source.removedAttachments = maps.Clone(e.source.removedAttachments)
+		next.source.idsReady = next.source.idsReady || e.source.idsReady
 	}
+	next.history, next.historyIndex, next.historyLimit = e.history, e.historyIndex, e.historyLimit
+	next.revision, next.serial = e.revision, e.serial
+	next.OnWriteProgress, next.output = e.OnWriteProgress, e.output
+	next.encryption = e.encryption
+	next.saveTarget, next.sourceFile = e.saveTarget, e.sourceFile
+	next.backends, next.fontDirs, next.fontFS = e.backends, e.fontDirs, e.fontFS
+	next.SetResources(e.runtimeResources)
+	next.validatedPaths = e.validatedPaths
+	*e = *next
 	return nil
 }
 

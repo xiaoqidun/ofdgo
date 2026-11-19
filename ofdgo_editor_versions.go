@@ -87,7 +87,7 @@ func (e *Editor) SelectVersionContext(ctx context.Context, id string) error {
 	}
 	before := e.transactionSnapshot()
 	next := *e
-	if err := next.adoptDocumentReader(ctx, view); err != nil {
+	if err := next.adoptDocumentReader(ctx, view, nil); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"slices"
 	"strings"
 )
 
@@ -100,13 +101,8 @@ func (e *Editor) DrawParam(id string, resolved bool) (*DrawParam, error) {
 		}
 		return cloneEditorData(draw), nil
 	}
-	for _, resource := range e.resources {
-		if resource.draw != nil && sameResourceID(resource.draw.ID, id) {
-			return cloneEditorData(resource.draw), nil
-		}
-	}
-	if e.source != nil {
-		if value, _ := e.sourceDrawParam(id); value != nil {
+	for _, scope := range e.drawParamScopes() {
+		if value := e.lookupDrawParamInScope(scope, id); value != nil {
 			return cloneEditorData(value), nil
 		}
 	}
@@ -403,6 +399,12 @@ func (e *Editor) SetImageBorders(page int, ids []string, border *ImageBorder) er
 	return e.updateObjects(page, objects, true)
 }
 
+// editorDrawParamScope 描述编辑器绘制参数继承解析的单个资源层级
+type editorDrawParamScope struct {
+	key    string
+	parsed *parsedRes
+}
+
 // addDrawParam 校验并注册绘制参数，资源操作可传递取消上下文
 // 入参: ctx 取消上下文, draw 绘制参数
 // 返回: string 资源标识, error 校验、编码或取消错误
@@ -478,31 +480,115 @@ func (e *Editor) explicitDefaultPaint(object GraphicObject) (GraphicObject, erro
 	return object, nil
 }
 
+// drawParamScopes 按编辑器待注册资源、激活页面局部资源及文档级公共资源顺序生成查找链
+// 返回: []editorDrawParamScope 有序查找层级
+func (e *Editor) drawParamScopes() []editorDrawParamScope {
+	scopes := []editorDrawParamScope{{key: "@editor"}}
+	if e.source == nil {
+		return scopes
+	}
+	seen := make(map[string]bool)
+	for _, parsed := range slices.Backward(e.pageScope) {
+		if parsed.path != "" && !seen[parsed.path] {
+			seen[parsed.path] = true
+			scopes = append(scopes, editorDrawParamScope{key: parsed.path, parsed: parsed})
+		}
+	}
+	hasDocFile := false
+	for _, list := range [][]string{e.source.document.CommonData.DocumentRes, e.source.document.CommonData.PublicRes} {
+		for _, loc := range slices.Backward(list) {
+			resPath := cleanPackagePath(e.source.reader.ResPath(loc))
+			if resPath == "" || resPath == "." || seen[resPath] {
+				continue
+			}
+			seen[resPath] = true
+			if parsed, err := e.source.reader.parseResFileContext(context.Background(), resPath); err == nil && parsed != nil {
+				hasDocFile = true
+				scopes = append(scopes, editorDrawParamScope{key: resPath, parsed: parsed})
+			}
+		}
+	}
+	if !hasDocFile {
+		scopes = append(scopes, editorDrawParamScope{key: "@doc"})
+	}
+	if len(e.pageScope) == 0 {
+		for _, parsed := range e.ensureSourcePageResources() {
+			if parsed.path != "" && !seen[parsed.path] {
+				seen[parsed.path] = true
+				scopes = append(scopes, editorDrawParamScope{key: parsed.path, parsed: parsed})
+			}
+		}
+	}
+	return scopes
+}
+
+// lookupDrawParamInScope 在单个资源层级内匹配指定标识的绘制参数
+// 入参: scope 资源层级, id 绘制参数标识
+// 返回: *DrawParam 命中定义，未命中返回nil
+func (e *Editor) lookupDrawParamInScope(scope editorDrawParamScope, id string) *DrawParam {
+	switch scope.key {
+	case "@editor":
+		for _, resource := range e.resources {
+			if resource.draw != nil && sameResourceID(resource.draw.ID, id) {
+				return resource.draw
+			}
+		}
+	case "@doc":
+		if e.source != nil {
+			if dp, ok := e.source.reader.docDrawParams.get(id); ok {
+				return dp
+			}
+		}
+	default:
+		if dp, ok := scope.parsed.drawParams.get(id); ok {
+			return dp
+		}
+	}
+	return nil
+}
+
 // editorDrawParam 解析原文档的绘制参数继承链，缺失或循环引用不进入编辑快照
 // 入参: id 绘制参数标识, visited 已访问标识
 // 返回: *DrawParam 合并参数, error 错误信息
 func (e *Editor) editorDrawParam(id string, visited map[string]bool) (*DrawParam, error) {
+	return e.editorDrawParamAt(id, 0, e.drawParamScopes(), visited)
+}
+
+// editorDrawParamAt 从指定作用域层级起解析绘制参数，支持同名Relative向上级资源继承
+// 入参: id 绘制参数标识, startLevel 起始层级索引, scopes 作用域链, visited 已访问作用域标识对
+// 返回: *DrawParam 合并参数, error 错误信息
+func (e *Editor) editorDrawParamAt(id string, startLevel int, scopes []editorDrawParamScope, visited map[string]bool) (*DrawParam, error) {
 	if id == "" {
 		return &DrawParam{}, nil
 	}
 	var dp *DrawParam
-	for _, resource := range e.resources {
-		if resource.draw != nil && sameResourceID(resource.draw.ID, id) {
-			dp = resource.draw
+	foundLevel := -1
+	for i := startLevel; i < len(scopes); i++ {
+		if candidate := e.lookupDrawParamInScope(scopes[i], id); candidate != nil {
+			dp, foundLevel = candidate, i
 			break
 		}
 	}
-	if dp == nil && e.source != nil {
-		dp, _ = e.sourceDrawParam(id)
+	key := id
+	if normalized := editorResourceID(id); normalized != "" {
+		key = normalized
 	}
-	if key := editorResourceID(id); key != "" {
-		id = key
+	if dp == nil {
+		return nil, &EditError{Code: EditUnsupportedStyle, Err: fmt.Errorf("invalid draw parameter reference %q", key)}
 	}
-	if dp == nil || visited[id] {
-		return nil, &EditError{Code: EditUnsupportedStyle, Err: fmt.Errorf("invalid draw parameter reference %q", id)}
+	visitKey := scopes[foundLevel].key + "\x00" + key
+	if visited[visitKey] {
+		return nil, &EditError{Code: EditUnsupportedStyle, Err: fmt.Errorf("invalid draw parameter reference %q", key)}
 	}
-	visited[id] = true
-	base, err := e.editorDrawParam(dp.Relative, visited)
+	visited[visitKey] = true
+	if dp.Relative == "" {
+		return mergeDrawParam(DrawParam{}, dp), nil
+	}
+	nextStart := foundLevel
+	if sameResourceID(dp.Relative, id) {
+		nextStart = foundLevel + 1
+	}
+	base, err := e.editorDrawParamAt(dp.Relative, nextStart, scopes, visited)
 	if err != nil {
 		return nil, err
 	}

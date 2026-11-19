@@ -14,21 +14,44 @@
 
 package ofdgo
 
+import "slices"
+
 // PageScene 保存后端无关的页面语义与绘制顺序，不提前展开文字或重新编码图片
 // 场景借用源页面及资源的只读引用，编辑文档后应重新构建
 type PageScene struct {
-	Source   *PageContent
-	Box      Box
-	commands []sceneCommand
+	Source      *PageContent
+	Box         Box
+	renderer    *Renderer
+	patternPage *Matrix
+	commands    []sceneCommand
 }
 
 // Walk 重放语义场景，访问器仍可自行处理文字和原始图片
 // 入参: visitor 页面访问器
 // 返回: error 访问器错误
 func (s *PageScene) Walk(visitor PageVisitor) error {
+	var activeResources []*parsedRes
+	if s.renderer != nil {
+		prevPatternPage := s.renderer.patternPage
+		s.renderer.patternPage = s.patternPage
+		initialResources := s.renderer.pageResources
+		if len(s.commands) > 0 {
+			initialResources = s.commands[0].pageResources
+		}
+		restoreResources := s.renderer.bindParsedResources(initialResources)
+		activeResources = initialResources
+		defer func() {
+			restoreResources()
+			s.renderer.patternPage = prevPatternPage
+		}()
+	}
 	groups, grouped := visitor.(PageGroups)
 	var stack []bool
 	for _, command := range s.commands {
+		if s.renderer != nil && !slices.Equal(activeResources, command.pageResources) {
+			s.renderer.bindParsedResources(command.pageResources)
+			activeResources = command.pageResources
+		}
 		switch command.kind {
 		case sceneObject:
 			if err := visitor.DrawObject(command.object, command.state); err != nil {
@@ -73,7 +96,12 @@ func (r *Renderer) CompileScene(page *PageContent) (*PageScene, error) {
 	if err != nil {
 		return nil, err
 	}
-	scene := &PageScene{Source: page, Box: box}
+	patternPage := r.patternPage
+	if patternPage == nil && (box.X != 0 || box.Y != 0) {
+		shift := TranslationMatrix(-box.X, -box.Y)
+		patternPage = &shift
+	}
+	scene := &PageScene{Source: page, Box: box, renderer: r, patternPage: patternPage}
 	if err := r.WalkPage(page, (*sceneRecorder)(scene)); err != nil {
 		return nil, err
 	}
@@ -82,12 +110,13 @@ func (r *Renderer) CompileScene(page *PageContent) (*PageScene, error) {
 
 // sceneCommand 保存叶子对象、签章或嵌套分组事件
 type sceneCommand struct {
-	kind       sceneCommandKind
-	object     *GraphicObject
-	state      RenderState
-	stamp      Stamp
-	annotation string
-	count      int
+	kind          sceneCommandKind
+	object        *GraphicObject
+	state         RenderState
+	stamp         Stamp
+	annotation    string
+	count         int
+	pageResources []*parsedRes
 }
 
 // sceneCommandKind 区分场景中的绘制和分组事件
@@ -95,11 +124,17 @@ type sceneCommandKind uint8
 
 // 场景遍历的绘制、分组及跳过指令
 const (
+	// sceneObject 绘制单个图形对象
 	sceneObject sceneCommandKind = iota
+	// sceneStamp 绘制签章外观
 	sceneStamp
+	// sceneBeginObject 开始图形对象分组
 	sceneBeginObject
+	// sceneBeginAnnotation 开始页面注解分组
 	sceneBeginAnnotation
+	// sceneEnd 结束当前对象或注解分组
 	sceneEnd
+	// sceneSkip 跳过不可见对象计数
 	sceneSkip
 )
 
@@ -110,7 +145,7 @@ type sceneRecorder PageScene
 // 入参: object 源对象, state 继承状态
 // 返回: error 固定为空
 func (s *sceneRecorder) DrawObject(object *GraphicObject, state RenderState) error {
-	s.commands = append(s.commands, sceneCommand{kind: sceneObject, object: object, state: state})
+	s.commands = append(s.commands, sceneCommand{kind: sceneObject, object: object, state: state, pageResources: s.renderer.pageResources})
 	return nil
 }
 
@@ -118,7 +153,7 @@ func (s *sceneRecorder) DrawObject(object *GraphicObject, state RenderState) err
 // 入参: stamp 签章
 // 返回: error 固定为空
 func (s *sceneRecorder) DrawStamp(stamp Stamp) error {
-	s.commands = append(s.commands, sceneCommand{kind: sceneStamp, stamp: stamp})
+	s.commands = append(s.commands, sceneCommand{kind: sceneStamp, stamp: stamp, pageResources: s.renderer.pageResources})
 	return nil
 }
 
@@ -126,7 +161,7 @@ func (s *sceneRecorder) DrawStamp(stamp Stamp) error {
 // 入参: object 源对象
 // 返回: bool 固定为true
 func (s *sceneRecorder) BeginObject(object *GraphicObject) bool {
-	s.commands = append(s.commands, sceneCommand{kind: sceneBeginObject, object: object})
+	s.commands = append(s.commands, sceneCommand{kind: sceneBeginObject, object: object, pageResources: s.renderer.pageResources})
 	return true
 }
 
@@ -134,17 +169,19 @@ func (s *sceneRecorder) BeginObject(object *GraphicObject) bool {
 // 入参: id 注解标识
 // 返回: bool 固定为true
 func (s *sceneRecorder) BeginAnnotation(id string) bool {
-	s.commands = append(s.commands, sceneCommand{kind: sceneBeginAnnotation, annotation: id})
+	s.commands = append(s.commands, sceneCommand{kind: sceneBeginAnnotation, annotation: id, pageResources: s.renderer.pageResources})
 	return true
 }
 
 // EndObject 记录分组结束
-func (s *sceneRecorder) EndObject() { s.commands = append(s.commands, sceneCommand{kind: sceneEnd}) }
+func (s *sceneRecorder) EndObject() {
+	s.commands = append(s.commands, sceneCommand{kind: sceneEnd, pageResources: s.renderer.pageResources})
+}
 
 // SkipObjects 记录不可见成员数量，保持可编辑输出的对象编号
 // 入参: count 对象数量
 func (s *sceneRecorder) SkipObjects(count int) {
-	s.commands = append(s.commands, sceneCommand{kind: sceneSkip, count: count})
+	s.commands = append(s.commands, sceneCommand{kind: sceneSkip, count: count, pageResources: s.renderer.pageResources})
 }
 
 // closeSceneGroups 在访问器失败时配对结束已建立的分组

@@ -114,6 +114,7 @@ func (e *Editor) PreviewTextSelection(page int, selection TextSelection, edit Te
 		return TextSelectionPreview{}, err
 	}
 	copy := e.transactionSnapshot()
+	defer copy.bindPageIndex(page)()
 	if err := copy.prepareTextSelectionEdit(&edit); err != nil {
 		return TextSelectionPreview{}, err
 	}
@@ -130,6 +131,7 @@ func (e *Editor) UpdateTextSelection(page int, selection TextSelection, edit Tex
 		return err
 	}
 	return e.Transaction(func(e *Editor) error {
+		defer e.bindPageIndex(page)()
 		if err := e.prepareTextSelectionEdit(&edit); err != nil {
 			return err
 		}
@@ -206,6 +208,7 @@ func (e *Editor) UpdateTextSelection(page int, selection TextSelection, edit Tex
 // 入参: page 页面索引, selection 文字选区
 // 返回: TextSelectionAnalysis 分析快照, error 选择或布局错误
 func (e *Editor) analyzeTextSelection(page int, selection TextSelection) (TextSelectionAnalysis, error) {
+	defer e.bindPageIndex(page)()
 	result := TextSelectionAnalysis{Selection: selection, Replace: true, Delete: true, Reflow: true}
 	result.Selection.IDs = slices.Clone(selection.IDs)
 	result.Selection.Indexes = slices.Clone(selection.Indexes)

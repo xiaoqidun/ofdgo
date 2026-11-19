@@ -145,20 +145,23 @@ func centerArc(start Point, arc Segment) (geometryArc, error) {
 		ry *= scale
 	}
 	u, v := x/rx, y/ry
-	square := u*u + v*v
-	factor := math.Sqrt(math.Max(0, (1-square)/square))
+	chord := math.Hypot(u, v)
+	if !finite(chord) || chord == 0 {
+		return geometryArc{}, fmt.Errorf("invalid arc extent")
+	}
+	root := math.Sqrt(math.Max(0, (1-chord)*(1+chord)))
+	sign := 1.0
 	if arc.Large == arc.Sweep {
-		factor = -factor
+		sign = -1
 	}
-	cx, cy := factor*rx*v, -factor*ry*u
+	cx, cy := sign*root*(v/chord)*rx, -sign*root*(u/chord)*ry
 	theta := math.Atan2((y-cy)/ry, (x-cx)/rx)
-	end := math.Atan2((-y-cy)/ry, (-x-cx)/rx)
-	delta := math.Mod(end-theta, 2*math.Pi)
-	if arc.Sweep && delta < 0 {
-		delta += 2 * math.Pi
+	delta := 2 * math.Atan2(chord, root)
+	if arc.Large {
+		delta = 2*math.Pi - delta
 	}
-	if !arc.Sweep && delta > 0 {
-		delta -= 2 * math.Pi
+	if !arc.Sweep {
+		delta = -delta
 	}
 	center := Point{cosine*cx - sine*cy + arcCoordinateMean(start.X, arc.End.X), sine*cx + cosine*cy + arcCoordinateMean(start.Y, arc.End.Y)}
 	if !finite(center.X) || !finite(center.Y) || !finite(rx) || !finite(ry) || !finite(delta) || !finite(theta) || delta == 0 {

@@ -86,6 +86,7 @@ func (e *MissingGlyphError) Error() string {
 // 入参: page 页面索引, ids 文字对象标识, style 样式增量
 // 返回: error 错误信息
 func (e *Editor) StyleText(page int, ids []string, style TextStyle) (err error) {
+	defer e.bindPageIndex(page)()
 	objects, _, err := e.selectedObjects(page, ids)
 	if err != nil {
 		return err
@@ -113,6 +114,7 @@ func (e *Editor) StyleText(page int, ids []string, style TextStyle) (err error) 
 // 入参: page 页面索引, id 文字对象标识, value 新内容, style 样式增量
 // 返回: error 错误信息
 func (e *Editor) UpdateTextContent(page int, id, value string, style TextStyle) (err error) {
+	defer e.bindPageIndex(page)()
 	capability, err := e.ObjectCapabilities(page, id)
 	if err != nil {
 		return err
@@ -185,6 +187,17 @@ func (e *Editor) UpdateTextContent(page int, id, value string, style TextStyle) 
 		return err
 	}
 	return e.updateObjects(page, updates, true)
+}
+
+// RewritePageText 按目标页面资源作用域保留原定位重写文字，不修改文档或历史
+// 入参: page 页面索引, text 文字对象, value 新内容
+// 返回: error 页面、字体或定位错误
+func (e *Editor) RewritePageText(page int, text *TextObject, value string) error {
+	if _, err := e.page(page); err != nil {
+		return err
+	}
+	defer e.bindPageIndex(page)()
+	return e.RewriteText(text, value)
 }
 
 // RewriteText 保留原文的字形定位，不修改对象样式或文档

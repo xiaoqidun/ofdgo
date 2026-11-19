@@ -74,9 +74,10 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64, pare
 				r.renderError = err
 				return
 			}
-			var childClip *canvas.Path
+			childClip := canvas.Rectangle(sealBox.W, sealBox.H)
 			if parentClip != nil {
-				childClip = parentClip.Copy().Translate(-s.Box.X, -(pageH-s.Box.Y-s.Box.H)).Scale(sealBox.W/s.Box.W, sealBox.H/s.Box.H)
+				parentInSeal := parentClip.Copy().Translate(-s.Box.X, -(pageH-s.Box.Y-s.Box.H)).Scale(sealBox.W/s.Box.W, sealBox.H/s.Box.H)
+				childClip = renderer.intersectCachedClipPath(childClip, parentInSeal)
 			}
 			if s.Clip != nil {
 				clipW := s.Clip.W * sealBox.W / s.Box.W
@@ -86,7 +87,7 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64, pare
 				rect := canvas.Rectangle(clipW, clipH).Translate(clipX, clipY)
 				childClip = renderer.intersectCachedClipPath(childClip, rect)
 			}
-			if childClip != nil && childClip.Empty() {
+			if childClip.Empty() {
 				continue
 			}
 			pageRenderer := *renderer

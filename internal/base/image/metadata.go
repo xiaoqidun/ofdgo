@@ -45,7 +45,7 @@ type PageInfo struct {
 // 返回: Density 像素密度, bool 密度是否可保留
 func BMPDensity(data []byte) (Density, bool) {
 	xdpi, ydpi := int32(binary.LittleEndian.Uint32(data[38:42])), int32(binary.LittleEndian.Uint32(data[42:46]))
-	if xdpi < 0 || ydpi < 0 {
+	if xdpi < 0 || ydpi < 0 || (xdpi == 0) != (ydpi == 0) {
 		return Density{}, false
 	}
 	return Density{X: float64(xdpi), Y: float64(ydpi), Unit: 1}, true
@@ -179,11 +179,15 @@ func TIFFConversionDensity(data []byte, layout TIFFLayout) (Density, bool) {
 func (density Density) Scale(before, after image.Point) (Density, bool) {
 	hasDensity := density.X != 0 || density.Y != 0
 	if hasDensity && before != after {
+		if before.X <= 0 || before.Y <= 0 || after.X <= 0 || after.Y <= 0 || !(density.X > 0 && density.Y > 0) || math.IsInf(density.X, 0) || math.IsInf(density.Y, 0) {
+			return Density{}, false
+		}
 		if density.Unit == 0 {
-			ratio := new(big.Rat).SetFrac64(int64(density.X)*int64(after.X), int64(density.Y)*int64(after.Y))
+			ratio := new(big.Rat).Quo(new(big.Rat).SetFloat64(density.X), new(big.Rat).SetFloat64(density.Y))
+			ratio.Mul(ratio, new(big.Rat).SetFrac64(int64(after.X), int64(after.Y)))
 			ratio.Mul(ratio, new(big.Rat).SetFrac64(int64(before.Y), int64(before.X)))
 			if ratio.Num().BitLen() > 31 || ratio.Denom().BitLen() > 31 {
-				return density, false
+				return Density{}, false
 			}
 			density.X, density.Y = float64(ratio.Num().Int64()), float64(ratio.Denom().Int64())
 		} else {
@@ -329,10 +333,10 @@ func PageMetadataContext(ctx context.Context, data []byte, format string, dpi fl
 // 返回: []byte 带密度的编码, bool 密度是否可完整保留
 func WithPNGDensity(data []byte, density Density) ([]byte, bool) {
 	x, y := math.Round(density.X), math.Round(density.Y)
-	if x > math.MaxInt32 || y > math.MaxInt32 || density.X > 0 && x < 1 || density.Y > 0 && y < 1 {
+	if !(x >= 1 && y >= 1 && x <= math.MaxInt32 && y <= math.MaxInt32) {
 		return nil, false
 	}
-	chunk := make([]byte, 21)
+	chunk := make([]byte, PNGDensityChunkSize)
 	binary.BigEndian.PutUint32(chunk, 9)
 	copy(chunk[4:], "pHYs")
 	binary.BigEndian.PutUint32(chunk[8:], uint32(x))

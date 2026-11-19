@@ -530,14 +530,8 @@ func pdfDestination(dest Dest, box Box) (pdfgo.Destination, error) {
 	if _, err := dest.attributes(); err != nil {
 		return pdfgo.Destination{}, err
 	}
-	left := dest.Left
-	if !dest.OmitLeft {
-		left -= box.X
-	}
-	top := dest.Top
-	if !dest.OmitTop {
-		top -= box.Y
-	}
+	left := dest.Left - box.X
+	top := dest.Top - box.Y
 	right := dest.Right - box.X
 	bottom := dest.Bottom - box.Y
 	const scale = 72.0 / 25.4

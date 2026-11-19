@@ -155,6 +155,26 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 		if err != nil {
 			return err
 		}
+		if !rasterPositive(stamp.Box.W) || !rasterPositive(stamp.Box.H) || stamp.Clip != nil && (!rasterPositive(stamp.Clip.W) || !rasterPositive(stamp.Clip.H)) {
+			return nil
+		}
+		clipBox := stamp.Box
+		if stamp.Clip != nil {
+			x0 := max(clipBox.X, stamp.Box.X+stamp.Clip.X)
+			y0 := max(clipBox.Y, stamp.Box.Y+stamp.Clip.Y)
+			x1 := min(clipBox.X+clipBox.W, stamp.Box.X+stamp.Clip.X+stamp.Clip.W)
+			y1 := min(clipBox.Y+clipBox.H, stamp.Box.Y+stamp.Clip.Y+stamp.Clip.H)
+			clipBox = Box{X: x0, Y: y0, W: x1 - x0, H: y1 - y0}
+		}
+		var clip GeometryPath
+		var segments []RasterSegment
+		if rasterPositive(clipBox.W) && rasterPositive(clipBox.H) {
+			clip = GeometryPath(basegeom.Rectangle(clipBox))
+			segments, err = c.segments(clip)
+			if err != nil {
+				return err
+			}
+		}
 		renderer := c.renderer.childRenderer(reader)
 		renderer.TransparentBackground = true
 		for _, reference := range document.Pages.Page {
@@ -166,16 +186,10 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 			if err != nil {
 				return err
 			}
-			matrix := TranslationMatrix(stamp.Box.X, stamp.Box.Y).Multiply(Matrix{a: stamp.Box.W / page.Width, d: stamp.Box.H / page.Height})
-			var clip GeometryPath
-			var segments []RasterSegment
-			if stamp.Clip != nil {
-				clip = GeometryPath(basegeom.Rectangle(Box{X: stamp.Box.X + stamp.Clip.X, Y: stamp.Box.Y + stamp.Clip.Y, W: stamp.Clip.W, H: stamp.Clip.H}))
-				segments, err = c.segments(clip)
-				if err != nil {
-					return err
-				}
+			if len(clip) == 0 {
+				continue
 			}
+			matrix := TranslationMatrix(stamp.Box.X, stamp.Box.Y).Multiply(Matrix{a: stamp.Box.W / page.Width, d: stamp.Box.H / page.Height})
 			for _, command := range page.Commands {
 				if err := ctx.Err(); err != nil {
 					return err
@@ -193,21 +207,18 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 					command.Stroke = &stroke
 				}
 				if command.Clip != nil {
+					rasterMat := RasterMatrix(matrix.Values())
 					command.Clip = slices.Clone(command.Clip)
 					for i := range command.Clip {
 						segment := command.Clip[i]
-						segment.End = RasterMatrix(matrix.Values()).Apply(segment.End)
-						segment.Control1 = RasterMatrix(matrix.Values()).Apply(segment.Control1)
-						segment.Control2 = RasterMatrix(matrix.Values()).Apply(segment.Control2)
+						segment.End = rasterMat.Apply(segment.End)
+						segment.Control1 = rasterMat.Apply(segment.Control1)
+						segment.Control2 = rasterMat.Apply(segment.Control2)
 						command.Clip[i] = segment
 					}
 				}
-				if stamp.Clip != nil {
-					if err := c.appendClippedCommands([]RasterCommand{command}, clip, segments); err != nil {
-						return err
-					}
-				} else {
-					c.page.Commands = append(c.page.Commands, command)
+				if err := c.appendClippedCommands([]RasterCommand{command}, clip, segments); err != nil {
+					return err
 				}
 			}
 		}

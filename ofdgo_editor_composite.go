@@ -24,6 +24,7 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"strings"
 )
 
 // ObjectPath 定位页面顶层对象或注解外观内的成员，Children为从0开始的逐层绘制序号
@@ -412,6 +413,7 @@ func (e *Editor) measureCompositeSelection(renderer *Renderer, nodes []*editorCo
 // 入参: page 页面索引, path 复合对象路径
 // 返回: *Reader 预览读取器, *Renderer 度量器, *editorCompositeNode 顶层节点, []*editorCompositeNode 成员, error 错误信息
 func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, *editorCompositeNode, []*editorCompositeNode, error) {
+	defer e.bindPageIndex(page)()
 	if path.Signature != "" {
 		return nil, nil, nil, nil, fmt.Errorf("signature appearances have no editable children")
 	}
@@ -533,7 +535,7 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 				}
 			}
 			if name == "" {
-				name, _ = resourceValue(reader.resourceFiles, c.ResourceID)
+				name, _ = reader.resourceFileByKind("CompositeGraphicUnit", c.ResourceID)
 			}
 			if name == "" {
 				name, _ = e.sourceResourceFile(c.ResourceID, "CompositeGraphicUnit")
@@ -1032,15 +1034,165 @@ func (e *Editor) addCompositeResource(data []byte, states map[string]editorCompo
 	return id, nil
 }
 
-// compositeResource 记录生成复合资源的完整引用，用于保存时按依赖保留资源
+// compositeResource 记录生成复合资源的完整引用，从当前页局部作用域提升资源以消除跨页冲突
 // 入参: id 资源标识, data 资源XML
 // 返回: editorResource 资源, error 错误信息
 func (e *Editor) compositeResource(id string, data []byte) (editorResource, error) {
+	if e.source != nil && len(e.pageScope) > 0 {
+		prevMaxID, prevResCount := e.maxID, len(e.resources)
+		prevPromoted, prevImages := maps.Clone(e.promoted), maps.Clone(e.images)
+		promotedData, err := e.promoteScopeXMLToDocument(data, e.pageScope)
+		if err != nil {
+			clear(e.resources[prevResCount:])
+			e.resources, e.maxID = e.resources[:prevResCount], prevMaxID
+			e.promoted, e.images = prevPromoted, prevImages
+			return editorResource{}, err
+		}
+		data = promotedData
+	}
 	refs, err := editorResourceReferences(data)
 	if err != nil {
 		return editorResource{}, err
 	}
 	return editorResource{name: e.packageName("Res/Composites/Composite_" + id + ".xml"), data: data, composite: id, references: refs}, nil
+}
+
+// promoteScopeXMLToDocument 将XML片段引用的局部页面资源克隆提升为无冲突文档级资源并重写引用
+// 入参: data XML数据, scope 当前页面局部资源作用域
+// 返回: []byte 重写后的XML数据, error 资源读取、克隆或编码错误
+func (e *Editor) promoteScopeXMLToDocument(data []byte, scope []*parsedRes) ([]byte, error) {
+	if e.source == nil || len(scope) == 0 {
+		return data, nil
+	}
+	initialRefs, err := editorResourceReferences(data)
+	if err != nil || len(initialRefs) == 0 {
+		return data, err
+	}
+	if err := e.prepareSourceIDs(); err != nil {
+		return nil, err
+	}
+	if err := e.prepromoteSelfRelativeDrawParams(scope); err != nil {
+		return nil, err
+	}
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	remapped, changed, err := e.remapXMLResources(data, root, scope, nil, true, make(map[string]bool))
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		return remapped, nil
+	}
+	return data, nil
+}
+
+// prepromoteSelfRelativeDrawParams 预先提升局部资源中继承上级同名参数的DrawParam，避免同名Relative被误判为自环
+// 入参: scope 页面局部资源作用域
+// 返回: error 读取或提升错误
+func (e *Editor) prepromoteSelfRelativeDrawParams(scope []*parsedRes) error {
+	reader := e.source.reader
+	for idx, parsed := range scope {
+		if parsed.path == "" {
+			continue
+		}
+		for _, rawID := range slices.Sorted(maps.Keys(parsed.drawParams.exact)) {
+			dp := parsed.drawParams.exact[rawID]
+			if dp == nil || dp.Relative == "" || !sameResourceID(dp.Relative, dp.ID) {
+				continue
+			}
+			key := editorResourceID(dp.ID)
+			if key == "" {
+				continue
+			}
+			cacheKey := parsed.path + "\x00" + key
+			if cached := e.promoted[cacheKey]; cached != "" && strings.HasPrefix(e.resolveScopeResourceFile(nil, cached), "@editor/") {
+				continue
+			}
+			parentScope := scope[:idx]
+			parentID, _, err := e.promoteScopedResource(dp.Relative, "DrawParam", parentScope, nil, true, make(map[string]bool))
+			if err != nil {
+				return err
+			}
+			if e.resolveScopeResourceFile(parentScope, parentID) == "" {
+				return fmt.Errorf("draw parameter %q not found", dp.Relative)
+			}
+			resData, err := reader.readFile(parsed.path)
+			if err != nil {
+				return err
+			}
+			resRoot, err := parseEditorXML(resData)
+			if err != nil {
+				return err
+			}
+			resNode := editorResourceNode(resRoot, "DrawParams", "DrawParam", key)
+			if resNode == nil {
+				return fmt.Errorf("draw parameter %q not found in %s", key, parsed.path)
+			}
+			baseLoc := resRoot.attr("BaseLoc")
+			standalone, err := editorXMLStandalone(resData[resNode.start:resNode.end], resNode)
+			if err != nil {
+				return err
+			}
+			if linkLoc := strings.TrimSpace(resNode.attr("Link")); linkLoc != "" {
+				extPath := resolveResourcePath(parsed.path, baseLoc, linkLoc)
+				extData, readErr := reader.readFile(extPath)
+				if readErr != nil {
+					return readErr
+				}
+				extRoot, parseErr := parseEditorXML(extData)
+				if parseErr != nil {
+					return parseErr
+				}
+				standalone, err = editorXMLStandalone(extData[extRoot.start:extRoot.end], extRoot)
+				if err != nil {
+					return err
+				}
+				extRoot, err = parseEditorXML(standalone)
+				if err != nil {
+					return err
+				}
+				standalone, err = editorXMLAttribute(standalone, extRoot, "ID", key)
+				if err != nil {
+					return err
+				}
+			}
+			dpRoot, err := parseEditorXML(standalone)
+			if err != nil {
+				return err
+			}
+			clearRel, err := editorXMLAttributeChange(standalone, dpRoot, "Relative", nil)
+			if err != nil {
+				return err
+			}
+			standalone = editorPatchXML(standalone, []editorXMLPatch{clearRel})
+			var promotedDP DrawParam
+			wrapped, objIDs, err := e.promoteXMLResource(standalone, "DrawParams", &promotedDP, scope[:idx+1], nil, make(map[string]bool))
+			if err != nil {
+				return err
+			}
+			newID := objIDs[key]
+			wrappedRoot, err := parseEditorXML(wrapped)
+			if err != nil {
+				return err
+			}
+			wrappedNode := editorResourceNode(wrappedRoot, "DrawParams", "DrawParam", newID)
+			setRel, err := editorXMLAttributePatch(wrapped, wrappedNode, "Relative", parentID)
+			if err != nil {
+				return err
+			}
+			wrapped = editorPatchXML(wrapped, []editorXMLPatch{setRel})
+			promotedDP.Relative = parentID
+			refs, err := editorResourceReferences(wrapped)
+			if err != nil {
+				return err
+			}
+			e.resources = append(e.resources, editorResource{name: e.packageName("Res/DrawParams/DrawParam_" + newID + ".xml"), data: wrapped, draw: &promotedDP, references: refs})
+			e.promoted[cacheKey] = newID
+		}
+	}
+	return nil
 }
 
 // validateVector 校验共享矢量资源及嵌套绘制引用，不修改资源内容

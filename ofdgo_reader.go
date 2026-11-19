@@ -54,7 +54,7 @@ type Reader struct {
 	pdfDestinations           *pdfDestinations
 	resFileCache              map[string]*parsedRes
 	resourcesRead             map[string]bool
-	resourceFiles             map[string]string
+	resourceFilesByKind       map[string]map[string]string
 	imageCatalog              []ImageInfo
 	resourceInfoCache         []ResourceInfo
 	mediaCache                map[string]MultiMedia
@@ -742,7 +742,7 @@ func (r *Reader) cloneMutableState(next *Reader) {
 	next.mediaCache = maps.Clone(r.mediaCache)
 	next.docMedias = r.docMedias.clone()
 	next.resourcesRead = maps.Clone(r.resourcesRead)
-	next.resourceFiles = maps.Clone(r.resourceFiles)
+	next.resourceFilesByKind = cloneEditorMap(r.resourceFilesByKind)
 	next.imageCatalog = slices.Clone(r.imageCatalog)
 	if r.resourceInfoCache != nil {
 		next.resourceInfoCache = slices.Clone(r.resourceInfoCache)
@@ -832,10 +832,15 @@ func (r *Reader) commitDocumentStructure(view *Reader) {
 		r.resourcesRead = make(map[string]bool)
 	}
 	maps.Copy(r.resourcesRead, view.resourcesRead)
-	if r.resourceFiles == nil {
-		r.resourceFiles = make(map[string]string)
+	if r.resourceFilesByKind == nil {
+		r.resourceFilesByKind = make(map[string]map[string]string)
 	}
-	maps.Copy(r.resourceFiles, view.resourceFiles)
+	for k, v := range view.resourceFilesByKind {
+		if r.resourceFilesByKind[k] == nil {
+			r.resourceFilesByKind[k] = make(map[string]string, len(v))
+		}
+		maps.Copy(r.resourceFilesByKind[k], v)
+	}
 	if r.ResMap == nil {
 		r.ResMap = make(map[string]string)
 	}
@@ -978,7 +983,7 @@ func (r *Reader) initRootContext(ctx context.Context) error {
 	r.ResMap = make(map[string]string)
 	r.resourcesRead = make(map[string]bool)
 	r.mediaCache = make(map[string]MultiMedia)
-	r.resourceFiles = make(map[string]string)
+	r.resourceFilesByKind = make(map[string]map[string]string)
 	r.fontCache = make(map[string]*Font)
 	r.fontFaces = make(map[string][]*FontFace)
 	r.colorSpaceCache = make(map[string]*ColorSpace)
@@ -1151,6 +1156,94 @@ func (r *Reader) packageFile(name string) (*zip.File, bool) {
 	return f, ok
 }
 
+// hasPackageFile 判断规范化包内路径对应的物理文件是否存在于当前包中
+// 入参: name 包内路径
+// 返回: bool 是否存在
+func (r *Reader) hasPackageFile(name string) bool {
+	clean := cleanPackagePath(name)
+	if clean == "" || clean == "." {
+		return false
+	}
+	if _, ok := r.files[clean]; ok {
+		return true
+	}
+	_, ok := r.fileIndex[clean]
+	return ok
+}
+
+// putMapResourceOverride 按十进制等价标识覆盖字典中的旧资源条目
+// 入参: dst 目标字典, id 资源标识, value 新资源值
+func putMapResourceOverride[T any](dst map[string]T, id string, value T) {
+	if key := editorResourceID(id); key != "" {
+		for existing := range dst {
+			if existing != id && editorResourceID(existing) == key {
+				delete(dst, existing)
+			}
+		}
+	}
+	dst[id] = value
+}
+
+// mergeResourceIndexOverride 按高优先级资源表覆盖目标索引中的同名十进制条目
+// 入参: dst 文档级目标索引, src 当前资源文件局部索引
+func mergeResourceIndexOverride[T comparable](dst, src *resourceIndex[T]) {
+	if len(src.exact) == 0 {
+		return
+	}
+	keys := make(map[string]bool, len(src.exact))
+	for id := range src.exact {
+		if key := editorResourceID(id); key != "" {
+			keys[key] = true
+		}
+	}
+	if len(keys) > 0 {
+		for existing := range dst.exact {
+			if keys[editorResourceID(existing)] {
+				delete(dst.exact, existing)
+			}
+		}
+		for key := range keys {
+			delete(dst.canonical, key)
+			delete(dst.ambiguous, key)
+		}
+	}
+	for id, value := range src.exact {
+		dst.put(id, value)
+	}
+}
+
+// putResourceFileByKind 按资源类别记录声明文件路径
+// 入参: kind 资源类别, id 资源标识, fullPath 资源XML包内路径
+func (r *Reader) putResourceFileByKind(kind, id, fullPath string) {
+	if r.resourceFilesByKind == nil {
+		r.resourceFilesByKind = make(map[string]map[string]string)
+	}
+	bucket := r.resourceFilesByKind[kind]
+	if bucket == nil {
+		bucket = make(map[string]string)
+		r.resourceFilesByKind[kind] = bucket
+	}
+	putMapResourceOverride(bucket, id, fullPath)
+}
+
+// resourceFileByKind 按资源类别查找文档级声明所在的资源XML路径
+// 入参: kind 资源类别，空字符串按标准类别依次匹配, id 资源标识
+// 返回: string 资源XML路径, bool 是否命中
+func (r *Reader) resourceFileByKind(kind, id string) (string, bool) {
+	switch kind {
+	case "Image", "Audio", "Video":
+		kind = "MultiMedia"
+	case "":
+		for _, k := range []string{"Font", "MultiMedia", "ColorSpace", "DrawParam", "CompositeGraphicUnit"} {
+			if name, ok := resourceValue(r.resourceFilesByKind[k], id); ok && name != "" {
+				return name, true
+			}
+		}
+		return "", false
+	}
+	return resourceValue(r.resourceFilesByKind[kind], id)
+}
+
 // loadResContext 加载文档级可读资源的索引并合并入当前文档缓存
 // 入参: ctx 取消上下文, resPath 资源路径
 // 返回: error 取消错误
@@ -1187,37 +1280,37 @@ func (r *Reader) loadResContext(ctx context.Context, resPath string) error {
 	if r.docComposites == nil {
 		r.docComposites = &resourceIndex[*CompositeGraphicUnit]{}
 	}
+	mergeResourceIndexOverride(r.docColorSpaces, &parsed.colorSpaces)
 	for id, cs := range parsed.colorSpaces.exact {
-		r.colorSpaceCache[id] = cs
-		r.docColorSpaces.put(id, cs)
-		r.resourceFiles[id] = fullPath
+		putMapResourceOverride(r.colorSpaceCache, id, cs)
+		r.putResourceFileByKind("ColorSpace", id, fullPath)
 	}
+	if r.mediaCache == nil && len(parsed.medias.exact) > 0 {
+		r.mediaCache = make(map[string]MultiMedia)
+	}
+	mergeResourceIndexOverride(r.docMedias, &parsed.medias)
 	for id, mm := range parsed.medias.exact {
-		if r.mediaCache == nil {
-			r.mediaCache = make(map[string]MultiMedia)
-		}
-		r.mediaCache[id] = mm
-		r.docMedias.put(id, mm)
-		r.resourceFiles[id] = fullPath
+		putMapResourceOverride(r.mediaCache, id, mm)
+		r.putResourceFileByKind("MultiMedia", id, fullPath)
 	}
+	mergeResourceIndexOverride(r.docResPaths, &parsed.resPaths)
 	for id, finalPath := range parsed.resPaths.exact {
-		r.ResMap[id] = finalPath
-		r.docResPaths.put(id, finalPath)
+		putMapResourceOverride(r.ResMap, id, finalPath)
 	}
+	mergeResourceIndexOverride(r.docFonts, &parsed.fonts)
 	for id, f := range parsed.fonts.exact {
-		r.fontCache[id] = f
-		r.docFonts.put(id, f)
-		r.resourceFiles[id] = fullPath
+		putMapResourceOverride(r.fontCache, id, f)
+		r.putResourceFileByKind("Font", id, fullPath)
 	}
+	mergeResourceIndexOverride(r.docDrawParams, &parsed.drawParams)
 	for id, dp := range parsed.drawParams.exact {
-		r.drawParamCache[id] = dp
-		r.docDrawParams.put(id, dp)
-		r.resourceFiles[id] = fullPath
+		putMapResourceOverride(r.drawParamCache, id, dp)
+		r.putResourceFileByKind("DrawParam", id, fullPath)
 	}
+	mergeResourceIndexOverride(r.docComposites, &parsed.composites)
 	for id, cgu := range parsed.composites.exact {
-		r.compositeGraphicUnitCache[id] = cgu
-		r.docComposites.put(id, cgu)
-		r.resourceFiles[id] = fullPath
+		putMapResourceOverride(r.compositeGraphicUnitCache, id, cgu)
+		r.putResourceFileByKind("CompositeGraphicUnit", id, fullPath)
 	}
 	r.resourcesRead[fullPath] = true
 	return ctx.Err()

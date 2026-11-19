@@ -91,6 +91,30 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 	extent, _ := ParseBox(*boundary)
 	extent.X, extent.Y = 0, 0
 	*boundary = editorBoxString(extent)
+	var srcScope []*parsedRes
+	srcOrigin := e.snapshotOrigin(object)
+	if e.source != nil {
+		if srcOrigin != nil && srcOrigin.page != nil {
+			for pageIdx := range e.pages {
+				if e.pages[pageIdx].ID == srcOrigin.page.ref.ID {
+					if _, err := e.pageContext(ctx, pageIdx); err != nil {
+						return nil, err
+					}
+					break
+				}
+			}
+			if srcOrigin.page.original != nil {
+				srcScope = srcOrigin.page.original.pageResources
+			}
+		} else {
+			firstPage, err := e.pageContext(ctx, indexes[0])
+			if err != nil {
+				return nil, err
+			}
+			srcScope = firstPage.pageResources
+		}
+	}
+	rawObject := cloneEditorData(object)
 	preview := e.transactionSnapshot()
 	preview.SetHistoryLimit(0)
 	id, err := preview.AddObject(indexes[0], object)
@@ -110,10 +134,12 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 	if err != nil {
 		return nil, err
 	}
-	if _, err := reader.PageContentByIndexContext(ctx, indexes[0]); err != nil {
+	page0, err := reader.PageContentByIndexContext(ctx, indexes[0])
+	if err != nil {
 		return nil, err
 	}
 	renderer := e.newRenderer(reader)
+	unbindRenderer := renderer.bindPageResources(page0)
 	measured := cloneEditorData(object)
 	if measured.Type == "TextObject" {
 		measured.TextObject.Alpha = nil
@@ -121,6 +147,7 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 		measured.ImageObject.Alpha = nil
 	}
 	bounds, err := renderer.ObjectBounds(measured, "")
+	unbindRenderer()
 	if err != nil {
 		return nil, err
 	}
@@ -129,10 +156,25 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 	}
 	var ids []string
 	err = e.Transaction(func(edit *Editor) error {
+		restoreSrc := edit.bindParsedScope(srcScope)
+		validation := &editorValidation{Editor: edit}
+		baseObject, prepErr := validation.prepareCopiedObject("", rawObject)
+		restoreSrc()
+		if prepErr != nil {
+			return prepErr
+		}
 		items := make([][]byte, 0, len(indexes))
 		ids = make([]string, 0, len(indexes))
 		for _, index := range indexes {
 			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if _, err := edit.pageContext(ctx, index); err != nil {
+				return err
+			}
+			dstScope := edit.pageLocalScope(index)
+			pageObject, _, err := edit.remapCopiedObject(cloneEditorData(baseObject), srcOrigin, srcScope, dstScope, index)
+			if err != nil {
 				return err
 			}
 			area, err := reader.PageAreaContext(ctx, doc.Pages.Page[index])
@@ -153,7 +195,7 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 			if err != nil {
 				return err
 			}
-			annotation, err := layoutWatermark(ctx, object, bounds, box, options, pageBox)
+			annotation, err := layoutWatermark(ctx, pageObject, bounds, box, options, pageBox)
 			if err != nil {
 				return err
 			}

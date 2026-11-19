@@ -310,30 +310,23 @@ func (e *Editor) RGBColor(value color.NRGBA) (*FillColor, error) {
 		alpha := int(value.A)
 		result.Alpha = &alpha
 	}
-	if e.sourceRGB() {
+	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
+		return result, nil
+	}
+	defaultID := formatUnitID(uint64(e.source.document.CommonData.DefaultCS))
+	if e.sourceRGB() && !e.colorSpaceShadowedNonRGB(defaultID) {
 		return result, nil
 	}
 	for _, id := range slices.Sorted(maps.Keys(e.source.reader.colorSpaceCache)) {
 		space := e.source.reader.colorSpaceCache[id]
-		if space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0 {
+		if isStandardRGBColorSpace(space) && !e.colorSpaceShadowedNonRGB(id) {
 			result.ColorSpace = id
 			return result, nil
 		}
 	}
-	for i := len(e.pageScope) - 1; i >= 0; i-- {
-		if parsed := e.pageScope[i]; parsed != nil {
-			for _, id := range slices.Sorted(maps.Keys(parsed.colorSpaces.exact)) {
-				space := parsed.colorSpaces.exact[id]
-				if space != nil && space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0 {
-					result.ColorSpace = space.ID
-					return result, nil
-				}
-			}
-		}
-	}
 	for _, resource := range e.resources {
 		space := resource.space
-		if space != nil && space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0 {
+		if isStandardRGBColorSpace(space) && !e.colorSpaceShadowedNonRGB(space.ID) {
 			result.ColorSpace = space.ID
 			return result, nil
 		}
@@ -492,6 +485,36 @@ func (v *editorValidation) editorColor(value *FillColor) error {
 		}
 	}
 	return nil
+}
+
+// isStandardRGBColorSpace 判断颜色空间是否为无配置文件且无调色板的8位标准RGB
+// 入参: space 颜色空间定义
+// 返回: bool 是否为标准8位RGB
+func isStandardRGBColorSpace(space *ColorSpace) bool {
+	return space != nil && strings.EqualFold(space.Type, "RGB") && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0
+}
+
+// colorSpaceShadowedNonRGB 检查指定颜色空间标识是否在当前页或任一页的局部资源中被非标准RGB遮蔽
+// 入参: id 颜色空间标识
+// 返回: bool 是否存在非标准RGB同名遮蔽
+func (e *Editor) colorSpaceShadowedNonRGB(id string) bool {
+	checkList := func(list []*parsedRes) bool {
+		for _, parsed := range list {
+			if space, ok := parsed.colorSpaces.get(id); ok && !isStandardRGBColorSpace(space) {
+				return true
+			}
+		}
+		return false
+	}
+	if checkList(e.pageScope) {
+		return true
+	}
+	for i := range e.pages {
+		if checkList(e.pages[i].pageResources) {
+			return true
+		}
+	}
+	return e.source != nil && checkList(e.ensureSourcePageResources())
 }
 
 // editorPaintable 判断文字与路径颜色能否在保留其他字段的前提下修改

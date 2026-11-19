@@ -81,7 +81,9 @@ type canvasPathKey struct {
 // canvasBackendState 保存Canvas字体与字形适配缓存
 type canvasBackendState struct {
 	resources          *Resources
+	fontFamilies       map[canvasFontKey]*canvas.FontFamily
 	fontMap            map[canvasFontMapKey]*canvas.FontFamily
+	fontDigests        map[*canvas.Font][32]byte
 	svgFontCache       map[*canvas.Font]SVGFont
 	textGlyphPathCache renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue]
 	fontOutlines       map[*canvas.Font]*basefont.Outliner
@@ -90,7 +92,9 @@ type canvasBackendState struct {
 // resetFonts 清除Canvas字体及字形缓存
 func (s *canvasBackendState) resetFonts() {
 	s.textGlyphPathCache.clear()
+	s.fontFamilies = make(map[canvasFontKey]*canvas.FontFamily)
 	s.fontMap = make(map[canvasFontMapKey]*canvas.FontFamily)
+	s.fontDigests = make(map[*canvas.Font][32]byte)
 	s.svgFontCache = make(map[*canvas.Font]SVGFont)
 	s.textGlyphPathCache = *resourceCache[textGlyphPathCacheKey, textGlyphPathCacheValue](s.resources, 16<<20)
 	s.fontOutlines = make(map[*canvas.Font]*basefont.Outliner)
@@ -99,7 +103,7 @@ func (s *canvasBackendState) resetFonts() {
 // forkSharedState 将Canvas后端的线程安全共享缓存传递给Fork子渲染器
 // 入参: src 源渲染器, dst 目标子渲染器
 func (CanvasBackend) forkSharedState(src, dst *Renderer) {
-	dst.sharedBackendStates[CanvasBackend{}] = src.canvasFontFamilies()
+	dst.sharedBackendStates[CanvasBackend{}] = src.canvasFontData()
 	dst.sharedBackendStates[canvasOutlineCacheKey{}] = src.canvasFontOutlines()
 	dst.sharedBackendStates[canvasClipUnionKey{}] = src.canvasClipUnions()
 	dst.sharedBackendStates[canvasPathCacheKey{}] = src.canvasParsedPaths()
@@ -111,100 +115,61 @@ func (CanvasBackend) forkSharedState(src, dst *Renderer) {
 	dst.sharedBackendStates[svgFontCacheKey{}] = src.svgFontResources()
 }
 
-// canvasClipIntersections 获取子渲染器共享的几何交集缓存，限制结果保留量
-// 返回: *renderCache[[32]byte, *canvas.Path] 裁剪缓存
-func (r *Renderer) canvasClipIntersections() *renderCache[[32]byte, *canvas.Path] {
-	key := canvasClipCacheKey{}
+// sharedCanvasCache 获取或初始化指定键名的线程安全Canvas共享缓存
+// 入参: r 渲染器, key 缓存标识键, limit 容量上限字节数
+// 返回: *renderCache[K, V] 共享缓存
+func sharedCanvasCache[K comparable, V any](r *Renderer, key any, limit int) *renderCache[K, V] {
 	if state, ok := r.sharedBackendStates[key]; ok {
-		return state.(*renderCache[[32]byte, *canvas.Path])
+		return state.(*renderCache[K, V])
 	}
 	if r.sharedBackendStates == nil {
 		r.sharedBackendStates = make(map[any]any)
 	}
-	cache := resourceCache[[32]byte, *canvas.Path](r.Reader.resources, 8<<20)
+	cache := resourceCache[K, V](r.Reader.resources, limit)
 	r.sharedBackendStates[key] = cache
 	return cache
+}
+
+// canvasClipIntersections 获取子渲染器共享的几何交集缓存，限制结果保留量
+// 返回: *renderCache[[32]byte, *canvas.Path] 裁剪缓存
+func (r *Renderer) canvasClipIntersections() *renderCache[[32]byte, *canvas.Path] {
+	return sharedCanvasCache[[32]byte, *canvas.Path](r, canvasClipCacheKey{}, 8<<20)
 }
 
 // canvasClipUnions 复用相同输入轮廓的裁剪并集，不改变布尔运算顺序
 // 返回: *renderCache[[32]byte, *canvas.Path] 只读裁剪并集缓存
 func (r *Renderer) canvasClipUnions() *renderCache[[32]byte, *canvas.Path] {
-	key := canvasClipUnionKey{}
-	if state, ok := r.sharedBackendStates[key]; ok {
-		return state.(*renderCache[[32]byte, *canvas.Path])
-	}
-	if r.sharedBackendStates == nil {
-		r.sharedBackendStates = make(map[any]any)
-	}
-	cache := resourceCache[[32]byte, *canvas.Path](r.Reader.resources, 8<<20)
-	r.sharedBackendStates[key] = cache
-	return cache
+	return sharedCanvasCache[[32]byte, *canvas.Path](r, canvasClipUnionKey{}, 8<<20)
 }
 
 // canvasParsedPaths 获取子渲染器共享的局部路径缓存，不保留对象变换
 // 返回: *renderCache[canvasPathKey, *canvas.Path] 路径缓存
 func (r *Renderer) canvasParsedPaths() *renderCache[canvasPathKey, *canvas.Path] {
-	key := canvasPathCacheKey{}
-	if state, ok := r.sharedBackendStates[key]; ok {
-		return state.(*renderCache[canvasPathKey, *canvas.Path])
-	}
-	if r.sharedBackendStates == nil {
-		r.sharedBackendStates = make(map[any]any)
-	}
-	cache := resourceCache[canvasPathKey, *canvas.Path](r.Reader.resources, 16<<20)
-	r.sharedBackendStates[key] = cache
-	return cache
+	return sharedCanvasCache[canvasPathKey, *canvas.Path](r, canvasPathCacheKey{}, 16<<20)
 }
 
 // canvasSettledPaths 获取共享填充轮廓缓存，限制结果保留量
 // 返回: *renderCache[canvasFillKey, *canvas.Path] 填充轮廓缓存
 func (r *Renderer) canvasSettledPaths() *renderCache[canvasFillKey, *canvas.Path] {
-	key := canvasFillCacheKey{}
-	if state, ok := r.sharedBackendStates[key]; ok {
-		return state.(*renderCache[canvasFillKey, *canvas.Path])
-	}
-	if r.sharedBackendStates == nil {
-		r.sharedBackendStates = make(map[any]any)
-	}
-	cache := resourceCache[canvasFillKey, *canvas.Path](r.Reader.resources, 16<<20)
-	r.sharedBackendStates[key] = cache
-	return cache
+	return sharedCanvasCache[canvasFillKey, *canvas.Path](r, canvasFillCacheKey{}, 16<<20)
 }
 
-// canvasFontFamilies 获取子渲染器共享的只读字体族缓存，限制解析数据保留量
-// 返回: *renderCache[canvasFontKey, *canvas.FontFamily] 字体族缓存
-func (r *Renderer) canvasFontFamilies() *renderCache[canvasFontKey, *canvas.FontFamily] {
-	key := CanvasBackend{}
-	if state, ok := r.sharedBackendStates[key]; ok {
-		return state.(*renderCache[canvasFontKey, *canvas.FontFamily])
-	}
-	cache := resourceCache[canvasFontKey, *canvas.FontFamily](r.Reader.resources, 32<<20)
-	r.sharedBackendStates[key] = cache
-	return cache
+// canvasFontData 获取子渲染器共享的只读字体字节缓存，限制解析数据保留量
+// 返回: *renderCache[[32]byte, []byte] 字体数据缓存
+func (r *Renderer) canvasFontData() *renderCache[[32]byte, []byte] {
+	return sharedCanvasCache[[32]byte, []byte](r, CanvasBackend{}, 32<<20)
 }
 
 // canvasDrawClips 获取派生渲染器共享的绘制裁剪缓存
-// 返回: *renderCache 绘制裁剪缓存
+// 返回: *renderCache[[32]byte, *canvas.Path] 绘制裁剪缓存
 func (r *Renderer) canvasDrawClips() *renderCache[[32]byte, *canvas.Path] {
-	key := canvasDrawClipCacheKey{}
-	if state, ok := r.sharedBackendStates[key]; ok {
-		return state.(*renderCache[[32]byte, *canvas.Path])
-	}
-	cache := resourceCache[[32]byte, *canvas.Path](r.Reader.resources, 16<<20)
-	r.sharedBackendStates[key] = cache
-	return cache
+	return sharedCanvasCache[[32]byte, *canvas.Path](r, canvasDrawClipCacheKey{}, 16<<20)
 }
 
 // canvasStrokeClips 获取原生描边与裁剪结果缓存，按资源策略限制保留量
 // 返回: *renderCache[canvasStrokeKey, *canvas.Path] 描边缓存
 func (r *Renderer) canvasStrokeClips() *renderCache[canvasStrokeKey, *canvas.Path] {
-	key := canvasStrokeCacheKey{}
-	if state, ok := r.sharedBackendStates[key]; ok {
-		return state.(*renderCache[canvasStrokeKey, *canvas.Path])
-	}
-	cache := resourceCache[canvasStrokeKey, *canvas.Path](r.Reader.resources, 16<<20)
-	r.sharedBackendStates[key] = cache
-	return cache
+	return sharedCanvasCache[canvasStrokeKey, *canvas.Path](r, canvasStrokeCacheKey{}, 16<<20)
 }
 
 // strokeClippedCanvasPath 复用原生描边与裁剪结果，自定义几何后端沿用逐次调用
@@ -281,15 +246,9 @@ func (r *Renderer) applyCachedClipPath(path, clip *canvas.Path) *canvas.Path {
 }
 
 // canvasFontOutlines 获取子渲染器共享的字体轮廓解析缓存，限制字体及解析数据保留量
-// 返回: *renderCache[*canvas.Font, *basefont.Outliner] 字体轮廓缓存
-func (r *Renderer) canvasFontOutlines() *renderCache[*canvas.Font, *basefont.Outliner] {
-	key := canvasOutlineCacheKey{}
-	if state, ok := r.sharedBackendStates[key]; ok {
-		return state.(*renderCache[*canvas.Font, *basefont.Outliner])
-	}
-	cache := resourceCache[*canvas.Font, *basefont.Outliner](r.Reader.resources, 32<<20)
-	r.sharedBackendStates[key] = cache
-	return cache
+// 返回: *renderCache[[32]byte, *basefont.Outliner] 字体轮廓缓存
+func (r *Renderer) canvasFontOutlines() *renderCache[[32]byte, *basefont.Outliner] {
+	return sharedCanvasCache[[32]byte, *basefont.Outliner](r, canvasOutlineCacheKey{}, 32<<20)
 }
 
 // canvasState 获取当前渲染器的Canvas私有缓存，按需创建且不向其他后端暴露

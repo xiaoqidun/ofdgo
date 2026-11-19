@@ -6,7 +6,7 @@ require (
 	github.com/andybalholm/brotli v1.3.0
 	github.com/emmansun/gmsm v0.45.3
 	github.com/go-text/typesetting v0.3.5
-	github.com/tdewolff/canvas v0.0.0-20261116172151-988951479a61
+	github.com/tdewolff/canvas v0.0.0-20261118111642-891200a8cf2b
 	github.com/xiaoqidun/guigo v0.0.0-20261110054647-31d2a81b8610
 	github.com/xiaoqidun/j2kgo v1.0.2
 	github.com/xiaoqidun/jbig2 v1.1.9
@@ -34,8 +34,8 @@ require (
 	github.com/tdewolff/minify/v2 v2.24.17 // indirect
 	github.com/tdewolff/parse/v2 v2.8.16 // indirect
 	github.com/yuin/goldmark v1.8.5 // indirect
-	golang.org/x/crypto v0.59.0 // indirect
-	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	modernc.org/knuth v0.6.0 // indirect
 	modernc.org/token v1.1.0 // indirect
 	star-tex.org/x/tex v0.7.1 // indirect

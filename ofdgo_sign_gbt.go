@@ -21,10 +21,12 @@ import (
 	"math/big"
 )
 
-// GB/T35275内容类型及消息摘要属性的对象标识
 const (
-	signContentData       = "1.2.156.10197.6.1.4.2.1"
+	// signContentData GB/T35275数据内容类型对象标识
+	signContentData = "1.2.156.10197.6.1.4.2.1"
+	// signContentSignedData GB/T35275签名数据内容类型对象标识
 	signContentSignedData = "1.2.156.10197.6.1.4.2.2"
+	// signAttrMessageDigest 消息摘要属性对象标识
 	signAttrMessageDigest = "1.2.840.113549.1.9.4"
 )
 
@@ -45,10 +47,11 @@ type digitalVerifyResult struct {
 
 // gbtSignedData GB/T35275 SignedData结构
 type gbtSignedData struct {
-	Version       int
-	ContentDigest []byte
-	Certs         []gbtCertificate
-	Signers       []gbtSignerInfo
+	Version    int
+	HasContent bool
+	Content    []byte
+	Certs      []gbtCertificate
+	Signers    []gbtSignerInfo
 }
 
 // findCert 查找签名者证书
@@ -212,23 +215,25 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 		if err != nil {
 			return nil, err
 		}
-		if len(sd.ContentDigest) != 0 && !bytes.Equal(sd.ContentDigest, digest) {
+		if sd.HasContent && !bytes.Equal(sd.Content, signedData) && !bytes.Equal(sd.Content, digest) {
 			result.DataHashChecked = true
 			result.DataHashOK = false
 			return result, nil
 		}
 		result.DataHashOK = true
-		plain := sd.ContentDigest
+		var plains [][]byte
 		if len(signer.AuthAttrs) != 0 {
 			if !bytes.Equal(signer.AttrDigest, digest) {
 				result.DataHashChecked = true
 				result.DataHashOK = false
 				return result, nil
 			}
-			plain = signer.AuthAttrs
-		}
-		if len(plain) == 0 {
-			return nil, fmt.Errorf("invalid signed data content")
+			plains = [][]byte{signer.AuthAttrs}
+		} else {
+			plains = [][]byte{signedData}
+			if sd.HasContent && len(sd.Content) == len(digest) && !bytes.Equal(sd.Content, signedData) {
+				plains = append(plains, sd.Content)
+			}
 		}
 		result.DataHashChecked = index == len(sd.Signers)-1
 		cert := sd.findCert(signer.Issuer, signer.Serial)
@@ -254,6 +259,7 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 		if index == 0 {
 			result.CertInfo = certInfo
 		}
+		verified := false
 		if isSM2SignatureMethod(signer.SignatureAlg) {
 			pub, err := parseSM2PublicKeyFromCert(cert.Raw)
 			if err != nil {
@@ -262,28 +268,30 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 				result.CertOK = false
 				return result, err
 			}
-			if !verifySM2Signature(pub, nil, plain, signer.Signature) {
-				result.CertInfo = certInfo
-				result.DataHashChecked = true
-				result.SignedChecked = true
-				result.SignedOK = false
-				result.CertChecked = true
-				result.CertOK = true
-				return result, nil
+			for _, plain := range plains {
+				if verifySM2Signature(pub, nil, plain, signer.Signature) {
+					verified = true
+					break
+				}
 			}
-			continue
-		}
-		if !isRSASignatureMethod(signer.SignatureAlg) && !isECDSASignatureMethod(signer.SignatureAlg) {
+		} else if isRSASignatureMethod(signer.SignatureAlg) || isECDSASignatureMethod(signer.SignatureAlg) {
+			for _, plain := range plains {
+				ok, err := verifyPublicKeySignature(signer.SignatureAlg, signer.DigestAlg, cert.Raw, plain, signer.Signature)
+				if err != nil {
+					result.CertInfo = certInfo
+					result.CertChecked = true
+					result.CertOK = false
+					return result, err
+				}
+				if ok {
+					verified = true
+					break
+				}
+			}
+		} else {
 			return nil, fmt.Errorf("unsupported signature method: %s", signer.SignatureAlg)
 		}
-		ok, err := verifyPublicKeySignature(signer.SignatureAlg, signer.DigestAlg, cert.Raw, plain, signer.Signature)
-		if err != nil {
-			result.CertInfo = certInfo
-			result.CertChecked = true
-			result.CertOK = false
-			return result, err
-		}
-		if !ok {
+		if !verified {
 			result.CertInfo = certInfo
 			result.DataHashChecked = true
 			result.SignedChecked = true
@@ -467,16 +475,32 @@ func parseGBT35275SignedData(data []byte) (*gbtSignedData, error) {
 	if err != nil {
 		return nil, err
 	}
+	if contentOID != signContentData {
+		return nil, fmt.Errorf("invalid signed data inner content type")
+	}
 	if hasContent {
-		if contentOID != signContentData {
-			return nil, fmt.Errorf("invalid signed data inner content type")
+		if content.Class != asn1.ClassUniversal || content.Tag != asn1.TagOctetString {
+			return nil, fmt.Errorf("invalid signed data content")
 		}
-		if content.Tag == asn1.TagOctetString {
-			sd.ContentDigest, err = asn1OctetString(content)
+		if content.IsCompound {
+			chunks, ok := asn1Children(content.Bytes)
+			if !ok {
+				return nil, fmt.Errorf("invalid signed data content")
+			}
+			for _, chunk := range chunks {
+				part, err := asn1OctetString(chunk)
+				if err != nil {
+					return nil, err
+				}
+				sd.Content = append(sd.Content, part...)
+			}
+		} else {
+			sd.Content, err = asn1OctetString(content)
 			if err != nil {
 				return nil, err
 			}
 		}
+		sd.HasContent = true
 	}
 	for i := 3; i < len(items); i++ {
 		item := items[i]

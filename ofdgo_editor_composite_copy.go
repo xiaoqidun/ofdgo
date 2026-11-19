@@ -36,6 +36,7 @@ type CompositeSelection struct {
 	containers []int
 	nodes      []*editorCompositeNode
 	source     *editorSourcePage
+	pageScope  []*parsedRes
 	richText   map[int]*richTextSnapshot
 }
 
@@ -62,6 +63,9 @@ func (e *Editor) PasteCompositeSelection(page int, selection *CompositeSelection
 // 入参: page 页面索引, path 父复合路径, indexes 同一容器的成员序号
 // 返回: *CompositeSelection 独立快照, error 错误信息
 func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []int) (*CompositeSelection, error) {
+	if _, err := e.page(page); err != nil {
+		return nil, err
+	}
 	reader, _, root, nodes, err := e.compositeScope(page, path)
 	if err != nil {
 		return nil, err
@@ -74,12 +78,13 @@ func (e *Editor) CaptureCompositeObjects(page int, path ObjectPath, indexes []in
 	slices.Sort(indexes)
 	var owner *editorCompositeNode
 	var container *editorXML
-	selection := &CompositeSelection{richText: make(map[int]*richTextSnapshot), editor: e, document: e.documentIdentity(), page: e.pages[page].ID, path: ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: slices.Clone(path.Children)}}
+	selection := &CompositeSelection{richText: make(map[int]*richTextSnapshot), editor: e, document: e.documentIdentity(), page: e.pages[page].ID, pageScope: e.pageLocalScope(page), path: ObjectPath{ID: path.ID, Annotation: path.Annotation, Children: slices.Clone(path.Children)}}
 	if path.Annotation == "" {
 		if origin := e.objectOrigin(path.ID); origin != nil {
 			selection.source = origin.page
 		}
-	} else if e.source != nil {
+	}
+	if selection.source == nil && e.source != nil {
 		selection.source = e.source.pages[e.pages[page].ID]
 	}
 	for j, i := range indexes {
@@ -240,10 +245,26 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 	}
 	defer reader.Close()
 	renderer := e.newRenderer(reader)
-	if selection.source != nil && selection.source.original != nil {
-		defer e.bindPageResources(selection.source.original)()
-		defer renderer.bindPageResources(selection.source.original)()
+	scope := selection.pageScope
+	if len(scope) == 0 && selection.source != nil && selection.source.original != nil {
+		scope = selection.source.original.pageResources
 	}
+	if len(scope) == 0 {
+		scope = e.pageScope
+	}
+	restoreEditorScope := func() {}
+	restoreRendererScope := func() {}
+	if len(scope) > 0 {
+		restoreEditorScope = e.bindParsedScope(scope)
+		restoreRendererScope = renderer.bindParsedResources(scope)
+	}
+	scopedDone := false
+	defer func() {
+		if !scopedDone {
+			restoreRendererScope()
+			restoreEditorScope()
+		}
+	}()
 	var objects []GraphicObject
 	var remaps []map[string]string
 	for i, source := range selection.nodes {
@@ -355,6 +376,9 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 		objects = append(objects, object)
 		remaps = append(remaps, copy.remaps...)
 	}
+	scopedDone = true
+	restoreRendererScope()
+	restoreEditorScope()
 	return paste(objects, remaps)
 }
 

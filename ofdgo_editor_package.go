@@ -194,6 +194,9 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 			parts[resource.name] = resource.data
 		}
 	}
+	if e.output != nil && e.output.resources != nil {
+		maps.Copy(parts, e.output.resources.extra)
+	}
 	commonData := source.document.CommonData
 	for _, name := range append(slices.Clone(commonData.DocumentRes), commonData.PublicRes...) {
 		delete(usedFiles, reader.ResPath(name))
@@ -413,7 +416,7 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 	}
 	data := source.data
 	var patches []editorXMLPatch
-	if page.Area.PhysicalBox != source.original.Area.PhysicalBox {
+	if page.Area != source.original.Area {
 		area := source.root.child("Area")
 		if area != nil {
 			areaData, err := editorXMLStandalone(data[area.start:area.end], area)
@@ -424,7 +427,18 @@ func (e *Editor) sourcePageXML(index int, source *editorSourcePage) ([]byte, err
 			if err != nil {
 				return nil, err
 			}
-			updated, err := editorXMLSetText(areaData, areaRoot, [][2]string{{"PhysicalBox", page.Area.PhysicalBox}})
+			var fields [][2]string
+			for _, field := range [][3]string{
+				{"PhysicalBox", page.Area.PhysicalBox, source.original.Area.PhysicalBox},
+				{"ApplicationBox", page.Area.ApplicationBox, source.original.Area.ApplicationBox},
+				{"ContentBox", page.Area.ContentBox, source.original.Area.ContentBox},
+				{"BleedBox", page.Area.BleedBox, source.original.Area.BleedBox},
+			} {
+				if field[1] != field[2] {
+					fields = append(fields, [2]string{field[0], field[1]})
+				}
+			}
+			updated, err := editorXMLSetText(areaData, areaRoot, fields)
 			if err != nil {
 				return nil, err
 			}

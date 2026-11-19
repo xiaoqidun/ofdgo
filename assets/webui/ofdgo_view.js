@@ -1040,19 +1040,15 @@ export function createPageView(context) {
 			button.title = `${context.formatSize(page.width)} x ${context.formatSize(page.height)} mm`;
 			pageView.setPageItemCurrent(button, page.index === context.state.pageIndex);
 			pageView.layoutThumbnail(button, page);
-
 			const thumb = document.createElement("span");
 			thumb.className = "thumb-paper";
 			pageView.setThumbnailContent(thumb, context.state.pageCache.get(page.index)?.svg, page.index, openSeq);
-
 			const label = document.createElement("span");
 			label.className = "thumb-label";
 			label.textContent = `第${page.index + 1}页`;
-
 			const size = document.createElement("span");
 			size.className = "thumb-size";
 			size.textContent = `${context.formatSize(page.width)} x ${context.formatSize(page.height)} mm`;
-
 			button.append(thumb, label, size);
 			if (context.state.editing && context.pageCan("move", page.index)) context.enablePageDrag(button, page.index);
 			button.addEventListener("click", event => context.selectThumbnailPage(event, page.index));
@@ -1111,12 +1107,12 @@ export function createPageView(context) {
 				view.total = Math.ceil(offsets.at(-1));
 				view.host.style.height = `${Math.min(SCROLL_SEGMENT_SIZE, view.total)}px`;
 			};
-			let width = context.el.navigationContent.clientWidth || view.width || 180;
+			let width = pageView.thumbnailHostWidth() || view.width || 180;
 			measure(width);
-			const nextWidth = context.el.navigationContent.clientWidth;
+			const nextWidth = pageView.thumbnailHostWidth();
 			if (nextWidth && nextWidth !== width) {
 				measure(nextWidth);
-				if (context.el.navigationContent.clientWidth) view.width = context.el.navigationContent.clientWidth;
+				view.width = nextWidth;
 			}
 			for (const [index, button] of view.nodes) {
 				pageView.layoutThumbnail(button, context.state.doc.pages[index]);
@@ -1128,10 +1124,19 @@ export function createPageView(context) {
 			}
 		},
 
+		thumbnailHostWidth() {
+			if (context.el.pageList.clientWidth) return context.el.pageList.clientWidth;
+			const navWidth = context.el.navigationContent.clientWidth;
+			if (!navWidth) return 0;
+			const navStyle = getComputedStyle(context.el.navigationContent);
+			return Math.max(0, navWidth - (Number.parseFloat(navStyle.paddingLeft) || 0) - (Number.parseFloat(navStyle.paddingRight) || 0));
+		},
+
 		syncThumbnailWindow() {
 			const view = context.state.thumbnailWindow;
 			if (!view || context.el.pageList.hidden || !context.state.showPages) return;
-			if (context.el.navigationContent.clientWidth && (view.width !== context.el.navigationContent.clientWidth || view.rotation !== context.state.rotation || view.layout !== context.state.pageLayout)) pageView.layoutThumbnails();
+			const hostWidth = pageView.thumbnailHostWidth();
+			if (hostWidth && (view.width !== hostWidth || view.rotation !== context.state.rotation || view.layout !== context.state.pageLayout)) pageView.layoutThumbnails();
 			pageView.syncPageWindow(view, view.pendingTop ?? null);
 			view.pendingTop = null;
 			pageView.prunePageRenderQueue();
@@ -1551,16 +1556,17 @@ export function createPageView(context) {
 			if (scrollbarMeasurement?.key === key) return scrollbarMeasurement.width;
 			const probe = document.createElement("div");
 			const content = document.createElement("div");
+			probe.className = "scrollbar-probe";
 			probe.style.position = "absolute";
 			probe.style.width = "100px";
 			probe.style.height = "100px";
 			probe.style.overflow = "scroll";
-			probe.style.scrollbarWidth = style;
 			probe.style.left = "-9999px";
 			probe.append(content);
 			document.body.append(probe);
-			const width = 100 - Number.parseFloat(getComputedStyle(content).width);
+			const width = Math.max(0, 100 - Number.parseFloat(getComputedStyle(content).width));
 			probe.remove();
+			document.documentElement.style.setProperty("--scrollbar-width", `${width}px`);
 			scrollbarMeasurement = { key, width };
 			return width;
 		},

@@ -169,7 +169,6 @@ type editorPageImport struct {
 	docScope           []string
 	pageScopes         map[string][]string
 	pageScopesByPath   map[string][]string
-	tplLocalRes        map[string][]string
 	used               map[string][]byte
 	usedGroups         map[string]string
 	templates          map[string]TemplatePage
@@ -415,11 +414,12 @@ func (m *editorPageImport) resourceTargetID(entry editorImportEntry, key string)
 	return id
 }
 
-// registerPageRes 解析并登记页面声明的局部资源索引路径
-// 入参: list 已有局部资源列表, pageName 页面路径, values PageRes声明列表
-// 返回: []string 追加后的局部资源列表, error 路径解析或索引读取错误
-func (m *editorPageImport) registerPageRes(list []string, pageName string, values []string) ([]string, error) {
-	for _, value := range values {
+// resolvePageScope 按页面自身局部资源声明登记索引并拼装完整页面作用域链
+// 入参: pageName 页面路径, pageRes 页面PageRes声明列表
+// 返回: []string 按优先级排列的资源文件列表, error 读取或解析错误
+func (m *editorPageImport) resolvePageScope(pageName string, pageRes []string) ([]string, error) {
+	var local []string
+	for _, value := range pageRes {
 		loc, err := m.resolve(pageName, "", strings.TrimSpace(value))
 		if err != nil {
 			return nil, err
@@ -427,26 +427,7 @@ func (m *editorPageImport) registerPageRes(list []string, pageName string, value
 		if err := m.resourceIndex(loc); err != nil {
 			return nil, err
 		}
-		list = append(list, cleanPackagePath(loc))
-	}
-	return list, nil
-}
-
-// resolvePageScope 按模板与页面局部资源声明登记索引并拼装完整页面作用域链
-// 入参: pageName 页面路径, templates 模板标识列表, pageRes 页面PageRes声明列表
-// 返回: []string 按优先级排列的资源文件列表, error 读取或解析错误
-func (m *editorPageImport) resolvePageScope(pageName string, templates, pageRes []string) ([]string, error) {
-	var local []string
-	for _, tplID := range templates {
-		tplRes, err := m.templatePageRes(tplID)
-		if err != nil {
-			return nil, err
-		}
-		local = append(local, tplRes...)
-	}
-	local, err := m.registerPageRes(local, pageName, pageRes)
-	if err != nil {
-		return nil, err
+		local = append(local, cleanPackagePath(loc))
 	}
 	var scope []string
 	for _, res := range slices.Backward(local) {
@@ -456,50 +437,6 @@ func (m *editorPageImport) resolvePageScope(pageName string, templates, pageRes 
 		scope = appendUniquePath(scope, dRes)
 	}
 	return scope, nil
-}
-
-// templatePageRes 解析并缓存模板页声明的局部资源文件列表
-// 入参: templateID 模板页标识
-// 返回: []string 模板页局部资源文件列表, error 读取或解析错误
-func (m *editorPageImport) templatePageRes(templateID string) ([]string, error) {
-	key := editorImportKey(templateID)
-	tpl, ok := m.templates[key]
-	if !ok {
-		return nil, nil
-	}
-	if cached, seen := m.tplLocalRes[key]; seen {
-		return cached, nil
-	}
-	tplName := m.reader.ResPath(tpl.BaseLoc)
-	data, err := m.readFile(tplName)
-	if err != nil {
-		return nil, err
-	}
-	root, err := parseEditorXMLContext(m.ctx, data)
-	if err != nil {
-		return nil, err
-	}
-	list, err := m.registerPageRes(nil, tplName, collectXMLPageRes(data, root))
-	if err != nil {
-		return nil, err
-	}
-	m.tplLocalRes[key] = list
-	return list, nil
-}
-
-// buildPageScope 构建页面或模板页的资源作用域链并登记局部资源索引
-// 入参: name 页面路径, data 页面XML数据, root 页面根节点, template 是否按模板页解析
-// 返回: []string 按优先级排列的资源文件列表, error 读取或解析错误
-func (m *editorPageImport) buildPageScope(name string, data []byte, root *editorXML, template bool) ([]string, error) {
-	var templates []string
-	if !template {
-		for _, child := range root.children {
-			if child.matchesOFD("Template") {
-				templates = append(templates, child.attr("TemplateID"))
-			}
-		}
-	}
-	return m.resolvePageScope(name, templates, collectXMLPageRes(data, root))
 }
 
 // resource 按当前作用域与引用用途校验资源类型并迁移，避免生成悬空或类型不符的引用
@@ -697,7 +634,7 @@ func (m *editorPageImport) copyXML(name, candidate string, template bool, parent
 	paths[key], m.files[target] = target, nil
 	scope := parentScope
 	if root.name.Local == "Page" {
-		scope, err = m.buildPageScope(name, data, root, template)
+		scope, err = m.resolvePageScope(name, collectXMLPageRes(data, root))
 		if err != nil {
 			return "", err
 		}
@@ -1565,11 +1502,7 @@ func (e *Editor) importSelection(ctx context.Context, source *Editor, sourcePage
 	if err != nil {
 		return nil, nil, err
 	}
-	templates := make([]string, len(content.Template))
-	for i, tplRef := range content.Template {
-		templates[i] = tplRef.TemplateID
-	}
-	pageScope, err := migration.resolvePageScope(pageName, templates, content.PageRes)
+	pageScope, err := migration.resolvePageScope(pageName, content.PageRes)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1893,7 +1826,7 @@ func (e *Editor) prepareImport(ctx context.Context, source *Reader, doc *Documen
 	m := &editorPageImport{ctx: ctx, reader: source, doc: doc, directory: e.packageDirectory(), target: base.reader, maximum: maximum, copyPage: copyPage, progress: progress,
 		xmlPaths: make(map[string]string), dataPaths: make(map[string]string), evidence: make(map[string]string), ids: make(map[string]string), resIDs: make(map[string]string), pages: make(map[string]bool, len(selected)),
 		files: make(map[string][]byte), resByFile: make(map[string]map[string]editorImportEntry), docRes: make(map[string]bool), pageScopes: make(map[string][]string), pageScopesByPath: make(map[string][]string),
-		tplLocalRes: make(map[string][]string), used: make(map[string][]byte), usedGroups: make(map[string]string),
+		used: make(map[string][]byte), usedGroups: make(map[string]string),
 		templates: make(map[string]TemplatePage), templateParts: make(map[string][]byte), attachments: make(map[string][]byte), removedAttachments: base.removedAttachments, bookmarks: make(map[string]Dest, len(doc.Bookmarks.Bookmark))}
 	for _, bookmark := range doc.Bookmarks.Bookmark {
 		if err := ctx.Err(); err != nil {

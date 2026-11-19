@@ -34,12 +34,12 @@ func (r *Reader) ColorSpace(ctx context.Context, id string) (*ColorSpace, error)
 	if err != nil {
 		return nil, err
 	}
-	item, err := findResource(catalog.items, "ColorSpace", id)
+	item, _, resFile, _, err := findUniqueCatalogResource(catalog, "ColorSpace", id)
 	if err != nil {
 		return nil, err
 	}
 	var space ColorSpace
-	if err := catalog.styleDefinition(ctx, item, &space); err != nil {
+	if err := catalog.styleDefinitionAt(ctx, resFile, item, &space); err != nil {
 		return nil, err
 	}
 	space.ID, space.Profile = item.ID, ""
@@ -57,19 +57,54 @@ func (r *Reader) DrawParam(ctx context.Context, id string, resolved bool) (*Draw
 	if err != nil {
 		return nil, err
 	}
+	var matches []int
+	for i, item := range catalog.items {
+		if resourceMatches(item, "DrawParam", id) {
+			matches = append(matches, i)
+		}
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("resource not found: DrawParam/%s", id)
+	}
+	curIdx := matches[0]
+	if len(matches) > 1 {
+		if !resolved {
+			return nil, fmt.Errorf("ambiguous resource DrawParam/%s defined in multiple resource files", id)
+		}
+		bestIdx := -1
+		for _, candidate := range matches {
+			scope := catalog.scopeForFile(catalog.itemFiles[candidate])
+			coversAll := true
+			for _, other := range matches {
+				if !slices.Contains(scope, catalog.itemFiles[other]) {
+					coversAll = false
+					break
+				}
+			}
+			if coversAll {
+				if bestIdx != -1 {
+					return nil, fmt.Errorf("ambiguous resource DrawParam/%s defined in multiple resource files", id)
+				}
+				bestIdx = candidate
+			}
+		}
+		if bestIdx == -1 {
+			return nil, fmt.Errorf("ambiguous resource DrawParam/%s defined in multiple resource files", id)
+		}
+		curIdx = bestIdx
+	}
 	var chain []DrawParam
 	seen := make(map[string]bool)
 	for {
-		item, err := findResource(catalog.items, "DrawParam", id)
-		if err != nil {
-			return nil, err
-		}
-		if seen[item.ID] {
+		item := catalog.items[curIdx]
+		curFile := catalog.itemFiles[curIdx]
+		visitKey := curFile + "\x00" + item.ID
+		if seen[visitKey] {
 			return nil, fmt.Errorf("cyclic draw parameter %s", item.ID)
 		}
-		seen[item.ID] = true
+		seen[visitKey] = true
 		var draw DrawParam
-		if err := catalog.styleDefinition(ctx, item, &draw); err != nil {
+		if err := catalog.styleDefinitionAt(ctx, curFile, item, &draw); err != nil {
 			return nil, err
 		}
 		draw.ID = item.ID
@@ -83,7 +118,29 @@ func (r *Reader) DrawParam(ctx context.Context, id string, resolved bool) (*Draw
 		if draw.Relative == "" {
 			break
 		}
-		id = draw.Relative
+		relID := editorResourceID(draw.Relative)
+		scope := catalog.scopeForFile(curFile)
+		if pos := slices.Index(scope, curFile); pos >= 0 {
+			if relID == item.ID {
+				scope = scope[pos+1:]
+			} else {
+				scope = scope[pos:]
+			}
+		}
+		nextIdx := -1
+		for _, resFile := range scope {
+			if idx, ok := catalog.itemIndex[resFile+"\x00DrawParam\x00"+relID]; ok {
+				nextIdx = idx
+				break
+			}
+		}
+		if nextIdx < 0 {
+			if relID == item.ID {
+				return nil, fmt.Errorf("cyclic draw parameter %s", item.ID)
+			}
+			return nil, fmt.Errorf("resource not found: DrawParam/%s", draw.Relative)
+		}
+		curIdx = nextIdx
 	}
 	result := &DrawParam{}
 	for i := len(chain) - 1; i >= 0; i-- {
@@ -104,6 +161,14 @@ func (e *Editor) ColorSpace(id string) (*ColorSpace, error) {
 		}
 	}
 	if e.source != nil {
+		if found, ok := e.sourceColorSpace(id); ok && found != nil {
+			space := *found
+			space.Palette, space.profile = slices.Clone(space.Palette), nil
+			if space.Profile != "" {
+				space.Profile = "/" + cleanPackagePath(e.source.reader.ResPath(space.Profile))
+			}
+			return &space, nil
+		}
 		return e.source.reader.ColorSpace(context.Background(), id)
 	}
 	return nil, fmt.Errorf("color space %q not found", id)
@@ -154,9 +219,9 @@ func (e *Editor) ReplaceColorSpace(ctx context.Context, id string, space ColorSp
 		return err
 	}
 	space = *working.resources[0].space
-	return e.changeResourceStyle(ctx, "ColorSpace", id, func(catalog *resourceCatalog, item ResourceInfo, changes map[string][]byte) error {
+	return e.changeResourceStyle(ctx, "ColorSpace", id, func(catalog *resourceCatalog, item ResourceInfo, targetFile string, target editorFontText, changes map[string][]byte) error {
 		space.ID = item.ID
-		if err := validateResourceColors(ctx, catalog, space); err != nil {
+		if err := validateResourceColors(ctx, catalog, targetFile, space); err != nil {
 			return err
 		}
 		space.Profile = ""
@@ -178,7 +243,7 @@ func (e *Editor) ReplaceColorSpace(ctx context.Context, id string, space ColorSp
 		if err != nil {
 			return err
 		}
-		return replaceResourceStyle(ctx, catalog, item, fragment, changes)
+		return replaceResourceStyle(ctx, catalog, item, targetFile, target, fragment, changes)
 	})
 }
 
@@ -186,7 +251,7 @@ func (e *Editor) ReplaceColorSpace(ctx context.Context, id string, space ColorSp
 // 入参: ctx 取消上下文, id 既有标识, draw 新定义，ID由库管理，不接受外部定义引用
 // 返回: error 参数、依赖或循环错误，失败不改变文档，成功隔离其他文档及历史版本并支持撤销
 func (e *Editor) ReplaceDrawParam(ctx context.Context, id string, draw DrawParam) error {
-	return e.changeResourceStyle(ctx, "DrawParam", id, func(catalog *resourceCatalog, item ResourceInfo, changes map[string][]byte) error {
+	return e.changeResourceStyle(ctx, "DrawParam", id, func(catalog *resourceCatalog, item ResourceInfo, targetFile string, target editorFontText, changes map[string][]byte) error {
 		working, err := catalog.scan.reader.EditorContext(ctx)
 		if err != nil {
 			return err
@@ -194,6 +259,27 @@ func (e *Editor) ReplaceDrawParam(ctx context.Context, id string, draw DrawParam
 		if err := working.prepareSourceIDsContext(ctx); err != nil {
 			return err
 		}
+		restoreScope := func() {}
+		if targetFile != "" && !catalog.docRes[targetFile] {
+			var localParsed []*parsedRes
+			scope := catalog.scopeForFile(targetFile)
+			for i := len(scope) - 1; i >= 0; i-- {
+				if catalog.docRes[scope[i]] {
+					continue
+				}
+				parsed, parseErr := working.source.reader.parseResFileContext(ctx, scope[i])
+				if parseErr != nil {
+					return parseErr
+				}
+				if parsed != nil {
+					localParsed = append(localParsed, parsed)
+				}
+			}
+			if len(localParsed) > 0 {
+				restoreScope = working.bindParsedScope(localParsed)
+			}
+		}
+		defer restoreScope()
 		added, err := working.addDrawParam(ctx, draw)
 		if err != nil {
 			return err
@@ -210,26 +296,32 @@ func (e *Editor) ReplaceDrawParam(ctx context.Context, id string, draw DrawParam
 		if err != nil {
 			return err
 		}
-		return replaceResourceStyle(ctx, catalog, item, fragment, changes)
+		return replaceResourceStyle(ctx, catalog, item, targetFile, target, fragment, changes)
 	})
 }
 
 // resourceStyleReference 保存资源依赖及可选的类型要求，不持有XML节点
 type resourceStyleReference struct {
-	scope string
-	key   string
-	kind  string
-	exact bool
+	scope   string
+	ownerID string
+	key     string
+	kind    string
+	exact   bool
 }
 
-// styleDefinition 从声明原文解码样式定义，补齐继承的XML命名空间
-// 入参: ctx 取消上下文, item 目录条目, target 解码目标
+// styleDefinitionAt 从指定资源文件的声明原文解码样式定义，补齐继承的XML命名空间
+// 入参: ctx 取消上下文, resFile 声明所在资源文件, item 目录条目, target 解码目标
 // 返回: error 取消或XML解析错误
-func (c *resourceCatalog) styleDefinition(ctx context.Context, item ResourceInfo, target any) error {
+func (c *resourceCatalog) styleDefinitionAt(ctx context.Context, resFile string, item ResourceInfo, target any) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	entry := c.nodes[item.Kind+"/"+item.ID]
+	if resFile != "" {
+		if scoped, ok := c.nodes[resFile+":"+item.Kind+"/"+item.ID]; ok {
+			entry = scoped
+		}
+	}
 	data, err := editorXMLStandaloneContext(ctx, entry.file.data[entry.node.start:entry.node.end], entry.node)
 	if err != nil {
 		return err
@@ -416,7 +508,7 @@ func applyResourceStyleParts(ctx context.Context, reader *Reader, maximumID uint
 // changeResourceStyle 在补齐待注册资源的快照中替换定义，依赖与目标仅在全部校验通过后一次提交
 // 入参: ctx 取消上下文, kind 资源类型, id 目标标识, replace 定义替换操作
 // 返回: error 引用、校验或提交错误，失败不改变注册资源和撤销状态
-func (e *Editor) changeResourceStyle(ctx context.Context, kind, id string, replace func(*resourceCatalog, ResourceInfo, map[string][]byte) error) error {
+func (e *Editor) changeResourceStyle(ctx context.Context, kind, id string, replace func(*resourceCatalog, ResourceInfo, string, editorFontText, map[string][]byte) error) error {
 	reader, err := e.resourceStyleReader(ctx)
 	if err != nil {
 		return err
@@ -425,7 +517,7 @@ func (e *Editor) changeResourceStyle(ctx context.Context, kind, id string, repla
 	if err != nil {
 		return err
 	}
-	item, err := findResource(catalog.items, kind, id)
+	item, _, targetFile, target, err := findUniqueCatalogResource(catalog, kind, id)
 	if err != nil {
 		return err
 	}
@@ -433,7 +525,7 @@ func (e *Editor) changeResourceStyle(ctx context.Context, kind, id string, repla
 		return fmt.Errorf("resource references contain unsupported content")
 	}
 	changes := make(map[string][]byte)
-	if err := replace(catalog, item, changes); err != nil {
+	if err := replace(catalog, item, targetFile, target, changes); err != nil {
 		return err
 	}
 	if err := catalog.scan.apply(ctx, changes); err != nil {
@@ -446,10 +538,9 @@ func (e *Editor) changeResourceStyle(ctx context.Context, kind, id string, repla
 }
 
 // replaceResourceStyle 更新声明原文并验证资源依赖，清除受影响的复合及底纹预览
-// 入参: ctx 取消上下文, catalog 当前目录, item 目标条目, fragment 新声明, changes 待提交修改
+// 入参: ctx 取消上下文, catalog 当前目录, item 目标条目, targetFile 目标所在资源文件, target 目标节点, fragment 新声明, changes 待提交修改
 // 返回: error 不支持的定义、引用或预览处理错误
-func replaceResourceStyle(ctx context.Context, catalog *resourceCatalog, item ResourceInfo, fragment []byte, changes map[string][]byte) error {
-	target := catalog.nodes[item.Kind+"/"+item.ID]
+func replaceResourceStyle(ctx context.Context, catalog *resourceCatalog, item ResourceInfo, targetFile string, target editorFontText, fragment []byte, changes map[string][]byte) error {
 	if item.Kind == "DrawParam" && (target.node.attr("Link") != "" || target.node.attr("BaseLoc") != "" || target.node.attr("ResourceID") != "") {
 		return fmt.Errorf("external draw parameter cannot be replaced")
 	}
@@ -457,7 +548,7 @@ func replaceResourceStyle(ctx context.Context, catalog *resourceCatalog, item Re
 	if err := validateResourceStyleGraph(ctx, catalog, target.file.name, item.ID, changes); err != nil {
 		return err
 	}
-	return invalidateResourcePreviews(ctx, catalog.scan, changes, item.ID)
+	return invalidateScopedResourcePreviews(ctx, catalog, changes, targetFile, item.Kind, item.ID)
 }
 
 // resourceColorNode 判断可携带基本颜色或复杂填充的标准节点
@@ -467,18 +558,27 @@ func resourceColorNode(node *editorXML) bool {
 	return node.matchesOFD(node.name.Local) && slices.Contains([]string{"FillColor", "StrokeColor", "BorderColor", "Color", "BackColor"}, node.name.Local)
 }
 
-// validateResourceColors 校验显式及默认颜色空间的既有颜色，防止位深或调色板更新使引用失效
-// 入参: ctx 取消上下文, catalog 当前资源目录, space 替换后的颜色空间
+// validateResourceColors 校验按作用域精确命中目标颜色空间的显式及默认颜色，不误伤其他页面的同名颜色空间
+// 入参: ctx 取消上下文, catalog 当前资源目录, targetFile 目标颜色空间所在文件, space 替换后的颜色空间
 // 返回: error 不兼容的色值或调色板索引
-func validateResourceColors(ctx context.Context, catalog *resourceCatalog, space ColorSpace) error {
+func validateResourceColors(ctx context.Context, catalog *resourceCatalog, targetFile string, space ColorSpace) error {
 	doc, err := catalog.scan.reader.DocContext(ctx)
 	if err != nil {
 		return err
+	}
+	defaultCS := ""
+	if doc.CommonData.DefaultCS != 0 {
+		defaultCS = formatUnitID(uint64(doc.CommonData.DefaultCS))
+	}
+	expectedKey := ""
+	if targetFile != "" {
+		expectedKey = "res:" + cleanPackagePath(targetFile) + ":ColorSpace:" + editorResourceID(space.ID)
 	}
 	working := NewEditor()
 	space.Profile, space.profile = "", nil
 	working.resources = []editorResource{{space: &space}}
 	for _, file := range catalog.scan.files {
+		cleanName := cleanPackagePath(file.name)
 		root, err := parseEditorXMLContext(ctx, file.data)
 		if err != nil {
 			return err
@@ -491,18 +591,24 @@ func validateResourceColors(ctx context.Context, catalog *resourceCatalog, space
 			if !node.matchesOFD(node.name.Local) {
 				return nil
 			}
-			id := node.attr("ColorSpace")
-			if id == "" {
-				id = formatUnitID(uint64(doc.CommonData.DefaultCS))
-			}
-			if resourceColorNode(node) && sameResourceID(id, space.ID) {
-				var paint FillColor
-				decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(file.data[node.start:node.end])), ctx: ctx})
-				if err := decoder.Decode(&paint); err != nil {
-					return err
+			if resourceColorNode(node) {
+				id := node.attr("ColorSpace")
+				if id == "" {
+					id = defaultCS
 				}
-				if _, err := working.Color(&FillColor{Value: paint.Value, Index: paint.Index, Alpha: paint.Alpha, ColorSpace: space.ID}); err != nil {
-					return fmt.Errorf("color in %s: %w", file.name, err)
+				matched := sameResourceID(id, space.ID)
+				if matched && expectedKey != "" {
+					matched = resolveCatalogScopedKey(catalog, cleanName, node.name.Local, "", "ColorSpace", id) == expectedKey
+				}
+				if matched {
+					var paint FillColor
+					decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(file.data[node.start:node.end])), ctx: ctx})
+					if err := decoder.Decode(&paint); err != nil {
+						return err
+					}
+					if _, err := working.Color(&FillColor{Value: paint.Value, Index: paint.Index, Alpha: paint.Alpha, ColorSpace: space.ID}); err != nil {
+						return fmt.Errorf("color in %s: %w", file.name, err)
+					}
 				}
 			}
 			for _, child := range node.children {
@@ -570,9 +676,11 @@ func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, t
 				return nil
 			}
 			owner := "file/" + cleanName
+			ownerResID := ""
 			if root.matchesOFD("Res") {
 				owner = ""
 				if ownerID := resourceReferenceOwner(node); ownerID != "" {
+					ownerResID = ownerID
 					owner = cleanName + "\x00" + ownerID
 				}
 			}
@@ -584,13 +692,17 @@ func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, t
 					if attr.Name.Space == "" && attr.Value != "" && slices.Contains([]string{"Relative", "DrawParam", "ColorSpace", "Font", "ResourceID", "ImageMask", "Substitution", "Thumbnail"}, attr.Name.Local) {
 						key := editorResourceID(attr.Value)
 						kind := ""
+						refOwner := ""
 						switch attr.Name.Local {
-						case "Relative", "DrawParam":
+						case "Relative":
+							kind = "DrawParam"
+							refOwner = ownerResID
+						case "DrawParam":
 							kind = "DrawParam"
 						case "ColorSpace", "Font":
 							kind = attr.Name.Local
 						}
-						graph[owner] = append(graph[owner], resourceStyleReference{scope: cleanName, key: key, kind: kind})
+						graph[owner] = append(graph[owner], resourceStyleReference{scope: cleanName, ownerID: refOwner, key: key, kind: kind})
 					}
 				}
 			}
@@ -615,7 +727,17 @@ func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, t
 		if !reference.exact {
 			nodeKey = ""
 			if reference.key != "" {
-				for _, resFile := range catalog.scopeForFile(reference.scope) {
+				scope := catalog.scopeForFile(reference.scope)
+				if reference.ownerID != "" {
+					if pos := slices.Index(scope, reference.scope); pos >= 0 {
+						if reference.key == reference.ownerID {
+							scope = scope[pos+1:]
+						} else {
+							scope = scope[pos:]
+						}
+					}
+				}
+				for _, resFile := range scope {
 					candidate := resFile + "\x00" + reference.key
 					if types[candidate] != "" {
 						nodeKey = candidate
@@ -644,13 +766,6 @@ func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, t
 		start = resourceStyleReference{key: cleanPackagePath(targetFile) + "\x00" + editorResourceID(id), exact: true}
 	}
 	return visit(start)
-}
-
-// drawParamXML 读取绘制参数原文，保留复杂颜色、扩展属性及命名空间
-// 入参: id 绘制参数标识
-// 返回: []byte 独立参数片段, error 错误信息
-func (e *Editor) drawParamXML(id string) ([]byte, error) {
-	return e.drawParamXMLContext(context.Background(), id)
 }
 
 // drawParamXMLContext 读取并提取绘制参数原文，保留扩展信息并响应取消
@@ -697,22 +812,120 @@ func (e *Editor) drawParamXMLContext(ctx context.Context, id string) ([]byte, er
 	return nil, fmt.Errorf("draw parameter %q not found", id)
 }
 
+// drawParamXMLAtScope 从指定资源层级提取单个绘制参数独立XML，支持展开外部Link文件
+// 入参: ctx 取消上下文, scope 资源层级, id 绘制参数标识
+// 返回: []byte 独立参数片段, error 读取或解析错误
+func (e *Editor) drawParamXMLAtScope(ctx context.Context, scope editorDrawParamScope, id string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	switch scope.key {
+	case "@editor":
+		for _, resource := range e.resources {
+			if resource.draw != nil && sameResourceID(resource.draw.ID, id) {
+				root, err := parseEditorXMLContext(ctx, resource.data)
+				if err != nil {
+					return nil, err
+				}
+				if node := editorResourceNode(root, "DrawParams", "DrawParam", id); node != nil {
+					return editorXMLStandaloneContext(ctx, resource.data[node.start:node.end], node)
+				}
+			}
+		}
+		return nil, fmt.Errorf("draw parameter %q not found", id)
+	case "@doc":
+		return e.drawParamXMLContext(ctx, id)
+	default:
+		if e.source == nil {
+			return nil, fmt.Errorf("draw parameter %q not found", id)
+		}
+		data, err := e.source.reader.readFileViewContext(ctx, scope.key)
+		if err != nil {
+			return nil, err
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return nil, err
+		}
+		node := editorResourceNode(root, "DrawParams", "DrawParam", id)
+		if node == nil {
+			return nil, fmt.Errorf("draw parameter %q not found", id)
+		}
+		if link := strings.TrimSpace(node.attr("Link")); link != "" {
+			extPath := resolveResourcePath(scope.key, root.attr("BaseLoc"), link)
+			extData, err := e.source.reader.readFileViewContext(ctx, extPath)
+			if err != nil {
+				return nil, err
+			}
+			extRoot, err := parseEditorXMLContext(ctx, extData)
+			if err != nil {
+				return nil, err
+			}
+			if extRoot.matchesOFD("DrawParam") {
+				fragment, err := editorXMLStandaloneContext(ctx, extData[extRoot.start:extRoot.end], extRoot)
+				if err != nil {
+					return nil, err
+				}
+				fragRoot, err := parseEditorXMLContext(ctx, fragment)
+				if err != nil {
+					return nil, err
+				}
+				fragment, err = editorXMLAttribute(fragment, fragRoot, "ID", node.attr("ID"))
+				if err != nil {
+					return nil, err
+				}
+				if rel := node.attr("Relative"); rel != "" && extRoot.attr("Relative") == "" {
+					fragRoot, err = parseEditorXMLContext(ctx, fragment)
+					if err != nil {
+						return nil, err
+					}
+					fragment, err = editorXMLAttribute(fragment, fragRoot, "Relative", rel)
+					if err != nil {
+						return nil, err
+					}
+				}
+				return fragment, ctx.Err()
+			}
+		}
+		return editorXMLStandaloneContext(ctx, data[node.start:node.end], node)
+	}
+}
+
 // copyDrawParam 将原绘制参数继承链接到独立基准，复用相同副本且不改写原资源
 // 入参: id 源参数标识, base 独立基准标识, visited 当前继承链
 // 返回: string 新继承链末端标识, error 错误信息
 func (e *Editor) copyDrawParam(id, base string, visited map[string]bool) (string, error) {
+	return e.copyDrawParamAt(id, base, 0, e.drawParamScopes(), visited)
+}
+
+// copyDrawParamAt 按作用域链复制绘制参数继承链并提升局部资源引用
+// 入参: id 源参数标识, base 独立基准标识, startLevel 起始层级, scopes 作用域链, visited 已访问作用域标识
+// 返回: string 新继承链末端标识, error 错误信息
+func (e *Editor) copyDrawParamAt(id, base string, startLevel int, scopes []editorDrawParamScope, visited map[string]bool) (string, error) {
 	if id == "" || sameResourceID(id, base) {
 		return base, nil
+	}
+	foundLevel := -1
+	for i := startLevel; i < len(scopes); i++ {
+		if e.lookupDrawParamInScope(scopes[i], id) != nil {
+			foundLevel = i
+			break
+		}
+	}
+	if foundLevel < 0 {
+		return "", fmt.Errorf("draw parameter %q not found", id)
 	}
 	key := id
 	if value := editorResourceID(id); value != "" {
 		key = value
 	}
-	if visited[key] {
+	scope := scopes[foundLevel]
+	visitKey := scope.key + "\x00" + key
+	if visited[visitKey] {
 		return "", fmt.Errorf("cyclic draw parameter %q", id)
 	}
-	visited[key] = true
-	data, err := e.drawParamXML(id)
+	visited[visitKey] = true
+	data, err := e.drawParamXMLAtScope(context.Background(), scope, id)
 	if err != nil {
 		return "", err
 	}
@@ -720,20 +933,44 @@ func (e *Editor) copyDrawParam(id, base string, visited map[string]bool) (string
 	if err != nil {
 		return "", err
 	}
-	if sameResourceID(root.attr("Relative"), base) {
+	localIdx := slices.IndexFunc(e.pageScope, func(p *parsedRes) bool { return p.path == scope.key })
+	isLocalScope := scope.parsed != nil && localIdx >= 0
+	if !isLocalScope && sameResourceID(root.attr("Relative"), base) {
 		return id, nil
 	}
-	base, err = e.copyDrawParam(root.attr("Relative"), base, visited)
+	nextStart := foundLevel
+	if root.attr("Relative") != "" && sameResourceID(root.attr("Relative"), id) {
+		nextStart = foundLevel + 1
+	}
+	base, err = e.copyDrawParamAt(root.attr("Relative"), base, nextStart, scopes, visited)
 	if err != nil {
 		return "", err
 	}
+	sourceTag := key
+	if scope.key != "@editor" && scope.key != "@doc" && scope.key != "" {
+		sourceTag = scope.key + "\x00" + key
+	}
 	for _, resource := range e.resources {
-		if sameResourceID(resource.drawSource, id) && sameResourceID(resource.draw.Relative, base) {
+		if resource.draw != nil && resource.drawSource == sourceTag && sameResourceID(resource.draw.Relative, base) {
 			return resource.draw.ID, nil
 		}
 	}
 	if !editorXMLCopyable(root) {
 		return "", fmt.Errorf("draw parameter contains unsupported identifiers")
+	}
+	if isLocalScope {
+		data, err = editorXMLAttribute(data, root, "Relative", "")
+		if err != nil {
+			return "", err
+		}
+		data, err = e.promoteScopeXMLToDocument(data, e.pageScope[:localIdx+1])
+		if err != nil {
+			return "", err
+		}
+		root, err = parseEditorXML(data)
+		if err != nil {
+			return "", err
+		}
 	}
 	before, err := editorXMLContainer("DrawParam", ofdAttrs{{Name: xml.Name{Local: "Relative"}, Value: root.attr("Relative")}}, nil)
 	if err != nil {
@@ -775,6 +1012,6 @@ func (e *Editor) copyDrawParam(id, base string, visited map[string]bool) (string
 	if err != nil {
 		return "", err
 	}
-	e.resources = append(e.resources, editorResource{name: e.packageName("Res/DrawParams/DrawParam_" + draw.ID + ".xml"), data: data, draw: &draw, drawSource: id, references: refs})
+	e.resources = append(e.resources, editorResource{name: e.packageName("Res/DrawParams/DrawParam_" + draw.ID + ".xml"), data: data, draw: &draw, drawSource: sourceTag, references: refs})
 	return draw.ID, nil
 }

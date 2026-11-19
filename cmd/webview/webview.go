@@ -21,39 +21,31 @@ import (
 	"strings"
 )
 
-// commandLine 读取桌面参数并处理参数错误
+// commandLine 读取桌面启动参数并提取文件路径与数据目录
 // 返回: []string 文件路径, string 浏览器数据目录
 func commandLine() ([]string, string) {
-	paths, dataDir, ok := parseArguments(os.Args[1:])
-	if !ok {
-		os.Exit(2)
-	}
-	return paths, dataDir
-}
-
-// parseArguments 解析双横线选项及后续文件路径
-// 入参: args 启动参数
-// 返回: []string 文件路径, string 浏览器数据目录, bool 参数是否有效
-func parseArguments(args []string) ([]string, string, bool) {
+	args := os.Args[1:]
+	var paths []string
 	var dataDir string
 	for len(args) > 0 {
 		arg := args[0]
 		switch {
 		case arg == "--":
-			return args[1:], dataDir, true
+			return append(paths, args[1:]...), dataDir
 		case arg == "--data-dir":
-			if len(args) < 2 || strings.HasPrefix(args[1], "-") {
-				return nil, dataDir, false
+			if len(args) >= 2 && args[1] != "" && !strings.HasPrefix(args[1], "-") {
+				dataDir, args = args[1], args[1:]
 			}
-			dataDir, args = args[1], args[1:]
 		case strings.HasPrefix(arg, "--data-dir="):
 			dataDir = strings.TrimPrefix(arg, "--data-dir=")
 		case strings.HasPrefix(arg, "-"):
-			return nil, dataDir, false
+			if info, err := os.Stat(arg); err == nil && !info.IsDir() {
+				paths = append(paths, arg)
+			}
 		default:
-			return args, dataDir, true
+			paths = append(paths, arg)
 		}
 		args = args[1:]
 	}
-	return nil, dataDir, true
+	return paths, dataDir
 }

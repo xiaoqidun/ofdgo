@@ -118,14 +118,21 @@ func (r *Reader) ResourceReferences(ctx context.Context, kind, id string, offset
 	if err != nil {
 		return nil, err
 	}
-	item, err := findResource(items, kind, id)
-	if err != nil {
-		return nil, err
+	var refs []ResourceReference
+	found := false
+	for _, item := range items {
+		if resourceMatches(item, kind, id) {
+			found = true
+			refs = append(refs, item.References...)
+		}
 	}
-	if offset >= len(item.References) {
+	if !found {
+		return nil, fmt.Errorf("resource not found: %s/%s", kind, id)
+	}
+	if offset >= len(refs) {
 		return []ResourceReference{}, ctx.Err()
 	}
-	return slices.Clone(item.References[offset : offset+min(limit, len(item.References)-offset)]), ctx.Err()
+	return slices.Clone(refs[offset : offset+min(limit, len(refs)-offset)]), ctx.Err()
 }
 
 // OpenResource 打开当前资源的原始文件，ColorSpace导出ICC，无ICC或内联DrawParam不提供文件流
@@ -224,15 +231,10 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 	if err != nil {
 		return nil, err
 	}
-	targetIdx, err := findResourceIndex(catalog.items, kind, id, reference)
+	targetIdx, ref, err := findResourceRefTarget(catalog.items, kind, id, reference)
 	if err != nil {
 		return nil, err
 	}
-	item := catalog.items[targetIdx]
-	if reference < 0 || reference >= len(item.References) {
-		return nil, fmt.Errorf("resource reference not found")
-	}
-	ref := item.References[reference]
 	doc, err := r.Reader.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
@@ -356,7 +358,27 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 		}
 	}
 	view := *r
-	view.RenderAnnotations, view.pageContext = true, ctx
+	view.pageContext = ctx
+	collectTargets := func(files ...string) map[string]*StructureTarget {
+		var targets map[string]*StructureTarget
+		for _, cf := range files {
+			prefix := "obj:" + cf + ":"
+			for node := range wanted {
+				if strings.HasPrefix(node, prefix) {
+					objID := strings.TrimPrefix(node, prefix)
+					if objID != "" {
+						if targets == nil {
+							targets = make(map[string]*StructureTarget)
+						}
+						if targets[objID] == nil {
+							targets[objID] = &StructureTarget{ID: objID}
+						}
+					}
+				}
+			}
+		}
+		return targets
+	}
 	var result []ResourceLocation
 	for page := range doc.Pages.Page {
 		if ref.Page >= 0 && ref.Page != page || !hasObjectWanted {
@@ -367,43 +389,55 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 			return nil, err
 		}
 		pageRef := doc.Pages.Page[page]
-		contentFiles := []string{cleanPackagePath(r.Reader.ResPath(pageRef.BaseLoc))}
+		var pageHits []ResourceLocation
+		walkPart := func(part PageContent, renderAnnots bool, targets map[string]*StructureTarget) error {
+			if len(targets) == 0 {
+				return nil
+			}
+			partView := view
+			partView.RenderAnnotations = renderAnnots
+			visitor := &structureVisitor{ctx: ctx, renderer: &partView, targets: targets, boundsOnly: true}
+			if err := partView.WalkPage(&part, visitor); err != nil {
+				return err
+			}
+			for _, objID := range slices.Sorted(maps.Keys(targets)) {
+				box := targets[objID].Bounds
+				if box.W > 0 && box.H > 0 {
+					pageHits = append(pageHits, ResourceLocation{Page: page + 1, Object: objID, Bounds: box})
+				}
+			}
+			return nil
+		}
 		for _, tplRef := range content.Template {
 			for _, tpl := range doc.CommonData.TemplatePage {
 				if sameResourceID(tpl.ID, tplRef.TemplateID) {
-					contentFiles = append(contentFiles, cleanPackagePath(r.Reader.ResPath(tpl.BaseLoc)))
+					tplPart := *content
+					tplPart.Content = Content{}
+					tplPart.Template = []Template{tplRef}
+					if err := walkPart(tplPart, false, collectTargets(cleanPackagePath(r.Reader.ResPath(tpl.BaseLoc)))); err != nil {
+						return nil, err
+					}
 					break
 				}
 			}
 		}
-		if pageKey := editorResourceID(pageRef.ID); pageKey != "" {
-			contentFiles = append(contentFiles, catalog.annotByPage[pageKey]...)
-		}
-		targets := make(map[string]*StructureTarget)
-		for _, cf := range contentFiles {
-			prefix := "obj:" + cf + ":"
-			for node := range wanted {
-				if strings.HasPrefix(node, prefix) {
-					objID := strings.TrimPrefix(node, prefix)
-					if objID != "" && targets[objID] == nil {
-						targets[objID] = &StructureTarget{ID: objID}
-					}
-				}
-			}
-		}
-		if len(targets) == 0 {
-			continue
-		}
-		visitor := &structureVisitor{ctx: ctx, renderer: &view, targets: targets, boundsOnly: true}
-		if err := view.WalkPage(content, visitor); err != nil {
+		pagePart := *content
+		pagePart.Template = nil
+		if err := walkPart(pagePart, false, collectTargets(cleanPackagePath(r.Reader.ResPath(pageRef.BaseLoc)))); err != nil {
 			return nil, err
 		}
-		for _, objID := range slices.Sorted(maps.Keys(targets)) {
-			box := targets[objID].Bounds
-			if box.W > 0 && box.H > 0 {
-				result = append(result, ResourceLocation{Page: page + 1, Object: objID, Bounds: box})
+		if pageKey := editorResourceID(pageRef.ID); pageKey != "" {
+			annotPart := *content
+			annotPart.Content = Content{}
+			annotPart.Template = nil
+			if err := walkPart(annotPart, true, collectTargets(catalog.annotByPage[pageKey]...)); err != nil {
+				return nil, err
 			}
 		}
+		slices.SortStableFunc(pageHits, func(a, b ResourceLocation) int {
+			return cmp.Compare(a.Object, b.Object)
+		})
+		result = append(result, pageHits...)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -612,7 +646,6 @@ func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourc
 	}
 	pages := make(map[string]int)
 	pageIDToFile := make(map[string]string)
-	tplIDToFile := make(map[string]string)
 	isPageOrTpl := make(map[string]bool)
 	doc, err := r.docStructureContext(ctx)
 	if err != nil {
@@ -646,9 +679,6 @@ func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourc
 		name := cleanPackagePath(r.ResPath(page.BaseLoc))
 		isPageOrTpl[name] = true
 		pages[name] = -1
-		if id := editorResourceID(page.ID); id != "" {
-			tplIDToFile[id] = name
-		}
 	}
 	var rawRefs []rawResourceRef
 	declaredPageRes := make(map[string][]string)
@@ -833,26 +863,12 @@ func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourc
 			return nil, err
 		}
 	}
-	pageTemplates := make(map[string][]string)
-	for _, raw := range rawRefs {
-		if raw.elem == "Template" && raw.ref.Role == "TemplateID" {
-			if tplFile := tplIDToFile[editorResourceID(raw.value)]; tplFile != "" {
-				pFile := cleanPackagePath(raw.ref.File)
-				pageTemplates[pFile] = append(pageTemplates[pFile], tplFile)
-			}
-		}
-	}
 	resPageOwners := make(map[string][]string)
 	for pFile := range isPageOrTpl {
 		var scope []string
 		for _, res := range slices.Backward(declaredPageRes[pFile]) {
 			scope = appendUniquePath(scope, res)
 			resPageOwners[res] = appendUniquePath(resPageOwners[res], pFile)
-		}
-		for _, tpl := range slices.Backward(pageTemplates[pFile]) {
-			for _, res := range slices.Backward(declaredPageRes[tpl]) {
-				scope = appendUniquePath(scope, res)
-			}
 		}
 		for _, dRes := range catalog.docScope {
 			scope = appendUniquePath(scope, dRes)
@@ -936,7 +952,7 @@ func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourc
 	return catalog, ctx.Err()
 }
 
-// locateResourceFileContext 仅扫描资源索引文件定位单个资源路径，不解压页面正文
+// locateResourceFileContext 仅扫描资源索引文件定位单个资源路径，优先返回含有效内嵌文件的定义
 // 入参: ctx 取消上下文, kind 资源类型, id 资源标识
 // 返回: string 资源文件路径, bool 是否找到声明, error 读取或取消错误
 func (r *Reader) locateResourceFileContext(ctx context.Context, kind, id string) (string, bool, error) {
@@ -968,60 +984,84 @@ func (r *Reader) locateResourceFileContext(ctx context.Context, kind, id string)
 		}
 		return "", false
 	}
+	foundAny := false
+	fallbackLoc := ""
+	consider := func(loc string) bool {
+		foundAny = true
+		if loc == "" {
+			return false
+		}
+		if r.hasPackageFile(r.ResPath(loc)) {
+			fallbackLoc = loc
+			return true
+		}
+		if fallbackLoc == "" {
+			fallbackLoc = loc
+		}
+		return false
+	}
+	seenRes := make(map[string]bool)
 	for _, list := range [][]string{doc.CommonData.DocumentRes, doc.CommonData.PublicRes} {
 		for _, res := range slices.Backward(list) {
-			parsed, err := r.parseResFileContext(ctx, r.ResPath(res))
+			resFull := cleanPackagePath(r.ResPath(res))
+			if resFull == "" || resFull == "." || seenRes[resFull] {
+				continue
+			}
+			seenRes[resFull] = true
+			parsed, err := r.parseResFileContext(ctx, resFull)
 			if err != nil {
 				return "", false, err
 			}
-			if loc, ok := matchIn(parsed); ok {
-				return loc, true, nil
+			if loc, ok := matchIn(parsed); ok && consider(loc) {
+				return fallbackLoc, true, nil
 			}
 		}
 	}
-	seenRes := make(map[string]bool)
-	checkPageHeader := func(p Page) (string, bool, error) {
+	checkPageHeader := func(p Page) (bool, error) {
 		hdr, hdrErr := r.readPageHeaderContext(ctx, p)
 		if hdrErr != nil {
 			if ctx.Err() != nil {
-				return "", false, ctx.Err()
+				return false, ctx.Err()
 			}
-			return "", false, nil
+			return false, nil
 		}
 		pageFullPath := r.ResPath(p.BaseLoc)
 		for _, res := range slices.Backward(hdr.PageRes) {
 			resFull := cleanPackagePath(resolveResourcePath(pageFullPath, "", res))
-			if seenRes[resFull] {
+			if resFull == "" || resFull == "." || seenRes[resFull] {
 				continue
 			}
 			seenRes[resFull] = true
 			parsed, parseErr := r.parseResFileContext(ctx, resFull)
 			if parseErr != nil {
-				return "", false, parseErr
+				return false, parseErr
 			}
-			if loc, ok := matchIn(parsed); ok {
-				return loc, true, nil
+			if loc, ok := matchIn(parsed); ok && consider(loc) {
+				return true, nil
 			}
 		}
-		return "", false, nil
+		return false, nil
 	}
 	for _, p := range doc.Pages.Page {
 		if err := ctx.Err(); err != nil {
 			return "", false, err
 		}
-		if loc, ok, err := checkPageHeader(p); err != nil || ok {
-			return loc, ok, err
+		if done, err := checkPageHeader(p); err != nil || done {
+			return fallbackLoc, done, err
 		}
 	}
 	for _, tpl := range doc.CommonData.TemplatePage {
 		if err := ctx.Err(); err != nil {
 			return "", false, err
 		}
-		if loc, ok, err := checkPageHeader(Page{BaseLoc: tpl.BaseLoc}); err != nil || ok {
-			return loc, ok, err
+		if done, err := checkPageHeader(Page{BaseLoc: tpl.BaseLoc}); err != nil || done {
+			return fallbackLoc, done, err
 		}
 	}
-	return "", false, ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	return fallbackLoc, foundAny, nil
 }
 
 // scanResourcePage 流式收集常规页面引用与PageRes声明，特殊结构回退到完整节点扫描
@@ -1146,6 +1186,13 @@ func scanResourcePage(ctx context.Context, file *editorFontXML, pages map[string
 	}
 }
 
+// resourceMatches 判断资源条目是否匹配指定的资源类型与标识
+// 入参: item 资源条目, kind 资源类型, id 资源标识
+// 返回: bool 是否匹配
+func resourceMatches(item ResourceInfo, kind, id string) bool {
+	return item.Kind == kind && (item.ID == id || kind != "Attachment" && sameResourceID(item.ID, id))
+}
+
 // findResource 查找当前视图内的资源，不接受调用方提供的任意包路径
 // 入参: items 资源列表, kind 资源类型, id 资源标识
 // 返回: ResourceInfo 资源信息, error 未找到资源
@@ -1161,7 +1208,7 @@ func findResourceWithCount(items []ResourceInfo, kind, id string) (ResourceInfo,
 	var first ResourceInfo
 	count := 0
 	for _, item := range items {
-		if item.Kind == kind && (item.ID == id || kind != "Attachment" && sameResourceID(item.ID, id)) {
+		if resourceMatches(item, kind, id) {
 			if count == 0 {
 				first = item
 			}
@@ -1174,25 +1221,26 @@ func findResourceWithCount(items []ResourceInfo, kind, id string) (ResourceInfo,
 	return first, count, nil
 }
 
-// findResourceIndex 查找资源条目索引，存在同名局部条目时优先选取包含该引用下标的条目
-// 入参: items 资源列表, kind 资源类型, id 资源标识, reference 引用下标
-// 返回: int 条目索引, error 未找到资源
-func findResourceIndex(items []ResourceInfo, kind, id string, reference int) (int, error) {
-	first := -1
+// findResourceRefTarget 按Resources与ResourceReferences一致的顺序定位引用所属声明与引用项
+// 入参: items 资源列表, kind 资源类型, id 资源标识, reference 全局引用下标
+// 返回: int 声明条目索引, ResourceReference 命中引用, error 未找到资源或引用错误
+func findResourceRefTarget(items []ResourceInfo, kind, id string, reference int) (int, ResourceReference, error) {
+	found := false
+	rem := reference
 	for i, item := range items {
-		if item.Kind == kind && (item.ID == id || kind != "Attachment" && sameResourceID(item.ID, id)) {
-			if first < 0 {
-				first = i
-			}
-			if reference >= 0 && reference < len(item.References) {
-				return i, nil
-			}
+		if !resourceMatches(item, kind, id) {
+			continue
 		}
+		found = true
+		if rem >= 0 && rem < len(item.References) {
+			return i, item.References[rem], nil
+		}
+		rem -= len(item.References)
 	}
-	if first < 0 {
-		return -1, fmt.Errorf("resource not found: %s/%s", kind, id)
+	if !found {
+		return -1, ResourceReference{}, fmt.Errorf("resource not found: %s/%s", kind, id)
 	}
-	return first, nil
+	return -1, ResourceReference{}, fmt.Errorf("resource reference not found")
 }
 
 // resourceExpectedKind 根据承载元素与引用角色推断标准目标资源类别

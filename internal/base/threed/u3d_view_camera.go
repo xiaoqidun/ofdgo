@@ -18,9 +18,10 @@ import (
 	"errors"
 )
 
-// 视图相机路径解析错误，由文档适配层转换为相应格式的错误
 var (
-	ErrCameraNotFound  = errors.New("missing U3D camera path")
+	// ErrCameraNotFound 视图相机路径缺失错误
+	ErrCameraNotFound = errors.New("missing U3D camera path")
+	// ErrAmbiguousCamera 视图相机路径存在多实例歧义错误
 	ErrAmbiguousCamera = errors.New("ambiguous U3D camera instance")
 )
 
@@ -44,7 +45,7 @@ func (r *Renderer) ViewCamera(selected int, path []string, exactRoot bool) ([16]
 					return transform, err
 				}
 			}
-			if current < 0 || r.model.Nodes[r.scene[current].node].Name != path[j] || r.model.Nodes[r.scene[current].node].Kind != "View" {
+			if current < 0 || r.model.Nodes[r.scene[current].node].Name != path[j] {
 				match = false
 				break
 			}

@@ -26,10 +26,10 @@ import (
 )
 
 // SignaturePolicy 签名验签策略
-// 空列表不限制已支持的算法或版本, RequiredFiles使用包内绝对路径
+// 空列表不限制已支持的算法或版本，RequiredFiles使用包内绝对路径
 // RequireDocumentCoverage检查OFD.xml、文档目录、选中版本清单及已知OFD引用可达的跨目录文件
 // 仅豁免签名列表以及当前与后续签名位于独立签名子目录或标准签名路径的描述、签名值和外置印章
-// 此范围不覆盖其他多文档条目, 自定义扩展隐含引用应使用RequiredFiles补充
+// 此范围不覆盖其他多文档条目，自定义扩展隐含引用应使用RequiredFiles补充
 type SignaturePolicy struct {
 	OFDVersions             []string
 	SESVersions             []int
@@ -264,19 +264,6 @@ func (r *Reader) signatureCoverageReferences(root string, required map[string]bo
 	usedIDs := make(map[string]bool)
 	resDeps := make(map[string][]string)
 	var pending []pendingResFile
-	hasExactFile := func(target string) bool {
-		if r.files != nil {
-			if _, ok := r.files[target]; ok {
-				return true
-			}
-		}
-		if r.fileIndex != nil {
-			if _, ok := r.fileIndex[target]; ok {
-				return true
-			}
-		}
-		return false
-	}
 	recordID := func(ownerID, raw string) {
 		id := editorResourceID(raw)
 		if id == "" {
@@ -329,7 +316,7 @@ func (r *Reader) signatureCoverageReferences(root string, required map[string]bo
 				if !validPackagePath(resolved) {
 					return
 				}
-				if resource && resItemID != "" && !hasExactFile(resolved) {
+				if resource && resItemID != "" {
 					pending = append(pending, pendingResFile{id: resItemID, resolved: resolved, structure: structure})
 					return
 				}

@@ -20,8 +20,10 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -95,6 +97,14 @@ type invoiceXMLNode struct {
 type invoiceXMLPart struct {
 	text  string
 	child *invoiceXMLNode
+}
+
+// invoiceContextMeta 保存上下文的主体期间归并键与规范化维度键
+type invoiceContextMeta struct {
+	baseKey       string
+	dimKey        string
+	hasSubContext bool
+	dims          []InvoiceDimension
 }
 
 // invoiceDecimalEqual 精确比较十进制词法值，不接受指数或分数
@@ -205,13 +215,6 @@ func invoiceXMLTree(ctx context.Context, data []byte) (*invoiceXMLNode, error) {
 				if a.Name.Space == "" && a.Name.Local == "xmlns" {
 					n.ns[""] = a.Value
 				}
-			}
-			attrs := map[xml.Name]bool{}
-			for _, a := range v.Attr {
-				if attrs[a.Name] {
-					return nil, fmt.Errorf("duplicate XML attribute")
-				}
-				attrs[a.Name] = true
 			}
 			bindings += len(n.ns)
 			if bindings > 1000000 {
@@ -336,16 +339,19 @@ func parseInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (In
 	seen := map[string]InvoiceFact{}
 	blocked := map[string]bool{}
 	dimensions := map[string][]InvoiceDimension{}
+	contextMetas := map[string]invoiceContextMeta{}
 	for _, id := range invoiceSortedNodes(contexts) {
 		n := contexts[id]
 		if n == nil {
 			continue
 		}
-		ds, valid := invoiceContext(n)
-		dimensions[id] = ds
+		meta, valid := invoiceContextInfo(n)
+		dimensions[id] = meta.dims
 		if !valid {
 			contexts[id] = nil
 			issue("invalid-reference", "context", "invalid context entity, period or dimensions", source)
+		} else {
+			contextMetas[id] = meta
 		}
 	}
 	unitValues := map[string]string{}
@@ -361,6 +367,94 @@ func parseInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (In
 		} else {
 			unitValues[id] = v
 		}
+	}
+	type ctxFactStat struct {
+		hasHeader bool
+		hasItem   bool
+	}
+	ctxStats := map[string]*ctxFactStat{}
+	var prescan func(*invoiceXMLNode)
+	prescan = func(n *invoiceXMLNode) {
+		if n.name.Space == invoiceXBRL || n.name.Space == invoiceLinkbase {
+			return
+		}
+		if len(n.children) > 0 && invoiceXMLAttr(n, "", "contextRef") == "" {
+			for _, c := range n.children {
+				prescan(c)
+			}
+			return
+		}
+		kind, _ := invoiceTaxonomy(n.name.Space)
+		ref := invoiceXMLAttr(n, "", "contextRef")
+		if kind == "" || contexts[ref] == nil {
+			return
+		}
+		pair := n.name.Space + "\x00" + ref
+		stat := ctxStats[pair]
+		if stat == nil {
+			stat = &ctxFactStat{}
+			ctxStats[pair] = stat
+		}
+		inTuple := n.parent != root && n.parent.name.Space == n.name.Space && invoiceItemTuple(kind, n.parent.name.Local)
+		if inTuple {
+			stat.hasHeader = true
+			return
+		}
+		if invoiceKnownItemFact(kind, n.name.Local) {
+			stat.hasItem = true
+		} else {
+			stat.hasHeader = true
+		}
+	}
+	for _, n := range root.children {
+		prescan(n)
+	}
+	hasPlainHeader := map[string]bool{}
+	for pair, stat := range ctxStats {
+		space, ref, _ := strings.Cut(pair, "\x00")
+		meta := contextMetas[ref]
+		if !meta.hasSubContext && stat.hasHeader {
+			hasPlainHeader[space+"\x00"+meta.baseKey] = true
+		}
+	}
+	itemContexts := map[string]bool{}
+	mainRefsByGroup := map[string][]string{}
+	for _, pair := range slices.Sorted(maps.Keys(ctxStats)) {
+		stat := ctxStats[pair]
+		space, ref, _ := strings.Cut(pair, "\x00")
+		meta := contextMetas[ref]
+		group := space + "\x00" + meta.baseKey
+		if len(meta.dims) > 0 || meta.hasSubContext && !stat.hasHeader && stat.hasItem || !stat.hasHeader && stat.hasItem && hasPlainHeader[group] {
+			itemContexts[pair] = true
+		} else {
+			mainRefsByGroup[group] = append(mainRefsByGroup[group], ref)
+		}
+	}
+	invoiceBucketKey := func(space, ref string) (string, bool) {
+		if contexts[ref] == nil {
+			return "raw:" + space + "\x00" + ref, false
+		}
+		pair := space + "\x00" + ref
+		meta := contextMetas[ref]
+		group := space + "\x00" + meta.baseKey
+		isItem := itemContexts[pair]
+		mains := mainRefsByGroup[group]
+		if len(mains) <= 1 {
+			return "base:" + group, isItem
+		}
+		if !isItem {
+			return "ctx:" + pair, false
+		}
+		matchedMain := ""
+		for _, m := range mains {
+			if strings.HasPrefix(ref, m) && len(m) > len(matchedMain) {
+				matchedMain = m
+			}
+		}
+		if matchedMain != "" {
+			return "ctx:" + space + "\x00" + matchedMain, true
+		}
+		return "base:" + group, true
 	}
 	itemIndexes := map[string]int{}
 	unknown := map[string][]InvoiceFact{}
@@ -413,7 +507,7 @@ func parseInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (In
 			unknownOrder = append(unknownOrder, fact)
 			return nil
 		}
-		key := n.name.Space + "\x00" + ref
+		key, isItemCtx := invoiceBucketKey(n.name.Space, ref)
 		i, ok := indexes[key]
 		if !ok {
 			i = len(report.Invoices)
@@ -466,15 +560,22 @@ func parseInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (In
 			cf.Nil = false
 			assign(&inv.Currency, key+"\x00currency", cf, false)
 		}
-		if n.parent == root && len(fact.Dimensions) == 0 {
+		if n.parent == root && len(fact.Dimensions) == 0 && !isItemCtx {
 			assign(invoiceXMLField(inv, kind, fact.Name), key+"\x00"+fact.Name, fact, numeric)
 		}
 		tuple := ""
 		if n.parent != root && n.parent.name.Space == n.name.Space && invoiceItemTuple(kind, n.parent.name.Local) {
 			tuple = n.parent.path
 		}
-		if tuple != "" || len(fact.Dimensions) > 0 {
-			ik := key + "\x00" + tuple
+		if tuple != "" || len(fact.Dimensions) > 0 || isItemCtx {
+			meta := contextMetas[ref]
+			rowKey := "ctx:" + ref
+			if tuple != "" {
+				rowKey = "tuple:" + tuple + "\x00" + meta.dimKey
+			} else if meta.dimKey != "" {
+				rowKey = "dim:" + meta.dimKey
+			}
+			ik := key + "\x00" + rowKey
 			idx, ok := itemIndexes[ik]
 			if !ok {
 				idx = len(inv.Items)
@@ -500,13 +601,28 @@ func parseInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (In
 			return InvoiceReport{}, err
 		}
 		inv := &report.Invoices[i]
-		ref := ""
-		if len(inv.Facts) > 0 {
-			ref = inv.Facts[0].Context
+		var primaryRefs, secondaryRefs []string
+		seenRef := map[string]bool{}
+		for _, f := range inv.Facts {
+			if f.Context == "" || seenRef[f.Context] || contexts[f.Context] == nil {
+				continue
+			}
+			seenRef[f.Context] = true
+			if len(dimensions[f.Context]) == 0 && !itemContexts[inv.Standard+"\x00"+f.Context] {
+				primaryRefs = append(primaryRefs, f.Context)
+			} else {
+				secondaryRefs = append(secondaryRefs, f.Context)
+			}
 		}
-		if n := contexts[ref]; n != nil {
-			inv.Facts = append(inv.Facts, unknown[ref]...)
-			assignedContexts[ref] = true
+		orderedRefs := append(primaryRefs, secondaryRefs...)
+		for _, ref := range orderedRefs {
+			if !assignedContexts[ref] {
+				inv.Facts = append(inv.Facts, unknown[ref]...)
+				assignedContexts[ref] = true
+			}
+		}
+		for _, ref := range orderedRefs {
+			n := contexts[ref]
 			s := source
 			s.NodePath += n.path
 			inv.Facts = append(inv.Facts, InvoiceFact{Name: "context", Namespace: invoiceXBRL, Context: ref, Value: string(n.inner), Source: s, Dimensions: dimensions[ref]})
@@ -792,30 +908,46 @@ func invoiceChildren(n *invoiceXMLNode, space, local string) []*invoiceXMLNode {
 // 入参: n 上下文节点
 // 返回: []InvoiceDimension 维度, bool 有效标志
 func invoiceContext(n *invoiceXMLNode) ([]InvoiceDimension, bool) {
+	meta, valid := invoiceContextInfo(n)
+	return meta.dims, valid
+}
+
+// invoiceContextInfo 校验主体、期间及维度并提取规范化归并键
+// 入参: n 上下文节点
+// 返回: invoiceContextMeta 上下文元数据, bool 有效标志
+func invoiceContextInfo(n *invoiceXMLNode) (invoiceContextMeta, bool) {
 	entities, periods := invoiceChildren(n, invoiceXBRL, "entity"), invoiceChildren(n, invoiceXBRL, "period")
 	if len(entities) != 1 || len(periods) != 1 {
-		return nil, false
+		return invoiceContextMeta{}, false
 	}
 	ids := invoiceChildren(entities[0], invoiceXBRL, "identifier")
-	if len(ids) != 1 || strings.TrimSpace(ids[0].text.String()) == "" || invoiceXMLAttr(ids[0], "", "scheme") == "" {
-		return nil, false
+	if len(ids) != 1 {
+		return invoiceContextMeta{}, false
+	}
+	idText, scheme := strings.TrimSpace(ids[0].text.String()), strings.TrimSpace(invoiceXMLAttr(ids[0], "", "scheme"))
+	if idText == "" || scheme == "" {
+		return invoiceContextMeta{}, false
 	}
 	p := periods[0]
 	instant, start, end, forever := invoiceChildren(p, invoiceXBRL, "instant"), invoiceChildren(p, invoiceXBRL, "startDate"), invoiceChildren(p, invoiceXBRL, "endDate"), invoiceChildren(p, invoiceXBRL, "forever")
 	if !((len(instant) == 1 && len(p.children) == 1 && strings.TrimSpace(instant[0].text.String()) != "") || (len(start) == 1 && len(end) == 1 && len(p.children) == 2 && strings.TrimSpace(start[0].text.String()) != "" && strings.TrimSpace(end[0].text.String()) != "") || (len(forever) == 1 && len(p.children) == 1)) {
-		return nil, false
+		return invoiceContextMeta{}, false
 	}
+	periodKey := "F"
 	if len(instant) == 1 {
-		if _, ok := invoicePeriodTime(instant[0].text.String()); !ok {
-			return nil, false
+		t, ok := invoicePeriodTime(instant[0].text.String())
+		if !ok {
+			return invoiceContextMeta{}, false
 		}
+		periodKey = "I:" + t.UTC().Format(time.RFC3339Nano)
 	}
 	if len(start) == 1 {
 		a, ok := invoicePeriodTime(start[0].text.String())
 		b, ok2 := invoicePeriodTime(end[0].text.String())
 		if !ok || !ok2 || a.After(b) {
-			return nil, false
+			return invoiceContextMeta{}, false
 		}
+		periodKey = "D:" + a.UTC().Format(time.RFC3339Nano) + "~" + b.UTC().Format(time.RFC3339Nano)
 	}
 	var dims []InvoiceDimension
 	valid := true
@@ -851,7 +983,37 @@ func invoiceContext(n *invoiceXMLNode) ([]InvoiceDimension, bool) {
 		}
 	}
 	walk(n)
-	return dims, valid
+	if !valid {
+		return invoiceContextMeta{}, false
+	}
+	var subParts []string
+	for _, seg := range append(invoiceChildren(entities[0], invoiceXBRL, "segment"), invoiceChildren(n, invoiceXBRL, "scenario")...) {
+		for _, child := range seg.children {
+			if child.name.Space != invoiceDimension {
+				subParts = append(subParts, invoiceCanonicalXML(child))
+			}
+		}
+	}
+	var dimParts []string
+	if len(dims) > 0 {
+		sortedDims := slices.Clone(dims)
+		sort.Slice(sortedDims, func(i, j int) bool {
+			if sortedDims[i].Namespace != sortedDims[j].Namespace {
+				return sortedDims[i].Namespace < sortedDims[j].Namespace
+			}
+			return sortedDims[i].Name < sortedDims[j].Name
+		})
+		for _, d := range sortedDims {
+			dimParts = append(dimParts, "{"+d.Namespace+"}"+d.Name+"="+d.Value)
+		}
+	}
+	dimParts = append(dimParts, subParts...)
+	return invoiceContextMeta{
+		baseKey:       scheme + "\x00" + idText + "\x00" + periodKey,
+		dimKey:        strings.Join(dimParts, "\x00"),
+		hasSubContext: len(dims) > 0 || len(subParts) > 0,
+		dims:          dims,
+	}, true
 }
 
 // invoiceUnit 校验单位结构并展开所有度量QName
@@ -907,7 +1069,7 @@ func invoiceNumeric(kind, name string) bool {
 	}
 	if kind == "einv" {
 		switch name {
-		case "TotalAmWithoutTax", "TotalTaxAm", "TotalTax-includedAmount":
+		case "TotalAmWithoutTax", "TotalTaxAm", "TotalTax-includedAmount", "Quantity", "UnPrice", "Amount", "TaxRate", "ComTaxAm":
 			return true
 		}
 	}
@@ -958,7 +1120,7 @@ func invoiceAccuracy(value string, nonnegative bool) bool {
 // 入参: kind 类别, name 概念名称
 // 返回: bool 是否为已映射货币概念
 func invoiceMonetary(kind, name string) bool {
-	return invoiceNumeric(kind, name) && name != "QuantityOfGoodsOrServices" && name != "VatRate" && name != "TaxRate"
+	return invoiceNumeric(kind, name) && name != "QuantityOfGoodsOrServices" && name != "Quantity" && name != "UnPrice" && name != "VatRate" && name != "TaxRate"
 }
 
 // invoiceCurrencyUnit 检查单一ISO币种度量
@@ -980,10 +1142,53 @@ func invoiceItemTuple(kind, name string) bool {
 	return kind == "atr" && name == "DetailInformationOfAirTicketTuple" || kind == "inv" && (name == "InformationOfTaxableGoodsOrServicesDetailItemsTuple" || name == "InformationOfTollFeeDetailItemsTuple")
 }
 
-// invoiceItemField 映射增值税商品明细公共字段
+// invoiceKnownItemFact 判断概念是否属于分类标准中的明细行专属字段
+// 入参: kind 标准类别, name 概念名
+// 返回: bool 是否为明细字段
+func invoiceKnownItemFact(kind, name string) bool {
+	if invoiceItemField(&InvoiceItem{}, kind, name) != nil {
+		return true
+	}
+	switch kind {
+	case "inv":
+		switch name {
+		case "NatureOfInvoiceLine", "PlateNumber", "TypesOfVehicle", "EntranceDate", "ExitDate":
+			return true
+		}
+	case "atr":
+		switch name {
+		case "DepartureStation", "DestinationStation", "FlightSegment", "Carrier", "Flight", "Class", "CarrierDate", "DepartureTime", "FareBasis", "EffectiveDate", "ExpirationDate", "FreeBaggageAllowance":
+			return true
+		}
+	}
+	return false
+}
+
+// invoiceItemField 映射增值税及数电发票商品明细公共字段
 // 入参: item 明细, kind 类别, name 概念名
 // 返回: *string 字段地址，其他明细仅保留事实
 func invoiceItemField(item *InvoiceItem, kind, name string) *string {
+	if kind == "einv" {
+		switch name {
+		case "ItemName":
+			return &item.Name
+		case "SpecMod":
+			return &item.Specification
+		case "MeaUnits":
+			return &item.Unit
+		case "Quantity":
+			return &item.Quantity
+		case "UnPrice":
+			return &item.UnitPrice
+		case "Amount":
+			return &item.Amount
+		case "TaxRate":
+			return &item.TaxRate
+		case "ComTaxAm":
+			return &item.TaxAmount
+		}
+		return nil
+	}
 	if kind != "inv" {
 		return nil
 	}

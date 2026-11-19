@@ -2158,6 +2158,10 @@ button:not(:disabled):hover {
 	overflow-wrap: anywhere;
 }
 
+#annotationCreateStatus {
+	color: var(--danger);
+}
+
 .form-actions {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) auto auto;
@@ -2210,32 +2214,48 @@ body[data-hide-meta] .meta-panel {
 	display: none;
 }
 
-.form-dialog,
-.form-dialog *,
-.font-listbox,
-.dropdown-list,
-.navigation-content,
-.viewer-panel,
-.annotation-summary-list,
-.search-results,
-.editor-toolbar,
-.document-list,
-.meta-panel {
-	scrollbar-width: thin;
-	scrollbar-color: var(--line-strong) transparent;
+@supports selector(::-webkit-scrollbar) {
+	:is(.scrollbar-probe, .form-dialog, .form-dialog *, .font-listbox, .dropdown-list, .navigation-content, .viewer-panel, .annotation-summary-list, .search-results, .editor-toolbar, .document-list, .meta-panel)::-webkit-scrollbar {
+		width: 6px;
+		height: 6px;
+	}
+
+	:is(.scrollbar-probe, .form-dialog, .form-dialog *, .font-listbox, .dropdown-list, .navigation-content, .viewer-panel, .annotation-summary-list, .search-results, .editor-toolbar, .document-list, .meta-panel)::-webkit-scrollbar-button {
+		display: none;
+		width: 0;
+		height: 0;
+	}
+
+	:is(.scrollbar-probe, .form-dialog, .form-dialog *, .font-listbox, .dropdown-list, .navigation-content, .viewer-panel, .annotation-summary-list, .search-results, .editor-toolbar, .document-list, .meta-panel)::-webkit-scrollbar-track,
+	:is(.scrollbar-probe, .form-dialog, .form-dialog *, .font-listbox, .dropdown-list, .navigation-content, .viewer-panel, .annotation-summary-list, .search-results, .editor-toolbar, .document-list, .meta-panel)::-webkit-scrollbar-corner {
+		background: transparent;
+	}
+
+	:is(.scrollbar-probe, .form-dialog, .form-dialog *, .font-listbox, .dropdown-list, .navigation-content, .viewer-panel, .annotation-summary-list, .search-results, .editor-toolbar, .document-list, .meta-panel)::-webkit-scrollbar-thumb {
+		background: var(--line-strong);
+		border-radius: 999px;
+	}
+
+	:is(.scrollbar-probe, .form-dialog, .form-dialog *, .font-listbox, .dropdown-list, .navigation-content, .viewer-panel, .annotation-summary-list, .search-results, .editor-toolbar, .document-list, .meta-panel):hover::-webkit-scrollbar-thumb {
+		background: var(--text-muted);
+	}
 }
 
-:is(.form-dialog, .form-dialog *, .font-listbox, .dropdown-list, .navigation-content, .viewer-panel, .annotation-summary-list, .search-results, .editor-toolbar, .document-list, .meta-panel):hover {
-	scrollbar-color: var(--text-muted) transparent;
+@supports not selector(::-webkit-scrollbar) {
+	:is(.scrollbar-probe, .form-dialog, .form-dialog *, .font-listbox, .dropdown-list, .navigation-content, .viewer-panel, .annotation-summary-list, .search-results, .editor-toolbar, .document-list, .meta-panel) {
+		scrollbar-width: thin;
+		scrollbar-color: var(--line-strong) transparent;
+	}
+
+	:is(.scrollbar-probe, .form-dialog, .form-dialog *, .font-listbox, .dropdown-list, .navigation-content, .viewer-panel, .annotation-summary-list, .search-results, .editor-toolbar, .document-list, .meta-panel):hover {
+		scrollbar-color: var(--text-muted) transparent;
+	}
 }
 
 .page-list-panel,
 .meta-panel {
 	min-height: 0;
-	padding: 12px;
-	border-right: 1px solid var(--line);
 	background: var(--panel-fill);
-	overflow: auto;
 	font-size: 13px;
 	line-height: 1.5;
 }
@@ -2243,12 +2263,22 @@ body[data-hide-meta] .meta-panel {
 .page-list-panel {
 	display: flex;
 	flex-direction: column;
+	padding: 12px 0 0;
+	border-right: 1px solid var(--line);
 	overflow: hidden;
+}
+
+#pageListTitle,
+.navigation-tabs,
+.page-selection-tools {
+	margin-inline: 12px;
 }
 
 .navigation-content {
 	flex: 1;
 	min-height: 0;
+	padding: 0 max(2px, calc(12px - var(--scrollbar-width, 0px))) 12px 12px;
+	scrollbar-gutter: stable;
 	overflow-x: hidden;
 	overflow-y: auto;
 	overflow-anchor: none;
@@ -2268,8 +2298,11 @@ body[data-hide-meta] .meta-panel {
 }
 
 .meta-panel {
-	border-right: 0;
+	padding: 12px max(2px, calc(12px - var(--scrollbar-width, 0px))) 12px 12px;
 	border-left: 1px solid var(--line);
+	scrollbar-gutter: stable;
+	overflow-x: hidden;
+	overflow-y: auto;
 }
 
 .panel-title {
@@ -3050,7 +3083,10 @@ body[data-hide-meta] .meta-panel {
 
 .annotation-summary-list {
 	min-height: 0;
-	overflow: auto;
+	padding: 0 max(2px, calc(12px - var(--scrollbar-width, 0px))) 12px 12px;
+	scrollbar-gutter: stable;
+	overflow-x: hidden;
+	overflow-y: auto;
 	overflow-anchor: none;
 }
 
@@ -3105,7 +3141,7 @@ body[data-hide-meta] .meta-panel {
 
 #annotationsStatus {
 	flex-shrink: 0;
-	margin: 8px 0 0;
+	margin: 8px 12px 0;
 }
 
 #annotationsStatus:empty {
@@ -3145,6 +3181,18 @@ body[data-hide-meta] .meta-panel {
 	overflow: hidden;
 }
 
+.navigation-content:has(#searchPanel:not([hidden])),
+.navigation-content:has(#annotationsPanel:not([hidden])) {
+	padding: 0;
+	scrollbar-gutter: auto;
+}
+
+#annotationsPanel > .search-form,
+#searchPanel > .search-form,
+#searchPanel > .search-tools {
+	margin-inline: 12px;
+}
+
 #searchPanel,
 #annotationsPanel {
 	flex: 1;
@@ -3157,7 +3205,10 @@ body[data-hide-meta] .meta-panel {
 
 .search-results {
 	min-height: 0;
-	overflow: auto;
+	padding: 0 max(2px, calc(12px - var(--scrollbar-width, 0px))) 12px 12px;
+	scrollbar-gutter: stable;
+	overflow-x: hidden;
+	overflow-y: auto;
 }
 
 .search-form {

@@ -171,9 +171,8 @@ func (e *Editor) ReplaceResource(ctx context.Context, kind, id, format string, d
 	if !slices.Contains([]string{"Image", "Audio", "Video", "Attachment"}, kind) {
 		return fmt.Errorf("use typed definition or font binding operations for %s", kind)
 	}
-	return e.changeResource(ctx, kind, id, func(catalog *resourceCatalog, item ResourceInfo, changes map[string][]byte) error {
+	return e.changeResource(ctx, kind, id, func(catalog *resourceCatalog, item ResourceInfo, targetIdx int, target editorFontText, changes map[string][]byte) error {
 		reader := catalog.scan.reader
-		target := catalog.nodes[item.Kind+"/"+item.ID]
 		if len(data) == 0 {
 			return fmt.Errorf("empty media data")
 		}
@@ -182,7 +181,7 @@ func (e *Editor) ReplaceResource(ctx context.Context, kind, id, format string, d
 			if err != nil {
 				return err
 			}
-			if err := validateResourceImageMask(ctx, catalog, item.ID, img); err != nil {
+			if err := validateResourceImageMask(ctx, catalog, targetIdx, img); err != nil {
 				return err
 			}
 			format = actual
@@ -230,11 +229,39 @@ func (e *Editor) DeleteResource(ctx context.Context, kind, id string) error {
 // 入参: ctx 取消上下文, id 媒体标识, page 零基页码, object 图元标识, bind 为false时移除该媒体的点击播放动作
 // 返回: error 资源、对象或提交错误
 func (e *Editor) BindMedia(ctx context.Context, id string, page int, object string, bind bool) error {
+	if _, err := e.page(page); err != nil {
+		return err
+	}
 	kind := ""
 	for _, resource := range e.resources {
 		if media := resource.image; media != nil && sameResourceID(media.ID, id) && (media.Type == "Audio" || media.Type == "Video") {
 			kind, id = media.Type, media.ID
 			break
+		}
+	}
+	if kind == "" && e.source != nil {
+		shadowed := false
+		for _, parsed := range slices.Backward(e.pageLocalScope(page)) {
+			if media, ok := parsed.medias.get(id); ok {
+				if media.Type == "Audio" || media.Type == "Video" {
+					kind, id = media.Type, media.ID
+				} else {
+					shadowed = true
+				}
+				break
+			}
+			if parsedHasResource(parsed, id, "") {
+				shadowed = true
+				break
+			}
+		}
+		if kind == "" && !shadowed {
+			if media, ok := e.source.reader.docMedias.get(id); ok && (media.Type == "Audio" || media.Type == "Video") {
+				kind, id = media.Type, media.ID
+			}
+		}
+		if kind == "" && shadowed {
+			return fmt.Errorf("audio or video resource not found")
 		}
 	}
 	if kind == "" {
@@ -325,6 +352,15 @@ func (e *Editor) CopyMedia(id string) (string, error) {
 		}
 	}
 	if copy.image == nil && e.source != nil {
+		for _, parsed := range slices.Backward(e.pageScope) {
+			if media, ok := parsed.medias.get(id); ok && (media.Type == "Audio" || media.Type == "Video") {
+				media.MediaFile = "/" + cleanPackagePath(e.source.reader.ResPath(media.MediaFile))
+				copy.image = &media
+				break
+			}
+		}
+	}
+	if copy.image == nil && e.source != nil {
 		media, err := e.source.reader.Media(id)
 		if err != nil {
 			return "", err
@@ -359,10 +395,41 @@ type resourceImageMaskKey struct {
 	replacement bool
 }
 
+// findUniqueCatalogResource 在资源目录中定位无歧义的唯一资源声明及其所在文件与原文节点
+// 入参: catalog 资源目录, kind 资源类型, id 资源标识
+// 返回: ResourceInfo 资源条目, int 目录索引, string 声明所在资源文件, editorFontText 原文节点, error 未找到或跨文件同名歧义错误
+func findUniqueCatalogResource(catalog *resourceCatalog, kind, id string) (ResourceInfo, int, string, editorFontText, error) {
+	foundIdx := -1
+	count := 0
+	for i, item := range catalog.items {
+		if resourceMatches(item, kind, id) {
+			if count == 0 {
+				foundIdx = i
+			}
+			count++
+		}
+	}
+	if count == 0 {
+		return ResourceInfo{}, -1, "", editorFontText{}, fmt.Errorf("resource not found: %s/%s", kind, id)
+	}
+	if count > 1 {
+		return ResourceInfo{}, -1, "", editorFontText{}, fmt.Errorf("ambiguous resource %s/%s defined in multiple resource files", kind, id)
+	}
+	item := catalog.items[foundIdx]
+	resFile := catalog.itemFiles[foundIdx]
+	target := catalog.nodes[item.Kind+"/"+item.ID]
+	if resFile != "" {
+		if scoped, ok := catalog.nodes[resFile+":"+item.Kind+"/"+item.ID]; ok {
+			target = scoped
+		}
+	}
+	return item, foundIdx, resFile, target, nil
+}
+
 // changeResource 校验引用后在独立快照中修改声明，借用既有版本隔离和历史提交路径
 // 入参: ctx 取消上下文, kind 资源类型, id 标识, replace 替换操作，nil表示删除, data 附件替换数据
 // 返回: error 引用、结构或提交错误
-func (e *Editor) changeResource(ctx context.Context, kind, id string, replace func(*resourceCatalog, ResourceInfo, map[string][]byte) error, data []byte) error {
+func (e *Editor) changeResource(ctx context.Context, kind, id string, replace func(*resourceCatalog, ResourceInfo, int, editorFontText, map[string][]byte) error, data []byte) error {
 	reader, err := e.Reader(ctx)
 	if err != nil {
 		return err
@@ -371,7 +438,7 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 	if err != nil {
 		return err
 	}
-	item, err := findResource(catalog.items, kind, id)
+	item, targetIdx, targetFile, target, err := findUniqueCatalogResource(catalog, kind, id)
 	if err != nil {
 		return err
 	}
@@ -407,7 +474,6 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 		}
 		return e.commitResourceSnapshot(ctx, reader)
 	}
-	target := catalog.nodes[item.Kind+"/"+item.ID]
 	changes := make(map[string][]byte)
 	if replace == nil {
 		node := target.node
@@ -415,14 +481,14 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 			node = node.parent
 		}
 		changes[target.file.name] = editorPatchXML(target.file.data, []editorXMLPatch{{start: node.start, end: node.end}})
-	} else if err := replace(catalog, item, changes); err != nil {
+	} else if err := replace(catalog, item, targetIdx, target, changes); err != nil {
 		return err
 	}
 	if len(changes) == 0 {
 		return nil
 	}
 	if replace != nil && kind == "Image" {
-		if err := invalidateResourcePreviews(ctx, catalog.scan, changes, item.ID); err != nil {
+		if err := invalidateScopedResourcePreviews(ctx, catalog, changes, targetFile, item.Kind, item.ID); err != nil {
 			return err
 		}
 	}
@@ -435,39 +501,40 @@ func (e *Editor) changeResource(ctx context.Context, kind, id string, replace fu
 	return e.commitResourceSnapshot(ctx, reader)
 }
 
-// validateResourceImageMask 校验图片替换涉及的全部蒙版引用，按文件复用尺寸和二值像素校验结果
-// 待替换资源单独校验，不影响仍使用同一原文件的其他资源声明
-// 入参: ctx 取消上下文, catalog 当前文档资源, id 替换图片标识, replacement 新图片
+// validateResourceImageMask 校验图片替换涉及的全部蒙版引用，按文件作用域精确匹配目标资源并复用校验结果
+// 待替换资源单独校验，不影响仍使用同一原文件或同名局部资源的其他声明
+// 入参: ctx 取消上下文, catalog 当前文档资源, targetIdx 待替换资源在catalog.items中的索引, replacement 新图片
 // 返回: error 资源、尺寸、像素或取消错误
-func validateResourceImageMask(ctx context.Context, catalog *resourceCatalog, id string, replacement image.Image) error {
+func validateResourceImageMask(ctx context.Context, catalog *resourceCatalog, targetIdx int, replacement image.Image) error {
 	updated := resourceImageMaskKey{replacement: true}
-	keys := map[string]resourceImageMaskKey{id: updated}
 	sizes := map[resourceImageMaskKey]image.Point{updated: replacement.Bounds().Size()}
 	validated := make(map[resourceImageMaskKey]image.Point)
-	locate := func(id string) (resourceImageMaskKey, error) {
-		if key, ok := keys[id]; ok {
-			return key, nil
+	keyFor := func(idx int) resourceImageMaskKey {
+		if idx == targetIdx {
+			return updated
 		}
-		item, err := findResource(catalog.items, "Image", id)
-		if err != nil {
-			return resourceImageMaskKey{}, err
-		}
-		key := resourceImageMaskKey{file: item.File}
-		keys[id] = key
-		return key, nil
+		return resourceImageMaskKey{file: catalog.items[idx].File}
 	}
 	for _, entry := range catalog.images {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		source, mask := editorResourceID(entry.node.attr("ResourceID")), editorResourceID(entry.node.attr("ImageMask"))
-		if mask == "" || source != id && mask != id {
+		rawSource, rawMask := entry.node.attr("ResourceID"), entry.node.attr("ImageMask")
+		if editorResourceID(rawMask) == "" {
 			continue
 		}
-		sourceKey, err := locate(source)
-		if err != nil {
-			return err
+		sourceIdx, okSource := catalog.resolveRefIndex(entry.file.name, "ImageObject", "ResourceID", rawSource)
+		maskIdx, okMask := catalog.resolveRefIndex(entry.file.name, "ImageObject", "ImageMask", rawMask)
+		if (!okSource || sourceIdx != targetIdx) && (!okMask || maskIdx != targetIdx) {
+			continue
 		}
+		if !okSource {
+			return fmt.Errorf("resource not found: Image/%s", editorResourceID(rawSource))
+		}
+		if !okMask {
+			return fmt.Errorf("resource not found: Image/%s", editorResourceID(rawMask))
+		}
+		sourceKey := keyFor(sourceIdx)
 		size, ok := sizes[sourceKey]
 		if !ok {
 			data, err := catalog.scan.reader.readFileViewContext(ctx, sourceKey.file)
@@ -481,13 +548,10 @@ func validateResourceImageMask(ctx context.Context, catalog *resourceCatalog, id
 			size = image.Pt(config.Width, config.Height)
 			sizes[sourceKey] = size
 		}
-		maskKey, err := locate(mask)
-		if err != nil {
-			return err
-		}
+		maskKey := keyFor(maskIdx)
 		if previous, ok := validated[maskKey]; ok {
 			if previous != size {
-				return fmt.Errorf("image mask %s dimensions differ from source %s", mask, source)
+				return fmt.Errorf("image mask %s dimensions differ from source %s", editorResourceID(rawMask), editorResourceID(rawSource))
 			}
 			continue
 		}
@@ -509,6 +573,40 @@ func validateResourceImageMask(ctx context.Context, catalog *resourceCatalog, id
 		validated[maskKey] = size
 	}
 	return ctx.Err()
+}
+
+// resolveCatalogScopedKey 解析XML引用在所属文件作用域下命中的精确资源声明键
+// 入参: catalog 资源目录, cleanFile 所在文件规范路径, elemName 元素名, ownerDrawParamID 所属DrawParam标识, role 引用角色, rawValue 原始值
+// 返回: string 形如res:file:Kind:ID的作用域限定键，未命中返回空字符串
+func resolveCatalogScopedKey(catalog *resourceCatalog, cleanFile, elemName, ownerDrawParamID, role, rawValue string) string {
+	id := editorResourceID(rawValue)
+	if id == "" {
+		return ""
+	}
+	expected := resourceExpectedKind(elemName, role)
+	scope := catalog.scopeForFile(cleanFile)
+	if role == "Relative" && ownerDrawParamID != "" {
+		if pos := slices.Index(scope, cleanFile); pos >= 0 {
+			if id == ownerDrawParamID {
+				scope = scope[pos+1:]
+			} else {
+				scope = scope[pos:]
+			}
+		}
+	}
+	if expected != "" {
+		for _, resFile := range scope {
+			if catalog.resKinds[resFile][id] == expected {
+				return "res:" + resFile + ":" + expected + ":" + id
+			}
+		}
+	}
+	for _, resFile := range scope {
+		if kind := catalog.resKinds[resFile][id]; kind != "" {
+			return "res:" + resFile + ":" + kind + ":" + id
+		}
+	}
+	return ""
 }
 
 // invalidateResourcePreviews 单次解析文档结构，沿资源引用传播失效状态并移除旧替换图及底纹预览
@@ -620,6 +718,180 @@ func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, c
 		}
 		visited[id] = true
 		for _, preview := range references[id] {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			for current := preview; current != nil && !affected[current]; current = current.parent {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				affected[current] = true
+				if current.resource != "" {
+					pending = append(pending, current.resource)
+				}
+				if len(current.patches) != 0 {
+					patches[current.file] = append(patches[current.file], current.patches...)
+				}
+			}
+		}
+	}
+	for name, edits := range patches {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		data, exists := changes[name]
+		if !exists {
+			data = scan.files[name].data
+		}
+		changes[name] = editorPatchXML(data, edits)
+	}
+	return ctx.Err()
+}
+
+// invalidateScopedResourcePreviews 单次解析文档结构，按资源所属作用域沿引用传播失效状态并移除旧替换图及底纹预览
+// 入参: ctx 取消上下文, catalog 当前资源目录, changes 待提交文件, targetFile 目标资源所在文件, targetKind 目标资源类型, targetID 目标资源标识
+// 返回: error 解析或取消错误
+func invalidateScopedResourcePreviews(ctx context.Context, catalog *resourceCatalog, changes map[string][]byte, targetFile, targetKind, targetID string) error {
+	idKey := editorResourceID(targetID)
+	if idKey == "" || targetKind == "" {
+		return ctx.Err()
+	}
+	scan := catalog.scan
+	reader := scan.reader
+	if scan.index != reader.DocumentIndex() {
+		var err error
+		reader, err = reader.DocumentContext(ctx, scan.index)
+		if err != nil {
+			return err
+		}
+	}
+	doc, err := reader.DocContext(ctx)
+	if err != nil {
+		return err
+	}
+	defaultCS := ""
+	if doc.CommonData.DefaultCS != 0 {
+		defaultCS = formatUnitID(uint64(doc.CommonData.DefaultCS))
+	}
+	references := make(map[string][]*editorResourcePreview)
+	for name, file := range scan.files {
+		cleanName := cleanPackagePath(name)
+		data, exists := changes[name]
+		if !exists {
+			data = file.data
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return err
+		}
+		_, isExtFile := catalog.extParents[cleanName]
+		var fileRootPreview *editorResourcePreview
+		if isExtFile {
+			fileRootPreview = &editorResourcePreview{resource: "file:" + cleanName, file: name}
+		}
+		var visit func(*editorXML, *editorResourcePreview, string) error
+		visit = func(node *editorXML, parent *editorResourcePreview, ownerDrawParamID string) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !node.matchesOFD(node.name.Local) {
+				return nil
+			}
+			current := parent
+			if node.parent != nil && (node.matchesOFD("DrawParam") && node.parent.matchesOFD("DrawParams") || node.matchesOFD("CompositeGraphicUnit") && node.parent.matchesOFD("CompositeGraphicUnits")) {
+				declKind := node.name.Local
+				declID := editorResourceID(node.attr("ID"))
+				current = &editorResourcePreview{parent: parent, resource: "res:" + cleanName + ":" + declKind + ":" + declID, file: name}
+				if node.matchesOFD("DrawParam") {
+					ownerDrawParamID = declID
+					if link := strings.TrimSpace(node.attr("Link")); link != "" {
+						ext := cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), link))
+						references["file:"+ext] = append(references["file:"+ext], current)
+					}
+				}
+				if node.matchesOFD("CompositeGraphicUnit") {
+					if loc := strings.TrimSpace(node.attr("BaseLoc")); loc != "" {
+						ext := cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), loc))
+						references["file:"+ext] = append(references["file:"+ext], current)
+					}
+					for _, key := range []string{"Thumbnail", "Substitution"} {
+						if child := node.child(key); child != nil {
+							current.patches = append(current.patches, editorXMLPatch{start: child.start, end: child.end})
+						}
+					}
+				}
+			}
+			if node.matchesOFD("CellContent") && node.parent != nil && node.parent.matchesOFD("Pattern") && node.hasAttr("Thumbnail") {
+				patch, err := editorXMLAttributeChange(data, node, "Thumbnail", nil)
+				if err != nil {
+					return err
+				}
+				current = &editorResourcePreview{parent: parent, file: name, patches: []editorXMLPatch{patch}}
+			}
+			if node.matchesOFD("ImageObject") && node.hasAttr("Substitution") {
+				patch, err := editorXMLAttributeChange(data, node, "Substitution", nil)
+				if err != nil {
+					return err
+				}
+				preview := &editorResourcePreview{file: name, patches: []editorXMLPatch{patch}}
+				for _, key := range []string{"ResourceID", "ImageMask"} {
+					if dep := resolveCatalogScopedKey(catalog, cleanName, node.name.Local, ownerDrawParamID, key, node.attr(key)); dep != "" {
+						references[dep] = append(references[dep], preview)
+					}
+				}
+			}
+			if current != nil {
+				for _, key := range []string{"ResourceID", "ImageMask", "Substitution", "DrawParam", "ColorSpace", "Font"} {
+					if dep := resolveCatalogScopedKey(catalog, cleanName, node.name.Local, ownerDrawParamID, key, node.attr(key)); dep != "" {
+						references[dep] = append(references[dep], current)
+					}
+				}
+				if defaultCS != "" && resourceColorNode(node) && node.attr("ColorSpace") == "" {
+					if dep := resolveCatalogScopedKey(catalog, cleanName, node.name.Local, ownerDrawParamID, "ColorSpace", defaultCS); dep != "" {
+						references[dep] = append(references[dep], current)
+					}
+				}
+				if node.matchesOFD("DrawParam") {
+					if dep := resolveCatalogScopedKey(catalog, cleanName, node.name.Local, ownerDrawParamID, "Relative", node.attr("Relative")); dep != "" {
+						references[dep] = append(references[dep], current)
+					}
+				}
+			}
+			for _, child := range node.children {
+				if err := visit(child, current, ownerDrawParamID); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if err := visit(root, fileRootPreview, ""); err != nil {
+			return err
+		}
+	}
+	affected := make(map[*editorResourcePreview]bool)
+	patches := make(map[string][]editorXMLPatch)
+	visited := make(map[string]bool)
+	var pending []string
+	if targetFile != "" {
+		pending = append(pending, "res:"+cleanPackagePath(targetFile)+":"+targetKind+":"+idKey)
+	} else {
+		for resFile, kinds := range catalog.resKinds {
+			if kinds[idKey] == targetKind {
+				pending = append(pending, "res:"+resFile+":"+targetKind+":"+idKey)
+			}
+		}
+	}
+	for len(pending) != 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		currentKey := pending[0]
+		pending = pending[1:]
+		if currentKey == "" || visited[currentKey] {
+			continue
+		}
+		visited[currentKey] = true
+		for _, preview := range references[currentKey] {
 			if err := ctx.Err(); err != nil {
 				return err
 			}

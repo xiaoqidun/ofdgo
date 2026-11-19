@@ -144,6 +144,7 @@ func (e *Editor) PageCapabilities(index int) (PageCapabilities, error) {
 	if index < 0 || index >= len(e.pages) {
 		return PageCapabilities{}, fmt.Errorf("page index %d out of range", index)
 	}
+	defer e.bindPageIndex(index)()
 	return PageCapabilities{Insert: e.sourceRGB(), Copy: true, Delete: true, Move: true, Resize: true}, nil
 }
 
@@ -462,25 +463,6 @@ func (e *Editor) loadSourcePageContext(ctx context.Context, index int) error {
 	page, err := reader.PageContentContext(ctx, source.ref)
 	if err != nil {
 		return err
-	}
-	var tplResources []*parsedRes
-	for _, tplRef := range page.Template {
-		for _, tpl := range e.source.document.CommonData.TemplatePage {
-			if sameResourceID(tpl.ID, tplRef.TemplateID) && tpl.BaseLoc != "" {
-				tplHeader, tplErr := reader.readPageHeaderContext(ctx, Page{ID: tpl.ID, BaseLoc: tpl.BaseLoc})
-				if tplErr != nil {
-					return tplErr
-				}
-				tplRes, resErr := reader.collectPageResourcesContext(ctx, reader.ResPath(tpl.BaseLoc), &tplHeader)
-				if resErr != nil {
-					return resErr
-				}
-				tplResources = append(tplResources, tplRes...)
-			}
-		}
-	}
-	if len(tplResources) > 0 {
-		page.pageResources = slices.Concat(tplResources, page.pageResources)
 	}
 	data, repaired, err := e.repairSourceObjectIDs(ctx, data, root)
 	if err != nil {
@@ -995,23 +977,8 @@ func (e *Editor) bindPageIndex(index int) func() {
 			}
 			reader := e.source.reader
 			if header, err := reader.readPageHeaderContext(context.Background(), source.ref); err == nil {
-				var list []*parsedRes
-				for _, ref := range header.Template {
-					for _, tpl := range e.source.document.CommonData.TemplatePage {
-						if sameResourceID(tpl.ID, ref.TemplateID) && tpl.BaseLoc != "" {
-							if tplHeader, tplErr := reader.readPageHeaderContext(context.Background(), Page{ID: tpl.ID, BaseLoc: tpl.BaseLoc}); tplErr == nil {
-								if tplRes, resErr := reader.collectPageResourcesContext(context.Background(), reader.ResPath(tpl.BaseLoc), &tplHeader); resErr == nil {
-									list = append(list, tplRes...)
-								}
-							}
-						}
-					}
-				}
-				if pageRes, resErr := reader.collectPageResourcesContext(context.Background(), reader.ResPath(source.ref.BaseLoc), &header); resErr == nil {
-					list = append(list, pageRes...)
-				}
-				if len(list) > 0 {
-					return e.bindParsedScope(list)
+				if pageRes, resErr := reader.collectPageResourcesContext(context.Background(), reader.ResPath(source.ref.BaseLoc), &header); resErr == nil && len(pageRes) > 0 {
+					return e.bindParsedScope(pageRes)
 				}
 			}
 		}
@@ -1023,9 +990,6 @@ func (e *Editor) bindPageIndex(index int) func() {
 // 入参: ctx 取消上下文
 // 返回: []*parsedRes 去重后的页级资源列表, error 读取、解析或取消错误
 func (e *Editor) ensureSourcePageResourcesContext(ctx context.Context) ([]*parsedRes, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1099,32 +1063,6 @@ func (e *Editor) ensureSourcePageResources() []*parsedRes {
 func (e *Editor) pageScopeFont(id string) (*Font, bool) {
 	for i := len(e.pageScope) - 1; i >= 0; i-- {
 		if v, ok := e.pageScope[i].fonts.get(id); ok {
-			return v, true
-		}
-	}
-	return nil, false
-}
-
-// sourceDrawParam 按页面作用域、文档级缓存及全文档页级资源顺序查找绘制参数
-// 入参: id 绘制参数标识
-// 返回: *DrawParam 绘制参数, bool 是否找到
-func (e *Editor) sourceDrawParam(id string) (*DrawParam, bool) {
-	if e.source == nil {
-		return nil, false
-	}
-	for i := len(e.pageScope) - 1; i >= 0; i-- {
-		if v, ok := e.pageScope[i].drawParams.get(id); ok {
-			return v, true
-		}
-	}
-	if v, ok := e.source.reader.docDrawParams.get(id); ok {
-		return v, true
-	}
-	if v, ok := resourceValue(e.source.reader.drawParamCache, id); ok {
-		return v, true
-	}
-	for _, parsed := range e.ensureSourcePageResources() {
-		if v, ok := parsed.drawParams.get(id); ok {
 			return v, true
 		}
 	}
@@ -1208,9 +1146,6 @@ func (e *Editor) sourceFont(id string) (*Font, bool) {
 // 入参: ctx 取消上下文, id 资源标识, kind 资源类型，空字符串匹配任意类型
 // 返回: string 资源XML包内路径, bool 是否找到, error 读取或取消错误
 func (e *Editor) sourceResourceFileContext(ctx context.Context, id, kind string) (string, bool, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := ctx.Err(); err != nil {
 		return "", false, err
 	}
@@ -1223,8 +1158,8 @@ func (e *Editor) sourceResourceFileContext(ctx context.Context, id, kind string)
 			return parsed.path, true, nil
 		}
 	}
-	if name, ok := resourceValue(reader.resourceFiles, id); ok && name != "" {
-		if kind == "" {
+	if name, ok := reader.resourceFileByKind(kind, id); ok && name != "" {
+		if kind != "Image" && kind != "Audio" && kind != "Video" {
 			return name, true, nil
 		}
 		if parsed := reader.resFileCache[name]; parsed == nil || parsedHasResource(parsed, id, kind) {

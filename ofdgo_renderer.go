@@ -164,25 +164,18 @@ type sharedStateForker interface {
 // 入参: page 页面内容
 // 返回: func() 恢复之前的作用域状态
 func (r *Renderer) bindPageResources(page *PageContent) func() {
-	if r == nil {
-		return func() {}
-	}
 	if page == nil {
 		return r.bindParsedResources(nil)
 	}
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
 	if r.Reader != nil && r.Reader.doc == nil && r.Reader.OFD != nil {
-		ctx := r.pageContext
-		if ctx == nil {
-			ctx = r.outputContext()
-		}
 		_, _ = r.Reader.docStructureContext(ctx)
 	}
 	res := page.pageResources
 	if res == nil && len(page.PageRes) > 0 && r.Reader != nil {
-		ctx := r.pageContext
-		if ctx == nil {
-			ctx = r.outputContext()
-		}
 		basePath := ""
 		if r.Reader.doc != nil && page.ID != "" {
 			for _, ref := range r.Reader.doc.Pages.Page {
@@ -197,7 +190,6 @@ func (r *Renderer) bindPageResources(page *PageContent) func() {
 		}
 		if collected, err := r.Reader.collectPageResourcesContext(ctx, basePath, page); err == nil {
 			res = collected
-			page.pageResources = collected
 		}
 	}
 	return r.bindParsedResources(res)
@@ -207,9 +199,6 @@ func (r *Renderer) bindPageResources(page *PageContent) func() {
 // 入参: res 局部资源表列表
 // 返回: func() 恢复之前的作用域状态
 func (r *Renderer) bindParsedResources(res []*parsedRes) func() {
-	if r == nil {
-		return func() {}
-	}
 	prevRes := r.pageResources
 	prevDrawParams := r.DrawParams
 	prevComposites := r.CompositeGraphicUnits
