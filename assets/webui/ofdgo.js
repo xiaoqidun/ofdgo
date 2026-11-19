@@ -3132,7 +3132,7 @@ async function mountDocumentTab(tab) {
 			state.documentSelection = null;
 			canvasEditor.pendingSelection = null;
 		}
-		await openDocument({ doc: state.wasmExited ? undefined : state.doc, pageIndex: state.pageIndex, fitMode: state.fitMode || "free", scale: state.scale,
+		await openDocument({ doc: state.wasmExited ? undefined : state.doc, documentIndex: state.doc.documentIndex, versionID: state.doc.documentVersion, pageIndex: state.pageIndex, fitMode: state.fitMode || "free", scale: state.scale,
 			skipAutoFonts: !tab.initialLoad, keepSearch: !tab.refreshPending, keepCache: !tab.refreshPending, restoreTab: !tab.initialLoad, resetScroll: Boolean(tab.initialLoad), openSeq });
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
 		tab.configurePending = false;
@@ -3703,13 +3703,15 @@ async function switchDocument(index) {
 		state.editorViews.clear();
 		state.objectClipboardToken = state.styleClipboard = null;
 		delete state.textDefaults.fontChoice;
-		adopted = true;
-		state.packageDirty ||= state.dirty;
-		state.savedRevision = doc.revision;
-		state.ofdBytes = null;
-		state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
-			pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
-		state.dirty = state.packageDirty || state.encryptionDirty;
+		if (state.editorInfo) {
+			adopted = true;
+			state.packageDirty ||= state.dirty;
+			state.savedRevision = doc.revision;
+			state.ofdBytes = null;
+			state.editorInfo = {revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
+				pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
+			state.dirty = state.packageDirty || state.encryptionDirty;
+		}
 		state.doc = doc;
 		if (!isForegroundDocument(tab)) {
 			state.pageCache.clear();
@@ -3721,7 +3723,7 @@ async function switchDocument(index) {
 		canvasEditor.clear();
 		canvasEditor.setTool("");
 		updateTextFonts(null, true);
-		setEditorInfo(doc);
+		if (state.editorInfo) setEditorInfo(doc);
 		await openDocument({ doc, openSeq, skipAutoFonts: true, resetScroll: true, clearSelection: true, fitMode: state.fitMode, scale: state.scale, activateActions: true });
 	} catch (error) {
 		if (!tab.closed && tab.state === state && state.doc === originalDocument) {
@@ -6412,6 +6414,7 @@ async function recoverWASM() {
 	try {
 		await openDocument({
 			pageIndex: state.pageIndex,
+			documentIndex: state.doc?.documentIndex,
 			versionID: state.doc?.documentVersion,
 			fitMode: state.fitMode || "width",
 			scale: state.scale,
@@ -7186,6 +7189,10 @@ async function openDocument(options = {}) {
 			: await openWithCredentials(fonts, openSeq));
 		if (openSeq !== state.openSeq) {
 			return;
+		}
+		if (options.documentIndex !== undefined && options.documentIndex !== (doc.documentIndex || 0)) {
+			doc = await callWASM("ofdgoSelectDocument", options.documentIndex);
+			if (openSeq !== state.openSeq) return;
 		}
 		if (options.versionID !== undefined && options.versionID !== (doc.documentVersion || "")) {
 			doc = await callWASM("ofdgoSelectVersion", options.versionID);
@@ -10031,9 +10038,7 @@ async function openSealPosition() {
 }
 
 function sealPointer(event) {
-	const preview = sealPreview;
-	const point = pagePoint(event.clientX, event.clientY, preview.surface.getBoundingClientRect(), preview.page, state.rotation);
-	return {x:preview.page.x + point.x, y:preview.page.y + point.y};
+	return pagePoint(event.clientX, event.clientY, sealPreview.surface.getBoundingClientRect(), sealPreview.page, state.rotation);
 }
 
 function beginSealDrag(event) {
@@ -10072,9 +10077,9 @@ function moveSealDrag(event) {
 		height = width * count / preview.ratio;
 	}
 	const x = dx < 0 ? start.x - width : start.x, y = dy < 0 ? start.y - height : start.y;
-	preview.box = {x:preview.mode === "seam" ? page.x + page.width - x - width : x, y, width:width * count, height};
+	preview.box = {x:preview.mode === "seam" ? page.width - x - width : x, y, width:width * count, height};
 	sealPosition.Stamp.hidden = false;
-	Object.assign(sealPosition.Stamp.style, {left:`${(x-page.x)/page.width*100}%`, top:`${(y-page.y)/page.height*100}%`, width:`${width/page.width*100}%`, height:`${height/page.height*100}%`});
+	Object.assign(sealPosition.Stamp.style, {left:`${x/page.width*100}%`, top:`${y/page.height*100}%`, width:`${width/page.width*100}%`, height:`${height/page.height*100}%`});
 	Object.assign(sealPosition.Image.style, {width:`${count*100}%`, left:`${preview.mode === "seam" ? -preview.selected.indexOf(page.index)*100 : 0}%`});
 }
 

@@ -438,6 +438,7 @@ func signatureAlgorithmPolicy(p *SignaturePolicy, method, digest string) error {
 	if p == nil {
 		return nil
 	}
+	method = strings.TrimSpace(method)
 	if len(p.DigestMethods) != 0 {
 		allowed := false
 		for _, v := range p.DigestMethods {
@@ -447,7 +448,7 @@ func signatureAlgorithmPolicy(p *SignaturePolicy, method, digest string) error {
 			return rejectSignaturePolicy("digest algorithm rejected: %s", digest)
 		}
 	}
-	if len(p.SignatureMethods) != 0 {
+	if method != "" && len(p.SignatureMethods) != 0 {
 		allowed := false
 		for _, v := range p.SignatureMethods {
 			allowed = allowed || signatureAlgorithmEquivalent(v, method, digest)
@@ -461,9 +462,11 @@ func signatureAlgorithmPolicy(p *SignaturePolicy, method, digest string) error {
 		if ok && (h == crypto.MD5 || h == crypto.SHA1) {
 			return rejectSignaturePolicy("weak digest algorithm: %s", digest)
 		}
-		h, err := signatureMethodHash(method, digest)
-		if !isSM2SignatureMethod(method) && err == nil && (h == crypto.MD5 || h == crypto.SHA1) {
-			return rejectSignaturePolicy("weak signature algorithm: %s", method)
+		if method != "" {
+			h, err := signatureMethodHash(method, digest)
+			if !isSM2SignatureMethod(method) && err == nil && (h == crypto.MD5 || h == crypto.SHA1) {
+				return rejectSignaturePolicy("weak signature algorithm: %s", method)
+			}
 		}
 	}
 	return nil

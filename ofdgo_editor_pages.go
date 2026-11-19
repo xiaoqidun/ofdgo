@@ -100,6 +100,10 @@ func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][
 		if err != nil {
 			return err
 		}
+		resBase := ""
+		if root.name.Local == "Res" {
+			resBase = root.attr("BaseLoc")
+		}
 		var patches []editorXMLPatch
 		var walk func(*editorXML) error
 		walk = func(node *editorXML) error {
@@ -140,11 +144,21 @@ func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][
 				patches = append(patches, editorXMLPatch{start: node.start, end: node.end})
 				return nil
 			}
-			var location string
+			var location, locBase string
 			switch node.name.Local {
-			case "Page", "TemplatePage", "Signature":
-				if node.parent != nil && (node.parent.name.Local == "Pages" || node.parent.name.Local == "CommonData" || node.parent.name.Local == "Signatures") {
+			case "Page":
+				if node.parent != nil && node.parent.name.Local == "Pages" {
 					location = node.attr("BaseLoc")
+				} else if root.name.Local == "Annotations" {
+					location = strings.TrimSpace(node.attr("FileLoc"))
+				}
+			case "TemplatePage", "Signature":
+				if node.parent != nil && (node.parent.name.Local == "CommonData" || node.parent.name.Local == "Signatures") {
+					location = node.attr("BaseLoc")
+				}
+			case "CompositeGraphicUnit":
+				if root.name.Local == "Res" && node.parent != nil && node.parent.name.Local == "CompositeGraphicUnits" {
+					location, locBase = strings.TrimSpace(node.attr("BaseLoc")), resBase
 				}
 			case "PublicRes", "DocumentRes", "PageRes", "Annotations", "Extensions":
 				if len(node.children) == 0 {
@@ -158,7 +172,7 @@ func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][
 				return nil
 			}
 			if location != "" {
-				resolved, err := editorPageLocation(reader, parts, name, location)
+				resolved, err := editorPageResourceLocation(reader, parts, name, locBase, location)
 				if err != nil {
 					return err
 				}
@@ -260,7 +274,14 @@ func pruneCreatedPageReferences(ctx context.Context, data []byte, removed map[st
 // 入参: reader 原包, parts 覆盖条目, name 所在XML, value 路径
 // 返回: string 包内路径, error 路径不存在
 func editorPageLocation(reader *Reader, parts map[string][]byte, name, value string) (string, error) {
-	candidate := resolveResourcePath(name, "", value)
+	return editorPageResourceLocation(reader, parts, name, "", value)
+}
+
+// editorPageResourceLocation 按所在XML与可选资源基准目录解析引用
+// 入参: reader 原包, parts 覆盖条目, name 所在XML, base 资源基准目录, value 路径
+// 返回: string 包内路径, error 路径不存在
+func editorPageResourceLocation(reader *Reader, parts map[string][]byte, name, base, value string) (string, error) {
+	candidate := resolveResourcePath(name, base, value)
 	if _, ok := parts[candidate]; ok {
 		return candidate, nil
 	}

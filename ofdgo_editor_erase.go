@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"reflect"
 	"slices"
@@ -277,6 +278,16 @@ func (e *Editor) eraseObjects(page int, ids []string, box Box, points []Point, r
 				}
 			}
 			layers[i].Objects = objects
+		}
+		removedIDs := slices.Collect(maps.Keys(removed))
+		if e.hasRichTextMetadata(page, removedIDs) {
+			return e.Transaction(func(e *Editor) error {
+				if err := e.cleanupRichTextMetadata(page, removedIDs); err != nil {
+					return err
+				}
+				e.replaceLayers(page, layers)
+				return nil
+			})
 		}
 		e.replaceLayers(page, layers)
 	}

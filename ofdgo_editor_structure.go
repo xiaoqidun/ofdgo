@@ -90,7 +90,7 @@ func (e *Editor) pruneStructureReferences(ctx context.Context, parts map[string]
 			files := make(map[string][]byte, len(reader.files)+len(parts))
 			maps.Copy(files, reader.files)
 			maps.Copy(files, parts)
-			snapshot = &Reader{Zip: reader.Zip, files: files, encryption: e.encryption, documentIndex: reader.documentIndex, selectedVersion: reader.selectedVersion}
+			snapshot = &Reader{Zip: reader.Zip, sourceFile: reader.sourceFile, files: files, encryption: e.encryption, documentIndex: reader.documentIndex, selectedVersion: reader.selectedVersion}
 			if err := snapshot.initRootContext(ctx); err != nil {
 				return err
 			}

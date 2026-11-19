@@ -90,11 +90,19 @@ func (e *Editor) copyObjectsToComposite(page int, path ObjectPath, objects []Gra
 				}
 			}
 		}
+		dstScope := e.pageLocalScope(page)
 		var content []byte
 		validation := &editorValidation{Editor: e}
 		for _, source := range objects {
+			var srcScope []*parsedRes
+			restoreOrigin := func() {}
+			if srcOrigin := e.snapshotOrigin(source); srcOrigin != nil && srcOrigin.page != nil && srcOrigin.page.original != nil {
+				srcScope = srcOrigin.page.original.pageResources
+				restoreOrigin = e.bindPageResources(srcOrigin.page.original)
+			}
 			id := e.nextID()
 			object, err := validation.prepareCopiedObject(id, source)
+			restoreOrigin()
 			if err != nil {
 				return err
 			}
@@ -104,6 +112,15 @@ func (e *Editor) copyObjectsToComposite(page int, path ObjectPath, objects []Gra
 				return err
 			}
 			e.maxID = maximum
+			srcLayerStyle := e.copiedLayerStyle(source)
+			object, origin, err = e.remapCopiedObject(object, origin, srcScope, dstScope, page)
+			if err != nil {
+				return err
+			}
+			targetLayerStyle, err := e.copiedTargetLayerStyle(srcLayerStyle, srcScope, dstScope)
+			if err != nil {
+				return err
+			}
 			var data []byte
 			if origin != nil {
 				data, err = editorXMLObject(origin.data, origin.node, origin.object, object)
@@ -121,10 +138,12 @@ func (e *Editor) copyObjectsToComposite(page int, path ObjectPath, objects []Gra
 				return err
 			}
 			if node.object.Type == "PathObject" {
-				node.defaults = renderer.drawParamDefaults(e.copiedLayerStyle(source), nil)
-				style, styleErr := e.resolveEditorStyle(node.object, e.copiedLayerStyle(source))
+				restoreSrc := e.bindParsedScope(srcScope)
+				node.defaults = renderer.drawParamDefaults(srcLayerStyle, nil)
+				style, styleErr := e.resolveEditorStyle(node.object, targetLayerStyle)
 				_, fillErr := e.Color(style.PathObject.FillColor)
 				_, strokeErr := e.Color((*FillColor)(style.PathObject.StrokeColor))
+				restoreSrc()
 				if styleErr != nil && editReason(styleErr) == EditUnsupportedColor || fillErr != nil || strokeErr != nil {
 					node, err = e.wrapCompositePath(renderer, node)
 					if err != nil {
@@ -134,7 +153,7 @@ func (e *Editor) copyObjectsToComposite(page int, path ObjectPath, objects []Gra
 			}
 			node.parent, node.boundaryInCTM = IdentityMatrix, true
 			node.setStates(object.CompositeGraphicUnit.states)
-			node.drawParams = []string{e.copiedLayerStyle(source)}
+			node.drawParams = []string{targetLayerStyle}
 			if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
 				if err := node.convertCoordinates(IdentityMatrix, true); err != nil {
 					return err

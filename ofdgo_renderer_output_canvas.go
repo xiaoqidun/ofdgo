@@ -111,6 +111,11 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	if len(pages) == 0 {
 		return fmt.Errorf("no pages found")
 	}
+	for i, page := range pages {
+		if !rasterPositive(page.Box.W) || !rasterPositive(page.Box.H) {
+			return fmt.Errorf("invalid PDF page %d size: %g x %g", i+1, page.Box.W, page.Box.H)
+		}
+	}
 	doc := r.Reader.doc
 	navigation := &pdfNavigation{}
 	if !r.printing {

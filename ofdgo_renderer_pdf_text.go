@@ -186,14 +186,15 @@ func (r *Renderer) pdfTextSupported(object TextObject, fontID string, face *canv
 	position := 0
 	for _, code := range object.TextCode {
 		runes := textCodeRunes(code.Value)
-		glyphs := textCodeGlyphs(runes, transforms, position)
+		var glyphs []textGlyph
 		if code.Index != "" {
-			runes = r.parseIndexRunes(code.Index, fontID)
-			glyphs = textRuneGlyphs(runes)
+			glyphs = r.parseIndexGlyphs(code.Index, fontID)
+		} else {
+			glyphs = textCodeGlyphs(runes, transforms, position)
 		}
 		positioner := NewTextPositioner(code, object.ReadDirection)
 		for _, glyph := range glyphs {
-			if glyph.GlyphID == 0 || glyph.GlyphID >= int(face.Font.NumGlyphs()) {
+			if code.Index != "" && glyph.GlyphID >= 0 || glyph.GlyphID == 0 || glyph.GlyphID >= int(face.Font.NumGlyphs()) {
 				return false
 			}
 			if glyph.GlyphID < 0 {

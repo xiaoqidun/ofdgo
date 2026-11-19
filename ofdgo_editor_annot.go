@@ -30,7 +30,7 @@ type AnnotationSelection struct {
 	editor    *Editor
 	document  editorDocumentIdentity
 	data      [][]byte
-	resources []string
+	pageScope []*parsedRes
 	states    map[string]map[string]editorCompositeState
 	richText  map[int]*richTextSnapshot
 }
@@ -148,11 +148,10 @@ func (e *Editor) DeleteAnnotations(index int, ids []string) error {
 // 入参: page 页面索引, ids 不重复的注解标识
 // 返回: *AnnotationSelection 独立快照, error 错误信息
 func (e *Editor) CaptureAnnotations(page int, ids []string) (*AnnotationSelection, error) {
-	content, err := e.page(page)
-	if err != nil {
+	if _, err := e.page(page); err != nil {
 		return nil, err
 	}
-	selection := &AnnotationSelection{editor: e, document: e.documentIdentity(), states: make(map[string]map[string]editorCompositeState), richText: make(map[int]*richTextSnapshot)}
+	selection := &AnnotationSelection{editor: e, document: e.documentIdentity(), pageScope: e.pageLocalScope(page), states: make(map[string]map[string]editorCompositeState), richText: make(map[int]*richTextSnapshot)}
 	seen := make(map[string]bool)
 	for _, id := range ids {
 		key := editorResourceID(id)
@@ -185,17 +184,11 @@ func (e *Editor) CaptureAnnotations(page int, ids []string) (*AnnotationSelectio
 		selection.data = append(selection.data, data)
 		selection.states[key] = maps.Clone(e.source.annotationStates[e.pages[page].ID+"/"+key])
 	}
-	if e.originalPage(page) {
-		origin := e.source.pages[e.pages[page].ID]
-		for _, name := range content.PageRes {
-			selection.resources = append(selection.resources, resolveResourcePath(e.source.reader.ResPath(origin.ref.BaseLoc), "", name))
-		}
-	}
 	return selection, nil
 }
 
 // PasteAnnotations 将注解快照粘贴到指定页并平移，保留动作目标和原有外观
-// 全部标识重新分配，页级资源提升为文档资源，一次操作计入一条撤销记录
+// 全部标识重新分配，局部资源按需克隆为独立文档资源，一次操作计入一条撤销记录
 // 入参: page 目标页面索引, selection 当前编辑器快照, dx 横向位移，单位为毫米, dy 纵向位移，单位为毫米
 // 返回: []string 新注解标识, error 错误信息
 func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, dy float64) ([]string, error) {
@@ -204,8 +197,8 @@ func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, 
 	}
 	var result []string
 	err := e.Transaction(func(edit *Editor) error {
-		if page < 0 || page >= len(edit.pages) {
-			return fmt.Errorf("page index %d out of range", page)
+		if _, err := edit.page(page); err != nil {
+			return err
 		}
 		if len(selection.data) == 0 {
 			return nil
@@ -213,6 +206,7 @@ func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, 
 		if err := edit.prepareSourceIDs(); err != nil {
 			return err
 		}
+		dstScope := edit.pageLocalScope(page)
 		var content []byte
 		var states map[string]map[string]editorCompositeState
 		if edit.source != nil {
@@ -232,13 +226,23 @@ func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, 
 			}
 			id := ids[editorResourceID(root.attr("ID"))]
 			states[edit.pages[page].ID+"/"+id] = remapCompositeStates(selection.states[editorResourceID(root.attr("ID"))], ids)
-			data, err = editorXMLRemapIDs(data, root, ids)
+			data, err = editorXMLRemapOnlyIDs(data, root, ids)
 			if err != nil {
 				return err
 			}
 			root, err = parseEditorXML(data)
 			if err != nil {
 				return err
+			}
+			data, changed, err := edit.remapXMLResources(data, root, selection.pageScope, dstScope, false, make(map[string]bool))
+			if err != nil {
+				return err
+			}
+			if changed {
+				root, err = parseEditorXML(data)
+				if err != nil {
+					return err
+				}
 			}
 			appearance := root.child("Appearance")
 			if appearance == nil {
@@ -264,45 +268,6 @@ func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, 
 			return err
 		}
 		edit.source.annotationStates = states
-		if len(selection.resources) != 0 {
-			reader := edit.source.reader
-			name := reader.documentRoot
-			data, err := reader.readFile(name)
-			if err != nil {
-				return err
-			}
-			root, err := parseEditorXML(data)
-			if err != nil {
-				return err
-			}
-			common := root.child("CommonData")
-			registered := make(map[string]bool)
-			for _, name := range edit.source.document.CommonData.PublicRes {
-				registered[reader.ResPath(name)] = true
-			}
-			for _, name := range edit.source.document.CommonData.DocumentRes {
-				registered[reader.ResPath(name)] = true
-			}
-			var added []byte
-			for _, name := range selection.resources {
-				if !registered[name] {
-					added = append(added, common.textXML("DocumentRes", "/"+name)...)
-					registered[name] = true
-				}
-			}
-			if len(added) != 0 {
-				position := common.close
-				for _, node := range common.children {
-					if node.name.Local == "TemplatePage" || node.name.Local == "DefaultCS" {
-						position = node.start
-						break
-					}
-				}
-				if err := edit.commitAnnotationParts(edit.source, map[string][]byte{name: editorPatchXML(data, []editorXMLPatch{{position, position, added}})}); err != nil {
-					return err
-				}
-			}
-		}
 		for i, id := range result {
 			if snapshot := selection.richText[i]; snapshot != nil {
 				annotation, err := edit.Annotation(page, id)

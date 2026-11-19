@@ -42,7 +42,7 @@ func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byt
 	if err != nil || protected {
 		return err
 	}
-	view := &Reader{Zip: reader.Zip, files: maps.Clone(reader.files)}
+	view := &Reader{Zip: reader.Zip, sourceFile: reader.sourceFile, files: maps.Clone(reader.files)}
 	if view.files == nil {
 		view.files = make(map[string][]byte)
 	}

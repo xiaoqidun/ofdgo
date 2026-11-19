@@ -30,6 +30,7 @@ const (
 
 // digitalVerifyResult 数字签名验证结果
 type digitalVerifyResult struct {
+	SignatureMethod string
 	Timestamps      []signatureTimestampEvidence
 	DataHashChecked bool
 	DataHashOK      bool
@@ -199,7 +200,7 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 	if len(sd.Signers) == 0 {
 		return nil, fmt.Errorf("invalid signed data signer info")
 	}
-	result := &digitalVerifyResult{Certs: sd.rawCerts()}
+	result := &digitalVerifyResult{SignatureMethod: sd.Signers[0].SignatureAlg, Certs: sd.rawCerts()}
 	for index, signer := range sd.Signers {
 		if err := signatureSignerDigest(signer.SignatureAlg, signer.DigestAlg); err != nil {
 			return result, err

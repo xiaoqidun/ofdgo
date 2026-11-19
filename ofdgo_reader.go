@@ -395,6 +395,11 @@ func (r *Reader) ResPath(resLink string) string {
 	if strings.HasPrefix(resLink, "/") {
 		return cleanPackagePath(resLink)
 	}
+	if r.RootDir == "" {
+		if docRoot, err := r.DocumentRoot(); err == nil {
+			r.RootDir = path.Dir(docRoot)
+		}
+	}
 	resLink = path.Clean(resLink)
 	rootDir := strings.TrimPrefix(strings.ReplaceAll(r.RootDir, "\\", "/"), "/")
 	return cleanPackagePath(path.Join(rootDir, resLink))

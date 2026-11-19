@@ -23,6 +23,7 @@ import (
 	"image"
 	"io"
 	"math"
+	"slices"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"github.com/xiaoqidun/pdfgo"
@@ -118,19 +119,28 @@ func (v *compressionImages) IncludeHidden() bool { return true }
 // 返回: bool 始终为真
 func (v *compressionImages) SkipClips() bool { return true }
 
-// recordSize 合并同一图像资源在不同位置的最大像素需求
+// recordSize 按当前资源作用域解析包内媒体路径并合并同一文件的最大像素需求
 // 入参: ids 图像标识，空值不统计, size 当前像素需求
 // 返回: error 尺寸无效时返回错误
 func (v *compressionImages) recordSize(ids [2]string, size image.Point) error {
 	if size.X == 0 || size.Y == 0 {
 		return fmt.Errorf("invalid image placement")
 	}
+	r := v.renderer.Reader
 	for _, id := range ids {
 		if id == "" {
 			continue
 		}
-		old := v.sizes[id]
-		v.sizes[id] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
+		rel, ok := r.resolveResPathScoped(v.renderer.pageResources, id)
+		if !ok {
+			continue
+		}
+		name := r.ResPath(rel)
+		if name == "" || name == "." {
+			continue
+		}
+		old := v.sizes[name]
+		v.sizes[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
 	}
 	return nil
 }
@@ -357,12 +367,18 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 		if err != nil {
 			return nil, ctx.Err()
 		}
-		for _, ref := range page.Template {
-			if renderer.loadTemplate(ref.TemplateID) == nil {
+		var tplResources []*parsedRes
+		for _, tplRef := range page.Template {
+			template := renderer.loadTemplate(tplRef.TemplateID)
+			if template == nil {
 				return nil, ctx.Err()
 			}
+			tplResources = append(tplResources, template.pageResources...)
 		}
 		content := *page
+		if len(tplResources) > 0 {
+			content.pageResources = slices.Concat(tplResources, page.pageResources)
+		}
 		content.Template = nil
 		if err := renderer.WalkPage(&content, visitor); err != nil {
 			return nil, ctx.Err()
@@ -388,7 +404,7 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 	result := make(map[string]image.Point)
 	for _, img := range images {
 		name := cleanPackagePath(img.Location)
-		size := visitor.sizes[editorResourceID(img.ID)]
+		size := visitor.sizes[name]
 		old := result[name]
 		result[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
 	}

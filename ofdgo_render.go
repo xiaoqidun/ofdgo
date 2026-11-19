@@ -46,17 +46,7 @@ func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
 			return Box{}, err
 		}
 	}
-	boxStr := area.PhysicalBox
-	if boxStr == "" {
-		boxStr = area.ApplicationBox
-	}
-	if boxStr == "" {
-		boxStr = area.ContentBox
-	}
-	if boxStr == "" {
-		boxStr = "0 0 210 297"
-	}
-	return ParseBox(boxStr)
+	return parsePageAreaBox(area)
 }
 
 // PageLinks 获取页面、模板和可见注释中图元的点击动作，保留复杂区域和组合图元

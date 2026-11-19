@@ -203,6 +203,7 @@ func WithRenderBackends(backends RenderBackends) RendererOption {
 			}
 		}
 		r.backends = backends
+		r.rasterDisabled = false
 		if fontsChanged {
 			r.resetFontBackendCache()
 		}
@@ -217,6 +218,7 @@ func WithRasterBackend(backend RasterBackend) RendererOption {
 		if !sameBackend(r.backends.Raster, backend) {
 			r.backendStates = make(map[any]any)
 		}
+		r.rasterDisabled = backend == nil && (r.backends.Raster != nil || r.rasterDisabled)
 		r.backends.Raster = backend
 	}
 }

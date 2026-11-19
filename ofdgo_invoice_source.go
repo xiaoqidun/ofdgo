@@ -141,21 +141,17 @@ func (r *Reader) readInvoiceXML(ctx context.Context, data []byte, source Invoice
 	if err != nil {
 		return report, err
 	}
-	if root.name.Space != ofdNamespace2016 || root.name.Local != "root" || !invoiceObjectReferences(root) {
+	if !invoiceReferenceRoot(root) {
 		if root.name.Local != "eInvoice" && root.name.Local != "EInvoice" && root.name.Local != "xbrl" {
 			return InvoiceReport{}, nil
 		}
 		return report, nil
 	}
-	structure, err := parseStructure(ctx, data, CustomTag{TypeID: structureTypeOfficial, NameSpace: ofdNamespace2016})
+	structure, err := parseStructure(ctx, data, CustomTag{TypeID: structureTypeOfficial})
 	if err != nil {
 		return report, err
 	}
-	known := false
-	for _, node := range structure.Children {
-		known = known || node.Namespace == ofdNamespace2016 && node.Name == "InvoiceNo"
-	}
-	if !known {
+	if !structureInvoiceReferences(structure) {
 		return report, nil
 	}
 	doc, err := r.DocContext(ctx)
@@ -167,13 +163,17 @@ func (r *Reader) readInvoiceXML(ctx context.Context, data []byte, source Invoice
 	inv := Invoice{Kind: "inv", Standard: ofdNamespace2016, Version: "1.0", Sources: []InvoiceSource{source}}
 	assigned := make(map[string]bool)
 	total := 0
-	var visit func(*StructureNode, string, string) error
-	visit = func(node *StructureNode, nodePath, fieldPath string) error {
+	var visit func(*StructureNode, string, string, int) error
+	visit = func(node *StructureNode, nodePath, fieldPath string, itemIndex int) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if node.Namespace != ofdNamespace2016 {
+		if node.Namespace != structure.Namespace {
 			return nil
+		}
+		if fieldPath == "/eInvoice/GoodsInfos/GoodsInfo" {
+			inv.Items = append(inv.Items, InvoiceItem{})
+			itemIndex = len(inv.Items) - 1
 		}
 		var refs []StructureReference
 		for _, child := range node.Children {
@@ -236,37 +236,45 @@ func (r *Reader) readInvoiceXML(ctx context.Context, data []byte, source Invoice
 				}
 			}
 			inv.Facts = append(inv.Facts, fact)
-			dst, numeric := invoiceEDRMField(&inv, nil, fieldPath)
+			var item *InvoiceItem
+			if itemIndex >= 0 {
+				item = &inv.Items[itemIndex]
+				item.Fields = append(item.Fields, fact)
+			}
+			dst, numeric := invoiceEDRMField(&inv, item, fieldPath)
 			if dst != nil && valid {
 				value := strings.TrimSpace(fact.Value)
 				if numeric {
 					value = strings.TrimSpace(strings.TrimLeft(value, "¥￥"))
-					if value != "" && invoiceDecimal(value) == nil {
-						report.Issues = append(report.Issues, InvoiceIssue{Code: "invalid-decimal", Message: "invalid invoice amount", Source: factSource, Field: nodePath})
-						return nil
+				}
+				if numeric && value != "" && invoiceDecimal(value) == nil {
+					report.Issues = append(report.Issues, InvoiceIssue{Code: "invalid-decimal", Message: "invalid invoice amount", Source: factSource, Field: nodePath})
+				} else {
+					key := fieldPath
+					if itemIndex >= 0 {
+						key = fmt.Sprintf("%d:%s", itemIndex, fieldPath)
+					}
+					if assigned[key] {
+						*dst = ""
+						report.Issues = append(report.Issues, InvoiceIssue{Code: "ambiguous-field", Message: "multiple invoice field references", Source: factSource, Field: nodePath})
+					} else {
+						*dst = value
+						assigned[key] = true
 					}
 				}
-				if assigned[fieldPath] {
-					*dst = ""
-					report.Issues = append(report.Issues, InvoiceIssue{Code: "ambiguous-field", Message: "multiple invoice field references", Source: factSource, Field: nodePath})
-				} else {
-					*dst = value
-					assigned[fieldPath] = true
-				}
 			}
-			return nil
 		}
 		counts := make(map[string]int)
 		for i := range node.Children {
 			child := &node.Children[i]
 			counts[child.Name]++
-			if err := visit(child, fmt.Sprintf("%s/%s[%d]", nodePath, child.Name, counts[child.Name]), fieldPath+"/"+child.Name); err != nil {
+			if err := visit(child, fmt.Sprintf("%s/%s[%d]", nodePath, child.Name, counts[child.Name]), fieldPath+"/"+child.Name, itemIndex); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	if err := visit(structure, "/root[1]", "/eInvoice"); err != nil {
+	if err := visit(structure, fmt.Sprintf("/%s[1]", structure.Name), "/eInvoice", -1); err != nil {
 		return InvoiceReport{}, err
 	}
 	if date, err := time.Parse("2006年01月02日", inv.Date); err == nil {
@@ -545,11 +553,15 @@ func (e *Editor) importInvoiceReferences(ctx context.Context, data []byte, optio
 		if err != nil {
 			return err
 		}
-		root, err := parseStructure(ctx, data, CustomTag{TypeID: structureTypeOfficial, NameSpace: ofdNamespace2016})
+		root, err := parseStructure(ctx, data, CustomTag{TypeID: structureTypeOfficial})
 		if err != nil {
 			return err
 		}
-		index, err := next.AddStructure(CustomTag{TypeID: "root", NameSpace: ofdNamespace2016}, *root)
+		typeID := root.Name
+		if root.Namespace != ofdNamespace2016 {
+			typeID = structureTypeInvoice
+		}
+		index, err := next.AddStructure(CustomTag{TypeID: typeID, NameSpace: root.Namespace}, *root)
 		if err != nil {
 			return err
 		}
@@ -833,7 +845,7 @@ func invoiceReferenceDisplay(invoice Invoice, fact InvoiceFact, value string) (s
 	if value == "" {
 		return "", nil
 	}
-	binding, ok := invoiceEDRMFactBinding(invoice, fact)
+	binding, ok := invoiceNormalizedFactBinding(invoice, fact)
 	if !ok {
 		return value, nil
 	}
@@ -902,7 +914,7 @@ func (e *Editor) setInvoiceReferences(ctx context.Context, source InvoiceSource,
 		}
 		match := -1
 		for i, fact := range before.Facts {
-			binding, ok := invoiceEDRMFactBinding(before, fact)
+			binding, ok := invoiceNormalizedFactBinding(before, fact)
 			if ok && binding.Field == field.field && binding.Item == field.item {
 				if match >= 0 {
 					return InvoiceUpdateResult{}, fmt.Errorf("invoice summary field is ambiguous")
@@ -988,4 +1000,14 @@ func (e *Editor) createInvoiceReferences(ctx context.Context, invoice Invoice, o
 		return InvoiceSource{}, err
 	}
 	return source, nil
+}
+
+// invoiceNormalizedFactBinding 归一化标引命名空间并解析公共字段绑定
+// 入参: invoice 发票, fact 原始事实
+// 返回: InvoiceBinding 字段关联, bool 是否命中
+func invoiceNormalizedFactBinding(invoice Invoice, fact InvoiceFact) (InvoiceBinding, bool) {
+	if fact.Namespace == structureNamespaceEInvoice2016 || fact.Namespace == InvoiceStandardEDRM2019 {
+		fact.Namespace = invoice.Standard
+	}
+	return invoiceEDRMFactBinding(invoice, fact)
 }

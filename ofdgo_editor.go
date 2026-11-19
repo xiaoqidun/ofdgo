@@ -66,6 +66,7 @@ type Editor struct {
 	backends           RenderBackends
 	images             map[string]image.Point
 	resourceID         map[editorResourceKey]string
+	promoted           map[string]string
 	maxID              uint64
 	history            []editorChange
 	historyIndex       int
@@ -109,6 +110,7 @@ func NewEditor() *Editor {
 		fonts:       make(map[string]*FontResource),
 		images:      make(map[string]image.Point),
 		resourceID:  make(map[editorResourceKey]string),
+		promoted:    make(map[string]string),
 		fontMetrics: make(map[string]FontMetrics),
 		backends:    defaultRenderBackends(),
 	}
@@ -739,6 +741,21 @@ func (r editorResource) definition() string {
 		return r.draw.ID
 	}
 	return r.composite
+}
+
+// id 获取编辑器注册资源的标识
+// 返回: string 资源标识
+func (r editorResource) id() string {
+	switch {
+	case r.font != nil:
+		return r.font.ID
+	case r.image != nil:
+		return r.image.ID
+	case r.space != nil:
+		return r.space.ID
+	default:
+		return r.definition()
+	}
 }
 
 // editorResourceKey 资源内容和字体集合索引

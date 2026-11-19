@@ -517,7 +517,7 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef
 		return report
 	}
 	report.Provider = sigFile.SignedInfo.Provider
-	report.SignatureMethod = sigFile.SignedInfo.SignatureMethod
+	report.SignatureMethod = strings.TrimSpace(sigFile.SignedInfo.SignatureMethod)
 	report.SignatureDateTime = sigFile.SignedInfo.SignatureDateTime
 	report.DigestMethod = sigFile.SignedInfo.References.CheckMethod
 	if report.DigestMethod == "" {
@@ -548,6 +548,12 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef
 		}
 		result, err := verifyDigitalSignature(report.SignatureMethod, report.DigestMethod, signedValue, sigData, options)
 		if result != nil {
+			if report.SignatureMethod == "" {
+				report.SignatureMethod = strings.TrimSpace(result.SignatureMethod)
+				if report.SignatureMethod != "" {
+					report.applySignaturePolicy(options, r.OFD.Version, 0, report.SignatureMethod, report.DigestMethod)
+				}
+			}
 			report.signerCerts = result.SignerCerts
 			report.DataHashChecked = result.DataHashChecked
 			report.DataHashOK = result.DataHashOK
@@ -557,6 +563,9 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef
 			report.CertOK = result.CertOK
 			report.SignCert = result.CertInfo
 			report.Signer = result.CertInfo.CommonName
+		}
+		if report.SignatureMethod == "" && options.Policy != nil && len(options.Policy.SignatureMethods) != 0 {
+			report.applySignaturePolicyError(rejectSignaturePolicy("signature algorithm rejected: %s", report.SignatureMethod))
 		}
 		if err != nil {
 			report.applySignaturePolicyError(err)
@@ -587,6 +596,9 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef
 	}
 	sesResult, err := verifySESSignature(signedValue, sigData, options)
 	if sesResult != nil {
+		if report.SignatureMethod == "" {
+			report.SignatureMethod = strings.TrimSpace(sesResult.SignatureMethod)
+		}
 		report.signerCerts = [][]byte{sesResult.SignCertRaw}
 		report.DataHashChecked = sesResult.DataHashChecked
 		report.DataHashOK = sesResult.DataHashOK

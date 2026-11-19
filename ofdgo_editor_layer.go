@@ -179,6 +179,7 @@ func (e *Editor) DeleteLayer(page int, id string) error {
 // 返回: error 选区、继承参数或结构错误
 func (e *Editor) MoveObjectsToLayer(page int, ids []string, layerID string) error {
 	return e.editLayerPage(page, func(_ *Reader, data []byte, root *editorXML) ([]byte, error) {
+		defer e.bindPageIndex(page)()
 		target, err := editorFindStructureID(root.child("Content"), "Layer", "ID", layerID)
 		if err != nil {
 			return nil, err
@@ -320,6 +321,7 @@ func (e *Editor) validateLayerDrawParam(page int, id string) error {
 	if _, err := e.page(page); err != nil {
 		return err
 	}
+	defer e.bindPageIndex(page)()
 	_, err := e.editorDrawParam(id, make(map[string]bool))
 	return err
 }

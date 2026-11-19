@@ -190,7 +190,7 @@ func (e *Editor) transactionState() Editor {
 	next := *e
 	next.Info = cloneEditorData(e.Info)
 	next.resources = slices.Clone(e.resources)
-	next.fonts, next.images, next.resourceID = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID)
+	next.fonts, next.images, next.resourceID, next.promoted = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID), maps.Clone(e.promoted)
 	next.origins = maps.Clone(e.origins)
 	next.removedPages = maps.Clone(e.removedPages)
 	next.structureRemaps = maps.Clone(e.structureRemaps)
@@ -260,6 +260,7 @@ func (e *Editor) retainDocumentResources(source *Editor) {
 	maps.Copy(e.fonts, source.fonts)
 	maps.Copy(e.images, source.images)
 	maps.Copy(e.resourceID, source.resourceID)
+	maps.Copy(e.promoted, source.promoted)
 	if sameBackend(e.backends.FontResources, source.backends.FontResources) {
 		e.fontRegistration = source.fontRegistration
 	}

@@ -463,6 +463,25 @@ func (e *Editor) loadSourcePageContext(ctx context.Context, index int) error {
 	if err != nil {
 		return err
 	}
+	var tplResources []*parsedRes
+	for _, tplRef := range page.Template {
+		for _, tpl := range e.source.document.CommonData.TemplatePage {
+			if sameResourceID(tpl.ID, tplRef.TemplateID) && tpl.BaseLoc != "" {
+				tplHeader, tplErr := reader.readPageHeaderContext(ctx, Page{ID: tpl.ID, BaseLoc: tpl.BaseLoc})
+				if tplErr != nil {
+					return tplErr
+				}
+				tplRes, resErr := reader.collectPageResourcesContext(ctx, reader.ResPath(tpl.BaseLoc), &tplHeader)
+				if resErr != nil {
+					return resErr
+				}
+				tplResources = append(tplResources, tplRes...)
+			}
+		}
+	}
+	if len(tplResources) > 0 {
+		page.pageResources = slices.Concat(tplResources, page.pageResources)
+	}
 	data, repaired, err := e.repairSourceObjectIDs(ctx, data, root)
 	if err != nil {
 		return err
@@ -919,6 +938,323 @@ func (e *Editor) validateImageMask(id string, size image.Point) error {
 	return validateImageMask(context.Background(), mask, size)
 }
 
+// pageAreaBox 解析目标页面的有效区域框并按标准顺序回退
+// 入参: page 页面索引
+// 返回: Box 页面区域框, error 页面加载或区域解析错误
+func (e *Editor) pageAreaBox(page int) (Box, error) {
+	p, err := e.page(page)
+	if err != nil {
+		return Box{}, err
+	}
+	area := p.Area
+	if e.source != nil {
+		area, err = e.source.reader.resolvePageAreaContext(context.Background(), p.Area, p.Template)
+		if err != nil {
+			return Box{}, err
+		}
+	}
+	return parsePageAreaBox(area)
+}
+
+// bindPageResources 为当前编辑操作绑定页面级资源作用域并返回恢复函数
+// 入参: page 页面内容
+// 返回: func() 恢复原作用域的函数
+func (e *Editor) bindPageResources(page *PageContent) func() {
+	if page == nil || len(page.pageResources) == 0 {
+		return func() {}
+	}
+	return e.bindParsedScope(page.pageResources)
+}
+
+// bindParsedScope 绑定已解析的局部资源列表并返回恢复函数
+// 入参: local 局部资源列表
+// 返回: func() 恢复原作用域的函数
+func (e *Editor) bindParsedScope(local []*parsedRes) func() {
+	if len(local) == 0 {
+		return func() {}
+	}
+	prev := e.pageScope
+	e.pageScope = local
+	return func() { e.pageScope = prev }
+}
+
+// bindPageIndex 按页面索引绑定所属页面的局部资源作用域
+// 入参: index 页面索引
+// 返回: func() 恢复原作用域的函数
+func (e *Editor) bindPageIndex(index int) func() {
+	if index < 0 || index >= len(e.pages) {
+		return func() {}
+	}
+	if len(e.pages[index].pageResources) > 0 {
+		return e.bindParsedScope(e.pages[index].pageResources)
+	}
+	if e.originalPage(index) {
+		if source := e.source.pages[e.pages[index].ID]; source != nil {
+			if source.original != nil && len(source.original.pageResources) > 0 {
+				return e.bindParsedScope(source.original.pageResources)
+			}
+			reader := e.source.reader
+			if header, err := reader.readPageHeaderContext(context.Background(), source.ref); err == nil {
+				var list []*parsedRes
+				for _, ref := range header.Template {
+					for _, tpl := range e.source.document.CommonData.TemplatePage {
+						if sameResourceID(tpl.ID, ref.TemplateID) && tpl.BaseLoc != "" {
+							if tplHeader, tplErr := reader.readPageHeaderContext(context.Background(), Page{ID: tpl.ID, BaseLoc: tpl.BaseLoc}); tplErr == nil {
+								if tplRes, resErr := reader.collectPageResourcesContext(context.Background(), reader.ResPath(tpl.BaseLoc), &tplHeader); resErr == nil {
+									list = append(list, tplRes...)
+								}
+							}
+						}
+					}
+				}
+				if pageRes, resErr := reader.collectPageResourcesContext(context.Background(), reader.ResPath(source.ref.BaseLoc), &header); resErr == nil {
+					list = append(list, pageRes...)
+				}
+				if len(list) > 0 {
+					return e.bindParsedScope(list)
+				}
+			}
+		}
+	}
+	return func() {}
+}
+
+// ensureSourcePageResourcesContext 按需收集源文档全部模板页与页面头部的PageRes解析结果
+// 入参: ctx 取消上下文
+// 返回: []*parsedRes 去重后的页级资源列表, error 读取、解析或取消错误
+func (e *Editor) ensureSourcePageResourcesContext(ctx context.Context) ([]*parsedRes, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if e.source == nil {
+		return nil, nil
+	}
+	if e.source.pageResLoaded {
+		return e.source.pageResList, nil
+	}
+	reader := e.source.reader
+	doc := e.source.document
+	seen := make(map[string]bool)
+	var list []*parsedRes
+	appendPage := func(baseLoc string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if baseLoc == "" {
+			return nil
+		}
+		fullPath := reader.ResPath(baseLoc)
+		header, err := reader.readPageHeaderContext(ctx, Page{BaseLoc: baseLoc})
+		if err != nil {
+			return err
+		}
+		for _, loc := range header.PageRes {
+			resFull := resolveResourcePath(fullPath, "", loc)
+			if seen[resFull] {
+				continue
+			}
+			parsed, err := reader.parseResFileContext(ctx, resFull)
+			if err != nil {
+				return err
+			}
+			seen[resFull] = true
+			if parsed != nil {
+				list = append(list, parsed)
+			}
+		}
+		return nil
+	}
+	for _, tpl := range doc.CommonData.TemplatePage {
+		if err := appendPage(tpl.BaseLoc); err != nil {
+			return nil, err
+		}
+	}
+	for _, page := range doc.Pages.Page {
+		if err := appendPage(page.BaseLoc); err != nil {
+			return nil, err
+		}
+	}
+	e.source.pageResList = list
+	e.source.pageResLoaded = true
+	return list, nil
+}
+
+// ensureSourcePageResources 收集源文档全部页级资源供同步资源查询回退使用
+// 返回: []*parsedRes 页级资源列表
+func (e *Editor) ensureSourcePageResources() []*parsedRes {
+	ctx := context.Background()
+	if e.output != nil && e.output.ctx != nil {
+		ctx = e.output.ctx
+	}
+	list, _ := e.ensureSourcePageResourcesContext(ctx)
+	return list
+}
+
+// pageScopeFont 在当前页面作用域中查找字体声明
+// 入参: id 字体资源标识
+// 返回: *Font 字体声明, bool 是否命中局部作用域
+func (e *Editor) pageScopeFont(id string) (*Font, bool) {
+	for i := len(e.pageScope) - 1; i >= 0; i-- {
+		if v, ok := e.pageScope[i].fonts.get(id); ok {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+// sourceDrawParam 按页面作用域、文档级缓存及全文档页级资源顺序查找绘制参数
+// 入参: id 绘制参数标识
+// 返回: *DrawParam 绘制参数, bool 是否找到
+func (e *Editor) sourceDrawParam(id string) (*DrawParam, bool) {
+	if e.source == nil {
+		return nil, false
+	}
+	for i := len(e.pageScope) - 1; i >= 0; i-- {
+		if v, ok := e.pageScope[i].drawParams.get(id); ok {
+			return v, true
+		}
+	}
+	if v, ok := e.source.reader.docDrawParams.get(id); ok {
+		return v, true
+	}
+	if v, ok := resourceValue(e.source.reader.drawParamCache, id); ok {
+		return v, true
+	}
+	for _, parsed := range e.ensureSourcePageResources() {
+		if v, ok := parsed.drawParams.get(id); ok {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+// sourceColorSpace 按页面作用域、文档级缓存及全文档页级资源顺序查找颜色空间
+// 入参: id 颜色空间标识
+// 返回: *ColorSpace 颜色空间, bool 是否找到
+func (e *Editor) sourceColorSpace(id string) (*ColorSpace, bool) {
+	if e.source == nil {
+		return nil, false
+	}
+	if v, ok := e.source.reader.resolveColorSpaceScoped(e.pageScope, id); ok {
+		return v, true
+	}
+	for _, parsed := range e.ensureSourcePageResources() {
+		if v, ok := parsed.colorSpaces.get(id); ok {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+// sourceResPath 按页面作用域、文档级缓存及全文档页级资源顺序查找资源包内路径
+// 入参: id 资源标识
+// 返回: string 包内路径, bool 是否找到
+func (e *Editor) sourceResPath(id string) (string, bool) {
+	if e.source == nil {
+		return "", false
+	}
+	reader := e.source.reader
+	if rel, ok := reader.resolveResPathScoped(e.pageScope, id); ok {
+		return reader.ResPath(rel), true
+	}
+	for _, parsed := range e.ensureSourcePageResources() {
+		if rel, ok := parsed.resPaths.get(id); ok {
+			return reader.ResPath(rel), true
+		}
+	}
+	return "", false
+}
+
+// sourceMedia 按页面作用域、文档级缓存及全文档页级资源顺序查找多媒体定义
+// 入参: id 多媒体标识
+// 返回: *MultiMedia 多媒体定义, bool 是否找到
+func (e *Editor) sourceMedia(id string) (*MultiMedia, bool) {
+	if e.source == nil {
+		return nil, false
+	}
+	if v, ok := e.source.reader.resolveMediaScoped(e.pageScope, id); ok {
+		return &v, true
+	}
+	for _, parsed := range e.ensureSourcePageResources() {
+		if v, ok := parsed.medias.get(id); ok {
+			return &v, true
+		}
+	}
+	return nil, false
+}
+
+// sourceFont 按页面作用域、文档级缓存及全文档页级资源顺序查找字体声明
+// 入参: id 字体标识
+// 返回: *Font 字体声明, bool 是否找到
+func (e *Editor) sourceFont(id string) (*Font, bool) {
+	if e.source == nil {
+		return nil, false
+	}
+	if v, ok := e.source.reader.resolveFontScoped(e.pageScope, id); ok {
+		return v, true
+	}
+	for _, parsed := range e.ensureSourcePageResources() {
+		if v, ok := parsed.fonts.get(id); ok {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+// sourceResourceFileContext 定位源文档中定义指定资源的XML文件路径，响应取消
+// 入参: ctx 取消上下文, id 资源标识, kind 资源类型，空字符串匹配任意类型
+// 返回: string 资源XML包内路径, bool 是否找到, error 读取或取消错误
+func (e *Editor) sourceResourceFileContext(ctx context.Context, id, kind string) (string, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	if e.source == nil {
+		return "", false, nil
+	}
+	reader := e.source.reader
+	for i := len(e.pageScope) - 1; i >= 0; i-- {
+		if parsed := e.pageScope[i]; parsed.path != "" && parsedHasResource(parsed, id, kind) {
+			return parsed.path, true, nil
+		}
+	}
+	if name, ok := resourceValue(reader.resourceFiles, id); ok && name != "" {
+		if kind == "" {
+			return name, true, nil
+		}
+		if parsed := reader.resFileCache[name]; parsed == nil || parsedHasResource(parsed, id, kind) {
+			return name, true, nil
+		}
+	}
+	list, err := e.ensureSourcePageResourcesContext(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	for _, parsed := range list {
+		if parsed.path != "" && parsedHasResource(parsed, id, kind) {
+			return parsed.path, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// sourceResourceFile 定位源文档中定义指定资源的XML文件路径
+// 入参: id 资源标识, kind 资源类型，空字符串匹配任意类型
+// 返回: string 资源XML包内路径, bool 是否找到
+func (e *Editor) sourceResourceFile(id, kind string) (string, bool) {
+	ctx := context.Background()
+	if e.output != nil && e.output.ctx != nil {
+		ctx = e.output.ctx
+	}
+	name, ok, _ := e.sourceResourceFileContext(ctx, id, kind)
+	return name, ok
+}
+
 // cloneEditorReader 复用已验证的只读包索引，独立保存可变文档与读取缓存
 // 入参: reader 已加载当前文档的阅读器
 // 返回: *Reader 不拥有输入文件的独立阅读器
@@ -1160,252 +1496,6 @@ func validateEditorGeometry(object GraphicObject) error {
 	return nil
 }
 
-// bindPageResources 为当前编辑操作绑定页面级资源作用域并返回恢复函数
-// 入参: page 页面内容
-// 返回: func() 恢复原作用域的函数
-func (e *Editor) bindPageResources(page *PageContent) func() {
-	if page == nil || len(page.pageResources) == 0 {
-		return func() {}
-	}
-	return e.bindParsedScope(page.pageResources)
-}
-
-// bindParsedScope 绑定已解析的局部资源列表并返回恢复函数
-// 入参: local 局部资源列表
-// 返回: func() 恢复原作用域的函数
-func (e *Editor) bindParsedScope(local []*parsedRes) func() {
-	if len(local) == 0 {
-		return func() {}
-	}
-	prev := e.pageScope
-	e.pageScope = local
-	return func() { e.pageScope = prev }
-}
-
-// bindPageIndex 按页面索引绑定所属页面的局部资源作用域
-// 入参: index 页面索引
-// 返回: func() 恢复原作用域的函数
-func (e *Editor) bindPageIndex(index int) func() {
-	if index < 0 || index >= len(e.pages) {
-		return func() {}
-	}
-	if len(e.pages[index].pageResources) > 0 {
-		return e.bindParsedScope(e.pages[index].pageResources)
-	}
-	if e.originalPage(index) {
-		if source := e.source.pages[e.pages[index].ID]; source != nil {
-			if source.original != nil && len(source.original.pageResources) > 0 {
-				return e.bindParsedScope(source.original.pageResources)
-			}
-			reader := e.source.reader
-			if header, err := reader.readPageHeaderContext(context.Background(), source.ref); err == nil {
-				var list []*parsedRes
-				for _, ref := range header.Template {
-					for _, tpl := range e.source.document.CommonData.TemplatePage {
-						if sameResourceID(tpl.ID, ref.TemplateID) && tpl.BaseLoc != "" {
-							if tplHeader, tplErr := reader.readPageHeaderContext(context.Background(), Page{ID: tpl.ID, BaseLoc: tpl.BaseLoc}); tplErr == nil {
-								if tplRes, resErr := reader.collectPageResourcesContext(context.Background(), reader.ResPath(tpl.BaseLoc), &tplHeader); resErr == nil {
-									list = append(list, tplRes...)
-								}
-							}
-						}
-					}
-				}
-				if pageRes, resErr := reader.collectPageResourcesContext(context.Background(), reader.ResPath(source.ref.BaseLoc), &header); resErr == nil {
-					list = append(list, pageRes...)
-				}
-				if len(list) > 0 {
-					return e.bindParsedScope(list)
-				}
-			}
-		}
-	}
-	return func() {}
-}
-
-// ensureSourcePageResourcesContext 按需收集源文档全部模板页与页面头部的PageRes解析结果
-// 入参: ctx 取消上下文
-// 返回: []*parsedRes 去重后的页级资源列表, error 读取、解析或取消错误
-func (e *Editor) ensureSourcePageResourcesContext(ctx context.Context) ([]*parsedRes, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if e.source == nil {
-		return nil, nil
-	}
-	if e.source.pageResLoaded {
-		return e.source.pageResList, nil
-	}
-	reader := e.source.reader
-	doc := e.source.document
-	seen := make(map[string]bool)
-	var list []*parsedRes
-	appendPage := func(baseLoc string) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if baseLoc == "" {
-			return nil
-		}
-		fullPath := reader.ResPath(baseLoc)
-		header, err := reader.readPageHeaderContext(ctx, Page{BaseLoc: baseLoc})
-		if err != nil {
-			return err
-		}
-		for _, loc := range header.PageRes {
-			resFull := resolveResourcePath(fullPath, "", loc)
-			if seen[resFull] {
-				continue
-			}
-			parsed, err := reader.parseResFileContext(ctx, resFull)
-			if err != nil {
-				return err
-			}
-			seen[resFull] = true
-			list = append(list, parsed)
-		}
-		return nil
-	}
-	for _, tpl := range doc.CommonData.TemplatePage {
-		if err := appendPage(tpl.BaseLoc); err != nil {
-			return nil, err
-		}
-	}
-	for _, page := range doc.Pages.Page {
-		if err := appendPage(page.BaseLoc); err != nil {
-			return nil, err
-		}
-	}
-	e.source.pageResList = list
-	e.source.pageResLoaded = true
-	return list, nil
-}
-
-// ensureSourcePageResources 收集源文档全部页级资源供同步资源查询回退使用
-// 返回: []*parsedRes 页级资源列表
-func (e *Editor) ensureSourcePageResources() []*parsedRes {
-	ctx := context.Background()
-	if e.output != nil && e.output.ctx != nil {
-		ctx = e.output.ctx
-	}
-	list, _ := e.ensureSourcePageResourcesContext(ctx)
-	return list
-}
-
-// pageScopeFont 在当前页面作用域中查找字体声明
-// 入参: id 字体资源标识
-// 返回: *Font 字体声明, bool 是否命中局部作用域
-func (e *Editor) pageScopeFont(id string) (*Font, bool) {
-	for i := len(e.pageScope) - 1; i >= 0; i-- {
-		if v, ok := e.pageScope[i].fonts.get(id); ok {
-			return v, true
-		}
-	}
-	return nil, false
-}
-
-// sourceDrawParam 按页面作用域、文档级缓存及全文档页级资源顺序查找绘制参数
-// 入参: id 绘制参数标识
-// 返回: *DrawParam 绘制参数, bool 是否找到
-func (e *Editor) sourceDrawParam(id string) (*DrawParam, bool) {
-	if e.source == nil {
-		return nil, false
-	}
-	for i := len(e.pageScope) - 1; i >= 0; i-- {
-		if v, ok := e.pageScope[i].drawParams.get(id); ok {
-			return v, true
-		}
-	}
-	if v, ok := e.source.reader.docDrawParams.get(id); ok {
-		return v, true
-	}
-	if v, ok := resourceValue(e.source.reader.drawParamCache, id); ok {
-		return v, true
-	}
-	for _, parsed := range e.ensureSourcePageResources() {
-		if v, ok := parsed.drawParams.get(id); ok {
-			return v, true
-		}
-	}
-	return nil, false
-}
-
-// sourceColorSpace 按页面作用域、文档级缓存及全文档页级资源顺序查找颜色空间
-// 入参: id 颜色空间标识
-// 返回: *ColorSpace 颜色空间, bool 是否找到
-func (e *Editor) sourceColorSpace(id string) (*ColorSpace, bool) {
-	if e.source == nil {
-		return nil, false
-	}
-	if v, ok := e.source.reader.resolveColorSpaceScoped(e.pageScope, id); ok {
-		return v, true
-	}
-	for _, parsed := range e.ensureSourcePageResources() {
-		if v, ok := parsed.colorSpaces.get(id); ok {
-			return v, true
-		}
-	}
-	return nil, false
-}
-
-// sourceResPath 按页面作用域、文档级缓存及全文档页级资源顺序查找资源包内路径
-// 入参: id 资源标识
-// 返回: string 包内路径, bool 是否找到
-func (e *Editor) sourceResPath(id string) (string, bool) {
-	if e.source == nil {
-		return "", false
-	}
-	reader := e.source.reader
-	if rel, ok := reader.resolveResPathScoped(e.pageScope, id); ok {
-		return reader.ResPath(rel), true
-	}
-	for _, parsed := range e.ensureSourcePageResources() {
-		if rel, ok := parsed.resPaths.get(id); ok {
-			return reader.ResPath(rel), true
-		}
-	}
-	return "", false
-}
-
-// sourceMedia 按页面作用域、文档级缓存及全文档页级资源顺序查找多媒体定义
-// 入参: id 多媒体标识
-// 返回: *MultiMedia 多媒体定义, bool 是否找到
-func (e *Editor) sourceMedia(id string) (*MultiMedia, bool) {
-	if e.source == nil {
-		return nil, false
-	}
-	if v, ok := e.source.reader.resolveMediaScoped(e.pageScope, id); ok {
-		return &v, true
-	}
-	for _, parsed := range e.ensureSourcePageResources() {
-		if v, ok := parsed.medias.get(id); ok {
-			return &v, true
-		}
-	}
-	return nil, false
-}
-
-// sourceFont 按页面作用域、文档级缓存及全文档页级资源顺序查找字体声明
-// 入参: id 字体标识
-// 返回: *Font 字体声明, bool 是否找到
-func (e *Editor) sourceFont(id string) (*Font, bool) {
-	if e.source == nil {
-		return nil, false
-	}
-	if v, ok := e.source.reader.resolveFontScoped(e.pageScope, id); ok {
-		return v, true
-	}
-	for _, parsed := range e.ensureSourcePageResources() {
-		if v, ok := parsed.fonts.get(id); ok {
-			return v, true
-		}
-	}
-	return nil, false
-}
-
 // parsedHasResource 判断单个已解析资源文件是否包含指定类型与标识的资源定义
 // 入参: parsed 已解析资源文件, id 资源标识, kind 资源类型，空字符串匹配任意类型
 // 返回: bool 是否包含
@@ -1445,55 +1535,4 @@ func parsedHasResource(parsed *parsedRes, id, kind string) bool {
 		_, ok := parsed.medias.get(id)
 		return ok
 	}
-}
-
-// sourceResourceFileContext 定位源文档中定义指定资源的XML文件路径，响应取消
-// 入参: ctx 取消上下文, id 资源标识, kind 资源类型，空字符串匹配任意类型
-// 返回: string 资源XML包内路径, bool 是否找到, error 读取或取消错误
-func (e *Editor) sourceResourceFileContext(ctx context.Context, id, kind string) (string, bool, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return "", false, err
-	}
-	if e.source == nil {
-		return "", false, nil
-	}
-	reader := e.source.reader
-	for i := len(e.pageScope) - 1; i >= 0; i-- {
-		if parsed := e.pageScope[i]; parsed.path != "" && parsedHasResource(parsed, id, kind) {
-			return parsed.path, true, nil
-		}
-	}
-	if name, ok := resourceValue(reader.resourceFiles, id); ok && name != "" {
-		if kind == "" {
-			return name, true, nil
-		}
-		if parsed := reader.resFileCache[name]; parsed == nil || parsedHasResource(parsed, id, kind) {
-			return name, true, nil
-		}
-	}
-	list, err := e.ensureSourcePageResourcesContext(ctx)
-	if err != nil {
-		return "", false, err
-	}
-	for _, parsed := range list {
-		if parsed.path != "" && parsedHasResource(parsed, id, kind) {
-			return parsed.path, true, nil
-		}
-	}
-	return "", false, nil
-}
-
-// sourceResourceFile 定位源文档中定义指定资源的XML文件路径
-// 入参: id 资源标识, kind 资源类型，空字符串匹配任意类型
-// 返回: string 资源XML包内路径, bool 是否找到
-func (e *Editor) sourceResourceFile(id, kind string) (string, bool) {
-	ctx := context.Background()
-	if e.output != nil && e.output.ctx != nil {
-		ctx = e.output.ctx
-	}
-	name, ok, _ := e.sourceResourceFileContext(ctx, id, kind)
-	return name, ok
 }

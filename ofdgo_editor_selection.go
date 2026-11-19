@@ -858,7 +858,7 @@ func (e *Editor) PrepareTargets(ctx context.Context, page int, paths []ObjectPat
 	if err != nil {
 		return nil, err
 	}
-	box, err := creationBox(content.Area.PhysicalBox)
+	box, err := snapshot.pageAreaBox(page)
 	if err != nil {
 		return nil, err
 	}

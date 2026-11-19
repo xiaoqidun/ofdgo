@@ -1882,7 +1882,6 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 		var original map[string]GraphicObject
 		var originalLayers map[string]string
 		var localRes []*parsedRes
-		localPaths := make(map[string]bool)
 		if e.source != nil {
 			original = make(map[string]GraphicObject)
 			originalLayers = make(map[string]string)
@@ -1896,11 +1895,6 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 					for _, object := range layer.Objects {
 						original[editorObjectID(object)] = object
 					}
-				}
-			}
-			for _, parsed := range localRes {
-				if parsed != nil && parsed.path != "" {
-					localPaths[parsed.path] = true
 				}
 			}
 		}
@@ -1934,19 +1928,6 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 							if origin != nil && origin.page != nil && origin.page.original != nil && len(origin.page.original.pageResources) > 0 {
 								pageOrigins[ref] = origin.page.original.pageResources
 							}
-						}
-					}
-				}
-				if origin != nil && origin.page != nil && origin.page.original != nil && (!exists || before.Type != object.Type || !reflect.DeepEqual(before.CompositeGraphicUnit, object.CompositeGraphicUnit)) {
-					for _, parsed := range origin.page.original.pageResources {
-						if parsed != nil && parsed.path != "" && !localPaths[parsed.path] {
-							files[parsed.path] = true
-						}
-					}
-					for _, name := range origin.page.original.PageRes {
-						resPath := resolveResourcePath(e.source.reader.ResPath(origin.page.ref.BaseLoc), "", name)
-						if !localPaths[resPath] {
-							files[resPath] = true
 						}
 					}
 				}
@@ -2010,12 +1991,10 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 			continue
 		}
 		var found string
-		if originRes := pageOrigins[id]; len(originRes) > 0 {
-			for i := len(originRes) - 1; i >= 0; i-- {
-				if parsed := originRes[i]; parsed != nil && parsed.path != "" && parsedHasResource(parsed, id, "") {
-					found = parsed.path
-					break
-				}
+		for _, parsed := range slices.Backward(pageOrigins[id]) {
+			if parsedHasResource(parsed, id, "") {
+				found = parsed.path
+				break
 			}
 		}
 		if found == "" {
@@ -2025,8 +2004,24 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 				return nil, nil, nil, nil, err
 			}
 		}
-		if found != "" {
+		if found == "" || files[found] {
+			continue
+		}
+		parsed, err := e.source.reader.parseResFileContext(ctx, found)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		if parsed == nil {
+			continue
+		}
+		safe, err := e.pageResSafeForDocument(ctx, parsed)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		if safe {
 			files[found] = true
+		} else {
+			e.appendUnconflictedPageResItem(parsed, id, &fonts, &images, &spaces)
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -2036,6 +2031,71 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 		e.output.resources = &editorResourceSelection{owner: e, fonts: slices.Clone(fonts), images: slices.Clone(images), spaces: slices.Clone(spaces), files: maps.Clone(files)}
 	}
 	return fonts, images, spaces, files, nil
+}
+
+// pageResSafeForDocument 检查页级资源文件是否不含与公共资源或其他页级资源同名的冲突标识
+// 入参: ctx 取消上下文, parsed 已解析页级资源
+// 返回: bool 是否可安全挂入文档级资源, error 读取或解析错误
+func (e *Editor) pageResSafeForDocument(ctx context.Context, parsed *parsedRes) (bool, error) {
+	allPageRes, err := e.ensureSourcePageResourcesContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	ids := make(map[string]bool)
+	for id := range parsed.fonts.exact {
+		ids[id] = true
+	}
+	for id := range parsed.medias.exact {
+		ids[id] = true
+	}
+	for id := range parsed.colorSpaces.exact {
+		ids[id] = true
+	}
+	for id := range parsed.drawParams.exact {
+		ids[id] = true
+	}
+	for id := range parsed.composites.exact {
+		ids[id] = true
+	}
+	for id := range ids {
+		if e.resolveScopeResourceFile(nil, id) != "" {
+			return false, nil
+		}
+		for _, other := range allPageRes {
+			if other.path != parsed.path && parsedHasResource(other, id, "") {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
+// appendUnconflictedPageResItem 提取不含公共标识冲突的单个页级基础资源声明供输出写入
+// 入参: parsed 已解析页级资源, id 资源标识, fonts 待输出字体切片, images 待输出图片切片, spaces 待输出颜色空间切片
+func (e *Editor) appendUnconflictedPageResItem(parsed *parsedRes, id string, fonts, images *[]editorResource, spaces *[]ColorSpace) {
+	reader := e.source.reader
+	if fontDef, ok := parsed.fonts.get(id); ok {
+		f := *fontDef
+		if f.FontFile != "" {
+			f.FontFile = "/" + reader.ResPath(f.FontFile)
+		}
+		*fonts = append(*fonts, editorResource{font: &f})
+		return
+	}
+	if mediaDef, ok := parsed.medias.get(id); ok {
+		if mediaDef.MediaFile != "" {
+			mediaDef.MediaFile = "/" + reader.ResPath(mediaDef.MediaFile)
+		}
+		*images = append(*images, editorResource{image: &mediaDef})
+		return
+	}
+	if csDef, ok := parsed.colorSpaces.get(id); ok {
+		cs := *csDef
+		if cs.Profile != "" {
+			cs.Profile = "/" + reader.ResPath(cs.Profile)
+		}
+		*spaces = append(*spaces, cs)
+	}
 }
 
 // encodeXML 按本次保存上下文编码，不改变普通快照的输出

@@ -138,6 +138,7 @@ type editorImportEntry struct {
 	node              *editorXML
 	template          bool
 	ids               map[string]string
+	scope             []string
 }
 
 // editorPageImport 一次插页操作的独立资源图，提交前不修改目标文档
@@ -159,11 +160,18 @@ type editorPageImport struct {
 	docRefs            map[string]map[string]*editorXML
 	maximum            uint64
 	ids                map[string]string
+	resIDs             map[string]string
 	pages              map[string]bool
 	files              map[string][]byte
-	resources          map[string]editorImportEntry
+	resByFile          map[string]map[string]editorImportEntry
 	resourceFiles      map[string]bool
+	docRes             map[string]bool
+	docScope           []string
+	pageScopes         map[string][]string
+	pageScopesByPath   map[string][]string
+	tplLocalRes        map[string][]string
 	used               map[string][]byte
+	usedGroups         map[string]string
 	templates          map[string]TemplatePage
 	templateParts      map[string][]byte
 	defaultCS          string
@@ -189,7 +197,7 @@ func (m *editorPageImport) encodeResources() error {
 			if err := m.ctx.Err(); err != nil {
 				return err
 			}
-			if m.resources[id].group == group {
+			if m.usedGroups[id] == group {
 				entries = append(entries, m.used[id]...)
 			}
 		}
@@ -328,7 +336,7 @@ func (m *editorPageImport) id(value string) string {
 	return id
 }
 
-// resourceIndex 每个索引只登记一次，拒绝重复资源标识，按引用延迟复制资源内容
+// resourceIndex 每个索引只登记一次，拒绝同一文件内的重复资源标识，按引用延迟复制资源内容
 // 入参: name 资源索引路径
 // 返回: error 错误信息
 func (m *editorPageImport) resourceIndex(name string) error {
@@ -357,16 +365,16 @@ func (m *editorPageImport) resourceIndex(name string) error {
 				return err
 			}
 			id := editorImportKey(node.attr("ID"))
-			if _, exists := entries[id]; exists {
-				return fmt.Errorf("duplicate resource ID %q in %s", id, name)
+			if id == "" {
+				return fmt.Errorf("missing resource ID in %s", name)
 			}
-			if _, exists := m.resources[id]; exists {
+			if _, exists := entries[id]; exists {
 				return fmt.Errorf("duplicate resource ID %q in %s", id, name)
 			}
 			entries[id] = editorImportEntry{name: name, base: root.attr("BaseLoc"), group: group.name.Local, data: data, node: node}
 		}
 	}
-	maps.Copy(m.resources, entries)
+	m.resByFile[name] = entries
 	if m.resourceFiles == nil {
 		m.resourceFiles = make(map[string]bool)
 	}
@@ -374,14 +382,134 @@ func (m *editorPageImport) resourceIndex(name string) error {
 	return nil
 }
 
-// resource 按引用用途校验资源类型并迁移，避免生成悬空或类型不符的引用
-// 入参: value 来源资源标识, kind 资源类型或多媒体用途，空值仅检查资源是否存在
+// lookupResource 按可见资源作用域链查找资源声明
+// 入参: scope 资源文件优先级列表, value 来源资源标识
+// 返回: editorImportEntry 资源条目, bool 是否找到
+func (m *editorPageImport) lookupResource(scope []string, value string) (editorImportEntry, bool) {
+	if len(scope) == 0 {
+		scope = m.docScope
+	}
+	key := editorImportKey(value)
+	for _, resFile := range scope {
+		if entry, ok := m.resByFile[resFile][key]; ok {
+			return entry, true
+		}
+	}
+	return editorImportEntry{}, false
+}
+
+// resourceTargetID 按资源所属文件与标识分配独立目标标识
+// 入参: entry 来源资源条目, key 规范化标识
+// 返回: string 目标资源标识
+func (m *editorPageImport) resourceTargetID(entry editorImportEntry, key string) string {
+	if m.copyPage {
+		return entry.node.attr("ID")
+	}
+	resKey := entry.name + "\x00" + key
+	if id := m.resIDs[resKey]; id != "" {
+		return id
+	}
+	m.maximum++
+	id := formatUnitID(m.maximum)
+	m.resIDs[resKey] = id
+	return id
+}
+
+// registerPageRes 解析并登记页面声明的局部资源索引路径
+// 入参: list 已有局部资源列表, pageName 页面路径, values PageRes声明列表
+// 返回: []string 追加后的局部资源列表, error 路径解析或索引读取错误
+func (m *editorPageImport) registerPageRes(list []string, pageName string, values []string) ([]string, error) {
+	for _, value := range values {
+		loc, err := m.resolve(pageName, "", strings.TrimSpace(value))
+		if err != nil {
+			return nil, err
+		}
+		if err := m.resourceIndex(loc); err != nil {
+			return nil, err
+		}
+		list = append(list, cleanPackagePath(loc))
+	}
+	return list, nil
+}
+
+// resolvePageScope 按模板与页面局部资源声明登记索引并拼装完整页面作用域链
+// 入参: pageName 页面路径, templates 模板标识列表, pageRes 页面PageRes声明列表
+// 返回: []string 按优先级排列的资源文件列表, error 读取或解析错误
+func (m *editorPageImport) resolvePageScope(pageName string, templates, pageRes []string) ([]string, error) {
+	var local []string
+	for _, tplID := range templates {
+		tplRes, err := m.templatePageRes(tplID)
+		if err != nil {
+			return nil, err
+		}
+		local = append(local, tplRes...)
+	}
+	local, err := m.registerPageRes(local, pageName, pageRes)
+	if err != nil {
+		return nil, err
+	}
+	var scope []string
+	for _, res := range slices.Backward(local) {
+		scope = appendUniquePath(scope, res)
+	}
+	for _, dRes := range m.docScope {
+		scope = appendUniquePath(scope, dRes)
+	}
+	return scope, nil
+}
+
+// templatePageRes 解析并缓存模板页声明的局部资源文件列表
+// 入参: templateID 模板页标识
+// 返回: []string 模板页局部资源文件列表, error 读取或解析错误
+func (m *editorPageImport) templatePageRes(templateID string) ([]string, error) {
+	key := editorImportKey(templateID)
+	tpl, ok := m.templates[key]
+	if !ok {
+		return nil, nil
+	}
+	if cached, seen := m.tplLocalRes[key]; seen {
+		return cached, nil
+	}
+	tplName := m.reader.ResPath(tpl.BaseLoc)
+	data, err := m.readFile(tplName)
+	if err != nil {
+		return nil, err
+	}
+	root, err := parseEditorXMLContext(m.ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	list, err := m.registerPageRes(nil, tplName, collectXMLPageRes(data, root))
+	if err != nil {
+		return nil, err
+	}
+	m.tplLocalRes[key] = list
+	return list, nil
+}
+
+// buildPageScope 构建页面或模板页的资源作用域链并登记局部资源索引
+// 入参: name 页面路径, data 页面XML数据, root 页面根节点, template 是否按模板页解析
+// 返回: []string 按优先级排列的资源文件列表, error 读取或解析错误
+func (m *editorPageImport) buildPageScope(name string, data []byte, root *editorXML, template bool) ([]string, error) {
+	var templates []string
+	if !template {
+		for _, child := range root.children {
+			if child.matchesOFD("Template") {
+				templates = append(templates, child.attr("TemplateID"))
+			}
+		}
+	}
+	return m.resolvePageScope(name, templates, collectXMLPageRes(data, root))
+}
+
+// resource 按当前作用域与引用用途校验资源类型并迁移，避免生成悬空或类型不符的引用
+// 入参: scope 当前可见资源作用域, value 来源资源标识, kind 资源类型或多媒体用途，空值仅检查资源是否存在
 // 返回: string 新标识, error 资源缺失、类型或迁移错误
-func (m *editorPageImport) resource(value, kind string) (string, error) {
+func (m *editorPageImport) resource(scope []string, value, kind string) (string, error) {
 	if err := m.ctx.Err(); err != nil {
 		return "", err
 	}
-	entry, exists := m.resources[editorImportKey(value)]
+	entry, exists := m.lookupResource(scope, value)
 	if !exists {
 		return "", fmt.Errorf("resource %q not found", value)
 	}
@@ -394,38 +522,50 @@ func (m *editorPageImport) resource(value, kind string) (string, error) {
 			return "", fmt.Errorf("invalid resource type for %q: expected %s", value, expected)
 		}
 	}
-	return m.reference(value)
+	if m.copyPage {
+		return entry.node.attr("ID"), nil
+	}
+	key := editorImportKey(value)
+	resKey := entry.name + "\x00" + key
+	targetID := m.resourceTargetID(entry, key)
+	if data, seen := m.used[resKey]; seen && data == nil {
+		return "", fmt.Errorf("cyclic resource reference %q", value)
+	} else if !seen {
+		m.used[resKey] = nil
+		m.usedGroups[resKey] = entry.group
+		resEntry := entry
+		resEntry.ids = map[string]string{key: targetID}
+		if m.docRes[entry.name] {
+			resEntry.scope = m.docScope
+		} else if len(scope) > 0 {
+			resEntry.scope = scope
+		} else {
+			resEntry.scope = append([]string{entry.name}, m.docScope...)
+		}
+		data, err := m.encode(resEntry, entry.node)
+		if err != nil {
+			return "", err
+		}
+		m.used[resKey] = data
+	}
+	return targetID, nil
 }
 
-// reference 复制被引用的资源及其传递依赖，拒绝循环依赖
-// 入参: value 来源资源标识
+// reference 复制被引用的模板并映射页面或对象标识
+// 入参: value 来源标识
 // 返回: string 新标识, error 错误信息
 func (m *editorPageImport) reference(value string) (string, error) {
 	key := editorImportKey(value)
 	if m.copyPage {
-		if entry, ok := m.resources[key]; ok {
-			return entry.node.attr("ID"), nil
-		}
 		if template, ok := m.templates[key]; ok {
 			return template.ID, nil
 		}
-	}
-	if entry, ok := m.resources[key]; ok {
-		if data, seen := m.used[key]; seen && data == nil {
-			return "", fmt.Errorf("cyclic resource reference %q", value)
-		} else if !seen {
-			m.used[key] = nil
-			data, err := m.encode(entry, entry.node)
-			if err != nil {
-				return "", err
-			}
-			m.used[key] = data
-		}
+		return m.id(value), nil
 	}
 	if template, ok := m.templates[key]; ok {
 		if _, seen := m.templateParts[key]; !seen {
 			m.templateParts[key] = nil
-			name, err := m.copyXML(m.reader.ResPath(template.BaseLoc), path.Join(m.directory, "Templates", "Template_"+m.id(value), "Content.xml"), true)
+			name, err := m.copyXML(m.reader.ResPath(template.BaseLoc), path.Join(m.directory, "Templates", "Template_"+m.id(value), "Content.xml"), true, nil)
 			if err != nil {
 				return "", err
 			}
@@ -531,9 +671,9 @@ func (m *editorPageImport) copyData(name, relative string, evidence bool) (strin
 }
 
 // copyXML 复制页面或标准关联XML并重映射引用
-// 入参: name 来源路径, candidate 目标候选路径, template 是否按模板页复制
+// 入参: name 来源路径, candidate 目标候选路径, template 是否按模板页复制, parentScope 外部继承的资源作用域
 // 返回: string 新路径, error 错误信息
-func (m *editorPageImport) copyXML(name, candidate string, template bool) (string, error) {
+func (m *editorPageImport) copyXML(name, candidate string, template bool, parentScope []string) (string, error) {
 	paths := m.xmlPaths
 	if template {
 		if m.templatePaths == nil {
@@ -555,20 +695,17 @@ func (m *editorPageImport) copyXML(name, candidate string, template bool) (strin
 		return "", err
 	}
 	paths[key], m.files[target] = target, nil
+	scope := parentScope
 	if root.name.Local == "Page" {
-		for _, child := range root.children {
-			if child.name.Local == "PageRes" {
-				loc, err := m.resolve(name, "", editorImportText(data, child))
-				if err != nil {
-					return "", err
-				}
-				if err := m.resourceIndex(loc); err != nil {
-					return "", err
-				}
-			}
+		scope, err = m.buildPageScope(name, data, root, template)
+		if err != nil {
+			return "", err
+		}
+		if !template {
+			m.pageScopesByPath[key] = scope
 		}
 	}
-	entry := editorImportEntry{name: name, data: data, template: template}
+	entry := editorImportEntry{name: name, data: data, template: template, scope: scope}
 	if template && slices.ContainsFunc(m.doc.Pages.Page, func(page Page) bool {
 		return cleanPackagePath(m.reader.ResPath(page.BaseLoc)) == key
 	}) {
@@ -654,7 +791,7 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 		var err error
 		switch key {
 		case "ID":
-			if id := entry.ids[editorImportKey(value)]; id != "" {
+			if id := entry.ids[editorImportKey(value)]; id != "" && (entry.node == nil || node == entry.node) {
 				value = id
 			} else if name == "Attachment" {
 				value, err = m.attachmentID(value)
@@ -670,11 +807,11 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 				value = id
 			}
 		case "Font", "DrawParam", "ColorSpace":
-			value, err = m.resource(value, key)
+			value, err = m.resource(entry.scope, value, key)
 		case "Relative":
-			value, err = m.resource(value, "DrawParam")
+			value, err = m.resource(entry.scope, value, "DrawParam")
 		case "Substitution", "ImageMask", "Thumbnail":
-			value, err = m.resource(value, "Image")
+			value, err = m.resource(entry.scope, value, "Image")
 		case "ResourceID":
 			kind := ""
 			switch name {
@@ -687,7 +824,7 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			case "Movie":
 				kind = "Video"
 			}
-			value, err = m.resource(value, kind)
+			value, err = m.resource(entry.scope, value, kind)
 		case "TemplateID":
 			if _, exists := m.templates[editorImportKey(value)]; !exists {
 				return nil, fmt.Errorf("template %q not found", value)
@@ -696,7 +833,7 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 		case "PageRef", "RefId":
 			value, err = m.reference(value)
 		case "BaseLoc", "FileRef":
-			loc, resolveErr := m.resolve(entry.name, "", value)
+			loc, resolveErr := m.resolve(entry.name, entry.base, value)
 			if resolveErr != nil {
 				return nil, resolveErr
 			}
@@ -711,7 +848,7 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 					}
 					directory = path.Join("Signs", "Sign_"+id)
 				}
-				value, err = m.copyXML(loc, path.Join(m.directory, directory, path.Base(loc)), false)
+				value, err = m.copyXML(loc, path.Join(m.directory, directory, path.Base(loc)), false, entry.scope)
 			}
 		case "AttachID":
 			value, err = m.attachment(value)
@@ -834,18 +971,22 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			directory := "Res"
 			file := path.Base(loc)
 			owner := node.parent.attr("ID")
+			ownerID := entry.ids[editorImportKey(owner)]
+			if ownerID == "" && owner != "" {
+				ownerID = m.id(owner)
+			}
 			switch name {
 			case "FontFile":
 				directory = "Res/Fonts"
-				if owner != "" {
-					file = "Font_" + m.id(owner) + strings.ToLower(path.Ext(loc))
+				if ownerID != "" {
+					file = "Font_" + ownerID + strings.ToLower(path.Ext(loc))
 				}
 			case "MediaFile":
 				directory = "Res/Images"
 				if node.parent.attr("Type") != "Image" {
 					directory = "Res/Media"
-				} else if owner != "" {
-					file = "Image_" + m.id(owner) + strings.ToLower(path.Ext(loc))
+				} else if ownerID != "" {
+					file = "Image_" + ownerID + strings.ToLower(path.Ext(loc))
 				}
 			case "Profile":
 				directory = "Res/ColorSpaces"
@@ -861,11 +1002,12 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			if node.parent.name.Local == "Attachment" {
 				value, err = m.copyData(loc, path.Join("Attachments", path.Base(loc)), false)
 			} else {
-				candidate := path.Join(m.directory, "Annotations", "Page_"+m.id(node.parent.attr("PageID"))+".xml")
-				value, err = m.copyXML(loc, candidate, false)
+				pageID := node.parent.attr("PageID")
+				candidate := path.Join(m.directory, "Annotations", "Page_"+m.id(pageID)+".xml")
+				value, err = m.copyXML(loc, candidate, false, m.pageScopes[editorImportKey(pageID)])
 			}
 		case "Substitution", "Thumbnail":
-			value, err = m.resource(strings.TrimSpace(value), "Image")
+			value, err = m.resource(entry.scope, strings.TrimSpace(value), "Image")
 		}
 		if err != nil {
 			return nil, err
@@ -1331,7 +1473,7 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 		files = make(map[string][]byte)
 	}
 	maps.Copy(files, parts)
-	reader := &Reader{Zip: base.reader.Zip, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex, selectedVersion: base.reader.selectedVersion}
+	reader := &Reader{Zip: base.reader.Zip, sourceFile: base.reader.sourceFile, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex, selectedVersion: base.reader.selectedVersion}
 	if err := reader.initRoot(); err != nil {
 		return nil, err
 	}
@@ -1423,14 +1565,13 @@ func (e *Editor) importSelection(ctx context.Context, source *Editor, sourcePage
 	if err != nil {
 		return nil, nil, err
 	}
-	for _, value := range content.PageRes {
-		name, err := migration.resolve(pageName, "", value)
-		if err != nil {
-			return nil, nil, err
-		}
-		if err := migration.resourceIndex(name); err != nil {
-			return nil, nil, err
-		}
+	templates := make([]string, len(content.Template))
+	for i, tplRef := range content.Template {
+		templates[i] = tplRef.TemplateID
+	}
+	pageScope, err := migration.resolvePageScope(pageName, templates, content.PageRes)
+	if err != nil {
+		return nil, nil, err
 	}
 	layers := make([][]byte, len(objects))
 	for i, object := range objects {
@@ -1464,7 +1605,7 @@ func (e *Editor) importSelection(ctx context.Context, source *Editor, sourcePage
 		if err != nil {
 			return nil, nil, err
 		}
-		layers[i], err = migration.encode(editorImportEntry{name: pageName, data: data}, root)
+		layers[i], err = migration.encode(editorImportEntry{name: pageName, data: data, scope: pageScope}, root)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1479,7 +1620,7 @@ func (e *Editor) importSelection(ctx context.Context, source *Editor, sourcePage
 		if err != nil {
 			return nil, nil, err
 		}
-		data, err = migration.encode(editorImportEntry{name: pageName, data: data}, root)
+		data, err = migration.encode(editorImportEntry{name: pageName, data: data, scope: pageScope}, root)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1591,9 +1732,13 @@ func (e *Editor) importPages(ctx context.Context, source *Reader, indexes []int,
 		}
 		page := doc.Pages.Page[index]
 		ids[i] = m.id(page.ID)
-		name, err := m.copyXML(source.ResPath(page.BaseLoc), packagePagePath(m.directory, ids[i]), false)
+		pagePath := source.ResPath(page.BaseLoc)
+		name, err := m.copyXML(pagePath, packagePagePath(m.directory, ids[i]), false, nil)
 		if err != nil {
 			return nil, err
+		}
+		if scope, ok := m.pageScopesByPath[cleanPackagePath(pagePath)]; ok {
+			m.pageScopes[editorImportKey(page.ID)] = scope
 		}
 		refs[i] = Page{ID: ids[i], BaseLoc: name}
 		entry, err := m.documentReference("Pages", "Page", page.ID, ids[i], name)
@@ -1746,8 +1891,9 @@ func (e *Editor) prepareImport(ctx context.Context, source *Reader, doc *Documen
 		}
 	}
 	m := &editorPageImport{ctx: ctx, reader: source, doc: doc, directory: e.packageDirectory(), target: base.reader, maximum: maximum, copyPage: copyPage, progress: progress,
-		xmlPaths: make(map[string]string), dataPaths: make(map[string]string), evidence: make(map[string]string), ids: make(map[string]string), pages: make(map[string]bool, len(selected)),
-		files: make(map[string][]byte), resources: make(map[string]editorImportEntry), used: make(map[string][]byte),
+		xmlPaths: make(map[string]string), dataPaths: make(map[string]string), evidence: make(map[string]string), ids: make(map[string]string), resIDs: make(map[string]string), pages: make(map[string]bool, len(selected)),
+		files: make(map[string][]byte), resByFile: make(map[string]map[string]editorImportEntry), docRes: make(map[string]bool), pageScopes: make(map[string][]string), pageScopesByPath: make(map[string][]string),
+		tplLocalRes: make(map[string][]string), used: make(map[string][]byte), usedGroups: make(map[string]string),
 		templates: make(map[string]TemplatePage), templateParts: make(map[string][]byte), attachments: make(map[string][]byte), removedAttachments: base.removedAttachments, bookmarks: make(map[string]Dest, len(doc.Bookmarks.Bookmark))}
 	for _, bookmark := range doc.Bookmarks.Bookmark {
 		if err := ctx.Err(); err != nil {
@@ -1776,23 +1922,28 @@ func (e *Editor) prepareImport(ctx context.Context, source *Reader, doc *Documen
 			}
 		}
 	}
-	for _, name := range append(slices.Clone(doc.CommonData.PublicRes), doc.CommonData.DocumentRes...) {
-		if err := m.resourceIndex(source.ResPath(name)); err != nil {
-			return nil, nil, err
+	for _, list := range [][]string{doc.CommonData.DocumentRes, doc.CommonData.PublicRes} {
+		for _, res := range slices.Backward(list) {
+			loc := source.ResPath(res)
+			if err := m.resourceIndex(loc); err != nil {
+				return nil, nil, err
+			}
+			m.docRes[loc] = true
+			m.docScope = appendUniquePath(m.docScope, loc)
 		}
 	}
 	for _, template := range doc.CommonData.TemplatePage {
 		m.templates[editorImportKey(template.ID)] = template
 	}
 	if doc.CommonData.DefaultCS != 0 {
-		m.defaultCS, err = m.resource(formatUnitID(uint64(doc.CommonData.DefaultCS)), "ColorSpace")
+		m.defaultCS, err = m.resource(m.docScope, formatUnitID(uint64(doc.CommonData.DefaultCS)), "ColorSpace")
 		if err != nil {
 			return nil, nil, err
 		}
 	} else if !e.sourceRGB() {
 		m.defaultCS = m.id("defaultRGB")
 		m.used["defaultRGB"] = []byte(`<ofd:ColorSpace ID="` + m.defaultCS + `" Type="RGB" BitsPerComponent="8"/>`)
-		m.resources["defaultRGB"] = editorImportEntry{group: "ColorSpaces"}
+		m.usedGroups["defaultRGB"] = "ColorSpaces"
 	}
 	return base, m, nil
 }
@@ -1884,6 +2035,21 @@ func (e *Editor) importBaseContext(ctx context.Context) (*editorSource, error) {
 	editor.source.idsReady = true
 	editor.source.fromNew = true
 	return editor.source, nil
+}
+
+// collectXMLPageRes 提取Page节点下声明的PageRes文本列表
+// 入参: data 页面XML数据, root 页面根节点
+// 返回: []string PageRes声明列表
+func collectXMLPageRes(data []byte, root *editorXML) []string {
+	var values []string
+	if root.name.Local == "Page" {
+		for _, child := range root.children {
+			if child.name.Local == "PageRes" {
+				values = append(values, editorImportText(data, child))
+			}
+		}
+	}
+	return values
 }
 
 // editorImportKey 统一数值标识的映射键，保留导入过程中使用的内部名称

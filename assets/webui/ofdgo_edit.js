@@ -608,7 +608,7 @@ export class CanvasEditor {
 			const x = box.x + (handle.dataset.corner === "e" ? box.width : 0), y = box.y + box.height / 2;
 			handle.style.left = `${(a * x + c * y + e - bounds.x) * scale * PX_PER_MM}px`;
 			handle.style.top = `${(b * x + d * y + f - bounds.y) * scale * PX_PER_MM}px`;
-			handle.style.cursor = a === 0 ? "var(--resize-vertical, ns-resize)" : "var(--resize-horizontal, ew-resize)";
+			handle.style.cursor = Math.abs(a) < 1e-9 ? "var(--resize-vertical, ns-resize)" : "var(--resize-horizontal, ew-resize)";
 		}
 	}
 

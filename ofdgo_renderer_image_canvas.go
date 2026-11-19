@@ -106,7 +106,9 @@ func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPa
 		imageClip = nil
 	}
 	if !compiled && !pdf {
-		img = r.imageWithClip(img, clipPath, m, 96)
+		v := ctx.CoordSystemView().Mul(ctx.View())
+		dpi := 96 * max(1, math.Hypot(v[0][0], v[1][0]), math.Hypot(v[0][1], v[1][1]))
+		img = r.imageWithClip(img, clipPath, m, dpi)
 	}
 	if r.renderError != nil {
 		return
@@ -233,11 +235,12 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		r.renderError = compiler.err
 		return img
 	}
-	if r.backends.Raster == nil {
+	raster := r.internalRasterBackend()
+	if raster == nil {
 		r.renderError = fmt.Errorf("image clip raster: %w", ErrBackendUnavailable)
 		return img
 	}
-	result, err := r.backends.Raster.Render(compiler.page)
+	result, err := raster.Render(compiler.page)
 	if cancelErr := work.Err(); cancelErr != nil {
 		err = cancelErr
 	}

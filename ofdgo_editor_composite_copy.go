@@ -240,6 +240,10 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 	}
 	defer reader.Close()
 	renderer := e.newRenderer(reader)
+	if selection.source != nil && selection.source.original != nil {
+		defer e.bindPageResources(selection.source.original)()
+		defer renderer.bindPageResources(selection.source.original)()
+	}
 	var objects []GraphicObject
 	var remaps []map[string]string
 	for i, source := range selection.nodes {

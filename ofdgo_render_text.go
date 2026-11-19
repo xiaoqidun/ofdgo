@@ -166,15 +166,14 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 			textOffset++
 		}
 		runes := textCodeRunes(code.Value)
-		glyphs := textCodeGlyphs(runes, transforms, codeOffset)
-		spans := textGlyphSpans(runes, transforms, codeOffset)
+		var glyphs []textGlyph
+		var spans [][2]int
 		if code.Index != "" {
-			runes = r.parseIndexRunes(code.Index, id)
-			glyphs = textRuneGlyphs(runes)
-			spans = make([][2]int, len(glyphs))
-			for i := range spans {
-				spans[i] = [2]int{0, 1}
-			}
+			glyphs = r.parseIndexGlyphs(code.Index, id)
+			spans = indexGlyphSpans(len(glyphs))
+		} else {
+			glyphs = textCodeGlyphs(runes, transforms, codeOffset)
+			spans = textGlyphSpans(runes, transforms, codeOffset)
 		}
 		ids := make([]uint16, len(glyphs))
 		for i, glyph := range glyphs {

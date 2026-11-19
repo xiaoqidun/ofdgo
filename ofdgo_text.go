@@ -214,19 +214,6 @@ func (obj TextObject) withPathStyle(style PathObject) TextObject {
 	return obj
 }
 
-// textCodeRuneCount 统计文本编码中的字符数，识别转义及XML排版空白
-// 入参: value 文本编码内容
-// 返回: int 字符数量
-func textCodeRuneCount(value string) int {
-	if strings.Contains(value, "\\") {
-		return len(textCodeRunes(value))
-	}
-	if strings.ContainsAny(value, "\r\n") {
-		value = strings.TrimSpace(value)
-	}
-	return utf8.RuneCountInString(value)
-}
-
 // textObjectFontID 获取文本对象字体ID
 // 入参: text 文本对象
 // 返回: string 字体ID
@@ -276,6 +263,82 @@ func (r *Renderer) textObjectGlyphTransforms(fontID string, text TextObject) map
 	return result
 }
 
+// textGlyphFromID 获取字形ID对应的绘制字形
+// 入参: fontID 字体ID, glyphID 字形ID或CID
+// 返回: textGlyph 绘制字形
+func (r *Renderer) textGlyphFromID(fontID string, glyphID int) textGlyph {
+	if mapped, ok := r.fontGlyphRune(fontID, glyphID); ok {
+		return textGlyph{Text: string(mapped), GlyphID: -1}
+	}
+	return textGlyph{GlyphID: glyphID}
+}
+
+// fontGlyphRune 获取字形ID对应的包装字体字符
+// 入参: fontID 字体ID, glyphID 字形ID或CID
+// 返回: rune 包装字体字符, bool 是否存在
+func (r *Renderer) fontGlyphRune(fontID string, glyphID int) (rune, bool) {
+	if glyphID < 0 || glyphID > 0xFFFF {
+		return 0, false
+	}
+	id := uint16(glyphID)
+	prepared := r.preparedFonts[fontID]
+	if prepared == nil {
+		return 0, false
+	}
+	if mapped, ok := prepared.CIDs[id]; ok {
+		return mapped, true
+	}
+	if mapped, ok := prepared.Glyphs[id]; ok {
+		return mapped, true
+	}
+	return 0, false
+}
+
+// parseIndexGlyphs 解析索引字形
+// 入参: indexStr 索引字符串, fontID 字体ID
+// 返回: []textGlyph 绘制字形列表
+func (r *Renderer) parseIndexGlyphs(indexStr, fontID string) []textGlyph {
+	parts := strings.Fields(indexStr)
+	result := make([]textGlyph, 0, min(len(parts), maxIndexRunes))
+	for _, p := range parts {
+		if len(result) >= maxIndexRunes {
+			break
+		}
+		if startText, endText, ok := strings.Cut(p, "-"); ok {
+			if !strings.Contains(endText, "-") {
+				start, err1 := strconv.ParseUint(startText, 10, 16)
+				end, err2 := strconv.ParseUint(endText, 10, 16)
+				if err1 != nil || err2 != nil || start > end {
+					continue
+				}
+				for k := start; k <= end && len(result) < maxIndexRunes; k++ {
+					result = append(result, r.textGlyphFromID(fontID, int(k)))
+				}
+			}
+		} else {
+			val, err := strconv.ParseUint(p, 10, 16)
+			if err != nil {
+				continue
+			}
+			result = append(result, r.textGlyphFromID(fontID, int(val)))
+		}
+	}
+	return result
+}
+
+// textCodeRuneCount 统计文本编码中的字符数，识别转义及XML排版空白
+// 入参: value 文本编码内容
+// 返回: int 字符数量
+func textCodeRuneCount(value string) int {
+	if strings.Contains(value, "\\") {
+		return len(textCodeRunes(value))
+	}
+	if strings.ContainsAny(value, "\r\n") {
+		value = strings.TrimSpace(value)
+	}
+	return utf8.RuneCountInString(value)
+}
+
 // textCodeGlyphs 获取文本编码对应的绘制字形
 // 入参: runes 文本字符, transforms 字形变换, codeOffset 文本编码偏移
 // 返回: []textGlyph 绘制字形列表
@@ -307,14 +370,15 @@ func textRuneGlyphs(runes []rune) []textGlyph {
 	return glyphs
 }
 
-// textGlyphFromID 获取字形ID对应的绘制字形
-// 入参: fontID 字体ID, glyphID 字形ID或CID
-// 返回: textGlyph 绘制字形
-func (r *Renderer) textGlyphFromID(fontID string, glyphID int) textGlyph {
-	if mapped, ok := r.fontGlyphRune(fontID, glyphID); ok {
-		return textGlyph{Text: string(mapped), GlyphID: -1}
+// indexGlyphSpans 为索引字形生成指向单占位符的原文区间
+// 入参: count 字形数量
+// 返回: [][2]int 字符区间列表
+func indexGlyphSpans(count int) [][2]int {
+	spans := make([][2]int, count)
+	for i := range spans {
+		spans[i] = [2]int{0, 1}
 	}
-	return textGlyph{GlyphID: glyphID}
+	return spans
 }
 
 // hasTextMatrix 判断文本是否需要应用字形变换
@@ -323,69 +387,6 @@ func (r *Renderer) textGlyphFromID(fontID string, glyphID int) textGlyph {
 func hasTextMatrix(ctm Matrix) bool {
 	const eps = 1e-9
 	return math.Abs(ctm.a-1) > eps || math.Abs(ctm.b) > eps || math.Abs(ctm.c) > eps || math.Abs(ctm.d-1) > eps
-}
-
-// fontGlyphRune 获取字形ID对应的包装字体字符
-// 入参: fontID 字体ID, glyphID 字形ID或CID
-// 返回: rune 包装字体字符, bool 是否存在
-func (r *Renderer) fontGlyphRune(fontID string, glyphID int) (rune, bool) {
-	if glyphID < 0 || glyphID > 0xFFFF {
-		return 0, false
-	}
-	id := uint16(glyphID)
-	prepared := r.preparedFonts[fontID]
-	if prepared == nil {
-		return 0, false
-	}
-	if mapped, ok := prepared.CIDs[id]; ok {
-		return mapped, true
-	}
-	if mapped, ok := prepared.Glyphs[id]; ok {
-		return mapped, true
-	}
-	return 0, false
-}
-
-// parseIndexRunes 解析索引字形
-// 入参: indexStr 索引字符串, fontID 字体ID
-// 返回: []rune 字形列表
-func (r *Renderer) parseIndexRunes(indexStr string, fontID string) []rune {
-	parts := strings.Fields(indexStr)
-	result := make([]rune, 0, min(len(parts), maxIndexRunes))
-	for _, p := range parts {
-		if len(result) >= maxIndexRunes {
-			break
-		}
-		if startText, endText, ok := strings.Cut(p, "-"); ok {
-			if !strings.Contains(endText, "-") {
-				start, err1 := strconv.ParseUint(startText, 10, 16)
-				end, err2 := strconv.ParseUint(endText, 10, 16)
-				if err1 != nil || err2 != nil || start > end {
-					continue
-				}
-				for k := start; k <= end && len(result) < maxIndexRunes; k++ {
-					result = append(result, r.textIndexRune(fontID, int(k)))
-				}
-			}
-		} else {
-			val, err := strconv.ParseUint(p, 10, 16)
-			if err != nil {
-				continue
-			}
-			result = append(result, r.textIndexRune(fontID, int(val)))
-		}
-	}
-	return result
-}
-
-// textIndexRune 获取索引字形对应的字符
-// 入参: fontID 字体ID, glyphID 字形ID或CID
-// 返回: rune 字符
-func (r *Renderer) textIndexRune(fontID string, glyphID int) rune {
-	if mapped, ok := r.fontGlyphRune(fontID, glyphID); ok {
-		return mapped
-	}
-	return rune(glyphID)
 }
 
 // textCodePositioned 判断文本编码是否带显式定位

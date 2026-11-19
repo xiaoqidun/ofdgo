@@ -233,18 +233,20 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		if textRun != nil && lines.next(tc) {
 			textPos++
 		}
-		var runes []rune
+		runes := textCodeRunes(tc.Value)
 		var glyphs []textGlyph
 		if tc.Index != "" {
-			runes = r.parseIndexRunes(tc.Index, fontID)
-			glyphs = textRuneGlyphs(runes)
+			glyphs = r.parseIndexGlyphs(tc.Index, fontID)
 		} else {
-			runes = textCodeRunes(tc.Value)
 			glyphs = textCodeGlyphs(runes, glyphTransforms, codePos)
 		}
 		var spans [][2]int
-		if textRun != nil && tc.Index == "" {
-			spans = textGlyphSpans(runes, glyphTransforms, codePos)
+		if textRun != nil {
+			if tc.Index == "" {
+				spans = textGlyphSpans(runes, glyphTransforms, codePos)
+			} else {
+				spans = indexGlyphSpans(len(glyphs))
+			}
 		}
 		positioner := NewTextPositioner(tc, obj.ReadDirection)
 		positioned := textCodePositioned(tc, positioner.xs, positioner.ys) || obj.ReadDirection != 0

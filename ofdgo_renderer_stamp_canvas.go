@@ -24,8 +24,8 @@ import (
 )
 
 // renderStamp 渲染印章
-// 入参: ctx 画布上下文, s 印章对象, pageH 页面高度
-func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
+// 入参: ctx 画布上下文, s 印章对象, pageH 页面高度, parentClip 父级裁剪路径
+func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64, parentClip *canvas.Path) {
 	if r.textOnly {
 		return
 	}
@@ -42,49 +42,70 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 		r.renderError = err
 		return
 	}
+	validBox := rasterPositive(s.Box.W) && rasterPositive(s.Box.H) && (s.Clip == nil || rasterPositive(s.Clip.W) && rasterPositive(s.Clip.H))
 	if s.Type == "ofd" && len(s.Data) > 0 {
-		if s.Clip != nil {
-			if img := r.renderOFDStampImage(s.Data); img != nil {
-				r.renderStampImage(ctx, img, s, pageH)
-			}
-			return
-		}
 		reader, err := NewReader(&Input{reader: bytes.NewReader(s.Data), size: int64(len(s.Data))})
-		if err == nil {
-			defer reader.Close()
-			doc, err := reader.DocContext(pageContext)
-			if err == nil {
-				renderer := r.childRenderer(reader)
-				for _, pageRef := range doc.Pages.Page {
-					content, err := reader.PageContentContext(pageContext, pageRef)
-					if err != nil {
-						if pageContext.Err() != nil {
-							return
-						}
-						r.renderError = err
-						return
-					}
-					sealBox, err := renderer.GetPageBox(content)
-					if err != nil {
-						r.renderError = err
-						return
-					}
-					ctx.Push()
-					ctx.Translate(s.Box.X, pageH-(s.Box.Y+s.Box.H))
-					ctx.Scale(s.Box.W/sealBox.W, s.Box.H/sealBox.H)
-					err = renderer.renderCanvasPageToContext(ctx, content, false)
-					ctx.Pop()
-					if err != nil {
-						r.renderError = err
-						return
-					}
-				}
-				return
-			}
+		if err != nil {
 			r.renderError = err
 			return
 		}
-		r.renderError = err
+		defer reader.Close()
+		doc, err := reader.DocContext(pageContext)
+		if err != nil {
+			r.renderError = err
+			return
+		}
+		if !validBox {
+			return
+		}
+		renderer := r.childRenderer(reader)
+		renderer.TransparentBackground = true
+		for _, pageRef := range doc.Pages.Page {
+			content, err := reader.PageContentContext(pageContext, pageRef)
+			if err != nil {
+				if pageContext.Err() != nil {
+					return
+				}
+				r.renderError = err
+				return
+			}
+			sealBox, err := renderer.GetPageBox(content)
+			if err != nil {
+				r.renderError = err
+				return
+			}
+			var childClip *canvas.Path
+			if parentClip != nil {
+				childClip = parentClip.Copy().Translate(-s.Box.X, -(pageH-s.Box.Y-s.Box.H)).Scale(sealBox.W/s.Box.W, sealBox.H/s.Box.H)
+			}
+			if s.Clip != nil {
+				clipW := s.Clip.W * sealBox.W / s.Box.W
+				clipH := s.Clip.H * sealBox.H / s.Box.H
+				clipX := s.Clip.X * sealBox.W / s.Box.W
+				clipY := sealBox.H - (s.Clip.Y+s.Clip.H)*sealBox.H/s.Box.H
+				rect := canvas.Rectangle(clipW, clipH).Translate(clipX, clipY)
+				childClip = renderer.intersectCachedClipPath(childClip, rect)
+			}
+			if childClip != nil && childClip.Empty() {
+				continue
+			}
+			pageRenderer := *renderer
+			if scale := max(s.Box.W/sealBox.W, s.Box.H/sealBox.H); scale > 1 {
+				limit := 4096 * 25.4 / max(sealBox.W, sealBox.H)
+				if pageRenderer.DPI < limit {
+					pageRenderer.DPI = min(pageRenderer.DPI*scale, limit)
+				}
+			}
+			ctx.Push()
+			ctx.Translate(s.Box.X, pageH-(s.Box.Y+s.Box.H))
+			ctx.Scale(s.Box.W/sealBox.W, s.Box.H/sealBox.H)
+			err = pageRenderer.renderCanvasPageClipped(ctx, content, false, childClip)
+			ctx.Pop()
+			if err != nil {
+				r.renderError = err
+				return
+			}
+		}
 		return
 	}
 	if len(s.Data) > 0 {
@@ -93,63 +114,15 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64) {
 			r.renderError = err
 			return
 		}
-		r.renderStampImage(ctx, img, s, pageH)
-	}
-}
-
-// renderOFDStampImage 渲染OFD印章图像
-// 入参: data OFD印章数据
-// 返回: image.Image 印章图像
-func (r *Renderer) renderOFDStampImage(data []byte) image.Image {
-	ctx := r.pageContext
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	defer func() {
-		if err := ctx.Err(); err != nil {
-			r.renderError = err
+		if validBox {
+			r.renderStampImage(ctx, img, s, pageH, parentClip)
 		}
-	}()
-	if err := ctx.Err(); err != nil {
-		r.renderError = err
-		return nil
 	}
-	reader, err := NewReader(&Input{reader: bytes.NewReader(data), size: int64(len(data))})
-	if err != nil {
-		r.renderError = err
-		return nil
-	}
-	defer reader.Close()
-	doc, err := reader.DocContext(ctx)
-	if err != nil {
-		r.renderError = err
-		return nil
-	}
-	renderer := r.childRenderer(reader)
-	renderer.decodeImages = true
-	renderer.TransparentBackground = true
-	for _, pageRef := range doc.Pages.Page {
-		content, err := reader.PageContentContext(ctx, pageRef)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			r.renderError = err
-			return nil
-		}
-		img, err := renderer.RenderToImage(content)
-		if err != nil {
-			r.renderError = err
-			return nil
-		}
-		return img
-	}
-	return nil
 }
 
 // renderStampImage 渲染印章图像
-// 入参: ctx 画布上下文, img 印章图像, s 印章对象, pageH 页面高度
-func (r *Renderer) renderStampImage(ctx *canvas.Context, img image.Image, s Stamp, pageH float64) {
+// 入参: ctx 画布上下文, img 印章图像, s 印章对象, pageH 页面高度, parentClip 父级裁剪路径
+func (r *Renderer) renderStampImage(ctx *canvas.Context, img image.Image, s Stamp, pageH float64, parentClip *canvas.Path) {
 	pixels, err := baseimage.PixelDataContext(r.pageContext, img)
 	if err != nil {
 		r.renderError = err
@@ -158,10 +131,14 @@ func (r *Renderer) renderStampImage(ctx *canvas.Context, img image.Image, s Stam
 	if r.decodeImages {
 		img = pixels
 	}
+	if img.Bounds().Dx() <= 0 || img.Bounds().Dy() <= 0 {
+		return
+	}
 	box := s.Box
-	var clip *canvas.Path
+	clip := parentClip
 	if s.Clip != nil {
-		clip = canvas.Rectangle(s.Clip.W, s.Clip.H).Translate(box.X+s.Clip.X, pageH-box.Y-s.Clip.Y-s.Clip.H)
+		rect := canvas.Rectangle(s.Clip.W, s.Clip.H).Translate(box.X+s.Clip.X, pageH-box.Y-s.Clip.Y-s.Clip.H)
+		clip = r.intersectCachedClipPath(clip, rect)
 	}
 	matrix := canvas.Identity.Translate(box.X, pageH-box.Y-box.H).Scale(box.W/float64(img.Bounds().Dx()), box.H/float64(img.Bounds().Dy()))
 	r.drawClippedImage(ctx, img, clip, matrix)

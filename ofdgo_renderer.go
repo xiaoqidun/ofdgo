@@ -58,6 +58,7 @@ type Renderer struct {
 	textContentOnly       bool
 	knownSVGResources     map[string]bool
 	backends              RenderBackends
+	rasterDisabled        bool
 	backendStates         map[any]any
 	sharedBackendStates   map[any]any
 	resolvedFonts         map[resolvedFontKey]resolvedFontResult
@@ -95,6 +96,7 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	maps.Copy(reader.drawParamCache, drawParams)
 	maps.Copy(reader.compositeGraphicUnitCache, composites)
 	next := NewRenderer(reader, WithDPI(r.DPI), WithAnnotations(r.RenderAnnotations), WithRenderBackends(r.backends), WithFontDirs(r.fontDirs...), WithFontFS(r.fontFS...))
+	next.rasterDisabled = r.rasterDisabled
 	next.Compression = r.Compression
 	next.OutputContext = ctx
 	next.TransparentBackground = r.TransparentBackground
@@ -412,6 +414,7 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 		opts = append(opts, WithFontFS(r.fontFS...))
 	}
 	renderer := NewRenderer(reader, opts...)
+	renderer.rasterDisabled = r.rasterDisabled
 	renderer.printing = r.printing
 	renderer.sharedBackendStates = r.sharedBackendStates
 	renderer.fontPreparations = r.fontPreparations
@@ -473,6 +476,18 @@ func (r *Renderer) templateOrder(ref Template) int {
 		kind = "Background"
 	}
 	return layerOrder(kind)
+}
+
+// internalRasterBackend 获取矢量导出内部局部采样可用的光栅后端
+// 返回: RasterBackend 光栅后端，未配置且非仅禁用图像输出时为nil
+func (r *Renderer) internalRasterBackend() RasterBackend {
+	if r.backends.Raster != nil {
+		return r.backends.Raster
+	}
+	if r.rasterDisabled {
+		return CanvasBackend{}
+	}
+	return nil
 }
 
 // layerOrder 获取图层类型的绘制顺序

@@ -212,10 +212,8 @@ func SignEditorToContext(ctx context.Context, writer io.Writer, editor *Editor, 
 	if writer == nil || editor == nil {
 		return 0, fmt.Errorf("nil signature editor or writer")
 	}
-	if editor.source != nil && editor.source.reader != nil {
-		if err := sameOutputFile(editor.source.reader.sourceFile, writer); err != nil {
-			return 0, err
-		}
+	if err := sameOutputFile(editor.sourceFile, writer); err != nil {
+		return 0, err
 	}
 	if options.Encryption == nil && editor.encryption != nil && editor.encryption.options == nil {
 		return 0, ErrEncryptionPolicyRequired
@@ -803,8 +801,11 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, over
 	}
 	refs := SignatureReferences{CheckMethod: identity.digest}
 	var allowed map[string]bool
-	if len(scoped.OFD.DocBody) > 1 && !options.Lock {
+	if len(scoped.OFD.DocBody) > 1 {
 		allowed = map[string]bool{"OFD.xml": true}
+		if cover := strings.TrimSpace(scoped.OFD.DocBody[index].DocInfo.Cover); cover != "" {
+			allowed[cleanPackagePath(resolveResourcePath("OFD.xml", "", cover))] = true
+		}
 		docRoot := cleanPackagePath(scoped.documentRoot)
 		if docRoot == "" || docRoot == "." {
 			docRoot, err = scoped.DocumentRootContext(ctx)
@@ -838,6 +839,9 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, over
 		}
 		if kind == SignTypeSeal {
 			allowed[sealPath] = true
+		}
+		if options.Lock {
+			allowed[listPath] = true
 		}
 	}
 	names := make([]string, 0, len(scoped.fileNames))

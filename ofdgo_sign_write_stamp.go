@@ -74,11 +74,11 @@ func (r *Reader) SignaturePageStamps(pages []int, box Box) ([]SignatureStamp, er
 }
 
 // SignatureSeamStamps 生成页面右侧的等宽骑缝印章位置
-// 页码从1开始，按传入顺序分割同一印章；box.X为右侧内缩，Y为纵坐标，W/H为完整印章尺寸
+// 页码从1开始，按传入顺序分割同一印章；box.X为右侧内缩，Y为顶部偏移，W/H为完整印章尺寸
 // 入参: pages 至少两页且不重复, box 印章参数，单位毫米
 // 返回: []SignatureStamp 可传入签署选项的位置, error 错误信息
 func (r *Reader) SignatureSeamStamps(pages []int, box Box) ([]SignatureStamp, error) {
-	if r == nil || len(pages) < 2 || !signatureWriteBoxValid(box) || box.X < 0 {
+	if r == nil || len(pages) < 2 || !signatureWriteBoxValid(box) || box.X < 0 || box.Y < 0 {
 		return nil, fmt.Errorf("invalid seam stamp parameters")
 	}
 	doc, err := r.Doc()
@@ -97,12 +97,12 @@ func (r *Reader) SignatureSeamStamps(pages []int, box Box) ([]SignatureStamp, er
 		if err != nil {
 			return nil, err
 		}
-		physical, err := ParseBox(area.PhysicalBox)
+		physical, err := parsePageAreaBox(area)
 		if err != nil {
 			return nil, err
 		}
 		clip := Box{X: float64(i) * width, W: width, H: box.H}
-		boundary := Box{X: physical.X + physical.W - box.X - width - clip.X, Y: box.Y, W: box.W, H: box.H}
+		boundary := Box{X: physical.X + physical.W - box.X - width - clip.X, Y: physical.Y + box.Y, W: box.W, H: box.H}
 		stamps = append(stamps, SignatureStamp{PageRef: doc.Pages.Page[page-1].ID, Boundary: signatureWriteBox(boundary), Clip: signatureWriteBox(clip)})
 	}
 	return signatureWriteStamps(r, stamps, true)
@@ -414,9 +414,9 @@ func signatureWriteStamps(r *Reader, stamps []SignatureStamp, seal bool) ([]Sign
 		if err != nil {
 			return nil, err
 		}
-		page, err := ParseBox(area.PhysicalBox)
-		if err != nil || !signatureWriteBoxValid(page) {
-			return nil, fmt.Errorf("invalid stamp page area")
+		page, err := parsePageAreaBox(area)
+		if err != nil {
+			return nil, err
 		}
 		if visible.X < page.X-1e-9 || visible.Y < page.Y-1e-9 || visible.X+visible.W > page.X+page.W+1e-9 || visible.Y+visible.H > page.Y+page.H+1e-9 {
 			return nil, fmt.Errorf("stamp is outside page %d", position.Page)

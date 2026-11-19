@@ -216,8 +216,10 @@ func (e *Editor) ReplaceDrawParam(ctx context.Context, id string, draw DrawParam
 
 // resourceStyleReference 保存资源依赖及可选的类型要求，不持有XML节点
 type resourceStyleReference struct {
-	key  string
-	kind string
+	scope string
+	key   string
+	kind  string
+	exact bool
 }
 
 // styleDefinition 从声明原文解码样式定义，补齐继承的XML命名空间
@@ -265,7 +267,7 @@ func (e *Editor) importResourceStyle(ctx context.Context, create func(*Editor) (
 	if err != nil {
 		return "", err
 	}
-	if err := validateResourceStyleGraph(ctx, catalog, id, nil); err != nil {
+	if err := validateResourceStyleGraph(ctx, catalog, "", id, nil); err != nil {
 		return "", err
 	}
 	return id, e.commitResourceSnapshot(ctx, reader)
@@ -452,7 +454,7 @@ func replaceResourceStyle(ctx context.Context, catalog *resourceCatalog, item Re
 		return fmt.Errorf("external draw parameter cannot be replaced")
 	}
 	changes[target.file.name] = editorPatchXML(target.file.data, []editorXMLPatch{{target.node.start, target.node.end, fragment}})
-	if err := validateResourceStyleGraph(ctx, catalog, item.ID, changes); err != nil {
+	if err := validateResourceStyleGraph(ctx, catalog, target.file.name, item.ID, changes); err != nil {
 		return err
 	}
 	return invalidateResourcePreviews(ctx, catalog.scan, changes, item.ID)
@@ -519,9 +521,9 @@ func validateResourceColors(ctx context.Context, catalog *resourceCatalog, space
 
 // validateResourceStyleGraph 检查替换定义的传递依赖，拒绝缺失资源、错误类型及跨底纹复合资源的循环
 // 逐文件收集依赖后统一校验，不同时保留所有结构文件的XML树
-// 入参: ctx 取消上下文, catalog 当前目录, id 替换标识, changes 待提交修改
+// 入参: ctx 取消上下文, catalog 当前目录, targetFile 目标定义所在资源文件，空值使用文档级作用域, id 替换标识, changes 待提交修改
 // 返回: error 资源引用或循环错误
-func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, id string, changes map[string][]byte) error {
+func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, targetFile, id string, changes map[string][]byte) error {
 	types := make(map[string]string)
 	graph := make(map[string][]resourceStyleReference)
 	for name, file := range catalog.scan.files {
@@ -533,16 +535,18 @@ func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, i
 		if err != nil {
 			return err
 		}
-		types["file/"+name] = "File"
+		cleanName := cleanPackagePath(name)
+		types["file/"+cleanName] = "File"
 		if root.matchesOFD("Res") {
 			for _, group := range root.children {
 				for _, node := range group.children {
 					if node.matchesOFD(editorResourceElement(group.name.Local)) {
 						key := editorResourceID(node.attr("ID"))
-						if key == "" || types[key] != "" {
+						resKey := cleanName + "\x00" + key
+						if key == "" || types[resKey] != "" {
 							return fmt.Errorf("invalid or duplicate resource ID %q", key)
 						}
-						types[key] = node.name.Local
+						types[resKey] = node.name.Local
 						location := ""
 						if node.matchesOFD("CompositeGraphicUnit") {
 							location = node.attr("BaseLoc")
@@ -550,8 +554,8 @@ func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, i
 							location = node.attr("Link")
 						}
 						if location != "" {
-							file := "file/" + resolveResourcePath(name, root.attr("BaseLoc"), location)
-							graph[key] = append(graph[key], resourceStyleReference{key: file})
+							extFile := "file/" + cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), location))
+							graph[resKey] = append(graph[resKey], resourceStyleReference{key: extFile, exact: true})
 						}
 					}
 				}
@@ -565,24 +569,29 @@ func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, i
 			if !node.matchesOFD(node.name.Local) {
 				return nil
 			}
-			owner := resourceReferenceOwner(node)
-			if !root.matchesOFD("Res") {
-				owner = "file/" + name
+			owner := "file/" + cleanName
+			if root.matchesOFD("Res") {
+				owner = ""
+				if ownerID := resourceReferenceOwner(node); ownerID != "" {
+					owner = cleanName + "\x00" + ownerID
+				}
 			}
-			if slices.Contains([]string{"Thumbnail", "Substitution"}, node.name.Local) {
-				graph[owner] = append(graph[owner], resourceStyleReference{key: editorResourceID(editorImportText(data, node))})
-			}
-			for _, attr := range node.attrs {
-				if attr.Name.Space == "" && attr.Value != "" && slices.Contains([]string{"Relative", "DrawParam", "ColorSpace", "Font", "ResourceID", "ImageMask", "Substitution", "Thumbnail"}, attr.Name.Local) {
-					key := editorResourceID(attr.Value)
-					kind := ""
-					switch attr.Name.Local {
-					case "Relative", "DrawParam":
-						kind = "DrawParam"
-					case "ColorSpace", "Font":
-						kind = attr.Name.Local
+			if owner != "" {
+				if slices.Contains([]string{"Thumbnail", "Substitution"}, node.name.Local) {
+					graph[owner] = append(graph[owner], resourceStyleReference{scope: cleanName, key: editorResourceID(editorImportText(data, node))})
+				}
+				for _, attr := range node.attrs {
+					if attr.Name.Space == "" && attr.Value != "" && slices.Contains([]string{"Relative", "DrawParam", "ColorSpace", "Font", "ResourceID", "ImageMask", "Substitution", "Thumbnail"}, attr.Name.Local) {
+						key := editorResourceID(attr.Value)
+						kind := ""
+						switch attr.Name.Local {
+						case "Relative", "DrawParam":
+							kind = "DrawParam"
+						case "ColorSpace", "Font":
+							kind = attr.Name.Local
+						}
+						graph[owner] = append(graph[owner], resourceStyleReference{scope: cleanName, key: key, kind: kind})
 					}
-					graph[owner] = append(graph[owner], resourceStyleReference{key: key, kind: kind})
 				}
 			}
 			for _, child := range node.children {
@@ -602,23 +611,39 @@ func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, i
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		key := reference.key
-		if types[key] == "" || reference.kind != "" && types[key] != reference.kind || state[key] == 1 {
-			return fmt.Errorf("missing, mistyped or cyclic style resource %q", key)
+		nodeKey := reference.key
+		if !reference.exact {
+			nodeKey = ""
+			if reference.key != "" {
+				for _, resFile := range catalog.scopeForFile(reference.scope) {
+					candidate := resFile + "\x00" + reference.key
+					if types[candidate] != "" {
+						nodeKey = candidate
+						break
+					}
+				}
+			}
 		}
-		if state[key] == 2 {
+		if types[nodeKey] == "" || reference.kind != "" && types[nodeKey] != reference.kind || state[nodeKey] == 1 {
+			return fmt.Errorf("missing, mistyped or cyclic style resource %q", reference.key)
+		}
+		if state[nodeKey] == 2 {
 			return nil
 		}
-		state[key] = 1
-		for _, dependency := range graph[key] {
+		state[nodeKey] = 1
+		for _, dependency := range graph[nodeKey] {
 			if err := visit(dependency); err != nil {
 				return err
 			}
 		}
-		state[key] = 2
+		state[nodeKey] = 2
 		return nil
 	}
-	return visit(resourceStyleReference{key: id})
+	start := resourceStyleReference{scope: "", key: editorResourceID(id)}
+	if targetFile != "" {
+		start = resourceStyleReference{key: cleanPackagePath(targetFile) + "\x00" + editorResourceID(id), exact: true}
+	}
+	return visit(start)
 }
 
 // drawParamXML 读取绘制参数原文，保留复杂颜色、扩展属性及命名空间

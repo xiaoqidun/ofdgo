@@ -420,18 +420,18 @@ func unwrapEncryptionKey(seed encryptionSeed, settings readerOptions, passwordKe
 			if credential.UserName != "" && credential.UserName != user.Name {
 				continue
 			}
-			wrapped, err := base64.StdEncoding.DecodeString(user.Key)
+			wrapped, err := decodeEncryptionBase64(user.Key)
 			if err != nil {
 				return nil, nil, -1, ErrInvalidCredentials
 			}
-			iv, err := base64.StdEncoding.DecodeString(user.IV)
-			if user.IV == "" {
+			iv, err := decodeEncryptionBase64(user.IV)
+			if err == nil && len(iv) == 0 {
 				iv = make([]byte, 16)
 			}
 			if err != nil || len(iv) != 16 {
 				return nil, nil, -1, ErrInvalidCredentials
 			}
-			var key []byte
+			var key, certificate []byte
 			if seed.Method == "1.1.1" && len(credential.Password) != 0 {
 				kek := passwordKeys[credIndex]
 				if kek == nil {
@@ -444,8 +444,8 @@ func unwrapEncryptionKey(seed encryptionSeed, settings readerOptions, passwordKe
 				}
 				key, err = settings.provider.DecryptSM4(kek, iv, wrapped)
 			} else if seed.Method == "1.1.2" && credential.Decrypter != nil {
-				certificate, decodeErr := base64.StdEncoding.DecodeString(user.Certificate)
-				if decodeErr != nil || len(certificate) == 0 {
+				certificate, err = decodeEncryptionBase64(user.Certificate)
+				if err != nil || len(certificate) == 0 {
 					return nil, nil, -1, ErrInvalidCredentials
 				}
 				if len(credential.Certificate) != 0 && !bytes.Equal(credential.Certificate, certificate) {
@@ -480,13 +480,20 @@ func inheritedEncryptionOptions(seed encryptionSeed, credential Credentials, pro
 		return options
 	}
 	for _, user := range seed.Users {
-		certificate, err := base64.StdEncoding.DecodeString(user.Certificate)
-		if err != nil {
+		certificate, err := decodeEncryptionBase64(user.Certificate)
+		if err != nil || len(certificate) == 0 {
 			return nil
 		}
 		options.Recipients = append(options.Recipients, EncryptionRecipient{UserName: user.Name, UserType: user.Role, Certificate: certificate})
 	}
 	return options
+}
+
+// decodeEncryptionBase64 过滤ASCII空白字符后解码Base64数据
+// 入参: value Base64编码文本
+// 返回: []byte 解码字节, error 解码错误
+func decodeEncryptionBase64(value string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(strings.ReplaceAll(strings.ReplaceAll(value, " ", ""), "\t", ""))
 }
 
 // encryptPackageToWriter 流式逐条加密阅读器中的包条目并直接写出ZIP归档

@@ -178,7 +178,7 @@ func (r *Reader) ExtractVersionContext(ctx context.Context, id string) (*Reader,
 	if err != nil {
 		return nil, err
 	}
-	next := &Reader{Path: r.Path, files: map[string][]byte{"OFD.xml": root}, encryption: r.encryption, resources: r.resources}
+	next := &Reader{Path: r.Path, sourceFile: r.sourceFile, files: map[string][]byte{"OFD.xml": root}, encryption: r.encryption, resources: r.resources}
 	for name := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err

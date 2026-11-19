@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/ecdsa"
 	"encoding/asn1"
 	"fmt"
@@ -372,19 +373,20 @@ func verifySESSignature(data, signedData []byte, options *signatureVerifyOptions
 	result.SignatureTime = sig.Time
 	result.DataHashChecked = true
 	result.DataHashOK = bytes.Equal(sig.DataHash, signSM3(signedData))
-	signPub, err := parseSM2PublicKeyFromCert(sig.Cert)
-	if err != nil {
-		return result, err
+	sealPub, sealErr := parseSM2PublicKeyFromCert(sig.Seal.Cert)
+	if sealErr == nil {
+		result.SealChecked = true
+		result.SealOK = verifySM2Signature(sealPub, nil, sig.Seal.SignData, sig.Seal.Signature)
 	}
-	sealPub, err := parseSM2PublicKeyFromCert(sig.Seal.Cert)
-	if err != nil {
-		return result, err
+	signPub, signErr := parseSM2PublicKeyFromCert(sig.Cert)
+	if signErr == nil {
+		result.SignedChecked = true
+		result.SignedOK = verifySM2Signature(signPub, nil, sig.ToSign, sig.Signature)
 	}
-	result.SignedChecked = true
-	result.SignedOK = verifySM2Signature(signPub, nil, sig.ToSign, sig.Signature)
-	result.SealChecked = true
-	result.SealOK = verifySM2Signature(sealPub, nil, sig.Seal.SignData, sig.Seal.Signature)
 	result.CertChecked = true
+	if err := cmp.Or(signErr, sealErr); err != nil {
+		return result, err
+	}
 	result.CertOK = sesCertInList(sig.Cert, sig.Seal.CertList)
 	return result, nil
 }

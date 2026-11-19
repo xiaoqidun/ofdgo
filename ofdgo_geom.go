@@ -15,7 +15,9 @@
 package ofdgo
 
 import (
+	"cmp"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -51,7 +53,7 @@ func ParseBox(s string) (Box, error) {
 			return Box{}, fmt.Errorf("invalid box: %s", s)
 		}
 		value, err := strconv.ParseFloat(part, 64)
-		if err != nil {
+		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
 			return Box{}, fmt.Errorf("invalid box: %s", s)
 		}
 		values[i] = value
@@ -220,4 +222,16 @@ func parseInts(s string) []int {
 		}
 	}
 	return result
+}
+
+// parsePageAreaBox 按OFD页面区域回退规则解析正有限尺寸的页面边界框
+// 入参: area 页面区域声明
+// 返回: Box 页面边界框, error 解析或尺寸无效错误
+func parsePageAreaBox(area PageArea) (Box, error) {
+	raw := cmp.Or(strings.TrimSpace(area.PhysicalBox), strings.TrimSpace(area.ApplicationBox), strings.TrimSpace(area.ContentBox), "0 0 210 297")
+	box, err := ParseBox(raw)
+	if err != nil || box.W <= 0 || box.H <= 0 {
+		return Box{}, fmt.Errorf("invalid page box: %s", raw)
+	}
+	return box, nil
 }

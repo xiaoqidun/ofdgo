@@ -17,7 +17,9 @@ package ofdgo
 import (
 	"cmp"
 	"context"
+	"encoding/xml"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 
@@ -310,9 +312,13 @@ func (e *Editor) AlignObjects(page int, ids []string, alignment string) error {
 	if err != nil {
 		return err
 	}
-	target, _ := ParseBox(e.pages[page].Area.PhysicalBox)
-	if len(objects) > 1 {
-		target = Box{}
+	var target Box
+	if len(objects) == 1 {
+		target, err = e.pageAreaBox(page)
+		if err != nil {
+			return err
+		}
+	} else {
 		for _, box := range boxes {
 			target = unionTextBox(target, box)
 		}
@@ -338,33 +344,14 @@ func (e *Editor) DeleteObjects(page int, ids []string) error {
 	if _, _, err := e.selectedObjects(page, ids); err != nil {
 		return err
 	}
-	entries := make(map[int]bool)
-	if e.source != nil {
-		index := e.richTextMetadataIndex()
-		for _, id := range ids {
-			if entry, ok := index.entries[editorResourceID(e.pages[page].ID)+"/"+editorResourceID(id)]; ok {
-				entries[entry.index] = true
-			}
-		}
-	}
-	if len(entries) == 0 {
+	if !e.hasRichTextMetadata(page, ids) {
 		return e.deleteObjects(page, ids)
 	}
-	order := make([]int, 0, len(entries))
-	for index := range entries {
-		order = append(order, index)
-	}
-	slices.Sort(order)
 	return e.Transaction(func(e *Editor) error {
-		if err := e.deleteObjects(page, ids); err != nil {
+		if err := e.cleanupRichTextMetadata(page, ids); err != nil {
 			return err
 		}
-		for _, index := range slices.Backward(order) {
-			if err := e.DeleteStructure(index); err != nil {
-				return err
-			}
-		}
-		return nil
+		return e.deleteObjects(page, ids)
 	})
 }
 
@@ -433,20 +420,34 @@ func (e *Editor) copyObjectsContext(ctx context.Context, page int, objects []Gra
 		return nil, err
 	}
 	defer e.bindPageIndex(page)()
+	prevMaxID, prevResCount, prevPromoted := e.maxID, len(e.resources), maps.Clone(e.promoted)
+	prevImages := maps.Clone(e.images)
+	committed := false
+	defer func() {
+		if !committed {
+			clear(e.resources[prevResCount:])
+			e.resources, e.maxID = e.resources[:prevResCount], prevMaxID
+			e.promoted, e.images = prevPromoted, prevImages
+		}
+	}()
+	dstScope := e.pageLocalScope(page)
 	prepared := make([]GraphicObject, len(objects))
 	origins := make([]*editorObjectOrigin, len(objects))
+	layerStyles := make([]string, len(objects))
 	result := make([]string, len(objects))
-	maximum := e.maxID + uint64(len(objects))
+	e.maxID += uint64(len(objects))
 	validation := &editorValidation{Editor: e}
 	for i, object := range objects {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		var srcScope []*parsedRes
 		restoreOrigin := func() {}
 		if origin := e.snapshotOrigin(object); origin != nil && origin.page != nil && origin.page.original != nil {
+			srcScope = origin.page.original.pageResources
 			restoreOrigin = e.bindPageResources(origin.page.original)
 		}
-		result[i] = formatUnitID(e.maxID + uint64(i) + 1)
+		result[i] = formatUnitID(prevMaxID + uint64(i) + 1)
 		copied, err := validation.prepareCopiedObject(result[i], object)
 		restoreOrigin()
 		if err != nil {
@@ -462,22 +463,30 @@ func (e *Editor) copyObjectsContext(ctx context.Context, page int, objects []Gra
 				return nil, err
 			}
 		}
-		prepared[i], origins[i], err = e.copyObjectOrigin(objects[i], object, &maximum)
+		prepared[i], origins[i], err = e.copyObjectOrigin(objects[i], object, &e.maxID)
 		if err != nil {
 			return nil, err
+		}
+		prepared[i], origins[i], err = e.remapCopiedObject(prepared[i], origins[i], srcScope, dstScope, page)
+		if err != nil {
+			return nil, err
+		}
+		layerStyles[i], err = e.copiedTargetLayerStyle(e.copiedLayerStyle(objects[i]), srcScope, dstScope)
+		if err != nil {
+			return nil, err
+		}
+		if origins[i] != nil && origins[i].node.parent != nil && origins[i].node.parent.name.Local == "Layer" && origins[i].node.parent.attr("DrawParam") != layerStyles[i] {
+			parentCopy := *origins[i].node.parent
+			parentCopy.attrs = slices.Clone(parentCopy.attrs)
+			parentCopy.attrs = slices.DeleteFunc(parentCopy.attrs, func(attr xml.Attr) bool { return attr.Name.Space == "" && attr.Name.Local == "DrawParam" })
+			if layerStyles[i] != "" {
+				parentCopy.attrs = append(parentCopy.attrs, xml.Attr{Name: xml.Name{Local: "DrawParam"}, Value: layerStyles[i]})
+			}
+			origins[i].node.parent = &parentCopy
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	if maximum > maxUnitID {
-		return nil, fmt.Errorf("MaxUnitID %d exceeds uint32 range", maximum)
-	}
-	e.maxID = maximum
-	for i, origin := range origins {
-		if origin != nil {
-			e.setObjectOrigin(result[i], origin)
-		}
 	}
 	layers := copyEditorPage(e.pages[page]).Content.Layer
 	target := 0
@@ -488,13 +497,13 @@ func (e *Editor) copyObjectsContext(ctx context.Context, page int, objects []Gra
 		target = len(layers) - 1
 	}
 	for i := 0; i < len(prepared); {
-		style := e.copiedLayerStyle(objects[i])
+		style := layerStyles[i]
 		if target == len(layers) || layers[target].DrawParam != style {
 			layers = append(layers, Layer{ID: e.nextID(), Type: "Body", DrawParam: style})
 			target = len(layers) - 1
 		}
 		end := i + 1
-		for end < len(prepared) && e.copiedLayerStyle(objects[end]) == style {
+		for end < len(prepared) && layerStyles[end] == style {
 			end++
 		}
 		if len(layers[target].Objects) == 0 {
@@ -504,6 +513,15 @@ func (e *Editor) copyObjectsContext(ctx context.Context, page int, objects []Gra
 		}
 		i = end
 	}
+	if e.maxID > maxUnitID {
+		return nil, fmt.Errorf("MaxUnitID %d exceeds uint32 range", e.maxID)
+	}
+	for i, origin := range origins {
+		if origin != nil {
+			e.setObjectOrigin(result[i], origin)
+		}
+	}
+	committed = true
 	e.replacePreparedLayers(page, layers)
 	return result, nil
 }
@@ -905,6 +923,90 @@ func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) 
 	return boxes, nil
 }
 
+// hasRichTextMetadata 判断指定页面的图元列表是否关联富文本标引
+// 入参: page 页面索引, ids 图元标识列表
+// 返回: bool 是否存在富文本标引
+func (e *Editor) hasRichTextMetadata(page int, ids []string) bool {
+	if e.source == nil {
+		return false
+	}
+	pageKey := editorResourceID(e.pages[page].ID)
+	index := e.richTextMetadataIndex()
+	for _, id := range ids {
+		if _, ok := index.entries[pageKey+"/"+editorResourceID(id)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// cleanupRichTextMetadata 级联清理被销毁或解组图元关联的富文本标引
+// 入参: page 页面索引, ids 被移除或解组的外层图元标识列表
+// 返回: error 标引编辑或删除错误
+func (e *Editor) cleanupRichTextMetadata(page int, ids []string) error {
+	if e.source == nil {
+		return nil
+	}
+	pageKey := editorResourceID(e.pages[page].ID)
+	index := e.richTextMetadataIndex()
+	removed := make(map[string]bool, len(ids))
+	entries := make(map[int]bool)
+	for _, id := range ids {
+		objKey := editorResourceID(id)
+		if objKey == "" {
+			continue
+		}
+		removed[objKey] = true
+		if entry, ok := index.entries[pageKey+"/"+objKey]; ok {
+			entries[entry.index] = true
+		}
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	links, err := structureRemapLinks(context.Background(), e.structureRemaps[pageKey])
+	if err != nil {
+		return err
+	}
+	order := slices.Sorted(maps.Keys(entries))
+	for _, tagIdx := range slices.Backward(order) {
+		empty := false
+		if err := e.editStructure(tagIdx, func(data []byte, _ *editorXML, tag CustomTag) ([]byte, error) {
+			kept := 0
+			updated, rwErr := rewriteStructureReferences(context.Background(), data, tag, func(pageID string, objIDs []string) (string, []string, error) {
+				if editorResourceID(pageID) != pageKey {
+					kept += len(objIDs)
+					return pageID, objIDs, nil
+				}
+				var remaining []string
+				for _, objectID := range objIDs {
+					if !richTextObjectRemoved(editorResourceID(objectID), links, removed) {
+						remaining = append(remaining, objectID)
+					}
+				}
+				kept += len(remaining)
+				return pageID, remaining, nil
+			})
+			if rwErr != nil {
+				return nil, rwErr
+			}
+			if kept == 0 {
+				empty = true
+				return data, nil
+			}
+			return updated, nil
+		}); err != nil {
+			return err
+		}
+		if empty {
+			if err := e.DeleteStructure(tagIdx); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // compareEditorPosition 比较对象在页面结构中的先后顺序
 // 入参: a 第一个对象的位置, b 第二个对象的位置
 // 返回: int 比较结果
@@ -1044,4 +1146,38 @@ func editorObjectID(object GraphicObject) string {
 		return object.CompositeGraphicUnit.ID
 	}
 	return ""
+}
+
+// richTextObjectRemoved 判断标引中的原图元标识或其重映射目标是否已全部被移除
+// 入参: rawKey 原始图元标识, links 图元编号重映射图, removed 本次移除的图元集合
+// 返回: bool 是否应当从标引中移除该引用
+func richTextObjectRemoved(rawKey string, links map[string][]string, removed map[string]bool) bool {
+	if rawKey == "" {
+		return false
+	}
+	if removed[rawKey] || len(links[rawKey]) == 0 {
+		return removed[rawKey]
+	}
+	seen := make(map[string]bool)
+	var allRemoved func(string) bool
+	allRemoved = func(cur string) bool {
+		if removed[cur] {
+			return true
+		}
+		if seen[cur] {
+			return true
+		}
+		seen[cur] = true
+		next := links[cur]
+		if len(next) == 0 {
+			return false
+		}
+		for _, target := range next {
+			if !allRemoved(target) {
+				return false
+			}
+		}
+		return true
+	}
+	return allRemoved(rawKey)
 }

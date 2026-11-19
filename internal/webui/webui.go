@@ -394,6 +394,9 @@ func (s *Session) Document(index int) (*Session, error) {
 	if next.fontFS != nil {
 		next.Renderer.SetFontFS(next.fontFS)
 	}
+	if s.editor == nil {
+		return next, nil
+	}
 	next.editor, err = reader.Editor()
 	if err != nil {
 		return nil, err
@@ -2658,9 +2661,10 @@ func (e *businessEngine) linkResults(source []ofdgo.PageLink) ([]any, error) {
 			}
 		}
 		if dest := link.Dest; dest != nil {
-			item["dest"] = map[string]any{"type": dest.Type, "pageID": e.resolvedPageID(dest.PageID), "left": dest.Left, "top": dest.Top,
-				"right": dest.Right, "bottom": dest.Bottom, "zoom": dest.Zoom,
-				"omitLeft": dest.OmitLeft, "omitTop": dest.OmitTop, "omitZoom": dest.OmitZoom}
+			view := e.viewportLinkDest(*dest)
+			item["dest"] = map[string]any{"type": view.Type, "pageID": view.PageID, "left": view.Left, "top": view.Top,
+				"right": view.Right, "bottom": view.Bottom, "zoom": view.Zoom,
+				"omitLeft": view.OmitLeft, "omitTop": view.OmitTop, "omitZoom": view.OmitZoom}
 		}
 		links[i] = item
 	}
@@ -3725,8 +3729,7 @@ func (e *businessEngine) editorAppearance(item map[string]any, object ofdgo.Grap
 		if action.Event == "CLICK" && (action.URI != nil || action.Goto != nil) {
 			links++
 			if action.Goto != nil && action.Goto.Dest != nil {
-				gotoAction, dest := *action.Goto, *action.Goto.Dest
-				dest.PageID = e.resolvedPageID(dest.PageID)
+				gotoAction, dest := *action.Goto, e.viewportDest(*action.Goto.Dest)
 				gotoAction.Dest, action.Goto = &dest, &gotoAction
 			}
 			if data, err := json.Marshal(action); err == nil {
@@ -5915,6 +5918,9 @@ func (e *businessEngine) styleObjects(args []platformValue) (any, error) {
 		}
 	}
 	return e.changeObjects(func() error {
+		if appearance.Link != nil && appearance.Link.Dest != nil {
+			*appearance.Link.Dest = e.pageDestFromViewport(*appearance.Link.Dest)
+		}
 		if border != nil {
 			if err := e.resolveStylePaint((*ofdgo.FillColor)(border.Color)); err != nil {
 				return err
@@ -6612,6 +6618,12 @@ func (e *businessEngine) documentNavigation(args []platformValue) (any, error) {
 	switch args[0].String() {
 	case "bookmarks", "actions":
 		bookmarks, err := e.currentSession.Reader.Bookmarks()
+		if err == nil {
+			bookmarks = slices.Clone(bookmarks)
+			for i := range bookmarks {
+				bookmarks[i].Dest = e.viewportLinkDest(bookmarks[i].Dest)
+			}
+		}
 		return map[string]any{"bookmarks": bookmarks}, err
 	case "extensions":
 		extensions, err := e.currentSession.Reader.Extensions()
@@ -6635,8 +6647,9 @@ func (e *businessEngine) changeBookmark(args []platformValue) (any, error) {
 	return e.changeAtomicObjects(func() error {
 		switch args[0].String() {
 		case "add":
-			return e.currentEditor.AddBookmark(bookmark.Name, bookmark.Dest)
+			return e.currentEditor.AddBookmark(bookmark.Name, e.pageDestFromViewport(bookmark.Dest))
 		case "update":
+			bookmark.Dest = e.pageDestFromViewport(bookmark.Dest)
 			return e.currentEditor.UpdateBookmark(args[1].String(), bookmark)
 		case "delete":
 			return e.currentEditor.DeleteBookmark(args[1].String())
@@ -6653,18 +6666,29 @@ func (e *businessEngine) actionList(args []platformValue) (any, error) {
 	if e.currentEditor == nil || len(args) != 4 {
 		return nil, fmt.Errorf("invalid action selection")
 	}
+	var actions []ofdgo.Action
+	var err error
 	switch args[0].String() {
 	case "document":
-		return e.currentEditor.DocumentActions(), nil
+		actions = e.currentEditor.DocumentActions()
 	case "page":
-		return e.currentEditor.PageActions(args[1].Int())
+		actions, err = e.currentEditor.PageActions(args[1].Int())
 	case "object":
-		return e.currentEditor.ObjectActions(args[1].Int(), args[2].String())
+		actions, err = e.currentEditor.ObjectActions(args[1].Int(), args[2].String())
 	case "outline":
-		return e.currentEditor.OutlineActions(e.indexesFromJS(args[3]))
+		actions, err = e.currentEditor.OutlineActions(e.indexesFromJS(args[3]))
 	default:
 		return nil, fmt.Errorf("invalid action scope")
 	}
+	if err != nil {
+		return nil, err
+	}
+	for i := range actions {
+		if actions[i].Goto != nil && actions[i].Goto.Dest != nil {
+			*actions[i].Goto.Dest = e.viewportDest(*actions[i].Goto.Dest)
+		}
+	}
+	return actions, nil
 }
 
 // changeActions 将动作列表交给库层校验和原子提交
@@ -6679,6 +6703,11 @@ func (e *businessEngine) changeActions(args []platformValue) (any, error) {
 		return nil, err
 	}
 	return e.changeAtomicObjects(func() error {
+		for i := range actions {
+			if actions[i].Goto != nil && actions[i].Goto.Dest != nil {
+				*actions[i].Goto.Dest = e.pageDestFromViewport(*actions[i].Goto.Dest)
+			}
+		}
 		if err := e.currentEditor.ValidateActionTargets(e.operationContext(), actions); err != nil {
 			return err
 		}
@@ -6952,6 +6981,9 @@ func (e *businessEngine) selectDocument(args []platformValue) (any, error) {
 		e.pendingImport = nil
 	}
 	e.copiedObjects, e.copiedStyle = nil, nil
+	if e.currentEditor == nil {
+		return e.currentSession.Summary(), nil
+	}
 	return e.editorSummary(), nil
 }
 
@@ -7747,15 +7779,11 @@ func (e *businessEngine) previewSignatureSeal(args []platformValue) (any, error)
 	}
 	pages := make([]map[string]any, 0, len(indices))
 	for _, index := range indices {
-		area, err := e.currentSession.Reader.PageArea(e.currentSession.doc.Pages.Page[index])
+		box, err := e.currentSession.pageBox(index, nil)
 		if err != nil {
 			return nil, err
 		}
-		box, err := ofdgo.ParseBox(area.PhysicalBox)
-		if err != nil {
-			return nil, err
-		}
-		pages = append(pages, map[string]any{"index": index, "x": box.X, "y": box.Y, "width": box.W, "height": box.H})
+		pages = append(pages, map[string]any{"index": index, "width": box.W, "height": box.H})
 	}
 	editor := ofdgo.NewEditor()
 	editor.SetResources(e.resources)
@@ -7800,15 +7828,27 @@ func (e *businessEngine) signatureStampsFromJS(input platformValue) ([]ofdgo.Sig
 	if err != nil {
 		return nil, err
 	}
-	pages := make([]int, len(indices))
-	for i, index := range indices {
-		pages[i] = index + 1
-	}
 	box := ofdgo.Box{X: input.Get("x").Float(), Y: input.Get("y").Float(), W: input.Get("width").Float(), H: input.Get("height").Float()}
 	switch input.Get("placement").String() {
 	case "normal":
-		return e.currentSession.Reader.SignaturePageStamps(pages, box)
+		stamps := make([]ofdgo.SignatureStamp, 0, len(indices))
+		for _, index := range indices {
+			pageBox, err := e.currentSession.pageBox(index, nil)
+			if err != nil {
+				return nil, err
+			}
+			pageStamps, err := e.currentSession.Reader.SignaturePageStamps([]int{index + 1}, ofdgo.Box{X: pageBox.X + box.X, Y: pageBox.Y + box.Y, W: box.W, H: box.H})
+			if err != nil {
+				return nil, err
+			}
+			stamps = append(stamps, pageStamps...)
+		}
+		return stamps, nil
 	case "seam":
+		pages := make([]int, len(indices))
+		for i, index := range indices {
+			pages[i] = index + 1
+		}
 		return e.currentSession.Reader.SignatureSeamStamps(pages, box)
 	default:
 		return nil, fmt.Errorf("invalid stamp placement")
@@ -8284,6 +8324,67 @@ func (e *businessEngine) pageTransformFromViewport(page int, dx, dy, scale float
 		return 0, 0, err
 	}
 	return dx + (1-scale)*pageBox.X, dy + (1-scale)*pageBox.Y, nil
+}
+
+// viewportLinkDest 将链接或书签目标换算为视口坐标，PDF导入目标保留原坐标语义
+// 入参: dest 库层跳转目标
+// 返回: ofdgo.Dest 视口跳转目标
+func (e *businessEngine) viewportLinkDest(dest ofdgo.Dest) ofdgo.Dest {
+	if _, ok := e.currentSession.Reader.PDFDestination(dest); e.pdf != nil || ok {
+		dest.PageID = e.resolvedPageID(dest.PageID)
+		return dest
+	}
+	return e.viewportDest(dest)
+}
+
+// viewportDest 将页面物理坐标下的跳转目标换算为视口相对坐标
+// 入参: dest 页面坐标跳转目标
+// 返回: ofdgo.Dest 视口坐标跳转目标
+func (e *businessEngine) viewportDest(dest ofdgo.Dest) ofdgo.Dest {
+	return e.translateDest(dest, true)
+}
+
+// pageDestFromViewport 将视口相对坐标下的跳转目标还原为页面物理坐标
+// 入参: dest 视口坐标跳转目标
+// 返回: ofdgo.Dest 页面坐标跳转目标
+func (e *businessEngine) pageDestFromViewport(dest ofdgo.Dest) ofdgo.Dest {
+	return e.translateDest(dest, false)
+}
+
+// translateDest 在页面物理坐标与视口相对坐标之间双向换算跳转目标
+// 入参: dest 跳转目标, toViewport 是否换算为视口坐标
+// 返回: ofdgo.Dest 换算后的跳转目标
+func (e *businessEngine) translateDest(dest ofdgo.Dest, toViewport bool) ofdgo.Dest {
+	targetIdx := e.currentSession.doc.PageIndex(dest.PageID)
+	if targetIdx < 0 {
+		return dest
+	}
+	var targetBox ofdgo.Box
+	var err error
+	if toViewport {
+		dest.PageID = e.currentSession.doc.Pages.Page[targetIdx].ID
+		targetBox, err = e.currentSession.pageBox(targetIdx, nil)
+	} else {
+		targetBox, err = e.editorPageBox(targetIdx)
+	}
+	if err != nil {
+		return dest
+	}
+	sign := 1.0
+	if toViewport {
+		sign = -1.0
+	}
+	if !dest.OmitLeft {
+		dest.Left += sign * targetBox.X
+	}
+	if !dest.OmitTop {
+		dest.Top += sign * targetBox.Y
+	}
+	if dest.Type == "FitR" {
+		dest.Right += sign * targetBox.X
+		dest.Bottom += sign * targetBox.Y
+	}
+	return dest
 }
 
 // pageSearchMatch 保存批量搜索匹配及其零基页面索引
@@ -9036,22 +9137,36 @@ func translateSVGPath(path string, dx, dy float64) string {
 			i++
 			continue
 		}
+		if (cmd == 'A' || cmd == 'a') && (argIdx%7 == 3 || argIdx%7 == 4) && (ch == '0' || ch == '1') {
+			out.WriteByte(' ')
+			out.WriteByte(ch)
+			argIdx++
+			i++
+			continue
+		}
 		start := i
 		if path[i] == '+' || path[i] == '-' {
 			i++
 		}
 		hasDot := false
+		hasExp := false
 		for i < len(path) {
 			c := path[i]
 			if c >= '0' && c <= '9' {
 				i++
-			} else if c == '.' && !hasDot {
+			} else if c == '.' && !hasDot && !hasExp {
 				hasDot = true
 				i++
-			} else if (c == 'e' || c == 'E') && i+1 < len(path) {
-				i++
-				if path[i] == '+' || path[i] == '-' {
-					i++
+			} else if (c == 'e' || c == 'E') && !hasExp && i+1 < len(path) {
+				next := i + 1
+				if path[next] == '+' || path[next] == '-' {
+					next++
+				}
+				if next < len(path) && path[next] >= '0' && path[next] <= '9' {
+					hasExp = true
+					i = next + 1
+				} else {
+					break
 				}
 			} else {
 				break

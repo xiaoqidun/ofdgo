@@ -158,41 +158,49 @@ func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
 // 入参: page 页面索引, id 组合标识
 // 返回: []string 展开后的对象标识, error 错误信息
 func (e *Editor) UngroupObject(page int, id string) ([]string, error) {
-	defer e.bindPageIndex(page)()
-	_, indexes, err := e.selectedObjects(page, []string{id})
-	if err != nil {
-		return nil, err
-	}
-	origin := e.objectOrigin(id)
-	if origin == nil || !editorContainerOrderable(origin.node.parent) {
-		return nil, fmt.Errorf("group container cannot be removed without losing attributes")
-	}
-	reader, renderer, root, _, err := e.compositeScope(page, ObjectPath{ID: id})
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
 	var result []string
-	err = e.ungroupCompositeNode(renderer, root, func(objects []GraphicObject, remaps []map[string]string) error {
-		e.restoreUngroupedLayouts(e.pages[page].ID, objects, remaps)
-		origins := make(map[string]*editorObjectOrigin, len(objects))
-		for i := range objects {
-			object := &objects[i]
-			copy := *object.origin
-			copy.node.parent = origin.node.parent
-			copy.object.TextObject.layout = object.TextObject.layout
-			copy.object.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
-			object.origin = nil
-			id := editorObjectID(*object)
-			origins[id] = &copy
-			result = append(result, id)
+	err := e.Transaction(func(e *Editor) error {
+		defer e.bindPageIndex(page)()
+		_, indexes, err := e.selectedObjects(page, []string{id})
+		if err != nil {
+			return err
 		}
-		return e.remapStructureObjects(page, remaps, func() error {
-			e.replaceGroup(page, indexes, objects, origins)
-			return nil
+		origin := e.objectOrigin(id)
+		if origin == nil || !editorContainerOrderable(origin.node.parent) {
+			return fmt.Errorf("group container cannot be removed without losing attributes")
+		}
+		reader, renderer, root, _, err := e.compositeScope(page, ObjectPath{ID: id})
+		if err != nil {
+			return err
+		}
+		defer reader.Close()
+		return e.ungroupCompositeNode(renderer, root, func(objects []GraphicObject, remaps []map[string]string) error {
+			e.restoreUngroupedLayouts(e.pages[page].ID, objects, remaps)
+			origins := make(map[string]*editorObjectOrigin, len(objects))
+			for i := range objects {
+				object := &objects[i]
+				copy := *object.origin
+				copy.node.parent = origin.node.parent
+				copy.object.TextObject.layout = object.TextObject.layout
+				copy.object.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
+				object.origin = nil
+				objID := editorObjectID(*object)
+				origins[objID] = &copy
+				result = append(result, objID)
+			}
+			if err := e.cleanupRichTextMetadata(page, []string{id}); err != nil {
+				return err
+			}
+			return e.remapStructureObjects(page, remaps, func() error {
+				e.replaceGroup(page, indexes, objects, origins)
+				return nil
+			})
 		})
 	})
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // replaceGroup 原子替换同容器连续成员及原文来源，提交一次撤销记录

@@ -81,26 +81,36 @@ func (e *Editor) GroupCompositeObjects(page int, path ObjectPath, indexes []int)
 // 返回: []int 展开后的成员序号, error 错误信息
 func (e *Editor) UngroupCompositeObject(page int, path ObjectPath, index int) ([]int, error) {
 	var result []int
-	err := e.editCompositeObjects(page, path, []int{index}, func(renderer *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
-		node := nodes[0]
-		if !members[0].Capabilities.Order {
-			return fmt.Errorf("composite container cannot be reordered")
-		}
-		return e.ungroupCompositeNode(renderer, node, func(objects []GraphicObject, remaps []map[string]string) error {
-			node.owner.remaps = append(node.owner.remaps, remaps...)
-			var content []byte
-			for i, object := range objects {
-				content = append(content, object.origin.data...)
-				maps.Copy(node.owner.states, object.CompositeGraphicUnit.states)
-				node.owner.states[editorObjectID(object)] = object.state
-				result = append(result, index+i)
+	err := e.Transaction(func(e *Editor) error {
+		var outerID string
+		if err := e.editCompositeObjects(page, path, []int{index}, func(renderer *Renderer, nodes []*editorCompositeNode, members []CompositeMember) error {
+			node := nodes[0]
+			if !members[0].Capabilities.Order {
+				return fmt.Errorf("composite container cannot be reordered")
 			}
-			delete(node.owner.states, editorObjectID(node.object))
-			node.owner.patches = append(node.owner.patches, editorXMLPatch{node.span.start, node.span.end, content})
-			return nil
-		})
+			outerID = editorObjectID(node.object)
+			return e.ungroupCompositeNode(renderer, node, func(objects []GraphicObject, remaps []map[string]string) error {
+				node.owner.remaps = append(node.owner.remaps, remaps...)
+				var content []byte
+				for i, object := range objects {
+					content = append(content, object.origin.data...)
+					maps.Copy(node.owner.states, object.CompositeGraphicUnit.states)
+					node.owner.states[editorObjectID(object)] = object.state
+					result = append(result, index+i)
+				}
+				delete(node.owner.states, outerID)
+				node.owner.patches = append(node.owner.patches, editorXMLPatch{node.span.start, node.span.end, content})
+				return nil
+			})
+		}); err != nil {
+			return err
+		}
+		return e.cleanupRichTextMetadata(page, []string{outerID})
 	})
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // vectorInstance 将同一坐标系的内容封装为标准矢量资源，独立分配内部标识

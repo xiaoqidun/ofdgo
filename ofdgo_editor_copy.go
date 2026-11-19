@@ -16,11 +16,17 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
+	"image"
+	"path"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
+
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
 // editorClonePlans 仅共享类型的可变字段索引，不持有文档对象或资源
@@ -133,10 +139,404 @@ func (e *Editor) copyObjectOrigin(before, after GraphicObject, maximum *uint64) 
 	return result, &editorObjectOrigin{page: origin.page, data: data, node: root, object: result}, nil
 }
 
-// editorXMLRemapIDs 仅重写标准标识和指向副本内部的引用，保留扩展、文字和XML结构
-// 入参: data 独立片段, root 根节点, ids 原标识与新标识
-// 返回: []byte 修改后的片段, error 错误信息
-func editorXMLRemapIDs(data []byte, root *editorXML, ids map[string]string) ([]byte, error) {
+// copiedLayerStyle 保留复合对象和复杂路径的图层参数，普通对象使用已解析样式
+// 入参: object 对象
+// 返回: string 绘制参数标识
+func (e *Editor) copiedLayerStyle(object GraphicObject) string {
+	if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" || object.Type == "PathObject" {
+		if origin := e.snapshotOrigin(object); origin != nil {
+			for parent := origin.node.parent; parent != nil; parent = parent.parent {
+				if parent.name.Local == "Layer" {
+					id := parent.attr("DrawParam")
+					if object.Type == "PathObject" {
+						restore := func() {}
+						if origin.page != nil && origin.page.original != nil {
+							restore = e.bindPageResources(origin.page.original)
+						}
+						_, err := e.resolveEditorStyle(object, id)
+						restore()
+						if err == nil || editReason(err) != EditUnsupportedColor {
+							return ""
+						}
+					}
+					return id
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// copiedTargetLayerStyle 解析目标页面上的复制图层参数并在跨页局部冲突时克隆提升
+// 入参: style 源图层绘制参数标识, srcScope 源页面局部资源作用域, dstScope 目标页面局部资源作用域
+// 返回: string 目标页面可用的绘制参数标识, error 资源克隆错误
+func (e *Editor) copiedTargetLayerStyle(style string, srcScope, dstScope []*parsedRes) (string, error) {
+	if style == "" {
+		return "", nil
+	}
+	mapped, _, err := e.promoteScopedResource(style, "DrawParam", srcScope, dstScope, false, make(map[string]bool))
+	return mapped, err
+}
+
+// pageLocalScope 获取指定页面的局部资源列表
+// 入参: page 页面索引
+// 返回: []*parsedRes 页面局部资源作用域
+func (e *Editor) pageLocalScope(page int) []*parsedRes {
+	if len(e.pages[page].pageResources) > 0 {
+		return e.pages[page].pageResources
+	}
+	if e.source != nil {
+		if source := e.source.pages[e.pages[page].ID]; source != nil && source.original != nil {
+			return source.original.pageResources
+		}
+	}
+	return nil
+}
+
+// resolveScopeResourceFile 按局部作用域与文档公共资源优先级定位资源声明所在路径
+// 入参: scope 页面局部资源作用域, id 资源标识
+// 返回: string 命中的资源文件路径标识，未找到时为空
+func (e *Editor) resolveScopeResourceFile(scope []*parsedRes, id string) string {
+	for _, resource := range e.resources {
+		if resID := resource.id(); resID != "" && sameResourceID(resID, id) {
+			return "@editor/" + editorResourceID(id)
+		}
+	}
+	for _, parsed := range slices.Backward(scope) {
+		if parsedHasResource(parsed, id, "") {
+			return parsed.path
+		}
+	}
+	if e.source != nil {
+		reader := e.source.reader
+		common := e.source.document.CommonData
+		for _, list := range [][]string{common.DocumentRes, common.PublicRes} {
+			for _, loc := range slices.Backward(list) {
+				parsed, err := reader.parseResFileContext(context.Background(), reader.ResPath(loc))
+				if err == nil && parsedHasResource(parsed, id, "") {
+					return parsed.path
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// promoteScopedResource 在源页与目标页资源作用域不一致时将源资源克隆注册为独立文档资源
+// 入参: id 原资源标识, kind 期望资源类型, srcScope 源页面作用域, dstScope 目标页面作用域, forceDoc 是否作为文档级资源内部依赖, visiting 循环依赖检查集合
+// 返回: string 目标资源标识, bool 是否已重映射, error 读取、解析或循环错误
+func (e *Editor) promoteScopedResource(id, kind string, srcScope, dstScope []*parsedRes, forceDoc bool, visiting map[string]bool) (string, bool, error) {
+	key := editorResourceID(id)
+	if key == "" || e.source == nil {
+		return id, false, nil
+	}
+	srcFile := e.resolveScopeResourceFile(srcScope, key)
+	if srcFile == "" || strings.HasPrefix(srcFile, "@editor/") {
+		return id, false, nil
+	}
+	dstFile := e.resolveScopeResourceFile(dstScope, key)
+	docFile := e.resolveScopeResourceFile(nil, key)
+	if srcFile == dstFile && (!forceDoc || srcFile == docFile) {
+		return id, false, nil
+	}
+	cacheKey := srcFile + "\x00" + key
+	if cached := e.promoted[cacheKey]; cached != "" && strings.HasPrefix(e.resolveScopeResourceFile(nil, cached), "@editor/") {
+		return cached, true, nil
+	}
+	if visiting[cacheKey] {
+		return "", false, fmt.Errorf("cyclic resource reference %q", id)
+	}
+	visiting[cacheKey] = true
+	defer delete(visiting, cacheKey)
+	reader := e.source.reader
+	resData, err := reader.readFile(srcFile)
+	if err != nil {
+		return "", false, err
+	}
+	resRoot, err := parseEditorXML(resData)
+	if err != nil {
+		return "", false, err
+	}
+	var resNode *editorXML
+	var groupName string
+	for _, group := range resRoot.children {
+		elemName := editorResourceElement(group.name.Local)
+		if elemName == "" {
+			continue
+		}
+		for _, child := range group.children {
+			if child.matchesOFD(elemName) && sameResourceID(child.attr("ID"), key) {
+				if kind == "" || elemName == kind || (kind == "Image" || kind == "Audio" || kind == "Video") && elemName == "MultiMedia" {
+					resNode, groupName = child, group.name.Local
+					break
+				}
+				if resNode == nil {
+					resNode, groupName = child, group.name.Local
+				}
+			}
+		}
+		if resNode != nil && (kind == "" || editorResourceElement(groupName) == kind) {
+			break
+		}
+	}
+	if resNode == nil {
+		return "", false, fmt.Errorf("resource %q not found in %s", id, srcFile)
+	}
+	var innerSrcScope []*parsedRes
+	if srcFile != docFile {
+		innerSrcScope = srcScope
+		if len(innerSrcScope) == 0 {
+			if parsed, parseErr := reader.parseResFileContext(context.Background(), srcFile); parseErr == nil && parsed != nil {
+				innerSrcScope = []*parsedRes{parsed}
+			}
+		}
+	}
+	baseLoc := resRoot.attr("BaseLoc")
+	standalone, err := editorXMLStandalone(resData[resNode.start:resNode.end], resNode)
+	if err != nil {
+		return "", false, err
+	}
+	var newID string
+	switch groupName {
+	case "Fonts":
+		var f Font
+		if err := xml.Unmarshal(standalone, &f); err != nil {
+			return "", false, err
+		}
+		newID = e.nextID()
+		f.ID = newID
+		var res editorResource
+		if loc := strings.TrimSpace(f.FontFile); loc != "" {
+			fontPath := resolveResourcePath(srcFile, baseLoc, loc)
+			fontBytes, readErr := reader.readFile(fontPath)
+			if readErr != nil {
+				return "", false, readErr
+			}
+			resName := e.packageName("Res/Fonts/Font_" + newID + strings.ToLower(path.Ext(fontPath)))
+			f.FontFile = "/" + resName
+			res = editorResource{name: resName, data: fontBytes, font: &f}
+		} else {
+			f.FontFile = ""
+			res = editorResource{font: &f}
+		}
+		e.resources = append(e.resources, res)
+	case "MultiMedias":
+		mmRoot, parseErr := parseEditorXML(standalone)
+		if parseErr != nil {
+			return "", false, parseErr
+		}
+		standalone, _, err = e.remapXMLResources(standalone, mmRoot, innerSrcScope, dstScope, true, visiting)
+		if err != nil {
+			return "", false, err
+		}
+		var m MultiMedia
+		if err := xml.Unmarshal(standalone, &m); err != nil {
+			return "", false, err
+		}
+		newID = e.nextID()
+		m.ID = newID
+		mediaPath := resolveResourcePath(srcFile, baseLoc, strings.TrimSpace(m.MediaFile))
+		mediaBytes, readErr := reader.readFile(mediaPath)
+		if readErr != nil {
+			return "", false, readErr
+		}
+		dir, prefix := "Res/Images", "Image_"
+		if m.Type != "Image" {
+			dir, prefix = "Res/Media", "Media_"
+		}
+		resName := e.packageName(dir + "/" + prefix + newID + strings.ToLower(path.Ext(mediaPath)))
+		m.MediaFile = "/" + resName
+		e.resources = append(e.resources, editorResource{name: resName, data: mediaBytes, image: &m})
+		if m.Type == "Image" {
+			if cfg, _, cfgErr := baseimage.DecodeConfigData(mediaBytes); cfgErr == nil {
+				e.images[newID] = image.Pt(cfg.Width, cfg.Height)
+			}
+		}
+	case "ColorSpaces":
+		var cs ColorSpace
+		if err := xml.Unmarshal(standalone, &cs); err != nil {
+			return "", false, err
+		}
+		newID = e.nextID()
+		cs.ID = newID
+		cs.Palette = slices.Clone(cs.Palette)
+		res := editorResource{space: &cs}
+		if loc := strings.TrimSpace(cs.Profile); loc != "" {
+			profPath := resolveResourcePath(srcFile, baseLoc, loc)
+			profBytes, readErr := reader.readFile(profPath)
+			if readErr != nil {
+				return "", false, readErr
+			}
+			if parsedProf, profErr := parseColorProfile(cs.Type, profBytes); profErr == nil {
+				cs.profile = parsedProf
+			}
+			res.name = e.packageName("Res/ColorSpaces/ColorSpace_" + newID + ".icc")
+			res.data = profBytes
+			cs.Profile = "/" + res.name
+		}
+		e.resources = append(e.resources, res)
+	case "DrawParams":
+		if linkLoc := strings.TrimSpace(resNode.attr("Link")); linkLoc != "" {
+			extPath := resolveResourcePath(srcFile, baseLoc, linkLoc)
+			extData, readErr := reader.readFile(extPath)
+			if readErr != nil {
+				return "", false, readErr
+			}
+			extRoot, parseErr := parseEditorXML(extData)
+			if parseErr != nil {
+				return "", false, parseErr
+			}
+			standalone, err = editorXMLStandalone(extData[extRoot.start:extRoot.end], extRoot)
+			if err != nil {
+				return "", false, err
+			}
+			extRoot, err = parseEditorXML(standalone)
+			if err != nil {
+				return "", false, err
+			}
+			standalone, err = editorXMLAttribute(standalone, extRoot, "ID", key)
+			if err != nil {
+				return "", false, err
+			}
+			if rel := resNode.attr("Relative"); rel != "" {
+				extRoot, err = parseEditorXML(standalone)
+				if err != nil {
+					return "", false, err
+				}
+				standalone, err = editorXMLAttribute(standalone, extRoot, "Relative", rel)
+				if err != nil {
+					return "", false, err
+				}
+			}
+		}
+		var dp DrawParam
+		wrapped, objIDs, err := e.promoteXMLResource(standalone, groupName, &dp, innerSrcScope, dstScope, visiting)
+		if err != nil {
+			return "", false, err
+		}
+		newID = objIDs[key]
+		refs, err := editorResourceReferences(wrapped)
+		if err != nil {
+			return "", false, err
+		}
+		e.resources = append(e.resources, editorResource{name: e.packageName("Res/DrawParams/DrawParam_" + newID + ".xml"), data: wrapped, draw: &dp, references: refs})
+	case "CompositeGraphicUnits":
+		if extLoc := strings.TrimSpace(resNode.attr("BaseLoc")); extLoc != "" {
+			extPath := resolveResourcePath(srcFile, baseLoc, extLoc)
+			extData, readErr := reader.readFile(extPath)
+			if readErr != nil {
+				return "", false, readErr
+			}
+			extRoot, parseErr := parseEditorXML(extData)
+			if parseErr != nil {
+				return "", false, parseErr
+			}
+			extStandalone, stdErr := editorXMLStandalone(extData[extRoot.start:extRoot.end], extRoot)
+			if stdErr != nil {
+				return "", false, stdErr
+			}
+			extParsed, pErr := parseEditorXML(extStandalone)
+			if pErr != nil {
+				return "", false, pErr
+			}
+			var innerContent []byte
+			if extParsed.name.Local == "CompositeGraphicUnit" {
+				if extParsed.open != extParsed.end {
+					innerContent = bytes.Clone(extStandalone[extParsed.open:extParsed.close])
+				}
+			} else {
+				wrappedContent, wrapErr := editorXMLContainer("Content", nil, bytes.TrimPrefix(extStandalone, []byte(xml.Header)))
+				if wrapErr != nil {
+					return "", false, wrapErr
+				}
+				innerContent = bytes.TrimPrefix(wrappedContent, []byte(xml.Header))
+			}
+			cguRoot, cErr := parseEditorXML(standalone)
+			if cErr != nil {
+				return "", false, cErr
+			}
+			patch, attrErr := editorXMLAttributeChange(standalone, cguRoot, "BaseLoc", nil)
+			if attrErr != nil {
+				return "", false, attrErr
+			}
+			standalone = editorPatchXML(standalone, []editorXMLPatch{patch})
+			cguRoot, err = parseEditorXML(standalone)
+			if err != nil {
+				return "", false, err
+			}
+			if cguRoot.open == cguRoot.end {
+				standalone = editorPatchXML(standalone, []editorXMLPatch{editorXMLContent(standalone, cguRoot, innerContent)})
+			} else {
+				standalone = editorPatchXML(standalone, []editorXMLPatch{{cguRoot.close, cguRoot.close, innerContent}})
+			}
+		}
+		wrapped, objIDs, err := e.promoteXMLResource(standalone, groupName, nil, innerSrcScope, dstScope, visiting)
+		if err != nil {
+			return "", false, err
+		}
+		newID = objIDs[key]
+		res, err := e.compositeResource(newID, wrapped)
+		if err != nil {
+			return "", false, err
+		}
+		res.objectIDs = objIDs
+		e.resources = append(e.resources, res)
+	default:
+		return id, false, nil
+	}
+	e.promoted[cacheKey] = newID
+	return newID, true, nil
+}
+
+// promoteXMLResource 重映射定义节点的资源依赖与内部标识并封装为独立Res文档
+// 入参: standalone 独立资源定义片段, group 容器元素名, target 可选解码目标, srcScope 源页面作用域, dstScope 目标页面作用域, visiting 循环检查集合
+// 返回: []byte 独立Res文档, map[string]string 内部标识映射, error 解析或重映射错误
+func (e *Editor) promoteXMLResource(standalone []byte, group string, target any, srcScope, dstScope []*parsedRes, visiting map[string]bool) ([]byte, map[string]string, error) {
+	root, err := parseEditorXML(standalone)
+	if err != nil {
+		return nil, nil, err
+	}
+	standalone, changed, err := e.remapXMLResources(standalone, root, srcScope, dstScope, true, visiting)
+	if err != nil {
+		return nil, nil, err
+	}
+	if changed {
+		root, err = parseEditorXML(standalone)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	objIDs := make(map[string]string)
+	if err := e.collectCompositeIDs(root, objIDs); err != nil {
+		return nil, nil, err
+	}
+	standalone, err = editorXMLRemapOnlyIDs(standalone, root, objIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	if target != nil {
+		if err := xml.Unmarshal(standalone, target); err != nil {
+			return nil, nil, err
+		}
+	}
+	wrapped, err := editorXMLContainer(group, nil, bytes.TrimPrefix(standalone, []byte(xml.Header)))
+	if err != nil {
+		return nil, nil, err
+	}
+	wrapped, err = editorXMLContainer("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "."}}, bytes.TrimPrefix(wrapped, []byte(xml.Header)))
+	if err != nil {
+		return nil, nil, err
+	}
+	return wrapped, objIDs, nil
+}
+
+// remapXMLResources 扫描并按需克隆提升XML片段引用的页面局部资源
+// 入参: data XML片段, root 解析根节点, srcScope 源页面作用域, dstScope 目标页面作用域, forceDoc 是否按文档级依赖处理, visiting 循环检查集合
+// 返回: []byte 更新后的XML片段, bool 是否发生重写, error 资源克隆或编码错误
+func (e *Editor) remapXMLResources(data []byte, root *editorXML, srcScope, dstScope []*parsedRes, forceDoc bool, visiting map[string]bool) ([]byte, bool, error) {
+	if e.source == nil || len(srcScope) == 0 && len(dstScope) == 0 {
+		return data, false, nil
+	}
 	var patches []editorXMLPatch
 	var visit func(*editorXML) error
 	visit = func(node *editorXML) error {
@@ -153,39 +553,187 @@ func editorXMLRemapIDs(data []byte, root *editorXML, ids map[string]string) ([]b
 				if attr.Name.Space != "" {
 					continue
 				}
-				if attr.Name.Local == "ID" || editorObjectReference(attr.Name.Local) {
+				kind, isResRef := editorScopedResourceAttrKind(node.name.Local, attr.Name.Local)
+				if !isResRef {
+					continue
+				}
+				mapped, ok, promErr := e.promoteScopedResource(attr.Value, kind, srcScope, dstScope, forceDoc, visiting)
+				if promErr != nil {
+					return promErr
+				}
+				if ok {
+					attr.Value, changed = mapped, true
+				}
+			}
+			if changed {
+				encoded, encErr := encodeStartElementToken(start, node.open == node.end)
+				if encErr != nil {
+					return encErr
+				}
+				patches = append(patches, editorXMLPatch{node.start, node.open, encoded})
+			}
+			if len(node.children) == 0 {
+				textKind := ""
+				if node.name.Local == "Thumbnail" || node.name.Local == "Substitution" {
+					textKind = "Image"
+				} else if node.name.Local == "Font" && node.attr("ID") == "" {
+					textKind = "Font"
+				}
+				if textKind != "" {
+					mapped, ok, promErr := e.promoteScopedResource(strings.TrimSpace(editorImportText(data, node)), textKind, srcScope, dstScope, forceDoc, visiting)
+					if promErr != nil {
+						return promErr
+					}
+					if ok {
+						patches = append(patches, editorXMLContent(data, node, []byte(mapped)))
+					}
+				}
+			}
+		}
+		for _, child := range node.children {
+			if err := visit(child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := visit(root); err != nil {
+		return nil, false, err
+	}
+	if len(patches) == 0 {
+		return data, false, nil
+	}
+	return editorPatchXML(data, patches), true, nil
+}
+
+// remapCopiedObject 为跨页复制的对象副本克隆提升局部资源并重写引用
+// 入参: object 已准备的对象副本, origin 副本原文来源, srcScope 源页面局部资源, dstScope 目标页面局部资源, targetPage 目标页面索引
+// 返回: GraphicObject 更新后的对象副本, *editorObjectOrigin 更新后的原文来源, error 重映射或解码错误
+func (e *Editor) remapCopiedObject(object GraphicObject, origin *editorObjectOrigin, srcScope, dstScope []*parsedRes, targetPage int) (GraphicObject, *editorObjectOrigin, error) {
+	if e.source == nil || len(srcScope) == 0 && len(dstScope) == 0 {
+		return object, origin, nil
+	}
+	targetSource := e.source.pages[e.pages[targetPage].ID]
+	var data []byte
+	var err error
+	if origin != nil {
+		data, err = editorXMLObject(origin.data, origin.node, origin.object, object)
+		if err == nil {
+			data, err = editorXMLStandalone(data, origin.node)
+		}
+	} else {
+		data, err = editorObjectXML(object)
+	}
+	if err != nil {
+		return GraphicObject{}, nil, err
+	}
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return GraphicObject{}, nil, err
+	}
+	remapped, changed, err := e.remapXMLResources(data, root, srcScope, dstScope, false, make(map[string]bool))
+	if err != nil {
+		return GraphicObject{}, nil, err
+	}
+	if !changed {
+		if origin != nil && origin.page != targetSource {
+			copiedOrigin := *origin
+			copiedOrigin.page = targetSource
+			origin = &copiedOrigin
+		}
+		return object, origin, nil
+	}
+	result := GraphicObject{Type: object.Type}
+	var target any
+	switch result.Type {
+	case "TextObject":
+		target = &result.TextObject
+	case "PathObject":
+		target = &result.PathObject
+	case "ImageObject":
+		target = &result.ImageObject
+	case "CompositeObject", "CompositeGraphicUnit":
+		target = &result.CompositeGraphicUnit
+	}
+	if err := xml.Unmarshal(remapped, target); err != nil {
+		return GraphicObject{}, nil, err
+	}
+	result.TextObject.layout = object.TextObject.layout
+	result.ImageObject.LineWidthSet = object.ImageObject.LineWidthSet
+	result.ImageObject.MiterLimitSet = object.ImageObject.MiterLimitSet
+	result.ImageObject.dashPatternSet = object.ImageObject.dashPatternSet
+	result.state = object.state
+	result.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
+	if origin == nil {
+		return result, nil, nil
+	}
+	newRoot, err := parseEditorXML(remapped)
+	if err != nil {
+		return GraphicObject{}, nil, err
+	}
+	newRoot.parent = origin.node.parent
+	return result, &editorObjectOrigin{page: targetSource, data: remapped, node: newRoot, object: result}, nil
+}
+
+// editorXMLRemapIDs 仅重写标准标识和指向副本内部的引用，保留扩展、文字和XML结构
+// 入参: data 独立片段, root 根节点, ids 原标识与新标识
+// 返回: []byte 修改后的片段, error 错误信息
+func editorXMLRemapIDs(data []byte, root *editorXML, ids map[string]string) ([]byte, error) {
+	return remapEditorXMLIDs(data, root, ids, true)
+}
+
+// editorObjectReference 判断对象内可按ST_RefID重映射的标准属性
+// 入参: name 属性名
+// 返回: bool 是否为标识引用
+func editorObjectReference(name string) bool {
+	switch name {
+	case "Font", "ResourceID", "Substitution", "ImageMask", "Relative", "DrawParam", "ColorSpace", "Thumbnail", "TemplateID", "PageID", "PageRef", "RefId":
+		return true
+	}
+	return false
+}
+
+// editorXMLRemapOnlyIDs 仅重写XML节点树上的ID属性而不触碰外部资源引用属性
+// 入参: data 独立片段, root 根节点, ids 原标识与新标识映射
+// 返回: []byte 修改后的片段, error 编码错误
+func editorXMLRemapOnlyIDs(data []byte, root *editorXML, ids map[string]string) ([]byte, error) {
+	return remapEditorXMLIDs(data, root, ids, false)
+}
+
+// remapEditorXMLIDs 遍历重写标准节点的标识属性及可选的内部引用
+// 入参: data 独立片段, root 根节点, ids 原标识与新标识映射, includeRefs 是否同时重写引用属性和文本节点
+// 返回: []byte 修改后的片段, error 编码错误
+func remapEditorXMLIDs(data []byte, root *editorXML, ids map[string]string, includeRefs bool) ([]byte, error) {
+	var patches []editorXMLPatch
+	var visit func(*editorXML) error
+	visit = func(node *editorXML) error {
+		if classifyOFDNamespace(node.name.Space) != ofdXMLUnknown {
+			decoder := xml.NewDecoder(bytes.NewReader(data[node.start:node.open]))
+			token, err := decoder.RawToken()
+			if err != nil {
+				return err
+			}
+			start := token.(xml.StartElement)
+			changed := false
+			for i := range start.Attr {
+				attr := &start.Attr[i]
+				if attr.Name.Space != "" {
+					continue
+				}
+				if attr.Name.Local == "ID" || includeRefs && editorObjectReference(attr.Name.Local) {
 					if value := ids[editorResourceID(attr.Value)]; value != "" {
 						attr.Value, changed = value, true
 					}
 				}
 			}
 			if changed {
-				if start.Name.Space != "" {
-					start.Name.Local = start.Name.Space + ":" + start.Name.Local
-					start.Name.Space = ""
-				}
-				for i := range start.Attr {
-					attr := &start.Attr[i]
-					if attr.Name.Space != "" {
-						attr.Name.Local = attr.Name.Space + ":" + attr.Name.Local
-						attr.Name.Space = ""
-					}
-				}
-				var header bytes.Buffer
-				encoder := xml.NewEncoder(&header)
-				if err := encoder.EncodeToken(start); err != nil {
+				value, err := encodeStartElementToken(start, node.open == node.end)
+				if err != nil {
 					return err
-				}
-				if err := encoder.Flush(); err != nil {
-					return err
-				}
-				value := header.Bytes()
-				if node.open == node.end {
-					value = append(value[:len(value)-1], '/', '>')
 				}
 				patches = append(patches, editorXMLPatch{node.start, node.open, value})
 			}
-			if node.name.Local == "Font" || node.name.Local == "Substitution" || node.name.Local == "Thumbnail" {
+			if includeRefs && (node.name.Local == "Font" || node.name.Local == "Substitution" || node.name.Local == "Thumbnail") {
 				if value := ids[editorResourceID(editorImportText(data, node))]; value != "" {
 					patches = append(patches, editorXMLContent(data, node, []byte(value)))
 				}
@@ -204,37 +752,65 @@ func editorXMLRemapIDs(data []byte, root *editorXML, ids map[string]string) ([]b
 	return editorPatchXML(data, patches), nil
 }
 
-// editorObjectReference 判断对象内可按ST_RefID重映射的标准属性
-// 入参: name 属性名
-// 返回: bool 是否为标识引用
-func editorObjectReference(name string) bool {
-	switch name {
-	case "Font", "ResourceID", "Substitution", "ImageMask", "Relative", "DrawParam", "ColorSpace", "Thumbnail", "TemplateID", "PageID", "PageRef", "RefId":
-		return true
+// encodeStartElementToken 序列化保留原前缀的起始标签Token
+// 入参: start 起始标签, selfClosing 是否自闭合
+// 返回: []byte 标签字节切片, error 编码错误
+func encodeStartElementToken(start xml.StartElement, selfClosing bool) ([]byte, error) {
+	if start.Name.Space != "" {
+		start.Name.Local = start.Name.Space + ":" + start.Name.Local
+		start.Name.Space = ""
 	}
-	return false
-}
-
-// copiedLayerStyle 保留复合对象和复杂路径的图层参数，普通对象使用已解析样式
-// 入参: object 对象
-// 返回: string 绘制参数标识
-func (e *Editor) copiedLayerStyle(object GraphicObject) string {
-	if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" || object.Type == "PathObject" {
-		if origin := e.snapshotOrigin(object); origin != nil {
-			for parent := origin.node.parent; parent != nil; parent = parent.parent {
-				if parent.name.Local == "Layer" {
-					id := parent.attr("DrawParam")
-					if object.Type == "PathObject" {
-						if _, err := e.resolveEditorStyle(object, id); err == nil || editReason(err) != EditUnsupportedColor {
-							return ""
-						}
-					}
-					return id
-				}
-			}
+	for i := range start.Attr {
+		attr := &start.Attr[i]
+		if attr.Name.Space != "" {
+			attr.Name.Local = attr.Name.Space + ":" + attr.Name.Local
+			attr.Name.Space = ""
 		}
 	}
-	return ""
+	var header bytes.Buffer
+	encoder := xml.NewEncoder(&header)
+	if err := encoder.EncodeToken(start); err != nil {
+		return nil, err
+	}
+	if err := encoder.Flush(); err != nil {
+		return nil, err
+	}
+	value := header.Bytes()
+	if selfClosing {
+		value = append(value[:len(value)-1], '/', '>')
+	}
+	return value, nil
+}
+
+// editorScopedResourceAttrKind 判断属性是否为资源表引用并返回预期资源类别
+// 入参: elem 元素局部名, attr 属性局部名
+// 返回: string 期望资源类别, bool 是否为资源表引用属性
+func editorScopedResourceAttrKind(elem, attr string) (string, bool) {
+	switch attr {
+	case "Font":
+		return "Font", true
+	case "DrawParam", "Relative":
+		return "DrawParam", true
+	case "ColorSpace":
+		return "ColorSpace", true
+	case "ImageMask", "Substitution", "Thumbnail":
+		return "Image", true
+	case "ResourceID":
+		switch elem {
+		case "ImageObject":
+			return "Image", true
+		case "Sound":
+			return "Audio", true
+		case "Movie":
+			return "Video", true
+		case "DrawParam":
+			return "DrawParam", true
+		case "CompositeObject", "CompositeGraphicUnit":
+			return "CompositeGraphicUnit", true
+		}
+		return "", true
+	}
+	return "", false
 }
 
 // cloneEditorData 深复制编辑快照，未导出的排版及原文来源保持不可变共享

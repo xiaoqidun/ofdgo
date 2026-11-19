@@ -427,10 +427,9 @@ type resourceCatalog struct {
 	nodes       map[string]editorFontText
 	images      []editorFontText
 	fileIDs     map[string]string
-	docIDs      map[string]string
 }
 
-// add 加入资源声明，拒绝同一资源文件或文档级公共资源内的重复标识，允许页级资源声明局部同名标识
+// add 加入资源声明，拒绝同一资源文件内的重复标识，允许不同资源文件声明同名标识
 // 入参: item 资源信息, node 声明位置
 // 返回: error 标识冲突
 func (c *resourceCatalog) add(item ResourceInfo, node editorFontText) error {
@@ -461,15 +460,6 @@ func (c *resourceCatalog) add(item ResourceInfo, node editorFontText) error {
 			c.resKinds[fileName] = make(map[string]string)
 		}
 		c.resKinds[fileName][item.ID] = item.Kind
-	}
-	if c.docRes[fileName] {
-		if prevKind, exists := c.docIDs[item.ID]; exists {
-			if prevKind == item.Kind {
-				return fmt.Errorf("duplicate resource %s/%s", item.Kind, item.ID)
-			}
-			return fmt.Errorf("conflicting resource ID %s", item.ID)
-		}
-		c.docIDs[item.ID] = item.Kind
 	}
 	key := item.Kind + "/" + item.ID
 	if _, exists := c.nodes[key]; !exists {
@@ -619,27 +609,21 @@ func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourc
 		items:       []ResourceInfo{},
 		nodes:       make(map[string]editorFontText),
 		fileIDs:     make(map[string]string),
-		docIDs:      make(map[string]string),
 	}
 	pages := make(map[string]int)
 	pageIDToFile := make(map[string]string)
+	tplIDToFile := make(map[string]string)
 	isPageOrTpl := make(map[string]bool)
 	doc, err := r.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	for i := len(doc.CommonData.DocumentRes) - 1; i >= 0; i-- {
-		name := cleanPackagePath(r.ResPath(doc.CommonData.DocumentRes[i]))
-		if name != "" && name != "." {
-			catalog.docRes[name] = true
-			catalog.docScope = appendUniquePath(catalog.docScope, name)
-		}
-	}
-	for i := len(doc.CommonData.PublicRes) - 1; i >= 0; i-- {
-		name := cleanPackagePath(r.ResPath(doc.CommonData.PublicRes[i]))
-		if name != "" && name != "." {
-			catalog.docRes[name] = true
-			catalog.docScope = appendUniquePath(catalog.docScope, name)
+	for _, list := range [][]string{doc.CommonData.DocumentRes, doc.CommonData.PublicRes} {
+		for _, loc := range slices.Backward(list) {
+			if name := r.ResPath(loc); name != "" && name != "." {
+				catalog.docRes[name] = true
+				catalog.docScope = appendUniquePath(catalog.docScope, name)
+			}
 		}
 	}
 	for i, page := range doc.Pages.Page {
@@ -662,6 +646,9 @@ func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourc
 		name := cleanPackagePath(r.ResPath(page.BaseLoc))
 		isPageOrTpl[name] = true
 		pages[name] = -1
+		if id := editorResourceID(page.ID); id != "" {
+			tplIDToFile[id] = name
+		}
 	}
 	var rawRefs []rawResourceRef
 	declaredPageRes := make(map[string][]string)
@@ -758,9 +745,7 @@ func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourc
 				}
 				annotFile := cleanPackagePath(resolveResourcePath(name, "", loc))
 				catalog.annotByPage[pageID] = appendUniquePath(catalog.annotByPage[pageID], annotFile)
-				if pFile := pageIDToFile[pageID]; pFile != "" {
-					recordSingleOwner(annotOwners, annotFile, pFile)
-				}
+				recordSingleOwner(annotOwners, annotFile, pageIDToFile[pageID])
 			}
 		}
 		page := -1
@@ -848,13 +833,26 @@ func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourc
 			return nil, err
 		}
 	}
+	pageTemplates := make(map[string][]string)
+	for _, raw := range rawRefs {
+		if raw.elem == "Template" && raw.ref.Role == "TemplateID" {
+			if tplFile := tplIDToFile[editorResourceID(raw.value)]; tplFile != "" {
+				pFile := cleanPackagePath(raw.ref.File)
+				pageTemplates[pFile] = append(pageTemplates[pFile], tplFile)
+			}
+		}
+	}
 	resPageOwners := make(map[string][]string)
 	for pFile := range isPageOrTpl {
 		var scope []string
-		local := declaredPageRes[pFile]
-		for i := len(local) - 1; i >= 0; i-- {
-			scope = appendUniquePath(scope, local[i])
-			resPageOwners[local[i]] = appendUniquePath(resPageOwners[local[i]], pFile)
+		for _, res := range slices.Backward(declaredPageRes[pFile]) {
+			scope = appendUniquePath(scope, res)
+			resPageOwners[res] = appendUniquePath(resPageOwners[res], pFile)
+		}
+		for _, tpl := range slices.Backward(pageTemplates[pFile]) {
+			for _, res := range slices.Backward(declaredPageRes[tpl]) {
+				scope = appendUniquePath(scope, res)
+			}
 		}
 		for _, dRes := range catalog.docScope {
 			scope = appendUniquePath(scope, dRes)
@@ -867,9 +865,9 @@ func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourc
 			continue
 		}
 		var scope []string
-		for i := len(local) - 1; i >= 0; i-- {
-			scope = appendUniquePath(scope, local[i])
-			resPageOwners[local[i]] = appendUniquePath(resPageOwners[local[i]], pFile)
+		for _, res := range slices.Backward(local) {
+			scope = appendUniquePath(scope, res)
+			resPageOwners[res] = appendUniquePath(resPageOwners[res], pFile)
 		}
 		for _, dRes := range catalog.docScope {
 			scope = appendUniquePath(scope, dRes)
@@ -970,22 +968,15 @@ func (r *Reader) locateResourceFileContext(ctx context.Context, kind, id string)
 		}
 		return "", false
 	}
-	for i := len(doc.CommonData.DocumentRes) - 1; i >= 0; i-- {
-		parsed, err := r.parseResFileContext(ctx, r.ResPath(doc.CommonData.DocumentRes[i]))
-		if err != nil {
-			return "", false, err
-		}
-		if loc, ok := matchIn(parsed); ok {
-			return loc, true, nil
-		}
-	}
-	for i := len(doc.CommonData.PublicRes) - 1; i >= 0; i-- {
-		parsed, err := r.parseResFileContext(ctx, r.ResPath(doc.CommonData.PublicRes[i]))
-		if err != nil {
-			return "", false, err
-		}
-		if loc, ok := matchIn(parsed); ok {
-			return loc, true, nil
+	for _, list := range [][]string{doc.CommonData.DocumentRes, doc.CommonData.PublicRes} {
+		for _, res := range slices.Backward(list) {
+			parsed, err := r.parseResFileContext(ctx, r.ResPath(res))
+			if err != nil {
+				return "", false, err
+			}
+			if loc, ok := matchIn(parsed); ok {
+				return loc, true, nil
+			}
 		}
 	}
 	seenRes := make(map[string]bool)
@@ -998,8 +989,8 @@ func (r *Reader) locateResourceFileContext(ctx context.Context, kind, id string)
 			return "", false, nil
 		}
 		pageFullPath := r.ResPath(p.BaseLoc)
-		for i := len(hdr.PageRes) - 1; i >= 0; i-- {
-			resFull := cleanPackagePath(resolveResourcePath(pageFullPath, "", hdr.PageRes[i]))
+		for _, res := range slices.Backward(hdr.PageRes) {
+			resFull := cleanPackagePath(resolveResourcePath(pageFullPath, "", res))
 			if seenRes[resFull] {
 				continue
 			}

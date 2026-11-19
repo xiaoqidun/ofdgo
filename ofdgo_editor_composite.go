@@ -224,9 +224,14 @@ func (e *Editor) AlignCompositeObjects(page int, path ObjectPath, indexes []int,
 		return fmt.Errorf("invalid alignment %q", alignment)
 	}
 	return e.arrangeCompositeObjects(page, path, indexes, func(boxes []Box) ([]Matrix, error) {
-		target, _ := ParseBox(e.pages[page].Area.PhysicalBox)
-		if len(boxes) > 1 {
-			target = Box{}
+		var target Box
+		if len(boxes) == 1 {
+			var err error
+			target, err = e.pageAreaBox(page)
+			if err != nil {
+				return nil, err
+			}
+		} else {
 			for _, box := range boxes {
 				target = unionTextBox(target, box)
 			}

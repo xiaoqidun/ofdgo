@@ -131,7 +131,7 @@ func (e *Editor) ProcessFontsWithOptions(ctx context.Context, options FontProces
 		pending := &editorFontChange{patches: make(map[string][]editorXMLPatch), files: make(map[string][]byte)}
 		ids := slices.Sorted(maps.Keys(scan.fonts))
 		ids = slices.DeleteFunc(ids, func(id string) bool {
-			return (mode == FontEmbed) == (scan.fonts[id].location != "")
+			return !scan.duplicateIDs[id] && (mode == FontEmbed) == (scan.fonts[id].location != "")
 		})
 		total := 0
 		if document == reader.DocumentCount()-1 {
@@ -322,9 +322,13 @@ func (e *Editor) changeFontSnapshot(ctx context.Context, scan *editorFontDocumen
 // 入参: ctx 取消上下文, scan 文档引用, id 字体标识, mode 保存方式, file 字体文件, index 集合索引, pending 已准备的资源文件
 // 返回: *editorFontChange 字体修改，无需处理时为nil, error 字体或结构错误
 func (e *Editor) prepareFontBinding(ctx context.Context, scan *editorFontDocument, id string, mode FontMode, file FontFile, index int, pending map[string][]byte) (*editorFontChange, error) {
-	declaration := scan.fonts[editorResourceID(id)]
+	key := editorResourceID(id)
+	declaration := scan.fonts[key]
 	if declaration == nil {
 		return nil, fmt.Errorf("font not found: %s", id)
+	}
+	if scan.duplicateIDs[key] {
+		return nil, fmt.Errorf("ambiguous font ID: %s", id)
 	}
 	explicit := mode == FontEmbed && len(file.Data) != 0
 	if (mode == FontEmbed) == (declaration.location != "") && !explicit {
@@ -485,7 +489,7 @@ func (e *Editor) resolveBindingFont(ctx context.Context, scan *editorFontDocumen
 	}
 	reader := scan.fontReader
 	if reader == nil {
-		reader = &Reader{Zip: scan.reader.Zip, files: maps.Clone(scan.reader.files), documentIndex: scan.index}
+		reader = &Reader{Zip: scan.reader.Zip, sourceFile: scan.reader.sourceFile, files: maps.Clone(scan.reader.files), documentIndex: scan.index}
 		if scan.index == scan.reader.documentIndex {
 			reader.selectedVersion = scan.reader.selectedVersion
 		}

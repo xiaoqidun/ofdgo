@@ -62,7 +62,7 @@ func themeColors(dark bool) guigo.TitleBarColors {
 }
 
 // loadTheme 在创建窗口前读取用户目录中的主题偏好
-// 返回: error 读取或解析错误
+// 返回: error 读取错误
 func (h *Host) loadTheme() error {
 	h.theme = applicationTheme{Mode: "system", Material: "solid"}
 	data, err := os.ReadFile(h.themePath)
@@ -72,10 +72,11 @@ func (h *Host) loadTheme() error {
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal(data, &h.theme); err != nil {
-		return err
+	var theme applicationTheme
+	if json.Unmarshal(data, &theme) == nil && theme.validate() == nil {
+		h.theme = theme
 	}
-	return h.theme.validate()
+	return nil
 }
 
 // themeIndex 在页面首次绘制前提供当前主题偏好

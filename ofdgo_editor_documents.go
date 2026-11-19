@@ -436,6 +436,9 @@ func (e *Editor) editDocumentSnapshot(ctx context.Context, reader *Reader, edit 
 // 入参: ctx 取消上下文, reader 不拥有输入文件的独立阅读器
 // 返回: error 编辑器初始化错误
 func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader) error {
+	if reader.Zip != nil && reader.sourceFile == nil {
+		reader.sourceFile = e.sourceFile
+	}
 	version, err := reader.DocumentVersionID()
 	if err != nil {
 		return err
@@ -475,7 +478,7 @@ func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader) error 
 		next.revision, next.serial = e.revision, e.serial
 		next.OnWriteProgress, next.output = e.OnWriteProgress, e.output
 		next.encryption = e.encryption
-		next.saveTarget = e.saveTarget
+		next.saveTarget, next.sourceFile = e.saveTarget, e.sourceFile
 		next.backends, next.fontDirs, next.fontFS = e.backends, e.fontDirs, e.fontFS
 		next.SetResources(e.runtimeResources)
 		next.validatedPaths = e.validatedPaths
