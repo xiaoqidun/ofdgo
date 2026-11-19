@@ -274,7 +274,7 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 			}
 			annotation.Dictionary = field
 			if field["FT"] == pdfgo.Name("Sig") && field["V"] != nil {
-				err = p.signatureWidget(ctx, page, annotation)
+				err = p.signatureWidget(ctx, page, annotation, strict)
 			} else {
 				err = p.formWidget(ctx, page, annotation, strict)
 			}

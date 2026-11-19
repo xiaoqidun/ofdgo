@@ -308,7 +308,8 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			}
 		}
 		_, repeat := strokePaint.(*repeatAxialGradient)
-		if strokeClip != nil || strokeView != canvas.Identity || repeat || style.strokePattern != nil || !canvasNativeStroke(r.backends.Geometry) || zeroDash {
+		_, sampled := strokePaint.(rasterGradientCanvas)
+		if strokeClip != nil || strokeView != canvas.Identity || repeat || sampled || style.strokePattern != nil || !canvasNativeStroke(r.backends.Geometry) || zeroDash {
 			fill := style.strokePattern == nil && canvasFillClip(strokeClip)
 			options := canvasStrokeOptions(style.lineWidth, style.lineCap, style.lineJoin, canvas.Tolerance)
 			if zeroDash {

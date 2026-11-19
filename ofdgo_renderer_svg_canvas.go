@@ -191,17 +191,26 @@ func (s *svgResourceRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
 		return
 	}
 	font := text.MostCommonFontFace().Font
-	resource, ok := s.renderer.canvasState().svgFontCache[font]
+	state := s.renderer.canvasState()
+	resource, ok := state.svgFontCache[font]
 	if !ok {
-		ctx := context.Background()
-		if s.renderer != nil {
-			ctx = s.renderer.outputContext()
+		ctx := s.renderer.outputContext()
+		var prebuilt []byte
+		digest, hasDigest := state.fontDigests[font]
+		if !hasDigest {
+			prebuilt = basefont.SFNTData(font.Tables)
+			digest = sha256.Sum256(prebuilt)
+			state.fontDigests[font] = digest
 		}
+		cacheKey := svgFontResourceKey{digest: digest, style: font.Style()}
 		var err error
-		resource, err = s.renderer.svgFontResources().load(ctx, font, func() (SVGFont, int, error) {
-			data := basefont.SFNTData(font.Tables)
+		resource, err = s.renderer.svgFontResources().load(ctx, cacheKey, func() (SVGFont, int, error) {
+			data := prebuilt
+			if data == nil {
+				data = basefont.SFNTData(font.Tables)
+			}
 			built := SVGFont{
-				Name:   fmt.Sprintf("ofdgo-%x-%d", sha256.Sum256(data), font.Style()),
+				Name:   fmt.Sprintf("ofdgo-%x-%d", digest, font.Style()),
 				Weight: font.Style().CSS(),
 				Style:  "normal",
 				Data:   data,
@@ -215,7 +224,7 @@ func (s *svgResourceRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
 			s.err = err
 			return
 		}
-		s.renderer.canvasState().svgFontCache[font] = resource
+		state.svgFontCache[font] = resource
 	}
 	if !s.seen[resource.Name] {
 		s.seen[resource.Name] = true
@@ -385,6 +394,12 @@ type svgResourceCacheKey struct{}
 // svgFontCacheKey 区分共享的SVG序列化字体缓存
 type svgFontCacheKey struct{}
 
+// svgFontResourceKey 按字体内容摘要与样式区分共享的SVG字体缓存
+type svgFontResourceKey struct {
+	digest [32]byte
+	style  canvas.FontStyle
+}
+
 // svgImageResourceKey 按像素、压缩策略及目标尺寸区分编码结果
 type svgImageResourceKey struct {
 	digest  [32]byte
@@ -413,12 +428,12 @@ func (r *Renderer) svgImageResources() *renderCache[svgImageResourceKey, SVGImag
 
 // svgFontResources 获取派生渲染器共享的SVG字体数据缓存
 // 返回: *renderCache 字体数据缓存
-func (r *Renderer) svgFontResources() *renderCache[*canvas.Font, SVGFont] {
+func (r *Renderer) svgFontResources() *renderCache[svgFontResourceKey, SVGFont] {
 	key := svgFontCacheKey{}
 	if state, ok := r.sharedBackendStates[key]; ok {
-		return state.(*renderCache[*canvas.Font, SVGFont])
+		return state.(*renderCache[svgFontResourceKey, SVGFont])
 	}
-	cache := resourceCache[*canvas.Font, SVGFont](r.Reader.resources, 32<<20)
+	cache := resourceCache[svgFontResourceKey, SVGFont](r.Reader.resources, 32<<20)
 	r.sharedBackendStates[key] = cache
 	return cache
 }

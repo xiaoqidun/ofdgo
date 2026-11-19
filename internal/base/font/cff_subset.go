@@ -20,7 +20,7 @@ import (
 	"maps"
 )
 
-// subsetCFFFont 裁剪CFF字体，保留组合组件和度量，按需重排字形
+// subsetCFFFont 裁剪CFF字体，保留组合组件和度量，按需重排字形并在保留编号时维护排版表
 // 入参: sfnt 已解析字体, glyphs 使用的字形, preserve 是否保留原字形编号
 // 返回: []byte 字体子集, error 裁剪错误
 func subsetCFFFont(sfnt *SFNT, glyphs []uint16, preserve bool) ([]byte, error) {
@@ -31,13 +31,17 @@ func subsetCFFFont(sfnt *SFNT, glyphs []uint16, preserve bool) ([]byte, error) {
 		}
 		keep[gid] = true
 	}
+	retainLayout := false
+	if preserve {
+		retainLayout = retainSFNTSubstitutions(sfnt.Tables["GSUB"], keep, sfnt.NumGlyphs())
+	}
 	data, err := subsetCFFCharstrings(sfnt.Tables["CFF "], keep)
 	if err != nil {
 		return bytes.Clone(sfnt.Write()), nil
 	}
 	if !preserve {
 		if compact, ids, err := compactCFFGlyphs(data, keep); err == nil {
-			return compactCFFTables(sfnt, compact, ids)
+			return compactCFFTables(sfnt, compact, ids, nil, nil)
 		}
 	}
 	tables := maps.Clone(sfnt.Tables)
@@ -49,8 +53,11 @@ func subsetCFFFont(sfnt *SFNT, glyphs []uint16, preserve bool) ([]byte, error) {
 		}
 	}
 	tables["cmap"] = BuildCmapTable(sfnt.NumGlyphs(), mapping)
-	for _, tag := range []string{"DSIG", "GSUB", "GPOS", "GDEF"} {
-		delete(tables, tag)
+	dropTransientSubsetTables(tables)
+	if !preserve || !retainLayout {
+		for _, tag := range []string{"GSUB", "GPOS", "GDEF"} {
+			delete(tables, tag)
+		}
 	}
 	return SerializeOTF(tables)
 }

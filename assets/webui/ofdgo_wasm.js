@@ -235,9 +235,10 @@ async function handleMessage(engine, { id, name, args }) {
 	let saveStamp;
 	let channel;
 	const signal = operations.get(id)?.signal;
-	const cancellable = ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoResources", "ofdgoPrepareSave", "ofdgoSaveSnapshot", "ofdgoImportDocuments", "ofdgoImportImages", "ofdgoExportImages", "ofdgoOpenPDF", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned", "ofdgoImportPages"].includes(name);
+	const cancellable = ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoResources", "ofdgoPrepareSave", "ofdgoSaveSnapshot", "ofdgoImportDocuments", "ofdgoImportImages", "ofdgoExportImages", "ofdgoOpenPDF", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned", "ofdgoImportPages", "ofdgoProcessFonts"].includes(name);
 	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages" || name === "ofdgoImportDocuments";
 	const converting = name === "ofdgoOpenPDF";
+	const processingFonts = name === "ofdgoProcessFonts";
 	const saving = name === "ofdgoSaveDocument" || name === "ofdgoSaveSnapshot" || name === "ofdgoSaveSigned";
 	const resources = ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoResources", "ofdgoPrepareSave"].includes(name);
 	if (engine.pdf) {
@@ -299,6 +300,11 @@ async function handleMessage(engine, { id, name, args }) {
 					finish(done, null, importing && phase === "commit");
 				});
 				if (converting) args.push((name, done) => requestFont(engine, id, signal, name, done));
+			} else if (processingFonts) {
+				args.push((phase, completed, total, done) => {
+					postMessage({ id, type: "fonts", phase, completed, total });
+					finish(done);
+				});
 			} else {
 				const destination = args.pop();
 				const file = destination?.fileHandle || destination;
@@ -362,7 +368,7 @@ async function handleMessage(engine, { id, name, args }) {
 		if (result.ok && name === "ofdgoOpenPDF") engine.pdf = true;
 		if (result.ok && (name === "ofdgoOpen" || name === "ofdgoLoadPDF" && result.data.done)) engine.pdf = false;
 		if (started !== null && result.ok) result.elapsed = performance.now() - started;
-		if (cancellable && !importing && !converting && !resources && result.ok) {
+		if (cancellable && !importing && !converting && !processingFonts && !resources && result.ok) {
 			result.data.size = size;
 			if (name !== "ofdgoExportMedia") postMessage({ id, type: "export", stage: "save" });
 			if (output) {
@@ -386,7 +392,7 @@ async function handleMessage(engine, { id, name, args }) {
 		await output?.abort().catch(() => {});
 		const result = { id, ok: false, error: err.message, errorName: err.name };
 		if (signal?.aborted) {
-			result.error = resources ? "查询已取消" : importing ? "导入已取消" : converting ? "转换已取消" : cancellable ? "导出已取消" : "操作已取消";
+			result.error = resources ? "查询已取消" : importing ? "导入已取消" : converting ? "转换已取消" : processingFonts ? "处理已取消" : cancellable ? "导出已取消" : "操作已取消";
 			result.canceled = true;
 		}
 		postMessage(result);

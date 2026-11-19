@@ -106,6 +106,18 @@ func SubsetSFNT(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 	if sfnt.Tables["fvar"] != nil {
 		return subsetVariableSFNTFont(sfnt, glyphs)
 	}
+	if hasBitmapTables(sfnt.Tables) {
+		hasOutline := false
+		for _, id := range append([]uint16{0}, glyphs...) {
+			if outline, err := trueTypeGlyphData(sfnt.Tables, id); err == nil && len(outline) > 0 {
+				hasOutline = true
+				break
+			}
+		}
+		if !hasOutline {
+			return nil, nil
+		}
+	}
 	if mapped {
 		usage := newUsage()
 		for _, id := range glyphs {
@@ -115,7 +127,7 @@ func SubsetSFNT(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 			}
 		}
 		tables := make(map[string][]byte)
-		for _, tag := range []string{"cmap", "head", "hhea", "hmtx", "vhea", "vmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "cvt ", "fpgm", "prep", "gasp"} {
+		for _, tag := range []string{"cmap", "head", "hhea", "hmtx", "vhea", "vmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "cvt ", "fpgm", "prep", "gasp", "GSUB", "GPOS", "GDEF", "kern", "BASE", "MATH", "meta", "PCLT", "FFTM", "STAT"} {
 			if table := sfnt.Tables[tag]; table != nil {
 				tables[tag] = table
 			}
@@ -130,11 +142,11 @@ func SubsetSFNT(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 		}
 		return fixed, nil
 	}
-	return subsetCompactSFNTFont(sfnt, glyphs)
+	return subsetCompactSFNTFont(sfnt, glyphs, nil, nil)
 }
 
-// SubsetSourceSFNT 裁剪静态TrueType或CFF原有字体，保留字形编号、组合依赖、度量和提示指令
-// 字形替换结果一并保留，集合、可变、彩色和未知表保持原样
+// SubsetSourceSFNT 裁剪静态TrueType或CFF原有字体，保留组合依赖、度量和提示指令
+// 安全删除点阵和辅助提示表，在无显式编号及布局表依赖时优先产出紧凑子集
 // 入参: data 字体数据, usage 全包用字记录
 // 返回: []byte 更小的字体子集，无确定收益时为空
 func SubsetSourceSFNT(data []byte, usage *Usage) []byte {
@@ -147,7 +159,7 @@ func SubsetSourceSFNT(data []byte, usage *Usage) []byte {
 	}
 	for tag := range fontTables {
 		switch tag {
-		case "cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "CFF ", "cvt ", "fpgm", "prep", "gasp", "kern", "vhea", "vmtx", "VORG", "hdmx", "LTSH", "VDMX", "GDEF", "GPOS", "GSUB", "meta", "DSIG", "FFTM", "PCLT":
+		case "cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "CFF ", "cvt ", "fpgm", "prep", "gasp", "kern", "vhea", "vmtx", "VORG", "GDEF", "GPOS", "GSUB", "BASE", "MATH", "meta", "PCLT", "FFTM", "STAT", "EBDT", "EBLC", "EBSC", "JSTF", "hdmx", "LTSH", "VDMX", "DSIG", "MERG":
 		default:
 			return nil
 		}
@@ -169,6 +181,21 @@ func fontEmbeddingFlags(sfnt *SFNT) uint16 {
 	return 0
 }
 
+// hasBitmapTables 判断字体是否包含嵌入式点阵表
+// 入参: tables 字体表映射
+// 返回: bool 是否含点阵表
+func hasBitmapTables(tables map[string][]byte) bool {
+	return tables["EBDT"] != nil || tables["EBLC"] != nil || tables["EBSC"] != nil
+}
+
+// dropTransientSubsetTables 删除轮廓裁剪后失效的点阵、辅助提示和签名表
+// 入参: tables 字体表映射
+func dropTransientSubsetTables(tables map[string][]byte) {
+	for _, tag := range []string{"DSIG", "EBDT", "EBLC", "EBSC", "JSTF", "hdmx", "LTSH", "VDMX", "MERG"} {
+		delete(tables, tag)
+	}
+}
+
 // subsetSourceSFNT 复用已校验的字体表裁剪字形，仅返回小于原编码的结果
 // 入参: sfnt 已解析字体, usage 用字记录, size 原编码长度
 // 返回: []byte 更小的字体子集，无确定收益时为空
@@ -178,19 +205,31 @@ func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
 	}
 	var unicodeTables []sfntCmap
 	for _, record := range sfnt.cmaps {
-		if record.format == 14 {
-			continue
-		}
-		if record.platform == 0 || record.platform == 3 && (record.encoding == 1 || record.encoding == 10) {
+		if !record.duplicate && record.isUnicode() {
 			unicodeTables = append(unicodeTables, record)
 		}
 	}
 	if len(unicodeTables) == 0 {
 		return nil
 	}
-	glyphs := maps.Clone(usage.Glyphs)
-	if glyphs == nil {
-		glyphs = make(map[uint16]bool)
+	glyphs := make(map[uint16]bool, len(usage.Glyphs)+1)
+	var cidToGID map[uint16]uint16
+	if sfnt.IsCFF && len(usage.Glyphs) > 0 {
+		cidToGID = CFFCIDToGID(sfnt.Tables["CFF "])
+	}
+	if len(cidToGID) > 0 {
+		for id := range usage.Glyphs {
+			if id < sfnt.NumGlyphs() {
+				glyphs[id] = true
+			}
+			if gid, ok := cidToGID[id]; ok && gid < sfnt.NumGlyphs() {
+				glyphs[gid] = true
+			} else if id >= sfnt.NumGlyphs() {
+				glyphs[id] = true
+			}
+		}
+	} else {
+		maps.Copy(glyphs, usage.Glyphs)
 	}
 	glyphs[0] = true
 	mapping := make(map[rune]uint16, len(usage.Characters))
@@ -210,6 +249,7 @@ func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
 	if !ok || !retainSFNTSubstitutions(sfnt.Tables["GSUB"], glyphs, sfnt.NumGlyphs()) {
 		return nil
 	}
+	canCompact := len(usage.Glyphs) == 0 && sfnt.Tables["GSUB"] == nil && sfnt.Tables["GPOS"] == nil && sfnt.Tables["GDEF"] == nil && sfnt.Tables["kern"] == nil && sfnt.Tables["MATH"] == nil
 	if sfnt.IsCFF {
 		count, err := parseCFFAndCountGlyphs(sfnt.Tables["CFF "])
 		if err != nil || count != int(sfnt.NumGlyphs()) {
@@ -222,12 +262,19 @@ func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
 		tables := maps.Clone(sfnt.Tables)
 		tables["CFF "] = cff
 		tables["cmap"] = buildCmapWithVariations(sfnt.NumGlyphs(), mapping, variations)
-		delete(tables, "DSIG")
-		result, err := SerializeOTF(tables)
-		if err != nil || len(result) >= size {
-			return nil
+		dropTransientSubsetTables(tables)
+		best, err := SerializeOTF(tables)
+		if err != nil || len(best) >= size {
+			best = nil
 		}
-		return result
+		if canCompact {
+			if compact, ids, err := compactCFFGlyphs(cff, glyphs); err == nil {
+				if candidate, err := compactCFFTables(sfnt, compact, ids, mapping, variations); err == nil && len(candidate) < size && (best == nil || len(candidate) < len(best)) {
+					best = candidate
+				}
+			}
+		}
+		return best
 	}
 	for id := 0; id < int(sfnt.NumGlyphs()); id++ {
 		if _, err := trueTypeGlyphData(sfnt.Tables, uint16(id)); err != nil {
@@ -248,7 +295,13 @@ func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
 			glyfSize += len(data) + len(data)%2
 		}
 	}
-	locaFormat := binary.BigEndian.Uint16(sfnt.Tables["head"][50:])
+	if glyfSize == 0 && hasBitmapTables(sfnt.Tables) {
+		return nil
+	}
+	locaFormat := uint16(1)
+	if glyfSize <= 0x1fffe {
+		locaFormat = 0
+	}
 	glyf := make([]byte, 0, glyfSize)
 	loca := make([]byte, 0, (int(sfnt.NumGlyphs())+1)*(2+2*int(locaFormat)))
 	for id := 0; id <= int(sfnt.NumGlyphs()); id++ {
@@ -269,16 +322,22 @@ func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
 	tables["glyf"], tables["loca"] = glyf, loca
 	tables["cmap"] = buildCmapWithVariations(sfnt.NumGlyphs(), mapping, variations)
 	tables["head"] = bytes.Clone(tables["head"])
+	binary.BigEndian.PutUint16(tables["head"][50:], locaFormat)
 	clear(tables["head"][8:12])
-	delete(tables, "DSIG")
-	result, err := SerializeOTF(tables)
-	if err != nil || len(result) >= size {
-		return nil
+	dropTransientSubsetTables(tables)
+	best, err := SerializeOTF(tables)
+	if err != nil || len(best) >= size {
+		best = nil
 	}
-	return result
+	if canCompact {
+		if candidate, err := subsetCompactSFNTFont(sfnt, slices.Sorted(maps.Keys(glyphs)), mapping, variations); err == nil && len(candidate) > 0 && len(candidate) < size && (best == nil || len(candidate) < len(best)) {
+			best = candidate
+		}
+	}
+	return best
 }
 
-// retainSFNTSubstitutions 保留全部替换结果，使原字形替换表在裁剪后仍可使用
+// retainSFNTSubstitutions 按当前字形集合做GSUB迭代不动点闭包，仅保留可达替换结果
 // 入参: data 替换表, glyphs 待保留字形, count 字形总数
 // 返回: bool 替换表及结果编号是否有效
 func retainSFNTSubstitutions(data []byte, glyphs map[uint16]bool, count uint16) bool {
@@ -295,6 +354,7 @@ func retainSFNTSubstitutions(data []byte, glyphs map[uint16]bool, count uint16) 
 	if err != nil {
 		return false
 	}
+	var active []tables.GSUBLookup
 	for _, lookup := range layout.LookupList.Lookups {
 		subtables, err := lookup.AsGSUBLookups()
 		if err != nil {
@@ -310,66 +370,156 @@ func retainSFNTSubstitutions(data []byte, glyphs map[uint16]bool, count uint16) 
 					return false
 				}
 			}
-			if !retainSFNTSubstitution(subtable, glyphs, count) {
+			switch sub := subtable.(type) {
+			case tables.SingleSubs:
+				switch sub.Data.(type) {
+				case tables.SingleSubstData1, tables.SingleSubstData2:
+					active = append(active, sub)
+				default:
+					return false
+				}
+			case tables.MultipleSubs, tables.AlternateSubs, tables.LigatureSubs, tables.ReverseChainSingleSubs:
+				active = append(active, sub)
+			case tables.ContextualSubs, tables.ChainedContextualSubs:
+			default:
 				return false
 			}
 		}
 	}
-	return true
-}
-
-// retainSFNTSubstitution 收集替换子表的输出字形，上下文替换的结果由被引用的查找表提供
-// 入参: subtable 替换子表, glyphs 待保留字形, count 字形总数
-// 返回: bool 子表类型及输出字形是否有效
-func retainSFNTSubstitution(subtable tables.GSUBLookup, glyphs map[uint16]bool, count uint16) bool {
-	var outputs []tables.GlyphID
-	switch subtable := subtable.(type) {
-	case tables.SingleSubs:
-		switch data := subtable.Data.(type) {
-		case tables.SingleSubstData1:
-			for id := uint16(0); id < count; id++ {
-				if _, ok := data.Coverage.Index(tables.GlyphID(id)); ok {
-					outputs = append(outputs, tables.GlyphID(id+uint16(data.DeltaGlyphID)))
+	if len(active) == 0 {
+		return true
+	}
+	all := make([]uint16, 0, len(glyphs))
+	for id, retained := range glyphs {
+		if retained && id < count {
+			all = append(all, id)
+		}
+	}
+	frontier := all
+	for len(frontier) > 0 {
+		var next []uint16
+		add := func(id tables.GlyphID) bool {
+			if uint16(id) >= count {
+				return false
+			}
+			if !glyphs[uint16(id)] {
+				glyphs[uint16(id)] = true
+				next = append(next, uint16(id))
+			}
+			return true
+		}
+		for _, subtable := range active {
+			switch sub := subtable.(type) {
+			case tables.SingleSubs:
+				switch data := sub.Data.(type) {
+				case tables.SingleSubstData1:
+					for _, id := range frontier {
+						if _, ok := data.Coverage.Index(tables.GlyphID(id)); ok {
+							if !add(tables.GlyphID(id + uint16(data.DeltaGlyphID))) {
+								return false
+							}
+						}
+					}
+				case tables.SingleSubstData2:
+					for _, id := range frontier {
+						if idx, ok := data.Coverage.Index(tables.GlyphID(id)); ok {
+							if idx < 0 || idx >= len(data.SubstituteGlyphIDs) || !add(data.SubstituteGlyphIDs[idx]) {
+								return false
+							}
+						}
+					}
+				}
+			case tables.MultipleSubs:
+				for _, id := range frontier {
+					if idx, ok := sub.Coverage.Index(tables.GlyphID(id)); ok {
+						if idx < 0 || idx >= len(sub.Sequences) {
+							return false
+						}
+						for _, out := range sub.Sequences[idx].SubstituteGlyphIDs {
+							if !add(out) {
+								return false
+							}
+						}
+					}
+				}
+			case tables.AlternateSubs:
+				for _, id := range frontier {
+					if idx, ok := sub.Coverage.Index(tables.GlyphID(id)); ok {
+						if idx < 0 || idx >= len(sub.AlternateSets) {
+							return false
+						}
+						for _, out := range sub.AlternateSets[idx].AlternateGlyphIDs {
+							if !add(out) {
+								return false
+							}
+						}
+					}
+				}
+			case tables.ReverseChainSingleSubs:
+				for _, id := range frontier {
+					if idx, ok := sub.Cov().Index(tables.GlyphID(id)); ok {
+						if idx < 0 || idx >= len(sub.SubstituteGlyphIDs) || !add(sub.SubstituteGlyphIDs[idx]) {
+							return false
+						}
+					}
+				}
+			case tables.LigatureSubs:
+				for _, id := range all {
+					if idx, ok := sub.Coverage.Index(tables.GlyphID(id)); ok {
+						if idx < 0 || idx >= len(sub.LigatureSets) {
+							return false
+						}
+						for _, ligature := range sub.LigatureSets[idx].Ligatures {
+							matched := true
+							for _, comp := range ligature.ComponentGlyphIDs {
+								if !glyphs[uint16(comp)] {
+									matched = false
+									break
+								}
+							}
+							if matched && !add(ligature.LigatureGlyph) {
+								return false
+							}
+						}
+					}
 				}
 			}
-		case tables.SingleSubstData2:
-			outputs = data.SubstituteGlyphIDs
-		default:
-			return false
 		}
-	case tables.MultipleSubs:
-		for _, sequence := range subtable.Sequences {
-			outputs = append(outputs, sequence.SubstituteGlyphIDs...)
-		}
-	case tables.AlternateSubs:
-		for _, set := range subtable.AlternateSets {
-			outputs = append(outputs, set.AlternateGlyphIDs...)
-		}
-	case tables.LigatureSubs:
-		for _, set := range subtable.LigatureSets {
-			for _, ligature := range set.Ligatures {
-				outputs = append(outputs, ligature.LigatureGlyph)
-			}
-		}
-	case tables.ReverseChainSingleSubs:
-		outputs = subtable.SubstituteGlyphIDs
-	case tables.ContextualSubs, tables.ChainedContextualSubs:
-	default:
-		return false
-	}
-	for _, id := range outputs {
-		if uint16(id) >= count {
-			return false
-		}
-		glyphs[uint16(id)] = true
+		all = append(all, next...)
+		frontier = next
 	}
 	return true
 }
 
-// subsetCompactSFNTFont 重排新建静态字体的字形，同步复合引用、字符映射和度量
-// 入参: sfnt 字体, glyphs 使用字形
+// buildCompactCmap 按重排后的字形编号构建字符映射及格式14变体子表
+// 入参: sfnt 原字体, ids 新编号对应的原编号, remap 原编号到新编号映射, sourceMapping 指定字符映射(nil时按原映射反查), variations 格式14变体子表
+// 返回: []byte 字符映射表, error 变体映射错误
+func buildCompactCmap(sfnt *SFNT, ids []uint16, remap map[uint16]uint16, sourceMapping map[rune]uint16, variations []byte) ([]byte, error) {
+	mapping := make(map[rune]uint16)
+	if sourceMapping == nil {
+		for index, gid := range ids {
+			for _, char := range sfnt.glyphCharacters(gid) {
+				mapping[char] = uint16(index)
+			}
+		}
+	} else {
+		for char, gid := range sourceMapping {
+			if mapped, ok := remap[gid]; ok && mapped != 0 {
+				mapping[char] = mapped
+			}
+		}
+	}
+	remappedVariations, ok := remapCmapVariations(variations, remap)
+	if !ok {
+		return nil, fmt.Errorf("invalid cmap variation glyph remap")
+	}
+	return buildCmapWithVariations(uint16(len(ids)), mapping, remappedVariations), nil
+}
+
+// subsetCompactSFNTFont 重排静态TrueType字形，同步复合引用、字符映射、格式14变体和度量
+// 入参: sfnt 字体, glyphs 使用字形, sourceMapping 指定字符映射(nil时按原映射反查), variations 格式14变体子表
 // 返回: []byte 紧凑字体子集, error 字形数据错误
-func subsetCompactSFNTFont(sfnt *SFNT, glyphs []uint16) ([]byte, error) {
+func subsetCompactSFNTFont(sfnt *SFNT, glyphs []uint16, sourceMapping map[rune]uint16, variations []byte) ([]byte, error) {
 	ids := []uint16{0}
 	remap := map[uint16]uint16{0: 0}
 	for _, id := range glyphs {
@@ -397,10 +547,10 @@ func subsetCompactSFNTFont(sfnt *SFNT, glyphs []uint16) ([]byte, error) {
 			table[tag] = bytes.Clone(data)
 		}
 	}
-	var glyf, loca, hmtx, vmtx []byte
-	mapping := make(map[rune]uint16)
-	for _, id := range ids {
-		loca = binary.BigEndian.AppendUint32(loca, uint32(len(glyf)))
+	var glyf, hmtx, vmtx []byte
+	offsets := make([]int, len(ids)+1)
+	for idx, id := range ids {
+		offsets[idx] = len(glyf)
 		data, err := trueTypeGlyphData(sfnt.Tables, id)
 		if err != nil {
 			return nil, err
@@ -438,14 +588,29 @@ func subsetCompactSFNTFont(sfnt *SFNT, glyphs []uint16) ([]byte, error) {
 			vmtx = binary.BigEndian.AppendUint16(vmtx, sfnt.GlyphVerticalAdvance(id))
 			vmtx = binary.BigEndian.AppendUint16(vmtx, uint16(sfnt.sideBearing(id, true)))
 		}
-		for _, char := range sfnt.glyphCharacters(id) {
-			mapping[char] = remap[id]
+	}
+	offsets[len(ids)] = len(glyf)
+	if len(glyf) == 0 && hasBitmapTables(sfnt.Tables) {
+		return nil, nil
+	}
+	cmap, err := buildCompactCmap(sfnt, ids, remap, sourceMapping, variations)
+	if err != nil {
+		return nil, err
+	}
+	locaFormat := uint16(1)
+	if len(glyf) <= 0x1fffe {
+		locaFormat = 0
+	}
+	loca := make([]byte, 0, len(offsets)*(2+2*int(locaFormat)))
+	for _, off := range offsets {
+		if locaFormat == 0 {
+			loca = binary.BigEndian.AppendUint16(loca, uint16(off/2))
+		} else {
+			loca = binary.BigEndian.AppendUint32(loca, uint32(off))
 		}
 	}
-	loca = binary.BigEndian.AppendUint32(loca, uint32(len(glyf)))
-	table["glyf"], table["loca"], table["hmtx"] = glyf, loca, hmtx
-	table["cmap"] = BuildCmapTable(uint16(len(ids)), mapping)
-	binary.BigEndian.PutUint16(table["head"][50:], 1)
+	table["glyf"], table["loca"], table["hmtx"], table["cmap"] = glyf, loca, hmtx, cmap
+	binary.BigEndian.PutUint16(table["head"][50:], locaFormat)
 	binary.BigEndian.PutUint16(table["hhea"][34:], uint16(len(ids)))
 	binary.BigEndian.PutUint16(table["maxp"][4:], uint16(len(ids)))
 	if len(table["post"]) >= 32 {

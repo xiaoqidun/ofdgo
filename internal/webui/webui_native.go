@@ -91,16 +91,21 @@ type NativeEngine struct {
 	// ReserveOutput 为单次批量预留整体入口，返回错误时由宿主释放未交付的预留
 	ReserveOutput func(context.Context, NativeOutputRequest) (NativeOutputTarget, error)
 	// CleanupOutput 必须幂等，以兼容前端收到output事件后重复removeEntry
-	CleanupOutput func(context.Context, NativeOutputTarget) error
-	gate          chan struct{}
-	once          sync.Once
-	saves         sync.WaitGroup
-	closed        bool
-	renderMu      sync.Mutex
-	renderCount   int
-	renderDone    chan struct{}
-	renderSlots   chan struct{}
-	renderIdle    []*Session
+	CleanupOutput  func(context.Context, NativeOutputTarget) error
+	gate           chan struct{}
+	once           sync.Once
+	saves          sync.WaitGroup
+	closed         bool
+	ctxMu          sync.Mutex
+	renderMu       sync.Mutex
+	renderCount    int
+	renderSeq      uint64
+	renderContexts map[uint64]context.Context
+	saveSeq        uint64
+	saveContexts   map[uint64]context.Context
+	renderDone     chan struct{}
+	renderSlots    chan struct{}
+	renderIdle     []*Session
 }
 
 // NewNativeEngine 创建独立业务会话，resolver不接收未经授权的文件路径
@@ -119,7 +124,11 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 	e.once.Do(func() {
 		e.gate = make(chan struct{}, 1)
 		e.renderSlots = make(chan struct{}, e.renderParallelism())
-		e.resolveInput = e.input
+		e.renderContexts = make(map[uint64]context.Context)
+		e.saveContexts = make(map[uint64]context.Context)
+		e.resolveInput = func(ctx context.Context, value any) (io.ReaderAt, int64, error) {
+			return e.resolveNativeInput(ctx, value, false)
+		}
 		e.conversionPool = e.ConversionPool
 		e.resources = e.Resources
 	})
@@ -180,6 +189,11 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 			}
 		}
 		operation.currentEditor = nil
+		e.ctxMu.Lock()
+		e.renderSeq++
+		renderID := e.renderSeq
+		e.renderContexts[renderID] = ctx
+		e.ctxMu.Unlock()
 		e.renderMu.Lock()
 		if e.renderCount == 0 {
 			e.renderDone = make(chan struct{})
@@ -190,6 +204,9 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 		locked = false
 		defer func() {
 			worker.Renderer.OutputContext = context.Background()
+			e.ctxMu.Lock()
+			delete(e.renderContexts, renderID)
+			e.ctxMu.Unlock()
 			e.renderMu.Lock()
 			if result != nil && result["ok"] == true && ctx.Err() == nil {
 				e.currentSession.retainSVGFonts(worker.svgFonts)
@@ -249,16 +266,28 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 		if snapshot == nil {
 			return nativeFailure(fmt.Errorf("save snapshot is not prepared"))
 		}
-		output := &NativeEngine{OpenWriter: e.OpenWriter}
+		output := &NativeEngine{OpenWriter: e.OpenWriter, Resources: e.Resources, ConversionPool: e.ConversionPool}
 		output.currentEditor = snapshot
+		e.ctxMu.Lock()
+		e.saveSeq++
+		saveID := e.saveSeq
+		e.saveContexts[saveID] = ctx
+		e.ctxMu.Unlock()
 		e.saves.Add(1)
-		defer e.saves.Done()
+		defer func() {
+			e.ctxMu.Lock()
+			delete(e.saveContexts, saveID)
+			e.ctxMu.Unlock()
+			e.saves.Done()
+		}()
 		<-e.gate
 		locked = false
 		defer output.Close()
 		return output.Call(ctx, "ofdgoSaveDocument", args, emit)
 	}
+	e.ctxMu.Lock()
 	e.ctx = ctx
+	e.ctxMu.Unlock()
 	if e.currentSession != nil {
 		e.currentSession.Renderer.OutputContext = ctx
 	}
@@ -266,7 +295,9 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 		if e.currentSession != nil {
 			e.currentSession.Renderer.OutputContext = context.Background()
 		}
+		e.ctxMu.Lock()
 		e.ctx = nil
+		e.ctxMu.Unlock()
 		if failure := recover(); failure != nil {
 			if err, ok := failure.(error); ok {
 				result = nativeFailure(err)
@@ -331,7 +362,6 @@ func (e *NativeEngine) Close() error {
 	e.once.Do(func() {
 		e.gate = make(chan struct{}, 1)
 		e.renderSlots = make(chan struct{}, e.renderParallelism())
-		e.resolveInput = e.input
 	})
 	e.gate <- struct{}{}
 	defer func() { <-e.gate }()
@@ -353,9 +383,10 @@ func (e *NativeEngine) Close() error {
 	return err
 }
 
-// nativeReader 在会话当前操作上下文中分块读取，不捕获已结束请求的上下文
+// nativeReader 在会话当前操作上下文或请求上下文中分块读取，不捕获已结束请求的上下文
 type nativeReader struct {
 	engine *NativeEngine
+	ctx    context.Context
 	input  io.ReaderAt
 }
 
@@ -365,7 +396,7 @@ type nativeReader struct {
 func (r nativeReader) ReadAt(data []byte, offset int64) (int, error) {
 	total := 0
 	for len(data) > 0 {
-		if err := r.engine.operationContext().Err(); err != nil {
+		if err := r.contextErr(); err != nil {
 			return total, err
 		}
 		n := min(len(data), 256<<10)
@@ -380,6 +411,15 @@ func (r nativeReader) ReadAt(data []byte, offset int64) (int, error) {
 		data, offset = data[n:], offset+int64(n)
 	}
 	return total, nil
+}
+
+// contextErr 返回当前读取应响应的取消状态
+// 返回: error 取消错误
+func (r nativeReader) contextErr() error {
+	if r.ctx != nil {
+		return r.ctx.Err()
+	}
+	return r.engine.readerContextErr()
 }
 
 // nativeCall 保存单次worker适配状态
@@ -442,7 +482,7 @@ func (c *nativeCall) progress(kind, stage string, phased bool) nativeCallback {
 // 入参: value 输入源参数
 // 返回: nativeCallback 读取回调, int64 数据大小, error 授权或读取错误
 func (c *nativeCall) readCallback(value any) (nativeCallback, int64, error) {
-	input, size, err := c.engine.input(c.ctx, value)
+	input, size, err := c.engine.resolveNativeInput(c.ctx, value, true)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -669,6 +709,8 @@ func (c *nativeCall) prepare(name string, args []any) ([]any, error) {
 		return append(args, checkpoint), nil
 	case "ofdgoImportPages", "ofdgoImportDocuments", "ofdgoImportImages":
 		return append(args, c.progress("import", "", true)), nil
+	case "ofdgoProcessFonts":
+		return append(args, c.progress("fonts", "", true)), nil
 	case "ofdgoOpenPDF":
 		return append(args, c.progress("conversion", "", true), nativeCallback(c.font)), nil
 	case "ofdgoExportImages", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned":
@@ -909,9 +951,9 @@ func nativeReadOnly(name string) bool {
 	switch name {
 	case "ofdgoImagePreview", "ofdgoImagePageSize", "ofdgoCheckDocument", "ofdgoDocumentInfo", "ofdgoEditorInfo", "ofdgoDocumentNavigation", "ofdgoDocumentVersions", "ofdgoPackageDocuments",
 		"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoActionList", "ofdgoPageSettings", "ofdgoStyleResource",
-		"ofdgoOutlineLinks", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoOpenLinks", "ofdgoRenderBackends",
+		"ofdgoOutlineLinks", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoStructureXML", "ofdgoOpenLinks", "ofdgoRenderBackends",
 		"ofdgoSVGFontData", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences",
-		"ofdgoResourceTargets", "ofdgoResourceLocations", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange":
+		"ofdgoResourceTargets", "ofdgoResourceLocations", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoClearImport":
 		return true
 	}
 	return false
@@ -997,18 +1039,52 @@ func (e *NativeEngine) renderObjects(operation *businessEngine, index int) ([]an
 	return operation.editorObjects(index, text)
 }
 
-// input 读取授权源并以宿主报告的大小为准
-// 入参: ctx 调用上下文, value 输入字节或授权描述
+// readerContextErr 检查当前串行操作、并行页面渲染与后台保存的取消状态
+// 返回: error 取消错误
+func (e *NativeEngine) readerContextErr() error {
+	e.ctxMu.Lock()
+	defer e.ctxMu.Unlock()
+	var canceled error
+	if e.ctx != nil {
+		err := e.ctx.Err()
+		if err == nil {
+			return nil
+		}
+		canceled = err
+	}
+	for _, ctx := range e.renderContexts {
+		err := ctx.Err()
+		if err == nil {
+			return nil
+		}
+		canceled = err
+	}
+	for _, ctx := range e.saveContexts {
+		err := ctx.Err()
+		if err == nil {
+			return nil
+		}
+		canceled = err
+	}
+	return canceled
+}
+
+// resolveNativeInput 解析原生二进制或授权句柄并包装分块取消读取器
+// 入参: ctx 调用上下文, value 输入字节或授权描述, bindContext 是否绑定本次请求上下文
 // 返回: io.ReaderAt 随机读取器, int64 数据大小, error 授权或读取错误
-func (e *NativeEngine) input(ctx context.Context, value any) (io.ReaderAt, int64, error) {
+func (e *NativeEngine) resolveNativeInput(ctx context.Context, value any, bindContext bool) (io.ReaderAt, int64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
 	if p, ok := value.(platformValue); ok {
 		value = p.value
 	}
+	var bound context.Context
+	if bindContext {
+		bound = ctx
+	}
 	if data, ok := value.([]byte); ok {
-		return nativeReader{engine: e, input: bytes.NewReader(data)}, int64(len(data)), nil
+		return nativeReader{engine: e, ctx: bound, input: bytes.NewReader(data)}, int64(len(data)), nil
 	}
 	descriptor, ok := value.(map[string]any)
 	if !ok {
@@ -1025,14 +1101,14 @@ func (e *NativeEngine) input(ctx context.Context, value any) (io.ReaderAt, int64
 	if input == nil || size < 0 {
 		return nil, 0, fmt.Errorf("invalid native file input")
 	}
-	return nativeReader{engine: e, input: input}, size, nil
+	return nativeReader{engine: e, ctx: bound, input: input}, size, nil
 }
 
 // readBytes 分块读取完整资源并检查取消状态
 // 入参: ctx 调用上下文, value 资源参数
 // 返回: []byte 资源数据, error 读取错误
 func (e *NativeEngine) readBytes(ctx context.Context, value any) ([]byte, error) {
-	input, size, err := e.input(ctx, value)
+	input, size, err := e.resolveNativeInput(ctx, value, true)
 	if err != nil {
 		return nil, err
 	}

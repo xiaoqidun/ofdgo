@@ -15,6 +15,7 @@
 package font
 
 import (
+	"bytes"
 	"encoding/binary"
 	"maps"
 	"slices"
@@ -22,6 +23,32 @@ import (
 
 	"github.com/go-text/typesetting/font/opentype/tables"
 )
+
+// HasCmapVariations 判断独立SFNT字体的cmap表是否包含格式14变体序列子表
+// 入参: data 独立SFNT字体数据
+// 返回: bool 是否包含格式14子表
+func HasCmapVariations(data []byte) bool {
+	fontTables, err := FileTables(data, 0)
+	if err != nil {
+		return false
+	}
+	cmap := fontTables["cmap"]
+	if len(cmap) < 4 {
+		return false
+	}
+	n := int(binary.BigEndian.Uint16(cmap[2:]))
+	if n > (len(cmap)-4)/8 {
+		return false
+	}
+	for i := 0; i < n; i++ {
+		record := cmap[4+i*8:]
+		offset := uint64(binary.BigEndian.Uint32(record[4:]))
+		if offset+2 <= uint64(len(cmap)) && binary.BigEndian.Uint16(cmap[offset:]) == 14 {
+			return true
+		}
+	}
+	return false
+}
 
 // subsetCmapVariations 裁剪Unicode变体映射，将非默认变体的字形加入保留集合
 // 入参: data 字符映射表, chars 使用字符, glyphs 保留字形, count 字形总数
@@ -231,4 +258,43 @@ func buildCmapWithVariations(count uint16, mapping map[rune]uint16, variations [
 	binary.BigEndian.PutUint32(out[24:], 28)
 	out = append(out, payload...)
 	return append(out, variations...)
+}
+
+// remapCmapVariations 按新字形映射表重写格式14非默认变体的字形编号
+// 入参: data 格式14子表, remap 原字形编号到新字形编号的映射
+// 返回: []byte 重映射后的格式14子表, bool 是否全部映射成功
+func remapCmapVariations(data []byte, remap map[uint16]uint16) ([]byte, bool) {
+	if len(data) == 0 {
+		return nil, true
+	}
+	if len(data) < 10 || binary.BigEndian.Uint16(data) != 14 {
+		return nil, false
+	}
+	n := uint64(binary.BigEndian.Uint32(data[6:]))
+	if 10+n*11 > uint64(len(data)) {
+		return nil, false
+	}
+	out := bytes.Clone(data)
+	for i := uint64(0); i < n; i++ {
+		offset := uint64(binary.BigEndian.Uint32(out[10+i*11+7:]))
+		if offset == 0 {
+			continue
+		}
+		if offset+4 > uint64(len(out)) {
+			return nil, false
+		}
+		count := uint64(binary.BigEndian.Uint32(out[offset:]))
+		if offset+4+count*5 > uint64(len(out)) {
+			return nil, false
+		}
+		for j := uint64(0); j < count; j++ {
+			pos := offset + 4 + j*5 + 3
+			mapped, ok := remap[binary.BigEndian.Uint16(out[pos:])]
+			if !ok {
+				return nil, false
+			}
+			binary.BigEndian.PutUint16(out[pos:], mapped)
+		}
+	}
+	return out, true
 }

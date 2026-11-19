@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -97,7 +98,7 @@ func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byt
 	if err := pruneUnreferencedFiles(ctx, view, slices.Collect(maps.Keys(candidates))...); err != nil {
 		return err
 	}
-	if err := e.subsetPackageFonts(ctx, view, removed, generated); err != nil {
+	if err := e.subsetPackageFonts(ctx, view, parts, removed, generated); err != nil {
 		return err
 	}
 	for name, data := range view.files {
@@ -199,10 +200,10 @@ func fontCleanupDirectory(input io.Reader, size uint64) (bool, error) {
 	return true, nil
 }
 
-// subsetPackageFonts 按文档作用域收集用字，合并共享字体需求并保留字形编号
-// 入参: ctx 取消上下文, view 独立输出快照, removed 待删除条目, generated 本次编码的页面引用
+// subsetPackageFonts 按文档作用域收集用字，复用引用缓存并跳过已裁剪收敛字体
+// 入参: ctx 取消上下文, view 独立输出快照, parts 前序输出改动, removed 待删除条目, generated 本次编码的页面引用
 // 返回: error 读取、裁剪或取消错误
-func (e *Editor) subsetPackageFonts(ctx context.Context, view *Reader, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
+func (e *Editor) subsetPackageFonts(ctx context.Context, view *Reader, parts map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
 	if e.backends.FontResources == nil {
 		return nil
 	}
@@ -211,7 +212,16 @@ func (e *Editor) subsetPackageFonts(ctx context.Context, view *Reader, removed m
 		delete(names, name)
 	}
 	progress := editorProgress(e.OnWriteProgress)
-	refs, resources, references, safe, err := scanEditorResources(ctx, view, view.files, generated, names, progress, true)
+	var refs *editorResourceRefs
+	var resources []string
+	var references map[string]*editorResourceRefs
+	var safe bool
+	var err error
+	if e.output != nil && e.output.references != nil {
+		refs, resources, references, safe, err = scanEditorResourceFiles(ctx, e.source.reader, view.files, generated, names, nil, progress, true, e.output.references)
+	} else {
+		refs, resources, references, safe, err = scanEditorResources(ctx, view, view.files, generated, names, progress, true)
+	}
 	if err != nil || !safe || refs.fontUnsafe {
 		return err
 	}
@@ -238,6 +248,19 @@ func (e *Editor) subsetPackageFonts(ctx context.Context, view *Reader, removed m
 			}
 		}
 	}
+	converged := make(map[[32]byte]bool)
+	for _, resource := range e.resources {
+		if resource.subset != nil && len(resource.subset.data) != 0 {
+			converged[sha256.Sum256(resource.subset.data)] = true
+		}
+	}
+	if e.output != nil && e.output.options.Mode != CompressionUnchanged {
+		for name, data := range parts {
+			if usage[name] != nil && e.source.reader.fileNames[name] && len(data) != 0 {
+				converged[sha256.Sum256(data)] = true
+			}
+		}
+	}
 	var cache editorSourceFontCache
 	for index, name := range slices.Sorted(maps.Keys(usage)) {
 		if err := progress.report("fonts", index, len(usage)); err != nil {
@@ -249,6 +272,9 @@ func (e *Editor) subsetPackageFonts(ctx context.Context, view *Reader, removed m
 		data, err := read(name)
 		if err != nil {
 			return err
+		}
+		if converged[sha256.Sum256(data)] {
+			continue
 		}
 		subset, err := cache.subset(ctx, e.backends.FontResources, data, usage[name])
 		if err != nil {

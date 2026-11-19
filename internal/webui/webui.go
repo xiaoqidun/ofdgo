@@ -58,6 +58,7 @@ type OpenOptions struct {
 	Fonts             []FontFile
 	RenderAnnotations bool
 	ReaderOptions     []ofdgo.ReaderOption
+	RendererOptions   []ofdgo.RendererOption
 }
 
 // FontFile 字体文件
@@ -507,14 +508,8 @@ func (s *Session) SearchPageContext(ctx context.Context, index int, query string
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	text := s.cachedPageText(index)
-	if text == nil {
-		var err error
-		text, err = s.readPageText(ctx, index)
-		if err != nil {
-			return nil, err
-		}
-		s.cachePageText(index, text)
+	if query == "" {
+		return nil, nil
 	}
 	var matches []ofdgo.TextMatch
 	visit := func(match ofdgo.TextMatch) error {
@@ -523,6 +518,22 @@ func (s *Session) SearchPageContext(ctx context.Context, index int, query string
 			return io.EOF
 		}
 		return nil
+	}
+	text := s.cachedPageText(index)
+	if text == nil && s.pageCache[index] == nil {
+		err := s.Renderer.SearchText(ctx, query, func(_ int, match ofdgo.TextMatch) error { return visit(match) }, index)
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		return matches, nil
+	}
+	if text == nil {
+		var err error
+		text, err = s.readPageText(ctx, index)
+		if err != nil {
+			return nil, err
+		}
+		s.cachePageText(index, text)
 	}
 	cached, err := s.textCache.SearchEach(ctx, index, query, visit)
 	if !cached && err == nil {
@@ -899,11 +910,17 @@ type invoiceEditorInfo struct {
 	InvoiceResult ofdgo.InvoiceUpdateResult `json:"invoiceResult"`
 }
 
+// fontProcessEditorInfo 全包字体批量处理后的编辑状态与明细
+type fontProcessEditorInfo struct {
+	editorInfo
+	FontChanges []ofdgo.FontChange `json:"fontChanges"`
+}
+
 // annotationOptions 保存注解面板的输入，资源字节单独传输
 type annotationOptions struct {
 	Kind, ID, Text, Old, Creator, Pages, URI, Color string
 	Base                                            string
-	X, Y, Width, Height, Size, Angle                float64
+	X, Y, Width, Height, Size, Angle, Gap           float64
 	Alpha                                           int
 	Tile                                            bool
 	Keep                                            bool
@@ -1216,7 +1233,7 @@ func (e *businessEngine) checkDocument(name string) error {
 	switch name {
 	case "ofdgoFontFaces", "ofdgoFontMenu", "ofdgoFontPreferenceOrder", "ofdgoFontFace", "ofdgoCheckTextFont", "ofdgoImagePageSize", "ofdgoImagePreview":
 		return nil
-	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDestinationView", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
+	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDestinationView", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoClearImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
 		return nil
 	default:
 		return ofdgo.ErrIncompleteDocument
@@ -2557,6 +2574,8 @@ func (e *businessEngine) changeStructure(args []platformValue) (any, error) {
 		Index      int                        `json:"index"`
 		Path       []int                      `json:"path"`
 		TypeID     string                     `json:"typeId"`
+		Namespace  string                     `json:"namespace"`
+		XML        string                     `json:"xml"`
 		Node       ofdgo.StructureNode        `json:"node"`
 		References []ofdgo.StructureReference `json:"references"`
 	}
@@ -2564,7 +2583,7 @@ func (e *businessEngine) changeStructure(args []platformValue) (any, error) {
 		return nil, err
 	}
 	return e.changeObjects(func() error {
-		if request.Action != "create" {
+		if request.Action != "create" && request.Action != "importXML" {
 			structures, err := e.currentEditor.Structure()
 			if err != nil {
 				return err
@@ -2577,6 +2596,11 @@ func (e *businessEngine) changeStructure(args []platformValue) (any, error) {
 		case "create":
 			_, err := e.currentEditor.AddStructure(ofdgo.CustomTag{TypeID: request.TypeID, NameSpace: request.Node.Namespace}, request.Node)
 			return err
+		case "importXML":
+			_, err := e.currentEditor.AddStructureXMLContext(e.operationContext(), ofdgo.CustomTag{TypeID: strings.TrimSpace(request.TypeID), NameSpace: strings.TrimSpace(request.Namespace)}, []byte(request.XML))
+			return err
+		case "updateXML":
+			return e.currentEditor.UpdateStructureXMLContext(e.operationContext(), request.Index, []byte(request.XML))
 		case "add":
 			_, err := e.currentEditor.AddStructureNode(request.Index, request.Path, request.Node)
 			return err
@@ -2593,6 +2617,31 @@ func (e *businessEngine) changeStructure(args []platformValue) (any, error) {
 			return fmt.Errorf("unsupported structure action %q", request.Action)
 		}
 	})
+}
+
+// structureXML 读取当前文档指定标引的原始XML文本
+// 入参: args 从0开始的标引索引
+// 返回: any 原始XML文本, error 参数或读取错误
+func (e *businessEngine) structureXML(args []platformValue) (any, error) {
+	if e.currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	if len(args) != 1 {
+		return nil, fmt.Errorf("missing structure index")
+	}
+	tags, err := e.currentSession.Reader.CustomTagsContext(e.operationContext())
+	if err != nil {
+		return nil, err
+	}
+	index := args[0].Int()
+	if index < 0 || index >= len(tags) {
+		return nil, fmt.Errorf("custom tag structure not found: %d", index)
+	}
+	data, err := e.currentSession.Reader.ResData(tags[index].FileLoc)
+	if err != nil {
+		return nil, err
+	}
+	return string(data), nil
 }
 
 // structureObjects 获取当前编辑文档的绑定候选，不允许阅读模式调用编辑入口
@@ -3442,7 +3491,7 @@ func (e *businessEngine) writeAnnotation(args []platformValue) (any, error) {
 				}
 				object = ofdgo.GraphicObject{Type: "TextObject", TextObject: text}
 			}
-			added, err := e.currentEditor.AddWatermarks(e.operationContext(), pages, object, ofdgo.WatermarkOptions{Creator: options.Creator, Angle: options.Angle, Tile: options.Tile, Area: options.Area})
+			added, err := e.currentEditor.AddWatermarks(e.operationContext(), pages, object, ofdgo.WatermarkOptions{Creator: options.Creator, Angle: options.Angle, Tile: options.Tile, Gap: options.Gap, Area: options.Area})
 			if err != nil {
 				return err
 			}
@@ -5266,10 +5315,6 @@ func (e *businessEngine) insertText(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	fontID, err := e.currentEditor.AddFont(FontFile{Data: data}, 0)
-	if err != nil {
-		return nil, err
-	}
 	page := args[0].Int()
 	content, err := e.currentSession.pageContent(page)
 	if err != nil {
@@ -5285,17 +5330,29 @@ func (e *businessEngine) insertText(args []platformValue) (any, error) {
 		width = 80
 	}
 	box = ofdgo.Box{X: x + box.X, Y: y + box.Y, W: math.Min(width, box.W-x), H: box.H - y}
-	object := ofdgo.GraphicObject{Type: "TextObject", TextObject: ofdgo.TextObject{
-		Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
-		Font:     fontID, Size: args[5].Float(),
-	}}
-	if err := e.currentEditor.LayoutText(&object.TextObject, args[1].String(), ofdgo.TextLayout{AutoBidi: true, Wrap: args[8].Bool(), Align: args[9].String(), LineHeight: args[10].Float(), LetterSpacing: args[11].Float(), LeftIndent: args[12].Float(), RightIndent: args[13].Float(), FirstLineIndent: args[14].Float()}); err != nil {
+	var id string
+	if err := e.currentEditor.Transaction(func(editor *ofdgo.Editor) error {
+		fontID, err := editor.AddFont(FontFile{Data: data}, 0)
+		if err != nil {
+			return err
+		}
+		object := ofdgo.GraphicObject{Type: "TextObject", TextObject: ofdgo.TextObject{
+			Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
+			Font:     fontID, Size: args[5].Float(),
+		}}
+		if err := editor.LayoutText(&object.TextObject, args[1].String(), ofdgo.TextLayout{AutoBidi: true, Wrap: args[8].Bool(), Align: args[9].String(), LineHeight: args[10].Float(), LetterSpacing: args[11].Float(), LeftIndent: args[12].Float(), RightIndent: args[13].Float(), FirstLineIndent: args[14].Float()}); err != nil {
+			return err
+		}
+		if err := e.setTextColor(&object.TextObject, args[6].String()); err != nil {
+			return err
+		}
+		id, err = e.addEditorObject(page, object, args[15:])
+		return err
+	}); err != nil {
 		return nil, err
 	}
-	if err := e.setTextColor(&object.TextObject, args[6].String()); err != nil {
-		return nil, err
-	}
-	return e.insertEditorObject(page, object, args[15:])
+	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	return editorSelectionInfo{info, []string{id}}, err
 }
 
 // layoutText 调整文字框和段落排版，保留软换行前的原文
@@ -6909,6 +6966,51 @@ func (e *businessEngine) changeFontBinding(args []platformValue) (any, error) {
 	})
 }
 
+// processFonts 全包批量嵌入或外置字体并返回编辑状态及逐字体明细
+// 入参: args 处理模式与可选进度回调
+// 返回: any 编辑状态及字体变更明细, error 字体处理错误
+func (e *businessEngine) processFonts(args []platformValue) (any, error) {
+	if e.currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
+	if len(args) < 1 {
+		return nil, fmt.Errorf("请选择字体处理方式")
+	}
+	var mode ofdgo.FontMode
+	switch args[0].Int() {
+	case int(ofdgo.FontEmbed):
+		mode = ofdgo.FontEmbed
+	case int(ofdgo.FontExternal):
+		mode = ofdgo.FontExternal
+	default:
+		return nil, fmt.Errorf("字体方式无效")
+	}
+	ctx := e.operationContext()
+	options := ofdgo.FontProcessOptions{Mode: mode}
+	if len(args) > 1 && args[1].Type() == platformTypeFunction {
+		operation, report := e.newEditorOperationContext(args[1])
+		ctx = operation
+		options.OnProgress = func(stage string, completed, total int) error {
+			return report("fonts", completed, total)
+		}
+	}
+	revision := e.currentEditor.Revision()
+	changes, err := e.currentEditor.ProcessFontsWithOptions(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	var info editorInfo
+	if e.currentEditor.Revision() == revision {
+		info = e.editorSummary()
+	} else {
+		info, err = e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return fontProcessEditorInfo{editorInfo: info, FontChanges: changes}, nil
+}
+
 // changePackageDocument 调用库层文档增删、改名或排序，不在浏览器内重写包结构
 // 入参: args 操作及标题、页面尺寸、文档索引或移动位置
 // 返回: any 文档信息, error 错误信息
@@ -7090,11 +7192,21 @@ func (e *businessEngine) syncEditorPageIDs(index int, content *ofdgo.PageContent
 // 入参: editor 编辑文档, annotations 是否显示注解
 // 返回: editorInfo 文档信息, error 错误信息
 func (e *businessEngine) previewEditor(editor *ofdgo.Editor, annotations bool) (editorInfo, error) {
+	if e.resources != nil {
+		editor.SetResources(e.resources)
+	}
 	reader, err := editor.Reader(e.operationContext())
 	if err != nil {
 		return editorInfo{}, err
 	}
-	session, err := newSession(reader, OpenOptions{RenderAnnotations: annotations})
+	opts := OpenOptions{RenderAnnotations: annotations}
+	if e.currentSession != nil {
+		opts.RendererOptions = append(opts.RendererOptions, ofdgo.WithRenderBackends(e.currentSession.Renderer.Backends()))
+		if e.currentSession.fontFS != nil {
+			opts.RendererOptions = append(opts.RendererOptions, ofdgo.WithFontFS(e.currentSession.fontFS))
+		}
+	}
+	session, err := newSession(reader, opts)
 	if err != nil {
 		return editorInfo{}, err
 	}
@@ -7109,10 +7221,8 @@ func (e *businessEngine) previewEditor(editor *ofdgo.Editor, annotations bool) (
 			e.copiedObjects, e.copiedStyle = nil, nil
 			e.clearImport()
 		}
-		ofdgo.WithRenderBackends(e.currentSession.Renderer.Backends())(session.Renderer)
 		if e.currentSession.fontFS != nil {
 			session.fontFS = e.currentSession.fontFS
-			session.Renderer.SetFontFS(session.fontFS)
 			editor.SetFontFS(session.fontFS)
 		}
 		changes := editor.Changes()
@@ -7530,54 +7640,76 @@ func (e *businessEngine) insertImage(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	resourceID, err := e.currentEditor.AddImage(data)
+	page := args[0].Int()
+	content, err := e.currentSession.pageContent(page)
 	if err != nil {
 		return nil, err
 	}
-	size, err := e.currentEditor.ImageSize(resourceID)
+	pageBox, err := e.currentSession.pageBox(page, content)
 	if err != nil {
 		return nil, err
 	}
-	width := args[4].Float()
-	box := ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: width, H: width * float64(size.Y) / float64(size.X)}
-	content, err := e.currentSession.pageContent(args[0].Int())
-	if err != nil {
+	var id string
+	if err := e.currentEditor.Transaction(func(editor *ofdgo.Editor) error {
+		resourceID, err := editor.AddImage(data)
+		if err != nil {
+			return err
+		}
+		size, err := editor.ImageSize(resourceID)
+		if err != nil {
+			return err
+		}
+		width := args[4].Float()
+		box := ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: width, H: width * float64(size.Y) / float64(size.X)}
+		if box.Y < 0 {
+			box.Y = 0
+		}
+		if box.Y >= pageBox.H {
+			box.Y = math.Max(0, pageBox.H-math.Min(box.H, pageBox.H))
+		}
+		if height := pageBox.H - box.Y; box.H > height {
+			box.W *= height / box.H
+			box.H = height
+		}
+		box.X += pageBox.X
+		box.Y += pageBox.Y
+		object := ofdgo.GraphicObject{Type: "ImageObject", ImageObject: ofdgo.ImageObject{
+			ResourceID: resourceID, Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
+		}}
+		id, err = e.addEditorObject(page, object, args[5:])
+		return err
+	}); err != nil {
 		return nil, err
 	}
-	pageBox, err := e.currentSession.pageBox(args[0].Int(), content)
-	if err != nil {
-		return nil, err
+	info, err := e.previewEditor(e.currentEditor, e.currentSession.Renderer.RenderAnnotations)
+	return editorSelectionInfo{info, []string{id}}, err
+}
+
+// addEditorObject 向页面或指定复合范围写入对象并返回稳定选区标识
+// 入参: page 页码, object 新对象, scope 可选父路径
+// 返回: string 选区标识, error 错误信息
+func (e *businessEngine) addEditorObject(page int, object ofdgo.GraphicObject, scope []platformValue) (string, error) {
+	if len(scope) > 0 {
+		if key := optionalString(scope[0]); key != "" {
+			path, err := e.compositePath(key)
+			if err != nil {
+				return "", err
+			}
+			index, err := e.currentEditor.AddCompositeObject(page, path, object)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("%s/%d", key, index), nil
+		}
 	}
-	if height := pageBox.H - box.Y; box.H > height {
-		box.W *= height / box.H
-		box.H = height
-	}
-	box.X += pageBox.X
-	box.Y += pageBox.Y
-	object := ofdgo.GraphicObject{Type: "ImageObject", ImageObject: ofdgo.ImageObject{
-		ResourceID: resourceID, Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
-	}}
-	return e.insertEditorObject(args[0].Int(), object, args[5:])
+	return e.currentEditor.AddObject(page, object)
 }
 
 // insertEditorObject 复用顶层和内部范围插入流程，返回稳定选区
 // 入参: page 页码, object 新对象, scope 可选父路径
 // 返回: any 文档信息及新选区, error 错误信息
 func (e *businessEngine) insertEditorObject(page int, object ofdgo.GraphicObject, scope []platformValue) (any, error) {
-	var id string
-	var err error
-	if len(scope) > 0 && scope[0].String() != "" {
-		key := scope[0].String()
-		path, parseErr := e.compositePath(key)
-		if parseErr != nil {
-			return nil, parseErr
-		}
-		var index int
-		index, err = e.currentEditor.AddCompositeObject(page, path, object)
-		id = fmt.Sprintf("%s/%d", key, index)
-	} else {
-		id, err = e.currentEditor.AddObject(page, object)
-	}
+	id, err := e.addEditorObject(page, object, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -7604,7 +7736,7 @@ func (e *businessEngine) editorOperationProgress(callback platformValue) func(st
 // 入参: value 解锁表单数据
 // 返回: ofdgo.Credentials 会话凭据, error 错误信息
 func (e *businessEngine) credentialsFromJS(value platformValue) (ofdgo.Credentials, error) {
-	credentials := ofdgo.Credentials{UserName: value.Get("userName").String()}
+	credentials := ofdgo.Credentials{UserName: optionalString(value.Get("userName"))}
 	if keyValue := value.Get("key"); !keyValue.IsNull() && !keyValue.IsUndefined() {
 		key, err := e.bytesFromJS(keyValue)
 		if err != nil {
@@ -7674,6 +7806,13 @@ func (e *businessEngine) verifySignatures(args []platformValue) (any, error) {
 		files[name] = data
 	}
 	now := time.Now()
+	if rawTime := strings.TrimSpace(optionalString(input.Get("verifyTime"))); rawTime != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, rawTime)
+		if err != nil {
+			return nil, fmt.Errorf("invalid verifyTime %q", rawTime)
+		}
+		now = parsed
+	}
 	policy := ofdgo.SignaturePolicy{RejectWeakAlgorithms: true, RequireDocumentCoverage: true,
 		RequireTimestamp: input.Get("requireTimestamp").Bool(), RequireRevocation: input.Get("requireRevocation").Bool()}
 	options := []ofdgo.SignatureVerifyOption{
@@ -7753,9 +7892,7 @@ func (e *businessEngine) encryptionOptionsFromJS(value platformValue) (*ofdgo.En
 			clear(password)
 		}
 	}()
-	if user := value.Get("userName"); user.Type() == platformTypeString {
-		options.UserName = user.String()
-	}
+	options.UserName = optionalString(value.Get("userName"))
 	if recipients := value.Get("recipients"); !recipients.IsUndefined() && !recipients.IsNull() {
 		for i := 0; i < recipients.Length(); i++ {
 			item := recipients.Index(i)
@@ -7767,7 +7904,7 @@ func (e *businessEngine) encryptionOptionsFromJS(value platformValue) (*ofdgo.En
 			if err != nil {
 				return nil, fmt.Errorf("接收者证书无效或不支持SM2加密")
 			}
-			options.Recipients = append(options.Recipients, ofdgo.EncryptionRecipient{UserName: item.Get("userName").String(), Certificate: certificate})
+			options.Recipients = append(options.Recipients, ofdgo.EncryptionRecipient{UserName: optionalString(item.Get("userName")), Certificate: certificate})
 		}
 	}
 	if len(password) == 0 && len(options.Recipients) == 0 {
@@ -8159,6 +8296,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoOutlineLinks":           e.outlineLinks,
 		"ofdgoStructureTargets":       e.structureTargets,
 		"ofdgoStructureObjects":       e.structureObjects,
+		"ofdgoStructureXML":           e.structureXML,
 		"ofdgoChangeStructure":        e.changeStructure,
 		"ofdgoOpenLinks":              e.openLinks,
 		"ofdgoDestinationView":        e.destinationView,
@@ -8184,6 +8322,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoExportImages":           e.exportImages,
 		"ofdgoMatchFontFiles":         e.matchFontFiles,
 		"ofdgoChangeFontBinding":      e.changeFontBinding,
+		"ofdgoProcessFonts":           e.processFonts,
 		"ofdgoFontFaces":              e.fontFaces,
 		"ofdgoFontMenu":               e.fontMenu,
 		"ofdgoFontFace":               e.fontFace,
@@ -8211,6 +8350,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoPasteStyle":             e.pasteStyle,
 		"ofdgoResizeObjects":          e.resizeObjects,
 		"ofdgoLoadImport":             e.loadImport,
+		"ofdgoClearImport":            func([]platformValue) (any, error) { e.clearImport(); return nil, nil },
 		"ofdgoImportPages":            e.importPages,
 		"ofdgoImportDocuments":        e.importDocuments,
 		"ofdgoInsertText":             e.insertText,
@@ -8619,6 +8759,7 @@ func newSession(reader *ofdgo.Reader, opts OpenOptions) (*Session, error) {
 		rendererOptions = append(rendererOptions, ofdgo.WithFontFS(fontFS))
 	}
 	rendererOptions = append(rendererOptions, ofdgo.WithAnnotations(opts.RenderAnnotations))
+	rendererOptions = append(rendererOptions, opts.RendererOptions...)
 	return &Session{
 		Reader:    reader,
 		Renderer:  ofdgo.NewRenderer(reader, rendererOptions...),
@@ -9246,4 +9387,14 @@ func translateSVGPath(path string, dx, dy float64) string {
 		out.WriteString(strconv.FormatFloat(val, 'g', -1, 64))
 	}
 	return out.String()
+}
+
+// optionalString 读取可选字符串参数，非字符串值返回空字符串
+// 入参: v 平台参数值
+// 返回: string 字符串内容
+func optionalString(v platformValue) string {
+	if v.Type() == platformTypeString {
+		return v.String()
+	}
+	return ""
 }

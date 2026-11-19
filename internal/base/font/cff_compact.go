@@ -109,10 +109,10 @@ func compactCFFGlyphs(data []byte, keep map[uint16]bool) ([]byte, []uint16, erro
 	return result, ids, err
 }
 
-// compactCFFTables 重建按字形编号索引的度量和字符映射，不保留旧编号的布局表
-// 入参: font 原字体, cff 紧凑CFF数据, ids 新编号对应的原编号
+// compactCFFTables 重建按字形编号索引的度量、字符映射和格式14变体子表
+// 入参: font 原字体, cff 紧凑CFF数据, ids 新编号对应的原编号, sourceMapping 指定字符映射(nil时按原映射反查), variations 格式14变体子表
 // 返回: []byte 独立OpenType字体, error 封装错误
-func compactCFFTables(font *SFNT, cff []byte, ids []uint16) ([]byte, error) {
+func compactCFFTables(font *SFNT, cff []byte, ids []uint16, sourceMapping map[rune]uint16, variations []byte) ([]byte, error) {
 	tables := make(map[string][]byte)
 	for _, tag := range []string{"head", "hhea", "maxp", "OS/2", "post", "name", "vhea", "gasp"} {
 		if data := font.Tables[tag]; data != nil {
@@ -120,20 +120,21 @@ func compactCFFTables(font *SFNT, cff []byte, ids []uint16) ([]byte, error) {
 		}
 	}
 	var hmtx, vmtx []byte
-	mapping := make(map[rune]uint16)
+	remap := make(map[uint16]uint16, len(ids))
 	for index, gid := range ids {
+		remap[gid] = uint16(index)
 		hmtx = binary.BigEndian.AppendUint16(hmtx, font.GlyphAdvance(gid))
 		hmtx = binary.BigEndian.AppendUint16(hmtx, uint16(font.sideBearing(gid, false)))
 		if font.vertical != 0 {
 			vmtx = binary.BigEndian.AppendUint16(vmtx, font.GlyphVerticalAdvance(gid))
 			vmtx = binary.BigEndian.AppendUint16(vmtx, uint16(font.sideBearing(gid, true)))
 		}
-		for _, char := range font.glyphCharacters(gid) {
-			mapping[char] = uint16(index)
-		}
 	}
-	tables["CFF "], tables["hmtx"] = cff, hmtx
-	tables["cmap"] = BuildCmapTable(uint16(len(ids)), mapping)
+	cmap, err := buildCompactCmap(font, ids, remap, sourceMapping, variations)
+	if err != nil {
+		return nil, err
+	}
+	tables["CFF "], tables["hmtx"], tables["cmap"] = cff, hmtx, cmap
 	binary.BigEndian.PutUint16(tables["hhea"][34:], uint16(len(ids)))
 	binary.BigEndian.PutUint16(tables["maxp"][4:], uint16(len(ids)))
 	if len(tables["post"]) >= 32 {

@@ -1,3 +1,5 @@
+import { randomID } from "./ofdgo_util.js";
+
 export const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
 const PX_PER_MM = 96 / 25.4;
@@ -205,7 +207,7 @@ export class RichTextSession {
 			const layout = { ...this.model.layout, ...this.model.paragraphs?.[first + i] };
 			return Object.fromEntries(["align", "lineHeight", "letterSpacing", "leftIndent", "rightIndent", "firstLineIndent"].map(key => [key, key === "align" ? layout[key] || this.model.layout.align || "left" : layout[key] || 0]));
 		});
-		const clipboard = { token: crypto.randomUUID(), runs, text, paragraphs, scope: this.editor.options.textClipboardScope?.(),
+		const clipboard = { token: randomID(), runs, text, paragraphs, scope: this.editor.options.textClipboardScope?.(),
 			fonts, faces: new Map([...this.faces].filter(([key]) => keys.has(key))), choices: new Map([...this.choices].filter(([key]) => keys.has(key))) };
 		if (this.editor.options.setTextClipboard) this.editor.options.setTextClipboard(clipboard);
 		else this.editor.richClipboard = clipboard;
@@ -224,7 +226,7 @@ export class RichTextSession {
 			&& event.clipboardData.getData(RICH_CLIPBOARD) === copy.token && text === copy.text;
 		let runs;
 		if (internal) {
-			const keys = new Map(copy.runs.map(run => [run.format.font, sameScope ? run.format.font : `temp-font-${crypto.randomUUID()}`]));
+			const keys = new Map(copy.runs.map(run => [run.format.font, sameScope ? run.format.font : `temp-font-${randomID()}`]));
 			let faces = copy.faces;
 			if (!sameScope) {
 				const original = this.model.runs, paragraphs = this.model.paragraphs, caret = this.selection();
@@ -240,7 +242,7 @@ export class RichTextSession {
 		this.replace(runs || [{ text, format: { ...this.typing } }], internal ? copy.paragraphs : null);
 	}
 	setFont(face, data, key) {
-		key ||= `temp-font-${crypto.randomUUID()}`;
+		key ||= `temp-font-${randomID()}`;
 		const previous = this.faces.get(key);
 		this.faces.set(key, face);
 		if (previous && ![...this.faces.values()].includes(previous)) document.fonts.delete(previous);
@@ -441,6 +443,8 @@ export class CanvasEditor {
 		this.multiple = false;
 		this.nodes = new WeakMap();
 		this.pages = new WeakMap();
+		this.pageItemMap = new Map();
+		this.parentNodes = new Set();
 		this.tool = "";
 		viewer.addEventListener("pointerdown", (event) => this.start(event));
 		viewer.addEventListener("pointermove", (event) => this.move(event));
@@ -484,6 +488,7 @@ export class CanvasEditor {
 		if (!enabled) {
 			this.setTool("");
 			this.clear();
+			this.pageItemMap.clear();
 		}
 	}
 
@@ -557,7 +562,8 @@ export class CanvasEditor {
 				selection.push(item);
 			}
 		}
-		this.pages.set(surface, { index, width: page.width, height: page.height, hitIndex: new ObjectIndex(items) });
+		this.pages.set(surface, { index, width: page.width, height: page.height, items, hitIndex: new ObjectIndex(items) });
+		this.pageItemMap.set(index, { layer, items, byId: new Map(items.map(item => [item.id, item])) });
 		surface.append(layer);
 		if (pending || selected.size) this.setSelection(selection, true);
 		if (pending) this.pendingSelection = null;
@@ -666,7 +672,14 @@ export class CanvasEditor {
 	}
 
 	setSelection(items, restoring = false) {
-		items = items.filter(item => !items.some(parent => parent !== item && item.id.startsWith(parent.id + "/")));
+		const unique = [], seen = new Set();
+		for (const item of items) if (item && !seen.has(item.id)) { seen.add(item.id); unique.push(item); }
+		items = unique.filter(item => {
+			for (let slash = item.id.indexOf("/"); slash >= 0; slash = item.id.indexOf("/", slash + 1)) {
+				if (seen.has(item.id.slice(0, slash))) return false;
+			}
+			return true;
+		});
 		this.cancelNudge();
 		const previous = this.selected;
 		if (this.crop && (items.length !== 1 || items[0] !== this.crop.item)) this.closeCrop();
@@ -712,9 +725,12 @@ export class CanvasEditor {
 			item.node.classList.toggle("multi-selected", items.length > 1);
 			item.node.setAttribute("data-pressed", "true");
 		}
-		for (const node of this.viewer.querySelectorAll(".edit-parent")) node.classList.remove("edit-parent");
+		for (const node of this.parentNodes) node.classList.remove("edit-parent");
+		this.parentNodes.clear();
 		for (const item of items) {
-			if (item.parent) this.pageItems(item.index).find(parent => parent.id === item.parent)?.node.classList.add("edit-parent");
+			if (!item.parent) continue;
+			const parent = this.pageItem(item.index, item.parent)?.node;
+			if (parent) { parent.classList.add("edit-parent"); this.parentNodes.add(parent); }
 		}
 		this.options.onSelect(this.selected, previous, restoring);
 	}
@@ -731,7 +747,7 @@ export class CanvasEditor {
 	selectParent() {
 		const item = this.selected;
 		if (!item?.parent) return false;
-		const parent = this.pageItems(item.index).find(parent => parent.id === item.parent);
+		const parent = this.pageItem(item.index, item.parent);
 		if (!parent) return false;
 		this.select(parent);
 		this.focus();
@@ -834,8 +850,8 @@ export class CanvasEditor {
 		this.viewer.append(extent);
 		if (!this.drag.corner) {
 			const selected = this.items();
-			const targets = [...item.surface.querySelectorAll(".edit-object")]
-				.map(node => this.nodes.get(node)).filter(member => !selected.some(item => item === member || item.id.startsWith(member.id + "/") || member.id.startsWith(item.id + "/")));
+			const targets = (this.pages.get(item.surface)?.items || [])
+				.filter(member => !selected.some(item => item === member || item.id.startsWith(member.id + "/") || member.id.startsWith(item.id + "/")));
 			targets.push({ x: 0, y: 0, ...item.page });
 			this.drag.alignment = new AlignmentIndex(targets);
 		}
@@ -879,14 +895,24 @@ export class CanvasEditor {
 		if (!await this.commitText() || this.input || !this.enabled || this.options.busy() || this.tool) return;
 		if (index !== undefined) this.options.onPage?.(index);
 		if (target) {
-			const item = this.pageItems(target.index).find(item => item.id === target.id);
+			const item = this.pageItem(target.index, target.id);
 			if (item) this.select(item);
 		} else if (index !== undefined) this.select(null);
 		this.focus();
 	}
 
 	pageItems(index) {
-		return [...this.viewer.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)).filter(item => item?.index === index);
+		const entry = this.pageItemMap.get(index);
+		if (entry?.layer.isConnected) return entry.items;
+		if (entry) this.pageItemMap.delete(index);
+		return [];
+	}
+
+	pageItem(index, id) {
+		const entry = this.pageItemMap.get(index);
+		if (entry?.layer.isConnected) return entry.byId.get(id) || null;
+		if (entry) this.pageItemMap.delete(index);
+		return null;
 	}
 
 	cycleSelection(event) {
@@ -1170,7 +1196,7 @@ export class CanvasEditor {
 		const preview = this.createPreview(surface, page, "path", pressure ? { ...style, fill: true, fillColor: style.strokeColor, stroke: false } : style);
 		preview.node.setAttribute("stroke-linecap", "round");
 		preview.node.setAttribute("stroke-linejoin", "round");
-		this.drag = { ink: true, pressure, points: [], parts: [], page, surface, style, ...preview, pointerID: event.pointerId,
+		this.drag = { ink: true, pressure, points: [], path: "", page, surface, style, ...preview, pointerID: event.pointerId,
 			rect: surface.getBoundingClientRect(), rotation: this.options.rotation() };
 		this.viewer.setPointerCapture(event.pointerId);
 		this.moveInk(event, this.drag);
@@ -1178,6 +1204,7 @@ export class CanvasEditor {
 
 	moveInk(event, drag) {
 		const coalesced = event.getCoalescedEvents?.() || [];
+		let chunk = "";
 		for (const sample of coalesced.length ? coalesced : [event]) {
 			const point = pagePoint(sample.clientX, sample.clientY, drag.rect, drag.page, drag.rotation);
 			const last = drag.points.at(-1);
@@ -1185,22 +1212,24 @@ export class CanvasEditor {
 			if (last && Math.hypot(point.x-last.x, point.y-last.y) < 0.05 && Math.abs(point.pressure-last.pressure) < 0.01) continue;
 			drag.points.push(point);
 			if (!drag.pressure) {
-				drag.parts.push(`${last ? "L" : "M"}${point.x} ${point.y}`);
+				chunk += `${last ? " L" : "M"}${point.x} ${point.y}`;
 			} else {
 				const radius = drag.style.lineWidth * point.pressure / 2;
-				if (radius > 0) drag.parts.push(`M${point.x+radius} ${point.y}a${radius} ${radius} 0 1 1 ${-2*radius} 0a${radius} ${radius} 0 1 1 ${2*radius} 0Z`);
+				if (radius > 0) chunk += `${drag.path || chunk ? " " : ""}M${point.x+radius} ${point.y}a${radius} ${radius} 0 1 1 ${-2*radius} 0a${radius} ${radius} 0 1 1 ${2*radius} 0Z`;
 				if (last) {
 					const r = drag.style.lineWidth * last.pressure / 2, dx = point.x-last.x, dy = point.y-last.y, length = Math.hypot(dx,dy);
 					if ((radius > 0 || r > 0) && length > Math.abs(radius-r)) {
 						const x = dx/length, y = dy/length, a = (r-radius)/length, b = Math.sqrt(1-a*a);
 						const nx = a*x-b*y, ny = a*y+b*x, mx = a*x+b*y, my = a*y-b*x;
-						drag.parts.push(`M${last.x+r*mx} ${last.y+r*my}L${point.x+radius*mx} ${point.y+radius*my}L${point.x+radius*nx} ${point.y+radius*ny}L${last.x+r*nx} ${last.y+r*ny}Z`);
+						chunk += `${drag.path || chunk ? " " : ""}M${last.x+r*mx} ${last.y+r*my}L${point.x+radius*mx} ${point.y+radius*my}L${point.x+radius*nx} ${point.y+radius*ny}L${last.x+r*nx} ${last.y+r*ny}Z`;
 					}
 				}
 			}
 		}
-		const dot = drag.points.length === 1 && !drag.pressure ? `l0.001 0` : "";
-		drag.node.setAttribute("d", drag.parts.join(" ") + dot);
+		if (!chunk) return;
+		drag.path += chunk;
+		const dot = drag.points.length === 1 && !drag.pressure ? "l0.001 0" : "";
+		drag.node.setAttribute("d", drag.path + dot);
 	}
 
 	startErase(event) {
@@ -1209,14 +1238,14 @@ export class CanvasEditor {
 		if (!page) return;
 		event.preventDefault();
 		this.focus();
-		this.drag = { erase: this.tool, page, surface, items: [...surface.querySelectorAll(".edit-object")].map(node => this.nodes.get(node)).filter(item => !item.parent),
+		this.drag = { erase: this.tool, page, surface, items: page.items.filter(item => !item.parent),
 			erased: new Set(), shape: "rectangle", pointerID: event.pointerId, clientX: event.clientX, clientY: event.clientY,
 			rect: surface.getBoundingClientRect(), rotation: this.options.rotation() };
 		if (this.tool === "erase-region") Object.assign(this.drag, this.createPreview(surface, page, "rectangle",
 			{ fill: true, fillColor: "var(--accent-soft)", stroke: true, strokeColor: "var(--accent)", lineWidth: 0.2 }));
 		if (this.tool === "erase-path") {
 			Object.assign(this.drag, this.createPreview(surface, page, "path",
-				{ fill: true, fillColor: "var(--accent-soft)", stroke: true, strokeColor: "var(--accent)", lineWidth: 0.2 }), { points: [] });
+				{ fill: true, fillColor: "var(--accent-soft)", stroke: true, strokeColor: "var(--accent)", lineWidth: 0.2 }), { points: [], path: "" });
 			this.drag.node.setAttribute("fill-rule", "evenodd");
 		}
 		this.viewer.setPointerCapture(event.pointerId);
@@ -1235,10 +1264,12 @@ export class CanvasEditor {
 			const right = Math.max(box.x + box.width, point.x), bottom = Math.max(box.y + box.height, point.y);
 			drag.box = { x: Math.min(box.x, point.x), y: Math.min(box.y, point.y) };
 			Object.assign(drag.box, { width: right - drag.box.x, height: bottom - drag.box.y });
-			drag.node.setAttribute("d", drag.points.map((point, index) => `${index ? "L" : "M"}${point.x} ${point.y}`).join(" ") + " Z");
+			drag.path += `${drag.path ? " L" : "M"}${point.x} ${point.y}`;
+			drag.node.setAttribute("d", `${drag.path} Z`);
 			return;
 		}
-		const item = [...drag.items].reverse().find(item => this.contains(item, point, 3 * drag.page.width / (drag.rotation % 180 ? drag.rect.height : drag.rect.width)));
+		const tolerance = 3 * drag.page.width / (drag.rotation % 180 ? drag.rect.height : drag.rect.width);
+		const item = drag.page.hitIndex.query(point, tolerance).find(item => !item.parent && !drag.erased.has(item) && this.contains(item, point, tolerance));
 		if (item) { drag.erased.add(item); item.node.classList.add("erasing"); }
 	}
 
@@ -1428,14 +1459,15 @@ export class CanvasEditor {
 		}
 		const directions = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
 		const edit = event.key === "Enter" || event.key === "F2";
-		if (event.key !== "Escape" && event.key !== "Delete" && !edit && !directions[event.key]) {
+		const remove = event.key === "Delete" || event.key === "Backspace";
+		if (event.key !== "Escape" && !remove && !edit && !directions[event.key]) {
 			return;
 		}
 		event.preventDefault();
 		event.stopPropagation();
 		if (event.key === "Escape") {
 			this.nudge ? this.cancelNudge() : this.drag ? this.cancel() : this.clear();
-		} else if (event.key === "Delete" && canEditObject(this.selected, "delete")) {
+		} else if (remove && canEditObject(this.selected, "delete")) {
 			if (this.nudge) this.commitNudge().then(saved => { if (saved && this.selected) this.options.onDelete(this.selected); });
 			else this.options.onDelete(this.selected);
 		} else if (edit && !this.drag && !this.selected.items) {
@@ -1643,7 +1675,7 @@ export class CanvasEditor {
 		const [start, end] = range.sort((a, b) => a - b), text = editTextValue(editing.input).slice(start, end);
 		const model = richTextModel({ ...editing.item, ...editing.style, text });
 		const font = editing.fontData || editing.fontResource;
-		const clipboard = { token: crypto.randomUUID(), text, runs: model.runs, scope: this.options.textClipboardScope?.(),
+		const clipboard = { token: randomID(), text, runs: model.runs, scope: this.options.textClipboardScope?.(),
 			fonts: new Map(font ? [[editing.item.font, font]] : []), faces: new Map([[editing.item.font, editing.face]]), choices: new Map(),
 			paragraphs: text.split("\n").map(() => ({ align: "left" })) };
 		if (this.options.setTextClipboard) this.options.setTextClipboard(clipboard);
@@ -1692,7 +1724,7 @@ export class CanvasEditor {
 			if (entry.fontData) {
 				let key = fonts.get(entry.fontData);
 				if (!key) {
-					key = `temp-font-${crypto.randomUUID()}`; fonts.set(entry.fontData, key);
+					key = `temp-font-${randomID()}`; fonts.set(entry.fontData, key);
 					session.imports.set(key, entry.fontData); session.faces.set(key, entry.face);
 					document.fonts.add(entry.face);
 					if (entry.fontChoice) session.choices.set(key, entry.fontChoice);

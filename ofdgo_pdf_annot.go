@@ -498,11 +498,11 @@ func (p *pdfImporter) formWidget(ctx context.Context, page *pdfgo.Page, annotati
 }
 
 // signatureWidget 转换可见签名外观，不将PDF签名误写成OFD签名
-// 入参: ctx 取消上下文, page PDF页面, annotation 签名控件
+// 入参: ctx 取消上下文, page PDF页面, annotation 签名控件, strict 严格检查开关
 // 返回: error 外观或转换错误
-func (p *pdfImporter) signatureWidget(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation) error {
-	if annotation.Dictionary["FT"] != pdfgo.Name("Sig") || annotation.Dictionary["V"] == nil {
-		return &pdfgo.UnsupportedError{Feature: "non-signature widget"}
+func (p *pdfImporter) signatureWidget(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation, strict bool) error {
+	if strict {
+		return &pdfgo.UnsupportedError{Feature: "PDF digital signature conversion"}
 	}
 	flags, err := p.reader.ReadAnnotationFlags(annotation)
 	if err != nil {

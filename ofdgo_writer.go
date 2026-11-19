@@ -1621,7 +1621,7 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 			return err
 		}
 	}
-	fonts, images, spaces, definitions, err := e.usedResources(ctx)
+	fonts, images, spaces, definitions, extraParts, err := e.usedResources(ctx)
 	if err != nil {
 		return err
 	}
@@ -1791,24 +1791,37 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 	}
 	for _, resource := range e.resources {
 		if resource.definition() != "" && definitions[resource.name] || resource.colorProfileUsed(spaces) {
+			if written[resource.name] {
+				continue
+			}
 			if err := write(resource.name, resource.data, false); err != nil {
 				return err
 			}
+			written[resource.name] = true
 		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(extraParts)) {
+		if written[name] {
+			continue
+		}
+		if err := write(name, extraParts[name], false); err != nil {
+			return err
+		}
+		written[name] = true
 	}
 	return nil
 }
 
-// usedResources 沿图层、对象及资源依赖筛选新增资源和共享文件，不修改资源池
+// usedResources 沿图层、对象及资源依赖筛选新增资源、共享文件及提升生成的附加资源条目，不修改资源池
 // 入参: ctx 取消上下文
-// 返回: []editorResource 新增字体, []editorResource 新增图片, []ColorSpace 新增颜色空间, map[string]bool 独立资源文件集合, error 取消错误
-func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResource, spaces []ColorSpace, sourceFiles map[string]bool, err error) {
+// 返回: []editorResource 新增字体, []editorResource 新增图片, []ColorSpace 新增颜色空间, map[string]bool 独立资源文件集合, map[string][]byte 附加资源条目, error 取消错误
+func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResource, spaces []ColorSpace, sourceFiles map[string]bool, extraParts map[string][]byte, err error) {
 	if err := ctx.Err(); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	if e.output != nil && e.output.resources != nil && e.output.resources.owner == e {
 		cached := e.output.resources
-		return slices.Clone(cached.fonts), slices.Clone(cached.images), slices.Clone(cached.spaces), maps.Clone(cached.files), nil
+		return slices.Clone(cached.fonts), slices.Clone(cached.images), slices.Clone(cached.spaces), maps.Clone(cached.files), maps.Clone(cached.extra), nil
 	}
 	used := make(map[string]bool)
 	promoted := make(map[string]bool)
@@ -1820,33 +1833,71 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 			retainAll = true
 		}
 	}
-	localResForPageID := func(pageID string) ([]*parsedRes, error) {
-		for _, p := range e.pages {
-			if sameResourceID(p.ID, pageID) && len(p.pageResources) > 0 {
-				return p.pageResources, nil
+	normPageID := func(id string) string {
+		if key := editorResourceID(id); key != "" {
+			return key
+		}
+		return id
+	}
+	editorPageRes := make(map[string][]*parsedRes, len(e.pages))
+	for _, p := range e.pages {
+		if len(p.pageResources) == 0 {
+			continue
+		}
+		key := normPageID(p.ID)
+		if _, exists := editorPageRes[key]; !exists {
+			editorPageRes[key] = p.pageResources
+		}
+	}
+	var sourcePageRefs map[string]Page
+	if e.source != nil {
+		sourcePageRefs = make(map[string]Page, len(e.source.document.Pages.Page))
+		for _, p := range e.source.document.Pages.Page {
+			key := normPageID(p.ID)
+			if _, exists := sourcePageRefs[key]; !exists {
+				sourcePageRefs[key] = p
 			}
 		}
+	}
+	localResCache := make(map[string][]*parsedRes)
+	localResForPageID := func(pageID string) ([]*parsedRes, error) {
+		key := normPageID(pageID)
+		if cached, ok := localResCache[key]; ok {
+			return cached, nil
+		}
+		if res, ok := editorPageRes[key]; ok {
+			localResCache[key] = res
+			return res, nil
+		}
 		if e.source == nil {
+			localResCache[key] = nil
 			return nil, nil
 		}
 		if sp := e.source.pages[pageID]; sp != nil && sp.original != nil && len(sp.original.pageResources) > 0 {
+			localResCache[key] = sp.original.pageResources
 			return sp.original.pageResources, nil
 		}
-		for _, p := range e.source.document.Pages.Page {
-			if sameResourceID(p.ID, pageID) {
-				hdr, hdrErr := e.source.reader.readPageHeaderContext(ctx, p)
-				if hdrErr != nil {
-					if ctx.Err() != nil {
-						return nil, ctx.Err()
-					}
-					return nil, nil
+		if p, ok := sourcePageRefs[key]; ok {
+			hdr, hdrErr := e.source.reader.readPageHeaderContext(ctx, p)
+			if hdrErr != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
 				}
-				if len(hdr.PageRes) == 0 {
-					return nil, nil
-				}
-				return e.source.reader.collectPageResourcesContext(ctx, e.source.reader.ResPath(p.BaseLoc), &hdr)
+				localResCache[key] = nil
+				return nil, nil
 			}
+			if len(hdr.PageRes) == 0 {
+				localResCache[key] = nil
+				return nil, nil
+			}
+			res, resErr := e.source.reader.collectPageResourcesContext(ctx, e.source.reader.ResPath(p.BaseLoc), &hdr)
+			if resErr != nil {
+				return nil, resErr
+			}
+			localResCache[key] = res
+			return res, nil
 		}
+		localResCache[key] = nil
 		return nil, nil
 	}
 	pageOrigins := make(map[string][]*parsedRes)
@@ -1855,7 +1906,7 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 		maps.Copy(promoted, used)
 		for _, name := range e.annotationFiles() {
 			if err := ctx.Err(); err != nil {
-				return nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, err
 			}
 			data, changed := e.source.reader.files[name]
 			if !changed {
@@ -1876,7 +1927,7 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 			if len(ownerPages) == 1 {
 				annotLocal, locErr := localResForPageID(ownerPages[0])
 				if locErr != nil {
-					return nil, nil, nil, nil, locErr
+					return nil, nil, nil, nil, nil, locErr
 				}
 				normalizeResourceReferences(annotUsed)
 				for ref := range annotUsed {
@@ -1890,7 +1941,7 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	if retainAll {
 		for _, resource := range e.resources {
@@ -1911,7 +1962,7 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 	}
 	for _, page := range e.pages {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 		var localRes []*parsedRes
 		if e.source != nil {
@@ -1920,7 +1971,7 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 				var locErr error
 				localRes, locErr = localResForPageID(page.ID)
 				if locErr != nil {
-					return nil, nil, nil, nil, locErr
+					return nil, nil, nil, nil, nil, locErr
 				}
 			}
 		}
@@ -1945,7 +1996,7 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 				}
 				for _, object := range layer.Objects {
 					if err := ctx.Err(); err != nil {
-						return nil, nil, nil, nil, err
+						return nil, nil, nil, nil, nil, err
 					}
 					collectObjectReferences(object, used)
 				}
@@ -1981,7 +2032,7 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 			}
 			for _, object := range layer.Objects {
 				if err := ctx.Err(); err != nil {
-					return nil, nil, nil, nil, err
+					return nil, nil, nil, nil, nil, err
 				}
 				before, exists := original[editorObjectID(object)]
 				collectObjectReferences(object, used)
@@ -2016,7 +2067,7 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 	}
 	for len(pending) != 0 {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 		id := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
@@ -2053,12 +2104,12 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 			delete(promoted, resource.space.ID)
 		}
 	}
-	extraParts := make(map[string][]byte)
+	extraParts = make(map[string][]byte)
 	promoQueue := slices.Sorted(maps.Keys(promoted))
 	promoVisited := make(map[string]bool)
 	for len(promoQueue) != 0 {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 		id := promoQueue[0]
 		promoQueue = promoQueue[1:]
@@ -2082,7 +2133,7 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 		if found == "" && e.resolveScopeResourceFile(nil, id) == "" {
 			allPageRes, resErr := e.ensureSourcePageResourcesContext(ctx)
 			if resErr != nil {
-				return nil, nil, nil, nil, resErr
+				return nil, nil, nil, nil, nil, resErr
 			}
 			matches := 0
 			for _, candidate := range allPageRes {
@@ -2100,14 +2151,14 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 		}
 		parsed, err := e.source.reader.parseResFileContext(ctx, found)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 		if parsed == nil {
 			continue
 		}
 		safe, err := e.pageResSafeForDocument(ctx, parsed)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 		if safe {
 			files[found] = true
@@ -2115,14 +2166,14 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 		}
 		unconflicted, err := e.pageResItemUnconflicted(ctx, parsed, id)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 		if !unconflicted {
 			continue
 		}
 		subRefs, err := e.appendUnconflictedPageResItem(ctx, parsed, id, &fonts, &images, &spaces, files, extraParts)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 		for _, subRef := range subRefs {
 			if norm := editorResourceID(subRef); norm != "" {
@@ -2137,12 +2188,12 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	if e.output != nil {
 		e.output.resources = &editorResourceSelection{owner: e, fonts: slices.Clone(fonts), images: slices.Clone(images), spaces: slices.Clone(spaces), files: maps.Clone(files), extra: maps.Clone(extraParts)}
 	}
-	return fonts, images, spaces, files, nil
+	return fonts, images, spaces, files, extraParts, nil
 }
 
 // pageResItemUnconflicted 检查单个页级资源标识是否不与公共资源或其他页级资源同名冲突

@@ -209,6 +209,7 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 		return err
 	}
 	outerDecrypted := make(map[string][]byte)
+	deferredScopeAll := false
 	for i := len(list.Records) - 1; i >= 0; i-- {
 		record := list.Records[i]
 		seedData, seedName, err := encryptionPart(parts, "Encryptions.xml", record.Seed)
@@ -295,12 +296,20 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 		}
 		if strings.EqualFold(strings.TrimSpace(record.Scope), "All") {
 			nextParts := make(map[string][]byte, len(decrypted)+len(outerDecrypted))
+			resolvedInner := true
 			for j := 0; j < i; j++ {
-				preserveInnerEncryptionRecord(nextParts, parts, decrypted, list.Records[j])
+				if !preserveInnerEncryptionRecord(nextParts, parts, decrypted, list.Records[j]) {
+					resolvedInner = false
+				}
 			}
-			maps.Copy(nextParts, outerDecrypted)
-			maps.Copy(nextParts, decrypted)
-			parts = nextParts
+			if resolvedInner {
+				maps.Copy(nextParts, outerDecrypted)
+				maps.Copy(nextParts, decrypted)
+				parts = nextParts
+			} else {
+				deferredScopeAll = true
+				maps.Copy(parts, decrypted)
+			}
 		} else {
 			maps.Copy(parts, decrypted)
 		}
@@ -312,6 +321,9 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 		if len(list.Records) == 1 && canInherit {
 			state.options = inheritedEncryptionOptions(seed, settings.credentials[credIndex], settings.provider)
 		}
+	}
+	if deferredScopeAll {
+		parts = outerDecrypted
 	}
 	delete(parts, "Encryptions.xml")
 	r.Zip, r.files, r.encryption = nil, parts, state
@@ -715,7 +727,8 @@ func encryptionPath(base, loc string) string {
 
 // preserveInnerEncryptionRecord 保留全包解密层尚未处理的更内层加密元数据及明文映射引用的密文和条目种子
 // 入参: dst 下一轮包条目, parts 当前包条目, decrypted 本层解密结果, record 更内层加密记录
-func preserveInnerEncryptionRecord(dst, parts, decrypted map[string][]byte, record encryptionRecord) {
+// 返回: bool 内层映射表是否已按明文XML完整解析
+func preserveInnerEncryptionRecord(dst, parts, decrypted map[string][]byte, record encryptionRecord) bool {
 	for _, meta := range []string{record.Seed, record.Entries} {
 		metaName := encryptionPath("Encryptions.xml", meta)
 		if validPackagePath(metaName) {
@@ -726,18 +739,18 @@ func preserveInnerEncryptionRecord(dst, parts, decrypted map[string][]byte, reco
 	}
 	entriesName := encryptionPath("Encryptions.xml", record.Entries)
 	if !validPackagePath(entriesName) {
-		return
+		return false
 	}
 	entriesData, ok := decrypted[entriesName]
 	if !ok {
 		entriesData, ok = parts[entriesName]
 	}
 	if !ok {
-		return
+		return false
 	}
 	var innerEntries encryptionEntries
 	if xml.Unmarshal(entriesData, &innerEntries) != nil || innerEntries.XMLName.Space != ofdNamespace2016 || (innerEntries.XMLName.Local != "EncryptEntries" && innerEntries.XMLName.Local != "EncryptedEntries") {
-		return
+		return false
 	}
 	for _, entry := range innerEntries.Entries {
 		for _, ref := range []string{entry.EncryptedPath, entry.Seed} {
@@ -752,4 +765,5 @@ func preserveInnerEncryptionRecord(dst, parts, decrypted map[string][]byte, reco
 			}
 		}
 	}
+	return true
 }

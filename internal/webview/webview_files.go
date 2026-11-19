@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +38,9 @@ import (
 // fileEntry 保存窗口授权的文件或目录
 type fileEntry struct {
 	id         string
+	parentID   string
 	path       string
+	pathKey    string
 	name       string
 	size       int64
 	modTime    int64
@@ -47,7 +50,8 @@ type fileEntry struct {
 	directory  bool
 	owned      bool
 	temporary  bool
-	releasable bool
+	readOnly   bool
+	pinned     bool
 	saveTarget ofdgo.Output
 	readers    int
 	retired    bool
@@ -69,6 +73,8 @@ type fileHolder struct {
 type fileStore struct {
 	mu        sync.Mutex
 	entries   map[string]*fileEntry
+	pathIndex map[string]string
+	children  map[string]map[string]struct{}
 	holders   map[string]*fileHolder
 	writers   map[string]*fileWriter
 	temporary string
@@ -82,13 +88,13 @@ func newFileStore() (*fileStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &fileStore{entries: make(map[string]*fileEntry), holders: make(map[string]*fileHolder), writers: make(map[string]*fileWriter), temporary: dir}, nil
+	return &fileStore{entries: make(map[string]*fileEntry), pathIndex: make(map[string]string), children: make(map[string]map[string]struct{}), holders: make(map[string]*fileHolder), writers: make(map[string]*fileWriter), temporary: dir}, nil
 }
 
 // add 登记已有授权文件
-// 入参: name 文件路径, directory 是否为目录
+// 入参: name 文件路径, directory 是否为目录, writable 是否允许初始化保存目标
 // 返回: map[string]any 句柄描述, error 登记错误
-func (s *fileStore) add(name string, directory bool) (map[string]any, error) {
+func (s *fileStore) add(name string, directory, writable bool) (map[string]any, error) {
 	info, err := os.Stat(name)
 	if err != nil {
 		return nil, err
@@ -99,49 +105,82 @@ func (s *fileStore) add(name string, directory bool) (map[string]any, error) {
 	if !directory && !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("文件类型不匹配")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := rand.Text()
-	entry := &fileEntry{id: id, path: name, name: filepath.Base(name), size: info.Size(), modTime: info.ModTime().UnixMilli(), directory: directory}
-	if !directory {
-		entry.saveTarget, err = ofdgo.NewFileOutput(name)
-		if err != nil {
-			return nil, err
+	var target ofdgo.Output
+	if !directory && writable {
+		linfo, lerr := os.Lstat(name)
+		if lerr != nil {
+			return nil, lerr
+		}
+		if linfo.Mode().IsRegular() {
+			target, err = ofdgo.NewFileOutput(name)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
-	s.entries[id] = entry
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, os.ErrClosed
+	}
+	id := rand.Text()
+	entry := &fileEntry{id: id, path: name, name: filepath.Base(name), size: info.Size(), modTime: info.ModTime().UnixMilli(), directory: directory, readOnly: !directory && !writable, saveTarget: target}
+	s.registerEntry(entry, true)
 	return s.descriptor(id), nil
+}
+
+// addFont 登记常驻只读系统字体条目，不初始化保存目标
+// 入参: name 字体文件路径, size 文件大小, modTime 修改时间毫秒戳
+// 返回: map[string]any 文件描述, error 登记错误
+func (s *fileStore) addFont(name string, size, modTime int64) (map[string]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, os.ErrClosed
+	}
+	id := rand.Text()
+	entry := &fileEntry{id: id, path: name, name: filepath.Base(name), size: size, modTime: modTime, readOnly: true, pinned: true}
+	s.registerEntry(entry, false)
+	return map[string]any{"nativeFile": id, "name": entry.name, "size": size, "lastModified": modTime, "url": "/__native/data/" + id}, nil
 }
 
 // addDrop 登记拖放文件及读取快照，失败时撤销本次授权
 // 入参: name 拖放文件路径
 // 返回: map[string]any 文件描述, error 登记错误
 func (s *fileStore) addDrop(name string) (map[string]any, error) {
-	handle, err := s.add(name, false)
+	handle, err := s.add(name, false, true)
 	if err != nil {
 		return nil, err
 	}
 	id := handle["nativeHandle"].(string)
 	file, err := s.file(id)
+	var files []*os.File
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err == nil && !s.closed {
 		if entry := s.entries[file["nativeFile"].(string)]; entry != nil && s.entries[id] != nil {
 			entry.dropHandle = id
 			file["drop"] = true
+			s.mu.Unlock()
 			return file, nil
 		}
 		err = os.ErrNotExist
 	}
-	delete(s.entries, id)
+	if drop := s.entries[id]; drop != nil {
+		if f, _ := s.retireEntry(drop); f != nil {
+			files = append(files, f)
+		}
+	}
 	if file != nil {
 		key := file["nativeFile"].(string)
 		if entry := s.entries[key]; entry != nil {
-			delete(s.entries, key)
-			if entry.file != nil {
-				entry.file.Close()
+			if f, _ := s.retireEntry(entry); f != nil {
+				files = append(files, f)
 			}
 		}
+	}
+	s.mu.Unlock()
+	for _, f := range files {
+		_ = f.Close()
 	}
 	if err == nil {
 		err = os.ErrClosed
@@ -152,6 +191,8 @@ func (s *fileStore) addDrop(name string) (map[string]any, error) {
 // discardDrop 撤销未接收的拖放文件及其授权，不删除源文件
 // 入参: id 拖放读取快照标识
 func (s *fileStore) discardDrop(id string) {
+	var files []*os.File
+	var path string
 	s.mu.Lock()
 	entry := s.entries[id]
 	if entry == nil || entry.dropHandle == "" || entry.retired {
@@ -159,15 +200,18 @@ func (s *fileStore) discardDrop(id string) {
 		return
 	}
 	if drop := s.entries[entry.dropHandle]; drop != nil {
-		drop.retired = true
-		if drop.readers == 0 {
-			delete(s.entries, entry.dropHandle)
+		if f, _ := s.retireEntry(drop); f != nil {
+			files = append(files, f)
 		}
 	}
-	file, path := s.retireEntry(entry)
-	s.mu.Unlock()
+	var file *os.File
+	file, path = s.retireEntry(entry)
 	if file != nil {
-		_ = file.Close()
+		files = append(files, file)
+	}
+	s.mu.Unlock()
+	for _, f := range files {
+		_ = f.Close()
 	}
 	if path != "" {
 		_ = os.Remove(path)
@@ -176,13 +220,16 @@ func (s *fileStore) discardDrop(id string) {
 
 // save 登记用户选择的输出路径
 // 入参: name 输出文件路径
-// 返回: map[string]any 句柄描述
-func (s *fileStore) save(name string) map[string]any {
+// 返回: map[string]any 句柄描述, error 登记错误
+func (s *fileStore) save(name string) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil, os.ErrClosed
+	}
 	id := rand.Text()
-	s.entries[id] = &fileEntry{id: id, path: name, name: filepath.Base(name)}
-	return s.descriptor(id)
+	s.registerEntry(&fileEntry{id: id, path: name, name: filepath.Base(name)}, true)
+	return s.descriptor(id), nil
 }
 
 // descriptor 返回文件句柄，不暴露本机路径
@@ -228,55 +275,13 @@ func (s *fileStore) file(id string) (map[string]any, error) {
 			}
 			size = info.Size()
 			modified = info.ModTime().UnixMilli()
+			entry.size, entry.modTime = size, modified
 			id = rand.Text()
-			entry = &fileEntry{id: id, path: entry.path, name: entry.name, size: size, modTime: modified, releasable: true}
-			s.entries[id] = entry
+			entry = &fileEntry{id: id, path: entry.path, name: entry.name, size: size, modTime: modified, readOnly: true}
+			s.registerEntry(entry, false)
 		}
 	}
 	return map[string]any{"nativeFile": id, "name": entry.name, "size": size, "lastModified": modified, "url": "/__native/data/" + id, "handle": handle}, nil
-}
-
-// reference 返回按需读取的文件描述，不创建或持有文件快照
-// 入参: id 授权标识
-// 返回: map[string]any 文件描述, error 授权或状态错误
-func (s *fileStore) reference(id string) (map[string]any, error) {
-	return s.lazy(id, false)
-}
-
-// lazyFile 返回可释放的按需读取文件描述，枚举目录时不预先打开句柄
-// 入参: id 授权标识
-// 返回: map[string]any 文件描述, error 授权或状态错误
-func (s *fileStore) lazyFile(id string) (map[string]any, error) {
-	return s.lazy(id, true)
-}
-
-// lazy 生成按需读取的文件描述并隔离授权句柄
-// 入参: id 授权标识, releasable 是否允许前端释放读取条目
-// 返回: map[string]any 文件描述, error 授权或状态错误
-func (s *fileStore) lazy(id string, releasable bool) (map[string]any, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entry := s.entries[id]
-	if entry == nil || entry.directory || entry.retired {
-		return nil, fmt.Errorf("文件授权无效")
-	}
-	info, err := os.Stat(entry.path)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("文件类型不匹配")
-	}
-	size := info.Size()
-	modified := info.ModTime().UnixMilli()
-	entry.size, entry.modTime = size, modified
-	handle := s.descriptor(id)
-	if !releasable {
-		return map[string]any{"nativeFile": id, "name": entry.name, "size": size, "lastModified": modified, "url": "/__native/data/" + id, "handle": handle}, nil
-	}
-	refID := rand.Text()
-	s.entries[refID] = &fileEntry{id: refID, path: entry.path, name: entry.name, size: size, modTime: modified, releasable: true}
-	return map[string]any{"nativeFile": refID, "name": entry.name, "size": size, "lastModified": modified, "url": "/__native/data/" + refID, "handle": handle}, nil
 }
 
 // openHolder 登记独立业务会话的文件持有表
@@ -334,22 +339,41 @@ func (s *fileStore) beginHolderCall(holder, name string, args []any) func(bool) 
 						state.pack = nil
 					}
 				}
-				if ok {
-					switch name {
-					case "ofdgoDetectFormat":
-						if firstToken != "" {
-							state.detectToken = firstToken
-						}
-					case "ofdgoOpen", "ofdgoOpenPDF":
+				switch name {
+				case "ofdgoDetectFormat":
+					if ok && firstToken != "" {
+						state.detectToken = firstToken
+					} else {
+						state.detectToken = ""
+					}
+				case "ofdgoOpen", "ofdgoOpenPDF":
+					if ok {
 						state.mainToken = firstToken
 						state.detectToken = ""
 						state.importToken = ""
-					case "ofdgoCreateDocument":
+					} else {
+						state.detectToken = ""
+					}
+				case "ofdgoCreateDocument":
+					if ok {
 						state.mainToken = ""
 						state.detectToken = ""
 						state.importToken = ""
-					case "ofdgoLoadImport":
+					}
+				case "ofdgoLoadImport":
+					state.detectToken = ""
+					if ok {
 						state.importToken = firstToken
+					} else {
+						state.importToken = ""
+					}
+				case "ofdgoClearImport":
+					state.importToken = ""
+					state.detectToken = ""
+				case "ofdgoImportPages", "ofdgoImportDocuments":
+					if ok {
+						state.importToken = ""
+						state.detectToken = ""
 					}
 				}
 				state.activeCalls--
@@ -532,6 +556,41 @@ func (s *fileStore) openEntry(id string) (*fileEntry, int64, error) {
 	return entry, info.Size(), nil
 }
 
+// registerEntry 登记条目并按需写入路径索引及父子关系，调用方持有mu
+// 入参: entry 文件条目, indexed 是否写入路径索引
+func (s *fileStore) registerEntry(entry *fileEntry, indexed bool) {
+	s.entries[entry.id] = entry
+	if indexed && entry.path != "" {
+		entry.pathKey = normalizePath(entry.path)
+		existing := s.entries[s.pathIndex[entry.pathKey]]
+		if existing == nil || existing.retired || entry.owned || !existing.owned {
+			s.pathIndex[entry.pathKey] = entry.id
+		}
+	}
+	if entry.parentID != "" {
+		if s.children[entry.parentID] == nil {
+			s.children[entry.parentID] = make(map[string]struct{})
+		}
+		s.children[entry.parentID][entry.id] = struct{}{}
+	}
+}
+
+// unregisterIndex 从路径索引及父子关系表中移除条目，调用方持有mu
+// 入参: entry 文件条目
+func (s *fileStore) unregisterIndex(entry *fileEntry) {
+	if entry.pathKey != "" && s.pathIndex[entry.pathKey] == entry.id {
+		delete(s.pathIndex, entry.pathKey)
+	}
+	if entry.parentID != "" {
+		if set := s.children[entry.parentID]; set != nil {
+			delete(set, entry.id)
+			if len(set) == 0 {
+				delete(s.children, entry.parentID)
+			}
+		}
+	}
+}
+
 // collectIdleEntry 在无在途读取时回收底层文件句柄，已退役条目同步从表中移除
 // 入参: entry 文件条目
 // 返回: *os.File 待关闭文件, string 待删除临时路径
@@ -554,7 +613,7 @@ func (s *fileStore) collectIdleEntry(entry *fileEntry) (*os.File, string) {
 			file = entry.file
 			entry.file = nil
 		}
-		if entry.temporary {
+		if entry.temporary && !entry.directory {
 			path = entry.path
 		}
 	}
@@ -565,8 +624,58 @@ func (s *fileStore) collectIdleEntry(entry *fileEntry) (*os.File, string) {
 // 入参: entry 文件条目
 // 返回: *os.File 待关闭文件, string 待删除临时路径
 func (s *fileStore) retireEntry(entry *fileEntry) (*os.File, string) {
-	entry.retired = true
+	if !entry.retired {
+		entry.retired = true
+		s.unregisterIndex(entry)
+	}
 	return s.collectIdleEntry(entry)
+}
+
+// collectTreeFiles 收集目录条目及其子条目的闲置文件句柄，调用方持有mu
+// 入参: entry 根条目, files 待关闭文件句柄列表
+func (s *fileStore) collectTreeFiles(entry *fileEntry, files *[]*os.File) {
+	if entry == nil || entry.retired {
+		return
+	}
+	for childID := range s.children[entry.id] {
+		s.collectTreeFiles(s.entries[childID], files)
+	}
+	if file, _ := s.collectIdleEntry(entry); file != nil {
+		*files = append(*files, file)
+	}
+}
+
+// retireTree 递归退役目录条目及其登记的子条目，调用方持有mu
+// 入参: entry 根条目, files 待关闭文件句柄列表
+func (s *fileStore) retireTree(entry *fileEntry, files *[]*os.File) {
+	if entry == nil {
+		return
+	}
+	if set := s.children[entry.id]; len(set) != 0 {
+		ids := make([]string, 0, len(set))
+		for childID := range set {
+			ids = append(ids, childID)
+		}
+		delete(s.children, entry.id)
+		for _, childID := range ids {
+			s.retireTree(s.entries[childID], files)
+		}
+	}
+	if file, _ := s.retireEntry(entry); file != nil {
+		*files = append(*files, file)
+	}
+}
+
+// disownTree 递归剥离条目及子项的本次创建标记，调用方持有mu
+// 入参: entry 根条目
+func (s *fileStore) disownTree(entry *fileEntry) {
+	if entry == nil || entry.retired {
+		return
+	}
+	entry.owned = false
+	for childID := range s.children[entry.id] {
+		s.disownTree(s.entries[childID])
+	}
 }
 
 // releaseEntry 递减条目读取计数并在无在途读取时立即释放底层文件句柄
@@ -600,7 +709,7 @@ func (s *fileStore) bytes(ctx context.Context, data []byte) map[string]any {
 		return nil
 	}
 	id := rand.Text()
-	s.entries[id] = &fileEntry{id: id, data: data, name: "data", stop: context.AfterFunc(ctx, func() { s.release(id) })}
+	s.registerEntry(&fileEntry{id: id, data: data, name: "data", stop: context.AfterFunc(ctx, func() { s.release(id) })}, false)
 	return map[string]any{"nativeFile": id, "size": len(data), "name": "data", "url": "/__native/data/" + id, "temporary": true}
 }
 
@@ -642,12 +751,12 @@ func (s *fileStore) resource(id string) (io.ReaderAt, int64, func() error, error
 	return file, info.Size(), file.Close, nil
 }
 
-// release 释放读取快照、内存结果或临时文件，保留在途读取及源文件
+// release 释放可读条目、句柄、内存结果或临时文件，保留常驻条目、在途读取及源文件
 // 入参: id 资源标识
 func (s *fileStore) release(id string) {
 	s.mu.Lock()
 	entry := s.entries[id]
-	if entry == nil || entry.retired || entry.data == nil && !entry.temporary && entry.file == nil && !entry.releasable {
+	if entry == nil || entry.retired || entry.pinned || entry.directory && entry.temporary {
 		s.mu.Unlock()
 		return
 	}
@@ -666,6 +775,98 @@ func (s *fileStore) release(id string) {
 	}
 }
 
+// discardEntries 批量撤销刚登记但未交付的授权条目，不删除源文件
+// 入参: ids 待撤销的授权标识列表
+func (s *fileStore) discardEntries(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	var files []*os.File
+	s.mu.Lock()
+	for _, id := range ids {
+		if entry := s.entries[id]; entry != nil && !entry.retired && !entry.pinned {
+			if file, _ := s.retireEntry(entry); file != nil {
+				files = append(files, file)
+			}
+		}
+	}
+	s.mu.Unlock()
+	for _, file := range files {
+		_ = file.Close()
+	}
+}
+
+// disown 剥离已交付批量输出项及子项的本次创建标记，避免外部重建同名文件被误删
+// 入参: id 父目录授权标识, name 输出入口名称
+func (s *fileStore) disown(id, name string) {
+	if id == "" || name == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parent := s.entries[id]
+	if parent == nil || !parent.directory || parent.retired {
+		return
+	}
+	norm := normalizePath(filepath.Join(parent.path, name))
+	s.disownTree(s.entries[s.pathIndex[norm]])
+}
+
+// tempDirectory 在宿主临时根目录下创建并登记批量暂存子目录
+// 返回: map[string]any 临时目录描述, error 创建错误
+func (s *fileStore) tempDirectory() (map[string]any, error) {
+	s.mu.Lock()
+	if s.closed || s.temporary == "" {
+		s.mu.Unlock()
+		return nil, os.ErrClosed
+	}
+	tempRoot := s.temporary
+	s.mu.Unlock()
+	dir, err := os.MkdirTemp(tempRoot, "batch-*")
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = os.RemoveAll(dir)
+		return nil, os.ErrClosed
+	}
+	id := rand.Text()
+	s.registerEntry(&fileEntry{id: id, path: dir, name: filepath.Base(dir), directory: true, owned: true, temporary: true}, true)
+	result := s.descriptor(id)
+	s.mu.Unlock()
+	return result, nil
+}
+
+// removeTempDirectory 校验并删除由宿主创建的批量暂存子目录及其全部子条目
+// 入参: id 临时目录授权标识
+// 返回: error 删除或越权校验错误
+func (s *fileStore) removeTempDirectory(id string) error {
+	if id == "" {
+		return fmt.Errorf("临时目录授权无效")
+	}
+	var files []*os.File
+	var targetPath string
+	s.mu.Lock()
+	entry := s.entries[id]
+	if entry == nil || entry.retired {
+		s.mu.Unlock()
+		return nil
+	}
+	if !entry.directory || !entry.temporary || !isSubPath(s.temporary, entry.path) {
+		s.mu.Unlock()
+		return fmt.Errorf("临时目录授权无效")
+	}
+	targetPath = entry.path
+	s.retireTree(entry, &files)
+	s.mu.Unlock()
+	for _, file := range files {
+		_ = file.Close()
+	}
+	return os.RemoveAll(targetPath)
+}
+
 // child 在已授权目录中查找或创建直接子项
 // 入参: id 目录授权标识, name 子项名称, directory 是否为目录, create 是否允许创建
 // 返回: map[string]any 句柄描述, error 访问错误
@@ -680,10 +881,13 @@ func (s *fileStore) child(id, name string, directory, create bool) (map[string]a
 		return nil, fmt.Errorf("目录授权无效")
 	}
 	path := filepath.Join(parent.path, name)
-	for key, entry := range s.entries {
-		if !entry.retired && entry.path == path && entry.directory == directory {
+	norm := normalizePath(path)
+	if key, ok := s.pathIndex[norm]; ok {
+		if entry := s.entries[key]; entry != nil && !entry.retired && entry.directory == directory {
 			if _, err := os.Stat(path); err == nil {
 				return s.descriptor(key), nil
+			} else if errors.Is(err, os.ErrNotExist) {
+				s.unregisterIndex(entry)
 			}
 		}
 	}
@@ -699,7 +903,7 @@ func (s *fileStore) child(id, name string, directory, create bool) (map[string]a
 			err = root.Mkdir(name, 0755)
 		} else {
 			var file *os.File
-			file, err = root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+			file, err = root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0666)
 			if err == nil {
 				err = file.Close()
 			}
@@ -717,7 +921,7 @@ func (s *fileStore) child(id, name string, directory, create bool) (map[string]a
 		return nil, fmt.Errorf("文件类型不匹配")
 	}
 	key := rand.Text()
-	s.entries[key] = &fileEntry{id: key, path: filepath.Join(parent.path, name), name: name, size: info.Size(), modTime: info.ModTime().UnixMilli(), directory: directory, owned: created}
+	s.registerEntry(&fileEntry{id: key, parentID: id, path: path, name: name, size: info.Size(), modTime: info.ModTime().UnixMilli(), directory: directory, owned: created}, true)
 	return s.descriptor(key), nil
 }
 
@@ -752,7 +956,7 @@ func (s *fileStore) reserve(id, base, extension string, directory bool) (string,
 			err = root.Mkdir(name, 0755)
 		} else {
 			var file *os.File
-			file, err = root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+			file, err = root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0666)
 			if err == nil {
 				err = file.Close()
 				if err != nil {
@@ -767,7 +971,7 @@ func (s *fileStore) reserve(id, base, extension string, directory bool) (string,
 			return "", "", err
 		}
 		key := rand.Text()
-		s.entries[key] = &fileEntry{id: key, path: filepath.Join(parent.path, name), name: name, directory: directory, owned: true}
+		s.registerEntry(&fileEntry{id: key, parentID: id, path: filepath.Join(parent.path, name), name: name, directory: directory, owned: true}, true)
 		return stem, name, nil
 	}
 }
@@ -785,16 +989,22 @@ func (s *fileStore) begin(ctx context.Context, id string) (*fileWriter, error) {
 	if entry == nil || entry.directory || entry.retired || entry.path == "" {
 		return nil, fmt.Errorf("输出授权无效")
 	}
+	if entry.readOnly {
+		return nil, fmt.Errorf("文件为只读，无法写入")
+	}
 	if entry.saveTarget == nil {
+		if linfo, lerr := os.Lstat(entry.path); lerr == nil && linfo.Mode()&fs.ModeSymlink != 0 {
+			return nil, fmt.Errorf("不支持直接覆盖符号链接，请另存为")
+		}
 		var err error
 		entry.saveTarget, err = ofdgo.NewFileOutput(entry.path)
 		if err != nil {
-			return nil, err
+			return nil, saveError(err)
 		}
 	}
 	output, err := entry.saveTarget.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return nil, saveError(err)
 	}
 	writer := &fileWriter{id: rand.Text(), store: s, output: output}
 	s.writers[writer.id] = writer
@@ -809,46 +1019,60 @@ func (s *fileStore) remove(id, name string, recursive bool) error {
 		return fmt.Errorf("文件名无效")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	parent := s.entries[id]
 	if parent == nil || !parent.directory || parent.retired {
+		s.mu.Unlock()
 		return fmt.Errorf("目录授权无效")
 	}
-	target := filepath.Join(parent.path, name)
-	owned := false
-	for _, entry := range s.entries {
-		if entry.path == target && entry.owned {
-			owned = true
-			break
-		}
-	}
-	if !owned {
+	parentPath := parent.path
+	target := filepath.Join(parentPath, name)
+	norm := normalizePath(target)
+	entry := s.entries[s.pathIndex[norm]]
+	if entry == nil || entry.retired || !entry.owned {
+		s.mu.Unlock()
 		if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return fmt.Errorf("只能清理本次创建的输出")
 	}
-	root, err := os.OpenRoot(parent.path)
+	var files []*os.File
+	if recursive {
+		s.collectTreeFiles(entry, &files)
+	} else if file, _ := s.collectIdleEntry(entry); file != nil {
+		files = append(files, file)
+	}
+	s.mu.Unlock()
+	for _, file := range files {
+		_ = file.Close()
+	}
+	root, err := os.OpenRoot(parentPath)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	var files []*os.File
-	for _, entry := range s.entries {
-		if entry.path == target || recursive && strings.HasPrefix(entry.path, target+string(filepath.Separator)) {
-			file, _ := s.retireEntry(entry)
-			if file != nil {
-				files = append(files, file)
-			}
-		}
+	if recursive {
+		err = root.RemoveAll(name)
+	} else {
+		err = root.Remove(name)
 	}
-	for _, file := range files {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	var retired []*os.File
+	s.mu.Lock()
+	if recursive {
+		s.retireTree(entry, &retired)
+	} else if file, _ := s.retireEntry(entry); file != nil {
+		retired = append(retired, file)
+	}
+	s.mu.Unlock()
+	for _, file := range retired {
 		_ = file.Close()
 	}
-	if recursive {
-		return root.RemoveAll(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	return root.Remove(name)
+	return err
 }
 
 // serve 提供窗口内资源，不建立网络监听器
@@ -889,6 +1113,8 @@ func (s *fileStore) close() error {
 	entries := s.entries
 	s.writers = make(map[string]*fileWriter)
 	s.entries = make(map[string]*fileEntry)
+	s.pathIndex = make(map[string]string)
+	s.children = make(map[string]map[string]struct{})
 	var stops []func() bool
 	var files []*os.File
 	for _, entry := range entries {
@@ -926,7 +1152,8 @@ type fileWriter struct {
 // 入参: data 输出数据
 // 返回: int 写入字节数, error 写入错误
 func (w *fileWriter) Write(data []byte) (int, error) {
-	return w.output.Write(data)
+	n, err := w.output.Write(data)
+	return n, saveError(err)
 }
 
 // Close 同步并替换目标文件
@@ -934,7 +1161,7 @@ func (w *fileWriter) Write(data []byte) (int, error) {
 func (w *fileWriter) Close() error {
 	defer w.release()
 	if err := w.output.Commit(); err != nil {
-		return errors.Join(err, w.output.Abort())
+		return saveError(errors.Join(err, w.output.Abort()))
 	}
 	return nil
 }
@@ -943,7 +1170,7 @@ func (w *fileWriter) Close() error {
 // 返回: error 清理错误
 func (w *fileWriter) Abort() error {
 	defer w.release()
-	return w.output.Abort()
+	return saveError(w.output.Abort())
 }
 
 // release 移除已结束的写入事务
@@ -1045,4 +1272,48 @@ func nativeFileToken(args []any) string {
 	}
 	token, _ := descriptor["nativeFile"].(string)
 	return token
+}
+
+// normalizePath 生成用于路径索引的规范化键
+// 入参: path 文件或目录路径
+// 返回: string 规范化路径键
+func normalizePath(path string) string {
+	cleaned := filepath.Clean(path)
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(cleaned)
+	}
+	return cleaned
+}
+
+// isSubPath 判断目标路径是否严格位于根目录之下
+// 入参: root 根目录路径, target 目标路径
+// 返回: bool 是否为有效子路径
+func isSubPath(root, target string) bool {
+	if root == "" || target == "" {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(target))
+	if err != nil || rel == "." || rel == ".." {
+		return false
+	}
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// saveError 将文件保存冲突与权限错误转换为面向用户的中文提示
+// 入参: err 原始错误
+// 返回: error 中文提示错误
+func saveError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ofdgo.ErrSaveConflict) {
+		return errors.New("目标文件已被其他程序修改，请重新打开或另存为")
+	}
+	if errors.Is(err, ofdgo.ErrSaveBusy) {
+		return errors.New("目标文件正在保存中，请稍后再试")
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return errors.New("没有写入该文件的权限")
+	}
+	return err
 }

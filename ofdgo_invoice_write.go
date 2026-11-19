@@ -768,13 +768,19 @@ func UpdateInvoiceXML(ctx context.Context, data []byte, invoiceIndex int, value 
 				matches = append(matches, inv)
 				continue
 			}
+			matched := false
 			for _, f := range inv.Facts {
 				if f.Name == "context" && f.Namespace == invoiceXBRL {
 					for _, of := range old.Facts {
 						if of.Name == "context" && of.Namespace == invoiceXBRL && of.Context == f.Context {
 							matches = append(matches, inv)
+							matched = true
+							break
 						}
 					}
+				}
+				if matched {
+					break
 				}
 			}
 		}

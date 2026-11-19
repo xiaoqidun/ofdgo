@@ -456,7 +456,7 @@ class BrowserEngine {
 			"ofdgoLoadPDF", "ofdgoDocumentInfo", "ofdgoDocumentVersions", "ofdgoDocumentNavigation", "ofdgoOpenLinks", "ofdgoDestinationView", "ofdgoOutlineLinks", "ofdgoRenderBackends", "ofdgoSVGFontData",
 			"ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences", "ofdgoResourceTargets",
 			"ofdgoResourceLocations", "ofdgoFontPreview", "ofdgoFontFaces", "ofdgoFontFace", "ofdgoMatchFontFiles",
-			"ofdgoImages", "ofdgoImagePageSize", "ofdgoImagePreview", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoPackageDocuments", "ofdgoVerifySignatures",
+			"ofdgoImages", "ofdgoImagePageSize", "ofdgoImagePreview", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoStructureXML", "ofdgoPackageDocuments", "ofdgoVerifySignatures",
 			"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoExportInvoice", "ofdgoValidateInvoice",
 			"ofdgoActionList", "ofdgoPageSettings", "ofdgoReadAnnotation", "ofdgoPreviewSignatureSeal",
 			"ofdgoExportFormats", "ofdgoOutputFormats", "ofdgoParsePageRange", "ofdgoExportPage", "ofdgoExportDocument",
@@ -622,13 +622,11 @@ class NativeHost {
 			signal?.throwIfAborted();
 			return await file.arrayBuffer(signal);
 		} finally {
-			try { await this.call("release", {file:file.nativeFile}); }
-			finally {
-				if (acquired) {
-					const next = this.readQueue.shift();
-					if (next) next();
-					else this.reading--;
-				}
+			await this.call("release", {file:file.nativeFile}).catch(() => {});
+			if (acquired) {
+				const next = this.readQueue.shift();
+				if (next) next();
+				else this.reading--;
 			}
 		}
 	}
@@ -780,6 +778,15 @@ class NativeHost {
 		return new NativeHandle(this, await this.call("directory", {}));
 	}
 
+	async createTempDirectory() {
+		return new NativeHandle(this, await this.call("temp.directory", {}));
+	}
+
+	removeTempDirectory(dir) {
+		if (!dir) return Promise.resolve();
+		return this.call("temp.remove", { id: dir.nativeHandle || dir });
+	}
+
 	async fonts() {
 		return (await this.call("fonts", {})).map(({file, ...font}) => ({...font, nativeFile:new NativeFile(file)}));
 	}
@@ -848,6 +855,7 @@ export function createEngineWorker(options = {}) {
 
 export async function documentBytes(file) {
 	if (file?.nativeFile) return file;
+	if (!nativeHost && file instanceof File) return file;
 	if (file instanceof Blob) return new Response(file.stream()).blob();
 	return new Uint8Array(await file.arrayBuffer());
 }

@@ -182,7 +182,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 	if err := progress.report("pages", len(e.pages), len(e.pages)); err != nil {
 		return nil, nil, err
 	}
-	fonts, images, spaces, usedFiles, err := e.usedResources(ctx)
+	fonts, images, spaces, usedFiles, extraParts, err := e.usedResources(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -194,9 +194,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 			parts[resource.name] = resource.data
 		}
 	}
-	if e.output != nil && e.output.resources != nil {
-		maps.Copy(parts, e.output.resources.extra)
-	}
+	maps.Copy(parts, extraParts)
 	commonData := source.document.CommonData
 	for _, name := range append(slices.Clone(commonData.DocumentRes), commonData.PublicRes...) {
 		delete(usedFiles, reader.ResPath(name))

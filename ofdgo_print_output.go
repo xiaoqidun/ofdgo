@@ -153,6 +153,28 @@ func (p *PrintDocument) WritePDF(ctx context.Context, writer io.Writer) error {
 	return codecpdf.WritePrintPDF(ctx, writer, &source, source.size, sheets)
 }
 
+// printSharedImageKey 按图片资源名与声明宽高唯一标识可跨页复用的图片定义
+type printSharedImageKey struct {
+	name   string
+	width  string
+	height string
+}
+
+// printSharedImageDef 保存首张纸面SVG中待输出的共享图片定义
+type printSharedImageDef struct {
+	id     string
+	width  string
+	height string
+	url    string
+}
+
+// svgTagAttr 保存单个SVG标签属性的名称、值与引号字符
+type svgTagAttr struct {
+	name  string
+	val   string
+	quote byte
+}
+
 // printSide 校验任务及纸面索引，并设置当前输出上下文
 // 入参: ctx 输出上下文, index 零基纸面索引
 // 返回: PrintSide 当前纸面, error 状态、索引或取消错误
@@ -431,6 +453,40 @@ func (p *PrintDocument) writeVectorPrintHTML(ctx context.Context, out io.Writer)
 			pageFragments[placement.Page] = stripSVGOuterTag(buf.String())
 		}
 	}
+	pageImageKeys := make(map[int][]printSharedImageKey, len(pageFragments))
+	for pageIdx, fragment := range pageFragments {
+		pageImageKeys[pageIdx] = collectSVGImageKeys(fragment, imageURLs)
+	}
+	imageUseCounts := make(map[printSharedImageKey]int)
+	for _, side := range p.layout.Sides {
+		for _, placement := range side.Placements {
+			for _, key := range pageImageKeys[placement.Page] {
+				imageUseCounts[key]++
+			}
+		}
+	}
+	var sharedKeys []printSharedImageKey
+	for key, count := range imageUseCounts {
+		if count > 1 {
+			sharedKeys = append(sharedKeys, key)
+		}
+	}
+	slices.SortFunc(sharedKeys, func(a, b printSharedImageKey) int {
+		if c := strings.Compare(a.name, b.name); c != 0 {
+			return c
+		}
+		if c := strings.Compare(a.width, b.width); c != 0 {
+			return c
+		}
+		return strings.Compare(a.height, b.height)
+	})
+	sharedImages := make(map[printSharedImageKey]string, len(sharedKeys))
+	sharedDefs := make([]printSharedImageDef, len(sharedKeys))
+	for i, key := range sharedKeys {
+		id := fmt.Sprintf("shared_img_%d", i)
+		sharedImages[key] = id
+		sharedDefs[i] = printSharedImageDef{id: id, width: key.width, height: key.height, url: imageURLs[key.name]}
+	}
 	if _, err := io.WriteString(out, "</style></head><body>"); err != nil {
 		return err
 	}
@@ -438,14 +494,30 @@ func (p *PrintDocument) writeVectorPrintHTML(ctx context.Context, out io.Writer)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(out, `<section class="s%d"><svg class="sheet" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="%gmm" height="%gmm" viewBox="0 0 %g %g"><rect width="100%%" height="100%%" fill="white"/>`, sIdx, side.Width, side.Height, side.Width, side.Height); err != nil {
+		if _, err := fmt.Fprintf(out, `<section class="s%d"><svg class="sheet" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="%gmm" height="%gmm" viewBox="0 0 %g %g">`, sIdx, side.Width, side.Height, side.Width, side.Height); err != nil {
+			return err
+		}
+		if sIdx == 0 && len(sharedDefs) != 0 {
+			if _, err := io.WriteString(out, `<defs>`); err != nil {
+				return err
+			}
+			for _, def := range sharedDefs {
+				if _, err := fmt.Fprintf(out, `<image id="%s" width="%s" height="%s" href="%s" xlink:href="%s"/>`, def.id, def.width, def.height, def.url, def.url); err != nil {
+					return err
+				}
+			}
+			if _, err := io.WriteString(out, `</defs>`); err != nil {
+				return err
+			}
+		}
+		if _, err := io.WriteString(out, `<rect width="100%" height="100%" fill="white"/>`); err != nil {
 			return err
 		}
 		for pIdx, placement := range side.Placements {
 			c, m := placement.Clip, placement.Transform
 			box := pageBoxes[placement.Page]
 			prefix := fmt.Sprintf("s%dp%d_", sIdx, pIdx)
-			fragment := namespaceSVGFragment(pageFragments[placement.Page], prefix, imageURLs)
+			fragment := namespaceSVGFragment(pageFragments[placement.Page], prefix, imageURLs, sharedImages)
 			clipID := fmt.Sprintf("pclip_%d_%d", sIdx, pIdx)
 			if _, err := fmt.Fprintf(out, `<defs><clipPath id="%s"><rect x="%g" y="%g" width="%g" height="%g"/></clipPath></defs><g clip-path="url(#%s)"><g transform="matrix(%g %g %g %g %g %g)"><svg width="%g" height="%g" viewBox="0 0 %g %g" overflow="hidden">%s</svg></g></g>`, clipID, c.X, c.Y, c.W, c.H, clipID, m[0], m[1], m[2], m[3], m[4], m[5], placement.Width, placement.Height, box.W, box.H, fragment); err != nil {
 				return err
@@ -485,61 +557,159 @@ func stripSVGOuterTag(raw string) string {
 	return strings.TrimPrefix(raw, svgCreatorMetadata)
 }
 
-// namespaceSVGFragment 仅在SVG标签属性内部重写局部标识与共享图片引用，绝不篡改标签外正文文本
-// 入参: fragment SVG内部片段, prefix 唯一前缀, imageURLs 共享图片DataURL映射
-// 返回: string 重写后的SVG片段
-func namespaceSVGFragment(fragment, prefix string, imageURLs map[string]string) string {
-	var b strings.Builder
-	b.Grow(len(fragment) + len(fragment)/8)
+// walkSVGFragment 顺序扫描SVG片段，将非元素内容透传至out并对开始或自闭合元素标签调用回调
+// 入参: fragment SVG内部片段, out 非元素片段输出缓冲(可为nil), onTag 元素标签回调
+func walkSVGFragment(fragment string, out *strings.Builder, onTag func(string)) {
+	writeRaw := func(s string) {
+		if out != nil {
+			out.WriteString(s)
+		}
+	}
 	pos := 0
 	for pos < len(fragment) {
 		rel := strings.IndexByte(fragment[pos:], '<')
 		if rel < 0 {
-			b.WriteString(fragment[pos:])
-			break
+			writeRaw(fragment[pos:])
+			return
 		}
 		tagStart := pos + rel
-		b.WriteString(fragment[pos:tagStart])
+		writeRaw(fragment[pos:tagStart])
 		rest := fragment[tagStart:]
 		if strings.HasPrefix(rest, "<!--") {
 			end := strings.Index(rest[4:], "-->")
 			if end < 0 {
-				b.WriteString(rest)
-				break
+				writeRaw(rest)
+				return
 			}
-			b.WriteString(rest[:4+end+3])
+			writeRaw(rest[:4+end+3])
 			pos = tagStart + 4 + end + 3
 			continue
 		}
 		if strings.HasPrefix(rest, "<![CDATA[") {
 			end := strings.Index(rest[9:], "]]>")
 			if end < 0 {
-				b.WriteString(rest)
-				break
+				writeRaw(rest)
+				return
 			}
-			b.WriteString(rest[:9+end+3])
+			writeRaw(rest[:9+end+3])
 			pos = tagStart + 9 + end + 3
 			continue
 		}
 		if len(rest) < 2 || rest[1] == '/' || rest[1] == '!' || rest[1] == '?' {
 			end := strings.IndexByte(rest, '>')
 			if end < 0 {
-				b.WriteString(rest)
-				break
+				writeRaw(rest)
+				return
 			}
-			b.WriteString(rest[:end+1])
+			writeRaw(rest[:end+1])
 			pos = tagStart + end + 1
 			continue
 		}
 		tagEnd := findSVGTagEnd(rest)
 		if tagEnd < 0 {
-			b.WriteString(rest)
-			break
+			writeRaw(rest)
+			return
 		}
-		rewriteSVGTag(&b, rest[:tagEnd+1], prefix, imageURLs)
+		onTag(rest[:tagEnd+1])
 		pos = tagStart + tagEnd + 1
 	}
+}
+
+// namespaceSVGFragment 仅在SVG标签属性内部重写局部标识与共享图片引用，绝不篡改标签外正文文本
+// 入参: fragment SVG内部片段, prefix 唯一前缀, imageURLs 共享图片DataURL映射, sharedImages 顶层复用图片标识映射
+// 返回: string 重写后的SVG片段
+func namespaceSVGFragment(fragment, prefix string, imageURLs map[string]string, sharedImages map[printSharedImageKey]string) string {
+	var b strings.Builder
+	b.Grow(len(fragment) + len(fragment)/8)
+	walkSVGFragment(fragment, &b, func(tag string) {
+		rewriteSVGTag(&b, tag, prefix, imageURLs, sharedImages)
+	})
 	return b.String()
+}
+
+// collectSVGImageKeys 收集单页SVG片段中可复用的自闭合图片标签键
+// 入参: fragment SVG内部片段, imageURLs 图片资源映射
+// 返回: []printSharedImageKey 可复用图片键列表
+func collectSVGImageKeys(fragment string, imageURLs map[string]string) []printSharedImageKey {
+	if len(imageURLs) == 0 {
+		return nil
+	}
+	var keys []printSharedImageKey
+	walkSVGFragment(fragment, nil, func(tag string) {
+		if key, _, ok := parseSharedSVGImageTag(tag, imageURLs); ok {
+			keys = append(keys, key)
+		}
+	})
+	return keys
+}
+
+// parseSharedSVGImageTag 解析可跨页复用的自闭合SVG图片标签及其属性列表
+// 入参: tag 完整XML元素标签, imageURLs 图片资源映射
+// 返回: printSharedImageKey 图片键, []svgTagAttr 标签属性列表, bool 是否满足复用条件
+func parseSharedSVGImageTag(tag string, imageURLs map[string]string) (printSharedImageKey, []svgTagAttr, bool) {
+	if !strings.HasSuffix(tag, "/>") || len(tag) < 8 || !strings.HasPrefix(tag, "<image") || !isSVGAttrSpace(tag[6]) {
+		return printSharedImageKey{}, nil, false
+	}
+	i := 6
+	var attrs []svgTagAttr
+	var href, width, height string
+	for i < len(tag) {
+		for i < len(tag) && isSVGAttrSpace(tag[i]) {
+			i++
+		}
+		if i >= len(tag) || tag[i] == '>' || tag[i] == '/' {
+			break
+		}
+		nameStart := i
+		for i < len(tag) && !isSVGAttrSpace(tag[i]) && tag[i] != '=' && tag[i] != '/' && tag[i] != '>' && tag[i] != '"' && tag[i] != '\'' {
+			i++
+		}
+		if i == nameStart {
+			return printSharedImageKey{}, nil, false
+		}
+		name := tag[nameStart:i]
+		for i < len(tag) && isSVGAttrSpace(tag[i]) {
+			i++
+		}
+		if i >= len(tag) || tag[i] != '=' {
+			return printSharedImageKey{}, nil, false
+		}
+		i++
+		for i < len(tag) && isSVGAttrSpace(tag[i]) {
+			i++
+		}
+		if i >= len(tag) || (tag[i] != '"' && tag[i] != '\'') {
+			return printSharedImageKey{}, nil, false
+		}
+		quote := tag[i]
+		valStart := i + 1
+		relEnd := strings.IndexByte(tag[valStart:], quote)
+		if relEnd < 0 {
+			return printSharedImageKey{}, nil, false
+		}
+		val := tag[valStart : valStart+relEnd]
+		i = valStart + relEnd + 1
+		switch name {
+		case "href", "xlink:href":
+			href = val
+		case "width":
+			width = val
+		case "height":
+			height = val
+		case "preserveAspectRatio":
+			return printSharedImageKey{}, nil, false
+		}
+		attrs = append(attrs, svgTagAttr{name: name, val: val, quote: quote})
+	}
+	if href == "" || width == "" || height == "" {
+		return printSharedImageKey{}, nil, false
+	}
+	if imageURLs != nil {
+		if _, ok := imageURLs[href]; !ok {
+			return printSharedImageKey{}, nil, false
+		}
+	}
+	return printSharedImageKey{name: href, width: width, height: height}, attrs, true
 }
 
 // findSVGTagEnd 定位XML开始或自闭合标签的结束尖括号，跳过引号内的尖括号
@@ -565,8 +735,33 @@ func findSVGTagEnd(s string) int {
 }
 
 // rewriteSVGTag 扫描单个XML元素标签并重写id、href、xlink:href与url(#...)属性引用
-// 入参: out 输出缓冲, tag 单个完整XML元素标签, prefix 唯一前缀, imageURLs 共享图片DataURL映射
-func rewriteSVGTag(out *strings.Builder, tag, prefix string, imageURLs map[string]string) {
+// 入参: out 输出缓冲, tag 单个完整XML元素标签, prefix 唯一前缀, imageURLs 共享图片DataURL映射, sharedImages 顶层复用图片标识映射
+func rewriteSVGTag(out *strings.Builder, tag, prefix string, imageURLs map[string]string, sharedImages map[printSharedImageKey]string) {
+	if len(sharedImages) != 0 {
+		if key, attrs, ok := parseSharedSVGImageTag(tag, nil); ok {
+			if sharedID, exists := sharedImages[key]; exists {
+				out.WriteString("<use")
+				for _, attr := range attrs {
+					if attr.name == "width" || attr.name == "height" || attr.name == "href" || attr.name == "xlink:href" {
+						continue
+					}
+					val := rewriteSVGAttrValue(attr.name, attr.val, prefix, nil)
+					out.WriteByte(' ')
+					out.WriteString(attr.name)
+					out.WriteByte('=')
+					out.WriteByte(attr.quote)
+					out.WriteString(val)
+					out.WriteByte(attr.quote)
+				}
+				out.WriteString(` href="#`)
+				out.WriteString(sharedID)
+				out.WriteString(`" xlink:href="#`)
+				out.WriteString(sharedID)
+				out.WriteString(`"/>`)
+				return
+			}
+		}
+	}
 	i := 1
 	for i < len(tag) && !isSVGAttrSpace(tag[i]) && tag[i] != '/' && tag[i] != '>' {
 		i++

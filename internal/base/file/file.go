@@ -59,7 +59,7 @@ func NewTarget(name string) (*Target, error) {
 	if name == "" {
 		return nil, os.ErrInvalid
 	}
-	name, err := filepath.Abs(name)
+	name, err := nativePath(name)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +89,10 @@ func (t *Target) Begin(ctx context.Context) (*Writer, error) {
 		activeFiles.Delete(t.name)
 		return nil, err
 	}
+	perm := os.FileMode(0600)
+	if t.info == nil {
+		perm = 0666
+	}
 	for range 100 {
 		n, err := rand.Int(rand.Reader, big.NewInt(10000000))
 		if err != nil {
@@ -96,7 +100,7 @@ func (t *Target) Begin(ctx context.Context) (*Writer, error) {
 			return nil, err
 		}
 		name := fmt.Sprintf("%s.%07d.tmp", t.name, n.Int64())
-		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
 		if errors.Is(err, os.ErrExist) {
 			continue
 		}
@@ -193,6 +197,10 @@ func (w *Writer) Abort() error {
 func NewTemp(directory string) (*os.File, error) {
 	if directory == "" {
 		directory = os.TempDir()
+	}
+	directory, err := nativePath(directory)
+	if err != nil {
+		return nil, err
 	}
 	for range 100 {
 		n, err := rand.Int(rand.Reader, big.NewInt(10000000))

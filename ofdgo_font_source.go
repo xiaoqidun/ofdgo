@@ -97,12 +97,96 @@ type fontSourceData struct {
 	err  error
 }
 
+// sharedFontSourceIndex 为派生渲染器提供并发安全的目录、文件系统与字体候选共享索引
+type sharedFontSourceIndex struct {
+	mu          sync.RWMutex
+	candidates  map[fontCandidateKey][]fontSource
+	directories map[string][]basefont.FileCandidate
+	filesystems map[int][]basefont.FileCandidate
+	names       map[int][]string
+}
+
+// newSharedFontSourceIndex 创建并发安全的共享字体来源索引
+// 返回: *sharedFontSourceIndex 共享字体来源索引
+func newSharedFontSourceIndex() *sharedFontSourceIndex {
+	return &sharedFontSourceIndex{candidates: make(map[fontCandidateKey][]fontSource), directories: make(map[string][]basefont.FileCandidate), filesystems: make(map[int][]basefont.FileCandidate), names: make(map[int][]string)}
+}
+
+// getCandidates 读取共享字体候选列表
+// 入参: key 字体候选键
+// 返回: []fontSource 候选来源, bool 是否命中
+func (s *sharedFontSourceIndex) getCandidates(key fontCandidateKey) ([]fontSource, bool) {
+	s.mu.RLock()
+	sources, ok := s.candidates[key]
+	s.mu.RUnlock()
+	return sources, ok
+}
+
+// setCandidates 写入共享字体候选列表
+// 入参: key 字体候选键, sources 候选来源
+func (s *sharedFontSourceIndex) setCandidates(key fontCandidateKey, sources []fontSource) {
+	s.mu.Lock()
+	s.candidates[key] = sources
+	s.mu.Unlock()
+}
+
+// getDirectory 读取共享目录字体索引
+// 入参: dir 字体目录
+// 返回: []basefont.FileCandidate 候选列表, bool 是否命中
+func (s *sharedFontSourceIndex) getDirectory(dir string) ([]basefont.FileCandidate, bool) {
+	s.mu.RLock()
+	candidates, ok := s.directories[dir]
+	s.mu.RUnlock()
+	return candidates, ok
+}
+
+// setDirectory 写入共享目录字体索引
+// 入参: dir 字体目录, candidates 候选列表
+func (s *sharedFontSourceIndex) setDirectory(dir string, candidates []basefont.FileCandidate) {
+	s.mu.Lock()
+	s.directories[dir] = candidates
+	s.mu.Unlock()
+}
+
+// getFilesystem 读取共享文件系统字体索引
+// 入参: index 文件系统索引
+// 返回: []basefont.FileCandidate 候选列表, bool 是否命中
+func (s *sharedFontSourceIndex) getFilesystem(index int) ([]basefont.FileCandidate, bool) {
+	s.mu.RLock()
+	candidates, ok := s.filesystems[index]
+	s.mu.RUnlock()
+	return candidates, ok
+}
+
+// setFilesystem 写入共享文件系统字体索引
+// 入参: index 文件系统索引, candidates 候选列表
+func (s *sharedFontSourceIndex) setFilesystem(index int, candidates []basefont.FileCandidate) {
+	s.mu.Lock()
+	s.filesystems[index] = candidates
+	s.mu.Unlock()
+}
+
+// getNames 读取共享文件系统目录条目
+// 入参: index 文件系统索引
+// 返回: []string 文件名列表, bool 是否命中
+func (s *sharedFontSourceIndex) getNames(index int) ([]string, bool) {
+	s.mu.RLock()
+	names, ok := s.names[index]
+	s.mu.RUnlock()
+	return names, ok
+}
+
+// setNames 写入共享文件系统目录条目
+// 入参: index 文件系统索引, names 文件名列表
+func (s *sharedFontSourceIndex) setNames(index int, names []string) {
+	s.mu.Lock()
+	s.names[index] = names
+	s.mu.Unlock()
+}
+
 // fontSourceCache 保存字体候选及独立字体数据，原始集合按字节预算淘汰，不包含绘图库对象
 type fontSourceCache struct {
-	candidates   map[fontCandidateKey][]fontSource
-	directories  map[string][]basefont.FileCandidate
-	filesystems  map[int][]basefont.FileCandidate
-	names        map[int][]string
+	shared       *sharedFontSourceIndex
 	data         map[fontSourceKey]fontSourceData
 	collections  *renderCache[fontSourceKey, []byte]
 	fallback     ResolvedFont
@@ -113,17 +197,13 @@ type fontSourceCache struct {
 // 入参: resources 共享资源策略
 // 返回: *fontSourceCache 字体来源缓存
 func newFontSourceCache(resources *Resources) *fontSourceCache {
-	return &fontSourceCache{candidates: make(map[fontCandidateKey][]fontSource), directories: make(map[string][]basefont.FileCandidate), filesystems: make(map[int][]basefont.FileCandidate), names: make(map[int][]string), data: make(map[fontSourceKey]fontSourceData), collections: resourceCache[fontSourceKey, []byte](resources, 64<<20)}
+	return &fontSourceCache{shared: newSharedFontSourceIndex(), data: make(map[fontSourceKey]fontSourceData), collections: resourceCache[fontSourceKey, []byte](resources, 64<<20)}
 }
 
-// child 复用相同来源的文件索引与数据，匹配和回退状态保持独立
+// child 复用相同来源的文件索引、候选与数据，回退状态保持独立
 // 返回: *fontSourceCache 独立文档缓存
 func (c *fontSourceCache) child() *fontSourceCache {
-	cache := newFontSourceCache(nil)
-	cache.directories, cache.filesystems, cache.data = c.directories, c.filesystems, c.data
-	cache.names = c.names
-	cache.collections = c.collections
-	return cache
+	return &fontSourceCache{shared: c.shared, data: c.data, collections: c.collections}
 }
 
 // readFontSource 读取独立字体并规范符号映射，保留集合中的名称和样式选择
@@ -158,10 +238,7 @@ func (r *Renderer) readFontSource(source fontSource, definition *Font) ([]byte, 
 		if readErr != nil {
 			return nil, 0, readErr
 		}
-		if bytes.HasPrefix(raw, []byte("ttcf")) {
-			return raw, len(raw) + 256, nil
-		}
-		return raw, 0, nil
+		return raw, len(raw) + 256, nil
 	})
 	if err == nil && bytes.HasPrefix(data, []byte("ttcf")) {
 		data, err = basefont.ExtractCollectionFont(data, key.face)
@@ -256,7 +333,7 @@ func (r *Renderer) resolveFontSource(backend FontBackend, id string, exact bool)
 // 返回: []fontSource 字体来源列表
 func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
 	cacheKey := fontCandidateKey{id: fontID, fontName: font.FontName, familyName: font.FamilyName, bold: font.Bold, italic: font.Italic}
-	if sources, ok := r.fontSourcesCache.candidates[cacheKey]; ok {
+	if sources, ok := r.fontSourcesCache.shared.getCandidates(cacheKey); ok {
 		return sources
 	}
 	bold, italic := font.Bold, font.Italic
@@ -276,10 +353,8 @@ func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
 	sortFontSources(sources)
 	systemStart := len(sources)
 	if canLoadSystemFonts() {
-		for _, dir := range systemFontDirs() {
-			for _, match := range r.matchFontFiles(dir, names, bold, italic) {
-				sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.Name, face: match.Face, exact: match.Rank == basefont.MatchExact, priority: min(match.Priority, 0)})
-			}
+		for _, match := range basefont.FileMatches(systemFontIndex(), names, bold, italic) {
+			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.Name, face: match.Face, exact: match.Rank == basefont.MatchExact, priority: min(match.Priority, 0)})
 		}
 		for _, name := range basefont.SystemNames(names...) {
 			source := fontSource{kind: fontSourceSystem, name: name, exact: true}
@@ -309,7 +384,7 @@ func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
 			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFS, index: index, name: name})
 		}
 	}
-	r.fontSourcesCache.candidates[cacheKey] = sources
+	r.fontSourcesCache.shared.setCandidates(cacheKey, sources)
 	return sources
 }
 
@@ -317,7 +392,7 @@ func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
 // 入参: dir 字体目录, names 字体名称, bold 是否粗体, italic 是否斜体
 // 返回: []basefont.FileMatch 字体匹配列表
 func (r *Renderer) matchFontFiles(dir string, names []string, bold, italic bool) []basefont.FileMatch {
-	candidates, ok := r.fontSourcesCache.directories[dir]
+	candidates, ok := r.fontSourcesCache.shared.getDirectory(dir)
 	if !ok {
 		files, _ := filepath.Glob(filepath.Join(dir, "*"))
 		candidates = basefont.FileCandidates(files, filepath.Base)
@@ -329,7 +404,7 @@ func (r *Renderer) matchFontFiles(dir string, names []string, bold, italic bool)
 			candidates = basefont.AppendFileNames(candidates, i, basefont.FileNames(file))
 			file.Close()
 		}
-		r.fontSourcesCache.directories[dir] = candidates
+		r.fontSourcesCache.shared.setDirectory(dir, candidates)
 	}
 	return basefont.FileMatches(candidates, names, bold, italic)
 }
@@ -342,7 +417,7 @@ func (r *Renderer) matchFontFS(index int, names []string, bold, italic bool) []b
 	if fonts, ok := fsys.(*FontFS); ok {
 		return basefont.FileMatches(fonts.candidates, names, bold, italic)
 	}
-	candidates, ok := r.fontSourcesCache.filesystems[index]
+	candidates, ok := r.fontSourcesCache.shared.getFilesystem(index)
 	if !ok {
 		files, err := r.fontFSNames(index)
 		if err != nil {
@@ -365,7 +440,7 @@ func (r *Renderer) matchFontFS(index int, names []string, bold, italic bool) []b
 			candidates = basefont.AppendFileNames(candidates, i, basefont.FileNames(reader))
 			file.Close()
 		}
-		r.fontSourcesCache.filesystems[index] = candidates
+		r.fontSourcesCache.shared.setFilesystem(index, candidates)
 	}
 	return basefont.FileMatches(candidates, names, bold, italic)
 }
@@ -374,7 +449,7 @@ func (r *Renderer) matchFontFS(index int, names []string, bold, italic bool) []b
 // 入参: index 字体文件系统索引
 // 返回: []string 只读文件名列表, error 目录读取错误
 func (r *Renderer) fontFSNames(index int) ([]string, error) {
-	if names, ok := r.fontSourcesCache.names[index]; ok {
+	if names, ok := r.fontSourcesCache.shared.getNames(index); ok {
 		return names, nil
 	}
 	var names []string
@@ -389,7 +464,7 @@ func (r *Renderer) fontFSNames(index int) ([]string, error) {
 		}
 	}
 	if err == nil {
-		r.fontSourcesCache.names[index] = names
+		r.fontSourcesCache.shared.setNames(index, names)
 	}
 	return names, err
 }

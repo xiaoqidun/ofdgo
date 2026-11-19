@@ -587,7 +587,7 @@ func (e *Editor) retainPendingResources(ctx context.Context, source *Editor) err
 		var fonts, images []editorResource
 		var spaces []ColorSpace
 		var err error
-		fonts, images, spaces, files, err = source.usedResources(ctx)
+		fonts, images, spaces, files, _, err = source.usedResources(ctx)
 		if err != nil {
 			return err
 		}

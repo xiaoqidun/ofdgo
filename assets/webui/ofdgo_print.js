@@ -14,9 +14,15 @@ export class PrintDialog {
 		this.el.Settings.addEventListener("input", event => { if (event.target === this.el.Printer) this.choosePrinter(); else this.schedule(); });
 		this.el.Properties.addEventListener("click", () => this.properties());
 		this.el.Form.addEventListener("submit", event => { event.preventDefault(); this.print(); });
-		this.el.Cancel.addEventListener("click", () => this.el.Panel.close());
+		this.el.Cancel.addEventListener("click", () => {
+			if (this.running && !this.waiting) { this.abortPrint(); return; }
+			this.el.Panel.close();
+		});
 		this.el.Panel.addEventListener("close", () => this.close());
-		this.el.Panel.addEventListener("cancel", event => { if (this.waiting) event.preventDefault(); });
+		this.el.Panel.addEventListener("cancel", event => {
+			if (this.waiting) { event.preventDefault(); return; }
+			if (this.running) { event.preventDefault(); this.abortPrint(); }
+		});
 		this.el.Previous.addEventListener("click", () => this.preview(this.side - 1));
 		this.el.Next.addEventListener("click", () => this.preview(this.side + 1));
 		this.el.PreviewNumber.addEventListener("change", () => this.preview(Number(this.el.PreviewNumber.value) - 1));
@@ -90,7 +96,7 @@ export class PrintDialog {
 				if (!this.current(sequence)) return;
 				for (const printer of printers) this.el.Printer.add(new Option(printer.name, `device:${printer.name}`));
 				const printer = printers.find(printer => printer.default) || printers[0];
-				this.el.Printer.value = printer ? `device:${printer.name}` : "pdf";
+				this.el.Printer.value = printer ? `device:${printer.name}` : capabilities.systemDialog ? "browser" : "pdf";
 			}
 		} catch (error) { if (this.current(sequence)) this.status(error.message); }
 		finally {
@@ -250,8 +256,7 @@ export class PrintDialog {
 		const context = this.context;
 		try {
 			if (!this.el.Form.checkValidity()) {
-				if (this.el.Panel.open) this.el.Form.reportValidity();
-				else this.status("请检查打印设置");
+				this.status("请检查打印设置");
 				return;
 			}
 			this.status("正在准备预览", true);
@@ -435,6 +440,12 @@ export class PrintDialog {
 				this.controls();
 			}
 		}
+	}
+
+	abortPrint() {
+		this.sequence++;
+		if (this.context) this.cancel(this.context.tab);
+		this.finishPrint("打印已取消");
 	}
 
 	finishPrint(message = "") {

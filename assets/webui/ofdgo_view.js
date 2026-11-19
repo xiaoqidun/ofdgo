@@ -41,7 +41,7 @@ export function createPageView(context) {
 			}
 			try {
 				pageView.setCurrentPage(index);
-				if (options.fit !== false) {
+				if (options.fit !== false && !(state.fitMode === "width" && state.pageLayout === 1 && state.pageWindow?.offsets.length > 1)) {
 					pageView.applyFit(false);
 				}
 				if (options.scroll !== false) {
@@ -244,6 +244,7 @@ export function createPageView(context) {
 				task.resolve(null);
 			}
 			context.state.pageRenderQueue = [];
+			context.state.pageRenderScheduleSeq = (context.state.pageRenderScheduleSeq || 0) + 1;
 			context.state.pageRenderRunning = context.state.pageRenderWorkers > 0;
 			context.state.pagePrefetchIndex = null;
 			context.state.pagePrefetchDirection = 1;
@@ -394,19 +395,30 @@ export function createPageView(context) {
 				}
 				return;
 			}
-			context.state.pageRenderRunning = true;
 			const tab = context.documentTab(), openSeq = tab.state.openSeq, loadSeq = tab.state.pageLoadSeq;
+			const scheduleSeq = (tab.state.pageRenderScheduleSeq || 0) + 1;
+			tab.state.pageRenderScheduleSeq = scheduleSeq;
+			tab.state.pageRenderRunning = true;
 			requestAnimationFrame(() => {
-				if (context.activeTab === tab && openSeq === tab.state.openSeq && loadSeq === tab.state.pageLoadSeq) pageView.processPageRenderQueue();
+				if (scheduleSeq !== tab.state.pageRenderScheduleSeq || openSeq !== tab.state.openSeq || loadSeq !== tab.state.pageLoadSeq) return;
+				if (context.activeTab === tab) pageView.processPageRenderQueue(tab, openSeq, loadSeq, scheduleSeq);
+				else tab.state.pageRenderRunning = tab.state.pageRenderWorkers > 0;
 			});
 		},
 
-		async processPageRenderQueue() {
-			const tab = context.documentTab(), openSeq = tab.state.openSeq, loadSeq = tab.state.pageLoadSeq;
+		async processPageRenderQueue(tab = context.documentTab(), openSeq = tab.state.openSeq, loadSeq = tab.state.pageLoadSeq, scheduleSeq = tab.state.pageRenderScheduleSeq) {
 			await context.nextFrame();
-			if (context.activeTab !== tab || openSeq !== tab.state.openSeq || loadSeq !== tab.state.pageLoadSeq) return;
+			if (scheduleSeq !== tab.state.pageRenderScheduleSeq || openSeq !== tab.state.openSeq || loadSeq !== tab.state.pageLoadSeq) return;
+			if (context.activeTab !== tab) {
+				tab.state.pageRenderRunning = tab.state.pageRenderWorkers > 0;
+				return;
+			}
 			const available = (nativeHost?.parallelism || context.wasmWorker?.parallelism || 1) - tab.state.pageRenderWorkers;
-			await Promise.all(Array.from({ length: Math.max(0, available) }, () => pageView.processPageRenderTasks()));
+			if (available <= 0) {
+				tab.state.pageRenderRunning = tab.state.pageRenderWorkers > 0;
+				return;
+			}
+			await Promise.all(Array.from({ length: available }, () => pageView.processPageRenderTasks()));
 		},
 
 		async processPageRenderTasks() {
@@ -627,8 +639,8 @@ export function createPageView(context) {
 			const tab = context.documentTab(), state = tab.state, openSeq = state.openSeq, loadSeq = state.pageLoadSeq;
 			if (state.pagePresentFrame || !state.pagePresentQueue.size) return;
 			state.pagePresentFrame = requestAnimationFrame(() => {
-				if (context.activeTab !== tab || openSeq !== state.openSeq || loadSeq !== state.pageLoadSeq) return;
 				state.pagePresentFrame = 0;
+				if (context.activeTab !== tab || openSeq !== state.openSeq || loadSeq !== state.pageLoadSeq) return;
 				const started = performance.now();
 				do {
 					const task = [...state.pagePresentQueue.values()].sort(pageView.comparePageRenderTask)[0];
@@ -665,7 +677,7 @@ export function createPageView(context) {
 			svg.classList.add("ofd-svg");
 			surface.replaceChildren(svg);
 			surface.append(textLayer || pageView.createTextLayer(page.text));
-			if (context.state.editorInfo && pageView.displayMode() === "svg") {
+			if (context.state.editing && context.state.editorInfo && pageView.displayMode() === "svg") {
 				context.mountEditorObjects(index, page, surface);
 			}
 			context.mountAnnotationNotes(index, surface, page.annotations);
@@ -834,13 +846,24 @@ export function createPageView(context) {
 		},
 
 		setCurrentPage(index) {
+			const previousPage = pageView.currentPageInfo();
 			if (index !== context.state.pageIndex && !context.state.openActionTask?.navigating) context.state.openActionTask = null;
 			context.state.pageIndex = index;
 			pageView.prunePageRenderQueue();
 			if (context.state.editing) context.state.openActionPage = context.state.doc?.pages[index]?.id;
 			if (context.state.fitMode === "width" && context.state.pageLayout === 1) {
-				context.state.scale = pageView.fitWidthScale(pageView.currentPageInfo());
-				context.el.zoomLabel.textContent = `${Math.round(context.state.scale * 100)}%`;
+				const nextPage = pageView.currentPageInfo();
+				if (previousPage && nextPage && context.state.pageWindow?.offsets.length > 1) {
+					const prevWidth = pageView.pageViewSize(previousPage).width;
+					const nextWidth = pageView.pageViewSize(nextPage).width;
+					if (prevWidth > 0 && nextWidth > 0 && prevWidth !== nextWidth) {
+						context.state.scale = Math.min(4, context.state.scale * prevWidth / nextWidth);
+						context.el.zoomLabel.textContent = `${Math.round(context.state.scale * 100)}%`;
+					}
+				} else if (nextPage) {
+					context.state.scale = pageView.fitWidthScale(nextPage);
+					context.el.zoomLabel.textContent = `${Math.round(context.state.scale * 100)}%`;
+				}
 			}
 			pageView.updatePageListCurrent();
 			context.updateControls();

@@ -228,7 +228,7 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 		if clip != nil && s.view != canvas.Identity {
 			clip = clip.Transform(s.view)
 		}
-		if s.sample != nil {
+		if s.sample != nil || pdfGradientNeedsSampling(ctx.Renderer, g.Grad) {
 			return s.sampledRaster(), clip, s.view
 		}
 		if s.mapType != "Reflect" && s.mapType != "Repeat" {
@@ -260,7 +260,7 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 		if clip != nil && s.view != canvas.Identity {
 			clip = clip.Transform(s.view)
 		}
-		if s.sample != nil {
+		if s.sample != nil || pdfGradientNeedsSampling(ctx.Renderer, g.Grad) {
 			return s.sampledRaster(), clip, s.view
 		}
 		if s.mapType != "Reflect" {
@@ -453,6 +453,21 @@ func canvasShading(paint Paint, x, y, pageH float64) *shdPaint {
 		result.gradient = gradient.ToRadial(start, source.StartRadius, result.view.Inv().Dot(end), source.EndRadius)
 	}
 	return result
+}
+
+// pdfGradientNeedsSampling 判断PDF渲染目标上的渐变是否包含非完全不透明色标
+// 入参: renderer 目标渲染器, stops 渐变色标
+// 返回: bool 是否需要回退光栅采样
+func pdfGradientNeedsSampling(renderer canvas.Renderer, stops canvas.Grad) bool {
+	if _, ok := renderer.(*pdfRenderer); !ok {
+		return false
+	}
+	for _, stop := range stops {
+		if stop.Color.A != 255 {
+			return true
+		}
+	}
+	return false
 }
 
 // axialShdClip 获取轴向渐变的延伸裁剪区域

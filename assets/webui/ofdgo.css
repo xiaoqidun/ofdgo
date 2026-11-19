@@ -5360,3 +5360,25 @@ select:not([multiple]):not([size]) {
 .form-select > select:not([multiple]):not([size]) {
 	background-image: none;
 }
+
+.credentials-file {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.structure-xml {
+	min-height: 180px;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 12px;
+	line-height: 1.45;
+	resize: vertical;
+}
+
+.convert-table tr.convert-spacer,
+.convert-table tr.convert-spacer > td {
+	padding: 0;
+	border: 0;
+	background: transparent;
+}

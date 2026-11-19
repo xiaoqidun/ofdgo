@@ -29,7 +29,11 @@ var replaceFileProc = syscall.NewLazyDLL("kernel32.dll").NewProc("ReplaceFileW")
 // 入参: name 文件路径
 // 返回: *os.File 文件, error 打开错误
 func Open(name string) (*os.File, error) {
-	path, err := nativePath(name)
+	longPath, err := nativePath(name)
+	if err != nil {
+		return nil, err
+	}
+	path, err := syscall.UTF16PtrFromString(longPath)
 	if err != nil {
 		return nil, err
 	}
@@ -44,11 +48,19 @@ func Open(name string) (*os.File, error) {
 // 入参: source 临时路径, target 目标路径
 // 返回: error 替换错误
 func Replace(source, target string) error {
-	from, err := nativePath(source)
+	fromPath, err := nativePath(source)
 	if err != nil {
 		return err
 	}
-	to, err := nativePath(target)
+	toPath, err := nativePath(target)
+	if err != nil {
+		return err
+	}
+	from, err := syscall.UTF16PtrFromString(fromPath)
+	if err != nil {
+		return err
+	}
+	to, err := syscall.UTF16PtrFromString(toPath)
 	if err != nil {
 		return err
 	}
@@ -57,25 +69,24 @@ func Replace(source, target string) error {
 		return nil
 	}
 	if err == syscall.ERROR_FILE_NOT_FOUND {
-		return os.Rename(source, target)
+		return os.Rename(fromPath, toPath)
 	}
 	return &os.LinkError{Op: "replace", Old: source, New: target, Err: err}
 }
 
 // nativePath 转换绝对长路径
 // 入参: name 路径
-// 返回: *uint16 原生路径, error 转换错误
-func nativePath(name string) (*uint16, error) {
+// 返回: string 原生长路径, error 转换错误
+func nativePath(name string) (string, error) {
+	if strings.HasPrefix(name, `\\?\`) {
+		return name, nil
+	}
 	path, err := filepath.Abs(name)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	if !strings.HasPrefix(path, `\\?\`) {
-		if strings.HasPrefix(path, `\\`) {
-			path = `\\?\UNC\` + path[2:]
-		} else {
-			path = `\\?\` + path
-		}
+	if strings.HasPrefix(path, `\\`) {
+		return `\\?\UNC\` + path[2:], nil
 	}
-	return syscall.UTF16PtrFromString(path)
+	return `\\?\` + path, nil
 }

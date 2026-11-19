@@ -92,16 +92,12 @@ async function currentBundle(meta) {
 
 async function readResource(event, navigation) {
 	const meta = await caches.open(META_CACHE);
-	let bundle;
-	if (navigation) {
-		bundle = await readBundle(meta, self.registration.scope);
-	} else {
-		bundle = await readBundle(meta, CLIENT_PREFIX + event.clientId);
-	}
+	let bundle = await readBundle(meta, navigation ? self.registration.scope : CLIENT_PREFIX + event.clientId);
 	if (!bundle || !await caches.has(bundle.name)) {
-		const client = await self.clients.get(event.clientId);
-		if (client && resourceURL(client.url) !== self.registration.scope) return fetch(event.request);
-		return Response.error();
+		const fallback = navigation ? null : await readBundle(meta, self.registration.scope);
+		if (!await isBundleComplete(fallback)) return fetch(event.request);
+		bundle = fallback;
+		if (event.clientId) await meta.put(CLIENT_PREFIX + event.clientId, Response.json(bundle));
 	}
 	if (event.resultingClientId) {
 		await meta.put(CLIENT_PREFIX + event.resultingClientId, Response.json(bundle));
@@ -111,7 +107,17 @@ async function readResource(event, navigation) {
 		return fetch(event.request);
 	}
 	const cache = await caches.open(bundle.name);
-	return await cache.match(url) || Response.error();
+	return await cache.match(url) || fetch(event.request);
+}
+
+function randomID() {
+	if (typeof crypto?.randomUUID === "function") return crypto.randomUUID();
+	const bytes = new Uint8Array(16);
+	crypto.getRandomValues(bytes);
+	bytes[6] = (bytes[6] & 0x0f) | 0x40;
+	bytes[8] = (bytes[8] & 0x3f) | 0x80;
+	const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 async function updateBundle(meta) {
@@ -126,7 +132,7 @@ async function updateBundle(meta) {
 	if (resources.some(({ response }) => response.headers.get("X-OFDGo-Checksum") !== BUNDLE_CHECKSUM)) {
 		throw new Error("资源校验失败");
 	}
-	const bundle = { name: CACHE_PREFIX + crypto.randomUUID(), assets: ASSETS };
+	const bundle = { name: CACHE_PREFIX + randomID(), assets: ASSETS };
 	try {
 		const cache = await caches.open(bundle.name);
 		for (const { url, response } of resources) {

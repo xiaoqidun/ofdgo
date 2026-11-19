@@ -31,6 +31,7 @@ type SFNT struct {
 	Tables                             map[string][]byte
 	IsTrueType, IsCFF                  bool
 	cmaps                              []sfntCmap
+	hasUnicodeCmap                     bool
 	units, count, horizontal, vertical uint16
 	reverseOnce                        sync.Once
 	reverse                            map[uint16][]rune
@@ -81,6 +82,7 @@ func ParseSFNTTables(table map[string][]byte) (*SFNT, error) {
 		return nil, err
 	}
 	f.cmaps = cmaps
+	f.hasUnicodeCmap = slices.ContainsFunc(cmaps, func(c sfntCmap) bool { return c.isUnicode() })
 	for _, cmap := range f.cmaps {
 		if cmap.duplicate {
 			continue
@@ -112,12 +114,12 @@ func (f *SFNT) CmapEntries() uint64 {
 	return count
 }
 
-// GlyphIndex 按编码表顺序查找字符，不替换缺失字形
+// GlyphIndex 按Unicode优先级顺序查找字符，仅在无Unicode子表时回退非Unicode子表
 // 入参: char 字符
 // 返回: uint16 字形编号
 func (f *SFNT) GlyphIndex(char rune) uint16 {
 	for _, cmap := range f.cmaps {
-		if cmap.duplicate {
+		if f.skipCmap(cmap) {
 			continue
 		}
 		if gid, ok := cmap.lookup(char); ok && gid != 0 {
@@ -178,10 +180,35 @@ func (f *SFNT) Write() []byte { data, _ := SerializeOTF(f.Tables); return data }
 // sfntCmap 保存编码记录及字符映射，连续区间与共享子表不重复展开
 type sfntCmap struct {
 	platform, encoding, format uint16
+	offset                     uint32
 	mapping                    map[rune]uint16
 	groups                     []byte
 	entries                    uint64
 	duplicate                  bool
+}
+
+// isUnicode 判断编码子表是否为常规Unicode字符映射
+// 返回: bool 是否为Unicode映射子表
+func (c sfntCmap) isUnicode() bool {
+	return c.priority() <= 2
+}
+
+// priority 返回编码子表的Unicode检索优先级，值越小越优先
+// 返回: int 优先级数值
+func (c sfntCmap) priority() int {
+	if c.format == 14 {
+		return 4
+	}
+	if c.platform == 0 && c.encoding == 4 || c.platform == 3 && c.encoding == 10 {
+		return 0
+	}
+	if c.platform == 0 && c.encoding == 3 || c.platform == 3 && c.encoding == 1 {
+		return 1
+	}
+	if c.platform == 0 && (c.encoding <= 2 || c.encoding == 6) {
+		return 2
+	}
+	return 3
 }
 
 // pairs 按原映射返回字符与字形，连续编码段不展开存储
@@ -313,10 +340,23 @@ func readSFNTCmaps(data []byte) ([]sfntCmap, error) {
 			}
 			parsed[offset] = cmap
 		}
-		cmap.platform, cmap.encoding, cmap.format, cmap.duplicate = binary.BigEndian.Uint16(record), binary.BigEndian.Uint16(record[2:]), format, found
+		cmap.platform, cmap.encoding, cmap.format, cmap.offset = binary.BigEndian.Uint16(record), binary.BigEndian.Uint16(record[2:]), format, offset
 		result = append(result, cmap)
 	}
+	slices.SortStableFunc(result, func(a, b sfntCmap) int { return a.priority() - b.priority() })
+	seen := make(map[uint32]bool, len(result))
+	for i := range result {
+		result[i].duplicate = seen[result[i].offset]
+		seen[result[i].offset] = true
+	}
 	return result, nil
+}
+
+// skipCmap 判断查找字符映射时是否跳过该编码子表
+// 入参: c 编码子表
+// 返回: bool 是否跳过
+func (f *SFNT) skipCmap(c sfntCmap) bool {
+	return c.duplicate || c.format == 14 || f.hasUnicodeCmap && !c.isUnicode()
 }
 
 // glyphCharacters 返回指向指定字形的全部字符，连续区间按需反查
@@ -327,7 +367,7 @@ func (f *SFNT) glyphCharacters(gid uint16) []rune {
 		f.reverse = make(map[uint16][]rune)
 		seen := make(map[rune]bool)
 		for _, cmap := range f.cmaps {
-			if cmap.duplicate {
+			if f.skipCmap(cmap) {
 				continue
 			}
 			for char, glyph := range cmap.mapping {
@@ -346,7 +386,7 @@ func (f *SFNT) glyphCharacters(gid uint16) []rune {
 	}
 	chars := slices.Clone(f.reverse[gid])
 	for _, cmap := range f.cmaps {
-		if cmap.duplicate {
+		if f.skipCmap(cmap) {
 			continue
 		}
 		for offset := 0; offset+12 <= len(cmap.groups); offset += 12 {

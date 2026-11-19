@@ -17,11 +17,9 @@ package webview
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
-
-// conversionMemory 未提供系统内存探测时仅按并行数调度
-var conversionMemory func() int64
 
 // instanceDirectory 解析数据目录的实际路径，使符号链接复用同一实例
 // 入参: path 数据目录路径
@@ -61,4 +59,45 @@ func fontNameLanguage() (uint16, uint16) {
 		return 3, 0x0409
 	}
 	return 0xffff, 0xffff
+}
+
+// conversionMemory 预留系统内存后返回可用于新增转换的额度
+// 返回: int64 可用字节数，查询失败时暂停扩容
+func conversionMemory() int64 {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	var total, available, free, buffers, cached int64
+	var hasAvailable bool
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		value, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil || value < 0 {
+			continue
+		}
+		switch fields[0] {
+		case "MemTotal:":
+			total = value << 10
+		case "MemAvailable:":
+			available = value << 10
+			hasAvailable = true
+		case "MemFree:":
+			free = value << 10
+		case "Buffers:":
+			buffers = value << 10
+		case "Cached:":
+			cached = value << 10
+		}
+	}
+	if total <= 0 {
+		return 0
+	}
+	if !hasAvailable {
+		available = free + buffers + cached
+	}
+	return max(0, available-total/8)
 }

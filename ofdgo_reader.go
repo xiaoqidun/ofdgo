@@ -685,6 +685,23 @@ func (list *documentPageList) UnmarshalXML(d *xml.Decoder, start xml.StartElemen
 	})
 }
 
+// resLoadState 在批量加载文档资源文件期间维护归一化标识到原始键的常数时间索引
+type resLoadState struct {
+	colorSpaces   map[string]string
+	medias        map[string]string
+	resPaths      map[string]string
+	fonts         map[string]string
+	drawParams    map[string]string
+	composites    map[string]string
+	filesByKind   map[string]map[string]string
+	idxColorSpace map[string][]string
+	idxMedias     map[string][]string
+	idxResPaths   map[string][]string
+	idxFonts      map[string][]string
+	idxDrawParams map[string][]string
+	idxComposites map[string][]string
+}
+
 // limitedEntryReader 限制包内单条目解压字节数，超限时返回明确错误而非静默截断
 type limitedEntryReader struct {
 	io.ReadCloser
@@ -803,13 +820,14 @@ func (r *Reader) docStructureContext(ctx context.Context) (*Document, error) {
 	}
 	doc.Signatures = view.versionSignatures(docAttr.Signatures)
 	r.cloneMutableState(&view)
+	loadState := &resLoadState{}
 	for _, res := range doc.CommonData.PublicRes {
-		if err := view.loadResContext(ctx, res); err != nil {
+		if err := view.loadResContext(ctx, res, loadState); err != nil {
 			return nil, err
 		}
 	}
 	for _, res := range doc.CommonData.DocumentRes {
-		if err := view.loadResContext(ctx, res); err != nil {
+		if err := view.loadResContext(ctx, res, loadState); err != nil {
 			return nil, err
 		}
 	}
@@ -1171,59 +1189,107 @@ func (r *Reader) hasPackageFile(name string) bool {
 	return ok
 }
 
-// putMapResourceOverride 按十进制等价标识覆盖字典中的旧资源条目
-// 入参: dst 目标字典, id 资源标识, value 新资源值
-func putMapResourceOverride[T any](dst map[string]T, id string, value T) {
-	if key := editorResourceID(id); key != "" {
+// mergeMapResourceOverride 按十进制等价标识批量覆盖字典中的旧资源条目
+// 入参: dst 目标字典, src 新资源表, normIndex 归一化键到原始键索引
+func mergeMapResourceOverride[T any](dst, src map[string]T, normIndex *map[string]string) {
+	if len(src) == 0 {
+		return
+	}
+	idx := *normIndex
+	if idx == nil {
+		idx = make(map[string]string, len(dst)+len(src))
 		for existing := range dst {
-			if existing != id && editorResourceID(existing) == key {
-				delete(dst, existing)
+			if key := editorResourceID(existing); key != "" {
+				idx[key] = existing
 			}
 		}
+		*normIndex = idx
 	}
-	dst[id] = value
+	for id, value := range src {
+		if key := editorResourceID(id); key != "" {
+			if prev, ok := idx[key]; ok && prev != id {
+				delete(dst, prev)
+			}
+			idx[key] = id
+		}
+		dst[id] = value
+	}
 }
 
 // mergeResourceIndexOverride 按高优先级资源表覆盖目标索引中的同名十进制条目
-// 入参: dst 文档级目标索引, src 当前资源文件局部索引
-func mergeResourceIndexOverride[T comparable](dst, src *resourceIndex[T]) {
+// 入参: dst 文档级目标索引, src 当前资源文件局部索引, normIndex 归一化键到原始键列表索引
+func mergeResourceIndexOverride[T comparable](dst, src *resourceIndex[T], normIndex *map[string][]string) {
 	if len(src.exact) == 0 {
 		return
 	}
-	keys := make(map[string]bool, len(src.exact))
-	for id := range src.exact {
-		if key := editorResourceID(id); key != "" {
-			keys[key] = true
-		}
-	}
-	if len(keys) > 0 {
+	idx := *normIndex
+	if idx == nil {
+		idx = make(map[string][]string, len(dst.exact)+len(src.exact))
 		for existing := range dst.exact {
-			if keys[editorResourceID(existing)] {
-				delete(dst.exact, existing)
+			if key := editorResourceID(existing); key != "" {
+				idx[key] = append(idx[key], existing)
 			}
 		}
-		for key := range keys {
-			delete(dst.canonical, key)
-			delete(dst.ambiguous, key)
+		*normIndex = idx
+	}
+	if len(dst.exact) != 0 {
+		for id := range src.exact {
+			if key := editorResourceID(id); key != "" {
+				if olds := idx[key]; len(olds) != 0 {
+					for _, existing := range olds {
+						delete(dst.exact, existing)
+					}
+					delete(dst.canonical, key)
+					delete(dst.ambiguous, key)
+					delete(idx, key)
+				}
+			}
 		}
 	}
 	for id, value := range src.exact {
 		dst.put(id, value)
+		if key := editorResourceID(id); key != "" {
+			idx[key] = append(idx[key], id)
+		}
 	}
 }
 
-// putResourceFileByKind 按资源类别记录声明文件路径
-// 入参: kind 资源类别, id 资源标识, fullPath 资源XML包内路径
-func (r *Reader) putResourceFileByKind(kind, id, fullPath string) {
+// mergeResourceFilesByKind 按资源类别批量记录声明文件路径并覆写等价旧标识
+// 入参: r 阅读器, kind 资源类别, src 资源精确表, fullPath 资源XML包内路径, state 批量加载状态
+func mergeResourceFilesByKind[T any](r *Reader, kind string, src map[string]T, fullPath string, state *resLoadState) {
+	if len(src) == 0 {
+		return
+	}
 	if r.resourceFilesByKind == nil {
 		r.resourceFilesByKind = make(map[string]map[string]string)
 	}
 	bucket := r.resourceFilesByKind[kind]
 	if bucket == nil {
-		bucket = make(map[string]string)
+		bucket = make(map[string]string, len(src))
 		r.resourceFilesByKind[kind] = bucket
 	}
-	putMapResourceOverride(bucket, id, fullPath)
+	if state.filesByKind == nil {
+		state.filesByKind = make(map[string]map[string]string)
+	}
+	idx := state.filesByKind[kind]
+	if idx == nil {
+		idx = make(map[string]string, len(bucket)+len(src))
+		for existing := range bucket {
+			if key := editorResourceID(existing); key != "" {
+				idx[key] = existing
+			}
+		}
+		state.filesByKind[kind] = idx
+	}
+	for id := range src {
+		if key := editorResourceID(id); key != "" {
+			if prev, ok := idx[key]; ok && prev != id {
+				delete(bucket, prev)
+			}
+			idx[key] = id
+		}
+		bucket[id] = fullPath
+	}
 }
 
 // resourceFileByKind 按资源类别查找文档级声明所在的资源XML路径
@@ -1244,10 +1310,10 @@ func (r *Reader) resourceFileByKind(kind, id string) (string, bool) {
 	return resourceValue(r.resourceFilesByKind[kind], id)
 }
 
-// loadResContext 加载文档级可读资源的索引并合并入当前文档缓存
-// 入参: ctx 取消上下文, resPath 资源路径
+// loadResContext 加载文档级资源索引并借助批量索引状态以常数时间覆写旧条目
+// 入参: ctx 取消上下文, resPath 资源路径, state 批量加载状态
 // 返回: error 取消错误
-func (r *Reader) loadResContext(ctx context.Context, resPath string) error {
+func (r *Reader) loadResContext(ctx context.Context, resPath string, state *resLoadState) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1280,38 +1346,26 @@ func (r *Reader) loadResContext(ctx context.Context, resPath string) error {
 	if r.docComposites == nil {
 		r.docComposites = &resourceIndex[*CompositeGraphicUnit]{}
 	}
-	mergeResourceIndexOverride(r.docColorSpaces, &parsed.colorSpaces)
-	for id, cs := range parsed.colorSpaces.exact {
-		putMapResourceOverride(r.colorSpaceCache, id, cs)
-		r.putResourceFileByKind("ColorSpace", id, fullPath)
-	}
+	mergeResourceIndexOverride(r.docColorSpaces, &parsed.colorSpaces, &state.idxColorSpace)
+	mergeMapResourceOverride(r.colorSpaceCache, parsed.colorSpaces.exact, &state.colorSpaces)
+	mergeResourceFilesByKind(r, "ColorSpace", parsed.colorSpaces.exact, fullPath, state)
 	if r.mediaCache == nil && len(parsed.medias.exact) > 0 {
-		r.mediaCache = make(map[string]MultiMedia)
+		r.mediaCache = make(map[string]MultiMedia, len(parsed.medias.exact))
 	}
-	mergeResourceIndexOverride(r.docMedias, &parsed.medias)
-	for id, mm := range parsed.medias.exact {
-		putMapResourceOverride(r.mediaCache, id, mm)
-		r.putResourceFileByKind("MultiMedia", id, fullPath)
-	}
-	mergeResourceIndexOverride(r.docResPaths, &parsed.resPaths)
-	for id, finalPath := range parsed.resPaths.exact {
-		putMapResourceOverride(r.ResMap, id, finalPath)
-	}
-	mergeResourceIndexOverride(r.docFonts, &parsed.fonts)
-	for id, f := range parsed.fonts.exact {
-		putMapResourceOverride(r.fontCache, id, f)
-		r.putResourceFileByKind("Font", id, fullPath)
-	}
-	mergeResourceIndexOverride(r.docDrawParams, &parsed.drawParams)
-	for id, dp := range parsed.drawParams.exact {
-		putMapResourceOverride(r.drawParamCache, id, dp)
-		r.putResourceFileByKind("DrawParam", id, fullPath)
-	}
-	mergeResourceIndexOverride(r.docComposites, &parsed.composites)
-	for id, cgu := range parsed.composites.exact {
-		putMapResourceOverride(r.compositeGraphicUnitCache, id, cgu)
-		r.putResourceFileByKind("CompositeGraphicUnit", id, fullPath)
-	}
+	mergeResourceIndexOverride(r.docMedias, &parsed.medias, &state.idxMedias)
+	mergeMapResourceOverride(r.mediaCache, parsed.medias.exact, &state.medias)
+	mergeResourceFilesByKind(r, "MultiMedia", parsed.medias.exact, fullPath, state)
+	mergeResourceIndexOverride(r.docResPaths, &parsed.resPaths, &state.idxResPaths)
+	mergeMapResourceOverride(r.ResMap, parsed.resPaths.exact, &state.resPaths)
+	mergeResourceIndexOverride(r.docFonts, &parsed.fonts, &state.idxFonts)
+	mergeMapResourceOverride(r.fontCache, parsed.fonts.exact, &state.fonts)
+	mergeResourceFilesByKind(r, "Font", parsed.fonts.exact, fullPath, state)
+	mergeResourceIndexOverride(r.docDrawParams, &parsed.drawParams, &state.idxDrawParams)
+	mergeMapResourceOverride(r.drawParamCache, parsed.drawParams.exact, &state.drawParams)
+	mergeResourceFilesByKind(r, "DrawParam", parsed.drawParams.exact, fullPath, state)
+	mergeResourceIndexOverride(r.docComposites, &parsed.composites, &state.idxComposites)
+	mergeMapResourceOverride(r.compositeGraphicUnitCache, parsed.composites.exact, &state.composites)
+	mergeResourceFilesByKind(r, "CompositeGraphicUnit", parsed.composites.exact, fullPath, state)
 	r.resourcesRead[fullPath] = true
 	return ctx.Err()
 }

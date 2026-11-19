@@ -50,7 +50,16 @@ type pdfRenderer struct {
 	exactText   bool
 }
 
-// RenderImage 校验惰性图片并同步不透明画笔，保留解码错误及后端透明度状态
+// RenderPath 在绘制渐变前重置透明度图形状态，避免前驱半透明对象污染不透明渐变
+// 入参: path 几何路径, style 绘制样式, matrix 变换矩阵
+func (r *pdfRenderer) RenderPath(path *canvas.Path, style canvas.Style, matrix canvas.Matrix) {
+	if style.Fill.IsGradient() || style.Stroke.IsGradient() {
+		r.resetOpacityState()
+	}
+	r.PDF.RenderPath(path, style, matrix)
+}
+
+// RenderImage 校验惰性图片并同步不透明画笔，直通JPEG跳过全量像素解码
 // 入参: img 图像, matrix 图像变换
 func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 	if r.imageError != nil {
@@ -58,27 +67,61 @@ func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 	}
 	encoded, isEncoded := img.(*EncodedImage)
 	var transient image.Image
+	target := img
+	jpegPassThrough := false
 	if isEncoded {
-		var err error
-		transient, err = baseimage.DecodeTransientContext(context.Background(), encoded)
-		if err != nil {
-			r.imageError = err
-			return
+		var jpegTarget image.Image
+		if encoded.MIME() == "image/jpeg" {
+			raw := encoded.Bytes()
+			if validJPEGStream(raw) {
+				cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
+				if err != nil {
+					r.imageError = err
+					return
+				}
+				if image.Rect(0, 0, cfg.Width, cfg.Height) != img.Bounds() {
+					r.imageError = fmt.Errorf("PDF output image pixel bounds differ")
+					return
+				}
+				if parsed, jpegErr := canvasimage.NewJPEGImage(bytes.NewReader(raw)); jpegErr == nil {
+					parsed.Bytes = raw
+					jpegTarget = parsed
+					if img.ColorModel() == cfg.ColorModel && (cfg.ColorModel == color.YCbCrModel || cfg.ColorModel == color.GrayModel) {
+						target = jpegTarget
+						jpegPassThrough = true
+					}
+				}
+			}
 		}
-		if transient == nil || transient.Bounds() != img.Bounds() {
-			r.imageError = fmt.Errorf("PDF output image pixel bounds differ")
-			return
+		if !jpegPassThrough {
+			var err error
+			transient, err = baseimage.DecodeTransientContext(context.Background(), encoded)
+			if err != nil {
+				r.imageError = err
+				return
+			}
+			if transient == nil || transient.Bounds() != img.Bounds() {
+				r.imageError = fmt.Errorf("PDF output image pixel bounds differ")
+				return
+			}
+			if jpegTarget != nil {
+				target = jpegTarget
+			} else {
+				target = transient
+			}
 		}
 	}
 	if len(r.images) != 0 {
 		var original image.Image
-		opaque := false
-		check := img
-		if transient != nil {
-			check = transient
-		}
-		if source, ok := check.(interface{ Opaque() bool }); ok {
-			opaque = source.Opaque()
+		opaque := jpegPassThrough
+		if !jpegPassThrough {
+			check := img
+			if transient != nil {
+				check = transient
+			}
+			if source, ok := check.(interface{ Opaque() bool }); ok {
+				opaque = source.Opaque()
+			}
 		}
 		switch img.ColorModel() {
 		case color.GrayModel, color.CMYKModel:
@@ -107,24 +150,16 @@ func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 			}
 		}
 	}
-	target := img
-	if isEncoded {
-		if encoded.MIME() == "image/jpeg" {
-			if jpegImage, err := canvasimage.NewJPEGImage(bytes.NewReader(encoded.Bytes())); err == nil {
-				jpegImage.Bytes = encoded.Bytes()
-				target = jpegImage
-			} else if transient != nil {
-				target = transient
-			}
-		} else if transient != nil {
-			target = transient
-		}
-	}
-	style := canvas.DefaultStyle
-	style.Fill = canvas.Paint{Color: canvas.White}
-	style.Stroke = canvas.Paint{Color: canvas.Black}
-	r.PDF.RenderPath(&canvas.Path{}, style, canvas.Identity)
+	r.resetOpacityState()
 	r.PDF.RenderImage(target, matrix)
+}
+
+// resetOpacityState 重置PDF透明度图形状态，避免前驱半透明对象污染后续绘制
+func (r *pdfRenderer) resetOpacityState() {
+	reset := canvas.DefaultStyle
+	reset.Fill = canvas.Paint{Color: canvas.White}
+	reset.Stroke = canvas.Paint{Color: canvas.Black}
+	r.PDF.RenderPath(&canvas.Path{}, reset, canvas.Identity)
 }
 
 // glyphPath 在缓存预算内复用相似变换下的PDF字形圆弧转换
@@ -547,4 +582,92 @@ func pdfDestination(dest Dest, box Box) (pdfgo.Destination, error) {
 		result.Parameters = pdfgo.Array{pdfgo.Real(left * scale), pdfgo.Real((box.H - bottom) * scale), pdfgo.Real(right * scale), pdfgo.Real((box.H - top) * scale)}
 	}
 	return result, nil
+}
+
+// validJPEGStream 按JPEG标记结构快速校验字节流完整性，不执行像素解码
+// 入参: data JPEG原始字节
+// 返回: bool 字节流是否完整包含SOI、SOF、SOS与EOI
+func validJPEGStream(data []byte) bool {
+	if len(data) < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+		return false
+	}
+	hasSOF := false
+	hasSOS := false
+	i := 2
+	for i < len(data) {
+		if data[i] != 0xFF {
+			return false
+		}
+		for i < len(data) && data[i] == 0xFF {
+			i++
+		}
+		if i >= len(data) {
+			return false
+		}
+		marker := data[i]
+		i++
+		if marker == 0x00 || marker == 0xD8 {
+			return false
+		}
+		if marker == 0xD9 {
+			return hasSOF && hasSOS
+		}
+		if marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7) {
+			continue
+		}
+		if i+2 > len(data) {
+			return false
+		}
+		segLen := int(data[i])<<8 | int(data[i+1])
+		if segLen < 2 || i+segLen > len(data) {
+			return false
+		}
+		if marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
+			if segLen < 8 {
+				return false
+			}
+			hasSOF = true
+		}
+		if marker == 0xDA {
+			if !hasSOF || segLen < 6 {
+				return false
+			}
+			hasSOS = true
+			i += segLen
+			for i < len(data) {
+				idx := bytes.IndexByte(data[i:], 0xFF)
+				if idx < 0 {
+					return false
+				}
+				i += idx
+				if i+1 >= len(data) {
+					return false
+				}
+				if data[i+1] == 0x00 {
+					i += 2
+					continue
+				}
+				j := i + 1
+				for j < len(data) && data[j] == 0xFF {
+					j++
+				}
+				if j >= len(data) {
+					return false
+				}
+				next := data[j]
+				if next >= 0xD0 && next <= 0xD7 {
+					i = j + 1
+					continue
+				}
+				if next == 0x00 {
+					return false
+				}
+				i = j - 1
+				break
+			}
+			continue
+		}
+		i += segLen
+	}
+	return false
 }

@@ -362,6 +362,7 @@ func parseOCSPSingleResponse(responses []asn1.RawValue, cert, issuer *smx509.Cer
 		return 0, time.Time{}, time.Time{}, time.Time{}, err
 	}
 	matched := 0
+	issuerMismatch := false
 	var hit []asn1.RawValue
 	for _, raw := range responses {
 		fields, ok := asn1Children(raw.Bytes)
@@ -396,12 +397,16 @@ func parseOCSPSingleResponse(responses []asn1.RawValue, cert, issuer *smx509.Cer
 			return 0, time.Time{}, time.Time{}, time.Time{}, err
 		}
 		if !bytes.Equal(nameHash, expectedName) || !bytes.Equal(keyHash, expectedKey) {
-			return 0, time.Time{}, time.Time{}, time.Time{}, fmt.Errorf("OCSP issuer hash mismatch")
+			issuerMismatch = true
+			continue
 		}
 		matched++
 		hit = fields
 	}
 	if matched != 1 {
+		if matched == 0 && issuerMismatch {
+			return 0, time.Time{}, time.Time{}, time.Time{}, fmt.Errorf("OCSP issuer hash mismatch")
+		}
 		return 0, time.Time{}, time.Time{}, time.Time{}, fmt.Errorf("ambiguous OCSP certificate status")
 	}
 	thisUpdate, err := asn1Time(hit[2])

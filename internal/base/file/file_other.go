@@ -16,7 +16,10 @@
 
 package file
 
-import "os"
+import (
+	"os"
+	"path/filepath"
+)
 
 // Open 打开文件，路径替换后已有读取句柄仍有效
 // 入参: name 文件路径
@@ -30,4 +33,11 @@ func Open(name string) (*os.File, error) {
 // 返回: error 替换错误
 func Replace(source, target string) error {
 	return os.Rename(source, target)
+}
+
+// nativePath 转换绝对路径
+// 入参: name 路径
+// 返回: string 绝对路径, error 转换错误
+func nativePath(name string) (string, error) {
+	return filepath.Abs(name)
 }

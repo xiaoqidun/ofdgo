@@ -245,6 +245,12 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 					usage.unsafe = true
 				}
 			}
+			if token.Name.Local == "TextCode" && attr.Name.Local == "Index" && attr.Value != "" && usage != nil {
+				if err := usage.index(s.ctx, attr.Value); err != nil {
+					s.safe = false
+					return false
+				}
+			}
 		}
 		s.stack = append(s.stack, token.Name.Local)
 		s.fonts = append(s.fonts, usage)

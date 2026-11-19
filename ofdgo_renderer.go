@@ -110,6 +110,7 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	next.glyphOutlines = r.glyphOutlines
 	if r.fontSourcesCache != nil && next.fontSourcesCache != nil {
 		next.fontSourcesCache.collections = r.fontSourcesCache.collections
+		next.fontSourcesCache.shared = r.fontSourcesCache.shared
 	}
 	maps.Copy(next.sharedBackendStates, r.sharedBackendStates)
 	seenForkers := make(map[any]bool)
@@ -227,96 +228,44 @@ func (r *Renderer) bindParsedResources(res []*parsedRes) func() {
 // 入参: base 外部基准绘制参数表, res 当前页面局部资源
 // 返回: map[string]*DrawParam 当前作用域绘制参数表
 func (r *Renderer) mergeScopedDrawParams(base map[string]*DrawParam, res []*parsedRes) map[string]*DrawParam {
-	hasLocal := false
+	locals := make([]map[string]*DrawParam, 0, len(res))
 	for _, item := range res {
 		if item != nil && len(item.drawParams.exact) > 0 {
-			hasLocal = true
-			break
+			locals = append(locals, item.drawParams.exact)
 		}
 	}
-	if !hasLocal {
+	if len(locals) == 0 {
 		return base
 	}
-	scoped := maps.Clone(base)
-	if scoped == nil {
-		scoped = make(map[string]*DrawParam)
+	var docIndex *resourceIndex[*DrawParam]
+	var docFallback map[string]*DrawParam
+	if r.Reader != nil {
+		docIndex = r.Reader.docDrawParams
+		docFallback = r.Reader.drawParamCache
 	}
-	for _, item := range res {
-		if item == nil {
-			continue
-		}
-		for _, id := range slices.Sorted(maps.Keys(item.drawParams.exact)) {
-			dp := item.drawParams.exact[id]
-			if r.hasDrawParamOverride(base, id) {
-				continue
-			}
-			for key := range scoped {
-				if key != id && sameResourceID(key, id) {
-					delete(scoped, key)
-				}
-			}
-			scoped[id] = dp
-		}
-	}
-	return scoped
+	return mergeScopedResources(base, docIndex, docFallback, r.Reader != nil, locals)
 }
 
 // mergeScopedComposites 基于外部初始覆盖与文档资源合并当前页面局部复合图元
 // 入参: base 外部基准复合图元表, res 当前页面局部资源
 // 返回: map[string]*CompositeGraphicUnit 当前作用域复合图元表
 func (r *Renderer) mergeScopedComposites(base map[string]*CompositeGraphicUnit, res []*parsedRes) map[string]*CompositeGraphicUnit {
-	hasLocal := false
+	locals := make([]map[string]*CompositeGraphicUnit, 0, len(res))
 	for _, item := range res {
 		if item != nil && len(item.composites.exact) > 0 {
-			hasLocal = true
-			break
+			locals = append(locals, item.composites.exact)
 		}
 	}
-	if !hasLocal {
+	if len(locals) == 0 {
 		return base
 	}
-	scoped := maps.Clone(base)
-	if scoped == nil {
-		scoped = make(map[string]*CompositeGraphicUnit)
+	var docIndex *resourceIndex[*CompositeGraphicUnit]
+	var docFallback map[string]*CompositeGraphicUnit
+	if r.Reader != nil {
+		docIndex = r.Reader.docComposites
+		docFallback = r.Reader.compositeGraphicUnitCache
 	}
-	for _, item := range res {
-		if item == nil {
-			continue
-		}
-		for _, id := range slices.Sorted(maps.Keys(item.composites.exact)) {
-			unit := item.composites.exact[id]
-			if r.hasCompositeOverride(base, id) {
-				continue
-			}
-			for key := range scoped {
-				if key != id && sameResourceID(key, id) {
-					delete(scoped, key)
-				}
-			}
-			scoped[id] = unit
-		}
-	}
-	return scoped
-}
-
-// hasDrawParamOverride 判断外部基准表是否显式注入了覆盖文档定义的绘制参数
-// 入参: base 外部基准表, id 资源标识
-// 返回: bool 是否存在外部显式覆盖
-func (r *Renderer) hasDrawParamOverride(base map[string]*DrawParam, id string) bool {
-	existing, ok := resourceValue(base, id)
-	if !ok || existing == nil {
-		return false
-	}
-	if r.Reader == nil {
-		return true
-	}
-	var docVal *DrawParam
-	if r.Reader.docDrawParams != nil {
-		docVal, _ = r.Reader.docDrawParams.get(id)
-	} else {
-		docVal, _ = resourceValue(r.Reader.drawParamCache, id)
-	}
-	return existing != docVal
+	return mergeScopedResources(base, docIndex, docFallback, r.Reader != nil, locals)
 }
 
 // hasCompositeOverride 判断外部基准表是否显式注入了覆盖文档定义的复合图元
@@ -387,7 +336,7 @@ func (r *Renderer) deviceLineWidth(width float64) float64 {
 	return width
 }
 
-// childRenderer 继承配置并复用字体文件索引与数据，文档匹配结果保持独立
+// childRenderer 继承配置并复用字体文件索引、候选与数据，文档解析与回退状态保持独立
 // 入参: reader 子阅读器
 // 返回: *Renderer 子渲染器
 func (r *Renderer) childRenderer(reader *Reader) *Renderer {
@@ -477,6 +426,63 @@ func (r *Renderer) internalRasterBackend() RasterBackend {
 		return CanvasBackend{}
 	}
 	return nil
+}
+
+// mergeScopedResources 按常数时间索引将页面局部资源合并至基准表，保留外部显式覆盖
+// 入参: base 基准资源表, docIndex 文档级资源索引, docFallback 文档级回退表, hasReader 是否绑定阅读器, locals 各局部资源文件的精确表
+// 返回: map[string]T 合并后的作用域资源表
+func mergeScopedResources[T comparable](base map[string]T, docIndex *resourceIndex[T], docFallback map[string]T, hasReader bool, locals []map[string]T) map[string]T {
+	var zero T
+	totalLocal := 0
+	for _, exact := range locals {
+		totalLocal += len(exact)
+	}
+	scoped := make(map[string]T, len(base)+totalLocal)
+	var baseIdx resourceIndex[T]
+	normKeys := make(map[string][]string, len(base))
+	for key, val := range base {
+		scoped[key] = val
+		baseIdx.put(key, val)
+		if norm := editorResourceID(key); norm != "" {
+			normKeys[norm] = append(normKeys[norm], key)
+		}
+	}
+	var fallbackIdx *resourceIndex[T]
+	for _, exact := range locals {
+		for _, id := range slices.Sorted(maps.Keys(exact)) {
+			val := exact[id]
+			if existing, ok := baseIdx.get(id); ok && existing != zero {
+				if !hasReader {
+					continue
+				}
+				var docVal T
+				if docIndex != nil {
+					docVal, _ = docIndex.get(id)
+				} else if len(docFallback) != 0 {
+					if fallbackIdx == nil {
+						fallbackIdx = &resourceIndex[T]{}
+						for fk, fv := range docFallback {
+							fallbackIdx.put(fk, fv)
+						}
+					}
+					docVal, _ = fallbackIdx.get(id)
+				}
+				if existing != docVal {
+					continue
+				}
+			}
+			if norm := editorResourceID(id); norm != "" {
+				for _, oldKey := range normKeys[norm] {
+					if oldKey != id {
+						delete(scoped, oldKey)
+					}
+				}
+				normKeys[norm] = []string{id}
+			}
+			scoped[id] = val
+		}
+	}
+	return scoped
 }
 
 // layerOrder 获取图层类型的绘制顺序

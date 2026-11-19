@@ -23,8 +23,8 @@
 		<header class="toolbar-frame">
 			<div class="toolbar app-bar">
 				<input id="ofdInput" class="file-input" type="file" accept=".ofd,.pdf" multiple>
-				<input id="fontInput" class="file-input" type="file" accept=".ttf,.otf,.ttc,font/*" multiple>
-				<input id="fontDirectoryInput" class="file-input" type="file" webkitdirectory multiple>
+				<input id="fontInput" class="file-input" type="file" accept=".ttf,.otf,.ttc,.otc,font/*" multiple>
+				<input id="fontDirectoryInput" class="file-input" type="file" accept=".ttf,.otf,.ttc,.otc" webkitdirectory multiple>
 				<div class="tool-group">
 					<button id="ofdButton" class="icon-button" type="button" title="打开"><span class="open-icon"></span></button>
 					<button id="closeButton" class="icon-button" type="button" title="关闭文档" disabled><span class="close-icon"></span></button>
@@ -312,7 +312,7 @@
 				<h2 id="structureTitle" class="form-title">结构标引</h2>
 				<div class="form-row"><label for="structureEntry">标引</label><select id="structureEntry"></select></div>
 				<div id="structureNodeRow" class="form-row"><label for="structureNodeSelect">节点</label><select id="structureNodeSelect"></select></div>
-				<div id="structureActionRow" class="form-row"><label for="structureAction">操作</label><select id="structureAction"><option value="update">修改</option><option value="add">新增</option><option value="bind">绑定</option><option value="delete">删除</option></select></div>
+				<div id="structureActionRow" class="form-row"><label for="structureAction">操作</label><select id="structureAction"><option value="update">修改</option><option value="add">新增</option><option value="bind">绑定</option><option value="updateXML">编辑源码</option><option value="delete">删除</option></select></div>
 				<div id="structureFields">
 					<div id="structureTypeRow" class="form-row"><label for="structureType">类型</label><input id="structureType" type="text"></div>
 					<div class="form-row"><label for="structureName">名称</label><input id="structureName" type="text" required></div>
@@ -324,6 +324,12 @@
 				<div id="structureBinding" hidden>
 					<div class="panel-row"><span>引用</span><div class="panel-actions"><button id="structureSelection" class="button" type="button">选区</button><button id="structureReferenceAdd" class="icon-button" type="button" title="添加引用">+</button></div></div>
 					<div id="structureReferences" class="structure-edit-list"></div>
+				</div>
+				<div id="structureSource" hidden>
+					<div id="structureXMLTypeRow" class="form-row" hidden><label for="structureXMLType">类型</label><input id="structureXMLType" type="text"></div>
+					<div id="structureXMLNamespaceRow" class="form-row" hidden><label for="structureXMLNamespace">命名空间</label><input id="structureXMLNamespace" type="text"></div>
+					<div class="form-row"><label for="structureXMLFile">文件</label><input id="structureXMLFile" type="file" accept=".xml,text/xml,application/xml"></div>
+					<div class="form-row"><label for="structureXML">源码</label><textarea id="structureXML" class="structure-xml" rows="10" spellcheck="false"></textarea></div>
 				</div>
 				<div class="form-actions"><div id="structureStatus" class="form-status"></div><button id="structureCancel" class="button" type="button">取消</button><button id="structureSubmit" class="button" type="submit">确定</button></div>
 			</form>
@@ -575,6 +581,7 @@
 					<label class="form-row"><span>透明</span><span class="form-unit"><input id="annotationOpacity" type="number" min="0" max="100" step="any" value="80" required><span>%</span></span></label>
 				</div>
 				<label class="form-row" data-annotation="watermark"><span>排列</span><select id="annotationTile"><option value="single">单个</option><option value="tile">平铺</option></select></label>
+				<label class="form-row" id="annotationGapRow" data-annotation="watermark" hidden><span>间距</span><span class="form-unit"><input id="annotationGap" type="number" min="0" step="any" value="10" required><span>mm</span></span></label>
 				<div class="form-row" data-annotation="watermark"><label id="annotationPlacementLabel" for="annotationPlacement">位置</label><div class="annotation-placement"><select id="annotationPlacement"><option value="page">居中</option><option value="custom">指定</option></select><button id="annotationPick" class="button" type="button">定位</button></div></div>
 				<label class="form-row" data-annotation="watermark"><span>应用</span><select id="annotationScope"><option value="current">本页</option><option value="all">全部</option><option value="custom">指定</option></select></label>
 				<label class="form-row" data-annotation="note watermark stamp link"><span>页码</span><input id="annotationPages" type="text" required></label>
@@ -642,7 +649,7 @@
 				<h2 id="insertTitle" class="form-title">添加图片</h2>
 				<div class="form-row">
 					<label for="insertImage">图片</label>
-					<input id="insertImage" type="file" accept=".png,.jpg,.jpeg,.bmp,.tif,.tiff,image/png,image/jpeg,image/bmp,image/tiff" required autofocus>
+					<input id="insertImage" type="file" accept=".png,.jpg,.jpeg,.bmp,.tif,.tiff,.gif,.webp,image/png,image/jpeg,image/bmp,image/tiff,image/gif,image/webp" required autofocus>
 				</div>
 				<div id="insertFitRow" class="form-row" hidden>
 					<label for="insertFit">缩放</label>
@@ -692,6 +699,7 @@
 				<div class="form-row"><label for="verifyTokens">时间戳</label><input id="verifyTokens" type="file" accept=".tsr,.tst,.der" multiple></div>
 				<div class="form-row"><label for="verifyCRLs">撤销表</label><input id="verifyCRLs" type="file" accept=".crl,.der" multiple></div>
 				<div class="form-row"><label for="verifyOCSP">OCSP响应</label><input id="verifyOCSP" type="file" accept=".ocsp,.der" multiple></div>
+				<div class="form-row"><label for="verifyTime">验证时间</label><input id="verifyTime" type="datetime-local" step="1"></div>
 				<div class="form-row"><span>要求</span><div class="form-options"><label><input id="verifyRequireTime" type="checkbox"><span>时间戳</span></label><label><input id="verifyRequireRevocation" type="checkbox"><span>撤销检查</span></label></div></div>
 				<div class="form-actions"><div id="verifyStatus" class="form-status"></div><button id="verifyCancel" class="button" type="button">取消</button><button class="button" type="submit">验签</button></div>
 			</form>
@@ -699,6 +707,7 @@
 		<dialog id="credentialsPanel" class="form-dialog security-dialog">
 			<form id="credentialsForm" autocomplete="off">
 				<h2 id="credentialsTitle" class="form-title">解锁文档</h2>
+				<div id="credentialsFileRow" class="form-row" hidden><span>文件</span><output id="credentialsFile" class="credentials-file"></output></div>
 				<div id="credentialsTypeRow" class="form-row"><label for="credentialsType">方式</label><select id="credentialsType"><option value="password">口令</option><option value="certificate">证书</option></select></div>
 				<div id="credentialsUserRow" class="form-row"><label for="credentialsUser">用户</label><input id="credentialsUser" type="text" autocomplete="off" spellcheck="false"></div>
 				<div id="credentialsPasswordRow" class="form-row"><label for="credentialsPassword">口令</label><input id="credentialsPassword" type="password" autocomplete="off" required autofocus></div>
@@ -927,7 +936,11 @@
 				<section class="doc-font-panel">
 					<div class="panel-row">
 						<div id="docFontPanelTitle" class="panel-title compact">文档字体</div>
-						<span id="docFontSummary" class="count-pill">0</span>
+						<div class="panel-actions">
+							<span id="docFontSummary" class="count-pill">0</span>
+							<button id="embedAllFontsButton" class="small-button" type="button" hidden>全嵌</button>
+							<button id="externalizeAllFontsButton" class="small-button" type="button" hidden>全外</button>
+						</div>
 					</div>
 					<div id="docFontList" class="doc-font-list"></div>
 				</section>

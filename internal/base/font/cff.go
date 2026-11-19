@@ -349,6 +349,31 @@ func GetCFFCIDRuneMap(data []byte) map[uint16]rune {
 	return result
 }
 
+// CFFCIDToGID 返回CID编码CFF字体的CID到GID反查表，非CID字体返回nil
+// 入参: data CFF或OpenType字体数据
+// 返回: map[uint16]uint16 CID到GID映射
+func CFFCIDToGID(data []byte) map[uint16]uint16 {
+	cffData := getCFFData(data)
+	if cffData == nil {
+		return nil
+	}
+	numGlyphs, err := parseCFFAndCountGlyphs(cffData)
+	if err != nil || numGlyphs <= 0 {
+		return nil
+	}
+	sids, registry, _, _, ok := getCFFCharsetInfo(cffData, numGlyphs)
+	if !ok || registry == "" {
+		return nil
+	}
+	result := make(map[uint16]uint16, len(sids))
+	for gid, cid := range sids {
+		if gid > 0 && gid <= 0xFFFF && cid >= 0 && cid <= 0xFFFF {
+			result[uint16(cid)] = uint16(gid)
+		}
+	}
+	return result
+}
+
 // cffDict 使用float64存储所有数值，以统一处理整数和实数
 type cffDict map[int][]float64
 
