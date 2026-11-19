@@ -2274,10 +2274,14 @@ body[data-hide-meta] .meta-panel {
 	margin-inline: 12px;
 }
 
+#pageListTitle {
+	margin-bottom: 0;
+}
+
 .navigation-content {
 	flex: 1;
 	min-height: 0;
-	padding: 0 max(2px, calc(12px - var(--scrollbar-width, 0px))) 12px 12px;
+	padding: 12px max(2px, calc(12px - var(--scrollbar-width, 0px))) 12px 12px;
 	scrollbar-gutter: stable;
 	overflow-x: hidden;
 	overflow-y: auto;
@@ -2288,7 +2292,7 @@ body[data-hide-meta] .meta-panel {
 	display: flex;
 	align-items: center;
 	gap: 6px;
-	margin-bottom: 12px;
+	margin-top: 12px;
 }
 
 .page-selection-tools > span {
@@ -3077,13 +3081,12 @@ body[data-hide-meta] .meta-panel {
 	display: flex;
 	flex-shrink: 0;
 	gap: 16px;
-	margin-bottom: 12px;
 	border-bottom: 1px solid var(--line);
 }
 
 .annotation-summary-list {
 	min-height: 0;
-	padding: 0 max(2px, calc(12px - var(--scrollbar-width, 0px))) 12px 12px;
+	padding: 8px max(2px, calc(12px - var(--scrollbar-width, 0px))) 12px 12px;
 	scrollbar-gutter: stable;
 	overflow-x: hidden;
 	overflow-y: auto;
@@ -3188,9 +3191,12 @@ body[data-hide-meta] .meta-panel {
 }
 
 #annotationsPanel > .search-form,
-#searchPanel > .search-form,
+#searchPanel > .search-form {
+	margin: 12px 12px 0;
+}
+
 #searchPanel > .search-tools {
-	margin-inline: 12px;
+	margin: 8px 12px 0;
 }
 
 #searchPanel,
@@ -3205,7 +3211,7 @@ body[data-hide-meta] .meta-panel {
 
 .search-results {
 	min-height: 0;
-	padding: 0 max(2px, calc(12px - var(--scrollbar-width, 0px))) 12px 12px;
+	padding: 8px max(2px, calc(12px - var(--scrollbar-width, 0px))) 12px 12px;
 	scrollbar-gutter: stable;
 	overflow-x: hidden;
 	overflow-y: auto;

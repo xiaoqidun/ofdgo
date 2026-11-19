@@ -1066,7 +1066,8 @@ export function createPageView(context) {
 			const view = context.state.thumbnailWindow;
 			if (!view) return;
 			const visible = !context.el.pageList.hidden && context.state.showPages;
-			const anchor = visible && view.offsets.length > 1 ? pageView.pageWindowAnchor(view) : view.anchor || { index: context.state.pageIndex, offset: 0 };
+			const inset = visible ? pageView.windowInset(view) : Number.parseFloat(getComputedStyle(view.viewport).paddingTop) || 0;
+			const anchor = visible && view.offsets.length > 1 ? pageView.pageWindowAnchor(view) : view.anchor || { index: context.state.pageIndex, offset: -inset };
 			view.rotation = context.state.rotation;
 			view.layout = context.state.pageLayout;
 			view.host.classList.toggle("grouped-pages", context.state.pageLayout > 1);
@@ -1104,7 +1105,7 @@ export function createPageView(context) {
 				offsets[context.state.doc.pages.length] = top;
 				view.offsets = offsets;
 				view.gap = gap;
-				view.total = Math.ceil(offsets.at(-1));
+				view.total = Math.ceil(Math.max(0, offsets.at(-1) - gap));
 				view.host.style.height = `${Math.min(SCROLL_SEGMENT_SIZE, view.total)}px`;
 			};
 			let width = pageView.thumbnailHostWidth() || view.width || 180;
@@ -1146,16 +1147,18 @@ export function createPageView(context) {
 			pageView.syncThumbnailWindow();
 			const view = context.state.thumbnailWindow;
 			if (!view) return;
+			const inset = pageView.windowInset(view);
+			const padBottom = Number.parseFloat(getComputedStyle(view.viewport).paddingBottom) || 0;
 			const top = pageView.pageWindowTop(view);
 			let start = view.offsets[index], end = start + view.heights[index];
-			if (start < top || end > top + context.el.navigationContent.clientHeight) {
+			if (start - inset < top || end + padBottom > top + context.el.navigationContent.clientHeight) {
 				const first = pageView.pageGroupStart(index), last = Math.min(context.state.doc.pageCount - 1, first + context.state.pageLayout - 1);
 				const groupEnd = view.offsets[last] + view.heights[last];
-				if (groupEnd - view.offsets[first] <= context.el.navigationContent.clientHeight) {
+				if (groupEnd - view.offsets[first] + inset + padBottom <= context.el.navigationContent.clientHeight) {
 					start = view.offsets[first];
 					end = groupEnd;
 				}
-				const target = start < top ? Math.floor(start) : Math.min(start, Math.ceil(end - context.el.navigationContent.clientHeight));
+				const target = start - inset < top ? Math.floor(start - inset) : Math.min(start - inset, Math.ceil(end + padBottom - context.el.navigationContent.clientHeight));
 				pageView.syncPageWindow(view, target);
 			}
 		},
