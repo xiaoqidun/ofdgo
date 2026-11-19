@@ -1575,7 +1575,7 @@ el.structureForm.addEventListener("submit", async event => {
 	el.structureStatus.textContent = "";
 	if (action === "importXML" || action === "updateXML") {
 		const xml = el.structureXML.value;
-		if (!xml.trim()) { el.structureStatus.textContent = "请输入 XML 源码"; el.structureXML.focus(); return; }
+		if (!xml.trim()) { el.structureStatus.textContent = "请输入源码"; el.structureXML.focus(); return; }
 		const payload = action === "importXML"
 			? { action, typeId: el.structureXMLType.value, namespace: el.structureXMLNamespace.value, xml }
 			: { action, index, xml };
@@ -12640,7 +12640,7 @@ function openStructureDialog() {
 		el.structureEntry.add(new Option(`${index + 1} · ${structure.root?.name || structure.typeId || structure.namespace}`, index));
 	}
 	el.structureEntry.add(new Option("新建标引", -1));
-	el.structureEntry.add(new Option("导入 XML", -2));
+	el.structureEntry.add(new Option("导入标引", -2));
 	el.structureEntry.value = String((state.doc.structures || []).findIndex(structure => !structure.internal));
 	el.structureAction.value = "update";
 	el.structureXMLFile.value = "";
@@ -12667,7 +12667,7 @@ async function loadStructureXML(index) {
 	el.structureXML.value = "";
 	el.structureXML.disabled = true;
 	el.structureSubmit.disabled = true;
-	el.structureStatus.textContent = "正在读取 XML";
+	el.structureStatus.textContent = "正在读取源码";
 	try {
 		const xml = await callWASM("ofdgoStructureXML", index);
 		if (sequence !== structureXMLSequence || openSeq !== state.openSeq || !el.structureDialog.open) return;
