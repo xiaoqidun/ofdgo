@@ -54,6 +54,7 @@ const (
 // ExistingVerifyOptions用于追加签署前和写出后的验证，可提供已有裸签名的验证证书
 // ReaderOptions用于打开加密包；Encryption为空时继承阅读器的加密策略
 // Compression在计算签名前优化图像，不改写已有签名保护的资源
+// PrepareAllDocuments在多文档包首次签章且OFD.xml未受保护时，为包内其他尚无Signatures声明的文档预先声明空签名列表
 type SignatureWriteOptions struct {
 	Signer                crypto.Signer
 	Certificate           []byte
@@ -65,11 +66,71 @@ type SignatureWriteOptions struct {
 	Time                  time.Time
 	Provider              SignatureProvider
 	Lock                  bool
+	PrepareAllDocuments   bool
 	ExistingVerifyOptions []SignatureVerifyOption
 	ReaderOptions         []ReaderOption
 	Encryption            *EncryptionOptions
 	Compression           CompressionOptions
 	progress              editorProgress
+}
+
+// PrepareDocumentSignatures 为包内尚无Signatures声明的各文档预先声明签名入口，便于多文档依次签署，支持撤销重做
+// 返回: error 依赖冲突、读取或结构错误
+func (e *Editor) PrepareDocumentSignatures() error {
+	return e.PrepareDocumentSignaturesContext(context.Background())
+}
+
+// PrepareDocumentSignaturesContext 为包内各文档预先声明签名入口并响应取消，失败时不改变文档和历史
+// 入参: ctx 取消上下文
+// 返回: error 依赖冲突、读取、结构或取消错误
+func (e *Editor) PrepareDocumentSignaturesContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	reader, err := e.readerContext(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if reader.OFD == nil || len(reader.OFD.DocBody) == 0 {
+		return fmt.Errorf("no docbody found")
+	}
+	pending := false
+	for _, body := range reader.OFD.DocBody {
+		if body.Signatures == "" {
+			pending = true
+			break
+		}
+	}
+	if !pending {
+		return nil
+	}
+	protected, _, err := reader.signatureRemovalProtected(ctx, "", nil, false)
+	if err != nil {
+		return err
+	}
+	if protected["OFD.xml"] {
+		return fmt.Errorf("%w: protected file OFD.xml", ErrSignatureDependency)
+	}
+	ofdData, err := reader.readFileViewContext(ctx, "OFD.xml")
+	if err != nil {
+		return err
+	}
+	parts := make(map[string][]byte)
+	updatedOFD, err := prepareDocumentSignatureEntries(ctx, reader, ofdData, parts, nil)
+	if err != nil {
+		return err
+	}
+	if updatedOFD == nil {
+		return nil
+	}
+	parts["OFD.xml"] = updatedOFD
+	for file, data := range reader.files {
+		if _, changed := parts[file]; !changed {
+			parts[file] = data
+		}
+	}
+	reader.files = parts
+	return e.commitResourceSnapshot(ctx, reader)
 }
 
 // RemoveSignature 移除当前文档版本的指定签名及外观，支持撤销重做
@@ -281,6 +342,79 @@ func (s *signatureIDSequence) next() (string, error) {
 	return "s" + strconv.FormatUint(uint64(*s), 10), nil
 }
 
+// prepareDocumentSignatureEntries 为OFD中缺少Signatures声明的DocBody补充空签名列表与声明
+// 入参: ctx 取消上下文, r 阅读器, ofdData 原OFD.xml内容, overlay 输出覆盖层, customPaths 指定文档的预设路径，可为nil
+// 返回: []byte 更新后的OFD.xml，未改动时为nil, error 读取或编码错误
+func prepareDocumentSignatureEntries(ctx context.Context, r *Reader, ofdData []byte, overlay map[string][]byte, customPaths map[int]string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	emptyList, err := signatureWriteXML("Signatures", Signatures{})
+	if err != nil {
+		return nil, err
+	}
+	current := ofdData
+	changed := false
+	for index, body := range r.OFD.DocBody {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if body.Signatures != "" {
+			continue
+		}
+		listPath := ""
+		if customPaths != nil {
+			listPath = customPaths[index]
+		}
+		if listPath == "" {
+			docDir := signatureDocumentDirectory(ctx, r, index, body)
+			listPath = signatureWriteAvailableInView(r, overlay, path.Join(docDir, "Signs", "Signatures.xml"))
+			overlay[listPath] = bytes.Clone(emptyList)
+		}
+		root, err := parseEditorXMLContext(ctx, current)
+		if err != nil {
+			return nil, err
+		}
+		node := root.childAt("DocBody", index)
+		if node == nil {
+			return nil, fmt.Errorf("missing document body")
+		}
+		current, err = editorXMLSetText(current, node, [][2]string{{"Signatures", "/" + listPath}})
+		if err != nil {
+			return nil, err
+		}
+		changed = true
+	}
+	if !changed {
+		return nil, nil
+	}
+	return current, nil
+}
+
+// signatureDocumentDirectory 推导指定DocBody的签名基础目录
+// 入参: ctx 取消上下文, r 阅读器, index 文档索引, body 文档体
+// 返回: string 文档目录路径
+func signatureDocumentDirectory(ctx context.Context, r *Reader, index int, body DocBody) string {
+	if body.DocRoot != "" {
+		dir := path.Dir(cleanPackagePath(resolveResourcePath("OFD.xml", "", body.DocRoot)))
+		if dir != "" && dir != "." {
+			return dir
+		}
+	}
+	if body.versioned {
+		view := &Reader{Zip: r.Zip, encrypted: r.encryptedSource(), files: r.files, documentIndex: index, resources: r.resources}
+		if view.initRootContext(ctx) == nil {
+			if root, err := view.DocumentRootContext(ctx); err == nil {
+				dir := path.Dir(cleanPackagePath(root))
+				if dir != "" && dir != "." {
+					return dir
+				}
+			}
+		}
+	}
+	return "Doc_" + strconv.Itoa(index)
+}
+
 // removeSignatures 在独立快照中移除签名入口，校验保留依赖后提交历史
 // 入参: ctx 取消上下文, id 签名标识，空值清空
 // 返回: error 标识、依赖、结构或取消错误
@@ -335,16 +469,35 @@ func (e *Editor) removeSignatures(ctx context.Context, id string) error {
 	if id != "" && !removed[id] {
 		return fmt.Errorf("signature not found: %s", id)
 	}
-	protected, dependencies, err := reader.signatureRemovalProtected(ctx, name, removed)
+	listShared := false
+	if reader.versionInfo != nil {
+		listShared, err = reader.versionSignatureListShared(ctx, name)
+		if err != nil {
+			return err
+		}
+	}
+	protected, dependencies, err := reader.signatureRemovalProtected(ctx, name, removed, reader.versionInfo != nil && !listShared)
 	if err != nil {
 		return err
 	}
 	parts := make(map[string][]byte)
 	if reader.versionInfo != nil {
 		if remaining != 0 {
-			return fmt.Errorf("%w: version shares signature list %s", ErrSignatureDependency, name)
+			if listShared {
+				return fmt.Errorf("%w: version shares signature list %s", ErrSignatureDependency, name)
+			}
+			if dependencies[name] {
+				return fmt.Errorf("%w: retained signature protects %s", ErrSignatureDependency, name)
+			}
+			for file := range candidates {
+				if dependencies[file] {
+					return fmt.Errorf("%w: retained signature protects %s", ErrSignatureDependency, file)
+				}
+			}
+			parts[name] = editorPatchXML(data, patches)
+		} else {
+			candidates[name] = true
 		}
-		candidates[name] = true
 		used, err := reader.versionFileDependencies(ctx, reader.documentRoot, nil, nil)
 		if err != nil {
 			return err
@@ -457,10 +610,56 @@ func (r *Reader) signatureRemovalFiles(ctx context.Context, name string) (map[st
 	return owned, protected, ctx.Err()
 }
 
+// versionSignatureListShared 精确判断当前版本的签名列表是否实际被其他版本、主入口或其他文档共享
+// 入参: ctx 取消上下文, name 签名列表包内路径
+// 返回: bool 是否实际共享, error 读取或取消错误
+func (r *Reader) versionSignatureListShared(ctx context.Context, name string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	clean := cleanPackagePath(name)
+	if r.OFD.DocBody[r.documentIndex].DocRoot != "" {
+		return true, nil
+	}
+	versions, err := r.DocumentVersionsContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, version := range versions {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if r.versionInfo != nil && version.ID == r.versionInfo.ID {
+			continue
+		}
+		for _, file := range version.Files {
+			if cleanPackagePath(file.Location) == clean {
+				return true, nil
+			}
+		}
+	}
+	var otherIndexes []int
+	for index := range r.DocumentCount() {
+		if index != r.documentIndex {
+			otherIndexes = append(otherIndexes, index)
+		}
+	}
+	if len(otherIndexes) != 0 {
+		otherFiles, err := r.documentFiles(ctx, otherIndexes...)
+		if err != nil {
+			return false, err
+		}
+		if otherFiles[clean] {
+			return true, nil
+		}
+	}
+	return false, ctx.Err()
+}
+
 // signatureRemovalProtected 汇总保留签名的原文及其他文档的签名入口，不要求证书或私钥
-// 入参: ctx 取消上下文, selected 当前签名列表, removed 待移除标识
+// 入参: ctx 取消上下文, selected 当前签名列表, removed 待移除标识, allowCurrentVersion 是否允许修改当前版本独享的签名列表
 // 返回: map[string]bool 保留路径, map[string]bool 非共享的摘要保护路径, error 读取、结构或取消错误
-func (r *Reader) signatureRemovalProtected(ctx context.Context, selected string, removed map[string]bool) (map[string]bool, map[string]bool, error) {
+func (r *Reader) signatureRemovalProtected(ctx context.Context, selected string, removed map[string]bool, allowCurrentVersion bool) (map[string]bool, map[string]bool, error) {
 	protected := make(map[string]bool)
 	dependencies := make(map[string]bool)
 	retained := make(map[string]bool)
@@ -469,7 +668,7 @@ func (r *Reader) signatureRemovalProtected(ctx context.Context, selected string,
 			continue
 		}
 		name := signatureRefPath("OFD.xml", body.Signatures)
-		current := index == r.documentIndex && r.versionInfo == nil
+		current := index == r.documentIndex && (r.versionInfo == nil || allowCurrentVersion)
 		if !current {
 			protected[name] = true
 		}
@@ -526,17 +725,27 @@ func signatureWriteOutput(ctx context.Context, r *Reader, writer io.Writer, opti
 			return 0, err
 		}
 	}
-	if err := r.indexPackageContext(ctx); err != nil {
+	if r.OFD == nil {
+		if err := r.initRootContext(ctx); err != nil {
+			return 0, err
+		}
+	} else if err := r.indexPackageContext(ctx); err != nil {
 		return 0, err
 	}
 	baseZip := r.Zip
+	encSource := r.encryptedSource()
 	var overlay map[string][]byte
-	if options.Compression.Mode != CompressionUnchanged {
+	hasSignatures, err := r.hasOutputSignatures(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if options.Compression.Mode != CompressionUnchanged && !hasSignatures {
 		parts, err := signatureWritePartsContext(ctx, r)
 		if err != nil {
 			return 0, err
 		}
 		baseZip = nil
+		encSource = nil
 		overlay = parts
 	} else {
 		overlay = make(map[string][]byte, len(r.files)+8)
@@ -554,14 +763,14 @@ func signatureWriteOutput(ctx context.Context, r *Reader, writer io.Writer, opti
 	if err := options.progress.report("sign", 0, 1); err != nil {
 		return 0, err
 	}
-	if err := signatureWriteOverlayPackage(ctx, baseZip, overlay, r.resources, options, r.DocumentIndex()); err != nil {
+	if err := signatureWriteOverlayPackage(ctx, baseZip, encSource, overlay, r.resources, options, r.DocumentIndex()); err != nil {
 		return 0, err
 	}
 	if err := options.progress.report("sign", 1, 1); err != nil {
 		return 0, err
 	}
 	if encryption != nil {
-		encReader := &Reader{Zip: baseZip, files: overlay, resources: r.resources}
+		encReader := &Reader{Zip: baseZip, encrypted: encSource, files: overlay, resources: r.resources}
 		if err := encReader.indexPackageContext(ctx); err != nil {
 			return 0, err
 		}
@@ -580,7 +789,7 @@ func signatureWriteOutput(ctx context.Context, r *Reader, writer io.Writer, opti
 	}
 	var count int64
 	output := convertWriter{ctx: ctx, writer: writer, count: &count}
-	err := signatureWriteZIPOverlayTo(ctx, output, baseZip, overlay, options.Compression)
+	err = signatureWriteZIPOverlayTo(ctx, output, baseZip, encSource, overlay, options.Compression)
 	return count, err
 }
 
@@ -606,16 +815,16 @@ func signatureWritePartsContext(ctx context.Context, r *Reader) (map[string][]by
 }
 
 // signatureWriteOverlayPackage 基于只读底包与增量覆盖层流式计算摘要、生成签名并完成回验
-// 入参: ctx 取消上下文, baseZip 源只读ZIP归档, overlay 修改与新增文件覆盖层, resources 资源选项, options 签署选项, index 文档索引
+// 入参: ctx 取消上下文, baseZip 源只读ZIP归档, encSource 加密按需解密源, overlay 修改与新增文件覆盖层, resources 资源选项, options 签署选项, index 文档索引
 // 返回: error 签署或取消错误
-func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, overlay map[string][]byte, resources *Resources, options SignatureWriteOptions, index int) error {
+func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encSource *encryptedPackageSource, overlay map[string][]byte, resources *Resources, options SignatureWriteOptions, index int) error {
 	if err := options.Compression.Validate(); err != nil {
 		return err
 	}
 	if options.Mode != SignatureAppend && options.Mode != SignatureReplace {
 		return fmt.Errorf("unsupported signature write mode")
 	}
-	r := &Reader{Zip: baseZip, files: overlay, documentIndex: index, resources: resources}
+	r := &Reader{Zip: baseZip, encrypted: encSource, files: overlay, documentIndex: index, resources: resources}
 	if err := r.initRootContext(ctx); err != nil {
 		return err
 	}
@@ -632,25 +841,49 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, over
 		return err
 	}
 	digestCache := make(map[[2]string][]byte, len(r.fileNames)+8)
-	verifyOptions := append([]SignatureVerifyOption{withSignatureDigestCache(digestCache)}, options.ExistingVerifyOptions...)
-	verifyOptions = append(verifyOptions, WithSignatureCert(identity.cert.Raw))
-	protected, err := signatureWriteProtectedNames(ctx, r, baseZip, overlay, resources, verifyOptions)
+	var parsedExisting signatureVerifyOptions
+	for _, opt := range options.ExistingVerifyOptions {
+		if opt != nil {
+			opt(&parsedExisting)
+		}
+	}
+	existingVerifyOptions := append([]SignatureVerifyOption{withSignatureDigestCache(digestCache)}, options.ExistingVerifyOptions...)
+	existingVerifyOptions = append(existingVerifyOptions, WithSignatureCert(identity.cert.Raw))
+	verifyOptions := slices.Clone(existingVerifyOptions)
+	if len(options.Intermediates) != 0 {
+		verifyOptions = append(verifyOptions, WithSignatureCerts(options.Intermediates...))
+	}
+	if len(parsedExisting.TrustCerts) != 0 && len(options.TrustRoots) != 0 {
+		verifyOptions = append(verifyOptions, WithSignatureTrustCerts(options.TrustRoots...))
+	}
+	protected, err := signatureWriteProtectedNames(ctx, r, baseZip, encSource, overlay, resources, verifyOptions)
 	if err != nil {
 		return err
 	}
-	if options.Compression.Mode != CompressionUnchanged && baseZip == nil && doc.Signatures == "" && len(protected) == 0 {
+	if options.Compression.Mode != CompressionUnchanged && baseZip == nil && encSource == nil && doc.Signatures == "" && len(protected) == 0 {
 		images, sizes, err := r.compressionImagePlan(ctx, options.Compression)
 		if err != nil {
 			return err
 		}
-		optimizer := &Editor{output: &outputOptimization{ctx: ctx, options: options.Compression, sizes: sizes, images: images}}
+		optimizer := &Editor{backends: defaultRenderBackends(), runtimeResources: resources, source: &editorSource{reader: r}, output: &outputOptimization{ctx: ctx, options: options.Compression, sizes: sizes, images: images}}
 		optimizer.OnWriteProgress = func(stage string, completed, total int) error {
 			return options.progress.report(stage, completed, total)
 		}
-		removed := make(map[string]bool)
-		if err := optimizer.compressResourceParts(overlay, nil, removed); err != nil {
+		optParts := make(map[string][]byte)
+		removed, err := optimizer.compactResourceReferences(optParts, r, editorProgress(optimizer.OnWriteProgress), nil, nil)
+		if err != nil {
 			return err
 		}
+		if removed == nil {
+			removed = make(map[string]bool)
+		}
+		if err := optimizer.compressResourceReferences(optParts, r, removed, nil); err != nil {
+			return err
+		}
+		if err := optimizer.compactPackageFonts(ctx, optParts, removed, nil); err != nil {
+			return err
+		}
+		maps.Copy(overlay, optParts)
 		for name := range overlay {
 			if removed[cleanPackagePath(name)] {
 				delete(overlay, name)
@@ -689,7 +922,7 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, over
 		return err
 	}
 	if options.Mode == SignatureAppend && oldCount > 0 {
-		reports, err := r.VerifyDocumentSignaturesContext(ctx, index, verifyOptions...)
+		reports, err := r.VerifyDocumentSignaturesContext(ctx, index, existingVerifyOptions...)
 		if err != nil {
 			return err
 		}
@@ -714,21 +947,43 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, over
 	modifiedNames := make(map[string][]byte)
 	if doc.Signatures == "" {
 		listPath = signatureWriteAvailableInView(r, overlay, path.Join(r.RootDir, "Signs", "Signatures.xml"))
-		root, err := parseEditorXML(originalOFDData)
+		if options.PrepareAllDocuments && len(r.OFD.DocBody) > 1 && !protected["OFD.xml"] {
+			updatedOFD, err := prepareDocumentSignatureEntries(ctx, r, originalOFDData, overlay, map[int]string{index: listPath})
+			if err != nil {
+				return err
+			}
+			if updatedOFD != nil {
+				modifiedNames["OFD.xml"] = originalOFDData
+				overlay["OFD.xml"] = updatedOFD
+				deleteSignatureDigestCachePath(digestCache, "OFD.xml")
+			}
+		} else {
+			root, err := parseEditorXML(originalOFDData)
+			if err != nil {
+				return err
+			}
+			body := root.childAt("DocBody", index)
+			if body == nil {
+				return fmt.Errorf("missing document body")
+			}
+			updatedOFD, err := editorXMLSetText(originalOFDData, body, [][2]string{{"Signatures", "/" + listPath}})
+			if err != nil {
+				return err
+			}
+			modifiedNames["OFD.xml"] = originalOFDData
+			overlay["OFD.xml"] = updatedOFD
+			deleteSignatureDigestCachePath(digestCache, "OFD.xml")
+		}
+	} else if options.PrepareAllDocuments && len(r.OFD.DocBody) > 1 && !protected["OFD.xml"] {
+		updatedOFD, err := prepareDocumentSignatureEntries(ctx, r, originalOFDData, overlay, nil)
 		if err != nil {
 			return err
 		}
-		body := root.childAt("DocBody", index)
-		if body == nil {
-			return fmt.Errorf("missing document body")
+		if updatedOFD != nil {
+			modifiedNames["OFD.xml"] = originalOFDData
+			overlay["OFD.xml"] = updatedOFD
+			deleteSignatureDigestCachePath(digestCache, "OFD.xml")
 		}
-		updatedOFD, err := editorXMLSetText(originalOFDData, body, [][2]string{{"Signatures", "/" + listPath}})
-		if err != nil {
-			return err
-		}
-		modifiedNames["OFD.xml"] = originalOFDData
-		overlay["OFD.xml"] = updatedOFD
-		deleteSignatureDigestCachePath(digestCache, "OFD.xml")
 	}
 	if options.Mode == SignatureReplace {
 		list.List = nil
@@ -795,7 +1050,7 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, over
 			return fmt.Errorf("another document signature protects %s", created)
 		}
 	}
-	scoped := &Reader{Zip: baseZip, files: overlay, documentIndex: index, resources: resources}
+	scoped := &Reader{Zip: baseZip, encrypted: encSource, files: overlay, documentIndex: index, resources: resources}
 	if err := scoped.initRootContext(ctx); err != nil {
 		return err
 	}
@@ -901,7 +1156,7 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, over
 	if err != nil {
 		return err
 	}
-	check := &Reader{Zip: baseZip, files: overlay, resources: resources}
+	check := &Reader{Zip: baseZip, encrypted: encSource, files: overlay, resources: resources}
 	if err := check.initRootContext(ctx); err != nil {
 		return err
 	}
@@ -931,10 +1186,10 @@ func deleteSignatureDigestCachePath(cache map[[2]string][]byte, name string) {
 	}
 }
 
-// signatureWriteProtectedNames 校验并收集其他文档签名的全部受保护路径，不整块克隆大附件内容
-// 入参: ctx 取消上下文, r 包阅读器, baseZip 底包归档, overlay 覆盖层, resources 资源选项, options 既有签名的验证选项
+// signatureWriteProtectedNames 校验并收集其他文档及历史版本签名的全部受保护路径，不整块克隆大附件内容
+// 入参: ctx 取消上下文, r 包阅读器, baseZip 底包归档, encSource 加密按需解密源, overlay 覆盖层, resources 资源选项, options 既有签名的验证选项
 // 返回: map[string]bool 不可改写的包内路径集合, error 读取或验签错误
-func signatureWriteProtectedNames(ctx context.Context, r *Reader, baseZip *zip.Reader, overlay map[string][]byte, resources *Resources, options []SignatureVerifyOption) (map[string]bool, error) {
+func signatureWriteProtectedNames(ctx context.Context, r *Reader, baseZip *zip.Reader, encSource *encryptedPackageSource, overlay map[string][]byte, resources *Resources, options []SignatureVerifyOption) (map[string]bool, error) {
 	protected := make(map[string]bool)
 	retain := func(view *Reader, name string) error {
 		clean := cleanPackagePath(name)
@@ -947,28 +1202,27 @@ func signatureWriteProtectedNames(ctx context.Context, r *Reader, baseZip *zip.R
 		protected[clean] = true
 		return nil
 	}
-	for index := range r.OFD.DocBody {
-		if index == r.documentIndex {
-			continue
-		}
-		view := &Reader{Zip: baseZip, files: overlay, documentIndex: index, selectedVersion: new(string), resources: resources}
+	collectView := func(view *Reader, index int) error {
 		if err := view.initRootContext(ctx); err != nil {
-			return nil, err
+			return err
 		}
 		doc, err := view.docStructureContext(ctx)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if doc.Signatures == "" {
-			continue
+			return nil
 		}
 		reports, err := view.VerifyDocumentSignaturesContext(ctx, index, options...)
 		if err != nil {
-			return nil, err
+			return err
+		}
+		if len(reports) == 0 {
+			return nil
 		}
 		listPath := view.ResPath(doc.Signatures)
 		if err := retain(view, listPath); err != nil {
-			return nil, err
+			return err
 		}
 		for _, report := range reports {
 			if !report.Valid {
@@ -976,16 +1230,16 @@ func signatureWriteProtectedNames(ctx context.Context, r *Reader, baseZip *zip.R
 				if reason == "" {
 					reason = "signature verification failed"
 				}
-				return nil, fmt.Errorf("cannot preserve document %d signature %s: %s", index, report.ID, reason)
+				return fmt.Errorf("cannot preserve document %d signature %s: %s", index, report.ID, reason)
 			}
 			sigPath := signatureRefPath(listPath, report.BaseLoc)
 			sigData, err := view.readFileViewContext(ctx, sigPath)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			file, err := parseSignatureFile(sigData)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			names := []string{sigPath, signatureRefPath(sigPath, file.SignedValue)}
 			if file.SignedInfo.Seal.BaseLoc != "" {
@@ -996,6 +1250,35 @@ func signatureWriteProtectedNames(ctx context.Context, r *Reader, baseZip *zip.R
 			}
 			for _, name := range names {
 				if err := retain(view, name); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	for index, body := range r.OFD.DocBody {
+		if index == r.documentIndex || body.Signatures == "" {
+			continue
+		}
+		if body.DocRoot != "" {
+			mainView := &Reader{Zip: baseZip, encrypted: encSource, files: overlay, documentIndex: index, selectedVersion: new(string), resources: resources}
+			if err := collectView(mainView, index); err != nil {
+				return nil, err
+			}
+		}
+		if body.versioned {
+			baseView := &Reader{Zip: baseZip, encrypted: encSource, files: overlay, documentIndex: index, resources: resources}
+			if err := baseView.initRootContext(ctx); err != nil {
+				return nil, err
+			}
+			versions, err := baseView.DocumentVersionsContext(ctx)
+			if err != nil {
+				return nil, err
+			}
+			for _, version := range versions {
+				versionID := version.ID
+				verView := &Reader{Zip: baseZip, encrypted: encSource, files: overlay, documentIndex: index, selectedVersion: &versionID, resources: resources}
+				if err := collectView(verView, index); err != nil {
 					return nil, err
 				}
 			}
@@ -1088,9 +1371,9 @@ func signatureWriteAvailableInView(view *Reader, overlay map[string][]byte, name
 }
 
 // signatureWriteZIPOverlayTo 写出已回验包内容，对未修改ZIP源条目采用OpenRaw与CreateRaw原样直通
-// 入参: ctx 取消上下文, writer 输出目标, baseZip 源ZIP归档, overlay 覆盖与新增文件, compression 压缩配置
+// 入参: ctx 取消上下文, writer 输出目标, baseZip 源ZIP归档, encSource 加密按需解密源, overlay 覆盖与新增文件, compression 压缩配置
 // 返回: error 输出或取消错误
-func signatureWriteZIPOverlayTo(ctx context.Context, writer io.Writer, baseZip *zip.Reader, overlay map[string][]byte, compression CompressionOptions) error {
+func signatureWriteZIPOverlayTo(ctx context.Context, writer io.Writer, baseZip *zip.Reader, encSource *encryptedPackageSource, overlay map[string][]byte, compression CompressionOptions) error {
 	all := make(map[string]*zip.File)
 	namesSet := make(map[string]bool, len(overlay))
 	if baseZip != nil {
@@ -1101,6 +1384,10 @@ func signatureWriteZIPOverlayTo(ctx context.Context, writer io.Writer, baseZip *
 			clean := cleanPackagePath(zf.Name)
 			all[clean] = zf
 			namesSet[clean] = true
+		}
+	} else if encSource != nil {
+		for _, name := range encSource.names() {
+			namesSet[name] = true
 		}
 	}
 	for name := range overlay {
@@ -1124,53 +1411,76 @@ func signatureWriteZIPOverlayTo(ctx context.Context, writer io.Writer, baseZip *
 			}
 			continue
 		}
-		zf, ok := all[name]
-		if !ok {
-			return fmt.Errorf("missing package file: %s", name)
-		}
-		if compression.Mode == CompressionUnchanged {
-			rawReader, err := zf.OpenRaw()
+		if zf, ok := all[name]; ok {
+			if compression.Mode == CompressionUnchanged {
+				rawReader, err := zf.OpenRaw()
+				if err != nil {
+					return err
+				}
+				fh := zf.FileHeader
+				fh.Name = name
+				fh.Comment = ""
+				fh.Flags &^= 0x800
+				fh.NonUTF8 = false
+				prepareOutputHeader(&fh, zf.Method, zf.UncompressedSize64, zf.CompressedSize64, zf.CRC32)
+				rawWriter, err := w.CreateRaw(&fh)
+				if err != nil {
+					return err
+				}
+				if copyBuf == nil {
+					copyBuf = make([]byte, 32<<10)
+				}
+				if _, err := io.CopyBuffer(rawWriter, imageInput{ReadCloser: io.NopCloser(rawReader), ctx: ctx}, copyBuf); err != nil {
+					return err
+				}
+				continue
+			}
+			rc, err := zf.Open()
 			if err != nil {
 				return err
 			}
-			fh := zf.FileHeader
-			fh.Name = name
-			fh.Comment = ""
-			fh.Flags &^= 0x800
-			fh.NonUTF8 = false
-			prepareOutputHeader(&fh, zf.Method, zf.UncompressedSize64, zf.CompressedSize64, zf.CRC32)
-			rawWriter, err := w.CreateRaw(&fh)
+			f, err := w.Create(name)
 			if err != nil {
+				_ = rc.Close()
 				return err
 			}
 			if copyBuf == nil {
 				copyBuf = make([]byte, 32<<10)
 			}
-			if _, err := io.CopyBuffer(rawWriter, imageInput{ReadCloser: io.NopCloser(rawReader), ctx: ctx}, copyBuf); err != nil {
-				return err
+			_, copyErr := io.CopyBuffer(f, imageInput{ReadCloser: rc, ctx: ctx}, copyBuf)
+			closeErr := rc.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			if closeErr != nil {
+				return closeErr
 			}
 			continue
 		}
-		rc, err := zf.Open()
-		if err != nil {
-			return err
+		if encSource != nil && encSource.has(name) {
+			rc, err := encSource.open(name)
+			if err != nil {
+				return err
+			}
+			f, err := w.Create(name)
+			if err != nil {
+				_ = rc.Close()
+				return err
+			}
+			if copyBuf == nil {
+				copyBuf = make([]byte, 32<<10)
+			}
+			_, copyErr := io.CopyBuffer(f, imageInput{ReadCloser: rc, ctx: ctx}, copyBuf)
+			closeErr := rc.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			continue
 		}
-		f, err := w.Create(name)
-		if err != nil {
-			_ = rc.Close()
-			return err
-		}
-		if copyBuf == nil {
-			copyBuf = make([]byte, 32<<10)
-		}
-		_, copyErr := io.CopyBuffer(f, imageInput{ReadCloser: rc, ctx: ctx}, copyBuf)
-		closeErr := rc.Close()
-		if copyErr != nil {
-			return copyErr
-		}
-		if closeErr != nil {
-			return closeErr
-		}
+		return fmt.Errorf("missing package file: %s", name)
 	}
 	if err := w.Close(); err != nil {
 		return err

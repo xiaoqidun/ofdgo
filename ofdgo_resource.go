@@ -942,6 +942,8 @@ func (r *Reader) resourceCatalogMode(ctx context.Context, retain bool) (*resourc
 				item.Size = uint64(len(data))
 			} else if file, ok := r.packageFile(item.File); ok {
 				item.Size = file.UncompressedSize64
+			} else if size, ok := r.encryptedSource().size(item.File); ok {
+				item.Size = size
 			} else {
 				item.Missing = true
 			}

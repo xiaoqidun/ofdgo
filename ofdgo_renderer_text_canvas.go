@@ -15,6 +15,10 @@
 package ofdgo
 
 import (
+	"image/color"
+	"math"
+	"slices"
+
 	"github.com/tdewolff/canvas"
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
@@ -79,7 +83,14 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		sizeMM *= scale
 	}
 	sizePt := sizeMM * ptPerMM
-	fillColor := colorWithAlpha(canvas.Black, obj.Alpha)
+	compiler, isCompiler := ctx.Renderer.(*canvasPageCompiler)
+	objAlpha := fillAlphaByte(obj.Alpha)
+	useGroup := isCompiler && !r.textOnly && shouldFill && shouldStroke && objAlpha < 255
+	styleAlpha := obj.Alpha
+	if useGroup {
+		styleAlpha = nil
+	}
+	fillColor := colorWithAlpha(canvas.Black, styleAlpha)
 	var fillPaint any = fillColor
 	var fillPattern *PatternPaint
 	var fillColorNode *FillColor
@@ -93,7 +104,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		fillColorNode = obj.FillColor
 	}
 	if fillColorNode != nil {
-		fillColorNode = withFillAlpha(fillColorNode, obj.Alpha)
+		fillColorNode = withFillAlpha(fillColorNode, styleAlpha)
 		fillColor = r.parseFillColor(fillColorNode)
 		fillPaint = r.parseFillPaint(fillColorNode, bx, by, pageH)
 		fillPattern = parsePatternPaint(fillColorNode)
@@ -105,19 +116,25 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	fillPaint, shadingClip, fillView := resolveShdPaint(ctx, fillPaint)
 	fillClip := r.intersectCachedClipPath(clipPath, shadingClip)
 	var strokeStyle pathStyle
+	var localStrokeWidth, localDashOffset float64
+	var localDashPattern []float64
 	strokeClip := clipPath
 	strokeView := canvas.Identity
 	if shouldStroke {
-		strokeStyle = r.newPathStyle(defaults, bx, by, pageH, obj.Alpha)
+		strokeStyle = r.newPathStyle(defaults, bx, by, pageH, styleAlpha)
 		if dp != nil {
-			strokeStyle.applyDrawParam(r, dp, bx, by, pageH, obj.Alpha)
+			strokeStyle.applyDrawParam(r, dp, bx, by, pageH, styleAlpha)
 		}
 		strokeObject := obj.pathStyle()
 		strokeObject.FillColor = nil
+		strokeObject.Alpha = styleAlpha
 		strokeStyle.applyPathObject(r, strokeObject, bx, by, pageH)
 		if strokeStyle.strokePaint == nil {
 			strokeStyle.strokePaint = canvas.Transparent
 		}
+		localStrokeWidth = strokeStyle.lineWidth
+		localDashOffset = strokeStyle.dashOffset
+		localDashPattern = slices.Clone(strokeStyle.dashPattern)
 		strokeStyle.scale(ctm)
 		strokeStyle.lineWidth = r.deviceLineWidth(strokeStyle.lineWidth)
 		transformShdPaint(strokeStyle.strokePaint, parentCTM, bx, by, pageH, boundaryInCTM)
@@ -144,7 +161,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	embeddedFont := false
 	if of := r.fontDefinition(fontID); of != nil {
 		embeddedFont = of.FontFile != ""
-		if syntheticBold && !embeddedFont && basefont.NoSyntheticBold(of.FontName, of.FamilyName) {
+		if syntheticBold && basefont.NoSyntheticBold(of.FontName, of.FamilyName) {
 			syntheticBold = false
 		}
 		if of.Bold {
@@ -185,6 +202,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	}
 	face := ff.Face(sizePt, fillPaint, fontStyle, canvas.FontNormal)
 	face.Hinting = 0
+	if face.FauxBold != 0 && sfntTablesBold(face.Font.Tables) {
+		face.FauxBold = 0
+	}
 	recoverBaseline := len(obj.TextCode) > 0 && obj.TextCode[0].Y == ""
 	var metrics canvas.FontMetrics
 	if textRun != nil || recoverBaseline {
@@ -209,7 +229,17 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	glyphTransforms := r.textObjectGlyphTransforms(fontID, obj)
 	_, shadedFill := fillPaint.(canvas.Gradient)
 	pdfOutput, _ := ctx.Renderer.(*pdfRenderer)
-	pdfText := pdfOutput != nil && !r.textOnly && shouldFill && !shouldStroke && fillPattern == nil && !shadedFill && face.FauxBold == 0 && face.FauxItalic == 0
+	var pdfBoldColor color.RGBA
+	pdfFauxBold := false
+	fauxBoldOK := face.FauxBold == 0
+	if !fauxBoldOK && face.FauxBold > 0 && (!useTextMatrix || glyphMatrix.IsSimilarity()) && hScale == 1 {
+		if c, ok := pdfOpaqueSolidColor(fillPaint); ok {
+			pdfBoldColor = c
+			pdfFauxBold = true
+			fauxBoldOK = true
+		}
+	}
+	pdfText := pdfOutput != nil && !r.textOnly && shouldFill && !shouldStroke && fillPattern == nil && !shadedFill && fauxBoldOK
 	if pdfText {
 		view := canvas.Identity
 		if useTextMatrix {
@@ -221,13 +251,64 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		if len(pdfOutput.text) == 0 {
 			pdfOutput.text = append(pdfOutput.text, codecpdf.TextPage{})
 		}
-		defer pdfOutput.preserveText(pdfOutput.text[len(pdfOutput.text)-1].Count, effectiveObj.Text())
+		firstBT := pdfOutput.text[len(pdfOutput.text)-1].Count
+		defer pdfOutput.preserveText(firstBT, r.pdfActualText(effectiveObj, fontID, face))
+		if pdfFauxBold {
+			boldScale := 1.0
+			if useTextMatrix {
+				boldScale = math.Sqrt(math.Abs(glyphMatrix.Det()))
+			}
+			boldWidth := 2 * face.FauxBold * face.Size * boldScale
+			defer pdfOutput.preserveFauxBold(firstBT, boldWidth, pdfBoldColor)
+		}
 	}
+	if useGroup {
+		compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupBegin, GroupAlpha: objAlpha})
+		defer func() {
+			compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupEnd})
+		}()
+	}
+	nonUniformStroke := shouldStroke && !matrixIsSimilarity(ctm)
 	codePos := 0
 	textPos := 0
 	var lines textLineScanner
 	if textRun != nil {
 		lines = newTextLineScanner(effectiveObj)
+	}
+	var batch []pdfGlyphItem
+	var batchIDs map[uint16]bool
+	var batchY, batchCanvasX, batchCanvasY float64
+	flushBatch := func() {
+		if len(batch) == 0 {
+			return
+		}
+		ctx.SetFill(fillPaint)
+		ctx.SetStrokeColor(canvas.Transparent)
+		text, err := pdfOutput.glyphsText(face, batch, hScale)
+		batch = batch[:0]
+		clear(batchIDs)
+		if err != nil {
+			r.renderError = err
+			return
+		}
+		needTransform := useTextMatrix || hScale != 1 || face.FauxItalic != 0
+		if needTransform {
+			ctx.Push()
+			ctx.Translate(batchCanvasX, batchCanvasY)
+			if useTextMatrix {
+				ctx.ComposeView(glyphMatrix)
+			}
+			if hScale != 1 {
+				ctx.Scale(hScale, 1)
+			}
+			if face.FauxItalic != 0 {
+				ctx.ComposeView(canvas.Identity.Shear(face.FauxItalic, 0))
+			}
+			ctx.DrawText(0, 0, text)
+			ctx.Pop()
+		} else {
+			ctx.DrawText(batchCanvasX, batchCanvasY, text)
+		}
 	}
 	for _, tc := range obj.TextCode {
 		if textRun != nil && lines.next(tc) {
@@ -258,6 +339,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					ctx.Pop()
 					return
 				}
+			}
+			if tc.Index != "" && glyph.Text == "" && len(runes) == len(glyphs) {
+				glyph.Text = string(runes[i])
 			}
 			str := glyph.Text
 			drawAsGlyphPath := drawAsPath || glyph.GlyphID >= 0
@@ -326,8 +410,16 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					ctx.SetStrokeColor(canvas.Transparent)
 					r.drawShdPath(ctx, applyClipPath(path.Copy(), fillClip), fillView)
 				}
-				path = r.strokeDashedCanvasPath(path, strokeStyle.lineWidth, strokeStyle.lineCap, strokeStyle.lineJoin, strokeStyle.dashOffset, strokeStyle.dashPattern, false)
-				path = r.applyCachedClipPath(path, strokeClip)
+				if nonUniformStroke {
+					localTransform := canvas.Identity.Rotate(-float64(obj.CharDirection)).Scale(scaleX, 1)
+					localGlyph := glyphPath.Copy().Transform(localTransform)
+					localStroked := r.strokeDashedCanvasPath(localGlyph, r.localStrokeWidth(localStrokeWidth, ctm), strokeStyle.lineCap, strokeStyle.lineJoin, localDashOffset, localDashPattern, false)
+					pageTransform := canvas.Identity.Translate(canvasX, canvasY).Mul(textMatrix(ctm))
+					path = r.applyCachedClipPath(localStroked.Transform(pageTransform), strokeClip)
+				} else {
+					path = r.strokeDashedCanvasPath(path, strokeStyle.lineWidth, strokeStyle.lineCap, strokeStyle.lineJoin, strokeStyle.dashOffset, strokeStyle.dashPattern, false)
+					path = r.applyCachedClipPath(path, strokeClip)
+				}
 				if strokeStyle.strokePattern != nil {
 					r.renderPattern(ctx, strokeStyle.strokePattern, pageH, path, patternOrigin)
 				} else {
@@ -338,6 +430,41 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				continue
 			}
 			if fillPaint != nil || fillPattern != nil {
+				if pdfText && obj.CharDirection == 0 && face.MmPerEm > 0 && hScale != 0 {
+					if gid, ok := pdfSingleGlyphID(face, glyph); ok {
+						canJoin := len(batch) == 0
+						if !canJoin && math.Abs(cy-batchY) <= 1e-9 {
+							unitScale := hScale * face.MmPerEm
+							delta := cx - batch[0].x
+							target := math.Round(delta / unitScale)
+							cffOK := !face.Font.IsCFF || batchIDs[gid] || len(batchIDs) < 228
+							canJoin = cffOK && math.Abs(target) < 1e7 && math.Abs(target*unitScale-delta) <= 1e-3
+						}
+						if !canJoin {
+							flushBatch()
+							if r.renderError != nil {
+								ctx.Pop()
+								return
+							}
+						}
+						if len(batch) == 0 {
+							batchY, batchCanvasX, batchCanvasY = cy, canvasX, canvasY
+						}
+						if face.Font.IsCFF {
+							if batchIDs == nil {
+								batchIDs = make(map[uint16]bool)
+							}
+							batchIDs[gid] = true
+						}
+						batch = append(batch, pdfGlyphItem{glyph: glyph, id: gid, x: cx})
+						continue
+					}
+					flushBatch()
+					if r.renderError != nil {
+						ctx.Pop()
+						return
+					}
+				}
 				ctx.SetFill(fillPaint)
 				ctx.SetStrokeColor(canvas.Transparent)
 				glyphClip := fillClip
@@ -393,11 +520,17 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 							ctx.DrawPath(x, y, glyphPath)
 						}
 					} else {
-						scaled := hScale != 1
-						if scaled {
+						shear := pdfOutput != nil && face.FauxItalic != 0
+						transformed := hScale != 1 || shear
+						if transformed {
 							ctx.Push()
 							ctx.Translate(x, y)
-							ctx.Scale(hScale, 1)
+							if hScale != 1 {
+								ctx.Scale(hScale, 1)
+							}
+							if shear {
+								ctx.ComposeView(canvas.Identity.Shear(face.FauxItalic, 0))
+							}
 							x, y = 0, 0
 						}
 						var text *canvas.Text
@@ -406,7 +539,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 							text, err = pdfOutput.glyphText(face, glyph)
 							if err != nil {
 								r.renderError = err
-								if scaled {
+								if transformed {
 									ctx.Pop()
 								}
 								return
@@ -415,7 +548,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 							text = canvas.NewTextLine(face, str, canvas.Left)
 						}
 						ctx.DrawText(x, y, text)
-						if scaled {
+						if transformed {
 							ctx.Pop()
 						}
 					}
@@ -430,6 +563,11 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 				}
 				drawGlyph(canvasX, canvasY)
 			}
+		}
+		flushBatch()
+		if r.renderError != nil {
+			ctx.Pop()
+			return
 		}
 		codePos += len(runes)
 		if textRun != nil {

@@ -265,14 +265,38 @@ func (e *Editor) addStructureXML(ctx context.Context, tag CustomTag, data []byte
 		}
 		tag.SchemaLoc = "/" + name
 	}
-	name, index, container, entries, err := editorStructureIndexContext(ctx, base, nil)
-	if err != nil {
-		return 0, err
-	}
 	tag.FileLoc = "/" + e.packageName("Tags/Tag.xml")
 	var attrs ofdAttrs
 	attrs.add("TypeID", tag.TypeID)
 	attrs.add("NameSpace", tag.NameSpace)
+	if base.document.CustomTags.Path != "" && base.customTagCountReady {
+		indexName := base.reader.ResPath(base.document.CustomTags.Path)
+		if existing, readErr := base.reader.readFileViewContext(ctx, indexName); readErr == nil {
+			var content []byte
+			if tag.SchemaLoc != "" {
+				content = append(content, editorXMLText("SchemaLoc", tag.SchemaLoc)...)
+			}
+			content = append(content, editorXMLText("FileLoc", tag.FileLoc)...)
+			entry, encErr := editorXMLContainer("CustomTag", attrs, content)
+			if encErr == nil {
+				entry = bytes.TrimPrefix(entry, []byte(xml.Header))
+				if patched, ok := appendOFDXMLBeforeClosing(existing, "CustomTags", entry); ok {
+					idx := base.customTagCount
+					parts := map[string][]byte{strings.TrimPrefix(tag.FileLoc, "/"): data, indexName: patched}
+					if err := e.commitStructurePartsContext(ctx, base, parts, objects, idx); err != nil {
+						return 0, err
+					}
+					e.source.customTagCount = idx + 1
+					e.source.customTagCountReady = true
+					return idx, nil
+				}
+			}
+		}
+	}
+	name, index, container, entries, err := editorStructureIndexContext(ctx, base, nil)
+	if err != nil {
+		return 0, err
+	}
 	var content []byte
 	if tag.SchemaLoc != "" {
 		content = append(content, container.textXML("SchemaLoc", tag.SchemaLoc)...)
@@ -302,7 +326,12 @@ func (e *Editor) addStructureXML(ctx context.Context, tag CustomTag, data []byte
 			return 0, err
 		}
 	}
-	return len(entries), e.commitStructurePartsContext(ctx, base, parts, objects, len(entries))
+	if err := e.commitStructurePartsContext(ctx, base, parts, objects, len(entries)); err != nil {
+		return 0, err
+	}
+	e.source.customTagCount = len(entries) + 1
+	e.source.customTagCountReady = true
+	return len(entries), nil
 }
 
 // editStructure 验证完整标引后原子提交，隔离共享入口并保留未修改的XML
@@ -451,6 +480,13 @@ func (e *Editor) validateStructureReferencesContext(ctx context.Context, root *S
 		return nil, nil
 	}
 	if r == nil {
+		if fast, ok, err := e.validateStructureReferencesFast(ctx, refs); err != nil {
+			return nil, err
+		} else if ok {
+			return fast, nil
+		}
+	}
+	if r == nil {
 		var err error
 		r, err = e.Reader(ctx)
 		if err != nil {
@@ -500,6 +536,52 @@ func (e *Editor) validateStructureReferencesContext(ctx context.Context, root *S
 		}
 	}
 	return result, nil
+}
+
+// validateStructureReferencesFast 优先通过内存页对象索引校验引用，避免批量添加时重复打包整本快照
+// 入参: ctx 取消上下文, refs 待校验引用集合
+// 返回: map[string]map[string]bool 已校验目标, bool 是否全部命中内存快路径, error 取消错误
+func (e *Editor) validateStructureReferencesFast(ctx context.Context, refs []StructureReference) (map[string]map[string]bool, bool, error) {
+	pageMap := make(map[string]int, len(e.pages))
+	for i := range e.pages {
+		if id := editorResourceID(e.pages[i].ID); id != "" {
+			pageMap[id] = i
+		}
+	}
+	result := make(map[string]map[string]bool)
+	for _, ref := range refs {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		pageKey := editorResourceID(ref.PageID)
+		pageIdx, exists := pageMap[pageKey]
+		if !exists {
+			return nil, false, nil
+		}
+		content := &e.pages[pageIdx]
+		if e.source != nil && e.source.pages[content.ID] != nil && e.source.pages[content.ID].original == nil {
+			return nil, false, nil
+		}
+		positions := e.objectPositions(content)
+		for _, id := range ref.ObjectIDs {
+			objKey := editorResourceID(id)
+			if objKey == "" {
+				return nil, false, nil
+			}
+			_, found := positions[id]
+			if !found && objKey != id {
+				_, found = positions[objKey]
+			}
+			if !found {
+				return nil, false, nil
+			}
+			if result[pageKey] == nil {
+				result[pageKey] = make(map[string]bool)
+			}
+			result[pageKey][objKey] = true
+		}
+	}
+	return result, true, nil
 }
 
 // editorStructureIndex 读取或准备当前文档的标引索引，保留内联入口和未知扩展

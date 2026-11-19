@@ -387,12 +387,23 @@ func (r *Reader) versionFileUnchanged(ctx context.Context, name string, data []b
 		}
 		return true, ctx.Err()
 	}
-	file, ok := r.packageFile(name)
-	if !ok || file.UncompressedSize64 != uint64(len(data)) {
-		return false, nil
-	}
-	input, err := file.Open()
-	if err != nil {
+	var input io.ReadCloser
+	if file, ok := r.packageFile(name); ok {
+		if file.UncompressedSize64 != uint64(len(data)) {
+			return false, nil
+		}
+		var err error
+		input, err = file.Open()
+		if err != nil {
+			return false, nil
+		}
+	} else if src := r.encryptedSource(); src != nil && src.has(name) {
+		var err error
+		input, err = src.open(name)
+		if err != nil {
+			return false, nil
+		}
+	} else {
 		return false, nil
 	}
 	defer input.Close()
@@ -448,9 +459,23 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	if len(parts) == 0 && len(removed) == 0 {
 		return parts, ctx.Err()
 	}
-	shared, err := r.versionSharedFiles(ctx)
+	preserved, err := r.versionPreservedFiles(ctx)
 	if err != nil {
 		return nil, err
+	}
+	var otherIndexes []int
+	for index := range r.DocumentCount() {
+		if index != r.documentIndex {
+			otherIndexes = append(otherIndexes, index)
+		}
+	}
+	shared := maps.Clone(preserved)
+	if len(otherIndexes) != 0 {
+		otherFiles, err := r.documentFiles(ctx, otherIndexes...)
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(shared, otherFiles)
 	}
 	if r.versionInfo == nil && len(removed) == 0 {
 		changed := false
@@ -557,8 +582,27 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 		node := root.childAt("DocBody", r.documentIndex).child("DocRoot")
 		parts["OFD.xml"] = editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, editorFontXMLText("/"+target))})
 	}
+	retainedShared := shared
+	if len(removed) != 0 && len(otherIndexes) != 0 && len(parts) != 0 {
+		afterView := *r
+		afterView.files = maps.Clone(r.files)
+		if afterView.files == nil {
+			afterView.files = make(map[string][]byte, len(parts))
+		}
+		for name, data := range parts {
+			if data != nil {
+				afterView.files[name] = data
+			}
+		}
+		afterFiles, err := afterView.documentFiles(ctx, otherIndexes...)
+		if err != nil {
+			return nil, err
+		}
+		retainedShared = maps.Clone(preserved)
+		maps.Copy(retainedShared, afterFiles)
+	}
 	for name := range removed {
-		if shared[name] {
+		if retainedShared[name] {
 			delete(removed, name)
 		}
 	}

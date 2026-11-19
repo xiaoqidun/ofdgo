@@ -85,6 +85,16 @@ const el = {
 	signHeight: document.querySelector("#signHeight"),
 	signMode: document.querySelector("#signMode"),
 	signLock: document.querySelector("#signLock"),
+	signEncryptionFields: document.querySelector("#signEncryptionFields"),
+	signEncryptionType: document.querySelector("#signEncryptionType"),
+	signEncryptionUserRow: document.querySelector("#signEncryptionUserRow"),
+	signEncryptionUser: document.querySelector("#signEncryptionUser"),
+	signEncryptionPasswordRow: document.querySelector("#signEncryptionPasswordRow"),
+	signEncryptionPassword: document.querySelector("#signEncryptionPassword"),
+	signEncryptionConfirmRow: document.querySelector("#signEncryptionConfirmRow"),
+	signEncryptionConfirm: document.querySelector("#signEncryptionConfirm"),
+	signEncryptionCertificatesRow: document.querySelector("#signEncryptionCertificatesRow"),
+	signEncryptionCertificates: document.querySelector("#signEncryptionCertificates"),
 	signStatus: document.querySelector("#signStatus"),
 	signCancel: document.querySelector("#signCancel"),
 	verifyButton: document.querySelector("#verifyButton"),
@@ -469,6 +479,10 @@ const el = {
 	searchPrev: document.querySelector("#searchPrev"),
 	searchNext: document.querySelector("#searchNext"),
 	searchResults: document.querySelector("#searchResults"),
+	searchPager: document.querySelector("#searchPager"),
+	searchPagePrev: document.querySelector("#searchPagePrev"),
+	searchPageNext: document.querySelector("#searchPageNext"),
+	searchPageInfo: document.querySelector("#searchPageInfo"),
 	metaPanel: document.querySelector(".meta-panel"),
 	renderVectorButton: document.querySelector("#renderVectorButton"),
 	renderRasterButton: document.querySelector("#renderRasterButton"),
@@ -769,10 +783,14 @@ function createDocumentState() {
 		searchQuery: "",
 		searchMatches: [],
 		searchIndex: -1,
+		searchResultPage: 0,
 		searchRunning: false,
 		searchNext: 0,
 		searchPaused: false,
 		searchTruncated: false,
+		outlinesDirty: false,
+		importFile: null,
+		exportCancel: null,
 		navigationScroll: new Map(),
 		annotationFilter: {scope: null, query: "", kind: ""},
 		fontSyncPending: false,
@@ -832,6 +850,39 @@ function createDocumentState() {
 	};
 }
 
+function activeNativeIDs(skipTab = null) {
+	const ids = new Set();
+	const collect = value => {
+		if (!value || typeof value !== "object") return;
+		if (value.nativeFile) ids.add(value.nativeFile);
+		if (value.nativeHandle) ids.add(value.nativeHandle);
+		if (value.handle?.nativeHandle) ids.add(value.handle.nativeHandle);
+	};
+	for (const tab of workspace.tabs) {
+		if (tab === skipTab || tab.closed) continue;
+		collect(tab.state.ofdBytes);
+		collect(tab.state.saveHandle);
+		collect(tab.state.importFile);
+		for (const entry of tab.state.createImageQueue?.entries || []) collect(entry.file);
+	}
+	for (const item of batch.items) collect(item.file);
+	return ids;
+}
+
+function releaseNative(value, skipTab = null) {
+	if (!nativeHost || !value) return Promise.resolve();
+	return nativeHost.release(value, { exclude: activeNativeIDs(skipTab) });
+}
+
+function releaseFormFiles(form) {
+	if (!nativeHost || !form) return Promise.resolve();
+	const files = [];
+	for (const input of form.querySelectorAll('input[type="file"]')) {
+		if (input.files?.length) files.push(...input.files);
+	}
+	return releaseNative(files);
+}
+
 function createPrintDialog(tab) {
 	const panel = el.printPanel.cloneNode(true);
 	el.printPanel.remove();
@@ -840,6 +891,8 @@ function createPrintDialog(tab) {
 		panel,
 		nativeHost,
 		show: panel => documentDialogs.openFor(tab, panel),
+		savePicker: options => nativeHost || window.showSaveFilePicker ? saveFilePicker(options) : null,
+		release: value => releaseNative(value),
 		download: (bytes, mime, name) => nativeHost ? nativeHost.download(bytes, mime, name) : downloadBytes(bytes, mime, name),
 		cancel: tab => {
 			for (const [id, request] of wasmRequests) if (request.tab === tab && ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF"].includes(request.name)) cancelOperation(id);
@@ -1013,8 +1066,14 @@ for (const [button, action] of [[resourceElements.Bind, "bind"], [resourceElemen
 }
 resourceElements.File.addEventListener("change", () => resourceTask(async () => {
 	const request = resourceManager.fileAction, file = resourceElements.File.files[0];
-	if (!file || !request || request.sequence !== state.openSeq || !state.editing) return;
-	await changeManagedResource(request.action, request.item, file);
+	if (!file) return;
+	try {
+		if (!request || request.sequence !== state.openSeq || !state.editing) return;
+		await changeManagedResource(request.action, request.item, file);
+	} finally {
+		resourceElements.File.value = "";
+		await releaseNative(file);
+	}
 }));
 for (const dialog of [fontBindingElements.Panel, el.attachmentDialog]) {
 	dialog.addEventListener("close", () => { if (resourceElements.Panel.open) resourceTask(loadManagedResources); });
@@ -1171,7 +1230,11 @@ el.annotationTool.addEventListener("change", async () => {
 });
 annotationFields.CreateCancel.addEventListener("click", () => el.annotationCreate.close());
 el.annotationCreate.addEventListener("close", () => {
-	if (!state.annotationCreate?.picking) state.annotationCreate = null;
+	if (!state.annotationCreate?.picking) {
+		releaseNative(Array.from(annotationFields.Image.files || []));
+		annotationFields.Image.value = "";
+		state.annotationCreate = null;
+	}
 });
 annotationFields.Content.addEventListener("change", updateAnnotationFields);
 annotationFields.Height.addEventListener("input", () => { state.annotationCreate.height = annotationFields.Height.value; });
@@ -1371,10 +1434,13 @@ el.importPanel.addEventListener("cancel", event => {
 	if (state.importing) { event.preventDefault(); cancelExport(); }
 });
 el.importPanel.addEventListener("close", () => {
+	const previous = state.importFile;
+	state.importFile = null;
 	state.importPageCount = 0;
 	state.importDocumentCount = 0;
 	state.importDocumentMode = false;
 	state.importEncrypted = false;
+	releaseNative(previous);
 	el.importForm.reset();
 	if (state.ready) callWASM("ofdgoClearImport").catch(() => {});
 });
@@ -1564,6 +1630,9 @@ el.structureXMLFile.addEventListener("change", async () => {
 		el.structureStatus.textContent = "";
 	} catch (err) {
 		el.structureStatus.textContent = err.message;
+	} finally {
+		el.structureXMLFile.value = "";
+		await releaseNative(file);
 	}
 });
 el.structureForm.addEventListener("submit", async event => {
@@ -1656,7 +1725,8 @@ batchElements.List.addEventListener("click", event => {
 	const row = button.closest("tr[data-batch-index]");
 	const index = row ? Number(row.dataset.batchIndex) : -1;
 	if (index < 0 || index >= batch.items.length) return;
-	batch.items.splice(index, 1);
+	const [removed] = batch.items.splice(index, 1);
+	releaseNative(removed?.file);
 	renderBatchList(true);
 });
 batchElements.List.closest(".convert-table").addEventListener("scroll", () => {
@@ -1665,7 +1735,14 @@ batchElements.List.closest(".convert-table").addEventListener("scroll", () => {
 });
 batchElements.Add.addEventListener("click", () => batchElements.Input.click());
 batchElements.Input.addEventListener("change", () => { addBatchFiles(batchElements.Input.files); batchElements.Input.value = ""; });
-batchElements.Clear.addEventListener("click", () => { batch.items = []; renderBatchList(); batchElements.Status.textContent = ""; batchElements.Progress.value = 0; });
+batchElements.Clear.addEventListener("click", () => {
+	const files = batch.items.map(item => item.file);
+	batch.items = [];
+	releaseNative(files);
+	renderBatchList();
+	batchElements.Status.textContent = "";
+	batchElements.Progress.value = 0;
+});
 batchElements.Format.addEventListener("change", updateBatchControls);
 batchElements.DPI.addEventListener("change", updateBatchControls);
 batchElements.Close.addEventListener("click", () => batchElements.Panel.close());
@@ -1712,6 +1789,7 @@ fontBindingElements.File.addEventListener("change", async () => {
 			fontBindingElements.Status.textContent = faces.length > 1 ? "请选择字体" : "";
 		});
 	} catch (err) { update(() => { fontBindingElements.Status.textContent = err.message; }); }
+	finally { await releaseNative(file); }
 });
 fontBindingElements.Form.addEventListener("submit", async event => {
 	event.preventDefault();
@@ -1829,7 +1907,11 @@ el.createForm.addEventListener("submit", createDocument);
 editorClick(el.insertTextButton, toggleTextTool);
 editorClick(el.insertImageButton, () => openInsertPanel());
 el.insertCancel.addEventListener("click", () => el.insertPanel.close());
-el.insertPanel.addEventListener("close", () => { state.insertObject = null; });
+el.insertPanel.addEventListener("close", () => {
+	releaseNative(Array.from(el.insertImage.files || []));
+	el.insertImage.value = "";
+	state.insertObject = null;
+});
 el.insertForm.addEventListener("submit", insertObject);
 el.textFontAdd.addEventListener("click", () => openFontFile(el.fontInput));
 el.saveButton.addEventListener("click", () => exportFile(true, null, "ofd", false));
@@ -1837,19 +1919,28 @@ el.saveAsButton.addEventListener("click", () => exportFile(true, null, "ofd", tr
 editorClick(el.encryptSaveButton, openEncryptionPanel);
 el.signButton.addEventListener("click", () => {
 	if (!state.doc || document.body.hasAttribute("data-busy")) return;
+	releaseFormFiles(el.signForm);
 	el.signForm.reset();
 	el.signPages.value = state.editing && state.pageSelection.size ? selectedPageRange() : String(state.pageIndex + 1);
 	el.signStatus.textContent = "";
 	updateSignPlacement();
+	updateSignEncryption();
 	el.signPanel.showModal();
 });
 el.signSeal.addEventListener("change", updateSignPlacement);
 el.signPlacement.addEventListener("change", updateSignPlacement);
+el.signEncryptionType.addEventListener("change", updateSignEncryption);
 el.signCancel.addEventListener("click", () => state.signing ? cancelSigning() : el.signPanel.close());
 el.signPanel.addEventListener("cancel", event => {
 	if (state.signing) { event.preventDefault(); cancelSigning(); }
 });
-el.signPanel.addEventListener("close", () => { if (!el.signPanel.open && !sealPreview) el.signForm.reset(); });
+el.signPanel.addEventListener("close", () => {
+	if (!el.signPanel.open && !sealPreview) {
+		releaseFormFiles(el.signForm);
+		el.signForm.reset();
+		updateSignEncryption();
+	}
+});
 el.signForm.addEventListener("submit", signDocument);
 document.querySelector("#signPick").addEventListener("click", openSealPosition);
 el.viewerPanel.addEventListener("pointerdown", beginSealDrag, true);
@@ -1870,7 +1961,12 @@ el.verifyButton.addEventListener("click", () => {
 	el.verifyPanel.showModal();
 });
 el.verifyCancel.addEventListener("click", () => el.verifyPanel.close());
-el.verifyPanel.addEventListener("close", () => { if (!el.verifyPanel.open) el.verifyForm.reset(); });
+el.verifyPanel.addEventListener("close", () => {
+	if (!el.verifyPanel.open) {
+		releaseFormFiles(el.verifyForm);
+		el.verifyForm.reset();
+	}
+});
 el.verifyForm.addEventListener("submit", verifyDocument);
 el.credentialsCancel.addEventListener("click", () => finishCredentials(null));
 el.credentialsPanel.addEventListener("cancel", event => { event.preventDefault(); finishCredentials(null); });
@@ -1947,6 +2043,8 @@ el.searchForm.addEventListener("submit", (event) => {
 el.searchInput.addEventListener("input", () => resetSearch(false));
 el.searchPrev.addEventListener("click", () => selectSearchMatch(Math.max(0, state.searchIndex) - 1));
 el.searchNext.addEventListener("click", () => selectSearchMatch(state.searchIndex + 1));
+el.searchPagePrev.addEventListener("click", () => changeSearchResultPage(-1));
+el.searchPageNext.addEventListener("click", () => changeSearchResultPage(1));
 document.addEventListener("keydown", handleKeyDown);
 document.addEventListener("keydown", event => {
 	if (event.key === "Tab") el.viewerPanel.classList.add("keyboard-focus");
@@ -1957,7 +2055,13 @@ el.fontDirectoryButton.addEventListener("click", () => openFontFile(el.fontDirec
 el.localFontButton.addEventListener("click", loadLocalFonts);
 el.embedAllFontsButton.addEventListener("click", () => processAllFonts(1));
 el.externalizeAllFontsButton.addEventListener("click", () => processAllFonts(2));
-el.ofdInput.addEventListener("change", async () => { await Promise.all(Array.from(el.ofdInput.files, file => openOFD(file))); });
+el.ofdInput.addEventListener("change", async () => {
+	const files = Array.from(el.ofdInput.files || []);
+	el.ofdInput.value = "";
+	await Promise.all(files.map(async file => {
+		if (!await openOFD(file)) await releaseNative(file);
+	}));
+});
 el.fontInput.addEventListener("change", openSelectedFonts);
 el.fontDirectoryInput.addEventListener("change", openSelectedFonts);
 el.prevButton.addEventListener("click", () => pageView.renderPage(pageView.pageGroupStart() - state.pageLayout));
@@ -2721,6 +2825,9 @@ async function loadImportFile() {
 	const tab = documentTab(), state = tab.state;
 	const callWASM = (name, ...args) => callTabWASM(tab, name, ...args);
 	const file = el.importFile.files[0];
+	const previous = state.importFile;
+	state.importFile = file || null;
+	if (previous && previous !== file) releaseNative(previous);
 	const openSeq = state.openSeq;
 	state.importPageCount = 0;
 	state.importDocumentCount = 0;
@@ -2731,10 +2838,16 @@ async function loadImportFile() {
 	setBusy(true);
 	try {
 		const data = file ? await documentBytes(file) : null;
-		if (openSeq !== state.openSeq) return;
+		if (openSeq !== state.openSeq) {
+			if (state.importFile === file) state.importFile = null;
+			await releaseNative(file);
+			return;
+		}
 		const info = data ? await openWithCredentials(null, openSeq, data, true, false, tab) : (await callWASM("ofdgoClearImport"), null);
 		if (openSeq !== state.openSeq || !el.importPanel.open) {
 			await callWASM("ofdgoClearImport").catch(() => {});
+			if (state.importFile === file) state.importFile = null;
+			await releaseNative(file);
 			return;
 		}
 		state.importPageCount = info?.pageCount || 0;
@@ -3268,8 +3381,11 @@ async function releaseDocumentTab(tab) {
 	tab.settings.drafts.clear();
 	tab.invoice.views.clear();
 	tab.invoice.drafts.clear();
-	if (nativeHost) await nativeHost.release(tab.state.ofdBytes);
+	const nativeResources = [tab.state.ofdBytes, tab.state.saveHandle, tab.state.importFile];
 	tab.state.ofdBytes = null;
+	tab.state.saveHandle = null;
+	tab.state.importFile = null;
+	await releaseNative(nativeResources, tab);
 	tab.state.doc = null;
 	tab.localFonts = [];
 	tab.view = null;
@@ -3340,11 +3456,13 @@ async function requestCloseAction(title, message, save, tab = documentTab()) {
 
 async function confirmDocumentClose(tab = documentTab()) {
 	const state = tab.state;
-	if (state.dirty || canvasEditor.input || canvasEditor.nudge || canvasEditor.nudgeCommit || canvasEditor.crop) {
-		const action = await requestCloseAction("关闭文档", "文档尚未保存", state.saveHandle ? "保存" : "另存");
+	const pendingEdit = isForegroundDocument(tab) && (canvasEditor.input || canvasEditor.nudge || canvasEditor.nudgeCommit || canvasEditor.crop);
+	if (state.dirty || pendingEdit) {
+		const action = await requestCloseAction("关闭文档", "文档尚未保存", state.saveHandle ? "保存" : "另存", tab);
 		if (tab.closed || action === "cancel") return false;
 		if (action === "save") {
 			if (!isForegroundDocument(tab) && !await activateDocumentTab(tab)) return false;
+			if (!isForegroundDocument(tab)) return false;
 			if (!await exportFile(true, null, "ofd", false)) return false;
 			if (state.dirty) return false;
 		}
@@ -3378,7 +3496,7 @@ async function closeFile(tab = documentTab(), keepTab = false) {
 			const action = await requestCloseAction("关闭文档", "文档正在处理，是否取消并关闭？", null, tab);
 			if (action !== "discard" || tab.closed) return;
 		}
-		if (tab.state.dirty || tab === workspace.active && (canvasEditor.input || canvasEditor.crop || canvasEditor.nudge)) {
+		if (tab.state.dirty || tab === workspace.active && (canvasEditor.input || canvasEditor.crop || canvasEditor.nudge || canvasEditor.nudgeCommit)) {
 			if (tab !== workspace.active && !await activateDocumentTab(tab)) return;
 			if (!await confirmDocumentClose(tab) || tab.closed || workspace.closing) return;
 		}
@@ -3605,8 +3723,9 @@ async function exportManagedVersion() {
 	state.exporting = true;
 	setBusy(true, "正在另存版本", null, "", tab);
 	manager.status = el.versionStatus.textContent = "正在另存版本";
+	let file = null;
 	try {
-		const file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({suggestedName: name, types: [{description: "OFD", accept: {"application/ofd": [".ofd"]}}]}) : null;
+		file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({suggestedName: name, types: [{description: "OFD", accept: {"application/ofd": [".ofd"]}}]}) : null;
 		if (tab.closed || tab.state !== state || state.doc !== originalDocument || wasmSeq !== state.wasmSeq) return;
 		const result = await callTabWASM(tab, "ofdgoExportVersion", entry.id, file);
 		if (tab.closed || tab.state !== state || wasmSeq !== state.wasmSeq) return;
@@ -3624,6 +3743,7 @@ async function exportManagedVersion() {
 			if (isForegroundDocument(tab) && state.versionManagement === manager) el.versionStatus.textContent = manager.status;
 		}
 	} finally {
+		await releaseNative(file);
 		state.exporting = false;
 		state.exportRequestID = 0;
 		setBusy(false, "", 0, "", tab);
@@ -3798,7 +3918,7 @@ async function switchDocument(index) {
 			showError(error, false);
 		}
 	} finally {
-		if (nativeHost && adopted) await nativeHost.release(source);
+		if (nativeHost && adopted) await releaseNative(source);
 		tab.editTask = false;
 		setBusy(false, "", 0, "", tab);
 	}
@@ -3909,7 +4029,7 @@ async function toggleEditor() {
 	} catch (err) {
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) showError(err, false);
 	} finally {
-		if (nativeHost && adopted) await nativeHost.release(source);
+		if (nativeHost && adopted) await releaseNative(source);
 		setBusy(false, "", 0, "", tab);
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) {
 			updateControls();
@@ -3999,9 +4119,14 @@ function releaseCreateImages(tab) {
 	const queue = tab.state.createImageQueue;
 	if (!queue) return;
 	queue.observer?.disconnect();
-	for (const entry of queue.entries) if (entry.url) URL.revokeObjectURL(entry.url);
+	const files = [];
+	for (const entry of queue.entries) {
+		if (entry.url) URL.revokeObjectURL(entry.url);
+		if (entry.file) files.push(entry.file);
+	}
 	queue.entries.length = 0;
 	tab.state.createImageQueue = null;
+	releaseNative(files);
 }
 
 function addCreateImages() {
@@ -4009,7 +4134,10 @@ function addCreateImages() {
 	createImagePicker = null;
 	const files = [...el.createImages.files];
 	el.createImages.value = "";
-	if (tab.closed || !queue || tab.state.createImageQueue !== queue) return;
+	if (tab.closed || !queue || tab.state.createImageQueue !== queue) {
+		releaseNative(files);
+		return;
+	}
 	for (const file of files) queue.entries.push({ id: queue.next++, file, url: null, previewed: false });
 	sortCreateImages(queue);
 	if (isForegroundDocument(tab)) updateCreateOptions();
@@ -4058,6 +4186,7 @@ function removeCreateImage() {
 	if (index < 0) return;
 	const [entry] = queue.entries.splice(index, 1);
 	if (entry.url) URL.revokeObjectURL(entry.url);
+	releaseNative(entry.file);
 	queue.selected = queue.entries[Math.min(index, queue.entries.length - 1)]?.id ?? null;
 	renderCreateImages();
 	updateCreateOptions();
@@ -6703,8 +6832,8 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 		const source = tab.state.ofdBytes;
 		if (!accepted && tab.worker) {
 			await markWASMExited(tab.state.wasmSeq, null, tab);
-			if (nativeHost) await nativeHost.release(source);
 			tab.state.ofdBytes = null;
+			await releaseNative(source, tab);
 		}
 	}
 	return accepted;
@@ -6720,11 +6849,13 @@ async function openSelectedFonts(event) {
 		return;
 	}
 	const input = event.currentTarget;
-	const files = Array.from(input.files || []).filter((file) => (
+	const allFiles = Array.from(input.files || []);
+	const files = allFiles.filter((file) => (
 		!input.webkitdirectory || /\.(ttf|otf|ttc|otc)$/i.test(file.name)
 	));
 	input.value = "";
 	if (!files.length) {
+		await releaseNative(allFiles);
 		setStatus("暂无字体文件");
 		return;
 	}
@@ -6752,6 +6883,7 @@ async function openSelectedFonts(event) {
 		tab.status = err.message;
 		if (isForegroundDocument(tab)) showError(err, false);
 	} finally {
+		await releaseNative(allFiles);
 		tab.fontTask = false;
 		setBusy(false, "", 0, "", tab);
 	}
@@ -7407,7 +7539,7 @@ async function openDocument(options = {}) {
 		const pageFonts = state.sourcePDF && !nativeHost && !state.editorInfo ? await fontManager.files(fontManager.records()) : fonts;
 		if (state.editing) await initializeTextFont(tab);
 		if (openSeq !== state.openSeq) return;
-		tab.worker.configurePages?.(!state.editorInfo && !doc.encrypted && state.ofdBytes ? {
+		tab.worker.configurePages?.(!state.editorInfo && !doc.encryption?.encrypted && state.ofdBytes ? {
 			file: state.ofdBytes, fonts: pageFonts, pdf: state.sourcePDF, fontNames: state.sourcePDF ? [...fontManager.localEntries().keys()] : [], annotations: state.renderAnnotations, document: doc.documentIndex, version: doc.documentVersion
 		} : null);
 		if (options.keepPreview) {
@@ -8673,6 +8805,8 @@ function readInvoiceFile(accept) {
 			await accept(text);
 		} catch (error) {
 			if (isForegroundDocument(tab)) settingsElements.Status.textContent = error.message;
+		} finally {
+			await releaseNative(file);
 		}
 	});
 	input.click();
@@ -9119,10 +9253,12 @@ async function writeStyleResource(kind) {
 		value.Type = settingsValue("ColorType");
 		value.BitsPerComponent = Number(settingsValue("Bits"));
 		value.Palette = settingsValue("Palette").split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-		const file = document.querySelector("#settingsProfile").files[0];
+		const profileInput = document.querySelector("#settingsProfile");
+		const file = profileInput.files[0];
 		if (file) {
 			try { profile = new Uint8Array(await file.arrayBuffer()); }
 			catch (error) { if (isForegroundDocument(tab) && sequence === settings.sequence && openSeq === state.openSeq) settingsElements.Status.textContent = error.message; return; }
+			finally { profileInput.value = ""; await releaseNative(file); }
 			if (!isForegroundDocument(tab) || sequence !== settings.sequence || openSeq !== state.openSeq || resource !== settings.resource || open !== settingsElements.Panel.open) return;
 		}
 		else if (settingsValue("ClearProfile")) profile = new Uint8Array();
@@ -9900,6 +10036,7 @@ function downloadAttachment(attachment) {
 el.attachmentCancel.addEventListener("click", () => el.attachmentDialog.close());
 el.attachmentDialog.addEventListener("cancel", event => { if (el.attachmentForm.inert) event.preventDefault(); });
 el.attachmentDialog.addEventListener("close", () => {
+	releaseFormFiles(el.attachmentForm);
 	el.attachmentForm.reset();
 	delete el.attachmentDialog.attachmentEdit;
 });
@@ -9957,8 +10094,9 @@ async function downloadResource(attachment, api, label) {
 	state.exporting = true;
 	updateControls();
 	setBusy(true, `正在读取${label}`, null, `正在读取${label}`, tab);
+	let file = null;
 	try {
-		const file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({ suggestedName: attachment.fileName }) : null;
+		file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({ suggestedName: attachment.fileName }) : null;
 		if (tab.closed || state.doc !== originalDocument) {
 			return;
 		}
@@ -9980,6 +10118,7 @@ async function downloadResource(attachment, api, label) {
 			}
 		}
 	} finally {
+		await releaseNative(file);
 		state.exporting = false;
 		state.exportRequestID = 0;
 		setBusy(false, "", 0, "", tab);
@@ -10105,6 +10244,7 @@ async function encryptionRecipients(files) {
 }
 
 function clearEncryptionForm() {
+	releaseFormFiles(el.encryptionForm);
 	el.encryptionForm.inert = false;
 	el.encryptionPassword.value = "";
 	el.encryptionConfirm.value = "";
@@ -10292,6 +10432,27 @@ function updateSignPlacement() {
 	document.querySelector('label[for="signX"]').textContent = el.signPlacement.value === "seam" ? "右侧内缩" : "横向";
 }
 
+function updateSignEncryption() {
+	const required = Boolean(state.doc?.encryption?.policyRequired);
+	el.signEncryptionFields.hidden = !required;
+	const mode = required ? el.signEncryptionType.value : "";
+	const password = mode === "password";
+	const certificates = mode === "certificate";
+	el.signEncryptionUserRow.hidden = el.signEncryptionPasswordRow.hidden = el.signEncryptionConfirmRow.hidden = !password;
+	el.signEncryptionCertificatesRow.hidden = !certificates;
+	el.signEncryptionPassword.required = el.signEncryptionConfirm.required = password;
+	el.signEncryptionCertificates.required = certificates;
+	if (!password) {
+		el.signEncryptionUser.value = "";
+		el.signEncryptionPassword.value = "";
+		el.signEncryptionConfirm.value = "";
+	}
+	if (!certificates && el.signEncryptionCertificates.files?.length) {
+		releaseNative(Array.from(el.signEncryptionCertificates.files));
+		el.signEncryptionCertificates.value = "";
+	}
+}
+
 async function signDocument(event) {
 	const tab = documentTab(), state = tab.state, wasmSeq = state.wasmSeq;
 	const valid = () => !tab.closed && wasmSeq === state.wasmSeq;
@@ -10308,16 +10469,41 @@ async function signDocument(event) {
 		el.signStatus.textContent = "请选择证书、私钥和信任根";
 		return;
 	}
+	const policyRequired = Boolean(state.doc.encryption?.policyRequired);
+	const encryptionMode = policyRequired ? el.signEncryptionType.value : "";
+	if (encryptionMode === "password") {
+		if (!el.signEncryptionPassword.value) {
+			el.signStatus.textContent = "请输入口令";
+			el.signEncryptionPassword.focus();
+			return;
+		}
+		if (el.signEncryptionPassword.value !== el.signEncryptionConfirm.value) {
+			el.signStatus.textContent = "口令不一致";
+			el.signEncryptionConfirm.focus();
+			return;
+		}
+	}
+	if (encryptionMode === "certificate" && !el.signEncryptionCertificates.files?.length) {
+		el.signStatus.textContent = "请选择接收者证书";
+		return;
+	}
 	if (el.signMode.value === "replace" && !await requestConfirmation("替换现有签名，是否继续？")) return;
 	let key;
+	let file = null;
 	const keyPassword = new TextEncoder().encode(el.signKeyPassword.value);
+	const encryptionPassword = encryptionMode === "password" ? new TextEncoder().encode(el.signEncryptionPassword.value) : null;
+	const encryptionUser = encryptionMode === "password" ? el.signEncryptionUser.value.trim() : "";
+	const encryptionCerts = encryptionMode === "certificate" ? Array.from(el.signEncryptionCertificates.files || []) : [];
 	const files = Object.fromEntries(["Key", "Certificate", "Roots", "Intermediates", "Seal"].map(name => [name, Array.from(el[`sign${name}`].files || [])]));
 	const options = { keyPassword, pages:el.signPages.value.trim(), placement:el.signPlacement.value,
 		x:Number(el.signX.value), y:Number(el.signY.value), width:Number(el.signWidth.value), height:Number(el.signHeight.value),
 		mode:el.signMode.value, lock:el.signLock.checked, compression:compressionOptions(el.outputCompression.value) };
+	if (policyRequired) options.encryptionMode = encryptionMode;
 	const name = `${baseFileName()}_签章.ofd`;
 	el.signKeyPassword.value = "";
 	el.signKey.value = "";
+	el.signEncryptionPassword.value = "";
+	el.signEncryptionConfirm.value = "";
 	state.exporting = true;
 	state.signing = true;
 	state.signCanceled = false;
@@ -10325,7 +10511,7 @@ async function signDocument(event) {
 	setBusy(true, "正在签署文档", null, "正在签署文档", tab);
 	el.signForm.querySelectorAll("input, select, button[type=submit]").forEach(input => { input.disabled = true; });
 	try {
-		const file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({suggestedName:name, types:[{description:"OFD",accept:{"application/ofd":[".ofd"]}}]}) : null;
+		file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({suggestedName:name, types:[{description:"OFD",accept:{"application/ofd":[".ofd"]}}]}) : null;
 		if (!valid() || state.signCanceled) return;
 		if (active() && (canvasEditor.input || canvasEditor.crop || canvasEditor.nudge || canvasEditor.nudgeCommit)) {
 			setBusy(false, "", 0, "", tab);
@@ -10338,6 +10524,11 @@ async function signDocument(event) {
 		if (!valid() || state.signCanceled) return;
 		const [certificate, roots, intermediates, seal] = await Promise.all(["Certificate", "Roots", "Intermediates", "Seal"].map(name => securityFiles({files:files[name]})));
 		Object.assign(options, {key, certificate:certificate[0], roots, intermediates, seal:seal[0] || null});
+		if (encryptionMode === "password") {
+			options.encryption = { password: encryptionPassword, userName: encryptionUser };
+		} else if (encryptionMode === "certificate") {
+			options.encryption = { recipients: await encryptionRecipients(encryptionCerts) };
+		}
 		if (!valid() || state.signCanceled) return;
 		const result = await callTabWASM(tab, "ofdgoSaveSigned", null, options, file);
 		if (!valid()) return;
@@ -10350,6 +10541,8 @@ async function signDocument(event) {
 	} finally {
 		key?.fill(0);
 		keyPassword.fill(0);
+		encryptionPassword?.fill(0);
+		await releaseNative([file, ...files.Key]);
 		state.signing = false;
 		state.exporting = false;
 		state.exportRequestID = 0;
@@ -10359,6 +10552,7 @@ async function signDocument(event) {
 			el.signCancel.disabled = false;
 			if (state.signCanceled) el.signStatus.textContent = "签署已取消";
 			updateSignPlacement();
+			updateSignEncryption();
 			el.cancelExportButton.hidden = true;
 		});
 		if (valid()) {
@@ -10459,10 +10653,16 @@ async function updateExportRange() {
 
 function addBatchFiles(files) {
 	let rejected = false;
+	const discarded = [];
 	for (const file of files) {
-		if (!/\.(ofd|pdf)$/i.test(file.name)) { rejected = true; continue; }
+		if (!/\.(ofd|pdf)$/i.test(file.name)) {
+			rejected = true;
+			discarded.push(file);
+			continue;
+		}
 		batch.items.push({ file, format: "", pages: "", status: "pending", text: "待转", details: [] });
 	}
+	if (discarded.length) releaseNative(discarded);
 	if (rejected) batchElements.Status.textContent = "仅支持PDF、OFD";
 	renderBatchList();
 }
@@ -10932,7 +11132,8 @@ async function runBatch() {
 		await Promise.all([...batch.workers].map(slot => Promise.resolve(slot.worker.terminate())));
 		batch.workers.clear();
 		batch.requests.clear();
-		if (nativeHost) await nativeHost.release(results);
+		if (nativeHost) await nativeHost.release(results, { temporaryOnly: true });
+		await releaseNative([zipFile, destination && destination !== tempDir ? destination : null]);
 		if (tempDir) {
 			try { await nativeHost.removeTempDirectory(tempDir); }
 			catch { batchElements.Status.textContent += " · 临时文件清理失败"; }
@@ -10996,8 +11197,10 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 	state.saving = saving && indices === null;
 	updateControls();
 	setBusy(true, "正在生成文件", null, status, tab);
+	let file = null;
+	let previousHandle = null;
 	try {
-		let file = saving && indices === null && !saveAs ? state.saveHandle : null;
+		file = saving && indices === null && !saveAs ? state.saveHandle : null;
 		if (file && !nativeHost) {
 			try {
 				const permission = await file.queryPermission({mode: "readwrite"});
@@ -11036,7 +11239,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			await callWASM("ofdgoPrepareSave");
 			if (tab.closed || wasmSeq !== state.wasmSeq) return;
 		}
-		if (saving && indices === null) {
+		if (saving && indices === null && !readingSave) {
 			background = true;
 			state.exporting = false;
 			setBusy(false, "", 0, "", tab);
@@ -11051,17 +11254,53 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			return;
 		}
 		if (readingSave && file) {
-			const writer = await file.createWritable();
+			const controller = new AbortController();
+			let writer = null, creating = null, aborted = false;
+			const abortWriter = () => {
+				if (aborted) return;
+				aborted = true;
+				if (writer) return writer.abort().catch(() => {});
+				if (creating) creating.then(w => w?.abort?.().catch(() => {})).catch(() => {});
+			};
+			state.exportCancel = () => {
+				controller.abort();
+				abortWriter();
+			};
+			if (active()) {
+				el.cancelExportButton.hidden = false;
+				el.cancelExportButton.disabled = false;
+			}
+			const abortPromise = new Promise((_, reject) => {
+				controller.signal.addEventListener("abort", () => reject(new DOMException(`${action}已取消`, "AbortError")), { once: true });
+			});
 			try {
-				await writer.write(result.blob);
+				if (controller.signal.aborted) throw new DOMException(`${action}已取消`, "AbortError");
+				creating = file.createWritable();
+				writer = await Promise.race([creating, abortPromise]);
+				if (controller.signal.aborted) throw new DOMException(`${action}已取消`, "AbortError");
+				const source = result.blob;
+				if (!nativeHost && source instanceof Blob && source.size > 2 * 1024 * 1024) {
+					const chunk = 2 * 1024 * 1024;
+					for (let offset = 0; offset < source.size; offset += chunk) {
+						if (controller.signal.aborted) throw new DOMException(`${action}已取消`, "AbortError");
+						await Promise.race([writer.write(source.slice(offset, offset + chunk)), abortPromise]);
+						if (active()) setProgress("正在保存文件", Math.round(Math.min(source.size, offset + chunk) / source.size * 100));
+					}
+				} else {
+					await Promise.race([writer.write(source), abortPromise]);
+				}
+				if (controller.signal.aborted) throw new DOMException(`${action}已取消`, "AbortError");
 				if (destination?.saveStamp) {
 					const current = await file.getFile();
 					if (current.size !== destination.saveStamp.size || current.lastModified !== destination.saveStamp.modified) throw new Error("文件已被修改，请另存");
 				}
-				await writer.close();
+				if (controller.signal.aborted) throw new DOMException(`${action}已取消`, "AbortError");
+				await Promise.race([writer.close(), abortPromise]);
 			} catch (error) {
-				await writer.abort().catch(() => {});
+				await abortWriter();
 				throw error;
+			} finally {
+				state.exportCancel = null;
 			}
 			delete result.blob;
 		}
@@ -11079,6 +11318,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			updateWorkspaceDirty();
 		}
 		if (saving && indices === null && file) {
+			if (state.saveHandle && state.saveHandle !== file) previousHandle = state.saveHandle;
 			state.saveHandle = file;
 			state.fileName = file.name;
 			state.saveStamp = null;
@@ -11111,6 +11351,9 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 	} finally {
 		try {
 			if (snapshotPrepared) await callWASM("ofdgoDiscardSave").catch(() => {});
+			if (previousHandle) await releaseNative(previousHandle);
+			if (file && file !== state.saveHandle) await releaseNative(file);
+			state.exportCancel = null;
 			state.saving = false;
 			state.saveRequestID = 0;
 			if (!background) {
@@ -11119,7 +11362,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 				if (wasmSeq === state.wasmSeq) setBusy(false, "", 0, "", tab);
 			}
 			if (active()) {
-				el.cancelExportButton.hidden = !state.exportRequestID;
+				el.cancelExportButton.hidden = !state.exportRequestID && !state.exportCancel;
 				if (!document.body.hasAttribute("data-busy")) el.progressPanel.hidden = true;
 				if (wasmSeq === state.wasmSeq) updateControls();
 			} else if (workspace.active === tab) tab.controlsPending = true;
@@ -11140,6 +11383,12 @@ function cancelExport() {
 	}
 	const tab = documentTab();
 	const target = tab.state;
+	if (target.exportCancel && !el.cancelExportButton.disabled) {
+		el.cancelExportButton.disabled = true;
+		setProgress("正在取消操作", null);
+		target.exportCancel();
+		return;
+	}
 	const requestID = operationRequest(tab)?.id || target.exportRequestID || target.saveRequestID;
 	if (!requestID || el.cancelExportButton.disabled) {
 		return;
@@ -11493,10 +11742,17 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 	}
 }
 
+function cancelDocumentTextSelection(tab = documentTab()) {
+	for (const [id, request] of wasmRequests) {
+		if (request.tab === tab && request.name === "ofdgoPagesText") cancelOperation(id);
+	}
+}
+
 function syncSelection() {
 	const selection = document.getSelection();
 	if (state.documentSelection && (!selection.rangeCount || !isDocumentSelection(selection.getRangeAt(0)))) {
 		state.documentSelection = null;
+		cancelDocumentTextSelection();
 		if (state.doc && !document.body.hasAttribute("data-busy")) {
 			setStatus(pageStatus(state.pageIndex, state.doc.pageCount));
 		}
@@ -11512,38 +11768,59 @@ function isDocumentSelection(range) {
 		&& range.endContainer === el.svgHost && range.endOffset === el.svgHost.childNodes.length;
 }
 
+async function writeTextToClipboard(text) {
+	if (navigator.clipboard?.writeText) {
+		await navigator.clipboard.writeText(text);
+		return true;
+	}
+	return false;
+}
+
 async function selectDocumentText() {
 	const selection = document.getSelection();
 	if (state.documentSelection && selection.rangeCount && isDocumentSelection(selection.getRangeAt(0))) {
 		return;
 	}
-	const openSeq = state.openSeq;
-	const current = { text: null };
-	const active = () => state.documentSelection === current && openSeq === state.openSeq
-		&& selection.rangeCount > 0 && isDocumentSelection(selection.getRangeAt(0));
-	state.documentSelection = current;
+	const tab = documentTab();
+	const target = tab.state;
+	const openSeq = target.openSeq;
+	const count = target.doc?.pageCount || 0;
+	if (!count) return;
+	cancelDocumentTextSelection(tab);
+	const current = { text: null, copyPending: false };
+	const active = () => target.documentSelection === current && openSeq === target.openSeq
+		&& isForegroundDocument(tab) && selection.rangeCount > 0 && isDocumentSelection(selection.getRangeAt(0));
+	target.documentSelection = current;
 	const range = document.createRange();
 	range.selectNodeContents(el.svgHost);
 	selection.removeAllRanges();
 	selection.addRange(range);
-	const pages = [];
-	const count = state.doc.pageCount;
+	setStatus("正在全选文字");
 	try {
-		for (let index = 0; index < count; index += 1) {
-			setStatus(`正在全选文字 · ${index + 1} / ${count} 页`);
-			const text = await callWASM("ofdgoPageTextString", index);
-			if (!active()) {
+		const text = await callTabWASM(tab, "ofdgoPagesText", 0, count - 1);
+		if (!active()) {
+			return;
+		}
+		current.text = text || "";
+		if (current.copyPending) {
+			current.copyPending = false;
+			if (!current.text) {
+				setStatus("暂无文字");
 				return;
 			}
-			if (text) {
-				pages.push(text);
+			try {
+				if (await writeTextToClipboard(current.text)) setStatus("已复制全部文字");
+				else setStatus("文字已全选，请再按复制");
+			} catch {
+				setStatus("文字已全选，请再按复制");
 			}
+			return;
 		}
-		current.text = pages.join("\n");
 		setStatus(current.text ? "文字已全选" : "暂无文字");
 	} catch (err) {
+		if (err.name === "AbortError") return;
 		if (active()) {
-			state.documentSelection = null;
+			target.documentSelection = null;
 			selection.removeAllRanges();
 			showError(err, false);
 		}
@@ -11697,31 +11974,9 @@ async function pasteEditorContent(event) {
 		width, style.wrap, style.align || "left", style.paragraphHeight || 0, style.letterSpacing || 0, ...textIndents(style));
 }
 
-function copySelection(event) {
-	if (sealPreview) return;
-	if (!editorShortcutTarget(event.target)) {
-		return;
-	}
-	const selection = document.getSelection();
-	if (selection.isCollapsed && copyEditorSelection(event)) return;
-	if (selection.isCollapsed || !selection.rangeCount) {
-		return;
-	}
-	const range = selection.getRangeAt(0);
-	if (state.documentSelection && isDocumentSelection(range)) {
-		event.preventDefault();
-		if (state.documentSelection.text === null) {
-			setStatus("正在全选文字");
-		} else {
-			event.clipboardData.setData("text/plain", state.documentSelection.text);
-		}
-		return;
-	}
-	if (!el.svgHost.contains(range.startContainer) || !el.svgHost.contains(range.endContainer)) {
-		return;
-	}
+function extractRangeText(container, range) {
 	const lines = [];
-	for (const run of el.svgHost.querySelectorAll(".text-run")) {
+	for (const run of container.querySelectorAll(".text-run")) {
 		if (!range.intersectsNode(run)) {
 			continue;
 		}
@@ -11737,10 +11992,78 @@ function copySelection(event) {
 			lines.push(text);
 		}
 	}
-	if (!lines.length) {
+	return lines.join("\n");
+}
+
+function rangePageShell(node) {
+	return (node?.nodeType === 1 ? node : node?.parentElement)?.closest?.(".page-shell") || null;
+}
+
+async function copyCrossPageText(tab, openSeq, headText, middleStart, middleEnd, tailText) {
+	setStatus("正在提取跨页文字");
+	try {
+		const middleText = await callTabWASM(tab, "ofdgoPagesText", middleStart, middleEnd);
+		if (tab.closed || openSeq !== tab.state.openSeq) return;
+		const fullText = [headText, middleText, tailText].filter(Boolean).join("\n");
+		if (await writeTextToClipboard(fullText)) {
+			if (isForegroundDocument(tab)) setStatus("已复制所选文字");
+		} else if (isForegroundDocument(tab)) {
+			setStatus("无法自动写入剪贴板");
+		}
+	} catch (err) {
+		if (err.name !== "AbortError" && isForegroundDocument(tab) && openSeq === tab.state.openSeq) showError(err, false);
+	}
+}
+
+function copySelection(event) {
+	if (sealPreview) return;
+	if (!editorShortcutTarget(event.target)) {
 		return;
 	}
-	event.clipboardData.setData("text/plain", lines.join("\n"));
+	const selection = document.getSelection();
+	if (selection.isCollapsed && copyEditorSelection(event)) return;
+	if (selection.isCollapsed || !selection.rangeCount) {
+		return;
+	}
+	const range = selection.getRangeAt(0);
+	if (state.documentSelection && isDocumentSelection(range)) {
+		event.preventDefault();
+		if (state.documentSelection.text === null) {
+			state.documentSelection.copyPending = true;
+			setStatus("正在提取文字，完成后自动复制");
+		} else {
+			event.clipboardData.setData("text/plain", state.documentSelection.text);
+		}
+		return;
+	}
+	if (!el.svgHost.contains(range.startContainer) || !el.svgHost.contains(range.endContainer)) {
+		return;
+	}
+	const startShell = rangePageShell(range.startContainer);
+	const endShell = rangePageShell(range.endContainer);
+	const startPage = startShell ? Number(startShell.dataset.pageIndex) : -1;
+	const endPage = endShell ? Number(endShell.dataset.pageIndex) : -1;
+	const hasUnrenderedMiddle = startPage >= 0 && endPage > startPage + 1 && (() => {
+		for (let page = startPage + 1; page < endPage; page++) {
+			const shell = pageView.pageShell(page);
+			if (!shell || !shell.classList.contains("rendered")) return true;
+		}
+		return false;
+	})();
+	if (hasUnrenderedMiddle) {
+		const headText = extractRangeText(startShell, range);
+		const tailText = extractRangeText(endShell, range);
+		const partial = extractRangeText(el.svgHost, range);
+		event.clipboardData.setData("text/plain", partial);
+		event.preventDefault();
+		copyCrossPageText(documentTab(), state.openSeq, headText, startPage + 1, endPage - 1, tailText);
+		return;
+	}
+	const text = extractRangeText(el.svgHost, range);
+	if (!text) {
+		return;
+	}
+	event.clipboardData.setData("text/plain", text);
 	event.preventDefault();
 }
 
@@ -11775,6 +12098,7 @@ function showNavigation(selected) {
 	el.pageSelectionTools.hidden = !state.editing || !state.pageMultiSelect || selected !== el.pagesTab;
 	el.navigationContent.scrollTop = state.navigationScroll.get(selected) || 0;
 	if (selected === el.pagesTab) pageView.syncThumbnailWindow();
+	if (selected === el.outlinesTab && state.outlinesDirty) mountOutlines();
 	if (selected === el.annotationsTab) loadAnnotationSummary();
 }
 
@@ -11883,18 +12207,22 @@ function createAnnotationRow(item) {
 	return row;
 }
 
-function renderOutlines(reset = true) {
-	const selected = !reset && [el.pagesTab, el.outlinesTab, el.annotationsTab, el.searchTab].find(tab => tab.getAttribute("data-selected") === "true");
-	const scrollTop = reset ? 0 : el.navigationContent.scrollTop;
-	if (reset) {
-		state.navigationScroll.clear();
-		state.outlineExpanded.clear();
-		state.outlineSelection = null;
+function countOutlineNodes(outlines, limit = 200) {
+	let count = 0;
+	const stack = [...outlines];
+	while (stack.length && count <= limit) {
+		const item = stack.pop();
+		count++;
+		if (item.children?.length) {
+			for (let i = 0; i < item.children.length; i++) stack.push(item.children[i]);
+		}
 	}
+	return count;
+}
+
+function mountOutlines() {
+	state.outlinesDirty = false;
 	const outlines = state.doc?.outlines || [];
-	el.pageListTitle.hidden = Boolean(state.doc);
-	el.navigationTabs.hidden = !state.doc;
-	el.outlinesTab.hidden = outlines.length === 0 && !state.editing;
 	el.outlineList.replaceChildren();
 	if (state.editing) {
 		const tools = document.createElement("div");
@@ -11912,10 +12240,29 @@ function renderOutlines(reset = true) {
 		el.outlineList.append(tools);
 	}
 	if (outlines.length > 0) {
-		el.outlineList.append(createOutlineList(outlines));
+		const collapseDeep = countOutlineNodes(outlines, 200) > 200;
+		el.outlineList.append(createOutlineList(outlines, [], collapseDeep));
 	}
+}
+
+function renderOutlines(reset = true) {
+	const selected = !reset && [el.pagesTab, el.outlinesTab, el.annotationsTab, el.searchTab].find(tab => tab.getAttribute("data-selected") === "true");
+	const scrollTop = reset ? 0 : el.navigationContent.scrollTop;
+	if (reset) {
+		state.navigationScroll.clear();
+		state.outlineExpanded.clear();
+		state.outlineSelection = null;
+	}
+	const outlines = state.doc?.outlines || [];
+	el.pageListTitle.hidden = Boolean(state.doc);
+	el.navigationTabs.hidden = !state.doc;
+	el.outlinesTab.hidden = outlines.length === 0 && !state.editing;
+	el.outlineList.replaceChildren();
+	state.outlinesDirty = true;
+	const target = selected && !selected.hidden ? selected : el.pagesTab;
+	if (target === el.outlinesTab) mountOutlines();
 	el.navigationContent.scrollTop = scrollTop;
-	showNavigation(selected && !selected.hidden ? selected : el.pagesTab);
+	showNavigation(target);
 }
 
 function resetSearch(clearInput = true) {
@@ -11928,11 +12275,13 @@ function resetSearch(clearInput = true) {
 	state.searchQuery = "";
 	state.searchMatches = [];
 	state.searchIndex = -1;
+	state.searchResultPage = 0;
 	if (clearInput) {
 		el.searchInput.value = "";
 	}
 	el.searchStatus.textContent = "";
 	el.searchResults.replaceChildren();
+	el.searchPager.hidden = true;
 	updateSearchCount();
 	clearSearchHighlights();
 }
@@ -12043,12 +12392,26 @@ function updateSearchCount() {
 	el.searchNext.disabled = count === 0;
 }
 
+function changeSearchResultPage(delta) {
+	const totalPages = Math.max(1, Math.ceil(state.searchMatches.length / 50));
+	const next = Math.max(0, Math.min(totalPages - 1, (state.searchResultPage || 0) + delta));
+	if (next === state.searchResultPage) return;
+	state.searchResultPage = next;
+	renderSearchResults();
+	el.searchResults.scrollTop = 0;
+}
+
 function renderSearchResults() {
-	const start = Math.floor(Math.max(0, state.searchIndex) / 50) * 50;
-	if (el.searchResults.firstElementChild && Number(el.searchResults.firstElementChild.dataset.matchIndex) !== start) {
+	const count = state.searchMatches.length;
+	const totalPages = Math.max(1, Math.ceil(count / 50));
+	state.searchResultPage = Math.max(0, Math.min(state.searchResultPage || 0, totalPages - 1));
+	const start = state.searchResultPage * 50;
+	const end = Math.min(start + 50, count);
+	if (el.searchResults.firstElementChild && Number(el.searchResults.firstElementChild.dataset.matchIndex) !== start
+		|| el.searchResults.childElementCount > end - start) {
 		el.searchResults.replaceChildren();
 	}
-	for (let i = start + el.searchResults.childElementCount; i < Math.min(start + 50, state.searchMatches.length); i += 1) {
+	for (let i = start + el.searchResults.childElementCount; i < end; i += 1) {
 		const match = state.searchMatches[i];
 		const button = document.createElement("button");
 		button.type = "button";
@@ -12068,6 +12431,10 @@ function renderSearchResults() {
 	for (const button of el.searchResults.children) {
 		button.setAttribute("data-current", String(Number(button.dataset.matchIndex) === state.searchIndex));
 	}
+	el.searchPager.hidden = totalPages <= 1;
+	el.searchPageInfo.textContent = `${state.searchResultPage + 1} / ${totalPages}`;
+	el.searchPagePrev.disabled = state.searchResultPage <= 0;
+	el.searchPageNext.disabled = state.searchResultPage + 1 >= totalPages;
 	updateSearchCount();
 }
 
@@ -12078,6 +12445,7 @@ async function selectSearchMatch(index) {
 	}
 	index = (index + count) % count;
 	state.searchIndex = index;
+	state.searchResultPage = Math.floor(index / 50);
 	const match = state.searchMatches[index];
 	const target = state;
 	const seq = state.searchSeq;
@@ -12092,7 +12460,8 @@ async function selectSearchMatch(index) {
 		return;
 	}
 	renderSearchHighlights(match.page);
-	const mark = pageView.pageShell(match.page).querySelector(".search-highlight");
+	const shell = pageView.pageShell(match.page);
+	const mark = shell?.querySelector(".search-highlight");
 	if (mark) {
 		const box = mark.getBoundingClientRect();
 		const viewer = el.viewerPanel.getBoundingClientRect();
@@ -12105,8 +12474,8 @@ async function selectSearchMatch(index) {
 	} else {
 		pageView.scrollToPage(match.page);
 	}
-	if (state.editing) {
-		const node = [...pageView.pageShell(match.page).querySelectorAll(".edit-object")].find(node => canvasEditor.nodes.get(node)?.id === match.id);
+	if (state.editing && shell) {
+		const node = [...shell.querySelectorAll(".edit-object")].find(node => canvasEditor.nodes.get(node)?.id === match.id);
 		const item = node && canvasEditor.nodes.get(node);
 		if (item?.type === "TextObject" && !match.parts?.length) {
 			state.selectObjects = true;
@@ -12117,12 +12486,14 @@ async function selectSearchMatch(index) {
 		} else canvasEditor.select(null);
 	}
 	const button = el.searchResults.querySelector("[data-current=true]");
-	const row = button.getBoundingClientRect();
-	const panel = el.searchResults.getBoundingClientRect();
-	if (row.top < panel.top) {
-		el.searchResults.scrollTop += row.top - panel.top;
-	} else if (row.bottom > panel.bottom) {
-		el.searchResults.scrollTop += row.bottom - panel.bottom;
+	if (button) {
+		const row = button.getBoundingClientRect();
+		const panel = el.searchResults.getBoundingClientRect();
+		if (row.top < panel.top) {
+			el.searchResults.scrollTop += row.top - panel.top;
+		} else if (row.bottom > panel.bottom) {
+			el.searchResults.scrollTop += row.bottom - panel.bottom;
+		}
 	}
 	return true;
 }
@@ -12138,7 +12509,10 @@ function renderSearchHighlights(index) {
 	if (!match || match.page !== index) {
 		return;
 	}
-	const surface = pageView.pageShell(index).querySelector(".page-surface");
+	const surface = pageView.pageShell(index)?.querySelector(".page-surface");
+	if (!surface) {
+		return;
+	}
 	for (const mark of surface.querySelectorAll(".search-highlight")) {
 		mark.remove();
 	}
@@ -12230,7 +12604,7 @@ async function activateOutline(path) {
 	}
 }
 
-function createOutlineList(outlines, path = []) {
+function createOutlineList(outlines, path = [], collapseDeep = false) {
 	const list = document.createElement("ul");
 	list.className = "outline-list";
 	for (const [index, outline] of outlines.entries()) {
@@ -12284,14 +12658,14 @@ function createOutlineList(outlines, path = []) {
 		if (hasChildren) {
 			const details = document.createElement("details");
 			const key = JSON.stringify(current);
-			details.open = state.outlineExpanded.get(key) ?? outline.expanded;
+			details.open = state.outlineExpanded.get(key) ?? (collapseDeep ? false : Boolean(outline.expanded));
 			details.addEventListener("toggle", () => {
 				if (!details.isConnected) return;
 				state.outlineExpanded.set(key, details.open);
-				if (details.open && details.childElementCount === 1) details.append(createOutlineList(outline.children, current));
+				if (details.open && details.childElementCount === 1) details.append(createOutlineList(outline.children, current, collapseDeep));
 			});
 			details.append(row);
-			if (details.open) details.append(createOutlineList(outline.children, current));
+			if (details.open) details.append(createOutlineList(outline.children, current, collapseDeep));
 			item.append(details);
 		} else {
 			item.append(row);

@@ -113,7 +113,7 @@ func (r *Reader) DocumentVersion(id string) (*Reader, error) {
 // 入参: ctx 取消上下文, id 版本标识，空值选择主入口
 // 返回: *Reader 版本阅读器, error 读取或取消错误
 func (r *Reader) DocumentVersionContext(ctx context.Context, id string) (*Reader, error) {
-	next := &Reader{Path: r.Path, Zip: r.Zip, sourceFile: r.sourceFile, archiveID: r.archiveID, files: r.files, encryption: r.encryption, documentIndex: r.documentIndex, selectedVersion: &id, pageReady: r.pageReady, pageContents: r.pageContents, pdfDestinations: r.pdfDestinations.clone(), resources: r.resources}
+	next := &Reader{Path: r.Path, Zip: r.Zip, encrypted: r.encryptedSource(), sourceFile: r.sourceFile, archiveID: r.archiveID, files: r.files, encryption: r.encryption, documentIndex: r.documentIndex, selectedVersion: &id, pageReady: r.pageReady, pageContents: r.pageContents, pdfDestinations: r.pdfDestinations.clone(), resources: r.resources}
 	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}
@@ -200,6 +200,15 @@ func (r *Reader) ExtractVersionContext(ctx context.Context, id string) (*Reader,
 				next.Zip.File = append(next.Zip.File, file)
 			}
 		}
+	}
+	if src := r.encryptedSource(); src != nil {
+		keep := make(map[string]bool, len(files))
+		for name := range files {
+			if name != "OFD.xml" {
+				keep[name] = true
+			}
+		}
+		next.setEncryptedSource(src.filter(keep))
 	}
 	if err := next.initRootContext(ctx); err != nil {
 		return nil, err

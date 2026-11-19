@@ -126,7 +126,7 @@ func (e *Editor) DeleteRichText(page int, id string) error {
 			if err != nil {
 				return err
 			}
-			if err := e.DeleteStructure(entry.index); err != nil {
+			if err := e.deleteRichTextMetadata(page, id, entry); err != nil {
 				return err
 			}
 		}
@@ -380,9 +380,10 @@ type richTextSnapshot struct {
 
 // richTextEntry 保存标引入口及延迟报告的损坏诊断
 type richTextEntry struct {
-	index    int
-	metadata richTextMetadata
-	err      error
+	index     int
+	aggregate bool
+	metadata  richTextMetadata
+	err       error
 }
 
 // textLayoutEntry 保存普通文字的标引入口与可恢复排版语义
@@ -771,21 +772,42 @@ func (e *Editor) richTextMetadataIndex() *richTextIndex {
 			return index
 		}
 		root := structure.Root
-		entry := richTextEntry{index: i}
 		if root.Name != "RichText" || root.Namespace != richTextNamespace {
-			entry.err = fmt.Errorf("invalid rich text metadata root")
-		} else {
-			entry.err = json.Unmarshal([]byte(root.Text), &entry.metadata)
-		}
-		if entry.err == nil && (entry.metadata.Version != 1 || entry.metadata.Frame.X != 0 || entry.metadata.Frame.Y != 0 || !finite(entry.metadata.Frame.W) || !finite(entry.metadata.Frame.H) || entry.metadata.Frame.W <= 0 || entry.metadata.Frame.H <= 0 || len(entry.metadata.Digest) != 64) {
-			entry.err = fmt.Errorf("invalid rich text metadata version or frame")
-		}
-		if entry.err == nil {
-			meta := entry.metadata
-			if meta.Extent.X != 0 || meta.Extent.Y != 0 || !finite(meta.Extent.W) || !finite(meta.Extent.H) || meta.Extent.W <= 0 || meta.Extent.H <= 0 || !finite(meta.Offset[0]) || !finite(meta.Offset[1]) || meta.Offset[0] < 0 || meta.Offset[1] < 0 || meta.Offset[0] > meta.Extent.W || meta.Offset[1] > meta.Extent.H || len(meta.Anchors) != len(meta.Value.Runs) {
-				entry.err = fmt.Errorf("invalid rich text metadata extent or anchors")
+			entry := richTextEntry{index: i, err: fmt.Errorf("invalid rich text metadata root")}
+			for _, child := range root.Children {
+				for _, ref := range child.References {
+					for _, id := range ref.ObjectIDs {
+						key := editorResourceID(ref.PageID) + "/" + editorResourceID(id)
+						index.entries[key] = entry
+					}
+				}
 			}
+			continue
 		}
+		if isRichTextAggregateRoot(root) {
+			for _, item := range root.Children {
+				entry := richTextEntry{index: i, aggregate: true}
+				if item.Name != "Entry" || item.Namespace != richTextNamespace {
+					entry.err = fmt.Errorf("invalid rich text metadata entry")
+				} else {
+					entry.err = parseRichTextMetadata(item.Text, &entry.metadata)
+				}
+				for _, child := range item.Children {
+					for _, ref := range child.References {
+						for _, id := range ref.ObjectIDs {
+							key := editorResourceID(ref.PageID) + "/" + editorResourceID(id)
+							if _, exists := index.entries[key]; exists {
+								entry.err = fmt.Errorf("ambiguous rich text metadata")
+							}
+							index.entries[key] = entry
+						}
+					}
+				}
+			}
+			continue
+		}
+		entry := richTextEntry{index: i}
+		entry.err = parseRichTextMetadata(root.Text, &entry.metadata)
 		for _, child := range root.Children {
 			for _, ref := range child.References {
 				for _, id := range ref.ObjectIDs {
@@ -825,7 +847,7 @@ func (e *Editor) richTextMetadataIndex() *richTextIndex {
 	return index
 }
 
-// putRichTextMetadata 添加或替换带有标准标引引用的富文本语义
+// putRichTextMetadata 添加或替换带有标准标引引用的富文本语义，新条目聚合到统一富文本标引文件
 // 入参: page 页面索引, id 对象标识, meta 编辑信息, index 原入口或-1
 // 返回: error 编码或提交错误
 func (e *Editor) putRichTextMetadata(page int, id string, meta richTextMetadata, index int) error {
@@ -833,11 +855,14 @@ func (e *Editor) putRichTextMetadata(page int, id string, meta richTextMetadata,
 	if err != nil {
 		return err
 	}
-	root := StructureNode{Name: "RichText", Namespace: richTextNamespace, Text: string(data)}
 	if index >= 0 {
+		if handled, err := e.updateRichTextAggregateMetadata(page, id, data, index); err != nil || handled {
+			return err
+		}
+		root := StructureNode{Name: "RichText", Namespace: richTextNamespace, Text: string(data)}
 		separate := false
-		err := e.editStructure(index, func(data []byte, node *editorXML, tag CustomTag) ([]byte, error) {
-			updated, err := rewriteStructureReferences(context.Background(), data, tag, func(pageID string, ids []string) (string, []string, error) {
+		err := e.editStructure(index, func(raw []byte, node *editorXML, tag CustomTag) ([]byte, error) {
+			updated, err := rewriteStructureReferences(context.Background(), raw, tag, func(pageID string, ids []string) (string, []string, error) {
 				var remaining []string
 				for _, objectID := range ids {
 					if editorResourceID(pageID) != editorResourceID(e.pages[page].ID) || editorResourceID(objectID) != editorResourceID(id) {
@@ -850,15 +875,462 @@ func (e *Editor) putRichTextMetadata(page int, id string, meta richTextMetadata,
 			if err != nil || separate {
 				return updated, err
 			}
-			return updateStructureNodeXML(data, node, root)
+			return updateStructureNodeXML(raw, node, root)
 		})
 		if err != nil || !separate {
 			return err
 		}
 	}
-	root.Children = []StructureNode{{Name: "ObjectRef", Namespace: richTextNamespace, Attributes: []StructureAttribute{{Name: "PageRef", Value: e.pages[page].ID}}, Text: id}}
-	_, err = e.AddStructure(CustomTag{TypeID: richTextTagType, NameSpace: richTextNamespace}, root)
-	return err
+	return e.appendRichTextAggregateMetadata(page, id, data)
+}
+
+// isRichTextAggregateRoot 判断富文本标引根节点是否采用多条目聚合结构
+// 入参: root 标引根节点
+// 返回: bool 是否为聚合格式
+func isRichTextAggregateRoot(root *StructureNode) bool {
+	if root == nil || strings.TrimSpace(root.Text) != "" || len(root.Children) == 0 {
+		return false
+	}
+	for _, child := range root.Children {
+		if child.Name == "ObjectRef" && child.Namespace == richTextNamespace {
+			return false
+		}
+	}
+	return true
+}
+
+// parseRichTextMetadata 解码并校验单条富文本语义JSON
+// 入参: text 原始JSON文本, meta 输出结构
+// 返回: error 解码或字段范围错误
+func parseRichTextMetadata(text string, meta *richTextMetadata) error {
+	if err := json.Unmarshal([]byte(text), meta); err != nil {
+		return err
+	}
+	if meta.Version != 1 || meta.Frame.X != 0 || meta.Frame.Y != 0 || !finite(meta.Frame.W) || !finite(meta.Frame.H) || meta.Frame.W <= 0 || meta.Frame.H <= 0 || len(meta.Digest) != 64 {
+		return fmt.Errorf("invalid rich text metadata version or frame")
+	}
+	if meta.Extent.X != 0 || meta.Extent.Y != 0 || !finite(meta.Extent.W) || !finite(meta.Extent.H) || meta.Extent.W <= 0 || meta.Extent.H <= 0 || !finite(meta.Offset[0]) || !finite(meta.Offset[1]) || meta.Offset[0] < 0 || meta.Offset[1] < 0 || meta.Offset[0] > meta.Extent.W || meta.Offset[1] > meta.Extent.H || len(meta.Anchors) != len(meta.Value.Runs) {
+		return fmt.Errorf("invalid rich text metadata extent or anchors")
+	}
+	return nil
+}
+
+// encodeRichTextEntryFragment 编码聚合富文本标引内的单条Entry片段
+// 入参: pageID 页面标识, objectID 对象标识, payload 序列化后的元数据JSON
+// 返回: []byte Entry XML片段, error 转义错误
+func encodeRichTextEntryFragment(pageID, objectID string, payload []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.Grow(len(payload) + 96)
+	buf.WriteString("<Entry>")
+	if err := xml.EscapeText(&buf, payload); err != nil {
+		return nil, err
+	}
+	buf.WriteString(`<ObjectRef PageRef="`)
+	if err := xml.EscapeText(&buf, []byte(pageID)); err != nil {
+		return nil, err
+	}
+	buf.WriteString(`">`)
+	if err := xml.EscapeText(&buf, []byte(objectID)); err != nil {
+		return nil, err
+	}
+	buf.WriteString("</ObjectRef></Entry>")
+	return buf.Bytes(), nil
+}
+
+// findRichTextAggregateTag 查找并缓存当前文档的统一内部富文本聚合标引文件
+// 入参: ctx 取消上下文, base 编辑包快照
+// 返回: string 文件路径, int 标引序号, bool 是否存在, error 读取或取消错误
+func (e *Editor) findRichTextAggregateTag(ctx context.Context, base *editorSource) (string, int, bool, error) {
+	if base.richTextTagKnown {
+		return base.richTextTagPath, base.richTextTagIndex, base.richTextTagPath != "", nil
+	}
+	tags, err := base.reader.CustomTagsContext(ctx)
+	if err != nil {
+		return "", -1, false, err
+	}
+	for i, tag := range tags {
+		if tag.TypeID != richTextTagType || tag.NameSpace != richTextNamespace || tag.SchemaLoc != "" {
+			continue
+		}
+		name := base.reader.ResPath(tag.FileLoc)
+		raw, readErr := base.reader.readFileViewContext(ctx, name)
+		if readErr != nil {
+			continue
+		}
+		root, parseErr := parseEditorXMLContext(ctx, raw)
+		if parseErr != nil || root.name.Local != "RichText" || root.name.Space != richTextNamespace {
+			continue
+		}
+		isAggregate := false
+		for _, child := range root.children {
+			if child.name.Local == "Entry" && child.name.Space == richTextNamespace {
+				isAggregate = true
+				break
+			}
+		}
+		if !isAggregate {
+			continue
+		}
+		shared := false
+		for j, other := range tags {
+			if j != i && base.reader.ResPath(other.FileLoc) == name {
+				shared = true
+				break
+			}
+		}
+		if shared {
+			continue
+		}
+		base.richTextTagPath = name
+		base.richTextTagIndex = i
+		base.richTextTagKnown = true
+		return name, i, true, nil
+	}
+	base.richTextTagPath = ""
+	base.richTextTagIndex = -1
+	base.richTextTagKnown = true
+	return "", -1, false, nil
+}
+
+// appendRichTextAggregateMetadata 将单条富文本语义追加到统一内部富文本标引文件，避免碎片XML
+// 入参: page 页面索引, id 对象标识, payload 元数据JSON
+// 返回: error 编码或提交错误
+func (e *Editor) appendRichTextAggregateMetadata(page int, id string, payload []byte) error {
+	ctx := context.Background()
+	base := e.source
+	var err error
+	if base == nil {
+		base, err = e.importBaseContext(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	pageID := e.pages[page].ID
+	fragment, err := encodeRichTextEntryFragment(pageID, id, payload)
+	if err != nil {
+		return err
+	}
+	objects := map[string]map[string]bool{editorResourceID(pageID): {editorResourceID(id): true}}
+	tagPath, tagIndex, found, err := e.findRichTextAggregateTag(ctx, base)
+	if err != nil {
+		return err
+	}
+	if found {
+		existing, err := base.reader.readFileViewContext(ctx, tagPath)
+		if err != nil {
+			return err
+		}
+		updated, ok := appendNamespacedXMLBeforeClosing(existing, "RichText", richTextNamespace, fragment)
+		if !ok {
+			root, parseErr := parseEditorXMLContext(ctx, existing)
+			if parseErr != nil {
+				return parseErr
+			}
+			if root.open == root.end {
+				updated = editorPatchXML(existing, []editorXMLPatch{editorXMLContent(existing, root, fragment)})
+			} else {
+				updated = editorPatchXML(existing, []editorXMLPatch{{root.close, root.close, fragment}})
+			}
+		}
+		if err := e.commitStructurePartsContext(ctx, base, map[string][]byte{tagPath: updated}, objects, tagIndex); err != nil {
+			return err
+		}
+		e.source.richTextTagPath = tagPath
+		e.source.richTextTagIndex = tagIndex
+		e.source.richTextTagKnown = true
+		return nil
+	}
+	var docBuf bytes.Buffer
+	docBuf.Grow(len(xml.Header) + len(richTextNamespace) + len(fragment) + 48)
+	docBuf.WriteString(xml.Header)
+	docBuf.WriteString(`<RichText xmlns="`)
+	docBuf.WriteString(richTextNamespace)
+	docBuf.WriteString(`">`)
+	docBuf.Write(fragment)
+	docBuf.WriteString("</RichText>")
+	tagData := docBuf.Bytes()
+	filePath := e.packageName("Tags/RichText.xml")
+	attrs := ofdAttrs{}
+	attrs.add("TypeID", richTextTagType)
+	attrs.add("NameSpace", richTextNamespace)
+	if base.document.CustomTags.Path != "" && base.customTagCountReady {
+		indexName := base.reader.ResPath(base.document.CustomTags.Path)
+		if existing, readErr := base.reader.readFileViewContext(ctx, indexName); readErr == nil {
+			entry, encErr := editorXMLContainer("CustomTag", attrs, editorXMLText("FileLoc", "/"+filePath))
+			if encErr == nil {
+				entry = bytes.TrimPrefix(entry, []byte(xml.Header))
+				if patched, ok := appendOFDXMLBeforeClosing(existing, "CustomTags", entry); ok {
+					idx := base.customTagCount
+					parts := map[string][]byte{filePath: tagData, indexName: patched}
+					if err := e.commitStructurePartsContext(ctx, base, parts, objects, idx); err != nil {
+						return err
+					}
+					e.source.customTagCount = idx + 1
+					e.source.customTagCountReady = true
+					e.source.richTextTagPath = filePath
+					e.source.richTextTagIndex = idx
+					e.source.richTextTagKnown = true
+					return nil
+				}
+			}
+		}
+	}
+	name, indexData, container, entries, err := editorStructureIndexContext(ctx, base, nil)
+	if err != nil {
+		return err
+	}
+	entry, err := container.containerXML("CustomTag", attrs, container.textXML("FileLoc", "/"+filePath))
+	if err != nil {
+		return err
+	}
+	parts := map[string][]byte{filePath: tagData}
+	if container.open != container.end {
+		entry = append(bytes.Clone(indexData[container.open:container.close]), entry...)
+	}
+	parts[name] = editorPatchXML(indexData, []editorXMLPatch{editorXMLContent(indexData, container, entry)})
+	if base.document.CustomTags.Path == "" && name != base.reader.documentRoot {
+		docName := base.reader.documentRoot
+		docData, err := base.reader.readFileViewContext(ctx, docName)
+		if err != nil {
+			return err
+		}
+		doc, err := parseEditorXMLContext(ctx, docData)
+		if err != nil {
+			return err
+		}
+		parts[docName], err = editorXMLSetText(docData, doc, [][2]string{{"CustomTags", "/" + name}})
+		if err != nil {
+			return err
+		}
+	}
+	idx := len(entries)
+	if err := e.commitStructurePartsContext(ctx, base, parts, objects, idx); err != nil {
+		return err
+	}
+	e.source.customTagCount = idx + 1
+	e.source.customTagCountReady = true
+	e.source.richTextTagPath = filePath
+	e.source.richTextTagIndex = idx
+	e.source.richTextTagKnown = true
+	return nil
+}
+
+// updateRichTextAggregateMetadata 更新聚合富文本标引文件中的指定条目，共享引用时自动拆出独立条目
+// 入参: page 页面索引, id 对象标识, payload 新元数据JSON, index 标引入口序号
+// 返回: bool 是否由聚合格式处理, error 读取或提交错误
+func (e *Editor) updateRichTextAggregateMetadata(page int, id string, payload []byte, index int) (bool, error) {
+	if e.source == nil {
+		return false, nil
+	}
+	ctx := context.Background()
+	tags, err := e.source.reader.CustomTagsContext(ctx)
+	if err != nil || index < 0 || index >= len(tags) {
+		return false, err
+	}
+	tag := tags[index]
+	name := e.source.reader.ResPath(tag.FileLoc)
+	raw, err := e.source.reader.readFileViewContext(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	root, err := parseEditorXMLContext(ctx, raw)
+	if err != nil {
+		return false, err
+	}
+	hasEntry := false
+	for _, child := range root.children {
+		if child.name.Local == "Entry" && child.name.Space == richTextNamespace {
+			hasEntry = true
+			break
+		}
+	}
+	if !hasEntry {
+		return false, nil
+	}
+	pageID := e.pages[page].ID
+	targetPage, targetObj := editorResourceID(pageID), editorResourceID(id)
+	fragment, err := encodeRichTextEntryFragment(pageID, id, payload)
+	if err != nil {
+		return true, err
+	}
+	var patches []editorXMLPatch
+	matched := false
+	separated := false
+	for _, entryNode := range root.children {
+		if entryNode.name.Local != "Entry" || entryNode.name.Space != richTextNamespace {
+			continue
+		}
+		var refPatches []editorXMLPatch
+		hasTarget, hasOther := false, false
+		for _, child := range entryNode.children {
+			if child.name.Local != "ObjectRef" || child.name.Space != richTextNamespace {
+				continue
+			}
+			refPage := child.attr("PageRef")
+			ids := structureObjectIDs(editorImportText(raw, child))
+			var kept []string
+			changed := false
+			for _, objID := range ids {
+				if editorResourceID(refPage) == targetPage && editorResourceID(objID) == targetObj {
+					hasTarget = true
+					changed = true
+				} else {
+					hasOther = true
+					kept = append(kept, objID)
+				}
+			}
+			if changed {
+				if len(kept) == 0 {
+					refPatches = append(refPatches, editorXMLPatch{start: child.start, end: child.end})
+				} else {
+					refPatches = append(refPatches, editorXMLContent(raw, child, []byte(strings.Join(kept, ","))))
+				}
+			}
+		}
+		if !hasTarget {
+			continue
+		}
+		matched = true
+		if !hasOther {
+			patches = append(patches, editorXMLPatch{start: entryNode.start, end: entryNode.end, data: fragment})
+		} else {
+			patches = append(patches, refPatches...)
+			separated = true
+		}
+	}
+	if !matched || separated {
+		patches = append(patches, editorXMLPatch{start: root.close, end: root.close, data: fragment})
+	}
+	updated := editorPatchXML(raw, patches)
+	parts := make(map[string][]byte)
+	for i, other := range tags {
+		if i != index && e.source.reader.ResPath(other.FileLoc) == name {
+			indexName, indexData, _, entries, idxErr := editorStructureIndexContext(ctx, e.source, nil)
+			if idxErr != nil {
+				return true, idxErr
+			}
+			name = e.packageName("Tags/RichText.xml")
+			loc := entries[index].child("FileLoc")
+			if loc == nil {
+				return true, fmt.Errorf("custom tag requires FileLoc")
+			}
+			var value bytes.Buffer
+			_ = xml.EscapeText(&value, []byte("/"+name))
+			parts[indexName] = editorPatchXML(indexData, []editorXMLPatch{editorXMLContent(indexData, loc, value.Bytes())})
+			break
+		}
+	}
+	parts[name] = updated
+	objects := map[string]map[string]bool{targetPage: {targetObj: true}}
+	if err := e.commitStructurePartsContext(ctx, e.source, parts, objects, index); err != nil {
+		return true, err
+	}
+	e.source.richTextTagPath = name
+	e.source.richTextTagIndex = index
+	e.source.richTextTagKnown = true
+	return true, nil
+}
+
+// deleteRichTextMetadata 删除单个富文本标引条目，聚合文件仅剔除目标条目并在清空时移除入口
+// 入参: page 页面索引, id 对象标识, entry 目标富文本标引记录
+// 返回: error 删除或提交错误
+func (e *Editor) deleteRichTextMetadata(page int, id string, entry richTextEntry) error {
+	if !entry.aggregate {
+		return e.DeleteStructure(entry.index)
+	}
+	ctx := context.Background()
+	tags, err := e.source.reader.CustomTagsContext(ctx)
+	if err != nil || entry.index < 0 || entry.index >= len(tags) {
+		return err
+	}
+	tag := tags[entry.index]
+	name := e.source.reader.ResPath(tag.FileLoc)
+	raw, err := e.source.reader.readFileViewContext(ctx, name)
+	if err != nil {
+		return err
+	}
+	root, err := parseEditorXMLContext(ctx, raw)
+	if err != nil {
+		return err
+	}
+	targetPage, targetObj := editorResourceID(e.pages[page].ID), editorResourceID(id)
+	var patches []editorXMLPatch
+	remainingEntries := 0
+	for _, entryNode := range root.children {
+		if entryNode.name.Local != "Entry" || entryNode.name.Space != richTextNamespace {
+			continue
+		}
+		var refPatches []editorXMLPatch
+		hasTarget, hasOther := false, false
+		for _, child := range entryNode.children {
+			if child.name.Local != "ObjectRef" || child.name.Space != richTextNamespace {
+				continue
+			}
+			refPage := child.attr("PageRef")
+			ids := structureObjectIDs(editorImportText(raw, child))
+			var kept []string
+			changed := false
+			for _, objID := range ids {
+				if editorResourceID(refPage) == targetPage && editorResourceID(objID) == targetObj {
+					hasTarget = true
+					changed = true
+				} else {
+					hasOther = true
+					kept = append(kept, objID)
+				}
+			}
+			if changed {
+				if len(kept) == 0 {
+					refPatches = append(refPatches, editorXMLPatch{start: child.start, end: child.end})
+				} else {
+					refPatches = append(refPatches, editorXMLContent(raw, child, []byte(strings.Join(kept, ","))))
+				}
+			}
+		}
+		if !hasTarget {
+			remainingEntries++
+			continue
+		}
+		if !hasOther {
+			patches = append(patches, editorXMLPatch{start: entryNode.start, end: entryNode.end})
+		} else {
+			patches = append(patches, refPatches...)
+			remainingEntries++
+		}
+	}
+	if remainingEntries == 0 {
+		return e.DeleteStructure(entry.index)
+	}
+	if len(patches) == 0 {
+		return nil
+	}
+	updated := editorPatchXML(raw, patches)
+	parts := make(map[string][]byte)
+	for i, other := range tags {
+		if i != entry.index && e.source.reader.ResPath(other.FileLoc) == name {
+			indexName, indexData, _, entries, idxErr := editorStructureIndexContext(ctx, e.source, nil)
+			if idxErr != nil {
+				return idxErr
+			}
+			name = e.packageName("Tags/RichText.xml")
+			loc := entries[entry.index].child("FileLoc")
+			if loc == nil {
+				return fmt.Errorf("custom tag requires FileLoc")
+			}
+			var value bytes.Buffer
+			_ = xml.EscapeText(&value, []byte("/"+name))
+			parts[indexName] = editorPatchXML(indexData, []editorXMLPatch{editorXMLContent(indexData, loc, value.Bytes())})
+			break
+		}
+	}
+	parts[name] = updated
+	if err := e.commitStructurePartsContext(ctx, e.source, parts, nil, entry.index); err != nil {
+		return err
+	}
+	e.source.richTextTagPath = name
+	e.source.richTextTagIndex = entry.index
+	e.source.richTextTagKnown = true
+	return nil
 }
 
 // lookupTextLayout 按页面标识、图元标识及定位摘要匹配普通文字排版语义
@@ -2309,6 +2781,19 @@ func richTextTagsFontSafe(ctx context.Context, reader *Reader, index int) (bool,
 			root := structure.Root
 			if root.Name != "RichText" || root.Namespace != richTextNamespace || len(root.Attributes) != 0 {
 				return false, nil
+			}
+			if isRichTextAggregateRoot(root) {
+				for _, item := range root.Children {
+					if item.Name != "Entry" || item.Namespace != richTextNamespace || len(item.Attributes) != 0 || !richTextMetadataFontSafe(item.Text) {
+						return false, nil
+					}
+					for _, child := range item.Children {
+						if child.Name != "ObjectRef" || child.Namespace != richTextNamespace || len(child.Children) != 0 || len(child.Attributes) != 1 || child.Attributes[0].Namespace != "" || child.Attributes[0].Name != "PageRef" {
+							return false, nil
+						}
+					}
+				}
+				continue
 			}
 			if !richTextMetadataFontSafe(root.Text) {
 				return false, nil

@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"maps"
 	"reflect"
@@ -42,10 +43,13 @@ type compressionPatternUse struct {
 	paint               *compressionPatternPaint
 }
 
-// compressPatternPaints 将新文档中重复的大底纹颜色提取为绘制参数，仅修改输出快照
+// compressPatternPaints 将重复的大底纹颜色提取为绘制参数，仅修改输出快照且跳过受签名保护内容
 // 返回: error 编码或取消错误
 func (e *Editor) compressPatternPaints() error {
-	if e.output == nil || e.output.options.Mode == CompressionUnchanged || e.output.protected || e.source != nil && !e.source.fromNew {
+	if e.output == nil || e.output.options.Mode == CompressionUnchanged || e.output.protected {
+		return nil
+	}
+	if e.source != nil && e.source.reader != nil && e.output.protectedDocs[e.source.reader.documentIndex] {
 		return nil
 	}
 	if e.source != nil {
@@ -54,6 +58,25 @@ func (e *Editor) compressPatternPaints() error {
 		e.source = &source
 		e.pages = slices.Clone(e.pages)
 		for index := range e.pages {
+			if err := e.output.ctx.Err(); err != nil {
+				return err
+			}
+			pageID := e.pages[index].ID
+			if srcPage := e.source.pages[pageID]; srcPage != nil {
+				loc := cleanPackagePath(e.source.reader.ResPath(srcPage.ref.BaseLoc))
+				if e.output.protectedFiles[loc] {
+					continue
+				}
+				if srcPage.original == nil {
+					raw, err := e.source.reader.readFileViewContext(e.output.ctx, loc)
+					if err != nil {
+						return err
+					}
+					if !bytes.Contains(raw, []byte("Pattern")) {
+						continue
+					}
+				}
+			}
 			if err := e.loadSourcePageContext(e.output.ctx, index); err != nil {
 				return err
 			}
@@ -62,6 +85,19 @@ func (e *Editor) compressPatternPaints() error {
 	paints := make(map[[32]byte]*compressionPatternPaint)
 	var uses []compressionPatternUse
 	for pi, page := range e.pages {
+		if len(page.pageResources) > 0 {
+			continue
+		}
+		if e.source != nil {
+			if srcPage := e.source.pages[page.ID]; srcPage != nil {
+				if e.output.protectedFiles[cleanPackagePath(e.source.reader.ResPath(srcPage.ref.BaseLoc))] {
+					continue
+				}
+				if srcPage.original != nil && len(srcPage.original.pageResources) > 0 {
+					continue
+				}
+			}
+		}
 		for li, layer := range page.Content.Layer {
 			if layer.DrawParam != "" {
 				continue
@@ -72,6 +108,11 @@ func (e *Editor) compressPatternPaints() error {
 				}
 				if len(uses) == compressionPatternUses {
 					break
+				}
+				if origin := e.objectOrigin(editorObjectID(object)); origin != nil {
+					if origin.node == nil || !editorXMLTransformable(origin.node) || origin.reason != nil || origin.node.attr("DrawParam") != "" {
+						continue
+					}
 				}
 				fill, stroke := compressionObjectPattern(object)
 				if fill == nil && stroke == nil {
@@ -115,6 +156,9 @@ func (e *Editor) compressPatternPaints() error {
 			continue
 		}
 		if !copied {
+			if err := e.prepareSourceIDsContext(e.output.ctx); err != nil {
+				return err
+			}
 			e.pages = slices.Clone(e.pages)
 			e.resources = slices.Clone(e.resources)
 			copied = true

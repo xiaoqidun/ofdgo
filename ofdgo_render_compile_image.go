@@ -50,6 +50,22 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 	if err != nil {
 		return err
 	}
+	var border PathObject
+	hasBorder := object.Border != nil
+	if hasBorder {
+		border = imageBorderObject(object, box)
+		if border.LineWidth == 0 {
+			hasBorder = false
+		}
+	}
+	useGroup := !c.measure && hasBorder && object.Alpha != nil && clampColor(*object.Alpha) < 255
+	imgAlpha := object.Alpha
+	if useGroup {
+		c.BeginTransparencyGroup(uint8(clampColor(*object.Alpha)))
+		defer c.EndTransparencyGroup()
+		imgAlpha = nil
+		border.Alpha = nil
+	}
 	if c.measure {
 		path, err := c.geometry.Transform(GeometryPath(basegeom.Rectangle(Box{W: 1, H: 1})), matrix)
 		if err != nil {
@@ -71,7 +87,7 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 		if err != nil {
 			return err
 		}
-		img, err = imageWithEffects(c.renderer.pageContext, img, mask, object.Alpha)
+		img, err = imageWithEffects(c.renderer.pageContext, img, mask, imgAlpha)
 		if err != nil {
 			return err
 		}
@@ -81,11 +97,7 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 			return err
 		}
 	}
-	if object.Border != nil {
-		border := imageBorderObject(object, box)
-		if border.LineWidth == 0 {
-			return nil
-		}
+	if hasBorder {
 		borderClip, err := c.renderer.imageBorderClip(object.Clips, object.Boundary, local, state)
 		if err != nil {
 			return err
@@ -194,17 +206,19 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				command.Transform = RasterMatrix(matrix.Multiply(MatrixFromValues([6]float64(command.Transform))).Values())
-				if command.Stroke != nil {
-					stroke := *command.Stroke
-					scale := math.Sqrt(math.Abs(matrix.a*matrix.d - matrix.b*matrix.c))
-					stroke.Width *= scale
-					stroke.DashOffset *= scale
-					stroke.Dashes = slices.Clone(stroke.Dashes)
-					for i := range stroke.Dashes {
-						stroke.Dashes[i] *= scale
+				if command.Group == RasterGroupNone {
+					command.Transform = RasterMatrix(matrix.Multiply(MatrixFromValues([6]float64(command.Transform))).Values())
+					if command.Stroke != nil {
+						stroke := *command.Stroke
+						scale := math.Sqrt(math.Abs(matrix.a*matrix.d - matrix.b*matrix.c))
+						stroke.Width *= scale
+						stroke.DashOffset *= scale
+						stroke.Dashes = slices.Clone(stroke.Dashes)
+						for i := range stroke.Dashes {
+							stroke.Dashes[i] *= scale
+						}
+						command.Stroke = &stroke
 					}
-					command.Stroke = &stroke
 				}
 				if command.Clip != nil {
 					rasterMat := RasterMatrix(matrix.Values())

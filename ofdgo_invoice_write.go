@@ -295,11 +295,11 @@ func ValidateInvoice(ctx context.Context, value Invoice) ([]InvoiceIssue, error)
 			return nil, err
 		}
 		for _, field := range []invoiceWriteField{{"Quantity", item.Quantity}, {"UnitPrice", item.UnitPrice}, {"Amount", item.Amount}, {"TaxAmount", item.TaxAmount}} {
-			if field.value != "" && invoiceDecimal(field.value) == nil {
+			if strings.TrimSpace(field.value) != "" && invoiceDecimal(field.value) == nil {
 				add("invalid-decimal", fmt.Sprintf("Items[%d].%s", i, field.name), "invalid decimal lexical value")
 			}
 		}
-		if value.Standard == InvoiceStandardEInvoice && item.TaxRate != "" && invoiceDecimal(item.TaxRate) == nil {
+		if value.Standard == InvoiceStandardEInvoice && !invoiceEInvoiceTaxRateValid(item.TaxRate) {
 			add("invalid-decimal", fmt.Sprintf("Items[%d].TaxRate", i), "invalid decimal lexical value")
 		}
 	}

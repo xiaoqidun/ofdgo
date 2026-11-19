@@ -7,10 +7,10 @@ require (
 	github.com/emmansun/gmsm v0.45.3
 	github.com/go-text/typesetting v0.3.5
 	github.com/tdewolff/canvas v0.0.0-20261118111642-891200a8cf2b
-	github.com/xiaoqidun/guigo v0.0.0-20261110054647-31d2a81b8610
-	github.com/xiaoqidun/j2kgo v1.0.2
-	github.com/xiaoqidun/jbig2 v1.1.9
-	github.com/xiaoqidun/pdfgo v0.0.0-20261119145355-c6b3307c899a
+	github.com/xiaoqidun/guigo v0.0.0-20261119185121-8562607287f4
+	github.com/xiaoqidun/j2kgo v1.0.3
+	github.com/xiaoqidun/jbig2 v1.1.10
+	github.com/xiaoqidun/pdfgo v0.0.0-20261119185603-c36ffbd37777
 	golang.org/x/image v0.48.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/text v0.44.0

@@ -25,7 +25,9 @@ import (
 	"image/jpeg"
 	"io"
 	"math"
+	"runtime"
 	"strconv"
+	"sync"
 
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers/pdf"
@@ -149,8 +151,78 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		}
 		renderer.information[field.key] = encoded
 	}
+	type pdfPrefetchResult struct {
+		content *PageContent
+		err     error
+	}
+	prefetchCtx, prefetchCancel := context.WithCancel(ctx)
+	var prefetchWG sync.WaitGroup
+	var prefetchJobs chan int
+	var prefetchSlots []chan pdfPrefetchResult
+	prefetchNext := 1
+	prefetchWindow := 0
+	stopPrefetch := func() {
+		prefetchCancel()
+		if prefetchJobs != nil {
+			close(prefetchJobs)
+			prefetchJobs = nil
+		}
+		prefetchWG.Wait()
+	}
+	defer stopPrefetch()
 	for i, page := range pages {
-		content, err := page.ReadContent(ctx, r.Reader)
+		var content *PageContent
+		var err error
+		if i == 0 || prefetchSlots == nil {
+			content, err = page.ReadContent(ctx, r.Reader)
+			if i == 0 && err == nil && len(pages) > 1 && r.Reader != nil {
+				workers := min(len(pages)-1, min(max(1, runtime.GOMAXPROCS(0)), 4))
+				if workers > 1 {
+					forks := make([]*Reader, 0, workers)
+					for range workers {
+						fork, forkErr := r.Reader.Fork(prefetchCtx)
+						if forkErr != nil {
+							if ctx.Err() != nil {
+								return ctx.Err()
+							}
+							forks = nil
+							break
+						}
+						forks = append(forks, fork)
+					}
+					if len(forks) > 0 {
+						prefetchWindow = min(len(pages)-1, len(forks)*2)
+						prefetchJobs = make(chan int, prefetchWindow)
+						prefetchSlots = make([]chan pdfPrefetchResult, len(pages))
+						for k := 1; k < len(pages); k++ {
+							prefetchSlots[k] = make(chan pdfPrefetchResult, 1)
+						}
+						for _, fork := range forks {
+							prefetchWG.Add(1)
+							go func(reader *Reader) {
+								defer prefetchWG.Done()
+								for idx := range prefetchJobs {
+									c, e := pages[idx].ReadContent(prefetchCtx, reader)
+									prefetchSlots[idx] <- pdfPrefetchResult{content: c, err: e}
+								}
+							}(fork)
+						}
+						for prefetchNext < len(pages) && prefetchNext <= prefetchWindow {
+							prefetchJobs <- prefetchNext
+							prefetchNext++
+						}
+					}
+				}
+			}
+		} else {
+			res := <-prefetchSlots[i]
+			prefetchSlots[i] = nil
+			content, err = res.content, res.err
+			if prefetchJobs != nil && prefetchNext < len(pages) {
+				prefetchJobs <- prefetchNext
+				prefetchNext++
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("failed to read page %d: %w", i+1, err)
 		}
@@ -186,6 +258,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 			return err
 		}
 	}
+	stopPrefetch()
 	if doc != nil && !r.printing {
 		if err := navigation.addOutlines(doc.Outlines.OutlineElem, 0, navigation.bookmarks, navigation.pageIndex, pages); err != nil {
 			return err

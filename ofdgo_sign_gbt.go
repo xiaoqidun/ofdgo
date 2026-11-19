@@ -26,6 +26,8 @@ const (
 	signContentData = "1.2.156.10197.6.1.4.2.1"
 	// signContentSignedData GB/T35275签名数据内容类型对象标识
 	signContentSignedData = "1.2.156.10197.6.1.4.2.2"
+	// signContentCMSData 标准CMS数据内容类型对象标识
+	signContentCMSData = "1.2.840.113549.1.7.1"
 	// signAttrMessageDigest 消息摘要属性对象标识
 	signAttrMessageDigest = "1.2.840.113549.1.9.4"
 )
@@ -313,14 +315,14 @@ func verifyGBT35275SignedData(signedValue, signedData []byte, options *signature
 // 返回: []byte 定长编码数据, bool 是否为SignedData
 func normalizeGBT35275SignedValue(data []byte) ([]byte, bool) {
 	if contentType, ok := gbtContentType(data); ok {
-		return data, contentType == signContentSignedData
+		return data, contentType == signContentSignedData || contentType == signContentCMS
 	}
 	der, err := berToDefinite(data)
 	if err != nil {
 		return nil, false
 	}
 	contentType, ok := gbtContentType(der)
-	if !ok || contentType != signContentSignedData {
+	if !ok || contentType != signContentSignedData && contentType != signContentCMS {
 		return nil, false
 	}
 	return der, true
@@ -459,7 +461,7 @@ func parseGBT35275SignedData(data []byte) (*gbtSignedData, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !ok || contentType != signContentSignedData {
+	if !ok || contentType != signContentSignedData && contentType != signContentCMS {
 		return nil, fmt.Errorf("invalid signed data content type")
 	}
 	items, ok := asn1Children(content.Bytes)
@@ -475,7 +477,7 @@ func parseGBT35275SignedData(data []byte) (*gbtSignedData, error) {
 	if err != nil {
 		return nil, err
 	}
-	if contentOID != signContentData {
+	if contentOID != signContentData && contentOID != signContentCMSData {
 		return nil, fmt.Errorf("invalid signed data inner content type")
 	}
 	if hasContent {

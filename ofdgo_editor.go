@@ -90,6 +90,11 @@ type Editor struct {
 	objectIndices      map[string]*editorObjectIndex
 	richIndex          *richTextIndex
 	pageScope          []*parsedRes
+	nameCache          *editorNameCache
+	ownedReader        *Reader
+	ownedOwner         *Editor
+	ownedTx            *EditorChanges
+	ownedRevision      uint64
 }
 
 // NewEditor 创建空白文档，保存前至少添加一页
@@ -254,6 +259,9 @@ func (e *Editor) AddPage(width, height float64) (int, error) {
 	}
 	if err := e.prepareSourceIDs(); err != nil {
 		return 0, err
+	}
+	if e.maxID > maxUnitID-2 {
+		return 0, fmt.Errorf("MaxUnitID exceeds uint32 range")
 	}
 	e.pages = append(e.pages, PageContent{
 		ID:      e.nextID(),
@@ -846,6 +854,9 @@ func (e *Editor) addImage(ctx context.Context, data []byte, size image.Point, fo
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	if e.maxID >= maxUnitID {
+		return "", fmt.Errorf("MaxUnitID exceeds uint32 range")
+	}
 	id := e.nextID()
 	extension := format
 	if extension == "jpeg" {
@@ -934,9 +945,12 @@ func formatUnitID(id uint64) string {
 	return strconv.FormatUint(id, 10)
 }
 
-// nextID 分配文档内唯一标识
+// nextID 分配文档内唯一标识，达到ST_ID上限时触发panic防止静默溢出
 // 返回: string 对象标识
 func (e *Editor) nextID() string {
+	if e.maxID >= maxUnitID {
+		panic("ofdgo: MaxUnitID exceeds uint32 range")
+	}
 	e.maxID++
 	return formatUnitID(e.maxID)
 }

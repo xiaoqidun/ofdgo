@@ -147,15 +147,17 @@ func WithCompression(options CompressionOptions) RendererOption {
 
 // outputOptimization 保存单次写出的配置、图片路径及压缩进度，复用压缩器
 type outputOptimization struct {
-	ctx        context.Context
-	options    CompressionOptions
-	images     map[string]bool
-	sizes      map[string]image.Point
-	protected  bool
-	completed  int
-	deflater   *flate.Writer
-	resources  *editorResourceSelection
-	references *renderCache[editorScanKey, editorScanValue]
+	ctx            context.Context
+	options        CompressionOptions
+	images         map[string]bool
+	sizes          map[string]image.Point
+	protected      bool
+	protectedDocs  map[int]bool
+	protectedFiles map[string]bool
+	completed      int
+	deflater       *flate.Writer
+	resources      *editorResourceSelection
+	references     *renderCache[editorScanKey, editorScanValue]
 }
 
 // compressor 获取当前输出独占的压缩器，重置后不复用上一次编码状态
@@ -223,11 +225,13 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 		return &snapshot, nil
 	}
 	if e.source != nil {
-		protected, err := e.source.reader.hasOutputSignatures(ctx)
+		protectedDocs, protectedFiles, protected, err := e.source.reader.outputSignatureProtection(ctx)
 		if err != nil {
 			return nil, err
 		}
 		snapshot.output.protected = protected
+		snapshot.output.protectedDocs = protectedDocs
+		snapshot.output.protectedFiles = protectedFiles
 		if protected {
 			return &snapshot, nil
 		}
@@ -238,7 +242,7 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 			return nil, err
 		}
 		defer reader.Close()
-		snapshot.output.images, snapshot.output.sizes, err = reader.compressionImagePlan(ctx, options.Compression)
+		snapshot.output.images, snapshot.output.sizes, err = reader.compressionImagePlanProtected(ctx, options.Compression, snapshot.output.protectedDocs, snapshot.output.protectedFiles)
 		if err != nil {
 			return nil, err
 		}
@@ -398,6 +402,152 @@ func (r *Reader) hasOutputSignatures(ctx context.Context) (bool, error) {
 		}
 	}
 	return false, ctx.Err()
+}
+
+// outputSignatureProtection 细化多文档包的签名保护范围，未签名子文档允许正常压缩
+// 入参: ctx 取消上下文
+// 返回: map[int]bool 受签名文档索引, map[string]bool 受保护文件路径, bool 是否整包受保护, error 取消错误
+func (r *Reader) outputSignatureProtection(ctx context.Context) (map[int]bool, map[string]bool, bool, error) {
+	if r == nil || r.OFD == nil {
+		return nil, nil, false, ctx.Err()
+	}
+	var protectedDocs map[int]bool
+	for index, body := range r.OFD.DocBody {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, false, err
+		}
+		if body.Signatures != "" {
+			if protectedDocs == nil {
+				protectedDocs = make(map[int]bool)
+			}
+			protectedDocs[index] = true
+		}
+	}
+	if len(protectedDocs) == 0 {
+		return nil, nil, false, ctx.Err()
+	}
+	if len(protectedDocs) == len(r.OFD.DocBody) {
+		return protectedDocs, nil, true, ctx.Err()
+	}
+	protectedFiles := make(map[string]bool)
+	signedRefs := make(map[string]bool)
+	for docIndex := range protectedDocs {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, false, err
+		}
+		body := r.OFD.DocBody[docIndex]
+		sigListPath := cleanPackagePath(resolveResourcePath("OFD.xml", "", body.Signatures))
+		sigListData, err := r.readFileViewContext(ctx, sigListPath)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, false, ctx.Err()
+			}
+			return protectedDocs, nil, true, nil
+		}
+		var sigs Signatures
+		if err := xml.Unmarshal(sigListData, &sigs); err != nil {
+			return protectedDocs, nil, true, nil
+		}
+		protectedFiles[sigListPath] = true
+		signedRefs[sigListPath] = true
+		for _, item := range sigs.List {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, false, err
+			}
+			sigPath := cleanPackagePath(resolveResourcePath(sigListPath, "", item.BaseLoc))
+			sigData, err := r.readFileViewContext(ctx, sigPath)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, nil, false, ctx.Err()
+				}
+				return protectedDocs, nil, true, nil
+			}
+			var sigFile SignatureFile
+			if err := xml.Unmarshal(sigData, &sigFile); err != nil {
+				return protectedDocs, nil, true, nil
+			}
+			protectedFiles[sigPath] = true
+			signedRefs[sigPath] = true
+			if sigFile.SignedValue != "" {
+				target := cleanPackagePath(resolveResourcePath(sigPath, "", sigFile.SignedValue))
+				protectedFiles[target] = true
+				signedRefs[target] = true
+			}
+			if sigFile.SignedInfo.Seal.BaseLoc != "" {
+				target := cleanPackagePath(resolveResourcePath(sigPath, "", sigFile.SignedInfo.Seal.BaseLoc))
+				protectedFiles[target] = true
+				signedRefs[target] = true
+			}
+			for _, ref := range sigFile.SignedInfo.References.Reference {
+				if ref.FileRef == "" {
+					continue
+				}
+				target := cleanPackagePath(resolveResourcePath(sigPath, "", ref.FileRef))
+				protectedFiles[target] = true
+				signedRefs[target] = true
+			}
+		}
+		entry, err := r.documentEntryContext(ctx, docIndex)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, false, ctx.Err()
+			}
+			return protectedDocs, nil, true, nil
+		}
+		deps, structures, err := r.versionDependencies(ctx, entry, nil, nil)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, false, ctx.Err()
+			}
+			return protectedDocs, nil, true, nil
+		}
+		for dep := range deps {
+			protectedFiles[cleanPackagePath(dep)] = true
+		}
+		for name := range structures {
+			clean := cleanPackagePath(name)
+			if !signedRefs[clean] {
+				continue
+			}
+			data, err := r.readFileViewContext(ctx, clean)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, nil, false, ctx.Err()
+				}
+				return protectedDocs, nil, true, nil
+			}
+			root, err := parseEditorXMLContext(ctx, data)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, nil, false, ctx.Err()
+				}
+				return protectedDocs, nil, true, nil
+			}
+			if root.name.Local != "Res" {
+				continue
+			}
+			baseLoc := root.attr("BaseLoc")
+			for _, group := range root.children {
+				for _, node := range group.children {
+					for _, field := range [2]string{"FontFile", "MediaFile"} {
+						child := node.child(field)
+						if child == nil {
+							continue
+						}
+						var value string
+						if err := xml.Unmarshal(data[child.start:child.end], &value); err != nil {
+							return protectedDocs, nil, true, nil
+						}
+						target := editorResourceLocation(clean, baseLoc, value)
+						if target != "" && !signedRefs[target] {
+							return protectedDocs, nil, true, nil
+						}
+					}
+				}
+			}
+		}
+	}
+	return protectedDocs, protectedFiles, false, ctx.Err()
 }
 
 // writeOutputEntry 优化ZIP编码，保留资源名称及条目的未压缩字节

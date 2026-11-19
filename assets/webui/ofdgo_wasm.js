@@ -235,19 +235,19 @@ async function handleMessage(engine, { id, name, args }) {
 	let saveStamp;
 	let channel;
 	const signal = operations.get(id)?.signal;
-	const cancellable = ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoResources", "ofdgoPrepareSave", "ofdgoSaveSnapshot", "ofdgoImportDocuments", "ofdgoImportImages", "ofdgoExportImages", "ofdgoOpenPDF", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned", "ofdgoImportPages", "ofdgoProcessFonts"].includes(name);
+	const cancellable = ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoPagesText", "ofdgoResources", "ofdgoPrepareSave", "ofdgoSaveSnapshot", "ofdgoImportDocuments", "ofdgoImportImages", "ofdgoExportImages", "ofdgoOpenPDF", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned", "ofdgoImportPages", "ofdgoProcessFonts"].includes(name);
 	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages" || name === "ofdgoImportDocuments";
 	const converting = name === "ofdgoOpenPDF";
 	const processingFonts = name === "ofdgoProcessFonts";
 	const saving = name === "ofdgoSaveDocument" || name === "ofdgoSaveSnapshot" || name === "ofdgoSaveSigned";
-	const resources = ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoResources", "ofdgoPrepareSave"].includes(name);
+	const resources = ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPagesText", "ofdgoResources", "ofdgoPrepareSave"].includes(name);
 	if (engine.pdf) {
 		const checked = JSON.parse(await globalThis.ofdgoEngineCall(engine.id, "ofdgoCheckDocument", null, name));
 		if (!checked.ok) { postMessage({id, ...checked}); operations.delete(id); return; }
 	}
 	const key = name === "ofdgoOpen" ? args[3]?.key : name === "ofdgoSaveSigned" || name === "ofdgoLoadImport" ? args[1]?.key : null;
 	const keyPassword = name === "ofdgoOpen" ? args[3]?.keyPassword : name === "ofdgoSaveSigned" || name === "ofdgoLoadImport" ? args[1]?.keyPassword : null;
-	const password = converting ? args[2] : name === "ofdgoSetEncryption" ? args[0]?.password : name === "ofdgoOpen" ? args[3]?.password : name === "ofdgoLoadImport" ? args[1]?.password : null;
+	const password = converting ? args[2] : name === "ofdgoSetEncryption" ? args[0]?.password : name === "ofdgoOpen" ? args[3]?.password : name === "ofdgoLoadImport" ? args[1]?.password : name === "ofdgoSaveSigned" ? args[1]?.encryption?.password : null;
 	try {
 		signal?.throwIfAborted();
 		if (["ofdgoOpen", "ofdgoOpenPDF", "ofdgoLoadImport"].includes(name) && args[0] instanceof Blob) {
@@ -337,6 +337,8 @@ async function handleMessage(engine, { id, name, args }) {
 						postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
 						finish(done);
 					}, done => finish(done));
+				} else if (name === "ofdgoPrintPDF") {
+					args.push(done => finish(done));
 				} else if (saving) {
 					args.push((phase, completed, total, done) => {
 						postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
@@ -345,7 +347,7 @@ async function handleMessage(engine, { id, name, args }) {
 					if (compression || name === "ofdgoSaveSnapshot") args.push(indices, compression || {mode: 0}, done => finish(done));
 					else if (indices != null) args.push(indices);
 				}
-				if (!saving && args.some(value => value?.mode !== undefined)) args.push(done => finish(done));
+				if (!saving && name !== "ofdgoPrintPDF" && args.some(value => value?.mode !== undefined)) args.push(done => finish(done));
 			}
 		}
 		if (engine.pdf && name !== "ofdgoOpenPDF") {
@@ -370,7 +372,7 @@ async function handleMessage(engine, { id, name, args }) {
 		if (started !== null && result.ok) result.elapsed = performance.now() - started;
 		if (cancellable && !importing && !converting && !processingFonts && !resources && result.ok) {
 			result.data.size = size;
-			if (name !== "ofdgoExportMedia") postMessage({ id, type: "export", stage: "save" });
+			if (name !== "ofdgoExportMedia" && name !== "ofdgoPrintPDF") postMessage({ id, type: "export", stage: "save" });
 			if (output) {
 				if (saveStamp) {
 					const current = await saveFile.getFile();

@@ -195,7 +195,7 @@ func parseSESSignature(data []byte) (*sesSignature, error) {
 	if err != nil {
 		return nil, err
 	}
-	if version != 4 {
+	if version != 4 && version != 5 {
 		return nil, fmt.Errorf("unsupported ses version: %d", version)
 	}
 	var timestamp []byte

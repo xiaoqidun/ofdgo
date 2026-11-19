@@ -579,6 +579,9 @@ func (m *editorPageImport) resolve(name, base, value string) (string, error) {
 	if file, ok := m.reader.packageFile(candidate); ok {
 		return cleanPackagePath(file.Name), nil
 	}
+	if m.reader.encryptedSource().has(candidate) {
+		return candidate, nil
+	}
 	return "", fmt.Errorf("import reference %q in %s not found", value, name)
 }
 
@@ -1410,7 +1413,7 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 		files = make(map[string][]byte)
 	}
 	maps.Copy(files, parts)
-	reader := &Reader{Zip: base.reader.Zip, sourceFile: base.reader.sourceFile, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex, selectedVersion: base.reader.selectedVersion}
+	reader := &Reader{Zip: base.reader.Zip, encrypted: base.reader.encryptedSource(), sourceFile: base.reader.sourceFile, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex, selectedVersion: base.reader.selectedVersion}
 	if err := reader.initRoot(); err != nil {
 		return nil, err
 	}

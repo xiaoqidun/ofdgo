@@ -489,7 +489,11 @@ func (e *Editor) resolveBindingFont(ctx context.Context, scan *editorFontDocumen
 	}
 	reader := scan.fontReader
 	if reader == nil {
-		reader = &Reader{Zip: scan.reader.Zip, sourceFile: scan.reader.sourceFile, files: maps.Clone(scan.reader.files), documentIndex: scan.index}
+		resources := e.runtimeResources
+		if resources == nil {
+			resources = scan.reader.resources
+		}
+		reader = &Reader{Zip: scan.reader.Zip, encrypted: scan.reader.encryptedSource(), sourceFile: scan.reader.sourceFile, files: maps.Clone(scan.reader.files), documentIndex: scan.index, resources: resources}
 		if scan.index == scan.reader.documentIndex {
 			reader.selectedVersion = scan.reader.selectedVersion
 		}
@@ -539,7 +543,15 @@ func (e *Editor) commitResourceSnapshot(ctx context.Context, reader *Reader) err
 	if sourceFile == nil {
 		sourceFile = e.sourceFile
 	}
-	clean := &Reader{Zip: reader.Zip, sourceFile: sourceFile, files: maps.Clone(reader.files), documentIndex: reader.DocumentIndex(), encryption: e.encryption, selectedVersion: reader.selectedVersion}
+	resources := e.runtimeResources
+	if resources == nil {
+		resources = reader.resources
+	}
+	pdfDest := e.pdfDestinations.clone()
+	if pdfDest == nil {
+		pdfDest = reader.pdfDestinations.clone()
+	}
+	clean := &Reader{Zip: reader.Zip, encrypted: reader.encryptedSource(), sourceFile: sourceFile, files: maps.Clone(reader.files), documentIndex: reader.DocumentIndex(), encryption: e.encryption, selectedVersion: reader.selectedVersion, resources: resources, pdfDestinations: pdfDest}
 	if err := clean.initRootContext(ctx); err != nil {
 		return err
 	}
@@ -557,9 +569,11 @@ func (e *Editor) commitResourceSnapshot(ctx context.Context, reader *Reader) err
 		return err
 	}
 	before := e.transactionSnapshot()
+	before.pdfDestinations = e.pdfDestinations.clone()
 	e.restoreResourceSnapshot(*next)
 	if change := e.recordChange(); change != nil {
 		after := e.transactionSnapshot()
+		after.pdfDestinations = e.pdfDestinations.clone()
 		before.history, after.history = nil, nil
 		change.undo = func(e *Editor) {
 			after.retainDocumentResources(e)
@@ -806,7 +820,13 @@ func (e *Editor) matchesRegisteredResource(ctx context.Context, source *Editor, 
 // restoreResourceSnapshot 恢复资源修改前后的包状态，保留运行配置与撤销队列
 // 入参: state 包快照
 func (e *Editor) restoreResourceSnapshot(state Editor) {
+	dest := state.pdfDestinations
 	state = state.transactionSnapshot()
+	if dest != nil {
+		state.pdfDestinations = dest.clone()
+	} else {
+		state.pdfDestinations = e.pdfDestinations.clone()
+	}
 	state.history, state.historyIndex, state.historyLimit = e.history, e.historyIndex, e.historyLimit
 	state.serial, state.revision = e.serial, e.revision
 	if !sameBackend(state.backends.FontResources, e.backends.FontResources) {
@@ -857,7 +877,7 @@ func fontBindingFile(ctx context.Context, reader *Reader, pending map[string][]b
 		if !occupied {
 			existing, occupied = reader.files[candidate]
 			if !occupied {
-				_, occupied = reader.packageFile(candidate)
+				occupied = reader.hasPackageFile(candidate)
 				if occupied {
 					var err error
 					existing, err = reader.readFileViewContext(ctx, candidate)

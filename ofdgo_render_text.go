@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 
@@ -134,10 +135,13 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 	bold := weight >= 700
 	if definition := r.fontDefinition(id); definition != nil {
 		bold = bold && !definition.Bold
-		if definition.FontFile == "" && basefont.NoSyntheticBold(definition.FontName, definition.FamilyName) {
+		if basefont.NoSyntheticBold(definition.FontName, definition.FamilyName) {
 			bold = false
 		}
 		italic = italic && !definition.Italic
+	}
+	if bold && preparedFontBold(prepared, metrics) {
+		bold = false
 	}
 	ascent, descent, _ := metrics.VerticalMetrics()
 	unit := size / float64(metrics.UnitsPerEm())
@@ -470,4 +474,34 @@ func renderObjectMatrix(boundary string, local Matrix, state RenderState) (Matri
 		matrix = state.Parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(local)
 	}
 	return matrix, linear
+}
+
+// sfntTablesBold 依据字体自身OS/2字重与head粗体标志判定是否本身已是粗体
+// 入参: tables OpenType字表映射
+// 返回: bool 字体本身是否为粗体
+func sfntTablesBold(tables map[string][]byte) bool {
+	if os2 := tables["OS/2"]; len(os2) >= 6 && binary.BigEndian.Uint16(os2[4:6]) >= 700 {
+		return true
+	}
+	if head := tables["head"]; len(head) >= 46 && binary.BigEndian.Uint16(head[44:46])&1 != 0 {
+		return true
+	}
+	return false
+}
+
+// preparedFontBold 读取已准备字体的OpenType表以判定字库本身是否为粗体
+// 入参: prepared 已准备字体, metrics 字体度量
+// 返回: bool 字体本身是否为粗体
+func preparedFontBold(prepared *PreparedFont, metrics FontMetrics) bool {
+	if sfnt, ok := metrics.(*sfntFontMetrics); ok && sfnt != nil && sfnt.SFNT != nil {
+		return sfntTablesBold(sfnt.Tables)
+	}
+	if prepared == nil || len(prepared.Data) == 0 {
+		return false
+	}
+	tables, err := basefont.FileTables(prepared.Data, 0)
+	if err != nil {
+		return false
+	}
+	return sfntTablesBold(tables)
 }

@@ -83,7 +83,7 @@ func (e *Editor) ImportDocumentsContext(ctx context.Context, source *Reader, ind
 		return []int{}, ctx.Err()
 	}
 	migration := &editorDocumentImport{ctx: ctx, source: source, files: make(map[string]*versionEditFile),
-		kinds: make(map[string]int), progress: editorProgress(options.OnProgress).withContext(ctx)}
+		borrowed: make(map[string]bool), kinds: make(map[string]int), progress: editorProgress(options.OnProgress).withContext(ctx)}
 	if err := migration.progress.report("documents", 0, len(indexes)); err != nil {
 		return nil, err
 	}
@@ -156,7 +156,11 @@ func (e *Editor) ImportDocumentsContext(ctx context.Context, source *Reader, ind
 			if paths[name] != "" {
 				location = paths[name]
 			}
-			reader.files[location] = bytes.Clone(content)
+			if migration.borrowed[name] && len(content) == len(file.data) && (len(content) == 0 || &content[0] == &file.data[0]) {
+				content = bytes.Clone(content)
+			}
+			reader.files[location] = content
+			file.data = nil
 		}
 		updated, err := entry.rewrite(ctx, paths)
 		if err != nil {
@@ -200,6 +204,7 @@ type editorDocumentImport struct {
 	ctx      context.Context
 	source   *Reader
 	files    map[string]*versionEditFile
+	borrowed map[string]bool
 	kinds    map[string]int
 	queue    []string
 	progress editorProgress
@@ -296,8 +301,9 @@ func (m *editorDocumentImport) load(structuresOnly bool) error {
 		}
 		file := m.files[name]
 		if file == nil {
-			if _, cached := m.source.files[name]; !cached {
-				if _, exists := m.source.packageFile(name); !exists {
+			_, cached := m.source.files[name]
+			if !cached {
+				if _, exists := m.source.packageFile(name); !exists && !m.source.encryptedSource().has(name) {
 					continue
 				}
 			}
@@ -307,6 +313,9 @@ func (m *editorDocumentImport) load(structuresOnly bool) error {
 			}
 			file = &versionEditFile{reader: m.source, name: name, data: data}
 			m.files[name] = file
+			if cached && m.borrowed != nil {
+				m.borrowed[name] = true
+			}
 		}
 		if m.kinds[name] == packageReferenceXML && !parsed[name] {
 			parsed[name] = true

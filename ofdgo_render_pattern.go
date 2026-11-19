@@ -154,6 +154,10 @@ func (c *semanticCompiler) patternCell(pattern *PatternPaint, matrix Matrix) ([]
 // 返回: error 裁剪合并错误
 func (c *semanticCompiler) appendClippedCommands(commands []RasterCommand, clip GeometryPath, segments []RasterSegment) error {
 	for _, command := range commands {
+		if command.Group != RasterGroupNone {
+			c.page.Commands = append(c.page.Commands, command)
+			continue
+		}
 		commandClip := segments
 		if command.Clip != nil {
 			path := geometryFromRaster(command.Clip)
@@ -213,8 +217,10 @@ func translatePatternCommands(commands []RasterCommand, x, y float64) []RasterCo
 	result := slices.Clone(commands)
 	for i := range result {
 		command := &result[i]
-		command.Transform[4] += x
-		command.Transform[5] += y
+		if command.Group == RasterGroupNone {
+			command.Transform[4] += x
+			command.Transform[5] += y
+		}
 		if command.Clip != nil {
 			command.Clip = slices.Clone(command.Clip)
 			matrix := RasterMatrix{1, 0, 0, 1, x, y}

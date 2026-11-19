@@ -863,7 +863,11 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 	case "file":
 		return h.files.file(text("handle"))
 	case "release":
-		h.files.release(text("file"))
+		id := text("file")
+		if id == "" {
+			id = text("handle")
+		}
+		h.files.release(id)
 		return nil, nil
 	case "drop.release":
 		h.files.discardDrop(text("file"))
@@ -1076,6 +1080,7 @@ func (h *Host) cleanupOutput(ctx context.Context, target webui.NativeOutputTarge
 // readFonts 建立系统字体目录并登记按需读取资源
 func (h *Host) readFonts() {
 	platform, language := fontNameLanguage()
+	priorities := make(map[string]int)
 	for _, name := range ofdgo.FontSystemFiles() {
 		f, err := os.Open(name)
 		if err != nil {
@@ -1097,9 +1102,20 @@ func (h *Host) readFonts() {
 		}
 		for _, face := range faces {
 			h.fonts = append(h.fonts, map[string]any{"index": face.Index, "postscriptName": face.PostScriptName, "fullName": face.FullName, "family": face.Family, "style": face.Style, "names": face.Names, "menuFamily": face.MenuFamily, "menuStyle": face.MenuStyle, "familyKey": face.FamilyKey, "bold": face.Bold, "italic": face.Italic, "file": file})
+			priority := 1
+			if !face.Bold && !face.Italic {
+				priority = 3
+			} else if !face.Bold {
+				priority = 2
+			}
 			for _, alias := range append([]string{face.FullName, face.Family, face.PostScriptName, strings.TrimSpace(face.Family + " " + face.Style)}, face.Names...) {
-				if alias != "" && h.fontFiles[alias+".ttf"] == "" {
-					h.fontFiles[alias+".ttf"] = name + "\x00" + strconv.Itoa(face.Index)
+				if alias == "" {
+					continue
+				}
+				key := alias + ".ttf"
+				if priority > priorities[key] {
+					h.fontFiles[key] = name + "\x00" + strconv.Itoa(face.Index)
+					priorities[key] = priority
 				}
 			}
 		}

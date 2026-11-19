@@ -15,12 +15,12 @@ export class PrintDialog {
 		this.el.Properties.addEventListener("click", () => this.properties());
 		this.el.Form.addEventListener("submit", event => { event.preventDefault(); this.print(); });
 		this.el.Cancel.addEventListener("click", () => {
-			if (this.running && !this.waiting) { this.abortPrint(); return; }
+			if (this.running && this.waiting !== "native") { this.abortPrint(); return; }
 			this.el.Panel.close();
 		});
 		this.el.Panel.addEventListener("close", () => this.close());
 		this.el.Panel.addEventListener("cancel", event => {
-			if (this.waiting) { event.preventDefault(); return; }
+			if (this.waiting === "native") { event.preventDefault(); return; }
 			if (this.running) { event.preventDefault(); this.abortPrint(); }
 		});
 		this.el.Previous.addEventListener("click", () => this.preview(this.side - 1));
@@ -33,6 +33,21 @@ export class PrintDialog {
 		});
 		this.observer = new ResizeObserver(([entry]) => { this.previewSize = entry.contentRect; this.resize(); });
 		this.observer.observe(this.el.Preview);
+		this.printMedia = typeof window.matchMedia === "function" ? window.matchMedia("print") : null;
+		this.browserPrintTimer = 0;
+		this.browserPrintFallback = () => {
+			if (this.waiting !== "browser") return;
+			clearTimeout(this.browserPrintTimer);
+			this.browserPrintTimer = setTimeout(() => {
+				if (this.waiting === "browser" && !this.printMedia?.matches) this.finishPrint("打印窗口已关闭");
+			}, 300);
+		};
+		this.browserPrintMediaChange = event => {
+			if (!event.matches) this.browserPrintFallback();
+		};
+		this.browserPrintVisibility = () => {
+			if (document.visibilityState === "visible") this.browserPrintFallback();
+		};
 		this.afterPrint = () => { if (this.waiting === "browser") this.finishPrint("打印窗口已关闭"); };
 		this.beforePrint = () => {
 			if (!this.context || !this.el.Panel.open) return;
@@ -135,7 +150,7 @@ export class PrintDialog {
 				if (!this.current(sequence)) return;
 				this.profile = profile;
 				this.el.Paper.replaceChildren(...profile.papers.map(paper => new Option(paper.name, `${paper.width},${paper.height}`)));
-				if (profile.customPaper) this.el.Paper.add(new Option("自定义", "custom"));
+				if (profile.customPaper) this.el.Paper.add(new Option("自定尺寸", "custom"));
 				this.el.Paper.value = `${profile.options.width},${profile.options.height}`;
 				if (!this.el.Paper.value && profile.customPaper) { this.el.Paper.value = "custom"; this.el.Width.value = profile.options.width; this.el.Height.value = profile.options.height; }
 				if (!this.el.Paper.value) throw new Error("设备默认纸张不在支持列表中");
@@ -159,12 +174,80 @@ export class PrintDialog {
 	async properties() {
 		if (!this.isDevice() || this.running || this.loading) return;
 		const sequence = this.sequence;
+		const printer = this.el.Printer.value.slice(7);
 		this.loading = true;
 		this.status("正在打开属性", true);
 		this.controls();
-		try { await this.nativeHost.call("print.properties", {printer:this.el.Printer.value.slice(7)}); }
-		catch (error) { if (this.current(sequence)) this.status(error.message); }
-		finally { if (this.current(sequence)) { this.loading = false; await this.choosePrinter(); } }
+		let before = null;
+		let after = null;
+		let failed = null;
+		try {
+			before = await this.nativeHost.call("print.query", {printer}).catch(() => null);
+			if (!this.current(sequence)) return;
+			await this.nativeHost.call("print.properties", {printer});
+			if (!this.current(sequence)) return;
+			after = await this.nativeHost.call("print.query", {printer});
+		} catch (error) {
+			failed = error;
+		} finally {
+			if (this.current(sequence)) {
+				this.loading = false;
+				if (failed) {
+					this.status(failed.message);
+					this.controls();
+				} else if (after) {
+					this.syncDeviceProfile(before, after);
+					this.controls();
+					this.schedule();
+				} else {
+					this.controls();
+				}
+			}
+		}
+	}
+
+	syncDeviceProfile(before, after) {
+		const el = this.el;
+		const currentPaper = el.Paper.value;
+		const currentWidth = el.Width.value;
+		const currentHeight = el.Height.value;
+		el.Paper.replaceChildren(...after.papers.map(paper => new Option(paper.name, `${paper.width},${paper.height}`)));
+		if (after.customPaper) el.Paper.add(new Option("自定尺寸", "custom"));
+		const paperChanged = !before || after.options.width !== before.options.width || after.options.height !== before.options.height;
+		if (!paperChanged) {
+			el.Paper.value = currentPaper;
+			if (el.Paper.value === "custom") {
+				el.Width.value = currentWidth;
+				el.Height.value = currentHeight;
+			}
+		}
+		if (paperChanged || !el.Paper.value) {
+			el.Paper.value = `${after.options.width},${after.options.height}`;
+			if (!el.Paper.value && after.customPaper) {
+				el.Paper.value = "custom";
+				el.Width.value = after.options.width;
+				el.Height.value = after.options.height;
+			}
+		}
+		if (!el.Paper.value && el.Paper.options.length) el.Paper.selectedIndex = 0;
+		if (before && after.options.orientation && after.options.orientation !== before.options.orientation && el.Mode.value !== "booklet") {
+			el.Orientation.value = after.options.orientation;
+		}
+		if (before && after.options.duplex && after.options.duplex !== before.options.duplex) {
+			if ([...el.Duplex.options].some(option => option.value === after.options.duplex)) el.Duplex.value = after.options.duplex;
+		}
+		const maxCopies = Math.min(999, after.maxCopies || 999);
+		el.Copies.max = maxCopies;
+		if (before && after.options.copies > 0 && after.options.copies !== before.options.copies) {
+			el.Copies.value = Math.min(maxCopies, after.options.copies);
+		} else if (Number(el.Copies.value) > maxCopies) {
+			el.Copies.value = maxCopies;
+		}
+		el.Grayscale.disabled = !after.color;
+		if (!after.color) el.Grayscale.checked = after.options.color === "grayscale";
+		else if (before && after.options.color && after.options.color !== before.options.color) el.Grayscale.checked = after.options.color === "grayscale";
+		el.Properties.hidden = !after.properties;
+		this.profile = after;
 	}
 
 	deviceOptions() {
@@ -296,7 +379,8 @@ export class PrintDialog {
 			if (!this.current(sequence) || preview !== this.previewSequence) return;
 			if (this.profile) {
 				const area = this.profile.printableArea;
-				svg = svg.replace("</svg>", `<rect x="${area.x}" y="${area.y}" width="${area.width}" height="${area.height}" fill="none" stroke="#88949e" stroke-width="0.2" stroke-dasharray="1 1"/></svg>`);
+				const end = svg.lastIndexOf("</svg>");
+				if (end >= 0) svg = `${svg.slice(0, end)}<rect x="${area.x}" y="${area.y}" width="${area.width}" height="${area.height}" fill="none" stroke="#88949e" stroke-width="0.2" stroke-dasharray="1 1"/>${svg.slice(end)}`;
 			}
 			const url = URL.createObjectURL(new Blob([svg], {type:"image/svg+xml"}));
 			const img = new Image();
@@ -338,8 +422,8 @@ export class PrintDialog {
 		this.el.PreviewNumber.value = count ? this.side + 1 : 1;
 		this.el.PageCount.textContent = String(count);
 		this.el.PageControl.style.setProperty("--page-width", `${String(count || 1).length + 0.5}ch`);
-		this.el.Cancel.textContent = busy && !this.waiting ? "取消" : "关闭";
-		this.el.Cancel.disabled = !!this.waiting;
+		this.el.Cancel.textContent = busy && this.waiting !== "native" ? "取消" : "关闭";
+		this.el.Cancel.disabled = this.waiting === "native";
 	}
 
 	restore(saved) {
@@ -368,13 +452,28 @@ export class PrintDialog {
 		return root;
 	}
 
+	watchBrowserPrint() {
+		this.clearBrowserPrintWatch();
+		window.addEventListener("focus", this.browserPrintFallback);
+		document.addEventListener("visibilitychange", this.browserPrintVisibility);
+		this.printMedia?.addEventListener?.("change", this.browserPrintMediaChange);
+	}
+
+	clearBrowserPrintWatch() {
+		clearTimeout(this.browserPrintTimer);
+		this.browserPrintTimer = 0;
+		window.removeEventListener("focus", this.browserPrintFallback);
+		document.removeEventListener("visibilitychange", this.browserPrintVisibility);
+		this.printMedia?.removeEventListener?.("change", this.browserPrintMediaChange);
+	}
+
 	async print() {
 		if (!this.layout || !this.job || this.running) return;
 		this.previewSequence++;
 		if (this.el.Printer.value === "pdf") return this.pdf();
 		const sequence = this.sequence, context = this.context;
 		const job = this.job;
-		this.running = true;
+		this.running = "print";
 		this.controls();
 		this.status("正在等待打印", true);
 		const previous = printQueue;
@@ -385,23 +484,38 @@ export class PrintDialog {
 		this.releasePrint = release;
 		try {
 			this.root = document.querySelector("#ofdgoPrintDocument") || this.createRoot();
+			for (const img of this.root.querySelectorAll("img")) img.src = "";
 			this.root.replaceChildren();
 			const style = document.createElement("style");
 			style.textContent = this.layout.sides.map((side, i) => `@page ofdgoPrint${i}{size:${side.width}mm ${side.height}mm;margin:0}`).join("");
 			this.root.append(style);
+			const raster = this.el.Raster.checked || this.el.Grayscale.checked;
+			let totalBytes = 0;
 			this.status("正在准备纸面", true, 0, this.layout.sides.length);
 			for (let i = 0; i < this.layout.sides.length; i++) {
 				if (!this.current(sequence)) throw new DOMException("打印已取消", "AbortError");
 				const {svg} = await context.call("ofdgoPrintSide", i);
 				if (!this.current(sequence)) throw new DOMException("打印已取消", "AbortError");
+				totalBytes += svg.length;
+				const deferDecode = raster && this.layout.sides.length > 8 || totalBytes > 32 * 1024 * 1024;
 				const url = URL.createObjectURL(new Blob([svg], {type:"image/svg+xml"}));
 				this.urls.push(url);
 				const img = new Image(), section = document.createElement("section"), side = this.layout.sides[i];
+				img.decoding = deferDecode ? "async" : "sync";
+				const loaded = deferDecode ? new Promise((resolve, reject) => {
+					img.addEventListener("load", resolve, {once:true});
+					img.addEventListener("error", () => reject(new Error("纸面加载失败")), {once:true});
+				}) : null;
 				img.src = url;
 				section.append(img);
 				section.style.cssText = `page:ofdgoPrint${i};width:${side.width}mm;height:${side.height}mm`;
 				this.root.append(section);
-				await img.decode();
+				if (deferDecode) {
+					if (!img.complete) await loaded;
+					if ((i + 1) % 8 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+				} else {
+					await img.decode();
+				}
 				if (this.current(sequence)) this.status("正在准备纸面", true, i + 1, this.layout.sides.length);
 			}
 			await document.fonts.ready;
@@ -424,10 +538,17 @@ export class PrintDialog {
 				const capabilities = await this.nativeHost.call("print.capabilities", {});
 				if (!this.current(sequence)) throw new DOMException("打印已取消", "AbortError");
 				if (!capabilities.systemDialog) throw new Error("当前运行时不支持系统打印");
-				if (!capabilities.dialogCompletion) this.waiting = "browser";
+				if (!capabilities.dialogCompletion) {
+					this.waiting = "browser";
+					this.controls();
+					this.watchBrowserPrint();
+				}
 				await this.nativeHost.call("print.dialog", {kind:"system"});
 				if (capabilities.dialogCompletion) this.finishPrint("打印窗口已关闭");
-			} else if (typeof window.print === "function") window.print();
+			} else if (typeof window.print === "function") {
+				this.watchBrowserPrint();
+				window.print();
+			}
 			else throw new Error("当前浏览器不支持打印");
 		} catch (error) {
 			if (this.releasePrint === release) this.finishPrint();
@@ -443,17 +564,22 @@ export class PrintDialog {
 	}
 
 	abortPrint() {
+		const exporting = this.running === "pdf";
 		this.sequence++;
 		if (this.context) this.cancel(this.context.tab);
-		this.finishPrint("打印已取消");
+		this.finishPrint(exporting ? "导出已取消" : "打印已取消");
 	}
 
 	finishPrint(message = "") {
+		this.clearBrowserPrintWatch();
 		if (this.previousTitle !== undefined) {
 			if (document.title === this.printTitle) document.title = this.previousTitle;
 			delete this.previousTitle;
 		}
-		if (this.releasePrint) this.root?.replaceChildren();
+		if (this.releasePrint && this.root) {
+			for (const img of this.root.querySelectorAll("img")) img.src = "";
+			this.root.replaceChildren();
+		}
 		for (const url of this.urls) URL.revokeObjectURL(url);
 		this.urls = [];
 		this.releasePrint?.();
@@ -467,17 +593,25 @@ export class PrintDialog {
 	async pdf() {
 		if (!this.layout || this.running) return;
 		const sequence = this.sequence, context = this.context;
-		this.running = true;
+		const name = `${context.name.replace(/\.[^.]+$/, "")}-打印.pdf`;
+		this.running = "pdf";
 		this.controls();
 		this.status("正在生成文件", true);
+		let file = null;
 		try {
-			const result = await context.call("ofdgoPrintPDF");
+			file = this.savePicker ? await this.savePicker({suggestedName:name, types:[{description:"PDF", accept:{"application/pdf":[".pdf"]}}]}) : null;
+			if (!this.current(sequence)) return;
+			const result = await context.call("ofdgoPrintPDF", file);
 			if (this.current(sequence)) {
-				await this.download(result.bytes, "application/pdf", `${context.name.replace(/\.[^.]+$/, "")}-打印.pdf`);
+				if (result.blob) await this.download(result.blob, result.mime || "application/pdf", name);
 				if (this.current(sequence)) this.status("文件已生成");
 			}
-		} catch (error) { if (this.current(sequence)) this.status(error.message); }
-		finally { if (this.current(sequence)) { this.running = false; this.controls(); } }
+		} catch (error) {
+			if (this.current(sequence)) this.status(error.name === "AbortError" ? "导出已取消" : error.message);
+		} finally {
+			await this.release?.(file);
+			if (this.current(sequence)) { this.running = false; this.controls(); }
+		}
 	}
 
 	close() {
@@ -496,6 +630,7 @@ export class PrintDialog {
 
 	destroy() {
 		this.destroyed = true;
+		this.clearBrowserPrintWatch();
 		this.close();
 		this.observer.disconnect();
 		window.removeEventListener("beforeprint", this.beforePrint);

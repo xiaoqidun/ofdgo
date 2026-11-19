@@ -160,7 +160,7 @@ func (v *compressionImages) objectPatterns(object PathObject, state RenderState)
 	if (fill == nil || fill.Pattern == nil) && (stroke == nil || stroke.Pattern == nil) {
 		return nil
 	}
-	matrix, _ := renderObjectMatrix(object.Boundary, NewMatrix(object.CTM), state)
+	matrix, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
 	for _, color := range [2]*FillColor{fill, stroke} {
 		if color != nil && color.Pattern != nil {
 			if err := v.patternImages(color, matrix); err != nil {
@@ -267,6 +267,13 @@ type compressionPatternKey struct {
 // 入参: ctx 取消上下文, options 压缩配置
 // 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
 func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOptions) (map[string]bool, map[string]image.Point, error) {
+	return r.compressionImagePlanProtected(ctx, options, nil, nil)
+}
+
+// compressionImagePlanProtected 按签名保护边界分文档合并图片需求，受保护文档和文件不参与有损降采样
+// 入参: ctx 取消上下文, options 压缩配置, protectedDocs 受签名保护的文档索引, protectedFiles 受签名保护的文件路径
+// 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
+func (r *Reader) compressionImagePlanProtected(ctx context.Context, options CompressionOptions, protectedDocs map[int]bool, protectedFiles map[string]bool) (map[string]bool, map[string]image.Point, error) {
 	if options.Mode != CompressionLossy {
 		return nil, nil, ctx.Err()
 	}
@@ -282,6 +289,9 @@ func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOp
 		index := offset
 		if isolated {
 			index = (r.documentIndex + offset) % r.DocumentCount()
+		}
+		if protectedDocs[index] {
+			continue
 		}
 		document := r
 		if index != r.DocumentIndex() {
@@ -317,6 +327,12 @@ func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOp
 		}
 		for _, img := range catalog {
 			name := cleanPackagePath(img.Location)
+			if protectedFiles[name] {
+				images[name] = false
+				blocked[name] = true
+				delete(sizes, name)
+				continue
+			}
 			if isolated {
 				if index == r.documentIndex {
 					current[name] = true
@@ -378,7 +394,10 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 		}
 		template := renderer.loadTemplate(ref.ID)
 		if template == nil {
-			return nil, ctx.Err()
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			continue
 		}
 		unbind := renderer.bindPageResources(template)
 		for order := range 3 {

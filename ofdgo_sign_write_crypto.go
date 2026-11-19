@@ -118,7 +118,7 @@ func (key *signatureWriteKey) sign(data []byte, property string, options Signatu
 		if err != nil {
 			return nil, err
 		}
-		return signatureWriteSignedData(key.cert, digest[:], signature)
+		return signatureWriteSignedData(key.cert, digest[:], signature, options.Intermediates)
 	}
 	digest := sm3.Sum(data)
 	tbs, err := asn1.Marshal(struct {
@@ -295,10 +295,10 @@ func signatureWriteTrust(cert *smx509.Certificate, at time.Time, options Signatu
 	return verifySignatureCertificateChain(cert, options.Intermediates, options.TrustRoots, at, smx509.ExtKeyUsageAny)
 }
 
-// signatureWriteSignedData 编码带签署证书的SM2数字签名消息
-// 入参: cert 证书, digest 文档描述摘要, signature SM2签名值
+// signatureWriteSignedData 编码带签署证书及中间证书链的SM2数字签名消息
+// 入参: cert 叶证书, digest 文档描述摘要, signature SM2签名值, intermediates 中间证书列表
 // 返回: []byte SignedData编码, error 错误信息
-func signatureWriteSignedData(cert *smx509.Certificate, digest, signature []byte) ([]byte, error) {
+func signatureWriteSignedData(cert *smx509.Certificate, digest, signature []byte, intermediates [][]byte) ([]byte, error) {
 	type contentInfo struct {
 		Type    asn1.ObjectIdentifier
 		Content asn1.RawValue
@@ -321,13 +321,25 @@ func signatureWriteSignedData(cert *smx509.Certificate, digest, signature []byte
 	if err != nil {
 		return nil, err
 	}
+	certsBytes := append([]byte(nil), cert.Raw...)
+	seen := map[string]bool{string(cert.Raw): true}
+	for _, raw := range appendSignatureCerts(nil, intermediates...) {
+		parsed, parseErr := parseSignatureCertificate(raw)
+		if parseErr != nil {
+			continue
+		}
+		if !seen[string(parsed.Raw)] {
+			seen[string(parsed.Raw)] = true
+			certsBytes = append(certsBytes, parsed.Raw...)
+		}
+	}
 	sd, err := asn1.Marshal(struct {
 		Version      int
 		Digests      []pkix.AlgorithmIdentifier `asn1:"set"`
 		Content      contentInfo
 		Certificates asn1.RawValue
 		Signers      []signerInfo `asn1:"set"`
-	}{1, []pkix.AlgorithmIdentifier{digestAlg}, contentInfo{asn1.ObjectIdentifier{1, 2, 156, 10197, 6, 1, 4, 2, 1}, asn1.RawValue{Class: 2, Tag: 0, IsCompound: true, Bytes: content}}, asn1.RawValue{Class: 2, Tag: 0, IsCompound: true, Bytes: cert.Raw}, []signerInfo{signer}})
+	}{1, []pkix.AlgorithmIdentifier{digestAlg}, contentInfo{asn1.ObjectIdentifier{1, 2, 156, 10197, 6, 1, 4, 2, 1}, asn1.RawValue{Class: 2, Tag: 0, IsCompound: true, Bytes: content}}, asn1.RawValue{Class: 2, Tag: 0, IsCompound: true, Bytes: certsBytes}, []signerInfo{signer}})
 	if err != nil {
 		return nil, err
 	}

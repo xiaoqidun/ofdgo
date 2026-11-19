@@ -15,6 +15,7 @@
 package webui
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -108,22 +109,28 @@ func (e *businessEngine) printSide(args []platformValue) (any, error) {
 	return successResult(map[string]any{"svg": output.String()}), nil
 }
 
-// printPDF 输出和预览相同的打印布局，便于另存或交给第三方打印系统
-// 入参: args 可选输出任务标识
-// 返回: any PDF数据及媒体类型, error 状态或输出错误
+// printPDF 流式输出和预览相同的打印布局，便于另存或交给第三方打印系统
+// 入参: args 数据写出回调及可选取消检查回调
+// 返回: any PDF结果及媒体类型, error 状态或输出错误
 func (e *businessEngine) printPDF(args []platformValue) (any, error) {
 	if e.printDocument == nil {
 		return nil, fmt.Errorf("print document is not prepared")
 	}
-	ctx := e.operationContext()
-	if len(args) > 0 {
-		ctx = e.newOutputContext(args[0])
+	if len(args) == 0 || args[0].Type() != platformTypeFunction {
+		return nil, fmt.Errorf("missing output callback")
 	}
-	var output bytes.Buffer
-	if err := e.printDocument.WritePDF(ctx, &output); err != nil {
+	ctx := e.operationContext()
+	if len(args) > 1 && args[1].Type() == platformTypeFunction {
+		ctx = e.newOutputContext(args[1])
+	}
+	writer := bufio.NewWriterSize(exportWriter{write: args[0]}, 1<<20)
+	if err := e.printDocument.WritePDF(ctx, writer); err != nil {
 		return nil, err
 	}
-	return successResult(map[string]any{"bytes": bytesToJS(output.Bytes()), "mime": "application/pdf"}), nil
+	if err := writer.Flush(); err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"mime": "application/pdf", "label": "PDF"}), nil
 }
 
 // discardPrint 释放当前打印快照，可重复调用

@@ -378,6 +378,9 @@ func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
 				return removed[cleanPackagePath(file.Name)]
 			})}
 		}
+		if src := reader.encryptedSource(); src != nil {
+			reader.setEncryptedSource(src.omit(removed))
+		}
 		body := root.childAt("DocBody", index)
 		reader.files["OFD.xml"] = editorPatchXML(data, []editorXMLPatch{{start: body.start, end: body.end}})
 		selected := reader.DocumentIndex()

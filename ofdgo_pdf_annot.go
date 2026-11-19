@@ -280,6 +280,7 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 			return err
 		}
 	}
+	p.mergeAnnotationStamp(&stamp)
 	if flags&(2|32) == 0 && !invisible {
 		p.compositeNodes = stamp.compositeNodes
 		p.transferBackdrop = stamp.transferBackdrop
@@ -517,4 +518,85 @@ func (p *pdfImporter) signatureWidget(ctx context.Context, page *pdfgo.Page, ann
 	}
 	p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF signature appearance imported; digital signature not transferred"})
 	return nil
+}
+
+// mergeAnnotationStamp 将注解局部值拷贝期间产生的统计、告警及惰性缓存状态回写到主导入器
+// 入参: stamp 注解绘制使用的局部导入器
+func (p *pdfImporter) mergeAnnotationStamp(stamp *pdfImporter) {
+	p.report.Pages += stamp.report.Pages
+	p.report.TextObjects += stamp.report.TextObjects
+	p.report.PathObjects += stamp.report.PathObjects
+	p.report.ImageObjects += stamp.report.ImageObjects
+	p.report.Links += stamp.report.Links
+	p.report.Warnings = append(p.report.Warnings, stamp.report.Warnings...)
+	p.rasterWarned = p.rasterWarned || stamp.rasterWarned
+	if p.cmykSpace == "" {
+		p.cmykSpace = stamp.cmykSpace
+	}
+	if p.rgbSpace == "" {
+		p.rgbSpace = stamp.rgbSpace
+	}
+	if p.fontPrograms == nil {
+		p.fontPrograms = stamp.fontPrograms
+	}
+	if p.symbolFonts == nil {
+		p.symbolFonts = stamp.symbolFonts
+	}
+	if p.fontWarnings == nil {
+		p.fontWarnings = stamp.fontWarnings
+	}
+	if p.textOrigins == nil {
+		p.textOrigins = stamp.textOrigins
+	}
+	if p.clipPaths == nil {
+		p.clipPaths = stamp.clipPaths
+	}
+	if p.iccSpaces == nil {
+		p.iccSpaces = stamp.iccSpaces
+	}
+	if p.formResources == nil {
+		p.formResources = stamp.formResources
+	}
+	if p.validation == nil {
+		p.validation = stamp.validation
+	}
+	if p.imageIDs == nil {
+		p.imageIDs = stamp.imageIDs
+	}
+	if p.imageContents == nil {
+		p.imageContents = stamp.imageContents
+	}
+	if p.attachmentIDs == nil {
+		p.attachmentIDs = stamp.attachmentIDs
+	}
+	if p.modelAttachments == nil {
+		p.modelAttachments = stamp.modelAttachments
+	}
+	if p.mediaResources == nil {
+		p.mediaResources = stamp.mediaResources
+	}
+	if p.mediaInstances == nil {
+		p.mediaInstances = stamp.mediaInstances
+	}
+	if p.movieBounds == nil {
+		p.movieBounds = stamp.movieBounds
+	}
+	if p.renditions == nil {
+		p.renditions = stamp.renditions
+	}
+	if p.maskClips == nil {
+		p.maskClips = stamp.maskClips
+	}
+	if p.patternCells == nil {
+		p.patternCells = stamp.patternCells
+	}
+	if p.patternOrigins == nil {
+		p.patternOrigins = stamp.patternOrigins
+	}
+	if p.references == nil {
+		p.references = stamp.references
+	}
+	if p.halftoneWarnings == nil {
+		p.halftoneWarnings = stamp.halftoneWarnings
+	}
 }

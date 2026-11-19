@@ -43,7 +43,11 @@ func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byt
 	if err != nil || protected {
 		return err
 	}
-	view := &Reader{Zip: reader.Zip, sourceFile: reader.sourceFile, files: maps.Clone(reader.files)}
+	resources := e.runtimeResources
+	if resources == nil {
+		resources = reader.resources
+	}
+	view := &Reader{Zip: reader.Zip, encrypted: reader.encryptedSource(), sourceFile: reader.sourceFile, files: maps.Clone(reader.files), resources: resources}
 	if view.files == nil {
 		view.files = make(map[string][]byte)
 	}
@@ -129,6 +133,10 @@ func (r *Reader) fontCleanupCandidate(ctx context.Context, name string) (bool, e
 		size = uint64(len(data))
 	} else if file, ok := r.packageFile(name); ok {
 		size = file.UncompressedSize64
+	} else if src := r.encryptedSource(); src != nil {
+		if entrySize, ok := src.size(name); ok {
+			size = entrySize
+		}
 	}
 	candidate, err := fontCleanupDirectory(imageInput{ReadCloser: input, ctx: ctx}, size)
 	if err == io.EOF || err == io.ErrUnexpectedEOF {

@@ -93,6 +93,7 @@ type Reader struct {
 	files                     map[string][]byte
 	fileNames                 map[string]bool
 	encryption                *encryptionState
+	encrypted                 *encryptedPackageSource
 }
 
 // Close 关闭阅读器持有的文件，重复调用不再关闭底层文件
@@ -203,7 +204,7 @@ func (r *Reader) DocumentContext(ctx context.Context, index int) (*Reader, error
 	if index < 0 || index >= r.DocumentCount() {
 		return nil, fmt.Errorf("document index %d out of range", index)
 	}
-	next := &Reader{Path: r.Path, Zip: r.Zip, sourceFile: r.sourceFile, archiveID: r.archiveID, files: r.files, encryption: r.encryption, documentIndex: index, resources: r.resources, pageReady: r.pageReady, pdfDestinations: r.pdfDestinations.clone()}
+	next := &Reader{Path: r.Path, Zip: r.Zip, encrypted: r.encryptedSource(), sourceFile: r.sourceFile, archiveID: r.archiveID, files: r.files, encryption: r.encryption, documentIndex: index, resources: r.resources, pageReady: r.pageReady, pdfDestinations: r.pdfDestinations.clone()}
 	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}
@@ -656,6 +657,26 @@ func (r *Reader) ExtensionsContext(ctx context.Context) ([]Extension, error) {
 	return doc.Extensions.Extension, nil
 }
 
+// WithDocumentIndex 设置打开OFD时默认选中的文档索引，从0开始
+// 入参: index 文档索引
+// 返回: ReaderOption 阅读选项
+func WithDocumentIndex(index int) ReaderOption {
+	return func(options *readerOptions) {
+		options.documentIndex = index
+		options.hasDocumentIndex = true
+	}
+}
+
+// WithVersion 设置打开OFD时选中的历史版本标识，空字符串表示主文档入口
+// 入参: id 版本标识
+// 返回: ReaderOption 阅读选项
+func WithVersion(id string) ReaderOption {
+	return func(options *readerOptions) {
+		value := id
+		options.versionID = &value
+	}
+}
+
 // pageContentKey 按页面原文或只读归档路径及解析模式区分缓存，不包含文档资源和区域继承
 type pageContentKey struct {
 	archiveID uint64
@@ -723,6 +744,21 @@ func (l *limitedEntryReader) Read(data []byte) (int, error) {
 		return n, fmt.Errorf("package entry %s exceeds size limit (%d bytes)", l.name, l.limit)
 	}
 	return n, err
+}
+
+// encryptedSource 返回当前阅读器关联的按需解密源，优先使用直接挂载的实例
+// 返回: *encryptedPackageSource 加密源，非加密包时为nil
+func (r *Reader) encryptedSource() *encryptedPackageSource {
+	if r == nil {
+		return nil
+	}
+	if r.encrypted != nil {
+		return r.encrypted
+	}
+	if r.Zip == nil && r.encryption != nil && r.encryption.source != nil {
+		return r.encryption.source
+	}
+	return nil
 }
 
 // cloneMutableState 深拷贝阅读器上的全部可变资源缓存、索引、批注与印章状态到目标实例
@@ -1065,6 +1101,14 @@ func (r *Reader) indexPackageContext(ctx context.Context) error {
 		}
 		names[name] = true
 	}
+	if src := r.encryptedSource(); src != nil {
+		for _, name := range src.names() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			names[name] = true
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1142,6 +1186,15 @@ func (r *Reader) readFileData(name string) ([]byte, bool, error) {
 		data, err := io.ReadAll(input)
 		return data, false, err
 	}
+	if src := r.encryptedSource(); src != nil && src.has(name) {
+		input, err := r.openFile(name)
+		if err != nil {
+			return nil, false, err
+		}
+		defer input.Close()
+		data, err := io.ReadAll(input)
+		return data, false, err
+	}
 	return nil, false, fmt.Errorf("file not found: %s", name)
 }
 
@@ -1155,6 +1208,16 @@ func (r *Reader) openFile(name string) (io.ReadCloser, error) {
 	}
 	if f, ok := r.packageFile(name); ok {
 		rc, err := f.Open()
+		if err != nil {
+			return nil, err
+		}
+		if limit := r.entryLimit(); limit > 0 {
+			return &limitedEntryReader{ReadCloser: rc, name: name, remaining: limit, limit: limit}, nil
+		}
+		return rc, nil
+	}
+	if src := r.encryptedSource(); src != nil && src.has(name) {
+		rc, err := src.open(name)
 		if err != nil {
 			return nil, err
 		}
@@ -1185,8 +1248,13 @@ func (r *Reader) hasPackageFile(name string) bool {
 	if _, ok := r.files[clean]; ok {
 		return true
 	}
-	_, ok := r.fileIndex[clean]
-	return ok
+	if _, ok := r.fileIndex[clean]; ok {
+		return true
+	}
+	if src := r.encryptedSource(); src != nil {
+		return src.has(clean)
+	}
+	return false
 }
 
 // mergeMapResourceOverride 按十进制等价标识批量覆盖字典中的旧资源条目

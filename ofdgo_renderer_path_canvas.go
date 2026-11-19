@@ -194,6 +194,29 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		return
 	}
 	ctx.Push()
+	shouldFill := false
+	if obj.Fill != nil {
+		shouldFill = *obj.Fill
+	}
+	shouldStroke := true
+	if obj.Stroke != nil {
+		shouldStroke = *obj.Stroke
+	}
+	if !shouldFill && !shouldStroke {
+		ctx.Pop()
+		return
+	}
+	objAlpha := fillAlphaByte(obj.Alpha)
+	if objAlpha == 0 {
+		ctx.Pop()
+		return
+	}
+	compiler, isCompiler := ctx.Renderer.(*canvasPageCompiler)
+	useGroup := isCompiler && shouldFill && shouldStroke && objAlpha < 255
+	styleObj := obj
+	if useGroup {
+		styleObj.Alpha = nil
+	}
 	bx, by := 0.0, 0.0
 	if obj.Boundary != "" {
 		if box, err := ParseBox(obj.Boundary); err == nil {
@@ -205,13 +228,16 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	if parentCTM != nil {
 		ctm = parentCTM.Multiply(ctm)
 	}
-	style := r.newPathStyle(defaults, bx, by, pageH, obj.Alpha)
+	style := r.newPathStyle(defaults, bx, by, pageH, styleObj.Alpha)
 	if obj.DrawParam != "" {
 		if dp := r.getDrawParam(obj.DrawParam, nil); dp != nil {
-			style.applyDrawParam(r, dp, bx, by, pageH, obj.Alpha)
+			style.applyDrawParam(r, dp, bx, by, pageH, styleObj.Alpha)
 		}
 	}
-	style.applyPathObject(r, obj, bx, by, pageH)
+	style.applyPathObject(r, styleObj, bx, by, pageH)
+	localLineWidth := style.lineWidth
+	localDashOffset := style.dashOffset
+	localDashPattern := slices.Clone(style.dashPattern)
 	style.scale(ctm)
 	style.lineWidth = r.deviceLineWidth(style.lineWidth)
 	patternOrigin := TranslationMatrix(bx, by)
@@ -236,12 +262,14 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		})
 	}
 	clipPath := r.intersectCachedClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
-	shouldFill := false
-	if obj.Fill != nil {
-		shouldFill = *obj.Fill
-	}
 	if style.fillPaint == nil {
 		style.fillPaint = style.fillColor
+	}
+	if useGroup {
+		compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupBegin, GroupAlpha: objAlpha})
+		defer func() {
+			compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupEnd})
+		}()
 	}
 	if shouldFill {
 		fillPaint, shadingClip, fillView := resolveShdPaint(ctx, style.fillPaint)
@@ -276,17 +304,13 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			r.drawShdPath(ctx, fp, fillView)
 		}
 	}
-	shouldStroke := true
-	if obj.Stroke != nil {
-		shouldStroke = *obj.Stroke
-	}
 	if shouldStroke {
 		ctx.SetFillRule(canvas.NonZero)
 		if style.strokePaint == nil {
 			style.strokePaint = style.strokeColor
 		}
 		if style.strokePaint == nil {
-			style.strokePaint = colorWithAlpha(canvas.Black, obj.Alpha)
+			style.strokePaint = colorWithAlpha(canvas.Black, styleObj.Alpha)
 		}
 		strokePaint, shadingClip, strokeView := resolveShdPaint(ctx, style.strokePaint)
 		ctx.SetFillColor(canvas.Transparent)
@@ -294,13 +318,44 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		ctx.SetStrokeWidth(style.lineWidth)
 		ctx.SetStrokeCapper(style.lineCap)
 		ctx.SetStrokeJoiner(style.lineJoin)
+		strokeClip := r.intersectCachedClipPath(clipPath, shadingClip)
+		if !matrixIsSimilarity(ctm) {
+			localP, err := r.parseCanvasPath(obj.AbbreviatedData)
+			if err != nil {
+				r.renderError = err
+				ctx.Pop()
+				return
+			}
+			localOpts := canvasStrokeOptions(r.localStrokeWidth(localLineWidth, ctm), style.lineCap, style.lineJoin, canvas.Tolerance)
+			localOpts.DashOffset, localOpts.Dashes = localDashOffset, localDashPattern
+			sp := r.strokeClippedCanvasPath(localP, nil, localOpts, false)
+			fullMatrix := TranslationMatrix(bx, by).Multiply(ctm)
+			if boundaryInCTM && parentCTM != nil {
+				fullMatrix = parentCTM.Multiply(TranslationMatrix(bx, by)).Multiply(localCTM)
+			}
+			if canvas.Equal(fullMatrix.a*fullMatrix.d-fullMatrix.b*fullMatrix.c, 0) {
+				sp = sp.ReplaceArcs()
+			}
+			sp = sp.Transform(canvas.Matrix{{fullMatrix.a, fullMatrix.c, fullMatrix.e}, {-fullMatrix.b, -fullMatrix.d, pageH - fullMatrix.f}})
+			if strokeClip != nil {
+				sp = applyClipPath(sp, strokeClip)
+			}
+			if style.strokePattern != nil {
+				r.renderPattern(ctx, style.strokePattern, pageH, sp, patternOrigin)
+			} else {
+				ctx.SetFill(strokePaint)
+				ctx.SetStrokeColor(canvas.Transparent)
+				r.drawShdPath(ctx, sp, strokeView)
+			}
+			ctx.Pop()
+			return
+		}
 		sp := p
 		zeroDash := slices.Contains(style.dashPattern, 0)
 		if len(style.dashPattern) > 0 && !zeroDash {
 			sp = sp.Dash(style.dashOffset, style.dashPattern...)
 			ctx.SetDashes(0)
 		}
-		strokeClip := r.intersectCachedClipPath(clipPath, shadingClip)
 		if bounds, ok := rectangularPath(strokeClip); ok {
 			margin := style.lineWidth / 2 * math.Max(math.Sqrt2, style.miterLimit)
 			if finite(margin) && bounds.Contains(sp.Bounds().Expand(margin)) {
@@ -361,10 +416,10 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 		r.patternPage = parentPage
 	}()
 	xStep, yStep := pattern.XStep, pattern.YStep
-	if xStep < pattern.Width {
+	if xStep <= 0 {
 		xStep = pattern.Width
 	}
-	if yStep < pattern.Height {
+	if yStep <= 0 {
 		yStep = pattern.Height
 	}
 	if xStep <= 0 || yStep <= 0 {
@@ -401,10 +456,24 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 		minY = math.Min(minY, y)
 		maxY = math.Max(maxY, y)
 	}
-	startX := int(math.Floor(minX/xStep)) - 1
-	endX := int(math.Ceil(maxX/xStep)) + 1
-	startY := int(math.Floor(minY/yStep)) - 1
-	endY := int(math.Ceil(maxY/yStep)) + 1
+	startXF := math.Floor((minX-pattern.Width)/xStep) - 1
+	endXF := math.Ceil(maxX/xStep) + 1
+	startYF := math.Floor((minY-pattern.Height)/yStep) - 1
+	endYF := math.Ceil(maxY/yStep) + 1
+	if !finite(startXF) || !finite(endXF) || !finite(startYF) || !finite(endYF) {
+		r.renderError = fmt.Errorf("invalid pattern bounds")
+		return
+	}
+	countX, countY := endXF-startXF+1, endYF-startYF+1
+	if countX <= 0 || countY <= 0 {
+		return
+	}
+	if countX > maxPatternTiles || countY > maxPatternTiles || countX*countY > maxPatternTiles {
+		r.renderError = fmt.Errorf("pattern tile count exceeds limit")
+		return
+	}
+	startX, endX := int(startXF), int(endXF)
+	startY, endY := int(startYF), int(endYF)
 	for ix := startX; ix <= endX; ix++ {
 		for iy := startY; iy <= endY; iy++ {
 			tileCTM := patternCTM.Multiply(TranslationMatrix(float64(ix)*xStep, float64(iy)*yStep))

@@ -72,19 +72,26 @@ func (e *Editor) AddAttachmentContext(ctx context.Context, name string, data []b
 			return "", err
 		}
 	}
-	attachments, err := base.reader.attachmentsContext(ctx, true)
-	if err != nil {
-		return "", err
-	}
-	used := make(map[string]bool, len(attachments)+len(base.removedAttachments))
-	for _, attachment := range attachments {
-		if err := ctx.Err(); err != nil {
+	used := base.attachmentIDs
+	if used == nil {
+		attachments, err := base.reader.attachmentsContext(ctx, true)
+		if err != nil {
 			return "", err
 		}
-		used[attachment.ID] = true
-	}
-	for removedID := range base.removedAttachments {
-		used[removedID] = true
+		used = make(map[string]bool, len(attachments)+len(base.removedAttachments)+1)
+		for _, attachment := range attachments {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			used[attachment.ID] = true
+		}
+		for removedID := range base.removedAttachments {
+			used[removedID] = true
+		}
+	} else {
+		for removedID := range base.removedAttachments {
+			used[removedID] = true
+		}
 	}
 	id, maximum := nextAttachmentID(used, maximum)
 	if maximum > maxUnitID {
@@ -102,62 +109,70 @@ func (e *Editor) AddAttachmentContext(ctx context.Context, name string, data []b
 		return "", err
 	}
 	entry = bytes.TrimPrefix(entry, []byte(xml.Header))
-	docName := base.reader.documentRoot
-	docData, err := base.reader.readFileViewContext(ctx, docName)
-	if err != nil {
-		return "", err
-	}
-	doc, err := parseEditorXMLContext(ctx, docData)
-	if err != nil {
-		return "", err
-	}
-	node := doc.child("Attachments")
 	parts := map[string][]byte{file: bytes.Clone(data)}
 	if strings.TrimSpace(base.document.Attachments.Path) != "" {
-		name := base.reader.ResPath(base.document.Attachments.Path)
-		existing, err := base.reader.readFileViewContext(ctx, name)
+		attName := base.reader.ResPath(base.document.Attachments.Path)
+		existing, err := base.reader.readFileViewContext(ctx, attName)
 		if err != nil {
 			return "", err
 		}
-		root, err := parseEditorXMLContext(ctx, existing)
-		if err != nil {
-			return "", err
-		}
-		entry, err = editorXMLGenerated(entry, root.name.Space)
-		if err != nil {
-			return "", err
-		}
-		if root.open == root.end {
-			parts[name] = editorPatchXML(existing, []editorXMLPatch{editorXMLContent(existing, root, entry)})
+		if patched, ok := appendOFDXMLBeforeClosing(existing, "Attachments", entry); ok {
+			parts[attName] = patched
 		} else {
-			parts[name] = editorPatchXML(existing, []editorXMLPatch{{root.close, root.close, entry}})
-		}
-	} else if node != nil {
-		entry, err = editorXMLGenerated(entry, node.name.Space)
-		if err != nil {
-			return "", err
-		}
-		if node.open == node.end {
-			parts[docName] = editorPatchXML(docData, []editorXMLPatch{editorXMLContent(docData, node, entry)})
-		} else {
-			parts[docName] = editorPatchXML(docData, []editorXMLPatch{{node.close, node.close, entry}})
+			root, err := parseEditorXMLContext(ctx, existing)
+			if err != nil {
+				return "", err
+			}
+			entry, err = editorXMLGenerated(entry, root.name.Space)
+			if err != nil {
+				return "", err
+			}
+			if root.open == root.end {
+				parts[attName] = editorPatchXML(existing, []editorXMLPatch{editorXMLContent(existing, root, entry)})
+			} else {
+				parts[attName] = editorPatchXML(existing, []editorXMLPatch{{root.close, root.close, entry}})
+			}
 		}
 	} else {
-		container, err := editorXMLContainer("Attachments", nil, entry)
+		docName := base.reader.documentRoot
+		docData, err := base.reader.readFileViewContext(ctx, docName)
 		if err != nil {
 			return "", err
 		}
-		name := e.packageName("Attachments.xml")
-		parts[name] = container
-		position := doc.close
-		if next := doc.child("Extensions"); next != nil {
-			position = next.start
+		doc, err := parseEditorXMLContext(ctx, docData)
+		if err != nil {
+			return "", err
 		}
-		parts[docName] = editorPatchXML(docData, []editorXMLPatch{{position, position, doc.textXML("Attachments", "/"+name)}})
+		if node := doc.child("Attachments"); node != nil {
+			entry, err = editorXMLGenerated(entry, node.name.Space)
+			if err != nil {
+				return "", err
+			}
+			if node.open == node.end {
+				parts[docName] = editorPatchXML(docData, []editorXMLPatch{editorXMLContent(docData, node, entry)})
+			} else {
+				parts[docName] = editorPatchXML(docData, []editorXMLPatch{{node.close, node.close, entry}})
+			}
+		} else {
+			container, err := editorXMLContainer("Attachments", nil, entry)
+			if err != nil {
+				return "", err
+			}
+			attName := e.packageName("Attachments.xml")
+			parts[attName] = container
+			position := doc.close
+			if next := doc.child("Extensions"); next != nil {
+				position = next.start
+			}
+			parts[docName] = editorPatchXML(docData, []editorXMLPatch{{position, position, doc.textXML("Attachments", "/"+attName)}})
+		}
 	}
 	if err := e.commitAnnotationPartsContext(ctx, base, parts); err != nil {
 		return "", err
 	}
+	base.attachmentIDs = nil
+	used[id] = true
+	e.source.attachmentIDs = used
 	if e.source != nil && e.source.removedAttachments[id] {
 		removed := maps.Clone(e.source.removedAttachments)
 		delete(removed, id)

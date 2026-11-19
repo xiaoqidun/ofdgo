@@ -23,6 +23,9 @@ import (
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
+// maxPatternTiles 限制单次底纹填充展开的最大平铺单元数，防止极小步长引发拒绝服务
+const maxPatternTiles = 262144
+
 // OFDCompiler 使用库自有页面语义，字体和几何操作交给当前后端配置
 type OFDCompiler struct{}
 
@@ -110,10 +113,11 @@ func (OFDCompiler) MeasureObject(r *Renderer, object GraphicObject, options Meas
 	return c.measurement, err
 }
 
-// semanticStyle 保存已继承的路径颜色和描边参数
+// semanticStyle 保存已继承的路径颜色、页面描边参数与对象局部描边参数
 type semanticStyle struct {
 	fill, stroke *FillColor
 	options      StrokeOptions
+	localOptions StrokeOptions
 }
 
 // semanticCompiler 将公共页面语义编译为路径和原始图片，绘制、搜索和度量共享定位
@@ -162,6 +166,24 @@ func (c *semanticCompiler) DrawObject(object *GraphicObject, state RenderState) 
 		return fmt.Errorf("unsupported graphic object %q", object.Type)
 	}
 	return nil
+}
+
+// BeginTransparencyGroup 在非度量且非纯文本模式下开启离屏透明组
+// 入参: alpha 对象级透明度
+// 返回: bool 是否开启了透明组
+func (c *semanticCompiler) BeginTransparencyGroup(alpha uint8) bool {
+	if c.measure || c.textOnly || c.page == nil {
+		return false
+	}
+	c.page.Commands = append(c.page.Commands, RasterCommand{Group: RasterGroupBegin, GroupAlpha: alpha})
+	return true
+}
+
+// EndTransparencyGroup 结束当前离屏透明组
+func (c *semanticCompiler) EndTransparencyGroup() {
+	if c.page != nil {
+		c.page.Commands = append(c.page.Commands, RasterCommand{Group: RasterGroupEnd})
+	}
 }
 
 // segments 转换光栅曲线，仅在输出边界展开椭圆弧
@@ -395,6 +417,11 @@ func (c *semanticCompiler) objectStyle(object PathObject, defaults *DrawParam, l
 	}
 	style.fill = withFillAlpha(style.fill, object.Alpha)
 	style.stroke = withFillAlpha(style.stroke, object.Alpha)
+	style.localOptions = style.options
+	style.localOptions.Width = c.renderer.localStrokeWidth(style.localOptions.Width, linear)
+	if len(style.options.Dashes) > 0 {
+		style.options.Dashes = append([]float64(nil), style.options.Dashes...)
+	}
 	if scale := math.Sqrt(math.Abs(linear.a*linear.d - linear.b*linear.c)); scale > 0 {
 		style.options.Width *= scale
 		style.options.DashOffset *= scale
@@ -413,15 +440,24 @@ func (c *semanticCompiler) pathObject(object PathObject, state RenderState) erro
 	if object.Visible != nil && !*object.Visible {
 		return nil
 	}
+	shouldFill := object.Fill != nil && *object.Fill
+	shouldStroke := object.Stroke == nil || *object.Stroke
+	if !shouldFill && !shouldStroke {
+		return nil
+	}
+	objAlpha := fillAlphaByte(object.Alpha)
+	if !c.measure && objAlpha == 0 {
+		return nil
+	}
 	matrix, linear := renderObjectMatrix(object.Boundary, NewMatrix(object.CTM), state)
 	local := object
 	local.Boundary = "0 0 1 1"
 	local.CTM = ""
-	path, err := c.geometry.Path(local)
+	localPath, err := c.geometry.Path(local)
 	if err != nil {
 		return err
 	}
-	path, err = c.geometry.Transform(path, matrix)
+	path, err := c.geometry.Transform(localPath, matrix)
 	if err != nil {
 		return err
 	}
@@ -429,27 +465,71 @@ func (c *semanticCompiler) pathObject(object PathObject, state RenderState) erro
 	if err != nil {
 		return err
 	}
-	style := c.objectStyle(object, state.Defaults, linear)
+	useGroup := !c.measure && shouldFill && shouldStroke && objAlpha < 255
+	styleObj := object
+	if useGroup {
+		styleObj.Alpha = nil
+	}
+	style := c.objectStyle(styleObj, state.Defaults, linear)
 	shading, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
-	if object.Fill != nil && *object.Fill {
-		paint, err := c.renderer.ResolvePaint(style.fill)
+	var fillPaint Paint
+	if shouldFill {
+		fillPaint, err = c.renderer.ResolvePaint(style.fill)
 		if err != nil {
 			return err
 		}
-		if err := c.fill(path, paint, object.Rule == "Even-Odd", clip, shading, shading); err != nil {
-			return err
-		}
 	}
-	if object.Stroke == nil || *object.Stroke {
-		paint := Paint{Kind: PaintSolid, Color: color.RGBA{A: fillAlphaByte(object.Alpha)}}
+	var strokePaint Paint
+	if shouldStroke {
+		strokePaint = Paint{Kind: PaintSolid, Color: color.RGBA{A: fillAlphaByte(styleObj.Alpha)}}
 		if style.stroke != nil {
-			var err error
-			paint, err = c.renderer.ResolvePaint(style.stroke)
+			strokePaint, err = c.renderer.ResolvePaint(style.stroke)
 			if err != nil {
 				return err
 			}
 		}
-		return c.stroke(path, paint, style.options, clip, shading, shading)
+	}
+	if useGroup && (!paintVisible(fillPaint) || !paintVisible(strokePaint)) {
+		useGroup = false
+		style = c.objectStyle(object, state.Defaults, linear)
+		if shouldFill {
+			fillPaint, err = c.renderer.ResolvePaint(style.fill)
+			if err != nil {
+				return err
+			}
+		}
+		if shouldStroke {
+			strokePaint = Paint{Kind: PaintSolid, Color: color.RGBA{A: objAlpha}}
+			if style.stroke != nil {
+				strokePaint, err = c.renderer.ResolvePaint(style.stroke)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if useGroup {
+		c.BeginTransparencyGroup(objAlpha)
+		defer c.EndTransparencyGroup()
+	}
+	if shouldFill {
+		if err := c.fill(path, fillPaint, object.Rule == "Even-Odd", clip, shading, shading); err != nil {
+			return err
+		}
+	}
+	if shouldStroke {
+		if !matrixIsSimilarity(linear) && len(localPath) > 0 && paintVisible(strokePaint) {
+			outline, err := c.geometry.Stroke(localPath, style.localOptions)
+			if err != nil {
+				return err
+			}
+			outline, err = c.geometry.Transform(outline, matrix)
+			if err != nil {
+				return err
+			}
+			return c.fill(outline, strokePaint, false, clip, shading, shading)
+		}
+		return c.stroke(path, strokePaint, style.options, clip, shading, shading)
 	}
 	return nil
 }
@@ -458,7 +538,9 @@ func (c *semanticCompiler) pathObject(object PathObject, state RenderState) erro
 // 入参: object 文字对象, state 继承状态
 // 返回: error 字体或几何错误
 func (c *semanticCompiler) textObject(object TextObject, state RenderState) error {
-	if object.Visible != nil && !*object.Visible || object.Fill != nil && !*object.Fill && (object.Stroke == nil || !*object.Stroke) {
+	shouldFill := object.Fill == nil || *object.Fill
+	shouldStroke := object.Stroke != nil && *object.Stroke
+	if object.Visible != nil && !*object.Visible || !shouldFill && !shouldStroke {
 		return nil
 	}
 	positioned, err := c.renderer.positionText(object, state, c.textOnly && c.renderer.textContentOnly)
@@ -477,10 +559,19 @@ func (c *semanticCompiler) textObject(object TextObject, state RenderState) erro
 		}
 		return nil
 	}
+	objAlpha := fillAlphaByte(object.Alpha)
+	if !c.measure && objAlpha == 0 {
+		return nil
+	}
 	_, linear := renderObjectMatrix(object.Boundary, NewMatrix(object.CTM), state)
-	style := c.objectStyle(object.pathStyle(), state.Defaults, linear)
+	useGroup := !c.measure && shouldFill && shouldStroke && objAlpha < 255 && len(positioned.Glyphs) > 0
+	styleObj := object.pathStyle()
+	if useGroup {
+		styleObj.Alpha = nil
+	}
+	style := c.objectStyle(styleObj, state.Defaults, linear)
 	shading, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
-	fill := Paint{Kind: PaintSolid, Color: color.RGBA{A: fillAlphaByte(object.Alpha)}}
+	fill := Paint{Kind: PaintSolid, Color: color.RGBA{A: fillAlphaByte(styleObj.Alpha)}}
 	if style.fill != nil {
 		fill, err = c.renderer.ResolvePaint(style.fill)
 		if err != nil {
@@ -488,19 +579,67 @@ func (c *semanticCompiler) textObject(object TextObject, state RenderState) erro
 		}
 	}
 	var stroke Paint
-	if object.Stroke != nil && *object.Stroke {
+	if shouldStroke {
 		stroke, err = c.renderer.ResolvePaint(style.stroke)
 		if err != nil {
 			return err
 		}
 	}
+	if useGroup && (!paintVisible(fill) || !paintVisible(stroke)) {
+		useGroup = false
+		style = c.objectStyle(object.pathStyle(), state.Defaults, linear)
+		fill = Paint{Kind: PaintSolid, Color: color.RGBA{A: objAlpha}}
+		if style.fill != nil {
+			fill, err = c.renderer.ResolvePaint(style.fill)
+			if err != nil {
+				return err
+			}
+		}
+		if shouldStroke {
+			stroke, err = c.renderer.ResolvePaint(style.stroke)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if useGroup {
+		c.BeginTransparencyGroup(objAlpha)
+		defer c.EndTransparencyGroup()
+	}
+	nonUniform := shouldStroke && !matrixIsSimilarity(linear)
+	var invLinear Matrix
+	if nonUniform {
+		var ok bool
+		invLinear, ok = linear.Invert()
+		if !ok {
+			nonUniform = false
+		}
+	}
 	for _, glyph := range positioned.Glyphs {
-		if object.Fill == nil || *object.Fill {
+		if shouldFill {
 			if err := c.fill(glyph.Path, fill, false, positioned.Clip, shading, shading); err != nil {
 				return err
 			}
 		}
-		if object.Stroke != nil && *object.Stroke && len(glyph.Path) > 0 {
+		if shouldStroke && len(glyph.Path) > 0 {
+			if nonUniform && paintVisible(stroke) {
+				localGlyph, err := c.geometry.Transform(glyph.Path, invLinear)
+				if err != nil {
+					return err
+				}
+				outline, err := c.geometry.Stroke(localGlyph, style.localOptions)
+				if err != nil {
+					return err
+				}
+				outline, err = c.geometry.Transform(outline, linear)
+				if err != nil {
+					return err
+				}
+				if err := c.fill(outline, stroke, false, positioned.Clip, shading, shading); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := c.stroke(glyph.Path, stroke, style.options, positioned.Clip, shading, shading); err != nil {
 				return err
 			}
@@ -513,7 +652,13 @@ func (c *semanticCompiler) textObject(object TextObject, state RenderState) erro
 // 入参: clip 绘制区域, pattern 底纹, object 对象原点矩阵
 // 返回: error 编译错误
 func (c *semanticCompiler) fillPattern(clip GeometryPath, pattern *PatternPaint, object Matrix) error {
-	xstep, ystep := math.Max(pattern.XStep, pattern.Width), math.Max(pattern.YStep, pattern.Height)
+	xstep, ystep := pattern.XStep, pattern.YStep
+	if xstep <= 0 {
+		xstep = pattern.Width
+	}
+	if ystep <= 0 {
+		ystep = pattern.Height
+	}
 	if xstep <= 0 || ystep <= 0 {
 		return fmt.Errorf("invalid pattern cell size")
 	}
@@ -539,8 +684,22 @@ func (c *semanticCompiler) fillPattern(clip GeometryPath, pattern *PatternPaint,
 	if err != nil {
 		return err
 	}
-	for x, end := int(math.Floor(box.X/xstep))-1, int(math.Ceil((box.X+box.W)/xstep))+1; x <= end; x++ {
-		for y, end := int(math.Floor(box.Y/ystep))-1, int(math.Ceil((box.Y+box.H)/ystep))+1; y <= end; y++ {
+	startXF := math.Floor((box.X-pattern.Width)/xstep) - 1
+	endXF := math.Ceil((box.X+box.W)/xstep) + 1
+	startYF := math.Floor((box.Y-pattern.Height)/ystep) - 1
+	endYF := math.Ceil((box.Y+box.H)/ystep) + 1
+	if !finite(startXF) || !finite(endXF) || !finite(startYF) || !finite(endYF) {
+		return fmt.Errorf("invalid pattern bounds")
+	}
+	countX, countY := endXF-startXF+1, endYF-startYF+1
+	if countX <= 0 || countY <= 0 {
+		return nil
+	}
+	if countX > maxPatternTiles || countY > maxPatternTiles || countX*countY > maxPatternTiles {
+		return fmt.Errorf("pattern tile count exceeds limit")
+	}
+	for x, end := int(startXF), int(endXF); x <= end; x++ {
+		for y, end := int(startYF), int(endYF); y <= end; y++ {
 			tile := matrix.Multiply(TranslationMatrix(float64(x)*xstep, float64(y)*ystep))
 			if x%2 != 0 && (pattern.ReflectMethod == "Column" || pattern.ReflectMethod == "RowAndColumn") {
 				tile = tile.Multiply(Matrix{a: -1, d: 1, e: pattern.Width})
@@ -628,6 +787,47 @@ func (c *semanticCompiler) shadingClip(path GeometryPath, paint Paint, matrix Ma
 		}
 	}
 	return c.geometry.Transform(local, view)
+}
+
+// paintVisible 判断画刷是否产生可见输出
+// 入参: paint 画刷
+// 返回: bool 是否可见
+func paintVisible(paint Paint) bool {
+	return paint.Kind != PaintNone && (paint.Kind != PaintSolid || paint.Color.A != 0)
+}
+
+// matrixIsSimilarity 判断二维线性矩阵是否为非退化相似变换
+// 入参: m 变换矩阵
+// 返回: bool 是否为等比正交变换
+func matrixIsSimilarity(m Matrix) bool {
+	s1 := m.a*m.a + m.b*m.b
+	s2 := m.c*m.c + m.d*m.d
+	if s1 <= 0 || s2 <= 0 {
+		return false
+	}
+	dot := m.a*m.c + m.b*m.d
+	ref := max(s1, s2, 1e-12)
+	return math.Abs(s1-s2) <= 1e-6*ref && math.Abs(dot) <= 1e-6*ref
+}
+
+// localStrokeWidth 按页面设备最小线宽约束折算对象局部描边线宽
+// 入参: width 对象局部线宽, linear 线性变换矩阵
+// 返回: float64 修正后的局部线宽
+func (r *Renderer) localStrokeWidth(width float64, linear Matrix) float64 {
+	scale := math.Sqrt(math.Abs(linear.a*linear.d - linear.b*linear.c))
+	if scale <= 0 {
+		return r.deviceLineWidth(width)
+	}
+	if width == 0 {
+		return r.deviceLineWidth(0) / scale
+	}
+	if width > 0 {
+		minWidth := r.deviceLineWidth(width*scale) / scale
+		if width < minWidth {
+			return minWidth
+		}
+	}
+	return width
 }
 
 // semanticGradient 保留渐变周期、延伸与椭圆坐标

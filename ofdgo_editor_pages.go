@@ -291,5 +291,8 @@ func editorPageResourceLocation(reader *Reader, parts map[string][]byte, name, b
 	if file, ok := reader.packageFile(candidate); ok {
 		return cleanPackagePath(file.Name), nil
 	}
+	if reader.encryptedSource().has(candidate) {
+		return candidate, nil
+	}
 	return "", fmt.Errorf("page reference %q in %s not found", value, name)
 }

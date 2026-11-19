@@ -62,6 +62,12 @@ type PageAnalysis interface {
 	SkipClips() bool
 }
 
+// PageTransparencyGroups 提供可选的离屏透明组隔离，返回true时配对调用EndTransparencyGroup
+type PageTransparencyGroups interface {
+	BeginTransparencyGroup(alpha uint8) bool
+	EndTransparencyGroup()
+}
+
 // WalkPage 按模板、图层、注解和印章顺序访问页面，不依赖任何绘图库
 // 页面背景由调用方处理，文字裁剪可通过几何后端加载字体，图片由访问器按需加载
 // 注释与印章按当前页惰性加载，不触发整份文档全量解析
@@ -355,6 +361,24 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 		}
 	}
 	state.BoundaryInCTM = true
+	useGroup := false
+	if object.Alpha != nil {
+		alpha := clampColor(*object.Alpha)
+		if alpha < 255 && r.compositeObjectCount(object, references) > 1 {
+			if tg, ok := visitor.(PageTransparencyGroups); ok && tg.BeginTransparencyGroup(uint8(alpha)) {
+				useGroup = true
+				defer tg.EndTransparencyGroup()
+			} else if cv, ok := visitor.(*canvasPageVisitor); ok {
+				if compiler, ok := cv.ctx.Renderer.(*canvasPageCompiler); ok {
+					compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupBegin, GroupAlpha: uint8(alpha)})
+					useGroup = true
+					defer func() {
+						compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupEnd})
+					}()
+				}
+			}
+		}
+	}
 	if object.ResourceID != "" {
 		if ref := r.compositeDefinition(object.ResourceID); ref != nil {
 			if references[ref] {
@@ -365,7 +389,9 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 			}
 			references[ref] = true
 			copy := *ref
-			copy.Alpha = mergeAlpha(copy.Alpha, object.Alpha)
+			if !useGroup {
+				copy.Alpha = mergeAlpha(copy.Alpha, object.Alpha)
+			}
 			err := r.walkComposite(copy, state, visitor, references)
 			delete(references, ref)
 			if err != nil {
@@ -374,12 +400,53 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 		}
 	}
 	for member := range object.objects() {
-		member = mergeGraphicObjectAlpha(member, object.Alpha)
+		if !useGroup {
+			member = mergeGraphicObjectAlpha(member, object.Alpha)
+		}
 		if err := r.walkObject(&member, state, visitor, references); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// compositeObjectCount 估算复合图元展开后的可见子图元数量，超过1即提前返回
+// 入参: object 复合图元, references 当前资源引用链
+// 返回: int 截断至2的子图元计数
+func (r *Renderer) compositeObjectCount(object CompositeGraphicUnit, references map[*CompositeGraphicUnit]bool) int {
+	count := 0
+	var visit func(unit CompositeGraphicUnit, seen map[*CompositeGraphicUnit]bool)
+	visit = func(unit CompositeGraphicUnit, seen map[*CompositeGraphicUnit]bool) {
+		if count > 1 {
+			return
+		}
+		if unit.ResourceID != "" {
+			if ref := r.compositeDefinition(unit.ResourceID); ref != nil && !references[ref] && !seen[ref] {
+				if seen == nil {
+					seen = make(map[*CompositeGraphicUnit]bool)
+				}
+				seen[ref] = true
+				visit(*ref, seen)
+				delete(seen, ref)
+				if count > 1 {
+					return
+				}
+			}
+		}
+		for member := range unit.objects() {
+			switch member.Type {
+			case "CompositeGraphicUnit", "CompositeObject":
+				visit(member.CompositeGraphicUnit, seen)
+			default:
+				count++
+			}
+			if count > 1 {
+				return
+			}
+		}
+	}
+	visit(object, nil)
+	return count
 }
 
 // compositeExtentClip 按矢量资源尺寸裁剪内容，资源裁剪随实例变换

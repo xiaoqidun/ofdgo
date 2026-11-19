@@ -63,19 +63,32 @@ type RasterSegment struct {
 	End                RasterPoint
 }
 
-// RasterCommand 填充路径或绘制图像，Image非空时为图像指令
+// RasterGroupKind 光栅透明组指令类型
+type RasterGroupKind uint8
+
+// 光栅透明组指令：常规绘制、开启透明组与结束透明组
+const (
+	RasterGroupNone RasterGroupKind = iota
+	RasterGroupBegin
+	RasterGroupEnd
+)
+
+// RasterCommand 填充路径、绘制图像或管理透明组，Image非空时为图像指令
+// Group非零时为透明组边界指令，GroupAlpha为开启透明组时的整体透明度
 // EvenOdd仅控制填充规则，不影响描边
 // Transform将局部坐标映射到页面，图像局部坐标与image.Image的像素坐标一致
-// Clip为页面坐标裁剪，适用于路径和图像，nil表示不裁剪，空切片表示全部裁去
+// Clip为页面坐标裁剪，适用于路径、图像和透明组，nil表示不裁剪，空切片表示全部裁去
 // Stroke非空时为描边，宽度与虚线使用页面毫米，不随Transform再次缩放
 type RasterCommand struct {
-	Path      []RasterSegment
-	Paint     RasterPaint
-	EvenOdd   bool
-	Transform RasterMatrix
-	Image     image.Image
-	Clip      []RasterSegment
-	Stroke    *StrokeOptions
+	Path       []RasterSegment
+	Paint      RasterPaint
+	EvenOdd    bool
+	Transform  RasterMatrix
+	Image      image.Image
+	Clip       []RasterSegment
+	Stroke     *StrokeOptions
+	Group      RasterGroupKind
+	GroupAlpha uint8
 }
 
 // RasterPaint 预乘RGBA纯色或渐变，Gradient非空时忽略Color
@@ -439,6 +452,9 @@ func (g *RasterGradient) colorAt(t float64) color.RGBA {
 // 入参: geometry 几何后端, command 绘制指令
 // 返回: GeometryPath 页面轮廓, error 几何或指令错误
 func rasterCommandGeometry(geometry GeometryBackend, command RasterCommand) (GeometryPath, error) {
+	if command.Group != RasterGroupNone {
+		return nil, nil
+	}
 	if command.Clip != nil && len(command.Clip) == 0 {
 		return nil, nil
 	}
@@ -584,13 +600,16 @@ func rasterClipMask(backend RasterBackend, page *RasterPage, path []RasterSegmen
 	return mask, nil
 }
 
-// drawRasterImageCommand 使用当前后端生成裁剪蒙版，共用高质量图像采样
-// 入参: backend 当前后端, page 页面, dst 目标图像, src 原始图像, command 图像指令, cache 蒙版缓存
+// drawRasterImageCommandOffset 在带页面像素偏移的目标缓冲上绘制图像与裁剪蒙版
+// 入参: backend 当前后端, page 页面, dst 目标图像, offset 目标左上角在整页像素中的偏移, pageH 整页像素高度, src 原始图像, command 图像指令, cache 蒙版缓存
 // 返回: error 裁剪绘制错误
-func drawRasterImageCommand(backend RasterBackend, page *RasterPage, dst draw.Image, src image.Image, command RasterCommand, cache *renderCache[[32]byte, *image.Alpha]) error {
-	m := page.PixelTransform(command.Transform, dst.Bounds().Dy())
+func drawRasterImageCommandOffset(backend RasterBackend, page *RasterPage, dst draw.Image, offset image.Point, pageH int, src image.Image, command RasterCommand, cache *renderCache[[32]byte, *image.Alpha]) error {
+	m := page.PixelTransform(command.Transform, pageH)
+	localM := m
+	localM[4] -= float64(offset.X)
+	localM[5] -= float64(offset.Y)
 	if command.Clip == nil {
-		baseimage.DrawPixels(dst, src, m, draw.Over)
+		baseimage.DrawPixels(dst, src, localM, draw.Over)
 		return nil
 	}
 	mask, err := rasterClipMask(backend, page, command.Clip, cache)
@@ -600,13 +619,14 @@ func drawRasterImageCommand(backend RasterBackend, page *RasterPage, dst draw.Im
 	if mask.Rect.Empty() {
 		return nil
 	}
-	bounds := mask.Rect.Intersect(dst.Bounds()).Intersect(baseimage.TransformBounds(src.Bounds(), m, dst.Bounds()))
+	dstPageBounds := dst.Bounds().Add(offset)
+	bounds := mask.Rect.Intersect(dstPageBounds).Intersect(baseimage.TransformBounds(src.Bounds(), m, dstPageBounds))
 	if bounds.Empty() {
 		return nil
 	}
 	layer := image.NewRGBA64(bounds)
 	baseimage.DrawPixels(layer, baseimage.PixelSource(src), m, draw.Src)
-	draw.DrawMask(dst, bounds, layer, bounds.Min, mask, bounds.Min, draw.Over)
+	draw.DrawMask(dst, bounds.Sub(offset), layer, bounds.Min, mask, bounds.Min, draw.Over)
 	return nil
 }
 

@@ -586,5 +586,8 @@ func (r *Reader) retireVersionFiles(ctx context.Context, candidates map[string]b
 			return candidates[cleanPackagePath(file.Name)]
 		})}
 	}
+	if src := r.encryptedSource(); src != nil {
+		r.setEncryptedSource(src.omit(candidates))
+	}
 	return nil
 }

@@ -321,6 +321,16 @@ func (r *pdfTextReplacements) clear(nodes []pdfCompositeNode) {
 	}
 }
 
+// pdfTextGlyphItem 保存单字形的基线坐标、转义原文及字形索引，用于同行合并
+type pdfTextGlyphItem struct {
+	x            float64
+	y            float64
+	text         string
+	runes        int
+	hasTransform bool
+	gid          uint16
+}
+
 // text 保留字形及逐字基线，外部字体优先复用同名内嵌资源
 // 入参: mark PDF文字绘制信息
 // 返回: error 错误信息
@@ -482,9 +492,13 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	const unit = 25.4 / 72
 	m := p.matrix.Mul(mark.Matrix).Mul(pdfgo.Matrix{1 / unit, 0, 0, -1 / unit, 0, 0})
 	var extent pdfPointBounds
-	object := TextObject{Font: id, Size: mark.Size * unit, HScale: mark.HorizontalScale, TextCode: make([]TextCode, 0, len(mark.Glyphs))}
-	if embedded {
-		object.CGTransform = make([]CGTransform, 0, len(mark.Glyphs))
+	object := TextObject{Font: id, Size: mark.Size * unit, HScale: mark.HorizontalScale}
+	items := make([]pdfTextGlyphItem, 0, len(mark.Glyphs))
+	if mark.Replacement != nil {
+		object.TextCode = make([]TextCode, 0, len(mark.Glyphs))
+		if embedded {
+			object.CGTransform = make([]CGTransform, 0, len(mark.Glyphs))
+		}
 	}
 	position := 0
 	for n, glyph := range mark.Glyphs {
@@ -524,10 +538,16 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			gid = metrics.GlyphIndex(char)
 		}
 		origin := mark.Positions[n]
-		object.TextCode = append(object.TextCode, TextCode{X: pdfNumbers(origin.X * unit), Y: pdfNumbers(-origin.Y * unit), Value: escapeOFDText(glyph.Text)})
+		escaped := escapeOFDText(glyph.Text)
 		count := utf8.RuneCountInString(glyph.Text)
-		if embedded || undefined {
-			object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: position, CodeCount: count, GlyphCount: 1, Glyphs: strconv.Itoa(int(gid))})
+		hasTransform := embedded || undefined
+		if mark.Replacement != nil {
+			object.TextCode = append(object.TextCode, TextCode{X: pdfNumbers(origin.X * unit), Y: pdfNumbers(-origin.Y * unit), Value: escaped})
+			if hasTransform {
+				object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: position, CodeCount: count, GlyphCount: 1, Glyphs: strconv.Itoa(int(gid))})
+			}
+		} else {
+			items = append(items, pdfTextGlyphItem{x: origin.X * unit, y: -origin.Y * unit, text: escaped, runes: count, hasTransform: hasTransform, gid: gid})
 		}
 		position += count
 		if embedded || outlineStroke || undefined && outline != nil {
@@ -589,6 +609,8 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	}
 	if mark.Replacement != nil {
 		pdfApplyReplacement(&object, mark.Replacement.Text, mark.Positions)
+	} else {
+		pdfCompactTextRuns(&object, items)
 	}
 	box := extent.box()
 	if stroke && !outlineStroke {
@@ -1045,4 +1067,70 @@ func pdfApplyReplacement(object *TextObject, text string, positions []pdfgo.Poin
 	}
 	object.TextCode = []TextCode{{X: pdfNumbers(positions[0].X * unit), Y: pdfNumbers(-positions[0].Y * unit), DeltaX: pdfNumbers(dx...), DeltaY: pdfNumbers(dy...), Value: escapeOFDText(text)}}
 	object.CGTransform = []CGTransform{{CodeCount: utf8.RuneCountInString(text), GlyphCount: len(glyphs), Glyphs: strings.Join(glyphs, " ")}}
+}
+
+// pdfCompactTextRuns 将同基线连续字形合并为单条TextCode与DeltaX，并合并连续一对一CGTransform
+// 入参: object 目标文字对象, items 字形项序列
+func pdfCompactTextRuns(object *TextObject, items []pdfTextGlyphItem) {
+	if len(items) == 0 {
+		return
+	}
+	object.TextCode = make([]TextCode, 0, 1)
+	var textBuf strings.Builder
+	var glyphBuf strings.Builder
+	var deltas []float64
+	pos := 0
+	for start := 0; start < len(items); {
+		first := items[start]
+		end := start + 1
+		if first.hasTransform || first.runes == 1 {
+			for end < len(items) && math.Abs(items[end].y-first.y) <= 1e-9 && (items[end].hasTransform || items[end].runes == 1) {
+				end++
+			}
+		}
+		textBuf.Reset()
+		deltas = deltas[:0]
+		curX := first.x
+		runStart, runCount := -1, 0
+		glyphBuf.Reset()
+		flushTransform := func() {
+			if runCount == 0 {
+				return
+			}
+			object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: runStart, CodeCount: runCount, GlyphCount: runCount, Glyphs: glyphBuf.String()})
+			runStart, runCount = -1, 0
+			glyphBuf.Reset()
+		}
+		for i := start; i < end; i++ {
+			item := items[i]
+			textBuf.WriteString(item.text)
+			if i > start {
+				dx := item.x - curX
+				deltas = append(deltas, dx)
+				curX += dx
+			}
+			if !item.hasTransform {
+				flushTransform()
+			} else if item.runes == 1 {
+				if runCount == 0 {
+					runStart = pos
+				} else {
+					glyphBuf.WriteByte(' ')
+				}
+				glyphBuf.WriteString(strconv.Itoa(int(item.gid)))
+				runCount++
+			} else {
+				flushTransform()
+				object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: pos, CodeCount: item.runes, GlyphCount: 1, Glyphs: strconv.Itoa(int(item.gid))})
+			}
+			pos += item.runes
+		}
+		flushTransform()
+		code := TextCode{X: pdfNumbers(first.x), Y: pdfNumbers(first.y), Value: textBuf.String()}
+		if len(deltas) > 0 {
+			code.DeltaX = pdfNumbers(deltas...)
+		}
+		object.TextCode = append(object.TextCode, code)
+		start = end
+	}
 }

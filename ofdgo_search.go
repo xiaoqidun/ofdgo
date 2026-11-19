@@ -20,9 +20,11 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 	"unsafe"
@@ -343,6 +345,15 @@ func (r *Renderer) SearchText(ctx context.Context, query string, visit func(int,
 	}
 	query = foldText(query)
 	compactQuery := compactSearchText(query)
+	if len(indices) >= 16 {
+		workers := min(runtime.GOMAXPROCS(0), 8, len(indices)/2)
+		if r.Reader != nil && r.Reader.resources != nil && r.Reader.resources.options.Parallelism > 0 && r.Reader.resources.options.Parallelism < workers {
+			workers = r.Reader.resources.options.Parallelism
+		}
+		if workers > 1 {
+			return r.searchTextParallel(ctx, doc.Pages.Page, indices, query, compactQuery, workers, visit)
+		}
+	}
 	for _, index := range indices {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -359,6 +370,20 @@ func (r *Renderer) SearchText(ctx context.Context, query string, visit func(int,
 		}
 	}
 	return ctx.Err()
+}
+
+// searchPageResult 保存并发搜索单页的预筛或完整文字提取结果
+type searchPageResult struct {
+	index   int
+	text    *PageText
+	matched bool
+	err     error
+}
+
+// searchPageJob 表示并发搜索队列中的单个页面任务
+type searchPageJob struct {
+	index int
+	done  chan searchPageResult
 }
 
 // pageTextEntry 将页面原文和派生搜索索引放在同一预算与失效范围内
@@ -407,6 +432,116 @@ func (d *textPageTokens) Token() (xml.Token, error) {
 		}
 		return token, nil
 	}
+}
+
+// searchTextParallel 使用有限工作协程并发预筛和提取多页文字，严格按页序回调并响应取消
+// 入参: ctx 取消上下文, pages 页面列表, indices 待搜页码, query 已折叠查询, compactQuery 去空白查询, workers 工作协程数, visit 匹配访问函数
+// 返回: error 提取、取消或访问错误
+func (r *Renderer) searchTextParallel(ctx context.Context, pages []Page, indices []int, query, compactQuery string, workers int, visit func(int, TextMatch) error) error {
+	searchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	clones := make([]*Renderer, 0, workers)
+	for range workers {
+		forked, err := r.Fork(searchCtx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			for _, index := range indices {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				text, matched, err := r.searchPageTextByIndexContext(ctx, pages[index], query, compactQuery)
+				if err != nil {
+					return fmt.Errorf("failed to search page %d: %w", index+1, err)
+				}
+				if !matched || text == nil {
+					continue
+				}
+				if err := text.searchEach(ctx, query, func(match TextMatch) error { return visit(index, match) }); err != nil {
+					return err
+				}
+			}
+			return ctx.Err()
+		}
+		clones = append(clones, forked)
+	}
+	window := min(len(indices), workers*2)
+	jobs := make(chan searchPageJob, window)
+	ordered := make(chan (<-chan searchPageResult), window)
+	var wg sync.WaitGroup
+	for _, worker := range clones {
+		wg.Add(1)
+		go func(renderer *Renderer) {
+			defer wg.Done()
+			for job := range jobs {
+				if err := searchCtx.Err(); err != nil {
+					job.done <- searchPageResult{index: job.index, err: err}
+					continue
+				}
+				text, matched, err := renderer.searchPageTextByIndexContext(searchCtx, pages[job.index], query, compactQuery)
+				job.done <- searchPageResult{index: job.index, text: text, matched: matched, err: err}
+			}
+		}(worker)
+	}
+	var dispatchWG sync.WaitGroup
+	dispatchWG.Add(1)
+	go func() {
+		defer dispatchWG.Done()
+		defer close(jobs)
+		defer close(ordered)
+		for _, index := range indices {
+			done := make(chan searchPageResult, 1)
+			select {
+			case <-searchCtx.Done():
+				return
+			case ordered <- done:
+			}
+			select {
+			case <-searchCtx.Done():
+				return
+			case jobs <- searchPageJob{index: index, done: done}:
+			}
+		}
+	}()
+	var firstErr error
+	for slot := range ordered {
+		if firstErr != nil {
+			break
+		}
+		if err := searchCtx.Err(); err != nil {
+			firstErr = err
+			break
+		}
+		var res searchPageResult
+		select {
+		case <-searchCtx.Done():
+			firstErr = searchCtx.Err()
+		case res = <-slot:
+			if res.err != nil {
+				if ctx.Err() != nil {
+					firstErr = ctx.Err()
+				} else {
+					firstErr = fmt.Errorf("failed to search page %d: %w", res.index+1, res.err)
+				}
+			} else if res.matched && res.text != nil {
+				if err := res.text.searchEach(searchCtx, query, func(match TextMatch) error { return visit(res.index, match) }); err != nil {
+					firstErr = err
+				}
+			}
+		}
+		if firstErr != nil {
+			cancel()
+			break
+		}
+	}
+	cancel()
+	dispatchWG.Wait()
+	wg.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
 }
 
 // writeTo 输出非空文本对象，可在首个对象前分隔上一页
@@ -587,9 +722,9 @@ func (r *Renderer) searchPageTextByIndexContext(ctx context.Context, pageRef Pag
 	return text, true, nil
 }
 
-// extractFastPlainPageText 在不含字形重映射时按实际绘制顺序快速拼接页面全部可读文本
+// extractFastPlainPageText 按实际绘制顺序快速拼接页面可读Unicode原文，仅对索引字形等复杂情形回退
 // 入参: ctx 取消上下文, page 页面内容
-// 返回: string 原始文本拼接结果, bool 是否不含字形重映射可安全预筛
+// 返回: string 原始文本拼接结果, bool 是否可安全预筛
 func (r *Renderer) extractFastPlainPageText(ctx context.Context, page *PageContent) (string, bool) {
 	if page == nil || r == nil || r.Reader == nil {
 		return "", false
@@ -620,12 +755,12 @@ func (r *Renderer) extractFastPlainPageText(ctx context.Context, page *PageConte
 			if !shouldFill && !shouldStroke {
 				return true
 			}
-			if len(t.CGTransform) != 0 {
-				return false
-			}
 			for _, tc := range t.TextCode {
 				if tc.Index != "" {
 					return false
+				}
+				if tc.Value == "" {
+					continue
 				}
 				sb.WriteString(string(textCodeRunes(tc.Value)))
 			}
@@ -781,8 +916,14 @@ func textGlyphSpans(runes []rune, transforms map[int]textGlyphTransform, offset 
 	spans := make([][2]int, 0, len(runes))
 	for i := 0; i < len(runes); {
 		if transform, ok := transforms[offset+i]; ok && i+transform.CodeCount <= len(runes) {
-			for range transform.Glyphs {
-				spans = append(spans, [2]int{i, i + transform.CodeCount})
+			if transform.CodeCount == len(transform.Glyphs) {
+				for k := range transform.Glyphs {
+					spans = append(spans, [2]int{i + k, i + k + 1})
+				}
+			} else {
+				for range transform.Glyphs {
+					spans = append(spans, [2]int{i, i + transform.CodeCount})
+				}
 			}
 			i += transform.CodeCount
 		} else {

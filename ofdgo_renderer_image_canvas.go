@@ -39,21 +39,48 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	if obj.Visible != nil && !*obj.Visible || obj.Alpha != nil && *obj.Alpha == 0 {
 		return
 	}
-	img, err := r.imageObjectResource(obj)
-	if err != nil {
-		r.renderError = err
-		return
-	}
 	box, _ := ParseBox(obj.Boundary)
-	mask, err := r.imageObjectMask(obj, img)
-	if err != nil {
-		r.renderError = err
-		return
+	compiler, isCompiler := ctx.Renderer.(*canvasPageCompiler)
+	hasBorder := obj.Border != nil
+	if hasBorder {
+		if border := imageBorderObject(obj, box); border.LineWidth == 0 {
+			hasBorder = false
+		}
 	}
-	img, err = imageWithEffects(r.pageContext, img, mask, obj.Alpha)
-	if err != nil {
-		r.renderError = err
-		return
+	useGroup := isCompiler && hasBorder && obj.Alpha != nil && clampColor(*obj.Alpha) < 255
+	imgAlpha := obj.Alpha
+	borderObj := obj
+	if useGroup {
+		compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupBegin, GroupAlpha: uint8(clampColor(*obj.Alpha))})
+		defer func() {
+			compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupEnd})
+		}()
+		imgAlpha = nil
+		borderObj.Alpha = nil
+	}
+	var img image.Image
+	if pdfOutput, isPDF := ctx.Renderer.(*pdfRenderer); isPDF {
+		if raw := pdfOutput.rawImageResource(r, obj); raw != nil {
+			img = raw
+		}
+	}
+	if img == nil {
+		var err error
+		img, err = r.imageObjectResource(obj)
+		if err != nil {
+			r.renderError = err
+			return
+		}
+		mask, err := r.imageObjectMask(obj, img)
+		if err != nil {
+			r.renderError = err
+			return
+		}
+		img, err = imageWithEffects(r.pageContext, img, mask, imgAlpha)
+		if err != nil {
+			r.renderError = err
+			return
+		}
 	}
 	imgBounds := img.Bounds()
 	imgW, imgH := float64(imgBounds.Dx()), float64(imgBounds.Dy())
@@ -87,8 +114,8 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	if r.renderError != nil {
 		return
 	}
-	if obj.Border != nil {
-		r.renderImageBorder(ctx, obj, box, pageH, localCTM, parentCTM, boundaryInCTM, parentClip)
+	if hasBorder {
+		r.renderImageBorder(ctx, borderObj, box, pageH, localCTM, parentCTM, boundaryInCTM, parentClip)
 	}
 }
 

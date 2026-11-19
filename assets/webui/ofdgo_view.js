@@ -313,8 +313,10 @@ export function createPageView(context) {
 			}
 			const selection = document.getSelection();
 			const range = !selection.isCollapsed && selection.rangeCount ? selection.getRangeAt(0) : null;
-			if (context.canvasEditor.input?.item.index === index || context.canvasEditor.crop?.item.index === index
-				|| range && (!context.state.documentSelection || !context.isDocumentSelection(range)) && range.intersectsNode(shell)) {
+			const endpointShell = node => (node?.nodeType === 1 ? node : node?.parentElement)?.closest?.(".page-shell");
+			const selectedEndpoint = range && (!context.state.documentSelection || !context.isDocumentSelection(range))
+				&& (endpointShell(range.startContainer) === shell || endpointShell(range.endContainer) === shell);
+			if (context.canvasEditor.input?.item.index === index || context.canvasEditor.crop?.item.index === index || selectedEndpoint) {
 				context.state.selectedPages.add(index);
 				return;
 			}

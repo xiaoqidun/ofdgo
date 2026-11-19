@@ -483,10 +483,17 @@ func (s *Session) PageText(index int) (*ofdgo.PageText, error) {
 // 入参: index 页面索引
 // 返回: string 页面原文, error 错误信息
 func (s *Session) PageTextString(index int) (string, error) {
+	return s.PageTextStringContext(context.Background(), index)
+}
+
+// PageTextStringContext 在指定上下文中获取页面原文
+// 入参: ctx 取消上下文, index 页面索引
+// 返回: string 页面原文, error 错误信息
+func (s *Session) PageTextStringContext(ctx context.Context, index int) (string, error) {
 	text := s.cachedPageText(index)
 	if text == nil {
 		var err error
-		text, err = s.readPageText(context.Background(), index)
+		text, err = s.readPageText(ctx, index)
 		if err != nil {
 			return "", err
 		}
@@ -1233,7 +1240,7 @@ func (e *businessEngine) checkDocument(name string) error {
 	switch name {
 	case "ofdgoFontFaces", "ofdgoFontMenu", "ofdgoFontPreferenceOrder", "ofdgoFontFace", "ofdgoCheckTextFont", "ofdgoImagePageSize", "ofdgoImagePreview":
 		return nil
-	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDestinationView", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoClearImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
+	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDestinationView", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoPagesText", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoClearImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
 		return nil
 	default:
 		return ofdgo.ErrIncompleteDocument
@@ -2747,7 +2754,54 @@ func (e *businessEngine) pageTextString(args []platformValue) (any, error) {
 	if err := e.preparePDFText(args[0].Int()); err != nil {
 		return nil, err
 	}
-	return e.currentSession.PageTextString(args[0].Int())
+	return e.currentSession.PageTextStringContext(e.operationContext(), args[0].Int())
+}
+
+// pagesText 在单次上下文中提取闭区间页面原文，支持取消
+// 入参: args 起始页、结束页及可选取消检查回调
+// 返回: any 合并后的页面原文, error 提取或取消错误
+func (e *businessEngine) pagesText(args []platformValue) (any, error) {
+	if e.currentSession == nil {
+		return nil, fmt.Errorf("ofd document is not opened")
+	}
+	count := len(e.currentSession.doc.Pages.Page)
+	if count == 0 {
+		return "", nil
+	}
+	start, end := 0, count-1
+	if len(args) > 0 && !args[0].IsNull() && !args[0].IsUndefined() {
+		start = max(0, args[0].Int())
+	}
+	if len(args) > 1 && !args[1].IsNull() && !args[1].IsUndefined() {
+		end = min(count-1, args[1].Int())
+	}
+	ctx := e.operationContext()
+	if len(args) > 2 && args[2].Type() == platformTypeFunction {
+		ctx = e.newOutputContext(args[2])
+	}
+	var parts []string
+	for page := start; page <= end; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := e.preparePDFText(page); err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		text, err := e.currentSession.PageTextStringContext(ctx, page)
+		if err != nil {
+			return nil, err
+		}
+		if text != "" {
+			parts = append(parts, text)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return strings.Join(parts, "\n"), nil
 }
 
 // searchPage 搜索OFD页面文字
@@ -4686,53 +4740,6 @@ func (e *businessEngine) updateTextSelection(args []platformValue) (any, error) 
 		selected = append(selected, fmt.Sprintf("%s/%d", key, index))
 	}
 	return editorSelectionInfo{editorInfo: result.(editorInfo), SelectedIDs: selected}, nil
-}
-
-// previewPositionedText 预览保留定位的文字替换，不修改编辑器或撤销记录
-// 入参: args 页面、对象路径和内容
-// 返回: any SVG预览, error 错误信息
-func (e *businessEngine) previewPositionedText(args []platformValue) (any, error) {
-	pageIndex := args[0].Int()
-	object, err := e.editorObjectAt(pageIndex, args[1].String())
-	if err != nil {
-		return nil, err
-	}
-	if object.Type != "TextObject" {
-		return nil, fmt.Errorf("object is not text")
-	}
-	if err := e.currentEditor.RewritePageText(pageIndex, &object.TextObject, args[2].String()); err != nil {
-		return nil, err
-	}
-	sourcePage, err := e.currentSession.pageContent(pageIndex)
-	if err != nil {
-		return nil, err
-	}
-	restore := e.currentSession.Renderer.BindPageResources(sourcePage)
-	defer restore()
-	measured, err := e.currentSession.Renderer.MeasureObject(object, ofdgo.MeasureOptions{})
-	if err != nil {
-		return nil, err
-	}
-	box := measured.Bounds
-	margin := object.TextObject.Size / 4
-	box.X, box.Y, box.W, box.H = box.X-margin, box.Y-margin, box.W+2*margin, box.H+2*margin
-	boundary, err := ofdgo.ParseBox(object.TextObject.Boundary)
-	if err != nil {
-		return nil, err
-	}
-	object.TextObject.Boundary = fmt.Sprintf("%g %g %g %g", boundary.X-box.X, boundary.Y-box.Y, boundary.W, boundary.H)
-	page := *sourcePage
-	page.Template = nil
-	page.Area = ofdgo.PageArea{PhysicalBox: fmt.Sprintf("0 0 %g %g", box.W, box.H)}
-	page.Content = ofdgo.Content{Layer: []ofdgo.Layer{{Objects: []ofdgo.GraphicObject{object}}}}
-	prevAnnotations := e.currentSession.Renderer.RenderAnnotations
-	e.currentSession.Renderer.RenderAnnotations = false
-	defer func() { e.currentSession.Renderer.RenderAnnotations = prevAnnotations }()
-	var output bytes.Buffer
-	if err := e.currentSession.Renderer.RenderToSVG(&page, &output); err != nil {
-		return nil, err
-	}
-	return output.String(), nil
 }
 
 // updateText 修改文字，null内容保留定位且允许替换字体，null字体数据和颜色沿用对象属性
@@ -8066,6 +8073,20 @@ func (e *businessEngine) saveSigned(args []platformValue) (any, error) {
 			return nil, err
 		}
 	}
+	plainOutput := false
+	if mode := input.Get("encryptionMode"); !mode.IsUndefined() && !mode.IsNull() {
+		plainOutput = mode.String() == "none"
+	}
+	if encryption := input.Get("encryption"); !encryption.IsUndefined() && !encryption.IsNull() {
+		encOptions, err := e.encryptionOptionsFromJS(encryption)
+		if err != nil {
+			return nil, err
+		}
+		if encOptions != nil {
+			defer clear(encOptions.Password)
+		}
+		options.Encryption = encOptions
+	}
 	switch input.Get("mode").String() {
 	case "append":
 		options.Mode = ofdgo.SignatureAppend
@@ -8088,21 +8109,38 @@ func (e *businessEngine) saveSigned(args []platformValue) (any, error) {
 	if err := progress("sign", 0, 1); err != nil {
 		return nil, err
 	}
-	var output bytes.Buffer
-	if e.currentEditor != nil {
+	ctx := e.operationContext()
+	writer := bufio.NewWriterSize(exportWriter{write: args[1]}, 1<<20)
+	if plainOutput {
+		var editor *ofdgo.Editor
+		if e.currentEditor != nil {
+			editor, err = e.currentEditor.Snapshot(ctx)
+		} else {
+			editor, err = e.currentSession.Reader.EditorContext(ctx)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := editor.SetEncryption(nil); err != nil {
+			return nil, err
+		}
+		editor.OnWriteProgress = progress
+		defer func() { editor.OnWriteProgress = nil }()
+		_, err = ofdgo.SignEditorToContext(ctx, writer, editor, options)
+	} else if e.currentEditor != nil {
 		e.currentEditor.OnWriteProgress = progress
 		defer func() { e.currentEditor.OnWriteProgress = nil }()
-		_, err = ofdgo.SignEditorToContext(e.operationContext(), &output, e.currentEditor, options)
+		_, err = ofdgo.SignEditorToContext(ctx, writer, e.currentEditor, options)
 	} else {
-		_, err = e.currentSession.Reader.SignToContext(e.operationContext(), &output, options)
+		_, err = e.currentSession.Reader.SignToContext(ctx, writer, options)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := progress("sign", 1, 1); err != nil {
+	if err := writer.Flush(); err != nil {
 		return nil, err
 	}
-	if _, err := (exportWriter{write: args[1]}).Write(output.Bytes()); err != nil {
+	if err := progress("sign", 1, 1); err != nil {
 		return nil, err
 	}
 	return successResult(map[string]any{"mime": "application/ofd", "label": "OFD"}), nil
@@ -8305,6 +8343,7 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoSearchPage":             e.searchPage,
 		"ofdgoSearchPages":            e.searchPages,
 		"ofdgoPageTextString":         e.pageTextString,
+		"ofdgoPagesText":              e.pagesText,
 		"ofdgoExportFormats":          e.exportFormats,
 		"ofdgoParsePageRange":         e.parsePageRange,
 		"ofdgoExportPage":             e.exportPage,
@@ -8343,7 +8382,6 @@ func (e *businessEngine) businessCommands() map[string]func([]platformValue) (an
 		"ofdgoReadAnnotation":         e.readAnnotation,
 		"ofdgoInsertInk":              e.insertInk,
 		"ofdgoStyleObjects":           e.styleObjects,
-		"ofdgoPreviewPositionedText":  e.previewPositionedText,
 		"ofdgoMoveOutline":            e.moveOutline,
 		"ofdgoCaptureStyle":           e.captureStyle,
 		"ofdgoGroupObjects":           e.groupObjects,

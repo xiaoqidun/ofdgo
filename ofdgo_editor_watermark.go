@@ -107,11 +107,10 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 				srcScope = srcOrigin.page.original.pageResources
 			}
 		} else {
-			firstPage, err := e.pageContext(ctx, indexes[0])
+			srcScope, err = e.watermarkPageScope(ctx, indexes[0])
 			if err != nil {
 				return nil, err
 			}
-			srcScope = firstPage.pageResources
 		}
 	}
 	rawObject := cloneEditorData(object)
@@ -165,19 +164,24 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 		}
 		items := make([][]byte, 0, len(indexes))
 		ids = make([]string, 0, len(indexes))
+		if len(indexes) >= 32 {
+			selected := make([]Page, len(indexes))
+			for i, index := range indexes {
+				selected[i] = doc.Pages.Page[index]
+			}
+			if err := reader.preloadPageHeadersContext(ctx, selected); err != nil {
+				return err
+			}
+		}
 		for _, index := range indexes {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if _, err := edit.pageContext(ctx, index); err != nil {
-				return err
-			}
-			dstScope := edit.pageLocalScope(index)
-			pageObject, _, err := edit.remapCopiedObject(cloneEditorData(baseObject), srcOrigin, srcScope, dstScope, index)
+			dstScope, area, err := edit.watermarkPageMeta(ctx, index, reader, doc.Pages.Page[index])
 			if err != nil {
 				return err
 			}
-			area, err := reader.PageAreaContext(ctx, doc.Pages.Page[index])
+			pageObject, _, err := edit.remapCopiedObject(cloneEditorData(baseObject), srcOrigin, srcScope, dstScope, index)
 			if err != nil {
 				return err
 			}
@@ -273,4 +277,54 @@ func layoutWatermark(ctx context.Context, base GraphicObject, bounds, box Box, o
 		}
 	}
 	return annotation, nil
+}
+
+// watermarkPageScope 仅读取单页页头资源作用域，避免全量解析页面正文图元
+// 入参: ctx 取消上下文, index 页面索引
+// 返回: []*parsedRes 页面局部资源作用域, error 读取或取消错误
+func (e *Editor) watermarkPageScope(ctx context.Context, index int) ([]*parsedRes, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if scope := e.pageLocalScope(index); len(scope) > 0 {
+		return scope, nil
+	}
+	if e.originalPage(index) {
+		if source := e.source.pages[e.pages[index].ID]; source != nil {
+			header, err := e.source.reader.readPageHeaderContext(ctx, source.ref)
+			if err != nil {
+				return nil, err
+			}
+			if len(header.PageRes) == 0 {
+				return nil, nil
+			}
+			return e.source.reader.collectPageResourcesContext(ctx, e.source.reader.ResPath(source.ref.BaseLoc), &header)
+		}
+	}
+	return nil, nil
+}
+
+// watermarkPageMeta 按轻量页头一次获取水印目标页的资源作用域与页面尺寸，不解析正文图元DOM
+// 入参: ctx 取消上下文, index 页面索引, reader 预览阅读器, pageRef 预览页面引用
+// 返回: []*parsedRes 页面局部资源作用域, PageArea 页面尺寸, error 读取或取消错误
+func (e *Editor) watermarkPageMeta(ctx context.Context, index int, reader *Reader, pageRef Page) ([]*parsedRes, PageArea, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, PageArea{}, err
+	}
+	scope := e.pageLocalScope(index)
+	header, err := reader.readPageHeaderContext(ctx, pageRef)
+	if err != nil {
+		return nil, PageArea{}, err
+	}
+	if len(scope) == 0 && len(header.PageRes) != 0 {
+		scope, err = reader.collectPageResourcesContext(ctx, reader.ResPath(pageRef.BaseLoc), &header)
+		if err != nil {
+			return nil, PageArea{}, err
+		}
+	}
+	area, err := reader.resolvePageAreaContext(ctx, header.Area, header.Template)
+	if err != nil {
+		return nil, PageArea{}, err
+	}
+	return scope, area, nil
 }

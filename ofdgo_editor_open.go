@@ -188,23 +188,29 @@ func (e *Editor) FontData(id string) ([]byte, error) {
 
 // editorSource 保留输入包及按需加载的原始页面
 type editorSource struct {
-	reader             *Reader
-	document           *Document
-	info               DocInfo
-	fallbackDocID      string
-	directory          string
-	fromNew            bool
-	pages              map[string]*editorSourcePage
-	origins            map[string]*editorObjectOrigin
-	idsReady           bool
-	pageResLoaded      bool
-	pageResList        []*parsedRes
-	annotationStates   map[string]map[string]editorCompositeState
-	annotationPages    map[string]bool
-	retiredAttachments map[string]bool
-	removedAttachments map[string]bool
-	structureObjects   map[string]map[string]bool
-	structureStarts    map[int]map[string]int
+	reader              *Reader
+	document            *Document
+	info                DocInfo
+	fallbackDocID       string
+	directory           string
+	fromNew             bool
+	pages               map[string]*editorSourcePage
+	origins             map[string]*editorObjectOrigin
+	idsReady            bool
+	pageResLoaded       bool
+	pageResList         []*parsedRes
+	annotationStates    map[string]map[string]editorCompositeState
+	annotationPages     map[string]bool
+	retiredAttachments  map[string]bool
+	removedAttachments  map[string]bool
+	structureObjects    map[string]map[string]bool
+	structureStarts     map[int]map[string]int
+	attachmentIDs       map[string]bool
+	richTextTagPath     string
+	richTextTagIndex    int
+	richTextTagKnown    bool
+	customTagCount      int
+	customTagCountReady bool
 }
 
 // editorObjectOrigin 保留原对象的XML语义，供复制和局部更新复用
@@ -287,6 +293,9 @@ func (e *Editor) sourceMaxID(progress editorProgress) (uint64, error) {
 		if err := progress.report("ids", 0, 0); err != nil {
 			return 0, err
 		}
+		if strings.HasSuffix(name, "/") || isNonXMLPackageFile(name) {
+			continue
+		}
 		input, err := reader.openFile(name)
 		if err != nil {
 			return 0, err
@@ -299,6 +308,20 @@ func (e *Editor) sourceMaxID(progress editorProgress) (uint64, error) {
 		maximum = max(maximum, id)
 	}
 	return maximum, nil
+}
+
+// isNonXMLPackageFile 按扩展名识别明显为二进制媒体、字体或签章数据的非XML条目
+// 入参: name 包内文件路径
+// 返回: bool 是否应跳过XML标识扫描
+func isNonXMLPackageFile(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".jb2", ".jbig2", ".jp2", ".jpx", ".gif", ".webp",
+		".ttf", ".otf", ".ttc", ".otc", ".cff", ".woff", ".woff2", ".icc", ".icm",
+		".mp3", ".wav", ".mp4", ".esl", ".ses", ".dat", ".bin":
+		return true
+	default:
+		return false
+	}
 }
 
 // originalPage 判断索引是否指向原文档页面

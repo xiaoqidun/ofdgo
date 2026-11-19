@@ -229,7 +229,7 @@ func cloneSignatureEvidence(values [][]byte) [][]byte {
 // 返回: error 验证错误
 func verifySignatureTimestamp(token, data []byte, altData [][]byte, o SignatureTimestampOptions, allowUntrusted bool, report *SignatureTimestampReport) error {
 	oid, content, present, err := parseGBTContentInfoBytes(token)
-	if err != nil || !present || oid != signContentCMS {
+	if err != nil || !present || oid != signContentCMS && oid != signContentSignedData {
 		return fmt.Errorf("invalid RFC3161 CMS token")
 	}
 	items, ok := asn1Children(content.Bytes)
@@ -237,7 +237,7 @@ func verifySignatureTimestamp(token, data []byte, altData [][]byte, o SignatureT
 		return fmt.Errorf("invalid timestamp signed data")
 	}
 	version, err := asn1Integer(items[0])
-	if err != nil || version != 3 {
+	if err != nil || version != 1 && version != 3 {
 		return fmt.Errorf("unsupported timestamp CMS version")
 	}
 	oid, value, present, err := parseGBTContentInfo(items[2])

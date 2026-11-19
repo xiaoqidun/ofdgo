@@ -3215,6 +3215,23 @@ body[data-hide-meta] .meta-panel {
 	scrollbar-gutter: stable;
 	overflow-x: hidden;
 	overflow-y: auto;
+	flex: 1;
+}
+
+.search-pager {
+	display: flex;
+	flex-shrink: 0;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 8px 12px;
+	border-top: 1px solid var(--line);
+	color: var(--text-muted);
+	font-size: 12px;
+}
+
+.search-pager[hidden] {
+	display: none;
 }
 
 .search-form {

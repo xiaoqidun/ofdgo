@@ -1296,7 +1296,7 @@ func invoicePlainXML(ctx context.Context, root *invoiceXMLNode, source InvoiceSo
 			return report, nil
 		}
 		versions := invoiceChildren(headers[0], "", "Version")
-		if len(versions) != 1 || versions[0].text.String() != "0.3" {
+		if len(versions) != 1 || strings.TrimSpace(versions[0].text.String()) != "0.3" {
 			report.Issues = append(report.Issues, InvoiceIssue{Code: "unsupported", Field: "Version", Message: "unsupported EInvoice version", Source: source})
 			return report, nil
 		}
@@ -1347,10 +1347,15 @@ func invoicePlainXML(ctx context.Context, root *invoiceXMLNode, source InvoiceSo
 			report.Issues = append(report.Issues, InvoiceIssue{Code: "invalid-value", Field: f.Name, Message: "nil fact contains a value", Source: s})
 			return nil
 		}
-		if numeric && inv.Standard == InvoiceStandardEDRM2019 && strings.TrimSpace(f.Value) == "" && !f.Nil {
+		if numeric && (inv.Standard == InvoiceStandardEDRM2019 || inv.Standard == InvoiceStandardEInvoice) && strings.TrimSpace(f.Value) == "" && !f.Nil {
 			return nil
 		}
-		if numeric && !f.Nil && invoiceDecimal(f.Value) == nil {
+		if inv.Standard == InvoiceStandardEInvoice && path == "/EInvoice/EInvoiceData/IssuItemInformation/TaxRate" {
+			if !f.Nil && !invoiceEInvoiceTaxRateValid(f.Value) {
+				report.Issues = append(report.Issues, InvoiceIssue{Code: "invalid-decimal", Field: f.Name, Message: "invalid tax rate lexical value", Source: s})
+				return nil
+			}
+		} else if numeric && !f.Nil && invoiceDecimal(f.Value) == nil {
 			report.Issues = append(report.Issues, InvoiceIssue{Code: "invalid-decimal", Field: f.Name, Message: "invalid decimal lexical value", Source: s})
 			return nil
 		}
@@ -1493,10 +1498,24 @@ func invoicePlainField(inv *Invoice, item *InvoiceItem, path string) (*string, b
 		case "Amount":
 			return &item.Amount, true
 		case "TaxRate":
-			return &item.TaxRate, true
+			return &item.TaxRate, false
 		case "ComTaxAm":
 			return &item.TaxAmount, true
 		}
 	}
 	return nil, false
+}
+
+// invoiceEInvoiceTaxRateValid 校验数电票税率字段，兼容数值、百分比、免税、不征税、星号与空值
+// 入参: value 税率文本
+// 返回: bool 是否合法
+func invoiceEInvoiceTaxRateValid(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || trimmed == "免税" || trimmed == "不征税" || trimmed == "***" {
+		return true
+	}
+	if strings.HasSuffix(trimmed, "%") {
+		trimmed = strings.TrimSpace(strings.TrimSuffix(trimmed, "%"))
+	}
+	return invoiceDecimal(trimmed) != nil
 }

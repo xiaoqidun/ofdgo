@@ -682,6 +682,13 @@
 				</div>
 				<div class="form-row"><label for="signMode">方式</label><select id="signMode"><option value="append">追加</option><option value="replace">替换</option></select></div>
 				<div class="form-row"><label for="signLock">禁止追加</label><input id="signLock" type="checkbox"></div>
+				<div id="signEncryptionFields" hidden>
+					<div class="form-row"><label for="signEncryptionType">加密</label><select id="signEncryptionType"><option value="none">明文</option><option value="password">口令</option><option value="certificate">证书</option></select></div>
+					<div id="signEncryptionUserRow" class="form-row" hidden><label for="signEncryptionUser">用户</label><input id="signEncryptionUser" type="text" placeholder="可选" autocomplete="off" spellcheck="false"></div>
+					<div id="signEncryptionPasswordRow" class="form-row" hidden><label for="signEncryptionPassword">口令</label><input id="signEncryptionPassword" type="password" autocomplete="new-password"></div>
+					<div id="signEncryptionConfirmRow" class="form-row" hidden><label for="signEncryptionConfirm">确认</label><input id="signEncryptionConfirm" type="password" autocomplete="new-password"></div>
+					<div id="signEncryptionCertificatesRow" class="form-row" hidden><label for="signEncryptionCertificates">证书</label><input id="signEncryptionCertificates" type="file" accept=".pem,.cer,.crt,.der" multiple></div>
+				</div>
 				<div class="form-actions"><div id="signStatus" class="form-status"></div><button id="signCancel" class="button" type="button">取消</button><button class="button" type="submit">签署</button></div>
 			</form>
 		</dialog>
@@ -834,6 +841,11 @@
 							<button id="searchNext" type="button" class="icon-button arrow-next" title="下一处" disabled></button>
 						</div>
 						<div id="searchResults" class="search-results"></div>
+						<div id="searchPager" class="search-pager" hidden>
+							<button id="searchPagePrev" type="button" class="small-button">上页</button>
+							<span id="searchPageInfo">1 / 1</span>
+							<button id="searchPageNext" type="button" class="small-button">下页</button>
+						</div>
 					</div>
 				</div>
 			</aside>

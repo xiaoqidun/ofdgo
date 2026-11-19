@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"archive/zip"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/hex"
 	"encoding/xml"
@@ -796,17 +797,33 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		}
 		x.color("FillColor", fill)
 		x.color("StrokeColor", stroke)
+		transforms := object.TextObject.CGTransform
+		if len(transforms) > 1 {
+			sorted := true
+			for i := 1; i < len(transforms); i++ {
+				if transforms[i].CodePosition < transforms[i-1].CodePosition {
+					sorted = false
+					break
+				}
+			}
+			if !sorted {
+				transforms = slices.Clone(transforms)
+				slices.SortStableFunc(transforms, func(a, b CGTransform) int {
+					return cmp.Compare(a.CodePosition, b.CodePosition)
+				})
+			}
+		}
 		offset, index := 0, 0
 		for _, code := range object.TextObject.TextCode {
 			if x.err != nil {
 				return
 			}
 			end := offset + len(textCodeRunes(code.Value))
-			for index < len(object.TextObject.CGTransform) && object.TextObject.CGTransform[index].CodePosition < end {
+			for index < len(transforms) && transforms[index].CodePosition < end {
 				if x.err != nil {
 					return
 				}
-				transform := object.TextObject.CGTransform[index]
+				transform := transforms[index]
 				attrs := x.attrs[:0]
 				attrs.add("CodePosition", strconv.Itoa(transform.CodePosition-offset))
 				attrs.add("CodeCount", strconv.Itoa(transform.CodeCount))

@@ -186,6 +186,7 @@ func (r *editorResourceRefs) reference(name, base, key, value string, resource b
 // 返回: map[string]bool 可移除条目, error 读取或取消错误
 func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Reader, progress editorProgress, generated map[string]editorGeneratedReferences, retired map[string]bool) (map[string]bool, error) {
 	multiple := reader != nil && reader.DocumentCount() > 1
+	versioned := reader != nil && reader.OFD.DocBody[reader.documentIndex].versioned
 	prune := e.output != nil && e.output.options.Mode != CompressionUnchanged
 	if e.output != nil && e.output.protected {
 		return nil, nil
@@ -198,7 +199,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 	if e.output != nil {
 		ctx = e.output.ctx
 	}
-	if multiple {
+	if reader != nil {
 		protected, err := reader.hasOutputSignatures(ctx)
 		if err != nil || protected {
 			return nil, err
@@ -219,6 +220,11 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 		}
 		for name := range reader.files {
 			names[name] = true
+		}
+		if src := reader.encryptedSource(); src != nil {
+			for _, name := range src.names() {
+				names[name] = true
+			}
 		}
 	}
 	for name := range parts {
@@ -354,7 +360,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 				}
 				if location := editorResourceLocation(name, root.attr("BaseLoc"), value); location != "" {
 					alternate := cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))
-					if field == "FontFile" && !multiple && keep {
+					if field == "FontFile" && !multiple && !versioned && keep {
 						var usage *editorFontUsage
 						if usageRefs != nil {
 							usage = usageRefs.fonts[id]

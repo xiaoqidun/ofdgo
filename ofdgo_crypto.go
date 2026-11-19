@@ -225,15 +225,19 @@ func ParseEncryptionCertificate(certificate []byte) ([]byte, error) {
 
 // readerOptions 保存打开文档时的会话参数
 type readerOptions struct {
-	resources   *Resources
-	credentials []Credentials
-	provider    CryptoProvider
+	resources        *Resources
+	credentials      []Credentials
+	provider         CryptoProvider
+	documentIndex    int
+	hasDocumentIndex bool
+	versionID        *string
 }
 
 // encryptionState 保存解密来源与可继承的输出策略
 type encryptionState struct {
 	info    EncryptionInfo
 	options *EncryptionOptions
+	source  *encryptedPackageSource
 }
 
 // summary 复制不含凭据的加密状态

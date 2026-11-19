@@ -116,6 +116,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 	source := e.source
 	reader := source.reader
 	pageRefs := make([]Page, len(e.pages))
+	keptSource := make(map[string]bool, len(e.pages))
 	originalCount := 0
 	for i, page := range e.pages {
 		if err := progress.report("pages", i, len(e.pages)); err != nil {
@@ -123,6 +124,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 		}
 		original := source.pages[page.ID]
 		if original != nil {
+			keptSource[page.ID] = true
 			originalCount++
 			pageRefs[i] = original.ref
 			if original.original == nil {
@@ -348,6 +350,10 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 			return nil, nil, err
 		}
 	}
+	retired, err = e.collectRetiredPages(ctx, keptSource, retired)
+	if err != nil {
+		return nil, nil, err
+	}
 	for name, data := range maps.Clone(parts) {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
@@ -377,6 +383,106 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 		return nil, nil, err
 	}
 	return parts, retired, nil
+}
+
+// collectRetiredPages 收集相对原包已删除页面、其页面资源及仅归属被删页的注解路径
+// 入参: ctx 取消上下文, keptSource 保留的原页面标识, retired 已有淘汰路径集合
+// 返回: map[string]bool 合并后的淘汰路径集合, error 读取或取消错误
+func (e *Editor) collectRetiredPages(ctx context.Context, keptSource, retired map[string]bool) (map[string]bool, error) {
+	source := e.source
+	if source == nil || len(keptSource) == len(source.pages) {
+		return retired, ctx.Err()
+	}
+	reader := source.reader
+	addRetired := func(name string) {
+		clean := cleanPackagePath(name)
+		if clean == "" || clean == "." {
+			return
+		}
+		if retired == nil {
+			retired = make(map[string]bool)
+		}
+		retired[clean] = true
+	}
+	removedPageIDs := make(map[string]bool)
+	for id, orig := range source.pages {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if keptSource[id] {
+			continue
+		}
+		if rid := editorResourceID(id); rid != "" {
+			removedPageIDs[rid] = true
+		}
+		pagePath := cleanPackagePath(reader.ResPath(orig.ref.BaseLoc))
+		if pagePath == "" || pagePath == "." {
+			continue
+		}
+		addRetired(pagePath)
+		data, err := reader.readFileViewContext(ctx, pagePath)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		for _, child := range root.children {
+			if child.matchesOFD("PageRes") && len(child.children) == 0 {
+				if loc := strings.TrimSpace(editorImportText(data, child)); loc != "" {
+					addRetired(resolveResourcePath(pagePath, "", loc))
+				}
+			}
+		}
+	}
+	if len(removedPageIDs) != 0 && source.document.Annotations != "" {
+		annotsPath := cleanPackagePath(reader.ResPath(source.document.Annotations))
+		if data, err := reader.readFileViewContext(ctx, annotsPath); err == nil {
+			if root, parseErr := parseEditorXMLContext(ctx, data); parseErr == nil {
+				removedAnnots := make(map[string]bool)
+				keptAnnots := make(map[string]bool)
+				for _, node := range root.children {
+					if err := ctx.Err(); err != nil {
+						return nil, err
+					}
+					if !node.matchesOFD("Page") {
+						continue
+					}
+					target := keptAnnots
+					if removedPageIDs[editorResourceID(node.attr("PageID"))] {
+						target = removedAnnots
+					}
+					if loc := strings.TrimSpace(node.attr("FileLoc")); loc != "" {
+						target[cleanPackagePath(resolveResourcePath(annotsPath, "", loc))] = true
+					}
+					for _, child := range node.children {
+						if child.matchesOFD("FileLoc") && len(child.children) == 0 {
+							if loc := strings.TrimSpace(editorImportText(data, child)); loc != "" {
+								target[cleanPackagePath(resolveResourcePath(annotsPath, "", loc))] = true
+							}
+						}
+					}
+				}
+				for name := range removedAnnots {
+					if !keptAnnots[name] {
+						addRetired(name)
+					}
+				}
+			} else if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+		} else if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+	return retired, ctx.Err()
 }
 
 // sourcePageXML 仅改写已修改的对象、页面尺寸、动作和新增图层，保留原页块层级
@@ -711,18 +817,18 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		ctx = e.output.ctx
 	}
 	generated := make(map[string]editorGeneratedReferences)
-	parts, retiredTags, err := e.sourceParts(ctx, progress, generated, true, true)
+	parts, retiredParts, err := e.sourceParts(ctx, progress, generated, true, true)
 	if err != nil {
 		return 0, err
 	}
 	maps.Copy(parts, fonts)
 	reader := e.source.reader
 	retired := maps.Clone(e.source.retiredAttachments)
-	if len(retiredTags) != 0 {
+	if len(retiredParts) != 0 {
 		if retired == nil {
-			retired = make(map[string]bool, len(retiredTags))
+			retired = make(map[string]bool, len(retiredParts))
 		}
-		maps.Copy(retired, retiredTags)
+		maps.Copy(retired, retiredParts)
 	}
 	versioned := reader.OFD.DocBody[reader.documentIndex].versioned
 	if !versioned && reader.DocumentCount() > 1 {
@@ -737,24 +843,24 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 	}
 	if removed == nil {
 		removed = make(map[string]bool)
-		if len(retiredTags) != 0 && (e.output == nil || !e.output.protected) {
-			protected, sigErr := reader.hasOutputSignatures(ctx)
-			if sigErr != nil {
-				return 0, sigErr
+	}
+	if len(retired) != 0 && (e.output == nil || !e.output.protected) {
+		protected, sigErr := reader.hasOutputSignatures(ctx)
+		if sigErr != nil {
+			return 0, sigErr
+		}
+		if !protected {
+			shared, shErr := reader.versionSharedFiles(ctx)
+			docRoot, rootErr := reader.DocumentRootContext(ctx)
+			var currentUsed map[string]bool
+			var depErr error
+			if shErr == nil && rootErr == nil {
+				currentUsed, _, depErr = reader.versionDependencies(ctx, docRoot, parts, generated)
 			}
-			if !protected {
-				shared, shErr := reader.versionSharedFiles(ctx)
-				docRoot, rootErr := reader.DocumentRootContext(ctx)
-				var currentUsed map[string]bool
-				var depErr error
-				if shErr == nil && rootErr == nil {
-					currentUsed, _, depErr = reader.versionDependencies(ctx, docRoot, parts, generated)
-				}
-				if shErr == nil && rootErr == nil && depErr == nil {
-					for tagPath := range retiredTags {
-						if !shared[tagPath] && !currentUsed[tagPath] && parts[tagPath] == nil {
-							removed[tagPath] = true
-						}
+			if shErr == nil && rootErr == nil && depErr == nil {
+				for itemPath := range retired {
+					if !currentUsed[itemPath] && parts[itemPath] == nil && (versioned || !shared[itemPath]) {
+						removed[itemPath] = true
 					}
 				}
 			}
@@ -850,6 +956,44 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 			}
 		}
 	}
+	if reader.Zip == nil {
+		if src := reader.encryptedSource(); src != nil {
+			buffer := make([]byte, 32*1024)
+			for _, name := range src.names() {
+				if err := ctx.Err(); err != nil {
+					return output.count, err
+				}
+				if removed[name] {
+					continue
+				}
+				if _, modified := remaining[name]; modified {
+					continue
+				}
+				method := uint16(zip.Store)
+				if strings.HasSuffix(strings.ToLower(name), ".xml") {
+					method = zip.Deflate
+				}
+				header := zip.FileHeader{Name: name, Method: method}
+				input, openErr := src.open(name)
+				if openErr != nil {
+					return output.count, openErr
+				}
+				entry, createErr := archive.CreateHeader(&header)
+				if createErr != nil {
+					_ = input.Close()
+					return output.count, createErr
+				}
+				_, copyErr := io.CopyBuffer(entry, imageInput{ReadCloser: input, ctx: ctx}, buffer)
+				closeErr := input.Close()
+				if copyErr != nil {
+					return output.count, copyErr
+				}
+				if closeErr != nil {
+					return output.count, closeErr
+				}
+			}
+		}
+	}
 	for _, name := range slices.Sorted(maps.Keys(remaining)) {
 		method := uint16(zip.Store)
 		if strings.HasSuffix(strings.ToLower(name), ".xml") {
@@ -892,7 +1036,7 @@ func (e *Editor) sourceReader(ctx context.Context, progress editorProgress, sync
 			}
 		}
 	}
-	if len(otherParts) == 0 && len(retired) == 0 {
+	if len(otherParts) == 0 && len(retired) == 0 && (!syncText || e.source.reader.encryptedSource() == nil) {
 		reader := cloneEditorReader(e.source.reader)
 		if reader.files == nil {
 			reader.files = make(map[string][]byte)
@@ -917,7 +1061,23 @@ func (e *Editor) sourceReader(ctx context.Context, progress editorProgress, sync
 		files = make(map[string][]byte)
 	}
 	maps.Copy(files, parts)
-	reader := &Reader{Zip: e.source.reader.Zip, sourceFile: e.source.reader.sourceFile, files: files, encryption: e.encryption, documentIndex: e.source.reader.documentIndex, selectedVersion: e.source.reader.selectedVersion, pageContents: e.source.reader.pageContents, resources: e.runtimeResources}
+	zipArchive := e.source.reader.Zip
+	var encSource *encryptedPackageSource
+	if src := e.source.reader.encryptedSource(); src != nil {
+		if syncText {
+			limit := int64(editorSnapshotArchiveLimit)
+			if e.runtimeResources != nil {
+				limit = e.runtimeResources.options.SnapshotBytes
+			}
+			zipArchive, err = src.materializeArchive(ctx, limit)
+			if err != nil {
+				return nil, nil, err
+			}
+		} else {
+			encSource = src
+		}
+	}
+	reader := &Reader{Zip: zipArchive, encrypted: encSource, sourceFile: e.source.reader.sourceFile, files: files, encryption: e.encryption, documentIndex: e.source.reader.documentIndex, selectedVersion: e.source.reader.selectedVersion, pageContents: e.source.reader.pageContents, resources: e.runtimeResources}
 	if err := reader.initRootContext(ctx); err != nil {
 		return nil, nil, err
 	}

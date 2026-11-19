@@ -17,12 +17,22 @@ package ofdgo
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"io"
 	"path"
 	"slices"
 	"strconv"
 	"strings"
 )
+
+// editorNameCache 缓存当前编辑器的已占资源路径与前缀递增序号，消除重复命名探测
+type editorNameCache struct {
+	owner    *Editor
+	source   *editorSource
+	resCount int
+	used     map[string]struct{}
+	counters map[string]int
+}
 
 // packageDirectory 获取当前文档的包内根目录，新建文档与编辑文档共用布局
 // 返回: string 文档目录
@@ -41,7 +51,7 @@ func packagePagePath(directory, id string) string {
 }
 
 // packageName 为新增条目分配文档内路径，不覆盖原文件或本次资源
-// 无暂存资源冲突时直接返回路径，避免重复构建资源映射
+// 维护当前编辑器路径缓存与按前缀递增的序号计数器，将命名探测降至均摊O(1)
 // 入参: relative 文档相对路径
 // 返回: string 未占用路径
 func (e *Editor) packageName(relative string) string {
@@ -50,15 +60,106 @@ func (e *Editor) packageName(relative string) string {
 		reader = e.source.reader
 	}
 	name := path.Join(e.packageDirectory(), relative)
-	candidate := packageAvailableName(reader, nil, name)
-	if !slices.ContainsFunc(e.resources, func(resource editorResource) bool { return resource.name == candidate }) {
-		return candidate
+	cache := e.nameCache
+	if cache == nil || cache.owner != e {
+		cache = &editorNameCache{
+			owner:    e,
+			source:   e.source,
+			resCount: len(e.resources),
+			used:     make(map[string]struct{}, len(e.resources)),
+			counters: make(map[string]int),
+		}
+		for _, resource := range e.resources {
+			cache.used[resource.name] = struct{}{}
+		}
+		e.nameCache = cache
+	} else if cache.source != e.source || cache.resCount > len(e.resources) {
+		clear(cache.used)
+		clear(cache.counters)
+		for _, resource := range e.resources {
+			cache.used[resource.name] = struct{}{}
+		}
+		cache.source = e.source
+		cache.resCount = len(e.resources)
+	} else if cache.resCount < len(e.resources) {
+		for _, resource := range e.resources[cache.resCount:] {
+			cache.used[resource.name] = struct{}{}
+		}
+		cache.resCount = len(e.resources)
 	}
-	files := make(map[string][]byte, len(e.resources))
-	for _, resource := range e.resources {
-		files[resource.name] = nil
+	base, extension := strings.TrimSuffix(name, path.Ext(name)), path.Ext(name)
+	for i := cache.counters[name]; ; i++ {
+		candidate := name
+		if i != 0 {
+			candidate = base + "_" + strconv.Itoa(i) + extension
+		}
+		occupied := false
+		if reader != nil {
+			_, occupied = reader.packageFile(candidate)
+			_, cached := reader.files[candidate]
+			occupied = occupied || cached || reader.encryptedSource().has(candidate)
+		}
+		if !occupied {
+			_, occupied = cache.used[candidate]
+		}
+		if !occupied {
+			cache.counters[name] = i
+			return candidate
+		}
 	}
-	return packageAvailableName(reader, files, name)
+}
+
+// syncPackageNameCache 在增量提交推进文档快照后同步命名缓存来源，保留序号计数器
+// 入参: before 提交前的包快照, after 提交后的包快照
+func (e *Editor) syncPackageNameCache(before, after *editorSource) {
+	if e.nameCache != nil && e.nameCache.owner == e && e.nameCache.source == before {
+		e.nameCache.source = after
+	}
+}
+
+// appendOFDXMLBeforeClosing 在标准OFD 2016根元素闭合标签前直接追加子XML片段
+// 入参: data 原XML字节, localName 根元素本地名, addition 待追加子片段
+// 返回: []byte 追加结果, bool 是否满足安全快路径
+func appendOFDXMLBeforeClosing(data []byte, localName string, addition []byte) ([]byte, bool) {
+	openPrefix := "<ofd:" + localName + ` xmlns:ofd="` + ofdNamespace2016 + `">`
+	closeTag := "</ofd:" + localName + ">"
+	return appendRawXMLBeforeClosing(data, openPrefix, closeTag, addition)
+}
+
+// appendNamespacedXMLBeforeClosing 在指定默认命名空间根元素闭合标签前直接追加子XML片段
+// 入参: data 原XML字节, localName 根元素本地名, namespace 默认命名空间, addition 待追加子片段
+// 返回: []byte 追加结果, bool 是否满足安全快路径
+func appendNamespacedXMLBeforeClosing(data []byte, localName, namespace string, addition []byte) ([]byte, bool) {
+	openPrefix := "<" + localName + ` xmlns="` + namespace + `">`
+	closeTag := "</" + localName + ">"
+	return appendRawXMLBeforeClosing(data, openPrefix, closeTag, addition)
+}
+
+// appendRawXMLBeforeClosing 校验标准开闭标签并在根闭合标签前执行O(1)字节拼接
+// 入参: data 原XML字节, openPrefix 期望根开始标签, closeTag 期望根结束标签, addition 待追加子片段
+// 返回: []byte 追加结果, bool 是否匹配标准结构
+func appendRawXMLBeforeClosing(data []byte, openPrefix, closeTag string, addition []byte) ([]byte, bool) {
+	body := bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
+	body = bytes.TrimLeft(body, " \t\r\n")
+	if bytes.HasPrefix(body, []byte(xml.Header)) {
+		body = bytes.TrimLeft(body[len(xml.Header):], " \t\r\n")
+	}
+	if !bytes.HasPrefix(body, []byte(openPrefix)) {
+		return nil, false
+	}
+	trimmed := bytes.TrimRight(data, " \t\r\n")
+	if !bytes.HasSuffix(trimmed, []byte(closeTag)) {
+		return nil, false
+	}
+	closeStart := len(trimmed) - len(closeTag)
+	if closeStart <= 0 {
+		return nil, false
+	}
+	out := make([]byte, 0, len(data)+len(addition))
+	out = append(out, data[:closeStart]...)
+	out = append(out, addition...)
+	out = append(out, data[closeStart:]...)
+	return out, true
 }
 
 // packageAvailableName 仅在包内同名条目冲突时添加序号，路径区分大小写
@@ -75,7 +176,7 @@ func packageAvailableName(reader *Reader, files map[string][]byte, name string) 
 		if reader != nil {
 			_, occupied = reader.packageFile(candidate)
 			_, cached := reader.files[candidate]
-			occupied = occupied || cached
+			occupied = occupied || cached || reader.encryptedSource().has(candidate)
 		}
 		_, pending := files[candidate]
 		occupied = occupied || pending
@@ -96,7 +197,7 @@ func packageDataEqual(ctx context.Context, reader *Reader, name string, data []b
 	if current, ok := reader.files[name]; ok {
 		return bytes.Equal(current, data), ctx.Err()
 	}
-	if _, ok := reader.packageFile(name); !ok {
+	if _, ok := reader.packageFile(name); !ok && !reader.encryptedSource().has(name) {
 		return false, nil
 	}
 	stream, err := reader.openFile(name)

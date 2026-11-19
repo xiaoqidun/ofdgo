@@ -76,6 +76,11 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		for name := range reader.files {
 			names[name] = true
 		}
+		if src := reader.encryptedSource(); src != nil {
+			for _, name := range src.names() {
+				names[name] = true
+			}
+		}
 	}
 	for name := range parts {
 		names[name] = true
@@ -440,6 +445,11 @@ func outputResourceSize(reader *Reader, parts map[string][]byte, name string) (u
 		}
 		if file, ok := reader.packageFile(name); ok {
 			return file.UncompressedSize64, nil
+		}
+		if src := reader.encryptedSource(); src != nil {
+			if size, ok := src.size(name); ok {
+				return size, nil
+			}
 		}
 	}
 	return 0, fmt.Errorf("file not found: %s", name)

@@ -751,13 +751,25 @@ func (s *fileStore) resource(id string) (io.ReaderAt, int64, func() error, error
 	return file, info.Size(), file.Close, nil
 }
 
-// release 释放可读条目、句柄、内存结果或临时文件，保留常驻条目、在途读取及源文件
+// release 释放可读条目、句柄、非临时目录树、内存结果或临时文件，保留常驻条目、临时目录、在途读取及源文件
 // 入参: id 资源标识
 func (s *fileStore) release(id string) {
+	if id == "" {
+		return
+	}
+	var files []*os.File
 	s.mu.Lock()
 	entry := s.entries[id]
 	if entry == nil || entry.retired || entry.pinned || entry.directory && entry.temporary {
 		s.mu.Unlock()
+		return
+	}
+	if entry.directory {
+		s.retireTree(entry, &files)
+		s.mu.Unlock()
+		for _, file := range files {
+			_ = file.Close()
+		}
 		return
 	}
 	stop := entry.stop

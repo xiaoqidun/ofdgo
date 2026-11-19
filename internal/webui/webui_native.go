@@ -705,7 +705,7 @@ func (c *nativeCall) prepare(name string, args []any) ([]any, error) {
 		args = append(args, c.fileCallback(files))
 	}
 	switch name {
-	case "ofdgoResources", "ofdgoPrepareSave":
+	case "ofdgoResources", "ofdgoPrepareSave", "ofdgoPagesText":
 		return append(args, checkpoint), nil
 	case "ofdgoImportPages", "ofdgoImportDocuments", "ofdgoImportImages":
 		return append(args, c.progress("import", "", true)), nil
@@ -713,7 +713,7 @@ func (c *nativeCall) prepare(name string, args []any) ([]any, error) {
 		return append(args, c.progress("fonts", "", true)), nil
 	case "ofdgoOpenPDF":
 		return append(args, c.progress("conversion", "", true), nativeCallback(c.font)), nil
-	case "ofdgoExportImages", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned":
+	case "ofdgoExportImages", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned", "ofdgoPrintPDF":
 		if len(args) == 0 {
 			return nil, fmt.Errorf("missing output arguments")
 		}
@@ -743,6 +743,9 @@ func (c *nativeCall) prepare(name string, args []any) ([]any, error) {
 		if name == "ofdgoExportVersion" {
 			args = append(args, c.progress("export", "prepare", true), checkpoint)
 		}
+		if name == "ofdgoPrintPDF" {
+			args = append(args, checkpoint)
+		}
 		if saving {
 			args = append(args, c.progress("export", "prepare", true))
 			if compression != nil {
@@ -750,7 +753,7 @@ func (c *nativeCall) prepare(name string, args []any) ([]any, error) {
 			} else if indices != nil {
 				args = append(args, indices)
 			}
-		} else {
+		} else if name != "ofdgoPrintPDF" {
 			for _, arg := range args {
 				if m, ok := arg.(map[string]any); ok && m["mode"] != nil {
 					args = append(args, checkpoint)
@@ -792,7 +795,7 @@ func (c *nativeCall) finish(name string, result map[string]any) error {
 	}
 	data["size"] = c.size
 	c.committed = true
-	if c.exporting && name != "ofdgoExportMedia" && name != "ofdgoPackFiles" {
+	if c.exporting && name != "ofdgoExportMedia" && name != "ofdgoPackFiles" && name != "ofdgoPrintPDF" {
 		c.event(map[string]any{"type": "export", "stage": "save"})
 	}
 	return nil
@@ -952,7 +955,7 @@ func nativeReadOnly(name string) bool {
 	case "ofdgoImagePreview", "ofdgoImagePageSize", "ofdgoCheckDocument", "ofdgoDocumentInfo", "ofdgoEditorInfo", "ofdgoDocumentNavigation", "ofdgoDocumentVersions", "ofdgoPackageDocuments",
 		"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoActionList", "ofdgoPageSettings", "ofdgoStyleResource",
 		"ofdgoOutlineLinks", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoStructureXML", "ofdgoOpenLinks", "ofdgoRenderBackends",
-		"ofdgoSVGFontData", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoResources", "ofdgoResourceReferences",
+		"ofdgoSVGFontData", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoPagesText", "ofdgoResources", "ofdgoResourceReferences",
 		"ofdgoResourceTargets", "ofdgoResourceLocations", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoClearImport":
 		return true
 	}
