@@ -26,6 +26,7 @@ import (
 // 入参: page 页面索引, ids 至少两个对象标识
 // 返回: string 组合标识, error 错误信息
 func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
+	defer e.bindPageIndex(page)()
 	_, indexes, err := e.selectedObjects(page, ids)
 	if err != nil {
 		return "", err
@@ -52,7 +53,12 @@ func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
 		return "", err
 	}
 	defer reader.Close()
+	pageContent, err := reader.PageContentByIndex(page)
+	if err != nil {
+		return "", err
+	}
 	renderer := e.newRenderer(reader)
+	defer renderer.bindPageResources(pageContent)()
 	var extent Box
 	for _, index := range indexes {
 		object := layer.Objects[index.index]
@@ -152,6 +158,7 @@ func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
 // 入参: page 页面索引, id 组合标识
 // 返回: []string 展开后的对象标识, error 错误信息
 func (e *Editor) UngroupObject(page int, id string) ([]string, error) {
+	defer e.bindPageIndex(page)()
 	_, indexes, err := e.selectedObjects(page, []string{id})
 	if err != nil {
 		return nil, err
@@ -219,7 +226,7 @@ func editorUngroupable(node *editorXML) bool {
 	if node.name.Local != "CompositeObject" && node.name.Local != "CompositeGraphicUnit" {
 		return false
 	}
-	if !editorXMLAttributes(node, "ID Boundary CTM DrawParam Alpha Visible ResourceID Width Height") {
+	if !editorXMLAttributes(node, "ID Name Boundary CTM DrawParam Alpha Visible ResourceID Width Height") {
 		return false
 	}
 	var contentSupported func(*editorXML) bool

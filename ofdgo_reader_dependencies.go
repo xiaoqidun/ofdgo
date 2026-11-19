@@ -88,7 +88,7 @@ func packageReference(root, parent, name, attribute string) int {
 		switch {
 		case root == "Annotations" && parent == "Page":
 			return packageReferenceXML
-		case root == "Attachments" && parent == "Attachment", root == "CustomTags" && parent == "CustomTag":
+		case (root == "Attachments" || root == "Document") && parent == "Attachment", (root == "CustomTags" || root == "Document") && parent == "CustomTag":
 			return packageReferenceData
 		}
 	case "File":
@@ -116,7 +116,7 @@ func packageReference(root, parent, name, attribute string) int {
 			return packageReferenceData
 		}
 	case "SchemaLoc":
-		if root == "CustomTags" && parent == "CustomTag" {
+		if (root == "CustomTags" || root == "Document") && parent == "CustomTag" {
 			return packageReferenceData
 		}
 	case "ExtendData":

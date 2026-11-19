@@ -157,6 +157,7 @@ func (e *Editor) ObjectCapabilities(page int, id string) (ObjectCapabilities, er
 	if err != nil {
 		return ObjectCapabilities{}, err
 	}
+	defer e.bindPageIndex(page)()
 	return e.objectCapabilities(layer.Objects[index], make(map[*editorXML]bool)), nil
 }
 
@@ -173,8 +174,8 @@ func (e *Editor) FontData(id string) ([]byte, error) {
 		}
 	}
 	if e.source != nil {
-		if definition := e.source.reader.fontDefinition(id); definition != nil && definition.FontFile != "" {
-			return e.source.reader.FontData(id)
+		if definition, ok := e.sourceFont(id); ok && definition != nil && definition.FontFile != "" {
+			return e.source.reader.readFile(e.source.reader.ResPath(definition.FontFile))
 		}
 	}
 	sfnt, err := e.editorFont(id)
@@ -195,6 +196,8 @@ type editorSource struct {
 	pages              map[string]*editorSourcePage
 	origins            map[string]*editorObjectOrigin
 	idsReady           bool
+	pageResLoaded      bool
+	pageResList        []*parsedRes
 	annotationStates   map[string]map[string]editorCompositeState
 	annotationPages    map[string]bool
 	retiredAttachments map[string]bool
@@ -310,7 +313,7 @@ func (e *Editor) sourceRGB() bool {
 	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
 		return true
 	}
-	space, _ := resourceValue(e.source.reader.colorSpaceCache, formatUnitID(uint64(e.source.document.CommonData.DefaultCS)))
+	space, _ := e.sourceColorSpace(formatUnitID(uint64(e.source.document.CommonData.DefaultCS)))
 	return space != nil && space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0
 }
 
@@ -490,14 +493,22 @@ func (e *Editor) loadSourcePageContext(ctx context.Context, index int) error {
 	source.data, source.root, source.nodes = data, root, nodes
 	source.repaired = repaired
 	origins := make(map[string]*editorObjectOrigin)
+	restoreScope := e.bindPageResources(page)
 	for i := range page.Content.Layer {
 		layer := &page.Content.Layer[i]
 		for j, object := range layer.Objects {
 			if err := ctx.Err(); err != nil {
+				restoreScope()
 				return err
 			}
 			id := editorObjectID(object)
 			if node := nodes[id]; node != nil {
+				if object.Type == "ImageObject" {
+					object.ImageObject.LineWidthSet = node.hasAttr("LineWidth") && object.ImageObject.LineWidth == 0
+					object.ImageObject.MiterLimitSet = node.hasAttr("MiterLimit") && object.ImageObject.MiterLimit == 0
+					object.ImageObject.dashPatternSet = node.hasAttr("DashPattern") && object.ImageObject.DashPattern == ""
+					layer.Objects[j] = object
+				}
 				origin := &editorObjectOrigin{page: source, data: data, node: node, object: object}
 				origins[id] = origin
 				if editorXMLTransformable(node) {
@@ -511,6 +522,7 @@ func (e *Editor) loadSourcePageContext(ctx context.Context, index int) error {
 			}
 		}
 	}
+	restoreScope()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -733,12 +745,6 @@ func (e *Editor) editorFont(id string) (FontMetrics, error) {
 	if key := editorResourceID(id); key != "" {
 		id = key
 	}
-	if metrics := e.fontMetrics[id]; metrics != nil {
-		return metrics, nil
-	}
-	if e.backends.Fonts == nil {
-		return nil, &EditError{Code: EditFontUnavailable, Err: fmt.Errorf("fonts: %w", ErrBackendUnavailable)}
-	}
 	var data []byte
 	var external *Font
 	for _, resource := range e.resources {
@@ -750,11 +756,28 @@ func (e *Editor) editorFont(id string) (FontMetrics, error) {
 			break
 		}
 	}
+	cacheKey := id
+	if data == nil && external == nil {
+		if localFont, ok := e.pageScopeFont(id); ok && localFont != nil {
+			cacheKey = id + "\x00" + localFont.FontFile + "\x00" + localFont.FontName
+		}
+	}
+	if metrics := e.fontMetrics[cacheKey]; metrics != nil {
+		return metrics, nil
+	}
+	if e.backends.Fonts == nil {
+		return nil, &EditError{Code: EditFontUnavailable, Err: fmt.Errorf("fonts: %w", ErrBackendUnavailable)}
+	}
 	if data == nil && e.source != nil && external == nil {
+		if len(e.pageScope) == 0 && e.source.reader.fontDefinition(id) == nil {
+			e.ensureSourcePageResources()
+		}
 		if e.fontRenderer == nil {
 			e.fontRenderer = e.newRenderer(e.source.reader)
 		}
+		restore := e.fontRenderer.bindParsedResources(e.pageScope)
 		resolved, err := e.fontRenderer.ResolveFont(id, true)
+		restore()
 		if err != nil {
 			return nil, &EditError{Code: EditFontUnavailable, Err: err}
 		}
@@ -775,7 +798,7 @@ func (e *Editor) editorFont(id string) (FontMetrics, error) {
 	if err != nil {
 		return nil, &EditError{Code: EditFontUnavailable, Err: err}
 	}
-	e.fontMetrics[id] = metrics
+	e.fontMetrics[cacheKey] = metrics
 	return metrics, nil
 }
 
@@ -823,25 +846,34 @@ func (e *Editor) editorTextMeasurable(text TextObject) bool {
 // 入参: id 图片资源标识
 // 返回: image.Point 图片尺寸, error 错误信息
 func (e *Editor) editorImage(id string) (image.Point, error) {
-	if size, ok := resourceValue(e.images, id); ok && size.X > 0 {
-		return size, nil
+	added := slices.ContainsFunc(e.resources, func(resource editorResource) bool {
+		return resource.image != nil && sameResourceID(resource.image.ID, id)
+	})
+	if added || len(e.pageScope) == 0 || e.source == nil {
+		if size, ok := resourceValue(e.images, id); ok && size.X > 0 {
+			return size, nil
+		}
 	}
 	if e.source == nil {
 		return image.Point{}, fmt.Errorf("image resource %q not found", id)
 	}
 	reader := e.source.reader
-	name, ok := resourceValue(reader.ResMap, id)
+	fullPath, ok := e.sourceResPath(id)
 	if !ok {
 		return image.Point{}, fmt.Errorf("image resource %q not found", id)
 	}
-	input, err := reader.openFile(reader.ResPath(name))
+	cacheKey := "path:" + fullPath
+	if size, ok := e.images[cacheKey]; ok && size.X > 0 {
+		return size, nil
+	}
+	input, err := reader.openFile(fullPath)
 	if err != nil {
 		return image.Point{}, err
 	}
 	defer input.Close()
 	config, _, err := baseimage.DecodeConfig(input)
 	if errors.Is(err, baseimage.ErrTIFFRandomAccess) {
-		data, readErr := reader.readFileView(reader.ResPath(name))
+		data, readErr := reader.readFileView(fullPath)
 		if readErr != nil {
 			return image.Point{}, readErr
 		}
@@ -851,7 +883,10 @@ func (e *Editor) editorImage(id string) (image.Point, error) {
 		return image.Point{}, err
 	}
 	size := image.Pt(config.Width, config.Height)
-	e.images[id] = size
+	e.images[cacheKey] = size
+	if len(e.pageScope) == 0 {
+		e.images[id] = size
+	}
 	return size, nil
 }
 
@@ -867,13 +902,12 @@ func (e *Editor) validateImageMask(id string, size image.Point) error {
 		}
 	}
 	if data == nil && e.source != nil {
-		reader := e.source.reader
-		name, ok := resourceValue(reader.ResMap, id)
+		fullPath, ok := e.sourceResPath(id)
 		if !ok {
 			return fmt.Errorf("image mask resource %q not found", id)
 		}
 		var err error
-		data, err = reader.readFileView(reader.ResPath(name))
+		data, err = e.source.reader.readFileView(fullPath)
 		if err != nil {
 			return err
 		}
@@ -1124,4 +1158,342 @@ func validateEditorGeometry(object GraphicObject) error {
 		}
 	}
 	return nil
+}
+
+// bindPageResources 为当前编辑操作绑定页面级资源作用域并返回恢复函数
+// 入参: page 页面内容
+// 返回: func() 恢复原作用域的函数
+func (e *Editor) bindPageResources(page *PageContent) func() {
+	if page == nil || len(page.pageResources) == 0 {
+		return func() {}
+	}
+	return e.bindParsedScope(page.pageResources)
+}
+
+// bindParsedScope 绑定已解析的局部资源列表并返回恢复函数
+// 入参: local 局部资源列表
+// 返回: func() 恢复原作用域的函数
+func (e *Editor) bindParsedScope(local []*parsedRes) func() {
+	if len(local) == 0 {
+		return func() {}
+	}
+	prev := e.pageScope
+	e.pageScope = local
+	return func() { e.pageScope = prev }
+}
+
+// bindPageIndex 按页面索引绑定所属页面的局部资源作用域
+// 入参: index 页面索引
+// 返回: func() 恢复原作用域的函数
+func (e *Editor) bindPageIndex(index int) func() {
+	if index < 0 || index >= len(e.pages) {
+		return func() {}
+	}
+	if len(e.pages[index].pageResources) > 0 {
+		return e.bindParsedScope(e.pages[index].pageResources)
+	}
+	if e.originalPage(index) {
+		if source := e.source.pages[e.pages[index].ID]; source != nil {
+			if source.original != nil && len(source.original.pageResources) > 0 {
+				return e.bindParsedScope(source.original.pageResources)
+			}
+			reader := e.source.reader
+			if header, err := reader.readPageHeaderContext(context.Background(), source.ref); err == nil {
+				var list []*parsedRes
+				for _, ref := range header.Template {
+					for _, tpl := range e.source.document.CommonData.TemplatePage {
+						if sameResourceID(tpl.ID, ref.TemplateID) && tpl.BaseLoc != "" {
+							if tplHeader, tplErr := reader.readPageHeaderContext(context.Background(), Page{ID: tpl.ID, BaseLoc: tpl.BaseLoc}); tplErr == nil {
+								if tplRes, resErr := reader.collectPageResourcesContext(context.Background(), reader.ResPath(tpl.BaseLoc), &tplHeader); resErr == nil {
+									list = append(list, tplRes...)
+								}
+							}
+						}
+					}
+				}
+				if pageRes, resErr := reader.collectPageResourcesContext(context.Background(), reader.ResPath(source.ref.BaseLoc), &header); resErr == nil {
+					list = append(list, pageRes...)
+				}
+				if len(list) > 0 {
+					return e.bindParsedScope(list)
+				}
+			}
+		}
+	}
+	return func() {}
+}
+
+// ensureSourcePageResourcesContext 按需收集源文档全部模板页与页面头部的PageRes解析结果
+// 入参: ctx 取消上下文
+// 返回: []*parsedRes 去重后的页级资源列表, error 读取、解析或取消错误
+func (e *Editor) ensureSourcePageResourcesContext(ctx context.Context) ([]*parsedRes, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if e.source == nil {
+		return nil, nil
+	}
+	if e.source.pageResLoaded {
+		return e.source.pageResList, nil
+	}
+	reader := e.source.reader
+	doc := e.source.document
+	seen := make(map[string]bool)
+	var list []*parsedRes
+	appendPage := func(baseLoc string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if baseLoc == "" {
+			return nil
+		}
+		fullPath := reader.ResPath(baseLoc)
+		header, err := reader.readPageHeaderContext(ctx, Page{BaseLoc: baseLoc})
+		if err != nil {
+			return err
+		}
+		for _, loc := range header.PageRes {
+			resFull := resolveResourcePath(fullPath, "", loc)
+			if seen[resFull] {
+				continue
+			}
+			parsed, err := reader.parseResFileContext(ctx, resFull)
+			if err != nil {
+				return err
+			}
+			seen[resFull] = true
+			list = append(list, parsed)
+		}
+		return nil
+	}
+	for _, tpl := range doc.CommonData.TemplatePage {
+		if err := appendPage(tpl.BaseLoc); err != nil {
+			return nil, err
+		}
+	}
+	for _, page := range doc.Pages.Page {
+		if err := appendPage(page.BaseLoc); err != nil {
+			return nil, err
+		}
+	}
+	e.source.pageResList = list
+	e.source.pageResLoaded = true
+	return list, nil
+}
+
+// ensureSourcePageResources 收集源文档全部页级资源供同步资源查询回退使用
+// 返回: []*parsedRes 页级资源列表
+func (e *Editor) ensureSourcePageResources() []*parsedRes {
+	ctx := context.Background()
+	if e.output != nil && e.output.ctx != nil {
+		ctx = e.output.ctx
+	}
+	list, _ := e.ensureSourcePageResourcesContext(ctx)
+	return list
+}
+
+// pageScopeFont 在当前页面作用域中查找字体声明
+// 入参: id 字体资源标识
+// 返回: *Font 字体声明, bool 是否命中局部作用域
+func (e *Editor) pageScopeFont(id string) (*Font, bool) {
+	for i := len(e.pageScope) - 1; i >= 0; i-- {
+		if v, ok := e.pageScope[i].fonts.get(id); ok {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+// sourceDrawParam 按页面作用域、文档级缓存及全文档页级资源顺序查找绘制参数
+// 入参: id 绘制参数标识
+// 返回: *DrawParam 绘制参数, bool 是否找到
+func (e *Editor) sourceDrawParam(id string) (*DrawParam, bool) {
+	if e.source == nil {
+		return nil, false
+	}
+	for i := len(e.pageScope) - 1; i >= 0; i-- {
+		if v, ok := e.pageScope[i].drawParams.get(id); ok {
+			return v, true
+		}
+	}
+	if v, ok := e.source.reader.docDrawParams.get(id); ok {
+		return v, true
+	}
+	if v, ok := resourceValue(e.source.reader.drawParamCache, id); ok {
+		return v, true
+	}
+	for _, parsed := range e.ensureSourcePageResources() {
+		if v, ok := parsed.drawParams.get(id); ok {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+// sourceColorSpace 按页面作用域、文档级缓存及全文档页级资源顺序查找颜色空间
+// 入参: id 颜色空间标识
+// 返回: *ColorSpace 颜色空间, bool 是否找到
+func (e *Editor) sourceColorSpace(id string) (*ColorSpace, bool) {
+	if e.source == nil {
+		return nil, false
+	}
+	if v, ok := e.source.reader.resolveColorSpaceScoped(e.pageScope, id); ok {
+		return v, true
+	}
+	for _, parsed := range e.ensureSourcePageResources() {
+		if v, ok := parsed.colorSpaces.get(id); ok {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+// sourceResPath 按页面作用域、文档级缓存及全文档页级资源顺序查找资源包内路径
+// 入参: id 资源标识
+// 返回: string 包内路径, bool 是否找到
+func (e *Editor) sourceResPath(id string) (string, bool) {
+	if e.source == nil {
+		return "", false
+	}
+	reader := e.source.reader
+	if rel, ok := reader.resolveResPathScoped(e.pageScope, id); ok {
+		return reader.ResPath(rel), true
+	}
+	for _, parsed := range e.ensureSourcePageResources() {
+		if rel, ok := parsed.resPaths.get(id); ok {
+			return reader.ResPath(rel), true
+		}
+	}
+	return "", false
+}
+
+// sourceMedia 按页面作用域、文档级缓存及全文档页级资源顺序查找多媒体定义
+// 入参: id 多媒体标识
+// 返回: *MultiMedia 多媒体定义, bool 是否找到
+func (e *Editor) sourceMedia(id string) (*MultiMedia, bool) {
+	if e.source == nil {
+		return nil, false
+	}
+	if v, ok := e.source.reader.resolveMediaScoped(e.pageScope, id); ok {
+		return &v, true
+	}
+	for _, parsed := range e.ensureSourcePageResources() {
+		if v, ok := parsed.medias.get(id); ok {
+			return &v, true
+		}
+	}
+	return nil, false
+}
+
+// sourceFont 按页面作用域、文档级缓存及全文档页级资源顺序查找字体声明
+// 入参: id 字体标识
+// 返回: *Font 字体声明, bool 是否找到
+func (e *Editor) sourceFont(id string) (*Font, bool) {
+	if e.source == nil {
+		return nil, false
+	}
+	if v, ok := e.source.reader.resolveFontScoped(e.pageScope, id); ok {
+		return v, true
+	}
+	for _, parsed := range e.ensureSourcePageResources() {
+		if v, ok := parsed.fonts.get(id); ok {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+// parsedHasResource 判断单个已解析资源文件是否包含指定类型与标识的资源定义
+// 入参: parsed 已解析资源文件, id 资源标识, kind 资源类型，空字符串匹配任意类型
+// 返回: bool 是否包含
+func parsedHasResource(parsed *parsedRes, id, kind string) bool {
+	if parsed == nil {
+		return false
+	}
+	switch kind {
+	case "DrawParam":
+		_, ok := parsed.drawParams.get(id)
+		return ok
+	case "CompositeGraphicUnit":
+		_, ok := parsed.composites.get(id)
+		return ok
+	case "ColorSpace":
+		_, ok := parsed.colorSpaces.get(id)
+		return ok
+	case "Font":
+		_, ok := parsed.fonts.get(id)
+		return ok
+	case "MultiMedia":
+		_, ok := parsed.medias.get(id)
+		return ok
+	default:
+		if _, ok := parsed.drawParams.get(id); ok {
+			return true
+		}
+		if _, ok := parsed.composites.get(id); ok {
+			return true
+		}
+		if _, ok := parsed.colorSpaces.get(id); ok {
+			return true
+		}
+		if _, ok := parsed.fonts.get(id); ok {
+			return true
+		}
+		_, ok := parsed.medias.get(id)
+		return ok
+	}
+}
+
+// sourceResourceFileContext 定位源文档中定义指定资源的XML文件路径，响应取消
+// 入参: ctx 取消上下文, id 资源标识, kind 资源类型，空字符串匹配任意类型
+// 返回: string 资源XML包内路径, bool 是否找到, error 读取或取消错误
+func (e *Editor) sourceResourceFileContext(ctx context.Context, id, kind string) (string, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	if e.source == nil {
+		return "", false, nil
+	}
+	reader := e.source.reader
+	for i := len(e.pageScope) - 1; i >= 0; i-- {
+		if parsed := e.pageScope[i]; parsed.path != "" && parsedHasResource(parsed, id, kind) {
+			return parsed.path, true, nil
+		}
+	}
+	if name, ok := resourceValue(reader.resourceFiles, id); ok && name != "" {
+		if kind == "" {
+			return name, true, nil
+		}
+		if parsed := reader.resFileCache[name]; parsed == nil || parsedHasResource(parsed, id, kind) {
+			return name, true, nil
+		}
+	}
+	list, err := e.ensureSourcePageResourcesContext(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	for _, parsed := range list {
+		if parsed.path != "" && parsedHasResource(parsed, id, kind) {
+			return parsed.path, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// sourceResourceFile 定位源文档中定义指定资源的XML文件路径
+// 入参: id 资源标识, kind 资源类型，空字符串匹配任意类型
+// 返回: string 资源XML包内路径, bool 是否找到
+func (e *Editor) sourceResourceFile(id, kind string) (string, bool) {
+	ctx := context.Background()
+	if e.output != nil && e.output.ctx != nil {
+		ctx = e.output.ctx
+	}
+	name, ok, _ := e.sourceResourceFileContext(ctx, id, kind)
+	return name, ok
 }

@@ -91,6 +91,7 @@ type ClipArea struct {
 // MiterLimitSet为true时，零截断值覆盖继承值，否则零值表示未指定
 type TextObject struct {
 	ID             string        `xml:"ID,attr"`
+	Name           string        `xml:"Name,attr"`
 	Boundary       string        `xml:"Boundary,attr"`
 	DrawParam      string        `xml:"DrawParam,attr"`
 	LineWidth      float64       `xml:"LineWidth,attr"`
@@ -185,6 +186,7 @@ type CGTransform struct {
 // MiterLimitSet为true时，零截断值覆盖继承值，否则零值表示未指定
 type PathObject struct {
 	ID              string       `xml:"ID,attr"`
+	Name            string       `xml:"Name,attr"`
 	Boundary        string       `xml:"Boundary,attr"`
 	DrawParam       string       `xml:"DrawParam,attr"`
 	LineWidth       float64      `xml:"LineWidth,attr"`
@@ -253,17 +255,28 @@ type ShdColor struct {
 
 // ImageObject 图片对象
 type ImageObject struct {
-	ID           string       `xml:"ID,attr"`
-	Boundary     string       `xml:"Boundary,attr"`
-	ResourceID   string       `xml:"ResourceID,attr"`
-	Substitution string       `xml:"Substitution,attr"`
-	ImageMask    string       `xml:"ImageMask,attr"`
-	CTM          string       `xml:"CTM,attr"`
-	Alpha        *int         `xml:"Alpha,attr"`
-	Visible      *bool        `xml:"Visible,attr"`
-	Border       *ImageBorder `xml:"Border"`
-	Clips        *Clips       `xml:"Clips"`
-	Actions      []Action     `xml:"Actions>Action"`
+	ID             string       `xml:"ID,attr"`
+	Name           string       `xml:"Name,attr"`
+	Boundary       string       `xml:"Boundary,attr"`
+	DrawParam      string       `xml:"DrawParam,attr"`
+	LineWidth      float64      `xml:"LineWidth,attr"`
+	Cap            string       `xml:"Cap,attr"`
+	Join           string       `xml:"Join,attr"`
+	MiterLimit     float64      `xml:"MiterLimit,attr"`
+	DashOffset     *float64     `xml:"DashOffset,attr"`
+	DashPattern    string       `xml:"DashPattern,attr"`
+	ResourceID     string       `xml:"ResourceID,attr"`
+	Substitution   string       `xml:"Substitution,attr"`
+	ImageMask      string       `xml:"ImageMask,attr"`
+	CTM            string       `xml:"CTM,attr"`
+	Alpha          *int         `xml:"Alpha,attr"`
+	Visible        *bool        `xml:"Visible,attr"`
+	Border         *ImageBorder `xml:"Border"`
+	Clips          *Clips       `xml:"Clips"`
+	Actions        []Action     `xml:"Actions>Action"`
+	LineWidthSet   bool         `xml:"-"`
+	MiterLimitSet  bool         `xml:"-"`
+	dashPatternSet bool
 }
 
 // ImageBorder 图像边框

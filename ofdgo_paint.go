@@ -248,9 +248,9 @@ func (r *Renderer) colorComponents(value string, index *int, space string) (stri
 	kind, bits, count := "RGB", 8, 3
 	if cs != nil {
 		kind = strings.ToUpper(cs.Type)
-		switch cs.BitsPerComponent {
-		case 0:
-		case 1, 2, 4, 8, 16:
+		switch {
+		case cs.BitsPerComponent == 0 && !cs.bitsSet:
+		case cs.BitsPerComponent == 1, cs.BitsPerComponent == 2, cs.BitsPerComponent == 4, cs.BitsPerComponent == 8, cs.BitsPerComponent == 16:
 			bits = cs.BitsPerComponent
 		default:
 			return "", [4]float64{}, fmt.Errorf("unsupported color depth %d", cs.BitsPerComponent)

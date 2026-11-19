@@ -415,14 +415,16 @@ func newOFDXML(writer io.Writer) *ofdXML {
 func (x *ofdXML) page(page PageContent) {
 	x.root("Page", nil)
 	x.pageHeader(page)
-	x.start("Content", nil)
-	for _, layer := range page.Content.Layer {
-		if x.err != nil {
-			return
+	if len(page.Content.Layer) > 0 {
+		x.start("Content", nil)
+		for _, layer := range page.Content.Layer {
+			if x.err != nil {
+				return
+			}
+			x.layer(layer)
 		}
-		x.layer(layer)
+		x.end("Content")
 	}
-	x.end("Content")
 	x.actions(page.Actions)
 	x.end("Page")
 }
@@ -439,7 +441,9 @@ func (x *ofdXML) pageHeader(page PageContent) {
 	for _, resource := range page.PageRes {
 		x.text("PageRes", resource)
 	}
-	x.pageArea("Area", page.Area)
+	if page.Area != (PageArea{}) && page.Area.PhysicalBox != "" {
+		x.pageArea("Area", page.Area)
+	}
 }
 
 // pageArea 写出物理、显示、版心及出血区域，省略未定义的可选区域
@@ -482,7 +486,11 @@ func (x *ofdXML) resources(fonts, images []editorResource, spaces []ColorSpace) 
 			if x.err != nil {
 				return
 			}
-			attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: space.ID}, {Name: xml.Name{Local: "Type"}, Value: space.Type}, {Name: xml.Name{Local: "BitsPerComponent"}, Value: strconv.Itoa(space.BitsPerComponent)}}
+			bits := space.BitsPerComponent
+			if bits <= 0 {
+				bits = 8
+			}
+			attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: space.ID}, {Name: xml.Name{Local: "Type"}, Value: space.Type}, {Name: xml.Name{Local: "BitsPerComponent"}, Value: strconv.Itoa(bits)}}
 			attrs.add("Profile", space.Profile)
 			x.start("ColorSpace", attrs)
 			if len(space.Palette) != 0 {
@@ -624,6 +632,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		if object.Type == "TextObject" {
 			attrs.add("ID", obj.ID)
 		}
+		attrs.add("Name", obj.Name)
 		attrs.add("DrawParam", obj.DrawParam)
 		attrs.add("Boundary", obj.Boundary)
 		attrs.add("CTM", obj.CTM)
@@ -671,6 +680,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		if object.Type == "PathObject" {
 			attrs.add("ID", obj.ID)
 		}
+		attrs.add("Name", obj.Name)
 		attrs.add("DrawParam", obj.DrawParam)
 		attrs.add("Boundary", obj.Boundary)
 		attrs.add("CTM", obj.CTM)
@@ -702,11 +712,31 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 	case "ImageObject":
 		obj := object.ImageObject
 		attrs.add("ID", obj.ID)
+		attrs.add("Name", obj.Name)
 		attrs.add("Boundary", obj.Boundary)
 		attrs.add("CTM", obj.CTM)
 		attrs.add("ResourceID", obj.ResourceID)
 		attrs.add("ImageMask", obj.ImageMask)
 		attrs.add("Substitution", obj.Substitution)
+		attrs.add("DrawParam", obj.DrawParam)
+		attrs.number("LineWidth", obj.LineWidth)
+		if obj.LineWidthSet && obj.LineWidth == 0 {
+			attrs.add("LineWidth", "0")
+		}
+		attrs.number("MiterLimit", obj.MiterLimit)
+		if obj.MiterLimitSet && obj.MiterLimit == 0 {
+			attrs.add("MiterLimit", "0")
+		}
+		attrs.add("Join", obj.Join)
+		attrs.add("Cap", obj.Cap)
+		if obj.dashPatternSet {
+			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
+		} else {
+			attrs.add("DashPattern", obj.DashPattern)
+		}
+		if obj.DashOffset != nil {
+			attrs.add("DashOffset", ofdNumber(*obj.DashOffset))
+		}
 		attrs.flag("Visible", obj.Visible)
 		attrs.alpha(obj.Alpha)
 		actions = obj.Actions
@@ -1825,11 +1855,16 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 	if e.source != nil {
 		maps.Copy(promoted, used)
 	}
+	pageOrigins := make(map[string][]*parsedRes)
 	for _, page := range e.pages {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, nil, err
 		}
+		beforeUsed := len(used)
 		collectActionReferences(page.Actions, used)
+		if e.source != nil && len(used) > beforeUsed {
+			collectActionReferences(page.Actions, promoted)
+		}
 		if e.source != nil && sourcePageUntouched(page, e.source.pages[page.ID]) {
 			for _, layer := range page.Content.Layer {
 				if layer.DrawParam != "" {
@@ -1846,10 +1881,16 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 		}
 		var original map[string]GraphicObject
 		var originalLayers map[string]string
+		var localRes []*parsedRes
+		localPaths := make(map[string]bool)
 		if e.source != nil {
 			original = make(map[string]GraphicObject)
 			originalLayers = make(map[string]string)
+			localRes = page.pageResources
 			if source := e.source.pages[page.ID]; source != nil && source.original != nil {
+				if len(localRes) == 0 {
+					localRes = source.original.pageResources
+				}
 				for _, layer := range source.original.Content.Layer {
 					originalLayers[layer.ID] = layer.DrawParam
 					for _, object := range layer.Objects {
@@ -1857,12 +1898,23 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 					}
 				}
 			}
+			for _, parsed := range localRes {
+				if parsed != nil && parsed.path != "" {
+					localPaths[parsed.path] = true
+				}
+			}
 		}
 		for _, layer := range page.Content.Layer {
 			if layer.DrawParam != "" {
 				used[layer.DrawParam] = true
 				if e.source != nil && originalLayers[layer.ID] != layer.DrawParam {
-					promoted[layer.DrawParam] = true
+					key := editorResourceID(layer.DrawParam)
+					if key == "" {
+						key = layer.DrawParam
+					}
+					if !slices.ContainsFunc(localRes, func(parsed *parsedRes) bool { return parsedHasResource(parsed, key, "") }) {
+						promoted[key] = true
+					}
 				}
 			}
 			for _, object := range layer.Objects {
@@ -1871,12 +1923,31 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 				}
 				before, exists := original[editorObjectID(object)]
 				collectObjectReferences(object, used)
+				origin := e.objectOrigin(editorObjectID(object))
 				if e.source != nil && (!exists || !reflect.DeepEqual(before, object)) {
-					collectObjectReferences(object, promoted)
+					refs := make(map[string]bool)
+					collectObjectReferences(object, refs)
+					normalizeResourceReferences(refs)
+					for ref := range refs {
+						if !slices.ContainsFunc(localRes, func(parsed *parsedRes) bool { return parsedHasResource(parsed, ref, "") }) {
+							promoted[ref] = true
+							if origin != nil && origin.page != nil && origin.page.original != nil && len(origin.page.original.pageResources) > 0 {
+								pageOrigins[ref] = origin.page.original.pageResources
+							}
+						}
+					}
 				}
-				if origin := e.objectOrigin(editorObjectID(object)); origin != nil && origin.page != nil && (!exists || before.Type != object.Type || !reflect.DeepEqual(before.CompositeGraphicUnit, object.CompositeGraphicUnit)) {
+				if origin != nil && origin.page != nil && origin.page.original != nil && (!exists || before.Type != object.Type || !reflect.DeepEqual(before.CompositeGraphicUnit, object.CompositeGraphicUnit)) {
+					for _, parsed := range origin.page.original.pageResources {
+						if parsed != nil && parsed.path != "" && !localPaths[parsed.path] {
+							files[parsed.path] = true
+						}
+					}
 					for _, name := range origin.page.original.PageRes {
-						files[resolveResourcePath(e.source.reader.ResPath(origin.page.ref.BaseLoc), "", name)] = true
+						resPath := resolveResourcePath(e.source.reader.ResPath(origin.page.ref.BaseLoc), "", name)
+						if !localPaths[resPath] {
+							files[resPath] = true
+						}
 					}
 				}
 			}
@@ -1918,6 +1989,7 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 	for _, resource := range e.resources {
 		if resource.definition() != "" && used[resource.definition()] {
 			files[resource.name] = true
+			delete(promoted, resource.definition())
 		}
 		if resource.font != nil && used[resource.font.ID] {
 			fonts = append(fonts, resource)
@@ -1935,6 +2007,26 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 	for id := range promoted {
 		if name, _ := resourceValue(e.source.reader.resourceFiles, id); name != "" {
 			files[name] = true
+			continue
+		}
+		var found string
+		if originRes := pageOrigins[id]; len(originRes) > 0 {
+			for i := len(originRes) - 1; i >= 0; i-- {
+				if parsed := originRes[i]; parsed != nil && parsed.path != "" && parsedHasResource(parsed, id, "") {
+					found = parsed.path
+					break
+				}
+			}
+		}
+		if found == "" {
+			var err error
+			found, _, err = e.sourceResourceFileContext(ctx, id, "")
+			if err != nil {
+				return nil, nil, nil, nil, err
+			}
+		}
+		if found != "" {
+			files[found] = true
 		}
 	}
 	if err := ctx.Err(); err != nil {

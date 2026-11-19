@@ -70,6 +70,9 @@ const invoiceDimension = "http://xbrl.org/2006/xbrldi"
 // invoiceXMLSignature 表示XML数字签名命名空间
 const invoiceXMLSignature = "http://www.w3.org/2000/09/xmldsig#"
 
+// invoiceStandardEDRM2016 表示2016版电子发票标引命名空间
+const invoiceStandardEDRM2016 = "http://www.edrm.org.cn/schema/e-invoice/2016"
+
 // invoiceDecimalPattern 仅接受XML十进制词法
 var invoiceDecimalPattern = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$`)
 
@@ -287,7 +290,7 @@ func parseInvoiceXML(ctx context.Context, data []byte, source InvoiceSource) (In
 	issue := func(code, field, msg string, s InvoiceSource) {
 		report.Issues = append(report.Issues, InvoiceIssue{Code: code, Field: field, Message: msg, Source: s})
 	}
-	if source.Kind == "tag" && invoiceObjectReferences(root) {
+	if source.Kind == "tag" && (invoiceObjectReferences(root) || invoiceEmptyTagRoot(root)) {
 		return report, nil
 	}
 	if root.name == (xml.Name{Local: "EInvoice"}) || root.name.Local == "eInvoice" && (root.name.Space == "" || root.name.Space == InvoiceStandardEDRM2019) {
@@ -1024,7 +1027,7 @@ func invoiceObjectReferences(root *invoiceXMLNode) bool {
 	count := 0
 	var walk func(*invoiceXMLNode) bool
 	walk = func(n *invoiceXMLNode) bool {
-		if n.name.Space == ofdNamespace2016 || n.name.Space == ofdNamespaceLegacy || n.name.Space == "ofd" || n.name.Space == InvoiceStandardEDRM2019 {
+		if n.name.Space == ofdNamespace2016 || n.name.Space == ofdNamespaceLegacy || n.name.Space == "ofd" || n.name.Space == invoiceStandardEDRM2016 || n.name.Space == InvoiceStandardEDRM2019 {
 			if n.name.Local == "ObjectRef" {
 				count++
 				return len(n.children) == 0 && strings.TrimSpace(n.text.String()) != "" && invoiceXMLAttr(n, "", "PageRef") != ""
@@ -1044,6 +1047,13 @@ func invoiceObjectReferences(root *invoiceXMLNode) bool {
 		return true
 	}
 	return walk(root) && count > 0
+}
+
+// invoiceEmptyTagRoot 识别不含子元素与文本的空电子发票标引壳
+// 入参: root 标引根节点
+// 返回: bool 是否为空电子发票标引壳
+func invoiceEmptyTagRoot(root *invoiceXMLNode) bool {
+	return root != nil && root.name.Local == "eInvoice" && (root.name.Space == "" || root.name.Space == invoiceStandardEDRM2016 || root.name.Space == InvoiceStandardEDRM2019) && len(root.children) == 0 && strings.TrimSpace(root.text.String()) == ""
 }
 
 // invoiceReferenceRoot 识别样例使用的OFD发票标引根，不推断其他业务命名空间

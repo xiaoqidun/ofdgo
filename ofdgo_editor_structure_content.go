@@ -237,8 +237,8 @@ func (e *Editor) addStructureXML(ctx context.Context, tag CustomTag, data []byte
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if strings.TrimSpace(tag.NameSpace) == "" || tag.FileLoc != "" {
-		return 0, fmt.Errorf("custom tag requires NameSpace and an automatically assigned FileLoc")
+	if strings.TrimSpace(tag.NameSpace) == "" && strings.TrimSpace(tag.TypeID) == "" || tag.FileLoc != "" {
+		return 0, fmt.Errorf("custom tag requires NameSpace or TypeID and an automatically assigned FileLoc")
 	}
 	if !structureXMLText(tag.TypeID) || !structureXMLText(tag.NameSpace) || !structureXMLText(tag.SchemaLoc) {
 		return 0, fmt.Errorf("invalid custom tag metadata")

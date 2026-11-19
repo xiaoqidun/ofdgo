@@ -499,8 +499,11 @@ func (e *Editor) resolveBindingFont(ctx context.Context, scan *editorFontDocumen
 	}
 	definition := declaration.font
 	definition.FontFile = ""
+	local := &parsedRes{}
+	local.fonts.put(definition.ID, &definition)
 	reader.fontCache[definition.ID] = &definition
 	renderer := e.newRenderer(reader)
+	defer renderer.bindParsedResources([]*parsedRes{local})()
 	renderer.pageContext = ctx
 	resolved, err := renderer.ResolveFont(definition.ID, true)
 	if err != nil {
@@ -613,7 +616,11 @@ func (e *Editor) retainPendingResources(ctx context.Context, source *Editor) err
 		if id == "" || used[id] || files[resource.name] {
 			continue
 		}
-		if _, exists := resourceValue(e.source.reader.resourceFiles, id); exists {
+		_, exists, err := e.sourceResourceFileContext(ctx, id, "")
+		if err != nil {
+			return err
+		}
+		if exists {
 			continue
 		}
 		e.resources = append(e.resources, resource)
@@ -727,17 +734,17 @@ func (e *Editor) registeredResource(id string) editorResource {
 		return editorResource{}
 	}
 	reader := e.source.reader
-	if font, ok := resourceValue(reader.fontCache, id); ok && font != nil {
+	if font, ok := e.sourceFont(id); ok && font != nil {
 		resource := editorResource{font: font}
 		if font.FontFile != "" {
 			resource.name = reader.ResPath(font.FontFile)
 		}
 		return resource
 	}
-	if media, ok := resourceValue(reader.mediaCache, id); ok {
-		return editorResource{image: &media, name: reader.ResPath(media.MediaFile)}
+	if media, ok := e.sourceMedia(id); ok && media != nil {
+		return editorResource{image: media, name: reader.ResPath(media.MediaFile)}
 	}
-	if space, ok := resourceValue(reader.colorSpaceCache, id); ok && space != nil && space.Profile != "" {
+	if space, ok := e.sourceColorSpace(id); ok && space != nil && space.Profile != "" {
 		return editorResource{space: space, name: reader.ResPath(space.Profile)}
 	}
 	return editorResource{}

@@ -47,6 +47,7 @@ type ColorSpace struct {
 	Profile          string   `xml:"Profile,attr,omitempty"`
 	Palette          []string `xml:"Palette>CV"`
 	profile          *colorProfile
+	bitsSet          bool
 }
 
 // Fonts 字体集合
@@ -193,13 +194,14 @@ func (spaces *ColorSpaces) UnmarshalXML(d *xml.Decoder, start xml.StartElement) 
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
 func (space *ColorSpace) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	*space = ColorSpace{ID: attrValue(start, "ID"), Type: attrValue(start, "Type"), Profile: attrValue(start, "Profile")}
+	*space = ColorSpace{ID: attrValue(start, "ID"), Type: attrValue(start, "Type"), BitsPerComponent: 8, Profile: attrValue(start, "Profile")}
 	if value := strings.TrimSpace(attrValue(start, "BitsPerComponent")); value != "" {
 		bits, err := strconv.Atoi(value)
 		if err != nil {
 			return err
 		}
 		space.BitsPerComponent = bits
+		space.bitsSet = true
 	}
 	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
 		if node.Name.Local == "Palette" {
@@ -220,7 +222,11 @@ func (fonts *Fonts) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
 func (font *Font) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	*font = Font{ID: attrValue(start, "ID"), FontName: attrValue(start, "FontName"), FamilyName: attrValue(start, "FamilyName"), Charset: attrValue(start, "Charset")}
+	charset := attrValue(start, "Charset")
+	if strings.TrimSpace(charset) == "" {
+		charset = "unicode"
+	}
+	*font = Font{ID: attrValue(start, "ID"), FontName: attrValue(start, "FontName"), FamilyName: attrValue(start, "FamilyName"), Charset: charset}
 	for _, attr := range start.Attr {
 		if attr.Name.Space != "" {
 			continue

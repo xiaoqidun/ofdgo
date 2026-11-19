@@ -652,19 +652,22 @@ func (e *Editor) sourcePageData(page PageContent, references *editorReferenceSca
 	if err != nil {
 		return nil, err
 	}
-	var layers []byte
-	for _, layer := range page.Content.Layer {
-		data, err := e.sourceLayerXML(layer, ofdNamespace2016)
+	data := bytes.Clone(bytes.TrimPrefix(header, []byte(xml.Header)))
+	if len(page.Content.Layer) > 0 {
+		var layers []byte
+		for _, layer := range page.Content.Layer {
+			encoded, err := e.sourceLayerXML(layer, ofdNamespace2016)
+			if err != nil {
+				return nil, err
+			}
+			layers = append(layers, encoded...)
+		}
+		content, err := editorXMLContainer("Content", nil, layers)
 		if err != nil {
 			return nil, err
 		}
-		layers = append(layers, data...)
+		data = append(data, content...)
 	}
-	content, err := editorXMLContainer("Content", nil, layers)
-	if err != nil {
-		return nil, err
-	}
-	data := append(bytes.TrimPrefix(header, []byte(xml.Header)), content...)
 	if len(page.Actions) != 0 {
 		actions, err := e.encodeXML(func(x *ofdXML) { x.actions(page.Actions) })
 		if err != nil {

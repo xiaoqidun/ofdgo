@@ -162,7 +162,7 @@ func (r *Renderer) imageObjectMask(object ImageObject, target image.Image) (imag
 	if err := validateImageMask(ctx, mask, original.Bounds().Size()); err != nil {
 		return nil, err
 	}
-	mask, err = baseimage.PixelDataContext(ctx, mask)
+	mask, err = baseimage.RawPixelDataContext(ctx, mask)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +228,7 @@ func imageWithEffects(ctx context.Context, img, mask image.Image, alpha *int) (i
 	bounds := source.Bounds()
 	var maskBounds image.Rectangle
 	if mask != nil {
-		mask, err = baseimage.PixelDataContext(ctx, mask)
+		mask, err = baseimage.RawPixelDataContext(ctx, mask)
 		if err != nil {
 			return nil, err
 		}
@@ -330,7 +330,7 @@ func validateImageMask(ctx context.Context, mask image.Image, size image.Point) 
 	if mask.Bounds().Size() != size || size.X <= 0 || size.Y <= 0 {
 		return fmt.Errorf("image mask dimensions differ from source")
 	}
-	mask, err := baseimage.PixelDataContext(ctx, mask)
+	mask, err := baseimage.RawPixelDataContext(ctx, mask)
 	if err != nil {
 		return err
 	}

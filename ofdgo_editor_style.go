@@ -106,7 +106,7 @@ func (e *Editor) DrawParam(id string, resolved bool) (*DrawParam, error) {
 		}
 	}
 	if e.source != nil {
-		if value, _ := resourceValue(e.source.reader.drawParamCache, id); value != nil {
+		if value, _ := e.sourceDrawParam(id); value != nil {
 			return cloneEditorData(value), nil
 		}
 	}
@@ -117,6 +117,7 @@ func (e *Editor) DrawParam(id string, resolved bool) (*DrawParam, error) {
 // 入参: page 页面索引, ids 对象标识, id 绘制参数标识
 // 返回: error 错误信息
 func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
+	defer e.bindPageIndex(page)()
 	if _, err := e.editorDrawParam(id, make(map[string]bool)); err != nil {
 		return err
 	}
@@ -126,7 +127,7 @@ func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
 	}
 	origins := make(map[string]*editorObjectOrigin)
 	for i, object := range objects {
-		if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+		if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "ImageObject" && object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
 			return fmt.Errorf("object %q does not support draw parameters", ids[i])
 		}
 		origin := e.objectOrigin(ids[i])
@@ -144,7 +145,7 @@ func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
 				return encodeErr
 			}
 			comparison := object
-			comparison.TextObject.DrawParam, comparison.PathObject.DrawParam = "", ""
+			comparison.TextObject.DrawParam, comparison.PathObject.DrawParam, comparison.ImageObject.DrawParam = "", "", ""
 			newXML, encodeErr := editorObjectXML(comparison)
 			if encodeErr != nil {
 				return encodeErr
@@ -186,6 +187,8 @@ func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
 			target = &next.TextObject
 		case "PathObject":
 			target = &next.PathObject
+		case "ImageObject":
+			target = &next.ImageObject
 		default:
 			target = &next.CompositeGraphicUnit
 		}
@@ -204,6 +207,8 @@ func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
 			next.TextObject.DrawParam = id
 		case "PathObject":
 			next.PathObject.DrawParam = id
+		case "ImageObject":
+			next.ImageObject.DrawParam = id
 		}
 		next.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
 		root, err = parseEditorXML(data)
@@ -238,6 +243,7 @@ func (e *Editor) AddDrawParam(draw DrawParam) (string, error) {
 // 入参: page 页面索引, ids 对象标识, style 待修改属性
 // 返回: error 错误信息
 func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
+	defer e.bindPageIndex(page)()
 	objects, _, err := e.selectedObjects(page, ids)
 	if err != nil {
 		return err
@@ -266,6 +272,7 @@ func (e *Editor) StyleObjects(page int, ids []string, style ObjectStyle) error {
 // 入参: page 目标页面索引, ids 目标对象标识, source 样式来源快照
 // 返回: error 错误信息
 func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err error) {
+	defer e.bindPageIndex(page)()
 	if err := e.validateCopyStyle(source); err != nil {
 		return err
 	}
@@ -328,6 +335,7 @@ func (e *Editor) CopyStyle(page int, ids []string, source GraphicObject) (err er
 // 入参: page 页面索引, ids 图片标识, style 边框增量
 // 返回: error 错误信息
 func (e *Editor) StyleImageBorders(page int, ids []string, style ImageBorderStyle) error {
+	defer e.bindPageIndex(page)()
 	for _, value := range []*float64{style.LineWidth, style.HorizontalRadius, style.VerticalRadius} {
 		if value != nil && (!finite(*value) || *value < 0) {
 			return fmt.Errorf("border dimensions must be finite and nonnegative")
@@ -378,6 +386,7 @@ func (e *Editor) StyleImageBorders(page int, ids []string, style ImageBorderStyl
 // 入参: page 页面索引, ids 图片标识, border 边框样式
 // 返回: error 错误信息
 func (e *Editor) SetImageBorders(page int, ids []string, border *ImageBorder) error {
+	defer e.bindPageIndex(page)()
 	if err := e.validateImageBorder(border); err != nil {
 		return err
 	}
@@ -412,7 +421,7 @@ func (e *Editor) addDrawParam(ctx context.Context, draw DrawParam) (string, erro
 	if err := validateEditorStroke(PathObject{LineWidth: draw.LineWidth, Cap: draw.Cap, Join: draw.Join, MiterLimit: draw.MiterLimit, DashPattern: draw.DashPattern, DashOffset: draw.DashOffset}); err != nil {
 		return "", err
 	}
-	if !finite(draw.Size) || draw.Size < 0 || draw.Weight < 0 || draw.Weight > 900 || draw.Weight%100 != 0 {
+	if !finite(draw.Size) || draw.Size < 0 || draw.Weight < 0 || draw.Weight > 1000 || draw.Weight%100 != 0 {
 		return "", fmt.Errorf("invalid draw parameter font size or weight")
 	}
 	if effective.Font != "" {
@@ -484,7 +493,7 @@ func (e *Editor) editorDrawParam(id string, visited map[string]bool) (*DrawParam
 		}
 	}
 	if dp == nil && e.source != nil {
-		dp, _ = resourceValue(e.source.reader.drawParamCache, id)
+		dp, _ = e.sourceDrawParam(id)
 	}
 	if key := editorResourceID(id); key != "" {
 		id = key
@@ -510,6 +519,13 @@ func (e *Editor) resolveEditorStyle(object GraphicObject, layer string) (Graphic
 		id = object.TextObject.DrawParam
 	case "PathObject":
 		id = object.PathObject.DrawParam
+	case "ImageObject":
+		for _, id := range []string{layer, object.ImageObject.DrawParam} {
+			if _, err := e.editorDrawParam(id, make(map[string]bool)); err != nil {
+				return GraphicObject{}, err
+			}
+		}
+		return object, nil
 	case "CompositeObject", "CompositeGraphicUnit":
 		for _, id := range []string{layer, object.CompositeGraphicUnit.DrawParam} {
 			if _, err := e.editorDrawParam(id, make(map[string]bool)); err != nil {

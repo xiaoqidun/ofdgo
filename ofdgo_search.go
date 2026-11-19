@@ -685,13 +685,7 @@ func (r *Renderer) extractFastPlainPageText(ctx context.Context, page *PageConte
 					}
 					continue
 				}
-				restoreTpl := func() {}
-				if len(tplPage.pageResources) > 0 {
-					merged := make([]*parsedRes, 0, len(view.pageResources)+len(tplPage.pageResources))
-					merged = append(merged, view.pageResources...)
-					merged = append(merged, tplPage.pageResources...)
-					restoreTpl = view.bindParsedResources(merged)
-				}
+				restoreTpl := view.bindParsedResources(tplPage.pageResources)
 				for tplOrder := range 3 {
 					if !collectLayers(tplPage.Content.Layer, tplOrder) {
 						restoreTpl()

@@ -72,7 +72,8 @@ func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
 		return nil, err
 	}
 	defer reader.Close()
-	if _, err := reader.PageContentByIndex(index); err != nil {
+	content, err := reader.PageContentByIndex(index)
+	if err != nil {
 		return nil, err
 	}
 	texts := make([]string, 0)
@@ -82,7 +83,7 @@ func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
 	var collect func(CompositeGraphicUnit) error
 	collect = func(unit CompositeGraphicUnit) error {
 		if unit.ResourceID != "" {
-			ref, _ := resourceValue(reader.compositeGraphicUnitCache, unit.ResourceID)
+			ref, _ := reader.resolveCompositeScoped(content.pageResources, unit.ResourceID)
 			if ref == nil || visiting[ref] {
 				return fmt.Errorf("invalid composite resource %q", unit.ResourceID)
 			}
@@ -592,16 +593,19 @@ func (e *Editor) annotationScope(page int, path ObjectPath) (*Reader, *Renderer,
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	root.pageID = e.pages[page].ID
 	root.setStates(e.source.annotationStates[e.pages[page].ID+"/"+editorResourceID(path.Annotation)])
 	reader, err := e.reader(nil)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	if _, err = reader.PageContentByIndex(page); err != nil {
+	content, err := reader.PageContentByIndex(page)
+	if err != nil {
 		reader.Close()
 		return nil, nil, nil, nil, err
 	}
 	renderer := e.newRenderer(reader)
+	renderer.bindPageResources(content)
 	root.parent, root.visible = IdentityMatrix, true
 	scope := root
 	for depth := 0; ; depth++ {

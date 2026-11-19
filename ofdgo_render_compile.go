@@ -430,9 +430,6 @@ func (c *semanticCompiler) pathObject(object PathObject, state RenderState) erro
 		return err
 	}
 	style := c.objectStyle(object, state.Defaults, linear)
-	if style.stroke == nil {
-		style.stroke = withFillAlpha(&FillColor{}, object.Alpha)
-	}
 	shading, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
 	if object.Fill != nil && *object.Fill {
 		paint, err := c.renderer.ResolvePaint(style.fill)
@@ -444,9 +441,13 @@ func (c *semanticCompiler) pathObject(object PathObject, state RenderState) erro
 		}
 	}
 	if object.Stroke == nil || *object.Stroke {
-		paint, err := c.renderer.ResolvePaint(style.stroke)
-		if err != nil {
-			return err
+		paint := Paint{Kind: PaintSolid, Color: color.RGBA{A: fillAlphaByte(object.Alpha)}}
+		if style.stroke != nil {
+			var err error
+			paint, err = c.renderer.ResolvePaint(style.stroke)
+			if err != nil {
+				return err
+			}
 		}
 		return c.stroke(path, paint, style.options, clip, shading, shading)
 	}
@@ -478,13 +479,13 @@ func (c *semanticCompiler) textObject(object TextObject, state RenderState) erro
 	}
 	_, linear := renderObjectMatrix(object.Boundary, NewMatrix(object.CTM), state)
 	style := c.objectStyle(object.pathStyle(), state.Defaults, linear)
-	if style.fill == nil {
-		style.fill = withFillAlpha(&FillColor{}, object.Alpha)
-	}
 	shading, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
-	fill, err := c.renderer.ResolvePaint(style.fill)
-	if err != nil {
-		return err
+	fill := Paint{Kind: PaintSolid, Color: color.RGBA{A: fillAlphaByte(object.Alpha)}}
+	if style.fill != nil {
+		fill, err = c.renderer.ResolvePaint(style.fill)
+		if err != nil {
+			return err
+		}
 	}
 	var stroke Paint
 	if object.Stroke != nil && *object.Stroke {
@@ -677,4 +678,14 @@ func geometryCircle(center RasterPoint, radius float64) GeometryPath {
 		{Verb: GeometryArc, RadiusX: radius, RadiusY: radius, Sweep: true, End: Point{X: center.X + radius, Y: center.Y}},
 		{Verb: GeometryClose},
 	}
+}
+
+// fillAlphaByte 将可选对象透明度转换为预乘黑色Alpha字节
+// 入参: alpha 对象透明度
+// 返回: uint8 Alpha字节
+func fillAlphaByte(alpha *int) uint8 {
+	if alpha == nil {
+		return 255
+	}
+	return uint8(clampColor(*alpha))
 }

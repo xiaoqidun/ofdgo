@@ -56,6 +56,7 @@ type CompositeMember struct {
 // 入参: page 页面索引, path 复合对象路径
 // 返回: []CompositeMember 按绘制顺序排列的成员, error 错误信息
 func (e *Editor) CompositeObjects(page int, path ObjectPath) ([]CompositeMember, error) {
+	defer e.bindPageIndex(page)()
 	reader, renderer, _, members, err := e.compositeScope(page, path)
 	if err != nil {
 		return nil, err
@@ -79,6 +80,7 @@ func (e *Editor) CompositeObject(page int, path ObjectPath, index int) (Composit
 // 入参: page 页面索引, path 父复合路径, indexes 不重复的成员序号
 // 返回: []CompositeMember 独立成员快照, error 错误信息
 func (e *Editor) CompositeObjectsAt(page int, path ObjectPath, indexes []int) ([]CompositeMember, error) {
+	defer e.bindPageIndex(page)()
 	reader, renderer, _, nodes, err := e.compositeScope(page, path)
 	if err != nil {
 		return nil, err
@@ -516,7 +518,24 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 		visible := n.visible && (c.Visible == nil || *c.Visible)
 		alpha := mergeAlpha(n.alpha, c.Alpha)
 		if c.ResourceID != "" {
-			name, _ := resourceValue(reader.resourceFiles, c.ResourceID)
+			var name string
+			if renderer != nil {
+				for i := len(renderer.pageResources) - 1; i >= 0; i-- {
+					if parsed := renderer.pageResources[i]; parsed != nil && parsed.path != "" && parsedHasResource(parsed, c.ResourceID, "CompositeGraphicUnit") {
+						name = parsed.path
+						break
+					}
+				}
+			}
+			if name == "" {
+				name, _ = resourceValue(reader.resourceFiles, c.ResourceID)
+			}
+			if name == "" {
+				name, _ = e.sourceResourceFile(c.ResourceID, "CompositeGraphicUnit")
+			}
+			if name == "" {
+				return nil, fmt.Errorf("composite resource %q not found", c.ResourceID)
+			}
 			data, err := reader.readFile(name)
 			if err != nil {
 				return nil, err
@@ -620,6 +639,9 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 // 入参: renderer 渲染器, nodes 成员
 // 返回: []CompositeMember 独立快照及操作能力, error 度量错误
 func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorCompositeNode) ([]CompositeMember, error) {
+	if renderer != nil {
+		defer e.bindParsedScope(renderer.pageResources)()
+	}
 	result := make([]CompositeMember, len(nodes))
 	positions := make(map[*editorXML]ObjectPosition)
 	orderable := make(map[*editorXML]bool)
@@ -798,6 +820,7 @@ func (e *Editor) editCompositeObjects(page int, path ObjectPath, indexes []int, 
 // 入参: page 页面索引, path 父路径, edit 修改回调
 // 返回: error 错误信息
 func (e *Editor) editCompositeScope(page int, path ObjectPath, edit func(*Renderer, *editorCompositeNode, []*editorCompositeNode) error) (err error) {
+	defer e.bindPageIndex(page)()
 	reader, renderer, root, nodes, err := e.compositeScope(page, path)
 	if err != nil {
 		return err

@@ -80,6 +80,26 @@ type encryptionSeed struct {
 	Params  encryptionParams `xml:"ExtendParams"`
 }
 
+// UnmarshalXML 解析密钥描述并兼容标准印刷错拼DecyptSeed与正拼DecryptSeed
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (seed *encryptionSeed) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Space != ofdNamespace2016 || (start.Name.Local != "DecyptSeed" && start.Name.Local != "DecryptSeed") {
+		return fmt.Errorf("unexpected encryption seed element: %s", start.Name.Local)
+	}
+	var raw struct {
+		ID     string           `xml:"ID,attr"`
+		Method string           `xml:"EncryptCaseId,attr"`
+		Users  []encryptionUser `xml:"UserInfo"`
+		Params encryptionParams `xml:"ExtendParams"`
+	}
+	if err := d.DecodeElement(&raw, &start); err != nil {
+		return err
+	}
+	*seed = encryptionSeed{ID: raw.ID, Method: raw.Method, Users: raw.Users, Params: raw.Params}
+	return nil
+}
+
 // encryptionParams 保留未知扩展，避免默认另存时静默丢失其语义
 type encryptionParams struct {
 	Raw string `xml:",innerxml"`
@@ -191,7 +211,7 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 	outerDecrypted := make(map[string][]byte)
 	for i := len(list.Records) - 1; i >= 0; i-- {
 		record := list.Records[i]
-		seedData, seedName, err := encryptionPart(parts, record.Seed)
+		seedData, seedName, err := encryptionPart(parts, "Encryptions.xml", record.Seed)
 		if err != nil {
 			return err
 		}
@@ -203,7 +223,7 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 		if err != nil {
 			return err
 		}
-		mapData, mapName, err := encryptionPart(parts, record.Entries)
+		mapData, mapName, err := encryptionPart(parts, "Encryptions.xml", record.Entries)
 		var entries encryptionEntries
 		if err == nil {
 			entries, err = decodeEncryptionEntries(mapData, key, iv, settings.provider)
@@ -217,14 +237,18 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 		extraSeeds := make(map[string]bool)
 		canInherit := true
 		for _, entry := range entries.Entries {
-			name := cleanPackagePath(entry.Path)
+			name := encryptionPath(mapName, entry.Path)
 			if !validPackagePath(name) || used[name] {
 				clear(key)
 				return fmt.Errorf("ambiguous encrypted package path: %q", entry.Path)
 			}
 			entryKey, entryIV := key, iv
-			if entry.Seed != "" && cleanPackagePath(entry.Seed) != seedName {
-				entrySeedData, extraSeed, seedErr := encryptionPart(parts, entry.Seed)
+			entrySeedName := ""
+			if strings.TrimSpace(entry.Seed) != "" {
+				entrySeedName = encryptionPath(mapName, entry.Seed)
+			}
+			if entrySeedName != "" && entrySeedName != seedName {
+				entrySeedData, extraSeed, seedErr := encryptionPart(parts, mapName, entry.Seed)
 				var entrySeed encryptionSeed
 				if seedErr == nil {
 					seedErr = xml.Unmarshal(entrySeedData, &entrySeed)
@@ -242,11 +266,11 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 				}
 				extraSeeds[extraSeed] = true
 			}
-			ciphertext, _, err := encryptionPart(parts, entry.EncryptedPath)
+			ciphertext, _, err := encryptionPart(parts, mapName, entry.EncryptedPath)
 			if err == nil {
 				decrypted[name], err = settings.provider.DecryptSM4(entryKey, entryIV, ciphertext)
 			}
-			if entry.Seed != "" && cleanPackagePath(entry.Seed) != seedName {
+			if entrySeedName != "" && entrySeedName != seedName {
 				clear(entryKey)
 			}
 			if err != nil {
@@ -257,7 +281,7 @@ func (r *Reader) decryptPackage(settings readerOptions) error {
 		}
 		clear(key)
 		for _, entry := range entries.Entries {
-			encPath := cleanPackagePath(entry.EncryptedPath)
+			encPath := encryptionPath(mapName, entry.EncryptedPath)
 			delete(parts, encPath)
 			delete(outerDecrypted, encPath)
 		}
@@ -332,11 +356,11 @@ func decodeEncryptionEntries(data, key, iv []byte, provider CryptoProvider) (enc
 	return entries, nil
 }
 
-// encryptionPart 按大小写敏感路径读取加密元数据引用
-// 入参: parts 包内条目, name 引用路径
+// encryptionPart 按ST_Loc规则及大小写敏感路径读取加密元数据引用
+// 入参: parts 包内条目, base 基准XML路径, name 引用路径
 // 返回: []byte 条目内容, string 实际路径, error 错误信息
-func encryptionPart(parts map[string][]byte, name string) ([]byte, string, error) {
-	name = cleanPackagePath(name)
+func encryptionPart(parts map[string][]byte, base, name string) ([]byte, string, error) {
+	name = encryptionPath(base, name)
 	if !validPackagePath(name) {
 		return nil, "", fmt.Errorf("invalid encryption path: %q", name)
 	}
@@ -668,18 +692,32 @@ func validateEncryptionOptions(options EncryptionOptions) error {
 	return nil
 }
 
+// encryptionPath 按ST_Loc规则相对基准XML解析包内路径并保留越界特征供校验拦截
+// 入参: base 基准XML路径, loc 引用路径
+// 返回: string 规范化路径
+func encryptionPath(base, loc string) string {
+	trimmed := strings.ReplaceAll(strings.TrimSpace(loc), "\\", "/")
+	if strings.HasPrefix(trimmed, "/") {
+		return cleanPackagePath(trimmed)
+	}
+	if trimmed == "" {
+		return "."
+	}
+	return resolveResourcePath(base, "", trimmed)
+}
+
 // preserveInnerEncryptionRecord 保留全包解密层尚未处理的更内层加密元数据及明文映射引用的密文和条目种子
 // 入参: dst 下一轮包条目, parts 当前包条目, decrypted 本层解密结果, record 更内层加密记录
 func preserveInnerEncryptionRecord(dst, parts, decrypted map[string][]byte, record encryptionRecord) {
 	for _, meta := range []string{record.Seed, record.Entries} {
-		metaName := cleanPackagePath(meta)
+		metaName := encryptionPath("Encryptions.xml", meta)
 		if validPackagePath(metaName) {
 			if metaData, ok := parts[metaName]; ok {
 				dst[metaName] = metaData
 			}
 		}
 	}
-	entriesName := cleanPackagePath(record.Entries)
+	entriesName := encryptionPath("Encryptions.xml", record.Entries)
 	if !validPackagePath(entriesName) {
 		return
 	}
@@ -699,7 +737,7 @@ func preserveInnerEncryptionRecord(dst, parts, decrypted map[string][]byte, reco
 			if strings.TrimSpace(ref) == "" {
 				continue
 			}
-			refName := cleanPackagePath(ref)
+			refName := encryptionPath(entriesName, ref)
 			if validPackagePath(refName) {
 				if refData, exists := parts[refName]; exists {
 					dst[refName] = refData

@@ -68,22 +68,22 @@ func (u *editorVectorUsage) matches(name string, data []byte) bool {
 
 // editorReferenceScan 按XML事件收集资源、字体用字和图元编号，未知内容保持完整扫描
 type editorReferenceScan struct {
-	ctx              context.Context
-	refs             *editorResourceRefs
-	objects          map[string]bool
-	graphicIDs       map[string]bool
-	name             string
-	base             string
-	stack            []string
-	fonts            []*editorFontUsage
-	text             strings.Builder
-	richText         strings.Builder
-	currentCustomTag CustomTag
-	resource         bool
-	capture          bool
+	ctx               context.Context
+	refs              *editorResourceRefs
+	objects           map[string]bool
+	graphicIDs        map[string]bool
+	name              string
+	base              string
+	stack             []string
+	fonts             []*editorFontUsage
+	text              strings.Builder
+	richText          strings.Builder
+	currentCustomTag  CustomTag
+	resource          bool
+	capture           bool
 	externalCustomTag bool
-	safe             bool
-	seen             bool
+	safe              bool
+	seen              bool
 }
 
 // vectorUsage 保留完整且限额内的自产矢量引用，超限时保存流程重新扫描
@@ -175,9 +175,6 @@ func (s *editorReferenceScan) accept(token xml.Token) bool {
 			}
 			s.currentCustomTag = tag
 			s.externalCustomTag = !internalFontSafe
-			if s.externalCustomTag {
-				s.refs.fontUnsafe = true
-			}
 		}
 		if len(s.stack) == 0 {
 			if s.seen {

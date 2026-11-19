@@ -19,6 +19,7 @@ import (
 	"image"
 	"io/fs"
 	"maps"
+	"slices"
 )
 
 // Renderer 渲染器实现
@@ -39,6 +40,9 @@ type Renderer struct {
 	OnExportProgress      func(completed, total int) error
 	DrawParams            map[string]*DrawParam
 	CompositeGraphicUnits map[string]*CompositeGraphicUnit
+	hasBaseScope          bool
+	scopedDrawParams      map[string]*DrawParam
+	scopedComposites      map[string]*CompositeGraphicUnit
 	pageResources         []*parsedRes
 	templatePageCache     map[string]*PageContent
 	imageCache            *renderCache[string, image.Image]
@@ -82,8 +86,14 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	if err != nil {
 		return nil, err
 	}
-	maps.Copy(reader.drawParamCache, r.DrawParams)
-	maps.Copy(reader.compositeGraphicUnitCache, r.CompositeGraphicUnits)
+	drawParams := r.DrawParams
+	composites := r.CompositeGraphicUnits
+	if r.hasBaseScope {
+		drawParams = r.scopedDrawParams
+		composites = r.scopedComposites
+	}
+	maps.Copy(reader.drawParamCache, drawParams)
+	maps.Copy(reader.compositeGraphicUnitCache, composites)
 	next := NewRenderer(reader, WithDPI(r.DPI), WithAnnotations(r.RenderAnnotations), WithRenderBackends(r.backends), WithFontDirs(r.fontDirs...), WithFontFS(r.fontFS...))
 	next.Compression = r.Compression
 	next.OutputContext = ctx
@@ -158,14 +168,18 @@ func (r *Renderer) bindPageResources(page *PageContent) func() {
 	if page == nil {
 		return r.bindParsedResources(nil)
 	}
-	res := page.pageResources
-	if res == nil && (len(page.PageRes) > 0 || len(page.Template) > 0) && r.Reader != nil {
+	if r.Reader != nil && r.Reader.doc == nil && r.Reader.OFD != nil {
 		ctx := r.pageContext
 		if ctx == nil {
 			ctx = r.outputContext()
 		}
-		if r.Reader.doc == nil {
-			_, _ = r.Reader.docStructureContext(ctx)
+		_, _ = r.Reader.docStructureContext(ctx)
+	}
+	res := page.pageResources
+	if res == nil && len(page.PageRes) > 0 && r.Reader != nil {
+		ctx := r.pageContext
+		if ctx == nil {
+			ctx = r.outputContext()
 		}
 		basePath := ""
 		if r.Reader.doc != nil && page.ID != "" {
@@ -197,87 +211,148 @@ func (r *Renderer) bindParsedResources(res []*parsedRes) func() {
 	prevRes := r.pageResources
 	prevDrawParams := r.DrawParams
 	prevComposites := r.CompositeGraphicUnits
+	prevHasBase := r.hasBaseScope
+	prevBaseDP := r.scopedDrawParams
+	prevBaseComp := r.scopedComposites
+	if !r.hasBaseScope {
+		r.hasBaseScope = true
+		r.scopedDrawParams = prevDrawParams
+		r.scopedComposites = prevComposites
+	}
 	r.pageResources = res
-	hasDrawParams := false
-	hasComposites := false
-	for _, item := range res {
-		if item != nil {
-			if len(item.drawParams.exact) > 0 {
-				hasDrawParams = true
-			}
-			if len(item.composites.exact) > 0 {
-				hasComposites = true
-			}
-		}
-	}
-	if hasDrawParams {
-		scoped := maps.Clone(prevDrawParams)
-		if scoped == nil {
-			scoped = make(map[string]*DrawParam)
-		}
-		for _, item := range res {
-			if item == nil {
-				continue
-			}
-			for id, dp := range item.drawParams.exact {
-				overridden := false
-				if existing, ok := prevDrawParams[id]; ok {
-					var docVal *DrawParam
-					if r.Reader != nil {
-						docVal, _ = r.Reader.docDrawParams.get(id)
-						if docVal == nil {
-							docVal = r.Reader.drawParamCache[id]
-						}
-					}
-					overridden = existing != docVal
-				}
-				if !overridden {
-					scoped[id] = dp
-				}
-			}
-		}
-		r.DrawParams = scoped
-	}
-	if hasComposites {
-		scoped := maps.Clone(prevComposites)
-		if scoped == nil {
-			scoped = make(map[string]*CompositeGraphicUnit)
-		}
-		for _, item := range res {
-			if item == nil {
-				continue
-			}
-			for id, unit := range item.composites.exact {
-				overridden := false
-				if existing, ok := prevComposites[id]; ok {
-					var docVal *CompositeGraphicUnit
-					if r.Reader != nil {
-						docVal, _ = r.Reader.docComposites.get(id)
-						if docVal == nil {
-							docVal = r.Reader.compositeGraphicUnitCache[id]
-						}
-					}
-					overridden = existing != docVal
-				}
-				if !overridden {
-					scoped[id] = unit
-				}
-			}
-		}
-		r.CompositeGraphicUnits = scoped
-	}
+	r.DrawParams = r.mergeScopedDrawParams(r.scopedDrawParams, res)
+	r.CompositeGraphicUnits = r.mergeScopedComposites(r.scopedComposites, res)
 	return func() {
 		r.pageResources = prevRes
 		r.DrawParams = prevDrawParams
 		r.CompositeGraphicUnits = prevComposites
+		r.hasBaseScope = prevHasBase
+		r.scopedDrawParams = prevBaseDP
+		r.scopedComposites = prevBaseComp
 	}
+}
+
+// mergeScopedDrawParams 基于外部初始覆盖与文档资源合并当前页面局部绘制参数
+// 入参: base 外部基准绘制参数表, res 当前页面局部资源
+// 返回: map[string]*DrawParam 当前作用域绘制参数表
+func (r *Renderer) mergeScopedDrawParams(base map[string]*DrawParam, res []*parsedRes) map[string]*DrawParam {
+	hasLocal := false
+	for _, item := range res {
+		if item != nil && len(item.drawParams.exact) > 0 {
+			hasLocal = true
+			break
+		}
+	}
+	if !hasLocal {
+		return base
+	}
+	scoped := maps.Clone(base)
+	if scoped == nil {
+		scoped = make(map[string]*DrawParam)
+	}
+	for _, item := range res {
+		if item == nil {
+			continue
+		}
+		for _, id := range slices.Sorted(maps.Keys(item.drawParams.exact)) {
+			dp := item.drawParams.exact[id]
+			if r.hasDrawParamOverride(base, id) {
+				continue
+			}
+			for key := range scoped {
+				if key != id && sameResourceID(key, id) {
+					delete(scoped, key)
+				}
+			}
+			scoped[id] = dp
+		}
+	}
+	return scoped
+}
+
+// mergeScopedComposites 基于外部初始覆盖与文档资源合并当前页面局部复合图元
+// 入参: base 外部基准复合图元表, res 当前页面局部资源
+// 返回: map[string]*CompositeGraphicUnit 当前作用域复合图元表
+func (r *Renderer) mergeScopedComposites(base map[string]*CompositeGraphicUnit, res []*parsedRes) map[string]*CompositeGraphicUnit {
+	hasLocal := false
+	for _, item := range res {
+		if item != nil && len(item.composites.exact) > 0 {
+			hasLocal = true
+			break
+		}
+	}
+	if !hasLocal {
+		return base
+	}
+	scoped := maps.Clone(base)
+	if scoped == nil {
+		scoped = make(map[string]*CompositeGraphicUnit)
+	}
+	for _, item := range res {
+		if item == nil {
+			continue
+		}
+		for _, id := range slices.Sorted(maps.Keys(item.composites.exact)) {
+			unit := item.composites.exact[id]
+			if r.hasCompositeOverride(base, id) {
+				continue
+			}
+			for key := range scoped {
+				if key != id && sameResourceID(key, id) {
+					delete(scoped, key)
+				}
+			}
+			scoped[id] = unit
+		}
+	}
+	return scoped
+}
+
+// hasDrawParamOverride 判断外部基准表是否显式注入了覆盖文档定义的绘制参数
+// 入参: base 外部基准表, id 资源标识
+// 返回: bool 是否存在外部显式覆盖
+func (r *Renderer) hasDrawParamOverride(base map[string]*DrawParam, id string) bool {
+	existing, ok := resourceValue(base, id)
+	if !ok || existing == nil {
+		return false
+	}
+	if r.Reader == nil {
+		return true
+	}
+	var docVal *DrawParam
+	if r.Reader.docDrawParams != nil {
+		docVal, _ = r.Reader.docDrawParams.get(id)
+	} else {
+		docVal, _ = resourceValue(r.Reader.drawParamCache, id)
+	}
+	return existing != docVal
+}
+
+// hasCompositeOverride 判断外部基准表是否显式注入了覆盖文档定义的复合图元
+// 入参: base 外部基准表, id 资源标识
+// 返回: bool 是否存在外部显式覆盖
+func (r *Renderer) hasCompositeOverride(base map[string]*CompositeGraphicUnit, id string) bool {
+	existing, ok := resourceValue(base, id)
+	if !ok || existing == nil {
+		return false
+	}
+	if r.Reader == nil {
+		return true
+	}
+	var docVal *CompositeGraphicUnit
+	if r.Reader.docComposites != nil {
+		docVal, _ = r.Reader.docComposites.get(id)
+	} else {
+		docVal, _ = resourceValue(r.Reader.compositeGraphicUnitCache, id)
+	}
+	return existing != docVal
 }
 
 // fontDefinition 按页面局部资源优先查找字体定义
 // 入参: id 字体资源标识
 // 返回: *Font 字体定义
 func (r *Renderer) fontDefinition(id string) *Font {
-	if r == nil || r.Reader == nil {
+	if r.Reader == nil {
 		return nil
 	}
 	if font, ok := r.Reader.resolveFontScoped(r.pageResources, id); ok {
@@ -290,25 +365,20 @@ func (r *Renderer) fontDefinition(id string) *Font {
 // 入参: id 复合图元资源标识
 // 返回: *CompositeGraphicUnit 复合图元定义
 func (r *Renderer) compositeDefinition(id string) *CompositeGraphicUnit {
-	if r == nil {
-		return nil
+	base := r.CompositeGraphicUnits
+	if r.hasBaseScope {
+		base = r.scopedComposites
 	}
-	unit, ok := resourceValue(r.CompositeGraphicUnits, id)
-	if r.Reader == nil {
+	if r.hasCompositeOverride(base, id) {
+		unit, _ := resourceValue(base, id)
 		return unit
 	}
-	if ok && unit != nil {
-		docUnit, _ := r.Reader.docComposites.get(id)
-		if docUnit == nil {
-			docUnit, _ = resourceValue(r.Reader.compositeGraphicUnitCache, id)
-		}
-		if unit != docUnit {
-			return unit
+	if r.Reader != nil {
+		if scoped, found := r.Reader.resolveCompositeScoped(r.pageResources, id); found {
+			return scoped
 		}
 	}
-	if scoped, found := r.Reader.resolveCompositeScoped(r.pageResources, id); found {
-		return scoped
-	}
+	unit, _ := resourceValue(r.CompositeGraphicUnits, id)
 	return unit
 }
 

@@ -46,6 +46,7 @@ func (e *Editor) Objects(page int, ids []string) ([]GraphicObject, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer e.bindPageIndex(page)()
 	slices.SortFunc(indexes, compareEditorPosition)
 	objects := make([]GraphicObject, len(indexes))
 	orderable := make(map[*editorXML]bool)
@@ -127,6 +128,7 @@ func (e *Editor) PageObjectInfo(page int) (map[string]ObjectInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer e.bindPageIndex(page)()
 	result := make(map[string]ObjectInfo)
 	orderable := make(map[*editorXML]bool)
 	for i := range content.Content.Layer {
@@ -192,6 +194,7 @@ func (e *Editor) OrderObjects(page int, ids []string, order string) error {
 	if err != nil || len(indexes) == 0 {
 		return err
 	}
+	defer e.bindPageIndex(page)()
 	layer := &e.pages[page].Content.Layer[indexes[0].layer]
 	_, siblings := e.objectOrderIndexes(page, layer, ids[0])
 	positions := make(map[int]int, len(siblings))
@@ -429,6 +432,7 @@ func (e *Editor) copyObjectsContext(ctx context.Context, page int, objects []Gra
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	defer e.bindPageIndex(page)()
 	prepared := make([]GraphicObject, len(objects))
 	origins := make([]*editorObjectOrigin, len(objects))
 	result := make([]string, len(objects))
@@ -438,11 +442,17 @@ func (e *Editor) copyObjectsContext(ctx context.Context, page int, objects []Gra
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		restoreOrigin := func() {}
+		if origin := e.snapshotOrigin(object); origin != nil && origin.page != nil && origin.page.original != nil {
+			restoreOrigin = e.bindPageResources(origin.page.original)
+		}
 		result[i] = formatUnitID(e.maxID + uint64(i) + 1)
-		object, err := validation.prepareCopiedObject(result[i], object)
+		copied, err := validation.prepareCopiedObject(result[i], object)
+		restoreOrigin()
 		if err != nil {
 			return nil, err
 		}
+		object = copied
 		if dx != 0 || dy != 0 {
 			object, err = transformEditorObject(object, dx, dy, 1)
 			if err != nil {
@@ -522,6 +532,7 @@ func (v *editorValidation) appendOwnedObjects(ctx context.Context, page int, obj
 	if err := e.prepareSourceIDs(); err != nil {
 		return err
 	}
+	defer e.bindPageIndex(page)()
 	for i, object := range objects {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -584,6 +595,7 @@ func (e *Editor) deleteObjects(page int, ids []string) error {
 	if err != nil || len(indexes) == 0 {
 		return err
 	}
+	defer e.bindPageIndex(page)()
 	orderable := make(map[*editorXML]bool)
 	for _, object := range objects {
 		capability := e.objectCapabilities(object, orderable)
@@ -714,6 +726,7 @@ func (e *Editor) updateObjectOrigins(page int, objects []GraphicObject, preserve
 	if err != nil {
 		return err
 	}
+	defer e.bindPageIndex(page)()
 	after := make([]GraphicObject, len(objects))
 	var beforeOrigins, afterOrigins map[string]*editorObjectOrigin
 	orderable := make(map[*editorXML]bool)
@@ -844,6 +857,7 @@ func (e *Editor) selectedObjects(page int, ids []string) ([]GraphicObject, []edi
 // 入参: page 页面索引, objects 待度量的对象
 // 返回: []Box 对象范围, error 错误信息
 func (e *Editor) objectBounds(page int, objects []GraphicObject) ([]Box, error) {
+	defer e.bindPageIndex(page)()
 	orderable := make(map[*editorXML]bool)
 	for _, object := range objects {
 		capability := e.objectCapabilities(object, orderable)

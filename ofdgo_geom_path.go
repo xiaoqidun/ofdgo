@@ -16,15 +16,12 @@ package ofdgo
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
-
-// GeometryPath 保存独立于绘图库的几何路径，不扁平化曲线或舍入坐标
-// 坐标以左上角为原点，单位为毫米，子路径从Move开始，Close回到当前子路径起点
-type GeometryPath []GeometrySegment
 
 // GeometryVerb 表示几何路径指令
 type GeometryVerb = basegeom.Verb
@@ -38,6 +35,10 @@ const (
 	GeometryArc   = basegeom.Arc
 	GeometryClose = basegeom.ClosePath
 )
+
+// GeometryPath 保存独立于绘图库的几何路径，不扁平化曲线或舍入坐标
+// 坐标以左上角为原点，单位为毫米，子路径从Move开始，Close回到当前子路径起点
+type GeometryPath []GeometrySegment
 
 // GeometrySegment 保存路径端点、贝塞尔控制点或端点式椭圆弧参数
 // 弧线Rotation单位为度，Sweep为true表示顺时针，Large表示大弧
@@ -191,10 +192,10 @@ func geometryPathSegment(command string, args []string) (GeometrySegment, error)
 	case "B":
 		segment.Verb, segment.Control1, segment.Control2, segment.End = GeometryCubic, Point{X: values[0], Y: values[1]}, Point{X: values[2], Y: values[3]}, Point{X: values[4], Y: values[5]}
 	case "A":
-		if values[0] < 0 || values[1] < 0 || values[3] != 0 && values[3] != 1 || values[4] != 0 && values[4] != 1 {
+		if values[3] != 0 && values[3] != 1 || values[4] != 0 && values[4] != 1 {
 			return GeometrySegment{}, fmt.Errorf("invalid arc radii or flags")
 		}
-		segment = GeometrySegment{Verb: GeometryArc, RadiusX: values[0], RadiusY: values[1], Rotation: values[2], Large: values[3] != 0, Sweep: values[4] != 0, End: Point{X: values[5], Y: values[6]}}
+		segment = GeometrySegment{Verb: GeometryArc, RadiusX: math.Abs(values[0]), RadiusY: math.Abs(values[1]), Rotation: values[2], Large: values[3] != 0, Sweep: values[4] != 0, End: Point{X: values[5], Y: values[6]}}
 	case "C":
 		segment.Verb = GeometryClose
 	}

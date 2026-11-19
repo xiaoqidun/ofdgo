@@ -443,7 +443,7 @@ func (e *Editor) addEditorDrawParamContext(ctx context.Context, draw DrawParam) 
 		x.root("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "."}})
 		x.start("DrawParams", nil)
 		attrs := ofdAttrs{}
-		for _, pair := range [][2]string{{"ID", draw.ID}, {"Relative", draw.Relative}, {"Cap", draw.Cap}, {"Join", draw.Join}, {"Font", draw.Font}} {
+		for _, pair := range [][2]string{{"ID", draw.ID}, {"Relative", draw.Relative}, {"Cap", draw.Cap}, {"Join", draw.Join}} {
 			attrs.add(pair[0], pair[1])
 		}
 		attrs.number("LineWidth", draw.LineWidth)
@@ -454,16 +454,11 @@ func (e *Editor) addEditorDrawParamContext(ctx context.Context, draw DrawParam) 
 		if draw.MiterLimitSet && draw.MiterLimit == 0 {
 			attrs.add("MiterLimit", "0")
 		}
-		if draw.Relative == "" || draw.dashPatternSet || draw.DashPattern != "" {
+		if draw.DashPattern != "" || draw.dashPatternSet && draw.Relative != "" {
 			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: draw.DashPattern})
 		}
 		if draw.DashOffset != nil {
 			attrs.add("DashOffset", ofdNumber(*draw.DashOffset))
-		}
-		attrs.number("Size", draw.Size)
-		attrs.number("Weight", float64(draw.Weight))
-		if draw.Italic {
-			attrs.add("Italic", "true")
 		}
 		x.start("DrawParam", attrs)
 		x.color("FillColor", draw.FillColor)

@@ -88,6 +88,7 @@ type Editor struct {
 	transactionChanges *EditorChanges
 	objectIndices      map[string]*editorObjectIndex
 	richIndex          *richTextIndex
+	pageScope          []*parsedRes
 }
 
 // NewEditor 创建空白文档，保存前至少添加一页
@@ -612,6 +613,7 @@ func (e *Editor) MoveObject(page int, id string, to int) error {
 // 入参: page 页面索引, box 文字边界, value 原文, fontID 字体资源标识, size 字号
 // 返回: string 对象标识, error 错误信息
 func (e *Editor) AddText(page int, box Box, value, fontID string, size float64) (string, error) {
+	defer e.bindPageIndex(page)()
 	object := GraphicObject{Type: "TextObject", TextObject: TextObject{
 		Boundary: fmt.Sprintf("%s %s %s %s", ofdNumber(box.X), ofdNumber(box.Y), ofdNumber(box.W), ofdNumber(box.H)),
 		Font:     fontID, Size: size,
@@ -627,6 +629,7 @@ func (e *Editor) AddText(page int, box Box, value, fontID string, size float64) 
 // 入参: page 页面索引, id 文字对象标识, value 原文, fontID 字体资源标识, size 字号
 // 返回: error 错误信息
 func (e *Editor) UpdateText(page int, id, value, fontID string, size float64) error {
+	defer e.bindPageIndex(page)()
 	layer, index, err := e.findObject(page, id)
 	if err != nil {
 		return err
@@ -657,6 +660,7 @@ func (e *Editor) TransformObject(page int, id string, dx, dy, scale float64) err
 // 入参: page 页面索引, id 图片对象标识, data AddImage支持的图片数据, fit 为contain、cover或空，空值保留原变换和裁剪
 // 返回: error 错误信息
 func (e *Editor) ReplaceImage(page int, id string, data []byte, fit string) error {
+	defer e.bindPageIndex(page)()
 	object, err := e.Object(page, id)
 	if err != nil {
 		return err
@@ -971,6 +975,9 @@ func (v *editorValidation) prepareObject(id string, object GraphicObject) (Graph
 		fill, stroke = obj.FillColor, (*FillColor)(obj.StrokeColor)
 	case "ImageObject":
 		obj := &object.ImageObject
+		if err := validateEditorStroke(PathObject{LineWidth: obj.LineWidth, Cap: obj.Cap, Join: obj.Join, MiterLimit: obj.MiterLimit, DashOffset: obj.DashOffset, DashPattern: obj.DashPattern}); err != nil {
+			return GraphicObject{}, err
+		}
 		size, err := e.editorImage(obj.ResourceID)
 		if err != nil {
 			return GraphicObject{}, err
@@ -991,7 +998,8 @@ func (v *editorValidation) prepareObject(id string, object GraphicObject) (Graph
 			}
 		}
 		obj.ID = id
-		boundary, ctm = obj.Boundary, obj.CTM
+		boundary, ctm, drawParam = obj.Boundary, obj.CTM, obj.DrawParam
+		join = obj.Join
 		alpha, clips, actions = obj.Alpha, obj.Clips, obj.Actions
 	case "CompositeObject":
 		obj := &object.CompositeGraphicUnit
@@ -1267,7 +1275,7 @@ func (e *Editor) prepareText(obj *TextObject) error {
 	if !finite(obj.HScale) || obj.HScale < 0 {
 		return fmt.Errorf("invalid text dimensions")
 	}
-	if obj.Weight < 0 || obj.Weight > 900 || obj.Weight%100 != 0 {
+	if obj.Weight < 0 || obj.Weight > 1000 || obj.Weight%100 != 0 {
 		return fmt.Errorf("invalid text weight")
 	}
 	for _, direction := range []int{obj.ReadDirection, obj.CharDirection} {

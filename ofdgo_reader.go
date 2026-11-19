@@ -1301,38 +1301,11 @@ func (r *Reader) parseResFileContext(ctx context.Context, fullPath string) (*par
 	return parsed, nil
 }
 
-// collectPageResourcesContext 按模板页在前、当前页在后的优先级收集页面局部资源表
+// collectPageResourcesContext 收集当前页面或模板页自身的局部资源表
 // 入参: ctx 取消上下文, fullPath 页面文件路径, content 页面内容
 // 返回: []*parsedRes 局部资源列表, error 取消错误
 func (r *Reader) collectPageResourcesContext(ctx context.Context, fullPath string, content *PageContent) ([]*parsedRes, error) {
 	var list []*parsedRes
-	if r.doc != nil {
-		for _, ref := range content.Template {
-			for _, tpl := range r.doc.CommonData.TemplatePage {
-				if !sameResourceID(tpl.ID, ref.TemplateID) {
-					continue
-				}
-				tplHeader, err := r.readPageHeaderContext(ctx, Page{BaseLoc: tpl.BaseLoc})
-				if err != nil {
-					if ctx.Err() != nil {
-						return nil, ctx.Err()
-					}
-					break
-				}
-				tplFullPath := r.ResPath(tpl.BaseLoc)
-				for _, res := range tplHeader.PageRes {
-					parsed, err := r.parseResFileContext(ctx, resolveResourcePath(tplFullPath, "", res))
-					if err != nil {
-						return nil, err
-					}
-					if parsed != nil {
-						list = append(list, parsed)
-					}
-				}
-				break
-			}
-		}
-	}
 	for _, res := range content.PageRes {
 		parsed, err := r.parseResFileContext(ctx, resolveResourcePath(fullPath, "", res))
 		if err != nil {

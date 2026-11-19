@@ -432,6 +432,10 @@ func copyEditorPathObject(value PathObject) PathObject {
 // 入参: value 原值
 // 返回: ImageObject 独立副本
 func copyEditorImageObject(value ImageObject) ImageObject {
+	if value.DashOffset != nil {
+		copied := *value.DashOffset
+		value.DashOffset = &copied
+	}
 	if value.Alpha != nil {
 		copied := *value.Alpha
 		value.Alpha = &copied

@@ -304,6 +304,17 @@ func PixelDataContext(ctx context.Context, img image.Image) (image.Image, error)
 	return pixels, err
 }
 
+// RawPixelDataContext 获取未应用显示色彩配置的原始解码像素并传递取消状态
+// 入参: ctx 取消上下文，nil使用后台上下文, img 图片对象
+// 返回: image.Image 原始解码像素, error 解码或取消错误
+func RawPixelDataContext(ctx context.Context, img image.Image) (image.Image, error) {
+	pixels, err := PixelDataContext(ctx, img)
+	if err != nil {
+		return nil, err
+	}
+	return rawImageSource(pixels), nil
+}
+
 // DecodeTransientContext 获取单次临时解码像素，惰性编码图片未缓存时不长期驻留像素缓冲
 // 入参: ctx 取消上下文，nil使用后台上下文, img 图片对象
 // 返回: image.Image 解码像素, error 解码或取消错误
@@ -994,4 +1005,26 @@ func scanPalettedZeroAlpha(ctx context.Context, src *image.Paletted, w, h int) (
 		}
 	}
 	return false, ctx.Err()
+}
+
+// rawImageSource 剥离显示色彩配置包装并保留方向与透明蒙版结构
+// 入参: img 已解码图像
+// 返回: image.Image 底层原始采样图像
+func rawImageSource(img image.Image) image.Image {
+	switch src := img.(type) {
+	case *colorImage:
+		return rawImageSource(src.source)
+	case *orientedTIFFImage:
+		if raw := rawImageSource(src.source); raw != src.source {
+			copy := *src
+			copy.source = raw
+			return &copy
+		}
+	case *maskedTIFFImage:
+		rawSrc, rawMask := rawImageSource(src.source), rawImageSource(src.mask)
+		if rawSrc != src.source || rawMask != src.mask {
+			return &maskedTIFFImage{source: rawSrc, mask: rawMask, bounds: src.bounds}
+		}
+	}
+	return img
 }

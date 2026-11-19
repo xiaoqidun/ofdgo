@@ -1982,6 +1982,13 @@ el.navigationContent.addEventListener("scroll", () => {
 		pageView.syncThumbnailWindow();
 	});
 });
+new ResizeObserver(() => {
+	if (!state.doc || el.pageList.hidden || !state.showPages || state.thumbnailFrame) return;
+	state.thumbnailFrame = requestAnimationFrame(() => {
+		state.thumbnailFrame = 0;
+		pageView.syncThumbnailWindow();
+	});
+}).observe(el.navigationContent);
 for (const [viewport, current] of [[el.viewerPanel, () => state.pageWindow], [el.navigationContent, () => el.pageList.hidden ? null : state.thumbnailWindow]]) {
 	viewport.addEventListener("wheel", event => {
 		const view = current();

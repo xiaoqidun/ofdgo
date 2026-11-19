@@ -2257,10 +2257,13 @@ func richTextTagsFontSafe(ctx context.Context, reader *Reader, index int) (bool,
 		return false, err
 	}
 	for _, tag := range tags {
-		if tag.SchemaLoc != "" {
-			return false, nil
+		if err := ctx.Err(); err != nil {
+			return false, err
 		}
 		if tag.TypeID == textTagType && tag.NameSpace == textNamespace {
+			if tag.SchemaLoc != "" {
+				return false, nil
+			}
 			structure, err := view.readStructureContext(ctx, tag)
 			if err != nil {
 				return false, err
@@ -2276,24 +2279,44 @@ func richTextTagsFontSafe(ctx context.Context, reader *Reader, index int) (bool,
 			}
 			continue
 		}
-		if tag.TypeID != richTextTagType || tag.NameSpace != richTextNamespace {
+		if tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace {
+			if tag.SchemaLoc != "" {
+				return false, nil
+			}
+			structure, err := view.readStructureContext(ctx, tag)
+			if err != nil {
+				return false, err
+			}
+			root := structure.Root
+			if root.Name != "RichText" || root.Namespace != richTextNamespace || len(root.Attributes) != 0 {
+				return false, nil
+			}
+			if !richTextMetadataFontSafe(root.Text) {
+				return false, nil
+			}
+			for _, child := range root.Children {
+				if child.Name != "ObjectRef" || child.Namespace != richTextNamespace || len(child.Children) != 0 || len(child.Attributes) != 1 || child.Attributes[0].Namespace != "" || child.Attributes[0].Name != "PageRef" {
+					return false, nil
+				}
+			}
+			continue
+		}
+		if strings.TrimSpace(tag.FileLoc) == "" || !isKnownResourceSafeTagMeta(tag) {
 			return false, nil
+		}
+		if tag.SchemaLoc != "" {
+			schemaFile, err := view.openFile(view.ResPath(tag.SchemaLoc))
+			if err != nil {
+				return false, nil
+			}
+			_ = schemaFile.Close()
 		}
 		structure, err := view.readStructureContext(ctx, tag)
 		if err != nil {
-			return false, err
+			return false, ctx.Err()
 		}
-		root := structure.Root
-		if root.Name != "RichText" || root.Namespace != richTextNamespace || len(root.Attributes) != 0 {
+		if !knownResourceSafeCustomTag(tag, structure.Root) {
 			return false, nil
-		}
-		if !richTextMetadataFontSafe(root.Text) {
-			return false, nil
-		}
-		for _, child := range root.Children {
-			if child.Name != "ObjectRef" || child.Namespace != richTextNamespace || len(child.Children) != 0 || len(child.Attributes) != 1 || child.Attributes[0].Namespace != "" || child.Attributes[0].Name != "PageRef" {
-				return false, nil
-			}
 		}
 	}
 	return true, ctx.Err()

@@ -106,13 +106,7 @@ func (r *Renderer) WalkPage(page *PageContent, visitor PageVisitor) error {
 				if template == nil {
 					continue
 				}
-				restoreTpl := func() {}
-				if len(template.pageResources) > 0 {
-					merged := make([]*parsedRes, 0, len(r.pageResources)+len(template.pageResources))
-					merged = append(merged, r.pageResources...)
-					merged = append(merged, template.pageResources...)
-					restoreTpl = r.bindParsedResources(merged)
-				}
+				restoreTpl := r.bindParsedResources(template.pageResources)
 				for templateOrder := range 3 {
 					if err := r.walkLayers(template.Content.Layer, templateOrder, pageOrigin, visitor); err != nil {
 						restoreTpl()

@@ -643,8 +643,13 @@ func (e *Editor) drawParamXMLContext(ctx context.Context, id string) ([]byte, er
 		}
 	}
 	if data == nil && e.source != nil {
-		var err error
-		name, _ := resourceValue(e.source.reader.resourceFiles, id)
+		name, ok, err := e.sourceResourceFileContext(ctx, id, "DrawParam")
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("draw parameter %q not found", id)
+		}
 		data, err = e.source.reader.readFileViewContext(ctx, name)
 		if err != nil {
 			return nil, err

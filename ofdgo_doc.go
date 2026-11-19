@@ -606,12 +606,20 @@ func (o *OutlineElem) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error
 	})
 }
 
-// UnmarshalXML 解析视图首选项并忽略外部命名空间的同名节点
+// UnmarshalXML 解析视图首选项并应用标准默认值，忽略外部命名空间的同名节点
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解析错误
 func (v *VPreferences) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	*v = VPreferences{}
-	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+	*v = VPreferences{
+		PageMode:     "None",
+		PageLayout:   "OneColumn",
+		TabDisplay:   "DocTitle",
+		HideToolbar:  new(bool),
+		HideMenubar:  new(bool),
+		HideWindowUI: new(bool),
+	}
+	zoomSet := false
+	err := decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
 		switch node.Name.Local {
 		case "PageMode":
 			return d.DecodeElement(&v.PageMode, &node)
@@ -629,14 +637,23 @@ func (v *VPreferences) UnmarshalXML(d *xml.Decoder, start xml.StartElement) erro
 			v.HideWindowUI = new(bool)
 			return d.DecodeElement(v.HideWindowUI, &node)
 		case "ZoomMode":
+			zoomSet = true
 			return d.DecodeElement(&v.ZoomMode, &node)
 		case "Zoom":
+			zoomSet = true
 			v.Zoom = new(float64)
 			return d.DecodeElement(v.Zoom, &node)
 		default:
 			return d.Skip()
 		}
 	})
+	if err != nil {
+		return err
+	}
+	if !zoomSet {
+		v.ZoomMode = "Default"
+	}
+	return nil
 }
 
 // UnmarshalXML 解析文档权限并应用默认值

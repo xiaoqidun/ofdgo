@@ -266,8 +266,13 @@ func editorXMLSetText(data []byte, node *editorXML, values [][2]string) ([]byte,
 	var patches []editorXMLPatch
 	var added []byte
 	order := []string{"PhysicalBox", "ApplicationBox", "ContentBox", "BleedBox"}
-	if node.name.Local == "DocInfo" {
+	switch node.name.Local {
+	case "DocInfo":
 		order = []string{"DocID", "Title", "Author", "Subject", "Abstract", "CreationDate", "ModDate", "DocUsage", "Cover", "Keywords", "Creator", "CreatorVersion", "CustomDatas"}
+	case "Document":
+		order = []string{"CommonData", "Pages", "Outlines", "Permissions", "Actions", "VPreferences", "Bookmarks", "Annotations", "CustomTags", "Attachments", "Extensions"}
+	case "DocBody":
+		order = []string{"DocInfo", "DocRoot", "Versions", "Signatures"}
 	}
 	for _, value := range values {
 		child := node.child(value[0])
@@ -289,10 +294,12 @@ func editorXMLSetText(data []byte, node *editorXML, values [][2]string) ([]byte,
 			added = append(added, encoded...)
 		} else if len(encoded) != 0 {
 			position := node.close
-			for _, next := range node.children {
-				if slices.Index(order, next.name.Local) > slices.Index(order, value[0]) {
-					position = next.start
-					break
+			if targetIdx := slices.Index(order, value[0]); targetIdx >= 0 {
+				for _, next := range node.children {
+					if nextIdx := slices.Index(order, next.name.Local); nextIdx > targetIdx {
+						position = next.start
+						break
+					}
 				}
 			}
 			patches = append(patches, editorXMLPatch{position, position, encoded})
@@ -411,7 +418,7 @@ func editorXMLSupported(node *editorXML) bool {
 	var allowed, children string
 	switch node.name.Local {
 	case "TextObject", "Text":
-		allowed, children = "Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Cap DashPattern DashOffset Italic Visible Stroke Fill Alpha", "FillColor StrokeColor CGTransform TextCode"
+		allowed, children = "Name Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Cap DashPattern DashOffset Italic Visible Stroke Fill Alpha", "Actions FillColor StrokeColor CGTransform TextCode"
 		if node.name.Local == "TextObject" {
 			allowed += " ID"
 			children += " Clips"
@@ -420,23 +427,83 @@ func editorXMLSupported(node *editorXML) bool {
 		allowed, children = "CodePosition CodeCount GlyphCount", "Glyphs"
 	case "Glyphs":
 	case "PathObject", "Path":
-		allowed, children = "Boundary CTM DrawParam LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha", "StrokeColor FillColor AbbreviatedData"
+		allowed, children = "Name Boundary CTM DrawParam LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha", "Actions StrokeColor FillColor AbbreviatedData"
 		if node.name.Local == "PathObject" {
 			allowed += " ID"
 			children += " Clips"
 		}
 	case "ImageObject":
-		allowed, children = "ID Boundary CTM ResourceID Substitution ImageMask Visible Alpha", "Clips"
+		allowed, children = "ID Name Boundary CTM ResourceID Substitution ImageMask DrawParam LineWidth MiterLimit Join Cap DashPattern DashOffset Visible Alpha", "Actions Clips Border"
+	case "Border":
+		allowed, children = "LineWidth HorizonalCornerRadius VerticalCornerRadius DashOffset DashPattern", "BorderColor"
 	case "TextCode":
 		allowed = "X Y DeltaX DeltaY"
-	case "FillColor", "StrokeColor":
+	case "FillColor", "StrokeColor", "BorderColor":
 		allowed = "Value Alpha ColorSpace Index"
 	case "Clips":
 		allowed, children = "TransFlag", "Clip"
 	case "Clip":
 		children = "Area"
 	case "Area":
-		allowed, children = "CTM DrawParam", "Path Text"
+		if node.parent != nil && node.parent.name.Local == "Region" {
+			if !node.hasAttr("Start") {
+				return false
+			}
+			allowed, children = "Start", "Move Line QuadraticBezier CubicBezier Arc Close"
+		} else {
+			allowed, children = "CTM DrawParam", "Path Text"
+		}
+	case "Actions":
+		if len(node.children) == 0 {
+			return false
+		}
+		children = "Action"
+	case "Action":
+		allowed, children = "Event", "Region Goto URI GotoA Sound Movie"
+		targets := 0
+		for i, child := range node.children {
+			if child.name.Local == "Region" {
+				if i != 0 {
+					return false
+				}
+			} else {
+				targets++
+			}
+		}
+		if targets > 1 {
+			return false
+		}
+	case "Region":
+		if len(node.children) == 0 {
+			return false
+		}
+		children = "Area"
+	case "Move", "Line":
+		allowed = "Point1"
+	case "QuadraticBezier":
+		allowed = "Point1 Point2"
+	case "CubicBezier":
+		allowed = "Point1 Point2 Point3"
+	case "Arc":
+		allowed = "SweepDirection LargeArc RotationAngle EllipseSize EndPoint"
+	case "Close":
+	case "Goto":
+		if len(node.children) != 1 {
+			return false
+		}
+		children = "Dest Bookmark"
+	case "Dest":
+		allowed = "Type PageID Left Top Right Bottom Zoom"
+	case "Bookmark":
+		allowed = "Name"
+	case "URI":
+		allowed = "URI Base Target"
+	case "GotoA":
+		allowed = "AttachID NewWindow"
+	case "Sound":
+		allowed = "ResourceID Volume Repeat Synchronous"
+	case "Movie":
+		allowed = "ResourceID Operator"
 	case "AbbreviatedData":
 	default:
 		return false
@@ -459,11 +526,11 @@ func editorXMLTransformable(node *editorXML) bool {
 	var attrs string
 	switch node.name.Local {
 	case "TextObject":
-		attrs = "ID Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Cap DashPattern DashOffset Italic Visible Stroke Fill Alpha"
+		attrs = "ID Name Boundary CTM DrawParam Font Size HScale Weight ReadDirection CharDirection LineWidth MiterLimit Join Cap DashPattern DashOffset Italic Visible Stroke Fill Alpha"
 	case "PathObject":
-		attrs = "ID Boundary CTM DrawParam LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha"
+		attrs = "ID Name Boundary CTM DrawParam LineWidth MiterLimit Join Cap Rule DashPattern DashOffset Visible Stroke Fill Alpha"
 	case "ImageObject":
-		attrs = "ID Boundary CTM ResourceID Substitution ImageMask Visible Alpha"
+		attrs = "ID Name Boundary CTM ResourceID Substitution ImageMask DrawParam LineWidth Cap Join MiterLimit DashOffset DashPattern Visible Alpha"
 	case "CompositeObject", "CompositeGraphicUnit":
 		attrs = "ID Name Boundary CTM ResourceID DrawParam LineWidth Cap Join MiterLimit DashOffset DashPattern Visible Alpha"
 	default:
@@ -515,7 +582,7 @@ func editorXMLObject(data []byte, node *editorXML, before, after GraphicObject) 
 		}
 		return editorXMLGenerated(encoded, node.name.Space)
 	}
-	if node.attr("DrawParam") != "" && (before.Type == "TextObject" && before.TextObject.DrawParam == "" || before.Type == "PathObject" && before.PathObject.DrawParam == "") {
+	if node.attr("DrawParam") != "" && (before.Type == "TextObject" && before.TextObject.DrawParam == "" || before.Type == "PathObject" && before.PathObject.DrawParam == "" || before.Type == "ImageObject" && before.ImageObject.DrawParam == "") {
 		before = GraphicObject{Type: before.Type}
 		var err error
 		switch before.Type {
@@ -523,6 +590,8 @@ func editorXMLObject(data []byte, node *editorXML, before, after GraphicObject) 
 			err = xml.Unmarshal(data[node.start:node.end], &before.TextObject)
 		case "PathObject":
 			err = xml.Unmarshal(data[node.start:node.end], &before.PathObject)
+		case "ImageObject":
+			err = xml.Unmarshal(data[node.start:node.end], &before.ImageObject)
 		}
 		if err != nil {
 			return nil, err

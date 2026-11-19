@@ -365,17 +365,20 @@ func (r *Renderer) pageOpenActionSources(page *PageContent) []actionSource {
 // 入参: page 页面内容
 // 返回: []actionSource 动作来源
 func (r *Renderer) pageActionSources(page *PageContent) []actionSource {
+	defer r.bindPageResources(page)()
 	sources := make([]actionSource, 0)
 	for order := range 3 {
-		if r.Reader.doc != nil {
+		if r.Reader != nil && r.Reader.doc != nil {
 			for _, ref := range page.Template {
 				if r.templateOrder(ref) != order {
 					continue
 				}
 				if template := r.loadTemplate(ref.TemplateID); template != nil {
+					restoreTpl := r.bindParsedResources(template.pageResources)
 					for templateOrder := range 3 {
 						sources = r.appendLayerActionSources(sources, template, template.Content.Layer, templateOrder)
 					}
+					restoreTpl()
 				}
 			}
 		}
@@ -403,6 +406,9 @@ func (r *Renderer) appendLayerActionSources(sources []actionSource, page *PageCo
 // 入参: page 所属页面内容, annotations 页面注释
 // 返回: []actionSource 动作来源
 func (r *Renderer) annotationActionSources(page *PageContent, annotations []Annotation) []actionSource {
+	if page != nil {
+		defer r.bindPageResources(page)()
+	}
 	sources := make([]actionSource, 0)
 	for i := range annotations {
 		annotation := &annotations[i]
@@ -473,28 +479,7 @@ func (r *Renderer) appendGraphicActionSources(sources []actionSource, page *Page
 		sources = append(sources, source)
 	}
 	if resource != "" {
-		var unit *CompositeGraphicUnit
-		if r.Reader != nil {
-			if candidate, ok := resourceValue(r.CompositeGraphicUnits, resource); ok && candidate != nil {
-				docUnit, _ := r.Reader.docComposites.get(resource)
-				if docUnit == nil {
-					docUnit, _ = resourceValue(r.Reader.compositeGraphicUnitCache, resource)
-				}
-				if candidate != docUnit {
-					unit = candidate
-				}
-			}
-			if unit == nil {
-				local := r.pageResources
-				if page != nil && len(page.pageResources) > 0 {
-					local = page.pageResources
-				}
-				unit, _ = r.Reader.resolveCompositeScoped(local, resource)
-			}
-		}
-		if unit == nil {
-			unit, _ = resourceValue(r.CompositeGraphicUnits, resource)
-		}
+		unit := r.compositeDefinition(resource)
 		if unit != nil && !seen[unit] {
 			if seen == nil {
 				seen = make(map[*CompositeGraphicUnit]bool)

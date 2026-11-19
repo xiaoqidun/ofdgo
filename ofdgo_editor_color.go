@@ -142,6 +142,7 @@ func (e *Editor) StylePatterns(page int, ids []string, stroke bool, style Patter
 	if err != nil {
 		return err
 	}
+	defer e.bindPageIndex(page)()
 	for i := range objects {
 		objects[i] = cloneEditorData(objects[i])
 		object := &objects[i]
@@ -226,7 +227,7 @@ func (e *Editor) Color(value *FillColor) (color.NRGBA, error) {
 	if id != "" {
 		var found *ColorSpace
 		if e.source != nil {
-			found, _ = resourceValue(e.source.reader.colorSpaceCache, id)
+			found, _ = e.sourceColorSpace(id)
 		}
 		for _, resource := range e.resources {
 			if resource.space != nil && sameResourceID(resource.space.ID, id) {
@@ -319,6 +320,17 @@ func (e *Editor) RGBColor(value color.NRGBA) (*FillColor, error) {
 			return result, nil
 		}
 	}
+	for i := len(e.pageScope) - 1; i >= 0; i-- {
+		if parsed := e.pageScope[i]; parsed != nil {
+			for _, id := range slices.Sorted(maps.Keys(parsed.colorSpaces.exact)) {
+				space := parsed.colorSpaces.exact[id]
+				if space != nil && space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0 {
+					result.ColorSpace = space.ID
+					return result, nil
+				}
+			}
+		}
+	}
 	for _, resource := range e.resources {
 		space := resource.space
 		if space != nil && space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0 {
@@ -338,6 +350,7 @@ func (e *Editor) RGBColor(value color.NRGBA) (*FillColor, error) {
 // 入参: page 页面索引, ids 对象标识, paint 绘制颜色，nil恢复默认, stroke 是否修改描边
 // 返回: error 错误信息
 func (e *Editor) PaintObjects(page int, ids []string, paint *FillColor, stroke bool) error {
+	defer e.bindPageIndex(page)()
 	if err := e.editorColor(paint); err != nil {
 		return err
 	}
@@ -561,7 +574,7 @@ func collectObjectReferences(object GraphicObject, used map[string]bool) {
 		actions = object.PathObject.Actions
 	case "ImageObject":
 		used[object.ImageObject.ResourceID], used[object.ImageObject.ImageMask] = true, true
-		used[object.ImageObject.Substitution] = true
+		used[object.ImageObject.Substitution], used[object.ImageObject.DrawParam] = true, true
 		if object.ImageObject.Border != nil {
 			collectPaintReferences((*FillColor)(object.ImageObject.Border.BorderColor), used)
 		}

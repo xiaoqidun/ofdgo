@@ -156,7 +156,6 @@ func (r *editorResourceRefs) scanCustomTagEntries(ctx context.Context, input io.
 		if err != nil || !knownResourceSafeCustomTag(tag, root) {
 			return false
 		}
-		r.fontUnsafe = true
 	}
 	return ctx.Err() == nil
 }
@@ -545,7 +544,11 @@ func editorResourceLocation(name, base, value string) string {
 // 返回: bool 是否属于已知白名单
 func isKnownResourceSafeTagMeta(tag CustomTag) bool {
 	if tag.TypeID == structureTypeOfficial {
-		return strings.TrimSpace(tag.NameSpace) != ""
+		return true
+	}
+	if tag.TypeID == structureTypeInvoice {
+		ns := strings.TrimSpace(tag.NameSpace)
+		return ns == "" || ns == structureNamespaceEInvoice2016 || ns == InvoiceStandardEDRM2019 || ns == ofdNamespace2016
 	}
 	switch tag.NameSpace {
 	case textNamespace:
@@ -571,20 +574,26 @@ func isKnownResourceSafeTagMeta(tag CustomTag) bool {
 // 入参: tag 标引入口描述, root 已解析标引根节点
 // 返回: bool 是否确认不含隐式直接资源标识引用
 func knownResourceSafeCustomTag(tag CustomTag, root *StructureNode) bool {
-	if root == nil || !isKnownResourceSafeTagMeta(tag) || strings.TrimSpace(root.Namespace) == "" || root.Namespace != tag.NameSpace {
+	if root == nil || !isKnownResourceSafeTagMeta(tag) {
 		return false
 	}
-	if structureOfficial(tag, root.Namespace) || structureInvoiceReferences(root) {
+	if tag.TypeID == pdfMetadataTagType && (tag.NameSpace == pdfMetadataRDF || tag.NameSpace == pdfMetadataXML) && (root.Namespace == pdfMetadataRDF || root.Namespace == pdfMetadataXML) {
 		return true
 	}
-	if tag.TypeID == pdfAuxiliaryTagType && tag.NameSpace == pdfStructureNamespace && root.Namespace == pdfStructureNamespace {
+	if strings.TrimSpace(tag.NameSpace) != "" && root.Namespace != tag.NameSpace {
+		return false
+	}
+	if tag.TypeID == structureTypeInvoice {
+		if structureInvoiceReferences(root) {
+			return true
+		}
+		return root.Name == "eInvoice" && len(root.Children) == 0 && strings.TrimSpace(root.Text) == "" && (root.Namespace == "" || root.Namespace == structureNamespaceEInvoice2016 || root.Namespace == InvoiceStandardEDRM2019)
+	}
+	if structureOfficial(tag, root.Namespace) {
 		return true
 	}
-	if tag.TypeID == pdfInformationTagType && tag.NameSpace == pdfInformationNamespace && root.Namespace == pdfInformationNamespace {
-		return true
+	if strings.TrimSpace(root.Namespace) == "" || root.Namespace != tag.NameSpace {
+		return false
 	}
-	if tag.TypeID == pdfMetadataTagType && (root.Namespace == pdfMetadataRDF || root.Namespace == pdfMetadataXML) {
-		return true
-	}
-	return false
+	return structureInvoiceReferences(root) || tag.TypeID == pdfAuxiliaryTagType && root.Namespace == pdfStructureNamespace || tag.TypeID == pdfInformationTagType && root.Namespace == pdfInformationNamespace
 }

@@ -617,14 +617,17 @@ func actionRegionPath(region *Region, matrix Matrix) *canvas.Path {
 				sweep, sweepErr := strconv.ParseBool(command.SweepDirection)
 				if len(end) == 2 && finite(end[0]) && finite(end[1]) && err == nil && finite(angle) && largeErr == nil && sweepErr == nil {
 					rx, ry := 0.0, 0.0
-					if len(size) > 0 {
-						rx, ry = math.Abs(size[0]), math.Abs(size[0])
-					}
-					if len(size) > 1 {
-						rx, ry = rx/2, math.Abs(size[1])/2
+					if len(size) == 1 {
+						rx, ry = math.Abs(size[0])/2, math.Abs(size[0])/2
+					} else if len(size) >= 2 {
+						rx, ry = math.Abs(size[0])/2, math.Abs(size[1])/2
 					}
 					if finite(rx) && finite(ry) {
-						part.ArcTo(rx, ry, math.Mod(angle, 360), large, sweep, end[0], end[1])
+						if rx == 0 || ry == 0 {
+							part.LineTo(end[0], end[1])
+						} else {
+							part.ArcTo(rx, ry, math.Mod(angle, 360), large, sweep, end[0], end[1])
+						}
 					}
 				}
 			case "Close":

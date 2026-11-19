@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
@@ -138,52 +139,17 @@ func (s *FontInfoScanner) Infos() ([]FontInfo, error) {
 	return s.renderer.fontInfos(s.usage)
 }
 
-// Fonts 获取OFD声明的文档及页面局部字体列表，按标识去重且不加载注解或签名
+// Fonts 获取OFD声明的文档及页面局部字体列表，保留不同页面资源文件的同名局部字体且不加载注解或签名
 // 返回: []Font 字体列表, error 错误信息
 func (r *Reader) Fonts() ([]Font, error) {
-	doc, err := r.docStructure()
+	entries, err := r.declaredFonts()
 	if err != nil {
 		return nil, err
 	}
-	if !r.fontResourcesRead {
-		for _, page := range doc.Pages.Page {
-			header, err := r.readPageHeaderContext(context.Background(), page)
-			if err == nil {
-				_, _ = r.collectPageResourcesContext(context.Background(), r.ResPath(page.BaseLoc), &header)
-			}
-		}
-		for _, template := range doc.CommonData.TemplatePage {
-			ref := Page{BaseLoc: template.BaseLoc}
-			header, err := r.readPageHeaderContext(context.Background(), ref)
-			if err == nil {
-				_, _ = r.collectPageResourcesContext(context.Background(), r.ResPath(ref.BaseLoc), &header)
-			}
-		}
-		r.fontResourcesRead = true
+	fonts := make([]Font, len(entries))
+	for i, entry := range entries {
+		fonts[i] = entry.font
 	}
-	seen := make(map[string]bool, len(r.fontCache))
-	fonts := make([]Font, 0, len(r.fontCache))
-	for _, font := range r.fontCache {
-		if font != nil && !seen[font.ID] {
-			seen[font.ID] = true
-			fonts = append(fonts, *font)
-		}
-	}
-	for _, name := range slices.Sorted(maps.Keys(r.resFileCache)) {
-		parsed := r.resFileCache[name]
-		if parsed == nil {
-			continue
-		}
-		for _, font := range parsed.fonts.exact {
-			if font != nil && !seen[font.ID] {
-				seen[font.ID] = true
-				fonts = append(fonts, *font)
-			}
-		}
-	}
-	sort.SliceStable(fonts, func(i, j int) bool {
-		return fonts[i].ID < fonts[j].ID
-	})
 	return fonts, nil
 }
 
@@ -274,6 +240,12 @@ func (r *Renderer) FontInfosFromPages(pages []*PageContent) ([]FontInfo, error) 
 		return nil, err
 	}
 	return r.fontInfos(r.fontUsage(doc, pages))
+}
+
+// declaredFontEntry 关联字体声明与其所属资源文件作用域键
+type declaredFontEntry struct {
+	key  string
+	font Font
 }
 
 // fontUsagePage 逐图元统计字体的页面解码器
@@ -381,6 +353,81 @@ func (o *fontUsageObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) e
 	})
 }
 
+// declaredFonts 收集文档级与页面局部资源中声明的独立字体条目
+// 返回: []declaredFontEntry 绑定作用域键的字体列表, error 结构读取错误
+func (r *Reader) declaredFonts() ([]declaredFontEntry, error) {
+	doc, err := r.docStructure()
+	if err != nil {
+		return nil, err
+	}
+	if !r.fontResourcesRead {
+		for _, page := range doc.Pages.Page {
+			header, err := r.readPageHeaderContext(context.Background(), page)
+			if err == nil {
+				_, _ = r.collectPageResourcesContext(context.Background(), r.ResPath(page.BaseLoc), &header)
+			}
+		}
+		for _, template := range doc.CommonData.TemplatePage {
+			ref := Page{BaseLoc: template.BaseLoc}
+			header, err := r.readPageHeaderContext(context.Background(), ref)
+			if err == nil {
+				_, _ = r.collectPageResourcesContext(context.Background(), r.ResPath(ref.BaseLoc), &header)
+			}
+		}
+		r.fontResourcesRead = true
+	}
+	docResFiles := make(map[string]bool, len(doc.CommonData.PublicRes)+len(doc.CommonData.DocumentRes)+len(r.resourcesRead))
+	for _, loc := range doc.CommonData.PublicRes {
+		docResFiles[cleanPackagePath(r.ResPath(loc))] = true
+	}
+	for _, loc := range doc.CommonData.DocumentRes {
+		docResFiles[cleanPackagePath(r.ResPath(loc))] = true
+	}
+	for name, ok := range r.resourcesRead {
+		if ok {
+			docResFiles[cleanPackagePath(name)] = true
+		}
+	}
+	seen := make(map[string]bool, len(r.fontCache))
+	entries := make([]declaredFontEntry, 0, len(r.fontCache))
+	for _, id := range slices.Sorted(maps.Keys(r.fontCache)) {
+		font := r.fontCache[id]
+		if font == nil {
+			continue
+		}
+		key := "\x00" + font.ID
+		if !seen[key] {
+			seen[key] = true
+			entries = append(entries, declaredFontEntry{key: key, font: *font})
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(r.resFileCache)) {
+		cleanName := cleanPackagePath(name)
+		if docResFiles[cleanName] {
+			continue
+		}
+		parsed := r.resFileCache[name]
+		if parsed == nil {
+			continue
+		}
+		for _, id := range slices.Sorted(maps.Keys(parsed.fonts.exact)) {
+			font := parsed.fonts.exact[id]
+			if font == nil {
+				continue
+			}
+			key := cleanName + "\x00" + font.ID
+			if !seen[key] {
+				seen[key] = true
+				entries = append(entries, declaredFontEntry{key: key, font: *font})
+			}
+		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].font.ID < entries[j].font.ID
+	})
+	return entries, nil
+}
+
 // fontData 按调用方所有权读取内嵌字体，集合字体始终独立提取
 // 入参: id 字体资源标识, readonly 是否允许借用只读资源
 // 返回: []byte 字体数据, error 资源或集合错误
@@ -423,7 +470,7 @@ func (r *Reader) readFontData(f *Font, readonly bool) ([]byte, error) {
 // 入参: id 字体资源标识
 // 返回: *Font 字体定义，未找到或别名冲突时为nil
 func (r *Reader) fontDefinition(id string) *Font {
-	if r == nil || id == "" {
+	if id == "" {
 		return nil
 	}
 	if font, ok := r.docFonts.get(id); ok && font != nil {
@@ -433,10 +480,8 @@ func (r *Reader) fontDefinition(id string) *Font {
 		return font
 	}
 	for _, name := range slices.Sorted(maps.Keys(r.resFileCache)) {
-		if parsed := r.resFileCache[name]; parsed != nil {
-			if font, ok := parsed.fonts.get(id); ok && font != nil {
-				return font
-			}
+		if font, ok := r.resFileCache[name].fonts.get(id); ok && font != nil {
+			return font
 		}
 	}
 	return nil
@@ -504,28 +549,19 @@ func (r *Renderer) fontInfoDocument() (*Document, error) {
 // 入参: usage 字体使用次数
 // 返回: []FontInfo 字体诊断列表, error 错误信息
 func (r *Renderer) fontInfos(usage map[string]int) ([]FontInfo, error) {
-	fonts, err := r.Reader.Fonts()
+	entries, err := r.Reader.declaredFonts()
 	if err != nil {
 		return nil, err
 	}
-	counts := make(map[string]int, len(usage))
-	for id, used := range usage {
-		if font := r.fontDefinition(id); font != nil {
-			id = font.ID
-		}
-		counts[id] += used
-	}
-	usage = counts
-	infos := make([]FontInfo, 0, len(fonts)+len(usage))
-	seen := make(map[string]bool)
-	for _, font := range fonts {
-		info := r.fontInfo(font)
-		info.Used = usage[font.ID]
+	infos := make([]FontInfo, 0, len(entries)+len(usage))
+	for _, entry := range entries {
+		info := r.fontInfo(entry.font)
+		info.Used = usage[entry.key]
 		infos = append(infos, info)
-		seen[font.ID] = true
 	}
-	for id, used := range usage {
-		if seen[id] {
+	for _, id := range slices.Sorted(maps.Keys(usage)) {
+		used := usage[id]
+		if used <= 0 || strings.Contains(id, "\x00") {
 			continue
 		}
 		info := r.fontInfo(Font{ID: id})
@@ -666,8 +702,8 @@ func (r *Renderer) countAnnotationFonts(pageID string, usage map[string]int) {
 			if annot.Visible != nil && !*annot.Visible {
 				continue
 			}
-			for _, obj := range annot.Appearance.Objects {
-				r.countObjectFonts(obj, usage, nil, nil)
+			for obj := range annot.Appearance.objects() {
+				r.countObjectFonts(*obj, usage, nil, nil)
 			}
 		}
 	}
@@ -795,11 +831,32 @@ func (r *Renderer) countPatternFonts(fill *FillColor, usage map[string]int, visi
 	}
 }
 
+// scopedFontUsageKey 按当前页面局部资源优先的作用域解析字体统计键
+// 入参: id 字体引用标识
+// 返回: string 绑定声明文件的作用域键或未声明原始标识
+func (r *Renderer) scopedFontUsageKey(id string) string {
+	if r.Reader == nil || id == "" {
+		return id
+	}
+	for i := len(r.pageResources) - 1; i >= 0; i-- {
+		if font, ok := r.pageResources[i].fonts.get(id); ok && font != nil {
+			return cleanPackagePath(r.pageResources[i].path) + "\x00" + font.ID
+		}
+	}
+	if font, ok := r.Reader.docFonts.get(id); ok && font != nil {
+		return "\x00" + font.ID
+	}
+	if font, ok := resourceValue(r.Reader.fontCache, id); ok && font != nil {
+		return "\x00" + font.ID
+	}
+	return id
+}
+
 // countTextFont 统计文本字体使用次数
 // 入参: text 文本对象, usage 字体使用次数
 func (r *Renderer) countTextFont(text TextObject, usage map[string]int) {
 	if fontID := r.textObjectFontID(text); fontID != "" {
-		usage[fontID]++
+		usage[r.scopedFontUsageKey(fontID)]++
 	}
 	r.countClipFonts(text.Clips, usage)
 }

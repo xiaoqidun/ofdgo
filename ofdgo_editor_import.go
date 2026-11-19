@@ -142,40 +142,40 @@ type editorImportEntry struct {
 
 // editorPageImport 一次插页操作的独立资源图，提交前不修改目标文档
 type editorPageImport struct {
-	ctx           context.Context
-	reader        *Reader
-	doc           *Document
-	directory     string
-	target        *Reader
-	xmlPaths      map[string]string
-	dataPaths     map[string]string
-	templatePaths map[string]string
-	evidence      map[string]string
-	resourceXML   []byte
-	pageParts     []byte
-	structureXML  []byte
-	documentXML   []byte
-	documentRoot  *editorXML
-	docRefs       map[string]map[string]*editorXML
-	maximum       uint64
-	ids           map[string]string
-	pages         map[string]bool
-	files         map[string][]byte
-	resources     map[string]editorImportEntry
-	resourceFiles map[string]bool
-	used          map[string][]byte
-	templates     map[string]TemplatePage
-	templateParts map[string][]byte
-	defaultCS     string
+	ctx                context.Context
+	reader             *Reader
+	doc                *Document
+	directory          string
+	target             *Reader
+	xmlPaths           map[string]string
+	dataPaths          map[string]string
+	templatePaths      map[string]string
+	evidence           map[string]string
+	resourceXML        []byte
+	pageParts          []byte
+	structureXML       []byte
+	documentXML        []byte
+	documentRoot       *editorXML
+	docRefs            map[string]map[string]*editorXML
+	maximum            uint64
+	ids                map[string]string
+	pages              map[string]bool
+	files              map[string][]byte
+	resources          map[string]editorImportEntry
+	resourceFiles      map[string]bool
+	used               map[string][]byte
+	templates          map[string]TemplatePage
+	templateParts      map[string][]byte
+	defaultCS          string
 	attachments        map[string][]byte
 	attachmentMap      map[string]editorImportEntry
 	attachmentIDs      map[string]bool
 	removedAttachments map[string]bool
 	bookmarks          map[string]Dest
-	signatureIDs  *signatureIDSequence
-	copyPage      bool
-	strictLinks   bool
-	progress      editorProgress
+	signatureIDs       *signatureIDSequence
+	copyPage           bool
+	strictLinks        bool
+	progress           editorProgress
 }
 
 // encodeResources 编码本次迁移实际引用的资源，不包含未使用的资源定义

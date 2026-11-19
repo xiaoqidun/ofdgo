@@ -308,8 +308,11 @@ func (e *Editor) compositeDefinition(id string) (*editorCompositeNode, error) {
 		}
 	}
 	if data == nil && e.source != nil {
+		name, ok := e.sourceResourceFile(id, "CompositeGraphicUnit")
+		if !ok {
+			return nil, fmt.Errorf("composite resource %q not found", id)
+		}
 		var err error
-		name, _ := resourceValue(e.source.reader.resourceFiles, id)
 		data, err = e.source.reader.readFile(name)
 		if err != nil {
 			return nil, err

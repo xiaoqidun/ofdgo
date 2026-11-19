@@ -116,15 +116,19 @@ export function createPageView(context) {
 			if (!view || view.offsets.length < 2) return;
 			const { host, viewport, offsets, nodes } = view;
 			const extent = Math.min(SCROLL_SEGMENT_SIZE, view.total);
-			host.style.height = `${extent}px`;
+			const heightText = `${extent}px`;
+			if (host.style.height !== heightText) host.style.height = heightText;
 			const inset = pageView.windowInset(view), height = viewport.clientHeight;
 			const maxTop = Math.max(0, viewport.scrollHeight - height);
 			const logicalMax = maxTop + view.total - extent;
 			const logical = Math.max(-inset, Math.min(logicalMax - inset, target ?? pageView.pageWindowTop(view)));
-			viewport.scrollTop = logicalMax > 0 ? (logical + inset) * maxTop / logicalMax : 0;
+			const nextTop = logicalMax > 0 ? (logical + inset) * maxTop / logicalMax : 0;
+			if (target !== null || view.total > SCROLL_SEGMENT_SIZE && Math.abs(viewport.scrollTop - nextTop) >= 1) {
+				viewport.scrollTop = nextTop;
+			}
 			view.scrollTop = viewport.scrollTop;
 			view.logicalTop = logical;
-			view.origin = logical - viewport.scrollTop + inset;
+			view.origin = view.total > SCROLL_SEGMENT_SIZE ? logical - viewport.scrollTop + inset : 0;
 			let first = pageView.virtualIndex(offsets, Math.max(view.origin, logical - view.overscan));
 			let last = pageView.virtualIndex(offsets, Math.min(view.origin + extent, logical + height + view.overscan));
 			if (view.columns) {
@@ -155,7 +159,10 @@ export function createPageView(context) {
 				const top = offsets[index] - view.origin;
 				const itemHeight = view.heights?.[index] ?? offsets[index + 1] - offsets[index] - view.gap;
 				if (view.lefts) {
-					node.style.left = `${view.lefts[index]}px`;
+					node.style.left = view.columns && host === context.el.pageList
+						? index % 2 ? `calc(50% + ${view.gap / 2}px)` : "0px"
+						: `${view.lefts[index]}px`;
+					node.style.right = "auto";
 					node.style.transform = "none";
 				}
 				node.style.top = `${Math.max(-itemHeight, Math.min(extent, top))}px`;
@@ -1064,49 +1071,57 @@ export function createPageView(context) {
 			if (!view) return;
 			const visible = !context.el.pageList.hidden && context.state.showPages;
 			const anchor = visible && view.offsets.length > 1 ? pageView.pageWindowAnchor(view) : view.anchor || { index: context.state.pageIndex, offset: 0 };
-			const width = context.el.navigationContent.clientWidth || view.width || 180;
-			view.width = width;
 			view.rotation = context.state.rotation;
 			view.layout = context.state.pageLayout;
 			view.host.classList.toggle("grouped-pages", context.state.pageLayout > 1);
 			const gap = Number.parseFloat(getComputedStyle(view.host).columnGap) || 0;
-			const offsets = new Float64Array(context.state.doc.pages.length + 1);
-			view.heights = new Float64Array(context.state.doc.pages.length);
-			view.lefts = context.state.pageLayout > 1 ? new Float64Array(context.state.doc.pages.length) : null;
-			view.scales = context.state.pageLayout > 1 ? new Float64Array(context.state.doc.pages.length) : null;
-			view.columns = context.state.pageLayout > 1 ? context.state.pageLayout : 0;
-			view.itemWidth = context.state.pageLayout > 1 ? Math.max(1, (width - gap) / 2) : width;
-			let top = 0;
-			for (let start = 0; start < context.state.doc.pages.length; start += context.state.pageLayout) {
-				if (context.state.pageLayout === 1) {
-					const size = pageView.pageViewSize(context.state.doc.pages[start]);
-					const ratio = size.width > 0 && size.height > 0 ? size.height / size.width : 1 / 0.707;
-					view.heights[start] = Math.max(1, width - 20) * ratio + 66;
-					offsets[start] = top;
-					top += view.heights[start] + gap;
-					continue;
+			const measure = (width) => {
+				view.width = width;
+				const offsets = new Float64Array(context.state.doc.pages.length + 1);
+				view.heights = new Float64Array(context.state.doc.pages.length);
+				view.lefts = context.state.pageLayout > 1 ? new Float64Array(context.state.doc.pages.length) : null;
+				view.scales = context.state.pageLayout > 1 ? new Float64Array(context.state.doc.pages.length) : null;
+				view.columns = context.state.pageLayout > 1 ? context.state.pageLayout : 0;
+				view.itemWidth = context.state.pageLayout > 1 ? Math.max(1, (width - gap) / 2) : width;
+				let top = 0;
+				for (let start = 0; start < context.state.doc.pages.length; start += context.state.pageLayout) {
+					if (context.state.pageLayout === 1) {
+						const size = pageView.pageViewSize(context.state.doc.pages[start]);
+						const ratio = size.width > 0 && size.height > 0 ? size.height / size.width : 1 / 0.707;
+						view.heights[start] = Math.max(1, width - 20) * ratio + 66;
+						offsets[start] = top;
+						top += view.heights[start] + gap;
+						continue;
+					}
+					const group = pageView.pageGroupSize(start), scale = Math.max(1, view.itemWidth - 20) / Math.max(...group.widths);
+					const height = group.height * scale + 66;
+					for (let column = 0; column < 2; column++) {
+						const index = start + column;
+						if (index >= context.state.doc.pages.length) break;
+						offsets[index] = top;
+						view.heights[index] = height;
+						view.lefts[index] = column * (view.itemWidth + gap);
+						view.scales[index] = scale;
+					}
+					top += height + gap;
 				}
-				const group = pageView.pageGroupSize(start), scale = Math.max(1, view.itemWidth - 20) / Math.max(...group.widths);
-				const height = group.height * scale + 66;
-				for (let column = 0; column < 2; column++) {
-					const index = start + column;
-					if (index >= context.state.doc.pages.length) break;
-					offsets[index] = top;
-					view.heights[index] = height;
-					view.lefts[index] = column * (view.itemWidth + gap);
-					view.scales[index] = scale;
-				}
-				top += height + gap;
+				offsets[context.state.doc.pages.length] = top;
+				view.offsets = offsets;
+				view.gap = gap;
+				view.total = Math.ceil(offsets.at(-1));
+				view.host.style.height = `${Math.min(SCROLL_SEGMENT_SIZE, view.total)}px`;
+			};
+			let width = context.el.navigationContent.clientWidth || view.width || 180;
+			measure(width);
+			const nextWidth = context.el.navigationContent.clientWidth;
+			if (nextWidth && nextWidth !== width) {
+				measure(nextWidth);
+				if (context.el.navigationContent.clientWidth) view.width = context.el.navigationContent.clientWidth;
 			}
-			offsets[context.state.doc.pages.length] = top;
-			view.offsets = offsets;
-			view.gap = gap;
-			view.total = Math.ceil(offsets.at(-1));
 			for (const [index, button] of view.nodes) {
 				pageView.layoutThumbnail(button, context.state.doc.pages[index]);
 			}
-			view.pendingTop = offsets[anchor.index] + anchor.offset;
-			view.host.style.height = `${Math.min(SCROLL_SEGMENT_SIZE, view.total)}px`;
+			view.pendingTop = view.offsets[anchor.index] + anchor.offset;
 			if (visible) {
 				pageView.syncPageWindow(view, view.pendingTop);
 				view.pendingTop = null;
@@ -1155,12 +1170,14 @@ export function createPageView(context) {
 			const size = pageView.pageViewSize(page);
 			const view = context.state.thumbnailWindow;
 			button.style.height = `${view.heights[page.index]}px`;
-			button.style.width = `${view.itemWidth}px`;
 			if (view.scales) {
+				button.style.width = `calc(50% - ${view.gap / 2}px)`;
 				button.style.setProperty("--thumb-paper-width", `${size.width * view.scales[page.index]}px`);
 				button.style.setProperty("--thumb-paper-height", `${size.height * view.scales[page.index]}px`);
 			} else {
+				button.style.removeProperty("width");
 				button.style.removeProperty("left");
+				button.style.removeProperty("right");
 				button.style.removeProperty("transform");
 				button.style.removeProperty("--thumb-paper-width");
 				button.style.removeProperty("--thumb-paper-height");

@@ -3433,19 +3433,69 @@ func (e *businessEngine) writeAnnotation(args []platformValue) (any, error) {
 				}
 				object = ofdgo.GraphicObject{Type: "TextObject", TextObject: text}
 			}
-			added, err := e.currentEditor.AddWatermarks(e.operationContext(), pages, object, ofdgo.WatermarkOptions{Creator: options.Creator, Angle: options.Angle, Tile: options.Tile, Area: options.Area})
+			if options.Area == nil || len(pages) == 0 {
+				added, err := e.currentEditor.AddWatermarks(e.operationContext(), pages, object, ofdgo.WatermarkOptions{Creator: options.Creator, Angle: options.Angle, Tile: options.Tile, Area: options.Area})
+				if err != nil {
+					return err
+				}
+				for i, index := range pages {
+					if index == page {
+						ids = append(ids, "annotation:"+added[i])
+					}
+				}
+				return nil
+			}
+			firstBox, err := e.editorPageBox(pages[0])
 			if err != nil {
 				return err
 			}
-			for i, index := range pages {
+			sameOrigin := true
+			for _, index := range pages[1:] {
+				pBox, boxErr := e.editorPageBox(index)
+				if boxErr != nil {
+					return boxErr
+				}
+				if pBox.X != firstBox.X || pBox.Y != firstBox.Y {
+					sameOrigin = false
+					break
+				}
+			}
+			if sameOrigin {
+				area, boxErr := e.pageBoxFromViewport(pages[0], *options.Area)
+				if boxErr != nil {
+					return boxErr
+				}
+				added, err := e.currentEditor.AddWatermarks(e.operationContext(), pages, object, ofdgo.WatermarkOptions{Creator: options.Creator, Angle: options.Angle, Tile: options.Tile, Area: &area})
+				if err != nil {
+					return err
+				}
+				for i, index := range pages {
+					if index == page {
+						ids = append(ids, "annotation:"+added[i])
+					}
+				}
+				return nil
+			}
+			for _, index := range pages {
+				area, boxErr := e.pageBoxFromViewport(index, *options.Area)
+				if boxErr != nil {
+					return boxErr
+				}
+				added, err := e.currentEditor.AddWatermarks(e.operationContext(), []int{index}, object, ofdgo.WatermarkOptions{Creator: options.Creator, Angle: options.Angle, Tile: options.Tile, Area: &area})
+				if err != nil {
+					return err
+				}
 				if index == page {
-					ids = append(ids, "annotation:"+added[i])
+					ids = append(ids, "annotation:"+added[0])
 				}
 			}
 			return nil
 		}
 		for _, index := range pages {
-			box := ofdgo.Box{X: options.X, Y: options.Y, W: options.Width, H: options.Height}
+			box, err := e.pageBoxFromViewport(index, ofdgo.Box{X: options.X, Y: options.Y, W: options.Width, H: options.Height})
+			if err != nil {
+				return err
+			}
 			var id string
 			if options.Kind == "link" {
 				id, err = e.currentEditor.AddLinkAnnotation(index, box, target, options.Creator)
@@ -3489,9 +3539,22 @@ func (e *businessEngine) writeAnnotation(args []platformValue) (any, error) {
 // 入参: args 页面、JSON采样、线宽、压感开关、颜色及可选父路径
 // 返回: any 文档和选区, error 错误信息
 func (e *businessEngine) insertInk(args []platformValue) (any, error) {
+	if e.currentEditor == nil {
+		return nil, fmt.Errorf("no document is being edited")
+	}
 	var points []ofdgo.InkPoint
 	if err := json.Unmarshal([]byte(args[1].String()), &points); err != nil {
 		return nil, err
+	}
+	pageBox, err := e.editorPageBox(args[0].Int())
+	if err != nil {
+		return nil, err
+	}
+	if pageBox.X != 0 || pageBox.Y != 0 {
+		for i := range points {
+			points[i].X += pageBox.X
+			points[i].Y += pageBox.Y
+		}
 	}
 	path, err := ofdgo.NewInk(points, args[2].Float(), args[3].Bool())
 	if err != nil {
@@ -3545,23 +3608,39 @@ func (e *businessEngine) changeSelection(args []platformValue) (any, error) {
 		case "style":
 			return e.currentEditor.StyleTargets(page, paths, e.objectStyle(args[3]))
 		case "erase":
-			return e.currentEditor.EraseTargets(page, paths, ofdgo.Box{
+			box, err := e.pageBoxFromViewport(page, ofdgo.Box{
 				X: args[3].Float(), Y: args[4].Float(), W: args[5].Float(), H: args[6].Float(),
 			})
+			if err != nil {
+				return err
+			}
+			return e.currentEditor.EraseTargets(page, paths, box)
 		case "erasePath":
-			return e.currentEditor.EraseTargetsPath(page, paths, e.pointsFromJS(args[3]))
+			points, err := e.pagePointsFromViewport(page, e.pointsFromJS(args[3]))
+			if err != nil {
+				return err
+			}
+			return e.currentEditor.EraseTargetsPath(page, paths, points)
 		case "rotate":
 			return e.currentEditor.RotateTargets(page, paths, args[3].Int())
 		case "flip":
 			return e.currentEditor.FlipTargets(page, paths, args[3].String())
 		case "resize":
-			return e.currentEditor.ResizeTargets(page, paths, ofdgo.Box{
+			box, err := e.pageBoxFromViewport(page, ofdgo.Box{
 				X: args[3].Float(), Y: args[4].Float(), W: args[5].Float(), H: args[6].Float(),
 			})
+			if err != nil {
+				return err
+			}
+			return e.currentEditor.ResizeTargets(page, paths, box)
 		case "transform":
 			dx, dy, scale := args[3].Float(), args[4].Float(), args[5].Float()
 			if scale <= 0 {
 				return fmt.Errorf("scale must be positive")
+			}
+			dx, dy, err = e.pageTransformFromViewport(page, dx, dy, scale)
+			if err != nil {
+				return err
 			}
 			matrix := ofdgo.NewMatrix(fmt.Sprintf("%g 0 0 %g %g %g", scale, scale, dx, dy))
 			return e.currentEditor.TransformTargets(page, paths, matrix)
@@ -3784,7 +3863,15 @@ func (e *businessEngine) compositeObjects(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	members, err := e.currentEditor.CompositeObjects(args[0].Int(), path)
+	pageIndex := args[0].Int()
+	pageBox, err := e.editorPageBox(pageIndex)
+	if err != nil {
+		return nil, err
+	}
+	offsetX, offsetY := -pageBox.X, -pageBox.Y
+	hasOffset := offsetX != 0 || offsetY != 0
+	shift := ofdgo.TranslationMatrix(offsetX, offsetY)
+	members, err := e.currentEditor.CompositeObjects(pageIndex, path)
 	if err != nil {
 		return nil, err
 	}
@@ -3794,16 +3881,24 @@ func (e *businessEngine) compositeObjects(args []platformValue) (any, error) {
 		if box.W <= 0 || box.H <= 0 {
 			continue
 		}
-		item := map[string]any{"id": fmt.Sprintf("%s/%d", key, i), "type": member.Object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": i, "position": member.Position.Index, "count": member.Position.Count, "container": key + ":" + member.Position.Container, "scoped": true, "parent": key, "contours": member.Contours,
+		box.X += offsetX
+		box.Y += offsetY
+		contours := translateContours(member.Contours, offsetX, offsetY)
+		item := map[string]any{"id": fmt.Sprintf("%s/%d", key, i), "type": member.Object.Type, "x": box.X, "y": box.Y, "width": box.W, "height": box.H, "order": i, "position": member.Position.Index, "count": member.Position.Count, "container": key + ":" + member.Position.Container, "scoped": true, "parent": key, "contours": contours,
 			"capabilities": e.editorCapabilities(member.Capabilities, member.Object.Type)}
 		e.editorAppearance(item, member.Object, member.Capabilities.Paint, member.StrokeScale)
 		if member.Object.Type == "ImageObject" {
 			item["imageResource"] = member.Object.ImageObject.ResourceID
 		}
 		if kind, geometry := member.Shape(); kind != "" {
+			geometry.X += offsetX
+			geometry.Y += offsetY
 			item["shape"], item["geometry"] = string(kind), e.editorBox(geometry)
-		} else if kind, box, matrix := member.ShapeFrame(); kind != "" {
-			item["oriented"] = map[string]any{"kind": string(kind), "box": e.editorBox(box), "matrix": e.editorMatrix(matrix)}
+		} else if kind, shapeBox, matrix := member.ShapeFrame(); kind != "" {
+			if hasOffset {
+				matrix = shift.Multiply(matrix)
+			}
+			item["oriented"] = map[string]any{"kind": string(kind), "box": e.editorBox(shapeBox), "matrix": e.editorMatrix(matrix)}
 		}
 		if member.Object.Type == "TextObject" {
 			object := member.Object.TextObject
@@ -3812,10 +3907,14 @@ func (e *businessEngine) compositeObjects(args []platformValue) (any, error) {
 			item["wrap"], item["align"], item["paragraphHeight"] = layout.Wrap, layout.Align, layout.LineHeight
 			item["letterSpacing"] = layout.LetterSpacing
 			item["leftIndent"], item["rightIndent"], item["firstLineIndent"] = layout.LeftIndent, layout.RightIndent, layout.FirstLineIndent
-			item["font"], item["fontName"], item["size"] = object.Font, e.pageFontName(args[0].Int(), object.Font), object.Size
+			item["font"], item["fontName"], item["size"] = object.Font, e.pageFontName(pageIndex, object.Font), object.Size
 			item["bounds"] = e.editorBox(box)
 			if member.Capabilities.Reflow {
-				inverse, _ := member.Matrix.Invert()
+				textMatrix := member.Matrix
+				if hasOffset {
+					textMatrix = shift.Multiply(textMatrix)
+				}
+				inverse, _ := textMatrix.Invert()
 				local := inverse.TransformBox(box)
 				width := math.Max(object.Size, local.X+local.W)
 				if member.Capabilities.LayoutKnown {
@@ -3827,9 +3926,9 @@ func (e *businessEngine) compositeObjects(args []platformValue) (any, error) {
 					width = frame.W
 				}
 				frame := ofdgo.Box{W: width, H: math.Max(object.Size, local.Y+local.H)}
-				item["textFrame"] = map[string]any{"width": frame.W, "height": frame.H, "matrix": e.editorMatrix(member.Matrix)}
+				item["textFrame"] = map[string]any{"width": frame.W, "height": frame.H, "matrix": e.editorMatrix(textMatrix)}
 				if member.Capabilities.LayoutKnown {
-					bounds := member.Matrix.TransformBox(frame)
+					bounds := textMatrix.TransformBox(frame)
 					item["x"], item["y"], item["width"], item["height"] = bounds.X, bounds.Y, bounds.W, bounds.H
 				}
 			}
@@ -3839,8 +3938,11 @@ func (e *businessEngine) compositeObjects(args []platformValue) (any, error) {
 			item["cropped"] = member.Cropped
 		}
 		if member.Object.Type == "CompositeObject" {
-			if value, frame, matrix, err := e.currentEditor.CompositeRichText(args[0].Int(), member); err == nil {
-				e.editorRichText(item, member.Object, value, args[0].Int(), frame, matrix)
+			if value, frame, matrix, err := e.currentEditor.CompositeRichText(pageIndex, member); err == nil {
+				if hasOffset {
+					matrix = shift.Multiply(matrix)
+				}
+				e.editorRichText(item, member.Object, value, pageIndex, frame, matrix)
 			}
 		}
 		objects = append(objects, item)
@@ -3888,17 +3990,29 @@ func (e *businessEngine) changeCompositeObjects(args []platformValue) (any, erro
 				return fmt.Errorf("shape editing requires one member")
 			}
 			box := ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()}
+			if operation == "reshape" && len(args) > 8 && args[8].Bool() {
+				return e.currentEditor.ReshapeCompositeFrame(page, path, indexes[0], box)
+			}
+			box, err = e.pageBoxFromViewport(page, box)
+			if err != nil {
+				return err
+			}
 			if operation == "line" {
 				return e.currentEditor.ReshapeCompositeLine(page, path, indexes[0], ofdgo.ShapeKind(args[8].String()), box)
 			}
-			if len(args) > 8 && args[8].Bool() {
-				return e.currentEditor.ReshapeCompositeFrame(page, path, indexes[0], box)
-			}
 			return e.currentEditor.ReshapeCompositeObject(page, path, indexes[0], box)
 		case "erase":
-			return e.currentEditor.EraseCompositeObjects(page, path, indexes, ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()})
+			box, err := e.pageBoxFromViewport(page, ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()})
+			if err != nil {
+				return err
+			}
+			return e.currentEditor.EraseCompositeObjects(page, path, indexes, box)
 		case "erasePath":
-			return e.currentEditor.EraseCompositeObjectsPath(page, path, indexes, e.pointsFromJS(args[4]))
+			points, err := e.pagePointsFromViewport(page, e.pointsFromJS(args[4]))
+			if err != nil {
+				return err
+			}
+			return e.currentEditor.EraseCompositeObjectsPath(page, path, indexes, points)
 		case "delete":
 			return e.currentEditor.DeleteCompositeObjects(page, path, indexes)
 		case "copy":
@@ -3927,7 +4041,11 @@ func (e *businessEngine) changeCompositeObjects(args []platformValue) (any, erro
 			if len(indexes) != 1 {
 				return fmt.Errorf("image crop requires one member")
 			}
-			return e.currentEditor.CropCompositeImage(page, path, indexes[0], ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()})
+			box, err := e.pageBoxFromViewport(page, ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()})
+			if err != nil {
+				return err
+			}
+			return e.currentEditor.CropCompositeImage(page, path, indexes[0], box)
 		case "image":
 			if len(indexes) != 1 {
 				return fmt.Errorf("image replacement requires one member")
@@ -3938,13 +4056,21 @@ func (e *businessEngine) changeCompositeObjects(args []platformValue) (any, erro
 			}
 			return e.currentEditor.ReplaceCompositeImage(page, path, indexes[0], data)
 		case "transform":
-			return e.currentEditor.TransformCompositeObjects(page, path, indexes, args[4].Float(), args[5].Float(), args[6].Float())
+			dx, dy, err := e.pageTransformFromViewport(page, args[4].Float(), args[5].Float(), args[6].Float())
+			if err != nil {
+				return err
+			}
+			return e.currentEditor.TransformCompositeObjects(page, path, indexes, dx, dy, args[6].Float())
 		case "rotate":
 			return e.currentEditor.RotateCompositeObjects(page, path, indexes, args[4].Int())
 		case "flip":
 			return e.currentEditor.FlipCompositeObjects(page, path, indexes, args[4].String())
 		case "resize":
-			return e.currentEditor.ResizeCompositeObjects(page, path, indexes, ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()})
+			box, err := e.pageBoxFromViewport(page, ofdgo.Box{X: args[4].Float(), Y: args[5].Float(), W: args[6].Float(), H: args[7].Float()})
+			if err != nil {
+				return err
+			}
+			return e.currentEditor.ResizeCompositeObjects(page, path, indexes, box)
 		case "align":
 			return e.currentEditor.AlignCompositeObjects(page, path, indexes, args[4].String())
 		case "distribute":
@@ -4282,7 +4408,12 @@ func (e *businessEngine) textSelection(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	analysis, err := e.currentEditor.AnalyzeTextSelection(args[0].Int(), selection)
+	pageIndex := args[0].Int()
+	pageBox, err := e.editorPageBox(pageIndex)
+	if err != nil {
+		return nil, err
+	}
+	analysis, err := e.currentEditor.AnalyzeTextSelection(pageIndex, selection)
 	if err != nil {
 		return nil, err
 	}
@@ -4293,7 +4424,10 @@ func (e *businessEngine) textSelection(args []platformValue) (any, error) {
 	first := analysis.Parts[0].TextObject
 	_, origin := analysis.Parts[0].Matrix.Transform(0, 0)
 	_, unit := analysis.Parts[0].Matrix.Transform(0, 1)
-	item := e.editorBox(analysis.Bounds)
+	bounds := analysis.Bounds
+	bounds.X -= pageBox.X
+	bounds.Y -= pageBox.Y
+	item := e.editorBox(bounds)
 	item["text"], item["font"], item["size"] = analysis.Text, first.Font, first.Size*(unit-origin)
 	item["color"] = e.richTextColorHex(analysis.Parts[0].Color)
 	item["alpha"] = 255
@@ -4301,8 +4435,8 @@ func (e *businessEngine) textSelection(args []platformValue) (any, error) {
 		item["alpha"] = *first.Alpha
 	}
 	item["capabilities"] = map[string]any{"textContent": true, "rewriteText": analysis.Replace, "replaceFont": true, "paint": true, "reflow": analysis.Reflow, "layoutKnown": false}
-	item["textFrame"] = map[string]any{"width": analysis.Bounds.W, "height": analysis.Bounds.H, "matrix": e.editorMatrix(ofdgo.TranslationMatrix(analysis.Bounds.X, analysis.Bounds.Y))}
-	if fontName := e.pageFontName(args[0].Int(), first.Font); fontName != "" {
+	item["textFrame"] = map[string]any{"width": bounds.W, "height": bounds.H, "matrix": e.editorMatrix(ofdgo.TranslationMatrix(bounds.X, bounds.Y))}
+	if fontName := e.pageFontName(pageIndex, first.Font); fontName != "" {
 		item["fontName"] = fontName
 	}
 	data, err := json.Marshal(map[string]any{"item": item, "source": source})
@@ -4888,6 +5022,13 @@ func (e *businessEngine) getRichText(args []platformValue) (any, error) {
 		return nil, err
 	}
 	if len(args) > 2 {
+		pageBox, err := e.editorPageBox(args[0].Int())
+		if err != nil {
+			return nil, err
+		}
+		if pageBox.X != 0 || pageBox.Y != 0 {
+			matrix = ofdgo.TranslationMatrix(-pageBox.X, -pageBox.Y).Multiply(matrix)
+		}
 		return map[string]any{"model": e.browserRichText(value), "frame": map[string]any{
 			"width": frame.W, "height": frame.H, "matrix": e.editorMatrix(matrix),
 		}}, nil
@@ -5034,17 +5175,21 @@ func (e *businessEngine) saveRichText(args []platformValue) (any, error) {
 			}
 			return e.currentEditor.UpdateTargetRichText(page, path, value, offset, width)
 		}
+		targetBox, err := e.pageBoxFromViewport(page, ofdgo.Box{X: box.Get("x").Float(), Y: box.Get("y").Float(), W: box.Get("width").Float(), H: box.Get("height").Float()})
+		if err != nil {
+			return err
+		}
 		if len(args) > 5 && args[5].String() != "" {
 			key := args[5].String()
 			path, err := e.compositePath(key)
 			if err != nil {
 				return err
 			}
-			index, err := e.currentEditor.AddCompositeRichText(page, path, ofdgo.Box{X: box.Get("x").Float(), Y: box.Get("y").Float(), W: box.Get("width").Float(), H: box.Get("height").Float()}, value)
+			index, err := e.currentEditor.AddCompositeRichText(page, path, targetBox, value)
 			id = fmt.Sprintf("%s/%d", key, index)
 			return err
 		}
-		id, err = e.currentEditor.AddRichText(page, ofdgo.Box{X: box.Get("x").Float(), Y: box.Get("y").Float(), W: box.Get("width").Float(), H: box.Get("height").Float()}, value)
+		id, err = e.currentEditor.AddRichText(page, targetBox, value)
 		return err
 	})
 	if err != nil {
@@ -5157,7 +5302,7 @@ func (e *businessEngine) insertText(args []platformValue) (any, error) {
 	if width == 0 {
 		width = 80
 	}
-	box = ofdgo.Box{X: x, Y: y, W: math.Min(width, box.W-x), H: box.H - y}
+	box = ofdgo.Box{X: x + box.X, Y: y + box.Y, W: math.Min(width, box.W-x), H: box.H - y}
 	object := ofdgo.GraphicObject{Type: "TextObject", TextObject: ofdgo.TextObject{
 		Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
 		Font:     fontID, Size: args[5].Float(),
@@ -5241,8 +5386,12 @@ func (e *businessEngine) transformObject(args []platformValue) (any, error) {
 		return nil, fmt.Errorf("no document is being edited")
 	}
 	page, id := args[0].Int(), args[1].String()
+	dx, dy, err := e.pageTransformFromViewport(page, args[2].Float(), args[3].Float(), args[4].Float())
+	if err != nil {
+		return nil, err
+	}
 	revision := e.currentEditor.Revision()
-	if err := e.currentEditor.TransformObject(page, id, args[2].Float(), args[3].Float(), args[4].Float()); err != nil {
+	if err := e.currentEditor.TransformObject(page, id, dx, dy, args[4].Float()); err != nil {
 		return nil, err
 	}
 	if e.currentEditor.Revision() == revision {
@@ -5270,7 +5419,10 @@ func (e *businessEngine) reshapeObject(args []platformValue) (any, error) {
 	if len(args) > 6 && args[6].Bool() {
 		object.PathObject, err = object.PathObject.ReshapeFrame(box)
 	} else {
-		object.PathObject, err = object.PathObject.Reshape(box)
+		box, err = e.pageBoxFromViewport(page, box)
+		if err == nil {
+			object.PathObject, err = object.PathObject.Reshape(box)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -5298,7 +5450,11 @@ func (e *businessEngine) reshapeLine(args []platformValue) (any, error) {
 		if object.Type != "PathObject" {
 			return fmt.Errorf("object is not a path")
 		}
-		object.PathObject, err = object.PathObject.ReshapeLine(ofdgo.ShapeKind(args[6].String()), ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
+		box, err := e.pageBoxFromViewport(page, ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
+		if err != nil {
+			return err
+		}
+		object.PathObject, err = object.PathObject.ReshapeLine(ofdgo.ShapeKind(args[6].String()), box)
 		if err != nil {
 			return err
 		}
@@ -5680,7 +5836,12 @@ func (e *businessEngine) pasteStyle(args []platformValue) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func (e *businessEngine) resizeObjects(args []platformValue) (any, error) {
 	return e.changeObjects(func() error {
-		return e.currentEditor.ResizeObjects(args[0].Int(), e.stringsFromJS(args[1]), ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
+		page := args[0].Int()
+		box, err := e.pageBoxFromViewport(page, ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
+		if err != nil {
+			return err
+		}
+		return e.currentEditor.ResizeObjects(page, e.stringsFromJS(args[1]), box)
 	})
 }
 
@@ -6551,6 +6712,12 @@ func (e *businessEngine) annotationInfos(args []platformValue) (any, error) {
 	}
 	var infos []ofdgo.AnnotationInfo
 	err := e.currentSession.Reader.WalkAnnotationInfos(e.operationContext(), func(info ofdgo.AnnotationInfo) error {
+		if info.Page > 0 {
+			if box, boxErr := e.currentSession.pageBox(info.Page-1, nil); boxErr == nil {
+				info.X -= box.X
+				info.Y -= box.Y
+			}
+		}
 		infos = append(infos, info)
 		return nil
 	}, indexes...)
@@ -7053,14 +7220,19 @@ func (e *businessEngine) insertShape(args []platformValue) (any, error) {
 	if e.currentEditor == nil {
 		return nil, fmt.Errorf("no document is being edited")
 	}
-	path, err := ofdgo.NewShape(ofdgo.ShapeKind(args[1].String()), ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
+	page := args[0].Int()
+	box, err := e.pageBoxFromViewport(page, ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
+	if err != nil {
+		return nil, err
+	}
+	path, err := ofdgo.NewShape(ofdgo.ShapeKind(args[1].String()), box)
 	if err != nil {
 		return nil, err
 	}
 	if err := e.setPathStyle(&path, args[6:]); err != nil {
 		return nil, err
 	}
-	return e.insertEditorObject(args[0].Int(), ofdgo.GraphicObject{Type: "PathObject", PathObject: path}, args[11:])
+	return e.insertEditorObject(page, ofdgo.GraphicObject{Type: "PathObject", PathObject: path}, args[11:])
 }
 
 // updatePathStyle 原子更新选中路径的绘制样式，保留未修改属性
@@ -7127,7 +7299,12 @@ func (e *businessEngine) flipObjects(args []platformValue) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func (e *businessEngine) cropImage(args []platformValue) (any, error) {
 	return e.changeObjects(func() error {
-		return e.currentEditor.CropImage(args[0].Int(), args[1].String(), ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
+		page := args[0].Int()
+		box, err := e.pageBoxFromViewport(page, ofdgo.Box{X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float()})
+		if err != nil {
+			return err
+		}
+		return e.currentEditor.CropImage(page, args[1].String(), box)
 	})
 }
 
@@ -7196,7 +7373,12 @@ func (e *businessEngine) svgImagesToJS(images []ofdgo.SVGImage) []any {
 // 返回: any 文档信息, error 错误信息
 func (e *businessEngine) transformObjects(args []platformValue) (any, error) {
 	return e.changeObjects(func() error {
-		return e.currentEditor.TransformObjects(args[0].Int(), e.stringsFromJS(args[1]), args[2].Float(), args[3].Float(), args[4].Float())
+		page := args[0].Int()
+		dx, dy, err := e.pageTransformFromViewport(page, args[2].Float(), args[3].Float(), args[4].Float())
+		if err != nil {
+			return err
+		}
+		return e.currentEditor.TransformObjects(page, e.stringsFromJS(args[1]), dx, dy, args[4].Float())
 	})
 }
 
@@ -7223,7 +7405,12 @@ func (e *businessEngine) deleteObjects(args []platformValue) (any, error) {
 // 返回: any 文档信息, error 错误信息
 func (e *businessEngine) eraseObjectsPath(args []platformValue) (any, error) {
 	return e.changeObjects(func() error {
-		return e.currentEditor.EraseObjectsPath(args[0].Int(), e.stringsFromJS(args[1]), e.pointsFromJS(args[2]))
+		page := args[0].Int()
+		points, err := e.pagePointsFromViewport(page, e.pointsFromJS(args[2]))
+		if err != nil {
+			return err
+		}
+		return e.currentEditor.EraseObjectsPath(page, e.stringsFromJS(args[1]), points)
 	})
 }
 
@@ -7244,9 +7431,14 @@ func (e *businessEngine) pointsFromJS(value platformValue) []ofdgo.Point {
 // 返回: any 文档信息, error 错误信息
 func (e *businessEngine) eraseObjects(args []platformValue) (any, error) {
 	return e.changeObjects(func() error {
-		return e.currentEditor.EraseObjects(args[0].Int(), e.stringsFromJS(args[1]), ofdgo.Box{
+		page := args[0].Int()
+		box, err := e.pageBoxFromViewport(page, ofdgo.Box{
 			X: args[2].Float(), Y: args[3].Float(), W: args[4].Float(), H: args[5].Float(),
 		})
+		if err != nil {
+			return err
+		}
+		return e.currentEditor.EraseObjects(page, e.stringsFromJS(args[1]), box)
 	})
 }
 
@@ -7309,6 +7501,8 @@ func (e *businessEngine) insertImage(args []platformValue) (any, error) {
 		box.W *= height / box.H
 		box.H = height
 	}
+	box.X += pageBox.X
+	box.Y += pageBox.Y
 	object := ofdgo.GraphicObject{Type: "ImageObject", ImageObject: ofdgo.ImageObject{
 		ResourceID: resourceID, Boundary: fmt.Sprintf("%g %g %g %g", box.X, box.Y, box.W, box.H),
 	}}
@@ -7452,7 +7646,7 @@ func (e *businessEngine) verifySignatures(args []platformValue) (any, error) {
 	}
 	infos := make([]SignatureInfo, len(reports))
 	for i, report := range reports {
-		infos[i] = signatureInfo(report)
+		infos[i] = e.currentSession.signatureInfo(report)
 	}
 	e.currentSession.signatures, e.currentSession.signatureError, e.currentSession.signaturesRead = infos, nil, true
 	return map[string]any{"signatures": infos, "signatureCount": len(infos), "signatureError": ""}, nil
@@ -8031,6 +8225,67 @@ func (e *businessEngine) operationContext() context.Context {
 	return context.Background()
 }
 
+// editorPageBox 获取编辑页面的物理区域以执行视口与页面坐标转换
+// 入参: page 页面索引
+// 返回: ofdgo.Box 页面物理区域, error 错误信息
+func (e *businessEngine) editorPageBox(page int) (ofdgo.Box, error) {
+	if e.currentSession != nil && page >= 0 && page < len(e.currentSession.boxCache) {
+		return e.currentSession.pageBox(page, nil)
+	}
+	if e.currentEditor != nil && e.currentSession != nil {
+		content, err := e.currentEditor.Page(page)
+		if err != nil {
+			return ofdgo.Box{}, err
+		}
+		return e.currentSession.Renderer.GetPageBox(content)
+	}
+	return ofdgo.Box{}, fmt.Errorf("page index %d out of range", page)
+}
+
+// pageBoxFromViewport 将视口毫米坐标范围还原为页面坐标系范围
+// 入参: page 页面索引, box 视口矩形范围
+// 返回: ofdgo.Box 页面矩形范围, error 错误信息
+func (e *businessEngine) pageBoxFromViewport(page int, box ofdgo.Box) (ofdgo.Box, error) {
+	pageBox, err := e.editorPageBox(page)
+	if err != nil {
+		return ofdgo.Box{}, err
+	}
+	box.X += pageBox.X
+	box.Y += pageBox.Y
+	return box, nil
+}
+
+// pagePointsFromViewport 将视口毫米坐标点序列还原为页面坐标系点序列
+// 入参: page 页面索引, points 视口坐标点列表
+// 返回: []ofdgo.Point 页面坐标点列表, error 错误信息
+func (e *businessEngine) pagePointsFromViewport(page int, points []ofdgo.Point) ([]ofdgo.Point, error) {
+	pageBox, err := e.editorPageBox(page)
+	if err != nil {
+		return nil, err
+	}
+	if pageBox.X != 0 || pageBox.Y != 0 {
+		for i := range points {
+			points[i].X += pageBox.X
+			points[i].Y += pageBox.Y
+		}
+	}
+	return points, nil
+}
+
+// pageTransformFromViewport 将视口下的等比缩放与平移分量换算为页面坐标系位移分量
+// 入参: page 页面索引, dx 视口横向位移, dy 视口纵向位移, scale 缩放比例
+// 返回: float64 页面横向位移, float64 页面纵向位移, error 错误信息
+func (e *businessEngine) pageTransformFromViewport(page int, dx, dy, scale float64) (float64, float64, error) {
+	if scale == 1 {
+		return dx, dy, nil
+	}
+	pageBox, err := e.editorPageBox(page)
+	if err != nil {
+		return 0, 0, err
+	}
+	return dx + (1-scale)*pageBox.X, dy + (1-scale)*pageBox.Y, nil
+}
+
 // pageSearchMatch 保存批量搜索匹配及其零基页面索引
 type pageSearchMatch struct {
 	ofdgo.TextMatch
@@ -8445,8 +8700,18 @@ func (s *Session) cachePageContent(index int, page *ofdgo.PageContent) {
 // 入参: index 页面索引, page 页面内容
 // 返回: ofdgo.Box 页面物理区域, error 错误信息
 func (s *Session) pageBox(index int, page *ofdgo.PageContent) (ofdgo.Box, error) {
+	if index < 0 || index >= len(s.boxCache) {
+		return ofdgo.Box{}, fmt.Errorf("page index %d out of range", index)
+	}
 	if cached := s.boxCache[index]; cached.valid {
 		return cached.box, nil
+	}
+	if page == nil {
+		area, err := s.Reader.PageArea(s.doc.Pages.Page[index])
+		if err != nil {
+			return ofdgo.Box{}, err
+		}
+		page = &ofdgo.PageContent{Area: area}
 	}
 	box, err := s.Renderer.GetPageBox(page)
 	if err != nil {
@@ -8496,7 +8761,7 @@ func (s *Session) signatureInfos() ([]SignatureInfo, error) {
 	}
 	infos := make([]SignatureInfo, 0, len(reports))
 	for _, report := range reports {
-		infos = append(infos, signatureInfo(report))
+		infos = append(infos, s.signatureInfo(report))
 	}
 	s.signatures = infos
 	return infos, nil
@@ -8505,7 +8770,7 @@ func (s *Session) signatureInfos() ([]SignatureInfo, error) {
 // signatureInfo 转换签名验证信息
 // 入参: report 签名验证报告
 // 返回: SignatureInfo 签名验证信息
-func signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
+func (s *Session) signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
 	status := "unchecked"
 	if report.Valid {
 		status = "valid"
@@ -8544,7 +8809,7 @@ func signatureInfo(report ofdgo.SignatureVerifyReport) SignatureInfo {
 		ReferenceCount:       len(report.References),
 		ReferenceChecked:     checked,
 		ReferencePassed:      passed,
-		Stamps:               signatureStampInfos(report.StampPositions),
+		Stamps:               s.signatureStampInfos(report.StampPositions),
 		DataHashChecked:      report.DataHashChecked,
 		DataHashOK:           report.DataHashOK,
 		SignedValueChecked:   report.SignedValueChecked,
@@ -8652,19 +8917,26 @@ func signatureReportError(report ofdgo.SignatureVerifyReport) string {
 	return report.StampPositionError
 }
 
-// signatureStampInfos 转换签名外观位置
+// signatureStampInfos 转换签名外观位置并对齐视口原点
 // 入参: positions 签名外观位置
 // 返回: []SignatureStampInfo 签名外观信息
-func signatureStampInfos(positions []ofdgo.SignatureStampPosition) []SignatureStampInfo {
+func (s *Session) signatureStampInfos(positions []ofdgo.SignatureStampPosition) []SignatureStampInfo {
 	infos := make([]SignatureStampInfo, 0, len(positions))
 	for _, position := range positions {
+		x, y := position.Box.X, position.Box.Y
+		if position.Page > 0 {
+			if box, err := s.pageBox(position.Page-1, nil); err == nil {
+				x -= box.X
+				y -= box.Y
+			}
+		}
 		infos = append(infos, SignatureStampInfo{
 			ID:       position.ID,
 			Page:     position.Page,
 			PageID:   position.PageID,
 			Boundary: position.Boundary,
-			X:        position.Box.X,
-			Y:        position.Box.Y,
+			X:        x,
+			Y:        y,
 			Width:    position.Box.W,
 			Height:   position.Box.H,
 		})
@@ -8800,6 +9072,7 @@ func translateSVGPath(path string, dx, dy float64) string {
 				val += dy
 			}
 			if cmd == 'M' && argIdx == 1 {
+				firstMove = false
 				cmd = 'L'
 				argIdx = -1
 			}
@@ -8840,7 +9113,6 @@ func translateSVGPath(path string, dx, dy float64) string {
 				val += dy
 			}
 		}
-		firstMove = false
 		argIdx++
 		out.WriteByte(' ')
 		out.WriteString(strconv.FormatFloat(val, 'g', -1, 64))

@@ -1000,14 +1000,13 @@ func signatureWriteProtectedNames(ctx context.Context, r *Reader, baseZip *zip.R
 	return protected, nil
 }
 
-// signatureWriteIDsInView 为签名和全部外观分配同一签章域的标识，不修改文档图元编号
+// signatureWriteIDsInView 按各自XML文档作用域判重签章标识并递增全局编号，不修改文档图元编号
 // 入参: ctx 取消上下文, list 签名列表, listPath 列表路径, view 包读取视图, stamps 外观
 // 返回: string 签名标识, []SignatureStamp 外观, error 错误信息
 func signatureWriteIDsInView(ctx context.Context, list *Signatures, listPath string, view *Reader, stamps []SignatureStamp) (string, []SignatureStamp, error) {
-	used := make(map[string]bool)
 	var sequence signatureIDSequence
 	sequence.observe(list.MaxSignID)
-	add := func(id string) error {
+	add := func(used map[string]bool, id string) error {
 		if !ofdXMLIDValid(id) || used[id] {
 			return fmt.Errorf("invalid or duplicate signature ID: %s", id)
 		}
@@ -1015,8 +1014,9 @@ func signatureWriteIDsInView(ctx context.Context, list *Signatures, listPath str
 		sequence.observe(id)
 		return nil
 	}
+	listUsed := make(map[string]bool, len(list.List))
 	for _, ref := range list.List {
-		if err := add(ref.ID); err != nil {
+		if err := add(listUsed, ref.ID); err != nil {
 			return "", nil, err
 		}
 		sigData, err := view.readFileViewContext(ctx, signatureRefPath(listPath, ref.BaseLoc))
@@ -1027,15 +1027,17 @@ func signatureWriteIDsInView(ctx context.Context, list *Signatures, listPath str
 		if err != nil {
 			return "", nil, err
 		}
+		sigUsed := make(map[string]bool, len(file.SignedInfo.StampAnnot))
 		for _, stamp := range file.SignedInfo.StampAnnot {
-			if err := add(stamp.ID); err != nil {
+			if err := add(sigUsed, stamp.ID); err != nil {
 				return "", nil, err
 			}
 		}
 	}
+	newUsed := make(map[string]bool, len(stamps))
 	for _, stamp := range stamps {
 		if stamp.ID != "" {
-			if err := add(stamp.ID); err != nil {
+			if err := add(newUsed, stamp.ID); err != nil {
 				return "", nil, err
 			}
 		}

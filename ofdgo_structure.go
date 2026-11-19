@@ -29,8 +29,14 @@ import (
 // structureTypeOfficial 公文标引类型标识
 const structureTypeOfficial = "od"
 
+// structureTypeInvoice 电子发票标引类型标识
+const structureTypeInvoice = "fp"
+
 // structureNamespaceEGov2013 2013版电子公文标引命名空间
 const structureNamespaceEGov2013 = "http://www.nits.org.cn/eGovDoc/2013"
+
+// structureNamespaceEInvoice2016 2016版电子发票标引命名空间
+const structureNamespaceEInvoice2016 = "http://www.edrm.org.cn/schema/e-invoice/2016"
 
 // Structure 保存自定义标引入口及结构树，单个文件解析失败时通过Error报告，不影响其他标引
 // CanBind表示已识别标引引用规则，包括公文、富文本及发票标引，具体节点和目标仍由绑定接口校验
@@ -353,19 +359,34 @@ func parseStructure(ctx context.Context, data []byte, tag CustomTag) (*Structure
 // 入参: root 标引根节点
 // 返回: bool 是否为纯对象引用发票
 func structureInvoiceReferences(root *StructureNode) bool {
-	if root == nil || root.Name != "root" || root.Namespace != ofdNamespace2016 {
+	if root == nil {
 		return false
 	}
-	known, refs := false, 0
-	for _, child := range root.Children {
-		known = known || child.Name == "InvoiceNo" && child.Namespace == ofdNamespace2016
-	}
-	var check func(*StructureNode) bool
-	check = func(node *StructureNode) bool {
-		if node.Namespace != ofdNamespace2016 {
+	ns := root.Namespace
+	var known bool
+	switch ns {
+	case ofdNamespace2016:
+		if root.Name != "root" {
 			return false
 		}
-		if node.Name == "ObjectRef" {
+		for _, child := range root.Children {
+			known = known || child.Name == "InvoiceNo" && child.Namespace == ofdNamespace2016
+		}
+	case structureNamespaceEInvoice2016, InvoiceStandardEDRM2019:
+		if root.Name != "eInvoice" && root.Name != "root" {
+			return false
+		}
+		known = root.Name == "eInvoice"
+		for _, child := range root.Children {
+			known = known || child.Name == "InvoiceNo" && child.Namespace == ns
+		}
+	default:
+		return false
+	}
+	refs := 0
+	var check func(*StructureNode) bool
+	check = func(node *StructureNode) bool {
+		if node.Name == "ObjectRef" && (node.Namespace == ns || node.Namespace == ofdNamespace2016) {
 			page := ""
 			for _, attr := range node.Attributes {
 				if attr.Name == "PageRef" && attr.Namespace == "" {
@@ -383,6 +404,9 @@ func structureInvoiceReferences(root *StructureNode) bool {
 			}
 			refs++
 			return true
+		}
+		if node.Namespace != ns {
+			return false
 		}
 		if node.Name == "ObjectData" {
 			return len(node.Children) == 0

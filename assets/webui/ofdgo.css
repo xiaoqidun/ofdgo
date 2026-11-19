@@ -2249,7 +2249,9 @@ body[data-hide-meta] .meta-panel {
 .navigation-content {
 	flex: 1;
 	min-height: 0;
-	overflow: auto;
+	overflow-x: hidden;
+	overflow-y: auto;
+	overflow-anchor: none;
 }
 
 .page-selection-tools {
@@ -3314,6 +3316,10 @@ button.outline-link:hover {
 }
 
 .page-list.virtual-pages > .page-list-item {
+	left: 0;
+	right: 0;
+	width: auto;
+	grid-template-columns: minmax(0, 1fr);
 	grid-template-rows: minmax(0, 1fr) 20px 18px;
 }
 

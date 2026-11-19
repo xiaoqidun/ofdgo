@@ -332,6 +332,9 @@ func pngColorProfile(ctx context.Context, data []byte) ([]byte, *pngColor, error
 		hasGamma = true
 		rawGamma = binary.BigEndian.Uint32(chunk)
 	}
+	if !hasChrm && hasGamma && rawGamma == 45455 {
+		return nil, nil, nil
+	}
 	if hasChrm && rawChrm == [8]uint32{31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000} && (!hasGamma || rawGamma == 45455) {
 		return nil, nil, nil
 	}

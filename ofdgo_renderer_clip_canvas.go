@@ -129,8 +129,8 @@ func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, ma
 				textObj.Boundary, textObj.CTM = "", ""
 				textObj.Clips = nil
 				textObj.Alpha = nil
-				textObj.FillColor = &FillColor{Value: "0 0 0"}
-				textObj.StrokeColor = &StrokeColor{Value: "0 0 0"}
+				textObj.FillColor = &FillColor{}
+				textObj.StrokeColor = &StrokeColor{}
 				textRenderer := *r
 				if scale := math.Sqrt(math.Abs(m.a*m.d - m.b*m.c)); scale > 0 {
 					textRenderer.DPI *= scale

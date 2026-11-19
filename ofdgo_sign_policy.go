@@ -637,7 +637,7 @@ func inDocumentContentSubdir(target, docRootDir string) bool {
 		return false
 	}
 	switch strings.ToLower(first) {
-	case "pages", "res", "attachs", "annots", "annotations", "customtags", "extensions", "temps", "versions":
+	case "pages", "res", "attachs", "annots", "annotations", "customtags", "extensions", "temps", "versions", "tpls", "tags", "exts":
 		return true
 	default:
 		return false

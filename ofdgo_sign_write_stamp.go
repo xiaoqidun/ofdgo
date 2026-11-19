@@ -369,9 +369,6 @@ func (e *Editor) changeSignatureStamps(page int, paths []ObjectPath, matrix *Mat
 // 入参: r 阅读器, stamps 位置, seal 是否电子印章
 // 返回: []SignatureStamp 独立位置列表, error 错误信息
 func signatureWriteStamps(r *Reader, stamps []SignatureStamp, seal bool) ([]SignatureStamp, error) {
-	if len(stamps) != 0 && !seal {
-		return nil, fmt.Errorf("digital signatures cannot contain seal appearances")
-	}
 	positions, err := r.SignatureStampPositions(stamps)
 	if err != nil {
 		return nil, err
