@@ -99,7 +99,7 @@ func (s *NativeImage) NRGBA64At(x, y int) color.NRGBA64 {
 	return color.NRGBA64{R: uint16(math.Round(rgb[0] * 65535)), G: uint16(math.Round(rgb[1] * 65535)), B: uint16(math.Round(rgb[2] * 65535)), A: uint16(math.Round(alpha * 65535))}
 }
 
-// EncodeCMYKTIFF 将直接四色图像保存为十六位无损TIFF，不经过显示颜色转换
+// EncodeCMYKTIFF 将直接四色图像保存为无损TIFF，八位不透明图采用四通道八位压缩，不经过显示颜色转换
 // 入参: ctx 取消上下文, source PDF源图像
 // 返回: []byte 含ICC和非预乘透明度的TIFF，非四色图像为nil, error 解码或编码错误
 func EncodeCMYKTIFF(ctx context.Context, source *pdfgo.Image) ([]byte, error) {
@@ -135,83 +135,17 @@ func EncodeCMYKTIFF(ctx context.Context, source *pdfgo.Image) ([]byte, error) {
 		return nil, fmt.Errorf("invalid CMYK TIFF dimensions")
 	}
 	profile := components.Space.ICCProfile(source.Intent)
-	count := 12
-	if len(profile) != 0 {
-		count++
-	}
-	bitsOffset := uint64(8 + 2 + count*12 + 4)
-	profileOffset := bitsOffset + 10
-	stripOffset := (profileOffset + uint64(len(profile)) + 1) &^ uint64(1)
-	if stripOffset > uint64(^uint32(0)) {
-		return nil, fmt.Errorf("CMYK TIFF profile exceeds size limit")
-	}
-	var compressed bytes.Buffer
-	writer := zlib.NewWriter(&compressed)
-	row := make([]byte, width*10)
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			if (x-bounds.Min.X)%1024 == 0 {
-				if err := ctx.Err(); err != nil {
-					writer.Close()
-					return nil, err
-				}
-			}
-			values, alpha := components.ValuesAt(x, y)
-			pixel := row[(x-bounds.Min.X)*10:]
-			for channel, value := range [5]float64{values[0], values[1], values[2], values[3], alpha} {
-				if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 1 {
-					writer.Close()
-					return nil, fmt.Errorf("invalid CMYK TIFF component")
-				}
-				binary.LittleEndian.PutUint16(pixel[channel*2:], uint16(math.Round(value*65535)))
-			}
-		}
-		if _, err := writer.Write(row); err != nil {
-			writer.Close()
+	if source.BitsPerComponent <= 8 && len(source.Decode) == 0 {
+		data, ok, err := encodeCMYKTIFFPixels(ctx, components, width, height, profile, true)
+		if err != nil {
 			return nil, err
 		}
-		if stripOffset+uint64(compressed.Len()) > uint64(^uint32(0)) {
-			writer.Close()
-			return nil, fmt.Errorf("CMYK TIFF exceeds size limit")
+		if ok {
+			return data, nil
 		}
 	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	total := stripOffset + uint64(compressed.Len())
-	if total > uint64(^uint32(0)) || total > uint64(int(^uint(0)>>1)) {
-		return nil, fmt.Errorf("CMYK TIFF exceeds size limit")
-	}
-	data := make([]byte, int(total))
-	copy(data, "II")
-	binary.LittleEndian.PutUint16(data[2:], 42)
-	binary.LittleEndian.PutUint32(data[4:], 8)
-	binary.LittleEndian.PutUint16(data[8:], uint16(count))
-	entries := [][4]uint32{
-		{256, 4, 1, uint32(width)}, {257, 4, 1, uint32(height)},
-		{258, 3, 5, uint32(bitsOffset)}, {259, 3, 1, 8}, {262, 3, 1, 5},
-		{273, 4, 1, uint32(stripOffset)}, {277, 3, 1, 5}, {278, 4, 1, uint32(height)},
-		{279, 4, 1, uint32(compressed.Len())}, {284, 3, 1, 1}, {332, 3, 1, 1}, {338, 3, 1, 2},
-	}
-	if len(profile) != 0 {
-		entries = append(entries, [4]uint32{34675, 7, uint32(len(profile)), uint32(profileOffset)})
-	}
-	for i, entry := range entries {
-		p := data[10+i*12:]
-		binary.LittleEndian.PutUint16(p, uint16(entry[0]))
-		binary.LittleEndian.PutUint16(p[2:], uint16(entry[1]))
-		binary.LittleEndian.PutUint32(p[4:], entry[2])
-		binary.LittleEndian.PutUint32(p[8:], entry[3])
-	}
-	for i := range 5 {
-		binary.LittleEndian.PutUint16(data[int(bitsOffset)+2*i:], 16)
-	}
-	copy(data[int(profileOffset):], profile)
-	copy(data[int(stripOffset):], compressed.Bytes())
-	return data, nil
+	data, _, err := encodeCMYKTIFFPixels(ctx, components, width, height, profile, false)
+	return data, err
 }
 
 // ImageProcessColorants 识别可在四色设备上直接绘制的专色色料
@@ -226,4 +160,129 @@ func ImageProcessColorants(image *pdfgo.Image) ([4]bool, bool, error) {
 	process := source.PrepareProcess(&pdfgo.ColorantDevice{Space: space}, space, false)
 	mask := process.Mask()
 	return mask, mask != ([4]bool{}), nil
+}
+
+// encodeCMYKTIFFPixels 压缩编码四通道八位或五通道十六位CMYK无损TIFF，八位模式遇半透明或高精度分量时返回false回退
+// 入参: ctx 取消上下文, components 四色分量视图, width 图像宽度, height 图像高度, profile 可选ICC配置, eightBit 是否尝试八位编码
+// 返回: []byte TIFF字节, bool 是否完成编码, error 编码或取消错误
+func encodeCMYKTIFFPixels(ctx context.Context, components *pdfgo.ImageComponents, width, height int, profile []byte, eightBit bool) ([]byte, bool, error) {
+	samples, depth, pixelBytes := 5, 16, 10
+	if eightBit {
+		samples, depth, pixelBytes = 4, 8, 4
+	}
+	entries := cmykTIFFEntries(width, height, samples, len(profile))
+	bitsOffset := uint64(8 + 2 + len(entries)*12 + 4)
+	profileOffset := bitsOffset + uint64(samples*2)
+	stripOffset := (profileOffset + uint64(len(profile)) + 1) &^ uint64(1)
+	if stripOffset > uint64(^uint32(0)) {
+		return nil, false, fmt.Errorf("CMYK TIFF profile exceeds size limit")
+	}
+	bounds := components.Rect
+	var compressed bytes.Buffer
+	writer := zlib.NewWriter(&compressed)
+	row := make([]byte, width*pixelBytes)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			if (x-bounds.Min.X)%1024 == 0 {
+				if err := ctx.Err(); err != nil {
+					writer.Close()
+					return nil, false, err
+				}
+			}
+			values, alpha := components.ValuesAt(x, y)
+			pixel := row[(x-bounds.Min.X)*pixelBytes:]
+			if eightBit {
+				if math.IsNaN(alpha) || math.IsInf(alpha, 0) || alpha < 0 || alpha > 1 {
+					writer.Close()
+					return nil, false, fmt.Errorf("invalid CMYK TIFF component")
+				}
+				if uint16(math.Round(alpha*65535)) != 65535 {
+					writer.Close()
+					return nil, false, nil
+				}
+				for channel := range 4 {
+					value := values[channel]
+					if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 1 {
+						writer.Close()
+						return nil, false, fmt.Errorf("invalid CMYK TIFF component")
+					}
+					word := uint16(math.Round(value * 65535))
+					if word%257 != 0 {
+						writer.Close()
+						return nil, false, nil
+					}
+					pixel[channel] = byte(word / 257)
+				}
+			} else {
+				for channel, value := range [5]float64{values[0], values[1], values[2], values[3], alpha} {
+					if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 1 {
+						writer.Close()
+						return nil, false, fmt.Errorf("invalid CMYK TIFF component")
+					}
+					binary.LittleEndian.PutUint16(pixel[channel*2:], uint16(math.Round(value*65535)))
+				}
+			}
+		}
+		if _, err := writer.Write(row); err != nil {
+			writer.Close()
+			return nil, false, err
+		}
+		if stripOffset+uint64(compressed.Len()) > uint64(^uint32(0)) {
+			writer.Close()
+			return nil, false, fmt.Errorf("CMYK TIFF exceeds size limit")
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	total := stripOffset + uint64(compressed.Len())
+	if total > uint64(^uint32(0)) || total > uint64(int(^uint(0)>>1)) {
+		return nil, false, fmt.Errorf("CMYK TIFF exceeds size limit")
+	}
+	entries[2][3] = uint32(bitsOffset)
+	entries[5][3] = uint32(stripOffset)
+	entries[8][3] = uint32(compressed.Len())
+	if len(profile) != 0 {
+		entries[len(entries)-1][3] = uint32(profileOffset)
+	}
+	data := make([]byte, int(total))
+	copy(data, "II")
+	binary.LittleEndian.PutUint16(data[2:], 42)
+	binary.LittleEndian.PutUint32(data[4:], 8)
+	binary.LittleEndian.PutUint16(data[8:], uint16(len(entries)))
+	for i, entry := range entries {
+		p := data[10+i*12:]
+		binary.LittleEndian.PutUint16(p, uint16(entry[0]))
+		binary.LittleEndian.PutUint16(p[2:], uint16(entry[1]))
+		binary.LittleEndian.PutUint32(p[4:], entry[2])
+		binary.LittleEndian.PutUint32(p[8:], entry[3])
+	}
+	for i := range samples {
+		binary.LittleEndian.PutUint16(data[int(bitsOffset)+2*i:], uint16(depth))
+	}
+	copy(data[int(profileOffset):], profile)
+	copy(data[int(stripOffset):], compressed.Bytes())
+	return data, true, nil
+}
+
+// cmykTIFFEntries 构建CMYK无损TIFF目录项骨架
+// 入参: width 图像宽度, height 图像高度, samples 通道数, profileLen ICC字节长度
+// 返回: [][4]uint32 目录项列表
+func cmykTIFFEntries(width, height, samples, profileLen int) [][4]uint32 {
+	entries := [][4]uint32{
+		{256, 4, 1, uint32(width)}, {257, 4, 1, uint32(height)},
+		{258, 3, uint32(samples), 0}, {259, 3, 1, 8}, {262, 3, 1, 5},
+		{273, 4, 1, 0}, {277, 3, 1, uint32(samples)}, {278, 4, 1, uint32(height)},
+		{279, 4, 1, 0}, {284, 3, 1, 1}, {332, 3, 1, 1},
+	}
+	if samples == 5 {
+		entries = append(entries, [4]uint32{338, 3, 1, 2})
+	}
+	if profileLen != 0 {
+		entries = append(entries, [4]uint32{34675, 7, uint32(profileLen), 0})
+	}
+	return entries
 }

@@ -477,24 +477,20 @@ func jpegDisplayImage(ctx context.Context, source image.Image, profile *pdfgo.Co
 				}
 			}
 			ink := cmyk.CMYKAt(x, y)
-			if profile == nil {
-				white := 255 - int(ink.K)
-				pixels.SetNRGBA64(x, y, color.NRGBA64{
-					R: uint16(max(0, white-int(ink.C))) * 257,
-					G: uint16(max(0, white-int(ink.M))) * 257,
-					B: uint16(max(0, white-int(ink.Y))) * 257,
-					A: 65535,
-				})
-				continue
-			}
 			if previousPixel.A != 0 && ink == previous {
 				pixels.SetNRGBA64(x, y, previousPixel)
 				continue
 			}
-			values := [4]float64{float64(ink.C) / 255, float64(ink.M) / 255, float64(ink.Y) / 255, float64(ink.K) / 255}
-			rgb, err := profile.SRGB(values[:], intent)
-			if err != nil {
-				return nil, err
+			var rgb [3]float64
+			if profile == nil {
+				rgb = pdfgo.DeviceCMYKToSRGB(float64(ink.C)/255, float64(ink.M)/255, float64(ink.Y)/255, float64(ink.K)/255)
+			} else {
+				values := [4]float64{float64(ink.C) / 255, float64(ink.M) / 255, float64(ink.Y) / 255, float64(ink.K) / 255}
+				var err error
+				rgb, err = profile.SRGB(values[:], intent)
+				if err != nil {
+					return nil, err
+				}
 			}
 			previous = ink
 			previousPixel = color.NRGBA64{R: colorWord(rgb[0]), G: colorWord(rgb[1]), B: colorWord(rgb[2]), A: 65535}

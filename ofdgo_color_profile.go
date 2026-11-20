@@ -130,19 +130,16 @@ func displayColor(kind string, values [4]float64, profile *colorProfile) ([3]flo
 	if profile != nil {
 		return profile.srgb(values)
 	}
-	var model pdfgo.Name
 	switch kind {
 	case "GRAY":
-		model = "DeviceGray"
+		return [3]float64{values[0], values[0], values[0]}, nil
 	case "RGB":
-		model = "DeviceRGB"
+		return [3]float64{values[0], values[1], values[2]}, nil
 	case "CMYK":
-		model = "DeviceCMYK"
+		return pdfgo.DeviceCMYKToSRGB(values[0], values[1], values[2], values[3]), nil
 	default:
 		return [3]float64{}, fmt.Errorf("unsupported color space %q", kind)
 	}
-	space := pdfgo.ColorSpace{Model: model}
-	return space.SRGB(values[:space.Components()], "RelativeColorimetric")
 }
 
 // profileColor 将显示分量一次量化并按透明度预乘

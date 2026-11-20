@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"image/color"
 	"math"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -461,47 +460,52 @@ func (r *Renderer) renderGradientStops(segments []ShdSegment, alpha *int) []Colo
 	return result
 }
 
-// cmykGradientStops 在加黑截断点分段，将预乘插值误差控制在四分之一灰阶内
+// cmykGradientStops 按印刷颜色非线性误差自适应细分色标，保持矢量渐变平滑过渡
 // 入参: left 左端分量, right 右端分量, start 左端色标, end 右端色标
 // 返回: []ColorStop 不含端点的显示色标
 func cmykGradientStops(left, right [4]float64, start, end ColorStop) []ColorStop {
-	positions := []float64{0, 1}
 	a0, a1 := float64(start.Color.A)/255, float64(end.Color.A)/255
-	bound := 0.0
-	for channel := 0; channel < 3; channel++ {
-		first, last := left[channel]+left[3], right[channel]+right[3]
-		delta := last - first
-		bound = math.Max(bound, 2*math.Abs((a1-a0)*delta))
-		if delta != 0 {
-			position := (1 - first) / delta
-			if 0 < position && position < 1 {
-				positions = append(positions, position)
-			}
-		}
-	}
-	slices.Sort(positions)
-	positions = slices.Compact(positions)
 	var result []ColorStop
-	for i := 1; i < len(positions); i++ {
-		first, last := positions[i-1], positions[i]
-		steps := max(1, int(math.Ceil((last-first)*math.Sqrt(bound*255/2))))
-		for step := 1; step <= steps; step++ {
-			t := first + (last-first)*float64(step)/float64(steps)
-			if t >= 1 {
-				continue
-			}
-			var values [4]float64
-			for channel := range values {
-				values[channel] = left[channel]*(1-t) + right[channel]*t
-			}
-			r, g, b := meshRGB("CMYK", values)
-			result = append(result, ColorStop{
-				Offset: start.Offset*(1-t) + end.Offset*t,
-				Color:  profileColor([3]float64{r, g, b}, a0*(1-t)+a1*t),
-			})
+	var subdivide func(t0, t1 float64, c0, c1 color.RGBA, depth int)
+	subdivide = func(t0, t1 float64, c0, c1 color.RGBA, depth int) {
+		if depth >= 4 {
+			return
 		}
+		tm := (t0 + t1) / 2
+		var values [4]float64
+		for i := range values {
+			values[i] = left[i]*(1-tm) + right[i]*tm
+		}
+		r, g, b := meshRGB("CMYK", values)
+		actual := profileColor([3]float64{r, g, b}, a0*(1-tm)+a1*tm)
+		expected := color.RGBA{
+			R: uint8((uint16(c0.R) + uint16(c1.R) + 1) / 2),
+			G: uint8((uint16(c0.G) + uint16(c1.G) + 1) / 2),
+			B: uint8((uint16(c0.B) + uint16(c1.B) + 1) / 2),
+			A: uint8((uint16(c0.A) + uint16(c1.A) + 1) / 2),
+		}
+		if colorChannelDiff(actual, expected) <= 1 {
+			return
+		}
+		subdivide(t0, tm, c0, actual, depth+1)
+		result = append(result, ColorStop{Offset: start.Offset*(1-tm) + end.Offset*tm, Color: actual})
+		subdivide(tm, t1, actual, c1, depth+1)
 	}
+	subdivide(0, 1, start.Color, end.Color, 0)
 	return result
+}
+
+// colorChannelDiff 返回两预乘颜色各通道最大绝对差值
+// 入参: a 第一颜色, b 第二颜色
+// 返回: int 最大通道差值
+func colorChannelDiff(a, b color.RGBA) int {
+	diff := func(x, y uint8) int {
+		if x > y {
+			return int(x - y)
+		}
+		return int(y - x)
+	}
+	return max(diff(a.R, b.R), diff(a.G, b.G), diff(a.B, b.B), diff(a.A, b.A))
 }
 
 // gradientPositions 按显式锚点补全渐变分段位置，保留原顺序

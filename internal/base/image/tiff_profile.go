@@ -118,6 +118,7 @@ func applyImageColorProfile(ctx context.Context, source image.Image, profile *pd
 	premultiplied := model == color.RGBAModel || model == color.RGBA64Model
 	table := newTIFFProfileTable(source)
 	components, intent := profile.Components(), profile.DefaultIntent()
+	defaultCMYK := profile.Model == "DeviceCMYK" && !profile.Calibrated()
 	result := image.NewNRGBA64(bounds)
 	var previous [4]float64
 	var previousPixel color.NRGBA64
@@ -184,9 +185,15 @@ func applyImageColorProfile(ctx context.Context, source image.Image, profile *pd
 					values[i] = srgbToLinear(values[i])
 				}
 			}
-			rgb, err := profile.SRGB(values[:components], intent)
-			if err != nil {
-				return nil, err
+			var rgb [3]float64
+			if defaultCMYK {
+				rgb = pdfgo.DeviceCMYKToSRGB(values[0], values[1], values[2], values[3])
+			} else {
+				var err error
+				rgb, err = profile.SRGB(values[:components], intent)
+				if err != nil {
+					return nil, err
+				}
 			}
 			var channels [3]uint16
 			for i, value := range rgb {

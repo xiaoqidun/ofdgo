@@ -210,7 +210,7 @@ func (p *planarTIFFImage) components(x, y int) [4]uint16 {
 		for i := range components {
 			components[i] = float64(min(uint32(ink[i]), maximum)) / float64(maximum)
 		}
-		rgb, _ := (&pdfgo.ColorSpace{Model: "DeviceCMYK"}).SRGB(components[:], "")
+		rgb := pdfgo.DeviceCMYKToSRGB(components[0], components[1], components[2], components[3])
 		var values [4]uint16
 		for i := range 3 {
 			values[i] = uint16(math.Round(rgb[i] * float64(maximum)))
@@ -352,6 +352,11 @@ func decodeTIFFPixels(ctx context.Context, data []byte, layout TIFFLayout) (imag
 	}
 	if profile != nil {
 		pixels, err = applyTIFFColorProfile(ctx, pixels, profile)
+		if err != nil {
+			return nil, err
+		}
+	} else if cmyk, ok := pixels.(*planarTIFFImage); ok && cmyk.cmyk {
+		pixels, err = applyTIFFColorProfile(ctx, pixels, &pdfgo.ColorSpace{Model: "DeviceCMYK"})
 		if err != nil {
 			return nil, err
 		}
