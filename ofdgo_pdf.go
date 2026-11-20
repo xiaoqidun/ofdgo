@@ -144,6 +144,10 @@ func NewPDFImport(ctx context.Context, input *Input, options PDFImportOptions) (
 	if !finite(renderer.DPI) || renderer.DPI <= 0 {
 		return nil, fmt.Errorf("invalid PDF raster DPI")
 	}
+	rasterDPI := renderer.DPI
+	if options.RasterDPI == 0 && options.Compression.Mode == CompressionLossy && options.Compression.ImageDPI() > 0 {
+		rasterDPI = min(rasterDPI, float64(options.Compression.ImageDPI()))
+	}
 	keep := false
 	options.Password = slices.Clone(options.Password)
 	defer func() {
@@ -160,7 +164,7 @@ func NewPDFImport(ctx context.Context, input *Input, options PDFImportOptions) (
 	editor.SetRenderBackends(renderer.Backends())
 	editor.fontDirs, editor.fontFS = renderer.FontSources()
 	editor.fontSourcesCache = renderer.fontSourcesCache
-	importer := &pdfImporter{resources: options.Resources, ctx: ctx, editor: editor, renderer: renderer, rasterDPI: renderer.DPI, page: -1, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}, structureBindings: &pdfStructureBindings{}}
+	importer := &pdfImporter{resources: options.Resources, ctx: ctx, editor: editor, renderer: renderer, rasterDPI: rasterDPI, page: -1, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}, structureBindings: &pdfStructureBindings{}}
 	readOptions := pdfgo.ReaderOptions{Password: options.Password, PasswordUTF8: options.PasswordUTF8, ShapeText: importer.shapePDFText}
 	if !options.Strict {
 		importer.warning = func(warning pdfgo.Diagnostic) {

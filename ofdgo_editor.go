@@ -65,6 +65,7 @@ type Editor struct {
 	fontMetrics        map[string]FontMetrics
 	backends           RenderBackends
 	images             map[string]image.Point
+	optimizedImages    map[[32]byte]CompressionOptions
 	resourceID         map[editorResourceKey]string
 	promoted           map[string]string
 	maxID              uint64
@@ -873,6 +874,34 @@ func (e *Editor) addImage(ctx context.Context, data []byte, size image.Point, fo
 	e.images[id] = size
 	e.resourceID[key] = id
 	return id, nil
+}
+
+// markOptimizedImage 记录本会话已按指定策略优化的图像摘要，避免连续写出时重复有损压缩
+// 入参: id 图像资源标识, options 压缩配置
+func (e *Editor) markOptimizedImage(id string, options CompressionOptions) {
+	if options.Mode != CompressionLossy {
+		return
+	}
+	for i := len(e.resources) - 1; i >= 0; i-- {
+		if e.resources[i].image != nil && e.resources[i].image.ID == id {
+			if e.optimizedImages == nil {
+				e.optimizedImages = make(map[[32]byte]CompressionOptions)
+			}
+			e.optimizedImages[sha256.Sum256(e.resources[i].data)] = options
+			return
+		}
+	}
+}
+
+// imageAlreadyOptimized 判断图像是否已按等价压缩策略优化，防止重复有损量化
+// 入参: hash 图像内容摘要, options 当前输出策略
+// 返回: bool 是否跳过重复优化
+func (e *Editor) imageAlreadyOptimized(hash [32]byte, options CompressionOptions) bool {
+	if options.Mode != CompressionLossy || len(e.optimizedImages) == 0 {
+		return false
+	}
+	recorded, ok := e.optimizedImages[hash]
+	return ok && recorded.ImageQuality() == options.ImageQuality() && recorded.ImageDPI() == options.ImageDPI()
 }
 
 // newRenderer 使用编辑器字体来源和完整后端配置创建资源度量器

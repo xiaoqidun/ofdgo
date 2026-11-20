@@ -317,6 +317,9 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 	if e.pdf != nil {
 		e.pdf.progress = platformValueOf(call.progress("conversion", "", true))
 		e.pdf.font = platformValueOf(nativeCallback(call.font))
+		e.pdfFont = e.pdf.font
+	} else if name == "ofdgoSaveDocument" && e.currentSession != nil && e.currentSession.pdfSource != nil {
+		e.pdfFont = platformValueOf(nativeCallback(call.font))
 	}
 	defer func() {
 		if err := call.abort(); err != nil {
@@ -724,13 +727,13 @@ func (c *nativeCall) prepare(name string, args []any) ([]any, error) {
 		}
 		saving := name == "ofdgoSaveDocument" || name == "ofdgoSaveSigned"
 		var indices, compression any
-		if saving {
-			if name != "ofdgoSaveSigned" && len(args) > 0 {
-				if m, ok := args[len(args)-1].(map[string]any); ok && m["mode"] != nil {
-					compression = m
-					args = args[:len(args)-1]
-				}
+		if (name == "ofdgoSaveDocument" && len(args) > 0) || (name == "ofdgoExportVersion" && len(args) > 1) {
+			if m, ok := args[len(args)-1].(map[string]any); ok && m["mode"] != nil {
+				compression = m
+				args = args[:len(args)-1]
 			}
+		}
+		if saving {
 			if len(args) == 0 {
 				return nil, fmt.Errorf("missing save page selection")
 			}
@@ -741,7 +744,10 @@ func (c *nativeCall) prepare(name string, args []any) ([]any, error) {
 			args = append(args, c.progress("export", "pages", false))
 		}
 		if name == "ofdgoExportVersion" {
-			args = append(args, c.progress("export", "prepare", true), checkpoint)
+			if compression == nil {
+				compression = map[string]any{"mode": 0}
+			}
+			args = append(args, c.progress("export", "prepare", true), compression, checkpoint)
 		}
 		if name == "ofdgoPrintPDF" {
 			args = append(args, checkpoint)
@@ -753,7 +759,7 @@ func (c *nativeCall) prepare(name string, args []any) ([]any, error) {
 			} else if indices != nil {
 				args = append(args, indices)
 			}
-		} else if name != "ofdgoPrintPDF" {
+		} else if name != "ofdgoPrintPDF" && name != "ofdgoExportVersion" {
 			for _, arg := range args {
 				if m, ok := arg.(map[string]any); ok && m["mode"] != nil {
 					args = append(args, checkpoint)

@@ -129,6 +129,9 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 			}
 		}
 	}
+	for name := range e.output.protectedFiles {
+		refs.files[name] = true
+	}
 	type resourceFile struct{ key, role string }
 	type resourceScope struct {
 		role     string
@@ -148,7 +151,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		if err != nil {
 			return err
 		}
-		preserved := refs.versions[cleanPackagePath(name)]
+		preserved := refs.versions[cleanPackagePath(name)] || e.output.protectedFiles[cleanPackagePath(name)]
 		for _, group := range root.children {
 			for _, node := range group.children {
 				if err := e.output.ctx.Err(); err != nil {
@@ -301,58 +304,60 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 			}
 			if role == "MediaFile" && optimizable {
 				options, demand := e.outputImageOptions(key)
-				cacheKey := outputImageKey{hash: source.key.hash, options: options, size: demand}
-				candidate, cached := imageResults[cacheKey]
-				var err error
-				if !cached {
-					candidate, err = optimizeOutputImage(e.output.ctx, outputImageJob{data: data, key: outputImageKey{options: options, size: demand}})
-					if err := e.output.ctx.Err(); err != nil {
-						return err
+				if !e.imageAlreadyOptimized(source.key.hash, options) {
+					cacheKey := outputImageKey{hash: source.key.hash, options: options, size: demand}
+					candidate, cached := imageResults[cacheKey]
+					var err error
+					if !cached {
+						candidate, err = optimizeOutputImage(e.output.ctx, outputImageJob{data: data, key: outputImageKey{options: options, size: demand}})
+						if err := e.output.ctx.Err(); err != nil {
+							return err
+						}
+						imageResults[cacheKey] = nil
+						if err == nil && len(candidate) < len(data) {
+							imageResults[cacheKey] = candidate
+						} else {
+							candidate = nil
+						}
 					}
-					imageResults[cacheKey] = nil
-					if err == nil && len(candidate) < len(data) {
-						imageResults[cacheKey] = candidate
-					} else {
-						candidate = nil
+					if candidate != nil {
+						data = candidate
+						parts[actual[key]] = data
+						digest, ok := imageDigests[cacheKey]
+						if !ok {
+							digest = sha256.Sum256(data)
+							imageDigests[cacheKey] = digest
+						}
+						source.key.hash = digest
 					}
-				}
-				if candidate != nil {
-					data = candidate
-					parts[actual[key]] = data
-					digest, ok := imageDigests[cacheKey]
-					if !ok {
-						digest = sha256.Sum256(data)
-						imageDigests[cacheKey] = digest
+					if data != nil {
+						source.format = outputImageFormat(data)
 					}
-					source.key.hash = digest
-				}
-				if data != nil {
-					source.format = outputImageFormat(data)
-				}
-				if source.format != "" {
-					formats[key] = source.format
-					suffix := ".png"
-					if source.format == "JPEG" {
-						suffix = ".jpg"
-					}
-					ext := path.Ext(actual[key])
-					if !strings.EqualFold(ext, suffix) && !(source.format == "JPEG" && strings.EqualFold(ext, ".jpeg")) {
-						if data == nil {
-							data, err = read(actual[key])
-							if err != nil {
-								return err
+					if source.format != "" {
+						formats[key] = source.format
+						suffix := ".png"
+						if source.format == "JPEG" {
+							suffix = ".jpg"
+						}
+						ext := path.Ext(actual[key])
+						if !strings.EqualFold(ext, suffix) && !(source.format == "JPEG" && strings.EqualFold(ext, ".jpeg")) {
+							if data == nil {
+								data, err = read(actual[key])
+								if err != nil {
+									return err
+								}
 							}
+							stem := strings.TrimSuffix(actual[key], ext)
+							name := stem + suffix
+							for n := 1; reserved[name]; n++ {
+								name = fmt.Sprintf("%s-%d%s", stem, n, suffix)
+							}
+							reserved[name] = true
+							locations[key] = name
+							parts[name] = data
+							delete(parts, actual[key])
+							removed[key] = true
 						}
-						stem := strings.TrimSuffix(actual[key], ext)
-						name := stem + suffix
-						for n := 1; reserved[name]; n++ {
-							name = fmt.Sprintf("%s-%d%s", stem, n, suffix)
-						}
-						reserved[name] = true
-						locations[key] = name
-						parts[name] = data
-						delete(parts, actual[key])
-						removed[key] = true
 					}
 				}
 			}
@@ -376,7 +381,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		return e.output.ctx.Err()
 	}
 	for _, name := range resources {
-		if refs.versions[cleanPackagePath(name)] {
+		if refs.versions[cleanPackagePath(name)] || e.output.protectedFiles[cleanPackagePath(name)] {
 			continue
 		}
 		data, err := read(name)

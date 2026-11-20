@@ -280,9 +280,10 @@ func WriteSource(ctx context.Context, source io.ReaderAt, size int64, writer io.
 		defer patchedReader.Close()
 		activeReader = patchedReader
 	}
-	decoder := &exportImageDecoder{ctx: ctx}
+	lossy := settings.Optimization.Compression.Mode == pdfgo.CompressionLossy
+	decoder := &exportImageDecoder{ctx: ctx, lossy: lossy}
 	defer decoder.clear()
-	options := pdfgo.RewriteOptions{Information: settings.Information, Images: images, ImageOptions: pdfgo.ImageWriteOptions{PreblendBinary: true}, LinkRegions: links, TextReplacements: texts, Optimization: settings.Optimization}
+	options := pdfgo.RewriteOptions{Information: settings.Information, Images: images, ImageOptions: pdfgo.ImageWriteOptions{PreblendBinary: !lossy}, LinkRegions: links, TextReplacements: texts, Optimization: settings.Optimization}
 	pageClips := make(map[pdfgo.Reference][]string, len(references))
 	pageFauxBolds := make(map[pdfgo.Reference][]TextFauxBold, len(references))
 	for i, ref := range references {
@@ -379,10 +380,11 @@ type decoderSlot struct {
 
 // exportImageDecoder 控制PDF写出期间的单槽懒解码，确保同时最多驻留单张图像像素
 type exportImageDecoder struct {
-	mu   sync.Mutex
-	ctx  context.Context
-	slot atomic.Pointer[decoderSlot]
-	err  error
+	mu    sync.Mutex
+	ctx   context.Context
+	lossy bool
+	slot  atomic.Pointer[decoderSlot]
+	err   error
 }
 
 // load 按需解码目标图像并立即丢弃上一张图像的未压缩像素缓冲，热路径零加锁
@@ -401,7 +403,7 @@ func (d *exportImageDecoder) load(target *lazyExportImage) *decoderSlot {
 		return s
 	}
 	d.slot.Store(nil)
-	pixels, err := decodeExportImage(d.ctx, target.source)
+	pixels, err := decodeExportImage(d.ctx, target.source, d.lossy)
 	if err != nil {
 		d.err = err
 		return nil
@@ -757,10 +759,10 @@ func clipPageImages(ctx context.Context, data []byte, clips []string) ([]byte, e
 	return output.Bytes(), ctx.Err()
 }
 
-// decodeExportImage 单次临时解码单张待导出图像并校验范围，不在源惰性对象上保留像素缓存
-// 入参: ctx 取消上下文, original 源图像或惰性图像
+// decodeExportImage 单次临时解码单张待导出图像并校验范围，有损模式降至8位以启用下游压缩，不在源惰性对象上保留像素缓存
+// 入参: ctx 取消上下文, original 源图像或惰性图像, lossy 是否处于有损压缩模式
 // 返回: image.Image 解码像素, error 解码、范围或取消错误
-func decodeExportImage(ctx context.Context, original image.Image) (image.Image, error) {
+func decodeExportImage(ctx context.Context, original image.Image, lossy bool) (image.Image, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -771,5 +773,69 @@ func decodeExportImage(ctx context.Context, original image.Image) (image.Image, 
 	if pixels == nil || pixels.Bounds() != original.Bounds() {
 		return nil, fmt.Errorf("PDF output image pixel bounds differ")
 	}
+	if lossy {
+		return normalizeLossyExportImage(ctx, pixels)
+	}
 	return pixels, nil
+}
+
+// normalizeLossyExportImage 将高精度或预乘图像规范化为8位非预乘格式，避免PDF写出阶段升级16位绕过有损压缩
+// 入参: ctx 取消上下文, pixels 已解码像素
+// 返回: image.Image 8位图像, error 取消错误
+func normalizeLossyExportImage(ctx context.Context, pixels image.Image) (image.Image, error) {
+	switch src := pixels.(type) {
+	case *image.NRGBA, *image.Gray, *image.YCbCr, *image.CMYK:
+		return pixels, ctx.Err()
+	case *image.Gray16:
+		b := src.Bounds()
+		w, h := b.Dx(), b.Dy()
+		dst := image.NewGray(image.Rect(0, 0, w, h))
+		for y := 0; y < h; y++ {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			srcRow := src.Pix[src.PixOffset(b.Min.X, b.Min.Y+y):]
+			dstRow := dst.Pix[y*dst.Stride:]
+			for x := 0; x < w; x++ {
+				dstRow[x] = srcRow[x*2]
+			}
+		}
+		return dst, ctx.Err()
+	case *image.NRGBA64:
+		b := src.Bounds()
+		w, h := b.Dx(), b.Dy()
+		dst := image.NewNRGBA(image.Rect(0, 0, w, h))
+		for y := 0; y < h; y++ {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			srcRow := src.Pix[src.PixOffset(b.Min.X, b.Min.Y+y):]
+			dstRow := dst.Pix[y*dst.Stride:]
+			for x := 0; x < w; x++ {
+				si, di := x*8, x*4
+				dstRow[di], dstRow[di+1], dstRow[di+2], dstRow[di+3] = srcRow[si], srcRow[si+2], srcRow[si+4], srcRow[si+6]
+			}
+		}
+		return dst, ctx.Err()
+	}
+	b := pixels.Bounds()
+	w, h := b.Dx(), b.Dy()
+	dst := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		dstRow := dst.Pix[y*dst.Stride:]
+		for x := 0; x < w; x++ {
+			if x&4095 == 4095 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
+			c := baseimage.NRGBAAt(pixels, b.Min.X+x, b.Min.Y+y)
+			di := x * 4
+			dstRow[di], dstRow[di+1], dstRow[di+2], dstRow[di+3] = c.R, c.G, c.B, c.A
+		}
+	}
+	return dst, ctx.Err()
 }

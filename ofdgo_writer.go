@@ -1375,6 +1375,7 @@ func (e *Editor) writePagesTo(writer io.Writer, indexes []int) (int64, error) {
 	selected.SetFontDirs(e.fontDirs...)
 	selected.SetFontFS(e.fontFS...)
 	selected.encryption = e.encryption
+	selected.optimizedImages = maps.Clone(e.optimizedImages)
 	id := selected.Info.DocID
 	selected.Info = cloneEditorData(e.Info)
 	selected.Info.DocID = id

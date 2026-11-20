@@ -52,7 +52,7 @@ func BMPDensity(data []byte) (Density, bool) {
 }
 
 // TIFFConversionDensity 校验可转换的TIFF字段并提取规范化后的像素密度
-// 无损模式保留色彩配置与CMYK原始编码，有损模式允许CMYK、ICC及预乘透明度转换为显示格式
+// 无损模式保留色彩配置、子目录与CMYK原始编码，有损模式允许常见非关键标签、子IFD、CMYK、ICC及预乘透明度转换为显示格式
 // 入参: data TIFF编码, layout 已校验的主图布局, allowColorConversion 是否允许颜色空间转换
 // 返回: Density PNG像素密度, bool 是否可完整转换
 func TIFFConversionDensity(data []byte, layout TIFFLayout, allowColorConversion bool) (Density, bool) {
@@ -61,7 +61,7 @@ func TIFFConversionDensity(data []byte, layout TIFFLayout, allowColorConversion 
 	if data[0] == 'M' {
 		order = binary.BigEndian
 	}
-	if layout.Next != 0 || layout.Offset != order.Uint32(data[4:]) || layout.Reduced {
+	if layout.Reduced || !allowColorConversion && (layout.Next != 0 || layout.Offset != order.Uint32(data[4:])) {
 		return density, false
 	}
 	offset := int(layout.Offset)
@@ -81,7 +81,7 @@ func TIFFConversionDensity(data []byte, layout TIFFLayout, allowColorConversion 
 			if value == 5 && !allowColorConversion {
 				return density, false
 			}
-		case 332, 334, 336, 34675:
+		case 269, 270, 271, 272, 280, 281, 285, 286, 287, 297, 305, 306, 315, 316, 318, 319, 330, 332, 334, 336, 700, 33432, 33723, 34377, 34665, 34675, 34853, 37724:
 			if !allowColorConversion {
 				return density, false
 			}
@@ -178,7 +178,7 @@ func TIFFConversionDensity(data []byte, layout TIFFLayout, allowColorConversion 
 	if layout.Orientation >= 5 {
 		density.X, density.Y = density.Y, density.X
 	}
-	return density, true
+	return density.Scale(layout.size(), layout.DisplaySize())
 }
 
 // Scale 按最终像素尺寸保留绝对密度或精确相对比例
@@ -334,6 +334,52 @@ func PageMetadataContext(ctx context.Context, data []byte, format string, dpi fl
 	}
 	info.XDPI, info.YDPI = info.XDPI*scaleX, info.YDPI*scaleY
 	return info, ctx.Err()
+}
+
+// WithJPEGDensity 在JPEG头后写入或更新JFIF密度段，保留源编码不变
+// 入参: data 完整JPEG编码, density 像素密度
+// 返回: []byte 带密度的编码, bool 密度是否可在JFIF范围内表示
+func WithJPEGDensity(data []byte, density Density) ([]byte, bool) {
+	if !IsJPEG(data) {
+		return nil, false
+	}
+	rx, ry := math.Round(density.X), math.Round(density.Y)
+	if !(rx >= 1 && ry >= 1 && rx <= math.MaxInt32 && ry <= math.MaxInt32) {
+		return nil, false
+	}
+	unit := byte(0)
+	var dx, dy uint64
+	if density.Unit == 0 {
+		ratio := new(big.Rat).SetFrac64(int64(rx), int64(ry))
+		dx, dy = ratio.Num().Uint64(), ratio.Denom().Uint64()
+	} else {
+		ix, iy := uint64(rx), uint64(ry)
+		if ix%100 == 0 && iy%100 == 0 {
+			unit, dx, dy = 2, ix/100, iy/100
+		} else {
+			unit = 1
+			dx = max(1, uint64(math.Round(density.X*0.0254)))
+			dy = max(1, uint64(math.Round(density.Y*0.0254)))
+		}
+	}
+	if dx > 65535 || dy > 65535 {
+		return nil, false
+	}
+	if len(data) >= 20 && data[2] == 0xff && data[3] == 0xe0 && binary.BigEndian.Uint16(data[4:6]) >= 16 && bytes.Equal(data[6:11], []byte("JFIF\x00")) {
+		output := bytes.Clone(data)
+		output[13] = unit
+		binary.BigEndian.PutUint16(output[14:16], uint16(dx))
+		binary.BigEndian.PutUint16(output[16:18], uint16(dy))
+		return output, true
+	}
+	segment := []byte{0xff, 0xe0, 0, 16, 'J', 'F', 'I', 'F', 0, 1, 1, unit, 0, 0, 0, 0, 0, 0}
+	binary.BigEndian.PutUint16(segment[12:14], uint16(dx))
+	binary.BigEndian.PutUint16(segment[14:16], uint16(dy))
+	output := make([]byte, 0, len(data)+len(segment))
+	output = append(output, data[:2]...)
+	output = append(output, segment...)
+	output = append(output, data[2:]...)
+	return output, true
 }
 
 // WithPNGDensity 在无密度块的PNG头后插入pHYs，保留源编码不变

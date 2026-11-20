@@ -24,6 +24,7 @@ import (
 	"hash/crc32"
 	"io"
 	"maps"
+	"path"
 	"reflect"
 	"slices"
 	"strings"
@@ -883,18 +884,20 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		if file, ok := reader.packageFile(name); ok {
 			name = cleanPackagePath(file.Name)
 		}
-		data, ok := parts[name]
-		if !ok {
-			data, err = reader.readFile(name)
+		if e.output == nil || !e.output.protectedFiles[name] {
+			data, ok := parts[name]
+			if !ok {
+				data, err = reader.readFile(name)
+				if err != nil {
+					return 0, err
+				}
+			}
+			data, _, err = editorDocInfoXML(data, e.source.fallbackDocID, reader.documentIndex)
 			if err != nil {
 				return 0, err
 			}
+			parts[name] = data
 		}
-		data, _, err = editorDocInfoXML(data, e.source.fallbackDocID, reader.documentIndex)
-		if err != nil {
-			return 0, err
-		}
-		parts[name] = data
 	}
 	remaining := maps.Clone(reader.files)
 	if remaining == nil {
@@ -911,6 +914,9 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 	}
 	output := &ofdCountingWriter{writer: writer}
 	archive := zip.NewWriter(output)
+	if e.output != nil && e.output.options.Mode != CompressionUnchanged {
+		configureArchive(archive, e.output.options)
+	}
 	if reader.Zip != nil {
 		_ = archive.SetComment(reader.Zip.Comment)
 		buffer := make([]byte, 32*1024)
@@ -959,6 +965,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 	if reader.Zip == nil {
 		if src := reader.encryptedSource(); src != nil {
 			buffer := make([]byte, 32*1024)
+			compress := e.output != nil && e.output.options.Mode != CompressionUnchanged
 			for _, name := range src.names() {
 				if err := ctx.Err(); err != nil {
 					return output.count, err
@@ -969,8 +976,34 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 				if _, modified := remaining[name]; modified {
 					continue
 				}
+				if compress {
+					if size, ok := src.size(name); ok && size <= outputOptimizationBufferLimit {
+						input, openErr := src.open(name)
+						if openErr != nil {
+							return output.count, openErr
+						}
+						data, readErr := io.ReadAll(imageInput{ReadCloser: input, ctx: ctx})
+						closeErr := input.Close()
+						if readErr != nil {
+							return output.count, readErr
+						}
+						if closeErr != nil {
+							return output.count, closeErr
+						}
+						if err := e.writeOutputEntry(archive, zip.FileHeader{Name: name, Method: zip.Deflate}, data); err != nil {
+							return output.count, err
+						}
+						continue
+					}
+				}
 				method := uint16(zip.Store)
-				if strings.HasSuffix(strings.ToLower(name), ".xml") {
+				if compress {
+					switch strings.ToLower(path.Ext(name)) {
+					case ".jpg", ".jpeg", ".png", ".jp2", ".jb2", ".zip", ".pdf", ".ofd":
+					default:
+						method = zip.Deflate
+					}
+				} else if strings.HasSuffix(strings.ToLower(name), ".xml") {
 					method = zip.Deflate
 				}
 				header := zip.FileHeader{Name: name, Method: method}

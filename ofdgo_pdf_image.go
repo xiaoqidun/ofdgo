@@ -217,12 +217,16 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 				if err != nil {
 					return err
 				}
+				optimized = true
 			}
 			decoded = nil
 		}
 		id, err = p.editor.addDecodedImageContext(p.ctx, data, decoded)
 		if err != nil {
 			return err
+		}
+		if optimized {
+			p.editor.markOptimizedImage(id, p.compression)
 		}
 		if cacheable {
 			p.imageContents.put(contentKey, pdfImageContent{source: source, id: id}, len(source.Stream.Data)+65536)

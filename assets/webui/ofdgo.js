@@ -1744,6 +1744,7 @@ batchElements.Clear.addEventListener("click", () => {
 	batchElements.Progress.value = 0;
 });
 batchElements.Format.addEventListener("change", updateBatchControls);
+batchElements.Destination.addEventListener("change", updateBatchControls);
 batchElements.DPI.addEventListener("change", updateBatchControls);
 batchElements.Close.addEventListener("click", () => batchElements.Panel.close());
 batchElements.Cancel.addEventListener("click", cancelBatch);
@@ -3727,7 +3728,7 @@ async function exportManagedVersion() {
 	try {
 		file = nativeHost || window.showSaveFilePicker ? await saveFilePicker({suggestedName: name, types: [{description: "OFD", accept: {"application/ofd": [".ofd"]}}]}) : null;
 		if (tab.closed || tab.state !== state || state.doc !== originalDocument || wasmSeq !== state.wasmSeq) return;
-		const result = await callTabWASM(tab, "ofdgoExportVersion", entry.id, file);
+		const result = await callTabWASM(tab, "ofdgoExportVersion", entry.id, compressionOptions(el.outputCompression.value), file);
 		if (tab.closed || tab.state !== state || wasmSeq !== state.wasmSeq) return;
 		if (result.blob) {
 			if (isForegroundDocument(tab)) downloadBytes(result.blob, result.mime, name);
@@ -6547,8 +6548,10 @@ async function loadWASM(tab = documentTab()) {
 						setProgress("正在写入文件", null);
 					} else if (!el.cancelExportButton.disabled) {
 						if (data.stage === "prepare") {
-							const label = { snapshot: "正在准备文档", ids: "正在检查标识", commit: "正在整理文档", fonts: "正在处理字体", pages: "正在处理页面", references: "正在检查引用", resources: "正在整理资源", compress: "正在压缩文件", write: "正在写入文件", sign: "正在签署文档", encrypt: "正在加密文档" }[data.phase];
-							setProgress(data.phase === "compress" && data.completed ? `${label} · 已处理 ${data.completed} 项` : label, data.total ? data.completed / data.total * 100 : null);
+							const writing = data.phase?.startsWith("write.");
+							const phase = writing ? data.phase.slice(6) : data.phase;
+							const label = { open: "正在读取文档", convert: "正在转换文档", snapshot: "正在准备文档", ids: "正在检查标识", commit: "正在整理文档", fonts: "正在处理字体", pages: "正在处理页面", references: "正在检查引用", resources: "正在整理资源", compress: "正在压缩文件", write: "正在写入文件", sign: "正在签署文档", encrypt: "正在加密文档" }[phase] || (writing ? "正在写入文件" : "");
+							setProgress(phase === "compress" && data.completed ? `${label} · 已处理 ${data.completed} 项` : phase === "convert" && data.total ? `${label} · ${data.completed} / ${data.total} 页` : label, data.total ? data.completed / data.total * 100 : null);
 						} else if (data.completed === data.total) {
 							setProgress("正在整理文件", null);
 						} else {
@@ -10781,7 +10784,7 @@ function renderBatchList(force = true) {
 function updateBatchControls() {
 	for (const name of ["Add", "Clear", "Format", "Compression", "FontMode", "Destination", "DPI"]) batchElements[name].disabled = batch.running;
 	batchElements.FontRow.hidden = !(batch.items.length ? batch.items : [null]).some(item => (item?.format || batchElements.Format.value) === "ofd");
-	batchElements.Compression.disabled ||= (batch.items.length ? batch.items : [null]).every(item => (item?.format || batchElements.Format.value) === "txt");
+	batchElements.Compression.disabled ||= batchElements.Destination.value !== "archive" && (batch.items.length ? batch.items : [null]).every(item => (item?.format || batchElements.Format.value) === "txt");
 	batchElements.Clear.disabled ||= !batch.items.length;
 	batchElements.Start.disabled = batch.running || !batch.items.length || !batch.formats.length;
 	batchElements.Start.hidden = batch.running;
@@ -10962,8 +10965,8 @@ async function runBatch() {
 	if (!defaultFormat) return;
 	const pageRange = item => item.pages.trim() === "全部" ? "" : item.pages.trim();
 	const dpi = Number(batchElements.DPI.value);
-	const compression = compressionOptions(batchElements.Compression.value);
 	const archive = batchElements.Destination.value === "archive";
+	const compression = !archive && batch.items.every(item => (item.format || defaultFormat.value) === "txt") ? { mode: 0 } : compressionOptions(batchElements.Compression.value);
 	const backend = state.renderBackend;
 	const fontKey = [fontManager.permission, fontManager.records().map(font => [font.id, font.name, font.enabled, font.checksum])];
 	for (const item of batch.items) {

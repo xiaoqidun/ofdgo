@@ -219,10 +219,10 @@ func (r *Renderer) RenderToPNG(page *PageContent, writer io.Writer) error {
 		return png.Encode(&imageMetadataWriter{writer: writer, skip: 33, data: chunk}, img)
 	}
 	var encoded bytes.Buffer
-	if err := png.Encode(&imageMetadataWriter{writer: &encoded, skip: 33, data: chunk}, img); err != nil {
+	if err := png.Encode(&encoded, img); err != nil {
 		return err
 	}
-	return r.writeCompressedImage(writer, encoded.Bytes())
+	return r.writeCompressedImage(&imageMetadataWriter{writer: writer, skip: 33, data: chunk}, encoded.Bytes())
 }
 
 // RenderToJPEG 渲染为白底JPEG，像素尺寸由DPI决定

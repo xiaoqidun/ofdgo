@@ -310,7 +310,7 @@ async function handleMessage(engine, { id, name, args }) {
 				const file = destination?.fileHandle || destination;
 				saveFile = file;
 				saveStamp = destination?.saveStamp;
-				const compression = saving && name !== "ofdgoSaveSigned" && args.at(-1)?.mode !== undefined ? args.pop() : null;
+				const compression = (saving && name !== "ofdgoSaveSigned" || name === "ofdgoExportVersion") && args.at(-1)?.mode !== undefined ? args.pop() : null;
 				const indices = saving ? args.shift() : null;
 				if (file) output = await file.createWritable();
 				signal.throwIfAborted();
@@ -336,7 +336,7 @@ async function handleMessage(engine, { id, name, args }) {
 					args.push((phase, completed, total, done) => {
 						postMessage({ id, type: "export", stage: "prepare", phase, completed, total });
 						finish(done);
-					}, done => finish(done));
+					}, compression || {mode: 0}, done => finish(done));
 				} else if (name === "ofdgoPrintPDF") {
 					args.push(done => finish(done));
 				} else if (saving) {
@@ -347,10 +347,10 @@ async function handleMessage(engine, { id, name, args }) {
 					if (compression || name === "ofdgoSaveSnapshot") args.push(indices, compression || {mode: 0}, done => finish(done));
 					else if (indices != null) args.push(indices);
 				}
-				if (!saving && name !== "ofdgoPrintPDF" && args.some(value => value?.mode !== undefined)) args.push(done => finish(done));
+				if (!saving && name !== "ofdgoPrintPDF" && name !== "ofdgoExportVersion" && args.some(value => value?.mode !== undefined)) args.push(done => finish(done));
 			}
 		}
-		if (engine.pdf && name !== "ofdgoOpenPDF") {
+		if ((engine.pdf || engine.pdfSource && name === "ofdgoSaveDocument") && name !== "ofdgoOpenPDF") {
 			channel ||= new MessageChannel();
 			const context = await globalThis.ofdgoEngineCall(engine.id, "ofdgoPDFContext", null, (phase, completed, total, done) => {
 				postMessage({id, type: "conversion", phase, completed, total});
@@ -367,8 +367,9 @@ async function handleMessage(engine, { id, name, args }) {
 		}, ...args);
 		signal?.throwIfAborted();
 		const result = typeof payload === "string" ? JSON.parse(payload) : payload;
-		if (result.ok && name === "ofdgoOpenPDF") engine.pdf = true;
-		if (result.ok && (name === "ofdgoOpen" || name === "ofdgoLoadPDF" && result.data.done)) engine.pdf = false;
+		if (result.ok && name === "ofdgoOpenPDF") engine.pdf = engine.pdfSource = true;
+		if (result.ok && (name === "ofdgoOpen" || name === "ofdgoCreateDocument")) engine.pdf = engine.pdfSource = false;
+		if (result.ok && name === "ofdgoLoadPDF" && result.data.done) engine.pdf = false;
 		if (started !== null && result.ok) result.elapsed = performance.now() - started;
 		if (cancellable && !importing && !converting && !processingFonts && !resources && result.ok) {
 			result.data.size = size;

@@ -142,9 +142,13 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 			continue
 		}
 		options, demand := e.outputImageOptions(key)
-		cacheKey := outputImageKey{hash: sha256.Sum256(data), options: options, size: demand}
+		hash := sha256.Sum256(data)
+		cacheKey := outputImageKey{hash: hash, options: options, size: demand}
 		if sources != nil {
 			sources[key] = outputImageSource{key: cacheKey, format: outputImageFormat(data)}
+		}
+		if e.imageAlreadyOptimized(hash, options) {
+			continue
 		}
 		if _, cached := results[cacheKey]; cached {
 			continue

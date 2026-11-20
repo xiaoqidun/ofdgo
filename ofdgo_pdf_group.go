@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"io"
 	"math"
 	"reflect"
 
@@ -523,16 +524,36 @@ func (p *pdfImporter) renderGroupSceneInto(source *RasterPage, box Box, target *
 // 入参: img 透明图像, box 页面区域, opacity 组透明度, origin 来源区段
 // 返回: error 保存错误
 func (p *pdfImporter) appendRasterGroup(img image.Image, box Box, opacity float64, origin pdfObjectOrigin) error {
-	var data bytes.Buffer
-	if err := pdfgo.EncodePNG(p.ctx, &data, img); err != nil {
-		return err
+	var encoded []byte
+	decoded := img
+	optimized := false
+	if p.compression.Mode == CompressionLossy {
+		var err error
+		encoded, err = pdfgo.EncodeImageResource(p.ctx, img, p.compression)
+		if err != nil && !errors.Is(err, io.ErrShortBuffer) {
+			return err
+		}
+		if err == nil {
+			optimized = true
+			decoded = nil
+		}
+	}
+	if len(encoded) == 0 {
+		var data bytes.Buffer
+		if err := pdfgo.EncodePNG(p.ctx, &data, img); err != nil {
+			return err
+		}
+		encoded = data.Bytes()
 	}
 	if err := p.ctx.Err(); err != nil {
 		return err
 	}
-	id, err := p.editor.addDecodedImageContext(p.ctx, data.Bytes(), img)
+	id, err := p.editor.addDecodedImageContext(p.ctx, encoded, decoded)
 	if err != nil {
 		return err
+	}
+	if optimized {
+		p.editor.markOptimizedImage(id, p.compression)
 	}
 	alpha := int(math.Round(opacity * 255))
 	object := ImageObject{ResourceID: id, Boundary: pdfBoundary(box), CTM: pdfNumbers(box.W, 0, 0, box.H, 0, 0), Alpha: &alpha}
