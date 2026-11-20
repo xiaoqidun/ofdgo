@@ -1240,7 +1240,7 @@ func (e *businessEngine) checkDocument(name string) error {
 	switch name {
 	case "ofdgoFontFaces", "ofdgoFontMenu", "ofdgoFontPreferenceOrder", "ofdgoFontFace", "ofdgoCheckTextFont", "ofdgoImagePageSize", "ofdgoImagePreview":
 		return nil
-	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDestinationView", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoPagesText", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoClearImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
+	case "ofdgoDiscardObjects", "ofdgoExportObjects", "ofdgoCheckDocument", "ofdgoPDFContext", "ofdgoOpenPDF", "ofdgoOpen", "ofdgoLoadPDF", "ofdgoConfigure", "ofdgoDocumentInfo", "ofdgoSVGFontData", "ofdgoRenderBackends", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoMatchFontFiles", "ofdgoOutlineLinks", "ofdgoDestinationView", "ofdgoDocumentNavigation", "ofdgoInvoices", "ofdgoRenderPage", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoPagesText", "ofdgoOpenLinks", "ofdgoDiscardPrint", "ofdgoDiscardSave", "ofdgoSaveDocument", "ofdgoDetectFormat", "ofdgoConvertFile", "ofdgoPackFiles", "ofdgoLoadImport", "ofdgoClearImport", "ofdgoCreateDocument", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF":
 		return nil
 	default:
 		return ofdgo.ErrIncompleteDocument
@@ -8194,13 +8194,32 @@ func (e *businessEngine) discardSave(args []platformValue) (any, error) {
 	return successResult(nil), nil
 }
 
-// saveDocument 分块写出当前编辑文档或指定页面
+// saveDocument 分块写出当前编辑文档或指定页面，未编辑的明文PDF在有损模式下直接流式转换输出
 // 入参: args 数据写出回调、可选准备进度回调和可选页面索引
 // 返回: any 保存结果, error 错误信息
 func (e *businessEngine) saveDocument(args []platformValue) (any, error) {
 	if e.currentEditor == nil {
 		if e.currentSession == nil {
 			return nil, fmt.Errorf("ofd document is not opened")
+		}
+		var options ofdgo.WriteOptions
+		if len(args) > 3 {
+			if err := e.compressionFromJS(args[3], &options.Compression); err != nil {
+				return nil, err
+			}
+		}
+		hasIndices := len(args) > 2 && !args[2].IsNull() && !args[2].IsUndefined()
+		if !hasIndices && options.Compression.Mode == ofdgo.CompressionLossy && !e.currentSession.Reader.Encryption().Encrypted {
+			pdfInput := e.currentSession.pdfSource
+			if e.pdf != nil {
+				pdfInput = e.pdf.input
+			}
+			if pdfInput != nil {
+				return e.savePDFCompressed(pdfInput, args, options.Compression)
+			}
+		}
+		if e.pdf != nil {
+			return nil, ofdgo.ErrIncompleteDocument
 		}
 		editor, err := e.currentSession.Reader.EditorContext(e.operationContext())
 		if err != nil {
@@ -8209,6 +8228,36 @@ func (e *businessEngine) saveDocument(args []platformValue) (any, error) {
 		return e.saveEditor(editor, args)
 	}
 	return e.saveEditor(e.currentEditor, args)
+}
+
+// savePDFCompressed 将未编辑的明文PDF直接按有损压缩流式转为OFD，避免生成中间无损图像快照
+// 入参: input 源PDF输入, args 写出回调、进度回调、页码、压缩选项与取消检查, compression 压缩配置
+// 返回: any 保存结果, error 转换或写出错误
+func (e *businessEngine) savePDFCompressed(input *ofdgo.Input, args []platformValue, compression ofdgo.CompressionOptions) (any, error) {
+	if len(args) == 0 || args[0].Type() != platformTypeFunction {
+		return nil, fmt.Errorf("missing output callback")
+	}
+	writer := bufio.NewWriterSize(exportWriter{write: args[0]}, 1<<20)
+	ctx := e.operationContext()
+	if len(args) > 4 {
+		ctx = e.newOutputContext(args[4])
+	}
+	dirs, sources := e.currentSession.Renderer.FontSources()
+	pdfOptions := ofdgo.PDFImportOptions{
+		Resources:       e.resources,
+		Compression:     compression,
+		RendererOptions: []ofdgo.RendererOption{ofdgo.WithFontDirs(dirs...), ofdgo.WithFontFS(sources...), ofdgo.WithRenderBackends(e.currentSession.Renderer.Backends())},
+	}
+	if len(args) > 1 {
+		pdfOptions.OnProgress = e.editorOperationProgress(args[1])
+	}
+	if _, err := ofdgo.ConvertPDF(ctx, input, writer, pdfOptions); err != nil {
+		return nil, err
+	}
+	if err := writer.Flush(); err != nil {
+		return nil, err
+	}
+	return successResult(map[string]any{"mime": "application/ofd", "label": "OFD"}), nil
 }
 
 // saveEditor 统一分块写出及进度取消，加密策略由库层执行

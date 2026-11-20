@@ -152,49 +152,44 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	}
 	if id == "" {
 		var data []byte
-		if !source.ImageMask && key.process == "" && p.compression.Mode != CompressionLossy {
-			data, err = codecpdf.EncodeCMYKTIFF(p.ctx, source)
+		var decoded image.Image
+		if key.process != "" {
+			decoded, err = p.imageProcess(source, key.process)
 			if err != nil {
 				return err
 			}
-		}
-		var jbig2Original, jpegOriginal []byte
-		var decoded image.Image
-		if len(data) == 0 {
-			if key.process != "" {
-				decoded, err = p.imageProcess(source, key.process)
+			if key.size != (image.Point{}) {
+				decoded, err = pdfgo.ResizeImage(p.ctx, decoded, key.size)
 				if err != nil {
 					return err
-				}
-				if key.size != (image.Point{}) {
-					decoded, err = pdfgo.ResizeImage(p.ctx, decoded, key.size)
-					if err != nil {
-						return err
-					}
-				}
-			} else {
-				jbig2Original, err = source.JBIG2FileContext(p.ctx)
-				if err != nil {
-					return err
-				}
-				jpegOriginal, err = source.JPEGFileContext(p.ctx)
-				if err != nil {
-					return err
-				}
-				if len(jbig2Original) == 0 && len(jpegOriginal) == 0 && (source.ImageMask || key.size != (image.Point{})) {
-					decoded, err = source.DecodeImageSizeContext(p.ctx, key.size)
-					if err != nil {
-						return err
-					}
 				}
 			}
-			if source.ImageMask {
-				decoded = &codecpdf.StencilImage{Source: decoded, Fill: key.tint}
+		} else {
+			data, err = source.JBIG2FileContext(p.ctx)
+			if err != nil {
+				return err
 			}
-			data = jbig2Original
 			if len(data) == 0 {
-				data = jpegOriginal
+				data, err = source.JPEGFileContext(p.ctx)
+				if err != nil {
+					return err
+				}
 			}
+			if len(data) == 0 && !source.ImageMask && p.compression.Mode != CompressionLossy {
+				data, err = codecpdf.EncodeCMYKTIFF(p.ctx, source)
+				if err != nil {
+					return err
+				}
+			}
+			if len(data) == 0 && (source.ImageMask || key.size != (image.Point{})) {
+				decoded, err = source.DecodeImageSizeContext(p.ctx, key.size)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if source.ImageMask {
+			decoded = &codecpdf.StencilImage{Source: decoded, Fill: key.tint}
 		}
 		optimized := false
 		if len(data) == 0 && decoded != nil && !source.ImageMask && p.compression.Mode == CompressionLossy {

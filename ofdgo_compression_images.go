@@ -590,7 +590,7 @@ func optimizeTIFFResource(ctx context.Context, data []byte, options CompressionO
 	if layout.TileWidth != 0 && int64(layout.TileWidth) > outputOptimizationBufferLimit/pixelSize/int64(layout.TileHeight) {
 		return data, ctx.Err()
 	}
-	density, ok := baseimage.TIFFConversionDensity(data, layout)
+	density, ok := baseimage.TIFFConversionDensity(data, layout, options.Mode == CompressionLossy)
 	if !ok {
 		return data, ctx.Err()
 	}

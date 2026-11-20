@@ -11231,15 +11231,16 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			setBusy(true, "正在生成文件", null, status, tab);
 		}
 		const readingSave = saving && !state.sourcePDF && !state.editorInfo && indices === null && compression.mode === 0;
+		const pdfLossySave = saving && state.sourcePDF && !state.editorInfo && !state.doc.encryption?.encrypted && indices === null && compression.mode === 2;
 		const destination = !nativeHost && file && file === state.saveHandle && state.saveStamp ? {fileHandle: file, saveStamp: state.saveStamp} : file;
-		if (saving && indices === null && !readingSave) {
+		if (saving && indices === null && !readingSave && !pdfLossySave) {
 			snapshotPrepared = true;
 			savedRevision = state.editorInfo?.revision;
 			encryptionDirty = state.encryptionDirty;
 			await callWASM("ofdgoPrepareSave");
 			if (tab.closed || wasmSeq !== state.wasmSeq) return;
 		}
-		if (saving && indices === null && !readingSave) {
+		if (saving && indices === null && !readingSave && !pdfLossySave) {
 			background = true;
 			state.exporting = false;
 			setBusy(false, "", 0, "", tab);

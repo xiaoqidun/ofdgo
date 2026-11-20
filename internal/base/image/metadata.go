@@ -52,10 +52,10 @@ func BMPDensity(data []byte) (Density, bool) {
 }
 
 // TIFFConversionDensity 校验可转换的TIFF字段并提取规范化后的像素密度
-// 色彩配置、预乘透明度、扩展字段及其他目录需保留原始编码
-// 入参: data TIFF编码, layout 已校验的主图布局
+// 无损模式保留色彩配置与CMYK原始编码，有损模式允许CMYK、ICC及预乘透明度转换为显示格式
+// 入参: data TIFF编码, layout 已校验的主图布局, allowColorConversion 是否允许颜色空间转换
 // 返回: Density PNG像素密度, bool 是否可完整转换
-func TIFFConversionDensity(data []byte, layout TIFFLayout) (Density, bool) {
+func TIFFConversionDensity(data []byte, layout TIFFLayout, allowColorConversion bool) (Density, bool) {
 	var density Density
 	var order binary.ByteOrder = binary.LittleEndian
 	if data[0] == 'M' {
@@ -78,7 +78,11 @@ func TIFFConversionDensity(data []byte, layout TIFFLayout) (Density, bool) {
 		switch tag {
 		case 256, 257, 258, 259, 273, 274, 277, 278, 279, 320, 322, 323, 324, 325:
 		case 262:
-			if value == 5 {
+			if value == 5 && !allowColorConversion {
+				return density, false
+			}
+		case 332, 334, 336, 34675:
+			if !allowColorConversion {
 				return density, false
 			}
 		case 254:
@@ -110,11 +114,15 @@ func TIFFConversionDensity(data []byte, layout TIFFLayout) (Density, bool) {
 				return density, false
 			}
 		case 338:
-			if kind != 3 || number != 1 || value != 2 {
+			if kind != 3 || number != 1 || value != 2 && (!allowColorConversion || value != 1) {
 				return density, false
 			}
 		case 339:
-			if kind != 3 || number == 0 || number > 4 {
+			maxChannels := uint32(4)
+			if allowColorConversion {
+				maxChannels = 5
+			}
+			if kind != 3 || number == 0 || number > maxChannels {
 				return density, false
 			}
 			values := entry[8:]
