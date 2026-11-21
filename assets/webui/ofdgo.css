@@ -2284,6 +2284,7 @@ body[data-hide-meta] .meta-panel {
 	overflow-x: hidden;
 	overflow-y: auto;
 	overflow-anchor: none;
+	will-change: scroll-position;
 }
 
 .page-selection-tools {
@@ -3422,7 +3423,7 @@ button.outline-link:hover {
 	width: var(--thumb-paper-width);
 	height: var(--thumb-paper-height);
 	justify-self: center;
-	align-self: start;
+	align-self: center;
 }
 
 .page-list.grouped-pages .page-list-item[data-pressed] .thumb-label,
@@ -3446,6 +3447,7 @@ button.outline-link:hover {
 	padding: 8px 8px 4px;
 	font-variant-numeric: tabular-nums;
 	text-align: left;
+	contain: strict;
 	transition: border-color 0.16s ease, background-color 0.16s ease;
 }
 
@@ -3454,8 +3456,22 @@ button.outline-link:hover {
 	background: var(--hover-fill);
 }
 
+.page-list-item.pair-active,
+.page-list-item[data-pair-current] {
+	border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+	background: var(--accent-soft);
+}
+
+.page-list-item.pair-active:not(:disabled):hover,
+.page-list-item[data-pair-current]:not(:disabled):hover {
+	border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+	background: color-mix(in srgb, var(--selected-fill) 72%, var(--hover-fill));
+}
+
 .page-list-item[data-current],
-.page-list-item[data-current]:hover {
+.page-list-item[data-current]:hover,
+.page-list-item.active,
+.page-list-item.active:hover {
 	border-color: var(--accent);
 	color: var(--accent-strong);
 	font-weight: 700;
@@ -3468,6 +3484,7 @@ button.outline-link:hover {
 }
 
 .page-list-item[data-current]:not([data-pressed="false"]),
+.page-list-item.active:not([data-pressed="false"]),
 .page-list-item[data-pressed="true"],
 .page-list-item[data-pressed="true"]:hover {
 	border-color: transparent;
@@ -3482,6 +3499,7 @@ button.outline-link:hover {
 	place-items: center;
 	aspect-ratio: var(--thumb-ratio, 0.707 / 1);
 	overflow: hidden;
+	contain: strict;
 	border: 1px solid var(--line);
 	background: #ffffff;
 	box-shadow: 0 2px 7px rgba(31, 36, 40, 0.1);
@@ -3534,6 +3552,7 @@ button.outline-link:hover {
 	min-height: 0;
 	overflow: auto;
 	overflow-anchor: none;
+	will-change: scroll-position;
 	background:
 		linear-gradient(90deg, var(--canvas-grid) 1px, transparent 1px),
 		linear-gradient(0deg, var(--canvas-grid) 1px, transparent 1px),
@@ -3704,22 +3723,18 @@ button.outline-link:hover {
 .page-shell {
 	position: relative;
 	overflow: hidden;
+	contain: layout style paint;
 	border: 1px solid rgba(170, 183, 193, 0.55);
 	background: var(--page);
 }
 
 .page-frame.continuous .page-shell {
 	border: 0;
+	border-bottom: 1px solid rgba(170, 183, 193, 0.48);
 }
 
-.page-frame.continuous .page-shell::after {
-	content: "";
-	position: absolute;
-	inset: 0;
+.page-frame.continuous .svg-host.two-page > .page-shell[data-spread-col="0"] {
 	border-right: 1px solid rgba(170, 183, 193, 0.55);
-	border-bottom: 1px solid rgba(170, 183, 193, 0.55);
-	pointer-events: none;
-	z-index: 1;
 }
 
 .page-shell.error,
@@ -3963,6 +3978,11 @@ button.outline-link:hover {
 
 .page-list-item.reordering {
 	opacity: 0.5;
+}
+
+.page-list-item.drop-before,
+.page-list-item.drop-after {
+	contain: layout style;
 }
 
 .page-list-item.drop-before::before,

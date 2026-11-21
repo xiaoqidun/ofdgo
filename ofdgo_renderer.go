@@ -58,6 +58,8 @@ type Renderer struct {
 	printContents         string
 	textContentOnly       bool
 	knownSVGResources     map[string]bool
+	svgIDPrefix           string
+	svgPrecision          int
 	backends              RenderBackends
 	rasterDisabled        bool
 	backendStates         map[any]any

@@ -52,6 +52,10 @@ type PreviewOptions struct {
 	Objects bool
 	// KnownResources 标识调用方仍持有的资源，返回引用但不重复返回数据
 	KnownResources map[string]bool
+	// IDPrefix 指定页面SVG内部局部ID前缀，为空保持默认命名
+	IDPrefix string
+	// Precision 指定纯矢量路径毫米坐标小数位数，非正数默认3位
+	Precision int
 }
 
 // RenderToSVGWithFonts 渲染为SVG并返回页面引用的字体资源，不在SVG中嵌入字体
@@ -80,8 +84,18 @@ func (r *Renderer) RenderToSVGWithObjects(page *PageContent, writer io.Writer) (
 // 入参: page 页面内容, writer 输出流, options 显示方式
 // 返回: SVGResources 需由调用方映射地址的资源, error 错误信息
 func (r *Renderer) RenderPreview(page *PageContent, writer io.Writer, options PreviewOptions) (resources SVGResources, err error) {
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	if err := ctx.Err(); err != nil {
+		return SVGResources{}, err
+	}
 	view := *r
+	view.pageContext = ctx
 	view.knownSVGResources = options.KnownResources
+	view.svgIDPrefix = options.IDPrefix
+	view.svgPrecision = options.Precision
 	r = &view
 	defer func() {
 		for i := range resources.Fonts {
@@ -110,6 +124,9 @@ func (r *Renderer) RenderPreview(page *PageContent, writer io.Writer, options Pr
 	}
 	var pixels bytes.Buffer
 	if err := r.RenderToPNG(page, &pixels); err != nil {
+		return SVGResources{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return SVGResources{}, err
 	}
 	name := fmt.Sprintf("ofdgo-image-%x", sha256.Sum256(pixels.Bytes()))
@@ -191,13 +208,22 @@ func (r *Renderer) RenderFontPreview(ctx context.Context, id string, writer io.W
 // 入参: page 页面内容, writer 输出流, mode 资源封装方式
 // 返回: SVGResources 字体和图片资源, error 渲染、写入或取消错误
 func (r *Renderer) renderSVG(page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error) {
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	if err := ctx.Err(); err != nil {
+		return SVGResources{}, err
+	}
 	if err := r.Compression.Validate(); err != nil {
 		return SVGResources{}, err
 	}
 	if r.backends.SVG == nil {
 		return SVGResources{}, fmt.Errorf("svg: %w", ErrBackendUnavailable)
 	}
+	view := *r
+	view.pageContext = ctx
 	var written int64
-	writer = convertWriter{ctx: r.outputContext(), writer: writer, count: &written}
-	return r.backends.SVG.RenderSVG(r, page, writer, mode)
+	writer = convertWriter{ctx: ctx, writer: writer, count: &written}
+	return view.backends.SVG.RenderSVG(&view, page, writer, mode)
 }

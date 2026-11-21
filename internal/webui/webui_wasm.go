@@ -35,16 +35,6 @@ const (
 	platformTypeFunction = js.TypeFunction
 )
 
-// RunWASM 注册浏览器WASM接口并阻塞运行
-func RunWASM() {
-	resources, _ := ofdgo.NewResources(ofdgo.ResourceOptions{Parallelism: 1, MemoryLimit: 64 << 20, CacheBytes: 48 << 20, SnapshotBytes: 32 << 20})
-	engines := &wasmEngines{resources: resources, engines: make(map[string]*businessEngine)}
-	registerCallback("ofdgoEngineOpen", engines.open)
-	registerAsyncCallback("ofdgoEngineCall", engines.call)
-	registerCallback("ofdgoEngineClose", engines.close)
-	select {}
-}
-
 // platformValue 浏览器参数值
 type platformValue = js.Value
 
@@ -54,99 +44,14 @@ type wasmEngines struct {
 	engines   map[string]*businessEngine
 }
 
-// open 创建具有稳定标识的独立业务会话
-// 入参: args 会话标识
-// 返回: any 空结果, error 参数或会话错误
-func (w *wasmEngines) open(args []js.Value) (any, error) {
-	if len(args) != 1 || args[0].Type() != js.TypeString || args[0].String() == "" {
-		return nil, fmt.Errorf("missing engine ID")
-	}
-	id := args[0].String()
-	if w.engines[id] != nil {
-		return nil, fmt.Errorf("engine already exists: %s", id)
-	}
-	w.engines[id] = &businessEngine{resources: w.resources}
-	return nil, nil
-}
-
-// call 按会话标识分派业务命令，统一绑定本次调用的取消上下文
-// 入参: args 会话标识、命令、取消检查点及业务参数
-// 返回: any 业务结果, error 调用错误
-func (w *wasmEngines) call(args []js.Value) (any, error) {
-	if len(args) < 3 || args[0].Type() != js.TypeString || args[1].Type() != js.TypeString {
-		return nil, fmt.Errorf("missing engine ID or operation")
-	}
-	e := w.engines[args[0].String()]
-	if e == nil {
-		return nil, fmt.Errorf("unknown engine: %s", args[0].String())
-	}
-	name := args[1].String()
-	if name == "ofdgoSaveSnapshot" {
-		snapshot := e.saveSnapshot
-		e.saveSnapshot = nil
-		if snapshot == nil {
-			return nil, fmt.Errorf("save snapshot is not prepared")
-		}
-		output := &businessEngine{resources: e.resources, ctx: context.Background()}
-		if args[2].Type() == js.TypeFunction {
-			output.ctx = output.newOutputContext(args[2])
-		}
-		if err := output.ctx.Err(); err != nil {
-			return nil, err
-		}
-		return output.saveEditor(snapshot, args[3:])
-	}
-	fn := e.businessCommands()[name]
-	if fn == nil {
-		return nil, fmt.Errorf("unknown operation: %s", name)
-	}
-	if err := e.checkDocument(name); err != nil {
-		return nil, err
-	}
-	e.ctx = context.Background()
-	if args[2].Type() == js.TypeFunction {
-		e.ctx = e.newOutputContext(args[2])
-	}
-	ctx := e.ctx
-	if e.currentSession != nil {
-		e.currentSession.Renderer.OutputContext = ctx
-	}
-	defer func() {
-		if e.ctx == ctx {
-			e.ctx = nil
-		}
-		if e.currentSession != nil {
-			e.currentSession.Renderer.OutputContext = context.Background()
-		}
-	}()
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := e.preparePDF(name, args[3:]); err != nil {
-		return nil, err
-	}
-	return fn(args[3:])
-}
-
-// close 释放会话的文档、编辑器、导入及剪贴板，不关闭共享资源
-// 入参: args 会话标识
-// 返回: any 空结果, error 参数或关闭错误
-func (w *wasmEngines) close(args []js.Value) (any, error) {
-	if len(args) != 1 || args[0].Type() != js.TypeString || args[0].String() == "" {
-		return nil, fmt.Errorf("missing engine ID")
-	}
-	id := args[0].String()
-	e := w.engines[id]
-	if e == nil {
-		return nil, nil
-	}
-	delete(w.engines, id)
-	_, _ = e.discardPrint(nil)
-	e.clearPDF()
-	e.clearImport()
-	err := e.currentSession.Close()
-	*e = businessEngine{}
-	return nil, err
+// RunWASM 注册浏览器WASM接口并阻塞运行
+func RunWASM() {
+	resources, _ := ofdgo.NewResources(ofdgo.ResourceOptions{Parallelism: 1, MemoryLimit: 64 << 20, CacheBytes: 48 << 20, SnapshotBytes: 32 << 20})
+	engines := &wasmEngines{resources: resources, engines: make(map[string]*businessEngine)}
+	registerCallback("ofdgoEngineOpen", engines.open)
+	registerAsyncCallback("ofdgoEngineCall", engines.call)
+	registerCallback("ofdgoEngineClose", engines.close)
+	select {}
 }
 
 // awaitExport 等待浏览器处理导出检查点
@@ -210,30 +115,6 @@ func callbackResult(fn func([]js.Value) (any, error), args []js.Value) any {
 	return (&businessEngine{}).encodeResult(apiResult{OK: true, Data: data})
 }
 
-// loadConversionFont 按需读取浏览器已授权字体，不预读系统字体目录
-// 入参: load 浏览器读取函数, name 字体文件名
-// 返回: []byte 字体内容, error 读取错误或取消原因
-func (e *businessEngine) loadConversionFont(load js.Value, name string) ([]byte, error) {
-	done := make(chan error, 1)
-	var data []byte
-	callback := js.FuncOf(func(this js.Value, args []js.Value) any {
-		var err error
-		if args[2].Bool() {
-			err = context.Canceled
-		} else if message := args[1].String(); message != "" {
-			err = fmt.Errorf("%s", message)
-		} else {
-			data, err = e.bytesFromJS(args[0])
-		}
-		done <- err
-		return nil
-	})
-	defer callback.Release()
-	load.Invoke(name, callback)
-	err := <-done
-	return data, err
-}
-
 // successResult 创建成功接口结果
 // 入参: data 返回数据
 // 返回: js.Value 接口结果
@@ -251,28 +132,6 @@ func bytesToJS(data []byte) js.Value {
 	value := js.Global().Get("Uint8Array").New(len(data))
 	js.CopyBytesToJS(value, data)
 	return value
-}
-
-// bytesFromJS 从浏览器值读取二进制数据
-// 入参: value 浏览器值
-// 返回: []byte 二进制数据, error 错误信息
-func (e *businessEngine) bytesFromJS(value js.Value) ([]byte, error) {
-	if value.IsUndefined() || value.IsNull() {
-		return nil, fmt.Errorf("missing binary data")
-	}
-	uint8Array := js.Global().Get("Uint8Array")
-	arrayBuffer := js.Global().Get("ArrayBuffer")
-	if value.InstanceOf(arrayBuffer) {
-		value = uint8Array.New(value)
-	}
-	if !value.InstanceOf(uint8Array) {
-		return nil, fmt.Errorf("binary data must be Uint8Array or ArrayBuffer")
-	}
-	data := make([]byte, value.Get("byteLength").Int())
-	if n := js.CopyBytesToGo(data, value); n != len(data) {
-		return nil, fmt.Errorf("copied %d of %d bytes", n, len(data))
-	}
-	return data, nil
 }
 
 // platformValueOf 转换浏览器参数
@@ -305,6 +164,151 @@ func platformParseJSON(data []byte) map[string]any {
 		panic(err)
 	}
 	return result
+}
+
+// open 创建具有稳定标识的独立业务会话
+// 入参: args 会话标识
+// 返回: any 空结果, error 参数或会话错误
+func (w *wasmEngines) open(args []js.Value) (any, error) {
+	if len(args) != 1 || args[0].Type() != js.TypeString || args[0].String() == "" {
+		return nil, fmt.Errorf("missing engine ID")
+	}
+	id := args[0].String()
+	if w.engines[id] != nil {
+		return nil, fmt.Errorf("engine already exists: %s", id)
+	}
+	w.engines[id] = &businessEngine{resources: w.resources}
+	return nil, nil
+}
+
+// call 按会话标识分派业务命令，统一绑定本次调用的取消上下文并兼容ofdgoRenderPage可选优先级参数
+// 入参: args 会话标识、命令、取消检查点及业务参数
+// 返回: any 业务结果, error 调用错误
+func (w *wasmEngines) call(args []js.Value) (any, error) {
+	if len(args) < 3 || args[0].Type() != js.TypeString || args[1].Type() != js.TypeString {
+		return nil, fmt.Errorf("missing engine ID or operation")
+	}
+	e := w.engines[args[0].String()]
+	if e == nil {
+		return nil, fmt.Errorf("unknown engine: %s", args[0].String())
+	}
+	name := args[1].String()
+	callArgs := args[3:]
+	if name == "ofdgoRenderPage" && len(callArgs) > 8 {
+		callArgs = callArgs[:8]
+	}
+	if name == "ofdgoSaveSnapshot" {
+		snapshot := e.saveSnapshot
+		e.saveSnapshot = nil
+		if snapshot == nil {
+			return nil, fmt.Errorf("save snapshot is not prepared")
+		}
+		output := &businessEngine{resources: e.resources, ctx: context.Background()}
+		if args[2].Type() == js.TypeFunction {
+			output.ctx = output.newOutputContext(args[2])
+		}
+		if err := output.ctx.Err(); err != nil {
+			return nil, err
+		}
+		return output.saveEditor(snapshot, callArgs)
+	}
+	fn := e.businessCommands()[name]
+	if fn == nil {
+		return nil, fmt.Errorf("unknown operation: %s", name)
+	}
+	if err := e.checkDocument(name); err != nil {
+		return nil, err
+	}
+	e.ctx = context.Background()
+	if args[2].Type() == js.TypeFunction {
+		e.ctx = e.newOutputContext(args[2])
+	}
+	ctx := e.ctx
+	if e.currentSession != nil {
+		e.currentSession.Renderer.OutputContext = ctx
+	}
+	defer func() {
+		if e.ctx == ctx {
+			e.ctx = nil
+		}
+		if e.currentSession != nil {
+			e.currentSession.Renderer.OutputContext = context.Background()
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := e.preparePDF(name, callArgs); err != nil {
+		return nil, err
+	}
+	return fn(callArgs)
+}
+
+// close 释放会话的文档、编辑器、导入及剪贴板，不关闭共享资源
+// 入参: args 会话标识
+// 返回: any 空结果, error 参数或关闭错误
+func (w *wasmEngines) close(args []js.Value) (any, error) {
+	if len(args) != 1 || args[0].Type() != js.TypeString || args[0].String() == "" {
+		return nil, fmt.Errorf("missing engine ID")
+	}
+	id := args[0].String()
+	e := w.engines[id]
+	if e == nil {
+		return nil, nil
+	}
+	delete(w.engines, id)
+	_, _ = e.discardPrint(nil)
+	e.clearPDF()
+	e.clearImport()
+	err := e.currentSession.Close()
+	*e = businessEngine{}
+	return nil, err
+}
+
+// loadConversionFont 按需读取浏览器已授权字体，不预读系统字体目录
+// 入参: load 浏览器读取函数, name 字体文件名
+// 返回: []byte 字体内容, error 读取错误或取消原因
+func (e *businessEngine) loadConversionFont(load js.Value, name string) ([]byte, error) {
+	done := make(chan error, 1)
+	var data []byte
+	callback := js.FuncOf(func(this js.Value, args []js.Value) any {
+		var err error
+		if args[2].Bool() {
+			err = context.Canceled
+		} else if message := args[1].String(); message != "" {
+			err = fmt.Errorf("%s", message)
+		} else {
+			data, err = e.bytesFromJS(args[0])
+		}
+		done <- err
+		return nil
+	})
+	defer callback.Release()
+	load.Invoke(name, callback)
+	err := <-done
+	return data, err
+}
+
+// bytesFromJS 从浏览器值读取二进制数据
+// 入参: value 浏览器值
+// 返回: []byte 二进制数据, error 错误信息
+func (e *businessEngine) bytesFromJS(value js.Value) ([]byte, error) {
+	if value.IsUndefined() || value.IsNull() {
+		return nil, fmt.Errorf("missing binary data")
+	}
+	uint8Array := js.Global().Get("Uint8Array")
+	arrayBuffer := js.Global().Get("ArrayBuffer")
+	if value.InstanceOf(arrayBuffer) {
+		value = uint8Array.New(value)
+	}
+	if !value.InstanceOf(uint8Array) {
+		return nil, fmt.Errorf("binary data must be Uint8Array or ArrayBuffer")
+	}
+	data := make([]byte, value.Get("byteLength").Int())
+	if n := js.CopyBytesToGo(data, value); n != len(data) {
+		return nil, fmt.Errorf("copied %d of %d bytes", n, len(data))
+	}
+	return data, nil
 }
 
 // inputFromValue 读取浏览器随机输入或二进制数据

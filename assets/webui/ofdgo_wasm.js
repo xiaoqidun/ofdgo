@@ -235,6 +235,11 @@ async function handleMessage(engine, { id, name, args }) {
 	let saveStamp;
 	let channel;
 	const signal = operations.get(id)?.signal;
+	if (signal?.aborted) {
+		operations.delete(id);
+		postMessage({ id, ok: false, error: "操作已取消", canceled: true });
+		return;
+	}
 	const cancellable = ["ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoPagesText", "ofdgoResources", "ofdgoPrepareSave", "ofdgoSaveSnapshot", "ofdgoImportDocuments", "ofdgoImportImages", "ofdgoExportImages", "ofdgoOpenPDF", "ofdgoExportPage", "ofdgoExportDocument", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion", "ofdgoSaveDocument", "ofdgoSaveSigned", "ofdgoImportPages", "ofdgoProcessFonts"].includes(name);
 	const importing = name === "ofdgoImportPages" || name === "ofdgoImportImages" || name === "ofdgoImportDocuments";
 	const converting = name === "ofdgoOpenPDF";

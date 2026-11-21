@@ -47,6 +47,14 @@ const (
 	platformTypeObject
 	// platformTypeFunction 表示函数
 	platformTypeFunction
+	// renderPriorityMain 表示主画布页面默认调度优先级
+	renderPriorityMain = 2
+	// renderPriorityPreview 表示缩略图与后台预览默认调度优先级
+	renderPriorityPreview = 5
+	// renderQuotaMain 表示主画布复杂页渲染的资源预留配额
+	renderQuotaMain = 64 << 20
+	// renderQuotaPreview 表示低优缩略图渲染的轻配额
+	renderQuotaPreview = 8 << 20
 )
 
 // nativeFields 缓存可直接展开的JSON字段，空值使用标准编码
@@ -106,14 +114,184 @@ type NativeEngine struct {
 	saveSeq        uint64
 	saveContexts   map[uint64]context.Context
 	renderDone     chan struct{}
-	renderSlots    chan struct{}
+	renderSlots    *renderLimiter
 	renderIdle     []*Session
+}
+
+// renderWaiter 保存优先级渲染队列中的单个等待请求
+type renderWaiter struct {
+	priority int
+	seq      uint64
+	ready    chan struct{}
+	granted  bool
+}
+
+// renderLimiter 按优先级调度并行渲染槽位并为高优主画布预留保底槽位
+type renderLimiter struct {
+	mu        sync.Mutex
+	limit     int
+	lowLimit  int
+	active    int
+	activeLow int
+	nextSeq   uint64
+	waiters   []*renderWaiter
 }
 
 // NewNativeEngine 创建独立业务会话，resolver不接收未经授权的文件路径
 // 入参: resolve 宿主资源解析回调
 // 返回: *NativeEngine 独立原生业务引擎
 func NewNativeEngine(resolve NativeResolver) *NativeEngine { return &NativeEngine{Resolve: resolve} }
+
+// newRenderLimiter 创建支持优先级排序与高优保底槽位的渲染限流器
+// 入参: limit 总并行度上限
+// 返回: *renderLimiter 优先级渲染限流器
+func newRenderLimiter(limit int) *renderLimiter {
+	limit = max(2, limit)
+	return &renderLimiter{limit: limit, lowLimit: max(1, limit/2)}
+}
+
+// renderPriority 从页面渲染参数中解析调度优先级及预览标记
+// 入参: args 渲染调用参数
+// 返回: int 优先级数值，越小越优先, bool 是否为仅预览模式
+func renderPriority(args []any) (int, bool) {
+	preview := len(args) > 6 && platformValueOf(args[6]).Type() == platformTypeBoolean && platformValueOf(args[6]).Bool()
+	if len(args) > 7 && platformValueOf(args[7]).Type() == platformTypeNumber {
+		priority := platformValueOf(args[7]).Int()
+		if priority < 0 {
+			return 0, preview
+		}
+		if priority > 6 {
+			return 6, preview
+		}
+		return priority, preview
+	}
+	if preview {
+		return renderPriorityPreview, true
+	}
+	return renderPriorityMain, false
+}
+
+// acquire 按优先级申请并行渲染槽位，支持上下文取消
+// 入参: ctx 取消上下文, priority 调度优先级
+// 返回: func() 槽位释放函数, error 取消错误
+func (l *renderLimiter) acquire(ctx context.Context, priority int) (func(), error) {
+	isLow := priority >= renderPriorityPreview
+	l.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		l.mu.Unlock()
+		return nil, err
+	}
+	if l.canGrantLocked(priority) {
+		l.active++
+		if isLow {
+			l.activeLow++
+		}
+		l.mu.Unlock()
+		var once sync.Once
+		return func() { once.Do(func() { l.release(isLow) }) }, nil
+	}
+	l.nextSeq++
+	waiter := &renderWaiter{priority: priority, seq: l.nextSeq, ready: make(chan struct{})}
+	l.insertWaiterLocked(waiter)
+	l.mu.Unlock()
+	select {
+	case <-waiter.ready:
+		var once sync.Once
+		return func() { once.Do(func() { l.release(isLow) }) }, nil
+	case <-ctx.Done():
+		l.mu.Lock()
+		if waiter.granted {
+			l.releaseLocked(isLow)
+		} else {
+			l.removeWaiterLocked(waiter)
+			l.dispatchLocked()
+		}
+		l.mu.Unlock()
+		return nil, ctx.Err()
+	}
+}
+
+// canGrantLocked 判断当前是否可直接为指定优先级分配槽位
+// 入参: priority 调度优先级
+// 返回: bool 是否可立即分配
+func (l *renderLimiter) canGrantLocked(priority int) bool {
+	if l.active >= l.limit {
+		return false
+	}
+	if len(l.waiters) > 0 && l.waiters[0].priority < priority {
+		return false
+	}
+	if priority >= renderPriorityPreview && l.activeLow >= l.lowLimit {
+		return false
+	}
+	return true
+}
+
+// insertWaiterLocked 按优先级升序及同优先级先进先出顺序插入等待队列
+// 入参: waiter 等待节点
+func (l *renderLimiter) insertWaiterLocked(waiter *renderWaiter) {
+	pos := len(l.waiters)
+	for i, item := range l.waiters {
+		if waiter.priority < item.priority || (waiter.priority == item.priority && waiter.seq < item.seq) {
+			pos = i
+			break
+		}
+	}
+	l.waiters = append(l.waiters, nil)
+	copy(l.waiters[pos+1:], l.waiters[pos:])
+	l.waiters[pos] = waiter
+}
+
+// removeWaiterLocked 从等待队列中移除指定等待节点
+// 入参: waiter 等待节点
+func (l *renderLimiter) removeWaiterLocked(waiter *renderWaiter) {
+	for i, item := range l.waiters {
+		if item == waiter {
+			copy(l.waiters[i:], l.waiters[i+1:])
+			l.waiters[len(l.waiters)-1] = nil
+			l.waiters = l.waiters[:len(l.waiters)-1]
+			return
+		}
+	}
+}
+
+// release 归还渲染槽位并唤醒队列中优先级最高的等待者
+// 入参: isLow 是否为低优槽位
+func (l *renderLimiter) release(isLow bool) {
+	l.mu.Lock()
+	l.releaseLocked(isLow)
+	l.mu.Unlock()
+}
+
+// releaseLocked 在持锁状态下归还渲染槽位并分发空闲槽位
+// 入参: isLow 是否为低优槽位
+func (l *renderLimiter) releaseLocked(isLow bool) {
+	l.active--
+	if isLow {
+		l.activeLow--
+	}
+	l.dispatchLocked()
+}
+
+// dispatchLocked 在持锁状态下按优先级唤醒可执行的等待者
+func (l *renderLimiter) dispatchLocked() {
+	for len(l.waiters) > 0 && l.active < l.limit {
+		next := l.waiters[0]
+		isLow := next.priority >= renderPriorityPreview
+		if isLow && l.activeLow >= l.lowLimit {
+			break
+		}
+		copy(l.waiters, l.waiters[1:])
+		l.waiters[len(l.waiters)-1] = nil
+		l.waiters = l.waiters[:len(l.waiters)-1]
+		next.granted = true
+		l.active++
+		if isLow {
+			l.activeLow++
+		}
+		close(next.ready)
+	}
+}
 
 // Call 执行worker输入协议，返回ok/data/error，字节保持[]byte，emit不含请求id
 // 入参: ctx 取消上下文, name 原操作名, args worker参数, emit 同步进度通知
@@ -125,7 +303,7 @@ func NewNativeEngine(resolve NativeResolver) *NativeEngine { return &NativeEngin
 func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit func(any)) (result map[string]any) {
 	e.once.Do(func() {
 		e.gate = make(chan struct{}, 1)
-		e.renderSlots = make(chan struct{}, e.renderParallelism())
+		e.renderSlots = newRenderLimiter(e.renderParallelism())
 		e.renderContexts = make(map[uint64]context.Context)
 		e.saveContexts = make(map[uint64]context.Context)
 		e.resolveInput = func(ctx context.Context, value any) (io.ReaderAt, int64, error) {
@@ -138,14 +316,18 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 		ctx = context.Background()
 	}
 	if name == "ofdgoRenderPage" {
-		select {
-		case e.renderSlots <- struct{}{}:
-			defer func() { <-e.renderSlots }()
-		case <-ctx.Done():
-			return nativeFailure(ctx.Err())
+		priority, preview := renderPriority(args)
+		releaseSlot, err := e.renderSlots.acquire(ctx, priority)
+		if err != nil {
+			return nativeFailure(err)
 		}
+		defer releaseSlot()
 		if e.resources != nil {
-			release, err := e.resources.Acquire(ctx, 64<<20)
+			quota := int64(renderQuotaMain)
+			if preview {
+				quota = renderQuotaPreview
+			}
+			release, err := e.resources.Acquire(ctx, quota)
 			if err != nil {
 				return nativeFailure(err)
 			}
@@ -203,7 +385,7 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 		}
 		return map[string]any{"ok": true, "data": map[string]any{"bytes": data}}
 	}
-	if nativeConcurrentRead(name, e.currentEditor != nil) && e.currentSession != nil && (e.pdf == nil || nativePDFConcurrentRead(name)) {
+	if e.canConcurrentRead(name, args) {
 		session := e.currentSession
 		worker, err := e.renderSession(ctx)
 		if err != nil {
@@ -356,7 +538,7 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 func (e *NativeEngine) Close() error {
 	e.once.Do(func() {
 		e.gate = make(chan struct{}, 1)
-		e.renderSlots = make(chan struct{}, e.renderParallelism())
+		e.renderSlots = newRenderLimiter(e.renderParallelism())
 	})
 	e.gate <- struct{}{}
 	e.closed = true
@@ -976,13 +1158,34 @@ func nativeReadOnly(name string) bool {
 func nativeConcurrentRead(name string, editing bool) bool {
 	switch name {
 	case "ofdgoPageTextString", "ofdgoPagesText", "ofdgoSearchPage", "ofdgoSearchPages",
-		"ofdgoOpenLinks", "ofdgoOutlineLinks", "ofdgoDestinationView", "ofdgoVerifySignatures",
+		"ofdgoOutlineLinks", "ofdgoDestinationView", "ofdgoVerifySignatures",
 		"ofdgoAnnotationInfos", "ofdgoDocumentNavigation",
 		"ofdgoStructureTargets", "ofdgoStructureXML", "ofdgoResources", "ofdgoResourceReferences",
 		"ofdgoResourceLocations":
 		return true
-	case "ofdgoDocumentVersions", "ofdgoInvoices", "ofdgoInvoice", "ofdgoPageSettings":
+	case "ofdgoOpenLinks", "ofdgoDocumentVersions", "ofdgoInvoices", "ofdgoInvoice", "ofdgoPageSettings":
 		return !editing
+	}
+	return false
+}
+
+// canConcurrentRead 判断当前请求能否在不排空并行渲染池的情况下并发执行
+// 入参: name 操作名称, args 调用参数
+// 返回: bool 是否允许直接并发执行
+func (e *NativeEngine) canConcurrentRead(name string, args []any) bool {
+	if e.currentSession == nil || !nativeConcurrentRead(name, e.currentEditor != nil) {
+		return false
+	}
+	if e.pdf == nil || nativePDFConcurrentRead(name) {
+		return true
+	}
+	if name == "ofdgoOpenLinks" && e.currentEditor == nil && !e.pdf.retry.Load() {
+		if len(args) == 0 {
+			return true
+		}
+		if len(args) == 1 && platformValueOf(args[0]).Type() == platformTypeNumber {
+			return e.pdf.importer.PageSynced(e.currentSession.Reader, platformValueOf(args[0]).Int())
+		}
 	}
 	return false
 }
@@ -1070,12 +1273,11 @@ func (e *NativeEngine) endReadTask(id uint64, session, worker *Session, retain b
 	delete(e.renderContexts, id)
 	e.ctxMu.Unlock()
 	e.renderMu.Lock()
-	if worker != nil && retain && session != nil && e.currentSession == session && worker.pdfSyncGen == session.pdfSyncGen {
+	if worker != nil && retain && session != nil && e.currentSession == session && worker.doc == session.doc {
 		if len(worker.svgFonts) > 0 {
 			session.retainSVGFonts(worker.svgFonts)
 			clear(worker.svgFonts)
 		}
-		clear(worker.pageCache)
 		if worker.editing {
 			worker.textCache.Clear()
 		}
@@ -1088,16 +1290,16 @@ func (e *NativeEngine) endReadTask(id uint64, session, worker *Session, retain b
 	e.renderMu.Unlock()
 }
 
-// renderParallelism 返回首次调用时采用的页面并行数
+// renderParallelism 返回首次调用时采用的页面并行数，至少保留两个槽位
 // 返回: int 同时运行的页面任务数
 func (e *NativeEngine) renderParallelism() int {
 	if e.RenderParallelism > 0 {
-		return e.RenderParallelism
+		return max(2, e.RenderParallelism)
 	}
-	return runtime.GOMAXPROCS(0)
+	return max(2, runtime.GOMAXPROCS(0))
 }
 
-// renderSession 复用独立只读会话，调用时已持有引擎门控
+// renderSession 复用独立只读会话，渐进同步代数落后时仅刷新阅读器快照，调用时已持有引擎门控
 // 入参: ctx 渲染上下文
 // 返回: *Session 渲染会话, error 准备错误
 func (e *NativeEngine) renderSession(ctx context.Context) (*Session, error) {
@@ -1107,17 +1309,27 @@ func (e *NativeEngine) renderSession(ctx context.Context) (*Session, error) {
 		worker := e.renderIdle[count-1]
 		e.renderIdle[count-1] = nil
 		e.renderIdle = e.renderIdle[:count-1]
-		if worker.pdfSyncGen == source.pdfSyncGen && worker.doc == source.doc {
-			e.renderMu.Unlock()
-			worker.Renderer.OutputContext = ctx
-			return worker, nil
+		if worker.doc != source.doc {
+			continue
 		}
+		e.renderMu.Unlock()
+		if worker.pdfSyncGen != source.pdfSyncGen {
+			reader, err := source.Reader.Fork(ctx)
+			if err != nil {
+				return nil, err
+			}
+			worker.Reader = reader
+			worker.Renderer.Reader = reader
+			worker.pdfSyncGen = source.pdfSyncGen
+		}
+		worker.Renderer.OutputContext = ctx
+		return worker, nil
 	}
 	e.renderMu.Unlock()
 	return e.newReadWorker(ctx, source)
 }
 
-// newReadWorker 从主会话派生独立只读工作会话，共享只读缓存和线程安全文字缓存
+// newReadWorker 从主会话派生独立只读工作会话，共享只读页面内容与文字缓存
 // 入参: ctx 任务上下文, source 主会话
 // 返回: *Session 独立工作会话, error 派生错误
 func (e *NativeEngine) newReadWorker(ctx context.Context, source *Session) (*Session, error) {
@@ -1129,12 +1341,16 @@ func (e *NativeEngine) newReadWorker(ctx context.Context, source *Session) (*Ses
 	if source.editing || textCache == nil {
 		textCache = ofdgo.NewPageTextCache(sessionTextCacheBytes)
 	}
+	pageCache := source.pageCache
+	if source.editing || pageCache == nil {
+		pageCache = newSharedPageCache(sessionPageCacheBytes)
+	}
 	return &Session{
 		Reader:     renderer.Reader,
 		Renderer:   renderer,
 		doc:        source.doc,
 		fontFS:     source.fontFS,
-		pageCache:  make(map[int]*ofdgo.PageContent),
+		pageCache:  pageCache,
 		boxCache:   append([]pageBoxInfo(nil), source.boxCache...),
 		textCache:  textCache,
 		svgFonts:   make(map[string][]byte),
@@ -1183,6 +1399,8 @@ func (e *NativeEngine) acquirePDFGate(ctx context.Context, locked bool) (*pendin
 // 入参: ctx 取消上下文, pending 渐进PDF状态, session 目标会话, pageIndex 页面索引, emit 进度回调
 // 返回: error 转换、同步或取消错误
 func (e *NativeEngine) preparePDFPageNative(ctx context.Context, pending *pendingPDF, session *Session, pageIndex int, emit func(any)) error {
+	pending.beginForeground()
+	defer pending.endForeground()
 	pending.mu.Lock()
 	defer pending.mu.Unlock()
 	if pending.finished.Load() {
@@ -1283,11 +1501,11 @@ func (e *NativeEngine) preparePDFPageNative(ctx context.Context, pending *pendin
 		}
 		return err
 	}
+	session.invalidatePageCache(pageIndex)
 	pending.page = pageIndex
 	pending.syncGen++
 	e.renderMu.Lock()
 	session.pdfSyncGen = pending.syncGen
-	e.renderIdle = nil
 	e.renderMu.Unlock()
 	return nil
 }
@@ -1384,7 +1602,13 @@ func (e *NativeEngine) runConcurrentRender(ctx context.Context, args []any, emit
 	for _, value := range page["fonts"].([]any) {
 		font := value.(map[string]any)
 		if name := font["name"].(string); !known[name] {
-			font["data"] = worker.svgFonts[name]
+			fontData := worker.svgFonts[name]
+			if len(fontData) == 0 && session != nil {
+				e.renderMu.Lock()
+				fontData = session.svgFonts[name]
+				e.renderMu.Unlock()
+			}
+			font["data"] = fontData
 		}
 	}
 	if editor != nil && session.editing && !(len(values) > 6 && values[6].Bool()) {
@@ -1434,8 +1658,18 @@ func (e *NativeEngine) runLoadPDF(ctx context.Context, emit func(any)) (result m
 	if pending == nil {
 		return map[string]any{"ok": true, "data": map[string]any{"done": true, "doc": nativePlain(session.Summary()), "warnings": string(warnings)}}
 	}
+	if pending.foregroundWaiters.Load() > 0 {
+		if err := pending.waitForeground(ctx); err != nil {
+			return nativeFailure(err)
+		}
+	}
 	pending.mu.Lock()
-	defer pending.mu.Unlock()
+	pdfLocked := true
+	defer func() {
+		if pdfLocked {
+			pending.mu.Unlock()
+		}
+	}()
 	if pending.finished.Load() {
 		select {
 		case e.gate <- struct{}{}:
@@ -1513,6 +1747,34 @@ func (e *NativeEngine) runLoadPDF(ctx context.Context, emit func(any)) (result m
 	}
 	deadline := time.Now().Add(32 * time.Millisecond)
 	for pending.next < pending.importer.PageCount() {
+		if pending.foregroundWaiters.Load() > 0 {
+			pending.mu.Unlock()
+			pdfLocked = false
+			if err := pending.waitForeground(ctx); err != nil {
+				return nativeFailure(err)
+			}
+			pending.mu.Lock()
+			pdfLocked = true
+			if pending.finished.Load() {
+				return map[string]any{"ok": true, "data": map[string]any{"done": false}}
+			}
+			if pending.closed.Load() {
+				return nativeFailure(context.Canceled)
+			}
+			if err := ctx.Err(); err != nil {
+				return nativeFailure(err)
+			}
+			if pending.retry.Load() || time.Now().After(deadline) {
+				return map[string]any{"ok": true, "data": map[string]any{"done": false}}
+			}
+			e.ctxMu.Lock()
+			e.pdfCtx = ctx
+			e.ctxMu.Unlock()
+			pending.progress = platformValueOf(call.progress("conversion", "", true))
+			pending.font = platformValueOf(nativeCallback(call.font))
+			e.bindPDFContext(pending, ctx)
+			continue
+		}
 		index := pending.next
 		if !pending.importer.Ready(index) {
 			if err := pending.importer.ConvertPage(ctx, index); err != nil {

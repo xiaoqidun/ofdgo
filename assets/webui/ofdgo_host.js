@@ -1,6 +1,20 @@
 import { setInputFiles } from "./ofdgo_util.js";
 
 const engineRuntimes = new Map();
+const READ_ONLY_OPERATIONS = new Set([
+	"ofdgoRenderPage", "ofdgoLoadPDF", "ofdgoDocumentInfo", "ofdgoDocumentVersions", "ofdgoDocumentNavigation",
+	"ofdgoOpenLinks", "ofdgoDestinationView", "ofdgoOutlineLinks", "ofdgoRenderBackends", "ofdgoSVGFontData",
+	"ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoPagesText", "ofdgoResources",
+	"ofdgoResourceReferences", "ofdgoResourceTargets", "ofdgoResourceLocations", "ofdgoFontPreview",
+	"ofdgoFontFaces", "ofdgoFontFace", "ofdgoMatchFontFiles", "ofdgoImages", "ofdgoImagePageSize",
+	"ofdgoImagePreview", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoStructureXML",
+	"ofdgoPackageDocuments", "ofdgoVerifySignatures", "ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice",
+	"ofdgoExportInvoice", "ofdgoValidateInvoice", "ofdgoActionList", "ofdgoPageSettings", "ofdgoReadAnnotation",
+	"ofdgoPreviewSignatureSeal", "ofdgoExportFormats", "ofdgoOutputFormats", "ofdgoParsePageRange",
+	"ofdgoExportPage", "ofdgoExportDocument", "ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide",
+	"ofdgoPrintPDF", "ofdgoDiscardPrint", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia",
+	"ofdgoExportVersion", "ofdgoPreviewText", "ofdgoPreviewTextSelection", "ofdgoCheckDocument",
+]);
 let engineModule = null;
 let engineScheduler = null;
 let engineSequence = 0;
@@ -28,7 +42,16 @@ class BrowserScheduler {
 	}
 
 	priority(task) {
-		return Number(task.worker.batch || this.owner(task.worker, task.data)?.foreground === false) + Number(!!task.data.preload || !!task.data.background);
+		const base = Number(task.worker.batch || this.owner(task.worker, task.data)?.foreground === false) * 10;
+		const data = task.data;
+		if (typeof data.priority === "number") return base + data.priority;
+		if (data.name === "ofdgoRenderPage") {
+			if (typeof data.args?.[7] === "number") return base + data.args[7];
+			return base + (data.args?.[6] ? 5 : data.preload ? 6 : 2);
+		}
+		if (data.background) return base + 7;
+		if (data.preload) return base + 6;
+		return base + 1;
 	}
 
 	submit(worker, data, transfer) {
@@ -77,11 +100,12 @@ class BrowserScheduler {
 				if (this.memory + (64 << 20) <= this.budget) break;
 				if (!worker.requests.size) worker.reclaim?.();
 			}
-			this.queue.sort((a, b) => this.priority(a) - this.priority(b) + (a.queued - b.queued) / 2000);
+			this.queue.sort((a, b) => this.priority(a) - this.priority(b) || a.order - b.order);
 			for (let i = 0; i < this.queue.length;) {
 				const task = this.queue[i];
 				if (task.worker.closed) { this.queue.splice(i, 1); continue; }
-				if (this.queue.some(previous => previous.worker === task.worker && previous.data.engineID === task.data.engineID && previous.order < task.order)) { i++; continue; }
+				const taskReadOnly = READ_ONLY_OPERATIONS.has(task.data.name);
+				if (this.queue.some(previous => previous.worker === task.worker && previous.data.engineID === task.data.engineID && previous.order < task.order && (!taskReadOnly || !READ_ONLY_OPERATIONS.has(previous.data.name)))) { i++; continue; }
 				const busy = [...task.worker.operations.values()].some(data => data.engineID === task.data.engineID && data.name !== "ofdgoSaveSnapshot");
 				const snapshot = task.data.name === "ofdgoSaveSnapshot" && [...task.worker.operations.values()].some(data => data.engineID === task.data.engineID && data.name === "ofdgoSaveSnapshot");
 				const active = this.active();
@@ -418,14 +442,23 @@ class BrowserEngine {
 		const draining = engineScheduler.draining;
 		engineScheduler.draining = true;
 		try {
-			const queued = engineScheduler.queue.filter(task => task.worker === this.primary.runtime && task.data.engineID === this.engineID).sort((a,b) => a.order-b.order);
+			const queued = engineScheduler.queue
+				.filter(task => task.worker === this.primary.runtime && task.data.engineID === this.engineID)
+				.sort((a, b) => a.order - b.order);
+			const candidates = [];
 			for (const task of queued) {
-				if (task.data.name !== "ofdgoRenderPage") break;
+				if (!READ_ONLY_OPERATIONS.has(task.data.name)) break;
+				if (task.data.name === "ofdgoRenderPage") candidates.push(task);
+			}
+			candidates.sort((a, b) => engineScheduler.priority(a) - engineScheduler.priority(b) || a.order - b.order);
+			for (const task of candidates) {
 				if (this.requests.get(task.data.id) !== null) continue;
+				if (this.primaryPages.has(task.data.args[0])) continue;
 				let slot;
 				try { slot = this.pageSlot(task.data); } catch { break; }
 				if (!slot) break;
-				engineScheduler.queue.splice(engineScheduler.queue.indexOf(task), 1);
+				const index = engineScheduler.queue.indexOf(task);
+				if (index >= 0) engineScheduler.queue.splice(index, 1);
 				this.primary.requests.delete(task.data.id);
 				this.renderSlot(slot, task.data, task.transfer);
 			}
@@ -452,17 +485,7 @@ class BrowserEngine {
 			else this.primary.postMessage(data);
 			return;
 		}
-		if (!data.type && data.name !== "ofdgoRenderPage" && ![
-			"ofdgoLoadPDF", "ofdgoDocumentInfo", "ofdgoDocumentVersions", "ofdgoDocumentNavigation", "ofdgoOpenLinks", "ofdgoDestinationView", "ofdgoOutlineLinks", "ofdgoRenderBackends", "ofdgoSVGFontData",
-			"ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoPagesText", "ofdgoResources", "ofdgoResourceReferences", "ofdgoResourceTargets",
-			"ofdgoResourceLocations", "ofdgoFontPreview", "ofdgoFontFaces", "ofdgoFontFace", "ofdgoMatchFontFiles",
-			"ofdgoImages", "ofdgoImagePageSize", "ofdgoImagePreview", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoStructureXML", "ofdgoPackageDocuments", "ofdgoVerifySignatures",
-			"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoExportInvoice", "ofdgoValidateInvoice",
-			"ofdgoActionList", "ofdgoPageSettings", "ofdgoReadAnnotation", "ofdgoPreviewSignatureSeal",
-			"ofdgoExportFormats", "ofdgoOutputFormats", "ofdgoParsePageRange", "ofdgoExportPage", "ofdgoExportDocument",
-			"ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide", "ofdgoPrintPDF", "ofdgoDiscardPrint",
-			"ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia", "ofdgoExportVersion"
-		].includes(data.name)) this.invalidatePages();
+		if (!data.type && !READ_ONLY_OPERATIONS.has(data.name)) this.invalidatePages();
 		const slot = data.name === "ofdgoRenderPage" && this.source ? this.pageSlot(data) : null;
 		if (!slot) {
 			if (data.name === "ofdgoRenderPage") this.requests.set(data.id, null);
@@ -480,7 +503,8 @@ class BrowserEngine {
 		let fallback = false;
 		slot.ready.then(() => this.callSlot(slot, data.name, data.args, !!data.preload)).then(result => {
 			if (revision !== this.revision) throw new DOMException("页面加载已取消", "AbortError");
-			if (this.source.pdf && ((JSON.parse(result.data.annotations || "null") || []).length || result.data.links?.length)) {
+			const annotations = typeof result.data.annotations === "string" ? (JSON.parse(result.data.annotations || "null") || []) : (result.data.annotations || []);
+			if (this.source.pdf && (annotations.length || result.data.links?.length)) {
 				this.primaryPages.add(data.args[0]);
 				this.requests.set(data.id, this.primary);
 				fallback = true;
@@ -587,8 +611,9 @@ class NativeHost {
 	constructor(bridge) {
 		this.bridge = bridge;
 		this.parallelism = 1;
-		this.cacheBytes = 32 * 1024 * 1024;
+		this.cacheBytes = 192 * 1024 * 1024;
 		this.reading = 0;
+		this.readSeq = 0;
 		this.readQueue = [];
 		this.resources = typeof FinalizationRegistry === "function" ? new FinalizationRegistry(entry => {
 			this.call("release", entry).catch(() => {});
@@ -599,21 +624,26 @@ class NativeHost {
 		return this.bridge.call(`ofdgo.host.${name}`, value, {signal});
 	}
 
-	async readResource(file, signal) {
+	async readResource(file, signal, priority = 3) {
 		let acquired = false;
 		try {
 			signal?.throwIfAborted();
 			if (this.reading >= this.parallelism) await new Promise((resolve, reject) => {
-				const next = () => {
-					signal?.removeEventListener("abort", cancel);
-					acquired = true;
-					resolve();
+				const entry = {
+					priority,
+					order: ++this.readSeq,
+					next: () => {
+						signal?.removeEventListener("abort", cancel);
+						acquired = true;
+						resolve();
+					},
 				};
 				const cancel = () => {
-					this.readQueue.splice(this.readQueue.indexOf(next), 1);
+					const index = this.readQueue.indexOf(entry);
+					if (index >= 0) this.readQueue.splice(index, 1);
 					reject(signal.reason);
 				};
-				this.readQueue.push(next);
+				this.readQueue.push(entry);
 				signal?.addEventListener("abort", cancel, {once:true});
 			});
 			else {
@@ -625,21 +655,27 @@ class NativeHost {
 		} finally {
 			await this.call("release", {file:file.nativeFile}).catch(() => {});
 			if (acquired) {
-				const next = this.readQueue.shift();
-				if (next) next();
-				else this.reading--;
+				if (this.readQueue.length) {
+					let best = 0;
+					for (let index = 1; index < this.readQueue.length; index++) {
+						const candidate = this.readQueue[index], current = this.readQueue[best];
+						if (candidate.priority < current.priority || candidate.priority === current.priority && candidate.order < current.order) best = index;
+					}
+					const [entry] = this.readQueue.splice(best, 1);
+					entry.next();
+				} else this.reading--;
 			}
 		}
 	}
 
-	async decode(value, signal) {
+	async decode(value, signal, priority = 3) {
 		const reads = [];
 		const visit = (item, field, replace) => {
 			if (!item || typeof item !== "object" || item instanceof Blob || item instanceof ArrayBuffer || ArrayBuffer.isView(item)) return;
 			if (item.nativeFile) {
 				const file = new NativeFile(item);
 				if (field === "file") replace(file);
-				else reads.push(this.readResource(file, signal).then(bytes => replace(field === "blob" ? new Blob([bytes], {type:item.type}) : new Uint8Array(bytes))));
+				else reads.push(this.readResource(file, signal, priority).then(bytes => replace(field === "blob" ? new Blob([bytes], {type:item.type}) : new Uint8Array(bytes))));
 				return;
 			}
 			for (const [child, content] of Object.entries(item)) {
@@ -731,7 +767,10 @@ class NativeHost {
 				}
 				const controller = new AbortController();
 				requests.set(data.id, controller);
-				const parallel = data.name === "ofdgoRenderPage";
+				const parallel = READ_ONLY_OPERATIONS.has(data.name);
+				const priority = typeof data.priority === "number" ? data.priority
+					: data.name === "ofdgoRenderPage" ? (typeof data.args?.[7] === "number" ? data.args[7] : data.args?.[6] ? 5 : 2)
+					: data.background ? 7 : data.preload ? 6 : 3;
 				const barrier = parallel ? pending : Promise.all([pending, ...readers]);
 				const operation = barrier.then(async () => {
 					const engine = await ready;
@@ -758,7 +797,7 @@ class NativeHost {
 					let decoded;
 					try {
 						controller.signal.throwIfAborted();
-						decoded = await host.decode(result, controller.signal);
+						decoded = await host.decode(result, controller.signal, priority);
 						controller.signal.throwIfAborted();
 					}
 					catch (error) { await host.release(result, {temporaryOnly:true}); throw error; }

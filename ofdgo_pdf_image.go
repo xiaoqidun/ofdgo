@@ -16,10 +16,12 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"io"
 	"math"
 	"reflect"
@@ -27,6 +29,12 @@ import (
 
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
+)
+
+// PDF原生有损照片防膨胀JPEG编码参数
+const (
+	pdfPhotoJPEGQuality = 92
+	pdfPhotoMinPixels   = 65536
 )
 
 // pdfImageKey 区分图像流、渲染意图、原生输出空间、模板填充色及采样尺寸
@@ -59,13 +67,6 @@ type pdfImageContent struct {
 	id     string
 }
 
-// matches 核对完整编码与有效图像属性，不以摘要相同代替内容相同
-// 入参: source 待复用图像
-// 返回: bool 是否可使用同一图像资源
-func (c pdfImageContent) matches(source *pdfgo.Image) bool {
-	return codecpdf.SameImage(c.source, source)
-}
-
 // pdfSharedImageEntry 保存跨工作协程去重编码的单张图像结果
 type pdfSharedImageEntry struct {
 	space     pdfgo.Object
@@ -85,6 +86,130 @@ type pdfSharedImageCache struct {
 // 返回: *pdfSharedImageCache 并发安全的图像编码缓存
 func newPDFSharedImageCache() *pdfSharedImageCache {
 	return &pdfSharedImageCache{entries: make(map[pdfImageKey][]*pdfSharedImageEntry)}
+}
+
+// pdfImageLossyFilter 检查图像底层流滤镜是否包含JPXDecode或DCTDecode有损照片编码
+// 入参: reader 来源阅读器, source 源图像
+// 返回: bool 是否含JPXDecode, bool 是否含DCTDecode
+func pdfImageLossyFilter(reader *pdfgo.Reader, source *pdfgo.Image) (bool, bool) {
+	if source == nil || source.Stream == nil || source.Stream.Dictionary == nil {
+		return false, false
+	}
+	filterObj := source.Stream.Dictionary["Filter"]
+	if filterObj == nil {
+		return false, false
+	}
+	if reader != nil {
+		if resolved, err := reader.Resolve(filterObj); err == nil {
+			filterObj = resolved
+		}
+	}
+	var jpx, dct bool
+	check := func(name pdfgo.Name) {
+		switch name {
+		case "JPXDecode":
+			jpx = true
+		case "DCTDecode", "DCT":
+			dct = true
+		}
+	}
+	switch value := filterObj.(type) {
+	case pdfgo.Name:
+		check(value)
+	case pdfgo.Array:
+		for _, item := range value {
+			if reader != nil {
+				if resolved, err := reader.Resolve(item); err == nil {
+					item = resolved
+				}
+			}
+			if name, ok := item.(pdfgo.Name); ok {
+				check(name)
+			}
+		}
+	}
+	return jpx, dct
+}
+
+// pdfImageOpaque 检查已解码图像是否所有像素完全不透明
+// 入参: img 已解码图像
+// 返回: bool 是否完全不透明
+func pdfImageOpaque(img image.Image) bool {
+	if img == nil {
+		return false
+	}
+	if op, ok := img.(interface{ Opaque() bool }); ok {
+		return op.Opaque()
+	}
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if _, _, _, a := img.At(x, y).RGBA(); a != 0xffff {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// pdfImageMostlyFlat 均匀抽样判断图像是否大面积平涂，用于决定大图是否对比PNG体积
+// 入参: img 已解码图像
+// 返回: bool 是否高度平涂
+func pdfImageMostlyFlat(img image.Image) bool {
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w < 2 || h < 2 {
+		return true
+	}
+	stepX := max(1, w/32)
+	stepY := max(1, h/32)
+	total, same := 0, 0
+	for y := b.Min.Y; y+1 < b.Max.Y; y += stepY {
+		for x := b.Min.X; x+1 < b.Max.X; x += stepX {
+			r0, g0, b0, _ := img.At(x, y).RGBA()
+			r1, g1, b1, _ := img.At(x+1, y).RGBA()
+			if r0 == r1 && g0 == g1 && b0 == b1 {
+				same++
+			}
+			total++
+		}
+	}
+	return total > 0 && same*100 >= total*85
+}
+
+// encodeLossyPhotoCandidate 将不透明有损照片编码为高质量JPEG，小图或平涂图对比PNG后保留更小结果
+// 入参: ctx 取消上下文, decoded 已解码图像
+// 返回: []byte 编码字节, error 编码或取消错误
+func encodeLossyPhotoCandidate(ctx context.Context, decoded image.Image) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var jpgBuf bytes.Buffer
+	if err := jpeg.Encode(&jpgBuf, decoded, &jpeg.Options{Quality: pdfPhotoJPEGQuality}); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	b := decoded.Bounds()
+	pixels := int64(b.Dx()) * int64(b.Dy())
+	if pixels < pdfPhotoMinPixels || pdfImageMostlyFlat(decoded) || int64(jpgBuf.Len())*4 >= pixels*3 {
+		var pngBuf bytes.Buffer
+		if err := pdfgo.EncodePNG(ctx, &pngBuf, decoded); err == nil && pngBuf.Len() <= jpgBuf.Len() {
+			return pngBuf.Bytes(), nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return jpgBuf.Bytes(), nil
+}
+
+// matches 核对完整编码与有效图像属性，不以摘要相同代替内容相同
+// 入参: source 待复用图像
+// 返回: bool 是否可使用同一图像资源
+func (c pdfImageContent) matches(source *pdfgo.Image) bool {
+	return codecpdf.SameImage(c.source, source)
 }
 
 // acquire 获取或占位指定图像编码任务，由首位调用方执行实际编解码
@@ -232,6 +357,7 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		}
 		if len(data) == 0 {
 			var encodeErr error
+			preferJPEG := p.preferLossyPhotoJPEG(source)
 			if key.process != "" {
 				decoded, encodeErr = p.imageProcess(source, key.process)
 				if encodeErr == nil && key.size != (image.Point{}) {
@@ -245,7 +371,7 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 				if encodeErr == nil && len(data) == 0 && !source.ImageMask && p.compression.Mode != CompressionLossy {
 					data, encodeErr = codecpdf.EncodeCMYKTIFF(p.ctx, source)
 				}
-				if encodeErr == nil && len(data) == 0 && (source.ImageMask || key.size != (image.Point{}) || p.compression.Mode == CompressionLossy) {
+				if encodeErr == nil && len(data) == 0 && (source.ImageMask || key.size != (image.Point{}) || p.compression.Mode == CompressionLossy || preferJPEG) {
 					decoded, encodeErr = source.DecodeImageSizeContext(p.ctx, key.size)
 				}
 			}
@@ -258,6 +384,12 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 					optimized = true
 				} else if errors.Is(encodeErr, io.ErrShortBuffer) {
 					encodeErr = nil
+				}
+			}
+			if encodeErr == nil && len(data) == 0 && decoded != nil && preferJPEG && pdfImageOpaque(decoded) {
+				data, encodeErr = encodeLossyPhotoCandidate(p.ctx, decoded)
+				if encodeErr == nil && len(data) != 0 {
+					decoded = nil
 				}
 			}
 			if encodeErr == nil && len(data) == 0 {
@@ -322,6 +454,32 @@ func (p *pdfImporter) appendImage(mark pdfgo.ImageMark, id string) error {
 	p.appendSequenceObject(GraphicObject{Type: "ImageObject", ImageObject: object}, mark.Sequence)
 	p.report.ImageObjects++
 	return nil
+}
+
+// preferLossyPhotoJPEG 判断默认导入模式下是否将原生不透明有损位图照片编码为高质量JPEG
+// 入参: source 源图像
+// 返回: bool 是否优先编码为高质量JPEG
+func (p *pdfImporter) preferLossyPhotoJPEG(source *pdfgo.Image) bool {
+	if p.compression.Mode != CompressionUnchanged || source == nil || source.ImageMask || source.Mask != nil || source.SoftMask != nil || source.BitsPerComponent == 1 {
+		return false
+	}
+	jpx, dct := pdfImageLossyFilter(p.reader, source)
+	if !jpx && !dct {
+		return false
+	}
+	if !jpx {
+		if int64(source.Width)*int64(source.Height) < pdfPhotoMinPixels {
+			return false
+		}
+		if source.BitsPerComponent > 0 && source.BitsPerComponent < 8 {
+			return false
+		}
+		if family, err := source.ColorSpaceFamily(); err == nil && family == "Indexed" {
+			return false
+		}
+	}
+	masked, err := source.HasMask()
+	return err == nil && !masked
 }
 
 // imageContentKey 对无间接依赖的小图像生成内容键，超大图像仍沿用流缓存

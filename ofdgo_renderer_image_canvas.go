@@ -27,6 +27,64 @@ import (
 	"golang.org/x/image/draw"
 )
 
+// isOpaqueEncodedImage 判断惰性编码图像是否不含透明通道与额外色彩转换，避免SVG输出触发像素解码
+// 入参: img 图像对象
+// 返回: bool 是否为可直接输出的不透明编码图像
+func isOpaqueEncodedImage(img image.Image) bool {
+	encoded, ok := img.(*EncodedImage)
+	if !ok {
+		return false
+	}
+	switch encoded.ColorModel() {
+	case color.YCbCrModel, color.GrayModel, color.Gray16Model, color.RGBAModel, color.RGBA64Model:
+		return true
+	default:
+		return false
+	}
+}
+
+// isDirectSVGEncodedImage 判断惰性编码图像是否无需色彩空间转换即可直接由浏览器SVG渲染
+// 入参: img 图像对象
+// 返回: bool 是否可零解码直出至SVG
+func isDirectSVGEncodedImage(img image.Image) bool {
+	encoded, ok := img.(*EncodedImage)
+	if !ok {
+		return false
+	}
+	switch encoded.ColorModel().(type) {
+	case color.Palette:
+		return true
+	}
+	switch encoded.ColorModel() {
+	case color.YCbCrModel, color.GrayModel, color.Gray16Model, color.RGBAModel, color.RGBA64Model, color.NRGBAModel:
+		return true
+	default:
+		return false
+	}
+}
+
+// isAxisAlignedCanvasMatrix 判断仿射变换矩阵是否无旋转和斜切
+// 入参: m 变换矩阵
+// 返回: bool 是否轴对齐
+func isAxisAlignedCanvasMatrix(m canvas.Matrix) bool {
+	return math.Abs(m[0][1]) <= 1e-9 && math.Abs(m[1][0]) <= 1e-9
+}
+
+// imageClipContains 判断裁剪是否完整包含变换后的图像，避免重复削弱边缘覆盖率
+// 入参: img 图片, clipPath 裁剪路径, m 图片到页面变换
+// 返回: bool 是否完整包含
+func imageClipContains(img image.Image, clipPath *canvas.Path, m canvas.Matrix) bool {
+	b := img.Bounds()
+	outline := canvas.Rectangle(float64(b.Dx()), float64(b.Dy())).Transform(m)
+	if rect, ok := rectangularPath(clipPath); ok {
+		return rect.Contains(outline.FastBounds())
+	}
+	if basegeom.ConvexContains(basegeom.Path(*geometryFromCanvasPath(clipPath)), basegeom.Path(*geometryFromCanvasPath(outline))) {
+		return true
+	}
+	return clipPath.Contains(outline)
+}
+
 // renderImage 渲染图片，图像像素受Boundary裁剪而边框豁免Boundary裁剪
 // 入参: ctx 画布上下文, obj 图片对象, pageH 页面高度, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM, parentClip 父级裁剪路径
 func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float64, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
@@ -140,10 +198,16 @@ func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPa
 		return
 	}
 	m = m.Scale(imgW/float64(img.Bounds().Dx()), imgH/float64(img.Bounds().Dy()))
-	if !pdf && !(isSVG && isOpaqueEncodedImage(img)) {
+	total := ctx.CoordSystemView().Mul(ctx.View()).Mul(m)
+	skipTransparentEdge := pdf || isSVG && (isOpaqueEncodedImage(img) || isAxisAlignedCanvasMatrix(total) && isDirectSVGEncodedImage(img))
+	if !skipTransparentEdge {
+		work := r.pageContext
+		if work == nil {
+			work = r.outputContext()
+		}
 		var pad int
 		var err error
-		img, pad, err = baseimage.WithTransparentEdge(r.pageContext, img)
+		img, pad, err = baseimage.WithTransparentEdge(work, img)
 		if err != nil {
 			r.renderError = err
 			return
@@ -175,22 +239,6 @@ func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPa
 			return
 		}
 		compiler.page.Commands[len(compiler.page.Commands)-1].Clip = segments
-	}
-}
-
-// isOpaqueEncodedImage 判断惰性编码图像是否不含透明通道与额外色彩转换，避免SVG输出触发像素解码
-// 入参: img 图像对象
-// 返回: bool 是否为可直接输出的不透明编码图像
-func isOpaqueEncodedImage(img image.Image) bool {
-	encoded, ok := img.(*EncodedImage)
-	if !ok {
-		return false
-	}
-	switch encoded.ColorModel() {
-	case color.YCbCrModel, color.GrayModel, color.Gray16Model, color.RGBAModel, color.RGBA64Model:
-		return true
-	default:
-		return false
 	}
 }
 
@@ -449,19 +497,4 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		return img
 	}
 	return out
-}
-
-// imageClipContains 判断裁剪是否完整包含变换后的图像，避免重复削弱边缘覆盖率
-// 入参: img 图片, clipPath 裁剪路径, m 图片到页面变换
-// 返回: bool 是否完整包含
-func imageClipContains(img image.Image, clipPath *canvas.Path, m canvas.Matrix) bool {
-	b := img.Bounds()
-	outline := canvas.Rectangle(float64(b.Dx()), float64(b.Dy())).Transform(m)
-	if rect, ok := rectangularPath(clipPath); ok {
-		return rect.Contains(outline.FastBounds())
-	}
-	if basegeom.ConvexContains(basegeom.Path(*geometryFromCanvasPath(clipPath)), basegeom.Path(*geometryFromCanvasPath(outline))) {
-		return true
-	}
-	return clipPath.Contains(outline)
 }

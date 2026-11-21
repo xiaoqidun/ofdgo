@@ -27,6 +27,7 @@ import (
 	"io/fs"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -44,12 +45,17 @@ import (
 	"github.com/xiaoqidun/ofdgo/internal/webui"
 )
 
-// 应用版本检查、发布下载根地址及系统字体缓存上限
+// 应用版本检查、发布下载根地址、字体与原生内存资源缓存上限
 const (
 	applicationVersionURL  = "https://ofdgo.aite.me/"
 	applicationDownloadURL = "https://ofdgo.aite.me/releases/"
 	fontCacheMaxEntries    = 16
 	fontCacheMaxBytes      = 64 << 20
+	docResourceMaxBytes    = 256 << 20
+	inlineSVGMaxBytes      = 128 << 10
+	svgStreamMaxBytes      = 256 << 20
+	svgStreamTTL           = 60 * time.Second
+	engineCacheMaxBytes    = 192 << 20
 )
 
 // Host 连接桌面系统能力和共用文档业务
@@ -60,6 +66,8 @@ type Host struct {
 	mu             sync.Mutex
 	window         *guigo.Window
 	files          *fileStore
+	docResources   *docResourceStore
+	svgStreams     *svgStreamStore
 	engines        map[string]*webui.NativeEngine
 	engineStops    map[string]func() bool
 	closingEngines map[string]*engineClose
@@ -125,6 +133,8 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 		return err
 	}
 	h.files = files
+	h.docResources = newDocResourceStore(docResourceMaxBytes)
+	h.svgStreams = newSVGStreamStore(svgStreamMaxBytes)
 	h.engines = make(map[string]*webui.NativeEngine)
 	h.cancels = make(map[string]context.CancelFunc)
 	h.fontFiles = make(map[string]string)
@@ -146,6 +156,9 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	static := http.FileServerFS(webuiassets.NativeFS)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/__native/") {
+			if h.serveMemoryResource(w, r) {
+				return
+			}
 			files.serve(w, r)
 			return
 		}
@@ -313,6 +326,393 @@ func (c *fontDataCache) clear() {
 	c.mu.Unlock()
 }
 
+// docResourceItem 保存只读文档资源缓存中的单条数据及媒体类型
+type docResourceItem struct {
+	mime string
+	data []byte
+}
+
+// docResourceBucket 保存单个文档令牌隔离的只读资源集合
+type docResourceBucket struct {
+	engineID string
+	items    map[string]docResourceItem
+	order    []string
+	bytes    int64
+}
+
+// docResourceStore 维护按文档令牌隔离的只读内存资源池
+type docResourceStore struct {
+	mu           sync.RWMutex
+	maxBytes     int64
+	totalBytes   int64
+	engineTokens map[string]string
+	buckets      map[string]*docResourceBucket
+}
+
+// newDocResourceStore 创建带总字节上限的文档只读资源内存池
+// 入参: maxBytes 内存池最大字节数
+// 返回: *docResourceStore 文档只读资源池
+func newDocResourceStore(maxBytes int64) *docResourceStore {
+	return &docResourceStore{
+		maxBytes:     maxBytes,
+		engineTokens: make(map[string]string),
+		buckets:      make(map[string]*docResourceBucket),
+	}
+}
+
+// tokenFor 获取或初始化指定会话当前的文档资源隔离令牌
+// 入参: engineID 会话标识
+// 返回: string 文档资源令牌
+func (s *docResourceStore) tokenFor(engineID string) string {
+	s.mu.RLock()
+	token := s.engineTokens[engineID]
+	s.mu.RUnlock()
+	if token != "" {
+		return token
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if token = s.engineTokens[engineID]; token != "" {
+		return token
+	}
+	token = rand.Text()
+	s.engineTokens[engineID] = token
+	s.buckets[token] = &docResourceBucket{engineID: engineID, items: make(map[string]docResourceItem)}
+	return token
+}
+
+// rotate 切换指定会话的文档资源令牌并立即释放旧令牌占用的全部内存
+// 入参: engineID 会话标识
+// 返回: string 新文档资源令牌
+func (s *docResourceStore) rotate(engineID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if oldToken := s.engineTokens[engineID]; oldToken != "" {
+		if old := s.buckets[oldToken]; old != nil {
+			s.totalBytes -= old.bytes
+			delete(s.buckets, oldToken)
+		}
+	}
+	token := rand.Text()
+	s.engineTokens[engineID] = token
+	s.buckets[token] = &docResourceBucket{engineID: engineID, items: make(map[string]docResourceItem)}
+	return token
+}
+
+// put 将只读资源写入指定令牌桶并返回原生零拷贝直读路径
+// 入参: engineID 会话标识, token 文档令牌, name 资源名称, mimeType 媒体类型, data 只读字节
+// 返回: string 原生资源路径
+func (s *docResourceStore) put(engineID, token, name, mimeType string, data []byte) string {
+	if name == "" || token == "" || len(data) == 0 {
+		return ""
+	}
+	resURL := "/__native/resource/" + token + "/" + url.PathEscape(name)
+	size := int64(len(data))
+	if s.maxBytes > 0 && size > s.maxBytes {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.engineTokens[engineID] != token {
+		return ""
+	}
+	bucket := s.buckets[token]
+	if bucket == nil {
+		return ""
+	}
+	if existing, ok := bucket.items[name]; ok && len(existing.data) > 0 {
+		if existing.mime == "" && mimeType != "" {
+			existing.mime = mimeType
+			bucket.items[name] = existing
+		}
+		return resURL
+	}
+	for s.maxBytes > 0 && s.totalBytes+size > s.maxBytes {
+		if !s.evictOneLocked(token) {
+			return ""
+		}
+	}
+	bucket.items[name] = docResourceItem{mime: mimeType, data: data}
+	bucket.order = append(bucket.order, name)
+	bucket.bytes += size
+	s.totalBytes += size
+	return resURL
+}
+
+// lookup 查询指定会话与令牌中已登记的资源路径及大小
+// 入参: engineID 会话标识, token 文档令牌, name 资源名称
+// 返回: string 资源路径, int 资源字节数, bool 是否命中
+func (s *docResourceStore) lookup(engineID, token, name string) (string, int, bool) {
+	if name == "" {
+		return "", 0, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if token == "" {
+		token = s.engineTokens[engineID]
+	}
+	if token == "" || s.engineTokens[engineID] != token {
+		return "", 0, false
+	}
+	bucket := s.buckets[token]
+	if bucket == nil {
+		return "", 0, false
+	}
+	item, ok := bucket.items[name]
+	if !ok || len(item.data) == 0 {
+		return "", 0, false
+	}
+	return "/__native/resource/" + token + "/" + url.PathEscape(name), len(item.data), true
+}
+
+// get 按令牌和资源名只读获取内存资源内容
+// 入参: token 文档令牌, name 资源名称
+// 返回: docResourceItem 资源条目, bool 是否命中
+func (s *docResourceStore) get(token, name string) (docResourceItem, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	bucket := s.buckets[token]
+	if bucket == nil {
+		return docResourceItem{}, false
+	}
+	item, ok := bucket.items[name]
+	return item, ok
+}
+
+// clearEngine 释放指定会话持有的全部文档只读资源
+// 入参: engineID 会话标识
+func (s *docResourceStore) clearEngine(engineID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if token := s.engineTokens[engineID]; token != "" {
+		if bucket := s.buckets[token]; bucket != nil {
+			s.totalBytes -= bucket.bytes
+			delete(s.buckets, token)
+		}
+		delete(s.engineTokens, engineID)
+	}
+}
+
+// clearAll 清空整个窗口持有的全部文档只读资源
+func (s *docResourceStore) clearAll() {
+	s.mu.Lock()
+	s.engineTokens = make(map[string]string)
+	s.buckets = make(map[string]*docResourceBucket)
+	s.totalBytes = 0
+	s.mu.Unlock()
+}
+
+// evictOneLocked 在持锁状态下按先进先出淘汰一条只读资源
+// 入参: currentToken 当前写入令牌
+// 返回: bool 是否成功淘汰一条资源
+func (s *docResourceStore) evictOneLocked(currentToken string) bool {
+	for token, bucket := range s.buckets {
+		if token == currentToken || len(bucket.order) == 0 {
+			continue
+		}
+		return s.evictBucketHeadLocked(bucket)
+	}
+	if bucket := s.buckets[currentToken]; bucket != nil && len(bucket.order) > 0 {
+		return s.evictBucketHeadLocked(bucket)
+	}
+	return false
+}
+
+// evictBucketHeadLocked 在持锁状态下淘汰指定令牌桶队头资源
+// 入参: bucket 目标令牌桶
+// 返回: bool 是否成功淘汰
+func (s *docResourceStore) evictBucketHeadLocked(bucket *docResourceBucket) bool {
+	if len(bucket.order) == 0 {
+		return false
+	}
+	name := bucket.order[0]
+	copy(bucket.order, bucket.order[1:])
+	bucket.order[len(bucket.order)-1] = ""
+	bucket.order = bucket.order[:len(bucket.order)-1]
+	if item, ok := bucket.items[name]; ok {
+		size := int64(len(item.data))
+		delete(bucket.items, name)
+		bucket.bytes -= size
+		s.totalBytes -= size
+		return true
+	}
+	return false
+}
+
+// svgStreamItem 保存一次性大SVG自动释放流的内存数据
+type svgStreamItem struct {
+	engineID  string
+	data      []byte
+	createdAt time.Time
+	reading   bool
+}
+
+// svgStreamStore 管理大SVG一次性内存流并在读完、超时或会话切换时自动回收
+type svgStreamStore struct {
+	mu         sync.Mutex
+	maxBytes   int64
+	totalBytes int64
+	items      map[string]*svgStreamItem
+	order      []string
+}
+
+// newSVGStreamStore 创建带容量保护的大SVG一次性自动释放流存储
+// 入参: maxBytes 最大保留字节数
+// 返回: *svgStreamStore 大SVG内存流存储
+func newSVGStreamStore(maxBytes int64) *svgStreamStore {
+	return &svgStreamStore{maxBytes: maxBytes, items: make(map[string]*svgStreamItem)}
+}
+
+// put 登记一次性大SVG字节流并返回直读路径
+// 入参: engineID 会话标识, data SVG字节数据
+// 返回: string 一次性SVG流路径
+func (s *svgStreamStore) put(engineID string, data []byte) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	s.pruneExpiredLocked(now)
+	size := int64(len(data))
+	for s.maxBytes > 0 && len(s.order) > 0 && s.totalBytes+size > s.maxBytes {
+		if !s.evictOldestLocked() {
+			break
+		}
+	}
+	id := rand.Text()
+	s.items[id] = &svgStreamItem{engineID: engineID, data: data, createdAt: now}
+	s.order = append(s.order, id)
+	s.totalBytes += size
+	return "/__native/svg/" + id
+}
+
+// acquire 获取大SVG只读字节数据，调用方读取完毕后可按需释放条目
+// 入参: id 流标识, consume 是否标记正在消费
+// 返回: []byte SVG字节, bool 是否命中
+func (s *svgStreamStore) acquire(id string, consume bool) ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item := s.items[id]
+	if item == nil {
+		return nil, false
+	}
+	if consume {
+		item.reading = true
+	}
+	return item.data, true
+}
+
+// delete 立即从内存释放指定大SVG流条目
+// 入参: id 流标识
+func (s *svgStreamStore) delete(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deleteLocked(id)
+}
+
+// clearEngine 清理指定会话尚未读取完毕的全部大SVG流
+// 入参: engineID 会话标识
+func (s *svgStreamStore) clearEngine(engineID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := s.order[:0]
+	for _, id := range s.order {
+		item := s.items[id]
+		if item == nil {
+			continue
+		}
+		if item.engineID == engineID {
+			s.totalBytes -= int64(len(item.data))
+			item.data = nil
+			delete(s.items, id)
+			continue
+		}
+		kept = append(kept, id)
+	}
+	for i := len(kept); i < len(s.order); i++ {
+		s.order[i] = ""
+	}
+	s.order = kept
+}
+
+// clearAll 清空全部大SVG内存流
+func (s *svgStreamStore) clearAll() {
+	s.mu.Lock()
+	for id, item := range s.items {
+		item.data = nil
+		delete(s.items, id)
+	}
+	s.order = nil
+	s.totalBytes = 0
+	s.mu.Unlock()
+}
+
+// pruneExpiredLocked 清理超过生存时间且未在读取中的残留SVG流
+// 入参: now 当前时间
+func (s *svgStreamStore) pruneExpiredLocked(now time.Time) {
+	kept := s.order[:0]
+	for _, id := range s.order {
+		item := s.items[id]
+		if item == nil {
+			continue
+		}
+		if !item.reading && now.Sub(item.createdAt) > svgStreamTTL {
+			s.totalBytes -= int64(len(item.data))
+			item.data = nil
+			delete(s.items, id)
+			continue
+		}
+		kept = append(kept, id)
+	}
+	for i := len(kept); i < len(s.order); i++ {
+		s.order[i] = ""
+	}
+	s.order = kept
+}
+
+// evictOldestLocked 淘汰最早登记且未在读取中的SVG流
+// 返回: bool 是否成功淘汰
+func (s *svgStreamStore) evictOldestLocked() bool {
+	for i, id := range s.order {
+		item := s.items[id]
+		if item == nil {
+			copy(s.order[i:], s.order[i+1:])
+			s.order[len(s.order)-1] = ""
+			s.order = s.order[:len(s.order)-1]
+			return true
+		}
+		if item.reading {
+			continue
+		}
+		s.totalBytes -= int64(len(item.data))
+		item.data = nil
+		delete(s.items, id)
+		copy(s.order[i:], s.order[i+1:])
+		s.order[len(s.order)-1] = ""
+		s.order = s.order[:len(s.order)-1]
+		return true
+	}
+	return false
+}
+
+// deleteLocked 在持锁状态下删除指定SVG流条目
+// 入参: id 流标识
+func (s *svgStreamStore) deleteLocked(id string) {
+	item := s.items[id]
+	if item == nil {
+		return
+	}
+	s.totalBytes -= int64(len(item.data))
+	item.data = nil
+	delete(s.items, id)
+	for i, entryID := range s.order {
+		if entryID == id {
+			copy(s.order[i:], s.order[i+1:])
+			s.order[len(s.order)-1] = ""
+			s.order = s.order[:len(s.order)-1]
+			return
+		}
+	}
+}
+
 // resourceReader 保存资源读取位置及关闭操作
 type resourceReader struct {
 	*io.SectionReader
@@ -328,7 +728,7 @@ func (r *resourceReader) Close() error {
 	return nil
 }
 
-// resource 将静态资源及文件直接交给宿主资源流
+// resource 将静态资源、只读内存文档资源、大SVG自动释放流及文件直接交给宿主资源流
 // 入参: r 资源请求
 // 返回: *guigo.Resource 资源响应, error 读取错误
 func (h *Host) resource(r *http.Request) (*guigo.Resource, error) {
@@ -343,13 +743,45 @@ func (h *Host) resource(r *http.Request) (*guigo.Resource, error) {
 	var reader io.ReaderAt
 	var size int64
 	var close func() error
+	var contentType string
+	cacheControl := "no-store"
+	svgStreamID := ""
 	transferred := false
 	defer func() {
 		if !transferred && close != nil {
 			close()
 		}
 	}()
-	if strings.HasPrefix(r.URL.Path, "/__native/data/") {
+	if strings.HasPrefix(r.URL.Path, "/__native/resource/") {
+		rest := strings.TrimPrefix(r.URL.Path, "/__native/resource/")
+		token, rawName, ok := strings.Cut(rest, "/")
+		if !ok || token == "" || rawName == "" || h.docResources == nil {
+			return nil, nil
+		}
+		name, err := url.PathUnescape(rawName)
+		if err != nil || name == "" {
+			return nil, nil
+		}
+		item, ok := h.docResources.get(token, name)
+		if !ok {
+			return nil, nil
+		}
+		reader, size = bytes.NewReader(item.data), int64(len(item.data))
+		contentType = item.mime
+		cacheControl = "private, max-age=3600"
+	} else if strings.HasPrefix(r.URL.Path, "/__native/svg/") {
+		id := strings.TrimPrefix(r.URL.Path, "/__native/svg/")
+		if id == "" || strings.Contains(id, "/") || h.svgStreams == nil {
+			return nil, nil
+		}
+		data, ok := h.svgStreams.acquire(id, r.Method == http.MethodGet)
+		if !ok {
+			return nil, nil
+		}
+		reader, size = bytes.NewReader(data), int64(len(data))
+		contentType = "image/svg+xml; charset=utf-8"
+		svgStreamID = id
+	} else if strings.HasPrefix(r.URL.Path, "/__native/data/") {
 		var err error
 		reader, size, close, err = h.files.resource(strings.TrimPrefix(r.URL.Path, "/__native/data/"))
 		if err != nil {
@@ -372,16 +804,18 @@ func (h *Host) resource(r *http.Request) (*guigo.Resource, error) {
 		}
 		reader, size = bytes.NewReader(data), int64(len(data))
 	}
-	header := make([]byte, min(size, 512))
-	_, err := reader.ReadAt(header, 0)
-	if err != nil && err != io.EOF {
-		return nil, err
-	}
-	contentType := mime.TypeByExtension(filepath.Ext(r.URL.Path))
 	if contentType == "" {
+		contentType = mime.TypeByExtension(filepath.Ext(r.URL.Path))
+	}
+	if contentType == "" {
+		header := make([]byte, min(size, 512))
+		_, err := reader.ReadAt(header, 0)
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
 		contentType = http.DetectContentType(header)
 	}
-	headers := http.Header{"Content-Type": {contentType}, "Content-Length": {strconv.FormatInt(size, 10)}, "Cache-Control": {"no-store"}, "Accept-Ranges": {"bytes"}}
+	headers := http.Header{"Content-Type": {contentType}, "Content-Length": {strconv.FormatInt(size, 10)}, "Cache-Control": {cacheControl}, "Accept-Ranges": {"bytes"}}
 	headers.Set("X-OFDGo-Build-Version", build.Version)
 	start, length, status := int64(0), size, http.StatusOK
 	if value := r.Header.Get("Range"); value != "" && r.Method == http.MethodGet {
@@ -421,11 +855,81 @@ func (h *Host) resource(r *http.Request) (*guigo.Resource, error) {
 		headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, size))
 		headers.Set("Content-Length", strconv.FormatInt(length, 10))
 	}
+	if svgStreamID != "" && r.Method == http.MethodGet && start+length >= size {
+		var once sync.Once
+		id := svgStreamID
+		close = func() error {
+			once.Do(func() { h.svgStreams.delete(id) })
+			return nil
+		}
+	}
 	if r.Method == http.MethodHead {
 		length = 0
 	}
 	transferred = true
 	return &guigo.Resource{Body: &resourceReader{SectionReader: io.NewSectionReader(reader, start, length), close: close}, StatusCode: status, Header: headers}, nil
+}
+
+// serveMemoryResource 通过HTTP回退通道直读文档只读内存资源或一次性大SVG流
+// 入参: w 响应写入器, r HTTP请求
+// 返回: bool 是否已由内存资源通道处理
+func (h *Host) serveMemoryResource(w http.ResponseWriter, r *http.Request) bool {
+	if strings.HasPrefix(r.URL.Path, "/__native/resource/") {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return true
+		}
+		rest := strings.TrimPrefix(r.URL.Path, "/__native/resource/")
+		token, rawName, ok := strings.Cut(rest, "/")
+		if !ok || token == "" || rawName == "" || h.docResources == nil {
+			http.NotFound(w, r)
+			return true
+		}
+		name, err := url.PathUnescape(rawName)
+		if err != nil || name == "" {
+			http.NotFound(w, r)
+			return true
+		}
+		item, ok := h.docResources.get(token, name)
+		if !ok {
+			http.NotFound(w, r)
+			return true
+		}
+		contentType := item.mime
+		if contentType == "" {
+			contentType = http.DetectContentType(item.data[:min(len(item.data), 512)])
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "private, max-age=3600")
+		w.Header().Set("X-OFDGo-Build-Version", build.Version)
+		http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(item.data))
+		return true
+	}
+	if strings.HasPrefix(r.URL.Path, "/__native/svg/") {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return true
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/__native/svg/")
+		if id == "" || strings.Contains(id, "/") || h.svgStreams == nil {
+			http.NotFound(w, r)
+			return true
+		}
+		data, ok := h.svgStreams.acquire(id, r.Method == http.MethodGet)
+		if !ok {
+			http.NotFound(w, r)
+			return true
+		}
+		if r.Method == http.MethodGet {
+			defer h.svgStreams.delete(id)
+		}
+		w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-OFDGo-Build-Version", build.Version)
+		http.ServeContent(w, r, id+".svg", time.Time{}, bytes.NewReader(data))
+		return true
+	}
+	return false
 }
 
 // emit 发送当前窗口事件
@@ -591,10 +1095,10 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 			return nil, err
 		}
 		engine := webui.NewNativeEngine(func(token string) (io.ReaderAt, int64, error) { return h.files.resolveHolder(id, token) })
-		parallelism, cacheBytes := runtime.GOMAXPROCS(0), int64(128<<20)
+		parallelism, cacheBytes := max(2, runtime.GOMAXPROCS(0)), int64(engineCacheMaxBytes)
 		if memory := conversionMemory; memory != nil {
 			available := memory()
-			cacheBytes = max(32<<20, available/32)
+			cacheBytes = min(int64(engineCacheMaxBytes), max(64<<20, available/16))
 		}
 		engine.RenderParallelism = parallelism
 		engine.ConversionPool = h.conversionPool
@@ -603,6 +1107,9 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		engine.ReserveOutput = h.reserveOutput
 		engine.CleanupOutput = h.cleanupOutput
 		engine.LoadFont = h.loadFont
+		if h.docResources != nil {
+			h.docResources.tokenFor(id)
+		}
 		h.mu.Lock()
 		h.engines[id] = engine
 		if h.engineStops == nil {
@@ -741,6 +1248,17 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		}
 		callName := text("name")
 		values, _ := args["args"].([]any)
+		docToken := ""
+		if h.docResources != nil {
+			docToken = h.docResources.tokenFor(id)
+			if callName == "ofdgoSVGFontData" && len(values) > 0 {
+				if fontName, ok := values[0].(string); ok && fontName != "" {
+					if resURL, size, hit := h.docResources.lookup(id, docToken, fontName); hit {
+						return guigo.Result{Value: map[string]any{"ok": true, "data": map[string]any{"url": resURL, "size": size}}}, nil
+					}
+				}
+			}
+		}
 		finishCall := h.files.beginHolderCall(id, callName, values)
 		defer finishCall(false)
 		result := engine.Call(operation, callName, values, func(event any) {
@@ -749,8 +1267,25 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 				h.emit("ofdgo.engine."+id, value)
 			}
 		})
-		finishCall(result != nil && result["ok"] == true)
-		encoded := h.encode(guigo.PageContext(ctx), result)
+		succeeded := result != nil && result["ok"] == true
+		finishCall(succeeded)
+		if succeeded && rotatesDocResources(callName) {
+			if h.docResources != nil {
+				h.docResources.rotate(id)
+			}
+			if h.svgStreams != nil {
+				h.svgStreams.clearEngine(id)
+			}
+		}
+		pageCtx := guigo.PageContext(ctx)
+		var encoded any
+		if succeeded && callName == "ofdgoRenderPage" {
+			encoded = h.encodeRenderPage(pageCtx, id, docToken, result)
+		} else if succeeded && callName == "ofdgoSVGFontData" {
+			encoded = h.encodeSVGFontData(pageCtx, id, docToken, values, result)
+		} else {
+			encoded = h.encode(pageCtx, result)
+		}
 		return guigo.Result{Value: encoded, Discard: func() { h.discard(encoded) }}, nil
 	case "open", "save", "directory":
 		h.mu.Lock()
@@ -984,6 +1519,149 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 	return nil, fmt.Errorf("未知宿主操作")
 }
 
+// encodeRenderPage 对页面渲染结果执行零拷贝编码，图片与字体直连只读内存池，大SVG转为一次性自动释放流
+// 入参: ctx 页面上下文, engineID 会话标识, docToken 文档资源令牌, result 原生渲染结果
+// 返回: any 零拷贝编码后的渲染响应
+func (h *Host) encodeRenderPage(ctx context.Context, engineID, docToken string, result map[string]any) any {
+	data, ok := result["data"].(map[string]any)
+	if !ok {
+		return h.encode(ctx, result)
+	}
+	out := make(map[string]any, len(data)+2)
+	for key, item := range data {
+		switch key {
+		case "images":
+			out[key] = h.encodeRenderImages(ctx, engineID, docToken, item)
+		case "fonts":
+			out[key] = h.encodeRenderFonts(engineID, docToken, item)
+		case "text":
+			out[key] = rawJSONValue(item, "{}")
+		case "annotations":
+			out[key] = rawJSONValue(item, "[]")
+		case "svg":
+			if svgStr, isStr := item.(string); isStr && len(svgStr) > inlineSVGMaxBytes && h.svgStreams != nil {
+				out["svgUrl"] = h.svgStreams.put(engineID, []byte(svgStr))
+				out["svgBytes"] = len(svgStr)
+			} else {
+				out[key] = item
+			}
+		default:
+			out[key] = h.encode(ctx, item)
+		}
+	}
+	encoded := make(map[string]any, len(result))
+	for key, item := range result {
+		if key == "data" {
+			encoded[key] = out
+		} else {
+			encoded[key] = h.encode(ctx, item)
+		}
+	}
+	return encoded
+}
+
+// encodeRenderImages 将渲染结果中的图片字节登记到只读文档内存池并返回直读地址
+// 入参: ctx 页面上下文, engineID 会话标识, docToken 文档资源令牌, value 图片列表
+// 返回: any 零拷贝图片描述列表
+func (h *Host) encodeRenderImages(ctx context.Context, engineID, docToken string, value any) any {
+	items, ok := value.([]any)
+	if !ok {
+		return value
+	}
+	out := make([]any, len(items))
+	for i, item := range items {
+		imageMap, ok := item.(map[string]any)
+		if !ok {
+			out[i] = item
+			continue
+		}
+		name, _ := imageMap["name"].(string)
+		mimeType, _ := imageMap["mime"].(string)
+		entry := map[string]any{"name": name, "mime": mimeType}
+		if raw, ok := imageMap["bytes"].([]byte); ok && len(raw) > 0 {
+			if h.docResources != nil {
+				if resURL := h.docResources.put(engineID, docToken, name, mimeType, raw); resURL != "" {
+					entry["url"] = resURL
+					entry["size"] = len(raw)
+					out[i] = entry
+					continue
+				}
+			}
+			entry["bytes"] = h.encode(ctx, raw)
+		} else if h.docResources != nil {
+			if resURL, size, hit := h.docResources.lookup(engineID, docToken, name); hit {
+				entry["url"] = resURL
+				entry["size"] = size
+			}
+		}
+		out[i] = entry
+	}
+	return out
+}
+
+// encodeRenderFonts 将渲染结果中的字体字节登记到只读文档内存池并返回直读地址
+// 入参: engineID 会话标识, docToken 文档资源令牌, value 字体列表
+// 返回: any 零拷贝字体描述列表
+func (h *Host) encodeRenderFonts(engineID, docToken string, value any) any {
+	items, ok := value.([]any)
+	if !ok {
+		return value
+	}
+	out := make([]any, len(items))
+	for i, item := range items {
+		fontMap, ok := item.(map[string]any)
+		if !ok {
+			out[i] = item
+			continue
+		}
+		name, _ := fontMap["name"].(string)
+		entry := make(map[string]any, len(fontMap)+2)
+		for k, v := range fontMap {
+			if k == "data" || k == "bytes" {
+				continue
+			}
+			entry[k] = v
+		}
+		raw, _ := fontMap["data"].([]byte)
+		if len(raw) == 0 {
+			raw, _ = fontMap["bytes"].([]byte)
+		}
+		if len(raw) > 0 && h.docResources != nil {
+			if resURL := h.docResources.put(engineID, docToken, name, fontMIME(raw), raw); resURL != "" {
+				entry["url"] = resURL
+				entry["size"] = len(raw)
+			}
+		} else if h.docResources != nil {
+			if resURL, size, hit := h.docResources.lookup(engineID, docToken, name); hit {
+				entry["url"] = resURL
+				entry["size"] = size
+			}
+		}
+		out[i] = entry
+	}
+	return out
+}
+
+// encodeSVGFontData 将按需请求的字体字节登记到只读文档内存池并返回直读地址
+// 入参: ctx 页面上下文, engineID 会话标识, docToken 文档资源令牌, args 请求参数, result 原生响应
+// 返回: any 编码后的字体响应
+func (h *Host) encodeSVGFontData(ctx context.Context, engineID, docToken string, args []any, result map[string]any) any {
+	data, ok := result["data"].(map[string]any)
+	if !ok || h.docResources == nil || len(args) == 0 {
+		return h.encode(ctx, result)
+	}
+	fontName, _ := args[0].(string)
+	raw, _ := data["bytes"].([]byte)
+	if fontName == "" || len(raw) == 0 {
+		return h.encode(ctx, result)
+	}
+	resURL := h.docResources.put(engineID, docToken, fontName, fontMIME(raw), raw)
+	if resURL == "" {
+		return h.encode(ctx, result)
+	}
+	return map[string]any{"ok": true, "data": map[string]any{"url": resURL, "size": len(raw)}}
+}
+
 // encode 将二进制输出登记为页面资源
 // 入参: ctx 页面上下文, value 原生调用结果
 // 返回: any 包含资源描述的调用结果
@@ -1008,11 +1686,14 @@ func (h *Host) encode(ctx context.Context, value any) any {
 	}
 }
 
-// discard 释放页面未接收的临时结果
+// discard 释放页面未接收的临时结果及大SVG自动释放流
 // 入参: value 包含资源描述的调用结果
 func (h *Host) discard(value any) {
 	switch v := value.(type) {
 	case map[string]any:
+		if svgURL, ok := v["svgUrl"].(string); ok && strings.HasPrefix(svgURL, "/__native/svg/") && h.svgStreams != nil {
+			h.svgStreams.delete(strings.TrimPrefix(svgURL, "/__native/svg/"))
+		}
 		if id, ok := v["nativeFile"].(string); ok && v["temporary"] == true {
 			h.files.release(id)
 			return
@@ -1197,6 +1878,12 @@ func (h *Host) closeEngine(id string) error {
 	for _, result := range results {
 		h.discard(result)
 	}
+	if h.docResources != nil {
+		h.docResources.clearEngine(id)
+	}
+	if h.svgStreams != nil {
+		h.svgStreams.clearEngine(id)
+	}
 	err := errors.Join(engine.Close(), h.files.closeHolder(id))
 	h.mu.Lock()
 	closing.err = err
@@ -1233,10 +1920,62 @@ func (h *Host) close() {
 		h.discard(result)
 	}
 	h.fontCache.clear()
+	if h.docResources != nil {
+		h.docResources.clearAll()
+	}
+	if h.svgStreams != nil {
+		h.svgStreams.clearAll()
+	}
 	if h.resources != nil {
 		h.resources.Clear()
 	}
 	_ = h.files.close()
+}
+
+// rotatesDocResources 判断操作成功时是否切换、重建或关闭当前文档会话
+// 入参: name 操作名称
+// 返回: bool 是否需要轮换文档资源令牌并清空旧内存池
+func rotatesDocResources(name string) bool {
+	switch name {
+	case "ofdgoOpen", "ofdgoOpenPDF", "ofdgoCreateDocument", "ofdgoImportImages", "ofdgoSelectDocument", "ofdgoSelectDocumentVersion", "ofdgoClose":
+		return true
+	}
+	return false
+}
+
+// fontMIME 根据字体文件魔数推断响应媒体类型
+// 入参: data 字体字节数据
+// 返回: string 媒体类型
+func fontMIME(data []byte) string {
+	if len(data) >= 4 {
+		switch string(data[:4]) {
+		case "wOF2":
+			return "font/woff2"
+		case "wOFF":
+			return "font/woff"
+		case "OTTO":
+			return "font/otf"
+		}
+	}
+	return "font/ttf"
+}
+
+// rawJSONValue 将已编码的JSON字符串直接转为原始JSON片段，避免发往WebView时二次转义
+// 入参: value 原始字段值, fallback 空值时的JSON回退片段
+// 返回: any 原始JSON片段或原对象
+func rawJSONValue(value any, fallback string) any {
+	text, ok := value.(string)
+	if !ok {
+		if value == nil {
+			return json.RawMessage(fallback)
+		}
+		return value
+	}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || trimmed == "null" {
+		return json.RawMessage(fallback)
+	}
+	return json.RawMessage(trimmed)
 }
 
 // associationOptions 提供Windows文件关联的固定应用配置

@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -38,62 +39,9 @@ var canvasSRGBTables = sync.OnceValue(func() [2]*[256][256]uint8 {
 // canvasGammaTables 缓存Gamma色彩空间的双向查表
 var canvasGammaTables sync.Map
 
-// init 注册Canvas适配器和默认组合
-func init() {
-	if err := RegisterRenderBackend("canvas", defaultRenderBackends); err != nil {
-		panic(err)
-	}
-}
-
 // CanvasBackend canvas页面编译与绘制适配器，ColorSpace仅影响光栅输出
 type CanvasBackend struct {
 	ColorSpace canvas.ColorSpace
-}
-
-// Name 返回后端标识
-// 返回: string 后端标识
-func (CanvasBackend) Name() string { return "canvas" }
-
-// Render 绘制已编译页面，不修改输入数据
-// 入参: page 只读页面
-// 返回: image.Image 图像, error 绘制错误
-func (b CanvasBackend) Render(page *RasterPage) (image.Image, error) {
-	w, h, err := page.PixelSize()
-	if err != nil {
-		return nil, err
-	}
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	return b.renderImage(page, img)
-}
-
-// RenderInto 在调用方独占的紧密RGBA缓冲中重新绘制，不修改页面或保留缓冲
-// 入参: page 只读页面, target 原点为零且尺寸匹配的目标，不与输入图像共享数据
-// 返回: error 参数或绘制错误，绘制失败时目标可能包含部分结果
-func (b CanvasBackend) RenderInto(page *RasterPage, target *image.RGBA) error {
-	w, h, err := page.PixelSize()
-	if err != nil {
-		return err
-	}
-	if target == nil || target.Rect != image.Rect(0, 0, w, h) || target.Stride != 4*w || len(target.Pix) < 4*w*h {
-		return fmt.Errorf("invalid canvas target buffer")
-	}
-	clear(target.Pix[:4*w*h])
-	_, err = b.renderImage(page, target)
-	return err
-}
-
-// OpenFont 使用独立字体后端读取字体度量
-// 入参: data 字体数据
-// 返回: FontMetrics 字体度量, error 解析错误
-func (CanvasBackend) OpenFont(data []byte) (FontMetrics, error) {
-	return (SFNTBackend{}).OpenFont(data)
-}
-
-// ResolveFont 使用独立字体后端解析字体来源
-// 入参: r 渲染器, id 字体标识, exact 是否禁止无关回退
-// 返回: ResolvedFont 字体与来源, error 解析错误
-func (CanvasBackend) ResolveFont(r *Renderer, id string, exact bool) (ResolvedFont, error) {
-	return (SFNTBackend{}).ResolveFont(r, id, exact)
 }
 
 // rasterStrokeGradientCanvas 保留页面坐标描边的局部渐变定位
@@ -102,27 +50,18 @@ type rasterStrokeGradientCanvas struct {
 	inverse RasterMatrix
 }
 
-// At 返回原局部坐标的描边渐变颜色
-// 入参: x 页面横坐标, y 页面纵坐标
-// 返回: color.RGBA 预乘颜色
-func (g rasterStrokeGradientCanvas) At(x, y float64) color.RGBA {
-	p := g.inverse.Apply(RasterPoint{x, y})
-	return g.rasterGradientCanvas.At(p.X, p.Y)
-}
-
-// SetColorSpace 转换描边渐变颜色，不修改共享分段
-// 入参: space 颜色空间
-// 返回: canvas.Gradient 独立渐变
-func (g rasterStrokeGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
-	g.rasterGradientCanvas = g.rasterGradientCanvas.SetColorSpace(space).(rasterGradientCanvas)
-	return g
-}
-
 // rasterGradientCanvas 将公共渐变交给Canvas采样，不改变OFD周期语义
 type rasterGradientCanvas struct {
 	gradient *RasterGradient
 	space    canvas.ColorSpace
 	mesh     *MeshSampler
+}
+
+// init 注册Canvas适配器和默认组合
+func init() {
+	if err := RegisterRenderBackend("canvas", defaultRenderBackends); err != nil {
+		panic(err)
+	}
 }
 
 // newRasterGradientCanvas 准备渐变适配器及独立网格采样器
@@ -134,38 +73,6 @@ func newRasterGradientCanvas(gradient *RasterGradient) rasterGradientCanvas {
 		result.mesh = gradient.Mesh.NewSampler()
 	}
 	return result
-}
-
-// At 返回局部坐标的预乘颜色
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.RGBA 渐变颜色
-func (g rasterGradientCanvas) At(x, y float64) color.RGBA {
-	var value color.RGBA
-	if g.mesh != nil {
-		value = g.mesh.At(x, y)
-	} else {
-		value = g.gradient.At(x, y)
-	}
-	if g.space != nil {
-		return g.space.ToLinear(value)
-	}
-	return value
-}
-
-// SetColorSpace 返回转换颜色空间后的独立渐变
-// 入参: space 目标颜色空间
-// 返回: canvas.Gradient 采样器
-func (g rasterGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
-	if g.gradient.Mesh != nil || g.gradient.Sample != nil {
-		g.space = space
-		return g
-	}
-	copy := *g.gradient
-	copy.Stops = append([]ColorStop(nil), copy.Stops...)
-	for i := range copy.Stops {
-		copy.Stops[i].Color = space.ToLinear(copy.Stops[i].Color)
-	}
-	return rasterGradientCanvas{gradient: &copy}
 }
 
 // canvasColorTransfer 准备八位预乘颜色变换，任意自定义空间保留其原始计算
@@ -202,221 +109,6 @@ func canvasColorTransfer(space canvas.ColorSpace, linear bool) func(color.RGBA) 
 		return func(value color.RGBA) color.RGBA { return space.ToLinear(value) }
 	}
 	return func(value color.RGBA) color.RGBA { return space.FromLinear(value) }
-}
-
-// renderImage 将页面绘制到已清空且尺寸匹配的目标
-// 入参: page 只读页面, img 独占目标
-// 返回: image.Image 目标图像, error 绘制错误
-func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Image, error) {
-	space := b.ColorSpace
-	if space == nil {
-		space = canvas.DefaultColorSpace
-	}
-	_, linear := space.(canvas.LinearColorSpace)
-	var toLinear func(color.RGBA) color.RGBA
-	var linearImages map[image.Image]*image.RGBA
-	if !linear {
-		toLinear = canvasColorTransfer(space, true)
-		linearImages = make(map[image.Image]*image.RGBA)
-	}
-	masks := renderCache[[32]byte, *image.Alpha]{limit: 16 << 20}
-	var scratch []byte
-	if err := b.renderCommands(page, page.Commands, img, image.Point{}, img.Rect.Dx(), img.Rect.Dy(), space, toLinear, linearImages, &masks, &scratch); err != nil {
-		return nil, err
-	}
-	if !linear {
-		baseimage.TransformRGBA(img, img, canvasColorTransfer(space, false))
-	}
-	return img, nil
-}
-
-// renderCommands 在带页面像素偏移的目标缓冲上执行指令序列并支持嵌套离屏透明组合成
-// 入参: page 页面定义, commands 指令切片, img 当前目标缓冲, offset 目标左上角在整页中的像素偏移, pageW 整页像素宽, pageH 整页像素高, space 线性或目标色彩空间, toLinear 非线性转线性单像素函数, linearImages 页内线性图像缓存, masks 裁剪蒙版缓存, scratch 可复用离屏裁剪缓冲
-// 返回: error 绘制错误
-func (b CanvasBackend) renderCommands(page *RasterPage, commands []RasterCommand, img *image.RGBA, offset image.Point, pageW, pageH int, space canvas.ColorSpace, toLinear func(color.RGBA) color.RGBA, linearImages map[image.Image]*image.RGBA, masks *renderCache[[32]byte, *image.Alpha], scratch *[]byte) error {
-	scale := page.DPI / 25.4
-	dstPageBounds := img.Rect.Add(offset)
-	r := rasterizer.FromImage(img, canvas.DPMM(scale), space)
-	var pathData []float64
-	for i := 0; i < len(commands); i++ {
-		cmd := commands[i]
-		if cmd.Group == RasterGroupBegin {
-			end := findRasterGroupEnd(commands, i)
-			if cmd.GroupAlpha == 0 || end <= i+1 {
-				i = end
-				continue
-			}
-			groupBounds := rasterCommandsPixelBounds(page, commands[i+1:end], pageW, pageH).Intersect(dstPageBounds)
-			if groupBounds.Empty() {
-				i = end
-				continue
-			}
-			offscreen := image.NewRGBA(image.Rect(0, 0, groupBounds.Dx(), groupBounds.Dy()))
-			if err := b.renderCommands(page, commands[i+1:end], offscreen, groupBounds.Min, pageW, pageH, space, toLinear, linearImages, masks, scratch); err != nil {
-				return err
-			}
-			compositeGroupAlpha(img, groupBounds.Sub(offset), offscreen, cmd.GroupAlpha)
-			i = end
-			continue
-		}
-		if cmd.Group == RasterGroupEnd {
-			continue
-		}
-		if cmd.Image != nil {
-			source, err := baseimage.PixelData(cmd.Image)
-			if err != nil {
-				return fmt.Errorf("canvas image %d: %w", i, err)
-			}
-			if toLinear != nil {
-				cacheable := reflect.ValueOf(source).Kind() == reflect.Pointer
-				if cacheable {
-					if converted, ok := linearImages[source]; ok {
-						source = converted
-					} else {
-						converted = image.NewRGBA(source.Bounds())
-						baseimage.TransformRGBA(converted, source, toLinear)
-						linearImages[source] = converted
-						source = converted
-					}
-				} else {
-					converted := image.NewRGBA(source.Bounds())
-					baseimage.TransformRGBA(converted, source, toLinear)
-					source = converted
-				}
-			}
-			if err := drawRasterImageCommandOffset(b, page, img, offset, pageH, source, cmd, masks); err != nil {
-				return err
-			}
-			continue
-		}
-		visible := visibleRasterPath(cmd, page)
-		if cmd.Clip != nil {
-			if len(cmd.Clip) == 0 || len(visible) == 0 {
-				continue
-			}
-		}
-		p, err := rasterCanvasPath(visible, pathData)
-		if err != nil {
-			return fmt.Errorf("canvas command %d: %w", i, err)
-		}
-		pathData = p.Data()[:0]
-		paint := canvas.Paint{Color: cmd.Paint.Color}
-		var sampled rasterGradientCanvas
-		if g := cmd.Paint.Gradient; g != nil {
-			sampled = newRasterGradientCanvas(g)
-			stops := make(canvas.Grad, len(g.Stops))
-			for j, stop := range g.Stops {
-				stops[j] = canvas.Stop{Offset: stop.Offset, Color: stop.Color}
-			}
-			start, end := canvas.Point{X: g.Start.X, Y: g.Start.Y}, canvas.Point{X: g.End.X, Y: g.End.Y}
-			switch g.Kind {
-			case RasterLinear:
-				paint = canvas.Paint{Gradient: stops.ToLinear(start, end)}
-			case RasterRadial:
-				paint = canvas.Paint{Gradient: stops.ToRadial(start, g.R0, end, g.R1)}
-			case RasterMesh:
-				paint = canvas.Paint{Gradient: sampled}
-			default:
-				return fmt.Errorf("canvas command %d: unsupported gradient %d", i, g.Kind)
-			}
-			if g.Spread != nil || g.Sample != nil {
-				paint = canvas.Paint{Gradient: sampled}
-			}
-		}
-		style := canvas.Style{Fill: paint, FillRule: canvas.NonZero}
-		if cmd.EvenOdd {
-			style.FillRule = canvas.EvenOdd
-		}
-		m := cmd.Transform
-		if cmd.Stroke != nil {
-			options := *cmd.Stroke
-			if err := basegeom.ValidateStroke(options); err != nil {
-				return err
-			}
-			p = p.Transform(canvas.Matrix{{m[0], m[2], m[4]}, {m[1], m[3], m[5]}})
-			if cmd.Paint.Gradient != nil {
-				inverse, err := m.Inverse()
-				if err != nil {
-					return err
-				}
-				paint = canvas.Paint{Gradient: rasterStrokeGradientCanvas{sampled, inverse}}
-			}
-			line := pathStyle{lineJoin: canvas.MiterJoin, miterLimit: defaultMiterLimit}
-			line.applyLineJoin(options.Join, options.MiterLimit, options.MiterLimitSet)
-			style = canvas.Style{Stroke: paint, StrokeWidth: options.Width, StrokeCapper: pathLineCap(options.Cap, canvas.ButtCap), StrokeJoiner: line.lineJoin, FillRule: canvas.NonZero}
-			if len(options.Dashes) > 0 {
-				style.DashOffset = options.DashOffset / options.Width
-				style.Dashes = make([]float64, len(options.Dashes))
-				for j, dash := range options.Dashes {
-					style.Dashes[j] = dash / options.Width
-				}
-			}
-			var pointPath GeometryPath
-			pointStroke := false
-			if options.Cap == "Round" {
-				pointPath, pointStroke = canvasPointPath(geometryFromRaster(cmd.Path))
-			}
-			if options.Cap == "Round" && (p.Empty() || pointStroke) {
-				path, err := pointPath.Transform(MatrixFromValues([6]float64(m)))
-				if err != nil {
-					return err
-				}
-				path, err = path.Stroke(options)
-				if err != nil {
-					return err
-				}
-				p, err = canvasObjectPath(path)
-				if err != nil {
-					return err
-				}
-				style = canvas.Style{Fill: paint, FillRule: canvas.NonZero}
-			} else if slices.Contains(options.Dashes, 0) {
-				var err error
-				p, err = canvasStrokePath(b, p, options)
-				if err != nil {
-					return err
-				}
-				style = canvas.Style{Fill: paint, FillRule: canvas.NonZero}
-			}
-			m = RasterMatrix{1, 0, 0, 1, 0, 0}
-		}
-		matrix := canvas.Matrix{{m[0], m[2], m[4]}, {-m[1], -m[3], page.Height - m[5]}}
-		if cmd.Clip == nil {
-			matrix[0][2] -= float64(offset.X) / scale
-			matrix[1][2] -= float64(pageH-(offset.Y+img.Rect.Dy())) / scale
-			r.RenderPath(p, style, matrix)
-			continue
-		}
-		pathRect, bounded := rasterCommandPathPixelBounds(page, cmd, visible, pageH, dstPageBounds)
-		if bounded && pathRect.Empty() {
-			continue
-		}
-		mask, err := rasterClipMask(b, page, cmd.Clip, masks)
-		if err != nil {
-			return err
-		}
-		clipRect := mask.Rect.Intersect(dstPageBounds)
-		if bounded {
-			clipRect = clipRect.Intersect(pathRect)
-		}
-		if clipRect.Empty() {
-			continue
-		}
-		w, h := clipRect.Dx(), clipRect.Dy()
-		need := w * h * 4
-		if cap(*scratch) < need {
-			*scratch = make([]byte, need)
-		}
-		buf := (*scratch)[:need]
-		clear(buf)
-		part := &image.RGBA{Pix: buf, Stride: w * 4, Rect: image.Rect(0, 0, w, h)}
-		local := rasterizer.FromImage(part, canvas.DPMM(scale), space)
-		matrix[0][2] -= float64(clipRect.Min.X) / scale
-		matrix[1][2] -= float64(pageH-clipRect.Max.Y) / scale
-		local.RenderPath(p, style, matrix)
-		draw.DrawMask(img, clipRect.Sub(offset), part, image.Point{}, mask, clipRect.Min, draw.Over)
-	}
-	return nil
 }
 
 // rasterCommandPathPixelBounds 计算路径绘制指令含描边外扩后的紧致像素包围盒
@@ -698,4 +390,361 @@ func buildCanvasColorTables(space canvas.ColorSpace) [2]*[256][256]uint8 {
 func defaultRenderBackends() RenderBackends {
 	backend := CanvasBackend{}
 	return RenderBackends{FontResources: SFNTBackend{}, Fonts: SFNTBackend{}, Geometry: backend, Compiler: backend, Raster: backend, SVG: backend, PDF: backend, EPS: backend}
+}
+
+// Name 返回后端标识
+// 返回: string 后端标识
+func (CanvasBackend) Name() string { return "canvas" }
+
+// Render 绘制已编译页面，不修改输入数据
+// 入参: page 只读页面
+// 返回: image.Image 图像, error 绘制错误
+func (b CanvasBackend) Render(page *RasterPage) (image.Image, error) {
+	return b.RenderContext(context.Background(), page)
+}
+
+// RenderContext 按取消上下文绘制已编译页面，不修改输入数据
+// 入参: ctx 取消上下文, page 只读页面
+// 返回: image.Image 图像, error 绘制或取消错误
+func (b CanvasBackend) RenderContext(ctx context.Context, page *RasterPage) (image.Image, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	w, h, err := page.PixelSize()
+	if err != nil {
+		return nil, err
+	}
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	return b.renderImageContext(ctx, page, img)
+}
+
+// RenderInto 在调用方独占的紧密RGBA缓冲中重新绘制，不修改页面或保留缓冲
+// 入参: page 只读页面, target 原点为零且尺寸匹配的目标，不与输入图像共享数据
+// 返回: error 参数或绘制错误，绘制失败时目标可能包含部分结果
+func (b CanvasBackend) RenderInto(page *RasterPage, target *image.RGBA) error {
+	w, h, err := page.PixelSize()
+	if err != nil {
+		return err
+	}
+	if target == nil || target.Rect != image.Rect(0, 0, w, h) || target.Stride != 4*w || len(target.Pix) < 4*w*h {
+		return fmt.Errorf("invalid canvas target buffer")
+	}
+	clear(target.Pix[:4*w*h])
+	_, err = b.renderImageContext(context.Background(), page, target)
+	return err
+}
+
+// OpenFont 使用独立字体后端读取字体度量
+// 入参: data 字体数据
+// 返回: FontMetrics 字体度量, error 解析错误
+func (CanvasBackend) OpenFont(data []byte) (FontMetrics, error) {
+	return (SFNTBackend{}).OpenFont(data)
+}
+
+// ResolveFont 使用独立字体后端解析字体来源
+// 入参: r 渲染器, id 字体标识, exact 是否禁止无关回退
+// 返回: ResolvedFont 字体与来源, error 解析错误
+func (CanvasBackend) ResolveFont(r *Renderer, id string, exact bool) (ResolvedFont, error) {
+	return (SFNTBackend{}).ResolveFont(r, id, exact)
+}
+
+// At 返回原局部坐标的描边渐变颜色
+// 入参: x 页面横坐标, y 页面纵坐标
+// 返回: color.RGBA 预乘颜色
+func (g rasterStrokeGradientCanvas) At(x, y float64) color.RGBA {
+	p := g.inverse.Apply(RasterPoint{x, y})
+	return g.rasterGradientCanvas.At(p.X, p.Y)
+}
+
+// SetColorSpace 转换描边渐变颜色，不修改共享分段
+// 入参: space 颜色空间
+// 返回: canvas.Gradient 独立渐变
+func (g rasterStrokeGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
+	g.rasterGradientCanvas = g.rasterGradientCanvas.SetColorSpace(space).(rasterGradientCanvas)
+	return g
+}
+
+// At 返回局部坐标的预乘颜色
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.RGBA 渐变颜色
+func (g rasterGradientCanvas) At(x, y float64) color.RGBA {
+	var value color.RGBA
+	if g.mesh != nil {
+		value = g.mesh.At(x, y)
+	} else {
+		value = g.gradient.At(x, y)
+	}
+	if g.space != nil {
+		return g.space.ToLinear(value)
+	}
+	return value
+}
+
+// SetColorSpace 返回转换颜色空间后的独立渐变
+// 入参: space 目标颜色空间
+// 返回: canvas.Gradient 采样器
+func (g rasterGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
+	if g.gradient.Mesh != nil || g.gradient.Sample != nil {
+		g.space = space
+		return g
+	}
+	copy := *g.gradient
+	copy.Stops = append([]ColorStop(nil), copy.Stops...)
+	for i := range copy.Stops {
+		copy.Stops[i].Color = space.ToLinear(copy.Stops[i].Color)
+	}
+	return rasterGradientCanvas{gradient: &copy}
+}
+
+// renderImageContext 按取消上下文将页面绘制到已清空且尺寸匹配的目标
+// 入参: ctx 取消上下文, page 只读页面, img 独占目标
+// 返回: image.Image 目标图像, error 绘制或取消错误
+func (b CanvasBackend) renderImageContext(ctx context.Context, page *RasterPage, img *image.RGBA) (image.Image, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	space := b.ColorSpace
+	if space == nil {
+		space = canvas.DefaultColorSpace
+	}
+	_, linear := space.(canvas.LinearColorSpace)
+	var toLinear func(color.RGBA) color.RGBA
+	var linearImages map[image.Image]*image.RGBA
+	if !linear {
+		toLinear = canvasColorTransfer(space, true)
+		linearImages = make(map[image.Image]*image.RGBA)
+	}
+	masks := renderCache[[32]byte, *image.Alpha]{limit: 16 << 20}
+	var scratch []byte
+	if err := b.renderCommands(ctx, page, page.Commands, img, image.Point{}, img.Rect.Dx(), img.Rect.Dy(), space, toLinear, linearImages, &masks, &scratch); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !linear {
+		baseimage.TransformRGBA(img, img, canvasColorTransfer(space, false))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return img, nil
+}
+
+// renderCommands 在带页面像素偏移的目标缓冲上执行指令序列并支持嵌套离屏透明组合成
+// 入参: ctx 取消上下文, page 页面定义, commands 指令切片, img 当前目标缓冲, offset 目标左上角在整页中的像素偏移, pageW 整页像素宽, pageH 整页像素高, space 线性或目标色彩空间, toLinear 非线性转线性单像素函数, linearImages 页内线性图像缓存, masks 裁剪蒙版缓存, scratch 可复用离屏裁剪缓冲
+// 返回: error 绘制或取消错误
+func (b CanvasBackend) renderCommands(ctx context.Context, page *RasterPage, commands []RasterCommand, img *image.RGBA, offset image.Point, pageW, pageH int, space canvas.ColorSpace, toLinear func(color.RGBA) color.RGBA, linearImages map[image.Image]*image.RGBA, masks *renderCache[[32]byte, *image.Alpha], scratch *[]byte) error {
+	scale := page.DPI / 25.4
+	dstPageBounds := img.Rect.Add(offset)
+	r := rasterizer.FromImage(img, canvas.DPMM(scale), space)
+	var pathData []float64
+	for i := 0; i < len(commands); i++ {
+		if i&15 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		cmd := commands[i]
+		if cmd.Group == RasterGroupBegin {
+			end := findRasterGroupEnd(commands, i)
+			if cmd.GroupAlpha == 0 || end <= i+1 {
+				i = end
+				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			groupBounds := rasterCommandsPixelBounds(page, commands[i+1:end], pageW, pageH).Intersect(dstPageBounds)
+			if groupBounds.Empty() {
+				i = end
+				continue
+			}
+			offscreen := image.NewRGBA(image.Rect(0, 0, groupBounds.Dx(), groupBounds.Dy()))
+			if err := b.renderCommands(ctx, page, commands[i+1:end], offscreen, groupBounds.Min, pageW, pageH, space, toLinear, linearImages, masks, scratch); err != nil {
+				return err
+			}
+			compositeGroupAlpha(img, groupBounds.Sub(offset), offscreen, cmd.GroupAlpha)
+			i = end
+			continue
+		}
+		if cmd.Group == RasterGroupEnd {
+			continue
+		}
+		if cmd.Image != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			source, err := baseimage.PixelDataContext(ctx, cmd.Image)
+			if err != nil {
+				return fmt.Errorf("canvas image %d: %w", i, err)
+			}
+			drawCmd := cmd
+			if toLinear != nil {
+				cacheable := reflect.ValueOf(source).Kind() == reflect.Pointer
+				if cacheable {
+					if converted, ok := linearImages[source]; ok {
+						source = converted
+					} else if down, scaledCmd, ok := downsampleRasterImage(source, drawCmd, page, pageH); ok {
+						baseimage.TransformRGBA(down, down, toLinear)
+						source = down
+						drawCmd = scaledCmd
+					} else {
+						converted = image.NewRGBA(source.Bounds())
+						baseimage.TransformRGBA(converted, source, toLinear)
+						linearImages[source] = converted
+						source = converted
+					}
+				} else if down, scaledCmd, ok := downsampleRasterImage(source, drawCmd, page, pageH); ok {
+					baseimage.TransformRGBA(down, down, toLinear)
+					source = down
+					drawCmd = scaledCmd
+				} else {
+					converted := image.NewRGBA(source.Bounds())
+					baseimage.TransformRGBA(converted, source, toLinear)
+					source = converted
+				}
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := drawRasterImageCommandOffset(b, page, img, offset, pageH, source, drawCmd, masks); err != nil {
+				return err
+			}
+			continue
+		}
+		visible := visibleRasterPath(cmd, page)
+		if cmd.Clip != nil {
+			if len(cmd.Clip) == 0 || len(visible) == 0 {
+				continue
+			}
+		}
+		p, err := rasterCanvasPath(visible, pathData)
+		if err != nil {
+			return fmt.Errorf("canvas command %d: %w", i, err)
+		}
+		pathData = p.Data()[:0]
+		paint := canvas.Paint{Color: cmd.Paint.Color}
+		var sampled rasterGradientCanvas
+		if g := cmd.Paint.Gradient; g != nil {
+			sampled = newRasterGradientCanvas(g)
+			stops := make(canvas.Grad, len(g.Stops))
+			for j, stop := range g.Stops {
+				stops[j] = canvas.Stop{Offset: stop.Offset, Color: stop.Color}
+			}
+			start, end := canvas.Point{X: g.Start.X, Y: g.Start.Y}, canvas.Point{X: g.End.X, Y: g.End.Y}
+			switch g.Kind {
+			case RasterLinear:
+				paint = canvas.Paint{Gradient: stops.ToLinear(start, end)}
+			case RasterRadial:
+				paint = canvas.Paint{Gradient: stops.ToRadial(start, g.R0, end, g.R1)}
+			case RasterMesh:
+				paint = canvas.Paint{Gradient: sampled}
+			default:
+				return fmt.Errorf("canvas command %d: unsupported gradient %d", i, g.Kind)
+			}
+			if g.Spread != nil || g.Sample != nil {
+				paint = canvas.Paint{Gradient: sampled}
+			}
+		}
+		style := canvas.Style{Fill: paint, FillRule: canvas.NonZero}
+		if cmd.EvenOdd {
+			style.FillRule = canvas.EvenOdd
+		}
+		m := cmd.Transform
+		if cmd.Stroke != nil {
+			options := *cmd.Stroke
+			if err := basegeom.ValidateStroke(options); err != nil {
+				return err
+			}
+			p = p.Transform(canvas.Matrix{{m[0], m[2], m[4]}, {m[1], m[3], m[5]}})
+			if cmd.Paint.Gradient != nil {
+				inverse, err := m.Inverse()
+				if err != nil {
+					return err
+				}
+				paint = canvas.Paint{Gradient: rasterStrokeGradientCanvas{sampled, inverse}}
+			}
+			line := pathStyle{lineJoin: canvas.MiterJoin, miterLimit: defaultMiterLimit}
+			line.applyLineJoin(options.Join, options.MiterLimit, options.MiterLimitSet)
+			style = canvas.Style{Stroke: paint, StrokeWidth: options.Width, StrokeCapper: pathLineCap(options.Cap, canvas.ButtCap), StrokeJoiner: line.lineJoin, FillRule: canvas.NonZero}
+			if len(options.Dashes) > 0 {
+				style.DashOffset = options.DashOffset / options.Width
+				style.Dashes = make([]float64, len(options.Dashes))
+				for j, dash := range options.Dashes {
+					style.Dashes[j] = dash / options.Width
+				}
+			}
+			var pointPath GeometryPath
+			pointStroke := false
+			if options.Cap == "Round" {
+				pointPath, pointStroke = canvasPointPath(geometryFromRaster(cmd.Path))
+			}
+			if options.Cap == "Round" && (p.Empty() || pointStroke) {
+				path, err := pointPath.Transform(MatrixFromValues([6]float64(m)))
+				if err != nil {
+					return err
+				}
+				path, err = path.Stroke(options)
+				if err != nil {
+					return err
+				}
+				p, err = canvasObjectPath(path)
+				if err != nil {
+					return err
+				}
+				style = canvas.Style{Fill: paint, FillRule: canvas.NonZero}
+			} else if slices.Contains(options.Dashes, 0) {
+				var err error
+				p, err = canvasStrokePath(b, p, options)
+				if err != nil {
+					return err
+				}
+				style = canvas.Style{Fill: paint, FillRule: canvas.NonZero}
+			}
+			m = RasterMatrix{1, 0, 0, 1, 0, 0}
+		}
+		matrix := canvas.Matrix{{m[0], m[2], m[4]}, {-m[1], -m[3], page.Height - m[5]}}
+		if cmd.Clip == nil {
+			matrix[0][2] -= float64(offset.X) / scale
+			matrix[1][2] -= float64(pageH-(offset.Y+img.Rect.Dy())) / scale
+			r.RenderPath(p, style, matrix)
+			continue
+		}
+		pathRect, bounded := rasterCommandPathPixelBounds(page, cmd, visible, pageH, dstPageBounds)
+		if bounded && pathRect.Empty() {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		mask, err := rasterClipMask(b, page, cmd.Clip, masks)
+		if err != nil {
+			return err
+		}
+		clipRect := mask.Rect.Intersect(dstPageBounds)
+		if bounded {
+			clipRect = clipRect.Intersect(pathRect)
+		}
+		if clipRect.Empty() {
+			continue
+		}
+		w, h := clipRect.Dx(), clipRect.Dy()
+		need := w * h * 4
+		if cap(*scratch) < need {
+			*scratch = make([]byte, need)
+		}
+		buf := (*scratch)[:need]
+		clear(buf)
+		part := &image.RGBA{Pix: buf, Stride: w * 4, Rect: image.Rect(0, 0, w, h)}
+		local := rasterizer.FromImage(part, canvas.DPMM(scale), space)
+		matrix[0][2] -= float64(clipRect.Min.X) / scale
+		matrix[1][2] -= float64(pageH-clipRect.Max.Y) / scale
+		local.RenderPath(p, style, matrix)
+		draw.DrawMask(img, clipRect.Sub(offset), part, image.Point{}, mask, clipRect.Min, draw.Over)
+	}
+	return nil
 }

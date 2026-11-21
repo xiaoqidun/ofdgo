@@ -40,6 +40,38 @@ const xmpNamespace = "http://ns.adobe.com/xap/1.0/"
 // creatorXMP 记录独立导出文件的制作软件
 const creatorXMP = `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:xmp="` + xmpNamespace + `"><xmp:CreatorTool>` + ofdCreator + `</xmp:CreatorTool></rdf:Description></rdf:RDF>`
 
+// imageMetadataWriter 在图像固定头之后插入元数据，不缓存图像主体
+type imageMetadataWriter struct {
+	writer io.Writer
+	skip   int
+	data   []byte
+}
+
+// fillWhiteBackground 填充白色背景，复用当前导出图片的RGBA像素
+// 入参: img 图片对象
+// 返回: image.Image 图片对象
+func fillWhiteBackground(img image.Image) image.Image {
+	bounds := img.Bounds()
+	if rgba, ok := img.(*image.RGBA); ok {
+		for y := 0; y < bounds.Dy(); y++ {
+			row := rgba.Pix[y*rgba.Stride : y*rgba.Stride+bounds.Dx()*4]
+			for i := 0; i < len(row); i += 4 {
+				if alpha := 255 - row[i+3]; alpha != 0 {
+					row[i] += alpha
+					row[i+1] += alpha
+					row[i+2] += alpha
+					row[i+3] = 255
+				}
+			}
+		}
+		return rgba
+	}
+	dst := image.NewRGBA(bounds)
+	draw.Draw(dst, bounds, image.White, image.Point{}, draw.Src)
+	draw.Draw(dst, bounds, img, bounds.Min, draw.Over)
+	return dst
+}
+
 // RenderTo 按格式渲染单页，JPEG使用95画质
 // 入参: page 页面内容, writer 输出流, format svg、pdf、eps、png、jpg、jpeg或txt
 // 返回: error 错误信息
@@ -200,24 +232,75 @@ func (r *Renderer) RenderToMultiPageText(writer io.Writer, indices ...int) error
 // 入参: page 页面内容
 // 返回: image.Image 图像对象, error 错误信息
 func (r *Renderer) RenderToImage(page *PageContent) (image.Image, error) {
-	scene, err := r.PreparePage(page)
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r.backends.Raster == nil {
+		return nil, fmt.Errorf("raster scene: %w", ErrBackendUnavailable)
+	}
+	_, hasReuse := r.backends.Raster.(RasterSceneReuseBackend)
+	_, hasScene := r.backends.Raster.(RasterSceneBackend)
+	if !hasReuse && !hasScene {
+		compiled, err := r.CompilePageContext(ctx, page)
+		if err != nil {
+			return nil, err
+		}
+		if _, _, err := compiled.PixelSize(); err != nil {
+			return nil, err
+		}
+		var img image.Image
+		if ctxRaster, ok := r.backends.Raster.(interface {
+			RenderContext(context.Context, *RasterPage) (image.Image, error)
+		}); ok {
+			img, err = ctxRaster.RenderContext(ctx, compiled)
+		} else {
+			img, err = r.backends.Raster.Render(compiled)
+		}
+		if cancelErr := ctx.Err(); cancelErr != nil {
+			return nil, cancelErr
+		}
+		return img, err
+	}
+	view := *r
+	view.pageContext = ctx
+	scene, err := view.PreparePage(page)
 	if err != nil {
 		return nil, err
 	}
-	return scene.Render()
+	img, err := scene.Render()
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return nil, cancelErr
+	}
+	return img, err
 }
 
 // RenderToPNG 渲染为PNG，像素尺寸由DPI决定
 // 入参: page 页面内容, writer 输出流
 // 返回: error 渲染、写入或取消错误
 func (r *Renderer) RenderToPNG(page *PageContent, writer io.Writer) error {
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := r.Compression.Validate(); err != nil {
 		return err
 	}
 	var written int64
-	writer = convertWriter{ctx: r.outputContext(), writer: writer, count: &written}
-	img, err := r.RenderToImage(page)
+	writer = convertWriter{ctx: ctx, writer: writer, count: &written}
+	view := *r
+	view.pageContext = ctx
+	img, err := view.RenderToImage(page)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	text := []byte("Software\x00" + ofdCreator)
@@ -229,7 +312,7 @@ func (r *Renderer) RenderToPNG(page *PageContent, writer io.Writer) error {
 	if r.Compression.Mode == CompressionUnchanged {
 		return png.Encode(&imageMetadataWriter{writer: writer, skip: 33, data: chunk}, img)
 	}
-	optimized, err := pdfgo.OptimizeImageFromPixels(r.outputContext(), img, r.Compression)
+	optimized, err := pdfgo.OptimizeImageFromPixels(ctx, img, r.Compression)
 	if errors.Is(err, io.ErrShortBuffer) {
 		return png.Encode(&imageMetadataWriter{writer: writer, skip: 33, data: chunk}, img)
 	}
@@ -244,13 +327,25 @@ func (r *Renderer) RenderToPNG(page *PageContent, writer io.Writer) error {
 // 入参: page 页面内容, writer 输出流, options 编码选项，nil使用标准库默认值
 // 返回: error 渲染、写入或取消错误
 func (r *Renderer) RenderToJPEG(page *PageContent, writer io.Writer, options *jpeg.Options) error {
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := r.Compression.Validate(); err != nil {
 		return err
 	}
 	var written int64
-	writer = convertWriter{ctx: r.outputContext(), writer: writer, count: &written}
-	img, err := r.RenderToImage(page)
+	writer = convertWriter{ctx: ctx, writer: writer, count: &written}
+	view := *r
+	view.pageContext = ctx
+	img, err := view.RenderToImage(page)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	metadata := []byte(xmpNamespace + "\x00" + creatorXMP)
@@ -272,7 +367,7 @@ func (r *Renderer) RenderToJPEG(page *PageContent, writer io.Writer, options *jp
 	if err := jpeg.Encode(&imageMetadataWriter{writer: &encoded, skip: 2, data: segment}, fillWhiteBackground(img), options); err != nil {
 		return err
 	}
-	optimized, err := pdfgo.OptimizeJPEG(r.outputContext(), encoded.Bytes())
+	optimized, err := pdfgo.OptimizeJPEG(ctx, encoded.Bytes())
 	if err != nil {
 		return err
 	}
@@ -373,13 +468,6 @@ func (r *Renderer) RenderPagesToPDF(contents []*PageContent, writer io.Writer) e
 		pages[i] = RenderDocumentPage{Content: page, Box: box}
 	}
 	return r.renderPDFPages(pages, writer, r.OnExportProgress)
-}
-
-// imageMetadataWriter 在图像固定头之后插入元数据，不缓存图像主体
-type imageMetadataWriter struct {
-	writer io.Writer
-	skip   int
-	data   []byte
 }
 
 // Write 交付图像数据并在头部边界写入元数据
@@ -618,29 +706,4 @@ func (r *Renderer) renderPDFPages(pages []RenderDocumentPage, writer io.Writer, 
 		return err
 	}
 	return ctx.Err()
-}
-
-// fillWhiteBackground 填充白色背景，复用当前导出图片的RGBA像素
-// 入参: img 图片对象
-// 返回: image.Image 图片对象
-func fillWhiteBackground(img image.Image) image.Image {
-	bounds := img.Bounds()
-	if rgba, ok := img.(*image.RGBA); ok {
-		for y := 0; y < bounds.Dy(); y++ {
-			row := rgba.Pix[y*rgba.Stride : y*rgba.Stride+bounds.Dx()*4]
-			for i := 0; i < len(row); i += 4 {
-				if alpha := 255 - row[i+3]; alpha != 0 {
-					row[i] += alpha
-					row[i+1] += alpha
-					row[i+2] += alpha
-					row[i+3] = 255
-				}
-			}
-		}
-		return rgba
-	}
-	dst := image.NewRGBA(bounds)
-	draw.Draw(dst, bounds, image.White, image.Point{}, draw.Src)
-	draw.Draw(dst, bounds, img, bounds.Min, draw.Over)
-	return dst
 }

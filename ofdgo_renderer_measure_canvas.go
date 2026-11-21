@@ -17,9 +17,74 @@ package ofdgo
 import (
 	"fmt"
 	"image"
+	"math"
 
 	"github.com/tdewolff/canvas"
 )
+
+// boundsRenderer 收集绘制范围，不分配页面像素或合并独立图形轮廓
+type boundsRenderer struct {
+	box      Box
+	collect  bool
+	contours []ObjectContour
+}
+
+// boundsColor 以底纹的基础颜色和透明度度量轮廓，不修改原画刷
+// 入参: color 填充或描边颜色
+// 返回: *FillColor 用于度量的颜色
+func boundsColor(color *FillColor) *FillColor {
+	if color == nil || color.Pattern == nil {
+		return color
+	}
+	return &FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}
+}
+
+// textPathBox 将字形轮廓转换为页面区域
+// 入参: path 字形轮廓, pageH 页面高度
+// 返回: Box 字符区域
+func textPathBox(path *canvas.Path, pageH float64) Box {
+	if path.Empty() {
+		return Box{}
+	}
+	bounds := path.Bounds()
+	return Box{X: bounds.X0, Y: pageH - bounds.Y1, W: bounds.X1 - bounds.X0, H: bounds.Y1 - bounds.Y0}
+}
+
+// mergeAdjacentTextSpan 尝试将同行连续相邻字符选区合并到前一个选区矩阵
+// 入参: prev 前一个文字选区, end 当前字符结束偏移, cur 当前字符选区矩阵
+// 返回: TextSpan 合并后的选区, bool 是否允许合并
+func mergeAdjacentTextSpan(prev TextSpan, end int, cur [6]float64) (TextSpan, bool) {
+	pa, pb, pc, pd, pe, pf := prev.Matrix[0], prev.Matrix[1], prev.Matrix[2], prev.Matrix[3], prev.Matrix[4], prev.Matrix[5]
+	ma, mb, mc, md, me, mf := cur[0], cur[1], cur[2], cur[3], cur[4], cur[5]
+	if math.Abs(pc-mc) > 0.05 || math.Abs(pd-md) > 0.05 {
+		return TextSpan{}, false
+	}
+	pLen := math.Hypot(pa, pb)
+	cLen := math.Hypot(ma, mb)
+	lineH := math.Hypot(pc, pd)
+	if pLen <= 1e-6 || cLen <= 1e-6 || lineH <= 1e-6 {
+		return TextSpan{}, false
+	}
+	ux, uy := pa/pLen, pb/pLen
+	cx, cy := ma/cLen, mb/cLen
+	if ux*cx+uy*cy < 0.999 || math.Abs(ux*cy-uy*cx) > 0.01 {
+		return TextSpan{}, false
+	}
+	dx, dy := me-(pe+pa), mf-(pf+pb)
+	perp := math.Abs(-dx*uy + dy*ux)
+	if perp > 0.05 {
+		return TextSpan{}, false
+	}
+	gap := dx*ux + dy*uy
+	if gap < -0.25*lineH || gap > 0.8*lineH {
+		return TextSpan{}, false
+	}
+	totalW := (me+ma-pe)*ux + (mf+mb-pf)*uy
+	if totalW <= pLen {
+		return TextSpan{}, false
+	}
+	return TextSpan{Start: prev.Start, End: end, Matrix: [6]float64{ux * totalW, uy * totalW, pc, pd, pe, pf}}, true
+}
 
 // MeasureObject 使用默认解释器度量对象，不分配页面像素
 // 入参: r 渲染器, object 图形对象, options 度量上下文
@@ -93,26 +158,30 @@ func (CanvasBackend) MeasureObject(r *Renderer, object GraphicObject, options Me
 // 入参: r 渲染器, page 页面内容
 // 返回: *PageText 页面文字, error 错误信息
 func (CanvasBackend) PageText(r *Renderer, page *PageContent) (*PageText, error) {
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	defer r.bindPageResources(page)()
 	box, err := r.GetPageBox(page)
 	if err != nil {
 		return nil, err
 	}
 	renderer := *r
+	renderer.pageContext = ctx
 	renderer.OnPageText = nil
 	renderer.pageText = &PageText{}
 	renderer.textOnly = true
 	if err := renderer.renderCanvasPageToContext(canvas.NewContext(canvas.New(box.W, box.H)), page, false); err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return renderer.pageText, nil
-}
-
-// boundsRenderer 收集绘制范围，不分配页面像素或合并独立图形轮廓
-type boundsRenderer struct {
-	box      Box
-	collect  bool
-	contours []ObjectContour
 }
 
 // Size 返回不限定边界的度量画布尺寸
@@ -198,60 +267,80 @@ func (r *Renderer) measureImage(ctx *canvas.Context, obj ImageObject, pageH floa
 	}
 }
 
-// addSpan 收集字形选择区域，同一原文区间的多个字形合并为一项
+// addSpan 收集字形选择区域，合并同原文区间及同行相邻连续字符选区
 // 入参: start 起始字符, end 结束字符, bounds 字形布局区域, m 字形变换, clip 裁剪路径, pageH 页面高度
 func (run *TextRun) addSpan(start, end int, bounds canvas.Rect, m canvas.Matrix, clip *canvas.Path, pageH float64) {
 	if m.Det() == 0 {
 		return
 	}
 	if clip != nil {
-		path := canvas.Rectangle(bounds.W(), bounds.H()).Translate(bounds.X0, bounds.Y0).Transform(m)
-		path = applyClipPath(path, clip)
-		if path.Empty() {
-			return
+		if clipRect, isRect := rectangularPath(clip); isRect {
+			world := bounds.Transform(m)
+			if !clipRect.Contains(world) {
+				if isAxisAlignedCanvasMatrix(m) {
+					clipped, ok := intersectCanvasRect(world, clipRect)
+					if !ok {
+						return
+					}
+					x0, x1 := (clipped.X0-m[0][2])/m[0][0], (clipped.X1-m[0][2])/m[0][0]
+					if x0 > x1 {
+						x0, x1 = x1, x0
+					}
+					y0, y1 := (clipped.Y0-m[1][2])/m[1][1], (clipped.Y1-m[1][2])/m[1][1]
+					if y0 > y1 {
+						y0, y1 = y1, y0
+					}
+					bounds = canvas.Rect{X0: x0, Y0: y0, X1: x1, Y1: y1}
+				} else {
+					path := canvas.Rectangle(bounds.W(), bounds.H()).Translate(bounds.X0, bounds.Y0).Transform(m)
+					path = applyClipPath(path, clip)
+					if path.Empty() {
+						return
+					}
+					inverse, ok := invertCanvasMatrix(m)
+					if !ok {
+						return
+					}
+					bounds = path.Transform(inverse).Bounds()
+				}
+			}
+		} else {
+			path := canvas.Rectangle(bounds.W(), bounds.H()).Translate(bounds.X0, bounds.Y0).Transform(m)
+			path = applyClipPath(path, clip)
+			if path.Empty() {
+				return
+			}
+			inverse, ok := invertCanvasMatrix(m)
+			if !ok {
+				return
+			}
+			bounds = path.Transform(inverse).Bounds()
 		}
-		inverse, ok := invertCanvasMatrix(m)
-		if !ok {
-			return
-		}
-		bounds = path.Transform(inverse).Bounds()
 	}
 	if bounds.W() < 0 || bounds.H() <= 0 {
 		return
 	}
 	m = canvas.Matrix{{1, 0, 0}, {0, -1, pageH}}.Mul(m).Translate(bounds.X0, bounds.Y1).Scale(bounds.W(), -bounds.H())
-	span := TextSpan{Start: start, End: end}
-	if n := len(run.Spans); n > 0 && run.Spans[n-1].Start == start && run.Spans[n-1].End == end {
-		span = run.Spans[n-1]
-		v := span.Matrix
-		previous := canvas.Matrix{{v[0], v[2], v[4]}, {v[1], v[3], v[5]}}
-		if inverse, ok := invertCanvasMatrix(previous); ok {
-			bounds = canvas.Rect{X1: 1, Y1: 1}.Add(canvas.Rect{X1: 1, Y1: 1}.Transform(inverse.Mul(m)))
-			m = previous.Translate(bounds.X0, bounds.Y0).Scale(bounds.W(), bounds.H())
+	curMatrix := [6]float64{m[0][0], m[1][0], m[0][1], m[1][1], m[0][2], m[1][2]}
+	if n := len(run.Spans); n > 0 {
+		if run.Spans[n-1].Start == start && run.Spans[n-1].End == end {
+			span := run.Spans[n-1]
+			v := span.Matrix
+			previous := canvas.Matrix{{v[0], v[2], v[4]}, {v[1], v[3], v[5]}}
+			if inverse, ok := invertCanvasMatrix(previous); ok {
+				merged := canvas.Rect{X1: 1, Y1: 1}.Add(canvas.Rect{X1: 1, Y1: 1}.Transform(inverse.Mul(m)))
+				m = previous.Translate(merged.X0, merged.Y0).Scale(merged.W(), merged.H())
+				curMatrix = [6]float64{m[0][0], m[1][0], m[0][1], m[1][1], m[0][2], m[1][2]}
+			}
+			run.Spans[n-1] = TextSpan{Start: start, End: end, Matrix: curMatrix}
+			return
 		}
-		run.Spans = run.Spans[:n-1]
+		if run.Spans[n-1].End == start {
+			if merged, ok := mergeAdjacentTextSpan(run.Spans[n-1], end, curMatrix); ok {
+				run.Spans[n-1] = merged
+				return
+			}
+		}
 	}
-	span.Matrix = [6]float64{m[0][0], m[1][0], m[0][1], m[1][1], m[0][2], m[1][2]}
-	run.Spans = append(run.Spans, span)
-}
-
-// boundsColor 以底纹的基础颜色和透明度度量轮廓，不修改原画刷
-// 入参: color 填充或描边颜色
-// 返回: *FillColor 用于度量的颜色
-func boundsColor(color *FillColor) *FillColor {
-	if color == nil || color.Pattern == nil {
-		return color
-	}
-	return &FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace, Alpha: color.Alpha}
-}
-
-// textPathBox 将字形轮廓转换为页面区域
-// 入参: path 字形轮廓, pageH 页面高度
-// 返回: Box 字符区域
-func textPathBox(path *canvas.Path, pageH float64) Box {
-	if path.Empty() {
-		return Box{}
-	}
-	bounds := path.Bounds()
-	return Box{X: bounds.X0, Y: pageH - bounds.Y1, W: bounds.X1 - bounds.X0, H: bounds.Y1 - bounds.Y0}
+	run.Spans = append(run.Spans, TextSpan{Start: start, End: end, Matrix: curMatrix})
 }

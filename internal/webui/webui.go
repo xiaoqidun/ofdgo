@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"image/color"
@@ -49,11 +50,8 @@ const sessionTextCacheBytes = 32 << 20
 // sessionSVGFontCacheBytes 限制已渲染页面字体的保留预算
 const sessionSVGFontCacheBytes = 32 << 20
 
-// sessionPageCacheLimit 限制会话已解析页面缓存窗口的页数上限
-const sessionPageCacheLimit = 8
-
-// sessionPageCacheObjectLimit 限制可放入长驻页面缓存的单页图元数量上限
-const sessionPageCacheObjectLimit = 4096
+// sessionPageCacheBytes 限制跨工作会话共享页面内容LRU缓存的内存预算
+const sessionPageCacheBytes = 64 << 20
 
 // batchFontCacheLimit 限制跨会话共享只读批量字体文件系统的缓存上限
 const batchFontCacheLimit = 4
@@ -93,33 +91,36 @@ type FontInfo = ofdgo.FontInfo
 
 // Session WebUI文档会话
 type Session struct {
-	Reader           *ofdgo.Reader
-	Renderer         *ofdgo.Renderer
-	input            *ofdgo.Input
-	pdfSource        *ofdgo.Input
-	pdfFontNames     []string
-	fontFS           *ofdgo.FontFS
-	doc              *ofdgo.Document
-	pageCache        map[int]*ofdgo.PageContent
-	boxCache         []pageBoxInfo
-	textCache        *ofdgo.PageTextCache
-	svgFonts         map[string][]byte
-	fontScan         *ofdgo.FontInfoScanner
-	fontScanMu       *sync.Mutex
-	fontScanWorker   *Session
-	fontInfos        []FontInfo
-	fontsRead        bool
-	fontAnnotations  bool
-	signatures       []SignatureInfo
-	signatureError   error
-	signaturesRead   bool
-	editing          bool
-	editor           *ofdgo.Editor
-	summaryChanges   *ofdgo.EditorChanges
-	detailsUnchanged bool
-	revision         uint64
-	baseRevision     uint64
-	pdfSyncGen       uint64
+	Reader              *ofdgo.Reader
+	Renderer            *ofdgo.Renderer
+	input               *ofdgo.Input
+	pdfSource           *ofdgo.Input
+	pdfFontNames        []string
+	fontFS              *ofdgo.FontFS
+	doc                 *ofdgo.Document
+	pageCache           *sharedPageCache
+	boxCache            []pageBoxInfo
+	openActionCache     []int8
+	openTemplatesLoaded bool
+	openTemplates       map[string]bool
+	textCache           *ofdgo.PageTextCache
+	svgFonts            map[string][]byte
+	fontScan            *ofdgo.FontInfoScanner
+	fontScanMu          *sync.Mutex
+	fontScanWorker      *Session
+	fontInfos           []FontInfo
+	fontsRead           bool
+	fontAnnotations     bool
+	signatures          []SignatureInfo
+	signatureError      error
+	signaturesRead      bool
+	editing             bool
+	editor              *ofdgo.Editor
+	summaryChanges      *ofdgo.EditorChanges
+	detailsUnchanged    bool
+	revision            uint64
+	baseRevision        uint64
+	pdfSyncGen          uint64
 }
 
 // DocumentMetadata 文档描述，供信息展示与包内文档管理共用
@@ -158,6 +159,9 @@ type DocumentInfo struct {
 	Fonts           []FontInfo          `json:"fonts"`
 	Signatures      []SignatureInfo     `json:"signatures"`
 	Pages           []PageInfo          `json:"pages"`
+	HasOpenAction   bool                `json:"hasOpenAction"`
+	DefaultPageSize *PageSize           `json:"defaultPageSize,omitempty"`
+	PageOverrides   []PageInfo          `json:"pageOverrides,omitempty"`
 	Outlines        []OutlineInfo       `json:"outlines,omitempty"`
 	Structures      []ofdgo.Structure   `json:"structures,omitempty"`
 	StructureError  string              `json:"structureError,omitempty"`
@@ -227,12 +231,19 @@ type AttachmentInfo struct {
 	Visible  bool     `json:"visible"`
 }
 
-// PageInfo 页面信息
-type PageInfo struct {
-	Index  int     `json:"index"`
-	ID     string  `json:"id"`
+// PageSize 页面默认尺寸
+type PageSize struct {
 	Width  float64 `json:"width"`
 	Height float64 `json:"height"`
+}
+
+// PageInfo 页面信息
+type PageInfo struct {
+	Index         int     `json:"index"`
+	ID            string  `json:"id"`
+	Width         float64 `json:"width"`
+	Height        float64 `json:"height"`
+	HasOpenAction bool    `json:"hasOpenAction,omitempty"`
 }
 
 // PageSVG 页面SVG结果
@@ -517,14 +528,14 @@ func (s *Session) SetFonts(fonts []FontFile) error {
 	return nil
 }
 
-// PageText 获取指定页面文字，复用当前会话的文字索引
+// PageText 获取指定页面文字，复用当前会话的文字索引并响应会话取消上下文
 // 入参: index 页面索引
 // 返回: *ofdgo.PageText 页面文字, error 错误信息
 func (s *Session) PageText(index int) (*ofdgo.PageText, error) {
 	text := s.cachedPageText(index)
 	if text == nil {
 		var err error
-		text, err = s.readPageText(context.Background(), index)
+		text, err = s.readPageText(s.outputContext(), index)
 		if err != nil {
 			return nil, err
 		}
@@ -581,7 +592,7 @@ func (s *Session) SearchPageContext(ctx context.Context, index int, query string
 		return nil
 	}
 	text := s.cachedPageText(index)
-	if text == nil && s.pageCache[index] == nil {
+	if text == nil && !s.hasCachedPage(index) {
 		err := s.Renderer.SearchText(ctx, query, func(_ int, match ofdgo.TextMatch) error { return visit(match) }, index)
 		if err != nil && err != io.EOF {
 			return nil, err
@@ -769,6 +780,156 @@ func ExportFormats() []ExportFormat {
 type pageBoxInfo struct {
 	box   ofdgo.Box
 	valid bool
+}
+
+// pageCacheEntry 保存共享页面缓存中的单个页面节点及估算字节
+type pageCacheEntry struct {
+	index int
+	page  *ofdgo.PageContent
+	bytes int64
+}
+
+// sharedPageCache 跨工作会话共享的并发安全有界页面内容LRU缓存
+type sharedPageCache struct {
+	mu      sync.Mutex
+	budget  int64
+	bytes   int64
+	entries map[int]*pageCacheEntry
+	order   []*pageCacheEntry
+}
+
+// newSharedPageCache 创建指定内存预算的共享页面内容LRU缓存
+// 入参: budget 内存预算字节数
+// 返回: *sharedPageCache 共享页面缓存实例
+func newSharedPageCache(budget int64) *sharedPageCache {
+	return &sharedPageCache{budget: budget, entries: make(map[int]*pageCacheEntry)}
+}
+
+// get 查询页面并在命中时更新最近访问顺序
+// 入参: index 页面索引
+// 返回: *ofdgo.PageContent 页面内容, bool 是否命中
+func (c *sharedPageCache) get(index int) (*ofdgo.PageContent, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[index]
+	if entry == nil {
+		return nil, false
+	}
+	c.touchLocked(entry)
+	return entry.page, true
+}
+
+// has 检查指定页面是否位于缓存中
+// 入参: index 页面索引
+// 返回: bool 是否存在
+func (c *sharedPageCache) has(index int) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	_, ok := c.entries[index]
+	c.mu.Unlock()
+	return ok
+}
+
+// put 写入页面内容并按内存预算淘汰最久未使用的页面
+// 入参: index 页面索引, page 页面内容
+func (c *sharedPageCache) put(index int, page *ofdgo.PageContent) {
+	if c == nil || page == nil {
+		return
+	}
+	size := estimatePageContentBytes(page)
+	if c.budget > 0 && size > c.budget {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[int]*pageCacheEntry)
+	}
+	if entry := c.entries[index]; entry != nil {
+		c.bytes -= entry.bytes
+		entry.page = page
+		entry.bytes = size
+		c.bytes += size
+		c.touchLocked(entry)
+		for len(c.order) > 1 && c.budget > 0 && c.bytes > c.budget {
+			c.evictLocked()
+		}
+		return
+	}
+	for len(c.order) > 0 && c.budget > 0 && c.bytes+size > c.budget {
+		c.evictLocked()
+	}
+	entry := &pageCacheEntry{index: index, page: page, bytes: size}
+	c.entries[index] = entry
+	c.order = append(c.order, entry)
+	c.bytes += size
+}
+
+// delete 移除指定页面的缓存条目
+// 入参: index 页面索引
+func (c *sharedPageCache) delete(index int) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[index]
+	if entry == nil {
+		return
+	}
+	delete(c.entries, index)
+	c.bytes -= entry.bytes
+	for i, item := range c.order {
+		if item == entry {
+			copy(c.order[i:], c.order[i+1:])
+			c.order[len(c.order)-1] = nil
+			c.order = c.order[:len(c.order)-1]
+			return
+		}
+	}
+}
+
+// rangeEntries 遍历当前缓存中的所有页面快照
+// 入参: fn 遍历回调
+func (c *sharedPageCache) rangeEntries(fn func(index int, page *ofdgo.PageContent)) {
+	if c == nil || fn == nil {
+		return
+	}
+	c.mu.Lock()
+	snapshot := make([]pageCacheEntry, len(c.order))
+	for i, entry := range c.order {
+		snapshot[i] = *entry
+	}
+	c.mu.Unlock()
+	for _, entry := range snapshot {
+		fn(entry.index, entry.page)
+	}
+}
+
+// touchLocked 在持锁状态下将节点移至最近使用队尾
+// 入参: entry 缓存条目
+func (c *sharedPageCache) touchLocked(entry *pageCacheEntry) {
+	for i, item := range c.order {
+		if item == entry {
+			copy(c.order[i:], c.order[i+1:])
+			c.order[len(c.order)-1] = entry
+			return
+		}
+	}
+}
+
+// evictLocked 在持锁状态下淘汰最久未使用的队头条目
+func (c *sharedPageCache) evictLocked() {
+	evicted := c.order[0]
+	c.order[0] = nil
+	c.order = c.order[1:]
+	delete(c.entries, evicted.index)
+	c.bytes -= evicted.bytes
 }
 
 // exportWriter 分块传递导出数据
@@ -994,23 +1155,65 @@ func (c *outputContext) Err() error {
 
 // pendingPDF 保存当前标签的增量转换、输入及操作回调
 type pendingPDF struct {
-	mu        sync.Mutex
-	closed    atomic.Bool
-	finished  atomic.Bool
-	syncGen   uint64
-	importer  *ofdgo.PDFImport
-	retry     atomic.Bool
-	input     *ofdgo.Input
-	fontNames []string
-	page      int
-	next      int
-	progress  platformValue
-	font      platformValue
-	operation *outputContext
-	report    func(string, int, int) error
-	stage     string
-	completed int
-	total     int
+	mu                sync.Mutex
+	closed            atomic.Bool
+	finished          atomic.Bool
+	foregroundWaiters atomic.Int32
+	fgMu              sync.Mutex
+	fgDone            chan struct{}
+	syncGen           uint64
+	importer          *ofdgo.PDFImport
+	retry             atomic.Bool
+	input             *ofdgo.Input
+	fontNames         []string
+	page              int
+	next              int
+	progress          platformValue
+	font              platformValue
+	operation         *outputContext
+	report            func(string, int, int) error
+	stage             string
+	completed         int
+	total             int
+}
+
+// beginForeground 登记前台按需同步页面请求，促使后台转换主动让出互斥锁
+func (p *pendingPDF) beginForeground() {
+	p.fgMu.Lock()
+	if p.foregroundWaiters.Add(1) == 1 {
+		p.fgDone = make(chan struct{})
+	}
+	p.fgMu.Unlock()
+}
+
+// endForeground 注销前台按需同步请求并在全部完成时唤醒后台转换
+func (p *pendingPDF) endForeground() {
+	p.fgMu.Lock()
+	if p.foregroundWaiters.Add(-1) == 0 && p.fgDone != nil {
+		close(p.fgDone)
+		p.fgDone = nil
+	}
+	p.fgMu.Unlock()
+}
+
+// waitForeground 等待所有前台按需同步请求结束，响应上下文取消
+// 入参: ctx 取消上下文
+// 返回: error 取消错误
+func (p *pendingPDF) waitForeground(ctx context.Context) error {
+	for p.foregroundWaiters.Load() > 0 {
+		p.fgMu.Lock()
+		done := p.fgDone
+		p.fgMu.Unlock()
+		if done == nil {
+			return ctx.Err()
+		}
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return ctx.Err()
 }
 
 // batchFontCache 缓存只读字体文件系统，避免批量转换跨引擎重复拷贝和解析字体
@@ -1522,6 +1725,7 @@ func (e *businessEngine) preparePDFPage(index int) error {
 	if err := e.pdf.importer.SyncReader(e.pdf.operation, e.currentSession.Reader, index); err != nil {
 		return e.pdfError(err)
 	}
+	e.currentSession.invalidatePageCache(index)
 	e.pdf.page = index
 	e.pdf.syncGen++
 	e.currentSession.pdfSyncGen = e.pdf.syncGen
@@ -2641,7 +2845,7 @@ func (e *businessEngine) svgFontData(args []platformValue) (any, error) {
 }
 
 // renderPage 渲染OFD页面
-// 入参: args 页面索引、后端组合、DPI、光栅开关、已持有字体和图片、仅预览开关
+// 入参: args 页面索引、后端组合、DPI、光栅开关、已持有字体和图片、仅预览开关及可选调度优先级
 // 返回: any 页面SVG结果, error 错误信息
 func (e *businessEngine) renderPage(args []platformValue) (any, error) {
 	if e.currentSession == nil {
@@ -2743,7 +2947,7 @@ func (e *businessEngine) openLinks(args []platformValue) (any, error) {
 	if len(args) == 0 {
 		links, err = e.currentSession.Renderer.DocumentOpenLinks()
 	} else if len(args) == 1 {
-		page, readErr := e.currentSession.Reader.PageContentByIndex(args[0].Int())
+		page, readErr := e.currentSession.pageContent(args[0].Int())
 		if readErr != nil {
 			return nil, readErr
 		}
@@ -7581,7 +7785,7 @@ func (e *businessEngine) syncEditorPageIDs(index int, content *ofdgo.PageContent
 	if mismatch, err := e.editorTargetMismatch(); err != nil || mismatch {
 		return err
 	}
-	page := e.currentSession.pageCache[index]
+	page, _ := e.currentSession.cachedPage(index)
 	if page == nil {
 		var err error
 		page, err = e.currentSession.pageContent(index)
@@ -7604,7 +7808,7 @@ func (e *businessEngine) syncEditorPageIDs(index int, content *ofdgo.PageContent
 	}
 	if repaired {
 		e.currentSession.textCache.Delete(index)
-		if e.currentSession.pageCache[index] == nil {
+		if !e.currentSession.hasCachedPage(index) {
 			e.currentSession.cachePageContent(index, page)
 		}
 	}
@@ -7661,11 +7865,11 @@ func (e *businessEngine) previewEditor(editor *ofdgo.Editor, annotations bool) (
 				session.fontAnnotations = session.Renderer.RenderAnnotations
 			}
 			changed := changes.Pages
-			for index, page := range e.currentSession.pageCache {
+			e.currentSession.pageCache.rangeEntries(func(index int, page *ofdgo.PageContent) {
 				if !slices.Contains(changed, index) {
-					session.pageCache[index] = page
+					session.cachePageContent(index, page)
 				}
-			}
+			})
 			e.currentSession.textCache.Range(func(index int, text *ofdgo.PageText) bool {
 				if !slices.Contains(changed, index) {
 					session.cachePageText(index, text)
@@ -7675,6 +7879,11 @@ func (e *businessEngine) previewEditor(editor *ofdgo.Editor, annotations bool) (
 			for index, box := range e.currentSession.boxCache {
 				if !slices.Contains(changed, index) {
 					session.boxCache[index] = box
+				}
+			}
+			for index, flag := range e.currentSession.openActionCache {
+				if !slices.Contains(changed, index) {
+					session.openActionCache[index] = flag
 				}
 			}
 		}
@@ -9149,17 +9358,51 @@ func (s *Session) cachePageText(index int, text *ofdgo.PageText) {
 // 入参: indexes 增量页码，nil表示全部页面
 // 返回: DocumentInfo 文档摘要
 func (s *Session) summary(indexes []int) DocumentInfo {
+	pages := s.pageInfosAt(indexes)
+	docHasOpen := s.hasDocumentOpenAction()
+	firstPageHasOpen := false
+	if len(s.doc.Pages.Page) > 0 {
+		if indexes == nil && len(pages) > 0 {
+			firstPageHasOpen = pages[0].HasOpenAction
+		} else {
+			firstPageHasOpen = s.pageHasOpenAction(0)
+		}
+	}
 	info := DocumentInfo{
 		DocumentIndex:  s.Reader.DocumentIndex(),
 		Encryption:     s.encryptionInfo(),
 		Version:        s.Reader.Version(),
 		DocType:        s.Reader.DocType(),
 		PageCount:      len(s.doc.Pages.Page),
-		Pages:          s.pageInfosAt(indexes),
+		HasOpenAction:  docHasOpen || firstPageHasOpen,
 		Outlines:       s.doc.OutlineInfos(),
 		Permissions:    s.permissionsInfo(),
 		VPreferences:   cloneWebUIVPreferences(s.doc.VPreferences),
 		DetailsPending: true,
+	}
+	if indexes == nil && info.PageCount > 1024 && len(pages) > 0 {
+		counts := make(map[PageSize]int)
+		var defaultSize PageSize
+		bestCount := 0
+		for _, page := range pages {
+			size := PageSize{Width: page.Width, Height: page.Height}
+			counts[size]++
+			if counts[size] > bestCount {
+				bestCount = counts[size]
+				defaultSize = size
+			}
+		}
+		var overrides []PageInfo
+		for _, page := range pages {
+			if page.Width != defaultSize.Width || page.Height != defaultSize.Height || page.HasOpenAction {
+				overrides = append(overrides, page)
+			}
+		}
+		info.DefaultPageSize = &defaultSize
+		info.PageOverrides = overrides
+		info.Pages = nil
+	} else {
+		info.Pages = pages
 	}
 	info.DocumentVersion, _ = s.Reader.DocumentVersionID()
 	info.VersionCount, _ = s.Reader.DocumentVersionCount()
@@ -9226,6 +9469,10 @@ func (s *Session) renderPage(index int, backend string, dpi float64, raster, pre
 			return PageSVG{}, err
 		}
 	}
+	ctx := s.outputContext()
+	if err := ctx.Err(); err != nil {
+		return PageSVG{}, err
+	}
 	page, err := s.pageContent(index)
 	if err != nil {
 		return PageSVG{}, err
@@ -9236,6 +9483,7 @@ func (s *Session) renderPage(index int, backend string, dpi float64, raster, pre
 	}
 	var buf bytes.Buffer
 	renderer := *s.Renderer
+	renderer.OutputContext = ctx
 	if !preview && s.cachedPageText(index) == nil {
 		renderer.OnPageText = func(_ *ofdgo.PageContent, text *ofdgo.PageText) {
 			s.cachePageText(index, text)
@@ -9244,7 +9492,17 @@ func (s *Session) renderPage(index int, backend string, dpi float64, raster, pre
 	if raster {
 		renderer.DPI = dpi
 	}
-	resources, err := renderer.RenderPreview(page, &buf, ofdgo.PreviewOptions{Raster: raster, Objects: !raster && s.editing && !preview, KnownResources: known})
+	idPrefix, precision := fmt.Sprintf("p%d-", index), 3
+	if preview {
+		idPrefix, precision = fmt.Sprintf("t%d-", index), 2
+	}
+	resources, err := renderer.RenderPreview(page, &buf, ofdgo.PreviewOptions{
+		Raster:         raster,
+		Objects:        !raster && s.editing && !preview,
+		KnownResources: known,
+		IDPrefix:       idPrefix,
+		Precision:      precision,
+	})
 	if err != nil {
 		return PageSVG{}, err
 	}
@@ -9261,7 +9519,10 @@ func (s *Session) renderPage(index int, backend string, dpi float64, raster, pre
 	if preview {
 		return PageSVG{Index: index, Number: index + 1, ID: page.ID, Width: box.W, Height: box.H, SVG: buf.String(), Fonts: resources.Fonts, Images: resources.Images}, nil
 	}
-	links, err := s.Renderer.PageLinks(page)
+	if err := ctx.Err(); err != nil {
+		return PageSVG{}, err
+	}
+	links, err := renderer.PageLinks(page)
 	if err != nil {
 		return PageSVG{}, err
 	}
@@ -9279,6 +9540,9 @@ func (s *Session) renderPage(index int, backend string, dpi float64, raster, pre
 	defer renderer.BindPageResources(page)()
 	annotations := make([]AnnotationPreview, len(infos))
 	for i, info := range infos {
+		if err := ctx.Err(); err != nil {
+			return PageSVG{}, err
+		}
 		if box.X != 0 || box.Y != 0 {
 			info.X -= box.X
 			info.Y -= box.Y
@@ -9359,15 +9623,16 @@ func newSession(reader *ofdgo.Reader, opts OpenOptions) (*Session, error) {
 	rendererOptions = append(rendererOptions, ofdgo.WithAnnotations(opts.RenderAnnotations))
 	rendererOptions = append(rendererOptions, opts.RendererOptions...)
 	return &Session{
-		Reader:     reader,
-		Renderer:   ofdgo.NewRenderer(reader, rendererOptions...),
-		fontFS:     fontFS,
-		doc:        doc,
-		pageCache:  make(map[int]*ofdgo.PageContent),
-		boxCache:   make([]pageBoxInfo, len(doc.Pages.Page)),
-		textCache:  ofdgo.NewPageTextCache(sessionTextCacheBytes),
-		svgFonts:   make(map[string][]byte),
-		fontScanMu: &sync.Mutex{},
+		Reader:          reader,
+		Renderer:        ofdgo.NewRenderer(reader, rendererOptions...),
+		fontFS:          fontFS,
+		doc:             doc,
+		pageCache:       newSharedPageCache(sessionPageCacheBytes),
+		boxCache:        make([]pageBoxInfo, len(doc.Pages.Page)),
+		openActionCache: make([]int8, len(doc.Pages.Page)),
+		textCache:       ofdgo.NewPageTextCache(sessionTextCacheBytes),
+		svgFonts:        make(map[string][]byte),
+		fontScanMu:      &sync.Mutex{},
 	}, nil
 }
 
@@ -9438,10 +9703,96 @@ func (s *Session) scanFontInfoBatch() bool {
 // 入参: ctx 取消上下文, index 页面索引
 // 返回: *ofdgo.PageText 页面文字, error 错误信息
 func (s *Session) readPageText(ctx context.Context, index int) (*ofdgo.PageText, error) {
-	if page := s.pageCache[index]; page != nil {
+	if page, ok := s.cachedPage(index); ok {
 		return s.Renderer.PageTextContext(ctx, page)
 	}
 	return s.Renderer.PageTextByIndexContext(ctx, index)
+}
+
+// hasDocumentOpenAction 检测文档根节点是否存在有效的打开动作
+// 返回: bool 是否存在文档打开动作
+func (s *Session) hasDocumentOpenAction() bool {
+	if s == nil || s.doc == nil || len(s.doc.Actions) == 0 {
+		return false
+	}
+	links, err := s.Renderer.DocumentOpenLinks()
+	return err == nil && len(links) > 0
+}
+
+// openActionTemplateIDs 返回包含页面打开动作的模板标识集合
+// 返回: map[string]bool 存在页面打开动作的模板集合
+func (s *Session) openActionTemplateIDs() map[string]bool {
+	if s.openTemplatesLoaded {
+		return s.openTemplates
+	}
+	s.openTemplatesLoaded = true
+	if s.doc == nil || len(s.doc.CommonData.TemplatePage) == 0 {
+		return nil
+	}
+	for _, tpl := range s.doc.CommonData.TemplatePage {
+		data, err := s.Reader.ResData(tpl.BaseLoc)
+		if err != nil || !bytes.Contains(data, []byte("Actions")) || !bytes.Contains(data, []byte("PO")) {
+			continue
+		}
+		var parsed struct {
+			Actions []ofdgo.Action `xml:"Actions>Action"`
+		}
+		if err := xml.Unmarshal(data, &parsed); err != nil {
+			continue
+		}
+		for _, action := range parsed.Actions {
+			if strings.EqualFold(action.Event, "PO") {
+				if s.openTemplates == nil {
+					s.openTemplates = make(map[string]bool)
+				}
+				s.openTemplates[tpl.ID] = true
+				break
+			}
+		}
+	}
+	return s.openTemplates
+}
+
+// pageHasOpenAction 轻量检测指定页面及其模板是否存在打开动作并缓存结果
+// 入参: index 页面索引
+// 返回: bool 是否存在页面打开动作
+func (s *Session) pageHasOpenAction(index int) bool {
+	if s == nil || s.doc == nil || index < 0 || index >= len(s.doc.Pages.Page) {
+		return false
+	}
+	if index < len(s.openActionCache) && s.openActionCache[index] != 0 {
+		return s.openActionCache[index] == 2
+	}
+	record := func(has bool) bool {
+		if index < len(s.openActionCache) {
+			if has {
+				s.openActionCache[index] = 2
+			} else {
+				s.openActionCache[index] = 1
+			}
+		}
+		return has
+	}
+	if cached, ok := s.cachedPage(index); ok {
+		links, err := s.Renderer.PageOpenLinks(cached)
+		return record(err == nil && len(links) > 0)
+	}
+	data, err := s.Reader.ResData(s.doc.Pages.Page[index].BaseLoc)
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	openTemplates := s.openActionTemplateIDs()
+	maybeAction := bytes.Contains(data, []byte("Actions")) && bytes.Contains(data, []byte("PO"))
+	maybeTemplate := len(openTemplates) > 0 && bytes.Contains(data, []byte("Template"))
+	if !maybeAction && !maybeTemplate {
+		return record(false)
+	}
+	page, err := s.Reader.PageContentByIndexContext(s.outputContext(), index)
+	if err != nil {
+		return false
+	}
+	links, err := s.Renderer.PageOpenLinks(page)
+	return record(err == nil && len(links) > 0)
 }
 
 // pageInfosAt 获取指定页面的真实尺寸，大页数首屏摘要先使用文档默认区域并精确预读前64页
@@ -9477,7 +9828,11 @@ func (s *Session) pageInfosAt(indexes []int) []PageInfo {
 				if cached := s.boxCache[index]; cached.valid {
 					box = cached.box
 				}
-				pages[index] = PageInfo{Index: index, ID: page.ID, Width: box.W, Height: box.H}
+				hasOpen := false
+				if index < eager || (index < len(s.openActionCache) && s.openActionCache[index] != 0) || s.hasCachedPage(index) {
+					hasOpen = s.pageHasOpenAction(index)
+				}
+				pages[index] = PageInfo{Index: index, ID: page.ID, Width: box.W, Height: box.H, HasOpenAction: hasOpen}
 			}
 			return pages
 		}
@@ -9525,60 +9880,73 @@ func (s *Session) pageInfosAt(indexes []int) []PageInfo {
 				box, _ = s.pageBox(index, &ofdgo.PageContent{Area: area})
 			}
 		}
-		pages[position] = PageInfo{Index: index, ID: page.ID, Width: box.W, Height: box.H}
+		pages[position] = PageInfo{Index: index, ID: page.ID, Width: box.W, Height: box.H, HasOpenAction: s.pageHasOpenAction(index)}
 	}
 	return pages
 }
 
-// pageContent 读取页面，在有界窗口内保留最近解析结果
+// cachedPage 从共享LRU缓存读取指定页面内容
+// 入参: index 页面索引
+// 返回: *ofdgo.PageContent 页面内容, bool 是否命中
+func (s *Session) cachedPage(index int) (*ofdgo.PageContent, bool) {
+	if s == nil || s.pageCache == nil {
+		return nil, false
+	}
+	return s.pageCache.get(index)
+}
+
+// hasCachedPage 检查指定页面是否位于共享LRU缓存中
+// 入参: index 页面索引
+// 返回: bool 是否已缓存
+func (s *Session) hasCachedPage(index int) bool {
+	if s == nil || s.pageCache == nil {
+		return false
+	}
+	return s.pageCache.has(index)
+}
+
+// invalidatePageCache 仅失效指定页面的共享缓存与打开动作标记
+// 入参: index 页面索引
+func (s *Session) invalidatePageCache(index int) {
+	if s == nil {
+		return
+	}
+	if s.pageCache != nil {
+		s.pageCache.delete(index)
+	}
+	if index >= 0 && index < len(s.openActionCache) {
+		s.openActionCache[index] = 0
+	}
+}
+
+// pageContent 读取页面并在共享有界LRU缓存中保留最近解析结果
 // 入参: index 页面索引
 // 返回: *ofdgo.PageContent 页面内容, error 错误信息
 func (s *Session) pageContent(index int) (*ofdgo.PageContent, error) {
 	if s == nil || s.Reader == nil || s.Renderer == nil || s.doc == nil {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
-	if page, ok := s.pageCache[index]; ok {
+	if page, ok := s.cachedPage(index); ok {
 		return page, nil
 	}
-	ctx := s.Renderer.OutputContext
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	page, err := s.Reader.PageContentByIndexContext(ctx, index)
+	page, err := s.Reader.PageContentByIndexContext(s.outputContext(), index)
 	if err != nil {
 		return nil, err
 	}
-	if pageObjectCount(page) <= sessionPageCacheObjectLimit {
-		s.cachePageContent(index, page)
-	}
+	s.cachePageContent(index, page)
 	return page, nil
 }
 
-// cachePageContent 在有界窗口内写入页面缓存，超出页数上限时淘汰距离最远页
+// cachePageContent 将页面内容写入跨工作会话共享的有界LRU缓存
 // 入参: index 页面索引, page 页面内容
 func (s *Session) cachePageContent(index int, page *ofdgo.PageContent) {
-	if len(s.pageCache) >= sessionPageCacheLimit {
-		var victim int
-		hasVictim := false
-		for cachedIndex := range s.pageCache {
-			dist := cachedIndex - index
-			if dist < 0 {
-				dist = -dist
-			}
-			best := victim - index
-			if best < 0 {
-				best = -best
-			}
-			if !hasVictim || dist > best {
-				victim = cachedIndex
-				hasVictim = true
-			}
-		}
-		if hasVictim {
-			delete(s.pageCache, victim)
-		}
+	if s == nil || page == nil {
+		return
 	}
-	s.pageCache[index] = page
+	if s.pageCache == nil {
+		s.pageCache = newSharedPageCache(sessionPageCacheBytes)
+	}
+	s.pageCache.put(index, page)
 }
 
 // pageBox 获取页面物理区域
@@ -9936,18 +10304,34 @@ func failureResult(err error) apiResult {
 	return result
 }
 
-// pageObjectCount 统计单页各图层的图元总数
+// estimatePageContentBytes 估算页面内容在共享LRU缓存中的内存占用字节数
 // 入参: page 页面内容
-// 返回: int 图元总数
-func pageObjectCount(page *ofdgo.PageContent) int {
+// 返回: int64 估算字节数
+func estimatePageContentBytes(page *ofdgo.PageContent) int64 {
 	if page == nil {
 		return 0
 	}
-	count := 0
+	total := int64(4096) + int64(len(page.Template))*128 + int64(len(page.Actions))*256
 	for _, layer := range page.Content.Layer {
-		count += max(len(layer.Objects), len(layer.TextObject)+len(layer.PathObject)+len(layer.ImageObject)+len(layer.CompositeGraphicUnit))
+		total += 256
+		objects := max(len(layer.Objects), len(layer.TextObject)+len(layer.PathObject)+len(layer.ImageObject)+len(layer.CompositeGraphicUnit))
+		total += int64(objects) * 512
+		for _, text := range layer.TextObject {
+			for _, code := range text.TextCode {
+				total += int64(len(code.Value) + len(code.DeltaX) + len(code.DeltaY))
+			}
+		}
+		for _, path := range layer.PathObject {
+			total += int64(len(path.AbbreviatedData))
+		}
+		for _, obj := range layer.Objects {
+			for _, code := range obj.TextObject.TextCode {
+				total += int64(len(code.Value) + len(code.DeltaX) + len(code.DeltaY))
+			}
+			total += int64(len(obj.PathObject.AbbreviatedData))
+		}
 	}
-	return count
+	return total
 }
 
 // translateContours 将对象轮廓中的SVG路径按给定偏移平移至视口坐标

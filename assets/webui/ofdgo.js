@@ -28,6 +28,7 @@ const STATUS = {
 const wasmRequests = new Map();
 const metaContents = new WeakMap();
 const pageIndexes = new WeakMap();
+const sparsePagesMeta = new WeakMap();
 const batch = { items: [], formats: [], running: false, canceled: false, workers: new Set(), requests: new Map(), sequence: 0, progress: null, jobs: [], activeJobs: new Set(), counts: { completed: 0, done: 0, failed: 0 }, progressFrame: 0, renderFrame: 0, range: [-1, -1], rowHeight: 56, credentialType: "password", credentials: Promise.resolve() };
 const batchElements = Object.fromEntries(["Button", "Panel", "Form", "Input", "Add", "Clear", "Count", "Format", "Compression", "FontRow", "FontMode", "Destination", "DPIRow", "DPI", "DPIValue", "List", "Empty", "Progress", "Status", "Close", "Cancel", "Start"].map(name => [name, document.querySelector(`#convert${name}`)]));
 const fontBinding = { font: null, choices: [], sequence: 0 };
@@ -40,6 +41,7 @@ const createPaperSizes = { a4: [210, 297], a3: [297, 420], a5: [148, 210] };
 const sealPosition = Object.fromEntries(["Layer", "Stamp", "Image"].map(name => [name, document.querySelector(`#signPosition${name}`)]));
 const workspace = { tabs: [], active: null, sequence: 0, nextID: 0, switching: false, closing: false, objectClipboard: null, textClipboard: null, batchCredentials: null };
 const busyControls = new Set();
+const credentialWaiters = [];
 
 let resourceManager = createResourceManager();
 let settings = createSettings();
@@ -56,6 +58,7 @@ let cancelPageTouch = null;
 let createImagePicker = null;
 let aboutBackdrop = false;
 let sealPreview = null;
+let structureXMLSequence = 0;
 
 const el = {
 	appearanceButton: document.querySelector("#appearanceButton"),
@@ -694,7 +697,7 @@ const pageView = createPageView({
 	get wasmWorker() { return wasmWorker; },
 	get activeTab() { return workspace.active; },
 	get tabs() { return workspace.tabs; },
-	callWASM, canvasEditor, clearRegionHighlights, documentTab, el,
+	callRenderPage, callWASM, canvasEditor, clearRegionHighlights, documentTab, el,
 	enablePageDrag, formatSize, isDocumentSelection, isForegroundDocument, mountAnnotationNotes,
 	mountEditorObjects, mountPageLinks, nextFrame, pageCan, pageStatus,
 	releaseMediaPlayers, renderSearchHighlights, loadEditorMembers, scheduleOpenActions, selectThumbnailPage,
@@ -820,6 +823,8 @@ function createDocumentState() {
 		renderMode: "svg",
 		renderDPI: DEFAULT_IMAGE_DPI,
 		pageCache: new Map(),
+		thumbCache: new Map(),
+		detachedPages: new Map(),
 		mediaPlayers: new Map(),
 		svgFonts: new Map(),
 		svgFontLoads: new Map(),
@@ -838,11 +843,21 @@ function createDocumentState() {
 		pageObserver: null,
 		visiblePages: new Set(),
 		scrollFrame: 0,
+		viewerFastScroll: false,
+		viewerScrollTimer: 0,
+		viewerLastScrollTop: 0,
+		viewerLastScrollTime: 0,
 		pageWindow: null,
 		thumbnailWindow: null,
 		thumbnailFrame: 0,
+		thumbFastScroll: false,
+		thumbScrollTimer: 0,
+		thumbLastScrollTop: 0,
+		thumbLastScrollTime: 0,
+		revealThumbTimer: 0,
 		pageDragIndex: null,
 		pageListCurrent: null,
+		pageListPair: -1,
 		thumbnailObserver: null,
 		visibleThumbnails: new Set(),
 		exportFormats: [],
@@ -2152,7 +2167,7 @@ el.navigationContent.addEventListener("scroll", () => {
 	if (state.thumbnailFrame) return;
 	state.thumbnailFrame = requestAnimationFrame(() => {
 		state.thumbnailFrame = 0;
-		pageView.syncThumbnailWindow();
+		pageView.syncThumbnailWindow(true);
 	});
 });
 new ResizeObserver(() => {
@@ -3160,9 +3175,15 @@ function detachDocumentView() {
 	if (state.scrollFrame) cancelAnimationFrame(state.scrollFrame);
 	if (state.thumbnailFrame) cancelAnimationFrame(state.thumbnailFrame);
 	if (state.openActionFrame) cancelAnimationFrame(state.openActionFrame);
+	if (state.viewerScrollTimer) clearTimeout(state.viewerScrollTimer);
+	if (state.thumbScrollTimer) clearTimeout(state.thumbScrollTimer);
+	if (state.revealThumbTimer) clearTimeout(state.revealThumbTimer);
 	state.scrollFrame = state.thumbnailFrame = state.openActionFrame = 0;
+	state.viewerScrollTimer = state.thumbScrollTimer = state.revealThumbTimer = 0;
+	state.viewerFastScroll = state.thumbFastScroll = false;
 	state.openActionTask = null;
 	pageView.resetPageLoading();
+	state.detachedPages.clear();
 	state.pageWindow = null;
 	state.thumbnailWindow = null;
 	state.visiblePages.clear();
@@ -3372,12 +3393,14 @@ async function releaseDocumentTab(tab) {
 	tab.credentials?.resolve(null);
 	tab.credentials = null;
 	await markWASMExited(tab.state.wasmSeq, null, tab);
-	for (const image of tab.state.svgImages.values()) URL.revokeObjectURL(image.url);
+	for (const image of tab.state.svgImages.values()) if (!image.native) URL.revokeObjectURL(image.url);
 	for (const font of tab.state.svgFonts.values()) document.fonts.delete(font);
 	tab.state.svgImages.clear();
 	tab.state.svgFonts.clear();
 	tab.state.svgFontLoads.clear();
 	tab.state.pageCache.clear();
+	tab.state.thumbCache.clear();
+	tab.state.detachedPages.clear();
 	tab.state.pageInFlight.clear();
 	tab.state.editorViews.clear();
 	tab.resources.views.clear();
@@ -3673,6 +3696,8 @@ async function switchReadingVersion(id) {
 		state.doc = doc;
 		if (!isForegroundDocument(tab)) {
 			state.pageCache.clear();
+			state.thumbCache.clear();
+			state.detachedPages.clear();
 			state.pageIndex = 0;
 			tab.view = null;
 			await refreshDocumentTab(tab);
@@ -3905,6 +3930,8 @@ async function switchDocument(index) {
 		state.doc = doc;
 		if (!isForegroundDocument(tab)) {
 			state.pageCache.clear();
+			state.thumbCache.clear();
+			state.detachedPages.clear();
 			state.pageIndex = 0;
 			tab.view = null;
 			await refreshDocumentTab(tab);
@@ -4015,6 +4042,8 @@ async function toggleEditor() {
 			state.conversionWarnings = [];
 			state.objectClipboardToken = state.styleClipboard = null;
 			state.pageCache.clear();
+			state.thumbCache.clear();
+			state.detachedPages.clear();
 			updateWorkspaceDirty();
 			await refreshDocumentTab(tab);
 			return;
@@ -5405,6 +5434,8 @@ async function insertObject(event) {
 				pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
 			state.dirty = state.encryptionDirty || doc.revision !== state.savedRevision;
 			state.pageCache.clear();
+			state.thumbCache.clear();
+			state.detachedPages.clear();
 			await refreshDocumentTab(tab);
 			return;
 		}
@@ -5720,6 +5751,8 @@ async function changeDocument(name, item, ...args) {
 					pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || []};
 				tab.state.dirty = state.encryptionDirty || doc.revision !== state.savedRevision;
 				tab.state.pageCache.clear();
+				tab.state.thumbCache.clear();
+				tab.state.detachedPages.clear();
 				await refreshDocumentTab(tab);
 			}
 			return;
@@ -5911,6 +5944,8 @@ async function refreshFontBinding(doc, openSeq) {
 	state.documentSelection = null;
 	pageView.resetPageLoading();
 	state.pageCache.clear();
+	state.thumbCache.clear();
+	state.detachedPages.clear();
 	canvasEditor.clear();
 	try {
 		try {
@@ -5984,6 +6019,8 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 				canvasEditor.select(canvasEditor.input.item);
 			} else {
 				state.pageCache.delete(index);
+				state.thumbCache.delete(index);
+				state.detachedPages.delete(index);
 				canvasEditor.clear();
 				const shell = pageView.pageShell(index);
 				shell.querySelector(".page-surface").replaceChildren();
@@ -6104,6 +6141,8 @@ function syncLayoutMode(event) {
 function resizeViewer() {
 	pageView.scrollbarWidth();
 	if (state.doc) {
+		pageView.invalidateWindowMetrics(state.pageWindow);
+		pageView.invalidateWindowMetrics(state.thumbnailWindow);
 		pageView.syncThumbnailWindow();
 		const anchor = state.fitMode === "width" ? pageView.scaleAnchor() : null;
 		pageView.applyFit(false);
@@ -7173,6 +7212,8 @@ async function changeDisplayMode(mode = state.renderMode) {
 		state.renderDPI = previous.dpi;
 		state.renderMode = previous.mode;
 		state.pageCache.clear();
+		state.thumbCache.clear();
+		state.detachedPages.clear();
 		if (isForegroundDocument(tab)) {
 			el.imageDPI.value = String(previous.dpi);
 			pageView.resetPageLoading();
@@ -7310,8 +7351,6 @@ function updateCredentialsType() {
 	el.credentialsCertificate.value = el.credentialsKey.value = "";
 	el.credentialsKeyPassword.value = "";
 }
-
-const credentialWaiters = [];
 
 function notifyCredentialsAvailable() {
 	for (const resolve of credentialWaiters.splice(0)) resolve();
@@ -7515,6 +7554,7 @@ async function openDocument(options = {}) {
 			doc = await callWASM("ofdgoSelectVersion", options.versionID);
 			if (openSeq !== state.openSeq) return;
 		}
+		doc = normalizeDocument(doc);
 		const pageCount = doc.pageCount || 0;
 		const pageIndex = Math.min(Math.max(options.pageIndex || 0, 0), Math.max(pageCount - 1, 0));
 		state.doc = doc;
@@ -7561,6 +7601,8 @@ async function openDocument(options = {}) {
 		if (options.keepPreview) {
 			pageView.resetPageLoading();
 			state.pageCache.clear();
+			state.thumbCache.clear();
+			state.detachedPages.clear();
 			if (state.editing) {
 				const prepared = await callWASM("ofdgoDocumentInfo").catch(err => ({ detailsError: err.message }));
 				if (openSeq !== state.openSeq) return;
@@ -7570,7 +7612,7 @@ async function openDocument(options = {}) {
 			if (thumbnailPreviews) {
 				for (const page of doc.pages) {
 					const preview = thumbnailPreviews.get(page.id);
-					if (preview) state.pageCache.set(page.index, { ...preview, previewOnly: true });
+					if (preview) state.thumbCache.set(page.index, { ...preview, previewOnly: true });
 				}
 			}
 			const indices = new Set([pageIndex, ...previewIDs.map(id => pageIndexByID(doc.pages, id)).filter(index => index >= 0)]);
@@ -7584,13 +7626,9 @@ async function openDocument(options = {}) {
 		if (options.clearSelection) canvasEditor.clear();
 		if (options.selection) canvasEditor.pendingSelection = options.selection;
 		pageView.resetPageFlow(options.keepPreview || options.keepCache);
-		pageView.renderPageList();
-		if (options.keepPreview || options.resetScroll || el.outlineList.childElementCount === 0) {
-			renderOutlines(!options.keepPreview && !options.restoreTab);
-		}
-		renderMeta(options.keepPreview);
+		const hideForOpenAction = initialActions && doc.hasOpenAction === true;
 		pageView.renderPageFlow();
-		el.pageFrame.style.visibility = initialActions ? "hidden" : "";
+		el.pageFrame.style.visibility = hideForOpenAction ? "hidden" : "";
 		if (options.keepPreview) {
 			for (const [index, page] of state.pageCache) {
 				if (!page.previewOnly) pageView.mountPageSVG(index, page, openSeq);
@@ -7618,22 +7656,31 @@ async function openDocument(options = {}) {
 			}
 			setStatus(pageStatus(pageIndex, pageCount));
 		}
-		await nextFrame();
 		if (openSeq !== state.openSeq) {
 			return;
 		}
 		const page = options.keepPreview ? state.pageCache.get(pageIndex)
-			: await pageView.renderPage(pageIndex, { keepBusy: true, scroll: false, openSeq });
+			: await pageView.renderPage(pageIndex, { keepBusy: true, scroll: false, openSeq, fit: false, deferNearby: true, waitPair: state.pageLayout > 1 });
+		if (openSeq !== state.openSeq) {
+			return;
+		}
+		pageView.renderPageList();
+		if (options.keepPreview || options.resetScroll || el.outlineList.childElementCount === 0) {
+			renderOutlines(!options.keepPreview && !options.restoreTab);
+		}
+		renderMeta(options.keepPreview);
 		if (page && options.resetScroll) {
 			canvasEditor.focus();
 		}
 		if (page && options.activateActions) {
+			const hasDocOpenAction = doc.hasOpenAction !== false;
+			const hasPageOpenAction = pageView.pageHasOpenAction(state.pageIndex);
 			state.openActionEnabled = true;
-			state.openActionDocument = !state.editing;
-			state.openActionPage = state.editing ? state.doc.pages[state.pageIndex]?.id : null;
+			state.openActionDocument = !state.editing && hasDocOpenAction;
+			state.openActionPage = state.editing || !hasPageOpenAction ? state.doc.pages[state.pageIndex]?.id : null;
 			state.openActionTask = null;
-			if (initialActions) await activateOpenActions(true);
-			else scheduleOpenActions();
+			if (hideForOpenAction) await activateOpenActions(true);
+			else if (state.openActionDocument || hasPageOpenAction) scheduleOpenActions();
 		}
 		if (openSeq !== state.openSeq || !isForegroundDocument(tab)) return;
 		pageView.queueNearbyPages(state.pageIndex, openSeq);
@@ -11868,7 +11915,9 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 		}));
 		if (openAction && state.openActionTask !== openAction) return false;
 		if (seq !== state.openSeq || state.pageIndex !== index || state.pageNavigation !== navigation) return;
-		let point, omitInline = false;
+		let point, omitInline = false, fitSinglePageWidth = false;
+		const sideways = state.rotation % 180 !== 0;
+		const isFitHWidth = dest.type === "FitH" && !sideways || dest.type === "FitV" && sideways;
 		if (view) {
 			if (view.keepPosition && openAction && index === sourcePage) return;
 			if (view.fitMode === "height") {
@@ -11877,7 +11926,13 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 				return;
 			}
 			if (view.fitMode === "width") {
-				pageView.fitWidth(false);
+				if (state.pageLayout > 1 && isFitHWidth) {
+					const singleWidth = Math.max(1, el.viewerPanel.clientWidth - space * 2);
+					pageView.setScale(Math.min(4, singleWidth / Math.max(1, size.width * MM_TO_PX)), false, "free");
+					fitSinglePageWidth = true;
+				} else {
+					pageView.fitWidth(false);
+				}
 			} else if (view.fitMode === "" && fitMode !== "free") {
 				pageView.applyFit(false);
 			} else {
@@ -11887,7 +11942,6 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 			omitInline = Boolean(view.keepLeft);
 		} else {
 			const width = Math.max(1, el.viewerPanel.clientWidth - space * 2), height = Math.max(1, el.viewerPanel.clientHeight - space * 2);
-			const sideways = state.rotation % 180 !== 0;
 			if (dest.type === "Fit") {
 				pageView.fitHeight(false);
 				pageView.scrollToPage(index);
@@ -11895,7 +11949,12 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 			} else if (dest.type === "FitH" || dest.type === "FitV") {
 				const horizontal = sideways ? dest.type === "FitV" : dest.type === "FitH";
 				if (horizontal) {
-					pageView.fitWidth(false);
+					if (state.pageLayout > 1) {
+						pageView.setScale(Math.min(4, width / Math.max(1, size.width * MM_TO_PX)), false, "free");
+						fitSinglePageWidth = true;
+					} else {
+						pageView.fitWidth(false);
+					}
 					omitInline = true;
 				} else {
 					pageView.setScale(height / Math.max(1, size.height * MM_TO_PX), false);
@@ -11935,7 +11994,7 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 		const y = size.height <= viewHeight ? 0 : Math.max(0, Math.min(size.height - viewHeight, point.y));
 		const node = pageView.pageShell(index), shell = node.getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
 		const group = state.pageLayout > 1 ? pageView.pageGroupSize(index) : null;
-		if (group && omitInline && group.width * MM_TO_PX * activeScale + group.gap <= el.viewerPanel.clientWidth - space * 2 + 1) {
+		if (group && !fitSinglePageWidth && omitInline && group.width * MM_TO_PX * activeScale + group.gap <= el.viewerPanel.clientWidth - space * 2 + 1) {
 			el.viewerPanel.scrollLeft = Math.max(0, (el.viewerPanel.scrollWidth - el.viewerPanel.clientWidth) / 2);
 		} else {
 			el.viewerPanel.scrollLeft += shell.left + node.clientLeft - viewer.left - el.viewerPanel.clientLeft + x * MM_TO_PX * activeScale - space;
@@ -12751,22 +12810,29 @@ function scheduleOpenActions() {
 
 async function activateOpenActions(initial = false) {
 	if (!state.openActionEnabled || !state.doc || state.editing || state.exporting || !initial && document.body.hasAttribute("data-busy")) return;
-	const pageID = state.doc.pages[state.pageIndex]?.id;
+	const pageInfo = state.doc.pages[state.pageIndex];
+	const pageID = pageInfo?.id;
 	if (!pageID || !state.openActionDocument && state.openActionPage === pageID) return;
+	if (!state.openActionDocument && !pageView.pageHasOpenAction(state.pageIndex)) {
+		state.openActionPage = pageID;
+		return;
+	}
 	const task = { sequence: state.openSeq, seen: new Set(), navigating: false, initial };
 	state.openActionTask = task;
 	const current = () => task === state.openActionTask && task.sequence === state.openSeq && !state.editing;
-	let documentOpened = state.openActionDocument;
+	let documentOpened = state.openActionDocument && state.doc.hasOpenAction !== false;
 	state.openActionDocument = false;
 	state.openActionPage = pageID;
 	try {
 		while (current()) {
 			const index = state.pageIndex;
-			const id = state.doc.pages[index]?.id;
+			const infoAtIndex = state.doc.pages[index];
+			const id = infoAtIndex?.id;
 			if (!id || !documentOpened && task.seen.has(id)) break;
 			if (!documentOpened) {
 				task.seen.add(id);
 				state.openActionPage = id;
+				if (!pageView.pageHasOpenAction(index)) break;
 			}
 			const page = await pageView.renderFlowPage(index, { openSeq: task.sequence, priority: 0, throwError: true });
 			if (!page || !current()) break;
@@ -12889,7 +12955,130 @@ function createOutlineList(outlines, path = [], collapseDeep = false) {
 	return list;
 }
 
+function normalizeDocument(doc) {
+	if (!doc || typeof doc !== "object") return doc;
+	const count = doc.pageCount || 0;
+	if (!doc.defaultPageSize || count <= 0 || doc.pages?.length >= count) return doc;
+	const baseWidth = doc.defaultPageSize.width || 210;
+	const baseHeight = doc.defaultPageSize.height || 297;
+	const overrides = new Map();
+	const idToIndex = new Map();
+	const rawOverrides = doc.pageOverrides;
+	if (Array.isArray(rawOverrides)) {
+		for (const item of rawOverrides) {
+			if (typeof item?.index === "number" && item.index >= 0 && item.index < count) {
+				overrides.set(item.index, item);
+				if (item.id !== undefined) idToIndex.set(referenceIDKey(item.id), item.index);
+			}
+		}
+	} else if (rawOverrides && typeof rawOverrides === "object") {
+		for (const [key, item] of Object.entries(rawOverrides)) {
+			const idx = Number(key);
+			if (Number.isInteger(idx) && idx >= 0 && idx < count && item && typeof item === "object") {
+				overrides.set(idx, item);
+				if (item.id !== undefined) idToIndex.set(referenceIDKey(item.id), idx);
+			}
+		}
+	}
+	const makePage = (index) => {
+		const ov = overrides.get(index);
+		return {
+			index,
+			id: ov?.id !== undefined ? ov.id : String(index + 1),
+			width: ov?.width ?? baseWidth,
+			height: ov?.height ?? baseHeight,
+			hasOpenAction: ov?.hasOpenAction ?? false,
+		};
+	};
+	if (count <= 4096) {
+		const pages = new Array(count);
+		for (let i = 0; i < count; i++) pages[i] = makePage(i);
+		doc.pages = pages;
+		return doc;
+	}
+	const cache = new Map();
+	const getPage = (index) => {
+		let page = cache.get(index);
+		if (!page) {
+			page = makePage(index);
+			if (cache.size >= 2048) cache.delete(cache.keys().next().value);
+			cache.set(index, page);
+		}
+		return page;
+	};
+	const pages = new Proxy([], {
+		get(target, prop, receiver) {
+			if (prop === "length") return count;
+			if (prop === Symbol.iterator) {
+				return function* () {
+					for (let i = 0; i < count; i++) yield getPage(i);
+				};
+			}
+			if (prop === "entries") {
+				return function* () {
+					for (let i = 0; i < count; i++) yield [i, getPage(i)];
+				};
+			}
+			if (prop === "map") {
+				return (fn, thisArg) => {
+					const out = new Array(count);
+					for (let i = 0; i < count; i++) out[i] = fn.call(thisArg, getPage(i), i, pages);
+					return out;
+				};
+			}
+			if (prop === "forEach") {
+				return (fn, thisArg) => {
+					for (let i = 0; i < count; i++) fn.call(thisArg, getPage(i), i, pages);
+				};
+			}
+			if (prop === "slice") {
+				return (start = 0, end = count) => {
+					const from = start < 0 ? Math.max(0, count + start) : Math.min(count, start);
+					const to = end < 0 ? Math.max(0, count + end) : Math.min(count, end);
+					const out = new Array(Math.max(0, to - from));
+					for (let i = from; i < to; i++) out[i - from] = getPage(i);
+					return out;
+				};
+			}
+			if (prop === "findIndex") {
+				return (fn, thisArg) => {
+					for (let i = 0; i < count; i++) if (fn.call(thisArg, getPage(i), i, pages)) return i;
+					return -1;
+				};
+			}
+			if (typeof prop === "string") {
+				const idx = Number(prop);
+				if (Number.isInteger(idx) && idx >= 0 && idx < count && String(idx) === prop) return getPage(idx);
+			}
+			return Reflect.get(target, prop, receiver);
+		},
+		has(target, prop) {
+			if (typeof prop === "string") {
+				const idx = Number(prop);
+				if (Number.isInteger(idx) && idx >= 0 && idx < count && String(idx) === prop) return true;
+			}
+			return Reflect.has(target, prop);
+		},
+	});
+	sparsePagesMeta.set(pages, { count, overrides, idToIndex });
+	doc.pages = pages;
+	return doc;
+}
+
 function pageIndexByID(pages, id) {
+	if (!pages) return -1;
+	const sparse = sparsePagesMeta.get(pages);
+	if (sparse) {
+		const key = referenceIDKey(id);
+		if (sparse.idToIndex.has(key)) return sparse.idToIndex.get(key);
+		const num = Number(key);
+		if (Number.isInteger(num) && num >= 1 && num <= sparse.count) {
+			const candidate = num - 1;
+			const ov = sparse.overrides.get(candidate);
+			if (!ov || ov.id === undefined || referenceIDKey(ov.id) === key) return candidate;
+		}
+		return -1;
+	}
 	let indexes = pageIndexes.get(pages);
 	if (!indexes) {
 		indexes = new Map(pages.map((page, position) => [referenceIDKey(page.id), {page, position}]));
@@ -13217,8 +13406,6 @@ function renderMetaContent(node, value, render) {
 	render();
 	metaContents.set(node, key);
 }
-
-let structureXMLSequence = 0;
 
 function openStructureDialog() {
 	if (!state.editing || !state.doc || document.body.hasAttribute("data-busy")) return;
@@ -14340,6 +14527,10 @@ async function callWASM(name, ...args) {
 	return callTabWASM(documentTab(), name, ...args);
 }
 
+async function callRenderPage(args, task) {
+	return callTabWASM(documentTab(), "ofdgoRenderPage", ...args, { task });
+}
+
 function operationRequest(tab) {
 	return [...wasmRequests.values()].findLast(request => request.tab === tab && request.cancellable && !request.name.includes("Print"));
 }
@@ -14408,6 +14599,10 @@ async function prepareOperation(id, request) {
 }
 
 async function callTabWASM(tab, name, ...args) {
+	let renderTask = null;
+	if (name === "ofdgoRenderPage" && args.length > 0 && args.at(-1)?.task) {
+		renderTask = args.pop().task;
+	}
 	const state = tab.state;
 	const doc = state.doc, editor = state.editorInfo;
 	const visible = isForegroundDocument(tab);
@@ -14421,6 +14616,7 @@ async function callTabWASM(tab, name, ...args) {
 	}
 	return new Promise((resolve, reject) => {
 		const id = ++wasmRequestID;
+		if (renderTask) renderTask.requestID = id;
 		if (name === "ofdgoPrepareSave" || name === "ofdgoSaveSnapshot") {
 			state.saveRequestID = id;
 			if (visible) {
@@ -14456,7 +14652,11 @@ async function callTabWASM(tab, name, ...args) {
 			if (name === "ofdgoLoadImport" && ArrayBuffer.isView(args[0]) && !nativeHost) transfer.push(args[0].buffer);
 			const message = {id, name, args};
 			if (name === "ofdgoLoadPDF") message.background = true;
-			if (name === "ofdgoRenderPage" && [...state.pageInFlight.values()].some(task => task.index === args[0] && pageView.pageRenderPriority(task, state) >= 6)) message.preload = true;
+			if (name === "ofdgoRenderPage") {
+				const priority = typeof args[7] === "number" ? args[7] : (args[6] ? 5 : 2);
+				message.priority = priority;
+				if (priority >= 6) message.preload = true;
+			}
 			request.send = () => tab.worker.postMessage(message, transfer);
 			request.send();
 		} catch (err) {
@@ -14467,6 +14667,7 @@ async function callTabWASM(tab, name, ...args) {
 }
 
 async function mergeEditorSummary(tab, value, document, editor) {
+	if (value && typeof value === "object" && value.defaultPageSize && value.pageCount) normalizeDocument(value);
 	if (!value?.incremental) return value;
 	if ((value.baseRevision || 0) !== editor?.revision) return {...value, ...await callTabWASM(tab, "ofdgoEditorInfo"), incremental:false, detailsUnchanged:false, resynchronized:true, changes:{all:true}};
 	const pages = document.pages.slice(), capabilities = editor.pageCapabilities.slice();

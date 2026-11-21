@@ -198,8 +198,15 @@ func countLocalForms(nodes []pdfCompositeNode) map[pdfFormIdentity]int {
 // 返回: int 估算总引用次数
 func (p *pdfImporter) formUseCount(ref pdfgo.Reference, stream *pdfgo.Stream) int {
 	total := 0
-	if ref != (pdfgo.Reference{}) && p.formRefCounts != nil {
-		total = p.formRefCounts[ref]
+	if ref != (pdfgo.Reference{}) {
+		if p.formRefCounts != nil {
+			total = p.formRefCounts[ref]
+		}
+		if total < 2 && p.seenFormPages != nil {
+			if first, ok := p.seenFormPages[ref]; ok && first != p.page {
+				total = 2
+			}
+		}
 	}
 	if p.localFormCounts != nil {
 		local := p.localFormCounts[formIdentity(ref, stream)]
@@ -210,6 +217,40 @@ func (p *pdfImporter) formUseCount(ref pdfgo.Reference, stream *pdfgo.Stream) in
 		}
 	}
 	return total
+}
+
+// recordPageForms 收集当前页遇到的表单间接引用，供单页提交后登记渐进跨页复用
+// 入参: counts 当前页表单频次映射
+func (p *pdfImporter) recordPageForms(counts map[pdfFormIdentity]int) {
+	if len(counts) == 0 {
+		return
+	}
+	for id := range counts {
+		if id.ref == (pdfgo.Reference{}) {
+			continue
+		}
+		if p.pageSeenForms == nil {
+			p.pageSeenForms = make(map[pdfgo.Reference]bool, len(counts))
+		}
+		p.pageSeenForms[id.ref] = true
+	}
+}
+
+// commitSeenForms 在单页转换提交成功后登记本页出现的表单引用
+// 入参: pageIndex 已提交页面索引
+func (p *pdfImporter) commitSeenForms(pageIndex int) {
+	if len(p.pageSeenForms) == 0 {
+		return
+	}
+	if p.seenFormPages == nil {
+		p.seenFormPages = make(map[pdfgo.Reference]int, len(p.pageSeenForms))
+	}
+	for ref := range p.pageSeenForms {
+		if _, exists := p.seenFormPages[ref]; !exists {
+			p.seenFormPages[ref] = pageIndex
+		}
+	}
+	p.pageSeenForms = nil
 }
 
 // shouldReuseForm 判断普通表单是否满足自动复用条件

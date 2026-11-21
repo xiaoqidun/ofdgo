@@ -56,15 +56,18 @@ const (
 
 // pdfStructureBindings 保存来源区段与最终页面图元的关联，不记录临时渲染对象
 type pdfStructureBindings struct {
-	parents   map[*pdfgo.Reader]map[[2]int64]pdfgo.Reference
-	prepared  map[*pdfgo.Reader]bool
-	invalid   map[*pdfgo.Reader]bool
-	readers   []*pdfgo.Reader
-	marked    map[pdfStructureContent]bool
-	sequences map[*pdfgo.ContentSequence][]StructureReference
-	order     []*pdfgo.ContentSequence
-	contents  []*pdfgo.ContentSequence
-	objects   map[pdfStructureObject][]StructureReference
+	parents     map[*pdfgo.Reader]map[[2]int64]pdfgo.Reference
+	prepared    map[*pdfgo.Reader]bool
+	invalid     map[*pdfgo.Reader]bool
+	lazyChecked map[*pdfgo.Reader]bool
+	lazyTrees   map[*pdfgo.Reader]*pdfgo.StructureTree
+	lazyParents map[*pdfgo.Reader]map[int64]pdfgo.Array
+	readers     []*pdfgo.Reader
+	marked      map[pdfStructureContent]bool
+	sequences   map[*pdfgo.ContentSequence][]StructureReference
+	order       []*pdfgo.ContentSequence
+	contents    []*pdfgo.ContentSequence
+	objects     map[pdfStructureObject][]StructureReference
 }
 
 // objectReferences 汇总注解及XObject调用对应的已提交图元
@@ -108,11 +111,133 @@ func (b *pdfStructureBindings) objectReferences(ctx context.Context) (map[pdfStr
 	return result, ctx.Err()
 }
 
-// observe 保存已读取的标记区段，不登记尚未提交的图元
+// observe 保存已读取的标记区段并在未预检全书结构树时按页探测父树绑定，不登记尚未提交的图元
 // 入参: sequence 来源区段
 func (b *pdfStructureBindings) observe(sequence *pdfgo.ContentSequence) {
 	if sequence != nil && sequence.Properties["MCID"] != nil {
 		b.contents = append(b.contents, sequence)
+		if sequence.Reader != nil && !b.prepared[sequence.Reader] && b.lazyTrees[sequence.Reader] != nil {
+			b.markLazyContent(sequence)
+		}
+	}
+}
+
+// markLazyContent 通过父树二分查找验证单页标记内容是否关联逻辑结构，避免首屏全书遍历
+// 入参: sequence 含MCID的标记内容区段
+func (b *pdfStructureBindings) markLazyContent(sequence *pdfgo.ContentSequence) {
+	key, ok, err := pdfStructureContentKey(sequence)
+	if err != nil || !ok || b.marked[key] {
+		return
+	}
+	var dict pdfgo.Dictionary
+	if sequence.Stream != nil {
+		dict = sequence.Stream.Dictionary
+	} else if sequence.Page != nil {
+		dict = sequence.Page.Dictionary
+	}
+	if dict == nil || dict["StructParents"] == nil {
+		return
+	}
+	resolved, err := sequence.Reader.Resolve(dict["StructParents"])
+	if err != nil {
+		return
+	}
+	parentKey, ok := resolved.(pdfgo.Integer)
+	if !ok {
+		return
+	}
+	arr := b.lazyParentArray(sequence.Reader, int64(parentKey))
+	if key.mcid < 0 || int(key.mcid) >= len(arr) || arr[key.mcid] == nil {
+		return
+	}
+	if b.marked == nil {
+		b.marked = make(map[pdfStructureContent]bool)
+	}
+	b.marked[key] = true
+}
+
+// lazyParentArray 按StructParents键惰性查询并缓存ParentTree中的单页父节点数组
+// 入参: reader 来源阅读器, parentKey 容器父树键
+// 返回: pdfgo.Array 对应的父节点数组，未命中返回nil
+func (b *pdfStructureBindings) lazyParentArray(reader *pdfgo.Reader, parentKey int64) pdfgo.Array {
+	if cache := b.lazyParents[reader]; cache != nil {
+		if arr, ok := cache[parentKey]; ok {
+			return arr
+		}
+	}
+	tree := b.lazyTrees[reader]
+	var arr pdfgo.Array
+	if tree != nil && tree.Dictionary["ParentTree"] != nil {
+		if entry, found := pdfLookupNumberTree(reader, tree.Dictionary["ParentTree"], parentKey); found {
+			if resolved, err := reader.Resolve(entry); err == nil {
+				arr, _ = resolved.(pdfgo.Array)
+			}
+		}
+	}
+	if b.lazyParents == nil {
+		b.lazyParents = make(map[*pdfgo.Reader]map[int64]pdfgo.Array)
+	}
+	cache := b.lazyParents[reader]
+	if cache == nil {
+		cache = make(map[int64]pdfgo.Array)
+		b.lazyParents[reader] = cache
+	}
+	cache[parentKey] = arr
+	return arr
+}
+
+// clearReaderMarked 清除指定阅读器的惰性或旧结构标记并释放惰性缓存
+// 入参: reader 来源阅读器
+func (b *pdfStructureBindings) clearReaderMarked(reader *pdfgo.Reader) {
+	if b == nil {
+		return
+	}
+	for key := range b.marked {
+		if key.reader == reader {
+			delete(b.marked, key)
+		}
+	}
+	delete(b.lazyParents, reader)
+	delete(b.lazyTrees, reader)
+}
+
+// rollbackPage 撤销单页取消前写入的区段观察与图元绑定，保持其余页面绑定不受影响
+// 入参: pageID 被取消的页面标识, savedContentsLen 转换前contents长度, savedOrderLen 转换前order长度
+func (b *pdfStructureBindings) rollbackPage(pageID string, savedContentsLen, savedOrderLen int) {
+	if b == nil {
+		return
+	}
+	if savedContentsLen >= 0 && len(b.contents) > savedContentsLen {
+		clear(b.contents[savedContentsLen:])
+		b.contents = b.contents[:savedContentsLen]
+	}
+	if pageID == "" {
+		return
+	}
+	for _, seq := range b.order {
+		refs := b.sequences[seq]
+		for len(refs) > 0 && refs[len(refs)-1].PageID == pageID {
+			refs = refs[:len(refs)-1]
+		}
+		if len(refs) == 0 {
+			delete(b.sequences, seq)
+		} else {
+			b.sequences[seq] = refs
+		}
+	}
+	if savedOrderLen >= 0 && len(b.order) > savedOrderLen {
+		clear(b.order[savedOrderLen:])
+		b.order = b.order[:savedOrderLen]
+	}
+	for key, refs := range b.objects {
+		for len(refs) > 0 && refs[len(refs)-1].PageID == pageID {
+			refs = refs[:len(refs)-1]
+		}
+		if len(refs) == 0 {
+			delete(b.objects, key)
+		} else {
+			b.objects[key] = refs
+		}
 	}
 }
 
@@ -511,7 +636,59 @@ func (p *pdfImporter) prepareStructure(ctx context.Context) error {
 	if b.invalid == nil {
 		b.invalid = make(map[*pdfgo.Reader]bool)
 	}
+	b.clearReaderMarked(p.reader)
 	b.prepared[p.reader], b.invalid[p.reader] = true, true
+	return ctx.Err()
+}
+
+// prepareStructureLazy 仅读取结构树根字典而不遍历全书结构树，供单页渐进转换按需探测
+// 入参: ctx 取消上下文
+// 返回: error 目录读取、严格校验或取消错误
+func (p *pdfImporter) prepareStructureLazy(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b := p.structureBindings
+	if b.prepared[p.reader] || b.lazyChecked[p.reader] {
+		return nil
+	}
+	tree, err := p.reader.StructureTree()
+	if err != nil {
+		if p.warning == nil || !pdfAuxiliaryError(err) {
+			return err
+		}
+		object, readErr := p.pdfCatalogObject("StructTreeRoot")
+		if readErr != nil {
+			return readErr
+		}
+		if err := p.recoverPDFObject(ctx, "Structure", object, err); err != nil {
+			return err
+		}
+		if b.prepared == nil {
+			b.prepared = make(map[*pdfgo.Reader]bool)
+		}
+		if b.invalid == nil {
+			b.invalid = make(map[*pdfgo.Reader]bool)
+		}
+		b.clearReaderMarked(p.reader)
+		b.prepared[p.reader], b.invalid[p.reader] = true, true
+		return ctx.Err()
+	}
+	if tree == nil {
+		if b.prepared == nil {
+			b.prepared = make(map[*pdfgo.Reader]bool)
+		}
+		b.prepared[p.reader] = true
+		return ctx.Err()
+	}
+	if b.lazyChecked == nil {
+		b.lazyChecked = make(map[*pdfgo.Reader]bool)
+	}
+	if b.lazyTrees == nil {
+		b.lazyTrees = make(map[*pdfgo.Reader]*pdfgo.StructureTree)
+	}
+	b.lazyChecked[p.reader] = true
+	b.lazyTrees[p.reader] = tree
 	return ctx.Err()
 }
 
@@ -574,16 +751,29 @@ func (p *pdfImporter) readStructureBindings(ctx context.Context) error {
 	if b.marked == nil {
 		b.marked = make(map[pdfStructureContent]bool)
 	}
+	b.clearReaderMarked(p.reader)
 	b.parents[p.reader], b.prepared[p.reader] = parents, true
 	maps.Copy(b.marked, marked)
 	b.readers = append(b.readers, p.reader)
 	return nil
 }
 
-// prepareSourceStructure 使用来源阅读器校验引用文档，共享最终图元索引
+// prepareSourceStructure 为单页转换按需探测来源文档的结构树根，延迟全书校验至Finish
 // 入参: ctx 取消上下文, reader 来源阅读器
 // 返回: error 结构或取消错误
 func (p *pdfImporter) prepareSourceStructure(ctx context.Context, reader *pdfgo.Reader) error {
+	if p.structureBindings.prepared[reader] || p.structureBindings.lazyChecked[reader] {
+		return ctx.Err()
+	}
+	source := *p
+	source.reader = reader
+	return source.prepareStructureLazy(ctx)
+}
+
+// prepareSourceStructureFull 使用来源阅读器完整校验引用文档结构树，供Finish导出标引
+// 入参: ctx 取消上下文, reader 来源阅读器
+// 返回: error 结构或取消错误
+func (p *pdfImporter) prepareSourceStructureFull(ctx context.Context, reader *pdfgo.Reader) error {
 	if p.structureBindings.prepared[reader] {
 		return ctx.Err()
 	}
@@ -616,8 +806,11 @@ func (p *pdfImporter) structureParents(ctx context.Context) (map[[2]int64]pdfgo.
 // 入参: ctx 取消上下文
 // 返回: error 结构或提交错误
 func (p *pdfImporter) documentStructures(ctx context.Context) error {
+	if err := p.prepareStructure(ctx); err != nil {
+		return err
+	}
 	for _, sequence := range p.structureBindings.order {
-		if err := p.prepareSourceStructure(ctx, sequence.Reader); err != nil {
+		if err := p.prepareSourceStructureFull(ctx, sequence.Reader); err != nil {
 			return err
 		}
 	}
@@ -969,6 +1162,149 @@ func pdfStructureContentKey(sequence *pdfgo.ContentSequence) (pdfStructureConten
 		return key, false, fmt.Errorf("invalid PDF marked content ID")
 	}
 	return pdfStructureContent{reader: sequence.Reader, page: sequence.Page.Reference, stream: sequence.Stream, mcid: int64(mcid)}, true, nil
+}
+
+// pdfLookupNumberTree 在PDF数字树中按目标键二分查找对应条目，避免全树遍历
+// 入参: reader 来源阅读器, root 数字树根节点, target 目标整数键
+// 返回: pdfgo.Object 命中值, bool 是否命中
+func pdfLookupNumberTree(reader *pdfgo.Reader, root pdfgo.Object, target int64) (pdfgo.Object, bool) {
+	if reader == nil || root == nil {
+		return nil, false
+	}
+	return pdfLookupNumberTreeNode(reader, root, target, 0)
+}
+
+// pdfLookupNumberTreeNode 递归查找数字树节点，优先按Limits剪枝与二分定位
+// 入参: reader 来源阅读器, node 当前节点对象, target 目标整数键, depth 递归深度
+// 返回: pdfgo.Object 命中值, bool 是否命中
+func pdfLookupNumberTreeNode(reader *pdfgo.Reader, node pdfgo.Object, target int64, depth int) (pdfgo.Object, bool) {
+	if depth > 64 {
+		return nil, false
+	}
+	resolved, err := reader.Resolve(node)
+	if err != nil {
+		return nil, false
+	}
+	dict, ok := resolved.(pdfgo.Dictionary)
+	if !ok {
+		return nil, false
+	}
+	if lo, hi, hasLimits := pdfNumberTreeLimits(reader, dict["Limits"]); hasLimits {
+		if target < lo || target > hi {
+			return nil, false
+		}
+	}
+	if numsObj := dict["Nums"]; numsObj != nil {
+		if numsVal, err := reader.Resolve(numsObj); err == nil {
+			if nums, ok := numsVal.(pdfgo.Array); ok && len(nums) >= 2 {
+				pairs := len(nums) / 2
+				low, high := 0, pairs-1
+				ordered := true
+				for low <= high {
+					mid := (low + high) / 2
+					keyVal, err := reader.Resolve(nums[mid*2])
+					if err != nil {
+						ordered = false
+						break
+					}
+					keyInt, ok := keyVal.(pdfgo.Integer)
+					if !ok {
+						ordered = false
+						break
+					}
+					if int64(keyInt) == target {
+						return nums[mid*2+1], true
+					}
+					if int64(keyInt) < target {
+						low = mid + 1
+					} else {
+						high = mid - 1
+					}
+				}
+				if !ordered {
+					for i := 0; i+1 < len(nums); i += 2 {
+						if keyVal, err := reader.Resolve(nums[i]); err == nil {
+							if keyInt, ok := keyVal.(pdfgo.Integer); ok && int64(keyInt) == target {
+								return nums[i+1], true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if kidsObj := dict["Kids"]; kidsObj != nil {
+		if kidsVal, err := reader.Resolve(kidsObj); err == nil {
+			if kids, ok := kidsVal.(pdfgo.Array); ok && len(kids) != 0 {
+				low, high := 0, len(kids)-1
+				ordered := true
+				for low <= high {
+					mid := (low + high) / 2
+					kidVal, err := reader.Resolve(kids[mid])
+					if err != nil {
+						ordered = false
+						break
+					}
+					kidDict, ok := kidVal.(pdfgo.Dictionary)
+					if !ok {
+						ordered = false
+						break
+					}
+					lo, hi, hasLimits := pdfNumberTreeLimits(reader, kidDict["Limits"])
+					if !hasLimits {
+						ordered = false
+						break
+					}
+					if target < lo {
+						high = mid - 1
+					} else if target > hi {
+						low = mid + 1
+					} else {
+						return pdfLookupNumberTreeNode(reader, kidDict, target, depth+1)
+					}
+				}
+				if !ordered {
+					for _, kid := range kids {
+						if val, found := pdfLookupNumberTreeNode(reader, kid, target, depth+1); found {
+							return val, true
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil, false
+}
+
+// pdfNumberTreeLimits 解析数字树节点的Limits上下界
+// 入参: reader 来源阅读器, obj Limits对象
+// 返回: int64 下界, int64 上界, bool 是否有效
+func pdfNumberTreeLimits(reader *pdfgo.Reader, obj pdfgo.Object) (int64, int64, bool) {
+	if obj == nil {
+		return 0, 0, false
+	}
+	val, err := reader.Resolve(obj)
+	if err != nil {
+		return 0, 0, false
+	}
+	arr, ok := val.(pdfgo.Array)
+	if !ok || len(arr) != 2 {
+		return 0, 0, false
+	}
+	loVal, err := reader.Resolve(arr[0])
+	if err != nil {
+		return 0, 0, false
+	}
+	hiVal, err := reader.Resolve(arr[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	lo, okLo := loVal.(pdfgo.Integer)
+	hi, okHi := hiVal.(pdfgo.Integer)
+	if !okLo || !okHi {
+		return 0, 0, false
+	}
+	return int64(lo), int64(hi), true
 }
 
 // pdfStructurePropertiesEqual 比较类型化属性树，不生成临时XML

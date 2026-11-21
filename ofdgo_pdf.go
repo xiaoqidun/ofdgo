@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"hash"
@@ -193,9 +194,6 @@ func NewPDFImport(ctx context.Context, input *Input, options PDFImportOptions) (
 		}
 	}()
 	importer.reader = reader
-	if err := importer.prepareStructure(ctx); err != nil {
-		return nil, fmt.Errorf("import PDF structure: %w", err)
-	}
 	outputIntents, err := reader.OutputIntents()
 	if err != nil {
 		return nil, fmt.Errorf("import PDF output intents: %w", err)
@@ -272,7 +270,6 @@ func NewPDFImport(ctx context.Context, input *Input, options PDFImportOptions) (
 	if len(editor.pages) == 0 {
 		return nil, fmt.Errorf("PDF contains no pages")
 	}
-	importer.formRefCounts = importer.scanFormRefCounts(ctx)
 	keep = true
 	return &PDFImport{input: input, importer: importer, options: options, pages: cloneEditorData(editor.pages), ready: make([]bool, len(editor.pages))}, nil
 }
@@ -317,12 +314,58 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 	if p.ready[index] {
 		return nil
 	}
-	defer func() {
-		if err != nil {
-			p.err = err
-		}
-	}()
 	importer := p.importer
+	savedPage := cloneEditorData(importer.editor.pages[index])
+	savedSource := importer.editor.source
+	if savedSource != nil {
+		importer.editor.ownedOwner = nil
+	}
+	savedOrigins := maps.Clone(importer.editor.origins)
+	savedReport := importer.report
+	savedWarningsLen := len(importer.report.Warnings)
+	_, hadBodyCounts := importer.pageBodyCounts[index]
+	savedContentsLen, savedOrderLen := 0, 0
+	if importer.structureBindings != nil {
+		savedContentsLen = len(importer.structureBindings.contents)
+		savedOrderLen = len(importer.structureBindings.order)
+	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+			importer.editor.pages[index] = savedPage
+			importer.editor.source = savedSource
+			importer.editor.origins = savedOrigins
+			importer.editor.ownedOwner = nil
+			importer.editor.previewPages = nil
+			importer.objects = nil
+			importer.annotationData = nil
+			importer.annotationBindings = nil
+			importer.compositeCache = nil
+			importer.compositeNodes = nil
+			importer.compositeSpace = nil
+			importer.maskClips = nil
+			importer.patternCells = nil
+			importer.patternOrigins = nil
+			importer.clipTexts = nil
+			importer.textOrigins = nil
+			importer.clipPaths = nil
+			importer.localFormCounts = nil
+			importer.pageSeenForms = nil
+			importer.report = savedReport
+			importer.report.Warnings = savedReport.Warnings[:savedWarningsLen]
+			if !hadBodyCounts {
+				delete(importer.pageBodyCounts, index)
+			}
+			if importer.structureBindings != nil {
+				importer.structureBindings.rollbackPage(savedPage.ID, savedContentsLen, savedOrderLen)
+			}
+			p.ready[index] = false
+			return
+		}
+		p.err = err
+	}()
 	importer.ctx = importer.resources.context(ctx)
 	ctx = importer.ctx
 	importer.renderer.OutputContext = ctx
@@ -346,6 +389,7 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 	importer.annotationData = nil
 	importer.annotationBindings = nil
 	importer.localFormCounts = nil
+	importer.pageSeenForms = nil
 	importer.imageScaleBoost = 0
 	if err := importer.pageOpenActions(ctx, page); err != nil {
 		return fmt.Errorf("import PDF page %d actions: %w", index+1, err)
@@ -380,6 +424,7 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 			return err
 		}
 	}
+	importer.commitSeenForms(index)
 	p.ready[index] = true
 	return nil
 }
@@ -517,6 +562,13 @@ func (p *PDFImport) Finish(ctx context.Context) (*Editor, PDFImportReport, error
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, PDFImportReport{}, err
+	}
+	if !p.finished {
+		p.importer.ctx = p.importer.resources.context(ctx)
+		if err := p.importer.prepareStructure(p.importer.ctx); err != nil {
+			p.err = err
+			return nil, PDFImportReport{}, fmt.Errorf("import PDF structure: %w", err)
+		}
 	}
 	if err := p.finishPages(ctx); err != nil {
 		p.err = err
@@ -744,19 +796,23 @@ func (l *pdfLiveReader) sync(ctx context.Context, editor *Editor, index int) err
 			}
 		}
 	}
+	var pendingMemPath string
+	var pendingMemPage *PageContent
 	if needPage {
 		page := target.doc.Pages.Page[index]
 		pagePath := cleanPackagePath(target.ResPath(page.BaseLoc))
-		data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) { x.page(editor.pages[index]) })
+		memPage, err := cloneMemoryPageContent(ctx, editor.pages[index])
 		if err != nil {
 			return err
 		}
 		ensureMaps()
-		nextFiles[pagePath] = data
+		delete(nextFiles, pagePath)
 		nextNames[pagePath] = true
 		nextReady[page.ID] = true
+		pendingMemPath = pagePath
+		pendingMemPage = memPage
 		if target.pageHeaders != nil {
-			target.pageHeaders.put(pagePath, PageContent{Area: editor.pages[index].Area, Template: slices.Clone(editor.pages[index].Template), PageRes: slices.Clone(editor.pages[index].PageRes)}, data)
+			target.pageHeaders.put(pagePath, PageContent{Area: memPage.Area, Template: slices.Clone(memPage.Template), PageRes: slices.Clone(memPage.PageRes)}, nil)
 		}
 		l.syncedPages[index] = true
 	}
@@ -765,6 +821,9 @@ func (l *pdfLiveReader) sync(ctx context.Context, editor *Editor, index int) err
 		l.syncedDestLen = len(editor.pdfDestinations.targets)
 	}
 	target.encryption = editor.encryption
+	if pendingMemPage != nil {
+		target.injectMemoryPage(pendingMemPath, pendingMemPage)
+	}
 	if nextFiles != nil {
 		target.files = nextFiles
 		target.fileNames = nextNames
@@ -886,6 +945,8 @@ type pdfImporter struct {
 	imageScaleBoost     float64
 	sharedImages        *pdfSharedImageCache
 	formRefCounts       map[pdfgo.Reference]int
+	seenFormPages       map[pdfgo.Reference]int
+	pageSeenForms       map[pdfgo.Reference]bool
 	localFormCounts     map[pdfFormIdentity]int
 	recordForms         bool
 	formRecords         map[string]pdfFormRecord
@@ -1472,6 +1533,9 @@ func (p *PDFImport) finishPages(ctx context.Context) error {
 	importer := p.importer
 	importer.ctx = importer.resources.context(ctx)
 	ctx = importer.ctx
+	if len(pending) >= 2 && importer.formRefCounts == nil {
+		importer.formRefCounts = importer.scanFormRefCounts(ctx)
+	}
 	fingerprintLeaders := make(map[[32]byte]int)
 	duplicateOf := make(map[int]int)
 	duplicateGroups := make(map[int][]int)
@@ -2319,4 +2383,36 @@ func remapGraphicObjects(objects []GraphicObject, idMap map[string]string) {
 	for i := range objects {
 		remapOne(&objects[i])
 	}
+}
+
+// cloneMemoryPageContent 深拷贝单页内容并同步分类对象切片，供常驻阅读器零XML往返直挂
+// 入参: ctx 取消上下文, page 编辑器内存页面
+// 返回: *PageContent 独立隔离的页面内容副本, error 取消错误
+func cloneMemoryPageContent(ctx context.Context, page PageContent) (*PageContent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	copied := cloneEditorData(page)
+	copied.XMLName = xml.Name{Space: ofdNamespace2016, Local: "Page"}
+	copied.pageResources = nil
+	for i := range copied.Content.Layer {
+		layer := &copied.Content.Layer[i]
+		layer.TextObject, layer.PathObject, layer.ImageObject, layer.CompositeGraphicUnit = nil, nil, nil, nil
+		for _, object := range layer.Objects {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			switch object.Type {
+			case "TextObject":
+				layer.TextObject = append(layer.TextObject, object.TextObject)
+			case "PathObject":
+				layer.PathObject = append(layer.PathObject, object.PathObject)
+			case "ImageObject":
+				layer.ImageObject = append(layer.ImageObject, object.ImageObject)
+			case "CompositeObject", "CompositeGraphicUnit":
+				layer.CompositeGraphicUnit = append(layer.CompositeGraphicUnit, object.CompositeGraphicUnit)
+			}
+		}
+	}
+	return &copied, ctx.Err()
 }

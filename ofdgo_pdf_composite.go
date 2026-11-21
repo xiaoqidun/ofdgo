@@ -829,6 +829,7 @@ func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
 	space := p.compositeSpace
 	previousLocalForms := p.localFormCounts
 	p.localFormCounts = countLocalForms(nodes)
+	p.recordPageForms(p.localFormCounts)
 	defer func() { p.localFormCounts = previousLocalForms }()
 	for i := 0; i < len(nodes); i++ {
 		node := nodes[i]

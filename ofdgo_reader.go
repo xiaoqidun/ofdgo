@@ -76,6 +76,7 @@ type Reader struct {
 	pageHeaders               *pageHeaderStore
 	stampSealCache            *stampSealCache
 	pageReady                 map[string]bool
+	memPages                  map[string]*PageContent
 	pageContents              *renderCache[pageContentKey, PageContent]
 	doc                       *Document
 	relatedPending            bool
@@ -1046,8 +1047,10 @@ func (r *Reader) deriveView(files map[string][]byte, docIndex int, selectedVersi
 	}
 	sameVersion := (r.selectedVersion == nil && selectedVersion == nil) || (r.selectedVersion != nil && selectedVersion != nil && *r.selectedVersion == *selectedVersion)
 	pageReady := r.pageReady
+	memPages := r.memPages
 	if files != nil || docIndex != r.documentIndex || !sameVersion {
 		pageReady = nil
+		memPages = nil
 	}
 	return &Reader{
 		Path:            r.Path,
@@ -1060,6 +1063,7 @@ func (r *Reader) deriveView(files map[string][]byte, docIndex int, selectedVersi
 		documentIndex:   docIndex,
 		selectedVersion: ver,
 		pageReady:       pageReady,
+		memPages:        memPages,
 		pageContents:    r.pageContents,
 		pageHeaders:     r.pageHeaders,
 		stampSealCache:  stampCache,
@@ -1576,8 +1580,12 @@ func (r *Reader) readFileViewContext(ctx context.Context, name string) ([]byte, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if data, ok := r.files[cleanPackagePath(name)]; ok {
+	clean := cleanPackagePath(name)
+	if data, ok := r.files[clean]; ok {
 		return data, nil
+	}
+	if page := r.memPages[clean]; page != nil {
+		return encodeOFDXMLContext(ctx, func(x *ofdXML) { x.page(*page) })
 	}
 	input, err := r.openFile(name)
 	if err != nil {
@@ -1611,6 +1619,10 @@ func (r *Reader) readFileData(name string) ([]byte, bool, error) {
 	if data, ok := r.files[name]; ok {
 		return data, true, nil
 	}
+	if page := r.memPages[name]; page != nil {
+		data, err := encodeOFDXMLContext(context.Background(), func(x *ofdXML) { x.page(*page) })
+		return data, false, err
+	}
 	if _, ok := r.packageFile(name); ok {
 		input, err := r.openFile(name)
 		if err != nil {
@@ -1638,6 +1650,13 @@ func (r *Reader) readFileData(name string) ([]byte, bool, error) {
 func (r *Reader) openFile(name string) (io.ReadCloser, error) {
 	name = cleanPackagePath(name)
 	if data, ok := r.files[name]; ok {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+	if page := r.memPages[name]; page != nil {
+		data, err := encodeOFDXMLContext(context.Background(), func(x *ofdXML) { x.page(*page) })
+		if err != nil {
+			return nil, err
+		}
 		return io.NopCloser(bytes.NewReader(data)), nil
 	}
 	if f, ok := r.packageFile(name); ok {
@@ -1680,6 +1699,9 @@ func (r *Reader) hasPackageFile(name string) bool {
 		return false
 	}
 	if _, ok := r.files[clean]; ok {
+		return true
+	}
+	if r.memPages[clean] != nil {
 		return true
 	}
 	if _, ok := r.fileIndex[clean]; ok {
@@ -2095,6 +2117,17 @@ func (r *Reader) readPageContentReadOnly(ctx context.Context, page Page, textOnl
 	return r.readPageContentInternal(ctx, page, textOnly, template, false)
 }
 
+// injectMemoryPage 以写时复制方式向阅读器注入单页已构建内容，供渐进同步零XML往返复用
+// 入参: pagePath 规范化页面路径, content 独立页面内容副本
+func (r *Reader) injectMemoryPage(pagePath string, content *PageContent) {
+	next := maps.Clone(r.memPages)
+	if next == nil {
+		next = make(map[string]*PageContent, 1)
+	}
+	next[pagePath] = content
+	r.memPages = next
+}
+
 // readPageContentInternal 读取页面内容并按需克隆以隔离外部修改
 // 入参: ctx 取消上下文, page 页面对象, textOnly 是否仅用于文字提取, template 是否按模板页读取, clone 是否深拷贝缓存对象
 // 返回: *PageContent 页面内容, error 错误信息
@@ -2109,61 +2142,70 @@ func (r *Reader) readPageContentInternal(ctx context.Context, page Page, textOnl
 	}
 	fullPath := r.ResPath(page.BaseLoc)
 	cleanPath := cleanPackagePath(fullPath)
-	if r.pageContents == nil {
-		r.pageContents = resourceCache[pageContentKey, PageContent](r.resources, 16<<20)
-	}
-	maxCacheData := (r.pageContents.limit/4 - 4096) / 16
 	var content PageContent
 	var err error
-	if r.Zip != nil && r.archiveID != 0 && r.files[cleanPath] == nil {
-		zf, ok := r.packageFile(cleanPath)
-		if !ok {
-			return nil, fmt.Errorf("file not found: %s", cleanPath)
+	if !template && r.memPages != nil && r.files[cleanPath] == nil && r.memPages[cleanPath] != nil {
+		direct := r.memPages[cleanPath]
+		if clone {
+			content = cloneEditorData(*direct)
+		} else {
+			content = *direct
 		}
-		if zf.UncompressedSize64 > uint64(max(0, maxCacheData)) {
+	} else {
+		if r.pageContents == nil {
+			r.pageContents = resourceCache[pageContentKey, PageContent](r.resources, 16<<20)
+		}
+		maxCacheData := (r.pageContents.limit/4 - 4096) / 16
+		if r.Zip != nil && r.archiveID != 0 && r.files[cleanPath] == nil {
+			zf, ok := r.packageFile(cleanPath)
+			if !ok {
+				return nil, fmt.Errorf("file not found: %s", cleanPath)
+			}
+			if zf.UncompressedSize64 > uint64(max(0, maxCacheData)) {
+				data, readErr := r.readFileViewContext(ctx, fullPath)
+				if readErr != nil {
+					return nil, readErr
+				}
+				content, err = decodePageContent(ctx, data, textOnly)
+			} else {
+				var parsed PageContent
+				parsed, err = r.pageContents.load(ctx, pageContentKey{archiveID: r.archiveID, path: cleanPath, textOnly: textOnly}, func() (PageContent, int, error) {
+					data, readErr := r.readFileViewContext(ctx, fullPath)
+					if readErr != nil {
+						return PageContent{}, 0, readErr
+					}
+					decoded, decErr := decodePageContent(ctx, data, textOnly)
+					return decoded, len(data)*16 + 4096, decErr
+				})
+				if err == nil {
+					if clone {
+						content = cloneEditorData(parsed)
+					} else {
+						content = parsed
+					}
+				} else if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return nil, err
+				}
+			}
+		} else {
 			data, readErr := r.readFileViewContext(ctx, fullPath)
 			if readErr != nil {
 				return nil, readErr
 			}
-			content, err = decodePageContent(ctx, data, textOnly)
-		} else {
-			var parsed PageContent
-			parsed, err = r.pageContents.load(ctx, pageContentKey{archiveID: r.archiveID, path: cleanPath, textOnly: textOnly}, func() (PageContent, int, error) {
-				data, readErr := r.readFileViewContext(ctx, fullPath)
-				if readErr != nil {
-					return PageContent{}, 0, readErr
-				}
-				decoded, decErr := decodePageContent(ctx, data, textOnly)
-				return decoded, len(data)*16 + 4096, decErr
-			})
-			if err == nil {
-				if clone {
-					content = cloneEditorData(parsed)
-				} else {
-					content = parsed
-				}
-			} else if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return nil, err
-			}
-		}
-	} else {
-		data, readErr := r.readFileViewContext(ctx, fullPath)
-		if readErr != nil {
-			return nil, readErr
-		}
-		if len(data) > maxCacheData {
-			content, err = decodePageContent(ctx, data, textOnly)
-		} else {
-			var parsed PageContent
-			parsed, err = r.pageContents.load(ctx, pageContentKey{digest: sha256.Sum256(data), textOnly: textOnly}, func() (PageContent, int, error) {
-				decoded, decErr := decodePageContent(ctx, data, textOnly)
-				return decoded, len(data)*16 + 4096, decErr
-			})
-			if err == nil {
-				if clone {
-					content = cloneEditorData(parsed)
-				} else {
-					content = parsed
+			if len(data) > maxCacheData {
+				content, err = decodePageContent(ctx, data, textOnly)
+			} else {
+				var parsed PageContent
+				parsed, err = r.pageContents.load(ctx, pageContentKey{digest: sha256.Sum256(data), textOnly: textOnly}, func() (PageContent, int, error) {
+					decoded, decErr := decodePageContent(ctx, data, textOnly)
+					return decoded, len(data)*16 + 4096, decErr
+				})
+				if err == nil {
+					if clone {
+						content = cloneEditorData(parsed)
+					} else {
+						content = parsed
+					}
 				}
 			}
 		}

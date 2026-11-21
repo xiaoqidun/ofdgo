@@ -11,6 +11,13 @@ export const DEFAULT_VIEW_POLICY = {
 
 const PAGE_CACHE_LIMIT = 16;
 const PAGE_CACHE_BYTES = 32 * 1024 * 1024;
+const THUMB_CACHE_LIMIT = 96;
+const THUMB_CACHE_BYTES = 16 * 1024 * 1024;
+const DETACHED_DOM_LIMIT = 8;
+const FAST_SCROLL_VELOCITY = 3.5;
+const SCROLL_SETTLE_DELAY = 55;
+const THUMB_SETTLE_DELAY = 80;
+const REVEAL_THUMB_DEBOUNCE = 48;
 const PAGE_LAYOUT_GAP = 16;
 const svgFontBytes = new WeakMap();
 let textMeasure = null;
@@ -82,6 +89,8 @@ export function createPageView(context) {
 				return null;
 			}
 			if (options.navigation !== state.pageNavigation) state.pageNavigation = null;
+			const previousIndex = state.pageIndex;
+			const sameSpreadRow = state.pageLayout > 1 && pageView.pageGroupStart(index) === pageView.pageGroupStart(previousIndex);
 			if (!options.keepBusy && index !== state.pageIndex) {
 				if (!await context.canvasEditor.commitNudge() || !context.isForegroundDocument(tab) || openSeq !== state.openSeq) return null;
 				if (!await context.canvasEditor.commitText() || !context.isForegroundDocument(tab) || openSeq !== state.openSeq) return null;
@@ -97,23 +106,34 @@ export function createPageView(context) {
 			}
 			try {
 				pageView.setCurrentPage(index);
-				if (options.fit !== false && !(state.fitMode === "width" && state.pageLayout === 1 && state.pageWindow?.offsets.length > 1)) {
+				const stableContinuousTwoPage = state.pageLayout > 1 && state.continuous && state.pageWindow?.rows?.length > 0;
+				const stableSingleWidth = state.fitMode === "width" && state.pageLayout === 1 && state.pageWindow?.offsets.length > 1;
+				if (options.fit !== false && !stableSingleWidth && !stableContinuousTwoPage) {
 					pageView.applyFit(false);
 				}
+				const scrollOptions = { preserveInline: sameSpreadRow && state.fitMode === "free" };
 				if (options.scroll !== false) {
-					pageView.scrollToPage(index);
+					pageView.scrollToPage(index, scrollOptions);
 				} else if (state.pageWindow && (!pageView.pageShell(index) || pageView.pageShell(index).style.visibility === "hidden")) {
-					pageView.scrollToPage(index);
+					pageView.scrollToPage(index, scrollOptions);
 				}
 				pageView.prunePageRenderQueue();
+				const pairStart = pageView.pageGroupStart(index);
+				let pairTask = null;
+				if (state.pageLayout > 1) {
+					for (let i = pairStart; i < Math.min(pageCount, pairStart + state.pageLayout); i++) {
+						if (i !== index) pairTask = pageView.renderFlowPage(i, { openSeq, priority: 1 });
+					}
+				}
 				const page = await pageView.renderFlowPage(index, { throwError: true, openSeq, priority: 0 });
+				if (pairTask && options.waitPair) await pairTask.catch(() => null);
 				if (!page || openSeq !== state.openSeq || index !== state.pageIndex) {
 					return null;
 				}
 				if (options.scroll !== false) {
-					pageView.scrollToPage(index);
+					pageView.scrollToPage(index, scrollOptions);
 				}
-				pageView.queueNearbyPages(index, openSeq);
+				if (!options.deferNearby) pageView.queueNearbyPages(index, openSeq);
 				return page;
 			} catch (err) {
 				if (openSeq === state.openSeq) {
@@ -124,9 +144,24 @@ export function createPageView(context) {
 				if (!options.keepBusy && !state.exporting && !context.isForegroundDocument(tab)) context.setBusy(false, "", 0, "", tab);
 				if (!options.keepBusy && !state.exporting && openSeq === state.openSeq && pageSeq === state.pageSeq) {
 					context.setBusy(false, "", 0, "", tab);
-					if (!options.openAction) context.scheduleOpenActions();
+					if (!options.openAction && pageView.pageHasOpenAction(index)) context.scheduleOpenActions();
 				}
 			}
+		},
+
+		pageHasOpenAction(index = context.state.pageIndex) {
+			const doc = context.state.doc;
+			if (!doc) return false;
+			const page = pageView.pageInfo(index);
+			if (page && typeof page.hasOpenAction === "boolean") return page.hasOpenAction;
+			if (typeof doc.hasOpenAction === "boolean") return doc.hasOpenAction;
+			return true;
+		},
+
+		pageInfo(index) {
+			const doc = context.state.doc;
+			if (!doc || index < 0 || index >= (doc.pageCount || 0)) return null;
+			return doc.pages?.[index] || null;
 		},
 
 		virtualIndex(offsets, top) {
@@ -139,14 +174,55 @@ export function createPageView(context) {
 			return low;
 		},
 
+		virtualRowIndex(view, top) {
+			const rowOffsets = view?.rowOffsets;
+			if (!rowOffsets || rowOffsets.length < 2) return 0;
+			let low = 0, high = rowOffsets.length - 1;
+			while (low + 1 < high) {
+				const mid = (low + high) >>> 1;
+				if (rowOffsets[mid] <= top) low = mid;
+				else high = mid;
+			}
+			return Math.min(low, view.rows.length - 1);
+		},
+
+		pageRowIndex(view, index) {
+			if (!view?.rows?.length) return 0;
+			const stride = view.columns > 1 ? view.columns : 1;
+			return Math.max(0, Math.min(view.rows.length - 1, Math.floor(index / stride)));
+		},
+
 		createPageWindow(host, viewport, overscan, create, release, observe) {
 			host.classList.add("virtual-pages");
-			return { host, viewport, overscan, create, release, observe, nodes: new Map(), offsets: new Float64Array(1), origin: 0, total: 0, gap: 0 };
+			return {
+				host, viewport, overscan, create, release, observe,
+				nodes: new Map(), nodeStyles: new Map(),
+				offsets: new Float64Array(1), rows: [], rowOffsets: new Float64Array(1),
+				origin: 0, total: 0, gap: 0, inset: null, padBottom: null,
+				hostWidth: 0, columns: 0, logicalTop: 0, scrollTop: 0,
+			};
+		},
+
+		invalidateWindowMetrics(view) {
+			if (!view) return;
+			view.inset = null;
+			view.padBottom = null;
 		},
 
 		windowInset(view) {
-			return view.host.getBoundingClientRect().top - view.viewport.getBoundingClientRect().top
+			if (!view) return 0;
+			if (view.inset !== null) return view.inset;
+			const inset = view.host.getBoundingClientRect().top - view.viewport.getBoundingClientRect().top
 				+ view.viewport.scrollTop - view.viewport.clientTop;
+			view.inset = Number.isFinite(inset) ? inset : 0;
+			return view.inset;
+		},
+
+		windowPadBottom(view) {
+			if (!view) return 0;
+			if (view.padBottom !== null) return view.padBottom;
+			view.padBottom = Number.parseFloat(getComputedStyle(view.viewport).paddingBottom) || 0;
+			return view.padBottom;
 		},
 
 		virtualScrollMetrics(view, inset) {
@@ -182,8 +258,8 @@ export function createPageView(context) {
 		},
 
 		syncPageWindow(view, target = null) {
-			if (!view || view.offsets.length < 2) return;
-			const { host, viewport, offsets, nodes } = view;
+			if (!view || view.rows.length < 1) return;
+			const { host, viewport, offsets, nodes, nodeStyles, rows } = view;
 			const extent = Math.min(SCROLL_SEGMENT_SIZE, view.total);
 			const heightText = `${extent}px`;
 			if (host.style.height !== heightText) host.style.height = heightText;
@@ -207,12 +283,10 @@ export function createPageView(context) {
 			view.scrollTop = viewport.scrollTop;
 			view.logicalTop = logical;
 			view.origin = view.total > SCROLL_SEGMENT_SIZE ? Math.max(0, Math.min(view.total - extent, logical - viewport.scrollTop + inset)) : 0;
-			let first = pageView.virtualIndex(offsets, Math.max(view.origin, logical - view.overscan));
-			let last = pageView.virtualIndex(offsets, Math.min(view.origin + extent, logical + height + view.overscan));
-			if (view.columns) {
-				first -= first % view.columns;
-				last = Math.min(offsets.length - 2, last + view.columns - 1 - last % view.columns);
-			}
+			const firstRow = pageView.virtualRowIndex(view, Math.max(view.origin, logical - view.overscan));
+			const lastRow = pageView.virtualRowIndex(view, Math.min(view.origin + extent, logical + height + view.overscan));
+			const first = rows[firstRow].start;
+			const last = rows[lastRow].end;
 			const selection = host === context.el.svgHost && context.state.documentSelection ? document.getSelection() : null;
 			const selected = selection?.rangeCount && context.isDocumentSelection(selection.getRangeAt(0));
 			let changed = false;
@@ -220,40 +294,61 @@ export function createPageView(context) {
 				if ((index < first || index > last) && view.release(node, index)) {
 					node.remove();
 					nodes.delete(index);
+					nodeStyles.delete(index);
 					changed = true;
 				}
 			}
+			const created = [];
 			for (let index = first; index <= last; index++) {
 				if (nodes.has(index)) continue;
-				const node = view.create(context.state.doc.pages[index]);
+				const node = view.create(pageView.pageInfo(index));
 				nodes.set(index, node);
-				const next = [...host.children].find(child => Number(child.dataset.pageIndex) > index);
-				host.insertBefore(node, next || null);
+				let nextNode = null, nextIndex = Infinity;
+				for (const [existingIndex, existingNode] of nodes) {
+					if (existingIndex > index && existingIndex < nextIndex && existingNode.parentNode === host) {
+						nextIndex = existingIndex;
+						nextNode = existingNode;
+					}
+				}
+				host.insertBefore(node, nextNode);
 				changed = true;
-				node.style.top = `${offsets[index] - view.origin}px`;
-				view.observe(node, index);
+				created.push([node, index]);
 			}
+			const isPageList = host === context.el.pageList;
 			for (const [index, node] of nodes) {
 				const top = offsets[index] - view.origin;
 				const itemHeight = view.heights?.[index] ?? offsets[index + 1] - offsets[index] - view.gap;
+				const clampedTop = `${Math.max(-itemHeight, Math.min(extent, top))}px`;
+				const visibility = top + itemHeight < 0 || top >= extent ? "hidden" : "";
+				let styleCache = nodeStyles.get(index);
+				if (!styleCache) {
+					styleCache = { top: "", left: "", right: "", transform: "", visibility: null };
+					nodeStyles.set(index, styleCache);
+				}
 				if (view.lefts) {
-					node.style.left = view.columns && host === context.el.pageList
+					const leftVal = view.columns && isPageList
 						? index % 2 ? `calc(50% + ${view.gap / 2}px)` : "0px"
 						: `${view.lefts[index]}px`;
-					node.style.right = "auto";
-					node.style.transform = "none";
+					if (styleCache.left !== leftVal) { node.style.left = leftVal; styleCache.left = leftVal; }
+					if (styleCache.right !== "auto") { node.style.right = "auto"; styleCache.right = "auto"; }
+					if (styleCache.transform !== "none") { node.style.transform = "none"; styleCache.transform = "none"; }
 				}
-				node.style.top = `${Math.max(-itemHeight, Math.min(extent, top))}px`;
-				node.style.visibility = top + itemHeight < 0 || top >= extent ? "hidden" : "";
+				if (styleCache.top !== clampedTop) { node.style.top = clampedTop; styleCache.top = clampedTop; }
+				if (styleCache.visibility !== visibility) { node.style.visibility = visibility; styleCache.visibility = visibility; }
 			}
+			for (const [node, index] of created) view.observe(node, index);
 			if (selected && changed) selection.getRangeAt(0).selectNodeContents(host);
 			view.anchor = pageView.pageWindowAnchor(view);
 		},
 
 		pageWindowAnchor(view) {
-			const top = pageView.pageWindowTop(view);
-			const index = pageView.virtualIndex(view.offsets, top);
-			return { index, offset: top - view.offsets[index] };
+			if (!view?.rows?.length) return { index: context.state.pageIndex, row: 0, offset: 0 };
+			const top = view.logicalTop ?? pageView.pageWindowTop(view);
+			const rowIndex = pageView.virtualRowIndex(view, Math.max(0, top));
+			const row = view.rows[rowIndex];
+			const current = context.state.pageIndex;
+			const index = current >= row.start && current <= row.end ? current : row.start;
+			return { index, row: rowIndex, offset: top - row.top };
 		},
 
 		releaseFlowShell(shell, index) {
@@ -269,6 +364,7 @@ export function createPageView(context) {
 			const shell = document.createElement("div");
 			shell.className = "page-shell";
 			shell.dataset.pageIndex = String(page.index);
+			shell.dataset.spreadCol = String(page.index % 2);
 			const surface = document.createElement("div");
 			surface.className = "page-surface";
 			const placeholder = document.createElement("div");
@@ -298,8 +394,10 @@ export function createPageView(context) {
 
 		resetPageFlow(keepCache = false) {
 			context.state.pageNavigation = null;
+			context.state.detachedPages.clear();
 			if (!keepCache) {
 				context.state.pageCache.clear();
+				context.state.thumbCache.clear();
 				pageView.releasePageResources();
 			}
 			context.state.selectedPages.clear();
@@ -308,29 +406,50 @@ export function createPageView(context) {
 			pageView.resetPageLoading();
 		},
 
-		resetPageLoading() {
-			context.state.pageLoadSeq++;
-			context.releaseMediaPlayers();
-			if (context.state.pagePresentFrame) cancelAnimationFrame(context.state.pagePresentFrame);
-			context.state.pagePresentFrame = 0;
-			for (const task of context.state.pagePresentQueue.values()) task.resolve(null);
-			context.state.pagePresentQueue.clear();
-			for (const [id, request] of context.wasmRequests) {
-				if (request.tab === context.documentTab() && request.name === "ofdgoRenderPage" && (!context.state.sourcePDF || context.state.pdfComplete || context.state.editorInfo)) context.wasmWorker?.postMessage({ type: "cancel", id });
+		cancelPageTask(task) {
+			if (!task) return;
+			task.canceled = true;
+			task.controller?.abort();
+			if (task.requestID) {
+				context.wasmWorker?.postMessage({ type: "cancel", id: task.requestID });
+				task.requestID = 0;
 			}
-			for (const task of context.state.pageInFlight.values()) {
+			const state = context.state;
+			if (state.pageInFlight.get(task.key) === task) state.pageInFlight.delete(task.key);
+			task.resolve(null);
+		},
+
+		resetPageLoading() {
+			const state = context.state;
+			state.pageLoadSeq++;
+			context.releaseMediaPlayers();
+			if (state.pagePresentFrame) cancelAnimationFrame(state.pagePresentFrame);
+			state.pagePresentFrame = 0;
+			if (state.viewerScrollTimer) { clearTimeout(state.viewerScrollTimer); state.viewerScrollTimer = 0; }
+			if (state.thumbScrollTimer) { clearTimeout(state.thumbScrollTimer); state.thumbScrollTimer = 0; }
+			if (state.revealThumbTimer) { clearTimeout(state.revealThumbTimer); state.revealThumbTimer = 0; }
+			state.viewerFastScroll = false;
+			state.thumbFastScroll = false;
+			for (const task of state.pagePresentQueue.values()) task.resolve(null);
+			state.pagePresentQueue.clear();
+			for (const [id, request] of context.wasmRequests) {
+				if (request.tab === context.documentTab() && request.name === "ofdgoRenderPage") context.wasmWorker?.postMessage({ type: "cancel", id });
+			}
+			for (const task of state.pageInFlight.values()) {
+				task.canceled = true;
+				task.controller?.abort();
 				task.resolve(null);
 			}
-			context.state.pageRenderQueue = [];
-			context.state.pageRenderScheduleSeq = (context.state.pageRenderScheduleSeq || 0) + 1;
-			context.state.pageRenderRunning = context.state.pageRenderWorkers > 0;
-			context.state.pagePrefetchIndex = null;
-			context.state.pagePrefetchDirection = 1;
-			context.state.pageInFlight.clear();
+			state.pageRenderQueue = [];
+			state.pageRenderScheduleSeq = (state.pageRenderScheduleSeq || 0) + 1;
+			state.pageRenderRunning = state.pageRenderWorkers > 0;
+			state.pagePrefetchIndex = null;
+			state.pagePrefetchDirection = 1;
+			state.pageInFlight.clear();
 			pageView.resetThumbnails();
-			if (context.state.pageObserver) {
-				context.state.pageObserver.disconnect();
-				context.state.pageObserver = null;
+			if (state.pageObserver) {
+				state.pageObserver.disconnect();
+				state.pageObserver = null;
 			}
 		},
 
@@ -366,7 +485,11 @@ export function createPageView(context) {
 						}
 						context.state.visiblePages.add(index);
 						context.state.selectedPages.delete(index);
-						pageView.renderFlowPage(index, { openSeq, priority: 4 });
+						if (!context.state.viewerFastScroll) {
+							pageView.renderFlowPage(index, { openSeq, priority: 2 });
+						} else if (context.state.detachedPages.has(index) && context.state.pageCache.has(index)) {
+							pageView.mountPageSVG(index, context.state.pageCache.get(index), openSeq);
+						}
 					}
 					pageView.trimPageCache();
 				}, {
@@ -398,8 +521,31 @@ export function createPageView(context) {
 				context.state.selectedPages.add(index);
 				return;
 			}
-			context.releaseMediaPlayers(shell.querySelector(".page-surface"));
-			shell.querySelector(".page-surface").replaceChildren();
+			const surface = shell.querySelector(".page-surface");
+			const hasMedia = !!surface.querySelector("audio, video");
+			context.releaseMediaPlayers(surface);
+			const cachedPage = context.state.pageCache.get(index);
+			if (!context.state.editing && !hasMedia && shell.classList.contains("rendered") && cachedPage && !cachedPage.previewOnly) {
+				const svg = surface.querySelector(":scope > .ofd-svg");
+				if (svg) {
+					const fragment = document.createDocumentFragment();
+					for (const child of [...surface.childNodes]) {
+						if (child.classList?.contains("search-highlight")) child.remove();
+						else fragment.append(child);
+					}
+					const detached = context.state.detachedPages;
+					detached.delete(index);
+					detached.set(index, { openSeq: context.state.openSeq, page: cachedPage, fragment, textPending: shell.dataset.textPending === "1" });
+					while (detached.size > DETACHED_DOM_LIMIT) {
+						detached.delete(detached.keys().next().value);
+					}
+				} else {
+					surface.replaceChildren();
+				}
+			} else {
+				surface.replaceChildren();
+			}
+			delete shell.dataset.textPending;
 			shell.classList.remove("rendered");
 			context.state.selectedPages.delete(index);
 		},
@@ -424,6 +570,7 @@ export function createPageView(context) {
 				pageView.trimPageCache();
 				return page;
 			} catch (err) {
+				if (err?.name === "AbortError") return null;
 				if (current()) {
 					pageView.markFlowPageError(index, err);
 				}
@@ -436,24 +583,54 @@ export function createPageView(context) {
 
 		loadPageData(index, options = {}) {
 			const openSeq = options.openSeq || context.state.openSeq;
-			const loadSeq = context.state.pageLoadSeq;
-			if (openSeq !== context.state.openSeq) {
+			const state = context.state;
+			if (openSeq !== state.openSeq) {
 				return Promise.resolve(null);
 			}
 			const key = `${openSeq}:${index}`;
 			const priority = options.priority ?? 3;
-			const current = context.state.pageInFlight.get(key);
-			if (current) {
-				current.priority = Math.min(current.priority, priority);
-				current.view &&= !!options.view;
-				if (current.preview && !options.preview) return current.promise.then(page => page && openSeq === context.state.openSeq && loadSeq === context.state.pageLoadSeq ? pageView.loadPageData(index, options) : null);
-				return current.promise;
+			const preview = !!options.preview;
+			if (!options.refresh) {
+				const cached = state.pageCache.get(index);
+				if (cached && (preview || !cached.previewOnly)) {
+					state.pageCache.delete(index);
+					state.pageCache.set(index, cached);
+					return Promise.resolve(cached);
+				}
+				if (preview && state.thumbCache.has(index)) {
+					const thumb = state.thumbCache.get(index);
+					state.thumbCache.delete(index);
+					state.thumbCache.set(index, thumb);
+					return Promise.resolve(thumb);
+				}
 			}
-			if (!options.refresh && context.state.pageCache.has(index) && (options.preview || !context.state.pageCache.get(index).previewOnly)) {
-				const page = context.state.pageCache.get(index);
-				context.state.pageCache.delete(index);
-				context.state.pageCache.set(index, page);
-				return Promise.resolve(page);
+			const current = state.pageInFlight.get(key);
+			if (current) {
+				if (current.preview && !preview) {
+					if (!current.dispatched) {
+						current.preview = false;
+						current.priority = Math.min(current.priority, priority);
+						current.view = current.view || !!options.view;
+						current.refresh = current.refresh || !!options.refresh;
+						pageView.schedulePageRender();
+						return current.promise;
+					}
+					const previousResolve = current.resolve;
+					const previousReject = current.reject;
+					current.canceled = true;
+					current.controller?.abort();
+					if (current.requestID) {
+						context.wasmWorker?.postMessage({ type: "cancel", id: current.requestID });
+						current.requestID = 0;
+					}
+					state.pageInFlight.delete(key);
+					const upgraded = pageView.loadPageData(index, options);
+					upgraded.then(previousResolve, previousReject);
+					return upgraded;
+				}
+				current.priority = Math.min(current.priority, priority);
+				current.view = current.view || !!options.view;
+				return current.promise;
 			}
 			let resolve;
 			let reject;
@@ -461,9 +638,12 @@ export function createPageView(context) {
 				resolve = done;
 				reject = fail;
 			});
-			const task = { key, index, openSeq, priority, view: !!options.view, preview: !!options.preview, refresh: options.refresh, resolve, reject, promise };
-			context.state.pageInFlight.set(key, task);
-			context.state.pageRenderQueue.push(task);
+			const task = {
+				key, index, openSeq, priority, view: !!options.view, preview, refresh: !!options.refresh,
+				dispatched: false, canceled: false, requestID: 0, controller: null, resolve, reject, promise,
+			};
+			state.pageInFlight.set(key, task);
+			state.pageRenderQueue.push(task);
 			pageView.schedulePageRender();
 			return promise;
 		},
@@ -479,7 +659,7 @@ export function createPageView(context) {
 			const scheduleSeq = (tab.state.pageRenderScheduleSeq || 0) + 1;
 			tab.state.pageRenderScheduleSeq = scheduleSeq;
 			tab.state.pageRenderRunning = true;
-			requestAnimationFrame(() => {
+			queueMicrotask(() => {
 				if (scheduleSeq !== tab.state.pageRenderScheduleSeq || openSeq !== tab.state.openSeq || loadSeq !== tab.state.pageLoadSeq) return;
 				if (context.activeTab === tab) pageView.processPageRenderQueue(tab, openSeq, loadSeq, scheduleSeq);
 				else tab.state.pageRenderRunning = tab.state.pageRenderWorkers > 0;
@@ -487,7 +667,6 @@ export function createPageView(context) {
 		},
 
 		async processPageRenderQueue(tab = context.documentTab(), openSeq = tab.state.openSeq, loadSeq = tab.state.pageLoadSeq, scheduleSeq = tab.state.pageRenderScheduleSeq) {
-			await context.nextFrame();
 			if (scheduleSeq !== tab.state.pageRenderScheduleSeq || openSeq !== tab.state.openSeq || loadSeq !== tab.state.pageLoadSeq) return;
 			if (context.activeTab !== tab) {
 				tab.state.pageRenderRunning = tab.state.pageRenderWorkers > 0;
@@ -512,57 +691,103 @@ export function createPageView(context) {
 					}
 					const [task] = state.pageRenderQueue.splice(next, 1);
 					try {
-						if (task.openSeq !== state.openSeq) {
+						if (task.canceled || task.openSeq !== state.openSeq) {
 							task.resolve(null);
 							continue;
 						}
-						if (!task.refresh && state.pageCache.has(task.index) && (task.preview || !state.pageCache.get(task.index).previewOnly)) {
-							task.resolve(state.pageCache.get(task.index));
-							continue;
+						if (!task.refresh) {
+							const cached = state.pageCache.get(task.index);
+							if (cached && (task.preview || !cached.previewOnly)) {
+								task.resolve(cached);
+								continue;
+							}
+							if (task.preview && state.thumbCache.has(task.index)) {
+								task.resolve(state.thumbCache.get(task.index));
+								continue;
+							}
 						}
-						const args = [task.index, state.renderBackend, state.renderDPI, pageView.displayMode() === "raster"];
-						args.push([...state.svgFonts.keys()], [...state.svgImages.keys()], task.preview);
-						const page = await context.callWASM("ofdgoRenderPage", ...args);
-						if (context.activeTab !== tab || state.pageInFlight.get(task.key) !== task || task.openSeq !== state.openSeq) {
+						task.dispatched = true;
+						task.controller = new AbortController();
+						const priority = pageView.pageRenderPriority(task, state);
+						const args = [task.index, state.renderBackend, state.renderDPI, pageView.displayMode() === "raster",
+							[...state.svgFonts.keys()], [...state.svgImages.keys()], task.preview, priority];
+						const page = await context.callRenderPage(args, task);
+						if (task.canceled || context.activeTab !== tab || state.pageInFlight.get(task.key) !== task || task.openSeq !== state.openSeq) {
 							task.resolve(null);
 							continue;
 						}
-						if (state.editing) await context.loadEditorMembers(tab, page, task.index);
-						if (context.activeTab !== tab || state.pageInFlight.get(task.key) !== task || task.openSeq !== state.openSeq) {
+						if (page.svgUrl) {
+							const response = await fetch(page.svgUrl, { signal: task.controller.signal });
+							if (!response.ok) throw new Error("读取页面矢量失败");
+							page.svg = await response.text();
+						} else if (typeof page.svg !== "string") {
+							page.svg = "";
+						}
+						if (task.canceled || context.activeTab !== tab || state.pageInFlight.get(task.key) !== task || task.openSeq !== state.openSeq) {
 							task.resolve(null);
 							continue;
 						}
-						await pageView.loadSVGFonts(page.fonts, task.openSeq);
-						for (const font of page.fonts) delete font.data;
-						if (task.openSeq === state.openSeq && state.pageInFlight.get(task.key) === task) {
-							for (const image of page.images) {
+						if (state.editing && !task.preview) await context.loadEditorMembers(tab, page, task.index);
+						if (task.canceled || context.activeTab !== tab || state.pageInFlight.get(task.key) !== task || task.openSeq !== state.openSeq) {
+							task.resolve(null);
+							continue;
+						}
+						await pageView.loadSVGFonts(page.fonts || [], task.openSeq);
+						for (const font of page.fonts || []) delete font.data;
+						if (!task.canceled && task.openSeq === state.openSeq && state.pageInFlight.get(task.key) === task) {
+							const images = page.images || [];
+							for (const image of images) {
 								if (!state.svgImages.has(image.name)) {
-									const blob = new Blob([image.bytes], { type: image.mime });
-									state.svgImages.set(image.name, { url: URL.createObjectURL(blob), size: blob.size });
+									if (image.url) {
+										state.svgImages.set(image.name, { url: image.url, size: image.size || 0, native: true });
+									} else if (image.bytes) {
+										const blob = new Blob([image.bytes], { type: image.mime });
+										state.svgImages.set(image.name, { url: URL.createObjectURL(blob), size: blob.size, native: false });
+									}
 								}
 							}
-							page.imageNames = page.images.map((image) => image.name);
+							page.imageNames = images.map((image) => image.name);
 							delete page.images;
 							if (task.refresh && state.editing) {
 								await Promise.all(page.imageNames.map(name => {
+									const entry = state.svgImages.get(name);
+									if (!entry) return Promise.resolve();
 									const image = new Image();
-									image.src = state.svgImages.get(name).url;
-									return image.decode();
+									image.src = entry.url;
+									return image.decode().catch(() => {});
 								}));
 							}
-							if (task.openSeq !== state.openSeq || state.pageInFlight.get(task.key) !== task) {
+							if (task.canceled || task.openSeq !== state.openSeq || state.pageInFlight.get(task.key) !== task) {
 								task.resolve(null);
 								continue;
 							}
-							page.cacheBytes = (page.svg.length + page.text.length + page.annotations.length) * 2;
-							page.text = JSON.parse(page.text);
-							page.annotations = JSON.parse(page.annotations);
-							state.pageCache.set(task.index, page);
+							const rawTextLen = typeof page.text === "string" ? page.text.length : 0;
+							const rawAnnLen = typeof page.annotations === "string" ? page.annotations.length : 0;
+							if (typeof page.text === "string") page.text = page.text ? JSON.parse(page.text) : { runs: [] };
+							else if (!page.text) page.text = { runs: [] };
+							if (typeof page.annotations === "string") page.annotations = page.annotations ? JSON.parse(page.annotations) : [];
+							else if (!page.annotations) page.annotations = [];
+							page.cacheBytes = (page.svg.length + rawTextLen + rawAnnLen) * 2
+								+ (rawTextLen ? 0 : (page.text.runs?.length || 0) * 128)
+								+ (rawAnnLen ? 0 : page.annotations.length * 128);
+							if (task.preview) {
+								page.previewOnly = true;
+								state.thumbCache.delete(task.index);
+								state.thumbCache.set(task.index, page);
+							} else {
+								page.previewOnly = false;
+								state.thumbCache.delete(task.index);
+								state.detachedPages.delete(task.index);
+								state.pageCache.delete(task.index);
+								state.pageCache.set(task.index, page);
+							}
 						}
 						task.resolve(page);
 					} catch (err) {
-						task.reject(err);
+						if (task.canceled || err?.name === "AbortError") task.resolve(null);
+						else task.reject(err);
 					} finally {
+						task.requestID = 0;
 						if (state.pageInFlight.get(task.key) === task) state.pageInFlight.delete(task.key);
 					}
 				}
@@ -576,65 +801,85 @@ export function createPageView(context) {
 		},
 
 		trimPageCache() {
-			const protectedPages = new Set([context.state.pageIndex, ...context.state.visiblePages, ...context.state.visibleThumbnails, ...context.state.selectedPages]);
-			for (const index of context.state.pagePresentQueue.keys()) protectedPages.add(index);
-			for (const view of [context.state.pageWindow, context.state.thumbnailWindow]) {
-				for (const index of view?.nodes.keys() || []) protectedPages.add(index);
+			const state = context.state;
+			const protectedPages = new Set([state.pageIndex, ...state.visiblePages, ...state.selectedPages]);
+			for (const [index, task] of state.pagePresentQueue) {
+				if (task.shell) protectedPages.add(index);
 			}
-			for (const task of context.state.pageInFlight.values()) {
-				protectedPages.add(task.index);
+			for (const index of state.pageWindow?.nodes.keys() || []) protectedPages.add(index);
+			for (const task of state.pageInFlight.values()) {
+				if (!task.preview) protectedPages.add(task.index);
+			}
+			const protectedThumbs = new Set([state.pageIndex, ...state.visibleThumbnails]);
+			for (const [index, task] of state.pagePresentQueue) {
+				if (task.thumb) protectedThumbs.add(index);
+			}
+			for (const index of state.thumbnailWindow?.nodes.keys() || []) protectedThumbs.add(index);
+			for (const task of state.pageInFlight.values()) {
+				if (task.preview) protectedThumbs.add(task.index);
 			}
 			const references = new Map(), fontReferences = new Map();
-			let bytes = 0;
-			for (const page of context.state.pageCache.values()) {
-				bytes += page.cacheBytes;
-				for (const name of page.imageNames) {
-					references.set(name, (references.get(name) || 0) + 1);
-				}
-				for (const font of page.fonts || []) {
-					fontReferences.set(font.name, (fontReferences.get(font.name) || 0) + 1);
-				}
+			let pageBytes = 0, thumbBytes = 0;
+			const countRefs = (page) => {
+				for (const name of page.imageNames || []) references.set(name, (references.get(name) || 0) + 1);
+				for (const font of page.fonts || []) fontReferences.set(font.name, (fontReferences.get(font.name) || 0) + 1);
+			};
+			for (const page of state.pageCache.values()) {
+				pageBytes += page.cacheBytes || 0;
+				countRefs(page);
 			}
-			for (const image of context.state.svgImages.values()) {
-				bytes += image.size;
+			for (const page of state.thumbCache.values()) {
+				thumbBytes += page.cacheBytes || 0;
+				countRefs(page);
 			}
-			for (const face of context.state.svgFonts.values()) bytes += svgFontBytes.get(face) || 0;
-			const budget = nativeHost?.cacheBytes || PAGE_CACHE_BYTES;
-			for (const [index, page] of context.state.pageCache) {
-				if (context.state.pageCache.size <= PAGE_CACHE_LIMIT * Math.max(1, budget / PAGE_CACHE_BYTES) && bytes <= budget) {
-					break;
-				}
-				if (protectedPages.has(index)) {
-					continue;
-				}
-				context.state.pageCache.delete(index);
-				bytes -= page.cacheBytes;
-				for (const name of page.imageNames) {
-					const count = references.get(name) - 1;
+			let sharedBytes = 0;
+			for (const image of state.svgImages.values()) sharedBytes += image.size || 0;
+			for (const face of state.svgFonts.values()) sharedBytes += svgFontBytes.get(face) || 0;
+			const releaseUnused = (page) => {
+				for (const name of page.imageNames || []) {
+					const count = (references.get(name) || 0) - 1;
 					references.set(name, count);
-					if (count === 0 && !context.state.pageInFlight.size) {
-						const image = context.state.svgImages.get(name);
+					if (count <= 0 && !state.pageInFlight.size) {
+						const image = state.svgImages.get(name);
 						if (image) {
-							bytes -= image.size;
-							URL.revokeObjectURL(image.url);
-							context.state.svgImages.delete(name);
+							sharedBytes -= image.size || 0;
+							if (!image.native) URL.revokeObjectURL(image.url);
+							state.svgImages.delete(name);
 						}
 					}
 				}
 				for (const font of page.fonts || []) {
-					const count = fontReferences.get(font.name) - 1;
+					const count = (fontReferences.get(font.name) || 0) - 1;
 					fontReferences.set(font.name, count);
-					if (count === 0 && !context.state.pageInFlight.size) {
-						const face = context.state.svgFonts.get(font.name);
+					if (count <= 0 && !state.pageInFlight.size) {
+						const face = state.svgFonts.get(font.name);
 						if (face) {
-							bytes -= svgFontBytes.get(face) || 0;
+							sharedBytes -= svgFontBytes.get(face) || 0;
 							document.fonts.delete(face);
-							context.state.svgFonts.delete(font.name);
+							state.svgFonts.delete(font.name);
 						}
 					}
 				}
+			};
+			const budget = nativeHost?.cacheBytes || PAGE_CACHE_BYTES;
+			const thumbBudget = Math.max(THUMB_CACHE_BYTES, Math.min(48 << 20, Math.floor(budget / 4)));
+			for (const [index, page] of state.thumbCache) {
+				if (state.thumbCache.size <= THUMB_CACHE_LIMIT && thumbBytes <= thumbBudget) break;
+				if (protectedThumbs.has(index)) continue;
+				state.thumbCache.delete(index);
+				thumbBytes -= page.cacheBytes || 0;
+				releaseUnused(page);
 			}
-			if (!context.state.pageInFlight.size) pageView.releasePageResources();
+			const pageLimit = Math.round(PAGE_CACHE_LIMIT * Math.max(1, budget / PAGE_CACHE_BYTES));
+			for (const [index, page] of state.pageCache) {
+				if (state.pageCache.size <= pageLimit && pageBytes + sharedBytes <= budget) break;
+				if (protectedPages.has(index)) continue;
+				state.pageCache.delete(index);
+				state.detachedPages.delete(index);
+				pageBytes -= page.cacheBytes || 0;
+				releaseUnused(page);
+			}
+			if (!state.pageInFlight.size) pageView.releasePageResources();
 			pageView.trimWorkspaceCaches();
 		},
 
@@ -663,17 +908,24 @@ export function createPageView(context) {
 		},
 
 		async loadSVGFont(font, openSeq, loadSeq = context.state.pageLoadSeq) {
-			const data = font.data ? { bytes: font.data } : await context.callWASM("ofdgoSVGFontData", font.name);
-			if (openSeq !== context.state.openSeq || loadSeq !== context.state.pageLoadSeq) {
-				return;
+			let face;
+			let byteSize = font.size || 0;
+			if (font.url) {
+				face = new FontFace(font.name, `url("${font.url}")`, { weight: String(font.weight), style: font.style });
+			} else {
+				const data = font.data ? { bytes: font.data } : await context.callWASM("ofdgoSVGFontData", font.name);
+				if (openSeq !== context.state.openSeq || loadSeq !== context.state.pageLoadSeq) {
+					return;
+				}
+				byteSize = data.bytes?.byteLength || 0;
+				face = new FontFace(font.name, data.bytes, { weight: String(font.weight), style: font.style });
 			}
-			const face = new FontFace(font.name, data.bytes, { weight: String(font.weight), style: font.style });
 			await face.load();
 			if (openSeq !== context.state.openSeq || loadSeq !== context.state.pageLoadSeq) {
 				return;
 			}
 			document.fonts.add(face);
-			svgFontBytes.set(face, data.bytes.byteLength);
+			svgFontBytes.set(face, byteSize);
 			context.state.svgFonts.set(font.name, face);
 		},
 
@@ -685,26 +937,33 @@ export function createPageView(context) {
 			if (!task.view || task.refresh) return task.priority;
 			if (task.index === state.pageIndex) return 0;
 			if (Math.floor(task.index / state.pageLayout) === Math.floor(state.pageIndex / state.pageLayout)) return 1;
+			if (state.visiblePages.has(task.index)) return 2;
 			if (!task.preview) {
-				if (state.visiblePages.has(task.index)) return 2;
 				if (state.pageWindow?.nodes.has(task.index)) return 3;
+				return 4;
 			}
 			if (state.visibleThumbnails.has(task.index) || state.thumbnailWindow?.nodes.has(task.index)) return 5;
 			return 6;
 		},
 
+		getThumbnailSVG(index, state = context.state) {
+			return state.pageCache.get(index)?.svg || state.thumbCache.get(index)?.svg || "";
+		},
+
 		queuePagePresentation(index, page, openSeq, flow = false) {
 			const state = context.state;
-			if (openSeq !== state.openSeq || state.pageCache.get(index) !== page) return Promise.resolve(null);
-			let shell = flow ? pageView.pageShell(index) : null;
-			let thumb = context.el.pageList.querySelector(`[data-page-index="${index}"] .thumb-paper`);
+			const inPage = state.pageCache.get(index) === page;
+			const inThumb = state.thumbCache.get(index) === page;
+			if (openSeq !== state.openSeq || (!inPage && !inThumb)) return Promise.resolve(null);
+			let shell = flow && inPage ? pageView.pageShell(index) : null;
+			let thumb = state.thumbnailWindow?.nodes.get(index)?.querySelector(".thumb-paper") || null;
 			if (shell?.classList.contains("rendered") || state.pageObserver && !state.visiblePages.has(index) && index !== state.pageIndex) shell = null;
 			if (thumb?.dataset.renderKey === `${openSeq}:${index}` || state.thumbnailObserver && !state.visibleThumbnails.has(index) && index !== state.pageIndex) thumb = null;
 			if (!shell && !thumb) return Promise.resolve(null);
 			const queue = state.pagePresentQueue, current = queue.get(index);
 			if (current?.page === page) {
 				if (shell) { current.shell = shell; current.preview = false; }
-				current.thumb = thumb;
+				if (thumb) current.thumb = thumb;
 				return current.promise;
 			}
 			current?.resolve(null);
@@ -725,16 +984,27 @@ export function createPageView(context) {
 				do {
 					const task = [...state.pagePresentQueue.values()].sort(pageView.comparePageRenderTask)[0];
 					try {
-						if (state.pageCache.get(task.index) === task.page) {
-							if (task.shell && pageView.pageShell(task.index) === task.shell && !task.shell.classList.contains("rendered")
+						const inPage = state.pageCache.get(task.index) === task.page;
+						const inThumb = state.thumbCache.get(task.index) === task.page;
+						if (inPage || inThumb) {
+							if (inPage && task.shell && pageView.pageShell(task.index) === task.shell && !task.shell.classList.contains("rendered")
 								&& (!state.pageObserver || state.visiblePages.has(task.index) || task.index === state.pageIndex)) {
-								task.text ||= pageView.createTextLayerParts(task.page.text);
-								let text;
-								do { text = task.text.next(); } while (!text.done && performance.now() - started < 6);
-								if (!text.done) break;
-								pageView.mountPageSVG(task.index, task.page, task.openSeq, text.value);
+								const detached = !state.editing ? state.detachedPages.get(task.index) : null;
+								if (detached && detached.openSeq === task.openSeq && detached.page === task.page) {
+									pageView.mountPageSVG(task.index, task.page, task.openSeq, null);
+								} else if (state.viewerFastScroll && !state.editing) {
+									pageView.mountPageSVG(task.index, task.page, task.openSeq, false);
+								} else {
+									task.text ||= pageView.createTextLayerParts(task.page.text);
+									let text;
+									do { text = task.text.next(); } while (!text.done && performance.now() - started < 6);
+									if (!text.done) break;
+									pageView.mountPageSVG(task.index, task.page, task.openSeq, text.value);
+								}
 							}
-							if (task.thumb && context.el.pageList.querySelector(`[data-page-index="${task.index}"] .thumb-paper`) === task.thumb) pageView.updateThumbnail(task.index, task.openSeq);
+							if (task.thumb && state.thumbnailWindow?.nodes.get(task.index)?.querySelector(".thumb-paper") === task.thumb) {
+								pageView.updateThumbnail(task.index, task.openSeq);
+							}
 						}
 						task.resolve(null);
 					} catch (err) { task.reject(err); }
@@ -753,10 +1023,38 @@ export function createPageView(context) {
 				return;
 			}
 			const surface = shell.querySelector(".page-surface");
+			const detached = !context.state.editing ? context.state.detachedPages.get(index) : null;
+			if (detached && detached.openSeq === openSeq && detached.page === page) {
+				context.state.detachedPages.delete(index);
+				surface.replaceChildren(detached.fragment);
+				if (detached.textPending) {
+					if (context.state.viewerFastScroll) {
+						shell.dataset.textPending = "1";
+					} else {
+						delete shell.dataset.textPending;
+						const svg = surface.querySelector(":scope > .ofd-svg");
+						const layer = textLayer || pageView.createTextLayer(page.text);
+						if (svg?.nextSibling) surface.insertBefore(layer, svg.nextSibling);
+						else surface.append(layer);
+					}
+				} else {
+					delete shell.dataset.textPending;
+				}
+				shell.classList.add("rendered");
+				context.renderSearchHighlights(index);
+				const info = pageView.pageInfo(index);
+				if (info) pageView.layoutPageShell(shell, info);
+				return;
+			}
 			const svg = pageView.parseSVG(page.svg, `p${openSeq}-${index}`);
 			svg.classList.add("ofd-svg");
 			surface.replaceChildren(svg);
-			surface.append(textLayer || pageView.createTextLayer(page.text));
+			if (textLayer === false && !context.state.editing) {
+				shell.dataset.textPending = "1";
+			} else {
+				delete shell.dataset.textPending;
+				surface.append(textLayer || pageView.createTextLayer(page.text));
+			}
 			if (context.state.editing && context.state.editorInfo && pageView.displayMode() === "svg") {
 				context.mountEditorObjects(index, page, surface);
 			}
@@ -764,8 +1062,31 @@ export function createPageView(context) {
 			context.mountPageLinks(page, surface);
 			shell.classList.add("rendered");
 			context.renderSearchHighlights(index);
-			if (context.state.doc?.pages?.[index]) {
-				pageView.layoutPageShell(shell, context.state.doc.pages[index]);
+			const info = pageView.pageInfo(index);
+			if (info) {
+				pageView.layoutPageShell(shell, info);
+			}
+		},
+
+		hydratePendingTextLayers() {
+			const state = context.state;
+			if (!state.doc || state.viewerFastScroll || state.editing) return;
+			for (const index of state.visiblePages) {
+				const shell = pageView.pageShell(index);
+				if (!shell || shell.dataset.textPending !== "1") continue;
+				const page = state.pageCache.get(index);
+				if (!page) continue;
+				const surface = shell.querySelector(".page-surface");
+				if (!surface || surface.querySelector(":scope > .text-layer")) {
+					delete shell.dataset.textPending;
+					continue;
+				}
+				const svg = surface.querySelector(":scope > .ofd-svg");
+				const layer = pageView.createTextLayer(page.text);
+				if (svg?.nextSibling) surface.insertBefore(layer, svg.nextSibling);
+				else surface.append(layer);
+				delete shell.dataset.textPending;
+				context.renderSearchHighlights(index);
 			}
 		},
 
@@ -782,23 +1103,37 @@ export function createPageView(context) {
 		},
 
 		queueNearbyPages(index, openSeq = context.state.openSeq) {
+			const state = context.state;
+			if (!state.doc || state.viewerFastScroll) return;
+			const layout = state.pageLayout;
 			const start = pageView.pageGroupStart(index);
-			if (context.state.pagePrefetchIndex !== null && start !== context.state.pagePrefetchIndex) context.state.pagePrefetchDirection = Math.sign(start - context.state.pagePrefetchIndex);
-			const direction = context.state.pagePrefetchDirection;
-			context.state.pagePrefetchIndex = start;
+			if (state.pagePrefetchIndex !== null && start !== state.pagePrefetchIndex) state.pagePrefetchDirection = Math.sign(start - state.pagePrefetchIndex);
+			const direction = state.pagePrefetchDirection || 1;
+			state.pagePrefetchIndex = start;
 			let bytes = 0;
-			for (const page of context.state.pageCache.values()) bytes += page.cacheBytes || 0;
-			for (const image of context.state.svgImages.values()) bytes += image.size;
-			for (const face of context.state.svgFonts.values()) bytes += svgFontBytes.get(face) || 0;
+			for (const page of state.pageCache.values()) bytes += page.cacheBytes || 0;
+			for (const image of state.svgImages.values()) bytes += image.size || 0;
+			for (const face of state.svgFonts.values()) bytes += svgFontBytes.get(face) || 0;
 			const budget = nativeHost?.cacheBytes || PAGE_CACHE_BYTES;
-			const cost = Math.max(1 << 20, bytes / Math.max(1, context.state.pageCache.size));
-			const count = Math.max(0, Math.min(nativeHost?.parallelism || context.wasmWorker?.parallelism || 1, context.state.pageLayout * 2, Math.floor((budget - bytes) / cost)));
-			for (let i = start; i < Math.min(context.state.doc?.pageCount || 1, start + context.state.pageLayout); i += 1) {
+			const cost = Math.max(512 << 10, bytes / Math.max(1, state.pageCache.size));
+			const pageCount = state.doc.pageCount || 0;
+			const maxAheadRows = layout > 1 ? 3 : 4;
+			const maxAheadPages = maxAheadRows * layout;
+			const parallelism = nativeHost?.parallelism || context.wasmWorker?.parallelism || 1;
+			const budgetPages = Math.max(0, Math.floor((budget - bytes) / cost));
+			const aheadCount = Math.min(maxAheadPages, Math.max(layout, parallelism * layout), budgetPages);
+			for (let i = start; i < Math.min(pageCount, start + layout); i += 1) {
 				pageView.renderFlowPage(i, { openSeq, priority: 1 });
 			}
-			for (let offset = 1; offset <= count; offset += 1) {
-				const next = direction > 0 ? start + context.state.pageLayout + offset - 1 : start - offset;
-				if (next >= 0 && next < (context.state.doc?.pageCount || 1)) pageView.renderFlowPage(next, { openSeq, priority: 6 });
+			for (let offset = 1; offset <= aheadCount; offset += 1) {
+				const next = direction > 0 ? start + layout + offset - 1 : start - offset;
+				if (next >= 0 && next < pageCount) pageView.renderFlowPage(next, { openSeq, priority: offset <= layout ? 3 : 4 });
+			}
+			if (budgetPages > aheadCount) {
+				for (let offset = 1; offset <= layout; offset += 1) {
+					const back = direction > 0 ? start - offset : start + layout + offset - 1;
+					if (back >= 0 && back < pageCount) pageView.renderFlowPage(back, { openSeq, priority: 6 });
+				}
 			}
 		},
 
@@ -806,38 +1141,58 @@ export function createPageView(context) {
 			return context.state.pageWindow?.nodes.get(index) || null;
 		},
 
-		scrollToPage(index) {
-			if (context.state.pageLayout > 1 && context.state.pageWindow) {
-				const view = context.state.pageWindow, start = pageView.pageGroupStart(index);
-				const size = pageView.pageGroupSize(start), gap = context.state.continuous || size.count < 2 ? 0 : PAGE_LAYOUT_GAP;
-				const height = size.height * MM_TO_PX * context.state.scale;
-				const whole = height <= context.el.viewerPanel.clientHeight - pageView.pageBlockSpace() * 2 + 1;
+		scrollToPage(index, options = {}) {
+			const view = context.state.pageWindow;
+			const viewer = context.el.viewerPanel;
+			if (view && view.rows.length > 0) {
+				const rowIndex = pageView.pageRowIndex(view, index);
+				const row = view.rows[rowIndex];
+				const viewportHeight = viewer.clientHeight;
+				const viewportWidth = viewer.clientWidth;
+				const blockSpace = pageView.pageBlockSpace();
 				const space = context.state.fitMode === "height" && !context.state.continuous
-					? Math.max(pageView.pageBlockSpace(), (context.el.viewerPanel.clientHeight - height) / 2) : pageView.pageBlockSpace();
-				pageView.syncPageWindow(view, view.offsets[whole ? start : index] - space);
-				context.el.viewerPanel.scrollLeft = Math.max(0, (context.el.viewerPanel.scrollWidth - context.el.viewerPanel.clientWidth) / 2);
-				if (size.width * MM_TO_PX * context.state.scale + gap > context.el.viewerPanel.clientWidth) {
-					const shell = pageView.pageShell(index);
-					if (shell) pageView.centerPageInline(shell);
+					? Math.max(blockSpace, (viewportHeight - row.height) / 2)
+					: blockSpace;
+				pageView.syncPageWindow(view, row.top - space);
+				const maxLeft = Math.max(0, viewer.scrollWidth - viewportWidth);
+				if (context.state.pageLayout > 1) {
+					const inlineSpace = pageView.pageSpace();
+					if (row.width <= viewportWidth - inlineSpace * 2 + 1) {
+						viewer.scrollLeft = maxLeft / 2;
+					} else {
+						const hostLeft = Math.max(inlineSpace, (viewer.scrollWidth - view.hostWidth) / 2);
+						const pageLeft = hostLeft + (view.lefts?.[index] || 0);
+						const pageWidth = view.widths?.[index] || row.width;
+						const pageRight = pageLeft + pageWidth;
+						const visibleLeft = viewer.scrollLeft;
+						const visibleRight = visibleLeft + viewportWidth;
+						const overlap = Math.max(0, Math.min(visibleRight, pageRight) - Math.max(visibleLeft, pageLeft));
+						if (!(options.preserveInline && overlap >= Math.min(pageWidth, viewportWidth) * 0.5)) {
+							const targetLeft = pageLeft + pageWidth / 2 - viewportWidth / 2;
+							viewer.scrollLeft = Math.max(0, Math.min(maxLeft, targetLeft));
+						}
+					}
+					if (!context.state.pageNavigation) {
+						context.state.pageNavigation = { openSeq: context.state.openSeq, index, top: view.logicalTop, left: viewer.scrollLeft };
+					}
+					return;
+				}
+				viewer.scrollLeft = maxLeft / 2;
+				if (!context.state.pageNavigation) {
+					context.state.pageNavigation = { openSeq: context.state.openSeq, index, top: view.logicalTop, left: viewer.scrollLeft };
 				}
 				return;
 			}
-			if (context.state.pageWindow) pageView.syncPageWindow(context.state.pageWindow, context.state.pageWindow.offsets[index]);
 			const shell = pageView.pageShell(index);
 			if (shell) {
-				if (context.state.pageWindow) {
-					const shellRect = shell.getBoundingClientRect(), viewerRect = context.el.viewerPanel.getBoundingClientRect();
-					const space = context.state.fitMode === "height" && !context.state.continuous
-						? Math.max(pageView.pageBlockSpace(), (context.el.viewerPanel.clientHeight - shellRect.height) / 2) : pageView.pageBlockSpace();
-					pageView.scrollViewerBy(shellRect.top - viewerRect.top - space);
-				} else if (context.state.fitMode === "height" && !context.state.continuous) {
+				if (context.state.fitMode === "height" && !context.state.continuous) {
 					shell.scrollIntoView({ block: "center", inline: "nearest" });
 				} else {
-					const viewerRect = context.el.viewerPanel.getBoundingClientRect();
+					const viewerRect = viewer.getBoundingClientRect();
 					const shellRect = shell.getBoundingClientRect();
-					const top = context.el.viewerPanel.scrollTop + shellRect.top - viewerRect.top - pageView.pageBlockSpace();
-					const maxTop = Math.max(0, context.el.viewerPanel.scrollHeight - context.el.viewerPanel.clientHeight);
-					context.el.viewerPanel.scrollTop = Math.min(maxTop, Math.max(0, top));
+					const top = viewer.scrollTop + shellRect.top - viewerRect.top - pageView.pageBlockSpace();
+					const maxTop = Math.max(0, viewer.scrollHeight - viewer.clientHeight);
+					viewer.scrollTop = Math.min(maxTop, Math.max(0, top));
 				}
 				pageView.centerPageInline(shell);
 			}
@@ -850,20 +1205,58 @@ export function createPageView(context) {
 		},
 
 		schedulePageSync() {
-			if (context.state.scrollFrame || !context.state.doc) {
+			const state = context.state;
+			if (!state.doc) return;
+			const now = performance.now();
+			const scrollTop = context.el.viewerPanel.scrollTop;
+			if (state.viewerLastScrollTime > 0) {
+				const dt = Math.max(1, now - state.viewerLastScrollTime);
+				const velocity = Math.abs(scrollTop - state.viewerLastScrollTop) / dt;
+				if (velocity > FAST_SCROLL_VELOCITY) {
+					state.viewerFastScroll = true;
+				}
+			}
+			state.viewerLastScrollTop = scrollTop;
+			state.viewerLastScrollTime = now;
+			if (state.viewerFastScroll) {
+				if (state.viewerScrollTimer) clearTimeout(state.viewerScrollTimer);
+				const openSeq = state.openSeq, loadSeq = state.pageLoadSeq;
+				state.viewerScrollTimer = setTimeout(() => {
+					state.viewerScrollTimer = 0;
+					if (openSeq !== context.state.openSeq || loadSeq !== context.state.pageLoadSeq) return;
+					pageView.onViewerScrollSettled(openSeq);
+				}, SCROLL_SETTLE_DELAY);
+			}
+			if (state.scrollFrame) {
 				return;
 			}
-			context.state.scrollFrame = requestAnimationFrame(() => {
-				context.state.scrollFrame = 0;
+			state.scrollFrame = requestAnimationFrame(() => {
+				state.scrollFrame = 0;
 				pageView.syncCurrentPageFromScroll();
 			});
+		},
+
+		onViewerScrollSettled(openSeq = context.state.openSeq) {
+			const state = context.state;
+			if (!state.doc || openSeq !== state.openSeq) return;
+			state.viewerFastScroll = false;
+			state.viewerLastScrollTime = 0;
+			for (const index of state.visiblePages) {
+				const shell = pageView.pageShell(index);
+				if (shell && !shell.classList.contains("rendered")) {
+					pageView.renderFlowPage(index, { openSeq, priority: 2 });
+				}
+			}
+			pageView.hydratePendingTextLayers();
+			pageView.queueNearbyPages(state.pageIndex, openSeq);
+			pageView.prunePageRenderQueue();
 		},
 
 		syncCurrentPageFromScroll() {
 			if (context.state.openActionTask?.navigating) return;
 			pageView.syncPageWindow(context.state.pageWindow);
 			const navigation = context.state.pageNavigation;
-			const top = context.state.pageWindow ? pageView.pageWindowTop(context.state.pageWindow) : context.el.viewerPanel.scrollTop;
+			const top = context.state.pageWindow ? context.state.pageWindow.logicalTop : context.el.viewerPanel.scrollTop;
 			if (navigation?.openSeq === context.state.openSeq && navigation.index === context.state.pageIndex
 				&& (navigation.top === undefined || Math.abs(navigation.top - top) < 1 && Math.abs(navigation.left - context.el.viewerPanel.scrollLeft) < 1)) return;
 			context.state.pageNavigation = null;
@@ -875,109 +1268,143 @@ export function createPageView(context) {
 			const nextIndex = Number.parseInt(shell.dataset.pageIndex, 10);
 			if (Number.isFinite(nextIndex) && nextIndex !== context.state.pageIndex) {
 				pageView.setCurrentPage(nextIndex);
-				pageView.queueNearbyPages(nextIndex);
-				context.scheduleOpenActions();
+				if (!context.state.viewerFastScroll) pageView.queueNearbyPages(nextIndex);
+				if (pageView.pageHasOpenAction(nextIndex)) context.scheduleOpenActions();
 			}
 			pageView.prunePageRenderQueue();
 		},
 
+		isPageProtectedFromPrune(index, preview, state = context.state) {
+			if (preview) {
+				if (index === state.pageIndex) return true;
+				if (state.visibleThumbnails.has(index) || state.thumbnailWindow?.nodes.has(index)) return true;
+				return false;
+			}
+			const layout = state.pageLayout;
+			const start = pageView.pageGroupStart(state.pageIndex);
+			const direction = state.pagePrefetchDirection || 1;
+			const minProtected = direction > 0 ? start - layout * 2 : start - layout * 3;
+			const maxProtected = direction > 0 ? start + layout * 4 - 1 : start + layout * 3 - 1;
+			if (index >= minProtected && index <= maxProtected) return true;
+			if (state.visiblePages.has(index) || state.pageWindow?.nodes.has(index)) return true;
+			return false;
+		},
+
 		prunePageRenderQueue() {
-			context.state.pageRenderQueue = context.state.pageRenderQueue.filter(task => {
-				if (!task.view || task.refresh || Math.abs(task.index - context.state.pageIndex) <= 2
-					|| context.state.pageWindow?.nodes.has(task.index) || context.state.thumbnailWindow?.nodes.has(task.index)) return true;
-				context.state.pageInFlight.delete(task.key);
+			const state = context.state;
+			state.pageRenderQueue = state.pageRenderQueue.filter(task => {
+				if (!task.view || task.refresh || pageView.isPageProtectedFromPrune(task.index, task.preview, state)) return true;
+				if (state.pageInFlight.get(task.key) === task) state.pageInFlight.delete(task.key);
+				task.canceled = true;
 				task.resolve(null);
 				return false;
 			});
+			for (const task of [...state.pageInFlight.values()]) {
+				if (!task.dispatched || !task.view || task.refresh) continue;
+				if (pageView.isPageProtectedFromPrune(task.index, task.preview, state)) continue;
+				pageView.cancelPageTask(task);
+			}
 		},
 
 		pageShellFromView() {
-			const view = context.state.pageWindow, pages = context.state.doc?.pages;
-			if (!view || !pages?.length || view.offsets.length < 2) {
+			const view = context.state.pageWindow, count = context.state.doc?.pageCount || 0;
+			if (!view || !count || view.rows.length < 1) {
 				return pageView.pageShell(context.state.pageIndex);
 			}
-			const rect = context.el.viewerPanel.getBoundingClientRect();
-			const viewportHeight = context.el.viewerPanel.clientHeight;
+			const viewer = context.el.viewerPanel;
+			const viewportHeight = viewer.clientHeight;
+			const viewportWidth = viewer.clientWidth;
+			const scrollLeft = viewer.scrollLeft;
 			const inset = pageView.windowInset(view);
-			const top = pageView.pageWindowTop(view);
+			const top = view.logicalTop ?? pageView.pageWindowTop(view);
 			const bottom = top + viewportHeight;
-			const count = pages.length;
 			const atBottom = view.total + inset * 2 > viewportHeight + 1 && bottom >= view.total + inset - 1;
-			if (context.state.pageLayout > 1) {
-				const groupHeight = start => {
-					const next = Math.min(count, start + context.state.pageLayout);
-					return Math.max(0, view.offsets[next] - view.offsets[start] - view.gap);
-				};
-				let start;
-				if (atBottom) {
-					const currentStart = pageView.pageGroupStart(context.state.pageIndex);
-					const currentTop = view.offsets[currentStart], currentBottom = currentTop + groupHeight(currentStart);
-					if (currentTop >= top - 1 && currentBottom <= bottom + 1) {
-						return pageView.pageShell(context.state.pageIndex);
-					}
-					start = pageView.pageGroupStart(count - 1);
-				} else {
-					const focusY = context.state.continuous ? top + 1 : top + viewportHeight * 0.45;
-					start = pageView.pageGroupStart(pageView.virtualIndex(view.offsets, Math.max(0, focusY)));
-					const rowBottom = view.offsets[start] + groupHeight(start);
-					if (!context.state.continuous && focusY > rowBottom && start + context.state.pageLayout < count) {
-						const nextStart = start + context.state.pageLayout;
-						if (Math.abs(view.offsets[nextStart] - focusY) < Math.abs(focusY - rowBottom)) start = nextStart;
-					}
-				}
-				const groupEnd = Math.min(count, start + context.state.pageLayout);
-				const current = context.state.pageIndex;
-				if (current >= start && current < groupEnd) {
-					const shell = pageView.pageShell(current);
-					const bounds = shell?.getBoundingClientRect();
-					if (bounds && bounds.right > rect.left + 1 && bounds.left < rect.right - 1 && bounds.bottom > rect.top + 1 && bounds.top < rect.bottom - 1) {
-						return shell;
-					}
-				}
-				let best = null, bestArea = -1;
-				for (let index = start; index < groupEnd; index++) {
-					const shell = pageView.pageShell(index);
-					if (!shell || shell.style.visibility === "hidden") continue;
-					const bounds = shell.getBoundingClientRect();
-					const visible = Math.max(0, Math.min(rect.right, bounds.right) - Math.max(rect.left, bounds.left))
-						* Math.max(0, Math.min(rect.bottom, bounds.bottom) - Math.max(rect.top, bounds.top));
-					if (visible > bestArea + 1) { best = shell; bestArea = visible; }
-				}
-				return best || pageView.pageShell(start);
-			}
+			const rows = view.rows;
+			let rowIndex = 0;
 			if (atBottom) {
-				const current = context.state.pageIndex;
-				const currentTop = view.offsets[current], currentBottom = view.offsets[current + 1] - view.gap;
-				if (currentTop >= top - 1 && currentBottom <= bottom + 1) {
-					return pageView.pageShell(current);
+				const currentRowIndex = pageView.pageRowIndex(view, context.state.pageIndex);
+				const currentRow = rows[currentRowIndex];
+				if (currentRow && currentRow.top >= top - 1 && currentRow.top + currentRow.height <= bottom + 1) {
+					return pageView.pageShell(context.state.pageIndex);
 				}
-				return pageView.pageShell(count - 1);
-			}
-			if (context.state.continuous) {
-				return pageView.pageShell(pageView.virtualIndex(view.offsets, Math.max(0, top + 1)));
-			}
-			for (const ratio of [0.45, 0.25, 0.65]) {
-				const y = top + viewportHeight * ratio;
-				if (y < 0 || y > view.total) continue;
-				const index = pageView.virtualIndex(view.offsets, y);
-				if (y <= view.offsets[index + 1] - view.gap) {
-					return pageView.pageShell(index);
+				rowIndex = rows.length - 1;
+			} else if (context.state.continuous) {
+				const firstVisibleRow = pageView.virtualRowIndex(view, Math.max(0, top));
+				const firstRow = rows[firstVisibleRow];
+				const adaptiveOffset = firstRow ? Math.min(viewportHeight * 0.3, Math.max(24, firstRow.height * 0.45)) : viewportHeight * 0.3;
+				const focusY = Math.max(0, Math.min(view.total, top + adaptiveOffset));
+				rowIndex = pageView.virtualRowIndex(view, focusY);
+				const lastVisibleRow = pageView.virtualRowIndex(view, Math.min(view.total, bottom));
+				let bestRow = rowIndex;
+				let bestVisible = 0;
+				const focusRow = rows[rowIndex];
+				if (focusRow) {
+					bestVisible = Math.max(0, Math.min(bottom, focusRow.top + focusRow.height) - Math.max(top, focusRow.top));
+				}
+				for (let r = firstVisibleRow; r <= lastVisibleRow; r++) {
+					const candidate = rows[r];
+					const vis = Math.max(0, Math.min(bottom, candidate.top + candidate.height) - Math.max(top, candidate.top));
+					if (vis > viewportHeight * 0.5 && vis > bestVisible + 1) {
+						bestRow = r;
+						bestVisible = vis;
+					}
+				}
+				rowIndex = bestRow;
+			} else {
+				let matched = -1;
+				for (const ratio of [0.45, 0.25, 0.65]) {
+					const y = top + viewportHeight * ratio;
+					if (y < 0 || y > view.total) continue;
+					const candidateIndex = pageView.virtualRowIndex(view, y);
+					const candidate = rows[candidateIndex];
+					if (candidate && y <= candidate.top + candidate.height) {
+						matched = candidateIndex;
+						break;
+					}
+				}
+				if (matched >= 0) {
+					rowIndex = matched;
+				} else {
+					const mid = Math.max(0, Math.min(view.total, top + viewportHeight * 0.45));
+					rowIndex = pageView.virtualRowIndex(view, mid);
+					const row = rows[rowIndex];
+					if (row && mid > row.top + row.height && rowIndex + 1 < rows.length) {
+						const nextRow = rows[rowIndex + 1];
+						if (Math.abs(nextRow.top - mid) < Math.abs(mid - (row.top + row.height))) rowIndex++;
+					}
 				}
 			}
-			const mid = Math.max(0, Math.min(view.total, top + viewportHeight * 0.45));
-			const index = pageView.virtualIndex(view.offsets, mid);
-			const itemBottom = view.offsets[index + 1] - view.gap;
-			if (mid > itemBottom && index + 1 < count && view.offsets[index + 1] - mid < mid - itemBottom) {
-				return pageView.pageShell(index + 1);
+			const row = rows[rowIndex];
+			if (!row) return pageView.pageShell(context.state.pageIndex);
+			if (context.state.pageLayout === 1 || row.start === row.end) {
+				return pageView.pageShell(row.start);
 			}
-			return pageView.pageShell(index);
+			const hostLeft = Math.max(0, (viewer.scrollWidth - view.hostWidth) / 2);
+			const current = context.state.pageIndex;
+			const visibleAreaOf = (index) => {
+				const pLeft = hostLeft + (view.lefts?.[index] || 0) - scrollLeft;
+				const pRight = pLeft + (view.widths?.[index] || 0);
+				const pTop = view.offsets[index] - top;
+				const pBottom = pTop + (view.heights?.[index] || row.height);
+				return Math.max(0, Math.min(viewportWidth, pRight) - Math.max(0, pLeft))
+					* Math.max(0, Math.min(viewportHeight, pBottom) - Math.max(0, pTop));
+			};
+			if (current >= row.start && current <= row.end && visibleAreaOf(current) > 1) {
+				return pageView.pageShell(current);
+			}
+			let bestIndex = row.start, bestArea = -1;
+			for (let index = row.start; index <= row.end; index++) {
+				const area = visibleAreaOf(index);
+				if (area > bestArea + 1) { bestIndex = index; bestArea = area; }
+			}
+			return pageView.pageShell(bestIndex);
 		},
 
 		setCurrentPage(index) {
 			if (index !== context.state.pageIndex && !context.state.openActionTask?.navigating) context.state.openActionTask = null;
 			context.state.pageIndex = index;
 			pageView.prunePageRenderQueue();
-			if (context.state.editing) context.state.openActionPage = context.state.doc?.pages[index]?.id;
+			if (context.state.editing) context.state.openActionPage = pageView.pageInfo(index)?.id;
 			if (context.state.fitMode === "width" && context.state.pageLayout === 1) {
 				const nextPage = pageView.currentPageInfo();
 				if (nextPage) {
@@ -997,23 +1424,32 @@ export function createPageView(context) {
 			}
 		},
 
+		pairPageIndex(index = context.state.pageIndex) {
+			if (context.state.pageLayout <= 1 || !context.state.doc) return -1;
+			const start = pageView.pageGroupStart(index);
+			const other = index === start ? start + 1 : start;
+			return other < context.state.doc.pageCount ? other : -1;
+		},
+
 		updatePageListCurrent(force = false) {
-			const current = context.el.pageList.querySelector(".page-list-item[data-current]");
-			if (context.state.thumbnailWindow) {
-				if (!force && context.state.pageListCurrent === context.state.pageIndex) return;
-				context.state.pageListCurrent = context.state.pageIndex;
-				if (context.state.showPages && !context.el.pageList.hidden) pageView.revealThumbnail(context.state.pageIndex);
+			const state = context.state;
+			const index = state.pageIndex;
+			const pairIndex = pageView.pairPageIndex(index);
+			if (state.thumbnailWindow) {
+				if (!force && state.pageListCurrent === index && state.pageListPair === pairIndex) return;
+				state.pageListCurrent = index;
+				state.pageListPair = pairIndex;
+				if (state.showPages && !context.el.pageList.hidden) pageView.scheduleRevealThumbnail(index, force);
 			}
-			if (current) {
-				if (!force && Number.parseInt(current.dataset.pageIndex, 10) === context.state.pageIndex) {
-					return;
-				}
-				current.removeAttribute("data-current");
+			for (const item of context.el.pageList.querySelectorAll(".page-list-item[data-current], .page-list-item.active, .page-list-item[data-pair-current], .page-list-item.pair-active")) {
+				const itemIndex = Number.parseInt(item.dataset.pageIndex, 10);
+				if (itemIndex !== index) pageView.setPageItemCurrent(item, false);
+				if (itemIndex !== pairIndex) pageView.setPageItemPairCurrent(item, false);
 			}
-			const next = context.el.pageList.querySelector(`.page-list-item[data-page-index="${context.state.pageIndex}"]`);
+			const next = state.thumbnailWindow?.nodes.get(index) || context.el.pageList.querySelector(`.page-list-item[data-page-index="${index}"]`);
 			if (next) {
 				pageView.setPageItemCurrent(next, true);
-				if (context.state.showPages && !context.el.pageList.hidden && !context.state.thumbnailWindow) {
+				if (state.showPages && !context.el.pageList.hidden && !state.thumbnailWindow) {
 					const panel = context.el.navigationContent.getBoundingClientRect();
 					const item = next.getBoundingClientRect();
 					if (item.top < panel.top) {
@@ -1023,14 +1459,30 @@ export function createPageView(context) {
 					}
 				}
 			}
+			if (pairIndex >= 0) {
+				const pair = state.thumbnailWindow?.nodes.get(pairIndex) || context.el.pageList.querySelector(`.page-list-item[data-page-index="${pairIndex}"]`);
+				if (pair) pageView.setPageItemPairCurrent(pair, true);
+			}
 		},
 
 		setPageItemCurrent(item, current) {
 			if (current) {
 				item.setAttribute("data-current", "page");
+				item.classList.add("active");
 				return;
 			}
 			item.removeAttribute("data-current");
+			item.classList.remove("active");
+		},
+
+		setPageItemPairCurrent(item, active) {
+			if (active) {
+				item.setAttribute("data-pair-current", "true");
+				item.classList.add("pair-active");
+				return;
+			}
+			item.removeAttribute("data-pair-current");
+			item.classList.remove("pair-active");
 		},
 
 		pageGroupStart(index = context.state.pageIndex) {
@@ -1041,7 +1493,7 @@ export function createPageView(context) {
 			const start = pageView.pageGroupStart(index), widths = [0, 0];
 			let height = 0, count = 0;
 			for (let offset = 0; offset < context.state.pageLayout; offset++) {
-				const page = context.state.doc.pages[start + offset];
+				const page = pageView.pageInfo(start + offset);
 				if (!page) continue;
 				const size = pageView.pageViewSize(page);
 				widths[offset] = size.width;
@@ -1061,7 +1513,7 @@ export function createPageView(context) {
 			context.state.pageLayoutPreference = context.state.pageLayout === 1 ? 2 : 1;
 			pageView.layoutPages();
 			pageView.layoutThumbnails();
-			if (context.state.showPages && !context.el.pageList.hidden) pageView.revealThumbnail(context.state.pageIndex);
+			pageView.updatePageListCurrent(true);
 			if (pageView.defaultView().fitMode === "height") pageView.fitHeight();
 			else pageView.fitWidth();
 			pageView.queueNearbyPages(context.state.pageIndex);
@@ -1074,73 +1526,109 @@ export function createPageView(context) {
 			context.canvasEditor.cancel();
 			const view = context.state.pageWindow;
 			if (!view) return;
+			pageView.invalidateWindowMetrics(view);
 			const initialOffset = context.state.pageIndex === 0 ? -pageView.windowInset(view) : -pageView.pageBlockSpace();
-			const anchor = view.offsets.length > 1 ? pageView.pageWindowAnchor(view) : { index: context.state.pageIndex, offset: initialOffset };
+			const anchor = view.rows.length > 0 ? pageView.pageWindowAnchor(view) : { index: context.state.pageIndex, offset: initialOffset };
 			const gap = context.state.continuous ? 0 : Math.max(context.state.pageLayout > 1 ? PAGE_LAYOUT_GAP : 0, Number.parseFloat(getComputedStyle(context.el.svgHost).rowGap) || 0);
+			const count = context.state.doc.pageCount || 0;
+			view.nodeStyles.clear();
+			context.el.svgHost.classList.toggle("two-page", context.state.pageLayout > 1);
 			if (context.state.pageLayout > 1) {
-				const count = context.state.doc.pages.length, spacing = context.state.continuous ? 0 : PAGE_LAYOUT_GAP;
+				const spacing = context.state.continuous ? 0 : PAGE_LAYOUT_GAP;
+				const rowCount = Math.ceil(count / 2);
 				view.columns = 2;
 				view.offsets = new Float64Array(count + 1);
 				view.heights = new Float64Array(count);
+				view.widths = new Float64Array(count);
 				view.lefts = new Float64Array(count);
-				let top = 0, width = 0;
-				const groups = [];
-				for (let start = 0; start < count; start += context.state.pageLayout) {
-					const size = pageView.pageGroupSize(start), factor = MM_TO_PX * context.state.scale;
+				view.rows = new Array(rowCount);
+				view.rowOffsets = new Float64Array(rowCount + 1);
+				const factor = MM_TO_PX * context.state.scale;
+				let top = 0, maxWidth = 1;
+				for (let rowIdx = 0; rowIdx < rowCount; rowIdx++) {
+					const start = rowIdx * 2;
+					const end = Math.min(count - 1, start + 1);
+					const size = pageView.pageGroupSize(start);
 					const groupWidth = size.width * factor + (size.count > 1 ? spacing : 0);
-					groups.push({ start, size, width: groupWidth });
-					width = Math.max(width, groupWidth);
-					for (let column = 0; column < 2; column++) {
-						const index = start + column;
-						if (index >= count) break;
+					const rowHeight = size.height * factor;
+					maxWidth = Math.max(maxWidth, groupWidth);
+					view.rowOffsets[rowIdx] = top;
+					view.rows[rowIdx] = { row: rowIdx, start, end, top, height: rowHeight, width: groupWidth, widths0: size.widths[0] * factor };
+					for (let index = start; index <= end; index++) {
+						const pSize = pageView.pageViewSize(pageView.pageInfo(index));
 						view.offsets[index] = top;
-						view.heights[index] = pageView.pageViewSize(context.state.doc.pages[index]).height * factor;
+						view.heights[index] = Math.max(1, pSize.height * factor);
+						view.widths[index] = Math.max(1, pSize.width * factor);
 					}
-					top += size.height * factor + gap;
+					top += rowHeight + gap;
 				}
-				for (const group of groups) {
-					for (let index = group.start; index < Math.min(count, group.start + context.state.pageLayout); index++) {
-						const column = (index - group.start) % 2, factor = MM_TO_PX * context.state.scale;
-						view.lefts[index] = (width - group.width) / 2
-							+ (column ? group.size.widths[0] * factor + spacing : 0)
-							+ (group.size.widths[column] - pageView.pageViewSize(context.state.doc.pages[index]).width) * factor / 2;
+				for (let rowIdx = 0; rowIdx < rowCount; rowIdx++) {
+					const row = view.rows[rowIdx];
+					const rowLeft = (maxWidth - row.width) / 2;
+					view.lefts[row.start] = rowLeft;
+					if (row.end > row.start) {
+						view.lefts[row.end] = rowLeft + row.widths0 + spacing;
 					}
 				}
 				view.offsets[count] = top;
+				view.rowOffsets[rowCount] = top;
 				view.gap = gap;
 				view.total = Math.max(0, top - gap);
-				view.host.style.width = `${width}px`;
-				for (const [index, shell] of view.nodes) pageView.layoutPageShell(shell, context.state.doc.pages[index]);
-				pageView.syncPageWindow(view, view.offsets[Math.min(anchor.index, count - 1)] + anchor.offset);
+				view.hostWidth = maxWidth;
+				view.host.style.width = `${maxWidth}px`;
+				for (const [index, shell] of view.nodes) pageView.layoutPageShell(shell, pageView.pageInfo(index));
+				const targetIndex = Math.max(0, Math.min(anchor.index, count - 1));
+				const targetRow = view.rows[pageView.pageRowIndex(view, targetIndex)];
+				pageView.syncPageWindow(view, (targetRow ? targetRow.top : 0) + anchor.offset);
 				return;
 			}
 			view.columns = 0;
-			view.heights = null;
 			view.lefts = null;
 			for (const shell of view.nodes.values()) {
 				shell.style.removeProperty("left");
+				shell.style.removeProperty("right");
 				shell.style.removeProperty("transform");
 			}
-			const offsets = new Float64Array(context.state.doc.pages.length + 1);
+			const offsets = new Float64Array(count + 1);
+			const heights = new Float64Array(count);
+			const widths = new Float64Array(count);
+			const rows = new Array(count);
+			const rowOffsets = new Float64Array(count + 1);
 			const maxWidth = context.state.fitMode === "width" ? pageView.widthFitTargetWidth()
 				: context.state.fitMode === "height" ? pageView.heightFitMaxWidth() : null;
-			let width = 1;
-			for (let index = 0; index < context.state.doc.pages.length; index++) {
-				const page = context.state.doc.pages[index];
+			let width = 1, top = 0;
+			for (let index = 0; index < count; index++) {
+				const page = pageView.pageInfo(index);
 				const size = pageView.pageViewSize(page);
 				const scale = pageView.pageScale(page, context.state.scale, context.state.fitMode, maxWidth);
-				offsets[index + 1] = offsets[index] + Math.max(1, size.height * MM_TO_PX) * scale + gap;
-				width = Math.max(width, Math.max(1, size.width * MM_TO_PX) * scale);
+				const h = Math.max(1, size.height * MM_TO_PX) * scale;
+				const w = Math.max(1, size.width * MM_TO_PX) * scale;
+				offsets[index] = top;
+				rowOffsets[index] = top;
+				heights[index] = h;
+				widths[index] = w;
+				rows[index] = { row: index, start: index, end: index, top, height: h, width: w };
+				top += h + gap;
+				width = Math.max(width, w);
 			}
+			offsets[count] = top;
+			rowOffsets[count] = top;
 			view.offsets = offsets;
+			view.heights = heights;
+			view.widths = widths;
+			view.rows = rows;
+			view.rowOffsets = rowOffsets;
 			view.gap = gap;
-			view.total = Math.max(0, offsets.at(-1) - gap);
+			view.total = Math.max(0, top - gap);
+			view.hostWidth = width;
 			view.host.style.width = `${width}px`;
-			for (const [index, shell] of view.nodes) pageView.layoutPageShell(shell, context.state.doc.pages[index]);
-			pageView.syncPageWindow(view, offsets[anchor.index] + anchor.offset);
+			for (const [index, shell] of view.nodes) pageView.layoutPageShell(shell, pageView.pageInfo(index));
+			const targetIndex = Math.max(0, Math.min(anchor.index, count - 1));
+			pageView.syncPageWindow(view, (offsets[targetIndex] || 0) + anchor.offset);
 		},
 
 		layoutPageShell(shell, page) {
+			if (!page) return;
 			const width = Math.max(1, page.width * MM_TO_PX);
 			const height = Math.max(1, page.height * MM_TO_PX);
 			const size = pageView.pageViewSize(page);
@@ -1149,6 +1637,7 @@ export function createPageView(context) {
 			const scale = pageView.pageScale(page);
 			shell.style.width = `${viewWidth * scale}px`;
 			shell.style.height = `${viewHeight * scale}px`;
+			shell.dataset.spreadCol = String(page.index % 2);
 			const surface = shell.querySelector(".page-surface");
 			if (surface) {
 				surface.style.width = `${width}px`;
@@ -1166,6 +1655,7 @@ export function createPageView(context) {
 			context.el.pageList.replaceChildren();
 			context.state.thumbnailWindow = null;
 			context.state.pageListCurrent = null;
+			context.state.pageListPair = -1;
 			context.state.visibleThumbnails.clear();
 			if (!context.state.doc) {
 				context.el.pageList.style.height = "";
@@ -1176,10 +1666,16 @@ export function createPageView(context) {
 			if (context.state.thumbnailObserver) {
 				context.state.thumbnailObserver.disconnect();
 			}
-			const ids = new Set(context.state.doc.pages.map(page => page.id));
-			for (const id of context.state.pageSelection) if (!ids.has(id) || !context.state.editing) context.state.pageSelection.delete(id);
+			if (context.state.pageSelection.size) {
+				if (!context.state.editing) context.state.pageSelection.clear();
+				else {
+					const ids = new Set(context.state.doc.pages.map(page => page.id));
+					for (const id of context.state.pageSelection) if (!ids.has(id)) context.state.pageSelection.delete(id);
+				}
+			}
 			context.state.thumbnailWindow = pageView.createPageWindow(context.el.pageList, context.el.navigationContent, 180, pageView.createThumbnail, pageView.releaseThumbnail, pageView.observeThumbnail);
 			pageView.layoutThumbnails();
+			pageView.updatePageListCurrent(true);
 			context.syncPageSelection();
 		},
 
@@ -1192,10 +1688,11 @@ export function createPageView(context) {
 			if (context.state.editing) button.setAttribute("data-pressed", String(context.state.pageSelection.has(page.id)));
 			button.title = `${context.formatSize(page.width)} x ${context.formatSize(page.height)} mm`;
 			pageView.setPageItemCurrent(button, page.index === context.state.pageIndex);
+			pageView.setPageItemPairCurrent(button, page.index === pageView.pairPageIndex(context.state.pageIndex));
 			pageView.layoutThumbnail(button, page);
 			const thumb = document.createElement("span");
 			thumb.className = "thumb-paper";
-			pageView.setThumbnailContent(thumb, context.state.pageCache.get(page.index)?.svg, page.index, openSeq);
+			pageView.setThumbnailContent(thumb, pageView.getThumbnailSVG(page.index), page.index, openSeq);
 			const label = document.createElement("span");
 			label.className = "thumb-label";
 			label.textContent = `第${page.index + 1}页`;
@@ -1217,48 +1714,71 @@ export function createPageView(context) {
 
 		layoutThumbnails() {
 			const view = context.state.thumbnailWindow;
-			if (!view) return;
+			if (!view || !context.state.doc) return;
 			const visible = !context.el.pageList.hidden && context.state.showPages;
+			pageView.invalidateWindowMetrics(view);
 			const inset = visible ? pageView.windowInset(view) : Number.parseFloat(getComputedStyle(view.viewport).paddingTop) || 0;
-			const anchor = visible && view.offsets.length > 1 ? pageView.pageWindowAnchor(view) : view.anchor || { index: context.state.pageIndex, offset: -inset };
+			const anchor = visible && view.rows.length > 0 ? pageView.pageWindowAnchor(view) : view.anchor || { index: context.state.pageIndex, offset: -inset };
 			view.rotation = context.state.rotation;
 			view.layout = context.state.pageLayout;
+			view.nodeStyles.clear();
 			view.host.classList.toggle("grouped-pages", context.state.pageLayout > 1);
 			const gap = Number.parseFloat(getComputedStyle(view.host).columnGap) || 0;
+			const count = context.state.doc.pageCount || 0;
 			const measure = (width) => {
 				view.width = width;
-				const offsets = new Float64Array(context.state.doc.pages.length + 1);
-				view.heights = new Float64Array(context.state.doc.pages.length);
-				view.lefts = context.state.pageLayout > 1 ? new Float64Array(context.state.doc.pages.length) : null;
-				view.scales = context.state.pageLayout > 1 ? new Float64Array(context.state.doc.pages.length) : null;
-				view.columns = context.state.pageLayout > 1 ? context.state.pageLayout : 0;
-				view.itemWidth = context.state.pageLayout > 1 ? Math.max(1, (width - gap) / 2) : width;
+				const layout = context.state.pageLayout;
+				const rowCount = Math.ceil(count / layout);
+				const offsets = new Float64Array(count + 1);
+				const heights = new Float64Array(count);
+				const rows = new Array(rowCount);
+				const rowOffsets = new Float64Array(rowCount + 1);
+				view.lefts = layout > 1 ? new Float64Array(count) : null;
+				view.scales = layout > 1 ? new Float64Array(count) : null;
+				view.columns = layout > 1 ? layout : 0;
+				view.itemWidth = layout > 1 ? Math.max(1, (width - gap) / 2) : width;
 				let top = 0;
-				for (let start = 0; start < context.state.doc.pages.length; start += context.state.pageLayout) {
-					if (context.state.pageLayout === 1) {
-						const size = pageView.pageViewSize(context.state.doc.pages[start]);
+				for (let rowIdx = 0; rowIdx < rowCount; rowIdx++) {
+					const start = rowIdx * layout;
+					const end = Math.min(count - 1, start + layout - 1);
+					if (layout === 1) {
+						const size = pageView.pageViewSize(pageView.pageInfo(start));
 						const ratio = size.width > 0 && size.height > 0 ? size.height / size.width : 1 / 0.707;
-						view.heights[start] = Math.max(1, width - 20) * ratio + 66;
+						const h = Math.max(1, width - 20) * ratio + 66;
+						heights[start] = h;
 						offsets[start] = top;
-						top += view.heights[start] + gap;
+						rowOffsets[rowIdx] = top;
+						rows[rowIdx] = { row: rowIdx, start, end, top, height: h, width };
+						top += h + gap;
 						continue;
 					}
-					const group = pageView.pageGroupSize(start), scale = Math.max(1, view.itemWidth - 20) / Math.max(...group.widths);
-					const height = group.height * scale + 66;
-					for (let column = 0; column < 2; column++) {
-						const index = start + column;
-						if (index >= context.state.doc.pages.length) break;
+					const innerWidth = Math.max(1, view.itemWidth - 20);
+					let rowPaperHeight = 0;
+					for (let index = start; index <= end; index++) {
+						const size = pageView.pageViewSize(pageView.pageInfo(index));
+						const pageScale = size.width > 0 ? innerWidth / size.width : 1;
+						view.scales[index] = pageScale;
+						rowPaperHeight = Math.max(rowPaperHeight, Math.max(1, size.height) * pageScale);
+					}
+					const height = rowPaperHeight + 66;
+					rowOffsets[rowIdx] = top;
+					rows[rowIdx] = { row: rowIdx, start, end, top, height, width };
+					for (let index = start; index <= end; index++) {
+						const column = index - start;
 						offsets[index] = top;
-						view.heights[index] = height;
+						heights[index] = height;
 						view.lefts[index] = column * (view.itemWidth + gap);
-						view.scales[index] = scale;
 					}
 					top += height + gap;
 				}
-				offsets[context.state.doc.pages.length] = top;
+				offsets[count] = top;
+				rowOffsets[rowCount] = top;
 				view.offsets = offsets;
+				view.heights = heights;
+				view.rows = rows;
+				view.rowOffsets = rowOffsets;
 				view.gap = gap;
-				view.total = Math.ceil(Math.max(0, offsets.at(-1) - gap));
+				view.total = Math.ceil(Math.max(0, top - gap));
 				view.host.style.height = `${Math.min(SCROLL_SEGMENT_SIZE, view.total)}px`;
 			};
 			let width = pageView.thumbnailHostWidth() || view.width || 180;
@@ -1269,9 +1789,11 @@ export function createPageView(context) {
 				view.width = nextWidth;
 			}
 			for (const [index, button] of view.nodes) {
-				pageView.layoutThumbnail(button, context.state.doc.pages[index]);
+				pageView.layoutThumbnail(button, pageView.pageInfo(index));
 			}
-			view.pendingTop = view.offsets[anchor.index] + anchor.offset;
+			const targetIndex = Math.max(0, Math.min(anchor.index, count - 1));
+			const targetRow = view.rows[pageView.pageRowIndex(view, targetIndex)];
+			view.pendingTop = (targetRow ? targetRow.top : 0) + anchor.offset;
 			if (visible) {
 				pageView.syncPageWindow(view, view.pendingTop);
 				view.pendingTop = null;
@@ -1286,34 +1808,77 @@ export function createPageView(context) {
 			return Math.max(0, navWidth - (Number.parseFloat(navStyle.paddingLeft) || 0) - (Number.parseFloat(navStyle.paddingRight) || 0));
 		},
 
-		syncThumbnailWindow() {
-			const view = context.state.thumbnailWindow;
-			if (!view || context.el.pageList.hidden || !context.state.showPages) return;
+		syncThumbnailWindow(fromScroll = false) {
+			const state = context.state;
+			const view = state.thumbnailWindow;
+			if (!view || context.el.pageList.hidden || !state.showPages) return;
+			if (fromScroll) {
+				const now = performance.now();
+				const scrollTop = context.el.navigationContent.scrollTop;
+				if (state.thumbLastScrollTime > 0) {
+					const dt = Math.max(1, now - state.thumbLastScrollTime);
+					const velocity = Math.abs(scrollTop - state.thumbLastScrollTop) / dt;
+					if (velocity > FAST_SCROLL_VELOCITY) state.thumbFastScroll = true;
+				}
+				state.thumbLastScrollTop = scrollTop;
+				state.thumbLastScrollTime = now;
+				if (state.thumbFastScroll) {
+					if (state.thumbScrollTimer) clearTimeout(state.thumbScrollTimer);
+					const openSeq = state.openSeq, loadSeq = state.pageLoadSeq;
+					state.thumbScrollTimer = setTimeout(() => {
+						state.thumbScrollTimer = 0;
+						if (openSeq !== context.state.openSeq || loadSeq !== context.state.pageLoadSeq) return;
+						context.state.thumbFastScroll = false;
+						context.state.thumbLastScrollTime = 0;
+						for (const index of context.state.visibleThumbnails) {
+							const thumb = context.state.thumbnailWindow?.nodes.get(index)?.querySelector(".thumb-paper");
+							if (thumb && !thumb.dataset.renderKey) pageView.renderThumbnail(index, openSeq);
+						}
+						pageView.prunePageRenderQueue();
+					}, THUMB_SETTLE_DELAY);
+				}
+			}
 			const hostWidth = pageView.thumbnailHostWidth();
-			if (hostWidth && (view.width !== hostWidth || view.rotation !== context.state.rotation || view.layout !== context.state.pageLayout)) pageView.layoutThumbnails();
+			if (hostWidth && (view.width !== hostWidth || view.rotation !== state.rotation || view.layout !== state.pageLayout)) pageView.layoutThumbnails();
 			pageView.syncPageWindow(view, view.pendingTop ?? null);
 			view.pendingTop = null;
 			pageView.prunePageRenderQueue();
 		},
 
+		scheduleRevealThumbnail(index, immediate = false) {
+			const state = context.state;
+			if (state.revealThumbTimer) {
+				clearTimeout(state.revealThumbTimer);
+				state.revealThumbTimer = 0;
+			}
+			if (immediate || !state.viewerFastScroll && !state.scrollFrame) {
+				pageView.revealThumbnail(index);
+				return;
+			}
+			const openSeq = state.openSeq;
+			state.revealThumbTimer = setTimeout(() => {
+				state.revealThumbTimer = 0;
+				if (openSeq !== context.state.openSeq) return;
+				pageView.revealThumbnail(context.state.pageIndex);
+			}, REVEAL_THUMB_DEBOUNCE);
+		},
+
 		revealThumbnail(index) {
 			pageView.syncThumbnailWindow();
 			const view = context.state.thumbnailWindow;
-			if (!view) return;
+			if (!view || !view.rows.length) return;
 			const inset = pageView.windowInset(view);
-			const padBottom = Number.parseFloat(getComputedStyle(view.viewport).paddingBottom) || 0;
-			const top = pageView.pageWindowTop(view);
-			let start = view.offsets[index], end = start + view.heights[index];
-			if (start - inset < top || end + padBottom > top + context.el.navigationContent.clientHeight) {
-				const first = pageView.pageGroupStart(index), last = Math.min(context.state.doc.pageCount - 1, first + context.state.pageLayout - 1);
-				const groupEnd = view.offsets[last] + view.heights[last];
-				if (groupEnd - view.offsets[first] + inset + padBottom <= context.el.navigationContent.clientHeight) {
-					start = view.offsets[first];
-					end = groupEnd;
-				}
-				const target = start - inset < top ? Math.floor(start - inset) : Math.min(start - inset, Math.ceil(end + padBottom - context.el.navigationContent.clientHeight));
-				pageView.syncPageWindow(view, target);
-			}
+			const padBottom = pageView.windowPadBottom(view);
+			const top = view.logicalTop ?? pageView.pageWindowTop(view);
+			const viewHeight = context.el.navigationContent.clientHeight;
+			const row = view.rows[pageView.pageRowIndex(view, index)];
+			if (!row) return;
+			const start = row.top, end = row.top + row.height;
+			if (start - inset >= top && end + padBottom <= top + viewHeight) return;
+			const target = start - inset < top
+				? Math.floor(start - inset)
+				: Math.min(start - inset, Math.ceil(end + padBottom - viewHeight));
+			pageView.syncPageWindow(view, target);
 		},
 
 		resetThumbnails() {
@@ -1325,7 +1890,7 @@ export function createPageView(context) {
 		},
 
 		layoutThumbnail(button, page) {
-			if (page.width <= 0 || page.height <= 0) {
+			if (!page || page.width <= 0 || page.height <= 0) {
 				return;
 			}
 			const size = pageView.pageViewSize(page);
@@ -1401,7 +1966,7 @@ export function createPageView(context) {
 						if (!entry.isIntersecting) {
 							context.state.visibleThumbnails.delete(index);
 							const thumb = entry.target.querySelector(".thumb-paper");
-							if (thumb.dataset.renderKey) {
+							if (thumb?.dataset.renderKey) {
 								pageView.setThumbnailContent(thumb, "", index, openSeq);
 							}
 							continue;
@@ -1409,6 +1974,7 @@ export function createPageView(context) {
 						context.state.visibleThumbnails.add(index);
 						pageView.renderThumbnail(index, openSeq);
 					}
+					pageView.prunePageRenderQueue();
 					pageView.trimPageCache();
 				}, {
 					root: context.el.navigationContent,
@@ -1419,11 +1985,19 @@ export function createPageView(context) {
 		},
 
 		async renderThumbnail(index, openSeq = context.state.openSeq) {
-			const loadSeq = context.state.pageLoadSeq;
+			const state = context.state;
+			const loadSeq = state.pageLoadSeq;
 			const current = () => openSeq === context.state.openSeq && loadSeq === context.state.pageLoadSeq;
-			if (!current() || !context.state.doc) {
+			if (!current() || !state.doc) {
 				return;
 			}
+			const cachedSVG = pageView.getThumbnailSVG(index, state);
+			if (cachedSVG) {
+				const cachedPage = state.pageCache.get(index) || state.thumbCache.get(index);
+				if (cachedPage) await pageView.queuePagePresentation(index, cachedPage, openSeq);
+				return;
+			}
+			if (state.thumbFastScroll && index !== state.pageIndex) return;
 			try {
 				const page = await pageView.loadPageData(index, { openSeq, priority: 5, preview: true, view: true });
 				if (!current() || !page) {
@@ -1443,14 +2017,16 @@ export function createPageView(context) {
 			if (openSeq !== context.state.openSeq || (context.state.thumbnailObserver && !context.state.visibleThumbnails.has(index) && index !== context.state.pageIndex)) {
 				return;
 			}
-			const thumb = context.el.pageList.querySelector(`[data-page-index="${index}"] .thumb-paper`);
+			const thumb = context.state.thumbnailWindow?.nodes.get(index)?.querySelector(".thumb-paper")
+				|| context.el.pageList.querySelector(`[data-page-index="${index}"] .thumb-paper`);
 			if (thumb) {
-				pageView.setThumbnailContent(thumb, context.state.pageCache.get(index)?.svg, index, openSeq);
+				pageView.setThumbnailContent(thumb, pageView.getThumbnailSVG(index), index, openSeq);
 			}
 		},
 
 		markThumbnailError(index) {
-			const thumb = context.el.pageList.querySelector(`[data-page-index="${index}"] .thumb-paper`);
+			const thumb = context.state.thumbnailWindow?.nodes.get(index)?.querySelector(".thumb-paper")
+				|| context.el.pageList.querySelector(`[data-page-index="${index}"] .thumb-paper`);
 			if (thumb) {
 				delete thumb.dataset.renderKey;
 				thumb.classList.add("error");
@@ -1462,6 +2038,7 @@ export function createPageView(context) {
 			context.state.continuous = continuous;
 			context.el.pageFrame.classList.toggle("continuous", context.state.continuous);
 			context.el.continuousButton.setAttribute("data-pressed", String(context.state.continuous));
+			pageView.invalidateWindowMetrics(context.state.pageWindow);
 		},
 
 		async toggleContinuous() {
@@ -1581,25 +2158,73 @@ export function createPageView(context) {
 		},
 
 		fitPageScale(page, mode) {
-			const size = context.state.pageLayout > 1 ? pageView.pageGroupSize(page.index) : pageView.pageViewSize(page);
+			const doc = context.state.doc;
+			const pageCount = doc?.pageCount || 0;
+			const layout = context.state.pageLayout;
+			const size = layout > 1 ? pageView.pageGroupSize(page.index) : pageView.pageViewSize(page);
 			const width = Math.max(1, size.width * MM_TO_PX), height = Math.max(1, size.height * MM_TO_PX);
-			const space = pageView.pageSpace(), gap = context.state.pageLayout > 1 && !context.state.continuous ? PAGE_LAYOUT_GAP : 0;
-			const singleMode = context.state.pageLayout === 1;
+			const space = pageView.pageSpace(), gap = layout > 1 && !context.state.continuous ? PAGE_LAYOUT_GAP : 0;
+			const singleMode = layout === 1;
 			const items = [];
-			let maxGroupWidth = 0, maxGroupGap = 0, contentHeight = 0;
-			for (let index = 0; index < context.state.doc.pages.length; index += context.state.pageLayout) {
-				const item = context.state.pageLayout > 1 ? pageView.pageGroupSize(index) : pageView.pageViewSize(context.state.doc.pages[index]);
-				const itemWidth = Math.max(1, item.width * MM_TO_PX), itemHeight = Math.max(1, item.height * MM_TO_PX);
-				const itemGap = context.state.pageLayout > 1 && item.count > 1 ? gap : 0;
-				items.push({ width: itemWidth, height: itemHeight, gap: itemGap });
-				if (!singleMode) {
-					if (itemWidth + itemGap > maxGroupWidth + maxGroupGap) {
-						maxGroupWidth = itemWidth;
-						maxGroupGap = itemGap;
+			let maxGroupWidth = 0, maxGroupGap = 0, maxGroupHeight = height, contentHeight = 0, rowCount = 0;
+			if (doc?.defaultPageSize && pageCount > 4096) {
+				const defSize = pageView.pageViewSize(doc.defaultPageSize);
+				const defW = Math.max(1, defSize.width * MM_TO_PX), defH = Math.max(1, defSize.height * MM_TO_PX);
+				rowCount = Math.ceil(pageCount / layout);
+				if (singleMode) {
+					items.push({ width: defW, height: defH, gap: 0, count: pageCount });
+				} else {
+					const pairW = defW * (pageCount > 1 ? 2 : 1), pairGap = pageCount > 1 ? gap : 0;
+					maxGroupWidth = pairW;
+					maxGroupGap = pairGap;
+					maxGroupHeight = Math.max(maxGroupHeight, defH);
+					contentHeight = defH * rowCount;
+					items.push({ width: pairW, height: defH, gap: pairGap, count: rowCount });
+				}
+				const overrideStarts = new Set();
+				const rawOverrides = doc.pageOverrides;
+				if (Array.isArray(rawOverrides)) {
+					for (const item of rawOverrides) {
+						if (typeof item?.index === "number" && item.index >= 0 && item.index < pageCount) overrideStarts.add(Math.floor(item.index / layout) * layout);
 					}
-					contentHeight += itemHeight;
+				} else if (rawOverrides && typeof rawOverrides === "object") {
+					for (const key of Object.keys(rawOverrides)) {
+						const idx = Number(key);
+						if (Number.isInteger(idx) && idx >= 0 && idx < pageCount) overrideStarts.add(Math.floor(idx / layout) * layout);
+					}
+				}
+				for (const start of overrideStarts) {
+					const item = layout > 1 ? pageView.pageGroupSize(start) : pageView.pageViewSize(pageView.pageInfo(start));
+					const itemWidth = Math.max(1, item.width * MM_TO_PX), itemHeight = Math.max(1, item.height * MM_TO_PX);
+					const itemGap = layout > 1 && item.count > 1 ? gap : 0;
+					items.push({ width: itemWidth, height: itemHeight, gap: itemGap, count: 1 });
+					if (!singleMode) {
+						if (itemWidth + itemGap > maxGroupWidth + maxGroupGap) {
+							maxGroupWidth = itemWidth;
+							maxGroupGap = itemGap;
+						}
+						maxGroupHeight = Math.max(maxGroupHeight, itemHeight);
+						contentHeight += itemHeight - defH;
+					}
+				}
+			} else {
+				for (let index = 0; index < pageCount; index += layout) {
+					const item = layout > 1 ? pageView.pageGroupSize(index) : pageView.pageViewSize(pageView.pageInfo(index));
+					const itemWidth = Math.max(1, item.width * MM_TO_PX), itemHeight = Math.max(1, item.height * MM_TO_PX);
+					const itemGap = layout > 1 && item.count > 1 ? gap : 0;
+					items.push({ width: itemWidth, height: itemHeight, gap: itemGap, count: 1 });
+					rowCount++;
+					if (!singleMode) {
+						if (itemWidth + itemGap > maxGroupWidth + maxGroupGap) {
+							maxGroupWidth = itemWidth;
+							maxGroupGap = itemGap;
+						}
+						maxGroupHeight = Math.max(maxGroupHeight, itemHeight);
+						contentHeight += itemHeight;
+					}
 				}
 			}
+			const fitTargetHeight = !singleMode && context.state.continuous ? maxGroupHeight : height;
 			const scrollbar = pageView.scrollbarWidth();
 			const viewport = context.el.viewerPanel.getBoundingClientRect();
 			let vertical = false, horizontal = false, scale = 1, maxPageWidth = 0;
@@ -1615,9 +2240,9 @@ export function createPageView(context) {
 					for (const item of items) {
 						scale = Math.min(scale, Math.max(1, availableWidth - space * 2 - item.gap) / item.width);
 					}
-					if (mode === "height") scale = Math.min(scale, Math.max(1, availableHeight - space * 2) / height);
+					if (mode === "height") scale = Math.min(scale, Math.max(1, availableHeight - space * 2) / fitTargetHeight);
 				}
-				const blockSpace = context.state.continuous ? 0 : Math.max(space, (availableHeight - height * scale) / 2);
+				const blockSpace = context.state.continuous ? 0 : Math.max(space, (availableHeight - fitTargetHeight * scale) / 2);
 				const rowGap = context.state.continuous ? 0 : Math.max(gap, blockSpace + 2);
 				let totalHeight = contentHeight * scale;
 				let nextHorizontal = !singleMode && maxGroupWidth * scale + maxGroupGap + space * 2 > availableWidth + 0.5;
@@ -1625,11 +2250,11 @@ export function createPageView(context) {
 					totalHeight = 0;
 					for (const item of items) {
 						const itemScale = mode === "width" ? Math.min(4, maxPageWidth / item.width) : Math.min(scale, maxPageWidth / item.width);
-						totalHeight += item.height * itemScale;
+						totalHeight += item.height * itemScale * (item.count || 1);
 					}
 					nextHorizontal = false;
 				}
-				const nextVertical = totalHeight + rowGap * (items.length - 1) + blockSpace * 2 > availableHeight + 0.5;
+				const nextVertical = totalHeight + rowGap * Math.max(0, rowCount - 1) + blockSpace * 2 > availableHeight + 0.5;
 				if ((!nextVertical || vertical) && (!nextHorizontal || horizontal)) break;
 				vertical ||= nextVertical;
 				horizontal ||= nextHorizontal;
@@ -1768,6 +2393,7 @@ export function createPageView(context) {
 				context.el.viewerPanel.classList.remove("single-page-fits-height");
 				context.el.pageFrame.style.removeProperty("--fit-space");
 				context.el.pageFrame.style.removeProperty("--fit-gap");
+				pageView.invalidateWindowMetrics(context.state.pageWindow);
 				return;
 			}
 			const shell = pageView.pageShell(context.state.pageIndex);
@@ -1780,18 +2406,22 @@ export function createPageView(context) {
 			const gap = context.state.continuous ? 0 : space + 2;
 			context.el.pageFrame.style.setProperty("--fit-space", `${space}px`);
 			context.el.pageFrame.style.setProperty("--fit-gap", `${gap}px`);
+			pageView.invalidateWindowMetrics(context.state.pageWindow);
 		},
 
 		releasePageResources(state = context.documentTab().state) {
 			if (state.pageInFlight.size) return;
 			const images = new Set(), fonts = new Set();
-			for (const page of state.pageCache.values()) {
-				for (const name of page.imageNames) images.add(name);
-				for (const font of page.fonts || []) fonts.add(font.name);
+			for (const pool of [state.pageCache, state.thumbCache]) {
+				if (!pool) continue;
+				for (const page of pool.values()) {
+					for (const name of page.imageNames || []) images.add(name);
+					for (const font of page.fonts || []) fonts.add(font.name);
+				}
 			}
 			for (const [name, image] of state.svgImages) {
 				if (!images.has(name)) {
-					URL.revokeObjectURL(image.url);
+					if (!image.native) URL.revokeObjectURL(image.url);
 					state.svgImages.delete(name);
 				}
 			}
@@ -1806,6 +2436,7 @@ export function createPageView(context) {
 		trimWorkspaceCaches() {
 			const budget = nativeHost?.cacheBytes || Math.max(PAGE_CACHE_BYTES, Math.min(256 << 20, engineLimits().memoryBytes / 4));
 			const bytes = tab => [...tab.state.pageCache.values()].reduce((sum, page) => sum + (page.cacheBytes || 0), 0)
+				+ [...(tab.state.thumbCache?.values() || [])].reduce((sum, page) => sum + (page.cacheBytes || 0), 0)
 				+ [...tab.state.svgImages.values()].reduce((sum, image) => sum + (image.size || 0), 0)
 				+ [...tab.state.svgFonts.values()].reduce((sum, face) => sum + (svgFontBytes.get(face) || 0), 0);
 			let total = context.tabs.reduce((sum, tab) => sum + bytes(tab), 0);
@@ -1813,16 +2444,48 @@ export function createPageView(context) {
 				if (total <= budget) break;
 				const previous = bytes(tab);
 				tab.state.pageCache.clear();
+				tab.state.thumbCache?.clear();
+				tab.state.detachedPages?.clear();
 				pageView.releasePageResources(tab.state);
 				total -= previous - bytes(tab);
 			}
 		},
 
 		parseSVG(svgText, prefix = "", images = context.state.svgImages) {
+			let markup = svgText.includes("ofdgo-image-")
+				? svgText.replace(/xlink:href="(ofdgo-image-[a-f0-9]{64})"/g, (match, name) => {
+					const entry = images.get(name);
+					return entry ? `xlink:href="${entry.url}"` : match;
+				})
+				: svgText;
+			const hasLocalID = !!prefix && (markup.includes('id="') || markup.includes("id='"));
+			let needsPrefixWalk = hasLocalID;
+			if (hasLocalID) {
+				const scopeMatch = /^([pt])\d+-(\d+)$/.exec(prefix);
+				if (scopeMatch) {
+					const kind = scopeMatch[1], pageIdx = scopeMatch[2];
+					const pagePrefix = `p${pageIdx}-`;
+					const unprefixed = new RegExp(`\\bid=["'](?!${pagePrefix})`);
+					if (!unprefixed.test(markup)) {
+						if (kind === "p") {
+							needsPrefixWalk = false;
+						} else {
+							const thumbPrefix = `${prefix}-`;
+							markup = markup
+								.replaceAll(`id="${pagePrefix}`, `id="${thumbPrefix}`)
+								.replaceAll(`id='${pagePrefix}`, `id='${thumbPrefix}`)
+								.replaceAll(`url(#${pagePrefix}`, `url(#${thumbPrefix}`)
+								.replaceAll(`href="#${pagePrefix}`, `href="#${thumbPrefix}`)
+								.replaceAll(`href='#${pagePrefix}`, `href='#${thumbPrefix}`);
+							needsPrefixWalk = false;
+						}
+					}
+				}
+			}
 			const template = document.createElement("template");
-			template.innerHTML = svgText.replace(/xlink:href="(ofdgo-image-[a-f0-9]{64})"/g, (_, name) => `xlink:href="${images.get(name).url}"`);
+			template.innerHTML = markup;
 			const svg = document.adoptNode(template.content.firstElementChild);
-			pageView.prefixSVGIds(svg, prefix);
+			if (needsPrefixWalk) pageView.prefixSVGIds(svg, prefix);
 			return svg;
 		},
 
