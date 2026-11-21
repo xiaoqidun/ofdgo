@@ -2793,10 +2793,19 @@ body[data-hide-meta] .meta-panel {
 	display: none;
 }
 
+.settings-dialog > form > .panel-tabs:not([hidden]) + .settings-body:has(> #settingsContext:empty):has(> #settingsContent:empty) + .settings-footer {
+	border-top: 0;
+}
+
 .settings-dialog .settings-section {
 	min-width: 0;
 	padding-block: 12px;
 	border-top: 1px solid var(--line);
+}
+
+.settings-body:has(> #settingsContext:empty) > #settingsContent > .settings-section:first-child {
+	padding-top: 0;
+	border-top: 0;
 }
 
 .settings-dialog .settings-section:last-child {
@@ -2959,6 +2968,15 @@ body[data-hide-meta] .meta-panel {
 	padding-block: 10px;
 	border-bottom: 1px solid var(--line);
 	overflow-wrap: anywhere;
+}
+
+.settings-dialog .settings-detail:first-child {
+	padding-top: 0;
+}
+
+.settings-dialog .settings-detail:last-child {
+	padding-bottom: 0;
+	border-bottom: 0;
 }
 
 .settings-dialog .settings-detail pre {

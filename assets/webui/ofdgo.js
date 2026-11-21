@@ -9485,11 +9485,13 @@ function renderPermissionsSettings() {
 	const copies = settingsField(group.section, "打印份数", "PermCopies", permissions.copies ?? -1, "number");
 	copies.min = "-1";
 	copies.step = "1";
-	copies.placeholder = "-1 表示不限制";
+	if (state.editing) copies.placeholder = "-1 表示不限制";
 	const startDate = settingsField(group.section, "生效日期", "PermStartDate", permissions.validPeriod?.startDate || "");
-	startDate.placeholder = "YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS";
 	const endDate = settingsField(group.section, "失效日期", "PermEndDate", permissions.validPeriod?.endDate || "");
-	endDate.placeholder = "YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS";
+	if (state.editing) {
+		startDate.placeholder = "YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS";
+		endDate.placeholder = "YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS";
+	}
 	group.section.querySelectorAll("input,select").forEach(field => { field.disabled = !state.editing; });
 	group.section.append(group.actions);
 	if (!state.editing) return;
