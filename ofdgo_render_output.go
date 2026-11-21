@@ -57,11 +57,15 @@ func (r *Renderer) RenderTo(page *PageContent, writer io.Writer, format string) 
 // 返回: error 错误信息
 func (r *Renderer) RenderToZIP(writer io.Writer, format string, indices ...int) error {
 	renderer := *r
-	if renderer.pageContext == nil {
-		renderer.pageContext = r.outputContext()
+	ctx := renderer.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
 	}
+	if r.Reader != nil {
+		ctx = r.Reader.resources.context(ctx)
+	}
+	renderer.pageContext = ctx
 	r = &renderer
-	ctx := r.pageContext
 	extension, render, err := r.outputRenderer(format)
 	if err != nil {
 		return err

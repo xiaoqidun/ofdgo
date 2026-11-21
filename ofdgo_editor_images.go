@@ -293,11 +293,13 @@ func (e *Editor) ImportImages(ctx context.Context, sources []ImagePageSource, at
 	})
 }
 
-// editorImagePageInfo 保存同批次已校验图片的建页信息，不持有编码、像素或颜色模型
+// editorImagePageInfo 保存同批次已校验图片的建页信息与可选压缩载荷
 type editorImagePageInfo struct {
-	size     image.Point
-	format   string
-	metadata baseimage.PageInfo
+	size          image.Point
+	format        string
+	metadata      baseimage.PageInfo
+	payload       []byte
+	payloadFormat string
 }
 
 // editorPreparedImage 保存并发预处理后的建页元数据与待写入载荷
@@ -377,7 +379,11 @@ func prepareImagePage(ctx context.Context, data []byte, options ImagePageOptions
 		info, known = verified[checksum]
 	}
 	if known {
-		return editorPreparedImage{checksum: checksum, info: info, data: data, format: info.format}, nil
+		payload, payloadFormat := data, info.format
+		if info.payload != nil {
+			payload, payloadFormat = info.payload, info.payloadFormat
+		}
+		return editorPreparedImage{checksum: checksum, info: info, data: payload, format: payloadFormat}, nil
 	}
 	config, format, err := baseimage.DecodeConfigDataContext(ctx, data)
 	if err != nil {
@@ -411,6 +417,10 @@ func prepareImagePage(ctx context.Context, data []byte, options ImagePageOptions
 		}
 	}
 	info = editorImagePageInfo{size: image.Pt(config.Width, config.Height), format: format, metadata: metadata}
+	if payloadFormat != format {
+		info.payload = payload
+		info.payloadFormat = payloadFormat
+	}
 	if mu != nil {
 		mu.Lock()
 		verified[checksum] = info
@@ -435,10 +445,7 @@ func validateImageStructure(ctx context.Context, data []byte, format string) err
 	case "png":
 		return validatePNGStructure(ctx, data)
 	case "jbig2":
-		if len(data) < 13 {
-			return fmt.Errorf("truncated JBIG2 image")
-		}
-		return nil
+		return validateJBIG2Structure(ctx, data)
 	default:
 		return fmt.Errorf("unsupported image format %s", format)
 	}
@@ -474,7 +481,10 @@ func validateJPEGStructure(ctx context.Context, data []byte) error {
 			}
 			return nil
 		}
-		if marker == 0x00 || marker == 0x01 || marker == 0xd8 || (marker >= 0xd0 && marker <= 0xd7) {
+		if marker == 0xd8 {
+			return fmt.Errorf("unexpected JPEG SOI marker")
+		}
+		if marker == 0x00 || marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7) {
 			continue
 		}
 		if pos+2 > len(data) {
@@ -484,8 +494,14 @@ func validateJPEGStructure(ctx context.Context, data []byte) error {
 		if segLen < 2 || pos+segLen > len(data) {
 			return fmt.Errorf("truncated JPEG segment")
 		}
-		if (marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf) {
+		switch marker {
+		case 0xc0, 0xc1, 0xc2:
+			if segLen < 8 || data[pos+2] != 8 {
+				return fmt.Errorf("unsupported JPEG precision")
+			}
 			hasSOF = true
+		case 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf:
+			return fmt.Errorf("unsupported JPEG SOF marker 0x%02x", marker)
 		}
 		pos += segLen
 		if marker == 0xda {
@@ -552,7 +568,7 @@ func validateBMPStructure(ctx context.Context, data []byte) error {
 	return err
 }
 
-// validateTIFFStructure 校验单页TIFF目录中主图条带或瓦片偏移及字节数范围
+// validateTIFFStructure 校验单页TIFF目录的压缩编码与条带或瓦片字节范围
 // 入参: ctx 取消上下文, data TIFF编码数据
 // 返回: error 结构或越界错误
 func validateTIFFStructure(ctx context.Context, data []byte) error {
@@ -564,7 +580,21 @@ func validateTIFFStructure(ctx context.Context, data []byte) error {
 	if data[0] == 'M' {
 		order = binary.BigEndian
 	}
-	offset := int(layout.Offset)
+	if err := validateTIFFDirectory(data, order, int(layout.Offset)); err != nil {
+		return err
+	}
+	if layout.Transparency != nil {
+		if err := validateTIFFDirectory(data, order, int(layout.Transparency.Offset)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateTIFFDirectory 校验单个TIFF目录的压缩编码与条带或瓦片字节范围
+// 入参: data TIFF编码数据, order 字节序, offset 目录偏移
+// 返回: error 结构或越界错误
+func validateTIFFDirectory(data []byte, order binary.ByteOrder, offset int) error {
 	if offset < 8 || offset+2 > len(data) {
 		return fmt.Errorf("invalid TIFF directory offset")
 	}
@@ -572,6 +602,7 @@ func validateTIFFStructure(ctx context.Context, data []byte) error {
 	if offset+2+count*12 > len(data) {
 		return fmt.Errorf("truncated TIFF directory")
 	}
+	compression := uint64(1)
 	var stripOffsets, stripCounts, tileOffsets, tileCounts []uint64
 	readValues := func(kind uint16, number uint32, field []byte) ([]uint64, error) {
 		elemSize := 0
@@ -605,7 +636,13 @@ func validateTIFFStructure(ctx context.Context, data []byte) error {
 	for i := range count {
 		entry := data[offset+2+i*12 : offset+14+i*12]
 		tag, kind, number := order.Uint16(entry), order.Uint16(entry[2:]), order.Uint32(entry[4:])
+		var err error
 		switch tag {
+		case 259:
+			if kind != 3 || number != 1 {
+				return fmt.Errorf("invalid TIFF compression field")
+			}
+			compression = uint64(order.Uint16(entry[8:10]))
 		case 273:
 			stripOffsets, err = readValues(kind, number, entry[8:12])
 		case 279:
@@ -618,6 +655,11 @@ func validateTIFFStructure(ctx context.Context, data []byte) error {
 		if err != nil {
 			return err
 		}
+	}
+	switch compression {
+	case 0, 1, 2, 3, 4, 5, 8, 32773, 32946:
+	default:
+		return fmt.Errorf("unsupported TIFF compression %d", compression)
 	}
 	checkRanges := func(offsets, counts []uint64) error {
 		if len(offsets) != len(counts) {
@@ -639,14 +681,16 @@ func validateTIFFStructure(ctx context.Context, data []byte) error {
 	return fmt.Errorf("missing TIFF image data")
 }
 
-// validatePNGStructure 校验PNG签名与块边界完整性，不解压IDAT像素流
+// validatePNGStructure 校验PNG签名、调色板、IDAT压缩头、APNG与块边界完整性
 // 入参: ctx 取消上下文, data PNG编码数据
 // 返回: error 格式或截断错误
 func validatePNGStructure(ctx context.Context, data []byte) error {
 	if len(data) < 33 || string(data[:8]) != "\x89PNG\r\n\x1a\n" {
 		return fmt.Errorf("invalid PNG header")
 	}
-	hasIHDR, hasIDAT := false, false
+	hasIHDR, hasPLTE, needPLTE, hasIDAT := false, false, false, false
+	var zlibHeader [2]byte
+	zlibLen := 0
 	for pos := 8; pos < len(data); {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -659,23 +703,155 @@ func validatePNGStructure(ctx context.Context, data []byte) error {
 			return fmt.Errorf("truncated PNG chunk")
 		}
 		kind := string(data[pos+4 : pos+8])
+		payload := data[pos+8 : pos+8+int(length)]
 		switch kind {
 		case "IHDR":
 			if length != 13 {
 				return fmt.Errorf("invalid PNG IHDR chunk")
 			}
+			needPLTE = payload[9] == 3
 			hasIHDR = true
+		case "PLTE":
+			if length == 0 || length%3 != 0 || length > 768 {
+				return fmt.Errorf("invalid PNG PLTE chunk")
+			}
+			hasPLTE = true
+		case "acTL":
+			return fmt.Errorf("animated PNG images are not supported")
 		case "IDAT":
 			hasIDAT = true
+			if zlibLen < 2 && len(payload) > 0 {
+				zlibLen += copy(zlibHeader[zlibLen:], payload)
+			}
 		case "IEND":
-			if length != 0 || !hasIHDR || !hasIDAT {
+			if length != 0 || !hasIHDR || !hasIDAT || (needPLTE && !hasPLTE) || zlibLen < 2 {
 				return fmt.Errorf("incomplete PNG image")
+			}
+			cmf, flg := zlibHeader[0], zlibHeader[1]
+			if cmf&0x0f != 8 || cmf>>4 > 7 || flg&0x20 != 0 || (uint16(cmf)<<8|uint16(flg))%31 != 0 {
+				return fmt.Errorf("invalid PNG zlib header")
 			}
 			return nil
 		}
 		pos += 12 + int(length)
 	}
 	return fmt.Errorf("truncated PNG image")
+}
+
+// validateJBIG2Structure 校验JBIG2标准文件魔数及段头与数据边界完整性
+// 入参: ctx 取消上下文, data JBIG2编码数据
+// 返回: error 格式或截断错误
+func validateJBIG2Structure(ctx context.Context, data []byte) error {
+	if len(data) < 9 || string(data[:8]) != "\x97JB2\r\n\x1a\n" {
+		return fmt.Errorf("invalid JBIG2 header")
+	}
+	flags := data[8]
+	randomAccess := flags&1 == 0
+	unknownPages := flags&2 != 0
+	pos := 9
+	if !unknownPages {
+		if len(data) < 13 {
+			return fmt.Errorf("truncated JBIG2 header")
+		}
+		pos = 13
+	}
+	segments := 0
+	hasEOF := false
+	hasUnknownLen := false
+	var totalData uint64
+	for pos < len(data) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if pos+6 > len(data) {
+			return fmt.Errorf("truncated JBIG2 segment header")
+		}
+		segNum := binary.BigEndian.Uint32(data[pos : pos+4])
+		segFlags := data[pos+4]
+		segType := segFlags & 0x3f
+		pageAssocLong := segFlags&0x40 != 0
+		pos += 5
+		refCount := int(data[pos] >> 5)
+		if refCount == 5 || refCount == 6 {
+			return fmt.Errorf("invalid JBIG2 referred segment count")
+		}
+		if refCount == 7 {
+			if pos+4 > len(data) {
+				return fmt.Errorf("truncated JBIG2 segment header")
+			}
+			refCount = int(binary.BigEndian.Uint32(data[pos:pos+4]) & 0x1fffffff)
+			pos += 4
+			if refCount > 1024 {
+				return fmt.Errorf("invalid JBIG2 referred segment count")
+			}
+			retainBytes := (refCount + 8) / 8
+			if pos+retainBytes > len(data) {
+				return fmt.Errorf("truncated JBIG2 segment header")
+			}
+			pos += retainBytes
+		} else {
+			pos++
+		}
+		refSize := 1
+		if segNum > 65536 {
+			refSize = 4
+		} else if segNum > 256 {
+			refSize = 2
+		}
+		pageAssocSize := 1
+		if pageAssocLong {
+			pageAssocSize = 4
+		}
+		need := refCount*refSize + pageAssocSize + 4
+		if need < 0 || pos+need > len(data) {
+			return fmt.Errorf("truncated JBIG2 segment header")
+		}
+		pos += refCount*refSize + pageAssocSize
+		dataLen := binary.BigEndian.Uint32(data[pos : pos+4])
+		pos += 4
+		segments++
+		if !randomAccess {
+			if dataLen == 0xffffffff {
+				if segType != 38 && segType != 39 {
+					return fmt.Errorf("invalid JBIG2 unknown segment length")
+				}
+				return nil
+			}
+			if uint64(dataLen) > uint64(len(data)-pos) {
+				return fmt.Errorf("truncated JBIG2 segment data")
+			}
+			pos += int(dataLen)
+			if segType == 51 {
+				hasEOF = true
+				break
+			}
+		} else {
+			if dataLen == 0xffffffff {
+				if segType != 38 && segType != 39 {
+					return fmt.Errorf("invalid JBIG2 unknown segment length")
+				}
+				hasUnknownLen = true
+			} else {
+				totalData += uint64(dataLen)
+			}
+			if segType == 51 {
+				hasEOF = true
+				break
+			}
+		}
+	}
+	if segments == 0 {
+		return fmt.Errorf("empty JBIG2 image")
+	}
+	if randomAccess {
+		if !hasEOF {
+			return fmt.Errorf("truncated JBIG2 segment headers")
+		}
+		if !hasUnknownLen && totalData > uint64(len(data)-pos) {
+			return fmt.Errorf("truncated JBIG2 segment data")
+		}
+	}
+	return nil
 }
 
 // imagePageOrientation 将EXIF方向映射为单位图像到页面局部坐标的变换

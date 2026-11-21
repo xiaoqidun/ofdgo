@@ -31,6 +31,14 @@ import (
 // archiveParallelMaxBytes 限制单条目并发预压缩的内存上限，超限文件回退主线程流式写出
 const archiveParallelMaxBytes = 32 << 20
 
+// archiveDefaultDeflaterPool 复用默认压缩等级编码器，不保留输出流引用
+var archiveDefaultDeflaterPool = sync.Pool{
+	New: func() any {
+		writer, _ := flate.NewWriter(io.Discard, flate.DefaultCompression)
+		return writer
+	},
+}
+
 // ArchiveFile 描述已生成的归档文件，不关闭调用方提供的源读取器
 type ArchiveFile struct {
 	Name  string
@@ -118,13 +126,17 @@ func WriteArchive(ctx context.Context, writer io.Writer, files []ArchiveFile, op
 		workerWG.Add(1)
 		go func() {
 			defer workerWG.Done()
-			fw, err := flate.NewWriter(io.Discard, level)
-			if err != nil {
-				for task := range jobs {
-					task.err = err
-					close(task.done)
-				}
-				return
+			var fw *flate.Writer
+			if level == flate.BestCompression {
+				fw = acquireOutputDeflater(io.Discard)
+				defer releaseOutputDeflater(fw)
+			} else {
+				fw = archiveDefaultDeflaterPool.Get().(*flate.Writer)
+				fw.Reset(io.Discard)
+				defer func() {
+					fw.Reset(io.Discard)
+					archiveDefaultDeflaterPool.Put(fw)
+				}()
 			}
 			copyBuf := make([]byte, 32<<10)
 			for task := range jobs {

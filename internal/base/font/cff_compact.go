@@ -21,6 +21,25 @@ import (
 	"slices"
 )
 
+// CFFCIDInfo 读取CID类型CFF字体的字形CID映射及ROS注册信息
+// 入参: sfnt 已解析字体
+// 返回: []uint16 按GID索引的CID表, string Registry, string Ordering, int Supplement, bool 是否为CID字体
+func CFFCIDInfo(sfnt *SFNT) ([]uint16, string, string, int, bool) {
+	if sfnt == nil || !sfnt.IsCFF || len(sfnt.Tables["CFF "]) == 0 {
+		return nil, "", "", 0, false
+	}
+	cid, err := readCIDSubsetFont(sfnt.Tables["CFF "])
+	if err != nil {
+		return nil, "", "", 0, false
+	}
+	cids := make([]uint16, len(cid.cids))
+	for i, v := range cid.cids {
+		cids[i] = uint16(v)
+	}
+	ros := cid.top[1230]
+	return cids, cffStringBySID(cid.strings, int(ros[0])), cffStringBySID(cid.strings, int(ros[1])), int(ros[2]), true
+}
+
 // compactCFFDirect 直接从原始CFF构建紧凑子集，仅对保留字形及组合组件执行Type2分析
 // 入参: data 原始CFF数据, expectedGlyphs 期望字形总数，小于等于0时跳过校验, keep 保留的原字形编号
 // 返回: []byte 紧凑CFF数据, []uint16 新编号对应的原编号, error 结构或编码错误
@@ -213,6 +232,9 @@ func compactCFFOrdered(data []byte, expectedGlyphs int, glyphs []uint16) ([]byte
 		}
 		chars[index], selected[index], selects[index] = cid.fonts[fd].chars[gid], index, mapped
 	}
+	regSID := internCFFString(&cid.strings, "Adobe")
+	ordSID := internCFFString(&cid.strings, "Identity")
+	cid.top[1230] = []float64{float64(regSID), float64(ordSID), 0}
 	cid.top[1234] = []float64{float64(len(ids))}
 	cid.dicts, cid.private, cid.fonts = dicts, private, fonts
 	cid.charset, cid.selects = encodeCFFSubsetCharset(selected), selects
@@ -508,4 +530,40 @@ func encodeCFFSubsetEncoding(codes [256]uint16, sids []int, ids []uint16) ([]byt
 		result = append(result, supplements...)
 	}
 	return result, nil
+}
+
+// cffStringBySID 按SID查询标准或自定义CFF字符串
+// 入参: strings 自定义字符串表, sid 字符串编号
+// 返回: string 字符串值
+func cffStringBySID(strings [][]byte, sid int) string {
+	if sid < 0 {
+		return ""
+	}
+	if sid < len(cffStandardStrings) {
+		return cffStandardStrings[sid]
+	}
+	idx := sid - len(cffStandardStrings)
+	if idx < len(strings) {
+		return string(strings[idx])
+	}
+	return ""
+}
+
+// internCFFString 查询或追加CFF自定义字符串并返回对应SID
+// 入参: strings 自定义字符串表指针, value 字符串值
+// 返回: int 字符串SID
+func internCFFString(strings *[][]byte, value string) int {
+	for sid, std := range cffStandardStrings {
+		if std == value {
+			return sid
+		}
+	}
+	raw := []byte(value)
+	for idx, item := range *strings {
+		if bytes.Equal(item, raw) {
+			return len(cffStandardStrings) + idx
+		}
+	}
+	*strings = append(*strings, raw)
+	return len(cffStandardStrings) + len(*strings) - 1
 }

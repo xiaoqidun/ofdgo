@@ -138,7 +138,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	}
 	session := newPDFStreamSession(sw, r.Compression)
 	navWriter := codecpdf.NewNavWriter(sw)
-	pageGroupRef := session.allocRef()
+	pageGroupRef := sw.AllocRef()
 	if err := sw.WriteObject(pageGroupRef, pdfgo.Dictionary{
 		"Type": pdfgo.Name("Group"),
 		"S":    pdfgo.Name("Transparency"),
@@ -318,36 +318,41 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 			jobs <- nextSend
 			nextSend++
 		}
+		var closeJobsOnce sync.Once
+		closeJobs := func() {
+			closeJobsOnce.Do(func() {
+				close(jobs)
+			})
+		}
 		stopWorkers := func() {
 			cancelWorkers()
-			close(jobs)
+			closeJobs()
 			wg.Wait()
 		}
 		var loopErr error
 		for i := 1; i < len(pages); i++ {
 			res := <-slots[(i-1)%window]
-			if nextSend < len(pages) && loopErr == nil {
-				jobs <- nextSend
-				nextSend++
-			}
-			if loopErr != nil {
-				continue
-			}
 			if res.err != nil {
 				loopErr = fmt.Errorf("failed to render page %d: %w", i+1, res.err)
-				cancelWorkers()
-				continue
+			} else {
+				if nextSend < len(pages) {
+					jobs <- nextSend
+					nextSend++
+				}
+				contentRef, resRef, err := commitCompiledPDFPage(sw, session, res)
+				if err != nil {
+					loopErr = err
+				} else if err := writeSinglePage(i, contentRef, resRef, res.contentForNav); err != nil {
+					loopErr = err
+				}
 			}
-			contentRef, resRef, err := commitCompiledPDFPage(sw, session, res)
-			if err != nil {
-				loopErr = err
+			if loopErr != nil {
 				cancelWorkers()
-				continue
-			}
-			if err := writeSinglePage(i, contentRef, resRef, res.contentForNav); err != nil {
-				loopErr = err
-				cancelWorkers()
-				continue
+				closeJobs()
+				for k := i + 1; k < nextSend; k++ {
+					<-slots[(k-1)%window]
+				}
+				break
 			}
 		}
 		stopWorkers()
@@ -695,7 +700,7 @@ func commitCompiledPDFPage(sw *codecpdf.StreamWriter, session *pdfStreamSession,
 	if exists {
 		session.contentHits.Add(1)
 	} else {
-		contentRef = session.allocRef()
+		contentRef = sw.AllocRef()
 		if err := sw.WritePreencodedStream(contentRef, pdfgo.Dictionary{"Filter": pdfgo.Name("FlateDecode")}, res.compressed); err != nil {
 			return pdfgo.Reference{}, pdfgo.Reference{}, err
 		}

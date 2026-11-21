@@ -126,7 +126,7 @@ func (r *Reader) EditorContext(ctx context.Context) (*Editor, error) {
 	directory := cleanPackagePath(reader.RootDir)
 	e.source = &editorSource{reader: reader, document: doc, info: cloneEditorData(*info), fallbackDocID: e.Info.DocID, directory: directory, pages: make(map[string]*editorSourcePage, len(doc.Pages.Page)), origins: make(map[string]*editorObjectOrigin), initialFiles: maps.Clone(reader.files)}
 	e.Info, e.maxID = cloneEditorData(*info), maximum
-	e.ownedReader, e.ownedOwner, e.ownedRevision = reader, e, e.revision
+	e.ownedReader, e.ownedOwner = reader, e
 	e.pages = make([]PageContent, len(doc.Pages.Page))
 	sourcePages := make([]editorSourcePage, len(doc.Pages.Page))
 	for i, page := range doc.Pages.Page {
@@ -163,8 +163,13 @@ func (e *Editor) PageCapabilitiesContext(ctx context.Context, index int) (PageCa
 	if index < 0 || index >= len(e.pages) {
 		return PageCapabilities{}, fmt.Errorf("page index %d out of range", index)
 	}
-	if insert, resolved := e.docDefaultRGB(); resolved {
-		return PageCapabilities{Insert: insert, Copy: true, Delete: true, Move: true, Resize: true}, nil
+	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
+		return PageCapabilities{Insert: true, Copy: true, Delete: true, Move: true, Resize: true}, nil
+	}
+	if e.pageNoLocalRes(index) {
+		if insert, resolved := e.docDefaultRGB(); resolved {
+			return PageCapabilities{Insert: insert, Copy: true, Delete: true, Move: true, Resize: true}, nil
+		}
 	}
 	restore, err := e.bindPageIndexContext(ctx, index)
 	if err != nil {
@@ -178,7 +183,7 @@ func (e *Editor) PageCapabilitiesContext(ctx context.Context, index int) (PageCa
 	return PageCapabilities{Insert: insert, Copy: true, Delete: true, Move: true, Resize: true}, nil
 }
 
-// PageCapabilitiesBatchContext 批量获取页面操作范围并响应取消，文档级默认颜色空间可直接批量返回
+// PageCapabilitiesBatchContext 批量获取页面操作范围并响应取消，默认无DefaultCS时直接批量返回
 // 入参: ctx 取消上下文, indexes 页面索引列表
 // 返回: []PageCapabilities 对应页面的操作能力列表, error 索引、读取或取消错误
 func (e *Editor) PageCapabilitiesBatchContext(ctx context.Context, indexes []int) ([]PageCapabilities, error) {
@@ -188,8 +193,8 @@ func (e *Editor) PageCapabilitiesBatchContext(ctx context.Context, indexes []int
 	if len(indexes) == 0 {
 		return nil, nil
 	}
-	if insert, resolved := e.docDefaultRGB(); resolved {
-		capability := PageCapabilities{Insert: insert, Copy: true, Delete: true, Move: true, Resize: true}
+	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
+		capability := PageCapabilities{Insert: true, Copy: true, Delete: true, Move: true, Resize: true}
 		result := make([]PageCapabilities, len(indexes))
 		for i, index := range indexes {
 			if i&4095 == 0 {
@@ -323,14 +328,16 @@ type editorObjectOrigin struct {
 
 // editorSourcePage 保存页面原文、解析快照及图层和页块内的对象位置
 type editorSourcePage struct {
-	ref            Page
-	data           []byte
-	root           *editorXML
-	original       *PageContent
-	initialLayers  []Layer
-	initialActions []Action
-	nodes          map[string]*editorXML
-	repaired       bool
+	ref              Page
+	data             []byte
+	root             *editorXML
+	original         *PageContent
+	initialLayers    []Layer
+	initialActions   []Action
+	initialTemplates []Template
+	initialPageRes   []string
+	nodes            map[string]*editorXML
+	repaired         bool
 }
 
 // editorMaxIDScanner 复用工作协程的解压器与读缓冲以加速包内XML标识扫描
@@ -397,6 +404,7 @@ func (s *editorMaxIDScanner) scan(reader *Reader, name string, progress editorPr
 		return 0, err
 	}
 	defer input.Close()
+	var stream io.Reader = input
 	if src := reader.encryptedSource(); src != nil && src.has(clean) {
 		if sz, ok := src.size(clean); ok && sz <= editorMaxIDFastLimit && (limit <= 0 || sz <= uint64(limit)) {
 			if s.buf.Cap() > 1<<20 {
@@ -419,9 +427,13 @@ func (s *editorMaxIDScanner) scan(reader *Reader, name string, progress editorPr
 				}
 				return editorXMLMaxID(bytes.NewReader(data))
 			}
+			if limit > 0 && n > limit {
+				return 0, fmt.Errorf("package entry %s exceeds size limit (%d bytes)", clean, limit)
+			}
+			stream = io.MultiReader(bytes.NewReader(s.buf.Bytes()), input)
 		}
 	}
-	return editorXMLMaxID(&editorProgressReader{Reader: input, progress: progress, stage: "ids"})
+	return editorXMLMaxID(&editorProgressReader{Reader: stream, progress: progress, stage: "ids"})
 }
 
 // editorMaxIDChunkResult 汇总单批并行标识扫描的局部最大值与首个错误
@@ -665,6 +677,35 @@ func (e *Editor) originalPage(index int) bool {
 	return e.source != nil && index >= 0 && index < len(e.pages) && e.source.pages[e.pages[index].ID] != nil
 }
 
+// pageNoLocalRes 基于已加载页或缓存页头判断目标页是否确定无页面级PageRes声明
+// 入参: index 页面索引
+// 返回: bool 是否确定不存在页面级资源
+func (e *Editor) pageNoLocalRes(index int) bool {
+	if len(e.pages[index].pageResources) > 0 || len(e.pages[index].PageRes) > 0 {
+		return false
+	}
+	if e.source == nil {
+		return true
+	}
+	source := e.source.pages[e.pages[index].ID]
+	if source == nil {
+		return true
+	}
+	if source.original != nil {
+		return len(source.original.pageResources) == 0 && len(source.original.PageRes) == 0
+	}
+	reader := e.source.reader
+	name := reader.ResPath(source.ref.BaseLoc)
+	if hdr, ok := reader.pageHeaderCache[name]; ok {
+		return len(hdr.PageRes) == 0
+	}
+	fileData, inFiles := reader.files[name]
+	if hdr, ok := reader.pageHeaders.get(name, fileData, inFiles); ok {
+		return len(hdr.PageRes) == 0
+	}
+	return false
+}
+
 // docDefaultRGB 常数时间判定文档默认颜色空间是否已在文档级解析为8位RGB
 // 返回: bool 是否为8位RGB, bool 是否已在文档级确定
 func (e *Editor) docDefaultRGB() (bool, bool) {
@@ -681,8 +722,8 @@ func (e *Editor) docDefaultRGB() (bool, bool) {
 // sourceRGB 判断新建RGB对象能否直接使用文档默认颜色空间
 // 返回: bool 是否为8位RGB文档
 func (e *Editor) sourceRGB() bool {
-	if rgb, resolved := e.docDefaultRGB(); resolved {
-		return rgb
+	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
+		return true
 	}
 	space, _ := e.sourceColorSpace(formatUnitID(uint64(e.source.document.CommonData.DefaultCS)))
 	return isDefaultRGBColorSpace(space)
@@ -695,8 +736,8 @@ func (e *Editor) sourceRGBContext(ctx context.Context) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	if rgb, resolved := e.docDefaultRGB(); resolved {
-		return rgb, nil
+	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
+		return true, nil
 	}
 	id := formatUnitID(uint64(e.source.document.CommonData.DefaultCS))
 	if space, ok := e.source.reader.resolveColorSpaceScoped(e.pageScope, id); ok {
@@ -927,6 +968,8 @@ func (e *Editor) loadSourcePageContext(ctx context.Context, index int) error {
 	copied := copyEditorPage(*page)
 	source.initialLayers = copied.Content.Layer
 	source.initialActions = copied.Actions
+	source.initialTemplates = copied.Template
+	source.initialPageRes = copied.PageRes
 	source.original = page
 	e.source.pages[source.ref.ID] = source
 	e.pages[index] = copied
@@ -1959,6 +2002,12 @@ func scanFastOFDXMLMaxID(data []byte) (uint64, bool) {
 // 返回: bool 是否完全未改动
 func sourcePageUntouched(page PageContent, source *editorSourcePage) bool {
 	if source == nil || source.original == nil || page.Area != source.original.Area {
+		return false
+	}
+	if len(page.Template) != len(source.initialTemplates) || len(page.Template) > 0 && &page.Template[0] != &source.initialTemplates[0] {
+		return false
+	}
+	if len(page.PageRes) != len(source.initialPageRes) || len(page.PageRes) > 0 && &page.PageRes[0] != &source.initialPageRes[0] {
 		return false
 	}
 	if len(page.Actions) != len(source.initialActions) || len(page.Actions) > 0 && &page.Actions[0] != &source.initialActions[0] {

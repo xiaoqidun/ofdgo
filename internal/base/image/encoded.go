@@ -17,6 +17,7 @@ package image
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"image"
@@ -42,6 +43,9 @@ type EncodedImage struct {
 	result     atomic.Pointer[encodedImageResult]
 	mu         sync.Mutex
 	pending    chan struct{}
+	metaOnce   sync.Once
+	metaDigest [32]byte
+	metaMIME   string
 }
 
 // NewEncodedImage 校验PNG或JPEG头信息后复制输入，不解码像素
@@ -63,6 +67,19 @@ func (img *EncodedImage) Bytes() []byte { return img.data }
 // MIME 返回图片媒体类型
 // 返回: string 媒体类型
 func (img *EncodedImage) MIME() string { return "image/" + img.format }
+
+// ContentMeta 惰性计算并缓存原始编码的内容摘要与规范化媒体类型
+// 返回: [32]byte SHA-256摘要, string 规范化媒体类型
+func (img *EncodedImage) ContentMeta() ([32]byte, string) {
+	img.metaOnce.Do(func() {
+		img.metaDigest = sha256.Sum256(img.data)
+		img.metaMIME = img.MIME()
+		if bytes.HasPrefix(img.data, []byte{255, 216}) {
+			img.metaMIME = "image/jpeg"
+		}
+	})
+	return img.metaDigest, img.metaMIME
+}
 
 // ColorModel 返回显示像素的颜色模型，不解码像素
 // 返回: color.Model 颜色模型

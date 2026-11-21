@@ -204,9 +204,15 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 		return map[string]any{"ok": true, "data": map[string]any{"bytes": data}}
 	}
 	if nativeConcurrentRead(name, e.currentEditor != nil) && e.currentSession != nil && (e.pdf == nil || nativePDFConcurrentRead(name)) {
+		session := e.currentSession
+		worker, err := e.renderSession(ctx)
+		if err != nil {
+			return nativeFailure(err)
+		}
+		taskID := e.beginReadTask(ctx)
 		<-e.gate
 		locked = false
-		return e.runConcurrentRead(ctx, name, args, emit)
+		return e.runConcurrentRead(ctx, name, args, emit, session, worker, taskID)
 	}
 	var lockedPDF *pendingPDF
 	if e.pdf != nil {
@@ -240,7 +246,7 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 			}
 		}
 	}
-	if !nativeReadOnly(name) || e.pdf != nil {
+	if !nativeReadOnly(name) || e.pdf != nil || e.currentEditor != nil {
 		if err := e.waitRenders(ctx); err != nil {
 			return nativeFailure(err)
 		}
@@ -1200,7 +1206,7 @@ func (e *NativeEngine) preparePDFPageNative(ctx context.Context, pending *pendin
 	pending.progress = platformValueOf(call.progress("conversion", "", true))
 	pending.font = platformValueOf(nativeCallback(call.font))
 	e.bindPDFContext(pending, ctx)
-	if pending.retry {
+	if pending.retry.Load() {
 		if err := pending.importer.Reset(ctx); err != nil {
 			return err
 		}
@@ -1232,10 +1238,13 @@ func (e *NativeEngine) preparePDFPageNative(ctx context.Context, pending *pendin
 		err = e.replacePDFReader(reader)
 		if err == nil {
 			session = e.currentSession
-			pending.page, pending.next, pending.retry = -1, 0, false
+			pending.page, pending.next = -1, 0
+			pending.retry.Store(false)
 			pending.syncGen++
+			e.renderMu.Lock()
 			session.pdfSyncGen = pending.syncGen
 			e.renderIdle = nil
+			e.renderMu.Unlock()
 		}
 		<-e.gate
 		if err != nil {
@@ -1245,7 +1254,7 @@ func (e *NativeEngine) preparePDFPageNative(ctx context.Context, pending *pendin
 	if pageIndex >= 0 && !pending.importer.Ready(pageIndex) {
 		if err := pending.importer.ConvertPage(ctx, pageIndex); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				pending.retry = true
+				pending.retry.Store(true)
 			}
 			return err
 		}
@@ -1265,16 +1274,19 @@ func (e *NativeEngine) preparePDFPageNative(ctx context.Context, pending *pendin
 	if pending.importer.PageSynced(session.Reader, pageIndex) {
 		return nil
 	}
+	if err := e.waitRenders(ctx); err != nil {
+		return err
+	}
 	if err := pending.importer.SyncReader(ctx, session.Reader, pageIndex); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			pending.retry = true
+			pending.retry.Store(true)
 		}
 		return err
 	}
 	pending.page = pageIndex
 	pending.syncGen++
-	session.pdfSyncGen = pending.syncGen
 	e.renderMu.Lock()
+	session.pdfSyncGen = pending.syncGen
 	e.renderIdle = nil
 	e.renderMu.Unlock()
 	return nil
@@ -1320,7 +1332,7 @@ func (e *NativeEngine) runConcurrentRender(ctx context.Context, args []any, emit
 				return nativeFailure(fmt.Errorf("missing page index"))
 			}
 			pageIndex := values[0].Int()
-			if e.pdf.retry || !e.pdf.importer.PageSynced(e.currentSession.Reader, pageIndex) {
+			if e.pdf.retry.Load() || !e.pdf.importer.PageSynced(e.currentSession.Reader, pageIndex) {
 				pending := e.pdf
 				targetSession := e.currentSession
 				<-e.gate
@@ -1338,7 +1350,7 @@ func (e *NativeEngine) runConcurrentRender(ctx context.Context, args []any, emit
 		}
 		session = e.currentSession
 		editor = e.currentEditor
-		if len(values) > 0 && editor != nil {
+		if len(values) > 0 && editor != nil && session.editing {
 			operation := &businessEngine{currentSession: worker, currentEditor: editor, ctx: ctx}
 			if pageErr := e.prepareRender(operation, values[0].Int()); pageErr != nil {
 				<-e.gate
@@ -1375,7 +1387,7 @@ func (e *NativeEngine) runConcurrentRender(ctx context.Context, args []any, emit
 			font["data"] = worker.svgFonts[name]
 		}
 	}
-	if editor != nil && !(len(values) > 6 && values[6].Bool()) {
+	if editor != nil && session.editing && !(len(values) > 6 && values[6].Bool()) {
 		objects, textErr := e.renderObjects(operation, values[0].Int())
 		if textErr != nil {
 			return nativeFailure(textErr)
@@ -1457,7 +1469,7 @@ func (e *NativeEngine) runLoadPDF(ctx context.Context, emit func(any)) (result m
 	pending.progress = platformValueOf(call.progress("conversion", "", true))
 	pending.font = platformValueOf(nativeCallback(call.font))
 	e.bindPDFContext(pending, ctx)
-	if pending.retry {
+	if pending.retry.Load() {
 		if err := pending.importer.Reset(ctx); err != nil {
 			return nativeFailure(err)
 		}
@@ -1486,10 +1498,13 @@ func (e *NativeEngine) runLoadPDF(ctx context.Context, emit func(any)) (result m
 		err = e.replacePDFReader(reader)
 		if err == nil {
 			session = e.currentSession
-			pending.page, pending.next, pending.retry = -1, 0, false
+			pending.page, pending.next = -1, 0
+			pending.retry.Store(false)
 			pending.syncGen++
+			e.renderMu.Lock()
 			session.pdfSyncGen = pending.syncGen
 			e.renderIdle = nil
+			e.renderMu.Unlock()
 		}
 		<-e.gate
 		if err != nil {
@@ -1502,7 +1517,7 @@ func (e *NativeEngine) runLoadPDF(ctx context.Context, emit func(any)) (result m
 		if !pending.importer.Ready(index) {
 			if err := pending.importer.ConvertPage(ctx, index); err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					pending.retry = true
+					pending.retry.Store(true)
 				}
 				return nativeFailure(err)
 			}
@@ -1515,7 +1530,7 @@ func (e *NativeEngine) runLoadPDF(ctx context.Context, emit func(any)) (result m
 	editor, report, err := pending.importer.Finish(ctx)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			pending.retry = true
+			pending.retry.Store(true)
 		}
 		return nativeFailure(err)
 	}
@@ -1681,10 +1696,10 @@ func (e *NativeEngine) runDocumentInfo(ctx context.Context, args []any) (result 
 	return map[string]any{"ok": true, "data": nativePlain(details)}
 }
 
-// runConcurrentRead 在独立只读工作会话上并发执行不修改会话状态的查询，不排空并行渲染池
-// 入参: ctx 取消上下文, name 操作名称, args 调用参数, emit 进度回调
+// runConcurrentRead 在已登记的独立只读工作会话上并发执行查询，不排空并行渲染池
+// 入参: ctx 取消上下文, name 操作名称, args 调用参数, emit 进度回调, session 主会话, worker 独立只读会话, taskID 任务编号
 // 返回: map[string]any 查询结果
-func (e *NativeEngine) runConcurrentRead(ctx context.Context, name string, args []any, emit func(any)) (result map[string]any) {
+func (e *NativeEngine) runConcurrentRead(ctx context.Context, name string, args []any, emit func(any), session, worker *Session, taskID uint64) (result map[string]any) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			if err, ok := failure.(error); ok {
@@ -1694,31 +1709,6 @@ func (e *NativeEngine) runConcurrentRead(ctx context.Context, name string, args 
 			}
 		}
 	}()
-	select {
-	case e.gate <- struct{}{}:
-	case <-ctx.Done():
-		return nativeFailure(ctx.Err())
-	}
-	if err := ctx.Err(); err != nil {
-		<-e.gate
-		return nativeFailure(err)
-	}
-	if e.closed {
-		<-e.gate
-		return nativeFailure(fmt.Errorf("native engine is closed"))
-	}
-	session := e.currentSession
-	if session == nil {
-		<-e.gate
-		return nativeFailure(fmt.Errorf("ofd document is not opened"))
-	}
-	worker, err := e.renderSession(ctx)
-	if err != nil {
-		<-e.gate
-		return nativeFailure(err)
-	}
-	taskID := e.beginReadTask(ctx)
-	<-e.gate
 	retain := false
 	defer func() {
 		e.endReadTask(taskID, session, worker, retain)

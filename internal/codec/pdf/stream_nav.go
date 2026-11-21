@@ -274,9 +274,20 @@ func (n *NavWriter) WriteOutlines(ctx context.Context, items []NavOutline) (pdfg
 	firstTop, lastTop, topCount := -1, -1, 0
 	var stack []int
 	for i, item := range items {
-		if item.Level == 0 {
-			nodes[i].ref = n.writer.AllocRef()
-			nodes[i].valid = true
+		level := item.Level
+		if level < 0 {
+			level = 0
+		}
+		for len(stack) > 0 && (level == 0 || level <= items[stack[len(stack)-1]].Level) {
+			child := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if len(stack) > 0 {
+				nodes[stack[len(stack)-1]].count += nodes[child].count
+			}
+		}
+		nodes[i].ref = n.writer.AllocRef()
+		nodes[i].valid = true
+		if len(stack) == 0 {
 			nodes[i].prev = lastTop
 			if lastTop != -1 {
 				nodes[lastTop].next = i
@@ -285,25 +296,10 @@ func (n *NavWriter) WriteOutlines(ctx context.Context, items []NavOutline) (pdfg
 			}
 			lastTop = i
 			topCount++
-			stack = append(stack[:0], i)
-			continue
-		}
-		if len(stack) == 0 || items[stack[len(stack)-1]].Level+1 < item.Level {
-			continue
-		}
-		for len(stack) > 0 && item.Level <= items[stack[len(stack)-1]].Level {
-			child := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			if len(stack) > 0 {
-				nodes[stack[len(stack)-1]].count += nodes[child].count
-			}
-		}
-		if len(stack) == 0 {
+			stack = append(stack, i)
 			continue
 		}
 		parent := stack[len(stack)-1]
-		nodes[i].ref = n.writer.AllocRef()
-		nodes[i].valid = true
 		nodes[i].parent = parent
 		if nodes[parent].first == -1 {
 			nodes[parent].first = i

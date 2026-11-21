@@ -30,7 +30,7 @@ var canvasFontLoadMu sync.Mutex
 
 // textGlyphPathCacheKey 字形路径缓存键
 type textGlyphPathCacheKey struct {
-	font       *canvas.Font
+	fontDigest [32]byte
 	size       float64
 	fauxBold   float64
 	fauxItalic float64
@@ -125,8 +125,14 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 // 入参: face 字体, glyph 绘制字形
 // 返回: *canvas.Path 字形路径, float64 字形宽度
 func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (*canvas.Path, float64) {
+	state := r.canvasState()
+	digest, ok := state.fontDigests[face.Font]
+	if !ok {
+		digest = sha256.Sum256(basefont.SFNTData(face.Font.Tables))
+		state.fontDigests[face.Font] = digest
+	}
 	key := textGlyphPathCacheKey{
-		font:       face.Font,
+		fontDigest: digest,
 		size:       face.Size,
 		fauxBold:   face.FauxBold,
 		fauxItalic: face.FauxItalic,
@@ -141,14 +147,8 @@ func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (
 	if cached, ok := glyphCache.get(key); ok {
 		return cached.path, cached.width
 	}
-	state := r.canvasState()
 	outlines := state.fontOutlines[face.Font]
 	if outlines == nil {
-		digest, ok := state.fontDigests[face.Font]
-		if !ok {
-			digest = sha256.Sum256(basefont.SFNTData(face.Font.Tables))
-			state.fontDigests[face.Font] = digest
-		}
 		cache := r.canvasFontOutlines()
 		ctx := r.pageContext
 		if ctx == nil {
@@ -257,6 +257,9 @@ func sfntHasNameRecord(data []byte) bool {
 			}
 			raw := table[strOff+offset : strOff+offset+length]
 			if platform == 3 && encoding == 1 && length >= 2 && length%2 == 0 {
+				if raw[0] == 0xfe && raw[1] == 0xff {
+					raw = raw[2:]
+				}
 				for j := 0; j+1 < len(raw); j += 2 {
 					if raw[j] != 0 || raw[j+1] != 0 {
 						return true

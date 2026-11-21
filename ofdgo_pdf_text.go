@@ -294,11 +294,11 @@ func (r *pdfTextReplacements) merge(nodes []pdfCompositeNode) ([]pdfCompositeNod
 				}
 			}
 		}
-		node.formCount = 0
+		node.forms = nil
 		result = append(result, node)
 		if !combined {
 			for _, remaining := range nodes[i+1 : end] {
-				remaining.formCount = 0
+				remaining.forms = nil
 				result = append(result, remaining)
 			}
 		}
@@ -573,9 +573,11 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 					if p.fontWarnings == nil {
 						p.fontWarnings = make(map[string]bool)
 					}
-					if !p.fontWarnings[id] {
-						p.warning(pdfgo.Diagnostic{Message: fmt.Sprintf("PDF font %s has invalid hinting instructions; design outlines and original font retained", font.Name)})
+					msg := fmt.Sprintf("PDF font %s has invalid hinting instructions; design outlines and original font retained", font.Name)
+					if !p.fontWarnings[id] && !p.fontWarnings[msg] {
+						p.warning(pdfgo.Diagnostic{Message: msg})
 						p.fontWarnings[id] = true
+						p.fontWarnings[msg] = true
 					}
 				}
 			}

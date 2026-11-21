@@ -27,6 +27,7 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"sync"
 
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -84,6 +85,7 @@ type StreamWriter struct {
 	err           error
 	compress      bool
 	compressLevel int
+	xrefMu        sync.Mutex
 	xref          []xrefEntry
 	catalogRef    pdfgo.Reference
 	infoRef       pdfgo.Reference
@@ -127,7 +129,6 @@ func NewStreamWriter(ctx context.Context, writer io.Writer, pageCount int, compr
 		objStmOffsets: make([]int, 0, objStmBatchSize),
 	}
 	sw.catalogRef = sw.AllocRef()
-	sw.infoRef = sw.AllocRef()
 	sw.pagesRootRef = sw.AllocRef()
 	sw.initPageTree(pageCount)
 	if err := sw.writeRaw(pdfFileHeader); err != nil {
@@ -168,11 +169,13 @@ func (w *StreamWriter) PageRefs() []pdfgo.Reference {
 	return w.pageRefs
 }
 
-// AllocRef 分配下一个PDF间接对象引用
+// AllocRef 线程安全地分配下一个PDF间接对象引用
 // 返回: pdfgo.Reference 新对象引用
 func (w *StreamWriter) AllocRef() pdfgo.Reference {
+	w.xrefMu.Lock()
 	num := int64(len(w.xref))
 	w.xref = append(w.xref, xrefEntry{kind: xrefFree})
+	w.xrefMu.Unlock()
 	return pdfgo.Reference{Number: num}
 }
 
@@ -187,7 +190,10 @@ func (w *StreamWriter) WriteObject(ref pdfgo.Reference, obj pdfgo.Object) error 
 		w.err = err
 		return err
 	}
-	if ref.Number <= 0 || int(ref.Number) >= len(w.xref) {
+	w.xrefMu.Lock()
+	valid := ref.Number > 0 && int(ref.Number) < len(w.xref)
+	w.xrefMu.Unlock()
+	if !valid {
 		return fmt.Errorf("invalid PDF object reference %d", ref.Number)
 	}
 	if len(w.objStmNums) > 0 {
@@ -213,7 +219,15 @@ func (w *StreamWriter) WriteDirectObject(ref pdfgo.Reference, obj pdfgo.Object) 
 		w.err = err
 		return err
 	}
-	w.xref[ref.Number] = xrefEntry{kind: xrefNormal, field2: uint64(w.pos), field3: 0}
+	w.xrefMu.Lock()
+	valid := ref.Number > 0 && int(ref.Number) < len(w.xref)
+	if valid {
+		w.xref[ref.Number] = xrefEntry{kind: xrefNormal, field2: uint64(w.pos), field3: 0}
+	}
+	w.xrefMu.Unlock()
+	if !valid {
+		return fmt.Errorf("invalid PDF object reference %d", ref.Number)
+	}
 	w.scratchBuf.Reset()
 	w.scratchBuf.WriteString(strconv.FormatInt(ref.Number, 10))
 	w.scratchBuf.WriteString(" 0 obj\n")
@@ -295,6 +309,9 @@ func (w *StreamWriter) Finish(catalog pdfgo.Dictionary, info pdfgo.Dictionary) e
 	}
 	hasInfo := len(info) != 0
 	if hasInfo {
+		if w.infoRef.Number == 0 {
+			w.infoRef = w.AllocRef()
+		}
 		if err := w.WriteObject(w.infoRef, info); err != nil {
 			return err
 		}
@@ -432,7 +449,7 @@ func (w *StreamWriter) initPageTree(pageCount int) {
 	}
 }
 
-// flushObjStm 将当前累积的非流对象压缩为一个PDF对象流并释放临时缓冲
+// flushObjStm 将当前累积的非流对象打入PDF对象流并按压缩开关写出，随后释放临时缓冲
 // 返回: error 压缩或写入错误
 func (w *StreamWriter) flushObjStm() error {
 	count := len(w.objStmNums)
@@ -452,35 +469,44 @@ func (w *StreamWriter) flushObjStm() error {
 	w.scratchBuf.WriteByte('\n')
 	first := w.scratchBuf.Len()
 	w.scratchBuf.Write(w.objStmBody.Bytes())
-	compressed, err := w.deflate(w.scratchBuf.Bytes())
-	if err != nil {
-		w.err = err
-		return err
-	}
 	dict := pdfgo.Dictionary{
-		"Type":   pdfgo.Name("ObjStm"),
-		"N":      pdfgo.Integer(count),
-		"First":  pdfgo.Integer(first),
-		"Filter": pdfgo.Name("FlateDecode"),
+		"Type":  pdfgo.Name("ObjStm"),
+		"N":     pdfgo.Integer(count),
+		"First": pdfgo.Integer(first),
 	}
-	if err := w.writeStreamBytes(stmRef, dict, compressed, false); err != nil {
+	var payload []byte
+	if w.compress {
+		compressed, err := w.deflate(w.scratchBuf.Bytes())
+		if err != nil {
+			w.err = err
+			return err
+		}
+		payload = compressed
+		dict["Filter"] = pdfgo.Name("FlateDecode")
+	} else {
+		payload = bytes.Clone(w.scratchBuf.Bytes())
+	}
+	if err := w.writeStreamBytes(stmRef, dict, payload, false); err != nil {
 		return err
 	}
+	w.xrefMu.Lock()
 	for i, objNum := range w.objStmNums {
 		w.xref[objNum] = xrefEntry{kind: xrefCompressed, field2: uint64(stmRef.Number), field3: uint32(i)}
 	}
+	w.xrefMu.Unlock()
 	w.objStmNums = w.objStmNums[:0]
 	w.objStmOffsets = w.objStmOffsets[:0]
 	w.objStmBody.Reset()
 	return nil
 }
 
-// writeXRefStream 写出带PNG Up预测器的PDF 1.5+压缩交叉引用流与文件尾
+// writeXRefStream 写出PDF 1.5+交叉引用流与文件尾，按压缩开关启用PNG Up预测器与Flate压缩
 // 入参: hasInfo 是否包含有效文档信息对象
 // 返回: error 压缩或写入错误
 func (w *StreamWriter) writeXRefStream(hasInfo bool) error {
 	xrefRef := w.AllocRef()
 	xrefOffset := w.pos
+	w.xrefMu.Lock()
 	w.xref[xrefRef.Number] = xrefEntry{kind: xrefNormal, field2: uint64(xrefOffset), field3: 0}
 	var maxF2 uint64
 	var maxF3 uint32
@@ -498,41 +524,58 @@ func (w *StreamWriter) writeXRefStream(hasInfo bool) error {
 		w3 = 2
 	}
 	cols := 1 + w2 + w3
-	rowStride := 1 + cols
-	raw := make([]byte, len(w.xref)*rowStride)
-	prev := make([]byte, cols)
-	cur := make([]byte, cols)
-	for i, entry := range w.xref {
-		cur[0] = entry.kind
-		putBigEndian(cur[1:1+w2], entry.field2)
-		putBigEndian(cur[1+w2:cols], uint64(entry.field3))
-		dst := raw[i*rowStride:]
-		dst[0] = 2
-		for j := range cols {
-			dst[1+j] = cur[j] - prev[j]
+	xrefSize := len(w.xref)
+	var raw []byte
+	if w.compress {
+		rowStride := 1 + cols
+		raw = make([]byte, xrefSize*rowStride)
+		prev := make([]byte, cols)
+		cur := make([]byte, cols)
+		for i, entry := range w.xref {
+			cur[0] = entry.kind
+			putBigEndian(cur[1:1+w2], entry.field2)
+			putBigEndian(cur[1+w2:cols], uint64(entry.field3))
+			dst := raw[i*rowStride:]
+			dst[0] = 2
+			for j := range cols {
+				dst[1+j] = cur[j] - prev[j]
+			}
+			copy(prev, cur)
 		}
-		copy(prev, cur)
+	} else {
+		raw = make([]byte, xrefSize*cols)
+		for i, entry := range w.xref {
+			dst := raw[i*cols:]
+			dst[0] = entry.kind
+			putBigEndian(dst[1:1+w2], entry.field2)
+			putBigEndian(dst[1+w2:cols], uint64(entry.field3))
+		}
 	}
-	compressed, err := w.deflate(raw)
-	if err != nil {
-		w.err = err
-		return err
-	}
+	w.xrefMu.Unlock()
 	dict := pdfgo.Dictionary{
-		"Type":   pdfgo.Name("XRef"),
-		"Size":   pdfgo.Integer(len(w.xref)),
-		"Root":   w.catalogRef,
-		"W":      pdfgo.Array{pdfgo.Integer(1), pdfgo.Integer(w2), pdfgo.Integer(w3)},
-		"Filter": pdfgo.Name("FlateDecode"),
-		"DecodeParms": pdfgo.Dictionary{
+		"Type": pdfgo.Name("XRef"),
+		"Size": pdfgo.Integer(xrefSize),
+		"Root": w.catalogRef,
+		"W":    pdfgo.Array{pdfgo.Integer(1), pdfgo.Integer(w2), pdfgo.Integer(w3)},
+	}
+	payload := raw
+	if w.compress {
+		compressed, err := w.deflate(raw)
+		if err != nil {
+			w.err = err
+			return err
+		}
+		payload = compressed
+		dict["Filter"] = pdfgo.Name("FlateDecode")
+		dict["DecodeParms"] = pdfgo.Dictionary{
 			"Predictor": pdfgo.Integer(12),
 			"Columns":   pdfgo.Integer(cols),
-		},
+		}
 	}
 	if hasInfo {
 		dict["Info"] = w.infoRef
 	}
-	if err := w.writeStreamBytes(xrefRef, dict, compressed, false); err != nil {
+	if err := w.writeStreamBytes(xrefRef, dict, payload, false); err != nil {
 		return err
 	}
 	w.scratchBuf.Reset()
@@ -546,7 +589,15 @@ func (w *StreamWriter) writeXRefStream(hasInfo bool) error {
 // 入参: ref 流对象引用, dict 流字典, payload 写出字节, addFlate 是否补写FlateDecode过滤器
 // 返回: error 写入错误
 func (w *StreamWriter) writeStreamBytes(ref pdfgo.Reference, dict pdfgo.Dictionary, payload []byte, addFlate bool) error {
-	w.xref[ref.Number] = xrefEntry{kind: xrefNormal, field2: uint64(w.pos), field3: 0}
+	w.xrefMu.Lock()
+	valid := ref.Number > 0 && int(ref.Number) < len(w.xref)
+	if valid {
+		w.xref[ref.Number] = xrefEntry{kind: xrefNormal, field2: uint64(w.pos), field3: 0}
+	}
+	w.xrefMu.Unlock()
+	if !valid {
+		return fmt.Errorf("invalid PDF object reference %d", ref.Number)
+	}
 	w.scratchBuf.Reset()
 	w.scratchBuf.WriteString(strconv.FormatInt(ref.Number, 10))
 	w.scratchBuf.WriteString(" 0 obj\n")

@@ -18,8 +18,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/xml"
+	"hash"
 	"math"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,12 +52,14 @@ type pdfFormRecord struct {
 
 // pdfIsolatedGroupKey 区分独立透明组表单的局部光栅缓存键
 type pdfIsolatedGroupKey struct {
-	ref    pdfgo.Reference
-	stream *pdfgo.Stream
-	bounds pdfgo.Rectangle
-	dpi    int
-	alpha  int
-	space  string
+	ref           pdfgo.Reference
+	stream        *pdfgo.Stream
+	bounds        pdfgo.Rectangle
+	dpi           int
+	alpha         int
+	knockout      bool
+	space         string
+	contentDigest [32]byte
 }
 
 // pdfIsolatedGroupImage 保存独立透明组光栅化后的共享图像资源与局部边界
@@ -171,8 +176,10 @@ func countLocalForms(nodes []pdfCompositeNode) map[pdfFormIdentity]int {
 	visit = func(list []pdfCompositeNode) {
 		for i := 0; i < len(list); i++ {
 			node := list[i]
-			if node.formCount > 0 && node.form != nil {
-				add(node.form.Ref, node.form.Stream)
+			for _, span := range node.forms {
+				if span.count > 0 && span.mark != nil {
+					add(span.mark.Ref, span.mark.Stream)
+				}
 			}
 			if node.group != nil && !node.group.Page {
 				add(node.group.Ref, node.group.Stream)
@@ -592,12 +599,14 @@ func (p *pdfImporter) compositeIsolatedGroupRaster(node pdfCompositeNode) (bool,
 		spaceName = string(space.Model)
 	}
 	cacheKey := pdfIsolatedGroupKey{
-		ref:    g.Ref,
-		stream: g.Stream,
-		bounds: g.Bounds,
-		dpi:    int(effectiveDPI),
-		alpha:  int(math.Round(g.Alpha * 255)),
-		space:  spaceName,
+		ref:           g.Ref,
+		stream:        g.Stream,
+		bounds:        g.Bounds,
+		dpi:           int(effectiveDPI),
+		alpha:         int(math.Round(g.Alpha * 255)),
+		knockout:      g.Knockout,
+		space:         spaceName,
+		contentDigest: isolatedGroupContentDigest(strippedChildren, formToLocal, space),
 	}
 	if g.Ref != (pdfgo.Reference{}) {
 		cacheKey.stream = nil
@@ -797,6 +806,10 @@ func stripFormOuterClips(nodes []pdfCompositeNode, outerCount int) ([]pdfgo.Path
 				copyMark := *node.image
 				stripStyle(&copyMark.Style)
 				copyNode.image = &copyMark
+			} else if node.glyph != nil {
+				copyMark := *node.glyph
+				stripStyle(&copyMark.Style)
+				copyNode.glyph = &copyMark
 			}
 			if len(node.children) != 0 {
 				copyNode.children = cloneList(node.children)
@@ -1203,4 +1216,209 @@ func canonicalFormObject(object GraphicObject) GraphicObject {
 		object.CompositeGraphicUnit = c
 	}
 	return object
+}
+
+// isolatedGroupContentDigest 计算独立透明组子图元局部几何与继承图形状态的确定性摘要，避免跨状态光栅缓存误命中
+// 入参: nodes 剥离外层裁剪后的子图元切片, toLocal 页面到表单局部毫米坐标的变换矩阵, space 组混合颜色空间
+// 返回: [32]byte 内容与状态特征摘要
+func isolatedGroupContentDigest(nodes []pdfCompositeNode, toLocal pdfgo.Matrix, space *pdfgo.ColorSpace) [32]byte {
+	h := sha256.New()
+	var buf [8]byte
+	writeU64 := func(v uint64) {
+		binary.LittleEndian.PutUint64(buf[:], v)
+		h.Write(buf[:])
+	}
+	writeFloat := func(v float64) {
+		q := math.Round(v*1e4) / 1e4
+		if q == 0 {
+			q = 0
+		}
+		writeU64(math.Float64bits(q))
+	}
+	writeBool := func(v bool) {
+		if v {
+			h.Write([]byte{1})
+		} else {
+			h.Write([]byte{0})
+		}
+	}
+	writeString := func(s string) {
+		writeU64(uint64(len(s)))
+		h.Write([]byte(s))
+	}
+	writePtr := func(v any) {
+		if v == nil {
+			writeU64(0)
+			return
+		}
+		rv := reflect.ValueOf(v)
+		if rv.Kind() != reflect.Pointer || rv.IsNil() {
+			writeU64(0)
+			return
+		}
+		writeU64(uint64(rv.Pointer()))
+	}
+	writeMatrix := func(m pdfgo.Matrix) {
+		for _, v := range m {
+			writeFloat(v)
+		}
+	}
+	writeColorSpace := func(cs *pdfgo.ColorSpace) {
+		writePtr(cs)
+		if cs != nil {
+			writeString(string(cs.Model))
+		}
+	}
+	writePath := func(path pdfgo.Path, mat pdfgo.Matrix) {
+		writeBool(path.EvenOdd)
+		writeU64(uint64(len(path.Segments)))
+		for _, seg := range path.Segments {
+			writeString(seg.Operator)
+			writeU64(uint64(len(seg.Points)))
+			for _, pt := range seg.Points {
+				p := mat.Apply(pt)
+				writeFloat(p.X)
+				writeFloat(p.Y)
+			}
+		}
+		writeU64(uint64(len(path.Text)))
+		for _, tc := range path.Text {
+			writePtr(tc)
+		}
+	}
+	writePaint := func(paint pdfgo.Paint) {
+		writeBool(paint.None)
+		writeFloat(paint.Alpha)
+		for _, v := range paint.RGB {
+			writeFloat(v)
+		}
+		writeBool(paint.CMYK != nil)
+		if paint.CMYK != nil {
+			for _, v := range *paint.CMYK {
+				writeFloat(v)
+			}
+		}
+		writeColorSpace(paint.Space)
+		writeString(string(paint.SourceSpace))
+		for _, v := range paint.Values {
+			writeFloat(v)
+		}
+		writePtr(paint.Process)
+		writePtr(paint.Colorant)
+		writePtr(paint.Axial)
+		writePtr(paint.Radial)
+		writePtr(paint.Function)
+		writePtr(paint.Mesh)
+		writePtr(paint.Tiling)
+		writePtr(paint.Shading)
+	}
+	writeStyle := func(st pdfgo.Style) {
+		writePaint(st.Fill)
+		writePaint(st.Stroke)
+		writeFloat(st.LineWidth)
+		writeU64(uint64(st.Cap))
+		writeU64(uint64(st.Join))
+		writeFloat(st.MiterLimit)
+		writeU64(uint64(len(st.Dash)))
+		for _, d := range st.Dash {
+			writeFloat(d)
+		}
+		writeFloat(st.DashPhase)
+		writeBool(st.StrokeAdjust)
+		writeBool(st.FillOverprint)
+		writeBool(st.StrokeOverprint)
+		writeU64(uint64(st.OverprintMode))
+		writeString(string(st.RenderingIntent))
+		writeString(string(st.BlendMode))
+		writeBool(st.AlphaIsShape)
+		writePtr(st.SoftMask)
+		writeBool(st.Smoothness != nil)
+		if st.Smoothness != nil {
+			writeFloat(*st.Smoothness)
+		}
+		writeBool(st.Antialias != nil)
+		if st.Antialias != nil {
+			writeBool(*st.Antialias)
+		}
+		writePtr(st.Halftone)
+		writePtr(st.Transfer)
+		writeU64(uint64(len(st.Clips)))
+		for _, clip := range st.Clips {
+			writePath(clip, toLocal)
+		}
+	}
+	writeTextMark := func(tm *pdfgo.TextMark) {
+		writePtr(tm.Font)
+		if tm.Font != nil {
+			writeString(tm.Font.Name)
+		}
+		writeU64(uint64(tm.Mode))
+		writeFloat(tm.Size)
+		writeFloat(tm.HorizontalScale)
+		writeMatrix(toLocal.Mul(tm.Matrix))
+		if tm.StrokeMatrix != (pdfgo.Matrix{}) {
+			writeMatrix(toLocal.Mul(tm.StrokeMatrix))
+		}
+		writeStyle(tm.Style)
+		writeU64(uint64(len(tm.Glyphs)))
+		for _, g := range tm.Glyphs {
+			writeU64(uint64(g.Code))
+			writeU64(uint64(g.CID))
+			writeString(g.Name)
+			writeFloat(g.Width)
+		}
+		writeU64(uint64(len(tm.Positions)))
+		for _, pos := range tm.Positions {
+			writeFloat(pos.X)
+			writeFloat(pos.Y)
+		}
+	}
+	var hashNodes func(h hash.Hash, list []pdfCompositeNode)
+	hashNodes = func(h hash.Hash, list []pdfCompositeNode) {
+		writeU64(uint64(len(list)))
+		for _, node := range list {
+			if node.path != nil {
+				h.Write([]byte{'P'})
+				writeBool(node.path.Fill)
+				writeBool(node.path.Stroke)
+				if node.path.StrokeMatrix != (pdfgo.Matrix{}) {
+					writeMatrix(toLocal.Mul(node.path.StrokeMatrix))
+				}
+				writeStyle(node.path.Style)
+				writePath(node.path.Path, toLocal)
+			}
+			if node.text != nil {
+				h.Write([]byte{'T'})
+				writeTextMark(node.text)
+			}
+			if node.image != nil {
+				h.Write([]byte{'I'})
+				writePtr(node.image.Image)
+				writeMatrix(toLocal.Mul(node.image.Matrix))
+				writeStyle(node.image.Style)
+			}
+			if node.glyph != nil {
+				h.Write([]byte{'L'})
+				writeTextMark(node.glyph)
+			}
+			if node.group != nil {
+				h.Write([]byte{'G'})
+				writeFloat(node.group.Alpha)
+				writeBool(node.group.Isolated)
+				writeBool(node.group.Knockout)
+				writeString(string(node.group.BlendMode))
+				writeColorSpace(node.group.ColorSpace)
+				writePtr(node.group.SoftMask)
+			}
+			if len(node.children) != 0 {
+				h.Write([]byte{'C'})
+				hashNodes(h, node.children)
+			}
+		}
+	}
+	writeColorSpace(space)
+	hashNodes(h, nodes)
+	var sum [32]byte
+	h.Sum(sum[:0])
+	return sum
 }

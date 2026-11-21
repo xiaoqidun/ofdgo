@@ -136,7 +136,7 @@ func (r *Reader) Fork(ctx context.Context) (*Reader, error) {
 		r.pageHeaders = &pageHeaderStore{items: make(map[string]pageHeaderEntry)}
 	}
 	if r.stampSealCache == nil {
-		r.stampSealCache = &stampSealCache{items: make(map[stampSealSource]loadedStampMedia)}
+		r.stampSealCache = newStampSealCache(r.resources)
 	}
 	if r.maxIDCache == nil {
 		r.maxIDCache = &archiveMaxIDCache{}
@@ -1044,6 +1044,11 @@ func (r *Reader) deriveView(files map[string][]byte, docIndex int, selectedVersi
 		id := *selectedVersion
 		ver = &id
 	}
+	sameVersion := (r.selectedVersion == nil && selectedVersion == nil) || (r.selectedVersion != nil && selectedVersion != nil && *r.selectedVersion == *selectedVersion)
+	pageReady := r.pageReady
+	if files != nil || docIndex != r.documentIndex || !sameVersion {
+		pageReady = nil
+	}
 	return &Reader{
 		Path:            r.Path,
 		Zip:             r.Zip,
@@ -1054,7 +1059,7 @@ func (r *Reader) deriveView(files map[string][]byte, docIndex int, selectedVersi
 		encryption:      r.encryption,
 		documentIndex:   docIndex,
 		selectedVersion: ver,
-		pageReady:       r.pageReady,
+		pageReady:       pageReady,
 		pageContents:    r.pageContents,
 		pageHeaders:     r.pageHeaders,
 		stampSealCache:  stampCache,
@@ -1473,7 +1478,7 @@ func (r *Reader) initRootContext(ctx context.Context) error {
 	r.docComposites = &resourceIndex[*CompositeGraphicUnit]{}
 	r.pageHeaderCache = make(map[string]PageContent)
 	r.pageHeaders = &pageHeaderStore{items: make(map[string]pageHeaderEntry)}
-	r.stampSealCache = &stampSealCache{items: make(map[stampSealSource]loadedStampMedia)}
+	r.stampSealCache = newStampSealCache(r.resources)
 	if r.maxIDCache == nil {
 		r.maxIDCache = &archiveMaxIDCache{}
 	}

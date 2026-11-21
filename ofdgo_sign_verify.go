@@ -569,6 +569,10 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef
 	if report.Type == "" {
 		report.Type = SignTypeSeal
 	}
+	if !validPackagePath(sigPath) {
+		report.Error = fmt.Sprintf("invalid signature path: %s", sigRef.BaseLoc)
+		return report
+	}
 	sigData, err := r.readFileViewContext(ctx, sigPath)
 	if err != nil {
 		report.Error = err.Error()
@@ -596,6 +600,10 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef
 	r.applySignatureCoverage(&report, sigListPath, options)
 	report.applySignaturePolicy(options, r.OFD.Version, 0, report.SignatureMethod, report.DigestMethod)
 	signedValuePath := signatureRefPath(sigPath, sigFile.SignedValue)
+	if !validPackagePath(signedValuePath) {
+		report.Error = fmt.Sprintf("invalid signed value path: %s", sigFile.SignedValue)
+		return report
+	}
 	signedValue, err := r.readFileViewContext(ctx, signedValuePath)
 	if err != nil {
 		report.Error = err.Error()
@@ -710,6 +718,10 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef
 	report.applySignatureRevocation(options, [][]byte{sesResult.SignCertRaw, sesResult.SealCertRaw}, sesResult.Certs)
 	if sigFile.SignedInfo.Seal.BaseLoc != "" {
 		sealPath := signatureRefPath(sigPath, sigFile.SignedInfo.Seal.BaseLoc)
+		if !validPackagePath(sealPath) {
+			report.Error = fmt.Sprintf("invalid seal path: %s", sigFile.SignedInfo.Seal.BaseLoc)
+			return report
+		}
 		sealData, err := r.readFileViewContext(ctx, sealPath)
 		if err != nil {
 			report.Error = err.Error()
@@ -787,6 +799,10 @@ func (r *Reader) verifySignatureReference(ctx context.Context, sigPath, method s
 	result := SignatureReferenceVerify{
 		FileRef: ref.FileRef,
 		Path:    refPath,
+	}
+	if !validPackagePath(refPath) {
+		result.Error = fmt.Sprintf("invalid reference path: %s", ref.FileRef)
+		return result
 	}
 	checkValue, err := base64.StdEncoding.DecodeString(strings.TrimSpace(ref.CheckValue))
 	if err != nil {

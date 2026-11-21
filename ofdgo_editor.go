@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"embed"
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
@@ -95,7 +96,6 @@ type Editor struct {
 	ownedReader        *Reader
 	ownedOwner         *Editor
 	ownedTx            *EditorChanges
-	ownedRevision      uint64
 }
 
 // NewEditor 创建空白文档，保存前至少添加一页
@@ -201,6 +201,7 @@ func (e *Editor) SetResources(resources *Resources) {
 		e.source.reader = cloneEditorReader(e.source.reader)
 		e.source.reader.resources = resources
 		e.source.reader.pageContents = resourceCache[pageContentKey, PageContent](resources, 16<<20)
+		e.source.reader.stampSealCache = newStampSealCache(resources)
 	}
 }
 
@@ -1603,15 +1604,16 @@ func escapeOFDText(value string) string {
 	return text.String()
 }
 
-// sameFS 判断两个字体文件系统配置是否安全等价，避免不可比较具体类型触发异常
+// sameFS 判断两个字体文件系统配置是否明确不可变且等价，避免可变文件系统跳过缓存刷新
 // 入参: left 原文件系统, right 新文件系统
 // 返回: bool 是否等价
 func sameFS(left, right fs.FS) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
 	}
-	lt, rt := reflect.TypeOf(left), reflect.TypeOf(right)
-	return lt == rt && lt.Comparable() && left == right
+	l, lok := left.(embed.FS)
+	r, rok := right.(embed.FS)
+	return lok && rok && l == r
 }
 
 // sameFontFS 判断字体文件系统切片配置是否完全一致

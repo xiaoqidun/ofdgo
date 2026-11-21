@@ -18,6 +18,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -220,7 +221,10 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 	if report.Input != "pdf" && report.Input != "ofd" {
 		return report, fmt.Errorf("unsupported input format")
 	}
-	extractDoc := options.ExtractDocument || options.VersionID != "" || options.PrimaryVersion
+	if report.Input == "pdf" && (options.DocumentIndex != 0 || options.VersionID != "" || options.PrimaryVersion) {
+		return report, fmt.Errorf("PDF input does not support document index or version selection")
+	}
+	extractDoc := report.Input == "ofd" && (options.ExtractDocument || options.VersionID != "" || options.PrimaryVersion)
 	if options.SkipUnchanged && !extractDoc && options.DocumentIndex == 0 && options.Fonts == FontKeep && options.Compression.Mode == CompressionUnchanged && report.Input == format && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
 		report.Unchanged = true
 		return report, nil
@@ -865,15 +869,28 @@ func extractConvertDocument(ctx context.Context, reader *Reader, options Convert
 	if info := body.child("DocInfo"); info != nil {
 		if cover := info.child("Cover"); cover != nil {
 			coverPath := cleanPackagePath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, cover)))
-			if coverPath != "" && reader.fileNames[coverPath] {
+			if validPackagePath(coverPath) && reader.fileNames[coverPath] {
 				files[coverPath] = true
 			}
 		}
 	}
+	var overrideFiles map[string][]byte
 	if sigNode := body.child("Signatures"); sigNode != nil {
 		sigPath := cleanPackagePath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, sigNode)))
-		if sigPath != "" && reader.fileNames[sigPath] {
-			if sigDeps, sigErr := reader.versionFileDependencies(ctx, sigPath, nil, nil); sigErr == nil {
+		if validPackagePath(sigPath) && reader.fileNames[sigPath] {
+			if reader.currentVersioned() {
+				filteredList, keptSigFiles, filterErr := filterPrimarySignatureFiles(ctx, reader, entry, sigPath)
+				if filterErr != nil {
+					return nil, filterErr
+				}
+				if len(keptSigFiles) != 0 {
+					files[sigPath] = true
+					maps.Copy(files, keptSigFiles)
+					if filteredList != nil {
+						overrideFiles = map[string][]byte{sigPath: filteredList}
+					}
+				}
+			} else if sigDeps, sigErr := reader.versionFileDependencies(ctx, sigPath, nil, nil); sigErr == nil {
 				maps.Copy(files, sigDeps)
 			} else if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -895,6 +912,7 @@ func extractConvertDocument(ctx context.Context, reader *Reader, options Convert
 			}
 		}
 	}
+	maps.Copy(next.files, overrideFiles)
 	if reader.Zip != nil {
 		next.Zip = &zip.Reader{Comment: reader.Zip.Comment}
 		for _, file := range reader.Zip.File {
@@ -923,4 +941,155 @@ func extractConvertDocument(ctx context.Context, reader *Reader, options Convert
 		return nil, err
 	}
 	return next, nil
+}
+
+// filterPrimarySignatureFiles 过滤多版本文档主入口中仅归属历史版本的签章条目与文件
+// 入参: ctx 取消上下文, reader 源阅读器, entry 主入口文档路径, listPath 签名列表路径
+// 返回: []byte 过滤后的签名列表XML，未改动时为nil, map[string]bool 保留的签章文件集, error 读取或取消错误
+func filterPrimarySignatureFiles(ctx context.Context, reader *Reader, entry, listPath string) ([]byte, map[string]bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	cleanEntry := cleanPackagePath(entry)
+	cleanList := cleanPackagePath(listPath)
+	listData, err := reader.readFileViewContext(ctx, cleanList)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		return nil, nil, nil
+	}
+	listRoot, err := parseEditorXMLContext(ctx, listData)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		return nil, nil, nil
+	}
+	versionRoots := make(map[string]bool)
+	versionDeclaredFiles := make(map[string]bool)
+	if versions, verErr := reader.DocumentVersionsContext(ctx); verErr == nil {
+		for _, v := range versions {
+			if loc := cleanPackagePath(v.Location); validPackagePath(loc) {
+				versionRoots[loc] = true
+			}
+			vDocRoot := cleanPackagePath(v.DocRoot)
+			if validPackagePath(vDocRoot) && vDocRoot != cleanEntry {
+				versionRoots[vDocRoot] = true
+			}
+			for _, vf := range v.Files {
+				if clean := cleanPackagePath(vf.Location); validPackagePath(clean) {
+					versionDeclaredFiles[clean] = true
+				}
+			}
+		}
+	} else if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	primaryPages := make(map[string]bool)
+	if docData, docErr := reader.readFileViewContext(ctx, cleanEntry); docErr == nil {
+		var doc documentPageList
+		if xml.Unmarshal(docData, &doc) == nil {
+			for _, page := range doc.Pages.Page {
+				if id := editorResourceID(page.ID); id != "" {
+					primaryPages[id] = true
+				}
+			}
+		}
+	} else if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	keptFiles := make(map[string]bool)
+	var dropPatches []editorXMLPatch
+	keptCount := 0
+	for _, node := range listRoot.children {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if !node.matchesOFD("Signature") {
+			continue
+		}
+		sigFilePath := cleanPackagePath(signatureRefPath(cleanList, node.attr("BaseLoc")))
+		if !validPackagePath(sigFilePath) || versionDeclaredFiles[sigFilePath] {
+			dropPatches = append(dropPatches, editorXMLPatch{start: node.start, end: node.end})
+			continue
+		}
+		sigData, readErr := reader.readFileViewContext(ctx, sigFilePath)
+		if readErr != nil {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			keptCount++
+			if reader.fileNames[sigFilePath] {
+				keptFiles[sigFilePath] = true
+			}
+			continue
+		}
+		sigFile, parseErr := parseSignatureFile(sigData)
+		if parseErr != nil {
+			keptCount++
+			keptFiles[sigFilePath] = true
+			continue
+		}
+		ownValue := ""
+		if sigFile.SignedValue != "" {
+			if p := cleanPackagePath(signatureRefPath(sigFilePath, sigFile.SignedValue)); validPackagePath(p) {
+				ownValue = p
+			}
+		}
+		ownSeal := ""
+		if sigFile.SignedInfo.Seal.BaseLoc != "" {
+			if p := cleanPackagePath(signatureRefPath(sigFilePath, sigFile.SignedInfo.Seal.BaseLoc)); validPackagePath(p) {
+				ownSeal = p
+			}
+		}
+		hitsPrimaryRoot := false
+		hitsVersionRoot := false
+		for _, ref := range sigFile.SignedInfo.References.Reference {
+			refPath := cleanPackagePath(signatureRefPath(sigFilePath, ref.FileRef))
+			if !validPackagePath(refPath) || refPath == "OFD.xml" || refPath == cleanList || refPath == sigFilePath || refPath == ownValue || refPath == ownSeal {
+				continue
+			}
+			if refPath == cleanEntry {
+				hitsPrimaryRoot = true
+			}
+			if versionRoots[refPath] {
+				hitsVersionRoot = true
+			}
+		}
+		drop := false
+		if hitsVersionRoot && !hitsPrimaryRoot {
+			drop = true
+		} else if !hitsPrimaryRoot && len(sigFile.SignedInfo.StampAnnot) > 0 && len(primaryPages) > 0 {
+			matchedPage := false
+			for _, stamp := range sigFile.SignedInfo.StampAnnot {
+				if primaryPages[editorResourceID(stamp.PageRef)] {
+					matchedPage = true
+					break
+				}
+			}
+			if !matchedPage {
+				drop = true
+			}
+		}
+		if drop {
+			dropPatches = append(dropPatches, editorXMLPatch{start: node.start, end: node.end})
+			continue
+		}
+		keptCount++
+		keptFiles[sigFilePath] = true
+		if ownValue != "" && reader.fileNames[ownValue] {
+			keptFiles[ownValue] = true
+		}
+		if ownSeal != "" && reader.fileNames[ownSeal] {
+			keptFiles[ownSeal] = true
+		}
+	}
+	if keptCount == 0 {
+		return nil, nil, ctx.Err()
+	}
+	if len(dropPatches) == 0 {
+		return nil, keptFiles, ctx.Err()
+	}
+	return editorPatchXML(listData, dropPatches), keptFiles, ctx.Err()
 }

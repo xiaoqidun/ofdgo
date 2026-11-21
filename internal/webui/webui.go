@@ -74,6 +74,7 @@ var sharedBatchFonts = &batchFontCache{
 	byHash: make(map[[32]byte]*ofdgo.FontFS),
 	byKey:  make(map[string]*ofdgo.FontFS),
 	keys:   make(map[string][32]byte),
+	refs:   make(map[[32]byte]int),
 }
 
 // OpenOptions 打开OFD文档选项
@@ -998,7 +999,7 @@ type pendingPDF struct {
 	finished  atomic.Bool
 	syncGen   uint64
 	importer  *ofdgo.PDFImport
-	retry     bool
+	retry     atomic.Bool
 	input     *ofdgo.Input
 	fontNames []string
 	page      int
@@ -1019,6 +1020,7 @@ type batchFontCache struct {
 	byHash map[[32]byte]*ofdgo.FontFS
 	byKey  map[string]*ofdgo.FontFS
 	keys   map[string][32]byte
+	refs   map[[32]byte]int
 }
 
 // get 按批次键查询已缓存的只读字体文件系统
@@ -1054,10 +1056,7 @@ func (c *batchFontCache) getOrBuild(key string, fonts []FontFile) *ofdgo.FontFS 
 	hash.Sum(digest[:0])
 	c.mu.Lock()
 	if existing, ok := c.byHash[digest]; ok {
-		if key != "" {
-			c.byKey[key] = existing
-			c.keys[key] = digest
-		}
+		c.bindKeyLocked(key, digest, existing)
 		c.mu.Unlock()
 		return existing
 	}
@@ -1066,29 +1065,13 @@ func (c *batchFontCache) getOrBuild(key string, fonts []FontFile) *ofdgo.FontFS 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if existing, ok := c.byHash[digest]; ok {
-		if key != "" {
-			c.byKey[key] = existing
-			c.keys[key] = digest
-		}
+		c.bindKeyLocked(key, digest, existing)
 		return existing
 	}
-	if len(c.order) >= batchFontCacheLimit {
-		evict := c.order[0]
-		c.order = c.order[1:]
-		delete(c.byHash, evict)
-		for k, d := range c.keys {
-			if d == evict {
-				delete(c.keys, k)
-				delete(c.byKey, k)
-			}
-		}
-	}
+	c.evictLocked(batchFontCacheLimit - 1)
 	c.order = append(c.order, digest)
 	c.byHash[digest] = built
-	if key != "" {
-		c.byKey[key] = built
-		c.keys[key] = digest
-	}
+	c.bindKeyLocked(key, digest, built)
 	return built
 }
 
@@ -1106,16 +1089,59 @@ func (c *batchFontCache) release(key string) {
 	if !ok {
 		return
 	}
-	for _, other := range c.keys {
-		if other == digest {
-			return
-		}
+	if count := c.refs[digest] - 1; count > 0 {
+		c.refs[digest] = count
+		return
 	}
+	delete(c.refs, digest)
 	delete(c.byHash, digest)
 	for i, item := range c.order {
 		if item == digest {
 			c.order = append(c.order[:i], c.order[i+1:]...)
 			break
+		}
+	}
+	c.evictLocked(batchFontCacheLimit)
+}
+
+// bindKeyLocked 在持锁状态下绑定批次键并维护摘要引用计数
+// 入参: key 批次字体缓存键, digest 内容摘要, fsys 只读字体文件系统
+func (c *batchFontCache) bindKeyLocked(key string, digest [32]byte, fsys *ofdgo.FontFS) {
+	if key == "" {
+		return
+	}
+	if old, exists := c.keys[key]; exists {
+		if old == digest {
+			c.byKey[key] = fsys
+			return
+		}
+		if count := c.refs[old] - 1; count > 0 {
+			c.refs[old] = count
+		} else {
+			delete(c.refs, old)
+		}
+	}
+	c.byKey[key] = fsys
+	c.keys[key] = digest
+	c.refs[digest]++
+}
+
+// evictLocked 在持锁状态下按FIFO淘汰无活跃批次绑定的摘要缓存直至不超过上限
+// 入参: limit 目标保留条目上限
+func (c *batchFontCache) evictLocked(limit int) {
+	for len(c.order) > limit {
+		evicted := false
+		for i, digest := range c.order {
+			if c.refs[digest] > 0 {
+				continue
+			}
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			delete(c.byHash, digest)
+			evicted = true
+			break
+		}
+		if !evicted {
+			return
 		}
 	}
 }
@@ -1300,7 +1326,7 @@ func (e *businessEngine) openPDF(args []platformValue) (any, error) {
 // 返回: error 原错误
 func (e *businessEngine) pdfError(err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		e.pdf.retry = true
+		e.pdf.retry.Store(true)
 	}
 	return err
 }
@@ -1449,7 +1475,7 @@ func (e *businessEngine) preparePDF(name string, args []platformValue) error {
 	e.pdf.operation.checked = time.Now()
 	e.pdf.operation.interval = 255
 	e.currentSession.Renderer.OutputContext = e.pdf.operation
-	if e.pdf.retry {
+	if e.pdf.retry.Load() {
 		if err := e.pdf.importer.Reset(e.pdf.operation); err != nil {
 			return err
 		}
@@ -1462,7 +1488,8 @@ func (e *businessEngine) preparePDF(name string, args []platformValue) error {
 		if err := e.replacePDFReader(reader); err != nil {
 			return err
 		}
-		e.pdf.page, e.pdf.next, e.pdf.retry = -1, 0, false
+		e.pdf.page, e.pdf.next = -1, 0
+		e.pdf.retry.Store(false)
 		e.pdf.syncGen++
 		e.currentSession.pdfSyncGen = e.pdf.syncGen
 	}
@@ -1528,7 +1555,10 @@ func (e *businessEngine) setBatchFonts(args []platformValue) (any, error) {
 		key = args[1].String()
 	}
 	if args[0].IsNull() || args[0].IsUndefined() {
-		if e.batchFontKey == key || key == "" {
+		if key == "" {
+			key = e.batchFontKey
+		}
+		if e.batchFontKey == key {
 			e.batchFontKey = ""
 			e.batchFontFS = nil
 		}
@@ -7358,11 +7388,13 @@ func (e *businessEngine) selectDocument(args []platformValue) (any, error) {
 	if e.currentSession == nil || len(args) == 0 {
 		return nil, fmt.Errorf("ofd document is not opened")
 	}
+	previousEditing := e.currentSession.editing
 	if len(args) > 1 && !args[1].IsNull() && !args[1].IsUndefined() && !args[1].Bool() {
 		e.currentSession.editing = false
 	}
 	session, err := e.currentSession.Document(args[0].Int())
 	if err != nil {
+		e.currentSession.editing = previousEditing
 		return nil, err
 	}
 	session.input, e.currentSession.input = e.currentSession.input, nil
@@ -9883,8 +9915,6 @@ func failureResult(err error) apiResult {
 		result.Code, result.Error = "signatureDependency", "存在签名或版本依赖，无法移除"
 	case errors.Is(err, ofdgo.ErrIncompleteDocument):
 		result.Code, result.Error = "documentPending", "文档尚未准备完成"
-	case errors.Is(err, ofdgo.ErrPrintDenied):
-		result.Code, result.Error = "printDenied", "文档禁止打印"
 	case errors.Is(err, ofdgo.ErrPDFPassword):
 		result.Code, result.Error = "pdfPassword", "PDF密码缺失或错误"
 	case errors.Is(err, ofdgo.ErrCredentialsRequired):

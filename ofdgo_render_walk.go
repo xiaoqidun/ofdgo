@@ -277,59 +277,68 @@ func (r *Renderer) walkTemplatePage(template *PageContent, offsetX, offsetY floa
 				}
 				cache := r.svgTemplateFragments()
 				if cached, hit := cache.get(key); hit {
-					return svgOut.appendTemplateFragment(cached)
-				}
-				var buf bytes.Buffer
-				options := svg.DefaultOptions
-				options.EmbedFonts = false
-				sub := &svgResourceRenderer{
-					SVG:          svg.New(&buf, w, h, &options),
-					renderer:     r,
-					writer:       &buf,
-					seen:         make(map[string]bool),
-					collectClips: true,
-				}
-				if svgOut.imageNames != nil {
-					sub.imageNames = make(map[svgImageKey]string)
-				}
-				buf.Reset()
-				subVisitor := &canvasPageVisitor{renderer: r, ctx: canvas.NewContext(sub), height: cv.height}
-				restoreTpl := r.bindParsedResources(template.pageResources)
-				var walkErr error
-				for templateOrder := range 3 {
-					if walkErr = r.walkLayers(template.Content.Layer, templateOrder, pageOrigin, subVisitor); walkErr != nil {
-						break
+					if cached != svgNonReusableTemplate {
+						return svgOut.appendTemplateFragment(cached)
 					}
-				}
-				restoreTpl()
-				if walkErr != nil {
-					return walkErr
-				}
-				if sub.err != nil {
-					svgOut.err = sub.err
-					return sub.err
-				}
-				if r.renderError != nil {
-					return r.renderError
-				}
-				if !sub.hasSVGDefs {
-					frag := &svgTemplateFragment{
-						markup:   bytes.Clone(buf.Bytes()),
-						fonts:    sub.fonts,
-						images:   sub.images,
-						clipDefs: sub.clipDefs,
+				} else {
+					var buf bytes.Buffer
+					options := svg.DefaultOptions
+					options.EmbedFonts = false
+					tplRenderer := *r
+					tplRenderer.knownSVGResources = nil
+					sub := &svgResourceRenderer{
+						SVG:          svg.New(&buf, w, h, &options),
+						renderer:     &tplRenderer,
+						writer:       &buf,
+						seen:         make(map[string]bool),
+						collectClips: true,
 					}
-					cost := len(frag.markup) + 256
-					for _, img := range frag.images {
-						cost += len(img.Data) + 64
+					if svgOut.imageNames != nil {
+						sub.imageNames = make(map[svgImageKey]string)
 					}
-					for _, def := range frag.clipDefs {
-						cost += len(def.path) + 64
+					buf.Reset()
+					subVisitor := &canvasPageVisitor{renderer: &tplRenderer, ctx: canvas.NewContext(sub), height: cv.height}
+					restoreTpl := tplRenderer.bindParsedResources(template.pageResources)
+					var walkErr error
+					for templateOrder := range 3 {
+						if walkErr = tplRenderer.walkLayers(template.Content.Layer, templateOrder, pageOrigin, subVisitor); walkErr != nil {
+							break
+						}
 					}
-					if cost <= cache.limit {
-						cache.put(key, frag, cost)
+					restoreTpl()
+					if walkErr != nil {
+						return walkErr
 					}
-					return svgOut.appendTemplateFragment(frag)
+					if sub.err != nil {
+						svgOut.err = sub.err
+						return sub.err
+					}
+					if tplRenderer.renderError != nil {
+						r.renderError = tplRenderer.renderError
+						return tplRenderer.renderError
+					}
+					if !sub.hasSVGDefs {
+						frag := &svgTemplateFragment{
+							markup:   bytes.Clone(buf.Bytes()),
+							fonts:    sub.fonts,
+							images:   sub.images,
+							clipDefs: sub.clipDefs,
+						}
+						cost := len(frag.markup) + 256
+						for _, img := range frag.images {
+							cost += len(img.Data) + 64
+						}
+						for _, def := range frag.clipDefs {
+							cost += len(def.path) + 64
+						}
+						if cost <= cache.limit {
+							cache.put(key, frag, cost)
+						}
+						return svgOut.appendTemplateFragment(frag)
+					}
+					if 64 <= cache.limit {
+						cache.put(key, svgNonReusableTemplate, 64)
+					}
 				}
 			}
 		}
@@ -527,7 +536,7 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 					if effAlpha != nil {
 						alphaByte = uint8(clampColor(*effAlpha))
 					}
-					needGroup := alphaByte < 255 && r.compositeObjectCount(*ref, references) > 1
+					needGroup := alphaByte < 255
 					return r.drawPDFCompositeForm(pdfOut, ref, matrix, state.Clip, cv.clip, cv.height, alphaByte, needGroup, references)
 				}
 			}

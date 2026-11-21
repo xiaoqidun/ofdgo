@@ -817,7 +817,8 @@ func (e *Editor) commitAnnotationPartsModeContext(ctx context.Context, base *edi
 		return err
 	}
 	before, after := e.source, *base
-	resources := e.resources
+	beforeResources := e.resources
+	resources := beforeResources
 	if before == nil {
 		resources = slices.Clone(resources)
 		for i := range resources {
@@ -935,7 +936,11 @@ func (e *Editor) commitAnnotationPartsModeContext(ctx context.Context, base *edi
 					e.fontRenderer = nil
 					e.fontMetrics = make(map[string]FontMetrics)
 				}
+				if before == nil {
+					e.resources = beforeResources
+				}
 				e.source = before
+				e.alignSourceResources()
 			}
 			change.redo = func(e *Editor) {
 				for name, data := range updates {
@@ -961,15 +966,49 @@ func (e *Editor) commitAnnotationPartsModeContext(ctx context.Context, base *edi
 					e.fontRenderer = nil
 					e.fontMetrics = make(map[string]FontMetrics)
 				}
+				if before == nil {
+					e.resources = resources
+				}
 				e.source = &after
+				e.alignSourceResources()
 			}
 		} else {
-			change.undo = func(e *Editor) { e.source = before }
-			change.redo = func(e *Editor) { e.source = &after }
+			change.undo = func(e *Editor) {
+				if before == nil {
+					e.resources = beforeResources
+				}
+				e.source = before
+				e.alignSourceResources()
+			}
+			change.redo = func(e *Editor) {
+				if before == nil {
+					e.resources = resources
+				}
+				e.source = &after
+				e.alignSourceResources()
+			}
 		}
 	}
-	e.ownedRevision = e.revision
 	return nil
+}
+
+// alignSourceResources 在撤销或重做恢复源快照后对齐运行时共享资源策略
+func (e *Editor) alignSourceResources() {
+	if e.source == nil || e.source.reader == nil || e.source.reader.resources == e.runtimeResources {
+		return
+	}
+	if e.source.reader == e.ownedReader {
+		e.source.reader.resources = e.runtimeResources
+		e.source.reader.pageContents = resourceCache[pageContentKey, PageContent](e.runtimeResources, 16<<20)
+		e.source.reader.stampSealCache = newStampSealCache(e.runtimeResources)
+		return
+	}
+	source := *e.source
+	source.reader = cloneEditorReader(source.reader)
+	source.reader.resources = e.runtimeResources
+	source.reader.pageContents = resourceCache[pageContentKey, PageContent](e.runtimeResources, 16<<20)
+	source.reader.stampSealCache = newStampSealCache(e.runtimeResources)
+	e.source = &source
 }
 
 // canCommitIncrementalParts 判断本次改动能否在不重建整包根索引的前提下增量提交
@@ -1027,7 +1066,8 @@ func (e *Editor) commitAnnotationPartsFullContext(ctx context.Context, base *edi
 	after.customTagCountReady = false
 	after.richTextTagKnown = false
 	after.mayShrinkResources = true
-	resources := e.resources
+	beforeResources := e.resources
+	resources := beforeResources
 	if before == nil {
 		resources = slices.Clone(resources)
 		for i := range resources {
@@ -1057,10 +1097,21 @@ func (e *Editor) commitAnnotationPartsFullContext(ctx context.Context, base *edi
 	e.ownedTx = e.transactionChanges
 	e.syncPackageNameCache(before, &after)
 	if change := e.recordChange(); change != nil {
-		change.undo = func(e *Editor) { e.source = before }
-		change.redo = func(e *Editor) { e.source = &after }
+		change.undo = func(e *Editor) {
+			if before == nil {
+				e.resources = beforeResources
+			}
+			e.source = before
+			e.alignSourceResources()
+		}
+		change.redo = func(e *Editor) {
+			if before == nil {
+				e.resources = resources
+			}
+			e.source = &after
+			e.alignSourceResources()
+		}
 	}
-	e.ownedRevision = e.revision
 	return nil
 }
 

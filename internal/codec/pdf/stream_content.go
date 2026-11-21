@@ -229,7 +229,7 @@ func (b *ContentBuilder) RenderPath(path *canvas.Path, style canvas.Style, m can
 		} else if !style.HasFill() && style.HasStroke() {
 			b.setStroke(style.Stroke, m)
 			b.setStrokeStyle(style)
-			closed := b.appendPath(path, m, true)
+			closed := b.appendPath(path, m, true, true)
 			if closed {
 				b.buf = append(b.buf, " s"...)
 			} else {
@@ -241,7 +241,7 @@ func (b *ContentBuilder) RenderPath(path *canvas.Path, style canvas.Style, m can
 				b.setFill(style.Fill, m)
 				b.setStroke(style.Stroke, m)
 				b.setStrokeStyle(style)
-				closed := b.appendPath(path, m, true)
+				closed := b.appendPath(path, m, true, true)
 				if closed {
 					b.buf = append(b.buf, " b"...)
 				} else {
@@ -255,7 +255,7 @@ func (b *ContentBuilder) RenderPath(path *canvas.Path, style canvas.Style, m can
 				b.appendPathAndFill(path, m, style.FillRule == canvas.EvenOdd)
 				b.setStroke(style.Stroke, m)
 				b.setStrokeStyle(style)
-				closed := b.appendPath(path, m, true)
+				closed := b.appendPath(path, m, true, true)
 				if closed {
 					b.buf = append(b.buf, " s"...)
 				} else {
@@ -301,7 +301,7 @@ func (b *ContentBuilder) RenderText(text *canvas.Text, m canvas.Matrix, onSubCan
 			if span.Face.FauxBold > 0 {
 				b.setTextRenderMode(2)
 				b.setStroke(span.Face.Fill, m)
-				b.setLineWidth(span.Face.FauxBold * 2)
+				b.setLineWidth(span.Face.FauxBold * span.Face.Size * 2)
 			} else {
 				b.setTextRenderMode(0)
 			}
@@ -342,11 +342,7 @@ func (b *ContentBuilder) WrapFauxBold(firstSpan int, lineWidth float64, fillColo
 		prefix = appendCompactFloatBytes(prefix, float64(fillColor.B)/255, 4)
 		prefix = append(prefix, " RG"...)
 	}
-	btPos := bytes.Index(b.buf[start:], []byte(" BT"))
-	if btPos >= 0 {
-		insertTr := start + btPos + 3
-		b.insertBytes(insertTr, []byte(" 2 Tr"))
-	}
+	b.injectFauxBoldRenderMode(start)
 	b.insertBytes(start, prefix)
 	b.buf = append(b.buf, " Q"...)
 	b.restoreAfterQ()
@@ -518,6 +514,57 @@ func (b *ContentBuilder) insertBytes(pos int, data []byte) {
 	b.buf = append(b.buf, data...)
 	copy(b.buf[pos+n:], b.buf[pos:oldLen])
 	copy(b.buf[pos:pos+n], data)
+}
+
+// injectFauxBoldRenderMode 在指定区间内所有顶层BT指令后注入2 Tr，自动跳过字符串字面量
+// 入参: start 区间起始偏移
+func (b *ContentBuilder) injectFauxBoldRenderMode(start int) {
+	segment := b.buf[start:]
+	var positions []int
+	parenDepth := 0
+	for i := 0; i < len(segment); i++ {
+		c := segment[i]
+		if parenDepth > 0 {
+			if c == '\\' {
+				i++
+			} else if c == '(' {
+				parenDepth++
+			} else if c == ')' {
+				parenDepth--
+			}
+			continue
+		}
+		if c == '(' {
+			parenDepth = 1
+			continue
+		}
+		if c == 'B' && i+1 < len(segment) && segment[i+1] == 'T' {
+			prevOK := i == 0 || isPDFDelimiterOrSpace(segment[i-1])
+			nextOK := i+2 == len(segment) || isPDFDelimiterOrSpace(segment[i+2])
+			if prevOK && nextOK {
+				positions = append(positions, i+2)
+				i++
+			}
+		}
+	}
+	if len(positions) == 0 {
+		return
+	}
+	const trOp = " 2 Tr"
+	extra := len(positions) * len(trOp)
+	oldLen := len(b.buf)
+	b.buf = append(b.buf, make([]byte, extra)...)
+	dst := len(b.buf)
+	srcEnd := oldLen
+	for idx := len(positions) - 1; idx >= 0; idx-- {
+		split := start + positions[idx]
+		tailLen := srcEnd - split
+		dst -= tailLen
+		copy(b.buf[dst:dst+tailLen], b.buf[split:srcEnd])
+		dst -= len(trOp)
+		copy(b.buf[dst:dst+len(trOp)], trOp)
+		srcEnd = split
+	}
 }
 
 // cloneState 复制当前图形状态快照
@@ -998,7 +1045,7 @@ func (b *ContentBuilder) appendMatrixOp(m canvas.Matrix, op string) {
 // appendPathAndFill 追加路径与填充操作符
 // 入参: path 几何路径, m 变换矩阵, evenOdd 是否奇偶填充规则
 func (b *ContentBuilder) appendPathAndFill(path *canvas.Path, m canvas.Matrix, evenOdd bool) {
-	b.appendPath(path, m, false)
+	b.appendPath(path, m, false, false)
 	if evenOdd {
 		b.buf = append(b.buf, " f*"...)
 	} else {
@@ -1007,10 +1054,10 @@ func (b *ContentBuilder) appendPathAndFill(path *canvas.Path, m canvas.Matrix, e
 }
 
 // appendPath 追加变换后的PDF路径指令，对轴对齐矩形输出紧凑re指令
-// 入参: path 几何路径, m 变换矩阵, stripTrailingClose 是否剥离尾部闭合符以配合s/b操作符
+// 入参: path 几何路径, m 变换矩阵, stripTrailingClose 是否剥离尾部闭合符以配合s/b操作符, requireClosed 是否要求路径显式闭合
 // 返回: bool 路径是否以闭合指令结尾
-func (b *ContentBuilder) appendPath(path *canvas.Path, m canvas.Matrix, stripTrailingClose bool) bool {
-	if rect, ok := transformedAxisRect(path, m); ok {
+func (b *ContentBuilder) appendPath(path *canvas.Path, m canvas.Matrix, stripTrailingClose, requireClosed bool) bool {
+	if rect, ok := transformedAxisRect(path, m, requireClosed); ok {
 		b.buf = append(b.buf, ' ')
 		b.buf = appendCompactFloatBytes(b.buf, rect.X0, 4)
 		b.buf = append(b.buf, ' ')
@@ -1031,7 +1078,7 @@ func (b *ContentBuilder) appendPath(path *canvas.Path, m canvas.Matrix, stripTra
 // 入参: dst 目标缓冲, clip 裁剪路径
 // 返回: []byte 追加后的缓冲
 func appendClipPathOps(dst []byte, clip *canvas.Path) []byte {
-	if rect, ok := transformedAxisRect(clip, canvas.Identity); ok {
+	if rect, ok := transformedAxisRect(clip, canvas.Identity, false); ok {
 		dst = append(dst, ' ')
 		dst = appendCompactFloatBytes(dst, rect.X0, 4)
 		dst = append(dst, ' ')
@@ -1047,9 +1094,9 @@ func appendClipPathOps(dst []byte, clip *canvas.Path) []byte {
 }
 
 // transformedAxisRect 识别变换后为单一轴对齐矩形的路径以启用紧凑re操作符
-// 入参: path 源路径, m 变换矩阵
+// 入参: path 源路径, m 变换矩阵, requireClosed 是否要求显式闭合
 // 返回: canvas.Rect 矩形范围, bool 是否为单一轴对齐矩形
-func transformedAxisRect(path *canvas.Path, m canvas.Matrix) (canvas.Rect, bool) {
+func transformedAxisRect(path *canvas.Path, m canvas.Matrix, requireClosed bool) (canvas.Rect, bool) {
 	if path == nil {
 		return canvas.Rect{}, false
 	}
@@ -1067,7 +1114,7 @@ func transformedAxisRect(path *canvas.Path, m canvas.Matrix) (canvas.Rect, bool)
 			pts[0] = m.Dot(sc.End())
 			n = 1
 		case canvas.LineToCmd:
-			if n == 0 || n >= 5 {
+			if closed || n == 0 || n >= 5 {
 				return canvas.Rect{}, false
 			}
 			pts[n] = m.Dot(sc.End())
@@ -1081,13 +1128,15 @@ func transformedAxisRect(path *canvas.Path, m canvas.Matrix) (canvas.Rect, bool)
 			return canvas.Rect{}, false
 		}
 	}
+	explicitlyClosed := closed
 	if n == 5 {
 		if !pts[4].Equals(pts[0]) {
 			return canvas.Rect{}, false
 		}
 		n = 4
+		explicitlyClosed = true
 	}
-	if n != 4 {
+	if n != 4 || (requireClosed && !explicitlyClosed) {
 		return canvas.Rect{}, false
 	}
 	a, b, c, d := pts[0], pts[1], pts[2], pts[3]
@@ -1188,4 +1237,16 @@ func appendTransformedPathPDF(dst []byte, path *canvas.Path, m canvas.Matrix, st
 		return dst, true
 	}
 	return dst, lastClosed
+}
+
+// isPDFDelimiterOrSpace 判断字节是否为PDF词法空白或分隔符
+// 入参: c 字节值
+// 返回: bool 是否为空白或分隔符
+func isPDFDelimiterOrSpace(c byte) bool {
+	switch c {
+	case 0x00, '\t', '\n', '\f', '\r', ' ', '(', ')', '<', '>', '[', ']', '{', '}', '/', '%':
+		return true
+	default:
+		return false
+	}
 }

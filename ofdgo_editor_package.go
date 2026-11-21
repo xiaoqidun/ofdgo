@@ -121,8 +121,16 @@ func (w *editorPageEncoding) Write(data []byte) (int, error) {
 // 入参: ctx 取消上下文, progress 进度回调, generated 本次页面及引用, stage 是否压缩暂存, syncText 是否同步普通文字标引
 // 返回: map[string][]byte 输出条目, map[string]bool 已淘汰的旧标引路径, error 编码错误
 func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, generated map[string]editorGeneratedReferences, stage, syncText bool) (map[string][]byte, map[string]bool, error) {
+	parts, retired, _, err := e.sourcePartsWithRemaps(ctx, progress, generated, stage, syncText)
+	return parts, retired, err
+}
+
+// sourcePartsWithRemaps 准备编辑或归档条目，同时返回多版本删页产生的签名路径替换映射
+// 入参: ctx 取消上下文, progress 进度回调, generated 本次页面及引用, stage 是否压缩暂存, syncText 是否同步普通文字标引
+// 返回: map[string][]byte 输出条目, map[string]bool 已淘汰路径, map[string]string 签名路径替换映射, error 编码错误
+func (e *Editor) sourcePartsWithRemaps(ctx context.Context, progress editorProgress, generated map[string]editorGeneratedReferences, stage, syncText bool) (map[string][]byte, map[string]bool, map[string]string, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	progress = progress.withContext(ctx)
 	parts := make(map[string][]byte)
@@ -135,7 +143,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 	originalCount := 0
 	for i, page := range e.pages {
 		if err := progress.report("pages", i, len(e.pages)); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		original := source.pages[page.ID]
 		if original != nil {
@@ -147,7 +155,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 			}
 			data, err := e.sourcePageXML(i, original)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			if original.repaired || !bytes.Equal(data, original.data) {
 				parts[reader.ResPath(original.ref.BaseLoc)] = data
@@ -165,7 +173,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 			if stage && generated != nil && !e.sourcePagePreserved(page) {
 				data, err := stager.encode(e, page, scan)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				parts[name] = nil
 				known := editorGeneratedReferences{staged: data}
@@ -179,14 +187,14 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 					parts[name], err = io.ReadAll(input)
 					input.Close()
 					if err != nil {
-						return nil, nil, err
+						return nil, nil, nil, err
 					}
 					generated[name] = editorGeneratedReferences{data: parts[name], refs: known.refs, objects: known.objects}
 				}
 			} else {
 				data, err := e.sourcePageData(page, scan)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				parts[name] = data
 				if scan != nil && scan.safe && scan.seen && len(scan.stack) == 0 {
@@ -197,15 +205,15 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 		}
 	}
 	if err := progress.report("pages", len(e.pages), len(e.pages)); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	fonts, images, spaces, usedFiles, extraParts, err := e.usedResources(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for _, resource := range e.resources {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if resource.definition() != "" && usedFiles[resource.name] || resource.colorProfileUsed(spaces) {
 			parts[resource.name] = resource.data
@@ -220,11 +228,11 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 	if len(fonts)+len(images)+len(spaces) != 0 {
 		data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) { x.resources(fonts, images, spaces) })
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		resourcePath, added, err := mergePackageResources(ctx, reader, parts, source.document, source.directory, data)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if added {
 			resourceFiles = append(resourceFiles, resourcePath)
@@ -240,15 +248,15 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 		name := reader.documentRoot
 		data, err := reader.readFileViewContext(ctx, name)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		root, err := parseEditorXMLContext(ctx, data)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		common := root.child("CommonData")
 		if common == nil {
-			return nil, nil, fmt.Errorf("document has no CommonData")
+			return nil, nil, nil, fmt.Errorf("document has no CommonData")
 		}
 		var patches []editorXMLPatch
 		if e.maxID != uint64(source.document.CommonData.MaxUnitID) {
@@ -277,7 +285,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 		if pagesChanged {
 			pages := root.child("Pages")
 			if pages == nil {
-				return nil, nil, fmt.Errorf("document has no Pages")
+				return nil, nil, nil, fmt.Errorf("document has no Pages")
 			}
 			originals := make(map[string]*editorXML, len(pages.children))
 			for _, child := range pages.children {
@@ -296,7 +304,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 				} else {
 					item, err := pages.containerXML("Page", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: page.ID}, {Name: xml.Name{Local: "BaseLoc"}, Value: page.BaseLoc}}, nil)
 					if err != nil {
-						return nil, nil, err
+						return nil, nil, nil, err
 					}
 					entries = append(entries, bytes.TrimPrefix(item, []byte(xml.Header)))
 				}
@@ -330,7 +338,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 	if !reflect.DeepEqual(e.Info, source.info) {
 		data, err := e.sourceInfoXML()
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		parts["OFD.xml"] = data
 	}
@@ -341,37 +349,39 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 			var err error
 			data, err = reader.readFileViewContext(ctx, name)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 		updated, err := e.withOutlines(data)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		parts[name] = updated
 	}
+	var remaps map[string]string
 	if originalCount != len(source.pages) || len(source.annotationPages) != 0 || len(e.removedPages) != 0 || len(source.removedAttachments) != 0 {
-		if err := e.pruneDocumentReferences(ctx, parts, generated); err != nil {
-			return nil, nil, err
+		remaps, err = e.pruneDocumentReferences(ctx, parts, generated)
+		if err != nil {
+			return nil, nil, nil, err
 		}
 	}
 	if err := e.pruneStructureReferences(ctx, parts, generated); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var retired map[string]bool
 	if syncText {
 		retired, err = e.syncSourceTextMetadata(ctx, parts)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 	retired, err = e.collectRetiredPages(ctx, keptSource, retired)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for name, data := range maps.Clone(parts) {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if file, ok := reader.packageFile(name); ok {
 			actual := cleanPackagePath(file.Name)
@@ -395,9 +405,9 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return parts, retired, nil
+	return parts, retired, remaps, nil
 }
 
 // collectRetiredPages 收集相对原包已删除页面、其页面资源及仅归属被删页的注解路径
@@ -927,7 +937,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		ctx = e.output.ctx
 	}
 	generated := make(map[string]editorGeneratedReferences)
-	parts, retiredParts, err := e.sourceParts(ctx, progress, generated, true, true)
+	parts, retiredParts, sigRemaps, err := e.sourcePartsWithRemaps(ctx, progress, generated, true, true)
 	if err != nil {
 		return 0, err
 	}
@@ -987,7 +997,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		return 0, err
 	}
 	if currentVersioned {
-		parts, err = reader.versionOutputChanges(ctx, parts, removed, generated)
+		parts, err = reader.versionOutputChangesWithRemaps(ctx, parts, removed, generated, sigRemaps)
 		if err != nil {
 			return 0, err
 		}
@@ -1216,11 +1226,11 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 // 入参: ctx 取消上下文, progress 准备进度回调, syncText 是否同步普通文字标引
 // 返回: *Reader 阅读器, map[string]bool 已淘汰的旧标引路径, error 错误信息
 func (e *Editor) sourceReader(ctx context.Context, progress editorProgress, syncText bool) (*Reader, map[string]bool, error) {
-	parts, retired, err := e.sourceParts(ctx, progress, nil, false, syncText)
+	parts, retired, sigRemaps, err := e.sourcePartsWithRemaps(ctx, progress, nil, false, syncText)
 	if err != nil {
 		return nil, nil, err
 	}
-	parts, err = e.source.reader.versionOutputChanges(ctx, parts, retired, nil)
+	parts, err = e.source.reader.versionOutputChangesWithRemaps(ctx, parts, retired, nil, sigRemaps)
 	if err != nil {
 		return nil, nil, err
 	}

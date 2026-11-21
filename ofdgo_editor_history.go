@@ -64,6 +64,9 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 		changes = EditorChanges{All: true}
 	}
 	e.transactionChanges = before.transactionChanges
+	if e.ownedTx == pending {
+		e.ownedTx = before.transactionChanges
+	}
 	e.history, e.historyIndex, e.historyLimit = before.history, before.historyIndex, before.historyLimit
 	if !sameBackend(e.backends.FontResources, before.backends.FontResources) {
 		e.clearFontResourceCache()
@@ -553,6 +556,8 @@ func editorSourceInitialPage(source *editorSourcePage) PageContent {
 	page := *source.original
 	page.Content.Layer = source.initialLayers
 	page.Actions = source.initialActions
+	page.Template = source.initialTemplates
+	page.PageRes = source.initialPageRes
 	return page
 }
 

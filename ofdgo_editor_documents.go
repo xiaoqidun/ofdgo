@@ -420,7 +420,7 @@ func (identity editorDocumentIdentity) matches(other editorDocumentIdentity) boo
 	return identity.root == other.root && identity.id == other.id && identity.version == other.version
 }
 
-// editDocumentsContext 在独立快照中修改文档入口，新增文档切换时清空历史版本选择，其余保留
+// editDocumentsContext 在独立快照中修改文档入口，仅在目标文档切换时清空历史版本选择
 // 入参: ctx 取消上下文, edit 修改包快照并返回新的当前文档索引
 // 返回: error 修改或取消错误
 func (e *Editor) editDocumentsContext(ctx context.Context, edit func(*Reader, []byte, *editorXML) (int, error)) error {
@@ -429,7 +429,12 @@ func (e *Editor) editDocumentsContext(ctx context.Context, edit func(*Reader, []
 		return err
 	}
 	beforeCount := reader.DocumentCount()
+	beforeIndex := reader.DocumentIndex()
 	return e.editDocumentSnapshotWithRetired(ctx, reader, retiredTags, true, func(r *Reader, data []byte, root *editorXML) (int, error) {
+		var beforeRaw []byte
+		if beforeBody := root.childAt("DocBody", beforeIndex); beforeBody != nil {
+			beforeRaw = data[beforeBody.start:beforeBody.end]
+		}
 		index, editErr := edit(r, data, root)
 		if editErr != nil {
 			return 0, editErr
@@ -445,8 +450,13 @@ func (e *Editor) editDocumentsContext(ctx context.Context, edit func(*Reader, []
 					afterCount++
 				}
 			}
-			if afterCount != beforeCount {
+			if afterCount > beforeCount {
 				r.selectedVersion = nil
+			} else if afterCount < beforeCount {
+				afterBody := updatedRoot.childAt("DocBody", index)
+				if afterBody == nil || !bytes.Equal(beforeRaw, ofdData[afterBody.start:afterBody.end]) {
+					r.selectedVersion = nil
+				}
 			}
 		}
 		return index, nil

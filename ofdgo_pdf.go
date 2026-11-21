@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -27,6 +28,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
@@ -173,7 +175,7 @@ func NewPDFImport(ctx context.Context, input *Input, options PDFImportOptions) (
 	editor.fontDirs, editor.fontFS = renderer.FontSources()
 	editor.fontSourcesCache = renderer.fontSourcesCache
 	importer := &pdfImporter{resources: options.Resources, ctx: ctx, editor: editor, renderer: renderer, rasterDPI: rasterDPI, page: -1, fontIDs: map[*pdfgo.Font]string{}, fonts: map[*pdfgo.Font]*pdfImportedFont{}, pages: map[pdfgo.Reference]*pdfgo.Page{}, pageIDs: map[pdfgo.Reference]string{}, structureBindings: &pdfStructureBindings{}}
-	readOptions := pdfgo.ReaderOptions{Password: options.Password, PasswordUTF8: options.PasswordUTF8, ShapeText: importer.shapePDFText}
+	readOptions := pdfgo.ReaderOptions{Password: options.Password, PasswordUTF8: options.PasswordUTF8, ShapeText: importer.shapePDFText, Workers: conversionWorkers(ctx)}
 	if !options.Strict {
 		importer.warning = func(warning pdfgo.Diagnostic) {
 			warning.Page = importer.page + 1
@@ -348,8 +350,17 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 	if err := importer.pageOpenActions(ctx, page); err != nil {
 		return fmt.Errorf("import PDF page %d actions: %w", index+1, err)
 	}
+	baseT, baseP, baseI := importer.report.TextObjects, importer.report.PathObjects, importer.report.ImageObjects
 	if err := importer.compositePage(nil, func(visitor pdfgo.Visitor) error { return importer.reader.WalkPage(ctx, page, visitor) }); err != nil {
 		return fmt.Errorf("import PDF page %d: %w", index+1, err)
+	}
+	if importer.pageBodyCounts == nil {
+		importer.pageBodyCounts = make(map[int][3]int)
+	}
+	importer.pageBodyCounts[index] = [3]int{
+		importer.report.TextObjects - baseT,
+		importer.report.PathObjects - baseP,
+		importer.report.ImageObjects - baseI,
 	}
 	if err := importer.annotations(ctx, page, p.options.Strict); err != nil {
 		return fmt.Errorf("import PDF page %d: %w", index+1, err)
@@ -830,6 +841,8 @@ type pdfImporter struct {
 	cmykSpace           string
 	rgbSpace            string
 	iccSpaces           map[pdfICCKey]string
+	mergedColorSpaces   map[[32]byte]string
+	pageBodyCounts      map[int][3]int
 	objects             *pdfObjectBuffer
 	structureBindings   *pdfStructureBindings
 	annotationBindings  []pdfStructureObjectBinding
@@ -1025,7 +1038,7 @@ func (p *pdfImporter) commitObjects() error {
 	return nil
 }
 
-// mergeColorSpaceResource 将工作协程产生的颜色空间资源合并去重到主编辑器
+// mergeColorSpaceResource 将工作协程产生的颜色空间资源按特征去重合并到主编辑器
 // 入参: resource 工作协程颜色空间资源
 // 返回: string 主编辑器颜色空间标识, error 注册错误
 func (p *pdfImporter) mergeColorSpaceResource(resource editorResource) (string, error) {
@@ -1049,7 +1062,24 @@ func (p *pdfImporter) mergeColorSpaceResource(resource editorResource) (string, 
 			return p.rgbSpace, nil
 		}
 	}
-	return p.editor.AddColorSpace(ColorSpace{Type: space.Type, BitsPerComponent: space.BitsPerComponent, Palette: space.Palette}, resource.data)
+	if p.mergedColorSpaces == nil {
+		p.mergedColorSpaces = make(map[[32]byte]string)
+		for _, existing := range p.editor.resources {
+			if existing.space != nil {
+				p.mergedColorSpaces[colorSpaceResourceDigest(*existing.space, existing.data)] = existing.space.ID
+			}
+		}
+	}
+	key := colorSpaceResourceDigest(*space, resource.data)
+	if id, ok := p.mergedColorSpaces[key]; ok {
+		return id, nil
+	}
+	id, err := p.editor.AddColorSpace(ColorSpace{Type: space.Type, BitsPerComponent: space.BitsPerComponent, Palette: space.Palette}, resource.data)
+	if err != nil {
+		return "", err
+	}
+	p.mergedColorSpaces[key] = id
+	return id, nil
 }
 
 // registerMergedForm 对重映射后的复合图形对象按内容去重并注册到主编辑器
@@ -1542,11 +1572,18 @@ func (p *PDFImport) finishPagesParallel(ctx context.Context, pending, leaders []
 	received := 0
 	nextPos := 0
 	var firstErr error
+	var rootErr error
+	recordWorkerErr := func(err error) {
+		if err != nil && rootErr == nil && (!errors.Is(err, context.Canceled) || ctx.Err() != nil) {
+			rootErr = err
+		}
+	}
 	drainWorkers := func() {
 		cancel()
 		for received < len(leaders) {
-			<-results
+			drained := <-results
 			received++
+			recordWorkerErr(drained.err)
 		}
 		wg.Wait()
 	}
@@ -1581,12 +1618,16 @@ func (p *PDFImport) finishPagesParallel(ctx context.Context, pending, leaders []
 		res := <-results
 		received++
 		if res.err != nil {
+			recordWorkerErr(res.err)
 			cancel()
 		}
 		readyResults[res.pageIndex] = res
 	}
 	if firstErr != nil {
 		drainWorkers()
+		if ctx.Err() == nil && errors.Is(firstErr, context.Canceled) && rootErr != nil {
+			return rootErr
+		}
 		return firstErr
 	}
 	wg.Wait()
@@ -1871,10 +1912,25 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 	if err := importer.commitAnnotations(); err != nil {
 		return fmt.Errorf("import PDF page %d: %w", index+1, err)
 	}
+	if importer.pageBodyCounts == nil {
+		importer.pageBodyCounts = make(map[int][3]int)
+	}
+	importer.pageBodyCounts[index] = [3]int{res.report.TextObjects, res.report.PathObjects, res.report.ImageObjects}
 	importer.report.TextObjects += res.report.TextObjects
 	importer.report.PathObjects += res.report.PathObjects
 	importer.report.ImageObjects += res.report.ImageObjects
-	importer.report.Warnings = append(importer.report.Warnings, res.report.Warnings...)
+	for _, w := range res.report.Warnings {
+		if isPDFFontHintingWarning(w.Message) {
+			if importer.fontWarnings == nil {
+				importer.fontWarnings = make(map[string]bool)
+			}
+			if importer.fontWarnings[w.Message] {
+				continue
+			}
+			importer.fontWarnings[w.Message] = true
+		}
+		importer.report.Warnings = append(importer.report.Warnings, w)
+	}
 	importer.report.Pages++
 	if err := editorProgress(p.options.OnProgress).withContext(ctx).report("convert", importer.report.Pages, len(p.pages)); err != nil {
 		return err
@@ -1926,7 +1982,11 @@ func (p *PDFImport) convertDuplicatePage(ctx context.Context, index, leader int)
 	if err := importer.commitAnnotations(); err != nil {
 		return fmt.Errorf("import PDF page %d: %w", index+1, err)
 	}
-	_ = leader
+	if counts, ok := importer.pageBodyCounts[leader]; ok {
+		importer.report.TextObjects += counts[0]
+		importer.report.PathObjects += counts[1]
+		importer.report.ImageObjects += counts[2]
+	}
 	importer.report.Pages++
 	if err := editorProgress(p.options.OnProgress).withContext(ctx).report("convert", importer.report.Pages, len(p.pages)); err != nil {
 		return err
@@ -2081,19 +2141,54 @@ func rebindSequence(seq *pdfgo.ContentSequence, from, to *pdfgo.Reader, fromPage
 	}
 }
 
-// clearGraphicObjectID 清空对象标识以便作为独立模板对象重新分配标识
+// clearGraphicObjectID 递归清空对象及嵌套复合对象内部标识以便作为独立模板对象重新分配标识
 // 入参: object 图形对象指针
 func clearGraphicObjectID(object *GraphicObject) {
 	switch object.Type {
-	case "TextObject":
+	case "TextObject", "Text":
 		object.TextObject.ID = ""
-	case "PathObject":
+	case "PathObject", "Path":
 		object.PathObject.ID = ""
 	case "ImageObject":
 		object.ImageObject.ID = ""
 	case "CompositeObject", "CompositeGraphicUnit":
 		object.CompositeGraphicUnit.ID = ""
+		for i := range object.CompositeGraphicUnit.Objects {
+			clearGraphicObjectID(&object.CompositeGraphicUnit.Objects[i])
+		}
 	}
+}
+
+// colorSpaceResourceDigest 计算颜色空间类型、位深、调色板与ICC数据的确定性摘要
+// 入参: space 颜色空间定义, profileData ICC配置文件字节
+// 返回: [32]byte 颜色空间特征摘要
+func colorSpaceResourceDigest(space ColorSpace, profileData []byte) [32]byte {
+	h := sha256.New()
+	var buf [8]byte
+	writeU64 := func(v uint64) {
+		binary.LittleEndian.PutUint64(buf[:], v)
+		h.Write(buf[:])
+	}
+	writeU64(uint64(len(space.Type)))
+	h.Write([]byte(space.Type))
+	writeU64(uint64(space.BitsPerComponent))
+	writeU64(uint64(len(space.Palette)))
+	for _, entry := range space.Palette {
+		writeU64(uint64(len(entry)))
+		h.Write([]byte(entry))
+	}
+	writeU64(uint64(len(profileData)))
+	h.Write(profileData)
+	var sum [32]byte
+	h.Sum(sum[:0])
+	return sum
+}
+
+// isPDFFontHintingWarning 判断诊断信息是否为需要文档级去重的字体提示指令告警
+// 入参: message 诊断消息
+// 返回: bool 是否为字体提示告警
+func isPDFFontHintingWarning(message string) bool {
+	return strings.HasPrefix(message, "PDF font ") && strings.HasSuffix(message, " has invalid hinting instructions; design outlines and original font retained")
 }
 
 // remapGraphicObjects 递归重映射图形对象中的字体、图像、颜色空间及复合图形资源标识

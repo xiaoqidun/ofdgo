@@ -16,7 +16,9 @@ package pdf
 
 import (
 	"bytes"
+	"cmp"
 	"image/color"
+	"slices"
 	"strconv"
 	"sync"
 
@@ -184,37 +186,69 @@ func buildShadingPatternDict(gradient canvas.Gradient, m canvas.Matrix) pdfgo.Di
 	}
 }
 
-// buildGradientFunction 构造多色标拼接Type 3或单段Type 2插值函数字典
+// buildGradientFunction 构造严格覆盖[0,1]的多色标拼接Type 3或单段Type 2插值函数字典
 // 入参: grad 色标序列
 // 返回: pdfgo.Dictionary 函数字典
 func buildGradientFunction(grad canvas.Grad) pdfgo.Dictionary {
-	if len(grad) < 2 {
+	if len(grad) == 0 {
 		return pdfgo.Dictionary{}
 	}
-	fs := make(pdfgo.Array, 0, len(grad)-1)
-	bounds := make(pdfgo.Array, 0, max(0, len(grad)-2))
-	encode := make(pdfgo.Array, 0, 2*(len(grad)-1))
-	for i := 0; i < len(grad)-1; i++ {
-		fs = append(fs, pdfgo.Dictionary{
+	stops := make([]canvas.Stop, len(grad))
+	copy(stops, grad)
+	for i := range stops {
+		if stops[i].Offset < 0 {
+			stops[i].Offset = 0
+		} else if stops[i].Offset > 1 {
+			stops[i].Offset = 1
+		}
+	}
+	slices.SortStableFunc(stops, func(a, b canvas.Stop) int { return cmp.Compare(a.Offset, b.Offset) })
+	type gradSeg struct {
+		t0, t1 float64
+		c0, c1 color.RGBA
+	}
+	segs := make([]gradSeg, 0, len(stops)+1)
+	if stops[0].Offset > 0 {
+		segs = append(segs, gradSeg{t0: 0, t1: stops[0].Offset, c0: stops[0].Color, c1: stops[0].Color})
+	}
+	for i := 0; i < len(stops)-1; i++ {
+		if stops[i+1].Offset > stops[i].Offset {
+			segs = append(segs, gradSeg{t0: stops[i].Offset, t1: stops[i+1].Offset, c0: stops[i].Color, c1: stops[i+1].Color})
+		}
+	}
+	if stops[len(stops)-1].Offset < 1 {
+		last := stops[len(stops)-1]
+		segs = append(segs, gradSeg{t0: last.Offset, t1: 1, c0: last.Color, c1: last.Color})
+	}
+	if len(segs) == 0 {
+		c := stops[len(stops)-1].Color
+		segs = append(segs, gradSeg{t0: 0, t1: 1, c0: c, c1: c})
+	}
+	makeLinear := func(c0, c1 color.RGBA) pdfgo.Dictionary {
+		return pdfgo.Dictionary{
 			"FunctionType": pdfgo.Integer(2),
 			"Domain":       pdfgo.Array{pdfgo.Integer(0), pdfgo.Integer(1)},
 			"N":            pdfgo.Integer(1),
-			"C0":           unpremultiplyGradientStop(grad[i].Color),
-			"C1":           unpremultiplyGradientStop(grad[i+1].Color),
-		})
+			"C0":           unpremultiplyGradientStop(c0),
+			"C1":           unpremultiplyGradientStop(c1),
+		}
+	}
+	if len(segs) == 1 {
+		return makeLinear(segs[0].c0, segs[0].c1)
+	}
+	fs := make(pdfgo.Array, 0, len(segs))
+	bounds := make(pdfgo.Array, 0, len(segs)-1)
+	encode := make(pdfgo.Array, 0, 2*len(segs))
+	for i, seg := range segs {
+		fs = append(fs, makeLinear(seg.c0, seg.c1))
 		if i > 0 {
-			bounds = append(bounds, pdfgo.Real(grad[i].Offset))
+			bounds = append(bounds, pdfgo.Real(seg.t0))
 		}
 		encode = append(encode, pdfgo.Integer(0), pdfgo.Integer(1))
 	}
-	if len(fs) == 1 {
-		fn := fs[0].(pdfgo.Dictionary)
-		fn["Domain"] = pdfgo.Array{pdfgo.Real(grad[0].Offset), pdfgo.Real(grad[len(grad)-1].Offset)}
-		return fn
-	}
 	return pdfgo.Dictionary{
 		"FunctionType": pdfgo.Integer(3),
-		"Domain":       pdfgo.Array{pdfgo.Real(grad[0].Offset), pdfgo.Real(grad[len(grad)-1].Offset)},
+		"Domain":       pdfgo.Array{pdfgo.Integer(0), pdfgo.Integer(1)},
 		"Bounds":       bounds,
 		"Encode":       encode,
 		"Functions":    fs,

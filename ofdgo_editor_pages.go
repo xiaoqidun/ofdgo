@@ -36,10 +36,10 @@ type pageReferenceNode struct {
 // 沿当前文档、页面、模板、资源、注释和签名索引检查，不进入附件、私有扩展和签名原始凭据
 // 版本包通过独立副本隔离更新当前版本可见的签名列表与签名描述，保留历史版本原始签名快照
 // 入参: ctx 取消上下文, parts 输出覆盖条目, generated 本次自产页面及引用，可为nil
-// 返回: error 读取、解析或取消错误
-func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][]byte, generated map[string]editorGeneratedReferences) error {
+// 返回: map[string]string 版本签名路径替换映射, error 读取、解析或取消错误
+func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][]byte, generated map[string]editorGeneratedReferences) (map[string]string, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	removed := maps.Clone(e.removedPages)
 	if removed == nil {
@@ -56,7 +56,7 @@ func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][
 	}
 	delete(removed, "")
 	if len(removed) == 0 && len(e.source.removedAttachments) == 0 {
-		return nil
+		return nil, nil
 	}
 	reader := e.source.reader
 	bookmarks := make(map[string]bool)
@@ -72,7 +72,7 @@ func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][
 	seen := make(map[string]bool)
 	for len(queue) > 0 {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
 		name := queue[0]
 		queue = queue[1:]
@@ -85,7 +85,7 @@ func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][
 			var err error
 			data, err = reader.readFileViewContext(ctx, name)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		} else if known := generated[name]; data == nil && known.staged != nil {
 			input := imageInput{ReadCloser: known.staged.open(), ctx: ctx}
@@ -93,12 +93,12 @@ func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][
 			data, err = io.ReadAll(input)
 			input.Close()
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
 		root, err := parseEditorXMLContext(ctx, data)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		resBase := ""
 		if root.name.Local == "Res" {
@@ -196,7 +196,7 @@ func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][
 			return nil
 		}
 		if err := walk(root); err != nil {
-			return err
+			return nil, err
 		}
 		if len(patches) != 0 {
 			parts[name] = editorPatchXML(data, patches)
@@ -204,33 +204,35 @@ func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][
 		}
 	}
 	if len(removed) != 0 && e.source.document.Signatures != "" && reader.OFD.DocBody[reader.documentIndex].versioned {
-		if err := e.pruneVersionSignatureReferences(ctx, parts, removed); err != nil {
-			return err
+		remaps, err := e.pruneVersionSignatureReferences(ctx, parts, removed)
+		if err != nil {
+			return nil, err
 		}
+		return remaps, ctx.Err()
 	}
-	return ctx.Err()
+	return nil, ctx.Err()
 }
 
 // pruneVersionSignatureReferences 在多版本文档删页时隔离更新当前版本可见签名中的悬空印章引用
 // 入参: ctx 取消上下文, parts 输出覆盖条目, removed 已删除页面规范标识集合
-// 返回: error 读取、解析或取消错误
-func (e *Editor) pruneVersionSignatureReferences(ctx context.Context, parts map[string][]byte, removed map[string]bool) error {
+// 返回: map[string]string 旧路径到新路径的替换映射, error 读取、解析或取消错误
+func (e *Editor) pruneVersionSignatureReferences(ctx context.Context, parts map[string][]byte, removed map[string]bool) (map[string]string, error) {
 	reader := e.source.reader
 	listPath := cleanPackagePath(reader.ResPath(e.source.document.Signatures))
 	if !validPackagePath(listPath) {
-		return nil
+		return nil, nil
 	}
 	listData, ok := parts[listPath]
 	if !ok {
 		var err error
 		listData, err = reader.readFileViewContext(ctx, listPath)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	listRoot, err := parseEditorXMLContext(ctx, listData)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var scope *versionSignatureScope
 	if reader.versionInfo != nil {
@@ -238,14 +240,17 @@ func (e *Editor) pruneVersionSignatureReferences(ctx context.Context, parts map[
 		if xml.Unmarshal(listData, &list) == nil {
 			scope, err = reader.buildVersionSignatureScope(ctx, listPath, list)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
+	staged := maps.Clone(parts)
+	remaps := make(map[string]string)
+	currentSigIDs := make(map[string]bool)
 	var listPatches []editorXMLPatch
 	for _, node := range listRoot.children {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
 		if !node.matchesOFD("Signature") {
 			continue
@@ -254,20 +259,21 @@ func (e *Editor) pruneVersionSignatureReferences(ctx context.Context, parts map[
 		if scope != nil && !reader.versionSignatureMatches(ctx, scope, sigRef) {
 			continue
 		}
+		currentSigIDs[sigRef.ID] = true
 		sigPath := cleanPackagePath(signatureRefPath(listPath, sigRef.BaseLoc))
 		if !validPackagePath(sigPath) {
 			continue
 		}
-		sigData, exists := parts[sigPath]
+		sigData, exists := staged[sigPath]
 		if !exists {
 			sigData, err = reader.readFileViewContext(ctx, sigPath)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
 		sigRoot, err := parseEditorXMLContext(ctx, sigData)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		var sigPatches []editorXMLPatch
 		var walkSig func(*editorXML)
@@ -287,40 +293,78 @@ func (e *Editor) pruneVersionSignatureReferences(ctx context.Context, parts map[
 		if len(sigPatches) == 0 {
 			continue
 		}
-		newSigPath := packageAvailableName(reader, parts, sigPath)
-		parts[newSigPath] = editorPatchXML(sigData, sigPatches)
+		newSigPath := packageAvailableName(reader, staged, sigPath)
+		staged[newSigPath] = editorPatchXML(sigData, sigPatches)
+		remaps[sigPath] = newSigPath
 		patch, err := editorXMLAttributePatch(listData, node, "BaseLoc", "/"+newSigPath)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		listPatches = append(listPatches, patch)
 	}
 	if len(listPatches) == 0 {
-		return nil
+		return nil, nil
 	}
-	newListPath := packageAvailableName(reader, parts, listPath)
-	parts[newListPath] = editorPatchXML(listData, listPatches)
 	ofdName := "OFD.xml"
 	if file, ok := reader.packageFile(ofdName); ok {
 		ofdName = cleanPackagePath(file.Name)
 	}
+	_, protectedFiles, protected, err := e.outputProtection(ctx, reader)
+	if err != nil {
+		return nil, err
+	}
+	ofdProtected := false
+	listProtected := false
+	if protected || protectedFiles[ofdName] {
+		otherProtected, _, protErr := reader.signatureRemovalProtected(ctx, listPath, currentSigIDs, true)
+		if protErr != nil {
+			return nil, protErr
+		}
+		ofdProtected = otherProtected[ofdName] || otherProtected["OFD.xml"]
+		listProtected = otherProtected[listPath]
+	}
+	if ofdProtected {
+		listShared, shareErr := reader.versionSignatureListShared(ctx, listPath)
+		if shareErr != nil {
+			return nil, shareErr
+		}
+		if listProtected || listShared {
+			return nil, nil
+		}
+		for _, newSigPath := range remaps {
+			parts[newSigPath] = staged[newSigPath]
+		}
+		parts[listPath] = editorPatchXML(listData, listPatches)
+		return remaps, nil
+	}
+	newListPath := packageAvailableName(reader, staged, listPath)
+	staged[newListPath] = editorPatchXML(listData, listPatches)
 	ofdData, ok := parts[ofdName]
 	if !ok {
 		ofdData, err = reader.readFileViewContext(ctx, ofdName)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	ofdRoot, err := parseEditorXMLContext(ctx, ofdData)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	body := ofdRoot.childAt("DocBody", reader.documentIndex)
 	if body == nil {
-		return fmt.Errorf("missing document body")
+		return nil, fmt.Errorf("missing document body")
 	}
-	parts[ofdName], err = editorXMLSetText(ofdData, body, [][2]string{{"Signatures", "/" + newListPath}})
-	return err
+	updatedOFD, err := editorXMLSetText(ofdData, body, [][2]string{{"Signatures", "/" + newListPath}})
+	if err != nil {
+		return nil, err
+	}
+	for _, newSigPath := range remaps {
+		parts[newSigPath] = staged[newSigPath]
+	}
+	parts[newListPath] = staged[newListPath]
+	parts[ofdName] = updatedOFD
+	remaps[listPath] = newListPath
+	return remaps, nil
 }
 
 // pruneCreatedPageReferences 清理创作文档中被明确删除页面的直接跳转，不检查其他目标是否可达
@@ -399,6 +443,9 @@ func editorPageLocation(reader *Reader, parts map[string][]byte, name, value str
 // 返回: string 包内路径, error 路径不存在
 func editorPageResourceLocation(reader *Reader, parts map[string][]byte, name, base, value string) (string, error) {
 	candidate := resolveResourcePath(name, base, value)
+	if !validPackagePath(candidate) {
+		return "", fmt.Errorf("page reference %q in %s not found", value, name)
+	}
 	if _, ok := parts[candidate]; ok {
 		return candidate, nil
 	}

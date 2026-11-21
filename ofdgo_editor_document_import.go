@@ -454,7 +454,7 @@ func documentImportSourceTopDirs(ofdData []byte, root *editorXML, indexes []int,
 	hasRootDoc := false
 	addPath := func(loc string) {
 		clean := cleanPackagePath(loc)
-		if clean == "" || clean == "." {
+		if !validPackagePath(clean) {
 			return
 		}
 		if top, _, ok := strings.Cut(clean, "/"); ok {
@@ -473,6 +473,14 @@ func documentImportSourceTopDirs(ofdData []byte, root *editorXML, indexes []int,
 		}
 		if docRoot := body.child("DocRoot"); docRoot != nil {
 			addPath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, docRoot)))
+		}
+		if sig := body.child("Signatures"); sig != nil {
+			addPath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, sig)))
+		}
+		if info := body.child("DocInfo"); info != nil {
+			if cover := info.child("Cover"); cover != nil {
+				addPath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, cover)))
+			}
 		}
 		if versions := body.child("Versions"); versions != nil {
 			for _, ver := range versions.children {

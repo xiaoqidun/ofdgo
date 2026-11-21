@@ -11017,10 +11017,10 @@ function updateBatchProgress() {
 	else batchElements.Progress.removeAttribute("value");
 }
 
-function batchCall(slot, name, args, onProgress) {
+function batchCall(slot, name, args, onProgress, ignoreCancel = false) {
 	return new Promise((resolve, reject) => {
 		if (slot.error) { reject(slot.error); return; }
-		if (batch.canceled) { reject(new DOMException("已取消转换", "AbortError")); return; }
+		if (!ignoreCancel && batch.canceled) { reject(new DOMException("已取消转换", "AbortError")); return; }
 		const id = ++batch.sequence;
 		batch.requests.set(id, { slot, resolve, reject, onProgress, destination: name === "ofdgoConvertFile" ? args[3] : null });
 		try { slot.worker.postMessage({ id, name, args }); }
@@ -11153,6 +11153,7 @@ async function runBatch() {
 	let stagingName = "";
 	let tempDir = null;
 	let packed = false;
+	let batchFontKey = "";
 	const results = new Array(jobs.length);
 	try {
 		if (archive) {
@@ -11177,7 +11178,7 @@ async function runBatch() {
 		batchElements.Status.textContent = "正在准备";
 		const first = await startBatchWorker();
 		const fonts = await fontManager.files(fontManager.records());
-		const batchFontKey = fonts.length ? randomID() : "";
+		batchFontKey = fonts.length ? randomID() : "";
 		const batchFontArg = batchFontKey || null;
 		if (batchFontKey) {
 			await batchCall(first, "ofdgoSetBatchFonts", [fonts, batchFontKey]);
@@ -11275,10 +11276,6 @@ async function runBatch() {
 			packed = true;
 			for (const item of jobs) if (item.status === "ready") batchStatus(item, "done", "完成");
 		}
-		if (batchFontKey && !batch.canceled) {
-			const slot = [...batch.workers].find(slot => !slot.error);
-			if (slot) await batchCall(slot, "ofdgoSetBatchFonts", [null, batchFontKey]).catch(() => {});
-		}
 		const unchanged = batch.items.reduce((total, item) => total + (item.status === "unchanged" ? 1 : 0), 0);
 		batchElements.Status.textContent = `${batch.canceled ? "取消 · " : ""}完成 ${batch.counts.done}${batch.counts.failed ? ` · 失败 ${batch.counts.failed}` : ""}${unchanged ? ` · 原样 ${unchanged}` : ""}`;
 	} catch (err) {
@@ -11292,6 +11289,10 @@ async function runBatch() {
 		for (const item of jobs) item.inBatch = false;
 		if (!batchElements.Progress.hasAttribute("value")) batchElements.Progress.value = 0;
 		if (archive && !packed) for (const item of jobs) if (item.status === "ready") { item.status = "pending"; item.text = "待转"; }
+		if (batchFontKey) {
+			const slot = [...batch.workers].find(slot => !slot.error);
+			if (slot) await batchCall(slot, "ofdgoSetBatchFonts", [null, batchFontKey], null, true).catch(() => {});
+		}
 		await Promise.all([...batch.workers].map(slot => Promise.resolve(slot.worker.terminate())));
 		batch.workers.clear();
 		batch.requests.clear();

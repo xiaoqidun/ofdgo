@@ -85,12 +85,14 @@ func EncodeRawImageStream(ctx context.Context, raw *RawImage, compression pdfgo.
 		}
 	}
 	dict := pdfgo.Dictionary{
-		"Type":        pdfgo.Name("XObject"),
-		"Subtype":     pdfgo.Name("Image"),
-		"Width":       pdfgo.Integer(width),
-		"Height":      pdfgo.Integer(height),
-		"Interpolate": pdfgo.Boolean(true),
-		"Filter":      pdfgo.Name(filter),
+		"Type":    pdfgo.Name("XObject"),
+		"Subtype": pdfgo.Name("Image"),
+		"Width":   pdfgo.Integer(width),
+		"Height":  pdfgo.Integer(height),
+		"Filter":  pdfgo.Name(filter),
+	}
+	if bpc != 1 && filter != "JBIG2Decode" {
+		dict["Interpolate"] = pdfgo.Boolean(true)
 	}
 	if bpc > 0 {
 		dict["BitsPerComponent"] = pdfgo.Integer(bpc)
@@ -593,8 +595,10 @@ func makeImageDict(width, height int, colorSpace string, bpc int, filter string,
 		"Height":           pdfgo.Integer(height),
 		"ColorSpace":       pdfgo.Name(colorSpace),
 		"BitsPerComponent": pdfgo.Integer(bpc),
-		"Interpolate":      pdfgo.Boolean(true),
 		"Filter":           pdfgo.Name(filter),
+	}
+	if bpc != 1 {
+		dict["Interpolate"] = pdfgo.Boolean(true)
 	}
 	if len(decodeParms) > 0 {
 		dict["DecodeParms"] = decodeParms

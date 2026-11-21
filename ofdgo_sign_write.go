@@ -461,6 +461,9 @@ func (e *Editor) removeSignatures(ctx context.Context, id string) error {
 			continue
 		}
 		location := signatureRefPath(name, node.attr("BaseLoc"))
+		if !validPackagePath(location) {
+			return fmt.Errorf("invalid signature path: %s", node.attr("BaseLoc"))
+		}
 		files, _, err := reader.signatureRemovalFiles(ctx, location)
 		if err != nil {
 			return err
@@ -603,12 +606,16 @@ func (r *Reader) signatureRemovalFiles(ctx context.Context, name string) (map[st
 	owned := map[string]bool{name: true}
 	for _, location := range []string{signature.SignedValue, signature.SignedInfo.Seal.BaseLoc} {
 		if location != "" {
-			owned[signatureRefPath(name, location)] = true
+			if target := cleanPackagePath(signatureRefPath(name, location)); validPackagePath(target) {
+				owned[target] = true
+			}
 		}
 	}
 	protected := make(map[string]bool)
 	for _, reference := range signature.SignedInfo.References.Reference {
-		protected[signatureRefPath(name, reference.FileRef)] = true
+		if target := cleanPackagePath(signatureRefPath(name, reference.FileRef)); validPackagePath(target) {
+			protected[target] = true
+		}
 	}
 	return owned, protected, ctx.Err()
 }
@@ -671,6 +678,9 @@ func (r *Reader) signatureRemovalProtected(ctx context.Context, selected string,
 			continue
 		}
 		name := signatureRefPath("OFD.xml", body.Signatures)
+		if !validPackagePath(name) {
+			continue
+		}
 		current := index == r.documentIndex && (r.versionInfo == nil || allowCurrentVersion)
 		if !current {
 			protected[name] = true
@@ -687,7 +697,11 @@ func (r *Reader) signatureRemovalProtected(ctx context.Context, selected string,
 			if !node.matchesOFD("Signature") || current && name == selected && removed[node.attr("ID")] {
 				continue
 			}
-			owned, refs, err := r.signatureRemovalFiles(ctx, signatureRefPath(name, node.attr("BaseLoc")))
+			sigLoc := signatureRefPath(name, node.attr("BaseLoc"))
+			if !validPackagePath(sigLoc) {
+				continue
+			}
+			owned, refs, err := r.signatureRemovalFiles(ctx, sigLoc)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -909,6 +923,9 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 	var originalListData []byte
 	if bodySignatures != "" {
 		listPath = cleanPackagePath(resolveResourcePath("OFD.xml", "", bodySignatures))
+		if !validPackagePath(listPath) {
+			return fmt.Errorf("invalid signature list path: %s", bodySignatures)
+		}
 		data, err := r.readFileViewContext(ctx, listPath)
 		if err != nil {
 			return fmt.Errorf("signature list not found: %s", listPath)
@@ -1046,6 +1063,9 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 			removedSigFiles = make(map[string]bool)
 			for _, entry := range currentEntries {
 				sigLoc := cleanPackagePath(signatureRefPath(originalListPath, entry.BaseLoc))
+				if !validPackagePath(sigLoc) {
+					continue
+				}
 				if owned, _, sigErr := r.signatureRemovalFiles(ctx, sigLoc); sigErr == nil {
 					maps.Copy(removedSigFiles, owned)
 				}
@@ -1248,12 +1268,13 @@ func signatureTargetFiles(ctx context.Context, scoped *Reader, index int, listPa
 		return nil, err
 	}
 	if scoped.versionInfo != nil {
-		if verLoc := cleanPackagePath(scoped.versionInfo.Location); validPackagePath(verLoc) {
+		verLoc := cleanPackagePath(scoped.versionInfo.Location)
+		if lock && validPackagePath(verLoc) {
 			allowed[verLoc] = true
 		}
 		for _, vf := range scoped.versionInfo.Files {
 			clean := cleanPackagePath(vf.Location)
-			if validPackagePath(clean) {
+			if validPackagePath(clean) && (lock || clean != verLoc) {
 				allowed[clean] = true
 			}
 		}
@@ -1291,10 +1312,14 @@ func signatureTargetFiles(ctx context.Context, scoped *Reader, index int, listPa
 		if entryData, readErr := scoped.readFileViewContext(ctx, entryPath); readErr == nil {
 			if entryFile, parseErr := parseSignatureFile(entryData); parseErr == nil {
 				if entryFile.SignedValue != "" {
-					allowed[cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedValue))] = true
+					if p := cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedValue)); validPackagePath(p) {
+						allowed[p] = true
+					}
 				}
 				if entryFile.SignedInfo.Seal.BaseLoc != "" {
-					allowed[cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedInfo.Seal.BaseLoc))] = true
+					if p := cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedInfo.Seal.BaseLoc)); validPackagePath(p) {
+						allowed[p] = true
+					}
 				}
 			}
 		}
@@ -1310,6 +1335,16 @@ func signatureTargetFiles(ctx context.Context, scoped *Reader, index int, listPa
 		allowed[listPath] = true
 	} else {
 		delete(allowed, listPath)
+	}
+	if scoped.versionInfo != nil {
+		verLoc := cleanPackagePath(scoped.versionInfo.Location)
+		if lock {
+			if validPackagePath(verLoc) {
+				allowed[verLoc] = true
+			}
+		} else {
+			delete(allowed, verLoc)
+		}
 	}
 	names := make([]string, 0, len(allowed))
 	for name := range scoped.fileNames {
@@ -1457,6 +1492,9 @@ func signatureWriteProtectedNames(ctx context.Context, r *Reader, baseZip *zip.R
 				return fmt.Errorf("cannot preserve document %d signature %s: %s", index, report.ID, reason)
 			}
 			sigPath := signatureRefPath(listPath, report.BaseLoc)
+			if !validPackagePath(sigPath) {
+				return fmt.Errorf("invalid signature path: %s", report.BaseLoc)
+			}
 			sigData, err := view.readFileViewContext(ctx, sigPath)
 			if err != nil {
 				return err
@@ -1465,9 +1503,14 @@ func signatureWriteProtectedNames(ctx context.Context, r *Reader, baseZip *zip.R
 			if err != nil {
 				return err
 			}
-			names := []string{sigPath, signatureRefPath(sigPath, file.SignedValue)}
+			names := []string{sigPath}
+			if valPath := signatureRefPath(sigPath, file.SignedValue); validPackagePath(valPath) {
+				names = append(names, valPath)
+			}
 			if file.SignedInfo.Seal.BaseLoc != "" {
-				names = append(names, signatureRefPath(sigPath, file.SignedInfo.Seal.BaseLoc))
+				if sPath := signatureRefPath(sigPath, file.SignedInfo.Seal.BaseLoc); validPackagePath(sPath) {
+					names = append(names, sPath)
+				}
 			}
 			for _, ref := range report.References {
 				names = append(names, ref.Path)
@@ -1556,7 +1599,11 @@ func signatureWriteIDsInView(ctx context.Context, list *Signatures, listPath str
 		if err := add(listUsed, ref.ID); err != nil {
 			return "", nil, err
 		}
-		sigData, err := view.readFileViewContext(ctx, signatureRefPath(listPath, ref.BaseLoc))
+		sigLoc := signatureRefPath(listPath, ref.BaseLoc)
+		if !validPackagePath(sigLoc) {
+			return "", nil, fmt.Errorf("invalid signature path: %s", ref.BaseLoc)
+		}
+		sigData, err := view.readFileViewContext(ctx, sigLoc)
 		if err != nil {
 			return "", nil, err
 		}

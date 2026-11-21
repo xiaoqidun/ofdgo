@@ -453,7 +453,7 @@ func (r *Reader) resolvePageAnnotFileByCanon(key string) (string, bool) {
 // 入参: key 规范化十进制页面标识
 // 返回: string 匹配的页面键, bool 是否命中
 func (r *Reader) resolveAnnotMapByCanon(key string) (string, bool) {
-	if r.annotCanon == nil || r.annotCanonLen != len(r.Annots) {
+	rebuild := func() {
 		index := make(map[string]string, len(r.Annots))
 		for candidate := range r.Annots {
 			if canon := editorResourceID(candidate); canon != "" {
@@ -465,13 +465,33 @@ func (r *Reader) resolveAnnotMapByCanon(key string) (string, bool) {
 		r.annotCanon = index
 		r.annotCanonLen = len(r.Annots)
 	}
+	rebuilt := false
+	if r.annotCanon == nil || r.annotCanonLen != len(r.Annots) {
+		rebuild()
+		rebuilt = true
+	}
 	candidate, ok := r.annotCanon[key]
 	if ok {
 		if _, exists := r.Annots[candidate]; exists {
 			return candidate, true
 		}
-		r.annotCanon = nil
-		return r.resolveAnnotMapByCanon(key)
+		if !rebuilt {
+			rebuild()
+			if candidate, ok = r.annotCanon[key]; ok {
+				if _, exists := r.Annots[candidate]; exists {
+					return candidate, true
+				}
+			}
+		}
+		return "", false
+	}
+	if !rebuilt && len(r.Annots) > 0 {
+		rebuild()
+		if candidate, ok = r.annotCanon[key]; ok {
+			if _, exists := r.Annots[candidate]; exists {
+				return candidate, true
+			}
+		}
 	}
 	return "", false
 }

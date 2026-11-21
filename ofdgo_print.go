@@ -16,15 +16,11 @@ package ofdgo
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"slices"
 	"sync"
 )
-
-// ErrPrintDenied 表示打印被拒绝的错误标识
-var ErrPrintDenied = errors.New("document printing is not permitted")
 
 // PrintOptions 设置内容排版，长度以毫米为单位，比例1表示100%
 // Pages为零基有序页码，nil表示全部，非nil空列表表示不选择页面；与PageRange互斥

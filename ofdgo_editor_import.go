@@ -1715,6 +1715,11 @@ func (e *Editor) importPages(ctx context.Context, source *Reader, indexes []int,
 	if len(indexes) == 0 {
 		return nil, nil
 	}
+	origSource := e.source
+	var origResources, boundResources []editorResource
+	if origSource == nil {
+		origResources = slices.Clone(e.resources)
+	}
 	progress := editorProgress(options.OnProgress).withContext(ctx)
 	base, m, err := e.prepareImport(ctx, source, doc, selected, copyPage, progress)
 	if err != nil {
@@ -1825,6 +1830,9 @@ func (e *Editor) importPages(ctx context.Context, source *Reader, indexes []int,
 		return nil, err
 	}
 	e.bindImportResources()
+	if origSource == nil {
+		boundResources = slices.Clone(e.resources)
+	}
 	e.source, e.maxID = next, m.maximum
 	next.idsReady = true
 	e.outlines = outlines
@@ -1835,7 +1843,10 @@ func (e *Editor) importPages(ctx context.Context, source *Reader, indexes []int,
 				added[i] = copyEditorPage(e.pages[at+i])
 			}
 			e.pages = slices.Delete(e.pages, at, at+len(added))
-			e.source = base
+			e.source = origSource
+			if origSource == nil {
+				e.resources = slices.Clone(origResources)
+			}
 			e.outlines = beforeOutlines
 		}
 		change.redo = func(e *Editor) {
@@ -1845,6 +1856,9 @@ func (e *Editor) importPages(ctx context.Context, source *Reader, indexes []int,
 			}
 			e.pages = slices.Insert(e.pages, at, pages...)
 			e.source = next
+			if origSource == nil {
+				e.resources = slices.Clone(boundResources)
+			}
 			e.outlines = outlines
 		}
 	}

@@ -310,15 +310,15 @@ func (r *Reader) buildVersionSignatureScope(ctx context.Context, listPath string
 		versionPages:      make(map[string]bool),
 		otherVersionRoots: make(map[string]bool),
 	}
-	if versionLoc != "" && versionLoc != "." {
+	if validPackagePath(versionLoc) {
 		scope.versionFiles[versionLoc] = true
 	}
-	if versionDocRoot != "" && versionDocRoot != "." {
+	if validPackagePath(versionDocRoot) {
 		scope.versionFiles[versionDocRoot] = true
 	}
 	for _, file := range r.versionInfo.Files {
 		clean := cleanPackagePath(file.Location)
-		if clean == "" || clean == "." {
+		if !validPackagePath(clean) {
 			continue
 		}
 		scope.versionFiles[clean] = true
@@ -328,7 +328,7 @@ func (r *Reader) buildVersionSignatureScope(ctx context.Context, listPath string
 	}
 	for _, sigRef := range list.List {
 		sigPath := cleanPackagePath(signatureRefPath(cleanList, sigRef.BaseLoc))
-		if scope.versionFiles[sigPath] {
+		if validPackagePath(sigPath) && scope.versionFiles[sigPath] {
 			scope.hasExplicitSig = true
 			break
 		}
@@ -339,7 +339,7 @@ func (r *Reader) buildVersionSignatureScope(ctx context.Context, listPath string
 				scope.versionPages[id] = true
 			}
 		}
-	} else if versionDocRoot != "" && versionDocRoot != "." {
+	} else if validPackagePath(versionDocRoot) {
 		if data, err := r.readFileViewContext(ctx, versionDocRoot); err == nil {
 			var doc documentPageList
 			if xml.Unmarshal(data, &doc) == nil {
@@ -356,17 +356,17 @@ func (r *Reader) buildVersionSignatureScope(ctx context.Context, listPath string
 			if v.ID == r.versionInfo.ID {
 				continue
 			}
-			if loc := cleanPackagePath(v.Location); loc != "" && loc != "." && loc != versionLoc {
+			if loc := cleanPackagePath(v.Location); validPackagePath(loc) && loc != versionLoc {
 				scope.otherVersionRoots[loc] = true
 			}
-			if dr := cleanPackagePath(v.DocRoot); dr != "" && dr != "." && dr != versionDocRoot {
+			if dr := cleanPackagePath(v.DocRoot); validPackagePath(dr) && dr != versionDocRoot {
 				scope.otherVersionRoots[dr] = true
 			}
 		}
 	}
 	if r.OFD != nil && r.documentIndex >= 0 && r.documentIndex < len(r.OFD.DocBody) {
 		if mainDoc := r.OFD.DocBody[r.documentIndex].DocRoot; mainDoc != "" {
-			if dr := cleanPackagePath(resolveResourcePath("OFD.xml", "", mainDoc)); dr != "" && dr != "." && dr != versionDocRoot {
+			if dr := cleanPackagePath(resolveResourcePath("OFD.xml", "", mainDoc)); validPackagePath(dr) && dr != versionDocRoot {
 				scope.otherVersionRoots[dr] = true
 			}
 		}
@@ -382,6 +382,9 @@ func (r *Reader) versionSignatureMatches(ctx context.Context, scope *versionSign
 		return true
 	}
 	sigPath := cleanPackagePath(signatureRefPath(scope.listPath, sigRef.BaseLoc))
+	if !validPackagePath(sigPath) {
+		return false
+	}
 	if scope.versionFiles[sigPath] {
 		return true
 	}
@@ -395,11 +398,15 @@ func (r *Reader) versionSignatureMatches(ctx context.Context, scope *versionSign
 	}
 	ownValue := ""
 	if sigFile.SignedValue != "" {
-		ownValue = cleanPackagePath(signatureRefPath(sigPath, sigFile.SignedValue))
+		if p := cleanPackagePath(signatureRefPath(sigPath, sigFile.SignedValue)); validPackagePath(p) {
+			ownValue = p
+		}
 	}
 	ownSeal := ""
 	if sigFile.SignedInfo.Seal.BaseLoc != "" {
-		ownSeal = cleanPackagePath(signatureRefPath(sigPath, sigFile.SignedInfo.Seal.BaseLoc))
+		if p := cleanPackagePath(signatureRefPath(sigPath, sigFile.SignedInfo.Seal.BaseLoc)); validPackagePath(p) {
+			ownSeal = p
+		}
 	}
 	hitsCurrentRoot := false
 	hitsOtherRoot := false
@@ -407,7 +414,7 @@ func (r *Reader) versionSignatureMatches(ctx context.Context, scope *versionSign
 	nonSharedRefs := 0
 	for _, ref := range sigFile.SignedInfo.References.Reference {
 		refPath := cleanPackagePath(signatureRefPath(sigPath, ref.FileRef))
-		if refPath == "" || refPath == "." || refPath == "OFD.xml" || refPath == scope.listPath || refPath == sigPath || refPath == ownValue || refPath == ownSeal {
+		if !validPackagePath(refPath) || refPath == "OFD.xml" || refPath == scope.listPath || refPath == sigPath || refPath == ownValue || refPath == ownSeal {
 			continue
 		}
 		nonSharedRefs++
@@ -490,7 +497,7 @@ func (r *Reader) extractedVersionRoot(ctx context.Context, version DocumentVersi
 			continue
 		}
 		name := resolveResourcePath("OFD.xml", "", editorImportText(data, node))
-		if files[name] {
+		if validPackagePath(name) && files[name] {
 			patches = append(patches, editorXMLContent(data, node, editorFontXMLText("/"+name)))
 		} else {
 			patches = append(patches, editorXMLPatch{start: node.start, end: node.end})

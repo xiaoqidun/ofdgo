@@ -67,9 +67,6 @@ type canvasStrokeKey struct {
 // canvasOutlineCacheKey 区分子渲染器共享的字体轮廓解析缓存
 type canvasOutlineCacheKey struct{}
 
-// canvasFontFamilyCacheKey 区分跨渲染器共享的已加载只读字体族缓存
-type canvasFontFamilyCacheKey struct{}
-
 // canvasTextGlyphCacheKey 区分跨渲染器共享的字形路径缓存
 type canvasTextGlyphCacheKey struct{}
 
@@ -115,18 +112,20 @@ type canvasPathKey struct {
 
 // canvasBackendState 保存当前渲染器的Canvas快速查找缓存
 type canvasBackendState struct {
-	resources     *Resources
-	fontFamilies  map[canvasFontKey]*canvas.FontFamily
-	fontMap       map[canvasFontMapKey]*canvas.FontFamily
-	fontDigests   map[*canvas.Font][32]byte
-	svgFontCache  map[*canvas.Font]SVGFont
-	fontOutlines  map[*canvas.Font]*basefont.Outliner
-	stampSessions map[[32]byte]*cachedStampSession
+	resources       *Resources
+	fontFamilies    map[canvasFontKey]*canvas.FontFamily
+	fontFamilyCache *renderCache[canvasFontKey, *canvas.FontFamily]
+	fontMap         map[canvasFontMapKey]*canvas.FontFamily
+	fontDigests     map[*canvas.Font][32]byte
+	svgFontCache    map[*canvas.Font]SVGFont
+	fontOutlines    map[*canvas.Font]*basefont.Outliner
+	stampSessions   map[[32]byte]*cachedStampSession
 }
 
 // resetFonts 清除Canvas字体及字形缓存
 func (s *canvasBackendState) resetFonts() {
 	s.fontFamilies = make(map[canvasFontKey]*canvas.FontFamily)
+	s.fontFamilyCache = nil
 	s.fontMap = make(map[canvasFontMapKey]*canvas.FontFamily)
 	s.fontDigests = make(map[*canvas.Font][32]byte)
 	s.svgFontCache = make(map[*canvas.Font]SVGFont)
@@ -138,7 +137,6 @@ func (s *canvasBackendState) resetFonts() {
 // 入参: src 源渲染器, dst 目标子渲染器
 func (CanvasBackend) forkSharedState(src, dst *Renderer) {
 	dst.sharedBackendStates[CanvasBackend{}] = src.canvasFontData()
-	dst.sharedBackendStates[canvasFontFamilyCacheKey{}] = src.canvasFontFamilies()
 	dst.sharedBackendStates[canvasTextGlyphCacheKey{}] = src.canvasTextGlyphPaths()
 	dst.sharedBackendStates[canvasOutlineCacheKey{}] = src.canvasFontOutlines()
 	dst.sharedBackendStates[canvasClipUnionKey{}] = src.canvasClipUnions()
@@ -149,7 +147,6 @@ func (CanvasBackend) forkSharedState(src, dst *Renderer) {
 	dst.sharedBackendStates[canvasStrokeCacheKey{}] = src.canvasStrokeClips()
 	dst.sharedBackendStates[canvasTemplateCommandsKey{}] = src.canvasTemplateCommands()
 	dst.sharedBackendStates[svgResourceCacheKey{}] = src.svgImageResources()
-	dst.sharedBackendStates[svgEncodedMetaCacheKey{}] = src.svgEncodedImageMeta()
 	dst.sharedBackendStates[svgFontCacheKey{}] = src.svgFontResources()
 	dst.sharedBackendStates[svgTemplateCacheKey{}] = src.svgTemplateFragments()
 	dst.sharedBackendStates[stampImageCacheKey{}] = src.stampImageCache()
@@ -293,10 +290,14 @@ func (r *Renderer) canvasFontOutlines() *renderCache[[32]byte, *basefont.Outline
 	return sharedCanvasCache[[32]byte, *basefont.Outliner](r, canvasOutlineCacheKey{}, 32<<20)
 }
 
-// canvasFontFamilies 获取跨渲染器共享的只读字体族缓存
+// canvasFontFamilies 获取当前渲染器私有的字体族缓存，不跨Fork共享
 // 返回: *renderCache[canvasFontKey, *canvas.FontFamily] 字体族缓存
 func (r *Renderer) canvasFontFamilies() *renderCache[canvasFontKey, *canvas.FontFamily] {
-	return sharedCanvasCache[canvasFontKey, *canvas.FontFamily](r, canvasFontFamilyCacheKey{}, 64<<20)
+	state := r.canvasState()
+	if state.fontFamilyCache == nil {
+		state.fontFamilyCache = resourceCache[canvasFontKey, *canvas.FontFamily](r.Reader.resources, 64<<20)
+	}
+	return state.fontFamilyCache
 }
 
 // canvasTextGlyphPaths 获取跨渲染器共享的字形轮廓路径缓存

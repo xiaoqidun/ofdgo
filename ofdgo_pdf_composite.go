@@ -35,17 +35,22 @@ const (
 // pdfCompositeTileSize 限定单次合成块的像素边长
 const pdfCompositeTileSize = codecpdf.CompositeTileSize
 
+// pdfFormSpan 保存单个普通表单边界及其覆盖的连续图元数量
+type pdfFormSpan struct {
+	mark  *pdfgo.FormMark
+	count int
+}
+
 // pdfCompositeNode 保留局部合成所需的原始图元和透明组层级
 type pdfCompositeNode struct {
 	path       *pdfgo.PathMark
 	text       *pdfgo.TextMark
 	image      *pdfgo.ImageMark
 	group      *pdfgo.GroupMark
-	form       *pdfgo.FormMark
+	forms      []pdfFormSpan
 	children   []pdfCompositeNode
 	textObject *pdfgo.TextObject
 	glyph      *pdfgo.TextMark
-	formCount  int
 }
 
 // direct 检查sRGB图元能否使用标准OFD透明度而无需背景合成
@@ -737,8 +742,7 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widg
 			}
 			if len(children) != 0 {
 				formMark := mark
-				children[0].form = &formMark
-				children[0].formCount = len(children)
+				children[0].forms = append([]pdfFormSpan{{mark: &formMark, count: len(children)}}, children[0].forms...)
 				nodes = append(nodes, children...)
 			}
 			return nil
@@ -828,14 +832,24 @@ func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
 	defer func() { p.localFormCounts = previousLocalForms }()
 	for i := 0; i < len(nodes); i++ {
 		node := nodes[i]
-		if count := node.formCount; count > 0 && count <= len(nodes)-i && !p.transferBackdrop && p.shouldReuseForm(node.form, count) {
-			packed, err := p.compositeForm(node.form, nodes[i:i+count])
-			if err != nil {
-				return fmt.Errorf("convert form at graphic %d: %w", i+1, err)
+		if len(node.forms) > 0 && !p.transferBackdrop {
+			packed := false
+			for _, span := range node.forms {
+				if span.count <= 0 || span.count > len(nodes)-i || !p.shouldReuseForm(span.mark, span.count) {
+					continue
+				}
+				ok, err := p.compositeForm(span.mark, nodes[i:i+span.count])
+				if err != nil {
+					return fmt.Errorf("convert form at graphic %d: %w", i+1, err)
+				}
+				if ok {
+					p.compositeNodes = append(p.compositeNodes, nodes[i:i+span.count]...)
+					i += span.count - 1
+					packed = true
+					break
+				}
 			}
 			if packed {
-				p.compositeNodes = append(p.compositeNodes, nodes[i:i+count]...)
-				i += count - 1
 				continue
 			}
 		}

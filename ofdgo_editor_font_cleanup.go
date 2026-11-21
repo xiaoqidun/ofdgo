@@ -40,6 +40,22 @@ func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byt
 	if err != nil || protected {
 		return err
 	}
+	if versioned {
+		preserved, err := reader.versionPreservedFiles(ctx)
+		if err != nil {
+			return err
+		}
+		if len(preserved) != 0 {
+			merged := maps.Clone(protectedFiles)
+			if merged == nil {
+				merged = make(map[string]bool, len(preserved))
+			}
+			for name := range preserved {
+				merged[cleanPackagePath(name)] = true
+			}
+			protectedFiles = merged
+		}
+	}
 	resources := e.runtimeResources
 	if resources == nil {
 		resources = reader.resources

@@ -34,7 +34,6 @@ import (
 	"github.com/tdewolff/canvas"
 	"github.com/xiaoqidun/j2kgo"
 	"github.com/xiaoqidun/jbig2"
-	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
@@ -55,7 +54,7 @@ type pdfImageCacheKey struct {
 	target image.Point
 }
 
-// pdfTemplateFormKey 按模板页、页面尺寸、视口偏移与打印模式复用PDF模板Form
+// pdfTemplateFormKey 按模板页、页面尺寸、视口偏移、打印模式与高清替代策略复用PDF模板Form
 type pdfTemplateFormKey struct {
 	template      *PageContent
 	width         float64
@@ -64,6 +63,7 @@ type pdfTemplateFormKey struct {
 	offsetY       float64
 	printing      bool
 	printContents string
+	highRes       bool
 }
 
 // pdfStampFormKey 按印章OFD内容摘要与打印模式复用PDF印章Form集合
@@ -122,7 +122,6 @@ type pdfStampFormGroup struct {
 // pdfStreamSession 管理整份PDF输出期间并发安全的共享字体、图像、Form及图形资源表
 type pdfStreamSession struct {
 	writer        *codecpdf.StreamWriter
-	allocMu       sync.Mutex
 	compression   CompressionOptions
 	compress      bool
 	compressLevel int
@@ -131,9 +130,6 @@ type pdfStreamSession struct {
 	fontMu        sync.Mutex
 	fontDigests   map[*canvas.Font][32]byte
 	fontCanonical map[[32]byte]*canvas.Font
-	fontData      map[*canvas.Font][]byte
-	cffFonts      map[*canvas.Font][]*pdfFontSubset
-	cffGlyphMap   map[*canvas.Font]map[uint16]*pdfFontSubset
 	rawMu         sync.Mutex
 	rawCache      map[pdfRawCacheKey]*pdfRawImage
 	rawDigest     map[[32]byte]*pdfRawImage
@@ -170,7 +166,6 @@ func newPDFStreamSession(writer *codecpdf.StreamWriter, compression CompressionO
 		compressLevel: level,
 		fontDigests:   make(map[*canvas.Font][32]byte),
 		fontCanonical: make(map[[32]byte]*canvas.Font),
-		fontData:      make(map[*canvas.Font][]byte),
 		rawCache:      make(map[pdfRawCacheKey]*pdfRawImage),
 		rawDigest:     make(map[[32]byte]*pdfRawImage),
 		imgEntries:    make(map[pdfImageCacheKey]*pdfEncodedImageEntry),
@@ -179,8 +174,8 @@ func newPDFStreamSession(writer *codecpdf.StreamWriter, compression CompressionO
 		compForms:     make(map[pdfCompositeFormKey]*pdfFormEntry),
 		contentRefs:   make(map[[32]byte]pdfgo.Reference),
 	}
-	s.fonts = codecpdf.NewFontRegistry(s.allocRef, true, true, level)
-	s.graphics = codecpdf.NewGraphicResourceRegistry(s.allocRef)
+	s.fonts = codecpdf.NewFontRegistry(writer.AllocRef, true, true, level)
+	s.graphics = codecpdf.NewGraphicResourceRegistry(writer.AllocRef)
 	return s
 }
 
@@ -188,7 +183,7 @@ func newPDFStreamSession(writer *codecpdf.StreamWriter, compression CompressionO
 // 入参: font 画布字体, vertical 是否竖排
 // 返回: pdfgo.Name 资源名, pdfgo.Reference 对象引用, *codecpdf.FontEntry 字体项
 func (s *pdfStreamSession) FontResource(font *canvas.Font, vertical bool) (pdfgo.Name, pdfgo.Reference, *codecpdf.FontEntry) {
-	if font != nil && !font.IsCFF {
+	if font != nil {
 		font = s.canonicalFont(font)
 	}
 	return s.fonts.Register(font, vertical)
@@ -208,15 +203,7 @@ func (s *pdfStreamSession) ShadingPattern(gradient canvas.Gradient, m canvas.Mat
 	return s.graphics.ShadingPattern(gradient, m)
 }
 
-// allocRef 线程安全地向底层流式写出器申请新的PDF间接对象引用
-// 返回: pdfgo.Reference 对象引用
-func (s *pdfStreamSession) allocRef() pdfgo.Reference {
-	s.allocMu.Lock()
-	defer s.allocMu.Unlock()
-	return s.writer.AllocRef()
-}
-
-// canonicalFont 按只读SFNT表摘要将来自不同派生渲染器的相同非CFF字体归一化为单一实例，零拷贝不分配完整字体字节
+// canonicalFont 按只读SFNT表摘要将来自不同派生渲染器的相同字体归一化为单一实例，零拷贝不分配完整字体字节
 // 入参: font 画布字体
 // 返回: *canvas.Font 归一化字体实例
 func (s *pdfStreamSession) canonicalFont(font *canvas.Font) *canvas.Font {
@@ -253,27 +240,6 @@ func (s *pdfStreamSession) canonicalFont(font *canvas.Font) *canvas.Font {
 	return font
 }
 
-// cachedFontBytes 线程安全地缓存源字体序列化后的SFNT字节
-// 入参: src 源画布字体
-// 返回: []byte SFNT字节
-func (s *pdfStreamSession) cachedFontBytes(src *canvas.Font) []byte {
-	s.fontMu.Lock()
-	if data, ok := s.fontData[src]; ok {
-		s.fontMu.Unlock()
-		return data
-	}
-	s.fontMu.Unlock()
-	data := basefont.SFNTData(src.Tables)
-	s.fontMu.Lock()
-	if existing, ok := s.fontData[src]; ok {
-		s.fontMu.Unlock()
-		return existing
-	}
-	s.fontData[src] = data
-	s.fontMu.Unlock()
-	return data
-}
-
 // registerImage 线程安全地按去重键并发编码单张PDF图像，首次编码完成后进入待写出队列
 // 入参: ctx 取消上下文, img 图像, rawPass 可选直通原始流, imageKey 可选外部去重键, target 目标降采样尺寸
 // 返回: pdfgo.Name XObject资源名, pdfgo.Reference 对象引用, error 编码错误
@@ -298,7 +264,7 @@ func (s *pdfStreamSession) registerImage(ctx context.Context, img image.Image, r
 	entry := &pdfEncodedImageEntry{
 		done: make(chan struct{}),
 		name: pdfgo.Name("Im" + strconv.Itoa(s.imgSeq)),
-		ref:  s.allocRef(),
+		ref:  s.writer.AllocRef(),
 	}
 	s.imgSeq++
 	s.imgEntries[cacheKey] = entry
@@ -311,7 +277,7 @@ func (s *pdfStreamSession) registerImage(ctx context.Context, img image.Image, r
 		encoded, err = codecpdf.EncodePDFImageStream(ctx, img, s.compression, target, s.compressLevel)
 	}
 	if err == nil && len(encoded.SMaskData) > 0 {
-		entry.smaskRef = s.allocRef()
+		entry.smaskRef = s.writer.AllocRef()
 		encoded.Dict["SMask"] = entry.smaskRef
 	}
 	entry.encoded = encoded
@@ -332,7 +298,7 @@ func (s *pdfStreamSession) allocFormNameRef() (pdfgo.Name, pdfgo.Reference) {
 	name := pdfgo.Name("Fm" + strconv.Itoa(s.formSeq))
 	s.formSeq++
 	s.formMu.Unlock()
-	return name, s.allocRef()
+	return name, s.writer.AllocRef()
 }
 
 // enqueueForm 将已完成编译压缩的Form XObject加入主协程待写出队列
@@ -398,7 +364,7 @@ func (s *pdfStreamSession) flushPending() error {
 func (s *pdfStreamSession) allocFormNameRefUnlocked() (pdfgo.Name, pdfgo.Reference) {
 	name := pdfgo.Name("Fm" + strconv.Itoa(s.formSeq))
 	s.formSeq++
-	return name, s.allocRef()
+	return name, s.writer.AllocRef()
 }
 
 // pdfRenderer PDF单遍流式渲染器，实现canvas.Renderer并支持原生Form复用与文字裁剪
@@ -1013,6 +979,7 @@ func (r *Renderer) drawPDFTemplatePage(pdfOut *pdfRenderer, template *PageConten
 		offsetY:       offsetY,
 		printing:      r.printing,
 		printContents: r.printContents,
+		highRes:       r.DPI >= 300,
 	}
 	pdfOut.session.formMu.Lock()
 	if existing, ok := pdfOut.session.templateForms[key]; ok {
@@ -1040,6 +1007,7 @@ func (r *Renderer) drawPDFTemplatePage(pdfOut *pdfRenderer, template *PageConten
 	subRenderer := *r
 	subRenderer.pageContext = context.WithValue(pdfOut.ctx, pdfRendererCtxKey{}, subPDF)
 	subRenderer.renderError = nil
+	subRenderer.pageResources = nil
 	subVisitor := &canvasPageVisitor{renderer: &subRenderer, ctx: canvas.NewContext(subPDF), height: pageH}
 	restoreTpl := subRenderer.bindParsedResources(template.pageResources)
 	var walkErr error
@@ -1509,8 +1477,6 @@ func tryPDFRawImage(ctx context.Context, data []byte) *pdfRawImage {
 				raw.ColorSpace = "DeviceGray"
 			case 3:
 				raw.ColorSpace = "DeviceRGB"
-			case 4:
-				raw.ColorSpace = "DeviceCMYK"
 			default:
 				return nil
 			}

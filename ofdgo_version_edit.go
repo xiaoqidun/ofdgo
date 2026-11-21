@@ -253,7 +253,7 @@ func (r *Reader) packageVersioned() bool {
 	return false
 }
 
-// documentNonCurrentVersionFiles 收集指定版本化文档全部非当前版本及原始主入口依赖
+// documentNonCurrentVersionFiles 收集指定版本化文档全部非当前版本及原始主入口依赖，其他文档纳入全部版本
 // 入参: ctx 取消上下文, index 文档索引
 // 返回: map[string]bool 受保护文件路径, error 读取、结构或取消错误
 func (r *Reader) documentNonCurrentVersionFiles(ctx context.Context, index int) (map[string]bool, error) {
@@ -263,8 +263,9 @@ func (r *Reader) documentNonCurrentVersionFiles(ctx context.Context, index int) 
 	if r == nil || r.OFD == nil || index < 0 || index >= len(r.OFD.DocBody) || !r.OFD.DocBody[index].versioned {
 		return nil, nil
 	}
+	otherDoc := index != r.documentIndex
 	view := *r
-	if index != r.documentIndex {
+	if otherDoc {
 		view.documentIndex, view.documentRoot = index, ""
 		view.selectedVersion, view.versionInfo = nil, nil
 	}
@@ -280,7 +281,7 @@ func (r *Reader) documentNonCurrentVersionFiles(ctx context.Context, index int) 
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if view.versionInfo != nil && version.ID == view.versionInfo.ID {
+		if !otherDoc && view.versionInfo != nil && version.ID == view.versionInfo.ID {
 			continue
 		}
 		shared[version.Location] = true
@@ -298,7 +299,7 @@ func (r *Reader) documentNonCurrentVersionFiles(ctx context.Context, index int) 
 			}
 		}
 	}
-	if view.versionInfo != nil && view.OFD.DocBody[index].DocRoot != "" {
+	if (otherDoc || view.versionInfo != nil) && view.OFD.DocBody[index].DocRoot != "" {
 		entry, err := versionFileLocation("OFD.xml", view.OFD.DocBody[index].DocRoot)
 		if err != nil {
 			return nil, err
@@ -356,7 +357,7 @@ func (r *Reader) versionPreservedFiles(ctx context.Context) (map[string]bool, er
 							return nil, err
 						}
 						sigPath := cleanPackagePath(resolveResourcePath(sigList, "", item.BaseLoc))
-						if sigPath == "" {
+						if !validPackagePath(sigPath) {
 							continue
 						}
 						shared[sigPath] = true
@@ -499,6 +500,13 @@ func (r *Reader) versionFileUnchanged(ctx context.Context, name string, data []b
 // 入参: ctx 取消上下文, changes 待写入条目, removed 待删除条目，返回前移除受保护路径, generated 本次自产页面及引用，随隔离路径更新
 // 返回: map[string][]byte 隔离后的修改集, error 读取、引用或结构错误
 func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) (map[string][]byte, error) {
+	return r.versionOutputChangesWithRemaps(ctx, changes, removed, generated, nil)
+}
+
+// versionOutputChangesWithRemaps 隔离文档或版本改动，合并外部路径替换映射并同步版本清单
+// 入参: ctx 取消上下文, changes 待写入条目, removed 待删除条目, generated 本次自产页面及引用, remaps 外部已产出的路径替换映射
+// 返回: map[string][]byte 隔离后的修改集, error 读取、引用或结构错误
+func (r *Reader) versionOutputChangesWithRemaps(ctx context.Context, changes map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences, remaps map[string]string) (map[string][]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -506,7 +514,7 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	if err != nil {
 		return nil, err
 	}
-	if r.DocumentCount() == 1 && !r.currentVersioned() || len(changes) == 0 && len(removed) == 0 {
+	if r.DocumentCount() == 1 && !r.currentVersioned() || len(changes) == 0 && len(removed) == 0 && len(remaps) == 0 {
 		return changes, ctx.Err()
 	}
 	parts := maps.Clone(changes)
@@ -526,7 +534,7 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 			delete(parts, name)
 		}
 	}
-	if len(parts) == 0 && len(removed) == 0 {
+	if len(parts) == 0 && len(removed) == 0 && len(remaps) == 0 {
 		return parts, ctx.Err()
 	}
 	preserved, err := r.versionPreservedFiles(ctx)
@@ -634,7 +642,21 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 		delete(parts, source)
 	}
 	if r.versionInfo != nil {
-		if err := r.versionManifest(ctx, parts, paths, graph.used, shared, removed); err != nil {
+		manifestPaths := paths
+		manifestUsed := graph.used
+		if len(remaps) != 0 {
+			manifestPaths = maps.Clone(paths)
+			manifestUsed = maps.Clone(graph.used)
+			for source, target := range remaps {
+				cleanSource := cleanPackagePath(source)
+				cleanTarget := cleanPackagePath(target)
+				if validPackagePath(cleanSource) && validPackagePath(cleanTarget) {
+					manifestPaths[cleanSource] = cleanTarget
+					manifestUsed[cleanTarget] = true
+				}
+			}
+		}
+		if err := r.versionManifest(ctx, parts, manifestPaths, manifestUsed, shared, removed); err != nil {
 			return nil, err
 		}
 	} else if target := paths[entry]; target != "" {

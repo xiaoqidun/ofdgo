@@ -25,7 +25,6 @@ import (
 	"net/url"
 	"slices"
 	"strings"
-	"sync"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
@@ -256,8 +255,14 @@ type loadedStampMedia struct {
 
 // stampSealCache 在文档及其派生只读视图间并发共享已提取的只读印章媒体
 type stampSealCache struct {
-	mu    sync.RWMutex
-	items map[stampSealSource]loadedStampMedia
+	cache *renderCache[stampSealSource, loadedStampMedia]
+}
+
+// newStampSealCache 按共享资源策略创建有界印章媒体缓存
+// 入参: resources 共享资源策略，可为nil
+// 返回: *stampSealCache 印章媒体缓存
+func newStampSealCache(resources *Resources) *stampSealCache {
+	return &stampSealCache{cache: resourceCache[stampSealSource, loadedStampMedia](resources, 16<<20)}
 }
 
 // load 并发复用或按需提取同源印章媒体，返回只读媒体数据
@@ -267,27 +272,20 @@ func (c *stampSealCache) load(ctx context.Context, r *Reader, src stampSealSourc
 	if err := ctx.Err(); err != nil {
 		return loadedStampMedia{}, err
 	}
-	c.mu.RLock()
-	media, ok := c.items[src]
-	c.mu.RUnlock()
-	if ok {
-		return media, nil
+	if c.cache != nil {
+		if media, ok := c.cache.get(src); ok {
+			return media, nil
+		}
 	}
 	sealType, sealData, err := src.load(ctx, r)
 	if err != nil {
 		return loadedStampMedia{}, err
 	}
-	media = loadedStampMedia{sealType: sealType, sealData: sealData}
-	c.mu.Lock()
-	if existing, exists := c.items[src]; exists {
-		c.mu.Unlock()
-		return existing, nil
+	media := loadedStampMedia{sealType: sealType, sealData: sealData}
+	if c.cache != nil {
+		cost := max(64, 64+len(src.sealPath)+len(src.signedValuePath)+len(sealType)+len(sealData))
+		c.cache.put(src, media, cost)
 	}
-	if c.items == nil {
-		c.items = make(map[stampSealSource]loadedStampMedia)
-	}
-	c.items[src] = media
-	c.mu.Unlock()
 	return media, nil
 }
 
@@ -356,7 +354,7 @@ func (r *Reader) resolveStampPageID(pageID string) string {
 // 入参: key 规范化十进制页面标识
 // 返回: string 匹配的页面键, bool 是否命中
 func (r *Reader) resolveStampMapByCanon(key string) (string, bool) {
-	if r.stampCanon == nil || r.stampCanonLen != len(r.Stamps) {
+	rebuild := func() {
 		index := make(map[string]string, len(r.Stamps))
 		for candidate := range r.Stamps {
 			if canon := editorResourceID(candidate); canon != "" {
@@ -368,13 +366,33 @@ func (r *Reader) resolveStampMapByCanon(key string) (string, bool) {
 		r.stampCanon = index
 		r.stampCanonLen = len(r.Stamps)
 	}
+	rebuilt := false
+	if r.stampCanon == nil || r.stampCanonLen != len(r.Stamps) {
+		rebuild()
+		rebuilt = true
+	}
 	candidate, ok := r.stampCanon[key]
 	if ok {
 		if _, exists := r.Stamps[candidate]; exists {
 			return candidate, true
 		}
-		r.stampCanon = nil
-		return r.resolveStampMapByCanon(key)
+		if !rebuilt {
+			rebuild()
+			if candidate, ok = r.stampCanon[key]; ok {
+				if _, exists := r.Stamps[candidate]; exists {
+					return candidate, true
+				}
+			}
+		}
+		return "", false
+	}
+	if !rebuilt && len(r.Stamps) > 0 {
+		rebuild()
+		if candidate, ok = r.stampCanon[key]; ok {
+			if _, exists := r.Stamps[candidate]; exists {
+				return candidate, true
+			}
+		}
 	}
 	return "", false
 }
@@ -449,7 +467,7 @@ func (r *Reader) ensurePageStampsContext(ctx context.Context, pageID string) err
 		return nil
 	}
 	if r.stampSealCache == nil {
-		r.stampSealCache = &stampSealCache{items: make(map[stampSealSource]loadedStampMedia)}
+		r.stampSealCache = newStampSealCache(r.resources)
 	}
 	loaded := make([]Stamp, 0, len(existing)+len(pending))
 	for _, stamp := range existing {
@@ -564,7 +582,10 @@ func (r *Reader) parseSignatures(ctx context.Context, doc *Document) error {
 			continue
 		}
 		func(sigRef Signature) {
-			sigPath := resolveResourcePath(sigListPath, "", sigRef.BaseLoc)
+			sigPath := cleanPackagePath(resolveResourcePath(sigListPath, "", sigRef.BaseLoc))
+			if !validPackagePath(sigPath) {
+				return
+			}
 			sf, err := r.openFile(sigPath)
 			if err != nil {
 				return
@@ -579,10 +600,14 @@ func (r *Reader) parseSignatures(ctx context.Context, doc *Document) error {
 			}
 			var src stampSealSource
 			if sigFile.SignedInfo.Seal.BaseLoc != "" {
-				src.sealPath = resolveResourcePath(sigPath, "", sigFile.SignedInfo.Seal.BaseLoc)
+				if p := cleanPackagePath(resolveResourcePath(sigPath, "", sigFile.SignedInfo.Seal.BaseLoc)); validPackagePath(p) {
+					src.sealPath = p
+				}
 			}
 			if sigFile.SignedValue != "" {
-				src.signedValuePath = resolveResourcePath(sigPath, "", sigFile.SignedValue)
+				if p := cleanPackagePath(resolveResourcePath(sigPath, "", sigFile.SignedValue)); validPackagePath(p) {
+					src.signedValuePath = p
+				}
 			}
 			if src == (stampSealSource{}) {
 				return

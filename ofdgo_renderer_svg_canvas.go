@@ -38,6 +38,9 @@ import (
 // svgCreatorMetadata 记录SVG制作软件，不参与页面绘制
 const svgCreatorMetadata = `<metadata>` + creatorXMP + `</metadata>`
 
+// svgNonReusableTemplate 标记含渐变或底纹定义、不可按片段复用的模板页哨兵
+var svgNonReusableTemplate = &svgTemplateFragment{}
+
 // svgResourceRenderer 分离外部资源的SVG渲染器
 type svgResourceRenderer struct {
 	*svg.SVG
@@ -286,19 +289,8 @@ func (s *svgResourceRenderer) imageResource(ctx context.Context, img image.Image
 	}
 	if s.renderer != nil {
 		if encoded, ok := img.(*EncodedImage); ok && s.renderer.Compression.Mode == CompressionUnchanged {
-			meta, err := s.renderer.svgEncodedImageMeta().load(ctx, encoded, func() (svgEncodedMeta, int, error) {
-				raw := encoded.Bytes()
-				sum := sha256.Sum256(raw)
-				mime := encoded.MIME()
-				if bytes.HasPrefix(raw, []byte{255, 216}) {
-					mime = "image/jpeg"
-				}
-				return svgEncodedMeta{name: fmt.Sprintf("ofdgo-image-%x", sum), mime: mime, digest: sum}, 256, nil
-			})
-			if err != nil {
-				return SVGImage{}, err
-			}
-			result := SVGImage{Name: meta.name, MIME: meta.mime}
+			sum, mime := encoded.ContentMeta()
+			result := SVGImage{Name: fmt.Sprintf("ofdgo-image-%x", sum), MIME: mime}
 			if s.imageNames == nil || !s.renderer.knownSVGResources[result.Name] {
 				result.Data = bytes.Clone(encoded.Bytes())
 			}
@@ -507,18 +499,8 @@ type svgImageKey struct {
 // svgResourceCacheKey 区分共享的图片编码缓存
 type svgResourceCacheKey struct{}
 
-// svgEncodedMetaCacheKey 区分共享的编码图元数据摘要缓存
-type svgEncodedMetaCacheKey struct{}
-
 // svgFontCacheKey 区分共享的SVG序列化字体缓存
 type svgFontCacheKey struct{}
-
-// svgEncodedMeta 保存编码图的名称、媒体类型与原始字节摘要
-type svgEncodedMeta struct {
-	name   string
-	mime   string
-	digest [32]byte
-}
 
 // svgClipDef 保存原生SVG裁剪路径标识与路径数据
 type svgClipDef struct {
@@ -571,12 +553,6 @@ type svgObjectGroup struct {
 // 返回: *renderCache 图片编码缓存
 func (r *Renderer) svgImageResources() *renderCache[svgImageResourceKey, SVGImage] {
 	return sharedCanvasCache[svgImageResourceKey, SVGImage](r, svgResourceCacheKey{}, 64<<20)
-}
-
-// svgEncodedImageMeta 获取派生渲染器共享的原始编码图摘要缓存
-// 返回: *renderCache 编码图元数据缓存
-func (r *Renderer) svgEncodedImageMeta() *renderCache[*EncodedImage, svgEncodedMeta] {
-	return sharedCanvasCache[*EncodedImage, svgEncodedMeta](r, svgEncodedMetaCacheKey{}, 4<<20)
 }
 
 // svgFontResources 获取派生渲染器共享的SVG字体数据缓存

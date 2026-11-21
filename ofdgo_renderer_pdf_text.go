@@ -16,10 +16,8 @@ package ofdgo
 
 import (
 	"encoding/binary"
-	"fmt"
 	"image/color"
 	"math"
-	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -27,12 +25,6 @@ import (
 	canvastext "github.com/tdewolff/canvas/text"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 )
-
-// pdfFontSubset 保存独立CFF输出字体及实际用字，包含缺省字形
-type pdfFontSubset struct {
-	font   *canvas.Font
-	glyphs map[uint16]bool
-}
 
 // pdfGlyphItem 保存同基线批量输出的单个字形及局部横坐标
 type pdfGlyphItem struct {
@@ -93,11 +85,10 @@ func (r *pdfRenderer) finishTextObject() {
 	r.content.ClearTextIsolation()
 }
 
-// glyphText 使用共享或隔离输出字体和既定字形建立PDF文字，不改变字体缓存及定位
+// glyphText 使用共享输出字体和既定字形建立PDF文字，不改变字体缓存及定位
 // 入参: face 字体, glyph 字形
 // 返回: *canvas.Text 画布文字, error 字体解析错误
 func (r *pdfRenderer) glyphText(face *canvas.FontFace, glyph textGlyph) (*canvas.Text, error) {
-	srcFont := face.Font
 	outputFace := *face
 	outputFace.FauxBold = 0
 	outputFace.FauxItalic = 0
@@ -115,11 +106,6 @@ func (r *pdfRenderer) glyphText(face *canvas.FontFace, glyph textGlyph) (*canvas
 			}
 		})
 	}
-	if srcFont.IsCFF {
-		if err := r.cffTextFont(srcFont, text); err != nil {
-			return nil, err
-		}
-	}
 	return text, nil
 }
 
@@ -130,7 +116,6 @@ func (r *pdfRenderer) glyphsText(face *canvas.FontFace, items []pdfGlyphItem, hS
 	if len(items) == 1 {
 		return r.glyphText(face, items[0].glyph)
 	}
-	srcFont := face.Font
 	outputFace := *face
 	outputFace.FauxBold = 0
 	outputFace.FauxItalic = 0
@@ -158,106 +143,7 @@ func (r *pdfRenderer) glyphsText(face *canvas.FontFace, items []pdfGlyphItem, hS
 			spans[i].Glyphs = glyphs
 		}
 	})
-	if srcFont.IsCFF {
-		if err := r.cffTextFont(srcFont, text); err != nil {
-			return nil, err
-		}
-	}
 	return text, nil
-}
-
-// cffTextFont 线程安全地按实际用字隔离CFF子集，优先复用已有字形所在分片并共享缓存字体字节
-// 入参: srcFont 源画布字体, text 已定位文字
-// 返回: error 字形数量或字体解析错误
-func (r *pdfRenderer) cffTextFont(srcFont *canvas.Font, text *canvas.Text) error {
-	const limit = 229
-	ids := []uint16{0}
-	text.WalkSpans(func(_, _ float64, span canvas.TextSpan) {
-		for _, glyph := range span.Glyphs {
-			if !slices.Contains(ids, glyph.ID) {
-				ids = append(ids, glyph.ID)
-			}
-		}
-	})
-	if len(ids) > limit {
-		return fmt.Errorf("CFF text glyph count exceeds output subset capacity")
-	}
-	fontBytes := r.session.cachedFontBytes(srcFont)
-	r.session.fontMu.Lock()
-	var selected *pdfFontSubset
-	if glyphMap := r.session.cffGlyphMap[srcFont]; glyphMap != nil && len(ids) > 1 {
-		if candidate := glyphMap[ids[1]]; candidate != nil {
-			count := len(candidate.glyphs)
-			for _, id := range ids {
-				if !candidate.glyphs[id] {
-					count++
-				}
-			}
-			if count <= limit {
-				selected = candidate
-			}
-		}
-	}
-	if selected == nil {
-		bestOverlap := -1
-		for _, subset := range r.session.cffFonts[srcFont] {
-			count := len(subset.glyphs)
-			overlap := 0
-			for _, id := range ids {
-				if subset.glyphs[id] {
-					overlap++
-				} else {
-					count++
-				}
-			}
-			if count <= limit && overlap > bestOverlap {
-				bestOverlap = overlap
-				selected = subset
-				if overlap == len(ids) {
-					break
-				}
-			}
-		}
-	}
-	if selected == nil {
-		loaded, err := loadCanvasFont(fontBytes, 0, srcFont.Style())
-		if err != nil {
-			r.session.fontMu.Unlock()
-			return err
-		}
-		copyFont := *srcFont
-		copyFont.SFNT = loaded.SFNT
-		selected = &pdfFontSubset{font: &copyFont, glyphs: make(map[uint16]bool)}
-		if r.session.cffFonts == nil {
-			r.session.cffFonts = make(map[*canvas.Font][]*pdfFontSubset)
-		}
-		r.session.cffFonts[srcFont] = append(r.session.cffFonts[srcFont], selected)
-	}
-	if r.session.cffGlyphMap == nil {
-		r.session.cffGlyphMap = make(map[*canvas.Font]map[uint16]*pdfFontSubset)
-	}
-	if r.session.cffGlyphMap[srcFont] == nil {
-		r.session.cffGlyphMap[srcFont] = make(map[uint16]*pdfFontSubset)
-	}
-	for _, id := range ids {
-		selected.glyphs[id] = true
-		if id != 0 {
-			r.session.cffGlyphMap[srcFont][id] = selected
-		}
-	}
-	selectedFont := selected.font
-	r.session.fontMu.Unlock()
-	text.WalkLines(func(_ float64, spans []canvas.TextSpan) {
-		for i := range spans {
-			face := *spans[i].Face
-			face.Font = selectedFont
-			spans[i].Face = &face
-			for j := range spans[i].Glyphs {
-				spans[i].Glyphs[j].SFNT = selectedFont.SFNT
-			}
-		}
-	})
-	return nil
 }
 
 // pdfTextSupported 核对原生文字的字形合法性，并通过原生PDF矢量裁剪保留带边界裁剪的真文字

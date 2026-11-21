@@ -19,8 +19,10 @@ import (
 	"cmp"
 	"compress/zlib"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
-	"hash/crc32"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -162,6 +164,7 @@ func (r *FontRegistry) WriteAll(ctx context.Context, writer *StreamWriter, worke
 			return err
 		}
 	}
+	usedTags := make(map[string]bool, len(results))
 	for i := range results {
 		res := &results[i]
 		if res.err != nil {
@@ -192,6 +195,28 @@ func (r *FontRegistry) WriteAll(ctx context.Context, writer *StreamWriter, worke
 		cidFont := descendants[0].(pdfgo.Dictionary)
 		descriptor := cidFont["FontDescriptor"].(pdfgo.Dictionary)
 		descriptor[res.fontFileKey] = fontFileRef
+		if res.subsetTag != "" {
+			tag := res.subsetTag
+			for usedTags[tag] {
+				tag = nextSubsetTag(tag)
+			}
+			usedTags[tag] = true
+			if tag != res.subsetTag {
+				fullName := pdfgo.Name(tag + "+" + res.baseFontName)
+				res.dict["BaseFont"] = fullName
+				cidFont["BaseFont"] = fullName
+				descriptor["FontName"] = fullName
+			}
+		}
+		if res.encodingCMapData != nil {
+			encRef := writer.AllocRef()
+			if err := writer.WritePreencodedStream(encRef, res.encodingCMapDict, res.encodingCMapData); err != nil {
+				return err
+			}
+			res.encodingCMapData = nil
+			res.encodingCMapDict = nil
+			res.dict["Encoding"] = encRef
+		}
 		if res.cidMapData != nil {
 			cidMapRef := writer.AllocRef()
 			cidMapDict := pdfgo.Dictionary{}
@@ -219,14 +244,18 @@ type fontRegistryKey struct {
 
 // compiledFont 保存单个字体并行子集化与压缩后的待写出字节数据
 type compiledFont struct {
-	entry         *FontEntry
-	dict          pdfgo.Dictionary
-	toUnicodeData []byte
-	fontFileData  []byte
-	fontFileDict  pdfgo.Dictionary
-	fontFileKey   pdfgo.Name
-	cidMapData    []byte
-	err           error
+	entry            *FontEntry
+	dict             pdfgo.Dictionary
+	toUnicodeData    []byte
+	fontFileData     []byte
+	fontFileDict     pdfgo.Dictionary
+	fontFileKey      pdfgo.Name
+	cidMapData       []byte
+	encodingCMapData []byte
+	encodingCMapDict pdfgo.Dictionary
+	subsetTag        string
+	baseFontName     string
+	err              error
 }
 
 // compileFontEntry 将单个字体登记项编译为Type1或Type0+CIDFont字典及压缩字体流
@@ -254,12 +283,37 @@ func compileFontEntry(entry *FontEntry, doSubset, compress bool, level int, zw *
 		}
 	}
 	f := 1000.0 / float64(font.SFNT.Head.UnitsPerEm)
-	widths := make([]int, len(glyphIDs)+1)
+	widths := make([]int, len(glyphIDs))
 	for subsetGID, gid := range glyphIDs {
 		widths[subsetGID] = int(f*float64(font.SFNT.GlyphAdvance(gid)) + 0.5)
 	}
-	dw := widths[0]
-	wArr := buildFontWidthsArray(widths, dw)
+	dw := 1000
+	if len(widths) > 0 {
+		dw = widths[0]
+	}
+	customCMap := !subsetOK && !font.SFNT.IsTrueType
+	registry, ordering, supplement := "Adobe", "Identity", 0
+	var targetCIDs []uint16
+	if customCMap {
+		targetCIDs = make([]uint16, len(glyphIDs))
+		rawCIDs, reg, ord, sup, isCID := basefont.CFFCIDInfo(parsed)
+		if isCID && reg != "" && ord != "" {
+			registry, ordering, supplement = reg, ord, sup
+		}
+		for i, gid := range glyphIDs {
+			if isCID && int(gid) < len(rawCIDs) {
+				targetCIDs[i] = rawCIDs[gid]
+			} else {
+				targetCIDs[i] = gid
+			}
+		}
+	}
+	var wArr pdfgo.Array
+	if customCMap {
+		wArr = buildCIDWidthsArray(targetCIDs, widths, dw)
+	} else {
+		wArr = buildFontWidthsArray(widths, dw)
+	}
 	toUnicodeRaw := buildToUnicodeCMap(font, glyphIDs)
 	toUnicodeData := toUnicodeRaw
 	var err error
@@ -294,16 +348,23 @@ func compileFontEntry(entry *FontEntry, doSubset, compress bool, level int, zw *
 			name = psName
 		}
 	}
-	baseFont := strings.ReplaceAll(name, " ", "")
-	if baseFont == "" {
-		baseFont = "Font"
+	baseFontName := strings.ReplaceAll(name, " ", "")
+	if baseFontName == "" {
+		baseFontName = "Font"
 	}
+	baseFont := baseFontName
+	subsetTag := ""
 	if subsetOK {
-		baseFont = fontSubsetTag(fontProgram) + "+" + baseFont
+		subsetTag = fontSubsetTag(fontProgram, entry.Ref.Number, entry.Vertical)
+		baseFont = subsetTag + "+" + baseFontName
 	}
 	encoding := pdfgo.Name("Identity-H")
 	if entry.Vertical {
 		encoding = "Identity-V"
+	}
+	descent := int(f * float64(font.SFNT.Hhea.Descender))
+	if descent > 0 {
+		descent = -descent
 	}
 	cidDict := pdfgo.Dictionary{
 		"Type":     pdfgo.Name("Font"),
@@ -312,9 +373,9 @@ func compileFontEntry(entry *FontEntry, doSubset, compress bool, level int, zw *
 		"DW":       pdfgo.Integer(dw),
 		"W":        wArr,
 		"CIDSystemInfo": pdfgo.Dictionary{
-			"Registry":   pdfgo.String("Adobe"),
-			"Ordering":   pdfgo.String("Identity"),
-			"Supplement": pdfgo.Integer(0),
+			"Registry":   pdfgo.String(registry),
+			"Ordering":   pdfgo.String(ordering),
+			"Supplement": pdfgo.Integer(supplement),
 		},
 		"FontDescriptor": pdfgo.Dictionary{
 			"Type":     pdfgo.Name("FontDescriptor"),
@@ -328,27 +389,63 @@ func compileFontEntry(entry *FontEntry, doSubset, compress bool, level int, zw *
 			},
 			"ItalicAngle": pdfgo.Real(float64(font.SFNT.Post.ItalicAngle)),
 			"Ascent":      pdfgo.Integer(int(f * float64(font.SFNT.Hhea.Ascender))),
-			"Descent":     pdfgo.Integer(-int(f * float64(font.SFNT.Hhea.Descender))),
+			"Descent":     pdfgo.Integer(descent),
 			"CapHeight":   pdfgo.Integer(int(f * float64(font.SFNT.OS2.SCapHeight))),
 			"StemV":       pdfgo.Integer(80),
 		},
 	}
-	var cidMapData []byte
-	if !subsetOK {
-		rawMap := make([]byte, 2*len(glyphIDs))
-		for subsetGID, gid := range glyphIDs {
-			rawMap[subsetGID*2] = byte(gid >> 8)
-			rawMap[subsetGID*2+1] = byte(gid)
+	if entry.Vertical {
+		dw2, w2 := buildFontVerticalMetrics(font, glyphIDs, targetCIDs, widths, f)
+		cidDict["DW2"] = dw2
+		if len(w2) > 0 {
+			cidDict["W2"] = w2
 		}
-		cidMapData = rawMap
+	}
+	var cidMapData []byte
+	var encodingCMapData []byte
+	var encodingCMapDict pdfgo.Dictionary
+	if font.SFNT.IsTrueType {
+		if subsetOK {
+			cidDict["CIDToGIDMap"] = pdfgo.Name("Identity")
+		} else {
+			rawMap := make([]byte, 2*len(glyphIDs))
+			for subsetGID, gid := range glyphIDs {
+				rawMap[subsetGID*2] = byte(gid >> 8)
+				rawMap[subsetGID*2+1] = byte(gid)
+			}
+			cidMapData = rawMap
+			if compress {
+				cidMapData, zw, err = CompressBytes(zw, zbuf, level, rawMap)
+				if err != nil {
+					return compiledFont{entry: entry, err: err}, zw
+				}
+			}
+		}
+	} else if !subsetOK {
+		cmapName := fmt.Sprintf("CMap%d", entry.Ref.Number)
+		wMode := 0
+		if entry.Vertical {
+			wMode = 1
+		}
+		cmapRaw := buildCIDEncodingCMap(cmapName, registry, ordering, supplement, wMode, targetCIDs)
+		encodingCMapData = cmapRaw
+		encodingCMapDict = pdfgo.Dictionary{
+			"Type":     pdfgo.Name("CMap"),
+			"CMapName": pdfgo.Name(cmapName),
+			"CIDSystemInfo": pdfgo.Dictionary{
+				"Registry":   pdfgo.String(registry),
+				"Ordering":   pdfgo.String(ordering),
+				"Supplement": pdfgo.Integer(supplement),
+			},
+			"WMode": pdfgo.Integer(wMode),
+		}
 		if compress {
-			cidMapData, zw, err = CompressBytes(zw, zbuf, level, rawMap)
+			encodingCMapData, zw, err = CompressBytes(zw, zbuf, level, cmapRaw)
 			if err != nil {
 				return compiledFont{entry: entry, err: err}, zw
 			}
+			encodingCMapDict["Filter"] = pdfgo.Name("FlateDecode")
 		}
-	} else if font.SFNT.IsTrueType {
-		cidDict["CIDToGIDMap"] = pdfgo.Name("Identity")
 	}
 	dict := pdfgo.Dictionary{
 		"Type":            pdfgo.Name("Font"),
@@ -358,13 +455,17 @@ func compileFontEntry(entry *FontEntry, doSubset, compress bool, level int, zw *
 		"DescendantFonts": pdfgo.Array{cidDict},
 	}
 	return compiledFont{
-		entry:         entry,
-		dict:          dict,
-		toUnicodeData: toUnicodeData,
-		fontFileData:  fontFileData,
-		fontFileDict:  fontFileDict,
-		fontFileKey:   fontFileKey,
-		cidMapData:    cidMapData,
+		entry:            entry,
+		dict:             dict,
+		toUnicodeData:    toUnicodeData,
+		fontFileData:     fontFileData,
+		fontFileDict:     fontFileDict,
+		fontFileKey:      fontFileKey,
+		cidMapData:       cidMapData,
+		encodingCMapData: encodingCMapData,
+		encodingCMapDict: encodingCMapDict,
+		subsetTag:        subsetTag,
+		baseFontName:     baseFontName,
 	}, zw
 }
 
@@ -477,17 +578,277 @@ func buildToUnicodeCMap(font *canvas.Font, glyphIDs []uint16) []byte {
 	return buf.Bytes()
 }
 
-// fontSubsetTag 按嵌入字体程序校验和生成确定性六位大写子集前缀
-// 入参: program 字体程序字节
+// buildCIDWidthsArray 按稀疏目标CID排序并压缩构造CIDFont的W宽度数组
+// 入参: targetCIDs 按子集索引排列的目标CID切片, widths 对应字宽切片, dw 缺省宽度
+// 返回: pdfgo.Array PDF宽度数组
+func buildCIDWidthsArray(targetCIDs []uint16, widths []int, dw int) pdfgo.Array {
+	type item struct {
+		cid   uint16
+		width int
+	}
+	list := make([]item, 0, len(targetCIDs))
+	for i, cid := range targetCIDs {
+		if i < len(widths) && widths[i] != dw {
+			list = append(list, item{cid: cid, width: widths[i]})
+		}
+	}
+	if len(list) == 0 {
+		return nil
+	}
+	slices.SortFunc(list, func(a, b item) int { return cmp.Compare(a.cid, b.cid) })
+	var dedup []item
+	for _, it := range list {
+		if len(dedup) == 0 || dedup[len(dedup)-1].cid != it.cid {
+			dedup = append(dedup, it)
+		}
+	}
+	var w pdfgo.Array
+	for i := 0; i < len(dedup); {
+		j := i + 1
+		for j < len(dedup) && dedup[j].cid == dedup[j-1].cid+1 && dedup[j].width == dedup[i].width {
+			j++
+		}
+		if j-i >= 3 {
+			w = append(w, pdfgo.Integer(dedup[i].cid), pdfgo.Integer(dedup[j-1].cid), pdfgo.Integer(dedup[i].width))
+			i = j
+			continue
+		}
+		end := i + 1
+		for end < len(dedup) && dedup[end].cid == dedup[end-1].cid+1 {
+			k := end + 1
+			for k < len(dedup) && dedup[k].cid == dedup[k-1].cid+1 && dedup[k].width == dedup[end].width {
+				k++
+			}
+			if k-end >= 3 {
+				break
+			}
+			end++
+		}
+		arr := make(pdfgo.Array, 0, end-i)
+		for _, it := range dedup[i:end] {
+			arr = append(arr, pdfgo.Integer(it.width))
+		}
+		w = append(w, pdfgo.Integer(dedup[i].cid), arr)
+		i = end
+	}
+	return w
+}
+
+// buildFontVerticalMetrics 计算竖排CIDFont的DW2默认垂直度量与W2逐字形垂直度量数组
+// 入参: font 源画布字体, glyphIDs 子集字形列表, targetCIDs 可选目标CID映射, widths 水平宽度列表, f 字体单位到千分em换算系数
+// 返回: pdfgo.Array DW2数组, pdfgo.Array W2数组
+func buildFontVerticalMetrics(font *canvas.Font, glyphIDs, targetCIDs []uint16, widths []int, f float64) (pdfgo.Array, pdfgo.Array) {
+	defaultOriginY, vorgOverrides, hasVORG := parseVORGTable(font.SFNT.Tables["VORG"])
+	defaultVY := int(math.Round(f * float64(font.SFNT.Hhea.Ascender)))
+	if hasVORG {
+		defaultVY = int(math.Round(f * float64(defaultOriginY)))
+	} else if defaultVY == 0 {
+		defaultVY = 880
+	}
+	type vMetric struct {
+		cid uint16
+		w1y int
+		vx  int
+		vy  int
+	}
+	metrics := make([]vMetric, len(glyphIDs))
+	freq := make(map[int]int, len(glyphIDs))
+	defaultW1Y := -1000
+	bestCount := 0
+	for i, gid := range glyphIDs {
+		cid := uint16(i)
+		if len(targetCIDs) == len(glyphIDs) {
+			cid = targetCIDs[i]
+		}
+		w1y := -int(math.Round(f * float64(font.SFNT.GlyphVerticalAdvance(gid))))
+		vx := widths[i] / 2
+		vy := defaultVY
+		if hasVORG {
+			if override, ok := vorgOverrides[gid]; ok {
+				vy = int(math.Round(f * float64(override)))
+			}
+		}
+		metrics[i] = vMetric{cid: cid, w1y: w1y, vx: vx, vy: vy}
+		freq[w1y]++
+		if freq[w1y] > bestCount || (freq[w1y] == bestCount && w1y < defaultW1Y) {
+			bestCount = freq[w1y]
+			defaultW1Y = w1y
+		}
+	}
+	dw2 := pdfgo.Array{pdfgo.Integer(defaultVY), pdfgo.Integer(defaultW1Y)}
+	var nonDefault []vMetric
+	for _, m := range metrics {
+		if m.w1y != defaultW1Y || m.vy != defaultVY {
+			nonDefault = append(nonDefault, m)
+		}
+	}
+	if len(nonDefault) == 0 {
+		return dw2, nil
+	}
+	slices.SortFunc(nonDefault, func(a, b vMetric) int { return cmp.Compare(a.cid, b.cid) })
+	var dedup []vMetric
+	for _, m := range nonDefault {
+		if len(dedup) == 0 || dedup[len(dedup)-1].cid != m.cid {
+			dedup = append(dedup, m)
+		}
+	}
+	var w2 pdfgo.Array
+	for i := 0; i < len(dedup); {
+		j := i + 1
+		for j < len(dedup) && dedup[j].cid == dedup[j-1].cid+1 && dedup[j].w1y == dedup[i].w1y && dedup[j].vx == dedup[i].vx && dedup[j].vy == dedup[i].vy {
+			j++
+		}
+		if j-i >= 2 {
+			w2 = append(w2, pdfgo.Integer(dedup[i].cid), pdfgo.Integer(dedup[j-1].cid), pdfgo.Integer(dedup[i].w1y), pdfgo.Integer(dedup[i].vx), pdfgo.Integer(dedup[i].vy))
+			i = j
+			continue
+		}
+		end := i + 1
+		for end < len(dedup) && dedup[end].cid == dedup[end-1].cid+1 {
+			if end+1 < len(dedup) && dedup[end+1].cid == dedup[end].cid+1 && dedup[end+1].w1y == dedup[end].w1y && dedup[end+1].vx == dedup[end].vx && dedup[end+1].vy == dedup[end].vy {
+				break
+			}
+			end++
+		}
+		arr := make(pdfgo.Array, 0, (end-i)*3)
+		for _, m := range dedup[i:end] {
+			arr = append(arr, pdfgo.Integer(m.w1y), pdfgo.Integer(m.vx), pdfgo.Integer(m.vy))
+		}
+		w2 = append(w2, pdfgo.Integer(dedup[i].cid), arr)
+		i = end
+	}
+	return dw2, w2
+}
+
+// parseVORGTable 解析OpenType VORG表的默认垂直原点与逐字形覆写表
+// 入参: data VORG原始字节
+// 返回: int16 默认垂直原点Y, map[uint16]int16 逐字形垂直原点映射, bool 表是否合法
+func parseVORGTable(data []byte) (int16, map[uint16]int16, bool) {
+	if len(data) < 8 || binary.BigEndian.Uint32(data[:4]) != 0x00010000 {
+		return 0, nil, false
+	}
+	defaultY := int16(binary.BigEndian.Uint16(data[4:6]))
+	count := int(binary.BigEndian.Uint16(data[6:8]))
+	if 8+count*4 > len(data) {
+		return 0, nil, false
+	}
+	var overrides map[uint16]int16
+	if count > 0 {
+		overrides = make(map[uint16]int16, count)
+		for i := range count {
+			pos := 8 + i*4
+			gid := binary.BigEndian.Uint16(data[pos : pos+2])
+			y := int16(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
+			overrides[gid] = y
+		}
+	}
+	return defaultY, overrides, true
+}
+
+// buildCIDEncodingCMap 生成将两字节子集代码映射到源CFF真实CID或GID的自定义PDF CMap流
+// 入参: cmapName CMap名称, registry 注册机构, ordering 排序名, supplement 补充版本, wMode 书写模式, targetCIDs 目标CID映射表
+// 返回: []byte 标准PostScript CMap流字节
+func buildCIDEncodingCMap(cmapName, registry, ordering string, supplement, wMode int, targetCIDs []uint16) []byte {
+	type cidRangeItem struct {
+		start, end uint16
+		cid        uint16
+	}
+	type cidCharItem struct {
+		code uint16
+		cid  uint16
+	}
+	var ranges []cidRangeItem
+	var chars []cidCharItem
+	if len(targetCIDs) > 0 {
+		startCode := uint16(0)
+		startCID := targetCIDs[0]
+		length := uint16(1)
+		flush := func() {
+			if length > 1 {
+				ranges = append(ranges, cidRangeItem{start: startCode, end: startCode + length - 1, cid: startCID})
+			} else {
+				chars = append(chars, cidCharItem{code: startCode, cid: startCID})
+			}
+		}
+		for idx := 1; idx < len(targetCIDs); idx++ {
+			code := uint16(idx)
+			cid := targetCIDs[idx]
+			if code == startCode+length && cid == startCID+length && (startCode>>8) == (code>>8) {
+				length++
+			} else {
+				flush()
+				startCode = code
+				startCID = cid
+				length = 1
+			}
+		}
+		flush()
+	}
+	var buf bytes.Buffer
+	buf.WriteString("/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo <</Registry")
+	appendPDFLiteralString(&buf, []byte(registry))
+	buf.WriteString("/Ordering")
+	appendPDFLiteralString(&buf, []byte(ordering))
+	fmt.Fprintf(&buf, "/Supplement %d>> def\n/CMapName ", supplement)
+	appendPDFName(&buf, cmapName)
+	fmt.Fprintf(&buf, " def\n/CMapType 1 def\n/WMode %d def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange", wMode)
+	for i := 0; i < len(ranges); i += cmapChunkLimit {
+		chunk := ranges[i:min(i+cmapChunkLimit, len(ranges))]
+		fmt.Fprintf(&buf, "\n%d begincidrange", len(chunk))
+		for _, item := range chunk {
+			fmt.Fprintf(&buf, "\n<%04X> <%04X> %d", item.start, item.end, item.cid)
+		}
+		buf.WriteString("\nendcidrange")
+	}
+	for i := 0; i < len(chars); i += cmapChunkLimit {
+		chunk := chars[i:min(i+cmapChunkLimit, len(chars))]
+		fmt.Fprintf(&buf, "\n%d begincidchar", len(chunk))
+		for _, item := range chunk {
+			fmt.Fprintf(&buf, "\n<%04X> %d", item.code, item.cid)
+		}
+		buf.WriteString("\nendcidchar")
+	}
+	buf.WriteString("\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend")
+	return buf.Bytes()
+}
+
+// fontSubsetTag 按字体程序、对象编号与书写方向生成高熵确定性六位大写子集前缀
+// 入参: program 字体程序字节, refNum 对象编号, vertical 是否竖排
 // 返回: string 六位子集前缀
-func fontSubsetTag(program []byte) string {
+func fontSubsetTag(program []byte, refNum int64, vertical bool) string {
+	h := sha256.New()
+	var meta [9]byte
+	binary.LittleEndian.PutUint64(meta[:8], uint64(refNum))
+	if vertical {
+		meta[8] = 1
+	}
+	h.Write(meta[:])
+	h.Write(program)
+	var sum [32]byte
+	h.Sum(sum[:0])
+	val := binary.LittleEndian.Uint64(sum[:8])
 	var tag [6]byte
-	checksum := crc32.ChecksumIEEE(program)
 	for i := range 6 {
-		tag[i] = 'A' + byte(checksum%26)
-		checksum >>= 5
+		tag[i] = 'A' + byte(val%26)
+		val /= 26
 	}
 	return string(tag[:])
+}
+
+// nextSubsetTag 将六位大写字母子集前缀按26进制递增以消除文档内极小概率碰撞
+// 入参: tag 当前六位前缀
+// 返回: string 递增后的六位前缀
+func nextSubsetTag(tag string) string {
+	var out [6]byte
+	copy(out[:], tag)
+	for i := 5; i >= 0; i-- {
+		if out[i] < 'Z' {
+			out[i]++
+			break
+		}
+		out[i] = 'A'
+	}
+	return string(out[:])
 }
 
 // standardPDFFontName 识别可映射为PDF 14种内置Type1标准字体的名称与样式
