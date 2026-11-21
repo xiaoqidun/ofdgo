@@ -34,7 +34,6 @@
 	--shadow-soft: 0 12px 32px rgba(31, 36, 40, 0.18);
 	--shadow-choice: 0 1px 4px rgb(31 36 40 / 10%);
 	--popup-line: color-mix(in srgb, var(--text) 18%, transparent);
-	--shadow-page: 0 14px 30px rgba(31, 36, 40, 0.16);
 	--base: #eef1f3;
 	--text: #263238;
 	--input: #ffffff;
@@ -105,7 +104,6 @@
 	--shadow-flyout: 0 4px 12px #0005;
 	--shadow-soft: 0 12px 36px #0006, 0 2px 6px #0003;
 	--shadow-choice: 0 1px 4px rgb(0 0 0 / 24%);
-	--shadow-page: 0 14px 30px #0005;
 	--dropdown-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e0e7eb' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5 9 7 7 7-7'/%3E%3C/svg%3E");
 }
 
@@ -3689,13 +3687,11 @@ button.outline-link:hover {
 	position: relative;
 	overflow: hidden;
 	border: 1px solid rgba(170, 183, 193, 0.55);
-	box-shadow: var(--shadow-page);
 	background: var(--page);
 }
 
 .page-frame.continuous .page-shell {
 	border: 0;
-	box-shadow: none;
 }
 
 .page-frame.continuous .page-shell::after {
