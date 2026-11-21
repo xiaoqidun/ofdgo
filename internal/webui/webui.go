@@ -2511,7 +2511,7 @@ func (e *businessEngine) openLinks(args []platformValue) (any, error) {
 
 // destinationView 统一计算PDF目标视图，并应用目标页显示边界
 // 入参: args 目标、页面变换及当前视口的JSON
-// 返回: any PDF定位坐标和缩放率，普通OFD返回nil, error 参数或计算错误
+// 返回: any PDF定位坐标、缩放率及视图模式，普通OFD返回nil, error 参数或计算错误
 func (e *businessEngine) destinationView(args []platformValue) (any, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("invalid destination view arguments")
@@ -2557,7 +2557,19 @@ func (e *businessEngine) destinationView(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"left": view.Left, "top": view.Top, "zoom": view.Zoom}, nil
+	fitMode := "free"
+	switch target.Mode {
+	case "XYZ":
+		if target.KeepZoom {
+			fitMode = ""
+		}
+	case "Fit":
+		fitMode = "height"
+	case "FitH":
+		fitMode = "width"
+	}
+	keepPosition := target.Mode == "XYZ" && target.KeepLeft && target.KeepTop && target.KeepZoom
+	return map[string]any{"left": view.Left, "top": view.Top, "zoom": view.Zoom, "fitMode": fitMode, "keepPosition": keepPosition}, nil
 }
 
 // outlineLinks 获取目录节点的有序动作目标

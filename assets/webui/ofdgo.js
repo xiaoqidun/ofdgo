@@ -7517,9 +7517,12 @@ async function openDocument(options = {}) {
 		state.scale = options.scale || 1;
 		if (!options.fitMode) {
 			state.rotation = 0;
-			pageView.setContinuous(window.matchMedia("(max-width: 640px)").matches);
+			const defaults = pageView.defaultView(doc.pages?.[pageIndex] || null);
+			pageView.setContinuous(defaults.continuous);
+			state.fitMode = defaults.fitMode;
+		} else {
+			state.fitMode = options.fitMode;
 		}
-		state.fitMode = options.fitMode || (state.pageLayout > 1 || !state.continuous && pageCount === 1 ? "height" : "width");
 		if (!options.skipAutoFonts && await autoLoadDocumentLocalFonts(openSeq, tab, Boolean(options.keepLocalFonts))) {
 			if (openSeq !== state.openSeq) {
 				return;
@@ -11677,12 +11680,12 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 		setStatus("暂不支持此跳转方式");
 		return;
 	}
-	const navigationState = state, seq = state.openSeq, scale = state.scale, space = pageView.pageSpace();
+	const navigationState = state, seq = state.openSeq, scale = state.scale, currentScale = pageView.pageScale(pageView.currentPageInfo()), fitMode = state.fitMode, space = pageView.pageSpace();
 	const previousNode = pageView.pageShell(state.pageIndex), previous = previousNode?.getBoundingClientRect(), viewport = el.viewerPanel.getBoundingClientRect();
 	const current = {
-		left: previous ? (viewport.left + el.viewerPanel.clientLeft + space - previous.left - previousNode.clientLeft) / (MM_TO_PX * scale) : 0,
-		top: previous ? (viewport.top + el.viewerPanel.clientTop + space - previous.top - previousNode.clientTop) / (MM_TO_PX * scale) : 0,
-		zoom: scale,
+		left: previous ? (viewport.left + el.viewerPanel.clientLeft + space - previous.left - previousNode.clientLeft) / (MM_TO_PX * currentScale) : 0,
+		top: previous ? (viewport.top + el.viewerPanel.clientTop + space - previous.top - previousNode.clientTop) / (MM_TO_PX * currentScale) : 0,
+		zoom: currentScale,
 	};
 	const navigation = state.pageNavigation = { openSeq: seq, index };
 	try {
@@ -11706,7 +11709,19 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 		if (seq !== state.openSeq || state.pageIndex !== index || state.pageNavigation !== navigation) return;
 		let point, margin = 0;
 		if (view) {
-			pageView.setScale(view.zoom, false);
+			if (view.keepPosition && openAction?.initial && index === sourcePage) return;
+			if (view.fitMode === "height") {
+				pageView.fitHeight(false);
+				pageView.scrollToPage(index);
+				return;
+			}
+			if (view.fitMode === "width") {
+				pageView.fitWidth(false);
+			} else if (view.fitMode === "" && fitMode !== "free") {
+				pageView.applyFit(false);
+			} else {
+				pageView.setScale(view.zoom, false);
+			}
 			point = { x: view.left, y: view.top };
 			margin = space;
 		} else {
@@ -11717,7 +11732,7 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 				pageView.scrollToPage(index);
 				return;
 			} else if (dest.type === "FitH") {
-				pageView.setScale(pageView.fitWidthScale(page), false);
+				pageView.setScale(pageView.fitWidthScale(page), false, "width");
 			} else if (dest.type === "FitV") {
 				pageView.setScale(height / (size.height * MM_TO_PX), false);
 			} else if (dest.type === "FitR") {
@@ -11725,7 +11740,11 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 				if (dest.right <= left || dest.bottom <= top) return;
 				pageView.setScale(Math.min(width / Math.abs(b.x - a.x), height / Math.abs(b.y - a.y)) / MM_TO_PX, false);
 			} else {
-				pageView.setScale(!dest.omitZoom && dest.zoom > 0 ? dest.zoom : scale, false);
+				const keepZoom = dest.omitZoom || !(dest.zoom > 0);
+				if (keepZoom && dest.omitLeft && dest.omitTop && openAction?.initial && index === sourcePage) return;
+				if (!keepZoom) pageView.setScale(dest.zoom, false);
+				else if (fitMode !== "free") pageView.applyFit(false);
+				else pageView.setScale(scale, false);
 			}
 			point = destinationPoint(page, dest.type === "FitH" ? 0 : left, dest.type === "FitV" ? 0 : top);
 			if (dest.type === "FitR") {
@@ -11735,9 +11754,10 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 			}
 		}
 		if (state.pageWindow) pageView.syncPageWindow(state.pageWindow, state.pageWindow.offsets[index]);
+		const activeScale = pageView.pageScale(page);
 		const node = pageView.pageShell(index), shell = node.getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
-		el.viewerPanel.scrollLeft += shell.left + node.clientLeft - viewer.left - el.viewerPanel.clientLeft + point.x * MM_TO_PX * state.scale - margin;
-		pageView.scrollViewerBy(shell.top + node.clientTop - viewer.top - el.viewerPanel.clientTop + point.y * MM_TO_PX * state.scale - margin);
+		el.viewerPanel.scrollLeft += shell.left + node.clientLeft - viewer.left - el.viewerPanel.clientLeft + point.x * MM_TO_PX * activeScale - margin;
+		pageView.scrollViewerBy(shell.top + node.clientTop - viewer.top - el.viewerPanel.clientTop + point.y * MM_TO_PX * activeScale - margin);
 	} finally {
 		if (navigationState.pageNavigation === navigation) {
 			if (state !== navigationState || seq !== state.openSeq || index !== state.pageIndex) navigationState.pageNavigation = null;

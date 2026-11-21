@@ -2,6 +2,12 @@ import { nativeHost, engineLimits } from "./ofdgo_host.js";
 
 export const MM_TO_PX = 96 / 25.4;
 export const SCROLL_SEGMENT_SIZE = 1000000;
+export const DEFAULT_VIEW_POLICY = {
+	compactWidth: 640,
+	tallPageRatio: 2,
+	compact: { continuous: true, fitMode: "width" },
+	wide: { continuous: false },
+};
 
 const PAGE_CACHE_LIMIT = 16;
 const PAGE_CACHE_BYTES = 32 * 1024 * 1024;
@@ -9,9 +15,51 @@ const PAGE_LAYOUT_GAP = 16;
 const svgFontBytes = new WeakMap();
 let textMeasure = null;
 
+export function resolveDefaultView({ viewportWidth = window.innerWidth, pageCount = 0, pageLayout = 1, page = null, rotation = 0 } = {}) {
+	if (viewportWidth <= DEFAULT_VIEW_POLICY.compactWidth) {
+		return { continuous: DEFAULT_VIEW_POLICY.compact.continuous, fitMode: DEFAULT_VIEW_POLICY.compact.fitMode };
+	}
+	const width = page ? (rotation % 180 ? page.height : page.width) : 0;
+	const height = page ? (rotation % 180 ? page.width : page.height) : 0;
+	const tall = width > 0 && height > width * DEFAULT_VIEW_POLICY.tallPageRatio;
+	const landscapeOrSquare = width > 0 && height > 0 && width >= height;
+	const fitMode = tall ? "width" : (landscapeOrSquare || pageCount <= 1 || pageLayout > 1 ? "height" : "width");
+	return { continuous: DEFAULT_VIEW_POLICY.wide.continuous, fitMode };
+}
+
 export function createPageView(context) {
 	let scrollbarMeasurement = null;
+	let heightFitWidthLimit = 0;
+	let appliedHeightFitWidthLimit = 0;
 	const pageView = {
+		defaultView(page = pageView.currentPageInfo()) {
+			return resolveDefaultView({
+				viewportWidth: window.innerWidth,
+				pageCount: context.state.doc?.pageCount || 0,
+				pageLayout: context.state.pageLayout,
+				page,
+				rotation: context.state.rotation,
+			});
+		},
+
+		heightFitMaxWidth() {
+			const available = Math.max(1, context.el.viewerPanel.clientWidth - pageView.pageSpace() * 2);
+			return heightFitWidthLimit > 0 ? Math.min(available, heightFitWidthLimit) : available;
+		},
+
+		pageScale(page, scale = context.state.scale, fitMode = context.state.fitMode, maxWidth = null) {
+			if (!page || context.state.pageLayout > 1 || fitMode === "free") {
+				return scale;
+			}
+			const size = pageView.pageViewSize(page);
+			if (fitMode === "width") {
+				const current = pageView.currentPageInfo() || page;
+				return scale * pageView.pageViewSize(current).width / Math.max(1e-6, size.width);
+			}
+			const limit = maxWidth ?? pageView.heightFitMaxWidth();
+			return Math.min(scale, limit / Math.max(1, size.width * MM_TO_PX));
+		},
+
 		async renderPage(index, options = {}) {
 			const tab = context.documentTab(), state = tab.state;
 			if (!state.doc || (state.editorInfo && document.body.hasAttribute("data-busy") && !options.keepBusy)) {
@@ -866,6 +914,11 @@ export function createPageView(context) {
 					context.state.scale = pageView.fitWidthScale(nextPage);
 					context.el.zoomLabel.textContent = `${Math.round(context.state.scale * 100)}%`;
 				}
+			} else if (context.state.fitMode === "height" && context.state.pageLayout === 1) {
+				const nextPage = pageView.currentPageInfo();
+				if (nextPage) {
+					context.el.zoomLabel.textContent = `${Math.round(pageView.pageScale(nextPage) * 100)}%`;
+				}
 			}
 			pageView.updatePageListCurrent();
 			context.updateControls();
@@ -938,7 +991,8 @@ export function createPageView(context) {
 			pageView.layoutPages();
 			pageView.layoutThumbnails();
 			if (context.state.showPages && !context.el.pageList.hidden) pageView.revealThumbnail(context.state.pageIndex);
-			pageView.fitHeight();
+			if (pageView.defaultView().fitMode === "height") pageView.fitHeight();
+			else pageView.fitWidth();
 			pageView.queueNearbyPages(context.state.pageIndex);
 		},
 
@@ -996,11 +1050,12 @@ export function createPageView(context) {
 				shell.style.removeProperty("transform");
 			}
 			const offsets = new Float64Array(context.state.doc.pages.length + 1);
-			const fittedWidth = context.state.scale * pageView.pageViewSize(pageView.currentPageInfo()).width;
+			const maxWidth = context.state.fitMode === "height" ? pageView.heightFitMaxWidth() : null;
 			let width = 1;
 			for (let index = 0; index < context.state.doc.pages.length; index++) {
-				const size = pageView.pageViewSize(context.state.doc.pages[index]);
-				const scale = context.state.fitMode === "width" ? fittedWidth / size.width : context.state.scale;
+				const page = context.state.doc.pages[index];
+				const size = pageView.pageViewSize(page);
+				const scale = pageView.pageScale(page, context.state.scale, context.state.fitMode, maxWidth);
 				offsets[index + 1] = offsets[index] + Math.max(1, size.height * MM_TO_PX) * scale + gap;
 				width = Math.max(width, Math.max(1, size.width * MM_TO_PX) * scale);
 			}
@@ -1018,7 +1073,7 @@ export function createPageView(context) {
 			const size = pageView.pageViewSize(page);
 			const viewWidth = Math.max(1, size.width * MM_TO_PX);
 			const viewHeight = Math.max(1, size.height * MM_TO_PX);
-			const scale = context.state.fitMode === "width" && context.state.pageLayout === 1 ? context.state.scale * pageView.pageViewSize(pageView.currentPageInfo()).width / size.width : context.state.scale;
+			const scale = pageView.pageScale(page);
 			shell.style.width = `${viewWidth * scale}px`;
 			shell.style.height = `${viewHeight * scale}px`;
 			const surface = shell.querySelector(".page-surface");
@@ -1454,31 +1509,47 @@ export function createPageView(context) {
 			const size = context.state.pageLayout > 1 ? pageView.pageGroupSize(page.index) : pageView.pageViewSize(page);
 			const width = Math.max(1, size.width * MM_TO_PX), height = Math.max(1, size.height * MM_TO_PX);
 			const space = pageView.pageSpace(), gap = context.state.pageLayout > 1 && !context.state.continuous ? PAGE_LAYOUT_GAP : 0;
+			const singleHeightFit = mode === "height" && context.state.pageLayout === 1;
 			let contentWidth = 0, contentHeight = 0, rows = 0;
+			const items = singleHeightFit ? [] : null;
 			for (let index = 0; index < context.state.doc.pages.length; index += context.state.pageLayout) {
 				const item = context.state.pageLayout > 1 ? pageView.pageGroupSize(index) : pageView.pageViewSize(context.state.doc.pages[index]);
-				const factor = mode === "width" && context.state.pageLayout === 1 ? size.width / item.width : 1;
-				contentWidth = Math.max(contentWidth, item.width * MM_TO_PX * factor);
-				contentHeight += item.height * MM_TO_PX * factor;
+				if (singleHeightFit) {
+					items.push({ width: Math.max(1, item.width * MM_TO_PX), height: Math.max(1, item.height * MM_TO_PX) });
+				} else {
+					const factor = mode === "width" && context.state.pageLayout === 1 ? size.width / item.width : 1;
+					contentWidth = Math.max(contentWidth, item.width * MM_TO_PX * factor);
+					contentHeight += item.height * MM_TO_PX * factor;
+				}
 				rows++;
 			}
 			const layoutWidth = context.state.pageLayout > 1 ? Math.max(width, contentWidth) : width;
 			const scrollbar = pageView.scrollbarWidth();
 			const viewport = context.el.viewerPanel.getBoundingClientRect();
-			let vertical = false, horizontal = false, scale = 1;
+			let vertical = false, horizontal = false, scale = 1, maxPageWidth = 0;
 			for (let pass = 0; pass < 3; pass++) {
 				const availableWidth = Math.max(1, viewport.width - (vertical ? scrollbar : 0));
 				const availableHeight = Math.max(1, viewport.height - (horizontal ? scrollbar : 0));
-				scale = Math.min(4, Math.max(1, availableWidth - space * 2 - gap) / layoutWidth);
+				maxPageWidth = Math.max(1, availableWidth - space * 2 - gap);
+				scale = Math.min(4, maxPageWidth / layoutWidth);
 				if (mode === "height") scale = Math.min(scale, Math.max(1, availableHeight - space * 2) / height);
 				const blockSpace = context.state.continuous ? 0 : Math.max(space, (availableHeight - height * scale) / 2);
 				const rowGap = context.state.continuous ? 0 : Math.max(gap, blockSpace + 2);
-				const nextVertical = contentHeight * scale + rowGap * (rows - 1) + blockSpace * 2 > availableHeight + 0.5;
-				const nextHorizontal = contentWidth * scale + gap + space * 2 > availableWidth + 0.5;
+				let totalHeight = contentHeight * scale;
+				let nextHorizontal = contentWidth * scale + gap + space * 2 > availableWidth + 0.5;
+				if (singleHeightFit) {
+					totalHeight = 0;
+					for (const item of items) {
+						totalHeight += item.height * Math.min(scale, maxPageWidth / item.width);
+					}
+					nextHorizontal = false;
+				}
+				const nextVertical = totalHeight + rowGap * (rows - 1) + blockSpace * 2 > availableHeight + 0.5;
 				if ((!nextVertical || vertical) && (!nextHorizontal || horizontal)) break;
 				vertical ||= nextVertical;
 				horizontal ||= nextHorizontal;
 			}
+			if (singleHeightFit) heightFitWidthLimit = maxPageWidth;
 			return scale;
 		},
 
@@ -1508,7 +1579,9 @@ export function createPageView(context) {
 		setScale(nextScale, updateStatus = true, fitMode = "free") {
 			const anchor = updateStatus && fitMode === "free" ? pageView.scaleAnchor() : null;
 			const scale = Math.min(4, fitMode === "free" ? Math.max(0.2, nextScale) : nextScale);
-			const layoutChanged = scale !== context.state.scale || fitMode !== context.state.fitMode;
+			if (fitMode !== "height" || context.state.pageLayout > 1) heightFitWidthLimit = 0;
+			const layoutChanged = scale !== context.state.scale || fitMode !== context.state.fitMode || heightFitWidthLimit !== appliedHeightFitWidthLimit;
+			appliedHeightFitWidthLimit = heightFitWidthLimit;
 			context.state.fitMode = fitMode;
 			context.state.scale = scale;
 			if (layoutChanged) {
