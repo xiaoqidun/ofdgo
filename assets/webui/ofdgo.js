@@ -2070,8 +2070,8 @@ el.imageDPI.addEventListener("change", () => changeDisplayMode());
 el.renderVectorButton.addEventListener("click", () => changeDisplayMode("svg"));
 el.renderRasterButton.addEventListener("click", () => changeDisplayMode("raster"));
 el.nextButton.addEventListener("click", () => pageView.renderPage(pageView.pageGroupStart() + state.pageLayout));
-el.zoomOutButton.addEventListener("click", () => pageView.setScale(state.scale - 0.1));
-el.zoomInButton.addEventListener("click", () => pageView.setScale(state.scale + 0.1));
+el.zoomOutButton.addEventListener("click", () => pageView.setScale(pageView.pageScale(pageView.currentPageInfo()) - 0.1));
+el.zoomInButton.addEventListener("click", () => pageView.setScale(pageView.pageScale(pageView.currentPageInfo()) + 0.1));
 el.fitButton.addEventListener("click", pageView.fitWidth);
 el.fitHeightButton.addEventListener("click", pageView.fitHeight);
 el.rotateButton.addEventListener("click", pageView.rotatePages);
@@ -6100,9 +6100,14 @@ function resizeViewer() {
 	pageView.scrollbarWidth();
 	if (state.doc) {
 		pageView.syncThumbnailWindow();
+		const anchor = state.fitMode === "width" ? pageView.scaleAnchor() : null;
 		pageView.applyFit(false);
-		if (state.fitMode !== "free") {
+		if (state.fitMode === "height") {
 			pageView.scrollToPage(state.pageIndex);
+		} else if (state.fitMode === "width" && anchor) {
+			pageView.restoreScaleAnchor(anchor);
+		} else if (state.pageWindow) {
+			pageView.syncPageWindow(state.pageWindow);
 		}
 	}
 }
@@ -7453,7 +7458,7 @@ async function openDocument(options = {}) {
 		return;
 	}
 	const openSeq = options.openSeq || advanceDocumentSequence();
-	const initialActions = options.activateActions && state.sourcePDF && !state.editing;
+	const initialActions = options.activateActions && !state.editing;
 	if (openSeq === state.openSeq && isForegroundDocument(tab)) el.pageFrame.style.visibility = "";
 	const previewPosition = options.previewScroll && state.pageWindow ? pageView.pageWindowAnchor(state.pageWindow) : null;
 	const viewport = options.keepPreview ? el.viewerPanel.getBoundingClientRect() : null;
@@ -11680,24 +11685,27 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 		setStatus("暂不支持此跳转方式");
 		return;
 	}
-	const navigationState = state, seq = state.openSeq, scale = state.scale, currentScale = pageView.pageScale(pageView.currentPageInfo()), fitMode = state.fitMode, space = pageView.pageSpace();
+	const tab = documentTab(), navigationState = state, seq = state.openSeq, scale = state.scale;
+	const currentScale = pageView.pageScale(pageView.currentPageInfo()), fitMode = state.fitMode, space = pageView.pageSpace();
 	const previousNode = pageView.pageShell(state.pageIndex), previous = previousNode?.getBoundingClientRect(), viewport = el.viewerPanel.getBoundingClientRect();
 	const current = {
 		left: previous ? (viewport.left + el.viewerPanel.clientLeft + space - previous.left - previousNode.clientLeft) / (MM_TO_PX * currentScale) : 0,
 		top: previous ? (viewport.top + el.viewerPanel.clientTop + space - previous.top - previousNode.clientTop) / (MM_TO_PX * currentScale) : 0,
 		zoom: currentScale,
 	};
+	const manageBusy = !openAction?.initial && !state.exporting;
+	if (manageBusy) setBusy(true, "正在渲染页面", 35, "正在渲染页面");
 	const navigation = state.pageNavigation = { openSeq: seq, index };
 	try {
-		await pageView.renderPage(index, { fit: false, scroll: false, keepBusy: !!openAction?.initial, openAction, navigation });
+		await pageView.renderPage(index, { fit: false, scroll: false, keepBusy: true, openAction, navigation });
 		if (openAction && state.openActionTask !== openAction) return false;
 		if (seq !== state.openSeq || state.pageIndex !== index || state.pageNavigation !== navigation) return;
 		const page = state.doc.pages[index], size = pageView.pageViewSize(page);
-		const origin = destinationPoint(page, 0, 0), x = destinationPoint(page, 1, 0), y = destinationPoint(page, 0, 1);
+		const origin = destinationPoint(page, 0, 0), xAxis = destinationPoint(page, 1, 0), yAxis = destinationPoint(page, 0, 1);
 		const view = await callWASM("ofdgoDestinationView", JSON.stringify({
 			sourcePage,
 			dest,
-			matrix: [x.x - origin.x, x.y - origin.y, y.x - origin.x, y.y - origin.y, origin.x, origin.y],
+			matrix: [xAxis.x - origin.x, xAxis.y - origin.y, yAxis.x - origin.x, yAxis.y - origin.y, origin.x, origin.y],
 			viewport: {
 				width: Math.max(1, el.viewerPanel.clientWidth - space * 2) / MM_TO_PX,
 				height: Math.max(1, el.viewerPanel.clientHeight - space * 2) / MM_TO_PX,
@@ -11707,9 +11715,9 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 		}));
 		if (openAction && state.openActionTask !== openAction) return false;
 		if (seq !== state.openSeq || state.pageIndex !== index || state.pageNavigation !== navigation) return;
-		let point, margin = 0;
+		let point, omitInline = false;
 		if (view) {
-			if (view.keepPosition && openAction?.initial && index === sourcePage) return;
+			if (view.keepPosition && openAction && index === sourcePage) return;
 			if (view.fitMode === "height") {
 				pageView.fitHeight(false);
 				pageView.scrollToPage(index);
@@ -11723,45 +11731,71 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 				pageView.setScale(view.zoom, false);
 			}
 			point = { x: view.left, y: view.top };
-			margin = space;
+			omitInline = Boolean(view.keepLeft);
 		} else {
-			const width = el.viewerPanel.clientWidth - space * 2, height = el.viewerPanel.clientHeight - space * 2;
-			const left = dest.omitLeft ? 0 : (dest.left ?? 0), top = dest.omitTop ? 0 : (dest.top ?? 0);
+			const width = Math.max(1, el.viewerPanel.clientWidth - space * 2), height = Math.max(1, el.viewerPanel.clientHeight - space * 2);
+			const sideways = state.rotation % 180 !== 0;
 			if (dest.type === "Fit") {
 				pageView.fitHeight(false);
 				pageView.scrollToPage(index);
 				return;
-			} else if (dest.type === "FitH") {
-				pageView.setScale(pageView.fitWidthScale(page), false, "width");
-			} else if (dest.type === "FitV") {
-				pageView.setScale(height / (size.height * MM_TO_PX), false);
+			} else if (dest.type === "FitH" || dest.type === "FitV") {
+				const horizontal = sideways ? dest.type === "FitV" : dest.type === "FitH";
+				if (horizontal) {
+					pageView.fitWidth(false);
+					omitInline = true;
+				} else {
+					pageView.setScale(height / Math.max(1, size.height * MM_TO_PX), false);
+				}
+				const omit = dest.type === "FitH" ? dest.omitTop : dest.omitLeft;
+				if (omit) {
+					point = { x: 0, y: 0 };
+					omitInline = true;
+				} else {
+					const rotated = destinationPoint(page, dest.type === "FitV" ? (dest.left ?? 0) : 0, dest.type === "FitH" ? (dest.top ?? 0) : 0);
+					point = horizontal ? { x: 0, y: rotated.y } : { x: rotated.x, y: 0 };
+				}
 			} else if (dest.type === "FitR") {
-				const a = destinationPoint(page, left, top), b = destinationPoint(page, dest.right, dest.bottom);
+				const left = dest.left ?? 0, top = dest.top ?? 0;
 				if (dest.right <= left || dest.bottom <= top) return;
+				const a = destinationPoint(page, left, top), b = destinationPoint(page, dest.right, dest.bottom);
 				pageView.setScale(Math.min(width / Math.abs(b.x - a.x), height / Math.abs(b.y - a.y)) / MM_TO_PX, false);
+				point = { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y) };
 			} else {
 				const keepZoom = dest.omitZoom || !(dest.zoom > 0);
-				if (keepZoom && dest.omitLeft && dest.omitTop && openAction?.initial && index === sourcePage) return;
+				if (keepZoom && dest.omitLeft && dest.omitTop && openAction && index === sourcePage) return;
 				if (!keepZoom) pageView.setScale(dest.zoom, false);
 				else if (fitMode !== "free") pageView.applyFit(false);
 				else pageView.setScale(scale, false);
-			}
-			point = destinationPoint(page, dest.type === "FitH" ? 0 : left, dest.type === "FitV" ? 0 : top);
-			if (dest.type === "FitR") {
-				const bottom = destinationPoint(page, dest.right, dest.bottom);
-				point.x = Math.min(point.x, bottom.x);
-				point.y = Math.min(point.y, bottom.y);
+				const omitX = sideways ? dest.omitTop : dest.omitLeft;
+				const omitY = sideways ? dest.omitLeft : dest.omitTop;
+				const rotated = destinationPoint(page, dest.omitLeft ? 0 : (dest.left ?? 0), dest.omitTop ? 0 : (dest.top ?? 0));
+				point = { x: omitX ? 0 : rotated.x, y: omitY ? 0 : rotated.y };
+				omitInline = Boolean(omitX);
 			}
 		}
 		if (state.pageWindow) pageView.syncPageWindow(state.pageWindow, state.pageWindow.offsets[index]);
 		const activeScale = pageView.pageScale(page);
+		const viewWidth = Math.max(1, el.viewerPanel.clientWidth - space * 2) / (MM_TO_PX * activeScale);
+		const viewHeight = Math.max(1, el.viewerPanel.clientHeight - space * 2) / (MM_TO_PX * activeScale);
+		const x = size.width <= viewWidth ? (size.width - viewWidth) / 2 : Math.max(0, Math.min(size.width - viewWidth, point.x));
+		const y = size.height <= viewHeight ? 0 : Math.max(0, Math.min(size.height - viewHeight, point.y));
 		const node = pageView.pageShell(index), shell = node.getBoundingClientRect(), viewer = el.viewerPanel.getBoundingClientRect();
-		el.viewerPanel.scrollLeft += shell.left + node.clientLeft - viewer.left - el.viewerPanel.clientLeft + point.x * MM_TO_PX * activeScale - margin;
-		pageView.scrollViewerBy(shell.top + node.clientTop - viewer.top - el.viewerPanel.clientTop + point.y * MM_TO_PX * activeScale - margin);
+		const group = state.pageLayout > 1 ? pageView.pageGroupSize(index) : null;
+		if (group && omitInline && group.width * MM_TO_PX * activeScale + group.gap <= el.viewerPanel.clientWidth - space * 2 + 1) {
+			el.viewerPanel.scrollLeft = Math.max(0, (el.viewerPanel.scrollWidth - el.viewerPanel.clientWidth) / 2);
+		} else {
+			el.viewerPanel.scrollLeft += shell.left + node.clientLeft - viewer.left - el.viewerPanel.clientLeft + x * MM_TO_PX * activeScale - space;
+		}
+		pageView.scrollViewerBy(shell.top + node.clientTop - viewer.top - el.viewerPanel.clientTop + y * MM_TO_PX * activeScale - space);
 	} finally {
 		if (navigationState.pageNavigation === navigation) {
 			if (state !== navigationState || seq !== state.openSeq || index !== state.pageIndex) navigationState.pageNavigation = null;
 			else Object.assign(navigation, { top: state.pageWindow ? pageView.pageWindowTop(state.pageWindow) : el.viewerPanel.scrollTop, left: el.viewerPanel.scrollLeft });
+		}
+		if (manageBusy && !navigationState.exporting && (seq === navigationState.openSeq || !isForegroundDocument(tab))) {
+			setBusy(false, "", 0, "", tab);
+			if (!openAction && seq === navigationState.openSeq && isForegroundDocument(tab)) scheduleOpenActions();
 		}
 	}
 }
@@ -12121,7 +12155,10 @@ function showNavigation(selected) {
 	}
 	el.pageSelectionTools.hidden = !state.editing || !state.pageMultiSelect || selected !== el.pagesTab;
 	el.navigationContent.scrollTop = state.navigationScroll.get(selected) || 0;
-	if (selected === el.pagesTab) pageView.syncThumbnailWindow();
+	if (selected === el.pagesTab) {
+		pageView.syncThumbnailWindow();
+		if (state.doc) pageView.revealThumbnail(state.pageIndex);
+	}
 	if (selected === el.outlinesTab && state.outlinesDirty) mountOutlines();
 	if (selected === el.annotationsTab) loadAnnotationSummary();
 }
@@ -13955,8 +13992,9 @@ function updateControls() {
 	el.pageInput.max = String(pageCount || 1);
 	el.pageInput.value = String(hasDoc ? state.pageIndex + 1 : 0);
 	el.pageControl.style.setProperty("--page-width", `${String(pageCount || 1).length + 0.5}ch`);
-	el.zoomOutButton.disabled = !hasDoc || state.scale <= 0.2;
-	el.zoomInButton.disabled = !hasDoc || state.scale >= 4;
+	const activeScale = hasDoc ? pageView.pageScale(pageView.currentPageInfo()) : state.scale;
+	el.zoomOutButton.disabled = !hasDoc || activeScale <= 0.2 + 1e-6;
+	el.zoomInButton.disabled = !hasDoc || activeScale >= 4 - 1e-6;
 	el.fitButton.disabled = !hasDoc;
 	el.fitHeightButton.disabled = !hasDoc;
 	el.rotateButton.disabled = !hasDoc;
@@ -13965,8 +14003,8 @@ function updateControls() {
 	el.pageLayoutButton.disabled = pageCount < 2 || document.body.hasAttribute("data-busy");
 	el.pageLayoutButton.textContent = state.pageLayoutPreference === 1 ? "单页" : "双页";
 	el.pageLayoutButton.dataset.short = state.pageLayoutPreference === 1 ? "单" : "双";
-	el.fitButton.toggleAttribute("data-pressed", hasDoc && state.fitMode === "width");
-	el.fitHeightButton.toggleAttribute("data-pressed", hasDoc && state.fitMode === "height");
+	el.fitButton.setAttribute("data-pressed", String(hasDoc && state.fitMode === "width"));
+	el.fitHeightButton.setAttribute("data-pressed", String(hasDoc && state.fitMode === "height"));
 	updateAnnotationButton();
 	el.exportFormat.disabled = !hasDoc || state.exporting || !state.exportFormats.length;
 	el.outputCompression.disabled = !hasDoc || state.exporting;

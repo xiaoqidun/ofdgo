@@ -2509,7 +2509,7 @@ func (e *businessEngine) openLinks(args []platformValue) (any, error) {
 	return e.linkResults(links)
 }
 
-// destinationView 统一计算PDF目标视图，并应用目标页显示边界
+// destinationView 统一计算PDF目标视图及定位语义
 // 入参: args 目标、页面变换及当前视口的JSON
 // 返回: any PDF定位坐标、缩放率及视图模式，普通OFD返回nil, error 参数或计算错误
 func (e *businessEngine) destinationView(args []platformValue) (any, error) {
@@ -2547,29 +2547,35 @@ func (e *businessEngine) destinationView(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	zoom := math.Max(0.2, math.Min(4, view.Zoom))
-	if target.Mode == "Fit" || target.Mode == "FitR" {
-		view.Left += request.Viewport.Width * (1/view.Zoom - 1/zoom) / 2
-		view.Top += request.Viewport.Height * (1/view.Zoom - 1/zoom) / 2
-	}
-	view.Zoom = zoom
-	view, err = view.Constrain(request.Viewport)
-	if err != nil {
-		return nil, err
-	}
 	fitMode := "free"
 	switch target.Mode {
 	case "XYZ":
 		if target.KeepZoom {
 			fitMode = ""
 		}
-	case "Fit":
+	case "Fit", "FitB":
 		fitMode = "height"
-	case "FitH":
+	case "FitH", "FitBH":
 		fitMode = "width"
 	}
+	if fitMode == "free" {
+		zoom := math.Max(0.2, math.Min(4, view.Zoom))
+		if target.Mode == "FitR" {
+			view.Left += request.Viewport.Width * (1/view.Zoom - 1/zoom) / 2
+			view.Top += request.Viewport.Height * (1/view.Zoom - 1/zoom) / 2
+		}
+		view.Zoom = zoom
+	}
+	keepLeft := target.Mode == "FitH" || target.Mode == "FitBH" || target.Mode == "XYZ" && target.KeepLeft
 	keepPosition := target.Mode == "XYZ" && target.KeepLeft && target.KeepTop && target.KeepZoom
-	return map[string]any{"left": view.Left, "top": view.Top, "zoom": view.Zoom, "fitMode": fitMode, "keepPosition": keepPosition}, nil
+	return map[string]any{
+		"left":         view.Left,
+		"top":          view.Top,
+		"zoom":         view.Zoom,
+		"fitMode":      fitMode,
+		"keepLeft":     keepLeft,
+		"keepPosition": keepPosition,
+	}, nil
 }
 
 // outlineLinks 获取目录节点的有序动作目标
@@ -8647,15 +8653,18 @@ func (e *businessEngine) translateDest(dest ofdgo.Dest, toViewport bool) ofdgo.D
 	if toViewport {
 		sign = -1.0
 	}
+	if dest.Type == "FitR" {
+		dest.Left += sign * targetBox.X
+		dest.Top += sign * targetBox.Y
+		dest.Right += sign * targetBox.X
+		dest.Bottom += sign * targetBox.Y
+		return dest
+	}
 	if !dest.OmitLeft {
 		dest.Left += sign * targetBox.X
 	}
 	if !dest.OmitTop {
 		dest.Top += sign * targetBox.Y
-	}
-	if dest.Type == "FitR" {
-		dest.Right += sign * targetBox.X
-		dest.Bottom += sign * targetBox.Y
 	}
 	return dest
 }

@@ -4260,6 +4260,11 @@ audio.page-media {
 	display: none;
 }
 
+.seal-picking .page-link,
+.panning .page-link {
+	pointer-events: none;
+}
+
 .page-placeholder {
 	position: absolute;
 	inset: 0;

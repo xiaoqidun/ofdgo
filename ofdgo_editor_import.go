@@ -707,8 +707,9 @@ func (m *editorPageImport) encode(entry editorImportEntry, node *editorXML) ([]b
 			if err := xml.Unmarshal(entry.data[gotoNode.start:gotoNode.end], &action); err != nil {
 				return nil, err
 			}
-			if dest := gotoDest(&action, m.bookmarks); !m.copyPage && (dest == nil || !m.pages[editorImportKey(dest.PageID)]) {
-				if m.strictLinks {
+			dest := gotoDest(&action, m.bookmarks)
+			if dest == nil || (!m.copyPage && !m.pages[editorImportKey(dest.PageID)]) {
+				if !m.copyPage && m.strictLinks {
 					return nil, fmt.Errorf("object link targets a page outside the imported selection")
 				}
 				return nil, nil

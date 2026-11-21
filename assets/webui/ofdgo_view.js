@@ -31,6 +31,8 @@ export function createPageView(context) {
 	let scrollbarMeasurement = null;
 	let heightFitWidthLimit = 0;
 	let appliedHeightFitWidthLimit = 0;
+	let widthFitTarget = 0;
+	let appliedWidthFitTarget = 0;
 	const pageView = {
 		defaultView(page = pageView.currentPageInfo()) {
 			return resolveDefaultView({
@@ -40,6 +42,11 @@ export function createPageView(context) {
 				page,
 				rotation: context.state.rotation,
 			});
+		},
+
+		widthFitTargetWidth() {
+			const available = Math.max(1, context.el.viewerPanel.clientWidth - pageView.pageSpace() * 2);
+			return widthFitTarget > 0 ? Math.min(available, widthFitTarget) : available;
 		},
 
 		heightFitMaxWidth() {
@@ -52,12 +59,13 @@ export function createPageView(context) {
 				return scale;
 			}
 			const size = pageView.pageViewSize(page);
+			const pageWidth = Math.max(1, size.width * MM_TO_PX);
 			if (fitMode === "width") {
-				const current = pageView.currentPageInfo() || page;
-				return scale * pageView.pageViewSize(current).width / Math.max(1e-6, size.width);
+				const target = maxWidth ?? pageView.widthFitTargetWidth();
+				return Math.min(4, target / pageWidth);
 			}
 			const limit = maxWidth ?? pageView.heightFitMaxWidth();
-			return Math.min(scale, limit / Math.max(1, size.width * MM_TO_PX));
+			return Math.min(scale, limit / pageWidth);
 		},
 
 		async renderPage(index, options = {}) {
@@ -141,14 +149,27 @@ export function createPageView(context) {
 				+ view.viewport.scrollTop - view.viewport.clientTop;
 		},
 
+		virtualScrollMetrics(view, inset) {
+			const extent = Math.min(SCROLL_SEGMENT_SIZE, view.total);
+			const height = view.viewport.clientHeight;
+			const maxTop = Math.max(0, view.viewport.scrollHeight - height);
+			const bottomInset = Math.max(0, view.viewport.scrollHeight - extent - inset);
+			const contentScrollMax = Math.max(0, maxTop - inset - bottomInset);
+			const contentLogicalMax = Math.max(0, view.total - height);
+			return { height, maxTop, bottomInset, contentScrollMax, contentLogicalMax };
+		},
+
 		pageWindowTop(view) {
 			const inset = pageView.windowInset(view);
 			if (view.total <= SCROLL_SEGMENT_SIZE) return view.viewport.scrollTop - inset;
 			const delta = view.viewport.scrollTop - view.scrollTop;
 			if (!delta) return view.logicalTop;
 			if (view.relativeScroll) return view.logicalTop + delta;
-			const max = view.viewport.scrollHeight - view.viewport.clientHeight;
-			return view.viewport.scrollTop / Math.max(1, max) * (max + view.total - SCROLL_SEGMENT_SIZE) - inset;
+			const { maxTop, bottomInset, contentScrollMax, contentLogicalMax } = pageView.virtualScrollMetrics(view, inset);
+			const scrollTop = view.viewport.scrollTop;
+			if (scrollTop <= inset) return scrollTop - inset;
+			if (scrollTop >= maxTop - bottomInset) return contentLogicalMax + scrollTop - (maxTop - bottomInset);
+			return contentScrollMax > 0 ? (scrollTop - inset) / contentScrollMax * contentLogicalMax : 0;
 		},
 
 		scrollPageWindowBy(view, delta) {
@@ -166,17 +187,26 @@ export function createPageView(context) {
 			const extent = Math.min(SCROLL_SEGMENT_SIZE, view.total);
 			const heightText = `${extent}px`;
 			if (host.style.height !== heightText) host.style.height = heightText;
-			const inset = pageView.windowInset(view), height = viewport.clientHeight;
-			const maxTop = Math.max(0, viewport.scrollHeight - height);
-			const logicalMax = maxTop + view.total - extent;
-			const logical = Math.max(-inset, Math.min(logicalMax - inset, target ?? pageView.pageWindowTop(view)));
-			const nextTop = logicalMax > 0 ? (logical + inset) * maxTop / logicalMax : 0;
+			const inset = pageView.windowInset(view);
+			const { height, maxTop, bottomInset, contentScrollMax, contentLogicalMax } = pageView.virtualScrollMetrics(view, inset);
+			const logicalMax = contentLogicalMax + bottomInset;
+			const logical = Math.max(-inset, Math.min(logicalMax, target ?? pageView.pageWindowTop(view)));
+			let nextTop;
+			if (view.total <= SCROLL_SEGMENT_SIZE) {
+				nextTop = Math.max(0, Math.min(maxTop, logical + inset));
+			} else if (logical <= 0) {
+				nextTop = Math.max(0, logical + inset);
+			} else if (logical >= contentLogicalMax) {
+				nextTop = Math.min(maxTop, maxTop - bottomInset + logical - contentLogicalMax);
+			} else {
+				nextTop = inset + (contentScrollMax > 0 && contentLogicalMax > 0 ? logical * contentScrollMax / contentLogicalMax : 0);
+			}
 			if (target !== null || view.total > SCROLL_SEGMENT_SIZE && Math.abs(viewport.scrollTop - nextTop) >= 1) {
 				viewport.scrollTop = nextTop;
 			}
 			view.scrollTop = viewport.scrollTop;
 			view.logicalTop = logical;
-			view.origin = view.total > SCROLL_SEGMENT_SIZE ? logical - viewport.scrollTop + inset : 0;
+			view.origin = view.total > SCROLL_SEGMENT_SIZE ? Math.max(0, Math.min(view.total - extent, logical - viewport.scrollTop + inset)) : 0;
 			let first = pageView.virtualIndex(offsets, Math.max(view.origin, logical - view.overscan));
 			let last = pageView.virtualIndex(offsets, Math.min(view.origin + extent, logical + height + view.overscan));
 			if (view.columns) {
@@ -779,7 +809,7 @@ export function createPageView(context) {
 		scrollToPage(index) {
 			if (context.state.pageLayout > 1 && context.state.pageWindow) {
 				const view = context.state.pageWindow, start = pageView.pageGroupStart(index);
-				const size = pageView.pageGroupSize(start), gap = context.state.continuous ? 0 : PAGE_LAYOUT_GAP;
+				const size = pageView.pageGroupSize(start), gap = context.state.continuous || size.count < 2 ? 0 : PAGE_LAYOUT_GAP;
 				const height = size.height * MM_TO_PX * context.state.scale;
 				const whole = height <= context.el.viewerPanel.clientHeight - pageView.pageBlockSpace() * 2 + 1;
 				const space = context.state.fitMode === "height" && !context.state.continuous
@@ -798,7 +828,7 @@ export function createPageView(context) {
 				if (context.state.pageWindow) {
 					const shellRect = shell.getBoundingClientRect(), viewerRect = context.el.viewerPanel.getBoundingClientRect();
 					const space = context.state.fitMode === "height" && !context.state.continuous
-						? (context.el.viewerPanel.clientHeight - shellRect.height) / 2 : pageView.pageBlockSpace();
+						? Math.max(pageView.pageBlockSpace(), (context.el.viewerPanel.clientHeight - shellRect.height) / 2) : pageView.pageBlockSpace();
 					pageView.scrollViewerBy(shellRect.top - viewerRect.top - space);
 				} else if (context.state.fitMode === "height" && !context.state.continuous) {
 					shell.scrollIntoView({ block: "center", inline: "nearest" });
@@ -862,56 +892,96 @@ export function createPageView(context) {
 		},
 
 		pageShellFromView() {
+			const view = context.state.pageWindow, pages = context.state.doc?.pages;
+			if (!view || !pages?.length || view.offsets.length < 2) {
+				return pageView.pageShell(context.state.pageIndex);
+			}
 			const rect = context.el.viewerPanel.getBoundingClientRect();
+			const viewportHeight = context.el.viewerPanel.clientHeight;
+			const inset = pageView.windowInset(view);
+			const top = pageView.pageWindowTop(view);
+			const bottom = top + viewportHeight;
+			const count = pages.length;
+			const atBottom = view.total + inset * 2 > viewportHeight + 1 && bottom >= view.total + inset - 1;
 			if (context.state.pageLayout > 1) {
-				let best = null, area = 0;
-				const current = pageView.pageShell(context.state.pageIndex);
-				for (const shell of [current, ...(context.state.pageWindow?.nodes.values() || [])]) {
+				const groupHeight = start => {
+					const next = Math.min(count, start + context.state.pageLayout);
+					return Math.max(0, view.offsets[next] - view.offsets[start] - view.gap);
+				};
+				let start;
+				if (atBottom) {
+					const currentStart = pageView.pageGroupStart(context.state.pageIndex);
+					const currentTop = view.offsets[currentStart], currentBottom = currentTop + groupHeight(currentStart);
+					if (currentTop >= top - 1 && currentBottom <= bottom + 1) {
+						return pageView.pageShell(context.state.pageIndex);
+					}
+					start = pageView.pageGroupStart(count - 1);
+				} else {
+					const focusY = context.state.continuous ? top + 1 : top + viewportHeight * 0.45;
+					start = pageView.pageGroupStart(pageView.virtualIndex(view.offsets, Math.max(0, focusY)));
+					const rowBottom = view.offsets[start] + groupHeight(start);
+					if (!context.state.continuous && focusY > rowBottom && start + context.state.pageLayout < count) {
+						const nextStart = start + context.state.pageLayout;
+						if (Math.abs(view.offsets[nextStart] - focusY) < Math.abs(focusY - rowBottom)) start = nextStart;
+					}
+				}
+				const groupEnd = Math.min(count, start + context.state.pageLayout);
+				const current = context.state.pageIndex;
+				if (current >= start && current < groupEnd) {
+					const shell = pageView.pageShell(current);
+					const bounds = shell?.getBoundingClientRect();
+					if (bounds && bounds.right > rect.left + 1 && bounds.left < rect.right - 1 && bounds.bottom > rect.top + 1 && bounds.top < rect.bottom - 1) {
+						return shell;
+					}
+				}
+				let best = null, bestArea = -1;
+				for (let index = start; index < groupEnd; index++) {
+					const shell = pageView.pageShell(index);
 					if (!shell || shell.style.visibility === "hidden") continue;
 					const bounds = shell.getBoundingClientRect();
 					const visible = Math.max(0, Math.min(rect.right, bounds.right) - Math.max(rect.left, bounds.left))
 						* Math.max(0, Math.min(rect.bottom, bounds.bottom) - Math.max(rect.top, bounds.top));
-					const ratio = visible / Math.max(1, bounds.width * bounds.height);
-					if (ratio > area + 0.01) { best = shell; area = ratio; }
+					if (visible > bestArea + 1) { best = shell; bestArea = visible; }
 				}
-				return best;
+				return best || pageView.pageShell(start);
 			}
-			const x = rect.left + rect.width / 2;
-			if (context.el.viewerPanel.scrollTop + context.el.viewerPanel.clientHeight >= context.el.viewerPanel.scrollHeight - 1) {
-				const shell = pageView.pageShell(context.state.pageIndex);
-				const bounds = shell?.getBoundingClientRect();
-				return bounds && bounds.top >= rect.top - 1 && bounds.bottom <= rect.bottom + 1
-					? shell : context.el.svgHost.lastElementChild;
+			if (atBottom) {
+				const current = context.state.pageIndex;
+				const currentTop = view.offsets[current], currentBottom = view.offsets[current + 1] - view.gap;
+				if (currentTop >= top - 1 && currentBottom <= bottom + 1) {
+					return pageView.pageShell(current);
+				}
+				return pageView.pageShell(count - 1);
 			}
 			if (context.state.continuous) {
-				return pageView.pageShellAtPoint(x, rect.top + 1);
+				return pageView.pageShell(pageView.virtualIndex(view.offsets, Math.max(0, top + 1)));
 			}
-			return pageView.pageShellAtPoint(x, rect.top + rect.height * 0.45)
-				|| pageView.pageShellAtPoint(x, rect.top + rect.height * 0.25)
-				|| pageView.pageShellAtPoint(x, rect.top + rect.height * 0.65);
-		},
-
-		pageShellAtPoint(x, y) {
-			return document.elementFromPoint(x, y)?.closest?.(".page-shell") || null;
+			for (const ratio of [0.45, 0.25, 0.65]) {
+				const y = top + viewportHeight * ratio;
+				if (y < 0 || y > view.total) continue;
+				const index = pageView.virtualIndex(view.offsets, y);
+				if (y <= view.offsets[index + 1] - view.gap) {
+					return pageView.pageShell(index);
+				}
+			}
+			const mid = Math.max(0, Math.min(view.total, top + viewportHeight * 0.45));
+			const index = pageView.virtualIndex(view.offsets, mid);
+			const itemBottom = view.offsets[index + 1] - view.gap;
+			if (mid > itemBottom && index + 1 < count && view.offsets[index + 1] - mid < mid - itemBottom) {
+				return pageView.pageShell(index + 1);
+			}
+			return pageView.pageShell(index);
 		},
 
 		setCurrentPage(index) {
-			const previousPage = pageView.currentPageInfo();
 			if (index !== context.state.pageIndex && !context.state.openActionTask?.navigating) context.state.openActionTask = null;
 			context.state.pageIndex = index;
 			pageView.prunePageRenderQueue();
 			if (context.state.editing) context.state.openActionPage = context.state.doc?.pages[index]?.id;
 			if (context.state.fitMode === "width" && context.state.pageLayout === 1) {
 				const nextPage = pageView.currentPageInfo();
-				if (previousPage && nextPage && context.state.pageWindow?.offsets.length > 1) {
-					const prevWidth = pageView.pageViewSize(previousPage).width;
-					const nextWidth = pageView.pageViewSize(nextPage).width;
-					if (prevWidth > 0 && nextWidth > 0 && prevWidth !== nextWidth) {
-						context.state.scale = Math.min(4, context.state.scale * prevWidth / nextWidth);
-						context.el.zoomLabel.textContent = `${Math.round(context.state.scale * 100)}%`;
-					}
-				} else if (nextPage) {
-					context.state.scale = pageView.fitWidthScale(nextPage);
+				if (nextPage) {
+					context.state.scale = pageView.pageScale(nextPage);
 					context.el.zoomLabel.textContent = `${Math.round(context.state.scale * 100)}%`;
 				}
 			} else if (context.state.fitMode === "height" && context.state.pageLayout === 1) {
@@ -969,16 +1039,17 @@ export function createPageView(context) {
 
 		pageGroupSize(index = context.state.pageIndex) {
 			const start = pageView.pageGroupStart(index), widths = [0, 0];
-			let height = 0;
+			let height = 0, count = 0;
 			for (let offset = 0; offset < context.state.pageLayout; offset++) {
 				const page = context.state.doc.pages[start + offset];
 				if (!page) continue;
 				const size = pageView.pageViewSize(page);
 				widths[offset] = size.width;
 				height = Math.max(height, size.height);
+				count++;
 			}
-			if (!widths[1]) widths[1] = widths[0];
-			return { widths, width: widths[0] + widths[1], height };
+			const gap = count > 1 && !context.state.continuous ? PAGE_LAYOUT_GAP : 0;
+			return { widths, width: widths[0] + widths[1], height, count, gap };
 		},
 
 		async togglePageLayout() {
@@ -1003,7 +1074,8 @@ export function createPageView(context) {
 			context.canvasEditor.cancel();
 			const view = context.state.pageWindow;
 			if (!view) return;
-			const anchor = view.offsets.length > 1 ? pageView.pageWindowAnchor(view) : { index: context.state.pageIndex, offset: 0 };
+			const initialOffset = context.state.pageIndex === 0 ? -pageView.windowInset(view) : -pageView.pageBlockSpace();
+			const anchor = view.offsets.length > 1 ? pageView.pageWindowAnchor(view) : { index: context.state.pageIndex, offset: initialOffset };
 			const gap = context.state.continuous ? 0 : Math.max(context.state.pageLayout > 1 ? PAGE_LAYOUT_GAP : 0, Number.parseFloat(getComputedStyle(context.el.svgHost).rowGap) || 0);
 			if (context.state.pageLayout > 1) {
 				const count = context.state.doc.pages.length, spacing = context.state.continuous ? 0 : PAGE_LAYOUT_GAP;
@@ -1015,7 +1087,7 @@ export function createPageView(context) {
 				const groups = [];
 				for (let start = 0; start < count; start += context.state.pageLayout) {
 					const size = pageView.pageGroupSize(start), factor = MM_TO_PX * context.state.scale;
-					const groupWidth = size.width * factor + spacing;
+					const groupWidth = size.width * factor + (size.count > 1 ? spacing : 0);
 					groups.push({ start, size, width: groupWidth });
 					width = Math.max(width, groupWidth);
 					for (let column = 0; column < 2; column++) {
@@ -1050,7 +1122,8 @@ export function createPageView(context) {
 				shell.style.removeProperty("transform");
 			}
 			const offsets = new Float64Array(context.state.doc.pages.length + 1);
-			const maxWidth = context.state.fitMode === "height" ? pageView.heightFitMaxWidth() : null;
+			const maxWidth = context.state.fitMode === "width" ? pageView.widthFitTargetWidth()
+				: context.state.fitMode === "height" ? pageView.heightFitMaxWidth() : null;
 			let width = 1;
 			for (let index = 0; index < context.state.doc.pages.length; index++) {
 				const page = context.state.doc.pages[index];
@@ -1397,7 +1470,7 @@ export function createPageView(context) {
 			if (!await context.canvasEditor.commitNudge() || openSeq !== context.state.openSeq) return;
 			if (!await context.canvasEditor.commitText() || openSeq !== context.state.openSeq) return;
 			if (!await context.canvasEditor.commitCrop() || openSeq !== context.state.openSeq) return;
-			const anchor = context.state.fitMode === "free" ? pageView.scaleAnchor() : null;
+			const anchor = context.state.fitMode !== "height" ? pageView.scaleAnchor() : null;
 			pageView.setContinuous(!context.state.continuous);
 			if (context.state.pageWindow) {
 				pageView.updateFitSpace();
@@ -1408,7 +1481,8 @@ export function createPageView(context) {
 				pageView.restoreScaleAnchor(anchor);
 			} else {
 				pageView.applyFit(false);
-				pageView.scrollToPage(context.state.pageIndex);
+				if (context.state.fitMode === "width" && anchor) pageView.restoreScaleAnchor(anchor);
+				else pageView.scrollToPage(context.state.pageIndex);
 			}
 		},
 
@@ -1427,6 +1501,7 @@ export function createPageView(context) {
 				pageView.applyFit(false);
 			}
 			pageView.scrollToPage(context.state.pageIndex);
+			if (context.state.showPages && !context.el.pageList.hidden) pageView.revealThumbnail(context.state.pageIndex);
 		},
 
 		pageViewSize(page) {
@@ -1509,47 +1584,58 @@ export function createPageView(context) {
 			const size = context.state.pageLayout > 1 ? pageView.pageGroupSize(page.index) : pageView.pageViewSize(page);
 			const width = Math.max(1, size.width * MM_TO_PX), height = Math.max(1, size.height * MM_TO_PX);
 			const space = pageView.pageSpace(), gap = context.state.pageLayout > 1 && !context.state.continuous ? PAGE_LAYOUT_GAP : 0;
-			const singleHeightFit = mode === "height" && context.state.pageLayout === 1;
-			let contentWidth = 0, contentHeight = 0, rows = 0;
-			const items = singleHeightFit ? [] : null;
+			const singleMode = context.state.pageLayout === 1;
+			const items = [];
+			let maxGroupWidth = 0, maxGroupGap = 0, contentHeight = 0;
 			for (let index = 0; index < context.state.doc.pages.length; index += context.state.pageLayout) {
 				const item = context.state.pageLayout > 1 ? pageView.pageGroupSize(index) : pageView.pageViewSize(context.state.doc.pages[index]);
-				if (singleHeightFit) {
-					items.push({ width: Math.max(1, item.width * MM_TO_PX), height: Math.max(1, item.height * MM_TO_PX) });
-				} else {
-					const factor = mode === "width" && context.state.pageLayout === 1 ? size.width / item.width : 1;
-					contentWidth = Math.max(contentWidth, item.width * MM_TO_PX * factor);
-					contentHeight += item.height * MM_TO_PX * factor;
+				const itemWidth = Math.max(1, item.width * MM_TO_PX), itemHeight = Math.max(1, item.height * MM_TO_PX);
+				const itemGap = context.state.pageLayout > 1 && item.count > 1 ? gap : 0;
+				items.push({ width: itemWidth, height: itemHeight, gap: itemGap });
+				if (!singleMode) {
+					if (itemWidth + itemGap > maxGroupWidth + maxGroupGap) {
+						maxGroupWidth = itemWidth;
+						maxGroupGap = itemGap;
+					}
+					contentHeight += itemHeight;
 				}
-				rows++;
 			}
-			const layoutWidth = context.state.pageLayout > 1 ? Math.max(width, contentWidth) : width;
 			const scrollbar = pageView.scrollbarWidth();
 			const viewport = context.el.viewerPanel.getBoundingClientRect();
 			let vertical = false, horizontal = false, scale = 1, maxPageWidth = 0;
 			for (let pass = 0; pass < 3; pass++) {
 				const availableWidth = Math.max(1, viewport.width - (vertical ? scrollbar : 0));
 				const availableHeight = Math.max(1, viewport.height - (horizontal ? scrollbar : 0));
-				maxPageWidth = Math.max(1, availableWidth - space * 2 - gap);
-				scale = Math.min(4, maxPageWidth / layoutWidth);
-				if (mode === "height") scale = Math.min(scale, Math.max(1, availableHeight - space * 2) / height);
+				maxPageWidth = Math.max(1, availableWidth - space * 2);
+				if (singleMode) {
+					scale = Math.min(4, maxPageWidth / width);
+					if (mode === "height") scale = Math.min(scale, Math.max(1, availableHeight - space * 2) / height);
+				} else {
+					scale = 4;
+					for (const item of items) {
+						scale = Math.min(scale, Math.max(1, availableWidth - space * 2 - item.gap) / item.width);
+					}
+					if (mode === "height") scale = Math.min(scale, Math.max(1, availableHeight - space * 2) / height);
+				}
 				const blockSpace = context.state.continuous ? 0 : Math.max(space, (availableHeight - height * scale) / 2);
 				const rowGap = context.state.continuous ? 0 : Math.max(gap, blockSpace + 2);
 				let totalHeight = contentHeight * scale;
-				let nextHorizontal = contentWidth * scale + gap + space * 2 > availableWidth + 0.5;
-				if (singleHeightFit) {
+				let nextHorizontal = !singleMode && maxGroupWidth * scale + maxGroupGap + space * 2 > availableWidth + 0.5;
+				if (singleMode) {
 					totalHeight = 0;
 					for (const item of items) {
-						totalHeight += item.height * Math.min(scale, maxPageWidth / item.width);
+						const itemScale = mode === "width" ? Math.min(4, maxPageWidth / item.width) : Math.min(scale, maxPageWidth / item.width);
+						totalHeight += item.height * itemScale;
 					}
 					nextHorizontal = false;
 				}
-				const nextVertical = totalHeight + rowGap * (rows - 1) + blockSpace * 2 > availableHeight + 0.5;
+				const nextVertical = totalHeight + rowGap * (items.length - 1) + blockSpace * 2 > availableHeight + 0.5;
 				if ((!nextVertical || vertical) && (!nextHorizontal || horizontal)) break;
 				vertical ||= nextVertical;
 				horizontal ||= nextHorizontal;
 			}
-			if (singleHeightFit) heightFitWidthLimit = maxPageWidth;
+			if (singleMode && mode === "height") heightFitWidthLimit = maxPageWidth;
+			if (singleMode && mode === "width") widthFitTarget = maxPageWidth;
 			return scale;
 		},
 
@@ -1580,8 +1666,11 @@ export function createPageView(context) {
 			const anchor = updateStatus && fitMode === "free" ? pageView.scaleAnchor() : null;
 			const scale = Math.min(4, fitMode === "free" ? Math.max(0.2, nextScale) : nextScale);
 			if (fitMode !== "height" || context.state.pageLayout > 1) heightFitWidthLimit = 0;
-			const layoutChanged = scale !== context.state.scale || fitMode !== context.state.fitMode || heightFitWidthLimit !== appliedHeightFitWidthLimit;
+			if (fitMode !== "width" || context.state.pageLayout > 1) widthFitTarget = 0;
+			const layoutChanged = scale !== context.state.scale || fitMode !== context.state.fitMode
+				|| heightFitWidthLimit !== appliedHeightFitWidthLimit || widthFitTarget !== appliedWidthFitTarget;
 			appliedHeightFitWidthLimit = heightFitWidthLimit;
+			appliedWidthFitTarget = widthFitTarget;
 			context.state.fitMode = fitMode;
 			context.state.scale = scale;
 			if (layoutChanged) {
@@ -1594,7 +1683,8 @@ export function createPageView(context) {
 			if (layoutChanged) {
 				pageView.restoreScaleAnchor(anchor);
 			}
-			context.el.zoomLabel.textContent = `${Math.round(context.state.scale * 100)}%`;
+			const displayScale = pageView.pageScale(pageView.currentPageInfo());
+			context.el.zoomLabel.textContent = `${Math.round(displayScale * 100)}%`;
 			if (updateStatus && context.state.doc && !context.state.exporting) {
 				context.setStatus(`第 ${context.state.pageIndex + 1} / ${context.state.doc.pageCount} 页`);
 			}
@@ -1685,7 +1775,7 @@ export function createPageView(context) {
 			const height = group ? group.height * MM_TO_PX * context.state.scale
 				: shell ? shell.getBoundingClientRect().height : Math.max(1, pageView.pageViewSize(page).height * MM_TO_PX * context.state.scale);
 			const base = pageView.pageSpace();
-			context.el.viewerPanel.classList.toggle("single-page-fits-height", context.state.doc.pageCount === 1 && height <= context.el.viewerPanel.clientHeight - base * 2);
+			context.el.viewerPanel.classList.toggle("single-page-fits-height", context.state.doc.pageCount === 1 && height <= context.el.viewerPanel.clientHeight - base * 2 + 1);
 			const space = context.state.continuous ? 0 : Math.max(base, (context.el.viewerPanel.clientHeight - height) / 2);
 			const gap = context.state.continuous ? 0 : space + 2;
 			context.el.pageFrame.style.setProperty("--fit-space", `${space}px`);
